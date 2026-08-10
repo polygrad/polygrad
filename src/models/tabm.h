@@ -35,6 +35,6 @@
  *
  * Returns NULL on error.
  */
-PolyInstance *poly_tabm_instance(const char *spec_json, int spec_len);
+PolyInstance *poly_tabm_instance(const char *spec_json, int spec_len, PolyDevice device);
 
 #endif /* POLY_MODEL_TABM_H */

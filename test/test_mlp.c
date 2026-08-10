@@ -50,7 +50,7 @@ static bool mlp_expect_to_program_cache(PolyCtx *ctx) {
 /* Tests */
 
 TEST(mlp, create_simple) {
-  PolyInstance *inst = poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec));
+  PolyInstance *inst = poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   /* 2 weights + 2 biases = 4 params */
@@ -88,8 +88,34 @@ TEST(mlp, create_simple) {
   PASS();
 }
 
+TEST(mlp, staged_builder_retains_complete_physical_template) {
+  PolyInstance *inst = poly_mlp_from_json(
+      simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_INTERP
+  );
+
+  ASSERT_NOT_NULL(inst);
+  ASSERT_INT_EQ(poly_ctx_get_preferred_device(poly_instance_ctx(inst)), POLY_DEVICE_INTERP);
+  PolyUOp *sink = poly_instance_get_sink(inst, "forward");
+  ASSERT_NOT_NULL(sink);
+  ASSERT_INT_EQ(sink->op, POLY_OP_SINK);
+  ASSERT_INT_EQ(sink->n_src, 1);
+  ASSERT_INT_EQ(sink->src[0]->op, POLY_OP_STORE);
+  ASSERT_INT_EQ(poly_uop_device(sink->src[0]->src[0]), POLY_DEVICE_INTERP);
+
+  int n = 0;
+  PolyUOp **topo = poly_toposort_alloc(poly_instance_ctx(inst), sink, &n);
+  ASSERT_NOT_NULL(topo);
+  for (int i = 0; i < n; i++)
+    if (topo[i]->op == POLY_OP_BUFFER)
+      ASSERT_INT_EQ(poly_uop_device(topo[i]), POLY_DEVICE_INTERP);
+  free(topo);
+
+  poly_instance_free(inst);
+  PASS();
+}
+
 TEST(mlp, staged_builder_does_not_use_ctx_registry) {
-  PolyInstance *inst = poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec));
+  PolyInstance *inst = poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
   ASSERT_INT_EQ(poly_ctx_named_count(poly_instance_ctx(inst)), 0);
   poly_instance_free(inst);
@@ -97,7 +123,7 @@ TEST(mlp, staged_builder_does_not_use_ctx_registry) {
 }
 
 TEST(mlp, create_no_bias) {
-  PolyInstance *inst = poly_mlp_from_json(no_bias_spec, (int)strlen(no_bias_spec));
+  PolyInstance *inst = poly_mlp_from_json(no_bias_spec, (int)strlen(no_bias_spec), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   /* 1 weight, no bias */
@@ -116,8 +142,8 @@ TEST(mlp, create_no_bias) {
 
 TEST(mlp, deterministic_init) {
   /* Same seed should produce identical weights */
-  PolyInstance *inst1 = poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec));
-  PolyInstance *inst2 = poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec));
+  PolyInstance *inst1 = poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO);
+  PolyInstance *inst2 = poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst1);
   ASSERT_NOT_NULL(inst2);
 
@@ -138,8 +164,8 @@ TEST(mlp, cross_seed_divergence) {
   const char *spec_seed99 = "{\"layers\":[2,4,1],\"activation\":\"relu\",\"bias\":true,"
                             "\"loss\":\"mse\",\"batch_size\":1,\"seed\":99}";
 
-  PolyInstance *inst1 = poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec));
-  PolyInstance *inst2 = poly_mlp_from_json(spec_seed99, (int)strlen(spec_seed99));
+  PolyInstance *inst1 = poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO);
+  PolyInstance *inst2 = poly_mlp_from_json(spec_seed99, (int)strlen(spec_seed99), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst1);
   ASSERT_NOT_NULL(inst2);
 
@@ -164,7 +190,7 @@ TEST(mlp, cross_seed_divergence) {
 
 TEST(mlp, kaiming_bounds) {
   /* Kaiming init: values should be within [-sqrt(6/fan_in), +sqrt(6/fan_in)] */
-  PolyInstance *inst = poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec));
+  PolyInstance *inst = poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   /* Layer 0 weight: fan_in = 2, bound = sqrt(6/2) = sqrt(3) ~ 1.732 */
@@ -186,7 +212,7 @@ TEST(mlp, kaiming_bounds) {
 }
 
 TEST(mlp, forward_produces_output) {
-  PolyInstance *inst = poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec));
+  PolyInstance *inst = poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   float x[] = {1.0f, 2.0f};
@@ -218,7 +244,7 @@ TEST(mlp, forward_produces_output) {
 
 TEST(mlp, forward_deterministic) {
   /* Same instance, same input -> same output */
-  PolyInstance *inst = poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec));
+  PolyInstance *inst = poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   float x[] = {1.0f, 2.0f};
@@ -262,7 +288,7 @@ TEST(mlp, forward_and_train_replay_stats_plateau) {
   setenv("POLY_PCACHE", "1", 1);
   setenv("POLY_SCACHE", "1", 1);
 
-  PolyInstance *inst = poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec));
+  PolyInstance *inst = poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
   PolyCtx *ctx = poly_instance_ctx(inst);
   ASSERT_NOT_NULL(ctx);
@@ -333,18 +359,18 @@ TEST(mlp, forward_and_train_replay_stats_plateau) {
 
 TEST(mlp, null_and_invalid) {
   /* NULL input */
-  ASSERT_TRUE(poly_mlp_from_json(NULL, 0) == NULL);
+  ASSERT_TRUE(poly_mlp_from_json(NULL, 0, POLY_DEVICE_AUTO) == NULL);
 
   /* Empty JSON */
-  ASSERT_TRUE(poly_mlp_from_json("{}", 2) == NULL);
+  ASSERT_TRUE(poly_mlp_from_json("{}", 2, POLY_DEVICE_AUTO) == NULL);
 
   /* Missing layers */
   const char *no_layers = "{\"activation\":\"relu\"}";
-  ASSERT_TRUE(poly_mlp_from_json(no_layers, (int)strlen(no_layers)) == NULL);
+  ASSERT_TRUE(poly_mlp_from_json(no_layers, (int)strlen(no_layers), POLY_DEVICE_AUTO) == NULL);
 
   /* Too few layers */
   const char *one_layer = "{\"layers\":[4]}";
-  ASSERT_TRUE(poly_mlp_from_json(one_layer, (int)strlen(one_layer)) == NULL);
+  ASSERT_TRUE(poly_mlp_from_json(one_layer, (int)strlen(one_layer), POLY_DEVICE_AUTO) == NULL);
 
   PASS();
 }
@@ -354,7 +380,7 @@ TEST(mlp, train_single_layer) {
   const char *spec = "{\"layers\":[2,1],\"activation\":\"none\",\"bias\":true,"
                      "\"loss\":\"mse\",\"batch_size\":1,\"seed\":42}";
 
-  PolyInstance *inst = poly_mlp_from_json(spec, (int)strlen(spec));
+  PolyInstance *inst = poly_mlp_from_json(spec, (int)strlen(spec), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   /* Configure SGD */
@@ -394,7 +420,7 @@ TEST(mlp, train_multi_layer) {
   const char *spec = "{\"layers\":[1,4,1],\"activation\":\"relu\",\"bias\":true,"
                      "\"loss\":\"mse\",\"batch_size\":1,\"seed\":42}";
 
-  PolyInstance *inst = poly_mlp_from_json(spec, (int)strlen(spec));
+  PolyInstance *inst = poly_mlp_from_json(spec, (int)strlen(spec), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   /* Configure SGD */
@@ -430,7 +456,7 @@ TEST(mlp, train_cross_entropy) {
   const char *spec = "{\"layers\":[2,4,3],\"activation\":\"relu\",\"bias\":true,"
                      "\"loss\":\"cross_entropy\",\"batch_size\":1,\"seed\":42}";
 
-  PolyInstance *inst = poly_mlp_from_json(spec, (int)strlen(spec));
+  PolyInstance *inst = poly_mlp_from_json(spec, (int)strlen(spec), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   poly_instance_set_optimizer(inst, POLY_OPTIM_SGD, 0.01f, 0.0f, 0.0f, 0.0f, 0.0f);
@@ -465,7 +491,7 @@ TEST(mlp, train_batch2_mse) {
   const char *spec = "{\"layers\":[2,3,2],\"activation\":\"relu\",\"bias\":false,"
                      "\"loss\":\"mse\",\"batch_size\":2,\"seed\":42}";
 
-  PolyInstance *inst = poly_mlp_from_json(spec, (int)strlen(spec));
+  PolyInstance *inst = poly_mlp_from_json(spec, (int)strlen(spec), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
   poly_instance_set_optimizer(inst, POLY_OPTIM_SGD, 0.01f, 0.0f, 0.0f, 0.0f, 0.0f);
 
@@ -491,7 +517,7 @@ TEST(mlp, train_batch4_cross_entropy) {
   const char *spec = "{\"layers\":[4,8,3],\"activation\":\"relu\",\"bias\":true,"
                      "\"loss\":\"cross_entropy\",\"batch_size\":4,\"seed\":42}";
 
-  PolyInstance *inst = poly_mlp_from_json(spec, (int)strlen(spec));
+  PolyInstance *inst = poly_mlp_from_json(spec, (int)strlen(spec), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
   poly_instance_set_optimizer(inst, POLY_OPTIM_SGD, 0.01f, 0.0f, 0.0f, 0.0f, 0.0f);
 

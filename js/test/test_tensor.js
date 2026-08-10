@@ -1186,11 +1186,8 @@ async function runTensorTests(pg) {
   })
 
   await test('logaddexp softplus mish match pinned graph', async () => {
-    const original = Tensor.prototype._physicalizeResult
-    Tensor.prototype._physicalizeResult = () => {
-      throw new Error('elementwise construction entered frontend substitution')
-    }
-    try {
+    assert(Tensor.prototype._physicalizeResult === undefined,
+      'legacy frontend substitution helper must stay deleted')
       const x = new Tensor([
         [-20, -3, -0, 2, 20],
         [1, -1, 4, -4, 0.5]
@@ -1218,17 +1215,11 @@ async function runTensorTests(pg) {
         assert(actual.uopLogical.key === expected.uopLogical.key, 'logical graph differs')
         assertClose(await actual.toArray(), await expected.toArray(), 1e-6)
       }
-    } finally {
-      Tensor.prototype._physicalizeResult = original
-    }
   })
 
   await test('log1p expm1 use core tensor roots', async () => {
-    const original = Tensor.prototype._physicalizeResult
-    Tensor.prototype._physicalizeResult = () => {
-      throw new Error('superset construction entered frontend substitution')
-    }
-    try {
+    assert(Tensor.prototype._physicalizeResult === undefined,
+      'legacy frontend substitution helper must stay deleted')
       const x = new Tensor([-1e-6, 0, 1e-6, 0.25], { device: 'cpu' })
       const rows = [
         ['log1p', x.log1p(), [-1e-6, 0, 1e-6, 0.25].map(Math.log1p)],
@@ -1262,9 +1253,6 @@ async function runTensorTests(pg) {
           `${name} lost the nested physical occurrence`
         )
       }
-    } finally {
-      Tensor.prototype._physicalizeResult = original
-    }
   })
 
   await test('sin cos tan match pinned promotion', async () => {
@@ -1834,19 +1822,13 @@ async function runTensorTests(pg) {
   })
 
   await test('scatter construction bypasses frontend substitution', async () => {
-    const original = Tensor.prototype._physicalizeResult
-    Tensor.prototype._physicalizeResult = () => {
-      throw new Error('scatter construction entered frontend substitution')
-    }
-    try {
+    assert(Tensor.prototype._physicalizeResult === undefined,
+      'legacy frontend substitution helper must stay deleted')
       const base = new Tensor([[1, 2, 3, 4, 5]])
       const idx = new Tensor(new Int32Array([0, 1, 1, 3, 4]), { dtype: 'int32' }).reshape(1, 5)
       const src = new Tensor([[6, 7, 8, 9, 10]])
       assertClose(await base.scatter(1, idx, src).toArray(), [6, 8, 3, 9, 10])
       assertClose(await base.scatterReduce(1, idx, src, 'sum').toArray(), [7, 17, 3, 13, 15])
-    } finally {
-      Tensor.prototype._physicalizeResult = original
-    }
   })
 
   // -- Step slicing --
@@ -2014,11 +1996,8 @@ async function runTensorTests(pg) {
   })
 
   await test('triu/tril use pinned composition without substitution', async () => {
-    const original = Tensor.prototype._physicalizeResult
-    Tensor.prototype._physicalizeResult = () => {
-      throw new Error('triu/tril construction entered frontend substitution')
-    }
-    try {
+    assert(Tensor.prototype._physicalizeResult === undefined,
+      'legacy frontend substitution helper must stay deleted')
       const x = new Tensor([
         [1, 2, 3, 4],
         [5, 6, 7, 8]
@@ -2042,9 +2021,6 @@ async function runTensorTests(pg) {
         'triu lost moved occurrence')
       assert(countGraphOp(moved.tril().uop, pg._core.ops.COPY) === 2,
         'tril lost moved occurrence')
-    } finally {
-      Tensor.prototype._physicalizeResult = original
-    }
   })
 
   // -- Reduction --
@@ -2070,11 +2046,8 @@ async function runTensorTests(pg) {
   })
 
   await test('var matches pinned expression without substitution', async () => {
-    const original = Tensor.prototype._physicalizeResult
-    Tensor.prototype._physicalizeResult = () => {
-      throw new Error('variance construction entered frontend substitution')
-    }
-    try {
+    assert(Tensor.prototype._physicalizeResult === undefined,
+      'legacy frontend substitution helper must stay deleted')
       const x = new Tensor([[1, 2, 4], [3, 5, 9]])
       const pinnedExpression = (axis, keepdim = false, correction = 1) => {
         const squares = x.sub(x.mean(axis, true)).square()
@@ -2102,9 +2075,6 @@ async function runTensorTests(pg) {
           assertClose(actualValues, expectedValues)
         }
       }
-    } finally {
-      Tensor.prototype._physicalizeResult = original
-    }
   })
 
   await test('max', async () => {
@@ -2302,16 +2272,13 @@ async function runTensorTests(pg) {
   })
 
   await test('einsum uses the shared native/WASM adapter contract', async () => {
-    const original = Tensor.prototype._physicalizeResult
-    Tensor.prototype._physicalizeResult = () => {
-      throw new Error('einsum construction entered frontend substitution')
-    }
+    assert(Tensor.prototype._physicalizeResult === undefined,
+      'legacy frontend substitution helper must stay deleted')
     const a = new Tensor([[1, 2], [3, 4]])
     const b = new Tensor([[5, 6], [7, 8]])
-    try {
       const formula = 'ij,jk->ik'
       const logical = pg._core.ffi.poly_einsum(
-        a._ctx, formula, [{ _uop: a._graphUopRaw() }, { _uop: b._graphUopRaw() }]
+        a._ctx, formula, [{ _uop: a._logicalUopRaw() }, { _uop: b._logicalUopRaw() }]
       ).uop
       const physical = pg._core.ffi.poly_einsum(
         a._ctx, formula, [{ _uop: a._currentUopRaw() }, { _uop: b._currentUopRaw() }]
@@ -2327,17 +2294,11 @@ async function runTensorTests(pg) {
         'einsum physical graph differs'
       )
       assertClose(await out.toArray(), [19, 22, 43, 50])
-    } finally {
-      Tensor.prototype._physicalizeResult = original
-    }
   })
 
   await test('rearrange forwards named axis sizes on native and WASM', async () => {
-    const original = Tensor.prototype._physicalizeResult
-    Tensor.prototype._physicalizeResult = () => {
-      throw new Error('rearrange construction entered frontend substitution')
-    }
-    try {
+    assert(Tensor.prototype._physicalizeResult === undefined,
+      'legacy frontend substitution helper must stay deleted')
       const source = Tensor.arange(6)
       const out = source.rearrange('(h w) -> h w', { h: 2, w: 3 })
       const expectedLogical = pg._core.ffi.poly_rearrange(
@@ -2369,9 +2330,6 @@ async function runTensorTests(pg) {
         movedOut.uop.key === String(pg._core.ffi.poly_uop_key(expectedMoved.uop)),
         'rearrange lost the nested physical occurrence'
       )
-    } finally {
-      Tensor.prototype._physicalizeResult = original
-    }
   })
 
   await test('einsum and rearrange reject malformed core inputs', async () => {
@@ -2397,11 +2355,8 @@ async function runTensorTests(pg) {
   })
 
   await test('linalg construction bypasses frontend substitution', async () => {
-    const original = Tensor.prototype._physicalizeResult
-    Tensor.prototype._physicalizeResult = () => {
-      throw new Error('linalg construction entered frontend substitution')
-    }
-    try {
+    assert(Tensor.prototype._physicalizeResult === undefined,
+      'legacy frontend substitution helper must stay deleted')
       const a = new Tensor([[4, 2], [2, 5]])
       const b = new Tensor([1, 3])
       const lower = new Tensor([[2, 0], [1, 3]])
@@ -2418,9 +2373,6 @@ async function runTensorTests(pg) {
         new Tensor([[1, 0], [1, 1], [1, 2]]).lstsq(new Tensor([1, 2, 3])).shape,
         [2]
       )
-    } finally {
-      Tensor.prototype._physicalizeResult = original
-    }
   })
 
   await test('qr matches tinygrad probe', async () => {
@@ -2713,11 +2665,8 @@ async function runTensorTests(pg) {
   })
 
   await test('crossEntropy matches pinned expression without substitution', async () => {
-    const original = Tensor.prototype._physicalizeResult
-    Tensor.prototype._physicalizeResult = () => {
-      throw new Error('cross-entropy construction entered frontend substitution')
-    }
-    try {
+    assert(Tensor.prototype._physicalizeResult === undefined,
+      'legacy frontend substitution helper must stay deleted')
       const logits = new Tensor([[-1, 2, -3], [1, -2, 3]])
       const sparse = new Tensor([1, 2], { dtype: 'int32' })
       const dense = new Tensor([[0, 1, 0], [0, 0, 1]])
@@ -2754,9 +2703,6 @@ async function runTensorTests(pg) {
       for (const [actual, expected] of pairs) {
         assertClose(await actual.toArray(), await expected.toArray())
       }
-    } finally {
-      Tensor.prototype._physicalizeResult = original
-    }
   })
 
   await test('crossEntropy with sparse targets on non-last axis', async () => {
@@ -2885,6 +2831,13 @@ async function runTensorTests(pg) {
     a.assign(a.add(10))
     await a.realize()
     assertClose(await a.toArray(), [11, 12, 13])
+  })
+
+  await test('assign broadcasts rhs in core', async () => {
+    const target = Tensor.zeros([2, 3])
+    target.assign(new Tensor([4, 5, 6], { dtype: 'float32' }))
+    await target.realize()
+    assertClose(await target.toArray(), [4, 5, 6, 4, 5, 6])
   })
 
   await test('assign rejects device mismatch', async () => {

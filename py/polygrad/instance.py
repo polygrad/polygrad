@@ -10,6 +10,7 @@ import ctypes.util
 import pathlib
 import numpy as np
 from . import _ffi
+from .device import _device_id
 
 _get_lib = _ffi.get_lib
 
@@ -430,26 +431,32 @@ class Instance:
 
     @staticmethod
     def from_hf(model_path=None, *, config_json=None, weight_bytes_list=None,
-                max_batch=1, max_seq_len=0):
+                max_batch=1, max_seq_len=0, device=None):
         """Load a HuggingFace-format model as an Instance."""
         from .hf import load_hf, load_hf_bytes
 
         if config_json is not None or weight_bytes_list is not None:
             if config_json is None or weight_bytes_list is None:
                 raise ValueError('config_json and weight_bytes_list must be provided together')
-            return load_hf_bytes(config_json, weight_bytes_list, max_batch, max_seq_len)
+            return load_hf_bytes(
+                config_json, weight_bytes_list, max_batch, max_seq_len, device=device
+            )
         if model_path is None:
             raise ValueError('model_path is required')
-        return load_hf(model_path, max_batch=max_batch, max_seq_len=max_seq_len)
+        return load_hf(
+            model_path, max_batch=max_batch, max_seq_len=max_seq_len, device=device
+        )
 
     @staticmethod
-    def from_gguf(data, *, max_batch=1, max_seq_len=0):
+    def from_gguf(data, *, max_batch=1, max_seq_len=0, device=None):
         """Load a GGUF byte buffer or file path as an Instance."""
         if isinstance(data, (str, pathlib.Path)):
             data = pathlib.Path(data).read_bytes()
         data = bytes(data)
         buf = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
-        ptr = _get_lib().poly_gguf_load(buf, len(data), int(max_batch), int(max_seq_len))
+        ptr = _get_lib().poly_gguf_load(
+            buf, len(data), int(max_batch), int(max_seq_len), _device_id(device)
+        )
         if not ptr:
             raise RuntimeError('poly_gguf_load returned NULL')
         return Instance(ptr)

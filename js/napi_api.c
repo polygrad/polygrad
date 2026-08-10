@@ -1274,19 +1274,6 @@ static napi_value napi_poly_realize_uops(napi_env env, napi_callback_info info) 
   return out_js;
 }
 
-static napi_value napi_poly_tensor_create(napi_env env, napi_callback_info info) {
-  napi_value argv[4];
-  size_t argc = 4;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyCtx *ctx = get_external(env, argv[0]);
-  PolyUOp *uop = get_external(env, argv[1]);
-  int32_t role = 0;
-  int32_t device = 0;
-  napi_get_value_int32(env, argv[2], &role);
-  napi_get_value_int32(env, argv[3], &device);
-  return make_external(env, poly_tensor_create(ctx, uop, (PolyTensorRole)role, (PolyDevice)device));
-}
-
 static napi_value napi_poly_tensor_empty_by_id(napi_env env, napi_callback_info info) {
   napi_value argv[5];
   size_t argc = 5;
@@ -2561,7 +2548,6 @@ static napi_value napi_poly_ctx_stats(napi_env env, napi_callback_info info) {
   set_named_size(env, out, "bufferOwnedBytes", s.buffer_owned_bytes);
   set_named_size(env, out, "bufferOwnedCurrentBytes", s.buffer_owned_current_bytes);
   set_named_size(env, out, "bufferOwnedSourceBytes", s.buffer_owned_source_bytes);
-  set_named_size(env, out, "tensorEntries", s.tensor_entries);
   set_named_size(env, out, "tensorRecords", s.tensor_records);
   set_named_size(env, out, "registryEntries", s.registry_entries);
   set_named_size(env, out, "entrypointEntries", s.entrypoint_entries);
@@ -3713,13 +3699,15 @@ static napi_value napi_poly_instance_set_device(napi_env env, napi_callback_info
 }
 
 static napi_value napi_poly_mlp_from_json(napi_env env, napi_callback_info info) {
-  napi_value argv[1];
-  size_t argc = 1;
+  napi_value argv[2];
+  size_t argc = 2;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   size_t spec_len = 0;
   char *spec = read_utf8_arg(env, argv[0], &spec_len);
   if (!spec) return NULL;
-  PolyInstance *inst = poly_mlp_from_json(spec, (int)spec_len);
+  int32_t device;
+  NAPI_CALL(env, napi_get_value_int32(env, argv[1], &device));
+  PolyInstance *inst = poly_mlp_from_json(spec, (int)spec_len, (PolyDevice)device);
   free(spec);
   if (!inst) {
     napi_value result;
@@ -3730,13 +3718,15 @@ static napi_value napi_poly_mlp_from_json(napi_env env, napi_callback_info info)
 }
 
 static napi_value napi_poly_tabm_instance(napi_env env, napi_callback_info info) {
-  napi_value argv[1];
-  size_t argc = 1;
+  napi_value argv[2];
+  size_t argc = 2;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   size_t spec_len = 0;
   char *spec = read_utf8_arg(env, argv[0], &spec_len);
   if (!spec) return NULL;
-  PolyInstance *inst = poly_tabm_instance(spec, (int)spec_len);
+  int32_t device;
+  NAPI_CALL(env, napi_get_value_int32(env, argv[1], &device));
+  PolyInstance *inst = poly_tabm_instance(spec, (int)spec_len, (PolyDevice)device);
   free(spec);
   if (!inst) {
     napi_value result;
@@ -3747,13 +3737,15 @@ static napi_value napi_poly_tabm_instance(napi_env env, napi_callback_info info)
 }
 
 static napi_value napi_poly_nam_instance(napi_env env, napi_callback_info info) {
-  napi_value argv[1];
-  size_t argc = 1;
+  napi_value argv[2];
+  size_t argc = 2;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   size_t spec_len = 0;
   char *spec = read_utf8_arg(env, argv[0], &spec_len);
   if (!spec) return NULL;
-  PolyInstance *inst = poly_nam_instance(spec, (int)spec_len);
+  int32_t device;
+  NAPI_CALL(env, napi_get_value_int32(env, argv[1], &device));
+  PolyInstance *inst = poly_nam_instance(spec, (int)spec_len, (PolyDevice)device);
   free(spec);
   if (!inst) {
     napi_value result;
@@ -4812,19 +4804,21 @@ extern PolyInstance *poly_hf_load(
     const int64_t *weight_lens,
     int n_weight_files,
     int max_batch,
-    int max_seq_len
+    int max_seq_len,
+    PolyDevice device
 );
 
 extern PolyInstance *poly_gguf_load(
     const uint8_t *data,
     int64_t len,
     int max_batch,
-    int max_seq_len
+    int max_seq_len,
+    PolyDevice device
 );
 
 static napi_value napi_poly_hf_load(napi_env env, napi_callback_info info) {
-  napi_value argv[4];
-  size_t argc = 4;
+  napi_value argv[5];
+  size_t argc = 5;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
 
   /* argv[0] = config Buffer, argv[1] = weight Buffers array, argv[2] = maxBatch, argv[3] =
@@ -4848,13 +4842,14 @@ static napi_value napi_poly_hf_load(napi_env env, napi_callback_info info) {
     file_lens[i] = (int64_t)flen;
   }
 
-  int32_t max_batch, max_seq_len;
+  int32_t max_batch, max_seq_len, device;
   NAPI_CALL(env, napi_get_value_int32(env, argv[2], &max_batch));
   NAPI_CALL(env, napi_get_value_int32(env, argv[3], &max_seq_len));
+  NAPI_CALL(env, napi_get_value_int32(env, argv[4], &device));
 
   PolyInstance *inst = poly_hf_load(
       (const char *)cfg_data, (int)cfg_len, file_ptrs, file_lens, (int)n_files, max_batch,
-      max_seq_len
+      max_seq_len, (PolyDevice)device
   );
 
   free(file_ptrs);
@@ -4869,16 +4864,19 @@ static napi_value napi_poly_hf_load(napi_env env, napi_callback_info info) {
 }
 
 static napi_value napi_poly_gguf_load(napi_env env, napi_callback_info info) {
-  napi_value argv[3];
-  size_t argc = 3;
+  napi_value argv[4];
+  size_t argc = 4;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   void *data;
   size_t len;
   NAPI_CALL(env, napi_get_buffer_info(env, argv[0], &data, &len));
-  int32_t max_batch, max_seq_len;
+  int32_t max_batch, max_seq_len, device;
   NAPI_CALL(env, napi_get_value_int32(env, argv[1], &max_batch));
   NAPI_CALL(env, napi_get_value_int32(env, argv[2], &max_seq_len));
-  PolyInstance *inst = poly_gguf_load((const uint8_t *)data, (int64_t)len, max_batch, max_seq_len);
+  NAPI_CALL(env, napi_get_value_int32(env, argv[3], &device));
+  PolyInstance *inst = poly_gguf_load(
+      (const uint8_t *)data, (int64_t)len, max_batch, max_seq_len, (PolyDevice)device
+  );
   if (!inst) {
     napi_value n;
     napi_get_null(env, &n);
@@ -5002,7 +5000,6 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_uop_buffer", napi_poly_uop_buffer),
       DECLARE_NAPI_METHOD("poly_uop_reachable", napi_poly_uop_reachable),
       DECLARE_NAPI_METHOD("poly_realize_uops", napi_poly_realize_uops),
-      DECLARE_NAPI_METHOD("poly_tensor_create", napi_poly_tensor_create),
       DECLARE_NAPI_METHOD("poly_tensor_empty_by_id", napi_poly_tensor_empty_by_id),
       DECLARE_NAPI_METHOD("poly_tensor_create_with_roots", napi_poly_tensor_create_with_roots),
       DECLARE_NAPI_METHOD("poly_tensor_replace_roots", napi_poly_tensor_replace_roots),

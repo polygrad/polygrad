@@ -56,7 +56,7 @@ function createNativeCore(device) {
     if (name) ops[name] = i
   }
 
-  const EXPECTED_ABI = 47
+  const EXPECTED_ABI = 49
   const abi = binding.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(
@@ -71,15 +71,15 @@ function createNativeCore(device) {
       return setInstanceDevice(inst)
     },
     mlp(specJson) {
-      const inst = binding.poly_mlp_from_json(specJson)
+      const inst = binding.poly_mlp_from_json(specJson, deviceId)
       return setInstanceDevice(inst)
     },
     tabm(specJson) {
-      const inst = binding.poly_tabm_instance(specJson)
+      const inst = binding.poly_tabm_instance(specJson, deviceId)
       return setInstanceDevice(inst)
     },
     nam(specJson) {
-      const inst = binding.poly_nam_instance(specJson)
+      const inst = binding.poly_nam_instance(specJson, deviceId)
       return setInstanceDevice(inst)
     },
     free(inst) {
@@ -166,11 +166,12 @@ function createNativeCore(device) {
     },
     loadHF(configBytes, weightFilesBytes, maxBatch, maxSeqLen) {
       const inst = binding.poly_hf_load(configBytes, weightFilesBytes,
-        maxBatch || 1, maxSeqLen || 0)
+        maxBatch || 1, maxSeqLen || 0, deviceId)
       return setInstanceDevice(inst)
     },
     loadGGUF(ggufBytes, maxBatch, maxSeqLen) {
-      const inst = binding.poly_gguf_load(ggufBytes, maxBatch || 1, maxSeqLen || 0)
+      const inst = binding.poly_gguf_load(
+        ggufBytes, maxBatch || 1, maxSeqLen || 0, deviceId)
       return setInstanceDevice(inst)
     },
     importLastError() {

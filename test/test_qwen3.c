@@ -168,7 +168,7 @@ TEST(qwen3, config_from_gguf) {
 
 TEST(qwen3, model_build_and_load) {
   SKIP_IF_NO_GGUF();
-  PolyInstance *inst = poly_qwen3_from_gguf_decoded(g_gguf, 1, 25);
+  PolyInstance *inst = poly_qwen3_from_gguf_decoded(g_gguf, 1, 25, POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   /* Check buffer count: 4 I/O (x, output, rope_cos, rope_sin) + 310 params */
@@ -191,7 +191,7 @@ TEST(qwen3, model_build_and_load) {
 
 TEST(qwen3, forward_cpu) {
   SKIP_IF_NO_GGUF();
-  PolyInstance *inst = poly_qwen3_from_gguf_decoded(g_gguf, 1, 25);
+  PolyInstance *inst = poly_qwen3_from_gguf_decoded(g_gguf, 1, 25, POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   /* Fill input with prompt "The capital of France is" */
@@ -234,7 +234,7 @@ TEST(qwen3, forward_cuda) {
     PASS();
   }
 
-  PolyInstance *inst = poly_qwen3_from_gguf_decoded(g_gguf, 1, 25);
+  PolyInstance *inst = poly_qwen3_from_gguf_decoded(g_gguf, 1, 25, POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
   poly_instance_set_device(inst, POLY_DEVICE_CUDA);
 

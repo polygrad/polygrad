@@ -47,7 +47,7 @@ Qwen3Config poly_qwen3_config_default(void) {
 
 /* Builder */
 
-PolyInstance *poly_qwen3(const Qwen3Config *cfg) {
+PolyInstance *poly_qwen3(const Qwen3Config *cfg, PolyDevice device) {
   if (!cfg || cfg->n_layers < 1 || cfg->dim < 1 || cfg->vocab_size < 1) return NULL;
 
   int V = cfg->vocab_size;
@@ -69,6 +69,7 @@ PolyInstance *poly_qwen3(const Qwen3Config *cfg) {
 
   PolyCtx *ctx = poly_ctx_new();
   if (!ctx) return NULL;
+  if (device != POLY_DEVICE_AUTO) poly_ctx_set_preferred_device(ctx, device);
   PolyInstanceOptions opts = {
       .own_ctx_on_success = true,
       .own_ctx_on_failure = true,
@@ -92,104 +93,114 @@ PolyInstance *poly_qwen3(const Qwen3Config *cfg) {
   PolyTensor *rope_sin_tensor = poly_instance_input(inst, "rope_sin", POLY_FLOAT32, rope_shape, 2);
   if (!rope_sin_tensor) goto fail_pre_build;
 
-  PolyUOp *x = poly_tensor_uop(x_tensor);
   if (poly_instance_scope_push(inst, "token_embd") != POLY_STATUS_OK) goto fail_pre_build;
   int64_t token_shape[] = {V, D};
   PolyTensor *token_tensor = poly_instance_param(inst, "weight", POLY_FLOAT32, token_shape, 2);
   if (!token_tensor) goto fail_pre_build;
   if (poly_instance_scope_pop(inst) != POLY_STATUS_OK) goto fail_pre_build;
-  PolyUOp *token_weight = poly_tensor_uop(token_tensor);
-  PolyUOp *h = poly_embedding_apply(ctx, x, poly_reshape(ctx, token_weight, token_shape, 2));
-  h = poly_contiguous(ctx, h);
+  PolyTensor *h = poly_tensor_embedding_apply(ctx, x_tensor, token_tensor);
+  h = poly_tensor_contiguous(ctx, h);
   if (!h) goto fail_pre_build;
 
-  PolyUOp *rope_cos =
-      poly_reshape(ctx, poly_tensor_uop(rope_cos_tensor), (int64_t[]){1, 1, T, half_hd}, 4);
-  PolyUOp *rope_sin =
-      poly_reshape(ctx, poly_tensor_uop(rope_sin_tensor), (int64_t[]){1, 1, T, half_hd}, 4);
+  PolyTensor *rope_cos =
+      poly_tensor_reshape(ctx, rope_cos_tensor, (int64_t[]){1, 1, T, half_hd}, 4);
+  PolyTensor *rope_sin =
+      poly_tensor_reshape(ctx, rope_sin_tensor, (int64_t[]){1, 1, T, half_hd}, 4);
 
-  PolyUOp *mask =
-      poly_contiguous(ctx, poly_reshape(ctx, poly_causal_mask(ctx, T), (int64_t[]){1, 1, T, T}, 4));
+  PolyTensor *mask = poly_tensor_causal_mask(ctx, T);
+  mask = poly_tensor_reshape(ctx, mask, (int64_t[]){1, 1, T, T}, 4);
+  mask = poly_tensor_contiguous(ctx, mask);
   if (!mask) goto fail_pre_build;
 
   for (int i = 0; i < L; i++) {
     char pf[64];
 
     snprintf(pf, sizeof(pf), "blk.%d.attn_norm", i);
-    PolyUOp *x_norm = poly_contiguous(ctx, poly_instance_rmsnorm(inst, pf, h, D, eps));
+    PolyTensor *x_norm = poly_instance_rmsnorm(inst, pf, h, D, eps);
+    x_norm = poly_tensor_contiguous(ctx, x_norm);
     if (!x_norm) goto fail_pre_build;
 
     snprintf(pf, sizeof(pf), "blk.%d.attn_q", i);
-    PolyUOp *q = poly_contiguous(ctx, poly_instance_linear(inst, pf, x_norm, D, H * hd, false));
+    PolyTensor *q = poly_instance_linear(inst, pf, x_norm, D, H * hd, false);
+    q = poly_tensor_contiguous(ctx, q);
     snprintf(pf, sizeof(pf), "blk.%d.attn_k", i);
-    PolyUOp *k = poly_contiguous(ctx, poly_instance_linear(inst, pf, x_norm, D, KvH * hd, false));
+    PolyTensor *k = poly_instance_linear(inst, pf, x_norm, D, KvH * hd, false);
+    k = poly_tensor_contiguous(ctx, k);
     snprintf(pf, sizeof(pf), "blk.%d.attn_v", i);
-    PolyUOp *v = poly_contiguous(ctx, poly_instance_linear(inst, pf, x_norm, D, KvH * hd, false));
+    PolyTensor *v = poly_instance_linear(inst, pf, x_norm, D, KvH * hd, false);
+    v = poly_tensor_contiguous(ctx, v);
     if (!q || !k || !v) goto fail_pre_build;
 
-    q = poly_permute(
-        ctx, poly_reshape(ctx, q, (int64_t[]){B, T, H, hd}, 4), (int64_t[]){0, 2, 1, 3}, 4
-    );
-    k = poly_permute(
-        ctx, poly_reshape(ctx, k, (int64_t[]){B, T, KvH, hd}, 4), (int64_t[]){0, 2, 1, 3}, 4
-    );
-    v = poly_permute(
-        ctx, poly_reshape(ctx, v, (int64_t[]){B, T, KvH, hd}, 4), (int64_t[]){0, 2, 1, 3}, 4
-    );
+    q = poly_tensor_reshape(ctx, q, (int64_t[]){B, T, H, hd}, 4);
+    q = poly_tensor_permute(ctx, q, (int64_t[]){0, 2, 1, 3}, 4);
+    k = poly_tensor_reshape(ctx, k, (int64_t[]){B, T, KvH, hd}, 4);
+    k = poly_tensor_permute(ctx, k, (int64_t[]){0, 2, 1, 3}, 4);
+    v = poly_tensor_reshape(ctx, v, (int64_t[]){B, T, KvH, hd}, 4);
+    v = poly_tensor_permute(ctx, v, (int64_t[]){0, 2, 1, 3}, 4);
+    if (!q || !k || !v) goto fail_pre_build;
 
     if (qk_norm > 0) {
       snprintf(pf, sizeof(pf), "blk.%d.attn_q_norm", i);
-      q = poly_contiguous(ctx, poly_instance_rmsnorm(inst, pf, q, qk_norm, eps));
+      q = poly_instance_rmsnorm(inst, pf, q, qk_norm, eps);
+      q = poly_tensor_contiguous(ctx, q);
       snprintf(pf, sizeof(pf), "blk.%d.attn_k_norm", i);
-      k = poly_contiguous(ctx, poly_instance_rmsnorm(inst, pf, k, qk_norm, eps));
+      k = poly_instance_rmsnorm(inst, pf, k, qk_norm, eps);
+      k = poly_tensor_contiguous(ctx, k);
       if (!q || !k) goto fail_pre_build;
     }
 
-    q = poly_rope(ctx, q, rope_cos, rope_sin);
-    k = poly_rope(ctx, k, rope_cos, rope_sin);
+    q = poly_tensor_rope(ctx, q, rope_cos, rope_sin);
+    k = poly_tensor_rope(ctx, k, rope_cos, rope_sin);
 
-    PolyUOp *attn = poly_contiguous(ctx, poly_sdpa(ctx, q, k, v, mask, 0));
+    PolyTensor *attn = poly_tensor_sdpa(ctx, q, k, v, mask, 0);
+    attn = poly_tensor_contiguous(ctx, attn);
     if (!attn) goto fail_pre_build;
 
-    attn = poly_reshape(
-        ctx, poly_permute(ctx, attn, (int64_t[]){0, 2, 1, 3}, 4), (int64_t[]){B, T, H * hd}, 3
-    );
+    attn = poly_tensor_permute(ctx, attn, (int64_t[]){0, 2, 1, 3}, 4);
+    attn = poly_tensor_reshape(ctx, attn, (int64_t[]){B, T, H * hd}, 3);
 
     snprintf(pf, sizeof(pf), "blk.%d.attn_output", i);
-    attn = poly_contiguous(ctx, poly_instance_linear(inst, pf, attn, H * hd, D, false));
-    h = poly_contiguous(ctx, poly_add(ctx, h, attn));
+    attn = poly_instance_linear(inst, pf, attn, H * hd, D, false);
+    attn = poly_tensor_contiguous(ctx, attn);
+    h = poly_tensor_alu2(ctx, POLY_OP_ADD, h, attn);
+    h = poly_tensor_contiguous(ctx, h);
     if (!h) goto fail_pre_build;
 
     snprintf(pf, sizeof(pf), "blk.%d.ffn_norm", i);
-    PolyUOp *h_norm = poly_contiguous(ctx, poly_instance_rmsnorm(inst, pf, h, D, eps));
+    PolyTensor *h_norm = poly_instance_rmsnorm(inst, pf, h, D, eps);
+    h_norm = poly_tensor_contiguous(ctx, h_norm);
     if (!h_norm) goto fail_pre_build;
 
     snprintf(pf, sizeof(pf), "blk.%d.ffn_gate", i);
-    PolyUOp *gate =
-        poly_contiguous(ctx, poly_silu(ctx, poly_instance_linear(inst, pf, h_norm, D, FF, false)));
+    PolyTensor *gate = poly_instance_linear(inst, pf, h_norm, D, FF, false);
+    gate = poly_tensor_silu(ctx, gate);
+    gate = poly_tensor_contiguous(ctx, gate);
 
     snprintf(pf, sizeof(pf), "blk.%d.ffn_up", i);
-    PolyUOp *up = poly_contiguous(ctx, poly_instance_linear(inst, pf, h_norm, D, FF, false));
+    PolyTensor *up = poly_instance_linear(inst, pf, h_norm, D, FF, false);
+    up = poly_tensor_contiguous(ctx, up);
     if (!gate || !up) goto fail_pre_build;
 
-    PolyUOp *gated = poly_contiguous(ctx, poly_alu2(ctx, POLY_OP_MUL, gate, up));
+    PolyTensor *gated = poly_tensor_alu2(ctx, POLY_OP_MUL, gate, up);
+    gated = poly_tensor_contiguous(ctx, gated);
 
     snprintf(pf, sizeof(pf), "blk.%d.ffn_down", i);
-    PolyUOp *ffn_out = poly_contiguous(ctx, poly_instance_linear(inst, pf, gated, FF, D, false));
+    PolyTensor *ffn_out = poly_instance_linear(inst, pf, gated, FF, D, false);
+    ffn_out = poly_tensor_contiguous(ctx, ffn_out);
 
-    h = poly_contiguous(ctx, poly_add(ctx, h, ffn_out));
+    h = poly_tensor_alu2(ctx, POLY_OP_ADD, h, ffn_out);
+    h = poly_tensor_contiguous(ctx, h);
     if (!h) goto fail_pre_build;
   }
 
-  h = poly_contiguous(ctx, poly_instance_rmsnorm(inst, "output_norm", h, D, eps));
+  h = poly_instance_rmsnorm(inst, "output_norm", h, D, eps);
+  h = poly_tensor_contiguous(ctx, h);
   if (!h) goto fail_pre_build;
 
-  PolyUOp *logits =
-      poly_linear_apply(ctx, h, poly_reshape(ctx, token_weight, token_shape, 2), NULL);
+  PolyTensor *logits = poly_tensor_linear_apply(ctx, h, token_tensor, NULL);
   if (!logits) goto fail_pre_build;
 
-  PolyTensor *out_tensor = poly_tensor_create(ctx, logits, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
-  if (!out_tensor || poly_instance_output(inst, "output", out_tensor) != POLY_STATUS_OK)
+  if (poly_instance_output(inst, "output", logits) != POLY_STATUS_OK)
     goto fail_pre_build;
   const char *forward_inputs[] = {"x", "rope_cos", "rope_sin"};
   const char *forward_outputs[] = {"output"};
@@ -220,7 +231,7 @@ fail_pre_build:
 
 PolyInstance *poly_qwen3_from_gguf_decoded(
     const PolyGgufDecoded *gguf,
-    int max_batch, int max_seq_len)
+    int max_batch, int max_seq_len, PolyDevice device)
 {
     if (!gguf) return NULL;
 
@@ -289,7 +300,7 @@ PolyInstance *poly_qwen3_from_gguf_decoded(
             cfg.n_layers, cfg.hidden_dim, cfg.head_dim,
             cfg.max_seq_len, cfg.norm_eps, cfg.rope_theta, cfg.qk_norm);
 
-    PolyInstance *inst = poly_qwen3(&cfg);
+    PolyInstance *inst = poly_qwen3(&cfg, device);
     if (!inst) return NULL;
 
     /* Precompute RoPE frequencies and fill the input buffers */
@@ -365,5 +376,6 @@ PolyInstance *poly_qwen3_from_gguf_decoded_generic(
 {
     return poly_qwen3_from_gguf_decoded(gguf,
         opts ? opts->max_batch : 0,
-        opts ? opts->max_seq_len : 0);
+        opts ? opts->max_seq_len : 0,
+        opts ? opts->device : POLY_DEVICE_AUTO);
 }

@@ -80,3 +80,8 @@ class _Device:
 
 
 Device = _Device()
+
+
+def _device_id(device=None):
+    canonical = Device.canonicalize(device)
+    return int(_ffi.get_lib().poly_device_by_name(canonical.lower().encode('utf-8')))

@@ -665,6 +665,57 @@ def case_relu_float32():
     return {"physical": out.uop, "logical": logical(out)}
 
 
+def case_mlp_linear_relu():
+    x = Tensor.empty(2, 3, device="CPU").realize()
+    weight = Tensor.empty(4, 3, device="CPU").realize()
+    bias = Tensor.empty(4, device="CPU").realize()
+    # Pinned nn.Linear stores (out,in) and passes weight.transpose() to
+    # Tensor.linear (nn/__init__.py:156-177). Polygrad's frontend convenience
+    # method accepts the stored (out,in) weight and performs that transpose.
+    out = x.linear(weight.transpose(), bias) if ENGINE == "tinygrad" else x.linear(weight, bias)
+    out = out.relu()
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_mlp_mse():
+    pred = Tensor.empty(2, 4, device="CPU").realize()
+    target = Tensor.empty(2, 4, device="CPU").realize()
+    diff = pred - target
+    out = (diff * diff).mean()
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_mlp_dense_cross_entropy():
+    logits = Tensor.empty(2, 4, device="CPU").realize()
+    target = Tensor.empty(2, 4, device="CPU").realize()
+    out = logits.cross_entropy(target)
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_nn_layernorm_apply():
+    x = Tensor.empty(2, 4, device="CPU").realize()
+    weight = Tensor.empty(4, device="CPU").realize()
+    bias = Tensor.empty(4, device="CPU").realize()
+    out = x.layernorm(eps=1e-5, axis=-1) * weight + bias
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_nn_rmsnorm_apply():
+    x = Tensor.empty(2, 4, device="CPU").realize()
+    weight = Tensor.empty(4, device="CPU").realize()
+    xf = x.float()
+    out = (xf * (xf.square().mean(-1, keepdim=True) + 1e-6).rsqrt()).cast(x.dtype) * weight
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_nn_embedding_apply():
+    index = Tensor.empty(2, dtype="int32", device="CPU").realize()
+    weight = Tensor.empty(4, 3, device="CPU").realize()
+    arange = Tensor.arange(weight.shape[0]).to("CPU")
+    out = (arange == index.unsqueeze(-1)).unsqueeze(-1).where(weight, 0).sum(-2)
+    return {"physical": out.uop, "logical": logical(out)}
+
+
 def case_quick_gelu_float32():
     out = typed_realized_empty("float32").quick_gelu()
     return {"physical": out.uop, "logical": logical(out)}
@@ -1112,6 +1163,13 @@ def case_moved_assign_occurrence():
     moved.assign(Tensor.empty(2, device="CUDA"))
     out = x + moved.to("CPU")
     return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_moved_broadcast_assign_occurrence():
+    target = Tensor.empty(2, 3, device="CPU")
+    value = Tensor.empty(3, device="CPU").to("CUDA").to("CPU")
+    target.assign(value)
+    return {"physical": target.uop, "logical": logical(target)}
 
 
 def case_sibling_moves():
@@ -1568,6 +1626,7 @@ CASES = {
     "max_pool2d_float32": ("tensor", case_max_pool2d_float32),
     "movement_reduce": ("tensor", case_movement_reduce),
     "mish_occurrence": ("tensor", case_mish_occurrence),
+    "moved_broadcast_assign_occurrence": ("tensor", case_moved_broadcast_assign_occurrence),
     "moved_assign_occurrence": ("tensor", case_moved_assign_occurrence),
     "pad": ("tensor", case_pad),
     "pad_negative": ("tensor", case_pad_negative),
@@ -1602,6 +1661,12 @@ CASES = {
     "rng_single_counter": ("tensor", case_rng_single_counter),
     "rng_two_draw": ("tensor", case_rng_two_draw),
     "relu_float32": ("tensor", case_relu_float32),
+    "mlp_dense_cross_entropy": ("tensor", case_mlp_dense_cross_entropy),
+    "mlp_linear_relu": ("tensor", case_mlp_linear_relu),
+    "mlp_mse": ("tensor", case_mlp_mse),
+    "nn_embedding_apply": ("tensor", case_nn_embedding_apply),
+    "nn_layernorm_apply": ("tensor", case_nn_layernorm_apply),
+    "nn_rmsnorm_apply": ("tensor", case_nn_rmsnorm_apply),
     "relu6_occurrence": ("tensor", case_relu6_occurrence),
     "rsqrt_float32": ("tensor", case_rsqrt_float32),
     "scalar_bool": ("tensor", case_scalar_bool),

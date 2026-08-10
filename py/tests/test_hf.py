@@ -5,7 +5,7 @@ import json
 import struct
 import numpy as np
 import pytest
-from polygrad.hf import load_hf_bytes, _find_safetensors, _get_vocab_size
+from polygrad.hf import generate, load_hf_bytes, _find_safetensors, _get_vocab_size
 from polygrad.instance import Instance
 
 
@@ -223,3 +223,48 @@ class TestGetVocabSize:
         inst = load_hf_bytes(GPT2_TINY_CONFIG, [st])
         assert _get_vocab_size(inst) == 32
         inst.free()
+
+
+class TestGenerateTokenDtype:
+    class FakeInstance:
+        param_count = 1
+        buf_count = 1
+
+        @staticmethod
+        def param_name(_index):
+            return 'wte.weight'
+
+        @staticmethod
+        def param_shape(_index):
+            return [4, 2]
+
+        @staticmethod
+        def buf_name(_index):
+            return 'x'
+
+        @staticmethod
+        def buf_shape(_index):
+            return [1, 4]
+
+        @staticmethod
+        def forward(**inputs):
+            assert inputs['x'].dtype == np.int32
+            assert inputs['positions'].dtype == np.int32
+            logits = np.zeros((1, 4, 4), dtype=np.float32)
+            logits[..., 2] = 1.0
+            return {'output': logits}
+
+    def test_integer_tokens_are_normalized_to_int32(self):
+        result = generate(
+            self.FakeInstance(), np.array([[0, 1]], dtype=np.int64),
+            max_new_tokens=1, top_k=1,
+        )
+        assert result.dtype == np.int32
+        np.testing.assert_array_equal(result[:, :2], [[0, 1]])
+
+    def test_float_tokens_are_rejected(self):
+        with pytest.raises(TypeError, match='tokens must have an integer dtype'):
+            generate(
+                self.FakeInstance(), np.array([[0.0, 1.0]], dtype=np.float32),
+                max_new_tokens=1,
+            )

@@ -164,9 +164,9 @@ def _shape_key_and_bindings(shape):
 
 
 def _input_shape(t):
-    raw = _ffi._lib.poly_tensor_uop_logical(t._tensor)
-    if not raw:
-        raw = _ffi._lib.poly_tensor_uop(t._tensor)
+    # Pinned TinyJit keys inputs from the current Tensor.uop. Polygrad's
+    # current/parity root is physical; logical is export/re-placement only.
+    raw = _ffi._lib.poly_tensor_uop(t._tensor)
     from .tensor import _shape_from_uop
     return _shape_from_uop(t._ctx, raw)
 

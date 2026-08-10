@@ -27,8 +27,8 @@ typedef struct {
 } MLPConfig;
 
 MLPConfig poly_mlp_config_default(void);
-PolyInstance *poly_mlp(const MLPConfig *cfg);
-PolyInstance *poly_mlp_from_json(const char *json, int len);
+PolyInstance *poly_mlp(const MLPConfig *cfg, PolyDevice device);
+PolyInstance *poly_mlp_from_json(const char *json, int len, PolyDevice device);
 
 /* Deterministic parameter initialization.
  * Uses SplitMix64 PRNG seeded by (seed, FNV1a(name)).

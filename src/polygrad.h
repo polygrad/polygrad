@@ -596,12 +596,10 @@ typedef struct PolyJit PolyJit;
 /* Core frontend tensor handle.
  *
  * PolyUOp stays the pure logical value graph. PolyTensor is the C-side value
- * reference used by frontends: it points at a logical UOp and carries the
- * current non-portable realization intent. The tensor carries two roots:
- * logical is the exportable/provenance expression, physical is the realized
- * execution/readback root. physical is NULL for lazy tensors. poly_tensor_uop()
- * returns the frontend convenience root: physical when present, otherwise
- * logical. Portable export/autograd provenance should use uop_logical.
+ * reference used by frontends. The tensor carries two roots: logical is the
+ * exportable/re-placement expression, while physical is the mandatory current
+ * tinygrad-shaped execution/readback root. poly_tensor_uop() returns physical;
+ * portable export/provenance uses uop_logical explicitly.
  */
 typedef struct PolyTensor PolyTensor;
 
@@ -632,7 +630,6 @@ struct PolyTensor {
   PolyTensorProvenance provenance;
 };
 
-PolyTensor *poly_tensor_create(PolyCtx *ctx, PolyUOp *uop, PolyTensorRole role, PolyDevice device);
 PolyTensor *poly_tensor_create_with_roots(
     PolyCtx *ctx,
     PolyUOp *uop_logical,
@@ -728,6 +725,12 @@ int poly_tensor_topk(
 );
 PolyTensor *poly_tensor_softmax(PolyCtx *ctx, PolyTensor *src, int axis);
 PolyTensor *poly_tensor_log_softmax(PolyCtx *ctx, PolyTensor *src, int axis);
+PolyTensor *poly_tensor_rope(
+    PolyCtx *ctx,
+    PolyTensor *x,
+    PolyTensor *freqs_cos,
+    PolyTensor *freqs_sin
+);
 PolyTensor *poly_tensor_cast_by_id(PolyCtx *ctx, PolyTensor *src, int dtype_id);
 PolyTensor *poly_tensor_bitcast_by_id(PolyCtx *ctx, PolyTensor *src, int dtype_id);
 PolyTensor *poly_tensor_contiguous(PolyCtx *ctx, PolyTensor *src);
@@ -933,7 +936,6 @@ typedef struct {
   size_t buffer_owned_bytes;
   size_t buffer_owned_current_bytes;
   size_t buffer_owned_source_bytes;
-  size_t tensor_entries;
   size_t tensor_records;
   size_t registry_entries;
   size_t entrypoint_entries;

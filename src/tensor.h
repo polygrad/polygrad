@@ -31,17 +31,14 @@ int poly_tensor_set_physical(
     PolyDevice device
 );
 
-/* Apply realized replacements to live PolyTensors, preserving logical roots
- * and updating only executable physical roots. POLY_DEVICE_AUTO applies the
- * map globally; an exact device keeps placement aliases from retargeting a
- * distinct source-device tensor that shares the same portable logical root. */
+/* Apply realized replacements to live executable PolyTensor roots, preserving
+ * logical roots. POLY_DEVICE_AUTO applies the map globally. */
 int poly_tensor_apply_realize_map(
     PolyCtx *ctx,
     PolyUOp **from,
     PolyUOp **to,
     int n,
-    PolyDevice device,
-    PolyMap **placement_memo
+    PolyDevice device
 );
 
 /* Dynamic BUFFER helper used by C tests/probes and low-level callers. The
@@ -147,6 +144,10 @@ PolyUOp *poly_cumalu(PolyCtx *ctx, PolyUOp *x, int axis, PolyOps op, bool includ
 
 /* Broadcasting (matches tinygrad's _broadcasted) */
 
+/* Tensor-stage RESHAPE with exact symbolic shape sources, matching
+ * shape_to_shape_arg in pinned tinygrad. */
+PolyUOp *poly_reshape_uop(PolyCtx *ctx, PolyUOp *src, PolyUOp **dims, int ndim);
+
 /* Broadcast a UOp to a target shape via reshape + expand.
  * Equivalent to tinygrad's _broadcast_to: left-pad dims with 1, then expand. */
 PolyUOp *poly_broadcast_to(PolyCtx *ctx, PolyUOp *x, const int64_t *shape, int ndim);
@@ -156,52 +157,10 @@ PolyUOp *poly_broadcast_to(PolyCtx *ctx, PolyUOp *x, const int64_t *shape, int n
  * incompatible shapes. */
 bool poly_broadcast_pair(PolyCtx *ctx, PolyUOp **a, PolyUOp **b, int64_t *out_shape, int *out_ndim);
 
-/* Current-placement index lookup. `role == (PolyTensorRole)-1` means any role.
- * The index is keyed by poly_tensor_uop(t), not by the preserved logical root. */
-PolyTensor *poly_tensor_find_current(
-    PolyCtx *ctx,
-    PolyUOp *current,
-    PolyDevice device,
-    PolyTensorRole role
-);
-
 /* Find a live PolyTensor representative for this storage identity, preferring
  * trainable/state metadata over anonymous aliases. This is for instance/export
  * validation, not placement decisions. */
 PolyTensor *poly_tensor_find_storage_identity(PolyCtx *ctx, const PolyUOp *storage);
-
-typedef struct {
-  PolyTensor *selected;
-  PolyUOp *selected_current;
-  PolyUOp *selected_logical;
-  PolyUOp *selected_physical;
-  PolyTensorRole selected_role;
-  PolyDevice selected_device;
-  PolyTensor *selected_source;
-
-  PolyUOp *query_current;
-  PolyDevice query_device;
-  PolyTensor *place_fact;
-  PolyTensor *value_fact;
-  PolyTensor *matched_fact;
-  PolyTensorRole matched_role;
-
-  PolyUOp *physical_root;
-} PolyPlacementAudit;
-
-/* Test/probe-facing placement inspection. This is intentionally not part of
- * the frontend ABI: it mirrors the physicalizer's current fact lookup order so
- * placement tests can assert which VALUE/PLACE record is active before judging
- * the generated physical COPY/DEVICE graph. `query_current == NULL` audits the
- * selected tensor's current root; `query_device == AUTO` uses the selected
- * tensor's resolved device. */
-int poly_tensor_placement_audit(
-    PolyCtx *ctx,
-    PolyTensor *selected,
-    PolyUOp *query_current,
-    PolyDevice query_device,
-    PolyPlacementAudit *out
-);
 
 /* Broadcasting binary ops (like tinygrad Tensor.add/mul/sub) */
 
@@ -255,6 +214,14 @@ PolyUOp *poly_mish(PolyCtx *ctx, PolyUOp *x);
 PolyUOp *poly_hardtanh(PolyCtx *ctx, PolyUOp *x, double min_val, double max_val);
 PolyUOp *poly_hardswish(PolyCtx *ctx, PolyUOp *x);
 PolyUOp *poly_hardsigmoid(PolyCtx *ctx, PolyUOp *x);
+
+/* Paired Tensor boundaries for composed activations. These apply the exact
+ * raw tinygrad-shaped program independently to retained logical and current
+ * physical roots. */
+PolyTensor *poly_tensor_relu(PolyCtx *ctx, PolyTensor *src);
+PolyTensor *poly_tensor_sigmoid(PolyCtx *ctx, PolyTensor *src);
+PolyTensor *poly_tensor_tanh(PolyCtx *ctx, PolyTensor *src);
+PolyTensor *poly_tensor_silu(PolyCtx *ctx, PolyTensor *src);
 
 /* Comparisons. All return BOOL, mirroring tinygrad mixin/elementwise.py:
  *   eq/ne via CMPNE (and double-CMPNE for eq), gt/lt via CMPLT,
@@ -414,6 +381,12 @@ PolyUOp *poly_scatter_reduce(
 /* Additional composed ops */
 
 PolyUOp *poly_rope(PolyCtx *ctx, PolyUOp *x, PolyUOp *freqs_cos, PolyUOp *freqs_sin);
+PolyTensor *poly_tensor_rope(
+    PolyCtx *ctx,
+    PolyTensor *x,
+    PolyTensor *freqs_cos,
+    PolyTensor *freqs_sin
+);
 PolyUOp *poly_repeat_interleave(PolyCtx *ctx, PolyUOp *x, int repeats, int dim);
 PolyUOp *poly_argmax(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim);
 PolyUOp *poly_mse_loss(PolyCtx *ctx, PolyUOp *pred, PolyUOp *target);

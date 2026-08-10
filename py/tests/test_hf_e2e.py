@@ -73,10 +73,10 @@ class TestGPT2Forward:
         tokens = tokenizer.encode(PROMPT)
         max_seq_len = 128
 
-        x = np.zeros((1, max_seq_len), dtype=np.float32)
+        x = np.zeros((1, max_seq_len), dtype=np.int32)
         x[0, :len(tokens)] = tokens
 
-        positions = np.arange(max_seq_len, dtype=np.float32).reshape(1, -1)
+        positions = np.arange(max_seq_len, dtype=np.int32).reshape(1, -1)
         outputs = instance.forward(x=x, positions=positions)
         logits = outputs.get('output')
         assert logits is not None, 'no output buffer'
@@ -94,9 +94,9 @@ class TestGPT2Forward:
         max_seq_len = 128
 
         # Polygrad forward
-        x = np.zeros((1, max_seq_len), dtype=np.float32)
+        x = np.zeros((1, max_seq_len), dtype=np.int32)
         x[0, :len(tokens)] = tokens
-        positions = np.arange(max_seq_len, dtype=np.float32).reshape(1, -1)
+        positions = np.arange(max_seq_len, dtype=np.int32).reshape(1, -1)
         outputs = instance.forward(x=x, positions=positions)
         poly_logits = outputs['output'].reshape(1, max_seq_len, 50257)
 
@@ -141,7 +141,7 @@ class TestGPT2Generate:
     def test_greedy_generation(self, instance, tokenizer):
         """Generate text with temperature=0.01 (near-greedy) and verify it's coherent."""
         tokens = tokenizer.encode(PROMPT)
-        token_array = np.array(tokens, dtype=np.float32).reshape(1, -1)
+        token_array = np.array(tokens, dtype=np.int32).reshape(1, -1)
 
         result = generate(instance, token_array, max_new_tokens=20,
                          temperature=0.01, top_k=1)
@@ -161,7 +161,7 @@ class TestGPT2Generate:
     def test_sampling_diversity(self, instance, tokenizer):
         """Two runs with temperature=0.8 should produce different outputs."""
         tokens = tokenizer.encode(PROMPT)
-        token_array = np.array(tokens, dtype=np.float32).reshape(1, -1)
+        token_array = np.array(tokens, dtype=np.int32).reshape(1, -1)
 
         np.random.seed(42)
         r1 = generate(instance, token_array, max_new_tokens=10,

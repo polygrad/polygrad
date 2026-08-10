@@ -17,8 +17,6 @@
 typedef struct {
   PolyCtx *ctx;
   PolyMap *memo[POLY_DEVICE_DISK + 1];
-  PolyTensor *active_place;
-  int suppress_place_facts;
 } PolyPhysicalizer;
 
 static PolyDevice device_from_string_arg(const char *s) {
@@ -275,40 +273,6 @@ static PolyUOp *find_assign_store_for_after(PolyUOp *u) {
   return NULL;
 }
 
-static bool assign_chain_contains_version(PolyUOp *root, PolyUOp *version) {
-  for (PolyUOp *u = root; find_assign_store_for_after(u); u = u->src[0])
-    if (u == version) return true;
-  return false;
-}
-
-/* tinygrad's .to() puts COPY in the Tensor UOp before assign creates any
- * AFTER versions.  Polygrad retains the portable versions in uop_logical and
- * projects that COPY at the PLACE boundary, so an earlier version can be
- * reached before the exact current PLACE row.  Resolve only exact members of
- * a live PLACE's assignment chain; sharing a terminal BUFFER is insufficient
- * because the source VALUE intentionally shares that provenance. */
-static PolyTensor *find_place_owner_for_assign_version(
-    PolyCtx *ctx,
-    PolyUOp *version,
-    PolyDevice device
-) {
-  if (!ctx || !version || version->op != POLY_OP_AFTER) return NULL;
-  PolyTensor *best = NULL;
-  for (int i = 0; i < ctx->n_tensors; i++) {
-    PolyTensor *tensor = ctx->tensors[i];
-    if (!tensor || tensor->role != POLY_TENSOR_PLACE) continue;
-    /* Assignment-chain ownership is placement identity, not allocator
-     * compatibility: CPU, INTERP, and x86 can share storage while retaining
-     * distinct explicit COPY destinations. */
-    if (device != POLY_DEVICE_AUTO && tensor->device != device) continue;
-    if (!assign_chain_contains_version(tensor->uop_logical, version) &&
-        !assign_chain_contains_version(tensor->uop_physical, version))
-      continue;
-    if (!best || tensor->order > best->order) best = tensor;
-  }
-  return best;
-}
-
 PolyDevice poly_tensor_resolved_device(PolyCtx *ctx, PolyTensor *tensor) {
   PolyDevice device = tensor ? tensor->device : POLY_DEVICE_AUTO;
   if (device == POLY_DEVICE_AUTO) device = poly_ctx_get_preferred_device(ctx);
@@ -320,12 +284,7 @@ static PolyUOp *lower_tensor(PolyPhysicalizer *p, PolyTensor *tensor);
 
 static PolyUOp *lower_place_source(PolyPhysicalizer *p, PolyTensor *place) {
   if (!p || !place) return NULL;
-  if (place->source && place->source != place) {
-    p->suppress_place_facts++;
-    PolyUOp *ret = lower_tensor(p, place->source);
-    p->suppress_place_facts--;
-    return ret;
-  }
+  if (place->source && place->source != place) return lower_tensor(p, place->source);
 
   PolyDevice source_device = poly_ctx_get_preferred_device(p->ctx);
   if (source_device == POLY_DEVICE_AUTO) source_device = poly_device_default();
@@ -337,43 +296,26 @@ static PolyUOp *lower_place(PolyPhysicalizer *p, PolyTensor *place) {
   PolyDevice target_device = poly_tensor_resolved_device(p->ctx, place);
 
   if (!place->source || place->source == place) {
-    PolyTensor *prev_active = p->active_place;
-    p->active_place = place;
-    PolyUOp *root = poly_tensor_uop(place);
+    /* Explicit re-placement starts from the retained portable graph. Default
+     * execution never calls this path. */
+    PolyUOp *root = place->uop_logical;
     PolyUOp *base = lower_value(p, root, target_device);
-    p->active_place = prev_active;
     if (!base) return NULL;
     PolyUOp *target = ensure_on_device(p->ctx, base, target_device);
     if (!target || !memo_put(p, place->uop_logical, target_device, target)) return NULL;
     return target;
   }
 
-  PolyTensor *prev_active = p->active_place;
-  p->active_place = place;
-
   PolyUOp *target = lower_place_source(p, place);
-  if (!target) {
-    p->active_place = prev_active;
-    return NULL;
-  }
+  if (!target) return NULL;
   target = copy_to_device(p->ctx, target, target_device);
-  if (!target) {
-    p->active_place = prev_active;
-    return NULL;
-  }
+  if (!target) return NULL;
 
-  /* A live realize-map substitution may have installed a current physical
-   * alias for dependencies inside this pending PLACE assignment. Project the
-   * complete assignment-version chain onto the placement-owned target COPY,
-   * then lower that chain as one graph. Rebuilding only the outer STORE leaves
-   * nested STOREs writing the portable source BUFFER instead of the placed
-   * value, which can mutate imported host data and replay an old version. */
-  PolyUOp *effect_root = poly_tensor_uop(place);
+  /* Project the retained logical assignment-version chain onto the explicit
+   * placement-owned target COPY. Realization never feeds a physical alias
+   * back into this compiler. */
+  PolyUOp *effect_root = place->uop_logical;
   PolyUOp *store = find_assign_store_for_after(effect_root);
-  if (!store && effect_root != place->uop_logical) {
-    effect_root = place->uop_logical;
-    store = find_assign_store_for_after(place->uop_logical);
-  }
   if (store) {
     PolyUOp *effect_base = effect_root;
     while (find_assign_store_for_after(effect_base)) effect_base = effect_base->src[0];
@@ -382,17 +324,14 @@ static PolyUOp *lower_place(PolyPhysicalizer *p, PolyTensor *place) {
      * self-containing COPY and reject the cycle; the memo is the placement
      * pass's canonical logical->physical relation. */
     if (!memo_put(p, effect_base, target_device, target)) {
-      p->active_place = prev_active;
       return NULL;
     }
     target = lower_value(p, effect_root, target_device);
     if (!target) {
-      p->active_place = prev_active;
       return NULL;
     }
   }
 
-  p->active_place = prev_active;
   if (!memo_put(p, place->uop_logical, target_device, target)) return NULL;
   return target;
 }
@@ -401,7 +340,9 @@ static PolyUOp *lower_tensor(PolyPhysicalizer *p, PolyTensor *tensor) {
   if (!p || !tensor) return NULL;
   PolyDevice device = poly_tensor_resolved_device(p->ctx, tensor);
   if (tensor->role == POLY_TENSOR_PLACE) return lower_place(p, tensor);
-  PolyUOp *root = poly_tensor_uop(tensor);
+  /* This function is the explicit logical -> physical compiler. Tensor ops
+   * and default realization consume uop_physical directly instead. */
+  PolyUOp *root = tensor->uop_logical;
   PolyUOp *base = lower_contiguous_realized_view(p, root, device);
   if (!base) base = lower_value(p, root, device);
   if (!base) return NULL;
@@ -416,38 +357,16 @@ static PolyUOp *lower_value(PolyPhysicalizer *p, PolyUOp *u, PolyDevice device) 
   if (found) return found;
 
   PolyUOp *result = NULL;
-  PolyTensor *place_fact = p->suppress_place_facts
-                                ? NULL
-                                : poly_tensor_find_current(p->ctx, u, device, POLY_TENSOR_PLACE);
-  if (place_fact && place_fact != p->active_place) {
-    /* A newly-created PLACE can inherit its source's current physical root;
-     * that root still needs the requested placement. A different current
-     * physical root installed by callify is already tinygrad's mapped live
-     * Tensor value and must not replay the retained logical assignment graph. */
-    PolyUOp *source_current = place_fact->source ? poly_tensor_uop(place_fact->source) : NULL;
-    if (place_fact->uop_physical == u && u != source_current) {
-      result = u;
-    } else {
-      result = lower_place(p, place_fact);
-      if (!result) return NULL;
-    }
-  }
-
-  PolyTensor *fact = NULL;
-  if (!result) fact = poly_tensor_find_current(p->ctx, u, device, POLY_TENSOR_VALUE);
-  if (fact && fact->uop_physical && fact->uop_physical != u) {
-    result = lower_value(p, fact->uop_physical, device);
-    if (!result) return NULL;
-  }
 
   if (!result && (u->op == POLY_OP_BUFFER || u->op == POLY_OP_PARAM)) {
     PolyDevice declared = poly_uop_device(u);
-    PolyBuffer *buf = poly_buffer_get(p->ctx, u);
-    if ((declared != POLY_DEVICE_AUTO && placement_devices_share_storage(declared, device)) ||
-        (buf && buf->ptr && buf->device != POLY_DEVICE_AUTO &&
-         placement_devices_share_storage(buf->device, device)))
+    if (declared != POLY_DEVICE_AUTO && placement_devices_share_storage(declared, device))
       result = u;
     else
+      /* Runtime residency does not complete a portable BUFFER's physical IR.
+       * Pinned _frompy keeps an explicit source BUFFER and target DEVICE COPY
+       * (uop/ops.py:747-765); explicit re-placement must likewise publish a
+       * device-bearing occurrence. */
       result = copy_to_device(p->ctx, u, device);
   } else if (!result && (!placement_rebuilds_sources(u) || u->n_src == 0)) {
     result = u;
@@ -455,21 +374,6 @@ static PolyUOp *lower_value(PolyPhysicalizer *p, PolyUOp *u, PolyDevice device) 
     result = u;
   } else if (!result && u->op == POLY_OP_AFTER) {
     PolyUOp *assign_store = find_assign_store_for_after(u);
-    if (assign_store) {
-      /* A saved inner version is no longer an exact tensors_by_uop key after
-       * its PLACE advances to a later assignment.  Before preserving an
-       * ordinary BUFFER destination, establish the owning PLACE's existing
-       * base->COPY memo.  During that recursive lowering active_place prevents
-       * re-entry, and every version retains the same two-source recurrence. */
-      if (!find_assign_store_for_after(u->src[0]) && !p->suppress_place_facts) {
-        PolyTensor *owner = find_place_owner_for_assign_version(p->ctx, u, device);
-        if (owner && owner != p->active_place) {
-          if (!lower_place(p, owner)) return NULL;
-          result = memo_get(p, u, device);
-          if (!result) return NULL;
-        }
-      }
-    }
     if (assign_store && !result) {
       PolyUOp *new_target = lower_assign_target(p, u->src[0], device);
       PolyUOp *value = lower_value(p, assign_store->src[1], device);
@@ -634,15 +538,10 @@ int poly_tensor_physicalize_many(
     PolyCtx *ctx,
     PolyTensor **tensors,
     int n,
-    PolyUOp **out,
-    PolyMap **placement_memo
+    PolyUOp **out
 ) {
   if (!ctx || n < 0 || (n > 0 && (!tensors || !out))) return -1;
   PolyPhysicalizer p = {.ctx = ctx};
-  if (placement_memo) {
-    for (int device = POLY_DEVICE_AUTO + 1; device <= POLY_DEVICE_DISK; device++)
-      p.memo[device] = placement_memo[device];
-  }
   int rc = 0;
   for (int i = 0; i < n; i++) {
     out[i] = (tensors[i] && tensors[i]->uop_logical)
@@ -653,64 +552,6 @@ int poly_tensor_physicalize_many(
       break;
     }
   }
-  if (placement_memo) {
-    for (int device = POLY_DEVICE_AUTO + 1; device <= POLY_DEVICE_DISK; device++)
-      placement_memo[device] = p.memo[device];
-  } else {
-    physicalizer_destroy(&p);
-  }
+  physicalizer_destroy(&p);
   return rc;
-}
-
-void poly_tensor_physicalize_memo_destroy(PolyMap **placement_memo) {
-  if (!placement_memo) return;
-  for (int device = POLY_DEVICE_AUTO + 1; device <= POLY_DEVICE_DISK; device++) {
-    poly_map_destroy(placement_memo[device]);
-    placement_memo[device] = NULL;
-  }
-}
-
-int poly_tensor_placement_audit(
-    PolyCtx *ctx,
-    PolyTensor *selected,
-    PolyUOp *query_current,
-    PolyDevice query_device,
-    PolyPlacementAudit *out
-) {
-  if (!ctx || !selected || !out) return -1;
-  memset(out, 0, sizeof(*out));
-
-  out->selected = selected;
-  out->selected_current = poly_tensor_uop(selected);
-  out->selected_logical = poly_tensor_uop_logical(selected);
-  out->selected_physical = poly_tensor_uop_physical(selected);
-  out->selected_role = selected->role;
-  out->selected_device = poly_tensor_resolved_device(ctx, selected);
-  out->selected_source = selected->source;
-
-  out->query_current = query_current ? query_current : out->selected_current;
-  out->query_device = (query_device == POLY_DEVICE_AUTO) ? out->selected_device : query_device;
-  if (!out->query_current || out->query_device == POLY_DEVICE_AUTO) return -1;
-
-  out->place_fact =
-      poly_tensor_find_current(ctx, out->query_current, out->query_device, POLY_TENSOR_PLACE);
-  out->value_fact =
-      poly_tensor_find_current(ctx, out->query_current, out->query_device, POLY_TENSOR_VALUE);
-
-  /* Match lower_value's fact priority: an active PLACE fact is preferred over
-   * a VALUE fact, and VALUE facts only affect lowering when they carry a
-   * physical/current root distinct from the queried logical root. */
-  if (out->place_fact && out->place_fact != selected) {
-    out->matched_fact = out->place_fact;
-    out->matched_role = POLY_TENSOR_PLACE;
-  } else if (out->value_fact && out->value_fact->uop_physical &&
-             out->value_fact->uop_physical != out->query_current) {
-    out->matched_fact = out->value_fact;
-    out->matched_role = POLY_TENSOR_VALUE;
-  } else {
-    out->matched_role = (PolyTensorRole)-1;
-  }
-
-  out->physical_root = poly_tensor_physicalize(ctx, selected);
-  return out->physical_root ? 0 : -1;
 }

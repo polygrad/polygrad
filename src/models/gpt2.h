@@ -18,8 +18,8 @@ typedef struct {
 } GPT2Config;
 
 GPT2Config poly_gpt2_config_default(void);
-PolyInstance *poly_gpt2(const GPT2Config *cfg);
-PolyInstance *poly_gpt2_from_json(const char *json, int len);
+PolyInstance *poly_gpt2(const GPT2Config *cfg, PolyDevice device);
+PolyInstance *poly_gpt2_from_json(const char *json, int len, PolyDevice device);
 
 #ifdef __cplusplus
 }

@@ -28,11 +28,12 @@ typedef struct {
 } Qwen3Config;
 
 Qwen3Config poly_qwen3_config_default(void);
-PolyInstance *poly_qwen3(const Qwen3Config *cfg);
+PolyInstance *poly_qwen3(const Qwen3Config *cfg, PolyDevice device);
 PolyInstance *poly_qwen3_from_gguf_decoded(
     const PolyGgufDecoded *gguf,
     int batch_size,
-    int max_seq_len
+    int max_seq_len,
+    PolyDevice device
 );
 
 #ifdef __cplusplus

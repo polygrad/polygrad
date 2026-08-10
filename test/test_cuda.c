@@ -336,19 +336,22 @@ static void select_cuda_for_cuda_phase(PolyCtx *ctx) {
 
 TEST_BACKEND(cuda, tensor_realize_cuda_lazy_opens_backend_without_availability_probe) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *a = poly_buffer_f32(ctx, 3);
   float input[3] = {1.0f, 2.0f, 3.0f};
-  /* Exercise the same creation AFTER dependency as pinned PYTHON->CPU before
-   * the compute and CPU->CUDA->CPU transfers. */
-  poly_buffer_set(ctx, a, input, sizeof(input), POLY_DEVICE_HOST);
-
-  PolyTensor *at = poly_tensor_create(ctx, a, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  int64_t shape[1] = {3};
+  /* Pinned _frompy creates a deviceful source BUFFER followed by explicit
+   * target COPYs (uop/ops.py:747-765). Exercise that Tensor construction path
+   * instead of wrapping a logical-only raw BUFFER. */
+  PolyTensor *host =
+      poly_tensor_from_host(ctx, input, sizeof(input), POLY_FLOAT32, shape, 1);
+  PolyTensor *at = poly_tensor_to_device(ctx, host, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(host);
   ASSERT_NOT_NULL(at);
   PolyTensor *cuda_a = poly_tensor_to_device(ctx, at, POLY_DEVICE_CUDA);
   ASSERT_NOT_NULL(cuda_a);
-  PolyUOp *add = poly_alu2(ctx, POLY_OP_ADD, poly_tensor_uop(cuda_a), poly_const_float(ctx, 1.0f));
-  ASSERT_NOT_NULL(add);
-  PolyTensor *bt = poly_tensor_create(ctx, add, POLY_TENSOR_VALUE, POLY_DEVICE_CUDA);
+  int f32 = poly_dtype_id_by_name("float32");
+  PolyTensor *one = poly_tensor_const_float_by_id(ctx, 1.0f, f32, POLY_DEVICE_CUDA);
+  PolyTensor *bt = poly_tensor_alu2(ctx, POLY_OP_ADD, cuda_a, one);
+  ASSERT_NOT_NULL(one);
   ASSERT_NOT_NULL(bt);
 
   PolyTensor *out = NULL;
@@ -381,25 +384,20 @@ TEST_BACKEND(cuda, placed_host_gather_memory_plan_keeps_cuda_staging) {
   float x_data[] = {1.0f, 2.0f, 3.0f, 4.0f};
   int32_t index_data[] = {0, 0, 1, 0};
   int64_t shape[] = {2, 2};
-  PolyUOp *x = poly_buffer_from_host(
-      ctx, x_data, sizeof(x_data), poly_dtype_id_by_name("float32"), shape, 2
-  );
-  PolyUOp *index = poly_buffer_from_host(
-      ctx, index_data, sizeof(index_data), poly_dtype_id_by_name("int32"), shape, 2
-  );
-  ASSERT_NOT_NULL(x);
-  ASSERT_NOT_NULL(index);
-
-  PolyTensor *x_cpu = poly_tensor_create(ctx, x, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
-  PolyTensor *index_cpu = poly_tensor_create(ctx, index, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *x_host =
+      poly_tensor_from_host(ctx, x_data, sizeof(x_data), POLY_FLOAT32, shape, 2);
+  PolyTensor *index_host =
+      poly_tensor_from_host(ctx, index_data, sizeof(index_data), POLY_INT32, shape, 2);
+  ASSERT_NOT_NULL(x_host);
+  ASSERT_NOT_NULL(index_host);
+  PolyTensor *x_cpu = poly_tensor_to_device(ctx, x_host, POLY_DEVICE_CPU);
+  PolyTensor *index_cpu = poly_tensor_to_device(ctx, index_host, POLY_DEVICE_CPU);
   PolyTensor *x_cuda = poly_tensor_to_device(ctx, x_cpu, POLY_DEVICE_CUDA);
   PolyTensor *index_cuda = poly_tensor_to_device(ctx, index_cpu, POLY_DEVICE_CUDA);
   ASSERT_NOT_NULL(x_cuda);
   ASSERT_NOT_NULL(index_cuda);
 
-  PolyUOp *gathered = poly_gather_dim(ctx, poly_tensor_uop(x_cuda), 1, poly_tensor_uop(index_cuda));
-  ASSERT_NOT_NULL(gathered);
-  PolyTensor *result = poly_tensor_create(ctx, gathered, POLY_TENSOR_VALUE, POLY_DEVICE_CUDA);
+  PolyTensor *result = poly_tensor_gather_dim(ctx, x_cuda, 1, index_cuda);
   ASSERT_NOT_NULL(result);
 
   select_cuda_for_cuda_phase(ctx);
@@ -878,15 +876,16 @@ TEST_BACKEND(cuda, tensor_place_computed_expression_to_cuda_e2e) {
   SKIP_IF_NO_CUDA();
 
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *a = poly_buffer_f32(ctx, 3);
   float input[3] = {1.0f, 2.0f, 3.0f};
-  poly_buffer_set(ctx, a, input, sizeof(input), POLY_DEVICE_CPU);
-
-  PolyTensor *at = poly_tensor_create(ctx, a, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  int64_t shape[1] = {3};
+  int f32 = poly_dtype_id_by_name("float32");
+  PolyTensor *host =
+      poly_tensor_from_host(ctx, input, sizeof(input), POLY_FLOAT32, shape, 1);
+  PolyTensor *at = poly_tensor_to_device(ctx, host, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(at);
-  PolyUOp *mul = poly_alu2(ctx, POLY_OP_MUL, poly_tensor_uop(at), poly_const_float(ctx, 2.0f));
-  ASSERT_NOT_NULL(mul);
-  PolyTensor *mt = poly_tensor_create(ctx, mul, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *two = poly_tensor_const_float_by_id(ctx, 2.0f, f32, POLY_DEVICE_CPU);
+  PolyTensor *mt = poly_tensor_alu2(ctx, POLY_OP_MUL, at, two);
+  ASSERT_NOT_NULL(two);
   ASSERT_NOT_NULL(mt);
   PolyTensor *cuda_t = poly_tensor_to_device(ctx, mt, POLY_DEVICE_CUDA);
   ASSERT_NOT_NULL(cuda_t);
@@ -917,8 +916,9 @@ TEST_BACKEND(cuda, device_less_constant_copy_runs_producer_before_transfer) {
 
   PolyUOp *ones = poly_full(ctx, (int64_t[]){4}, 1, 1.0);
   PolyUOp *contiguous = poly_contiguous(ctx, ones);
-  PolyTensor *gradient =
-      poly_tensor_create(ctx, contiguous, POLY_TENSOR_VALUE, POLY_DEVICE_CUDA);
+  PolyTensor *gradient = poly_tensor_create_with_roots(
+      ctx, contiguous, NULL, POLY_TENSOR_VALUE, POLY_DEVICE_CUDA
+  );
   ASSERT_NOT_NULL(ones);
   ASSERT_NOT_NULL(contiguous);
   ASSERT_NOT_NULL(gradient);
@@ -951,15 +951,16 @@ TEST_BACKEND(cuda, tensor_place_computed_expression_cuda_cpu_roundtrip_e2e) {
   SKIP_IF_NO_CUDA();
 
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *a = poly_buffer_f32(ctx, 3);
   float input[3] = {1.0f, 2.0f, 3.0f};
-  poly_buffer_set(ctx, a, input, sizeof(input), POLY_DEVICE_CPU);
-
-  PolyTensor *at = poly_tensor_create(ctx, a, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  int64_t shape[1] = {3};
+  int f32 = poly_dtype_id_by_name("float32");
+  PolyTensor *host =
+      poly_tensor_from_host(ctx, input, sizeof(input), POLY_FLOAT32, shape, 1);
+  PolyTensor *at = poly_tensor_to_device(ctx, host, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(at);
-  PolyUOp *add = poly_alu2(ctx, POLY_OP_ADD, poly_tensor_uop(at), poly_const_float(ctx, 1.0f));
-  ASSERT_NOT_NULL(add);
-  PolyTensor *xt = poly_tensor_create(ctx, add, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *one = poly_tensor_const_float_by_id(ctx, 1.0f, f32, POLY_DEVICE_CPU);
+  PolyTensor *xt = poly_tensor_alu2(ctx, POLY_OP_ADD, at, one);
+  ASSERT_NOT_NULL(one);
   ASSERT_NOT_NULL(xt);
   PolyTensor *cuda_t = poly_tensor_to_device(ctx, xt, POLY_DEVICE_CUDA);
   ASSERT_NOT_NULL(cuda_t);
@@ -1039,7 +1040,7 @@ static PolyInstance *make_test_mlp(int n_in, int n_out) {
       "\"loss\":\"mse\",\"batch_size\":1,\"seed\":42}",
       n_in, n_out
   );
-  return poly_mlp_from_json(spec, (int)strlen(spec));
+  return poly_mlp_from_json(spec, (int)strlen(spec), POLY_DEVICE_AUTO);
 }
 
 TEST_BACKEND(cuda, large_mlp_train_cuda_codegen_no_wide_f32_vectors) {
@@ -1492,14 +1493,13 @@ TEST_BACKEND(cuda, instance_host_write_after_set_device_reacquire_updates_cuda_i
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
 
-  PolyUOp *x_buf = poly_buffer_f32(ctx, 4);
-  ASSERT_NOT_NULL(x_buf);
-  PolyTensor *x = poly_tensor_create(ctx, x_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  int64_t shape[1] = {4};
+  int f32 = poly_dtype_id_by_name("float32");
+  PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(x);
-
-  PolyUOp *one = poly_const_float(ctx, 1.0);
-  PolyUOp *sum = poly_alu2(ctx, POLY_OP_ADD, poly_tensor_uop(x), one);
-  PolyTensor *out = poly_tensor_create(ctx, sum, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *one = poly_tensor_const_float_by_id(ctx, 1.0, f32, POLY_DEVICE_CPU);
+  PolyTensor *out = poly_tensor_alu2(ctx, POLY_OP_ADD, x, one);
+  ASSERT_NOT_NULL(one);
   ASSERT_NOT_NULL(out);
 
   const char *binding_names[] = {"x", "output"};
@@ -1564,7 +1564,7 @@ TEST_BACKEND(cuda, instance_cuda_large_mlp_train_no_wide_vector_types) {
 
   const char *spec = "{\"layers\":[128,256,64],\"activation\":\"relu\",\"bias\":true,"
                      "\"loss\":\"mse\",\"batch_size\":32,\"seed\":42}";
-  PolyInstance *inst = poly_mlp_from_json(spec, (int)strlen(spec));
+  PolyInstance *inst = poly_mlp_from_json(spec, (int)strlen(spec), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
   ASSERT_INT_EQ(poly_instance_set_device(inst, POLY_DEVICE_CUDA), 0);
   ASSERT_INT_EQ(
@@ -1595,7 +1595,7 @@ TEST_BACKEND(cuda, instance_cuda_adam_train_lazily_created_state_stays_on_cuda) 
 
   const char *spec = "{\"layers\":[2,4,1],\"activation\":\"relu\",\"bias\":true,"
                      "\"loss\":\"mse\",\"batch_size\":1,\"seed\":42}";
-  PolyInstance *inst = poly_mlp_from_json(spec, (int)strlen(spec));
+  PolyInstance *inst = poly_mlp_from_json(spec, (int)strlen(spec), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   ASSERT_INT_EQ(poly_instance_set_device(inst, POLY_DEVICE_CUDA), 0);

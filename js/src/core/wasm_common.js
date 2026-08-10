@@ -209,7 +209,6 @@ function createWasmCoreFromModule(Module, device) {
     'bufferOwnedBytes',
     'bufferOwnedCurrentBytes',
     'bufferOwnedSourceBytes',
-    'tensorEntries',
     'tensorRecords',
     'registryEntries',
     'entrypointEntries',
@@ -229,7 +228,7 @@ function createWasmCoreFromModule(Module, device) {
   ]
 
   function readCtxStats(ctx) {
-    const ptr = Module._malloc(168)
+    const ptr = Module._malloc(160)
     try {
       const rc = Module._poly_ctx_stats(ctx, ptr)
       if (rc !== 0) throw new Error('poly_ctx_stats failed (rc=' + rc + ')')
@@ -244,11 +243,11 @@ function createWasmCoreFromModule(Module, device) {
         const hi = view.getUint32(ptr + offset + 4, true)
         return hi * 0x100000000 + lo
       }
-      out.globalOps = readU64(128)
-      out.globalMem = readU64(136)
-      out.timeSumS = view.getFloat64(ptr + 144, true)
-      out.kernelCount = readU64(152)
-      out.memUsed = readU64(160)
+      out.globalOps = readU64(120)
+      out.globalMem = readU64(128)
+      out.timeSumS = view.getFloat64(ptr + 136, true)
+      out.kernelCount = readU64(144)
+      out.memUsed = readU64(152)
       return out
     } finally {
       Module._free(ptr)
@@ -878,8 +877,6 @@ function createWasmCoreFromModule(Module, device) {
     poly_device_name: (device) => coreDeviceName(device),
     poly_device_is_host_addressable: (device) =>
       Boolean(Module._poly_device_is_host_addressable(device)),
-    poly_tensor_create: (ctx, uop, role, device) =>
-      Module._poly_tensor_create(ctx, uop, role, device),
     poly_tensor_custom_kernel: (ctx, body, inputs) => {
       const n = inputs.length
       if (n <= 0) return null
@@ -1560,7 +1557,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 47
+  const EXPECTED_ABI = 49
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(
@@ -1573,6 +1570,33 @@ function createWasmCoreFromModule(Module, device) {
   const ctx = ffi.poly_ctx_new()
   if (Module._poly_ctx_set_preferred_device) {
     Module._poly_ctx_set_preferred_device(ctx, deviceId)
+  }
+
+  /* WebGPU startup is asynchronous, while Instance construction is graph and
+   * package construction and remains synchronous. Keep set_device's real bulk
+   * migration semantics: defer only the call, then run it exactly once after
+   * the async device exists and before the first device-facing operation. */
+  const pendingInstanceDevices = new Set()
+  function configureInstanceDevice(inst) {
+    if (!inst) return null
+    if (deviceName === 'webgpu') {
+      pendingInstanceDevices.add(inst)
+      return inst
+    }
+    if (Module._poly_instance_set_device(inst, deviceId) !== 0) {
+      Module._poly_instance_free(inst)
+      throw new Error('polygrad: set_device failed for device ' + deviceName)
+    }
+    return inst
+  }
+
+  async function ensureInstanceDevice(inst) {
+    if (!inst || !pendingInstanceDevices.has(inst)) return
+    await ensureWebGPU()
+    if (Module._poly_instance_set_device(inst, deviceId) !== 0) {
+      throw new Error('polygrad: set_device failed for device ' + deviceName)
+    }
+    pendingInstanceDevices.delete(inst)
   }
 
   // --- Instance API ---
@@ -1588,50 +1612,37 @@ function createWasmCoreFromModule(Module, device) {
       const inst = Module._poly_instance_from_ir(irPtr, irBytes.length, weightsPtr, weightsLen)
       Module._free(irPtr)
       if (weightsPtr) Module._free(weightsPtr)
-      if (inst && Module._poly_instance_set_device(inst, deviceId) !== 0) {
-        Module._poly_instance_free(inst)
-        throw new Error('polygrad: set_device failed for device ' + deviceName)
-      }
-      return inst || null
+      return configureInstanceDevice(inst)
     },
 
     mlp(specJson) {
       const bytes = new TextEncoder().encode(specJson)
       const specPtr = allocBytes(bytes)
-      const inst = Module._poly_mlp_from_json(specPtr, bytes.length)
+      const inst = Module._poly_mlp_from_json(specPtr, bytes.length, deviceId)
       Module._free(specPtr)
-      if (inst && Module._poly_instance_set_device(inst, deviceId) !== 0) {
-        Module._poly_instance_free(inst)
-        throw new Error('polygrad: set_device failed for device ' + deviceName)
-      }
-      return inst || null
+      return configureInstanceDevice(inst)
     },
 
     tabm(specJson) {
       const bytes = new TextEncoder().encode(specJson)
       const specPtr = allocBytes(bytes)
-      const inst = Module._poly_tabm_instance(specPtr, bytes.length)
+      const inst = Module._poly_tabm_instance(specPtr, bytes.length, deviceId)
       Module._free(specPtr)
-      if (inst && Module._poly_instance_set_device(inst, deviceId) !== 0) {
-        Module._poly_instance_free(inst)
-        throw new Error('polygrad: set_device failed for device ' + deviceName)
-      }
-      return inst || null
+      return configureInstanceDevice(inst)
     },
 
     nam(specJson) {
       const bytes = new TextEncoder().encode(specJson)
       const specPtr = allocBytes(bytes)
-      const inst = Module._poly_nam_instance(specPtr, bytes.length)
+      const inst = Module._poly_nam_instance(specPtr, bytes.length, deviceId)
       Module._free(specPtr)
-      if (inst && Module._poly_instance_set_device(inst, deviceId) !== 0) {
-        Module._poly_instance_free(inst)
-        throw new Error('polygrad: set_device failed for device ' + deviceName)
-      }
-      return inst || null
+      return configureInstanceDevice(inst)
     },
 
-    free(instPtr) { Module._poly_instance_free(instPtr) },
+    free(instPtr) {
+      pendingInstanceDevices.delete(instPtr)
+      Module._poly_instance_free(instPtr)
+    },
     paramCount(instPtr) { return Module._poly_instance_param_count(instPtr) },
     paramName(instPtr, i) { return readCString(Module._poly_instance_param_name(instPtr, i)) },
     paramShape(instPtr, i) {
@@ -1645,19 +1656,21 @@ function createWasmCoreFromModule(Module, device) {
         return new Float32Array(heapF32().buffer.slice(dataPtr, dataPtr + numel * 4))
       }
       if (deviceName === 'webgpu' && Module.ccall) {
-        const nbytes = shapeNumel(this.paramShape(instPtr, i)) * 4
-        if (nbytes <= 0) return Promise.resolve(new Float32Array(0))
-        const dst = Module._malloc(nbytes)
-        return Module.ccall(
-          'poly_instance_readback_param',
-          'number',
-          ['number', 'number', 'number', 'number'],
-          [instPtr, i, dst, nbytes],
-          { async: true }
-        ).then(rc => {
-          if (rc !== 0) return null
-          return new Float32Array(heapF32().buffer.slice(dst, dst + nbytes))
-        }).finally(() => Module._free(dst))
+        return ensureInstanceDevice(instPtr).then(() => {
+          const nbytes = shapeNumel(this.paramShape(instPtr, i)) * 4
+          if (nbytes <= 0) return new Float32Array(0)
+          const dst = Module._malloc(nbytes)
+          return Module.ccall(
+            'poly_instance_readback_param',
+            'number',
+            ['number', 'number', 'number', 'number'],
+            [instPtr, i, dst, nbytes],
+            { async: true }
+          ).then(rc => {
+            if (rc !== 0) return null
+            return new Float32Array(heapF32().buffer.slice(dst, dst + nbytes))
+          }).finally(() => Module._free(dst))
+        })
       }
       const dataPtr = Module._poly_instance_param_data(instPtr, i, _scratchNumelPtr)
       return read(dataPtr)
@@ -1688,19 +1701,21 @@ function createWasmCoreFromModule(Module, device) {
         return new Float32Array(heapF32().buffer.slice(dataPtr, dataPtr + numel * 4))
       }
       if (deviceName === 'webgpu' && Module.ccall) {
-        const nbytes = shapeNumel(this.bufShape(instPtr, i)) * 4
-        if (nbytes <= 0) return Promise.resolve(new Float32Array(0))
-        const dst = Module._malloc(nbytes)
-        return Module.ccall(
-          'poly_instance_readback_buf',
-          'number',
-          ['number', 'number', 'number', 'number'],
-          [instPtr, i, dst, nbytes],
-          { async: true }
-        ).then(rc => {
-          if (rc !== 0) return null
-          return new Float32Array(heapF32().buffer.slice(dst, dst + nbytes))
-        }).finally(() => Module._free(dst))
+        return ensureInstanceDevice(instPtr).then(() => {
+          const nbytes = shapeNumel(this.bufShape(instPtr, i)) * 4
+          if (nbytes <= 0) return new Float32Array(0)
+          const dst = Module._malloc(nbytes)
+          return Module.ccall(
+            'poly_instance_readback_buf',
+            'number',
+            ['number', 'number', 'number', 'number'],
+            [instPtr, i, dst, nbytes],
+            { async: true }
+          ).then(rc => {
+            if (rc !== 0) return null
+            return new Float32Array(heapF32().buffer.slice(dst, dst + nbytes))
+          }).finally(() => Module._free(dst))
+        })
       }
       const dataPtr = Module._poly_instance_buf_data(instPtr, i, _scratchNumelPtr)
       return read(dataPtr)
@@ -1708,18 +1723,20 @@ function createWasmCoreFromModule(Module, device) {
     exportWeights(instPtr, flags) {
       const exportFlags = flags == null ? 3 : flags
       if (deviceName === 'webgpu' && Module.ccall) {
-        return Module.ccall(
-          'poly_instance_export_weights_ex',
-          'number',
-          ['number', 'number', 'number'],
-          [instPtr, _scratchLenPtr, exportFlags],
-          { async: true }
-        ).then(bytesPtr => {
-          if (!bytesPtr) return null
-          const len = heap32()[_scratchLenPtr >> 2]
-          const bytes = new Uint8Array(heapU8().buffer.slice(bytesPtr, bytesPtr + len))
-          Module._free(bytesPtr)
-          return bytes
+        return ensureInstanceDevice(instPtr).then(() => {
+          return Module.ccall(
+            'poly_instance_export_weights_ex',
+            'number',
+            ['number', 'number', 'number'],
+            [instPtr, _scratchLenPtr, exportFlags],
+            { async: true }
+          ).then(bytesPtr => {
+            if (!bytesPtr) return null
+            const len = heap32()[_scratchLenPtr >> 2]
+            const bytes = new Uint8Array(heapU8().buffer.slice(bytesPtr, bytesPtr + len))
+            Module._free(bytesPtr)
+            return bytes
+          })
         })
       }
       const bytesPtr = Module._poly_instance_export_weights_ex(instPtr, _scratchLenPtr, exportFlags)
@@ -1746,18 +1763,20 @@ function createWasmCoreFromModule(Module, device) {
     saveBundle(instPtr, flags) {
       const exportFlags = flags == null ? 3 : flags
       if (deviceName === 'webgpu' && Module.ccall) {
-        return Module.ccall(
-          'poly_instance_save_bundle_ex',
-          'number',
-          ['number', 'number', 'number'],
-          [instPtr, _scratchLenPtr, exportFlags],
-          { async: true }
-        ).then(bytesPtr => {
-          if (!bytesPtr) return null
-          const len = heap32()[_scratchLenPtr >> 2]
-          const bytes = new Uint8Array(heapU8().buffer.slice(bytesPtr, bytesPtr + len))
-          Module._free(bytesPtr)
-          return bytes
+        return ensureInstanceDevice(instPtr).then(() => {
+          return Module.ccall(
+            'poly_instance_save_bundle_ex',
+            'number',
+            ['number', 'number', 'number'],
+            [instPtr, _scratchLenPtr, exportFlags],
+            { async: true }
+          ).then(bytesPtr => {
+            if (!bytesPtr) return null
+            const len = heap32()[_scratchLenPtr >> 2]
+            const bytes = new Uint8Array(heapU8().buffer.slice(bytesPtr, bytesPtr + len))
+            Module._free(bytesPtr)
+            return bytes
+          })
         })
       }
       const bytesPtr = Module._poly_instance_save_bundle_ex(instPtr, _scratchLenPtr, exportFlags)
@@ -1771,11 +1790,7 @@ function createWasmCoreFromModule(Module, device) {
       const ptr = allocBytes(bytes)
       const inst = Module._poly_instance_from_bundle(ptr, bytes.length)
       Module._free(ptr)
-      if (inst && Module._poly_instance_set_device(inst, deviceId) !== 0) {
-        Module._poly_instance_free(inst)
-        throw new Error('polygrad: set_device failed for device ' + deviceName)
-      }
-      return inst || null
+      return configureInstanceDevice(inst)
     },
 
     fromSinks(ctxPtr, names, sinks) {
@@ -1791,11 +1806,7 @@ function createWasmCoreFromModule(Module, device) {
           heap32()[(sinksPtr >> 2) + i] = sinks[i] || 0
         }
         const inst = Module._poly_instance_from_sinks(ctxPtr, namesPtr, sinksPtr, n)
-        if (inst && Module._poly_instance_set_device(inst, deviceId) !== 0) {
-          Module._poly_instance_free(inst)
-          throw new Error('polygrad: set_device failed for device ' + deviceName)
-        }
-        return inst || null
+        return configureInstanceDevice(inst)
       } finally {
         for (const p of namePtrs) Module._free(p)
         Module._free(namesPtr)
@@ -1848,11 +1859,7 @@ function createWasmCoreFromModule(Module, device) {
           entryOutputsPtr, entryOutputCountsPtr, entryObjectivesPtr, entryFlagsPtr,
           entries.length, 0, 0
         )
-        if (inst && Module._poly_instance_set_device(inst, deviceId) !== 0) {
-          Module._poly_instance_free(inst)
-          throw new Error('polygrad: set_device failed for device ' + deviceName)
-        }
-        return inst || null
+        return configureInstanceDevice(inst)
       } finally {
         for (const p of stringPtrs) Module._free(p)
         Module._free(bindingNamesPtr)
@@ -1884,26 +1891,18 @@ function createWasmCoreFromModule(Module, device) {
       }
       const inst = Module._poly_hf_load(
         cfgPtr, configBytes.length, ptrArr, lenArr, n,
-        maxBatch || 1, maxSeqLen || 0)
+        maxBatch || 1, maxSeqLen || 0, deviceId)
       for (const fp of filePtrs) Module._free(fp)
       Module._free(ptrArr); Module._free(lenArr); Module._free(cfgPtr)
-      if (inst && Module._poly_instance_set_device(inst, deviceId) !== 0) {
-        Module._poly_instance_free(inst)
-        throw new Error('polygrad: set_device failed')
-      }
-      return inst || null
+      return configureInstanceDevice(inst)
     },
 
     loadGGUF(ggufBytes, maxBatch, maxSeqLen) {
       const ptr = allocBytes(ggufBytes)
       const inst = Module._poly_gguf_load(
-        ptr, BigInt(ggufBytes.length), maxBatch || 1, maxSeqLen || 0)
+        ptr, BigInt(ggufBytes.length), maxBatch || 1, maxSeqLen || 0, deviceId)
       Module._free(ptr)
-      if (inst && Module._poly_instance_set_device(inst, deviceId) !== 0) {
-        Module._poly_instance_free(inst)
-        throw new Error('polygrad: set_device failed')
-      }
-      return inst || null
+      return configureInstanceDevice(inst)
     },
 
     importLastError() {
@@ -1987,13 +1986,15 @@ function createWasmCoreFromModule(Module, device) {
         Module._free(bindingPtr)
       }
       if (deviceName === 'webgpu' && Module.ccall) {
-        return Module.ccall(
-          'poly_instance_forward',
-          'number',
-          ['number', 'number', 'number'],
-          [instPtr, bindingPtr, n],
-          { async: true }
-        ).finally(cleanup)
+        return ensureInstanceDevice(instPtr).then(() => {
+          return Module.ccall(
+            'poly_instance_forward',
+            'number',
+            ['number', 'number', 'number'],
+            [instPtr, bindingPtr, n],
+            { async: true }
+          )
+        }).finally(cleanup)
       }
       const rc = Module._poly_instance_forward(instPtr, bindingPtr, n)
       cleanup()
@@ -2027,13 +2028,15 @@ function createWasmCoreFromModule(Module, device) {
         Module._free(bindingPtr)
       }
       if (deviceName === 'webgpu' && Module.ccall) {
-        return Module.ccall(
-          'poly_instance_train_step',
-          'number',
-          ['number', 'number', 'number', 'number'],
-          [instPtr, bindingPtr, n, lossPtr],
-          { async: true }
-        ).then(readLoss).finally(cleanup)
+        return ensureInstanceDevice(instPtr).then(() => {
+          return Module.ccall(
+            'poly_instance_train_step',
+            'number',
+            ['number', 'number', 'number', 'number'],
+            [instPtr, bindingPtr, n, lossPtr],
+            { async: true }
+          )
+        }).then(readLoss).finally(cleanup)
       }
       const rc = Module._poly_instance_train_step(instPtr, bindingPtr, n, lossPtr)
       const loss = readLoss(rc)

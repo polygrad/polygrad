@@ -225,7 +225,7 @@ TEST(hf, gpt2_build_tiny) {
       .norm_eps = 1e-5f
   };
 
-  PolyInstance *inst = poly_gpt2(&cfg);
+  PolyInstance *inst = poly_gpt2(&cfg, POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   /* Check param count: wte + wpe + 1 layer (12 params) + ln_f (2) = 16 */
@@ -274,7 +274,7 @@ TEST(hf, gpt2_build_multi_layer) {
       .norm_eps = 1e-5f
   };
 
-  PolyInstance *inst = poly_gpt2(&cfg);
+  PolyInstance *inst = poly_gpt2(&cfg, POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   /* 2 (wte+wpe) + 3*12 (layers) + 2 (ln_f) = 40 params */
@@ -307,7 +307,7 @@ TEST(hf, qwen3_build_tiny_staged) {
   cfg.batch_size = 1;
   cfg.qk_norm = 0;
 
-  PolyInstance *inst = poly_qwen3(&cfg);
+  PolyInstance *inst = poly_qwen3(&cfg, POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
   ASSERT_INT_EQ(poly_ctx_named_count(poly_instance_ctx(inst)), 0);
 
@@ -349,7 +349,8 @@ TEST(hf, hf_load_tiny_gpt2) {
   const uint8_t *files[] = {file};
   int64_t lens[] = {file_len};
 
-  PolyInstance *inst = poly_hf_load(config, (int)strlen(config), files, lens, 1, 1, 8);
+  PolyInstance *inst =
+      poly_hf_load(config, (int)strlen(config), files, lens, 1, 1, 8, POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   /* Verify wte.weight was loaded */
@@ -388,7 +389,8 @@ TEST(hf, hf_load_ignores_attn_bias) {
   int64_t lens[] = {file_len};
 
   /* Should not crash */
-  PolyInstance *inst = poly_hf_load(config, (int)strlen(config), files, lens, 1, 1, 8);
+  PolyInstance *inst =
+      poly_hf_load(config, (int)strlen(config), files, lens, 1, 1, 8, POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   poly_instance_free(inst);
@@ -532,7 +534,7 @@ TEST(hf, gpt2_forward_e2e) {
       .norm_eps = 1e-5f
   };
 
-  PolyInstance *inst = poly_gpt2(&cfg);
+  PolyInstance *inst = poly_gpt2(&cfg, POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   /* Initialize weights with small random values */
@@ -610,7 +612,7 @@ TEST(hf, gpt2_training_loss_decreases) {
       .norm_eps = 1e-5f
   };
 
-  PolyInstance *inst = poly_gpt2(&cfg);
+  PolyInstance *inst = poly_gpt2(&cfg, POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   /* Initialize weights with small random values */
@@ -670,7 +672,8 @@ TEST(hf, gpt2_training_loss_decreases) {
 
 TEST(hf, hf_load_unsupported_type) {
   const char *config = "{\"model_type\":\"llama\",\"vocab_size\":100}";
-  PolyInstance *inst = poly_hf_load(config, (int)strlen(config), NULL, NULL, 0, 1, 64);
+  PolyInstance *inst =
+      poly_hf_load(config, (int)strlen(config), NULL, NULL, 0, 1, 64, POLY_DEVICE_AUTO);
   ASSERT_TRUE(inst == NULL);
   PASS();
 }

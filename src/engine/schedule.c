@@ -7527,6 +7527,11 @@ static int poly_schedule_infer_call_estimates(
   PolyUOp *call = poly_schedule_call(sched, call_index);
   if (!call) return -1;
 
+  /* Pinned tinygrad estimate_uop returns empty Estimates for SLICE/view
+   * calls (engine/realize.py:42-52). A view changes runtime alias metadata;
+   * it does not read or write tensor bytes. */
+  if (poly_call_is_view(call)) return 0;
+
   if (poly_call_is_copy(call)) {
     const PolyCallIO *io = poly_schedule_call_io(sched, call_index);
     if (!io || io->n_args < 1) return -1;

@@ -50,7 +50,7 @@ GPT2Config poly_gpt2_config_default(void) {
 
 /* GPT-2 Builder */
 
-PolyInstance *poly_gpt2(const GPT2Config *cfg) {
+PolyInstance *poly_gpt2(const GPT2Config *cfg, PolyDevice device) {
   if (!cfg || cfg->n_layer < 1 || cfg->n_embd < 1 || cfg->vocab_size < 1) return NULL;
 
   int V = cfg->vocab_size;
@@ -69,6 +69,7 @@ PolyInstance *poly_gpt2(const GPT2Config *cfg) {
 
   PolyCtx *ctx = poly_ctx_new();
   if (!ctx) return NULL;
+  if (device != POLY_DEVICE_AUTO) poly_ctx_set_preferred_device(ctx, device);
   PolyInstanceOptions opts = {
       .own_ctx_on_success = true,
       .own_ctx_on_failure = true,
@@ -90,91 +91,105 @@ PolyInstance *poly_gpt2(const GPT2Config *cfg) {
   if (!pos_tensor) goto fail_pre_build;
 
   /* Token + position embeddings. Keep wte table visible for LM-head tying. */
-  PolyUOp *x_shaped = poly_tensor_uop(x_tensor);
   if (poly_instance_scope_push(inst, "wte") != POLY_STATUS_OK) goto fail_pre_build;
   int64_t wte_shape[] = {V, D};
   PolyTensor *wte_tensor = poly_instance_param(inst, "weight", POLY_FLOAT32, wte_shape, 2);
   if (!wte_tensor) goto fail_pre_build;
   if (poly_instance_scope_pop(inst) != POLY_STATUS_OK) goto fail_pre_build;
-  PolyUOp *wte = poly_tensor_uop(wte_tensor);
-  PolyUOp *tok_emb = poly_embedding_apply(ctx, x_shaped, poly_reshape(ctx, wte, wte_shape, 2));
-  tok_emb = poly_contiguous(ctx, tok_emb);
+  PolyTensor *tok_emb = poly_tensor_embedding_apply(ctx, x_tensor, wte_tensor);
+  tok_emb = poly_tensor_contiguous(ctx, tok_emb);
 
-  PolyUOp *pos_shaped = poly_tensor_uop(pos_tensor);
-  PolyUOp *pos_emb = poly_instance_embedding(inst, "wpe", pos_shaped, T, D);
-  pos_emb = poly_contiguous(ctx, pos_emb);
+  PolyTensor *pos_emb = poly_instance_embedding(inst, "wpe", pos_tensor, T, D);
+  pos_emb = poly_tensor_contiguous(ctx, pos_emb);
 
   int64_t h_shape[] = {B, T, D};
-  PolyUOp *pos_exp = poly_expand(ctx, pos_emb, h_shape, 3);
-  PolyUOp *h = poly_alu2(ctx, POLY_OP_ADD, tok_emb, pos_exp);
-  h = poly_contiguous(ctx, h);
+  PolyTensor *pos_exp = poly_tensor_expand(ctx, pos_emb, h_shape, 3);
+  PolyTensor *h = poly_tensor_alu2(ctx, POLY_OP_ADD, tok_emb, pos_exp);
+  h = poly_tensor_contiguous(ctx, h);
   if (!h) goto fail_pre_build;
 
   /* Causal mask: (T, T) -> (1, 1, T, T) */
-  PolyUOp *mask =
-      poly_contiguous(ctx, poly_reshape(ctx, poly_causal_mask(ctx, T), (int64_t[]){1, 1, T, T}, 4));
+  PolyTensor *mask = poly_tensor_causal_mask(ctx, T);
+  mask = poly_tensor_reshape(ctx, mask, (int64_t[]){1, 1, T, T}, 4);
+  mask = poly_tensor_contiguous(ctx, mask);
   if (!mask) goto fail_pre_build;
 
   for (int i = 0; i < L; i++) {
     char prefix[64];
 
     snprintf(prefix, sizeof(prefix), "h.%d.ln_1", i);
-    PolyUOp *ln1 = poly_contiguous(ctx, poly_instance_layernorm(inst, prefix, h, D, eps));
+    PolyTensor *ln1 = poly_instance_layernorm(inst, prefix, h, D, eps);
+    ln1 = poly_tensor_contiguous(ctx, ln1);
     if (!ln1) goto fail_pre_build;
 
     snprintf(prefix, sizeof(prefix), "h.%d.attn.c_attn", i);
-    PolyUOp *qkv = poly_contiguous(ctx, poly_instance_linear(inst, prefix, ln1, D, 3 * D, true));
+    PolyTensor *qkv = poly_instance_linear(inst, prefix, ln1, D, 3 * D, true);
+    qkv = poly_tensor_contiguous(ctx, qkv);
     if (!qkv) goto fail_pre_build;
 
     int64_t shrink_q[][2] = {{0, B}, {0, T}, {0, D}};
     int64_t shrink_k[][2] = {{0, B}, {0, T}, {D, 2 * D}};
     int64_t shrink_v[][2] = {{0, B}, {0, T}, {2 * D, 3 * D}};
-    PolyUOp *q = poly_contiguous(ctx, poly_shrink(ctx, qkv, shrink_q, 3));
-    PolyUOp *k = poly_contiguous(ctx, poly_shrink(ctx, qkv, shrink_k, 3));
-    PolyUOp *v = poly_contiguous(ctx, poly_shrink(ctx, qkv, shrink_v, 3));
+    PolyTensor *q = poly_tensor_shrink(ctx, qkv, shrink_q, 3);
+    q = poly_tensor_contiguous(ctx, q);
+    PolyTensor *k = poly_tensor_shrink(ctx, qkv, shrink_k, 3);
+    k = poly_tensor_contiguous(ctx, k);
+    PolyTensor *v = poly_tensor_shrink(ctx, qkv, shrink_v, 3);
+    v = poly_tensor_contiguous(ctx, v);
     if (!q || !k || !v) goto fail_pre_build;
 
     int64_t mh[] = {B, T, H, head_dim};
     int64_t perm[] = {0, 2, 1, 3};
-    q = poly_permute(ctx, poly_reshape(ctx, q, mh, 4), perm, 4);
-    k = poly_permute(ctx, poly_reshape(ctx, k, mh, 4), perm, 4);
-    v = poly_permute(ctx, poly_reshape(ctx, v, mh, 4), perm, 4);
+    q = poly_tensor_reshape(ctx, q, mh, 4);
+    q = poly_tensor_permute(ctx, q, perm, 4);
+    k = poly_tensor_reshape(ctx, k, mh, 4);
+    k = poly_tensor_permute(ctx, k, perm, 4);
+    v = poly_tensor_reshape(ctx, v, mh, 4);
+    v = poly_tensor_permute(ctx, v, perm, 4);
+    if (!q || !k || !v) goto fail_pre_build;
 
-    PolyUOp *attn_out = poly_contiguous(ctx, poly_sdpa(ctx, q, k, v, mask, 0));
+    PolyTensor *attn_out = poly_tensor_sdpa(ctx, q, k, v, mask, 0);
+    attn_out = poly_tensor_contiguous(ctx, attn_out);
     if (!attn_out) goto fail_pre_build;
 
-    attn_out = poly_reshape(
-        ctx, poly_permute(ctx, attn_out, (int64_t[]){0, 2, 1, 3}, 4), (int64_t[]){B, T, D}, 3
-    );
+    attn_out = poly_tensor_permute(ctx, attn_out, (int64_t[]){0, 2, 1, 3}, 4);
+    attn_out = poly_tensor_reshape(ctx, attn_out, (int64_t[]){B, T, D}, 3);
 
     snprintf(prefix, sizeof(prefix), "h.%d.attn.c_proj", i);
-    attn_out = poly_contiguous(ctx, poly_instance_linear(inst, prefix, attn_out, D, D, true));
-    h = poly_contiguous(ctx, poly_alu2(ctx, POLY_OP_ADD, h, attn_out));
+    attn_out = poly_instance_linear(inst, prefix, attn_out, D, D, true);
+    attn_out = poly_tensor_contiguous(ctx, attn_out);
+    h = poly_tensor_alu2(ctx, POLY_OP_ADD, h, attn_out);
+    h = poly_tensor_contiguous(ctx, h);
     if (!h) goto fail_pre_build;
 
     snprintf(prefix, sizeof(prefix), "h.%d.ln_2", i);
-    PolyUOp *ln2 = poly_contiguous(ctx, poly_instance_layernorm(inst, prefix, h, D, eps));
+    PolyTensor *ln2 = poly_instance_layernorm(inst, prefix, h, D, eps);
+    ln2 = poly_tensor_contiguous(ctx, ln2);
     if (!ln2) goto fail_pre_build;
 
     snprintf(prefix, sizeof(prefix), "h.%d.mlp.c_fc", i);
-    PolyUOp *ffn = poly_contiguous(ctx, poly_instance_linear(inst, prefix, ln2, D, 4 * D, true));
-    ffn = poly_contiguous(ctx, poly_gelu(ctx, ffn));
+    PolyTensor *ffn = poly_instance_linear(inst, prefix, ln2, D, 4 * D, true);
+    ffn = poly_tensor_contiguous(ctx, ffn);
+    ffn = poly_tensor_gelu(ctx, ffn);
+    ffn = poly_tensor_contiguous(ctx, ffn);
     if (!ffn) goto fail_pre_build;
 
     snprintf(prefix, sizeof(prefix), "h.%d.mlp.c_proj", i);
-    ffn = poly_contiguous(ctx, poly_instance_linear(inst, prefix, ffn, 4 * D, D, true));
-    h = poly_contiguous(ctx, poly_alu2(ctx, POLY_OP_ADD, h, ffn));
+    ffn = poly_instance_linear(inst, prefix, ffn, 4 * D, D, true);
+    ffn = poly_tensor_contiguous(ctx, ffn);
+    h = poly_tensor_alu2(ctx, POLY_OP_ADD, h, ffn);
+    h = poly_tensor_contiguous(ctx, h);
     if (!h) goto fail_pre_build;
   }
 
-  h = poly_contiguous(ctx, poly_instance_layernorm(inst, "ln_f", h, D, eps));
+  h = poly_instance_layernorm(inst, "ln_f", h, D, eps);
+  h = poly_tensor_contiguous(ctx, h);
   if (!h) goto fail_pre_build;
 
-  PolyUOp *logits = poly_linear_apply(ctx, h, poly_reshape(ctx, wte, wte_shape, 2), NULL);
+  PolyTensor *logits = poly_tensor_linear_apply(ctx, h, wte_tensor, NULL);
   if (!logits) goto fail_pre_build;
 
-  PolyTensor *out_tensor = poly_tensor_create(ctx, logits, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
-  if (!out_tensor || poly_instance_output(inst, "output", out_tensor) != POLY_STATUS_OK)
+  if (poly_instance_output(inst, "output", logits) != POLY_STATUS_OK)
     goto fail_pre_build;
   const char *forward_inputs[] = {"x", "positions"};
   const char *forward_outputs[] = {"output"};
@@ -182,11 +197,10 @@ PolyInstance *poly_gpt2(const GPT2Config *cfg) {
       POLY_STATUS_OK)
     goto fail_pre_build;
 
-  PolyUOp *logits_sq = poly_alu2(ctx, POLY_OP_MUL, logits, logits);
+  PolyTensor *logits_sq = poly_tensor_alu2(ctx, POLY_OP_MUL, logits, logits);
   int64_t reduce_all[] = {0, 1, 2};
-  PolyUOp *loss_sum = poly_reduce_axis(ctx, POLY_OP_ADD, logits_sq, reduce_all, 3);
-  PolyUOp *loss_val = poly_reshape(ctx, loss_sum, (int64_t[]){1}, 1);
-  PolyTensor *loss_tensor = poly_tensor_create(ctx, loss_val, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
+  PolyTensor *loss_tensor = poly_tensor_sum(ctx, logits_sq, reduce_all, 3, false);
+  loss_tensor = poly_tensor_reshape(ctx, loss_tensor, (int64_t[]){1}, 1);
   if (!loss_tensor || poly_instance_output(inst, "loss", loss_tensor) != POLY_STATUS_OK)
     goto fail_pre_build;
   const char *loss_inputs[] = {"x", "positions"};
@@ -210,7 +224,7 @@ fail_pre_build:
   return NULL;
 }
 
-PolyInstance *poly_gpt2_from_json(const char *json, int len) {
+PolyInstance *poly_gpt2_from_json(const char *json, int len, PolyDevice device) {
   if (!json || len <= 0) return NULL;
 
   cJSON *root = cJSON_ParseWithLength(json, (size_t)len);
@@ -226,7 +240,7 @@ PolyInstance *poly_gpt2_from_json(const char *json, int len) {
   if ((v = cJSON_GetObjectItem(root, "batch_size")))          cfg.batch_size  = v->valueint;
   if ((v = cJSON_GetObjectItem(root, "layer_norm_epsilon")))  cfg.norm_eps    = (float)v->valuedouble;
 
-  PolyInstance *inst = poly_gpt2(&cfg);
+  PolyInstance *inst = poly_gpt2(&cfg, device);
   cJSON_Delete(root);
   return inst;
 }
@@ -276,7 +290,7 @@ static int gpt2_needs_transpose(
 
 PolyInstance *poly_gpt2_from_hf_decoded(
     const PolyHfDecoded *hf,
-    int max_batch, int max_seq_len)
+    int max_batch, int max_seq_len, PolyDevice device)
 {
   if (!hf || !hf->config) return NULL;
 
@@ -297,7 +311,7 @@ PolyInstance *poly_gpt2_from_hf_decoded(
   if (max_batch > 0) cfg.batch_size = max_batch;
   if (max_seq_len > 0) cfg.max_seq_len = max_seq_len;
 
-  PolyInstance *inst = poly_gpt2(&cfg);
+  PolyInstance *inst = poly_gpt2(&cfg, device);
   if (!inst) return NULL;
 
   PolyBindIndex *idx = poly_bind_index_create(inst);
@@ -342,14 +356,14 @@ PolyInstance *poly_gpt2_from_hf(
     const char *config_json, int config_len,
     const uint8_t **weight_files, const int64_t *weight_lens,
     int n_weight_files,
-    int max_batch, int max_seq_len)
+    int max_batch, int max_seq_len, PolyDevice device)
 {
   PolyHfDecoded *hf = NULL;
   if (poly_hf_decode(config_json, config_len,
                      weight_files, weight_lens, n_weight_files,
                      &hf) != 0 || !hf)
     return NULL;
-  PolyInstance *inst = poly_gpt2_from_hf_decoded(hf, max_batch, max_seq_len);
+  PolyInstance *inst = poly_gpt2_from_hf_decoded(hf, max_batch, max_seq_len, device);
   poly_hf_decoded_free(hf);
   return inst;
 }
@@ -361,7 +375,8 @@ PolyInstance *poly_gpt2_from_hf_decoded_generic(
 {
   return poly_gpt2_from_hf_decoded(hf,
       opts ? opts->max_batch : 0,
-      opts ? opts->max_seq_len : 0);
+      opts ? opts->max_seq_len : 0,
+      opts ? opts->device : POLY_DEVICE_AUTO);
 }
 
 /* GGUF import (model-specific) */
@@ -420,7 +435,7 @@ static const char *gpt2_gguf_map_name(const char *name, char *buf, int buf_size)
 
 PolyInstance *poly_gpt2_from_gguf_decoded(
     const PolyGgufDecoded *gguf,
-    int max_batch, int max_seq_len)
+    int max_batch, int max_seq_len, PolyDevice device)
 {
   if (!gguf) return NULL;
 
@@ -444,7 +459,7 @@ PolyInstance *poly_gpt2_from_gguf_decoded(
   if (max_batch > 0) cfg.batch_size = max_batch;
   if (max_seq_len > 0) cfg.max_seq_len = max_seq_len;
 
-  PolyInstance *inst = poly_gpt2(&cfg);
+  PolyInstance *inst = poly_gpt2(&cfg, device);
   if (!inst) return NULL;
 
   PolyBindIndex *idx = poly_bind_index_create(inst);
@@ -489,12 +504,12 @@ PolyInstance *poly_gpt2_from_gguf_decoded(
 
 PolyInstance *poly_gpt2_from_gguf(
     const uint8_t *data, int64_t len,
-    int max_batch, int max_seq_len)
+    int max_batch, int max_seq_len, PolyDevice device)
 {
   PolyGgufDecoded *gguf = NULL;
   if (poly_gguf_decode(data, len, &gguf) != 0 || !gguf)
     return NULL;
-  PolyInstance *inst = poly_gpt2_from_gguf_decoded(gguf, max_batch, max_seq_len);
+  PolyInstance *inst = poly_gpt2_from_gguf_decoded(gguf, max_batch, max_seq_len, device);
   poly_gguf_decoded_free(gguf);
   return inst;
 }
@@ -506,5 +521,6 @@ PolyInstance *poly_gpt2_from_gguf_decoded_generic(
 {
   return poly_gpt2_from_gguf_decoded(gguf,
       opts ? opts->max_batch : 0,
-      opts ? opts->max_seq_len : 0);
+      opts ? opts->max_seq_len : 0,
+      opts ? opts->device : POLY_DEVICE_AUTO);
 }

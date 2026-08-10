@@ -96,6 +96,14 @@ PolyUOp *poly_reshape(PolyCtx *ctx, PolyUOp *src, int64_t *dims, int ndim) {
   return poly_uop(ctx, POLY_OP_RESHAPE, src->dtype, srcs, 2, poly_arg_none());
 }
 
+PolyUOp *poly_reshape_uop(PolyCtx *ctx, PolyUOp *src, PolyUOp **dims, int ndim) {
+  if (!ctx || !src || !rank_tuple_valid(dims, ndim)) return NULL;
+  PolyUOp *shape = poly_shape_stack(ctx, dims, ndim);
+  if (!shape) return NULL;
+  PolyUOp *srcs[2] = {src, shape};
+  return poly_uop(ctx, POLY_OP_RESHAPE, src->dtype, srcs, 2, poly_arg_none());
+}
+
 PolyUOp *poly_expand(PolyCtx *ctx, PolyUOp *src, int64_t *dims, int ndim) {
   if (!ctx || !src || !rank_tuple_valid(dims, ndim)) return NULL;
   PolyUOp *shape = poly_static_shape_arg(ctx, dims, ndim);

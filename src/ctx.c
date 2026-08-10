@@ -56,7 +56,6 @@ PolyCtx *poly_ctx_new(void) {
   ctx->stats_suppression_depth = 0;
   ctx->shape_cache = poly_map_new(64);
   ctx->buffers = poly_map_new(64);
-  ctx->tensors_by_uop = poly_map_new(64);
   ctx->tensors = NULL;
   ctx->n_tensors = 0;
   ctx->tensors_cap = 0;
@@ -64,8 +63,7 @@ PolyCtx *poly_ctx_new(void) {
   ctx->active_jit_capture = NULL;
   ctx->name_map = poly_map_new(16);
   if (!ctx->arena || !ctx->scratch || !ctx->cse || !ctx->schedule_cache || !ctx->to_program_cache ||
-      !ctx->runtime_cache || !ctx->shape_cache || !ctx->buffers || !ctx->tensors_by_uop ||
-      !ctx->name_map) {
+      !ctx->runtime_cache || !ctx->shape_cache || !ctx->buffers || !ctx->name_map) {
     if (ctx->arena) poly_arena_destroy(ctx->arena);
     if (ctx->scratch) poly_arena_destroy(ctx->scratch);
     if (ctx->cse) poly_map_destroy(ctx->cse);
@@ -74,7 +72,6 @@ PolyCtx *poly_ctx_new(void) {
     if (ctx->runtime_cache) poly_map_destroy(ctx->runtime_cache);
     if (ctx->shape_cache) poly_map_destroy(ctx->shape_cache);
     if (ctx->buffers) poly_map_destroy(ctx->buffers);
-    if (ctx->tensors_by_uop) poly_map_destroy(ctx->tensors_by_uop);
     if (ctx->name_map) poly_map_destroy(ctx->name_map);
     free(ctx);
     return NULL;
@@ -110,7 +107,6 @@ void poly_ctx_destroy(PolyCtx *ctx) {
   /* Free owned buffer ptrs before destroying the map. */
   poly_map_foreach(ctx->buffers, free_buffer_entry, ctx);
   poly_map_destroy(ctx->buffers);
-  poly_map_destroy(ctx->tensors_by_uop);
   free(ctx->tensors);
   poly_map_destroy(ctx->name_map);
   poly_map_destroy(ctx->cse);
@@ -183,7 +179,6 @@ int poly_ctx_stats(PolyCtx *ctx, PolyCtxStats *out) {
   out->buffer_owned_current_bytes = buf_stats.current;
   out->buffer_owned_source_bytes = buf_stats.source;
   out->buffer_owned_bytes = buf_stats.current + buf_stats.source;
-  out->tensor_entries = poly_map_len(ctx->tensors_by_uop);
   out->tensor_records = (size_t)ctx->n_tensors;
   out->registry_entries = (size_t)ctx->n_entries;
   out->entrypoint_entries = (size_t)ctx->n_ep;
@@ -243,12 +238,12 @@ void poly_ctx_record_memory_free(PolyCtx *ctx, PolyDevice device, size_t nbytes)
 #ifdef __EMSCRIPTEN__
 /* wasm_common.js reads this public struct manually. Keep the ABI facts
  * compile-checked instead of relying on an unverified offset table. */
-_Static_assert(offsetof(PolyCtxStats, global_ops) == 128, "wasm PolyCtxStats.global_ops offset");
-_Static_assert(offsetof(PolyCtxStats, global_mem) == 136, "wasm PolyCtxStats.global_mem offset");
-_Static_assert(offsetof(PolyCtxStats, time_sum_s) == 144, "wasm PolyCtxStats.time_sum_s offset");
-_Static_assert(offsetof(PolyCtxStats, kernel_count) == 152, "wasm PolyCtxStats.kernel_count offset");
-_Static_assert(offsetof(PolyCtxStats, mem_used) == 160, "wasm PolyCtxStats.mem_used offset");
-_Static_assert(sizeof(PolyCtxStats) == 168, "wasm PolyCtxStats size");
+_Static_assert(offsetof(PolyCtxStats, global_ops) == 120, "wasm PolyCtxStats.global_ops offset");
+_Static_assert(offsetof(PolyCtxStats, global_mem) == 128, "wasm PolyCtxStats.global_mem offset");
+_Static_assert(offsetof(PolyCtxStats, time_sum_s) == 136, "wasm PolyCtxStats.time_sum_s offset");
+_Static_assert(offsetof(PolyCtxStats, kernel_count) == 144, "wasm PolyCtxStats.kernel_count offset");
+_Static_assert(offsetof(PolyCtxStats, mem_used) == 152, "wasm PolyCtxStats.mem_used offset");
+_Static_assert(sizeof(PolyCtxStats) == 160, "wasm PolyCtxStats size");
 #endif
 
 PolyScratchMark poly_ctx_scratch_mark(PolyCtx *ctx) {

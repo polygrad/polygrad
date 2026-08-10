@@ -14,7 +14,7 @@
 
 PolyInstance *poly_gguf_load(
     const uint8_t *data, int64_t len,
-    int max_batch, int max_seq_len)
+    int max_batch, int max_seq_len, PolyDevice device)
 {
     poly_import_error_clear();
 
@@ -33,6 +33,7 @@ PolyInstance *poly_gguf_load(
     PolyGenericImportOpts opts = {
         .max_batch   = max_batch,
         .max_seq_len = max_seq_len,
+        .device      = device,
     };
     PolyInstance *inst = desc->from_gguf_decoded(gguf, &opts);
 

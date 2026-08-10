@@ -462,22 +462,28 @@ static PolyTensor *make_bound_storage_tensor(
     return NULL;
   }
   PolyDType scalar = poly_dtype_scalar(dt);
-  PolyUOp *buf = poly_buffer(inst->ctx, scalar, numel);
-  if (!buf) {
-    poly_instance_set_error(inst, POLY_STATUS_ERROR, __func__, "failed to create storage buffer");
-    return NULL;
-  }
-  PolyUOp *root = buf;
-  if (!(ndim == 1 && shape[0] == numel))
-    root = poly_reshape(inst->ctx, buf, (int64_t *)shape, ndim);
-  PolyTensor *tensor = poly_tensor_create(inst->ctx, root, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
+  PolyDevice device = poly_ctx_get_preferred_device(inst->ctx);
+  if (!poly_device_can_execute(device)) device = poly_device_default();
+  /* Pinned UOp.empty/new_buffer constructs BUFFER(UNIQUE, DEVICE(device))
+   * before ordinary Tensor composition (uop/ops.py:733-746). Instance also
+   * retains the paired device-free BUFFER for portable IR; poly_tensor_empty
+   * supplies both roots from one UNIQUE without placement or correspondence. */
+  PolyTensor *tensor = poly_tensor_empty(inst->ctx, scalar, shape, ndim, device);
   if (!tensor) {
     poly_instance_set_error(inst, POLY_STATUS_ERROR, __func__, "failed to create tensor");
     return NULL;
   }
+  PolyUOp *buf =
+      (PolyUOp *)poly_uop_get_buffer_identity(poly_tensor_uop_logical(tensor));
+  PolyUOp *physical_buf =
+      (PolyUOp *)poly_uop_get_buffer_identity(poly_tensor_uop_physical(tensor));
+  if (!buf || !physical_buf) {
+    poly_instance_set_error(inst, POLY_STATUS_ERROR, __func__, "failed to create storage buffer");
+    return NULL;
+  }
   if (append_build_binding(
-          inst, name, role, 0, tensor, buf, NULL, buf, shape, ndim, default_requires_grad,
-          provenance
+          inst, name, role, 0, tensor, buf, physical_buf, buf, shape, ndim,
+          default_requires_grad, provenance
       ) != POLY_STATUS_OK)
     return NULL;
   return tensor;
@@ -931,6 +937,44 @@ PolyStatus poly_instance_build(PolyInstance *inst, PolyInstanceError *err) {
         (poly_tensor_provenance(b->tensor) == POLY_TENSOR_PROVENANCE_COMPUTED &&
          poly_uop_has_buffer_identity(physical_value)))
       paired_physical = false;
+  }
+
+  /* Instance is Polygrad's retained capture boundary. A runnable package
+   * requires the exact pre-realize physical template; reconstructing it from
+   * the surviving logical graph would be implicit placement. */
+  if (!paired_physical) {
+    for (int i = 0; i < build->n_bindings; i++) {
+      BuildBinding *b = &build->bindings[i];
+      PolyUOp *physical = b->role == POLY_ROLE_OUTPUT
+                              ? poly_tensor_uop_physical(b->tensor)
+                              : b->physical_buffer;
+      const char *reason = NULL;
+      if (!physical)
+        reason = "missing_physical";
+      else if (b->role == POLY_ROLE_OUTPUT &&
+               poly_tensor_root_has_unplaced_buffer(inst->ctx, physical))
+        reason = "unplaced_buffer";
+      else if (b->role == POLY_ROLE_OUTPUT &&
+               poly_tensor_provenance(b->tensor) == POLY_TENSOR_PROVENANCE_COMPUTED &&
+               poly_uop_has_buffer_identity(physical))
+        reason = "realized_output_without_template";
+      if (!reason) continue;
+      fprintf(
+          stderr,
+          "PHYSICAL_TEMPLATE_ADMISSION_FAIL binding=%s role=%u reason=%s "
+          "logical_op=%s physical_op=%s\n",
+          b->name, (unsigned)b->role, reason,
+          poly_tensor_uop_logical(b->tensor)
+              ? poly_op_name(poly_tensor_uop_logical(b->tensor)->op)
+              : "NULL",
+          physical ? poly_op_name(physical->op) : "NULL"
+      );
+    }
+    poly_instance_set_error(
+        inst, POLY_STATUS_INVALID, __func__, "complete physical template required"
+    );
+    st = POLY_STATUS_INVALID;
+    goto fail;
   }
 
   PolyIrBufEntry *bufs = calloc((size_t)build->n_bindings, sizeof(*bufs));
@@ -2734,11 +2778,11 @@ static const NamedBuf *instance_buf_for_uop(const PolyInstance *inst, PolyUOp *u
 
 typedef struct {
   PolyUOp *child_buf;
-  char *parent_name;
+  PolyTensor *parent_tensor;
 } InlineAlias;
 
-static PolyUOp *register_inline_buffer(
-    PolyCtx *dst_ctx,
+static PolyTensor *register_inline_tensor(
+    PolyInstance *parent,
     const NamedBuf *b,
     const char *prefix,
     bool trainable,
@@ -2746,46 +2790,57 @@ static PolyUOp *register_inline_buffer(
     int *n_aliases,
     int max_aliases
 ) {
-  if (!dst_ctx || !b) return NULL;
+  if (!parent || !parent->ctx || !b) return NULL;
 
   char *full = prefixed_name(prefix, b->name);
   if (!full) return NULL;
 
   for (int i = 0; i < *n_aliases; i++) {
     if (aliases[i].child_buf != b->logical_buffer) continue;
-    int rc = poly_alias(dst_ctx, full, aliases[i].parent_name);
-    PolyUOp *aliased = (rc == 0) ? poly_ctx_get(dst_ctx, "%s", full) : NULL;
+    PolyTensor *aliased = aliases[i].parent_tensor;
+    int rc = b->role == POLY_ROLE_PARAM
+                 ? poly_instance_state(parent, full, aliased, b->flags)
+                 : POLY_STATUS_OK;
     free(full);
-    return aliased;
+    return rc == POLY_STATUS_OK ? aliased : NULL;
   }
 
-  PolyUOp *ret = NULL;
+  PolyTensor *ret = NULL;
+  PolyDevice device = poly_ctx_get_preferred_device(parent->ctx);
+  if (!poly_device_can_execute(device)) device = poly_device_default();
   switch (b->role) {
   case POLY_ROLE_PARAM:
-    ret = poly_param(dst_ctx, b->logical_buffer->dtype, b->shape, b->ndim, "%s", full);
-    if (ret) poly_ctx_set_trainable(dst_ctx, full, trainable);
+    ret = poly_instance_param(
+        parent, full, poly_dtype_scalar(b->logical_buffer->dtype), b->shape, b->ndim
+    );
+    if (ret) poly_tensor_set_requires_grad(ret, trainable);
     break;
   case POLY_ROLE_INPUT:
-    ret = poly_input(dst_ctx, b->logical_buffer->dtype, b->shape, b->ndim, "%s", full);
-    break;
   case POLY_ROLE_TARGET:
-    ret = poly_target(dst_ctx, b->logical_buffer->dtype, b->shape, b->ndim, "%s", full);
+    /* Parent inputs/targets must be explicit bindings; silently declaring a
+     * second ABI input would make the composed entrypoint incomplete. */
     break;
   case POLY_ROLE_OUTPUT:
-    ret = poly_output(dst_ctx, b->logical_buffer->dtype, b->shape, b->ndim, "%s", full);
+    ret = poly_tensor_empty(
+        parent->ctx, poly_dtype_scalar(b->logical_buffer->dtype), b->shape, b->ndim,
+        device
+    );
     break;
   case POLY_ROLE_AUX:
   default:
-    ret = poly_aux(dst_ctx, b->logical_buffer->dtype, b->shape, b->ndim, "%s", full);
+    ret = poly_tensor_empty(
+        parent->ctx, poly_dtype_scalar(b->logical_buffer->dtype), b->shape, b->ndim,
+        device
+    );
+    if (ret && poly_instance_aux(parent, full, ret, b->flags) != POLY_STATUS_OK) ret = NULL;
     break;
   }
 
   if (ret && *n_aliases < max_aliases) {
-    aliases[*n_aliases] = (InlineAlias){b->logical_buffer, full};
+    aliases[*n_aliases] = (InlineAlias){b->logical_buffer, ret};
     (*n_aliases)++;
-  } else {
-    free(full);
   }
+  free(full);
   return ret;
 }
 
@@ -2821,8 +2876,18 @@ static PolyUOp *clone_uop_into_ctx(PolyCtx *dst_ctx, PolyMap *memo, PolyUOp *u) 
   return cloned;
 }
 
+static PolyUOp *inline_store_value(PolyUOp *sink, PolyUOp *buffer) {
+  if (!sink || sink->op != POLY_OP_SINK || !buffer) return NULL;
+  for (int i = 0; i < sink->n_src; i++) {
+    PolyUOp *store = sink->src[i];
+    if (!store || store->op != POLY_OP_STORE || store->n_src < 2) continue;
+    if (poly_uop_get_buffer_identity(store->src[0]) == buffer) return store->src[1];
+  }
+  return NULL;
+}
+
 int poly_instance_inline_entrypoint(
-    PolyCtx *dst_ctx,
+    PolyInstance *parent,
     const PolyInstance *child,
     const char *entrypoint,
     const char *prefix,
@@ -2834,12 +2899,25 @@ int poly_instance_inline_entrypoint(
     int *out_n_outputs
 ) {
   if (out_n_outputs) *out_n_outputs = 0;
-  if (!dst_ctx || !child || !entrypoint || !outputs || max_outputs < 0) return -1;
+  if (!parent || parent->stage != POLY_INSTANCE_BUILDING || !parent->ctx || !child ||
+      !entrypoint || !outputs || max_outputs < 0)
+    return -1;
+  PolyCtx *dst_ctx = parent->ctx;
   int ep_idx = find_entrypoint(child, entrypoint);
   if (ep_idx < 0) return -1;
+  PolyUOp *logical_sink = child->entrypoints[ep_idx].logical_sink;
+  PolyUOp *physical_sink = child->entrypoints[ep_idx].sink;
+  if (!logical_sink || logical_sink->op != POLY_OP_SINK || !physical_sink ||
+      physical_sink->op != POLY_OP_SINK)
+    return -1;
 
-  PolyMap *memo = poly_map_new(64);
-  if (!memo) return -1;
+  PolyMap *logical_memo = poly_map_new(64);
+  PolyMap *physical_memo = poly_map_new(64);
+  if (!logical_memo || !physical_memo) {
+    poly_map_destroy(logical_memo);
+    poly_map_destroy(physical_memo);
+    return -1;
+  }
 
   InlineAlias *aliases = calloc((size_t)child->n_bufs, sizeof(InlineAlias));
   int n_aliases = 0;
@@ -2847,30 +2925,47 @@ int poly_instance_inline_entrypoint(
 
   for (int i = 0; i < child->n_bufs; i++) {
     const NamedBuf *b = &child->bufs[i];
+    bool logical_reachable =
+        poly_uop_reachable(child->ctx, logical_sink, b->logical_buffer);
+    bool physical_reachable = poly_uop_reachable(child->ctx, physical_sink, b->buffer);
+    if (!logical_reachable && !physical_reachable) continue;
     const PolyInstanceInlineBinding *binding = find_inline_binding(bindings, n_bindings, b->name);
-    PolyUOp *replacement = binding ? binding->uop : NULL;
+    PolyTensor *replacement = binding ? binding->tensor : NULL;
     if (!replacement)
-      replacement =
-          register_inline_buffer(dst_ctx, b, prefix, trainable, aliases, &n_aliases, child->n_bufs);
-    if (!replacement) goto done;
+      replacement = register_inline_tensor(
+          parent, b, prefix, trainable, aliases, &n_aliases, child->n_bufs
+      );
+    if (!replacement || !replacement->uop_logical || !replacement->uop_physical) goto done;
     poly_map_set(
-        memo, poly_ptr_hash(b->logical_buffer), b->logical_buffer, replacement, poly_ptr_eq
+        logical_memo, poly_ptr_hash(b->logical_buffer), b->logical_buffer,
+        replacement->uop_logical, poly_ptr_eq
+    );
+    poly_map_set(
+        physical_memo, poly_ptr_hash(b->buffer), b->buffer,
+        replacement->uop_physical, poly_ptr_eq
     );
   }
 
-  PolyUOp *sink = child->entrypoints[ep_idx].logical_sink;
-  if (!sink || sink->op != POLY_OP_SINK) goto done;
-
   int n_outputs = 0;
-  for (int i = 0; i < sink->n_src; i++) {
-    PolyUOp *store = sink->src[i];
+  for (int i = 0; i < logical_sink->n_src; i++) {
+    PolyUOp *store = logical_sink->src[i];
     if (!store || store->op != POLY_OP_STORE || store->n_src < 2) continue;
     const PolyUOp *identity = poly_uop_get_buffer_identity(store->src[0]);
     const NamedBuf *out_buf = instance_buf_for_uop(child, (PolyUOp *)identity);
     if (!out_buf || out_buf->role != POLY_ROLE_OUTPUT) continue;
     if (n_outputs >= max_outputs) goto done;
-    PolyUOp *value = clone_uop_into_ctx(dst_ctx, memo, store->src[1]);
+    PolyUOp *physical_value_src = inline_store_value(physical_sink, out_buf->buffer);
+    PolyUOp *logical_value = clone_uop_into_ctx(dst_ctx, logical_memo, store->src[1]);
+    PolyUOp *physical_value = clone_uop_into_ctx(dst_ctx, physical_memo, physical_value_src);
+    if (!logical_value || !physical_value) goto done;
+    PolyDevice device = poly_ctx_get_preferred_device(dst_ctx);
+    if (!poly_device_can_execute(device)) device = poly_device_default();
+    PolyTensor *value = poly_tensor_create_with_roots(
+        dst_ctx, logical_value, physical_value, POLY_TENSOR_VALUE,
+        device
+    );
     if (!value) goto done;
+    value->provenance = POLY_TENSOR_PROVENANCE_COMPUTED;
     outputs[n_outputs++] = (PolyInstanceInlineOutput){out_buf->name, value};
   }
 
@@ -2878,12 +2973,9 @@ int poly_instance_inline_entrypoint(
   rc = 0;
 
 done:
-  if (aliases) {
-    for (int i = 0; i < n_aliases; i++)
-      free(aliases[i].parent_name);
-    free(aliases);
-  }
-  poly_map_destroy(memo);
+  free(aliases);
+  poly_map_destroy(logical_memo);
+  poly_map_destroy(physical_memo);
   return rc;
 }
 

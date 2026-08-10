@@ -19,6 +19,7 @@ extern "C" {
 typedef struct {
     int max_batch;
     int max_seq_len;
+    PolyDevice device;
 } PolyGenericImportOpts;
 
 typedef struct {

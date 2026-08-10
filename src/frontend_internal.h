@@ -111,19 +111,15 @@ int poly_uop_substitute_many(
 /* Resolve the exact execution device used by the physicalizer for a Tensor. */
 PolyDevice poly_tensor_resolved_device(PolyCtx *ctx, PolyTensor *tensor);
 
-/* Physicalize a snapshot of Tensor roots with one pass-local memo. This is the
- * logical/physical boundary counterpart to tinygrad rewriting one aggregate
- * SINK: shared UOps are lowered once per exact execution device. When
- * placement_memo is non-NULL it points to POLY_DEVICE_DISK+1 map slots; the
- * existing maps are reused and ownership remains with the caller. */
+/* Physicalize a snapshot of portable Tensor roots with one invocation-local
+ * memo. This is an explicit re-placement boundary, never default execution;
+ * no logical->physical correspondence escapes the call. */
 int poly_tensor_physicalize_many(
     PolyCtx *ctx,
     PolyTensor **tensors,
     int n,
-    PolyUOp **out,
-    PolyMap **placement_memo
+    PolyUOp **out
 );
-void poly_tensor_physicalize_memo_destroy(PolyMap **placement_memo);
 
 /* Physical-only counterpart to pinned transform_to_call's `(graph,
  * buffer_map)` return. The caller owns and frees out_map_orig/out_map_repl;

@@ -11,6 +11,7 @@
 #include "device.h"
 #include "engine/schedule.h"
 #include "frontend_internal.h"
+#include "pat.h"
 #include "utils.h"
 #include <assert.h>
 #include <stdio.h>
@@ -84,15 +85,13 @@ PolyUOp *poly_store_buffer_update(PolyCtx *ctx, PolyUOp *target, PolyUOp *value)
 
 /* Core PolyTensor handles */
 
-typedef struct {
-  PolyTensor **items;
-  int n;
-  int cap;
-} PolyTensorList;
-
 static PolyUOp *tensor_current_uop(PolyTensor *tensor) {
-  return tensor ? (tensor->uop_physical ? tensor->uop_physical : tensor->uop_logical) : NULL;
+  return tensor ? tensor->uop_physical : NULL;
 }
+
+static PolyUOp *broadcast_to_exact(
+    PolyCtx *ctx, PolyUOp *x, PolyUOp **target_dims, int ndim
+);
 
 static bool tensor_roots_owned_by_ctx(PolyCtx *ctx, const PolyTensor *tensor) {
   /* Polygrad-specific arena boundary: never intern a destination DAG whose
@@ -102,84 +101,18 @@ static bool tensor_roots_owned_by_ctx(PolyCtx *ctx, const PolyTensor *tensor) {
          poly_ctx_owns_ptr(ctx, tensor->uop_physical);
 }
 
-static PolyTensorList *tensor_list_for_uop(PolyCtx *ctx, PolyUOp *uop) {
-  if (!ctx || !uop) return NULL;
-  return poly_map_get(ctx->tensors_by_uop, poly_ptr_hash(uop), uop, poly_ptr_eq);
-}
-
-static bool tensor_list_append(PolyTensorList *list, PolyTensor *tensor) {
-  if (!list || !tensor) return false;
-  for (int i = 0; i < list->n; i++)
-    if (list->items[i] == tensor) return true;
-  if (list->n >= list->cap) {
-    int new_cap = list->cap ? list->cap * 2 : 4;
-    PolyTensor **new_items = realloc(list->items, (size_t)new_cap * sizeof(PolyTensor *));
-    if (!new_items) return false;
-    list->items = new_items;
-    list->cap = new_cap;
-  }
-  list->items[list->n++] = tensor;
-  return true;
-}
-
-static bool tensor_index_add(PolyCtx *ctx, PolyUOp *current, PolyTensor *tensor) {
-  if (!ctx || !current || !tensor) return false;
-  PolyTensorList *list = tensor_list_for_uop(ctx, current);
-  if (list) return tensor_list_append(list, tensor);
-
-  /* Allocate and populate before publishing the list. A failed first append
-   * must not leave an empty tensors_by_uop entry. */
-  list = calloc(1, sizeof(PolyTensorList));
-  if (!list) return false;
-  if (!tensor_list_append(list, tensor)) {
-    free(list);
-    return false;
-  }
-  poly_map_set(ctx->tensors_by_uop, poly_ptr_hash(current), current, list, poly_ptr_eq);
-  return true;
-}
-
-static bool tensor_index_add_current(PolyCtx *ctx, PolyTensor *tensor) {
-  return tensor_index_add(ctx, tensor_current_uop(tensor), tensor);
-}
-
-static void tensor_index_remove(PolyCtx *ctx, PolyUOp *current, PolyTensor *tensor) {
-  if (!ctx || !current || !tensor) return;
-  PolyTensorList *list = tensor_list_for_uop(ctx, current);
-  if (!list) return;
-  for (int i = 0; i < list->n; i++) {
-    if (list->items[i] != tensor) continue;
-    list->items[i] = list->items[list->n - 1];
-    list->n--;
-    if (list->n == 0) {
-      poly_map_remove(ctx->tensors_by_uop, poly_ptr_hash(current), current, poly_ptr_eq);
-      free(list->items);
-      free(list);
-    }
-    return;
-  }
-}
-
-/* Commit fields only after the caller has registered tensor at its future
- * current root. This phase allocates nothing and cannot leave a half-indexed
- * Tensor on recoverable tensor-list allocation failure. */
-static void tensor_replace_roots_commit_reserved(
-    PolyCtx *ctx,
+static void tensor_replace_roots_commit(
     PolyTensor *tensor,
     PolyUOp *uop_logical,
     PolyUOp *uop_physical,
     PolyTensorRole role,
     PolyDevice device
 ) {
-  PolyUOp *old_current = tensor_current_uop(tensor);
   tensor->uop_logical = uop_logical;
   tensor->uop_physical = uop_physical;
   tensor->role = role;
   if (device != POLY_DEVICE_AUTO) tensor->device = device;
   if (role != POLY_TENSOR_PLACE) tensor->source = NULL;
-
-  PolyUOp *new_current = tensor_current_uop(tensor);
-  if (old_current != new_current) tensor_index_remove(ctx, old_current, tensor);
 }
 
 static bool tensor_assign_anchor_op(PolyOps op) {
@@ -237,13 +170,23 @@ static PolyUOp *tensor_substitute_once(
   return result;
 }
 
-static int tensor_retarget_logical_uops(
+static int tensor_retarget_view_assign_roots(
     PolyCtx *ctx,
-    PolyUOp *from,
-    PolyUOp *to,
+    PolyUOp *logical_from,
+    PolyUOp *logical_to,
+    PolyUOp *physical_from,
+    PolyUOp *physical_to,
     PolyDevice device
 ) {
-  if (!ctx || !from || !to || from == to) return 0;
+  if (!ctx || !logical_from || !logical_to || !physical_from || !physical_to) return -1;
+
+  PolyMap *logical_memo = poly_map_new(64);
+  PolyMap *physical_memo = poly_map_new(64);
+  if (!logical_memo || !physical_memo) {
+    poly_map_destroy(physical_memo);
+    poly_map_destroy(logical_memo);
+    return -1;
+  }
 
   for (int i = 0; i < ctx->n_tensors; i++) {
     PolyTensor *t = ctx->tensors[i];
@@ -252,41 +195,41 @@ static int tensor_retarget_logical_uops(
         !poly_devices_share_storage(t->device, device))
       continue;
 
-    PolyUOp *current = tensor_current_uop(t);
-    if (!current) continue;
-    PolyMap *memo = poly_map_new(64);
-    if (!memo) return -1;
     /* View-assign replacements are intentionally self-containing
      * (BUFFER -> AFTER(BUFFER, STORE(...))). Do not recurse into the
-     * replacement itself, matching tinygrad's substitute map behavior. */
-    PolyUOp *new_current = tensor_substitute_once(ctx, current, from, to, memo);
-    poly_map_destroy(memo);
-    if (!new_current || new_current == current) continue;
-
-    /* View assign is a semantic effect rewrite, not a runtime materialization
-     * retarget. Keep it in logical IR as AFTER/STORE, matching tinygrad's
-     * Tensor.assign graph shape. */
-    if (poly_tensor_replace_roots(ctx, t, new_current, NULL, t->role, t->device) != 0) return -1;
+     * replacement itself, matching tinygrad's `_apply_map_to_tensors`
+     * substitution in Tensor.assign (tensor.py:246-252). Polygrad applies
+     * that same one-graph rule independently to its retained logical graph and
+     * eagerly built physical parity graph. */
+    if (!t->uop_logical || !t->uop_physical) continue;
+    PolyUOp *new_logical = tensor_substitute_once(
+        ctx, t->uop_logical, logical_from, logical_to, logical_memo
+    );
+    PolyUOp *new_physical = tensor_substitute_once(
+        ctx, t->uop_physical, physical_from, physical_to, physical_memo
+    );
+    if (!new_logical || !new_physical) {
+      poly_map_destroy(physical_memo);
+      poly_map_destroy(logical_memo);
+      return -1;
+    }
+    if (new_logical == t->uop_logical && new_physical == t->uop_physical) continue;
+    if (poly_tensor_replace_roots(
+            ctx, t, new_logical, new_physical, t->role, t->device
+        ) != 0) {
+      poly_map_destroy(physical_memo);
+      poly_map_destroy(logical_memo);
+      return -1;
+    }
   }
+  poly_map_destroy(physical_memo);
+  poly_map_destroy(logical_memo);
   return 0;
 }
 
-enum {
-  TENSOR_MAP_SCOPE_EXACT = 1,
-  TENSOR_MAP_SCOPE_PLACED = 2,
-};
-
-static int tensor_map_scope_node(PolyUOp *logical, PolyMap *exact, PolyMap *placement_memo) {
-  int scope = 0;
-  if (!logical || !exact) return scope;
-  if (poly_map_get(exact, poly_ptr_hash(logical), logical, poly_ptr_eq))
-    scope |= TENSOR_MAP_SCOPE_EXACT;
-  if (placement_memo) {
-    PolyUOp *placed = poly_map_get(placement_memo, poly_ptr_hash(logical), logical, poly_ptr_eq);
-    if (placed && poly_map_get(exact, poly_ptr_hash(placed), placed, poly_ptr_eq))
-      scope |= TENSOR_MAP_SCOPE_PLACED;
-  }
-  return scope;
+static bool tensor_map_scope_node(PolyUOp *u, PolyMap *exact) {
+  return u && exact &&
+         poly_map_get(exact, poly_ptr_hash(u), u, poly_ptr_eq) != NULL;
 }
 
 typedef struct {
@@ -302,7 +245,6 @@ static bool tensor_map_scope_visit(
     PolyCtx *ctx,
     PolyUOp *root,
     PolyMap *exact,
-    PolyMap *placement_memo,
     PolyMap *scope_map
 ) {
   if (!ctx || !root || !exact || !scope_map) return false;
@@ -319,30 +261,16 @@ static bool tensor_map_scope_visit(
   }
   for (int i = 0; i < n_topo; i++) {
     PolyUOp *u = topo[i];
-    int scope = tensor_map_scope_node(u, exact, placement_memo);
+    bool scope = tensor_map_scope_node(u, exact);
     for (int j = 0; j < u->n_src; j++) {
       void *child = poly_map_get(scope_map, poly_ptr_hash(u->src[j]), u->src[j], poly_ptr_eq);
-      if (child) {
-        int child_scope = (int)((uintptr_t)child - 1);
-        /* Scope discovery enters opaque bodies like tinygrad topovisit, so an
-         * exact map key still reaches its owning CALL/FUNCTION. A placed-only
-         * key inside src[0] must not nominate projection of that owner: the
-         * body is already physical and is identity-pinned during substitution. */
-        if ((u->op == POLY_OP_CALL || u->op == POLY_OP_FUNCTION) && j == 0)
-          child_scope &= TENSOR_MAP_SCOPE_EXACT;
-        scope |= child_scope;
-      }
+      scope |= child != NULL;
     }
-    poly_map_set(scope_map, poly_ptr_hash(u), u, (void *)(uintptr_t)(scope + 1), poly_ptr_eq);
+    if (scope)
+      poly_map_set(scope_map, poly_ptr_hash(u), u, (void *)(uintptr_t)1, poly_ptr_eq);
   }
   poly_ctx_scratch_rewind(ctx, scratch);
   return poly_map_get(scope_map, poly_ptr_hash(root), root, poly_ptr_eq) != NULL;
-}
-
-static int tensor_map_scope_get(PolyMap *scope_map, PolyUOp *root) {
-  if (!scope_map || !root) return 0;
-  void *scope = poly_map_get(scope_map, poly_ptr_hash(root), root, poly_ptr_eq);
-  return scope ? (int)((uintptr_t)scope - 1) : 0;
 }
 
 int poly_tensor_apply_realize_map(
@@ -350,8 +278,7 @@ int poly_tensor_apply_realize_map(
     PolyUOp **from,
     PolyUOp **to,
     int n,
-    PolyDevice device,
-    PolyMap **placement_memo
+    PolyDevice device
 ) {
   if (!ctx || n < 0 || (n > 0 && (!from || !to))) return -1;
   if (n == 0) return 0;
@@ -364,46 +291,33 @@ int poly_tensor_apply_realize_map(
   int n_tensors = ctx->n_tensors;
   if (n_tensors <= 0) return 0;
   size_t n_slots = (size_t)n_tensors;
-  if (n_slots > SIZE_MAX / 2) return -1;
-  size_t n_rewrite_slots = n_slots * 2;
 
   PolyUOp **updates = calloc((size_t)n_tensors, sizeof(*updates));
   PolyTensor **snapshot_tensors = calloc(n_slots, sizeof(*snapshot_tensors));
   PolyUOp **snapshot_roots = calloc(n_slots, sizeof(*snapshot_roots));
-  PolyDevice *snapshot_devices = calloc(n_slots, sizeof(*snapshot_devices));
   int *snapshot_indices = calloc(n_slots, sizeof(*snapshot_indices));
-  PolyUOp **ordinary_results = calloc(n_slots, sizeof(*ordinary_results));
-  PolyTensor **project_tensors = calloc((size_t)n_tensors, sizeof(*project_tensors));
-  int *project_slots = calloc((size_t)n_tensors, sizeof(*project_slots));
-  PolyUOp **project_roots = calloc(n_slots, sizeof(*project_roots));
-  PolyUOp **project_results = calloc(n_slots, sizeof(*project_results));
-  PolyUOp **rewrite_roots = calloc(n_rewrite_slots, sizeof(*rewrite_roots));
-  PolyUOp **rewrite_results = calloc(n_rewrite_slots, sizeof(*rewrite_results));
-  int *rewrite_slots = calloc(n_rewrite_slots, sizeof(*rewrite_slots));
-  int *rewrite_aux = calloc(n_rewrite_slots, sizeof(*rewrite_aux));
-  uint8_t *rewrite_kind = calloc(n_rewrite_slots, sizeof(*rewrite_kind));
+  PolyUOp **rewrite_roots = calloc(n_slots, sizeof(*rewrite_roots));
+  PolyUOp **rewrite_results = calloc(n_slots, sizeof(*rewrite_results));
+  int *rewrite_slots = calloc(n_slots, sizeof(*rewrite_slots));
 
   int rc = -1;
   PolyMap *exact = NULL;
-  PolyMap *scope_maps[POLY_DEVICE_DISK + 1] = {0};
-  if (!updates || !snapshot_tensors || !snapshot_roots || !snapshot_devices || !snapshot_indices ||
-      !ordinary_results || !project_tensors || !project_slots || !project_roots ||
-      !project_results || !rewrite_roots || !rewrite_results || !rewrite_slots || !rewrite_aux ||
-      !rewrite_kind)
+  PolyMap *scope_map = NULL;
+  if (!updates || !snapshot_tensors || !snapshot_roots || !snapshot_indices || !rewrite_roots ||
+      !rewrite_results || !rewrite_slots)
     goto cleanup;
 
   int n_snapshot = 0;
   for (int i = 0; i < n_tensors; i++) {
     PolyTensor *tensor = ctx->tensors[i];
     if (!tensor) continue;
+    PolyUOp *current = tensor_current_uop(tensor);
+    if (!current) continue;
     PolyDevice resolved_device = poly_tensor_resolved_device(ctx, tensor);
     if (resolved_device <= POLY_DEVICE_AUTO || resolved_device > POLY_DEVICE_DISK) goto cleanup;
     if (device != POLY_DEVICE_AUTO && resolved_device != device) continue;
-    PolyUOp *current = tensor_current_uop(tensor);
-    if (!current) continue;
     snapshot_tensors[n_snapshot] = tensor;
     snapshot_roots[n_snapshot] = current;
-    snapshot_devices[n_snapshot] = resolved_device;
     snapshot_indices[n_snapshot++] = i;
   }
 
@@ -421,75 +335,15 @@ int poly_tensor_apply_realize_map(
     rc = 0;
     goto cleanup;
   }
+  scope_map = poly_map_new((size_t)n_snapshot * 2 + 16);
+  if (!scope_map) goto cleanup;
 
   int n_rewrite = 0;
-  int n_project = 0;
   for (int slot = 0; slot < n_snapshot; slot++) {
-    PolyTensor *tensor = snapshot_tensors[slot];
     PolyUOp *current = snapshot_roots[slot];
-    PolyDevice resolved_device = snapshot_devices[slot];
-    PolyMap *scope_map = scope_maps[resolved_device];
-    if (!scope_map) {
-      scope_map = scope_maps[resolved_device] = poly_map_new((size_t)n_snapshot * 2 + 16);
-      if (!scope_map) goto cleanup;
-    }
-    PolyMap *device_memo = placement_memo ? placement_memo[resolved_device] : NULL;
-    if (!tensor_map_scope_visit(ctx, current, exact, device_memo, scope_map)) goto cleanup;
-    int scope = tensor_map_scope_get(scope_map, current);
-    int root_scope = tensor_map_scope_node(current, exact, device_memo);
-    /* tinygrad applies the map to its one current, already-placed Tensor.uop
-     * (tensor.py:202-206). A Polygrad PLACE can instead retain the source's
-     * physical root while its exact target projection is keyed by the
-     * preserved logical root. Admit only that existing per-device exact
-     * logical->physical proof; ordinary substitution scope remains current. */
-    int logical_placement_scope =
-        tensor_map_scope_node(tensor->uop_logical, exact, device_memo) & TENSOR_MAP_SCOPE_PLACED;
-    root_scope |= logical_placement_scope;
-    scope |= logical_placement_scope;
-    ordinary_results[slot] = current;
-    if (scope & TENSOR_MAP_SCOPE_EXACT) {
-      rewrite_roots[n_rewrite] = current;
-      rewrite_slots[n_rewrite] = slot;
-      rewrite_kind[n_rewrite++] = 0;
-    }
-
-    /* Pinned tinygrad has one physical Tensor root, so an exact root map hit
-     * cannot be displaced by a different exact hit in one of its descendants.
-     * At Polygrad's boundary, prefer the existing direct logical->physical
-     * memo correspondence when only that physical root is a callify map key. */
-    bool exact_root_placement =
-        (root_scope & TENSOR_MAP_SCOPE_PLACED) && !(root_scope & TENSOR_MAP_SCOPE_EXACT);
-    bool needs_placed_map = exact_root_placement || !(scope & TENSOR_MAP_SCOPE_EXACT) ||
-                            (current->op == POLY_OP_AFTER && current->n_src >= 1 &&
-                             !poly_uop_has_buffer_identity(current->src[0]));
-    /* tinygrad stores placement COPYs directly in Tensor.uop. Polygrad keeps
-     * portable logical roots, so retry only roots with map-derived placement
-     * evidence. PLACE role by itself is intentionally insufficient: unrelated
-     * pending placements are outside tinygrad's live-map scope. */
-    if (needs_placed_map && (scope & TENSOR_MAP_SCOPE_PLACED)) {
-      project_tensors[n_project] = tensor;
-      project_slots[n_project++] = slot;
-    }
-  }
-
-  if (n_project > 0 && poly_tensor_physicalize_many(
-                           ctx, project_tensors, n_project, project_roots, placement_memo
-                       ) != 0)
-    goto cleanup;
-
-  for (int projection = 0; projection < n_project; projection++) {
-    PolyUOp *placed = project_roots[projection];
-    project_results[projection] = placed;
-    int slot = project_slots[projection];
-    PolyDevice resolved_device = snapshot_devices[slot];
-    PolyMap *scope_map = scope_maps[resolved_device];
-    PolyMap *device_memo = placement_memo ? placement_memo[resolved_device] : NULL;
-    if (!tensor_map_scope_visit(ctx, placed, exact, device_memo, scope_map)) goto cleanup;
-    if (!(tensor_map_scope_get(scope_map, placed) & TENSOR_MAP_SCOPE_EXACT)) continue;
-    rewrite_roots[n_rewrite] = placed;
-    rewrite_slots[n_rewrite] = slot;
-    rewrite_aux[n_rewrite] = projection;
-    rewrite_kind[n_rewrite++] = 1;
+    if (!tensor_map_scope_visit(ctx, current, exact, scope_map)) continue;
+    rewrite_roots[n_rewrite] = current;
+    rewrite_slots[n_rewrite++] = slot;
   }
 
   if (n_rewrite == 0) {
@@ -500,63 +354,19 @@ int poly_tensor_apply_realize_map(
     goto cleanup;
 
   for (int rewrite = 0; rewrite < n_rewrite; rewrite++) {
-    if (rewrite_kind[rewrite])
-      project_results[rewrite_aux[rewrite]] = rewrite_results[rewrite];
-    else
-      ordinary_results[rewrite_slots[rewrite]] = rewrite_results[rewrite];
-  }
-
-  for (int slot = 0; slot < n_snapshot; slot++) {
-    PolyUOp *current = snapshot_roots[slot];
-    PolyUOp *realized = ordinary_results[slot];
-    if (realized != current) updates[snapshot_indices[slot]] = realized;
-  }
-  for (int projection = 0; projection < n_project; projection++) {
-    int slot = project_slots[projection];
-    PolyUOp *current = snapshot_roots[slot];
-    PolyUOp *placed = project_roots[projection];
-    PolyUOp *placed_realized = project_results[projection];
-    PolyDevice resolved_device = snapshot_devices[slot];
-    PolyMap *device_memo = placement_memo ? placement_memo[resolved_device] : NULL;
-    int root_scope = tensor_map_scope_node(current, exact, device_memo);
-    root_scope |= tensor_map_scope_node(snapshot_tensors[slot]->uop_logical, exact, device_memo) &
-                  TENSOR_MAP_SCOPE_PLACED;
-    bool exact_root_placement =
-        (root_scope & TENSOR_MAP_SCOPE_PLACED) && !(root_scope & TENSOR_MAP_SCOPE_EXACT);
-    bool needs_placed_map = exact_root_placement || ordinary_results[slot] == current ||
-                            (current->op == POLY_OP_AFTER && current->n_src >= 1 &&
-                             !poly_uop_has_buffer_identity(current->src[0]));
-    if (needs_placed_map && placed_realized != placed && placed_realized != current)
-      updates[snapshot_indices[slot]] = placed_realized;
-  }
-
-  /* Reserve every future index row before mutating any live Tensor. The row is
-   * temporarily ignored by lookup because tensor_current_uop still names its
-   * old root. Rollback is therefore allocation-free and restores the exact
-   * pre-commit registry if a later reservation fails. */
-  for (int i = 0; i < n_tensors; i++) {
-    PolyTensor *tensor = ctx->tensors[i];
-    PolyUOp *realized = updates[i];
-    if (!tensor || !realized) continue;
-    if (!tensor_index_add(ctx, realized, tensor)) {
-      for (int j = 0; j < i; j++) {
-        if (ctx->tensors[j] && updates[j]) tensor_index_remove(ctx, updates[j], ctx->tensors[j]);
-      }
-      goto cleanup;
-    }
+    int slot = rewrite_slots[rewrite];
+    if (rewrite_results[rewrite] != snapshot_roots[slot])
+      updates[snapshot_indices[slot]] = rewrite_results[rewrite];
   }
 
   for (int i = 0; i < n_tensors; i++) {
     PolyTensor *tensor = ctx->tensors[i];
     PolyUOp *realized = updates[i];
     if (!tensor || !realized) continue;
-    /* tinygrad applies transform_to_call's becomes_map to every live Tensor.
-     * Preserve Polygrad's export/provenance graph as uop_logical and install
-     * that rewritten, executable counterpart only as uop_physical. tinygrad
-     * publishes a mapped BUFFER before schedule creation and before JIT
-     * capture executes it. At Polygrad's placement boundary, an exact
-     * target-device buffer identity therefore completes the existing PLACE
-     * graph lifecycle without claiming runtime residency. */
+    /* Pinned tinygrad applies transform_to_call's becomes_map to every live
+     * current Tensor.uop before schedule creation (tensor.py:195-206).
+     * Polygrad installs the same rewrite only in its current physical root;
+     * the portable logical root is immutable across realization. */
     PolyTensorRole role = tensor->role;
     PolyDevice tensor_device = tensor->device;
     if (role == POLY_TENSOR_PLACE && poly_uop_has_buffer_identity(realized)) {
@@ -566,59 +376,21 @@ int poly_tensor_apply_realize_map(
         tensor_device = requested;
       }
     }
-    tensor_replace_roots_commit_reserved(
-        ctx, tensor, tensor->uop_logical, realized, role, tensor_device
-    );
+    tensor_replace_roots_commit(tensor, tensor->uop_logical, realized, role, tensor_device);
   }
   rc = 0;
 
 cleanup:
-  for (int resolved_device = POLY_DEVICE_AUTO + 1; resolved_device <= POLY_DEVICE_DISK;
-       resolved_device++)
-    poly_map_destroy(scope_maps[resolved_device]);
+  poly_map_destroy(scope_map);
   poly_map_destroy(exact);
-  free(rewrite_kind);
-  free(rewrite_aux);
   free(rewrite_slots);
   free(rewrite_results);
   free(rewrite_roots);
-  free(project_results);
-  free(project_roots);
-  free(project_slots);
-  free(project_tensors);
-  free(ordinary_results);
   free(snapshot_indices);
-  free(snapshot_devices);
   free(snapshot_roots);
   free(snapshot_tensors);
   free(updates);
   return rc;
-}
-
-PolyTensor *poly_tensor_find_current(
-    PolyCtx *ctx,
-    PolyUOp *current,
-    PolyDevice device,
-    PolyTensorRole role
-) {
-  PolyTensorList *list = tensor_list_for_uop(ctx, current);
-  if (!list) return NULL;
-  PolyTensor *best = NULL;
-  for (int i = 0; i < list->n; i++) {
-    PolyTensor *t = list->items[i];
-    if (!t || tensor_current_uop(t) != current) continue;
-    if (role != (PolyTensorRole)-1 && t->role != role) continue;
-    if (device != POLY_DEVICE_AUTO) {
-      /* PLACE is an exact requested execution device, even when two backends
-       * share an allocator. VALUE lookup may reuse compatible residency, but
-       * selecting another device's PLACE would change the COPY/DEVICE graph. */
-      if (t->role == POLY_TENSOR_PLACE ? t->device != device
-                                       : !poly_devices_share_storage(t->device, device))
-        continue;
-    }
-    if (!best || t->order > best->order) best = t;
-  }
-  return best;
 }
 
 PolyTensor *poly_tensor_find_storage_identity(PolyCtx *ctx, const PolyUOp *storage) {
@@ -628,8 +400,9 @@ PolyTensor *poly_tensor_find_storage_identity(PolyCtx *ctx, const PolyUOp *stora
   for (int i = 0; i < ctx->n_tensors; i++) {
     PolyTensor *t = ctx->tensors[i];
     if (!t) continue;
-    const PolyUOp *identity = poly_uop_get_buffer_identity(tensor_current_uop(t));
-    if (identity != storage) continue;
+    const PolyUOp *logical_identity = poly_uop_get_buffer_identity(t->uop_logical);
+    const PolyUOp *physical_identity = poly_uop_get_buffer_identity(t->uop_physical);
+    if (logical_identity != storage && physical_identity != storage) continue;
     int score = 0;
     if (t->provenance != POLY_TENSOR_PROVENANCE_UNKNOWN &&
         t->provenance != POLY_TENSOR_PROVENANCE_CONST_INIT)
@@ -643,19 +416,8 @@ PolyTensor *poly_tensor_find_storage_identity(PolyCtx *ctx, const PolyUOp *stora
   return best;
 }
 
-static void free_tensor_list_entry(const void *key, void *value, void *userdata) {
-  (void)key;
-  (void)userdata;
-  PolyTensorList *list = value;
-  if (list) {
-    free(list->items);
-    free(list);
-  }
-}
-
 void poly_tensor_ctx_cleanup(PolyCtx *ctx) {
   if (!ctx) return;
-  if (ctx->tensors_by_uop) poly_map_foreach(ctx->tensors_by_uop, free_tensor_list_entry, NULL);
   if (ctx->tensors) {
     for (int i = 0; i < ctx->n_tensors; i++)
       free(ctx->tensors[i]);
@@ -688,16 +450,8 @@ PolyTensor *poly_tensor_create_with_roots(
   tensor->order = ctx->next_tensor_order++;
   tensor->provenance = POLY_TENSOR_PROVENANCE_UNKNOWN;
 
-  if (!tensor_index_add_current(ctx, tensor)) {
-    free(tensor);
-    return NULL;
-  }
   ctx->tensors[ctx->n_tensors++] = tensor;
   return tensor;
-}
-
-PolyTensor *poly_tensor_create(PolyCtx *ctx, PolyUOp *uop, PolyTensorRole role, PolyDevice device) {
-  return poly_tensor_create_with_roots(ctx, uop, NULL, role, device);
 }
 
 int poly_tensor_custom_kernel(
@@ -868,13 +622,8 @@ int poly_tensor_replace_roots(
     PolyTensorRole role,
     PolyDevice device
 ) {
-  if (!ctx || !tensor || !uop_logical) return -1;
-  PolyUOp *old_current = tensor_current_uop(tensor);
-  PolyUOp *new_current = uop_physical ? uop_physical : uop_logical;
-
-  bool reindex = old_current != new_current;
-  if (reindex && !tensor_index_add(ctx, new_current, tensor)) return -1;
-  tensor_replace_roots_commit_reserved(ctx, tensor, uop_logical, uop_physical, role, device);
+  if (!ctx || !tensor || !uop_logical || !uop_physical) return -1;
+  tensor_replace_roots_commit(tensor, uop_logical, uop_physical, role, device);
   return 0;
 }
 
@@ -886,11 +635,7 @@ int poly_tensor_set_physical(
     PolyDevice device
 ) {
   if (!ctx || !tensor || !tensor->uop_logical || !uop_physical) return -1;
-  PolyUOp *old_current = tensor_current_uop(tensor);
-  if (old_current != uop_physical && !tensor_index_add(ctx, uop_physical, tensor)) return -1;
-  tensor_replace_roots_commit_reserved(
-      ctx, tensor, tensor->uop_logical, uop_physical, role, device
-  );
+  tensor_replace_roots_commit(tensor, tensor->uop_logical, uop_physical, role, device);
   return 0;
 }
 
@@ -925,11 +670,28 @@ static PolyTensor *tensor_alu(PolyCtx *ctx, PolyOps op, PolyTensor **inputs, int
   }
 
   /*
-   * Pinned tinygrad mixin/__init__.py:439-449 promotes broadcast operands
-   * before ALU construction. Keep that once in the C Tensor bridge so Python,
-   * JS, WASM, and direct C callers construct identical logical and physical
-   * CAST topology.
+   * Pinned ElementwiseMixin._binop calls Tensor._broadcasted before ALU;
+   * _broadcasted emits movement ops first and dtype promotion second
+   * (mixin/elementwise.py:26-28; mixin/__init__.py:439-449). Keep that once in
+   * the C Tensor bridge so Python, JS, WASM, and direct C callers construct the
+   * same logical and physical topology. Frontends that already supplied equal
+   * shapes are unchanged because poly_broadcast_to returns the input root.
    */
+  if (n == 2) {
+    int64_t logical_shape[POLY_MAX_DIMS], physical_shape[POLY_MAX_DIMS];
+    int logical_ndim = 0, physical_ndim = 0;
+    if (!poly_broadcast_pair(
+            ctx, &logical_src[0], &logical_src[1], logical_shape, &logical_ndim
+        ) ||
+        !poly_broadcast_pair(
+            ctx, &physical_src[0], &physical_src[1], physical_shape, &physical_ndim
+        ) ||
+        logical_ndim != physical_ndim)
+      return NULL;
+    for (int i = 0; i < logical_ndim; i++)
+      if (logical_shape[i] != physical_shape[i]) return NULL;
+  }
+
   int promote_from = 0;
   if (op == POLY_OP_WHERE) {
     if (!poly_dtype_is_bool(logical_src[0]->dtype)) {
@@ -1170,19 +932,17 @@ PolyTensor *poly_tensor_pad_value(
 }
 
 PolyTensor *poly_tensor_to_device(PolyCtx *ctx, PolyTensor *tensor, PolyDevice device) {
-  if (!ctx || !tensor || !tensor->uop_logical) return NULL;
+  if (!ctx || !tensor || !tensor->uop_logical || !tensor->uop_physical) return NULL;
   if (tensor->device == device) return tensor;
   /* Pinned Tensor.to returns self when Tensor.uop has no device
    * (tensor.py:327-335). Pure CONST/arange graphs are device-free values, not
    * storage that requires a COPY or late placement. */
-  if (tensor->uop_physical && poly_uop_device(tensor->uop_physical) == POLY_DEVICE_AUTO)
+  if (poly_uop_device(tensor->uop_physical) == POLY_DEVICE_AUTO)
     return tensor;
   /* Pinned tinygrad Tensor.to (tensor.py:327-335) stores
-   * self.uop.copy_to_device(device) immediately. This boundary therefore consumes
-   * the exact stored physical occurrence directly. Keep physicalization only
-   * as migration fallback for raw/unmigrated Tensors without that root. */
-  PolyUOp *source_physical =
-      tensor->uop_physical ? tensor->uop_physical : poly_tensor_physicalize(ctx, tensor);
+   * self.uop.copy_to_device(device) immediately. Consume the exact stored
+   * physical occurrence directly; explicit re-placement is a separate API. */
+  PolyUOp *source_physical = tensor->uop_physical;
   PolyUOp *target_device = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int((int64_t)device));
   PolyUOp *copy_src[2] = {source_physical, target_device};
   PolyUOp *physical =
@@ -1205,9 +965,32 @@ PolyTensor *poly_tensor_assign(PolyCtx *ctx, PolyTensor *target, PolyTensor *val
   if (!ctx || !target || !value) return NULL;
   PolyUOp *target_logical = target->uop_logical;
   PolyUOp *value_logical = value->uop_logical;
-  PolyUOp *target_current = poly_tensor_uop(target);
-  PolyUOp *value_current = poly_tensor_uop(value);
-  if (!target_logical || !value_logical || !target_current || !value_current) return NULL;
+  PolyUOp *target_physical = target->uop_physical;
+  PolyUOp *value_physical = value->uop_physical;
+  if (!target_logical || !value_logical || !target_physical || !value_physical) return NULL;
+
+  /* Pinned Tensor.assign broadcasts the RHS to the target shape before
+   * constructing AFTER(target, STORE(target, value)) (tensor.py:230-257).
+   * Apply that rule independently to the retained logical and exact current
+   * physical occurrences; a moved RHS must keep its COPY chain. */
+  int logical_ndim = poly_uop_ndim(ctx, target_logical);
+  int physical_ndim = poly_uop_ndim(ctx, target_physical);
+  if (logical_ndim < 0 || logical_ndim > POLY_MAX_DIMS || physical_ndim < 0 ||
+      physical_ndim > POLY_MAX_DIMS)
+    return NULL;
+  PolyUOp *logical_dims[POLY_MAX_DIMS];
+  PolyUOp *physical_dims[POLY_MAX_DIMS];
+  for (int i = 0; i < logical_ndim; i++) {
+    logical_dims[i] = poly_uop_shape_dim(ctx, target_logical, i);
+    if (!logical_dims[i]) return NULL;
+  }
+  for (int i = 0; i < physical_ndim; i++) {
+    physical_dims[i] = poly_uop_shape_dim(ctx, target_physical, i);
+    if (!physical_dims[i]) return NULL;
+  }
+  value_logical = broadcast_to_exact(ctx, value_logical, logical_dims, logical_ndim);
+  value_physical = broadcast_to_exact(ctx, value_physical, physical_dims, physical_ndim);
+  if (!value_logical || !value_physical) return NULL;
 
   /* Match tinygrad Tensor.assign: non-DISK assigns require same device and
    * dtype before constructing the AFTER/STORE effect graph. Without this,
@@ -1221,28 +1004,18 @@ PolyTensor *poly_tensor_assign(PolyCtx *ctx, PolyTensor *target, PolyTensor *val
           poly_dtype_scalar(target_logical->dtype), poly_dtype_scalar(value_logical->dtype)
       ) ||
       !poly_dtype_eq(
-          poly_dtype_scalar(target_current->dtype), poly_dtype_scalar(value_current->dtype)
+          poly_dtype_scalar(target_physical->dtype), poly_dtype_scalar(value_physical->dtype)
       ))
     return NULL;
 
-  PolyUOp *current_store = poly_store_val(ctx, target_current, value_current);
-  PolyUOp *current_src[2] = {target_current, current_store};
-  PolyUOp *current_after =
-      current_store
-          ? poly_uop(ctx, POLY_OP_AFTER, target_current->dtype, current_src, 2, poly_arg_none())
+  PolyUOp *physical_store = poly_store_val(ctx, target_physical, value_physical);
+  PolyUOp *physical_src[2] = {target_physical, physical_store};
+  PolyUOp *physical_after =
+      physical_store
+          ? poly_uop(
+                ctx, POLY_OP_AFTER, target_physical->dtype, physical_src, 2, poly_arg_none()
+            )
           : NULL;
-  if (!current_after) return NULL;
-
-  PolyUOp *view_anchor = tensor_assign_view_anchor(target_current);
-  if (view_anchor) {
-    PolyUOp *anchor_src[2] = {view_anchor, current_after};
-    PolyUOp *assigned_anchor =
-        poly_uop(ctx, POLY_OP_AFTER, view_anchor->dtype, anchor_src, 2, poly_arg_none());
-    if (!assigned_anchor) return NULL;
-    if (tensor_retarget_logical_uops(ctx, view_anchor, assigned_anchor, target->device) != 0)
-      return NULL;
-    return target;
-  }
 
   PolyUOp *logical_store = poly_store_val(ctx, target_logical, value_logical);
   PolyUOp *logical_src[2] = {target_logical, logical_store};
@@ -1250,14 +1023,36 @@ PolyTensor *poly_tensor_assign(PolyCtx *ctx, PolyTensor *target, PolyTensor *val
       logical_store
           ? poly_uop(ctx, POLY_OP_AFTER, target_logical->dtype, logical_src, 2, poly_arg_none())
           : NULL;
-  if (!logical_after) return NULL;
+  if (!logical_after || !physical_after) return NULL;
+
+  PolyUOp *logical_view_anchor = tensor_assign_view_anchor(target_logical);
+  PolyUOp *physical_view_anchor = tensor_assign_view_anchor(target_physical);
+  if (logical_view_anchor || physical_view_anchor) {
+    if (!logical_view_anchor || !physical_view_anchor) return NULL;
+    PolyUOp *logical_anchor_src[2] = {logical_view_anchor, logical_after};
+    PolyUOp *physical_anchor_src[2] = {physical_view_anchor, physical_after};
+    PolyUOp *logical_assigned_anchor = poly_uop(
+        ctx, POLY_OP_AFTER, logical_view_anchor->dtype, logical_anchor_src, 2, poly_arg_none()
+    );
+    PolyUOp *physical_assigned_anchor = poly_uop(
+        ctx, POLY_OP_AFTER, physical_view_anchor->dtype, physical_anchor_src, 2,
+        poly_arg_none()
+    );
+    if (!logical_assigned_anchor || !physical_assigned_anchor) return NULL;
+    if (tensor_retarget_view_assign_roots(
+            ctx, logical_view_anchor, logical_assigned_anchor, physical_view_anchor,
+            physical_assigned_anchor, target->device
+        ) != 0)
+      return NULL;
+    return target;
+  }
 
   /* Polygrad keeps portable provenance and placed execution as separate roots.
    * tinygrad has one UOp, so its second assign naturally chains from the first
    * AFTER. Preserve that same value-version chain independently in both roots
    * instead of leaking target_current into uop_logical. */
   if (poly_tensor_replace_roots(
-          ctx, target, logical_after, current_after, target->role, target->device
+          ctx, target, logical_after, physical_after, target->role, target->device
       ) != 0)
     return NULL;
   return target;
@@ -1268,17 +1063,13 @@ PolyTensor *poly_tensor_clone_into(PolyCtx *ctx, PolyTensor *target, PolyTensor 
   if (target->device == POLY_DEVICE_AUTO) return NULL;
 
   PolyUOp *target_logical = target->uop_logical;
-  PolyUOp *target_physical =
-      target->uop_physical ? target->uop_physical : poly_tensor_physicalize(ctx, target);
+  PolyUOp *target_physical = target->uop_physical;
   PolyUOp *source_logical = source->uop_logical;
   if (source_logical && source_logical->op == POLY_OP_AFTER && source->uop_physical)
     source_logical = source->uop_physical;
-  /* Pinned UOp.clone (uop/ops.py:765-769) decides from self.device and
-   * stores a device-free source directly. The stored current root is
-   * that self UOp; wrapper preferred-device metadata must not manufacture a
-   * COPY. Preserve the legacy fallback only for a missing physical root. */
-  PolyUOp *source_physical =
-      source->uop_physical ? source->uop_physical : poly_tensor_physicalize(ctx, source);
+  /* Pinned UOp.clone (uop/ops.py:765-769) decides from self.device and stores
+   * the current UOp directly. Wrapper metadata must not synthesize placement. */
+  PolyUOp *source_physical = source->uop_physical;
   if (!target_logical || !target_physical || !source_logical || !source_physical) return NULL;
   if (!poly_dtype_eq(
           poly_dtype_scalar(target_logical->dtype), poly_dtype_scalar(source_logical->dtype)
@@ -1754,6 +1545,61 @@ PolyUOp *poly_broadcast_to(PolyCtx *ctx, PolyUOp *x, const int64_t *shape, int n
   return r;
 }
 
+static bool broadcast_dim_const(PolyUOp *u, int64_t *value) {
+  return u && poly_uop_const_i64(u, value) == 0;
+}
+
+/* Pinned shape_to_shape_arg turns Python integer dimensions into weakint
+ * CONSTs (uop/ops.py:85-89). These are shape values, not int32 Tensor
+ * literals. */
+static PolyUOp *broadcast_shape_const(PolyCtx *ctx, int64_t value) {
+  return poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(value));
+}
+
+static bool broadcast_dim_equal(PolyUOp *a, PolyUOp *b) {
+  if (a == b) return true;
+  int64_t av = 0, bv = 0;
+  return broadcast_dim_const(a, &av) && broadcast_dim_const(b, &bv) && av == bv;
+}
+
+/* Pinned MovementMixin._broadcast_to keeps symbolic dimensions in the
+ * RESHAPE/EXPAND shape arguments (mixin/movement.py:116-127). */
+static PolyUOp *broadcast_to_exact(
+    PolyCtx *ctx, PolyUOp *x, PolyUOp **target_dims, int ndim
+) {
+  if (!ctx || !x || !target_dims || ndim < 0 || ndim > POLY_MAX_DIMS) return NULL;
+  int x_ndim = poly_uop_ndim(ctx, x);
+  if (x_ndim < 0) {
+    if (poly_dtype_eq(poly_dtype_scalar(x->dtype), POLY_VOID)) return NULL;
+    x_ndim = 0;
+  }
+  if (x_ndim > ndim) return NULL;
+
+  PolyUOp *aligned[POLY_MAX_DIMS];
+  int pad = ndim - x_ndim;
+  for (int i = 0; i < pad; i++)
+    aligned[i] = broadcast_shape_const(ctx, 1);
+  for (int i = 0; i < x_ndim; i++) {
+    aligned[pad + i] = poly_uop_shape_dim(ctx, x, i);
+    if (!aligned[pad + i]) return NULL;
+  }
+
+  bool need_expand = false;
+  for (int i = 0; i < ndim; i++) {
+    int64_t aligned_value = 0, target_value = 0;
+    bool aligned_const = broadcast_dim_const(aligned[i], &aligned_value);
+    bool target_const = broadcast_dim_const(target_dims[i], &target_value);
+    if (!broadcast_dim_equal(aligned[i], target_dims[i])) {
+      if (aligned_const && aligned_value != 1 && target_const) return NULL;
+      need_expand = true;
+    }
+  }
+
+  PolyUOp *ret = x_ndim == ndim ? x : poly_reshape_uop(ctx, x, aligned, ndim);
+  if (!ret) return NULL;
+  return need_expand ? poly_expand_uop(ctx, ret, target_dims, ndim) : ret;
+}
+
 bool poly_broadcast_pair(
     PolyCtx *ctx,
     PolyUOp **a,
@@ -1785,25 +1631,47 @@ bool poly_broadcast_pair(
     return false;
   }
   int pa = nd - na, pb = nd - nb;
+  PolyUOp *exact_shape[POLY_MAX_DIMS];
   for (int i = 0; i < nd; i++) {
     int64_t da = (i >= pa) ? sa[i - pa] : 1;
     int64_t db = (i >= pb) ? sb[i - pb] : 1;
-    if (da != db && da != 1 && db != 1) {
+    PolyUOp *dua =
+        i >= pa ? poly_uop_shape_dim(ctx, *a, i - pa) : broadcast_shape_const(ctx, 1);
+    PolyUOp *dub =
+        i >= pb ? poly_uop_shape_dim(ctx, *b, i - pb) : broadcast_shape_const(ctx, 1);
+    if (!dua || !dub) return false;
+    int64_t dua_value = 0, dub_value = 0;
+    bool dua_const = broadcast_dim_const(dua, &dua_value);
+    bool dub_const = broadcast_dim_const(dub, &dub_value);
+    if (dua_const && dub_const && dua_value != dub_value && dua_value != 1 && dub_value != 1) {
       fprintf(
           stderr, "poly_broadcast_pair: incompatible shapes at dim %d: %lld vs %lld\n", i,
-          (long long)da, (long long)db
+          (long long)dua_value, (long long)dub_value
       );
       *out_ndim = 0;
       return false;
     }
-    /* Pinned _broadcast_shape returns zero when any aligned dimension is zero
-     * (uop/ops.py:63-71). max(0, 1) is not the broadcast result. */
-    out_shape[i] = (da == 0 || db == 0) ? 0 : (da > db ? da : db);
+    if ((dua_const && dua_value == 0) || (dub_const && dub_value == 0)) {
+      exact_shape[i] = broadcast_shape_const(ctx, 0);
+      out_shape[i] = 0;
+    } else if (broadcast_dim_equal(dua, dub) || (dub_const && dub_value == 1)) {
+      exact_shape[i] = dua;
+      out_shape[i] = da;
+    } else if (dua_const && dua_value == 1) {
+      exact_shape[i] = dub;
+      out_shape[i] = db;
+    } else {
+      exact_shape[i] = poly_graph_rewrite(
+          ctx, poly_alu2(ctx, POLY_OP_MAX, dua, dub), poly_symbolic()
+      );
+      if (!exact_shape[i]) return false;
+      out_shape[i] = da > db ? da : db;
+    }
   }
   *out_ndim = nd;
 
-  *a = poly_broadcast_to(ctx, *a, out_shape, nd);
-  *b = poly_broadcast_to(ctx, *b, out_shape, nd);
+  *a = broadcast_to_exact(ctx, *a, exact_shape, nd);
+  *b = broadcast_to_exact(ctx, *b, exact_shape, nd);
   return *a != NULL && *b != NULL;
 }
 
@@ -5323,6 +5191,41 @@ PolyTensor *poly_tensor_gelu(PolyCtx *ctx, PolyTensor *src) {
   );
 }
 
+PolyTensor *poly_tensor_relu(PolyCtx *ctx, PolyTensor *src) {
+  if (!tensor_roots_owned_by_ctx(ctx, src)) return NULL;
+  /* Pinned relu is `(self > 0).where(self, 0)`
+   * (mixin/elementwise.py:656-665). */
+  return tensor_unary_result(
+      ctx, src, poly_relu(ctx, src->uop_logical), poly_relu(ctx, src->uop_physical)
+  );
+}
+
+PolyTensor *poly_tensor_sigmoid(PolyCtx *ctx, PolyTensor *src) {
+  if (!tensor_roots_owned_by_ctx(ctx, src)) return NULL;
+  /* Pinned sigmoid uses reciprocal(1 + exp2(x * -1/log(2)))
+   * (mixin/elementwise.py:667-677). */
+  return tensor_unary_result(
+      ctx, src, poly_sigmoid(ctx, src->uop_logical), poly_sigmoid(ctx, src->uop_physical)
+  );
+}
+
+PolyTensor *poly_tensor_tanh(PolyCtx *ctx, PolyTensor *src) {
+  if (!tensor_roots_owned_by_ctx(ctx, src)) return NULL;
+  /* Pinned tanh is 2*sigmoid(2*x)-1 (mixin/elementwise.py:739-748). */
+  return tensor_unary_result(
+      ctx, src, poly_tanh_act(ctx, src->uop_logical), poly_tanh_act(ctx, src->uop_physical)
+  );
+}
+
+PolyTensor *poly_tensor_silu(PolyCtx *ctx, PolyTensor *src) {
+  if (!tensor_roots_owned_by_ctx(ctx, src)) return NULL;
+  /* Pinned silu/swish is self*self.sigmoid()
+   * (mixin/elementwise.py:780-800). */
+  return tensor_unary_result(
+      ctx, src, poly_silu(ctx, src->uop_logical), poly_silu(ctx, src->uop_physical)
+  );
+}
+
 PolyTensor *poly_tensor_quick_gelu(PolyCtx *ctx, PolyTensor *src) {
   if (!tensor_roots_owned_by_ctx(ctx, src)) return NULL;
   return tensor_unary_result(
@@ -7035,6 +6938,24 @@ PolyUOp *poly_rope(PolyCtx *ctx, PolyUOp *x, PolyUOp *freqs_cos, PolyUOp *freqs_
   pad2[ndim - 1][0] = half_dim;
 
   return poly_alu2(ctx, POLY_OP_ADD, poly_pad(ctx, r1, pad1, ndim), poly_pad(ctx, r2, pad2, ndim));
+}
+
+PolyTensor *poly_tensor_rope(
+    PolyCtx *ctx,
+    PolyTensor *x,
+    PolyTensor *freqs_cos,
+    PolyTensor *freqs_sin
+) {
+  if (!tensor_roots_owned_by_ctx(ctx, x) || !tensor_roots_owned_by_ctx(ctx, freqs_cos) ||
+      !tensor_roots_owned_by_ctx(ctx, freqs_sin))
+    return NULL;
+  PolyTensor *inputs[3] = {x, freqs_cos, freqs_sin};
+  return tensor_composite_result(
+      ctx,
+      poly_rope(ctx, x->uop_logical, freqs_cos->uop_logical, freqs_sin->uop_logical),
+      poly_rope(ctx, x->uop_physical, freqs_cos->uop_physical, freqs_sin->uop_physical),
+      inputs, 3
+  );
 }
 
 PolyUOp *poly_repeat_interleave(PolyCtx *ctx, PolyUOp *x, int repeats, int dim) {

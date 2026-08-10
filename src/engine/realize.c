@@ -1413,11 +1413,25 @@ static PolyUOp *poly_transform_to_call_materialize_view_copy(
   PolyUOp *cached = poly_transform_to_call_cached_replacement(tctx, copy);
   if (cached) return cached;
 
-  const PolyUOp *view = poly_uop_get_buffer_identity(copy->src[0]);
-  const PolyUOp *base =
+  PolyUOp *view = (PolyUOp *)poly_uop_get_buffer_identity(copy->src[0]);
+  PolyUOp *base =
       (view && view->op == POLY_OP_BUFFER_VIEW && view->n_src >= 1)
-          ? poly_uop_get_buffer_identity(view->src[0])
+          ? (PolyUOp *)poly_uop_get_buffer_identity(view->src[0])
           : NULL;
+  if (!base) {
+    PolyShape view_shape = {.ndim = -1};
+    int64_t view_numel = -1;
+    size_t view_byte_offset = 0;
+    /* Pinned callify._make_buffer_view turns a provably contiguous movement
+     * source into SLICE before a creation-device COPY (callify.py:60-95).
+     * BUFFER_VIEW is Polygrad's existing schedule-level SLICE equivalent. */
+    if (!poly_uop_contiguous_view_info(
+            ctx, copy->src[0], &base, &view_shape, &view_numel,
+            &view_byte_offset
+        ))
+      return NULL;
+    view = poly_buffer_view(ctx, base, view_numel, view_byte_offset);
+  }
   if (!base) return NULL;
 
   PolyShape shape = poly_uop_max_shape_cached(ctx, copy);
@@ -1436,8 +1450,8 @@ static PolyUOp *poly_transform_to_call_materialize_view_copy(
   PolyUOp *copy_body = poly_callify_tag_ids(copy, NULL, NULL)
                             ? poly_callify_rebuild_without_tag(ctx, copy, NULL)
                             : copy;
-  PolyUOp *view_call_src[3] = {(PolyUOp *)view, (PolyUOp *)view, (PolyUOp *)base};
-  PolyUOp *copy_call_src[3] = {copy_body, buf, (PolyUOp *)view};
+  PolyUOp *view_call_src[3] = {view, view, base};
+  PolyUOp *copy_call_src[3] = {copy_body, buf, view};
   PolyUOp *view_call =
       poly_uop(ctx, POLY_OP_CALL, POLY_VOID, view_call_src, 3, poly_arg_none());
   PolyUOp *copy_call =
@@ -2466,8 +2480,9 @@ static PolySchedule *poly_schedule_callified_with_vars(PolyCtx *ctx, PolyUOp *bi
   return sched;
 }
 
-/* Raw physical-UOp analogue of Tensor.schedule_with_vars. Tensor placement
- * adaptation belongs to poly_realize_tensors_impl, not this entrypoint. */
+/* Raw physical-UOp analogue of Tensor.schedule_with_vars. Default Tensor
+ * execution requires a complete eagerly constructed physical root; explicit
+ * logical-to-physical compilation stays outside both scheduling entrypoints. */
 PolySchedule *poly_schedule_with_vars(PolyCtx *ctx, PolyUOp **uops, int n, PolyUOp **out_uops) {
   if (!ctx || !uops || !out_uops || n < 0) return NULL;
   if (n == 0) return NULL;
@@ -2572,76 +2587,35 @@ static int poly_realize_tensors_impl(
 ) {
   if (!ctx || !inputs || !outputs || n < 0) return -1;
   if (n == 0) return 0;
-  PolyUOp **physical_roots = calloc((size_t)n, sizeof(PolyUOp *));
   PolyTensor **pending_tensors = calloc((size_t)n, sizeof(PolyTensor *));
   PolyUOp **pending_roots = calloc((size_t)n, sizeof(PolyUOp *));
   PolyUOp **pending_out = calloc((size_t)n, sizeof(PolyUOp *));
   int *pending_indices = calloc((size_t)n, sizeof(int));
-  PolyMap *placement_memo[POLY_DEVICE_DISK + 1] = {0};
   PolyUOp **map_orig = NULL;
   PolyUOp **map_repl = NULL;
   int map_n = 0;
   PolySchedule *sched = NULL;
   int rc = -1;
   int n_pending = 0;
-  bool used_placement = false;
-  if (!physical_roots || !pending_tensors || !pending_roots || !pending_out ||
-      !pending_indices)
+  if (!pending_tensors || !pending_roots || !pending_out || !pending_indices)
     goto cleanup;
 
   for (int i = 0; i < n; i++) {
     outputs[i] = NULL;
     if (!inputs[i]) goto cleanup;
     if (!inputs[i]->uop_physical ||
-        poly_tensor_root_has_unplaced_buffer(ctx, inputs[i]->uop_physical))
-      used_placement = true;
-  }
-
-  /* Pinned Tensor.realize consumes its sole deviceful Tensor.uop directly
-   * (tensor.py:202-218); it has no logical->physical admission fallback.
-   * Keep the legacy projection available during migration, but make every
-   * remaining admission observable and fail-loud under the invariant gate. */
-  if (used_placement && poly_getenv_flag("POLY_REQUIRE_PHYSICAL_ROOTS")) {
-    for (int i = 0; i < n; i++) {
-      PolyUOp *physical = inputs[i]->uop_physical;
-      bool missing = physical == NULL;
-      bool unplaced = !missing && poly_tensor_root_has_unplaced_buffer(ctx, physical);
-      if (!missing && !unplaced) continue;
-      fprintf(
-          stderr,
-          "PHYSICAL_ROOT_ADMISSION_FAIL target=%d reason=%s logical_op=%s "
-          "physical_op=%s role=%d device=%d\n",
-          i, missing ? "missing_physical" : "unplaced_buffer",
-          inputs[i]->uop_logical ? poly_op_name(inputs[i]->uop_logical->op) : "NULL",
-          physical ? poly_op_name(physical->op) : "NULL", (int)inputs[i]->role,
-          (int)inputs[i]->device
-      );
-    }
-    goto cleanup;
-  }
-
-  /* Pinned Tensor.realize filters its already-deviceful Tensor.uop directly
-   * (tensor.py:214-219), then applies transform_to_call's exact becomes-map.
-   * Default Tensor construction stores a complete graph in uop_physical. During
-   * migration, a legacy non-NULL graph can still contain device-free BUFFERs;
-   * keep the preserved aggregate placer for that entire batch and
-   * never mix placement and direct roots within one realization. */
-  if (used_placement) {
-    if (poly_tensor_physicalize_many(
-            ctx, inputs, n, physical_roots, placement_memo
-        ) != 0)
+        poly_tensor_root_has_unplaced_buffer(ctx, inputs[i]->uop_physical)) {
+      fprintf(stderr, "poly_realize_tensors: tensor %d has no complete physical root\n", i);
       goto cleanup;
-  } else {
-    for (int i = 0; i < n; i++)
-      physical_roots[i] = inputs[i]->uop_physical;
+    }
   }
 
   for (int i = 0; i < n; i++) {
-    PolyUOp *physical = physical_roots[i];
+    PolyUOp *physical = inputs[i]->uop_physical;
     /* Pinned Tensor.realize skips roots whose UOp.device is None
      * (tensor.py:214-219). Polygrad represents that state as AUTO; wrapper
      * device metadata must not force a pure CONST graph through callify. */
-    if (!used_placement && poly_uop_device(physical) == POLY_DEVICE_AUTO) {
+    if (poly_uop_device(physical) == POLY_DEVICE_AUTO) {
       outputs[i] = inputs[i];
       continue;
     }
@@ -2649,8 +2623,7 @@ static int poly_realize_tensors_impl(
      * over already-valid storage as a zero-CALL Buffer.view. Do not use the
      * recursive UOp.buffer accessor as the proof: it also walks through
      * AFTER, whose STORE effects must first run through callify. */
-    if (!used_placement && physical->op == POLY_OP_CONTIGUOUS &&
-        physical->n_src == 1) {
+    if (physical->op == POLY_OP_CONTIGUOUS && physical->n_src == 1) {
       PolyUOp *view_identity = NULL;
       PolyShape view_shape = {.ndim = -1};
       int64_t view_numel = -1;
@@ -2693,16 +2666,14 @@ static int poly_realize_tensors_impl(
   }
 
   /* Pinned Tensor.linear_with_vars publishes transform_to_call's complete map
-   * before create_linear_with_vars. The exact placement memo exists only to
-   * adapt that physical map back onto Polygrad's live uop_physical roots. */
+   * to live current Tensor.uop roots before create_linear_with_vars
+   * (tensor.py:195-206). Polygrad's current parity surface is uop_physical. */
   PolyUOp *big_call = poly_transform_to_call_with_map(
       ctx, pending_roots, n_pending, pending_out, &map_orig, &map_repl, &map_n
   );
   if (!big_call) goto cleanup;
-  if (map_n > 0 && poly_tensor_apply_realize_map(
-                       ctx, map_orig, map_repl, map_n, POLY_DEVICE_AUTO,
-                       used_placement ? placement_memo : NULL
-                   ) != 0)
+  if (map_n > 0 &&
+      poly_tensor_apply_realize_map(ctx, map_orig, map_repl, map_n, POLY_DEVICE_AUTO) != 0)
     goto cleanup;
 
   for (int pending = 0; pending < n_pending; pending++) {
@@ -2735,12 +2706,10 @@ cleanup:
   poly_schedule_free(sched);
   free(map_repl);
   free(map_orig);
-  poly_tensor_physicalize_memo_destroy(placement_memo);
   free(pending_indices);
   free(pending_out);
   free(pending_roots);
   free(pending_tensors);
-  free(physical_roots);
   return rc;
 }
 

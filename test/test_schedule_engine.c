@@ -263,7 +263,9 @@ TEST(sched, placement_copy_item_uses_copy_root_and_two_slots) {
   poly_buffer_set(ctx, a, data, 3 * sizeof(float), POLY_DEVICE_HOST);
 
   PolyUOp *x = poly_alu2(ctx, POLY_OP_ADD, a, poly_const_float(ctx, 1.0f));
-  PolyTensor *tensor = poly_tensor_create(ctx, x, POLY_TENSOR_PLACE, POLY_DEVICE_CPU);
+  PolyTensor *tensor = poly_tensor_create_with_roots(
+      ctx, x, NULL, POLY_TENSOR_PLACE, POLY_DEVICE_CPU
+  );
   PolyUOp *physical = poly_tensor_physicalize(ctx, tensor);
   ASSERT_NOT_NULL(physical);
 
@@ -286,17 +288,23 @@ TEST(sched, placement_copy_item_uses_copy_root_and_two_slots) {
 TEST(sched, placement_computed_copy_source_materializes_before_copy) {
   PolyCtx *ctx = poly_ctx_new();
 
-  PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, 3);
   float data[3] = {1.0f, 2.0f, 3.0f};
-  poly_buffer_set(ctx, a, data, sizeof(data), POLY_DEVICE_CPU);
-
-  PolyUOp *mul = poly_alu2(ctx, POLY_OP_MUL, a, poly_const_float(ctx, 2.0f));
-  PolyTensor *mt = poly_tensor_create(ctx, mul, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  int64_t shape[1] = {3};
+  int f32 = poly_dtype_id_by_name("float32");
+  PolyTensor *a = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+  PolyUOp *a_buffer =
+      a ? (PolyUOp *)poly_uop_get_buffer_identity(poly_tensor_uop_physical(a)) : NULL;
+  PolyTensor *two = poly_tensor_const_float_by_id(ctx, 2.0f, f32, POLY_DEVICE_CPU);
+  PolyTensor *mt = poly_tensor_alu2(ctx, POLY_OP_MUL, a, two);
+  ASSERT_NOT_NULL(a);
+  ASSERT_NOT_NULL(a_buffer);
+  poly_buffer_set(ctx, a_buffer, data, sizeof(data), POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(two);
   ASSERT_NOT_NULL(mt);
   PolyTensor *cuda_t = poly_tensor_to_device(ctx, mt, POLY_DEVICE_CUDA);
   ASSERT_NOT_NULL(cuda_t);
 
-  PolyUOp *physical = poly_tensor_physicalize(ctx, cuda_t);
+  PolyUOp *physical = poly_tensor_uop_physical(cuda_t);
   ASSERT_NOT_NULL(physical);
   ASSERT_INT_EQ(physical->op, POLY_OP_COPY);
 
@@ -339,7 +347,9 @@ TEST(sched, placement_scalar_copy_operand_splits_before_compute) {
   poly_buffer_set(ctx, x, x_data, sizeof(x_data), POLY_DEVICE_CPU);
   poly_buffer_set(ctx, y, y_data, sizeof(y_data), POLY_DEVICE_HOST);
 
-  PolyTensor *yt = poly_tensor_create(ctx, y, POLY_TENSOR_PLACE, POLY_DEVICE_CPU);
+  PolyTensor *yt = poly_tensor_create_with_roots(
+      ctx, y, NULL, POLY_TENSOR_PLACE, POLY_DEVICE_CPU
+  );
   ASSERT_NOT_NULL(yt);
   PolyUOp *y_cpu = poly_tensor_physicalize(ctx, yt);
   ASSERT_NOT_NULL(y_cpu);

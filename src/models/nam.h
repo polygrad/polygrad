@@ -40,6 +40,6 @@
  *
  * Returns NULL on error.
  */
-PolyInstance *poly_nam_instance(const char *spec_json, int spec_len);
+PolyInstance *poly_nam_instance(const char *spec_json, int spec_len, PolyDevice device);
 
 #endif /* POLY_MODEL_NAM_H */

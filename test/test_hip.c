@@ -392,7 +392,7 @@ static PolyInstance *hip_make_test_mlp(int n_in, int n_out) {
       "\"loss\":\"mse\",\"batch_size\":1,\"seed\":42}",
       n_in, n_out
   );
-  return poly_mlp_from_json(spec, (int)strlen(spec));
+  return poly_mlp_from_json(spec, (int)strlen(spec), POLY_DEVICE_AUTO);
 }
 
 TEST_BACKEND(hip, instance_set_device_hip) {

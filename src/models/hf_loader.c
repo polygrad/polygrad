@@ -15,7 +15,7 @@ PolyInstance *poly_hf_load(
     const char *config_json, int config_len,
     const uint8_t **weight_files, const int64_t *weight_lens,
     int n_weight_files,
-    int max_batch, int max_seq_len)
+    int max_batch, int max_seq_len, PolyDevice device)
 {
   poly_import_error_clear();
 
@@ -39,6 +39,7 @@ PolyInstance *poly_hf_load(
   PolyGenericImportOpts opts = {
     .max_batch   = max_batch,
     .max_seq_len = max_seq_len,
+    .device      = device,
   };
   PolyInstance *inst = desc->from_hf_decoded(hf, &opts);
 

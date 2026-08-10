@@ -2,8 +2,8 @@
  * poly_model_mlp.c -- MLP family builder for PolyInstance
  *
  * Two entry points:
- *   poly_mlp(cfg)         -- builds from MLPConfig struct (like GPT-2)
- *   poly_mlp_from_json(json,len) -- FFI wrapper that parses JSON then calls build
+ *   poly_mlp(cfg, device) -- builds from MLPConfig struct on the requested device
+ *   poly_mlp_from_json(json,len,device) -- FFI wrapper that parses JSON then calls build
  *
  * Deterministic weight init via SplitMix64.
  */
@@ -67,22 +67,89 @@ static ActivationKind parse_activation(const char *s) {
   return ACT_RELU;
 }
 
-static PolyUOp *apply_activation(PolyCtx *ctx, PolyUOp *x, ActivationKind act) {
+static PolyTensor *apply_activation(PolyCtx *ctx, PolyTensor *x, ActivationKind act) {
   switch (act) {
   case ACT_RELU:
-    return poly_relu(ctx, x);
+    return poly_tensor_relu(ctx, x);
   case ACT_GELU:
-    return poly_gelu(ctx, x);
+    return poly_tensor_gelu(ctx, x);
   case ACT_SILU:
-    return poly_silu(ctx, x);
+    return poly_tensor_silu(ctx, x);
   case ACT_TANH:
-    return poly_tanh_act(ctx, x);
+    return poly_tensor_tanh(ctx, x);
   case ACT_SIGMOID:
-    return poly_sigmoid(ctx, x);
+    return poly_tensor_sigmoid(ctx, x);
   case ACT_NONE:
     return x;
   }
   return x;
+}
+
+static PolyTensor *mlp_linear(
+    PolyCtx *ctx,
+    PolyTensor *x,
+    PolyTensor *weight,
+    PolyTensor *bias
+) {
+  /* Pinned nn.Linear stores (out,in), transposes it, then calls Tensor.linear;
+   * Tensor.linear is dot followed by optional add
+   * (nn/__init__.py:156-177; mixin/__init__.py:1335-1350). */
+  int64_t perm[] = {1, 0};
+  PolyTensor *weight_t = poly_tensor_permute(ctx, weight, perm, 2);
+  PolyTensor *out = weight_t ? poly_tensor_dot(ctx, x, weight_t) : NULL;
+  return out && bias ? poly_tensor_alu2(ctx, POLY_OP_ADD, out, bias) : out;
+}
+
+static PolyTensor *mlp_int_scalar(PolyCtx *ctx, int64_t value) {
+  PolyUOp *constant = poly_const_typed(ctx, POLY_INT32, (double)value);
+  if (!constant) return NULL;
+  PolyTensor *out = poly_tensor_create_with_roots(
+      ctx, constant, constant, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO
+  );
+  if (out) {
+    poly_tensor_set_requires_grad(out, false);
+    poly_tensor_set_provenance(out, POLY_TENSOR_PROVENANCE_CONST_INIT);
+  }
+  return out;
+}
+
+static PolyTensor *mlp_mean_all(PolyCtx *ctx, PolyTensor *src) {
+  PolyUOp *physical = poly_tensor_uop_physical(src);
+  int ndim = physical ? poly_uop_ndim(ctx, physical) : -1;
+  const int64_t *shape = ndim >= 0 ? poly_uop_max_shape_dims(ctx, physical) : NULL;
+  int64_t numel = shape ? poly_shape_numel_checked(shape, ndim) : -1;
+  if (ndim < 0 || numel <= 0) return NULL;
+  if (ndim == 0) return src;
+  int64_t axes[POLY_MAX_DIMS];
+  for (int i = 0; i < ndim; i++)
+    axes[i] = i;
+  PolyTensor *sum = poly_tensor_sum(ctx, src, axes, ndim, false);
+  PolyTensor *denominator = mlp_int_scalar(ctx, numel);
+  return sum && denominator ? poly_tensor_div(ctx, sum, denominator) : NULL;
+}
+
+static PolyTensor *mlp_mse(PolyCtx *ctx, PolyTensor *pred, PolyTensor *target) {
+  PolyTensor *diff = poly_tensor_alu2(ctx, POLY_OP_SUB, pred, target);
+  PolyTensor *square = diff ? poly_tensor_alu2(ctx, POLY_OP_MUL, diff, diff) : NULL;
+  return square ? mlp_mean_all(ctx, square) : NULL;
+}
+
+static PolyTensor *mlp_dense_cross_entropy(
+    PolyCtx *ctx,
+    PolyTensor *logits,
+    PolyTensor *target
+) {
+  PolyUOp *physical = poly_tensor_uop_physical(logits);
+  int ndim = physical ? poly_uop_ndim(ctx, physical) : -1;
+  int classes_dim = ndim == 1 ? 0 : 1;
+  if (ndim < 1) return NULL;
+  PolyTensor *log_probs = poly_tensor_log_softmax(ctx, logits, classes_dim);
+  PolyTensor *weighted =
+      log_probs ? poly_tensor_alu2(ctx, POLY_OP_MUL, log_probs, target) : NULL;
+  int64_t axis[] = {classes_dim};
+  PolyTensor *reduced = weighted ? poly_tensor_sum(ctx, weighted, axis, 1, false) : NULL;
+  PolyTensor *mean = reduced ? mlp_mean_all(ctx, reduced) : NULL;
+  return mean ? poly_tensor_alu1(ctx, POLY_OP_NEG, mean) : NULL;
 }
 
 /* MLP Config */
@@ -100,7 +167,7 @@ MLPConfig poly_mlp_config_default(void) {
 
 /* MLP Builder (config struct) */
 
-PolyInstance *poly_mlp(const MLPConfig *cfg) {
+PolyInstance *poly_mlp(const MLPConfig *cfg, PolyDevice device) {
   if (!cfg || cfg->n_layers < 2 || cfg->n_layers > POLY_MLP_MAX_LAYERS) return NULL;
 
   int n_linear = cfg->n_layers - 1;
@@ -112,6 +179,7 @@ PolyInstance *poly_mlp(const MLPConfig *cfg) {
 
   PolyCtx *ctx = poly_ctx_new();
   if (!ctx) return NULL;
+  if (device != POLY_DEVICE_AUTO) poly_ctx_set_preferred_device(ctx, device);
   PolyInstanceOptions opts = {
       .own_ctx_on_success = true,
       .own_ctx_on_failure = true,
@@ -128,33 +196,30 @@ PolyInstance *poly_mlp(const MLPConfig *cfg) {
   if (!x_tensor) goto fail_pre_build;
 
   /* Forward: chain of linear + activation. */
-  PolyUOp *x = poly_tensor_uop(x_tensor);
+  PolyTensor *x = x_tensor;
   for (int l = 0; l < n_linear; l++) {
     if (poly_instance_scope_push(inst, "layers.%d", l) != POLY_STATUS_OK) goto fail_pre_build;
 
     int64_t ws[] = {cfg->layers[l + 1], cfg->layers[l]};
     PolyTensor *w_tensor = poly_instance_param(inst, "weight", POLY_FLOAT32, ws, 2);
     if (!w_tensor) goto fail_pre_build;
-    PolyUOp *w = poly_tensor_uop(w_tensor);
 
-    PolyUOp *b = NULL;
+    PolyTensor *b_tensor = NULL;
     if (cfg->use_bias) {
       int64_t bs[] = {cfg->layers[l + 1]};
-      PolyTensor *b_tensor = poly_instance_param(inst, "bias", POLY_FLOAT32, bs, 1);
+      b_tensor = poly_instance_param(inst, "bias", POLY_FLOAT32, bs, 1);
       if (!b_tensor) goto fail_pre_build;
-      b = poly_tensor_uop(b_tensor);
     }
 
     if (poly_instance_scope_pop(inst) != POLY_STATUS_OK) goto fail_pre_build;
 
-    x = poly_linear_apply(ctx, x, w, b);
+    x = mlp_linear(ctx, x, w_tensor, b_tensor);
     if (!x) goto fail_pre_build;
     if (l < n_linear - 1) x = apply_activation(ctx, x, activation);
     if (!x) goto fail_pre_build;
   }
 
-  PolyTensor *out_tensor = poly_tensor_create(ctx, x, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
-  if (!out_tensor || poly_instance_output(inst, "output", out_tensor) != POLY_STATUS_OK)
+  if (poly_instance_output(inst, "output", x) != POLY_STATUS_OK)
     goto fail_pre_build;
   const char *forward_inputs[] = {"x"};
   const char *forward_outputs[] = {"output"};
@@ -169,14 +234,10 @@ PolyInstance *poly_mlp(const MLPConfig *cfg) {
     int64_t y_shape[] = {batch_size, out_dim};
     PolyTensor *y_tensor = poly_instance_target(inst, "y", POLY_FLOAT32, y_shape, 2);
     if (!y_tensor) goto fail_pre_build;
-    PolyUOp *y = poly_tensor_uop(y_tensor);
 
-    PolyUOp *loss_val = (strcmp(loss_type, "mse") == 0) ? poly_mse_loss(ctx, x, y)
-                                                        : poly_cross_entropy(ctx, x, y, -1);
-    if (!loss_val) goto fail_pre_build;
-
-    PolyTensor *loss_tensor =
-        poly_tensor_create(ctx, loss_val, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
+    PolyTensor *loss_tensor = strcmp(loss_type, "mse") == 0
+                                  ? mlp_mse(ctx, x, y_tensor)
+                                  : mlp_dense_cross_entropy(ctx, x, y_tensor);
     if (!loss_tensor || poly_instance_output(inst, "loss", loss_tensor) != POLY_STATUS_OK)
       goto fail_pre_build;
     const char *loss_inputs[] = {"x", "y"};
@@ -215,7 +276,7 @@ fail_pre_build:
 
 /* FFI wrapper (JSON -> config -> build) */
 
-PolyInstance *poly_mlp_from_json(const char *json, int len) {
+PolyInstance *poly_mlp_from_json(const char *json, int len, PolyDevice device) {
   if (!json || len <= 0) return NULL;
 
   cJSON *root = cJSON_ParseWithLength(json, (size_t)len);
@@ -241,7 +302,7 @@ PolyInstance *poly_mlp_from_json(const char *json, int len) {
   for (int i = 0; i < cfg.n_layers; i++)
     cfg.layers[i] = cJSON_GetArrayItem(layers, i)->valueint;
 
-  PolyInstance *inst = poly_mlp(&cfg);
+  PolyInstance *inst = poly_mlp(&cfg, device);
   cJSON_Delete(root);
   return inst;
 }

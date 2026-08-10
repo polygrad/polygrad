@@ -21,13 +21,14 @@ import os
 import pathlib
 import numpy as np
 from . import _ffi
+from .device import _device_id
 from .instance import Instance
 
 _get_lib = _ffi.get_lib
 _u8p = ctypes.POINTER(ctypes.c_uint8)
 
 
-def load_hf(model_path, max_batch=1, max_seq_len=0):
+def load_hf(model_path, max_batch=1, max_seq_len=0, device=None):
     """Load a HuggingFace model from a local directory.
 
     Args:
@@ -56,10 +57,10 @@ def load_hf(model_path, max_batch=1, max_seq_len=0):
     for wf in weight_files:
         weight_data.append(wf.read_bytes())
 
-    return _load_from_bytes(config_bytes, weight_data, max_batch, max_seq_len)
+    return _load_from_bytes(config_bytes, weight_data, max_batch, max_seq_len, device)
 
 
-def load_hf_bytes(config_json, weight_bytes_list, max_batch=1, max_seq_len=0):
+def load_hf_bytes(config_json, weight_bytes_list, max_batch=1, max_seq_len=0, device=None):
     """Load from raw bytes (useful for non-filesystem sources).
 
     Args:
@@ -73,7 +74,7 @@ def load_hf_bytes(config_json, weight_bytes_list, max_batch=1, max_seq_len=0):
     """
     if isinstance(config_json, str):
         config_json = config_json.encode('utf-8')
-    return _load_from_bytes(config_json, weight_bytes_list, max_batch, max_seq_len)
+    return _load_from_bytes(config_json, weight_bytes_list, max_batch, max_seq_len, device)
 
 
 def download_hf(repo_id, cache_dir=None):
@@ -117,7 +118,10 @@ def generate(instance, tokens, max_new_tokens, temperature=1.0, top_k=None):
     Returns:
         numpy array of shape (1, seq_len + max_new_tokens) with generated tokens.
     """
-    tokens = np.asarray(tokens, dtype=np.float32)
+    tokens = np.asarray(tokens)
+    if not np.issubdtype(tokens.dtype, np.integer):
+        raise TypeError(f'tokens must have an integer dtype, got {tokens.dtype}')
+    tokens = tokens.astype(np.int32, copy=False)
     if tokens.ndim == 1:
         tokens = tokens.reshape(1, -1)
 
@@ -131,10 +135,10 @@ def generate(instance, tokens, max_new_tokens, temperature=1.0, top_k=None):
                 f'Sequence length {actual_len} exceeds max_seq_len {max_seq_len}')
 
         # Pad input to max_seq_len
-        x_padded = np.zeros((1, max_seq_len), dtype=np.float32)
+        x_padded = np.zeros((1, max_seq_len), dtype=np.int32)
         x_padded[0, :actual_len] = tokens[0]
 
-        positions = np.arange(max_seq_len, dtype=np.float32).reshape(1, -1)
+        positions = np.arange(max_seq_len, dtype=np.int32).reshape(1, -1)
         outputs = instance.forward(x=x_padded, positions=positions)
         logits = outputs.get('output')
         if logits is None:
@@ -163,7 +167,9 @@ def generate(instance, tokens, max_new_tokens, temperature=1.0, top_k=None):
         probs = probs / probs.sum(axis=-1, keepdims=True)
 
         # Sample
-        next_token = np.array([[np.random.choice(probs.shape[-1], p=probs[0])]], dtype=np.float32)
+        next_token = np.array(
+            [[np.random.choice(probs.shape[-1], p=probs[0])]], dtype=np.int32
+        )
         tokens = np.concatenate([tokens, next_token], axis=1)
 
     return tokens
@@ -192,7 +198,7 @@ def _find_safetensors(model_path):
     return files
 
 
-def _load_from_bytes(config_bytes, weight_data_list, max_batch, max_seq_len):
+def _load_from_bytes(config_bytes, weight_data_list, max_batch, max_seq_len, device=None):
     """Internal: call poly_hf_load with byte buffers."""
     if isinstance(config_bytes, str):
         config_bytes = config_bytes.encode('utf-8')
@@ -214,7 +220,7 @@ def _load_from_bytes(config_bytes, weight_data_list, max_batch, max_seq_len):
     ptr = _get_lib().poly_hf_load(
         config_bytes, len(config_bytes),
         file_ptrs, file_lens,
-        n_files, max_batch, max_seq_len
+        n_files, max_batch, max_seq_len, _device_id(device)
     )
 
     if not ptr:

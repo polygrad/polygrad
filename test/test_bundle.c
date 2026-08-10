@@ -84,7 +84,7 @@ TEST(bundle, instance_save_load_roundtrip) {
   /* Create MLP instance */
   const char *spec = "{\"layers\":[2,4,1],\"activation\":\"relu\",\"bias\":true,"
                      "\"loss\":\"mse\",\"batch_size\":1,\"seed\":42}";
-  PolyInstance *inst = poly_mlp_from_json(spec, (int)strlen(spec));
+  PolyInstance *inst = poly_mlp_from_json(spec, (int)strlen(spec), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   /* Set some non-zero weight values */

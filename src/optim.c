@@ -131,10 +131,6 @@ static PolyUOp *optim_assign_uop_target(PolyCtx *ctx, PolyUOp *target_uop, PolyU
   return after;
 }
 
-static PolyUOp *optim_assign_uop(PolyCtx *ctx, PolyTensor *target, PolyUOp *value) {
-  return target ? optim_assign_uop_target(ctx, poly_tensor_uop(target), value) : NULL;
-}
-
 int poly_optim_build_update(
     PolyCtx *ctx,
     const PolyOptimConfig *cfg,
@@ -284,8 +280,9 @@ int poly_optim_build_step(
     int out_cap
 ) {
   if (!ctx || !cfg || !lr || !params || !grads || n_params <= 0) return -1;
-  PolyUOp *lr_uop = optim_lr_uop(ctx, poly_tensor_uop(lr));
-  if (!lr_uop) return -1;
+  PolyUOp *lr_logical = optim_lr_uop(ctx, poly_tensor_uop_logical(lr));
+  PolyUOp *lr_physical = optim_lr_uop(ctx, poly_tensor_uop_physical(lr));
+  if (!lr_logical || !lr_physical) return -1;
   bool adam = (cfg->kind == POLY_OPTIM_ADAM || cfg->kind == POLY_OPTIM_ADAMW);
   bool sgd_momentum = (cfg->kind == POLY_OPTIM_SGD && cfg->momentum > 0.0f);
   int needed = n_params;
@@ -296,11 +293,15 @@ int poly_optim_build_step(
   if ((adam || sgd_momentum) && !m_tensors) return -1;
   if (adam && (!v_tensors || !bc1_tensor || !bc2_tensor)) return -1;
 
-  PolyUOp *bc1_uop = adam ? poly_tensor_uop(bc1_tensor) : NULL;
-  PolyUOp *bc2_uop = adam ? poly_tensor_uop(bc2_tensor) : NULL;
-  if (adam && (!bc1_uop || !bc2_uop || !poly_ctx_owns_ptr(ctx, bc1_uop) ||
-               !poly_ctx_owns_ptr(ctx, bc2_uop) || optim_uop_numel(ctx, bc1_uop) != 1 ||
-               optim_uop_numel(ctx, bc2_uop) != 1 ||
+  PolyUOp *bc1_logical = adam ? poly_tensor_uop_logical(bc1_tensor) : NULL;
+  PolyUOp *bc2_logical = adam ? poly_tensor_uop_logical(bc2_tensor) : NULL;
+  PolyUOp *bc1_physical = adam ? poly_tensor_uop_physical(bc1_tensor) : NULL;
+  PolyUOp *bc2_physical = adam ? poly_tensor_uop_physical(bc2_tensor) : NULL;
+  if (adam && (!bc1_logical || !bc2_logical || !bc1_physical || !bc2_physical ||
+               !poly_ctx_owns_ptr(ctx, bc1_logical) || !poly_ctx_owns_ptr(ctx, bc2_logical) ||
+               !poly_ctx_owns_ptr(ctx, bc1_physical) || !poly_ctx_owns_ptr(ctx, bc2_physical) ||
+               optim_uop_numel(ctx, bc1_physical) != 1 ||
+               optim_uop_numel(ctx, bc2_physical) != 1 ||
                poly_tensor_device(bc1_tensor) != poly_tensor_device(lr) ||
                poly_tensor_device(bc2_tensor) != poly_tensor_device(lr)))
     return -1;
@@ -309,35 +310,49 @@ int poly_optim_build_step(
   for (int i = 0; i < n_params; i++) {
     if (!params[i] || !grads[i] || poly_tensor_device(lr) != poly_tensor_device(params[i]))
       return -1;
-    PolyUOp *param_uop = poly_tensor_uop(params[i]);
-    PolyUOp *grad_uop = poly_tensor_uop(grads[i]);
-    if (!param_uop || !grad_uop || !poly_ctx_owns_ptr(ctx, param_uop) ||
-        !poly_ctx_owns_ptr(ctx, grad_uop))
+    PolyUOp *param_logical = poly_tensor_uop_logical(params[i]);
+    PolyUOp *grad_logical = poly_tensor_uop_logical(grads[i]);
+    PolyUOp *param_physical = poly_tensor_uop_physical(params[i]);
+    PolyUOp *grad_physical = poly_tensor_uop_physical(grads[i]);
+    if (!param_logical || !grad_logical || !param_physical || !grad_physical ||
+        !poly_ctx_owns_ptr(ctx, param_logical) || !poly_ctx_owns_ptr(ctx, grad_logical) ||
+        !poly_ctx_owns_ptr(ctx, param_physical) || !poly_ctx_owns_ptr(ctx, grad_physical))
       return -1;
-    int64_t numel = optim_uop_numel(ctx, param_uop);
-    if (numel <= 0 || optim_uop_numel(ctx, grad_uop) != numel) return -1;
+    int64_t numel = optim_uop_numel(ctx, param_physical);
+    if (numel <= 0 || optim_uop_numel(ctx, grad_physical) != numel ||
+        optim_uop_numel(ctx, param_logical) != numel ||
+        optim_uop_numel(ctx, grad_logical) != numel)
+      return -1;
 
     if (adam || sgd_momentum) {
       if (!m_tensors[i] || poly_tensor_device(m_tensors[i]) != poly_tensor_device(params[i]))
         return -1;
-      PolyUOp *m_uop = poly_tensor_uop(m_tensors[i]);
-      if (!m_uop || !poly_ctx_owns_ptr(ctx, m_uop) || optim_uop_numel(ctx, m_uop) != numel)
+      PolyUOp *m_logical = poly_tensor_uop_logical(m_tensors[i]);
+      PolyUOp *m_physical = poly_tensor_uop_physical(m_tensors[i]);
+      if (!m_logical || !m_physical || !poly_ctx_owns_ptr(ctx, m_logical) ||
+          !poly_ctx_owns_ptr(ctx, m_physical) || optim_uop_numel(ctx, m_logical) != numel ||
+          optim_uop_numel(ctx, m_physical) != numel)
         return -1;
     }
     if (adam) {
       if (!v_tensors[i] || poly_tensor_device(v_tensors[i]) != poly_tensor_device(params[i]))
         return -1;
-      PolyUOp *v_uop = poly_tensor_uop(v_tensors[i]);
-      if (!v_uop || !poly_ctx_owns_ptr(ctx, v_uop) || optim_uop_numel(ctx, v_uop) != numel)
+      PolyUOp *v_logical = poly_tensor_uop_logical(v_tensors[i]);
+      PolyUOp *v_physical = poly_tensor_uop_physical(v_tensors[i]);
+      if (!v_logical || !v_physical || !poly_ctx_owns_ptr(ctx, v_logical) ||
+          !poly_ctx_owns_ptr(ctx, v_physical) || optim_uop_numel(ctx, v_logical) != numel ||
+          optim_uop_numel(ctx, v_physical) != numel)
         return -1;
     }
   }
 
   PolyTensor **targets = calloc((size_t)needed, sizeof(PolyTensor *));
-  PolyUOp **effects = calloc((size_t)needed, sizeof(PolyUOp *));
-  if (!targets || !effects) {
+  PolyUOp **logical_effects = calloc((size_t)needed, sizeof(PolyUOp *));
+  PolyUOp **physical_effects = calloc((size_t)needed, sizeof(PolyUOp *));
+  if (!targets || !logical_effects || !physical_effects) {
     free(targets);
-    free(effects);
+    free(logical_effects);
+    free(physical_effects);
     return -1;
   }
 
@@ -355,60 +370,87 @@ int poly_optim_build_step(
   }
 
   for (int i = 0; i < n_params; i++) {
-    PolyUOp *param_uop = poly_tensor_uop(params[i]);
-    PolyUOp *grad_uop = poly_tensor_uop(grads[i]);
+    PolyUOp *param_logical = poly_tensor_uop_logical(params[i]);
+    PolyUOp *grad_logical = poly_tensor_uop_logical(grads[i]);
+    PolyUOp *param_physical = poly_tensor_uop_physical(params[i]);
+    PolyUOp *grad_physical = poly_tensor_uop_physical(grads[i]);
 
-    int64_t numel = optim_uop_numel(ctx, param_uop);
-    PolyOptimUpdate upd;
+    int64_t numel = optim_uop_numel(ctx, param_physical);
+    PolyOptimUpdate logical_update, physical_update;
     if (poly_optim_build_update(
-            ctx, cfg, lr_uop, param_uop, grad_uop,
-            (adam || sgd_momentum) ? poly_tensor_uop(m_tensors[i]) : NULL,
-            adam ? poly_tensor_uop(v_tensors[i]) : NULL, bc1_uop, bc2_uop, numel, &upd
+            ctx, cfg, lr_logical, param_logical, grad_logical,
+            (adam || sgd_momentum) ? poly_tensor_uop_logical(m_tensors[i]) : NULL,
+            adam ? poly_tensor_uop_logical(v_tensors[i]) : NULL, bc1_logical, bc2_logical,
+            numel, &logical_update
+        ) != 0 ||
+        poly_optim_build_update(
+            ctx, cfg, lr_physical, param_physical, grad_physical,
+            (adam || sgd_momentum) ? poly_tensor_uop_physical(m_tensors[i]) : NULL,
+            adam ? poly_tensor_uop_physical(v_tensors[i]) : NULL, bc1_physical, bc2_physical,
+            numel, &physical_update
         ) != 0)
       goto done;
 
-    PolyUOp *param_new = optim_reshape_like(ctx, upd.param_new, param_uop);
-    PolyUOp *param_effect = optim_assign_uop(ctx, params[i], param_new);
-    if (!param_new || !param_effect) goto done;
+    PolyUOp *param_new_logical =
+        optim_reshape_like(ctx, logical_update.param_new, param_logical);
+    PolyUOp *param_new_physical =
+        optim_reshape_like(ctx, physical_update.param_new, param_physical);
+    PolyUOp *param_effect_logical =
+        optim_assign_uop_target(ctx, param_logical, param_new_logical);
+    PolyUOp *param_effect_physical =
+        optim_assign_uop_target(ctx, param_physical, param_new_physical);
+    if (!param_new_logical || !param_new_physical || !param_effect_logical ||
+        !param_effect_physical)
+      goto done;
     targets[param_base + i] = params[i];
-    effects[param_base + i] = param_effect;
+    logical_effects[param_base + i] = param_effect_logical;
+    physical_effects[param_base + i] = param_effect_physical;
 
     if (sgd_momentum) {
-      if (!upd.m_new) goto done;
+      if (!logical_update.m_new || !physical_update.m_new) goto done;
       targets[m_base + i] = m_tensors[i];
-      effects[m_base + i] = upd.m_new;
+      logical_effects[m_base + i] = logical_update.m_new;
+      physical_effects[m_base + i] = physical_update.m_new;
     }
 
     if (adam) {
-      if (!upd.m_new || !upd.v_new || !upd.bc1_new || !upd.bc2_new) goto done;
+      if (!logical_update.m_new || !logical_update.v_new || !logical_update.bc1_new ||
+          !logical_update.bc2_new || !physical_update.m_new || !physical_update.v_new ||
+          !physical_update.bc1_new || !physical_update.bc2_new)
+        goto done;
       if (i == 0) {
         targets[0] = bc1_tensor;
-        effects[0] = upd.bc1_new;
+        logical_effects[0] = logical_update.bc1_new;
+        physical_effects[0] = physical_update.bc1_new;
         targets[1] = bc2_tensor;
-        effects[1] = upd.bc2_new;
-      } else if (effects[0] != upd.bc1_new || effects[1] != upd.bc2_new) {
+        logical_effects[1] = logical_update.bc2_new;
+        physical_effects[1] = physical_update.bc2_new;
+      } else if (logical_effects[0] != logical_update.bc1_new ||
+                 logical_effects[1] != logical_update.bc2_new ||
+                 physical_effects[0] != physical_update.bc1_new ||
+                 physical_effects[1] != physical_update.bc2_new) {
         goto done;
       }
       targets[m_base + i] = m_tensors[i];
-      effects[m_base + i] = upd.m_new;
+      logical_effects[m_base + i] = logical_update.m_new;
+      physical_effects[m_base + i] = physical_update.m_new;
       targets[v_base + i] = v_tensors[i];
-      effects[v_base + i] = upd.v_new;
+      logical_effects[v_base + i] = logical_update.v_new;
+      physical_effects[v_base + i] = physical_update.v_new;
     }
   }
 
   for (int i = 0; i < needed; i++)
-    if (!targets[i] || !effects[i]) goto done;
+    if (!targets[i] || !logical_effects[i] || !physical_effects[i]) goto done;
 
-  /* No PolyTensor root is changed until the whole batch has validated and all
-   * assignment-effect UOps have been constructed successfully. Pinned
-   * Optimizer.schedule_step mutates each current Tensor.uop through assign
-   * (nn/optim.py:41-57, tensor.py:230-257), so the Tensor boundary stores that exact
-   * current-derived AFTER/STORE effect as the physical root. The same pointer
-   * remains in the mandatory hybrid logical slot until retained optimizer
-   * export is specified. */
+  /* Pinned Optimizer.schedule_step advances every current Tensor.uop with
+   * assign (nn/optim.py:41-57; tensor.py:230-257). Preserve that exact program
+   * on the executable side, and apply it independently to the retained
+   * logical operands so export/re-placement never inherits physical storage. */
   for (int i = 0; i < needed; i++) {
     if (poly_tensor_replace_roots(
-            ctx, targets[i], effects[i], effects[i], targets[i]->role, targets[i]->device
+            ctx, targets[i], logical_effects[i], physical_effects[i], targets[i]->role,
+            targets[i]->device
         ) != 0)
       goto done;
   }
@@ -416,7 +458,8 @@ int poly_optim_build_step(
   rc = needed;
 
 done:
-  free(effects);
+  free(logical_effects);
+  free(physical_effects);
   free(targets);
   return rc;
 }

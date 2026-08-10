@@ -1500,13 +1500,8 @@ class TestElementwise:
         assert [src.op_name for src in logical_not.uop.src] == ['BUFFER', 'EXPAND']
         np.testing.assert_array_equal(logical_not.numpy(), [False, True])
 
-    def test_logaddexp_softplus_mish_match_pinned_graph(self, monkeypatch):
-        def forbidden_substitution(*_args, **_kwargs):
-            raise AssertionError('elementwise construction entered frontend substitution')
-
-        monkeypatch.setattr(
-            Tensor, '_physicalize_result_for', staticmethod(forbidden_substitution)
-        )
+    def test_logaddexp_softplus_mish_match_pinned_graph(self):
+        assert not hasattr(Tensor, '_physicalize_result_for')
         x = Tensor([
             [-20.0, -3.0, -0.0, 2.0, 20.0],
             [1.0, -1.0, 4.0, -4.0, 0.5],
@@ -1535,15 +1530,10 @@ class TestElementwise:
                 actual.numpy(), expected.numpy(), rtol=1e-6, atol=1e-6
             )
 
-    def test_log1p_expm1_use_core_tensor_roots(self, monkeypatch):
+    def test_log1p_expm1_use_core_tensor_roots(self):
         from polygrad.tensor import _uop_wrap
 
-        def forbidden_substitution(*_args, **_kwargs):
-            raise AssertionError('superset construction entered frontend substitution')
-
-        monkeypatch.setattr(
-            Tensor, '_physicalize_result_for', staticmethod(forbidden_substitution)
-        )
+        assert not hasattr(Tensor, '_physicalize_result_for')
         x = Tensor([-1e-6, 0.0, 1e-6, 0.25], device='cpu')
         for name, expected_values in (
             ('log1p', np.log1p(np.asarray([-1e-6, 0.0, 1e-6, 0.25]))),
@@ -1833,13 +1823,8 @@ class TestMovement:
         with pytest.raises(RuntimeError, match="must be one of"):
             base.scatter_reduce(1, idx, src, 'max')
 
-    def test_scatter_construction_bypasses_frontend_substitution(self, monkeypatch):
-        def forbidden_substitution(*_args, **_kwargs):
-            raise AssertionError('scatter construction entered frontend substitution')
-
-        monkeypatch.setattr(
-            Tensor, '_physicalize_result_for', staticmethod(forbidden_substitution)
-        )
+    def test_scatter_construction_bypasses_frontend_substitution(self):
+        assert not hasattr(Tensor, '_physicalize_result_for')
         base = Tensor([[1.0, 2.0, 3.0, 4.0, 5.0]])
         idx = Tensor(np.array([[0, 1, 1, 3, 4]], dtype=np.int32), dtype='int32')
         src = Tensor([[6.0, 7.0, 8.0, 9.0, 10.0]])
@@ -1927,13 +1912,8 @@ class TestReduce:
         s = a.reshape(2, 3).sum(axis=1)
         np.testing.assert_allclose(s.numpy(), [6, 15])
 
-    def test_var_matches_pinned_expression_without_substitution(self, monkeypatch):
-        def forbidden_substitution(*_args, **_kwargs):
-            raise AssertionError('variance construction entered frontend substitution')
-
-        monkeypatch.setattr(
-            Tensor, '_physicalize_result_for', staticmethod(forbidden_substitution)
-        )
+    def test_var_matches_pinned_expression_without_substitution(self):
+        assert not hasattr(Tensor, '_physicalize_result_for')
         x = Tensor([[1.0, 2.0, 4.0], [3.0, 5.0, 9.0]])
 
         def pinned_expression(axis, keepdim=False, correction=1):
@@ -2062,13 +2042,8 @@ class TestMatmulAndLoss:
             atol=1e-6,
         )
 
-    def test_einsum_c_api_wrapper(self, monkeypatch):
-        def forbidden_substitution(*_args, **_kwargs):
-            raise AssertionError('einsum construction entered frontend substitution')
-
-        monkeypatch.setattr(
-            Tensor, '_physicalize_result_for', staticmethod(forbidden_substitution)
-        )
+    def test_einsum_c_api_wrapper(self):
+        assert not hasattr(Tensor, '_physicalize_result_for')
         a = Tensor([[1.0, 2.0], [3.0, 4.0]])
         b = Tensor([[5.0, 6.0], [7.0, 8.0]])
         logical_inputs = (_ffi._ptr * 2)(
@@ -2098,15 +2073,10 @@ class TestMatmulAndLoss:
                     runtime_b.Tensor([4.0, 5.0, 6.0]),
                 )
 
-    def test_rearrange_uses_core_tensor_roots(self, monkeypatch):
+    def test_rearrange_uses_core_tensor_roots(self):
         from polygrad.tensor import _uop_wrap
 
-        def forbidden_substitution(*_args, **_kwargs):
-            raise AssertionError('rearrange construction entered frontend substitution')
-
-        monkeypatch.setattr(
-            Tensor, '_physicalize_result_for', staticmethod(forbidden_substitution)
-        )
+        assert not hasattr(Tensor, '_physicalize_result_for')
         source = Tensor.arange(6).reshape(2, 3)
         out = source.rearrange('h w -> w h')
         expected_logical = _uop_wrap(
@@ -2169,13 +2139,8 @@ class TestMatmulAndLoss:
         with pytest.raises(ValueError, match='cannot dot'):
             a @ b
 
-    def test_linalg_construction_bypasses_frontend_substitution(self, monkeypatch):
-        def forbidden_substitution(*_args, **_kwargs):
-            raise AssertionError('linalg construction entered frontend substitution')
-
-        monkeypatch.setattr(
-            Tensor, '_physicalize_result_for', staticmethod(forbidden_substitution)
-        )
+    def test_linalg_construction_bypasses_frontend_substitution(self):
+        assert not hasattr(Tensor, '_physicalize_result_for')
         a = Tensor([[4.0, 2.0], [2.0, 5.0]])
         b = Tensor([1.0, 3.0])
         lower = Tensor([[2.0, 0.0], [1.0, 3.0]])
@@ -2277,7 +2242,11 @@ class TestMatmulAndLoss:
             if unit_diagonal:
                 diag = np.arange(np_a.shape[-1])
                 np_a[..., diag, diag] = 1.0
-            expected = np.linalg.solve(np_a, b)
+            expected = (
+                np.stack([np.linalg.solve(batch, b) for batch in np_a])
+                if np_a.ndim > 2 and b.ndim == 1
+                else np.linalg.solve(np_a, b)
+            )
 
             got = Tensor(a).triangular_solve(
                 Tensor(b),
@@ -2632,13 +2601,8 @@ class TestMatmulAndLoss:
         assert loss.shape == ()
         np.testing.assert_allclose(loss.numpy(), np.log(3.0), rtol=1e-6)
 
-    def test_cross_entropy_matches_pinned_expression_without_substitution(self, monkeypatch):
-        def forbidden_substitution(*_args, **_kwargs):
-            raise AssertionError('cross-entropy construction entered frontend substitution')
-
-        monkeypatch.setattr(
-            Tensor, '_physicalize_result_for', staticmethod(forbidden_substitution)
-        )
+    def test_cross_entropy_matches_pinned_expression_without_substitution(self):
+        assert not hasattr(Tensor, '_physicalize_result_for')
         logits = Tensor([[-1.0, 2.0, -3.0], [1.0, -2.0, 3.0]])
         sparse = Tensor([1, 2], dtype='int32')
         dense = Tensor([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
@@ -2815,6 +2779,11 @@ class TestDevice:
         v = Tensor([5.0], device='cpu').to('cuda')
         with pytest.raises(RuntimeError, match='assign device mismatch CPU != CUDA'):
             a.assign(v)
+
+    def test_assign_broadcasts_rhs_in_core(self):
+        target = Tensor.zeros(2, 3)
+        target.assign(Tensor([4.0, 5.0, 6.0])).realize()
+        np.testing.assert_allclose(target.numpy(), [[4.0, 5.0, 6.0]] * 2)
 
     def test_assign_rejects_dtype_mismatch_like_tinygrad(self):
         a = Tensor([1.0], dtype='float32')

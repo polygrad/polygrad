@@ -824,51 +824,6 @@ class Tensor:
         raw = self._core_uop_physical_raw(self._tensor)
         return _uop_wrap(self._ctx, raw)
 
-    def _graph_uop_raw(self):
-        logical = self._core_uop_logical_raw(self._tensor)
-        physical = self._core_uop_physical_raw(self._tensor)
-        if logical and physical and _ffi._lib.poly_uop_op(logical) == _ffi.OPS.get('AFTER'):
-            return physical
-        return logical or self._core_uop_raw(self._tensor)
-
-    @property
-    def _graph_uop(self):
-        """Root used to construct new lazy value graphs.
-
-        Normally this is the logical/export root. After realized mutation
-        effects, tinygrad's tensor root is the current BUFFER again; Polygrad
-        mirrors that by using the physical root when the logical root is AFTER.
-        """
-        return _uop_wrap(self._ctx, self._graph_uop_raw())
-
-    @staticmethod
-    def _physicalize_result_for(ctx, logical, inputs):
-        from_roots = []
-        to_roots = []
-        seen = set()
-        for t in inputs:
-            if not isinstance(t, Tensor):
-                continue
-            logical_root = t._graph_uop_raw()
-            current_root = Tensor._core_uop_raw(t._tensor)
-            if not logical_root or not current_root or logical_root == current_root:
-                continue
-            if logical_root in seen:
-                continue
-            seen.add(logical_root)
-            from_roots.append(logical_root)
-            to_roots.append(current_root)
-        if not from_roots:
-            return None
-        n = len(from_roots)
-        from_arr = (_ffi._ptr * n)(*from_roots)
-        to_arr = (_ffi._ptr * n)(*to_roots)
-        physical = _ffi._lib.poly_uop_substitute(ctx, _uop_raw(logical), from_arr, to_arr, n)
-        return _uop_wrap(ctx, physical) if physical and physical != _uop_raw(logical) else None
-
-    def _physicalize_result(self, logical, inputs):
-        return Tensor._physicalize_result_for(self._ctx, logical, inputs)
-
     @property
     def shape(self):
         """Read shape from cached UOp fields (O(1), no allocation)."""
@@ -876,7 +831,10 @@ class Tensor:
             return self._shape_override
         if self._tensor is None:
             return ()
-        raw = self._core_uop_logical_raw(self._tensor) or self._core_uop_raw(self._tensor)
+        # Pinned Tensor.shape is derived from the one current Tensor.uop. On
+        # Polygrad's split boundary that parity surface is uop_physical;
+        # uop_logical is reserved for export/re-placement (tensor.py:76-121).
+        raw = self._core_uop_raw(self._tensor)
         if not raw:
             return ()
         return _shape_from_uop(self._ctx, raw)
@@ -952,27 +910,6 @@ class Tensor:
             dim += len(self.shape)
         return self.shape[dim]
 
-    def _apply_uop(self, fxn, *x, extra_args=(), **kwargs):
-        srcs = (self,) + x
-        new_uop = fxn(*[t._graph_uop for t in srcs], *extra_args, **kwargs)
-        needs_input_grad = [t._requires_grad for t in srcs]
-        ret = Tensor.__new__(Tensor)
-        ret._grad = None
-        ret._requires_grad = True if any(needs_input_grad) else None if None in needs_input_grad else False
-        ret._ctx = self._ctx
-        ret._dtype_str = self._dtype_str
-        ret._device = self._device
-        ret._data = None
-        ret._is_param = True
-        ret._shape_override = self.shape
-        ret._tensor = ret._core_create_with_roots(
-            new_uop, self._physicalize_result(new_uop, srcs), _POLY_TENSOR_VALUE, ret._device
-        )
-        if ret._requires_grad:
-            ret._sync_core_requires_grad(force=True)
-        all_tensors[weakref.ref(ret)] = None
-        return ret
-
     def custom_kernel(self, *lst, fxn, grad_fxn=None):
         """Call a custom SINK kernel written in UOps.
 
@@ -988,7 +925,7 @@ class Tensor:
             if t._ctx != self._ctx:
                 raise ValueError('custom_kernel tensors must share a context')
         contig = tuple(
-            t if t._graph_uop and t._graph_uop.op == _ffi.OPS.get('AFTER') else t.contiguous()
+            t if t.uop and t.uop.op == _ffi.OPS.get('AFTER') else t.contiguous()
             for t in srcs
         )
         placeholders = [UOp.placeholder_like(t.uop, slot=i) for i, t in enumerate(contig)]
@@ -1002,12 +939,9 @@ class Tensor:
         ) != 0:
             raise RuntimeError('poly_tensor_custom_kernel failed')
         outs = []
-        afters = []
         physical_afters = []
         for t, core in zip(contig, output_arr):
-            logical = _uop_wrap(t._ctx, self._core_uop_logical_raw(core))
             physical = _uop_wrap(t._ctx, self._core_uop_physical_raw(core))
-            afters.append(logical)
             physical_afters.append(physical)
             out = Tensor(
                 _ctx=t._ctx,
@@ -1018,12 +952,11 @@ class Tensor:
             if t._requires_grad:
                 out.requires_grad = True
             outs.append(out)
-        call = afters[0].src[1]
+        call = physical_afters[0].src[1]
         _custom_kernel_grad_records.append({
             'ctx': _ptr_value(self._ctx),
             'call': call,
             'args': tuple(call.src[1:]),
-            'afters': tuple(afters),
             'physical_afters': tuple(physical_afters),
             'grad_fxn': grad_fxn,
         })
@@ -1034,11 +967,10 @@ class Tensor:
     def _live_grad_targets(self):
         """Find gradient targets the same way tinygrad does.
 
-        tinygrad has no per-tensor input graph. Polygrad accepts reachability
-        through either half of a logical/current alias pair, but the reverse
-        pass must prefer the current executable root. The logical root is
-        retained for export/provenance and can describe a stale pre-realization
-        value (notably an earlier RNG counter version).
+        Pinned tinygrad discovers targets only through each current
+        ``Tensor.uop`` (tensor.py:527-543). Polygrad's corresponding root is
+        the mandatory physical/current root; retained logical provenance is
+        never an execution fallback.
         """
         targets = []
         stale_refs = []
@@ -1052,17 +984,9 @@ class Tensor:
                 continue
             if _ptr_value(t._ctx) != ctx_key or not t._requires_grad:
                 continue
-            target = t._graph_uop
             current_raw = Tensor._core_uop_raw(t._tensor)
-            target_raw = _uop_raw(target)
-            grad_root = None
             if current_raw and _ffi._lib.poly_uop_reachable(self._ctx, root, current_raw):
-                grad_root = current_raw
-            elif (target_raw and current_raw != target_raw and
-                  _ffi._lib.poly_uop_reachable(self._ctx, root, target_raw)):
-                grad_root = target_raw
-            if grad_root:
-                targets.append((t, grad_root))
+                targets.append((t, current_raw))
         for tref in stale_refs:
             all_tensors.pop(tref, None)
         return targets
@@ -1098,17 +1022,15 @@ class Tensor:
                 continue
             active = []
             active_seen = set()
-            for i, after in enumerate(rec['afters']):
-                active_after = None
-                if _ffi._lib.poly_uop_reachable(ctx, root_raw, _uop_raw(after)):
-                    active_after = _uop_raw(after)
-                else:
-                    physical_afters = rec.get('physical_afters', ())
-                    physical_after = physical_afters[i] if i < len(physical_afters) else None
+            physical_afters = rec.get('physical_afters', ())
+            for i, physical_after in enumerate(physical_afters):
+                active_after = (
+                    _uop_raw(physical_after)
                     if physical_after and _ffi._lib.poly_uop_reachable(
                         ctx, root_raw, _uop_raw(physical_after)
-                    ):
-                        active_after = _uop_raw(physical_after)
+                    )
+                    else None
+                )
                 active_key = _ptr_value(active_after) if active_after else 0
                 # UOps are hash-consed. If one source appears more than once,
                 # tinygrad's k.src.index(data) assigns the accumulated AFTER
@@ -1137,7 +1059,7 @@ class Tensor:
         if grad is None:
             return None
         if isinstance(grad, Tensor):
-            return _uop_raw(grad._graph_uop)
+            return Tensor._core_uop_raw(grad._tensor)
         if isinstance(grad, UOp):
             return grad.raw
         raw = _uop_raw(grad)
@@ -1159,10 +1081,8 @@ class Tensor:
         if not isinstance(x, Tensor):
             x = Tensor(x, dtype=self._dtype_str, device=self._device)
         if self.shape != x.shape:
-            x = Tensor(
-                _ctx=x._ctx, _uop=x._broadcast_uop(self.shape),
-                requires_grad=x._requires_grad, _dtype=x.dtype, _device=x._device,
-            )
+            if x._broadcast_shape(self.shape) != self.shape:
+                raise ValueError(f'assign shape mismatch {self.shape} != {x.shape}')
         if self.device != x.device:
             raise RuntimeError(f'assign device mismatch {self.device} != {x.device}')
         if self.dtype != x.dtype:
@@ -1409,7 +1329,7 @@ class Tensor:
     def contiguous(self, *args, **kwargs):
         """Returns a contiguous tensor."""
         if args or kwargs:
-            return self._apply_uop(UOp.contiguous, extra_args=args, **kwargs)
+            raise NotImplementedError('contiguous optimization options are not yet exposed by the C Tensor API')
         # Pinned Tensor.contiguous -> UOp.contiguous (tensor.py:742-746,
         # uop/ops.py:587-591). C owns both retained/current roots.
         core = _ffi._lib.poly_tensor_contiguous(self._ctx, self._tensor)
@@ -1490,27 +1410,6 @@ class Tensor:
         return self.cast('bfloat16')
 
     # --- Internal helpers ---
-
-    def _make_result(self, uop, shape, inputs):
-        dev = self._infer_device(inputs)
-        # Result dtype comes from the core graph now; inheriting from Python
-        # inputs was the stale behavior that made bool/int ops look floaty.
-        dt = _uop_dtype_name(self._ctx, uop, self._dtype_str)
-        physical = self._physicalize_result(uop, inputs)
-        ret = Tensor.__new__(Tensor)
-        ret._ctx = self._ctx
-        ret._device = dev
-        ret._tensor = self._core_create_with_roots(uop, physical, _POLY_TENSOR_VALUE, dev)
-        ret._shape_override = tuple(shape) if shape is not None else None
-        ret._data = None
-        ret._dtype_str = dt
-        ret._requires_grad = any(t._requires_grad for t in inputs)
-        ret._grad = None
-        ret._is_param = True
-        if ret._requires_grad:
-            ret._sync_core_requires_grad(force=True)
-        all_tensors[weakref.ref(ret)] = None
-        return ret
 
     def _make_result_from_core(self, core_tensor, shape, inputs):
         if not core_tensor:
@@ -1615,45 +1514,6 @@ class Tensor:
             else:
                 raise IndexError(f'shape mismatch: objects cannot be broadcast to a single shape {(self.shape, other_shape)}')
         return tuple(result)
-
-    def _broadcast_uop(self, target_shape):
-        """Return a UOp that broadcasts self to target_shape via RESHAPE+EXPAND.
-
-        Matches tinygrad's _broadcast_to: explicit shape ops so the scheduler
-        sees EXPAND UOps instead of implicit ALU broadcasting.
-        """
-        target_shape = tuple(target_shape)
-        if self.shape == target_shape:
-            return self._graph_uop
-        uop = self._graph_uop
-        cur_shape = self.shape
-        target_nd = len(target_shape)
-        if len(cur_shape) > target_nd:
-            raise ValueError(f"cannot broadcast tensor to fewer dimensions. shape={cur_shape} to new_shape={target_shape}")
-        aligned_shape = (1,) * (target_nd - len(cur_shape)) + tuple(cur_shape)
-        for s, ns in zip(aligned_shape, target_shape):
-            if not _is_symbolic_dim(ns) and int(ns) < 0:
-                raise ValueError(f"negative dimensions are not allowed: {target_shape}")
-            if not (s == ns or s == 1):
-                raise ValueError(f"cannot broadcast {cur_shape} to new_shape={target_shape}")
-        # Scalar tensor or lower-rank: pad left with 1s
-        if len(cur_shape) < target_nd:
-            cur_shape = aligned_shape
-            if not _shape_all_int(cur_shape):
-                raise NotImplementedError('symbolic movement reshape is not implemented')
-            dims, n = _int64_array(cur_shape)
-            uop = _ffi._lib.poly_reshape(self._ctx, uop, dims, n)
-        # Expand any dimensions where size 1 → target size
-        if cur_shape != target_shape:
-            if _shape_has_symbolic(target_shape):
-                dims = _shape_uop_array(self._ctx, target_shape)
-                uop = _ffi._lib.poly_expand_uop(self._ctx, uop, dims, len(target_shape))
-            else:
-                dims, n = _int64_array(target_shape)
-                uop = _ffi._lib.poly_expand(self._ctx, uop, dims, n)
-            if not uop:
-                raise RuntimeError('poly_expand failed')
-        return uop
 
     def _broadcast_to_tensor(self, target_shape):
         """Return the ordered Tensor occurrence used by an elementwise ALU.
@@ -2828,12 +2688,11 @@ class Tensor:
         return -(target * self.log() + (1.0 - target) * (1.0 - self).log()).mean()
 
     def layernorm(self, axis=-1, eps=1e-5):
-        # Layernorm is graph construction, not a materialization boundary.
-        # Explicit realize calls here severed gradients in cases where tinygrad
-        # keeps the full UOp DAG lazy until the user calls realize/backward.
-        m = self.mean(axis=axis, keepdim=True)
-        v = self.var(axis=axis, keepdim=True, correction=0)
-        return (self - m) / (v + eps).sqrt()
+        # Pinned mixin/__init__.py:1548-1564. Keep the centered value shared
+        # and use the exact mul/rsqrt spelling; this is ordinary lazy graph
+        # construction and never a materialization boundary.
+        y = self - self.mean(axis=axis, keepdim=True)
+        return y.mul((y * y).mean(axis=axis, keepdim=True).add(eps).rsqrt())
 
     # --- Indexing ---
 
@@ -2932,7 +2791,9 @@ class Tensor:
                 if i.start is None and i.stop is None and (i.step is None or i.step == 1):
                     dim += 1
                     continue
-                start, stop, step = i.indices(_slice_indices_size(result._ctx, result._graph_uop, dim, size))
+                start, stop, step = i.indices(
+                    _slice_indices_size(result._ctx, result.uop, dim, size)
+                )
                 if step == 0:
                     raise ValueError('slice step cannot be zero')
                 # Normalize boundary and stride (matching tinygrad _getitem)

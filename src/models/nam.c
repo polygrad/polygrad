@@ -36,9 +36,22 @@ static NamActivation nam_parse_activation(const char *s) {
   return NAM_ACT_EXU;
 }
 
+static PolyTensor *nam_float_scalar(PolyCtx *ctx, double value) {
+  PolyUOp *constant = poly_const_typed(ctx, POLY_FLOAT32, value);
+  if (!constant) return NULL;
+  PolyTensor *out = poly_tensor_create_with_roots(
+      ctx, constant, constant, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO
+  );
+  if (out) {
+    poly_tensor_set_requires_grad(out, false);
+    poly_tensor_set_provenance(out, POLY_TENSOR_PROVENANCE_CONST_INIT);
+  }
+  return out;
+}
+
 /* NAM Builder */
 
-PolyInstance *poly_nam_instance(const char *spec_json, int spec_len) {
+PolyInstance *poly_nam_instance(const char *spec_json, int spec_len, PolyDevice device) {
   if (!spec_json || spec_len <= 0) return NULL;
 
   /* Parse JSON */
@@ -104,6 +117,7 @@ PolyInstance *poly_nam_instance(const char *spec_json, int spec_len) {
 
   PolyCtx *ctx = poly_ctx_new();
   if (!ctx) goto fail_no_instance;
+  if (device != POLY_DEVICE_AUTO) poly_ctx_set_preferred_device(ctx, device);
   PolyInstanceOptions opts = {
       .own_ctx_on_success = true,
       .own_ctx_on_failure = true,
@@ -126,17 +140,17 @@ PolyInstance *poly_nam_instance(const char *spec_json, int spec_len) {
 
   /* Start with intercept broadcast to (batch_size, n_outputs). */
   int64_t intercept_shape[] = {1, n_outputs};
-  PolyUOp *accum = poly_reshape(ctx, poly_tensor_uop(intercept_tensor), intercept_shape, 2);
+  PolyTensor *accum = poly_tensor_reshape(ctx, intercept_tensor, intercept_shape, 2);
   int64_t accum_expanded[] = {batch_size, n_outputs};
-  accum = poly_expand(ctx, accum, accum_expanded, 2);
+  accum = poly_tensor_expand(ctx, accum, accum_expanded, 2);
   if (!accum) goto fail_pre_build;
 
-  PolyUOp *x_2d = poly_tensor_uop(x_tensor);
+  PolyTensor *x_2d = x_tensor;
 
   /* Process each feature subnet. */
   for (int k = 0; k < n_features; k++) {
     int64_t shrink_pairs[][2] = {{0, batch_size}, {k, k + 1}};
-    PolyUOp *xk = poly_shrink(ctx, x_2d, shrink_pairs, 2);
+    PolyTensor *xk = poly_tensor_shrink(ctx, x_2d, shrink_pairs, 2);
     if (!xk) goto fail_pre_build;
 
     for (int l = 0; l < n_linear; l++) {
@@ -149,24 +163,22 @@ PolyInstance *poly_nam_instance(const char *spec_json, int spec_len) {
       int64_t w_shape[] = {out_dim, in_dim};
       PolyTensor *w_tensor = poly_instance_param(inst, "weight", POLY_FLOAT32, w_shape, 2);
       if (!w_tensor) goto fail_pre_build;
-      PolyUOp *w = poly_tensor_uop(w_tensor);
 
       int64_t b_shape[] = {out_dim};
       PolyTensor *bias_tensor = poly_instance_param(inst, "bias", POLY_FLOAT32, b_shape, 1);
       if (!bias_tensor) goto fail_pre_build;
-      PolyUOp *bias = poly_tensor_uop(bias_tensor);
 
       if (poly_instance_scope_pop(inst) != POLY_STATUS_OK) goto fail_pre_build;
 
       int64_t perm[] = {1, 0};
-      PolyUOp *wt = poly_permute(ctx, w, perm, 2);
-      xk = poly_dot(ctx, xk, wt);
+      PolyTensor *wt = poly_tensor_permute(ctx, w_tensor, perm, 2);
+      xk = wt ? poly_tensor_dot(ctx, xk, wt) : NULL;
 
       int64_t b_1d[] = {1, out_dim};
-      PolyUOp *b_2d = poly_reshape(ctx, bias, b_1d, 2);
+      PolyTensor *b_2d = poly_tensor_reshape(ctx, bias_tensor, b_1d, 2);
       int64_t b_exp[] = {batch_size, out_dim};
-      b_2d = poly_expand(ctx, b_2d, b_exp, 2);
-      xk = poly_alu2(ctx, POLY_OP_ADD, xk, b_2d);
+      b_2d = b_2d ? poly_tensor_expand(ctx, b_2d, b_exp, 2) : NULL;
+      xk = xk && b_2d ? poly_tensor_alu2(ctx, POLY_OP_ADD, xk, b_2d) : NULL;
       if (!xk) goto fail_pre_build;
 
       /* Activation (skip on last layer). */
@@ -184,33 +196,34 @@ PolyInstance *poly_nam_instance(const char *spec_json, int spec_len) {
           int64_t eu_1d[] = {1, out_dim};
           int64_t eu_exp[] = {batch_size, out_dim};
 
-          PolyUOp *ew = poly_reshape(ctx, poly_tensor_uop(exu_w_tensor), eu_1d, 2);
-          ew = poly_expand(ctx, ew, eu_exp, 2);
-          PolyUOp *eb = poly_reshape(ctx, poly_tensor_uop(exu_b_tensor), eu_1d, 2);
-          eb = poly_expand(ctx, eb, eu_exp, 2);
+          PolyTensor *ew = poly_tensor_reshape(ctx, exu_w_tensor, eu_1d, 2);
+          ew = ew ? poly_tensor_expand(ctx, ew, eu_exp, 2) : NULL;
+          PolyTensor *eb = poly_tensor_reshape(ctx, exu_b_tensor, eu_1d, 2);
+          eb = eb ? poly_tensor_expand(ctx, eb, eu_exp, 2) : NULL;
 
-          xk = poly_alu2(ctx, POLY_OP_ADD, xk, poly_alu1(ctx, POLY_OP_NEG, eb));
-          PolyUOp *exp_w = poly_exp(ctx, ew);
-          xk = poly_alu2(ctx, POLY_OP_MUL, exp_w, xk);
-          xk = poly_relu(ctx, xk);
+          PolyTensor *centered = xk && eb ? poly_tensor_alu2(ctx, POLY_OP_SUB, xk, eb) : NULL;
+          PolyTensor *exp_w = ew ? poly_tensor_exp(ctx, ew) : NULL;
+          xk = centered && exp_w
+                   ? poly_tensor_alu2(ctx, POLY_OP_MUL, exp_w, centered)
+                   : NULL;
+          xk = xk ? poly_tensor_relu(ctx, xk) : NULL;
         } else if (activation == NAM_ACT_RELU) {
-          xk = poly_relu(ctx, xk);
+          xk = poly_tensor_relu(ctx, xk);
         } else if (activation == NAM_ACT_GELU) {
-          xk = poly_gelu(ctx, xk);
+          xk = poly_tensor_gelu(ctx, xk);
         } else if (activation == NAM_ACT_SILU) {
-          xk = poly_silu(ctx, xk);
+          xk = poly_tensor_silu(ctx, xk);
         }
         if (!xk) goto fail_pre_build;
       }
     }
 
-    accum = poly_alu2(ctx, POLY_OP_ADD, accum, xk);
+    accum = poly_tensor_alu2(ctx, POLY_OP_ADD, accum, xk);
     if (!accum) goto fail_pre_build;
   }
 
   int64_t out_shape[] = {batch_size, n_outputs};
-  PolyUOp *fwd_result = poly_reshape(ctx, accum, out_shape, 2);
-  PolyTensor *out_tensor = poly_tensor_create(ctx, fwd_result, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
+  PolyTensor *out_tensor = poly_tensor_reshape(ctx, accum, out_shape, 2);
   if (!out_tensor || poly_instance_output(inst, "output", out_tensor) != POLY_STATUS_OK)
     goto fail_pre_build;
   const char *forward_inputs[] = {"x"};
@@ -225,31 +238,36 @@ PolyInstance *poly_nam_instance(const char *spec_json, int spec_len) {
     int64_t y_shape[] = {batch_size, n_outputs};
     PolyTensor *y_tensor = poly_instance_target(inst, "y", POLY_FLOAT32, y_shape, 2);
     if (!y_tensor) goto fail_pre_build;
-    PolyUOp *y = poly_tensor_uop(y_tensor);
-    PolyUOp *loss_val;
+    PolyTensor *loss_tensor;
     if (strcmp(loss_type, "mse") == 0) {
-      PolyUOp *diff = poly_alu2(ctx, POLY_OP_ADD, fwd_result, poly_alu1(ctx, POLY_OP_NEG, y));
-      PolyUOp *sq = poly_alu2(ctx, POLY_OP_MUL, diff, diff);
+      PolyTensor *diff = poly_tensor_alu2(ctx, POLY_OP_SUB, out_tensor, y_tensor);
+      PolyTensor *sq = diff ? poly_tensor_alu2(ctx, POLY_OP_MUL, diff, diff) : NULL;
       int64_t axes_r0[] = {0};
-      PolyUOp *sum0 = poly_reduce_axis(ctx, POLY_OP_ADD, sq, axes_r0, 1);
+      PolyTensor *sum0 = sq ? poly_tensor_sum(ctx, sq, axes_r0, 1, false) : NULL;
       int64_t axes_r1[] = {0};
-      PolyUOp *sum1 = poly_reduce_axis(ctx, POLY_OP_ADD, sum0, axes_r1, 1);
+      PolyTensor *sum1 = sum0 ? poly_tensor_sum(ctx, sum0, axes_r1, 1, false) : NULL;
       double mse_scale = 1.0 / ((double)batch_size * n_outputs);
-      loss_val = poly_alu2(ctx, POLY_OP_MUL, sum1, poly_const_float(ctx, mse_scale));
+      PolyTensor *loss_scale = nam_float_scalar(ctx, mse_scale);
+      loss_tensor = sum1 && loss_scale
+                        ? poly_tensor_alu2(ctx, POLY_OP_MUL, sum1, loss_scale)
+                        : NULL;
     } else {
-      PolyUOp *log_probs = poly_log_softmax(ctx, fwd_result, 1);
-      PolyUOp *prod = poly_alu2(ctx, POLY_OP_MUL, y, log_probs);
+      PolyTensor *log_probs = poly_tensor_log_softmax(ctx, out_tensor, 1);
+      PolyTensor *prod = log_probs
+                             ? poly_tensor_alu2(ctx, POLY_OP_MUL, y_tensor, log_probs)
+                             : NULL;
       int64_t axes_class[] = {1};
-      PolyUOp *sum_class = poly_reduce_axis(ctx, POLY_OP_ADD, prod, axes_class, 1);
+      PolyTensor *sum_class = prod ? poly_tensor_sum(ctx, prod, axes_class, 1, false) : NULL;
       int64_t axes_batch[] = {0};
-      PolyUOp *sum_batch = poly_reduce_axis(ctx, POLY_OP_ADD, sum_class, axes_batch, 1);
+      PolyTensor *sum_batch = sum_class
+                                  ? poly_tensor_sum(ctx, sum_class, axes_batch, 1, false)
+                                  : NULL;
       double ce_scale = -1.0 / (double)batch_size;
-      loss_val = poly_alu2(ctx, POLY_OP_MUL, sum_batch, poly_const_float(ctx, ce_scale));
+      PolyTensor *loss_scale = nam_float_scalar(ctx, ce_scale);
+      loss_tensor = sum_batch && loss_scale
+                        ? poly_tensor_alu2(ctx, POLY_OP_MUL, sum_batch, loss_scale)
+                        : NULL;
     }
-    if (!loss_val) goto fail_pre_build;
-
-    PolyTensor *loss_tensor =
-        poly_tensor_create(ctx, loss_val, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
     if (!loss_tensor || poly_instance_output(inst, "loss", loss_tensor) != POLY_STATUS_OK)
       goto fail_pre_build;
     const char *loss_inputs[] = {"x", "y"};

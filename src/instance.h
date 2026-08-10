@@ -380,22 +380,21 @@ float *poly_instance_buf_data_named(PolyInstance *inst, const char *name, int64_
 int64_t poly_instance_buf_numel_named(const PolyInstance *inst, const char *name);
 
 /* Imported-instance composition. Inlines a value entrypoint from `child` into
- * `dst_ctx` under `prefix`. Input/target buffers listed in bindings are
- * substituted with parent-ctx UOps. Child PARAM buffers are recreated in
- * dst_ctx using prefixed names and marked trainable/frozen by `trainable`.
- * Output value UOps are returned by original child output name. */
+ * a building parent under `prefix`. Input/target buffers are replaced by
+ * exact parent Tensor occurrences; child state and returned values preserve
+ * both the portable logical graph and stored physical template. */
 typedef struct {
   const char *name;
-  PolyUOp *uop;
+  PolyTensor *tensor;
 } PolyInstanceInlineBinding;
 
 typedef struct {
   const char *name;
-  PolyUOp *uop;
+  PolyTensor *tensor;
 } PolyInstanceInlineOutput;
 
 int poly_instance_inline_entrypoint(
-    PolyCtx *dst_ctx,
+    PolyInstance *parent,
     const PolyInstance *child,
     const char *entrypoint,
     const char *prefix,

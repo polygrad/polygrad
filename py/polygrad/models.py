@@ -9,6 +9,7 @@ architecture factories such as MLP, TabM, and NAM.
 import json
 
 from . import _ffi
+from .device import _device_id
 from .instance import Instance
 
 
@@ -23,7 +24,7 @@ def _normalize_spec(spec):
 
 
 def MLP(spec=None, *, layers=None, activation="relu", bias=True, loss="none",
-        batch_size=1, seed=42, **extra):
+        batch_size=1, seed=42, device=None, **extra):
     """Build an MLP model family instance."""
     if spec is None:
         if layers is None:
@@ -44,11 +45,11 @@ def MLP(spec=None, *, layers=None, activation="relu", bias=True, loss="none",
         if layers is not None:
             spec["layers"] = layers
     data = _normalize_spec(spec)
-    ptr = _ffi.get_lib().poly_mlp_from_json(data, len(data))
+    ptr = _ffi.get_lib().poly_mlp_from_json(data, len(data), _device_id(device))
     return Instance(ptr)
 
 
-def TabM(spec=None, **kwargs):
+def TabM(spec=None, *, device=None, **kwargs):
     """Build a TabM model family instance."""
     if spec is None:
         spec = kwargs
@@ -57,11 +58,11 @@ def TabM(spec=None, **kwargs):
             raise TypeError("TabM keyword overrides require a dict spec")
         spec = {**spec, **kwargs}
     data = _normalize_spec(spec)
-    ptr = _ffi.get_lib().poly_tabm_instance(data, len(data))
+    ptr = _ffi.get_lib().poly_tabm_instance(data, len(data), _device_id(device))
     return Instance(ptr)
 
 
-def NAM(spec=None, **kwargs):
+def NAM(spec=None, *, device=None, **kwargs):
     """Build a NAM model family instance."""
     if spec is None:
         spec = kwargs
@@ -70,7 +71,7 @@ def NAM(spec=None, **kwargs):
             raise TypeError("NAM keyword overrides require a dict spec")
         spec = {**spec, **kwargs}
     data = _normalize_spec(spec)
-    ptr = _ffi.get_lib().poly_nam_instance(data, len(data))
+    ptr = _ffi.get_lib().poly_nam_instance(data, len(data), _device_id(device))
     return Instance(ptr)
 
 

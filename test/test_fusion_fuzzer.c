@@ -49,28 +49,29 @@ static const FusionCaseInfo FUSION_CASES[FUSION_CASE_COUNT] = {
     [FUSION_CASE_LSTSQ_TALL] = {"lstsq_tall", 2, 6e-4f},
 };
 
-static PolyUOp *fusion_host_f32(
+static PolyTensor *fusion_host_f32(
     PolyCtx *ctx,
     float *data,
     int64_t *shape,
-    int ndim
+    int ndim,
+    PolyDevice device
 ) {
   int dtype = poly_dtype_id_by_name("float32");
   if (dtype < 0) return NULL;
   int64_t numel = 1;
   for (int i = 0; i < ndim; i++) numel *= shape[i];
-  return poly_buffer_from_host(ctx, data, (size_t)numel * sizeof(float), dtype, shape, ndim);
+  PolyTensor *host = poly_tensor_from_host_by_id(
+      ctx, data, (size_t)numel * sizeof(float), dtype, shape, ndim
+  );
+  return host ? poly_tensor_to_device(ctx, host, device) : NULL;
 }
 
 static PolyTensor *fusion_realize_value(
     PolyCtx *ctx,
-    PolyUOp *value,
-    PolyDevice device
+    PolyTensor *value
 ) {
-  PolyTensor *tensor = poly_tensor_create(ctx, value, POLY_TENSOR_VALUE, device);
-  if (!tensor) return NULL;
   PolyTensor *out = NULL;
-  if (poly_realize_tensors(ctx, &tensor, 1, &out) != 0) return NULL;
+  if (!value || poly_realize_tensors(ctx, &value, 1, &out) != 0) return NULL;
   return out;
 }
 
@@ -81,28 +82,41 @@ static int fusion_read_tensor(
     int n
 ) {
   if (!ctx || !tensor || !out || n < 0) return -1;
-  const PolyUOp *buf = poly_uop_get_buffer_identity(poly_tensor_uop(tensor));
+  const PolyUOp *buf = poly_uop_get_buffer_identity(poly_tensor_uop_physical(tensor));
   if (!buf) return -1;
   return poly_buffer_read(ctx, (PolyUOp *)buf, out, (size_t)n * sizeof(float));
 }
 
-static PolyUOp *fusion_build_case(
+static PolyTensor *fusion_build_case(
     PolyCtx *ctx,
     FusionCase which,
     PolyDevice device
 ) {
+  int f32 = poly_dtype_id_by_name("float32");
+  if (f32 < 0) return NULL;
   switch (which) {
     case FUSION_CASE_MOVEMENT_REDUCE: {
       static float x_data[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11};
       int64_t x_shape[] = {3, 4};
-      PolyUOp *x = fusion_host_f32(ctx, x_data, x_shape, 2);
+      PolyTensor *x = fusion_host_f32(ctx, x_data, x_shape, 2, device);
       if (!x) return NULL;
-      PolyUOp *p = poly_pad(ctx, x, (int64_t[][2]){{1, 0}, {0, 1}}, 2);
-      PolyUOp *s = p ? poly_shrink(ctx, p, (int64_t[][2]){{1, 4}, {1, 5}}, 2) : NULL;
-      PolyUOp *scale = poly_full(ctx, x_shape, 2, 0.25);
-      PolyUOp *one = poly_full(ctx, x_shape, 2, 1.0);
-      PolyUOp *y = (s && scale && one) ? poly_add(ctx, poly_mul(ctx, s, scale), one) : NULL;
-      return y ? poly_sum_reduce(ctx, y, 1, 0) : NULL;
+      PolyTensor *p = poly_tensor_pad_value(
+          ctx, x, (int64_t[][2]){{1, 0}, {0, 1}}, 2, 0.0
+      );
+      PolyTensor *s = p ? poly_tensor_shrink(
+                              ctx, p, (int64_t[][2]){{1, 4}, {1, 5}}, 2
+                          )
+                        : NULL;
+      PolyTensor *scale =
+          poly_tensor_full_float_by_id(ctx, x_shape, 2, 0.25, f32, device);
+      PolyTensor *one =
+          poly_tensor_full_float_by_id(ctx, x_shape, 2, 1.0, f32, device);
+      PolyTensor *scaled =
+          (s && scale) ? poly_tensor_alu2(ctx, POLY_OP_MUL, s, scale) : NULL;
+      PolyTensor *y =
+          (scaled && one) ? poly_tensor_alu2(ctx, POLY_OP_ADD, scaled, one) : NULL;
+      int64_t axis = 1;
+      return y ? poly_tensor_sum(ctx, y, &axis, 1, false) : NULL;
     }
 
     case FUSION_CASE_WHERE_REDUCE: {
@@ -113,78 +127,91 @@ static PolyUOp *fusion_build_case(
           12, 13, 14, 15,
       };
       int64_t shape[] = {4, 4};
-      PolyUOp *x = fusion_host_f32(ctx, x_data, shape, 2);
-      PolyUOp *seven = poly_full(ctx, shape, 2, 7.0);
-      PolyUOp *neg = poly_full(ctx, shape, 2, -2.0);
-      PolyUOp *mask = (x && seven) ? poly_gt(ctx, seven, x) : NULL;
-      PolyUOp *sel = (mask && neg) ? poly_where_op(ctx, mask, x, neg) : NULL;
-      return sel ? poly_sum_reduce(ctx, sel, 0, 0) : NULL;
+      PolyTensor *x = fusion_host_f32(ctx, x_data, shape, 2, device);
+      PolyTensor *seven =
+          poly_tensor_full_float_by_id(ctx, shape, 2, 7.0, f32, device);
+      PolyTensor *neg =
+          poly_tensor_full_float_by_id(ctx, shape, 2, -2.0, f32, device);
+      PolyTensor *mask =
+          (x && seven) ? poly_tensor_alu2(ctx, POLY_OP_CMPLT, x, seven) : NULL;
+      PolyTensor *sel =
+          (mask && neg) ? poly_tensor_alu3(ctx, POLY_OP_WHERE, mask, x, neg) : NULL;
+      int64_t axis = 0;
+      return sel ? poly_tensor_sum(ctx, sel, &axis, 1, false) : NULL;
     }
 
     case FUSION_CASE_NO_BARRIER_REDUCE: {
       static float x_data[] = {1, 2, 3, 4, 5, 6, 7, 8, 9};
       int64_t shape[] = {3, 3};
-      PolyUOp *x = fusion_host_f32(ctx, x_data, shape, 2);
-      PolyUOp *one = poly_full(ctx, shape, 2, 1.0);
-      PolyUOp *y = (x && one) ? poly_add(ctx, x, one) : NULL;
-      PolyUOp *z = y ? poly_add(ctx, poly_square(ctx, y), y) : NULL;
-      return z ? poly_sum_reduce(ctx, z, 0, 0) : NULL;
+      PolyTensor *x = fusion_host_f32(ctx, x_data, shape, 2, device);
+      PolyTensor *one =
+          poly_tensor_full_float_by_id(ctx, shape, 2, 1.0, f32, device);
+      PolyTensor *y =
+          (x && one) ? poly_tensor_alu2(ctx, POLY_OP_ADD, x, one) : NULL;
+      PolyTensor *square = y ? poly_tensor_alu2(ctx, POLY_OP_MUL, y, y) : NULL;
+      PolyTensor *z = square ? poly_tensor_alu2(ctx, POLY_OP_ADD, square, y) : NULL;
+      int64_t axis = 0;
+      return z ? poly_tensor_sum(ctx, z, &axis, 1, false) : NULL;
     }
 
     case FUSION_CASE_EXPLICIT_BARRIER_REDUCE: {
       static float x_data[] = {1, 2, 3, 4, 5, 6, 7, 8, 9};
       int64_t shape[] = {3, 3};
-      PolyUOp *x = fusion_host_f32(ctx, x_data, shape, 2);
-      PolyUOp *one = poly_full(ctx, shape, 2, 1.0);
-      PolyUOp *mid = (x && one) ? poly_add(ctx, x, one) : NULL;
-      PolyTensor *mid_t = mid ? fusion_realize_value(ctx, mid, device) : NULL;
-      PolyUOp *mid_uop = mid_t ? poly_tensor_uop(mid_t) : NULL;
-      PolyUOp *z = mid_uop ? poly_add(ctx, poly_square(ctx, mid_uop), mid_uop) : NULL;
-      return z ? poly_sum_reduce(ctx, z, 0, 0) : NULL;
+      PolyTensor *x = fusion_host_f32(ctx, x_data, shape, 2, device);
+      PolyTensor *one =
+          poly_tensor_full_float_by_id(ctx, shape, 2, 1.0, f32, device);
+      PolyTensor *mid =
+          (x && one) ? poly_tensor_alu2(ctx, POLY_OP_ADD, x, one) : NULL;
+      PolyTensor *mid_t = mid ? fusion_realize_value(ctx, mid) : NULL;
+      PolyTensor *square =
+          mid_t ? poly_tensor_alu2(ctx, POLY_OP_MUL, mid_t, mid_t) : NULL;
+      PolyTensor *z =
+          square ? poly_tensor_alu2(ctx, POLY_OP_ADD, square, mid_t) : NULL;
+      int64_t axis = 0;
+      return z ? poly_tensor_sum(ctx, z, &axis, 1, false) : NULL;
     }
 
     case FUSION_CASE_QR_RECONSTRUCT: {
       static float a_data[] = {1.0f, 2.0f, -1.0f, 3.0f, 0.5f, 4.0f};
       int64_t shape[] = {3, 2};
-      PolyUOp *a = fusion_host_f32(ctx, a_data, shape, 2);
-      PolyUOp *q = NULL, *r = NULL;
-      if (!a || poly_qr(ctx, a, &q, &r) != 0 || !q || !r) return NULL;
-      return poly_dot(ctx, q, r);
+      PolyTensor *a = fusion_host_f32(ctx, a_data, shape, 2, device);
+      PolyTensor *q = NULL, *r = NULL;
+      if (!a || poly_tensor_qr_ex(ctx, a, POLY_QR_REDUCED, &q, &r) != 0 || !q || !r)
+        return NULL;
+      return poly_tensor_dot(ctx, q, r);
     }
 
     case FUSION_CASE_QR_BARRIER_RECONSTRUCT: {
       static float a_data[] = {1.0f, 2.0f, -1.0f, 3.0f, 0.5f, 4.0f};
       int64_t shape[] = {3, 2};
-      PolyUOp *a = fusion_host_f32(ctx, a_data, shape, 2);
-      PolyUOp *q = NULL, *r = NULL;
-      if (!a || poly_qr(ctx, a, &q, &r) != 0 || !q || !r) return NULL;
-      PolyTensor *q_t = fusion_realize_value(ctx, q, device);
-      PolyTensor *r_t = fusion_realize_value(ctx, r, device);
-      PolyUOp *q_uop = q_t ? poly_tensor_uop(q_t) : NULL;
-      PolyUOp *r_uop = r_t ? poly_tensor_uop(r_t) : NULL;
-      return (q_uop && r_uop) ? poly_dot(ctx, q_uop, r_uop) : NULL;
+      PolyTensor *a = fusion_host_f32(ctx, a_data, shape, 2, device);
+      PolyTensor *q = NULL, *r = NULL;
+      if (!a || poly_tensor_qr_ex(ctx, a, POLY_QR_REDUCED, &q, &r) != 0 || !q || !r)
+        return NULL;
+      PolyTensor *q_t = fusion_realize_value(ctx, q);
+      PolyTensor *r_t = fusion_realize_value(ctx, r);
+      return (q_t && r_t) ? poly_tensor_dot(ctx, q_t, r_t) : NULL;
     }
 
     case FUSION_CASE_CHOLESKY_SOLVE: {
       static float a_data[] = {4, 2, 2, 5};
       static float b_data[] = {1, 2, 3, 4};
       int64_t shape[] = {2, 2};
-      PolyUOp *a = fusion_host_f32(ctx, a_data, shape, 2);
-      PolyUOp *b = fusion_host_f32(ctx, b_data, shape, 2);
-      PolyUOp *l = a ? poly_cholesky(ctx, a, 0) : NULL;
-      return (l && b) ? poly_cholesky_solve(ctx, l, b, 0) : NULL;
+      PolyTensor *a = fusion_host_f32(ctx, a_data, shape, 2, device);
+      PolyTensor *b = fusion_host_f32(ctx, b_data, shape, 2, device);
+      PolyTensor *l = a ? poly_tensor_cholesky(ctx, a, 0) : NULL;
+      return (l && b) ? poly_tensor_cholesky_solve(ctx, l, b, 0) : NULL;
     }
 
     case FUSION_CASE_CHOLESKY_BARRIER_SOLVE: {
       static float a_data[] = {4, 2, 2, 5};
       static float b_data[] = {1, 2, 3, 4};
       int64_t shape[] = {2, 2};
-      PolyUOp *a = fusion_host_f32(ctx, a_data, shape, 2);
-      PolyUOp *b = fusion_host_f32(ctx, b_data, shape, 2);
-      PolyUOp *l = a ? poly_cholesky(ctx, a, 0) : NULL;
-      PolyTensor *l_t = l ? fusion_realize_value(ctx, l, device) : NULL;
-      PolyUOp *l_uop = l_t ? poly_tensor_uop(l_t) : NULL;
-      return (l_uop && b) ? poly_cholesky_solve(ctx, l_uop, b, 0) : NULL;
+      PolyTensor *a = fusion_host_f32(ctx, a_data, shape, 2, device);
+      PolyTensor *b = fusion_host_f32(ctx, b_data, shape, 2, device);
+      PolyTensor *l = a ? poly_tensor_cholesky(ctx, a, 0) : NULL;
+      PolyTensor *l_t = l ? fusion_realize_value(ctx, l) : NULL;
+      return (l_t && b) ? poly_tensor_cholesky_solve(ctx, l_t, b, 0) : NULL;
     }
 
     case FUSION_CASE_SOLVE: {
@@ -192,9 +219,9 @@ static PolyUOp *fusion_build_case(
       static float b_data[] = {4, 5};
       int64_t a_shape[] = {2, 2};
       int64_t b_shape[] = {2};
-      PolyUOp *a = fusion_host_f32(ctx, a_data, a_shape, 2);
-      PolyUOp *b = fusion_host_f32(ctx, b_data, b_shape, 1);
-      return (a && b) ? poly_solve(ctx, a, b) : NULL;
+      PolyTensor *a = fusion_host_f32(ctx, a_data, a_shape, 2, device);
+      PolyTensor *b = fusion_host_f32(ctx, b_data, b_shape, 1, device);
+      return (a && b) ? poly_tensor_solve(ctx, a, b) : NULL;
     }
 
     case FUSION_CASE_LSTSQ_TALL: {
@@ -202,9 +229,9 @@ static PolyUOp *fusion_build_case(
       static float b_data[] = {1, 2, 3};
       int64_t a_shape[] = {3, 2};
       int64_t b_shape[] = {3};
-      PolyUOp *a = fusion_host_f32(ctx, a_data, a_shape, 2);
-      PolyUOp *b = fusion_host_f32(ctx, b_data, b_shape, 1);
-      return (a && b) ? poly_lstsq(ctx, a, b) : NULL;
+      PolyTensor *a = fusion_host_f32(ctx, a_data, a_shape, 2, device);
+      PolyTensor *b = fusion_host_f32(ctx, b_data, b_shape, 1, device);
+      return (a && b) ? poly_tensor_lstsq(ctx, a, b) : NULL;
     }
 
     default:
@@ -226,8 +253,8 @@ static int fusion_run_case(
   if (!ctx) return -1;
   poly_ctx_set_preferred_device(ctx, device);
 
-  PolyUOp *value = fusion_build_case(ctx, which, device);
-  PolyTensor *tensor = value ? fusion_realize_value(ctx, value, device) : NULL;
+  PolyTensor *value = fusion_build_case(ctx, which, device);
+  PolyTensor *tensor = value ? fusion_realize_value(ctx, value) : NULL;
   int rc = tensor ? fusion_read_tensor(ctx, tensor, out, info->out_numel) : -1;
   poly_ctx_destroy(ctx);
   return rc;

@@ -21,7 +21,7 @@ int main(void) {
   cfg.batch_size = 1;
   cfg.seed = 42;
 
-  PolyInstance *inst = poly_mlp(&cfg);
+  PolyInstance *inst = poly_mlp(&cfg, POLY_DEVICE_AUTO);
   if (!inst) return 1;
 
   poly_instance_set_optimizer(inst, POLY_OPTIM_SGD, 0.03f, 0.0f, 0.0f, 0.0f, 0.0f);

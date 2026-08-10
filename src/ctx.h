@@ -39,7 +39,6 @@ struct PolyCtx {
   int stats_suppression_depth;
   PolyMap *shape_cache;
   PolyMap *buffers;
-  PolyMap *tensors_by_uop;
   PolyTensor **tensors;
   int n_tensors;
   int tensors_cap;

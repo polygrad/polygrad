@@ -313,17 +313,10 @@ function createBoundTensorClass(runtime) {
       if (rec.ctx !== ctx) continue
       const active = []
       const activeSeen = new Set()
-      for (let i = 0; i < rec.afters.length; i++) {
-        const logicalAfter = rawUop(rec.afters[i])
-        let activeAfter = null
-        if (ffi.poly_uop_reachable(ctx, rootRaw, logicalAfter)) {
-          activeAfter = logicalAfter
-        } else {
-          const physicalAfter = rec.physicalAfters && rawUop(rec.physicalAfters[i])
-          if (physicalAfter && ffi.poly_uop_reachable(ctx, rootRaw, physicalAfter)) {
-            activeAfter = physicalAfter
-          }
-        }
+      for (let i = 0; i < rec.physicalAfters.length; i++) {
+        const physicalAfter = rawUop(rec.physicalAfters[i])
+        const activeAfter = physicalAfter && ffi.poly_uop_reachable(ctx, rootRaw, physicalAfter)
+          ? physicalAfter : null
         const activeKey = uopKey(activeAfter)
         // Hash-consed duplicate sources share one AFTER. tinygrad uses the
         // first matching CALL slot and passes its accumulated gradient once.
@@ -349,7 +342,7 @@ function createBoundTensorClass(runtime) {
   }
   const gradResultRaw = (grad) => {
     if (!grad) return null
-    if (grad instanceof Tensor) return grad._graphUopRaw()
+    if (grad instanceof Tensor) return grad._currentUopRaw()
     if (grad instanceof UOp) return grad.raw
     return rawUop(grad)
   }
@@ -566,21 +559,6 @@ function createBoundTensorClass(runtime) {
     _currentUopRaw() { return this._tensor ? tensorUop(this._tensor) : null }
     _logicalUopRaw() { return this._tensor ? tensorUopLogical(this._tensor) : null }
     _physicalUopRaw() { return this._tensor ? tensorUopPhysical(this._tensor) : null }
-    _graphUopRaw() {
-      const logical = this._logicalUopRaw()
-      const physical = this._physicalUopRaw()
-      if (logical && physical && ffi.poly_uop_op && ops && ffi.poly_uop_op(logical) === ops.AFTER) {
-        return physical
-      }
-      return logical || this._currentUopRaw()
-    }
-    _graphBufferRaw() {
-      const raw = this._graphUopRaw()
-      if (!raw) return null
-      if (ffi.poly_uop_get_buffer_identity) return ffi.poly_uop_get_buffer_identity(raw)
-      const u = new UOp(this._ctx, this._rt._core.ffi, raw)
-      return u.buffer ? u.buffer.raw : null
-    }
     _coreToDevice(device) {
       if (!this._tensor) throw new Error('Tensor has no core PolyTensor')
       return ffi.poly_tensor_to_device(this._ctx, this._tensor, deviceId(device))
@@ -603,7 +581,6 @@ function createBoundTensorClass(runtime) {
     }
 
     get _uop() { return this._currentUopRaw() }
-    get _graphUop() { return this._graphUopRaw() }
     get _buffer() {
       const u = this.uop
       return u && u.buffer ? u.buffer.raw : null
@@ -667,23 +644,13 @@ function createBoundTensorClass(runtime) {
       }
       const root = this._currentUopRaw()
       const targets = []
-      /* tinygrad discovers backward targets from all_tensors, not from a saved
-       * input list. Polygrad accepts reachability through either half of its
-       * logical/current alias pair, but prefers the executable current root;
-       * the logical root can retain stale pre-realization RNG provenance. */
+      /* Pinned tensor.py:527-543 discovers targets only through the current
+       * Tensor.uop. Polygrad's corresponding root is mandatory physical. */
       for (const t of liveTensorSnapshot()) {
         if (!t || t._ctx !== this._ctx || !t._tensor || !t._requiresGrad) continue
-        const target = t._graphUopRaw()
         const current = t._currentUopRaw()
-        let gradRoot = null
         if (current && ffi.poly_uop_reachable(this._ctx, root, current)) {
-          gradRoot = current
-        } else if (target && uopKey(current) !== uopKey(target) &&
-                   ffi.poly_uop_reachable(this._ctx, root, target)) {
-          gradRoot = target
-        }
-        if (gradRoot) {
-          targets.push({ tensor: t, root: gradRoot })
+          targets.push({ tensor: t, root: current })
         }
       }
       return targets
@@ -977,15 +944,6 @@ function createBoundTensorClass(runtime) {
         if (!arraysEqual(outShape, this.shape)) {
           throw new Error(`assign shape mismatch [${this.shape}] != [${x.shape}]`)
         }
-        // Assignment broadcasting is represented as normal lazy EXPAND/RESHAPE
-        // on the RHS before the core builds tinygrad-style AFTER(target, STORE).
-        x = new Tensor(null, {
-          _ctx: this._ctx,
-          _uop: x._broadcastUop(this.shape),
-          _dtype: x._dtype,
-          _device: x._device,
-          requiresGrad: x._requiresGrad
-        })
       }
       if (this._device !== x._device) {
         throw new Error(`assign device mismatch ${this.device} != ${x.device}`)
@@ -1157,7 +1115,7 @@ function createBoundTensorClass(runtime) {
         if (t._ctx !== this._ctx) throw new Error('customKernel tensors must share a context')
       }
       const contig = srcs.map(t => {
-        const graph = t._graphUopRaw()
+        const graph = t._currentUopRaw()
         return graph && ffi.poly_uop_op && ffi.poly_uop_op(graph) === ops.AFTER ? t : t.contiguous()
       })
       const placeholders = contig.map(
@@ -1171,12 +1129,9 @@ function createBoundTensorClass(runtime) {
       if (!Array.isArray(cores) || cores.length !== contig.length || cores.some(x => !x)) {
         throw new Error('poly_tensor_custom_kernel failed')
       }
-      const afters = []
       const physicalAfters = []
       const outs = contig.map((t, i) => {
-        const logical = new UOp(t._ctx, ffi, tensorUopLogical(cores[i]))
         const physical = new UOp(t._ctx, ffi, tensorUopPhysical(cores[i]))
-        afters.push(logical)
         physicalAfters.push(physical)
         return new Tensor(null, {
           _ctx: t._ctx,
@@ -1186,12 +1141,11 @@ function createBoundTensorClass(runtime) {
           requiresGrad: t._requiresGrad
         })
       })
-      const call = afters[0].src[1]
+      const call = physicalAfters[0].src[1]
       customKernelGradRecords.push({
         ctx: this._ctx,
         call,
         args: call.src.slice(1),
-        afters,
         physicalAfters,
         gradFxn
       })
@@ -1255,22 +1209,6 @@ function createBoundTensorClass(runtime) {
         else throw new Error(`Cannot broadcast shapes [${a}] and [${b}]`)
       }
       return result
-    }
-
-    _broadcastUop(targetShape) {
-      if (arraysEqual(this.shape, targetShape)) return this._graphUopRaw()
-      const { ffi } = this._rt._core
-      let uop = this._graphUopRaw()
-      let curShape = [...this.shape]
-      const targetNd = targetShape.length
-      if (curShape.length < targetNd) {
-        curShape = new Array(targetNd - curShape.length).fill(1).concat(curShape)
-        uop = ffi.poly_reshape(this._ctx, uop, curShape, curShape.length)
-      }
-      if (!arraysEqual(curShape, targetShape)) {
-        uop = ffi.poly_expand(this._ctx, uop, targetShape, targetShape.length)
-      }
-      return uop
     }
 
     _broadcastTensor(targetShape) {
@@ -2395,11 +2333,10 @@ function createBoundTensorClass(runtime) {
     layernorm(axis, eps) {
       if (axis === undefined) axis = -1
       if (eps === undefined) eps = 1e-5
-      // Layernorm is normal lazy graph construction. A hidden realize here
-      // would make JS diverge from tinygrad and Python autograd boundaries.
-      const m = this.mean(axis, true)
-      const v = this.var(axis, true, 0)
-      return this.sub(m).div(v.add(eps).sqrt())
+      // Pinned mixin/__init__.py:1548-1564. Reuse the centered value and keep
+      // the exact mul/rsqrt spelling as one ordinary lazy graph.
+      const y = this.sub(this.mean(axis, true))
+      return y.mul(y.mul(y).mean(axis, true).add(eps).rsqrt())
     }
 
     // --- Indexing ---
@@ -2497,7 +2434,7 @@ function createBoundTensorClass(runtime) {
     static einsum(formula, ...operands) {
       if (operands.length === 1 && Array.isArray(operands[0])) operands = operands[0]
       if (!operands.length) throw new Error('einsum requires at least one operand')
-      if (operands.some(t => !t || typeof t._graphUopRaw !== 'function' || !t._ctx)) {
+      if (operands.some(t => !t || !t._tensor || !t._ctx)) {
         throw new TypeError('einsum operands must be Tensors')
       }
       const { ffi } = _runtime._core

@@ -1926,7 +1926,7 @@ TEST_BACKEND(x86, direct_stack_args_follow_tinygrad_sysv_x86_abi) {
 TEST_BACKEND(x86, schedule_runtime_tabm_forward_preserves_callee_saved_stack_args) {
   const char *spec = "{\"layers\":[2,4,1],\"activation\":\"relu\","
                      "\"loss\":\"mse\",\"batch_size\":1,\"seed\":42,\"n_ensemble\":4}";
-  PolyInstance *inst = poly_tabm_instance(spec, (int)strlen(spec));
+  PolyInstance *inst = poly_tabm_instance(spec, (int)strlen(spec), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
   ASSERT_INT_EQ(poly_instance_set_device(inst, POLY_DEVICE_X86), 0);
 

@@ -29,7 +29,7 @@ PolyInstance *poly_hf_load(
     const char *config_json, int config_len,
     const uint8_t **weight_files, const int64_t *weight_lens,
     int n_weight_files,
-    int max_batch, int max_seq_len);
+    int max_batch, int max_seq_len, PolyDevice device);
 
 #ifdef __cplusplus
 }

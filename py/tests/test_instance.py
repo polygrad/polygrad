@@ -59,6 +59,15 @@ class TestMLPCreate:
 
 
 class TestForward:
+    def test_factory_constructs_on_requested_device(self):
+        inst = MLP({
+            'layers': [2, 4, 1], 'activation': 'relu',
+            'bias': True, 'loss': 'mse', 'batch_size': 1, 'seed': 42,
+        }, device='INTERP')
+        outputs = inst.forward(x=np.array([1.0, 2.0], dtype=np.float32))
+        assert np.isfinite(outputs['output'][0])
+        inst.free()
+
     def test_forward_produces_output(self):
         inst = MLP({
             'layers': [2, 4, 1], 'activation': 'relu',

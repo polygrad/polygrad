@@ -16,7 +16,7 @@ import sys
 _lib = None
 OPS = {}
 _has_cuda_ffi = False
-POLYGRAD_ABI_VERSION = 47
+POLYGRAD_ABI_VERSION = 49
 
 # --- Opaque pointer type (always available) ---
 _ptr = ctypes.c_void_p
@@ -92,7 +92,6 @@ class PolyCtxStats(ctypes.Structure):
         ('buffer_owned_bytes', ctypes.c_size_t),
         ('buffer_owned_current_bytes', ctypes.c_size_t),
         ('buffer_owned_source_bytes', ctypes.c_size_t),
-        ('tensor_entries', ctypes.c_size_t),
         ('tensor_records', ctypes.c_size_t),
         ('registry_entries', ctypes.c_size_t),
         ('entrypoint_entries', ctypes.c_size_t),
@@ -738,9 +737,6 @@ def _declare_signatures(lib):
     lib.poly_realize_uops.restype = ctypes.c_int
     lib.poly_realize_uops.argtypes = [_ptr, ctypes.POINTER(_ptr), ctypes.c_int, ctypes.POINTER(_ptr)]
 
-    lib.poly_tensor_create.restype = _ptr
-    lib.poly_tensor_create.argtypes = [_ptr, _ptr, ctypes.c_int, ctypes.c_int]
-
     lib.poly_tensor_create_with_roots.restype = _ptr
     lib.poly_tensor_create_with_roots.argtypes = [_ptr, _ptr, _ptr, ctypes.c_int, ctypes.c_int]
 
@@ -1130,15 +1126,15 @@ def _declare_signatures(lib):
 
     # MLP family builder (model_mlp.h)
     lib.poly_mlp_from_json.restype = _ptr
-    lib.poly_mlp_from_json.argtypes = [ctypes.c_char_p, ctypes.c_int]
+    lib.poly_mlp_from_json.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_int]
 
     # TabM family builder (model_tabm.h)
     lib.poly_tabm_instance.restype = _ptr
-    lib.poly_tabm_instance.argtypes = [ctypes.c_char_p, ctypes.c_int]
+    lib.poly_tabm_instance.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_int]
 
     # NAM family builder (model_nam.h)
     lib.poly_nam_instance.restype = _ptr
-    lib.poly_nam_instance.argtypes = [ctypes.c_char_p, ctypes.c_int]
+    lib.poly_nam_instance.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_int]
 
     # HF/model loaders (src/models/*.c)
     lib.poly_hf_load.restype = _ptr
@@ -1146,11 +1142,13 @@ def _declare_signatures(lib):
         ctypes.c_char_p, ctypes.c_int,
         ctypes.POINTER(_u8p),
         ctypes.POINTER(ctypes.c_int64),
-        ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
     ]
 
     lib.poly_gguf_load.restype = _ptr
-    lib.poly_gguf_load.argtypes = [_u8p, ctypes.c_int64, ctypes.c_int, ctypes.c_int]
+    lib.poly_gguf_load.argtypes = [
+        _u8p, ctypes.c_int64, ctypes.c_int, ctypes.c_int, ctypes.c_int
+    ]
 
     # --- Shape-on-UOp accessors ---
     lib.poly_uop_ndim.restype = ctypes.c_int

@@ -34,18 +34,20 @@ TEST(nn, instance_linear_declares_params) {
   int64_t xs[] = {2, 4};
   PolyTensor *x_tensor = poly_instance_input(inst, "x", POLY_FLOAT32, xs, 2);
   ASSERT_NOT_NULL(x_tensor);
-  PolyUOp *x = poly_tensor_uop(x_tensor);
 
-  PolyUOp *out = poly_instance_linear(inst, "fc1", x, 4, 8, true);
-  ASSERT_TRUE(out != NULL);
-  PolyTensor *out_tensor = poly_tensor_create(ctx, out, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
+  PolyTensor *out_tensor = poly_instance_linear(inst, "fc1", x_tensor, 4, 8, true);
   ASSERT_NOT_NULL(out_tensor);
+  ASSERT_NOT_NULL(poly_tensor_uop_logical(out_tensor));
+  ASSERT_NOT_NULL(poly_tensor_uop_physical(out_tensor));
+  ASSERT_INT_EQ(poly_tensor_uop_logical(out_tensor)->op, POLY_OP_ADD);
+  ASSERT_INT_EQ(poly_tensor_uop_physical(out_tensor)->op, POLY_OP_ADD);
   ASSERT_INT_EQ(poly_instance_output(inst, "output", out_tensor), POLY_STATUS_OK);
   const char *inputs[] = {"x"};
   const char *outputs[] = {"output"};
   ASSERT_INT_EQ(
       poly_instance_entrypoint(inst, "forward", inputs, 1, outputs, 1, NULL), POLY_STATUS_OK
   );
+  ASSERT_NOT_NULL(poly_tensor_uop_physical(out_tensor));
   ASSERT_INT_EQ(poly_instance_build(inst, NULL), POLY_STATUS_OK);
 
   int wi = nn_param_index(inst, "fc1.weight");
@@ -72,10 +74,10 @@ TEST(nn, instance_linear_no_bias) {
   PolyTensor *x_tensor = poly_instance_input(inst, "x", POLY_FLOAT32, xs, 2);
   ASSERT_NOT_NULL(x_tensor);
 
-  PolyUOp *out = poly_instance_linear(inst, "fc", poly_tensor_uop(x_tensor), 4, 2, false);
-  ASSERT_TRUE(out != NULL);
-  PolyTensor *out_tensor = poly_tensor_create(ctx, out, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
+  PolyTensor *out_tensor = poly_instance_linear(inst, "fc", x_tensor, 4, 2, false);
   ASSERT_NOT_NULL(out_tensor);
+  ASSERT_NOT_NULL(poly_tensor_uop_physical(out_tensor));
+  ASSERT_INT_EQ(poly_tensor_uop_physical(out_tensor)->op, POLY_OP_RESHAPE);
   ASSERT_INT_EQ(poly_instance_output(inst, "output", out_tensor), POLY_STATUS_OK);
   const char *inputs[] = {"x"};
   const char *outputs[] = {"output"};
@@ -97,10 +99,8 @@ TEST(nn, instance_linear_duplicate_prefix_rejected) {
   int64_t xs[] = {1, 4};
   PolyTensor *x_tensor = poly_instance_input(inst, "x", POLY_FLOAT32, xs, 2);
   ASSERT_NOT_NULL(x_tensor);
-  PolyUOp *x = poly_tensor_uop(x_tensor);
-
-  ASSERT_NOT_NULL(poly_instance_linear(inst, "shared", x, 4, 8, true));
-  ASSERT_TRUE(poly_instance_linear(inst, "shared", x, 4, 8, true) == NULL);
+  ASSERT_NOT_NULL(poly_instance_linear(inst, "shared", x_tensor, 4, 8, true));
+  ASSERT_TRUE(poly_instance_linear(inst, "shared", x_tensor, 4, 8, true) == NULL);
   const PolyInstanceError *err = poly_instance_last_error(inst);
   ASSERT_TRUE(err && strstr(err->message, "duplicate binding") != NULL);
 
@@ -116,10 +116,9 @@ TEST(nn, nn_linear_e2e) {
   PolyTensor *x_tensor = poly_instance_input(inst, "x", POLY_FLOAT32, xs, 2);
   ASSERT_NOT_NULL(x_tensor);
 
-  PolyUOp *out = poly_instance_linear(inst, "fc", poly_tensor_uop(x_tensor), 2, 3, true);
-  ASSERT_TRUE(out != NULL);
-  PolyTensor *out_tensor = poly_tensor_create(ctx, out, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
+  PolyTensor *out_tensor = poly_instance_linear(inst, "fc", x_tensor, 2, 3, true);
   ASSERT_NOT_NULL(out_tensor);
+  ASSERT_NOT_NULL(poly_tensor_uop_physical(out_tensor));
   ASSERT_INT_EQ(poly_instance_output(inst, "output", out_tensor), POLY_STATUS_OK);
   const char *inputs[] = {"x"};
   const char *outputs[] = {"output"};
@@ -158,10 +157,12 @@ TEST(nn, instance_layernorm_declares_params) {
   PolyTensor *x_tensor = poly_instance_input(inst, "x", POLY_FLOAT32, xs, 2);
   ASSERT_NOT_NULL(x_tensor);
 
-  PolyUOp *out = poly_instance_layernorm(inst, "ln", poly_tensor_uop(x_tensor), 4, 1e-5);
-  ASSERT_TRUE(out != NULL);
-  PolyTensor *out_tensor = poly_tensor_create(ctx, out, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
+  PolyTensor *out_tensor = poly_instance_layernorm(inst, "ln", x_tensor, 4, 1e-5);
   ASSERT_NOT_NULL(out_tensor);
+  ASSERT_NOT_NULL(poly_tensor_uop_logical(out_tensor));
+  ASSERT_NOT_NULL(poly_tensor_uop_physical(out_tensor));
+  ASSERT_INT_EQ(poly_tensor_uop_logical(out_tensor)->op, POLY_OP_ADD);
+  ASSERT_INT_EQ(poly_tensor_uop_physical(out_tensor)->op, POLY_OP_ADD);
   ASSERT_INT_EQ(poly_instance_output(inst, "output", out_tensor), POLY_STATUS_OK);
   const char *inputs[] = {"x"};
   const char *outputs[] = {"output"};
@@ -184,10 +185,12 @@ TEST(nn, instance_rmsnorm_declares_params) {
   PolyTensor *x_tensor = poly_instance_input(inst, "x", POLY_FLOAT32, xs, 2);
   ASSERT_NOT_NULL(x_tensor);
 
-  PolyUOp *out = poly_instance_rmsnorm(inst, "rms", poly_tensor_uop(x_tensor), 4, 1e-6);
-  ASSERT_TRUE(out != NULL);
-  PolyTensor *out_tensor = poly_tensor_create(ctx, out, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
+  PolyTensor *out_tensor = poly_instance_rmsnorm(inst, "rms", x_tensor, 4, 1e-6);
   ASSERT_NOT_NULL(out_tensor);
+  ASSERT_NOT_NULL(poly_tensor_uop_logical(out_tensor));
+  ASSERT_NOT_NULL(poly_tensor_uop_physical(out_tensor));
+  ASSERT_INT_EQ(poly_tensor_uop_logical(out_tensor)->op, POLY_OP_MUL);
+  ASSERT_INT_EQ(poly_tensor_uop_physical(out_tensor)->op, POLY_OP_MUL);
   ASSERT_INT_EQ(poly_instance_output(inst, "output", out_tensor), POLY_STATUS_OK);
   const char *inputs[] = {"x"};
   const char *outputs[] = {"output"};
@@ -209,10 +212,12 @@ TEST(nn, instance_embedding_declares_params) {
   PolyTensor *tok_tensor = poly_instance_input(inst, "tokens", POLY_INT32, ts, 1);
   ASSERT_NOT_NULL(tok_tensor);
 
-  PolyUOp *out = poly_instance_embedding(inst, "emb", poly_tensor_uop(tok_tensor), 100, 64);
-  ASSERT_TRUE(out != NULL);
-  PolyTensor *out_tensor = poly_tensor_create(ctx, out, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
+  PolyTensor *out_tensor = poly_instance_embedding(inst, "emb", tok_tensor, 100, 64);
   ASSERT_NOT_NULL(out_tensor);
+  ASSERT_NOT_NULL(poly_tensor_uop_logical(out_tensor));
+  ASSERT_NOT_NULL(poly_tensor_uop_physical(out_tensor));
+  ASSERT_INT_EQ(poly_tensor_uop_logical(out_tensor)->op, POLY_OP_RESHAPE);
+  ASSERT_INT_EQ(poly_tensor_uop_physical(out_tensor)->op, POLY_OP_RESHAPE);
   ASSERT_INT_EQ(poly_instance_output(inst, "output", out_tensor), POLY_STATUS_OK);
   const char *inputs[] = {"tokens"};
   const char *outputs[] = {"output"};

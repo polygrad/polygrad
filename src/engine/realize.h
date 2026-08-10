@@ -23,8 +23,7 @@ extern "C" {
  * and returns the buffer-identity replacements in out_uops. Returns NULL when
  * there is nothing to run or on error. This raw-UOp entrypoint receives an
  * already-physical graph and therefore performs no logical Tensor placement
- * inference; poly_realize_tensors retains exact placement correspondence
- * through the private production variant. */
+ * inference. Default Tensor realization uses this same physical-only path. */
 PolyUOp *poly_transform_to_call(PolyCtx *ctx, PolyUOp **uops, int n, PolyUOp **out_uops);
 
 /* C-core analogue of tinygrad's Tensor.schedule_with_vars. Runs the local

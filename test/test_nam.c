@@ -25,7 +25,7 @@ static const char *ce_nam_spec =
 /* Tests */
 
 TEST(nam, create_simple) {
-  PolyInstance *inst = poly_nam_instance(simple_nam_spec, (int)strlen(simple_nam_spec));
+  PolyInstance *inst = poly_nam_instance(simple_nam_spec, (int)strlen(simple_nam_spec), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   /* intercept (1) + 2 features * (weight + bias per layer) = 1 + 2*(2*2) = 9 */
@@ -67,7 +67,7 @@ TEST(nam, create_simple) {
 }
 
 TEST(nam, staged_builder_does_not_use_ctx_registry) {
-  PolyInstance *inst = poly_nam_instance(simple_nam_spec, (int)strlen(simple_nam_spec));
+  PolyInstance *inst = poly_nam_instance(simple_nam_spec, (int)strlen(simple_nam_spec), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
   ASSERT_INT_EQ(poly_ctx_named_count(poly_instance_ctx(inst)), 0);
   poly_instance_free(inst);
@@ -75,7 +75,7 @@ TEST(nam, staged_builder_does_not_use_ctx_registry) {
 }
 
 TEST(nam, create_exu) {
-  PolyInstance *inst = poly_nam_instance(exu_nam_spec, (int)strlen(exu_nam_spec));
+  PolyInstance *inst = poly_nam_instance(exu_nam_spec, (int)strlen(exu_nam_spec), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   /* With ExU, hidden layers get extra exu.weight + exu.bias params.
@@ -95,7 +95,7 @@ TEST(nam, create_exu) {
 }
 
 TEST(nam, init_values) {
-  PolyInstance *inst = poly_nam_instance(simple_nam_spec, (int)strlen(simple_nam_spec));
+  PolyInstance *inst = poly_nam_instance(simple_nam_spec, (int)strlen(simple_nam_spec), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   /* Intercept should be zero */
@@ -122,7 +122,7 @@ TEST(nam, init_values) {
 }
 
 TEST(nam, exu_init_values) {
-  PolyInstance *inst = poly_nam_instance(exu_nam_spec, (int)strlen(exu_nam_spec));
+  PolyInstance *inst = poly_nam_instance(exu_nam_spec, (int)strlen(exu_nam_spec), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   /* ExU weight should be zero (exp(0) = 1) */
@@ -143,8 +143,8 @@ TEST(nam, exu_init_values) {
 }
 
 TEST(nam, deterministic_init) {
-  PolyInstance *inst1 = poly_nam_instance(simple_nam_spec, (int)strlen(simple_nam_spec));
-  PolyInstance *inst2 = poly_nam_instance(simple_nam_spec, (int)strlen(simple_nam_spec));
+  PolyInstance *inst1 = poly_nam_instance(simple_nam_spec, (int)strlen(simple_nam_spec), POLY_DEVICE_AUTO);
+  PolyInstance *inst2 = poly_nam_instance(simple_nam_spec, (int)strlen(simple_nam_spec), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst1);
   ASSERT_NOT_NULL(inst2);
 
@@ -162,7 +162,7 @@ TEST(nam, deterministic_init) {
 }
 
 TEST(nam, forward_produces_output) {
-  PolyInstance *inst = poly_nam_instance(simple_nam_spec, (int)strlen(simple_nam_spec));
+  PolyInstance *inst = poly_nam_instance(simple_nam_spec, (int)strlen(simple_nam_spec), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   float x[] = {1.0f, 2.0f};
@@ -192,7 +192,7 @@ TEST(nam, forward_produces_output) {
 }
 
 TEST(nam, forward_deterministic) {
-  PolyInstance *inst = poly_nam_instance(simple_nam_spec, (int)strlen(simple_nam_spec));
+  PolyInstance *inst = poly_nam_instance(simple_nam_spec, (int)strlen(simple_nam_spec), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   float x[] = {1.0f, 2.0f};
@@ -228,7 +228,7 @@ TEST(nam, forward_deterministic) {
 }
 
 TEST(nam, train_mse_loss_decreases) {
-  PolyInstance *inst = poly_nam_instance(simple_nam_spec, (int)strlen(simple_nam_spec));
+  PolyInstance *inst = poly_nam_instance(simple_nam_spec, (int)strlen(simple_nam_spec), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   poly_instance_set_optimizer(inst, POLY_OPTIM_SGD, 0.01f, 0.0f, 0.0f, 0.0f, 0.0f);
@@ -258,7 +258,7 @@ TEST(nam, train_mse_loss_decreases) {
 }
 
 TEST(nam, train_exu_loss_decreases) {
-  PolyInstance *inst = poly_nam_instance(exu_nam_spec, (int)strlen(exu_nam_spec));
+  PolyInstance *inst = poly_nam_instance(exu_nam_spec, (int)strlen(exu_nam_spec), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   poly_instance_set_optimizer(inst, POLY_OPTIM_SGD, 0.01f, 0.0f, 0.0f, 0.0f, 0.0f);
@@ -288,7 +288,7 @@ TEST(nam, train_exu_loss_decreases) {
 }
 
 TEST(nam, train_cross_entropy_loss_decreases) {
-  PolyInstance *inst = poly_nam_instance(ce_nam_spec, (int)strlen(ce_nam_spec));
+  PolyInstance *inst = poly_nam_instance(ce_nam_spec, (int)strlen(ce_nam_spec), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   poly_instance_set_optimizer(inst, POLY_OPTIM_SGD, 0.01f, 0.0f, 0.0f, 0.0f, 0.0f);
@@ -318,7 +318,7 @@ TEST(nam, train_cross_entropy_loss_decreases) {
 }
 
 TEST(nam, save_load_roundtrip) {
-  PolyInstance *inst = poly_nam_instance(simple_nam_spec, (int)strlen(simple_nam_spec));
+  PolyInstance *inst = poly_nam_instance(simple_nam_spec, (int)strlen(simple_nam_spec), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   /* Train a few steps */
@@ -383,11 +383,11 @@ TEST(nam, save_load_roundtrip) {
 }
 
 TEST(nam, null_and_invalid) {
-  ASSERT_TRUE(poly_nam_instance(NULL, 0) == NULL);
-  ASSERT_TRUE(poly_nam_instance("{}", 2) == NULL);
+  ASSERT_TRUE(poly_nam_instance(NULL, 0, POLY_DEVICE_AUTO) == NULL);
+  ASSERT_TRUE(poly_nam_instance("{}", 2, POLY_DEVICE_AUTO) == NULL);
 
   const char *no_features = "{\"hidden_sizes\":[4],\"n_outputs\":1}";
-  ASSERT_TRUE(poly_nam_instance(no_features, (int)strlen(no_features)) == NULL);
+  ASSERT_TRUE(poly_nam_instance(no_features, (int)strlen(no_features), POLY_DEVICE_AUTO) == NULL);
 
   PASS();
 }

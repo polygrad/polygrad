@@ -25,6 +25,46 @@ void poly_nn_seed(uint32_t seed) {
   nn_rng_state = seed;
 }
 
+/* Polygrad retains a portable logical twin, but default execution follows the
+ * same ordered Tensor.uop construction as pinned Tensor._apply_uop
+ * (tinygrad/tensor.py:128-140). Layer programs therefore run independently
+ * over the exact logical and physical occurrences; neither root is recovered
+ * from the other. */
+static PolyTensor *nn_tensor_result(
+    PolyCtx *ctx,
+    PolyUOp *logical,
+    PolyUOp *physical,
+    PolyTensor **inputs,
+    int n_inputs
+) {
+  if (!ctx || !logical || !physical || !inputs || n_inputs <= 0 ||
+      !poly_ctx_owns_ptr(ctx, logical) || !poly_ctx_owns_ptr(ctx, physical))
+    return NULL;
+  PolyDevice device = POLY_DEVICE_AUTO;
+  bool requires_grad = false;
+  bool requires_grad_set = false;
+  for (int i = 0; i < n_inputs; i++) {
+    PolyTensor *input = inputs[i];
+    if (!input || !input->uop_logical || !input->uop_physical ||
+        !poly_ctx_owns_ptr(ctx, input->uop_logical) ||
+        !poly_ctx_owns_ptr(ctx, input->uop_physical))
+      return NULL;
+    if (input->device != POLY_DEVICE_AUTO) {
+      if (device != POLY_DEVICE_AUTO && device != input->device) return NULL;
+      device = input->device;
+    }
+    requires_grad |= input->requires_grad;
+    requires_grad_set |= input->requires_grad_set;
+  }
+  PolyTensor *out =
+      poly_tensor_create_with_roots(ctx, logical, physical, POLY_TENSOR_VALUE, device);
+  if (!out) return NULL;
+  out->requires_grad = requires_grad;
+  out->requires_grad_set = requires_grad_set;
+  out->provenance = POLY_TENSOR_PROVENANCE_COMPUTED;
+  return out;
+}
+
 /* Linear */
 
 PolyUOp *poly_linear_apply(PolyCtx *ctx, PolyUOp *x, PolyUOp *w, PolyUOp *b) {
@@ -34,6 +74,25 @@ PolyUOp *poly_linear_apply(PolyCtx *ctx, PolyUOp *x, PolyUOp *w, PolyUOp *b) {
   if (!out) return NULL;
   if (b) out = poly_add(ctx, out, b);
   return out;
+}
+
+PolyTensor *poly_tensor_linear_apply(
+    PolyCtx *ctx,
+    PolyTensor *x,
+    PolyTensor *w,
+    PolyTensor *b
+) {
+  if (!ctx || !x || !w) return NULL;
+  /* Pinned nn.Linear stores (out,in), transposes it, then calls Tensor.linear;
+   * Tensor.linear is dot followed by optional add
+   * (nn/__init__.py:156-177; mixin/__init__.py:1335-1350). */
+  PolyUOp *logical =
+      poly_linear_apply(ctx, x->uop_logical, w->uop_logical, b ? b->uop_logical : NULL);
+  PolyUOp *physical = poly_linear_apply(
+      ctx, x->uop_physical, w->uop_physical, b ? b->uop_physical : NULL
+  );
+  PolyTensor *inputs[3] = {x, w, b};
+  return nn_tensor_result(ctx, logical, physical, inputs, b ? 3 : 2);
 }
 
 PolyUOp *poly_linear(
@@ -59,10 +118,10 @@ PolyUOp *poly_linear(
   return poly_linear_apply(ctx, x, w, b);
 }
 
-PolyUOp *poly_instance_linear(
+PolyTensor *poly_instance_linear(
     PolyInstance *inst,
     const char *prefix,
-    PolyUOp *x,
+    PolyTensor *x,
     int in_features,
     int out_features,
     bool use_bias
@@ -74,19 +133,16 @@ PolyUOp *poly_instance_linear(
   if (scoped && poly_instance_scope_push(inst, "%s", prefix) != POLY_STATUS_OK) return NULL;
 
   int64_t ws[] = {out_features, in_features};
-  PolyTensor *w_tensor = poly_instance_param(inst, "weight", POLY_FLOAT32, ws, 2);
-  PolyUOp *w = w_tensor ? poly_tensor_uop(w_tensor) : NULL;
-
-  PolyUOp *b = NULL;
+  PolyTensor *w = poly_instance_param(inst, "weight", POLY_FLOAT32, ws, 2);
+  PolyTensor *b = NULL;
   if (w && use_bias) {
     int64_t bs[] = {out_features};
-    PolyTensor *b_tensor = poly_instance_param(inst, "bias", POLY_FLOAT32, bs, 1);
-    b = b_tensor ? poly_tensor_uop(b_tensor) : NULL;
+    b = poly_instance_param(inst, "bias", POLY_FLOAT32, bs, 1);
   }
 
   if (scoped && poly_instance_scope_pop(inst) != POLY_STATUS_OK) return NULL;
   if (!w || (use_bias && !b)) return NULL;
-  return poly_linear_apply(ctx, x, w, b);
+  return poly_tensor_linear_apply(ctx, x, w, b);
 }
 
 /* LayerNorm */
@@ -114,6 +170,27 @@ PolyUOp *poly_layernorm_apply(
   return normed;
 }
 
+PolyTensor *poly_tensor_layernorm_apply(
+    PolyCtx *ctx,
+    PolyTensor *x,
+    PolyTensor *w,
+    PolyTensor *b,
+    int axis,
+    double eps
+) {
+  if (!ctx || !x || (!!w != !!b)) return NULL;
+  /* Pinned LayerNorm first runs Tensor.layernorm, then applies the affine
+   * weight and bias (nn/__init__.py:235-261; mixin/__init__.py:1548-1564). */
+  PolyUOp *logical = poly_layernorm_apply(
+      ctx, x->uop_logical, w ? w->uop_logical : NULL, b ? b->uop_logical : NULL, axis, eps
+  );
+  PolyUOp *physical = poly_layernorm_apply(
+      ctx, x->uop_physical, w ? w->uop_physical : NULL, b ? b->uop_physical : NULL, axis, eps
+  );
+  PolyTensor *inputs[3] = {x, w, b};
+  return nn_tensor_result(ctx, logical, physical, inputs, w ? 3 : 1);
+}
+
 PolyUOp *poly_layernorm(PolyCtx *ctx, const char *prefix, PolyUOp *x, int dim, double eps) {
   int64_t ds[] = {dim};
   PolyUOp *w = poly_param(ctx, POLY_FLOAT32, ds, 1, "%s.weight", prefix);
@@ -125,10 +202,10 @@ PolyUOp *poly_layernorm(PolyCtx *ctx, const char *prefix, PolyUOp *x, int dim, d
   );
 }
 
-PolyUOp *poly_instance_layernorm(
+PolyTensor *poly_instance_layernorm(
     PolyInstance *inst,
     const char *prefix,
-    PolyUOp *x,
+    PolyTensor *x,
     int dim,
     double eps
 ) {
@@ -139,15 +216,12 @@ PolyUOp *poly_instance_layernorm(
   if (scoped && poly_instance_scope_push(inst, "%s", prefix) != POLY_STATUS_OK) return NULL;
 
   int64_t ds[] = {dim};
-  PolyTensor *w_tensor = poly_instance_param(inst, "weight", POLY_FLOAT32, ds, 1);
-  PolyTensor *b_tensor = poly_instance_param(inst, "bias", POLY_FLOAT32, ds, 1);
+  PolyTensor *w = poly_instance_param(inst, "weight", POLY_FLOAT32, ds, 1);
+  PolyTensor *b = poly_instance_param(inst, "bias", POLY_FLOAT32, ds, 1);
 
   if (scoped && poly_instance_scope_pop(inst) != POLY_STATUS_OK) return NULL;
-  if (!w_tensor || !b_tensor) return NULL;
-  return poly_layernorm_apply(
-      ctx, x, poly_reshape(ctx, poly_tensor_uop(w_tensor), ds, 1),
-      poly_reshape(ctx, poly_tensor_uop(b_tensor), ds, 1), -1, eps
-  );
+  if (!w || !b) return NULL;
+  return poly_tensor_layernorm_apply(ctx, x, w, b, -1, eps);
 }
 
 /* RMSNorm */
@@ -186,6 +260,24 @@ PolyUOp *poly_rmsnorm_apply(PolyCtx *ctx, PolyUOp *x, PolyUOp *w, double eps) {
   return normed;
 }
 
+PolyTensor *poly_tensor_rmsnorm_apply(
+    PolyCtx *ctx,
+    PolyTensor *x,
+    PolyTensor *w,
+    double eps
+) {
+  if (!ctx || !x) return NULL;
+  /* Pinned RMSNorm normalizes x.float(), casts back, and applies the optional
+   * affine weight (nn/__init__.py:281-304). The existing raw program is run
+   * over both retained occurrences without correspondence. */
+  PolyUOp *logical =
+      poly_rmsnorm_apply(ctx, x->uop_logical, w ? w->uop_logical : NULL, eps);
+  PolyUOp *physical =
+      poly_rmsnorm_apply(ctx, x->uop_physical, w ? w->uop_physical : NULL, eps);
+  PolyTensor *inputs[2] = {x, w};
+  return nn_tensor_result(ctx, logical, physical, inputs, w ? 2 : 1);
+}
+
 PolyUOp *poly_rmsnorm(PolyCtx *ctx, const char *prefix, PolyUOp *x, int dim, double eps) {
   int64_t ds[] = {dim};
   PolyUOp *w = poly_param(ctx, POLY_FLOAT32, ds, 1, "%s.weight", prefix);
@@ -193,10 +285,10 @@ PolyUOp *poly_rmsnorm(PolyCtx *ctx, const char *prefix, PolyUOp *x, int dim, dou
   return poly_rmsnorm_apply(ctx, x, poly_reshape(ctx, w, ds, 1), eps);
 }
 
-PolyUOp *poly_instance_rmsnorm(
+PolyTensor *poly_instance_rmsnorm(
     PolyInstance *inst,
     const char *prefix,
-    PolyUOp *x,
+    PolyTensor *x,
     int dim,
     double eps
 ) {
@@ -207,17 +299,33 @@ PolyUOp *poly_instance_rmsnorm(
   if (scoped && poly_instance_scope_push(inst, "%s", prefix) != POLY_STATUS_OK) return NULL;
 
   int64_t ds[] = {dim};
-  PolyTensor *w_tensor = poly_instance_param(inst, "weight", POLY_FLOAT32, ds, 1);
+  PolyTensor *w = poly_instance_param(inst, "weight", POLY_FLOAT32, ds, 1);
 
   if (scoped && poly_instance_scope_pop(inst) != POLY_STATUS_OK) return NULL;
-  if (!w_tensor) return NULL;
-  return poly_rmsnorm_apply(ctx, x, poly_reshape(ctx, poly_tensor_uop(w_tensor), ds, 1), eps);
+  if (!w) return NULL;
+  return poly_tensor_rmsnorm_apply(ctx, x, w, eps);
 }
 
 /* Embedding */
 
 PolyUOp *poly_embedding_apply(PolyCtx *ctx, PolyUOp *tokens, PolyUOp *table) {
   return poly_gather(ctx, table, tokens);
+}
+
+PolyTensor *poly_tensor_embedding_apply(
+    PolyCtx *ctx,
+    PolyTensor *tokens,
+    PolyTensor *table
+) {
+  if (!ctx || !tokens || !table) return NULL;
+  /* Pinned Embedding is its one-hot WHERE/SUM program over the ordered weight
+   * and index Tensor.uops (nn/__init__.py:368-391). */
+  PolyUOp *logical =
+      poly_embedding_apply(ctx, tokens->uop_logical, table->uop_logical);
+  PolyUOp *physical =
+      poly_embedding_apply(ctx, tokens->uop_physical, table->uop_physical);
+  PolyTensor *inputs[2] = {tokens, table};
+  return nn_tensor_result(ctx, logical, physical, inputs, 2);
 }
 
 PolyUOp *poly_embedding(
@@ -233,10 +341,10 @@ PolyUOp *poly_embedding(
   return poly_embedding_apply(ctx, tokens, poly_reshape(ctx, w, ws, 2));
 }
 
-PolyUOp *poly_instance_embedding(
+PolyTensor *poly_instance_embedding(
     PolyInstance *inst,
     const char *prefix,
-    PolyUOp *tokens,
+    PolyTensor *tokens,
     int vocab_size,
     int embed_dim
 ) {
@@ -247,11 +355,11 @@ PolyUOp *poly_instance_embedding(
   if (scoped && poly_instance_scope_push(inst, "%s", prefix) != POLY_STATUS_OK) return NULL;
 
   int64_t ws[] = {vocab_size, embed_dim};
-  PolyTensor *w_tensor = poly_instance_param(inst, "weight", POLY_FLOAT32, ws, 2);
+  PolyTensor *w = poly_instance_param(inst, "weight", POLY_FLOAT32, ws, 2);
 
   if (scoped && poly_instance_scope_pop(inst) != POLY_STATUS_OK) return NULL;
-  if (!w_tensor) return NULL;
-  return poly_embedding_apply(ctx, tokens, poly_reshape(ctx, poly_tensor_uop(w_tensor), ws, 2));
+  if (!w) return NULL;
+  return poly_tensor_embedding_apply(ctx, tokens, w);
 }
 
 /* Causal attention mask */
@@ -269,6 +377,24 @@ PolyUOp *poly_causal_mask(PolyCtx *ctx, int64_t T) {
 
   PolyUOp *mask = poly_alu2(ctx, POLY_OP_CMPLT, row, col);
   return poly_where_op(ctx, mask, poly_const_float(ctx, -1e9), poly_const_float(ctx, 0.0));
+}
+
+PolyTensor *poly_tensor_causal_mask(PolyCtx *ctx, int64_t T) {
+  if (!ctx || T <= 0) return NULL;
+  /* Pinned GPT-2/LLaMA mask construction is a pure Tensor graph. With no
+   * BUFFER occurrence, retained and executable roots may CSE to the same
+   * node, but both approved roots are stored explicitly. */
+  PolyUOp *logical = poly_causal_mask(ctx, T);
+  PolyUOp *physical = poly_causal_mask(ctx, T);
+  if (!logical || !physical) return NULL;
+  PolyTensor *out = poly_tensor_create_with_roots(
+      ctx, logical, physical, POLY_TENSOR_VALUE, poly_ctx_get_preferred_device(ctx)
+  );
+  if (!out) return NULL;
+  out->requires_grad = false;
+  out->requires_grad_set = true;
+  out->provenance = POLY_TENSOR_PROVENANCE_COMPUTED;
+  return out;
 }
 
 /* Scaled Dot-Product Attention */
@@ -342,4 +468,25 @@ PolyUOp *poly_sdpa(PolyCtx *ctx, PolyUOp *q, PolyUOp *k, PolyUOp *v, PolyUOp *ma
   if (mask) scores = poly_add(ctx, scores, mask);
 
   return poly_dot(ctx, poly_softmax(ctx, scores, -1), v);
+}
+
+PolyTensor *poly_tensor_sdpa(
+    PolyCtx *ctx,
+    PolyTensor *q,
+    PolyTensor *k,
+    PolyTensor *v,
+    PolyTensor *mask,
+    int is_causal
+) {
+  if (!ctx || !q || !k || !v) return NULL;
+  PolyUOp *logical = poly_sdpa(
+      ctx, q->uop_logical, k->uop_logical, v->uop_logical,
+      mask ? mask->uop_logical : NULL, is_causal
+  );
+  PolyUOp *physical = poly_sdpa(
+      ctx, q->uop_physical, k->uop_physical, v->uop_physical,
+      mask ? mask->uop_physical : NULL, is_causal
+  );
+  PolyTensor *inputs[4] = {q, k, v, mask};
+  return nn_tensor_result(ctx, logical, physical, inputs, mask ? 4 : 3);
 }
