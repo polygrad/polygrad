@@ -109,7 +109,17 @@ async function runTensorTests(pg) {
   await test('from vector', async () => {
     const t = new Tensor([1, 2, 3])
     assertShape(t.shape, [3])
+    assert(t.dtype === 'int32', `expected int32, got ${t.dtype}`)
     assertClose(await t.toArray(), [1, 2, 3])
+  })
+
+  await test('array and TypedArray dtype inference matches tinygrad', async () => {
+    assert(new Tensor([[1, 2], [3, 4]]).dtype === 'int32', 'nested integers should infer int32')
+    assert(new Tensor([true, false]).dtype === 'bool', 'booleans should infer bool')
+    assert(new Tensor([1, 2.5]).dtype === 'float32', 'mixed numeric values should infer float32')
+    assert(new Tensor([]).dtype === 'float32', 'empty arrays should infer float32')
+    assert(new Tensor(new Int16Array([1, 2])).dtype === 'int16', 'Int16Array should preserve int16')
+    assert(new Tensor(new Uint32Array([1, 2])).dtype === 'uint32', 'Uint32Array should preserve uint32')
   })
 
   await test('bfloat16 host values stage through float32', async () => {
@@ -219,7 +229,7 @@ async function runTensorTests(pg) {
   })
 
   await test('detach is a lazy graph boundary', async () => {
-    const source = new Tensor([[1, 2], [3, 4]], { requiresGrad: true })
+    const source = new Tensor([[1, 2], [3, 4]], { dtype: 'float32', requiresGrad: true })
     const detached = source.detach()
 
     assertShape(detached.shape, source.shape)
@@ -271,7 +281,7 @@ async function runTensorTests(pg) {
   })
 
   await test('backward retains distinct wrappers sharing one UOp', async () => {
-    const x = new Tensor([1, 2, 3, 4], { requiresGrad: true })
+    const x = new Tensor([1, 2, 3, 4], { dtype: 'float32', requiresGrad: true })
     // Pinned Tensor.__init__ wraps an existing current Tensor.uop directly
     // (tensor.py:92-121); retained logical provenance is not executable state.
     const y = new Tensor(x.uop, { requiresGrad: true })
@@ -310,7 +320,7 @@ async function runTensorTests(pg) {
     const t = new Tensor([[1, 2], [3, 4]])
     assert(pg.uop, 'runtime should expose pg.uop')
     assertShape(pg.uop.shape(t.uop), [2, 2])
-    assert(pg.uop.dtype(t.uop) === 'float32', `expected float32, got ${pg.uop.dtype(t.uop)}`)
+    assert(pg.uop.dtype(t.uop) === 'int32', `expected int32, got ${pg.uop.dtype(t.uop)}`)
     // Pinned UOp.has_buffer_identity is false for native's lazy host COPY
     // (uop/ops.py:825-828). WASM bytes already reside in linear memory, so
     // that backend intentionally imports an immediately identifiable BUFFER.
@@ -335,6 +345,18 @@ async function runTensorTests(pg) {
     const c = Tensor.empty([4], { dtype: 'float32' })
     const out = c.customKernel(a, b, addKernel)[0]
     assertClose(await out.toArray(), [11, 22, 33, 44])
+  })
+
+  await test('customKernel RANGE numeric scalar preserves weakint', async () => {
+    const index = pg.uop.range(64, 0)
+    const offset = index.mul(64)
+    assert(pg.uop.dtype(index) === 'weakint', 'RANGE should expose weakint dtype')
+    assert(pg.uop.dtype(index.src[0]) === 'weakint', 'RANGE bound should be weakint')
+    assert(pg.uop.dtype(offset) === 'weakint', 'index expression should remain weakint')
+    assert(
+      offset.src.every(src => pg.uop.dtype(src) === 'weakint'),
+      'numeric scalar should be coerced to the index weakint dtype'
+    )
   })
 
   await test('customKernel multi-output backward matches tinygrad pattern', async () => {
@@ -416,7 +438,7 @@ async function runTensorTests(pg) {
       return [null, grad]
     }
     const out = Tensor.empty([4], { dtype: 'float32', requiresGrad: true })
-    const x = new Tensor([1, 2, 3, 4], { requiresGrad: true })
+    const x = new Tensor([1, 2, 3, 4], { dtype: 'float32', requiresGrad: true })
     const y = out.customKernel(x, { fxn: identityKernel, gradFxn: backwardIdentity })[0]
     await y.sum().backward()
 
@@ -438,7 +460,7 @@ async function runTensorTests(pg) {
       return [null, null, args[0]]
     }
     const out = Tensor.empty([4], { dtype: 'float32' })
-    const x = new Tensor([1, 2, 3, 4], { requiresGrad: true })
+    const x = new Tensor([1, 2, 3, 4], { dtype: 'float32', requiresGrad: true })
     const [y0, y1] = out.customKernel(out, x, { fxn: identityKernel, gradFxn: backwardIdentity })
     assert(y0.uop.key === y1.uop.key, 'duplicate output aliases should share one AFTER')
     await y0.sum().add(y1.sum()).backward()
@@ -454,7 +476,7 @@ async function runTensorTests(pg) {
       return out.index(i).store(x.index(i)).end(i).sink({ arg: new pg.uop.KernelInfo('missing_grad_fxn') })
     }
     const out = Tensor.empty([4], { dtype: 'float32' })
-    const x = new Tensor([1, 2, 3, 4], { requiresGrad: true })
+    const x = new Tensor([1, 2, 3, 4], { dtype: 'float32', requiresGrad: true })
     const y = out.customKernel(x, identityKernel)[0]
     let threw = false
     try {
@@ -475,7 +497,7 @@ async function runTensorTests(pg) {
     }
 
     let out = Tensor.empty([4], { dtype: 'float32', requiresGrad: true })
-    let x = new Tensor([1, 2, 3, 4], { requiresGrad: true })
+    let x = new Tensor([1, 2, 3, 4], { dtype: 'float32', requiresGrad: true })
     let y = out.customKernel(x, identityKernel)[0]
     await y.detach().sum().backward()
     assertClose(await x.grad.toArray(), [0, 0, 0, 0])
@@ -487,7 +509,7 @@ async function runTensorTests(pg) {
       return [null, new Tensor(grad).add(7).uop]
     }
     out = Tensor.empty([4], { dtype: 'float32', requiresGrad: true })
-    x = new Tensor([1, 2, 3, 4], { requiresGrad: true })
+    x = new Tensor([1, 2, 3, 4], { dtype: 'float32', requiresGrad: true })
     y = out.customKernel(x, { fxn: identityKernel, gradFxn: backwardIdentity })[0]
     await y.lt(0).cast('float32').sum().backward()
     assert(calls.length === 0, 'stop-gradient ops must not invoke custom callbacks')
@@ -502,7 +524,7 @@ async function runTensorTests(pg) {
       return c.index(i).store(a.index(i).add(b.index(i))).end(i).sink()
     }
     const a = Tensor.empty([4], { dtype: 'float32' })
-    const b = new Tensor([10, 20, 30, 40])
+    const b = new Tensor([10, 20, 30, 40], { dtype: 'float32' })
     const c = Tensor.empty([4], { dtype: 'float32' })
     const runs = [
       [new Float32Array([1, 2, 3, 4]), [11, 22, 33, 44]],
@@ -657,7 +679,7 @@ async function runTensorTests(pg) {
       return c.customKernel(a, b, addKernel)[0]
     })
     const a = Tensor.empty([4], { dtype: 'float32' })
-    const b = new Tensor([10, 20, 30, 40])
+    const b = new Tensor([10, 20, 30, 40], { dtype: 'float32' })
     a.copyFrom(new Float32Array([1, 2, 3, 4]))
     assertClose(await (await f(a, b)).toArray(), [11, 22, 33, 44])
     assertClose(await (await f(a, b)).toArray(), [11, 22, 33, 44])
@@ -674,7 +696,7 @@ async function runTensorTests(pg) {
       return c.index(i).store(a.index(i).add(b.index(i))).end(i).sink()
     }
     const a = Tensor.empty([4], { dtype: 'float32' })
-    const b = new Tensor([10, 20, 30, 40])
+    const b = new Tensor([10, 20, 30, 40], { dtype: 'float32' })
     a.copyFrom(new Float32Array([1, 2, 3, 4]))
     const compiled = await pg.compile((x, y) => {
       const c = Tensor.empty([4], { dtype: 'float32' })
@@ -699,7 +721,7 @@ async function runTensorTests(pg) {
       return out.index(c).store(sum).end(c).sink()
     }
     const a = Tensor.empty([8], { dtype: 'float32' })
-    const b = new Tensor([1, 2, 3, 4])
+    const b = new Tensor([1, 2, 3, 4], { dtype: 'float32' })
     a.copyFrom(new Float32Array([1, 2, 3, 4, 5, 6, 7, 8]))
     const compiled = await pg.compile((x, y) => {
       const out = Tensor.empty([2], { dtype: 'float32' })
@@ -726,7 +748,7 @@ async function runTensorTests(pg) {
       return st0.end(c).sink(st1.end(c))
     }
     const a = Tensor.empty([8], { dtype: 'float32' })
-    const b = new Tensor([1, 2, 3, 4])
+    const b = new Tensor([1, 2, 3, 4], { dtype: 'float32' })
     a.copyFrom(new Float32Array([1, 2, 3, 4, 5, 6, 7, 8]))
     const compiled = await pg.compile((x, y) => {
       const out0 = Tensor.empty([2], { dtype: 'float32' })
@@ -1064,7 +1086,7 @@ async function runTensorTests(pg) {
   await test('toTypedArray aliases flat typed readback', async () => {
     const t = new Tensor([1, 2, 3])
     const arr = await t.toTypedArray()
-    assert(arr instanceof Float32Array, `expected Float32Array, got ${arr.constructor.name}`)
+    assert(arr instanceof Int32Array, `expected Int32Array, got ${arr.constructor.name}`)
     assertClose(arr, [1, 2, 3])
   })
 
@@ -1072,7 +1094,7 @@ async function runTensorTests(pg) {
     const t = new Tensor([1, 2, 3])
     const outs = await Tensor.toTypedArrays(t.add(1), t.mul(2))
     assert(Array.isArray(outs) && outs.length === 2, 'expected two output arrays')
-    assert(outs[0] instanceof Float32Array, `expected Float32Array, got ${outs[0].constructor.name}`)
+    assert(outs[0] instanceof Int32Array, `expected Int32Array, got ${outs[0].constructor.name}`)
     assertClose(outs[0], [2, 3, 4])
     assertClose(outs[1], [2, 4, 6])
 
@@ -1257,29 +1279,26 @@ async function runTensorTests(pg) {
     const bool = new Tensor([false, true], { dtype: 'bool' })
     assertClose(await bool.sin().toArray(), [0, Math.sin(1)], 1e-6)
 
+    const angles = new Tensor([0, 0.25, 0.5])
+    assertClose(await angles.cos().toArray(), [Math.cos(0), Math.cos(0.25), Math.cos(0.5)], 1e-6)
+    assertClose(await angles.tan().toArray(), [Math.tan(0), Math.tan(0.25), Math.tan(0.5)], 1e-6)
+  })
+
+  await testIf(supportsF16, 'sin cos tan preserve float16 promotion', async () => {
     const half = new Tensor([0, 1]).cast('float16')
     const halfCos = half.cos()
     assert(halfCos.dtype === 'float16', 'float16 cos should cast back to float16')
     assertClose(await halfCos.cast('float32').toArray(), [1, Math.cos(1)], 2e-3)
+  })
 
-    for (const dtype of ['float32', 'float64']) {
-      const angles = new Tensor([0, 0.25, 0.5], { dtype })
-      const cos = angles.cos()
-      const tan = angles.tan()
-      assert(cos.dtype === dtype, `${dtype} cos should retain dtype`)
-      assert(tan.dtype === dtype, `${dtype} tan should retain dtype`)
-      const tolerance = dtype === 'float64' ? 1e-12 : 1e-6
-      assertClose(
-        await cos.toArray(),
-        [Math.cos(0), Math.cos(0.25), Math.cos(0.5)],
-        tolerance
-      )
-      assertClose(
-        await tan.toArray(),
-        [Math.tan(0), Math.tan(0.25), Math.tan(0.5)],
-        tolerance
-      )
-    }
+  await testIf(supportsF64, 'sin cos tan preserve float64 promotion', async () => {
+    const angles = new Tensor([0, 0.25, 0.5], { dtype: 'float64' })
+    const cos = angles.cos()
+    const tan = angles.tan()
+    assert(cos.dtype === 'float64', 'float64 cos should retain dtype')
+    assert(tan.dtype === 'float64', 'float64 tan should retain dtype')
+    assertClose(await cos.toArray(), [Math.cos(0), Math.cos(0.25), Math.cos(0.5)], 1e-12)
+    assertClose(await tan.toArray(), [Math.tan(0), Math.tan(0.25), Math.tan(0.5)], 1e-12)
   })
 
   await test('sin cos tan preserve nested current occurrence', async () => {
@@ -1359,11 +1378,6 @@ async function runTensorTests(pg) {
       2e-6
     )
 
-    const half = x.cast('float16')
-    assert(half.sigmoid().dtype === 'float16', 'float16 sigmoid should retain dtype')
-    assert(half.tanh().dtype === 'float16', 'float16 tanh should retain dtype')
-    assertClose(await half.tanh().cast('float32').toArray(), values.map(Math.tanh), 2e-3)
-
     const ints = new Tensor(new Int32Array([-2, 0, 3]), { dtype: 'int32' })
     assertClose(await ints.sign().toArray(), [-1, 0, 1])
     assertClose(await ints.abs().toArray(), [2, 0, 3])
@@ -1389,6 +1403,14 @@ async function runTensorTests(pg) {
       assert(countGraphOp(moved[method]().uop, pg._core.ops.COPY) === 2,
         `${method} should retain the nested current occurrence`)
     }
+  })
+
+  await testIf(supportsF16, 'literal composites preserve float16 promotion', async () => {
+    const values = [-2.5, -1, 0, 0.5, 2.5]
+    const half = new Tensor(values).cast('float16')
+    assert(half.sigmoid().dtype === 'float16', 'float16 sigmoid should retain dtype')
+    assert(half.tanh().dtype === 'float16', 'float16 tanh should retain dtype')
+    assertClose(await half.tanh().cast('float32').toArray(), values.map(Math.tanh), 2e-3)
   })
 
   await test('round and isinf match pinned compositions', async () => {
@@ -1772,11 +1794,11 @@ async function runTensorTests(pg) {
   await test('scatter matches tinygrad probe', async () => {
     const base = Tensor.zeros(3, 5)
     const idx0 = new Tensor(new Int32Array([0, 1, 2, 0]), { dtype: 'int32' }).reshape(1, 4)
-    const src0 = new Tensor([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]).reshape(2, 5)
+    const src0 = new Tensor([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], { dtype: 'float32' }).reshape(2, 5)
     assertClose(await base.scatter(0, idx0, src0).toArray(), [1, 0, 0, 4, 0, 0, 2, 0, 0, 0, 0, 0, 3, 0, 0])
 
     const idx1 = new Tensor(new Int32Array([0, 1, 2, 0, 1, 4, 2, 3, 4]), { dtype: 'int32' }).reshape(3, 3)
-    const src1 = new Tensor([1, 2, 3, 6, 7, 8, 9, 10, 11]).reshape(3, 3)
+    const src1 = new Tensor([1, 2, 3, 6, 7, 8, 9, 10, 11], { dtype: 'float32' }).reshape(3, 3)
     assertClose(await base.scatter(1, idx1, src1).toArray(), [1, 2, 3, 0, 0, 6, 7, 0, 0, 8, 0, 0, 9, 10, 11])
 
     const dupIdx = new Tensor(new Int32Array([1, 1, 2]), { dtype: 'int32' }).reshape(1, 3)
@@ -1797,13 +1819,13 @@ async function runTensorTests(pg) {
   })
 
   await test('scatterReduce matches tinygrad probe', async () => {
-    const base = new Tensor([[1, 2, 3, 4, 5]])
+    const base = new Tensor([[1, 2, 3, 4, 5]], { dtype: 'float32' })
     const idx = new Tensor(new Int32Array([0, 0, 1, 1, 2, 2, 3, 3, 4, 4]), { dtype: 'int32' }).reshape(1, 10)
-    const src = new Tensor([[1, 6, 2, 7, 3, 8, 4, 9, 5, 10]])
+    const src = new Tensor([[1, 6, 2, 7, 3, 8, 4, 9, 5, 10]], { dtype: 'float32' })
     assertClose(await base.scatterReduce(1, idx, src, 'sum').toArray(), [8, 11, 14, 17, 20])
     assertClose(await base.scatter_reduce(1, idx, src, 'prod').toArray(), [6, 28, 72, 144, 250])
     assertClose(await base.scatterReduce(1, idx, src, 'mean', false).toArray(), [3.5, 4.5, 5.5, 6.5, 7.5])
-    const extremeBase = new Tensor([[-10, 20, 0, 5, 10]])
+    const extremeBase = new Tensor([[-10, 20, 0, 5, 10]], { dtype: 'float32' })
     assertClose(await extremeBase.scatterReduce(1, idx, src, 'amax').toArray(), [6, 20, 8, 9, 10])
     assertClose(await extremeBase.scatterReduce(1, idx, src, 'amin').toArray(), [-10, 2, 0, 4, 5])
     let threw = false
@@ -2794,7 +2816,7 @@ async function runTensorTests(pg) {
   console.log('\n-- Autograd --')
 
   await test('grad: mul sum', async () => {
-    const a = new Tensor([1, 2, 3], { requiresGrad: true })
+    const a = new Tensor([1, 2, 3], { dtype: 'float32', requiresGrad: true })
     const b = new Tensor([4, 5, 6])
     const loss = a.mul(b).sum()
     await loss.backward()
@@ -2803,7 +2825,7 @@ async function runTensorTests(pg) {
   })
 
   await test('grad: neg sum', async () => {
-    const a = new Tensor([1, 2, 3], { requiresGrad: true })
+    const a = new Tensor([1, 2, 3], { dtype: 'float32', requiresGrad: true })
     const loss = a.neg().sum()
     await loss.backward()
     assert(a.grad, 'grad is null')
@@ -2811,7 +2833,7 @@ async function runTensorTests(pg) {
   })
 
   await test('grad: matmul backward', async () => {
-    const W = new Tensor([[1, 2], [3, 4]], { requiresGrad: true })
+    const W = new Tensor([[1, 2], [3, 4]], { dtype: 'float32', requiresGrad: true })
     const x = new Tensor([[1, 0]])
     const loss = x.dot(W).sum()
     await loss.backward()
@@ -2821,7 +2843,7 @@ async function runTensorTests(pg) {
   })
 
   await test('grad: relu backward', async () => {
-    const a = new Tensor([-1, 2, -3, 4], { requiresGrad: true })
+    const a = new Tensor([-1, 2, -3, 4], { dtype: 'float32', requiresGrad: true })
     const loss = a.relu().sum()
     await loss.backward()
     assert(a.grad, 'grad is null')
@@ -2830,7 +2852,7 @@ async function runTensorTests(pg) {
   })
 
   await test('grad: chain backward', async () => {
-    const a = new Tensor([1, 2, 3], { requiresGrad: true })
+    const a = new Tensor([1, 2, 3], { dtype: 'float32', requiresGrad: true })
     const loss = a.mul(a).sum()  // d/da(a^2) = 2a
     await loss.backward()
     assert(a.grad, 'grad is null')
@@ -2841,7 +2863,7 @@ async function runTensorTests(pg) {
   })
 
   await test('grad: backward uses current physical value after copyFrom', async () => {
-    const weight = new Tensor([1]).mul(2)
+    const weight = new Tensor([1], { dtype: 'float32' }).mul(2)
     await weight.realize()
     weight.requiresGrad = true
     const physicalBuffer = weight.uopPhysical.buffer.raw
@@ -3123,6 +3145,19 @@ async function runTensorTests(pg) {
     assert(min >= 0 && max < 1, `Out of range: min=${min}, max=${max}`)
   })
 
+  await test('uniform supports bounds and rejects empty intervals', async () => {
+    Tensor.manual_seed(42)
+    const arr = await Tensor.uniform(100, { low: -2, high: 3 }).toArray()
+    assert(arr.every(value => value >= -2 && value < 3), 'uniform value outside requested range')
+    let rejected = false
+    try {
+      Tensor.uniform(2, { low: 1, high: 1 })
+    } catch (error) {
+      rejected = String(error && error.message).includes('low < high')
+    }
+    assert(rejected, 'uniform should reject an empty interval')
+  })
+
   await test('randn gaussian', async () => {
     Tensor.manual_seed(99)
     const t = Tensor.randn(1000)
@@ -3195,9 +3230,9 @@ async function runTensorTests(pg) {
     assertClose(await a.grad.toArray(), [4, 5, 6])
   })
 
-  await test('f64: default is f32', async () => {
+  await test('f64: integer list still infers int32', async () => {
     const a = new Tensor([1, 2, 3])
-    assert(a.dtype === 'float32', `expected float32, got ${a.dtype}`)
+    assert(a.dtype === 'int32', `expected int32, got ${a.dtype}`)
   })
 
   // -- Kernel cache consistency --
@@ -3328,7 +3363,7 @@ async function runTensorTests(pg) {
   await test('composite ops preserve repeated logical physical occurrences', async () => {
     // Pinned composite methods consume ordered Tensor.uop occurrences. Two
     // logical aliases must not become one substitution key.
-    const x = await new Tensor([0, 0, 0, 0], { device: 'cpu' })
+    const x = await new Tensor([0, 0, 0, 0], { device: 'cpu', dtype: 'float32' })
       .reshape(1, 1, 2, 2).realize()
     const movedWeight = x.to('cuda').to('cpu')
     const conv = x.conv2d(movedWeight)
@@ -3341,9 +3376,9 @@ async function runTensorTests(pg) {
       'single-output conv2d should elide the no-op channel EXPAND'
     )
 
-    const bnX = await new Tensor([0, 0, 0], { device: 'cpu' })
+    const bnX = await new Tensor([0, 0, 0], { device: 'cpu', dtype: 'float32' })
       .reshape(1, 3, 1, 1).realize()
-    const stat = await new Tensor([0, 0, 0], { device: 'cpu' }).realize()
+    const stat = await new Tensor([0, 0, 0], { device: 'cpu', dtype: 'float32' }).realize()
     const movedInvstd = stat.to('cuda').to('cpu')
     const bn = bnX.batchnorm(null, null, stat, movedInvstd, 1)
     assert(
@@ -3351,7 +3386,7 @@ async function runTensorTests(pg) {
       'batchnorm should retain the nested COPY invstd occurrence'
     )
 
-    const minX = await new Tensor([1], { device: 'cpu' }).realize()
+    const minX = await new Tensor([1], { device: 'cpu', dtype: 'float32' }).realize()
     const minMoved = minX.to('cuda').to('cpu')
     const minimum = minX.minimum(minMoved)
     assert(

@@ -16,7 +16,7 @@ import sys
 _lib = None
 OPS = {}
 _has_cuda_ffi = False
-POLYGRAD_ABI_VERSION = 46
+POLYGRAD_ABI_VERSION = 47
 
 # --- Opaque pointer type (always available) ---
 _ptr = ctypes.c_void_p
@@ -47,7 +47,9 @@ class PolyBuffer(ctypes.Structure):
 
 class PolyIOBinding(ctypes.Structure):
     _fields_ = [('name', ctypes.c_char_p),
-                ('data', ctypes.POINTER(ctypes.c_float))]
+                ('data', ctypes.c_void_p),
+                ('nbytes', ctypes.c_size_t),
+                ('dtype_id', ctypes.c_int)]
 
 class PolyDType(ctypes.Structure):
     _fields_ = [

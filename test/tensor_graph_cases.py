@@ -18,10 +18,10 @@ import re
 
 ENGINE = os.environ.get("ENGINE", "tinygrad")
 if ENGINE == "tinygrad":
-    from tinygrad import Tensor, dtypes
+    from tinygrad import Tensor, dtypes, nn
     from tinygrad.nn.optim import Adam, AdamW, SGD
 elif ENGINE == "polygrad":
-    from polygrad import Tensor, _ffi, dtypes
+    from polygrad import Tensor, _ffi, dtypes, nn
     from polygrad.nn import Adam, AdamW, SGD
 else:
     raise RuntimeError(f"unknown ENGINE={ENGINE!r}")
@@ -1269,6 +1269,28 @@ def case_grad_scale():
     return {"physical": out}
 
 
+def case_grad_max_axes():
+    x = realized_input(2, 3)
+    return {"physical": raw_gradient(x.max(axis=1).sum(), x)}
+
+
+def case_nn_conv2d_initializer():
+    Tensor.manual_seed(201)
+    conv = nn.Conv2d(4, 8, 3, bias=False)
+    return {"physical": conv.weight.uop, "logical": logical(conv.weight)}
+
+
+def case_nn_linear_initializer():
+    Tensor.manual_seed(201)
+    linear = nn.Linear(8, 3)
+    return {"physical": linear.weight.uop, "logical": logical(linear.weight)}
+
+
+def case_nn_batchnorm_initializer():
+    norm = nn.BatchNorm(8)
+    return {"physical": norm.weight.uop, "logical": logical(norm.weight)}
+
+
 def case_grad_ceil():
     x = Tensor([-1.25, 0.25, 1.75])
     out = raw_gradient(x.ceil().sum(), x)
@@ -1474,6 +1496,10 @@ CASES = {
     "grad_hardswish": ("tensor", case_grad_hardswish),
     "grad_hardtanh": ("tensor", case_grad_hardtanh),
     "grad_leaky_relu": ("tensor", case_grad_leaky_relu),
+    "grad_max_axes": ("tensor", case_grad_max_axes),
+    "nn_batchnorm_initializer": ("tensor", case_nn_batchnorm_initializer),
+    "nn_conv2d_initializer": ("tensor", case_nn_conv2d_initializer),
+    "nn_linear_initializer": ("tensor", case_nn_linear_initializer),
     "grad_pow3": ("tensor", case_grad_pow3),
     "grad_pow_base": ("tensor", case_grad_pow_base),
     "grad_pow_exponent": ("tensor", case_grad_pow_exponent),

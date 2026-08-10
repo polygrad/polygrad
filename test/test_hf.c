@@ -407,7 +407,7 @@ TEST(hf, poly_gather_basic) {
 
   /* indices: (2,) -- reshape buffer to give it a shape */
   int64_t idx_shape[] = {2};
-  PolyUOp *indices = poly_reshape(ctx, poly_buffer_f32(ctx, 2), idx_shape, 1);
+  PolyUOp *indices = poly_reshape(ctx, poly_buffer(ctx, POLY_INT32, 2), idx_shape, 1);
 
   PolyUOp *result = poly_gather(ctx, table, indices);
   ASSERT_NOT_NULL(result);
@@ -430,7 +430,7 @@ TEST(hf, poly_gather_2d_indices) {
 
   /* indices: (2, 3) -- batch of indices, reshape buffer to give it a shape */
   int64_t idx_shape[] = {2, 3};
-  PolyUOp *indices = poly_reshape(ctx, poly_buffer_f32(ctx, 6), idx_shape, 2);
+  PolyUOp *indices = poly_reshape(ctx, poly_buffer(ctx, POLY_INT32, 6), idx_shape, 2);
 
   PolyUOp *result = poly_gather(ctx, table, indices);
   ASSERT_NOT_NULL(result);
@@ -554,30 +554,24 @@ TEST(hf, gpt2_forward_e2e) {
     }
   }
 
-  /* Set input tokens */
-  int nb = poly_instance_buf_count(inst);
-  for (int i = 0; i < nb; i++) {
-    const char *name = poly_instance_buf_name(inst, i);
-    int64_t numel;
-    float *data = poly_instance_buf_data(inst, i, &numel);
-    if (strcmp(name, "x") == 0) {
-      /* 1 batch, T=8 but only first 4 tokens matter */
-      for (int64_t j = 0; j < numel; j++)
-        data[j] = (float)(j % 4);
-    } else if (strcmp(name, "positions") == 0) {
-      for (int64_t j = 0; j < numel; j++)
-        data[j] = (float)j;
-    } else if (strcmp(name, "arange") == 0) {
-      for (int64_t j = 0; j < numel; j++)
-        data[j] = (float)j;
-    }
+  /* Pinned GPT-style embedding inputs are integer token/position indices.
+   * Use the typed byte API instead of the float-only convenience view. */
+  int32_t token_data[8], position_data[8];
+  for (int j = 0; j < 8; j++) {
+    token_data[j] = j % 4;
+    position_data[j] = j;
   }
+  ASSERT_INT_EQ(poly_instance_write_buf_named(inst, "x", token_data, sizeof(token_data)), 0);
+  ASSERT_INT_EQ(
+      poly_instance_write_buf_named(inst, "positions", position_data, sizeof(position_data)), 0
+  );
 
   /* Run forward pass */
   int ret = poly_instance_forward(inst, NULL, 0);
   ASSERT_INT_EQ(ret, 0);
 
   /* Check output: (1, 8, 32) logits */
+  int nb = poly_instance_buf_count(inst);
   int out_idx = -1;
   for (int i = 0; i < nb; i++) {
     if (strcmp(poly_instance_buf_name(inst, i), "output") == 0) {
@@ -637,23 +631,15 @@ TEST(hf, gpt2_training_loss_decreases) {
     }
   }
 
-  /* Set input tokens and positions */
-  int nb = poly_instance_buf_count(inst);
-  for (int i = 0; i < nb; i++) {
-    const char *name = poly_instance_buf_name(inst, i);
-    int64_t numel;
-    float *data = poly_instance_buf_data(inst, i, &numel);
-    if (strcmp(name, "x") == 0) {
-      for (int64_t j = 0; j < numel; j++)
-        data[j] = (float)(j % 4);
-    } else if (strcmp(name, "positions") == 0) {
-      for (int64_t j = 0; j < numel; j++)
-        data[j] = (float)j;
-    } else if (strcmp(name, "arange") == 0) {
-      for (int64_t j = 0; j < numel; j++)
-        data[j] = (float)j;
-    }
+  int32_t token_data[8], position_data[8];
+  for (int j = 0; j < 8; j++) {
+    token_data[j] = j % 4;
+    position_data[j] = j;
   }
+  ASSERT_INT_EQ(poly_instance_write_buf_named(inst, "x", token_data, sizeof(token_data)), 0);
+  ASSERT_INT_EQ(
+      poly_instance_write_buf_named(inst, "positions", position_data, sizeof(position_data)), 0
+  );
 
   /* Configure Adam optimizer */
   int ret = poly_instance_set_optimizer(inst, POLY_OPTIM_ADAM, 0.001f, 0.9f, 0.999f, 1e-8f, 0.0f);

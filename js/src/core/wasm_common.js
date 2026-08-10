@@ -351,7 +351,22 @@ function createWasmCoreFromModule(Module, device) {
     float16: coreDTypeId('float16'),
     bfloat16: coreDTypeId('bfloat16'),
     float32: coreDTypeId('float32'),
-    float64: coreDTypeId('float64')
+    float64: coreDTypeId('float64'),
+    weakint: coreDTypeId('weakint')
+  }
+
+  function instanceBindingDTypeId(arr) {
+    if (arr instanceof Int8Array) return DTYPE_IDS.int8
+    if (arr instanceof Uint8Array || arr instanceof Uint8ClampedArray) return DTYPE_IDS.uint8
+    if (arr instanceof Int16Array) return DTYPE_IDS.int16
+    if (arr instanceof Uint16Array) return DTYPE_IDS.uint16
+    if (arr instanceof Int32Array) return DTYPE_IDS.int32
+    if (arr instanceof Uint32Array) return DTYPE_IDS.uint32
+    if (typeof BigInt64Array !== 'undefined' && arr instanceof BigInt64Array) return DTYPE_IDS.int64
+    if (typeof BigUint64Array !== 'undefined' && arr instanceof BigUint64Array) return DTYPE_IDS.uint64
+    if (arr instanceof Float32Array) return DTYPE_IDS.float32
+    if (arr instanceof Float64Array) return DTYPE_IDS.float64
+    return -1
   }
   if (!(deviceName in DEVICE_IDS))
     throw new Error('polygrad: unsupported device \'' + deviceName + '\'')
@@ -568,6 +583,23 @@ function createWasmCoreFromModule(Module, device) {
       'number',
       ['number', 'number', 'number'],
       [jit, ptr, tensors.length],
+      { async: true }
+    )
+  }
+
+  function jitEndCaptureSync(jit) {
+    requireSyncBackend('poly_jit_end_capture', 'poly_jit_end_capture_async')
+    return Module._poly_jit_end_capture(jit)
+  }
+
+  async function jitEndCaptureAsync(jit) {
+    if (deviceName !== 'webgpu' || !Module.ccall) return jitEndCaptureSync(jit)
+    await ensureWebGPU()
+    return await Module.ccall(
+      'poly_jit_end_capture',
+      'number',
+      ['number'],
+      [jit],
       { async: true }
     )
   }
@@ -1110,7 +1142,8 @@ function createWasmCoreFromModule(Module, device) {
         if (ptr) Module._free(ptr)
       }
     },
-    poly_jit_end_capture: (jit) => Module._poly_jit_end_capture(jit),
+    poly_jit_end_capture: jitEndCaptureSync,
+    poly_jit_end_capture_async: jitEndCaptureAsync,
     poly_jit_cancel_capture: (jit) => Module._poly_jit_cancel_capture(jit),
     poly_jit_is_captured: (jit) => Boolean(Module._poly_jit_is_captured(jit)),
     poly_jit_schedule_count: (jit) => Module._poly_jit_schedule_count(jit),
@@ -1527,7 +1560,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 46
+  const EXPECTED_ABI = 47
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(
@@ -1932,15 +1965,21 @@ function createWasmCoreFromModule(Module, device) {
 
     forward(instPtr, names, arrays) {
       const n = names.length
-      const bindingPtr = Module._malloc(Math.max(1, n) * 8)
+      const dtypeIds = arrays.map(instanceBindingDTypeId)
+      if (dtypeIds.some(id => id < 0)) {
+        throw new TypeError('polygrad: unsupported Instance binding TypedArray')
+      }
+      const bindingPtr = Module._malloc(Math.max(1, n) * 16)
       const namePtrs = new Array(n)
       const dataPtrs = new Array(n)
       for (let i = 0; i < n; i++) {
         namePtrs[i] = allocString(names[i])
         dataPtrs[i] = allocBytes(new Uint8Array(arrays[i].buffer, arrays[i].byteOffset, arrays[i].byteLength))
-        const base = (bindingPtr >> 2) + i * 2
+        const base = (bindingPtr >> 2) + i * 4
         heap32()[base] = namePtrs[i]
         heap32()[base + 1] = dataPtrs[i]
+        heap32()[base + 2] = arrays[i].byteLength
+        heap32()[base + 3] = dtypeIds[i]
       }
       const cleanup = () => {
         for (const ptr of dataPtrs) Module._free(ptr)
@@ -1963,15 +2002,21 @@ function createWasmCoreFromModule(Module, device) {
 
     trainStep(instPtr, names, arrays) {
       const n = names.length
-      const bindingPtr = Module._malloc(Math.max(1, n) * 8)
+      const dtypeIds = arrays.map(instanceBindingDTypeId)
+      if (dtypeIds.some(id => id < 0)) {
+        throw new TypeError('polygrad: unsupported Instance binding TypedArray')
+      }
+      const bindingPtr = Module._malloc(Math.max(1, n) * 16)
       const namePtrs = new Array(n)
       const dataPtrs = new Array(n)
       for (let i = 0; i < n; i++) {
         namePtrs[i] = allocString(names[i])
         dataPtrs[i] = allocBytes(new Uint8Array(arrays[i].buffer, arrays[i].byteOffset, arrays[i].byteLength))
-        const base = (bindingPtr >> 2) + i * 2
+        const base = (bindingPtr >> 2) + i * 4
         heap32()[base] = namePtrs[i]
         heap32()[base + 1] = dataPtrs[i]
+        heap32()[base + 2] = arrays[i].byteLength
+        heap32()[base + 3] = dtypeIds[i]
       }
       const lossPtr = Module._malloc(4)
       const readLoss = (rc) => rc === 0 ? heapF32()[lossPtr >> 2] : null

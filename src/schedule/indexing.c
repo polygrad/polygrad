@@ -12,6 +12,7 @@
 #include "schedule/indexing.h"
 #include "pat.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static PolyUOp *index_const(PolyCtx *ctx, int64_t value) {
@@ -33,6 +34,62 @@ static PolyUOp *index_neg_like_tinygrad(PolyCtx *ctx, PolyUOp *u) {
 static PolyUOp *shape_stack_get(PolyUOp *stack, int idx) {
   if (!stack || stack->op != POLY_OP_STACK || idx < 0 || idx >= stack->n_src) return NULL;
   return stack->src[idx];
+}
+
+static bool index_invalid_where(PolyUOp *coord) {
+  return coord && coord->op == POLY_OP_WHERE && coord->n_src == 3 && coord->src[2] &&
+         coord->src[2]->op == POLY_OP_CONST && coord->src[2]->arg.kind == POLY_ARG_INVALID;
+}
+
+/* Pinned tinygrad/uop/ops.py:571-581. These are projections of an existing
+ * index coordinate, not rewrite or placement state. */
+PolyUOp *poly_index_get_idx(PolyCtx *ctx, PolyUOp *coord) {
+  if (!ctx || !coord || !poly_dtype_is_index(poly_dtype_scalar(coord->dtype))) return NULL;
+  if (coord->op == POLY_OP_STACK) {
+    PolyUOp *stack_src[16];
+    PolyUOp **src = coord->n_src <= (int)(sizeof(stack_src) / sizeof(stack_src[0]))
+                        ? stack_src
+                        : malloc((size_t)coord->n_src * sizeof(*src));
+    if (!src) return NULL;
+    for (int i = 0; i < coord->n_src; i++) {
+      src[i] = poly_index_get_idx(ctx, coord->src[i]);
+      if (!src[i]) {
+        if (src != stack_src) free(src);
+        return NULL;
+      }
+    }
+    PolyUOp *ret = poly_uop(ctx, POLY_OP_STACK, coord->dtype, src, coord->n_src, poly_arg_none());
+    if (src != stack_src) free(src);
+    return ret;
+  }
+  return index_invalid_where(coord) ? coord->src[1] : coord;
+}
+
+PolyUOp *poly_index_get_valid(PolyCtx *ctx, PolyUOp *coord) {
+  if (!ctx || !coord || !poly_dtype_is_index(poly_dtype_scalar(coord->dtype))) return NULL;
+  if (coord->op == POLY_OP_STACK) {
+    PolyUOp *stack_src[16];
+    PolyUOp **src = coord->n_src <= (int)(sizeof(stack_src) / sizeof(stack_src[0]))
+                        ? stack_src
+                        : malloc((size_t)coord->n_src * sizeof(*src));
+    if (!src) return NULL;
+    for (int i = 0; i < coord->n_src; i++) {
+      src[i] = poly_index_get_valid(ctx, coord->src[i]);
+      if (!src[i]) {
+        if (src != stack_src) free(src);
+        return NULL;
+      }
+    }
+    PolyDType dtype = poly_dtype_vec(POLY_BOOL, coord->dtype.count);
+    PolyUOp *ret = poly_uop(ctx, POLY_OP_STACK, dtype, src, coord->n_src, poly_arg_none());
+    if (src != stack_src) free(src);
+    return ret;
+  }
+  if (index_invalid_where(coord)) return coord->src[0];
+  return poly_uop0(
+      ctx, POLY_OP_CONST, POLY_BOOL,
+      poly_arg_bool(!(coord->op == POLY_OP_CONST && coord->arg.kind == POLY_ARG_INVALID))
+  );
 }
 
 static bool expand_target_dim_is_one(PolyCtx *ctx, PolyUOp *movement, PolyArg arg, int dim, bool *is_one) {
@@ -328,6 +385,7 @@ bool poly_apply_movement_op(
       if (movement->src[1]->op != POLY_OP_STACK || movement->src[1]->n_src != n) return false;
       PolyUOp *valid = NULL;
       PolyUOp *zero = index_const(ctx, 0);
+      PolyUOp *invalid = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_invalid());
       PolyUOp *falsev = poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_bool(false));
       PolyUOp *truev = poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_bool(true));
 
@@ -361,8 +419,11 @@ bool poly_apply_movement_op(
         PolyUOp *lt_end = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, index, end, poly_arg_none());
         PolyUOp *dim_valid =
             poly_uop2(ctx, POLY_OP_AND, POLY_BOOL, ge_begin, lt_end, poly_arg_none());
-        in_rngs[i] =
-            poly_uop3(ctx, POLY_OP_WHERE, POLY_INDEX, dim_valid, shifted, zero, poly_arg_none());
+        /* Pinned indexing.py:137 keeps address and validity separable through
+         * UOp.get_idx/get_valid: valid.where(r-off, Invalid). */
+        in_rngs[i] = poly_uop3(
+            ctx, POLY_OP_WHERE, POLY_INDEX, dim_valid, shifted, invalid, poly_arg_none()
+        );
         valid = valid ? poly_uop2(ctx, POLY_OP_AND, POLY_BOOL, valid, dim_valid, poly_arg_none())
                       : dim_valid;
       }
@@ -376,6 +437,7 @@ bool poly_apply_movement_op(
     int n = arg.pair_tuple.n;
     PolyUOp *valid = NULL;
     PolyUOp *zero = index_const(ctx, 0);
+    PolyUOp *invalid = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_invalid());
     PolyUOp *falsev = poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_bool(false));
 
     for (int i = 0; i < n; i++) {
@@ -420,10 +482,10 @@ bool poly_apply_movement_op(
       PolyUOp *lt_dim =
           poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, to_index_dtype(ctx, out_rngs[i]), end_c, poly_arg_none());
       PolyUOp *dv = poly_uop2(ctx, POLY_OP_AND, POLY_BOOL, ge_begin, lt_dim, poly_arg_none());
-      /* Clamp index to valid range: WHERE(valid, shifted, 0).
-       * Matches tinygrad indexing.py:137: valid.where(r-s, UOp.invalid()).
-       * Prevents negative INDEX offsets that crash non-short-circuiting backends. */
-      in_rngs[i] = poly_uop3(ctx, POLY_OP_WHERE, POLY_INDEX, dv, shifted, zero, poly_arg_none());
+      /* Pinned indexing.py:137 preserves invalidity in the coordinate. The
+       * late gater moves this predicate onto LOAD/STORE before rendering. */
+      in_rngs[i] =
+          poly_uop3(ctx, POLY_OP_WHERE, POLY_INDEX, dv, shifted, invalid, poly_arg_none());
       valid = valid ? poly_uop2(ctx, POLY_OP_AND, POLY_BOOL, valid, dv, poly_arg_none()) : dv;
     }
     if (valid_out) *valid_out = valid;

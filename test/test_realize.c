@@ -16,6 +16,7 @@
 #include "../src/polygrad.h"
 #include "../src/tensor.h"
 #include "../src/utils.h"
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -142,7 +143,7 @@ static PolyTensor *custom_summary_tensor(
   PolyUOp *pb = poly_uop_placeholder_like(ctx, poly_tensor_uop(b), 2);
   PolyUOp *c = poly_uop_range(ctx, 2, 0, POLY_AXIS_GLOBAL);
   PolyUOp *r = poly_uop_range(ctx, 4, 1, POLY_AXIS_LOOP);
-  PolyUOp *four = poly_const_int(ctx, 4);
+  PolyUOp *four = poly_const_typed(ctx, c->dtype, 4);
   PolyUOp *offset = poly_alu2(ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, c, four), r);
   PolyUOp *out_idx[1] = {c};
   PolyUOp *a_idx[1] = {offset};
@@ -185,7 +186,7 @@ static void custom_multi_summary_tensors(
   PolyUOp *pb = poly_uop_placeholder_like(ctx, poly_tensor_uop(b), 3);
   PolyUOp *c = poly_uop_range(ctx, 2, 0, POLY_AXIS_GLOBAL);
   PolyUOp *r = poly_uop_range(ctx, 4, 1, POLY_AXIS_LOOP);
-  PolyUOp *four = poly_const_int(ctx, 4);
+  PolyUOp *four = poly_const_typed(ctx, c->dtype, 4);
   PolyUOp *offset = poly_alu2(ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, c, four), r);
   PolyUOp *out_idx[1] = {c};
   PolyUOp *a_idx[1] = {offset};
@@ -229,8 +230,8 @@ static PolyTensor *custom_grouped_intercept_summary_tensor(
   PolyUOp *py = poly_uop_placeholder_like(ctx, poly_tensor_uop(y), 2);
   PolyUOp *c = poly_uop_range(ctx, 2, 0, POLY_AXIS_LOOP);
   PolyUOp *r = poly_uop_range(ctx, 128, 1, POLY_AXIS_REDUCE);
-  PolyUOp *rows = poly_const_int(ctx, 128);
-  PolyUOp *two = poly_const_int(ctx, 2);
+  PolyUOp *rows = poly_const_typed(ctx, c->dtype, 128);
+  PolyUOp *two = poly_const_typed(ctx, c->dtype, 2);
   PolyUOp *offset = poly_alu2(ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, c, rows), r);
   PolyUOp *x_idx[1] = {offset};
   PolyUOp *y_idx[1] = {r};
@@ -247,7 +248,7 @@ static PolyTensor *custom_grouped_intercept_summary_tensor(
 
   PolyUOp *stores[5];
   for (int i = 0; i < 5; i++) {
-    PolyUOp *stat = poly_const_int(ctx, i);
+    PolyUOp *stat = poly_const_typed(ctx, c->dtype, i);
     PolyUOp *idx = poly_alu2(ctx, POLY_OP_ADD, c, poly_alu2(ctx, POLY_OP_MUL, stat, two));
     PolyUOp *out_idx[1] = {idx};
     stores[i] = poly_uop_store(ctx, poly_uop_index(ctx, pout, out_idx, 1, 0), vals[i]);
@@ -3645,6 +3646,23 @@ TEST(realize, transform_to_call_finalizes_creation_copy_assignment_after) {
   ASSERT_NOT_NULL(realized);
   ASSERT_NOT_NULL(poly_uop_get_buffer_identity(realized));
   ASSERT_TRUE(map_n > 0);
+
+  PolyUOp *after_replacement = NULL;
+  PolyUOp *copy_replacement = NULL;
+  int after_rows = 0, copy_rows = 0;
+  for (int i = 0; i < map_n; i++) {
+    if (map_orig[i] == after) {
+      after_rows++;
+      after_replacement = map_repl[i];
+    }
+    if (map_orig[i] == copy) {
+      copy_rows++;
+      copy_replacement = map_repl[i];
+    }
+  }
+  ASSERT_INT_EQ(after_rows, 1);
+  ASSERT_INT_EQ(copy_rows, 1);
+  ASSERT_PTR_EQ(after_replacement, copy_replacement);
   ASSERT_INT_EQ(
       poly_tensor_apply_realize_map(ctx, map_orig, map_repl, map_n, POLY_DEVICE_AUTO, NULL), 0
   );
@@ -3659,6 +3677,728 @@ TEST(realize, transform_to_call_finalizes_creation_copy_assignment_after) {
   ASSERT_PTR_EQ(creation_copy_identity, counter_identity);
   ASSERT_PTR_NEQ(counter_identity, realized_identity);
   ASSERT_TRUE(poly_uop_reachable(ctx, call, (PolyUOp *)counter_identity));
+
+  free(map_repl);
+  free(map_orig);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(realize, transform_to_call_merges_contiguous_after_provenance) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *target =
+      poly_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_CPU);
+  PolyUOp *value = poly_add(ctx, target, poly_const_float(ctx, 1.0f));
+  PolyUOp *store = poly_store_val(ctx, target, value);
+  PolyUOp *after_src[2] = {target, store};
+  PolyUOp *after = poly_uop(
+      ctx, POLY_OP_AFTER, target->dtype, after_src, 2, poly_arg_none()
+  );
+  PolyUOp *contiguous = poly_contiguous(ctx, after);
+  ASSERT_NOT_NULL(after);
+  ASSERT_NOT_NULL(contiguous);
+
+  /* Pinned callify.py:159-160 concatenates AFTER then CONTIGUOUS provenance.
+   * finalize_after maps both original roots to the same stripped storage and
+   * removes the pass-local tag before returning the executable graph. */
+  PolyUOp *realized = NULL;
+  PolyUOp **map_orig = NULL;
+  PolyUOp **map_repl = NULL;
+  int map_n = 0;
+  PolyUOp *call = poly_transform_to_call_with_map(
+      ctx, &contiguous, 1, &realized, &map_orig, &map_repl, &map_n
+  );
+  ASSERT_NOT_NULL(call);
+  ASSERT_NOT_NULL(realized);
+
+  PolyUOp *after_replacement = NULL;
+  PolyUOp *contiguous_replacement = NULL;
+  int after_rows = 0, contiguous_rows = 0;
+  for (int i = 0; i < map_n; i++) {
+    if (map_orig[i] == after) {
+      after_rows++;
+      after_replacement = map_repl[i];
+    }
+    if (map_orig[i] == contiguous) {
+      contiguous_rows++;
+      contiguous_replacement = map_repl[i];
+    }
+  }
+  ASSERT_INT_EQ(after_rows, 1);
+  ASSERT_INT_EQ(contiguous_rows, 1);
+  ASSERT_PTR_EQ(after_replacement, contiguous_replacement);
+  ASSERT_PTR_EQ(
+      poly_uop_get_buffer_identity(after_replacement),
+      poly_uop_get_buffer_identity(contiguous_replacement)
+  );
+
+  PolyUOp *roots[4] = {
+      call, realized, after_replacement, contiguous_replacement
+  };
+  for (int root = 0; root < 4; root++) {
+    int n_topo = 0;
+    PolyUOp **topo = poly_toposort(ctx, roots[root], &n_topo);
+    for (int i = 0; i < n_topo; i++)
+      ASSERT_FALSE(
+          topo[i]->tag == INT32_MIN &&
+          topo[i]->tag_arg.kind == POLY_ARG_INT_TUPLE
+      );
+  }
+
+  free(map_repl);
+  free(map_orig);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(realize, transform_to_call_three_source_after_keeps_independent_effects) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *target =
+      poly_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_CPU);
+  PolyUOp *host =
+      poly_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_HOST);
+  PolyUOp *device =
+      poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CPU));
+  PolyUOp *copy_src[2] = {host, device};
+  PolyUOp *creation_copy = poly_uop(
+      ctx, POLY_OP_COPY, POLY_FLOAT32, copy_src, 2, poly_arg_none()
+  );
+  PolyUOp *primary_store = poly_store_val(ctx, target, creation_copy);
+
+  PolyUOp *extra_target =
+      poly_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_CPU);
+  PolyUOp *extra_store = poly_store_val(
+      ctx, extra_target, poly_const_float(ctx, 7.0f)
+  );
+  PolyUOp *after_src[3] = {target, primary_store, extra_store};
+  PolyUOp *after = poly_uop(
+      ctx, POLY_OP_AFTER, target->dtype, after_src, 3, poly_arg_none()
+  );
+  ASSERT_NOT_NULL(creation_copy);
+  ASSERT_NOT_NULL(primary_store);
+  ASSERT_NOT_NULL(extra_store);
+  ASSERT_NOT_NULL(after);
+
+  /* Pinned callify.py:35-39 uses strict two-source assignment patterns. This
+   * three-source AFTER is handled by untagged apply_after; its creation COPY is
+   * materialized independently and its extra effect is not dropped. */
+  PolyUOp *realized = NULL;
+  PolyUOp **map_orig = NULL;
+  PolyUOp **map_repl = NULL;
+  int map_n = 0;
+  PolyUOp *call = poly_transform_to_call_with_map(
+      ctx, &after, 1, &realized, &map_orig, &map_repl, &map_n
+  );
+  ASSERT_NOT_NULL(call);
+  ASSERT_NOT_NULL(realized);
+  ASSERT_INT_EQ(count_root_ops(ctx, call, POLY_OP_STORE), 3);
+
+  PolyUOp *after_replacement = NULL;
+  PolyUOp *copy_replacement = NULL;
+  int after_rows = 0, copy_rows = 0;
+  for (int i = 0; i < map_n; i++) {
+    if (map_orig[i] == after) {
+      after_rows++;
+      after_replacement = map_repl[i];
+    }
+    if (map_orig[i] == creation_copy) {
+      copy_rows++;
+      copy_replacement = map_repl[i];
+    }
+  }
+  ASSERT_INT_EQ(after_rows, 1);
+  ASSERT_INT_EQ(copy_rows, 1);
+  ASSERT_PTR_EQ(poly_uop_get_buffer_identity(after_replacement), target);
+  ASSERT_PTR_NEQ(
+      poly_uop_get_buffer_identity(copy_replacement),
+      poly_uop_get_buffer_identity(after_replacement)
+  );
+
+  free(map_repl);
+  free(map_orig);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(realize, transform_to_call_rejects_nonstorage_gated_store) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *base =
+      poly_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_CPU);
+  PolyUOp *one = poly_const_float(ctx, 1.0f);
+  PolyUOp *target = poly_add(ctx, base, one);
+  PolyUOp *value_base =
+      poly_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_CPU);
+  PolyUOp *value = poly_add(ctx, value_base, one);
+  PolyUOp *gate = poly_uop0(
+      ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_bool(false)
+  );
+  PolyUOp *store_src[3] = {target, value, gate};
+  PolyUOp *store = poly_uop(
+      ctx, POLY_OP_STORE, POLY_VOID, store_src, 3, poly_arg_none()
+  );
+  PolyUOp *after_src[2] = {target, store};
+  PolyUOp *after = poly_uop(
+      ctx, POLY_OP_AFTER, target->dtype, after_src, 2, poly_arg_none()
+  );
+  ASSERT_NOT_NULL(after);
+
+  /* Pinned callify.py:161-164 matches an exact two-source STORE before
+   * replacing non-storage AFTER+STORE with CONTIGUOUS. spec_tensor rejects a
+   * gated STORE whose target is not INDEX/SHRINK. Fail this malformed stage
+   * graph instead of silently deleting its third source and false gate. */
+  PolyUOp *realized = NULL;
+  PolyUOp **map_orig = NULL;
+  PolyUOp **map_repl = NULL;
+  int map_n = 0;
+  PolyUOp *call = poly_transform_to_call_with_map(
+      ctx, &after, 1, &realized, &map_orig, &map_repl, &map_n
+  );
+  ASSERT_PTR_EQ(call, NULL);
+  ASSERT_PTR_EQ(realized, NULL);
+  ASSERT_PTR_EQ(map_orig, NULL);
+  ASSERT_PTR_EQ(map_repl, NULL);
+  ASSERT_INT_EQ(map_n, 0);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(realize, transform_to_call_nested_three_source_after_keeps_map_key) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *target =
+      poly_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_CPU);
+  PolyUOp *host =
+      poly_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_HOST);
+  PolyUOp *device =
+      poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CPU));
+  PolyUOp *copy_src[2] = {host, device};
+  PolyUOp *creation_copy = poly_uop(
+      ctx, POLY_OP_COPY, POLY_FLOAT32, copy_src, 2, poly_arg_none()
+  );
+  PolyUOp *primary_store = poly_store_val(ctx, target, creation_copy);
+  PolyUOp *extra_target =
+      poly_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_CPU);
+  PolyUOp *extra_store = poly_store_val(
+      ctx, extra_target, poly_const_float(ctx, 7.0f)
+  );
+  PolyUOp *after_src[3] = {target, primary_store, extra_store};
+  PolyUOp *after = poly_uop(
+      ctx, POLY_OP_AFTER, target->dtype, after_src, 3, poly_arg_none()
+  );
+
+  PolyUOp *one = poly_const_float(ctx, 1.0f);
+  PolyUOp *outer_target = poly_add(ctx, after, one);
+  PolyUOp *outer_store = poly_store_val(ctx, outer_target, poly_add(ctx, target, one));
+  PolyUOp *outer_src[2] = {outer_target, outer_store};
+  PolyUOp *outer = poly_uop(
+      ctx, POLY_OP_AFTER, outer_target->dtype, outer_src, 2, poly_arg_none()
+  );
+  ASSERT_NOT_NULL(after);
+  ASSERT_NOT_NULL(outer);
+
+  PolyUOp *realized = NULL;
+  PolyUOp **map_orig = NULL;
+  PolyUOp **map_repl = NULL;
+  int map_n = 0;
+  PolyUOp *call = poly_transform_to_call_with_map(
+      ctx, &outer, 1, &realized, &map_orig, &map_repl, &map_n
+  );
+  ASSERT_NOT_NULL(call);
+  ASSERT_NOT_NULL(realized);
+
+  int after_rows = 0, outer_rows = 0;
+  for (int i = 0; i < map_n; i++) {
+    after_rows += map_orig[i] == after;
+    outer_rows += map_orig[i] == outer;
+  }
+  ASSERT_INT_EQ(after_rows, 1);
+  ASSERT_INT_EQ(outer_rows, 1);
+
+  free(map_repl);
+  free(map_orig);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(realize, transform_to_call_does_not_publish_discarded_assignment_target_rows) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *source_logical = poly_buffer(ctx, POLY_FLOAT32, 1);
+  PolyUOp *source_physical =
+      poly_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_HOST);
+  PolyTensor *source = poly_tensor_create_with_roots(
+      ctx, source_logical, source_physical, POLY_TENSOR_VALUE, POLY_DEVICE_HOST
+  );
+  PolyTensor *counter = poly_tensor_to_device(ctx, source, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(source);
+  ASSERT_NOT_NULL(counter);
+  PolyUOp *creation_copy = poly_tensor_uop_physical(counter);
+  ASSERT_NOT_NULL(creation_copy);
+  ASSERT_EQ(creation_copy->op, POLY_OP_COPY);
+
+  PolyUOp *one = poly_const_float(ctx, 1.0f);
+  PolyUOp *first_logical = NULL;
+  PolyUOp *first_physical = NULL;
+  for (int version = 0; version < 2; version++) {
+    PolyTensor *next = poly_tensor_create_with_roots(
+        ctx, poly_add(ctx, poly_tensor_uop_logical(counter), one),
+        poly_add(ctx, poly_tensor_uop_physical(counter), one),
+        POLY_TENSOR_VALUE, POLY_DEVICE_CPU
+    );
+    ASSERT_NOT_NULL(next);
+    ASSERT_PTR_EQ(poly_tensor_assign(ctx, counter, next), counter);
+    if (version == 0) {
+      first_logical = poly_tensor_uop_logical(counter);
+      first_physical = poly_tensor_uop_physical(counter);
+    }
+  }
+  ASSERT_NOT_NULL(first_logical);
+  ASSERT_NOT_NULL(first_physical);
+  ASSERT_EQ(first_physical->op, POLY_OP_AFTER);
+
+  PolyUOp *live_before = poly_tensor_uop_physical(counter);
+  ASSERT_NOT_NULL(live_before);
+  ASSERT_INT_EQ(count_root_ops(ctx, live_before, POLY_OP_AFTER), 2);
+  ASSERT_INT_EQ(count_root_ops(ctx, live_before, POLY_OP_STORE), 2);
+  ASSERT_INT_EQ(count_root_ops(ctx, live_before, POLY_OP_COPY), 1);
+
+  /* Pinned callify.py:54-57,161-164 rewrites this non-storage assignment
+   * target to CONTIGUOUS(replacement). Its separate finalize pass at
+   * callify.py:203-220 therefore never publishes rows for the discarded
+   * first version or creation COPY, even though another live Tensor retains
+   * them. */
+  PolyTensor *target = poly_tensor_create_with_roots(
+      ctx, poly_add(ctx, first_logical, one), poly_add(ctx, first_physical, one),
+      POLY_TENSOR_VALUE, POLY_DEVICE_CPU
+  );
+  PolyUOp *replacement_logical = poly_buffer(ctx, POLY_FLOAT32, 1);
+  PolyUOp *replacement_host =
+      poly_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_HOST);
+  PolyTensor *replacement_source = poly_tensor_create_with_roots(
+      ctx, replacement_logical, replacement_host, POLY_TENSOR_VALUE,
+      POLY_DEVICE_HOST
+  );
+  PolyTensor *replacement =
+      poly_tensor_to_device(ctx, replacement_source, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(target);
+  ASSERT_NOT_NULL(replacement_source);
+  ASSERT_NOT_NULL(replacement);
+  ASSERT_PTR_EQ(poly_tensor_assign(ctx, target, replacement), target);
+
+  PolyUOp *requested = poly_tensor_uop_physical(target);
+  PolyUOp *realized = NULL;
+  PolyUOp **map_orig = NULL;
+  PolyUOp **map_repl = NULL;
+  int map_n = 0;
+  PolyUOp *call = poly_transform_to_call_with_map(
+      ctx, &requested, 1, &realized, &map_orig, &map_repl, &map_n
+  );
+  ASSERT_NOT_NULL(call);
+  ASSERT_NOT_NULL(realized);
+  ASSERT_TRUE(map_n > 0);
+  for (int i = 0; i < map_n; i++) {
+    ASSERT_PTR_NEQ(map_orig[i], first_physical);
+    ASSERT_PTR_NEQ(map_orig[i], creation_copy);
+  }
+
+  ASSERT_INT_EQ(
+      poly_tensor_apply_realize_map(
+          ctx, map_orig, map_repl, map_n, POLY_DEVICE_AUTO, NULL
+      ),
+      0
+  );
+  ASSERT_PTR_EQ(poly_tensor_uop_physical(counter), live_before);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_tensor_uop_physical(counter), POLY_OP_AFTER), 2);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_tensor_uop_physical(counter), POLY_OP_STORE), 2);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_tensor_uop_physical(counter), POLY_OP_COPY), 1);
+
+  free(map_repl);
+  free(map_orig);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(realize, transform_to_call_discards_dead_view_copy_side_calls) {
+  for (int mode = 0; mode < 3; mode++) {
+    bool live = mode != 0;
+    bool nested = mode == 2;
+    PolyCtx *ctx = poly_ctx_new();
+    ASSERT_NOT_NULL(ctx);
+
+    float data[2] = {3.0f, 4.0f};
+    PolyUOp *base =
+        poly_buffer_on_device(ctx, POLY_FLOAT32, 2, POLY_DEVICE_HOST);
+    ASSERT_NOT_NULL(base);
+    PolyBuffer host_storage = {
+        .ptr = data,
+        .nbytes = sizeof(data),
+        .device = POLY_DEVICE_HOST,
+        .owned = false,
+        .valid = true,
+    };
+    poly_buffer_attach(ctx, base, &host_storage);
+    PolyUOp *view = poly_buffer_view(ctx, base, 1, 0);
+    PolyUOp *device = poly_uop0(
+        ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CPU)
+    );
+    PolyUOp *copy_src[2] = {view, device};
+    PolyUOp *copy = poly_uop(
+        ctx, POLY_OP_COPY, POLY_FLOAT32, copy_src, 2, poly_arg_none()
+    );
+    ASSERT_NOT_NULL(view);
+    ASSERT_NOT_NULL(device);
+    ASSERT_NOT_NULL(copy);
+
+    PolyUOp *one = poly_const_float(ctx, 1.0f);
+    PolyUOp *dead_target = poly_add(ctx, copy, one);
+    PolyUOp *live_buffer =
+        poly_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_CPU);
+    PolyUOp *live_value = poly_add(ctx, live_buffer, one);
+    PolyUOp *requested = nested ? dead_target : copy;
+    if (!live) {
+      PolyUOp *store = poly_store_val(ctx, dead_target, live_value);
+      PolyUOp *after_src[2] = {dead_target, store};
+      requested = poly_uop(
+          ctx, POLY_OP_AFTER, dead_target->dtype, after_src, 2,
+          poly_arg_none()
+      );
+    }
+    ASSERT_NOT_NULL(one);
+    ASSERT_NOT_NULL(dead_target);
+    ASSERT_NOT_NULL(live_buffer);
+    ASSERT_NOT_NULL(live_value);
+    ASSERT_NOT_NULL(requested);
+    PolyTensor *retained_copy = nested
+                                    ? poly_tensor_create_with_roots(
+                                          ctx, copy, copy, POLY_TENSOR_VALUE,
+                                          POLY_DEVICE_CPU
+                                      )
+                                    : NULL;
+    if (nested) ASSERT_NOT_NULL(retained_copy);
+
+    PolyUOp *realized = NULL;
+    PolyUOp **map_orig = NULL;
+    PolyUOp **map_repl = NULL;
+    int map_n = 0;
+    PolyUOp *call_graph = poly_transform_to_call_with_map(
+        ctx, &requested, 1, &realized, &map_orig, &map_repl, &map_n
+    );
+    ASSERT_NOT_NULL(call_graph);
+    ASSERT_TRUE(
+        call_graph->op == POLY_OP_CALL || call_graph->op == POLY_OP_LINEAR
+    );
+    ASSERT_NOT_NULL(realized);
+
+    int view_calls = 0, copy_calls = 0, sink_calls = 0, program_calls = 0;
+    int n_calls = call_graph->op == POLY_OP_CALL ? 1 : call_graph->n_src;
+    for (int i = 0; i < n_calls; i++) {
+      PolyUOp *call =
+          call_graph->op == POLY_OP_CALL ? call_graph : call_graph->src[i];
+      ASSERT_NOT_NULL(call);
+      ASSERT_EQ(call->op, POLY_OP_CALL);
+      ASSERT_TRUE(call->n_src >= 1);
+      view_calls += call->src[0]->op == POLY_OP_BUFFER_VIEW;
+      copy_calls += call->src[0]->op == POLY_OP_COPY;
+      sink_calls += call->src[0]->op == POLY_OP_SINK;
+      program_calls += call->src[0]->op == POLY_OP_PROGRAM;
+    }
+
+    int copy_rows = 0, requested_rows = 0, synthetic_rows = 0;
+    PolyUOp *copy_replacement = NULL;
+    for (int i = 0; i < map_n; i++) {
+      if (map_orig[i] == copy) {
+        copy_rows++;
+        copy_replacement = map_repl[i];
+      }
+      requested_rows += map_orig[i] == requested;
+      synthetic_rows += !poly_uop_reachable(ctx, requested, map_orig[i]);
+    }
+    int n_topo = 0, marker_nodes = 0;
+    PolyUOp **topo = poly_toposort(ctx, call_graph, &n_topo);
+    for (int i = 0; i < n_topo; i++)
+      marker_nodes += topo[i]->tag == INT32_MIN &&
+                      topo[i]->tag_arg.kind == POLY_ARG_INT_TUPLE;
+    ASSERT_INT_EQ(marker_nodes, 0);
+    if (live) {
+      /* Polygrad's BUFFER_VIEW boundary is the physical counterpart to
+       * pinned SLICE. A reachable view COPY keeps both side effects in exact
+       * dependency order. */
+      ASSERT_EQ(call_graph->op, POLY_OP_LINEAR);
+      ASSERT_INT_EQ(n_calls, nested ? 3 : 2);
+      ASSERT_INT_EQ(view_calls, 1);
+      ASSERT_INT_EQ(copy_calls, 1);
+      ASSERT_INT_EQ(sink_calls, 0);
+      ASSERT_INT_EQ(program_calls, nested ? 1 : 0);
+      ASSERT_EQ(call_graph->src[0]->src[0]->op, POLY_OP_BUFFER_VIEW);
+      ASSERT_EQ(call_graph->src[1]->src[0]->op, POLY_OP_COPY);
+      ASSERT_INT_EQ(copy_rows, 1);
+      ASSERT_INT_EQ(requested_rows, 1);
+      ASSERT_INT_EQ(synthetic_rows, 0);
+      ASSERT_INT_EQ(map_n, nested ? 2 : 1);
+      if (nested) {
+        ASSERT_NOT_NULL(copy_replacement);
+        ASSERT_INT_EQ(
+            poly_tensor_apply_realize_map(
+                ctx, map_orig, map_repl, map_n, POLY_DEVICE_AUTO, NULL
+            ),
+            0
+        );
+        ASSERT_PTR_EQ(
+            poly_tensor_uop_physical(retained_copy), copy_replacement
+        );
+        ASSERT_PTR_NEQ(poly_tensor_uop_physical(retained_copy), copy);
+      }
+    } else {
+      /* Pinned callify.py:54-57,155-181,203-220 drops the non-storage
+       * assignment target before reachable-only finalization. Its view and
+       * COPY must not escape through Polygrad's side-CALL list. */
+      ASSERT_EQ(call_graph->op, POLY_OP_CALL);
+      ASSERT_INT_EQ(n_calls, 1);
+      ASSERT_INT_EQ(view_calls, 0);
+      ASSERT_INT_EQ(copy_calls, 0);
+      ASSERT_INT_EQ(sink_calls, 1);
+      ASSERT_INT_EQ(program_calls, 0);
+      ASSERT_INT_EQ(copy_rows, 0);
+      ASSERT_INT_EQ(requested_rows, 1);
+      ASSERT_INT_EQ(synthetic_rows, 0);
+    }
+
+    free(map_repl);
+    free(map_orig);
+    poly_ctx_destroy(ctx);
+  }
+  PASS();
+}
+
+TEST(realize, transform_to_call_dead_map_rows_ignore_opaque_callee_bodies) {
+  const PolyOps opaque_ops[] = {POLY_OP_CALL, POLY_OP_FUNCTION};
+  for (int op_index = 0; op_index < 2; op_index++) {
+    PolyCtx *ctx = poly_ctx_new();
+    ASSERT_NOT_NULL(ctx);
+
+    PolyUOp *state =
+        poly_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_CPU);
+    PolyUOp *one = poly_const_float(ctx, 1.0f);
+    ASSERT_NOT_NULL(state);
+    ASSERT_NOT_NULL(one);
+
+    PolyUOp *state_store = poly_store_val(ctx, state, poly_add(ctx, state, one));
+    PolyUOp *state_after_src[2] = {state, state_store};
+    PolyUOp *discarded = poly_uop(
+        ctx, POLY_OP_AFTER, state->dtype, state_after_src, 2, poly_arg_none()
+    );
+    ASSERT_NOT_NULL(discarded);
+    ASSERT_EQ(discarded->op, POLY_OP_AFTER);
+
+    PolyUOp *target = poly_add(ctx, discarded, one);
+    PolyUOp *replacement_host =
+        poly_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_HOST);
+    PolyUOp *replacement_device =
+        poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CPU));
+    PolyUOp *replacement_src[2] = {replacement_host, replacement_device};
+    PolyUOp *replacement = poly_uop(
+        ctx, POLY_OP_COPY, POLY_FLOAT32, replacement_src, 2, poly_arg_none()
+    );
+    PolyUOp *target_store = poly_store_val(ctx, target, replacement);
+    PolyUOp *requested_src[2] = {target, target_store};
+    PolyUOp *requested_assign = poly_uop(
+        ctx, POLY_OP_AFTER, target->dtype, requested_src, 2, poly_arg_none()
+    );
+    ASSERT_NOT_NULL(target);
+    ASSERT_NOT_NULL(replacement_host);
+    ASSERT_NOT_NULL(replacement_device);
+    ASSERT_NOT_NULL(replacement);
+    ASSERT_NOT_NULL(requested_assign);
+
+    /* Pinned graph_rewrite(..., enter_calls=False) keeps src[0] opaque.  The
+     * same discarded state version appearing only as a callee body must not
+     * make its early-rewrite map row caller-visible. */
+    PolyUOp *body = poly_sink_n(ctx, &discarded, 1);
+    PolyUOp *opaque_src[2] = {body, state};
+    PolyUOp *opaque = poly_uop(
+        ctx, opaque_ops[op_index], POLY_VOID, opaque_src, 2,
+        poly_arg_none()
+    );
+    PolyUOp *keep_buffer =
+        poly_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_CPU);
+    PolyUOp *keep_src[2] = {keep_buffer, opaque};
+    PolyUOp *keep = poly_uop(
+        ctx, POLY_OP_AFTER, keep_buffer->dtype, keep_src, 2, poly_arg_none()
+    );
+    ASSERT_NOT_NULL(body);
+    ASSERT_NOT_NULL(opaque);
+    ASSERT_NOT_NULL(keep);
+    ASSERT_PTR_EQ(opaque->src[0], body);
+    ASSERT_PTR_EQ(body->src[0], discarded);
+
+    PolyUOp *requested[2] = {requested_assign, keep};
+    PolyUOp *realized[2] = {NULL, NULL};
+    PolyUOp **map_orig = NULL;
+    PolyUOp **map_repl = NULL;
+    int map_n = 0;
+    PolyUOp *call = poly_transform_to_call_with_map(
+        ctx, requested, 2, realized, &map_orig, &map_repl, &map_n
+    );
+    ASSERT_NOT_NULL(call);
+    ASSERT_NOT_NULL(realized[0]);
+    ASSERT_NOT_NULL(realized[1]);
+    ASSERT_TRUE(map_n > 0);
+    for (int i = 0; i < map_n; i++) {
+      ASSERT_PTR_NEQ(map_orig[i], discarded);
+    }
+    ASSERT_PTR_EQ(opaque->src[0], body);
+    ASSERT_PTR_EQ(body->src[0], discarded);
+
+    free(map_repl);
+    free(map_orig);
+    poly_ctx_destroy(ctx);
+  }
+  PASS();
+}
+
+TEST(realize, transform_to_call_does_not_publish_synthetic_early_rewrite_keys) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *state =
+      poly_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_CPU);
+  PolyUOp *one = poly_const_float(ctx, 1.0f);
+  PolyUOp *state_store = poly_store_val(ctx, state, poly_add(ctx, state, one));
+  PolyUOp *state_after_src[2] = {state, state_store};
+  PolyUOp *first = poly_uop(
+      ctx, POLY_OP_AFTER, state->dtype, state_after_src, 2, poly_arg_none()
+  );
+  PolyUOp *target = poly_add(ctx, first, one);
+
+  PolyUOp *host =
+      poly_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_HOST);
+  PolyUOp *cpu_device =
+      poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CPU));
+  PolyUOp *copy_src[2] = {host, cpu_device};
+  PolyUOp *replacement = poly_uop(
+      ctx, POLY_OP_COPY, POLY_FLOAT32, copy_src, 2, poly_arg_none()
+  );
+  PolyUOp *alias = poly_contiguous(ctx, replacement);
+  PolyTensor *alias_tensor = poly_tensor_create_with_roots(
+      ctx, alias, alias, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
+  );
+
+  PolyUOp *requested_store = poly_store_val(ctx, target, replacement);
+  PolyUOp *requested_src[2] = {target, requested_store};
+  PolyUOp *requested = poly_uop(
+      ctx, POLY_OP_AFTER, target->dtype, requested_src, 2, poly_arg_none()
+  );
+  ASSERT_NOT_NULL(state);
+  ASSERT_NOT_NULL(first);
+  ASSERT_NOT_NULL(replacement);
+  ASSERT_NOT_NULL(alias);
+  ASSERT_NOT_NULL(alias_tensor);
+  ASSERT_NOT_NULL(requested);
+
+  PolyUOp *realized = NULL;
+  PolyUOp **map_orig = NULL;
+  PolyUOp **map_repl = NULL;
+  int map_n = 0;
+  PolyUOp *call = poly_transform_to_call_with_map(
+      ctx, &requested, 1, &realized, &map_orig, &map_repl, &map_n
+  );
+  ASSERT_NOT_NULL(call);
+  ASSERT_NOT_NULL(realized);
+  ASSERT_TRUE(map_n > 0);
+
+  bool found_requested = false;
+  bool found_replacement = false;
+  for (int i = 0; i < map_n; i++) {
+    ASSERT_PTR_NEQ(map_orig[i], alias);
+    if (map_orig[i] == requested) found_requested = true;
+    if (map_orig[i] == replacement) found_replacement = true;
+  }
+  ASSERT_TRUE(found_requested);
+  ASSERT_TRUE(found_replacement);
+
+  ASSERT_PTR_EQ(poly_tensor_uop_physical(alias_tensor), alias);
+
+  free(map_repl);
+  free(map_orig);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(realize, transform_to_call_surviving_tags_disambiguate_shared_rewrites) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *buffer =
+      poly_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_CPU);
+  PolyUOp *one = poly_const_float(ctx, 1.0f);
+  PolyUOp *two = poly_const_float(ctx, 2.0f);
+  PolyUOp *shared_replacement = poly_add(ctx, buffer, one);
+
+  PolyUOp *dead_target = poly_add(ctx, buffer, two);
+  PolyUOp *dead_store = poly_store_val(ctx, dead_target, shared_replacement);
+  PolyUOp *dead_src[2] = {dead_target, dead_store};
+  PolyUOp *dead = poly_uop(
+      ctx, POLY_OP_AFTER, dead_target->dtype, dead_src, 2, poly_arg_none()
+  );
+  PolyUOp *outer_target = poly_add(ctx, dead, one);
+  PolyUOp *outer_value = poly_mul(ctx, buffer, two);
+  PolyUOp *outer_store = poly_store_val(ctx, outer_target, outer_value);
+  PolyUOp *outer_src[2] = {outer_target, outer_store};
+  PolyUOp *outer = poly_uop(
+      ctx, POLY_OP_AFTER, outer_target->dtype, outer_src, 2, poly_arg_none()
+  );
+
+  PolyUOp *live_target = poly_mul(ctx, buffer, one);
+  PolyUOp *live_store = poly_store_val(ctx, live_target, shared_replacement);
+  PolyUOp *live_src[2] = {live_target, live_store};
+  PolyUOp *live = poly_uop(
+      ctx, POLY_OP_AFTER, live_target->dtype, live_src, 2, poly_arg_none()
+  );
+  ASSERT_NOT_NULL(dead);
+  ASSERT_NOT_NULL(outer);
+  ASSERT_NOT_NULL(live);
+
+  PolyUOp *requested[2] = {outer, live};
+  PolyUOp *realized[2] = {NULL, NULL};
+  PolyUOp **map_orig = NULL;
+  PolyUOp **map_repl = NULL;
+  int map_n = 0;
+  PolyUOp *call = poly_transform_to_call_with_map(
+      ctx, requested, 2, realized, &map_orig, &map_repl, &map_n
+  );
+  ASSERT_NOT_NULL(call);
+  ASSERT_NOT_NULL(realized[0]);
+  ASSERT_NOT_NULL(realized[1]);
+
+  int dead_rows = 0, outer_rows = 0, live_rows = 0;
+  for (int i = 0; i < map_n; i++) {
+    dead_rows += map_orig[i] == dead;
+    outer_rows += map_orig[i] == outer;
+    live_rows += map_orig[i] == live;
+  }
+  ASSERT_INT_EQ(dead_rows, 0);
+  ASSERT_INT_EQ(outer_rows, 1);
+  ASSERT_INT_EQ(live_rows, 1);
+
+  PolyUOp *roots[3] = {call, realized[0], realized[1]};
+  for (int root = 0; root < 3; root++) {
+    int n_topo = 0;
+    PolyUOp **topo = poly_toposort(ctx, roots[root], &n_topo);
+    for (int i = 0; i < n_topo; i++)
+      ASSERT_FALSE(
+          topo[i]->tag == INT32_MIN &&
+          topo[i]->tag_arg.kind == POLY_ARG_INT_TUPLE
+      );
+  }
 
   free(map_repl);
   free(map_orig);

@@ -527,6 +527,26 @@
         "test/tensor_graph_cases.py:case_contiguous_deviceless"
       ],
       "close_when": "All executable raw/import callers carry complete physical device facts or cross explicit re_place, the device-free fold moves into poly_contiguous itself, and the native realization matrix remains green."
+    },
+    {
+      "id": "PG-PARITY-023",
+      "status": "open_debt",
+      "stages": ["ir", "codegen"],
+      "area": "UOp source-arity representation ceiling",
+      "vocabulary": {"tinygrad_only": [], "polygrad_only": []},
+      "tinygrad": "Python source tuples have no uint16 ceiling; pm_add_control_flow can append a predecessor to a 65,535-source RANGE and produce 65,536 sources",
+      "polygrad": "PolyUOp.n_src is uint16_t; poly_apply_control_flow now fails the whole pass cleanly at that exact boundary instead of returning a partial graph",
+      "rationale": "The existing C representation cannot encode the pinned result. Clean failure is required for correctness but is not approval of the parity debt or permission to widen the UOp representation implicitly.",
+      "approval": null,
+      "evidence": [
+        "references/tinygrad_latest/tinygrad/codegen/late/linearizer.py:pm_add_control_flow",
+        "references/tinygrad_latest/tinygrad/uop/ops.py:UOp.replace",
+        "src/polygrad.h:PolyUOp",
+        "src/render_c.c:poly_apply_control_flow",
+        "test/test_future_passes.c:control_flow_fails_cleanly_at_uop_arity_ceiling",
+        "temp/tg_control_flow_max_range_probe_20260809.py"
+      ],
+      "close_when": "A separately approved arity representation migration carries every UOp/CSE/IR/ABI consumer beyond uint16 and the 65,536-source result matches pinned tinygrad, or the accepted public graph contract explicitly rejects the input before construction."
     }
   ]
 }

@@ -133,7 +133,7 @@ async function runWasmOwnershipTests() {
     let grownPtr = 0
     try {
       const Tensor = pg.Tensor
-      const x = new Tensor([1, 2, 3], { requiresGrad: true })
+      const x = new Tensor([1, 2, 3], { dtype: 'float32', requiresGrad: true })
       const loss = x.detach().sum()
       const core = pg._core
       const Module = core.Module

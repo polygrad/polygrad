@@ -97,6 +97,8 @@ class UOp:
         dtype_id = _ffi._lib.poly_uop_dtype_id(self.ctx, self.raw) if self.raw is not None else -1
         if _ffi._lib.poly_dtype_id_by_name(b'void') == dtype_id:
             return dtypes.void
+        if _ffi._lib.poly_dtype_id_by_name(b'weakint') == dtype_id:
+            return dtypes.weakint
         for name, dtype in DTYPES_DICT.items():
             if _ffi._lib.poly_dtype_id_by_name(name.encode('utf-8')) == dtype_id:
                 return dtype

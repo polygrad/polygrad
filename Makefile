@@ -80,7 +80,7 @@ WASM_EXPORTS := $(WASM_EXPORTS),_poly_pad_value,_poly_pool,_poly_max_pool2d,_pol
 WASM_EXPORTS := $(WASM_EXPORTS),_poly_tokenizer_free
 
 WASM_ASYNCIFY_IMPORTS = ['js_webgpu_dispatch','js_webgpu_read_buffer_to_wasm','js_webgpu_read_buffer_to_hostkey']
-WASM_ASYNCIFY_ONLY = ['poly_instance_call','poly_instance_forward','poly_instance_value_and_grad','poly_instance_train_step','run_instance_sink','poly_instance_param_data','poly_instance_buf_data','poly_instance_export_weights','poly_instance_export_weights_ex','poly_instance_save_bundle','poly_instance_save_bundle_ex','poly_instance_readback_param','poly_instance_readback_buf','poly_realize_uops','poly_realize_tensors','poly_realize_tensors_ex','poly_jit_run','poly_jit_run_with_vars','poly_run_schedule','poly_schedule_execute_runner_call','poly_webgpu_execute','copy_execute_fn','poly_buffer_copy','poly_buffer_ensure_host_current','poly_buffer_read','poly_buffer_write','host_copy_in','webgpu_copy_out']
+WASM_ASYNCIFY_ONLY = ['poly_instance_call','poly_instance_forward','poly_instance_value_and_grad','poly_instance_train_step','run_instance_sink','poly_instance_param_data','poly_instance_buf_data','poly_instance_export_weights','poly_instance_export_weights_ex','poly_instance_save_bundle','poly_instance_save_bundle_ex','poly_instance_readback_param','poly_instance_readback_buf','poly_realize_uops','poly_realize_tensors','poly_realize_tensors_ex','poly_jit_end_capture','poly_jit_run','poly_jit_run_with_vars','poly_jit_run_captured_linear','poly_run_schedule','poly_schedule_execute_runner_call','poly_webgpu_execute','copy_execute_fn','poly_buffer_copy','poly_buffer_ensure_host_current','poly_buffer_read','poly_buffer_write','host_copy_in','webgpu_copy_out']
 WASM_ASYNCIFY_FLAGS = -s ASYNCIFY=1 \
 	-s "ASYNCIFY_IMPORTS=$(WASM_ASYNCIFY_IMPORTS)" \
 	-s "ASYNCIFY_ONLY=$(WASM_ASYNCIFY_ONLY)"
@@ -104,7 +104,7 @@ QWEN3_GGUF ?= $(if $(POLY_QWEN3_GGUF),$(POLY_QWEN3_GGUF),$(CURDIR)/temp/Qwen3-0.
 BROWSER_MATRIX ?= chromium,firefox,chrome-system=chromium@/usr/bin/google-chrome,chromium-snap=chromium@/snap/bin/chromium
 BROWSER_MATRIX_DEVICES ?= auto
 
-.PHONY: all test test-fast test-common test-common-cpu test-common-cuda test-common-hip test-common-interp test-common-x86 test-specific-cuda test-specific-hip test-specific-x86 test-cuda test-hip test-interp test-x86 test-parity test-parity-opt test-parity-ir test-parity-ir-opt test-parity-graph parity-graph-report test-parity-op-census parity-op-census-report test-parity-cuda test-parity-hip test-symbolic-z3 test-qwen3 test-browser-qwen3 require-qwen3-gguf test-wasm test-wasm-new test-native test-browser test-browser-matrix test-js-browser-matrix test-p2p test-p2p-browser bench bench-cuda bench-model-cuda bench-hip bench-train-py bench-smoke bench-local-baseline bench-update-local-baseline bench-smoke-regression bench-ci-regression bench-ratios bench-ratio-local-baseline bench-update-local-ratio-baseline bench-parity bench-jax-js-wasm bench-jax-js-matmul-wasm bench-jax-js-model-wasm bench-jax-js-browser-wasm bench-jax-js-browser-matmul-wasm bench-jax-js-browser-model-wasm bench-compare bench-compare-global bench-regression bench-update-baseline fuzz fuzz-smoke fuzz-nightly fuzz-symbolic fuzz-symbolic-div wasm wasm-pkg build-py build-py-sdist build-py-wheel build-python test-py-sdist-install publish-py publish-python build-js publish-js clean analyze cppcheck format format-check test-msan test-tsan verify coverage test-full test-js-native-cpu test-js-native-x86 test-js-native-interp test-js-native-cuda test-js-native-hip test-js-package test-filc-interp-fast sync-source-mirrors verify-source-mirrors test-py-x86
+.PHONY: all test test-fast test-common test-common-cpu test-common-cuda test-common-hip test-common-interp test-common-x86 test-specific-cuda test-specific-hip test-specific-x86 test-cuda test-hip test-interp test-x86 test-parity test-parity-opt test-parity-ir test-parity-ir-opt test-parity-graph parity-graph-report test-parity-op-census parity-op-census-report test-parity-cuda test-parity-hip test-symbolic-z3 test-qwen3 test-browser-qwen3 require-qwen3-gguf test-wasm test-wasm-new test-native test-browser test-browser-matrix test-js-browser-matrix test-p2p test-p2p-browser bench bench-cuda bench-model-cuda bench-hlb-cuda-semantic bench-hlb-cuda-timing bench-hlb-cuda-manifest bench-hip bench-train-py bench-smoke bench-local-baseline bench-update-local-baseline bench-smoke-regression bench-ci-regression bench-ratios bench-ratio-local-baseline bench-update-local-ratio-baseline bench-parity bench-jax-js-wasm bench-jax-js-matmul-wasm bench-jax-js-model-wasm bench-jax-js-browser-wasm bench-jax-js-browser-matmul-wasm bench-jax-js-browser-model-wasm bench-compare bench-compare-global bench-regression bench-update-baseline fuzz fuzz-smoke fuzz-nightly fuzz-symbolic fuzz-symbolic-div wasm wasm-pkg build-py build-py-sdist build-py-wheel build-python test-py-sdist-install publish-py publish-python build-js publish-js clean analyze cppcheck format format-check test-msan test-tsan verify coverage test-full test-js-native-cpu test-js-native-x86 test-js-native-interp test-js-native-cuda test-js-native-hip test-js-package test-filc-interp-fast sync-source-mirrors verify-source-mirrors test-py-x86
 
 all: build/libpolygrad.a build/libpolygrad.so
 
@@ -283,6 +283,39 @@ bench-cuda: build/bench_cuda
 bench-model-cuda: build/libpolygrad.so js/build/Release/polygrad_napi.node
 	POLYGRAD_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=references/tinygrad_latest $(PARITY_PY) bench/bench_model_cuda_vs_tinygrad.py
 
+# Bounded semantic gate for the exact pinned HLB source. The Python driver
+# owns engine-specific caches, model bytes, provenance, and comparison output.
+bench-hlb-cuda-semantic: build/libpolygrad.so
+	@mkdir -p temp/hlb_benchmark
+	@set -eu; \
+		run_root=$$(mktemp -d -p temp/hlb_benchmark .semantic.XXXXXX); \
+		rmdir "$$run_root"; \
+		$(PARITY_PY) bench/bench_hlb_cifar.py \
+			$(HLB_BENCH_ARGS) \
+			--mode semantic \
+			--python $(PARITY_PY) --polygrad-lib $(abspath build/libpolygrad.so) \
+			--output-dir "$$run_root"; \
+		test -s "$$run_root/comparison.json"
+
+# No-live-Tensor bounded timing gate. The driver first requires a fresh
+# one-step semantic canary on the same source/library/state, then records
+# deterministic eager/capture/replay windows in both process orders.
+bench-hlb-cuda-timing: build/libpolygrad.so
+	@mkdir -p temp/hlb_benchmark
+	@set -eu; \
+		run_root=$$(mktemp -d -p temp/hlb_benchmark .timing.XXXXXX); \
+		rmdir "$$run_root"; \
+		$(PARITY_PY) bench/bench_hlb_cifar.py \
+			$(HLB_BENCH_ARGS) \
+			--mode timing \
+			--python $(PARITY_PY) --polygrad-lib $(abspath build/libpolygrad.so) \
+			--output-dir "$$run_root"; \
+		test -s "$$run_root/comparison.json"
+
+bench-hlb-cuda-manifest: build/libpolygrad.so
+	$(PARITY_PY) bench/bench_hlb_cifar.py --manifest-only \
+		--python $(PARITY_PY) --polygrad-lib $(abspath build/libpolygrad.so)
+
 build/bench_cuda: $(SRC) $(CODEC_SRC) bench/bench_cuda.c
 	@mkdir -p build
 	$(CC) $(CFLAGS_RELEASE) -o $@ $(filter %.c,$^) -lm -ldl
@@ -294,6 +327,10 @@ test-parity-cuda: build/polygrad_parity_runner_cuda
 build/polygrad_parity_runner_cuda: $(SRC) $(CODEC_SRC) $(PARITY_RUNNER_SRC)
 	@mkdir -p build
 	$(CC) $(CFLAGS_RELEASE) -o $@ $(filter %.c,$^) -lm -ldl
+else
+bench-hlb-cuda-semantic bench-hlb-cuda-timing bench-hlb-cuda-manifest:
+	@echo "This target requires HAS_CUDA=1" >&2
+	@false
 endif
 
 ifeq ($(HAS_HIP), 1)

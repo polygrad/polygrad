@@ -12,6 +12,7 @@
 #include "../src/engine/realize.h"
 #include "../src/engine/schedule.h"
 #include "../src/codegen.h"
+#include "../src/schedule/indexing.h"
 #include "../src/schedule/rangeify.h"
 #include "../src/tensor.h"
 #include "../src/device.h"
@@ -132,6 +133,16 @@ static int count_root_ops(PolyCtx *ctx, PolyUOp *root, PolyOps op) {
   return count;
 }
 
+static bool contains_invalid_const(PolyCtx *ctx, PolyUOp *root) {
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(ctx, root, &n_topo);
+  for (int i = 0; i < n_topo; i++) {
+    PolyUOp *u = topo[i];
+    if (u && u->op == POLY_OP_CONST && u->arg.kind == POLY_ARG_INVALID) return true;
+  }
+  return false;
+}
+
 static PolyUOp *find_invalid_where(PolyCtx *ctx, PolyUOp *root) {
   int n_topo = 0;
   PolyUOp **topo = poly_toposort(ctx, root, &n_topo);
@@ -139,9 +150,7 @@ static PolyUOp *find_invalid_where(PolyCtx *ctx, PolyUOp *root) {
     PolyUOp *u = topo[i];
     if (!u || u->op != POLY_OP_WHERE || u->n_src != 3) continue;
     for (int j = 1; j <= 2; j++)
-      if (u->src[j] && u->src[j]->op == POLY_OP_CONST &&
-          u->src[j]->arg.kind == POLY_ARG_INVALID)
-        return u;
+      if (contains_invalid_const(ctx, u->src[j])) return u;
   }
   return NULL;
 }
@@ -229,9 +238,13 @@ TEST(schedule_runtime, effect_sink_parameterizes_concrete_buffers_before_rangeif
   ASSERT_INT_EQ(sched->template->n_calls, 3);
 
   const int expected_params[3] = {3, 4, 3};
-  const int expected_ranges[3] = {3, 3, 2};
-  const int expected_indexes[3] = {4, 5, 3};
-  const int expected_reduces[3] = {2, 2, 0};
+  /* Pinned rangeify.py:598-607 keeps symbolic/reduce simplification in the
+   * same fixed point as de-bufferization. The first step's known-value term is
+   * REDUCE(a_row * 0), so it disappears with its INDEX/RANGE; later steps use
+   * the accumulated solution and retain both reductions. */
+  const int expected_ranges[3] = {2, 3, 2};
+  const int expected_indexes[3] = {3, 5, 3};
+  const int expected_reduces[3] = {1, 2, 0};
   for (int i = 0; i < 3; i++) {
     PolyUOp *body = poly_schedule_call_body(sched, i);
     ASSERT_NOT_NULL(body);
@@ -871,6 +884,49 @@ TEST(schedule_runtime, validate_kernel_graph_grows_past_old_stack_cap) {
 
   bad->src[0] = NULL;
   ASSERT_TRUE(!poly_validate_kernel_graph(ctx, root));
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(schedule_runtime, validate_kernel_graph_accepts_wide_after_like_tinygrad) {
+  /* Pinned tinygrad/uop/spec.py:231-232 allows any AFTER source length. The
+   * validator's traversal storage grows dynamically, so it must not impose a
+   * separate 64-source graph limit. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *src[68];
+  for (int i = 0; i < 68; i++)
+    src[i] = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(i));
+  PolyUOp *after = poly_uop(ctx, POLY_OP_AFTER, POLY_INT32, src, 68, poly_arg_none());
+  ASSERT_NOT_NULL(after);
+  ASSERT_INT_EQ(after->n_src, 68);
+  ASSERT_PTR_EQ(after->src[0], src[0]);
+  ASSERT_TRUE(poly_validate_kernel_graph(ctx, after));
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(schedule_runtime, validate_kernel_graph_rejects_foreign_wide_index_source_safely) {
+  /* Context ownership is a Polygrad C boundary. Validate every source before
+   * reading INDEX dtype metadata, including positions beyond the old arity
+   * cap, so stale foreign arena pointers return false without dereference. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyCtx *foreign_ctx = poly_ctx_new();
+  PolyDType ptr = poly_dtype_ptr(POLY_FLOAT32, 1024, POLY_ADDR_GLOBAL);
+  PolyUOp *base = poly_uop0(ctx, POLY_OP_PARAM, ptr, poly_arg_int(0));
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
+  PolyUOp *foreign =
+      poly_uop0(foreign_ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(1));
+  PolyUOp *src[68];
+  src[0] = base;
+  for (int i = 1; i < 67; i++)
+    src[i] = zero;
+  src[67] = foreign;
+  PolyUOp *index = poly_uop(ctx, POLY_OP_INDEX, ptr, src, 68, poly_arg_none());
+  ASSERT_NOT_NULL(index);
+  poly_ctx_destroy(foreign_ctx);
+  ASSERT_FALSE(poly_validate_kernel_graph(ctx, index));
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -2435,7 +2491,7 @@ TEST(schedule_runtime, copy_intermediate_slots_do_not_need_zero) {
   PolySchedule *ps = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
   ASSERT_NOT_NULL(ps);
 
-  int n_copy_items = 0, n_intermediates = 0, n_zero = 0, n_arenas = 0, n_views = 0;
+  int n_copy_items = 0, n_intermediates = 0, n_arenas = 0, n_views = 0;
   for (int i = 0; i < ps->template->n_calls; i++)
     if (poly_schedule_call_is_copy(ps, i)) n_copy_items++;
   for (int i = 0; i < ps->template->n_buf_slots; i++) {
@@ -2443,14 +2499,12 @@ TEST(schedule_runtime, copy_intermediate_slots_do_not_need_zero) {
     n_intermediates++;
     if (ps->template->buf_slots[i].is_memory_arena) n_arenas++;
     if (ps->template->buf_slots[i].has_memory_parent) n_views++;
-    if (ps->template->buf_slots[i].needs_zero) n_zero++;
   }
 
   ASSERT_INT_EQ(n_copy_items, 2);
   ASSERT_INT_EQ(n_intermediates, 3);
   ASSERT_INT_EQ(n_arenas, 1);
   ASSERT_INT_EQ(n_views, 2);
-  ASSERT_INT_EQ(n_zero, 0);
 
   size_t expected_runtime_bytes = 0;
   for (int i = 0; i < ps->template->n_buf_slots; i++) {
@@ -3062,6 +3116,124 @@ TEST(schedule_runtime, webgpu_triu_heuristic_adds_local_split_like_tinygrad) {
   PASS();
 }
 
+TEST(schedule_runtime, heuristic_projected_backward_slice_excludes_direct_range_root) {
+  /* Pinned tinygrad heuristic.py:160-175 ranks a local axis using
+   * `rng not in b.src[1].get_idx().backward_slice`. UOp.backward_slice
+   * explicitly excludes the projected coordinate root (uop/ops.py:177-183),
+   * so INDEX(mean, r_channel) makes r_channel an expanded local candidate. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *rngs[4];
+  const int64_t shape[4] = {32, 3, 36, 36};
+  for (int i = 0; i < 4; i++) {
+    PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(shape[i]));
+    rngs[i] =
+        poly_uop1(ctx, POLY_OP_RANGE, POLY_INDEX, bound, poly_arg_range(i, POLY_AXIS_LOOP));
+  }
+
+  const int64_t out_stride[4] = {3888, 1296, 36, 1};
+  const int64_t in_stride[4] = {3072, 1024, 32, 1};
+  PolyUOp *out_coord = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(0));
+  PolyUOp *in_coord = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(0));
+  for (int i = 0; i < 4; i++) {
+    PolyUOp *out_term = rngs[i];
+    PolyUOp *in_term = rngs[i];
+    if (out_stride[i] != 1) {
+      PolyUOp *stride =
+          poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(out_stride[i]));
+      out_term = poly_uop2(ctx, POLY_OP_MUL, POLY_INDEX, rngs[i], stride, poly_arg_none());
+    }
+    if (in_stride[i] != 1) {
+      PolyUOp *stride =
+          poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(in_stride[i]));
+      in_term = poly_uop2(ctx, POLY_OP_MUL, POLY_INDEX, rngs[i], stride, poly_arg_none());
+    }
+    out_coord =
+        poly_uop2(ctx, POLY_OP_ADD, POLY_INDEX, out_coord, out_term, poly_arg_none());
+    in_coord =
+        poly_uop2(ctx, POLY_OP_ADD, POLY_INDEX, in_coord, in_term, poly_arg_none());
+  }
+
+  PolyDType out_ptr = poly_dtype_ptr(POLY_FLOAT32, 32 * 3 * 36 * 36, POLY_ADDR_GLOBAL);
+  PolyDType in_ptr = poly_dtype_ptr(POLY_FLOAT32, 32 * 3 * 32 * 32, POLY_ADDR_GLOBAL);
+  PolyDType vec_ptr = poly_dtype_ptr(POLY_FLOAT32, 3, POLY_ADDR_GLOBAL);
+  PolyUOp *out_param = poly_uop0(ctx, POLY_OP_PARAM, out_ptr, poly_arg_int(0));
+  PolyUOp *in_param = poly_uop0(ctx, POLY_OP_PARAM, in_ptr, poly_arg_int(1));
+  PolyUOp *mean_param = poly_uop0(ctx, POLY_OP_PARAM, vec_ptr, poly_arg_int(2));
+  PolyUOp *std_param = poly_uop0(ctx, POLY_OP_PARAM, vec_ptr, poly_arg_int(3));
+  PolyUOp *out_index =
+      poly_uop2(ctx, POLY_OP_INDEX, out_ptr, out_param, out_coord, poly_arg_none());
+  /* Pinned schedule/indexing.py:131-145 keeps PAD validity around the image
+   * address, while uop/ops.py:571-581 projects only in_coord for heuristic
+   * scoring. The channel-statistic addresses below remain direct ranges. */
+  PolyUOp *height_valid = poly_uop2(
+      ctx, POLY_OP_CMPLT, POLY_BOOL, rngs[2],
+      poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(32)), poly_arg_none()
+  );
+  PolyUOp *width_valid = poly_uop2(
+      ctx, POLY_OP_CMPLT, POLY_BOOL, rngs[3],
+      poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(32)), poly_arg_none()
+  );
+  PolyUOp *input_valid =
+      poly_uop2(ctx, POLY_OP_AND, POLY_BOOL, height_valid, width_valid, poly_arg_none());
+  PolyUOp *invalid = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_invalid());
+  PolyUOp *input_coord =
+      poly_uop3(ctx, POLY_OP_WHERE, POLY_INDEX, input_valid, in_coord, invalid, poly_arg_none());
+  ASSERT_PTR_EQ(poly_index_get_idx(ctx, input_coord), in_coord);
+  PolyUOp *in_index =
+      poly_uop2(ctx, POLY_OP_INDEX, in_ptr, in_param, input_coord, poly_arg_none());
+  PolyUOp *mean_index =
+      poly_uop2(ctx, POLY_OP_INDEX, vec_ptr, mean_param, rngs[1], poly_arg_none());
+  PolyUOp *std_index =
+      poly_uop2(ctx, POLY_OP_INDEX, vec_ptr, std_param, rngs[1], poly_arg_none());
+  PolyUOp *in_value = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, in_index, poly_arg_none());
+  PolyUOp *mean_value =
+      poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, mean_index, poly_arg_none());
+  PolyUOp *std_value =
+      poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, std_index, poly_arg_none());
+  PolyUOp *value = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, in_value, mean_value, poly_arg_none());
+  value = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, value, std_value, poly_arg_none());
+  PolyUOp *store =
+      poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out_index, value, poly_arg_none());
+  PolyUOp *end_src[5] = {store, rngs[0], rngs[1], rngs[2], rngs[3]};
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 5, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
+
+  PolyRendererCaps caps = {.has_local = true, .max_vec_width = 1};
+  PolyUOp *optimized = poly_apply_opts_heuristic_ex(ctx, sink, caps);
+  ASSERT_NOT_NULL(optimized);
+
+  int local_bounds[4] = {0};
+  int n_local = 0;
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(ctx, optimized, &n_topo);
+  for (int i = 0; i < n_topo; i++) {
+    PolyUOp *u = topo[i];
+    if (!u || u->op != POLY_OP_RANGE || !poly_arg_is_range(u->arg) ||
+        poly_range_axis_type(u->arg) != POLY_AXIS_LOCAL || u->n_src != 1 ||
+        u->src[0]->op != POLY_OP_CONST || u->src[0]->arg.kind != POLY_ARG_INT)
+      continue;
+    ASSERT_TRUE(n_local < 4);
+    local_bounds[n_local++] = (int)u->src[0]->arg.i;
+  }
+  for (int i = 0; i < n_local; i++)
+    for (int j = i + 1; j < n_local; j++)
+      if (local_bounds[j] < local_bounds[i]) {
+        int tmp = local_bounds[i];
+        local_bounds[i] = local_bounds[j];
+        local_bounds[j] = tmp;
+      }
+
+  ASSERT_INT_EQ(n_local, 3);
+  ASSERT_INT_EQ(local_bounds[0], 3);
+  ASSERT_INT_EQ(local_bounds[1], 4);
+  ASSERT_INT_EQ(local_bounds[2], 4);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(schedule_runtime, webgpu_triu_gpudims_replaces_all_ranges_like_tinygrad) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_TRUE(ctx != NULL);
@@ -3107,7 +3279,7 @@ TEST(schedule_runtime, webgpu_triu_gpudims_replaces_all_ranges_like_tinygrad) {
   PASS();
 }
 
-TEST(schedule_runtime, webgpu_triu_small_expander_drops_residual_where_like_tinygrad) {
+TEST(schedule_runtime, webgpu_triu_small_expander_keeps_invalid_where_like_tinygrad) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_TRUE(ctx != NULL);
 
@@ -3131,14 +3303,21 @@ TEST(schedule_runtime, webgpu_triu_small_expander_drops_residual_where_like_tiny
   u = poly_graph_rewrite(ctx, u, poly_pm_expander_pass());
   u = poly_graph_rewrite(ctx, u, poly_symbolic());
 
-  ASSERT_INT_EQ(count_root_ops(ctx, u, POLY_OP_WHERE), 0);
+  /* Pinned tinygrad ba1d3baa codegen/__init__.py:81-84 retains one vector
+   * WHERE(valid, indices, Invalid) after the combined expander fixed point. */
+  ASSERT_INT_EQ(count_root_ops(ctx, u, POLY_OP_WHERE), 1);
+  PolyUOp *invalid_where = find_invalid_where(ctx, u);
+  ASSERT_NOT_NULL(invalid_where);
+  ASSERT_TRUE(poly_dtype_is_index(invalid_where->dtype));
+  ASSERT_TRUE(poly_dtype_is_index(invalid_where->src[1]->dtype));
+  ASSERT_TRUE(poly_dtype_is_index(invalid_where->src[2]->dtype));
 
   poly_schedule_free(sched);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
-TEST(schedule_runtime, webgpu_tril_small_expander_drops_residual_where_like_tinygrad) {
+TEST(schedule_runtime, webgpu_tril_small_expander_keeps_invalid_where_like_tinygrad) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_TRUE(ctx != NULL);
 
@@ -3162,7 +3341,13 @@ TEST(schedule_runtime, webgpu_tril_small_expander_drops_residual_where_like_tiny
   u = poly_graph_rewrite(ctx, u, poly_pm_expander_pass());
   u = poly_graph_rewrite(ctx, u, poly_symbolic());
 
-  ASSERT_INT_EQ(count_root_ops(ctx, u, POLY_OP_WHERE), 0);
+  /* Same pinned stage and invariant as the triu case above. */
+  ASSERT_INT_EQ(count_root_ops(ctx, u, POLY_OP_WHERE), 1);
+  PolyUOp *invalid_where = find_invalid_where(ctx, u);
+  ASSERT_NOT_NULL(invalid_where);
+  ASSERT_TRUE(poly_dtype_is_index(invalid_where->dtype));
+  ASSERT_TRUE(poly_dtype_is_index(invalid_where->src[1]->dtype));
+  ASSERT_TRUE(poly_dtype_is_index(invalid_where->src[2]->dtype));
 
   poly_schedule_free(sched);
   poly_ctx_destroy(ctx);
@@ -4588,8 +4773,9 @@ TEST(schedule_runtime, parity_multikernel_reduce_chain) {
 /* Phase 5: Persistent workspace */
 
 TEST(schedule_runtime, workspace_reuse) {
-  /* Run same plan 100 times with different data. Persistent intermediates
-   * are zeroed each call (reduce accumulators). No per-call allocations. */
+  /* Pinned reduction PROGRAMs initialize private accumulators and fully write
+   * their outputs. Reuse the same planned arena 100 times with changing data;
+   * stale arena bytes must never affect a later result. */
   int N = 8;
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, N);
@@ -4615,16 +4801,13 @@ TEST(schedule_runtime, workspace_reuse) {
   /* Verify persistent intermediates were allocated */
   int n_inter = 0;
   int n_owning_inter = 0;
-  int n_zero = 0;
   for (int i = 0; i < ps->template->n_buf_slots; i++) {
     if (!ps->template->buf_slots[i].is_intermediate) continue;
     n_inter++;
     if (!ps->template->buf_slots[i].has_memory_parent) n_owning_inter++;
-    if (ps->template->buf_slots[i].needs_zero) n_zero++;
   }
   ASSERT_TRUE(n_inter > 0);
   ASSERT_TRUE(n_owning_inter > 0);
-  ASSERT_TRUE(n_zero > 0);
   ASSERT_TRUE(plan->run != NULL);
   ASSERT_INT_EQ(plan->run->n_intermediates, n_owning_inter);
 

@@ -18,6 +18,7 @@
 
 #include "polygrad.h"
 #include "engine/schedule.h" /* PolyDevice */
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -288,11 +289,23 @@ int poly_instance_upload_param(PolyInstance *inst, int i, const void *host_src, 
 
 /* Execution */
 
-/* I/O binding for forward/train calls. */
+/* Typed I/O binding for forward/train calls. The Instance input schema owns
+ * shape/dtype; each call supplies an exact byte representation and the dtype
+ * id is validated before the named BUFFER is mutated. */
 typedef struct {
   const char *name;
-  float *data;
+  const void *data;
+  size_t nbytes;
+  int dtype_id;
 } PolyIOBinding;
+
+#define POLY_IO_BINDING_BYTES(name_, data_, nbytes_, dtype_)                                  \
+  ((PolyIOBinding){                                                                            \
+      .name = (name_), .data = (data_), .nbytes = (nbytes_),                                  \
+      .dtype_id = poly_dtype_id_by_name(poly_dtype_name(dtype_)),                             \
+  })
+#define POLY_IO_BINDING_ARRAY(name_, data_, dtype_)                                            \
+  POLY_IO_BINDING_BYTES((name_), (data_), sizeof(data_), (dtype_))
 
 /* Generic entrypoint execution. Compiles lazily on first call.
  * I/O bindings match instance buffer names. Output written to

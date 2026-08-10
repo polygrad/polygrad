@@ -442,7 +442,7 @@ TEST_BACKEND(hip, instance_hip_forward_parity) {
   /* Forward on CPU */
   float input[] = {1.0f, 2.0f};
   float out_cpu[3] = {0};
-  PolyIOBinding io[] = {{"x", input}};
+  PolyIOBinding io[] = {POLY_IO_BINDING_ARRAY("x", input, POLY_FLOAT32)};
   ASSERT_INT_EQ(poly_instance_forward(inst, io, 1), 0);
 
   /* Read CPU output */
@@ -493,7 +493,7 @@ TEST_BACKEND(hip, instance_hip_roundtrip) {
   }
 
   float input[] = {1.0f, -1.0f};
-  PolyIOBinding io[] = {{"x", input}};
+  PolyIOBinding io[] = {POLY_IO_BINDING_ARRAY("x", input, POLY_FLOAT32)};
   float results[4];
 
   /* CPU -> forward */

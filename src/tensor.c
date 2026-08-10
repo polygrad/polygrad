@@ -30,7 +30,7 @@
 static const PolyDType *_dtype_table_ffi[] = {
     &POLY_VOID,    &POLY_BOOL,     &POLY_INT8,    &POLY_UINT8,   &POLY_INT16,
     &POLY_UINT16,  &POLY_INT32,    &POLY_UINT32,  &POLY_INT64,   &POLY_UINT64,
-    &POLY_FLOAT16, &POLY_BFLOAT16, &POLY_FLOAT32, &POLY_FLOAT64,
+    &POLY_FLOAT16, &POLY_BFLOAT16, &POLY_FLOAT32, &POLY_FLOAT64, &POLY_INDEX,
 };
 #define N_DTYPE_FFI ((int)(sizeof(_dtype_table_ffi) / sizeof(_dtype_table_ffi[0])))
 
@@ -2431,9 +2431,10 @@ PolyUOp *poly_logical_not(PolyCtx *ctx, PolyUOp *x) {
  * for tinygrad parity and to let Phase D's reduce_collapse Rule 4 match
  * polygrad's tril/triu masks. */
 PolyUOp *poly_eq(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
-  int64_t s[POLY_MAX_DIMS];
-  int nd;
-  if (!poly_broadcast_pair(ctx, &a, &b, s, &nd)) return NULL;
+  /* Pinned Tensor.eq reaches _binop/_broadcasted, which broadcasts and then
+   * promotes both operands with least_upper_dtype before CMPNE
+   * (mixin/elementwise.py:324-325, mixin/__init__.py:439-449). */
+  if (!poly_broadcasted_pair(ctx, &a, &b)) return NULL;
   PolyUOp *ne = poly_alu2(ctx, POLY_OP_CMPNE, a, b);
   return poly_logical_not(ctx, ne);
 }
@@ -6906,10 +6907,17 @@ PolyTensor *poly_tensor_scatter_reduce(
 
 PolyUOp *poly_gather(PolyCtx *ctx, PolyUOp *table, PolyUOp *indices) {
   if (!ctx || !table || !indices) return NULL;
+  /* Pinned tinygrad mixin/__init__.py:_one_hot_along_dim rejects non-integer
+   * index tensors before constructing the one-hot gather graph. Do not rely on
+   * post-index lowering to legalize float-derived addresses. */
+  if (indices->dtype.is_ptr || !poly_dtype_is_int(indices->dtype)) return NULL;
   int64_t table_shape[POLY_MAX_DIMS], idx_shape[POLY_MAX_DIMS];
   int table_ndim = uop_shape(ctx, table, table_shape);
   int idx_ndim = uop_shape(ctx, indices, idx_shape);
-  if (table_ndim != 2 || idx_ndim < 1) return NULL;
+  /* The one-hot expression appends two temporary axes before reducing one.
+   * Accept scalar indices like pinned Embedding, but reject unsupported high
+   * ranks before writing either fixed-size temporary shape. */
+  if (table_ndim != 2 || idx_ndim < 0 || idx_ndim > POLY_MAX_DIMS - 2) return NULL;
 
   int64_t V = table_shape[0];
   int64_t D = table_shape[1];

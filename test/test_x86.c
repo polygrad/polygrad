@@ -1931,7 +1931,7 @@ TEST_BACKEND(x86, schedule_runtime_tabm_forward_preserves_callee_saved_stack_arg
   ASSERT_INT_EQ(poly_instance_set_device(inst, POLY_DEVICE_X86), 0);
 
   float x[2] = {1.0f, 2.0f};
-  PolyIOBinding io = {.name = "x", .data = x};
+  PolyIOBinding io = POLY_IO_BINDING_ARRAY("x", x, POLY_FLOAT32);
   ASSERT_INT_EQ(poly_instance_forward(inst, &io, 1), 0);
 
   int64_t n = 0;

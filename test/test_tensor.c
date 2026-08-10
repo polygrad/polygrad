@@ -3333,9 +3333,84 @@ TEST(shape_uop, parity_cross_entropy) {
 TEST(shape_uop, parity_gather) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *table = make_buf(ctx, (int64_t[]){5, 4}, 2);
-  PolyUOp *idx = poly_reshape(ctx, poly_buffer_f32(ctx, 3), (int64_t[]){3}, 1);
+  PolyUOp *idx =
+      poly_reshape(ctx, poly_buffer(ctx, POLY_INT32, 3), (int64_t[]){3}, 1);
   PolyUOp *g = poly_gather(ctx, table, idx);
   ASSERT_INT_EQ(check_shape_parity(ctx, g), 0);
+  PolyUOp *float_idx =
+      poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 3), (int64_t[]){3}, 1);
+  ASSERT_TRUE(poly_gather(ctx, table, float_idx) == NULL);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(shape_uop, gather_integer_promotion_scalar_and_rank_match_tinygrad) {
+  /* Pinned nn/__init__.py:371-392 and mixin/__init__.py:439-449 accept scalar
+   * integer indices and promote the index/class-range pair before CMPNE. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *table =
+      poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 12), (int64_t[]){4, 3}, 2);
+  ASSERT_NOT_NULL(table);
+
+  struct {
+    PolyDType input;
+    PolyDType expected_cmp;
+  } cases[] = {
+      {POLY_INT8, POLY_INT32},   {POLY_UINT8, POLY_INT32},
+      {POLY_INT32, POLY_INT32}, {POLY_INT64, POLY_INT64},
+      {POLY_UINT64, POLY_UINT64}, {POLY_INDEX, POLY_INT32},
+  };
+  for (int ci = 0; ci < (int)(sizeof(cases) / sizeof(cases[0])); ci++) {
+    PolyUOp *idx = poly_reshape(
+        ctx, poly_buffer(ctx, cases[ci].input, 2), (int64_t[]){2}, 1
+    );
+    PolyUOp *g = poly_gather(ctx, table, idx);
+    ASSERT_NOT_NULL(g);
+    PolyUOp *value_cmp = NULL;
+    int n_topo = 0;
+    PolyUOp **topo = poly_toposort(ctx, g, &n_topo);
+    for (int i = 0; i < n_topo; i++) {
+      PolyUOp *u = topo[i];
+      if (u && u->op == POLY_OP_CMPNE && u->n_src == 2 &&
+          !poly_dtype_is_bool(u->src[0]->dtype)) {
+        value_cmp = u;
+        break;
+      }
+    }
+    ASSERT_NOT_NULL(value_cmp);
+    ASSERT_TRUE(poly_dtype_eq(value_cmp->src[0]->dtype, cases[ci].expected_cmp));
+    ASSERT_TRUE(poly_dtype_eq(value_cmp->src[1]->dtype, cases[ci].expected_cmp));
+  }
+
+  PolyUOp *scalar = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(2));
+  PolyUOp *scalar_gather = poly_gather(ctx, table, scalar);
+  ASSERT_NOT_NULL(scalar_gather);
+  PolyShape scalar_shape = poly_uop_max_shape(ctx, scalar_gather);
+  ASSERT_INT_EQ(scalar_shape.ndim, 1);
+  ASSERT_INT_EQ(scalar_shape.dims[0], 3);
+  free(scalar_shape.dims);
+
+  PolyDType int_ptr = poly_dtype_ptr(POLY_INT32, 2, POLY_ADDR_GLOBAL);
+  PolyUOp *ptr_indices = poly_uop0(ctx, POLY_OP_PARAM, int_ptr, poly_arg_int(0));
+  ASSERT_TRUE(poly_gather(ctx, table, ptr_indices) == NULL);
+
+  int64_t ones[POLY_MAX_DIMS];
+  for (int i = 0; i < POLY_MAX_DIMS; i++) ones[i] = 1;
+  PolyUOp *rank14 =
+      poly_reshape(ctx, poly_buffer(ctx, POLY_INT32, 1), ones, POLY_MAX_DIMS - 2);
+  PolyUOp *rank15 =
+      poly_reshape(ctx, poly_buffer(ctx, POLY_INT32, 1), ones, POLY_MAX_DIMS - 1);
+  PolyUOp *rank16 = poly_reshape(ctx, poly_buffer(ctx, POLY_INT32, 1), ones, POLY_MAX_DIMS);
+  ASSERT_NOT_NULL(rank14);
+  ASSERT_NOT_NULL(rank15);
+  ASSERT_NOT_NULL(rank16);
+  PolyUOp *rank14_gather = poly_gather(ctx, table, rank14);
+  ASSERT_NOT_NULL(rank14_gather);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, rank14_gather), POLY_MAX_DIMS - 1);
+  ASSERT_TRUE(poly_gather(ctx, table, rank15) == NULL);
+  ASSERT_TRUE(poly_gather(ctx, table, rank16) == NULL);
+
   poly_ctx_destroy(ctx);
   PASS();
 }

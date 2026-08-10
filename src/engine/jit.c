@@ -1,6 +1,7 @@
 /* jit.c -- tinygrad-style JIT capture/replay for raw Tensor realizes. */
 
 #include "engine/jit.h"
+#include "codegen.h"
 #include "ctx.h"
 #include "device.h"
 #include "pat.h"
@@ -27,6 +28,7 @@ struct PolyJit {
   bool prune;
   bool capturing;
   bool captured;
+  PolyUOp *graphed_linear;
 };
 
 static int poly_jit_run_captured_linear(
@@ -62,6 +64,7 @@ static void poly_jit_clear(PolyJit *jit) {
   jit->n_recorded_schedules = 0;
   jit->n_inputs = 0;
   jit->captured = false;
+  jit->graphed_linear = NULL;
 }
 
 static PolyUOp *poly_jit_tensor_buffer(PolyTensor *tensor) {
@@ -379,6 +382,149 @@ fail:
   return -1;
 }
 
+static int poly_jit_append_unique_param(
+    PolyUOp ***items,
+    int *n_items,
+    int *cap_items,
+    PolyUOp *param
+) {
+  if (!items || !n_items || !cap_items || !param) return -1;
+  for (int i = 0; i < *n_items; i++)
+    if ((*items)[i] == param) return 0;
+  if (*n_items >= *cap_items) {
+    int new_cap = *cap_items ? *cap_items * 2 : 8;
+    PolyUOp **grown = realloc(*items, (size_t)new_cap * sizeof(*grown));
+    if (!grown) return -1;
+    *items = grown;
+    *cap_items = new_cap;
+  }
+  (*items)[(*n_items)++] = param;
+  return 0;
+}
+
+/* Pinned create_graph_call(batch), tinygrad/engine/jit.py:25-29. The graph
+ * body retains the exact compiled PROGRAM CALL occurrences; the outer CALL
+ * exposes only deduplicated JIT PARAMs reachable from their arguments. */
+static PolyUOp *poly_jit_create_graph_call(PolyCtx *ctx, PolyUOp **calls, int n_calls) {
+  if (!ctx || !calls || n_calls <= 1) return NULL;
+  PolyUOp **params = NULL;
+  int n_params = 0, cap_params = 0;
+  for (int k = 0; k < n_calls; k++) {
+    PolyUOp *call = calls[k];
+    if (!call || call->op != POLY_OP_CALL || call->n_src < 1 || !call->src[0] ||
+        call->src[0]->op != POLY_OP_PROGRAM)
+      goto fail;
+    for (int a = 1; a < call->n_src; a++) {
+      int n_topo = 0;
+      PolyUOp **topo = poly_toposort_alloc(ctx, call->src[a], &n_topo);
+      if (!topo && n_topo > 0) goto fail;
+      for (int i = 0; i < n_topo; i++) {
+        if (!topo[i] || topo[i]->op != POLY_OP_PARAM || topo[i]->arg.kind != POLY_ARG_PARAM ||
+            !topo[i]->arg.param)
+          continue;
+        if (poly_jit_append_unique_param(&params, &n_params, &cap_params, topo[i]) != 0) {
+          poly_toposort_free(topo);
+          goto fail;
+        }
+      }
+      poly_toposort_free(topo);
+    }
+  }
+
+  PolyUOp *nested = poly_uop(ctx, POLY_OP_LINEAR, POLY_VOID, calls, n_calls, poly_arg_none());
+  if (!nested) goto fail;
+  PolyUOp *cf_src[1] = {nested};
+  PolyUOp *cf = poly_uop(
+      ctx, POLY_OP_CUSTOM_FUNCTION, POLY_VOID, cf_src, 1, poly_arg_str("graph")
+  );
+  if (!cf) goto fail;
+  PolyUOp **call_src = malloc((size_t)(n_params + 1) * sizeof(*call_src));
+  if (!call_src) goto fail;
+  call_src[0] = cf;
+  for (int i = 0; i < n_params; i++)
+    call_src[i + 1] = params[i];
+  PolyUOp *out = poly_uop(
+      ctx, POLY_OP_CALL, POLY_VOID, call_src, n_params + 1, poly_arg_none()
+  );
+  free(call_src);
+  free(params);
+  return out;
+
+fail:
+  free(params);
+  return NULL;
+}
+
+static int poly_jit_flush_graph_batch(
+    PolyCtx *ctx,
+    PolyUOp **calls,
+    int n_calls,
+    PolyUOp **out,
+    int *n_out,
+    int *max_batch_size
+) {
+  if (!ctx || !calls || n_calls <= 0 || !out || !n_out || !max_batch_size) return -1;
+  if (n_calls == 1) {
+    out[(*n_out)++] = calls[0];
+    return 0;
+  }
+  PolyUOp *graph_call = poly_jit_create_graph_call(ctx, calls, n_calls);
+  if (!graph_call) return -1;
+  out[(*n_out)++] = graph_call;
+  if (*max_batch_size > 0 && *max_batch_size <= INT_MAX / 2) *max_batch_size *= 2;
+  return 0;
+}
+
+/* Direct port of pinned graph_split_rewrite's default PROGRAM batching for
+ * CUDA (tinygrad/engine/jit.py:31-60). COPY batching stays disabled until the
+ * required D2D COPY probe establishes its runtime dependency/update boundary. */
+static PolyUOp *poly_jit_graph_split_rewrite(PolyCtx *ctx, PolyUOp *linear, PolyDevice device) {
+  if (!ctx || !linear || linear->op != POLY_OP_LINEAR) return NULL;
+#ifdef POLY_HAS_CUDA
+  if (device != POLY_DEVICE_CUDA || !poly_cuda_graph_available()) return linear;
+#else
+  (void)device;
+  return linear;
+#endif
+
+  PolyUOp **out = calloc((size_t)(linear->n_src > 0 ? linear->n_src : 1), sizeof(*out));
+  if (!out) return NULL;
+  int n_out = 0, batch_start = 0, n_batch = 0;
+  int max_batch_size = 32; /* pinned JIT_BATCH_SIZE default, helpers.py:241 */
+  for (int i = 0; i < linear->n_src; i++) {
+    PolyUOp *call = linear->src[i];
+    bool can_graph = call && call->op == POLY_OP_CALL && call->n_src >= 1 && call->src[0] &&
+                     call->src[0]->op == POLY_OP_PROGRAM;
+    bool can_extend = can_graph && (max_batch_size == 0 || n_batch < max_batch_size);
+    if (!can_extend && n_batch > 0) {
+      if (poly_jit_flush_graph_batch(
+              ctx, &linear->src[batch_start], n_batch, out, &n_out, &max_batch_size
+          ) != 0)
+        goto fail;
+      n_batch = 0;
+    }
+    if (can_graph) {
+      if (n_batch == 0) batch_start = i;
+      n_batch++;
+    } else {
+      out[n_out++] = call;
+    }
+  }
+  if (n_batch > 0 &&
+      poly_jit_flush_graph_batch(
+          ctx, &linear->src[batch_start], n_batch, out, &n_out, &max_batch_size
+      ) != 0)
+    goto fail;
+
+  PolyUOp *result = poly_uop(ctx, POLY_OP_LINEAR, POLY_VOID, out, n_out, linear->arg);
+  free(out);
+  return result;
+
+fail:
+  free(out);
+  return NULL;
+}
+
 static int poly_jit_build_captured_linear(PolyJit *jit) {
   if (!jit || !jit->ctx || jit->n_schedules <= 0) return -1;
   PolyUOp **external = NULL;
@@ -530,9 +676,10 @@ int poly_jit_schedule_count(PolyJit *jit) {
 }
 
 PolyUOp *poly_jit_captured_linear(PolyJit *jit) {
-  return (jit && jit->captured_linear && jit->captured_linear->template)
-             ? jit->captured_linear->template->linear
-             : NULL;
+  if (!jit) return NULL;
+  if (jit->graphed_linear) return jit->graphed_linear;
+  return (jit->captured_linear && jit->captured_linear->template)
+             ? jit->captured_linear->template->linear : NULL;
 }
 
 int poly_jit_record_schedule(PolyJit *jit, PolySchedule *sched) {
@@ -562,6 +709,17 @@ static int poly_jit_run_captured_linear(
     jit->compiled_linear = poly_lower_schedule(jit->ctx, jit->captured_linear, device);
     jit->compiled_device = jit->compiled_linear ? device : POLY_DEVICE_AUTO;
     if (!jit->compiled_linear) return -1;
+    jit->graphed_linear = poly_jit_graph_split_rewrite(
+        jit->ctx, jit->captured_linear->template->linear, device
+    );
+    if (!jit->graphed_linear ||
+        poly_compiled_schedule_set_jit_graph(jit->compiled_linear, jit->graphed_linear) != 0) {
+      poly_compiled_schedule_free(jit->compiled_linear);
+      jit->compiled_linear = NULL;
+      jit->compiled_device = POLY_DEVICE_AUTO;
+      jit->graphed_linear = NULL;
+      return -1;
+    }
   }
   return poly_run_compiled_schedule_with_input_uops(
       jit->compiled_linear, current_inputs, jit->n_inputs, var_bindings, n_var_bindings

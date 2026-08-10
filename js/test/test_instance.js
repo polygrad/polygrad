@@ -41,6 +41,29 @@ function testFilterFor(pg) {
   return ''
 }
 
+async function checkTypedIntegerInput(pg, Instance) {
+  const x = pg.Tensor.empty([3], { dtype: 'int32' })
+  const outTensor = x.cast('float32')
+  const inst = await Instance.fromTensors({
+    inputs: { typed_x: x },
+    outputs: { typed_out: outTensor }
+  })
+  try {
+    const output = await inst.forward({ typed_x: new Int32Array([0, 1, 2]) })
+    assertClose(output.typed_out, [0, 1, 2], 0)
+
+    let rejected = false
+    try {
+      await inst.forward({ typed_x: new Float32Array([0, 1, 2]) })
+    } catch (e) {
+      rejected = /forward failed/.test(String(e && e.message))
+    }
+    assert(rejected, 'float32 bytes must not bind to an int32 Instance input')
+  } finally {
+    inst.dispose()
+  }
+}
+
 async function runInstanceTests(pg) {
   const Instance = pg.Instance
   const { MLP, TabM, NAM } = pg.models
@@ -67,6 +90,10 @@ async function runInstanceTests(pg) {
   }
 
   console.log('\n== Instance ==')
+
+  await test('typed integer input preserves bytes and rejects float binding', async () => {
+    await checkTypedIntegerInput(pg, Instance)
+  })
 
   await test('model-family constructors are not Instance methods', async () => {
     assert(typeof Instance.mlp === 'undefined', 'Instance.mlp should not exist')
@@ -474,6 +501,10 @@ async function runInstanceSmokeTests(pg) {
   }
 
   console.log('\n== Instance ==')
+
+  await test('typed integer input preserves bytes and rejects float binding', async () => {
+    await checkTypedIntegerInput(pg, Instance)
+  })
 
   await test('webgpu mlp forward smoke', async () => {
     const inst = MLP({

@@ -38,7 +38,7 @@ int main(void) {
   poly_instance_set_optimizer(inst, POLY_OPTIM_SGD, 0.1f, 0.0f, 0.0f, 0.0f, 0.0f);
   float x_data[] = {1.0f};
   float y_data[] = {3.0f};
-  PolyIOBinding io[] = {{"x", x_data}, {"y", y_data}};
+  PolyIOBinding io[] = {POLY_IO_BINDING_ARRAY("x", x_data, POLY_FLOAT32), POLY_IO_BINDING_ARRAY("y", y_data, POLY_FLOAT32)};
   float first = 0.0f, last = 0.0f;
   for (int step = 0; step < 8; step++) {
     poly_instance_train_step(inst, io, 2, &last);

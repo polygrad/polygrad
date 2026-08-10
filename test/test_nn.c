@@ -138,7 +138,7 @@ TEST(nn, nn_linear_e2e) {
 
   /* Execute: x = [2, 3], expect [2, 3, 5] */
   float x_data[] = {2.0f, 3.0f};
-  PolyIOBinding io[] = {{"x", x_data}};
+  PolyIOBinding io[] = {POLY_IO_BINDING_ARRAY("x", x_data, POLY_FLOAT32)};
   ASSERT_INT_EQ(poly_instance_call(inst, "forward", io, 1), 0);
 
   float *od = poly_instance_buf_data_named(inst, "output", NULL);
@@ -242,7 +242,7 @@ TEST(nn, embedding_e2e) {
   PolyUOp *table = poly_reshape(ctx, table_buf, table_shape, 2);
 
   /* indices: (2,) tokens */
-  PolyUOp *idx_buf = poly_buffer_f32(ctx, 2);
+  PolyUOp *idx_buf = poly_buffer(ctx, POLY_INT32, 2);
   int64_t idx_shape[] = {2};
   PolyUOp *indices = poly_reshape(ctx, idx_buf, idx_shape, 1);
 
@@ -254,7 +254,7 @@ TEST(nn, embedding_e2e) {
   PolyUOp *sink = poly_sink1(ctx, store);
 
   float table_data[] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f, 11.0f, 12.0f};
-  float idx_data[] = {0.0f, 2.0f};
+  int32_t idx_data[] = {0, 2};
   float out_data[6] = {0};
 
   /* poly_gather internally creates an arange const buffer --

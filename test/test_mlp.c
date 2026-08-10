@@ -190,7 +190,7 @@ TEST(mlp, forward_produces_output) {
   ASSERT_NOT_NULL(inst);
 
   float x[] = {1.0f, 2.0f};
-  PolyIOBinding inputs[] = {{"x", x}};
+  PolyIOBinding inputs[] = {POLY_IO_BINDING_ARRAY("x", x, POLY_FLOAT32)};
 
   int ret = poly_instance_forward(inst, inputs, 1);
   ASSERT_INT_EQ(ret, 0);
@@ -222,7 +222,7 @@ TEST(mlp, forward_deterministic) {
   ASSERT_NOT_NULL(inst);
 
   float x[] = {1.0f, 2.0f};
-  PolyIOBinding inputs[] = {{"x", x}};
+  PolyIOBinding inputs[] = {POLY_IO_BINDING_ARRAY("x", x, POLY_FLOAT32)};
 
   poly_instance_forward(inst, inputs, 1);
 
@@ -269,8 +269,8 @@ TEST(mlp, forward_and_train_replay_stats_plateau) {
 
   float x[] = {1.0f, 2.0f};
   float y[] = {5.0f};
-  PolyIOBinding forward_io[] = {{"x", x}};
-  PolyIOBinding train_io[] = {{"x", x}, {"y", y}};
+  PolyIOBinding forward_io[] = {POLY_IO_BINDING_ARRAY("x", x, POLY_FLOAT32)};
+  PolyIOBinding train_io[] = {POLY_IO_BINDING_ARRAY("x", x, POLY_FLOAT32), POLY_IO_BINDING_ARRAY("y", y, POLY_FLOAT32)};
 
   ASSERT_INT_EQ(poly_instance_forward(inst, forward_io, 1), 0);
   PolyCtxStats forward_first = {0};
@@ -364,8 +364,8 @@ TEST(mlp, train_single_layer) {
   float x[] = {1.0f, 2.0f};
   float y[] = {5.0f};
   PolyIOBinding io[] = {
-      {"x", x},
-      {"y", y},
+      POLY_IO_BINDING_ARRAY("x", x, POLY_FLOAT32),
+      POLY_IO_BINDING_ARRAY("y", y, POLY_FLOAT32),
   };
 
   float first_loss = -1.0f;
@@ -403,8 +403,8 @@ TEST(mlp, train_multi_layer) {
   float x[] = {1.0f};
   float y[] = {2.0f};
   PolyIOBinding io[] = {
-      {"x", x},
-      {"y", y},
+      POLY_IO_BINDING_ARRAY("x", x, POLY_FLOAT32),
+      POLY_IO_BINDING_ARRAY("y", y, POLY_FLOAT32),
   };
 
   float first_loss = -1.0f;
@@ -439,8 +439,8 @@ TEST(mlp, train_cross_entropy) {
   float x[] = {1.0f, 0.0f};
   float y[] = {0.0f, 1.0f, 0.0f};
   PolyIOBinding io[] = {
-      {"x", x},
-      {"y", y},
+      POLY_IO_BINDING_ARRAY("x", x, POLY_FLOAT32),
+      POLY_IO_BINDING_ARRAY("y", y, POLY_FLOAT32),
   };
 
   float first_loss = -1.0f;
@@ -471,7 +471,7 @@ TEST(mlp, train_batch2_mse) {
 
   float x[] = {0.5f, 0.5f, 0.5f, 0.5f};
   float y[] = {0.3f, 0.3f, 0.3f, 0.3f};
-  PolyIOBinding io[] = {{"x", x}, {"y", y}};
+  PolyIOBinding io[] = {POLY_IO_BINDING_ARRAY("x", x, POLY_FLOAT32), POLY_IO_BINDING_ARRAY("y", y, POLY_FLOAT32)};
 
   float first_loss = -1.0f, prev_loss = 1e10f;
   for (int step = 0; step < 50; step++) {
@@ -501,7 +501,7 @@ TEST(mlp, train_batch4_cross_entropy) {
   memset(y, 0, sizeof(y));
   for (int i = 0; i < 4; i++)
     y[i * 3 + (i % 3)] = 1.0f;
-  PolyIOBinding io[] = {{"x", x}, {"y", y}};
+  PolyIOBinding io[] = {POLY_IO_BINDING_ARRAY("x", x, POLY_FLOAT32), POLY_IO_BINDING_ARRAY("y", y, POLY_FLOAT32)};
 
   float first_loss = -1.0f, prev_loss = 1e10f;
   for (int step = 0; step < 30; step++) {

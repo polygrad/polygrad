@@ -32,7 +32,7 @@ int main(void) {
   PolyInstance *inst = poly_instance_from_sinks(ctx, names, sinks, 1);
 
   float x_data[] = {10.0f, 10.0f, 10.0f, 10.0f};
-  PolyIOBinding io[] = {{"x", x_data}};
+  PolyIOBinding io[] = {POLY_IO_BINDING_ARRAY("x", x_data, POLY_FLOAT32)};
   if (poly_instance_forward(inst, io, 1) != 0) return 1;
 
   int64_t numel = 0;

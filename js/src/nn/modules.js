@@ -7,13 +7,15 @@ function createBoundModules(runtime) {
     constructor(inFeatures, outFeatures, opts = {}) {
       this.inFeatures = Number(inFeatures)
       this.outFeatures = Number(outFeatures)
-      const bound = Math.sqrt(6.0 / Math.max(1, this.inFeatures))
-      const w = new Float32Array(this.outFeatures * this.inFeatures)
-      for (let i = 0; i < w.length; i++) w[i] = (Math.random() * 2.0 - 1.0) * bound
-      this.weight = new Tensor(w, { requiresGrad: true }).reshape(this.outFeatures, this.inFeatures)
+      const bound = 1.0 / Math.sqrt(this.inFeatures)
+      this.weight = Tensor.uniform(this.outFeatures, this.inFeatures, {
+        low: -bound, high: bound
+      })
+      this.weight.requiresGrad = true
       this.bias = opts.bias === false
         ? null
-        : new Tensor(new Float32Array(this.outFeatures), { requiresGrad: true })
+        : Tensor.uniform(this.outFeatures, { low: -bound, high: bound })
+      if (this.bias) this.bias.requiresGrad = true
     }
 
     call(x) {
@@ -53,12 +55,14 @@ function createBoundModules(runtime) {
           : (typeof opts.padding === 'number' ? [opts.padding, opts.padding] : Array.from(opts.padding))
       }
       const bound = 1.0 / Math.sqrt(Math.max(1, this.inChannels * k[0] * k[1]))
-      this.weight = Tensor.rand(this.outChannels, Math.floor(this.inChannels / this.groups), k[0], k[1])
-        .mul(2.0 * bound).sub(bound)
+      this.weight = Tensor.uniform(
+        this.outChannels, Math.floor(this.inChannels / this.groups), k[0], k[1],
+        { low: -bound, high: bound }
+      )
       this.weight.requiresGrad = true
       this.bias = opts.bias === false
         ? null
-        : Tensor.rand(this.outChannels).mul(2.0 * bound).sub(bound)
+        : Tensor.uniform(this.outChannels, { low: -bound, high: bound })
       if (this.bias) this.bias.requiresGrad = true
     }
 

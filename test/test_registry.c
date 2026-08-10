@@ -430,7 +430,7 @@ TEST(registry, instance_from_ctx_execute) {
 
   /* Execute forward */
   float x_data[] = {2.0f, 3.0f, 4.0f, 5.0f};
-  PolyIOBinding io[] = {{"x", x_data}};
+  PolyIOBinding io[] = {POLY_IO_BINDING_ARRAY("x", x_data, POLY_FLOAT32)};
   int rc = poly_instance_call(inst, "forward", io, 1);
   ASSERT_INT_EQ(rc, 0);
 
@@ -591,8 +591,8 @@ TEST(registry, instance_from_ctx_parity_with_ir) {
     wb_d[i] = (float)(i + 1);
   }
 
-  PolyIOBinding io_a[] = {{"x", x_in}};
-  PolyIOBinding io_b[] = {{"x", x_in}};
+  PolyIOBinding io_a[] = {POLY_IO_BINDING_ARRAY("x", x_in, POLY_FLOAT32)};
+  PolyIOBinding io_b[] = {POLY_IO_BINDING_ARRAY("x", x_in, POLY_FLOAT32)};
   ASSERT_INT_EQ(poly_instance_call(inst_a, "forward", io_a, 1), 0);
   ASSERT_INT_EQ(poly_instance_call(inst_b, "forward", io_b, 1), 0);
 

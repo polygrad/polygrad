@@ -349,7 +349,7 @@ def test_random_crop_indices_remain_consistent_after_readback():
 
 
 def test_python_loader_checks_current_abi_before_use():
-    assert _ffi.get_lib().poly_abi_version() == _ffi.POLYGRAD_ABI_VERSION == 46
+    assert _ffi.get_lib().poly_abi_version() == _ffi.POLYGRAD_ABI_VERSION == 47
 
 
 @pytest.mark.parametrize('relative', [
@@ -377,7 +377,7 @@ def test_python_loader_rejects_mismatched_abi_before_declaring_signatures(monkey
     monkeypatch.setattr(_ffi, '_lib', None)
     monkeypatch.setattr(_ffi, '_find_lib', lambda: 'fake-libpolygrad.so')
     monkeypatch.setattr(_ffi.ctypes, 'CDLL', lambda _path: FakeLibrary())
-    with pytest.raises(RuntimeError, match='expected version 46, got 20'):
+    with pytest.raises(RuntimeError, match='expected version 47, got 20'):
         _ffi.get_lib()
     assert _ffi._lib is None
 

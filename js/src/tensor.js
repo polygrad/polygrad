@@ -77,6 +77,44 @@ function flattenArray(arr, dtype) {
   return { data: new ArrayType(flat), shape }
 }
 
+// Pinned Tensor.__init__ infers list/tuple inputs as bool, default_int, or
+// default_float from their flattened values (tensor.py:96-100).
+function inferArrayDtype(arr) {
+  let sawValue = false
+  let allBool = true
+  let allInt = true
+  const visit = (value) => {
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item)
+      return
+    }
+    if (typeof value !== 'boolean' && typeof value !== 'number') {
+      throw new Error(`Cannot infer dtype from value of type ${typeof value}`)
+    }
+    sawValue = true
+    allBool = allBool && typeof value === 'boolean'
+    allInt = allInt && (typeof value === 'boolean' || Number.isInteger(value))
+  }
+  visit(arr)
+  if (!sawValue) return 'float32'
+  if (allBool) return 'bool'
+  return allInt ? 'int32' : 'float32'
+}
+
+function typedArrayDtype(data) {
+  if (data instanceof Int8Array) return 'int8'
+  if (data instanceof Uint8Array || data instanceof Uint8ClampedArray) return 'uint8'
+  if (data instanceof Int16Array) return 'int16'
+  if (data instanceof Uint16Array) return 'uint16'
+  if (data instanceof Int32Array) return 'int32'
+  if (data instanceof Uint32Array) return 'uint32'
+  if (data instanceof BigInt64Array) return 'int64'
+  if (data instanceof BigUint64Array) return 'uint64'
+  if (data instanceof Float32Array) return 'float32'
+  if (data instanceof Float64Array) return 'float64'
+  return null
+}
+
 function arraysEqual(a, b) {
   if (a.length !== b.length) return false
   for (let i = 0; i < a.length; i++) {
@@ -434,12 +472,8 @@ function createBoundTensorClass(runtime) {
           currentUop = new UOp(this._ctx, core.ffi, physical)
           this._dtype = dt
           this._data = null
-        } else if (data instanceof Float64Array && (!opts.dtype || opts.dtype === 'float64')) {
-          dt = 'float64'; flat = new Float64Array(data); shape = [data.length]
-        } else if (data instanceof Float32Array && (!opts.dtype || opts.dtype === 'float32')) {
-          dt = 'float32'; flat = new Float32Array(data); shape = [data.length]
         } else if (ArrayBuffer.isView(data) && !(data instanceof DataView)) {
-          dt = (opts && opts.dtype) || 'float32'
+          dt = (opts && opts.dtype) || typedArrayDtype(data) || 'float32'
           // Pinned UOp._frompy stages numeric BF16 values as float32 bytes and
           // then casts the Tensor graph (uop/ops.py:752-764). Uint16Array here
           // would truncate the numeric values before the graph-level cast.
@@ -447,7 +481,7 @@ function createBoundTensorClass(runtime) {
           flat = new ArrayType(data)
           shape = [data.length]
         } else {
-          dt = (opts && opts.dtype) || 'float32'
+          dt = (opts && opts.dtype) || inferArrayDtype(data)
           const r = flattenArray(data, dt === 'bfloat16' ? 'float32' : dt)
           flat = r.data; shape = r.shape
         }
@@ -1438,20 +1472,26 @@ function createBoundTensorClass(runtime) {
 
     exp2() {
       const { ffi, ops } = this._rt._core
-      const core = ffi.poly_tensor_alu1(this._ctx, ops.EXP2, this._tensor)
-      return this._makeResultFromCore(core, [this])
+      // Pinned _ensure_float().alu(EXP2) (mixin/elementwise.py:517-527).
+      const base = isFloatDtype(this._dtype) ? this : this.cast('float32')
+      const core = ffi.poly_tensor_alu1(base._ctx, ops.EXP2, base._tensor)
+      return base._makeResultFromCore(core, [base])
     }
 
     log2() {
       const { ffi, ops } = this._rt._core
-      const core = ffi.poly_tensor_alu1(this._ctx, ops.LOG2, this._tensor)
-      return this._makeResultFromCore(core, [this])
+      // Pinned _ensure_float().alu(LOG2) (mixin/elementwise.py:505-515).
+      const base = isFloatDtype(this._dtype) ? this : this.cast('float32')
+      const core = ffi.poly_tensor_alu1(base._ctx, ops.LOG2, base._tensor)
+      return base._makeResultFromCore(core, [base])
     }
 
     sqrt() {
       const { ffi, ops } = this._rt._core
-      const core = ffi.poly_tensor_alu1(this._ctx, ops.SQRT, this._tensor)
-      return this._makeResultFromCore(core, [this])
+      // Pinned _ensure_float().alu(SQRT) (mixin/elementwise.py:460-468).
+      const base = isFloatDtype(this._dtype) ? this : this.cast('float32')
+      const core = ffi.poly_tensor_alu1(base._ctx, ops.SQRT, base._tensor)
+      return base._makeResultFromCore(core, [base])
     }
 
     reciprocal() {
@@ -2736,6 +2776,29 @@ function createBoundTensorClass(runtime) {
         _ctx: ctx, _uop: uop,
         _dtype: (opts && opts.dtype) || 'float32'
       })
+    }
+
+    static uniform(...args) {
+      let shape = args, opts = {}
+      if (args.length > 0 && typeof args[args.length - 1] === 'object'
+          && !Array.isArray(args[args.length - 1])) {
+        opts = { ...args[args.length - 1] }; shape = args.slice(0, -1)
+      }
+      if (shape.length === 1 && Array.isArray(shape[0])) shape = shape[0]
+      shape = shape.map(Number)
+      if (shape.some(dim => !Number.isInteger(dim) || dim < 0)) {
+        throw new Error(`invalid input shape=${JSON.stringify(shape)}`)
+      }
+      const low = opts.low == null ? 0.0 : Number(opts.low)
+      const high = opts.high == null ? 1.0 : Number(opts.high)
+      if (!(low < high)) {
+        throw new Error(`Tensor.uniform requires low < high, got low=${low}, high=${high}`)
+      }
+      const dtype = opts.dtype || 'float32'
+      const randOpts = { ...opts, dtype }
+      delete randOpts.low
+      delete randOpts.high
+      return Tensor.rand(...shape, randOpts).mul(high - low).cast(dtype).add(low)
     }
 
     static randint(...args) {

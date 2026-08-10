@@ -45,6 +45,12 @@ bool poly_apply_movement_op(
     PolyUOp **valid_out
 );
 
+/* Pinned tinygrad UOp.get_idx/get_valid projection for scheduler index
+ * coordinates. STACK is projected lane-wise; only
+ * WHERE(valid, index, Invalid) separates into an index and a validity guard. */
+PolyUOp *poly_index_get_idx(PolyCtx *ctx, PolyUOp *coord);
+PolyUOp *poly_index_get_valid(PolyCtx *ctx, PolyUOp *coord);
+
 /* Compute flat index from multi-dimensional ranges and shape strides.
  * Returns a UOp expression: ranges[0]*stride[0] + ranges[1]*stride[1] + ... */
 PolyUOp *poly_compute_flat_index(PolyCtx *ctx, PolyUOp **ranges, int ndim, PolyShape shape);

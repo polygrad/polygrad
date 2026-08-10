@@ -58,6 +58,19 @@ TEST(dtype, weakint_identity_uses_tinygrad_scalar_semantics) {
   PASS();
 }
 
+TEST(dtype, ffi_roundtrips_internal_weakint_without_renumbering_public_types) {
+  /* Pinned UOp.range exposes dtypes.weakint through ordinary UOp dtype
+   * reflection (uop/ops.py:563-565); keep existing FFI ids stable and append
+   * that internal dtype after float64. */
+  ASSERT_INT_EQ(poly_dtype_id_by_name("float64"), 13);
+  ASSERT_INT_EQ(poly_dtype_id_by_name("weakint"), 14);
+  ASSERT_INT_EQ(poly_dtype_count(), 15);
+  PolyDType dt = POLY_VOID;
+  ASSERT_TRUE(poly_dtype_by_id(14, &dt));
+  ASSERT_TRUE(poly_dtype_eq(dt, POLY_INDEX));
+  PASS();
+}
+
 TEST(dtype, itemsize) {
   ASSERT_INT_EQ(poly_dtype_itemsize(POLY_FLOAT32), 4);
   ASSERT_INT_EQ(poly_dtype_itemsize(POLY_FLOAT64), 8);
@@ -108,6 +121,24 @@ TEST(dtype, least_upper_matches_tinygrad_promotion_lattice) {
   ASSERT_TRUE(poly_dtype_eq(out, POLY_FLOAT16));
   ASSERT_TRUE(poly_dtype_least_upper(POLY_BOOL, POLY_INT8, &out));
   ASSERT_TRUE(poly_dtype_eq(out, POLY_INT8));
+  PASS();
+}
+
+TEST(dtype, can_lossless_cast_matches_tinygrad_supported_table) {
+  ASSERT_TRUE(poly_dtype_can_lossless_cast(POLY_INT32, POLY_INDEX));
+  ASSERT_TRUE(poly_dtype_can_lossless_cast(POLY_INT64, POLY_INDEX));
+  ASSERT_FALSE(poly_dtype_can_lossless_cast(POLY_FLOAT32, POLY_INDEX));
+  ASSERT_TRUE(poly_dtype_can_lossless_cast(POLY_BOOL, poly_dtype_vec(POLY_INT32, 2)));
+  ASSERT_TRUE(
+      poly_dtype_can_lossless_cast(POLY_BOOL, poly_dtype_ptr(POLY_INT32, 4, POLY_ADDR_GLOBAL))
+  );
+  ASSERT_TRUE(poly_dtype_can_lossless_cast(POLY_UINT16, POLY_INT32));
+  ASSERT_TRUE(poly_dtype_can_lossless_cast(POLY_INT8, POLY_FLOAT16));
+  ASSERT_FALSE(poly_dtype_can_lossless_cast(POLY_INT32, POLY_FLOAT32));
+  ASSERT_FALSE(poly_dtype_can_lossless_cast(POLY_INT32, POLY_INT16));
+  ASSERT_FALSE(
+      poly_dtype_can_lossless_cast(poly_dtype_vec(POLY_INT32, 2), poly_dtype_vec(POLY_INDEX, 2))
+  );
   PASS();
 }
 

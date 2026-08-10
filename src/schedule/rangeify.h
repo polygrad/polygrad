@@ -114,7 +114,6 @@ typedef struct {
 
   int64_t *intermediate_sizes;
   int *intermediate_itemsizes;
-  bool *intermediate_needs_zero;
   int n_intermediates;
   PolyUOp **intermediate_buf_uops;
 

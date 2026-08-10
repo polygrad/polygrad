@@ -1712,6 +1712,37 @@ TEST(wasm, matmul_specialized_modules_validate_and_use_load32_splat) {
   PASS();
 }
 
+TEST(wasm, f32_matmul_specializer_rejects_integer_graphs) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int64_t shape2[2] = {2, 2};
+  PolyUOp *a = poly_reshape(ctx, poly_buffer(ctx, POLY_INT32, 4), shape2, 2);
+  PolyUOp *b = poly_reshape(ctx, poly_buffer(ctx, POLY_INT32, 4), shape2, 2);
+  PolyUOp *out = poly_buffer(ctx, POLY_INT32, 4);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, poly_dot(ctx, a, b)));
+  PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(sched);
+  PolyUOp *body = poly_schedule_call_body(sched, 0);
+  ASSERT_NOT_NULL(body);
+
+  ASSERT_FALSE(poly_wasm_can_render_matmul(body));
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize_wasm(ctx, body, &n_lin);
+  ASSERT_NOT_NULL(lin);
+  int wasm_size = 0;
+  uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, true);
+  ASSERT_NOT_NULL(wasm);
+  ASSERT_TRUE(wasm_size > 8);
+  ASSERT_INT_EQ(wasm_write_module("temp/polygrad_test_matmul_i32_generic.wasm", wasm, wasm_size), 0);
+  ASSERT_INT_EQ(node_compile_wasm_module("temp/polygrad_test_matmul_i32_generic.wasm"), 0);
+
+  free(wasm);
+  free(lin);
+  poly_schedule_free(sched);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(wasm, matmul_ab_specializes_nonmultiple_k_tail) {
   PolyCtx *ctx = poly_ctx_new();
   int64_t m = 8, n = 16, k = 5;

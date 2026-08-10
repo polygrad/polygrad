@@ -256,6 +256,7 @@ bool poly_dtype_is_unsigned(PolyDType dt);
 bool poly_dtype_is_bool(PolyDType dt);
 PolyDType poly_dtype_scalar(PolyDType dt);
 bool poly_dtype_least_upper(PolyDType a, PolyDType b, PolyDType *out);
+bool poly_dtype_can_lossless_cast(PolyDType dt0, PolyDType dt1);
 PolyDType poly_dtype_vec(PolyDType dt, int sz);
 PolyDType poly_dtype_ptr(PolyDType dt, int64_t size, PolyAddrSpace addrspace);
 int poly_dtype_itemsize(PolyDType dt);
@@ -704,12 +705,7 @@ PolyTensor *poly_tensor_triangular_solve(
     int unit_diagonal
 );
 PolyTensor *poly_tensor_cholesky(PolyCtx *ctx, PolyTensor *src, int upper);
-PolyTensor *poly_tensor_cholesky_solve(
-    PolyCtx *ctx,
-    PolyTensor *chol,
-    PolyTensor *b,
-    int upper
-);
+PolyTensor *poly_tensor_cholesky_solve(PolyCtx *ctx, PolyTensor *chol, PolyTensor *b, int upper);
 PolyTensor *poly_tensor_solve(PolyCtx *ctx, PolyTensor *a, PolyTensor *b);
 PolyTensor *poly_tensor_lstsq(PolyCtx *ctx, PolyTensor *a, PolyTensor *b);
 int poly_tensor_sort(
@@ -737,12 +733,7 @@ PolyTensor *poly_tensor_bitcast_by_id(PolyCtx *ctx, PolyTensor *src, int dtype_i
 PolyTensor *poly_tensor_contiguous(PolyCtx *ctx, PolyTensor *src);
 PolyTensor *poly_tensor_reshape(PolyCtx *ctx, PolyTensor *src, int64_t *dims, int ndim);
 PolyTensor *poly_tensor_expand(PolyCtx *ctx, PolyTensor *src, int64_t *dims, int ndim);
-PolyTensor *poly_tensor_expand_uop(
-    PolyCtx *ctx,
-    PolyTensor *src,
-    PolyUOp **dims,
-    int ndim
-);
+PolyTensor *poly_tensor_expand_uop(PolyCtx *ctx, PolyTensor *src, PolyUOp **dims, int ndim);
 PolyTensor *poly_tensor_permute(PolyCtx *ctx, PolyTensor *src, int64_t *perm, int ndim);
 PolyTensor *poly_tensor_shrink(PolyCtx *ctx, PolyTensor *src, int64_t (*pairs)[2], int ndim);
 PolyTensor *poly_tensor_shrink_uop(

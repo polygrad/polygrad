@@ -638,6 +638,10 @@ class Tensor:
                 _ensure_frontend_buffer_release_registered(self._ctx)
                 if dtype is None and isinstance(data, np.ndarray):
                     dt = _dtype_name(data.dtype, default='float32')
+                elif dtype is None and isinstance(data, (list, tuple)):
+                    # Pinned Tensor.__init__ infers bool/default-int/default-float
+                    # from flattened list contents (tensor.py:96-100).
+                    dt = _dtype_name(dtypes.from_py(data), default='float32')
                 else:
                     dt = _dtype_name(dtype, default='float32')
                 import_dt = dt
@@ -1901,22 +1905,28 @@ class Tensor:
     # --- Unary math (C core composed ops) ---
 
     def exp2(self):
+        # Pinned _ensure_float().alu(EXP2) (mixin/elementwise.py:517-527).
+        base = self if dtypes.is_float(self.dtype) else self.cast(least_upper_float(to_dtype(self.dtype)))
         core = _ffi._lib.poly_tensor_alu1(
-            self._ctx, _ffi.OPS['EXP2'], self._tensor
+            base._ctx, _ffi.OPS['EXP2'], base._tensor
         )
-        return self._make_result_from_core(core, self.shape, [self])
+        return base._make_result_from_core(core, base.shape, [base])
 
     def log2(self):
+        # Pinned _ensure_float().alu(LOG2) (mixin/elementwise.py:505-515).
+        base = self if dtypes.is_float(self.dtype) else self.cast(least_upper_float(to_dtype(self.dtype)))
         core = _ffi._lib.poly_tensor_alu1(
-            self._ctx, _ffi.OPS['LOG2'], self._tensor
+            base._ctx, _ffi.OPS['LOG2'], base._tensor
         )
-        return self._make_result_from_core(core, self.shape, [self])
+        return base._make_result_from_core(core, base.shape, [base])
 
     def sqrt(self):
+        # Pinned _ensure_float().alu(SQRT) (mixin/elementwise.py:460-468).
+        base = self if dtypes.is_float(self.dtype) else self.cast(least_upper_float(to_dtype(self.dtype)))
         core = _ffi._lib.poly_tensor_alu1(
-            self._ctx, _ffi.OPS['SQRT'], self._tensor
+            base._ctx, _ffi.OPS['SQRT'], base._tensor
         )
-        return self._make_result_from_core(core, self.shape, [self])
+        return base._make_result_from_core(core, base.shape, [base])
 
     def reciprocal(self):
         base = self if dtypes.is_float(self.dtype) else self.cast(least_upper_float(to_dtype(self.dtype)))
@@ -3139,6 +3149,17 @@ class Tensor:
         if requires_grad:
             out.requires_grad = True
         return out
+
+    @staticmethod
+    def uniform(*shape, low=0.0, high=1.0, **kwargs):
+        """Create uniform values using pinned tinygrad's lazy rand/scale/add graph."""
+        shape = _shape_tuple(*shape)
+        if any(not isinstance(s, int) or s < 0 for s in shape):
+            raise ValueError(f'invalid input shape={shape}')
+        if low >= high:
+            raise ValueError(f'Tensor.uniform requires low < high, got low={low}, high={high}')
+        dtype = kwargs.get('dtype', dtypes.default_float)
+        return ((high - low) * Tensor.rand(*shape, **kwargs)).cast(dtype) + low
 
     @staticmethod
     def kaiming_uniform(*shape, **kwargs):

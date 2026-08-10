@@ -64,14 +64,11 @@ typedef struct {
   PolyUOp *buf_uop;
   PolyDevice device;
   bool is_intermediate;
-  bool needs_zero;
   int external_buf_idx;
   bool is_memory_arena;
   bool has_memory_parent;
   int memory_parent_slot;
   int64_t memory_offset;
-  bool has_zero_before_call;
-  int zero_before_call;
 } PolyScheduleBufSlot;
 
 typedef struct {
@@ -218,6 +215,8 @@ typedef struct {
   PolyScheduleRuntime *run;
 } PolySchedule;
 
+typedef struct PolyCompiledGraphBatch PolyCompiledGraphBatch;
+
 typedef struct {
   PolyCtx *ctx;
   PolyScheduleTemplate *template;
@@ -228,6 +227,15 @@ typedef struct {
    * schedule execution; the compiled plan owns the workspace and borrows the
    * schedule template. */
   PolyScheduleRuntime *run;
+
+  /* Pinned graph_split_rewrite projection for retained JIT execution. The
+   * schedule template remains the flat compiled LINEAR whose PROGRAM runners
+   * and buffer slots are owned above; graph batches group exact contiguous
+   * call occurrences and own only backend graph-exec state. */
+  PolyUOp *jit_graph_linear;
+  PolyCompiledGraphBatch *graph_batches;
+  int n_graph_batches;
+  int *call_to_graph_batch;
 } PolyCompiledSchedule;
 
 typedef struct {
@@ -371,6 +379,41 @@ int poly_schedule_call_run(
 
 /* Backend lowering from backend-neutral schedule to compiled runners. */
 PolyCompiledSchedule *poly_lower_schedule(PolyCtx *ctx, PolySchedule *schedule, PolyDevice device);
+
+/* Attach the exact pinned graph_split_rewrite topology to an already-lowered
+ * retained JIT LINEAR. This validates that every nested graph CALL names the
+ * same ordered flat PROGRAM occurrences as the compiled template. */
+int poly_compiled_schedule_set_jit_graph(
+    PolyCompiledSchedule *schedule,
+    PolyUOp *graph_linear
+);
+
+#ifdef POLY_HAS_CUDA
+struct PolyCudaGraphKernelSpec;
+
+/* Resolve the exact base allocation and byte interval used by CUDA graph
+ * dependency tracking. Exposed only through the private engine header so the
+ * runtime-alias range contract can be regression-tested without a CUDA launch. */
+int poly_schedule_cuda_graph_slot_range(
+    const PolyScheduleTemplate *template,
+    int slot,
+    int *base_slot,
+    int64_t *start,
+    int64_t *end
+);
+
+/* Build the exact pinned DepsTracker-style dependency indices for one
+ * contiguous CUDA graph batch. The caller owns each returned dependency row
+ * and the outer array. Private engine exposure keeps dependency topology under
+ * a launch-independent regression. */
+int poly_schedule_cuda_graph_build_dependencies(
+    PolySchedule *schedule,
+    int first_call,
+    int n_calls,
+    struct PolyCudaGraphKernelSpec *specs,
+    int ***owned_dependencies
+);
+#endif
 
 /* Internal execution-device selection shared by direct schedule execution and
  * cached entrypoint replay. Preferred executable device wins, otherwise slot

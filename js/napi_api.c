@@ -341,17 +341,67 @@ static int read_io_bindings(
       }
       return 0;
     }
-    if (type != napi_float32_array) {
+    const char *dtype_name = NULL;
+    size_t itemsize = 0;
+    switch (type) {
+    case napi_int8_array:
+      dtype_name = "int8";
+      itemsize = 1;
+      break;
+    case napi_uint8_array:
+    case napi_uint8_clamped_array:
+      dtype_name = "uint8";
+      itemsize = 1;
+      break;
+    case napi_int16_array:
+      dtype_name = "int16";
+      itemsize = 2;
+      break;
+    case napi_uint16_array:
+      dtype_name = "uint16";
+      itemsize = 2;
+      break;
+    case napi_int32_array:
+      dtype_name = "int32";
+      itemsize = 4;
+      break;
+    case napi_uint32_array:
+      dtype_name = "uint32";
+      itemsize = 4;
+      break;
+    case napi_bigint64_array:
+      dtype_name = "int64";
+      itemsize = 8;
+      break;
+    case napi_biguint64_array:
+      dtype_name = "uint64";
+      itemsize = 8;
+      break;
+    case napi_float32_array:
+      dtype_name = "float32";
+      itemsize = 4;
+      break;
+    case napi_float64_array:
+      dtype_name = "float64";
+      itemsize = 8;
+      break;
+    default:
+      break;
+    }
+    int dtype_id = dtype_name ? poly_dtype_id_by_name(dtype_name) : -1;
+    if (dtype_id < 0 || itemsize == 0 || length > SIZE_MAX / itemsize) {
       for (uint32_t j = 0; j <= i; j++)
         free(names[j]);
       free(names);
       free(bindings);
-      napi_throw_error(env, NULL, "polygrad: instance bindings must be Float32Array");
+      napi_throw_error(env, NULL, "polygrad: unsupported Instance binding TypedArray");
       return 0;
     }
 
     bindings[i].name = names[i];
-    bindings[i].data = (float *)data;
+    bindings[i].data = data;
+    bindings[i].nbytes = length * itemsize;
+    bindings[i].dtype_id = dtype_id;
   }
 
   *out_bindings = bindings;

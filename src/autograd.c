@@ -8,7 +8,7 @@
  * - Core ALU: ADD, SUB, MUL, FDIV, NEG, EXP2, LOG2, SQRT, RECIPROCAL, SIN, POW
  * - Binary: MAX (elementwise)
  * - Movement: RESHAPE, EXPAND, PERMUTE, PAD, SHRINK, FLIP
- * - Reductions: tensor REDUCE with ADD and MAX (CONTIGUOUS barrier for MAX)
+ * - Reductions: tensor REDUCE with ADD and MAX
  * - Utility: CAST pass-through, CONTIGUOUS/COPY/BUFFERIZE pass-through
  * - Stop gradient: DETACH, CMPLT, CMPNE, BITCAST
  * - Target-pruned reverse pass (port of tinygrad's _deepwalk)
@@ -794,30 +794,22 @@ static PolyMap *grad_reverse_pass(
         int n_axes = u->arg.reduce_axis.n;
         int64_t *axes = u->arg.reduce_axis.axes;
 
-        /* CONTIGUOUS barrier on the max result: forces rangeify to realize
-         * the forward REDUCE(MAX) as a separate kernel. Without this,
-         * the consumer kernel would recompute max, creating a
-         * reduce→expand→alu pattern that rangeify can't handle. */
-        PolyUOp *max_contig = poly_uop1(ctx, POLY_OP_CONTIGUOUS, u->dtype, u, poly_arg_none());
-        /* Broadcast max output back to input shape */
-        PolyUOp *max_bcast = poly_expand(ctx, max_contig, in_shape.dims, in_shape.ndim);
+        /* Pinned reduce_gradient broadcasts the singleton-preserving REDUCE
+         * result directly; it does not add a realization barrier
+         * (tinygrad/mixin/gradient.py:7-14). */
+        PolyUOp *max_bcast = poly_expand(ctx, u, in_shape.dims, in_shape.ndim);
 
         /* mask = (input == max_val).cast(float32) */
         PolyDType bool_dt = POLY_BOOL;
         PolyUOp *eq = poly_uop2(ctx, POLY_OP_CMPNE, bool_dt, u->src[0], max_bcast, poly_arg_none());
         /* CMPNE gives true where not equal; negate to get true where equal */
-        PolyUOp *true_val = poly_uop0(ctx, POLY_OP_CONST, bool_dt, poly_arg_bool(true));
-        true_val = poly_expand(ctx, true_val, in_shape.dims, in_shape.ndim);
+        PolyUOp *true_val = const_like(ctx, eq, 1.0);
         PolyUOp *mask = poly_uop2(ctx, POLY_OP_CMPNE, bool_dt, eq, true_val, poly_arg_none());
         /* Cast mask to float */
         PolyUOp *fmask = poly_uop1(ctx, POLY_OP_CAST, u->dtype, mask, poly_arg_none());
 
         /* count = mask.sum(axis) — how many elements equal the max */
         PolyUOp *count = poly_reduce_axis(ctx, POLY_OP_ADD, fmask, axes, n_axes);
-        /* CONTIGUOUS barrier: forces rangeify to realize count as a separate
-         * kernel, breaking the reduce→expand→alu pattern into two realizable
-         * kernels. Without this, the scheduler can't handle the fused pattern. */
-        count = poly_uop1(ctx, POLY_OP_CONTIGUOUS, count->dtype, count, poly_arg_none());
 
         /* Broadcast count and upstream grad to input shape */
         PolyUOp *count_bcast = poly_expand(ctx, count, in_shape.dims, in_shape.ndim);
@@ -825,8 +817,11 @@ static PolyMap *grad_reverse_pass(
         g_bcast = cast_to(ctx, g_bcast, u->dtype);
 
         /* gx = (mask / count) * upstream_grad */
-        PolyUOp *scaled_mask =
-            poly_uop2(ctx, POLY_OP_FDIV, u->dtype, fmask, count_bcast, poly_arg_none());
+        PolyUOp *scaled_mask = poly_uop2(
+            ctx, POLY_OP_MUL, u->dtype, fmask,
+            poly_uop1(ctx, POLY_OP_RECIPROCAL, count_bcast->dtype, count_bcast, poly_arg_none()),
+            poly_arg_none()
+        );
         PolyUOp *gx = poly_uop2(ctx, POLY_OP_MUL, u->dtype, scaled_mask, g_bcast, poly_arg_none());
         gx = cast_to(ctx, gx, u->src[0]->dtype);
         grad_add(ctx, grads, u->src[0], gx);

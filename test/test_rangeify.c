@@ -1221,6 +1221,232 @@ TEST(rangeify, apply_pad_to_where) {
   PASS();
 }
 
+TEST(rangeify, apply_pad_coordinates_preserve_invalid_like_tinygrad) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  /* Pinned schedule/indexing.py:131-140 returns
+   * valid.where(r-off, Invalid) for both the current movement vocabulary and
+   * imported legacy PAD spelling. This keeps address and validity separable
+   * for UOp.get_idx/get_valid. */
+  PolyUOp *input = poly_buffer_f32(ctx, 3);
+  int64_t pairs[1][2] = {{1, 2}};
+  PolyUOp *current = poly_pad(ctx, input, pairs, 1);
+  PolyArg legacy_arg = poly_arg_none();
+  legacy_arg.kind = POLY_ARG_PAIR_TUPLE;
+  legacy_arg.pair_tuple.pairs = pairs;
+  legacy_arg.pair_tuple.n = 1;
+  PolyUOp *legacy = poly_uop1(ctx, POLY_OP_PAD, POLY_FLOAT32, input, legacy_arg);
+  PolyUOp *movements[2] = {current, legacy};
+  int64_t dims[1] = {3};
+  PolyShape input_shape = {.dims = dims, .ndim = 1};
+  PolyUOp *output_range = poly_uop_range(ctx, 6, 0, POLY_AXIS_LOOP);
+
+  for (int i = 0; i < 2; i++) {
+    PolyUOp *input_ranges[POLY_MAX_DIMS] = {0};
+    PolyUOp *valid = NULL;
+    int n_input = 0;
+    ASSERT_TRUE(poly_apply_movement_op(
+        ctx, movements[i], POLY_OP_PAD, input_shape, movements[i]->arg, &output_range, 1,
+        input_ranges, &n_input, &valid
+    ));
+    ASSERT_INT_EQ(n_input, 1);
+    ASSERT_NOT_NULL(valid);
+    ASSERT_NOT_NULL(input_ranges[0]);
+    ASSERT_INT_EQ(input_ranges[0]->op, POLY_OP_WHERE);
+    ASSERT_INT_EQ(input_ranges[0]->n_src, 3);
+    ASSERT_PTR_EQ(input_ranges[0]->src[0], valid);
+    ASSERT_INT_EQ(input_ranges[0]->src[2]->op, POLY_OP_CONST);
+    ASSERT_INT_EQ(input_ranges[0]->src[2]->arg.kind, POLY_ARG_INVALID);
+    ASSERT_TRUE(poly_dtype_eq(input_ranges[0]->dtype, POLY_INDEX));
+    ASSERT_TRUE(poly_dtype_eq(input_ranges[0]->src[2]->dtype, POLY_INDEX));
+  }
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(rangeify, index_projection_matches_pinned_get_idx_get_valid) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  /* Pinned uop/ops.py:571-581 projects Invalid-bearing WHERE coordinates,
+   * recurses through STACK, and leaves ordinary integer WHERE values intact. */
+  PolyUOp *idx0 = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(3));
+  PolyUOp *idx1 = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(7));
+  PolyUOp *gate = poly_uop0(ctx, POLY_OP_PARAM, POLY_BOOL, poly_arg_int(0));
+  PolyUOp *invalid = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_invalid());
+  PolyUOp *gated =
+      poly_uop3(ctx, POLY_OP_WHERE, POLY_INDEX, gate, idx0, invalid, poly_arg_none());
+  PolyUOp *ordinary = poly_uop3(
+      ctx, POLY_OP_WHERE, POLY_INDEX, gate, idx0,
+      poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(0)), poly_arg_none()
+  );
+  PolyUOp *lanes[2] = {gated, idx1};
+  PolyUOp *stack = poly_uop(
+      ctx, POLY_OP_STACK, poly_dtype_vec(POLY_INDEX, 2), lanes, 2, poly_arg_none()
+  );
+
+  ASSERT_PTR_EQ(poly_index_get_idx(ctx, gated), idx0);
+  ASSERT_PTR_EQ(poly_index_get_valid(ctx, gated), gate);
+  ASSERT_PTR_EQ(poly_index_get_idx(ctx, ordinary), ordinary);
+  PolyUOp *ordinary_valid = poly_index_get_valid(ctx, ordinary);
+  ASSERT_INT_EQ(ordinary_valid->op, POLY_OP_CONST);
+  ASSERT_TRUE(ordinary_valid->arg.kind == POLY_ARG_BOOL && ordinary_valid->arg.b);
+  PolyUOp *invalid_valid = poly_index_get_valid(ctx, invalid);
+  ASSERT_INT_EQ(invalid_valid->op, POLY_OP_CONST);
+  ASSERT_TRUE(invalid_valid->arg.kind == POLY_ARG_BOOL && !invalid_valid->arg.b);
+
+  PolyUOp *stack_idx = poly_index_get_idx(ctx, stack);
+  ASSERT_INT_EQ(stack_idx->op, POLY_OP_STACK);
+  ASSERT_INT_EQ(stack_idx->n_src, 2);
+  ASSERT_PTR_EQ(stack_idx->src[0], idx0);
+  ASSERT_PTR_EQ(stack_idx->src[1], idx1);
+  ASSERT_TRUE(poly_dtype_eq(stack_idx->dtype, poly_dtype_vec(POLY_INDEX, 2)));
+  PolyUOp *stack_valid = poly_index_get_valid(ctx, stack);
+  ASSERT_INT_EQ(stack_valid->op, POLY_OP_STACK);
+  ASSERT_INT_EQ(stack_valid->n_src, 2);
+  ASSERT_PTR_EQ(stack_valid->src[0], gate);
+  ASSERT_TRUE(stack_valid->src[1]->arg.kind == POLY_ARG_BOOL && stack_valid->src[1]->arg.b);
+  ASSERT_TRUE(poly_dtype_eq(stack_valid->dtype, poly_dtype_vec(POLY_BOOL, 2)));
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(rangeify, flat_index_lifts_all_invalid_guards_like_tinygrad) {
+  /* Pinned probe temp/tg_flat_invalid_probe_20260809.py and
+   * uop/symbolic.py:60-86 produce
+   * WHERE(g0 AND g1, r0*32 + r1, Invalid). */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(32));
+  PolyUOp *r0 = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_INDEX, bound, poly_arg_range(0, POLY_AXIS_LOOP)
+  );
+  PolyUOp *r1 = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_INDEX, bound, poly_arg_range(1, POLY_AXIS_LOOP)
+  );
+  PolyUOp *g0 = poly_uop0(ctx, POLY_OP_PARAM, POLY_BOOL, poly_arg_int(0));
+  PolyUOp *g1 = poly_uop0(ctx, POLY_OP_PARAM, POLY_BOOL, poly_arg_int(1));
+  PolyUOp *invalid = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_invalid());
+  PolyUOp *coords[2] = {
+      poly_uop3(ctx, POLY_OP_WHERE, POLY_INDEX, g0, r0, invalid, poly_arg_none()),
+      poly_uop3(ctx, POLY_OP_WHERE, POLY_INDEX, g1, r1, invalid, poly_arg_none()),
+  };
+  PolyUOp *bounds[2] = {bound, bound};
+
+  int64_t dims[2] = {32, 32};
+  PolyShape shape = {.dims = dims, .ndim = 2};
+  PolyUOp *flats[2] = {
+      poly_compute_flat_index(ctx, coords, 2, shape),
+      poly_compute_flat_index_symbolic(ctx, coords, bounds, 2),
+  };
+  for (int i = 0; i < 2; i++) {
+    PolyUOp *flat = flats[i];
+    ASSERT_NOT_NULL(flat);
+    ASSERT_INT_EQ(flat->op, POLY_OP_WHERE);
+    ASSERT_INT_EQ(flat->n_src, 3);
+    ASSERT_INT_EQ(flat->src[0]->op, POLY_OP_AND);
+    ASSERT_TRUE(
+        (flat->src[0]->src[0] == g0 && flat->src[0]->src[1] == g1) ||
+        (flat->src[0]->src[0] == g1 && flat->src[0]->src[1] == g0)
+    );
+    ASSERT_INT_EQ(flat->src[1]->op, POLY_OP_ADD);
+    ASSERT_INT_EQ(flat->src[2]->op, POLY_OP_CONST);
+    ASSERT_INT_EQ(flat->src[2]->arg.kind, POLY_ARG_INVALID);
+  }
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(rangeify, hlb_reflect_input_index_reenters_symbolic_after_bufferize_removal) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  /* Exact pinned HLB reflect construction, examples/hlb_cifar10.py:189-192.
+   * Pinned get_kernel_graph runs symbolic and remove_bufferize in one rewrite
+   * fixed point (schedule/rangeify.py:598-607), so the substituted flat input
+   * coordinate is canonicalized to WHERE(g0 AND g1, flat, Invalid). */
+  PolyUOp *input = poly_reshape(
+      ctx, poly_buffer_f32(ctx, 32 * 3 * 32 * 32), (int64_t[]){32, 3, 32, 32}, 4
+  );
+  ASSERT_NOT_NULL(input);
+
+  PolyUOp *left = poly_flip(
+      ctx,
+      poly_shrink(
+          ctx, input, (int64_t[][2]){{0, 32}, {0, 3}, {0, 32}, {1, 3}}, 4
+      ),
+      (int64_t[]){3}, 1
+  );
+  PolyUOp *right = poly_flip(
+      ctx,
+      poly_shrink(
+          ctx, input, (int64_t[][2]){{0, 32}, {0, 3}, {0, 32}, {29, 31}}, 4
+      ),
+      (int64_t[]){3}, 1
+  );
+  PolyUOp *wide_parts[3] = {left, input, right};
+  PolyUOp *wide = poly_cat(ctx, wide_parts, 3, 3);
+  ASSERT_NOT_NULL(wide);
+
+  PolyUOp *top = poly_flip(
+      ctx,
+      poly_shrink(
+          ctx, wide, (int64_t[][2]){{0, 32}, {0, 3}, {1, 3}, {0, 36}}, 4
+      ),
+      (int64_t[]){2}, 1
+  );
+  PolyUOp *bottom = poly_flip(
+      ctx,
+      poly_shrink(
+          ctx, wide, (int64_t[][2]){{0, 32}, {0, 3}, {29, 31}, {0, 36}}, 4
+      ),
+      (int64_t[]){2}, 1
+  );
+  PolyUOp *tall_parts[3] = {top, wide, bottom};
+  PolyUOp *padded = poly_cat(ctx, tall_parts, 3, 2);
+  ASSERT_NOT_NULL(padded);
+
+  PolyUOp *realized = NULL;
+  PolySchedule *schedule = poly_schedule_with_vars(ctx, &padded, 1, &realized);
+  ASSERT_NOT_NULL(schedule);
+  ASSERT_INT_EQ(schedule->template->n_calls, 1);
+  PolyUOp *body = poly_schedule_call_body(schedule, 0);
+  ASSERT_NOT_NULL(body);
+
+  int n_body = 0;
+  PolyUOp **body_topo = poly_toposort_alloc(ctx, body, &n_body);
+  int invalid_indexes = 0;
+  for (int i = 0; i < n_body; i++) {
+    PolyUOp *index = body_topo[i];
+    if (index->op != POLY_OP_INDEX || index->n_src != 2) continue;
+    PolyUOp *coord = index->src[1];
+    int n_coord = 0;
+    PolyUOp **coord_topo = poly_toposort_alloc(ctx, coord, &n_coord);
+    bool has_invalid = false;
+    for (int j = 0; j < n_coord; j++)
+      has_invalid |= coord_topo[j]->op == POLY_OP_CONST &&
+                     coord_topo[j]->arg.kind == POLY_ARG_INVALID;
+    poly_toposort_free(coord_topo);
+    if (!has_invalid) continue;
+    invalid_indexes++;
+    ASSERT_INT_EQ(coord->op, POLY_OP_WHERE);
+    ASSERT_INT_EQ(coord->n_src, 3);
+    ASSERT_INT_EQ(coord->src[0]->op, POLY_OP_AND);
+    ASSERT_INT_EQ(coord->src[2]->op, POLY_OP_CONST);
+    ASSERT_INT_EQ(coord->src[2]->arg.kind, POLY_ARG_INVALID);
+  }
+  poly_toposort_free(body_topo);
+  ASSERT_TRUE(invalid_indexes > 0);
+
+  poly_schedule_free(schedule);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(rangeify, apply_elementwise_passthrough) {
   /* a + b → STORE → SINK: ALU ops pass through unchanged */
   PolyCtx *ctx = poly_ctx_new();

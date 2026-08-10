@@ -80,11 +80,13 @@ PolyInstance *poly_gpt2(const GPT2Config *cfg) {
   }
 
   int64_t x_shape[] = {B, T};
-  PolyTensor *x_tensor = poly_instance_input(inst, "x", POLY_FLOAT32, x_shape, 2);
+  /* Pinned tinygrad embedding/gather requires integer token indices
+   * (mixin/__init__.py:1088-1093,1106-1124). */
+  PolyTensor *x_tensor = poly_instance_input(inst, "x", POLY_INT32, x_shape, 2);
   if (!x_tensor) goto fail_pre_build;
 
   int64_t pos_shape[] = {1, T};
-  PolyTensor *pos_tensor = poly_instance_input(inst, "positions", POLY_FLOAT32, pos_shape, 2);
+  PolyTensor *pos_tensor = poly_instance_input(inst, "positions", POLY_INT32, pos_shape, 2);
   if (!pos_tensor) goto fail_pre_build;
 
   /* Token + position embeddings. Keep wte table visible for LM-head tying. */

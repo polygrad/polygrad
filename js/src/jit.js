@@ -281,7 +281,8 @@ function createBoundJit(runtime) {
         try {
           ret = await resolveUserReturnAsync(this.fxn(...args))
           await realizeReturnAsync(ret, Tensor)
-          if (ffi.poly_jit_end_capture(this._jit) !== 0) throw new Error("didn't jit anything")
+          const endCapture = ffi.poly_jit_end_capture_async || ffi.poly_jit_end_capture
+          if (await endCapture(this._jit) !== 0) throw new Error("didn't jit anything")
         } catch (err) {
           if (this._jit && ffi.poly_jit_cancel_capture) ffi.poly_jit_cancel_capture(this._jit)
           throw err

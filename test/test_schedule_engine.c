@@ -1764,9 +1764,15 @@ TEST(sched, custom_kernel_set_accumulator_noopt_executes) {
   PolyUOp *c = poly_uop_range(ctx, candidates, 0, POLY_AXIS_LOOP);
   PolyUOp *r = poly_uop_range(ctx, rows, 1, POLY_AXIS_REDUCE);
   PolyUOp *out_idx[1] = {c};
-  PolyUOp *rows_const = poly_const_int(ctx, rows);
+  /* Pinned `c * 64` coerces the scalar through c.const_like, so the complete
+   * pre-lowering expression remains weak-derived until pm_lower_index_dtype. */
+  PolyUOp *rows_const = poly_const_typed(ctx, c->dtype, rows);
   PolyUOp *offset = poly_alu2(ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, c, rows_const), r);
   PolyUOp *x_idx[1] = {offset};
+  ASSERT_TRUE(poly_dtype_eq(c->dtype, POLY_INDEX));
+  ASSERT_TRUE(c->n_src == 1 && poly_dtype_eq(c->src[0]->dtype, POLY_INDEX));
+  ASSERT_TRUE(poly_dtype_eq(rows_const->dtype, POLY_INDEX));
+  ASSERT_TRUE(poly_dtype_eq(offset->dtype, POLY_INDEX));
 
   PolyUOp *acc = poly_uop_set(ctx, poly_uop_index(ctx, pout, out_idx, 1, 0), poly_const_float(ctx, 0.0f), NULL, 0);
   ASSERT_NOT_NULL(acc);

@@ -126,6 +126,13 @@ static float *find_buf(PolyInstance *inst, const char *name, int64_t *numel) {
   return NULL;
 }
 
+static int find_buf_index(PolyInstance *inst, const char *name) {
+  int nb = poly_instance_buf_count(inst);
+  for (int b = 0; b < nb; b++)
+    if (strcmp(poly_instance_buf_name(inst, b), name) == 0) return b;
+  return -1;
+}
+
 static int argmax_f32(const float *data, int n) {
   int best = 0;
   float best_val = data[0];
@@ -170,8 +177,11 @@ TEST(qwen3, model_build_and_load) {
 
   /* Check I/O buffers exist */
   int64_t numel;
-  ASSERT_NOT_NULL(find_buf(inst, "x", &numel));
-  ASSERT_INT_EQ(numel, 25); /* batch=1 * seq_len=25 */
+  int x_idx = find_buf_index(inst, "x");
+  ASSERT_TRUE(x_idx >= 0);
+  int64_t x_shape[2] = {0};
+  ASSERT_INT_EQ(poly_instance_buf_shape(inst, x_idx, x_shape, 2), 2);
+  ASSERT_INT_EQ(x_shape[0] * x_shape[1], 25); /* batch=1 * seq_len=25 */
   ASSERT_NOT_NULL(find_buf(inst, "output", &numel));
   ASSERT_INT_EQ(numel, 25 * 151936); /* batch * seq_len * vocab */
 
@@ -185,16 +195,15 @@ TEST(qwen3, forward_cpu) {
   ASSERT_NOT_NULL(inst);
 
   /* Fill input with prompt "The capital of France is" */
-  int64_t numel;
-  float *x = find_buf(inst, "x", &numel);
-  ASSERT_NOT_NULL(x);
-  memset(x, 0, numel * sizeof(float));
-  float prompt[] = {785, 6722, 315, 9625, 374};
-  memcpy(x, prompt, sizeof(prompt));
+  int x_idx = find_buf_index(inst, "x");
+  ASSERT_TRUE(x_idx >= 0);
+  int32_t input_ids[25] = {785, 6722, 315, 9625, 374};
+  ASSERT_INT_EQ(poly_instance_write_buf(inst, x_idx, input_ids, sizeof(input_ids)), 0);
 
   int rc = poly_instance_forward(inst, NULL, 0);
   ASSERT_INT_EQ(rc, 0);
 
+  int64_t numel;
   float *out = find_buf(inst, "output", &numel);
   ASSERT_NOT_NULL(out);
 
@@ -229,16 +238,15 @@ TEST(qwen3, forward_cuda) {
   ASSERT_NOT_NULL(inst);
   poly_instance_set_device(inst, POLY_DEVICE_CUDA);
 
-  int64_t numel;
-  float *x = find_buf(inst, "x", &numel);
-  ASSERT_NOT_NULL(x);
-  memset(x, 0, numel * sizeof(float));
-  float prompt[] = {785, 6722, 315, 9625, 374};
-  memcpy(x, prompt, sizeof(prompt));
+  int x_idx = find_buf_index(inst, "x");
+  ASSERT_TRUE(x_idx >= 0);
+  int32_t input_ids[25] = {785, 6722, 315, 9625, 374};
+  ASSERT_INT_EQ(poly_instance_write_buf(inst, x_idx, input_ids, sizeof(input_ids)), 0);
 
   int rc = poly_instance_forward(inst, NULL, 0);
   ASSERT_INT_EQ(rc, 0);
 
+  int64_t numel;
   float *out = find_buf(inst, "output", &numel);
   ASSERT_NOT_NULL(out);
 

@@ -27,7 +27,7 @@ int main(void) {
   poly_instance_set_optimizer(inst, POLY_OPTIM_SGD, 0.03f, 0.0f, 0.0f, 0.0f, 0.0f);
   float x[] = {1.0f, 2.0f};
   float y[] = {4.0f};
-  PolyIOBinding io[] = {{"x", x}, {"y", y}};
+  PolyIOBinding io[] = {POLY_IO_BINDING_ARRAY("x", x, POLY_FLOAT32), POLY_IO_BINDING_ARRAY("y", y, POLY_FLOAT32)};
 
   float first = 0.0f, last = 0.0f;
   for (int step = 0; step < 12; step++) {

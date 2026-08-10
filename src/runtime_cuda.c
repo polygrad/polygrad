@@ -23,6 +23,26 @@ typedef void *CUcontext;
 typedef void *CUmodule;
 typedef void *CUfunction;
 typedef unsigned long long CUdeviceptr;
+typedef void *CUgraph;
+typedef void *CUgraphNode;
+typedef void *CUgraphExec;
+typedef void *CUstream;
+
+/* Legacy CUDA driver graph ABI used by pinned tinygrad's generated bindings.
+ * Keep this local so HAS_CUDA remains a dlopen-only build with no CUDA-header
+ * or link-time libcuda requirement. */
+typedef struct {
+  CUfunction func;
+  unsigned int gridDimX;
+  unsigned int gridDimY;
+  unsigned int gridDimZ;
+  unsigned int blockDimX;
+  unsigned int blockDimY;
+  unsigned int blockDimZ;
+  unsigned int sharedMemBytes;
+  void **kernelParams;
+  void **extra;
+} PolyCudaKernelNodeParams;
 
 /* CUresult codes we check */
 #define CUDA_SUCCESS 0
@@ -63,6 +83,19 @@ typedef CUresult (*cuLaunchKernel_fn)(CUfunction, unsigned int, unsigned int, un
 typedef CUresult (*cuCtxSynchronize_fn)(void);
 typedef CUresult (*cuMemsetD8_v2_fn)(CUdeviceptr, unsigned char, size_t);
 typedef CUresult (*cuModuleUnload_fn)(CUmodule);
+typedef CUresult (*cuGraphCreate_fn)(CUgraph *, unsigned int);
+typedef CUresult (*cuGraphAddKernelNode_fn)(
+    CUgraphNode *, CUgraph, const CUgraphNode *, size_t, const PolyCudaKernelNodeParams *
+);
+typedef CUresult (*cuGraphInstantiate_v2_fn)(
+    CUgraphExec *, CUgraph, CUgraphNode *, char *, size_t
+);
+typedef CUresult (*cuGraphExecKernelNodeSetParams_fn)(
+    CUgraphExec, CUgraphNode, const PolyCudaKernelNodeParams *
+);
+typedef CUresult (*cuGraphLaunch_fn)(CUgraphExec, CUstream);
+typedef CUresult (*cuGraphDestroy_fn)(CUgraph);
+typedef CUresult (*cuGraphExecDestroy_fn)(CUgraphExec);
 
 /* NVRTC */
 typedef nvrtcResult (*nvrtcCreateProgram_fn)(nvrtcProgram *, const char *, const char *, int, const char *const *, const char *const *);
@@ -95,6 +128,13 @@ static struct {
   cuCtxSynchronize_fn cuCtxSynchronize;
   cuMemsetD8_v2_fn cuMemsetD8_v2;
   cuModuleUnload_fn cuModuleUnload;
+  cuGraphCreate_fn cuGraphCreate;
+  cuGraphAddKernelNode_fn cuGraphAddKernelNode;
+  cuGraphInstantiate_v2_fn cuGraphInstantiate_v2;
+  cuGraphExecKernelNodeSetParams_fn cuGraphExecKernelNodeSetParams;
+  cuGraphLaunch_fn cuGraphLaunch;
+  cuGraphDestroy_fn cuGraphDestroy;
+  cuGraphExecDestroy_fn cuGraphExecDestroy;
 
   /* nvrtc */
   nvrtcCreateProgram_fn nvrtcCreateProgram;
@@ -167,6 +207,19 @@ static bool load_cuda_libs(void) {
   LOAD_CUDA(cuModuleUnload);
 
 #undef LOAD_CUDA
+
+  /* Pinned graph_split_rewrite only batches when the selected device exposes
+   * a graph runtime. Keep these optional so a driver without graph symbols
+   * still supports ordinary CUDA PROGRAM launches. */
+#define LOAD_CUDA_GRAPH(name) *(void **)&cuda_api.name = dlsym(cuda_api.libcuda, #name)
+  LOAD_CUDA_GRAPH(cuGraphCreate);
+  LOAD_CUDA_GRAPH(cuGraphAddKernelNode);
+  LOAD_CUDA_GRAPH(cuGraphInstantiate_v2);
+  LOAD_CUDA_GRAPH(cuGraphExecKernelNodeSetParams);
+  LOAD_CUDA_GRAPH(cuGraphLaunch);
+  LOAD_CUDA_GRAPH(cuGraphDestroy);
+  LOAD_CUDA_GRAPH(cuGraphExecDestroy);
+#undef LOAD_CUDA_GRAPH
 
   /* Resolve NVRTC symbols */
 #define LOAD_NVRTC(name)                                                                           \
@@ -465,6 +518,180 @@ void poly_cuda_program_destroy(PolyCudaProgram *prog) {
     cuda_api.cuModuleUnload((CUmodule)prog->module);
   }
   free(prog);
+}
+
+typedef struct {
+  CUgraphNode node;
+  PolyCudaKernelNodeParams params;
+  CUdeviceptr *buffer_values;
+  int *scalar_values;
+  void **kernel_params;
+  int n_buffer_args;
+  int n_args;
+} PolyCudaGraphNode;
+
+struct PolyCudaGraph {
+  CUgraph graph;
+  CUgraphExec instance;
+  PolyCudaGraphNode *nodes;
+  int n_nodes;
+};
+
+bool poly_cuda_graph_available(void) {
+  if (cuda_state == CUDA_NOT_TRIED && poly_cuda_init() != 0) return false;
+  return cuda_state == CUDA_INIT_OK && cuda_api.cuGraphCreate && cuda_api.cuGraphAddKernelNode &&
+         cuda_api.cuGraphInstantiate_v2 && cuda_api.cuGraphExecKernelNodeSetParams &&
+         cuda_api.cuGraphLaunch && cuda_api.cuGraphDestroy && cuda_api.cuGraphExecDestroy;
+}
+
+static int poly_cuda_graph_node_update(
+    PolyCudaGraphNode *node,
+    const PolyCudaGraphKernelSpec *spec
+) {
+  if (!node || !spec || !spec->program || !spec->args || spec->n_buffer_args < 0 ||
+      spec->n_args < spec->n_buffer_args || node->n_buffer_args != spec->n_buffer_args ||
+      node->n_args != spec->n_args)
+    return -1;
+
+  for (int i = 0; i < spec->n_buffer_args; i++) {
+    node->buffer_values[i] = (CUdeviceptr)(uintptr_t)spec->args[i];
+    node->kernel_params[i] = &node->buffer_values[i];
+  }
+  for (int i = spec->n_buffer_args; i < spec->n_args; i++) {
+    int scalar_idx = i - spec->n_buffer_args;
+    if (!spec->args[i]) return -1;
+    node->scalar_values[scalar_idx] = *(int *)spec->args[i];
+    node->kernel_params[i] = &node->scalar_values[scalar_idx];
+  }
+
+  node->params.func = (CUfunction)spec->program->function;
+  node->params.gridDimX = (unsigned int)(spec->grid[0] > 0 ? spec->grid[0] : 1);
+  node->params.gridDimY = (unsigned int)(spec->grid[1] > 0 ? spec->grid[1] : 1);
+  node->params.gridDimZ = (unsigned int)(spec->grid[2] > 0 ? spec->grid[2] : 1);
+  node->params.blockDimX = (unsigned int)(spec->block[0] > 0 ? spec->block[0] : 1);
+  node->params.blockDimY = (unsigned int)(spec->block[1] > 0 ? spec->block[1] : 1);
+  node->params.blockDimZ = (unsigned int)(spec->block[2] > 0 ? spec->block[2] : 1);
+  node->params.sharedMemBytes = 0;
+  node->params.kernelParams = node->kernel_params;
+  node->params.extra = NULL;
+  return 0;
+}
+
+void poly_cuda_graph_destroy(PolyCudaGraph *graph) {
+  if (!graph) return;
+  if (graph->instance && cuda_api.cuGraphExecDestroy)
+    cuda_api.cuGraphExecDestroy(graph->instance);
+  if (graph->graph && cuda_api.cuGraphDestroy) cuda_api.cuGraphDestroy(graph->graph);
+  for (int i = 0; i < graph->n_nodes; i++) {
+    free(graph->nodes[i].buffer_values);
+    free(graph->nodes[i].scalar_values);
+    free(graph->nodes[i].kernel_params);
+  }
+  free(graph->nodes);
+  free(graph);
+}
+
+PolyCudaGraph *poly_cuda_graph_create(const PolyCudaGraphKernelSpec *specs, int n_specs) {
+  if (!specs || n_specs <= 0 || !poly_cuda_graph_available()) return NULL;
+  PolyCudaGraph *graph = calloc(1, sizeof(*graph));
+  if (!graph) return NULL;
+  graph->n_nodes = n_specs;
+  graph->nodes = calloc((size_t)n_specs, sizeof(*graph->nodes));
+  if (!graph->nodes) goto fail;
+
+  CUresult err = cuda_api.cuGraphCreate(&graph->graph, 0);
+  if (err != CUDA_SUCCESS) {
+    fprintf(stderr, "polygrad: cuda: cuGraphCreate failed (CUresult=%d)\n", err);
+    goto fail;
+  }
+
+  for (int i = 0; i < n_specs; i++) {
+    const PolyCudaGraphKernelSpec *spec = &specs[i];
+    PolyCudaGraphNode *node = &graph->nodes[i];
+    if (!spec->program || !spec->args || spec->n_buffer_args < 0 ||
+        spec->n_args < spec->n_buffer_args || spec->n_dependencies < 0)
+      goto fail;
+    node->n_buffer_args = spec->n_buffer_args;
+    node->n_args = spec->n_args;
+    int n_scalars = spec->n_args - spec->n_buffer_args;
+    node->buffer_values = calloc(
+        (size_t)(spec->n_buffer_args > 0 ? spec->n_buffer_args : 1), sizeof(*node->buffer_values)
+    );
+    node->scalar_values =
+        calloc((size_t)(n_scalars > 0 ? n_scalars : 1), sizeof(*node->scalar_values));
+    node->kernel_params =
+        calloc((size_t)(spec->n_args > 0 ? spec->n_args : 1), sizeof(*node->kernel_params));
+    if (!node->buffer_values || !node->scalar_values || !node->kernel_params ||
+        poly_cuda_graph_node_update(node, spec) != 0)
+      goto fail;
+
+    CUgraphNode deps_inline[32];
+    CUgraphNode *deps = deps_inline;
+    if (spec->n_dependencies > (int)(sizeof(deps_inline) / sizeof(deps_inline[0]))) {
+      deps = malloc((size_t)spec->n_dependencies * sizeof(*deps));
+      if (!deps) goto fail;
+    }
+    bool deps_ok = true;
+    for (int d = 0; d < spec->n_dependencies; d++) {
+      int dep = spec->dependencies ? spec->dependencies[d] : -1;
+      if (dep < 0 || dep >= i || !graph->nodes[dep].node) {
+        deps_ok = false;
+        break;
+      }
+      deps[d] = graph->nodes[dep].node;
+    }
+    if (!deps_ok) {
+      if (deps != deps_inline) free(deps);
+      goto fail;
+    }
+    err = cuda_api.cuGraphAddKernelNode(
+        &node->node, graph->graph, spec->n_dependencies ? deps : NULL,
+        (size_t)spec->n_dependencies, &node->params
+    );
+    if (deps != deps_inline) free(deps);
+    if (err != CUDA_SUCCESS) {
+      fprintf(stderr, "polygrad: cuda: cuGraphAddKernelNode failed (CUresult=%d)\n", err);
+      goto fail;
+    }
+  }
+
+  err = cuda_api.cuGraphInstantiate_v2(&graph->instance, graph->graph, NULL, NULL, 0);
+  if (err != CUDA_SUCCESS) {
+    fprintf(stderr, "polygrad: cuda: cuGraphInstantiate_v2 failed (CUresult=%d)\n", err);
+    goto fail;
+  }
+  return graph;
+
+fail:
+  poly_cuda_graph_destroy(graph);
+  return NULL;
+}
+
+int poly_cuda_graph_update(PolyCudaGraph *graph, const PolyCudaGraphKernelSpec *specs, int n_specs) {
+  if (!graph || !graph->instance || !specs || n_specs != graph->n_nodes) return -1;
+  for (int i = 0; i < n_specs; i++) {
+    PolyCudaGraphNode *node = &graph->nodes[i];
+    if (poly_cuda_graph_node_update(node, &specs[i]) != 0) return -1;
+    CUresult err =
+        cuda_api.cuGraphExecKernelNodeSetParams(graph->instance, node->node, &node->params);
+    if (err != CUDA_SUCCESS) {
+      fprintf(
+          stderr, "polygrad: cuda: cuGraphExecKernelNodeSetParams failed (CUresult=%d)\n", err
+      );
+      return -1;
+    }
+  }
+  return 0;
+}
+
+int poly_cuda_graph_launch(PolyCudaGraph *graph) {
+  if (!graph || !graph->instance || !cuda_api.cuGraphLaunch) return -1;
+  CUresult err = cuda_api.cuGraphLaunch(graph->instance, NULL);
+  if (err != CUDA_SUCCESS) {
+    fprintf(stderr, "polygrad: cuda: cuGraphLaunch failed (CUresult=%d)\n", err);
+    return -1;
+  }
+  return 0;
 }
 
 int poly_cuda_memset(unsigned long long ptr, unsigned char val, size_t bytes) {

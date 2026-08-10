@@ -287,6 +287,21 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
 
 /* CUDA Runtime */
 typedef struct PolyCudaProgram PolyCudaProgram;
+typedef struct PolyCudaGraph PolyCudaGraph;
+
+/* Pinned tinygrad runtime/graph/cuda.py CUDAGraph kernel-node boundary.
+ * `args` uses PolyRunner's prepared ABI: raw device handles first, followed
+ * by pointers to scalar values. Dependency indices address earlier specs. */
+typedef struct PolyCudaGraphKernelSpec {
+  PolyCudaProgram *program;
+  void **args;
+  int n_buffer_args;
+  int n_args;
+  int grid[3];
+  int block[3];
+  const int *dependencies;
+  int n_dependencies;
+} PolyCudaGraphKernelSpec;
 
 int poly_cuda_init(void);
 bool poly_cuda_available(void);
@@ -311,6 +326,11 @@ int poly_cuda_launch(
 int poly_cuda_sync(void);
 void poly_cuda_program_destroy(PolyCudaProgram *prog);
 int poly_cuda_memset(unsigned long long ptr, unsigned char val, size_t bytes);
+bool poly_cuda_graph_available(void);
+PolyCudaGraph *poly_cuda_graph_create(const PolyCudaGraphKernelSpec *specs, int n_specs);
+int poly_cuda_graph_update(PolyCudaGraph *graph, const PolyCudaGraphKernelSpec *specs, int n_specs);
+int poly_cuda_graph_launch(PolyCudaGraph *graph);
+void poly_cuda_graph_destroy(PolyCudaGraph *graph);
 
 #endif /* POLY_HAS_CUDA */
 

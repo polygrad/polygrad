@@ -1,15 +1,12 @@
 """nn.modules — Stateful neural network layers (tinygrad-compatible)."""
 
 import math
+from ..dtype import dtypes
 from ..tensor import Tensor
 
 
 def _mark_param(t):
-    """Mark a tensor as a model parameter.
-
-    Parameters should behave like tinygrad leaves after their initializer has
-    been realized: backward sees the current UOp/buffer from all_tensors.
-    """
+    """Mark a tensor as a model parameter without changing its lazy graph."""
     t._is_param = True
     return t
 
@@ -18,12 +15,12 @@ class Linear:
     """y = x @ weight.T + bias"""
     def __init__(self, in_features, out_features, bias=True):
         bound = 1 / math.sqrt(in_features)
-        self.weight = (Tensor.rand(out_features, in_features) * (2 * bound) - bound).realize()
+        self.weight = Tensor.uniform(out_features, in_features, low=-bound, high=bound)
         self.weight.requires_grad = True
         _mark_param(self.weight)
         self.bias = None
         if bias:
-            self.bias = (Tensor.rand(out_features) * (2 * bound) - bound).realize()
+            self.bias = Tensor.uniform(out_features, low=-bound, high=bound)
             self.bias.requires_grad = True
             _mark_param(self.bias)
 
@@ -132,7 +129,11 @@ class Embedding:
         self.embed_dim = embed_dim
 
     def __call__(self, idx):
-        # idx: (*batch_dims,) integer tensor (realized to float — indices as floats)
+        # Pinned nn.Embedding rejects non-integer indices before building the
+        # selector graph (nn/__init__.py:388-392).
+        if not dtypes.is_int(idx.dtype):
+            raise TypeError(f'Expected integer dtype for index in embedding, got {idx.dtype}')
+        # idx: (*batch_dims,) integer tensor
         # arange: (vocab_size,)
         arange = Tensor.arange(self.vocab_size)
         # idx.unsqueeze(-1) == arange → (*batch_dims, vocab_size) boolean mask
@@ -174,12 +175,14 @@ class Conv2d:
         self.groups = groups
         self.padding = padding
         bound = 1 / math.sqrt(in_channels * kernel_size[0] * kernel_size[1])
-        self.weight = (Tensor.rand(out_channels, in_channels // groups, *kernel_size) * (2 * bound) - bound).realize()
+        self.weight = Tensor.uniform(
+            out_channels, in_channels // groups, *kernel_size, low=-bound, high=bound
+        )
         self.weight.requires_grad = True
         _mark_param(self.weight)
         self.bias = None
         if bias:
-            self.bias = (Tensor.rand(out_channels) * (2 * bound) - bound).realize()
+            self.bias = Tensor.uniform(out_channels, low=-bound, high=bound)
             self.bias.requires_grad = True
             _mark_param(self.bias)
 
@@ -194,10 +197,10 @@ class BatchNorm:
         self.eps = eps
         self.momentum = momentum
         self.track_running_stats = track_running_stats
-        self.weight = Tensor.ones(num_features).realize() if affine else None
-        self.bias = Tensor.zeros(num_features).realize() if affine else None
-        self.running_mean = Tensor.zeros(num_features).is_param_(False).realize() if track_running_stats else None
-        self.running_var = Tensor.ones(num_features).is_param_(False).realize() if track_running_stats else None
+        self.weight = Tensor.ones(num_features) if affine else None
+        self.bias = Tensor.zeros(num_features) if affine else None
+        self.running_mean = Tensor.zeros(num_features).is_param_(False) if track_running_stats else None
+        self.running_var = Tensor.ones(num_features).is_param_(False) if track_running_stats else None
         if self.weight is not None:
             self.weight.requires_grad = True
             _mark_param(self.weight)

@@ -32,11 +32,13 @@ const PolyDType POLY_FLOAT64 = {14, 64, "double", 'd', 1, false, 0, 0, 0};
 static const PolyDType *_dtype_table[] = {
     &POLY_VOID,    &POLY_BOOL,     &POLY_INT8,    &POLY_UINT8,   &POLY_INT16,
     &POLY_UINT16,  &POLY_INT32,    &POLY_UINT32,  &POLY_INT64,   &POLY_UINT64,
-    &POLY_FLOAT16, &POLY_BFLOAT16, &POLY_FLOAT32, &POLY_FLOAT64,
+    &POLY_FLOAT16, &POLY_BFLOAT16, &POLY_FLOAT32, &POLY_FLOAT64, &POLY_INDEX,
 };
 #define N_DTYPE_TABLE ((int)(sizeof(_dtype_table) / sizeof(_dtype_table[0])))
 
-int poly_dtype_count(void) { return N_DTYPE_TABLE; }
+int poly_dtype_count(void) {
+  return N_DTYPE_TABLE;
+}
 
 bool poly_dtype_by_id(int id, PolyDType *out) {
   if (!out || id < 0 || id >= N_DTYPE_TABLE) return false;
@@ -60,6 +62,7 @@ int poly_dtype_id_by_name(const char *name) {
   if (strcmp(name, "bfloat16") == 0 || strcmp(name, "__bf16") == 0) return 11;
   if (strcmp(name, "float32") == 0 || strcmp(name, "float") == 0) return 12;
   if (strcmp(name, "float64") == 0 || strcmp(name, "double") == 0) return 13;
+  if (strcmp(name, "weakint") == 0) return 14;
   return -1;
 }
 
@@ -117,8 +120,8 @@ PolyDType poly_dtype_scalar(PolyDType dt) {
   if (!s.is_ptr) {
     for (int i = 0; i < N_DTYPE_TABLE; i++) {
       const PolyDType *canon = _dtype_table[i];
-      if (canon->priority == s.priority && canon->bitsize == s.bitsize &&
-          canon->count == 1 && canon->name && s.name && strcmp(canon->name, s.name) == 0)
+      if (canon->priority == s.priority && canon->bitsize == s.bitsize && canon->count == 1 &&
+          canon->name && s.name && strcmp(canon->name, s.name) == 0)
         return *canon;
     }
   }
@@ -157,10 +160,9 @@ bool poly_dtype_least_upper(PolyDType a, PolyDType b, PolyDType *out) {
     PROMO_COUNT,
   };
   static const PolyDType *const types[PROMO_COUNT] = {
-      &POLY_BOOL,    &POLY_INDEX,    &POLY_INT8,    &POLY_UINT8,
-      &POLY_INT16,   &POLY_UINT16,   &POLY_INT32,   &POLY_UINT32,
-      &POLY_INT64,   &POLY_UINT64,   &POLY_FLOAT16, &POLY_BFLOAT16,
-      &POLY_FLOAT32, &POLY_FLOAT64,
+      &POLY_BOOL,    &POLY_INDEX,    &POLY_INT8,    &POLY_UINT8,   &POLY_INT16,
+      &POLY_UINT16,  &POLY_INT32,    &POLY_UINT32,  &POLY_INT64,   &POLY_UINT64,
+      &POLY_FLOAT16, &POLY_BFLOAT16, &POLY_FLOAT32, &POLY_FLOAT64,
   };
   static const uint16_t parents[PROMO_COUNT] = {
       [PROMO_BOOL] = 1u << PROMO_WEAKINT,
@@ -201,6 +203,40 @@ bool poly_dtype_least_upper(PolyDType a, PolyDType b, PolyDType *out) {
     *out = *types[i];
     return true;
   }
+  return false;
+}
+
+/* Pinned tinygrad dtype.py:256-270. Return whether dt1 preserves every value
+ * representable by dt0. Exact equality and bool sources are lossless before
+ * tinygrad's scalar-only target table is consulted. */
+bool poly_dtype_can_lossless_cast(PolyDType dt0, PolyDType dt1) {
+  if (poly_dtype_eq(dt0, dt1)) return true;
+  if (poly_dtype_eq(dt0, POLY_BOOL)) return true;
+  if (dt0.is_ptr || dt1.is_ptr || dt0.count != 1 || dt1.count != 1) return false;
+
+#define DT_IS(dt, type) poly_dtype_eq((dt), (type))
+  if (poly_dtype_is_index(dt1))
+    return poly_dtype_is_int(dt0) && !poly_dtype_is_index(dt0) && !poly_dtype_is_bool(dt0);
+  if (DT_IS(dt1, POLY_FLOAT64))
+    return DT_IS(dt0, POLY_FLOAT32) || DT_IS(dt0, POLY_FLOAT16) || DT_IS(dt0, POLY_BFLOAT16) ||
+           DT_IS(dt0, POLY_UINT32) || DT_IS(dt0, POLY_UINT16) || DT_IS(dt0, POLY_UINT8) ||
+           DT_IS(dt0, POLY_INT32) || DT_IS(dt0, POLY_INT16) || DT_IS(dt0, POLY_INT8);
+  if (DT_IS(dt1, POLY_FLOAT32))
+    return DT_IS(dt0, POLY_FLOAT16) || DT_IS(dt0, POLY_BFLOAT16) || DT_IS(dt0, POLY_UINT16) ||
+           DT_IS(dt0, POLY_UINT8) || DT_IS(dt0, POLY_INT16) || DT_IS(dt0, POLY_INT8);
+  if (DT_IS(dt1, POLY_FLOAT16)) return DT_IS(dt0, POLY_UINT8) || DT_IS(dt0, POLY_INT8);
+  if (DT_IS(dt1, POLY_UINT64))
+    return DT_IS(dt0, POLY_UINT32) || DT_IS(dt0, POLY_UINT16) || DT_IS(dt0, POLY_UINT8);
+  if (DT_IS(dt1, POLY_UINT32)) return DT_IS(dt0, POLY_UINT16) || DT_IS(dt0, POLY_UINT8);
+  if (DT_IS(dt1, POLY_UINT16)) return DT_IS(dt0, POLY_UINT8);
+  if (DT_IS(dt1, POLY_INT64))
+    return DT_IS(dt0, POLY_UINT32) || DT_IS(dt0, POLY_UINT16) || DT_IS(dt0, POLY_UINT8) ||
+           DT_IS(dt0, POLY_INT32) || DT_IS(dt0, POLY_INT16) || DT_IS(dt0, POLY_INT8);
+  if (DT_IS(dt1, POLY_INT32))
+    return DT_IS(dt0, POLY_UINT16) || DT_IS(dt0, POLY_UINT8) || DT_IS(dt0, POLY_INT16) ||
+           DT_IS(dt0, POLY_INT8);
+  if (DT_IS(dt1, POLY_INT16)) return DT_IS(dt0, POLY_UINT8) || DT_IS(dt0, POLY_INT8);
+#undef DT_IS
   return false;
 }
 

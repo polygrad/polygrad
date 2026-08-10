@@ -14,6 +14,7 @@
 #include "../src/device.h"
 #include "../src/instance.h"
 #include "../src/engine/realize.h"
+#include "../src/engine/jit.h"
 #include "../src/engine/schedule.h"
 #include "../src/schedule/rangeify.h"
 #include "../src/nn.h"
@@ -474,6 +475,79 @@ TEST_BACKEND(cuda, gated_output_store_preserves_current_residency) {
   float got = 0.0f;
   ASSERT_INT_EQ(poly_buffer_read(ctx, out, &got, sizeof(got)), 0);
   ASSERT_FLOAT_EQ(got, 11.0f, 0.0f);
+
+  poly_schedule_free(sched);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST_BACKEND(cuda, sparse_program_globals_bind_exact_call_slots) {
+  SKIP_IF_NO_CUDA();
+
+  /* Pinned ProgramInfo records only reachable PARAM slots, and exec_kernel
+   * passes bufs[i] for exactly those globals (uop/ops.py:1138-1158,
+   * engine/realize.py:176-184). Direct CUDA formal parameters are compact, so
+   * sparse slots 0,3,4 must not receive dense CALL slots 0,1,2. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *out = poly_buffer_on_device(ctx, POLY_FLOAT32, 2, POLY_DEVICE_CUDA);
+  PolyUOp *unused1 = poly_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_CUDA);
+  PolyUOp *unused2 = poly_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_CUDA);
+  PolyUOp *src3 = poly_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_CUDA);
+  PolyUOp *src4 = poly_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_CUDA);
+  ASSERT_NOT_NULL(out);
+  ASSERT_NOT_NULL(unused1);
+  ASSERT_NOT_NULL(unused2);
+  ASSERT_NOT_NULL(src3);
+  ASSERT_NOT_NULL(src4);
+  float out_init[2] = {0.0f, 0.0f}, u1 = 11.0f, u2 = 22.0f, v3 = 5.0f, v4 = 4.0f;
+  poly_buffer_set(ctx, out, out_init, sizeof(out_init), POLY_DEVICE_CPU);
+  poly_buffer_set(ctx, unused1, &u1, sizeof(u1), POLY_DEVICE_CPU);
+  poly_buffer_set(ctx, unused2, &u2, sizeof(u2), POLY_DEVICE_CPU);
+  poly_buffer_set(ctx, src3, &v3, sizeof(v3), POLY_DEVICE_CPU);
+  poly_buffer_set(ctx, src4, &v4, sizeof(v4), POLY_DEVICE_CPU);
+
+  PolyDType ptr2 = poly_dtype_ptr(POLY_FLOAT32, 2, POLY_ADDR_GLOBAL);
+  PolyDType ptr1 = poly_dtype_ptr(POLY_FLOAT32, 1, POLY_ADDR_GLOBAL);
+  PolyUOp *p0 = poly_uop0(ctx, POLY_OP_PARAM, ptr2, poly_arg_int(0));
+  PolyUOp *p3 = poly_uop0(ctx, POLY_OP_PARAM, ptr1, poly_arg_int(3));
+  PolyUOp *p4 = poly_uop0(ctx, POLY_OP_PARAM, ptr1, poly_arg_int(4));
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(0));
+  PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(1));
+  PolyUOp *dst0 = poly_uop2(ctx, POLY_OP_INDEX, ptr2, p0, zero, poly_arg_none());
+  PolyUOp *dst1 = poly_uop2(ctx, POLY_OP_INDEX, ptr2, p0, one, poly_arg_none());
+  PolyUOp *idx3 = poly_uop2(ctx, POLY_OP_INDEX, ptr1, p3, zero, poly_arg_none());
+  PolyUOp *idx4 = poly_uop2(ctx, POLY_OP_INDEX, ptr1, p4, zero, poly_arg_none());
+  PolyUOp *load3 = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx3, poly_arg_none());
+  PolyUOp *load4 = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx4, poly_arg_none());
+  PolyUOp *store0 = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, dst0, load3, poly_arg_none());
+  PolyUOp *store1 = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, dst1, load4, poly_arg_none());
+  PolyUOp *body_src[] = {store0, store1};
+  PolyUOp *body = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, body_src, 2, poly_arg_none());
+  PolyUOp *call_src[] = {body, out, unused1, unused2, src3, src4};
+  PolyUOp *call = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, call_src, 6, poly_arg_none());
+  PolyUOp *linear = poly_uop1(ctx, POLY_OP_LINEAR, POLY_VOID, call, poly_arg_none());
+  ASSERT_NOT_NULL(linear);
+
+  PolySchedule *sched = poly_create_schedule_from_linear(ctx, linear, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(sched);
+  ASSERT_INT_EQ(poly_schedule_call_lower(ctx, sched, 0, POLY_DEVICE_CUDA), 0);
+  ASSERT_INT_EQ(sched->run->calls[0].prg.n_params, 3);
+  ASSERT_INT_EQ(
+      sched->run->calls[0].prg.param_to_slot[0], poly_schedule_call_buffer_slot(sched, 0, 0)
+  );
+  ASSERT_INT_EQ(
+      sched->run->calls[0].prg.param_to_slot[1], poly_schedule_call_buffer_slot(sched, 0, 3)
+  );
+  ASSERT_INT_EQ(
+      sched->run->calls[0].prg.param_to_slot[2], poly_schedule_call_buffer_slot(sched, 0, 4)
+  );
+  ASSERT_INT_EQ(poly_run_schedule(ctx, sched, NULL, 0), 0);
+
+  float got[2] = {0.0f, 0.0f};
+  ASSERT_INT_EQ(poly_buffer_read(ctx, out, got, sizeof(got)), 0);
+  ASSERT_FLOAT_EQ(got[0], 5.0f, 0.0f);
+  ASSERT_FLOAT_EQ(got[1], 4.0f, 0.0f);
 
   poly_schedule_free(sched);
   poly_ctx_destroy(ctx);
@@ -1243,7 +1317,7 @@ TEST_BACKEND(cuda, instance_cuda_forward_parity) {
   /* Forward on CPU */
   float input[] = {1.0f, 2.0f};
   float out_cpu[3] = {0};
-  PolyIOBinding io[] = {{"x", input}};
+  PolyIOBinding io[] = {POLY_IO_BINDING_ARRAY("x", input, POLY_FLOAT32)};
   ASSERT_INT_EQ(poly_instance_forward(inst, io, 1), 0);
 
   /* Read CPU output */
@@ -1294,7 +1368,7 @@ TEST_BACKEND(cuda, instance_cuda_roundtrip) {
   }
 
   float input[] = {1.0f, -1.0f};
-  PolyIOBinding io[] = {{"x", input}};
+  PolyIOBinding io[] = {POLY_IO_BINDING_ARRAY("x", input, POLY_FLOAT32)};
   float results[4];
 
   /* CPU -> forward */
@@ -1505,8 +1579,8 @@ TEST_BACKEND(cuda, instance_cuda_large_mlp_train_no_wide_vector_types) {
     y[i] = (float)((i % 13) - 6) * 0.01f;
 
   PolyIOBinding io[] = {
-      {"x", x},
-      {"y", y},
+      POLY_IO_BINDING_ARRAY("x", x, POLY_FLOAT32),
+      POLY_IO_BINDING_ARRAY("y", y, POLY_FLOAT32),
   };
   float loss = 0.0f;
   ASSERT_INT_EQ(poly_instance_train_step(inst, io, 2, &loss), 0);
@@ -1532,8 +1606,8 @@ TEST_BACKEND(cuda, instance_cuda_adam_train_lazily_created_state_stays_on_cuda) 
   float x[] = {1.0f, 2.0f};
   float y[] = {3.0f};
   PolyIOBinding io[] = {
-      {"x", x},
-      {"y", y},
+      POLY_IO_BINDING_ARRAY("x", x, POLY_FLOAT32),
+      POLY_IO_BINDING_ARRAY("y", y, POLY_FLOAT32),
   };
 
   float loss = 0.0f;
@@ -1541,6 +1615,328 @@ TEST_BACKEND(cuda, instance_cuda_adam_train_lazily_created_state_stays_on_cuda) 
   ASSERT_TRUE(isfinite(loss));
 
   poly_instance_free(inst);
+  PASS();
+}
+
+TEST_BACKEND(cuda, jit_graph_batches_programs_and_replays_inputs) {
+  SKIP_IF_NO_CUDA();
+  ASSERT_TRUE(poly_cuda_graph_available());
+
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int64_t dims[1] = {4};
+  float capture_data[4] = {10.0f, 20.0f, 30.0f, 40.0f};
+  float replay_data[4] = {100.0f, 200.0f, 300.0f, 400.0f};
+  float ones_data[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+
+  PolyTensor *capture_host =
+      poly_tensor_from_host(ctx, capture_data, sizeof(capture_data), POLY_FLOAT32, dims, 1);
+  PolyTensor *ones_host =
+      poly_tensor_from_host(ctx, ones_data, sizeof(ones_data), POLY_FLOAT32, dims, 1);
+  PolyTensor *capture = poly_tensor_to_device(ctx, capture_host, POLY_DEVICE_CUDA);
+  PolyTensor *ones = poly_tensor_to_device(ctx, ones_host, POLY_DEVICE_CUDA);
+  ASSERT_NOT_NULL(capture);
+  ASSERT_NOT_NULL(ones);
+  PolyTensor *realized = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &capture, 1, &realized), 0);
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &ones, 1, &realized), 0);
+
+  PolyJit *jit = poly_jit_new(ctx);
+  ASSERT_NOT_NULL(jit);
+  ASSERT_INT_EQ(poly_jit_begin_capture(jit, &capture, 1), 0);
+  PolyTensor *first = poly_tensor_alu2(ctx, POLY_OP_ADD, capture, ones);
+  ASSERT_NOT_NULL(first);
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &first, 1, &realized), 0);
+  PolyTensor *out = poly_tensor_alu2(ctx, POLY_OP_MUL, first, ones);
+  ASSERT_NOT_NULL(out);
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &out, 1, &realized), 0);
+
+  poly_ctx_reset_counters(ctx);
+  ASSERT_INT_EQ(poly_jit_end_capture(jit), 0);
+  PolyUOp *linear = poly_jit_captured_linear(jit);
+  ASSERT_NOT_NULL(linear);
+  ASSERT_EQ(linear->op, POLY_OP_LINEAR);
+  ASSERT_INT_EQ(linear->n_src, 1);
+  PolyUOp *graph_call = linear->src[0];
+  ASSERT_NOT_NULL(graph_call);
+  ASSERT_EQ(graph_call->op, POLY_OP_CALL);
+  ASSERT_INT_EQ(graph_call->n_src, 2);
+  ASSERT_EQ(graph_call->src[1]->op, POLY_OP_PARAM);
+  PolyUOp *graph_fn = graph_call->src[0];
+  ASSERT_EQ(graph_fn->op, POLY_OP_CUSTOM_FUNCTION);
+  ASSERT_TRUE(graph_fn->arg.kind == POLY_ARG_STRING && graph_fn->arg.str &&
+              strcmp(graph_fn->arg.str, "graph") == 0);
+  ASSERT_INT_EQ(graph_fn->n_src, 1);
+  PolyUOp *nested = graph_fn->src[0];
+  ASSERT_EQ(nested->op, POLY_OP_LINEAR);
+  ASSERT_INT_EQ(nested->n_src, 2);
+  ASSERT_EQ(nested->src[0]->src[0]->op, POLY_OP_PROGRAM);
+  ASSERT_EQ(nested->src[1]->src[0]->op, POLY_OP_PROGRAM);
+
+  PolyCtxStats capture_stats = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &capture_stats), 0);
+  ASSERT_INT_EQ(capture_stats.kernel_count, 1);
+  float got[4] = {0};
+  PolyUOp *out_buffer = (PolyUOp *)poly_uop_get_buffer_identity(poly_tensor_uop(out));
+  ASSERT_NOT_NULL(out_buffer);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, out_buffer, got, sizeof(got)), 0);
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(got[i], capture_data[i] + 1.0f, 1e-5f);
+
+  PolyTensor *replay_host =
+      poly_tensor_from_host(ctx, replay_data, sizeof(replay_data), POLY_FLOAT32, dims, 1);
+  PolyTensor *replay = poly_tensor_to_device(ctx, replay_host, POLY_DEVICE_CUDA);
+  ASSERT_NOT_NULL(replay);
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &replay, 1, &realized), 0);
+  poly_ctx_reset_counters(ctx);
+  ASSERT_INT_EQ(poly_jit_run(jit, &replay, 1), 0);
+  PolyCtxStats replay_stats = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &replay_stats), 0);
+  ASSERT_INT_EQ(replay_stats.kernel_count, 1);
+  memset(got, 0, sizeof(got));
+  ASSERT_INT_EQ(poly_buffer_read(ctx, out_buffer, got, sizeof(got)), 0);
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(got[i], replay_data[i] + 1.0f, 1e-5f);
+
+  poly_jit_free(jit);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST_BACKEND(cuda, jit_graph_slot_ranges_match_runtime_aliases) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *arena = poly_buffer(ctx, POLY_UINT8, 256);
+  PolyUOp *old_storage = poly_buffer(ctx, POLY_UINT8, 128);
+  PolyUOp *later_storage = poly_buffer(ctx, POLY_UINT8, 64);
+  ASSERT_NOT_NULL(arena);
+  ASSERT_NOT_NULL(old_storage);
+  ASSERT_NOT_NULL(later_storage);
+
+  int64_t old_arg_vals[2] = {128, 0};
+  int64_t later_arg_vals[2] = {64, 64};
+  PolyUOp *old_src[2] = {arena, old_storage};
+  PolyUOp *later_src[2] = {arena, later_storage};
+  PolyUOp *old_view = poly_uop(
+      ctx, POLY_OP_BUFFER_VIEW, POLY_UINT8, old_src, 2,
+      (PolyArg){.kind = POLY_ARG_INT_TUPLE, .int_tuple = {old_arg_vals, 2}}
+  );
+  PolyUOp *later_view = poly_uop(
+      ctx, POLY_OP_BUFFER_VIEW, POLY_UINT8, later_src, 2,
+      (PolyArg){.kind = POLY_ARG_INT_TUPLE, .int_tuple = {later_arg_vals, 2}}
+  );
+  ASSERT_NOT_NULL(old_view);
+  ASSERT_NOT_NULL(later_view);
+
+  PolyScheduleBufSlot slots[5] = {
+      {.dtype = POLY_UINT8, .numel = 256, .nbytes = 256, .buf_uop = arena,
+       .device = POLY_DEVICE_CUDA, .is_intermediate = true, .is_memory_arena = true},
+      {.dtype = POLY_UINT8, .numel = 128, .nbytes = 128, .buf_uop = old_view,
+       .device = POLY_DEVICE_CUDA, .is_intermediate = true, .has_memory_parent = true,
+       .memory_parent_slot = 0, .memory_offset = 0},
+      {.dtype = POLY_UINT8, .numel = 64, .nbytes = 64, .buf_uop = later_view,
+       .device = POLY_DEVICE_CUDA, .is_intermediate = true, .has_memory_parent = true,
+       .memory_parent_slot = 0, .memory_offset = 64},
+      {.dtype = POLY_UINT8, .numel = 64, .nbytes = 64, .buf_uop = later_view,
+       .device = POLY_DEVICE_CUDA},
+      {.dtype = POLY_UINT8, .numel = 128, .nbytes = 128, .buf_uop = old_view,
+       .device = POLY_DEVICE_CUDA},
+  };
+  PolyScheduleTemplate tpl = {.n_buf_slots = 5, .buf_slots = slots};
+
+  int old_base = -1, later_base = -1, standalone_base = -1, standalone_old_base = -1;
+  int64_t old_start = -1, old_end = -1;
+  int64_t later_start = -1, later_end = -1;
+  int64_t standalone_start = -1, standalone_end = -1;
+  int64_t standalone_old_start = -1, standalone_old_end = -1;
+  ASSERT_INT_EQ(
+      poly_schedule_cuda_graph_slot_range(&tpl, 1, &old_base, &old_start, &old_end), 0
+  );
+  ASSERT_INT_EQ(
+      poly_schedule_cuda_graph_slot_range(
+          &tpl, 2, &later_base, &later_start, &later_end
+      ),
+      0
+  );
+  ASSERT_INT_EQ(
+      poly_schedule_cuda_graph_slot_range(
+          &tpl, 4, &standalone_old_base, &standalone_old_start, &standalone_old_end
+      ),
+      0
+  );
+  ASSERT_INT_EQ(
+      poly_schedule_cuda_graph_slot_range(
+          &tpl, 3, &standalone_base, &standalone_start, &standalone_end
+      ),
+      0
+  );
+
+  ASSERT_INT_EQ(old_base, 0);
+  ASSERT_INT_EQ(old_start, 0);
+  ASSERT_INT_EQ(old_end, 128);
+  ASSERT_INT_EQ(later_base, 0);
+  ASSERT_INT_EQ(later_start, 64);
+  ASSERT_INT_EQ(later_end, 128);
+  ASSERT_TRUE(old_start < later_end && later_start < old_end);
+
+  /* Ordinary BUFFER_VIEW aliases share the underlying storage base and retain
+   * their UOp offsets, matching tinygrad Buffer.base/Buffer.offset. */
+  ASSERT_INT_EQ(standalone_base, 0);
+  ASSERT_INT_EQ(standalone_start, 64);
+  ASSERT_INT_EQ(standalone_end, 128);
+  ASSERT_INT_EQ(standalone_old_base, 0);
+  ASSERT_INT_EQ(standalone_old_start, 0);
+  ASSERT_INT_EQ(standalone_old_end, 128);
+  ASSERT_TRUE(
+      standalone_old_start < standalone_end && standalone_start < standalone_old_end
+  );
+
+  slots[2].memory_offset = -1;
+  ASSERT_INT_EQ(
+      poly_schedule_cuda_graph_slot_range(
+          &tpl, 2, &later_base, &later_start, &later_end
+      ),
+      -1
+  );
+  slots[2].memory_offset = 64;
+  slots[0].has_memory_parent = true;
+  slots[0].memory_parent_slot = 2;
+  slots[0].memory_offset = 0;
+  ASSERT_INT_EQ(
+      poly_schedule_cuda_graph_slot_range(
+          &tpl, 2, &later_base, &later_start, &later_end
+      ),
+      -1
+  );
+  slots[0].has_memory_parent = false;
+  slots[0].memory_parent_slot = 0;
+
+  bool read_outs[1] = {false}, read_ins[1] = {true};
+  bool write_outs[1] = {true}, write_ins[1] = {false};
+  int read_active[1] = {0}, write_active[1] = {0};
+  int read_slots[1] = {4}, write_slots[1] = {3};
+  PolyCallAccess access[2] = {
+      {.n_args = 1, .outs = read_outs, .ins = read_ins,
+       .active_args = read_active, .n_active_args = 1},
+      {.n_args = 1, .outs = write_outs, .ins = write_ins,
+       .active_args = write_active, .n_active_args = 1},
+  };
+  PolyCallIO call_io[2] = {
+      {.n_args = 1, .arg_to_slot = read_slots, .access = &access[0]},
+      {.n_args = 1, .arg_to_slot = write_slots, .access = &access[1]},
+  };
+  PolyScheduleRuntime run = {.call_io = call_io};
+  tpl.n_calls = 2;
+  PolySchedule sched = {.template = &tpl, .run = &run};
+  PolyCudaGraphKernelSpec specs[2] = {0};
+  int **owned_dependencies = NULL;
+  ASSERT_INT_EQ(
+      poly_schedule_cuda_graph_build_dependencies(
+          &sched, 0, 2, specs, &owned_dependencies
+      ),
+      0
+  );
+  ASSERT_NOT_NULL(owned_dependencies);
+  ASSERT_INT_EQ(specs[0].n_dependencies, 0);
+  ASSERT_INT_EQ(specs[1].n_dependencies, 1);
+  ASSERT_INT_EQ(specs[1].dependencies[0], 0);
+  free(owned_dependencies[0]);
+  free(owned_dependencies[1]);
+  free(owned_dependencies);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST_BACKEND(cuda, jit_graph_batches_memory_planned_reductions) {
+  SKIP_IF_NO_CUDA();
+  ASSERT_TRUE(poly_cuda_graph_available());
+
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int64_t dims[2] = {2, 4};
+  int64_t axes[1] = {1};
+  float capture_data[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+  float replay_data[8] = {10, 20, 30, 40, 50, 60, 70, 80};
+  float ones_data[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+
+  PolyTensor *capture_host =
+      poly_tensor_from_host(ctx, capture_data, sizeof(capture_data), POLY_FLOAT32, dims, 2);
+  PolyTensor *replay_host =
+      poly_tensor_from_host(ctx, replay_data, sizeof(replay_data), POLY_FLOAT32, dims, 2);
+  PolyTensor *ones_host =
+      poly_tensor_from_host(ctx, ones_data, sizeof(ones_data), POLY_FLOAT32, dims, 2);
+  PolyTensor *capture = poly_tensor_to_device(ctx, capture_host, POLY_DEVICE_CUDA);
+  PolyTensor *replay = poly_tensor_to_device(ctx, replay_host, POLY_DEVICE_CUDA);
+  PolyTensor *ones = poly_tensor_to_device(ctx, ones_host, POLY_DEVICE_CUDA);
+  ASSERT_NOT_NULL(capture);
+  ASSERT_NOT_NULL(replay);
+  ASSERT_NOT_NULL(ones);
+  PolyTensor *realized = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &capture, 1, &realized), 0);
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &replay, 1, &realized), 0);
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &ones, 1, &realized), 0);
+
+  PolyJit *jit = poly_jit_new(ctx);
+  ASSERT_NOT_NULL(jit);
+  ASSERT_INT_EQ(poly_jit_begin_capture(jit, &capture, 1), 0);
+  PolyTensor *r0 = poly_tensor_sum(ctx, capture, axes, 1, false);
+  PolyTensor *x1 = poly_tensor_alu2(ctx, POLY_OP_ADD, capture, ones);
+  PolyTensor *r1 = poly_tensor_sum(ctx, x1, axes, 1, false);
+  PolyTensor *x2 = poly_tensor_alu2(ctx, POLY_OP_ADD, x1, ones);
+  PolyTensor *r2 = poly_tensor_sum(ctx, x2, axes, 1, false);
+  ASSERT_NOT_NULL(r0);
+  ASSERT_NOT_NULL(r1);
+  ASSERT_NOT_NULL(r2);
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &r0, 1, &realized), 0);
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &r1, 1, &realized), 0);
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &r2, 1, &realized), 0);
+  PolyTensor *r01 = poly_tensor_alu2(ctx, POLY_OP_ADD, r0, r1);
+  PolyTensor *out = poly_tensor_alu2(ctx, POLY_OP_ADD, r01, r2);
+  ASSERT_NOT_NULL(out);
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &out, 1, &realized), 0);
+
+  poly_ctx_reset_counters(ctx);
+  ASSERT_INT_EQ(poly_jit_end_capture(jit), 0);
+  PolyUOp *linear = poly_jit_captured_linear(jit);
+  ASSERT_NOT_NULL(linear);
+  ASSERT_EQ(linear->op, POLY_OP_LINEAR);
+  ASSERT_INT_EQ(linear->n_src, 1);
+  PolyUOp *graph_call = linear->src[0];
+  ASSERT_EQ(graph_call->op, POLY_OP_CALL);
+  ASSERT_EQ(graph_call->src[0]->op, POLY_OP_CUSTOM_FUNCTION);
+  ASSERT_TRUE(
+      graph_call->src[0]->arg.kind == POLY_ARG_STRING && graph_call->src[0]->arg.str &&
+      strcmp(graph_call->src[0]->arg.str, "graph") == 0
+  );
+  PolyUOp *nested = graph_call->src[0]->src[0];
+  ASSERT_EQ(nested->op, POLY_OP_LINEAR);
+  ASSERT_INT_EQ(nested->n_src, 4);
+  for (int i = 0; i < nested->n_src; i++) ASSERT_EQ(nested->src[i]->src[0]->op, POLY_OP_PROGRAM);
+
+  PolyCtxStats capture_stats = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &capture_stats), 0);
+  ASSERT_INT_EQ(capture_stats.kernel_count, 1);
+  float got[2] = {0};
+  PolyUOp *out_buffer = (PolyUOp *)poly_uop_get_buffer_identity(poly_tensor_uop(out));
+  ASSERT_NOT_NULL(out_buffer);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, out_buffer, got, sizeof(got)), 0);
+  ASSERT_FLOAT_EQ(got[0], 42.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(got[1], 90.0f, 1e-5f);
+
+  poly_ctx_reset_counters(ctx);
+  ASSERT_INT_EQ(poly_jit_run(jit, &replay, 1), 0);
+  PolyCtxStats replay_stats = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &replay_stats), 0);
+  ASSERT_INT_EQ(replay_stats.kernel_count, 1);
+  memset(got, 0, sizeof(got));
+  ASSERT_INT_EQ(poly_buffer_read(ctx, out_buffer, got, sizeof(got)), 0);
+  ASSERT_FLOAT_EQ(got[0], 312.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(got[1], 792.0f, 1e-5f);
+
+  poly_jit_free(jit);
+  poly_ctx_destroy(ctx);
   PASS();
 }
 

@@ -1028,9 +1028,8 @@ TEST(autograd, chain_mul_exp2_e2e) {
 }
 
 TEST(autograd, max_reduce_backward_e2e) {
-  /* reduce-MAX gradient requires multi-kernel scheduling (CONTIGUOUS barriers
-   * create BUFFERIZE intermediates). Must use poly_test_realize_buffer_views, not single-kernel
-   * RUN_GRAD_EXPR. */
+  /* Exercise the complete scheduler because the gradient contains nested
+   * reductions. */
   int N = 6;
   float x_d[6] = {1.0f, 3.0f, 2.0f, 4.0f, 5.0f, 6.0f};
   float gx_d[6] = {0};
@@ -1047,6 +1046,12 @@ TEST(autograd, max_reduce_backward_e2e) {
    * This matches the Python frontend which uses leaf._uop (RESHAPE(BUFFER)). */
   PolyUOp *gx = poly_grad(ctx, loss, xr);
   ASSERT_NOT_NULL(gx);
+  int n_grad_topo = 0;
+  PolyUOp **grad_topo = poly_toposort_alloc(ctx, gx, &n_grad_topo);
+  ASSERT_NOT_NULL(grad_topo);
+  for (int i = 0; i < n_grad_topo; i++)
+    ASSERT_TRUE(grad_topo[i]->op != POLY_OP_CONTIGUOUS);
+  poly_toposort_free(grad_topo);
 
   PolyUOp *out = poly_buffer_f32(ctx, N);
   PolyUOp *store = poly_store_val(ctx, out, gx);

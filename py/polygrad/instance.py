@@ -671,13 +671,24 @@ class Instance:
         """Convert {name: array} dict to PolyIOBinding array."""
         n = len(io_dict)
         arr = (_ffi.PolyIOBinding * n)()
+        owners = []
+        lib = _get_lib()
         for i, (name, data) in enumerate(io_dict.items()):
             if isinstance(data, np.ndarray):
-                data = np.ascontiguousarray(data, dtype=np.float32)
+                data = np.ascontiguousarray(data)
             else:
                 data = np.ascontiguousarray(data, dtype=np.float32)
+            dtype_id = lib.poly_dtype_id_by_name(data.dtype.name.encode('utf-8'))
+            if dtype_id < 0:
+                raise TypeError(f"unsupported Instance input dtype: {data.dtype}")
+            owners.append(data)
             arr[i].name = name.encode('utf-8')
-            arr[i].data = data.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+            arr[i].data = ctypes.c_void_p(data.ctypes.data)
+            arr[i].nbytes = data.nbytes
+            arr[i].dtype_id = dtype_id
+        # Converted Python lists/scalars are not otherwise owned after this
+        # method returns. Keep every contiguous array alive through the C call.
+        arr._owners = owners
         return arr, n
 
     def _collect_outputs(self):

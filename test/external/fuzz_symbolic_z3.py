@@ -379,6 +379,29 @@ def bv_floormod(a, b, dtype: PolyDType):
     return a - bv_floordiv(a, b, dtype) * b
 
 
+def bv_cast(value, source_dtype: PolyDType, target_dtype: PolyDType):
+    """Model tinygrad/C integer CAST with fixed-width bit-vector semantics."""
+    source_bool, target_bool = dtype_is_bool(source_dtype), dtype_is_bool(target_dtype)
+    if source_bool:
+        if target_bool:
+            return value
+        return z3.If(
+            value,
+            z3.BitVecVal(1, target_dtype.bitsize, ctx=value.ctx),
+            z3.BitVecVal(0, target_dtype.bitsize, ctx=value.ctx),
+        )
+    if target_bool:
+        return value != z3.BitVecVal(0, source_dtype.bitsize, ctx=value.ctx)
+
+    source_bits, target_bits = source_dtype.bitsize, target_dtype.bitsize
+    if target_bits == source_bits:
+        return value
+    if target_bits < source_bits:
+        return z3.Extract(target_bits - 1, 0, value)
+    extension = target_bits - source_bits
+    return z3.ZeroExt(extension, value) if dtype_is_unsigned(source_dtype) else z3.SignExt(extension, value)
+
+
 class Z3Translator:
     def __init__(self, poly: Poly, fixed_width: bool = False):
         self.poly = poly
@@ -519,6 +542,10 @@ class Z3Translator:
                 out = src[0] != src[1] if z3.is_bool(src[0]) else src[0] ^ src[1]
             elif op == "WHERE":
                 out = z3.If(src[0], src[1], src[2])
+            elif op == "CAST" and self.fixed_width:
+                if node.n_src != 1 or node.dtype.count != 1 or node.src[0].contents.dtype.count != 1:
+                    raise NotImplementedError("non-scalar fixed-width CAST")
+                out = bv_cast(src[0], node.src[0].contents.dtype, node.dtype)
             else:
                 raise NotImplementedError(f"unsupported op {op}")
 
@@ -691,6 +718,8 @@ def prove_equivalent(
     except NotImplementedError as exc:
         return True, f"skipped unsupported: {exc}"
 
+    if a.sort() != b.sort():
+        return False, f"Z3 sort mismatch: original={a.sort()}, rewritten={b.sort()}"
     a = z3.simplify(a)
     b = z3.simplify(b)
 

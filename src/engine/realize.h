@@ -41,6 +41,12 @@ PolySchedule *poly_schedule_with_vars(PolyCtx *ctx, PolyUOp **uops, int n, PolyU
  * tensor output allocation but not input-buffer callification. */
 PolySchedule *poly_schedule_effect_sink(PolyCtx *ctx, PolyUOp *sink);
 
+/* Admission predicate shared by default Tensor realization and retained
+ * physical Instance templates. It follows caller-visible graph inputs while
+ * treating CALL/FUNCTION bodies as opaque, and rejects any BUFFER whose device
+ * remains AUTO. */
+bool poly_tensor_root_has_unplaced_buffer(PolyCtx *ctx, PolyUOp *root);
+
 /* Run an already-effectful concrete SINK using ctx->buffers runtime state. This
  * is the execution layer for imported/Instance STORE/ASSIGN/AFTER graphs. */
 int poly_realize_sink(PolyCtx *ctx, PolyUOp *sink);

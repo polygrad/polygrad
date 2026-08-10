@@ -3400,6 +3400,11 @@ static bool wasm_match_row_reduce_root(PolyUOp *sink, WasmReduceSpec *spec) {
   if (!reduce || reduce->op != POLY_OP_REDUCE || reduce->arg.kind != POLY_ARG_OPS ||
       reduce->arg.ops != POLY_OP_ADD || reduce->n_src != 2)
     return false;
+  /* The specialized row-reduction module emits f32 locals/loads/stores.
+   * Other tinygrad dtypes stay on the general typed WASM renderer. */
+  if (!poly_dtype_eq(poly_dtype_scalar(reduce->dtype), POLY_FLOAT32) ||
+      !poly_dtype_eq(poly_dtype_scalar(reduce->src[0]->dtype), POLY_FLOAT32))
+    return false;
 
   PolyUOp *out_range = end->src[1];
   PolyUOp *red_range = reduce->src[1];
@@ -3439,6 +3444,13 @@ static bool wasm_match_matmul_root(PolyUOp *sink, WasmMatmulSpec *spec) {
     return false;
   PolyUOp *mul = reduce->src[0];
   if (!mul || mul->op != POLY_OP_MUL || mul->n_src != 2) return false;
+  /* wasm_emit_matmul_* is deliberately f32 SIMD. Keep integer and other
+   * tinygrad matmul graphs on the general dtype-aware renderer. */
+  if (!poly_dtype_eq(poly_dtype_scalar(reduce->dtype), POLY_FLOAT32) ||
+      !poly_dtype_eq(poly_dtype_scalar(mul->dtype), POLY_FLOAT32) ||
+      !poly_dtype_eq(poly_dtype_scalar(mul->src[0]->dtype), POLY_FLOAT32) ||
+      !poly_dtype_eq(poly_dtype_scalar(mul->src[1]->dtype), POLY_FLOAT32))
+    return false;
 
   PolyUOp *r_k = reduce->src[1];
   if (end->n_src == 2) {

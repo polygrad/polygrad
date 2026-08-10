@@ -22,6 +22,34 @@
 #include <stdio.h>
 #include <limits.h>
 
+struct PolyCompiledGraphBatch {
+  int first_call;
+  int n_calls;
+  void *backend_graph; /* PolyCudaGraph* for the current supported runtime. */
+};
+
+static bool poly_call_is_graph(PolyUOp *call) {
+  if (!call || call->op != POLY_OP_CALL || call->n_src < 1 || !call->src[0]) return false;
+  PolyUOp *cf = call->src[0];
+  return cf->op == POLY_OP_CUSTOM_FUNCTION && cf->arg.kind == POLY_ARG_STRING && cf->arg.str &&
+         strcmp(cf->arg.str, "graph") == 0 && cf->n_src == 1 && cf->src[0] &&
+         cf->src[0]->op == POLY_OP_LINEAR;
+}
+
+static void poly_compiled_graph_batches_clear(PolyCompiledSchedule *plan) {
+  if (!plan) return;
+#ifdef POLY_HAS_CUDA
+  for (int i = 0; i < plan->n_graph_batches; i++)
+    poly_cuda_graph_destroy((PolyCudaGraph *)plan->graph_batches[i].backend_graph);
+#endif
+  free(plan->graph_batches);
+  free(plan->call_to_graph_batch);
+  plan->graph_batches = NULL;
+  plan->call_to_graph_batch = NULL;
+  plan->n_graph_batches = 0;
+  plan->jit_graph_linear = NULL;
+}
+
 static PolyUOp *poly_program_source_identity(PolyUOp *program) {
   if (!program || program->op != POLY_OP_PROGRAM) return program;
   if (program->n_src >= 3 && program->src[2] && program->src[2]->op == POLY_OP_LINEAR)
@@ -105,7 +133,6 @@ typedef struct {
 
 typedef struct {
   PolyUOp *template_buf;
-  bool needs_zero;
 } PolyScheduleIntermediateDesc;
 
 struct PolyScheduleCacheEntry {
@@ -1989,7 +2016,6 @@ static int poly_schedule_memory_plan(PolyCtx *ctx, PolySchedule *sched) {
         .buf_uop = arena,
         .device = lanes[l].device,
         .is_intermediate = true,
-        .needs_zero = false,
         .external_buf_idx = -1,
         .is_memory_arena = true,
     };
@@ -2013,10 +2039,6 @@ static int poly_schedule_memory_plan(PolyCtx *ctx, PolySchedule *sched) {
     slot->has_memory_parent = true;
     slot->memory_parent_slot = lanes[items[i].lane].arena_slot;
     slot->memory_offset = (int64_t)items[i].offset;
-    if (slot->needs_zero) {
-      slot->has_zero_before_call = true;
-      slot->zero_before_call = items[i].first;
-    }
   }
 
   PolyUOp **new_linear_src = calloc((size_t)tpl->linear->n_src, sizeof(PolyUOp *));
@@ -2462,60 +2484,6 @@ static bool is_intermediate_buffer_uop(PolyUOp *buf) {
          buf->src[0]->op == POLY_OP_LUNIQUE;
 }
 
-static int linear_intermediate_needs_zero(
-    PolyCtx *ctx,
-    PolyUOp *linear,
-    PolyUOp *intermediate,
-    bool *needs_zero
-) {
-  if (!ctx || !linear || linear->op != POLY_OP_LINEAR ||
-      !is_intermediate_buffer_uop(intermediate) || !needs_zero)
-    return -1;
-
-  *needs_zero = false;
-  bool has_producer = false;
-  for (int k = 0; k < linear->n_src; k++) {
-    PolyUOp *call = linear->src[k];
-    int n_args = poly_call_n_buffer_args(call);
-    if (!call || call->op != POLY_OP_CALL || call->n_src < 1 || n_args < 0) return -1;
-    if (n_args == 0) continue;
-
-    bool *outs = calloc((size_t)n_args, sizeof(*outs));
-    bool *ins = calloc((size_t)n_args, sizeof(*ins));
-    if (!outs || !ins || poly_call_get_outs_ins(ctx, call, outs, ins, n_args) != 0) {
-      free(outs);
-      free(ins);
-      return -1;
-    }
-
-    bool call_produces_intermediate = false;
-    for (int i = 0; i < n_args; i++) {
-      PolyUOp *arg = poly_call_buffer_arg(call, i);
-      if (outs[i] && poly_uop_get_buffer_identity(arg) == intermediate) {
-        call_produces_intermediate = true;
-        has_producer = true;
-        break;
-      }
-    }
-    free(outs);
-    free(ins);
-    if (!call_produces_intermediate) continue;
-
-    PolyUOp *body = poly_program_body(call->src[0]);
-    int n_topo = 0;
-    PolyUOp **topo = poly_toposort_alloc(ctx, body, &n_topo);
-    if (!topo) return -1;
-    for (int i = 0; i < n_topo; i++) {
-      if (topo[i]->op == POLY_OP_REDUCE || topo[i]->op == POLY_OP_REDUCE_AXIS) {
-        *needs_zero = true;
-        break;
-      }
-    }
-    poly_toposort_free(topo);
-  }
-  return has_producer ? 0 : -1;
-}
-
 static PolyUOp *poly_schedule_runtime_slot_uop(const PolySchedule *sched, int slot_idx) {
   if (!sched || !sched->template || slot_idx < 0 || slot_idx >= sched->template->n_buf_slots)
     return NULL;
@@ -2959,7 +2927,6 @@ static PolyUOp *make_call_copy_body(
 typedef struct {
   PolyUOp *old_buf;
   PolyUOp *new_buf;
-  bool needs_zero;
 } PolyLinearReplayIntermediate;
 
 static bool linear_replay_arg_is_external_param(PolyUOp *arg, int *slot_out) {
@@ -3043,7 +3010,6 @@ static int linear_replay_add_intermediate(
   idx = (*n_items)++;
   (*items)[idx].old_buf = old_buf;
   (*items)[idx].new_buf = fresh;
-  (*items)[idx].needs_zero = cache_entry->intermediates[entry_idx].needs_zero;
   return idx;
 }
 
@@ -3196,7 +3162,6 @@ static PolySchedule *build_schedule_from_linear_template(
     slot->numel = poly_schedule_buffer_numel(ctx, buf);
     slot->device = poly_uop_device(buf);
     slot->nbytes = slot->numel * poly_dtype_itemsize(slot->dtype);
-    slot->needs_zero = intermediates[i].needs_zero;
   }
 
   PolyUOp **linear_src = calloc((size_t)linear_template->n_src, sizeof(PolyUOp *));
@@ -3401,13 +3366,8 @@ PolySchedule *poly_create_schedule_from_linear_with_vars(
   if (n_intermediate > 0) {
     entry->intermediates = calloc((size_t)n_intermediate, sizeof(*entry->intermediates));
     if (!entry->intermediates) goto cleanup;
-    for (int i = 0; i < n_intermediate; i++) {
+    for (int i = 0; i < n_intermediate; i++)
       entry->intermediates[i].template_buf = intermediate[i];
-      if (linear_intermediate_needs_zero(
-              ctx, entry->linear, intermediate[i], &entry->intermediates[i].needs_zero
-          ) != 0)
-        goto cleanup;
-    }
   }
 
   uint32_t ghash = poly_structural_hash(entry->linear) ^ (POLY_SCHED_CACHE_VERSION * 2654435761u);
@@ -3506,7 +3466,6 @@ static PolySchedule *build_schedule_from_kernel_graph(
                          ? sr.intermediate_itemsizes[b]
                          : (int)sizeof(float);
       slot->nbytes = slot->numel * itemsize;
-      slot->needs_zero = sr.intermediate_needs_zero ? sr.intermediate_needs_zero[b] : true;
     }
   }
 
@@ -4815,7 +4774,6 @@ static PolyScheduleCacheEntry *poly_schedule_cache_entry_from_schedule(
           !slot->buf_uop)
         continue;
       entry->intermediates[j].template_buf = slot->buf_uop;
-      entry->intermediates[j].needs_zero = slot->needs_zero;
       j++;
     }
   }
@@ -5720,15 +5678,41 @@ static int poly_bind_runner_param_slots(
   if (!poly_call_is_copy(call) && device == POLY_DEVICE_WEBGPU)
     return webgpu_fill_param_slots(ctx, schedule, call, call_index, runner);
 
-  int n_params = poly_call_n_buffer_args(call);
-  runner->n_params = n_params;
-  if (n_params <= 0) return 0;
-  runner->param_to_slot = malloc((size_t)n_params * sizeof(int));
-  if (!runner->param_to_slot) return -1;
-  for (int i = 0; i < n_params; i++) {
-    runner->param_to_slot[i] = poly_schedule_call_buffer_slot(schedule, call_index, i);
-    if (runner->param_to_slot[i] < 0) return -1;
+  int n_call_params = poly_call_n_buffer_args(call);
+  const int *program_globals = NULL;
+  int n_params = n_call_params;
+  if (!poly_call_is_copy(call) && (device == POLY_DEVICE_CUDA || device == POLY_DEVICE_HIP)) {
+    /* Pinned exec_kernel passes only ast.arg.globals to direct GPU runtimes
+     * (engine/realize.py:176-184). CUDA/HIP module signatures likewise contain
+     * only reachable PARAMs, unlike the CPU wrapper that indexes the complete
+     * dense CALL argument array itself. */
+    const PolyProgramInfo *info = poly_program_info(ctx, runner->program);
+    if (!info || info->n_globals < 0 || info->n_globals > n_call_params ||
+        (info->n_globals > 0 && !info->globals))
+      return -1;
+    program_globals = info->globals;
+    n_params = info->n_globals;
   }
+  if (n_params <= 0) {
+    runner->n_params = 0;
+    return 0;
+  }
+  int *param_to_slot = malloc((size_t)n_params * sizeof(*param_to_slot));
+  if (!param_to_slot) return -1;
+  for (int i = 0; i < n_params; i++) {
+    int call_param = program_globals ? program_globals[i] : i;
+    if (call_param < 0 || call_param >= n_call_params) {
+      free(param_to_slot);
+      return -1;
+    }
+    param_to_slot[i] = poly_schedule_call_buffer_slot(schedule, call_index, call_param);
+    if (param_to_slot[i] < 0) {
+      free(param_to_slot);
+      return -1;
+    }
+  }
+  runner->n_params = n_params;
+  runner->param_to_slot = param_to_slot;
   return 0;
 }
 
@@ -7113,6 +7097,77 @@ cleanup:
   return NULL;
 }
 
+int poly_compiled_schedule_set_jit_graph(
+    PolyCompiledSchedule *plan,
+    PolyUOp *graph_linear
+) {
+  if (!plan || !plan->template || !plan->template->linear || !graph_linear ||
+      graph_linear->op != POLY_OP_LINEAR)
+    return -1;
+  poly_compiled_graph_batches_clear(plan);
+
+  int n_batches = 0, flat_index = 0;
+  for (int i = 0; i < graph_linear->n_src; i++) {
+    PolyUOp *outer = graph_linear->src[i];
+    if (poly_call_is_graph(outer)) {
+      PolyUOp *nested = outer->src[0]->src[0];
+      if (nested->n_src <= 1) return -1;
+      for (int j = 0; j < nested->n_src; j++) {
+        if (flat_index + j >= plan->template->n_calls ||
+            nested->src[j] != plan->template->linear->src[flat_index + j] ||
+            !nested->src[j] || nested->src[j]->op != POLY_OP_CALL ||
+            nested->src[j]->n_src < 1 || !nested->src[j]->src[0] ||
+            nested->src[j]->src[0]->op != POLY_OP_PROGRAM)
+          return -1;
+      }
+      flat_index += nested->n_src;
+      n_batches++;
+    } else {
+      if (flat_index >= plan->template->n_calls ||
+          outer != plan->template->linear->src[flat_index])
+        return -1;
+      flat_index++;
+    }
+  }
+  if (flat_index != plan->template->n_calls) return -1;
+  plan->jit_graph_linear = graph_linear;
+  if (n_batches == 0) return 0;
+#ifndef POLY_HAS_CUDA
+  return -1;
+#else
+  if (plan->device != POLY_DEVICE_CUDA || !poly_cuda_graph_available()) return -1;
+  plan->graph_batches = calloc((size_t)n_batches, sizeof(*plan->graph_batches));
+  plan->call_to_graph_batch = malloc((size_t)plan->template->n_calls * sizeof(int));
+  if (!plan->graph_batches || !plan->call_to_graph_batch) {
+    poly_compiled_graph_batches_clear(plan);
+    return -1;
+  }
+  for (int i = 0; i < plan->template->n_calls; i++)
+    plan->call_to_graph_batch[i] = -1;
+
+  int batch_index = 0;
+  flat_index = 0;
+  for (int i = 0; i < graph_linear->n_src; i++) {
+    PolyUOp *outer = graph_linear->src[i];
+    if (!poly_call_is_graph(outer)) {
+      flat_index++;
+      continue;
+    }
+    PolyUOp *nested = outer->src[0]->src[0];
+    plan->graph_batches[batch_index] = (PolyCompiledGraphBatch){
+        .first_call = flat_index,
+        .n_calls = nested->n_src,
+        .backend_graph = NULL,
+    };
+    plan->call_to_graph_batch[flat_index] = batch_index;
+    flat_index += nested->n_src;
+    batch_index++;
+  }
+  plan->n_graph_batches = n_batches;
+  return 0;
+#endif
+}
+
 /* Infer the execution device from attached runtime buffers, matching the
  * graph-driven realize path. HOST buffers never force the executor. */
 PolyDevice poly_schedule_infer_device(PolyCtx *ctx, const PolySchedule *sched) {
@@ -7688,89 +7743,6 @@ static uint32_t poly_schedule_lower_env_stamp(void) {
   return stamp;
 }
 
-static void poly_zero_buffer(PolyBuffer *h) {
-  if (!h || !h->ptr) return;
-  if (h->device == POLY_DEVICE_CPU || h->device == POLY_DEVICE_INTERP
-#ifdef POLY_HAS_X86
-      || h->device == POLY_DEVICE_X86
-#endif
-#ifdef __EMSCRIPTEN__
-      || h->device == POLY_DEVICE_WASM
-#endif
-  ) {
-    memset(h->ptr, 0, h->nbytes);
-  }
-#ifdef POLY_HAS_CUDA
-  else if (h->device == POLY_DEVICE_CUDA) {
-    poly_cuda_memset((unsigned long long)(uintptr_t)h->ptr, 0, h->nbytes);
-  }
-#endif
-#ifdef POLY_HAS_HIP
-  else if (h->device == POLY_DEVICE_HIP) {
-    poly_hip_memset(h->ptr, 0, h->nbytes);
-  }
-#endif
-#ifdef __EMSCRIPTEN__
-  else if (h->device == POLY_DEVICE_WEBGPU) {
-    poly_webgpu_memset_zero((uintptr_t)h->ptr, h->nbytes);
-  }
-#endif
-}
-
-static void poly_zero_schedule_slot(
-    PolyCtx *ctx,
-    PolySchedule *sched,
-    PolyScheduleRuntime *run,
-    int slot_idx
-) {
-  if (!ctx || !sched || !run || !run->slot_to_data || slot_idx < 0 ||
-      slot_idx >= sched->template->n_buf_slots)
-    return;
-  PolyScheduleBufSlot *slot = &sched->template->buf_slots[slot_idx];
-  if (!slot->is_intermediate || !slot->needs_zero || !run->slot_to_data[slot_idx]) return;
-  size_t nbytes = (size_t)(slot->nbytes > 0 ? slot->nbytes : (int64_t)sizeof(float));
-  PolyDevice dev =
-      poly_schedule_runtime_slot_allocated_device(sched->template, run, slot_idx, run->device);
-  const PolyBackendDesc *be = poly_backend_get(dev);
-  PolyBuffer tmp = {
-      .ptr = run->slot_to_data[slot_idx],
-      .nbytes = nbytes,
-      .device = dev,
-      .owned = false,
-      .allocator = be ? be->get_allocator() : NULL,
-      .src = NULL,
-      .valid = true,
-  };
-  poly_zero_buffer(&tmp);
-}
-
-static void poly_zero_schedule_initial_intermediates(
-    PolyCtx *ctx,
-    PolySchedule *sched,
-    PolyScheduleRuntime *run
-) {
-  if (!sched || !run) return;
-  for (int s = 0; s < sched->template->n_buf_slots; s++) {
-    PolyScheduleBufSlot *slot = &sched->template->buf_slots[s];
-    if (!slot->is_intermediate || !slot->needs_zero || slot->has_zero_before_call) continue;
-    poly_zero_schedule_slot(ctx, sched, run, s);
-  }
-}
-
-static void poly_zero_schedule_call_intermediates(
-    PolyCtx *ctx,
-    PolySchedule *sched,
-    PolyScheduleRuntime *run,
-    int call_index
-) {
-  if (!sched || !run) return;
-  for (int s = 0; s < sched->template->n_buf_slots; s++) {
-    PolyScheduleBufSlot *slot = &sched->template->buf_slots[s];
-    if (!slot->is_intermediate || !slot->needs_zero || !slot->has_zero_before_call) continue;
-    if (slot->zero_before_call == call_index) poly_zero_schedule_slot(ctx, sched, run, s);
-  }
-}
-
 static int poly_schedule_runtime_prepare(PolyCtx *ctx, PolySchedule *sched, PolyDevice device) {
   if (!ctx || !sched) return -1;
 
@@ -8063,6 +8035,77 @@ static int poly_schedule_call_run_prepared(
   return 0;
 }
 
+static int poly_schedule_prepare_runner_call_args(
+    PolyCtx *ctx,
+    PolySchedule *sched,
+    int call_index,
+    PolyRunner *runner,
+    PolyDevice device,
+    void **slot_to_data,
+    void **args,
+    PolyVarBinding *merged_vars,
+    int n_all,
+    int *var_int_idx,
+    int **var_int_storage,
+    int *var_int_cap,
+    const char *label,
+    int *n_args_out
+) {
+  if (!ctx || !sched || !runner || !slot_to_data || !args || !var_int_idx || !var_int_storage ||
+      !var_int_cap || !n_args_out)
+    return -1;
+  if (!label) label = "run_schedule";
+  PolyUOp *call = poly_schedule_call(sched, call_index);
+  int n_vars = poly_call_n_var_args(call);
+  *n_args_out = runner->n_params + n_vars;
+
+  if (runner->kind == POLY_RUNNER_COPY &&
+      poly_copy_runner_update_identities(ctx, sched, call_index, runner) != 0)
+    return -1;
+
+  for (int i = 0; i < runner->n_params; i++) {
+    int slot = runner->param_to_slot[i];
+    if (slot >= 0 && slot < sched->template->n_buf_slots) args[i] = slot_to_data[slot];
+    if (!args[i] && !runner_copy_param_allows_null(runner, i)) {
+      fprintf(
+          stderr, "polygrad: %s: missing data for param %d (slot %d) in kernel %d\n", label, i,
+          slot, call_index
+      );
+      return -1;
+    }
+  }
+  for (int v = 0; v < n_vars; v++) {
+    PolyUOp *var = poly_call_var_arg(call, v);
+    bool found = false;
+    for (int vb = 0; vb < n_all; vb++) {
+      if (merged_vars[vb].var != var) continue;
+      if (*var_int_idx >= *var_int_cap) {
+        int new_cap = (*var_int_cap > 0) ? (*var_int_cap * 2) : 16;
+        while (*var_int_idx >= new_cap) new_cap *= 2;
+        int *new_storage = realloc(*var_int_storage, (size_t)new_cap * sizeof(int));
+        if (!new_storage) return -1;
+        *var_int_storage = new_storage;
+        *var_int_cap = new_cap;
+      }
+      (*var_int_storage)[*var_int_idx] = (int)merged_vars[vb].value;
+      args[runner->n_params + v] = &(*var_int_storage)[*var_int_idx];
+      (*var_int_idx)++;
+      found = true;
+      break;
+    }
+    if (!found) {
+      fprintf(stderr, "polygrad: %s: no binding for DEFINE_VAR in kernel %d\n", label, call_index);
+      return -1;
+    }
+  }
+
+  if (poly_resolve_runner_launch_dims(runner, merged_vars, n_all) != 0) {
+    fprintf(stderr, "polygrad: %s: failed to resolve launch dims for kernel %d\n", label, call_index);
+    return -1;
+  }
+  return 0;
+}
+
 static int poly_schedule_execute_runner_call(
     PolyCtx *ctx,
     PolySchedule *sched,
@@ -8093,57 +8136,12 @@ static int poly_schedule_execute_runner_call(
   }
 
   int n_vars = poly_call_n_var_args(call);
-  int n_args = runner->n_params + n_vars;
-
-  if (runner->kind == POLY_RUNNER_COPY &&
-      poly_copy_runner_update_identities(ctx, sched, call_index, runner) != 0)
+  int n_args = 0;
+  if (poly_schedule_prepare_runner_call_args(
+          ctx, sched, call_index, runner, device, slot_to_data, args, merged_vars, n_all,
+          var_int_idx, var_int_storage, var_int_cap, label, &n_args
+      ) != 0)
     return -1;
-
-  for (int i = 0; i < runner->n_params; i++) {
-    int slot = runner->param_to_slot[i];
-    if (slot >= 0 && slot < sched->template->n_buf_slots) args[i] = slot_to_data[slot];
-    if (!args[i] && !runner_copy_param_allows_null(runner, i)) {
-      fprintf(
-          stderr, "polygrad: %s: missing data for param %d (slot %d) in kernel %d\n", label, i,
-          slot, call_index
-      );
-      return -1;
-    }
-  }
-  if (n_vars > 0) {
-    for (int v = 0; v < n_vars; v++) {
-      PolyUOp *var = poly_call_var_arg(call, v);
-      bool found = false;
-      for (int vb = 0; vb < n_all; vb++) {
-        if (merged_vars[vb].var == var) {
-          if (*var_int_idx >= *var_int_cap) {
-            int new_cap = (*var_int_cap > 0) ? (*var_int_cap * 2) : 16;
-            while (*var_int_idx >= new_cap) new_cap *= 2;
-            int *new_storage = realloc(*var_int_storage, (size_t)new_cap * sizeof(int));
-            if (!new_storage) return -1;
-            *var_int_storage = new_storage;
-            *var_int_cap = new_cap;
-          }
-          (*var_int_storage)[*var_int_idx] = (int)merged_vars[vb].value;
-          args[runner->n_params + v] = &(*var_int_storage)[*var_int_idx];
-          (*var_int_idx)++;
-          found = true;
-          break;
-        }
-      }
-      if (!found) {
-        fprintf(stderr, "polygrad: %s: no binding for DEFINE_VAR in kernel %d\n", label, call_index);
-        return -1;
-      }
-    }
-  }
-
-  if (poly_resolve_runner_launch_dims(runner, merged_vars, n_all) != 0) {
-    fprintf(
-        stderr, "polygrad: %s: failed to resolve launch dims for kernel %d\n", label, call_index
-    );
-    return -1;
-  }
 
   if (compiled_debug_plan && compiled_debug_plan->device == POLY_DEVICE_WEBGPU)
     debug_dump_webgpu_runner_args(compiled_debug_plan, exec_step, call_index, runner, args);
@@ -8204,8 +8202,6 @@ int poly_schedule_call_run(
   if (poly_schedule_runtime_prepare(ctx, schedule, device) != 0) return -1;
   PolyDevice item_device = poly_call_device(ctx, schedule, call_index, device);
   if (poly_schedule_call_lower(ctx, schedule, call_index, item_device) != 0) return -1;
-  poly_zero_schedule_initial_intermediates(ctx, schedule, schedule->run);
-  poly_zero_schedule_call_intermediates(ctx, schedule, schedule->run, call_index);
 
   int n_all = poly_schedule_merge_runtime_vars(schedule, var_bindings, n_var_bindings);
   int var_int_idx = 0;
@@ -8242,8 +8238,7 @@ int poly_run_schedule(
   double t_prepare = timing ? poly_now_ms() : 0.0;
   double t_slots = timing ? poly_now_ms() : 0.0;
 
-  poly_zero_schedule_initial_intermediates(ctx, schedule, schedule->run);
-  double t_zero = timing ? poly_now_ms() : 0.0;
+  double t_zero = t_slots;
 
   int n_all = poly_schedule_merge_runtime_vars(schedule, var_bindings, n_var_bindings);
   if (n_all < 0) return -1;
@@ -8264,7 +8259,6 @@ int poly_run_schedule(
       ret = -1;
       break;
     }
-    poly_zero_schedule_call_intermediates(ctx, schedule, schedule->run, k);
     if (poly_debug_at_least(7)) {
       fprintf(
           stderr, "[polygrad:run_schedule] step=%d/%d call=%d run begin\n", k + 1,
@@ -8294,6 +8288,388 @@ int poly_run_schedule(
   }
   return ret;
 }
+
+#ifdef POLY_HAS_CUDA
+typedef struct {
+  int base_slot;
+  int64_t start;
+  int64_t end;
+  int node;
+} PolyGraphDepRange;
+
+typedef struct {
+  PolyGraphDepRange *items;
+  int n;
+  int cap;
+} PolyGraphDepRangeMap;
+
+static bool poly_graph_ranges_overlap(
+    const PolyGraphDepRange *range,
+    int base_slot,
+    int64_t start,
+    int64_t end
+) {
+  return range && range->base_slot == base_slot && range->start < end && start < range->end;
+}
+
+static int poly_graph_range_map_append(
+    PolyGraphDepRangeMap *map,
+    PolyGraphDepRange range
+) {
+  if (!map || range.start >= range.end) return -1;
+  if (map->n >= map->cap) {
+    int new_cap = map->cap ? map->cap * 2 : 16;
+    PolyGraphDepRange *grown = realloc(map->items, (size_t)new_cap * sizeof(*grown));
+    if (!grown) return -1;
+    map->items = grown;
+    map->cap = new_cap;
+  }
+  map->items[map->n++] = range;
+  return 0;
+}
+
+/* Pinned DepsTracker subtracts a new write range from both prior read and
+ * write maps before publishing the new writer (tinygrad/engine/jit.py:90-116). */
+static int poly_graph_range_map_remove_overlap(
+    PolyGraphDepRangeMap *map,
+    int base_slot,
+    int64_t start,
+    int64_t end
+) {
+  if (!map) return -1;
+  PolyGraphDepRangeMap kept = {0};
+  for (int i = 0; i < map->n; i++) {
+    PolyGraphDepRange range = map->items[i];
+    if (!poly_graph_ranges_overlap(&range, base_slot, start, end)) {
+      if (poly_graph_range_map_append(&kept, range) != 0) goto fail;
+      continue;
+    }
+    if (range.start < start) {
+      PolyGraphDepRange left = range;
+      left.end = start < range.end ? start : range.end;
+      if (left.start < left.end && poly_graph_range_map_append(&kept, left) != 0) goto fail;
+    }
+    if (end < range.end) {
+      PolyGraphDepRange right = range;
+      right.start = end > range.start ? end : range.start;
+      if (right.start < right.end && poly_graph_range_map_append(&kept, right) != 0) goto fail;
+    }
+  }
+  free(map->items);
+  *map = kept;
+  return 0;
+
+fail:
+  free(kept.items);
+  return -1;
+}
+
+static int poly_graph_add_nonnegative_offset(int64_t *total, int64_t add) {
+  if (!total || *total < 0 || add < 0 || add > INT64_MAX - *total) return -1;
+  *total += add;
+  return 0;
+}
+
+static int poly_graph_view_base_offset(
+    PolyUOp *uop,
+    PolyUOp **base_uop,
+    int64_t *offset
+) {
+  if (!uop || !base_uop || !offset) return -1;
+  int64_t total = 0;
+  while (uop->op == POLY_OP_BUFFER_VIEW) {
+    if (uop->n_src < 1 || !uop->src[0]) return -1;
+    int64_t view_offset = 0;
+    if (uop->arg.kind == POLY_ARG_INT_TUPLE && uop->arg.int_tuple.n >= 2) {
+      if (!uop->arg.int_tuple.vals) return -1;
+      view_offset = uop->arg.int_tuple.vals[1];
+    }
+    if (poly_graph_add_nonnegative_offset(&total, view_offset) != 0) return -1;
+    uop = uop->src[0];
+  }
+  *base_uop = uop;
+  *offset = total;
+  return 0;
+}
+
+static int poly_graph_canonical_base_slot(
+    const PolyScheduleTemplate *tpl,
+    PolyUOp *base_uop,
+    int fallback_slot
+) {
+  if (!tpl || !base_uop || fallback_slot < 0 || fallback_slot >= tpl->n_buf_slots)
+    return -1;
+  int candidate = -1;
+  for (int i = 0; i < tpl->n_buf_slots; i++) {
+    PolyUOp *slot_uop = tpl->buf_slots[i].buf_uop;
+    if (slot_uop == base_uop) return i;
+    PolyUOp *slot_base = NULL;
+    int64_t ignored_offset = 0;
+    if (poly_graph_view_base_offset(slot_uop, &slot_base, &ignored_offset) == 0 &&
+        slot_base == base_uop && candidate < 0)
+      candidate = i;
+  }
+  return candidate >= 0 ? candidate : fallback_slot;
+}
+
+int poly_schedule_cuda_graph_slot_range(
+    const PolyScheduleTemplate *tpl,
+    int slot,
+    int *base_slot,
+    int64_t *start,
+    int64_t *end
+) {
+  if (!tpl || slot < 0 || slot >= tpl->n_buf_slots || !base_slot || !start || !end) return -1;
+  int base = slot;
+  int64_t offset = 0;
+  int depth = 0;
+  while (tpl->buf_slots[base].has_memory_parent) {
+    if (depth++ >= tpl->n_buf_slots) return -1;
+    int parent = tpl->buf_slots[base].memory_parent_slot;
+    if (parent < 0 || parent >= tpl->n_buf_slots || parent == base) return -1;
+    if (poly_graph_add_nonnegative_offset(&offset, tpl->buf_slots[base].memory_offset) != 0)
+      return -1;
+    base = parent;
+  }
+  PolyUOp *storage_base = NULL;
+  int64_t view_offset = 0;
+  if (poly_graph_view_base_offset(
+          tpl->buf_slots[base].buf_uop, &storage_base, &view_offset
+      ) != 0 ||
+      poly_graph_add_nonnegative_offset(&offset, view_offset) != 0)
+    return -1;
+  base = poly_graph_canonical_base_slot(tpl, storage_base, base);
+  if (base < 0) return -1;
+  int64_t nbytes = tpl->buf_slots[slot].nbytes > 0 ? tpl->buf_slots[slot].nbytes : 1;
+  if (nbytes > INT64_MAX - offset) return -1;
+  *base_slot = base;
+  *start = offset;
+  *end = offset + nbytes;
+  return 0;
+}
+
+static int poly_graph_append_unique_dependency(int *items, int *n_items, int cap, int node) {
+  if (!items || !n_items || node < 0) return -1;
+  for (int i = 0; i < *n_items; i++)
+    if (items[i] == node) return 0;
+  if (*n_items >= cap) return -1;
+  items[(*n_items)++] = node;
+  return 0;
+}
+
+static int poly_graph_collect_waits(
+    const PolyGraphDepRangeMap *map,
+    int base_slot,
+    int64_t start,
+    int64_t end,
+    int *waits,
+    int *n_waits,
+    int cap_waits
+) {
+  if (!map) return -1;
+  for (int i = 0; i < map->n; i++) {
+    if (!poly_graph_ranges_overlap(&map->items[i], base_slot, start, end)) continue;
+    if (poly_graph_append_unique_dependency(waits, n_waits, cap_waits, map->items[i].node) != 0)
+      return -1;
+  }
+  return 0;
+}
+
+int poly_schedule_cuda_graph_build_dependencies(
+    PolySchedule *sched,
+    int first_call,
+    int n_calls,
+    PolyCudaGraphKernelSpec *specs,
+    int ***owned_dependencies_out
+) {
+  if (!sched || first_call < 0 || n_calls <= 0 || !specs || !owned_dependencies_out) return -1;
+  int **owned = calloc((size_t)n_calls, sizeof(*owned));
+  if (!owned) return -1;
+  PolyGraphDepRangeMap reads = {0}, writes = {0};
+
+  for (int local = 0; local < n_calls; local++) {
+    int call_index = first_call + local;
+    const PolyCallIO *io = poly_schedule_call_io(sched, call_index);
+    const PolyCallAccess *access = io ? io->access : NULL;
+    if (!io || !access) goto fail;
+    int *waits = calloc((size_t)(local > 0 ? local : 1), sizeof(*waits));
+    if (!waits) goto fail;
+    int n_waits = 0;
+
+    for (int ai = 0; ai < access->n_active_args; ai++) {
+      int arg = access->active_args[ai];
+      int slot = io->arg_to_slot[arg], base = -1;
+      int64_t start = 0, end = 0;
+      if (poly_schedule_cuda_graph_slot_range(sched->template, slot, &base, &start, &end) != 0 ||
+          poly_graph_collect_waits(&writes, base, start, end, waits, &n_waits, local) != 0 ||
+          (access->outs[arg] &&
+           poly_graph_collect_waits(&reads, base, start, end, waits, &n_waits, local) != 0)) {
+        free(waits);
+        goto fail;
+      }
+    }
+
+    owned[local] = waits;
+    specs[local].dependencies = waits;
+    specs[local].n_dependencies = n_waits;
+
+    for (int ai = 0; ai < access->n_active_args; ai++) {
+      int arg = access->active_args[ai];
+      int slot = io->arg_to_slot[arg], base = -1;
+      int64_t start = 0, end = 0;
+      if (poly_schedule_cuda_graph_slot_range(sched->template, slot, &base, &start, &end) != 0) goto fail;
+      PolyGraphDepRange range = {.base_slot = base, .start = start, .end = end, .node = local};
+      if (access->outs[arg]) {
+        if (poly_graph_range_map_remove_overlap(&writes, base, start, end) != 0 ||
+            poly_graph_range_map_remove_overlap(&reads, base, start, end) != 0 ||
+            poly_graph_range_map_append(&writes, range) != 0)
+          goto fail;
+      } else if (poly_graph_range_map_append(&reads, range) != 0) {
+        goto fail;
+      }
+    }
+  }
+
+  free(reads.items);
+  free(writes.items);
+  *owned_dependencies_out = owned;
+  return 0;
+
+fail:
+  for (int i = 0; i < n_calls; i++)
+    free(owned[i]);
+  free(owned);
+  free(reads.items);
+  free(writes.items);
+  return -1;
+}
+
+static int poly_ctx_record_graph_stats(
+    PolyCtx *ctx,
+    PolySchedule *sched,
+    int first_call,
+    int n_calls,
+    const PolyVarBinding *bindings,
+    int n_bindings,
+    double elapsed_ms
+) {
+  if (!ctx || ctx->stats_suppression_depth > 0) return 0;
+  uint64_t ops = 0, mem = 0;
+  for (int i = 0; i < n_calls; i++) {
+    int call_index = first_call + i;
+    uint64_t call_ops = 0, call_mem = 0;
+    PolyRunner *runner = &sched->run->calls[call_index].prg;
+    if (poly_schedule_infer_call_estimates(
+            ctx, sched, call_index, runner, bindings, n_bindings, &call_ops, &call_mem
+        ) != 0)
+      return -1;
+    ops = poly_counter_add_sat(ops, call_ops);
+    mem = poly_counter_add_sat(mem, call_mem);
+  }
+  ctx->kernel_count = poly_counter_add_sat(ctx->kernel_count, 1);
+  ctx->global_ops = poly_counter_add_sat(ctx->global_ops, ops);
+  ctx->global_mem = poly_counter_add_sat(ctx->global_mem, mem);
+  if (elapsed_ms >= 0.0) ctx->time_sum_s += elapsed_ms / 1000.0;
+  return 0;
+}
+
+static int poly_run_compiled_cuda_graph_batch(
+    PolyCompiledSchedule *plan,
+    PolySchedule *sched,
+    PolyCompiledGraphBatch *batch,
+    bool *ctx_slots,
+    int *var_int_idx,
+    int n_all
+) {
+  if (!plan || !sched || !batch || !ctx_slots || !var_int_idx || batch->n_calls <= 1 ||
+      plan->device != POLY_DEVICE_CUDA)
+    return -1;
+  PolyScheduleRuntime *run = plan->run;
+  int needed_vars = *var_int_idx;
+  for (int i = 0; i < batch->n_calls; i++)
+    needed_vars += poly_call_n_var_args(poly_schedule_call(sched, batch->first_call + i));
+  if (needed_vars > run->var_int_cap) {
+    int new_cap = run->var_int_cap > 0 ? run->var_int_cap : 16;
+    while (new_cap < needed_vars) new_cap *= 2;
+    int *grown = realloc(run->var_int_storage, (size_t)new_cap * sizeof(*grown));
+    if (!grown) return -1;
+    run->var_int_storage = grown;
+    run->var_int_cap = new_cap;
+  }
+
+  PolyCudaGraphKernelSpec *specs = calloc((size_t)batch->n_calls, sizeof(*specs));
+  if (!specs) return -1;
+  int **owned_dependencies = NULL;
+  int ret = -1;
+  for (int local = 0; local < batch->n_calls; local++) {
+    int call_index = batch->first_call + local;
+    PolyRunner *runner = &run->calls[call_index].prg;
+    if (runner->kind != POLY_RUNNER_COMPILED || !runner->handle) goto cleanup;
+    memset(ctx_slots, 0, (size_t)run->n_ctx_slots * sizeof(bool));
+    bool used_ctx_slots = false;
+    if (poly_prepare_missing_compiled_call_slots(
+            plan->ctx, sched, call_index, plan->device, run->slot_to_data, ctx_slots,
+            &used_ctx_slots
+        ) != 0)
+      goto cleanup;
+    int n_args = 0;
+    if (poly_schedule_prepare_runner_call_args(
+            plan->ctx, sched, call_index, runner, plan->device, run->slot_to_data,
+            run->kernel_args[call_index], run->merged_vars, n_all, var_int_idx,
+            &run->var_int_storage, &run->var_int_cap, "cuda_graph", &n_args
+        ) != 0)
+      goto cleanup;
+    CudaRunnerHandle *handle = (CudaRunnerHandle *)runner->handle;
+    specs[local] = (PolyCudaGraphKernelSpec){
+        .program = handle->prog,
+        .args = run->kernel_args[call_index],
+        .n_buffer_args = runner->n_params,
+        .n_args = n_args,
+        .grid = {runner->grid[0], runner->grid[1], runner->grid[2]},
+        .block = {runner->block[0], runner->block[1], runner->block[2]},
+    };
+  }
+  if (poly_schedule_cuda_graph_build_dependencies(
+          sched, batch->first_call, batch->n_calls, specs, &owned_dependencies
+      ) != 0)
+    goto cleanup;
+
+  bool stats_timing = plan->ctx->stats_suppression_depth == 0 && poly_debug_at_least(2);
+  double t0 = stats_timing ? poly_now_ms() : 0.0;
+  PolyCudaGraph *graph = (PolyCudaGraph *)batch->backend_graph;
+  if (!graph) {
+    graph = poly_cuda_graph_create(specs, batch->n_calls);
+    if (!graph) goto cleanup;
+    batch->backend_graph = graph;
+  } else if (poly_cuda_graph_update(graph, specs, batch->n_calls) != 0) {
+    goto cleanup;
+  }
+  if (poly_cuda_graph_launch(graph) != 0) goto cleanup;
+  if (stats_timing && poly_cuda_sync() != 0) goto cleanup;
+  double t1 = stats_timing ? poly_now_ms() : 0.0;
+  plan->ctx->launch_count++;
+  if (poly_ctx_record_graph_stats(
+          plan->ctx, sched, batch->first_call, batch->n_calls, run->merged_vars, n_all,
+          stats_timing ? t1 - t0 : -1.0
+      ) != 0)
+    goto cleanup;
+  for (int i = 0; i < batch->n_calls; i++)
+    if (poly_commit_call_buffer_writes(
+            plan->ctx, sched, batch->first_call + i, plan->device, NULL
+        ) != 0)
+      goto cleanup;
+  ret = 0;
+
+cleanup:
+  if (owned_dependencies) {
+    for (int i = 0; i < batch->n_calls; i++)
+      free(owned_dependencies[i]);
+    free(owned_dependencies);
+  }
+  free(specs);
+  return ret;
+}
+#endif
 
 static int poly_run_compiled_schedule_impl(
     PolyCompiledSchedule *plan,
@@ -8358,8 +8734,7 @@ static int poly_run_compiled_schedule_impl(
   bool used_ctx_slots = false;
   double t_slots = timing ? poly_now_ms() : 0.0;
 
-  poly_zero_schedule_initial_intermediates(plan->ctx, sched, run);
-  double t_zero = timing ? poly_now_ms() : 0.0;
+  double t_zero = t_slots;
 
   /* Merge default vars with runtime overrides */
   int n_all = 0;
@@ -8393,9 +8768,24 @@ static int poly_run_compiled_schedule_impl(
   double t_loop_execute = 0.0;
   double t_loop_commit = 0.0;
   for (int k = 0; k < sched->template->n_calls && ret == 0; k++) {
+#ifdef POLY_HAS_CUDA
+    int graph_batch_index = plan->call_to_graph_batch ? plan->call_to_graph_batch[k] : -1;
+    if (graph_batch_index >= 0) {
+      if (n_slots > 0 || graph_batch_index >= plan->n_graph_batches) {
+        ret = -1;
+        break;
+      }
+      PolyCompiledGraphBatch *batch = &plan->graph_batches[graph_batch_index];
+      double t_graph0 = timing ? poly_now_ms() : 0.0;
+      ret = poly_run_compiled_cuda_graph_batch(
+          plan, sched, batch, ctx_slots, &var_int_idx, n_all
+      );
+      if (timing) t_loop_execute += poly_now_ms() - t_graph0;
+      if (ret == 0) k += batch->n_calls - 1;
+      continue;
+    }
+#endif
     PolyRunner *runner = &run->calls[k].prg;
-    poly_zero_schedule_call_intermediates(plan->ctx, sched, run, k);
-
     if (poly_call_is_view(poly_schedule_call(sched, k))) {
       ret = poly_schedule_execute_view_call(plan->ctx, sched, k, plan->device, run);
       continue;
@@ -8480,6 +8870,9 @@ int poly_run_compiled_schedule_with_input_uops(
 void poly_compiled_schedule_free(PolyCompiledSchedule *plan) {
   if (!plan) return;
 
+  /* CUDA graph nodes borrow compiled CUfunction handles, so destroy graph
+   * execution before releasing runtime-cache runners/modules. */
+  poly_compiled_graph_batches_clear(plan);
   if (plan->run) {
     poly_schedule_runtime_cleanup(plan->template, plan->run);
     free(plan->run->calls);

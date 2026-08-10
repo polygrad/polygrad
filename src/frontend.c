@@ -27,7 +27,7 @@
 static const PolyDType *_dtype_table_ffi[] = {
     &POLY_VOID,    &POLY_BOOL,     &POLY_INT8,    &POLY_UINT8,   &POLY_INT16,
     &POLY_UINT16,  &POLY_INT32,    &POLY_UINT32,  &POLY_INT64,   &POLY_UINT64,
-    &POLY_FLOAT16, &POLY_BFLOAT16, &POLY_FLOAT32, &POLY_FLOAT64,
+    &POLY_FLOAT16, &POLY_BFLOAT16, &POLY_FLOAT32, &POLY_FLOAT64, &POLY_INDEX,
 };
 #define N_DTYPE_FFI ((int)(sizeof(_dtype_table_ffi) / sizeof(_dtype_table_ffi[0])))
 
@@ -302,9 +302,13 @@ PolyUOp *poly_uop_placeholder_like(PolyCtx *ctx, PolyUOp *like, int slot) {
 PolyUOp *poly_uop_range(PolyCtx *ctx, int64_t bound, int64_t axis_id, int axis_type) {
   if (!ctx || bound < 0) return NULL;
   if (axis_type < POLY_AXIS_GLOBAL || axis_type > POLY_AXIS_PLACEHOLDER) return NULL;
-  PolyUOp *bound_uop = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(bound));
+  /* Pinned tinygrad UOp.range defaults both the RANGE and its bound to
+   * dtypes.weakint (uop/ops.py:563-565). pm_lower_index_dtype owns the later
+   * concrete int/long choice; making this helper concrete early leaves a
+   * mixed graph when gpudims substitutes its weak SPECIAL. */
+  PolyUOp *bound_uop = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(bound));
   return poly_uop1(
-      ctx, POLY_OP_RANGE, POLY_INT32, bound_uop,
+      ctx, POLY_OP_RANGE, POLY_INDEX, bound_uop,
       poly_arg_range(axis_id, (PolyAxisType)axis_type)
   );
 }
@@ -1328,38 +1332,36 @@ bool poly_validate_kernel_graph(PolyCtx *ctx, PolyUOp *root) {
     if (poly_map_get(visited, poly_ptr_hash(u), u, poly_ptr_eq)) continue;
     poly_map_set(visited, poly_ptr_hash(u), u, u, poly_ptr_eq);
 
-    if (u->n_src > 64) {
-      fprintf(
-          stderr, "polygrad: realize: invalid n_src=%d on %s(%p)\n", u->n_src, poly_op_name(u->op),
-          (void *)u
-      );
-      free(stack);
-      free(parent_stack);
-      free(parent_src_idx);
-      poly_map_destroy(visited);
-      return false;
-    }
-    if (u->op == POLY_OP_INDEX) {
-      for (int i = 1; i < u->n_src; i++) {
-        if (u->src[i] && !poly_dtype_is_int(u->src[i]->dtype)) {
-          fprintf(
-              stderr,
-              "polygrad: codegen: INDEX src[%d] must have integer dtype, got %s\n",
-              i, u->src[i]->dtype.name ? u->src[i]->dtype.name : "unknown"
-          );
-          free(stack);
-          free(parent_stack);
-          free(parent_src_idx);
-          poly_map_destroy(visited);
-          return false;
-        }
-      }
-    }
     for (int i = 0; i < u->n_src; i++) {
-      if (!u->src[i]) {
+      PolyUOp *child = u->src[i];
+      if (!child) {
         fprintf(
             stderr, "polygrad: realize: NULL src[%d] on %s(%p), n_src=%d\n", i, poly_op_name(u->op),
             (void *)u, u->n_src
+        );
+        free(stack);
+        free(parent_stack);
+        free(parent_src_idx);
+        poly_map_destroy(visited);
+        return false;
+      }
+      /* Polygrad's C ownership boundary has no tinygrad Python-object
+       * equivalent: prove arena ownership before any op-specific child read. */
+      if (!poly_ctx_owns_ptr(ctx, child)) {
+        fprintf(
+            stderr, "polygrad: realize: foreign/stale UOp pointer %p referenced by %s(%p) src[%d]\n",
+            (void *)child, poly_op_name(u->op), (void *)u, i
+        );
+        free(stack);
+        free(parent_stack);
+        free(parent_src_idx);
+        poly_map_destroy(visited);
+        return false;
+      }
+      if (u->op == POLY_OP_INDEX && i >= 1 && !poly_dtype_is_int(child->dtype)) {
+        fprintf(
+            stderr, "polygrad: codegen: INDEX src[%d] must have integer dtype, got %s\n", i,
+            child->dtype.name ? child->dtype.name : "unknown"
         );
         free(stack);
         free(parent_stack);
@@ -1384,7 +1386,7 @@ bool poly_validate_kernel_graph(PolyCtx *ctx, PolyUOp *root) {
         parent_src_idx = new_parent_src_idx;
         stack_cap = new_cap;
       }
-      stack[sp++] = u->src[i];
+      stack[sp++] = child;
       parent_stack[sp - 1] = u;
       parent_src_idx[sp - 1] = i;
     }

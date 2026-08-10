@@ -97,7 +97,7 @@ TEST(bundle, instance_save_load_roundtrip) {
 
   /* Forward on original */
   float input[] = {1.0f, 2.0f};
-  PolyIOBinding io[] = {{"x", input}};
+  PolyIOBinding io[] = {POLY_IO_BINDING_ARRAY("x", input, POLY_FLOAT32)};
   ASSERT_INT_EQ(poly_instance_forward(inst, io, 1), 0);
 
   /* Read original output */

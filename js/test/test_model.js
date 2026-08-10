@@ -41,7 +41,7 @@ async function runModelTests(pg) {
   console.log('\n== Instance.fromTensors export ==')
 
   await test('functional model exports selected forward entrypoint', async () => {
-    const w = new Tensor([[2], [3]], { requiresGrad: true })
+    const w = new Tensor([[2], [3]], { dtype: 'float32', requiresGrad: true })
     await w.realize()
     const x = pg.Tensor.empty([1, 2])
     const y = x.dot(w)
@@ -69,7 +69,7 @@ async function runModelTests(pg) {
   await test('fromTensors uses instance-local bindings', async () => {
     const count = pg._core && pg._core.ffi && pg._core.ffi.poly_ctx_named_count
     assert(typeof count === 'function', 'poly_ctx_named_count unavailable')
-    const w = new Tensor([[2]], { requiresGrad: true })
+    const w = new Tensor([[2]], { dtype: 'float32', requiresGrad: true })
     await w.realize()
     const x = pg.Tensor.empty([1, 1])
     const y = x.dot(w)
@@ -88,7 +88,7 @@ async function runModelTests(pg) {
   await test('fromBindings primitive uses instance-local bindings', async () => {
     const count = pg._core && pg._core.ffi && pg._core.ffi.poly_ctx_named_count
     assert(typeof count === 'function', 'poly_ctx_named_count unavailable')
-    const w = new Tensor([[7]], { requiresGrad: true })
+    const w = new Tensor([[7]], { dtype: 'float32', requiresGrad: true })
     await w.realize()
     const x = pg.Tensor.empty([1, 1])
     const y = x.dot(w)
@@ -107,7 +107,7 @@ async function runModelTests(pg) {
   })
 
   await test('fromBindings uses tensor requiresGrad for trainability', async () => {
-    const w = new Tensor([[7]], { requiresGrad: false })
+    const w = new Tensor([[7]], { dtype: 'float32', requiresGrad: false })
     await w.realize()
     const x = pg.Tensor.empty([1, 1])
     const y = x.dot(w)
@@ -122,7 +122,7 @@ async function runModelTests(pg) {
   })
 
   await test('fromBindings requires current parameter storage', async () => {
-    const w = new Tensor([[7]], { requiresGrad: true })
+    const w = new Tensor([[7]], { dtype: 'float32', requiresGrad: true })
     const x = pg.Tensor.empty([1, 1])
     const y = x.dot(w)
     const bindings = [
@@ -151,7 +151,7 @@ async function runModelTests(pg) {
   await test('fromTensors keeps tinygrad-style plain object', async () => {
     class LinearNet {
       constructor() {
-        this.weight = new Tensor([[4], [5]], { requiresGrad: true })
+        this.weight = new Tensor([[4], [5]], { dtype: 'float32', requiresGrad: true })
       }
       call(x) { return x.dot(this.weight) }
     }
@@ -169,7 +169,7 @@ async function runModelTests(pg) {
   })
 
   await test('constructor state names survive IR round trip', async () => {
-    const w = new Tensor([[2], [3]], { requiresGrad: true })
+    const w = new Tensor([[2], [3]], { dtype: 'float32', requiresGrad: true })
     await w.realize()
     const x = pg.Tensor.empty([1, 2])
     const logits = x.dot(w)
@@ -194,7 +194,7 @@ async function runModelTests(pg) {
   })
 
   await test('Instance.fit uses instance training path', async () => {
-    const w = new Tensor([[1]], { requiresGrad: true })
+    const w = new Tensor([[1]], { dtype: 'float32', requiresGrad: true })
     await w.realize()
     const x = pg.Tensor.empty([1, 1])
     const y = pg.Tensor.empty([1, 1])

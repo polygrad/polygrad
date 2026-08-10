@@ -3203,6 +3203,111 @@ TEST(unify_pre, control_flow_rewinds_scratch_toposort) {
   PASS();
 }
 
+TEST(unify_pre, control_flow_preserves_wide_parent_arity) {
+  /* Pinned tinygrad/codegen/late/linearizer.py:83-85 rewrites only RANGE by
+   * appending its predecessor. A wide unmatched parent retains every source;
+   * the C traversal must not impose its own arity limit. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *src[65];
+  PolyUOp *ranges[2];
+  for (int axis = 0; axis < 2; axis++) {
+    PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(4));
+    PolyUOp *range_src[1] = {bound};
+    ranges[axis] = poly_uop_tagged_arg(
+        ctx, POLY_OP_RANGE, POLY_INT32, range_src, 1, poly_arg_range(axis, POLY_AXIS_LOOP),
+        100 + axis, poly_arg_int(200 + axis)
+    );
+    PolyUOp *value = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(10 + axis));
+    PolyUOp *end_src[2] = {value, ranges[axis]};
+    src[axis] = poly_uop_tagged_arg(
+        ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none(), 300 + axis,
+        poly_arg_int(400 + axis)
+    );
+  }
+  for (int i = 2; i < 65; i++) {
+    PolyUOp *value = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(1000 + i));
+    src[i] = poly_uop1(ctx, POLY_OP_NOOP, POLY_INT32, value, poly_arg_none());
+  }
+
+  PolyUOp *sink = poly_uop_tagged_arg(
+      ctx, POLY_OP_SINK, POLY_VOID, src, 65, poly_arg_none(), 500, poly_arg_int(600)
+  );
+  PolyUOp *rewritten = poly_apply_control_flow(ctx, sink);
+  ASSERT_NOT_NULL(rewritten);
+  ASSERT_INT_EQ(rewritten->n_src, 65);
+  ASSERT_INT_EQ(rewritten->tag, 500);
+  ASSERT_INT_EQ(rewritten->tag_arg.kind, POLY_ARG_INT);
+  ASSERT_INT_EQ(rewritten->tag_arg.i, 600);
+  ASSERT_PTR_EQ(rewritten->src[0], src[0]);
+  ASSERT_TRUE(rewritten->src[1] != src[1]);
+  ASSERT_INT_EQ(rewritten->src[1]->tag, 301);
+  ASSERT_INT_EQ(rewritten->src[1]->tag_arg.kind, POLY_ARG_INT);
+  ASSERT_INT_EQ(rewritten->src[1]->tag_arg.i, 401);
+  for (int i = 2; i < 65; i++)
+    ASSERT_PTR_EQ(rewritten->src[i], src[i]);
+
+  int n_topo = 0, range_count = 0, one_source_ranges = 0, two_source_ranges = 0;
+  PolyUOp **topo = poly_toposort(ctx, rewritten, &n_topo);
+  PolyUOp *ordered_range = NULL;
+  for (int i = 0; i < n_topo; i++) {
+    if (topo[i]->op != POLY_OP_RANGE) continue;
+    range_count++;
+    if (topo[i]->n_src == 1) one_source_ranges++;
+    if (topo[i]->n_src == 2) {
+      two_source_ranges++;
+      ordered_range = topo[i];
+    }
+  }
+  ASSERT_INT_EQ(range_count, 2);
+  ASSERT_INT_EQ(one_source_ranges, 1);
+  ASSERT_INT_EQ(two_source_ranges, 1);
+  ASSERT_NOT_NULL(ordered_range);
+  ASSERT_PTR_EQ(ordered_range->src[0], ranges[1]->src[0]);
+  ASSERT_PTR_EQ(ordered_range->src[1], src[0]);
+  ASSERT_INT_EQ(ordered_range->tag, 101);
+  ASSERT_INT_EQ(ordered_range->tag_arg.kind, POLY_ARG_INT);
+  ASSERT_INT_EQ(ordered_range->tag_arg.i, 201);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(unify_pre, control_flow_fails_cleanly_at_uop_arity_ceiling) {
+  /* PolyUOp.n_src is presently uint16_t. A RANGE at that ceiling cannot take
+   * tinygrad's predecessor source, so reject the whole pass instead of
+   * returning ancestors containing a NULL RANGE. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(4));
+  PolyUOp *dummy = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(9));
+  PolyUOp **range_src = malloc((size_t)UINT16_MAX * sizeof(PolyUOp *));
+  ASSERT_NOT_NULL(range_src);
+  range_src[0] = bound;
+  for (size_t i = 1; i < UINT16_MAX; i++)
+    range_src[i] = dummy;
+  PolyUOp *wide_range = poly_uop(
+      ctx, POLY_OP_RANGE, POLY_INT32, range_src, UINT16_MAX,
+      poly_arg_range(1, POLY_AXIS_LOOP)
+  );
+  free(range_src);
+  ASSERT_NOT_NULL(wide_range);
+
+  PolyUOp *normal_range =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_range(0, POLY_AXIS_LOOP));
+  PolyUOp *v0 = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(10));
+  PolyUOp *v1 = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(11));
+  PolyUOp *end0_src[2] = {v0, normal_range};
+  PolyUOp *end1_src[2] = {v1, wide_range};
+  PolyUOp *sink_src[2] = {
+      poly_uop(ctx, POLY_OP_END, POLY_VOID, end0_src, 2, poly_arg_none()),
+      poly_uop(ctx, POLY_OP_END, POLY_VOID, end1_src, 2, poly_arg_none()),
+  };
+  PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, sink_src, 2, poly_arg_none());
+  ASSERT_TRUE(poly_apply_control_flow(ctx, sink) == NULL);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(unify_pre, full_gpu_pipeline_structural) {
   /* Run the full GPU-style pipeline (no TC) on a large reduction and verify
    * the final IR has SPECIAL + DEFINE_LOCAL + BARRIER + no raw RANGE. */

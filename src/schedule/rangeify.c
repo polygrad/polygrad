@@ -321,28 +321,6 @@ static void buffer_alt_add(PolyIndexingCtx *ictx, PolyUOp *buf, PolyUOp **rngs, 
   (void)alt_rngs_append(alt, rngs, n_rngs);
 }
 
-/* tinygrad indexing.py merges multi-consumer ranges by comparing the local
- * index (`get_idx`) separately from the validity guard (`get_valid`).
- * polygrad's PAD transform uses WHERE(valid, idx, 0) to clamp invalid
- * accesses before codegen, so range propagation must still look through that
- * wrapper and compare the guarded idx expression itself. */
-static bool range_where_wraps_valid_idx(PolyUOp *u) {
-  return u && u->op == POLY_OP_WHERE && u->n_src >= 3 && poly_dtype_is_int(u->dtype) &&
-         !poly_dtype_is_bool(u->dtype);
-}
-
-static PolyUOp *range_get_idx(PolyUOp *r) {
-  if (!r) return NULL;
-  if (range_where_wraps_valid_idx(r)) return r->src[1];
-  return r;
-}
-
-static PolyUOp *range_get_valid(PolyCtx *ctx, PolyUOp *r) {
-  if (!r) return NULL;
-  if (range_where_wraps_valid_idx(r)) return r->src[0];
-  return poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_bool(true));
-}
-
 static PolyUOp *merge_range_valids(PolyCtx *ctx, PolyUOp **valids, int n_valids) {
   if (!ctx || !valids || n_valids <= 0) return NULL;
   PolyUOp *acc = poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_bool(false));
@@ -842,9 +820,9 @@ void poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
       if (same_shape) {
         bool all_all_same = true;
         for (int d = 0; d < ref_len; d++) {
-          PolyUOp *base_idx = range_get_idx(consumer_rngs_buf[0][d]);
+          PolyUOp *base_idx = poly_index_get_idx(ctx, consumer_rngs_buf[0][d]);
           for (int ci = 1; ci < n_consumer_rngs; ci++) {
-            if (range_get_idx(consumer_rngs_buf[ci][d]) != base_idx) {
+            if (poly_index_get_idx(ctx, consumer_rngs_buf[ci][d]) != base_idx) {
               all_all_same = false;
               break;
             }
@@ -871,9 +849,9 @@ void poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
 
             PolyUOp *valids[16];
             for (int ci = 0; ci < n_consumer_rngs; ci++)
-              valids[ci] = range_get_valid(ctx, consumer_rngs_buf[ci][d]);
+              valids[ci] = poly_index_get_valid(ctx, consumer_rngs_buf[ci][d]);
             PolyUOp *merged_valid = merge_range_valids(ctx, valids, n_consumer_rngs);
-            PolyUOp *merged_idx = range_get_idx(consumer_rngs_buf[0][d]);
+            PolyUOp *merged_idx = poly_index_get_idx(ctx, consumer_rngs_buf[0][d]);
             if (merged_valid->op == POLY_OP_CONST && merged_valid->arg.kind == POLY_ARG_BOOL &&
                 merged_valid->arg.b) {
               out_rngs[d] = merged_idx;
@@ -4179,6 +4157,13 @@ PolyUOp *poly_get_kernel_graph(PolyCtx *ctx, PolyUOp *tensor_sink) {
     fflush(stderr);
   }
   PolyUOp *removed = poly_remove_bufferize(ctx, cleaned);
+  /* Pinned tinygrad schedule/rangeify.py:598-607 runs symbolic,
+   * reduce-simplify, const folding, and remove_bufferize in one graph_rewrite.
+   * Its rewrite driver re-enters the replacement returned by remove_bufferize
+   * (uop/ops.py:1567-1633), so substituted range expressions reach the same
+   * symbolic fixed point before limit_bufs. Polygrad keeps removal as an
+   * explicit C pass; resume the shared symbolic/reduce fixed point here. */
+  removed = poly_apply_symbolic_reduce_simplify(ctx, removed);
   double t_remove = timing ? poly_now_ms() : 0.0;
   if (timing) {
     fprintf(stderr, "[polygrad:get_kernel_graph] stage remove_bufferize done %.3fms\n", t_remove - t_reduce);
@@ -4240,20 +4225,6 @@ PolyUOp *poly_get_kernel_graph(PolyCtx *ctx, PolyUOp *tensor_sink) {
     fflush(stderr);
   }
   return kernel_graph;
-}
-
-static bool poly_kernel_body_needs_zero(PolyCtx *ctx, PolyUOp *u) {
-  int n = 0;
-  PolyUOp **topo = poly_toposort_alloc(ctx, u, &n);
-  bool needs_zero = false;
-  for (int i = 0; i < n; i++) {
-    if (topo[i]->op == POLY_OP_REDUCE || topo[i]->op == POLY_OP_REDUCE_AXIS) {
-      needs_zero = true;
-      break;
-    }
-  }
-  poly_toposort_free(topo);
-  return needs_zero;
 }
 
 static PolyUOp *kernel_after_buffer_identity(PolyUOp *after) {
@@ -4414,7 +4385,6 @@ PolyKernelScheduleResult poly_build_kernel_schedule_from_kernel_graph(
   if (n_intermediates > 0) {
     result.intermediate_sizes = malloc(n_intermediates * sizeof(int64_t));
     result.intermediate_itemsizes = malloc(n_intermediates * sizeof(int));
-    result.intermediate_needs_zero = calloc((size_t)n_intermediates, sizeof(bool));
     result.intermediate_buf_uops = malloc(n_intermediates * sizeof(PolyUOp *));
   }
   double t_alloc = timing ? poly_now_ms() : 0.0;
@@ -4484,7 +4454,6 @@ PolyKernelScheduleResult poly_build_kernel_schedule_from_kernel_graph(
       int ii = intermediate_idx[a];
       result.intermediate_sizes[ii] = (after_buf->arg.kind == POLY_ARG_INT) ? after_buf->arg.i : 1;
       result.intermediate_itemsizes[ii] = poly_dtype_itemsize(poly_dtype_scalar(after_buf->dtype));
-      result.intermediate_needs_zero[ii] = poly_kernel_body_needs_zero(ctx, end_chain);
       result.intermediate_buf_uops[ii] = after_buf;
     }
 
@@ -4866,7 +4835,6 @@ void poly_kernel_schedule_result_free(PolyKernelScheduleResult *sr) {
   free(sr->kernel_n_params);
   free(sr->intermediate_sizes);
   free(sr->intermediate_itemsizes);
-  free(sr->intermediate_needs_zero);
   free(sr->intermediate_buf_uops);
   free(sr->exec_order);
   if (sr->var_to_buf) {

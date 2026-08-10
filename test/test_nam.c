@@ -166,7 +166,7 @@ TEST(nam, forward_produces_output) {
   ASSERT_NOT_NULL(inst);
 
   float x[] = {1.0f, 2.0f};
-  PolyIOBinding inputs[] = {{"x", x}};
+  PolyIOBinding inputs[] = {POLY_IO_BINDING_ARRAY("x", x, POLY_FLOAT32)};
 
   int ret = poly_instance_forward(inst, inputs, 1);
   ASSERT_INT_EQ(ret, 0);
@@ -196,7 +196,7 @@ TEST(nam, forward_deterministic) {
   ASSERT_NOT_NULL(inst);
 
   float x[] = {1.0f, 2.0f};
-  PolyIOBinding inputs[] = {{"x", x}};
+  PolyIOBinding inputs[] = {POLY_IO_BINDING_ARRAY("x", x, POLY_FLOAT32)};
 
   poly_instance_forward(inst, inputs, 1);
   float out1 = 0.0f;
@@ -236,8 +236,8 @@ TEST(nam, train_mse_loss_decreases) {
   float x[] = {1.0f, 2.0f};
   float y[] = {5.0f};
   PolyIOBinding io[] = {
-      {"x", x},
-      {"y", y},
+      POLY_IO_BINDING_ARRAY("x", x, POLY_FLOAT32),
+      POLY_IO_BINDING_ARRAY("y", y, POLY_FLOAT32),
   };
 
   float first_loss = -1.0f;
@@ -266,8 +266,8 @@ TEST(nam, train_exu_loss_decreases) {
   float x[] = {1.0f, 2.0f};
   float y[] = {5.0f};
   PolyIOBinding io[] = {
-      {"x", x},
-      {"y", y},
+      POLY_IO_BINDING_ARRAY("x", x, POLY_FLOAT32),
+      POLY_IO_BINDING_ARRAY("y", y, POLY_FLOAT32),
   };
 
   float first_loss = -1.0f;
@@ -296,8 +296,8 @@ TEST(nam, train_cross_entropy_loss_decreases) {
   float x[] = {1.0f, 0.0f};
   float y[] = {0.0f, 1.0f, 0.0f};
   PolyIOBinding io[] = {
-      {"x", x},
-      {"y", y},
+      POLY_IO_BINDING_ARRAY("x", x, POLY_FLOAT32),
+      POLY_IO_BINDING_ARRAY("y", y, POLY_FLOAT32),
   };
 
   float first_loss = -1.0f;
@@ -325,14 +325,14 @@ TEST(nam, save_load_roundtrip) {
   poly_instance_set_optimizer(inst, POLY_OPTIM_SGD, 0.01f, 0.0f, 0.0f, 0.0f, 0.0f);
   float x[] = {1.0f, 2.0f};
   float y[] = {5.0f};
-  PolyIOBinding io[] = {{"x", x}, {"y", y}};
+  PolyIOBinding io[] = {POLY_IO_BINDING_ARRAY("x", x, POLY_FLOAT32), POLY_IO_BINDING_ARRAY("y", y, POLY_FLOAT32)};
   for (int i = 0; i < 10; i++) {
     float loss;
     poly_instance_train_step(inst, io, 2, &loss);
   }
 
   /* Forward to get prediction before save */
-  PolyIOBinding fwd[] = {{"x", x}};
+  PolyIOBinding fwd[] = {POLY_IO_BINDING_ARRAY("x", x, POLY_FLOAT32)};
   poly_instance_forward(inst, fwd, 1);
   float pred_before = 0.0f;
   int n_bufs = poly_instance_buf_count(inst);

@@ -33,11 +33,11 @@ class TestLinear:
         y = m(x)
         assert y.shape == (1, 2)
 
-    def test_weight_has_buffer_identity(self):
+    def test_weight_initializer_stays_lazy_like_tinygrad(self):
         m = Linear(2, 3)
-        assert m.weight.uop.has_buffer_identity()
+        assert not m.weight.uop.has_buffer_identity()
         assert m.weight.requires_grad
-        assert m.bias.uop.has_buffer_identity()
+        assert not m.bias.uop.has_buffer_identity()
         assert m.bias.requires_grad
 
     def test_backward(self):
@@ -202,6 +202,11 @@ class TestEmbedding:
         assert approx(y[0], weight[0])
         assert approx(y[1], weight[2])
 
+    def test_rejects_non_integer_indices(self):
+        emb = Embedding(5, 3)
+        with pytest.raises(TypeError, match='Expected integer dtype'):
+            emb(Tensor([0.0, 2.0]))
+
 
 # ── Dropout ──
 
@@ -353,6 +358,16 @@ class TestAssign:
 # ── Instance export ──
 
 class TestInstanceExport:
+    def test_typed_integer_input_preserves_bytes_and_rejects_float_binding(self):
+        x = Tensor.empty((3,), dtype='int32')
+        out = x.cast('float32')
+        inst = Instance.from_tensors(inputs={'typed_x': x}, outputs={'typed_out': out})
+
+        result = inst.forward(typed_x=np.array([0, 1, 2], dtype=np.int32))
+        np.testing.assert_array_equal(result['typed_out'], np.array([0, 1, 2], dtype=np.float32))
+        with pytest.raises(RuntimeError, match='forward failed'):
+            inst.forward(typed_x=np.array([0, 1, 2], dtype=np.float32))
+
     def test_functional_model_exports_selected_forward_entrypoint(self):
         from polygrad import _ffi
 

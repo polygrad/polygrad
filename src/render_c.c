@@ -320,7 +320,8 @@ static int *build_control_edges(PolyUOp **topo, int n, IntMap *idx) {
     free(nest_parent);
     free(siblings);
     free(scores);
-    return extra_dep;
+    free(extra_dep);
+    return NULL;
   }
   for (int i = 0; i < n; i++)
     nest_parent[i] = -1;
@@ -434,8 +435,10 @@ static PolyUOp *cf_rewrite(
     IntMap *idx,
     int *extra_dep,
     PolyUOp **memo,
-    uint8_t *visit
+    uint8_t *visit,
+    bool *failed
 ) {
+  if (*failed) return NULL;
   int ui = imap_try_get(idx, u);
   if (ui < 0) return u; /* shared constant not in topo */
   if (visit[ui] == CF_DONE) return memo[ui];
@@ -451,18 +454,36 @@ static PolyUOp *cf_rewrite(
   }
   visit[ui] = CF_VISITING;
 
-  /* Rewrite sources first (recursive) */
-  PolyUOp *src[64];
+  /* Pinned tinygrad/codegen/late/linearizer.py:83-85 replaces only a matched
+   * RANGE and otherwise preserves arbitrary source-tuple arity. Allocate the
+   * exact temporary width here: wide SINK/AFTER parents are legal and must not
+   * inherit a renderer-local 64-source cap. */
+  PolyUOp *src_stack[64];
+  size_t src_cap = (size_t)u->n_src + 1;
+  PolyUOp **src = src_cap <= 64 ? src_stack : malloc(src_cap * sizeof(PolyUOp *));
+  if (!src) {
+    *failed = true;
+    return NULL;
+  }
   int ns = u->n_src;
   bool changed = false;
   for (int j = 0; j < ns; j++) {
-    src[j] = cf_rewrite(ctx, u->src[j], topo, idx, extra_dep, memo, visit);
+    src[j] = cf_rewrite(ctx, u->src[j], topo, idx, extra_dep, memo, visit, failed);
+    if (*failed) {
+      if (src != src_stack) free(src);
+      return NULL;
+    }
     if (src[j] != u->src[j]) changed = true;
   }
 
   /* Append control-flow dep for RANGE nodes */
   if (u->op == POLY_OP_RANGE && extra_dep[ui] >= 0) {
-    PolyUOp *dep = cf_rewrite(ctx, topo[extra_dep[ui]], topo, idx, extra_dep, memo, visit);
+    PolyUOp *dep =
+        cf_rewrite(ctx, topo[extra_dep[ui]], topo, idx, extra_dep, memo, visit, failed);
+    if (*failed) {
+      if (src != src_stack) free(src);
+      return NULL;
+    }
     /* Dedup: skip if dep already a source (after rewrite) */
     bool dup = false;
     for (int j = 0; j < ns; j++) {
@@ -472,15 +493,35 @@ static PolyUOp *cf_rewrite(
       }
     }
     if (!dup) {
+      /* PolyUOp currently stores n_src as uint16_t. Pinned tinygrad tuples can
+       * grow beyond this, but returning a partial graph with a NULL RANGE is
+       * never valid. Fail this pass cleanly until that representation debt is
+       * explicitly approved and migrated. */
+      if (ns == UINT16_MAX) {
+        if (src != src_stack) free(src);
+        *failed = true;
+        return NULL;
+      }
       src[ns++] = dep;
       changed = true;
     }
   }
 
-  if (changed)
-    memo[ui] = poly_uop(ctx, u->op, u->dtype, src, ns, u->arg);
-  else
+  if (changed) {
+    /* Pinned UOp.replace and GraphRewrite preserve metadata when sources are
+     * rebuilt (uop/ops.py:156-161,1631-1633). */
+    memo[ui] = (u->tag != 0 || u->tag_arg.kind != POLY_ARG_NONE)
+                   ? poly_uop_tagged_arg(
+                         ctx, u->op, u->dtype, src, ns, u->arg, u->tag, u->tag_arg
+                     )
+                   : poly_uop(ctx, u->op, u->dtype, src, ns, u->arg);
+    if (!memo[ui]) *failed = true;
+  } else {
     memo[ui] = u;
+  }
+  if (src != src_stack) free(src);
+
+  if (*failed) return NULL;
 
   visit[ui] = CF_DONE;
   return memo[ui];
@@ -501,6 +542,11 @@ PolyUOp *poly_apply_control_flow(PolyCtx *ctx, PolyUOp *sink) {
     imap_set(&idx, topo[i], i);
 
   int *extra_dep = build_control_edges(topo, n, &idx);
+  if (!extra_dep) {
+    imap_destroy(&idx);
+    poly_ctx_scratch_rewind(ctx, scratch);
+    return NULL;
+  }
 
   /* Early exit if no edges */
   bool has_edges = false;
@@ -520,7 +566,17 @@ PolyUOp *poly_apply_control_flow(PolyCtx *ctx, PolyUOp *sink) {
   /* DFS rewrite from sink with 3-state cycle detection */
   PolyUOp **memo = calloc(n, sizeof(PolyUOp *));
   uint8_t *visit = calloc(n, sizeof(uint8_t));
-  PolyUOp *result = cf_rewrite(ctx, sink, topo, &idx, extra_dep, memo, visit);
+  if (!memo || !visit) {
+    free(visit);
+    free(memo);
+    free(extra_dep);
+    imap_destroy(&idx);
+    poly_ctx_scratch_rewind(ctx, scratch);
+    return NULL;
+  }
+  bool failed = false;
+  PolyUOp *result = cf_rewrite(ctx, sink, topo, &idx, extra_dep, memo, visit, &failed);
+  if (failed) result = NULL;
 
 #ifndef NDEBUG
   /* Verify RANGE invariant: src[0] is always the bound (CONST or DEFINE_VAR),

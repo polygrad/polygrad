@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from polygrad import Device, Jit, JitError, Runtime, Tensor, Variable, _ffi, can_run, compile as pg_compile, jit, stats as pg_stats
+from polygrad.dtype import dtypes
 from polygrad.helpers import Context
 from polygrad.uop.ops import AxisType, KernelInfo, UOp
 
@@ -13,6 +14,13 @@ class TestCreation:
         t = Tensor([1.0, 2.0, 3.0])
         assert t.shape == (3,)
         np.testing.assert_allclose(t.numpy(), [1, 2, 3])
+
+    def test_list_dtype_inference_matches_tinygrad(self):
+        assert Tensor([1, 2, 3]).dtype == 'int32'
+        assert Tensor([[1, 2], [3, 4]]).dtype == 'int32'
+        assert Tensor([True, False]).dtype == 'bool'
+        assert Tensor([1, 2.5]).dtype == 'float32'
+        assert Tensor([]).dtype == 'float32'
 
     def test_from_scalar(self):
         cases = [
@@ -206,6 +214,16 @@ class TestCreation:
         c = Tensor.empty((4,), dtype='float32')
         out = c.custom_kernel(a, b, fxn=add_kernel)[0]
         np.testing.assert_allclose(out.numpy(), [11.0, 22.0, 33.0, 44.0])
+
+    def test_custom_kernel_range_numeric_scalar_preserves_weakint(self):
+        ctx = Tensor.empty((1,))._ctx
+        index = UOp.range(ctx, 64, 0)
+        offset = index * 64
+
+        assert index.dtype is dtypes.weakint
+        assert index.src[0].dtype is dtypes.weakint
+        assert offset.dtype is dtypes.weakint
+        assert tuple(src.dtype for src in offset.src) == (dtypes.weakint, dtypes.weakint)
 
     def test_custom_kernel_multi_output_backward_like_tinygrad(self):
         callback = {}
@@ -662,6 +680,17 @@ class TestCreation:
         np.testing.assert_allclose(a, c)
         np.testing.assert_allclose(b, d)
         assert not np.allclose(a, b)
+
+    def test_uniform_bounds_determinism_and_validation(self):
+        Tensor.manual_seed(42)
+        a = Tensor.uniform(64, low=-2, high=3).numpy()
+        Tensor.manual_seed(42)
+        b = Tensor.uniform(64, low=-2, high=3).numpy()
+        np.testing.assert_array_equal(a, b)
+        assert np.all(a >= -2)
+        assert np.all(a < 3)
+        with pytest.raises(ValueError, match='low < high'):
+            Tensor.uniform(2, low=1, high=1)
 
     def test_randn_manual_seed_deterministic(self):
         Tensor.manual_seed(42)
@@ -2821,7 +2850,7 @@ class TestRepr:
     def test_repr(self):
         t = Tensor([1, 2, 3])
         assert 'shape=(3,)' in repr(t)
-        assert 'float32' in repr(t)
+        assert 'int32' in repr(t)
 
     def test_bool_raises_like_tinygrad(self):
         with pytest.raises(TypeError, match="__bool__ on Tensor is not defined"):

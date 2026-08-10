@@ -58,23 +58,21 @@ function normalizeBytes(bytes, name) {
 
 function normalizeBindings(io) {
   if (!io || typeof io !== 'object' || Array.isArray(io)) {
-    throw new TypeError('polygrad: bindings must be an object of name -> Float32 data')
+    throw new TypeError('polygrad: bindings must be an object of name -> numeric data')
   }
 
   const names = []
   const arrays = []
   for (const [name, value] of Object.entries(io)) {
     let arr
-    if (value instanceof Float32Array) {
+    if (ArrayBuffer.isView(value) && !(value instanceof DataView)) {
       arr = value
-    } else if (value instanceof Float64Array) {
-      arr = new Float32Array(value)
     } else if (Array.isArray(value)) {
       arr = Float32Array.from(value)
     } else if (typeof value === 'number') {
       arr = new Float32Array([value])
     } else {
-      throw new TypeError(`polygrad: binding '${name}' must be number, array, or Float32Array`)
+      throw new TypeError(`polygrad: binding '${name}' must be a number, array, or numeric TypedArray`)
     }
     names.push(name)
     arrays.push(arr)
