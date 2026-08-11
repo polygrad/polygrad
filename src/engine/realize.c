@@ -2417,9 +2417,20 @@ PolyUOp *poly_transform_to_call(PolyCtx *ctx, PolyUOp **uops, int n, PolyUOp **o
   return poly_transform_to_call_with_map(ctx, uops, n, out_uops, NULL, NULL, NULL);
 }
 
+static bool poly_roots_explicit_devices_supported(PolyCtx *ctx, PolyUOp **roots, int n) {
+  if (!ctx || !roots || n < 0) return false;
+  for (int i = 0; i < n; i++)
+    if (!poly_uop_explicit_devices_supported(ctx, roots[i])) return false;
+  return true;
+}
+
 PolySchedule *poly_schedule_effect_sink(PolyCtx *ctx, PolyUOp *sink) {
   if (!ctx || !sink || sink->op != POLY_OP_SINK) {
     fprintf(stderr, "poly_realize: expected effect SINK\n");
+    return NULL;
+  }
+  if (!poly_uop_explicit_devices_supported(ctx, sink)) {
+    fprintf(stderr, "poly_realize: unsupported explicit device identity\n");
     return NULL;
   }
 
@@ -2486,6 +2497,11 @@ static PolySchedule *poly_schedule_callified_with_vars(PolyCtx *ctx, PolyUOp *bi
 PolySchedule *poly_schedule_with_vars(PolyCtx *ctx, PolyUOp **uops, int n, PolyUOp **out_uops) {
   if (!ctx || !uops || !out_uops || n < 0) return NULL;
   if (n == 0) return NULL;
+  if (!poly_roots_explicit_devices_supported(ctx, uops, n)) {
+    fprintf(stderr, "poly_realize: unsupported explicit device identity\n");
+    for (int i = 0; i < n; i++) out_uops[i] = NULL;
+    return NULL;
+  }
 
   PolyUOp *big_call = poly_transform_to_call(ctx, uops, n, out_uops);
   if (!big_call) goto fail;

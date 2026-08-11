@@ -36,6 +36,29 @@ PolyDevice poly_device_from_device_uop(PolyUOp *device) {
   return POLY_DEVICE_AUTO;
 }
 
+bool poly_uop_explicit_devices_supported(PolyCtx *ctx, PolyUOp *root) {
+  if (!ctx || !root) return false;
+  PolyScratchMark scratch = poly_ctx_scratch_mark(ctx);
+  int n = 0;
+  PolyUOp **topo =
+      poly_toposort_ex_user_scratch(ctx, root, &n, NULL, NULL, false);
+  if (!topo) {
+    poly_ctx_scratch_rewind(ctx, scratch);
+    return false;
+  }
+  bool supported = true;
+  for (int i = 0; i < n; i++) {
+    PolyUOp *u = topo[i];
+    if (u && u->op == POLY_OP_DEVICE && u->arg.kind != POLY_ARG_NONE &&
+        poly_device_from_device_uop(u) == POLY_DEVICE_AUTO) {
+      supported = false;
+      break;
+    }
+  }
+  poly_ctx_scratch_rewind(ctx, scratch);
+  return supported;
+}
+
 /* Derived physical-device property for a UOp graph.
  *
  * Tinygrad exposes this as UOp.device backed by cached UOp._device:

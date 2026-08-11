@@ -90,6 +90,11 @@ int poly_collect_output_buffers_in_sink(PolyUOp *tensor_sink, PolyUOp **out, int
  * spec_tensor implementation. Returns false with a diagnostic on stderr. */
 bool poly_validate_kernel_graph(PolyCtx *ctx, PolyUOp *root);
 
+/* Reject caller-visible explicit DEVICE identities which the current runtime
+ * cannot address.  An absent DEVICE and internal DEVICE(None) remain valid;
+ * CALL/FUNCTION bodies are opaque, matching pinned realization traversal. */
+bool poly_uop_explicit_devices_supported(PolyCtx *ctx, PolyUOp *root);
+
 /* Memoized backing helper for poly_uop_device(), matching tinygrad's cached
  * UOp._device property without storing pass-local cache state on every UOp. */
 PolyDevice poly_uop_device_cached(PolyUOp *u, PolyMap *cache);

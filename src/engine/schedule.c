@@ -3260,6 +3260,10 @@ PolySchedule *poly_create_schedule_from_linear_with_vars(
     fprintf(stderr, "polygrad: create_schedule_from_linear: expected LINEAR\n");
     return NULL;
   }
+  if (!poly_uop_explicit_devices_supported(ctx, binding_root ? binding_root : linear)) {
+    fprintf(stderr, "polygrad: create_schedule_from_linear: unsupported explicit device identity\n");
+    return NULL;
+  }
 
   PolyUOp **external = NULL;
   int n_external = 0, cap_external = 0;
@@ -3624,6 +3628,10 @@ PolySchedule *poly_complete_create_schedule_with_vars(
 ) {
   if (!sink || sink->op != POLY_OP_SINK) {
     fprintf(stderr, "polygrad: complete_create_schedule_with_vars: expected SINK\n");
+    return NULL;
+  }
+  if (!poly_uop_explicit_devices_supported(ctx, sink)) {
+    fprintf(stderr, "polygrad: complete_create_schedule_with_vars: unsupported explicit device identity\n");
     return NULL;
   }
 
@@ -4210,6 +4218,10 @@ static PolySchedule *poly_create_schedule_uncached(
 PolySchedule *poly_create_schedule(PolyCtx *ctx, PolyUOp *kernel_graph) {
   if (!kernel_graph || kernel_graph->op != POLY_OP_SINK) {
     fprintf(stderr, "polygrad: create_schedule: expected SINK\n");
+    return NULL;
+  }
+  if (!poly_uop_explicit_devices_supported(ctx, kernel_graph)) {
+    fprintf(stderr, "polygrad: create_schedule: unsupported explicit device identity\n");
     return NULL;
   }
 

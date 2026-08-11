@@ -7352,6 +7352,67 @@ TEST(realize, direct_deviceless_root_realize_matches_pinned_noop) {
   PASS();
 }
 
+TEST(realize, raw_explicit_unsupported_device_fails_before_schedule_fallback) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  poly_ctx_set_preferred_device(ctx, POLY_DEVICE_CPU);
+
+  /* Pinned Device[identity] opens the exact canonical runtime and never
+   * substitutes Device.DEFAULT for an explicit string (device.py:20-34;
+   * engine/realize.py:108-120). CPU:1 remains graph-distinct, but Polygrad
+   * must reject it until runtime instances carry ordinals. */
+  PolyUOp *unique =
+      poly_uop0(ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(poly_ctx_next_unique_id(ctx)));
+  PolyUOp *device = poly_device_uop_from_name(ctx, "CPU:1");
+  PolyUOp *buffer_src[2] = {unique, device};
+  PolyUOp *buffer =
+      poly_uop(ctx, POLY_OP_BUFFER, POLY_FLOAT32, buffer_src, 2, poly_arg_int(4));
+  float input[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+  poly_buffer_set(ctx, buffer, input, sizeof(input), POLY_DEVICE_HOST);
+  PolyUOp *root = poly_uop2(
+      ctx, POLY_OP_ADD, POLY_FLOAT32, buffer,
+      poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0)), poly_arg_none()
+  );
+  ASSERT_NOT_NULL(root);
+
+  PolyUOp *realized = (PolyUOp *)(uintptr_t)1;
+  ASSERT_INT_EQ(poly_realize_uops(ctx, &root, 1, &realized), -1);
+  ASSERT_TRUE(realized == NULL);
+
+  PolyUOp *store = poly_store_val(ctx, buffer, root);
+  PolyUOp *sink = store ? poly_sink1(ctx, store) : NULL;
+  ASSERT_NOT_NULL(sink);
+  ASSERT_TRUE(poly_schedule_effect_sink(ctx, sink) == NULL);
+
+  /* Direct prebuilt LINEAR is a lower-level schedule ingress. It must apply
+   * the same exact-device rule rather than infer ordinal-zero CPU from AUTO. */
+  PolyDType ptr = poly_dtype_ptr(POLY_FLOAT32, 1, POLY_ADDR_GLOBAL);
+  PolyUOp *param = poly_uop0(ctx, POLY_OP_PARAM, ptr, poly_arg_int(0));
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(0));
+  PolyUOp *index = poly_uop2(ctx, POLY_OP_INDEX, ptr, param, zero, poly_arg_none());
+  PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0));
+  PolyUOp *direct_store = poly_uop2(
+      ctx, POLY_OP_STORE, POLY_VOID, index, one, poly_arg_none()
+  );
+  PolyUOp *direct_body = poly_sink1(ctx, direct_store);
+  PolyUOp *direct_call_src[2] = {direct_body, buffer};
+  PolyUOp *direct_call = poly_uop(
+      ctx, POLY_OP_CALL, POLY_VOID, direct_call_src, 2, poly_arg_none()
+  );
+  PolyUOp *linear = poly_uop1(
+      ctx, POLY_OP_LINEAR, POLY_VOID, direct_call, poly_arg_none()
+  );
+  ASSERT_NOT_NULL(linear);
+  ASSERT_TRUE(poly_create_schedule_from_linear(ctx, linear, POLY_MODE_CALL) == NULL);
+
+  PolyCtxStats stats = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
+  ASSERT_TRUE(stats.kernel_count == 0);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(realize, direct_lazy_contiguous_after_runs_producer_and_maps_storage) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
