@@ -37,6 +37,11 @@ static PolyTensor *test_cpu_f32_tensor(
   return tensor;
 }
 
+static PolyDevice test_ctx_execution_device(PolyCtx *ctx) {
+  PolyDevice device = poly_ctx_get_preferred_device(ctx);
+  return poly_device_can_execute(device) ? device : poly_device_default();
+}
+
 /* Helper: build IR bytes for a simple add graph */
 /* out = a + b, forward entrypoint */
 static uint8_t *make_add_ir(int *out_len) {
@@ -1322,9 +1327,8 @@ TEST(instance, staged_build_validation_rewinds_scratch_on_unbound_storage) {
   PolyTensor *x = poly_instance_input(inst, "x", POLY_FLOAT32, shape, 1);
   ASSERT_NOT_NULL(x);
 
-  PolyTensor *w = poly_tensor_empty(
-      ctx, POLY_FLOAT32, shape, 1, poly_ctx_get_preferred_device(ctx)
-  );
+  PolyTensor *w =
+      poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, test_ctx_execution_device(ctx));
   ASSERT_NOT_NULL(w);
   PolyTensor *out = poly_tensor_alu2(ctx, POLY_OP_ADD, x, w);
   ASSERT_NOT_NULL(out);
@@ -1354,9 +1358,8 @@ TEST(instance, staged_build_rejects_unbound_storage_leaf) {
   PolyTensor *x = poly_instance_input(inst, "x", POLY_FLOAT32, shape, 1);
   ASSERT_NOT_NULL(x);
 
-  PolyTensor *w = poly_tensor_empty(
-      ctx, POLY_FLOAT32, shape, 1, poly_ctx_get_preferred_device(ctx)
-  );
+  PolyTensor *w =
+      poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, test_ctx_execution_device(ctx));
   ASSERT_NOT_NULL(w);
   PolyTensor *out = poly_tensor_alu2(ctx, POLY_OP_ADD, x, w);
   ASSERT_NOT_NULL(out);
@@ -1458,16 +1461,15 @@ TEST(instance, staged_build_rejects_unbound_trainable_storage_leaf) {
   ASSERT_NOT_NULL(x);
 
   int64_t w_shape[] = {2, 2};
-  PolyTensor *w = poly_tensor_empty(
-      ctx, POLY_FLOAT32, w_shape, 2, poly_ctx_get_preferred_device(ctx)
-  );
+  PolyDevice device = test_ctx_execution_device(ctx);
+  PolyTensor *w = poly_tensor_empty(ctx, POLY_FLOAT32, w_shape, 2, device);
   ASSERT_NOT_NULL(w);
   poly_tensor_set_requires_grad(w, true);
   poly_tensor_set_provenance(w, POLY_TENSOR_PROVENANCE_PARAM_INIT);
 
   PolyTensor *w_alias = poly_tensor_create_with_roots(
       ctx, poly_tensor_uop_logical(w), poly_tensor_uop_physical(w),
-      POLY_TENSOR_VALUE, poly_ctx_get_preferred_device(ctx)
+      POLY_TENSOR_VALUE, device
   );
   ASSERT_NOT_NULL(w_alias);
 
