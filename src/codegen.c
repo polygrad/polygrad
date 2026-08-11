@@ -9079,6 +9079,7 @@ static PolyPatternMatcher *poly_pm_index_is_shrink(void) {
  */
 
 static _Thread_local PolyPatternMatcher *g_combined_devec = NULL;
+static PolyPatternMatcher *poly_pm_load_store_indexing(void);
 static PolyPatternMatcher *poly_pm_combined_devec(void) {
   if (g_combined_devec) return g_combined_devec;
   /* Matches tinygrad codegen/__init__.py:79:
@@ -9086,8 +9087,11 @@ static PolyPatternMatcher *poly_pm_combined_devec(void) {
    * Run the shared symbolic matcher here so newly created invalid LOAD/STORE
    * nodes fold inside the same late devectorize stage, like tinygrad. */
   PolyPatternMatcher *sym_devec = poly_pm_concat(poly_symbolic(), poly_pm_devectorize());
-  g_combined_devec = poly_pm_thread_cache(poly_pm_concat(sym_devec, poly_pm_load_store_folding()));
+  PolyPatternMatcher *base = poly_pm_concat(sym_devec, poly_pm_load_store_folding());
+  g_combined_devec =
+      poly_pm_thread_cache(poly_pm_concat(base, poly_pm_load_store_indexing()));
   poly_pm_destroy(sym_devec); /* g_combined_devec owns copied rules. */
+  poly_pm_destroy(base);
   return g_combined_devec;
 }
 
@@ -9929,11 +9933,24 @@ static PolyUOp *rule_simplify_valid_index(
   return poly_uop(ctx, POLY_OP_INDEX, index->dtype, index_srcs, 2, index->arg);
 }
 
+static _Thread_local PolyPatternMatcher *g_pm_load_store_indexing = NULL;
+static PolyPatternMatcher *poly_pm_load_store_indexing(void) {
+  if (g_pm_load_store_indexing) return g_pm_load_store_indexing;
+  /* Pinned tinygrad/codegen/late/devectorizer.py:54-58. This matcher is
+   * intentionally shared by the devectorizer and index-dtype lowering
+   * rewrites, matching codegen/__init__.py:105-110. */
+  PolyRule rules[] = {
+      {poly_pat_op(POLY_OP_INDEX, NULL, 0, "idx"), rule_simplify_valid_index},
+  };
+  g_pm_load_store_indexing =
+      poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
+  return g_pm_load_store_indexing;
+}
+
 static _Thread_local PolyPatternMatcher *g_pm_post_index_lower = NULL;
 static PolyPatternMatcher *poly_pm_post_index_lower(void) {
   if (g_pm_post_index_lower) return g_pm_post_index_lower;
   PolyRule indexing_rules[] = {
-      {poly_pat_op(POLY_OP_INDEX, NULL, 0, "idx"), rule_simplify_valid_index},
       {poly_pat_op(POLY_OP_WHERE, NULL, 0, "w"), rule_where_branch_given_gate},
       {poly_pat_op(POLY_OP_AND, NULL, 0, "valid"), rule_canonicalize_and_valid_bounds},
       {poly_pat_op(POLY_OP_WHERE, NULL, 0, "w"), rule_where_after_gated_load},
@@ -9943,8 +9960,11 @@ static PolyPatternMatcher *poly_pm_post_index_lower(void) {
    * the checked load/store indexing cleanup needed for Invalid-carrying indexes. */
   PolyPatternMatcher *pm_indexing =
       poly_pm_new(indexing_rules, (int)(sizeof(indexing_rules) / sizeof(indexing_rules[0])));
-  PolyPatternMatcher *base = poly_pm_concat(poly_pm_lower_index_dtype(), poly_pm_gep_pushing());
+  PolyPatternMatcher *lower_index =
+      poly_pm_concat(poly_pm_lower_index_dtype(), poly_pm_load_store_indexing());
+  PolyPatternMatcher *base = poly_pm_concat(lower_index, poly_pm_gep_pushing());
   g_pm_post_index_lower = poly_pm_thread_cache(poly_pm_concat(base, pm_indexing));
+  poly_pm_destroy(lower_index);
   poly_pm_destroy(base);
   poly_pm_destroy(pm_indexing);
   return g_pm_post_index_lower;

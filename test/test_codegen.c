@@ -3253,6 +3253,81 @@ TEST(codegen, valid_gated_loaded_index_narrows_like_tinygrad) {
   PASS();
 }
 
+TEST(codegen, valid_index_simplifies_inside_devectorizer_like_tinygrad) {
+  /* Pinned tinygrad codegen/__init__.py:105-110 includes
+   * load_store_indexing in both the devectorizer and lower-index rewrites.
+   * devectorizer.py:39-42 therefore reduces x%8 to x under 0<=x<8 before
+   * weak-index dtype lowering; checking only the final graph misses that
+   * stage-order contract and can produce materially worse kernels. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyDType ptr_i32 = poly_dtype_ptr(POLY_INT32, -1, POLY_ADDR_GLOBAL);
+  PolyUOp *buf = poly_uop0(ctx, POLY_OP_PARAM, ptr_i32, poly_arg_int(0));
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(0));
+  PolyUOp *input_index =
+      poly_uop2(ctx, POLY_OP_INDEX, ptr_i32, buf, zero, poly_arg_none());
+  PolyUOp *loaded = poly_uop1(ctx, POLY_OP_LOAD, POLY_INT32, input_index, poly_arg_none());
+  PolyUOp *weak_loaded = poly_uop1(ctx, POLY_OP_CAST, POLY_INDEX, loaded, poly_arg_none());
+  PolyUOp *width = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(8));
+  PolyUOp *truth = poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_bool(true));
+  PolyUOp *negative =
+      poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, weak_loaded, zero, poly_arg_none());
+  PolyUOp *nonnegative =
+      poly_uop2(ctx, POLY_OP_CMPNE, POLY_BOOL, negative, truth, poly_arg_none());
+  PolyUOp *below_width =
+      poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, weak_loaded, width, poly_arg_none());
+  PolyUOp *valid =
+      poly_uop2(ctx, POLY_OP_AND, POLY_BOOL, nonnegative, below_width, poly_arg_none());
+  PolyUOp *bounded_mod =
+      poly_uop2(ctx, POLY_OP_FLOORMOD, POLY_INDEX, weak_loaded, width, poly_arg_none());
+  PolyUOp *invalid = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_invalid());
+  PolyUOp *coord =
+      poly_uop3(ctx, POLY_OP_WHERE, POLY_INDEX, valid, bounded_mod, invalid, poly_arg_none());
+  PolyUOp *root = poly_uop2(ctx, POLY_OP_INDEX, ptr_i32, buf, coord, poly_arg_none());
+
+  PolyRendererCaps caps = {.max_vec_width = 1};
+  PolyUOp *devec = poly_apply_devectorize_stage(ctx, root, 1, caps);
+  ASSERT_NOT_NULL(devec);
+  ASSERT_INT_EQ(devec->op, POLY_OP_INDEX);
+  ASSERT_INT_EQ(devec->n_src, 2);
+  PolyUOp *devec_coord = devec->src[1];
+  ASSERT_INT_EQ(devec_coord->op, POLY_OP_WHERE);
+  ASSERT_TRUE(poly_dtype_eq(devec_coord->dtype, POLY_INDEX));
+  ASSERT_INT_EQ(devec_coord->n_src, 3);
+  ASSERT_INT_EQ(devec_coord->src[1]->op, POLY_OP_CAST);
+  ASSERT_TRUE(poly_dtype_eq(devec_coord->src[1]->dtype, POLY_INDEX));
+  ASSERT_INT_EQ(devec_coord->src[1]->n_src, 1);
+  ASSERT_PTR_EQ(devec_coord->src[1]->src[0], loaded);
+
+  PolyUOp *lowered = poly_apply_post_index_symbolic_stage(ctx, devec, 1);
+  ASSERT_NOT_NULL(lowered);
+  ASSERT_INT_EQ(lowered->op, POLY_OP_INDEX);
+  PolyUOp *lowered_coord = lowered->src[1];
+  ASSERT_INT_EQ(lowered_coord->op, POLY_OP_WHERE);
+  ASSERT_TRUE(poly_dtype_eq(lowered_coord->dtype, POLY_INT32));
+  ASSERT_INT_EQ(lowered_coord->src[1]->op, POLY_OP_LOAD);
+  ASSERT_TRUE(poly_dtype_eq(lowered_coord->src[1]->dtype, POLY_INT32));
+  ASSERT_INT_EQ(lowered_coord->src[1]->n_src, 1);
+  PolyUOp *lowered_input_index = lowered_coord->src[1]->src[0];
+  ASSERT_INT_EQ(lowered_input_index->op, POLY_OP_INDEX);
+  ASSERT_INT_EQ(lowered_input_index->n_src, 2);
+  ASSERT_PTR_EQ(lowered_input_index->src[0], buf);
+  ASSERT_INT_EQ(lowered_input_index->src[1]->op, POLY_OP_CONST);
+  ASSERT_TRUE(poly_dtype_eq(lowered_input_index->src[1]->dtype, POLY_INT32));
+  ASSERT_INT_EQ(lowered_input_index->src[1]->arg.i, 0);
+
+  int n = 0;
+  PolyUOp **topo = poly_toposort(ctx, lowered, &n);
+  ASSERT_NOT_NULL(topo);
+  for (int i = 0; i < n; i++) {
+    ASSERT_TRUE(topo[i]->op != POLY_OP_FLOORMOD);
+    ASSERT_TRUE(topo[i]->op != POLY_OP_DEFINE_VAR);
+  }
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(codegen, lower_weak_comparison_legalizes_mixed_integer_operands) {
   /* Pinned tinygrad's GroupOp.Binary rule includes comparisons
    * (uop/ops.py:1657-1659): the result remains bool, but both weak-index
