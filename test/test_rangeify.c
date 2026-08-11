@@ -2760,7 +2760,7 @@ TEST(rangeify, add_buffers_uses_bufferize_device_metadata) {
   ASSERT_NOT_NULL(ctx);
 
   PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, 8);
-  PolyUOp *device = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CUDA));
+  PolyUOp *device = poly_device_uop(ctx, POLY_DEVICE_CUDA);
   PolyUOp *copy = poly_uop2(ctx, POLY_OP_COPY, POLY_FLOAT32, a, device, poly_arg_none());
   PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(8));
   PolyUOp *range = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_range(0, POLY_AXIS_LOOP));
@@ -2785,8 +2785,8 @@ TEST(rangeify, add_buffers_uses_bufferize_device_metadata) {
     PolyUOp *u = topo[i];
     if (u->op != POLY_OP_BUFFER || u->n_src < 2 || u->src[0]->op != POLY_OP_LUNIQUE) continue;
     ASSERT_TRUE(u->src[1]->op == POLY_OP_DEVICE);
-    ASSERT_TRUE(u->src[1]->arg.kind == POLY_ARG_INT);
-    ASSERT_INT_EQ(u->src[1]->arg.i, POLY_DEVICE_CUDA);
+    ASSERT_TRUE(u->src[1]->arg.kind == POLY_ARG_STRING);
+    ASSERT_STR_EQ(u->src[1]->arg.str, "CUDA");
     found = true;
   }
   ASSERT_TRUE(found);
@@ -3020,7 +3020,7 @@ TEST(rangeify, exec_order_keeps_versioned_read_after_same_buffer_writes) {
 
   PolyUOp *lunique = poly_uop0(ctx, POLY_OP_LUNIQUE, POLY_VOID, poly_arg_int(0));
   PolyUOp *device =
-      poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CPU));
+      poly_device_uop(ctx, POLY_DEVICE_CPU);
   PolyUOp *tmp_src[2] = {lunique, device};
   PolyUOp *tmp =
       poly_uop(ctx, POLY_OP_BUFFER, POLY_INT32, tmp_src, 2, poly_arg_int(1));
@@ -3096,7 +3096,7 @@ TEST(rangeify, scalar_store_of_explicit_copy_is_a_copy_kernel) {
   PolyUOp *dst_idx =
       poly_uop2(ctx, POLY_OP_INDEX, ptr, dst, zero, poly_arg_none());
   PolyUOp *device =
-      poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_INTERP));
+      poly_device_uop(ctx, POLY_DEVICE_INTERP);
   PolyUOp *copy_src[2] = {src, device};
   PolyUOp *copy =
       poly_uop(ctx, POLY_OP_COPY, POLY_FLOAT32, copy_src, 2, poly_arg_none());
@@ -3132,7 +3132,7 @@ TEST(rangeify, affine_indexed_store_of_copy_keeps_copy_kernel_and_ranges) {
   PolyUOp *src_idx =
       poly_uop2(ctx, POLY_OP_INDEX, ptr, src, idx, poly_arg_none());
   PolyUOp *device =
-      poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_INTERP));
+      poly_device_uop(ctx, POLY_DEVICE_INTERP);
   PolyUOp *copy_src[2] = {src_idx, device};
   PolyUOp *copy =
       poly_uop(ctx, POLY_OP_COPY, POLY_FLOAT32, copy_src, 2, poly_arg_none());

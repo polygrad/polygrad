@@ -61,8 +61,8 @@ TEST(placement, template_bindings_preserve_copy_and_assignment_occurrences) {
   ASSERT_NOT_NULL(base_interp);
   ASSERT_NOT_NULL(value_cuda);
 
-  PolyUOp *cuda_device = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CUDA));
-  PolyUOp *cpu_device = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CPU));
+  PolyUOp *cuda_device = poly_device_uop(ctx, POLY_DEVICE_CUDA);
+  PolyUOp *cpu_device = poly_device_uop(ctx, POLY_DEVICE_CPU);
   PolyUOp *to_cuda_src[2] = {base_cpu, cuda_device};
   PolyUOp *to_cuda = poly_uop(ctx, POLY_OP_COPY, POLY_FLOAT32, to_cuda_src, 2, poly_arg_none());
   PolyUOp *to_cpu_src[2] = {to_cuda, cpu_device};
@@ -121,7 +121,7 @@ TEST(placement, logical_missing_occurrence_evidence_fails_atomically) {
 
   PolyUOp *copy_src[2] = {
       logical,
-      poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CUDA)),
+      poly_device_uop(ctx, POLY_DEVICE_CUDA),
   };
   roots[0] = poly_uop(ctx, POLY_OP_COPY, POLY_FLOAT32, copy_src, 2, poly_arg_none());
   ASSERT_INT_EQ(poly_place_roots(ctx, roots, NULL, 1, from, NULL, to, 1, out), -1);
@@ -174,7 +174,7 @@ TEST(placement, invalid_binding_shape_or_alias_fails_atomically) {
   /* COPY is an occurrence inside a template, never a replaceable binding.
    * Substituting it directly would erase pinned `.to()` topology. */
   PolyUOp *interp_device =
-      poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_INTERP));
+      poly_device_uop(ctx, POLY_DEVICE_INTERP);
   PolyUOp *copy_src[2] = {target, interp_device};
   PolyUOp *copy = poly_uop(ctx, POLY_OP_COPY, POLY_FLOAT32, copy_src, 2, poly_arg_none());
   PolyUOp *template = poly_add(ctx, copy, copy);

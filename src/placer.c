@@ -32,7 +32,6 @@ static PolyDevice device_from_string_arg(const char *s) {
 
 PolyDevice poly_device_from_device_uop(PolyUOp *device) {
   if (!device || device->op != POLY_OP_DEVICE) return POLY_DEVICE_AUTO;
-  if (device->arg.kind == POLY_ARG_INT) return (PolyDevice)device->arg.i;
   if (device->arg.kind == POLY_ARG_STRING) return device_from_string_arg(device->arg.str);
   return POLY_DEVICE_AUTO;
 }
@@ -124,7 +123,7 @@ PolyDevice poly_uop_device_cached(PolyUOp *u, PolyMap *cache) {
 }
 
 static PolyUOp *make_device_uop(PolyCtx *ctx, PolyDevice device) {
-  return poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int((int64_t)device));
+  return poly_device_uop(ctx, device);
 }
 
 static PolyUOp *copy_to_device(PolyCtx *ctx, PolyUOp *value, PolyDevice device) {

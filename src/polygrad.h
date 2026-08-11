@@ -551,7 +551,12 @@ void poly_map_clear(PolyMap *m);
 typedef void (*PolyMapIterFn)(const void *key, void *value, void *userdata);
 void poly_map_foreach(PolyMap *m, PolyMapIterFn fn, void *userdata);
 
-/* Device identity */
+/* Backend kind.
+ *
+ * Concrete DEVICE UOp identity follows pinned tinygrad and is a canonical
+ * string (for example "CUDA" or "CUDA:1").  This enum still selects the
+ * current ordinal-zero backend/runtime and must not be used to collapse a
+ * nonzero device identity. */
 
 typedef enum {
   POLY_DEVICE_AUTO = 0,
@@ -578,7 +583,9 @@ bool poly_device_is_host_addressable(PolyDevice dev);
 /* Do two devices use the same underlying storage domain? */
 bool poly_devices_share_storage(PolyDevice a, PolyDevice b);
 
-/* Look up device id by name. Returns POLY_DEVICE_AUTO if unknown. */
+/* Look up the currently executable ordinal-zero backend by name. `:0` is
+ * canonicalized away; nonzero ordinals return AUTO until runtime identity is
+ * migrated. */
 PolyDevice poly_device_by_name(const char *name);
 const char *poly_device_name(PolyDevice device);
 

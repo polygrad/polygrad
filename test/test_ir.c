@@ -190,7 +190,7 @@ TEST(ir, round_trip_bufferize_opts_arg) {
   PolyCtx *ctx = poly_ctx_new();
 
   PolyUOp *a = poly_buffer_f32(ctx, 8);
-  PolyUOp *device = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CUDA));
+  PolyUOp *device = poly_device_uop(ctx, POLY_DEVICE_CUDA);
   PolyUOp *copy = poly_uop2(ctx, POLY_OP_COPY, POLY_FLOAT32, a, device, poly_arg_none());
   PolyUOp *bound = poly_const_int(ctx, 8);
   PolyUOp *range =
@@ -221,8 +221,13 @@ TEST(ir, round_trip_bufferize_opts_arg) {
   int n_topo = 0;
   PolyUOp **topo = poly_toposort(imported.ctx, imported.entrypoints[0].sink, &n_topo);
   ASSERT_NOT_NULL(topo);
-  bool found = false;
+  bool found = false, found_device = false;
   for (int i = 0; i < n_topo; i++) {
+    if (topo[i]->op == POLY_OP_DEVICE) {
+      ASSERT_EQ(topo[i]->arg.kind, POLY_ARG_STRING);
+      ASSERT_STR_EQ(topo[i]->arg.str, "CUDA");
+      found_device = true;
+    }
     if (topo[i]->op != POLY_OP_STAGE) continue;
     ASSERT_INT_EQ(topo[i]->arg.kind, POLY_ARG_BUFFERIZE_OPTS);
     ASSERT_INT_EQ(poly_bufferize_arg_device(topo[i]->arg), POLY_DEVICE_CUDA);
@@ -231,6 +236,7 @@ TEST(ir, round_trip_bufferize_opts_arg) {
     found = true;
   }
   ASSERT_TRUE(found);
+  ASSERT_TRUE(found_device);
 
   poly_ir_spec_free(&imported);
   poly_ctx_destroy(imported.ctx);

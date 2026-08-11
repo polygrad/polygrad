@@ -1103,7 +1103,7 @@ static PolyUOp *poly_program_from_call_body(
   PolyProgramInfo *info = poly_program_info_build(ctx, call, body, program_name);
   if (!info) return NULL;
 
-  PolyUOp *dev = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int((int64_t)device));
+  PolyUOp *dev = poly_device_uop(ctx, device);
   PolyUOp *program_src[2] = {body, dev};
   PolyUOp *program =
       poly_uop(ctx, POLY_OP_PROGRAM, POLY_VOID, program_src, 2, poly_arg_program_info(info));
@@ -2917,9 +2917,7 @@ static PolyUOp *make_call_copy_body(
     return NULL;
   PolyDType dtype = sched->template->buf_slots[src_slot].dtype;
   PolyUOp *src_param = poly_uop0(ctx, POLY_OP_PARAM, dtype, poly_arg_int(1));
-  PolyUOp *dev = poly_uop0(
-      ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int((int64_t)sched->template->buf_slots[dst_slot].device)
-  );
+  PolyUOp *dev = poly_device_uop(ctx, sched->template->buf_slots[dst_slot].device);
   PolyUOp *copy_src[2] = {src_param, dev};
   return poly_uop(ctx, POLY_OP_COPY, dtype, copy_src, 2, poly_arg_none());
 }
@@ -2947,8 +2945,9 @@ static PolyUOp *linear_replay_new_intermediate(PolyCtx *ctx, PolyUOp *old_buf) {
   PolyUOp *lunique = poly_uop0(ctx, POLY_OP_LUNIQUE, POLY_VOID, poly_arg_int(id));
   if (!lunique) return NULL;
   PolyDevice dev_id = poly_uop_device(old_buf);
-  PolyArg dev_arg = dev_id == POLY_DEVICE_AUTO ? poly_arg_none() : poly_arg_int((int64_t)dev_id);
-  PolyUOp *dev = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, dev_arg);
+  PolyUOp *dev = dev_id == POLY_DEVICE_AUTO
+                     ? poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_none())
+                     : poly_device_uop(ctx, dev_id);
   if (!dev) return NULL;
   PolyUOp *src[2] = {lunique, dev};
   return poly_uop(ctx, POLY_OP_BUFFER, old_buf->dtype, src, 2, old_buf->arg);

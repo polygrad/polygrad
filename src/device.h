@@ -12,6 +12,14 @@
 
 typedef struct PolyBuffer PolyBuffer;
 
+/* Pinned tinygrad stores canonical device strings directly in DEVICE.arg
+ * (device.py:15-24, uop/ops.py:733-746).  These are the only constructors
+ * production graph builders should use; the enum overload is the canonical
+ * ordinal-zero wrapper for the current backend-only public API. AUTO remains
+ * Polygrad's existing unresolved internal DEVICE(None) placeholder. */
+PolyUOp *poly_device_uop_from_name(PolyCtx *ctx, const char *name);
+PolyUOp *poly_device_uop(PolyCtx *ctx, PolyDevice device);
+
 typedef struct PolyAllocator {
   void *(*alloc)(size_t nbytes, void *dev_ctx);
   void (*free)(const PolyBuffer *buffer, void *dev_ctx);

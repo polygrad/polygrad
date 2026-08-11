@@ -550,7 +550,7 @@ PolyTensor *poly_tensor_empty(
 
   PolyUOp *unique =
       poly_uop0(ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(poly_ctx_next_unique_id(ctx)));
-  PolyUOp *device_uop = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int((int64_t)device));
+  PolyUOp *device_uop = poly_device_uop(ctx, device);
   if (!unique || !device_uop) return NULL;
 
   PolyUOp *logical = poly_uop1(ctx, POLY_OP_BUFFER, scalar_dtype, unique, poly_arg_int(numel));
@@ -943,7 +943,7 @@ PolyTensor *poly_tensor_to_device(PolyCtx *ctx, PolyTensor *tensor, PolyDevice d
    * self.uop.copy_to_device(device) immediately. Consume the exact stored
    * physical occurrence directly; explicit re-placement is a separate API. */
   PolyUOp *source_physical = tensor->uop_physical;
-  PolyUOp *target_device = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int((int64_t)device));
+  PolyUOp *target_device = poly_device_uop(ctx, device);
   PolyUOp *copy_src[2] = {source_physical, target_device};
   PolyUOp *physical =
       (source_physical && target_device)
@@ -1086,8 +1086,7 @@ PolyTensor *poly_tensor_clone_into(PolyCtx *ctx, PolyTensor *target, PolyTensor 
   PolyUOp *placed_source = source_physical;
   PolyDevice source_device = poly_uop_device(source_physical);
   if (source_device != POLY_DEVICE_AUTO && source_device != target->device) {
-    PolyUOp *device =
-        poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int((int64_t)target->device));
+    PolyUOp *device = poly_device_uop(ctx, target->device);
     PolyUOp *copy_src[2] = {source_physical, device};
     placed_source =
         device ? poly_uop(ctx, POLY_OP_COPY, source_physical->dtype, copy_src, 2, poly_arg_none())

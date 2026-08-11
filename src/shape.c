@@ -9,6 +9,7 @@
 
 #include "polygrad.h"
 #include "ctx.h"
+#include "device.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -61,7 +62,7 @@ PolyUOp *poly_buffer_on_device(
   if (device == POLY_DEVICE_AUTO)
     return poly_uop1(ctx, POLY_OP_BUFFER, scalar_dtype, unique, poly_arg_int(size));
 
-  PolyUOp *dev = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int((int64_t)device));
+  PolyUOp *dev = poly_device_uop(ctx, device);
   PolyUOp *src[2] = {unique, dev};
   return poly_uop(ctx, POLY_OP_BUFFER, scalar_dtype, src, 2, poly_arg_int(size));
 }

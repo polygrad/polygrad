@@ -1871,9 +1871,9 @@ static PolyUOp *bufferize_to_store_global(
    * DEVICE(), letting schedule/runtime selection place the temporary. */
   PolyUOp *lunique = poly_uop0(ctx, POLY_OP_LUNIQUE, POLY_VOID, poly_arg_int((*lunique_counter)++));
   int32_t bufferize_device = poly_bufferize_arg_device(bufferize->arg);
-  PolyArg device_arg =
-      bufferize_device == 0 ? poly_arg_none() : poly_arg_int((int64_t)bufferize_device);
-  PolyUOp *device = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, device_arg);
+  PolyUOp *device = bufferize_device == 0
+                        ? poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_none())
+                        : poly_device_uop(ctx, (PolyDevice)bufferize_device);
   PolyUOp *buf_src[2] = {lunique, device};
   PolyUOp *buf = poly_uop(ctx, POLY_OP_BUFFER, bufferize->dtype, buf_src, 2, poly_arg_int(size));
 

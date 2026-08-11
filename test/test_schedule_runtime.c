@@ -2398,7 +2398,7 @@ TEST(schedule_runtime, cached_linear_runtime_override_wins_over_default) {
 static PolyUOp *make_copy_sink(PolyCtx *ctx, PolyUOp **src_out, PolyUOp **dst_out) {
   PolyUOp *src = poly_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_CPU);
   PolyUOp *dst = poly_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_CPU);
-  PolyUOp *dev = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CPU));
+  PolyUOp *dev = poly_device_uop(ctx, POLY_DEVICE_CPU);
   PolyUOp *copy_src[2] = {src, dev};
   PolyUOp *copy = poly_uop(ctx, POLY_OP_COPY, POLY_FLOAT32, copy_src, 2, poly_arg_none());
   if (src_out) *src_out = src;
@@ -2480,7 +2480,7 @@ TEST(schedule_runtime, copy_intermediate_slots_do_not_need_zero) {
   PolyUOp *a = poly_buffer_f32(ctx, 4);
   PolyUOp *b = poly_buffer_f32(ctx, 4);
   PolyUOp *out = poly_buffer_f32(ctx, 4);
-  PolyUOp *dev = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CPU));
+  PolyUOp *dev = poly_device_uop(ctx, POLY_DEVICE_CPU);
   PolyUOp *copy_a_src[2] = {a, dev};
   PolyUOp *copy_b_src[2] = {b, dev};
   PolyUOp *copy_a = poly_uop(ctx, POLY_OP_COPY, POLY_FLOAT32, copy_a_src, 2, poly_arg_none());
@@ -2654,7 +2654,7 @@ TEST(schedule_runtime, webgpu_intermediates_are_memory_planned_into_views) {
   PolyUOp *a = poly_buffer_f32(ctx, 4);
   PolyUOp *b = poly_buffer_f32(ctx, 4);
   PolyUOp *out = poly_buffer_f32(ctx, 4);
-  PolyUOp *dev = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_WEBGPU));
+  PolyUOp *dev = poly_device_uop(ctx, POLY_DEVICE_WEBGPU);
   PolyUOp *copy_a_src[2] = {a, dev};
   PolyUOp *copy_b_src[2] = {b, dev};
   PolyUOp *copy_a = poly_uop(ctx, POLY_OP_COPY, POLY_FLOAT32, copy_a_src, 2, poly_arg_none());

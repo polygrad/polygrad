@@ -337,7 +337,7 @@ TEST(realize, custom_call_copy_output_schedules_copy_call) {
   PolyUOp *call = poly_uop_call(ctx, sink, args, 3);
   PolyUOp *after = poly_uop_after(ctx, c, call);
   PolyUOp *contig = poly_contiguous(ctx, after);
-  PolyUOp *device = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CUDA));
+  PolyUOp *device = poly_device_uop(ctx, POLY_DEVICE_CUDA);
   PolyUOp *copy_src[2] = {contig, device};
   PolyUOp *copy = poly_uop(ctx, POLY_OP_COPY, POLY_FLOAT32, copy_src, 2, poly_arg_none());
 
@@ -1468,7 +1468,7 @@ TEST(realize, aggregate_map_prefers_exact_root_placement_over_exact_descendant) 
   PolyUOp *param_logical =
       poly_uop(ctx, POLY_OP_AFTER, POLY_FLOAT32, logical_src, 2, poly_arg_none());
 
-  PolyUOp *cpu_device = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CPU));
+  PolyUOp *cpu_device = poly_device_uop(ctx, POLY_DEVICE_CPU);
   PolyUOp *copy_src[2] = {portable_value, cpu_device};
   PolyUOp *placed_value = poly_uop(ctx, POLY_OP_COPY, POLY_FLOAT32, copy_src, 2, poly_arg_none());
   PolyUOp *physical_value = poly_add(ctx, state_after, placed_value);
@@ -2539,8 +2539,8 @@ TEST(realize, placed_effect_uses_realized_alias_in_prebuilt_value) {
 
 TEST(realize, uop_device_follows_device_and_after_value) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *cpu_device = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CPU));
-  PolyUOp *cuda_device = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CUDA));
+  PolyUOp *cpu_device = poly_device_uop(ctx, POLY_DEVICE_CPU);
+  PolyUOp *cuda_device = poly_device_uop(ctx, POLY_DEVICE_CUDA);
   ASSERT_INT_EQ(poly_uop_device(cpu_device), POLY_DEVICE_CPU);
   ASSERT_INT_EQ(poly_uop_device(cuda_device), POLY_DEVICE_CUDA);
 
@@ -3597,7 +3597,7 @@ TEST(realize, transform_to_call_finalizes_creation_copy_assignment_after) {
   float initial = 2.0f;
   PolyUOp *host = poly_buffer_f32(ctx, 1);
   poly_buffer_set(ctx, host, &initial, sizeof(initial), POLY_DEVICE_HOST);
-  PolyUOp *device = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CPU));
+  PolyUOp *device = poly_device_uop(ctx, POLY_DEVICE_CPU);
   PolyUOp *copy_src[2] = {host, device};
   PolyUOp *copy = poly_uop(ctx, POLY_OP_COPY, POLY_FLOAT32, copy_src, 2, poly_arg_none());
   PolyUOp *value = poly_add(ctx, copy, poly_const_float(ctx, 1.0));
@@ -3740,7 +3740,7 @@ TEST(realize, transform_to_call_three_source_after_keeps_independent_effects) {
   PolyUOp *host =
       poly_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_HOST);
   PolyUOp *device =
-      poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CPU));
+      poly_device_uop(ctx, POLY_DEVICE_CPU);
   PolyUOp *copy_src[2] = {host, device};
   PolyUOp *creation_copy = poly_uop(
       ctx, POLY_OP_COPY, POLY_FLOAT32, copy_src, 2, poly_arg_none()
@@ -3856,7 +3856,7 @@ TEST(realize, transform_to_call_nested_three_source_after_keeps_map_key) {
   PolyUOp *host =
       poly_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_HOST);
   PolyUOp *device =
-      poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CPU));
+      poly_device_uop(ctx, POLY_DEVICE_CPU);
   PolyUOp *copy_src[2] = {host, device};
   PolyUOp *creation_copy = poly_uop(
       ctx, POLY_OP_COPY, POLY_FLOAT32, copy_src, 2, poly_arg_none()
@@ -4023,9 +4023,7 @@ TEST(realize, transform_to_call_discards_dead_view_copy_side_calls) {
     };
     poly_buffer_attach(ctx, base, &host_storage);
     PolyUOp *view = poly_buffer_view(ctx, base, 1, 0);
-    PolyUOp *device = poly_uop0(
-        ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CPU)
-    );
+    PolyUOp *device = poly_device_uop(ctx, POLY_DEVICE_CPU);
     PolyUOp *copy_src[2] = {view, device};
     PolyUOp *copy = poly_uop(
         ctx, POLY_OP_COPY, POLY_FLOAT32, copy_src, 2, poly_arg_none()
@@ -4177,7 +4175,7 @@ TEST(realize, transform_to_call_dead_map_rows_ignore_opaque_callee_bodies) {
     PolyUOp *replacement_host =
         poly_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_HOST);
     PolyUOp *replacement_device =
-        poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CPU));
+        poly_device_uop(ctx, POLY_DEVICE_CPU);
     PolyUOp *replacement_src[2] = {replacement_host, replacement_device};
     PolyUOp *replacement = poly_uop(
         ctx, POLY_OP_COPY, POLY_FLOAT32, replacement_src, 2, poly_arg_none()
@@ -4256,7 +4254,7 @@ TEST(realize, transform_to_call_does_not_publish_synthetic_early_rewrite_keys) {
   PolyUOp *host =
       poly_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_HOST);
   PolyUOp *cpu_device =
-      poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CPU));
+      poly_device_uop(ctx, POLY_DEVICE_CPU);
   PolyUOp *copy_src[2] = {host, cpu_device};
   PolyUOp *replacement = poly_uop(
       ctx, POLY_OP_COPY, POLY_FLOAT32, copy_src, 2, poly_arg_none()
@@ -7612,7 +7610,7 @@ TEST(realize, direct_movement_disk_copy_matches_pinned_creation_pipeline) {
   int64_t shape[2] = {2, 3};
   PolyUOp *movement = poly_reshape(ctx, poly_shrink(ctx, disk_buffer, bounds, 1), shape, 2);
   ASSERT_NOT_NULL(movement);
-  PolyUOp *device = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CPU));
+  PolyUOp *device = poly_device_uop(ctx, POLY_DEVICE_CPU);
   PolyUOp *copy_src[2] = {movement, device};
   PolyUOp *copy = poly_uop(ctx, POLY_OP_COPY, movement->dtype, copy_src, 2, poly_arg_none());
   ASSERT_NOT_NULL(copy);

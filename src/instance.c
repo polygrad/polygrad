@@ -2037,8 +2037,7 @@ static PolyUOp *instance_binding_on_device(PolyCtx *ctx, PolyUOp *logical, PolyD
   /* Pinned UOp.empty/new_buffer creates BUFFER(UNIQUE, DEVICE(device))
    * (uop/ops.py:733-746).  The portable binding already owns the UNIQUE, so
    * uniform placement adds only the DEVICE-bearing physical occurrence. */
-  PolyUOp *device_uop =
-      poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int((int64_t)device));
+  PolyUOp *device_uop = poly_device_uop(ctx, device);
   PolyUOp *src[2] = {logical->src[0], device_uop};
   if (!device_uop) return NULL;
   return (logical->tag != 0 || logical->tag_arg.kind != POLY_ARG_NONE)

@@ -129,6 +129,8 @@ TEST(tensor, static_empty_shares_unique_with_deviceful_physical_root) {
   ASSERT_TRUE(logical_buffer->src[0] == physical_buffer->src[0]);
   ASSERT_INT_EQ(physical_buffer->src[1]->op, POLY_OP_DEVICE);
   ASSERT_INT_EQ(poly_device_from_device_uop(physical_buffer->src[1]), POLY_DEVICE_CPU);
+  ASSERT_EQ(physical_buffer->src[1]->arg.kind, POLY_ARG_STRING);
+  ASSERT_STR_EQ(physical_buffer->src[1]->arg.str, "CPU");
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -638,9 +640,9 @@ TEST(tensor, einsum_rearrange_reject_invalid_and_foreign_inputs) {
   ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, valid)[1], 3);
 
   PolyUOp *cuda =
-      poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CUDA));
+      poly_device_uop(ctx, POLY_DEVICE_CUDA);
   PolyUOp *cpu =
-      poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CPU));
+      poly_device_uop(ctx, POLY_DEVICE_CPU);
   PolyUOp *to_cuda =
       poly_uop2(ctx, POLY_OP_COPY, x->dtype, x, cuda, poly_arg_none());
   PolyUOp *physical =
@@ -1153,8 +1155,8 @@ TEST(pe, argmax_2d_e2e) {
 TEST(pe, tensor_argmax_builds_both_roots_from_exact_occurrences) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *logical = make_buf(ctx, (int64_t[]){2, 3}, 2);
-  PolyUOp *cuda = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CUDA));
-  PolyUOp *cpu = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CPU));
+  PolyUOp *cuda = poly_device_uop(ctx, POLY_DEVICE_CUDA);
+  PolyUOp *cpu = poly_device_uop(ctx, POLY_DEVICE_CPU);
   PolyUOp *to_cuda =
       poly_uop2(ctx, POLY_OP_COPY, logical->dtype, logical, cuda, poly_arg_none());
   PolyUOp *physical =
@@ -1205,8 +1207,8 @@ TEST(pe, tensor_gelu_family_builds_both_roots_from_exact_occurrences) {
   ASSERT_NOT_NULL(foreign);
 
   PolyUOp *logical = make_buf(ctx, (int64_t[]){2, 2}, 2);
-  PolyUOp *cuda = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CUDA));
-  PolyUOp *cpu = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CPU));
+  PolyUOp *cuda = poly_device_uop(ctx, POLY_DEVICE_CUDA);
+  PolyUOp *cpu = poly_device_uop(ctx, POLY_DEVICE_CPU);
   PolyUOp *to_cuda =
       poly_uop2(ctx, POLY_OP_COPY, logical->dtype, logical, cuda, poly_arg_none());
   PolyUOp *physical =
@@ -1254,8 +1256,8 @@ TEST(pe, tensor_log1p_expm1_build_both_roots_from_exact_occurrences) {
   ASSERT_NOT_NULL(foreign);
 
   PolyUOp *logical = make_buf(ctx, (int64_t[]){4}, 1);
-  PolyUOp *cuda = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CUDA));
-  PolyUOp *cpu = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CPU));
+  PolyUOp *cuda = poly_device_uop(ctx, POLY_DEVICE_CUDA);
+  PolyUOp *cpu = poly_device_uop(ctx, POLY_DEVICE_CPU);
   PolyUOp *to_cuda =
       poly_uop2(ctx, POLY_OP_COPY, logical->dtype, logical, cuda, poly_arg_none());
   PolyUOp *physical =
@@ -1676,8 +1678,8 @@ TEST(pe, sort_topk_e2e_matches_tinygrad_probe) {
 TEST(pe, tensor_topk_builds_both_roots_from_exact_occurrences) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *logical = make_buf(ctx, (int64_t[]){4}, 1);
-  PolyUOp *cuda = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CUDA));
-  PolyUOp *cpu = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CPU));
+  PolyUOp *cuda = poly_device_uop(ctx, POLY_DEVICE_CUDA);
+  PolyUOp *cpu = poly_device_uop(ctx, POLY_DEVICE_CPU);
   PolyUOp *to_cuda =
       poly_uop2(ctx, POLY_OP_COPY, logical->dtype, logical, cuda, poly_arg_none());
   PolyUOp *physical =

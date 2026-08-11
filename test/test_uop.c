@@ -63,6 +63,40 @@ TEST(uop, create_string_arg) {
   PASS();
 }
 
+TEST(uop, device_constructor_uses_canonical_string_identity) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  /* Pinned Device._canonicalize removes only ordinal zero, and UOp.new_buffer
+   * stores the resulting string in DEVICE.arg (device.py:15-24,
+   * uop/ops.py:733-746). */
+  PolyUOp *cuda = poly_device_uop_from_name(ctx, "cuda");
+  PolyUOp *cuda0 = poly_device_uop_from_name(ctx, "CUDA:0");
+  PolyUOp *cuda1 = poly_device_uop_from_name(ctx, "cuda:1");
+  ASSERT_NOT_NULL(cuda);
+  ASSERT_NOT_NULL(cuda0);
+  ASSERT_NOT_NULL(cuda1);
+  ASSERT_PTR_EQ(cuda, cuda0);
+  ASSERT_PTR_NEQ(cuda, cuda1);
+  ASSERT_EQ(cuda->arg.kind, POLY_ARG_STRING);
+  ASSERT_EQ(cuda1->arg.kind, POLY_ARG_STRING);
+  ASSERT_STR_EQ(cuda->arg.str, "CUDA");
+  ASSERT_STR_EQ(cuda1->arg.str, "CUDA:1");
+  ASSERT_INT_EQ(poly_device_from_device_uop(cuda), POLY_DEVICE_CUDA);
+  ASSERT_INT_EQ(poly_device_from_device_uop(cuda1), POLY_DEVICE_AUTO);
+  PolyUOp *old_integer_dialect =
+      poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CUDA));
+  ASSERT_INT_EQ(poly_device_from_device_uop(old_integer_dialect), POLY_DEVICE_AUTO);
+
+  PolyUOp *cpu = poly_device_uop(ctx, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(cpu);
+  ASSERT_EQ(cpu->arg.kind, POLY_ARG_STRING);
+  ASSERT_STR_EQ(cpu->arg.str, "CPU");
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(uop, create_int_tuple_arg) {
   PolyCtx *ctx = poly_ctx_new();
   int64_t perm[] = {1, 0, 2};

@@ -109,16 +109,21 @@ PolyDevice poly_device_by_name(const char *name) {
   /* DISK device strings carry an arbitrary filesystem path. Recognize the
    * device prefix before copying short execution-device names into the fixed
    * normalization buffer. */
-  if (tolower((unsigned char)name[0]) == 'd' &&
+  size_t input_n = strlen(name);
+  if (input_n >= 5 && tolower((unsigned char)name[0]) == 'd' &&
       tolower((unsigned char)name[1]) == 'i' &&
       tolower((unsigned char)name[2]) == 's' &&
       tolower((unsigned char)name[3]) == 'k' && name[4] == ':')
     return POLY_DEVICE_DISK;
   char buf[64];
-  size_t n = strlen(name);
+  size_t n = input_n;
   if (n >= sizeof(buf)) return POLY_DEVICE_AUTO;
   for (size_t i = 0; i <= n; i++) buf[i] = (char)tolower((unsigned char)name[i]);
   name = buf;
+  /* Pinned Device._canonicalize removes only a terminal ordinal zero.  Keep
+   * nonzero ordinals unresolved until residency/runtime/cache identity carries
+   * them; resolving CUDA:1 to the CUDA backend here would execute on GPU 0. */
+  if (n >= 2 && buf[n - 2] == ':' && buf[n - 1] == '0') buf[n - 2] = '\0';
   if (strncmp(name, "cpu:", 4) == 0) name += 4;
   if (strncmp(name, "disk:", 5) == 0) name = "disk";
   for (size_t i = 0; i < sizeof(POLY_DEVICE_NAMES) / sizeof(POLY_DEVICE_NAMES[0]); i++)
@@ -130,6 +135,30 @@ const char *poly_device_name(PolyDevice device) {
   for (size_t i = 0; i < sizeof(POLY_DEVICE_NAMES) / sizeof(POLY_DEVICE_NAMES[0]); i++)
     if (POLY_DEVICE_NAMES[i].device == device) return POLY_DEVICE_NAMES[i].name;
   return "auto";
+}
+
+PolyUOp *poly_device_uop_from_name(PolyCtx *ctx, const char *name) {
+  if (!ctx || !name || !name[0]) return NULL;
+  size_t n = strlen(name);
+  char *canonical = malloc(n + 1);
+  if (!canonical) return NULL;
+  const char *sep = strchr(name, ':');
+  size_t prefix_n = sep ? (size_t)(sep - name) : n;
+  for (size_t i = 0; i < prefix_n; i++)
+    canonical[i] = (char)toupper((unsigned char)name[i]);
+  memcpy(canonical + prefix_n, name + prefix_n, n - prefix_n + 1);
+  if (n >= 2 && canonical[n - 2] == ':' && canonical[n - 1] == '0')
+    canonical[n - 2] = '\0';
+  PolyUOp *ret = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_str(canonical));
+  free(canonical);
+  return ret;
+}
+
+PolyUOp *poly_device_uop(PolyCtx *ctx, PolyDevice device) {
+  if (!ctx) return NULL;
+  if (device == POLY_DEVICE_AUTO)
+    return poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_none());
+  return poly_device_uop_from_name(ctx, poly_device_name(device));
 }
 
 static void *disk_alloc(size_t nbytes, void *dev_ctx) {
@@ -316,8 +345,7 @@ PolyUOp *poly_buffer_from_host_unique(
 #else
   PolyDevice source_device = POLY_DEVICE_HOST;
 #endif
-  PolyUOp *device =
-      poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int((int64_t)source_device));
+  PolyUOp *device = poly_device_uop(ctx, source_device);
   PolyUOp *src[2] = {unique, device};
   PolyUOp *buffer =
       device ? poly_uop(ctx, POLY_OP_BUFFER, scalar_dtype, src, 2, poly_arg_int(numel)) : NULL;

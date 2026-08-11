@@ -85,6 +85,11 @@ TEST(utils, getenv_flag_default_preserves_absent_default) {
 TEST(utils, device_name_accepts_tinygrad_style_cpu_renderer_aliases) {
   ASSERT_INT_EQ(poly_device_by_name("cpu"), POLY_DEVICE_CPU);
   ASSERT_INT_EQ(poly_device_by_name("CPU"), POLY_DEVICE_CPU);
+  ASSERT_INT_EQ(poly_device_by_name("CPU:0"), POLY_DEVICE_CPU);
+  ASSERT_INT_EQ(poly_device_by_name("CUDA:0"), POLY_DEVICE_CUDA);
+  /* Nonzero ordinals are graph identities, not aliases for ordinal zero. */
+  ASSERT_INT_EQ(poly_device_by_name("CPU:1"), POLY_DEVICE_AUTO);
+  ASSERT_INT_EQ(poly_device_by_name("CUDA:1"), POLY_DEVICE_AUTO);
   ASSERT_INT_EQ(poly_device_by_name("x86"), POLY_DEVICE_X86);
   ASSERT_INT_EQ(poly_device_by_name("X86"), POLY_DEVICE_X86);
   ASSERT_INT_EQ(poly_device_by_name("cpu:x86"), POLY_DEVICE_X86);
