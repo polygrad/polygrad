@@ -33,9 +33,9 @@ bool poly_structural_eq(const void *a, const void *b);
 /* tinygrad's callified function uses value PARAMs as external storage
  * identities until rangeify lowers them to kernel pointer PARAMs. */
 static inline bool poly_uop_is_shaped_value_param(const PolyUOp *u) {
-  return u && u->op == POLY_OP_PARAM && u->arg.kind == POLY_ARG_PARAM &&
-         u->arg.param && !u->dtype.is_ptr && !u->arg.param->name &&
-         u->n_src == 1 && u->src[0] && u->src[0]->op == POLY_OP_STACK;
+  return u && u->op == POLY_OP_PARAM && u->arg.kind == POLY_ARG_PARAM && u->arg.param &&
+         !u->dtype.is_ptr && !u->arg.param->name && u->n_src == 1 && u->src[0] &&
+         u->src[0]->op == POLY_OP_STACK;
 }
 
 /* DFS to collect BUFFER/BUFFER_VIEW and callified shaped PARAM identities in
@@ -108,18 +108,31 @@ int poly_uop_substitute_many(
     PolyUOp **out
 );
 
+/* Compile aggregate portable roots into complete physical roots using exact
+ * storage-binding rows.  When physical_templates is non-NULL, those exact
+ * occurrence graphs are the source and template_bindings supplies their
+ * storage identities; otherwise logical_roots/logical_bindings are used.
+ * This is a pure placement kernel: caller output slots change only when every
+ * candidate validates, and no Tensor/Instance/cache state is mutated. */
+int poly_place_roots(
+    PolyCtx *ctx,
+    PolyUOp **logical_roots,
+    PolyUOp **physical_templates,
+    int n_roots,
+    PolyUOp **logical_bindings,
+    PolyUOp **template_bindings,
+    PolyUOp **target_bindings,
+    int n_bindings,
+    PolyUOp **out_roots
+);
+
 /* Resolve the exact execution device used by the physicalizer for a Tensor. */
 PolyDevice poly_tensor_resolved_device(PolyCtx *ctx, PolyTensor *tensor);
 
 /* Physicalize a snapshot of portable Tensor roots with one invocation-local
  * memo. This is an explicit re-placement boundary, never default execution;
  * no logical->physical correspondence escapes the call. */
-int poly_tensor_physicalize_many(
-    PolyCtx *ctx,
-    PolyTensor **tensors,
-    int n,
-    PolyUOp **out
-);
+int poly_tensor_physicalize_many(PolyCtx *ctx, PolyTensor **tensors, int n, PolyUOp **out);
 
 /* Physical-only counterpart to pinned transform_to_call's `(graph,
  * buffer_map)` return. The caller owns and frees out_map_orig/out_map_repl;

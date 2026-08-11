@@ -25,10 +25,10 @@
       "id": "PG-DIV-001",
       "status": "approved",
       "stages": ["logical", "placement", "instance", "export"],
-      "area": "retained logical and explicit re-placement capability",
+      "area": "retained logical and explicit placement capability",
       "tinygrad": "Tensor owns one mutable, deviceful Tensor.uop",
-      "polygrad": "Default uop_physical is eagerly constructed in C and must match tinygrad Tensor.uop; Polygrad may additionally retain a deviceless logical graph and physical template for Instance, export, and explicit re_place outside default realization",
-      "rationale": "Portable logical retention, export, explicit re-placement, and PolyInstance capture are approved Polygrad superset capabilities; default physical construction and execution are parity surfaces.",
+      "polygrad": "Default uop_physical is eagerly constructed in C and must match tinygrad Tensor.uop; Polygrad may additionally retain a deviceless logical graph and physical template for Instance, export, and explicit place outside default realization",
+      "rationale": "Portable logical retention, export, explicit placement, and PolyInstance capture are approved Polygrad superset capabilities; default physical construction and execution are parity surfaces.",
       "approval": "AGENTS.md Core Invariants and user-approved logical/physical split",
       "evidence": [
         "ARCHITECTURE.md:Core Model",
@@ -131,20 +131,25 @@
     },
     {
       "id": "PG-PARITY-001",
-      "status": "open_debt",
+      "status": "resolved",
       "stages": ["placement", "realize"],
       "area": "placement lifecycle",
       "tinygrad": "Tensor.uop already contains occurrence-specific executable placement when realization begins",
-      "polygrad": "Realization reruns PolyPhysicalizer and consults a pass-local logical-and-device memo",
-      "rationale": "The current key is not an occurrence identity; WS2 replaces the hybrid with occurrence-aware aggregate placement at Tensor realize or explicit Instance prepare.",
+      "polygrad": "Default realization consumes the eagerly constructed physical graph directly; explicit Instance placement substitutes exact named logical/template BUFFER bindings across aggregate roots without a logical-and-device memo",
+      "rationale": "Path B removed placement and logical fallback from default realization. The explicit place boundary preserves exact COPY/effect occurrences from a captured physical template or fails closed when logical-only evidence is insufficient.",
       "approval": null,
       "evidence": [
-        "src/placer.c:PolyPhysicalizer",
+        "src/placer.c:poly_place_roots",
         "src/engine/realize.c:poly_realize_tensors_impl",
-        "temp/placement_occurrence_collision_probe.py",
-        "temp/shared_rebuild_after_realize_probe.py"
+        "test/test_placement.c",
+        "test/test_instance.c:instance.set_device_preserves_captured_copy_occurrences",
+        "temp/place_binding_substitution_correspondence_20260811.md",
+        "temp/instance_uniform_place_correspondence_20260811.md"
       ],
-      "close_when": "WS2 default-policy post-placement topology, occurrence, mutation, rebuilt-subexpression, two-policy, JIT, Instance, and broad frontend/backend gates pass without logical-key correspondence or eager frontend physical composition."
+      "resolution": {
+        "evidence": "Default physical topology, occurrence, mutation, rebuilt-subexpression, JIT, Instance, and broad frontend/backend gates pass without realization-time placement or logical-key correspondence. Explicit aggregate place preserves exact template COPY/effect occurrences and fails closed when logical-only evidence is insufficient.",
+        "closed_on": "2026-08-11"
+      }
     },
     {
       "id": "PG-PARITY-002",
@@ -526,7 +531,7 @@
         "test/test_tensor.c:contiguous_tensor_matches_pinned_device_rules",
         "test/tensor_graph_cases.py:case_contiguous_deviceless"
       ],
-      "close_when": "All executable raw/import callers carry complete physical device facts or cross explicit re_place, the device-free fold moves into poly_contiguous itself, and the native realization matrix remains green."
+      "close_when": "All executable raw/import callers carry complete physical device facts or cross explicit place, the device-free fold moves into poly_contiguous itself, and the native realization matrix remains green."
     },
     {
       "id": "PG-PARITY-023",

@@ -76,17 +76,20 @@ PolyDevice poly_uop_device_cached(PolyUOp *u, PolyMap *cache) {
   PolyDevice result = POLY_DEVICE_AUTO;
   if (u->op == POLY_OP_DEVICE) {
     result = poly_device_from_device_uop(u);
-    if (cache) poly_map_set(cache, poly_ptr_hash(u), u, (void *)(intptr_t)(result + 1), poly_ptr_eq);
+    if (cache)
+      poly_map_set(cache, poly_ptr_hash(u), u, (void *)(intptr_t)(result + 1), poly_ptr_eq);
     return result;
   }
   if (u->op == POLY_OP_COPY && u->n_src >= 2) {
     result = poly_device_from_device_uop(u->src[1]);
-    if (cache) poly_map_set(cache, poly_ptr_hash(u), u, (void *)(intptr_t)(result + 1), poly_ptr_eq);
+    if (cache)
+      poly_map_set(cache, poly_ptr_hash(u), u, (void *)(intptr_t)(result + 1), poly_ptr_eq);
     return result;
   }
   if (u->op == POLY_OP_BUFFER && u->n_src >= 2) {
     result = poly_device_from_device_uop(u->src[1]);
-    if (cache) poly_map_set(cache, poly_ptr_hash(u), u, (void *)(intptr_t)(result + 1), poly_ptr_eq);
+    if (cache)
+      poly_map_set(cache, poly_ptr_hash(u), u, (void *)(intptr_t)(result + 1), poly_ptr_eq);
     return result;
   }
   if (u->op == POLY_OP_PARAM && u->arg.kind == POLY_ARG_PARAM && u->arg.param &&
@@ -98,7 +101,8 @@ PolyDevice poly_uop_device_cached(PolyUOp *u, PolyMap *cache) {
   }
   if (u->op == POLY_OP_AFTER && u->n_src >= 1) {
     result = poly_uop_device_cached(u->src[0], cache);
-    if (cache) poly_map_set(cache, poly_ptr_hash(u), u, (void *)(intptr_t)(result + 1), poly_ptr_eq);
+    if (cache)
+      poly_map_set(cache, poly_ptr_hash(u), u, (void *)(intptr_t)(result + 1), poly_ptr_eq);
     return result;
   }
 
@@ -135,8 +139,8 @@ static PolyUOp *copy_to_device(PolyCtx *ctx, PolyUOp *value, PolyDevice device) 
 static bool placement_devices_share_storage(PolyDevice a, PolyDevice b) {
   if (a == POLY_DEVICE_AUTO || b == POLY_DEVICE_AUTO) return false;
   if (poly_devices_share_storage(a, b)) return true;
-  if (a == POLY_DEVICE_HOST || b == POLY_DEVICE_HOST ||
-      a == POLY_DEVICE_DISK || b == POLY_DEVICE_DISK)
+  if (a == POLY_DEVICE_HOST || b == POLY_DEVICE_HOST || a == POLY_DEVICE_DISK ||
+      b == POLY_DEVICE_DISK)
     return false;
   return poly_device_is_host_addressable(a) && poly_device_is_host_addressable(b);
 }
@@ -156,22 +160,16 @@ static PolyUOp *ensure_on_device(PolyCtx *ctx, PolyUOp *value, PolyDevice device
 }
 
 static PolyUOp *memo_get(PolyPhysicalizer *p, PolyUOp *logical, PolyDevice device) {
-  if (!p || !logical || device <= POLY_DEVICE_AUTO || device > POLY_DEVICE_DISK ||
-      !p->memo[device])
+  if (!p || !logical || device <= POLY_DEVICE_AUTO || device > POLY_DEVICE_DISK || !p->memo[device])
     return NULL;
-  return poly_map_get(
-      p->memo[device], poly_ptr_hash(logical), logical, poly_ptr_eq
-  );
+  return poly_map_get(p->memo[device], poly_ptr_hash(logical), logical, poly_ptr_eq);
 }
 
 static bool memo_put(PolyPhysicalizer *p, PolyUOp *logical, PolyDevice device, PolyUOp *physical) {
-  if (!p || !logical || !physical || device <= POLY_DEVICE_AUTO ||
-      device > POLY_DEVICE_DISK)
+  if (!p || !logical || !physical || device <= POLY_DEVICE_AUTO || device > POLY_DEVICE_DISK)
     return false;
   if (!p->memo[device]) p->memo[device] = poly_map_new(128);
-  poly_map_set(
-      p->memo[device], poly_ptr_hash(logical), logical, physical, poly_ptr_eq
-  );
+  poly_map_set(p->memo[device], poly_ptr_hash(logical), logical, physical, poly_ptr_eq);
   return true;
 }
 
@@ -199,16 +197,11 @@ static PolyUOp *lower_effect(PolyPhysicalizer *p, PolyUOp *u, PolyDevice device)
 
 /* Placement changes sources at the logical->physical boundary, but the
  * rebuilt UOp keeps tinygrad's original op/dtype/arg/tag identity. */
-static PolyUOp *placement_rebuild_with_sources(
-    PolyPhysicalizer *p,
-    PolyUOp *u,
-    PolyUOp **src
-) {
+static PolyUOp *placement_rebuild_with_sources(PolyPhysicalizer *p, PolyUOp *u, PolyUOp **src) {
   if (!p || !p->ctx || !u || (u->n_src > 0 && !src)) return NULL;
   return (u->tag != 0 || u->tag_arg.kind != POLY_ARG_NONE)
              ? poly_uop_tagged_arg(
-                   p->ctx, u->op, u->dtype, src, u->n_src, u->arg, u->tag,
-                   u->tag_arg
+                   p->ctx, u->op, u->dtype, src, u->n_src, u->arg, u->tag, u->tag_arg
                )
              : poly_uop(p->ctx, u->op, u->dtype, src, u->n_src, u->arg);
 }
@@ -219,11 +212,7 @@ static PolyUOp *placement_rebuild_with_sources(
  * otherwise retain a buffer-identity destination and lower only the value
  * being written.  Nested AFTER versions recurse through lower_value so their
  * dependency chain remains intact. */
-static PolyUOp *lower_assign_target(
-    PolyPhysicalizer *p,
-    PolyUOp *target,
-    PolyDevice device
-) {
+static PolyUOp *lower_assign_target(PolyPhysicalizer *p, PolyUOp *target, PolyDevice device) {
   if (!p || !target) return NULL;
   PolyUOp *placed = memo_get(p, target, device);
   if (placed) return placed;
@@ -238,19 +227,13 @@ static PolyUOp *lower_assign_target(
  * logical SHRINK/RESHAPE graph. This must not run during recursive value
  * lowering: tinygrad keeps nested movement logical and parameterizes an
  * already-realized slice only when it becomes a CALL argument. */
-static PolyUOp *lower_contiguous_realized_view(
-    PolyPhysicalizer *p,
-    PolyUOp *u,
-    PolyDevice device
-) {
+static PolyUOp *lower_contiguous_realized_view(PolyPhysicalizer *p, PolyUOp *u, PolyDevice device) {
   if (!p || !u) return NULL;
   PolyUOp *identity = NULL;
   PolyShape shape = {.ndim = -1};
   int64_t numel = -1;
   size_t byte_offset = 0;
-  if (!poly_uop_contiguous_view_info(
-          p->ctx, u, &identity, &shape, &numel, &byte_offset
-      ))
+  if (!poly_uop_contiguous_view_info(p->ctx, u, &identity, &shape, &numel, &byte_offset))
     return NULL;
   PolyBuffer *storage = poly_buffer_get(p->ctx, identity);
   if (!storage) return NULL;
@@ -318,7 +301,8 @@ static PolyUOp *lower_place(PolyPhysicalizer *p, PolyTensor *place) {
   PolyUOp *store = find_assign_store_for_after(effect_root);
   if (store) {
     PolyUOp *effect_base = effect_root;
-    while (find_assign_store_for_after(effect_base)) effect_base = effect_base->src[0];
+    while (find_assign_store_for_after(effect_base))
+      effect_base = effect_base->src[0];
     /* Seed the existing physicalizer memo instead of graph-substituting the
      * base with COPY(base, device). A recursive substitution would enter that
      * self-containing COPY and reject the cycle; the memo is the placement
@@ -393,9 +377,8 @@ static PolyUOp *lower_value(PolyPhysicalizer *p, PolyUOp *u, PolyDevice device) 
       if (!new_store) return NULL;
       if (new_target != u->src[0] || new_store != assign_store) {
         PolyUOp *after_stack[16];
-        PolyUOp **after_src = u->n_src > 16
-                                  ? malloc((size_t)u->n_src * sizeof(*after_src))
-                                  : after_stack;
+        PolyUOp **after_src =
+            u->n_src > 16 ? malloc((size_t)u->n_src * sizeof(*after_src)) : after_stack;
         if (!after_src) return NULL;
         memcpy(after_src, u->src, (size_t)u->n_src * sizeof(*after_src));
         after_src[0] = new_target;
@@ -444,8 +427,7 @@ static PolyUOp *lower_value(PolyPhysicalizer *p, PolyUOp *u, PolyDevice device) 
       result = u;
     } else {
       PolyUOp *stack_src[16];
-      PolyUOp **src =
-          (u->n_src > 16) ? malloc((size_t)u->n_src * sizeof(PolyUOp *)) : stack_src;
+      PolyUOp **src = (u->n_src > 16) ? malloc((size_t)u->n_src * sizeof(PolyUOp *)) : stack_src;
       if (!src) return NULL;
       /* Pinned RewriteContext pins CALL/FUNCTION.src[0] by exact identity and
        * visits src[1:] normally. Placement is Polygrad's boundary adaptation
@@ -495,9 +477,7 @@ static PolyUOp *lower_effect(PolyPhysicalizer *p, PolyUOp *u, PolyDevice device)
     if (!value) return NULL;
     if (value == u->src[1]) return u;
     PolyUOp *stack_src[16];
-    PolyUOp **src = u->n_src > 16
-                        ? malloc((size_t)u->n_src * sizeof(*src))
-                        : stack_src;
+    PolyUOp **src = u->n_src > 16 ? malloc((size_t)u->n_src * sizeof(*src)) : stack_src;
     if (!src) return NULL;
     memcpy(src, u->src, (size_t)u->n_src * sizeof(*src));
     src[1] = value;
@@ -511,9 +491,7 @@ static PolyUOp *lower_effect(PolyPhysicalizer *p, PolyUOp *u, PolyDevice device)
     if (!value) return NULL;
     if (value == u->src[1]) return u;
     PolyUOp *stack_src[16];
-    PolyUOp **src = u->n_src > 16
-                        ? malloc((size_t)u->n_src * sizeof(*src))
-                        : stack_src;
+    PolyUOp **src = u->n_src > 16 ? malloc((size_t)u->n_src * sizeof(*src)) : stack_src;
     if (!src) return NULL;
     memcpy(src, u->src, (size_t)u->n_src * sizeof(*src));
     src[1] = value;
@@ -534,24 +512,183 @@ PolyUOp *poly_tensor_physicalize(PolyCtx *ctx, PolyTensor *tensor) {
   return physical;
 }
 
-int poly_tensor_physicalize_many(
-    PolyCtx *ctx,
-    PolyTensor **tensors,
-    int n,
-    PolyUOp **out
-) {
+int poly_tensor_physicalize_many(PolyCtx *ctx, PolyTensor **tensors, int n, PolyUOp **out) {
   if (!ctx || n < 0 || (n > 0 && (!tensors || !out))) return -1;
   PolyPhysicalizer p = {.ctx = ctx};
   int rc = 0;
   for (int i = 0; i < n; i++) {
-    out[i] = (tensors[i] && tensors[i]->uop_logical)
-                 ? lower_tensor(&p, tensors[i])
-                 : NULL;
+    out[i] = (tensors[i] && tensors[i]->uop_logical) ? lower_tensor(&p, tensors[i]) : NULL;
     if (!out[i]) {
       rc = -1;
       break;
     }
   }
   physicalizer_destroy(&p);
+  return rc;
+}
+
+static bool place_exact_buffer_identity(PolyUOp *u) {
+  return u && poly_uop_get_buffer_identity(u) == u;
+}
+
+static bool place_direct_buffer_binding(PolyUOp *u) {
+  return place_exact_buffer_identity(u) && u->op == POLY_OP_BUFFER;
+}
+
+static int place_binding_index(PolyUOp **bindings, int n, PolyUOp *u) {
+  if (!bindings || !u) return -1;
+  for (int i = 0; i < n; i++)
+    if (bindings[i] == u) return i;
+  return -1;
+}
+
+static bool place_binding_shape_eq(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
+  if (!ctx || !a || !b || !poly_dtype_eq(a->dtype, b->dtype)) return false;
+  PolyShape as = poly_uop_max_shape_cached(ctx, a);
+  PolyShape bs = poly_uop_max_shape_cached(ctx, b);
+  return as.ndim >= 0 && bs.ndim >= 0 && poly_shape_eq(as, bs);
+}
+
+static bool place_lowered_op(PolyOps op) {
+  return op == POLY_OP_LINEAR || op == POLY_OP_PROGRAM || op == POLY_OP_SOURCE ||
+         op == POLY_OP_BINARY;
+}
+
+static bool place_logical_forbidden_op(PolyOps op) {
+  return op == POLY_OP_SINK || op == POLY_OP_STORE || op == POLY_OP_AFTER || op == POLY_OP_ASSIGN ||
+         op == POLY_OP_DEVICE || op == POLY_OP_COPY || op == POLY_OP_CALL ||
+         op == POLY_OP_FUNCTION || op == POLY_OP_CUSTOM_FUNCTION || op == POLY_OP_MULTI ||
+         op == POLY_OP_MSELECT || op == POLY_OP_MSTACK || op == POLY_OP_ALLREDUCE ||
+         place_lowered_op(op);
+}
+
+static bool place_validate_pure_logical(
+    PolyCtx *ctx,
+    PolyUOp *root,
+    PolyUOp **logical_bindings,
+    int n_bindings
+) {
+  if (!ctx || !root) return false;
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort_ex_alloc(ctx, root, &n_topo, NULL, false);
+  if (!topo) return false;
+  bool valid = true;
+  for (int i = 0; i < n_topo; i++) {
+    PolyUOp *u = topo[i];
+    if (!u || place_logical_forbidden_op(u->op)) {
+      valid = false;
+      break;
+    }
+    if (place_exact_buffer_identity(u) &&
+        place_binding_index(logical_bindings, n_bindings, u) < 0) {
+      valid = false;
+      break;
+    }
+  }
+  free(topo);
+  return valid;
+}
+
+static bool place_validate_logical_root(
+    PolyCtx *ctx,
+    PolyUOp *root,
+    PolyUOp **logical_bindings,
+    int n_bindings
+) {
+  if (!ctx || !root) return false;
+  if (root->op != POLY_OP_SINK)
+    return place_validate_pure_logical(ctx, root, logical_bindings, n_bindings);
+  if (root->n_src == 0) return false;
+  for (int i = 0; i < root->n_src; i++) {
+    PolyUOp *store = root->src[i];
+    if (!store || store->op != POLY_OP_STORE || store->n_src != 2 ||
+        !place_exact_buffer_identity(store->src[0]) ||
+        place_binding_index(logical_bindings, n_bindings, store->src[0]) < 0 ||
+        !place_validate_pure_logical(ctx, store->src[1], logical_bindings, n_bindings))
+      return false;
+  }
+  return true;
+}
+
+static bool place_validate_physical_root(PolyCtx *ctx, PolyUOp *root) {
+  if (!ctx || !root) return false;
+  int n_topo = 0;
+  /* Pinned RewriteContext keeps CALL/FUNCTION bodies opaque by default.  Their
+   * placeholders are not caller-visible storage bindings. */
+  PolyUOp **topo = poly_toposort_ex_alloc(ctx, root, &n_topo, NULL, false);
+  if (!topo) return false;
+  bool valid = true;
+  for (int i = 0; i < n_topo; i++) {
+    PolyUOp *u = topo[i];
+    if (!u || place_lowered_op(u->op) ||
+        (place_exact_buffer_identity(u) && poly_uop_device(u) == POLY_DEVICE_AUTO)) {
+      valid = false;
+      break;
+    }
+  }
+  free(topo);
+  return valid;
+}
+
+int poly_place_roots(
+    PolyCtx *ctx,
+    PolyUOp **logical_roots,
+    PolyUOp **physical_templates,
+    int n_roots,
+    PolyUOp **logical_bindings,
+    PolyUOp **template_bindings,
+    PolyUOp **target_bindings,
+    int n_bindings,
+    PolyUOp **out_roots
+) {
+  if (!ctx || n_roots < 0 || n_bindings < 0 || (n_roots > 0 && (!logical_roots || !out_roots)) ||
+      (n_bindings > 0 && (!logical_bindings || !target_bindings)) ||
+      (physical_templates && n_bindings > 0 && !template_bindings))
+    return -1;
+  if (n_roots == 0) return 0;
+
+  PolyUOp **source_roots = physical_templates ? physical_templates : logical_roots;
+  PolyUOp **source_bindings = physical_templates ? template_bindings : logical_bindings;
+  for (int i = 0; i < n_roots; i++) {
+    if (!logical_roots[i] || !source_roots[i] || !poly_ctx_owns_ptr(ctx, logical_roots[i]) ||
+        !poly_ctx_owns_ptr(ctx, source_roots[i]))
+      return -1;
+    if (!physical_templates &&
+        !place_validate_logical_root(ctx, logical_roots[i], logical_bindings, n_bindings))
+      return -1;
+  }
+
+  for (int i = 0; i < n_bindings; i++) {
+    PolyUOp *logical = logical_bindings[i];
+    PolyUOp *source = source_bindings[i];
+    PolyUOp *target = target_bindings[i];
+    /* Pinned `.to()` is an explicit COPY occurrence (tensor.py:327-335).
+     * COPY/BUFFER_VIEW/PARAM may remain nested in a physical template, but
+     * accepting one as the replaceable binding would erase that occurrence. */
+    if (!place_direct_buffer_binding(logical) || !place_direct_buffer_binding(source) ||
+        !place_direct_buffer_binding(target) || !poly_ctx_owns_ptr(ctx, logical) ||
+        !poly_ctx_owns_ptr(ctx, source) || !poly_ctx_owns_ptr(ctx, target) ||
+        poly_uop_device(target) == POLY_DEVICE_AUTO ||
+        !place_binding_shape_eq(ctx, logical, target) ||
+        !place_binding_shape_eq(ctx, source, target))
+      return -1;
+    for (int j = 0; j < i; j++) {
+      if ((logical_bindings[j] == logical && target_bindings[j] != target) ||
+          (source_bindings[j] == source && target_bindings[j] != target) ||
+          ((logical_bindings[j] != logical || source_bindings[j] != source) &&
+           target_bindings[j] == target))
+        return -1;
+    }
+  }
+
+  PolyUOp **candidates = calloc((size_t)n_roots, sizeof(*candidates));
+  if (!candidates) return -1;
+  int rc = poly_uop_substitute_many(
+      ctx, source_roots, n_roots, source_bindings, target_bindings, n_bindings, candidates
+  );
+  for (int i = 0; rc == 0 && i < n_roots; i++)
+    if (!place_validate_physical_root(ctx, candidates[i])) rc = -1;
+  if (rc == 0) memcpy(out_roots, candidates, (size_t)n_roots * sizeof(*out_roots));
+  free(candidates);
   return rc;
 }

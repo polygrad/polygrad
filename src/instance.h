@@ -9,8 +9,9 @@
  * Execution goes through the core schedule runner. The instance maps ABI names
  * to logical BUFFER UOps; buffer residency is owned by ctx->buffers.
  *
- * set_device() sets the preferred execution device and prefetches readable
- * bound buffers through the ctx buffer residency table.
+ * set_device() applies the explicit uniform-device placement policy to the
+ * retained logical graph / exact physical template, then migrates bound
+ * values through the ctx buffer residency table.
  */
 
 #ifndef POLY_INSTANCE_H
@@ -269,9 +270,9 @@ uint8_t *poly_instance_save_bundle_ex(PolyInstance *inst, int *out_len, uint32_t
 
 /* Device configuration */
 
-/* Set preferred execution device and prefetch readable bound buffers through
- * ctx->buffers. Returns 0 on success, <0 if device is unsupported or
- * unavailable. */
+/* Apply the explicit uniform-device placement policy to retained Instance
+ * roots and migrate bound values through ctx->buffers. Returns 0 on success,
+ * <0 if placement fails or the device is unsupported/unavailable. */
 int poly_instance_set_device(PolyInstance *inst, PolyDevice device);
 
 /* Explicit readback/upload for device-resident buffers */
