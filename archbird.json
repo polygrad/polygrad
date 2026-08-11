@@ -592,10 +592,10 @@
       "kind": "required_symbols",
       "layer": "core",
       "symbols": [
-        "poly_tensor_create"
+        "poly_tensor_from_host_by_id"
       ],
       "owner": "architecture",
-      "rationale": "Reviewed core symbols remain present."
+      "rationale": "The reviewed C-owned eager Tensor input constructor remains present."
     },
     "REQUIRED-SYMBOLS-PYTHON": {
       "kind": "required_symbols",
@@ -618,7 +618,7 @@
     "PROVIDER-SURFACE-JAVASCRIPT-WASM": {
       "declared": [
         "poly_ctx_new",
-        "poly_tensor_create"
+        "poly_tensor_from_host_by_id"
       ],
       "forbid_unregistered": true,
       "forbid_unresolved": true,
@@ -631,7 +631,7 @@
     "PROVIDER-SURFACE-JAVASCRIPT-NAPI": {
       "declared": [
         "poly_ctx_new",
-        "poly_tensor_create"
+        "poly_tensor_from_host_by_id"
       ],
       "forbid_unregistered": true,
       "forbid_unresolved": true,
