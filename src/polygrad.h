@@ -296,7 +296,13 @@ typedef struct {
   PolyAddrSpace addrspace;
   int32_t axis;
   bool has_axis;
-  int32_t device; /* PolyDevice, declared later; 0 is AUTO/None. */
+  /* Pinned ParamArg.device is str | tuple[str, ...] | None
+   * (tinygrad/uop/ops.py:1071-1076). Scalar identities use device;
+   * ordered tuple identities use devices/n_devices. Exactly one arm is set. */
+  const char *device;
+  const char **devices;
+  int32_t n_devices;
+  bool device_is_tuple;
 } PolyParamArg;
 
 /* Exact Python-int-compatible CONST argument. Limbs are little-endian base
@@ -320,13 +326,14 @@ typedef enum {
   POLY_ARG_REDUCE_AXIS, /* (PolyOps, int64_t[], n) */
   POLY_ARG_RANGE, /* (axis_id, axis_type, extra...) */
   POLY_ARG_DEFINE_VAR, /* (name, min_val, max_val) */
-  POLY_ARG_BUFFERIZE_OPTS, /* (device, addrspace, removable) */
+  POLY_ARG_BUFFERIZE_OPTS, /* (exact device string, addrspace, removable) */
   POLY_ARG_TENSOR_CORE, /* tinygrad WMMA metadata: (name, dims, threads) */
   POLY_ARG_PROGRAM_INFO, /* PolyProgramInfo* value metadata for PROGRAM */
   POLY_ARG_BYTES, /* immutable runtime bytes for BINARY UOps */
   POLY_ARG_INVALID,
   POLY_ARG_PARAM, /* pinned tinygrad ParamArg* for shaped value PARAMs */
   POLY_ARG_BIGINT, /* exact signed arbitrary-precision integer CONST */
+  POLY_ARG_STRING_TUPLE, /* ordered immutable string tuple (for DEVICE.arg) */
 } PolyArgKind;
 
 typedef struct {
@@ -344,6 +351,10 @@ typedef struct {
       int64_t (*pairs)[2];
       int n;
     } pair_tuple;
+    struct {
+      const char **vals;
+      int n;
+    } string_tuple;
     const char *str;
     PolyOps ops;
     struct {
@@ -363,7 +374,7 @@ typedef struct {
       int64_t max_val;
     } define_var;
     struct {
-      int32_t device; /* PolyDevice, kept int32_t because PolyDevice is declared later. */
+      const char *device; /* exact canonical DEVICE identity, NULL when unknown/local */
       PolyAddrSpace addrspace;
       bool removable;
     } bufferize_opts;
@@ -407,6 +418,9 @@ static inline PolyArg poly_arg_invalid(void) {
 static inline PolyArg poly_arg_str(const char *s) {
   return (PolyArg){.kind = POLY_ARG_STRING, .str = s};
 }
+static inline PolyArg poly_arg_string_tuple(const char **vals, int n) {
+  return (PolyArg){.kind = POLY_ARG_STRING_TUPLE, .string_tuple = {.vals = vals, .n = n}};
+}
 static inline PolyArg poly_arg_range(int64_t axis_id, PolyAxisType axis_type) {
   return (PolyArg
   ){.kind = POLY_ARG_RANGE,
@@ -430,13 +444,13 @@ static inline PolyArg poly_arg_define_var(const char *name, int64_t min_val, int
 }
 /* tinygrad BufferizeOpts equivalent.
  *
- * device is the already-derived physical device for the intermediate buffer
- * (or POLY_DEVICE_AUTO when unknown), addrspace selects global/local storage,
- * and removable preserves the rangeify optimization contract for eliminating
- * redundant temporary buffers.
+ * device is the exact canonical physical identity for the intermediate buffer
+ * (or NULL when unknown/local), addrspace selects global/local storage, and
+ * removable preserves the rangeify optimization contract for eliminating
+ * redundant temporary buffers. This matches pinned BufferizeOpts.device.
  */
 static inline PolyArg poly_arg_bufferize_opts(
-    int32_t device,
+    const char *device,
     PolyAddrSpace addrspace,
     bool removable
 ) {
@@ -499,9 +513,9 @@ static inline PolyAddrSpace poly_bufferize_arg_addrspace(PolyArg a) {
   if (a.kind == POLY_ARG_BUFFERIZE_OPTS) return a.bufferize_opts.addrspace;
   return POLY_ADDR_GLOBAL;
 }
-static inline int32_t poly_bufferize_arg_device(PolyArg a) {
+static inline const char *poly_bufferize_arg_device(PolyArg a) {
   if (a.kind == POLY_ARG_BUFFERIZE_OPTS) return a.bufferize_opts.device;
-  return 0; /* POLY_DEVICE_AUTO */
+  return NULL;
 }
 
 bool poly_arg_eq(PolyArg a, PolyArg b);
@@ -889,8 +903,16 @@ int poly_jit_run_with_vars(
     int n_var_bindings
 );
 
+/* Derive the backend implementation from an exact DEVICE identity.  This does
+ * not imply that every identity of that backend is executable; schedule
+ * ingress separately rejects unsupported runtime instances. */
 PolyDevice poly_device_from_device_uop(PolyUOp *device);
 PolyDevice poly_uop_device(PolyUOp *u);
+/* Exact concrete scalar device identity carried by the physical UOp graph.
+ * Returns the canonical DEVICE string (for example "CPU:1") or NULL when the
+ * graph has no concrete DEVICE identity.  Backend dispatch remains the
+ * separate PolyDevice-valued poly_uop_device() compatibility query. */
+const char *poly_uop_device_name(PolyCtx *ctx, PolyUOp *u);
 
 /* Frontend host-buffer lifetime hook.
  * Frontends keep strong maps keyed by the C-side PolyBuffer* address value.
@@ -1200,6 +1222,9 @@ bool poly_shape_eq(PolyShape a, PolyShape b);
 int poly_uop_ndim(PolyCtx *ctx, const PolyUOp *u);
 const int64_t *poly_uop_max_shape_dims(PolyCtx *ctx, const PolyUOp *u);
 PolyUOp *poly_uop_shape_dim(PolyCtx *ctx, const PolyUOp *u, int dim);
+/* Pinned UOp.axis query for multi-device shard propagation
+ * (tinygrad/uop/ops.py:623-651). Returns false when the value is unsharded. */
+bool poly_uop_axis(PolyCtx *ctx, const PolyUOp *u, int *out_axis);
 int poly_uop_const_i64(const PolyUOp *u, int64_t *out);
 PolyUOp *poly_uop_unbind_var(PolyUOp *u);
 int poly_uop_bind_value(PolyUOp *u, int64_t *out);

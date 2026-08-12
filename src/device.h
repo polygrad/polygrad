@@ -18,6 +18,7 @@ typedef struct PolyBuffer PolyBuffer;
  * ordinal-zero wrapper for the current backend-only public API. AUTO remains
  * Polygrad's existing unresolved internal DEVICE(None) placeholder. */
 PolyUOp *poly_device_uop_from_name(PolyCtx *ctx, const char *name);
+PolyUOp *poly_device_uop_from_names(PolyCtx *ctx, const char **names, int n);
 PolyUOp *poly_device_uop(PolyCtx *ctx, PolyDevice device);
 
 typedef struct PolyAllocator {
@@ -59,6 +60,17 @@ struct PolyBuffer {
   PolyFrontendBufferReleaseFn frontend_release; /* imported HOST owner release hook */
   bool memory_accounted; /* contributes to ctx GlobalCounters.mem_used */
   PolyDevice memory_device; /* allocation device used for per-device accounting */
+  PolyUOp *device_uop; /* exact canonical runtime residency identity */
+  PolyUOp *memory_device_uop; /* exact identity used for allocation accounting */
+
+  /* Pinned tinygrad represents a tuple-device BUFFER as MultiBuffer.bufs and
+   * constructs MSTACK.buffer as a borrowing MultiBuffer over its ordered
+   * source buffers (device.py:86-97, uop/ops.py:853-879).  This is runtime
+   * storage only: it never uses the scalar migration `src` chain and never
+   * changes UOp topology. */
+  PolyBuffer **bufs;
+  int n_bufs;
+  bool owns_bufs;
 };
 
 /* Attach buffer data to a BUFFER UOp.
@@ -130,6 +142,18 @@ void *poly_buffer_get_ptr(PolyCtx *ctx, PolyUOp *buf);
 
 /* Look up full PolyBuffer for a BUFFER UOp. Returns NULL if not attached. */
 PolyBuffer *poly_buffer_get(PolyCtx *ctx, PolyUOp *buf);
+
+/* C analogue of tinygrad UOp.buffer. It resolves tuple BUFFER/MSTACK/MSELECT
+ * runtime values as well as the existing scalar identities/views. */
+PolyBuffer *poly_uop_buffer_handle(PolyCtx *ctx, PolyUOp *u);
+
+bool poly_buffer_is_multi(const PolyBuffer *buffer);
+PolyBuffer *poly_buffer_multi_child(PolyBuffer *buffer, int index);
+
+/* Exact Buffer.ensure_allocated analogue for an already-resolved scalar
+ * runtime handle. This is used after MultiBuffer lane resolution, where a
+ * child has no independent BUFFER UOp key. */
+int poly_buffer_handle_ensure_allocated(PolyCtx *ctx, PolyBuffer *buffer);
 
 /* Free this residency's ptr if owned. Resets ptr=NULL, owned=false, valid=false.
  * Does NOT touch b->src. Does not remove from the side table.

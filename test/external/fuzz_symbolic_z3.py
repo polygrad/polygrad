@@ -84,7 +84,7 @@ class PolyDefineVarArg(ctypes.Structure):
 
 class PolyBufferizeOptsArg(ctypes.Structure):
     _fields_ = [
-        ("device", ctypes.c_int32),
+        ("device", ctypes.c_char_p),
         ("addrspace", ctypes.c_int),
         ("removable", ctypes.c_bool),
     ]

@@ -53,6 +53,7 @@ PolyCtx *poly_ctx_new(void) {
   ctx->kernel_count = 0;
   ctx->mem_used = 0;
   memset(ctx->mem_used_per_device, 0, sizeof(ctx->mem_used_per_device));
+  ctx->mem_used_by_device = poly_map_new(8);
   ctx->stats_suppression_depth = 0;
   ctx->shape_cache = poly_map_new(64);
   ctx->buffers = poly_map_new(64);
@@ -63,13 +64,15 @@ PolyCtx *poly_ctx_new(void) {
   ctx->active_jit_capture = NULL;
   ctx->name_map = poly_map_new(16);
   if (!ctx->arena || !ctx->scratch || !ctx->cse || !ctx->schedule_cache || !ctx->to_program_cache ||
-      !ctx->runtime_cache || !ctx->shape_cache || !ctx->buffers || !ctx->name_map) {
+      !ctx->runtime_cache || !ctx->mem_used_by_device || !ctx->shape_cache || !ctx->buffers ||
+      !ctx->name_map) {
     if (ctx->arena) poly_arena_destroy(ctx->arena);
     if (ctx->scratch) poly_arena_destroy(ctx->scratch);
     if (ctx->cse) poly_map_destroy(ctx->cse);
     if (ctx->schedule_cache) poly_map_destroy(ctx->schedule_cache);
     if (ctx->to_program_cache) poly_map_destroy(ctx->to_program_cache);
     if (ctx->runtime_cache) poly_map_destroy(ctx->runtime_cache);
+    if (ctx->mem_used_by_device) poly_map_destroy(ctx->mem_used_by_device);
     if (ctx->shape_cache) poly_map_destroy(ctx->shape_cache);
     if (ctx->buffers) poly_map_destroy(ctx->buffers);
     if (ctx->name_map) poly_map_destroy(ctx->name_map);
@@ -107,6 +110,7 @@ void poly_ctx_destroy(PolyCtx *ctx) {
   /* Free owned buffer ptrs before destroying the map. */
   poly_map_foreach(ctx->buffers, free_buffer_entry, ctx);
   poly_map_destroy(ctx->buffers);
+  poly_map_destroy(ctx->mem_used_by_device);
   free(ctx->tensors);
   poly_map_destroy(ctx->name_map);
   poly_map_destroy(ctx->cse);
@@ -215,24 +219,72 @@ uint64_t poly_ctx_mem_used_for_device(PolyCtx *ctx, PolyDevice device) {
   return ctx->mem_used_per_device[device];
 }
 
-void poly_ctx_record_memory_alloc(PolyCtx *ctx, PolyDevice device, size_t nbytes) {
+typedef struct {
+  PolyUOp *device_uop;
+  uint64_t bytes;
+} PolyDeviceMemoryEntry;
+
+static PolyDeviceMemoryEntry *poly_ctx_memory_entry(
+    PolyCtx *ctx,
+    PolyUOp *device_uop,
+    bool create
+) {
+  if (!ctx || !ctx->mem_used_by_device || !device_uop) return NULL;
+  PolyDeviceMemoryEntry *entry =
+      poly_map_get(ctx->mem_used_by_device, poly_ptr_hash(device_uop), device_uop, poly_ptr_eq);
+  if (entry || !create) return entry;
+  entry = poly_arena_alloc(ctx->arena, sizeof(*entry), _Alignof(PolyDeviceMemoryEntry));
+  if (!entry) return NULL;
+  *entry = (PolyDeviceMemoryEntry){.device_uop = device_uop, .bytes = 0};
+  poly_map_set(ctx->mem_used_by_device, poly_ptr_hash(device_uop), device_uop, entry, poly_ptr_eq);
+  return entry;
+}
+
+uint64_t poly_ctx_mem_used_for_device_uop(PolyCtx *ctx, PolyUOp *device_uop) {
+  PolyDeviceMemoryEntry *entry = poly_ctx_memory_entry(ctx, device_uop, false);
+  return entry ? entry->bytes : 0;
+}
+
+void poly_ctx_record_memory_alloc_exact(
+    PolyCtx *ctx,
+    PolyUOp *device_uop,
+    PolyDevice backend,
+    size_t nbytes
+) {
   if (!ctx || nbytes == 0) return;
   uint64_t bytes = (uint64_t)nbytes;
   ctx->mem_used = UINT64_MAX - ctx->mem_used < bytes ? UINT64_MAX : ctx->mem_used + bytes;
-  if (device >= POLY_DEVICE_AUTO && device <= POLY_DEVICE_DISK) {
-    uint64_t *per_device = &ctx->mem_used_per_device[device];
+  if (backend >= POLY_DEVICE_AUTO && backend <= POLY_DEVICE_DISK) {
+    uint64_t *per_device = &ctx->mem_used_per_device[backend];
     *per_device = UINT64_MAX - *per_device < bytes ? UINT64_MAX : *per_device + bytes;
   }
+  PolyDeviceMemoryEntry *entry = poly_ctx_memory_entry(ctx, device_uop, true);
+  if (entry) entry->bytes = UINT64_MAX - entry->bytes < bytes ? UINT64_MAX : entry->bytes + bytes;
 }
 
-void poly_ctx_record_memory_free(PolyCtx *ctx, PolyDevice device, size_t nbytes) {
+void poly_ctx_record_memory_free_exact(
+    PolyCtx *ctx,
+    PolyUOp *device_uop,
+    PolyDevice backend,
+    size_t nbytes
+) {
   if (!ctx || nbytes == 0) return;
   uint64_t bytes = (uint64_t)nbytes;
   ctx->mem_used = ctx->mem_used >= bytes ? ctx->mem_used - bytes : 0;
-  if (device >= POLY_DEVICE_AUTO && device <= POLY_DEVICE_DISK) {
-    uint64_t *per_device = &ctx->mem_used_per_device[device];
+  if (backend >= POLY_DEVICE_AUTO && backend <= POLY_DEVICE_DISK) {
+    uint64_t *per_device = &ctx->mem_used_per_device[backend];
     *per_device = *per_device >= bytes ? *per_device - bytes : 0;
   }
+  PolyDeviceMemoryEntry *entry = poly_ctx_memory_entry(ctx, device_uop, false);
+  if (entry) entry->bytes = entry->bytes >= bytes ? entry->bytes - bytes : 0;
+}
+
+void poly_ctx_record_memory_alloc(PolyCtx *ctx, PolyDevice device, size_t nbytes) {
+  poly_ctx_record_memory_alloc_exact(ctx, poly_device_uop(ctx, device), device, nbytes);
+}
+
+void poly_ctx_record_memory_free(PolyCtx *ctx, PolyDevice device, size_t nbytes) {
+  poly_ctx_record_memory_free_exact(ctx, poly_device_uop(ctx, device), device, nbytes);
 }
 
 #ifdef __EMSCRIPTEN__

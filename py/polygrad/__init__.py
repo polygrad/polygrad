@@ -9,16 +9,26 @@ from . import _ffi
 
 # Module-level default context (triggers lazy library load)
 _default_ctx = _ffi.get_lib().poly_ctx_new()
-atexit.register(lambda: _ffi.get_lib().poly_ctx_destroy(_default_ctx))
 
 from .tensor import Tensor, Variable, BoundVariable
 from .dtype import dtypes
 from .device import Device
 from .instance import Instance
-from .jit import CompiledCallable, Jit, JitError, compile, jit
+from .jit import CompiledCallable, Jit, JitError, _dispose_jits_for_ctx, compile, jit
 from . import nn as nn
 
 TinyJit = Jit
+
+
+def _dispose_default_ctx():
+    global _default_ctx
+    if _default_ctx:
+        _dispose_jits_for_ctx(_default_ctx)
+        _ffi.get_lib().poly_ctx_destroy(_default_ctx)
+        _default_ctx = None
+
+
+atexit.register(_dispose_default_ctx)
 
 
 class _GlobalCountersMeta(type):
@@ -262,6 +272,7 @@ class Runtime:
 
     def dispose(self):
       if not self._disposed:
+          _dispose_jits_for_ctx(self._ctx)
           _ffi.get_lib().poly_ctx_destroy(self._ctx)
           self._disposed = True
           self._ctx = None

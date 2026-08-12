@@ -7,6 +7,7 @@
 #include "../src/bigint.h"
 #include "../src/ctx.h"
 #include "../src/frontend.h"
+#include "../src/device.h"
 #include "../src/engine/schedule.h"
 #include <string.h>
 #include <stdlib.h>
@@ -136,10 +137,10 @@ TEST(ir, round_trip_const) {
   PASS();
 }
 
-TEST(ir, round_trip_exact_bigint_arg_v4) {
+TEST(ir, round_trip_exact_bigint_arg_current_format) {
   /* Pinned tinygrad UOp args retain positive uint64 values above INT64_MAX.
-   * poly.ir.uops@4 must preserve the same exact identity, not a signed
-   * surrogate. */
+   * The current Polygrad IR format must preserve the same exact identity, not
+   * a signed surrogate. */
   PolyCtx *ctx = poly_ctx_new();
   PolyInt value = {0};
   ASSERT_TRUE(poly_int_from_decimal(&value, "18446744073709550593"));
@@ -160,7 +161,7 @@ TEST(ir, round_trip_exact_bigint_arg_v4) {
   uint8_t *bytes = poly_ir_export(&spec, &out_len);
   ASSERT_NOT_NULL(bytes);
   ASSERT_TRUE(out_len > 32);
-  ASSERT_INT_EQ(bytes[4], 4);
+  ASSERT_INT_EQ(bytes[4], 7);
   ASSERT_INT_EQ(bytes[5], 0);
 
   PolyIrSpec imported;
@@ -190,7 +191,7 @@ TEST(ir, round_trip_bufferize_opts_arg) {
   PolyCtx *ctx = poly_ctx_new();
 
   PolyUOp *a = poly_buffer_f32(ctx, 8);
-  PolyUOp *device = poly_device_uop(ctx, POLY_DEVICE_CUDA);
+  PolyUOp *device = poly_device_uop_from_name(ctx, "CPU:1");
   PolyUOp *copy = poly_uop2(ctx, POLY_OP_COPY, POLY_FLOAT32, a, device, poly_arg_none());
   PolyUOp *bound = poly_const_int(ctx, 8);
   PolyUOp *range =
@@ -198,7 +199,7 @@ TEST(ir, round_trip_bufferize_opts_arg) {
   PolyUOp *bsrc[] = {copy, range};
   PolyUOp *bufferize = poly_uop(
       ctx, POLY_OP_STAGE, POLY_FLOAT32, bsrc, 2,
-      poly_arg_bufferize_opts(POLY_DEVICE_CUDA, POLY_ADDR_GLOBAL, false)
+      poly_arg_bufferize_opts("CPU:1", POLY_ADDR_GLOBAL, false)
   );
   PolyUOp *out = poly_buffer_f32(ctx, 8);
   PolyUOp *store = poly_store_val(ctx, out, bufferize);
@@ -225,18 +226,190 @@ TEST(ir, round_trip_bufferize_opts_arg) {
   for (int i = 0; i < n_topo; i++) {
     if (topo[i]->op == POLY_OP_DEVICE) {
       ASSERT_EQ(topo[i]->arg.kind, POLY_ARG_STRING);
-      ASSERT_STR_EQ(topo[i]->arg.str, "CUDA");
+      ASSERT_STR_EQ(topo[i]->arg.str, "CPU:1");
       found_device = true;
     }
     if (topo[i]->op != POLY_OP_STAGE) continue;
     ASSERT_INT_EQ(topo[i]->arg.kind, POLY_ARG_BUFFERIZE_OPTS);
-    ASSERT_INT_EQ(poly_bufferize_arg_device(topo[i]->arg), POLY_DEVICE_CUDA);
+    ASSERT_STR_EQ(poly_bufferize_arg_device(topo[i]->arg), "CPU:1");
     ASSERT_INT_EQ(poly_bufferize_arg_addrspace(topo[i]->arg), POLY_ADDR_GLOBAL);
     ASSERT_FALSE(poly_bufferize_arg_removable(topo[i]->arg));
     found = true;
   }
   ASSERT_TRUE(found);
   ASSERT_TRUE(found_device);
+
+  poly_ir_spec_free(&imported);
+  poly_ctx_destroy(imported.ctx);
+  poly_ctx_destroy(ctx);
+  free(bytes);
+  PASS();
+}
+
+TEST(ir, round_trip_tuple_device_arg) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  const char *devices[] = {"CPU:0", "cpu:1"};
+  PolyUOp *tuple_device = poly_device_uop_from_names(ctx, devices, 2);
+  PolyUOp *input = poly_buffer_f32(ctx, 4);
+  PolyUOp *copy = poly_uop2(ctx, POLY_OP_COPY, POLY_FLOAT32, input, tuple_device, poly_arg_none());
+  PolyUOp *output = poly_buffer_f32(ctx, 4);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, output, copy));
+  PolyIrBufEntry bufs[] = {
+      {.name = "input", .role = POLY_IR_ROLE_INPUT, .buffer = input, .shape = {4}, .ndim = 1},
+      {.name = "output", .role = POLY_IR_ROLE_OUTPUT, .buffer = output, .shape = {4}, .ndim = 1},
+  };
+  PolyIrEntrypoint eps[] = {{.name = "forward", .sink = sink}};
+  PolyIrSpec spec = {ctx, bufs, 2, eps, 1};
+
+  int out_len = 0;
+  uint8_t *bytes = poly_ir_export(&spec, &out_len);
+  ASSERT_NOT_NULL(bytes);
+  ASSERT_INT_EQ(bytes[4], 7);
+
+  PolyIrSpec imported;
+  ASSERT_INT_EQ(poly_ir_import(bytes, out_len, &imported), 0);
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(imported.ctx, imported.entrypoints[0].sink, &n_topo);
+  ASSERT_NOT_NULL(topo);
+  PolyUOp *imported_device = NULL;
+  for (int i = 0; i < n_topo; i++) {
+    if (topo[i]->op == POLY_OP_DEVICE && topo[i]->arg.kind == POLY_ARG_STRING_TUPLE) {
+      imported_device = topo[i];
+      break;
+    }
+  }
+  ASSERT_NOT_NULL(imported_device);
+  ASSERT_INT_EQ(imported_device->arg.string_tuple.n, 2);
+  ASSERT_STR_EQ(imported_device->arg.string_tuple.vals[0], "CPU");
+  ASSERT_STR_EQ(imported_device->arg.string_tuple.vals[1], "CPU:1");
+
+  poly_ir_spec_free(&imported);
+  poly_ctx_destroy(imported.ctx);
+  poly_ctx_destroy(ctx);
+  free(bytes);
+  PASS();
+}
+
+TEST(ir, round_trip_paramarg_exact_device_identity) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *shape = poly_const_int(ctx, 4);
+  PolyParamArg param_arg = {
+      .slot = 3,
+      .name = NULL,
+      .addrspace = POLY_ADDR_GLOBAL,
+      .device = "CPU:1",
+  };
+  PolyUOp *param = poly_uop1(ctx, POLY_OP_PARAM, POLY_FLOAT32, shape, poly_arg_param(&param_arg));
+  PolyUOp *sink = poly_sink1(ctx, param);
+  ASSERT_NOT_NULL(param);
+  ASSERT_NOT_NULL(sink);
+
+  PolyIrEntrypoint eps[] = {{.name = "forward", .sink = sink}};
+  PolyIrSpec spec = {ctx, NULL, 0, eps, 1};
+  int out_len = 0;
+  uint8_t *bytes = poly_ir_export(&spec, &out_len);
+  ASSERT_NOT_NULL(bytes);
+
+  PolyIrSpec imported;
+  ASSERT_INT_EQ(poly_ir_import(bytes, out_len, &imported), 0);
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(imported.ctx, imported.entrypoints[0].sink, &n_topo);
+  ASSERT_NOT_NULL(topo);
+  PolyUOp *imported_param = NULL;
+  for (int i = 0; i < n_topo; i++)
+    if (topo[i]->op == POLY_OP_PARAM && topo[i]->arg.kind == POLY_ARG_PARAM)
+      imported_param = topo[i];
+  ASSERT_NOT_NULL(imported_param);
+  ASSERT_NOT_NULL(imported_param->arg.param);
+  ASSERT_INT_EQ(imported_param->arg.param->slot, 3);
+  ASSERT_STR_EQ(imported_param->arg.param->device, "CPU:1");
+  ASSERT_STR_EQ(poly_uop_device_name(imported.ctx, imported_param), "CPU:1");
+
+  poly_ir_spec_free(&imported);
+  poly_ctx_destroy(imported.ctx);
+  poly_ctx_destroy(ctx);
+  free(bytes);
+  PASS();
+}
+
+TEST(ir, round_trip_paramarg_ordered_device_tuple) {
+  /* Pinned ParamArg.device preserves str | tuple[str, ...] | None
+   * (tinygrad/uop/ops.py:1071-1076). PGIR v7 must retain tuple order and keep
+   * it CSE-distinct from a scalar identity. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *shape = poly_const_int(ctx, 4);
+  const char *devices[] = {"CPU", "CPU:1"};
+  const char *reversed[] = {"CPU:1", "CPU"};
+  PolyParamArg tuple_arg = {
+      .slot = 4,
+      .addrspace = POLY_ADDR_GLOBAL,
+      .devices = devices,
+      .n_devices = 2,
+      .device_is_tuple = true,
+  };
+  PolyParamArg reversed_arg = {
+      .slot = 4,
+      .addrspace = POLY_ADDR_GLOBAL,
+      .devices = reversed,
+      .n_devices = 2,
+      .device_is_tuple = true,
+  };
+  PolyParamArg scalar_arg = {
+      .slot = 4,
+      .addrspace = POLY_ADDR_GLOBAL,
+      .device = "CPU",
+  };
+  PolyUOp *param =
+      poly_uop1(ctx, POLY_OP_PARAM, POLY_FLOAT32, shape, poly_arg_param(&tuple_arg));
+  PolyUOp *same =
+      poly_uop1(ctx, POLY_OP_PARAM, POLY_FLOAT32, shape, poly_arg_param(&tuple_arg));
+  PolyUOp *reverse =
+      poly_uop1(ctx, POLY_OP_PARAM, POLY_FLOAT32, shape, poly_arg_param(&reversed_arg));
+  PolyUOp *scalar =
+      poly_uop1(ctx, POLY_OP_PARAM, POLY_FLOAT32, shape, poly_arg_param(&scalar_arg));
+  ASSERT_NOT_NULL(param);
+  ASSERT_PTR_EQ(param, same);
+  ASSERT_TRUE(param != reverse);
+  ASSERT_TRUE(param != scalar);
+  PolyUOp *multi = poly_uop1(ctx, POLY_OP_MULTI, POLY_FLOAT32, param, poly_arg_int(0));
+  PolyShape multi_shape = poly_uop_max_shape(ctx, multi);
+  ASSERT_INT_EQ(multi_shape.ndim, 1);
+  ASSERT_INT_EQ(multi_shape.dims[0], 8);
+  free(multi_shape.dims);
+
+  PolyUOp *sink = poly_sink1(ctx, param);
+  PolyIrEntrypoint eps[] = {{.name = "forward", .sink = sink}};
+  PolyIrSpec spec = {ctx, NULL, 0, eps, 1};
+  int out_len = 0;
+  uint8_t *bytes = poly_ir_export(&spec, &out_len);
+  ASSERT_NOT_NULL(bytes);
+
+  PolyIrSpec imported;
+  ASSERT_INT_EQ(poly_ir_import(bytes, out_len, &imported), 0);
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(imported.ctx, imported.entrypoints[0].sink, &n_topo);
+  PolyUOp *imported_param = NULL;
+  for (int i = 0; i < n_topo; i++)
+    if (topo[i]->op == POLY_OP_PARAM && topo[i]->arg.kind == POLY_ARG_PARAM)
+      imported_param = topo[i];
+  ASSERT_NOT_NULL(imported_param);
+  ASSERT_TRUE(imported_param->arg.param->device_is_tuple);
+  ASSERT_TRUE(imported_param->arg.param->device == NULL);
+  ASSERT_INT_EQ(imported_param->arg.param->n_devices, 2);
+  ASSERT_STR_EQ(imported_param->arg.param->devices[0], "CPU");
+  ASSERT_STR_EQ(imported_param->arg.param->devices[1], "CPU:1");
+  PolyUOp *imported_multi =
+      poly_uop1(imported.ctx, POLY_OP_MULTI, POLY_FLOAT32, imported_param, poly_arg_int(0));
+  PolyShape imported_shape = poly_uop_max_shape(imported.ctx, imported_multi);
+  ASSERT_INT_EQ(imported_shape.ndim, 1);
+  ASSERT_INT_EQ(imported_shape.dims[0], 8);
+  free(imported_shape.dims);
 
   poly_ir_spec_free(&imported);
   poly_ctx_destroy(imported.ctx);

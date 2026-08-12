@@ -10,6 +10,8 @@
 #include "polygrad.h"
 #include "ctx.h"
 #include "device.h"
+#include "frontend_internal.h"
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -310,6 +312,177 @@ PolyUOp *poly_uop_shape_dim(PolyCtx *ctx, const PolyUOp *u, int dim) {
   ShapeCacheEntry *e = ensure_shape(ctx, (PolyUOp *)u);
   if (!e || dim >= e->ndim || !e->dim_uops) return NULL;
   return e->dim_uops[dim];
+}
+
+static PolyUOp *axis_shape_arg_item(PolyUOp *shape, int axis) {
+  if (!shape || axis < 0) return NULL;
+  if (shape->op == POLY_OP_STACK)
+    return axis < shape->n_src ? shape->src[axis] : NULL;
+  return axis == 0 && shape->op == POLY_OP_CONST ? shape : NULL;
+}
+
+static bool axis_expr_equal(PolyUOp *a, PolyUOp *b) {
+  if (a == b) return true;
+  int64_t av = 0, bv = 0;
+  return poly_uop_const_i64(a, &av) == 0 && poly_uop_const_i64(b, &bv) == 0 && av == bv;
+}
+
+static PolyUOp *axis_shape_product(PolyCtx *ctx, const PolyUOp *u, int end) {
+  if (!ctx || !u || end < 0 || end > poly_uop_ndim(ctx, u)) return NULL;
+  PolyUOp *product = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(1));
+  const int64_t *max_shape = poly_uop_max_shape_dims(ctx, u);
+  for (int i = 0; i < end; i++) {
+    PolyUOp *dim = poly_uop_shape_dim(ctx, u, i);
+    if (!dim && max_shape) dim = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(max_shape[i]));
+    if (!dim) return NULL;
+    product = poly_uop2(ctx, POLY_OP_MUL, POLY_INDEX, product, dim, poly_arg_none());
+    product = product ? poly_graph_rewrite(ctx, product, poly_symbolic_simple()) : NULL;
+    if (!product) return NULL;
+  }
+  return product;
+}
+
+/* Exact C port of pinned UOp.axis (tinygrad/uop/ops.py:623-651). The cache
+ * stores 1 for None and axis+2 for a concrete shard axis. */
+bool poly_uop_axis_cached(PolyCtx *ctx, const PolyUOp *u, PolyMap *cache, int *out_axis) {
+  if (out_axis) *out_axis = -1;
+  if (!ctx || !u) return false;
+  if (cache) {
+    void *cached = poly_map_get(cache, poly_ptr_hash(u), u, poly_ptr_eq);
+    if (cached) {
+      intptr_t encoded = (intptr_t)cached;
+      if (encoded == 1) return false;
+      if (out_axis) *out_axis = (int)(encoded - 2);
+      return true;
+    }
+  }
+
+  bool has_axis = false;
+  int axis = -1;
+  if (u->op == POLY_OP_COPY) {
+    has_axis = false;
+  } else if (u->op == POLY_OP_MULTI && u->arg.kind == POLY_ARG_INT && u->arg.i >= 0 &&
+             u->arg.i <= INT_MAX) {
+    axis = (int)u->arg.i;
+    has_axis = true;
+  } else if (u->op == POLY_OP_PARAM && u->arg.kind == POLY_ARG_PARAM && u->arg.param &&
+             u->arg.param->has_axis && u->arg.param->axis >= 0) {
+    axis = u->arg.param->axis;
+    has_axis = true;
+  } else if (poly_opset_has(POLY_GROUP_ALU, u->op)) {
+    /* Pinned dedup(...)[-1] chooses the last non-None source axis. */
+    for (int i = 0; i < u->n_src; i++) {
+      int source_axis = -1;
+      if (poly_uop_axis_cached(ctx, u->src[i], cache, &source_axis)) {
+        axis = source_axis;
+        has_axis = true;
+      }
+    }
+  } else if (u->n_src > 0) {
+    has_axis = poly_uop_axis_cached(ctx, u->src[0], cache, &axis);
+    if (has_axis && u->op == POLY_OP_SHRINK) {
+      bool full = false;
+      if (u->arg.kind == POLY_ARG_NONE && u->n_src >= 3) {
+        PolyUOp *start = axis_shape_arg_item(u->src[1], axis);
+        PolyUOp *size = axis_shape_arg_item(u->src[2], axis);
+        PolyUOp *source_dim = poly_uop_shape_dim(ctx, u->src[0], axis);
+        int64_t start_value = -1;
+        full = poly_uop_const_i64(start, &start_value) == 0 && start_value == 0 &&
+               axis_expr_equal(size, source_dim);
+      } else if (u->arg.kind == POLY_ARG_PAIR_TUPLE &&
+                 axis < u->arg.pair_tuple.n) {
+        const int64_t *source_shape = poly_uop_max_shape_dims(ctx, u->src[0]);
+        full = source_shape && u->arg.pair_tuple.pairs[axis][0] == 0 &&
+               u->arg.pair_tuple.pairs[axis][1] == source_shape[axis];
+      }
+      if (!full) has_axis = false;
+    } else if (has_axis && (u->op == POLY_OP_REDUCE || u->op == POLY_OP_REDUCE_AXIS) &&
+               u->arg.kind == POLY_ARG_REDUCE_AXIS) {
+      for (int i = 0; i < u->arg.reduce_axis.n; i++)
+        if (u->arg.reduce_axis.axes[i] == axis) {
+          has_axis = false;
+          break;
+        }
+    } else if (has_axis && u->op == POLY_OP_RESHAPE) {
+      PolyUOp *source_prefix = axis_shape_product(ctx, u->src[0], axis);
+      PolyUOp *output_prefix = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(1));
+      int output_ndim = poly_uop_ndim(ctx, u);
+      int new_axis = axis_expr_equal(output_prefix, source_prefix) ? 0 : -1;
+      for (int i = 0; i < output_ndim; i++) {
+        PolyUOp *dim = poly_uop_shape_dim(ctx, u, i);
+        const int64_t *max_shape = poly_uop_max_shape_dims(ctx, u);
+        if (!dim && max_shape)
+          dim = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(max_shape[i]));
+        output_prefix = dim
+                            ? poly_uop2(
+                                  ctx, POLY_OP_MUL, POLY_INDEX, output_prefix, dim,
+                                  poly_arg_none()
+                              )
+                            : NULL;
+        output_prefix = output_prefix
+                            ? poly_graph_rewrite(ctx, output_prefix, poly_symbolic_simple())
+                            : NULL;
+        if (!output_prefix) break;
+        if (axis_expr_equal(output_prefix, source_prefix)) new_axis = i + 1;
+      }
+      PolyUOp *device = poly_uop_device_uop_cached(ctx, (PolyUOp *)u, NULL);
+      int device_count = device && device->arg.kind == POLY_ARG_STRING_TUPLE
+                             ? device->arg.string_tuple.n
+                             : 0;
+      if (!source_prefix || new_axis < 0 || new_axis >= output_ndim || device_count <= 0) {
+        has_axis = false;
+      } else {
+        PolyUOp *new_dim = poly_uop_shape_dim(ctx, u, new_axis);
+        const int64_t *max_shape = poly_uop_max_shape_dims(ctx, u);
+        if (!new_dim && max_shape)
+          new_dim = poly_uop0(
+              ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(max_shape[new_axis])
+          );
+        PolyUOp *count = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(device_count));
+        PolyUOp *rem = new_dim
+                           ? poly_uop2(ctx, POLY_OP_MOD, POLY_INDEX, new_dim, count, poly_arg_none())
+                           : NULL;
+        rem = rem ? poly_graph_rewrite(ctx, rem, poly_symbolic_simple()) : NULL;
+        int64_t rem_value = -1;
+        if (poly_uop_const_i64(rem, &rem_value) != 0 || rem_value != 0) {
+          has_axis = false;
+        } else {
+          axis = new_axis;
+        }
+      }
+    } else if (has_axis && u->op == POLY_OP_PERMUTE &&
+               u->arg.kind == POLY_ARG_INT_TUPLE) {
+      int new_axis = -1;
+      for (int i = 0; i < u->arg.int_tuple.n; i++)
+        if (u->arg.int_tuple.vals[i] == axis) {
+          new_axis = i;
+          break;
+        }
+      if (new_axis < 0)
+        has_axis = false;
+      else
+        axis = new_axis;
+    }
+  }
+
+  if (cache)
+    poly_map_set(
+        cache, poly_ptr_hash(u), (void *)u,
+        (void *)(intptr_t)(has_axis ? axis + 2 : 1), poly_ptr_eq
+    );
+  if (has_axis && out_axis) *out_axis = axis;
+  return has_axis;
+}
+
+bool poly_uop_axis(PolyCtx *ctx, const PolyUOp *u, int *out_axis) {
+  PolyMap *cache = poly_map_new(64);
+  if (!cache) {
+    if (out_axis) *out_axis = -1;
+    return false;
+  }
+  bool ret = poly_uop_axis_cached(ctx, u, cache, out_axis);
+  poly_map_destroy(cache);
+  return ret;
 }
 
 int poly_uop_const_i64(const PolyUOp *u, int64_t *out) {
@@ -765,6 +938,48 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
     return make_entry_dims_uops(ctx, dims, dim_uops, out_ndim);
   }
 
+  /* Pinned UOp._shape treats MSTACK, MSELECT, and ALLREDUCE as source-0
+   * passthroughs (uop/ops.py:308-315). */
+  if (op == POLY_OP_MSTACK || op == POLY_OP_MSELECT || op == POLY_OP_ALLREDUCE) {
+    if (u->n_src >= 1 && SRC_NDIM(0) >= 0)
+      return make_entry_dims_uops(ctx, SRC_DIMS(0), SRC_DIM_UOPS(0), SRC_NDIM(0));
+    return make_entry_none(ctx);
+  }
+
+  /* Pinned MULTI is movement-like: src[0] is one local shard and the public
+   * shape multiplies the shard axis by the exact tuple-device count
+   * (uop/ops.py:322-355,612-625). */
+  if (op == POLY_OP_MULTI) {
+    if (u->n_src != 1 || u->arg.kind != POLY_ARG_INT || SRC_NDIM(0) < 0)
+      return make_entry_none(ctx);
+    PolyUOp *device = poly_uop_device_uop_cached(ctx, u, NULL);
+    int axis = (int)u->arg.i;
+    if (!device || device->arg.kind != POLY_ARG_STRING_TUPLE || u->arg.i != axis || axis < 0 ||
+        axis >= SRC_NDIM(0))
+      return make_entry_none(ctx);
+    int64_t dims[POLY_MAX_DIMS];
+    PolyUOp *dim_uops[POLY_MAX_DIMS];
+    memcpy(dims, SRC_DIMS(0), (size_t)SRC_NDIM(0) * sizeof(*dims));
+    PolyUOp *const *source_dim_uops = SRC_DIM_UOPS(0);
+    for (int i = 0; i < SRC_NDIM(0); i++)
+      dim_uops[i] = source_dim_uops ? source_dim_uops[i] : NULL;
+    int count = device->arg.string_tuple.n;
+    if (__builtin_mul_overflow(dims[axis], (int64_t)count, &dims[axis]))
+      return make_entry_none(ctx);
+    if (count == 0) {
+      dim_uops[axis] = NULL;
+    } else if (count > 1) {
+      if (shape_dim_is_static(dim_uops[axis])) {
+        dim_uops[axis] = shape_dim_const(ctx, dims[axis]);
+      } else {
+        dim_uops[axis] =
+            poly_alu2(ctx, POLY_OP_MUL, dim_uops[axis], shape_dim_const(ctx, count));
+        if (!dim_uops[axis]) return make_entry_none(ctx);
+      }
+    }
+    return make_entry_dims_uops(ctx, dims, dim_uops, SRC_NDIM(0));
+  }
+
   /* RESHAPE: pinned tensor form is (value, shape_to_shape_arg(shape)). */
   if (op == POLY_OP_RESHAPE && u->arg.kind == POLY_ARG_NONE && u->n_src == 2) {
     int8_t in_ndim = SRC_NDIM(0);
@@ -772,12 +987,10 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
     int64_t dims[POLY_MAX_DIMS];
     PolyUOp *dim_uops[POLY_MAX_DIMS];
     int n = 0;
-    if (!shape_arg_values(ctx, u->src[1], dims, dim_uops, &n))
-      return make_entry_none(ctx);
+    if (!shape_arg_values(ctx, u->src[1], dims, dim_uops, &n)) return make_entry_none(ctx);
     /* Pinned uop/ops.py:330-333 requires exact input/output cardinality.
      * Compare canonical products, not products of allocation maxima. */
-    PolyUOp *input_product =
-        exact_shape_product(ctx, SRC_DIMS(0), SRC_DIM_UOPS(0), in_ndim);
+    PolyUOp *input_product = exact_shape_product(ctx, SRC_DIMS(0), SRC_DIM_UOPS(0), in_ndim);
     PolyUOp *output_product = exact_shape_product(ctx, dims, dim_uops, n);
     if (!input_product || !output_product || input_product != output_product)
       return make_entry_none(ctx);

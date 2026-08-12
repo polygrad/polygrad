@@ -83,7 +83,8 @@ TEST(uop, device_constructor_uses_canonical_string_identity) {
   ASSERT_STR_EQ(cuda->arg.str, "CUDA");
   ASSERT_STR_EQ(cuda1->arg.str, "CUDA:1");
   ASSERT_INT_EQ(poly_device_from_device_uop(cuda), POLY_DEVICE_CUDA);
-  ASSERT_INT_EQ(poly_device_from_device_uop(cuda1), POLY_DEVICE_AUTO);
+  ASSERT_INT_EQ(poly_device_from_device_uop(cuda1), POLY_DEVICE_CUDA);
+  ASSERT_FALSE(poly_uop_explicit_devices_supported(ctx, cuda1));
   PolyUOp *old_integer_dialect =
       poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CUDA));
   ASSERT_INT_EQ(poly_device_from_device_uop(old_integer_dialect), POLY_DEVICE_AUTO);
@@ -92,6 +93,136 @@ TEST(uop, device_constructor_uses_canonical_string_identity) {
   ASSERT_NOT_NULL(cpu);
   ASSERT_EQ(cpu->arg.kind, POLY_ARG_STRING);
   ASSERT_STR_EQ(cpu->arg.str, "CPU");
+  PolyUOp *cpu1 = poly_device_uop_from_name(ctx, "CPU:1");
+  ASSERT_INT_EQ(poly_device_from_device_uop(cpu1), POLY_DEVICE_CPU);
+  ASSERT_TRUE(poly_uop_explicit_devices_supported(ctx, cpu1));
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(uop, device_constructor_preserves_ordered_tuple_identity) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  /* Pinned canonicalize_device maps every element independently, preserves
+   * tuple order, and collapses only a one-element tuple (device.py:57-59).
+   * DEVICE.arg stores the exact tuple (uop/ops.py:770-783). */
+  const char *names_a[] = {"CPU:0", "cpu:1"};
+  const char *names_b[] = {"CPU", "CPU:1"};
+  const char *names_rev[] = {"CPU:1", "CPU"};
+  const char *single[] = {"cpu:0"};
+  PolyUOp *tuple_a = poly_device_uop_from_names(ctx, names_a, 2);
+  PolyUOp *tuple_b = poly_device_uop_from_names(ctx, names_b, 2);
+  PolyUOp *tuple_rev = poly_device_uop_from_names(ctx, names_rev, 2);
+  PolyUOp *scalar = poly_device_uop_from_names(ctx, single, 1);
+  ASSERT_NOT_NULL(tuple_a);
+  ASSERT_PTR_EQ(tuple_a, tuple_b);
+  ASSERT_PTR_NEQ(tuple_a, tuple_rev);
+  ASSERT_PTR_EQ(scalar, poly_device_uop_from_name(ctx, "CPU"));
+  ASSERT_INT_EQ(tuple_a->arg.kind, POLY_ARG_STRING_TUPLE);
+  ASSERT_INT_EQ(tuple_a->arg.string_tuple.n, 2);
+  ASSERT_STR_EQ(tuple_a->arg.string_tuple.vals[0], "CPU");
+  ASSERT_STR_EQ(tuple_a->arg.string_tuple.vals[1], "CPU:1");
+  ASSERT_INT_EQ(poly_device_from_device_uop(tuple_a), POLY_DEVICE_AUTO);
+  /* Exact tuple identity has no scalar backend enum, but every CPU ordinal is
+   * executable and schedule/multi lowers it to supported scalar occurrences. */
+  ASSERT_TRUE(poly_uop_explicit_devices_supported(ctx, tuple_a));
+
+  PolyUOp *unique = poly_uop0(ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(1));
+  PolyUOp *buffer_src[] = {unique, poly_device_uop_from_name(ctx, "CPU")};
+  PolyUOp *buffer = poly_uop(ctx, POLY_OP_BUFFER, POLY_INT32, buffer_src, 2, poly_arg_int(8));
+  PolyUOp *copy = poly_uop2(ctx, POLY_OP_COPY, POLY_INT32, buffer, tuple_a, poly_arg_none());
+  PolyUOp *multi = poly_uop1(ctx, POLY_OP_MULTI, POLY_INT32, copy, poly_arg_int(0));
+  ASSERT_PTR_EQ(poly_uop_device_uop_cached(ctx, multi, NULL), tuple_a);
+  ASSERT_TRUE(poly_uop_explicit_devices_supported(ctx, multi));
+
+  /* Pinned UOp.device selects one tuple element for MSELECT and constructs an
+   * ordered tuple for MSTACK (uop/ops.py:770-783). MSTACK returns a tuple even
+   * with one source; that path does not call canonicalize_device. */
+  PolyUOp *cpu = poly_device_uop_from_name(ctx, "CPU");
+  PolyUOp *cpu1 = poly_device_uop_from_name(ctx, "CPU:1");
+  PolyUOp *unique1 = poly_uop0(ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(2));
+  PolyUOp *buffer1_src[] = {unique1, cpu1};
+  PolyUOp *buffer1 = poly_uop(ctx, POLY_OP_BUFFER, POLY_INT32, buffer1_src, 2, poly_arg_int(8));
+  PolyUOp *stack_src[] = {buffer, buffer1};
+  PolyUOp *stack = poly_uop(ctx, POLY_OP_MSTACK, POLY_INT32, stack_src, 2, poly_arg_none());
+  PolyUOp *stack_device = poly_uop_device_uop_cached(ctx, stack, NULL);
+  ASSERT_NOT_NULL(stack_device);
+  ASSERT_INT_EQ(stack_device->arg.kind, POLY_ARG_STRING_TUPLE);
+  ASSERT_INT_EQ(stack_device->arg.string_tuple.n, 2);
+  ASSERT_STR_EQ(stack_device->arg.string_tuple.vals[0], "CPU");
+  ASSERT_STR_EQ(stack_device->arg.string_tuple.vals[1], "CPU:1");
+  PolyUOp *select0 = poly_uop1(ctx, POLY_OP_MSELECT, POLY_INT32, stack, poly_arg_int(0));
+  PolyUOp *select1 = poly_uop1(ctx, POLY_OP_MSELECT, POLY_INT32, stack, poly_arg_int(1));
+  ASSERT_PTR_EQ(poly_uop_device_uop_cached(ctx, select0, NULL), cpu);
+  ASSERT_PTR_EQ(poly_uop_device_uop_cached(ctx, select1, NULL), cpu1);
+
+  PolyUOp *single_stack = poly_uop1(ctx, POLY_OP_MSTACK, POLY_INT32, buffer, poly_arg_none());
+  PolyUOp *single_stack_device = poly_uop_device_uop_cached(ctx, single_stack, NULL);
+  ASSERT_NOT_NULL(single_stack_device);
+  ASSERT_INT_EQ(single_stack_device->arg.kind, POLY_ARG_STRING_TUPLE);
+  ASSERT_INT_EQ(single_stack_device->arg.string_tuple.n, 1);
+  ASSERT_STR_EQ(single_stack_device->arg.string_tuple.vals[0], "CPU");
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(uop, device_query_preserves_exact_physical_identity) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  /* Pinned UOp.device returns the exact DEVICE identity, follows BUFFER/COPY
+   * src[1] and AFTER src[0], and takes the first concrete generic source
+   * (tinygrad/uop/ops.py:770-783). */
+  PolyUOp *cpu1 = poly_device_uop_from_name(ctx, "CPU:1");
+  PolyUOp *cuda = poly_device_uop_from_name(ctx, "CUDA");
+  PolyUOp *unique0 = poly_uop0(ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(0));
+  PolyUOp *unique1 = poly_uop0(ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(1));
+  PolyUOp *buffer0_src[2] = {unique0, cpu1};
+  PolyUOp *buffer1_src[2] = {unique1, cuda};
+  PolyUOp *buffer0 = poly_uop(ctx, POLY_OP_BUFFER, POLY_FLOAT32, buffer0_src, 2, poly_arg_int(1));
+  PolyUOp *buffer1 = poly_uop(ctx, POLY_OP_BUFFER, POLY_FLOAT32, buffer1_src, 2, poly_arg_int(1));
+  PolyUOp *copy_src[2] = {buffer1, cpu1};
+  PolyUOp *copy = poly_uop(ctx, POLY_OP_COPY, POLY_FLOAT32, copy_src, 2, poly_arg_none());
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, copy, buffer0, poly_arg_none());
+  PolyUOp *after = poly_uop2(ctx, POLY_OP_AFTER, POLY_FLOAT32, copy, store, poly_arg_none());
+  PolyUOp *mixed = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, buffer0, buffer1, poly_arg_none());
+  PolyUOp *constant = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0));
+
+  PolyUOp *shape = poly_const_int(ctx, 1);
+  PolyParamArg param_arg = {
+      .slot = 0,
+      .addrspace = POLY_ADDR_GLOBAL,
+      .device = "CPU:1",
+  };
+  PolyUOp *param = poly_uop1(ctx, POLY_OP_PARAM, POLY_FLOAT32, shape, poly_arg_param(&param_arg));
+  PolyUOp *stage_src[2] = {buffer0, shape};
+  PolyUOp *stage = poly_uop(
+      ctx, POLY_OP_STAGE, POLY_FLOAT32, stage_src, 2,
+      poly_arg_bufferize_opts("CPU:1", POLY_ADDR_GLOBAL, false)
+  );
+  PolyParamArg unsupported_arg = {
+      .slot = 1,
+      .addrspace = POLY_ADDR_GLOBAL,
+      .device = "CUDA:1",
+  };
+  PolyUOp *unsupported =
+      poly_uop1(ctx, POLY_OP_PARAM, POLY_FLOAT32, shape, poly_arg_param(&unsupported_arg));
+
+  ASSERT_PTR_EQ(poly_uop_device_uop_cached(ctx, cpu1, NULL), cpu1);
+  ASSERT_PTR_EQ(poly_uop_device_uop_cached(ctx, buffer0, NULL), cpu1);
+  ASSERT_PTR_EQ(poly_uop_device_uop_cached(ctx, copy, NULL), cpu1);
+  ASSERT_PTR_EQ(poly_uop_device_uop_cached(ctx, after, NULL), cpu1);
+  ASSERT_PTR_EQ(poly_uop_device_uop_cached(ctx, mixed, NULL), cpu1);
+  ASSERT_PTR_EQ(poly_uop_device_uop_cached(ctx, param, NULL), cpu1);
+  ASSERT_PTR_EQ(poly_uop_device_uop_cached(ctx, stage, NULL), cpu1);
+  ASSERT_STR_EQ(poly_uop_device_name(ctx, mixed), "CPU:1");
+  ASSERT_TRUE(poly_uop_device_uop_cached(ctx, constant, NULL) == NULL);
+  ASSERT_TRUE(poly_uop_device_name(ctx, constant) == NULL);
+  ASSERT_TRUE(poly_uop_explicit_devices_supported(ctx, param));
+  ASSERT_FALSE(poly_uop_explicit_devices_supported(ctx, unsupported));
 
   poly_ctx_destroy(ctx);
   PASS();

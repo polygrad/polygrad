@@ -99,6 +99,14 @@ bool poly_uop_explicit_devices_supported(PolyCtx *ctx, PolyUOp *root);
  * UOp._device property without storing pass-local cache state on every UOp. */
 PolyDevice poly_uop_device_cached(PolyUOp *u, PolyMap *cache);
 
+/* Pass-local exact concrete DEVICE identity query.  The returned UOp is owned
+ * by the input graph's context; the cache owns neither keys nor values. */
+PolyUOp *poly_uop_device_uop_cached(PolyCtx *ctx, PolyUOp *u, PolyMap *cache);
+
+/* Pass-local backing cache for pinned UOp.axis. NULL/false is represented
+ * explicitly in the map so shared unsharded subgraphs are not revisited. */
+bool poly_uop_axis_cached(PolyCtx *ctx, const PolyUOp *u, PolyMap *cache, int *out_axis);
+
 /* Apply one substitution map to several roots with one pass-local rewrite
  * memo. This is the allocation-free-root equivalent of tinygrad substituting
  * one temporary SINK: shared UOps are rewritten once, but no aggregate UOp is

@@ -741,6 +741,38 @@ class TestCreation:
 
 
 class TestJit:
+    def test_runtime_dispose_releases_its_retained_jits_first(self):
+        runtime = Runtime(device='interp')
+        other_runtime = Runtime(device='interp')
+
+        @Jit
+        def add_one(value):
+            return (value + 1).realize()
+
+        @Jit
+        def double(value):
+            return (value * 2).realize()
+
+        add_one(runtime.Tensor([1.0, 2.0]))
+        add_one(runtime.Tensor([3.0, 4.0]))
+        double(other_runtime.Tensor([1.0, 2.0]))
+        double(other_runtime.Tensor([3.0, 4.0]))
+        assert add_one.captured
+        assert double.captured
+        assert add_one._jit
+        assert add_one._ctx == runtime._ctx
+        assert double._jit
+
+        runtime.dispose()
+        assert add_one._jit is None
+        assert add_one._ctx is None
+        assert double._jit
+        np.testing.assert_allclose(
+            double(other_runtime.Tensor([5.0, 6.0])).numpy(), [10.0, 12.0]
+        )
+        other_runtime.dispose()
+        assert double._jit is None
+
     def test_jit_replays_raw_tensor_realize(self):
         @Jit
         def f(x):

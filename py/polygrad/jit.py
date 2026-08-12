@@ -3,6 +3,7 @@
 import functools
 import ctypes
 import time
+import weakref
 
 from . import _ffi
 from .tensor import BoundVariable, Tensor, Variable
@@ -10,6 +11,7 @@ from polygrad.uop.ops import UOp
 
 
 capturing = []
+_live_jits = weakref.WeakSet()
 
 
 class JitError(RuntimeError):
@@ -96,6 +98,14 @@ def _bound_var_items(args, kwargs):
 
 def _raw_int(raw):
     return 0 if raw is None else int(raw)
+
+
+def _dispose_jits_for_ctx(ctx):
+    """Drop retained C captures before their owning PolyCtx is destroyed."""
+    ctx_key = _raw_int(ctx)
+    for jit in list(_live_jits):
+        if jit._jit and _raw_int(jit._ctx) == ctx_key:
+            jit.reset()
 
 
 def _merge_var_bindings(*binding_lists):
@@ -213,14 +223,17 @@ class Jit:
         self.ret = None
         self.signature = None
         self._jit = None
+        self._ctx = None
         self.call_count = 0
         self.replay_count = 0
         self.last_call_ms = 0.0
+        _live_jits.add(self)
 
     def reset(self):
         if self._jit:
             _ffi._lib.poly_jit_free(self._jit)
         self._jit = None
+        self._ctx = None
         self.cnt = 0
         self.captured = False
         self.ret = None
@@ -291,14 +304,17 @@ class Jit:
             self._jit = _ffi._lib.poly_jit_new(ctx)
             if not self._jit:
                 raise JitError('poly_jit_new failed')
+            self._ctx = ctx
             if _ffi._lib.poly_jit_set_prune(self._jit, self.prune) != 0:
                 _ffi._lib.poly_jit_free(self._jit)
                 self._jit = None
+                self._ctx = None
                 raise JitError('poly_jit_set_prune failed')
             arr, n = _tensor_array(inputs)
             if _ffi._lib.poly_jit_begin_capture(self._jit, arr, n) != 0:
                 _ffi._lib.poly_jit_free(self._jit)
                 self._jit = None
+                self._ctx = None
                 raise JitError('poly_jit_begin_capture failed')
             capturing.append(self)
             try:

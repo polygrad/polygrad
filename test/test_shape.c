@@ -27,6 +27,54 @@ static PolyArg reduce_ax(PolyOps op, int64_t *axes, int n) {
   return a;
 }
 
+TEST(shape, multi_family_matches_pinned_tuple_device_shapes) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *cpu = poly_device_uop_from_name(ctx, "CPU");
+  PolyUOp *cpu1 = poly_device_uop_from_name(ctx, "CPU:1");
+  PolyUOp *unique0 = poly_uop0(ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(201));
+  PolyUOp *unique1 = poly_uop0(ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(202));
+  PolyUOp *buffer0_src[] = {unique0, cpu};
+  PolyUOp *buffer1_src[] = {unique1, cpu1};
+  PolyUOp *buffer0 = poly_uop(ctx, POLY_OP_BUFFER, POLY_FLOAT32, buffer0_src, 2, poly_arg_int(4));
+  PolyUOp *buffer1 = poly_uop(ctx, POLY_OP_BUFFER, POLY_FLOAT32, buffer1_src, 2, poly_arg_int(4));
+  PolyUOp *stack_src[] = {buffer0, buffer1};
+  PolyUOp *stack = poly_uop(ctx, POLY_OP_MSTACK, POLY_FLOAT32, stack_src, 2, poly_arg_none());
+  PolyUOp *select = poly_uop1(ctx, POLY_OP_MSELECT, POLY_FLOAT32, stack, poly_arg_int(1));
+
+  const char *devices[] = {"CPU", "CPU:1"};
+  PolyUOp *tuple = poly_device_uop_from_names(ctx, devices, 2);
+  PolyUOp *local_unique = poly_uop0(ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(203));
+  PolyUOp *local_src[] = {local_unique, tuple};
+  PolyUOp *local = poly_uop(ctx, POLY_OP_BUFFER, POLY_FLOAT32, local_src, 2, poly_arg_int(2));
+  PolyUOp *multi = poly_uop1(ctx, POLY_OP_MULTI, POLY_FLOAT32, local, poly_arg_int(0));
+  PolyUOp *allreduce_src[] = {multi, tuple};
+  PolyUOp *allreduce =
+      poly_uop(ctx, POLY_OP_ALLREDUCE, POLY_FLOAT32, allreduce_src, 2, poly_arg_ops(POLY_OP_ADD));
+
+  PolyUOp *roots[] = {stack, select, multi, allreduce};
+  for (int i = 0; i < 4; i++) {
+    PolyShape shape = poly_uop_max_shape(ctx, roots[i]);
+    ASSERT_INT_EQ(shape.ndim, 1);
+    ASSERT_INT_EQ(shape.dims[0], 4);
+    free(shape.dims);
+  }
+
+  PolyUOp *bad_axis = poly_uop1(ctx, POLY_OP_MULTI, POLY_FLOAT32, local, poly_arg_int(1));
+  PolyUOp *scalar_device_multi =
+      poly_uop1(ctx, POLY_OP_MULTI, POLY_FLOAT32, buffer0, poly_arg_int(0));
+  PolyShape bad_axis_shape = poly_uop_max_shape(ctx, bad_axis);
+  PolyShape scalar_device_shape = poly_uop_max_shape(ctx, scalar_device_multi);
+  ASSERT_INT_EQ(bad_axis_shape.ndim, -1);
+  ASSERT_INT_EQ(scalar_device_shape.ndim, -1);
+  free(bad_axis_shape.dims);
+  free(scalar_device_shape.dims);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 static int g_frontend_release_a = 0;
 static int g_frontend_release_b = 0;
 
@@ -400,7 +448,7 @@ TEST(shape, index_and_stage_match_tinygrad_topology) {
   PolyParamArg param_arg = {
       .slot = 0,
       .addrspace = POLY_ADDR_GLOBAL,
-      .device = POLY_DEVICE_CPU,
+      .device = "CPU",
   };
   PolyUOp *param = poly_uop1(
       ctx, POLY_OP_PARAM, POLY_FLOAT32, shape, poly_arg_param(&param_arg)
@@ -424,12 +472,12 @@ TEST(shape, index_and_stage_match_tinygrad_topology) {
   PolyUOp *stage_singleton_src[] = {full, zero};
   PolyUOp *stage_singleton = poly_uop(
       ctx, POLY_OP_STAGE, POLY_FLOAT32, stage_singleton_src, 2,
-      poly_arg_bufferize_opts(POLY_DEVICE_CPU, POLY_ADDR_GLOBAL, true)
+      poly_arg_bufferize_opts("CPU", POLY_ADDR_GLOBAL, true)
   );
   PolyUOp *stage_tensor_src[] = {param, r4};
   PolyUOp *stage_tensor = poly_uop(
       ctx, POLY_OP_STAGE, POLY_FLOAT32, stage_tensor_src, 2,
-      poly_arg_bufferize_opts(POLY_DEVICE_CPU, POLY_ADDR_GLOBAL, true)
+      poly_arg_bufferize_opts("CPU", POLY_ADDR_GLOBAL, true)
   );
 
   PolyShape partial_shape = poly_uop_max_shape_cached(ctx, partial);
@@ -648,13 +696,71 @@ TEST(shape, scalar_param_shape_uses_full_pinned_symbolic_canonicalization) {
   PolyParamArg arg = {
       .slot = 0,
       .addrspace = POLY_ADDR_GLOBAL,
-      .device = POLY_DEVICE_CPU,
+      .device = "CPU",
   };
   PolyUOp *param =
       poly_uop1(ctx, POLY_OP_PARAM, POLY_FLOAT32, source, poly_arg_param(&arg));
 
   ASSERT_INT_EQ(poly_uop_ndim(ctx, param), 1);
   ASSERT_PTR_EQ(poly_uop_shape_dim(ctx, param, 0), expected);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(shape, multi_axis_propagates_like_pinned_uop_axis) {
+  /* Pinned UOp.axis rules are source-backed by uop/ops.py:623-651 and the
+   * paired temp/tg_multi_axis_propagation_probe_20260811.py probe. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  const char *names[] = {"CPU", "CPU:1"};
+  PolyUOp *device_tuple = poly_device_uop_from_names(ctx, names, 2);
+  PolyUOp *unique = poly_uop0(ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(511));
+  PolyUOp *buffer_src[] = {unique, device_tuple};
+  PolyUOp *buffer =
+      poly_uop(ctx, POLY_OP_BUFFER, POLY_FLOAT32, buffer_src, 2, poly_arg_int(4));
+  PolyUOp *local = poly_reshape(ctx, buffer, (int64_t[]){2, 2}, 2);
+  PolyUOp *multi = poly_uop1(ctx, POLY_OP_MULTI, POLY_FLOAT32, local, poly_arg_int(0));
+  ASSERT_NOT_NULL(multi);
+
+  int axis = -1;
+  ASSERT_TRUE(poly_uop_axis(ctx, multi, &axis));
+  ASSERT_INT_EQ(axis, 0);
+
+  PolyUOp *contiguous = poly_contiguous(ctx, multi);
+  ASSERT_TRUE(poly_uop_axis(ctx, contiguous, &axis));
+  ASSERT_INT_EQ(axis, 0);
+
+  PolyUOp *cpu = poly_device_uop_from_name(ctx, "CPU");
+  PolyUOp *copy_src[] = {multi, cpu};
+  PolyUOp *copy = poly_uop(ctx, POLY_OP_COPY, POLY_FLOAT32, copy_src, 2, poly_arg_none());
+  ASSERT_FALSE(poly_uop_axis(ctx, copy, &axis));
+
+  PolyUOp *full = poly_shrink(ctx, multi, (int64_t[][2]){{0, 4}, {0, 2}}, 2);
+  PolyUOp *partial = poly_shrink(ctx, multi, (int64_t[][2]){{0, 2}, {0, 2}}, 2);
+  ASSERT_TRUE(poly_uop_axis(ctx, full, &axis));
+  ASSERT_INT_EQ(axis, 0);
+  ASSERT_FALSE(poly_uop_axis(ctx, partial, &axis));
+
+  PolyUOp *permuted = poly_permute(ctx, multi, (int64_t[]){1, 0}, 2);
+  ASSERT_TRUE(poly_uop_axis(ctx, permuted, &axis));
+  ASSERT_INT_EQ(axis, 1);
+
+  PolyUOp *reshaped = poly_reshape(ctx, multi, (int64_t[]){2, 4}, 2);
+  ASSERT_TRUE(poly_uop_axis(ctx, reshaped, &axis));
+  ASSERT_INT_EQ(axis, 0);
+
+  int64_t other_axis[] = {1};
+  int64_t shard_axis[] = {0};
+  PolyUOp *reduce_other = poly_uop1(
+      ctx, POLY_OP_REDUCE, POLY_FLOAT32, multi, reduce_ax(POLY_OP_ADD, other_axis, 1)
+  );
+  PolyUOp *reduce_shard = poly_uop1(
+      ctx, POLY_OP_REDUCE, POLY_FLOAT32, multi, reduce_ax(POLY_OP_ADD, shard_axis, 1)
+  );
+  ASSERT_TRUE(poly_uop_axis(ctx, reduce_other, &axis));
+  ASSERT_INT_EQ(axis, 0);
+  ASSERT_FALSE(poly_uop_axis(ctx, reduce_shard, &axis));
 
   poly_ctx_destroy(ctx);
   PASS();

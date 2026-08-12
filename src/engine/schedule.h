@@ -62,6 +62,7 @@ typedef struct {
   int64_t numel;
   int64_t nbytes;
   PolyUOp *buf_uop;
+  PolyUOp *device_uop; /* exact canonical DEVICE identity from buf_uop */
   PolyDevice device;
   bool is_intermediate;
   int external_buf_idx;
@@ -132,6 +133,7 @@ typedef struct {
    * never in the CALL UOp itself. */
   PolyRunner prg;
   PolyRuntimeCacheEntry *runtime_program;
+  PolyUOp *lowered_device_uop;
   PolyDevice lowered_device;
   uint32_t lowered_env_stamp;
   bool prg_valid;

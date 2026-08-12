@@ -10,6 +10,7 @@
 #include "tensor.h"
 #include "utils.h"
 
+#include <ctype.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,7 +28,138 @@ static PolyDevice device_from_string_arg(const char *s) {
   if (strcmp(s, "WEBGPU") == 0) return POLY_DEVICE_WEBGPU;
   if (strcmp(s, "INTERP") == 0) return POLY_DEVICE_INTERP;
   if (strcmp(s, "X86") == 0) return POLY_DEVICE_X86;
-  return poly_device_by_name(s);
+  PolyDevice direct = poly_device_by_name(s);
+  if (direct != POLY_DEVICE_AUTO) return direct;
+
+  /* Exact identity and backend implementation are separate in pinned
+   * tinygrad: Device["CPU:1"] is distinct, while its implementation class is
+   * still CPUDevice (device.py:15-35; runtime/ops_cpu.py:122-142).  Derive the
+   * backend from a numeric ordinal suffix without canonicalizing the identity
+   * itself.  Admission remains a separate check below. */
+  const char *sep = strchr(s, ':');
+  if (!sep || sep == s || !sep[1]) return POLY_DEVICE_AUTO;
+  const char *ordinal = sep + 1;
+  if (*ordinal == '+' || *ordinal == '-') ordinal++;
+  if (!*ordinal) return POLY_DEVICE_AUTO;
+  for (const char *p = ordinal; *p; p++)
+    if (!isdigit((unsigned char)*p)) return POLY_DEVICE_AUTO;
+
+  size_t prefix_n = (size_t)(sep - s);
+#define DEVICE_PREFIX(name, kind)                                                                  \
+  if (prefix_n == sizeof(name) - 1 && strncmp(s, name, prefix_n) == 0) return kind
+  DEVICE_PREFIX("CPU", POLY_DEVICE_CPU);
+  DEVICE_PREFIX("CUDA", POLY_DEVICE_CUDA);
+  DEVICE_PREFIX("HIP", POLY_DEVICE_HIP);
+  DEVICE_PREFIX("WEBGPU", POLY_DEVICE_WEBGPU);
+  DEVICE_PREFIX("INTERP", POLY_DEVICE_INTERP);
+  DEVICE_PREFIX("WASM", POLY_DEVICE_WASM);
+  DEVICE_PREFIX("X86", POLY_DEVICE_X86);
+#undef DEVICE_PREFIX
+  return POLY_DEVICE_AUTO;
+}
+
+static bool device_identity_name_supported(const char *name) {
+  if (!name) return true;
+  PolyDevice backend = device_from_string_arg(name);
+  if (backend == POLY_DEVICE_AUTO) return false;
+
+  /* Existing ordinal-zero and named DISK/CPU:X86 identities remain supported.
+   * CPU numeric identities are safe to admit because the CPU implementation
+   * is stateless per execution and all identity-bearing state is keyed by the
+   * exact DEVICE UOp.  Accelerator ordinals stay fail-closed until their
+   * contexts/allocators are per identity. */
+  if (poly_device_by_name(name) != POLY_DEVICE_AUTO) return true;
+  return backend == POLY_DEVICE_CPU;
+}
+
+static bool device_uop_identity_supported(PolyUOp *device) {
+  if (!device || device->op != POLY_OP_DEVICE) return false;
+  if (device->arg.kind == POLY_ARG_NONE) return true;
+  /* Pinned tuple DEVICE identities are ordered exact graph values which
+   * schedule/multi.py lowers to scalar occurrences (uop/ops.py:770-807;
+   * schedule/multi.py:8-31). Admit only tuples whose members already satisfy
+   * Polygrad's scalar backend-identity policy. */
+  if (device->arg.kind == POLY_ARG_STRING_TUPLE) {
+    if (device->arg.string_tuple.n <= 0 || !device->arg.string_tuple.vals) return false;
+    for (int i = 0; i < device->arg.string_tuple.n; i++)
+      if (!device_identity_name_supported(device->arg.string_tuple.vals[i])) return false;
+    return true;
+  }
+  if (device->arg.kind != POLY_ARG_STRING) return false;
+  return device_identity_name_supported(device->arg.str);
+}
+
+static char no_device_uop_cache_value;
+
+/* Exact-device counterpart of pinned UOp.device
+ * (tinygrad/uop/ops.py:770-783).  DEVICE is the concrete identity, COPY and
+ * BUFFER take src[1], AFTER follows its value, and generic UOps take the first
+ * concrete source.  This deliberately does not collapse identities to a
+ * PolyDevice backend kind or reconcile mixed-device sources. */
+PolyUOp *poly_uop_device_uop_cached(PolyCtx *ctx, PolyUOp *u, PolyMap *cache) {
+  if (!ctx || !u) return NULL;
+  if (cache) {
+    void *cached = poly_map_get(cache, poly_ptr_hash(u), u, poly_ptr_eq);
+    if (cached) return cached == &no_device_uop_cache_value ? NULL : cached;
+  }
+
+  PolyUOp *result = NULL;
+  if (u->op == POLY_OP_DEVICE) {
+    if (u->arg.kind == POLY_ARG_STRING || u->arg.kind == POLY_ARG_STRING_TUPLE) result = u;
+  } else if (u->op == POLY_OP_PARAM && u->arg.kind == POLY_ARG_PARAM && u->arg.param) {
+    if (u->arg.param->device_is_tuple)
+      result = poly_device_uop_from_names(
+          ctx, u->arg.param->devices, u->arg.param->n_devices
+      );
+    else if (u->arg.param->device)
+      result = poly_device_uop_from_name(ctx, u->arg.param->device);
+  } else if (u->op == POLY_OP_STAGE && u->arg.kind == POLY_ARG_BUFFERIZE_OPTS &&
+             u->arg.bufferize_opts.device) {
+    result = poly_device_uop_from_name(ctx, u->arg.bufferize_opts.device);
+  } else if ((u->op == POLY_OP_COPY || u->op == POLY_OP_BUFFER) && u->n_src >= 2) {
+    result = poly_uop_device_uop_cached(ctx, u->src[1], cache);
+  } else if (u->op == POLY_OP_AFTER && u->n_src >= 1) {
+    result = poly_uop_device_uop_cached(ctx, u->src[0], cache);
+  } else if (u->op == POLY_OP_MSELECT && u->n_src >= 1 && u->arg.kind == POLY_ARG_INT) {
+    PolyUOp *source_device = poly_uop_device_uop_cached(ctx, u->src[0], cache);
+    if (source_device && source_device->arg.kind == POLY_ARG_STRING_TUPLE && u->arg.i >= 0 &&
+        u->arg.i < source_device->arg.string_tuple.n)
+      result = poly_device_uop_from_name(ctx, source_device->arg.string_tuple.vals[(int)u->arg.i]);
+  } else if (u->op == POLY_OP_MSTACK) {
+    const char **names = u->n_src ? malloc((size_t)u->n_src * sizeof(*names)) : NULL;
+    bool complete = u->n_src == 0 || names != NULL;
+    for (int i = 0; i < u->n_src && complete; i++) {
+      PolyUOp *source_device = poly_uop_device_uop_cached(ctx, u->src[i], cache);
+      if (!source_device || source_device->arg.kind != POLY_ARG_STRING) {
+        complete = false;
+        break;
+      }
+      names[i] = source_device->arg.str;
+    }
+    if (complete)
+      result = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_string_tuple(names, u->n_src));
+    free(names);
+  } else if (u->op != POLY_OP_CONST && u->op != POLY_OP_VCONST) {
+    for (int i = 0; i < u->n_src && !result; i++)
+      result = poly_uop_device_uop_cached(ctx, u->src[i], cache);
+  }
+
+  if (cache)
+    poly_map_set(
+        cache, poly_ptr_hash(u), u, result ? (void *)result : (void *)&no_device_uop_cache_value,
+        poly_ptr_eq
+    );
+  return result;
+}
+
+const char *poly_uop_device_name(PolyCtx *ctx, PolyUOp *u) {
+  if (!ctx || !u) return NULL;
+  PolyMap *cache = poly_map_new(64);
+  if (!cache) return NULL;
+  PolyUOp *device = poly_uop_device_uop_cached(ctx, u, cache);
+  const char *name = device && device->arg.kind == POLY_ARG_STRING ? device->arg.str : NULL;
+  poly_map_destroy(cache);
+  return name;
 }
 
 PolyDevice poly_device_from_device_uop(PolyUOp *device) {
@@ -49,8 +181,30 @@ bool poly_uop_explicit_devices_supported(PolyCtx *ctx, PolyUOp *root) {
   bool supported = true;
   for (int i = 0; i < n; i++) {
     PolyUOp *u = topo[i];
-    if (u && u->op == POLY_OP_DEVICE && u->arg.kind != POLY_ARG_NONE &&
-        poly_device_from_device_uop(u) == POLY_DEVICE_AUTO) {
+    if (u && u->op == POLY_OP_DEVICE && !device_uop_identity_supported(u)) {
+      supported = false;
+      break;
+    }
+    if (u && u->op == POLY_OP_PARAM && u->arg.kind == POLY_ARG_PARAM && u->arg.param &&
+        u->arg.param->device_is_tuple) {
+      if (u->arg.param->n_devices <= 0 || !u->arg.param->devices) {
+        supported = false;
+        break;
+      }
+      for (int j = 0; j < u->arg.param->n_devices; j++) {
+        if (!device_identity_name_supported(u->arg.param->devices[j])) {
+          supported = false;
+          break;
+        }
+      }
+      if (!supported) break;
+    } else if (u && u->op == POLY_OP_PARAM && u->arg.kind == POLY_ARG_PARAM &&
+               u->arg.param && !device_identity_name_supported(u->arg.param->device)) {
+      supported = false;
+      break;
+    }
+    if (u && u->op == POLY_OP_STAGE && u->arg.kind == POLY_ARG_BUFFERIZE_OPTS &&
+        !device_identity_name_supported(u->arg.bufferize_opts.device)) {
       supported = false;
       break;
     }
@@ -115,8 +269,16 @@ PolyDevice poly_uop_device_cached(PolyUOp *u, PolyMap *cache) {
     return result;
   }
   if (u->op == POLY_OP_PARAM && u->arg.kind == POLY_ARG_PARAM && u->arg.param &&
-      u->arg.param->device != POLY_DEVICE_AUTO) {
-    result = (PolyDevice)u->arg.param->device;
+      (u->arg.param->device || u->arg.param->device_is_tuple)) {
+    result = u->arg.param->device ? device_from_string_arg(u->arg.param->device)
+                                  : POLY_DEVICE_AUTO;
+    if (cache)
+      poly_map_set(cache, poly_ptr_hash(u), u, (void *)(intptr_t)(result + 1), poly_ptr_eq);
+    return result;
+  }
+  if (u->op == POLY_OP_STAGE && u->arg.kind == POLY_ARG_BUFFERIZE_OPTS &&
+      u->arg.bufferize_opts.device) {
+    result = device_from_string_arg(u->arg.bufferize_opts.device);
     if (cache)
       poly_map_set(cache, poly_ptr_hash(u), u, (void *)(intptr_t)(result + 1), poly_ptr_eq);
     return result;

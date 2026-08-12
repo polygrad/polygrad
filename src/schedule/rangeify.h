@@ -88,6 +88,7 @@ PolyRangeEntry *poly_range_map_get(PolyIndexingCtx *ictx, PolyUOp *u);
 PolyUOp *poly_run_rangeify(PolyIndexingCtx *ictx, PolyUOp *sink);
 
 /* Internal stage helpers kept visible for parity probes and focused tests. */
+PolyUOp *poly_apply_multi_pm(PolyCtx *ctx, PolyUOp *sink);
 PolyUOp *poly_apply_earliest_rewrites(PolyCtx *ctx, PolyUOp *sink);
 PolyUOp *poly_apply_add_buffers(PolyCtx *ctx, PolyUOp *sink, PolyMap *buf_dims_map);
 

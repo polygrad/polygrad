@@ -64,6 +64,8 @@ typedef struct {
   PolyMap *requested_bases;
   PolyMap *view_copy_memo;
   PolyMap *original_uops;
+  PolyMap *device_memo;
+  PolyMap *axis_memo;
   bool publication_phase;
   bool failed;
 } PolyTransformToCallCtx;
@@ -318,21 +320,59 @@ static PolyUOp *poly_transform_to_call_after_result_buffer(PolyCtx *ctx, PolyUOp
  * allocation belongs to exec_copy/exec_kernel, where CALL output slots are
  * prepared. Keeping construction lazy also lets a LINEAR be inspected or
  * cached without opening its eventual backend. */
-static PolyUOp *poly_transform_to_call_empty_buffer_on_device(
+static PolyUOp *poly_transform_to_call_empty_buffer_like(
     PolyCtx *ctx,
+    PolyTransformToCallCtx *tctx,
     PolyDType dtype,
     PolyShape shape,
-    PolyDevice device
+    PolyUOp *like
 ) {
-  int64_t numel = 1;
-  if (shape.ndim >= 0) {
-    numel = poly_shape_numel(shape);
-    if (numel < 0) return NULL;
+  /* Pinned UOp.empty_like forwards the exact self.device into new_buffer
+   * (uop/ops.py:733-750). Keep the canonical DEVICE UOp already present in
+   * the physical graph; reducing CPU:1 to the CPU backend here aliases the
+   * result before ParamArg/Bufferize can preserve it. */
+  /* Pinned UOp.device is a recursive_property (uop/ops.py:770-783): shared
+   * immutable subgraphs are evaluated once. Keep the equivalent cache scoped
+   * to this callify pass so exact-device discovery stays linear in UOp count. */
+  PolyUOp *device = poly_uop_device_uop_cached(ctx, like, tctx ? tctx->device_memo : NULL);
+  if (!device) device = poly_device_uop(ctx, poly_device_default());
+  if (!device || shape.ndim < 0 || shape.ndim > POLY_MAX_DIMS) return NULL;
+
+  /* Pinned UOp.empty_like uses self.axis and shard_shape before UOp.empty
+   * (uop/ops.py:742-750). UOp.axis is the source-backed proof that a wrapper
+   * such as CONTIGUOUS still carries the same shard axis; descendant search is
+   * not equivalent because COPY and partial SHRINK deliberately clear it. */
+  int multi_axis = -1;
+  int tuple_count = 0;
+  if (device->arg.kind == POLY_ARG_STRING_TUPLE) {
+    tuple_count = device->arg.string_tuple.n;
+    if (tuple_count <= 0) return NULL;
+    int axis = -1;
+    if (poly_uop_axis_cached(ctx, like, tctx ? tctx->axis_memo : NULL, &axis)) {
+      if (axis < 0 || axis >= shape.ndim) return NULL;
+      multi_axis = axis;
+    }
   }
 
-  PolyDevice out_dev = device;
-  if (out_dev == POLY_DEVICE_AUTO) out_dev = poly_device_default();
-  return poly_buffer_on_device(ctx, poly_dtype_scalar(dtype), numel, out_dev);
+  int64_t buffer_shape[POLY_MAX_DIMS];
+  for (int i = 0; i < shape.ndim; i++) buffer_shape[i] = shape.dims[i];
+  if (multi_axis >= 0) {
+    if (buffer_shape[multi_axis] < 0 || buffer_shape[multi_axis] % tuple_count != 0)
+      return NULL;
+    buffer_shape[multi_axis] /= tuple_count;
+  }
+  PolyShape allocation_shape = {.dims = buffer_shape, .ndim = shape.ndim};
+  int64_t numel = poly_shape_numel(allocation_shape);
+  if (numel < 0) return NULL;
+  PolyUOp *unique =
+      poly_uop0(ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(poly_ctx_next_unique_id(ctx)));
+  PolyUOp *src[2] = {unique, device};
+  PolyUOp *buffer =
+      poly_uop(ctx, POLY_OP_BUFFER, poly_dtype_scalar(dtype), src, 2, poly_arg_int(numel));
+  if (!buffer || multi_axis < 0) return buffer;
+  PolyUOp *local = poly_reshape(ctx, buffer, buffer_shape, shape.ndim);
+  return local ?
+      poly_uop1(ctx, POLY_OP_MULTI, dtype, local, poly_arg_int(multi_axis)) : NULL;
 }
 
 static bool poly_transform_to_call_append_store(PolyTransformToCallCtx *tctx, PolyUOp *store) {
@@ -449,6 +489,8 @@ static void poly_transform_to_call_ctx_free(PolyTransformToCallCtx *tctx) {
   poly_map_destroy(tctx->requested_bases);
   poly_map_destroy(tctx->view_copy_memo);
   poly_map_destroy(tctx->original_uops);
+  poly_map_destroy(tctx->device_memo);
+  poly_map_destroy(tctx->axis_memo);
   tctx->stores = NULL;
   tctx->calls = NULL;
   tctx->call_owners = NULL;
@@ -461,6 +503,8 @@ static void poly_transform_to_call_ctx_free(PolyTransformToCallCtx *tctx) {
   tctx->requested_bases = NULL;
   tctx->view_copy_memo = NULL;
   tctx->original_uops = NULL;
+  tctx->device_memo = NULL;
+  tctx->axis_memo = NULL;
   tctx->n_stores = 0;
   tctx->stores_cap = 0;
   tctx->n_calls = 0;
@@ -1435,9 +1479,7 @@ static PolyUOp *poly_transform_to_call_materialize_view_copy(
   if (!base) return NULL;
 
   PolyShape shape = poly_uop_max_shape_cached(ctx, copy);
-  PolyUOp *buf = poly_transform_to_call_empty_buffer_on_device(
-      ctx, copy->dtype, shape, poly_uop_device(copy)
-  );
+  PolyUOp *buf = poly_transform_to_call_empty_buffer_like(ctx, tctx, copy->dtype, shape, copy);
   if (!buf) {
     fprintf(stderr, "poly_realize: output buffer creation failed\n");
     tctx->failed = true;
@@ -1579,9 +1621,7 @@ static PolyUOp *poly_transform_to_call_materialize_contiguous(
     return after;
   }
 
-  PolyDevice out_dev = poly_uop_device(u);
-  if (out_dev == POLY_DEVICE_AUTO) out_dev = poly_uop_device(u->src[0]);
-  PolyUOp *buf = poly_transform_to_call_empty_buffer_on_device(ctx, u->dtype, shape, out_dev);
+  PolyUOp *buf = poly_transform_to_call_empty_buffer_like(ctx, tctx, u->dtype, shape, u);
   PolyUOp *replacement = poly_transform_to_call_rebuild_view(ctx, buf, u, NULL);
   PolyUOp *store = replacement ? poly_store_val(ctx, replacement, u->src[0]) : NULL;
   PolyUOp *after_src[2] = {replacement, store};
@@ -1906,8 +1946,11 @@ PolyUOp *poly_transform_to_call_with_map(
       .requested_bases = poly_map_new((size_t)n * 2 + 16),
       .view_copy_memo = poly_map_new(256),
       .original_uops = poly_map_new(256),
+      .device_memo = poly_map_new(256),
+      .axis_memo = poly_map_new(256),
   };
-  if (!tctx.requested_bases || !tctx.view_copy_memo || !tctx.original_uops)
+  if (!tctx.requested_bases || !tctx.view_copy_memo || !tctx.original_uops ||
+      !tctx.device_memo || !tctx.axis_memo)
     return poly_transform_to_call_fail(&tctx, out_uops, n);
   for (int i = 0; i < n; i++) {
     PolyUOp *base = poly_transform_to_call_multibase(uops[i]);
@@ -2145,10 +2188,8 @@ PolyUOp *poly_transform_to_call_with_map(
        * Tensor to an unallocated BUFFER. Keep the distinct placed identity and
        * any producer effects collected above, but do not invent a residency:
        * there is no CALL whose execution could allocate or write one. */
-      PolyDevice out_dev = poly_uop_device(u);
-      PolyUOp *buf = poly_transform_to_call_empty_buffer_on_device(
-          ctx, u->dtype, output_shape, out_dev
-      );
+      PolyUOp *buf =
+          poly_transform_to_call_empty_buffer_like(ctx, &tctx, u->dtype, output_shape, u);
       if (!buf) return poly_transform_to_call_fail(&tctx, out_uops, n);
       PolyUOp *result =
           (output_shape.ndim == 1 && output_shape.dims[0] == 0)
@@ -2179,10 +2220,8 @@ PolyUOp *poly_transform_to_call_with_map(
        * scheduling an extra copy kernel for CONTIGUOUS itself. */
       materialized = materialized->src[0];
     }
-    PolyDevice out_dev = poly_uop_device(materialized);
-    if (out_dev == POLY_DEVICE_AUTO) out_dev = poly_uop_device(u);
     PolyUOp *buf =
-        poly_transform_to_call_empty_buffer_on_device(ctx, u->dtype, root_shape, out_dev);
+        poly_transform_to_call_empty_buffer_like(ctx, &tctx, u->dtype, root_shape, materialized);
     if (!buf) {
       fprintf(stderr, "poly_realize: output buffer creation failed\n");
       poly_transform_view_stack_free(&views);
@@ -2628,10 +2667,11 @@ static int poly_realize_tensors_impl(
 
   for (int i = 0; i < n; i++) {
     PolyUOp *physical = inputs[i]->uop_physical;
-    /* Pinned Tensor.realize skips roots whose UOp.device is None
-     * (tensor.py:214-219). Polygrad represents that state as AUTO; wrapper
-     * device metadata must not force a pure CONST graph through callify. */
-    if (poly_uop_device(physical) == POLY_DEVICE_AUTO) {
+    /* Pinned Tensor.realize skips only roots whose UOp.device is None
+     * (tensor.py:211-219). Ask for the canonical DEVICE UOp rather than a
+     * scalar backend enum: tuple devices are deviceful graphs even though
+     * they deliberately have no single PolyDevice execution value. */
+    if (!poly_uop_device_uop_cached(ctx, physical, NULL)) {
       outputs[i] = inputs[i];
       continue;
     }

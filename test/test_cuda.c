@@ -377,6 +377,56 @@ TEST_BACKEND(cuda, tensor_realize_cuda_lazy_opens_backend_without_availability_p
   PASS();
 }
 
+TEST_BACKEND(cuda, tensor_to_device_copy_uses_dense_call_arguments) {
+  SKIP_IF_NO_CUDA();
+
+  /* Pinned exec_copy consumes dense resolved [dest, src] arguments on every
+   * backend, unlike exec_kernel's sparse ast.arg.globals selection
+   * (engine/realize.py:156-184). A GPU destination does not make COPY a
+   * PROGRAM call. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  float input[3] = {1.0f, 2.0f, 3.0f};
+  int64_t shape[1] = {3};
+  PolyTensor *host =
+      poly_tensor_from_host(ctx, input, sizeof(input), POLY_FLOAT32, shape, 1);
+  PolyTensor *cpu = poly_tensor_to_device(ctx, host, POLY_DEVICE_CPU);
+  PolyTensor *two = poly_tensor_const_float_by_id(
+      ctx, 2.0f, poly_dtype_id_by_name("float32"), POLY_DEVICE_CPU
+  );
+  PolyTensor *scaled = poly_tensor_alu2(ctx, POLY_OP_MUL, cpu, two);
+  PolyTensor *cuda = poly_tensor_to_device(ctx, scaled, POLY_DEVICE_CUDA);
+  PolyTensor *roundtrip = poly_tensor_to_device(ctx, cuda, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(host);
+  ASSERT_NOT_NULL(cpu);
+  ASSERT_NOT_NULL(two);
+  ASSERT_NOT_NULL(scaled);
+  ASSERT_NOT_NULL(cuda);
+  ASSERT_NOT_NULL(roundtrip);
+  ASSERT_INT_EQ(poly_tensor_uop(cuda)->op, POLY_OP_COPY);
+  ASSERT_INT_EQ(
+      poly_device_from_device_uop(poly_tensor_uop(cuda)->src[1]), POLY_DEVICE_CUDA
+  );
+  ASSERT_INT_EQ(poly_tensor_uop(roundtrip)->op, POLY_OP_COPY);
+  ASSERT_INT_EQ(
+      poly_device_from_device_uop(poly_tensor_uop(roundtrip)->src[1]), POLY_DEVICE_CPU
+  );
+
+  PolyTensor *out = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &roundtrip, 1, &out), 0);
+  ASSERT_PTR_EQ(out, roundtrip);
+  float got[3] = {0};
+  const PolyUOp *buffer = poly_uop_get_buffer_identity(poly_tensor_uop(roundtrip));
+  ASSERT_NOT_NULL(buffer);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, (PolyUOp *)buffer, got, sizeof(got)), 0);
+  ASSERT_FLOAT_EQ(got[0], 2.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(got[1], 4.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(got[2], 6.0f, 1e-5f);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST_BACKEND(cuda, placed_host_gather_memory_plan_keeps_cuda_staging) {
   SKIP_IF_NO_CUDA();
 

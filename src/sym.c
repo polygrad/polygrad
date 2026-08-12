@@ -2413,6 +2413,15 @@ static int arg_pair_tuple_cmp(int64_t (*a)[2], int an, int64_t (*b)[2], int bn) 
   return (an > bn) - (an < bn);
 }
 
+static int arg_string_tuple_cmp(const char **a, int an, const char **b, int bn) {
+  int n = an < bn ? an : bn;
+  for (int i = 0; i < n; i++) {
+    int ret = cmp_cstr(a[i], b[i]);
+    if (ret) return ret;
+  }
+  return (an > bn) - (an < bn);
+}
+
 static int arg_tuplize_cmp(PolyArg a, PolyArg b) {
   if (poly_arg_eq(a, b)) return 0;
   if (a.kind != b.kind) return (a.kind > b.kind) - (a.kind < b.kind);
@@ -2443,6 +2452,10 @@ static int arg_tuplize_cmp(PolyArg a, PolyArg b) {
     );
   case POLY_ARG_STRING:
     return cmp_cstr(a.str, b.str);
+  case POLY_ARG_STRING_TUPLE:
+    return arg_string_tuple_cmp(
+        a.string_tuple.vals, a.string_tuple.n, b.string_tuple.vals, b.string_tuple.n
+    );
   case POLY_ARG_OPS:
     return cmp_i64((int64_t)a.ops, (int64_t)b.ops);
   case POLY_ARG_REDUCE_AXIS: {
@@ -2467,7 +2480,7 @@ static int arg_tuplize_cmp(PolyArg a, PolyArg b) {
     return cmp_i64(a.define_var.max_val, b.define_var.max_val);
   }
   case POLY_ARG_BUFFERIZE_OPTS: {
-    int ret = cmp_i64(a.bufferize_opts.device, b.bufferize_opts.device);
+    int ret = cmp_cstr(a.bufferize_opts.device, b.bufferize_opts.device);
     if (ret) return ret;
     ret = cmp_i64((int64_t)a.bufferize_opts.addrspace, (int64_t)b.bufferize_opts.addrspace);
     if (ret) return ret;
@@ -2516,7 +2529,20 @@ static int arg_tuplize_cmp(PolyArg a, PolyArg b) {
     ret = cmp_bool(a.param->has_axis, b.param->has_axis);
     if (ret) return ret;
     if (a.param->has_axis && (ret = cmp_i64(a.param->axis, b.param->axis))) return ret;
-    return cmp_i64(a.param->device, b.param->device);
+    ret = cmp_cstr(a.param->device, b.param->device);
+    if (ret) return ret;
+    ret = cmp_bool(a.param->device_is_tuple, b.param->device_is_tuple);
+    if (ret) return ret;
+    ret = cmp_i64(a.param->n_devices, b.param->n_devices);
+    if (ret) return ret;
+    for (int i = 0; i < a.param->n_devices; i++) {
+      ret = cmp_cstr(
+          a.param->devices ? a.param->devices[i] : NULL,
+          b.param->devices ? b.param->devices[i] : NULL
+      );
+      if (ret) return ret;
+    }
+    return 0;
   }
   }
   return 0;

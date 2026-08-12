@@ -43,6 +43,8 @@ class PolyBuffer(ctypes.Structure):
         ('frontend_release', _ptr),
         ('memory_accounted', ctypes.c_bool),
         ('memory_device', ctypes.c_int),
+        ('device_uop', _ptr),
+        ('memory_device_uop', _ptr),
     ]
 
 class PolyIOBinding(ctypes.Structure):

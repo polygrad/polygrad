@@ -4,6 +4,7 @@
 #include "codegen.h"
 #include "ctx.h"
 #include "device.h"
+#include "frontend_internal.h"
 #include "pat.h"
 #include "tensor.h"
 #include "utils.h"
@@ -16,7 +17,7 @@ struct PolyJit {
   PolyUOp **input_buffers;
   PolyUOp **input_views;
   PolyDType *input_dtypes;
-  PolyDevice *input_devices;
+  PolyUOp **input_devices;
   int n_inputs;
   PolySchedule **schedules;
   int n_schedules;
@@ -236,8 +237,8 @@ static bool poly_jit_capture_input_spec(PolyJit *jit, int index, PolyTensor *ten
   free(bindings);
   jit->input_buffers[index] = buf;
   jit->input_dtypes[index] = poly_dtype_scalar(root->dtype);
-  jit->input_devices[index] = poly_uop_device(buf);
-  return true;
+  jit->input_devices[index] = poly_uop_device_uop_cached(jit->ctx, buf, NULL);
+  return jit->input_devices[index] != NULL;
 }
 
 static bool poly_jit_input_matches_spec(
@@ -253,7 +254,7 @@ static bool poly_jit_input_matches_spec(
   PolyUOp *root = poly_tensor_uop(tensor);
   if (!root) return false;
   if (!poly_dtype_eq(poly_dtype_scalar(root->dtype), jit->input_dtypes[index])) return false;
-  if (poly_uop_device(buf) != jit->input_devices[index]) return false;
+  if (poly_uop_device_uop_cached(jit->ctx, buf, NULL) != jit->input_devices[index]) return false;
   PolyUOp *view = NULL;
   PolyVarBinding *input_bindings = NULL;
   int n_input_bindings = 0;
