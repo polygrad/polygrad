@@ -641,8 +641,11 @@ static bool poly_transform_to_call_collect_arg_effects(
     PolyUOp *base = u->src[0];
     while (base && base->op == POLY_OP_AFTER && base->n_src >= 1) base = base->src[0];
     if (!base || !poly_transform_to_call_cache_replacement(tctx, u, base)) return false;
-    for (int i = 1; i < u->n_src; i++)
-      if (!poly_transform_to_call_collect_after_stores(tctx, u->src[i])) return false;
+    /* Pinned finalize_after records the canonical AFTER occurrence, not a
+     * second raw STORE spelling of that same effect (callify.py:169-181).
+     * Keep traversing below so distinct nested effects remain visible; the
+     * exact-identity store set suppresses only repeated routes to this AFTER. */
+    if (!poly_transform_to_call_collect_after_stores(tctx, u)) return false;
   }
 
   int first_src = (u->op == POLY_OP_FUNCTION && u->n_src > 0) ? 1 : 0;
@@ -1619,6 +1622,239 @@ static bool poly_transform_to_call_view_copy_opaque(PolyOps op) {
   }
 }
 
+/* Pinned UOp.shrink_to for callify's precompiled FUNCTION boundary
+ * (tinygrad/callify.py:117-142).  Read the exact symbolic dimensions from
+ * `like`; max-shape allocation and the caller-visible symbolic view are
+ * separate, just as UOp.empty(...).shrink_to(shape) is in tinygrad. */
+static PolyUOp *poly_callify_shrink_to_like(
+    PolyCtx *ctx,
+    PolyUOp *value,
+    PolyUOp *like
+) {
+  if (!ctx || !value || !like) return NULL;
+  int ndim = poly_uop_ndim(ctx, like);
+  if (ndim < 0 || ndim > POLY_MAX_DIMS || poly_uop_ndim(ctx, value) != ndim)
+    return NULL;
+  PolyUOp *starts[POLY_MAX_DIMS], *sizes[POLY_MAX_DIMS];
+  for (int i = 0; i < ndim; i++) {
+    starts[i] = poly_const_int(ctx, 0);
+    sizes[i] = poly_uop_shape_dim(ctx, like, i);
+    if (!starts[i] || !sizes[i]) return NULL;
+  }
+  return poly_shrink_uop(ctx, value, starts, sizes, ndim);
+}
+
+/* Exact C port of pinned callify.transform_precompiled_call
+ * (tinygrad/callify.py:101-142): allocate explicit outputs, redirect the
+ * TUPLE body into output PARAMs, turn FUNCTION into opaque CALL, and expose
+ * each result as AFTER(output, CALL). */
+static PolyUOp *poly_transform_precompiled_call(
+    PolyCtx *ctx,
+    PolyTransformToCallCtx *tctx,
+    PolyUOp *function
+) {
+  if (!ctx || !tctx || !function || function->op != POLY_OP_FUNCTION ||
+      function->n_src < 1 || function->arg.kind != POLY_ARG_CALL_INFO ||
+      !function->arg.call_info || !function->arg.call_info->precompile)
+    return NULL;
+  PolyUOp *body = function->src[0];
+  if (!body || body->op != POLY_OP_TUPLE || body->n_src <= 0) return NULL;
+
+  int n_inputs = function->n_src - 1;
+  int n_outputs = body->n_src;
+  PolyUOp **inputs = n_inputs > 0
+                         ? malloc((size_t)n_inputs * sizeof(*inputs))
+                         : NULL;
+  PolyUOp **resolved = malloc((size_t)n_outputs * sizeof(*resolved));
+  PolyUOp **outputs = malloc((size_t)n_outputs * sizeof(*outputs));
+  PolyUOp **targets = malloc((size_t)n_outputs * sizeof(*targets));
+  PolyUOp **items = malloc((size_t)n_outputs * sizeof(*items));
+  PolyUOp **from = malloc((size_t)n_outputs * sizeof(*from));
+  PolyUOp **to = malloc((size_t)n_outputs * sizeof(*to));
+  PolyUOp **rewritten = malloc((size_t)n_outputs * sizeof(*rewritten));
+  PolyUOp **call_src = malloc(
+      (size_t)(1 + n_inputs + n_outputs) * sizeof(*call_src));
+  PolyUOp **tuple_src = malloc((size_t)n_outputs * sizeof(*tuple_src));
+  if ((n_inputs > 0 && !inputs) || !resolved || !outputs || !targets ||
+      !items || !from || !to || !rewritten || !call_src || !tuple_src) {
+    free(inputs);
+    free(resolved);
+    free(outputs);
+    free(targets);
+    free(items);
+    free(from);
+    free(to);
+    free(rewritten);
+    free(call_src);
+    free(tuple_src);
+    return NULL;
+  }
+
+  bool ok = true;
+  for (int i = 0; ok && i < n_inputs; i++) {
+    PolyUOp *input = function->src[i + 1];
+    inputs[i] = input && input->op != POLY_OP_AFTER && input->op != POLY_OP_BIND
+                    ? poly_contiguous(ctx, input)
+                    : input;
+    ok = inputs[i] != NULL;
+  }
+  for (int i = 0; ok && i < n_outputs; i++) {
+    resolved[i] = poly_uop1(
+        ctx, POLY_OP_GETTUPLE, body->src[i]->dtype, function,
+        poly_arg_int(i));
+    PolyShape shape = resolved[i]
+                          ? poly_uop_max_shape_cached(ctx, resolved[i])
+                          : (PolyShape){.ndim = -1};
+    PolyUOp *allocated = resolved[i]
+                             ? poly_transform_to_call_empty_buffer_like(
+                                   ctx, tctx, resolved[i]->dtype, shape,
+                                   resolved[i])
+                             : NULL;
+    outputs[i] = allocated
+                     ? poly_callify_shrink_to_like(ctx, allocated, resolved[i])
+                     : NULL;
+    PolyUOp *param = outputs[i]
+                         ? poly_uop_param(ctx, n_inputs + i, outputs[i])
+                         : NULL;
+    targets[i] = param
+                     ? poly_callify_shrink_to_like(ctx, param, body->src[i])
+                     : NULL;
+    ok = resolved[i] && outputs[i] && targets[i];
+  }
+
+  int n_sub = 0;
+  for (int i = 0; ok && i < n_outputs; i++) {
+    PolyUOp *source = body->src[i];
+    int n_deps = 0;
+    for (PolyUOp *cur = source;
+         cur && cur->op == POLY_OP_AFTER && cur->n_src >= 1;
+         cur = cur->src[0])
+      n_deps += cur->n_src - 1;
+    PolyUOp **deps = n_deps > 0
+                         ? malloc((size_t)n_deps * sizeof(*deps))
+                         : NULL;
+    if (n_deps > 0 && !deps) {
+      ok = false;
+      break;
+    }
+    int dep_i = 0;
+    while (source && source->op == POLY_OP_AFTER && source->n_src >= 1) {
+      for (int j = 1; j < source->n_src; j++) deps[dep_i++] = source->src[j];
+      source = source->src[0];
+    }
+    PolyUOp *placed = NULL;
+    if (source && source->op == POLY_OP_CONTIGUOUS && source->n_src == 1) {
+      PolyUOp *store = poly_store_val(ctx, targets[i], source->src[0]);
+      PolyUOp *after_src[2] = {targets[i], store};
+      placed = store
+                   ? poly_uop(
+                         ctx, POLY_OP_AFTER, targets[i]->dtype,
+                         after_src, 2, poly_arg_none())
+                   : NULL;
+    } else if (source &&
+               (source->op == POLY_OP_BUFFER || source->op == POLY_OP_MULTI) &&
+               poly_uop_has_buffer_identity(source)) {
+      placed = targets[i];
+    }
+
+    bool already_subbed = false;
+    if (placed)
+      for (int j = 0; j < n_sub; j++)
+        if (from[j] == source) already_subbed = true;
+    if (placed && !already_subbed) {
+      from[n_sub] = source;
+      to[n_sub] = placed;
+      n_sub++;
+      if (n_deps == 0) {
+        items[i] = source;
+      } else {
+        PolyUOp **after_src = malloc(
+            (size_t)(1 + n_deps) * sizeof(*after_src));
+        if (!after_src) {
+          free(deps);
+          ok = false;
+          break;
+        }
+        after_src[0] = source;
+        memcpy(after_src + 1, deps, (size_t)n_deps * sizeof(*deps));
+        items[i] = poly_uop(
+            ctx, POLY_OP_AFTER, source->dtype, after_src, 1 + n_deps,
+            poly_arg_none());
+        free(after_src);
+      }
+    } else {
+      PolyUOp *store = poly_store_val(ctx, targets[i], source);
+      PolyUOp **after_src = malloc(
+          (size_t)(2 + n_deps) * sizeof(*after_src));
+      if (!store || !after_src) {
+        free(after_src);
+        free(deps);
+        ok = false;
+        break;
+      }
+      after_src[0] = targets[i];
+      after_src[1] = store;
+      if (n_deps > 0)
+        memcpy(after_src + 2, deps, (size_t)n_deps * sizeof(*deps));
+      items[i] = poly_uop(
+          ctx, POLY_OP_AFTER, targets[i]->dtype, after_src, 2 + n_deps,
+          poly_arg_none());
+      free(after_src);
+    }
+    free(deps);
+    ok = items[i] != NULL;
+  }
+
+  if (ok && n_sub > 0 &&
+      poly_uop_substitute_many(
+          ctx, items, n_outputs, from, to, n_sub, rewritten) != 0)
+    ok = false;
+  if (ok && n_sub == 0)
+    memcpy(rewritten, items, (size_t)n_outputs * sizeof(*rewritten));
+
+  PolyUOp *call = NULL;
+  if (ok) {
+    PolyUOp *sink = poly_sink_n(ctx, rewritten, n_outputs);
+    call_src[0] = sink;
+    for (int i = 0; i < n_inputs; i++) call_src[1 + i] = inputs[i];
+    for (int i = 0; i < n_outputs; i++)
+      call_src[1 + n_inputs + i] = outputs[i];
+    call = sink
+               ? poly_uop(
+                     ctx, POLY_OP_CALL, function->dtype, call_src,
+                     1 + n_inputs + n_outputs, function->arg)
+               : NULL;
+    ok = call != NULL;
+  }
+  for (int i = 0; ok && i < n_outputs; i++) {
+    PolyUOp *after_src[2] = {outputs[i], call};
+    PolyUOp *after = poly_uop(
+        ctx, POLY_OP_AFTER, outputs[i]->dtype, after_src, 2,
+        poly_arg_none());
+    tuple_src[i] = after
+                       ? poly_callify_shrink_to_like(ctx, after, resolved[i])
+                       : NULL;
+    ok = tuple_src[i] != NULL;
+  }
+  PolyUOp *ret = ok
+                     ? poly_uop(
+                           ctx, POLY_OP_TUPLE, POLY_VOID, tuple_src,
+                           n_outputs, poly_arg_none())
+                     : NULL;
+
+  free(inputs);
+  free(resolved);
+  free(outputs);
+  free(targets);
+  free(items);
+  free(from);
+  free(to);
+  free(rewritten);
+  free(call_src);
+  free(tuple_src);
+  return ret;
+}
+
 static PolyUOp *poly_transform_to_call_rewrite_view_copies(
     PolyCtx *ctx,
     PolyUOp *u,
@@ -1787,6 +2023,28 @@ static PolyUOp *poly_transform_to_call_rewrite_nested_contiguous(
   PolyUOp *ret = changed ? poly_rebuild_with_sources(ctx, u, new_src) : u;
   if (new_src != src_buf) free(new_src);
   if (!ret) return NULL;
+
+  /* Pinned pm_early_transform_tensor_graph transforms precompiled FUNCTIONs
+   * before resolving their enclosing GETTUPLE(TUPLE(...)) selectors
+   * (tinygrad/callify.py:146-151).  CALL bodies stay opaque to this outer
+   * traversal; they are scheduled independently downstream. */
+  if (ret->op == POLY_OP_FUNCTION && ret->arg.kind == POLY_ARG_CALL_INFO &&
+      ret->arg.call_info && ret->arg.call_info->precompile) {
+    PolyUOp *precompiled = poly_transform_precompiled_call(ctx, tctx, ret);
+    if (!precompiled) {
+      tctx->failed = true;
+      return NULL;
+    }
+    poly_map_set(memo, poly_ptr_hash(u), u, precompiled, poly_ptr_eq);
+    return precompiled;
+  }
+  if (ret->op == POLY_OP_GETTUPLE && ret->n_src == 1 && ret->src[0] &&
+      ret->src[0]->op == POLY_OP_TUPLE && ret->arg.kind == POLY_ARG_INT &&
+      ret->arg.i >= 0 && ret->arg.i < ret->src[0]->n_src) {
+    PolyUOp *selected = ret->src[0]->src[ret->arg.i];
+    poly_map_set(memo, poly_ptr_hash(u), u, selected, poly_ptr_eq);
+    return selected;
+  }
 
   /* Pinned callify turns a contiguous movement view into a SLICE effect before
    * splitting the creation-device COPY that consumes it.  Polygrad's existing

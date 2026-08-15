@@ -52,6 +52,34 @@ TEST(uop, create_int_arg) {
   PASS();
 }
 
+TEST(uop, frontend_resolve_simplifies_before_using_bounds) {
+  /* Pinned tinygrad/uop/ops.py:50-54 simplifies first, then consults exact
+   * vmin/vmax and uses the caller default only for an unresolved boolean. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *v = poly_define_var(ctx, "resolve_v", 0, 5);
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(0));
+  PolyUOp *three = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(3));
+  PolyUOp *ten = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(10));
+  ASSERT_NOT_NULL(v);
+  ASSERT_INT_EQ(poly_uop_resolve(ctx, poly_alu2(ctx, POLY_OP_CMPLT, v, ten), 0), 1);
+  ASSERT_INT_EQ(poly_uop_resolve(ctx, poly_alu2(ctx, POLY_OP_CMPLT, v, zero), 1), 0);
+  PolyUOp *dynamic = poly_alu2(ctx, POLY_OP_CMPLT, v, three);
+  ASSERT_INT_EQ(poly_uop_resolve(ctx, dynamic, 1), 1);
+  ASSERT_INT_EQ(poly_uop_resolve(ctx, dynamic, 0), 0);
+  PolyUOp *true_const = poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_bool(true));
+  PolyUOp *self_ne = poly_alu2(ctx, POLY_OP_CMPNE, v, v);
+  PolyUOp *self_equal = poly_alu2(ctx, POLY_OP_CMPNE, self_ne, true_const);
+  ASSERT_INT_EQ(poly_uop_resolve(ctx, self_equal, 0), 1);
+  PolyUOp *mul_zero = poly_alu2(ctx, POLY_OP_MUL, v, zero);
+  PolyUOp *mul_ne = poly_alu2(ctx, POLY_OP_CMPNE, mul_zero, zero);
+  PolyUOp *mul_equal = poly_alu2(ctx, POLY_OP_CMPNE, mul_ne, true_const);
+  ASSERT_INT_EQ(poly_uop_resolve(ctx, mul_equal, 0), 1);
+  ASSERT_INT_EQ(poly_uop_resolve(ctx, v, 0), -1);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(uop, create_string_arg) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *u = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_str("CPU"));

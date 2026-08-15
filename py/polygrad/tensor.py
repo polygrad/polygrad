@@ -1072,6 +1072,38 @@ class Tensor:
             return cur
         return _ffi._lib.poly_alu2(ctx, _ffi.OPS['ADD'], cur, nxt)
 
+    def replace(self, x):
+        """Replace this Tensor's value graph while preserving its wrapper identity.
+
+        Pinned tinygrad tensor.py:221-228 assigns ``self.uop = x.uop`` after
+        checking shape. Polygrad adapts that operation at its documented
+        logical/physical boundary by replacing both roots atomically.
+        """
+        if not isinstance(x, Tensor):
+            raise TypeError('replace expects a Tensor')
+        if self.shape != x.shape:
+            raise AssertionError(f'replace shape mismatch {self.shape} != {x.shape}')
+        if _ptr_value(self._ctx) != _ptr_value(x._ctx):
+            raise RuntimeError('replace requires Tensors owned by the same PolyCtx')
+        logical, physical = x.uop_logical, x.uop_physical
+        if logical is None or physical is None:
+            raise RuntimeError('replace source must have logical and physical roots')
+        rc = _ffi._lib.poly_tensor_replace_roots(
+            self._ctx,
+            self._tensor,
+            logical.raw,
+            physical.raw,
+            _POLY_TENSOR_VALUE,
+            _device_id(x._device),
+        )
+        if rc != 0:
+            raise RuntimeError('poly_tensor_replace_roots failed during replace')
+        self._data = x._data
+        self._dtype_str = x._dtype_str
+        self._device = x._device
+        self._sync_core_requires_grad(force=True)
+        return self
+
     def assign(self, x):
         """In-place assignment: self's buffer will be overwritten with x's values.
         Must be realized before use. Returns self for chaining."""

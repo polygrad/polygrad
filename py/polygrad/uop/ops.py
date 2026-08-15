@@ -43,6 +43,21 @@ _BASE_OPS = frozenset(
 _DIRECT_REALIZED_OPS = frozenset((_ffi.OPS['BUFFER'], _ffi.OPS['BUFFER_VIEW']))
 
 
+def resolve(x, default=True):
+    """Return a proven symbolic boolean, otherwise ``default``.
+
+    Mirrors pinned tinygrad ``uop/ops.py:50-54``: symbolic simplification
+    precedes the vmin/vmax proof rather than querying raw intervals.
+    """
+    if isinstance(x, bool):
+        return x
+    assert isinstance(x, UOp) and x.dtype == dtypes.bool, 'UOp in resolve must be bool'
+    value = _ffi._lib.poly_uop_resolve(x.ctx, x.raw, int(bool(default)))
+    if value < 0:
+        raise RuntimeError('poly_uop_resolve failed')
+    return bool(value)
+
+
 class KernelInfo:
     """Minimal tinygrad KernelInfo carrier for custom-kernel SINK metadata."""
 
@@ -386,7 +401,10 @@ class UOp:
         return self.lt(other)
 
     def eq(self, other):
-        return self._alu2('CMPEQ', other)
+        # Pinned tinygrad mixin/elementwise.py:321-325 spells public equality
+        # as logical-not of CMPNE. CMPEQ remains a lower-level UOp available
+        # through alu; using it here changes symbolic simplification topology.
+        return self.ne(other).logical_not()
 
     def cmpeq(self, other):
         return self.eq(other)
@@ -396,6 +414,11 @@ class UOp:
 
     def cmpne(self, other):
         return self.ne(other)
+
+    def logical_not(self):
+        # Pinned tinygrad mixin/elementwise.py:39-49 casts to bool first, then
+        # compares against True. poly_cast returns self for an exact dtype.
+        return self.cast(dtypes.bool).ne(True)
 
     def sqrt(self):
         return self._alu1('SQRT')

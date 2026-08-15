@@ -9,7 +9,7 @@ from polygrad import _ffi
 from polygrad import Context, GlobalCounters, Jit, Tensor, TinyJit, UOp, Variable, dtypes, fetch, getenv, nn
 from polygrad.helpers import Context as HelperContext, fetch as helper_fetch, getenv as helper_getenv
 from polygrad.nn import SGD
-from polygrad.uop.ops import UOp as OpsUOp
+from polygrad.uop.ops import UOp as OpsUOp, resolve
 
 
 def test_top_level_public_exports_are_defining_module_objects():
@@ -20,6 +20,24 @@ def test_top_level_public_exports_are_defining_module_objects():
     assert fetch is helper_fetch
     assert getenv is helper_getenv
     assert getenv("POLYGRAD_MISSING_EXPORT_TEST", 17) == 17
+
+
+def test_uop_resolve_simplifies_before_using_bounds():
+    # Pinned tinygrad/uop/ops.py:50-54 rewrites first, then returns a proven
+    # boolean only when simplified vmin/vmax agree.
+    v = Variable('resolve_v', 0, 5).uop
+    self_equal = v.eq(v)
+    assert self_equal.op_name == 'CMPNE'
+    assert tuple(src.op_name for src in self_equal.src) == ('CMPNE', 'CONST')
+    assert resolve(True, False) is True
+    assert resolve(v.lt(10), False) is True
+    assert resolve(v.lt(0), True) is False
+    assert resolve(v.lt(3), True) is True
+    assert resolve(v.lt(3), False) is False
+    assert resolve(self_equal, False) is True
+    assert resolve((v * 0).eq(0), False) is True
+    with pytest.raises(AssertionError, match='must be bool'):
+        resolve(v)
 
 
 def test_tensor_module_cast_is_typing_cast_identity():
@@ -406,7 +424,7 @@ def test_random_crop_indices_remain_consistent_after_readback():
 
 
 def test_python_loader_checks_current_abi_before_use():
-    assert _ffi.get_lib().poly_abi_version() == _ffi.POLYGRAD_ABI_VERSION == 52
+    assert _ffi.get_lib().poly_abi_version() == _ffi.POLYGRAD_ABI_VERSION == 53
 
 
 @pytest.mark.parametrize('relative', [

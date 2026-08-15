@@ -360,8 +360,12 @@ static PolyUOp *poly_call_var_arg(PolyUOp *call, int var_idx) {
 static int poly_call_param_index_for_identity(PolyUOp *call, const PolyUOp *identity) {
   if (!call || !identity) return -1;
   int n_args = poly_call_n_buffer_args(call);
-  if (identity->op == POLY_OP_PARAM && identity->arg.kind == POLY_ARG_INT) {
-    int idx = (int)identity->arg.i;
+  if (identity->op == POLY_OP_PARAM &&
+      (identity->arg.kind == POLY_ARG_INT ||
+       (identity->arg.kind == POLY_ARG_PARAM && identity->arg.param))) {
+    int idx = identity->arg.kind == POLY_ARG_INT
+                  ? (int)identity->arg.i
+                  : (int)identity->arg.param->slot;
     return (idx >= 0 && idx < n_args) ? idx : -1;
   }
   for (int i = 0; i < n_args; i++) {
@@ -373,8 +377,15 @@ static int poly_call_param_index_for_identity(PolyUOp *call, const PolyUOp *iden
 
 static void poly_call_mark_access_param(PolyUOp *call, PolyUOp *ptr, bool *mask, int n_args) {
   if (!ptr || !mask) return;
-  if (ptr->op == POLY_OP_PARAM && ptr->arg.kind == POLY_ARG_INT) {
-    int idx = (int)ptr->arg.i;
+  /* Pinned ProgramInfo.from_sink reads ParamArg.slot for shaped function
+   * PARAMs as well as the lowered integer-slot PARAM form
+   * (tinygrad/uop/ops.py:1127-1152). */
+  if (ptr->op == POLY_OP_PARAM &&
+      (ptr->arg.kind == POLY_ARG_INT ||
+       (ptr->arg.kind == POLY_ARG_PARAM && ptr->arg.param))) {
+    int idx = ptr->arg.kind == POLY_ARG_INT
+                  ? (int)ptr->arg.i
+                  : (int)ptr->arg.param->slot;
     if (idx >= 0 && idx < n_args) mask[idx] = true;
     return;
   }
@@ -3766,6 +3777,8 @@ cleanup:
   return NULL;
 }
 
+static PolyUOp *linear_schedule_enter_calls(PolyCtx *ctx, PolyUOp *linear);
+
 PolySchedule *poly_create_schedule_from_linear_with_vars(
     PolyCtx *ctx,
     PolyUOp *linear,
@@ -3782,6 +3795,12 @@ PolySchedule *poly_create_schedule_from_linear_with_vars(
     );
     return NULL;
   }
+  /* Pinned create_linear_with_vars runs pm_schedule with enter_calls=True
+   * before PARAM resolution (schedule/__init__.py:118-128). A callified
+   * LINEAR can still contain high-level CALL(SINK/LINEAR, ...); lower and
+   * flatten those bodies before treating the LINEAR as executable. */
+  linear = linear_schedule_enter_calls(ctx, linear);
+  if (!linear) return NULL;
 
   PolyUOp **external = NULL;
   int n_external = 0, cap_external = 0;
@@ -5441,6 +5460,55 @@ static bool linear_append_call(PolyUOp ***calls, int *n_calls, int *cap_calls, P
   }
   (*calls)[(*n_calls)++] = call;
   return true;
+}
+
+/* C counterpart of pinned pm_schedule(..., enter_calls=True) followed by
+ * pm_resolve_linear_call. Calls carrying CallInfo are the high-level UOp.call
+ * surface; ordinary scheduled kernel CALLs have no CallInfo and already own a
+ * compiler-ready body. Named SINKs remain Polygrad's KernelInfo adapter. */
+static PolyUOp *linear_schedule_enter_calls(PolyCtx *ctx, PolyUOp *linear) {
+  if (!ctx || !linear || linear->op != POLY_OP_LINEAR) return NULL;
+  PolyUOp **calls = NULL;
+  int n_calls = 0, cap_calls = 0;
+  bool changed = false, ok = true;
+  for (int i = 0; ok && i < linear->n_src; i++) {
+    PolyUOp *call = linear->src[i];
+    if (!call || call->op != POLY_OP_CALL || call->n_src < 1 || !call->src[0]) {
+      ok = false;
+      break;
+    }
+    PolyUOp *body = call->src[0];
+    PolyUOp *inner = NULL;
+    bool high_level = call->arg.kind == POLY_ARG_CALL_INFO;
+    bool kernel_info = body->op == POLY_OP_SINK && body->arg.kind == POLY_ARG_STRING;
+    if (high_level && body->op == POLY_OP_LINEAR)
+      inner = body;
+    else if (high_level && body->op == POLY_OP_SINK && !kernel_info)
+      inner = poly_lower_sink_to_linear(ctx, body, POLY_MODE_CALL);
+
+    if (!inner) {
+      ok = linear_append_call(&calls, &n_calls, &cap_calls, call);
+      continue;
+    }
+    PolyUOp *resolved = linear_resolve_nested_linear(
+        ctx, inner, call->n_src > 1 ? &call->src[1] : NULL, call->n_src - 1);
+    if (!resolved) {
+      ok = false;
+      break;
+    }
+    changed = true;
+    for (int j = 0; ok && j < resolved->n_src; j++)
+      ok = linear_append_call(&calls, &n_calls, &cap_calls, resolved->src[j]);
+  }
+  PolyUOp *ret = NULL;
+  if (ok)
+    ret = changed
+              ? poly_uop(
+                    ctx, POLY_OP_LINEAR, linear->dtype, calls, n_calls,
+                    linear->arg)
+              : linear;
+  free(calls);
+  return ret;
 }
 
 static PolyUOp *linear_call_from_kernel_item(

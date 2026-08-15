@@ -125,7 +125,7 @@ TEST(tensor, function_builds_ordered_logical_and_physical_value_calls) {
   PolyTensor *outputs[1] = {NULL};
   ASSERT_INT_EQ(
       poly_tensor_function(
-          ctx, results, 1, inputs, 2, "ordered_add", false, outputs),
+          ctx, results, 1, inputs, 2, "ordered_add", false, false, false, outputs),
       0);
   ASSERT_NOT_NULL(outputs[0]);
 

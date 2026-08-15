@@ -96,10 +96,66 @@ def test_function_implicit_capture_is_explicitly_gated():
         accepted(Tensor([1.0, 2.0]).realize()).numpy(), [11.0, 22.0])
 
 
-@pytest.mark.parametrize('option', ['precompile', 'precompile_backward'])
-def test_function_rejects_unimplemented_precompile_modes(option):
-    with pytest.raises(NotImplementedError, match='precompile execution'):
-        function(lambda x: x, **{option: True})
+def test_function_precompile_executes_through_opaque_output_call():
+    # Pinned callify.py:101-142 allocates explicit output buffers, rewrites the
+    # TUPLE body to STORE into output PARAMs, and turns FUNCTION into an opaque
+    # CALL. The public pre-call graph remains the pinned FUNCTION surface.
+    weight = Tensor([3.0, 4.0])
+
+    @function(precompile=True, allow_implicit=True)
+    def add_weight(x):
+        return (x + weight).relu()
+
+    out = add_weight(Tensor([1.0, -3.0]))
+    counts = _op_counts(out)
+    assert counts['FUNCTION'] == counts['TUPLE'] == counts['GETTUPLE'] == 1
+    assert counts['PARAM'] == 2
+    np.testing.assert_array_equal(out.numpy(), [4.0, 1.0])
+
+
+def test_function_precompile_executes_multiple_outputs_in_dependency_order():
+    # Pinned schedule/__init__.py:21-68 emits one shared creation COPY before
+    # both kernels, and callify.py:101-142 binds the two explicit outputs.
+    @function(precompile=True)
+    def pair(x):
+        return x + 1.0, x * 2.0
+
+    first, second = pair(Tensor([2.0, 3.0]))
+    counts = _op_counts(first, second)
+    assert counts['FUNCTION'] == counts['TUPLE'] == 1
+    assert counts['GETTUPLE'] == 2
+    np.testing.assert_array_equal(first.numpy(), [3.0, 4.0])
+    np.testing.assert_array_equal(second.numpy(), [4.0, 6.0])
+
+
+def test_function_precompile_backward_flag_does_not_change_forward():
+    # Pinned function.py:31-79 carries precompile_backward independently of
+    # the forward precompile flag. Backward compilation remains a later gate.
+    @function(precompile_backward=True)
+    def doubled(x):
+        return x * 2.0
+
+    np.testing.assert_array_equal(doubled(Tensor([2.0, 3.0])).numpy(), [4.0, 6.0])
+
+
+def test_function_keeps_distinct_implicit_occurrences_over_one_buffer():
+    # Pinned function.py:9-17 appends each matched CONTIGUOUS occurrence and
+    # uses buf_uop only to exclude fresh invalid outputs. Two views over one
+    # storage must therefore occupy two ordered implicit PARAM slots.
+    base = Tensor([1.0, 2.0, 3.0, 4.0]).realize()
+    left, right = base[:2].contiguous(), base[2:].contiguous()
+
+    @function(allow_implicit=True)
+    def add_views(x):
+        return x + left + right
+
+    out = add_views(Tensor([10.0, 20.0]).realize())
+    fn = out.uop.src[0]
+    assert fn.op_name == 'FUNCTION'
+    assert [u.op_name for u in fn.src[1:]] == [
+        'BUFFER', 'CONTIGUOUS', 'CONTIGUOUS',
+    ]
+    np.testing.assert_array_equal(out.numpy(), [14.0, 26.0])
 
 
 def test_function_rejects_unimplemented_custom_gradient():

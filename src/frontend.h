@@ -13,7 +13,7 @@
 
 /* Public C/frontend ABI version. Bump when exported symbols or public struct
  * layouts used by frontends change. */
-#define POLYGRAD_ABI_VERSION 52
+#define POLYGRAD_ABI_VERSION 53
 
 #ifdef __cplusplus
 extern "C" {
@@ -94,6 +94,9 @@ int poly_uop_op(PolyUOp *u);
 int poly_uop_dtype_id(PolyCtx *ctx, PolyUOp *u);
 int poly_uop_n_src(PolyUOp *u);
 PolyUOp *poly_uop_src(PolyUOp *u, int idx);
+/* Pinned tinygrad uop/ops.py `resolve`: simplify a boolean UOp, return its
+ * proven value when constant, otherwise the caller-provided default. */
+int poly_uop_resolve(PolyCtx *ctx, PolyUOp *u, int default_value);
 
 /* FFI-safe UOp construction helpers used by tinygrad-style custom kernels.
  * These only build UOps; execution still flows through normal CALL scheduling. */

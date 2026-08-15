@@ -275,6 +275,17 @@ PolyUOp *poly_uop_src(PolyUOp *u, int idx) {
   return u->src[idx];
 }
 
+int poly_uop_resolve(PolyCtx *ctx, PolyUOp *u, int default_value) {
+  if (!ctx || !u || !poly_dtype_eq(poly_dtype_scalar(u->dtype), POLY_BOOL)) return -1;
+  /* Pinned tinygrad/uop/ops.py:50-54 simplifies before consulting vmin/vmax.
+   * Raw bounds alone miss algebraic identities such as v == v. */
+  PolyUOp *simplified = poly_graph_rewrite(ctx, u, poly_symbolic());
+  if (!simplified) return -1;
+  int64_t vmin, vmax;
+  poly_uop_minmax(ctx, simplified, &vmin, &vmax);
+  return vmin == vmax ? (vmin != 0) : (default_value != 0);
+}
+
 static PolyDType frontend_value_dtype(PolyDType dt) {
   if (!dt.is_ptr) return poly_dtype_scalar(dt);
   PolyDType base = dt;

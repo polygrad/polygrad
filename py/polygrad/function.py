@@ -37,15 +37,12 @@ class _function:
 
     def __init__(self, fxn, *, precompile, precompile_backward,
                  allow_implicit, grad_fxn):
-        if precompile or precompile_backward:
-            raise NotImplementedError(
-                'Polygrad function precompile execution is not yet implemented')
         if grad_fxn is not None:
             raise NotImplementedError(
                 'Polygrad function grad_fxn callbacks are not yet implemented')
         self.fxn = fxn
-        self.precompile = False
-        self.precompile_backward = False
+        self.precompile = bool(precompile)
+        self.precompile_backward = bool(precompile_backward)
         self.allow_implicit = bool(allow_implicit)
         self.grad_fxn = None
 
@@ -87,7 +84,8 @@ class _function:
         name = getattr(self.fxn, '__qualname__', None) or type(self.fxn).__qualname__
         rc = _ffi._lib.poly_tensor_function(
             ctx, result_arr, len(results), input_arr, len(tensors),
-            name.encode('utf-8'), self.allow_implicit, output_arr,
+            name.encode('utf-8'), self.allow_implicit,
+            self.precompile, self.precompile_backward, output_arr,
         )
         if rc == -2:
             raise RuntimeError(

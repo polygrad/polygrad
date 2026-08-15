@@ -818,6 +818,14 @@ class TestStateDict:
         assert sd["weight"].shape == (2, 3)
         assert sd["bias"].shape == (2,)
 
+    def test_get_state_dict_preserves_named_tensor_aliases(self):
+        # Pinned nn/state.py:87-107 emits every named path; object identity is
+        # not a reason to discard a model-state alias.
+        shared = Tensor([1.0, 2.0])
+        sd = get_state_dict({"left": shared, "right": shared})
+        assert list(sd) == ["left", "right"]
+        assert sd["left"] is sd["right"]
+
     def test_get_parameters(self):
         m = Linear(3, 2)
         params = get_parameters(m)

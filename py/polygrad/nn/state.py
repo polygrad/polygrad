@@ -9,9 +9,10 @@ import struct
 import tarfile
 import zipfile
 import zlib
+from collections import OrderedDict
 
 from ..dtype import dtypes
-from ..helpers import DEBUG, argsort, prod, strides_for_shape
+from ..helpers import DEBUG, Timing, argsort, prod, strides_for_shape, tqdm
 
 
 # Literal pinned tinygrad/nn/state.py:35-40 safetensors dtype vocabulary.
@@ -322,52 +323,78 @@ def get_parameters(obj):
 
 
 def get_state_dict(obj, prefix=""):
-    """Get a flat dict of name → Tensor for all parameters."""
+    """Get every named Tensor path, preserving aliases like pinned tinygrad."""
     from ..tensor import Tensor
 
+    if isinstance(obj, Tensor):
+        return {prefix.strip("."): obj}
+    if hasattr(obj, "_asdict"):
+        return get_state_dict(obj._asdict(), prefix)
+    if isinstance(obj, OrderedDict):
+        return get_state_dict(dict(obj), prefix)
+    if hasattr(obj, "__dict__"):
+        return get_state_dict(obj.__dict__, prefix)
     state = {}
-    seen = set()
-
-    def _collect(o, pfx):
-        oid = id(o)
-        if oid in seen:
-            return
-        seen.add(oid)
-
-        if isinstance(o, Tensor):
-            state[pfx] = o
-        elif isinstance(o, (list, tuple)):
-            for i, item in enumerate(o):
-                _collect(item, f"{pfx}.{i}" if pfx else str(i))
-        elif isinstance(o, dict):
-            for k, v in o.items():
-                _collect(v, f"{pfx}.{k}" if pfx else k)
-        elif hasattr(o, "__dict__"):
-            for k, v in o.__dict__.items():
-                if k.startswith("_"):
-                    continue
-                _collect(v, f"{pfx}.{k}" if pfx else k)
-
-    _collect(obj, prefix)
+    if isinstance(obj, (list, tuple)):
+        for i, value in enumerate(obj):
+            state.update(get_state_dict(value, f"{prefix}{i}."))
+    elif isinstance(obj, dict):
+        for name, value in obj.items():
+            state.update(get_state_dict(value, f"{prefix}{name}."))
     return state
 
 
-def load_state_dict(obj, state_dict, strict=True):
-    """Load parameters from a state dict into an object."""
-    from ..tensor import Tensor
+def load_state_dict(model, state_dict, strict=True, verbose=True, consume=False, realize=True):
+    """Load a state dict with pinned tinygrad's lazy replacement semantics."""
+    # Imported here to avoid binding the package-level counter owner before
+    # polygrad.__init__ finishes creating its default context.
+    from .. import GlobalCounters
 
-    current = get_state_dict(obj)
-    for key, val in state_dict.items():
-        if key in current:
-            target = current[key]
-            if isinstance(val, Tensor):
-                data = val.numpy()
+    start_mem_used = GlobalCounters.mem_used
+    ret = []
+    with Timing(
+        "loaded weights in ",
+        lambda et_ns: (
+            f", {(used := GlobalCounters.mem_used - start_mem_used) / 1e9:.2f} GB "
+            f"loaded at {used / et_ns:.2f} GB/s"
+        ),
+        enabled=verbose,
+    ):
+        model_state_dict = get_state_dict(model)
+        if DEBUG >= 1 and len(state_dict) > len(model_state_dict):
+            print(
+                "WARNING: unused weights in state_dict",
+                sorted(list(state_dict.keys() - model_state_dict.keys())),
+            )
+        for key, target in (progress := tqdm(
+            model_state_dict.items(), disable=None if verbose else True
+        )):
+            progress.desc = (
+                f"ram used: {GlobalCounters.mem_used / 1e9:5.2f} GB, {key:50s}: "
+            )
+            if key not in state_dict and not strict:
+                if DEBUG >= 1:
+                    print(f"WARNING: not loading {key}")
+                continue
+            source = state_dict[key]
+            if target.shape != source.shape:
+                if {(), (1,)} == {source.shape, target.shape}:
+                    source = state_dict[key] = source.reshape(target.shape)
+                else:
+                    raise ValueError(
+                        f"Shape mismatch in layer `{key}`: Expected shape {target.shape}, "
+                        f"but found {source.shape} in state dict."
+                    )
+            if isinstance(target.device, tuple):
+                target.replace(
+                    source if isinstance(source.device, tuple)
+                    else source.shard(target.device, target.uop.axis)
+                )
             else:
-                import numpy as np
-
-                data = np.asarray(val, dtype=np.float32)
-            new_t = Tensor(data, requires_grad=target.requires_grad)
-            target._tensor = new_t._tensor
-            target._data = new_t._data
-        elif strict:
-            raise KeyError(f"Unexpected key: {key}")
+                target.replace(source.to(target.device))
+            if realize:
+                target.realize()
+            if consume:
+                del state_dict[key]
+            ret.append(target)
+    return ret

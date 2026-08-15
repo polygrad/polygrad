@@ -762,6 +762,8 @@ int poly_tensor_function(
     int n_inputs,
     const char *name,
     bool allow_implicit,
+    bool precompile,
+    bool precompile_backward,
     PolyTensor **outputs
 );
 PolyTensor *poly_tensor_alu1(PolyCtx *ctx, PolyOps op, PolyTensor *src);

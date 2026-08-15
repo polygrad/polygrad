@@ -676,8 +676,11 @@ static PolyUOp *tensor_function_capture_match(
   if (!direct && !boundary) return NULL;
   PolyUOp *buf = tensor_function_buf_uop(u);
   if (!buf || tensor_function_is_invalid_output(capture, buf)) return NULL;
-  if (tensor_function_find_call_uop(capture, buf) >= 0) return NULL;
-  if (!tensor_function_add_call_uop(capture, buf, u)) {
+  /* Pinned function.py:add_to_ctx appends the matched occurrence `x`; its
+   * buf_uop is consulted only for invalid-output exclusion. Distinct views or
+   * CONTIGUOUS values over one storage remain distinct ordered inputs. */
+  if (tensor_function_find_call_uop(capture, u) >= 0) return NULL;
+  if (!tensor_function_add_call_uop(capture, u, u)) {
     capture->failed = true;
     return NULL;
   }
@@ -803,6 +806,8 @@ static int tensor_function_build_surface(
     int n_inputs,
     const char *name,
     bool allow_implicit,
+    bool precompile,
+    bool precompile_backward,
     PolyUOp **out_roots
 ) {
   if (!ctx || !roots || n_roots <= 0 || !out_roots || n_inputs < 0 ||
@@ -860,8 +865,8 @@ static int tensor_function_build_surface(
     function_src[i + 1] = capture.call_uops[i];
   PolyCallInfo call_info = {
       .name = name && name[0] ? name : NULL,
-      .precompile = false,
-      .precompile_backward = false,
+      .precompile = precompile,
+      .precompile_backward = precompile_backward,
       .has_grad_fxn = false,
       .has_metadata = false,
       .has_aux = false,
@@ -897,6 +902,8 @@ int poly_tensor_function(
     int n_inputs,
     const char *name,
     bool allow_implicit,
+    bool precompile,
+    bool precompile_backward,
     PolyTensor **outputs
 ) {
   if (!ctx || !results || n_results <= 0 || !outputs || n_inputs < 0 ||
@@ -932,11 +939,11 @@ int poly_tensor_function(
   }
   rc = tensor_function_build_surface(
       ctx, physical_roots, n_results, physical_inputs, selected, name,
-      allow_implicit, physical_out);
+      allow_implicit, precompile, precompile_backward, physical_out);
   if (rc != 0) goto done;
   rc = tensor_function_build_surface(
       ctx, logical_roots, n_results, logical_inputs, selected, name,
-      true, logical_out);
+      true, precompile, precompile_backward, logical_out);
   if (rc != 0) goto done;
   for (int i = 0; i < n_results; i++) {
     outputs[i] = poly_tensor_create_with_roots(

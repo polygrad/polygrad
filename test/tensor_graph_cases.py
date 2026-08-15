@@ -671,10 +671,10 @@ def case_mlp_linear_relu():
     x = Tensor.empty(2, 3, device="CPU").realize()
     weight = Tensor.empty(4, 3, device="CPU").realize()
     bias = Tensor.empty(4, device="CPU").realize()
-    # Pinned nn.Linear stores (out,in) and passes weight.transpose() to
-    # Tensor.linear (nn/__init__.py:156-177). Polygrad's frontend convenience
-    # method accepts the stored (out,in) weight and performs that transpose.
-    out = x.linear(weight.transpose(), bias) if ENGINE == "tinygrad" else x.linear(weight, bias)
+    # Pinned nn.Linear stores (out,in) and passes weight.transpose() to the
+    # shared Tensor.linear(in,out) contract (nn/__init__.py:156-177 and
+    # mixin/__init__.py:1335-1350). Exercise that same public spelling in both.
+    out = x.linear(weight.transpose(), bias)
     out = out.relu()
     return {"physical": out.uop, "logical": logical(out)}
 

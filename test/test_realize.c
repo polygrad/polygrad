@@ -3178,6 +3178,58 @@ TEST(realize, tensor_chained_assign_versions_execute_once) {
   PASS();
 }
 
+TEST(realize, chained_assign_schedule_preserves_repeated_effect_call) {
+  /* Pinned create_schedule preserves two ordered occurrences of the same
+   * immutable assignment CALL in this versioned graph. Only nested
+   * precompiled LINEAR flattening deduplicates shared inner work
+   * (tinygrad/schedule/__init__.py:21-68,92-128). */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  float *counter_data = malloc(sizeof(float));
+  ASSERT_NOT_NULL(counter_data);
+  counter_data[0] = 0.0f;
+  int f32 = poly_dtype_id_by_name("float32");
+  int64_t shape[] = {1};
+  PolyTensor *counter = initialized_f32_tensor(
+      ctx, shape, 1, counter_data, POLY_DEVICE_CPU, NULL);
+  PolyTensor *one = poly_tensor_const_float_by_id(ctx, 1.0, f32, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(counter);
+  ASSERT_NOT_NULL(one);
+
+  PolyTensor *next = poly_tensor_alu2(ctx, POLY_OP_ADD, counter, one);
+  ASSERT_NOT_NULL(next);
+  ASSERT_PTR_EQ(poly_tensor_assign(ctx, counter, next), counter);
+  PolyTensor *version0 = poly_tensor_contiguous(
+      ctx, poly_tensor_alu2(ctx, POLY_OP_SUB, counter, one));
+  ASSERT_NOT_NULL(version0);
+
+  next = poly_tensor_alu2(ctx, POLY_OP_ADD, counter, one);
+  ASSERT_NOT_NULL(next);
+  ASSERT_PTR_EQ(poly_tensor_assign(ctx, counter, next), counter);
+  PolyTensor *version1 = poly_tensor_contiguous(
+      ctx, poly_tensor_alu2(ctx, POLY_OP_SUB, counter, one));
+  ASSERT_NOT_NULL(version1);
+
+  PolyUOp *versions[2] = {
+      poly_tensor_uop_physical(version0),
+      poly_tensor_uop_physical(version1),
+  };
+  PolyUOp *root = poly_cat(ctx, versions, 2, 0);
+  ASSERT_NOT_NULL(root);
+  PolyUOp *scheduled = NULL;
+  PolySchedule *schedule = poly_schedule_with_vars(ctx, &root, 1, &scheduled);
+  ASSERT_NOT_NULL(schedule);
+  ASSERT_NOT_NULL(scheduled);
+  ASSERT_INT_EQ(schedule->template->n_calls, 5);
+  ASSERT_PTR_EQ(poly_schedule_call(schedule, 0), poly_schedule_call(schedule, 2));
+
+  poly_schedule_free(schedule);
+  poly_ctx_destroy(ctx);
+  free(counter_data);
+  PASS();
+}
+
 TEST(realize, tensor_shared_lazy_retarget_keeps_distinct_tensor_records) {
   PolyCtx *ctx = poly_ctx_new();
 
@@ -4726,6 +4778,139 @@ TEST(realize, transform_to_call_wraps_sink_body_in_call) {
   ASSERT_TRUE(poly_uop_get_buffer_identity(realized[0]) != NULL);
   ASSERT_TRUE(poly_uop_get_buffer_identity(realized[1]) != NULL);
 
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(realize, precompiled_function_becomes_opaque_output_call) {
+  /* Pinned callify.py:101-142 replaces a precompiled value FUNCTION with an
+   * opaque CALL whose SINK stores into explicit output PARAMs, then exposes
+   * each result as AFTER(output, CALL). */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  poly_ctx_set_preferred_device(ctx, POLY_DEVICE_INTERP);
+
+  float a_data[2] = {1.0f, -5.0f};
+  float b_data[2] = {3.0f, 4.0f};
+  int64_t shape[1] = {2};
+  PolyTensor *a_host = poly_tensor_from_host(
+      ctx, a_data, sizeof(a_data), POLY_FLOAT32, shape, 1);
+  PolyTensor *b_host = poly_tensor_from_host(
+      ctx, b_data, sizeof(b_data), POLY_FLOAT32, shape, 1);
+  PolyTensor *a = poly_tensor_to_device(ctx, a_host, POLY_DEVICE_INTERP);
+  PolyTensor *b = poly_tensor_to_device(ctx, b_host, POLY_DEVICE_INTERP);
+  PolyTensor *sum = poly_tensor_alu2(ctx, POLY_OP_ADD, a, b);
+  ASSERT_NOT_NULL(sum);
+
+  PolyTensor *results[1] = {sum};
+  PolyTensor *inputs[2] = {a, b};
+  PolyTensor *output = NULL;
+  ASSERT_INT_EQ(
+      poly_tensor_function(
+          ctx, results, 1, inputs, 2, "precompiled_add", false, true,
+          false, &output),
+      0);
+  ASSERT_NOT_NULL(output);
+  ASSERT_INT_EQ(output->uop_physical->op, POLY_OP_GETTUPLE);
+  ASSERT_INT_EQ(output->uop_physical->src[0]->op, POLY_OP_FUNCTION);
+
+  PolyUOp *requested = output->uop_physical;
+  PolyUOp *realized = NULL;
+  PolyUOp *callified = poly_transform_to_call(ctx, &requested, 1, &realized);
+  ASSERT_NOT_NULL(callified);
+  ASSERT_INT_EQ(count_root_ops(ctx, callified, POLY_OP_FUNCTION), 0);
+  ASSERT_INT_EQ(count_root_ops(ctx, callified, POLY_OP_GETTUPLE), 0);
+  ASSERT_INT_EQ(count_root_ops(ctx, callified, POLY_OP_TUPLE), 0);
+
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort_alloc(ctx, callified, &n_topo);
+  ASSERT_NOT_NULL(topo);
+  PolyUOp *precompiled = NULL;
+  for (int i = 0; i < n_topo; i++)
+    if (topo[i]->op == POLY_OP_CALL &&
+        topo[i]->arg.kind == POLY_ARG_CALL_INFO && topo[i]->arg.call_info &&
+        topo[i]->arg.call_info->precompile)
+      precompiled = topo[i];
+  ASSERT_NOT_NULL(precompiled);
+  ASSERT_INT_EQ(precompiled->n_src, 4);
+  ASSERT_INT_EQ(precompiled->src[0]->op, POLY_OP_SINK);
+  ASSERT_TRUE(poly_uop_has_buffer_identity(precompiled->src[3]));
+  ASSERT_TRUE(poly_uop_has_buffer_identity(realized));
+  poly_toposort_free(topo);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(realize, precompiled_multioutput_orders_one_shared_input_copy_first) {
+  /* Pinned create_schedule uses an identity-keyed dependency graph and emits
+   * the one shared creation COPY before both precompiled output kernels
+   * (schedule/__init__.py:21-68). */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  poly_ctx_set_preferred_device(ctx, POLY_DEVICE_INTERP);
+
+  float x_data[2] = {2.0f, 3.0f};
+  int64_t shape[1] = {2};
+  PolyTensor *x_host = poly_tensor_from_host(
+      ctx, x_data, sizeof(x_data), POLY_FLOAT32, shape, 1);
+  PolyTensor *x = poly_tensor_to_device(ctx, x_host, POLY_DEVICE_INTERP);
+  PolyTensor *add = poly_tensor_alu2(ctx, POLY_OP_ADD, x, x);
+  PolyTensor *mul = poly_tensor_alu2(ctx, POLY_OP_MUL, x, x);
+  ASSERT_NOT_NULL(x);
+  ASSERT_NOT_NULL(add);
+  ASSERT_NOT_NULL(mul);
+
+  PolyTensor *results[2] = {add, mul};
+  PolyTensor *inputs[1] = {x};
+  PolyTensor *outputs[2] = {NULL, NULL};
+  ASSERT_INT_EQ(
+      poly_tensor_function(
+          ctx, results, 2, inputs, 1, "precompiled_pair", false, true,
+          false, outputs),
+      0);
+  ASSERT_NOT_NULL(outputs[0]);
+  ASSERT_NOT_NULL(outputs[1]);
+
+  PolyUOp *roots[2] = {
+      poly_tensor_uop_physical(outputs[0]),
+      poly_tensor_uop_physical(outputs[1]),
+  };
+  PolyUOp *scheduled[2] = {NULL, NULL};
+  PolySchedule *schedule = poly_schedule_with_vars(ctx, roots, 2, scheduled);
+  ASSERT_NOT_NULL(schedule);
+  ASSERT_NOT_NULL(scheduled[0]);
+  ASSERT_NOT_NULL(scheduled[1]);
+  ASSERT_INT_EQ(schedule->template->n_calls, 3);
+  ASSERT_TRUE(poly_schedule_call_is_copy(schedule, 0));
+  /* Pinned symbolic rewrites x+x to x*2, so both bodies contain MUL; their
+   * CONST counts distinguish x+x from x*x exactly as the paired probe does. */
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(schedule, 1), POLY_OP_MUL), 1);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(schedule, 1), POLY_OP_CONST), 2);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(schedule, 2), POLY_OP_MUL), 1);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(schedule, 2), POLY_OP_CONST), 1);
+
+  const PolyUOp *copy_dst = poly_uop_get_buffer_identity(
+      poly_call_buffer_arg(poly_schedule_call(schedule, 0), 0));
+  const PolyUOp *add_input = poly_uop_get_buffer_identity(
+      poly_call_buffer_arg(poly_schedule_call(schedule, 1), 1));
+  const PolyUOp *mul_input = poly_uop_get_buffer_identity(
+      poly_call_buffer_arg(poly_schedule_call(schedule, 2), 1));
+  ASSERT_NOT_NULL(copy_dst);
+  ASSERT_PTR_EQ(add_input, copy_dst);
+  ASSERT_PTR_EQ(mul_input, copy_dst);
+
+  ASSERT_INT_EQ(poly_run_schedule(ctx, schedule, NULL, 0), 0);
+  float add_out[2] = {0};
+  float mul_out[2] = {0};
+  READ_REALIZED_F32(ctx, scheduled[0], add_out, 2);
+  READ_REALIZED_F32(ctx, scheduled[1], mul_out, 2);
+  ASSERT_FLOAT_EQ(add_out[0], 4.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(add_out[1], 6.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(mul_out[0], 4.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(mul_out[1], 9.0f, 1e-5f);
+
+  poly_schedule_free(schedule);
   poly_ctx_destroy(ctx);
   PASS();
 }
