@@ -175,6 +175,12 @@
           assert(view.uop.isRealized, "allocated recursive base should realize the movement view");
           assert(view.uop.is_realized, "snake-case realization alias should match");
         });
+        await test("flatten resolves negative dimensions like tinygrad", async () => {
+          const flattened = Tensor.arange(32).reshape(1, 2, 16).flatten(-2);
+          assertShape(flattened.shape, [1, 32]);
+          assert(flattened.uop.op === pg._core.ops.RESHAPE, "flatten should be one RESHAPE");
+          assertClose(await flattened.toArray(), Array.from({ length: 32 }, (_, i) => i));
+        });
         await test("clone is lazy separate and preserves state", async () => {
           const source = Tensor.empty([4], { dtype: "float32", requiresGrad: true }).is_param_(false);
           source.copyFrom(new Float32Array([1, 2, 3, 4]));
@@ -1694,6 +1700,9 @@
             maxOnly[0] === -Infinity && maxOnly[1] === -2 && maxOnly[2] === 1 && maxOnly[3] === 1,
             `clamp max-only mismatch: ${maxOnly}`
           );
+          const clipped = new Tensor([-3, -0.5, 2]).clip(-1, 1);
+          assert(clipped.uop.op === pg._core.ops.WHERE, "clip alias must end in WHERE");
+          assertClose(await clipped.toArray(), [-1, -0.5, 1]);
         });
         await test("clamp preserves nested current occurrence", async () => {
           const x = await new Tensor([1], { device: "cpu" }).realize();

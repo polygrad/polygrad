@@ -29,6 +29,7 @@ from polygrad.helpers import (
     partition,
     prod,
     profile_marker,
+    round_up,
     strides_for_shape,
     to_mv,
     tqdm,
@@ -41,6 +42,12 @@ def test_prod_matches_tinygrad_empty_generator_and_mixed_numeric_semantics():
     assert prod(value for value in (2, 3, 4)) == 24
     assert prod((2.5, 2)) == 5.0
     assert prod([True, False]) == 0
+
+
+def test_round_up_matches_pinned_negative_aligned_and_large_cases():
+    assert [round_up(n, amt) for n, amt in (
+        (-3, 4), (-4, 4), (6, 4), (8, 4), (232, 24984), (24984, 232),
+    )] == [0, -4, 8, 8, 24984, 25056]
 
 
 def test_flatten_and_partition_match_pinned_order_and_single_pass_semantics():

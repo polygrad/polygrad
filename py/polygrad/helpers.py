@@ -35,6 +35,12 @@ def prod(x: Iterable[T]):
     return functools.reduce(operator.mul, x, 1)
 
 
+# Pinned tinygrad/helpers.py:66. Python integer division deliberately handles
+# negative and arbitrary-precision inputs with the same alignment semantics.
+def round_up(num: int, amt: int) -> int:
+    return (num + amt - 1) // amt * amt
+
+
 # Pinned tinygrad/helpers.py:49,88-91. These are literal public helper ports.
 def flatten(values: Iterable[Iterable[T]]):
     return [item for sublist in values for item in sublist]

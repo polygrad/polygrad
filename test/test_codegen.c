@@ -412,6 +412,49 @@ TEST(codegen, reduce_merge_shared_end) {
 
 /* Renderer tests */
 
+TEST(codegen, render_range_names_preserve_full_argument_tuple) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
+  PolyUOp *out = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(0));
+  PolyUOp *bound8 = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(8));
+  PolyUOp *bound4 = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(4));
+  int64_t outer_extra[] = {0, 1};
+  int64_t inner_extra[] = {1};
+  PolyUOp *outer = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_INT32, bound8, poly_arg_range_ex(1, POLY_AXIS_LOOP, outer_extra, 2)
+  );
+  PolyUOp *inner = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_INT32, bound4, poly_arg_range_ex(1, POLY_AXIS_LOOP, inner_extra, 1)
+  );
+  PolyUOp *four = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(4));
+  PolyUOp *flat = poly_uop2(
+      ctx, POLY_OP_ADD, POLY_INT32,
+      poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, outer, four, poly_arg_none()), inner, poly_arg_none()
+  );
+  PolyUOp *idx = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, out, flat, poly_arg_none());
+  PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0));
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx, one, poly_arg_none());
+  PolyUOp *end_inner = poly_uop2(ctx, POLY_OP_END, POLY_VOID, store, inner, poly_arg_none());
+  PolyUOp *end_outer = poly_uop2(ctx, POLY_OP_END, POLY_VOID, end_inner, outer, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end_outer, poly_arg_none());
+  PolyUOp *linear[] = {
+      out,  bound8, outer, bound4, inner,     four,      flat->src[0],
+      flat, idx,    one,   store,  end_inner, end_outer, sink,
+  };
+
+  char *src = poly_render_c(linear, (int)(sizeof(linear) / sizeof(linear[0])), "range_identity");
+  ASSERT_NOT_NULL(src);
+  ASSERT_NOT_NULL(strstr(src, "for (int ridx1_0_1 = 0;"));
+  ASSERT_NOT_NULL(strstr(src, "for (int ridx1_1 = 0;"));
+  ASSERT_NOT_NULL(strstr(src, "ridx1_0_1*4"));
+  ASSERT_NOT_NULL(strstr(src, "+ridx1_1"));
+
+  free(src);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(codegen, render_vecadd) {
   VecKernel k = make_vec_binop(POLY_OP_ADD, 10);
   const char *old_expand_ssa = getenv("EXPAND_SSA");
@@ -601,6 +644,37 @@ TEST(codegen, exact_uint64_bigint_const_executes_like_tinygrad) {
   poly_program_destroy(prog);
   free(src);
   free(lin);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, interp_bitcast_uint8_to_int8_reinterprets_sign_bit) {
+  /* Pinned PythonProgram delegates BITCAST to uop/ops.py:1199-1207, which
+   * packs with the uint8 format and unpacks the same byte as int8. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyDType ptr_i32 = poly_dtype_ptr(POLY_INT32, 1, POLY_ADDR_GLOBAL);
+  PolyDType ptr_u8 = poly_dtype_ptr(POLY_UINT8, 1, POLY_ADDR_GLOBAL);
+  PolyUOp *out = poly_uop0(ctx, POLY_OP_PARAM, ptr_i32, poly_arg_int(0));
+  PolyUOp *in = poly_uop0(ctx, POLY_OP_PARAM, ptr_u8, poly_arg_int(1));
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(0));
+  PolyUOp *out_idx = poly_uop2(ctx, POLY_OP_INDEX, ptr_i32, out, zero, poly_arg_none());
+  PolyUOp *in_idx = poly_uop2(ctx, POLY_OP_INDEX, ptr_u8, in, zero, poly_arg_none());
+  PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_UINT8, in_idx, poly_arg_none());
+  PolyUOp *signed_byte = poly_uop1(ctx, POLY_OP_BITCAST, POLY_INT8, load, poly_arg_none());
+  PolyUOp *wide = poly_uop1(ctx, POLY_OP_CAST, POLY_INT32, signed_byte, poly_arg_none());
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out_idx, wide, poly_arg_none());
+  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *linear[] = {
+      out, in, zero, out_idx, in_idx, load, signed_byte, wide, store, sink,
+  };
+
+  uint8_t input = 159;
+  int32_t output = 0;
+  void *args[] = {&output, &input};
+  ASSERT_INT_EQ(poly_interp_eval(linear, (int)(sizeof(linear) / sizeof(linear[0])), args, 2), 0);
+  ASSERT_INT_EQ(output, -97);
+
   poly_ctx_destroy(ctx);
   PASS();
 }

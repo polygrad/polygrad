@@ -1366,6 +1366,9 @@ function createBoundTensorClass(runtime) {
       return hi !== undefined ? ret.gt(hi).where(hi, ret) : ret
     }
 
+    // Pinned mixin/elementwise.py:582-584: clip is the public clamp alias.
+    clip(lo, hi) { return this.clamp(lo, hi) }
+
     // --- Cast ---
 
     cast(dtype) {
@@ -1817,6 +1820,11 @@ function createBoundTensorClass(runtime) {
     flatten(startDim, endDim) {
       if (startDim === undefined) startDim = 0
       if (endDim === undefined) endDim = -1
+      const lo = -Math.max(1, this.shape.length)
+      const hi = Math.max(1, this.shape.length) - 1
+      if (startDim < lo || startDim > hi) throw new RangeError(`dim=${startDim} out of range [${lo}, ${hi}]`)
+      if (endDim < lo || endDim > hi) throw new RangeError(`dim=${endDim} out of range [${lo}, ${hi}]`)
+      if (startDim < 0) startDim += this.shape.length
       if (endDim < 0) endDim += this.shape.length
       const before = this.shape.slice(0, startDim)
       let flatDim = 1

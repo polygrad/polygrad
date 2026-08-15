@@ -55,6 +55,18 @@ static void sb_puts(StrBuf *sb, const char *s) {
   sb_printf(sb, "%s", s);
 }
 
+/* Pinned tinygrad/uop/ops.py:76-78 `range_str`: every RANGE argument
+ * component participates in the identifier, and negative components use an
+ * identifier-safe `mN` spelling. */
+static void sb_range_component(StrBuf *sb, int64_t value) {
+  if (value >= 0) {
+    sb_printf(sb, "%lld", (long long)value);
+  } else {
+    uint64_t magnitude = (uint64_t)(-(value + 1)) + 1;
+    sb_printf(sb, "m%llu", (unsigned long long)magnitude);
+  }
+}
+
 /* Pointer → int hash map (for linearizer) */
 
 typedef struct {
@@ -1951,23 +1963,22 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
 
     /* --- RANGE: for loop -------------------------------------------- */
     if (u->op == POLY_OP_RANGE) {
-      char name[32];
-      int64_t aid = poly_range_axis_id(u->arg);
+      StrBuf name;
+      sb_init(&name);
+      sb_puts(&name, "ridx");
+      sb_range_component(&name, poly_range_axis_id(u->arg));
       int n_extra = poly_range_n_extra(u->arg);
-      if (n_extra > 0) {
-        const int64_t *extra = poly_range_extra(u->arg);
-        snprintf(
-            name, sizeof(name), "ridx%lld_%lld", (long long)aid, (long long)extra[n_extra - 1]
-        );
-      } else {
-        snprintf(name, sizeof(name), "ridx%lld", (long long)aid);
+      const int64_t *extra = poly_range_extra(u->arg);
+      for (int i = 0; i < n_extra; i++) {
+        sb_puts(&name, "_");
+        sb_range_component(&name, extra[i]);
       }
-      smap_set(&names, u, strdup(name));
+      smap_set(&names, u, name.buf);
 
       char *bound = smap_get(&names, u->src[0]);
       for (int d = 0; d < depth; d++)
         sb_puts(&body, "  ");
-      sb_printf(&body, "for (int %s = 0; %s < %s; %s++) {\n", name, name, bound, name);
+      sb_printf(&body, "for (int %s = 0; %s < %s; %s++) {\n", name.buf, name.buf, bound, name.buf);
       depth++;
       if (n_open_ranges < 128) open_ranges[n_open_ranges++] = u;
       continue;

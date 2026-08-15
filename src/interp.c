@@ -573,7 +573,24 @@ static InterpLane interp_truncate_lane(InterpLane v, PolyDType dt) {
 
 /* BITCAST one lane: reinterpret bits without value conversion. */
 static InterpLane bitcast_lane(InterpLane src, PolyDType src_dt, PolyDType dst_dt) {
-  if (src_dt.bitsize == 16 && dst_dt.bitsize == 16) {
+  if (src_dt.bitsize == 8 && dst_dt.bitsize == 8) {
+    /* Pinned tinygrad/uop/ops.py:1199-1207 packs using the source storage
+     * format and unpacks using the destination storage format. */
+    uint8_t bits;
+    if (poly_dtype_is_bool(src_dt))
+      bits = src.i ? 1 : 0;
+    else if (poly_dtype_is_unsigned(src_dt))
+      bits = (uint8_t)src.u;
+    else
+      bits = (uint8_t)src.i;
+
+    if (poly_dtype_is_bool(dst_dt))
+      return il_int(bits ? 1 : 0);
+    else if (poly_dtype_is_unsigned(dst_dt))
+      return il_uint(bits);
+    else
+      return il_int((int8_t)bits);
+  } else if (src_dt.bitsize == 16 && dst_dt.bitsize == 16) {
     uint16_t bits;
     if (interp_is_bf16(src_dt)) {
       bits = interp_f32_to_bf16_bits((float)src.f);

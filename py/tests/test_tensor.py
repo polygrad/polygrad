@@ -95,6 +95,16 @@ class TestCreation:
         assert view.uop.realized is None
         assert view.uop.is_realized
 
+    def test_flatten_resolves_negative_dimensions_like_tinygrad(self):
+        flattened = Tensor.arange(32).reshape(1, 2, 16).flatten(-2)
+        assert flattened.shape == (1, 32)
+        assert flattened.uop.op_name == "RESHAPE"
+        np.testing.assert_array_equal(flattened.numpy(), np.arange(32).reshape(1, 32))
+        with pytest.raises(IndexError, match=r"dim=-4 out of range \[-3, 2\]"):
+            Tensor.empty(1, 2, 16).flatten(-4)
+        with pytest.raises(IndexError, match=r"dim=3 out of range \[-3, 2\]"):
+            Tensor.empty(1, 2, 16).flatten(0, 3)
+
     def test_clone_is_lazy_separate_and_preserves_state(self):
         source = Tensor.empty((4,), dtype='float32', requires_grad=True).is_param_(False)
         source.copy_from(np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32))
@@ -3536,6 +3546,11 @@ class TestMaterializationParity:
             values.clamp(max_=1.0).numpy(),
             np.array([-np.inf, -2.0, 1.0, 1.0], dtype=np.float32),
         )
+
+        clipped = Tensor([-3.0, -0.5, 2.0]).clip(-1.0, 1.0)
+        assert clipped.uop.op_name == 'WHERE'
+        assert [src.op_name for src in clipped.uop.src] == ['CMPLT', 'EXPAND', 'WHERE']
+        np.testing.assert_array_equal(clipped.numpy(), [-1.0, -0.5, 1.0])
 
         x = Tensor([1.0], device='cpu').realize()
         x_cuda = x.to('cuda')

@@ -1792,6 +1792,10 @@ class Tensor:
         ret = (self < min_).where(min_, self) if min_ is not None else self
         return (ret > max_).where(max_, ret) if max_ is not None else ret
 
+    def clip(self, min_=None, max_=None):
+        """Alias for :meth:`Tensor.clamp` (mixin/elementwise.py:582-584)."""
+        return self.clamp(min_, max_)
+
     # --- Unary math (C core composed ops) ---
 
     def exp2(self):
@@ -2223,15 +2227,15 @@ class Tensor:
         return self.reshape(tuple(new_shape))
 
     def flatten(self, start_dim=0, end_dim=-1):
-        if end_dim < 0:
-            end_dim += len(self.shape)
-        new_shape = list(self.shape[:start_dim])
-        flat_dim = 1
-        for i in range(start_dim, end_dim + 1):
-            flat_dim *= self.shape[i]
-        new_shape.append(flat_dim)
-        new_shape.extend(self.shape[end_dim + 1:])
-        return self.reshape(tuple(new_shape))
+        # Pinned tinygrad/mixin/movement.py:319-321 resolves both ends before
+        # multiplying the selected dimensions, including negative start_dim.
+        start_dim = self._resolve_dim(int(start_dim))
+        end_dim = self._resolve_dim(int(end_dim))
+        return self.reshape(
+            self.shape[:start_dim]
+            + (math.prod(self.shape[start_dim:end_dim + 1]),)
+            + self.shape[end_dim + 1:]
+        )
 
     def unflatten(self, dim, sizes):
         if dim < 0:
