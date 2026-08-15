@@ -230,6 +230,28 @@
           await detached.sum().backward();
           assertClose(await source.grad.toArray(), [0, 0, 0, 0]);
         });
+        await test("contiguousBackward has exact gradient barrier", async () => {
+          const source = new Tensor([1, -2, 3], { dtype: "float32", requiresGrad: true });
+          const result = source.mul(2).contiguousBackward();
+          assert(
+            result.uopLogical.op === pg._core.ops.CONTIGUOUS_BACKWARD,
+            "logical root should be CONTIGUOUS_BACKWARD"
+          );
+          assert(
+            result.uop.op === pg._core.ops.CONTIGUOUS_BACKWARD,
+            "physical root should be CONTIGUOUS_BACKWARD"
+          );
+          assert(
+            result.uopLogical.src[0].op === pg._core.ops.MUL,
+            "CONTIGUOUS_BACKWARD should wrap the exact MUL input"
+          );
+          assert(
+            result.contiguous_backward().uop.op === pg._core.ops.CONTIGUOUS_BACKWARD,
+            "snake-case alias should retain CONTIGUOUS_BACKWARD"
+          );
+          await result.square().sum().backward();
+          assertClose(await source.grad.toArray(), [8, -16, 24]);
+        });
         await test("backward clones deviceless grad and accumulates in place", async () => {
           const x = Tensor.empty([4], { dtype: "float32", requiresGrad: true });
           const loss = x.sum();
@@ -307,7 +329,9 @@
             a2 = a2.flatten();
             b2 = b2.flatten();
             const i = pg.uop.range(c2.numel(), 0);
-            return c2.index(i).store(a2.index(i).add(b2.index(i))).end(i).sink();
+            return c2.index(i).store(a2.index(i).add(b2.index(i))).end(i).sink(
+              new pg.uop.KernelInfo("custom_add_4")
+            );
           }
           const a = new Tensor([1, 2, 3, 4]);
           const b = new Tensor([10, 20, 30, 40]);
@@ -514,7 +538,9 @@
             a2 = a2.flatten();
             b2 = b2.flatten();
             const i = pg.uop.range(c2.numel(), 0);
-            return c2.index(i).store(a2.index(i).add(b2.index(i))).end(i).sink();
+            return c2.index(i).store(a2.index(i).add(b2.index(i))).end(i).sink(
+              new pg.uop.KernelInfo("custom_add_reuse_4")
+            );
           }
           const a = Tensor.empty([4], { dtype: "float32" });
           const b = new Tensor([10, 20, 30, 40], { dtype: "float32" });
@@ -541,7 +567,9 @@
             const av = a2.index(i);
             const bv = b2.index(i);
             const selected = av.lt(0).where(av.neg(), av.max(bv));
-            return out2.index(i).store(selected).end(i).sink();
+            return out2.index(i).store(selected).end(i).sink(
+              new pg.uop.KernelInfo("custom_select")
+            );
           }
           const out = Tensor.empty([4], { dtype: "float32" });
           const a = new Tensor([-3, 2, 5, -1]);
@@ -555,7 +583,9 @@
             const gate = zero.lt(1);
             const bad = out2.index(gate);
             assert(bad !== null, "UOp.index(bool) construction should match tinygrad");
-            return bad.store(out2.index(zero)).sink();
+            return bad.store(out2.index(zero)).sink(
+              new pg.uop.KernelInfo("invalid_bool_index")
+            );
           }
           const out = Tensor.empty([1], { dtype: "float32" });
           let threw = false;
@@ -574,7 +604,10 @@
             const i = pg.uop.range(x2.numel(), 0);
             const q = x2.index(i).floordiv(y2.index(i));
             const r = x2.index(i).floormod(y2.index(i));
-            return out2.index(i).store(q).end(i).sink(out2.index(i.add(x2.numel())).store(r).end(i));
+            return out2.index(i).store(q).end(i).sink(
+              out2.index(i.add(x2.numel())).store(r).end(i),
+              new pg.uop.KernelInfo("custom_signed_div_mod")
+            );
           }
           const x = new Tensor(new Int32Array([-7, -7, 7, 7, -1, 1, 0]), { dtype: "int32" });
           const y = new Tensor(new Int32Array([3, -3, -3, 3, 4, -4, 3]), { dtype: "int32" });
@@ -594,7 +627,10 @@
             const sameMul = xv.mul(2).div(xv.mul(3));
             const s0 = out2.index(i).store(sameAdd);
             const s1 = out2.index(i.add(x.numel())).store(sameMul);
-            return s0.end(i).sink(s1.end(i));
+            return s0.end(i).sink(
+              s1.end(i),
+              new pg.uop.KernelInfo("custom_numeric_literals")
+            );
           }
           const xData = new Float32Array(16);
           for (let i = 0; i < xData.length; i++) xData[i] = i / 10 + 1;
@@ -631,7 +667,9 @@
             v = opv.eq(2).where(a.mul(b), v);
             v = opv.eq(3).where(a.div(safeDen), v);
             v = opv.eq(4).where(z.sin(), v);
-            return out2.index(idx).store(v).end(idx).sink();
+            return out2.index(idx).store(v).end(idx).sink(
+              new pg.uop.KernelInfo("custom_descriptor_branches")
+            );
           }
           const xData = new Float32Array([
             1,
@@ -678,7 +716,9 @@
             a2 = a2.flatten();
             b2 = b2.flatten();
             const i = pg.uop.range(c.numel(), 0);
-            return c.index(i).store(a2.index(i).add(b2.index(i))).end(i).sink();
+            return c.index(i).store(a2.index(i).add(b2.index(i))).end(i).sink(
+              new pg.uop.KernelInfo("jit_custom_add_4")
+            );
           }
           const f = pg.jit((a2, b2) => {
             const c = Tensor.empty([4], { dtype: "float32" });
@@ -700,7 +740,9 @@
             a2 = a2.flatten();
             b2 = b2.flatten();
             const i = pg.uop.range(c.numel(), 0);
-            return c.index(i).store(a2.index(i).add(b2.index(i))).end(i).sink();
+            return c.index(i).store(a2.index(i).add(b2.index(i))).end(i).sink(
+              new pg.uop.KernelInfo("compile_custom_add_4")
+            );
           }
           const a = Tensor.empty([4], { dtype: "float32" });
           const b = new Tensor([10, 20, 30, 40], { dtype: "float32" });
@@ -726,7 +768,9 @@
             const offset = c.mul(4).add(r);
             const term = a2.index(offset).mul(b2.index(r));
             const sum = term.sum(r);
-            return out.index(c).store(sum).end(c).sink();
+            return out.index(c).store(sum).end(c).sink(
+              new pg.uop.KernelInfo("custom_fused_reduction")
+            );
           }
           const a = Tensor.empty([8], { dtype: "float32" });
           const b = new Tensor([1, 2, 3, 4], { dtype: "float32" });
@@ -755,7 +799,10 @@
             const s1 = term.mul(b2.index(r)).sum(r);
             const st0 = out0.index(c).store(s0);
             const st1 = out1.index(c).store(s1);
-            return st0.end(c).sink(st1.end(c));
+            return st0.end(c).sink(
+              st1.end(c),
+              new pg.uop.KernelInfo("custom_multi_output_reduction")
+            );
           }
           const a = Tensor.empty([8], { dtype: "float32" });
           const b = new Tensor([1, 2, 3, 4], { dtype: "float32" });
@@ -796,7 +843,9 @@
               xv.mul(yv).sum(r)
             ];
             const stores = stats.map((s, stat) => out.index(c.add(stat * candidates)).store(s));
-            return stores[0].group(...stores.slice(1)).end(c).sink();
+            return stores[0].group(...stores.slice(1)).end(c).sink(
+              new pg.uop.KernelInfo("custom_compact_summary")
+            );
           }
           const makeX = (shift = 0) => Float32Array.from({ length: 256 }, (_, i) => i + 1 + shift);
           const makeY = () => Float32Array.from({ length: 128 }, (_, i) => i + 1);
@@ -855,7 +904,9 @@
               for (let j = i; j < terms; j++) stats.push(ti.mul(termAt(j)).sum(r));
             }
             const stores = stats.map((s, stat) => out.index(c.add(stat * candidates)).store(s));
-            return stores[0].group(...stores.slice(1)).end(c).sink();
+            return stores[0].group(...stores.slice(1)).end(c).sink(
+              new pg.uop.KernelInfo("custom_sym_summary")
+            );
           }
           const makeX = (shift = 0) => Float32Array.from(
             { length: candidates * terms * rows },
@@ -1147,6 +1198,31 @@
           const b = new Tensor([2, 4, 5]);
           assertClose(await a.div(b).toArray(), [5, 5, 6]);
         });
+        await test("div rounding modes match tinygrad topology", async () => {
+          const ints = new Tensor([-7, -4, 4, 7], { dtype: "int32" });
+          const intDivisors = new Tensor([3, -3, 3, -3], { dtype: "int32" });
+          const truncInt = ints.div(intDivisors, "trunc");
+          const floorInt = ints.div(intDivisors, "floor");
+          assert(truncInt.uop.op === pg._core.ops.CDIV, "integer trunc division must be CDIV");
+          assert(floorInt.uop.op === pg._core.ops.FLOORDIV, "integer floor division must be FLOORDIV");
+          assertClose(await truncInt.toArray(), [-2, 1, 1, -2]);
+          assertClose(await floorInt.toArray(), [-3, 1, 1, -3]);
+          const floats = new Tensor([-7.5, -4.5, 4.5, 7.5], { dtype: "float32" });
+          const floatDivisors = new Tensor([2, -2, 2, -2], { dtype: "float32" });
+          const truncFloat = floats.div(floatDivisors, "trunc");
+          const floorFloat = floats.div(floatDivisors, "floor");
+          assert(truncFloat.uop.op === pg._core.ops.TRUNC, "float trunc division must end in TRUNC");
+          assert(floorFloat.uop.op === pg._core.ops.WHERE, "float floor division must end in WHERE");
+          assertClose(await truncFloat.toArray(), [-3, 2, 2, -3]);
+          assertClose(await floorFloat.toArray(), [-4, 2, 2, -4]);
+          let threw = false;
+          try {
+            ints.div(intDivisors, "nearest");
+          } catch (err) {
+            threw = /rounding_mode='nearest' is not supported/.test(String(err.message));
+          }
+          assert(threw, "unsupported division rounding mode must throw");
+        });
         await test("neg", async () => {
           const a = new Tensor([1, -2, 3]);
           const out = a.neg();
@@ -1208,6 +1284,20 @@
             assert(actual.uopLogical.key === expected.uopLogical.key, "logical graph differs");
             assertClose(await actual.toArray(), await expected.toArray(), 1e-6);
           }
+        });
+        await test("where scalar branch shapes before promotion", async () => {
+          const cond = new Tensor([[true, false], [false, true]], { dtype: "bool" });
+          const out = cond.where(0, -Infinity);
+          const zeroBranch = out.uop.src[1];
+          assert(zeroBranch.op === pg._core.ops.CAST, "expected promoted CAST branch");
+          assert(zeroBranch.src[0].op === pg._core.ops.EXPAND, "expected EXPAND before CAST");
+          assert(zeroBranch.src[0].src[0].op === pg._core.ops.RESHAPE, "expected RESHAPE before EXPAND");
+          assert(zeroBranch.src[0].src[0].src[0].op === pg._core.ops.CONST, "expected scalar CONST source");
+          const values = await out.toArray();
+          assert(
+            values[0] === 0 && values[1] === -Infinity && values[2] === -Infinity && values[3] === 0,
+            `unexpected where values ${Array.from(values)}`
+          );
         });
         await test("log1p expm1 use core tensor roots", async () => {
           assert(
@@ -1728,6 +1818,19 @@
           assert(indexed.uop.op === pg._core.ops.RESHAPE, "integer index must collapse to RESHAPE");
           assertClose(await indexed.toArray(), [0]);
         });
+        await test("basic indices use one shrink before dimension collapse", async () => {
+          const base = Tensor.zeros(2, 1, 8, 1, 4).contiguous();
+          await base.realize();
+          const indexed = base.getitem(0, [0, 1], [0, 3], [0, 1], [0, 4]);
+          assertShape(indexed.shape, [1, 3, 1, 4]);
+          assert(indexed.uop.op === pg._core.ops.RESHAPE, "basic index root must be RESHAPE");
+          assert(indexed.uop.src[0].op === pg._core.ops.SHRINK, "aggregate SHRINK must precede collapse");
+          assert(countGraphOp(indexed.uop, pg._core.ops.SHRINK) === 1, "basic indexing must emit one SHRINK");
+          assertClose(await indexed.toArray(), new Array(12).fill(0));
+          const injected = base.getitem(0, null, [0, 1], [1, 4], [0, 1], [0, 4]);
+          assertShape(injected.shape, [1, 1, 3, 1, 4]);
+          assert(injected.uop.op === pg._core.ops.SHRINK, "identity final reshape must be elided");
+        });
         await test("scatter matches tinygrad probe", async () => {
           const base = Tensor.zeros(3, 5);
           const idx0 = new Tensor(new Int32Array([0, 1, 2, 0]), { dtype: "int32" }).reshape(1, 4);
@@ -1958,10 +2061,143 @@
           );
         });
         console.log("\n-- Reduction --");
+        await test("linear vector and matrix match pinned semantics", async () => {
+          const x = new Tensor(Float32Array.from({ length: 16 }, (_, i) => i / 7)).reshape(2, 2, 4);
+          const vector = x.linear(
+            new Tensor(new Float32Array([1, 2, 3, 4])),
+            new Tensor(new Float32Array([0.5, 1, 1.5, 2]))
+          );
+          const matrixWeight = new Tensor(Float32Array.from({ length: 12 }, (_, i) => i / 11)).reshape(4, 3);
+          const matrix = x.linear(matrixWeight, new Tensor(new Float32Array([0.25, -0.5, 0.75])));
+          assertShape(vector.shape, [2, 2, 4]);
+          assertShape(matrix.shape, [2, 2, 3]);
+          assertClose(await vector.toArray(), [
+            0.5,
+            1 + 2 / 7,
+            1.5 + 6 / 7,
+            2 + 12 / 7,
+            4 / 7 + 0.5,
+            1 + 10 / 7,
+            1.5 + 18 / 7,
+            2 + 28 / 7,
+            8 / 7 + 0.5,
+            1 + 18 / 7,
+            1.5 + 30 / 7,
+            2 + 44 / 7,
+            12 / 7 + 0.5,
+            1 + 26 / 7,
+            1.5 + 42 / 7,
+            2 + 60 / 7
+          ]);
+          assertClose(await matrix.toArray(), [
+            42 / 77 + 0.25,
+            48 / 77 - 0.5,
+            54 / 77 + 0.75,
+            114 / 77 + 0.25,
+            136 / 77 - 0.5,
+            158 / 77 + 0.75,
+            186 / 77 + 0.25,
+            224 / 77 - 0.5,
+            262 / 77 + 0.75,
+            258 / 77 + 0.25,
+            312 / 77 - 0.5,
+            366 / 77 + 0.75
+          ]);
+        });
+        await test("attention primitives match pinned compositions", async () => {
+          const x = new Tensor([[1, 2], [3, 4]], { dtype: "float32" });
+          const repeated = x.repeatInterleave(2, 1);
+          const expectedRepeat = x.reshape(2, 2, 1).expand(2, 2, 2).reshape(2, 4);
+          assert(repeated.uop.key === expectedRepeat.uop.key, "repeatInterleave graph differs");
+          assertClose(await repeated.toArray(), [1, 1, 2, 2, 3, 3, 4, 4]);
+          assert(x.dropout(0.25) === x, "eval dropout must return self");
+          let rangeError = false;
+          try {
+            x.dropout(1.1);
+          } catch (err) {
+            rangeError = /out of range/.test(String(err));
+          }
+          assert(rangeError, "dropout must reject p outside [0,1]");
+          Tensor.manual_seed(11);
+          Tensor.training = true;
+          const dropped = x.dropout(0.25);
+          Tensor.manual_seed(11);
+          const expectedDropout = Tensor.randLike(x, { dtype: "float32", contiguous: false }).ge(0.25).contiguous().where(x, 0).div(0.75);
+          Tensor.training = false;
+          assert(dropped.uop.key === expectedDropout.uop.key, "dropout graph differs");
+          assertClose(await dropped.toArray(), await expectedDropout.toArray());
+          const q = new Tensor(Float32Array.from({ length: 12 }, (_, i) => i / 13)).reshape(1, 2, 2, 3);
+          const k = new Tensor(Float32Array.from({ length: 12 }, (_, i) => (i - 4) / 11)).reshape(1, 2, 2, 3);
+          const v = new Tensor(Float32Array.from({ length: 16 }, (_, i) => (i + 1) / 17)).reshape(1, 2, 2, 4);
+          const causal = q.scaledDotProductAttention(k, v, { isCausal: true });
+          const qk = q.matmul(k.transpose(-2, -1), false, "float32").div(Math.sqrt(3));
+          const mask = qk.constLike(1).cast("bool").tril().where(0, -Infinity);
+          const expectedCausal = qk.add(mask).cast(q.dtype).softmax(-1).matmul(v);
+          assert(causal.uop.key === expectedCausal.uop.key, "causal attention graph differs");
+          assertClose(await causal.toArray(), await expectedCausal.toArray());
+          const qg = new Tensor(Float32Array.from({ length: 24 }, (_, i) => i / 19)).reshape(1, 4, 2, 3);
+          const gqa = qg.scaledDotProductAttention(k, v, { enableGqa: true });
+          assertShape(gqa.shape, [1, 4, 2, 4]);
+          assertClose(await gqa.toArray(), [
+            0.17793298,
+            0.23675652,
+            0.29558003,
+            0.35440356,
+            0.18231565,
+            0.24113917,
+            0.2999627,
+            0.35878623,
+            0.18668212,
+            0.24550565,
+            0.3043292,
+            0.3631527,
+            0.1910204,
+            0.24984394,
+            0.30866745,
+            0.36749098,
+            0.66590714,
+            0.72473067,
+            0.7835542,
+            0.8423777,
+            0.6701545,
+            0.7289781,
+            0.78780156,
+            0.84662515,
+            0.67434025,
+            0.7331638,
+            0.7919873,
+            0.8508109,
+            0.67845434,
+            0.73727787,
+            0.79610145,
+            0.8549249
+          ], 1e-5);
+        });
+        await test("permute resolves negative axes validates and preserves identity", async () => {
+          const x = new Tensor(Float32Array.from({ length: 24 }, (_, i) => i)).reshape(2, 3, 4);
+          const direct = x.permute(0, 2, 1);
+          const negative = x.permute(0, -1, 1);
+          assert(direct.uop.key === negative.uop.key, "negative permute graph differs");
+          assertShape(direct.shape, [2, 4, 3]);
+          assert(x.permute(0, 1, 2) === x, "identity permute must return self");
+          let invalid = false;
+          try {
+            x.permute(0, 0, 1);
+          } catch (err) {
+            invalid = /not a valid permutation/.test(String(err));
+          }
+          assert(invalid, "duplicate permute axes must fail");
+        });
         await test("sum all", async () => {
           const t = new Tensor([1, 2, 3]);
           const v = await t.sum().item();
           assert(Math.abs(v - 6) < 1e-4, `Expected 6, got ${v}`);
+        });
+        await testIf(supportsF64, "sum supports an explicit accumulation dtype", async () => {
+          const x = new Tensor(new Float32Array([1.25, -2, 0.5, 3, 0.25, -1.5])).reshape(2, 3);
+          const out = x.sum(1, false, "float64");
+          assert(out.dtype === "float64", `expected float64, got ${out.dtype}`);
+          assertClose(await out.toArray(), [-0.25, 1.75]);
         });
         await test("sum axis", async () => {
           const t = new Tensor([[1, 2], [3, 4]]);
@@ -2137,6 +2373,25 @@
           const a = new Tensor([[1, 2], [3, 4]]);
           const b = new Tensor([[5, 6], [7, 8]]);
           assertClose(await a.dot(b).toArray(), [19, 22, 43, 50]);
+        });
+        await testIf(supportsF64, "dot supports an explicit accumulation dtype", async () => {
+          const a = new Tensor(new Float32Array([1.25, -2, 0.5, 3, 0.25, -1.5])).reshape(2, 3);
+          const b = new Tensor(new Float32Array([0.5, -1, 2, 0.25, -0.75, 3])).reshape(3, 2);
+          const out = a.dot(b, "float64");
+          assert(out.dtype === "float64", `expected float64, got ${out.dtype}`);
+          assertClose(await out.toArray(), [-3.75, -0.25, 3.125, -7.4375]);
+        });
+        await test("vector dot is scalar", async () => {
+          const scalar = new Tensor(new Float32Array([1, 2, 3])).dot(new Tensor(new Float32Array([4, 5, 6])));
+          assert(scalar.shape.length === 0, `expected scalar shape, got ${JSON.stringify(scalar.shape)}`);
+        });
+        await testIf(supportsF16, "mixed float16 float32 dot promotes to float32", async () => {
+          const mixedA = new Tensor([1.25, -2, 0.5, 3, 0.25, -1.5]).reshape(2, 3).cast("float16");
+          const mixedB = new Tensor([0.5, -1, 2, 0.25, -0.75, 3]).reshape(3, 2);
+          const mixed = mixedA.dot(mixedB);
+          assert(mixed.dtype === "float32", `expected mixed dot float32, got ${mixed.dtype}`);
+          assert(mixed.uop.op === mixed.uop.ffi.__polygradOps.RESHAPE, "expected mixed dot RESHAPE");
+          assertClose(await mixed.toArray(), [-3.75, -0.25, 3.125, -7.4375], 1e-5);
         });
         await test("matmul shape mismatch throws", async () => {
           const a = new Tensor([[1, 2], [3, 4]]);
@@ -3003,6 +3258,29 @@
           }
           assert(rejected, "uniform should reject an empty interval");
         });
+        await test("scaled_uniform matches the pinned initializer expression", async () => {
+          Tensor.manual_seed(42);
+          const actual = Tensor.scaled_uniform(2, 3);
+          Tensor.manual_seed(42);
+          const expected = Tensor.uniform(2, 3, { low: -1, high: 1 }).mul(6 ** -0.5);
+          const [a, b] = await Promise.all([actual.toArray(), expected.toArray()]);
+          assert(
+            a.length === b.length && a.every((value, i) => value === b[i]),
+            "scaled_uniform values must match the pinned expression"
+          );
+        });
+        await test("glorot_uniform matches the pinned initializer expression", async () => {
+          const bound = Math.sqrt(6 / (2 + 3));
+          Tensor.manual_seed(42);
+          const actual = Tensor.glorot_uniform(2, 3);
+          Tensor.manual_seed(42);
+          const expected = Tensor.uniform(2, 3, { low: -bound, high: bound });
+          const [a, b] = await Promise.all([actual.toArray(), expected.toArray()]);
+          assert(
+            a.length === b.length && a.every((value, i) => value === b[i]),
+            "glorot_uniform values must match the pinned expression"
+          );
+        });
         await test("randn gaussian", async () => {
           Tensor.manual_seed(99);
           const t = Tensor.randn(1e3);
@@ -3280,6 +3558,27 @@
           assertShape(conv.shape, [1, 3, 6, 2]);
           assertClose(await conv.toArray(), expected, 1e-4);
         });
+        await testIf(supportsF16, "conv2d dtype promotion and accumulation match pinned", async () => {
+          const x = new Tensor(Float32Array.from({ length: 9 }, (_, i) => i / 8)).reshape(1, 1, 3, 3).cast("float16");
+          const weightData = Float32Array.from([0.25, -0.5, 0.75, 0.125]);
+          const wHalf = new Tensor(weightData).reshape(1, 1, 2, 2).cast("float16");
+          const wFloat = new Tensor(weightData).reshape(1, 1, 2, 2);
+          const bHalf = new Tensor(new Float32Array([0.0625])).cast("float16");
+          const bFloat = new Tensor(new Float32Array([0.0625]));
+          const mixed = x.conv2d(wFloat, bFloat);
+          const halfDefault = x.conv2d(wHalf, bHalf);
+          const halfExplicit = x.conv2d(wHalf, bHalf, { dtype: "float32" });
+          const halfFloatBias = x.conv2d(wHalf, bFloat);
+          assert(mixed.dtype === "float32", `expected float32, got ${mixed.dtype}`);
+          assert(halfDefault.dtype === "float16", `expected float16, got ${halfDefault.dtype}`);
+          assert(halfExplicit.dtype === "float32", `expected float32, got ${halfExplicit.dtype}`);
+          assert(halfFloatBias.dtype === "float32", `expected float32, got ${halfFloatBias.dtype}`);
+          const expected = [0.34375, 0.421875, 0.578125, 0.65625];
+          assertClose(await mixed.toArray(), expected, 0);
+          assertClose(await halfDefault.toArray(), expected, 0);
+          assertClose(await halfExplicit.toArray(), expected, 0);
+          assertClose(await halfFloatBias.toArray(), expected, 0);
+        });
         await test("conv2d padded 3x3 4x4 devectorize regression", async () => {
           const padded = Tensor.arange(16, { dtype: "float32" }).reshape(1, 1, 4, 4).conv2d(Tensor.ones(1, 1, 3, 3), null, 1, 1, 1, 1);
           assertShape(padded.shape, [1, 1, 4, 4]);
@@ -3317,6 +3616,41 @@
           loss.backward();
           assert(mod.weight.grad !== null, "Conv2d weight grad missing");
           assert(mod.bias.grad !== null, "Conv2d bias grad missing");
+        });
+        await test("nn GroupNorm matches pinned layernorm composition", async () => {
+          const mod = new pg.nn.GroupNorm(2, 4);
+          const x = Tensor.arange(32, { dtype: "float32" }).reshape(1, 4, 2, 4).div(11);
+          const out = mod.call(x);
+          assertShape(out.shape, [1, 4, 2, 4]);
+          const values = await out.toArray();
+          for (let group = 0; group < 2; group++) {
+            const start = group * 16;
+            const mean = values.slice(start, start + 16).reduce((a, b) => a + b, 0) / 16;
+            assert(Math.abs(mean) < 1e-5, `GroupNorm group ${group} mean ${mean}`);
+          }
+          out.sum().backward();
+          assert(mod.weight.grad !== null, "GroupNorm weight grad missing");
+          assert(mod.bias.grad !== null, "GroupNorm bias grad missing");
+        });
+        await test("nn LayerNorm2d matches pinned NHWC composition", async () => {
+          const mod = new pg.nn.LayerNorm2d(3);
+          const input = Array.from({ length: 24 }, (_, i) => (i - 7) / 5);
+          const out = mod.call(new Tensor(input).reshape(2, 3, 2, 2));
+          assertShape(out.shape, [2, 3, 2, 2]);
+          assert(out.uop.op === pg._core.ops.PERMUTE, "LayerNorm2d root must be PERMUTE");
+          assert(countGraphOp(out.uop, pg._core.ops.PERMUTE) === 2, "expected two PERMUTEs");
+          assert(countGraphOp(out.uop, pg._core.ops.REDUCE) === 2, "expected two REDUCE nodes");
+          const values = await out.toArray();
+          for (let n = 0; n < 2; n++) for (let h = 0; h < 2; h++) for (let w = 0; w < 2; w++) {
+            const lanes = Array.from({ length: 3 }, (_, c) => values[((n * 3 + c) * 2 + h) * 2 + w]);
+            const mean = lanes.reduce((a, b) => a + b, 0) / lanes.length;
+            const variance = lanes.reduce((a, b) => a + b * b, 0) / lanes.length;
+            assert(Math.abs(mean) < 1e-5, `LayerNorm2d mean ${mean}`);
+            assert(Math.abs(variance - 1) < 1e-4, `LayerNorm2d variance ${variance}`);
+          }
+          out.sum().backward();
+          assert(mod.weight.grad !== null, "LayerNorm2d weight grad missing");
+          assert(mod.bias.grad !== null, "LayerNorm2d bias grad missing");
         });
         await test("layernorm", async () => {
           const t = new Tensor([[1, 2, 3], [4, 5, 6]]);
@@ -3488,6 +3822,49 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
           inst.dispose();
         }
       }
+      async function checkModuleDeviceMap(pg, Instance) {
+        const Tensor = pg.Tensor;
+        const x = Tensor.empty([2]);
+        const webgpu = String(pg.device).toLowerCase() === "webgpu";
+        const w0 = webgpu ? null : new Tensor([3, 4], { dtype: "float32", requiresGrad: true });
+        const w1 = webgpu ? null : new Tensor([2, 3], { dtype: "float32", requiresGrad: true });
+        const hidden = webgpu ? x.add(3) : x.add(w0);
+        const output = webgpu ? hidden.mul(2) : hidden.mul(w1);
+        const inst = await Instance.fromTensors({
+          inputs: { x },
+          outputs: { output },
+          params: webgpu ? null : { "layers.0.weight": w0, "layers.1.weight": w1 },
+          modules: [
+            { name: "layers.0", inputs: [x], output: hidden },
+            { name: "layers.1", inputs: [hidden], output }
+          ]
+        });
+        const first = String(pg.device).toUpperCase();
+        const second = first === "INTERP" ? "WASM" : "INTERP";
+        const place = async (map) => {
+          if (webgpu) await inst.setDeviceMapAsync(map);
+          else inst.setDeviceMap(map);
+        };
+        const forward = (input) => webgpu ? inst.forwardAsync(input) : inst.forward(input);
+        const expected = webgpu ? [8, 10] : [8, 18];
+        try {
+          await place({ "layers.0": first, "layers.1": second });
+          let result = await forward({ x: new Float32Array([1, 2]) });
+          assertClose(result.output, expected);
+          let rejected = false;
+          try {
+            await place({ "layers.0": first });
+          } catch (err) {
+            rejected = /incomplete|device map/.test(String(err.message || err));
+          }
+          assert(rejected, "expected incomplete device map to fail");
+          await place({ "layers.0": second, "layers.1": first });
+          result = await forward({ x: new Float32Array([1, 2]) });
+          assertClose(result.output, expected);
+        } finally {
+          inst.dispose();
+        }
+      }
       async function runInstanceTests(pg) {
         const Instance = pg.Instance;
         const { MLP, TabM, NAM } = pg.models;
@@ -3513,6 +3890,9 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
         console.log("\n== Instance ==");
         await test("typed integer input preserves bytes and rejects float binding", async () => {
           await checkTypedIntegerInput(pg, Instance);
+        });
+        await test("module device map places exact Tensor cuts atomically", async () => {
+          await checkModuleDeviceMap(pg, Instance);
         });
         await test("model-family constructors are not Instance methods", async () => {
           assert(typeof Instance.mlp === "undefined", "Instance.mlp should not exist");
@@ -3903,6 +4283,9 @@ Instance tests: ${passed} passed, ${failed} failed`);
         console.log("\n== Instance ==");
         await test("typed integer input preserves bytes and rejects float binding", async () => {
           await checkTypedIntegerInput(pg, Instance);
+        });
+        await test("webgpu module device map places exact Tensor cuts atomically", async () => {
+          await checkModuleDeviceMap(pg, Instance);
         });
         await test("webgpu mlp forward smoke", async () => {
           const inst = MLP({

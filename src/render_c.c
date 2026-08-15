@@ -579,15 +579,14 @@ PolyUOp *poly_apply_control_flow(PolyCtx *ctx, PolyUOp *sink) {
   if (failed) result = NULL;
 
 #ifndef NDEBUG
-  /* Verify RANGE invariant: src[0] is always the bound (CONST or DEFINE_VAR),
-   * additional sources from control-flow edges are ordering-only. */
+  /* Pinned RANGE accepts any same-dtype sint bound expression; additional
+   * sources from control-flow edges are ordering-only (uop/spec.py:73-76). */
   for (int i = 0; i < n; i++) {
     if (memo[i] && memo[i]->op == POLY_OP_RANGE && memo[i]->n_src > 0) {
       PolyUOp *bound = memo[i]->src[0];
-      if (bound->op != POLY_OP_CONST && bound->op != POLY_OP_DEFINE_VAR) {
+      if (!poly_dtype_eq(bound->dtype, memo[i]->dtype)) {
         fprintf(
-            stderr, "cf_rewrite: RANGE[%d] src[0] is %s, expected CONST or DEFINE_VAR\n", i,
-            poly_op_name(bound->op)
+            stderr, "cf_rewrite: RANGE[%d] bound dtype differs from RANGE dtype\n", i
         );
       }
     }
@@ -1024,14 +1023,11 @@ PolyUOp **poly_linearize_rewritten(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
     }
     /* Remove ended ranges */
     apply_uop_ended_ranges(r, u, topo, &idx, ranges, words);
-    /* RANGE: add self. Assert src[0] is the bound — additional sources
-     * from poly_apply_control_flow are control-flow ordering only. */
+    /* RANGE source 0 is any same-dtype sint bound expression; additional
+     * sources are control-flow ordering only (uop/spec.py:73-76). */
     if (u->op == POLY_OP_RANGE) {
       assert(u->n_src >= 1 && "RANGE must have at least one source (bound)");
-      assert(
-          (u->src[0]->op == POLY_OP_CONST || u->src[0]->op == POLY_OP_DEFINE_VAR) &&
-          "RANGE.src[0] must be CONST or DEFINE_VAR (bound)"
-      );
+      assert(poly_dtype_eq(u->dtype, u->src[0]->dtype) && "RANGE bound dtype must match");
       bitset_set(r, i);
     }
   }
@@ -1056,9 +1052,18 @@ PolyUOp **poly_linearize_rewritten(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
       while (bits) {
         int bit = __builtin_ctzll(bits);
         int b = w * 64 + bit;
-        if (b < n && topo[b]->op == POLY_OP_RANGE && topo[b]->n_src > 0 &&
-            topo[b]->src[0]->op == POLY_OP_CONST)
-          run_count[i] *= topo[b]->src[0]->arg.i;
+        if (b < n && topo[b]->op == POLY_OP_RANGE && topo[b]->n_src > 0) {
+          /* Literal pinned priority is int(range.vmax)+1, not only a literal
+           * CONST bound (codegen/late/linearizer.py:19-20). */
+          int64_t rmin = 0, rmax = 0;
+          poly_uop_minmax(ctx, topo[b], &rmin, &rmax);
+          int64_t extent = rmax == INT64_MAX ? INT64_MAX : rmax + 1;
+          int64_t product = 0;
+          if (__builtin_mul_overflow(run_count[i], extent, &product))
+            run_count[i] = INT64_MAX;
+          else
+            run_count[i] = product;
+        }
         bits &= bits - 1;
       }
     }

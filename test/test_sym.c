@@ -798,6 +798,189 @@ TEST(sym, combined_rewrite) {
   PASS();
 }
 
+TEST(sym, shifted_cmplt_bound_matches_pinned_symbolic) {
+  /* Pinned tinygrad/uop/symbolic.py:261 rewrites
+   *   (x + -2) < 3  ->  x < 5
+   * through the commutative ADD pattern. Assert exact source identity and
+   * constant topology, not only equivalent boolean values. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_uop0(
+      ctx, POLY_OP_DEFINE_VAR, POLY_INDEX, poly_arg_define_var("shifted_bound", 0, 40)
+  );
+  PolyUOp *minus_two = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(-2));
+  PolyUOp *three = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(3));
+  PolyUOp *shifted =
+      poly_uop2(ctx, POLY_OP_ADD, POLY_INDEX, x, minus_two, poly_arg_none());
+  PolyUOp *cmp =
+      poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, shifted, three, poly_arg_none());
+
+  PolyUOp *rewritten = poly_graph_rewrite(ctx, cmp, poly_symbolic());
+  ASSERT_NOT_NULL(rewritten);
+  ASSERT_INT_EQ(rewritten->op, POLY_OP_CMPLT);
+  ASSERT_INT_EQ(rewritten->n_src, 2);
+  ASSERT_PTR_EQ(rewritten->src[0], x);
+  ASSERT_INT_EQ(rewritten->src[1]->op, POLY_OP_CONST);
+  ASSERT_TRUE(integer_const_eq(rewritten->src[1], "5"));
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(sym, weak_index_lt_folding_matches_pinned_topology) {
+  /* Pinned tinygrad/uop/symbolic.py:174-178,290 rewrites
+   *   RANGE_reduce*2 + RANGE_loop < 2  ->  RANGE_reduce < 1
+   * because the unit-factor remainder lies exactly in [0,2). This is the
+   * validity coordinate reached by ResNet18 conv1.weight backward CALL 99. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *two = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(2));
+  PolyUOp *reduce = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_INDEX, two, poly_arg_range(1, POLY_AXIS_REDUCE)
+  );
+  PolyUOp *loop = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_INDEX, two, poly_arg_range(8, POLY_AXIS_LOOP)
+  );
+  PolyUOp *scaled =
+      poly_uop2(ctx, POLY_OP_MUL, POLY_INDEX, reduce, two, poly_arg_none());
+  PolyUOp *lhs =
+      poly_uop2(ctx, POLY_OP_ADD, POLY_INDEX, scaled, loop, poly_arg_none());
+  PolyUOp *cmp =
+      poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, lhs, two, poly_arg_none());
+
+  PolyUOp *rewritten = poly_graph_rewrite(ctx, cmp, poly_symbolic());
+  ASSERT_NOT_NULL(rewritten);
+  ASSERT_INT_EQ(rewritten->op, POLY_OP_CMPLT);
+  ASSERT_INT_EQ(rewritten->n_src, 2);
+  ASSERT_PTR_EQ(rewritten->src[0], reduce);
+  ASSERT_TRUE(integer_const_eq(rewritten->src[1], "1"));
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(sym, weak_index_lt_folding_requires_pinned_range_and_gcd_proofs) {
+  /* Pinned lt_folding returns None when the unit remainder reaches d or the
+   * common divisor is one. Assert the original root survives in both cases. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *two = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(2));
+  PolyUOp *three = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(3));
+  PolyUOp *reduce = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_INDEX, two, poly_arg_range(1, POLY_AXIS_REDUCE)
+  );
+  PolyUOp *wide_remainder = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_INDEX, three, poly_arg_range(8, POLY_AXIS_LOOP)
+  );
+  PolyUOp *mul_two =
+      poly_uop2(ctx, POLY_OP_MUL, POLY_INDEX, reduce, two, poly_arg_none());
+  PolyUOp *range_lhs =
+      poly_uop2(ctx, POLY_OP_ADD, POLY_INDEX, mul_two, wide_remainder, poly_arg_none());
+  PolyUOp *range_cmp =
+      poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, range_lhs, two, poly_arg_none());
+  ASSERT_PTR_EQ(poly_graph_rewrite(ctx, range_cmp, poly_symbolic()), range_cmp);
+
+  PolyUOp *loop = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_INDEX, two, poly_arg_range(9, POLY_AXIS_LOOP)
+  );
+  PolyUOp *mul_three =
+      poly_uop2(ctx, POLY_OP_MUL, POLY_INDEX, reduce, three, poly_arg_none());
+  PolyUOp *gcd_lhs =
+      poly_uop2(ctx, POLY_OP_ADD, POLY_INDEX, mul_three, loop, poly_arg_none());
+  PolyUOp *gcd_cmp =
+      poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, gcd_lhs, two, poly_arg_none());
+  ASSERT_PTR_EQ(poly_graph_rewrite(ctx, gcd_cmp, poly_symbolic()), gcd_cmp);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(sym, weak_index_lt_folding_preserves_arbitrary_precision_factors) {
+  /* Python ints are unbounded. Prove the same topology above int64 using
+   * d=2**64, rather than truncating the factor or comparison bound. */
+  PolyCtx *ctx = poly_ctx_new();
+  const uint32_t two_to_64_limbs[] = {0, 0, 1};
+  PolyUOp *two_to_64 = poly_uop0(
+      ctx, POLY_OP_CONST, POLY_INDEX,
+      poly_arg_bigint(1, two_to_64_limbs, 3)
+  );
+  PolyUOp *two = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(2));
+  PolyUOp *reduce = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_INDEX, two, poly_arg_range(1, POLY_AXIS_REDUCE)
+  );
+  PolyUOp *loop = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_INDEX, two, poly_arg_range(8, POLY_AXIS_LOOP)
+  );
+  PolyUOp *scaled = poly_uop2(
+      ctx, POLY_OP_MUL, POLY_INDEX, reduce, two_to_64, poly_arg_none()
+  );
+  PolyUOp *lhs =
+      poly_uop2(ctx, POLY_OP_ADD, POLY_INDEX, scaled, loop, poly_arg_none());
+  PolyUOp *cmp = poly_uop2(
+      ctx, POLY_OP_CMPLT, POLY_BOOL, lhs, two_to_64, poly_arg_none()
+  );
+
+  PolyUOp *rewritten = poly_graph_rewrite(ctx, cmp, poly_symbolic());
+  ASSERT_NOT_NULL(rewritten);
+  ASSERT_INT_EQ(rewritten->op, POLY_OP_CMPLT);
+  ASSERT_INT_EQ(rewritten->n_src, 2);
+  ASSERT_PTR_EQ(rewritten->src[0], reduce);
+  ASSERT_TRUE(integer_const_eq(rewritten->src[1], "1"));
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(sym, validity_priority_sort_is_not_output_topology) {
+  /* Pinned tinygrad/uop/symbolic.py:374-383 sorts only the working clause
+   * order. If no clause is deduplicated or simplified, simplify_valid returns
+   * None and preserves this grouped condition exactly. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *end18 = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(18));
+  PolyUOp *end7 = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(7));
+  PolyUOp *r = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_INDEX, end18, poly_arg_range(3, POLY_AXIS_PLACEHOLDER)
+  );
+  PolyUOp *q = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_INDEX, end7, poly_arg_range(4, POLY_AXIS_PLACEHOLDER)
+  );
+  PolyUOp *two = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(2));
+  PolyUOp *x = poly_uop2(
+      ctx, POLY_OP_ADD, POLY_INDEX,
+      poly_uop2(ctx, POLY_OP_MUL, POLY_INDEX, r, two, poly_arg_none()), q,
+      poly_arg_none()
+  );
+  PolyUOp *truth = poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_bool(true));
+  PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(1));
+  PolyUOp *five = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(5));
+  PolyUOp *seventeen = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(17));
+  PolyUOp *thirty_seven =
+      poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(37));
+  PolyUOp *x_lo = poly_uop2(
+      ctx, POLY_OP_CMPNE, POLY_BOOL,
+      poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, x, five, poly_arg_none()), truth,
+      poly_arg_none()
+  );
+  PolyUOp *x_hi =
+      poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, x, thirty_seven, poly_arg_none());
+  PolyUOp *r_lo = poly_uop2(
+      ctx, POLY_OP_CMPNE, POLY_BOOL,
+      poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, r, one, poly_arg_none()), truth,
+      poly_arg_none()
+  );
+  PolyUOp *r_hi =
+      poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, r, seventeen, poly_arg_none());
+  PolyUOp *x_valid =
+      poly_uop2(ctx, POLY_OP_AND, POLY_BOOL, x_lo, x_hi, poly_arg_none());
+  PolyUOp *r_valid =
+      poly_uop2(ctx, POLY_OP_AND, POLY_BOOL, r_lo, r_hi, poly_arg_none());
+  PolyUOp *valid =
+      poly_uop2(ctx, POLY_OP_AND, POLY_BOOL, x_valid, r_valid, poly_arg_none());
+
+  ASSERT_TRUE(poly_pm_rewrite(poly_pm_simplify_valid(), ctx, valid) == NULL);
+  ASSERT_PTR_EQ(poly_graph_rewrite(ctx, valid, poly_pm_simplify_valid()), valid);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(sym, const_fold_mul_float) {
   /* 2.0 * 3.5 -> 7.0 */
   PolyCtx *ctx = poly_ctx_new();
@@ -1347,6 +1530,19 @@ TEST(sym, minmax_define_var_pos) {
 TEST(sym, minmax_define_var_mixed_sign) {
   PolyCtx *ctx = poly_ctx_new();
   check_mm(ctx, mk_dvar(ctx, "y", -3, 4), -3, 4, "DEFINE_VAR[-3..4]");
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+TEST(sym, minmax_bounded_param_matches_tinygrad) {
+  /* Pinned tinygrad UOp._min_max returns ParamArg.vmin_vmax directly
+   * (tinygrad/uop/ops.py:1010). */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyParamArg arg = {
+      .slot = 1, .name = "size", .min_val = 1, .max_val = 8,
+      .has_minmax = true, .addrspace = POLY_ADDR_GLOBAL};
+  PolyUOp *shape = poly_uop(ctx, POLY_OP_STACK, POLY_VOID, NULL, 0, poly_arg_none());
+  PolyUOp *param = poly_uop1(ctx, POLY_OP_PARAM, POLY_INDEX, shape, poly_arg_param(&arg));
+  check_mm(ctx, param, 1, 8, "PARAM[1..8]");
   poly_ctx_destroy(ctx);
   PASS();
 }

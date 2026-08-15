@@ -98,6 +98,7 @@ PolyUOp *poly_get_kernel_graph(PolyCtx *ctx, PolyUOp *sink);
 typedef enum {
   POLY_KERNEL_ITEM_COMPUTE = 0,
   POLY_KERNEL_ITEM_COPY = 1,
+  POLY_KERNEL_ITEM_CALL = 2,
 } PolyKernelItemKind;
 
 typedef struct {

@@ -47,7 +47,8 @@ static void schedule_restore_env(ScheduleEnvSave *s) {
 }
 
 static int expected_to_program_cache_entries(PolyCtx *ctx, int source_backend_entries) {
-  return poly_ctx_get_preferred_device(ctx) == POLY_DEVICE_INTERP ? 0 : source_backend_entries;
+  (void)ctx;
+  return source_backend_entries;
 }
 
 /* Helper: run same graph on CPU and INTERP, compare outputs */
@@ -481,7 +482,7 @@ TEST(schedule_runtime, programinfo_collects_special_launch_dims) {
   PASS();
 }
 
-TEST(schedule_runtime, compute_schedule_calls_are_program_backed) {
+TEST(schedule_runtime, compute_schedule_calls_are_raw_until_compile) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
 
@@ -499,16 +500,34 @@ TEST(schedule_runtime, compute_schedule_calls_are_program_backed) {
   ASSERT_INT_EQ(call->op, POLY_OP_CALL);
   ASSERT_TRUE(call->n_src >= 1);
   ASSERT_NOT_NULL(call->src[0]);
-  ASSERT_INT_EQ(call->src[0]->op, POLY_OP_PROGRAM);
-  ASSERT_NOT_NULL(poly_program_info(ctx, call->src[0]));
+  /* Pinned Tensor.schedule_linear retains CALL(SINK, ...); compile_linear is
+   * the sole SINK -> PROGRAM boundary (tensor.py:198-210;
+   * engine/realize.py:244-267). */
+  ASSERT_INT_EQ(call->src[0]->op, POLY_OP_SINK);
   ASSERT_INT_EQ(poly_schedule_call_body(sched, 0)->op, POLY_OP_SINK);
+  PolyUOp *program = poly_schedule_call_to_program(ctx, sched, 0, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(program);
+  ASSERT_INT_EQ(program->op, POLY_OP_PROGRAM);
+  ASSERT_NOT_NULL(poly_program_info(ctx, program));
+  ASSERT_INT_EQ(call->src[0]->op, POLY_OP_SINK);
+  ASSERT_INT_EQ((int)poly_to_program_cache_len(ctx), 1);
+
+  PolyUOp *compiled = poly_compile_linear(ctx, sched, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(compiled);
+  ASSERT_INT_EQ(compiled->op, POLY_OP_LINEAR);
+  ASSERT_INT_EQ(compiled->n_src, 1);
+  ASSERT_INT_EQ(compiled->src[0]->op, POLY_OP_CALL);
+  ASSERT_PTR_EQ(compiled->src[0]->src[0], program);
+  ASSERT_PTR_EQ(poly_compile_linear(ctx, sched, POLY_DEVICE_CPU), compiled);
+  ASSERT_INT_EQ((int)poly_to_program_cache_len(ctx), 1);
+  ASSERT_INT_EQ(call->src[0]->op, POLY_OP_SINK);
 
   poly_schedule_free(sched);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
-TEST(schedule_runtime, compute_call_lower_rejects_raw_sink_body) {
+TEST(schedule_runtime, compute_call_lower_compiles_raw_sink_body) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
 
@@ -524,23 +543,19 @@ TEST(schedule_runtime, compute_call_lower_rejects_raw_sink_body) {
   PolyUOp *call = poly_schedule_call(sched, 0);
   ASSERT_NOT_NULL(call);
   ASSERT_TRUE(call->n_src >= 1);
-  ASSERT_INT_EQ(call->src[0]->op, POLY_OP_PROGRAM);
+  ASSERT_INT_EQ(call->src[0]->op, POLY_OP_SINK);
 
   PolyUOp *body = poly_schedule_call_body(sched, 0);
   ASSERT_NOT_NULL(body);
   ASSERT_INT_EQ(body->op, POLY_OP_SINK);
 
-  PolyUOp **src = malloc((size_t)call->n_src * sizeof(PolyUOp *));
-  ASSERT_NOT_NULL(src);
-  memcpy(src, call->src, (size_t)call->n_src * sizeof(PolyUOp *));
-  src[0] = body;
-  PolyUOp *raw_call = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, src, call->n_src, poly_arg_none());
-  free(src);
-  ASSERT_NOT_NULL(raw_call);
-
-  sched->template->linear->src[0] = raw_call;
-  sched->run->calls[0].call = raw_call;
-  ASSERT_INT_EQ(poly_schedule_call_lower(ctx, sched, 0, POLY_DEVICE_CPU), -1);
+  ASSERT_INT_EQ((int)poly_to_program_cache_len(ctx), 0);
+  ASSERT_INT_EQ(poly_schedule_call_lower(ctx, sched, 0, POLY_DEVICE_CPU), 0);
+  ASSERT_TRUE(sched->run->calls[0].prg_valid);
+  ASSERT_NOT_NULL(sched->run->calls[0].prg.program);
+  ASSERT_INT_EQ(sched->run->calls[0].prg.program->op, POLY_OP_PROGRAM);
+  ASSERT_INT_EQ((int)poly_to_program_cache_len(ctx), 1);
+  ASSERT_INT_EQ(call->src[0]->op, POLY_OP_SINK);
 
   poly_schedule_free(sched);
   poly_ctx_destroy(ctx);
@@ -644,7 +659,7 @@ TEST(schedule_runtime, runner_launch_uses_programinfo_metadata) {
   PolyUOp *call = poly_schedule_call(sched, 0);
   ASSERT_NOT_NULL(call);
   ASSERT_TRUE(call->n_src >= 1);
-  ASSERT_INT_EQ(call->src[0]->op, POLY_OP_PROGRAM);
+  ASSERT_INT_EQ(call->src[0]->op, POLY_OP_SINK);
 
   PolyUOp *program = poly_schedule_call_to_program(ctx, sched, 0, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(program);
@@ -2534,6 +2549,149 @@ TEST(schedule_runtime, copy_intermediate_slots_do_not_need_zero) {
   poly_compiled_schedule_free(plan);
 
   poly_schedule_free(ps);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+static PolyUOp *schedule_tuple_test_buffer(
+    PolyCtx *ctx, PolyOps unique_op, int unique_id, PolyUOp *device
+) {
+  PolyUOp *unique = poly_uop0(ctx, unique_op, POLY_VOID, poly_arg_int(unique_id));
+  PolyUOp *src[2] = {unique, device};
+  return unique && device
+             ? poly_uop(ctx, POLY_OP_BUFFER, POLY_FLOAT32, src, 2, poly_arg_int(4))
+             : NULL;
+}
+
+static PolyUOp *schedule_tuple_test_copy_body(PolyCtx *ctx) {
+  PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, 4, POLY_ADDR_GLOBAL);
+  PolyUOp *dst_param = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(0));
+  PolyUOp *src_param = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(1));
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(4));
+  PolyUOp *range =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INDEX, bound, poly_arg_range(0, POLY_AXIS_LOOP));
+  PolyUOp *dst = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, dst_param, range, poly_arg_none());
+  PolyUOp *src = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, src_param, range, poly_arg_none());
+  PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, src, poly_arg_none());
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, dst, load, poly_arg_none());
+  PolyUOp *end_src[2] = {store, range};
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
+  return end ? poly_sink1(ctx, end) : NULL;
+}
+
+static int schedule_tuple_values_match(PolyBuffer *output) {
+  const float expected[2][4] = {{1, 2, 3, 4}, {5, 6, 7, 8}};
+  const char *expected_devices[2] = {"CPU", "CPU:1"};
+  if (!output || !poly_buffer_is_multi(output) || output->n_bufs != 2) return -1;
+  for (int lane = 0; lane < 2; lane++) {
+    PolyBuffer *child = poly_buffer_multi_child(output, lane);
+    if (!child || !child->ptr || !child->valid || !child->device_uop ||
+        child->device_uop->arg.kind != POLY_ARG_STRING ||
+        strcmp(child->device_uop->arg.str, expected_devices[lane]) != 0)
+      return -2 - lane;
+    for (int i = 0; i < 4; i++)
+      if (((float *)child->ptr)[i] != expected[lane][i]) return -4 - lane * 4 - i;
+  }
+  return 0;
+}
+
+TEST(schedule_runtime, tuple_intermediate_is_multibuffer_in_direct_and_compiled_execution) {
+  /* Pinned UOp.new_buffer constructs a MultiBuffer for a tuple DEVICE, and
+   * memory_plan_rewrite retains the exact tuple key for an intermediate
+   * allocation (uop/ops.py:734-745,850-879; schedule/memory.py:20-63).
+   * resolve_params then executes one kernel per ordered child
+   * (engine/realize.py:142-180). */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  poly_ctx_set_preferred_device(ctx, POLY_DEVICE_CPU);
+
+  PolyUOp *cpu = poly_device_uop_from_name(ctx, "CPU");
+  PolyUOp *cpu1 = poly_device_uop_from_name(ctx, "CPU:1");
+  const char *names[2] = {"CPU", "CPU:1"};
+  PolyUOp *tuple = poly_device_uop_from_names(ctx, names, 2);
+  ASSERT_NOT_NULL(cpu);
+  ASSERT_NOT_NULL(cpu1);
+  ASSERT_NOT_NULL(tuple);
+
+  PolyUOp *left = schedule_tuple_test_buffer(ctx, POLY_OP_UNIQUE, 8101, cpu);
+  PolyUOp *right = schedule_tuple_test_buffer(ctx, POLY_OP_UNIQUE, 8102, cpu1);
+  ASSERT_NOT_NULL(left);
+  ASSERT_NOT_NULL(right);
+  const float left_values[4] = {1, 2, 3, 4};
+  const float right_values[4] = {5, 6, 7, 8};
+  ASSERT_INT_EQ(poly_buffer_allocate(ctx, left, POLY_DEVICE_CPU), 0);
+  ASSERT_INT_EQ(poly_buffer_allocate(ctx, right, POLY_DEVICE_CPU), 0);
+  ASSERT_INT_EQ(poly_buffer_copyin(ctx, left, left_values, sizeof(left_values)), 0);
+  ASSERT_INT_EQ(poly_buffer_copyin(ctx, right, right_values, sizeof(right_values)), 0);
+
+  PolyUOp *stack_src[2] = {left, right};
+  PolyUOp *stack = poly_uop(ctx, POLY_OP_MSTACK, POLY_FLOAT32, stack_src, 2, poly_arg_none());
+  PolyUOp *intermediate =
+      schedule_tuple_test_buffer(ctx, POLY_OP_LUNIQUE, 8103, tuple);
+  PolyUOp *output = schedule_tuple_test_buffer(ctx, POLY_OP_UNIQUE, 8104, tuple);
+  PolyUOp *body = schedule_tuple_test_copy_body(ctx);
+  ASSERT_NOT_NULL(stack);
+  ASSERT_NOT_NULL(intermediate);
+  ASSERT_NOT_NULL(output);
+  ASSERT_NOT_NULL(body);
+
+  PolyUOp *first_src[3] = {body, intermediate, stack};
+  PolyUOp *second_src[3] = {body, output, intermediate};
+  PolyUOp *first = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, first_src, 3, poly_arg_none());
+  PolyUOp *second = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, second_src, 3, poly_arg_none());
+  PolyUOp *linear_src[2] = {first, second};
+  PolyUOp *linear = poly_uop(ctx, POLY_OP_LINEAR, POLY_VOID, linear_src, 2, poly_arg_none());
+  PolySchedule *schedule = poly_create_schedule_from_linear(ctx, linear, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(schedule);
+  ASSERT_INT_EQ(schedule->template->n_calls, 2);
+
+  int tuple_intermediates = 0;
+  PolyUOp *planned_intermediate = NULL;
+  for (int i = 0; i < schedule->template->n_buf_slots; i++) {
+    PolyScheduleBufSlot *slot = &schedule->template->buf_slots[i];
+    if (!slot->is_intermediate) continue;
+    ASSERT_NOT_NULL(slot->device_uop);
+    if (slot->device_uop->arg.kind != POLY_ARG_STRING_TUPLE) continue;
+    tuple_intermediates++;
+    planned_intermediate = slot->buf_uop;
+    ASSERT_INT_EQ(slot->device_uop->arg.string_tuple.n, 2);
+    ASSERT_STR_EQ(slot->device_uop->arg.string_tuple.vals[0], "CPU");
+    ASSERT_STR_EQ(slot->device_uop->arg.string_tuple.vals[1], "CPU:1");
+    ASSERT_FALSE(slot->has_memory_parent);
+  }
+  ASSERT_INT_EQ(tuple_intermediates, 1);
+  ASSERT_NOT_NULL(planned_intermediate);
+  ASSERT_INT_EQ(planned_intermediate->op, POLY_OP_BUFFER);
+  ASSERT_INT_EQ(poly_schedule_call(schedule, 0)->src[1]->op, POLY_OP_BUFFER);
+  ASSERT_PTR_EQ(poly_schedule_call(schedule, 0)->src[1], poly_schedule_call(schedule, 1)->src[2]);
+
+  ASSERT_INT_EQ(poly_run_schedule(ctx, schedule, NULL, 0), 0);
+  PolyCtxStats direct_stats = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &direct_stats), 0);
+  ASSERT_INT_EQ(direct_stats.kernel_count, 4);
+  ASSERT_INT_EQ(poly_schedule_runtime_intermediate_bytes(schedule), 32);
+  PolyBuffer *output_handle = poly_uop_buffer_handle(ctx, output);
+  ASSERT_INT_EQ(schedule_tuple_values_match(output_handle), 0);
+
+  for (int lane = 0; lane < 2; lane++) {
+    PolyBuffer *child = poly_buffer_multi_child(output_handle, lane);
+    ASSERT_NOT_NULL(child);
+    memset(child->ptr, 0, child->nbytes);
+    child->valid = false;
+  }
+  PolyCompiledSchedule *compiled = poly_lower_schedule(ctx, schedule, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(compiled);
+  ASSERT_INT_EQ(compiled->template->n_calls, 2);
+  ASSERT_INT_EQ(poly_compiled_schedule_runtime_intermediate_bytes(compiled), 32);
+  poly_ctx_reset_counters(ctx);
+  ASSERT_INT_EQ(poly_run_compiled_schedule(compiled, NULL, 0, NULL, 0), 0);
+  PolyCtxStats compiled_stats = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &compiled_stats), 0);
+  ASSERT_INT_EQ(compiled_stats.kernel_count, 4);
+  ASSERT_INT_EQ(schedule_tuple_values_match(output_handle), 0);
+
+  poly_compiled_schedule_free(compiled);
+  poly_schedule_free(schedule);
   poly_ctx_destroy(ctx);
   PASS();
 }

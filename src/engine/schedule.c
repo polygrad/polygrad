@@ -74,10 +74,10 @@ PolyUOp *poly_uop_param(PolyCtx *ctx, int slot, PolyUOp *like) {
   PolyUOp *shape = poly_uop(ctx, POLY_OP_STACK, stack_dtype, dim_src, ndim, poly_arg_none());
   if (!shape) return NULL;
 
-  /* Pinned callify.replace_input_buffer passes b.device directly to UOp.param
-   * (tinygrad/callify.py:183-187). Preserve both scalar and ordered tuple
-   * DEVICE identities; reducing a tuple through poly_uop_device_name makes a
-   * surrounding MULTI shape-invalid before multi_pm can lower it. */
+  /* Pinned callify.replace_input_buffer passes b.shape and b.device directly
+   * to UOp.param without an axis (tinygrad/callify.py:183-187). Preserve both
+   * scalar and ordered tuple DEVICE identities here; axis-bearing param_like
+   * construction is a distinct FUNCTION/multi boundary. */
   PolyUOp *device = poly_uop_device_uop_cached(ctx, like, NULL);
 
   PolyParamArg param_arg = {
@@ -2069,9 +2069,15 @@ static int poly_schedule_memory_plan(PolyCtx *ctx, PolySchedule *sched) {
       cap_items = new_cap;
     }
     slot_to_item[s] = n_items;
-    PolyDevice item_device = poly_intermediate_slot_runtime_device(ctx, sched, s, schedule_device);
     PolyUOp *item_device_uop = slot->device_uop;
-    if (!item_device_uop || poly_device_from_device_uop(item_device_uop) != item_device)
+    bool tuple_device = item_device_uop && item_device_uop->op == POLY_OP_DEVICE &&
+                        item_device_uop->arg.kind == POLY_ARG_STRING_TUPLE;
+    PolyDevice item_device = tuple_device
+                                 ? POLY_DEVICE_AUTO
+                                 : poly_intermediate_slot_runtime_device(
+                                       ctx, sched, s, schedule_device);
+    if (!tuple_device &&
+        (!item_device_uop || poly_device_from_device_uop(item_device_uop) != item_device))
       item_device_uop = poly_device_uop(ctx, item_device);
     items[n_items++] = (PolyMemItem){
         .slot = s,
@@ -2182,7 +2188,14 @@ static int poly_schedule_memory_plan(PolyCtx *ctx, PolySchedule *sched) {
   for (int l = 0; l < n_lanes; l++) {
     size_t arena_size = poly_round_up_size(lanes[l].peak, 256);
     if (arena_size == 0) arena_size = 256;
-    PolyUOp *arena = poly_buffer(ctx, POLY_UINT8, (int64_t)arena_size);
+    PolyUOp *arena_unique = poly_uop0(
+        ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(poly_ctx_next_unique_id(ctx)));
+    PolyUOp *arena_src[2] = {arena_unique, lanes[l].device_uop};
+    PolyUOp *arena = arena_unique && lanes[l].device_uop
+                         ? poly_uop(
+                               ctx, POLY_OP_BUFFER, POLY_UINT8, arena_src, 2,
+                               poly_arg_int((int64_t)arena_size))
+                         : NULL;
     if (!arena) goto fail_after_resize;
     int slot = n_slots_orig + l;
     lanes[l].arena_slot = slot;
@@ -2942,6 +2955,25 @@ static bool schedule_order_shaped_param_externals(PolyUOp **items, int n) {
   return ok;
 }
 
+/* A shaped-PARAM function's caller supplies only its ordered PARAM slots.
+ * Ordinary BUFFERs created while lowering that function are literal schedule
+ * storage, not extra function arguments. This is the C counterpart of pinned
+ * lower_sink_to_linear(function) followed by pm_resolve_linear_call, whose
+ * PARAM matcher alone indexes linear_call.src[1:] (schedule/__init__.py:80-90). */
+static bool schedule_prepare_external_order(PolyUOp **items, int *n) {
+  if (!n || *n < 0 || (*n > 0 && !items)) return false;
+  bool has_shaped_param = false;
+  for (int i = 0; i < *n; i++)
+    if (poly_uop_is_shaped_value_param(items[i])) has_shaped_param = true;
+  if (has_shaped_param) {
+    int out = 0;
+    for (int i = 0; i < *n; i++)
+      if (poly_uop_is_shaped_value_param(items[i])) items[out++] = items[i];
+    *n = out;
+  }
+  return schedule_order_shaped_param_externals(items, *n);
+}
+
 static bool collect_external_buf_order_from_kernel_graph(
     PolyUOp *kernel_graph,
     PolyUOp ***out_buf_order,
@@ -2962,7 +2994,7 @@ static bool collect_external_buf_order_from_kernel_graph(
     for (int i = 0; i < n_all; i++) {
       if (!is_intermediate_buffer_uop(all_stack[i])) stack_buf_order[n_external++] = all_stack[i];
     }
-    if (!schedule_order_shaped_param_externals(stack_buf_order, n_external)) return false;
+    if (!schedule_prepare_external_order(stack_buf_order, &n_external)) return false;
     *out_n_external = n_external;
     return true;
   }
@@ -2973,7 +3005,7 @@ static bool collect_external_buf_order_from_kernel_graph(
   for (int i = 0; i < n_all; i++) {
     if (!is_intermediate_buffer_uop(all_bufs[i])) all_bufs[n_external++] = all_bufs[i];
   }
-  if (!schedule_order_shaped_param_externals(all_bufs, n_external)) {
+  if (!schedule_prepare_external_order(all_bufs, &n_external)) {
     free(all_bufs);
     return false;
   }
@@ -3064,19 +3096,22 @@ static int collect_bind_defaults(
   return n;
 }
 
+/* Pinned create_schedule first applies `_unwrap_src` before reading
+ * `buf_uop`, so INDEX/view/cast wrappers cannot hide MSELECT/MSTACK argument
+ * structure (schedule/__init__.py:10-12,61-64). BUFFER_VIEW is Polygrad's
+ * schedule-stage SLICE adapter and remains a concrete storage stop point. */
+static PolyUOp *schedule_unwrap_src(PolyUOp *u) {
+  while (u && u->n_src > 0 && u->op != POLY_OP_AFTER &&
+         u->op != POLY_OP_BUFFER && u->op != POLY_OP_PARAM &&
+         u->op != POLY_OP_BUFFER_VIEW && u->op != POLY_OP_MSELECT &&
+         u->op != POLY_OP_MSTACK && u->op != POLY_OP_BIND)
+    u = u->src[0];
+  return u;
+}
+
 static PolyUOp *schedule_binding_buf_uop(PolyUOp *binding) {
+  binding = schedule_unwrap_src(binding);
   if (!binding) return NULL;
-  /* Pinned exec_view binds a distinct SLICE result Buffer.view using the
-   * selected size and base offset (engine/realize.py:149-154;
-   * uop/ops.py:838-860). Polygrad's schedule-stage counterpart is
-   * BUFFER_VIEW, so retain it as a storage identity while peeling other
-   * INDEX/movement wrappers and preserving aggregate stop points. */
-  while (binding->n_src > 0 && binding->op != POLY_OP_AFTER &&
-         binding->op != POLY_OP_BUFFER && binding->op != POLY_OP_PARAM &&
-         binding->op != POLY_OP_BUFFER_VIEW &&
-         binding->op != POLY_OP_MSELECT && binding->op != POLY_OP_MSTACK &&
-         binding->op != POLY_OP_BIND)
-    binding = binding->src[0];
 
   /* Polygrad's split result retains AFTER for ordering; executable schedule
    * slots bind the same target storage selected by pinned UOp.buf_uop. */
@@ -3142,6 +3177,8 @@ static PolyUOp *schedule_call_arg_for_binding(
     const PolySchedule *sched
 ) {
   if (!ctx || !binding || !sched) return NULL;
+  binding = schedule_unwrap_src(binding);
+  if (!binding) return NULL;
   if (binding->op == POLY_OP_MSTACK) {
     if (binding->n_src == 0) return NULL;
     PolyUOp **src = malloc((size_t)binding->n_src * sizeof(*src));
@@ -3218,6 +3255,8 @@ static PolyUOp *linear_call_parameterize_arg(
     int n_external
 ) {
   if (!ctx || !arg) return NULL;
+  arg = schedule_unwrap_src(arg);
+  if (!arg) return NULL;
   if (poly_call_arg_is_var(arg)) return arg;
   if (arg->op == POLY_OP_MSTACK || arg->op == POLY_OP_MSELECT) {
     if (arg->n_src <= 0 || (arg->op == POLY_OP_MSELECT && arg->n_src != 1)) return NULL;
@@ -3351,8 +3390,8 @@ static bool linear_replay_arg_is_external_param(PolyUOp *arg, int *slot_out) {
 static PolyUOp *linear_replay_new_intermediate(PolyCtx *ctx, PolyUOp *old_buf) {
   if (!ctx || !old_buf || old_buf->op != POLY_OP_BUFFER) return NULL;
   int64_t id = poly_ctx_next_unique_id(ctx);
-  PolyUOp *lunique = poly_uop0(ctx, POLY_OP_LUNIQUE, POLY_VOID, poly_arg_int(id));
-  if (!lunique) return NULL;
+  PolyUOp *unique = poly_uop0(ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(id));
+  if (!unique) return NULL;
   /* Pinned resolve_params preserves each template BUFFER's exact `.device`
    * identity (engine/realize.py:142-147). A backend enum cannot distinguish
    * CPU from CPU:1 (or future accelerator ordinals), so replay the canonical
@@ -3360,7 +3399,7 @@ static PolyUOp *linear_replay_new_intermediate(PolyCtx *ctx, PolyUOp *old_buf) {
   PolyUOp *dev = poly_uop_device_uop_cached(ctx, old_buf, NULL);
   if (!dev) dev = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_none());
   if (!dev) return NULL;
-  PolyUOp *src[2] = {lunique, dev};
+  PolyUOp *src[2] = {unique, dev};
   return poly_uop(ctx, POLY_OP_BUFFER, old_buf->dtype, src, 2, old_buf->arg);
 }
 
@@ -3462,7 +3501,7 @@ static int linear_replay_collect_arg_intermediates(
       if (external_slot < 0 || external_slot >= n_external) goto cleanup;
       continue;
     }
-    if (!arg || arg->op != POLY_OP_BUFFER) {
+    if (!arg || (arg->op != POLY_OP_BUFFER && arg->op != POLY_OP_BUFFER_VIEW)) {
       if (poly_debug_at_least(7))
         fprintf(
             stderr, "[polygrad:linear-replay] reject call=%d arg=%d op=%s\n", call_index,
@@ -3470,7 +3509,10 @@ static int linear_replay_collect_arg_intermediates(
         );
       goto cleanup;
     }
-    if (linear_replay_add_intermediate(
+    /* Pinned pm_post_sched_cache rewrites only BUFFER(LUNIQUE, DEVICE).
+     * Ordinary UNIQUE buffers and views are retained literally. */
+    if (is_intermediate_buffer_uop(arg) &&
+        linear_replay_add_intermediate(
             ctx, cache_entry, items, n_items, cap_items, arg
         ) < 0)
       goto cleanup;
@@ -3539,7 +3581,8 @@ static PolyUOp *linear_replay_resolve_arg(
   if (linear_replay_arg_is_external_param(arg, &external_slot))
     return (external_slot >= 0 && external_slot < n_external) ? external_bufs[external_slot] : NULL;
   int idx = linear_replay_intermediate_index(items, n_items, arg);
-  return (idx >= 0) ? items[idx].new_buf : NULL;
+  if (idx >= 0) return items[idx].new_buf;
+  return (arg->op == POLY_OP_BUFFER || arg->op == POLY_OP_BUFFER_VIEW) ? arg : NULL;
 }
 
 static int poly_schedule_init_call_io_and_runtime(PolyCtx *ctx, PolySchedule *ps) {
@@ -3678,16 +3721,6 @@ static PolySchedule *build_schedule_from_linear_template(
         call_src[0] = copy_body;
         resolved_call = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, call_src, call->n_src, call->arg);
       }
-      if (resolved_call && !poly_call_is_copy(resolved_call) && !poly_call_is_view(resolved_call) &&
-          resolved_call->src[0] && resolved_call->src[0]->op != POLY_OP_PROGRAM) {
-        PolyUOp *program = poly_program_from_call(ctx, resolved_call, "test");
-        if (program) {
-          call_src[0] = program;
-          resolved_call = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, call_src, call->n_src, call->arg);
-        } else {
-          resolved_call = NULL;
-        }
-      }
       linear_src[k] = resolved_call;
     }
     free(call_src);
@@ -3806,16 +3839,6 @@ PolySchedule *poly_create_schedule_from_linear_with_vars(
       if (resolved_call && copy_body && resolved_call->src[0] != copy_body) {
         call_src[0] = copy_body;
         resolved_call = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, call_src, call->n_src, call->arg);
-      }
-      if (resolved_call && !poly_call_is_copy(resolved_call) && !poly_call_is_view(resolved_call) &&
-          resolved_call->src[0] && resolved_call->src[0]->op != POLY_OP_PROGRAM) {
-        PolyUOp *program = poly_program_from_call(ctx, resolved_call, "test");
-        if (program) {
-          call_src[0] = program;
-          resolved_call = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, call_src, call->n_src, call->arg);
-        } else {
-          resolved_call = NULL;
-        }
       }
       linear_src[k] = resolved_call;
     }
@@ -4032,19 +4055,6 @@ static PolySchedule *build_schedule_from_kernel_graph(
       free(call_src);
       goto cleanup_linear;
     }
-    if (!is_copy) {
-      PolyUOp *program = poly_program_from_call(ctx, call, "test");
-      if (!program) {
-        free(call_src);
-        goto cleanup_linear;
-      }
-      call_src[0] = program;
-      call = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, call_src, n_call_src, poly_arg_none());
-      if (!call) {
-        free(call_src);
-        goto cleanup_linear;
-      }
-    }
     linear_src[step] = call;
     free(call_src);
   }
@@ -4125,7 +4135,7 @@ PolySchedule *poly_complete_create_schedule_with_vars(
     if (!poly_collect_buf_order_alloc(sink, &buf_order_orig, &n_bufs_orig, &n_dfs)) return NULL;
     buf_order_orig_owned = true;
   }
-  if (!schedule_order_shaped_param_externals(buf_order_orig, n_bufs_orig)) {
+  if (!schedule_prepare_external_order(buf_order_orig, &n_bufs_orig)) {
     if (buf_order_orig_owned) free(buf_order_orig);
     return NULL;
   }
@@ -4751,41 +4761,6 @@ cleanup:
   return out;
 }
 
-static PolySchedule *poly_create_schedule_uncached(
-    PolyCtx *ctx,
-    PolyUOp *kernel_graph,
-    PolyUOp **outer_external_order,
-    int n_outer_external
-) {
-  if (!kernel_graph || kernel_graph->op != POLY_OP_SINK) {
-    fprintf(stderr, "polygrad: create_schedule: expected SINK\n");
-    return NULL;
-  }
-  if (n_outer_external < 0 || (n_outer_external > 0 && !outer_external_order)) return NULL;
-
-  PolyUOp *buf_order_stack[POLY_MAX_REALIZE_BUFS];
-  PolyUOp **buf_order = outer_external_order ? outer_external_order : buf_order_stack;
-  int n_external = outer_external_order ? n_outer_external : 0;
-  bool buf_order_owned = false;
-  if (outer_external_order) {
-    /* Pinned resolve_function explicitly permits unused function arguments.
-     * Keep the complete outer-CALL slot order while the split kernel uses
-     * only its live shaped PARAMs; sparse live slots such as [0,3] must still
-     * resolve against the original four arguments. */
-    if (!schedule_order_shaped_param_externals(buf_order, n_external)) return NULL;
-  } else if (!collect_external_buf_order_from_kernel_graph(
-                 kernel_graph, &buf_order, &n_external, buf_order_stack, &buf_order_owned
-             )) {
-    return NULL;
-  }
-  uint32_t ghash = poly_structural_hash(kernel_graph) ^ (POLY_SCHED_CACHE_VERSION * 2654435761u);
-  PolySchedule *schedule = build_schedule_from_kernel_graph(
-      ctx, kernel_graph, POLY_MODE_CALL, ghash, buf_order, n_external, NULL, 0, NULL, false
-  );
-  if (buf_order_owned) free(buf_order);
-  return schedule;
-}
-
 /* tinygrad/engine/schedule.py: create_schedule
  * Build the backend-neutral schedule from the kernel-graph boundary, resolving
  * cached LINEAR kernel roots against the current graph's buffers/vars. */
@@ -5033,7 +5008,8 @@ static void poly_schedule_runtime_cleanup(
 
   if (run->intermediates) {
     for (int i = 0; i < run->n_intermediates; i++) {
-      if (run->intermediates[i].ptr) poly_buffer_free(run->ctx, &run->intermediates[i]);
+      if (run->intermediates[i].ptr || poly_buffer_is_multi(&run->intermediates[i]))
+        poly_buffer_free(run->ctx, &run->intermediates[i]);
     }
     free(run->intermediates);
   }
@@ -5044,7 +5020,10 @@ static void poly_schedule_runtime_cleanup(
   }
   if (run->slot_views) {
     for (int i = 0; i < run->n_slot_views; i++) {
-      if (run->slot_views[i].ptr && run->slot_views[i].allocator && run->slot_views[i].owned)
+      if (poly_buffer_is_multi(&run->slot_views[i]))
+        poly_buffer_free(run->ctx, &run->slot_views[i]);
+      else if (run->slot_views[i].ptr && run->slot_views[i].allocator &&
+               run->slot_views[i].owned)
         poly_buffer_free(run->ctx, &run->slot_views[i]);
     }
     free(run->slot_views);
@@ -5083,8 +5062,16 @@ static void poly_schedule_runtime_destroy(PolySchedule *sched) {
 static size_t poly_schedule_runtime_owned_bytes(const PolyScheduleRuntime *run) {
   if (!run || !run->intermediates) return 0;
   size_t total = 0;
-  for (int i = 0; i < run->n_intermediates; i++)
-    if (run->intermediates[i].owned) total += run->intermediates[i].nbytes;
+  for (int i = 0; i < run->n_intermediates; i++) {
+    const PolyBuffer *buffer = &run->intermediates[i];
+    if (poly_buffer_is_multi(buffer)) {
+      for (int lane = 0; lane < buffer->n_bufs; lane++)
+        if (buffer->bufs[lane] && buffer->bufs[lane]->owned)
+          total += buffer->bufs[lane]->nbytes;
+    } else if (buffer->owned) {
+      total += buffer->nbytes;
+    }
+  }
   return total;
 }
 
@@ -5329,49 +5316,264 @@ static void poly_schedule_cache_entry_free_iter(const void *key, void *value, vo
   poly_schedule_cache_entry_release(entry);
 }
 
-static PolyScheduleCacheEntry *poly_schedule_cache_entry_from_schedule(
-    const PolySchedule *schedule,
+static PolyUOp *linear_rebuild_preserving_metadata(
+    PolyCtx *ctx,
+    PolyUOp *original,
+    PolyUOp **src
+) {
+  if (!ctx || !original || (original->n_src > 0 && !src)) return NULL;
+  if (original->tag || original->tag_arg.kind != POLY_ARG_NONE)
+    return poly_uop_tagged_arg(
+        ctx, original->op, original->dtype, src, original->n_src, original->arg,
+        original->tag, original->tag_arg
+    );
+  return poly_uop(
+      ctx, original->op, original->dtype, src, original->n_src, original->arg
+  );
+}
+
+/* Pinned pm_post_sched_cache rewrites CALL arguments, not kernel bodies:
+ * PARAM leaves bind to the caller and BUFFER(LUNIQUE, DEVICE) becomes one
+ * fresh ordinary BUFFER shared by all inner calls (schedule/__init__.py:76-90).
+ * The memo is pass-local and preserves aggregate/view topology. */
+static PolyUOp *linear_resolve_nested_arg(
+    PolyCtx *ctx,
+    PolyUOp *arg,
+    PolyUOp **outer_args,
+    int n_outer_args,
+    PolyMap *memo
+) {
+  if (!ctx || !arg || n_outer_args < 0 || (n_outer_args > 0 && !outer_args) || !memo)
+    return NULL;
+  PolyUOp *cached = poly_map_get(memo, poly_ptr_hash(arg), arg, poly_ptr_eq);
+  if (cached) return cached;
+
+  PolyUOp *ret = NULL;
+  int slot = -1;
+  if (poly_call_arg_is_var(arg)) {
+    ret = arg;
+  } else if (linear_replay_arg_is_external_param(arg, &slot)) {
+    ret = (slot >= 0 && slot < n_outer_args) ? outer_args[slot] : NULL;
+  } else if (is_intermediate_buffer_uop(arg)) {
+    ret = linear_replay_new_intermediate(ctx, arg);
+  } else if (arg->n_src == 0) {
+    ret = arg;
+  } else {
+    PolyUOp **src = malloc((size_t)arg->n_src * sizeof(*src));
+    if (!src) return NULL;
+    bool changed = false;
+    for (int i = 0; i < arg->n_src; i++) {
+      src[i] = linear_resolve_nested_arg(
+          ctx, arg->src[i], outer_args, n_outer_args, memo
+      );
+      if (!src[i]) {
+        free(src);
+        return NULL;
+      }
+      if (src[i] != arg->src[i]) changed = true;
+    }
+    ret = changed ? linear_rebuild_preserving_metadata(ctx, arg, src) : arg;
+    free(src);
+  }
+  if (ret) poly_map_set(memo, poly_ptr_hash(arg), arg, ret, poly_ptr_eq);
+  return ret;
+}
+
+static PolyUOp *linear_resolve_nested_linear(
+    PolyCtx *ctx,
+    PolyUOp *linear,
+    PolyUOp **outer_args,
+    int n_outer_args
+) {
+  if (!ctx || !linear || linear->op != POLY_OP_LINEAR || n_outer_args < 0 ||
+      (n_outer_args > 0 && !outer_args))
+    return NULL;
+  PolyMap *memo = poly_map_new(64);
+  PolyUOp **calls = linear->n_src > 0 ? calloc((size_t)linear->n_src, sizeof(*calls)) : NULL;
+  if (!memo || (linear->n_src > 0 && !calls)) {
+    poly_map_destroy(memo);
+    free(calls);
+    return NULL;
+  }
+  bool ok = true;
+  for (int i = 0; i < linear->n_src; i++) {
+    PolyUOp *call = linear->src[i];
+    if (!call || call->op != POLY_OP_CALL || call->n_src < 1) {
+      ok = false;
+      break;
+    }
+    PolyUOp **src = calloc((size_t)call->n_src, sizeof(*src));
+    if (!src) {
+      ok = false;
+      break;
+    }
+    src[0] = call->src[0];
+    for (int j = 1; j < call->n_src; j++) {
+      src[j] = linear_resolve_nested_arg(
+          ctx, call->src[j], outer_args, n_outer_args, memo
+      );
+      if (!src[j]) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) calls[i] = linear_rebuild_preserving_metadata(ctx, call, src);
+    free(src);
+    if (!calls[i]) {
+      ok = false;
+      break;
+    }
+  }
+  PolyUOp *ret = ok ? linear_rebuild_preserving_metadata(ctx, linear, calls) : NULL;
+  poly_map_destroy(memo);
+  free(calls);
+  return ret;
+}
+
+static bool linear_append_call(PolyUOp ***calls, int *n_calls, int *cap_calls, PolyUOp *call) {
+  if (!calls || !n_calls || !cap_calls || !call) return false;
+  if (*n_calls >= *cap_calls) {
+    int new_cap = *cap_calls ? *cap_calls * 2 : 8;
+    PolyUOp **grown = realloc(*calls, (size_t)new_cap * sizeof(*grown));
+    if (!grown) return false;
+    *calls = grown;
+    *cap_calls = new_cap;
+  }
+  (*calls)[(*n_calls)++] = call;
+  return true;
+}
+
+static PolyUOp *linear_call_from_kernel_item(
+    PolyCtx *ctx,
+    const PolyKernelScheduleResult *sr,
+    int kernel_idx,
+    PolyUOp **external,
+    int n_external
+) {
+  if (!ctx || !sr || kernel_idx < 0 || kernel_idx >= sr->n_kernels) return NULL;
+  int kind = sr->kernel_kinds ? sr->kernel_kinds[kernel_idx] : POLY_KERNEL_ITEM_COMPUTE;
+  PolyUOp *existing =
+      kind == POLY_KERNEL_ITEM_CALL && sr->kernels ? sr->kernels[kernel_idx] : NULL;
+  PolyUOp *body = existing && existing->op == POLY_OP_CALL && existing->n_src >= 1
+                      ? existing->src[0]
+                      : (sr->kernels ? sr->kernels[kernel_idx] : NULL);
+  if (!body) return NULL;
+
+  int n_params = kind == POLY_KERNEL_ITEM_COPY ? 2 : sr->kernel_n_params[kernel_idx];
+  int n_vars = sr->kernel_n_vars ? sr->kernel_n_vars[kernel_idx] : 0;
+  int n_src = 1 + n_params + n_vars;
+  PolyUOp **src = calloc((size_t)n_src, sizeof(*src));
+  if (!src) return NULL;
+  src[0] = body;
+  bool ok = true;
+  for (int i = 0; i < n_params; i++) {
+    int binding_idx = i;
+    if (kind == POLY_KERNEL_ITEM_COPY)
+      binding_idx = i == 0 ? sr->copy_dst_params[kernel_idx] : sr->copy_src_params[kernel_idx];
+    PolyUOp *binding =
+        sr->param_to_buf && sr->param_to_buf[kernel_idx] && binding_idx >= 0 &&
+                binding_idx < sr->kernel_n_params[kernel_idx]
+            ? sr->param_to_buf[kernel_idx][binding_idx]
+            : NULL;
+    src[1 + i] = linear_call_parameterize_arg(ctx, binding, external, n_external);
+    if (!src[1 + i]) {
+      ok = false;
+      break;
+    }
+  }
+  for (int i = 0; ok && i < n_vars; i++) {
+    src[1 + n_params + i] =
+        sr->var_to_buf && sr->var_to_buf[kernel_idx] ? sr->var_to_buf[kernel_idx][i] : NULL;
+    if (!src[1 + n_params + i]) ok = false;
+  }
+  PolyUOp *ret = NULL;
+  if (ok && existing) {
+    if (existing->tag || existing->tag_arg.kind != POLY_ARG_NONE)
+      ret = poly_uop_tagged_arg(
+          ctx, POLY_OP_CALL, existing->dtype, src, n_src, existing->arg,
+          existing->tag, existing->tag_arg
+      );
+    else
+      ret = poly_uop(ctx, POLY_OP_CALL, existing->dtype, src, n_src, existing->arg);
+  } else if (ok) {
+    ret = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, src, n_src, poly_arg_none());
+  }
+  free(src);
+  return ret;
+}
+
+static bool linear_collect_template_intermediates(
+    PolyCtx *ctx,
+    PolyUOp *linear,
+    PolyUOp ***out,
+    int *n_out
+) {
+  if (!ctx || !linear || linear->op != POLY_OP_LINEAR || !out || !n_out) return false;
+  PolyUOp **items = NULL;
+  int n_items = 0, cap_items = 0;
+  for (int i = 0; i < linear->n_src; i++) {
+    PolyUOp *call = linear->src[i];
+    if (!call || call->op != POLY_OP_CALL || call->n_src < 1) {
+      free(items);
+      return false;
+    }
+    for (int j = 1; j < call->n_src; j++) {
+      int n_topo = 0;
+      PolyUOp **topo = poly_toposort_ex_alloc(ctx, call->src[j], &n_topo, NULL, false);
+      if (!topo) {
+        free(items);
+        return false;
+      }
+      bool ok = true;
+      for (int k = 0; k < n_topo; k++) {
+        if (!is_intermediate_buffer_uop(topo[k])) continue;
+        if (!linear_call_append_unique_buffer(
+                topo[k], &items, &n_items, &cap_items
+            )) {
+          ok = false;
+          break;
+        }
+      }
+      poly_toposort_free(topo);
+      if (!ok) {
+        free(items);
+        return false;
+      }
+    }
+  }
+  *out = items;
+  *n_out = n_items;
+  return true;
+}
+
+static PolyScheduleCacheEntry *poly_schedule_cache_entry_from_linear_template(
+    PolyCtx *ctx,
     PolyUOp *linear
 ) {
-  if (!schedule || !schedule->template || !linear) return NULL;
-  PolyScheduleCacheEntry *entry = calloc(1, sizeof(PolyScheduleCacheEntry));
-  if (!entry) return NULL;
+  PolyUOp **intermediate = NULL;
+  int n_intermediate = 0;
+  if (!linear_collect_template_intermediates(ctx, linear, &intermediate, &n_intermediate))
+    return NULL;
+  PolyScheduleCacheEntry *entry = calloc(1, sizeof(*entry));
+  if (!entry) {
+    free(intermediate);
+    return NULL;
+  }
   entry->refcount = 1;
   entry->linear = linear;
-  entry->n_calls = schedule->template->n_calls;
-  if (entry->n_calls > 0) {
-    entry->call_access =
-        poly_call_access_clone_array(schedule->template->call_access, entry->n_calls);
-    if (!entry->call_access) {
-      poly_schedule_cache_entry_destroy(entry);
-      return NULL;
-    }
-  }
-
-  int n_intermediates = 0;
-  for (int i = 0; i < schedule->template->n_buf_slots; i++) {
-    const PolyScheduleBufSlot *slot = &schedule->template->buf_slots[i];
-    if (slot->is_intermediate && !slot->is_memory_arena && !slot->has_memory_parent &&
-        slot->buf_uop)
-      n_intermediates++;
-  }
-  entry->n_intermediates = n_intermediates;
-  if (n_intermediates > 0) {
-    entry->intermediates = calloc((size_t)n_intermediates, sizeof(PolyScheduleIntermediateDesc));
+  entry->n_calls = linear->n_src;
+  entry->n_intermediates = n_intermediate;
+  if (n_intermediate > 0) {
+    entry->intermediates = calloc((size_t)n_intermediate, sizeof(*entry->intermediates));
     if (!entry->intermediates) {
+      free(intermediate);
       poly_schedule_cache_entry_destroy(entry);
       return NULL;
     }
-    int j = 0;
-    for (int i = 0; i < schedule->template->n_buf_slots; i++) {
-      const PolyScheduleBufSlot *slot = &schedule->template->buf_slots[i];
-      if (!slot->is_intermediate || slot->is_memory_arena || slot->has_memory_parent ||
-          !slot->buf_uop)
-        continue;
-      entry->intermediates[j].template_buf = slot->buf_uop;
-      j++;
-    }
+    for (int i = 0; i < n_intermediate; i++)
+      entry->intermediates[i].template_buf = intermediate[i];
   }
+  free(intermediate);
   return entry;
 }
 
@@ -5391,18 +5593,6 @@ static PolyUOp *poly_build_linear_from_kernel_graph_uncached(
     );
     fflush(stderr);
   }
-  PolySchedule *schedule =
-      poly_create_schedule_uncached(ctx, kernel_graph, external_buf_order, n_external_buf_order);
-  if (!schedule) return NULL;
-  double t_schedule = timing ? poly_now_ms() : 0.0;
-  if (timing) {
-    fprintf(
-        stderr, "[polygrad:build_linear] schedule calls=%d slots=%d ms=%.3f\n",
-        schedule->template->n_calls, schedule->template->n_buf_slots, t_schedule - t0
-    );
-    fflush(stderr);
-  }
-
   PolyUOp **external_bufs = NULL;
   bool external_bufs_owned = false;
   PolyUOp *external_bufs_stack[POLY_MAX_REALIZE_BUFS];
@@ -5420,69 +5610,73 @@ static PolyUOp *poly_build_linear_from_kernel_graph_uncached(
     if (!collect_external_buf_order_from_kernel_graph(
             kernel_graph, &external_bufs, &n_external, external_bufs_stack, &external_bufs_owned
         )) {
-      poly_schedule_free(schedule);
       return NULL;
     }
   }
-  PolyUOp **linear_src = schedule->template->n_calls > 0
-                             ? calloc((size_t)schedule->template->n_calls, sizeof(PolyUOp *))
-                             : NULL;
-  if (schedule->template->n_calls > 0 && !linear_src) {
-    if (external_bufs_owned) free(external_bufs);
-    poly_schedule_free(schedule);
-    return NULL;
-  }
-  for (int step = 0; step < schedule->template->n_calls; step++) {
-    PolyUOp *call = poly_schedule_call(schedule, step);
-    if (!call || call->op != POLY_OP_CALL || call->n_src < 1) {
-      free(linear_src);
-      if (external_bufs_owned) free(external_bufs);
-      poly_schedule_free(schedule);
-      return NULL;
+  PolyKernelScheduleResult sr = poly_build_kernel_schedule_from_kernel_graph(ctx, kernel_graph);
+  PolyUOp **linear_src = NULL;
+  int n_linear = 0, cap_linear = 0;
+  bool ok = sr.n_kernels == 0 || sr.kernels;
+  for (int step = 0; ok && step < sr.n_kernels; step++) {
+    int k = sr.exec_order ? sr.exec_order[step] : step;
+    PolyUOp *call = linear_call_from_kernel_item(ctx, &sr, k, external_bufs, n_external);
+    if (!call) {
+      ok = false;
+      break;
     }
-    int n_call_src = call->n_src;
-    PolyUOp **call_src = calloc((size_t)n_call_src, sizeof(PolyUOp *));
-    if (!call_src) {
-      free(linear_src);
-      if (external_bufs_owned) free(external_bufs);
-      poly_schedule_free(schedule);
-      return NULL;
-    }
-    call_src[0] = call->src[0];
-    for (int i = 1; i < call->n_src; i++) {
-      call_src[i] =
-          linear_call_parameterize_arg(ctx, call->src[i], external_bufs, n_external);
-      if (!call_src[i]) {
-        free(call_src);
-        free(linear_src);
-        if (external_bufs_owned) free(external_bufs);
-        poly_schedule_free(schedule);
-        return NULL;
+    int kind = sr.kernel_kinds ? sr.kernel_kinds[k] : POLY_KERNEL_ITEM_COMPUTE;
+    PolyUOp *body = call->src[0];
+    bool kernel_info_sink = body && body->op == POLY_OP_SINK &&
+                            body->arg.kind == POLY_ARG_STRING;
+    if (kind == POLY_KERNEL_ITEM_CALL && body &&
+        (body->op == POLY_OP_LINEAR ||
+         (body->op == POLY_OP_SINK && !kernel_info_sink))) {
+      /* Pinned pm_schedule enters CALL bodies but lower_sink_to_linear returns
+       * None for SINK(KernelInfo): that body is already compiler-ready and
+       * remains CALL(SINK, args...) until compile_linear. Polygrad's existing
+       * KernelInfo adapter is a named SINK from poly_uop_sink_ex. */
+      PolyUOp *inner = body->op == POLY_OP_LINEAR
+                           ? body
+                           : poly_lower_sink_to_linear(ctx, body, POLY_MODE_CALL);
+      PolyUOp *resolved = inner ? linear_resolve_nested_linear(
+                                      ctx, inner, call->n_src > 1 ? &call->src[1] : NULL,
+                                      sr.kernel_n_params[k]
+                                  )
+                                : NULL;
+      if (!resolved) {
+        ok = false;
+        break;
       }
+      for (int i = 0; i < resolved->n_src; i++) {
+        if (!linear_append_call(&linear_src, &n_linear, &cap_linear, resolved->src[i])) {
+          ok = false;
+          break;
+        }
+      }
+    } else if (!linear_append_call(&linear_src, &n_linear, &cap_linear, call)) {
+      ok = false;
     }
-    linear_src[step] =
-        poly_uop(ctx, POLY_OP_CALL, POLY_VOID, call_src, n_call_src, poly_arg_none());
-    free(call_src);
   }
-  PolyUOp *linear = poly_uop(
-      ctx, POLY_OP_LINEAR, POLY_VOID, linear_src, schedule->template->n_calls, poly_arg_none()
-  );
+  poly_kernel_schedule_result_free(&sr);
+  PolyUOp *linear = ok ? poly_uop(
+                             ctx, POLY_OP_LINEAR, POLY_VOID, linear_src, n_linear,
+                             poly_arg_none()
+                         )
+                       : NULL;
   free(linear_src);
   if (external_bufs_owned) free(external_bufs);
   PolyScheduleCacheEntry *entry = NULL;
   if (linear && entry_out) {
-    entry = poly_schedule_cache_entry_from_schedule(schedule, linear);
+    entry = poly_schedule_cache_entry_from_linear_template(ctx, linear);
     if (!entry) {
-      poly_schedule_free(schedule);
       return NULL;
     }
   }
-  poly_schedule_free(schedule);
   if (timing) {
     double t_done = poly_now_ms();
     fprintf(
-        stderr, "[polygrad:build_linear] done calls=%d build_calls=%.3fms total=%.3fms\n",
-        linear ? linear->n_src : -1, t_done - t_schedule, t_done - t0
+        stderr, "[polygrad:build_linear] done calls=%d total=%.3fms\n",
+        linear ? linear->n_src : -1, t_done - t0
     );
     fflush(stderr);
   }
@@ -5734,7 +5928,7 @@ static PolyScheduleCacheEntry *poly_lower_sink_to_cache_entry_with_kernel_graph(
     }
     raw_external_owned = true;
   }
-  if (!schedule_order_shaped_param_externals(raw_external_bufs, n_raw_external)) {
+  if (!schedule_prepare_external_order(raw_external_bufs, &n_raw_external)) {
     if (input_order_owned) free(input_order);
     if (raw_external_owned) free(raw_external_bufs);
     return NULL;
@@ -6374,48 +6568,57 @@ static PolyUOp *poly_prepare_program_for_backend(
     uint32_t env_stamp
 ) {
   if (!ctx || !call || call->op != POLY_OP_CALL) return NULL;
-  PolyUOp *program = poly_call_raw_body(call);
-  PolyUOp *body = poly_program_kernel_body(program);
-  /* Pinned tinygrad/codegen/__init__.py:55-61 verifies spec_tensor before
-   * backend preprocess. Polygrad enforces its integer-INDEX-coordinate
-   * predicate here, together with the existing structural checks. */
-  if (!program || !body || !poly_validate_kernel_graph(ctx, body)) return NULL;
+  PolyUOp *ast = poly_call_raw_body(call);
+  if (!ast) return NULL;
 #ifdef POLY_HAS_X86
   if (device == POLY_DEVICE_X86)
     return poly_prepare_x86_program_for_backend(ctx, call, device_uop, device, env_stamp);
 #endif
   const PolyBackendDesc *backend = poly_backend_get(device);
-  if (!backend || !backend->rewrite_program) return program;
+  if (!backend) return NULL;
 
+  /* Pinned to_program caches the raw SINK ast.key before do_to_program builds
+   * ProgramInfo (codegen/__init__.py:244-250). A PROGRAM input remains a
+   * supported explicit precompiled boundary, but raw scheduled SINKs use the
+   * same cache key here instead of being wrapped during schedule creation. */
   PolyToProgramCacheEntry key = {
-      .program = program,
+      .program = ast,
       .device_uop = device_uop,
       .device = device,
       .env_stamp = env_stamp,
       .prepared_program = NULL,
   };
-  uint32_t hash = poly_program_cache_hash(program, device_uop, device, env_stamp);
+  uint32_t hash = poly_program_cache_hash(ast, device_uop, device, env_stamp);
   PolyToProgramCacheEntry *entry =
       (poly_program_cache_enabled() && ctx->to_program_cache)
           ? poly_map_get(ctx->to_program_cache, hash, &key, poly_to_program_cache_eq)
           : NULL;
   if (entry) return entry->prepared_program;
 
-  PolyUOp *rewritten = backend->rewrite_program(ctx, body);
-  if (!rewritten) return NULL;
+  PolyUOp *body = poly_program_body(ast);
+  /* Pinned tinygrad/codegen/__init__.py:55-61 verifies spec_tensor inside the
+   * cache miss before backend preprocess. Polygrad enforces its matching
+   * integer-INDEX-coordinate predicate here. */
+  if (!body || !poly_validate_kernel_graph(ctx, body)) return NULL;
 
-  PolyUOp *prepared =
-      poly_program_from_call_body(ctx, call, rewritten, poly_program_arg_name(program), device);
+  PolyUOp *rewritten = backend->rewrite_program ? backend->rewrite_program(ctx, body) : body;
+  if (!rewritten) return NULL;
+  PolyUOp *prepared = !backend->rewrite_program && ast->op == POLY_OP_PROGRAM
+                          ? ast
+                          : poly_program_from_call_body(
+                                ctx, call, rewritten, poly_program_arg_name(ast), device);
   if (!prepared) return NULL;
-  prepared = poly_program_attach_linear(ctx, prepared);
-  if (!prepared) return NULL;
-  prepared = poly_program_ensure_source(ctx, backend, prepared, device);
-  if (!prepared) return NULL;
+  if (backend->rewrite_program) {
+    prepared = poly_program_attach_linear(ctx, prepared);
+    if (!prepared) return NULL;
+    prepared = poly_program_ensure_source(ctx, backend, prepared, device);
+    if (!prepared) return NULL;
+  }
 
   if (poly_program_cache_enabled() && ctx->to_program_cache) {
     entry = poly_arena_alloc(ctx->arena, sizeof(*entry), _Alignof(PolyToProgramCacheEntry));
     if (entry) {
-      entry->program = program;
+      entry->program = ast;
       entry->device_uop = device_uop;
       entry->device = device;
       entry->env_stamp = env_stamp;
@@ -7429,29 +7632,183 @@ bool poly_device_is_host_addressable(PolyDevice device) {
   return be && be->get_allocator()->host_addressable;
 }
 
+static int poly_schedule_device_tuple_count(PolyUOp *device_uop) {
+  return device_uop && device_uop->op == POLY_OP_DEVICE &&
+                 device_uop->arg.kind == POLY_ARG_STRING_TUPLE &&
+                 device_uop->arg.string_tuple.vals && device_uop->arg.string_tuple.n > 0
+             ? device_uop->arg.string_tuple.n
+             : 0;
+}
+
+/* Schedule intermediates are runtime-owned Buffer objects just like pinned
+ * UOp.buffer. The template slot remains the graph identity; this derives its
+ * existing runtime object by the same stable slot order used at allocation. */
+static PolyBuffer *poly_schedule_runtime_unparented_buffer_for_slot(
+    const PolyScheduleTemplate *tpl,
+    PolyScheduleRuntime *run,
+    int slot_idx
+) {
+  if (!tpl || !run || !run->intermediates || slot_idx < 0 ||
+      slot_idx >= tpl->n_buf_slots)
+    return NULL;
+  int runtime_idx = 0;
+  for (int i = 0; i < tpl->n_buf_slots; i++) {
+    const PolyScheduleBufSlot *slot = &tpl->buf_slots[i];
+    if (!slot->is_intermediate || slot->has_memory_parent) continue;
+    if (i == slot_idx)
+      return runtime_idx < run->n_intermediates ? &run->intermediates[runtime_idx] : NULL;
+    runtime_idx++;
+  }
+  return NULL;
+}
+
+static PolyBuffer *poly_schedule_runtime_buffer_for_slot(
+    const PolyScheduleTemplate *tpl,
+    PolyScheduleRuntime *run,
+    int slot_idx
+) {
+  if (!tpl || !run || slot_idx < 0 || slot_idx >= tpl->n_buf_slots) return NULL;
+  if (run->slot_views && slot_idx < run->n_slot_views) {
+    PolyBuffer *view = &run->slot_views[slot_idx];
+    if (view->ptr || poly_buffer_is_multi(view)) return view;
+  }
+  const PolyScheduleBufSlot *slot = &tpl->buf_slots[slot_idx];
+  return slot->is_intermediate && !slot->has_memory_parent
+             ? poly_schedule_runtime_unparented_buffer_for_slot(tpl, run, slot_idx)
+             : NULL;
+}
+
+static int poly_schedule_runtime_allocate_intermediates(
+    PolyCtx *ctx,
+    PolySchedule *sched,
+    PolyScheduleRuntime *run,
+    PolyDevice fallback_device
+) {
+  if (!ctx || !sched || !sched->template || !run) return -1;
+  const PolyScheduleTemplate *tpl = sched->template;
+  int n_intermediates = 0, n_children = 0;
+  for (int i = 0; i < tpl->n_buf_slots; i++) {
+    const PolyScheduleBufSlot *slot = &tpl->buf_slots[i];
+    if (!slot->is_intermediate || slot->has_memory_parent) continue;
+    n_intermediates++;
+    n_children += poly_schedule_device_tuple_count(slot->device_uop);
+  }
+  run->n_intermediates = n_intermediates;
+  if (n_intermediates == 0) return 0;
+
+  size_t n_buffers = (size_t)n_intermediates + (size_t)n_children;
+  if (n_buffers > SIZE_MAX / sizeof(PolyBuffer) ||
+      (size_t)n_children > SIZE_MAX / sizeof(PolyBuffer *))
+    return -1;
+  size_t buffer_bytes = n_buffers * sizeof(PolyBuffer);
+  size_t ptr_align = _Alignof(PolyBuffer *);
+  size_t ptr_offset = (buffer_bytes + ptr_align - 1) & ~(ptr_align - 1);
+  size_t ptr_bytes = (size_t)n_children * sizeof(PolyBuffer *);
+  if (ptr_offset > SIZE_MAX - ptr_bytes) return -1;
+  unsigned char *storage = calloc(1, ptr_offset + ptr_bytes);
+  if (!storage) return -1;
+  run->intermediates = (PolyBuffer *)storage;
+  PolyBuffer *child_storage = run->intermediates + n_intermediates;
+  PolyBuffer **child_ptrs = (PolyBuffer **)(storage + ptr_offset);
+
+  int runtime_idx = 0, child_idx = 0;
+  for (int i = 0; i < tpl->n_buf_slots; i++) {
+    const PolyScheduleBufSlot *slot = &tpl->buf_slots[i];
+    if (!slot->is_intermediate || slot->has_memory_parent) continue;
+    size_t nbytes = slot->nbytes > 0 ? (size_t)slot->nbytes : sizeof(float);
+    PolyBuffer *runtime = &run->intermediates[runtime_idx++];
+    int tuple_count = poly_schedule_device_tuple_count(slot->device_uop);
+    if (tuple_count > 0) {
+      *runtime = (PolyBuffer){
+          .nbytes = nbytes,
+          .device = POLY_DEVICE_AUTO,
+          .valid = false,
+          .device_uop = slot->device_uop,
+          .bufs = child_ptrs + child_idx,
+          .n_bufs = tuple_count,
+          .owns_bufs = true,
+      };
+      for (int lane = 0; lane < tuple_count; lane++) {
+        PolyBuffer *child = &child_storage[child_idx];
+        runtime->bufs[lane] = child;
+        child_idx++;
+        PolyUOp *child_device = poly_device_uop_from_name(
+            ctx, slot->device_uop->arg.string_tuple.vals[lane]);
+        PolyDevice child_backend = poly_device_from_device_uop(child_device);
+        const PolyBackendDesc *backend = poly_backend_get(child_backend);
+        const PolyAllocator *allocator = backend ? backend->get_allocator() : NULL;
+        if (!child_device || child_backend == POLY_DEVICE_AUTO || !allocator ||
+            poly_backend_ensure_open(child_backend) != 0)
+          return -1;
+        void *ptr = allocator->alloc(nbytes, allocator->dev_ctx);
+        if (!ptr) return -1;
+        *child = (PolyBuffer){
+            .ptr = ptr,
+            .nbytes = nbytes,
+            .device = child_backend,
+            .owned = true,
+            .allocator = allocator,
+            .valid = false,
+            .memory_accounted = true,
+            .memory_device = child_backend,
+            .device_uop = child_device,
+            .memory_device_uop = child_device,
+        };
+        poly_ctx_record_memory_alloc_exact(ctx, child_device, child_backend, nbytes);
+      }
+      continue;
+    }
+
+    PolyDevice slot_device = slot->is_memory_arena
+                                 ? poly_memory_arena_slot_runtime_device(
+                                       ctx, sched, i, fallback_device)
+                                 : poly_intermediate_slot_runtime_device(
+                                       ctx, sched, i, fallback_device);
+    if (slot_device == POLY_DEVICE_HOST || slot_device == POLY_DEVICE_AUTO)
+      slot_device = fallback_device;
+    const PolyBackendDesc *backend = poly_backend_get(slot_device);
+    const PolyAllocator *allocator = backend ? backend->get_allocator() : NULL;
+    if (!allocator || poly_backend_ensure_open(slot_device) != 0) return -1;
+    void *ptr = allocator->alloc(nbytes, allocator->dev_ctx);
+    if (!ptr) return -1;
+    PolyUOp *device_uop = slot->device_uop;
+    if (!device_uop || poly_device_from_device_uop(device_uop) != slot_device)
+      device_uop = poly_device_uop(ctx, slot_device);
+    *runtime = (PolyBuffer){
+        .ptr = ptr,
+        .nbytes = nbytes,
+        .device = slot_device,
+        .owned = true,
+        .allocator = allocator,
+        .valid = false,
+        .memory_accounted = true,
+        .memory_device = slot_device,
+        .device_uop = device_uop,
+        .memory_device_uop = device_uop,
+    };
+    poly_ctx_record_memory_alloc_exact(ctx, device_uop, slot_device, nbytes);
+  }
+  return child_idx == n_children ? 0 : -1;
+}
+
 static PolyDevice poly_schedule_runtime_slot_allocated_device(
     const PolyScheduleTemplate *tpl,
-    const PolyScheduleRuntime *run,
+    const PolyScheduleRuntime *run_const,
     int slot_idx,
     PolyDevice fallback_device
 ) {
+  PolyScheduleRuntime *run = (PolyScheduleRuntime *)run_const;
   if (!tpl || !run || slot_idx < 0 || slot_idx >= tpl->n_buf_slots) return fallback_device;
 
-  if (run->slot_views && slot_idx < run->n_slot_views && run->slot_views[slot_idx].ptr)
-    return run->slot_views[slot_idx].device;
+  PolyBuffer *runtime = poly_schedule_runtime_buffer_for_slot(tpl, run, slot_idx);
+  if (runtime && !poly_buffer_is_multi(runtime) && runtime->device != POLY_DEVICE_AUTO)
+    return runtime->device;
 
   const PolyScheduleBufSlot *slot = &tpl->buf_slots[slot_idx];
   if (slot->is_intermediate && slot->has_memory_parent) {
     int parent = slot->memory_parent_slot;
     if (parent >= 0 && parent < tpl->n_buf_slots)
       return poly_schedule_runtime_slot_allocated_device(tpl, run, parent, fallback_device);
-  }
-
-  if (run->slot_to_data && slot_idx < run->n_slot_to_data) {
-    void *ptr = run->slot_to_data[slot_idx];
-    for (int i = 0; ptr && i < run->n_intermediates; i++) {
-      if (run->intermediates[i].ptr == ptr) return run->intermediates[i].device;
-    }
   }
 
   PolyDevice dev = slot->device;
@@ -7466,28 +7823,109 @@ static int poly_schedule_runtime_fill_parent_views(
 ) {
   if (!tpl || !run || !run->slot_to_data) return -1;
   bool need_slot_views = false;
+  int n_view_children = 0;
   for (int i = 0; i < run->n_slot_to_data && i < tpl->n_buf_slots; i++) {
     const PolyScheduleBufSlot *slot = &tpl->buf_slots[i];
     if (!slot->is_intermediate || !slot->has_memory_parent) continue;
     int parent = slot->memory_parent_slot;
-    if (parent < 0 || parent >= run->n_slot_to_data || parent >= tpl->n_buf_slots ||
-        !run->slot_to_data[parent])
+    if (parent < 0 || parent >= run->n_slot_to_data || parent >= tpl->n_buf_slots)
       return -1;
+    PolyBuffer *parent_buffer = poly_schedule_runtime_buffer_for_slot(tpl, run, parent);
+    if (poly_buffer_is_multi(parent_buffer)) {
+      need_slot_views = true;
+      n_view_children += parent_buffer->n_bufs;
+      continue;
+    }
+    if (!run->slot_to_data[parent]) return -1;
     PolyDevice parent_device =
         poly_schedule_runtime_slot_allocated_device(tpl, run, parent, fallback_device);
     if (parent_device == POLY_DEVICE_WEBGPU) need_slot_views = true;
   }
 
   if (need_slot_views && !run->slot_views) {
-    run->slot_views = calloc((size_t)run->n_slot_to_data, sizeof(PolyBuffer));
+    size_t n_buffers = (size_t)run->n_slot_to_data + (size_t)n_view_children;
+    if (n_buffers > SIZE_MAX / sizeof(PolyBuffer) ||
+        (size_t)n_view_children > SIZE_MAX / sizeof(PolyBuffer *))
+      return -1;
+    size_t buffer_bytes = n_buffers * sizeof(PolyBuffer);
+    size_t ptr_align = _Alignof(PolyBuffer *);
+    size_t ptr_offset = (buffer_bytes + ptr_align - 1) & ~(ptr_align - 1);
+    size_t ptr_bytes = (size_t)n_view_children * sizeof(PolyBuffer *);
+    if (ptr_offset > SIZE_MAX - ptr_bytes) return -1;
+    run->slot_views = (PolyBuffer *)calloc(1, ptr_offset + ptr_bytes);
     if (!run->slot_views) return -1;
     run->n_slot_views = run->n_slot_to_data;
   }
+
+  PolyBuffer *view_child_storage = run->slot_views
+                                       ? run->slot_views + run->n_slot_views
+                                       : NULL;
+  size_t view_buffer_bytes = run->slot_views
+                                 ? ((size_t)run->n_slot_views +
+                                    (size_t)n_view_children) * sizeof(PolyBuffer)
+                                 : 0;
+  size_t ptr_align = _Alignof(PolyBuffer *);
+  size_t view_ptr_offset = (view_buffer_bytes + ptr_align - 1) & ~(ptr_align - 1);
+  PolyBuffer **view_child_ptrs = run->slot_views
+                                    ? (PolyBuffer **)((unsigned char *)run->slot_views +
+                                                     view_ptr_offset)
+                                    : NULL;
+  int view_child_idx = 0;
 
   for (int i = 0; i < run->n_slot_to_data && i < tpl->n_buf_slots; i++) {
     const PolyScheduleBufSlot *slot = &tpl->buf_slots[i];
     if (!slot->is_intermediate || !slot->has_memory_parent) continue;
     int parent = slot->memory_parent_slot;
+    PolyBuffer *parent_buffer = poly_schedule_runtime_buffer_for_slot(tpl, run, parent);
+    if (poly_buffer_is_multi(parent_buffer)) {
+      if (!run->slot_views || slot->memory_offset < 0 || slot->nbytes <= 0) return -1;
+      PolyBuffer *view = &run->slot_views[i];
+      *view = (PolyBuffer){
+          .nbytes = (size_t)slot->nbytes,
+          .device = POLY_DEVICE_AUTO,
+          .valid = false,
+          .device_uop = slot->device_uop,
+          .bufs = view_child_ptrs + view_child_idx,
+          .n_bufs = parent_buffer->n_bufs,
+          .owns_bufs = true,
+      };
+      for (int lane = 0; lane < parent_buffer->n_bufs; lane++) {
+        PolyBuffer *base = parent_buffer->bufs[lane];
+        PolyBuffer *child = &view_child_storage[view_child_idx];
+        view->bufs[lane] = child;
+        view_child_idx++;
+        if (!base || poly_buffer_handle_ensure_allocated(run->ctx, base) != 0 ||
+            (size_t)slot->memory_offset > base->nbytes ||
+            (size_t)slot->nbytes > base->nbytes - (size_t)slot->memory_offset)
+          return -1;
+        void *ptr = NULL;
+        bool owned = false;
+        if (base->device == POLY_DEVICE_WEBGPU) {
+#ifdef __EMSCRIPTEN__
+          uintptr_t webgpu_view = poly_webgpu_create_buffer_view(
+              (uintptr_t)base->ptr, (size_t)slot->memory_offset,
+              (size_t)slot->nbytes);
+          if (!webgpu_view) return -1;
+          ptr = (void *)webgpu_view;
+          owned = true;
+#else
+          return -1;
+#endif
+        } else {
+          ptr = (void *)((char *)base->ptr + slot->memory_offset);
+        }
+        *child = (PolyBuffer){
+            .ptr = ptr,
+            .nbytes = (size_t)slot->nbytes,
+            .device = base->device,
+            .owned = owned,
+            .allocator = base->allocator,
+            .valid = false,
+            .device_uop = base->device_uop,
+        };
+      }
+      continue;
+    }
     PolyDevice parent_device =
         poly_schedule_runtime_slot_allocated_device(tpl, run, parent, fallback_device);
 
@@ -7516,7 +7954,23 @@ static int poly_schedule_runtime_fill_parent_views(
       run->slot_to_data[i] = (void *)((char *)run->slot_to_data[parent] + slot->memory_offset);
     }
   }
-  return 0;
+  return view_child_idx == n_view_children ? 0 : -1;
+}
+
+static int poly_schedule_runtime_fill_intermediate_slots(
+    const PolyScheduleTemplate *tpl,
+    PolyScheduleRuntime *run,
+    PolyDevice fallback_device
+) {
+  if (!tpl || !run || !run->slot_to_data) return -1;
+  for (int i = 0; i < run->n_slot_to_data && i < tpl->n_buf_slots; i++) {
+    const PolyScheduleBufSlot *slot = &tpl->buf_slots[i];
+    if (!slot->is_intermediate || slot->has_memory_parent) continue;
+    PolyBuffer *runtime = poly_schedule_runtime_unparented_buffer_for_slot(tpl, run, i);
+    if (!runtime) return -1;
+    run->slot_to_data[i] = poly_buffer_is_multi(runtime) ? NULL : runtime->ptr;
+  }
+  return poly_schedule_runtime_fill_parent_views(tpl, run, fallback_device);
 }
 
 /* Cache flush (called from napi_api.c) */
@@ -7537,6 +7991,58 @@ static bool poly_schedule_call_requires_resolved_args(
     int call_index
 );
 
+/* Direct port of pinned compile_linear's pm_compile boundary
+ * (tinygrad/engine/realize.py:244-267): schedule-cache LINEARs keep raw SINK
+ * bodies, while the executable LINEAR replaces only compute bodies with the
+ * cached PROGRAM. Aggregate arguments remain a Polygrad multi-device boundary
+ * and are compiled after lane resolution. */
+PolyUOp *poly_compile_linear(PolyCtx *ctx, PolySchedule *schedule, PolyDevice device) {
+  if (!ctx || !schedule || !schedule->template || !schedule->template->linear ||
+      schedule->template->linear->op != POLY_OP_LINEAR)
+    return NULL;
+  PolyUOp *linear = schedule->template->linear;
+  PolyUOp **calls = linear->n_src > 0 ? calloc((size_t)linear->n_src, sizeof(*calls)) : NULL;
+  if (linear->n_src > 0 && !calls) return NULL;
+  uint32_t env_stamp = poly_schedule_lower_env_stamp();
+  bool ok = true;
+  for (int i = 0; i < linear->n_src; i++) {
+    PolyUOp *call = linear->src[i];
+    if (!call || call->op != POLY_OP_CALL || call->n_src < 1) {
+      ok = false;
+      break;
+    }
+    PolyUOp *raw = call->src[0];
+    if ((raw->op != POLY_OP_SINK && raw->op != POLY_OP_PROGRAM) ||
+        poly_schedule_call_requires_resolved_args(ctx, schedule, i)) {
+      calls[i] = call;
+      continue;
+    }
+    PolyUOp *device_uop = poly_call_device_uop(ctx, schedule, i, device);
+    PolyUOp *program = poly_prepare_program_for_backend(
+        ctx, call, device_uop, device, env_stamp);
+    if (!program) {
+      ok = false;
+      break;
+    }
+    PolyUOp **src = malloc((size_t)call->n_src * sizeof(*src));
+    if (!src) {
+      ok = false;
+      break;
+    }
+    memcpy(src, call->src, (size_t)call->n_src * sizeof(*src));
+    src[0] = program;
+    calls[i] = linear_rebuild_preserving_metadata(ctx, call, src);
+    free(src);
+    if (!calls[i]) {
+      ok = false;
+      break;
+    }
+  }
+  PolyUOp *compiled = ok ? linear_rebuild_preserving_metadata(ctx, linear, calls) : NULL;
+  free(calls);
+  return compiled;
+}
+
 PolyCompiledSchedule *poly_lower_schedule(PolyCtx *ctx, PolySchedule *schedule, PolyDevice device) {
   if (!ctx || !schedule) return NULL;
 
@@ -7554,6 +8060,8 @@ PolyCompiledSchedule *poly_lower_schedule(PolyCtx *ctx, PolySchedule *schedule, 
   if (!plan) return NULL;
   plan->ctx = ctx;
   plan->template = poly_schedule_template_retain(schedule->template);
+  plan->linear = poly_compile_linear(ctx, schedule, device);
+  if (!plan->linear) goto cleanup;
   plan->device = device;
   plan->allocator = backend->get_allocator();
   plan->run = calloc(1, sizeof(PolyScheduleRuntime));
@@ -7574,7 +8082,8 @@ PolyCompiledSchedule *poly_lower_schedule(PolyCtx *ctx, PolySchedule *schedule, 
    * backend compiler caches see identical kernels as identical source. */
   uint32_t env_stamp = poly_schedule_lower_env_stamp();
   for (int k = 0; k < schedule->template->n_calls; k++) {
-    PolyUOp *call = poly_schedule_call(schedule, k);
+    PolyUOp *call = plan->linear->src[k];
+    PolyUOp *scheduled_call = poly_schedule_call(schedule, k);
     PolyUOp *device_uop = poly_call_device_uop(ctx, schedule, k, device);
     PolyCallRuntime *rt = &plan->run->calls[k];
     rt->call = call;
@@ -7603,7 +8112,7 @@ PolyCompiledSchedule *poly_lower_schedule(PolyCtx *ctx, PolySchedule *schedule, 
     }
     if (!lowered_as_copy) {
       int lower_rc = poly_lower_compute_call_cached(
-          ctx, call, device_uop, device, env_stamp, runner, &rt->runtime_program
+          ctx, scheduled_call, device_uop, device, env_stamp, runner, &rt->runtime_program
       );
       if (lower_rc == -2) {
         fprintf(stderr, "polygrad: compile_schedule: kernel %d validation failed\n", k);
@@ -7632,49 +8141,12 @@ PolyCompiledSchedule *poly_lower_schedule(PolyCtx *ctx, PolySchedule *schedule, 
     runner->var_indices = NULL;
   }
 
-  /* Allocate persistent intermediates */
-  plan->run->n_intermediates = 0;
-  for (int i = 0; i < schedule->template->n_buf_slots; i++)
-    if (schedule->template->buf_slots[i].is_intermediate &&
-        !schedule->template->buf_slots[i].has_memory_parent)
-      plan->run->n_intermediates++;
-
-  if (plan->run->n_intermediates > 0) {
-    plan->run->intermediates = calloc((size_t)plan->run->n_intermediates, sizeof(PolyBuffer));
-    if (!plan->run->intermediates) goto cleanup;
-    int idx = 0;
-    for (int i = 0; i < schedule->template->n_buf_slots; i++) {
-      if (!schedule->template->buf_slots[i].is_intermediate) continue;
-      if (schedule->template->buf_slots[i].has_memory_parent) continue;
-      size_t nbytes = (size_t)schedule->template->buf_slots[i].nbytes;
-      if (nbytes == 0) nbytes = sizeof(float);
-      PolyDevice slot_device =
-          schedule->template->buf_slots[i].is_memory_arena
-              ? poly_memory_arena_slot_runtime_device(ctx, schedule, i, device)
-              : poly_intermediate_slot_runtime_device(ctx, schedule, i, device);
-      if (slot_device == POLY_DEVICE_HOST || slot_device == POLY_DEVICE_AUTO) slot_device = device;
-      const PolyBackendDesc *slot_backend = poly_backend_get(slot_device);
-      const PolyAllocator *slot_alloc = slot_backend ? slot_backend->get_allocator() : NULL;
-      if (!slot_alloc) goto cleanup;
-      void *ptr = slot_alloc->alloc(nbytes, slot_alloc->dev_ctx);
-      if (!ptr) goto cleanup;
-      plan->run->intermediates[idx] = (PolyBuffer){
-          .ptr = ptr,
-          .nbytes = nbytes,
-          .device = slot_device,
-          .owned = true,
-          .allocator = slot_alloc,
-          .memory_accounted = true,
-          .memory_device = slot_device,
-          .device_uop = schedule->template->buf_slots[i].device_uop,
-          .memory_device_uop = schedule->template->buf_slots[i].device_uop,
-      };
-      poly_ctx_record_memory_alloc_exact(
-          ctx, plan->run->intermediates[idx].memory_device_uop, slot_device, nbytes
-      );
-      idx++;
-    }
-  }
+  /* Pinned UOp.buffer allocates tuple BUFFER intermediates as MultiBuffer
+   * children, and memory planning retains the tuple arena (uop/ops.py:850-879;
+   * schedule/memory.py:20-63). Direct and retained schedules share this one
+   * exact-device allocation path. */
+  if (poly_schedule_runtime_allocate_intermediates(ctx, schedule, plan->run, device) != 0)
+    goto cleanup;
 
   /* Allocate persistent per-kernel args arrays */
   plan->run->kernel_args = calloc((size_t)schedule->template->n_calls, sizeof(void **));
@@ -7699,19 +8171,12 @@ PolyCompiledSchedule *poly_lower_schedule(PolyCtx *ctx, PolySchedule *schedule, 
   for (int i = 0; i < plan->run->n_slot_uops; i++)
     plan->run->slot_uops[i] = schedule->template->buf_slots[i].buf_uop;
 
-  /* Pre-fill intermediate slot pointers (these don't change between runs) */
-  {
-    int idx = 0;
-    for (int i = 0; i < plan->run->n_slot_to_data; i++) {
-      if (schedule->template->buf_slots[i].is_intermediate &&
-          !schedule->template->buf_slots[i].has_memory_parent && idx < plan->run->n_intermediates) {
-        plan->run->slot_to_data[i] = plan->run->intermediates[idx].ptr;
-        idx++;
-      }
-    }
-    if (poly_schedule_runtime_fill_parent_views(schedule->template, plan->run, device) != 0)
-      goto cleanup;
-  }
+  /* Scalar slots retain raw pointers for existing runners. Tuple slots stay
+   * Buffer objects and are unwrapped per lane at CALL execution. */
+  if (poly_schedule_runtime_fill_intermediate_slots(
+          schedule->template, plan->run, device
+      ) != 0)
+    goto cleanup;
 
   /* Allocate merged vars array */
   {
@@ -7738,7 +8203,7 @@ cleanup:
 }
 
 int poly_compiled_schedule_set_jit_graph(PolyCompiledSchedule *plan, PolyUOp *graph_linear) {
-  if (!plan || !plan->template || !plan->template->linear || !graph_linear ||
+  if (!plan || !plan->template || !plan->template->linear || !plan->linear || !graph_linear ||
       graph_linear->op != POLY_OP_LINEAR)
     return -1;
   poly_compiled_graph_batches_clear(plan);
@@ -7751,7 +8216,7 @@ int poly_compiled_schedule_set_jit_graph(PolyCompiledSchedule *plan, PolyUOp *gr
       if (nested->n_src <= 1) return -1;
       for (int j = 0; j < nested->n_src; j++) {
         if (flat_index + j >= plan->template->n_calls ||
-            nested->src[j] != plan->template->linear->src[flat_index + j] || !nested->src[j] ||
+            nested->src[j] != plan->linear->src[flat_index + j] || !nested->src[j] ||
             nested->src[j]->op != POLY_OP_CALL || nested->src[j]->n_src < 1 ||
             !nested->src[j]->src[0] || nested->src[j]->src[0]->op != POLY_OP_PROGRAM)
           return -1;
@@ -7759,7 +8224,7 @@ int poly_compiled_schedule_set_jit_graph(PolyCompiledSchedule *plan, PolyUOp *gr
       flat_index += nested->n_src;
       n_batches++;
     } else {
-      if (flat_index >= plan->template->n_calls || outer != plan->template->linear->src[flat_index])
+      if (flat_index >= plan->template->n_calls || outer != plan->linear->src[flat_index])
         return -1;
       flat_index++;
     }
@@ -8403,47 +8868,8 @@ static int poly_schedule_runtime_prepare(PolyCtx *ctx, PolySchedule *sched, Poly
   sched->run->device = device;
   sched->run->allocator = backend->get_allocator();
 
-  sched->run->n_intermediates = 0;
-  for (int i = 0; i < sched->template->n_buf_slots; i++)
-    if (sched->template->buf_slots[i].is_intermediate &&
-        !sched->template->buf_slots[i].has_memory_parent)
-      sched->run->n_intermediates++;
-
-  if (sched->run->n_intermediates > 0) {
-    sched->run->intermediates = calloc((size_t)sched->run->n_intermediates, sizeof(PolyBuffer));
-    if (!sched->run->intermediates) goto fail;
-    int idx = 0;
-    for (int i = 0; i < sched->template->n_buf_slots; i++) {
-      if (!sched->template->buf_slots[i].is_intermediate) continue;
-      if (sched->template->buf_slots[i].has_memory_parent) continue;
-      size_t nbytes = (size_t)sched->template->buf_slots[i].nbytes;
-      if (nbytes == 0) nbytes = sizeof(float);
-      PolyDevice slot_device = sched->template->buf_slots[i].is_memory_arena
-                                   ? poly_memory_arena_slot_runtime_device(ctx, sched, i, device)
-                                   : poly_intermediate_slot_runtime_device(ctx, sched, i, device);
-      if (slot_device == POLY_DEVICE_HOST || slot_device == POLY_DEVICE_AUTO) slot_device = device;
-      const PolyBackendDesc *slot_backend = poly_backend_get(slot_device);
-      const PolyAllocator *slot_alloc = slot_backend ? slot_backend->get_allocator() : NULL;
-      if (!slot_alloc) goto fail;
-      void *ptr = slot_alloc->alloc(nbytes, slot_alloc->dev_ctx);
-      if (!ptr) goto fail;
-      sched->run->intermediates[idx] = (PolyBuffer){
-          .ptr = ptr,
-          .nbytes = nbytes,
-          .device = slot_device,
-          .owned = true,
-          .allocator = slot_alloc,
-          .memory_accounted = true,
-          .memory_device = slot_device,
-          .device_uop = sched->template->buf_slots[i].device_uop,
-          .memory_device_uop = sched->template->buf_slots[i].device_uop,
-      };
-      poly_ctx_record_memory_alloc_exact(
-          ctx, sched->run->intermediates[idx].memory_device_uop, slot_device, nbytes
-      );
-      idx++;
-    }
-  }
+  if (poly_schedule_runtime_allocate_intermediates(ctx, sched, sched->run, device) != 0)
+    goto fail;
 
   sched->run->kernel_args = sched->template->n_calls > 0
                                 ? calloc((size_t)sched->template->n_calls, sizeof(void **))
@@ -8463,16 +8889,10 @@ static int poly_schedule_runtime_prepare(PolyCtx *ctx, PolySchedule *sched, Poly
   for (int i = 0; i < sched->run->n_slot_uops; i++)
     sched->run->slot_uops[i] = sched->template->buf_slots[i].buf_uop;
 
-  {
-    int idx = 0;
-    for (int i = 0; i < sched->run->n_slot_to_data; i++) {
-      if (sched->template->buf_slots[i].is_intermediate &&
-          !sched->template->buf_slots[i].has_memory_parent && idx < sched->run->n_intermediates)
-        sched->run->slot_to_data[i] = sched->run->intermediates[idx++].ptr;
-    }
-    if (poly_schedule_runtime_fill_parent_views(sched->template, sched->run, device) != 0)
-      goto fail;
-  }
+  if (poly_schedule_runtime_fill_intermediate_slots(
+          sched->template, sched->run, device
+      ) != 0)
+    goto fail;
 
   {
     int total_vars = sched->template->n_default_vars + 16;
@@ -8774,6 +9194,20 @@ static int poly_resolve_call_arg_buffers(
   if (slot < 0 || slot >= sched->template->n_buf_slots) return -1;
   const PolyScheduleBufSlot *meta = &sched->template->buf_slots[slot];
   if (meta->is_intermediate) {
+    /* Pinned resolve_params returns the Buffer/MultiBuffer owned by the
+     * resolved BUFFER or SLICE before unwrap_multi (engine/realize.py:142-180).
+     * A tuple schedule intermediate is therefore already the ordered lane
+     * container; never scalarize it through slot_to_data. */
+    PolyBuffer *runtime = poly_schedule_runtime_buffer_for_slot(
+        sched->template, sched->run, slot);
+    if (poly_buffer_is_multi(runtime)) {
+      out->items = malloc((size_t)runtime->n_bufs * sizeof(*out->items));
+      if (!out->items) return -1;
+      memcpy(out->items, runtime->bufs, (size_t)runtime->n_bufs * sizeof(*out->items));
+      out->n_items = runtime->n_bufs;
+      out->container = runtime;
+      return 0;
+    }
     if (!sched->run || !sched->run->slot_to_data ||
         slot >= sched->run->n_slot_to_data || !sched->run->slot_to_data[slot])
       return -1;
@@ -8914,13 +9348,15 @@ static int poly_schedule_call_run_resolved(
     int n_all,
     int *var_int_idx
 ) {
-  if (!ctx || !sched || !var_int_idx || poly_call_is_copy(poly_schedule_call(sched, call_index)) ||
+  if (!ctx || !sched || !var_int_idx ||
       poly_call_is_view(poly_schedule_call(sched, call_index)))
     return -1;
   PolyUOp *call = poly_schedule_call(sched, call_index);
   const PolyCallIO *io = poly_schedule_call_io(sched, call_index);
   const PolyCallAccess *access = io ? io->access : NULL;
   if (!call || !io || !access || io->n_args <= 0) return -1;
+  bool is_copy = poly_call_is_copy(call);
+  if (is_copy && io->n_args != 2) return -1;
 
   PolyResolvedCallArg *resolved = calloc((size_t)io->n_args, sizeof(*resolved));
   PolyResolvedBufferPool pool = {0};
@@ -8944,6 +9380,36 @@ static int poly_schedule_call_run_resolved(
 
   PolyUOp *device_num = poly_call_device_num_var(ctx, poly_schedule_call_body(sched, call_index));
   for (int lane = 0; lane < lane_count; lane++) {
+    if (is_copy) {
+      /* Pinned exec_copy resolves MSELECT/MSTACK first and copies each dense
+       * destination/source pair directly (engine/realize.py:142-167). COPY
+       * intentionally permits different endpoint devices. */
+      PolyBuffer *dst = resolved[0].items[lane];
+      PolyBuffer *src = resolved[1].items[lane];
+      if (!dst || !src || poly_buffer_is_multi(dst) || poly_buffer_is_multi(src) ||
+          dst->device == POLY_DEVICE_AUTO || src->device == POLY_DEVICE_AUTO)
+        goto cleanup;
+      if (!dst->ptr && dst->device != POLY_DEVICE_HOST && dst->device != POLY_DEVICE_DISK &&
+          poly_buffer_handle_ensure_allocated(ctx, dst) != 0)
+        goto cleanup;
+      if (!src->ptr && src->device != POLY_DEVICE_HOST && src->device != POLY_DEVICE_DISK &&
+          poly_buffer_handle_ensure_allocated(ctx, src) != 0)
+        goto cleanup;
+      if (!src->valid) goto cleanup;
+      bool stats_timing = ctx->stats_suppression_depth == 0 && poly_debug_at_least(2);
+      double start_ms = stats_timing ? poly_now_ms() : 0.0;
+      if (poly_buffer_copy(dst, src) != 0) goto cleanup;
+      double elapsed_ms = stats_timing ? poly_now_ms() - start_ms : -1.0;
+      dst->valid = true;
+      if (dst->src) dst->src->valid = false;
+      if (poly_ctx_record_call_stats(
+              ctx, sched, call_index, NULL, NULL, 0, elapsed_ms
+          ) != 0)
+        goto cleanup;
+      ctx->launch_count++;
+      continue;
+    }
+
     PolyBuffer *device_buffer = resolved[0].items[lane];
     PolyUOp *device_uop = device_buffer ? device_buffer->device_uop : NULL;
     PolyDevice device = device_uop ? poly_device_from_device_uop(device_uop) : POLY_DEVICE_AUTO;

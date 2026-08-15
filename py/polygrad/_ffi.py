@@ -16,7 +16,7 @@ import sys
 _lib = None
 OPS = {}
 _has_cuda_ffi = False
-POLYGRAD_ABI_VERSION = 49
+POLYGRAD_ABI_VERSION = 52
 
 # --- Opaque pointer type (always available) ---
 _ptr = ctypes.c_void_p
@@ -248,6 +248,9 @@ def _declare_signatures(lib):
 
     lib.poly_device_name.restype = ctypes.c_char_p
     lib.poly_device_name.argtypes = [ctypes.c_int]
+
+    lib.poly_uop_device_name.restype = ctypes.c_char_p
+    lib.poly_uop_device_name.argtypes = [_ptr, _ptr]
 
     lib.poly_device_can_execute.restype = ctypes.c_bool
     lib.poly_device_can_execute.argtypes = [ctypes.c_int]
@@ -786,13 +789,28 @@ def _declare_signatures(lib):
     lib.poly_tensor_detach.restype = _ptr
     lib.poly_tensor_detach.argtypes = [_ptr, _ptr]
 
+    lib.poly_tensor_contiguous_backward.restype = _ptr
+    lib.poly_tensor_contiguous_backward.argtypes = [_ptr, _ptr]
+
     lib.poly_tensor_custom_kernel.restype = ctypes.c_int
     lib.poly_tensor_custom_kernel.argtypes = [
         _ptr, _ptr, ctypes.POINTER(_ptr), ctypes.c_int, ctypes.POINTER(_ptr),
     ]
 
+    lib.poly_tensor_function.restype = ctypes.c_int
+    lib.poly_tensor_function.argtypes = [
+        _ptr, ctypes.POINTER(_ptr), ctypes.c_int,
+        ctypes.POINTER(_ptr), ctypes.c_int,
+        ctypes.c_char_p, ctypes.c_bool, ctypes.POINTER(_ptr),
+    ]
+
     lib.poly_tensor_sum.restype = _ptr
     lib.poly_tensor_sum.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int, ctypes.c_bool]
+
+    lib.poly_tensor_sum_dtype_by_id.restype = _ptr
+    lib.poly_tensor_sum_dtype_by_id.argtypes = [
+        _ptr, _ptr, _i64p, ctypes.c_int, ctypes.c_bool, ctypes.c_int,
+    ]
 
     lib.poly_tensor_max.restype = _ptr
     lib.poly_tensor_max.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int, ctypes.c_bool]
@@ -805,6 +823,9 @@ def _declare_signatures(lib):
 
     lib.poly_tensor_dot.restype = _ptr
     lib.poly_tensor_dot.argtypes = [_ptr, _ptr, _ptr]
+
+    lib.poly_tensor_dot_dtype_by_id.restype = _ptr
+    lib.poly_tensor_dot_dtype_by_id.argtypes = [_ptr, _ptr, _ptr, ctypes.c_int]
 
     lib.poly_tensor_qr_ex.restype = ctypes.c_int
     lib.poly_tensor_qr_ex.argtypes = [_ptr, _ptr, ctypes.c_int, _ptrp, _ptrp]
@@ -871,6 +892,11 @@ def _declare_signatures(lib):
     lib.poly_tensor_reshape.restype = _ptr
     lib.poly_tensor_reshape.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int]
 
+    lib.poly_tensor_reshape_uop.restype = _ptr
+    lib.poly_tensor_reshape_uop.argtypes = [
+        _ptr, _ptr, ctypes.POINTER(_ptr), ctypes.c_int,
+    ]
+
     lib.poly_tensor_expand.restype = _ptr
     lib.poly_tensor_expand.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int]
 
@@ -909,6 +935,11 @@ def _declare_signatures(lib):
     lib.poly_tensor_conv2d.restype = _ptr
     lib.poly_tensor_conv2d.argtypes = [
         _ptr, _ptr, _ptr, _ptr, ctypes.c_int, _i64p, _i64p, _i64p, ctypes.c_int,
+    ]
+    lib.poly_tensor_conv2d_dtype_by_id.restype = _ptr
+    lib.poly_tensor_conv2d_dtype_by_id.argtypes = [
+        _ptr, _ptr, _ptr, _ptr, ctypes.c_int, _i64p, _i64p, _i64p, ctypes.c_int,
+        ctypes.c_int,
     ]
 
     lib.poly_tensor_batchnorm.restype = _ptr
@@ -1046,6 +1077,24 @@ def _declare_signatures(lib):
         ctypes.POINTER(PolyEntrypointSpec), ctypes.c_int,
         ctypes.POINTER(PolyInstanceOptions),
         ctypes.POINTER(PolyInstanceError),
+    ]
+
+    lib.poly_instance_define_module_arrays.restype = ctypes.c_int
+    lib.poly_instance_define_module_arrays.argtypes = [
+        _ptr,
+        ctypes.POINTER(ctypes.c_char_p),
+        ctypes.POINTER(_ptr),
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(_ptr),
+        ctypes.c_int,
+    ]
+
+    lib.poly_instance_set_device_map_arrays.restype = ctypes.c_int
+    lib.poly_instance_set_device_map_arrays.argtypes = [
+        _ptr,
+        ctypes.POINTER(ctypes.c_char_p),
+        ctypes.POINTER(ctypes.c_char_p),
+        ctypes.c_int,
     ]
 
     lib.poly_instance_free.restype = None

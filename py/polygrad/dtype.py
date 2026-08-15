@@ -449,6 +449,34 @@ def _from_np_dtype(npdtype):
     return DTYPES_DICT[np.dtype(npdtype).name]
 
 
+# Literal pinned tinygrad/dtype.py:367-378 Torch dtype interop. Torch remains
+# an optional import and is loaded only when this boundary is called.
+@functools.cache
+def _to_torch_dtype(dtype):
+    import numpy as np
+    import torch
+
+    if dtype == dtypes.uint64:
+        return torch.uint64
+    if dtype == dtypes.bfloat16:
+        return torch.bfloat16
+    if dtype in dtypes.fp8s:
+        return torch.uint8
+    try:
+        return torch.from_numpy(np.array([], dtype=_to_np_dtype(dtype))).dtype
+    except TypeError:
+        return None
+
+
+@functools.cache
+def _from_torch_dtype(torchdtype):
+    return {
+        torch_value: dtype
+        for dtype in DTYPES_DICT.values()
+        if (torch_value := _to_torch_dtype(dtype)) is not None
+    }[torchdtype]
+
+
 _STR_TO_NP = None
 
 def _init_str_to_np():

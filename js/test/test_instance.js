@@ -64,6 +64,54 @@ async function checkTypedIntegerInput(pg, Instance) {
   }
 }
 
+async function checkModuleDeviceMap(pg, Instance) {
+  const Tensor = pg.Tensor
+  const x = Tensor.empty([2])
+  const webgpu = String(pg.device).toLowerCase() === 'webgpu'
+  const w0 = webgpu ? null : new Tensor([3, 4], { dtype: 'float32', requiresGrad: true })
+  const w1 = webgpu ? null : new Tensor([2, 3], { dtype: 'float32', requiresGrad: true })
+  const hidden = webgpu ? x.add(3) : x.add(w0)
+  const output = webgpu ? hidden.mul(2) : hidden.mul(w1)
+  const inst = await Instance.fromTensors({
+    inputs: { x },
+    outputs: { output },
+    params: webgpu ? null : { 'layers.0.weight': w0, 'layers.1.weight': w1 },
+    modules: [
+      { name: 'layers.0', inputs: [x], output: hidden },
+      { name: 'layers.1', inputs: [hidden], output }
+    ]
+  })
+  const first = String(pg.device).toUpperCase()
+  const second = first === 'INTERP' ? 'WASM' : 'INTERP'
+  const place = async map => {
+    if (webgpu) await inst.setDeviceMapAsync(map)
+    else inst.setDeviceMap(map)
+  }
+  const forward = input => webgpu
+    ? inst.forwardAsync(input) : inst.forward(input)
+  const expected = webgpu ? [8, 10] : [8, 18]
+
+  try {
+    await place({ 'layers.0': first, 'layers.1': second })
+    let result = await forward({ x: new Float32Array([1, 2]) })
+    assertClose(result.output, expected)
+
+    let rejected = false
+    try {
+      await place({ 'layers.0': first })
+    } catch (err) {
+      rejected = /incomplete|device map/.test(String(err.message || err))
+    }
+    assert(rejected, 'expected incomplete device map to fail')
+
+    await place({ 'layers.0': second, 'layers.1': first })
+    result = await forward({ x: new Float32Array([1, 2]) })
+    assertClose(result.output, expected)
+  } finally {
+    inst.dispose()
+  }
+}
+
 async function runInstanceTests(pg) {
   const Instance = pg.Instance
   const { MLP, TabM, NAM } = pg.models
@@ -93,6 +141,10 @@ async function runInstanceTests(pg) {
 
   await test('typed integer input preserves bytes and rejects float binding', async () => {
     await checkTypedIntegerInput(pg, Instance)
+  })
+
+  await test('module device map places exact Tensor cuts atomically', async () => {
+    await checkModuleDeviceMap(pg, Instance)
   })
 
   await test('model-family constructors are not Instance methods', async () => {
@@ -504,6 +556,10 @@ async function runInstanceSmokeTests(pg) {
 
   await test('typed integer input preserves bytes and rejects float binding', async () => {
     await checkTypedIntegerInput(pg, Instance)
+  })
+
+  await test('webgpu module device map places exact Tensor cuts atomically', async () => {
+    await checkModuleDeviceMap(pg, Instance)
   })
 
   await test('webgpu mlp forward smoke', async () => {

@@ -6,12 +6,69 @@ import pytest
 
 from extra.lr_scheduler import OneCycleLR
 from polygrad import _ffi
-from polygrad import GlobalCounters, Jit, Tensor, TinyJit, Variable, dtypes, nn
+from polygrad import Context, GlobalCounters, Jit, Tensor, TinyJit, UOp, Variable, dtypes, fetch, getenv, nn
+from polygrad.helpers import Context as HelperContext, fetch as helper_fetch, getenv as helper_getenv
 from polygrad.nn import SGD
+from polygrad.uop.ops import UOp as OpsUOp
+
+
+def test_top_level_public_exports_are_defining_module_objects():
+    # Pinned tinygrad/__init__.py re-exports these exact objects rather than
+    # defining wrappers or alternate compatibility implementations.
+    assert Context is HelperContext
+    assert UOp is OpsUOp
+    assert fetch is helper_fetch
+    assert getenv is helper_getenv
+    assert getenv("POLYGRAD_MISSING_EXPORT_TEST", 17) == 17
+
+
+def test_tensor_module_cast_is_typing_cast_identity():
+    # Pinned tinygrad/tensor.py:5 imports this public name from typing; it is
+    # not a Tensor CAST operation.
+    from polygrad.tensor import cast
+
+    value = [1, 2]
+    assert cast(list[int], value) is value
+
+
+def test_tensor_train_is_pinned_context_decorator_and_restores_state():
+    events = []
+
+    @Tensor.train()
+    def decorated(value):
+        events.append(("decorated", Tensor.training))
+        return value + 1
+
+    assert decorated(4) == 5
+    assert Tensor.training is False
+    with Tensor.train(False) as entered:
+        assert entered is None
+        events.append(("outer", Tensor.training))
+        with Tensor.train(True):
+            events.append(("inner", Tensor.training))
+        events.append(("restored_outer", Tensor.training))
+    assert Tensor.training is False
+    with pytest.raises(RuntimeError, match="probe"):
+        with Tensor.train(True):
+            raise RuntimeError("probe")
+    assert Tensor.training is False
+    assert events == [
+        ("decorated", True),
+        ("outer", False),
+        ("inner", True),
+        ("restored_outer", False),
+    ]
 
 
 def test_top_level_tinyjit_alias_uses_existing_jit():
     assert TinyJit is Jit
+    assert TinyJit.__name__ == "TinyJit"
+
+    from polygrad.engine.jit import JitError as EngineJitError
+    from polygrad.engine.jit import TinyJit as EngineTinyJit
+
+    assert EngineTinyJit is TinyJit
+    assert EngineJitError.__name__ == "JitError"
 
     @TinyJit
     def add_one(x):
@@ -349,7 +406,7 @@ def test_random_crop_indices_remain_consistent_after_readback():
 
 
 def test_python_loader_checks_current_abi_before_use():
-    assert _ffi.get_lib().poly_abi_version() == _ffi.POLYGRAD_ABI_VERSION == 49
+    assert _ffi.get_lib().poly_abi_version() == _ffi.POLYGRAD_ABI_VERSION == 52
 
 
 @pytest.mark.parametrize('relative', [
@@ -377,7 +434,10 @@ def test_python_loader_rejects_mismatched_abi_before_declaring_signatures(monkey
     monkeypatch.setattr(_ffi, '_lib', None)
     monkeypatch.setattr(_ffi, '_find_lib', lambda: 'fake-libpolygrad.so')
     monkeypatch.setattr(_ffi.ctypes, 'CDLL', lambda _path: FakeLibrary())
-    with pytest.raises(RuntimeError, match='expected version 49, got 20'):
+    with pytest.raises(
+        RuntimeError,
+        match=rf'expected version {_ffi.POLYGRAD_ABI_VERSION}, got 20',
+    ):
         _ffi.get_lib()
     assert _ffi._lib is None
 

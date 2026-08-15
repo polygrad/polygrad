@@ -249,6 +249,31 @@ The key invariant is that exportable logical tensor roots stay independent from
 realized physical roots. That lets the same logical graph be exported, cached, or
 rerun after placement on CUDA, WebGPU, WASM, CPU, or the interpreter.
 
+Default Tensor/JIT execution builds and schedules the physical graph eagerly;
+it does not invoke placement. Retained `Instance` graphs may instead request an
+explicit policy. The first non-uniform policy uses exact named module cuts:
+
+```python
+from polygrad import Instance, Tensor
+
+x = Tensor([1.0, 2.0])
+h = x + 3
+y = h * 2
+model = Instance.from_tensors(
+    inputs={"x": x}, outputs={"y": y},
+    modules=[
+        {"name": "stem", "inputs": [x], "output": h},
+        {"name": "head", "inputs": [h], "output": y},
+    ],
+)
+model.set_device_map({"stem": "CPU", "head": "CPU:1"})
+```
+
+The policy places the aggregate retained graph once, keeps module state with
+its module, and inserts explicit `COPY` nodes at cross-device cuts. CPU sibling
+identities are executable today; nonzero CUDA/HIP identities, automatic
+sharding, pipeline schedules, offload, and VRAM planning remain future work.
+
 ## High-Level APIs
 
 Polygrad includes the usual tensor building blocks:
@@ -305,7 +330,8 @@ up front and returns an explicit callable with `run(...)`, `stats()`, and
 
 Polygrad exposes a tinygrad-shaped custom kernel path for cases where Tensor
 composition is too indirect. A kernel function receives placeholder UOps and
-returns a `SINK` body. Polygrad wraps that body in `CALL` and returns
+returns a compiler-ready `SINK(..., arg=KernelInfo(...))` body. As in tinygrad,
+`KernelInfo` marks the opaque kernel boundary. Polygrad wraps that body in `CALL` and returns
 `AFTER(...)` tensors that still run through normal scheduling, placement,
 caches, and device residency.
 
@@ -313,12 +339,14 @@ Python:
 
 ```python
 from polygrad import Tensor
-from polygrad.uop.ops import UOp
+from polygrad.uop.ops import KernelInfo, UOp
 
 def add_kernel(out, a, b):
     out, a, b = out.flatten(), a.flatten(), b.flatten()
     i = UOp.range(out.ctx, out.numel(), 0)
-    return out[i].store(a[i] + b[i]).end(i).sink()
+    return out[i].store(a[i] + b[i]).end(i).sink(
+        arg=KernelInfo(name="custom_add_4")
+    )
 
 out = Tensor.empty((4,), dtype="float32")
 y = out.custom_kernel(Tensor([1, 2, 3, 4]), Tensor([10, 20, 30, 40]), fxn=add_kernel)[0]
@@ -333,7 +361,9 @@ const { Tensor, uop } = require('polygrad')
 function addKernel(out, a, b) {
   out = out.flatten(); a = a.flatten(); b = b.flatten()
   const i = uop.range(out.numel(), 0)
-  return out.index(i).store(a.index(i).add(b.index(i))).end(i).sink()
+  return out.index(i).store(a.index(i).add(b.index(i))).end(i).sink(
+    new uop.KernelInfo('custom_add_4')
+  )
 }
 
 const out = Tensor.empty([4], { dtype: 'float32' })

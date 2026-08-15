@@ -49,7 +49,10 @@ class PolyRuntime {
     const optim = createBoundOptim(this)
     this.nn = {
       Linear: modules.Linear,
+      LayerNorm: modules.LayerNorm,
+      LayerNorm2d: modules.LayerNorm2d,
       Conv2d: modules.Conv2d,
+      GroupNorm: modules.GroupNorm,
       getParameters,
       getStateDict,
       optim,

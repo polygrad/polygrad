@@ -239,6 +239,129 @@ static PolyUOp **target_walk(
   return result;
 }
 
+/* Pinned UOp.base strips only movement, MULTI and DETACH
+ * (tinygrad/uop/ops.py:675-680). FUNCTION backward keeps shaped constant
+ * output gradients inline and parameterizes every other output gradient. */
+static PolyUOp *grad_uop_base(PolyUOp *u) {
+  while (u && u->n_src > 0 &&
+         (poly_opset_has(POLY_GROUP_MOVEMENT, u->op) || u->op == POLY_OP_MULTI ||
+          u->op == POLY_OP_DETACH))
+    u = u->src[0];
+  return u;
+}
+
+static bool grad_walk_contains(PolyUOp **walk, int n_walk, PolyUOp *u) {
+  for (int i = 0; i < n_walk; i++)
+    if (walk[i] == u) return true;
+  return false;
+}
+
+static PolyUOp *grad_param_replace_slot(PolyCtx *ctx, PolyUOp *param, int64_t slot) {
+  if (!ctx || !param || param->op != POLY_OP_PARAM || param->n_src != 1 ||
+      param->arg.kind != POLY_ARG_PARAM || !param->arg.param)
+    return NULL;
+  PolyParamArg arg = *param->arg.param;
+  arg.slot = slot;
+  return poly_uop1(ctx, POLY_OP_PARAM, param->dtype, param->src[0], poly_arg_param(&arg));
+}
+
+/* Pinned _compact_params (tinygrad/mixin/gradient.py:17-21): sort the PARAMs
+ * actually reachable from the backward body by their old slots, renumber them
+ * densely, and retain only the corresponding call arguments. */
+static bool grad_compact_params(
+    PolyCtx *ctx,
+    PolyUOp *body,
+    PolyUOp **all_args,
+    int n_all_args,
+    PolyUOp **out_body,
+    PolyUOp ***out_args,
+    int *out_n_args
+) {
+  if (!ctx || !body || !out_body || !out_args || !out_n_args || n_all_args < 0 ||
+      (n_all_args > 0 && !all_args))
+    return false;
+  *out_body = NULL;
+  *out_args = NULL;
+  *out_n_args = 0;
+
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort_ex_alloc(ctx, body, &n_topo, NULL, false);
+  PolyUOp **by_slot = n_all_args > 0 ? calloc((size_t)n_all_args, sizeof(*by_slot)) : NULL;
+  if (!topo || (n_all_args > 0 && !by_slot)) {
+    poly_toposort_free(topo);
+    free(by_slot);
+    return false;
+  }
+  for (int i = 0; i < n_topo; i++) {
+    PolyUOp *u = topo[i];
+    if (!u || u->op != POLY_OP_PARAM || u->arg.kind != POLY_ARG_PARAM || !u->arg.param)
+      continue;
+    int64_t slot = u->arg.param->slot;
+    if (slot < 0 || slot >= n_all_args) {
+      poly_toposort_free(topo);
+      free(by_slot);
+      return false;
+    }
+    by_slot[slot] = u;
+  }
+
+  int n_used = 0;
+  for (int i = 0; i < n_all_args; i++)
+    if (by_slot[i]) n_used++;
+  PolyUOp **from = n_used > 0 ? malloc((size_t)n_used * sizeof(*from)) : NULL;
+  PolyUOp **temporary = n_used > 0 ? malloc((size_t)n_used * sizeof(*temporary)) : NULL;
+  PolyUOp **to = n_used > 0 ? malloc((size_t)n_used * sizeof(*to)) : NULL;
+  PolyUOp **args = n_used > 0 ? malloc((size_t)n_used * sizeof(*args)) : NULL;
+  if (n_used > 0 && (!from || !temporary || !to || !args)) {
+    poly_toposort_free(topo);
+    free(by_slot);
+    free(from);
+    free(temporary);
+    free(to);
+    free(args);
+    return false;
+  }
+  int at = 0;
+  for (int i = 0; i < n_all_args; i++) {
+    if (!by_slot[i]) continue;
+    from[at] = by_slot[i];
+    temporary[at] = grad_param_replace_slot(ctx, by_slot[i], n_all_args + at);
+    to[at] = grad_param_replace_slot(ctx, by_slot[i], at);
+    args[at] = all_args[i];
+    if (!temporary[at] || !to[at] || !args[at]) {
+      poly_toposort_free(topo);
+      free(by_slot);
+      free(from);
+      free(temporary);
+      free(to);
+      free(args);
+      return false;
+    }
+    at++;
+  }
+  /* The generic substitution follows replacement nodes recursively. A final
+   * dense PARAM can be identical to another old PARAM, so direct renaming can
+   * chain two intended terminal replacements. Pinned graph_rewrite does not.
+   * Rename through disjoint slots, then densify in a second pass. */
+  PolyUOp *staged =
+      n_used > 0 ? poly_uop_substitute(ctx, body, from, temporary, n_used) : body;
+  PolyUOp *compacted =
+      n_used > 0 ? poly_uop_substitute(ctx, staged, temporary, to, n_used) : staged;
+  poly_toposort_free(topo);
+  free(by_slot);
+  free(from);
+  free(temporary);
+  free(to);
+  if (!compacted) {
+    free(args);
+    return false;
+  }
+  *out_body = compacted;
+  *out_args = args;
+  *out_n_args = n_used;
+  return true;
+}
+
 /* Public API */
 
 /* Core gradient reverse pass. Builds the gradient map from loss backward.
@@ -310,6 +433,260 @@ static PolyMap *grad_reverse_pass(
     case POLY_OP_UNIQUE:
     case POLY_OP_DEVICE:
       break;
+
+    /* Pinned compute_gradient accumulates each GETTUPLE contribution into a
+     * TUPLE gradient on its owning FUNCTION, filling unused outputs with NOOP
+     * (tinygrad/mixin/gradient.py:101-109). */
+    case POLY_OP_GETTUPLE: {
+      if (u->n_src != 1 || u->arg.kind != POLY_ARG_INT || !u->src[0] ||
+          u->src[0]->op != POLY_OP_FUNCTION || u->src[0]->n_src < 1 ||
+          !u->src[0]->src[0] || u->src[0]->src[0]->op != POLY_OP_TUPLE) {
+        fprintf(stderr, "polygrad: autograd: malformed GETTUPLE/FUNCTION\n");
+        GRAD_REVERSE_FAIL();
+      }
+      PolyUOp *function = u->src[0];
+      int n_outputs = function->src[0]->n_src;
+      int64_t selected = u->arg.i;
+      if (selected < 0 || selected >= n_outputs) {
+        fprintf(stderr, "polygrad: autograd: GETTUPLE index out of range\n");
+        GRAD_REVERSE_FAIL();
+      }
+      PolyUOp *old = grad_get(grads, function);
+      if (old && (old->op != POLY_OP_TUPLE || old->n_src != n_outputs)) {
+        fprintf(stderr, "polygrad: autograd: FUNCTION gradient is not a TUPLE\n");
+        GRAD_REVERSE_FAIL();
+      }
+      PolyUOp **parts = malloc((size_t)n_outputs * sizeof(*parts));
+      if (!parts) GRAD_REVERSE_FAIL();
+      for (int j = 0; j < n_outputs; j++) {
+        PolyUOp *prev = old ? old->src[j] : NULL;
+        if (j != selected) {
+          parts[j] = prev ? prev : poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_none());
+        } else if (prev && prev->op != POLY_OP_NOOP) {
+          PolyUOp *rhs = cast_to(ctx, g, prev->dtype);
+          parts[j] = poly_uop2(ctx, POLY_OP_ADD, prev->dtype, prev, rhs, poly_arg_none());
+        } else {
+          parts[j] = g;
+        }
+        if (!parts[j]) {
+          free(parts);
+          GRAD_REVERSE_FAIL();
+        }
+      }
+      PolyUOp *tuple = poly_uop(
+          ctx, POLY_OP_TUPLE, POLY_VOID, parts, n_outputs, poly_arg_none());
+      free(parts);
+      if (!tuple) GRAD_REVERSE_FAIL();
+      poly_map_set(grads, poly_ptr_hash(function), function, tuple, poly_ptr_eq);
+    } break;
+
+    /* Pinned pm_gradient maps a TUPLE gradient directly to its ordered sources
+     * (tinygrad/mixin/gradient.py:79). */
+    case POLY_OP_TUPLE:
+      if (g->op != POLY_OP_TUPLE || g->n_src != u->n_src) {
+        fprintf(stderr, "polygrad: autograd: malformed TUPLE gradient\n");
+        GRAD_REVERSE_FAIL();
+      }
+      for (int j = 0; j < u->n_src; j++)
+        if (g->src[j] && g->src[j]->op != POLY_OP_NOOP) grad_add(ctx, grads, u->src[j], g->src[j]);
+      break;
+
+    /* Pinned call_gradient differentiates the value-producing TUPLE body
+     * against only needed PARAM slots, compacts its arguments, and emits one
+     * backward FUNCTION (tinygrad/mixin/gradient.py:23-47). Custom grad_fxn and
+     * precompiled execution remain fail-closed until those behaviors land. */
+    case POLY_OP_FUNCTION: {
+      if (u->n_src < 1 || !u->src[0] || u->src[0]->op != POLY_OP_TUPLE ||
+          !g || g->op != POLY_OP_TUPLE || g->n_src != u->src[0]->n_src) {
+        fprintf(stderr, "polygrad: autograd: malformed FUNCTION gradient\n");
+        GRAD_REVERSE_FAIL();
+      }
+      if (u->arg.kind != POLY_ARG_CALL_INFO || !u->arg.call_info ||
+          u->arg.call_info->has_grad_fxn || u->arg.call_info->has_metadata ||
+          u->arg.call_info->has_aux || u->arg.call_info->precompile ||
+          u->arg.call_info->precompile_backward) {
+        fprintf(stderr, "polygrad: autograd: unsupported FUNCTION CallInfo\n");
+        GRAD_REVERSE_FAIL();
+      }
+      int n_args = u->n_src - 1;
+      int n_outputs = g->n_src;
+      PolyUOp **params_by_slot = n_args > 0 ? calloc((size_t)n_args, sizeof(*params_by_slot)) : NULL;
+      int n_body_topo = 0;
+      PolyUOp **body_topo = poly_toposort_ex_alloc(ctx, u->src[0], &n_body_topo, NULL, false);
+      if (!body_topo || (n_args > 0 && !params_by_slot)) {
+        poly_toposort_free(body_topo);
+        free(params_by_slot);
+        GRAD_REVERSE_FAIL();
+      }
+      for (int j = 0; j < n_body_topo; j++) {
+        PolyUOp *p = body_topo[j];
+        if (!p || p->op != POLY_OP_PARAM || p->arg.kind != POLY_ARG_PARAM || !p->arg.param)
+          continue;
+        int64_t slot = p->arg.param->slot;
+        if (slot >= 0 && slot < n_args) params_by_slot[slot] = p;
+      }
+      poly_toposort_free(body_topo);
+
+      PolyUOp **needed_params = n_args > 0 ? malloc((size_t)n_args * sizeof(*needed_params)) : NULL;
+      int *needed_slots = n_args > 0 ? malloc((size_t)n_args * sizeof(*needed_slots)) : NULL;
+      PolyUOp **root_grad_parts = n_outputs > 0 ? malloc((size_t)n_outputs * sizeof(*root_grad_parts)) : NULL;
+      PolyUOp **all_args = (n_args + n_outputs) > 0
+                               ? malloc((size_t)(n_args + n_outputs) * sizeof(*all_args))
+                               : NULL;
+      if ((n_args > 0 && (!needed_params || !needed_slots)) ||
+          (n_outputs > 0 && !root_grad_parts) ||
+          (n_args + n_outputs > 0 && !all_args)) {
+        free(params_by_slot);
+        free(needed_params);
+        free(needed_slots);
+        free(root_grad_parts);
+        free(all_args);
+        GRAD_REVERSE_FAIL();
+      }
+
+      int n_needed = 0;
+      for (int j = 0; j < n_args; j++) {
+        all_args[j] = u->src[j + 1];
+        if (params_by_slot[j] && grad_walk_contains(walk, n_walk, u->src[j + 1])) {
+          needed_params[n_needed] = params_by_slot[j];
+          needed_slots[n_needed++] = j;
+        }
+      }
+      for (int j = 0; j < n_outputs; j++) {
+        PolyUOp *out_grad = g->src[j];
+        all_args[n_args + j] = out_grad;
+        if (out_grad->op == POLY_OP_NOOP || grad_uop_base(out_grad)->op == POLY_OP_CONST) {
+          root_grad_parts[j] = out_grad;
+        } else {
+          root_grad_parts[j] = poly_uop_param(ctx, n_args + j, out_grad);
+        }
+        if (!root_grad_parts[j]) {
+          free(params_by_slot);
+          free(needed_params);
+          free(needed_slots);
+          free(root_grad_parts);
+          free(all_args);
+          GRAD_REVERSE_FAIL();
+        }
+      }
+      PolyUOp *root_grad = poly_uop(
+          ctx, POLY_OP_TUPLE, POLY_VOID, root_grad_parts, n_outputs, poly_arg_none());
+      free(root_grad_parts);
+      if (!root_grad) {
+        free(params_by_slot);
+        free(needed_params);
+        free(needed_slots);
+        free(all_args);
+        GRAD_REVERSE_FAIL();
+      }
+      PolyMap *body_grads = n_needed > 0
+                                ? grad_reverse_pass(
+                                      ctx, u->src[0], root_grad, needed_params, n_needed)
+                                : poly_map_new(16);
+      free(needed_params);
+      if (!body_grads) {
+        free(params_by_slot);
+        free(needed_slots);
+        free(all_args);
+        GRAD_REVERSE_FAIL();
+      }
+
+      PolyUOp **grad_bodies = n_needed > 0 ? malloc((size_t)n_needed * sizeof(*grad_bodies)) : NULL;
+      int *grad_slots = n_needed > 0 ? malloc((size_t)n_needed * sizeof(*grad_slots)) : NULL;
+      if (n_needed > 0 && (!grad_bodies || !grad_slots)) {
+        poly_map_destroy(body_grads);
+        free(params_by_slot);
+        free(needed_slots);
+        free(all_args);
+        free(grad_bodies);
+        free(grad_slots);
+        GRAD_REVERSE_FAIL();
+      }
+      int n_grad_bodies = 0;
+      for (int j = 0; j < n_needed; j++) {
+        PolyUOp *body_grad = grad_get(body_grads, params_by_slot[needed_slots[j]]);
+        if (!body_grad) continue;
+        grad_bodies[n_grad_bodies] = body_grad;
+        grad_slots[n_grad_bodies++] = needed_slots[j];
+      }
+      poly_map_destroy(body_grads);
+      free(params_by_slot);
+      free(needed_slots);
+
+      if (n_grad_bodies > 0) {
+        PolyUOp *backward_body = poly_uop(
+            ctx, POLY_OP_TUPLE, POLY_VOID, grad_bodies, n_grad_bodies, poly_arg_none());
+        PolyUOp *compact_body = NULL;
+        PolyUOp **compact_args = NULL;
+        int n_compact_args = 0;
+        if (!backward_body || !grad_compact_params(
+                                  ctx, backward_body, all_args, n_args + n_outputs,
+                                  &compact_body, &compact_args, &n_compact_args)) {
+          free(grad_bodies);
+          free(grad_slots);
+          free(all_args);
+          GRAD_REVERSE_FAIL();
+        }
+        PolyUOp **function_src = malloc((size_t)(n_compact_args + 1) * sizeof(*function_src));
+        if (!function_src) {
+          free(compact_args);
+          free(grad_bodies);
+          free(grad_slots);
+          free(all_args);
+          GRAD_REVERSE_FAIL();
+        }
+        function_src[0] = compact_body;
+        for (int j = 0; j < n_compact_args; j++) function_src[j + 1] = compact_args[j];
+        const char *forward_name = u->arg.call_info->name ? u->arg.call_info->name : "";
+        size_t name_len = strlen(forward_name);
+        char *backward_name = malloc(name_len + sizeof("_backward"));
+        if (!backward_name) {
+          free(function_src);
+          free(compact_args);
+          free(grad_bodies);
+          free(grad_slots);
+          free(all_args);
+          GRAD_REVERSE_FAIL();
+        }
+        memcpy(backward_name, forward_name, name_len);
+        memcpy(backward_name + name_len, "_backward", sizeof("_backward"));
+        PolyCallInfo backward_info = {
+            .name = backward_name,
+            .precompile = false,
+            .precompile_backward = false,
+            .has_grad_fxn = false,
+            .has_metadata = false,
+            .has_aux = false,
+        };
+        PolyUOp *backward_function = poly_uop(
+            ctx, POLY_OP_FUNCTION, POLY_VOID, function_src, n_compact_args + 1,
+            poly_arg_call_info(&backward_info));
+        free(backward_name);
+        free(function_src);
+        free(compact_args);
+        if (!backward_function) {
+          free(grad_bodies);
+          free(grad_slots);
+          free(all_args);
+          GRAD_REVERSE_FAIL();
+        }
+        for (int j = 0; j < n_grad_bodies; j++) {
+          PolyUOp *input_grad = poly_uop1(
+              ctx, POLY_OP_GETTUPLE, grad_bodies[j]->dtype, backward_function,
+              poly_arg_int(j));
+          if (!input_grad) {
+            free(grad_bodies);
+            free(grad_slots);
+            free(all_args);
+            GRAD_REVERSE_FAIL();
+          }
+          grad_add(ctx, grads, u->src[grad_slots[j] + 1], input_grad);
+        }
+      }
+      free(grad_bodies);
+      free(grad_slots);
+      free(all_args);
+    } break;
 
     /* explicitly stop gradient flow */
     case POLY_OP_DETACH:

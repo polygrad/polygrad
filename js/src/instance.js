@@ -157,13 +157,47 @@ function entryFields(entry) {
   throw new TypeError('polygrad: Instance entrypoints must be objects or [name, inputs, outputs] arrays')
 }
 
+function moduleFields(module) {
+  if (Array.isArray(module) && module.length === 3) {
+    const [name, inputs, output] = module
+    return { name, inputs, output }
+  }
+  if (module && typeof module === 'object') {
+    return { name: module.name, inputs: module.inputs, output: module.output }
+  }
+  throw new TypeError('polygrad: Instance modules must be objects or [name, inputs, output] arrays')
+}
+
+function moduleInputs(inputs) {
+  if (inputs == null) return []
+  if (inputs && inputs._tensor) return [inputs]
+  return Array.from(inputs)
+}
+
+function deviceMapEntries(deviceMap) {
+  let rows
+  if (deviceMap instanceof Map) rows = Array.from(deviceMap.entries())
+  else if (Array.isArray(deviceMap)) rows = deviceMap
+  else if (deviceMap && typeof deviceMap === 'object') rows = Object.entries(deviceMap)
+  else rows = []
+  return rows.map(row => {
+    if (Array.isArray(row) && row.length === 2) {
+      return { module: String(row[0]), device: String(row[1]) }
+    }
+    if (row && typeof row === 'object' && row.module != null && row.device != null) {
+      return { module: String(row.module), device: String(row.device) }
+    }
+    throw new TypeError('polygrad: device-map entries must be [module, device] or {module, device}')
+  })
+}
+
 function isPromiseLike(v) {
   return v && typeof v.then === 'function'
 }
 
 function isInstanceSpec(v) {
   return v && typeof v === 'object' && !Array.isArray(v) &&
-    (v.inputs || v.targets || v.outputs || v.losses || v.params || v.state || v.entrypoints)
+    (v.inputs || v.targets || v.outputs || v.losses || v.params || v.state || v.entrypoints || v.modules)
 }
 
 function createBoundInstanceClass(runtime) {
@@ -189,8 +223,35 @@ function createBoundInstanceClass(runtime) {
     }
   }
 
+  function defineModulesOnHandle(handle, modules, expectedCtx = null) {
+    if (modules == null) return
+    const rows = Array.from(modules)
+    if (!rows.length) throw new Error('Instance.defineModules requires at least one module')
+    const parsed = rows.map(module => {
+      const m = moduleFields(module)
+      if (m.name == null) throw new Error('Instance module is missing a name')
+      const inputs = moduleInputs(m.inputs).map((tensor, i) =>
+        requireTensor(`${m.name}.inputs[${i}]`, tensor))
+      const output = requireTensor(`${m.name}.output`, m.output)
+      for (const tensor of inputs.concat([output])) {
+        if (expectedCtx != null && tensor._ctx !== expectedCtx) {
+          throw new Error(`Instance module '${m.name}' contains a Tensor from another PolyCtx`)
+        }
+      }
+      return {
+        name: String(m.name),
+        inputs: inputs.map(tensor => tensor._tensor),
+        output: output._tensor
+      }
+    })
+    const api = _runtime._core.instance
+    if (!api.defineModules) throw new Error('polygrad: module placement unavailable for this core')
+    const rc = api.defineModules(handle, parsed)
+    if (rc !== 0) throw new Error('polygrad: invalid or ambiguous Instance module cuts')
+  }
+
   function lowerTensorSpecSync(spec = {}) {
-    const { inputs, outputs, targets, losses, entrypoints } = spec
+    const { inputs, outputs, targets, losses, entrypoints, modules } = spec
     let { params, state } = spec
     if (params != null && state != null) {
       throw new Error('Instance accepts params or state, not both')
@@ -269,6 +330,12 @@ function createBoundInstanceClass(runtime) {
     if (!api.fromBindings) throw new Error('polygrad: fromBindings unavailable for this core')
     const handle = api.fromBindings(ctx, bindings, entries)
     if (!handle) throw new Error('polygrad: failed to create Instance from tensor bindings')
+    try {
+      defineModulesOnHandle(handle, modules, ctx)
+    } catch (err) {
+      api.free(handle)
+      throw err
+    }
     return handle
   }
 
@@ -315,7 +382,7 @@ function createBoundInstanceClass(runtime) {
       return new Instance(inst)
     }
 
-    static fromBindings(bindings, entrypoints) {
+    static fromBindings(bindings, entrypoints, modules = null) {
       bindings = Array.from(bindings || [])
       entrypoints = Array.from(entrypoints || [])
       if (!bindings.length) throw new Error('Instance.fromBindings requires at least one binding')
@@ -353,10 +420,18 @@ function createBoundInstanceClass(runtime) {
         name: b.name, role: b.role, tensor: b.tensor._tensor, flags: b.flags
       })), entries)
       if (!handle) throw new Error('polygrad: failed to create Instance from bindings')
+      try {
+        defineModulesOnHandle(handle, modules, ctx)
+      } catch (err) {
+        api.free(handle)
+        throw err
+      }
       return new Instance(handle)
     }
 
-    static async fromTensors({ inputs, outputs, targets, losses, params, state, entrypoints } = {}) {
+    static async fromTensors({
+      inputs, outputs, targets, losses, params, state, entrypoints, modules
+    } = {}) {
       if (params != null && state != null) {
         throw new Error('Instance.fromTensors accepts params or state, not both')
       }
@@ -442,6 +517,12 @@ function createBoundInstanceClass(runtime) {
       if (!api.fromBindings) throw new Error('polygrad: fromBindings unavailable for this core')
       const handle = api.fromBindings(ctx, bindings, entries)
       if (!handle) throw new Error('polygrad: failed to create Instance from tensors')
+      try {
+        defineModulesOnHandle(handle, modules, ctx)
+      } catch (err) {
+        api.free(handle)
+        throw err
+      }
       return new Instance(handle)
     }
 
@@ -477,6 +558,38 @@ function createBoundInstanceClass(runtime) {
 
     free() {
       this.dispose()
+    }
+
+    defineModules(modules) {
+      defineModulesOnHandle(this._handle, modules)
+      return this
+    }
+
+    setDeviceMap(deviceMap) {
+      this._requireSync('setDeviceMap()', 'setDeviceMapAsync()')
+      const entries = deviceMapEntries(deviceMap)
+      if (!entries.length) throw new Error('Instance.setDeviceMap requires at least one mapping')
+      const rc = this._rt._core.instance.setDeviceMap(this._handle, entries)
+      if (isPromiseLike(rc)) throw new PolyAsyncRequired('setDeviceMap()', 'setDeviceMapAsync()')
+      if (rc !== 0) throw new Error(`polygrad: invalid, incomplete, or unsupported device map (rc=${rc})`)
+      return this
+    }
+
+    setDeviceMapAsync(deviceMap) {
+      const entries = deviceMapEntries(deviceMap)
+      if (!entries.length) {
+        return Promise.reject(new Error('Instance.setDeviceMap requires at least one mapping'))
+      }
+      const run = () => Promise.resolve(
+        this._rt._core.instance.setDeviceMap(this._handle, entries)
+      ).then(rc => {
+        if (rc !== 0) {
+          throw new Error(`polygrad: invalid, incomplete, or unsupported device map (rc=${rc})`)
+        }
+        return this
+      })
+      if (this._usesAsyncHostBridge()) return this._enqueueAsync(run)
+      return run()
     }
 
     get paramCount() {

@@ -17,6 +17,7 @@
 #include "optim.h"
 #include "engine/realize.h"
 #include "engine/schedule.h"
+#include "device.h"
 #include "codegen.h" /* poly_cuda_available (POLY_HAS_CUDA) */
 #include <stdlib.h>
 #include <string.h>
@@ -123,6 +124,13 @@ typedef struct {
 } RuntimeEntrypoint;
 
 typedef struct {
+  char *name;
+  PolyUOp **logical_inputs;
+  int n_inputs;
+  PolyUOp *logical_output;
+} RuntimeModule;
+
+typedef struct {
   PolyInstanceOptions opts;
 
   BuildBinding *bindings;
@@ -159,6 +167,10 @@ struct PolyInstance {
   int n_entrypoints;
   PolySchedule **entry_schedules; /* lazy retained generic schedule per entrypoint */
 
+  /* Explicit product-layer graph cuts used only by non-uniform place(). */
+  RuntimeModule *modules;
+  int n_modules;
+
   /* Value-and-grad state (lazy, per-entrypoint -- currently only "loss") */
   VagState *vag; /* NULL until first value_and_grad call */
 
@@ -168,6 +180,8 @@ struct PolyInstance {
   /* Optimizer state */
   OptimState optim;
 };
+
+static void runtime_modules_free(RuntimeModule *modules, int n_modules);
 
 /* Helpers */
 
@@ -1120,6 +1134,117 @@ fail:
   return st;
 }
 
+static bool runtime_module_has_input(const RuntimeModule *module, PolyUOp *u) {
+  if (!module || !u) return false;
+  for (int i = 0; i < module->n_inputs; i++)
+    if (module->logical_inputs[i] == u) return true;
+  return false;
+}
+
+int poly_instance_define_modules(
+    PolyInstance *inst,
+    const PolyInstanceModuleSpec *modules,
+    int n_modules
+) {
+  if (!inst || inst->stage != POLY_INSTANCE_BUILT || !inst->ctx || !modules ||
+      n_modules <= 0)
+    return -1;
+
+  RuntimeModule *candidate = calloc((size_t)n_modules, sizeof(*candidate));
+  if (!candidate) return -1;
+  int rc = -1;
+
+  for (int i = 0; i < n_modules; i++) {
+    const PolyInstanceModuleSpec *src = &modules[i];
+    PolyUOp *output = src->output ? poly_tensor_uop_logical(src->output) : NULL;
+    if (!valid_binding_name(src->name) || src->n_inputs < 0 ||
+        (src->n_inputs > 0 && !src->inputs) || !output ||
+        !poly_ctx_owns_ptr(inst->ctx, output))
+      goto cleanup;
+    for (int j = 0; j < i; j++)
+      if (strcmp(candidate[j].name, src->name) == 0 ||
+          candidate[j].logical_output == output)
+        goto cleanup;
+
+    candidate[i].name = dup_cstr(src->name);
+    candidate[i].logical_output = output;
+    candidate[i].n_inputs = src->n_inputs;
+    candidate[i].logical_inputs = src->n_inputs > 0
+                                      ? calloc((size_t)src->n_inputs, sizeof(PolyUOp *))
+                                      : NULL;
+    if (!candidate[i].name || (src->n_inputs > 0 && !candidate[i].logical_inputs))
+      goto cleanup;
+    for (int j = 0; j < src->n_inputs; j++) {
+      PolyUOp *input = src->inputs[j] ? poly_tensor_uop_logical(src->inputs[j]) : NULL;
+      if (!input || !poly_ctx_owns_ptr(inst->ctx, input) || input == output ||
+          !poly_uop_reachable(inst->ctx, output, input))
+        goto cleanup;
+      for (int k = 0; k < j; k++)
+        if (candidate[i].logical_inputs[k] == input) goto cleanup;
+      candidate[i].logical_inputs[j] = input;
+    }
+  }
+
+  for (int i = 0; i < n_modules; i++) {
+    bool entry_reachable = false;
+    for (int j = 0; j < inst->n_entrypoints && !entry_reachable; j++)
+      entry_reachable = poly_uop_reachable(
+          inst->ctx, inst->entrypoints[j].logical_sink, candidate[i].logical_output
+      );
+    if (!entry_reachable) goto cleanup;
+
+    for (int j = 0; j < n_modules; j++) {
+      if (i == j || !poly_uop_reachable(
+                        inst->ctx, candidate[i].logical_output, candidate[j].logical_output
+                    ))
+        continue;
+      if (j >= i || !runtime_module_has_input(&candidate[i], candidate[j].logical_output))
+        goto cleanup;
+    }
+  }
+
+  runtime_modules_free(inst->modules, inst->n_modules);
+  inst->modules = candidate;
+  inst->n_modules = n_modules;
+  candidate = NULL;
+  rc = 0;
+
+cleanup:
+  runtime_modules_free(candidate, n_modules);
+  return rc;
+}
+
+int poly_instance_define_module_arrays(
+    PolyInstance *inst,
+    const char **names,
+    PolyTensor **inputs,
+    const int *input_counts,
+    PolyTensor **outputs,
+    int n_modules
+) {
+  if (!inst || !names || !input_counts || !outputs || n_modules <= 0) return -1;
+  PolyInstanceModuleSpec *modules =
+      calloc((size_t)n_modules, sizeof(PolyInstanceModuleSpec));
+  if (!modules) return -1;
+  int input_off = 0;
+  int rc = -1;
+  for (int i = 0; i < n_modules; i++) {
+    if (input_counts[i] < 0 || (input_counts[i] > 0 && !inputs)) goto cleanup;
+    modules[i] = (PolyInstanceModuleSpec){
+        .name = names[i],
+        .inputs = input_counts[i] > 0 ? &inputs[input_off] : NULL,
+        .n_inputs = input_counts[i],
+        .output = outputs[i],
+    };
+    input_off += input_counts[i];
+  }
+  rc = poly_instance_define_modules(inst, modules, n_modules);
+
+cleanup:
+  free(modules);
+  return rc;
+}
+
 PolyInstance *poly_instance_from_bindings(
     PolyCtx *ctx,
     const PolyBindingSpec *bindings,
@@ -1588,6 +1713,15 @@ static void train_free(TrainState *ts, int n_params) {
   free(ts);
 }
 
+static void runtime_modules_free(RuntimeModule *modules, int n_modules) {
+  if (!modules) return;
+  for (int i = 0; i < n_modules; i++) {
+    free(modules[i].name);
+    free(modules[i].logical_inputs);
+  }
+  free(modules);
+}
+
 void poly_instance_free(PolyInstance *inst) {
   if (!inst) return;
 
@@ -1619,6 +1753,10 @@ void poly_instance_free(PolyInstance *inst) {
     free(inst->entrypoints[i].objective);
   }
   free(inst->entrypoints);
+
+  runtime_modules_free(inst->modules, inst->n_modules);
+  inst->modules = NULL;
+  inst->n_modules = 0;
 
   /* Free execution caches.
    * Order: exec cache first (holds pointers into prepared steps),
@@ -2070,6 +2208,104 @@ static void instance_discard_candidate_residencies(
   }
 }
 
+static bool instance_backend_available(PolyDevice device) {
+  if (!poly_device_can_execute(device) || !poly_backend_get(device)) return false;
+#ifdef POLY_HAS_CUDA
+  if (device == POLY_DEVICE_CUDA && !poly_cuda_available()) return false;
+#endif
+#ifdef POLY_HAS_HIP
+  if (device == POLY_DEVICE_HIP && !poly_hip_available()) return false;
+#endif
+  return true;
+}
+
+static int instance_publish_placement(
+    PolyInstance *inst,
+    PolyUOp **target_bindings,
+    PolyUOp **placed_roots,
+    bool set_preferred,
+    PolyDevice preferred
+) {
+  if (!inst || !target_bindings || !placed_roots) return -1;
+  size_t nb = (size_t)(unsigned)inst->n_bufs;
+  void **target_data = calloc(nb, sizeof(*target_data));
+  uint8_t *target_existed = calloc(nb, sizeof(*target_existed));
+  int rc = -1;
+  if (!target_data || !target_existed) goto cleanup;
+
+  for (int i = 0; i < inst->n_bufs; i++) {
+    PolyUOp *device_uop = poly_uop_device_uop_cached(inst->ctx, target_bindings[i], NULL);
+    PolyDevice backend = poly_device_from_device_uop(device_uop);
+    if (!device_uop || device_uop->arg.kind != POLY_ARG_STRING ||
+        !instance_backend_available(backend))
+      goto cleanup;
+    target_existed[i] = poly_buffer_get(inst->ctx, target_bindings[i]) != NULL;
+  }
+
+  /* Prepare every target residency before publishing a new binding/root set.
+   * Aliases share one target UOp and are migrated exactly once. */
+  for (int i = 0; i < inst->n_bufs; i++) {
+    int alias = -1;
+    for (int j = 0; j < i; j++)
+      if (target_bindings[j] == target_bindings[i]) {
+        alias = j;
+        break;
+      }
+    if (alias >= 0) {
+      target_data[i] = target_data[alias];
+      continue;
+    }
+
+    PolyUOp *old = inst->bufs[i].buffer;
+    PolyUOp *target = target_bindings[i];
+    PolyUOp *device_uop = poly_uop_device_uop_cached(inst->ctx, target, NULL);
+    PolyDevice backend = poly_device_from_device_uop(device_uop);
+    size_t nbytes = named_buf_nbytes(&inst->bufs[i]);
+    if (nbytes > 0 && target != old) {
+      PolyBuffer *host = NULL;
+      if (poly_buffer_ensure_host_current(inst->ctx, old, &host) != 0 || !host ||
+          !host->ptr || host->nbytes < nbytes ||
+          poly_buffer_write(inst->ctx, target, host->ptr, nbytes) != 0)
+        goto cleanup_residencies;
+    }
+    if (nbytes > 0 && inst->bufs[i].role != POLY_ROLE_OUTPUT &&
+        poly_buffer_ensure_device_current(inst->ctx, target, backend) != 0)
+      goto cleanup_residencies;
+    if (nbytes > 0) {
+      PolyBuffer *host = NULL;
+      if (poly_buffer_ensure_host_current(inst->ctx, target, &host) != 0 || !host ||
+          !host->ptr)
+        goto cleanup_residencies;
+      target_data[i] = host->ptr;
+    }
+  }
+
+  for (int i = 0; i < inst->n_bufs; i++) {
+    inst->bufs[i].buffer = target_bindings[i];
+    inst->bufs[i].data = target_data[i];
+  }
+  for (int i = 0; i < inst->n_entrypoints; i++)
+    inst->entrypoints[i].sink = placed_roots[i];
+  if (set_preferred) poly_ctx_set_preferred_device(inst->ctx, preferred);
+
+  entry_schedules_clear(inst);
+  vag_free(inst->vag, inst->n_params);
+  inst->vag = NULL;
+  train_free(inst->train, inst->n_params);
+  inst->train = NULL;
+  rc = 0;
+  goto cleanup;
+
+cleanup_residencies:
+  instance_discard_candidate_residencies(
+      inst, target_bindings, target_existed, inst->n_bufs
+  );
+cleanup:
+  free(target_existed);
+  free(target_data);
+  return rc;
+}
+
 static int instance_place_uniform_device(PolyInstance *inst, PolyDevice device) {
   if (!inst || !inst->ctx || inst->n_bufs <= 0 || inst->n_entrypoints <= 0 ||
       !poly_device_can_execute(device))
@@ -2097,12 +2333,9 @@ static int instance_place_uniform_device(PolyInstance *inst, PolyDevice device) 
   PolyUOp **logical_bindings = calloc(nb, sizeof(*logical_bindings));
   PolyUOp **template_bindings = use_templates ? calloc(nb, sizeof(*template_bindings)) : NULL;
   PolyUOp **target_bindings = calloc(nb, sizeof(*target_bindings));
-  void **target_data = calloc(nb, sizeof(*target_data));
-  uint8_t *target_existed = calloc(nb, sizeof(*target_existed));
   int rc = -1;
   if (!logical_roots || (use_templates && !template_roots) || !placed_roots ||
-      !logical_bindings || (use_templates && !template_bindings) || !target_bindings ||
-      !target_data || !target_existed)
+      !logical_bindings || (use_templates && !template_bindings) || !target_bindings)
     goto cleanup;
 
   for (int i = 0; i < inst->n_entrypoints; i++) {
@@ -2115,7 +2348,6 @@ static int instance_place_uniform_device(PolyInstance *inst, PolyDevice device) 
     target_bindings[i] =
         instance_binding_on_device(inst->ctx, logical_bindings[i], device);
     if (!target_bindings[i]) goto cleanup;
-    target_existed[i] = poly_buffer_get(inst->ctx, target_bindings[i]) != NULL;
   }
 
   if (poly_place_roots(
@@ -2125,71 +2357,101 @@ static int instance_place_uniform_device(PolyInstance *inst, PolyDevice device) 
       ) != 0)
     goto cleanup;
 
-  /* Prepare every target residency before publishing a new binding/root set.
-   * Aliases share one target UOp and are migrated exactly once. */
-  for (int i = 0; i < inst->n_bufs; i++) {
-    int alias = -1;
-    for (int j = 0; j < i; j++)
-      if (target_bindings[j] == target_bindings[i]) {
-        alias = j;
-        break;
-      }
-    if (alias >= 0) {
-      target_data[i] = target_data[alias];
-      continue;
-    }
-
-    PolyUOp *old = inst->bufs[i].buffer;
-    PolyUOp *target = target_bindings[i];
-    size_t nbytes = named_buf_nbytes(&inst->bufs[i]);
-    if (nbytes > 0 && target != old) {
-      PolyBuffer *host = NULL;
-      if (poly_buffer_ensure_host_current(inst->ctx, old, &host) != 0 || !host ||
-          !host->ptr || host->nbytes < nbytes ||
-          poly_buffer_write(inst->ctx, target, host->ptr, nbytes) != 0)
-        goto cleanup_residencies;
-    }
-    if (nbytes > 0 && inst->bufs[i].role != POLY_ROLE_OUTPUT &&
-        poly_buffer_ensure_device_current(inst->ctx, target, device) != 0)
-      goto cleanup_residencies;
-    if (nbytes > 0) {
-      PolyBuffer *host = NULL;
-      if (poly_buffer_ensure_host_current(inst->ctx, target, &host) != 0 || !host ||
-          !host->ptr)
-        goto cleanup_residencies;
-      target_data[i] = host->ptr;
-    }
-  }
-
-  for (int i = 0; i < inst->n_bufs; i++) {
-    inst->bufs[i].buffer = target_bindings[i];
-    inst->bufs[i].data = target_data[i];
-  }
-  for (int i = 0; i < inst->n_entrypoints; i++)
-    inst->entrypoints[i].sink = placed_roots[i];
-  poly_ctx_set_preferred_device(inst->ctx, device);
-
-  entry_schedules_clear(inst);
-  vag_free(inst->vag, inst->n_params);
-  inst->vag = NULL;
-  train_free(inst->train, inst->n_params);
-  inst->train = NULL;
-  rc = 0;
-  goto cleanup;
-
-cleanup_residencies:
-  instance_discard_candidate_residencies(
-      inst, target_bindings, target_existed, inst->n_bufs
-  );
+  rc = instance_publish_placement(inst, target_bindings, placed_roots, true, device);
 cleanup:
-  free(target_existed);
-  free(target_data);
   free(target_bindings);
   free(template_bindings);
   free(logical_bindings);
   free(placed_roots);
   free(template_roots);
   free(logical_roots);
+  return rc;
+}
+
+int poly_instance_set_device_map(
+    PolyInstance *inst,
+    const PolyInstanceDeviceMapEntry *entries,
+    int n_entries
+) {
+  if (!inst || inst->stage != POLY_INSTANCE_BUILT || !inst->ctx || !entries ||
+      n_entries <= 0 || n_entries != inst->n_modules || !inst->modules)
+    return -1;
+
+  size_t nb = (size_t)(unsigned)inst->n_bufs;
+  size_t ne = (size_t)(unsigned)inst->n_entrypoints;
+  size_t nm = (size_t)(unsigned)inst->n_modules;
+  PolyUOp **logical_roots = calloc(ne, sizeof(*logical_roots));
+  PolyUOp **placed_roots = calloc(ne, sizeof(*placed_roots));
+  PolyUOp **logical_bindings = calloc(nb, sizeof(*logical_bindings));
+  PolyUOp **target_bindings = calloc(nb, sizeof(*target_bindings));
+  PolyPlaceModule *modules = calloc(nm, sizeof(*modules));
+  uint8_t *entry_used = calloc(nm, sizeof(*entry_used));
+  int rc = -1;
+  if (!logical_roots || !placed_roots || !logical_bindings || !target_bindings ||
+      !modules || !entry_used)
+    goto cleanup;
+
+  for (int i = 0; i < inst->n_entrypoints; i++)
+    logical_roots[i] = inst->entrypoints[i].logical_sink;
+  for (int i = 0; i < inst->n_bufs; i++)
+    logical_bindings[i] = inst->bufs[i].logical_buffer;
+
+  for (int i = 0; i < inst->n_modules; i++) {
+    int found = -1;
+    for (int j = 0; j < n_entries; j++) {
+      if (!entries[j].module || !entries[j].device ||
+          strcmp(entries[j].module, inst->modules[i].name) != 0)
+        continue;
+      if (found >= 0 || entry_used[j]) goto cleanup;
+      found = j;
+    }
+    if (found < 0) goto cleanup;
+    entry_used[found] = 1;
+    modules[i] = (PolyPlaceModule){
+        .name = inst->modules[i].name,
+        .output = inst->modules[i].logical_output,
+        .inputs = inst->modules[i].logical_inputs,
+        .n_inputs = inst->modules[i].n_inputs,
+        .device = poly_device_uop_from_name(inst->ctx, entries[found].device),
+    };
+    if (!modules[i].device) goto cleanup;
+  }
+  for (int i = 0; i < n_entries; i++)
+    if (!entry_used[i]) goto cleanup;
+
+  if (poly_place_module_map(
+          inst->ctx, logical_roots, inst->n_entrypoints,
+          logical_bindings, inst->n_bufs, modules, inst->n_modules,
+          target_bindings, placed_roots
+      ) != 0)
+    goto cleanup;
+
+  rc = instance_publish_placement(inst, target_bindings, placed_roots, false, POLY_DEVICE_AUTO);
+
+cleanup:
+  free(entry_used);
+  free(modules);
+  free(target_bindings);
+  free(logical_bindings);
+  free(placed_roots);
+  free(logical_roots);
+  return rc;
+}
+
+int poly_instance_set_device_map_arrays(
+    PolyInstance *inst,
+    const char **modules,
+    const char **devices,
+    int n_entries
+) {
+  if (!inst || !modules || !devices || n_entries <= 0) return -1;
+  PolyInstanceDeviceMapEntry *entries =
+      calloc((size_t)n_entries, sizeof(PolyInstanceDeviceMapEntry));
+  if (!entries) return -1;
+  for (int i = 0; i < n_entries; i++)
+    entries[i] = (PolyInstanceDeviceMapEntry){.module = modules[i], .device = devices[i]};
+  int rc = poly_instance_set_device_map(inst, entries, n_entries);
+  free(entries);
   return rc;
 }
 

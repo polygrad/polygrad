@@ -294,7 +294,27 @@ PolyUOp *poly_buffer_from_file(PolyCtx *ctx, const char *path, int dtype_id) {
   close(fd);
 
   int64_t numel = (int64_t)(mapped_bytes / (uint64_t)itemsize);
-  PolyUOp *buf = poly_buffer_on_device(ctx, scalar, numel, POLY_DEVICE_DISK);
+  /* Pinned Tensor(Path) keeps the complete DISK:path identity in the BUFFER's
+   * DEVICE source (device.py file-backed allocator, tensor.py constructor).
+   * Backend selection remains POLY_DEVICE_DISK, but graph/cache identity must
+   * not discard the path. */
+  char *disk_name = malloc(strlen(path) + 6);
+  if (!disk_name) {
+    if (ptr) munmap(ptr, (size_t)mapped_bytes);
+    return NULL;
+  }
+  sprintf(disk_name, "DISK:%s", path);
+  PolyUOp *unique = poly_uop0(
+      ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(poly_ctx_next_unique_id(ctx))
+  );
+  PolyUOp *device_uop = poly_device_uop_from_name(ctx, disk_name);
+  PolyUOp *buffer_src[2] = {unique, device_uop};
+  PolyUOp *buf = unique && device_uop
+                     ? poly_uop(
+                           ctx, POLY_OP_BUFFER, scalar, buffer_src, 2, poly_arg_int(numel)
+                       )
+                     : NULL;
+  free(disk_name);
   if (!buf) {
     if (ptr) munmap(ptr, (size_t)mapped_bytes);
     return NULL;
@@ -310,8 +330,8 @@ PolyUOp *poly_buffer_from_file(PolyCtx *ctx, const char *path, int dtype_id) {
       .frontend_release = NULL,
       .memory_accounted = false,
       .memory_device = POLY_DEVICE_DISK,
-      .device_uop = poly_buffer_device_uop(ctx, buf, POLY_DEVICE_DISK),
-      .memory_device_uop = poly_buffer_device_uop(ctx, buf, POLY_DEVICE_DISK),
+      .device_uop = device_uop,
+      .memory_device_uop = device_uop,
   };
   poly_buffer_adopt(ctx, buf, &mapped);
   return buf;
@@ -757,6 +777,7 @@ bool poly_uop_contiguous_view_info(
 PolyUOp *poly_buffer_view(
     PolyCtx *ctx,
     PolyUOp *base,
+    PolyDType dtype,
     int64_t numel,
     size_t byte_offset
 ) {
@@ -765,7 +786,7 @@ PolyUOp *poly_buffer_view(
   if (!identity) return NULL;
   PolyBuffer *parent = poly_buffer_get(ctx, (PolyUOp *)identity);
   if (!parent) return NULL;
-  size_t itemsize = poly_dtype_itemsize(poly_dtype_scalar(identity->dtype));
+  size_t itemsize = poly_dtype_itemsize(dtype);
   if (itemsize == 0 || (uint64_t)numel > SIZE_MAX / itemsize) return NULL;
   size_t nbytes = (size_t)numel * itemsize;
   if (byte_offset > parent->nbytes || nbytes > parent->nbytes - byte_offset) return NULL;
@@ -780,7 +801,7 @@ PolyUOp *poly_buffer_view(
   };
   PolyUOp *view_src[2] = {(PolyUOp *)identity, unique};
   PolyUOp *view = poly_uop(
-      ctx, POLY_OP_BUFFER_VIEW, poly_dtype_scalar(identity->dtype), view_src, 2, view_arg
+      ctx, POLY_OP_BUFFER_VIEW, dtype, view_src, 2, view_arg
   );
   if (!view) return NULL;
 
@@ -931,6 +952,38 @@ PolyUOp *poly_uop_buffer(PolyCtx *ctx, PolyUOp *u) {
        u->op == POLY_OP_DETACH || u->op == POLY_OP_AFTER) &&
       u->n_src >= 1)
     return poly_uop_buffer(ctx, u->src[0]);
+  /* Pinned UOp.buffer creates a typed Buffer.view for BITCAST after resolving
+   * the source Buffer/view (uop/ops.py:838-856). This is what makes an
+   * unequal-width DISK BITCAST a zero-copy typed file view instead of a
+   * scalar reinterpretation kernel. Attach the non-owning runtime alias to
+   * the immutable BITCAST node; graph topology stays unchanged. */
+  if (u->op == POLY_OP_BITCAST && u->n_src == 1) {
+    PolyBuffer *source = poly_uop_buffer_handle(ctx, u->src[0]);
+    PolyShape shape = poly_uop_max_shape_cached(ctx, u);
+    uint64_t numel = 0;
+    size_t itemsize = poly_dtype_itemsize(poly_dtype_scalar(u->dtype));
+    if (!source || poly_buffer_is_multi(source) ||
+        !contiguous_view_shape_numel(shape, &numel) || itemsize == 0 ||
+        numel > SIZE_MAX / itemsize || (size_t)numel * itemsize != source->nbytes)
+      return NULL;
+
+    PolyBuffer alias = *source;
+    alias.nbytes = (size_t)numel * itemsize;
+    alias.owned = false;
+    alias.src = NULL;
+    alias.frontend_release = NULL;
+    alias.memory_accounted = false;
+    alias.memory_device = POLY_DEVICE_AUTO;
+    alias.memory_device_uop = NULL;
+    PolyBuffer *cached = poly_buffer_get(ctx, u);
+    if (cached) {
+      poly_buffer_free_chain(ctx, cached);
+      *cached = alias;
+    } else {
+      poly_buffer_attach(ctx, u, &alias);
+    }
+    return poly_buffer_get(ctx, u) ? u : NULL;
+  }
   if (u->op == POLY_OP_MSTACK)
     return poly_multi_buffer_for_mstack(ctx, u) ? u : NULL;
   if (u->op == POLY_OP_MSELECT && u->n_src == 1 && u->arg.kind == POLY_ARG_INT) {

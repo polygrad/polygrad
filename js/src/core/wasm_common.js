@@ -936,8 +936,15 @@ function createWasmCoreFromModule(Module, device) {
       Module._poly_tensor_quick_gelu(ctx, src),
     poly_tensor_detach: (ctx, src) =>
       Module._poly_tensor_detach(ctx, src),
+    poly_tensor_contiguous_backward: (ctx, src) =>
+      Module._poly_tensor_contiguous_backward(ctx, src),
     poly_tensor_sum: (ctx, src, axes, len, keepdim) =>
       callWithInt64(Module._poly_tensor_sum, ctx, src, axes, len, keepdim ? 1 : 0),
+    poly_tensor_sum_dtype_by_id: (ctx, src, axes, len, keepdim, dtypeId) =>
+      callWithInt64(
+        Module._poly_tensor_sum_dtype_by_id,
+        ctx, src, axes, len, keepdim ? 1 : 0, dtypeId
+      ),
     poly_tensor_max: (ctx, src, axes, len, keepdim) =>
       callWithInt64(Module._poly_tensor_max, ctx, src, axes, len, keepdim ? 1 : 0),
     poly_tensor_argmax: (ctx, src, axis, keepdim) =>
@@ -946,6 +953,8 @@ function createWasmCoreFromModule(Module, device) {
       Module._poly_tensor_minimum(ctx, a, b),
     poly_tensor_dot: (ctx, src, weight) =>
       Module._poly_tensor_dot(ctx, src, weight),
+    poly_tensor_dot_dtype_by_id: (ctx, src, weight, dtypeId) =>
+      Module._poly_tensor_dot_dtype_by_id(ctx, src, weight, dtypeId),
     poly_tensor_qr_ex: (ctx, src, mode) =>
       callUopPair(
         Module._poly_tensor_qr_ex,
@@ -1065,6 +1074,23 @@ function createWasmCoreFromModule(Module, device) {
       try {
         return Module._poly_tensor_conv2d(
           ctx, tensor, weight, bias || 0, groups, stridePtr, dilationPtr, paddingPtr, nPadding
+        )
+      } finally {
+        if (stridePtr) Module._free(stridePtr)
+        if (dilationPtr) Module._free(dilationPtr)
+        if (paddingPtr) Module._free(paddingPtr)
+      }
+    },
+    poly_tensor_conv2d_dtype_by_id: (
+      ctx, tensor, weight, bias, groups, stride, dilation, padding, nPadding, dtypeId
+    ) => {
+      const stridePtr = writeInt64Array(stride)
+      const dilationPtr = writeInt64Array(dilation)
+      const paddingPtr = writeInt64Array(padding)
+      try {
+        return Module._poly_tensor_conv2d_dtype_by_id(
+          ctx, tensor, weight, bias || 0, groups, stridePtr, dilationPtr, paddingPtr, nPadding,
+          dtypeId
         )
       } finally {
         if (stridePtr) Module._free(stridePtr)
@@ -1557,7 +1583,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 49
+  const EXPECTED_ABI = 52
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(
@@ -1874,6 +1900,53 @@ function createWasmCoreFromModule(Module, device) {
         if (entryObjectivesPtr) Module._free(entryObjectivesPtr)
         if (entryFlagsPtr) Module._free(entryFlagsPtr)
       }
+    },
+
+    defineModules(inst, modules) {
+      const stringPtrs = []
+      const namePtrs = Module._malloc(Math.max(1, modules.length) * 4)
+      for (let i = 0; i < modules.length; i++) {
+        const p = allocString(modules[i].name)
+        stringPtrs.push(p)
+        heap32()[(namePtrs >> 2) + i] = p
+      }
+      const flatInputs = modules.flatMap(m => m.inputs || [])
+      const inputPtrs = writePtrArray(flatInputs)
+      const inputCounts = writeI32Array(modules.map(m => (m.inputs || []).length))
+      const outputPtrs = writePtrArray(modules.map(m => m.output))
+      try {
+        return Module._poly_instance_define_module_arrays(
+          inst, namePtrs, inputPtrs, inputCounts, outputPtrs, modules.length
+        )
+      } finally {
+        for (const p of stringPtrs) Module._free(p)
+        Module._free(namePtrs)
+        if (inputPtrs) Module._free(inputPtrs)
+        if (inputCounts) Module._free(inputCounts)
+        if (outputPtrs) Module._free(outputPtrs)
+      }
+    },
+
+    setDeviceMap(inst, entries) {
+      const moduleStrings = entries.map(e => allocString(e.module))
+      const deviceStrings = entries.map(e => allocString(e.device))
+      const modulePtrs = writePtrArray(moduleStrings)
+      const devicePtrs = writePtrArray(deviceStrings)
+      const cleanup = () => {
+        for (const p of moduleStrings) Module._free(p)
+        for (const p of deviceStrings) Module._free(p)
+        if (modulePtrs) Module._free(modulePtrs)
+        if (devicePtrs) Module._free(devicePtrs)
+      }
+      const place = () => Module._poly_instance_set_device_map_arrays(
+          inst, modulePtrs, devicePtrs, entries.length
+        )
+      if (deviceName === 'webgpu') {
+        return ensureInstanceDevice(inst).then(place).finally(cleanup)
+      }
+      const rc = place()
+      cleanup()
+      return rc
     },
 
     loadHF(configBytes, weightFilesBytes, maxBatch, maxSeqLen) {

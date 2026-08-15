@@ -365,6 +365,16 @@ bool poly_uop_axis_cached(PolyCtx *ctx, const PolyUOp *u, PolyMap *cache, int *o
              u->arg.i <= INT_MAX) {
     axis = (int)u->arg.i;
     has_axis = true;
+  } else if (u->op == POLY_OP_GETTUPLE && u->n_src == 1 &&
+             u->arg.kind == POLY_ARG_INT && u->arg.i >= 0) {
+    /* Pinned UOp.axis selects the requested TUPLE result, including through
+     * a value-producing FUNCTION (tinygrad/uop/ops.py:628-630). */
+    PolyUOp *aggregate = u->src[0];
+    PolyUOp *tuple = aggregate && aggregate->op == POLY_OP_FUNCTION && aggregate->n_src > 0
+                         ? aggregate->src[0]
+                         : aggregate;
+    if (tuple && tuple->op == POLY_OP_TUPLE && u->arg.i < tuple->n_src)
+      has_axis = poly_uop_axis_cached(ctx, tuple->src[u->arg.i], cache, &axis);
   } else if (u->op == POLY_OP_PARAM && u->arg.kind == POLY_ARG_PARAM && u->arg.param &&
              u->arg.param->has_axis && u->arg.param->axis >= 0) {
     axis = u->arg.param->axis;
@@ -749,6 +759,53 @@ static PolyUOp *const *src_dim_uops(PolyCtx *ctx, PolyUOp *u, int idx) {
 
 static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u);
 
+/* Pinned GETTUPLE(FUNCTION)._shape rewrites every symbolic dimension PARAM
+ * with the FUNCTION's ordered argument at ParamArg.slot
+ * (tinygrad/uop/ops.py:242-253,1691). Keep this query pass-local: it derives
+ * a shape expression and does not add graph or lifecycle state. */
+static PolyUOp *shape_resolve_function_dim(
+    PolyCtx *ctx, PolyUOp *dim, PolyUOp *function
+) {
+  if (!ctx || !dim || !function || function->op != POLY_OP_FUNCTION ||
+      function->n_src < 1)
+    return NULL;
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort_ex_alloc(ctx, dim, &n_topo, NULL, false);
+  if (!topo) return NULL;
+  PolyUOp **from = n_topo > 0 ? malloc((size_t)n_topo * sizeof(*from)) : NULL;
+  PolyUOp **to = n_topo > 0 ? malloc((size_t)n_topo * sizeof(*to)) : NULL;
+  if (n_topo > 0 && (!from || !to)) {
+    free(from);
+    free(to);
+    poly_toposort_free(topo);
+    return NULL;
+  }
+
+  int n_sub = 0;
+  bool valid = true;
+  for (int i = 0; i < n_topo; i++) {
+    PolyUOp *param = topo[i];
+    if (!param || param->op != POLY_OP_PARAM) continue;
+    if (param->arg.kind != POLY_ARG_PARAM || !param->arg.param ||
+        param->arg.param->slot < 0 || param->arg.param->slot >= function->n_src - 1) {
+      valid = false;
+      break;
+    }
+    from[n_sub] = param;
+    to[n_sub] = function->src[1 + param->arg.param->slot];
+    n_sub++;
+  }
+
+  PolyUOp *resolved = dim;
+  if (valid && n_sub > 0 &&
+      poly_uop_substitute_many(ctx, &dim, 1, from, to, n_sub, &resolved) != 0)
+    valid = false;
+  free(from);
+  free(to);
+  poly_toposort_free(topo);
+  return valid ? resolved : NULL;
+}
+
 static ShapeCacheEntry *ensure_shape(PolyCtx *ctx, PolyUOp *u) {
   ShapeCacheEntry *cached = shape_cache_lookup(ctx, u);
   if (cached) return cached;
@@ -783,6 +840,43 @@ static ShapeCacheEntry *ensure_shape(PolyCtx *ctx, PolyUOp *u) {
 
 static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
   PolyOps op = u->op;
+
+  /* Pinned GETTUPLE extracts shape from the requested TUPLE element. A
+   * FUNCTION selector additionally resolves symbolic dimension PARAMs from
+   * the ordered call arguments before exposing allocation maxima. */
+  if (op == POLY_OP_GETTUPLE && u->n_src == 1 && u->arg.kind == POLY_ARG_INT &&
+      u->arg.i >= 0) {
+    PolyUOp *aggregate = u->src[0];
+    PolyUOp *function = aggregate && aggregate->op == POLY_OP_FUNCTION ? aggregate : NULL;
+    PolyUOp *tuple = function && function->n_src > 0 ? function->src[0] : aggregate;
+    if (!tuple || tuple->op != POLY_OP_TUPLE || u->arg.i >= tuple->n_src)
+      return make_entry_none(ctx);
+    ShapeCacheEntry *selected = shape_cache_lookup(ctx, tuple->src[u->arg.i]);
+    if (!selected || selected->ndim < 0) return make_entry_none(ctx);
+    if (!function || selected->ndim == 0)
+      return make_entry_dims_uops(ctx, selected->dims, selected->dim_uops, selected->ndim);
+
+    int64_t dims[POLY_MAX_DIMS];
+    PolyUOp *dim_uops[POLY_MAX_DIMS];
+    for (int i = 0; i < selected->ndim; i++) {
+      PolyUOp *dim = selected->dim_uops ? selected->dim_uops[i] : NULL;
+      if (!dim) dim = shape_dim_const(ctx, selected->dims[i]);
+      dim = shape_resolve_function_dim(ctx, dim, function);
+      if (!dim) return make_entry_none(ctx);
+      int64_t value = 0;
+      if (poly_uop_const_i64(dim, &value) == 0) {
+        if (value < 0) return make_entry_none(ctx);
+        dims[i] = value;
+      } else {
+        int64_t vmin = 0, vmax = 0;
+        poly_uop_minmax(ctx, dim, &vmin, &vmax);
+        if (vmin < 0 || vmax < 0) return make_entry_none(ctx);
+        dims[i] = vmax;
+      }
+      dim_uops[i] = dim;
+    }
+    return make_entry_dims_uops(ctx, dims, dim_uops, selected->ndim);
+  }
 
   /* STORE: inherit shape from value (src[1]) */
   if (op == POLY_OP_STORE && u->n_src >= 2 && SRC_NDIM(1) >= 0)

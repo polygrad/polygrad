@@ -3,22 +3,168 @@
 from __future__ import annotations
 
 import contextlib
+import ctypes
+import decimal
 import functools
 import gzip
 import hashlib
+import itertools
 import operator
 import os
 import pathlib
+import platform
+import math
+import shutil
+import sys
 import tempfile
-from typing import Any, ClassVar, Generic, Iterable, Optional, TypeVar
+import time
+from dataclasses import dataclass, field
+from typing import Any, Callable, ClassVar, Generic, Iterable, Iterator, Optional, TypeVar
 
 
 T = TypeVar("T")
 
 
+# Pinned tinygrad/helpers.py:15-17 public platform facts.
+OSX = platform.system() == "Darwin"
+ARCH_X86 = any(value in platform.processor() for value in ("Intel", "i386", "x86_64"))
+
+
 def prod(x: Iterable[T]):
     """Multiply an iterable, returning integer one for an empty input."""
     return functools.reduce(operator.mul, x, 1)
+
+
+# Pinned tinygrad/helpers.py:49,88-91. These are literal public helper ports.
+def flatten(values: Iterable[Iterable[T]]):
+    return [item for sublist in values for item in sublist]
+
+
+def partition(itr: Iterable[T], fxn: Callable[[T], bool]) -> tuple[list[T], list[T]]:
+    ret: tuple[list[T], list[T]] = ([], [])
+    for value in itr:
+        (ret[0] if fxn(value) else ret[1]).append(value)
+    return ret
+
+
+# Literal pinned tinygrad/helpers.py:301-305 public timer.
+class Timing(contextlib.ContextDecorator):
+    def __init__(self, prefix="", on_exit=None, enabled=True):
+        self.prefix, self.on_exit, self.enabled = prefix, on_exit, enabled
+
+    def __enter__(self):
+        self.st = time.perf_counter_ns()
+
+    def __exit__(self, *exc):
+        self.et = time.perf_counter_ns() - self.st
+        if self.enabled:
+            suffix = self.on_exit(self.et) if self.on_exit else ""
+            print(f"{self.prefix}{self.et * 1e-6:6.2f} ms" + suffix)
+
+
+# Literal pinned tinygrad/helpers.py:308-327 Python profiler.
+def _format_fcn(fcn):
+    return f"{fcn[0]}:{fcn[1]}:{fcn[2]}"
+
+
+class Profiling(contextlib.ContextDecorator):
+    def __init__(self, enabled=True, sort="cumtime", frac=0.2, fn=None, ts=1):
+        self.enabled, self.sort, self.frac, self.fn, self.time_scale = (
+            enabled,
+            sort,
+            frac,
+            fn,
+            1e3 / ts,
+        )
+
+    def __enter__(self):
+        import cProfile
+
+        self.pr = cProfile.Profile()
+        if self.enabled:
+            self.pr.enable()
+
+    def __exit__(self, *exc):
+        if self.enabled:
+            self.pr.disable()
+            if self.fn:
+                self.pr.dump_stats(self.fn)
+            import pstats
+
+            stats = pstats.Stats(self.pr).strip_dirs().sort_stats(self.sort)
+            for fcn in stats.fcn_list[0 : int(len(stats.fcn_list) * self.frac)]:
+                (_primitive_calls, num_calls, tottime, cumtime, callers) = stats.stats[fcn]
+                scallers = sorted(callers.items(), key=lambda value: -value[1][2])
+                print(
+                    f"n:{num_calls:8d}  tm:{tottime * self.time_scale:7.2f}ms  "
+                    f"tot:{cumtime * self.time_scale:7.2f}ms",
+                    colored(_format_fcn(fcn).ljust(50), "yellow"),
+                    colored(
+                        f"<- {(scallers[0][1][2] / tottime) * 100:3.0f}% "
+                        f"{_format_fcn(scallers[0][0])}",
+                        "BLACK",
+                    )
+                    if scallers
+                    else "",
+                )
+
+
+# Literal pinned tinygrad/helpers.py:329,355-374 point-event contract.
+def perf_counter_us() -> decimal.Decimal:
+    return decimal.Decimal(time.perf_counter_ns()) / 1000
+
+
+class ProfileEvent:
+    pass
+
+
+@dataclass(frozen=True)
+class ProfilePointEvent(ProfileEvent):
+    device: str
+    name: str
+    key: Any
+    arg: Any = field(default_factory=dict)
+    ts: decimal.Decimal = field(default_factory=perf_counter_us)
+
+
+cpu_events: list[ProfileEvent] = []
+
+
+def profile_marker(name: str, color="gray") -> None:
+    cpu_events.append(
+        ProfilePointEvent("TINY", "marker", None, {"name": name, "color": color})
+    )
+
+
+# Pinned tinygrad/helpers.py:30,98-103,116-123. These helpers are public API
+# and are also used by the exact torch archive loader in nn.state.
+def argsort(x):
+    return type(x)(sorted(range(len(x)), key=x.__getitem__))
+
+
+def get_child(obj, key):
+    for part in key.split("."):
+        if part.isnumeric():
+            obj = obj[int(part)]
+        elif isinstance(obj, dict):
+            obj = obj[part]
+        else:
+            obj = getattr(obj, part)
+    return obj
+
+
+def canonicalize_strides(shape, strides):
+    return tuple(0 if size == 1 else stride for size, stride in zip(shape, strides))
+
+
+@functools.cache
+def strides_for_shape(shape):
+    if not shape:
+        return ()
+    strides = tuple(itertools.accumulate(reversed(shape[1:]), operator.mul, initial=1))[
+        ::-1
+    ]
+    return canonicalize_strides(shape, strides)
 
 
 @functools.cache
@@ -31,9 +177,7 @@ class Context(contextlib.ContextDecorator):
         self.kwargs = kwargs
 
     def __enter__(self):
-        self.old_context = {
-            key: ContextVar._cache[key].value for key in self.kwargs
-        }
+        self.old_context = {key: ContextVar._cache[key].value for key in self.kwargs}
         for key, value in self.kwargs.items():
             ContextVar._cache[key].value = value
 
@@ -78,13 +222,18 @@ class ContextVar(Generic[T]):
 DEV = ContextVar("DEV", "")
 DEBUG = ContextVar("DEBUG", 0)
 BEAM = ContextVar("BEAM", 0)
+# Pinned tinygrad/helpers.py:241. Keep the public configuration object rather
+# than exposing a frozen boolean so Context(JIT=...) and environment overrides work.
+JIT = ContextVar("JIT", 2 if OSX and ARCH_X86 else 1)
 WINO = ContextVar("WINO", 0)
 NO_COLOR = ContextVar("NO_COLOR", 0)
 
 cache_dir = os.path.join(
     getenv(
         "XDG_CACHE_HOME",
-        os.path.expanduser("~/Library/Caches" if os.sys.platform == "darwin" else "~/.cache"),
+        os.path.expanduser(
+            "~/Library/Caches" if os.sys.platform == "darwin" else "~/.cache"
+        ),
     ),
     "polygrad",
 )
@@ -112,13 +261,15 @@ def fetch(
         fp = pathlib.Path(name)
     else:
         header_hash = (
-            "_" + hashlib.md5(
+            "_"
+            + hashlib.md5(
                 "\n".join(
                     f"{key.strip()}:{value.strip()}"
                     for key, value in sorted(headers.items())
                 ).encode("utf-8")
             ).hexdigest()
-            if headers else ""
+            if headers
+            else ""
         )
         filename = (
             (name or hashlib.md5(url.encode("utf-8")).hexdigest())
@@ -127,10 +278,8 @@ def fetch(
         )
         fp = _ensure_downloads_dir() / (subdir or "") / filename
 
-    cached_hash_matches = (
-        not sha256 or (
-            fp.is_file() and hashlib.sha256(fp.read_bytes()).hexdigest() == sha256
-        )
+    cached_hash_matches = not sha256 or (
+        fp.is_file() and hashlib.sha256(fp.read_bytes()).hexdigest() == sha256
     )
     if not fp.is_file() or not allow_caching or not cached_hash_matches:
         fp.parent.mkdir(parents=True, exist_ok=True)
@@ -167,9 +316,7 @@ def fetch(
 def colored(st, color: Optional[str], background=False):
     if NO_COLOR:
         return st
-    colors = [
-        "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white"
-    ]
+    colors = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white"]
     if color is None:
         return st
     code = (
@@ -181,7 +328,146 @@ def colored(st, color: Optional[str], background=False):
     return f"\u001b[{code}m{st}\u001b[0m"
 
 
+# Literal pinned tinygrad/helpers.py:527-530 ctypes memory-view boundary.
+def to_mv(ptr: int, sz: int) -> memoryview:
+    return memoryview((ctypes.c_uint8 * sz).from_address(ptr)).cast("B")
+
+
+# Direct port of pinned tinygrad/helpers.py:538-575. The examples use the
+# returned object's counters and set_description in addition to iteration.
+class tqdm(Generic[T]):
+    def __init__(
+        self,
+        iterable: Iterable[T] | None = None,
+        desc: str = "",
+        disable: bool | None = False,
+        unit: str = "it",
+        unit_scale=False,
+        total: int | None = None,
+        rate: int = 100,
+    ):
+        self.disable = not sys.stderr.isatty() if disable is None else disable
+        self.iterable = iterable
+        self.unit = unit
+        self.unit_scale = unit_scale
+        self.rate = rate
+        self.st = time.perf_counter()
+        self.i, self.n, self.skip = -1, 0, 1
+        self.t = getattr(iterable, "__len__", lambda: 0)() if total is None else total
+        self.set_description(desc)
+        self.update(0)
+
+    def __iter__(self) -> Iterator[T]:
+        assert self.iterable is not None, "need an iterable to iterate"
+        for item in self.iterable:
+            yield item
+            self.update(1)
+        self.update(close=True)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.update(close=True)
+
+    def set_description(self, desc: str):
+        self.desc = f"{desc}: " if desc else ""
+
+    def update(self, n: int = 0, close: bool = False):
+        self.n, self.i = self.n + n, self.i + 1
+        if self.disable or (not close and self.i % self.skip != 0):
+            return
+        prog = self.n / self.t if self.t else 0
+        elapsed = time.perf_counter() - self.st
+        ncols = shutil.get_terminal_size().columns
+        if elapsed and self.i / elapsed > self.rate and self.i:
+            self.skip = max(int(self.i / elapsed) // self.rate, 1)
+
+        def hms(value):
+            return ":".join(
+                f"{part:02d}" if index else str(part)
+                for index, part in enumerate(
+                    [
+                        int(value) // 3600,
+                        int(value) % 3600 // 60,
+                        int(value) % 60,
+                    ]
+                )
+                if index or part
+            )
+
+        def si(value):
+            if not value:
+                return "0.00"
+            exponent = round(math.log(value, 1000), 6)
+            digits = int(3 - 3 * math.fmod(exponent, 1))
+            rendered = f"{value / 1000 ** int(exponent):.{digits}f}"[:4].rstrip(".")
+            if rendered == "1000":
+                return (
+                    f"{value / 1000 ** (int(exponent) + 1):.3f}"[:4].rstrip(".")
+                    + " kMGTPEZY"[int(exponent) + 1]
+                )
+            return rendered + " kMGTPEZY"[int(exponent)].strip()
+
+        progress = (
+            f"{si(self.n)}{f'/{si(self.t)}' if self.t else self.unit}"
+            if self.unit_scale
+            else f"{self.n}{f'/{self.t}' if self.t else self.unit}"
+        )
+        estimate = (
+            f"<{hms(elapsed / prog - elapsed) if self.n else '?'}" if self.t else ""
+        )
+        iterations = (
+            (si(self.n / elapsed) if self.unit_scale else f"{self.n / elapsed:5.2f}")
+            if self.n
+            else "?"
+        )
+        suffix = f"{progress} [{hms(elapsed)}{estimate}, {iterations}{self.unit}/s]"
+        size = max(ncols - len(self.desc) - 3 - 2 - 2 - len(suffix), 1)
+        fraction = size * prog
+        fill = ("█" * int(fraction) + " ▏▎▍▌▋▊▉"[int(8 * fraction) % 8].strip()).ljust(
+            size, " "
+        )
+        bar = (
+            "\r"
+            + self.desc
+            + (f"{100 * prog:3.0f}%|{fill}| " if self.t else "")
+            + suffix
+        )
+        print(bar[: ncols + 1], flush=True, end="\n" * close, file=sys.stderr)
+
+    @classmethod
+    def write(cls, value: str):
+        print(f"\r\033[K{value}", flush=True, file=sys.stderr)
+
+
+def trange(n: int, **kwargs) -> tqdm[int]:
+    return tqdm(range(n), total=n, **kwargs)
+
+
 __all__ = [
-    "DEV", "DEBUG", "BEAM", "WINO", "NO_COLOR", "Context", "ContextVar",
-    "GlobalCounters", "cache_dir", "colored", "fetch", "getenv", "prod"
+    "OSX",
+    "ARCH_X86",
+    "DEV",
+    "DEBUG",
+    "BEAM",
+    "JIT",
+    "WINO",
+    "NO_COLOR",
+    "Context",
+    "ContextVar",
+    "GlobalCounters",
+    "Profiling",
+    "ProfileEvent",
+    "ProfilePointEvent",
+    "cache_dir",
+    "colored",
+    "fetch",
+    "getenv",
+    "prod",
+    "profile_marker",
+    "cpu_events",
+    "to_mv",
+    "tqdm",
+    "trange",
 ]

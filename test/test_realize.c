@@ -2864,6 +2864,79 @@ TEST(realize, tensor_assign_shrink_view_realize_view_updates_base_storage) {
   PASS();
 }
 
+TEST(realize, tensor_assign_realized_contiguous_cache_view_retargets_both_roots) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int f32 = poly_dtype_id_by_name("float32");
+  int64_t cache_shape[] = {2, 1, 8, 1, 4};
+  int64_t value_shape[] = {2, 1, 3, 1, 4};
+
+  /* Tensor.zeros(...).contiguous() is the Llama KV-cache construction.  The
+   * retained graph keeps CONTIGUOUS while the current graph collapses it to
+   * storage on realization. */
+  PolyTensor *zero = poly_tensor_full_float_by_id(
+      ctx, cache_shape, 5, 0.0, f32, POLY_DEVICE_CPU
+  );
+  PolyTensor *cache = poly_tensor_empty(ctx, POLY_FLOAT32, cache_shape, 5, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(zero);
+  ASSERT_NOT_NULL(cache);
+  ASSERT_PTR_EQ(poly_tensor_clone_into(ctx, cache, zero), cache);
+  cache = poly_tensor_contiguous(ctx, cache);
+  ASSERT_NOT_NULL(cache);
+  ASSERT_INT_EQ(cache->uop_logical->op, POLY_OP_CONTIGUOUS);
+  ASSERT_INT_EQ(cache->uop_physical->op, POLY_OP_CONTIGUOUS);
+  PolyUOp *logical_materialization = cache->uop_logical;
+
+  PolyTensor *realized = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &cache, 1, &realized), 0);
+  ASSERT_PTR_EQ(realized, cache);
+  ASSERT_PTR_EQ(cache->uop_logical, logical_materialization);
+  PolyUOp *physical_materialization = cache->uop_physical;
+  PolyUOp *physical_identity =
+      (PolyUOp *)poly_uop_get_buffer_identity(physical_materialization);
+  ASSERT_NOT_NULL(physical_identity);
+
+  int64_t bounds[5][2] = {{0, 2}, {0, 1}, {0, 3}, {0, 1}, {0, 4}};
+  PolyTensor *view = poly_tensor_shrink(ctx, cache, bounds, 5);
+  ASSERT_NOT_NULL(view);
+  float values[24];
+  for (int i = 0; i < 12; i++) {
+    values[i] = (float)i;
+    values[12 + i] = (float)(100 + i);
+  }
+  PolyTensor *value = initialized_f32_tensor(
+      ctx, value_shape, 5, values, POLY_DEVICE_CPU, NULL
+  );
+  ASSERT_NOT_NULL(value);
+
+  ASSERT_PTR_EQ(poly_tensor_assign(ctx, view, value), view);
+  ASSERT_INT_EQ(cache->uop_logical->op, POLY_OP_AFTER);
+  ASSERT_PTR_EQ(cache->uop_logical->src[0], logical_materialization);
+  ASSERT_INT_EQ(cache->uop_physical->op, POLY_OP_AFTER);
+  ASSERT_PTR_EQ(cache->uop_physical->src[0], physical_materialization);
+  ASSERT_INT_EQ(view->uop_logical->op, POLY_OP_SHRINK);
+  ASSERT_PTR_EQ(view->uop_logical->src[0], cache->uop_logical);
+  ASSERT_INT_EQ(view->uop_physical->op, POLY_OP_SHRINK);
+  ASSERT_PTR_EQ(view->uop_physical->src[0], cache->uop_physical);
+  ASSERT_INT_EQ(count_root_ops(ctx, cache->uop_physical, POLY_OP_AFTER), 2);
+  ASSERT_INT_EQ(count_root_ops(ctx, cache->uop_physical, POLY_OP_STORE), 1);
+
+  PolyTensor *view_out = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &view, 1, &view_out), 0);
+  ASSERT_PTR_EQ(view_out, view);
+  float actual[64] = {0};
+  ASSERT_INT_EQ(poly_buffer_read(ctx, physical_identity, actual, sizeof(actual)), 0);
+  for (int i = 0; i < 12; i++) {
+    ASSERT_FLOAT_EQ(actual[i], (float)i, 1e-6f);
+    ASSERT_FLOAT_EQ(actual[32 + i], (float)(100 + i), 1e-6f);
+  }
+  for (int i = 12; i < 32; i++) ASSERT_FLOAT_EQ(actual[i], 0.0f, 1e-6f);
+  for (int i = 44; i < 64; i++) ASSERT_FLOAT_EQ(actual[i], 0.0f, 1e-6f);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(realize, tensor_assign_permute_view_updates_base_storage) {
   PolyCtx *ctx = poly_ctx_new();
 
@@ -4076,7 +4149,7 @@ TEST(realize, transform_to_call_discards_dead_view_copy_side_calls) {
         .valid = true,
     };
     poly_buffer_attach(ctx, base, &host_storage);
-    PolyUOp *view = poly_buffer_view(ctx, base, 1, 0);
+    PolyUOp *view = poly_buffer_view(ctx, base, POLY_FLOAT32, 1, 0);
     PolyUOp *device = poly_device_uop(ctx, POLY_DEVICE_CPU);
     PolyUOp *copy_src[2] = {view, device};
     PolyUOp *copy = poly_uop(
@@ -4164,8 +4237,11 @@ TEST(realize, transform_to_call_discards_dead_view_copy_side_calls) {
       ASSERT_INT_EQ(n_calls, nested ? 3 : 2);
       ASSERT_INT_EQ(view_calls, 1);
       ASSERT_INT_EQ(copy_calls, 1);
-      ASSERT_INT_EQ(sink_calls, 0);
-      ASSERT_INT_EQ(program_calls, nested ? 1 : 0);
+      /* Pinned schedule cache retains the nested live compute as CALL(SINK)
+       * and compile_linear performs the later SINK -> PROGRAM rewrite
+       * (schedule/__init__.py:92-105; engine/realize.py:244-267). */
+      ASSERT_INT_EQ(sink_calls, nested ? 1 : 0);
+      ASSERT_INT_EQ(program_calls, 0);
       ASSERT_EQ(call_graph->src[0]->src[0]->op, POLY_OP_BUFFER_VIEW);
       ASSERT_EQ(call_graph->src[1]->src[0]->op, POLY_OP_COPY);
       ASSERT_INT_EQ(copy_rows, 1);
@@ -8176,6 +8252,84 @@ TEST(realize, direct_movement_disk_copy_matches_pinned_creation_pipeline) {
   ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
   ASSERT_TRUE(stats.global_ops == 0);
   ASSERT_TRUE(stats.global_mem == 6);
+  ASSERT_TRUE(stats.kernel_count == 2);
+
+  poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(unlink(path), 0);
+  PASS();
+}
+
+TEST(realize, typed_disk_view_copy_matches_pinned_slice_pipeline) {
+  char path[256];
+  snprintf(path, sizeof(path), "temp/polygrad_disk_bitcast_%ld.bin", (long)getpid());
+  FILE *file = fopen(path, "wb");
+  ASSERT_NOT_NULL(file);
+  uint8_t file_data[32];
+  for (int i = 0; i < 32; i++) file_data[i] = (uint8_t)i;
+  ASSERT_TRUE(fwrite(file_data, 1, sizeof(file_data), file) == sizeof(file_data));
+  ASSERT_INT_EQ(fclose(file), 0);
+
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int uint8_id = poly_dtype_id_by_name("uint8");
+  int uint16_id = poly_dtype_id_by_name("uint16");
+  ASSERT_TRUE(uint8_id >= 0 && uint16_id >= 0);
+  PolyUOp *disk_buffer = poly_buffer_from_file(ctx, path, uint8_id);
+  ASSERT_NOT_NULL(disk_buffer);
+  PolyTensor *source = poly_tensor_create_with_roots(
+      ctx, disk_buffer, disk_buffer, POLY_TENSOR_VALUE, POLY_DEVICE_DISK
+  );
+  ASSERT_NOT_NULL(source);
+
+  int64_t bounds[1][2] = {{8, 12}};
+  PolyTensor *bytes = poly_tensor_shrink(ctx, source, bounds, 1);
+  PolyTensor *typed = poly_tensor_bitcast_by_id(ctx, bytes, uint16_id);
+  PolyTensor *cpu = poly_tensor_to_device(ctx, typed, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(bytes);
+  ASSERT_NOT_NULL(typed);
+  ASSERT_NOT_NULL(cpu);
+
+  /* Pinned construction is COPY(BITCAST(SHRINK(BUFFER@DISK)), DEVICE(CPU));
+   * the typed view is introduced only by late_buffer_view/split_store
+   * (schedule/rangeify.py:355-374,573-590). */
+  PolyUOp *copy = poly_tensor_uop_physical(cpu);
+  ASSERT_INT_EQ(copy->op, POLY_OP_COPY);
+  ASSERT_INT_EQ(copy->src[0]->op, POLY_OP_BITCAST);
+  ASSERT_INT_EQ(copy->src[0]->src[0]->op, POLY_OP_SHRINK);
+  ASSERT_PTR_EQ(copy->src[0]->src[0]->src[0], disk_buffer);
+  ASSERT_INT_EQ(count_root_ops(ctx, copy, POLY_OP_BUFFER_VIEW), 0);
+
+  PolyUOp *scheduled_out = NULL;
+  PolySchedule *schedule = poly_schedule_with_vars(ctx, &copy, 1, &scheduled_out);
+  ASSERT_NOT_NULL(schedule);
+  ASSERT_NOT_NULL(scheduled_out);
+  ASSERT_INT_EQ(schedule->template->n_calls, 2);
+  PolyUOp *view = poly_schedule_call_body(schedule, 0);
+  ASSERT_NOT_NULL(view);
+  ASSERT_INT_EQ(view->op, POLY_OP_BUFFER_VIEW);
+  ASSERT_TRUE(poly_dtype_eq(view->dtype, POLY_UINT16));
+  ASSERT_EQ(view->arg.kind, POLY_ARG_INT_TUPLE);
+  ASSERT_INT_EQ(view->arg.int_tuple.n, 2);
+  ASSERT_INT_EQ(view->arg.int_tuple.vals[0], 2);
+  ASSERT_INT_EQ(view->arg.int_tuple.vals[1], 8);
+  ASSERT_TRUE(poly_schedule_call_is_copy(schedule, 1));
+  poly_schedule_free(schedule);
+
+  poly_ctx_reset_counters(ctx);
+  PolyTensor *realized = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &cpu, 1, &realized), 0);
+  ASSERT_PTR_EQ(realized, cpu);
+  const PolyUOp *identity = poly_uop_get_buffer_identity(poly_tensor_uop_physical(realized));
+  ASSERT_NOT_NULL(identity);
+  uint16_t values[2] = {0};
+  ASSERT_INT_EQ(poly_buffer_read(ctx, (PolyUOp *)identity, values, sizeof(values)), 0);
+  ASSERT_INT_EQ(values[0], 0x0908);
+  ASSERT_INT_EQ(values[1], 0x0b0a);
+
+  PolyCtxStats stats = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
+  ASSERT_TRUE(stats.global_ops == 0);
+  ASSERT_TRUE(stats.global_mem == sizeof(values));
   ASSERT_TRUE(stats.kernel_count == 2);
 
   poly_ctx_destroy(ctx);

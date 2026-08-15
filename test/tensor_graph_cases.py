@@ -118,8 +118,10 @@ def normalize_arg(node, arg):
         if ENGINE == "tinygrad":
             name = arg.strip("'\"").upper()
         else:
-            device = _ffi._lib.poly_uop_device(node.raw)
-            raw_name = _ffi._lib.poly_device_name(device)
+            raw_name = _ffi._lib.poly_uop_device_name(node.ctx, node.raw)
+            if not raw_name:
+                device = _ffi._lib.poly_uop_device(node.raw)
+                raw_name = _ffi._lib.poly_device_name(device)
             name = raw_name.decode("utf-8").upper() if raw_name else f"DEVICE:{device}"
         # Both are the frontend-owned, creation-only source domain. Polygrad's
         # C runtime calls it HOST because no Python executor exists in core;

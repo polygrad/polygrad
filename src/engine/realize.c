@@ -916,6 +916,71 @@ static PolyUOp *poly_transform_to_call_wrap_call(PolyCtx *ctx, PolyUOp *sink) {
   return call;
 }
 
+/* Pinned pm_post_sched_cache(..., walk=True) resolves PARAM leaves throughout
+ * each LINEAR CALL argument while CALL/FUNCTION bodies remain opaque
+ * (schedule/__init__.py:80-90). This is required for aggregate arguments such
+ * as MSTACK(PARAM(1), PARAM(2)); resolving only a direct PARAM leaves a cached
+ * placeholder in the concrete LINEAR. */
+static PolyUOp *poly_transform_to_call_resolve_linear_arg(
+    PolyCtx *ctx,
+    PolyUOp *arg,
+    PolyUOp **external,
+    int n_external
+) {
+  if (!ctx || !arg || n_external < 0 || (n_external > 0 && !external)) return NULL;
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort_ex_alloc(ctx, arg, &n_topo, NULL, false);
+  if (!topo) return NULL;
+  PolyMap *memo = poly_map_new(n_topo < 16 ? 16 : (uint32_t)n_topo);
+  if (!memo) {
+    poly_toposort_free(topo);
+    return NULL;
+  }
+  bool ok = true;
+  for (int t = 0; ok && t < n_topo; t++) {
+    PolyUOp *u = topo[t];
+    PolyUOp *result = u;
+    int slot = -1;
+    if (u->op == POLY_OP_PARAM && u->arg.kind == POLY_ARG_INT)
+      slot = (int)u->arg.i;
+    else if (u->op == POLY_OP_PARAM && u->arg.kind == POLY_ARG_PARAM &&
+             u->arg.param)
+      slot = (int)u->arg.param->slot;
+    if (slot >= 0) {
+      result = slot < n_external ? external[slot] : NULL;
+      ok = result != NULL;
+    } else if (u->n_src > 0) {
+      PolyUOp *src_stack[16];
+      PolyUOp **src = u->n_src > 16
+                         ? malloc((size_t)u->n_src * sizeof(*src))
+                         : src_stack;
+      if (!src) {
+        ok = false;
+        break;
+      }
+      bool changed = false;
+      for (int i = 0; i < u->n_src; i++) {
+        PolyUOp *mapped = poly_map_get(
+            memo, poly_ptr_hash(u->src[i]), u->src[i], poly_ptr_eq);
+        src[i] = mapped ? mapped : u->src[i];
+        if (src[i] != u->src[i]) changed = true;
+      }
+      if (changed) result = poly_rebuild_with_sources(ctx, u, src);
+      if (src != src_stack) free(src);
+      ok = result != NULL;
+    }
+    if (ok && result != u)
+      poly_map_set(memo, poly_ptr_hash(u), u, result, poly_ptr_eq);
+  }
+  PolyUOp *resolved = ok
+                          ? poly_map_get(memo, poly_ptr_hash(arg), arg, poly_ptr_eq)
+                          : NULL;
+  if (ok && !resolved) resolved = arg;
+  poly_map_destroy(memo);
+  poly_toposort_free(topo);
+  return resolved;
+}
+
 /* tinygrad schedule.pm_resolve_linear_call: resolve a cached kernel-level
  * LINEAR CALL's external PARAM slots against the concrete buffers from the
  * high-level SINK that was just lowered. Intermediate BUFFER arguments and
@@ -935,18 +1000,8 @@ static PolyUOp *poly_transform_to_call_resolve_linear_call(
   src[0] = call->src[0];
   bool ok = true;
   for (int i = 1; i < call->n_src; i++) {
-    PolyUOp *arg = call->src[i];
-    int slot = -1;
-    if (arg && arg->op == POLY_OP_PARAM && arg->arg.kind == POLY_ARG_INT)
-      slot = (int)arg->arg.i;
-    else if (arg && arg->op == POLY_OP_PARAM && arg->arg.kind == POLY_ARG_PARAM &&
-             arg->arg.param)
-      slot = (int)arg->arg.param->slot;
-    if (slot >= 0) {
-      src[i] = (slot >= 0 && slot < n_external) ? external[slot] : NULL;
-    } else {
-      src[i] = arg;
-    }
+    src[i] = poly_transform_to_call_resolve_linear_arg(
+        ctx, call->src[i], external, n_external);
     if (!src[i]) {
       ok = false;
       break;
@@ -1466,15 +1521,52 @@ static PolyUOp *poly_transform_to_call_materialize_view_copy(
     PolyShape view_shape = {.ndim = -1};
     int64_t view_numel = -1;
     size_t view_byte_offset = 0;
-    /* Pinned callify._make_buffer_view turns a provably contiguous movement
-     * source into SLICE before a creation-device COPY (callify.py:60-95).
-     * BUFFER_VIEW is Polygrad's existing schedule-level SLICE equivalent. */
-    if (!poly_uop_contiguous_view_info(
-            ctx, copy->src[0], &base, &view_shape, &view_numel,
-            &view_byte_offset
-        ))
-      return NULL;
-    view = poly_buffer_view(ctx, base, view_numel, view_byte_offset);
+    PolyUOp *copy_value = copy->src[0];
+
+    /* Pinned late_buffer_view rewrites a staged DISK BITCAST to a typed
+     * SLICE before split_store (schedule/rangeify.py:355-374,573-590).
+     * Polygrad's reviewed PG-PARITY-005 spelling is BUFFER_VIEW. Preserve the
+     * same byte span while changing only the view dtype and element count;
+     * scalar BITCAST codegen is not a storage-view implementation. */
+    if (copy_value->op == POLY_OP_BITCAST && copy_value->n_src == 1) {
+      PolyUOp *source = copy_value->src[0];
+      PolyShape source_shape = poly_uop_max_shape_cached(ctx, source);
+      int64_t source_numel = poly_shape_numel(source_shape);
+      const PolyUOp *source_identity = poly_uop_get_buffer_identity(source);
+      if (source_identity) {
+        PolyBuffer *storage = poly_buffer_get(ctx, (PolyUOp *)source_identity);
+        if (!storage || (!storage->ptr && storage->nbytes != 0) || !storage->valid)
+          return NULL;
+        base = (PolyUOp *)source_identity;
+      } else if (!poly_uop_contiguous_view_info(
+                     ctx, source, &base, &source_shape, &source_numel,
+                     &view_byte_offset
+                 )) {
+        return NULL;
+      }
+
+      view_shape = poly_uop_max_shape_cached(ctx, copy_value);
+      view_numel = poly_shape_numel(view_shape);
+      size_t source_itemsize = poly_dtype_itemsize(source->dtype);
+      size_t view_itemsize = poly_dtype_itemsize(copy_value->dtype);
+      if (source_numel < 0 || view_numel < 0 || source_itemsize == 0 || view_itemsize == 0 ||
+          (uint64_t)source_numel > SIZE_MAX / source_itemsize ||
+          (uint64_t)view_numel > SIZE_MAX / view_itemsize ||
+          (size_t)source_numel * source_itemsize != (size_t)view_numel * view_itemsize)
+        return NULL;
+    } else {
+      /* Pinned callify._make_buffer_view turns a provably contiguous movement
+       * source into SLICE before a creation-device COPY (callify.py:59-70,
+       * 145-149). BUFFER_VIEW is Polygrad's schedule/runtime equivalent. */
+      if (!poly_uop_contiguous_view_info(
+              ctx, copy_value, &base, &view_shape, &view_numel,
+              &view_byte_offset
+          ))
+        return NULL;
+    }
+    view = poly_buffer_view(
+        ctx, base, copy_value->dtype, view_numel, view_byte_offset
+    );
   }
   if (!base) return NULL;
 
@@ -1838,6 +1930,14 @@ static PolyUOp *poly_transform_to_call_rewrite_nested_contiguous(
                                     contiguous_src, 1, poly_arg_none()
                                 )
                               : NULL;
+    /* Pinned replace_contig_with_store_after leaves DISK/TINYFS CONTIGUOUS
+     * unmaterialized (callify.py:44-53). The underlying allocator exposes a
+     * zero-copy Buffer.view, so allocating and scalar-bitcasting into a fresh
+     * buffer would be both slower and wrong for unequal item sizes. */
+    if (contiguous && poly_uop_device(contiguous) == POLY_DEVICE_DISK) {
+      poly_map_set(memo, poly_ptr_hash(u), u, contiguous, poly_ptr_eq);
+      return contiguous;
+    }
     PolyUOp *replacement = NULL;
     PolyUOp *executable = contiguous ? poly_transform_to_call_materialize_contiguous(
                                            ctx, contiguous, tctx, &replacement
@@ -1857,6 +1957,20 @@ static PolyUOp *poly_transform_to_call_rewrite_nested_contiguous(
    * preorder replacement leaves those inner buffers allocated but unwritten,
    * so the enclosing kernel can observe an invalid input residency. */
   if (u != outer && ret->op == POLY_OP_CONTIGUOUS && ret->n_src == 1) {
+    /* Same pinned DISK/TINYFS exception for an explicit CONTIGUOUS already in
+     * the graph. Strip callify's pass-local tag, but keep the operation and do
+     * not publish a realized replacement. */
+    if (poly_uop_device(ret) == POLY_DEVICE_DISK) {
+      PolyUOp *unmaterialized = poly_callify_tag_ids(ret, NULL, NULL)
+                                    ? poly_callify_rebuild_without_tag(ctx, ret, NULL)
+                                    : ret;
+      if (!unmaterialized) {
+        tctx->failed = true;
+        return NULL;
+      }
+      poly_map_set(memo, poly_ptr_hash(u), u, unmaterialized, poly_ptr_eq);
+      return unmaterialized;
+    }
     /* Pinned pm_early_transform_tensor_graph removes an extra CONTIGUOUS on
      * AFTER when the AFTER target already has buffer identity. Preserve the
      * AFTER in the executable graph so its producer remains a dependency, but
@@ -2048,6 +2162,21 @@ PolyUOp *poly_transform_to_call_with_map(
     }
     if (poly_uop_has_buffer_identity(u)) {
       out_uops[i] = u;
+      continue;
+    }
+
+    /* Pinned callify leaves a requested DISK/TINYFS CONTIGUOUS with no
+     * assignment and returns an empty CALL (callify.py:44-53,204-222). Keep
+     * the caller's original typed view root; its runtime Buffer.view is
+     * resolved lazily by poly_uop_buffer. */
+    PolyUOp *disk_contiguous = u;
+    while (disk_contiguous && disk_contiguous->n_src >= 1 &&
+           poly_opset_has(POLY_GROUP_MOVEMENT, disk_contiguous->op))
+      disk_contiguous = disk_contiguous->src[0];
+    if (disk_contiguous && disk_contiguous->op == POLY_OP_CONTIGUOUS &&
+        disk_contiguous->n_src == 1 &&
+        poly_uop_device(disk_contiguous) == POLY_DEVICE_DISK) {
+      out_uops[i] = uops[i];
       continue;
     }
 

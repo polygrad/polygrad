@@ -400,7 +400,11 @@ PolyUOp *poly_uop_sink_ex(
     int optimize
 ) {
   if (!ctx || n_src < 0 || (n_src > 0 && !srcs)) return NULL;
-  PolyArg arg = (name && name[0]) ? poly_arg_str(name) : poly_arg_none();
+  /* Pinned KernelInfo always carries a name (`test` by default). Keep the
+   * existing string-backed C adapter distinguishable from an ordinary SINK so
+   * recursive scheduling can leave compiler-ready custom kernels opaque
+   * (uop/ops.py:1099-1109; schedule/__init__.py:94-100). */
+  PolyArg arg = poly_arg_str((name && name[0]) ? name : "test");
   if (optimize) return poly_uop(ctx, POLY_OP_SINK, POLY_VOID, srcs, n_src, arg);
   return poly_uop_tagged_arg(
       ctx, POLY_OP_SINK, POLY_VOID, srcs, n_src, arg, 0, poly_arg_bool(false)
@@ -1172,16 +1176,21 @@ void poly_collect_buf_order(
       continue;
     }
 
-    if (sp + cur->n_src > cap) {
+    /* Pinned UOp traversal keeps CALL/FUNCTION bodies opaque unless a pass
+     * explicitly opts in (tinygrad/uop/ops.py:188-198). External storage
+     * order comes from caller arguments, never from body-local PARAM slots. */
+    int first_src = (cur->op == POLY_OP_CALL || cur->op == POLY_OP_FUNCTION) ? 1 : 0;
+    int n_children = cur->n_src - first_src;
+    if (sp + n_children > cap) {
       int new_cap = cap;
-      while (sp + cur->n_src > new_cap)
+      while (sp + n_children > new_cap)
         new_cap *= 2;
       PolyUOp **new_stack = realloc(stack, (size_t)new_cap * sizeof(PolyUOp *));
       if (!new_stack) break;
       stack = new_stack;
       cap = new_cap;
     }
-    for (int i = cur->n_src - 1; i >= 0; i--)
+    for (int i = cur->n_src - 1; i >= first_src; i--)
       stack[sp++] = cur->src[i];
   }
 
@@ -1229,9 +1238,11 @@ bool poly_collect_buf_order_alloc(
       continue;
     }
 
-    if (sp + cur->n_src > stack_cap) {
+    int first_src = (cur->op == POLY_OP_CALL || cur->op == POLY_OP_FUNCTION) ? 1 : 0;
+    int n_children = cur->n_src - first_src;
+    if (sp + n_children > stack_cap) {
       int new_cap = stack_cap;
-      while (sp + cur->n_src > new_cap)
+      while (sp + n_children > new_cap)
         new_cap *= 2;
       PolyUOp **new_stack = realloc(stack, (size_t)new_cap * sizeof(PolyUOp *));
       if (!new_stack) {
@@ -1241,7 +1252,7 @@ bool poly_collect_buf_order_alloc(
       stack = new_stack;
       stack_cap = new_cap;
     }
-    for (int i = cur->n_src - 1; i >= 0; i--)
+    for (int i = cur->n_src - 1; i >= first_src; i--)
       stack[sp++] = cur->src[i];
   }
 

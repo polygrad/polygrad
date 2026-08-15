@@ -11,14 +11,14 @@ from . import _ffi
 _default_ctx = _ffi.get_lib().poly_ctx_new()
 
 from .tensor import Tensor, Variable, BoundVariable
-from .dtype import dtypes
+from .dtype import DType, INVERSE_DTYPES_DICT, dtypes
 from .device import Device
 from .instance import Instance
-from .jit import CompiledCallable, Jit, JitError, _dispose_jits_for_ctx, compile, jit
+from .jit import CompiledCallable, Jit, JitError, TinyJit, _dispose_jits_for_ctx, compile, jit
+from .function import function
+from .uop.ops import UOp
+from .helpers import Context, fetch, getenv
 from . import nn as nn
-
-TinyJit = Jit
-
 
 def _dispose_default_ctx():
     global _default_ctx
@@ -101,12 +101,17 @@ def stats():
 def _can_run_dtype(dtype):
     if dtype is None:
         return 'float32'
-    name = str(dtype).lower()
-    if name == 'half':
-        return 'float16'
-    if name == 'double':
-        return 'float64'
-    return name
+    if isinstance(dtype, DType):
+        if dtype.count != 1:
+            return ''
+        name = INVERSE_DTYPES_DICT.get(dtype.name, dtype.name)
+    else:
+        name = str(dtype).lower()
+    return {
+        'half': 'float16', 'float': 'float32', 'double': 'float64',
+        'char': 'int8', 'uchar': 'uint8', 'short': 'int16', 'ushort': 'uint16',
+        'int': 'int32', 'uint': 'uint32', 'long': 'int64', 'ulong': 'uint64',
+    }.get(name, name)
 
 
 def _can_run_op(op):
@@ -296,8 +301,8 @@ def create(*, device='auto'):
 
 
 __all__ = [
-    'Tensor', 'Variable', 'BoundVariable', 'dtypes', 'Device', 'Instance', 'nn',
-    'GlobalCounters',
+    'Tensor', 'Variable', 'BoundVariable', 'UOp', 'dtypes', 'Device', 'Instance', 'nn',
+    'GlobalCounters', 'Context', 'fetch', 'getenv', 'function',
     'CompiledCallable', 'Jit', 'TinyJit', 'JitError', 'Runtime', 'create',
     'compile', 'jit', 'stats', 'can_run',
 ]

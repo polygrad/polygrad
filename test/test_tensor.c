@@ -105,6 +105,73 @@ static PolyUOp *single_scheduled_root(PolyCtx *ctx, PolyUOp *sink) {
 /*  v2 composed op e2e tests (tinygrad-verified reference values)         */
 /* ═══════════════════════════════════════════════════════════════════════ */
 
+TEST(tensor, function_builds_ordered_logical_and_physical_value_calls) {
+  /* Pinned function.py:39-94 and uop/ops.py:1077-1092 substitute ordered
+   * inputs with PARAMs and expose one TUPLE/FUNCTION/GETTUPLE value call. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  float av[2] = {1.0f, 2.0f}, bv[2] = {3.0f, 4.0f};
+  int64_t shape[1] = {2};
+  PolyTensor *a_host = poly_tensor_from_host(
+      ctx, av, sizeof(av), POLY_FLOAT32, shape, 1);
+  PolyTensor *b_host = poly_tensor_from_host(
+      ctx, bv, sizeof(bv), POLY_FLOAT32, shape, 1);
+  PolyTensor *a = poly_tensor_to_device(ctx, a_host, POLY_DEVICE_CPU);
+  PolyTensor *b = poly_tensor_to_device(ctx, b_host, POLY_DEVICE_CPU);
+  PolyTensor *sum = poly_tensor_alu2(ctx, POLY_OP_ADD, a, b);
+  ASSERT_NOT_NULL(sum);
+  PolyTensor *results[1] = {sum};
+  PolyTensor *inputs[2] = {a, b};
+  PolyTensor *outputs[1] = {NULL};
+  ASSERT_INT_EQ(
+      poly_tensor_function(
+          ctx, results, 1, inputs, 2, "ordered_add", false, outputs),
+      0);
+  ASSERT_NOT_NULL(outputs[0]);
+
+  PolyUOp *surfaces[2] = {
+      outputs[0]->uop_logical, outputs[0]->uop_physical};
+  for (int surface = 0; surface < 2; surface++) {
+    PolyUOp *selected = surfaces[surface];
+    ASSERT_NOT_NULL(selected);
+    ASSERT_INT_EQ(selected->op, POLY_OP_GETTUPLE);
+    ASSERT_INT_EQ(selected->arg.kind, POLY_ARG_INT);
+    ASSERT_INT_EQ(selected->arg.i, 0);
+    PolyUOp *function = selected->src[0];
+    ASSERT_INT_EQ(function->op, POLY_OP_FUNCTION);
+    ASSERT_INT_EQ(function->n_src, 3);
+    ASSERT_INT_EQ(function->arg.kind, POLY_ARG_CALL_INFO);
+    ASSERT_STR_EQ(function->arg.call_info->name, "ordered_add");
+    ASSERT_INT_EQ(function->src[0]->op, POLY_OP_TUPLE);
+    ASSERT_INT_EQ(function->src[0]->n_src, 1);
+    PolyUOp *add = function->src[0]->src[0];
+    ASSERT_INT_EQ(add->op, POLY_OP_ADD);
+    ASSERT_INT_EQ(add->src[0]->op, POLY_OP_PARAM);
+    ASSERT_INT_EQ(add->src[1]->op, POLY_OP_PARAM);
+    ASSERT_INT_EQ(add->src[0]->arg.param->slot, 0);
+    ASSERT_INT_EQ(add->src[1]->arg.param->slot, 1);
+  }
+
+  PolyUOp *grad = poly_grad(
+      ctx, outputs[0]->uop_physical, a->uop_physical);
+  ASSERT_NOT_NULL(grad);
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort_alloc(ctx, grad, &n_topo);
+  ASSERT_NOT_NULL(topo);
+  int functions = 0, gettuples = 0;
+  for (int i = 0; i < n_topo; i++) {
+    functions += topo[i]->op == POLY_OP_FUNCTION;
+    gettuples += topo[i]->op == POLY_OP_GETTUPLE;
+  }
+  /* For ADD the derivative is constant, so pinned gradient.py eliminates the
+   * forward call and retains only the backward FUNCTION/GETTUPLE pair. */
+  ASSERT_INT_EQ(functions, 1);
+  ASSERT_INT_EQ(gettuples, 1);
+  poly_toposort_free(topo);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(tensor, static_empty_shares_unique_with_deviceful_physical_root) {
   PolyCtx *ctx = poly_ctx_new();
   int64_t shape[2] = {2, 3};
@@ -467,6 +534,169 @@ TEST(tensor, symbolic_expand_uses_exact_logical_and_physical_sources) {
   PASS();
 }
 
+TEST(tensor, symbolic_reshape_uses_exact_logical_and_physical_sources) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *logical = make_buf(ctx, (int64_t[]){1, 8, 1, 8}, 4);
+  PolyUOp *physical_buffer =
+      poly_buffer_on_device(ctx, POLY_FLOAT32, 64, POLY_DEVICE_CPU);
+  PolyUOp *physical =
+      poly_reshape(ctx, physical_buffer, (int64_t[]){1, 8, 1, 8}, 4);
+  PolyTensor *source = poly_tensor_create_with_roots(
+      ctx, logical, physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
+  );
+  ASSERT_NOT_NULL(source);
+
+  PolyUOp *n = poly_define_var(ctx, "n", 1, 7);
+  PolyUOp *nb = poly_bind_var(ctx, n, 3);
+  PolyUOp *starts[4] = {
+      poly_const_int(ctx, 0), poly_const_int(ctx, 0),
+      poly_const_int(ctx, 0), poly_const_int(ctx, 0),
+  };
+  PolyUOp *sizes[4] = {
+      poly_const_int(ctx, 1), nb,
+      poly_const_int(ctx, 1), poly_const_int(ctx, 8),
+  };
+  PolyTensor *slice = poly_tensor_shrink_uop(ctx, source, starts, sizes, 4);
+  ASSERT_NOT_NULL(slice);
+
+  PolyUOp *dims[4] = {
+      poly_const_int(ctx, 1), nb,
+      poly_const_int(ctx, 2), poly_const_int(ctx, 4),
+  };
+  PolyUOp *expected_logical =
+      poly_reshape_uop(ctx, slice->uop_logical, dims, 4);
+  PolyUOp *expected_physical =
+      poly_reshape_uop(ctx, slice->uop_physical, dims, 4);
+  PolyTensor *reshaped = poly_tensor_reshape_uop(ctx, slice, dims, 4);
+  ASSERT_NOT_NULL(reshaped);
+  ASSERT_PTR_EQ(reshaped->uop_logical, expected_logical);
+  ASSERT_PTR_EQ(reshaped->uop_physical, expected_physical);
+  ASSERT_INT_EQ(reshaped->uop_logical->op, POLY_OP_RESHAPE);
+  ASSERT_INT_EQ(reshaped->uop_physical->op, POLY_OP_RESHAPE);
+  ASSERT_PTR_EQ(reshaped->uop_logical->src[0], slice->uop_logical);
+  ASSERT_PTR_EQ(reshaped->uop_physical->src[0], slice->uop_physical);
+  ASSERT_INT_EQ(reshaped->uop_physical->src[1]->op, POLY_OP_STACK);
+  ASSERT_INT_EQ(reshaped->uop_physical->src[1]->n_src, 4);
+  ASSERT_PTR_EQ(reshaped->uop_physical->src[1]->src[1], nb);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, reshaped->uop_logical), 4);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, reshaped->uop_physical), 4);
+
+  /* Pinned UOp._shape rejects symbolic reshapes whose exact products differ
+   * (uop/ops.py:318-336); the Tensor bridge must fail closed as well. */
+  PolyUOp *bad_dims[4] = {
+      poly_const_int(ctx, 1), nb,
+      poly_const_int(ctx, 3), poly_const_int(ctx, 4),
+  };
+  ASSERT_EQ(poly_tensor_reshape_uop(ctx, slice, bad_dims, 4), NULL);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tensor, symbolic_dot_preserves_noncontracted_bind_dimension) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *n = poly_define_var(ctx, "n", 1, 7);
+  PolyUOp *nb = poly_bind_var(ctx, n, 3);
+
+  PolyUOp *q_logical = make_buf(ctx, (int64_t[]){1, 2, 1, 4}, 4);
+  PolyUOp *q_buffer = poly_buffer_on_device(ctx, POLY_FLOAT32, 8, POLY_DEVICE_CPU);
+  PolyUOp *q_physical = poly_reshape(ctx, q_buffer, (int64_t[]){1, 2, 1, 4}, 4);
+  PolyTensor *query = poly_tensor_create_with_roots(
+      ctx, q_logical, q_physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
+  );
+
+  PolyUOp *k_logical_base = make_buf(ctx, (int64_t[]){1, 8, 2, 4}, 4);
+  PolyUOp *k_buffer = poly_buffer_on_device(ctx, POLY_FLOAT32, 64, POLY_DEVICE_CPU);
+  PolyUOp *k_physical_base = poly_reshape(ctx, k_buffer, (int64_t[]){1, 8, 2, 4}, 4);
+  PolyTensor *key_base = poly_tensor_create_with_roots(
+      ctx, k_logical_base, k_physical_base, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
+  );
+  PolyUOp *starts[4] = {
+      poly_const_int(ctx, 0), poly_const_int(ctx, 0),
+      poly_const_int(ctx, 0), poly_const_int(ctx, 0),
+  };
+  PolyUOp *sizes[4] = {
+      poly_const_int(ctx, 1), nb,
+      poly_const_int(ctx, 2), poly_const_int(ctx, 4),
+  };
+  PolyTensor *key = poly_tensor_shrink_uop(ctx, key_base, starts, sizes, 4);
+  int64_t perm[4] = {0, 2, 3, 1};
+  PolyTensor *weight = poly_tensor_permute(ctx, key, perm, 4);
+  ASSERT_NOT_NULL(query);
+  ASSERT_NOT_NULL(weight);
+
+  PolyTensor *output = poly_tensor_dot(ctx, query, weight);
+  ASSERT_NOT_NULL(output);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, output->uop_logical), 4);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, output->uop_physical), 4);
+  ASSERT_PTR_EQ(poly_uop_shape_dim(ctx, output->uop_logical, 3), nb);
+  ASSERT_PTR_EQ(poly_uop_shape_dim(ctx, output->uop_physical, 3), nb);
+  ASSERT_INT_EQ(output->uop_logical->op, POLY_OP_RESHAPE);
+  ASSERT_INT_EQ(output->uop_physical->op, POLY_OP_RESHAPE);
+  ASSERT_INT_EQ(output->uop_physical->src[0]->op, POLY_OP_REDUCE);
+  ASSERT_INT_EQ(output->uop_physical->src[1]->op, POLY_OP_STACK);
+  ASSERT_INT_EQ(output->uop_physical->src[1]->n_src, 4);
+  ASSERT_PTR_EQ(output->uop_physical->src[1]->src[3], nb);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tensor, symbolic_softmax_and_max_preserve_exact_bind_dimension) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *n = poly_define_var(ctx, "n", 1, 7);
+  PolyUOp *nb = poly_bind_var(ctx, n, 3);
+  PolyUOp *base = make_buf(ctx, (int64_t[]){1, 2, 1, 7}, 4);
+  PolyUOp *starts[4] = {
+      poly_const_int(ctx, 0), poly_const_int(ctx, 0),
+      poly_const_int(ctx, 0), poly_const_int(ctx, 0),
+  };
+  PolyUOp *sizes[4] = {
+      poly_const_int(ctx, 1), poly_const_int(ctx, 2),
+      poly_const_int(ctx, 1), nb,
+  };
+  PolyUOp *x = poly_shrink_uop(ctx, base, starts, sizes, 4);
+  ASSERT_NOT_NULL(x);
+
+  /* Pinned _softmax is max(keepdim)->detach->subtract->exp, followed by
+   * sum(keepdim)->reciprocal->multiply (mixin/__init__.py:743-770). */
+  PolyUOp *m = poly_max_reduce(ctx, x, -1, 1);
+  PolyUOp *shifted = poly_sub(ctx, x, poly_detach(ctx, m));
+  PolyUOp *e = poly_exp(ctx, shifted);
+  PolyUOp *s = poly_sum_reduce(ctx, e, -1, 1);
+  PolyUOp *manual = poly_mul(ctx, e, poly_alu1(ctx, POLY_OP_RECIPROCAL, s));
+  PolyUOp *softmax = poly_softmax(ctx, x, -1);
+  ASSERT_NOT_NULL(manual);
+  ASSERT_PTR_EQ(softmax, manual);
+  ASSERT_PTR_EQ(poly_uop_shape_dim(ctx, softmax, 3), nb);
+
+  /* Pinned log_softmax reuses the exact same prefix (mixin/__init__.py:772-793). */
+  PolyUOp *manual_log = poly_sub(ctx, shifted, poly_log(ctx, s));
+  PolyUOp *log_softmax = poly_log_softmax(ctx, x, -1);
+  ASSERT_NOT_NULL(manual_log);
+  ASSERT_PTR_EQ(log_softmax, manual_log);
+  ASSERT_PTR_EQ(poly_uop_shape_dim(ctx, log_softmax, 3), nb);
+
+  /* Pinned ReduceMixin._reduce reshapes with surviving symbolic dimensions
+   * instead of their allocation maxima (mixin/reduce.py:13-17). */
+  PolyUOp *other_axis = poly_max_reduce(ctx, x, 1, 0);
+  ASSERT_NOT_NULL(other_axis);
+  ASSERT_INT_EQ(other_axis->op, POLY_OP_RESHAPE);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, other_axis), 3);
+  ASSERT_PTR_EQ(poly_uop_shape_dim(ctx, other_axis, 2), nb);
+  ASSERT_INT_EQ(other_axis->src[1]->op, POLY_OP_STACK);
+  ASSERT_PTR_EQ(other_axis->src[1]->src[2], nb);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(tensor, custom_kernel_uses_ordered_roots_and_one_call_per_graph) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
@@ -495,7 +725,7 @@ TEST(tensor, custom_kernel_uses_ordered_roots_and_one_call_per_graph) {
   );
   PolyUOp *store = poly_uop_store(ctx, ci, sum);
   PolyUOp *end = poly_uop_end(ctx, store, &r, 1);
-  PolyUOp *body = poly_uop_sink(ctx, &end, 1);
+  PolyUOp *body = poly_uop_sink_ex(ctx, &end, 1, "custom_add_4", 1);
   ASSERT_NOT_NULL(body);
 
   PolyTensor *inputs[3] = {c, a, b};
@@ -522,6 +752,24 @@ TEST(tensor, custom_kernel_uses_ordered_roots_and_one_call_per_graph) {
     ASSERT_PTR_EQ(logical_call->src[i + 1], inputs[i]->uop_logical);
     ASSERT_PTR_EQ(physical_call->src[i + 1], inputs[i]->uop_physical);
   }
+
+  /* Pinned pm_schedule leaves SINK(KernelInfo) opaque and create_schedule
+   * preserves its three ordered buffer arguments. The following consumer is
+   * a separate raw SINK until compile_linear (schedule/__init__.py:94-105,
+   * 118-128). */
+  PolyUOp *probe_store =
+      poly_store_val(ctx, c->uop_physical, outputs[0]->uop_physical);
+  PolyUOp *probe_sink = poly_sink1(ctx, probe_store);
+  PolySchedule *probe_schedule = poly_schedule_effect_sink(ctx, probe_sink);
+  ASSERT_NOT_NULL(probe_schedule);
+  ASSERT_INT_EQ(probe_schedule->template->n_calls, 2);
+  PolyUOp *custom_call = poly_schedule_call(probe_schedule, 0);
+  ASSERT_NOT_NULL(custom_call);
+  ASSERT_INT_EQ(custom_call->op, POLY_OP_CALL);
+  ASSERT_INT_EQ(custom_call->n_src, 4);
+  ASSERT_PTR_EQ(custom_call->src[0], body);
+  ASSERT_INT_EQ(poly_schedule_call(probe_schedule, 1)->src[0]->op, POLY_OP_SINK);
+  poly_schedule_free(probe_schedule);
 
   float c_data[4] = {0};
   float a_data[4] = {1.0f, 2.0f, 3.0f, 4.0f};
@@ -568,6 +816,19 @@ TEST(tensor, dtype_constructors_use_exact_logical_and_physical_sources) {
   ASSERT_EQ(bitcasted->uop_physical->op, POLY_OP_BITCAST);
   ASSERT_PTR_EQ(bitcasted->uop_logical->src[0], source->uop_logical);
   ASSERT_PTR_EQ(bitcasted->uop_physical->src[0], source->uop_physical);
+
+  /* Pinned UOp.bitcast accepts unequal scalar widths; Tensor.bitcast keeps
+   * this direct spelling for DISK-backed tensors. Shape inference scales the
+   * last dimension instead of rejecting the UOp. */
+  int64_t bytes_shape[1] = {8};
+  PolyTensor *bytes = poly_tensor_empty(ctx, POLY_UINT8, bytes_shape, 1, POLY_DEVICE_CPU);
+  PolyTensor *wide = poly_tensor_bitcast_by_id(ctx, bytes, f32);
+  ASSERT_NOT_NULL(wide);
+  ASSERT_INT_EQ(wide->uop_logical->op, POLY_OP_BITCAST);
+  ASSERT_INT_EQ(wide->uop_physical->op, POLY_OP_BITCAST);
+  PolyShape wide_shape = poly_uop_max_shape_cached(ctx, wide->uop_physical);
+  ASSERT_INT_EQ(wide_shape.ndim, 1);
+  ASSERT_INT_EQ(wide_shape.dims[0], 2);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -1944,6 +2205,166 @@ TEST(pe, dot_v2_e2e) {
   PASS();
 }
 
+TEST(tensor, sum_and_dot_accumulation_dtype_match_pinned_topology) {
+  /* Pinned ReduceMixin.sum and dot cast the product/value to the selected
+   * accumulation dtype before REDUCE, and default half sums cast back
+   * (mixin/reduce.py:13-44, mixin/__init__.py:451-490). */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int f32 = poly_dtype_id_by_name("float32");
+  ASSERT_TRUE(f32 >= 0);
+  int64_t a_shape[] = {2, 3}, b_shape[] = {3, 2}, axis[] = {1};
+  PolyTensor *a = poly_tensor_empty(ctx, POLY_FLOAT16, a_shape, 2, POLY_DEVICE_CPU);
+  PolyTensor *b = poly_tensor_empty(ctx, POLY_FLOAT16, b_shape, 2, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(a);
+  ASSERT_NOT_NULL(b);
+
+  PolyTensor *sum_default = poly_tensor_sum(ctx, a, axis, 1, false);
+  PolyUOp *sum_default_root = poly_tensor_uop(sum_default);
+  ASSERT_NOT_NULL(sum_default_root);
+  ASSERT_INT_EQ(sum_default_root->op, POLY_OP_CAST);
+  ASSERT_TRUE(poly_dtype_eq(sum_default_root->dtype, POLY_FLOAT16));
+  ASSERT_INT_EQ(sum_default_root->src[0]->op, POLY_OP_RESHAPE);
+  ASSERT_INT_EQ(sum_default_root->src[0]->src[0]->op, POLY_OP_REDUCE);
+  ASSERT_INT_EQ(sum_default_root->src[0]->src[0]->src[0]->op, POLY_OP_CAST);
+  ASSERT_TRUE(poly_dtype_eq(sum_default_root->src[0]->src[0]->src[0]->dtype, POLY_FLOAT32));
+
+  PolyTensor *sum_explicit =
+      poly_tensor_sum_dtype_by_id(ctx, a, axis, 1, false, f32);
+  PolyUOp *sum_explicit_root = poly_tensor_uop(sum_explicit);
+  ASSERT_NOT_NULL(sum_explicit_root);
+  ASSERT_INT_EQ(sum_explicit_root->op, POLY_OP_RESHAPE);
+  ASSERT_INT_EQ(sum_explicit_root->src[0]->op, POLY_OP_REDUCE);
+  ASSERT_INT_EQ(sum_explicit_root->src[0]->src[0]->op, POLY_OP_CAST);
+  ASSERT_TRUE(poly_dtype_eq(sum_explicit_root->dtype, POLY_FLOAT32));
+
+  PolyTensor *dot_default = poly_tensor_dot(ctx, a, b);
+  PolyUOp *dot_default_root = poly_tensor_uop(dot_default);
+  ASSERT_NOT_NULL(dot_default_root);
+  ASSERT_INT_EQ(dot_default_root->op, POLY_OP_CAST);
+  ASSERT_INT_EQ(dot_default_root->src[0]->op, POLY_OP_RESHAPE);
+  ASSERT_INT_EQ(dot_default_root->src[0]->src[0]->op, POLY_OP_REDUCE);
+  ASSERT_INT_EQ(dot_default_root->src[0]->src[0]->src[0]->op, POLY_OP_CAST);
+  ASSERT_INT_EQ(dot_default_root->src[0]->src[0]->src[0]->src[0]->op, POLY_OP_MUL);
+
+  PolyTensor *dot_explicit = poly_tensor_dot_dtype_by_id(ctx, a, b, f32);
+  PolyUOp *dot_explicit_root = poly_tensor_uop(dot_explicit);
+  ASSERT_NOT_NULL(dot_explicit_root);
+  ASSERT_INT_EQ(dot_explicit_root->op, POLY_OP_RESHAPE);
+  ASSERT_INT_EQ(dot_explicit_root->src[0]->op, POLY_OP_REDUCE);
+  ASSERT_INT_EQ(dot_explicit_root->src[0]->src[0]->op, POLY_OP_CAST);
+  ASSERT_INT_EQ(dot_explicit_root->src[0]->src[0]->src[0]->op, POLY_OP_MUL);
+  ASSERT_TRUE(poly_dtype_eq(dot_explicit_root->dtype, POLY_FLOAT32));
+
+  PolyTensor *b_f32 = poly_tensor_empty(ctx, POLY_FLOAT32, b_shape, 2, POLY_DEVICE_CPU);
+  PolyTensor *dot_mixed = poly_tensor_dot(ctx, a, b_f32);
+  PolyUOp *dot_mixed_root = poly_tensor_uop(dot_mixed);
+  ASSERT_NOT_NULL(dot_mixed_root);
+  ASSERT_INT_EQ(dot_mixed_root->op, POLY_OP_RESHAPE);
+  ASSERT_TRUE(poly_dtype_eq(dot_mixed_root->dtype, POLY_FLOAT32));
+  ASSERT_INT_EQ(dot_mixed_root->src[0]->op, POLY_OP_REDUCE);
+  PolyUOp *mixed_mul = dot_mixed_root->src[0]->src[0];
+  ASSERT_INT_EQ(mixed_mul->op, POLY_OP_MUL);
+  ASSERT_TRUE(poly_dtype_eq(mixed_mul->dtype, POLY_FLOAT32));
+  ASSERT_INT_EQ(mixed_mul->src[0]->op, POLY_OP_CAST);
+  ASSERT_TRUE(poly_dtype_eq(mixed_mul->src[0]->dtype, POLY_FLOAT32));
+  ASSERT_FALSE(mixed_mul->src[1]->op == POLY_OP_CAST);
+
+  PolyTensor *v0 =
+      poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){3}, 1, POLY_DEVICE_CPU);
+  PolyTensor *v1 =
+      poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){3}, 1, POLY_DEVICE_CPU);
+  PolyTensor *scalar_dot = poly_tensor_dot(ctx, v0, v1);
+  ASSERT_NOT_NULL(scalar_dot);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, poly_tensor_uop(scalar_dot)), 0);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tensor, conv2d_promotion_accumulation_and_bias_match_pinned_topology) {
+  /* Pinned conv2d uses ordinary promoted multiplication, ReduceMixin.sum's
+   * accumulation/cast-back rule, and ordinary promoted bias addition
+   * (mixin/__init__.py:439-449,1493-1507; mixin/reduce.py:19-44). */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int f32 = poly_dtype_id_by_name("float32");
+  ASSERT_TRUE(f32 >= 0);
+  int64_t x_shape[] = {1, 1, 3, 3}, w_shape[] = {1, 1, 2, 2}, b_shape[] = {1};
+  PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT16, x_shape, 4, POLY_DEVICE_CPU);
+  PolyTensor *w_half = poly_tensor_empty(ctx, POLY_FLOAT16, w_shape, 4, POLY_DEVICE_CPU);
+  PolyTensor *w_float = poly_tensor_empty(ctx, POLY_FLOAT32, w_shape, 4, POLY_DEVICE_CPU);
+  PolyTensor *b_half = poly_tensor_empty(ctx, POLY_FLOAT16, b_shape, 1, POLY_DEVICE_CPU);
+  PolyTensor *b_float = poly_tensor_empty(ctx, POLY_FLOAT32, b_shape, 1, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(x);
+  ASSERT_NOT_NULL(w_half);
+  ASSERT_NOT_NULL(w_float);
+  ASSERT_NOT_NULL(b_half);
+  ASSERT_NOT_NULL(b_float);
+
+  PolyTensor *mixed = poly_tensor_conv2d(
+      ctx, x, w_float, b_float, 1, NULL, NULL, NULL, 0);
+  PolyTensor *half_default = poly_tensor_conv2d(
+      ctx, x, w_half, b_half, 1, NULL, NULL, NULL, 0);
+  PolyTensor *half_explicit = poly_tensor_conv2d_dtype_by_id(
+      ctx, x, w_half, b_half, 1, NULL, NULL, NULL, 0, f32);
+  ASSERT_NOT_NULL(mixed);
+  ASSERT_NOT_NULL(half_default);
+  ASSERT_NOT_NULL(half_explicit);
+  ASSERT_TRUE(poly_dtype_eq(poly_tensor_uop(mixed)->dtype, POLY_FLOAT32));
+  ASSERT_TRUE(poly_dtype_eq(poly_tensor_uop(half_default)->dtype, POLY_FLOAT16));
+  ASSERT_TRUE(poly_dtype_eq(poly_tensor_uop(half_explicit)->dtype, POLY_FLOAT32));
+
+  PolyUOp *roots[] = {
+      poly_tensor_uop(mixed), poly_tensor_uop(half_default), poly_tensor_uop(half_explicit)};
+  int expected_casts[] = {1, 2, 2};
+  for (int r = 0; r < 3; r++) {
+    int n_topo = 0, casts = 0, muls = 0, reduces = 0, adds = 0;
+    PolyUOp **topo = poly_toposort_alloc(ctx, roots[r], &n_topo);
+    ASSERT_NOT_NULL(topo);
+    for (int i = 0; i < n_topo; i++) {
+      casts += topo[i]->op == POLY_OP_CAST;
+      muls += topo[i]->op == POLY_OP_MUL;
+      reduces += topo[i]->op == POLY_OP_REDUCE;
+      adds += topo[i]->op == POLY_OP_ADD;
+      if (topo[i]->op == POLY_OP_REDUCE)
+        ASSERT_TRUE(poly_dtype_eq(topo[i]->dtype, POLY_FLOAT32));
+      if (topo[i]->op == POLY_OP_MUL)
+        ASSERT_TRUE(poly_dtype_eq(topo[i]->dtype, r == 0 ? POLY_FLOAT32 : POLY_FLOAT16));
+    }
+    ASSERT_INT_EQ(casts, expected_casts[r]);
+    ASSERT_INT_EQ(muls, 1);
+    ASSERT_INT_EQ(reduces, 1);
+    ASSERT_INT_EQ(adds, 1);
+    free(topo);
+  }
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, dot_singleton_batch_omits_noop_weight_expand) {
+  /* Pinned Tensor.dot reshapes a (K,N) weight to (1,N,K), then
+   * _broadcast_to returns it unchanged for a (1,K) input. Only the input
+   * requires EXPAND from (1,1,K) to (1,N,K). */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = make_buf(ctx, (int64_t[]){1, 12}, 2);
+  PolyUOp *w = make_buf(ctx, (int64_t[]){12, 10}, 2);
+  PolyUOp *r = poly_dot(ctx, x, w);
+  ASSERT_NOT_NULL(r);
+
+  int n_topo = 0, n_expand = 0;
+  PolyUOp **topo = poly_toposort_alloc(ctx, r, &n_topo);
+  ASSERT_NOT_NULL(topo);
+  for (int i = 0; i < n_topo; i++)
+    n_expand += topo[i]->op == POLY_OP_EXPAND;
+  ASSERT_INT_EQ(n_expand, 1);
+  poly_toposort_free(topo);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(pe, qr_e2e_matches_tinygrad_probe) {
   PolyCtx *ctx = poly_ctx_new();
 
@@ -2854,6 +3275,61 @@ TEST(shape_uop, buffer_dynamic) {
   PASS();
 }
 
+TEST(shape_uop, gettuple_function_resolves_symbolic_param_shape_and_axis) {
+  /* Pinned GETTUPLE(FUNCTION)._shape substitutes PARAM(slot) dimensions with
+   * ordered FUNCTION arguments, while BIND._min_max retains the PARAM range
+   * (tinygrad/uop/ops.py:242-253,628-630,1010-1012,1691). */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *empty = poly_uop(ctx, POLY_OP_STACK, POLY_VOID, NULL, 0, poly_arg_none());
+  PolyParamArg dim_arg = {
+      .slot = 1,
+      .name = "size",
+      .min_val = 1,
+      .max_val = 8,
+      .has_minmax = true,
+      .addrspace = POLY_ADDR_GLOBAL,
+  };
+  PolyUOp *dim_param = poly_uop1(
+      ctx, POLY_OP_PARAM, POLY_INDEX, empty, poly_arg_param(&dim_arg));
+  PolyUOp *body_dims[2] = {dim_param, poly_const_int(ctx, 4)};
+  PolyUOp *body_shape = poly_uop(
+      ctx, POLY_OP_STACK, poly_dtype_vec(POLY_INDEX, 2), body_dims, 2,
+      poly_arg_none());
+  PolyParamArg value_arg = {
+      .slot = 0,
+      .addrspace = POLY_ADDR_GLOBAL,
+      .axis = 1,
+      .has_axis = true,
+  };
+  PolyUOp *value = poly_uop1(
+      ctx, POLY_OP_PARAM, POLY_FLOAT32, body_shape, poly_arg_param(&value_arg));
+  PolyUOp *body = poly_uop1(ctx, POLY_OP_TUPLE, POLY_VOID, value, poly_arg_none());
+
+  PolyUOp *actual = poly_buffer_on_device(ctx, POLY_FLOAT32, 20, POLY_DEVICE_CPU);
+  actual = poly_reshape(ctx, actual, (int64_t[]){5, 4}, 2);
+  PolyUOp *size = poly_uop0(
+      ctx, POLY_OP_DEFINE_VAR, POLY_INDEX, poly_arg_define_var("size", 1, 8));
+  PolyUOp *bound = poly_uop2(
+      ctx, POLY_OP_BIND, POLY_INDEX, size, poly_const_int(ctx, 5), poly_arg_none());
+  PolyUOp *function_src[3] = {body, actual, bound};
+  PolyUOp *function = poly_uop(
+      ctx, POLY_OP_FUNCTION, POLY_VOID, function_src, 3,
+      poly_arg_str("symbolic_shape"));
+  PolyUOp *selected = poly_uop1(
+      ctx, POLY_OP_GETTUPLE, POLY_FLOAT32, function, poly_arg_int(0));
+
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, selected), 2);
+  ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, selected)[0], 8);
+  ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, selected)[1], 4);
+  ASSERT_PTR_EQ(poly_uop_shape_dim(ctx, selected, 0), bound);
+  int axis = -1;
+  ASSERT_TRUE(poly_uop_axis(ctx, selected, &axis));
+  ASSERT_INT_EQ(axis, 1);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(shape_uop, shrink_uop_with_bound_start_matches_tinygrad_form) {
   PolyCtx *ctx = poly_ctx_new();
 
@@ -3489,6 +3965,39 @@ TEST(tensor, contiguous_tensor_matches_pinned_device_rules) {
   ASSERT_PTR_EQ(poly_tensor_uop_logical(materialized)->src[0], poly_tensor_uop_logical(permuted));
   ASSERT_INT_EQ(poly_tensor_uop_physical(materialized)->op, POLY_OP_CONTIGUOUS);
   ASSERT_PTR_EQ(poly_tensor_uop_physical(materialized)->src[0], poly_tensor_uop_physical(permuted));
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tensor, contiguous_backward_constructs_exact_barrier_and_gradient) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int64_t shape[] = {3};
+  PolyTensor *source =
+      poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+  PolyTensor *result = poly_tensor_contiguous_backward(ctx, source);
+  ASSERT_NOT_NULL(source);
+  ASSERT_NOT_NULL(result);
+  ASSERT_INT_EQ(poly_tensor_uop_logical(result)->op, POLY_OP_CONTIGUOUS_BACKWARD);
+  ASSERT_PTR_EQ(
+      poly_tensor_uop_logical(result)->src[0], poly_tensor_uop_logical(source)
+  );
+  ASSERT_INT_EQ(poly_tensor_uop_physical(result)->op, POLY_OP_CONTIGUOUS_BACKWARD);
+  ASSERT_PTR_EQ(
+      poly_tensor_uop_physical(result)->src[0], poly_tensor_uop_physical(source)
+  );
+
+  PolyUOp *grad = poly_grad(
+      ctx, poly_tensor_uop_physical(result), poly_tensor_uop_physical(source)
+  );
+  ASSERT_NOT_NULL(grad);
+  int n_topo = 0, contiguous_count = 0;
+  PolyUOp **topo = poly_toposort_alloc(ctx, grad, &n_topo);
+  ASSERT_NOT_NULL(topo);
+  for (int i = 0; i < n_topo; i++) contiguous_count += topo[i]->op == POLY_OP_CONTIGUOUS;
+  ASSERT_INT_EQ(contiguous_count, 1);
+  free(topo);
 
   poly_ctx_destroy(ctx);
   PASS();

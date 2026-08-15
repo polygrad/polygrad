@@ -913,6 +913,16 @@ function createBoundTensorClass(runtime) {
       return ret
     }
 
+    contiguousBackward() {
+      // Pinned mixin/elementwise.py:51-55 is one CONTIGUOUS_BACKWARD UOp;
+      // C owns both retained and executable Tensor roots.
+      const { ffi } = this._rt._core
+      const core = ffi.poly_tensor_contiguous_backward(this._ctx, this._tensor)
+      return this._makeResultFromCore(core, [this])
+    }
+
+    contiguous_backward() { return this.contiguousBackward() }
+
     async detachAsync() {
       return this.detach()
     }
@@ -1254,14 +1264,22 @@ function createBoundTensorClass(runtime) {
       return this._binop(other, 'SUB')
     }
     mul(other, reverse = false) { return this._binop(other, 'MUL', reverse) }
-    div(other) {
-      // Pinned mixin/elementwise.py:219-234: true division is multiply by
-      // the reciprocal after both operands are broadcast and promoted.
-      other = this._ensureTensor(other)
+    div(other, roundingMode = null) {
+      // Pinned mixin/elementwise.py:219-247 selects integer CDIV/FLOORDIV
+      // after promotion; floating rounding composes over true division.
+      const rhs = this._ensureTensor(other)
+      if (isIntegerDtype(this._dtype) && isIntegerDtype(rhs._dtype)) {
+        if (roundingMode === 'trunc') return this._binop(rhs, 'CDIV')
+        if (roundingMode === 'floor') return this._binop(rhs, 'FLOORDIV')
+      }
       const core = this._rt._core.ffi.poly_tensor_div(
-        this._ctx, this._tensor, other._tensor
+        this._ctx, this._tensor, rhs._tensor
       )
-      return this._makeResultFromCore(core, [this, other])
+      const result = this._makeResultFromCore(core, [this, rhs])
+      if (roundingMode == null) return result
+      if (roundingMode === 'trunc') return result.trunc()
+      if (roundingMode === 'floor') return result.floor()
+      throw new Error(`rounding_mode='${roundingMode}' is not supported`)
     }
     pow(other) { return this._binop(other, 'POW') }
     lt(other) { return this._binop(other, 'CMPLT') }
@@ -1307,7 +1325,9 @@ function createBoundTensorClass(runtime) {
         x = y._ensureTensor(x)
         branchShape = _broadcastShapes(x.shape, y.shape)
       } else {
-        x = this._ensureTensor(x)
+        // Pinned tensor.py:769-770 uses self.ufix(x)._broadcasted(y): shape
+        // the scalar like the condition before branch dtype promotion.
+        x = this._ensureTensor(x)._broadcastTensor(this.shape)
         y = x._ensureTensor(y)
         branchShape = _broadcastShapes(x.shape, y.shape)
       }
@@ -1694,6 +1714,12 @@ function createBoundTensorClass(runtime) {
 
     permute(...order) {
       if (order.length === 1 && Array.isArray(order[0])) order = order[0]
+      order = order.map(axis => axis < 0 ? axis + this.shape.length : axis)
+      if (order.length !== this.shape.length ||
+          [...order].sort((a, b) => a - b).some((axis, index) => axis !== index)) {
+        throw new Error(`order is not a valid permutation, getting (${order})`)
+      }
+      if (order.every((axis, index) => axis === index)) return this
       const core = this._rt._core.ffi.poly_tensor_permute(
         this._ctx, this._tensor, order, order.length
       )
@@ -1823,9 +1849,24 @@ function createBoundTensorClass(runtime) {
       return this.reshape(newShape).expand(expShape).reshape(finalShape)
     }
 
+    repeatInterleave(repeats, dim = null) {
+      // Direct port of pinned mixin/movement.py:520-534.
+      let x = this
+      if (dim === null || dim === undefined) {
+        x = this.flatten(); dim = 0
+      } else if (dim < 0) dim += this.shape.length
+      if (dim < 0 || dim >= x.shape.length) throw new RangeError(`dim ${dim} out of range`)
+      const shape = x.shape
+      x = x.reshape([...shape.slice(0, dim + 1), 1, ...shape.slice(dim + 1)])
+      x = x.expand([...shape.slice(0, dim + 1), Number(repeats), ...shape.slice(dim + 1)])
+      return x.reshape([...shape.slice(0, dim), shape[dim] * Number(repeats), ...shape.slice(dim + 1)])
+    }
+
+    repeat_interleave(repeats, dim = null) { return this.repeatInterleave(repeats, dim) }
+
     // --- Reduction ops ---
 
-    sum(axis, keepdim) {
+    sum(axis, keepdim, dtype) {
       if (keepdim === undefined) keepdim = false
       if (axis === undefined || axis === null) {
         axis = this.shape.map((_, i) => i)
@@ -1837,9 +1878,19 @@ function createBoundTensorClass(runtime) {
       for (const a of axis) {
         if (a < 0 || a >= nd) throw new RangeError(`axis ${a} out of range for ndim ${nd}`)
       }
-      const core = this._rt._core.ffi.poly_tensor_sum(
-        this._ctx, this._tensor, axis, axis.length, Boolean(keepdim)
-      )
+      const { ffi } = this._rt._core
+      let core
+      if (dtype === undefined || dtype === null) {
+        core = ffi.poly_tensor_sum(
+          this._ctx, this._tensor, axis, axis.length, Boolean(keepdim)
+        )
+      } else {
+        const dtypeId = DTYPE_ID[dtype]
+        if (dtypeId === undefined) throw new Error(`unsupported dtype: ${dtype}`)
+        core = ffi.poly_tensor_sum_dtype_by_id(
+          this._ctx, this._tensor, axis, axis.length, Boolean(keepdim), dtypeId
+        )
+      }
       return this._makeResultFromCore(core, [this])
     }
 
@@ -1946,6 +1997,49 @@ function createBoundTensorClass(runtime) {
       const denominator = product(axes.map(a => this.shape[a]))
       const outputDtype = isFloatDtype(this._dtype) ? this._dtype : 'float32'
       return numerator.div(denominator).cast(outputDtype)
+    }
+
+    dropout(p = 0.5) {
+      // Direct port of pinned tensor.py:809-829.
+      p = Number(p)
+      if (!(p >= 0 && p <= 1)) throw new RangeError(`p=${p} is out of range [0, 1]`)
+      if (!Tensor.training || p === 0) return this
+      if (p === 1) return this.constLike(0)
+      return Tensor.randLike(this, { dtype: 'float32', contiguous: false })
+        .ge(p).contiguous().where(this, 0).div(1.0 - p)
+    }
+
+    scaledDotProductAttention(key, value, opts = {}) {
+      // Direct port of pinned tensor.py:831-858. With float32 included in
+      // the accumulation lattice, supported JS dtypes choose float64 iff
+      // either Q or K is float64, otherwise float32.
+      opts = opts || {}
+      const attnMask = opts.attnMask === undefined ? (opts.attn_mask || null) : opts.attnMask
+      const dropoutP = opts.dropoutP === undefined ? Number(opts.dropout_p || 0) : Number(opts.dropoutP)
+      const isCausal = Boolean(opts.isCausal === undefined ? opts.is_causal : opts.isCausal)
+      const enableGqa = Boolean(opts.enableGqa === undefined ? opts.enable_gqa : opts.enableGqa)
+      if (enableGqa) {
+        key = key.repeatInterleave(Math.trunc(this.shape.at(-3) / key.shape.at(-3)), -3)
+        value = value.repeatInterleave(Math.trunc(this.shape.at(-3) / value.shape.at(-3)), -3)
+      }
+      const accDtype = this.dtype === 'float64' || key.dtype === 'float64' ? 'float64' : 'float32'
+      let qk = this.matmul(key.transpose(-2, -1), false, accDtype).div(Math.sqrt(this.shape.at(-1)))
+      let mask = attnMask
+      if (isCausal) {
+        if (mask !== null) throw new Error('cannot set attn_mask when is_causal=True')
+        mask = qk.constLike(1).cast('bool').tril()
+      }
+      if (mask !== null) {
+        if (mask.dtype === 'bool') mask = mask.where(0, -Infinity)
+        qk = qk.add(mask)
+      }
+      return qk.cast(this.dtype).softmax(-1).dropout(dropoutP).matmul(value)
+    }
+
+    scaled_dot_product_attention(key, value, attnMask = null, dropoutP = 0, isCausal = false, enableGqa = false) {
+      return this.scaledDotProductAttention(key, value, {
+        attnMask, dropoutP, isCausal, enableGqa
+      })
     }
 
     var(axis, keepdim, correction) {
@@ -2090,19 +2184,28 @@ function createBoundTensorClass(runtime) {
 
     // --- Matmul (C core dot) ---
 
-    dot(w) {
+    dot(w, dtype) {
       if (!(w instanceof Tensor)) {
         throw new TypeError(`Expected Tensor, got ${typeof w}`)
       }
       const { ffi } = this._rt._core
-      const core = ffi.poly_tensor_dot(this._ctx, this._tensor, w._tensor)
+      let core
+      if (dtype === undefined || dtype === null) {
+        core = ffi.poly_tensor_dot(this._ctx, this._tensor, w._tensor)
+      } else {
+        const dtypeId = DTYPE_ID[dtype]
+        if (dtypeId === undefined) throw new Error(`unsupported dtype: ${dtype}`)
+        core = ffi.poly_tensor_dot_dtype_by_id(this._ctx, this._tensor, w._tensor, dtypeId)
+      }
       if (!core) {
         throw new Error(`cannot dot ${JSON.stringify(this.shape)} and ${JSON.stringify(w.shape)}`)
       }
       return this._makeResultFromCore(core, [this, w])
     }
 
-    matmul(other) { return this.dot(other) }
+    matmul(other, reverse = false, dtype) {
+      return reverse ? other.dot(this, dtype) : this.dot(other, dtype)
+    }
 
     qr(opts) {
       let mode = 'complete'
@@ -2191,10 +2294,15 @@ function createBoundTensorClass(runtime) {
       return this._makeResultFromCore(core, [this, b])
     }
 
-    linear(weight, bias) {
-      let result = this.dot(weight.transpose(-1, -2))
-      if (bias) result = result.add(bias)
-      return result
+    linear(weight, bias = null, dtype = null) {
+      // Direct port of pinned mixin/__init__.py:1335-1350.
+      if (dtype !== null && dtype !== undefined) {
+        return this.cast(dtype).linear(
+          weight.cast(dtype), bias === null ? null : bias.cast(dtype)
+        )
+      }
+      const result = weight.shape.length === 1 ? this.mul(weight) : this.dot(weight)
+      return bias === null ? result : result.add(bias)
     }
 
     sequential(list) {
@@ -2261,11 +2369,18 @@ function createBoundTensorClass(runtime) {
       const dilationTuple = opts.dilation == null ? makeTuple(1, hw.length) : makeTuple(opts.dilation, hw.length)
       const paddingTuple = resolvePoolPads(opts.padding == null ? 0 : opts.padding, hw.length)
       const groups = opts.groups == null ? 1 : Number(opts.groups)
-      const core = this._rt._core.ffi.poly_tensor_conv2d(
-        this._ctx, this._tensor, weight._tensor,
-        bias ? bias._tensor : null,
+      const args = [
+        this._ctx, this._tensor, weight._tensor, bias ? bias._tensor : null,
         groups, strideTuple, dilationTuple, paddingTuple, paddingTuple.length
-      )
+      ]
+      let core
+      if (opts.dtype === undefined || opts.dtype === null) {
+        core = this._rt._core.ffi.poly_tensor_conv2d(...args)
+      } else {
+        const dtypeId = DTYPE_ID[opts.dtype]
+        if (dtypeId === undefined) throw new Error(`unsupported dtype: ${opts.dtype}`)
+        core = this._rt._core.ffi.poly_tensor_conv2d_dtype_by_id(...args, dtypeId)
+      }
       if (!core) throw new Error('poly_conv2d failed')
       const inputs = bias ? [this, weight, bias] : [this, weight]
       return this._makeResultFromCore(core, inputs)
@@ -2343,6 +2458,89 @@ function createBoundTensorClass(runtime) {
 
     getitem(...idx) {
       if (idx.length === 1 && Array.isArray(idx[0])) idx = idx[0]
+
+      // Pinned mixin/movement.py:63-113 and mixin/__init__.py:121-146
+      // parse every basic view index, apply one aggregate movement, then one
+      // final reshape for injected/collapsed dimensions.
+      const isSliceObject = i => typeof i === 'object' && i !== null && 'step' in i
+      const isBasic = i => i === null || i === undefined || typeof i === 'number' ||
+        (Array.isArray(i) && i.length === 2) || isSliceObject(i)
+      if (idx.every(isBasic)) {
+        const parsed = []
+        let sourceDim = 0
+        for (const i of idx) {
+          if (i === null || i === undefined) {
+            parsed.push({ index: null, boundary: [0, 1], stride: 1, collapse: false })
+            continue
+          }
+          if (sourceDim >= this.shape.length) {
+            throw new Error(`too many indices for ${this.shape.length}D tensor`)
+          }
+          const size = this.shape[sourceDim++]
+          if (typeof i === 'number') {
+            let value = i
+            if (value < 0) value += size
+            if (value < 0 || value >= size) throw new Error(`index=${i} is out of bounds with size=${size}`)
+            parsed.push({ index: i, boundary: [value, value + 1], stride: 1, collapse: true })
+            continue
+          }
+
+          let start, stop, step
+          if (Array.isArray(i)) {
+            [start, stop] = i
+            step = 1
+          } else {
+            step = i.step != null ? i.step : 1
+            if (step === 0) throw new Error('slice step cannot be zero')
+            if (step > 0) {
+              start = i.start != null ? (i.start < 0 ? Math.max(i.start + size, 0) : Math.min(i.start, size)) : 0
+              stop = i.stop != null ? (i.stop < 0 ? Math.max(i.stop + size, 0) : Math.min(i.stop, size)) : size
+            } else {
+              start = i.start != null ? (i.start < 0 ? Math.max(i.start + size, -1) : Math.min(i.start, size - 1)) : size - 1
+              stop = i.stop != null ? (i.stop < 0 ? Math.max(i.stop + size, -1) : Math.min(i.stop, size - 1)) : -1
+            }
+          }
+          let boundary = [start, stop]
+          if (step * (boundary[1] - boundary[0]) < 0) boundary = [0, 0]
+          else if (step < 0) boundary = [boundary[1] + 1, boundary[0] + 1]
+          parsed.push({ index: i, boundary, stride: step, collapse: false })
+        }
+        while (sourceDim < this.shape.length) {
+          const size = this.shape[sourceDim++]
+          parsed.push({ index: [0, size], boundary: [0, size], stride: 1, collapse: false })
+        }
+
+        const movements = parsed.filter(p => p.index !== null)
+        let result = this.shrink(movements.map(p => p.boundary))
+        const negativeAxes = movements.map((p, d) => p.stride < 0 ? d : -1).filter(d => d >= 0)
+        if (negativeAxes.length) result = result.flip(negativeAxes)
+        const strides = movements.map(p => Math.abs(p.stride))
+        if (strides.some(stride => stride !== 1)) {
+          let shape = [...result.shape]
+          const padding = shape.map((size, d) => {
+            const rounded = Math.ceil(size / strides[d]) * strides[d]
+            return [0, rounded - size]
+          })
+          if (padding.some(pair => pair[1])) {
+            result = result.pad(padding)
+            shape = shape.map((size, d) => size + padding[d][1])
+          }
+          result = result.reshape(shape.flatMap((size, d) => [size / strides[d], strides[d]]))
+          result = result.shrink(result.shape.map((size, d) => d % 2 ? [0, 1] : [0, size]))
+          result = result.reshape(result.shape.filter((_, d) => d % 2 === 0))
+        }
+
+        const finalShape = []
+        let movementDim = 0
+        for (const p of parsed) {
+          if (p.index === null) finalShape.push(1)
+          else {
+            if (!p.collapse) finalShape.push(result.shape[movementDim])
+            movementDim += 1
+          }
+        }
+        return result.reshape(finalShape)
+      }
 
       let result = this
       let dim = 0
@@ -2698,6 +2896,22 @@ function createBoundTensorClass(runtime) {
       })
     }
 
+    static randLike(source, opts = {}) {
+      // Direct single-device port of pinned mixin/rand.py:70-86.
+      opts = { ...opts }
+      const device = opts.device || source.device
+      const dtype = opts.dtype || source.dtype
+      let out = Tensor.rand(...source.shape, { ...opts, dtype })
+      if (out.dtype !== dtype) out = out.cast(dtype)
+      if (normalizeDevice(device) !== normalizeDevice(out.device)) out = out.to(device)
+      return out
+    }
+
+    static rand_like(source, opts = {}) { return Tensor.randLike(source, opts) }
+
+    randLike(opts = {}) { return Tensor.randLike(this, opts) }
+    rand_like(opts = {}) { return Tensor.randLike(this, opts) }
+
     static randn(...args) {
       let shape = args, opts
       if (args.length > 0 && typeof args[args.length - 1] === 'object'
@@ -2737,6 +2951,35 @@ function createBoundTensorClass(runtime) {
       delete randOpts.high
       return Tensor.rand(...shape, randOpts).mul(high - low).cast(dtype).add(low)
     }
+
+    static scaledUniform(...args) {
+      let shape = args, opts = {}
+      if (args.length > 0 && typeof args[args.length - 1] === 'object'
+          && !Array.isArray(args[args.length - 1])) {
+        opts = { ...args[args.length - 1] }; shape = args.slice(0, -1)
+      }
+      if (shape.length === 1 && Array.isArray(shape[0])) shape = shape[0]
+      shape = shape.map(Number)
+      const scale = shape.reduce((product, dim) => product * dim, 1) ** -0.5
+      return Tensor.uniform(...shape, { ...opts, low: -1.0, high: 1.0 }).mul(scale)
+    }
+
+    static scaled_uniform(...args) { return Tensor.scaledUniform(...args) }
+
+    static glorotUniform(...args) {
+      let shape = args, opts = {}
+      if (args.length > 0 && typeof args[args.length - 1] === 'object'
+          && !Array.isArray(args[args.length - 1])) {
+        opts = { ...args[args.length - 1] }; shape = args.slice(0, -1)
+      }
+      if (shape.length === 1 && Array.isArray(shape[0])) shape = shape[0]
+      shape = shape.map(Number)
+      const fanOut = shape.slice(1).reduce((product, dim) => product * dim, 1)
+      const bound = Math.sqrt(6 / (shape[0] + fanOut))
+      return Tensor.uniform(...shape, { ...opts, low: -bound, high: bound })
+    }
+
+    static glorot_uniform(...args) { return Tensor.glorotUniform(...args) }
 
     static randint(...args) {
       let opts = {}
@@ -2934,6 +3177,7 @@ function createBoundTensorClass(runtime) {
     }
   }
 
+  Tensor.training = false
   return Tensor
 }
 

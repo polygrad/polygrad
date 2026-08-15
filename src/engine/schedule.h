@@ -222,6 +222,9 @@ typedef struct PolyCompiledGraphBatch PolyCompiledGraphBatch;
 typedef struct {
   PolyCtx *ctx;
   PolyScheduleTemplate *template;
+  /* Pinned compile_linear result: schedule_cache/template LINEAR remains raw,
+   * while this execution plan retains the PROGRAM-backed rewrite. */
+  PolyUOp *linear;
   PolyDevice device;
   const PolyAllocator *allocator;
 
@@ -381,6 +384,7 @@ int poly_schedule_call_run(
 
 /* Backend lowering from backend-neutral schedule to compiled runners. */
 PolyCompiledSchedule *poly_lower_schedule(PolyCtx *ctx, PolySchedule *schedule, PolyDevice device);
+PolyUOp *poly_compile_linear(PolyCtx *ctx, PolySchedule *schedule, PolyDevice device);
 
 /* Attach the exact pinned graph_split_rewrite topology to an already-lowered
  * retained JIT LINEAR. This validates that every nested graph CALL names the

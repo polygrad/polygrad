@@ -3,6 +3,7 @@ Tensor class for polygrad, lazy evaluation backed by the C compiler core.
 Supports float32 (default) and float64 dtypes.
 """
 
+import contextlib
 import ctypes
 import functools
 import hashlib
@@ -10,6 +11,7 @@ import math
 import pathlib
 import sys
 import weakref
+from typing import cast as cast
 
 import numpy as np
 
@@ -263,7 +265,7 @@ def _flat_to_grouped(padding):
 def _prod(vals):
     out = 1
     for v in vals:
-        out *= int(v)
+        out *= v
     return out
 
 
@@ -525,20 +527,18 @@ class Tensor:
     _device_seeds = {}
     _device_rng_counters = {}
 
-    @classmethod
-    def train(cls, mode=True):
-        """tinygrad-compatible training-mode context manager."""
-        class _TrainCtx:
-            def __enter__(self_nonlocal):
-                self_nonlocal.prev = cls.training
-                cls.training = bool(mode)
-                return cls
+    # Direct port of pinned tinygrad/tensor.py:151-154. ContextDecorator is
+    # observable because model examples use both `with Tensor.train()` and
+    # `@Tensor.train()` forms.
+    class train(contextlib.ContextDecorator):
+        def __init__(self, mode=True):
+            self.mode = mode
 
-            def __exit__(self_nonlocal, exc_type, exc, tb):
-                cls.training = self_nonlocal.prev
-                return False
+        def __enter__(self):
+            self.prev, Tensor.training = Tensor.training, self.mode
 
-        return _TrainCtx()
+        def __exit__(self, exc_type, exc_value, traceback):
+            Tensor.training = self.prev
 
     def __init__(self, data=None, requires_grad=False, *, dtype=None, device=None, _ctx=None, _uop=None,
                  _data=None, _shape=None, _dtype=None, _device=None, _tensor=None):
@@ -895,13 +895,10 @@ class Tensor:
         return self.transpose()
 
     def numel(self):
-        shape = self.shape
-        if not _shape_all_int(shape):
-            raise AssertionError(f'no data if shape is symbolic, self.shape={shape}')
-        n = 1
-        for s in shape:
-            n *= s
-        return n
+        # Pinned MovementMixin.numel returns the symbolic product and keeps
+        # the all-static assertion at data/readback boundaries
+        # (mixin/movement.py:38-47, tensor.py:278-280,311-313).
+        return _prod(self.shape)
 
     def size(self, dim=None):
         if dim is None:
@@ -911,12 +908,12 @@ class Tensor:
         return self.shape[dim]
 
     def custom_kernel(self, *lst, fxn, grad_fxn=None):
-        """Call a custom SINK kernel written in UOps.
+        """Call a custom ``SINK(..., arg=KernelInfo(...))`` kernel written in UOps.
 
         Mirrors tinygrad's alpha `Tensor.custom_kernel`: inputs are made
         contiguous, placeholder PARAM UOps are passed to `fxn`, the returned
-        SINK body is wrapped in CALL, and every source tensor is returned as
-        `AFTER(source, call)`.
+        compiler-ready SINK body is wrapped in CALL, and every source tensor
+        is returned as `AFTER(source, call)`.
         """
         srcs = (self,) + tuple(lst)
         for t in srcs:
@@ -1258,6 +1255,13 @@ class Tensor:
         ret.requires_grad = False
         return ret
 
+    def contiguous_backward(self):
+        """Insert a contiguous operation in the backward pass."""
+        # Pinned mixin/elementwise.py:51-55 is one CONTIGUOUS_BACKWARD UOp;
+        # the C Tensor bridge owns both retained and executable roots.
+        core = _ffi._lib.poly_tensor_contiguous_backward(self._ctx, self._tensor)
+        return self._make_result_from_core(core, self.shape, [self])
+
     def clone(self, device=None):
         from .device import Device
 
@@ -1355,9 +1359,11 @@ class Tensor:
         if current == target:
             return self
         old_size, new_size = current.itemsize, target.itemsize
-        if new_size != old_size:
-            if not self.shape or (self.shape[-1] * old_size) % new_size != 0:
-                raise RuntimeError('unsupported size in bitcast')
+        if not self.shape or (self.shape[-1] * old_size) % new_size != 0:
+            raise RuntimeError('unsupported size in bitcast')
+        # Pinned tensor.py:890-891 keeps unequal-width DISK views as one
+        # BITCAST; file-backed data can be reinterpreted without bytewise ALU.
+        if new_size != old_size and not str(self.device).upper().startswith('DISK:'):
             old_uint = to_dtype(f'uint{8 * old_size}')
             new_uint = to_dtype(f'uint{8 * new_size}')
             tmp = self.bitcast(old_uint)
@@ -1375,7 +1381,13 @@ class Tensor:
         )
         if not core:
             raise RuntimeError(f'poly_tensor_bitcast_by_id failed for dtype {target}')
-        return self._make_result_from_core(core, self.shape, [self])
+        # Unequal-width DISK BITCAST changes the final dimension. Derive the
+        # wrapper shape from the returned UOp, matching Tensor.shape's pinned
+        # UOp ownership instead of copying the source wrapper shape.
+        result_raw = self._core_uop_raw(core)
+        return self._make_result_from_core(
+            core, _shape_from_uop(self._ctx, result_raw), [self]
+        )
 
     def half(self):
         """Cast to float16."""
@@ -1651,15 +1663,30 @@ class Tensor:
         return self.div(other, reverse=True)
 
     def div(self, other, reverse=False, rounding_mode=None):
-        if rounding_mode is not None:
-            raise NotImplementedError(f"rounding_mode={rounding_mode!r} is not supported")
-        other = self._ensure_tensor(other)
-        dividend, divisor = (other, self) if reverse else (self, other)
-        out_shape = dividend._broadcast_shape(divisor.shape)
+        # Pinned ElementwiseMixin.div selects integer CDIV/FLOORDIV after
+        # broadcasting and promotion, otherwise rounds true division
+        # (mixin/elementwise.py:219-247).
+        dividend, divisor, out_shape = self._broadcasted(other, reverse)
+        if dtypes.is_int(to_dtype(dividend.dtype)):
+            op_name = {'trunc': 'CDIV', 'floor': 'FLOORDIV'}.get(rounding_mode)
+            if op_name is not None:
+                core = _ffi._lib.poly_tensor_alu2(
+                    self._ctx, _ffi.OPS[op_name], dividend._tensor, divisor._tensor
+                )
+                return self._make_result_from_core(
+                    core, out_shape, [dividend, divisor]
+                )
         core = _ffi._lib.poly_tensor_div(
             self._ctx, dividend._tensor, divisor._tensor
         )
-        return self._make_result_from_core(core, out_shape, [dividend, divisor])
+        result = self._make_result_from_core(core, out_shape, [dividend, divisor])
+        if rounding_mode is None:
+            return result
+        if rounding_mode == 'trunc':
+            return result.trunc()
+        if rounding_mode == 'floor':
+            return result.floor()
+        raise RuntimeError(f"rounding_mode={rounding_mode!r} is not supported")
 
     def __neg__(self):
         if dtypes.is_bool(to_dtype(self.dtype)):
@@ -1732,7 +1759,10 @@ class Tensor:
         elif isinstance(y, Tensor):
             y, x, branch_shape = y._broadcasted(x)
         else:
-            x, y, branch_shape = self._ensure_tensor(x)._broadcasted(y)
+            # Pinned tensor.py:769-770 uses self.ufix(x)._broadcasted(y).
+            # ufix shapes the scalar like the condition before branch
+            # promotion (uop/ops.py:496-508), so movement precedes CAST.
+            x, y, branch_shape = self._ensure_tensor(x)._broadcast_to_tensor(self.shape)._broadcasted(y)
         out_shape = _broadcast_shapes(self.shape, branch_shape)
         cond = self.cast('bool')._broadcast_to_tensor(out_shape)
         x = x._broadcast_to_tensor(out_shape)
@@ -1972,6 +2002,39 @@ class Tensor:
         core = _ffi._lib.poly_tensor_log_softmax(self._ctx, self._tensor, int(axis))
         return self._make_result_from_core(core, self.shape, [self])
 
+    def dropout(self, p=0.5):
+        # Direct port of pinned tensor.py:809-829.
+        if not 0 <= p <= 1:
+            raise ValueError(f'p={p} is out of range [0, 1]')
+        if not Tensor.training or p == 0:
+            return self
+        if p == 1:
+            return self.const_like(0)
+        return (Tensor.rand_like(self, dtype=dtypes.default_float, contiguous=False) >= p).contiguous().where(self, 0) / (1.0 - p)
+
+    def scaled_dot_product_attention(
+        self, key, value, attn_mask=None, dropout_p=0.0,
+        is_causal=False, enable_gqa=False,
+    ):
+        # Direct port of pinned tensor.py:831-858.
+        if enable_gqa:
+            key = key.repeat_interleave(int(self.shape[-3] // key.shape[-3]), dim=-3)
+            value = value.repeat_interleave(int(self.shape[-3] // value.shape[-3]), dim=-3)
+
+        qk = self.matmul(
+            key.transpose(-2, -1),
+            dtype=least_upper_dtype(to_dtype(self.dtype), to_dtype(key.dtype), dtypes.float32),
+        ) / math.sqrt(self.shape[-1])
+        if is_causal:
+            if attn_mask is not None:
+                raise RuntimeError('cannot set attn_mask when is_causal=True')
+            attn_mask = qk.const_like(1).cast(dtypes.bool).tril()
+        if attn_mask is not None:
+            if dtypes.is_bool(to_dtype(attn_mask.dtype)):
+                attn_mask = attn_mask.where(0, -float('inf'))
+            qk = qk + attn_mask
+        return qk.cast(self.dtype).softmax(-1).dropout(dropout_p) @ value
+
     # --- Movement ops ---
 
     def reshape(self, shape, *args):
@@ -1989,17 +2052,35 @@ class Tensor:
             shape = tuple(
                 -self.numel() // _prod(shape) if s == -1 else s for s in shape
             )
-        if self.numel() != _prod(shape):
+        symbolic = _shape_has_symbolic(self.shape) or _shape_has_symbolic(shape)
+        if not symbolic and self.numel() != _prod(shape):
             raise ValueError(f"size mismatch, can't reshape ({self.shape}) -> ({shape})")
         if shape == self.shape:
             return self
+        if symbolic:
+            dims = _shape_uop_array(self._ctx, shape)
+            core = _ffi._lib.poly_tensor_reshape_uop(
+                self._ctx, self._tensor, dims, len(shape)
+            )
+            if not core:
+                raise ValueError(f"size mismatch, can't reshape ({self.shape}) -> ({shape})")
+            current = self._core_uop_raw(core)
+            return self._make_result_from_core(
+                core, _shape_from_uop(self._ctx, current), [self]
+            )
         arr, n = _int64_array(shape)
         core = _ffi._lib.poly_tensor_reshape(self._ctx, self._tensor, arr, n)
         return self._make_result_from_core(core, shape, [self])
 
-    def permute(self, *order):
-        if len(order) == 1 and isinstance(order[0], (tuple, list)):
-            order = tuple(order[0])
+    def permute(self, order, *args):
+        # Direct port of pinned mixin/movement.py:195-211.
+        order = tuple(self._resolve_dim(int(axis)) for axis in (
+            tuple(order) if isinstance(order, (tuple, list)) and not args else (order, *args)
+        ))
+        if sorted(order) != list(range(self.ndim)):
+            raise RuntimeError(f'order is not a valid permutation, getting {order}')
+        if order == tuple(range(self.ndim)):
+            return self
         arr, n = _int64_array(order)
         new_shape = tuple(self.shape[i] for i in order)
         core = _ffi._lib.poly_tensor_permute(self._ctx, self._tensor, arr, n)
@@ -2164,19 +2245,26 @@ class Tensor:
     def repeat(self, *repeats):
         if len(repeats) == 1 and isinstance(repeats[0], (tuple, list)):
             repeats = tuple(repeats[0])
-        # Pad shape if needed
-        nd = max(len(self.shape), len(repeats))
-        shape = (1,) * (nd - len(self.shape)) + self.shape
-        repeats = (1,) * (nd - len(repeats)) + repeats
-        # Interleave: reshape to (1, s0, 1, s1, ...), expand to (r0, s0, r1, s1, ...), flatten pairs
-        new_shape = []
-        exp_shape = []
-        for s, r in zip(shape, repeats):
-            new_shape.extend([1, s])
-            exp_shape.extend([r, s])
-        result = self.reshape(tuple(new_shape)).expand(tuple(exp_shape))
-        final_shape = tuple(s * r for s, r in zip(shape, repeats))
-        return result.reshape(final_shape)
+        # Literal pinned MovementMixin.repeat: repeat-one axes remain single
+        # lanes instead of introducing no-op RESHAPE/EXPAND dimensions
+        # (mixin/movement.py:536-554).
+        base_shape = (1,) * (max(len(self.shape), len(repeats)) - len(self.shape)) + self.shape
+        unsqueezed_shape = tuple(
+            v for r, s in zip(repeats, base_shape) for v in ((s,) if r == 1 else (1, s))
+        )
+        expanded_shape = tuple(
+            v for r, s in zip(repeats, base_shape) for v in ((s,) if r == 1 else (r, s))
+        )
+        final_shape = tuple(r * s for r, s in zip(repeats, base_shape))
+        return self.reshape(unsqueezed_shape).expand(expanded_shape).reshape(final_shape)
+
+    def repeat_interleave(self, repeats, dim=None):
+        # Direct port of pinned mixin/movement.py:520-534.
+        x, dim = (self.flatten(), 0) if dim is None else (self, self._resolve_dim(dim))
+        shp = x.shape
+        x = x.reshape(*shp[:dim + 1], 1, *shp[dim + 1:])
+        x = x.expand(*shp[:dim + 1], repeats, *shp[dim + 1:])
+        return x.reshape(*shp[:dim], shp[dim] * repeats, *shp[dim + 1:])
 
     def roll(self, shifts, dims=None):
         if dims is None:
@@ -2198,15 +2286,19 @@ class Tensor:
 
     # --- Reduction ops (C core) ---
 
-    def sum(self, axis=None, keepdim=False):
+    def sum(self, axis=None, keepdim=False, dtype=None):
         if axis is None:
             axis = tuple(range(self.ndim))
         elif isinstance(axis, int):
             axis = (axis,)
         axis = tuple(self._resolve_dim(int(a)) for a in axis)
         arr, n = _int64_array(axis)
-        core = _ffi._lib.poly_tensor_sum(
-            self._ctx, self._tensor, arr, n, bool(keepdim)
+        core = (
+            _ffi._lib.poly_tensor_sum(self._ctx, self._tensor, arr, n, bool(keepdim))
+            if dtype is None else
+            _ffi._lib.poly_tensor_sum_dtype_by_id(
+                self._ctx, self._tensor, arr, n, bool(keepdim), _dtype_id(_dtype_name(dtype))
+            )
         )
         new_shape = (
             tuple(1 if i in axis else s for i, s in enumerate(self.shape))
@@ -2443,10 +2535,16 @@ class Tensor:
 
     # --- Matmul (C core dot) ---
 
-    def dot(self, w):
+    def dot(self, w, dtype=None):
         if not isinstance(w, Tensor):
             raise TypeError(f'Expected Tensor, got {type(w)}')
-        core = _ffi._lib.poly_tensor_dot(self._ctx, self._tensor, w._tensor)
+        core = (
+            _ffi._lib.poly_tensor_dot(self._ctx, self._tensor, w._tensor)
+            if dtype is None else
+            _ffi._lib.poly_tensor_dot_dtype_by_id(
+                self._ctx, self._tensor, w._tensor, _dtype_id(_dtype_name(dtype))
+            )
+        )
         if not core:
             raise ValueError(f'cannot dot {self.shape} and {w.shape}')
         current = self._core_uop_raw(core)
@@ -2454,8 +2552,8 @@ class Tensor:
             core, _shape_from_uop(self._ctx, current), [self, w]
         )
 
-    def matmul(self, other):
-        return self.dot(other)
+    def matmul(self, other, reverse=False, dtype=None):
+        return other.dot(self, dtype=dtype) if reverse else self.dot(other, dtype=dtype)
 
     def qr(self, mode='complete'):
         mode_id = {'complete': 0, 'reduced': 1, 'r': 2}.get(mode)
@@ -2552,18 +2650,22 @@ class Tensor:
         )
 
     def __matmul__(self, other):
-        return self.dot(other)
+        return self.matmul(other)
 
     def __rmatmul__(self, other):
         other = self._ensure_tensor(other)
-        return other.dot(self)
+        return self.matmul(other, reverse=True)
 
-    def linear(self, weight, bias=None):
-        """linear(x, w, bias) = x @ w.T + bias"""
-        result = self.dot(weight.transpose(-1, -2))
-        if bias is not None:
-            result = result + bias
-        return result
+    def linear(self, weight, bias=None, dtype=None):
+        # Direct port of pinned mixin/__init__.py:1335-1350. Stateful
+        # nn.Linear owns its stored-weight transpose at the module boundary.
+        if dtype is not None:
+            dt = to_dtype(dtype)
+            return self.cast(dt).linear(
+                weight.cast(dt), bias.cast(dt) if bias is not None else None
+            )
+        result = self.mul(weight) if len(weight.shape) == 1 else self.dot(weight)
+        return result.add(bias) if bias is not None else result
 
     def sequential(self, ll):
         return functools.reduce(lambda x, f: f(x), ll, self)
@@ -2605,10 +2707,14 @@ class Tensor:
         s_arr, _ = _int64_array(s)
         d_arr, _ = _int64_array(d)
         p_arr, npad = _int64_array(pads)
-        core = _ffi._lib.poly_tensor_conv2d(
-            self._ctx, self._tensor, weight._tensor,
-            bias._tensor if bias is not None else None,
+        args = (
+            self._ctx, self._tensor, weight._tensor, bias._tensor if bias is not None else None,
             int(groups), s_arr, d_arr, p_arr, npad,
+        )
+        core = (
+            _ffi._lib.poly_tensor_conv2d(*args)
+            if dtype is None else
+            _ffi._lib.poly_tensor_conv2d_dtype_by_id(*args, _dtype_id(_dtype_name(dtype)))
         )
         if not core:
             raise RuntimeError('poly_conv2d failed')
@@ -2713,16 +2819,117 @@ class Tensor:
                 core, _shape_from_uop(tensor._ctx, current), [tensor]
             )
 
-        # Expand Ellipsis
+        # Pinned mixin/movement.py:63-69 and mixin/__init__.py:121-146 parse
+        # every basic view index before applying one aggregate movement, then
+        # inject/collapse dimensions with one final reshape.
         n_ellipsis = sum(1 for i in idx if i is Ellipsis)
         if n_ellipsis > 1:
             raise IndexError('Only one Ellipsis allowed')
-        if n_ellipsis == 1:
-            eidx = idx.index(Ellipsis)
-            n_none = sum(1 for i in idx if i is None)
-            n_real = len(idx) - 1 - n_none
-            n_fill = len(self.shape) - n_real
-            idx = idx[:eidx] + (slice(None),) * n_fill + idx[eidx + 1:]
+        n_none = sum(1 for i in idx if i is None)
+        n_real = len(idx) - n_ellipsis - n_none
+        if n_real > len(self.shape):
+            raise IndexError(f'too many indices ({n_real}) for {len(self.shape)}D')
+        fill_idx = idx.index(Ellipsis) if n_ellipsis else len(idx)
+        normalized = list(idx)
+        normalized[fill_idx:fill_idx + n_ellipsis] = [slice(None)] * (len(self.shape) - n_real)
+        idx = tuple(normalized)
+
+        if all(i is None or isinstance(i, (int, slice)) for i in idx):
+            parsed = []
+            source_dim = 0
+            for i in idx:
+                if i is None:
+                    parsed.append({'index': None, 'boundary': (0, 1), 'stride': 1, 'collapse': False})
+                    continue
+                size = self.shape[source_dim]
+                source_dim += 1
+                if isinstance(i, int):
+                    if isinstance(size, int) and not -size <= i < size:
+                        raise IndexError(f'index={i} is out of bounds with size={size}')
+                    boundary_start = i if i >= 0 else size + i
+                    parsed.append({
+                        'index': i, 'boundary': (boundary_start, boundary_start + 1),
+                        'stride': 1, 'collapse': True,
+                    })
+                    continue
+
+                start_obj = 0 if i.start is None else i.start
+                stop_obj = size if i.stop is None else i.stop
+                step = 1 if i.step is None else i.step
+                symbolic = any(_is_symbolic_bound(v) for v in (start_obj, stop_obj, step))
+                if symbolic:
+                    if step == 0:
+                        raise ValueError('slice step cannot be zero')
+                    if step != 1:
+                        raise TypeError(f'slice {i!r} is not supported for symbolic shape')
+                    start_val = _bound_to_int(self._ctx, start_obj)
+                    stop_val = _bound_to_int(self._ctx, stop_obj)
+                    try:
+                        size_val = _bound_to_int(self._ctx, size)
+                    except TypeError:
+                        size_val = None
+                    if start_val < 0 or stop_val < start_val or (size_val is not None and stop_val > size_val):
+                        raise IndexError(f'symbolic slice {i!r} is out of bounds for size {size}')
+                    boundary = (start_obj, stop_obj)
+                else:
+                    start, stop, step = i.indices(
+                        _slice_indices_size(self._ctx, self.uop, source_dim - 1, size)
+                    )
+                    boundary = (start, stop)
+                    if step * (boundary[1] - boundary[0]) < 0:
+                        boundary = (0, 0)
+                    elif step < 0:
+                        boundary = (boundary[1] + 1, boundary[0] + 1)
+                parsed.append({'index': i, 'boundary': boundary, 'stride': step, 'collapse': False})
+
+            movements = [p for p in parsed if p['index'] is not None]
+            boundaries = [p['boundary'] for p in movements]
+            if all(isinstance(v, int) for boundary in boundaries for v in boundary):
+                result = self.shrink(tuple(boundaries))
+            else:
+                starts, sizes = [], []
+                for start_obj, stop_obj in boundaries:
+                    start_u = _bound_to_uop(self._ctx, start_obj)
+                    stop_u = _bound_to_uop(self._ctx, stop_obj)
+                    starts.append(start_u.raw)
+                    sizes.append(_symbolic_slice_size_uop(
+                        self._ctx, start_obj, stop_obj, start_u, stop_u
+                    ).raw)
+                result = _apply_uop_shrink(self, starts, sizes)
+
+            negative_axes = tuple(d for d, p in enumerate(movements) if p['stride'] < 0)
+            if negative_axes:
+                result = result.flip(negative_axes)
+            strides = [abs(p['stride']) for p in movements]
+            if any(stride != 1 for stride in strides):
+                if not _shape_all_int(result.shape):
+                    raise RuntimeError('symbolic shape not supported')
+                shape = list(result.shape)
+                padding = []
+                for size, stride in zip(shape, strides):
+                    rounded = ((size + stride - 1) // stride) * stride
+                    padding.append((0, rounded - size))
+                if any(after for _, after in padding):
+                    result = result.pad(tuple(padding))
+                    shape = [size + after for size, (_, after) in zip(shape, padding)]
+                split_shape = [dim for size, stride in zip(shape, strides) for dim in (size // stride, stride)]
+                result = result.reshape(tuple(split_shape))
+                result = result.shrink(tuple(
+                    (0, 1) if d % 2 else (0, size)
+                    for d, size in enumerate(result.shape)
+                ))
+                result = result.reshape(tuple(result.shape[::2]))
+
+            final_shape = []
+            movement_dim = 0
+            for p in parsed:
+                if p['index'] is None:
+                    final_shape.append(1)
+                else:
+                    if not p['collapse']:
+                        final_shape.append(result.shape[movement_dim])
+                    movement_dim += 1
+            return result.reshape(tuple(final_shape))
 
         result = self
         dim = 0
@@ -2997,6 +3204,16 @@ class Tensor:
             out.requires_grad = True
         return out
 
+    def rand_like(self, **kwargs):
+        # Direct single-device port of pinned mixin/rand.py:70-86. Polygrad's
+        # public Tensor wrapper currently exposes one device string per Tensor.
+        return type(self).rand(
+            *self.shape,
+            device=kwargs.pop('device', self.device),
+            dtype=kwargs.pop('dtype', self.dtype),
+            **kwargs,
+        )
+
     @staticmethod
     def randn(*shape, **kwargs):
         _ctx, dev, requires_grad = _creation_meta(kwargs)
@@ -3021,6 +3238,19 @@ class Tensor:
             raise ValueError(f'Tensor.uniform requires low < high, got low={low}, high={high}')
         dtype = kwargs.get('dtype', dtypes.default_float)
         return ((high - low) * Tensor.rand(*shape, **kwargs)).cast(dtype) + low
+
+    @staticmethod
+    def scaled_uniform(*shape, **kwargs):
+        """Create pinned tinygrad's product-scaled uniform initializer."""
+        shape = _shape_tuple(*shape)
+        return Tensor.uniform(*shape, low=-1.0, high=1.0, **kwargs).mul(_prod(shape) ** -0.5)
+
+    @staticmethod
+    def glorot_uniform(*shape, **kwargs):
+        """Create pinned tinygrad's Glorot-uniform initializer."""
+        shape = _shape_tuple(*shape)
+        bound = math.sqrt(6.0 / (shape[0] + _prod(shape[1:])))
+        return Tensor.uniform(*shape, low=-bound, high=bound, **kwargs)
 
     @staticmethod
     def kaiming_uniform(*shape, **kwargs):

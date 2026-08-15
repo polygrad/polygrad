@@ -7,6 +7,7 @@
 #include "../src/bigint.h"
 #include "../src/ctx.h"
 #include "../src/frontend.h"
+#include "../src/frontend_internal.h"
 #include "../src/device.h"
 #include "../src/engine/schedule.h"
 #include <string.h>
@@ -161,7 +162,7 @@ TEST(ir, round_trip_exact_bigint_arg_current_format) {
   uint8_t *bytes = poly_ir_export(&spec, &out_len);
   ASSERT_NOT_NULL(bytes);
   ASSERT_TRUE(out_len > 32);
-  ASSERT_INT_EQ(bytes[4], 7);
+  ASSERT_INT_EQ(bytes[4], 9);
   ASSERT_INT_EQ(bytes[5], 0);
 
   PolyIrSpec imported;
@@ -246,6 +247,61 @@ TEST(ir, round_trip_bufferize_opts_arg) {
   PASS();
 }
 
+TEST(ir, round_trip_bufferize_opts_tuple_device) {
+  /* Pinned BufferizeOpts.device preserves ordered device tuples
+   * (tinygrad/schedule/indexing.py:38-43). PGIR must not collapse this to
+   * unknown/AUTO metadata. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  const char *devices[] = {"CPU", "CPU:1"};
+  PolyUOp *input = poly_buffer_f32(ctx, 8);
+  PolyUOp *bound = poly_const_int(ctx, 8);
+  PolyUOp *range =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_range(0, POLY_AXIS_LOOP));
+  PolyUOp *stage_src[] = {input, range};
+  PolyUOp *stage = poly_uop(
+      ctx, POLY_OP_STAGE, POLY_FLOAT32, stage_src, 2,
+      poly_arg_bufferize_opts_tuple(devices, 2, POLY_ADDR_GLOBAL, false)
+  );
+  PolyUOp *output = poly_buffer_f32(ctx, 8);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, output, stage));
+  PolyIrBufEntry bufs[] = {
+      {.name = "input", .role = POLY_IR_ROLE_INPUT, .buffer = input, .shape = {8}, .ndim = 1},
+      {.name = "output", .role = POLY_IR_ROLE_OUTPUT, .buffer = output, .shape = {8}, .ndim = 1},
+  };
+  PolyIrEntrypoint eps[] = {{.name = "forward", .sink = sink}};
+  PolyIrSpec spec = {ctx, bufs, 2, eps, 1};
+
+  int out_len = 0;
+  uint8_t *bytes = poly_ir_export(&spec, &out_len);
+  ASSERT_NOT_NULL(bytes);
+  ASSERT_INT_EQ(bytes[4], 9);
+  PolyIrSpec imported;
+  ASSERT_INT_EQ(poly_ir_import(bytes, out_len, &imported), 0);
+
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(imported.ctx, imported.entrypoints[0].sink, &n_topo);
+  ASSERT_NOT_NULL(topo);
+  PolyUOp *imported_stage = NULL;
+  for (int i = 0; i < n_topo; i++)
+    if (topo[i]->op == POLY_OP_STAGE) imported_stage = topo[i];
+  ASSERT_NOT_NULL(imported_stage);
+  ASSERT_TRUE(poly_bufferize_arg_device_is_tuple(imported_stage->arg));
+  ASSERT_INT_EQ(poly_bufferize_arg_n_devices(imported_stage->arg), 2);
+  ASSERT_STR_EQ(poly_bufferize_arg_devices(imported_stage->arg)[0], "CPU");
+  ASSERT_STR_EQ(poly_bufferize_arg_devices(imported_stage->arg)[1], "CPU:1");
+  PolyUOp *imported_device = poly_uop_device_uop_cached(imported.ctx, imported_stage, NULL);
+  ASSERT_NOT_NULL(imported_device);
+  ASSERT_INT_EQ(imported_device->arg.kind, POLY_ARG_STRING_TUPLE);
+  ASSERT_INT_EQ(imported_device->arg.string_tuple.n, 2);
+
+  poly_ir_spec_free(&imported);
+  poly_ctx_destroy(imported.ctx);
+  poly_ctx_destroy(ctx);
+  free(bytes);
+  PASS();
+}
+
 TEST(ir, round_trip_tuple_device_arg) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
@@ -266,7 +322,7 @@ TEST(ir, round_trip_tuple_device_arg) {
   int out_len = 0;
   uint8_t *bytes = poly_ir_export(&spec, &out_len);
   ASSERT_NOT_NULL(bytes);
-  ASSERT_INT_EQ(bytes[4], 7);
+  ASSERT_INT_EQ(bytes[4], 9);
 
   PolyIrSpec imported;
   ASSERT_INT_EQ(poly_ir_import(bytes, out_len, &imported), 0);
@@ -338,7 +394,7 @@ TEST(ir, round_trip_paramarg_exact_device_identity) {
 
 TEST(ir, round_trip_paramarg_ordered_device_tuple) {
   /* Pinned ParamArg.device preserves str | tuple[str, ...] | None
-   * (tinygrad/uop/ops.py:1071-1076). PGIR v7 must retain tuple order and keep
+   * (tinygrad/uop/ops.py:1071-1076). PGIR v9 must retain tuple order and keep
    * it CSE-distinct from a scalar identity. */
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
@@ -410,6 +466,52 @@ TEST(ir, round_trip_paramarg_ordered_device_tuple) {
   ASSERT_INT_EQ(imported_shape.ndim, 1);
   ASSERT_INT_EQ(imported_shape.dims[0], 8);
   free(imported_shape.dims);
+
+  poly_ir_spec_free(&imported);
+  poly_ctx_destroy(imported.ctx);
+  poly_ctx_destroy(ctx);
+  free(bytes);
+  PASS();
+}
+
+TEST(ir, round_trip_default_call_info) {
+  /* PGIR v9 carries the serializable default CallInfo subset used by pinned
+   * value-producing FUNCTIONs (tinygrad/uop/ops.py:1083-1092,1158-1170). */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *value = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(3.0));
+  PolyUOp *body = poly_uop1(ctx, POLY_OP_TUPLE, POLY_VOID, value, poly_arg_none());
+  PolyCallInfo info = {.name = "round_trip"};
+  PolyUOp *function = poly_uop1(
+      ctx, POLY_OP_FUNCTION, POLY_VOID, body, poly_arg_call_info(&info));
+  PolyUOp *selected = poly_uop1(
+      ctx, POLY_OP_GETTUPLE, POLY_FLOAT32, function, poly_arg_int(0));
+  PolyUOp *sink = poly_sink1(ctx, selected);
+  ASSERT_NOT_NULL(sink);
+
+  PolyIrEntrypoint eps[] = {{.name = "forward", .sink = sink}};
+  PolyIrSpec spec = {ctx, NULL, 0, eps, 1};
+  int out_len = 0;
+  uint8_t *bytes = poly_ir_export(&spec, &out_len);
+  ASSERT_NOT_NULL(bytes);
+  PolyIrSpec imported;
+  ASSERT_INT_EQ(poly_ir_import(bytes, out_len, &imported), 0);
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(
+      imported.ctx, imported.entrypoints[0].sink, &n_topo);
+  ASSERT_NOT_NULL(topo);
+  PolyUOp *imported_function = NULL;
+  for (int i = 0; i < n_topo; i++)
+    if (topo[i]->op == POLY_OP_FUNCTION) imported_function = topo[i];
+  ASSERT_NOT_NULL(imported_function);
+  ASSERT_INT_EQ(imported_function->arg.kind, POLY_ARG_CALL_INFO);
+  ASSERT_NOT_NULL(imported_function->arg.call_info);
+  ASSERT_STR_EQ(imported_function->arg.call_info->name, "round_trip");
+  ASSERT_FALSE(imported_function->arg.call_info->precompile);
+  ASSERT_FALSE(imported_function->arg.call_info->precompile_backward);
+  ASSERT_FALSE(imported_function->arg.call_info->has_grad_fxn);
+  ASSERT_FALSE(imported_function->arg.call_info->has_metadata);
+  ASSERT_FALSE(imported_function->arg.call_info->has_aux);
 
   poly_ir_spec_free(&imported);
   poly_ctx_destroy(imported.ctx);

@@ -81,11 +81,22 @@ bool poly_arg_eq(PolyArg a, PolyArg b) {
     if (!a.define_var.name || !b.define_var.name) return false;
     return strcmp(a.define_var.name, b.define_var.name) == 0;
   case POLY_ARG_BUFFERIZE_OPTS:
-    return (a.bufferize_opts.device == b.bufferize_opts.device ||
-            (a.bufferize_opts.device && b.bufferize_opts.device &&
-             strcmp(a.bufferize_opts.device, b.bufferize_opts.device) == 0)) &&
-           a.bufferize_opts.addrspace == b.bufferize_opts.addrspace &&
-           a.bufferize_opts.removable == b.bufferize_opts.removable;
+    if (a.bufferize_opts.device_is_tuple != b.bufferize_opts.device_is_tuple ||
+        a.bufferize_opts.addrspace != b.bufferize_opts.addrspace ||
+        a.bufferize_opts.removable != b.bufferize_opts.removable)
+      return false;
+    if (a.bufferize_opts.device_is_tuple) {
+      if (a.bufferize_opts.n_devices != b.bufferize_opts.n_devices) return false;
+      for (int i = 0; i < a.bufferize_opts.n_devices; i++) {
+        const char *av = a.bufferize_opts.devices ? a.bufferize_opts.devices[i] : NULL;
+        const char *bv = b.bufferize_opts.devices ? b.bufferize_opts.devices[i] : NULL;
+        if (av != bv && (!av || !bv || strcmp(av, bv) != 0)) return false;
+      }
+      return true;
+    }
+    return a.bufferize_opts.device == b.bufferize_opts.device ||
+           (a.bufferize_opts.device && b.bufferize_opts.device &&
+            strcmp(a.bufferize_opts.device, b.bufferize_opts.device) == 0);
   case POLY_ARG_TENSOR_CORE:
     if (a.tensor_core.threads != b.tensor_core.threads ||
         memcmp(a.tensor_core.dims, b.tensor_core.dims, sizeof(a.tensor_core.dims)) != 0)
@@ -120,6 +131,18 @@ bool poly_arg_eq(PolyArg a, PolyArg b) {
     }
     if (a.param->name == b.param->name) return true;
     return a.param->name && b.param->name && strcmp(a.param->name, b.param->name) == 0;
+  case POLY_ARG_CALL_INFO:
+    if (a.call_info == b.call_info) return true;
+    if (!a.call_info || !b.call_info) return false;
+    if (a.call_info->precompile != b.call_info->precompile ||
+        a.call_info->precompile_backward != b.call_info->precompile_backward ||
+        a.call_info->has_grad_fxn != b.call_info->has_grad_fxn ||
+        a.call_info->has_metadata != b.call_info->has_metadata ||
+        a.call_info->has_aux != b.call_info->has_aux)
+      return false;
+    return a.call_info->name == b.call_info->name ||
+           (a.call_info->name && b.call_info->name &&
+            strcmp(a.call_info->name, b.call_info->name) == 0);
   }
   return false;
 }
@@ -203,9 +226,20 @@ uint32_t poly_arg_hash(PolyArg a) {
     h = hash_mix(h, (uint32_t)(a.define_var.max_val ^ (a.define_var.max_val >> 32)));
     break;
   case POLY_ARG_BUFFERIZE_OPTS:
-    if (a.bufferize_opts.device)
+    h = hash_mix(h, a.bufferize_opts.device_is_tuple ? 2u : 1u);
+    if (a.bufferize_opts.device_is_tuple) {
+      h = hash_mix(h, (uint32_t)a.bufferize_opts.n_devices);
+      for (int i = 0; i < a.bufferize_opts.n_devices; i++) {
+        const char *value = a.bufferize_opts.devices ? a.bufferize_opts.devices[i] : NULL;
+        if (value)
+          for (const char *p = value; *p; p++)
+            h = hash_mix(h, (uint32_t)*p);
+        h = hash_mix(h, UINT32_C(0xff));
+      }
+    } else if (a.bufferize_opts.device) {
       for (const char *p = a.bufferize_opts.device; *p; p++)
         h = hash_mix(h, (uint32_t)*p);
+    }
     h = hash_mix(h, (uint32_t)a.bufferize_opts.addrspace);
     h = hash_mix(h, a.bufferize_opts.removable ? 1u : 0u);
     break;
@@ -247,6 +281,17 @@ uint32_t poly_arg_hash(PolyArg a) {
       if (a.param->name) {
         for (const char *p = a.param->name; *p; p++) h = hash_mix(h, (uint32_t)*p);
       }
+    }
+    break;
+  case POLY_ARG_CALL_INFO:
+    if (a.call_info) {
+      if (a.call_info->name)
+        for (const char *p = a.call_info->name; *p; p++) h = hash_mix(h, (uint32_t)*p);
+      h = hash_mix(h, a.call_info->precompile ? 1u : 0u);
+      h = hash_mix(h, a.call_info->precompile_backward ? 1u : 0u);
+      h = hash_mix(h, a.call_info->has_grad_fxn ? 1u : 0u);
+      h = hash_mix(h, a.call_info->has_metadata ? 1u : 0u);
+      h = hash_mix(h, a.call_info->has_aux ? 1u : 0u);
     }
     break;
   }
@@ -456,6 +501,18 @@ static void poly_arg_copy_to_arena(PolyArena *arena, PolyArg *dst) {
     char *s = poly_arena_alloc(arena, len + 1, 1);
     memcpy(s, dst->define_var.name, len + 1);
     dst->define_var.name = s;
+  } else if (dst->kind == POLY_ARG_BUFFERIZE_OPTS &&
+             dst->bufferize_opts.device_is_tuple && dst->bufferize_opts.n_devices > 0) {
+    const char **vals = poly_arena_alloc(
+        arena, (size_t)dst->bufferize_opts.n_devices * sizeof(*vals), _Alignof(const char *)
+    );
+    for (int i = 0; i < dst->bufferize_opts.n_devices; i++) {
+      size_t len = strlen(dst->bufferize_opts.devices[i]);
+      char *value = poly_arena_alloc(arena, len + 1, 1);
+      memcpy(value, dst->bufferize_opts.devices[i], len + 1);
+      vals[i] = value;
+    }
+    dst->bufferize_opts.devices = vals;
   } else if (dst->kind == POLY_ARG_BUFFERIZE_OPTS && dst->bufferize_opts.device) {
     size_t len = strlen(dst->bufferize_opts.device);
     char *s = poly_arena_alloc(arena, len + 1, 1);
@@ -498,6 +555,17 @@ static void poly_arg_copy_to_arena(PolyArena *arena, PolyArg *dst) {
       param->devices = devices;
     }
     dst->param = param;
+  } else if (dst->kind == POLY_ARG_CALL_INFO && dst->call_info) {
+    PolyCallInfo *info =
+        poly_arena_alloc(arena, sizeof(*info), _Alignof(PolyCallInfo));
+    *info = *dst->call_info;
+    if (info->name) {
+      size_t len = strlen(info->name);
+      char *name = poly_arena_alloc(arena, len + 1, 1);
+      memcpy(name, info->name, len + 1);
+      info->name = name;
+    }
+    dst->call_info = info;
   }
 }
 
@@ -1434,9 +1502,28 @@ static void uop_print_one(PolyUOp *u, char *buf, int *pos, int cap) {
     if (written > 0) *pos += written;
     break;
   case POLY_ARG_BUFFERIZE_OPTS:
+    written = snprintf(buf + *pos, cap - *pos, ", BufferizeOpts(device=");
+    if (written > 0) *pos += written;
+    if (u->arg.bufferize_opts.device_is_tuple) {
+      written = snprintf(buf + *pos, cap - *pos, "(");
+      if (written > 0) *pos += written;
+      for (int i = 0; i < u->arg.bufferize_opts.n_devices; i++) {
+        written = snprintf(
+            buf + *pos, cap - *pos, "%s\"%s\"", i ? "," : "",
+            u->arg.bufferize_opts.devices[i]
+        );
+        if (written > 0) *pos += written;
+      }
+      written = snprintf(buf + *pos, cap - *pos, ")");
+    } else {
+      written = snprintf(
+          buf + *pos, cap - *pos, "%s",
+          u->arg.bufferize_opts.device ? u->arg.bufferize_opts.device : "None"
+      );
+    }
+    if (written > 0) *pos += written;
     written = snprintf(
-        buf + *pos, cap - *pos, ", BufferizeOpts(device=%s,addrspace=%d,removable=%d)",
-        u->arg.bufferize_opts.device ? u->arg.bufferize_opts.device : "None",
+        buf + *pos, cap - *pos, ",addrspace=%d,removable=%d)",
         (int)u->arg.bufferize_opts.addrspace, (int)u->arg.bufferize_opts.removable
     );
     if (written > 0) *pos += written;
@@ -1450,14 +1537,68 @@ static void uop_print_one(PolyUOp *u, char *buf, int *pos, int cap) {
     if (written > 0) *pos += written;
     break;
   case POLY_ARG_PARAM:
-    written = snprintf(
-        buf + *pos, cap - *pos, ", ParamArg(slot=%ld,device=%s,addrspace=%d%s%s)",
-        u->arg.param ? (long)u->arg.param->slot : -1L,
-        u->arg.param && u->arg.param->device ? u->arg.param->device : "None",
-        u->arg.param ? (int)u->arg.param->addrspace : 0,
-        u->arg.param && u->arg.param->has_axis ? ",axis" : "",
-        u->arg.param && u->arg.param->name ? ",name" : ""
-    );
+    if (!u->arg.param) {
+      written = snprintf(buf + *pos, cap - *pos, ", ParamArg(-1)");
+      if (written > 0) *pos += written;
+      break;
+    }
+    written = snprintf(buf + *pos, cap - *pos, ", ParamArg(%ld", (long)u->arg.param->slot);
+    if (written > 0) *pos += written;
+    if (u->arg.param->has_minmax) {
+      written = snprintf(
+          buf + *pos, cap - *pos, ", vmin_vmax=(%ld, %ld)",
+          (long)u->arg.param->min_val, (long)u->arg.param->max_val);
+      if (written > 0) *pos += written;
+    }
+    if (u->arg.param->name) {
+      written = snprintf(buf + *pos, cap - *pos, ", name='%s'", u->arg.param->name);
+      if (written > 0) *pos += written;
+    }
+    if (u->arg.param->addrspace != POLY_ADDR_GLOBAL) {
+      const char *addrspace = u->arg.param->addrspace == POLY_ADDR_LOCAL
+                                  ? "AddrSpace.LOCAL"
+                              : u->arg.param->addrspace == POLY_ADDR_REG
+                                  ? "AddrSpace.REG"
+                                  : "AddrSpace.UNKNOWN";
+      written = snprintf(buf + *pos, cap - *pos, ", addrspace=%s", addrspace);
+      if (written > 0) *pos += written;
+    }
+    if (u->arg.param->has_axis) {
+      written = snprintf(buf + *pos, cap - *pos, ", axis=%d", u->arg.param->axis);
+      if (written > 0) *pos += written;
+    }
+    if (u->arg.param->device_is_tuple) {
+      written = snprintf(buf + *pos, cap - *pos, ", device=(");
+      if (written > 0) *pos += written;
+      for (int i = 0; i < u->arg.param->n_devices; i++) {
+        written = snprintf(
+            buf + *pos, cap - *pos, "%s'%s'%s", i ? ", " : "",
+            u->arg.param->devices[i],
+            u->arg.param->n_devices == 1 ? "," : "");
+        if (written > 0) *pos += written;
+      }
+      written = snprintf(buf + *pos, cap - *pos, ")");
+      if (written > 0) *pos += written;
+    } else if (u->arg.param->device) {
+      written = snprintf(
+          buf + *pos, cap - *pos, ", device='%s'", u->arg.param->device);
+      if (written > 0) *pos += written;
+    }
+    written = snprintf(buf + *pos, cap - *pos, ")");
+    if (written > 0) *pos += written;
+    break;
+  case POLY_ARG_CALL_INFO:
+    if (!u->arg.call_info) {
+      written = snprintf(buf + *pos, cap - *pos, ", CallInfo(None,(),None,False,False)");
+    } else {
+      const PolyCallInfo *info = u->arg.call_info;
+      written = snprintf(
+          buf + *pos, cap - *pos, ", CallInfo(%s,(),%s%s%s,%s,%s)",
+          info->has_grad_fxn ? "<callback>" : "None", info->name ? "'" : "",
+          info->name ? info->name : "None", info->name ? "'" : "",
+          info->precompile ? "True" : "False",
+          info->precompile_backward ? "True" : "False");
+    }
     if (written > 0) *pos += written;
     break;
   default:
@@ -1553,10 +1694,18 @@ void poly_uop_dump_tree(FILE *fp, PolyUOp *u, int depth, int max_depth) {
     );
     break;
   case POLY_ARG_BUFFERIZE_OPTS:
+    fprintf(fp, " bufferize_opts=(device=");
+    if (u->arg.bufferize_opts.device_is_tuple) {
+      fprintf(fp, "(");
+      for (int i = 0; i < u->arg.bufferize_opts.n_devices; i++)
+        fprintf(fp, "%s\"%s\"", i ? "," : "", u->arg.bufferize_opts.devices[i]);
+      fprintf(fp, ")");
+    } else {
+      fprintf(fp, "%s", u->arg.bufferize_opts.device ? u->arg.bufferize_opts.device : "None");
+    }
     fprintf(
-        fp, " bufferize_opts=(device=%s,addrspace=%d,removable=%d)",
-        u->arg.bufferize_opts.device ? u->arg.bufferize_opts.device : "None",
-        (int)u->arg.bufferize_opts.addrspace, (int)u->arg.bufferize_opts.removable
+        fp, ",addrspace=%d,removable=%d)", (int)u->arg.bufferize_opts.addrspace,
+        (int)u->arg.bufferize_opts.removable
     );
     break;
   case POLY_ARG_TENSOR_CORE:
@@ -1575,6 +1724,16 @@ void poly_uop_dump_tree(FILE *fp, PolyUOp *u, int depth, int max_depth) {
         u->arg.param && u->arg.param->has_axis ? ",axis" : "",
         u->arg.param && u->arg.param->name ? ",name" : ""
     );
+    break;
+  case POLY_ARG_CALL_INFO:
+    fprintf(
+        fp, " call_info=(name=%s,precompile=%d,precompile_backward=%d%s%s%s)",
+        u->arg.call_info && u->arg.call_info->name ? u->arg.call_info->name : "None",
+        u->arg.call_info ? (int)u->arg.call_info->precompile : 0,
+        u->arg.call_info ? (int)u->arg.call_info->precompile_backward : 0,
+        u->arg.call_info && u->arg.call_info->has_grad_fxn ? ",grad_fxn" : "",
+        u->arg.call_info && u->arg.call_info->has_metadata ? ",metadata" : "",
+        u->arg.call_info && u->arg.call_info->has_aux ? ",aux" : "");
     break;
   default:
     break;

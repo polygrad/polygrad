@@ -305,6 +305,20 @@ typedef struct {
   bool device_is_tuple;
 } PolyParamArg;
 
+/* Pinned tinygrad CallInfo metadata for CALL/FUNCTION UOps
+ * (tinygrad/uop/ops.py:1158-1170). The current C value-function boundary
+ * supports the serializable default subset: no Python grad callback, empty
+ * metadata, optional name, no aux, and non-precompiled forward/backward. The
+ * presence bits keep unsupported variants distinguishable and fail-closed. */
+typedef struct {
+  const char *name;
+  bool precompile;
+  bool precompile_backward;
+  bool has_grad_fxn;
+  bool has_metadata;
+  bool has_aux;
+} PolyCallInfo;
+
 /* Exact Python-int-compatible CONST argument. Limbs are little-endian base
  * 2**32 magnitude; sign is -1 or +1 and zero remains POLY_ARG_INT(0).
  * poly_uop copies limbs into the owning context arena. */
@@ -326,7 +340,7 @@ typedef enum {
   POLY_ARG_REDUCE_AXIS, /* (PolyOps, int64_t[], n) */
   POLY_ARG_RANGE, /* (axis_id, axis_type, extra...) */
   POLY_ARG_DEFINE_VAR, /* (name, min_val, max_val) */
-  POLY_ARG_BUFFERIZE_OPTS, /* (exact device string, addrspace, removable) */
+  POLY_ARG_BUFFERIZE_OPTS, /* (exact scalar/tuple device, addrspace, removable) */
   POLY_ARG_TENSOR_CORE, /* tinygrad WMMA metadata: (name, dims, threads) */
   POLY_ARG_PROGRAM_INFO, /* PolyProgramInfo* value metadata for PROGRAM */
   POLY_ARG_BYTES, /* immutable runtime bytes for BINARY UOps */
@@ -334,6 +348,7 @@ typedef enum {
   POLY_ARG_PARAM, /* pinned tinygrad ParamArg* for shaped value PARAMs */
   POLY_ARG_BIGINT, /* exact signed arbitrary-precision integer CONST */
   POLY_ARG_STRING_TUPLE, /* ordered immutable string tuple (for DEVICE.arg) */
+  POLY_ARG_CALL_INFO, /* pinned tinygrad CallInfo* for CALL/FUNCTION */
 } PolyArgKind;
 
 typedef struct {
@@ -374,7 +389,13 @@ typedef struct {
       int64_t max_val;
     } define_var;
     struct {
-      const char *device; /* exact canonical DEVICE identity, NULL when unknown/local */
+      /* Pinned BufferizeOpts.device is str | tuple[str, ...] | int | None
+       * (tinygrad/schedule/indexing.py:38-43). Global physical scheduling uses
+       * the scalar/tuple string arms; local integer ids remain addrspace-local. */
+      const char *device;
+      const char **devices;
+      int32_t n_devices;
+      bool device_is_tuple;
       PolyAddrSpace addrspace;
       bool removable;
     } bufferize_opts;
@@ -385,6 +406,7 @@ typedef struct {
     } tensor_core;
     const PolyProgramInfo *program_info;
     const PolyParamArg *param;
+    const PolyCallInfo *call_info;
     struct {
       const uint8_t *data;
       int n;
@@ -421,6 +443,9 @@ static inline PolyArg poly_arg_str(const char *s) {
 static inline PolyArg poly_arg_string_tuple(const char **vals, int n) {
   return (PolyArg){.kind = POLY_ARG_STRING_TUPLE, .string_tuple = {.vals = vals, .n = n}};
 }
+static inline PolyArg poly_arg_call_info(const PolyCallInfo *info) {
+  return (PolyArg){.kind = POLY_ARG_CALL_INFO, .call_info = info};
+}
 static inline PolyArg poly_arg_range(int64_t axis_id, PolyAxisType axis_type) {
   return (PolyArg
   ){.kind = POLY_ARG_RANGE,
@@ -456,7 +481,31 @@ static inline PolyArg poly_arg_bufferize_opts(
 ) {
   return (PolyArg
   ){.kind = POLY_ARG_BUFFERIZE_OPTS,
-    .bufferize_opts = {.device = device, .addrspace = addrspace, .removable = removable}};
+    .bufferize_opts = {
+        .device = device,
+        .devices = NULL,
+        .n_devices = 0,
+        .device_is_tuple = false,
+        .addrspace = addrspace,
+        .removable = removable,
+    }};
+}
+static inline PolyArg poly_arg_bufferize_opts_tuple(
+    const char **devices,
+    int32_t n_devices,
+    PolyAddrSpace addrspace,
+    bool removable
+) {
+  return (PolyArg
+  ){.kind = POLY_ARG_BUFFERIZE_OPTS,
+    .bufferize_opts = {
+        .device = NULL,
+        .devices = devices,
+        .n_devices = n_devices,
+        .device_is_tuple = true,
+        .addrspace = addrspace,
+        .removable = removable,
+    }};
 }
 static inline PolyArg poly_arg_tensor_core(const char *name, const int dims[3], int threads) {
   return (PolyArg
@@ -514,8 +563,18 @@ static inline PolyAddrSpace poly_bufferize_arg_addrspace(PolyArg a) {
   return POLY_ADDR_GLOBAL;
 }
 static inline const char *poly_bufferize_arg_device(PolyArg a) {
-  if (a.kind == POLY_ARG_BUFFERIZE_OPTS) return a.bufferize_opts.device;
+  if (a.kind == POLY_ARG_BUFFERIZE_OPTS && !a.bufferize_opts.device_is_tuple)
+    return a.bufferize_opts.device;
   return NULL;
+}
+static inline bool poly_bufferize_arg_device_is_tuple(PolyArg a) {
+  return a.kind == POLY_ARG_BUFFERIZE_OPTS && a.bufferize_opts.device_is_tuple;
+}
+static inline const char **poly_bufferize_arg_devices(PolyArg a) {
+  return poly_bufferize_arg_device_is_tuple(a) ? a.bufferize_opts.devices : NULL;
+}
+static inline int32_t poly_bufferize_arg_n_devices(PolyArg a) {
+  return poly_bufferize_arg_device_is_tuple(a) ? a.bufferize_opts.n_devices : 0;
 }
 
 bool poly_arg_eq(PolyArg a, PolyArg b);
@@ -691,6 +750,20 @@ int poly_tensor_custom_kernel(
     int n_inputs,
     PolyTensor **outputs
 );
+/* Build pinned value-producing FUNCTION roots from already-constructed Tensor
+ * results and ordered argument/state Tensors. The Python decorator owns only
+ * object traversal; all UOp composition and implicit-input discovery stays in
+ * the C core (tinygrad/function.py:39-94, uop/ops.py:1077-1092). */
+int poly_tensor_function(
+    PolyCtx *ctx,
+    PolyTensor **results,
+    int n_results,
+    PolyTensor **inputs,
+    int n_inputs,
+    const char *name,
+    bool allow_implicit,
+    PolyTensor **outputs
+);
 PolyTensor *poly_tensor_alu1(PolyCtx *ctx, PolyOps op, PolyTensor *src);
 PolyTensor *poly_tensor_alu2(PolyCtx *ctx, PolyOps op, PolyTensor *a, PolyTensor *b);
 PolyTensor *poly_tensor_alu3(PolyCtx *ctx, PolyOps op, PolyTensor *a, PolyTensor *b, PolyTensor *c);
@@ -702,11 +775,18 @@ PolyTensor *poly_tensor_expm1(PolyCtx *ctx, PolyTensor *src);
 PolyTensor *poly_tensor_gelu(PolyCtx *ctx, PolyTensor *src);
 PolyTensor *poly_tensor_quick_gelu(PolyCtx *ctx, PolyTensor *src);
 PolyTensor *poly_tensor_detach(PolyCtx *ctx, PolyTensor *src);
+PolyTensor *poly_tensor_contiguous_backward(PolyCtx *ctx, PolyTensor *src);
 PolyTensor *poly_tensor_sum(PolyCtx *ctx, PolyTensor *src, int64_t *axes, int n_axes, bool keepdim);
+PolyTensor *poly_tensor_sum_dtype_by_id(
+    PolyCtx *ctx, PolyTensor *src, int64_t *axes, int n_axes, bool keepdim, int dtype_id
+);
 PolyTensor *poly_tensor_max(PolyCtx *ctx, PolyTensor *src, int64_t *axes, int n_axes, bool keepdim);
 PolyTensor *poly_tensor_argmax(PolyCtx *ctx, PolyTensor *src, int axis, bool keepdim);
 PolyTensor *poly_tensor_minimum(PolyCtx *ctx, PolyTensor *a, PolyTensor *b);
 PolyTensor *poly_tensor_dot(PolyCtx *ctx, PolyTensor *src, PolyTensor *weight);
+PolyTensor *poly_tensor_dot_dtype_by_id(
+    PolyCtx *ctx, PolyTensor *src, PolyTensor *weight, int dtype_id
+);
 int poly_tensor_qr_ex(
     PolyCtx *ctx,
     PolyTensor *src,
@@ -756,6 +836,7 @@ PolyTensor *poly_tensor_cast_by_id(PolyCtx *ctx, PolyTensor *src, int dtype_id);
 PolyTensor *poly_tensor_bitcast_by_id(PolyCtx *ctx, PolyTensor *src, int dtype_id);
 PolyTensor *poly_tensor_contiguous(PolyCtx *ctx, PolyTensor *src);
 PolyTensor *poly_tensor_reshape(PolyCtx *ctx, PolyTensor *src, int64_t *dims, int ndim);
+PolyTensor *poly_tensor_reshape_uop(PolyCtx *ctx, PolyTensor *src, PolyUOp **dims, int ndim);
 PolyTensor *poly_tensor_expand(PolyCtx *ctx, PolyTensor *src, int64_t *dims, int ndim);
 PolyTensor *poly_tensor_expand_uop(PolyCtx *ctx, PolyTensor *src, PolyUOp **dims, int ndim);
 PolyTensor *poly_tensor_permute(PolyCtx *ctx, PolyTensor *src, int64_t *perm, int ndim);
@@ -803,6 +884,18 @@ PolyTensor *poly_tensor_conv2d(
     const int64_t *dilation,
     const int64_t *padding,
     int n_padding
+);
+PolyTensor *poly_tensor_conv2d_dtype_by_id(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    PolyTensor *weight,
+    PolyTensor *bias,
+    int groups,
+    const int64_t *stride,
+    const int64_t *dilation,
+    const int64_t *padding,
+    int n_padding,
+    int dtype_id
 );
 PolyTensor *poly_tensor_batchnorm(
     PolyCtx *ctx,

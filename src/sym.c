@@ -11,6 +11,7 @@
 #include <math.h>
 #include <stdint.h>
 #include <limits.h>
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include "utils.h"
@@ -386,6 +387,16 @@ static bool poly_uop_minmax_node(PolyCtx *ctx, PolyUOp *u, int64_t *vmin, int64_
   if (u->op == POLY_OP_DEFINE_VAR && u->arg.kind == POLY_ARG_DEFINE_VAR) {
     *vmin = u->arg.define_var.min_val;
     *vmax = u->arg.define_var.max_val;
+    return true;
+  }
+
+  /* Pinned tinygrad UOp._min_max returns ParamArg.vmin_vmax directly
+   * (tinygrad/uop/ops.py:1010). This is the ordinary int64 query equivalent
+   * of exact_int_range_node's existing arbitrary-precision PARAM rule. */
+  if (u->op == POLY_OP_PARAM && u->arg.kind == POLY_ARG_PARAM && u->arg.param &&
+      u->arg.param->has_minmax) {
+    *vmin = u->arg.param->min_val;
+    *vmax = u->arg.param->max_val;
     return true;
   }
 
@@ -1979,6 +1990,350 @@ static bool invalid_gate_parts(PolyUOp *u, PolyUOp **cond, PolyUOp **value, Poly
   return true;
 }
 
+/* Pinned tinygrad/uop/symbolic.py:315-433 validity-aware simplification.
+ * This belongs beside symbolic, not in late codegen: schedule/indexing.py's
+ * _apply_reshape runs it before the CALL body is formed. */
+typedef struct {
+  PolyUOp *expr;
+  int64_t lo;
+  int64_t hi;
+  bool has_lo;
+  bool has_hi;
+  PolyUOp *fake;
+} PolyValidExprBound;
+
+static int valid_split_op(PolyUOp *u, PolyOps op, PolyUOp **out, int max_n) {
+  if (!u || !out || max_n <= 0) return 0;
+  if (u->op != op) {
+    out[0] = u;
+    return 1;
+  }
+  int n = 0;
+  for (int i = 0; i < u->n_src && n < max_n; i++)
+    n += valid_split_op(u->src[i], op, out + n, max_n - n);
+  return n;
+}
+
+static bool valid_true_const(PolyUOp *u) {
+  return u && u->op == POLY_OP_CONST &&
+         ((u->arg.kind == POLY_ARG_BOOL && u->arg.b) ||
+          (u->arg.kind == POLY_ARG_INT && u->arg.i == 1));
+}
+
+static PolyUOp *valid_and_all(PolyCtx *ctx, PolyUOp **clauses, int n) {
+  PolyUOp *acc = NULL;
+  for (int i = 0; i < n; i++) {
+    if (valid_true_const(clauses[i])) continue;
+    acc = acc ? poly_uop2(ctx, POLY_OP_AND, POLY_BOOL, acc, clauses[i], poly_arg_none())
+              : clauses[i];
+  }
+  return acc ? acc : poly_const_typed(ctx, POLY_BOOL, 1.0);
+}
+
+static bool valid_parse_clause(
+    PolyCtx *ctx,
+    PolyUOp *clause,
+    PolyUOp **expr_out,
+    bool *is_upper_out,
+    int64_t *bound_out
+) {
+  if (!clause || !expr_out || !is_upper_out || !bound_out) return false;
+  if (clause->op == POLY_OP_CMPNE && clause->n_src == 2 &&
+      valid_true_const(clause->src[1])) {
+    PolyUOp *lt = clause->src[0];
+    if (!lt || lt->op != POLY_OP_CMPLT || lt->n_src != 2 ||
+        !poly_dtype_is_int(lt->src[0]->dtype))
+      return false;
+    int64_t lo = 0, hi = 0;
+    poly_uop_minmax(ctx, lt->src[1], &lo, &hi);
+    *expr_out = lt->src[0];
+    *is_upper_out = false;
+    *bound_out = lo;
+    return true;
+  }
+  if (clause->op == POLY_OP_CMPLT && clause->n_src == 2 &&
+      poly_dtype_is_int(clause->src[0]->dtype)) {
+    int64_t lo = 0, hi = 0;
+    poly_uop_minmax(ctx, clause->src[1], &lo, &hi);
+    if (hi == INT64_MIN) return false;
+    *expr_out = clause->src[0];
+    *is_upper_out = true;
+    *bound_out = hi - 1;
+    return true;
+  }
+  return false;
+}
+
+static PolyUOp *valid_simplify_substitution(
+    PolyCtx *ctx,
+    PolyUOp *u,
+    PolyUOp **exprs,
+    PolyUOp **fakes,
+    int n
+) {
+  if (!ctx || !u || !exprs || !fakes || n <= 0) return u;
+  PolyUOp *substituted = poly_uop_substitute(ctx, u, exprs, fakes, n);
+  if (!substituted || substituted == u) return u;
+  substituted = poly_graph_rewrite(ctx, substituted, poly_symbolic());
+  if (!substituted) return u;
+  PolyUOp *restored = poly_uop_substitute(ctx, substituted, fakes, exprs, n);
+  if (!restored) return u;
+  PolyUOp *simplified = poly_graph_rewrite(ctx, restored, poly_symbolic());
+  return simplified ? simplified : u;
+}
+
+static bool valid_all_same(PolyUOp **uops, int n) {
+  if (!uops || n <= 0) return false;
+  for (int i = 1; i < n; i++)
+    if (uops[i] != uops[0]) return false;
+  return true;
+}
+
+PolyUOp *poly_uop_given_valid(
+    PolyCtx *ctx,
+    PolyUOp *valid,
+    PolyUOp *uop,
+    bool try_simplex
+) {
+  if (!ctx || !valid || !uop) return uop;
+
+  PolyUOp *clauses[128];
+  int n_clauses = valid_split_op(valid, POLY_OP_AND, clauses, 128);
+  PolyValidExprBound bounds[128] = {0};
+  int n_bounds = 0;
+  for (int i = 0; i < n_clauses; i++) {
+    PolyUOp *expr = NULL;
+    bool is_upper = false;
+    int64_t bound = 0;
+    if (!valid_parse_clause(ctx, clauses[i], &expr, &is_upper, &bound)) continue;
+    int at = -1;
+    for (int j = 0; j < n_bounds; j++)
+      if (bounds[j].expr == expr) {
+        at = j;
+        break;
+      }
+    if (at < 0) {
+      if (n_bounds >= 128) break;
+      at = n_bounds++;
+      bounds[at].expr = expr;
+    }
+    if (is_upper) {
+      bounds[at].hi = bound;
+      bounds[at].has_hi = true;
+    } else {
+      bounds[at].lo = bound;
+      bounds[at].has_lo = true;
+    }
+  }
+  if (n_bounds == 0) return uop;
+
+  for (int i = 0; i < n_bounds; i++) {
+    int64_t vmin = 0, vmax = 0;
+    poly_uop_minmax(ctx, bounds[i].expr, &vmin, &vmax);
+    if (!bounds[i].has_lo) bounds[i].lo = vmin;
+    if (!bounds[i].has_hi) bounds[i].hi = vmax;
+    if (bounds[i].lo > bounds[i].hi) continue;
+    char name[48];
+    snprintf(name, sizeof(name), "valid_bound_%d", i);
+    bounds[i].fake = poly_uop0(
+        ctx, POLY_OP_DEFINE_VAR, bounds[i].expr->dtype,
+        poly_arg_define_var(name, bounds[i].lo, bounds[i].hi)
+    );
+    if (!bounds[i].fake) continue;
+
+    PolyUOp *exprs[1] = {bounds[i].expr};
+    PolyUOp *fakes[1] = {bounds[i].fake};
+    uop = valid_simplify_substitution(ctx, uop, exprs, fakes, 1);
+
+    if (try_simplex && bounds[i].lo == 1 && bounds[i].expr->op == POLY_OP_ADD) {
+      PolyUOp *terms[128];
+      int n_terms = valid_split_op(bounds[i].expr, POLY_OP_ADD, terms, 128);
+      bool irreducible = n_terms > 0;
+      for (int j = 0; j < n_terms; j++)
+        if (!poly_opset_has(POLY_GROUP_IRREDUCIBLE, terms[j]->op)) irreducible = false;
+      if (irreducible) {
+        PolyUOp *candidates[128];
+        bool complete = true;
+        for (int j = 0; j < n_terms; j++) {
+          int64_t term_lo = 0, term_hi = 0;
+          poly_uop_minmax(ctx, terms[j], &term_lo, &term_hi);
+          (void)term_lo;
+          char term_name[64];
+          snprintf(term_name, sizeof(term_name), "valid_simplex_%d_%d", i, j);
+          PolyUOp *fake = poly_uop0(
+              ctx, POLY_OP_DEFINE_VAR, terms[j]->dtype,
+              poly_arg_define_var(term_name, 1, term_hi)
+          );
+          if (!fake) {
+            complete = false;
+            break;
+          }
+          PolyUOp *term_exprs[1] = {terms[j]}, *term_fakes[1] = {fake};
+          candidates[j] = valid_simplify_substitution(ctx, uop, term_exprs, term_fakes, 1);
+        }
+        if (complete && valid_all_same(candidates, n_terms)) {
+          uop = candidates[0];
+        } else if (complete && uop->op == POLY_OP_STACK && uop->n_src == 2) {
+          bool first_same = true, second_same = true;
+          for (int j = 0; j < n_terms; j++) {
+            if (!candidates[j] || candidates[j]->op != POLY_OP_STACK ||
+                candidates[j]->n_src != 2) {
+              first_same = second_same = false;
+              break;
+            }
+            if (j > 0 && candidates[j]->src[0] != candidates[0]->src[0]) first_same = false;
+            if (j > 0 && candidates[j]->src[1] != candidates[0]->src[1]) second_same = false;
+          }
+          PolyUOp *srcs[2] = {uop->src[0], uop->src[1]};
+          if (first_same) srcs[0] = candidates[0]->src[0];
+          if (second_same) srcs[1] = candidates[0]->src[1];
+          if (srcs[0] != uop->src[0] || srcs[1] != uop->src[1])
+            uop = poly_uop_tagged_arg(
+                ctx, uop->op, uop->dtype, srcs, 2, uop->arg, uop->tag, uop->tag_arg
+            );
+        }
+      }
+    }
+  }
+
+  PolyUOp *exprs[128], *fakes[128];
+  int n_candidates = 0;
+  for (int i = 0; i < n_bounds; i++) {
+    if (!bounds[i].fake) continue;
+    exprs[n_candidates] = bounds[i].expr;
+    fakes[n_candidates] = bounds[i].fake;
+    n_candidates++;
+  }
+  if (n_candidates > 0)
+    uop = valid_simplify_substitution(ctx, uop, exprs, fakes, n_candidates);
+  return uop;
+}
+
+static bool valid_contains_op(PolyUOp *u, PolyOps op) {
+  if (!u) return false;
+  if (u->op == op) return true;
+  for (int i = 0; i < u->n_src; i++)
+    if (valid_contains_op(u->src[i], op)) return true;
+  return false;
+}
+
+static int valid_priority(PolyCtx *ctx, PolyUOp *clause, PolyUOp **clauses, int n) {
+  PolyUOp *expr = NULL;
+  bool upper = false;
+  int64_t bound = 0;
+  if (!valid_parse_clause(ctx, clause, &expr, &upper, &bound)) return 0;
+  (void)upper;
+  (void)bound;
+  int score = 0;
+  for (int i = 0; i < n; i++)
+    if (poly_uop_reachable(ctx, clauses[i], expr)) score--;
+  return score;
+}
+
+static PolyUOp *rule_simplify_valid(PolyCtx *ctx, PolyUOp *valid, const PolyBindings *b) {
+  (void)b;
+  if (!valid || valid->op != POLY_OP_AND || valid_contains_op(valid, POLY_OP_INDEX)) return NULL;
+  PolyUOp *clauses[128];
+  int n = valid_split_op(valid, POLY_OP_AND, clauses, 128);
+  int priorities[128];
+  for (int i = 0; i < n; i++) priorities[i] = valid_priority(ctx, clauses[i], clauses, n);
+  for (int i = 1; i < n; i++) {
+    PolyUOp *clause = clauses[i];
+    int priority = priorities[i], j = i;
+    while (j > 0 && priority < priorities[j - 1]) {
+      clauses[j] = clauses[j - 1];
+      priorities[j] = priorities[j - 1];
+      j--;
+    }
+    clauses[j] = clause;
+    priorities[j] = priority;
+  }
+
+  PolyUOp *ret[128];
+  int n_ret = 0;
+  bool changed = false;
+  for (int i = 0; i < n; i++) {
+    bool duplicate = false;
+    for (int j = 0; j < n_ret; j++)
+      if (ret[j] == clauses[i]) duplicate = true;
+    if (duplicate) {
+      changed = true;
+      continue;
+    }
+    PolyUOp *stmt = clauses[i];
+    if (n_ret > 0) {
+      PolyUOp *known = valid_and_all(ctx, ret, n_ret);
+      PolyUOp *simplified = poly_uop_given_valid(ctx, known, stmt, true);
+      if (simplified != stmt) changed = true;
+      stmt = simplified;
+    }
+    if (stmt != clauses[i]) changed = true;
+    ret[n_ret++] = stmt;
+  }
+  return changed ? valid_and_all(ctx, ret, n_ret) : NULL;
+}
+
+static PolyUOp *rule_gated_given_valid(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+  (void)b;
+  PolyUOp *cond = NULL, *value = NULL, *invalid = NULL;
+  if (!invalid_gate_parts(root, &cond, &value, &invalid) ||
+      !poly_dtype_eq(poly_dtype_scalar(value->dtype), POLY_INDEX))
+    return NULL;
+  PolyUOp *simplified = poly_uop_given_valid(ctx, cond, value, false);
+  if (!simplified || simplified == value) return NULL;
+  return poly_uop3(ctx, POLY_OP_WHERE, root->dtype, cond, simplified, invalid, poly_arg_none());
+}
+
+static bool valid_clause_reaches_value_range(PolyCtx *ctx, PolyUOp *clause, PolyUOp *value) {
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort_alloc(ctx, clause, &n_topo);
+  PolyUOp **ranges = n_topo > 0 ? malloc((size_t)n_topo * sizeof(*ranges)) : NULL;
+  int n_ranges = ranges ? poly_uop_ranges(ctx, clause, ranges, n_topo) : 0;
+  bool reaches = false;
+  for (int i = 0; i < n_ranges && !reaches; i++)
+    reaches = poly_uop_in_ranges(ctx, value, ranges[i]);
+  free(ranges);
+  poly_toposort_free(topo);
+  return reaches;
+}
+
+static PolyUOp *rule_drop_and_clauses(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+  (void)b;
+  PolyUOp *cond = NULL, *value = NULL, *invalid = NULL;
+  if (!invalid_gate_parts(root, &cond, &value, &invalid)) return NULL;
+  PolyUOp *clauses[128], *keep[128];
+  int n = valid_split_op(cond, POLY_OP_AND, clauses, 128), n_keep = 0;
+  for (int i = 0; i < n; i++)
+    if (valid_clause_reaches_value_range(ctx, clauses[i], value)) keep[n_keep++] = clauses[i];
+  if (n_keep == n) return NULL;
+  PolyUOp *new_cond = valid_and_all(ctx, keep, n_keep);
+  return poly_uop3(ctx, POLY_OP_WHERE, root->dtype, new_cond, value, invalid, poly_arg_none());
+}
+
+static _Thread_local PolyPatternMatcher *g_pm_simplify_valid = NULL;
+static _Thread_local PolyPatternMatcher *g_pm_drop_and_clauses = NULL;
+
+PolyPatternMatcher *poly_pm_simplify_valid(void) {
+  if (g_pm_simplify_valid) return g_pm_simplify_valid;
+  PolyRule rules[] = {
+      {poly_pat_op(POLY_OP_AND, NULL, 0, "valid"), rule_simplify_valid},
+      {poly_pat_op(POLY_OP_WHERE, NULL, 0, "root"), rule_gated_given_valid},
+  };
+  g_pm_simplify_valid =
+      poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
+  return g_pm_simplify_valid;
+}
+
+PolyPatternMatcher *poly_pm_drop_and_clauses(void) {
+  if (g_pm_drop_and_clauses) return g_pm_drop_and_clauses;
+  PolyRule rules[] = {
+      {poly_pat_op(POLY_OP_WHERE, NULL, 0, "root"), rule_drop_and_clauses},
+  };
+  g_pm_drop_and_clauses =
+      poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
+  return g_pm_drop_and_clauses;
+}
+
 static bool invalid_propagation_comparison(PolyOps op) {
   return op == POLY_OP_CMPLT || op == POLY_OP_CMPEQ || op == POLY_OP_CMPNE;
 }
@@ -2292,6 +2647,36 @@ static PolyUOp *rule_assoc_fold_consts(PolyCtx *ctx, PolyUOp *root, const PolyBi
   return ret;
 }
 
+/* Pinned tinygrad/uop/symbolic.py:261:
+ *   (c0 + x) < c1 -> x < (c1 - c0)
+ * UPat builds commutative ADD patterns from both source permutations. The
+ * matcher below does the same; keep the callback limited to exact constants
+ * and use the shared unbounded-integer constant evaluator. */
+static PolyUOp *rule_cmplt_add_const_bound(
+    PolyCtx *ctx,
+    PolyUOp *root,
+    const PolyBindings *b
+) {
+  PolyUOp *x = poly_bind(b, "x");
+  PolyUOp *c0 = poly_bind(b, "c0");
+  PolyUOp *c1 = poly_bind(b, "c1");
+  if (!x || !c0 || !c1) return NULL;
+
+  PolyArg operands[2] = {c1->arg, c0->arg};
+  PolyArg folded;
+  PolyInt owned = {0};
+  if (!exec_symbolic_const_alu(
+          POLY_OP_SUB, c1->dtype, operands, 2, false, &folded, &owned
+      ) ||
+      folded.kind == POLY_ARG_INVALID) {
+    poly_int_free(&owned);
+    return NULL;
+  }
+  PolyUOp *bound = poly_const_like(ctx, c1, folded);
+  poly_int_free(&owned);
+  return bound ? poly_uop2(ctx, POLY_OP_CMPLT, root->dtype, x, bound, poly_arg_none()) : NULL;
+}
+
 /* tinygrad symbolic.py:
  *   y * (x + c) -> (y * x) + (y * c)
  *
@@ -2480,7 +2865,15 @@ static int arg_tuplize_cmp(PolyArg a, PolyArg b) {
     return cmp_i64(a.define_var.max_val, b.define_var.max_val);
   }
   case POLY_ARG_BUFFERIZE_OPTS: {
-    int ret = cmp_cstr(a.bufferize_opts.device, b.bufferize_opts.device);
+    int ret = cmp_bool(a.bufferize_opts.device_is_tuple, b.bufferize_opts.device_is_tuple);
+    if (ret) return ret;
+    if (a.bufferize_opts.device_is_tuple)
+      ret = arg_string_tuple_cmp(
+          a.bufferize_opts.devices, a.bufferize_opts.n_devices,
+          b.bufferize_opts.devices, b.bufferize_opts.n_devices
+      );
+    else
+      ret = cmp_cstr(a.bufferize_opts.device, b.bufferize_opts.device);
     if (ret) return ret;
     ret = cmp_i64((int64_t)a.bufferize_opts.addrspace, (int64_t)b.bufferize_opts.addrspace);
     if (ret) return ret;
@@ -2543,6 +2936,21 @@ static int arg_tuplize_cmp(PolyArg a, PolyArg b) {
       if (ret) return ret;
     }
     return 0;
+  }
+  case POLY_ARG_CALL_INFO: {
+    if (!a.call_info || !b.call_info)
+      return (a.call_info != NULL) - (b.call_info != NULL);
+    int ret = cmp_bool(a.call_info->has_grad_fxn, b.call_info->has_grad_fxn);
+    if (ret) return ret;
+    ret = cmp_bool(a.call_info->has_metadata, b.call_info->has_metadata);
+    if (ret) return ret;
+    ret = cmp_cstr(a.call_info->name, b.call_info->name);
+    if (ret) return ret;
+    ret = cmp_bool(a.call_info->precompile, b.call_info->precompile);
+    if (ret) return ret;
+    ret = cmp_bool(a.call_info->precompile_backward, b.call_info->precompile_backward);
+    if (ret) return ret;
+    return cmp_bool(a.call_info->has_aux, b.call_info->has_aux);
   }
   }
   return 0;
@@ -2737,6 +3145,243 @@ static PolyUOp *uop_sum_terms(PolyCtx *ctx, PolyDType dtype, PolyUOp **terms, in
   for (int i = 1; i < n_terms; i++)
     ret = poly_uop2(ctx, POLY_OP_ADD, dtype, ret, terms[i], poly_arg_none());
   return ret;
+}
+
+/* Pinned tinygrad/uop/ops.py:928-945 const_factor/divides helpers used by
+ * symbolic.py:174-178 lt_folding. Keep these separate from the div/mod
+ * optimizer's recursive factor heuristic: tinygrad's MUL const_factor is the
+ * immediate constant operand, not that constant times its other source's
+ * factor. Constants are arbitrary-precision Python ints in the reference. */
+static bool lt_poly_int_is_one(const PolyInt *value) {
+  return value && value->sign == 1 && value->n_limbs == 1 && value->limbs[0] == 1;
+}
+
+static bool lt_poly_int_gcd(PolyInt *out, const PolyInt *a, const PolyInt *b) {
+  PolyInt x = {0}, y = {0};
+  if (!poly_int_copy(&x, a) || !poly_int_copy(&y, b)) goto fail;
+  if (!poly_int_is_zero(&x)) x.sign = 1;
+  if (!poly_int_is_zero(&y)) y.sign = 1;
+  while (!poly_int_is_zero(&y)) {
+    PolyInt q = {0}, r = {0};
+    if (!poly_int_divmod(&q, &r, &x, &y, false)) {
+      poly_int_free(&q);
+      poly_int_free(&r);
+      goto fail;
+    }
+    poly_int_free(&q);
+    poly_int_free(&x);
+    x = y;
+    y = r;
+  }
+  *out = x;
+  poly_int_init(&x);
+  poly_int_free(&y);
+  return true;
+fail:
+  poly_int_free(&x);
+  poly_int_free(&y);
+  return false;
+}
+
+static bool lt_uop_const_factor(PolyUOp *u, PolyInt *out) {
+  if (!u || !out) return false;
+  if (u->op == POLY_OP_CONST &&
+      (u->arg.kind == POLY_ARG_INT || u->arg.kind == POLY_ARG_BIGINT))
+    return poly_int_from_arg(out, u->arg);
+  if (u->op == POLY_OP_STACK) {
+    if (u->n_src == 0) return poly_int_from_i64(out, 0);
+    PolyInt factor = {0};
+    if (!lt_uop_const_factor(u->src[0], &factor)) return false;
+    for (int i = 1; i < u->n_src; i++) {
+      PolyInt next = {0}, gcd = {0};
+      if (!lt_uop_const_factor(u->src[i], &next) ||
+          !lt_poly_int_gcd(&gcd, &factor, &next)) {
+        poly_int_free(&next);
+        poly_int_free(&gcd);
+        poly_int_free(&factor);
+        return false;
+      }
+      poly_int_free(&next);
+      poly_int_free(&factor);
+      factor = gcd;
+    }
+    *out = factor;
+    return true;
+  }
+  if (u->op == POLY_OP_ADD && u->n_src == 2) {
+    PolyInt a = {0}, b = {0};
+    bool ok = lt_uop_const_factor(u->src[0], &a) &&
+              lt_uop_const_factor(u->src[1], &b) && lt_poly_int_gcd(out, &a, &b);
+    poly_int_free(&a);
+    poly_int_free(&b);
+    return ok;
+  }
+  if (u->op == POLY_OP_MUL && u->n_src == 2) {
+    for (int i = 0; i < 2; i++) {
+      PolyUOp *source = u->src[i];
+      if (source->op == POLY_OP_CONST &&
+          (source->arg.kind == POLY_ARG_INT || source->arg.kind == POLY_ARG_BIGINT))
+        return poly_int_from_arg(out, source->arg);
+    }
+  }
+  return poly_int_from_i64(out, 1);
+}
+
+static PolyUOp *lt_uop_divides(PolyCtx *ctx, PolyUOp *u, const PolyInt *factor) {
+  if (!ctx || !u || !factor || poly_int_is_zero(factor)) return NULL;
+  if (lt_poly_int_is_one(factor)) return u;
+  if (u->op == POLY_OP_CONST &&
+      (u->arg.kind == POLY_ARG_INT || u->arg.kind == POLY_ARG_BIGINT)) {
+    PolyInt value = {0}, quotient = {0}, remainder = {0};
+    bool ok = poly_int_from_arg(&value, u->arg) &&
+              poly_int_divmod(&quotient, &remainder, &value, factor, false) &&
+              poly_int_is_zero(&remainder);
+    PolyUOp *ret = ok ? poly_const_like(ctx, u, poly_int_as_arg(&quotient)) : NULL;
+    poly_int_free(&value);
+    poly_int_free(&quotient);
+    poly_int_free(&remainder);
+    return ret;
+  }
+  if (u->op == POLY_OP_STACK) {
+    PolyUOp *inline_src[16];
+    PolyUOp **src = u->n_src <= 16 ? inline_src : malloc((size_t)u->n_src * sizeof(*src));
+    if (!src) return NULL;
+    bool ok = true;
+    for (int i = 0; i < u->n_src; i++)
+      if (!(src[i] = lt_uop_divides(ctx, u->src[i], factor))) {
+        ok = false;
+        break;
+      }
+    PolyUOp *ret = ok ? poly_uop(ctx, POLY_OP_STACK, u->dtype, src, u->n_src, poly_arg_none()) : NULL;
+    if (src != inline_src) free(src);
+    return ret;
+  }
+  if (u->op == POLY_OP_ADD && u->n_src == 2) {
+    PolyUOp *left = lt_uop_divides(ctx, u->src[0], factor);
+    PolyUOp *right = lt_uop_divides(ctx, u->src[1], factor);
+    return left && right
+               ? poly_uop2(ctx, POLY_OP_ADD, u->dtype, left, right, poly_arg_none())
+               : NULL;
+  }
+  if (u->op == POLY_OP_MUL && u->n_src == 2) {
+    PolyUOp *left = lt_uop_divides(ctx, u->src[0], factor);
+    if (left) return poly_uop2(ctx, POLY_OP_MUL, u->dtype, left, u->src[1], poly_arg_none());
+    PolyUOp *right = lt_uop_divides(ctx, u->src[1], factor);
+    if (right) return poly_uop2(ctx, POLY_OP_MUL, u->dtype, u->src[0], right, poly_arg_none());
+  }
+  return NULL;
+}
+
+/* Pinned tinygrad/uop/symbolic.py:174-178 lt_folding. For
+ *   sum(non-unit-factor terms) + remainder < c
+ * divide the non-unit terms and c by their GCD d when the exact remainder
+ * range lies in [0,d). */
+static PolyUOp *rule_lt_folding(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+  (void)b;
+  if (!ctx || !root || root->op != POLY_OP_CMPLT || root->n_src != 2) return NULL;
+  PolyUOp *x = root->src[0], *c = root->src[1];
+  if (!poly_dtype_eq(poly_dtype_scalar(x->dtype), POLY_INDEX) ||
+      c->op != POLY_OP_CONST ||
+      (c->arg.kind != POLY_ARG_INT && c->arg.kind != POLY_ARG_BIGINT))
+    return NULL;
+
+  PolyInt c_value = {0}, divisor = {0}, one = {0}, zero = {0};
+  if (!poly_int_from_arg(&c_value, c->arg) || c_value.sign <= 0 ||
+      !poly_int_copy(&divisor, &c_value) || !poly_int_from_i64(&one, 1) ||
+      !poly_int_from_i64(&zero, 0))
+    goto cleanup;
+
+  PolyAddTermList terms;
+  add_term_list_init(&terms);
+  if (!collect_add_terms(x, &terms) || terms.count == 0) {
+    add_term_list_free(&terms);
+    goto cleanup;
+  }
+  PolyUOp **unit = calloc((size_t)terms.count, sizeof(*unit));
+  PolyUOp **non_unit = calloc((size_t)terms.count, sizeof(*non_unit));
+  if (!unit || !non_unit) {
+    free(unit);
+    free(non_unit);
+    add_term_list_free(&terms);
+    goto cleanup;
+  }
+  int n_unit = 0, n_non_unit = 0;
+  bool proved = true;
+  for (int i = 0; i < terms.count; i++) {
+    PolyInt factor = {0};
+    if (!lt_uop_const_factor(terms.items[i], &factor)) {
+      proved = false;
+      poly_int_free(&factor);
+      break;
+    }
+    if (lt_poly_int_is_one(&factor)) {
+      unit[n_unit++] = terms.items[i];
+    } else {
+      PolyInt gcd = {0};
+      non_unit[n_non_unit++] = terms.items[i];
+      if (!lt_poly_int_gcd(&gcd, &divisor, &factor)) {
+        proved = false;
+        poly_int_free(&factor);
+        break;
+      }
+      poly_int_free(&divisor);
+      divisor = gcd;
+    }
+    poly_int_free(&factor);
+  }
+
+  PolyUOp *ret = NULL;
+  if (proved && n_non_unit > 0 && poly_int_cmp(&divisor, &one) > 0) {
+    PolyInt remainder_min = {0}, remainder_max = {0};
+    proved = poly_int_from_i64(&remainder_min, 0) && poly_int_from_i64(&remainder_max, 0);
+    for (int i = 0; proved && i < n_unit; i++) {
+      ExactIntRange range = {0};
+      PolyInt next_min = {0}, next_max = {0};
+      proved = exact_int_range(ctx, unit[i], &range) &&
+               poly_int_add(&next_min, &remainder_min, &range.lo) &&
+               poly_int_add(&next_max, &remainder_max, &range.hi);
+      exact_int_range_free(&range);
+      if (proved) {
+        poly_int_free(&remainder_min);
+        poly_int_free(&remainder_max);
+        remainder_min = next_min;
+        remainder_max = next_max;
+      } else {
+        poly_int_free(&next_min);
+        poly_int_free(&next_max);
+      }
+    }
+    if (proved && poly_int_cmp(&remainder_min, &zero) >= 0 &&
+        poly_int_cmp(&remainder_max, &divisor) < 0) {
+      PolyUOp *non_unit_sum = uop_sum_terms(ctx, x->dtype, non_unit, n_non_unit);
+      PolyUOp *divided = lt_uop_divides(ctx, non_unit_sum, &divisor);
+      PolyInt quotient = {0}, rem = {0};
+      if (divided && poly_int_divmod(&quotient, &rem, &c_value, &divisor, false) &&
+          poly_int_is_zero(&rem)) {
+        PolyUOp *bound = poly_const_like(ctx, c, poly_int_as_arg(&quotient));
+        if (bound) ret = poly_uop2(ctx, POLY_OP_CMPLT, root->dtype, divided, bound, poly_arg_none());
+      }
+      poly_int_free(&quotient);
+      poly_int_free(&rem);
+    }
+    poly_int_free(&remainder_min);
+    poly_int_free(&remainder_max);
+  }
+  free(unit);
+  free(non_unit);
+  add_term_list_free(&terms);
+  poly_int_free(&c_value);
+  poly_int_free(&divisor);
+  poly_int_free(&one);
+  poly_int_free(&zero);
+  return ret;
+
+cleanup:
+  poly_int_free(&c_value);
+  poly_int_free(&divisor);
+  poly_int_free(&one);
+  poly_int_free(&zero);
+  return NULL;
 }
 
 static PolyUOp *uop_sum_scaled_bases_raw(
@@ -3992,6 +4637,23 @@ PolyPatternMatcher *poly_symbolic(void) {
        rule_cast_index_add_const_to_add_casts},
       {poly_pat_ops2(POLY_GROUP_ASSOCIATIVE, poly_pat_any(NULL), poly_pat_any(NULL), "alu"),
        rule_assoc_fold_consts},
+      {poly_pat_op2(
+           POLY_OP_CMPLT,
+           poly_pat_op2c(
+               POLY_OP_ADD, poly_pat_any("x"),
+               poly_pat_op(POLY_OP_CONST, NULL, 0, "c0"), NULL
+           ),
+           poly_pat_op(POLY_OP_CONST, NULL, 0, "c1"), NULL
+       ),
+       rule_cmplt_add_const_bound},
+      /* Pinned tinygrad/uop/symbolic.py:174-178,290 generic weak-index
+       * less-than factor folding. The callback proves every precondition and
+       * returns no rewrite for non-positive or non-divisible bounds. */
+      {poly_pat_op2(
+           POLY_OP_CMPLT, poly_pat_any(NULL),
+           poly_pat_op(POLY_OP_CONST, NULL, 0, NULL), NULL
+       ),
+       rule_lt_folding},
       /* Remaining POW lowers through xpow, matching tinygrad symbolic.py:sym. */
       {poly_pat_op(POLY_OP_POW, NULL, 0, NULL), rule_decomp_pow_generic},
       /* Pinned tinygrad/uop/symbolic.py:478-480. d is exactly

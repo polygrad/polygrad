@@ -1,7 +1,7 @@
 /*
  * poly_ir.c -- Binary IR codec for tensor-level UOp graphs
  *
- * poly.ir.uops@7 format:
+ * poly.ir.uops@8 format:
  *   Header (32 bytes)
  *   String table (variable)
  *   Node table (variable, strict toposort order; scalar dtype ID + vector count)
@@ -9,7 +9,7 @@
  *   Entrypoint table (named SINKs plus v2+ ABI metadata)
  *
  * Import remains backward-compatible with v1 payloads (entrypoint name + SINK)
- * and v2-v6 payloads (including integer and scalar-string device metadata).
+ * and v2-v7 payloads (including integer and scalar-string device metadata).
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -135,7 +135,7 @@ static double br_f64(ByteReader *r) {
 /* Magic */
 
 #define IR_MAGIC 0x52494750 /* "PGIR" LE */
-#define IR_VERSION 7
+#define IR_VERSION 9
 #define IR_MIN_VERSION 1
 
 /* Dtype index table */
@@ -349,8 +349,28 @@ uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
       for (int j = 0; j < a.string_tuple.n; j++)
         st_add(&strings, a.string_tuple.vals[j]);
     if (a.kind == POLY_ARG_DEFINE_VAR && a.define_var.name) st_add(&strings, a.define_var.name);
-    if (a.kind == POLY_ARG_BUFFERIZE_OPTS && a.bufferize_opts.device)
+    if (a.kind == POLY_ARG_BUFFERIZE_OPTS && a.bufferize_opts.device_is_tuple) {
+      if (a.bufferize_opts.n_devices <= 0 || a.bufferize_opts.n_devices > UINT16_MAX ||
+          !a.bufferize_opts.devices) {
+        fprintf(stderr, "poly_ir_export: invalid tuple BufferizeOpts device\n");
+        free(node_map);
+        if (topo_is_heap) free(topo);
+        st_free(&strings);
+        return NULL;
+      }
+      for (int j = 0; j < a.bufferize_opts.n_devices; j++) {
+        if (!a.bufferize_opts.devices[j]) {
+          fprintf(stderr, "poly_ir_export: invalid tuple BufferizeOpts member\n");
+          free(node_map);
+          if (topo_is_heap) free(topo);
+          st_free(&strings);
+          return NULL;
+        }
+        st_add(&strings, a.bufferize_opts.devices[j]);
+      }
+    } else if (a.kind == POLY_ARG_BUFFERIZE_OPTS && a.bufferize_opts.device) {
       st_add(&strings, a.bufferize_opts.device);
+    }
     if (a.kind == POLY_ARG_TENSOR_CORE && a.tensor_core.name)
       st_add(&strings, a.tensor_core.name);
     if (a.kind == POLY_ARG_PARAM && a.param && a.param->name)
@@ -359,6 +379,8 @@ uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
     if (a.kind == POLY_ARG_PARAM && a.param && a.param->device_is_tuple)
       for (int j = 0; j < a.param->n_devices; j++)
         st_add(&strings, a.param->devices[j]);
+    if (a.kind == POLY_ARG_CALL_INFO && a.call_info && a.call_info->name)
+      st_add(&strings, a.call_info->name);
   }
   /* Collect strings from interface + entrypoints */
   for (int i = 0; i < spec->n_bufs; i++)
@@ -481,10 +503,17 @@ uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
       bb_i64(&buf, u->arg.define_var.max_val);
       break;
     case POLY_ARG_BUFFERIZE_OPTS:
-      bb_u32(
-          &buf,
-          u->arg.bufferize_opts.device ? st_add(&strings, u->arg.bufferize_opts.device) : UINT32_MAX
-      );
+      if (u->arg.bufferize_opts.device_is_tuple) {
+        bb_u8(&buf, 2);
+        bb_u16(&buf, (uint16_t)u->arg.bufferize_opts.n_devices);
+        for (int d = 0; d < u->arg.bufferize_opts.n_devices; d++)
+          bb_u32(&buf, st_add(&strings, u->arg.bufferize_opts.devices[d]));
+      } else if (u->arg.bufferize_opts.device) {
+        bb_u8(&buf, 1);
+        bb_u32(&buf, st_add(&strings, u->arg.bufferize_opts.device));
+      } else {
+        bb_u8(&buf, 0);
+      }
       bb_u8(&buf, (uint8_t)u->arg.bufferize_opts.addrspace);
       bb_u8(&buf, u->arg.bufferize_opts.removable ? 1 : 0);
       break;
@@ -539,6 +568,22 @@ uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
       );
       bb_i64(&buf, u->arg.param->min_val);
       bb_i64(&buf, u->arg.param->max_val);
+      break;
+    case POLY_ARG_CALL_INFO:
+      if (!u->arg.call_info || u->arg.call_info->has_grad_fxn ||
+          u->arg.call_info->has_metadata || u->arg.call_info->has_aux) {
+        fprintf(stderr, "poly_ir_export: unsupported CallInfo callback/metadata/aux\n");
+        free(node_map);
+        if (topo_is_heap) free(topo);
+        st_free(&strings);
+        free(buf.data);
+        return NULL;
+      }
+      bb_u32(
+          &buf, u->arg.call_info->name ? st_add(&strings, u->arg.call_info->name)
+                                       : UINT32_MAX);
+      bb_u8(&buf, u->arg.call_info->precompile ? 1 : 0);
+      bb_u8(&buf, u->arg.call_info->precompile_backward ? 1 : 0);
       break;
     }
   }
@@ -686,8 +731,11 @@ int poly_ir_import(const uint8_t *data, int len, PolyIrSpec *out) {
     memset(&arg, 0, sizeof(arg));
     arg.kind = (PolyArgKind)arg_kind;
     PolyParamArg param_arg_tmp;
+    PolyCallInfo call_info_tmp;
     const char **param_devices_tmp = NULL;
+    const char **bufferize_devices_tmp = NULL;
     memset(&param_arg_tmp, 0, sizeof(param_arg_tmp));
+    memset(&call_info_tmp, 0, sizeof(call_info_tmp));
 
     switch (arg.kind) {
     case POLY_ARG_NONE:
@@ -816,7 +864,43 @@ int poly_ir_import(const uint8_t *data, int len, PolyIrSpec *out) {
       break;
     }
     case POLY_ARG_BUFFERIZE_OPTS: {
-      if (version >= 5) {
+      if (version >= 8) {
+        uint8_t device_kind = br_u8(&r);
+        if (device_kind == 1) {
+          uint32_t device_idx = br_u32(&r);
+          arg.bufferize_opts.device = device_idx < n_strings ? strings[device_idx] : NULL;
+          if (!arg.bufferize_opts.device) {
+            if (srcs) free(srcs);
+            goto fail_nodes;
+          }
+        } else if (device_kind == 2) {
+          uint16_t count = br_u16(&r);
+          if (count == 0 || br_remaining(&r) < (int)((uint32_t)count * sizeof(uint32_t))) {
+            if (srcs) free(srcs);
+            goto fail_nodes;
+          }
+          bufferize_devices_tmp = malloc((size_t)count * sizeof(*bufferize_devices_tmp));
+          if (!bufferize_devices_tmp) {
+            if (srcs) free(srcs);
+            goto fail_nodes;
+          }
+          for (int d = 0; d < count; d++) {
+            uint32_t device_idx = br_u32(&r);
+            if (device_idx >= n_strings) {
+              free(bufferize_devices_tmp);
+              if (srcs) free(srcs);
+              goto fail_nodes;
+            }
+            bufferize_devices_tmp[d] = strings[device_idx];
+          }
+          arg.bufferize_opts.devices = bufferize_devices_tmp;
+          arg.bufferize_opts.n_devices = count;
+          arg.bufferize_opts.device_is_tuple = true;
+        } else if (device_kind != 0) {
+          if (srcs) free(srcs);
+          goto fail_nodes;
+        }
+      } else if (version >= 5) {
         uint32_t device_idx = br_u32(&r);
         arg.bufferize_opts.device = device_idx < n_strings ? strings[device_idx] : NULL;
       } else {
@@ -897,6 +981,22 @@ int poly_ir_import(const uint8_t *data, int len, PolyIrSpec *out) {
       arg.param = &param_arg_tmp;
       break;
     }
+    case POLY_ARG_CALL_INFO: {
+      if (version < 9 || br_remaining(&r) < 6) {
+        if (srcs) free(srcs);
+        goto fail_nodes;
+      }
+      uint32_t name_idx = br_u32(&r);
+      call_info_tmp.name = name_idx < n_strings ? strings[name_idx] : NULL;
+      if (name_idx != UINT32_MAX && !call_info_tmp.name) {
+        if (srcs) free(srcs);
+        goto fail_nodes;
+      }
+      call_info_tmp.precompile = br_u8(&r) != 0;
+      call_info_tmp.precompile_backward = br_u8(&r) != 0;
+      arg.call_info = &call_info_tmp;
+      break;
+    }
     default:
       fprintf(stderr, "poly_ir_import: unknown arg kind %u at node %u\n", arg_kind, i);
       if (srcs) free(srcs);
@@ -924,6 +1024,7 @@ int poly_ir_import(const uint8_t *data, int len, PolyIrSpec *out) {
       free(arg.range.extra);
     else if (arg.kind == POLY_ARG_STRING_TUPLE && arg.string_tuple.vals)
       free((void *)arg.string_tuple.vals);
+    if (bufferize_devices_tmp) free(bufferize_devices_tmp);
     if (param_devices_tmp) free(param_devices_tmp);
 
     if (tag != 0) ((PolyUOp *)u)->tag = tag;

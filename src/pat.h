@@ -185,6 +185,15 @@ PolyArg poly_exec_alu(
 PolyPatternMatcher *poly_symbolic_simple(void);
 PolyPatternMatcher *poly_symbolic(void);
 PolyPatternMatcher *poly_pm_gep_pushing(void);
+/* Pinned tinygrad/uop/symbolic.py validity-aware matcher components. */
+PolyUOp *poly_uop_given_valid(
+    PolyCtx *ctx,
+    PolyUOp *valid,
+    PolyUOp *uop,
+    bool try_simplex
+);
+PolyPatternMatcher *poly_pm_simplify_valid(void);
+PolyPatternMatcher *poly_pm_drop_and_clauses(void);
 
 /* Codegen pipeline (port of full_rewrite_to_sink) */
 

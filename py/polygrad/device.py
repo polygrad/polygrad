@@ -1,10 +1,11 @@
 """Device -- tinygrad-compatible device."""
 
 import ctypes
+import functools
 import numpy as np
 
 from . import _ffi
-from .dtype import _to_np_dtype
+from .dtype import _to_np_dtype, dtypes
 
 
 class Buffer:
@@ -41,6 +42,40 @@ class Buffer:
         return memoryview(out)
 
 
+class Renderer:
+    """Selected backend renderer capability surface."""
+
+    def __init__(self, device):
+        self.device = device
+
+    @functools.cached_property
+    def _supported_dtypes(self):
+        from . import can_run
+        return frozenset(
+            dtype for dtype in dtypes.all
+            if dtype is not dtypes.weakint and
+            can_run('add', dtype=dtype, shape=(1,), device=self.device)
+        )
+
+    def supported_dtypes(self):
+        # Pinned Renderer.supported_dtypes returns a mutable set.
+        return set(self._supported_dtypes)
+
+
+class Compiled:
+    """Opened executable device, matching tinygrad's selected-device shape."""
+
+    def __init__(self, device):
+        self.device = device
+        self.renderer = Renderer(device)
+
+    def __repr__(self):
+        return f"<Compiled device:{self.device}>"
+
+    def __str__(self):
+        return self.device
+
+
 class _Device:
     def __init__(self):
         self._default = 'CPU'
@@ -50,12 +85,15 @@ class _Device:
         from .helpers import DEV
         return self.canonicalize(DEV.value) if DEV.value else self._default
 
+    @functools.cache
     def __getitem__(self, key):
-        return self.canonicalize(key)
+        return Compiled(self.canonicalize(key))
 
     def canonicalize(self, device):
         if device is None:
             return self.DEFAULT
+        if isinstance(device, Compiled):
+            return device.device
         lib = _ffi.get_lib()
         value = str(device)
         if not value.upper().startswith('DISK:') and value.endswith(':0'):

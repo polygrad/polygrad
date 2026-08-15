@@ -1,20 +1,38 @@
 import gzip
 import hashlib
 import io
+import ctypes
+import decimal
+import os
 
 import pytest
 
 import polygrad.helpers as helpers
 from polygrad.helpers import (
     BEAM,
+    ARCH_X86,
+    JIT,
     NO_COLOR,
+    OSX,
+    Profiling,
     WINO,
     Context,
     ContextVar,
+    Timing,
+    argsort,
     colored,
+    cpu_events,
     fetch,
+    flatten,
+    get_child,
     getenv,
+    partition,
     prod,
+    profile_marker,
+    strides_for_shape,
+    to_mv,
+    tqdm,
+    trange,
 )
 
 
@@ -23,6 +41,83 @@ def test_prod_matches_tinygrad_empty_generator_and_mixed_numeric_semantics():
     assert prod(value for value in (2, 3, 4)) == 24
     assert prod((2.5, 2)) == 5.0
     assert prod([True, False]) == 0
+
+
+def test_flatten_and_partition_match_pinned_order_and_single_pass_semantics():
+    assert flatten(((1, 2), [], (3,), range(4, 6))) == [1, 2, 3, 4, 5]
+
+    seen = []
+
+    def source():
+        for value in range(6):
+            seen.append(value)
+            yield value
+
+    assert partition(source(), lambda value: value % 2 == 0) == (
+        [0, 2, 4],
+        [1, 3, 5],
+    )
+    assert seen == [0, 1, 2, 3, 4, 5]
+
+
+def test_timing_matches_pinned_elapsed_callback_and_disabled_output(monkeypatch, capsys):
+    values = iter((1_000_000_000, 1_012_345_678, 2_000_000_000, 2_000_000_111))
+    monkeypatch.setattr(helpers.time, "perf_counter_ns", lambda: next(values))
+    callback_values = []
+
+    with Timing("elapsed ", lambda et: callback_values.append(et) or ", done") as entered:
+        pass
+    disabled = Timing("hidden ", enabled=False)
+    with disabled:
+        pass
+
+    assert entered is None
+    assert callback_values == [12_345_678]
+    assert disabled.et == 111
+    assert capsys.readouterr().out == "elapsed  12.35 ms, done\n"
+
+
+def test_profiling_matches_pinned_disabled_and_stats_file_semantics(tmp_path, capsys):
+    with Profiling(enabled=False) as entered:
+        sum(range(4))
+    assert entered is None
+    assert capsys.readouterr().out == ""
+
+    stats_path = tmp_path / "profile.stats"
+    with Profiling(enabled=True, frac=0, fn=stats_path):
+        sum(range(8))
+    assert stats_path.is_file() and stats_path.stat().st_size > 0
+    assert capsys.readouterr().out == ""
+
+
+def test_profile_marker_appends_pinned_point_event():
+    before = len(cpu_events)
+    profile_marker("probe", "blue")
+    try:
+        event = cpu_events[-1]
+        assert len(cpu_events) == before + 1
+        assert (event.device, event.name, event.key, event.arg) == (
+            "TINY",
+            "marker",
+            None,
+            {"name": "probe", "color": "blue"},
+        )
+        assert isinstance(event.ts, decimal.Decimal)
+    finally:
+        cpu_events.pop()
+
+
+def test_state_path_and_stride_helpers_match_pinned_tinygrad():
+    class Box:
+        pass
+
+    box = Box()
+    box.layers = [{"weight": 7}, {"weight": 11}]
+    assert get_child(box, "layers.1.weight") == 11
+    assert argsort([30, 10, 20]) == [1, 2, 0]
+    assert argsort((30, 10, 20)) == (1, 2, 0)
+    assert strides_for_shape(()) == ()
+    assert strides_for_shape((2, 1, 3)) == (3, 0, 1)
 
 
 def test_getenv_is_cached_per_signature_and_propagates_conversion_errors(monkeypatch):
@@ -108,16 +203,69 @@ def test_colored_matches_tinygrad_bright_background_and_no_color_behavior():
 
 
 def test_public_context_globals_use_tinygrad_keys():
-    assert (BEAM.key, WINO.key, NO_COLOR.key) == ("BEAM", "WINO", "NO_COLOR")
+    assert (BEAM.key, JIT.key, WINO.key, NO_COLOR.key) == (
+        "BEAM",
+        "JIT",
+        "WINO",
+        "NO_COLOR",
+    )
+    default_jit = 2 if OSX and ARCH_X86 else 1
+    assert JIT.value == int(os.getenv("JIT", default_jit))
+
+
+def test_to_mv_matches_pinned_writable_zero_copy_ctypes_view():
+    storage = (ctypes.c_uint8 * 4)(1, 2, 3, 4)
+    view = to_mv(ctypes.addressof(storage), 4)
+    assert (view.format, view.shape, view.readonly, list(view)) == (
+        "B",
+        (4,),
+        False,
+        [1, 2, 3, 4],
+    )
+    view[1] = 9
+    assert list(storage) == [1, 9, 3, 4]
+
+
+def test_from_torch_dtype_matches_pinned_inverse_mapping():
+    torch = pytest.importorskip("torch")
+    from polygrad.dtype import _from_torch_dtype, dtypes
+
+    expected = {
+        torch.bool: dtypes.bool,
+        torch.uint8: dtypes.uint8,
+        torch.int16: dtypes.int16,
+        torch.int32: dtypes.int32,
+        torch.int64: dtypes.int64,
+        torch.float16: dtypes.float16,
+        torch.bfloat16: dtypes.bfloat16,
+        torch.float32: dtypes.float32,
+        torch.float64: dtypes.float64,
+    }
+    assert {torch_dtype: _from_torch_dtype(torch_dtype) for torch_dtype in expected} == expected
+
+
+def test_trange_matches_pinned_iteration_and_counter_semantics():
+    bar = trange(3, desc="start", disable=True)
+    assert list(bar) == [0, 1, 2]
+    bar.set_description("done")
+    assert (bar.n, bar.i, bar.t, bar.desc) == (3, 4, 3, "done: ")
+
+    empty = trange(0, disable=True)
+    assert list(empty) == []
+    assert (empty.n, empty.i) == (0, 1)
+
+    manual = tqdm(total=2, unit="row", disable=True)
+    manual.update()
+    manual.update()
+    manual.update(close=True)
+    assert (manual.n, manual.i, manual.t, manual.unit) == (0, 3, 2, "row")
 
 
 class _FetchResponse(io.BytesIO):
     def __init__(self, payload, status=200, content_length=True):
         super().__init__(payload)
         self.status = status
-        self.headers = {
-            "content-length": str(len(payload)) if content_length else "0"
-        }
+        self.headers = {"content-length": str(len(payload)) if content_length else "0"}
 
 
 def test_fetch_local_cache_refresh_and_gunzip(tmp_path, monkeypatch):

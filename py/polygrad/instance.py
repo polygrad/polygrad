@@ -142,6 +142,26 @@ def _entry_fields(entry):
     )
 
 
+def _module_fields(module):
+    if isinstance(module, dict):
+        return module.get('name'), module.get('inputs', ()), module.get('output')
+    if len(module) == 3:
+        return module
+    raise TypeError(
+        'Instance modules must be dicts or (name, inputs, output) tuples'
+    )
+
+
+def _module_inputs(inputs):
+    from .tensor import Tensor
+
+    if inputs is None:
+        return []
+    if isinstance(inputs, Tensor):
+        return [inputs]
+    return list(inputs)
+
+
 def _entry_name_list(names):
     if names is None:
         return []
@@ -225,8 +245,9 @@ class Instance:
     """Opaque model instance with forward, train, and weight I/O."""
 
     def __init__(self, ptr=None, *, inputs=None, targets=None, state=None,
-                 outputs=None, entrypoints=None, params=None, losses=None):
-        spec_args = (inputs, targets, state, outputs, entrypoints, params, losses)
+                 outputs=None, entrypoints=None, params=None, losses=None,
+                 modules=None):
+        spec_args = (inputs, targets, state, outputs, entrypoints, params, losses, modules)
         has_spec = any(v is not None for v in spec_args)
         if has_spec:
             if ptr is not None:
@@ -239,6 +260,7 @@ class Instance:
                 params=params,
                 state=state,
                 entrypoints=entrypoints,
+                modules=modules,
             )
             self._ptr = built._ptr
             built._ptr = None
@@ -272,7 +294,7 @@ class Instance:
         return Instance(ptr)
 
     @staticmethod
-    def from_bindings(bindings, entrypoints):
+    def from_bindings(bindings, entrypoints, *, modules=None):
         """Create an Instance from explicit binding and entrypoint records.
 
         Bindings may be dicts with ``name``, ``role``, ``tensor``, and optional
@@ -330,7 +352,14 @@ class Instance:
                 keepalive=keepalive,
             ))
 
-        return _instance_from_binding_specs(ctx, binding_rows, entry_rows, keepalive)
+        inst = _instance_from_binding_specs(ctx, binding_rows, entry_rows, keepalive)
+        if modules is not None:
+            try:
+                inst.define_modules(modules)
+            except Exception:
+                inst.free()
+                raise
+        return inst
 
     @staticmethod
     def from_tensors(
@@ -342,6 +371,7 @@ class Instance:
         params=None,
         state=None,
         entrypoints=None,
+        modules=None,
     ):
         """Package named Tensor roots as a runnable/exportable Instance."""
         from .tensor import Tensor, _ptr_value
@@ -427,7 +457,70 @@ class Instance:
                     objective=objective, keepalive=keepalive
                 ))
 
-        return _instance_from_binding_specs(ctx, binding_rows, entry_rows, keepalive)
+        inst = _instance_from_binding_specs(ctx, binding_rows, entry_rows, keepalive)
+        if modules is not None:
+            try:
+                inst.define_modules(modules)
+            except Exception:
+                inst.free()
+                raise
+        return inst
+
+    def define_modules(self, modules):
+        """Retain exact logical module cuts for explicit device-map placement.
+
+        Each row is ``{'name', 'inputs', 'output'}`` or
+        ``(name, inputs, output)``. Inputs and output are Tensor objects from
+        this Instance's construction context. This records product metadata;
+        it does not alter the current physical graph.
+        """
+        rows = list(modules or ())
+        if not rows:
+            raise ValueError('define_modules requires at least one module')
+
+        names = []
+        counts = []
+        flat_inputs = []
+        outputs = []
+        for row in rows:
+            name, inputs, output = _module_fields(row)
+            if name is None:
+                raise ValueError('Instance module is missing a name')
+            inputs = [_require_tensor(f'{name}.input', tensor)
+                      for tensor in _module_inputs(inputs)]
+            output = _require_tensor(f'{name}.output', output)
+            names.append(_name_bytes(name))
+            counts.append(len(inputs))
+            flat_inputs.extend(tensor._tensor for tensor in inputs)
+            outputs.append(output._tensor)
+
+        name_arr = (ctypes.c_char_p * len(names))(*names)
+        count_arr = (ctypes.c_int * len(counts))(*counts)
+        input_arr = ((ctypes.c_void_p * len(flat_inputs))(*flat_inputs)
+                     if flat_inputs else None)
+        output_arr = (ctypes.c_void_p * len(outputs))(*outputs)
+        rc = _get_lib().poly_instance_define_module_arrays(
+            self._ptr, name_arr, input_arr, count_arr, output_arr, len(rows)
+        )
+        if rc != 0:
+            raise ValueError('invalid or ambiguous Instance module cuts')
+        return self
+
+    def set_device_map(self, device_map):
+        """Place retained modules on exact devices and publish atomically."""
+        rows = list(device_map.items()) if isinstance(device_map, dict) else list(device_map or ())
+        if not rows:
+            raise ValueError('set_device_map requires at least one module mapping')
+        modules = [_name_bytes(name) for name, _ in rows]
+        devices = [_name_bytes(device) for _, device in rows]
+        module_arr = (ctypes.c_char_p * len(modules))(*modules)
+        device_arr = (ctypes.c_char_p * len(devices))(*devices)
+        rc = _get_lib().poly_instance_set_device_map_arrays(
+            self._ptr, module_arr, device_arr, len(rows)
+        )
+        if rc != 0:
+            raise ValueError('invalid, incomplete, or unsupported Instance device map')
+        return self
 
     @staticmethod
     def from_hf(model_path=None, *, config_json=None, weight_bytes_list=None,

@@ -56,7 +56,7 @@ function createNativeCore(device) {
     if (name) ops[name] = i
   }
 
-  const EXPECTED_ABI = 49
+  const EXPECTED_ABI = 52
   const abi = binding.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(
@@ -163,6 +163,20 @@ function createNativeCore(device) {
         entryObjectives, entryFlags
       )
       return setInstanceDevice(inst)
+    },
+    defineModules(inst, modules) {
+      return binding.poly_instance_define_module_arrays(
+        inst,
+        modules.map(m => m.name),
+        modules.flatMap(m => m.inputs || []),
+        modules.map(m => (m.inputs || []).length),
+        modules.map(m => m.output)
+      )
+    },
+    setDeviceMap(inst, entries) {
+      return binding.poly_instance_set_device_map_arrays(
+        inst, entries.map(e => e.module), entries.map(e => e.device)
+      )
     },
     loadHF(configBytes, weightFilesBytes, maxBatch, maxSeqLen) {
       const inst = binding.poly_hf_load(configBytes, weightFilesBytes,

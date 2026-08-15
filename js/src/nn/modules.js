@@ -19,7 +19,42 @@ function createBoundModules(runtime) {
     }
 
     call(x) {
-      return x.linear(this.weight, this.bias)
+      // Pinned nn/__init__.py:156-174 stores (out,in); Tensor.linear consumes
+      // the transposed (in,out) matrix.
+      return x.linear(this.weight.transpose(), this.bias)
+    }
+  }
+
+  class LayerNorm {
+    constructor(normalizedShape, opts = {}) {
+      this.normalizedShape = Array.isArray(normalizedShape)
+        ? Array.from(normalizedShape, Number)
+        : [Number(normalizedShape)]
+      this.axis = this.normalizedShape.map((_, i) => -1 - i)
+      this.eps = opts.eps == null ? 1e-5 : Number(opts.eps)
+      const affine = opts.elementwiseAffine !== false
+      this.weight = affine ? Tensor.ones(...this.normalizedShape) : null
+      this.bias = affine ? Tensor.zeros(...this.normalizedShape) : null
+      if (this.weight) this.weight.requiresGrad = true
+      if (this.bias) this.bias.requiresGrad = true
+    }
+
+    call(x) {
+      const tail = x.shape.slice(-this.normalizedShape.length)
+      if (tail.length !== this.normalizedShape.length ||
+          tail.some((dim, i) => dim !== this.normalizedShape[i])) {
+        throw new Error(`last dimensions of ${JSON.stringify(x.shape)} must match ${JSON.stringify(this.normalizedShape)}`)
+      }
+      let result = x.layernorm(this.axis, this.eps)
+      if (this.weight !== null && this.bias !== null) result = result.mul(this.weight).add(this.bias)
+      return result
+    }
+  }
+
+  class LayerNorm2d extends LayerNorm {
+    call(x) {
+      // Pinned tinygrad/nn/__init__.py:263-278.
+      return super.call(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
     }
   }
 
@@ -76,7 +111,36 @@ function createBoundModules(runtime) {
     }
   }
 
-  return { Linear, Conv2d }
+  class GroupNorm {
+    constructor(numGroups, numChannels, opts = {}) {
+      this.numGroups = Number(numGroups)
+      this.numChannels = Number(numChannels)
+      this.eps = opts.eps == null ? 1e-5 : Number(opts.eps)
+      if (this.numChannels % this.numGroups !== 0) {
+        throw new Error('numChannels must be divisible by numGroups')
+      }
+      const affine = opts.affine !== false
+      this.weight = affine ? Tensor.ones(this.numChannels) : null
+      this.bias = affine ? Tensor.zeros(this.numChannels) : null
+      if (this.weight) this.weight.requiresGrad = true
+      if (this.bias) this.bias.requiresGrad = true
+    }
+
+    call(x) {
+      // Literal pinned tinygrad/nn/__init__.py:200-207 composition.
+      const shape = x.shape
+      if (shape.length < 2) throw new Error('GroupNorm expects input with at least 2 dimensions')
+      if (shape[1] !== this.numChannels) {
+        throw new Error(`GroupNorm expected C=${this.numChannels}, got C=${shape[1]}`)
+      }
+      let result = x.reshape(shape[0], this.numGroups, -1).layernorm(-1, this.eps).reshape(...shape)
+      if (this.weight === null || this.bias === null) return result
+      const affineShape = [1, -1, ...Array(Math.max(0, shape.length - 2)).fill(1)]
+      return result.mul(this.weight.reshape(...affineShape)).add(this.bias.reshape(...affineShape))
+    }
+  }
+
+  return { Linear, LayerNorm, LayerNorm2d, Conv2d, GroupNorm }
 }
 
 module.exports = { createBoundModules }

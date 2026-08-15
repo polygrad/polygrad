@@ -5,10 +5,20 @@
 #include "../src/frontend.h"
 #include "../src/frontend_internal.h"
 #include "../src/polygrad.h"
+#include "../src/tensor.h"
 
 static PolyUOp *placement_buffer(PolyCtx *ctx, int64_t n, PolyDevice device) {
   return device == POLY_DEVICE_AUTO ? poly_buffer(ctx, POLY_FLOAT32, n)
                                     : poly_buffer_on_device(ctx, POLY_FLOAT32, n, device);
+}
+
+static PolyUOp *placement_binding_on_device(
+    PolyCtx *ctx,
+    PolyUOp *logical,
+    PolyDevice device
+) {
+  PolyUOp *src[2] = {logical->src[0], poly_device_uop(ctx, device)};
+  return poly_uop(ctx, POLY_OP_BUFFER, logical->dtype, src, 2, logical->arg);
 }
 
 TEST(placement, logical_bindings_reproduce_eager_value_and_instance_sink) {
@@ -186,6 +196,179 @@ TEST(placement, invalid_binding_shape_or_alias_fails_atomically) {
       poly_place_roots(ctx, roots, templates, 1, partial_from, copy_binding, partial_to, 1, out), -1
   );
   ASSERT_EQ(out[0], sentinel);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(placement, explicit_module_map_inserts_exact_cross_device_cut) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *lx = placement_buffer(ctx, 2, POLY_DEVICE_AUTO);
+  PolyUOp *lw0 = placement_buffer(ctx, 2, POLY_DEVICE_AUTO);
+  PolyUOp *lw1 = placement_buffer(ctx, 2, POLY_DEVICE_AUTO);
+  PolyUOp *lout = placement_buffer(ctx, 2, POLY_DEVICE_AUTO);
+  PolyUOp *module0 = poly_add(ctx, lx, lw0);
+  PolyUOp *module1 = poly_mul(ctx, module0, lw1);
+  PolyUOp *logical_sink = poly_sink1(ctx, poly_store_val(ctx, lout, module1));
+  ASSERT_NOT_NULL(lx);
+  ASSERT_NOT_NULL(lw0);
+  ASSERT_NOT_NULL(lw1);
+  ASSERT_NOT_NULL(lout);
+  ASSERT_NOT_NULL(module0);
+  ASSERT_NOT_NULL(module1);
+  ASSERT_NOT_NULL(logical_sink);
+
+  PolyUOp *logical_bindings[4] = {lx, lw0, lw1, lout};
+  PolyUOp *target_bindings[4] = {NULL, NULL, NULL, NULL};
+  PolyUOp *module0_inputs[1] = {lx};
+  PolyUOp *module1_inputs[1] = {module0};
+  PolyPlaceModule modules[2] = {
+      {"layers.0", module0, module0_inputs, 1, poly_device_uop(ctx, POLY_DEVICE_CPU)},
+      {"layers.1", module1, module1_inputs, 1, poly_device_uop(ctx, POLY_DEVICE_INTERP)},
+  };
+  ASSERT_NOT_NULL(modules[0].device);
+  ASSERT_NOT_NULL(modules[1].device);
+
+  /* Aggregate root order is intentionally consumer-first.  Module order is
+   * the declared dataflow order and does not depend on entrypoint root order. */
+  PolyUOp *roots[3] = {logical_sink, module1, module0};
+  PolyUOp *placed[3] = {NULL, NULL, NULL};
+  ASSERT_INT_EQ(
+      poly_place_module_map(
+          ctx, roots, 3, logical_bindings, 4, modules, 2, target_bindings, placed
+      ),
+      0
+  );
+
+  PolyUOp *px = placement_binding_on_device(ctx, lx, POLY_DEVICE_CPU);
+  PolyUOp *pw0 = placement_binding_on_device(ctx, lw0, POLY_DEVICE_CPU);
+  PolyUOp *pw1 = placement_binding_on_device(ctx, lw1, POLY_DEVICE_INTERP);
+  PolyUOp *pout = placement_binding_on_device(ctx, lout, POLY_DEVICE_INTERP);
+  ASSERT_PTR_EQ(target_bindings[0], px);
+  ASSERT_PTR_EQ(target_bindings[1], pw0);
+  ASSERT_PTR_EQ(target_bindings[2], pw1);
+  ASSERT_PTR_EQ(target_bindings[3], pout);
+  PolyUOp *expected_module0 = poly_add(ctx, px, pw0);
+  PolyUOp *copy_src[2] = {expected_module0, modules[1].device};
+  PolyUOp *expected_cut =
+      poly_uop(ctx, POLY_OP_COPY, POLY_FLOAT32, copy_src, 2, poly_arg_none());
+  PolyUOp *expected_module1 = poly_mul(ctx, expected_cut, pw1);
+  PolyUOp *expected_sink = poly_sink1(ctx, poly_store_val(ctx, pout, expected_module1));
+  ASSERT_PTR_EQ(placed[0], expected_sink);
+  ASSERT_PTR_EQ(placed[1], expected_module1);
+  ASSERT_PTR_EQ(placed[2], expected_module0);
+  ASSERT_EQ(placed[1]->op, POLY_OP_MUL);
+  ASSERT_EQ(placed[1]->src[0]->op, POLY_OP_COPY);
+  ASSERT_PTR_EQ(placed[1]->src[0]->src[0], placed[2]);
+  ASSERT_PTR_EQ(placed[1]->src[0]->src[1], modules[1].device);
+  ASSERT_EQ(poly_uop_device(placed[1]), POLY_DEVICE_INTERP);
+
+  PolyUOp *ordered_roots[3] = {module0, module1, logical_sink};
+  PolyUOp *ordered_placed[3] = {NULL, NULL, NULL};
+  ASSERT_INT_EQ(
+      poly_place_module_map(
+          ctx, ordered_roots, 3, logical_bindings, 4, modules, 2,
+          target_bindings, ordered_placed
+      ),
+      0
+  );
+  ASSERT_PTR_EQ(ordered_placed[0], placed[2]);
+  ASSERT_PTR_EQ(ordered_placed[1], placed[1]);
+  ASSERT_PTR_EQ(ordered_placed[2], placed[0]);
+
+  PolyUOp *reverse_targets[4] = {NULL, NULL, NULL, NULL};
+  PolyPlaceModule reverse_devices[2] = {
+      {"layers.0", module0, module0_inputs, 1, poly_device_uop(ctx, POLY_DEVICE_INTERP)},
+      {"layers.1", module1, module1_inputs, 1, poly_device_uop(ctx, POLY_DEVICE_CPU)},
+  };
+  PolyUOp *reverse_placed[3] = {NULL, NULL, NULL};
+  ASSERT_INT_EQ(
+      poly_place_module_map(
+          ctx, roots, 3, logical_bindings, 4, reverse_devices, 2,
+          reverse_targets, reverse_placed
+      ),
+      0
+  );
+  ASSERT_EQ(reverse_placed[1]->src[0]->op, POLY_OP_COPY);
+  ASSERT_PTR_EQ(reverse_placed[1]->src[0]->src[1], reverse_devices[1].device);
+  ASSERT_EQ(poly_uop_device(reverse_placed[1]), POLY_DEVICE_CPU);
+  ASSERT_EQ(poly_uop_device(reverse_targets[3]), POLY_DEVICE_CPU);
+
+  float x_data[2] = {1.0f, 2.0f};
+  float w0_data[2] = {3.0f, 4.0f};
+  float w1_data[2] = {2.0f, 3.0f};
+  ASSERT_INT_EQ(poly_buffer_write(ctx, px, x_data, sizeof(x_data)), 0);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, pw0, w0_data, sizeof(w0_data)), 0);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, pw1, w1_data, sizeof(w1_data)), 0);
+  PolyUOp *realized[2] = {NULL, NULL};
+  PolyUOp *value_roots[2] = {placed[1], placed[2]};
+  ASSERT_INT_EQ(poly_realize_uops(ctx, value_roots, 2, realized), 0);
+  float out[2] = {0.0f, 0.0f};
+  ASSERT_INT_EQ(poly_buffer_read(ctx, realized[0], out, sizeof(out)), 0);
+  ASSERT_FLOAT_NEAR(out[0], 8.0f, 4, 1e-6f);
+  ASSERT_FLOAT_NEAR(out[1], 18.0f, 4, 1e-6f);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(placement, explicit_module_map_rejects_ambiguous_regions_atomically) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *lx = placement_buffer(ctx, 2, POLY_DEVICE_AUTO);
+  PolyUOp *lw0 = placement_buffer(ctx, 2, POLY_DEVICE_AUTO);
+  PolyUOp *lw1 = placement_buffer(ctx, 2, POLY_DEVICE_AUTO);
+  PolyUOp *module0 = poly_add(ctx, lx, lw0);
+  PolyUOp *module1 = poly_mul(ctx, module0, lw1);
+  PolyUOp *logical_bindings[3] = {lx, lw0, lw1};
+  PolyUOp *target_bindings[3] = {NULL, NULL, NULL};
+  PolyUOp *module0_inputs[1] = {lx};
+  PolyUOp *module1_inputs[1] = {module0};
+  PolyPlaceModule modules[2] = {
+      {"layers.0", module0, module0_inputs, 1, poly_device_uop(ctx, POLY_DEVICE_CPU)},
+      {"layers.1", module1, module1_inputs, 1, poly_device_uop(ctx, POLY_DEVICE_INTERP)},
+  };
+  PolyUOp *roots[1] = {module1};
+  PolyUOp *sentinel = poly_const_int(ctx, 73);
+  PolyUOp *out[1] = {sentinel};
+
+  PolyPlaceModule missing_cut[2] = {modules[0], modules[1]};
+  missing_cut[1].inputs = NULL;
+  missing_cut[1].n_inputs = 0;
+  ASSERT_INT_EQ(
+      poly_place_module_map(
+          ctx, roots, 1, logical_bindings, 3, missing_cut, 2, target_bindings, out
+      ),
+      -1
+  );
+  ASSERT_PTR_EQ(out[0], sentinel);
+
+  PolyUOp *conflict1 = poly_mul(ctx, module0, lw0);
+  PolyUOp *conflict1_inputs[1] = {module0};
+  PolyPlaceModule conflicting_owner[2] = {
+      modules[0],
+      {"layers.1", conflict1, conflict1_inputs, 1, poly_device_uop(ctx, POLY_DEVICE_INTERP)},
+  };
+  PolyUOp *conflict_roots[1] = {conflict1};
+  ASSERT_INT_EQ(
+      poly_place_module_map(
+          ctx, conflict_roots, 1, logical_bindings, 3, conflicting_owner, 2,
+          target_bindings, out
+      ),
+      -1
+  );
+  ASSERT_PTR_EQ(out[0], sentinel);
+
+  PolyPlaceModule reversed[2] = {modules[1], modules[0]};
+  ASSERT_INT_EQ(
+      poly_place_module_map(
+          ctx, roots, 1, logical_bindings, 3, reversed, 2, target_bindings, out
+      ),
+      -1
+  );
+  ASSERT_PTR_EQ(out[0], sentinel);
 
   poly_ctx_destroy(ctx);
   PASS();

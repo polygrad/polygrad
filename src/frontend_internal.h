@@ -139,6 +139,35 @@ int poly_place_roots(
     PolyUOp **out_roots
 );
 
+/* One explicit module region for the non-uniform scalar-device placement
+ * policy.  The descriptor is pass input, not graph or Instance state: output
+ * is the exact portable value root produced by the module, and inputs are the
+ * exact portable roots at which its backward slice must stop. */
+typedef struct {
+  const char *name;
+  PolyUOp *output;
+  PolyUOp **inputs;
+  int n_inputs;
+  PolyUOp *device;
+} PolyPlaceModule;
+
+/* Compile pure portable roots under an ordered, explicit module/device map.
+ * Each module is rebuilt from declared boundary inputs on its target device;
+ * exact cross-module identity changes become ordinary COPY UOps.  The policy
+ * derives physical binding homes from exact module regions and STORE values.
+ * The operation is aggregate and atomic with respect to both output arrays. */
+int poly_place_module_map(
+    PolyCtx *ctx,
+    PolyUOp **logical_roots,
+    int n_roots,
+    PolyUOp **logical_bindings,
+    int n_bindings,
+    const PolyPlaceModule *modules,
+    int n_modules,
+    PolyUOp **out_bindings,
+    PolyUOp **out_roots
+);
+
 /* Resolve the exact execution device used by the physicalizer for a Tensor. */
 PolyDevice poly_tensor_resolved_device(PolyCtx *ctx, PolyTensor *tensor);
 

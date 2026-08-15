@@ -1695,7 +1695,7 @@ TEST(sched, custom_kernel_call_after_executes) {
   PolyUOp *sum = poly_alu2(ctx, POLY_OP_ADD, ai, bi);
   PolyUOp *store = poly_uop_store(ctx, ci, sum);
   PolyUOp *body = poly_uop_end(ctx, store, idxs, 1);
-  PolyUOp *sink = poly_uop_sink(ctx, &body, 1);
+  PolyUOp *sink = poly_uop_sink_ex(ctx, &body, 1, "custom_add_4", 1);
   PolyUOp *args[3] = {c, a, b};
   PolyUOp *call = poly_uop_call(ctx, sink, args, 3);
   PolyUOp *out = poly_uop_after(ctx, c, call);
@@ -1736,7 +1736,7 @@ TEST(sched, custom_kernel_call_replays_after_input_mutation) {
   PolyUOp *sum = poly_alu2(ctx, POLY_OP_ADD, ai, bi);
   PolyUOp *store = poly_uop_store(ctx, ci, sum);
   PolyUOp *body = poly_uop_end(ctx, store, idxs, 1);
-  PolyUOp *sink = poly_uop_sink(ctx, &body, 1);
+  PolyUOp *sink = poly_uop_sink_ex(ctx, &body, 1, "custom_add_replay_4", 1);
   PolyUOp *args[3] = {c, a, b};
   PolyUOp *call = poly_uop_call(ctx, sink, args, 3);
   PolyUOp *out = poly_uop_after(ctx, c, call);

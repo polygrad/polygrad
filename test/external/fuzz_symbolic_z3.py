@@ -85,6 +85,9 @@ class PolyDefineVarArg(ctypes.Structure):
 class PolyBufferizeOptsArg(ctypes.Structure):
     _fields_ = [
         ("device", ctypes.c_char_p),
+        ("devices", ctypes.POINTER(ctypes.c_char_p)),
+        ("n_devices", ctypes.c_int32),
+        ("device_is_tuple", ctypes.c_bool),
         ("addrspace", ctypes.c_int),
         ("removable", ctypes.c_bool),
     ]

@@ -1,23 +1,55 @@
 """Tests for polygrad.nn module — layers, optimizers, state dict."""
 
+import base64
 import math
+import zlib
 import numpy as np
 import pytest
-from polygrad import Instance, Tensor
+from polygrad import GlobalCounters, Instance, Tensor, _ffi
 from polygrad.nn import (
-    Linear, LayerNorm, GroupNorm, RMSNorm, Embedding, Dropout, Conv2d, BatchNorm,
-    SGD, Adam, AdamW, OptimizerGroup,
-    get_parameters, get_state_dict, load_state_dict,
+    Linear,
+    LayerNorm,
+    LayerNorm2d,
+    GroupNorm,
+    RMSNorm,
+    Embedding,
+    Dropout,
+    Conv2d,
+    BatchNorm,
+    BatchNorm2d,
+    BatchNorm3d,
+    SGD,
+    Adam,
+    AdamW,
+    OptimizerGroup,
+    get_parameters,
+    get_state_dict,
+    load_state_dict,
 )
+from polygrad.nn.state import safe_load, safe_load_metadata, torch_load
 
 
 # ── Helpers ──
+
 
 def approx(a, b, tol=1e-4):
     return np.allclose(a, b, atol=tol)
 
 
+def graph_op_counts(root):
+    counts, seen, stack = {}, set(), [root]
+    while stack:
+        node = stack.pop()
+        if not node or node in seen:
+            continue
+        seen.add(node)
+        counts[node.op_name] = counts.get(node.op_name, 0) + 1
+        stack.extend(node.src)
+    return counts
+
+
 # ── Linear ──
+
 
 class TestLinear:
     def test_forward_shape(self):
@@ -53,6 +85,7 @@ class TestLinear:
 
 # ── LayerNorm ──
 
+
 class TestLayerNorm:
     def test_forward_shape(self):
         ln = LayerNorm(4)
@@ -77,10 +110,57 @@ class TestLayerNorm:
         assert ln.weight.grad is not None
         assert ln.bias.grad is not None
 
+    def test_layernorm2d_exact_pinned_composition(self):
+        xv = (
+            np.arange(2 * 3 * 2 * 2, dtype=np.float32).reshape(2, 3, 2, 2) - 7
+        ) / 5
+        ln = LayerNorm2d(3, eps=1e-5)
+        ln.weight.assign(Tensor([1.5, -0.5, 2.0])).realize()
+        ln.bias.assign(Tensor([0.25, -0.75, 0.5])).realize()
+        out = ln(Tensor(xv))
+
+        assert out.shape == (2, 3, 2, 2)
+        assert out.uop.op_name == "PERMUTE"
+        assert graph_op_counts(out.uop) == {
+            "ADD": 3,
+            "BUFFER": 3,
+            "CONST": 6,
+            "COPY": 1,
+            "DEVICE": 2,
+            "EXPAND": 7,
+            "MUL": 6,
+            "PERMUTE": 2,
+            "RECIPROCAL": 2,
+            "REDUCE": 2,
+            "RESHAPE": 6,
+            "SQRT": 1,
+            "STACK": 5,
+            "UNIQUE": 3,
+        }
+        nhwc = xv.transpose(0, 2, 3, 1)
+        centered = nhwc - nhwc.mean(axis=-1, keepdims=True)
+        expected = centered / np.sqrt((centered * centered).mean(axis=-1, keepdims=True) + 1e-5)
+        expected = expected * np.asarray([1.5, -0.5, 2.0]) + np.asarray([0.25, -0.75, 0.5])
+        np.testing.assert_allclose(out.numpy(), expected.transpose(0, 3, 1, 2), rtol=1e-6, atol=1e-6)
+
 
 # ── RMSNorm ──
 
+
 class TestRMSNorm:
+    def test_exact_pinned_expression_and_optional_affine(self):
+        x = (Tensor.arange(8).float().reshape(2, 4) - 3.0) / 5.0
+        rn = RMSNorm(4, eps=1e-5)
+        expected = (
+            x.float() *
+            (x.float().square().mean(axis=-1, keepdim=True) + 1e-5).rsqrt()
+        ).cast(x.dtype) * rn.weight
+        assert rn(x).uop.raw == expected.uop.raw
+
+        no_affine = RMSNorm(4, elementwise_affine=False)
+        assert no_affine.weight is None
+        assert no_affine(x).uop.raw == no_affine._norm(x.float()).cast(x.dtype).uop.raw
+
     def test_forward_shape(self):
         rn = RMSNorm(4)
         x = Tensor.rand(2, 4)
@@ -97,6 +177,7 @@ class TestRMSNorm:
 
 
 # ── GroupNorm ──
+
 
 class TestGroupNorm:
     def test_forward_shape(self):
@@ -116,6 +197,7 @@ class TestGroupNorm:
 
 # ── Conv2d ──
 
+
 class TestConv2d:
     def test_forward_shape(self):
         conv = Conv2d(3, 4, kernel_size=3, stride=2, padding=1)
@@ -134,7 +216,12 @@ class TestConv2d:
 
 # ── BatchNorm ──
 
+
 class TestBatchNorm:
+    def test_dimensional_names_are_exact_aliases(self):
+        assert BatchNorm2d is BatchNorm
+        assert BatchNorm3d is BatchNorm
+
     def test_forward_shape(self):
         bn = BatchNorm(4)
         x = Tensor.rand(2, 4, 3, 3)
@@ -148,13 +235,16 @@ class TestBatchNorm:
         x = Tensor.rand(2, 4, 3, 3)
         before_mean = bn.running_mean.numpy().copy()
         before_var = bn.running_var.numpy().copy()
+        before_count = bn.num_batches_tracked.numpy().copy()
         Tensor.training = True
         _ = bn(x).realize()
         Tensor.training = False
         after_mean = bn.running_mean.numpy()
         after_var = bn.running_var.numpy()
+        after_count = bn.num_batches_tracked.numpy()
         assert not np.allclose(before_mean, after_mean)
         assert not np.allclose(before_var, after_var)
+        assert np.array_equal(after_count, before_count + 1)
 
     def test_running_var_bias_correction(self):
         bn = BatchNorm(4, momentum=0.1)
@@ -187,7 +277,22 @@ class TestBatchNorm:
 
 # ── Embedding ──
 
+
 class TestEmbedding:
+    def test_initializer_and_selector_match_pinned_expressions(self):
+        Tensor.manual_seed(123)
+        expected_weight = Tensor.glorot_uniform(5, 3).numpy()
+        Tensor.manual_seed(123)
+        emb = Embedding(5, 3)
+        np.testing.assert_array_equal(emb.weight.numpy(), expected_weight)
+
+        idx = Tensor.arange(3).cast('int32')
+        expected = (
+            Tensor.arange(5).eq(idx.unsqueeze(-1)).unsqueeze(-1)
+            .where(emb.weight, 0).sum(axis=-2, dtype=emb.weight.dtype)
+        )
+        assert emb(idx).uop.raw == expected.uop.raw
+
     def test_forward_shape(self):
         emb = Embedding(10, 4)
         idx = Tensor([0, 3, 7])
@@ -204,11 +309,12 @@ class TestEmbedding:
 
     def test_rejects_non_integer_indices(self):
         emb = Embedding(5, 3)
-        with pytest.raises(TypeError, match='Expected integer dtype'):
+        with pytest.raises(TypeError, match="Expected integer dtype"):
             emb(Tensor([0.0, 2.0]))
 
 
 # ── Dropout ──
+
 
 class TestDropout:
     def test_eval_passthrough(self):
@@ -228,6 +334,7 @@ class TestDropout:
 
 
 # ── SGD ──
+
 
 class TestSGD:
     def test_step_updates(self):
@@ -280,6 +387,7 @@ class TestSGD:
 
 # ── Adam ──
 
+
 class TestAdam:
     def test_loss_decreases(self):
         Tensor.manual_seed(42)
@@ -317,6 +425,7 @@ class TestAdam:
 
 # ── AdamW ──
 
+
 class TestAdamW:
     def test_loss_decreases(self):
         Tensor.manual_seed(42)
@@ -343,6 +452,7 @@ class TestAdamW:
 
 # ── ASSIGN ──
 
+
 class TestAssign:
     def test_assign_basic(self):
         a = Tensor([1.0, 2.0, 3.0])
@@ -357,15 +467,18 @@ class TestAssign:
 
 # ── Instance export ──
 
+
 class TestInstanceExport:
     def test_typed_integer_input_preserves_bytes_and_rejects_float_binding(self):
-        x = Tensor.empty((3,), dtype='int32')
-        out = x.cast('float32')
-        inst = Instance.from_tensors(inputs={'typed_x': x}, outputs={'typed_out': out})
+        x = Tensor.empty((3,), dtype="int32")
+        out = x.cast("float32")
+        inst = Instance.from_tensors(inputs={"typed_x": x}, outputs={"typed_out": out})
 
         result = inst.forward(typed_x=np.array([0, 1, 2], dtype=np.int32))
-        np.testing.assert_array_equal(result['typed_out'], np.array([0, 1, 2], dtype=np.float32))
-        with pytest.raises(RuntimeError, match='forward failed'):
+        np.testing.assert_array_equal(
+            result["typed_out"], np.array([0, 1, 2], dtype=np.float32)
+        )
+        with pytest.raises(RuntimeError, match="forward failed"):
             inst.forward(typed_x=np.array([0, 1, 2], dtype=np.float32))
 
     def test_functional_model_exports_selected_forward_entrypoint(self):
@@ -374,9 +487,13 @@ class TestInstanceExport:
         w = Tensor([[2.0], [3.0]], requires_grad=True).realize()
         x = Tensor.empty((1, 2))
         y = x.dot(w)
-        assert _ffi._lib.poly_uop_reachable(x._ctx, y.uop_logical.raw, w.uop_logical.raw)
+        assert _ffi._lib.poly_uop_reachable(
+            x._ctx, y.uop_logical.raw, w.uop_logical.raw
+        )
         if w.uop_logical.raw != w.uop.raw:
-            assert not _ffi._lib.poly_uop_reachable(x._ctx, y.uop_logical.raw, w.uop.raw)
+            assert not _ffi._lib.poly_uop_reachable(
+                x._ctx, y.uop_logical.raw, w.uop.raw
+            )
             assert y.uop_physical is not None
             assert _ffi._lib.poly_uop_reachable(x._ctx, y.uop_physical.raw, w.uop.raw)
 
@@ -490,6 +607,37 @@ class TestInstanceExport:
         out = inst.forward(py_trace_x=np.array([[2.0, 3.0]], dtype=np.float32))
         assert np.allclose(out["output"], [23.0], atol=1e-5)
 
+    def test_explicit_module_device_map_uses_exact_tensor_cuts(self):
+        x = Tensor.empty((2,))
+        w0 = Tensor([3.0, 4.0], requires_grad=True)
+        w1 = Tensor([2.0, 3.0], requires_grad=True)
+        hidden = x + w0
+        output = hidden * w1
+
+        inst = Instance.from_tensors(
+            inputs={"x": x},
+            outputs={"output": output},
+            params={"layers.0.weight": w0, "layers.1.weight": w1},
+            modules=[
+                {"name": "layers.0", "inputs": [x], "output": hidden},
+                {"name": "layers.1", "inputs": [hidden], "output": output},
+            ],
+        )
+        inst.set_device_map({"layers.0": "CPU", "layers.1": "CPU:1"})
+        result = inst.forward(x=np.array([1.0, 2.0], dtype=np.float32))
+        np.testing.assert_array_equal(
+            result["output"], np.array([8.0, 18.0], dtype=np.float32)
+        )
+
+        with pytest.raises(ValueError, match="incomplete"):
+            inst.set_device_map({"layers.0": "CPU"})
+
+        inst.set_device_map({"layers.0": "CPU:1", "layers.1": "CPU"})
+        result = inst.forward(x=np.array([1.0, 2.0], dtype=np.float32))
+        np.testing.assert_array_equal(
+            result["output"], np.array([8.0, 18.0], dtype=np.float32)
+        )
+
     def test_constructor_state_names_survive_ir_roundtrip(self):
         w = Tensor([[2.0], [3.0]], requires_grad=True).realize()
         x = Tensor.empty((1, 2))
@@ -568,14 +716,107 @@ class TestInstanceExport:
 
 # ── State dict ──
 
+
 class TestStateDict:
+    def test_safe_load_matches_pinned_lazy_disk_graph_and_values(self, tmp_path):
+        fixture = tmp_path / "state.safetensors"
+        fixture.write_bytes(base64.b64decode(
+            "MAEAAAAAAAB7Il9fbWV0YWRhdGFfXyI6eyJmb3JtYXQiOiJwb2x5Z3JhZC1wYXJpdHkiLCJ2ZXJzaW9uIjoiMSJ9LCJmbG9hdCI6eyJkdHlwZSI6IkYzMiIsInNoYXBlIjpbMiwyXSwiZGF0YV9vZmZzZXRzIjpbMCwxNl19LCJsb25nIjp7ImR0eXBlIjoiSTY0Iiwic2hhcGUiOlsyXSwiZGF0YV9vZmZzZXRzIjpbMTYsMzJdfSwiYm9vbCI6eyJkdHlwZSI6IkJPT0wiLCJzaGFwZSI6WzIsMl0sImRhdGFfb2Zmc2V0cyI6WzMyLDM2XX0sInNjYWxhciI6eyJkdHlwZSI6IkYzMiIsInNoYXBlIjpbXSwiZGF0YV9vZmZzZXRzIjpbMzYsNDBdfX0gICAgICAgAACgPwAAIMAAAHBAAACQQAAAAAAA////AwAAAAABAAABAAABAAAwQA=="
+        ))
+
+        source, data_start, metadata = safe_load_metadata(fixture)
+        loaded = safe_load(fixture)
+        assert data_start == 312
+        assert len(source) == 352
+        assert metadata["__metadata__"] == {
+            "format": "polygrad-parity",
+            "version": "1",
+        }
+        assert list(loaded) == ["float", "long", "bool", "scalar"]
+        assert loaded["float"].uop.op_name == "RESHAPE"
+        assert graph_op_counts(loaded["float"].uop) == {
+            "BITCAST": 1,
+            "BUFFER": 1,
+            "CONST": 5,
+            "DEVICE": 1,
+            "RESHAPE": 1,
+            "SHRINK": 2,
+            "STACK": 5,
+            "UNIQUE": 1,
+        }
+        assert loaded["float"].uop.src[0].op_name == "BITCAST"
+        assert loaded["float"].uop.src[0].src[0].op_name == "SHRINK"
+        stack = [loaded["float"].uop]
+        buffer_node = None
+        while stack:
+            node = stack.pop()
+            if node.op_name == "BUFFER":
+                buffer_node = node
+                break
+            stack.extend(node.src)
+        assert buffer_node is not None
+        graph_device = _ffi._lib.poly_uop_device_name(
+            loaded["float"]._ctx, buffer_node.raw
+        )
+        assert graph_device.decode() == f"DISK:{fixture.resolve()}"
+        physical_before = loaded["float"].uop.raw
+        kernels_before = GlobalCounters.kernel_count
+        loaded["float"].realize()
+        assert loaded["float"].uop.raw == physical_before
+        assert GlobalCounters.kernel_count == kernels_before
+        np.testing.assert_array_equal(
+            loaded["float"].numpy(),
+            np.asarray([[1.25, -2.5], [3.75, 4.5]], dtype=np.float32),
+        )
+        assert GlobalCounters.kernel_count == kernels_before
+        np.testing.assert_array_equal(
+            loaded["long"].numpy(),
+            np.asarray([-(1 << 40), (1 << 40) + 3], dtype=np.int64),
+        )
+        np.testing.assert_array_equal(
+            loaded["bool"].numpy(),
+            np.asarray([[True, False], [False, True]], dtype=np.bool_),
+        )
+        assert loaded["scalar"].item() == 2.75
+        with pytest.raises(RuntimeError, match="unsupported size in bitcast"):
+            source[:3].bitcast("float32")
+
+    def test_torch_load_modern_zip_values_dtypes_and_strides(self, tmp_path):
+        # zlib(base64) of the exact 2,496-byte torch.save fixture used by the
+        # paired pinned probe. Keeping bytes here avoids a runtime PyTorch test
+        # dependency while exercising the real archive/pickle format.
+        packed = "eNrFlklv00AUx8d2tpodSkkLlNI13W1naYrEogjlYiTSAFLEgch1TGNhxX32pCpcgEOrcuPECSE4Uc7cUb8CFHHkgoQ4wYEPEGbsEsUuSSyExEijSUZvfv//OO89pyBzIYRiMbRvjKJLCJuWWi0bplIp39XXcd3SypIgZYSsmJqvKFiZW71n5HMX0O2/Ho9YVTUNQ1OxbtZs/rpV0SytclVXMQ9osghMosQTM6pZw/pK3azbwKqOq7lyHeuGzZctbbmuG5Uy1mq2aZXXJB64RKIUJadsEqmsaBByj/B5chN8w93kIVxiSIwAkRJHFVbrEJUjGGJLMpJZmduEHpmTmU3gn1SpkwMYDhbhkGMHW0rNXjVtrQKHq0StGqq6NBGOVB3KUUrhZHYTjskMhR13KScw9BbhZClMgg2ztmJDnwvYs3iN7DUdnnKYEsQJk8PQ7zA3YEBmNuC0yzuD4WwRBh3esmkaNpzz8HJkr8kbcnhJOE94IQzD7k2JxxGykJuOuswxDONFmChF6CNUFUOxIOG5ZQomCYHBMEUIk5PuqWkMM0WYrc8V5Ghs6N2b3V0SSmehbYqNoYGOKbZ8H2smzYh8rq9Njhk6xoZGJTcufumnjulsLzmMprpm9byQz40HzGmEXl5GaGgHodUrCD0lc5t83rlCHT3/+ep1nGjGuziKd3ck5nO96D/qS+31yWg0Gr9ptJSQ86NHY2+3+dA/0k+20ydSDNX6sdX4TgRQqIvWTHetVD6XCNzRSANxnvXD7c9b3fVH0HRH/TXNskkfzOcmghpI8lT9/YuVWyzhsx3VJTTYUX3Oub6tWbpi6A8U2pHLeiWfG+hgRsgIophdzIrZhQVRSiYlSUgKQjqVzKYz5JsoSal0ZlFKU5fC42dLCeIj4bhkqNmmz9aGMbrPeZD3kJ/Y2g/GPDSVRcHajh/ZWlDDHuQnFgVoK8F5VS4AT/TzWgvOy/sWhCf5ea1F5fMXCsBL+nmtReLlfQzCS/l5rWk/4uHdDKMgheYHtmao5AF+6AL8c+0U5EhkZo8wyM02aT2+9SvrrusRdyXn6P8XdGcvgHH2whH3TI8T78b+ApnwOk8="
+        archive = tmp_path / "state.pth"
+        archive.write_bytes(zlib.decompress(base64.b64decode(packed)))
+        state = torch_load(archive)
+
+        assert list(state) == ["contiguous", "transposed", "longs", "bools", "scalar"]
+        np.testing.assert_array_equal(
+            state["contiguous"].numpy(),
+            np.asarray([[1.25, -2.5, 3.75], [4.5, -5.25, 6.0]], dtype=np.float32),
+        )
+        np.testing.assert_array_equal(
+            state["transposed"].numpy(),
+            np.asarray([[1.25, 4.5], [-2.5, -5.25], [3.75, 6.0]], dtype=np.float32),
+        )
+        np.testing.assert_array_equal(
+            state["longs"].numpy(),
+            np.asarray([-(1 << 40), 0, (1 << 40) + 3], dtype=np.int64),
+        )
+        np.testing.assert_array_equal(
+            state["bools"].numpy(),
+            np.asarray([[True, False], [False, True]], dtype=np.bool_),
+        )
+        assert state["scalar"].shape == ()
+        assert state["scalar"].item() == 2.75
+
     def test_get_state_dict(self):
         m = Linear(3, 2)
         sd = get_state_dict(m)
-        assert 'weight' in sd
-        assert 'bias' in sd
-        assert sd['weight'].shape == (2, 3)
-        assert sd['bias'].shape == (2,)
+        assert "weight" in sd
+        assert "bias" in sd
+        assert sd["weight"].shape == (2, 3)
+        assert sd["bias"].shape == (2,)
 
     def test_get_parameters(self):
         m = Linear(3, 2)
@@ -595,18 +836,20 @@ class TestStateDict:
             def __init__(self):
                 self.l1 = Linear(2, 3)
                 self.l2 = Linear(3, 1)
+
         m = Model()
         sd = get_state_dict(m)
-        assert 'l1.weight' in sd
-        assert 'l1.bias' in sd
-        assert 'l2.weight' in sd
-        assert 'l2.bias' in sd
+        assert "l1.weight" in sd
+        assert "l1.bias" in sd
+        assert "l2.weight" in sd
+        assert "l2.bias" in sd
 
     def test_get_parameters_nested(self):
         class Model:
             def __init__(self):
                 self.l1 = Linear(2, 3)
                 self.l2 = Linear(3, 1)
+
         m = Model()
         params = get_parameters(m)
         assert len(params) == 4  # weight+bias for each layer
@@ -618,9 +861,14 @@ class TestStateDict:
         assert [id(x) for x in params] == [id(x) for x in state.values()]
         assert any(x is bn.running_mean for x in params)
         assert any(x is bn.running_var for x in params)
+        assert any(x is bn.num_batches_tracked for x in params)
         opt = SGD(params, lr=0.1)
         assert [id(x) for x in opt.params] == [id(bn.weight), id(bn.bias)]
-        assert [id(x) for x in opt.buffers] == [id(bn.running_mean), id(bn.running_var)]
+        assert [id(x) for x in opt.buffers] == [
+            id(bn.num_batches_tracked),
+            id(bn.running_mean),
+            id(bn.running_var),
+        ]
 
 
 class TestParameterMarkerParity:
@@ -648,14 +896,21 @@ class TestParameterMarkerParity:
                 self.running_mean = Tensor.zeros(4).is_param_(False)
 
         state = get_state_dict(CustomNorm())
-        bias = [value for name, value in state.items() if value.is_param and 'bias' in name]
-        non_bias = [value for name, value in state.items() if value.is_param and 'bias' not in name]
+        bias = [
+            value for name, value in state.items() if value.is_param and "bias" in name
+        ]
+        non_bias = [
+            value
+            for name, value in state.items()
+            if value.is_param and "bias" not in name
+        ]
         assert len(bias) == 1
         assert len(non_bias) == 0
         assert [id(x) for x in SGD(bias, lr=0.1).params] == [id(x) for x in bias]
 
 
 # ── Segment-wise backward ──
+
 
 class TestLiveTensorBackward:
     """Tests for tinygrad-style live-UOp gradient target discovery."""
@@ -866,13 +1121,15 @@ class TestLiveTensorBackward:
         third = g.shape[1] // 3
         # All three sections must have non-zero gradients
         assert np.abs(g[:, :third]).sum() > 0, "q section gradient is zero"
-        assert np.abs(g[:, third:2*third]).sum() > 0, "k section gradient is zero"
-        assert np.abs(g[:, 2*third:]).sum() > 0, "v section gradient is zero"
+        assert np.abs(g[:, third : 2 * third]).sum() > 0, "k section gradient is zero"
+        assert np.abs(g[:, 2 * third :]).sum() > 0, "v section gradient is zero"
 
         # Compare magnitude across sections — they should be similar (same loss weight)
-        norms = [np.linalg.norm(g[:, i*third:(i+1)*third]) for i in range(3)]
+        norms = [np.linalg.norm(g[:, i * third : (i + 1) * third]) for i in range(3)]
         ratio = max(norms) / min(norms)
-        assert ratio < 10, f"Gradient section norms differ too much: {norms} (ratio={ratio:.1f})"
+        assert ratio < 10, (
+            f"Gradient section norms differ too much: {norms} (ratio={ratio:.1f})"
+        )
 
     def test_qkv_diamond_training(self):
         """QKV diamond pattern: lazy gradient produces loss decrease over steps."""
@@ -901,15 +1158,18 @@ class TestLiveTensorBackward:
             w._grad = None
 
         assert all(np.isfinite(l) for l in losses), f"NaN/Inf in losses: {losses}"
-        assert losses[-1] < losses[0], \
+        assert losses[-1] < losses[0], (
             f"Loss did not decrease: {losses[0]:.4f} -> {losses[-1]:.4f}"
+        )
 
 
 # ── Variable (dynamic shapes) ──
 
+
 class TestVariable:
     def test_creation(self):
         from polygrad import Variable
+
         v = Variable("N", 1, 128)
         assert v.name == "N"
         assert v.min_val == 1
@@ -917,6 +1177,7 @@ class TestVariable:
 
     def test_bind(self):
         from polygrad import Variable
+
         v = Variable("N", 1, 128)
         bound = v.bind(32)
         assert int(bound) == 32
@@ -924,6 +1185,7 @@ class TestVariable:
 
     def test_bind_out_of_range(self):
         from polygrad import Variable
+
         v = Variable("N", 1, 128)
         with pytest.raises(AssertionError):
             v.bind(0)
@@ -932,6 +1194,7 @@ class TestVariable:
 
     def test_repr(self):
         from polygrad import Variable
+
         v = Variable("N", 1, 128)
         assert "N" in repr(v)
         bound = v.bind(32)

@@ -7240,22 +7240,10 @@ static PolyPatternMatcher *poly_pm_load_store_folding(void) {
 /*
  * After range substitution (pm_split_ranges, apply_opts_basic), an END's
  * ended_ranges src[1:] may contain arithmetic expressions instead of RANGEs.
- * This pass walks backward from each src to find all actual RANGEs, then
- * rebuilds the END as a nested chain: END(END(...END(store, r_last)..., r1), r0).
+ * Match tinygrad's `UOp.sink(*e.src[1:]).ranges`: collect only ranges still
+ * active after nested END/REDUCE/STORE effects have closed their own ranges,
+ * then rebuild END as a nested chain.
  */
-
-static void collect_ranges_backward(PolyCtx *ctx, PolyUOp *u, PolyUOp **out, int *n, int cap) {
-  if (!u || *n >= cap) return;
-  if (u->op == POLY_OP_RANGE) {
-    /* Deduplicate */
-    for (int i = 0; i < *n; i++)
-      if (out[i] == u) return;
-    out[(*n)++] = u;
-    return;
-  }
-  for (int i = 0; i < u->n_src; i++)
-    collect_ranges_backward(ctx, u->src[i], out, n, cap);
-}
 
 static int cmp_range_axis_id(const void *a, const void *b) {
   const PolyUOp *ra = *(const PolyUOp *const *)a;
@@ -7282,15 +7270,33 @@ static PolyUOp *rule_split_ends(PolyCtx *ctx, PolyUOp *end, const PolyBindings *
   /* Also split multi-RANGE ENDs into nested single-RANGE ENDs */
   if (!needs_split && end->n_src <= 2) return NULL;
 
-  /* Collect all RANGE UOps reachable from src[1:] */
-  PolyUOp *ranges[64];
-  int n_ranges = 0;
-  for (int j = 1; j < end->n_src; j++)
-    collect_ranges_backward(ctx, end->src[j], ranges, &n_ranges, 64);
+  /* tinygrad codegen/late/linearizer.py:88-90 constructs a temporary SINK
+   * over the END dependencies and queries its active `.ranges`. Reuse the
+   * shared exact port instead of recursively rediscovering already-ended
+   * ranges. Size from the dependency graph so this rule has no fixed arity
+   * cap. */
+  PolyUOp *range_sink =
+      poly_uop(ctx, POLY_OP_SINK, POLY_VOID, end->src + 1, end->n_src - 1, poly_arg_none());
+  int n_topo = 0;
+  PolyUOp **range_topo = poly_toposort_alloc(ctx, range_sink, &n_topo);
+  if (!range_topo || n_topo <= 0) {
+    free(range_topo);
+    return NULL;
+  }
+  PolyUOp **ranges = malloc((size_t)n_topo * sizeof(*ranges));
+  if (!ranges) {
+    free(range_topo);
+    return NULL;
+  }
+  int n_ranges = poly_uop_ranges(ctx, range_sink, ranges, n_topo);
+  free(range_topo);
 
   /* tinygrad do_split_ends returns src[0] when no ranges remain reachable from
    * the END sources. Keeping an orphan END produces renderer depth mismatch. */
-  if (n_ranges == 0) return end->src[0];
+  if (n_ranges == 0) {
+    free(ranges);
+    return end->src[0];
+  }
 
   /* Sort by axis_id (ascending = outermost first) */
   qsort(ranges, (size_t)n_ranges, sizeof(PolyUOp *), cmp_range_axis_id);
@@ -7302,6 +7308,7 @@ static PolyUOp *rule_split_ends(PolyCtx *ctx, PolyUOp *end, const PolyBindings *
     PolyUOp *end_srcs[2] = {ret, ranges[i]};
     ret = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_srcs, 2, poly_arg_none());
   }
+  free(ranges);
   return ret;
 }
 
@@ -7767,13 +7774,18 @@ static PolyUOp *rule_cast_after_after(PolyCtx *ctx, PolyUOp *after, const PolyBi
   if (after->op != POLY_OP_AFTER || after->n_src < 1) return NULL;
   if (after->src[0]->op != POLY_OP_CAST || after->src[0]->n_src < 1) return NULL;
   PolyUOp *cast = after->src[0];
-  PolyUOp *new_srcs[128];
+  /* Pinned devectorizer.py:269 matches allow_any_len=True and reconstructs
+   * every AFTER dependency. Allocate from the actual legal UOp arity instead
+   * of truncating wide reduction effect lists to a fixed stack capacity. */
+  PolyUOp **new_srcs = malloc((size_t)after->n_src * sizeof(*new_srcs));
+  if (!new_srcs) return NULL;
   new_srcs[0] = cast->src[0];
-  int nd = after->n_src - 1;
-  for (int i = 0; i < nd && i < 127; i++)
-    new_srcs[1 + i] = after->src[1 + i];
+  for (int i = 1; i < after->n_src; i++)
+    new_srcs[i] = after->src[i];
   PolyUOp *new_after =
-      poly_uop(ctx, POLY_OP_AFTER, cast->src[0]->dtype, new_srcs, 1 + nd, poly_arg_none());
+      poly_uop(ctx, POLY_OP_AFTER, cast->src[0]->dtype, new_srcs, after->n_src, poly_arg_none());
+  free(new_srcs);
+  if (!new_after) return NULL;
   return poly_uop1(ctx, POLY_OP_CAST, cast->dtype, new_after, poly_arg_none());
 }
 
@@ -9426,14 +9438,6 @@ static bool is_invalid_const_codegen(PolyUOp *u) {
   return u && u->op == POLY_OP_CONST && u->arg.kind == POLY_ARG_INVALID;
 }
 
-static bool uop_tree_contains_invalid_const_codegen(PolyUOp *u) {
-  if (!u) return false;
-  if (is_invalid_const_codegen(u)) return true;
-  for (int i = 0; i < u->n_src; i++)
-    if (uop_tree_contains_invalid_const_codegen(u->src[i])) return true;
-  return false;
-}
-
 static bool int_const_value_codegen(PolyUOp *u, int64_t *out) {
   if (!u || u->op != POLY_OP_CONST || u->arg.kind != POLY_ARG_INT) return false;
   if (out) *out = u->arg.i;
@@ -9545,374 +9549,6 @@ static PolyUOp *rule_canonicalize_and_valid_bounds(
   return ret == root ? NULL : ret;
 }
 
-static PolyUOp *simplify_index_expr_given_gate(
-    PolyCtx *ctx,
-    PolyUOp *u,
-    PolyUOp *gate,
-    PolyUOp **memo_old,
-    PolyUOp **memo_new,
-    int *memo_n,
-    int memo_cap
-);
-
-static bool uop_tree_contains_op_codegen(PolyUOp *u, PolyOps op);
-
-static PolyUOp *rule_where_branch_given_gate(PolyCtx *ctx, PolyUOp *w, const PolyBindings *b) {
-  (void)b;
-  if (!w || w->op != POLY_OP_WHERE || w->n_src != 3) return NULL;
-
-  PolyUOp *new_true = w->src[1];
-  PolyUOp *new_false = w->src[2];
-  bool changed = false;
-
-  /* tinygrad's symbolic valid simplification (`uop_given_valid`) removes
-   * Invalid-bearing expressions once the surrounding gate proves the branch.
-   * This catches value-producing index kernels such as gather's intermediate
-   * offset program, where Invalid is not an INDEX coordinate. */
-  if (uop_tree_contains_invalid_const_codegen(new_true)) {
-    PolyUOp *memo_old[256], *memo_new[256];
-    int memo_n = 0;
-    PolyUOp *simplified =
-        simplify_index_expr_given_gate(ctx, new_true, w->src[0], memo_old, memo_new, &memo_n, 256);
-    if (simplified != new_true) {
-      new_true = simplified;
-      changed = true;
-    }
-  }
-
-  if (uop_tree_contains_invalid_const_codegen(new_false)) {
-    PolyUOp *true_uop = poly_const_like_bool(ctx, w->src[0], true);
-    PolyUOp *not_gate =
-        poly_uop2(ctx, POLY_OP_CMPNE, w->src[0]->dtype, w->src[0], true_uop, poly_arg_none());
-    PolyUOp *memo_old[256], *memo_new[256];
-    int memo_n = 0;
-    PolyUOp *simplified =
-        simplify_index_expr_given_gate(ctx, new_false, not_gate, memo_old, memo_new, &memo_n, 256);
-    if (simplified != new_false) {
-      new_false = simplified;
-      changed = true;
-    }
-  }
-
-  if (!changed) return NULL;
-  PolyUOp *new_srcs[3] = {w->src[0], new_true, new_false};
-  return rebuild_preserve_tag(ctx, w, w->dtype, new_srcs, 3);
-}
-
-/* Return:
- *   1  -> gate implies cond is true
- *  -1  -> gate implies cond is false
- *   0  -> no implication recognized
- */
-static int gate_implies_cond_branch(PolyUOp *gate, PolyUOp *cond) {
-  if (!gate || !cond) return 0;
-  if (gate == cond) return 1;
-  if (gate->op == POLY_OP_CMPNE && gate->n_src == 2 && gate->src[0] == cond &&
-      is_true_const_codegen(gate->src[1]))
-    return -1;
-  if (gate->op == POLY_OP_AND && gate->n_src == 2) {
-    int left = gate_implies_cond_branch(gate->src[0], cond);
-    if (left != 0) return left;
-    return gate_implies_cond_branch(gate->src[1], cond);
-  }
-  return 0;
-}
-
-static bool gate_implies_range_point(PolyCtx *ctx, PolyUOp *gate, PolyUOp *expr, int64_t *out) {
-  if (!gate || !expr) return false;
-  if (gate->op == POLY_OP_AND && gate->n_src == 2) {
-    return gate_implies_range_point(ctx, gate->src[0], expr, out) ||
-           gate_implies_range_point(ctx, gate->src[1], expr, out);
-  }
-  if (gate->op != POLY_OP_CMPLT || gate->n_src != 2) return false;
-
-  int64_t c = 0, lo = 0, hi = 0;
-  poly_uop_minmax(ctx, expr, &lo, &hi);
-  if (gate->src[1] == expr && int_const_value_codegen(gate->src[0], &c)) {
-    /* c < expr and expr.max == c+1 proves expr == c+1. This is the common
-     * replicate/right-pad endpoint after late valid-bound canonicalization. */
-    int64_t upper_point = 0;
-    if (!__builtin_add_overflow(c, 1, &upper_point) && hi == upper_point) {
-      if (out) *out = hi;
-      return true;
-    }
-  }
-  if (gate->src[0] == expr && int_const_value_codegen(gate->src[1], &c)) {
-    /* expr < c and expr.min == c-1 proves expr == c-1. */
-    int64_t lower_point = 0;
-    if (!__builtin_sub_overflow(c, 1, &lower_point) && lo == lower_point) {
-      if (out) *out = lo;
-      return true;
-    }
-  }
-  return false;
-}
-
-static bool expr_point_given_gate(PolyCtx *ctx, PolyUOp *gate, PolyUOp *u, int64_t *out) {
-  if (!u || !poly_dtype_is_int(u->dtype) || poly_dtype_is_bool(u->dtype)) return false;
-  if (u->op == POLY_OP_CONST && u->arg.kind == POLY_ARG_INT) {
-    if (out) *out = u->arg.i;
-    return true;
-  }
-  int64_t base_val = 0, k = 0;
-  PolyUOp *base = NULL;
-  if (split_add_const_codegen(u, &base, &k) && base != u &&
-      gate_implies_range_point(ctx, gate, base, &base_val)) {
-    int64_t folded = 0;
-    if (!__builtin_add_overflow(base_val, k, &folded)) {
-      if (out) *out = folded;
-      return true;
-    }
-  }
-  return gate_implies_range_point(ctx, gate, u, out);
-}
-
-static PolyUOp *simplify_index_expr_given_gate(
-    PolyCtx *ctx,
-    PolyUOp *u,
-    PolyUOp *gate,
-    PolyUOp **memo_old,
-    PolyUOp **memo_new,
-    int *memo_n,
-    int memo_cap
-) {
-  if (!u) return NULL;
-  for (int i = 0; i < *memo_n; i++)
-    if (memo_old[i] == u) return memo_new[i];
-
-  PolyUOp *result = u;
-  int64_t point = 0;
-  if (expr_point_given_gate(ctx, gate, u, &point)) {
-    result = poly_const_like_int(ctx, u, point);
-    if (*memo_n < memo_cap) {
-      memo_old[*memo_n] = u;
-      memo_new[*memo_n] = result;
-      (*memo_n)++;
-    }
-    return result;
-  }
-
-  if (u->op == POLY_OP_WHERE && u->n_src == 3) {
-    int branch = gate_implies_cond_branch(gate, u->src[0]);
-    if (branch != 0) {
-      result = simplify_index_expr_given_gate(
-          ctx, (branch > 0) ? u->src[1] : u->src[2], gate, memo_old, memo_new, memo_n, memo_cap
-      );
-      if (*memo_n < memo_cap) {
-        memo_old[*memo_n] = u;
-        memo_new[*memo_n] = result;
-        (*memo_n)++;
-      }
-      return result;
-    }
-  }
-
-  PolyUOp *new_srcs[64];
-  bool changed = false;
-  int ns = u->n_src < 64 ? u->n_src : 64;
-  for (int i = 0; i < ns; i++) {
-    new_srcs[i] =
-        simplify_index_expr_given_gate(ctx, u->src[i], gate, memo_old, memo_new, memo_n, memo_cap);
-    if (new_srcs[i] != u->src[i]) changed = true;
-  }
-  if (changed) result = rebuild_preserve_tag(ctx, u, u->dtype, new_srcs, ns);
-
-  if (*memo_n < memo_cap) {
-    memo_old[*memo_n] = u;
-    memo_new[*memo_n] = result;
-    (*memo_n)++;
-  }
-  return result;
-}
-
-typedef struct {
-  PolyUOp *expr;
-  int64_t lo;
-  int64_t hi;
-  bool has_lo;
-  bool has_hi;
-  PolyUOp *fake;
-} ValidExprBound;
-
-/* Pinned tinygrad/uop/symbolic.py:315-328. */
-static bool parse_valid_bound_clause(
-    PolyCtx *ctx,
-    PolyUOp *clause,
-    PolyUOp **expr_out,
-    bool *is_upper_out,
-    int64_t *bound_out
-) {
-  if (!clause || !expr_out || !is_upper_out || !bound_out) return false;
-  if (clause->op == POLY_OP_CMPNE && clause->n_src == 2 &&
-      is_true_clause_const(clause->src[1])) {
-    PolyUOp *lt = clause->src[0];
-    if (!lt || lt->op != POLY_OP_CMPLT || lt->n_src != 2 ||
-        !poly_dtype_is_int(lt->src[0]->dtype))
-      return false;
-    int64_t lo = 0, hi = 0;
-    poly_uop_minmax(ctx, lt->src[1], &lo, &hi);
-    *expr_out = lt->src[0];
-    *is_upper_out = false;
-    *bound_out = lo;
-    return true;
-  }
-  if (clause->op == POLY_OP_CMPLT && clause->n_src == 2 &&
-      poly_dtype_is_int(clause->src[0]->dtype)) {
-    int64_t lo = 0, hi = 0;
-    poly_uop_minmax(ctx, clause->src[1], &lo, &hi);
-    if (hi == INT64_MIN) return false;
-    *expr_out = clause->src[0];
-    *is_upper_out = true;
-    *bound_out = hi - 1;
-    return true;
-  }
-  return false;
-}
-
-static PolyUOp *simplify_with_valid_substitution(
-    PolyCtx *ctx,
-    PolyUOp *u,
-    PolyUOp **exprs,
-    PolyUOp **fakes,
-    int n
-) {
-  if (!ctx || !u || !exprs || !fakes || n <= 0) return u;
-  PolyUOp *substituted = poly_uop_substitute(ctx, u, exprs, fakes, n);
-  if (!substituted || substituted == u) return u;
-  substituted = poly_graph_rewrite(ctx, substituted, poly_symbolic());
-  if (!substituted) return u;
-  PolyUOp *restored = poly_uop_substitute(ctx, substituted, fakes, exprs, n);
-  if (!restored) return u;
-  PolyUOp *simplified = poly_graph_rewrite(ctx, restored, poly_symbolic());
-  return simplified ? simplified : u;
-}
-
-static bool all_same_uops(PolyUOp **uops, int n) {
-  if (!uops || n <= 0) return false;
-  for (int i = 1; i < n; i++)
-    if (uops[i] != uops[0]) return false;
-  return true;
-}
-
-/* Pinned tinygrad/uop/symbolic.py:331-356. Polygrad's temporary DEFINE_VAR is
- * the registered PG-PARITY-002 spelling of tinygrad's ALU PARAM. It exists
- * only while proving a validity-constrained simplification and is substituted
- * back out before this helper returns. */
-static PolyUOp *uop_given_valid(PolyCtx *ctx, PolyUOp *valid, PolyUOp *uop) {
-  if (!ctx || !valid || !uop) return uop;
-
-  PolyUOp *clauses[128];
-  int n_clauses = split_uop_and(valid, clauses, 128);
-  ValidExprBound bounds[128] = {0};
-  int n_bounds = 0;
-  for (int i = 0; i < n_clauses; i++) {
-    PolyUOp *expr = NULL;
-    bool is_upper = false;
-    int64_t bound = 0;
-    if (!parse_valid_bound_clause(ctx, clauses[i], &expr, &is_upper, &bound)) continue;
-    int at = -1;
-    for (int j = 0; j < n_bounds; j++)
-      if (bounds[j].expr == expr) {
-        at = j;
-        break;
-      }
-    if (at < 0) {
-      if (n_bounds >= 128) break;
-      at = n_bounds++;
-      bounds[at].expr = expr;
-    }
-    if (is_upper) {
-      bounds[at].hi = bound;
-      bounds[at].has_hi = true;
-    } else {
-      bounds[at].lo = bound;
-      bounds[at].has_lo = true;
-    }
-  }
-  if (n_bounds == 0) return uop;
-
-  for (int i = 0; i < n_bounds; i++) {
-    int64_t vmin = 0, vmax = 0;
-    poly_uop_minmax(ctx, bounds[i].expr, &vmin, &vmax);
-    if (!bounds[i].has_lo) bounds[i].lo = vmin;
-    if (!bounds[i].has_hi) bounds[i].hi = vmax;
-    if (bounds[i].lo > bounds[i].hi) continue;
-    char name[48];
-    snprintf(name, sizeof(name), "valid_bound_%d", i);
-    bounds[i].fake = poly_uop0(
-        ctx, POLY_OP_DEFINE_VAR, bounds[i].expr->dtype,
-        poly_arg_define_var(name, bounds[i].lo, bounds[i].hi)
-    );
-    if (!bounds[i].fake) continue;
-
-    PolyUOp *exprs[1] = {bounds[i].expr};
-    PolyUOp *fakes[1] = {bounds[i].fake};
-    uop = simplify_with_valid_substitution(ctx, uop, exprs, fakes, 1);
-
-    /* Pinned try_simplex branch: X0+...+Xn >= 1 can prove the same rewrite
-     * independently from each irreducible Xi >= 1. */
-    if (bounds[i].lo == 1 && bounds[i].expr->op == POLY_OP_ADD) {
-      PolyUOp *terms[128];
-      int n_terms = split_uop_add(bounds[i].expr, terms, 128);
-      bool irreducible = n_terms > 0;
-      for (int j = 0; j < n_terms; j++)
-        if (!poly_opset_has(POLY_GROUP_IRREDUCIBLE, terms[j]->op)) irreducible = false;
-      if (irreducible) {
-        PolyUOp *candidates[128];
-        bool complete = true;
-        for (int j = 0; j < n_terms; j++) {
-          int64_t term_lo = 0, term_hi = 0;
-          poly_uop_minmax(ctx, terms[j], &term_lo, &term_hi);
-          (void)term_lo;
-          char term_name[64];
-          snprintf(term_name, sizeof(term_name), "valid_simplex_%d_%d", i, j);
-          PolyUOp *fake = poly_uop0(
-              ctx, POLY_OP_DEFINE_VAR, terms[j]->dtype,
-              poly_arg_define_var(term_name, 1, term_hi)
-          );
-          if (!fake) {
-            complete = false;
-            break;
-          }
-          PolyUOp *term_exprs[1] = {terms[j]}, *term_fakes[1] = {fake};
-          candidates[j] = simplify_with_valid_substitution(ctx, uop, term_exprs, term_fakes, 1);
-        }
-        if (complete && all_same_uops(candidates, n_terms)) {
-          uop = candidates[0];
-        } else if (complete && uop->op == POLY_OP_STACK && uop->n_src == 2) {
-          bool first_same = true, second_same = true;
-          for (int j = 0; j < n_terms; j++) {
-            if (!candidates[j] || candidates[j]->op != POLY_OP_STACK ||
-                candidates[j]->n_src != 2) {
-              first_same = second_same = false;
-              break;
-            }
-            if (j > 0 && candidates[j]->src[0] != candidates[0]->src[0]) first_same = false;
-            if (j > 0 && candidates[j]->src[1] != candidates[0]->src[1]) second_same = false;
-          }
-          PolyUOp *srcs[2] = {uop->src[0], uop->src[1]};
-          if (first_same) srcs[0] = candidates[0]->src[0];
-          if (second_same) srcs[1] = candidates[0]->src[1];
-          if (srcs[0] != uop->src[0] || srcs[1] != uop->src[1])
-            uop = rebuild_preserve_tag(ctx, uop, uop->dtype, srcs, 2);
-        }
-      }
-    }
-  }
-
-  PolyUOp *exprs[128], *fakes[128];
-  int n_candidates = 0;
-  for (int i = 0; i < n_bounds; i++) {
-    if (!bounds[i].fake) continue;
-    exprs[n_candidates] = bounds[i].expr;
-    fakes[n_candidates] = bounds[i].fake;
-    n_candidates++;
-  }
-  if (n_candidates > 0)
-    uop = simplify_with_valid_substitution(ctx, uop, exprs, fakes, n_candidates);
-  return uop;
-}
-
 /* Pinned tinygrad/codegen/late/devectorizer.py:39-42,54-56. */
 static PolyUOp *rule_simplify_valid_index(
     PolyCtx *ctx,
@@ -9925,7 +9561,7 @@ static PolyUOp *rule_simplify_valid_index(
   if (!coord || coord->op != POLY_OP_WHERE || coord->n_src != 3 ||
       !is_invalid_const_codegen(coord->src[2]))
     return NULL;
-  PolyUOp *simplified = uop_given_valid(ctx, coord->src[0], coord->src[1]);
+  PolyUOp *simplified = poly_uop_given_valid(ctx, coord->src[0], coord->src[1], true);
   if (!simplified || simplified == coord->src[1]) return NULL;
   PolyUOp *coord_srcs[3] = {coord->src[0], simplified, coord->src[2]};
   PolyUOp *new_coord = rebuild_preserve_tag(ctx, coord, coord->dtype, coord_srcs, 3);
@@ -9951,7 +9587,6 @@ static _Thread_local PolyPatternMatcher *g_pm_post_index_lower = NULL;
 static PolyPatternMatcher *poly_pm_post_index_lower(void) {
   if (g_pm_post_index_lower) return g_pm_post_index_lower;
   PolyRule indexing_rules[] = {
-      {poly_pat_op(POLY_OP_WHERE, NULL, 0, "w"), rule_where_branch_given_gate},
       {poly_pat_op(POLY_OP_AND, NULL, 0, "valid"), rule_canonicalize_and_valid_bounds},
       {poly_pat_op(POLY_OP_WHERE, NULL, 0, "w"), rule_where_after_gated_load},
       {poly_pat_op(POLY_OP_WHERE, NULL, 0, "w"), rule_where_after_gated_load_rev},

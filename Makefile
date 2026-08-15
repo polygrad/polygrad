@@ -74,13 +74,13 @@ WASM_EXPORTS = _poly_ctx_new,_poly_ctx_destroy,_poly_ctx_set_preferred_device,_p
 
 WASM_EXPORTS := $(WASM_EXPORTS),_poly_const_float_by_id,_poly_const_int_by_id,_poly_ctx_reset_counters,_poly_ctx_mem_used_for_device,_poly_realize_tensors_ex,_poly_buffer_set,_poly_buffer_on_device_by_id,_poly_buffer_ensure_device_allocated
 WASM_EXPORTS := $(WASM_EXPORTS),_poly_buffer_is_allocated,_poly_tensor_empty_by_id,_poly_tensor_from_host_by_id,_poly_tensor_const_int_by_id,_poly_tensor_const_float_by_id,_poly_tensor_full_int_by_id,_poly_tensor_full_float_by_id,_poly_tensor_arange_int_by_id,_poly_tensor_arange_float_by_id,_poly_tensor_linspace_by_id,_poly_tensor_eye_by_id
-WASM_EXPORTS := $(WASM_EXPORTS),_poly_tensor_custom_kernel,_poly_tensor_alu1,_poly_tensor_alu2,_poly_tensor_alu3,_poly_tensor_div,_poly_tensor_exp,_poly_tensor_log,_poly_tensor_log1p,_poly_tensor_expm1,_poly_tensor_gelu,_poly_tensor_quick_gelu,_poly_tensor_detach,_poly_tensor_sum,_poly_tensor_max,_poly_tensor_argmax,_poly_tensor_minimum,_poly_tensor_dot,_poly_tensor_qr_ex,_poly_tensor_triangular_solve,_poly_tensor_cholesky,_poly_tensor_cholesky_solve,_poly_tensor_solve,_poly_tensor_lstsq,_poly_tensor_scatter,_poly_tensor_scatter_reduce,_poly_tensor_einsum,_poly_tensor_rearrange,_poly_tensor_sort,_poly_tensor_topk,_poly_tensor_softmax,_poly_tensor_log_softmax,_poly_tensor_cast_by_id,_poly_tensor_bitcast_by_id,_poly_tensor_contiguous,_poly_tensor_reshape,_poly_tensor_expand,_poly_tensor_permute,_poly_tensor_shrink,_poly_tensor_flip,_poly_tensor_pad_value,_poly_tensor_pool,_poly_tensor_max_pool2d,_poly_tensor_conv2d,_poly_tensor_batchnorm,_poly_tensor_one_hot,_poly_tensor_gather_dim,_poly_tensor_index_select
-WASM_EXPORTS := $(WASM_EXPORTS),_poly_tensor_requires_grad,_poly_tensor_set_requires_grad,_poly_instance_param_trainable,_poly_instance_set_param_trainable,_poly_instance_buf_trainable,_poly_instance_set_buf_trainable,_poly_instance_readback_param,_poly_instance_readback_buf,_poly_optim_build_step,_poly_register_buffer_by_id,_poly_register_existing_buffer,_poly_instance_from_sinks,_poly_instance_from_binding_arrays
+WASM_EXPORTS := $(WASM_EXPORTS),_poly_tensor_custom_kernel,_poly_tensor_alu1,_poly_tensor_alu2,_poly_tensor_alu3,_poly_tensor_div,_poly_tensor_exp,_poly_tensor_log,_poly_tensor_log1p,_poly_tensor_expm1,_poly_tensor_gelu,_poly_tensor_quick_gelu,_poly_tensor_detach,_poly_tensor_contiguous_backward,_poly_tensor_sum,_poly_tensor_sum_dtype_by_id,_poly_tensor_max,_poly_tensor_argmax,_poly_tensor_minimum,_poly_tensor_dot,_poly_tensor_dot_dtype_by_id,_poly_tensor_qr_ex,_poly_tensor_triangular_solve,_poly_tensor_cholesky,_poly_tensor_cholesky_solve,_poly_tensor_solve,_poly_tensor_lstsq,_poly_tensor_scatter,_poly_tensor_scatter_reduce,_poly_tensor_einsum,_poly_tensor_rearrange,_poly_tensor_sort,_poly_tensor_topk,_poly_tensor_softmax,_poly_tensor_log_softmax,_poly_tensor_cast_by_id,_poly_tensor_bitcast_by_id,_poly_tensor_contiguous,_poly_tensor_reshape,_poly_tensor_expand,_poly_tensor_permute,_poly_tensor_shrink,_poly_tensor_flip,_poly_tensor_pad_value,_poly_tensor_pool,_poly_tensor_max_pool2d,_poly_tensor_conv2d,_poly_tensor_conv2d_dtype_by_id,_poly_tensor_batchnorm,_poly_tensor_one_hot,_poly_tensor_gather_dim,_poly_tensor_index_select
+WASM_EXPORTS := $(WASM_EXPORTS),_poly_tensor_requires_grad,_poly_tensor_set_requires_grad,_poly_instance_param_trainable,_poly_instance_set_param_trainable,_poly_instance_buf_trainable,_poly_instance_set_buf_trainable,_poly_instance_readback_param,_poly_instance_readback_buf,_poly_optim_build_step,_poly_register_buffer_by_id,_poly_register_existing_buffer,_poly_instance_from_sinks,_poly_instance_from_binding_arrays,_poly_instance_define_module_arrays,_poly_instance_set_device_map_arrays
 WASM_EXPORTS := $(WASM_EXPORTS),_poly_pad_value,_poly_pool,_poly_max_pool2d,_poly_conv2d,_poly_batchnorm,_poly_one_hot,_poly_index_select
 WASM_EXPORTS := $(WASM_EXPORTS),_poly_tokenizer_free
 
 WASM_ASYNCIFY_IMPORTS = ['js_webgpu_dispatch','js_webgpu_read_buffer_to_wasm','js_webgpu_read_buffer_to_hostkey']
-WASM_ASYNCIFY_ONLY = ['poly_instance_call','poly_instance_forward','poly_instance_value_and_grad','poly_instance_train_step','run_instance_sink','poly_instance_param_data','poly_instance_buf_data','poly_instance_export_weights','poly_instance_export_weights_ex','poly_instance_save_bundle','poly_instance_save_bundle_ex','poly_instance_readback_param','poly_instance_readback_buf','poly_realize_uops','poly_realize_tensors','poly_realize_tensors_ex','poly_jit_end_capture','poly_jit_run','poly_jit_run_with_vars','poly_jit_run_captured_linear','poly_run_schedule','poly_schedule_execute_runner_call','poly_webgpu_execute','copy_execute_fn','poly_buffer_copy','poly_buffer_ensure_host_current','poly_buffer_read','poly_buffer_write','host_copy_in','webgpu_copy_out']
+WASM_ASYNCIFY_ONLY = ['poly_instance_call','poly_instance_forward','poly_instance_value_and_grad','poly_instance_train_step','poly_instance_set_device_map_arrays','instance_publish_placement','run_instance_sink','poly_instance_param_data','poly_instance_buf_data','poly_instance_export_weights','poly_instance_export_weights_ex','poly_instance_save_bundle','poly_instance_save_bundle_ex','poly_instance_readback_param','poly_instance_readback_buf','poly_realize_uops','poly_realize_tensors','poly_realize_tensors_ex','poly_jit_end_capture','poly_jit_run','poly_jit_run_with_vars','poly_jit_run_captured_linear','poly_run_schedule','poly_schedule_execute_runner_call','poly_webgpu_execute','copy_execute_fn','poly_buffer_copy','poly_buffer_ensure_device_current','poly_buffer_ensure_host_current','poly_buffer_read','poly_buffer_write','host_copy_in','webgpu_copy_out']
 WASM_ASYNCIFY_FLAGS = -s ASYNCIFY=1 \
 	-s "ASYNCIFY_IMPORTS=$(WASM_ASYNCIFY_IMPORTS)" \
 	-s "ASYNCIFY_ONLY=$(WASM_ASYNCIFY_ONLY)"
@@ -104,7 +104,7 @@ QWEN3_GGUF ?= $(if $(POLY_QWEN3_GGUF),$(POLY_QWEN3_GGUF),$(CURDIR)/temp/Qwen3-0.
 BROWSER_MATRIX ?= chromium,firefox,chrome-system=chromium@/usr/bin/google-chrome,chromium-snap=chromium@/snap/bin/chromium
 BROWSER_MATRIX_DEVICES ?= auto
 
-.PHONY: all test test-fast test-common test-common-cpu test-common-cuda test-common-hip test-common-interp test-common-x86 test-specific-cuda test-specific-hip test-specific-x86 test-cuda test-hip test-interp test-x86 test-parity test-parity-opt test-parity-ir test-parity-ir-opt test-parity-graph parity-graph-report test-parity-op-census parity-op-census-report test-parity-cuda test-parity-hip test-symbolic-z3 test-qwen3 test-browser-qwen3 require-qwen3-gguf test-wasm test-wasm-new test-native test-browser test-browser-matrix test-js-browser-matrix test-p2p test-p2p-browser bench bench-cuda bench-model-cuda bench-hlb-cuda-semantic bench-hlb-cuda-timing bench-hlb-cuda-manifest bench-hip bench-train-py bench-smoke bench-local-baseline bench-update-local-baseline bench-smoke-regression bench-ci-regression bench-ratios bench-ratio-local-baseline bench-update-local-ratio-baseline bench-parity bench-jax-js-wasm bench-jax-js-matmul-wasm bench-jax-js-model-wasm bench-jax-js-browser-wasm bench-jax-js-browser-matmul-wasm bench-jax-js-browser-model-wasm bench-compare bench-compare-global bench-regression bench-update-baseline fuzz fuzz-smoke fuzz-nightly fuzz-symbolic fuzz-symbolic-div wasm wasm-pkg build-py build-py-sdist build-py-wheel build-python test-py-sdist-install publish-py publish-python build-js publish-js clean analyze cppcheck format format-check test-msan test-tsan verify coverage test-full test-js-native-cpu test-js-native-x86 test-js-native-interp test-js-native-cuda test-js-native-hip test-js-package test-filc-interp-fast sync-source-mirrors verify-source-mirrors test-py-x86
+.PHONY: all test test-fast test-common test-common-cpu test-common-cuda test-common-hip test-common-interp test-common-x86 test-specific-cuda test-specific-hip test-specific-x86 test-cuda test-hip test-interp test-x86 test-parity test-parity-opt test-parity-ir test-parity-ir-opt test-parity-graph parity-graph-report test-parity-op-census parity-op-census-report test-compat-tinygrad-tier1 test-compat-tinygrad-convnext test-parity-cuda test-parity-hip test-symbolic-z3 test-qwen3 test-browser-qwen3 require-qwen3-gguf test-wasm test-wasm-new test-native test-browser test-browser-matrix test-js-browser-matrix test-p2p test-p2p-browser bench bench-cuda bench-model-cuda bench-hlb-cuda-semantic bench-hlb-cuda-timing bench-hlb-cuda-manifest bench-hip bench-train-py bench-smoke bench-local-baseline bench-update-local-baseline bench-smoke-regression bench-ci-regression bench-ratios bench-ratio-local-baseline bench-update-local-ratio-baseline bench-parity bench-jax-js-wasm bench-jax-js-matmul-wasm bench-jax-js-model-wasm bench-jax-js-browser-wasm bench-jax-js-browser-matmul-wasm bench-jax-js-browser-model-wasm bench-compare bench-compare-global bench-regression bench-update-baseline fuzz fuzz-smoke fuzz-nightly fuzz-symbolic fuzz-symbolic-div wasm wasm-pkg build-py build-py-sdist build-py-wheel build-python test-py-sdist-install publish-py publish-python build-js publish-js clean analyze cppcheck format format-check test-msan test-tsan verify coverage test-full test-js-native-cpu test-js-native-x86 test-js-native-interp test-js-native-cuda test-js-native-hip test-js-package test-filc-interp-fast sync-source-mirrors verify-source-mirrors test-py-x86
 
 all: build/libpolygrad.a build/libpolygrad.so
 
@@ -193,6 +193,8 @@ test-parity-ir-opt: build/polygrad_parity_runner
 GRAPH_PARITY_DIR ?= temp/parity_graph
 GRAPH_PARITY_CASE_ARGS ?=
 OP_PARITY_DIR ?= temp/parity_ops
+COMPAT_TIER1_DIR ?= temp/tinygrad_compat_tier1
+COMPAT_CONVNEXT_DIR ?= temp/tinygrad_compat_convnext
 
 test-parity-graph parity-graph-report: build/libpolygrad.so
 	@mkdir -p $(GRAPH_PARITY_DIR) temp/cc_tmp
@@ -213,6 +215,30 @@ test-parity-op-census parity-op-census-report: build/libpolygrad.so
 		test/op_vocabulary_census.py \
 		$(if $(filter parity-op-census-report,$@),--report-only,) \
 		--output $(OP_PARITY_DIR)/report.json
+
+test-compat-tinygrad-tier1: build/libpolygrad.so
+	@mkdir -p $(COMPAT_TIER1_DIR) temp/cc_tmp
+	ENGINE=tinygrad DEV=CPU PYTHONPATH=test:references/tinygrad_latest $(PARITY_PY) \
+		test/tinygrad_compat_cases.py > $(COMPAT_TIER1_DIR)/tinygrad.json
+	ENGINE=polygrad DEV=CPU POLY_DEVICE=cpu \
+		POLY_TMPDIR=$(abspath temp/cc_tmp) TMPDIR=$(abspath temp/cc_tmp) \
+		POLYGRAD_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=test:py $(PARITY_PY) \
+		test/tinygrad_compat_cases.py > $(COMPAT_TIER1_DIR)/polygrad.json
+	$(PARITY_PY) test/compare_tinygrad_compat.py \
+		$(COMPAT_TIER1_DIR)/tinygrad.json $(COMPAT_TIER1_DIR)/polygrad.json \
+		--output $(COMPAT_TIER1_DIR)/report.json
+
+test-compat-tinygrad-convnext: build/libpolygrad.so
+	@mkdir -p $(COMPAT_CONVNEXT_DIR) temp/cc_tmp
+	ENGINE=tinygrad COMPAT_CASES=convnext DEV=CPU PYTHONPATH=test:references/tinygrad_latest $(PARITY_PY) \
+		test/tinygrad_compat_cases.py > $(COMPAT_CONVNEXT_DIR)/tinygrad.json
+	ENGINE=polygrad COMPAT_CASES=convnext DEV=CPU POLY_DEVICE=cpu \
+		POLY_TMPDIR=$(abspath temp/cc_tmp) TMPDIR=$(abspath temp/cc_tmp) \
+		POLYGRAD_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=test:py $(PARITY_PY) \
+		test/tinygrad_compat_cases.py > $(COMPAT_CONVNEXT_DIR)/polygrad.json
+	$(PARITY_PY) test/compare_tinygrad_compat.py \
+		$(COMPAT_CONVNEXT_DIR)/tinygrad.json $(COMPAT_CONVNEXT_DIR)/polygrad.json \
+		--output $(COMPAT_CONVNEXT_DIR)/report.json
 
 Z3_FUZZ_ITERS ?= 128
 Z3_FUZZ_SEED ?= 0

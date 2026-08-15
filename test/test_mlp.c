@@ -43,10 +43,6 @@ static void mlp_restore_env(MlpEnvSave *s) {
   s->value = NULL;
 }
 
-static bool mlp_expect_to_program_cache(PolyCtx *ctx) {
-  return poly_ctx_get_preferred_device(ctx) != POLY_DEVICE_INTERP;
-}
-
 /* Tests */
 
 TEST(mlp, create_simple) {
@@ -302,10 +298,11 @@ TEST(mlp, forward_and_train_replay_stats_plateau) {
   PolyCtxStats forward_first = {0};
   ASSERT_INT_EQ(poly_ctx_stats(ctx, &forward_first), 0);
   ASSERT_INT_EQ(forward_first.schedule_cache_entries, 1);
-  if (mlp_expect_to_program_cache(ctx))
-    ASSERT_TRUE(forward_first.to_program_cache_entries > 0);
-  else
-    ASSERT_INT_EQ(forward_first.to_program_cache_entries, 0);
+  /* Pinned compile_linear sends every CALL(SINK) through to_program, including
+   * PythonRenderer, whose cache is keyed on the raw SINK before compilation
+   * (engine/realize.py:244-267; codegen/__init__.py:244-250). INTERP is the
+   * corresponding Polygrad execution backend and must cache the same boundary. */
+  ASSERT_TRUE(forward_first.to_program_cache_entries > 0);
   ASSERT_TRUE(forward_first.runtime_cache_entries > 0);
 
   for (int iter = 0; iter < 16; iter++)

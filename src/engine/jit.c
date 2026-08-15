@@ -711,7 +711,7 @@ static int poly_jit_run_captured_linear(
     jit->compiled_device = jit->compiled_linear ? device : POLY_DEVICE_AUTO;
     if (!jit->compiled_linear) return -1;
     jit->graphed_linear = poly_jit_graph_split_rewrite(
-        jit->ctx, jit->captured_linear->template->linear, device
+        jit->ctx, jit->compiled_linear->linear, device
     );
     if (!jit->graphed_linear ||
         poly_compiled_schedule_set_jit_graph(jit->compiled_linear, jit->graphed_linear) != 0) {

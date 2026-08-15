@@ -323,6 +323,52 @@ TEST(codegen, linearize_deps) {
   PASS();
 }
 
+TEST(codegen, split_ends_excludes_ranges_already_closed_by_nested_end) {
+  /* Pinned tinygrad codegen/late/linearizer.py:88-90 queries
+   * SINK(*end.src[1:]).ranges. An inner END removes its RANGE from that
+   * active set, so the outer END disappears instead of closing it twice. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(8));
+  PolyUOp *range =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INDEX, bound, poly_arg_range(3, POLY_AXIS_LOOP));
+  PolyUOp *body = poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_none());
+  PolyUOp *outer_body = poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_str("outer"));
+  PolyUOp *inner_srcs[2] = {body, range};
+  PolyUOp *inner = poly_uop(ctx, POLY_OP_END, POLY_VOID, inner_srcs, 2, poly_arg_none());
+  PolyUOp *outer_srcs[2] = {outer_body, inner};
+  PolyUOp *outer = poly_uop(ctx, POLY_OP_END, POLY_VOID, outer_srcs, 2, poly_arg_none());
+
+  PolyUOp *rewritten = poly_graph_rewrite(ctx, outer, poly_pm_split_ends_pass());
+  ASSERT_TRUE(rewritten == outer_body);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, split_ends_retains_ranges_still_active_in_dependency) {
+  /* The exclusion above is not a blanket END-subtree skip: an arithmetic
+   * dependency on RANGE keeps it active and rebuilds exactly END(body, r). */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(8));
+  PolyUOp *range =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INDEX, bound, poly_arg_range(3, POLY_AXIS_LOOP));
+  PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(1));
+  PolyUOp *active = poly_uop2(ctx, POLY_OP_ADD, POLY_INDEX, range, one, poly_arg_none());
+  PolyUOp *body = poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_str("outer"));
+  PolyUOp *end_srcs[2] = {body, active};
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_srcs, 2, poly_arg_none());
+
+  PolyUOp *rewritten = poly_graph_rewrite(ctx, end, poly_pm_split_ends_pass());
+  ASSERT_NOT_NULL(rewritten);
+  ASSERT_INT_EQ(rewritten->op, POLY_OP_END);
+  ASSERT_INT_EQ(rewritten->n_src, 2);
+  ASSERT_TRUE(rewritten->src[0] == body);
+  ASSERT_TRUE(rewritten->src[1] == range);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(codegen, reduce_merge_shared_end) {
   /* Two REDUCE ops over the same RANGE should share one merged END chain. */
   PolyCtx *ctx = poly_ctx_new();
@@ -3323,6 +3369,106 @@ TEST(codegen, valid_index_simplifies_inside_devectorizer_like_tinygrad) {
     ASSERT_TRUE(topo[i]->op != POLY_OP_FLOORMOD);
     ASSERT_TRUE(topo[i]->op != POLY_OP_DEFINE_VAR);
   }
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, wide_after_cast_devectorization_preserves_every_effect) {
+  /* Pinned devectorizer.py:268-270 uses allow_any_len=True and rebuilds
+   * AFTER(CAST(x), *effects) as CAST(AFTER(x, *effects)). ResNet18 backward
+   * reaches more than 128 effects, so assert exact arbitrary-arity topology. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_TRUE(ctx != NULL);
+  const int n_effects = 129;
+  PolyUOp **src = calloc((size_t)n_effects + 1, sizeof(*src));
+  ASSERT_TRUE(src != NULL);
+  PolyUOp *base = poly_uop0(ctx, POLY_OP_NOOP, POLY_FLOAT16, poly_arg_str("base"));
+  src[0] = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, base, poly_arg_none());
+  ASSERT_TRUE(base != NULL && src[0] != NULL);
+  for (int i = 0; i < n_effects; i++) {
+    src[i + 1] = poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_int(i));
+    ASSERT_TRUE(src[i + 1] != NULL);
+  }
+  PolyUOp *root = poly_uop(
+      ctx, POLY_OP_AFTER, POLY_FLOAT32, src, n_effects + 1, poly_arg_none());
+  ASSERT_TRUE(root != NULL);
+
+  PolyUOp *rewritten = poly_graph_rewrite(ctx, root, poly_pm_devectorize_pass());
+  ASSERT_TRUE(rewritten != NULL && rewritten->op == POLY_OP_CAST);
+  ASSERT_INT_EQ(rewritten->n_src, 1);
+  ASSERT_TRUE(poly_dtype_eq(rewritten->dtype, POLY_FLOAT32));
+  PolyUOp *inner = rewritten->src[0];
+  ASSERT_TRUE(inner != NULL && inner->op == POLY_OP_AFTER);
+  ASSERT_TRUE(poly_dtype_eq(inner->dtype, POLY_FLOAT16));
+  ASSERT_INT_EQ(inner->n_src, n_effects + 1);
+  ASSERT_TRUE(inner->src[0] == base);
+  for (int i = 0; i < n_effects; i++)
+    ASSERT_TRUE(inner->src[i + 1] == src[i + 1]);
+
+  free(src);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, post_index_validity_does_not_specialize_effects_under_value_where) {
+  /* Pinned codegen/__init__.py:105-111 runs only pm_lower_index_dtype,
+   * load_store_indexing, gep_pushing, then symbolic at this boundary.
+   * symbolic.py:422-428 scopes uop_given_valid to a weak-index WHERE value;
+   * devectorizer.py:39-58 scopes it to an Invalid-bearing INDEX coordinate.
+   * An outer float WHERE therefore must not recursively specialize a STORE
+   * coordinate hidden under AFTER. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *two = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(2));
+  PolyUOp *range =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INDEX, two, poly_arg_range(0, POLY_AXIS_LOOP));
+  PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(1));
+  PolyUOp *cond = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, range, one, poly_arg_none());
+  PolyUOp *invalid = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_invalid());
+  PolyUOp *coord =
+      poly_uop3(ctx, POLY_OP_WHERE, POLY_INDEX, cond, range, invalid, poly_arg_none());
+  PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
+  PolyUOp *buf = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(0));
+  PolyUOp *index = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, buf, coord, poly_arg_none());
+  PolyUOp *store = poly_uop2(
+      ctx, POLY_OP_STORE, POLY_VOID, index,
+      poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0)), poly_arg_none()
+  );
+  PolyUOp *after = poly_uop2(
+      ctx, POLY_OP_AFTER, POLY_FLOAT32,
+      poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(2.0)), store,
+      poly_arg_none()
+  );
+  PolyUOp *outer = poly_uop3(
+      ctx, POLY_OP_WHERE, POLY_FLOAT32, cond, after,
+      poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(0.0)), poly_arg_none()
+  );
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, outer, poly_arg_none());
+
+  PolyUOp *lowered = poly_apply_post_index_symbolic_stage(ctx, sink, 1);
+  ASSERT_NOT_NULL(lowered);
+  int n = 0;
+  PolyUOp **topo = poly_toposort(ctx, lowered, &n);
+  ASSERT_NOT_NULL(topo);
+  ASSERT_INT_EQ(n, 16);
+  ASSERT_INT_EQ(count_lin_ops(topo, n, POLY_OP_WHERE), 2);
+  ASSERT_INT_EQ(count_lin_ops(topo, n, POLY_OP_STORE), 1);
+  ASSERT_INT_EQ(count_lin_ops(topo, n, POLY_OP_AFTER), 1);
+
+  PolyUOp *lowered_store = NULL;
+  for (int i = 0; i < n; i++)
+    if (topo[i]->op == POLY_OP_STORE) lowered_store = topo[i];
+  ASSERT_NOT_NULL(lowered_store);
+  ASSERT_INT_EQ(lowered_store->n_src, 2);
+  ASSERT_INT_EQ(lowered_store->src[0]->op, POLY_OP_INDEX);
+  ASSERT_INT_EQ(lowered_store->src[0]->n_src, 2);
+  PolyUOp *lowered_coord = lowered_store->src[0]->src[1];
+  ASSERT_INT_EQ(lowered_coord->op, POLY_OP_WHERE);
+  ASSERT_TRUE(poly_dtype_eq(lowered_coord->dtype, POLY_INT32));
+  ASSERT_INT_EQ(lowered_coord->n_src, 3);
+  ASSERT_INT_EQ(lowered_coord->src[2]->op, POLY_OP_CONST);
+  ASSERT_INT_EQ(lowered_coord->src[2]->arg.kind, POLY_ARG_INVALID);
 
   poly_ctx_destroy(ctx);
   PASS();

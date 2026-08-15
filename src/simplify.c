@@ -1125,5 +1125,9 @@ PolyUOp *poly_apply_reduce_simplify(PolyCtx *ctx, PolyUOp *sink) {
 
 PolyUOp *poly_apply_symbolic_reduce_simplify(PolyCtx *ctx, PolyUOp *sink) {
   if (getenv("POLY_DISABLE_REDUCE_SIMPLIFY")) return sink;
-  return poly_graph_rewrite(ctx, sink, pm_symbolic_reduce_simplify_get());
+  /* Pinned graph_rewrite keeps CALL/FUNCTION bodies opaque by default; the
+   * recursive scheduler rewrites each retained body separately
+   * (uop/ops.py:1540-1649, schedule/__init__.py:94-105). */
+  return poly_graph_rewrite_ctx_ex2(
+      ctx, sink, pm_symbolic_reduce_simplify_get(), NULL, false, false);
 }

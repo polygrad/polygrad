@@ -36,6 +36,31 @@ static PolyUOp *shape_stack_get(PolyUOp *stack, int idx) {
   return stack->src[idx];
 }
 
+static _Thread_local PolyPatternMatcher *g_pm_reshape_indexing = NULL;
+static _Thread_local PolyPatternMatcher *g_pm_pad_valid = NULL;
+
+static PolyPatternMatcher *poly_pm_reshape_indexing(void) {
+  if (g_pm_reshape_indexing) return g_pm_reshape_indexing;
+  /* Pinned tinygrad/schedule/indexing.py:125-127. The three matchers run as
+   * one fixed-point rewrite over the complete ordered coordinate SINK. */
+  PolyPatternMatcher *symbolic_valid =
+      poly_pm_concat(poly_symbolic(), poly_pm_simplify_valid());
+  g_pm_reshape_indexing =
+      poly_pm_thread_cache(poly_pm_concat(symbolic_valid, poly_pm_drop_and_clauses()));
+  poly_pm_destroy(symbolic_valid);
+  return g_pm_reshape_indexing;
+}
+
+static PolyPatternMatcher *poly_pm_pad_valid(void) {
+  if (g_pm_pad_valid) return g_pm_pad_valid;
+  /* Pinned tinygrad/schedule/indexing.py:136-141 simplifies the newly added
+   * PAD validity before wrapping the shifted coordinate in WHERE(...,Invalid). */
+  g_pm_pad_valid = poly_pm_thread_cache(
+      poly_pm_concat(poly_symbolic(), poly_pm_simplify_valid())
+  );
+  return g_pm_pad_valid;
+}
+
 static bool index_invalid_where(PolyUOp *coord) {
   return coord && coord->op == POLY_OP_WHERE && coord->n_src == 3 && coord->src[2] &&
          coord->src[2]->op == POLY_OP_CONST && coord->src[2]->arg.kind == POLY_ARG_INVALID;
@@ -90,6 +115,29 @@ PolyUOp *poly_index_get_valid(PolyCtx *ctx, PolyUOp *coord) {
       ctx, POLY_OP_CONST, POLY_BOOL,
       poly_arg_bool(!(coord->op == POLY_OP_CONST && coord->arg.kind == POLY_ARG_INVALID))
   );
+}
+
+/* Pinned schedule/indexing.py:82-86 derives the PAD value wrapper from the
+ * get_valid() projection of every transformed coordinate.  In particular, an
+ * unchanged coordinate can already carry invalidity from an earlier movement
+ * and must remain part of this PAD's wrapper predicate. */
+static bool pad_wrapper_valid_from_coords(
+    PolyCtx *ctx, PolyUOp **coords, int n_coords, int n_out, PolyUOp **valid_out
+) {
+  PolyUOp *valid = NULL;
+  PolyUOp *falsev = poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_bool(false));
+  for (int i = 0; i < n_coords; i++) {
+    PolyUOp *dim_valid = i < n_out ? poly_index_get_valid(ctx, coords[i]) : falsev;
+    if (!dim_valid) return false;
+    if (dim_valid->op == POLY_OP_CONST && dim_valid->arg.kind == POLY_ARG_BOOL &&
+        dim_valid->arg.b)
+      continue;
+    valid = valid
+                ? poly_uop2(ctx, POLY_OP_AND, POLY_BOOL, valid, dim_valid, poly_arg_none())
+                : dim_valid;
+  }
+  *valid_out = valid;
+  return true;
 }
 
 static bool expand_target_dim_is_one(PolyCtx *ctx, PolyUOp *movement, PolyArg arg, int dim, bool *is_one) {
@@ -214,18 +262,111 @@ bool poly_reshape_indices(
     if (!in_dim || !out_dim || in_dim != out_dim) return false;
   }
 
+  /* Pinned indexing.py:142-145 first simplifies the ordered coordinate SINK,
+   * replaces its active ranges with PLACEHOLDER ranges, applies the cached
+   * reshape, then restores the original ranges. This prevents existing range
+   * bounds/validity from changing commutative rewrite order inside reshape. */
+  PolyUOp *coordinate_sink = poly_uop(
+      ctx, POLY_OP_SINK, POLY_VOID, out_ranges, n_out, poly_arg_none()
+  );
+  coordinate_sink = coordinate_sink
+                        ? poly_graph_rewrite(ctx, coordinate_sink, poly_symbolic())
+                        : NULL;
+  if (!coordinate_sink || coordinate_sink->op != POLY_OP_SINK ||
+      coordinate_sink->n_src != n_out)
+    return false;
+
+  int range_cap = 0;
+  PolyUOp **coordinate_topo = poly_toposort_alloc(ctx, coordinate_sink, &range_cap);
+  if (!coordinate_topo && range_cap != 0) return false;
+  poly_toposort_free(coordinate_topo);
+  PolyUOp **original_ranges = range_cap > 0
+                                  ? malloc((size_t)range_cap * sizeof(*original_ranges))
+                                  : NULL;
+  PolyUOp **placeholder_ranges = range_cap > 0
+                                     ? malloc((size_t)range_cap * sizeof(*placeholder_ranges))
+                                     : NULL;
+  if (range_cap > 0 && (!original_ranges || !placeholder_ranges)) {
+    free(original_ranges);
+    free(placeholder_ranges);
+    return false;
+  }
+  int n_replacements = range_cap > 0
+                           ? poly_uop_ranges(
+                                 ctx, coordinate_sink, original_ranges, range_cap
+                             )
+                           : 0;
+  bool placeholder_ok = true;
+  for (int i = 0; i < n_replacements; i++) {
+    PolyUOp *range = original_ranges[i];
+    if (!range || range->op != POLY_OP_RANGE || range->n_src != 1) {
+      placeholder_ok = false;
+      break;
+    }
+    placeholder_ranges[i] = poly_uop1(
+        ctx, POLY_OP_RANGE, range->dtype, range->src[0],
+        poly_arg_range(i, POLY_AXIS_PLACEHOLDER)
+    );
+    if (!placeholder_ranges[i]) {
+      placeholder_ok = false;
+      break;
+    }
+  }
+  if (!placeholder_ok) {
+    free(original_ranges);
+    free(placeholder_ranges);
+    return false;
+  }
+  PolyUOp *placeholder_sink = n_replacements > 0
+                                  ? poly_uop_substitute(
+                                        ctx, coordinate_sink, original_ranges,
+                                        placeholder_ranges, n_replacements
+                                    )
+                                  : coordinate_sink;
+  if (!placeholder_sink || placeholder_sink->op != POLY_OP_SINK ||
+      placeholder_sink->n_src != n_out) {
+    free(original_ranges);
+    free(placeholder_ranges);
+    return false;
+  }
+
   /* Pinned _apply_reshape uses the exact symbolic output shape to flatten,
    * then floor-mod/divides by each exact symbolic input dimension
-   * (schedule/indexing.py:113-127,142-145). Cached PolyShape dimensions are
-   * allocation maxima only, so use them solely for static dimensions. */
+   * (schedule/indexing.py:113-127). Cached PolyShape dimensions are allocation
+   * maxima only, so use them solely for static dimensions. */
   PolyUOp *out_bounds[POLY_MAX_DIMS];
   for (int i = 0; i < n_out; i++) {
     PolyUOp *dim = poly_uop_shape_dim(ctx, reshape, i);
     out_bounds[i] = dim ? to_index_dtype(ctx, dim) : index_const(ctx, out_shape.dims[i]);
   }
-  PolyUOp *combined =
-      poly_compute_flat_index_symbolic(ctx, out_ranges, out_bounds, n_out);
-  if (!combined) return false;
+  /* Pinned _apply_reshape constructs every acc*src term and all div/mod nodes
+   * before the one complete-SINK rewrite. In particular, do not call the
+   * shared flat-index helper here: its eager symbolic rewrite combines
+   * Invalid guards before reshape validity simplification can reason locally. */
+  PolyUOp *acc = index_const(ctx, 1);
+  PolyUOp *combined = index_const(ctx, 0);
+  for (int i = n_out - 1; i >= 0; i--) {
+    PolyUOp *term = poly_uop2(
+        ctx, POLY_OP_MUL, POLY_INDEX, acc,
+        to_index_dtype(ctx, placeholder_sink->src[i]), poly_arg_none()
+    );
+    combined = term ? poly_uop2(
+                          ctx, POLY_OP_ADD, POLY_INDEX, combined, term,
+                          poly_arg_none()
+                      )
+                    : NULL;
+    acc = acc ? poly_uop2(
+                    ctx, POLY_OP_MUL, POLY_INDEX, acc,
+                    to_index_dtype(ctx, out_bounds[i]), poly_arg_none()
+                )
+              : NULL;
+    if (!combined || !acc) break;
+  }
+  if (!combined || !acc) {
+    free(original_ranges);
+    free(placeholder_ranges);
+    return false;
+  }
 
   for (int j = n_in - 1; j >= 0; j--) {
     PolyUOp *dim = poly_uop_shape_dim(ctx, reshape->src[0], j);
@@ -234,8 +375,33 @@ bool poly_reshape_indices(
         poly_uop2(ctx, POLY_OP_FLOORMOD, POLY_INDEX, combined, dim_val, poly_arg_none());
     combined =
         poly_uop2(ctx, POLY_OP_FLOORDIV, POLY_INDEX, combined, dim_val, poly_arg_none());
-    if (!in_ranges[j] || !combined) return false;
+    if (!in_ranges[j] || !combined) {
+      free(original_ranges);
+      free(placeholder_ranges);
+      return false;
+    }
   }
+  if (n_in > 0) {
+    PolyUOp *sink = poly_uop(
+        ctx, POLY_OP_SINK, POLY_VOID, in_ranges, n_in, poly_arg_none()
+    );
+    PolyUOp *simplified_placeholder =
+        sink ? poly_graph_rewrite(ctx, sink, poly_pm_reshape_indexing()) : NULL;
+    PolyUOp *simplified = simplified_placeholder && n_replacements > 0
+                              ? poly_uop_substitute(
+                                    ctx, simplified_placeholder, placeholder_ranges,
+                                    original_ranges, n_replacements
+                                )
+                              : simplified_placeholder;
+    if (!simplified || simplified->op != POLY_OP_SINK || simplified->n_src != n_in) {
+      free(original_ranges);
+      free(placeholder_ranges);
+      return false;
+    }
+    for (int j = 0; j < n_in; j++) in_ranges[j] = simplified->src[j];
+  }
+  free(original_ranges);
+  free(placeholder_ranges);
   *n_in_out = n_in;
   return true;
 }
@@ -386,29 +552,31 @@ bool poly_apply_movement_op(
       PolyUOp *valid = NULL;
       PolyUOp *zero = index_const(ctx, 0);
       PolyUOp *invalid = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_invalid());
-      PolyUOp *falsev = poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_bool(false));
       PolyUOp *truev = poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_bool(true));
 
       for (int i = 0; i < n; i++) {
         if (i >= n_out) {
           in_rngs[i] = zero;
-          valid = valid ? poly_uop2(ctx, POLY_OP_AND, POLY_BOOL, valid, falsev, poly_arg_none())
-                        : falsev;
           continue;
         }
         PolyUOp *offset = shape_stack_get(movement->src[1], i);
         if (!offset) return false;
         PolyUOp *index = to_index_dtype(ctx, out_rngs[i]);
         PolyUOp *offset_index = to_index_dtype(ctx, offset);
-        int64_t offset_value = 0;
-        PolyUOp *shifted = poly_uop_const_i64(offset, &offset_value) == 0 && offset_value == 0
-                               ? index
-                               : poly_uop2(
-                                     ctx, POLY_OP_ADD, POLY_INDEX, index,
-                                     index_neg_like_tinygrad(ctx, offset_index), poly_arg_none()
-                                 );
         PolyUOp *input_size = poly_uop_shape_dim(ctx, movement->src[0], i);
         if (!input_size) input_size = index_const(ctx, in_shape.dims[i]);
+        PolyUOp *output_size = shape_stack_get(movement->src[2], i);
+        int64_t offset_value = 0;
+        if (output_size && poly_uop_const_i64(offset, &offset_value) == 0 &&
+            offset_value == 0 && output_size == input_size) {
+          /* Pinned indexing.py:137 leaves an unchanged PAD dimension alone. */
+          in_rngs[i] = out_rngs[i];
+          continue;
+        }
+        PolyUOp *shifted = poly_uop2(
+            ctx, POLY_OP_ADD, POLY_INDEX, index,
+            index_neg_like_tinygrad(ctx, offset_index), poly_arg_none()
+        );
         input_size = to_index_dtype(ctx, input_size);
         PolyUOp *end =
             poly_uop2(ctx, POLY_OP_ADD, POLY_INDEX, input_size, offset_index, poly_arg_none());
@@ -419,14 +587,15 @@ bool poly_apply_movement_op(
         PolyUOp *lt_end = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, index, end, poly_arg_none());
         PolyUOp *dim_valid =
             poly_uop2(ctx, POLY_OP_AND, POLY_BOOL, ge_begin, lt_end, poly_arg_none());
+        dim_valid = poly_graph_rewrite(ctx, dim_valid, poly_pm_pad_valid());
+        if (!dim_valid) return false;
         /* Pinned indexing.py:137 keeps address and validity separable through
          * UOp.get_idx/get_valid: valid.where(r-off, Invalid). */
         in_rngs[i] = poly_uop3(
             ctx, POLY_OP_WHERE, POLY_INDEX, dim_valid, shifted, invalid, poly_arg_none()
         );
-        valid = valid ? poly_uop2(ctx, POLY_OP_AND, POLY_BOOL, valid, dim_valid, poly_arg_none())
-                      : dim_valid;
       }
+      if (!pad_wrapper_valid_from_coords(ctx, in_rngs, n, n_out, &valid)) return false;
       if (valid_out) *valid_out = valid;
       *n_in_out = n;
       return true;
@@ -438,26 +607,22 @@ bool poly_apply_movement_op(
     PolyUOp *valid = NULL;
     PolyUOp *zero = index_const(ctx, 0);
     PolyUOp *invalid = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_invalid());
-    PolyUOp *falsev = poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_bool(false));
 
     for (int i = 0; i < n; i++) {
       if (i >= n_out) {
         in_rngs[i] = zero;
-        valid =
-            valid ? poly_uop2(ctx, POLY_OP_AND, POLY_BOOL, valid, falsev, poly_arg_none()) : falsev;
         continue;
       }
       int64_t begin = arg.pair_tuple.pairs[i][0];
-      PolyUOp *shifted;
-      if (begin == 0) {
-        shifted = out_rngs[i];
-      } else {
-        PolyUOp *off = index_const(ctx, begin);
-        shifted = poly_uop2(
-            ctx, POLY_OP_ADD, POLY_INDEX, to_index_dtype(ctx, out_rngs[i]),
-            index_neg_like_tinygrad(ctx, off), poly_arg_none()
-        );
+      if (begin == 0 && arg.pair_tuple.pairs[i][1] == 0) {
+        in_rngs[i] = out_rngs[i];
+        continue;
       }
+      PolyUOp *off = index_const(ctx, begin);
+      PolyUOp *shifted = poly_uop2(
+          ctx, POLY_OP_ADD, POLY_INDEX, to_index_dtype(ctx, out_rngs[i]),
+          index_neg_like_tinygrad(ctx, off), poly_arg_none()
+      );
       /* tinygrad schedule/indexing.py::apply_movement_op(PAD) forms the
        * valid mask on the output-space range:
        *
@@ -473,7 +638,6 @@ bool poly_apply_movement_op(
       if (__builtin_add_overflow(in_shape.dims[i], begin, &end_val)) return false;
       PolyUOp *begin_c = index_const(ctx, begin);
       PolyUOp *end_c = index_const(ctx, end_val);
-      PolyUOp *zero = index_const(ctx, 0);
       PolyUOp *true_const = poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_bool(true));
       PolyUOp *lt_begin =
           poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, to_index_dtype(ctx, out_rngs[i]), begin_c, poly_arg_none());
@@ -482,12 +646,14 @@ bool poly_apply_movement_op(
       PolyUOp *lt_dim =
           poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, to_index_dtype(ctx, out_rngs[i]), end_c, poly_arg_none());
       PolyUOp *dv = poly_uop2(ctx, POLY_OP_AND, POLY_BOOL, ge_begin, lt_dim, poly_arg_none());
+      dv = poly_graph_rewrite(ctx, dv, poly_pm_pad_valid());
+      if (!dv) return false;
       /* Pinned indexing.py:137 preserves invalidity in the coordinate. The
        * late gater moves this predicate onto LOAD/STORE before rendering. */
       in_rngs[i] =
           poly_uop3(ctx, POLY_OP_WHERE, POLY_INDEX, dv, shifted, invalid, poly_arg_none());
-      valid = valid ? poly_uop2(ctx, POLY_OP_AND, POLY_BOOL, valid, dv, poly_arg_none()) : dv;
     }
+    if (!pad_wrapper_valid_from_coords(ctx, in_rngs, n, n_out, &valid)) return false;
     if (valid_out) *valid_out = valid;
     *n_in_out = in_shape.ndim;
     return true;

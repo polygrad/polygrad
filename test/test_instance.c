@@ -2952,6 +2952,123 @@ TEST(instance, set_device_preserves_captured_copy_occurrences) {
   PASS();
 }
 
+TEST(instance, explicit_module_device_map_places_named_regions_atomically) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  poly_ctx_set_preferred_device(ctx, POLY_DEVICE_CPU);
+
+  int64_t shape[] = {2};
+  PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+  PolyTensor *w0 = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+  PolyTensor *w1 = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+  PolyTensor *hidden = poly_tensor_alu2(ctx, POLY_OP_ADD, x, w0);
+  PolyTensor *output = poly_tensor_alu2(ctx, POLY_OP_MUL, hidden, w1);
+  ASSERT_NOT_NULL(x);
+  ASSERT_NOT_NULL(w0);
+  ASSERT_NOT_NULL(w1);
+  ASSERT_NOT_NULL(hidden);
+  ASSERT_NOT_NULL(output);
+
+  float w0_data[] = {3.0f, 4.0f};
+  float w1_data[] = {2.0f, 3.0f};
+  ASSERT_INT_EQ(
+      poly_buffer_write(
+          ctx, (PolyUOp *)poly_uop_get_buffer_identity(poly_tensor_uop_physical(w0)),
+          w0_data, sizeof(w0_data)
+      ),
+      0
+  );
+  ASSERT_INT_EQ(
+      poly_buffer_write(
+          ctx, (PolyUOp *)poly_uop_get_buffer_identity(poly_tensor_uop_physical(w1)),
+          w1_data, sizeof(w1_data)
+      ),
+      0
+  );
+
+  PolyBindingSpec bindings[] = {
+      {.name = "x", .role = POLY_ROLE_INPUT, .tensor = x},
+      {.name = "layers.0.weight", .role = POLY_ROLE_PARAM, .tensor = w0},
+      {.name = "layers.1.weight", .role = POLY_ROLE_PARAM, .tensor = w1},
+      {.name = "output", .role = POLY_ROLE_OUTPUT, .tensor = output},
+  };
+  const char *input_names[] = {"x"};
+  const char *output_names[] = {"output"};
+  PolyEntrypointSpec entrypoints[] = {{
+      .name = "forward",
+      .inputs = input_names,
+      .n_inputs = 1,
+      .outputs = output_names,
+      .n_outputs = 1,
+  }};
+  PolyInstance *inst =
+      poly_instance_from_bindings(ctx, bindings, 4, entrypoints, 1, NULL, NULL);
+  ASSERT_NOT_NULL(inst);
+
+  PolyTensor *module0_inputs[] = {x};
+  PolyTensor *module1_inputs[] = {hidden};
+  PolyInstanceModuleSpec modules[] = {
+      {.name = "layers.0", .inputs = module0_inputs, .n_inputs = 1, .output = hidden},
+      {.name = "layers.1", .inputs = module1_inputs, .n_inputs = 1, .output = output},
+  };
+  ASSERT_INT_EQ(poly_instance_define_modules(inst, modules, 2), 0);
+
+  PolyInstanceDeviceMapEntry forward_map[] = {
+      {.module = "layers.1", .device = "CPU:1"},
+      {.module = "layers.0", .device = "CPU"},
+  };
+  ASSERT_INT_EQ(poly_instance_set_device_map(inst, forward_map, 2), 0);
+  PolyUOp *forward_sink = poly_instance_get_sink(inst, "forward");
+  ASSERT_NOT_NULL(forward_sink);
+  ASSERT_INT_EQ(instance_count_root_op(ctx, forward_sink, POLY_OP_COPY), 1);
+  ASSERT_STR_EQ(poly_uop_device_name(ctx, poly_instance_get_buffer(inst, "x")), "CPU");
+  ASSERT_STR_EQ(
+      poly_uop_device_name(ctx, poly_instance_get_buffer(inst, "layers.0.weight")), "CPU"
+  );
+  ASSERT_STR_EQ(
+      poly_uop_device_name(ctx, poly_instance_get_buffer(inst, "layers.1.weight")), "CPU:1"
+  );
+  ASSERT_STR_EQ(
+      poly_uop_device_name(ctx, poly_instance_get_buffer(inst, "output")), "CPU:1"
+  );
+
+  float x_data[] = {1.0f, 2.0f};
+  PolyIOBinding io[] = {POLY_IO_BINDING_ARRAY("x", x_data, POLY_FLOAT32)};
+  ASSERT_INT_EQ(poly_instance_forward(inst, io, 1), 0);
+  int64_t numel = 0;
+  float *out = poly_instance_buf_data_named(inst, "output", &numel);
+  ASSERT_NOT_NULL(out);
+  ASSERT_INT_EQ((int)numel, 2);
+  ASSERT_FLOAT_EQ(out[0], 8.0f, 1e-6f);
+  ASSERT_FLOAT_EQ(out[1], 18.0f, 1e-6f);
+
+  PolyInstanceDeviceMapEntry incomplete[] = {
+      {.module = "layers.0", .device = "CPU"},
+  };
+  ASSERT_INT_EQ(poly_instance_set_device_map(inst, incomplete, 1), -1);
+  ASSERT_PTR_EQ(poly_instance_get_sink(inst, "forward"), forward_sink);
+
+  PolyInstanceDeviceMapEntry reverse_map[] = {
+      {.module = "layers.0", .device = "CPU:1"},
+      {.module = "layers.1", .device = "CPU"},
+  };
+  ASSERT_INT_EQ(poly_instance_set_device_map(inst, reverse_map, 2), 0);
+  PolyUOp *reverse_sink = poly_instance_get_sink(inst, "forward");
+  ASSERT_NOT_NULL(reverse_sink);
+  ASSERT_PTR_NEQ(reverse_sink, forward_sink);
+  ASSERT_INT_EQ(instance_count_root_op(ctx, reverse_sink, POLY_OP_COPY), 1);
+  ASSERT_STR_EQ(poly_uop_device_name(ctx, poly_instance_get_buffer(inst, "x")), "CPU:1");
+  ASSERT_STR_EQ(poly_uop_device_name(ctx, poly_instance_get_buffer(inst, "output")), "CPU");
+  ASSERT_INT_EQ(poly_instance_forward(inst, io, 1), 0);
+  out = poly_instance_buf_data_named(inst, "output", &numel);
+  ASSERT_FLOAT_EQ(out[0], 8.0f, 1e-6f);
+  ASSERT_FLOAT_EQ(out[1], 18.0f, 1e-6f);
+
+  poly_instance_free(inst);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(instance, set_device_unsupported) {
   int ir_len = 0;
   uint8_t *ir = make_add_ir(&ir_len);

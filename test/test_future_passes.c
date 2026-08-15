@@ -3184,6 +3184,52 @@ TEST(unify_pre, control_flow_adds_predecessors) {
   PASS();
 }
 
+TEST(unify_pre, symbolic_arithmetic_range_bound_linearizes_like_tinygrad) {
+  /* Pinned UOp.range accepts any same-dtype sint source and linearize ranks
+   * it with int(r.vmax)+1 (uop/spec.py:73-76,
+   * codegen/late/linearizer.py:19-20). */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *n = poly_define_var(ctx, "n", 1, 7);
+  PolyUOp *bound_n = poly_bind_var(ctx, n, 3);
+  PolyUOp *bound = poly_alu2(ctx, POLY_OP_ADD, bound_n, poly_const_int(ctx, 1));
+  PolyUOp *range = poly_uop1(
+      ctx, POLY_OP_RANGE, bound->dtype, bound,
+      poly_arg_range(10, POLY_AXIS_LOOP));
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, range, poly_arg_none());
+  ASSERT_NOT_NULL(bound);
+  ASSERT_NOT_NULL(range);
+  ASSERT_NOT_NULL(sink);
+
+  int64_t lo = 0, hi = 0;
+  poly_uop_minmax(ctx, bound, &lo, &hi);
+  ASSERT_INT_EQ(lo, 2);
+  ASSERT_INT_EQ(hi, 8);
+  poly_uop_minmax(ctx, range, &lo, &hi);
+  ASSERT_INT_EQ(lo, 0);
+  ASSERT_INT_EQ(hi, 7);
+
+  PolyUOp *rewritten = poly_apply_control_flow(ctx, sink);
+  ASSERT_NOT_NULL(rewritten);
+  int n_linear = 0;
+  PolyUOp **linear = poly_linearize_rewritten(ctx, rewritten, &n_linear);
+  ASSERT_NOT_NULL(linear);
+  int bound_pos = -1, range_pos = -1, sink_pos = -1;
+  for (int i = 0; i < n_linear; i++) {
+    if (linear[i] == bound) bound_pos = i;
+    if (linear[i] == range) range_pos = i;
+    if (linear[i] == sink) sink_pos = i;
+  }
+  ASSERT_TRUE(bound_pos >= 0);
+  ASSERT_TRUE(range_pos > bound_pos);
+  ASSERT_TRUE(sink_pos > range_pos);
+  ASSERT_PTR_EQ(range->src[0], bound);
+
+  free(linear);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(unify_pre, control_flow_rewinds_scratch_toposort) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *sink = build_2range_kernel(ctx, 32, 64);

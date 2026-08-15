@@ -2,6 +2,25 @@ from ..tensor import Tensor
 from .state import tar_extract
 
 
+def mnist(device=None, fashion=False):
+    """Load MNIST or Fashion-MNIST using the pinned IDX slicing convention."""
+    base_url = (
+        "http://fashion-mnist.s3-website.eu-central-1.amazonaws.com/"
+        if fashion
+        else "https://storage.googleapis.com/cvdf-datasets/mnist/"
+    )
+
+    def _mnist(file):
+        return Tensor.from_url(base_url + file, gunzip=True)
+
+    return (
+        _mnist("train-images-idx3-ubyte.gz")[0x10:].reshape(-1, 1, 28, 28).to(device),
+        _mnist("train-labels-idx1-ubyte.gz")[8:].to(device),
+        _mnist("t10k-images-idx3-ubyte.gz")[0x10:].reshape(-1, 1, 28, 28).to(device),
+        _mnist("t10k-labels-idx1-ubyte.gz")[8:].to(device),
+    )
+
+
 def cifar(device=None):
     tensors = tar_extract(Tensor.from_url(
         "https://www.cs.toronto.edu/~kriz/cifar-10-binary.tar.gz",
@@ -21,4 +40,4 @@ def cifar(device=None):
     )
 
 
-__all__ = ["cifar"]
+__all__ = ["mnist", "cifar"]

@@ -76,6 +76,23 @@ typedef struct {
   uint32_t flags;
 } PolyEntrypointSpec;
 
+/* Explicit product-layer module cuts for non-uniform placement.  Inputs and
+ * output are Tensor handles only at definition time; PolyInstance retains the
+ * exact logical UOp roots owned by its PolyCtx. */
+typedef struct {
+  const char *name;
+  PolyTensor **inputs;
+  int n_inputs;
+  PolyTensor *output;
+} PolyInstanceModuleSpec;
+
+/* One exact module-name -> canonical device-name policy row.  String device
+ * identities preserve sibling ordinals such as CPU:1. */
+typedef struct {
+  const char *module;
+  const char *device;
+} PolyInstanceDeviceMapEntry;
+
 /* Buffer roles (matches poly_ir.h) */
 #define POLY_ROLE_PARAM 0
 #define POLY_ROLE_INPUT 1
@@ -160,6 +177,25 @@ PolyStatus poly_instance_entrypoint(
     const PolyEntrypointOptions *opts
 );
 PolyStatus poly_instance_build(PolyInstance *inst, PolyInstanceError *err);
+
+/* Retain explicit module boundaries on an already built Instance.  This does
+ * not alter its current physical roots.  Definition is aggregate and atomic. */
+int poly_instance_define_modules(
+    PolyInstance *inst,
+    const PolyInstanceModuleSpec *modules,
+    int n_modules
+);
+
+/* FFI-friendly flat-input adapter. Module inputs are concatenated in module
+ * order and split by input_counts. */
+int poly_instance_define_module_arrays(
+    PolyInstance *inst,
+    const char **names,
+    PolyTensor **inputs,
+    const int *input_counts,
+    PolyTensor **outputs,
+    int n_modules
+);
 
 PolyInstance *poly_instance_from_bindings(
     PolyCtx *ctx,
@@ -274,6 +310,22 @@ uint8_t *poly_instance_save_bundle_ex(PolyInstance *inst, int *out_len, uint32_t
  * roots and migrate bound values through ctx->buffers. Returns 0 on success,
  * <0 if placement fails or the device is unsupported/unavailable. */
 int poly_instance_set_device(PolyInstance *inst, PolyDevice device);
+
+/* Compile retained logical roots under a complete explicit module/device map,
+ * migrate named state, then atomically publish the replacement physical
+ * bindings and entrypoint roots. Default Tensor realization never calls it. */
+int poly_instance_set_device_map(
+    PolyInstance *inst,
+    const PolyInstanceDeviceMapEntry *entries,
+    int n_entries
+);
+
+int poly_instance_set_device_map_arrays(
+    PolyInstance *inst,
+    const char **modules,
+    const char **devices,
+    int n_entries
+);
 
 /* Explicit readback/upload for device-resident buffers */
 

@@ -1474,6 +1474,20 @@ static napi_value napi_poly_tensor_detach(napi_env env, napi_callback_info info)
   );
 }
 
+static napi_value napi_poly_tensor_contiguous_backward(
+    napi_env env, napi_callback_info info
+) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  return make_external(
+      env,
+      poly_tensor_contiguous_backward(
+          get_external(env, argv[0]), get_external(env, argv[1])
+      )
+  );
+}
+
 static napi_value napi_poly_tensor_sum(napi_env env, napi_callback_info info) {
   napi_value argv[5];
   size_t argc = 5;
@@ -1487,6 +1501,25 @@ static napi_value napi_poly_tensor_sum(napi_env env, napi_callback_info info) {
   return make_external(
       env,
       poly_tensor_sum(get_external(env, argv[0]), get_external(env, argv[1]), axes, n_axes, keepdim)
+  );
+}
+
+static napi_value napi_poly_tensor_sum_dtype_by_id(napi_env env, napi_callback_info info) {
+  napi_value argv[6];
+  size_t argc = 6;
+  int64_t axes[POLY_MAX_DIMS];
+  int32_t n_axes = 0, dtype_id = -1;
+  bool keepdim = false;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  read_int64_array(env, argv[2], axes, POLY_MAX_DIMS);
+  napi_get_value_int32(env, argv[3], &n_axes);
+  napi_get_value_bool(env, argv[4], &keepdim);
+  napi_get_value_int32(env, argv[5], &dtype_id);
+  return make_external(
+      env, poly_tensor_sum_dtype_by_id(
+               get_external(env, argv[0]), get_external(env, argv[1]), axes, n_axes, keepdim,
+               dtype_id
+           )
   );
 }
 
@@ -1539,6 +1572,20 @@ static napi_value napi_poly_tensor_dot(napi_env env, napi_callback_info info) {
   return make_external(
       env, poly_tensor_dot(
                get_external(env, argv[0]), get_external(env, argv[1]), get_external(env, argv[2])
+           )
+  );
+}
+
+static napi_value napi_poly_tensor_dot_dtype_by_id(napi_env env, napi_callback_info info) {
+  napi_value argv[4];
+  size_t argc = 4;
+  int32_t dtype_id = -1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  napi_get_value_int32(env, argv[3], &dtype_id);
+  return make_external(
+      env, poly_tensor_dot_dtype_by_id(
+               get_external(env, argv[0]), get_external(env, argv[1]), get_external(env, argv[2]),
+               dtype_id
            )
   );
 }
@@ -1857,6 +1904,27 @@ static napi_value napi_poly_tensor_conv2d(napi_env env, napi_callback_info info)
       env, poly_tensor_conv2d(
                get_external(env, argv[0]), get_external(env, argv[1]), get_external(env, argv[2]),
                get_external_nullable(env, argv[3]), groups, stride, dilation, padding, n_padding
+           )
+  );
+}
+
+static napi_value napi_poly_tensor_conv2d_dtype_by_id(napi_env env, napi_callback_info info) {
+  napi_value argv[10];
+  size_t argc = 10;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  int64_t stride[POLY_MAX_DIMS], dilation[POLY_MAX_DIMS], padding[2 * POLY_MAX_DIMS];
+  int32_t groups = 0, n_padding = 0, dtype_id = -1;
+  napi_get_value_int32(env, argv[4], &groups);
+  read_int64_array(env, argv[5], stride, POLY_MAX_DIMS);
+  read_int64_array(env, argv[6], dilation, POLY_MAX_DIMS);
+  read_int64_array(env, argv[7], padding, 2 * POLY_MAX_DIMS);
+  napi_get_value_int32(env, argv[8], &n_padding);
+  napi_get_value_int32(env, argv[9], &dtype_id);
+  return make_external(
+      env, poly_tensor_conv2d_dtype_by_id(
+               get_external(env, argv[0]), get_external(env, argv[1]), get_external(env, argv[2]),
+               get_external_nullable(env, argv[3]), groups, stride, dilation, padding, n_padding,
+               dtype_id
            )
   );
 }
@@ -3698,6 +3766,95 @@ static napi_value napi_poly_instance_set_device(napi_env env, napi_callback_info
   return result;
 }
 
+static napi_value napi_poly_instance_define_module_arrays(napi_env env, napi_callback_info info) {
+  napi_value argv[5];
+  size_t argc = 5;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc < 5) {
+    napi_throw_error(env, NULL, "polygrad: poly_instance_define_module_arrays expects 5 args");
+    return NULL;
+  }
+  PolyInstance *inst = get_external(env, argv[0]);
+  char **names = NULL;
+  PolyTensor **inputs = NULL;
+  int *input_counts = NULL;
+  PolyTensor **outputs = NULL;
+  uint32_t n_names = 0, n_inputs = 0, n_counts = 0, n_outputs = 0;
+  if (!read_string_array_alloc(env, argv[1], &names, &n_names, false) ||
+      !read_tensor_array_alloc(env, argv[2], &inputs, &n_inputs) ||
+      !read_i32_array_alloc(env, argv[3], &input_counts, &n_counts) ||
+      !read_tensor_array_alloc(env, argv[4], &outputs, &n_outputs))
+    goto fail;
+  if (n_names == 0 || n_names != n_counts || n_names != n_outputs) {
+    napi_throw_error(env, NULL, "polygrad: module array length mismatch");
+    goto fail;
+  }
+  uint64_t expected_inputs = 0;
+  for (uint32_t i = 0; i < n_counts; i++) {
+    if (input_counts[i] < 0) {
+      napi_throw_error(env, NULL, "polygrad: negative module input count");
+      goto fail;
+    }
+    expected_inputs += (uint32_t)input_counts[i];
+  }
+  if (expected_inputs != n_inputs) {
+    napi_throw_error(env, NULL, "polygrad: flattened module input count mismatch");
+    goto fail;
+  }
+
+  int rc = poly_instance_define_module_arrays(
+      inst, (const char **)names, inputs, input_counts, outputs, (int)n_names
+  );
+  free_string_array_items(names, n_names);
+  free(inputs);
+  free(input_counts);
+  free(outputs);
+  napi_value result;
+  NAPI_CALL(env, napi_create_int32(env, rc, &result));
+  return result;
+
+fail:
+  free_string_array_items(names, n_names);
+  free(inputs);
+  free(input_counts);
+  free(outputs);
+  return NULL;
+}
+
+static napi_value napi_poly_instance_set_device_map_arrays(napi_env env, napi_callback_info info) {
+  napi_value argv[3];
+  size_t argc = 3;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc < 3) {
+    napi_throw_error(env, NULL, "polygrad: poly_instance_set_device_map_arrays expects 3 args");
+    return NULL;
+  }
+  PolyInstance *inst = get_external(env, argv[0]);
+  char **modules = NULL;
+  char **devices = NULL;
+  uint32_t n_modules = 0, n_devices = 0;
+  if (!read_string_array_alloc(env, argv[1], &modules, &n_modules, false) ||
+      !read_string_array_alloc(env, argv[2], &devices, &n_devices, false))
+    goto fail;
+  if (n_modules == 0 || n_modules != n_devices) {
+    napi_throw_error(env, NULL, "polygrad: device-map array length mismatch");
+    goto fail;
+  }
+  int rc = poly_instance_set_device_map_arrays(
+      inst, (const char **)modules, (const char **)devices, (int)n_modules
+  );
+  free_string_array_items(modules, n_modules);
+  free_string_array_items(devices, n_devices);
+  napi_value result;
+  NAPI_CALL(env, napi_create_int32(env, rc, &result));
+  return result;
+
+fail:
+  free_string_array_items(modules, n_modules);
+  free_string_array_items(devices, n_devices);
+  return NULL;
+}
+
 static napi_value napi_poly_mlp_from_json(napi_env env, napi_callback_info info) {
   napi_value argv[2];
   size_t argc = 2;
@@ -5016,11 +5173,16 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_tensor_gelu", napi_poly_tensor_gelu),
       DECLARE_NAPI_METHOD("poly_tensor_quick_gelu", napi_poly_tensor_quick_gelu),
       DECLARE_NAPI_METHOD("poly_tensor_detach", napi_poly_tensor_detach),
+      DECLARE_NAPI_METHOD(
+          "poly_tensor_contiguous_backward", napi_poly_tensor_contiguous_backward
+      ),
       DECLARE_NAPI_METHOD("poly_tensor_sum", napi_poly_tensor_sum),
+      DECLARE_NAPI_METHOD("poly_tensor_sum_dtype_by_id", napi_poly_tensor_sum_dtype_by_id),
       DECLARE_NAPI_METHOD("poly_tensor_max", napi_poly_tensor_max),
       DECLARE_NAPI_METHOD("poly_tensor_argmax", napi_poly_tensor_argmax),
       DECLARE_NAPI_METHOD("poly_tensor_minimum", napi_poly_tensor_minimum),
       DECLARE_NAPI_METHOD("poly_tensor_dot", napi_poly_tensor_dot),
+      DECLARE_NAPI_METHOD("poly_tensor_dot_dtype_by_id", napi_poly_tensor_dot_dtype_by_id),
       DECLARE_NAPI_METHOD("poly_tensor_qr_ex", napi_poly_tensor_qr_ex),
       DECLARE_NAPI_METHOD(
           "poly_tensor_triangular_solve", napi_poly_tensor_triangular_solve
@@ -5053,6 +5215,9 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_tensor_pool", napi_poly_tensor_pool),
       DECLARE_NAPI_METHOD("poly_tensor_max_pool2d", napi_poly_tensor_max_pool2d),
       DECLARE_NAPI_METHOD("poly_tensor_conv2d", napi_poly_tensor_conv2d),
+      DECLARE_NAPI_METHOD(
+          "poly_tensor_conv2d_dtype_by_id", napi_poly_tensor_conv2d_dtype_by_id
+      ),
       DECLARE_NAPI_METHOD("poly_tensor_batchnorm", napi_poly_tensor_batchnorm),
       DECLARE_NAPI_METHOD("poly_tensor_one_hot", napi_poly_tensor_one_hot),
       DECLARE_NAPI_METHOD("poly_tensor_gather_dim", napi_poly_tensor_gather_dim),
@@ -5191,6 +5356,12 @@ NAPI_MODULE_INIT() {
       ),
       DECLARE_NAPI_METHOD("poly_instance_free", napi_poly_instance_free),
       DECLARE_NAPI_METHOD("poly_instance_set_device", napi_poly_instance_set_device),
+      DECLARE_NAPI_METHOD(
+          "poly_instance_define_module_arrays", napi_poly_instance_define_module_arrays
+      ),
+      DECLARE_NAPI_METHOD(
+          "poly_instance_set_device_map_arrays", napi_poly_instance_set_device_map_arrays
+      ),
       DECLARE_NAPI_METHOD("poly_mlp_from_json", napi_poly_mlp_from_json),
       DECLARE_NAPI_METHOD("poly_tabm_instance", napi_poly_tabm_instance),
       DECLARE_NAPI_METHOD("poly_nam_instance", napi_poly_nam_instance),

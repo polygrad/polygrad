@@ -205,7 +205,7 @@ def _tensor_array(inputs):
     return arr, n
 
 
-class Jit:
+class TinyJit:
     """Tinygrad-style capture/replay wrapper for Tensor functions.
 
     First call runs normally, second call captures returned tensor realization,
@@ -214,7 +214,7 @@ class Jit:
 
     def __init__(self, fxn, *, prune=False):
         if fxn is None:
-            raise TypeError('Jit requires a function')
+            raise TypeError('TinyJit requires a function')
         functools.update_wrapper(self, fxn)
         self.fxn = fxn
         self.prune = bool(prune)
@@ -350,17 +350,22 @@ class Jit:
         return ret
 
 
+# Compatibility name retained for Polygrad's existing Python surface. Pinned
+# tinygrad/engine/jit.py:246 names the shared capture/replay concept TinyJit.
+Jit = TinyJit
+
+
 def jit(fxn=None, *, prune=False):
     if fxn is None:
-        return lambda f: Jit(f, prune=prune)
-    return Jit(fxn, prune=prune)
+        return lambda f: TinyJit(f, prune=prune)
+    return TinyJit(fxn, prune=prune)
 
 
 class CompiledCallable:
     """Explicit wrapper around the same tinygrad-style JIT capture/replay path.
 
     Construction performs the normal first run and second capture run. Later
-    calls replay the captured schedules through the wrapped Jit object.
+    calls replay the captured schedules through the wrapped TinyJit object.
     """
 
     def __init__(self, jit_obj, compile_ms, input_count):
@@ -424,7 +429,7 @@ def compile(fxn, sample_inputs, *, prune=False):
     else:
         raise TypeError('compile requires a Tensor or sequence of Tensors')
 
-    j = Jit(fxn, prune=prune)
+    j = TinyJit(fxn, prune=prune)
     start = time.perf_counter()
     j(*args)
     j(*args)

@@ -203,6 +203,20 @@ TEST(uop, device_query_preserves_exact_physical_identity) {
       ctx, POLY_OP_STAGE, POLY_FLOAT32, stage_src, 2,
       poly_arg_bufferize_opts("CPU:1", POLY_ADDR_GLOBAL, false)
   );
+  const char *tuple_names[2] = {"CPU", "CPU:1"};
+  const char *reversed_names[2] = {"CPU:1", "CPU"};
+  PolyUOp *tuple_stage = poly_uop(
+      ctx, POLY_OP_STAGE, POLY_FLOAT32, stage_src, 2,
+      poly_arg_bufferize_opts_tuple(tuple_names, 2, POLY_ADDR_GLOBAL, false)
+  );
+  PolyUOp *tuple_stage_same = poly_uop(
+      ctx, POLY_OP_STAGE, POLY_FLOAT32, stage_src, 2,
+      poly_arg_bufferize_opts_tuple(tuple_names, 2, POLY_ADDR_GLOBAL, false)
+  );
+  PolyUOp *tuple_stage_reversed = poly_uop(
+      ctx, POLY_OP_STAGE, POLY_FLOAT32, stage_src, 2,
+      poly_arg_bufferize_opts_tuple(reversed_names, 2, POLY_ADDR_GLOBAL, false)
+  );
   PolyParamArg unsupported_arg = {
       .slot = 1,
       .addrspace = POLY_ADDR_GLOBAL,
@@ -218,10 +232,19 @@ TEST(uop, device_query_preserves_exact_physical_identity) {
   ASSERT_PTR_EQ(poly_uop_device_uop_cached(ctx, mixed, NULL), cpu1);
   ASSERT_PTR_EQ(poly_uop_device_uop_cached(ctx, param, NULL), cpu1);
   ASSERT_PTR_EQ(poly_uop_device_uop_cached(ctx, stage, NULL), cpu1);
+  PolyUOp *tuple_stage_device = poly_uop_device_uop_cached(ctx, tuple_stage, NULL);
+  ASSERT_NOT_NULL(tuple_stage_device);
+  ASSERT_INT_EQ(tuple_stage_device->arg.kind, POLY_ARG_STRING_TUPLE);
+  ASSERT_INT_EQ(tuple_stage_device->arg.string_tuple.n, 2);
+  ASSERT_STR_EQ(tuple_stage_device->arg.string_tuple.vals[0], "CPU");
+  ASSERT_STR_EQ(tuple_stage_device->arg.string_tuple.vals[1], "CPU:1");
+  ASSERT_PTR_EQ(tuple_stage, tuple_stage_same);
+  ASSERT_PTR_NEQ(tuple_stage, tuple_stage_reversed);
   ASSERT_STR_EQ(poly_uop_device_name(ctx, mixed), "CPU:1");
   ASSERT_TRUE(poly_uop_device_uop_cached(ctx, constant, NULL) == NULL);
   ASSERT_TRUE(poly_uop_device_name(ctx, constant) == NULL);
   ASSERT_TRUE(poly_uop_explicit_devices_supported(ctx, param));
+  ASSERT_TRUE(poly_uop_explicit_devices_supported(ctx, tuple_stage));
   ASSERT_FALSE(poly_uop_explicit_devices_supported(ctx, unsupported));
 
   poly_ctx_destroy(ctx);
@@ -358,6 +381,40 @@ TEST(uop, cse_int_tuple) {
   PolyUOp *u1 = poly_uop1(ctx, POLY_OP_PERMUTE, POLY_FLOAT32, a, arg1);
   PolyUOp *u2 = poly_uop1(ctx, POLY_OP_PERMUTE, POLY_FLOAT32, a, arg2);
   ASSERT_PTR_EQ(u1, u2);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(uop, call_info_is_value_metadata) {
+  /* Pinned CallInfo is FUNCTION value metadata, so equal field values CSE and
+   * every differing supported field stays distinct (uop/ops.py:1158-1170). */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *body = poly_uop0(ctx, POLY_OP_TUPLE, POLY_VOID, poly_arg_none());
+  ASSERT_NOT_NULL(body);
+  PolyCallInfo first = {.name = "forward"};
+  PolyCallInfo same = {.name = "forward"};
+  PolyCallInfo other = {.name = "other"};
+  PolyCallInfo precompiled = {.name = "forward", .precompile = true};
+  PolyUOp *a = poly_uop1(
+      ctx, POLY_OP_FUNCTION, POLY_VOID, body, poly_arg_call_info(&first));
+  PolyUOp *b = poly_uop1(
+      ctx, POLY_OP_FUNCTION, POLY_VOID, body, poly_arg_call_info(&same));
+  PolyUOp *c = poly_uop1(
+      ctx, POLY_OP_FUNCTION, POLY_VOID, body, poly_arg_call_info(&other));
+  PolyUOp *d = poly_uop1(
+      ctx, POLY_OP_FUNCTION, POLY_VOID, body, poly_arg_call_info(&precompiled));
+  ASSERT_NOT_NULL(a);
+  ASSERT_PTR_EQ(a, b);
+  ASSERT_PTR_NEQ(a, c);
+  ASSERT_PTR_NEQ(a, d);
+  first.name = "mutated-after-construction";
+  ASSERT_STR_EQ(a->arg.call_info->name, "forward");
+  char *text = poly_uop_str(a);
+  ASSERT_NOT_NULL(text);
+  ASSERT_STR_EQ(
+      text, "UOp(FUNCTION, CallInfo(None,(),'forward',False,False), src=1)");
+  free(text);
   poly_ctx_destroy(ctx);
   PASS();
 }

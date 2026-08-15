@@ -12,6 +12,7 @@ from polygrad.nn.state import TensorIO, tar_extract
 
 CIFAR_PREFIX = "cifar-10-batches-bin/"
 CIFAR_URL = "https://www.cs.toronto.edu/~kriz/cifar-10-binary.tar.gz"
+FASHION_MNIST_URL = "http://fashion-mnist.s3-website.eu-central-1.amazonaws.com/"
 
 
 def _tar_bytes(entries):
@@ -103,6 +104,46 @@ def test_tar_extract_returns_only_regular_lazy_member_views(tmp_path):
     assert all(tensor.device == f"DISK:{path.resolve()}" for tensor in members.values())
     assert members["first.bin"].tolist() == [97, 98, 99]
     assert members["nested/second.bin"].tolist() == [1, 2, 3, 4]
+
+
+def test_mnist_matches_pinned_idx_headers_urls_and_device(monkeypatch):
+    calls = []
+
+    def fake_from_url(url, **kwargs):
+        calls.append((url, kwargs))
+        if "images" in url:
+            return Tensor(
+                list(range(16)) + [i % 256 for i in range(2 * 28 * 28)],
+                dtype=dtypes.uint8,
+            )
+        return Tensor(list(range(8)) + [3, 7], dtype=dtypes.uint8)
+
+    monkeypatch.setattr(Tensor, "from_url", staticmethod(fake_from_url))
+    x_train, y_train, x_test, y_test = nn.datasets.mnist(
+        device="INTERP", fashion=True,
+    )
+
+    assert calls == [
+        (FASHION_MNIST_URL + "train-images-idx3-ubyte.gz", {"gunzip": True}),
+        (FASHION_MNIST_URL + "train-labels-idx1-ubyte.gz", {"gunzip": True}),
+        (FASHION_MNIST_URL + "t10k-images-idx3-ubyte.gz", {"gunzip": True}),
+        (FASHION_MNIST_URL + "t10k-labels-idx1-ubyte.gz", {"gunzip": True}),
+    ]
+    assert (x_train.shape, y_train.shape, x_test.shape, y_test.shape) == (
+        (2, 1, 28, 28), (2,), (2, 1, 28, 28), (2,),
+    )
+    assert all(
+        to_dtype(tensor.dtype) == dtypes.uint8
+        for tensor in (x_train, y_train, x_test, y_test)
+    )
+    assert all(
+        tensor.device == "INTERP"
+        for tensor in (x_train, y_train, x_test, y_test)
+    )
+    assert x_train.flatten()[:4].tolist() == [0, 1, 2, 3]
+    assert y_train.tolist() == [3, 7]
+    assert x_test.flatten()[:4].tolist() == [0, 1, 2, 3]
+    assert y_test.tolist() == [3, 7]
 
 
 def test_cifar_matches_pinned_member_order_shapes_values_and_device(tmp_path, monkeypatch):
