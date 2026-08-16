@@ -136,6 +136,50 @@ async function runTensorTests(pg) {
     assertClose(await t.toArray(), [1.0, 2.0])
   })
 
+  await testIf(supportsF16, 'numeric float16 host values preserve pinned bits and direct topology', async () => {
+    const values = [1.5, -2.25, 0.5, NaN, Infinity, -Infinity, 65504]
+    const inputs = [
+      ['array', values, [7]],
+      ['nested', [[1.5, -2.25], [0.5, 65504]], [2, 2]],
+      ['float64array', new Float64Array(values), [7]],
+      ['uint16array-numeric', new Uint16Array([1, 2, 3]), [3]]
+    ]
+    for (const [name, input, shape] of inputs) {
+      const direct = new Tensor(input, { dtype: 'float16' })
+      const control = new Tensor(input, { dtype: 'float32' }).cast('float16')
+      assertShape(direct.shape, shape)
+      assert(countGraphOp(direct.uop, pg._core.ops.CAST) === 0, `${name} direct graph gained CAST`)
+      assert(countGraphOp(control.uop, pg._core.ops.CAST) === 1, `${name} control graph lost CAST`)
+      const actual = await direct.toArray()
+      const expected = await control.toArray()
+      assert(actual.length === expected.length, `${name} length mismatch`)
+      for (let i = 0; i < actual.length; i++) {
+        if (Number.isNaN(expected[i])) assert(Number.isNaN(actual[i]), `${name}[${i}] expected NaN`)
+        else assert(Object.is(actual[i], expected[i]) || actual[i] === expected[i],
+          `${name}[${i}] ${actual[i]} != ${expected[i]}`)
+      }
+    }
+    const directSubnormal = new Tensor([2 ** -24], { dtype: 'float16' })
+    const controlSubnormal = new Tensor([2 ** -24], { dtype: 'float32' }).cast('float16')
+    if (pg.core === 'native' && pg.device === 'cpu') {
+      assert((await directSubnormal.item()) === 2 ** -24,
+        'native CPU direct float16 lost minimum subnormal storage')
+      assert((await controlSubnormal.item()) === 2 ** -24,
+        'native CPU float16 control lost minimum subnormal')
+    } else if (pg.device === 'wasm' || pg.device === 'interp') {
+      // Pinned PythonRenderer on Python 3.11 decomposes unsupported half LOAD
+      // through f2f: a direct half subnormal flushes, while the unmaterialized
+      // f32->half->f32 control remains exact (codegen/__init__.py:116-140).
+      assert((await directSubnormal.item()) === 0,
+        `${pg.device} direct float16 must match pinned non-native-half flush`)
+      assert((await controlSubnormal.item()) === 2 ** -24,
+        `${pg.device} float16 control must match pinned non-native-half graph`)
+    }
+    const scalar = new Tensor(1.5, { dtype: 'float16' })
+    assertShape(scalar.shape, [])
+    assert((await scalar.item()) === 1.5, 'scalar float16 construction mismatch')
+  })
+
   await test('from scalar', async () => {
     const cases = [
       [new Tensor(true), 'bool', true],
@@ -372,8 +416,10 @@ async function runTensorTests(pg) {
         new pg.uop.KernelInfo('custom_add_4')
       )
     }
-    const a = new Tensor([1, 2, 3, 4])
-    const b = new Tensor([10, 20, 30, 40])
+    // Pinned UOp.store preserves its value dtype (uop/ops.py:531-533); raw
+    // custom kernels must cast explicitly or use matching storage/value types.
+    const a = new Tensor([1, 2, 3, 4], { dtype: 'float32' })
+    const b = new Tensor([10, 20, 30, 40], { dtype: 'float32' })
     const c = Tensor.empty([4], { dtype: 'float32' })
     const out = c.customKernel(a, b, addKernel)[0]
     assertClose(await out.toArray(), [11, 22, 33, 44])
@@ -586,8 +632,8 @@ async function runTensorTests(pg) {
       )
     }
     const out = Tensor.empty([4], { dtype: 'float32' })
-    const a = new Tensor([-3, 2, 5, -1])
-    const b = new Tensor([1, 4, 3, 9])
+    const a = new Tensor([-3, 2, 5, -1], { dtype: 'float32' })
+    const b = new Tensor([1, 4, 3, 9], { dtype: 'float32' })
     assertClose(await out.customKernel(a, b, selectKernel)[0].toArray(), [3, 4, 5, 1])
   })
 
@@ -827,7 +873,9 @@ async function runTensorTests(pg) {
       const rows = 128
       const c = pg.uop.range(candidates, 0)
       const r = pg.uop.range(rows, 1, pg.uop.AxisType.REDUCE)
-      const one = pg.uop.constant(1.0)
+      // Pinned UOp.const requires an explicit dtype. JavaScript has one Number
+      // type, so spell the intended float intercept with the existing CAST.
+      const one = pg.uop.constant(1).cast('float32')
       const xv = x.index(c.mul(rows).add(r))
       const yv = y.index(r)
       const stats = [
@@ -884,7 +932,9 @@ async function runTensorTests(pg) {
       out = out.flatten(); x = x.flatten(); y = y.flatten()
       const c = pg.uop.range(candidates, 0)
       const r = pg.uop.range(rows, 1, pg.uop.AxisType.REDUCE)
-      const one = pg.uop.constant(1.0)
+      // Pinned UOp.const requires an explicit dtype. JavaScript has one Number
+      // type, so spell the intended float intercept with the existing CAST.
+      const one = pg.uop.constant(1).cast('float32')
       const yv = y.index(r)
       const termAt = (t) => x.index(c.mul(terms).add(t).mul(rows).add(r))
       const stats = [one.sum(r), yv.sum(r)]

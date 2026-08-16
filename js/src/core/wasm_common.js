@@ -477,10 +477,44 @@ function createWasmCoreFromModule(Module, device) {
    * every WebGPU entrypoint, including its WASM marshalling allocations, on a
    * core-wide queue so Tensor, JIT, and Instance calls cannot reenter it. */
   let asyncifyTail = Promise.resolve()
+  let asyncifyClosing = false
+  let asyncifyDestroyed = false
+  let asyncifyDestroyPromise = null
   function enqueueAsyncify(fn) {
+    if (asyncifyClosing) {
+      return Promise.reject(new Error('polygrad WASM core is closing'))
+    }
     const run = asyncifyTail.then(fn, fn)
     asyncifyTail = run.catch(() => {})
     return run
+  }
+
+  function destroyCoreNow() {
+    if (asyncifyDestroyed) return
+    asyncifyDestroyed = true
+    ffi.poly_ctx_destroy(ctx)
+    if (_scratchPtrArrayPtr) {
+      Module._free(_scratchPtrArrayPtr)
+      _scratchPtrArrayPtr = 0
+      _scratchPtrArrayCap = 0
+    }
+    Module._free(_scratchLenPtr)
+    Module._free(_scratchNumelPtr)
+    Module._free(_scratchAxisPtr)
+    Module._free(_scratchOutShapePtr)
+    Module._free(_scratchOutNdimPtr)
+  }
+
+  async function destroyCoreAsync() {
+    /* Pinned support/hcq.py:511-515 synchronizes queued device work before
+     * device finalization.  Asyncify queue-idle only proves that JS submitted
+     * the work, so join WebGPU's device queue before releasing C-owned buffers. */
+    try {
+      const state = Module.__polygradWebGpuState
+      if (state && state.device) await state.device.queue.onSubmittedWorkDone()
+    } finally {
+      destroyCoreNow()
+    }
   }
 
   function realizeUopsSync(ctx, uops) {
@@ -2203,17 +2237,16 @@ function createWasmCoreFromModule(Module, device) {
       Module.__polygradHostBuffers.delete(String(bufferKey))
     },
     destroy() {
-      ffi.poly_ctx_destroy(ctx)
-      if (_scratchPtrArrayPtr) {
-        Module._free(_scratchPtrArrayPtr)
-        _scratchPtrArrayPtr = 0
-        _scratchPtrArrayCap = 0
+      if (asyncifyDestroyPromise) return asyncifyDestroyPromise
+      if (asyncifyDestroyed) return undefined
+      asyncifyClosing = true
+      if (deviceName !== 'webgpu') {
+        destroyCoreNow()
+        return undefined
       }
-      Module._free(_scratchLenPtr)
-      Module._free(_scratchNumelPtr)
-      Module._free(_scratchAxisPtr)
-      Module._free(_scratchOutShapePtr)
-      Module._free(_scratchOutNdimPtr)
+      asyncifyDestroyPromise = asyncifyTail.then(destroyCoreAsync, destroyCoreAsync)
+      asyncifyTail = asyncifyDestroyPromise.catch(() => {})
+      return asyncifyDestroyPromise
     }
   }
 }

@@ -24,6 +24,66 @@ const { PolyAsyncRequired } = require('./errors')
  */
 const hostBuffers = new Map()
 
+const FLOAT64_BITS_BUFFER = new ArrayBuffer(8)
+const FLOAT64_BITS_VIEW = new DataView(FLOAT64_BITS_BUFFER)
+
+function roundShiftRightEven(value, shift) {
+  if (shift <= 0) return value << BigInt(-shift)
+  const s = BigInt(shift)
+  const quotient = value >> s
+  const remainder = value - (quotient << s)
+  const halfway = 1n << (s - 1n)
+  return remainder > halfway || (remainder === halfway && (quotient & 1n))
+    ? quotient + 1n
+    : quotient
+}
+
+// JavaScript has no baseline Float16Array. This is the IEEE-754 binary64 to
+// binary16, round-to-nearest-even equivalent of pinned UOp._frompy's
+// struct.pack('e', value) path (tinygrad/uop/ops.py:752-764).
+function encodeFloat16Bits(value) {
+  FLOAT64_BITS_VIEW.setFloat64(0, Number(value), false)
+  const bits = FLOAT64_BITS_VIEW.getBigUint64(0, false)
+  const sign = Number((bits >> 48n) & 0x8000n)
+  const exponent = Number((bits >> 52n) & 0x7FFn)
+  const fraction = bits & ((1n << 52n) - 1n)
+  if (exponent === 0x7FF) return sign | (fraction === 0n ? 0x7C00 : 0x7E00)
+
+  const significand = exponent === 0 ? fraction : (1n << 52n) | fraction
+  if (significand === 0n) return sign
+  const exponent2 = exponent === 0 ? -1074 : exponent - 1023 - 52
+  const topBit = significand.toString(2).length - 1
+  let unbiased = topBit + exponent2
+
+  if (unbiased < -14) {
+    const scale = exponent2 + 24
+    const mantissa = scale >= 0
+      ? significand << BigInt(scale)
+      : roundShiftRightEven(significand, -scale)
+    if (mantissa === 0n) return sign
+    if (mantissa >= 1024n) return sign | 0x0400
+    return sign | Number(mantissa)
+  }
+
+  let rounded = roundShiftRightEven(significand, topBit - 10)
+  if (rounded === 2048n) {
+    rounded = 1024n
+    unbiased++
+  }
+  if (unbiased > 15) return sign | 0x7C00
+  return sign | ((unbiased + 15) << 10) | Number(rounded - 1024n)
+}
+
+function numericTypedArray(values, dtype) {
+  if (dtype !== 'float16') {
+    const ArrayType = TA_BY_DTYPE[dtype] || Float32Array
+    return new ArrayType(values)
+  }
+  const out = new Uint16Array(values.length)
+  for (let i = 0; i < values.length; i++) out[i] = encodeFloat16Bits(values[i])
+  return out
+}
+
 // JS-side materialization/storage type by dtype name. The numeric dtype ids
 // come from the C core; this map is only the frontend's ArrayBuffer view choice.
 const TA_BY_DTYPE = {
@@ -45,13 +105,12 @@ const TA_BY_DTYPE = {
 // --- Utility helpers ---
 
 function flattenArray(arr, dtype) {
-  const ArrayType = TA_BY_DTYPE[dtype] || Float32Array
   if (typeof arr === 'number') {
     const v = dtype === 'bool' ? (arr ? 1 : 0) : arr
-    return { data: new ArrayType([v]), shape: [1] }
+    return { data: numericTypedArray([v], dtype), shape: [1] }
   }
   if (arr instanceof Float32Array || arr instanceof Float64Array) {
-    return { data: new ArrayType(arr), shape: [arr.length] }
+    return { data: numericTypedArray(arr, dtype), shape: [arr.length] }
   }
   if (!Array.isArray(arr)) {
     throw new Error('Expected number, array, Float32Array, or Float64Array')
@@ -74,7 +133,7 @@ function flattenArray(arr, dtype) {
   }
   recurse(arr)
 
-  return { data: new ArrayType(flat), shape }
+  return { data: numericTypedArray(flat, dtype), shape }
 }
 
 // Pinned Tensor.__init__ infers list/tuple inputs as bool, default_int, or
@@ -469,8 +528,7 @@ function createBoundTensorClass(runtime) {
           // Pinned UOp._frompy stages numeric BF16 values as float32 bytes and
           // then casts the Tensor graph (uop/ops.py:752-764). Uint16Array here
           // would truncate the numeric values before the graph-level cast.
-          const ArrayType = dt === 'bfloat16' ? Float32Array : (TA_BY_DTYPE[dt] || Float32Array)
-          flat = new ArrayType(data)
+          flat = numericTypedArray(data, dt === 'bfloat16' ? 'float32' : dt)
           shape = [data.length]
         } else {
           dt = (opts && opts.dtype) || inferArrayDtype(data)
@@ -680,7 +738,7 @@ function createBoundTensorClass(runtime) {
       return this._realizeWith(Tensor._coreRealizeBatch, ...lst)
     }
 
-    async realizeAsync(...lst) {
+    async _realizeAsyncUnleased(...lst) {
       const { ffi, ctx } = this._rt._core
       const tensors = [this, ...lst]
       if (!ffi.poly_realize_tensors_async && !ffi.poly_realize_tensors) {
@@ -697,6 +755,10 @@ function createBoundTensorClass(runtime) {
       if (!targets.length) return this
       await Tensor._coreRealizeBatchAsync(ctx, targets)
       return this
+    }
+
+    realizeAsync(...lst) {
+      return this._rt._withAsync(() => this._realizeAsyncUnleased(...lst))
     }
 
     _readBufferBytesWith(readBuffer) {
@@ -791,7 +853,7 @@ function createBoundTensorClass(runtime) {
       return t._readBufferBytes()
     }
 
-    async toArrayAsync() {
+    async _toArrayAsyncUnleased() {
       const numel = this.numel()
       if (numel === 0) {
         const AT = TA_BY_DTYPE[this._dtype] || Float32Array
@@ -803,8 +865,12 @@ function createBoundTensorClass(runtime) {
       if (Number(ffi.poly_uop_device(this._currentUopRaw())) === deviceId('auto')) {
         t = t.clone('cpu')
       }
-      await t.realizeAsync()
+      await t._realizeAsyncUnleased()
       return await t._readBufferBytesAsync()
+    }
+
+    toArrayAsync() {
+      return this._rt._withAsync(() => this._toArrayAsyncUnleased())
     }
 
     toTypedArray() {
@@ -853,28 +919,34 @@ function createBoundTensorClass(runtime) {
       for (const t of tensors) {
         if (!(t instanceof Tensor)) throw new TypeError('Tensor.toTypedArraysAsync expects Tensor arguments')
       }
-      const prepared = tensors.map(t => {
-        if (t.numel() === 0) return t
-        let out = t
-        if (out._dtype === 'float16' || out._dtype === 'bfloat16') out = out.cast('float32')
-        out = out.contiguous()
-        if (Number(ffi.poly_uop_device(t._currentUopRaw())) === deviceId('auto')) {
-          out = out.clone('cpu')
+      const rt = tensors[0]._rt
+      for (const t of tensors) {
+        if (t._rt !== rt) throw new Error('Tensor.toTypedArraysAsync tensors must share a runtime')
+      }
+      return rt._withAsync(async () => {
+        const prepared = tensors.map(t => {
+          if (t.numel() === 0) return t
+          let out = t
+          if (out._dtype === 'float16' || out._dtype === 'bfloat16') out = out.cast('float32')
+          out = out.contiguous()
+          if (Number(ffi.poly_uop_device(t._currentUopRaw())) === deviceId('auto')) {
+            out = out.clone('cpu')
+          }
+          return out
+        })
+        const targets = prepared.filter(t => t.numel() !== 0)
+        if (targets.length) await targets[0]._realizeAsyncUnleased(...targets.slice(1))
+        const out = []
+        for (const t of prepared) {
+          if (t.numel() === 0) {
+            const AT = TA_BY_DTYPE[t._dtype] || Float32Array
+            out.push(new AT(0))
+          } else {
+            out.push(await t._readBufferBytesAsync())
+          }
         }
         return out
       })
-      const targets = prepared.filter(t => t.numel() !== 0)
-      if (targets.length) await targets[0].realizeAsync(...targets.slice(1))
-      const out = []
-      for (const t of prepared) {
-        if (t.numel() === 0) {
-          const AT = TA_BY_DTYPE[t._dtype] || Float32Array
-          out.push(new AT(0))
-        } else {
-          out.push(await t._readBufferBytesAsync())
-        }
-      }
-      return out
     }
 
     item() {
@@ -922,8 +994,8 @@ function createBoundTensorClass(runtime) {
 
     contiguous_backward() { return this.contiguousBackward() }
 
-    async detachAsync() {
-      return this.detach()
+    detachAsync() {
+      return this._rt._withAsync(() => this.detach())
     }
 
     clone(device) {
@@ -942,8 +1014,8 @@ function createBoundTensorClass(runtime) {
       return t
     }
 
-    async cloneAsync(device) {
-      return this.clone(device)
+    cloneAsync(device) {
+      return this._rt._withAsync(() => this.clone(device))
     }
 
     assign(x) {

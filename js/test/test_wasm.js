@@ -7,6 +7,8 @@ const { runJitTests } = require('./test_jit')
 const { runOptimTests } = require('./test_optim')
 const { runModelTests } = require('./test_model')
 const { runSyncContractTests } = require('./test_sync_contract')
+const { PolyRuntime } = require('../src/runtime')
+const { createBoundInstanceClass } = require('../src/instance')
 
 function assertClose(actual, expected, tol = 1e-4) {
   if (actual.length !== expected.length) throw new Error(`length mismatch: ${actual.length} vs ${expected.length}`)
@@ -39,6 +41,73 @@ async function runWasmOwnershipTests() {
       failed++
     }
   }
+
+  function lifecycleRuntime(core) {
+    const rt = Object.create(PolyRuntime.prototype)
+    rt._core = core
+    rt._closing = false
+    rt._disposePromise = null
+    rt._activeAsync = 0
+    rt._asyncDrain = []
+    rt.jit = { disposeAll() {} }
+    return rt
+  }
+
+  await test('async runtime disposal waits for admitted work and rejects later work', async () => {
+    const events = []
+    const rt = lifecycleRuntime({
+      caps: { core: 'wasm', device: 'webgpu' },
+      destroy() { events.push('destroy') }
+    })
+    const release = rt._beginAsync()
+    const disposed = rt.dispose()
+    let rejected = false
+    try { await rt._withAsync(() => events.push('late')) } catch (err) {
+      rejected = /disposed/.test(String(err && err.message))
+    }
+    if (!rejected) throw new Error('runtime admitted work after close started')
+    if (events.length) throw new Error(`runtime destroyed before admitted work settled: ${events}`)
+    events.push('work')
+    release()
+    await disposed
+    if (events.join(',') !== 'work,destroy') {
+      throw new Error(`unexpected runtime teardown order: ${events}`)
+    }
+    if (rt.dispose() !== disposed) throw new Error('runtime disposal is not idempotent')
+  })
+
+  await test('async Instance disposal follows its admitted forward on the core queue', async () => {
+    const events = []
+    let tail = Promise.resolve()
+    const core = {
+      caps: { core: 'wasm', device: 'webgpu' },
+      enqueueAsync(fn) {
+        const run = tail.then(fn, fn)
+        tail = run.catch(() => {})
+        return run
+      },
+      instance: {
+        forward(handle) { events.push(`forward:${handle}`); return Promise.resolve(0) },
+        free(handle) { events.push(`free:${handle}`) },
+        bufCount() { return 0 }
+      }
+    }
+    const rt = lifecycleRuntime(core)
+    const Instance = createBoundInstanceClass(rt)
+    const inst = new Instance(123)
+    const forward = inst.forwardAsync({})
+    const disposed = inst.dispose()
+    await Promise.all([forward, disposed])
+    if (events.join(',') !== 'forward:123,free:123') {
+      throw new Error(`unexpected Instance teardown order: ${events}`)
+    }
+    let rejected = false
+    try { await inst.forwardAsync({}) } catch (err) {
+      rejected = /disposed/.test(String(err && err.message))
+    }
+    if (!rejected) throw new Error('disposed Instance admitted later work')
+    if (inst.dispose() !== disposed) throw new Error('Instance disposal is not idempotent')
+  })
 
   await test('explicit runtimes keep host buffers independent across dispose cycles', async () => {
     const pgA = await polygrad.create({ core: 'wasm' })

@@ -82,7 +82,11 @@ async function checkModuleDeviceMap(pg, Instance) {
     ]
   })
   const first = String(pg.device).toUpperCase()
-  const second = first === 'INTERP' ? 'WASM' : 'INTERP'
+  // Pinned Device opens only runtime/ops_* implementations (device.py:15-35).
+  // Native Polygrad likewise has no WASM backend; Emscripten does. Keep the
+  // test cross-device on every core without treating a graph spelling as an
+  // executable runtime merely because it is a valid DEVICE name.
+  const second = first === 'INTERP' ? (pg.core === 'native' ? 'CPU' : 'WASM') : 'INTERP'
   const place = async map => {
     if (webgpu) await inst.setDeviceMapAsync(map)
     else inst.setDeviceMap(map)

@@ -75,10 +75,10 @@ static int env_enabled(const char *name) {
  * kernels for value correctness. Use the schedule item kind, not graph-shape
  * guesses: Tensor.full and movement-gradient fills contain no LOAD/ALU but are
  * still SINK calls in tinygrad. */
-static int schedule_is_copy_only(const PolyKernelScheduleResult *sr) {
-  if (!sr || sr->n_kernels <= 0 || !sr->kernel_kinds) return 0;
-  for (int i = 0; i < sr->n_kernels; i++) {
-    if (sr->kernel_kinds[i] != POLY_KERNEL_ITEM_COPY) return 0;
+static int schedule_is_copy_only(const PolySchedule *schedule) {
+  if (!schedule || !schedule->template || schedule->template->n_calls <= 0) return 0;
+  for (int i = 0; i < schedule->template->n_calls; i++) {
+    if (!poly_schedule_call_is_copy(schedule, i)) return 0;
   }
   return 1;
 }
@@ -232,26 +232,43 @@ static int run_and_report_flags(
     free(bb);
   }
 
-  /* 2. Schedule and linearize for kernel metadata. */
-  PolyKernelScheduleResult sr = poly_build_kernel_schedule(ctx, tensor_sink);
-  if (sr.n_kernels < 1) {
+  /* 2. Schedule and linearize for kernel metadata.
+   * Pinned test_tinygrad_parity.py uses Tensor.schedule_linear(), which
+   * crosses transform_to_call before schedule creation. Use Polygrad's
+   * production effect-SINK boundary too; the legacy raw
+   * poly_build_kernel_schedule(SINK) helper intentionally starts one layer
+   * later and can fuse reductions that callification must materialize. */
+  PolySchedule *report_schedule = poly_schedule_effect_sink(ctx, tensor_sink);
+  if (!report_schedule || !report_schedule->template) {
     fprintf(stderr, "parity: schedule produced 0 kernels\n");
-    poly_kernel_schedule_result_free(&sr);
+    if (report_schedule) poly_schedule_free(report_schedule);
     return 0;
   }
 
-  PolyUOp ***all_lin = calloc(sr.n_kernels, sizeof(PolyUOp **));
-  int *all_n_lin = calloc(sr.n_kernels, sizeof(int));
+  int n_compute = 0;
+  for (int i = 0; i < report_schedule->template->n_calls; i++) {
+    PolyUOp *body = poly_schedule_call_body(report_schedule, i);
+    if (!poly_schedule_call_is_copy(report_schedule, i) && body && body->op == POLY_OP_SINK)
+      n_compute++;
+  }
+  PolyUOp ***all_lin = calloc((size_t)(n_compute > 0 ? n_compute : 1), sizeof(PolyUOp **));
+  int *all_n_lin = calloc((size_t)(n_compute > 0 ? n_compute : 1), sizeof(int));
+  int report_kernel = 0;
 
-  for (int k = 0; k < sr.n_kernels; k++) {
+  for (int call = 0; call < report_schedule->template->n_calls; call++) {
+    PolyUOp *body = poly_schedule_call_body(report_schedule, call);
+    if (poly_schedule_call_is_copy(report_schedule, call) || !body || body->op != POLY_OP_SINK)
+      continue;
 #ifdef POLY_HAS_CUDA
     if (use_cuda) {
-      all_lin[k] = poly_linearize_cuda(ctx, sr.kernels[k], &all_n_lin[k]);
+      all_lin[report_kernel] =
+          poly_linearize_cuda(ctx, body, &all_n_lin[report_kernel]);
     } else
 #endif
 #ifdef POLY_HAS_HIP
         if (use_hip) {
-      all_lin[k] = poly_linearize_hip(ctx, sr.kernels[k], &all_n_lin[k]);
+      all_lin[report_kernel] =
+          poly_linearize_hip(ctx, body, &all_n_lin[report_kernel]);
     } else
 #endif
     {
@@ -261,18 +278,28 @@ static int run_and_report_flags(
        * explicitly on or off. Use the env-aware CPU linearizer here so the
        * runner follows POLY_OPTIMIZE/POLY_DEVECTORIZE in the same way the
        * Python harness configures tinygrad extraction. */
-      all_lin[k] = poly_linearize_env(ctx, sr.kernels[k], &all_n_lin[k]);
+      all_lin[report_kernel] =
+          poly_linearize_env(ctx, body, &all_n_lin[report_kernel]);
     }
-    if (!all_lin[k]) {
-      fprintf(stderr, "parity: linearize failed for kernel %d\n", k);
-      for (int j = 0; j < k; j++)
+    if (!all_lin[report_kernel]) {
+      fprintf(stderr, "parity: linearize failed for kernel %d\n", report_kernel);
+      for (int j = 0; j < report_kernel; j++)
         free(all_lin[j]);
       free(all_lin);
       free(all_n_lin);
-      poly_kernel_schedule_result_free(&sr);
+      poly_schedule_free(report_schedule);
       return 0;
     }
-    dump_linear_details(k, all_lin[k], all_n_lin[k]);
+    dump_linear_details(report_kernel, all_lin[report_kernel], all_n_lin[report_kernel]);
+    report_kernel++;
+  }
+  if (report_kernel != n_compute) {
+    fprintf(stderr, "parity: compute CALL count changed during reporting\n");
+    for (int k = 0; k < report_kernel; k++) free(all_lin[k]);
+    free(all_lin);
+    free(all_n_lin);
+    poly_schedule_free(report_schedule);
+    return 0;
   }
 
   /* 3. Emit JSON */
@@ -280,14 +307,14 @@ static int run_and_report_flags(
     int no_sink_report = report_flags & PARITY_REPORT_NO_SINK;
     int movement_as_copy =
         env_enabled("POLY_PARITY_MOVEMENT_AS_COPY") &&
-        (schedule_is_copy_only(&sr) ||
+        (schedule_is_copy_only(report_schedule) ||
          (!graph_has_compute_ops(ctx, tensor_sink) &&
           graph_reads_input_binding(ctx, tensor_sink, bindings, n_bindings)));
     if (no_sink_report || movement_as_copy) {
       printf("{\"n_kernels\":0,\"kernels\":[]");
     } else {
-      printf("{\"n_kernels\":%d,\"kernels\":[", sr.n_kernels);
-      for (int k = 0; k < sr.n_kernels; k++) {
+      printf("{\"n_kernels\":%d,\"kernels\":[", n_compute);
+      for (int k = 0; k < n_compute; k++) {
         if (k) printf(",");
         printf("{\"ops\":");
         json_ops_array(all_lin[k], all_n_lin[k]);
@@ -303,11 +330,11 @@ static int run_and_report_flags(
   }
 
   /* Cleanup */
-  for (int k = 0; k < sr.n_kernels; k++)
+  for (int k = 0; k < n_compute; k++)
     free(all_lin[k]);
   free(all_lin);
   free(all_n_lin);
-  poly_kernel_schedule_result_free(&sr);
+  poly_schedule_free(report_schedule);
   return ok;
 }
 

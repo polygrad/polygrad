@@ -124,6 +124,56 @@
           assertShape(t.shape, [2]);
           assertClose(await t.toArray(), [1, 2]);
         });
+        await testIf(supportsF16, "numeric float16 host values preserve pinned bits and direct topology", async () => {
+          const values = [1.5, -2.25, 0.5, NaN, Infinity, -Infinity, 65504];
+          const inputs = [
+            ["array", values, [7]],
+            ["nested", [[1.5, -2.25], [0.5, 65504]], [2, 2]],
+            ["float64array", new Float64Array(values), [7]],
+            ["uint16array-numeric", new Uint16Array([1, 2, 3]), [3]]
+          ];
+          for (const [name, input, shape] of inputs) {
+            const direct = new Tensor(input, { dtype: "float16" });
+            const control = new Tensor(input, { dtype: "float32" }).cast("float16");
+            assertShape(direct.shape, shape);
+            assert(countGraphOp(direct.uop, pg._core.ops.CAST) === 0, `${name} direct graph gained CAST`);
+            assert(countGraphOp(control.uop, pg._core.ops.CAST) === 1, `${name} control graph lost CAST`);
+            const actual = await direct.toArray();
+            const expected = await control.toArray();
+            assert(actual.length === expected.length, `${name} length mismatch`);
+            for (let i = 0; i < actual.length; i++) {
+              if (Number.isNaN(expected[i])) assert(Number.isNaN(actual[i]), `${name}[${i}] expected NaN`);
+              else assert(
+                Object.is(actual[i], expected[i]) || actual[i] === expected[i],
+                `${name}[${i}] ${actual[i]} != ${expected[i]}`
+              );
+            }
+          }
+          const directSubnormal = new Tensor([2 ** -24], { dtype: "float16" });
+          const controlSubnormal = new Tensor([2 ** -24], { dtype: "float32" }).cast("float16");
+          if (pg.core === "native" && pg.device === "cpu") {
+            assert(
+              await directSubnormal.item() === 2 ** -24,
+              "native CPU direct float16 lost minimum subnormal storage"
+            );
+            assert(
+              await controlSubnormal.item() === 2 ** -24,
+              "native CPU float16 control lost minimum subnormal"
+            );
+          } else if (pg.device === "wasm" || pg.device === "interp") {
+            assert(
+              await directSubnormal.item() === 0,
+              `${pg.device} direct float16 must match pinned non-native-half flush`
+            );
+            assert(
+              await controlSubnormal.item() === 2 ** -24,
+              `${pg.device} float16 control must match pinned non-native-half graph`
+            );
+          }
+          const scalar = new Tensor(1.5, { dtype: "float16" });
+          assertShape(scalar.shape, []);
+          assert(await scalar.item() === 1.5, "scalar float16 construction mismatch");
+        });
         await test("from scalar", async () => {
           const cases = [
             [new Tensor(true), "bool", true],
@@ -339,8 +389,8 @@
               new pg.uop.KernelInfo("custom_add_4")
             );
           }
-          const a = new Tensor([1, 2, 3, 4]);
-          const b = new Tensor([10, 20, 30, 40]);
+          const a = new Tensor([1, 2, 3, 4], { dtype: "float32" });
+          const b = new Tensor([10, 20, 30, 40], { dtype: "float32" });
           const c = Tensor.empty([4], { dtype: "float32" });
           const out = c.customKernel(a, b, addKernel)[0];
           assertClose(await out.toArray(), [11, 22, 33, 44]);
@@ -578,8 +628,8 @@
             );
           }
           const out = Tensor.empty([4], { dtype: "float32" });
-          const a = new Tensor([-3, 2, 5, -1]);
-          const b = new Tensor([1, 4, 3, 9]);
+          const a = new Tensor([-3, 2, 5, -1], { dtype: "float32" });
+          const b = new Tensor([1, 4, 3, 9], { dtype: "float32" });
           assertClose(await out.customKernel(a, b, selectKernel)[0].toArray(), [3, 4, 5, 1]);
         });
         await test("customKernel rejects bool INDEX coordinate before codegen", async () => {
@@ -838,7 +888,7 @@
             const rows = 128;
             const c = pg.uop.range(candidates, 0);
             const r = pg.uop.range(rows, 1, pg.uop.AxisType.REDUCE);
-            const one = pg.uop.constant(1);
+            const one = pg.uop.constant(1).cast("float32");
             const xv = x2.index(c.mul(rows).add(r));
             const yv = y2.index(r);
             const stats = [
@@ -896,7 +946,7 @@
             y2 = y2.flatten();
             const c = pg.uop.range(candidates, 0);
             const r = pg.uop.range(rows, 1, pg.uop.AxisType.REDUCE);
-            const one = pg.uop.constant(1);
+            const one = pg.uop.constant(1).cast("float32");
             const yv = y2.index(r);
             const termAt = (t) => x2.index(c.mul(terms).add(t).mul(rows).add(r));
             const stats = [one.sum(r), yv.sum(r)];
@@ -3870,7 +3920,7 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
           ]
         });
         const first = String(pg.device).toUpperCase();
-        const second = first === "INTERP" ? "WASM" : "INTERP";
+        const second = first === "INTERP" ? pg.core === "native" ? "CPU" : "WASM" : "INTERP";
         const place = async (map) => {
           if (webgpu) await inst.setDeviceMapAsync(map);
           else inst.setDeviceMap(map);

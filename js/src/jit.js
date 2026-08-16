@@ -93,7 +93,7 @@ function realizeReturn(value, Tensor) {
 async function realizeReturnAsync(value, Tensor) {
   const outs = []
   retTensors(value, Tensor, outs)
-  for (const t of outs) await t.realizeAsync()
+  for (const t of outs) await t._realizeAsyncUnleased()
   return outs
 }
 
@@ -115,6 +115,11 @@ function createBoundJit(runtime) {
       this.inputCount = 0
       this._jit = 0
       this.disposed = false
+      this._resetting = false
+      this._activeAsync = 0
+      this._idleWaiters = []
+      this._disposePromise = null
+      this._resetPromise = null
       this.callCount = 0
       this.replayCount = 0
       this.lastCallMs = 0
@@ -134,15 +139,50 @@ function createBoundJit(runtime) {
       this.lastCallMs = 0
     }
 
-    reset() {
-      if (this.disposed) throw new Error('jit has been disposed')
-      this._clear()
+    _waitForAsync() {
+      if (this._activeAsync === 0) return Promise.resolve()
+      return new Promise(resolve => this._idleWaiters.push(resolve))
     }
 
-    dispose() {
-      this._clear()
+    _endAsync() {
+      this._activeAsync--
+      if (this._activeAsync === 0) {
+        const waiters = this._idleWaiters.splice(0)
+        for (const resolve of waiters) resolve()
+      }
+    }
+
+    reset() {
+      if (this.disposed) throw new Error('jit has been disposed')
+      if (this._resetting) return this._resetPromise
+      if (!runtime._usesAsyncHostBridge()) {
+        this._clear()
+        return undefined
+      }
+      this._resetting = true
+      this._resetPromise = runtime._withAsync(async () => {
+        await this._waitForAsync()
+        this._clear()
+      }).finally(() => {
+        this._resetting = false
+        this._resetPromise = null
+      })
+      return this._resetPromise
+    }
+
+    dispose(force = false) {
+      if (this.disposed) return this._disposePromise
       this.disposed = true
       live.delete(this)
+      if (force || !runtime._usesAsyncHostBridge()) {
+        this._clear()
+        return undefined
+      }
+      this._disposePromise = runtime._withAsync(async () => {
+        await this._waitForAsync()
+        this._clear()
+      })
+      return this._disposePromise
     }
 
     get scheduleCount() {
@@ -244,8 +284,14 @@ function createBoundJit(runtime) {
       return ret
     }
 
-    async callAsync(...args) {
-      if (this.disposed) throw new Error('jit has been disposed')
+    callAsync(...args) {
+      if (this.disposed) return Promise.reject(new Error('jit has been disposed'))
+      if (this._resetting) return Promise.reject(new Error('jit is resetting'))
+      this._activeAsync++
+      return runtime._withAsync(() => this._callAsyncBody(...args)).finally(() => this._endAsync())
+    }
+
+    async _callAsyncBody(...args) {
       if (!ffi.poly_jit_new) throw new Error('polygrad core does not expose poly_jit')
       const callStart = nowMs()
       let replayed = false
@@ -254,7 +300,7 @@ function createBoundJit(runtime) {
       if (inputs.length === 0) throw new Error('jit requires at least one Tensor input')
       if (this.cnt > 0 && inputs.some(t => t._ctx !== ctx)) throw new Error('jit inputs must share runtime context')
       for (const t of inputs) {
-        if (!t.uopPhysical || !t.uop.isRealized) await t.realizeAsync()
+        if (!t.uopPhysical || !t.uop.isRealized) await t._realizeAsyncUnleased()
       }
       checkDuplicateBuffers(inputs)
 
@@ -453,8 +499,8 @@ function createBoundJit(runtime) {
     return compiled
   }
 
-  function disposeAll() {
-    for (const state of Array.from(live)) state.dispose()
+  function disposeAll(force = false) {
+    for (const state of Array.from(live)) state.dispose(force)
   }
 
   function stats() {

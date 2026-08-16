@@ -4762,6 +4762,19 @@ uint8_t *poly_render_wasm(PolyUOp **uops, int n, int *size_out, bool use_simd) {
   return mod.data; /* caller must free() */
 }
 
+static _Thread_local PolyPatternMatcher *g_pm_wasm_non_native = NULL;
+
+static PolyPatternMatcher *poly_pm_wasm_non_native(void) {
+  if (g_pm_wasm_non_native) return g_pm_wasm_non_native;
+  /* Pinned do_dtype_decomps applies pm_float_decomp for every unsupported
+   * dtype, not only the first one found (codegen/__init__.py:116-140).
+   * Core Wasm has neither BF16 nor IEEE-f16 instructions. */
+  g_pm_wasm_non_native = poly_pm_thread_cache(
+      poly_pm_concat(poly_pm_bf16_non_native(), poly_pm_f16_non_native())
+  );
+  return g_pm_wasm_non_native;
+}
+
 PolyUOp *poly_rewrite_wasm(PolyCtx *ctx, PolyUOp *sink) {
   if (poly_wasm_can_render_matmul(sink) || poly_wasm_can_render_reduce(sink)) return sink;
   PolyRewriteOpts opts = {
@@ -4770,10 +4783,7 @@ PolyUOp *poly_rewrite_wasm(PolyCtx *ctx, PolyUOp *sink) {
       .caps = poly_wasm_renderer_caps_for_sink(ctx, sink),
       .device = POLY_DEVICE_WASM,
       .opt_policy = POLY_OPT_HEURISTIC,
-      /* Pinned tinygrad do_dtype_decomps lowers every float dtype unsupported
-       * by the selected renderer before final rendering
-       * (codegen/__init__.py:120-140). Core WASM has no BF16 instructions. */
-      .dtype_matcher = poly_pm_bf16_non_native(),
+      .dtype_matcher = poly_pm_wasm_non_native(),
   };
   return poly_full_rewrite_to_sink_ex(ctx, sink, opts);
 }
@@ -4800,7 +4810,7 @@ PolyUOp *poly_rewrite_wasm_env(PolyCtx *ctx, PolyUOp *sink) {
       .caps = poly_wasm_renderer_caps_for_sink(ctx, sink),
       .device = POLY_DEVICE_WASM,
       .opt_policy = POLY_OPT_HEURISTIC,
-      .dtype_matcher = poly_pm_bf16_non_native(),
+      .dtype_matcher = poly_pm_wasm_non_native(),
   };
   return poly_full_rewrite_to_sink_ex(ctx, sink, opts);
 }

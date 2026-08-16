@@ -466,7 +466,7 @@
         "js/src/tensor.js:Tensor",
         "js/test/test_tensor.js"
       ],
-      "close_when": "Plain JavaScript numeric float16 arrays stage numeric values and match the float32-then-cast Tensor graph/value behavior across native, Wasm, and browser frontends."
+      "close_when": "Plain JavaScript numeric float16 arrays encode pinned direct-buffer storage without a frontend CAST across native, Wasm, and browser frontends; backend readback matches the corresponding Tinygrad renderer, including the PythonRenderer non-native-half subnormal boundary."
     },
     {
       "id": "PG-PARITY-020",

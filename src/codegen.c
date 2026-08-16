@@ -147,18 +147,6 @@ static int horizontal_reduce_terms(
 
 /* pm_reduce: REDUCE → DEFINE_REG + END merge */
 
-/* Forward declaration: shared substitute helper used by reduce END merge. */
-static PolyUOp *substitute_node(
-    PolyCtx *ctx,
-    PolyUOp *node,
-    PolyUOp *old_node,
-    PolyUOp *new_node,
-    PolyUOp **memo_old,
-    PolyUOp **memo_new,
-    int *memo_n,
-    int memo_cap
-);
-
 /* Heuristic optimizer (port of tinygrad hand_coded_optimizations) */
 
 /* axis_to_pos ordering: matches tinygrad's axis_to_pos dict.
@@ -2524,13 +2512,23 @@ static PolyUOp *rule_reduce_to_acc(PolyCtx *ctx, PolyUOp *root, const PolyBindin
   }
 
   /* tinygrad/codegen/late/devectorizer.py:318 and uop/ops.py:85-88,1051-1060:
-   * UOp.placeholder((1,), ..., AddrSpace.REG) carries the shape as
-   * STACK(CONST<weakint>(1)), keeps slot/address space in ParamArg, and
-   * reduce_to_acc indexes it with weakint zero. */
+   * UOp.placeholder((1,), red.dtype, ..., AddrSpace.REG) carries scalar
+   * storage as STACK(1), and appends red.dtype.count for vector storage as
+   * STACK(1, count). Slot/address space remain in ParamArg; reduce_to_acc
+   * indexes the vector-typed placeholder with weakint zero. */
   int acc_id = rctx->acc_num++;
   PolyDType acc_ptr = poly_dtype_ptr(red->dtype, 1, POLY_ADDR_REG);
   PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(1));
-  PolyUOp *shape = poly_uop1(ctx, POLY_OP_STACK, POLY_INDEX, one, poly_arg_none());
+  PolyUOp *shape_srcs[2] = {one, NULL};
+  int n_shape_srcs = 1;
+  PolyDType shape_dtype = POLY_INDEX;
+  if (red->dtype.count > 1) {
+    shape_srcs[n_shape_srcs++] =
+        poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(red->dtype.count));
+    shape_dtype = poly_dtype_vec(POLY_INDEX, n_shape_srcs);
+  }
+  PolyUOp *shape =
+      poly_uop(ctx, POLY_OP_STACK, shape_dtype, shape_srcs, n_shape_srcs, poly_arg_none());
   PolyParamArg acc_param = {.slot = acc_id, .addrspace = POLY_ADDR_REG};
   PolyUOp *acc =
       poly_uop1(ctx, POLY_OP_BUFFER, acc_ptr, shape, poly_arg_param(&acc_param));
@@ -2683,14 +2681,23 @@ static PolyUOp *rule_merge_reduce_ends(PolyCtx *ctx, PolyUOp *root, const PolyBi
         if (ctx_group[j] != cg) continue;
         PolyUOp *mapped = g->ends[j];
         if (cg != 0) {
-          for (int r = 0; r < g->n_ranges; r++) {
-            PolyUOp *memo_old[4096];
-            PolyUOp *memo_new[4096];
-            int memo_n = 0;
-            mapped = substitute_node(
-                ctx, mapped, g->ranges[r], mapped_ranges[r], memo_old, memo_new, &memo_n, 4096
-            );
+          /* Pinned devectorizer.py:338 applies the complete r -> tr map in
+           * one e.substitute(dict(zip(r, tr))) traversal.  The shared
+           * substitution API is likewise unbounded and preserves metadata. */
+          PolyUOp *mapped_out = NULL;
+          if (poly_uop_substitute_many(
+                  ctx, &mapped, 1, g->ranges, mapped_ranges, g->n_ranges, &mapped_out
+              ) != 0 ||
+              !mapped_out) {
+            free(mapped_ends);
+            free(ctx_ranges);
+            free(ctx_n);
+            free(ctx_group);
+            free(sub_new);
+            free(sub_old);
+            return NULL;
           }
+          mapped = mapped_out;
         }
         mapped_ends[m++] = mapped;
       }
@@ -3949,43 +3956,6 @@ static PolyUOp *poly_decompose_int64(PolyCtx *ctx, PolyUOp *sink) {
   return rewritten;
 }
 
-/*
- * rule_store_dtype_cast — Insert CAST when STORE value dtype mismatches buffer dtype.
- * STORE(INDEX(ptr<T>), value<U>) → STORE(INDEX(ptr<T>), CAST<T>(value)) when T != U.
- * This is a safety net: frontends should match dtypes, but if they don't, the codegen
- * pipeline normalizes it here so renderers never see cross-type stores.
- */
-static PolyUOp *rule_store_dtype_cast(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
-  (void)b;
-  if (root->n_src < 2) return NULL;
-  PolyUOp *idx = root->src[0]; /* INDEX node */
-  PolyUOp *val = root->src[1]; /* value to store */
-  if (!idx->dtype.is_ptr) return NULL;
-  /* Extract the pointed-to value type from the pointer dtype.
-   * poly_dtype_scalar only strips vector count, not is_ptr/addrspace.
-   * We need a clean non-pointer scalar for the CAST target. */
-  PolyDType buf_scalar = poly_dtype_scalar(idx->dtype);
-  buf_scalar.is_ptr = false;
-  buf_scalar.addrspace = 0;
-  buf_scalar.ptr_size = 0;
-  buf_scalar.vcount = 0;
-  PolyDType val_scalar = poly_dtype_scalar(val->dtype);
-  /* Match by priority+bitsize (not poly_dtype_eq, which checks ptr metadata) */
-  if (buf_scalar.priority == val_scalar.priority && buf_scalar.bitsize == val_scalar.bitsize)
-    return NULL;
-  /* Insert CAST: value → buffer's scalar type (respecting vector width) */
-  PolyDType cast_dt =
-      (val->dtype.count > 1) ? poly_dtype_vec(buf_scalar, val->dtype.count) : buf_scalar;
-  PolyUOp *casted = poly_uop1(ctx, POLY_OP_CAST, cast_dt, val, poly_arg_none());
-  PolyUOp *st_srcs[64];
-  int ns = 0;
-  st_srcs[ns++] = idx;
-  st_srcs[ns++] = casted;
-  for (int i = 2; i < root->n_src && ns < 64; i++)
-    st_srcs[ns++] = root->src[i];
-  return poly_uop(ctx, POLY_OP_STORE, root->dtype, st_srcs, ns, root->arg);
-}
-
 /* Cached variants by renderer-supported late ops. Pinned tinygrad derives
  * this from Renderer.code_for_op before get_late_rewrite_patterns. */
 static _Thread_local PolyPatternMatcher *g_pm_decomp_caps[2][2][2][2] = {{{{NULL}}}};
@@ -4065,12 +4035,6 @@ poly_pm_decomp_with_caps(bool has_mulacc, bool has_max, bool has_threefry, bool 
   rules[n++] = (PolyRule){poly_pat_op(POLY_OP_CMPNE, NULL, 0, NULL), rule_not_cmplt_to_bound};
   /* CMPNE(CMPNE(x,y), true) → CMPEQ(x,y), when the renderer supports CMPEQ. */
   rules[n++] = (PolyRule){poly_pat_op(POLY_OP_CMPNE, NULL, 0, NULL), rule_cmpne_not_to_cmpeq};
-
-  /* STORE(ptr<T>, value<U>) → STORE(ptr<T>, CAST<T>(value)) when T != U */
-  {
-    PolyOpSet store_set = poly_opset_add((PolyOpSet){{0, 0}}, POLY_OP_STORE);
-    rules[n++] = (PolyRule){poly_pat_ops(store_set, NULL, 0, NULL), rule_store_dtype_cast};
-  }
 
   PolyPatternMatcher *late = poly_pm_new(rules, n);
   *target = poly_pm_thread_cache(poly_pm_concat(poly_symbolic_simple(), late));
@@ -10527,65 +10491,27 @@ static PolyUOp *poly_add_cpu_thread_dims(PolyCtx *ctx, PolyUOp *sink) {
  * invent new grouped-reduce axes for large serial reductions.
  */
 
-/* Recursively clone a subtree, substituting old_node → new_node */
-static PolyUOp *substitute_node(
-    PolyCtx *ctx,
-    PolyUOp *node,
-    PolyUOp *old_node,
-    PolyUOp *new_node,
-    PolyUOp **memo_old,
-    PolyUOp **memo_new,
-    int *memo_n,
-    int memo_cap
-) {
-  if (node == old_node) return new_node;
-  /* Check memo */
-  for (int i = 0; i < *memo_n; i++)
-    if (memo_old[i] == node) return memo_new[i];
-
-  /* Recurse on sources */
-  bool changed = false;
-  PolyUOp *new_srcs[64];
-  int ns = node->n_src < 64 ? node->n_src : 64;
-  for (int i = 0; i < ns; i++) {
-    new_srcs[i] = substitute_node(
-        ctx, node->src[i], old_node, new_node, memo_old, memo_new, memo_n, memo_cap
-    );
-    if (new_srcs[i] != node->src[i]) changed = true;
-  }
-
-  if (!changed) return node; /* subtree unchanged */
-
-  PolyUOp *result = poly_uop(ctx, node->op, node->dtype, new_srcs, ns, node->arg);
-  if (*memo_n < memo_cap) {
-    memo_old[*memo_n] = node;
-    memo_new[*memo_n] = result;
-    (*memo_n)++;
-  }
-  return result;
-}
-
 PolyUOp *poly_group_for_reduce(PolyCtx *ctx, PolyUOp *sink, int block_size) {
   (void)block_size;
   int n_topo = 0;
   PolyUOp **topo = poly_toposort(ctx, sink, &n_topo);
+  if (!topo || n_topo <= 0) return sink;
 
-  /* Find all REDUCE ops */
-  PolyUOp *reduces[32];
-  int n_reduces = 0;
-  for (int i = 0; i < n_topo; i++) {
-    if (topo[i]->op == POLY_OP_REDUCE && n_reduces < 32) reduces[n_reduces++] = topo[i];
+  /* Pinned graph_rewrite has no match-count ceiling.  Reserve one possible
+   * substitution row per reachable UOp, then let the shared substitution
+   * traversal rebuild the graph once after every REDUCE has been inspected. */
+  PolyUOp **sub_old = malloc((size_t)n_topo * sizeof(PolyUOp *));
+  PolyUOp **sub_new = malloc((size_t)n_topo * sizeof(PolyUOp *));
+  if (!sub_old || !sub_new) {
+    free(sub_old);
+    free(sub_new);
+    return NULL;
   }
-
-  if (n_reduces == 0) return sink;
-
-  /* Process each REDUCE: substitute in the full graph */
-  PolyUOp **sub_old = malloc((size_t)(n_topo + 256) * sizeof(PolyUOp *));
-  PolyUOp **sub_new = malloc((size_t)(n_topo + 256) * sizeof(PolyUOp *));
   int n_subs = 0;
 
-  for (int r = 0; r < n_reduces; r++) {
-    PolyUOp *red = reduces[r];
+  for (int r = 0; r < n_topo; r++) {
+    PolyUOp *red = topo[r];
+    if (red->op != POLY_OP_REDUCE) continue;
     PolyUOp *group_ranges[POLY_MAX_DIMS];
     PolyUOp *other_ranges[POLY_MAX_DIMS];
     int n_group = 0, n_other = 0;
@@ -10678,71 +10604,16 @@ PolyUOp *poly_group_for_reduce(PolyCtx *ctx, PolyUOp *sink, int block_size) {
     return sink;
   }
 
-  /* Bottom-up graph rebuild: substitute original REDUCE → final_reduce.
-   * No IF/ENDIF here: pinned gpudims first attaches Invalid-bearing integer
-   * index validity, and the late gater/linearizer emits IF/STORE/ENDIF. */
+  /* Pinned graph_rewrite applies every matched x.replace through one rewrite
+   * context.  Polygrad's existing aggregate substitute is likewise unbounded,
+   * preserves source order/sharing, and rebuilds tag/tag_arg metadata.  No
+   * IF/ENDIF is created here: gpudims/gater own that later transition. */
   PolyUOp *new_sink = sink;
-
-  /* Re-toposort since we modified things */
-  int n_topo2 = 0;
-  PolyUOp **topo2 = poly_toposort(ctx, sink, &n_topo2);
-
-  for (int i = 0; i < n_topo2; i++) {
-    PolyUOp *u = topo2[i];
-
-    /* Check if this node itself was substituted */
-    bool is_subst = false;
-    for (int k = 0; k < n_subs; k++) {
-      if (sub_old[k] == u) {
-        is_subst = true;
-        break;
-      }
-    }
-    if (is_subst) continue;
-
-    /* Check if any source was substituted */
-    bool changed = false;
-    PolyUOp *new_srcs[64];
-    int ns = u->n_src < 64 ? u->n_src : 64;
-    for (int j = 0; j < ns; j++) {
-      PolyUOp *mapped = NULL;
-      for (int k = 0; k < n_subs; k++) {
-        if (sub_old[k] == u->src[j]) {
-          mapped = sub_new[k];
-          break;
-        }
-      }
-      if (mapped) {
-        new_srcs[j] = mapped;
-        changed = true;
-      } else {
-        new_srcs[j] = u->src[j];
-      }
-    }
-
-    if (changed) {
-      /* Do NOT create IF/ENDIF here. Tinygrad's fix_group_for_reduce
-       * (expander.py) never injects IF; add_gpudims attaches an
-       * Invalid-bearing WHERE coordinate and the late gater/linearizer
-       * converts it to IF/STORE/ENDIF.
-       *
-       * Creating IF/ENDIF in the DAG causes the IF (linearizer priority 0)
-       * to float above the accumulation RANGE (priority 5), wrapping the
-       * entire kernel body in `if (lidx0 < 1)`.  Only thread 0 executes,
-       * so the inner loop checks vocab indices at stride 256 (0, 256, 512,
-       * ...) and misses all non-stride-aligned indices -- e.g. token 785
-       * is between 768 and 1024 and never gets checked. */
-      PolyUOp *new_u = poly_uop(ctx, u->op, u->dtype, new_srcs, ns, u->arg);
-      sub_old[n_subs] = u;
-      sub_new[n_subs] = new_u;
-      n_subs++;
-      if (u == sink) new_sink = new_u;
-    }
-  }
+  int rc = poly_uop_substitute_many(ctx, &sink, 1, sub_old, sub_new, n_subs, &new_sink);
 
   free(sub_old);
   free(sub_new);
-  return new_sink;
+  return rc == 0 ? new_sink : NULL;
 }
 
 /* Public wrapper for heuristic (used by tests) */

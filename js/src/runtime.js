@@ -26,6 +26,10 @@ function normalizeOptions(opts) {
 class PolyRuntime {
   constructor(binding) {
     this._core = binding
+    this._closing = false
+    this._disposePromise = null
+    this._activeAsync = 0
+    this._asyncDrain = []
     this.supportsInstance = Boolean(binding.instance)
     this.Tensor = createBoundTensorClass(this)
     this.uop = createBoundUopNamespace(this)
@@ -121,10 +125,65 @@ class PolyRuntime {
     return rc === 1
   }
 
+  _usesAsyncHostBridge() {
+    const caps = this._core && this._core.caps
+    return Boolean(caps && caps.core === 'wasm' && caps.device === 'webgpu')
+  }
+
+  _beginAsync() {
+    if (this._closing || !this._core) throw new Error('polygrad runtime has been disposed')
+    if (!this._usesAsyncHostBridge()) return () => {}
+    this._activeAsync++
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      this._activeAsync--
+      if (this._activeAsync === 0) {
+        const waiters = this._asyncDrain.splice(0)
+        for (const resolve of waiters) resolve()
+      }
+    }
+  }
+
+  _withAsync(fn) {
+    let release
+    try {
+      release = this._beginAsync()
+      return Promise.resolve(fn()).finally(release)
+    } catch (err) {
+      if (release) release()
+      return Promise.reject(err)
+    }
+  }
+
+  _waitForAsync() {
+    if (this._activeAsync === 0) return Promise.resolve()
+    return new Promise(resolve => this._asyncDrain.push(resolve))
+  }
+
   dispose() {
-    if (this.jit && this.jit.disposeAll) this.jit.disposeAll()
-    if (this._core && this._core.destroy) this._core.destroy()
-    this._core = null
+    if (this._disposePromise) return this._disposePromise
+    if (!this._core) return undefined
+
+    const core = this._core
+    const asyncHost = this._usesAsyncHostBridge()
+    this._closing = true
+
+    if (!asyncHost) {
+      if (this.jit && this.jit.disposeAll) this.jit.disposeAll(true)
+      if (core.destroy) core.destroy()
+      this._core = null
+      return undefined
+    }
+
+    this._disposePromise = this._waitForAsync().then(() => {
+      if (this.jit && this.jit.disposeAll) this.jit.disposeAll(true)
+      return core.destroy ? core.destroy() : undefined
+    }).finally(() => {
+      this._core = null
+    })
+    return this._disposePromise
   }
 }
 

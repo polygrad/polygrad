@@ -173,7 +173,7 @@ def _can_run_ctx(ctx, op=None, *, dtype='float32', shape=None, shapes=None, devi
     dims = _can_run_shape(op_name, shape, shapes) if op is not None else [1]
     arr_t = ctypes.c_int64 * len(dims)
     arr = arr_t(*dims) if dims else None
-    rc = lib.poly_can_run_op(_default_ctx, dev_id, op_name.encode('utf-8'), dtype_id, arr, len(dims))
+    rc = lib.poly_can_run_op(ctx, dev_id, op_name.encode('utf-8'), dtype_id, arr, len(dims))
     if rc < 0:
         raise RuntimeError('can_run cannot prove this op/shape query')
     return rc == 1
@@ -184,6 +184,11 @@ def _bound_tensor_class(ctx):
         def __init__(self, data=None, *args, **kwargs):
             kwargs.setdefault('_ctx', ctx)
             super().__init__(data, *args, **kwargs)
+
+        @staticmethod
+        def from_url(url, gunzip=False, **kwargs):
+            kwargs.setdefault('_ctx', ctx)
+            return Tensor.from_url(url, gunzip=gunzip, **kwargs)
 
         @staticmethod
         def zeros(*shape, **kwargs):
@@ -244,6 +249,10 @@ def _bound_tensor_class(ctx):
         def empty(*shape, **kwargs):
             kwargs.setdefault('_ctx', ctx)
             return Tensor.empty(*shape, **kwargs)
+
+        @staticmethod
+        def manual_seed(seed=0):
+            _ffi.get_lib().poly_tensor_manual_seed(ctx, int(seed))
 
     RuntimeTensor.__name__ = 'Tensor'
     RuntimeTensor.__qualname__ = 'Tensor'

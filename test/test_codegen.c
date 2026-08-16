@@ -458,6 +458,70 @@ TEST(codegen, reduce_merge_applies_independent_groups_atomically) {
   PASS();
 }
 
+TEST(codegen, reduce_merge_cloned_context_preserves_wide_metadata) {
+  /* Pinned devectorizer.py:330-348 clones a shared reduction RANGE for a
+   * second active-range context with one unrestricted
+   * e.substitute(dict(zip(r, tr))).  The cloned path must retain every STACK
+   * lane and the ancestor tag. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(8));
+  PolyUOp *r =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INDEX, bound, poly_arg_range(0, POLY_AXIS_REDUCE));
+  PolyUOp *c0_bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(2));
+  PolyUOp *c1_bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(3));
+  PolyUOp *c0 = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_INDEX, c0_bound, poly_arg_range(1, POLY_AXIS_LOOP)
+  );
+  PolyUOp *c1 = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_INDEX, c1_bound, poly_arg_range(2, POLY_AXIS_LOOP)
+  );
+
+  PolyUOp *simple_add = poly_uop2(ctx, POLY_OP_ADD, POLY_INDEX, r, c0, poly_arg_none());
+  PolyUOp *simple_cast =
+      poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, simple_add, poly_arg_none());
+  PolyUOp *simple_srcs[2] = {simple_cast, r};
+  PolyUOp *simple = poly_uop(
+      ctx, POLY_OP_REDUCE, POLY_FLOAT32, simple_srcs, 2, poly_arg_ops(POLY_OP_ADD)
+  );
+
+  PolyUOp *wide_srcs[70];
+  wide_srcs[0] = poly_uop2(ctx, POLY_OP_ADD, POLY_INDEX, r, c1, poly_arg_none());
+  for (int i = 1; i < 70; i++)
+    wide_srcs[i] = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(i));
+  PolyDType wide_dtype = poly_dtype_vec(POLY_INDEX, 70);
+  PolyUOp *wide = poly_uop_tagged_arg(
+      ctx, POLY_OP_STACK, wide_dtype, wide_srcs, 70, poly_arg_none(), 77,
+      poly_arg_str("wide-survives")
+  );
+  PolyUOp *wide_reduce_srcs[2] = {wide, r};
+  PolyUOp *wide_reduce = poly_uop(
+      ctx, POLY_OP_REDUCE, wide_dtype, wide_reduce_srcs, 2, poly_arg_ops(POLY_OP_ADD)
+  );
+  PolyUOp *roots[2] = {simple, wide_reduce};
+  PolyUOp *out = poly_apply_pm_reduce(ctx, poly_uop_sink(ctx, roots, 2));
+  ASSERT_NOT_NULL(out);
+
+  int n_topo = 0, tagged_wide = 0, max_axis = -1;
+  PolyUOp **topo = poly_toposort(ctx, out, &n_topo);
+  for (int i = 0; i < n_topo; i++) {
+    PolyUOp *u = topo[i];
+    if (u->op == POLY_OP_RANGE && u->arg.kind == POLY_ARG_RANGE &&
+        poly_range_axis_id(u->arg) > max_axis)
+      max_axis = (int)poly_range_axis_id(u->arg);
+    if (u->op != POLY_OP_STACK || u->tag != 77) continue;
+    tagged_wide++;
+    ASSERT_INT_EQ(u->n_src, 70);
+    ASSERT_INT_EQ(u->tag_arg.kind, POLY_ARG_STRING);
+    ASSERT_STR_EQ(u->tag_arg.str, "wide-survives");
+  }
+  ASSERT_INT_EQ(tagged_wide, 1);
+  ASSERT_TRUE(max_axis >= 3);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(codegen, reduce_accumulator_uses_tinygrad_placeholder_topology) {
   /* Pinned tinygrad/codegen/late/devectorizer.py:318,321,326 and
    * uop/ops.py:85-88,1051-1060: a register placeholder has
@@ -531,6 +595,61 @@ TEST(codegen, reduce_accumulator_uses_tinygrad_placeholder_topology) {
   ASSERT_INT_EQ(final_acc->src[0]->op, POLY_OP_CONST);
   ASSERT_TRUE(poly_dtype_eq(final_acc->src[0]->dtype, POLY_INT32));
   ASSERT_INT_EQ(final_acc->src[0]->arg.i, 1);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, reduce_vector_accumulator_preserves_placeholder_lane_shape) {
+  /* Pinned devectorizer.py:318 and uop/ops.py:1051-1060:
+   * placeholder((1,), float.vec(4), REG) owns shape STACK(1, 4). The lane
+   * extent is part of the pre-devectorization BUFFER topology even though the
+   * pointer extent remains one vector element. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(8));
+  PolyUOp *range =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INDEX, bound, poly_arg_range(0, POLY_AXIS_REDUCE));
+  PolyUOp *lanes[4];
+  for (int i = 0; i < 4; i++) {
+    PolyUOp *off = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(i));
+    PolyUOp *sum = poly_uop2(ctx, POLY_OP_ADD, POLY_INDEX, range, off, poly_arg_none());
+    lanes[i] = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, sum, poly_arg_none());
+  }
+  PolyDType vec4 = poly_dtype_vec(POLY_FLOAT32, 4);
+  PolyUOp *value = poly_uop(ctx, POLY_OP_STACK, vec4, lanes, 4, poly_arg_none());
+  PolyUOp *reduce_srcs[2] = {value, range};
+  PolyUOp *reduce =
+      poly_uop(ctx, POLY_OP_REDUCE, vec4, reduce_srcs, 2, poly_arg_ops(POLY_OP_ADD));
+  PolyUOp *rewritten =
+      poly_apply_pm_reduce(ctx, poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, reduce, poly_arg_none()));
+  ASSERT_NOT_NULL(rewritten);
+
+  int n_topo = 0, n_acc = 0;
+  PolyUOp *acc = NULL;
+  PolyUOp **topo = poly_toposort(ctx, rewritten, &n_topo);
+  for (int i = 0; i < n_topo; i++) {
+    PolyUOp *u = topo[i];
+    if (u->op != POLY_OP_BUFFER || !u->dtype.is_ptr || u->dtype.addrspace != POLY_ADDR_REG)
+      continue;
+    n_acc++;
+    acc = u;
+  }
+  ASSERT_INT_EQ(n_acc, 1);
+  ASSERT_NOT_NULL(acc);
+  ASSERT_INT_EQ(acc->dtype.ptr_size, 1);
+  ASSERT_INT_EQ(acc->dtype.count, 4);
+  ASSERT_INT_EQ(acc->n_src, 1);
+  PolyUOp *shape = acc->src[0];
+  ASSERT_INT_EQ(shape->op, POLY_OP_STACK);
+  ASSERT_TRUE(poly_dtype_eq(shape->dtype, poly_dtype_vec(POLY_INDEX, 2)));
+  ASSERT_INT_EQ(shape->n_src, 2);
+  ASSERT_INT_EQ(shape->src[0]->op, POLY_OP_CONST);
+  ASSERT_TRUE(poly_dtype_eq(shape->src[0]->dtype, POLY_INDEX));
+  ASSERT_INT_EQ(shape->src[0]->arg.i, 1);
+  ASSERT_INT_EQ(shape->src[1]->op, POLY_OP_CONST);
+  ASSERT_TRUE(poly_dtype_eq(shape->src[1]->dtype, POLY_INDEX));
+  ASSERT_INT_EQ(shape->src[1]->arg.i, 4);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -3169,6 +3288,118 @@ TEST(codegen, group_for_reduce_preserves_range_replacement_metadata_like_tinygra
     }
   }
   ASSERT_TRUE(direct_index_coordinate);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, group_for_reduce_is_unbounded_and_preserves_ancestor_metadata) {
+  /* Pinned expander.py:132-145 is one unrestricted graph_rewrite of
+   * fix_group_for_reduce's x.replace result.  More than 32 matches or 64
+   * ancestor sources must not change that topology contract. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(16));
+  PolyUOp *group = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_INDEX, bound, poly_arg_range(7, POLY_AXIS_GROUP_REDUCE)
+  );
+  PolyUOp *value = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, group, poly_arg_none());
+  PolyUOp *reduce_srcs[2] = {value, group};
+  PolyUOp *reduce = poly_uop(
+      ctx, POLY_OP_REDUCE, POLY_FLOAT32, reduce_srcs, 2, poly_arg_ops(POLY_OP_ADD)
+  );
+
+  PolyUOp *wide_srcs[70];
+  wide_srcs[0] = reduce;
+  for (int i = 1; i < 70; i++)
+    wide_srcs[i] = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(i));
+  PolyUOp *wide = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, wide_srcs, 70, poly_arg_none());
+  PolyUOp *wide_out = poly_group_for_reduce(ctx, wide, 256);
+  ASSERT_NOT_NULL(wide_out);
+  ASSERT_INT_EQ(wide_out->n_src, 70);
+  for (int i = 1; i < 70; i++) ASSERT_PTR_EQ(wide_out->src[i], wide_srcs[i]);
+
+  PolyUOp *many_reduces[33];
+  for (int i = 0; i < 33; i++) {
+    PolyUOp *range = poly_uop1(
+        ctx, POLY_OP_RANGE, POLY_INDEX, bound,
+        poly_arg_range(1000 + i, POLY_AXIS_GROUP_REDUCE)
+    );
+    PolyUOp *cast = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, range, poly_arg_none());
+    PolyUOp *srcs[2] = {cast, range};
+    many_reduces[i] = poly_uop_tagged_arg(
+        ctx, POLY_OP_REDUCE, POLY_FLOAT32, srcs, 2, poly_arg_ops(POLY_OP_ADD),
+        (uint64_t)(100 + i), poly_arg_none()
+    );
+  }
+  PolyUOp *many =
+      poly_uop(ctx, POLY_OP_SINK, POLY_VOID, many_reduces, 33, poly_arg_none());
+  PolyUOp *many_out = poly_group_for_reduce(ctx, many, 256);
+  ASSERT_NOT_NULL(many_out);
+  ASSERT_INT_EQ(many_out->n_src, 33);
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(ctx, many_out, &n_topo);
+  for (int i = 0; i < n_topo; i++) {
+    PolyUOp *u = topo[i];
+    if (u->op != POLY_OP_REDUCE) continue;
+    for (int j = 1; j < u->n_src; j++) {
+      ASSERT_FALSE(
+          u->src[j]->op == POLY_OP_RANGE &&
+          poly_range_axis_type(u->src[j]->arg) == POLY_AXIS_GROUP_REDUCE
+      );
+    }
+  }
+
+  PolyUOp *wrapped = poly_uop_tagged_arg(
+      ctx, POLY_OP_NEG, POLY_FLOAT32, &reduce, 1, poly_arg_none(), 77,
+      poly_arg_str("must-survive")
+  );
+  PolyUOp *tagged = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, wrapped, poly_arg_none());
+  PolyUOp *tagged_out = poly_group_for_reduce(ctx, tagged, 256);
+  ASSERT_NOT_NULL(tagged_out);
+  ASSERT_INT_EQ(tagged_out->n_src, 1);
+  ASSERT_INT_EQ(tagged_out->src[0]->tag, 77);
+  ASSERT_INT_EQ(tagged_out->src[0]->tag_arg.kind, POLY_ARG_STRING);
+  ASSERT_STR_EQ(tagged_out->src[0]->tag_arg.str, "must-survive");
+
+  /* graph_rewrite visits children before rebuilding/matching their parent.
+   * The aggregate substitution must therefore also rewrite a grouped child
+   * reachable only through the replacement constructed for a grouped parent. */
+  PolyUOp *inner_range = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_INDEX, bound, poly_arg_range(2000, POLY_AXIS_GROUP_REDUCE)
+  );
+  PolyUOp *inner_cast =
+      poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, inner_range, poly_arg_none());
+  PolyUOp *inner_srcs[2] = {inner_cast, inner_range};
+  PolyUOp *inner = poly_uop(
+      ctx, POLY_OP_REDUCE, POLY_FLOAT32, inner_srcs, 2, poly_arg_ops(POLY_OP_ADD)
+  );
+  PolyUOp *outer_range = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_INDEX, bound, poly_arg_range(2001, POLY_AXIS_GROUP_REDUCE)
+  );
+  PolyUOp *outer_cast =
+      poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, outer_range, poly_arg_none());
+  PolyUOp *outer_value =
+      poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, inner, outer_cast, poly_arg_none());
+  PolyUOp *outer_srcs[2] = {outer_value, outer_range};
+  PolyUOp *outer = poly_uop(
+      ctx, POLY_OP_REDUCE, POLY_FLOAT32, outer_srcs, 2, poly_arg_ops(POLY_OP_ADD)
+  );
+  PolyUOp *nested = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, outer, poly_arg_none());
+  PolyUOp *nested_out = poly_group_for_reduce(ctx, nested, 256);
+  ASSERT_NOT_NULL(nested_out);
+  int n_nested = 0;
+  PolyUOp **nested_topo = poly_toposort(ctx, nested_out, &n_nested);
+  for (int i = 0; i < n_nested; i++) {
+    PolyUOp *u = nested_topo[i];
+    if (u->op != POLY_OP_REDUCE) continue;
+    for (int j = 1; j < u->n_src; j++) {
+      ASSERT_FALSE(
+          u->src[j]->op == POLY_OP_RANGE &&
+          poly_range_axis_type(u->src[j]->arg) == POLY_AXIS_GROUP_REDUCE
+      );
+    }
+  }
 
   poly_ctx_destroy(ctx);
   PASS();

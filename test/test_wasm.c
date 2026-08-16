@@ -888,6 +888,46 @@ static WasmVecKernel wasm_make_vec_where_f32(int n) {
 
 /* WASM renderer tests */
 
+TEST(wasm, rewrite_legalizes_non_native_f16_storage_like_python_renderer) {
+  /* Pinned PythonRenderer excludes half on Python 3.11 and
+   * do_dtype_decomps applies pm_float_decomp before rendering
+   * (runtime/ops_python.py:203-223; codegen/__init__.py:116-140). */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyDType ptr_f16 = poly_dtype_ptr(POLY_FLOAT16, 2, POLY_ADDR_GLOBAL);
+  PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, 2, POLY_ADDR_GLOBAL);
+  PolyUOp *out = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(0));
+  PolyUOp *in = poly_uop0(ctx, POLY_OP_PARAM, ptr_f16, poly_arg_int(1));
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(0));
+  PolyUOp *out_idx = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, out, zero, poly_arg_none());
+  PolyUOp *in_idx = poly_uop2(ctx, POLY_OP_INDEX, ptr_f16, in, zero, poly_arg_none());
+  PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT16, in_idx, poly_arg_none());
+  PolyUOp *value = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, load, poly_arg_none());
+  PolyUOp *sink = poly_sink1(
+      ctx, poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out_idx, value, poly_arg_none())
+  );
+
+  PolyUOp *rewritten = poly_rewrite_wasm(ctx, sink);
+  ASSERT_NOT_NULL(rewritten);
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(ctx, rewritten, &n_topo);
+  ASSERT_NOT_NULL(topo);
+  int u16_loads = 0, f32_bitcasts = 0, residual_f16 = 0;
+  for (int i = 0; i < n_topo; i++) {
+    PolyDType scalar = poly_dtype_scalar(topo[i]->dtype);
+    if (topo[i]->op == POLY_OP_LOAD && poly_dtype_eq(topo[i]->dtype, POLY_UINT16)) u16_loads++;
+    if (topo[i]->op == POLY_OP_BITCAST && poly_dtype_eq(topo[i]->dtype, POLY_FLOAT32))
+      f32_bitcasts++;
+    if (scalar.priority == POLY_FLOAT16.priority && scalar.bitsize == POLY_FLOAT16.bitsize)
+      residual_f16++;
+  }
+  ASSERT_INT_EQ(u16_loads, 1);
+  ASSERT_INT_EQ(f32_bitcasts, 1);
+  ASSERT_INT_EQ(residual_f16, 0);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(wasm, render_vecadd) {
   WasmVecKernel k = wasm_make_vec_binop(POLY_OP_ADD, 10);
   int n_lin;

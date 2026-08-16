@@ -160,6 +160,61 @@ TEST_BACKEND(cuda, devectorizer_keeps_aligned_float4_store_like_tinygrad) {
   PASS();
 }
 
+TEST_BACKEND(cuda, raw_cross_dtype_store_does_not_invent_late_cast) {
+  /* Pinned UOp.store keeps the supplied value dtype (uop/ops.py:531-533),
+   * and the late pipeline has no STORE-dtype coercion
+   * (codegen/__init__.py:101-137). A malformed float* <- int value therefore
+   * stays malformed; codegen must not invent a CAST after devectorization. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyDType out_ptr = poly_dtype_ptr(POLY_FLOAT32, 4, POLY_ADDR_GLOBAL);
+  PolyDType in_ptr = poly_dtype_ptr(POLY_INT32, 4, POLY_ADDR_GLOBAL);
+  PolyUOp *out = poly_uop0(ctx, POLY_OP_PARAM, out_ptr, poly_arg_int(0));
+  PolyUOp *a = poly_uop0(ctx, POLY_OP_PARAM, in_ptr, poly_arg_int(1));
+  PolyUOp *b = poly_uop0(ctx, POLY_OP_PARAM, in_ptr, poly_arg_int(2));
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(4));
+  PolyUOp *range =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INDEX, bound, poly_arg_range(0, POLY_AXIS_GLOBAL));
+  PolyUOp *out_index = poly_uop2(ctx, POLY_OP_INDEX, out_ptr, out, range, poly_arg_none());
+  PolyUOp *a_index = poly_uop2(ctx, POLY_OP_INDEX, in_ptr, a, range, poly_arg_none());
+  PolyUOp *b_index = poly_uop2(ctx, POLY_OP_INDEX, in_ptr, b, range, poly_arg_none());
+  PolyUOp *a_load = poly_uop1(ctx, POLY_OP_LOAD, POLY_INT32, a_index, poly_arg_none());
+  PolyUOp *b_load = poly_uop1(ctx, POLY_OP_LOAD, POLY_INT32, b_index, poly_arg_none());
+  PolyUOp *value =
+      poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, a_load, b_load, poly_arg_none());
+  PolyUOp *store =
+      poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out_index, value, poly_arg_none());
+  PolyUOp *end = poly_uop2(ctx, POLY_OP_END, POLY_VOID, store, range, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
+
+  PolyUOp *rewritten = poly_rewrite_cuda(ctx, sink);
+  ASSERT_NOT_NULL(rewritten);
+  int n_topo = 0, invented_casts = 0;
+  PolyUOp **topo = poly_toposort(ctx, rewritten, &n_topo);
+  ASSERT_NOT_NULL(topo);
+  for (int i = 0; i < n_topo; i++) {
+    PolyUOp *u = topo[i];
+    if (u->op == POLY_OP_CAST && u->n_src == 1 && u->dtype.count == 4 &&
+        poly_dtype_eq(poly_dtype_scalar(u->dtype), POLY_FLOAT32) &&
+        u->src[0]->dtype.count == 4 &&
+        poly_dtype_eq(poly_dtype_scalar(u->src[0]->dtype), POLY_INT32))
+      invented_casts++;
+  }
+  ASSERT_INT_EQ(invented_casts, 0);
+
+  int n_linear = 0;
+  PolyUOp **linear = poly_linearize_rewritten(ctx, rewritten, &n_linear);
+  ASSERT_NOT_NULL(linear);
+  char *source = poly_render_cuda(linear, n_linear, "cross_dtype_store", 1);
+  free(linear);
+  ASSERT_NOT_NULL(source);
+  ASSERT_TRUE(strstr(source, "make_int4(") != NULL);
+  ASSERT_TRUE(strstr(source, "(float4)(make_int4(") == NULL);
+  free(source);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST_BACKEND(cuda, vector_local_shrink_load_store_use_typed_lvalue) {
   /* Pinned CStyleLanguage.render_access is shared by LOAD/STORE and every
    * address space (renderer/cstyle.py:47-58,179-184).  The final RMSNorm

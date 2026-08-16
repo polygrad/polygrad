@@ -475,9 +475,15 @@ def kernel_structure(ops: list[str]) -> dict[str, int]:
     return counts
 
 
-def run_polygrad_case(runner: pathlib.Path, case: str, mode: str,
+def run_polygrad_case(runner: pathlib.Path, case: str, mode: str, optimize: bool,
                       cuda: bool = False, hip: bool = False) -> dict:
     env = os.environ.copy()
+    # Bind both engines to the same optimization mode inside this harness.
+    # Pinned full_rewrite_to_sink receives `optimize` directly; Polygrad's
+    # env-aware parity linearizer reads POLY_OPTIMIZE. Depending on the caller
+    # (the Make target versus a direct invocation) previously compared
+    # optimized Tinygrad against unoptimized Polygrad.
+    env["POLY_OPTIMIZE"] = "1" if optimize else "0"
     # ASan-instrumented parity_runner is spawned from Python. On this platform,
     # detect_leaks=0 alone can produce recursive DEADLYSIGNAL reports in the
     # child process; halt_on_error=0 preserves the intended non-leak behavior
@@ -692,7 +698,7 @@ def main() -> int:
         builder = CASES[case]
 
         try:
-            polygrad_report = run_polygrad_case(args.runner, case, args.mode,
+            polygrad_report = run_polygrad_case(args.runner, case, args.mode, not args.no_opt,
                                                   cuda=args.cuda, hip=args.hip)
         except Exception as exc:  # noqa: BLE001
             failures.append((case, f"runner error: {exc}"))

@@ -805,6 +805,45 @@ class TestCreation:
         ], dtype=np.uint32)
         np.testing.assert_array_equal(pinned.view(np.uint32), expected_bits)
 
+    def test_runtime_random_creators_and_seed_are_context_local(self):
+        with Runtime(device='interp') as runtime:
+            runtime.Tensor.manual_seed(123)
+            runtime_a = runtime.Tensor.rand(8).numpy()
+            runtime.Tensor.manual_seed(123)
+            runtime_b = runtime.Tensor.rand(8).numpy()
+            np.testing.assert_array_equal(runtime_a, runtime_b)
+
+            creators = (
+                ('rand', (4,)),
+                ('uniform', (4,)),
+                ('scaled_uniform', (2, 2)),
+                ('glorot_uniform', (2, 2)),
+                ('kaiming_uniform', (2, 2)),
+                ('randint', (4,)),
+                ('randperm', (4,)),
+            )
+            for name, shape in creators:
+                value = getattr(runtime.Tensor, name)(*shape)
+                assert value._ctx == runtime._ctx, name
+
+            with pytest.raises(ValueError, match='same Polygrad context'):
+                runtime.Tensor.ones(2) + Tensor.uniform(2)
+
+        Tensor.manual_seed(999)
+        expected_first = Tensor.rand(4).numpy()
+        expected_second = Tensor.rand(4).numpy()
+        Tensor.manual_seed(999)
+        actual_first = Tensor.rand(4).numpy()
+        with Runtime(device='interp') as runtime:
+            runtime.Tensor.manual_seed(123)
+        actual_second = Tensor.rand(4).numpy()
+        np.testing.assert_array_equal(actual_first, expected_first)
+        np.testing.assert_array_equal(actual_second, expected_second)
+
+    def test_runtime_can_run_uses_runtime_preferred_device(self):
+        with Runtime(device='host') as runtime:
+            assert not runtime.can_run('add', dtype='float32', shape=(2,))
+
     def test_uniform_bounds_determinism_and_validation(self):
         Tensor.manual_seed(42)
         a = Tensor.uniform(64, low=-2, high=3).numpy()

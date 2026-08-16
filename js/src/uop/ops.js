@@ -305,6 +305,15 @@ class UOp {
   sin() { return this._alu1('SIN') }
   reciprocal() { return this._alu1('RECIPROCAL') }
   trunc() { return this._alu1('TRUNC') }
+  cast(dtype) {
+    // Pinned tinygrad uop/ops.py:509-513: UOp.cast constructs CAST unless the
+    // dtype already matches. The C primitive owns that same canonicalization.
+    const dtypeIds = this.ffi.__polygradDtypeIds || {}
+    const dtypeId = dtypeIds[String(dtype)]
+    if (dtypeId === undefined || dtypeId < 0) throw new TypeError(`unknown dtype ${dtype}`)
+    const raw = this.ffi.poly_cast_by_id(this.ctx, this.raw, dtypeId)
+    return raw ? new UOp(this.ctx, this.ffi, raw) : null
+  }
   where(yes, no) {
     const ref = yes instanceof UOp ? yes : no instanceof UOp ? no : this
     const y = this._coerceLike(yes, ref)
@@ -335,6 +344,7 @@ function createBoundUopNamespace(runtime) {
   const dtypeNameById = {}
   for (const [name, id] of Object.entries(dtypeIds || {})) dtypeNameById[Number(id)] = name
   ffi.__polygradDtypeNameById = dtypeNameById
+  ffi.__polygradDtypeIds = dtypeIds || {}
 
   function wrap(value) {
     if (value instanceof UOp) return value

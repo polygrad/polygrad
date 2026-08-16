@@ -1484,6 +1484,8 @@ class Tensor:
 
     def _ensure_tensor(self, other):
         if isinstance(other, Tensor):
+            if _ptr_value(other._ctx) != _ptr_value(self._ctx):
+                raise ValueError('Tensor operands must belong to the same Polygrad context')
             return other
         if isinstance(other, np.generic):
             other = other.item()
@@ -3251,8 +3253,8 @@ class Tensor:
             ctx, tensor, dtype_name, dev, requires_grad, 'poly_tensor_randn_by_id'
         )
 
-    @staticmethod
-    def uniform(*shape, low=0.0, high=1.0, **kwargs):
+    @classmethod
+    def uniform(cls, *shape, low=0.0, high=1.0, **kwargs):
         """Create uniform values using pinned tinygrad's lazy rand/scale/add graph."""
         shape = _shape_tuple(*shape)
         if any(not isinstance(s, int) or s < 0 for s in shape):
@@ -3260,20 +3262,20 @@ class Tensor:
         if low >= high:
             raise ValueError(f'Tensor.uniform requires low < high, got low={low}, high={high}')
         dtype = kwargs.get('dtype', dtypes.default_float)
-        return ((high - low) * Tensor.rand(*shape, **kwargs)).cast(dtype) + low
+        return ((high - low) * cls.rand(*shape, **kwargs)).cast(dtype) + low
 
-    @staticmethod
-    def scaled_uniform(*shape, **kwargs):
+    @classmethod
+    def scaled_uniform(cls, *shape, **kwargs):
         """Create pinned tinygrad's product-scaled uniform initializer."""
         shape = _shape_tuple(*shape)
-        return Tensor.uniform(*shape, low=-1.0, high=1.0, **kwargs).mul(_prod(shape) ** -0.5)
+        return cls.uniform(*shape, low=-1.0, high=1.0, **kwargs).mul(_prod(shape) ** -0.5)
 
-    @staticmethod
-    def glorot_uniform(*shape, **kwargs):
+    @classmethod
+    def glorot_uniform(cls, *shape, **kwargs):
         """Create pinned tinygrad's Glorot-uniform initializer."""
         shape = _shape_tuple(*shape)
         bound = math.sqrt(6.0 / (shape[0] + _prod(shape[1:])))
-        return Tensor.uniform(*shape, low=-bound, high=bound, **kwargs)
+        return cls.uniform(*shape, low=-bound, high=bound, **kwargs)
 
     @staticmethod
     def kaiming_uniform(*shape, **kwargs):
