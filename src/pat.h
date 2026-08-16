@@ -179,11 +179,22 @@ PolyArg poly_exec_alu(
     int n_ops,
     bool truncate_output
 );
+/* Pinned tinygrad symbolic.fold_bitcast: reinterpret one scalar CONST through
+ * equal-width storage formats. Returns false for pointer/vector/formatless or
+ * unequal-width dtypes. */
+bool poly_exec_bitcast_const(
+    PolyDType from,
+    PolyDType to,
+    PolyArg value,
+    PolyArg *out
+);
 
 /* Symbolic simplification rules */
 
 PolyPatternMatcher *poly_symbolic_simple(void);
 PolyPatternMatcher *poly_symbolic(void);
+/* Pinned tinygrad's broader codegen-stage `sym` matcher. */
+PolyPatternMatcher *poly_sym(void);
 PolyPatternMatcher *poly_pm_gep_pushing(void);
 /* Pinned tinygrad/uop/symbolic.py validity-aware matcher components. */
 PolyUOp *poly_uop_given_valid(

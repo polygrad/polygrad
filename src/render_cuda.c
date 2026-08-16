@@ -182,6 +182,22 @@ static void cuda_render_ctype(PolyDType dt, char *buf, int cap) {
   snprintf(buf, cap, "%s*", bt);
 }
 
+/* Pinned tinygrad CStyleLanguage.render_access
+ * (tinygrad/renderer/cstyle.py:179-184) dereferences vector memory through a
+ * pointer to the accessed vector dtype.  The devectorizer proves alignment
+ * before producing this vector LOAD/STORE; the PARAM itself remains scalar. */
+static void cuda_render_access_expr(
+    char *buf, int cap, const char *address, PolyDType value_dtype
+) {
+  if (value_dtype.count > 1) {
+    char value_type[128];
+    cuda_render_ctype_nonptr(value_dtype, value_type, sizeof(value_type));
+    snprintf(buf, cap, "*((%s*)(%s))", value_type, address ? address : "0");
+  } else {
+    snprintf(buf, cap, "*%s", address ? address : "0");
+  }
+}
+
 static bool cuda_vector_needs_prefix(PolyDType dt) {
   PolyDType s = poly_dtype_scalar(dt);
   if (dt.count <= 1) return false;
@@ -589,6 +605,9 @@ PolyUOp *poly_rewrite_cuda(PolyCtx *ctx, PolyUOp *sink) {
               .has_sin = true,
               .has_int64 = true,
               .has_local = true,
+              /* Pinned Renderer.supports_float4 defaults true
+               * (renderer/__init__.py:62); CUDARenderer does not override it. */
+              .max_vec_width = 4,
               .global_max = {2147483647, 65535, 65535},
               .local_max = {1024, 1024, 64},
           },
@@ -885,41 +904,42 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
       continue;
     }
 
-    /* --- DEFINE_LOCAL: shared memory array ------------------------------ */
-    if (u->op == POLY_OP_DEFINE_LOCAL) {
+    /* Pinned tinygrad's C-style renderers consume the LOCAL BUFFER emitted by
+     * pm_add_buffers_local directly. */
+    if (u->op == POLY_OP_DEFINE_LOCAL ||
+        (u->op == POLY_OP_BUFFER && poly_program_memory_is(u, POLY_ADDR_LOCAL))) {
       char name[32];
-      snprintf(name, sizeof(name), "smem%d", c_acc++);
+      snprintf(
+          name, sizeof(name), "smem%lld",
+          (long long)(u->op == POLY_OP_BUFFER ? poly_program_buffer_slot(u) : c_acc++)
+      );
       csmap_set(&names, u, strdup(name));
 
-      /* Render as __shared__ array. Size from pointer dtype's ptr_size. */
-      int smem_size = u->dtype.ptr_size > 0 ? u->dtype.ptr_size : 1;
+      int64_t smem_size = poly_program_buffer_size(u);
       {
         char ctype[128];
-        cuda_render_ctype_nonptr(poly_dtype_scalar(u->dtype), ctype, sizeof(ctype));
-        csb_printf(&decls, "  __shared__ %s %s[%d];\n", ctype, name, smem_size);
+        cuda_render_ctype_nonptr(poly_dtype_scalar(poly_program_buffer_dtype(u)), ctype, sizeof(ctype));
+        csb_printf(&decls, "  __shared__ %s %s[%lld];\n", ctype, name, (long long)smem_size);
       }
       continue;
     }
 
     /* --- register buffer --------------------------------------------- */
     if (u->op == POLY_OP_DEFINE_REG ||
-        (u->op == POLY_OP_BUFFER && u->dtype.is_ptr && u->dtype.addrspace == POLY_ADDR_REG)) {
+        (u->op == POLY_OP_BUFFER && poly_program_memory_is(u, POLY_ADDR_REG))) {
       char name[32];
-      snprintf(name, sizeof(name), "r%lld", (long long)u->arg.i);
+      snprintf(name, sizeof(name), "r%lld", (long long)poly_program_buffer_slot(u));
       csmap_set(&names, u, strdup(name));
 
-      PolyDType base = u->dtype;
-      base.is_ptr = false;
-      base.addrspace = 0;
-      base.ptr_size = 0;
-      int64_t reg_size = u->dtype.ptr_size > 0 ? u->dtype.ptr_size : 1;
+      PolyDType base = poly_program_buffer_dtype(u);
+      int64_t reg_size = poly_program_buffer_size(u);
       if (base.count > 1) {
         char ctype[128];
         cuda_render_ctype_nonptr(base, ctype, sizeof(ctype));
         csb_printf(&decls, "  %s %s[%lld];\n", ctype, name, (long long)reg_size);
       } else {
         char ctype[128];
-        cuda_render_ctype_nonptr(poly_dtype_scalar(u->dtype), ctype, sizeof(ctype));
+        cuda_render_ctype_nonptr(poly_dtype_scalar(base), ctype, sizeof(ctype));
         csb_printf(&decls, "  %s %s[%lld];\n", ctype, name, (long long)reg_size);
       }
       continue;
@@ -948,6 +968,8 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
       char *bidx = csmap_get(&names, u->src[0]);
       char ctype[128];
       cuda_render_ctype(u->dtype, ctype, sizeof(ctype));
+      char access[512];
+      cuda_render_access_expr(access, sizeof(access), bidx, u->dtype);
       csb_printf(&decls, "  %s %s;\n", ctype, name);
       for (int d = 0; d < depth; d++)
         csb_puts(&body, "  ");
@@ -960,12 +982,12 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
       if (gate_uop && u->n_src >= 2) {
         char *gate_s = csmap_get(&names, gate_uop);
         char *alt_s = csmap_get(&names, u->src[1]);
-        csb_printf(&body, "%s = (%s?(*%s):%s);\n", name, gate_s, bidx, alt_s);
+        csb_printf(&body, "%s = (%s?%s:%s);\n", name, gate_s, access, alt_s);
       } else if (gate_uop) {
         char *gate_s = csmap_get(&names, gate_uop);
-        csb_printf(&body, "%s = (%s?(*%s):(%s)0);\n", name, gate_s, bidx, ctype);
+        csb_printf(&body, "%s = (%s?%s:(%s)0);\n", name, gate_s, access, ctype);
       } else {
-        csb_printf(&body, "%s = (*%s);\n", name, bidx);
+        csb_printf(&body, "%s = %s;\n", name, access);
       }
       continue;
     }
@@ -982,17 +1004,16 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
         val = owned_val;
       }
 
-      bool store_to_local =
-          u->src[0]->op == POLY_OP_DEFINE_LOCAL ||
-          (u->src[0]->op == POLY_OP_BUFFER && u->src[0]->dtype.is_ptr &&
-           u->src[0]->dtype.addrspace == POLY_ADDR_LOCAL);
-
       for (int d = 0; d < depth; d++)
         csb_puts(&body, "  ");
-      if (store_to_local)
-        csb_printf(&body, "%s = %s;\n", target, val ? val : "null");
-      else
-        csb_printf(&body, "*%s = %s;\n", target, val ? val : "null");
+      /* Pinned CStyleLanguage.render_access is shared by GLOBAL and LOCAL
+       * stores (renderer/cstyle.py:58,179-184).  In particular a vector
+       * SHRINK over scalar shared memory is a typed vector-pointer lvalue. */
+      char access[512];
+      cuda_render_access_expr(
+          access, sizeof(access), target, u->src[1] ? u->src[1]->dtype : POLY_VOID
+      );
+      csb_printf(&body, "%s = %s;\n", access, val ? val : "null");
 
       free(owned_val);
       continue;

@@ -2233,8 +2233,7 @@ static int x86_graph_fold_address(PolyCtx *ctx, PolyUOp *addr, PolyUOp *out[4]) 
 }
 
 static bool x86_graph_address_is_reg_backed(PolyUOp *addr[4]) {
-  return addr && addr[0] && addr[0]->dtype.is_ptr &&
-         addr[0]->dtype.addrspace == POLY_ADDR_REG;
+  return addr && addr[0] && poly_program_memory_is(addr[0], POLY_ADDR_REG);
 }
 
 static bool x86_graph_load_address_tuple(PolyCtx *ctx, PolyUOp *load, PolyUOp *addr[4]) {
@@ -3036,6 +3035,11 @@ static PolyUOp *poly_graph_rewrite_x86_with_uses(
     }
     if (u->op == POLY_OP_RANGE && u->n_src > 0)
       x86_isel_mark_structural_const(uctx.structural_consts, u->src[0]);
+    /* Pinned tinygrad renderer/isa/x86.py:371-379 carries BUFFER shape
+     * sources through isel as rtag() metadata. They size the regalloc stack
+     * object and must not be materialized as value-producing instructions. */
+    if (u->op == POLY_OP_BUFFER && u->n_src > 0)
+      x86_isel_mark_structural_const(uctx.structural_consts, u->src[0]);
     if ((u->op == POLY_OP_INDEX || u->op == POLY_OP_GEP) && u->n_src > 1)
       x86_isel_mark_structural_const(uctx.structural_consts, u->src[1]);
     if (u->op == POLY_OP_SHRINK) {
@@ -3230,22 +3234,31 @@ static PolyUOp *x86_alias_value_as_dtype(PolyCtx *ctx, PolyUOp *src, PolyDType d
 }
 
 static int64_t x86_local_buffer_nbytes(PolyUOp *u) {
-  if (!u || !u->dtype.is_ptr) return 0;
-  PolyDType s = poly_dtype_scalar(u->dtype);
+  if (!u || (u->op != POLY_OP_BUFFER && u->op != POLY_OP_DEFINE_REG &&
+             u->op != POLY_OP_DEFINE_LOCAL))
+    return 0;
+  PolyDType s = poly_dtype_scalar(poly_program_buffer_dtype(u));
   int item = poly_dtype_itemsize(s);
   if (item <= 0) item = 1;
-  int count = u->dtype.count > 1 ? u->dtype.count : 1;
-  int64_t n = u->dtype.ptr_size > 0 ? u->dtype.ptr_size : 1;
+  int count = s.count > 1 ? s.count : 1;
+  int64_t n = poly_program_buffer_size(u);
   int64_t bytes = n * (int64_t)item * (int64_t)count;
   return bytes > 0 ? bytes : item;
 }
 
 static int x86_emit_buffer(X86IselCtx *isel, PolyUOp *u) {
-  if (!u || !u->dtype.is_ptr) return -1;
-  if (u->dtype.addrspace != POLY_ADDR_REG && u->dtype.addrspace != POLY_ADDR_LOCAL) return -1;
+  if (!u || (u->op != POLY_OP_BUFFER && u->op != POLY_OP_DEFINE_REG &&
+             u->op != POLY_OP_DEFINE_LOCAL))
+    return -1;
+  PolyAddrSpace addrspace = poly_program_memory_addrspace(u);
+  if (addrspace != POLY_ADDR_REG && addrspace != POLY_ADDR_LOCAL) return -1;
   int32_t def = x86_virtual_tag_for_dtype(x86_u64(), true, &isel->next_vreg);
+  /* Pinned tinygrad renderer/isa/x86.py:371-379 retains BUFFER size sources
+   * through virtual-register allocation (tagging them with rtag only so they
+   * are not materialized). The C size source is already a non-register
+   * metadata CONST, so preserve it verbatim for regalloc stack sizing. */
   PolyUOp *buf = poly_uop_tagged_arg(
-      isel->ctx, POLY_OP_BUFFER, u->dtype, NULL, 0, u->arg, def,
+      isel->ctx, POLY_OP_BUFFER, u->dtype, u->src, u->n_src, u->arg, def,
       x86_arg_int_tuple((int64_t[]){def}, 1)
   );
   return x86_emit_and_map(isel, u, buf);

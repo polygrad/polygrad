@@ -2077,6 +2077,164 @@ PolyUOp *poly_apply_add_buffers(PolyCtx *ctx, PolyUOp *sink, PolyMap *buf_dims_m
   return new_sink ? new_sink : sink;
 }
 
+/* Pinned tinygrad schedule/rangeify.py:409-445,482-484.
+ * Materialize codegen-local STAGE nodes only after the expander has fixed the
+ * vector width. This is the LOCAL branch of bufferize_to_store: one local
+ * placeholder, one indexed STORE closed over the STAGE ranges, one BARRIER,
+ * and one AFTER dependency. */
+static PolyUOp *bufferize_to_store_local(
+    PolyCtx *ctx,
+    int *slot_counter,
+    PolyUOp *stage
+) {
+  if (!stage || stage->op != POLY_OP_STAGE || stage->n_src < 2 ||
+      stage->arg.kind != POLY_ARG_BUFFERIZE_OPTS ||
+      poly_bufferize_arg_addrspace(stage->arg) != POLY_ADDR_LOCAL)
+    return NULL;
+
+  const int n_ranges = stage->n_src - 1;
+  if (n_ranges > POLY_MAX_DIMS) return NULL;
+  PolyUOp *ranges[POLY_MAX_DIMS];
+  PolyUOp *bounds[POLY_MAX_DIMS];
+  int64_t size = 1;
+  for (int i = 0; i < n_ranges; i++) {
+    PolyUOp *range = stage->src[1 + i];
+    int64_t bound = 0;
+    if (!range || range->op != POLY_OP_RANGE || range->n_src != 1 ||
+        poly_uop_const_i64(range->src[0], &bound) != 0 || bound <= 0 ||
+        __builtin_mul_overflow(size, bound, &size))
+      return NULL;
+    ranges[i] = range;
+    bounds[i] = range->src[0];
+  }
+
+  PolyUOp *shape_src[2];
+  int n_shape = 1;
+  shape_src[0] = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(size));
+  if (stage->dtype.count > 1)
+    shape_src[n_shape++] =
+        poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(stage->dtype.count));
+  PolyDType shape_dtype =
+      n_shape == 1 ? POLY_INDEX : poly_dtype_vec(POLY_INDEX, n_shape);
+  PolyUOp *shape =
+      poly_uop(ctx, POLY_OP_STACK, shape_dtype, shape_src, n_shape, poly_arg_none());
+
+  PolyParamArg param = {
+      .slot = (*slot_counter)++,
+      .addrspace = POLY_ADDR_LOCAL,
+  };
+  PolyDType ptr_dtype = poly_dtype_ptr(stage->dtype, size, POLY_ADDR_LOCAL);
+  PolyUOp *buffer =
+      poly_uop1(ctx, POLY_OP_BUFFER, ptr_dtype, shape, poly_arg_param(&param));
+  PolyUOp *flat = poly_compute_flat_index_symbolic(ctx, ranges, bounds, n_ranges);
+  if (!flat) return NULL;
+  PolyUOp *index =
+      poly_uop2(ctx, POLY_OP_INDEX, ptr_dtype, buffer, flat, poly_arg_none());
+  PolyUOp *store =
+      poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, index, stage->src[0], poly_arg_none());
+
+  PolyUOp *sorted[POLY_MAX_DIMS];
+  for (int i = 0; i < n_ranges; i++)
+    sorted[i] = ranges[i];
+  for (int i = 0; i < n_ranges - 1; i++) {
+    for (int j = i + 1; j < n_ranges; j++) {
+      if (poly_range_axis_id(sorted[i]->arg) > poly_range_axis_id(sorted[j]->arg)) {
+        PolyUOp *tmp = sorted[i];
+        sorted[i] = sorted[j];
+        sorted[j] = tmp;
+      }
+    }
+  }
+  PolyUOp *end_src[1 + POLY_MAX_DIMS];
+  end_src[0] = store;
+  for (int i = 0; i < n_ranges; i++)
+    end_src[1 + i] = sorted[i];
+  PolyUOp *end =
+      poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 1 + n_ranges, poly_arg_none());
+  PolyUOp *barrier = poly_uop1(ctx, POLY_OP_BARRIER, POLY_VOID, end, poly_arg_none());
+  PolyUOp *after_src[2] = {buffer, barrier};
+  return poly_uop(ctx, POLY_OP_AFTER, ptr_dtype, after_src, 2, poly_arg_none());
+}
+
+PolyUOp *poly_apply_add_buffers_local(PolyCtx *ctx, PolyUOp *sink) {
+  if (!ctx || !sink) return NULL;
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort_ex_alloc(ctx, sink, &n_topo, NULL, false);
+  if (!topo) return NULL;
+  PolyMap *rmap = poly_map_new(n_topo < 16 ? 16 : (uint32_t)n_topo);
+  if (!rmap) {
+    poly_toposort_free(topo);
+    return NULL;
+  }
+  int slot_counter = 0;
+  bool ok = true;
+
+  for (int t = 0; t < n_topo && ok; t++) {
+    PolyUOp *u = topo[t];
+    PolyUOp *stack_src[16];
+    PolyUOp **src = u->n_src > 16 ? malloc((size_t)u->n_src * sizeof(*src)) : stack_src;
+    if (!src) {
+      ok = false;
+      break;
+    }
+    bool changed = false;
+    for (int i = 0; i < u->n_src; i++) {
+      PolyUOp *mapped = rmap_get(rmap, u->src[i]);
+      src[i] = mapped ? mapped : u->src[i];
+      changed |= src[i] != u->src[i];
+    }
+
+    PolyUOp *result = NULL;
+    if (u->op == POLY_OP_STAGE && u->arg.kind == POLY_ARG_BUFFERIZE_OPTS &&
+        poly_bufferize_arg_addrspace(u->arg) == POLY_ADDR_LOCAL) {
+      PolyUOp *remapped =
+          changed ? rangeify_clone_preserving_metadata(ctx, u, src, u->n_src) : u;
+      result = bufferize_to_store_local(ctx, &slot_counter, remapped);
+      if (!result) ok = false;
+    } else if (u->op == POLY_OP_INDEX && u->n_src >= 1 && u->src[0] &&
+               u->src[0]->op == POLY_OP_STAGE &&
+               u->src[0]->arg.kind == POLY_ARG_BUFFERIZE_OPTS &&
+               poly_bufferize_arg_addrspace(u->src[0]->arg) == POLY_ADDR_LOCAL) {
+      PolyUOp *stage = u->src[0];
+      const int n_idx = u->n_src - 1;
+      if (n_idx != stage->n_src - 1 || n_idx > POLY_MAX_DIMS) {
+        ok = false;
+      } else {
+        PolyUOp *bounds[POLY_MAX_DIMS];
+        for (int i = 0; i < n_idx; i++) {
+          PolyUOp *range = stage->src[1 + i];
+          if (!range || range->op != POLY_OP_RANGE || range->n_src != 1) {
+            ok = false;
+            break;
+          }
+          bounds[i] = range->src[0];
+        }
+        if (ok) {
+          PolyUOp *flat =
+              poly_compute_flat_index_symbolic(ctx, src + 1, bounds, n_idx);
+          PolyUOp *index_src[2] = {src[0], flat};
+          if (!flat)
+            ok = false;
+          else
+            result = rangeify_clone_preserving_metadata(ctx, u, index_src, 2);
+        }
+      }
+    } else if (changed) {
+      result = rangeify_clone_preserving_metadata(ctx, u, src, u->n_src);
+    }
+
+    if (result && result != u)
+      rmap_set(rmap, u, result);
+    if (src != stack_src) free(src);
+  }
+
+  PolyUOp *ret = ok ? rmap_get(rmap, sink) : NULL;
+  if (ok && !ret) ret = sink;
+  poly_map_destroy(rmap);
+  poly_toposort_free(topo);
+  return ret;
+}
+
 /* ═══════════════════════════════════════════════════════════════════════
  * split_kernel_rewrite — tinygrad-aligned kernel extraction
  *

@@ -91,6 +91,7 @@ PolyUOp *poly_run_rangeify(PolyIndexingCtx *ictx, PolyUOp *sink);
 PolyUOp *poly_apply_multi_pm(PolyCtx *ctx, PolyUOp *sink);
 PolyUOp *poly_apply_earliest_rewrites(PolyCtx *ctx, PolyUOp *sink);
 PolyUOp *poly_apply_add_buffers(PolyCtx *ctx, PolyUOp *sink, PolyMap *buf_dims_map);
+PolyUOp *poly_apply_add_buffers_local(PolyCtx *ctx, PolyUOp *sink);
 
 /* Tinygrad schedule/rangeify.py analogue: build the kernel graph for a sink. */
 PolyUOp *poly_get_kernel_graph(PolyCtx *ctx, PolyUOp *sink);

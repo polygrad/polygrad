@@ -170,8 +170,8 @@ static int count_reg_storage_ops(PolyUOp **lin, int n) {
   int c = 0;
   for (int i = 0; i < n; i++) {
     PolyUOp *u = lin[i];
-    if (u->op == POLY_OP_DEFINE_REG ||
-        (u->op == POLY_OP_BUFFER && u->dtype.is_ptr && u->dtype.addrspace == POLY_ADDR_REG))
+    if (u->op == POLY_OP_BUFFER && u->arg.kind == POLY_ARG_PARAM && u->arg.param &&
+        u->arg.param->addrspace == POLY_ADDR_REG)
       c++;
   }
   return c;
@@ -403,9 +403,135 @@ TEST(codegen, reduce_merge_shared_end) {
   PolyUOp **lin = poly_linearize(ctx, sink, &n);
   ASSERT_TRUE(n > 0);
   ASSERT_INT_EQ(count_reg_storage_ops(lin, n), 2);
+  ASSERT_INT_EQ(count_lin_ops(lin, n, POLY_OP_DEFINE_REG), 0);
   ASSERT_INT_EQ(count_lin_ops(lin, n, POLY_OP_END), 1);
 
   free(lin);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, reduce_merge_applies_independent_groups_atomically) {
+  /* Pinned tinygrad/codegen/late/devectorizer.py:330-348 collects every
+   * mergeable END replacement and applies the complete substitution map once.
+   * Two independent reduce-range groups catch the order-dependent failure
+   * where rewriting the first group invalidates pointer keys in the second. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(8));
+  PolyUOp *r0 =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INDEX, bound, poly_arg_range(0, POLY_AXIS_REDUCE));
+  PolyUOp *r1 =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INDEX, bound, poly_arg_range(1, POLY_AXIS_REDUCE));
+  PolyUOp *v0 = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, r0, poly_arg_none());
+  PolyUOp *v1 = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, r1, poly_arg_none());
+  PolyUOp *red_srcs0[2] = {v0, r0};
+  PolyUOp *red_srcs1[2] = {v1, r1};
+  PolyUOp *roots[4] = {
+      poly_uop(ctx, POLY_OP_REDUCE, POLY_FLOAT32, red_srcs0, 2, poly_arg_ops(POLY_OP_ADD)),
+      poly_uop(ctx, POLY_OP_REDUCE, POLY_FLOAT32, red_srcs0, 2, poly_arg_ops(POLY_OP_MAX)),
+      poly_uop(ctx, POLY_OP_REDUCE, POLY_FLOAT32, red_srcs1, 2, poly_arg_ops(POLY_OP_ADD)),
+      poly_uop(ctx, POLY_OP_REDUCE, POLY_FLOAT32, red_srcs1, 2, poly_arg_ops(POLY_OP_MAX)),
+  };
+  PolyUOp *sink = poly_uop_sink(ctx, roots, 4);
+  PolyUOp *rewritten = poly_apply_pm_reduce(ctx, sink);
+  ASSERT_NOT_NULL(rewritten);
+
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(ctx, rewritten, &n_topo);
+  int n_end = 0, n_group = 0, n_range = 0;
+  for (int i = 0; i < n_topo; i++) {
+    n_end += topo[i]->op == POLY_OP_END;
+    n_group += topo[i]->op == POLY_OP_GROUP;
+    n_range += topo[i]->op == POLY_OP_RANGE;
+    if (topo[i]->op == POLY_OP_END) {
+      ASSERT_INT_EQ(topo[i]->n_src, 2);
+      ASSERT_INT_EQ(topo[i]->src[0]->op, POLY_OP_GROUP);
+      ASSERT_INT_EQ(topo[i]->src[0]->n_src, 2);
+      ASSERT_INT_EQ(topo[i]->src[1]->op, POLY_OP_RANGE);
+    }
+  }
+  ASSERT_INT_EQ(n_end, 2);
+  ASSERT_INT_EQ(n_group, 2);
+  ASSERT_INT_EQ(n_range, 2);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, reduce_accumulator_uses_tinygrad_placeholder_topology) {
+  /* Pinned tinygrad/codegen/late/devectorizer.py:318,321,326 and
+   * uop/ops.py:85-88,1051-1060: a register placeholder has
+   * BUFFER(STACK(CONST<weakint>(1))) topology, and every accumulator INDEX
+   * coordinate is CONST<weakint>(0). */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(8));
+  PolyUOp *range =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INDEX, bound, poly_arg_range(0, POLY_AXIS_REDUCE));
+  PolyUOp *value = poly_uop1(ctx, POLY_OP_CAST, POLY_INT32, range, poly_arg_none());
+  PolyUOp *reduce_srcs[2] = {value, range};
+  PolyUOp *reduce =
+      poly_uop(ctx, POLY_OP_REDUCE, POLY_INT32, reduce_srcs, 2, poly_arg_ops(POLY_OP_MAX));
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, reduce, poly_arg_none());
+  PolyUOp *rewritten = poly_apply_pm_reduce(ctx, sink);
+  ASSERT_NOT_NULL(rewritten);
+
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(ctx, rewritten, &n_topo);
+  PolyUOp *acc = NULL;
+  int accumulator_indices = 0;
+  for (int i = 0; i < n_topo; i++) {
+    PolyUOp *u = topo[i];
+    if (u->op == POLY_OP_BUFFER && u->dtype.is_ptr && u->dtype.addrspace == POLY_ADDR_REG)
+      acc = u;
+  }
+  ASSERT_NOT_NULL(acc);
+  ASSERT_INT_EQ(acc->arg.kind, POLY_ARG_PARAM);
+  ASSERT_NOT_NULL(acc->arg.param);
+  ASSERT_INT_EQ(acc->arg.param->slot, 0);
+  ASSERT_INT_EQ(acc->arg.param->addrspace, POLY_ADDR_REG);
+  ASSERT_INT_EQ(acc->n_src, 1);
+  ASSERT_INT_EQ(acc->src[0]->op, POLY_OP_STACK);
+  ASSERT_TRUE(poly_dtype_eq(acc->src[0]->dtype, POLY_INDEX));
+  ASSERT_INT_EQ(acc->src[0]->n_src, 1);
+  ASSERT_INT_EQ(acc->src[0]->src[0]->op, POLY_OP_CONST);
+  ASSERT_TRUE(poly_dtype_eq(acc->src[0]->src[0]->dtype, POLY_INDEX));
+  ASSERT_INT_EQ(acc->src[0]->src[0]->arg.i, 1);
+
+  for (int i = 0; i < n_topo; i++) {
+    PolyUOp *u = topo[i];
+    if (u->op != POLY_OP_INDEX || u->n_src != 2 ||
+        !(u->src[0] == acc || (u->src[0]->op == POLY_OP_AFTER && u->src[0]->src[0] == acc)))
+      continue;
+    ASSERT_INT_EQ(u->src[1]->op, POLY_OP_CONST);
+    ASSERT_TRUE(poly_dtype_eq(u->src[1]->dtype, POLY_INDEX));
+    ASSERT_INT_EQ(u->src[1]->arg.i, 0);
+    accumulator_indices++;
+  }
+  ASSERT_INT_EQ(accumulator_indices, 3);
+
+  /* Pinned tinygrad codegen/__init__.py:36-44 then converts every pointer
+   * storage UOp to new-style base dtype + CONST<int>(size), while ParamArg
+   * remains the source of slot/address-space identity. */
+  PolyRewriteOpts opts = {.optimize = false, .devectorize = 1};
+  opts.caps = poly_c_renderer_caps();
+  PolyUOp *final = poly_full_rewrite_to_sink_ex(ctx, sink, opts);
+  ASSERT_NOT_NULL(final);
+  int n_final = 0;
+  PolyUOp **final_topo = poly_toposort(ctx, final, &n_final);
+  PolyUOp *final_acc = NULL;
+  for (int i = 0; i < n_final; i++) {
+    PolyUOp *u = final_topo[i];
+    if (u->op == POLY_OP_BUFFER && u->arg.kind == POLY_ARG_PARAM && u->arg.param &&
+        u->arg.param->addrspace == POLY_ADDR_REG)
+      final_acc = u;
+  }
+  ASSERT_NOT_NULL(final_acc);
+  ASSERT_FALSE(final_acc->dtype.is_ptr);
+  ASSERT_INT_EQ(final_acc->n_src, 1);
+  ASSERT_INT_EQ(final_acc->src[0]->op, POLY_OP_CONST);
+  ASSERT_TRUE(poly_dtype_eq(final_acc->src[0]->dtype, POLY_INT32));
+  ASSERT_INT_EQ(final_acc->src[0]->arg.i, 1);
+
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -2751,6 +2877,53 @@ TEST(codegen, add_gpudims_same_axis_ranges_share_special) {
   PASS();
 }
 
+TEST(codegen, add_gpudims_preserves_end_with_special_sources_like_tinygrad) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *c5 = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(5));
+  PolyUOp *c4 = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(4));
+  PolyUOp *global =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INDEX, c5, poly_arg_range(1, POLY_AXIS_GLOBAL));
+  PolyUOp *local =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INDEX, c4, poly_arg_range(3, POLY_AXIS_LOCAL));
+  PolyDType ptr = poly_dtype_ptr(POLY_FLOAT32, 20, POLY_ADDR_GLOBAL);
+  PolyUOp *out = poly_uop0(ctx, POLY_OP_PARAM, ptr, poly_arg_int(0));
+  PolyUOp *coord = poly_uop2(
+      ctx, POLY_OP_ADD, POLY_INDEX,
+      poly_uop2(ctx, POLY_OP_MUL, POLY_INDEX, global, c4, poly_arg_none()), local,
+      poly_arg_none()
+  );
+  PolyUOp *index = poly_uop2(ctx, POLY_OP_INDEX, ptr, out, coord, poly_arg_none());
+  PolyUOp *value = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, local, poly_arg_none());
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, index, value, poly_arg_none());
+  PolyUOp *end_srcs[3] = {store, global, local};
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_srcs, 3, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_str("gpudims_end"));
+  PolyRendererCaps caps = {
+      .has_local = true,
+      .global_max = {INT32_MAX, 65535, 65535},
+      .local_max = {1024, 1024, 64},
+  };
+
+  PolyUOp *rewritten = poly_add_gpudims_ex(ctx, sink, caps);
+  ASSERT_NOT_NULL(rewritten);
+  /* tinygrad/codegen/gpudims.py:58-105 uses s.substitute(subs), preserving
+   * the END and substituting both range occurrences in-place. */
+  ASSERT_INT_EQ(rewritten->op, POLY_OP_SINK);
+  ASSERT_INT_EQ(rewritten->n_src, 1);
+  ASSERT_INT_EQ(rewritten->src[0]->op, POLY_OP_END);
+  ASSERT_INT_EQ(rewritten->src[0]->n_src, 3);
+  ASSERT_INT_EQ(rewritten->src[0]->src[0]->op, POLY_OP_STORE);
+  ASSERT_INT_EQ(rewritten->src[0]->src[1]->op, POLY_OP_SPECIAL);
+  ASSERT_STR_EQ(rewritten->src[0]->src[1]->arg.str, "gidx0");
+  ASSERT_INT_EQ(rewritten->src[0]->src[2]->op, POLY_OP_SPECIAL);
+  ASSERT_STR_EQ(rewritten->src[0]->src[2]->arg.str, "lidx0");
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(codegen, add_gpudims_reverse_group_preserves_logical_axis_order) {
   /* Pinned gpudims.py:28-56 implements reverse=True by reconstructing the
    * reversed dimensions first, then reversing the result. For the HLB-shaped
@@ -2917,6 +3090,34 @@ TEST(codegen, add_gpudims_webgpu_splits_oversized_global_dim) {
   ASSERT_INT_EQ((int)special_bound_hi_named(topo, n_topo, "gidx0"), 36864);
   ASSERT_INT_EQ((int)special_bound_hi_named(topo, n_topo, "gidx1"), 2);
   ASSERT_INT_EQ(count_lin_ops(topo, n_topo, POLY_OP_RANGE), 0);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, pre_expander_upcast_range_uses_stack_like_tinygrad) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(4));
+  PolyUOp *range = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_INDEX, bound, poly_arg_range(3, POLY_AXIS_UPCAST)
+  );
+  PolyUOp *out = poly_graph_rewrite(ctx, range, poly_pm_pre_expander_pass());
+
+  /* tinygrad/codegen/late/expander.py:132-145 constructs
+   * UNROLL(STACK(CONST(0), ...)); VCONST is not in the pinned IR. */
+  ASSERT_NOT_NULL(out);
+  ASSERT_INT_EQ(out->op, POLY_OP_UNROLL);
+  ASSERT_INT_EQ(out->n_src, 1);
+  ASSERT_INT_EQ(out->src[0]->op, POLY_OP_STACK);
+  ASSERT_INT_EQ(out->src[0]->dtype.count, 4);
+  ASSERT_INT_EQ(out->src[0]->n_src, 4);
+  for (int i = 0; i < 4; i++) {
+    ASSERT_INT_EQ(out->src[0]->src[i]->op, POLY_OP_CONST);
+    ASSERT_INT_EQ(out->src[0]->src[i]->arg.kind, POLY_ARG_INT);
+    ASSERT_INT_EQ(out->src[0]->src[i]->arg.i, i);
+  }
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -3124,6 +3325,108 @@ TEST(codegen, gpu_output_gate_matches_pinned_gpudims_gater_and_linear_cleanup) {
   PASS();
 }
 
+TEST(codegen, gpu_output_gate_tracks_each_missing_local_range) {
+  /* Pinned tinygrad codegen/gpudims.py:92-99 gates the exact set difference
+   * `local_dims - idx.ranges`. An output index can contain one ordinary LOCAL
+   * range while omitting a GROUP_REDUCE range; only the omitted occurrence
+   * may appear in the validity predicate. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *c5 = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(5));
+  PolyUOp *c4 = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(4));
+  PolyUOp *c8 = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(8));
+  PolyUOp *global =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INDEX, c5, poly_arg_range(1, POLY_AXIS_GLOBAL));
+  PolyUOp *group = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_INDEX, c8, poly_arg_range(2, POLY_AXIS_GROUP_REDUCE)
+  );
+  PolyUOp *local =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INDEX, c4, poly_arg_range(3, POLY_AXIS_LOCAL));
+  PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, 20, POLY_ADDR_GLOBAL);
+  PolyUOp *out = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(0));
+  PolyUOp *coord = poly_uop2(
+      ctx, POLY_OP_ADD, POLY_INDEX,
+      poly_uop2(ctx, POLY_OP_MUL, POLY_INDEX, global, c4, poly_arg_none()), local,
+      poly_arg_none()
+  );
+  PolyUOp *target = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, out, coord, poly_arg_none());
+  PolyUOp *value = poly_uop2(
+      ctx, POLY_OP_ADD, POLY_FLOAT32,
+      poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, local, poly_arg_none()),
+      poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, group, poly_arg_none()), poly_arg_none()
+  );
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, target, value, poly_arg_none());
+  PolyUOp *end_srcs[4] = {store, global, group, local};
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_srcs, 4, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_str("missing_local"));
+  PolyRendererCaps caps = {
+      .has_local = true,
+      .global_max = {INT32_MAX, 65535, 65535},
+      .local_max = {1024, 1024, 64},
+  };
+
+  PolyUOp *rewritten = poly_add_gpudims_ex(ctx, sink, caps);
+  ASSERT_NOT_NULL(rewritten);
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(ctx, rewritten, &n_topo);
+  ASSERT_INT_EQ(count_lin_ops(topo, n_topo, POLY_OP_WHERE), 1);
+  ASSERT_INT_EQ(count_lin_ops(topo, n_topo, POLY_OP_CMPNE), 2);
+
+  PolyUOp *where = NULL;
+  for (int i = 0; i < n_topo; i++)
+    if (topo[i]->op == POLY_OP_WHERE) where = topo[i];
+  ASSERT_NOT_NULL(where);
+  int n_gate = 0;
+  PolyUOp **gate_topo = poly_toposort(ctx, where->src[0], &n_gate);
+  ASSERT_INT_EQ(count_special_named(gate_topo, n_gate, "lidx0"), 1);
+  ASSERT_INT_EQ(count_special_named(gate_topo, n_gate, "lidx1"), 0);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, gpu_output_gate_accepts_element_typed_index_like_tinygrad) {
+  /* Pinned tinygrad/codegen/gpudims.py:92 checks idx.src[0].addrspace, not
+   * idx.dtype. Normal scheduled stores use INDEX<element>(PARAM<pointer>, ...)
+   * and must still receive the missing-local Invalid gate. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(16));
+  PolyUOp *local = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_INDEX, bound, poly_arg_range(0, POLY_AXIS_GROUP_REDUCE)
+  );
+  PolyDType ptr_i32 = poly_dtype_ptr(POLY_INT32, 1, POLY_ADDR_GLOBAL);
+  PolyUOp *out = poly_uop0(ctx, POLY_OP_PARAM, ptr_i32, poly_arg_int(0));
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(0));
+  PolyUOp *idx = poly_uop2(ctx, POLY_OP_INDEX, POLY_INT32, out, zero, poly_arg_none());
+  ASSERT_FALSE(idx->dtype.is_ptr);
+  ASSERT_TRUE(idx->src[0]->dtype.is_ptr);
+  ASSERT_INT_EQ(idx->src[0]->dtype.addrspace, POLY_ADDR_GLOBAL);
+  PolyUOp *value = poly_uop1(ctx, POLY_OP_CAST, POLY_INT32, local, poly_arg_none());
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx, value, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
+  PolyRendererCaps caps = {
+      .has_local = true,
+      .global_max = {INT32_MAX, 65535, 65535},
+      .local_max = {1024, 1024, 64},
+  };
+
+  PolyUOp *rewritten = poly_add_gpudims_ex(ctx, sink, caps);
+  ASSERT_NOT_NULL(rewritten);
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(ctx, rewritten, &n_topo);
+  ASSERT_INT_EQ(count_lin_ops(topo, n_topo, POLY_OP_WHERE), 1);
+  ASSERT_INT_EQ(count_lin_ops(topo, n_topo, POLY_OP_CMPNE), 2);
+  PolyUOp *where = NULL;
+  for (int i = 0; i < n_topo; i++)
+    if (topo[i]->op == POLY_OP_WHERE) where = topo[i];
+  ASSERT_NOT_NULL(where);
+  ASSERT_INT_EQ(where->n_src, 3);
+  ASSERT_INT_EQ(where->src[2]->op, POLY_OP_CONST);
+  ASSERT_INT_EQ(where->src[2]->arg.kind, POLY_ARG_INVALID);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(codegen, linearize_webgpu_special_stays_int32_under_wide_index_use) {
   /* tinygrad pm_lower_index_dtype keeps SPECIAL itself int32 and casts widened
    * uses. Rebuilding SPECIAL as int64 creates duplicate WGSL declarations for
@@ -3188,6 +3491,64 @@ TEST(codegen, lower_index_dtype_preserves_rank10_index_sources) {
       ASSERT_TRUE(poly_dtype_eq(poly_dtype_scalar(topo[i]->src[j]->dtype), POLY_INT32));
   }
   ASSERT_TRUE(saw_rank10_index);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, local_vector_index_constants_lower_with_weak_expression) {
+  /* Pinned tinygrad codegen/late/devectorizer.py:255-268 constructs the
+   * scalar-index multiplier and lane offsets as weakint. ops.py:1656-1675
+   * then lowers the complete address expression before the pointer CAST is
+   * converted to SHRINK. Assert both stage topologies so a concrete child
+   * cannot leave a renderer-visible weak MUL/SHL behind. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyDType vec = poly_dtype_vec(POLY_FLOAT32, 4);
+  PolyDType ptr = poly_dtype_ptr(vec, 32, POLY_ADDR_LOCAL);
+  PolyUOp *shape = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(128));
+  PolyUOp *buf = poly_uop1(ctx, POLY_OP_BUFFER, ptr, shape, poly_arg_int(0));
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(8));
+  PolyUOp *special =
+      poly_uop1(ctx, POLY_OP_SPECIAL, POLY_INDEX, bound, poly_arg_str("lidx0"));
+  PolyUOp *index = poly_uop2(ctx, POLY_OP_INDEX, ptr, buf, special, poly_arg_none());
+  PolyUOp *values[4];
+  for (int i = 0; i < 4; i++)
+    values[i] =
+        poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float((double)i + 1.0));
+  PolyUOp *value = poly_uop(ctx, POLY_OP_VECTORIZE, vec, values, 4, poly_arg_none());
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, index, value, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
+
+  PolyRendererCaps caps = {.max_vec_width = 4};
+  PolyUOp *devec = poly_apply_devectorize_stage(ctx, sink, 1, caps);
+  ASSERT_NOT_NULL(devec);
+  int n_devec = 0;
+  PolyUOp **devec_topo = poly_toposort(ctx, devec, &n_devec);
+  PolyUOp *weak_mul = NULL;
+  for (int i = 0; i < n_devec; i++)
+    if (devec_topo[i]->op == POLY_OP_MUL && poly_dtype_is_index(devec_topo[i]->dtype))
+      weak_mul = devec_topo[i];
+  ASSERT_NOT_NULL(weak_mul);
+  ASSERT_INT_EQ(weak_mul->n_src, 2);
+  ASSERT_TRUE(poly_dtype_is_index(weak_mul->src[0]->dtype));
+  ASSERT_TRUE(poly_dtype_is_index(weak_mul->src[1]->dtype));
+
+  PolyUOp *lowered = poly_apply_post_index_symbolic_stage(ctx, devec, 1);
+  ASSERT_NOT_NULL(lowered);
+  int n_lowered = 0;
+  PolyUOp **lowered_topo = poly_toposort(ctx, lowered, &n_lowered);
+  PolyUOp *concrete_mul = NULL;
+  for (int i = 0; i < n_lowered; i++) {
+    PolyUOp *u = lowered_topo[i];
+    if (u->op == POLY_OP_MUL && poly_dtype_eq(u->dtype, POLY_INT32)) concrete_mul = u;
+    ASSERT_TRUE(!poly_dtype_is_index(u->dtype));
+  }
+  ASSERT_NOT_NULL(concrete_mul);
+  ASSERT_INT_EQ(concrete_mul->n_src, 2);
+  ASSERT_TRUE(poly_dtype_eq(concrete_mul->src[0]->dtype, POLY_INT32));
+  ASSERT_TRUE(poly_dtype_eq(concrete_mul->src[1]->dtype, POLY_INT32));
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -3980,6 +4341,7 @@ TEST(codegen, linearize_webgpu_reduce_emits_tinygrad_sized_shared_barrier) {
   ASSERT_NOT_NULL(sched);
 
   bool found = false;
+  bool cuda_found = false;
   for (int i = 0; i < sched->template->n_calls; i++) {
     int n_lin = 0;
     PolyUOp **lin = poly_linearize_webgpu(ctx, poly_schedule_call_body(sched, i), &n_lin);
@@ -3994,12 +4356,20 @@ TEST(codegen, linearize_webgpu_reduce_emits_tinygrad_sized_shared_barrier) {
     ASSERT_INT_EQ(dims[2], 1);
     if (strstr(wgsl, "var<workgroup>") && strstr(wgsl, "workgroupBarrier();")) found = true;
     free(wgsl);
+    /* Renderer-only parity: the same tinygrad-shaped LOCAL BUFFER must be
+     * accepted by CUDA without probing or opening a CUDA runtime. */
+    char *cuda = poly_render_cuda(lin, n_lin, "reduce_cuda", 256);
+    ASSERT_NOT_NULL(cuda);
+    if (strstr(cuda, "__shared__") && !strstr(cuda, "(null)")) cuda_found = true;
+    free(cuda);
     free(lin);
+
   }
-  ASSERT_TRUE(found);
 
   poly_schedule_free(sched);
   poly_ctx_destroy(ctx);
+  ASSERT_TRUE(found);
+  ASSERT_TRUE(cuda_found);
   PASS();
 }
 

@@ -1071,6 +1071,62 @@ static napi_value napi_poly_tensor_arange_float_by_id(napi_env env, napi_callbac
   );
 }
 
+static napi_value napi_poly_tensor_manual_seed(napi_env env, napi_callback_info info) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  int64_t seed = 0;
+  NAPI_CALL(env, napi_get_value_int64(env, argv[1], &seed));
+  poly_tensor_manual_seed(ctx, seed);
+  napi_value out;
+  NAPI_CALL(env, napi_get_undefined(env, &out));
+  return out;
+}
+
+static napi_value napi_poly_tensor_rand_by_id(napi_env env, napi_callback_info info) {
+  napi_value argv[6];
+  size_t argc = 6;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  int64_t dims[POLY_MAX_DIMS];
+  int32_t ndim = 0, dtype_id = 0, device = 0, contiguous = 1;
+  NAPI_CALL(env, napi_get_value_int32(env, argv[2], &ndim));
+  NAPI_CALL(env, napi_get_value_int32(env, argv[3], &dtype_id));
+  NAPI_CALL(env, napi_get_value_int32(env, argv[4], &device));
+  NAPI_CALL(env, napi_get_value_int32(env, argv[5], &contiguous));
+  if (read_int64_array(env, argv[1], dims, POLY_MAX_DIMS) != ndim) {
+    napi_throw_range_error(env, NULL, "polygrad: shape length does not match ndim");
+    return NULL;
+  }
+  return make_external(
+      env,
+      poly_tensor_rand_by_id(
+          ctx, dims, ndim, dtype_id, (PolyDevice)device, contiguous
+      )
+  );
+}
+
+static napi_value napi_poly_tensor_randn_by_id(napi_env env, napi_callback_info info) {
+  napi_value argv[5];
+  size_t argc = 5;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  int64_t dims[POLY_MAX_DIMS];
+  int32_t ndim = 0, dtype_id = 0, device = 0;
+  NAPI_CALL(env, napi_get_value_int32(env, argv[2], &ndim));
+  NAPI_CALL(env, napi_get_value_int32(env, argv[3], &dtype_id));
+  NAPI_CALL(env, napi_get_value_int32(env, argv[4], &device));
+  if (read_int64_array(env, argv[1], dims, POLY_MAX_DIMS) != ndim) {
+    napi_throw_range_error(env, NULL, "polygrad: shape length does not match ndim");
+    return NULL;
+  }
+  return make_external(
+      env,
+      poly_tensor_randn_by_id(ctx, dims, ndim, dtype_id, (PolyDevice)device)
+  );
+}
+
 static napi_value napi_poly_tensor_linspace_by_id(napi_env env, napi_callback_info info) {
   napi_value argv[6];
   size_t argc = 6;
@@ -5139,6 +5195,9 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_tensor_arange_float_by_id", napi_poly_tensor_arange_float_by_id),
       DECLARE_NAPI_METHOD("poly_tensor_linspace_by_id", napi_poly_tensor_linspace_by_id),
       DECLARE_NAPI_METHOD("poly_tensor_eye_by_id", napi_poly_tensor_eye_by_id),
+      DECLARE_NAPI_METHOD("poly_tensor_manual_seed", napi_poly_tensor_manual_seed),
+      DECLARE_NAPI_METHOD("poly_tensor_rand_by_id", napi_poly_tensor_rand_by_id),
+      DECLARE_NAPI_METHOD("poly_tensor_randn_by_id", napi_poly_tensor_randn_by_id),
       DECLARE_NAPI_METHOD("poly_buffer_get_ptr", napi_poly_buffer_get_ptr),
       DECLARE_NAPI_METHOD("poly_buffer_is_allocated", napi_poly_buffer_is_allocated),
       DECLARE_NAPI_METHOD("poly_buffer_get_key", napi_poly_buffer_get_key),

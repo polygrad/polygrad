@@ -86,6 +86,135 @@ static bool cuda_source_has_illegal_wide_f32_vector(const char *src) {
 
 /* Render tests */
 
+TEST_BACKEND(cuda, devectorizer_keeps_aligned_float4_store_like_tinygrad) {
+  /* tinygrad Renderer.supports_float4 defaults true and CUDARenderer keeps it;
+   * devectorizer.py:140-184 therefore folds this contiguous lane group into
+   * one vector STORE instead of GROUP(4 x STORE). */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyDType ptr = poly_dtype_ptr(POLY_FLOAT32, 128, POLY_ADDR_GLOBAL);
+  PolyDType ptr4 = ptr;
+  ptr4.vcount = 4;
+  PolyUOp *buf = poly_uop0(ctx, POLY_OP_PARAM, ptr, poly_arg_int(0));
+  PolyUOp *c32 = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(32));
+  PolyUOp *special =
+      poly_uop1(ctx, POLY_OP_SPECIAL, POLY_INDEX, c32, poly_arg_str("lidx0"));
+  PolyUOp *c4 = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(4));
+  PolyUOp *base =
+      poly_uop2(ctx, POLY_OP_MUL, POLY_INDEX, special, c4, poly_arg_none());
+  PolyUOp *buf_srcs[4] = {buf, buf, buf, buf};
+  PolyUOp *base_srcs[4] = {base, base, base, base};
+  PolyUOp *lane_srcs[4];
+  PolyUOp *value_srcs[4];
+  for (int i = 0; i < 4; i++) {
+    lane_srcs[i] = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(i));
+    value_srcs[i] =
+        poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float((double)i));
+  }
+  PolyUOp *bufs =
+      poly_uop(ctx, POLY_OP_STACK, ptr4, buf_srcs, 4, poly_arg_none());
+  PolyUOp *bases = poly_uop(
+      ctx, POLY_OP_STACK, poly_dtype_vec(POLY_INDEX, 4), base_srcs, 4, poly_arg_none()
+  );
+  PolyUOp *lanes = poly_uop(
+      ctx, POLY_OP_STACK, poly_dtype_vec(POLY_INDEX, 4), lane_srcs, 4, poly_arg_none()
+  );
+  PolyUOp *coord = poly_uop2(
+      ctx, POLY_OP_ADD, poly_dtype_vec(POLY_INDEX, 4), bases, lanes, poly_arg_none()
+  );
+  PolyUOp *target = poly_uop2(ctx, POLY_OP_INDEX, ptr4, bufs, coord, poly_arg_none());
+  PolyUOp *value = poly_uop(
+      ctx, POLY_OP_STACK, poly_dtype_vec(POLY_FLOAT32, 4), value_srcs, 4, poly_arg_none()
+  );
+  PolyUOp *store =
+      poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, target, value, poly_arg_none());
+  PolyUOp *sink =
+      poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_str("float4_store"));
+
+  PolyUOp *rewritten = poly_rewrite_cuda(ctx, sink);
+  ASSERT_NOT_NULL(rewritten);
+  int n = 0, n_store = 0, n_group = 0;
+  PolyUOp **topo = poly_toposort(ctx, rewritten, &n);
+  PolyUOp *final_store = NULL;
+  for (int i = 0; i < n; i++) {
+    if (topo[i]->op == POLY_OP_STORE) n_store++, final_store = topo[i];
+    if (topo[i]->op == POLY_OP_GROUP) n_group++;
+  }
+  ASSERT_INT_EQ(n_store, 1);
+  ASSERT_INT_EQ(n_group, 0);
+  ASSERT_NOT_NULL(final_store);
+
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize_rewritten(ctx, rewritten, &n_lin);
+  ASSERT_NOT_NULL(lin);
+  char *source = poly_render_cuda(lin, n_lin, "float4_store", 32);
+  free(lin);
+  ASSERT_NOT_NULL(source);
+  /* tinygrad cstyle.py:179-184 casts the indexed scalar PARAM address to the
+   * vector access dtype before dereference. */
+  ASSERT_TRUE(strstr(source, "*((float4*)") != NULL);
+  ASSERT_TRUE(strstr(source, " = make_float4(") != NULL);
+  free(source);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST_BACKEND(cuda, vector_local_shrink_load_store_use_typed_lvalue) {
+  /* Pinned CStyleLanguage.render_access is shared by LOAD/STORE and every
+   * address space (renderer/cstyle.py:47-58,179-184).  The final RMSNorm
+   * reduction uses SHRINK<float4>(BUFFER<float@LOCAL>, idx, 4), so both
+   * directions must dereference a float4 pointer rather than assign to the
+   * scalar shared-memory address expression. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyDType vec4 = poly_dtype_vec(POLY_FLOAT32, 4);
+  PolyUOp *size = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(128));
+  PolyParamArg local_arg = {.slot = 0, .addrspace = POLY_ADDR_LOCAL};
+  PolyParamArg global_arg = {.slot = 0, .addrspace = POLY_ADDR_GLOBAL};
+  PolyUOp *local =
+      poly_uop1(ctx, POLY_OP_BUFFER, POLY_FLOAT32, size, poly_arg_param(&local_arg));
+  PolyUOp *global =
+      poly_uop1(ctx, POLY_OP_PARAM, POLY_FLOAT32, size, poly_arg_param(&global_arg));
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(32));
+  PolyUOp *idx =
+      poly_uop1(ctx, POLY_OP_SPECIAL, POLY_INT32, bound, poly_arg_str("lidx0"));
+  PolyUOp *width = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(4));
+  PolyUOp *local_srcs[3] = {local, idx, width};
+  PolyUOp *local_vec =
+      poly_uop(ctx, POLY_OP_SHRINK, vec4, local_srcs, 3, poly_arg_none());
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
+  PolyUOp *global_srcs[3] = {global, zero, width};
+  PolyUOp *global_vec =
+      poly_uop(ctx, POLY_OP_SHRINK, vec4, global_srcs, 3, poly_arg_none());
+  PolyUOp *values[4];
+  for (int i = 0; i < 4; i++)
+    values[i] =
+        poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float((double)i + 1.0));
+  PolyUOp *value = poly_uop(ctx, POLY_OP_STACK, vec4, values, 4, poly_arg_none());
+  PolyUOp *local_store =
+      poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, local_vec, value, poly_arg_none());
+  PolyUOp *local_load =
+      poly_uop1(ctx, POLY_OP_LOAD, vec4, local_vec, poly_arg_none());
+  PolyUOp *global_store =
+      poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, global_vec, local_load, poly_arg_none());
+  PolyUOp *sink_srcs[2] = {local_store, global_store};
+  PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, sink_srcs, 2, poly_arg_none());
+
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize_rewritten(ctx, sink, &n_lin);
+  ASSERT_NOT_NULL(lin);
+  char *source = poly_render_cuda(lin, n_lin, "local_float4_access", 32);
+  free(lin);
+  ASSERT_NOT_NULL(source);
+  const char *first = strstr(source, "*((float4*)((smem0+");
+  ASSERT_NOT_NULL(first);
+  ASSERT_NOT_NULL(strstr(first + 1, "*((float4*)((smem0+"));
+  free(source);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST_BACKEND(cuda, render_vecadd) {
   /* Test CUDA source generation — no GPU needed */
   PolyCtx *ctx = poly_ctx_new();
@@ -313,7 +442,16 @@ TEST_BACKEND(cuda, linearize_reduce_merge_shared_end) {
   PolyUOp **lin = poly_linearize_cuda(ctx, sink, &n);
   ASSERT_NOT_NULL(lin);
   ASSERT_TRUE(n > 0);
-  ASSERT_TRUE(count_lin_ops(lin, n, POLY_OP_DEFINE_LOCAL) >= 2);
+  int local_buffers = 0;
+  for (int i = 0; i < n; i++)
+    if (lin[i]->op == POLY_OP_BUFFER && lin[i]->arg.kind == POLY_ARG_PARAM &&
+        lin[i]->arg.param && lin[i]->arg.param->addrspace == POLY_ADDR_LOCAL)
+      local_buffers++;
+  /* Pinned pm_add_buffers_local + pm_remove_vec_dtypes emits one canonical
+   * BUFFER(..., ParamArg(addrspace=LOCAL)) per shared reduction and no legacy
+   * DEFINE_LOCAL (rangeify.py:409-445; codegen/__init__.py:36-44). */
+  ASSERT_INT_EQ(local_buffers, 2);
+  ASSERT_INT_EQ(count_lin_ops(lin, n, POLY_OP_DEFINE_LOCAL), 0);
   ASSERT_TRUE(count_lin_ops(lin, n, POLY_OP_BARRIER) >= 2);
   ASSERT_TRUE(count_lin_ops(lin, n, POLY_OP_END) >= 1);
 

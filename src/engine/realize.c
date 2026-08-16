@@ -369,10 +369,17 @@ static PolyUOp *poly_transform_to_call_empty_buffer_like(
   PolyUOp *src[2] = {unique, device};
   PolyUOp *buffer =
       poly_uop(ctx, POLY_OP_BUFFER, poly_dtype_scalar(dtype), src, 2, poly_arg_int(numel));
-  if (!buffer || multi_axis < 0) return buffer;
-  PolyUOp *local = poly_reshape(ctx, buffer, buffer_shape, shape.ndim);
-  return local ?
-      poly_uop1(ctx, POLY_OP_MULTI, dtype, local, poly_arg_int(multi_axis)) : NULL;
+  if (!buffer) return NULL;
+  /* Pinned UOp.empty is BUFFER(prod(max_shape)).reshape(max_shape) before
+   * symbolic shrink_to (uop/ops.py:742-750), while MovementMixin.reshape
+   * returns self for an unchanged shape (mixin/movement.py:145-165).  Preserve
+   * the natural flat BUFFER for rank-1 and shape only scalar/rank>1 outputs. */
+  PolyShape natural_shape = poly_uop_max_shape_cached(ctx, buffer);
+  PolyUOp *local = poly_shape_eq(natural_shape, allocation_shape)
+                       ? buffer
+                       : poly_reshape(ctx, buffer, buffer_shape, shape.ndim);
+  if (!local || multi_axis < 0) return local;
+  return poly_uop1(ctx, POLY_OP_MULTI, dtype, local, poly_arg_int(multi_axis));
 }
 
 static bool poly_transform_to_call_append_store(PolyTransformToCallCtx *tctx, PolyUOp *store) {
@@ -1968,6 +1975,41 @@ static PolyUOp *poly_transform_to_call_materialize_contiguous(
   return after;
 }
 
+static PolyUOp *poly_transform_to_call_contiguous_mops_to_view(
+    PolyCtx *ctx, PolyUOp *contiguous
+) {
+  if (!ctx || !contiguous || contiguous->op != POLY_OP_CONTIGUOUS ||
+      contiguous->n_src != 1 ||
+      !poly_opset_has(POLY_GROUP_MOVEMENT, contiguous->src[0]->op))
+    return NULL;
+
+  PolyShape shape = poly_uop_max_shape_cached(ctx, contiguous);
+  PolyUOp *base = NULL;
+  PolyShape view_shape = {.ndim = -1};
+  int64_t view_numel = -1;
+  size_t byte_offset = 0;
+  /* Pinned contiguous_mops_to_view accepts only static movement graphs whose
+   * flattened index is one contiguous range (callify.py:59-89).  Polygrad's
+   * existing proof returns that same base/range for realized storage. */
+  if (shape.ndim < 0 ||
+      !poly_transform_to_call_is_static_max_shape(ctx, contiguous, shape) ||
+      !poly_uop_contiguous_view_info(
+          ctx, contiguous->src[0], &base, &view_shape, &view_numel,
+          &byte_offset
+      ))
+    return NULL;
+
+  PolyUOp *view = poly_buffer_view(
+      ctx, base, contiguous->src[0]->dtype, view_numel, byte_offset
+  );
+  PolyUOp *shaped = view
+                        ? poly_transform_to_call_rebuild_view(
+                              ctx, view, contiguous->src[0], NULL
+                          )
+                        : NULL;
+  return shaped && poly_uop_has_buffer_identity(shaped) ? shaped : NULL;
+}
+
 /* tinygrad callify tags every CONTIGUOUS, not only the requested outer root.
  * Materialize nested boundaries into the same batched STORE sink and retain a
  * becomes-map entry so already-built live consumers read the realized value.
@@ -2044,6 +2086,17 @@ static PolyUOp *poly_transform_to_call_rewrite_nested_contiguous(
     PolyUOp *selected = ret->src[0]->src[ret->arg.i];
     poly_map_set(memo, poly_ptr_hash(u), u, selected, poly_ptr_eq);
     return selected;
+  }
+
+  /* Pinned pm_early_transform_tensor_graph runs contiguous_mops_to_view
+   * before replace_contig_with_store_after (callify.py:152-164).  Returning
+   * the storage view here removes the CONTIGUOUS through ordinary buffer
+   * identity instead of allocating an intermediate materialization. */
+  PolyUOp *movement_view =
+      poly_transform_to_call_contiguous_mops_to_view(ctx, ret);
+  if (movement_view) {
+    poly_map_set(memo, poly_ptr_hash(u), u, movement_view, poly_ptr_eq);
+    return movement_view;
   }
 
   /* Pinned callify turns a contiguous movement view into a SLICE effect before

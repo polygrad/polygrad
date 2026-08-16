@@ -1286,20 +1286,37 @@ def case_uint_sub():
     return {"physical": out.uop, "logical": logical(out)}
 
 
-def case_rng_single_counter():
-    key = Tensor([1, 2], dtype="uint32", device="CPU")
-    count = Tensor.arange(1, dtype="uint32")
-    out = Tensor._threefry_random_bits(key, count, count)
+def case_rng_single_draw():
+    Tensor.manual_seed(123)
+    out = Tensor.rand(4, device="CPU")
     return {"physical": out.uop, "logical": logical(out)}
 
 
 def case_rng_two_draw():
     Tensor.manual_seed(123)
-    draws = []
-    for _ in range(2):
-        key, counter = Tensor._next_counter("CPU", 4)
-        draws.append(Tensor._rand(key, counter, (4,), dtypes.float32))
+    draws = [Tensor.rand(4, device="CPU") for _ in range(2)]
     out = draws[0] + draws[1]
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_bitcast_widen_u8_u32():
+    out = Tensor.full((8,), 1, dtype="uint8").bitcast("uint32")
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_bitcast_narrow_u32_u8():
+    out = Tensor.full((2,), 1, dtype="uint32").bitcast("uint8")
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_dropout_stateful_rng():
+    x = realized_input(2, 2)
+    Tensor.manual_seed(11)
+    Tensor.training = True
+    try:
+        out = x.dropout(0.25)
+    finally:
+        Tensor.training = False
     return {"physical": out.uop, "logical": logical(out)}
 
 
@@ -1660,8 +1677,11 @@ CASES = {
     "round_int32": ("tensor", case_round_int32),
     "round_occurrence": ("tensor", case_round_occurrence),
     "roundtrip_occurrence": ("tensor", case_roundtrip_occurrence),
-    "rng_single_counter": ("tensor", case_rng_single_counter),
+    "rng_single_draw": ("tensor", case_rng_single_draw),
     "rng_two_draw": ("tensor", case_rng_two_draw),
+    "bitcast_widen_u8_u32": ("tensor", case_bitcast_widen_u8_u32),
+    "bitcast_narrow_u32_u8": ("tensor", case_bitcast_narrow_u32_u8),
+    "dropout_stateful_rng": ("tensor", case_dropout_stateful_rng),
     "relu_float32": ("tensor", case_relu_float32),
     "mlp_dense_cross_entropy": ("tensor", case_mlp_dense_cross_entropy),
     "mlp_linear_relu": ("tensor", case_mlp_linear_relu),

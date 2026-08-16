@@ -1287,7 +1287,7 @@ TEST(nn, c2c_rand_bitpattern_8) {
   int64_t shape[1] = {8};
   PolyUOp *r = poly_rand(ctx, shape, 1, 1337u);
   ASSERT_NOT_NULL(r);
-  int n_topo = 0, threefry_u32 = 0, threefry_u64 = 0;
+  int n_topo = 0, threefry_u32 = 0, threefry_u64 = 0, contiguous = 0;
   PolyUOp **topo = poly_toposort_alloc(ctx, r, &n_topo);
   ASSERT_NOT_NULL(topo);
   for (int i = 0; i < n_topo; i++) {
@@ -1295,8 +1295,13 @@ TEST(nn, c2c_rand_bitpattern_8) {
     if (poly_dtype_eq(topo[i]->dtype, POLY_UINT32)) threefry_u32++;
     if (poly_dtype_eq(topo[i]->dtype, POLY_UINT64)) threefry_u64++;
   }
+  for (int i = 0; i < n_topo; i++)
+    if (topo[i]->op == POLY_OP_CONTIGUOUS) contiguous++;
   ASSERT_INT_EQ(threefry_u32, 0);
   ASSERT_INT_EQ(threefry_u64, 1);
+  /* Pinned Tensor.rand's seed/counter inputs have storage identity.  The raw
+   * stateless helper records the same boundary explicitly for its literal key. */
+  ASSERT_INT_EQ(contiguous, 1);
   poly_toposort_free(topo);
   PolyUOp *out = poly_buffer_f32(ctx, 8);
   PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, r));
@@ -1326,6 +1331,47 @@ TEST(nn, c2c_rand_bitpattern_8) {
     FAIL("poly_rand bitpattern mismatch (memcmp)");
   }
   poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(nn, c2c_rand_optimized_small_bitpattern) {
+  /* A four-lane upcast makes the pure counter constant.  The materialized key
+   * must keep THREEFRY dynamic, matching pinned Tensor.rand's storage-backed
+   * seed/counter boundary instead of folding a huge mathematical CONST. */
+  const uint32_t thr_ref[4] = {1797259609u, 1351547692u, 1688610540u, 3098264785u};
+  float expected[4];
+  for (int i = 0; i < 4; i++)
+    expected[i] = (float)(thr_ref[i] >> 8) * (1.0f / 16777216.0f);
+
+  char save_opt[32] = "", save_dev[32] = "";
+  const char *e;
+  if ((e = getenv("POLY_OPTIMIZE"))) strncpy(save_opt, e, sizeof(save_opt) - 1);
+  if ((e = getenv("POLY_DEVECTORIZE"))) strncpy(save_dev, e, sizeof(save_dev) - 1);
+  setenv("POLY_OPTIMIZE", "1", 1);
+  setenv("POLY_DEVECTORIZE", "1", 1);
+
+  PolyCtx *ctx = poly_ctx_new();
+  int64_t shape[1] = {4};
+  PolyUOp *r = poly_rand(ctx, shape, 1, 0u);
+  ASSERT_NOT_NULL(r);
+  PolyUOp *out = poly_buffer_f32(ctx, 4);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, r));
+  float result[4] = {0};
+  PolyTestBufferView bind = POLY_TEST_HOST_VIEW(out, result);
+  int run_rc = poly_test_realize_buffer_views(ctx, sink, &bind, 1);
+  bool exact = memcmp(result, expected, sizeof(expected)) == 0;
+  bool in_range = true;
+  for (int i = 0; i < 4; i++)
+    if (!(result[i] >= 0.0f && result[i] < 1.0f)) in_range = false;
+  poly_ctx_destroy(ctx);
+
+  if (save_opt[0]) setenv("POLY_OPTIMIZE", save_opt, 1);
+  else unsetenv("POLY_OPTIMIZE");
+  if (save_dev[0]) setenv("POLY_DEVECTORIZE", save_dev, 1);
+  else unsetenv("POLY_DEVECTORIZE");
+  ASSERT_INT_EQ(run_rc, 0);
+  ASSERT_TRUE(exact);
+  ASSERT_TRUE(in_range);
   PASS();
 }
 

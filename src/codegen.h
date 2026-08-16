@@ -174,6 +174,59 @@ static inline bool poly_is_program_memory_base(const PolyUOp *u) {
          u->op == POLY_OP_DEFINE_LOCAL || u->op == POLY_OP_DEFINE_REG || u->op == POLY_OP_AFTER;
 }
 
+/* Pinned tinygrad UOp.addrspace/max_numel and ParamArg.slot program-IR
+ * accessors (uop/ops.py:384,786-799; renderer/cstyle.py:154-178). The final
+ * pm_remove_vec_dtypes representation stores address space and slot in
+ * ParamArg and the storage extent in src[0], after pointer dtype metadata has
+ * been removed. Legacy DEFINE_* and pointer forms remain readable until their
+ * independent vocabulary migrations close. */
+static inline PolyAddrSpace poly_program_memory_addrspace(const PolyUOp *u) {
+  while (u) {
+    if (u->op == POLY_OP_DEFINE_LOCAL) return POLY_ADDR_LOCAL;
+    if (u->op == POLY_OP_DEFINE_REG) return POLY_ADDR_REG;
+    if (u->op == POLY_OP_PARAM || u->op == POLY_OP_BUFFER) {
+      if (u->arg.kind == POLY_ARG_PARAM && u->arg.param) return u->arg.param->addrspace;
+      return u->dtype.is_ptr ? u->dtype.addrspace : POLY_ADDR_GLOBAL;
+    }
+    if ((u->op == POLY_OP_INDEX || u->op == POLY_OP_SHRINK || u->op == POLY_OP_AFTER ||
+         u->op == POLY_OP_CAST || u->op == POLY_OP_BITCAST || u->op == POLY_OP_GEP ||
+         u->op == POLY_OP_STORE) &&
+        u->n_src > 0) {
+      u = u->src[0];
+      continue;
+    }
+    return POLY_ADDR_GLOBAL;
+  }
+  return POLY_ADDR_GLOBAL;
+}
+
+static inline bool poly_program_memory_is(const PolyUOp *u, PolyAddrSpace addrspace) {
+  return u && poly_program_memory_addrspace(u) == addrspace;
+}
+
+static inline int64_t poly_program_buffer_slot(const PolyUOp *u) {
+  if (!u) return -1;
+  if (u->arg.kind == POLY_ARG_PARAM && u->arg.param) return u->arg.param->slot;
+  return u->arg.kind == POLY_ARG_INT ? u->arg.i : -1;
+}
+
+static inline int64_t poly_program_buffer_size(const PolyUOp *u) {
+  if (!u) return 1;
+  if (u->n_src == 1 && u->src[0] && u->src[0]->op == POLY_OP_CONST &&
+      u->src[0]->arg.kind == POLY_ARG_INT && u->src[0]->arg.i > 0)
+    return u->src[0]->arg.i;
+  return u->dtype.is_ptr && u->dtype.ptr_size > 0 ? u->dtype.ptr_size : 1;
+}
+
+static inline PolyDType poly_program_buffer_dtype(const PolyUOp *u) {
+  PolyDType dtype = u ? u->dtype : POLY_VOID;
+  dtype.is_ptr = false;
+  dtype.addrspace = POLY_ADDR_GLOBAL;
+  dtype.vcount = 0;
+  dtype.ptr_size = 0;
+  return dtype;
+}
+
 /* Codegen pipeline: full rewrite to sink (sym → reduce → decomp → transcendental) */
 PolyUOp *poly_full_rewrite_to_sink(PolyCtx *ctx, PolyUOp *sink);
 PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOpts opts);

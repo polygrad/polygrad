@@ -261,7 +261,6 @@ function createBoundTensorClass(runtime) {
   const DTYPE_NAME_BY_ID = new Map(
     Object.entries(DTYPE_ID).map(([name, id]) => [Number(id), name])
   )
-  let _seed = 0
   const ffi = _runtime._core.ffi
   const ops = _runtime._core.ops || {}
   const POLY_TENSOR_VALUE = 0
@@ -1395,9 +1394,10 @@ function createBoundTensorClass(runtime) {
       if (id === undefined) throw new Error(`unsupported bitcast target dtype: ${dtype}`)
       const sourceType = TA_BY_DTYPE[this._dtype]
       const targetType = TA_BY_DTYPE[dtype]
-      if (!sourceType || !targetType || sourceType.BYTES_PER_ELEMENT !== targetType.BYTES_PER_ELEMENT) {
-        throw new Error('unsupported size in bitcast')
-      }
+      /* Pinned UOp.bitcast and Tensor._bits_to_rand allow equal-total-byte
+       * scalar-width changes and update shape accordingly (uop/ops.py:922-929,
+       * mixin/rand.py:31-39). The C Tensor core owns that shape transform. */
+      if (!sourceType || !targetType) throw new Error('unsupported dtype in bitcast')
       const core = this._rt._core.ffi.poly_tensor_bitcast_by_id(
         this._ctx, this._tensor, id
       )
@@ -2883,8 +2883,9 @@ function createBoundTensorClass(runtime) {
       })
     }
 
-    static manual_seed(seed) {
-      _seed = seed >>> 0
+    static manual_seed(seed = 0) {
+      // Pinned tinygrad tensor.py:475-504 resets all per-device RNG versions.
+      ffi.poly_tensor_manual_seed(_runtime._core.ctx, Math.trunc(Number(seed)))
     }
 
     static rand(...args) {
@@ -2894,13 +2895,23 @@ function createBoundTensorClass(runtime) {
         opts = args[args.length - 1]; shape = args.slice(0, -1)
       }
       if (shape.length === 1 && Array.isArray(shape[0])) shape = shape[0]
-      const { ffi, ctx } = _runtime._core
-      const seed = _seed++
-      const uop = ffi.poly_rand(ctx, shape, shape.length, seed)
-      if (!uop) throw new Error('poly_rand failed')
+      opts = opts ? { ...opts } : {}
+      shape = shape.map(Number)
+      if (shape.some(dim => !Number.isInteger(dim) || dim < 0)) {
+        throw new Error(`invalid input shape=${JSON.stringify(shape)}`)
+      }
+      const dtype = opts.dtype || 'float32'
+      if (!isFloatDtype(dtype)) throw new Error(`rand only supports float dtypes, got ${dtype}`)
+      const device = normalizeDevice(opts.device || _runtime.device || 'cpu')
+      const dtypeId = DTYPE_ID[dtype]
+      const tensor = ffi.poly_tensor_rand_by_id(
+        _runtime._core.ctx, shape, shape.length, dtypeId, deviceId(device),
+        opts.contiguous === false ? 0 : 1
+      )
+      if (!tensor) throw new Error('poly_tensor_rand_by_id failed')
       return new Tensor(null, {
-        _ctx: ctx, _uop: uop,
-        _dtype: (opts && opts.dtype) || 'float32'
+        _ctx: _runtime._core.ctx, _tensor: tensor, _dtype: dtype, _device: device,
+        requiresGrad: Boolean(opts.requiresGrad || opts.requires_grad)
       })
     }
 
@@ -2927,13 +2938,21 @@ function createBoundTensorClass(runtime) {
         opts = args[args.length - 1]; shape = args.slice(0, -1)
       }
       if (shape.length === 1 && Array.isArray(shape[0])) shape = shape[0]
-      const { ffi, ctx } = _runtime._core
-      const seed = _seed++
-      const uop = ffi.poly_randn(ctx, shape, shape.length, seed)
-      if (!uop) throw new Error('poly_randn failed')
+      opts = opts ? { ...opts } : {}
+      const dtype = opts.dtype || 'float32'
+      const device = normalizeDevice(opts.device || _runtime.device || 'cpu')
+      shape = shape.map(Number)
+      if (shape.some(dim => !Number.isInteger(dim) || dim < 0)) {
+        throw new Error(`invalid input shape=${JSON.stringify(shape)}`)
+      }
+      if (!isFloatDtype(dtype)) throw new Error(`randn only supports float dtypes, got ${dtype}`)
+      const tensor = ffi.poly_tensor_randn_by_id(
+        _runtime._core.ctx, shape, shape.length, DTYPE_ID[dtype], deviceId(device)
+      )
+      if (!tensor) throw new Error('poly_tensor_randn_by_id failed')
       return new Tensor(null, {
-        _ctx: ctx, _uop: uop,
-        _dtype: (opts && opts.dtype) || 'float32'
+        _ctx: _runtime._core.ctx, _tensor: tensor, _dtype: dtype, _device: device,
+        requiresGrad: Boolean(opts.requiresGrad || opts.requires_grad)
       })
     }
 

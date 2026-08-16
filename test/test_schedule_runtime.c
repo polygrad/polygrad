@@ -284,6 +284,23 @@ static int count_root_ranges_of_type(PolyCtx *ctx, PolyUOp *root, PolyAxisType a
   return count;
 }
 
+static int count_root_ranges_of_type_bound(
+    PolyCtx *ctx, PolyUOp *root, PolyAxisType axis_type, int64_t expected_bound
+) {
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(ctx, root, &n_topo);
+  int count = 0;
+  for (int i = 0; i < n_topo; i++) {
+    PolyUOp *u = topo[i];
+    if (!u || u->op != POLY_OP_RANGE || !poly_arg_is_range(u->arg) || u->n_src != 1 ||
+        !u->src[0] || u->src[0]->op != POLY_OP_CONST ||
+        u->src[0]->arg.kind != POLY_ARG_INT)
+      continue;
+    if (poly_range_axis_type(u->arg) == axis_type && u->src[0]->arg.i == expected_bound) count++;
+  }
+  return count;
+}
+
 static PolyUOp *test_call_buffer_arg(PolyUOp *call, int arg_idx) {
   int seen = 0;
   for (int i = 1; call && i < call->n_src; i++) {
@@ -411,6 +428,87 @@ TEST(schedule_runtime, programinfo_uses_filtered_call_buffer_arg_indices) {
   ASSERT_INT_EQ(info->n_ins, 2);
   ASSERT_INT_EQ(info->ins[0], 0);
   ASSERT_INT_EQ(info->ins[1], 2);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(schedule_runtime, programinfo_unwraps_vector_cast_index_like_tinygrad) {
+  /* Pinned ProgramInfo.from_sink explicitly recognizes CAST(INDEX(...)) for
+   * vector memory access (tinygrad/uop/ops.py:1136-1140). */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *out = poly_buffer_f32(ctx, 4);
+  PolyUOp *in = poly_buffer_f32(ctx, 4);
+  PolyDType ptr = poly_dtype_ptr(POLY_FLOAT32, 4, POLY_ADDR_GLOBAL);
+  PolyDType ptr4 = ptr;
+  ptr4.vcount = 4;
+  PolyUOp *p0 = poly_uop0(ctx, POLY_OP_PARAM, ptr, poly_arg_int(0));
+  PolyUOp *p1 = poly_uop0(ctx, POLY_OP_PARAM, ptr, poly_arg_int(1));
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
+  PolyUOp *out_index = poly_uop2(ctx, POLY_OP_INDEX, ptr, p0, zero, poly_arg_none());
+  PolyUOp *vector_out =
+      poly_uop1(ctx, POLY_OP_CAST, ptr4, out_index, poly_arg_none());
+  PolyUOp *in_index = poly_uop2(ctx, POLY_OP_INDEX, ptr, p1, zero, poly_arg_none());
+  PolyUOp *value = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, in_index, poly_arg_none());
+  PolyUOp *store =
+      poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, vector_out, value, poly_arg_none());
+  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *src[] = {sink, out, in};
+  PolyUOp *call = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, src, 3, poly_arg_none());
+  PolyUOp *program = poly_program_from_call(ctx, call, "vector_cast_index");
+  ASSERT_NOT_NULL(program);
+
+  const PolyProgramInfo *info = poly_program_info(ctx, program);
+  ASSERT_NOT_NULL(info);
+  ASSERT_INT_EQ(info->n_globals, 2);
+  ASSERT_INT_EQ(info->globals[0], 0);
+  ASSERT_INT_EQ(info->globals[1], 1);
+  ASSERT_INT_EQ(info->n_outs, 1);
+  ASSERT_INT_EQ(info->outs[0], 0);
+  ASSERT_INT_EQ(info->n_ins, 1);
+  ASSERT_INT_EQ(info->ins[0], 1);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(schedule_runtime, programinfo_tracks_shrink_access_like_tinygrad) {
+  /* Pinned ProgramInfo.from_sink recognizes SHRINK as a memory address
+   * (`tinygrad/uop/ops.py:1136-1140`). Vector index lowering uses this exact
+   * form, so both globals and output classification must reach PARAM0. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *out = poly_buffer_f32(ctx, 4);
+  PolyUOp *in = poly_buffer_f32(ctx, 4);
+  PolyDType ptr = poly_dtype_ptr(POLY_FLOAT32, 4, POLY_ADDR_GLOBAL);
+  PolyUOp *p0 = poly_uop0(ctx, POLY_OP_PARAM, ptr, poly_arg_int(0));
+  PolyUOp *p1 = poly_uop0(ctx, POLY_OP_PARAM, ptr, poly_arg_int(1));
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
+  PolyUOp *four = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(4));
+  PolyUOp *out_slice =
+      poly_uop3(ctx, POLY_OP_SHRINK, ptr, p0, zero, four, poly_arg_none());
+  PolyUOp *in_index = poly_uop2(ctx, POLY_OP_INDEX, ptr, p1, zero, poly_arg_none());
+  PolyUOp *value = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, in_index, poly_arg_none());
+  PolyUOp *store =
+      poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out_slice, value, poly_arg_none());
+  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *src[] = {sink, out, in};
+  PolyUOp *call = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, src, 3, poly_arg_none());
+  PolyUOp *program = poly_program_from_call(ctx, call, "shrink_access");
+  ASSERT_NOT_NULL(program);
+
+  const PolyProgramInfo *info = poly_program_info(ctx, program);
+  ASSERT_NOT_NULL(info);
+  ASSERT_INT_EQ(info->n_globals, 2);
+  ASSERT_INT_EQ(info->globals[0], 0);
+  ASSERT_INT_EQ(info->globals[1], 1);
+  ASSERT_INT_EQ(info->n_outs, 1);
+  ASSERT_INT_EQ(info->outs[0], 0);
+  ASSERT_INT_EQ(info->n_ins, 1);
+  ASSERT_INT_EQ(info->ins[0], 1);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -3270,6 +3368,88 @@ TEST(schedule_runtime, webgpu_triu_heuristic_adds_local_split_like_tinygrad) {
   ASSERT_INT_EQ(count_root_ranges_of_type(ctx, heur, POLY_AXIS_UPCAST), 0);
 
   poly_schedule_free(sched);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+static PolyUOp *build_matvec_heuristic_reduction(PolyCtx *ctx) {
+  PolyUOp *out = poly_uop0(ctx, POLY_OP_PARAM, POLY_FLOAT32, poly_arg_int(0));
+  PolyUOp *in = poly_uop0(ctx, POLY_OP_PARAM, POLY_FLOAT32, poly_arg_int(1));
+  PolyUOp *bound16 = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(16));
+  PolyUOp *bound5 = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(5));
+  PolyUOp *bound128 = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(128));
+  PolyUOp *r0 =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INDEX, bound16, poly_arg_range(1, POLY_AXIS_GLOBAL));
+  PolyUOp *r1 =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INDEX, bound5, poly_arg_range(2, POLY_AXIS_GLOBAL));
+  PolyUOp *rr = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_INDEX, bound128, poly_arg_range(0, POLY_AXIS_REDUCE)
+  );
+
+  PolyUOp *five = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(5));
+  PolyUOp *out_coord = poly_uop2(
+      ctx, POLY_OP_ADD, POLY_INDEX,
+      poly_uop2(ctx, POLY_OP_MUL, POLY_INDEX, r0, five, poly_arg_none()), r1,
+      poly_arg_none()
+  );
+  PolyUOp *idx_out = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, out, out_coord, poly_arg_none());
+
+  PolyUOp *c128 = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(128));
+  PolyUOp *c640 = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(640));
+  PolyUOp *in_coord = poly_uop2(
+      ctx, POLY_OP_ADD, POLY_INDEX,
+      poly_uop2(
+          ctx, POLY_OP_ADD, POLY_INDEX,
+          poly_uop2(ctx, POLY_OP_MUL, POLY_INDEX, r1, c128, poly_arg_none()), rr,
+          poly_arg_none()
+      ),
+      poly_uop2(ctx, POLY_OP_MUL, POLY_INDEX, r0, c640, poly_arg_none()),
+      poly_arg_none()
+  );
+  PolyUOp *idx_in = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, in, in_coord, poly_arg_none());
+  PolyUOp *square =
+      poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT32, idx_in, idx_in, poly_arg_none());
+  PolyUOp *red_srcs[2] = {square, rr};
+  PolyUOp *red = poly_uop(
+      ctx, POLY_OP_REDUCE, POLY_FLOAT32, red_srcs, 2,
+      (PolyArg){.kind = POLY_ARG_OPS, .ops = POLY_OP_ADD}
+  );
+  PolyUOp *scale = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0 / 128.0));
+  PolyUOp *eps = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1e-6));
+  PolyUOp *mean = poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT32, red, scale, poly_arg_none());
+  PolyUOp *sqrt = poly_uop1(
+      ctx, POLY_OP_SQRT, POLY_FLOAT32,
+      poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, mean, eps, poly_arg_none()), poly_arg_none()
+  );
+  PolyUOp *reciprocal =
+      poly_uop1(ctx, POLY_OP_RECIPROCAL, POLY_FLOAT32, sqrt, poly_arg_none());
+  PolyUOp *store_srcs[2] = {idx_out, reciprocal};
+  PolyUOp *store = poly_uop(ctx, POLY_OP_STORE, POLY_VOID, store_srcs, 2, poly_arg_none());
+  PolyUOp *end_srcs[3] = {store, r0, r1};
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_srcs, 3, poly_arg_none());
+  return poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
+}
+
+TEST(schedule_runtime, matvec_reduction_heuristic_matches_tinygrad_topology) {
+  /* Pinned tinygrad codegen/opt/heuristic.py:60-80 recognizes the shared
+   * INDEX*INDEX reduction and applies GROUP(8), LOCAL(4), UPCAST(4), in that
+   * order, before the generic GROUPTOP rule. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *root = build_matvec_heuristic_reduction(ctx);
+  ASSERT_NOT_NULL(root);
+
+  PolyRendererCaps caps = {.has_local = true};
+  PolyUOp *heur = poly_apply_opts_heuristic_ex(ctx, root, caps);
+  ASSERT_NOT_NULL(heur);
+  ASSERT_INT_EQ(count_root_ranges_of_type_bound(ctx, heur, POLY_AXIS_GLOBAL, 1), 1);
+  ASSERT_INT_EQ(count_root_ranges_of_type_bound(ctx, heur, POLY_AXIS_GLOBAL, 5), 1);
+  ASSERT_INT_EQ(count_root_ranges_of_type_bound(ctx, heur, POLY_AXIS_UPCAST, 4), 1);
+  ASSERT_INT_EQ(count_root_ranges_of_type_bound(ctx, heur, POLY_AXIS_LOCAL, 4), 1);
+  ASSERT_INT_EQ(count_root_ranges_of_type_bound(ctx, heur, POLY_AXIS_GROUP_REDUCE, 8), 1);
+  ASSERT_INT_EQ(count_root_ranges_of_type_bound(ctx, heur, POLY_AXIS_REDUCE, 16), 1);
+  ASSERT_INT_EQ(count_root_ops(ctx, heur, POLY_OP_RANGE), 6);
+
   poly_ctx_destroy(ctx);
   PASS();
 }

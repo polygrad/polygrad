@@ -4792,11 +4792,11 @@ TEST(realize, precompiled_function_becomes_opaque_output_call) {
 
   float a_data[2] = {1.0f, -5.0f};
   float b_data[2] = {3.0f, 4.0f};
-  int64_t shape[1] = {2};
+  int64_t shape[3] = {1, 2, 1};
   PolyTensor *a_host = poly_tensor_from_host(
-      ctx, a_data, sizeof(a_data), POLY_FLOAT32, shape, 1);
+      ctx, a_data, sizeof(a_data), POLY_FLOAT32, shape, 3);
   PolyTensor *b_host = poly_tensor_from_host(
-      ctx, b_data, sizeof(b_data), POLY_FLOAT32, shape, 1);
+      ctx, b_data, sizeof(b_data), POLY_FLOAT32, shape, 3);
   PolyTensor *a = poly_tensor_to_device(ctx, a_host, POLY_DEVICE_INTERP);
   PolyTensor *b = poly_tensor_to_device(ctx, b_host, POLY_DEVICE_INTERP);
   PolyTensor *sum = poly_tensor_alu2(ctx, POLY_OP_ADD, a, b);
@@ -4834,9 +4834,24 @@ TEST(realize, precompiled_function_becomes_opaque_output_call) {
   ASSERT_NOT_NULL(precompiled);
   ASSERT_INT_EQ(precompiled->n_src, 4);
   ASSERT_INT_EQ(precompiled->src[0]->op, POLY_OP_SINK);
+  ASSERT_INT_EQ(precompiled->src[3]->op, POLY_OP_RESHAPE);
+  ASSERT_INT_EQ(precompiled->src[3]->src[0]->op, POLY_OP_BUFFER);
+  PolyShape output_shape = poly_uop_max_shape_cached(ctx, precompiled->src[3]);
+  ASSERT_INT_EQ(output_shape.ndim, 3);
+  ASSERT_INT_EQ(output_shape.dims[0], 1);
+  ASSERT_INT_EQ(output_shape.dims[1], 2);
+  ASSERT_INT_EQ(output_shape.dims[2], 1);
   ASSERT_TRUE(poly_uop_has_buffer_identity(precompiled->src[3]));
   ASSERT_TRUE(poly_uop_has_buffer_identity(realized));
   poly_toposort_free(topo);
+
+  PolyTensor *executed = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &output, 1, &executed), 0);
+  ASSERT_PTR_EQ(executed, output);
+  float values[2] = {0.0f, 0.0f};
+  READ_REALIZED_F32(ctx, poly_tensor_uop_physical(output), values, 2);
+  ASSERT_FLOAT_EQ(values[0], 4.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(values[1], -1.0f, 1e-5f);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -8244,6 +8259,131 @@ TEST(realize, direct_contiguous_view_buffer_accessor_is_zero_call_and_bounded) {
   ASSERT_TRUE(replay.global_mem == 0);
   ASSERT_TRUE(replay.kernel_count == 0);
 
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(realize, nested_contiguous_movement_view_is_one_consumer_call) {
+  /* Pinned callify.py:59-89,152-164 replaces a static contiguous movement
+   * with SLICE.reshape before generic CONTIGUOUS materialization. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  uint8_t data[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+  PolyUOp *base = poly_buffer_on_device(ctx, POLY_UINT8, 8, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(base);
+  ASSERT_INT_EQ(poly_buffer_allocate(ctx, base, POLY_DEVICE_CPU), 0);
+  ASSERT_INT_EQ(poly_buffer_copyin(ctx, base, data, sizeof(data)), 0);
+
+  int64_t bounds[1][2] = {{2, 6}};
+  int64_t shape[2] = {2, 2};
+  PolyUOp *movement =
+      poly_reshape(ctx, poly_shrink(ctx, base, bounds, 1), shape, 2);
+  PolyUOp *inner = poly_contiguous(ctx, movement);
+  PolyUOp *cast = inner
+                      ? poly_uop1(
+                            ctx, POLY_OP_CAST, POLY_FLOAT32, inner,
+                            poly_arg_none()
+                        )
+                      : NULL;
+  PolyUOp *outer = cast ? poly_contiguous(ctx, cast) : NULL;
+  ASSERT_NOT_NULL(movement);
+  ASSERT_NOT_NULL(inner);
+  ASSERT_NOT_NULL(outer);
+  ASSERT_INT_EQ(inner->op, POLY_OP_CONTIGUOUS);
+  ASSERT_INT_EQ(inner->src[0]->op, POLY_OP_RESHAPE);
+  ASSERT_INT_EQ(inner->src[0]->src[0]->op, POLY_OP_SHRINK);
+
+  PolyUOp *scheduled_out = NULL;
+  PolySchedule *schedule =
+      poly_schedule_with_vars(ctx, &outer, 1, &scheduled_out);
+  ASSERT_NOT_NULL(schedule);
+  ASSERT_NOT_NULL(scheduled_out);
+  ASSERT_INT_EQ(schedule->template->n_calls, 1);
+  PolyUOp *call = poly_schedule_call(schedule, 0);
+  ASSERT_NOT_NULL(call);
+  ASSERT_INT_EQ(poly_call_n_buffer_args(call), 2);
+  PolyUOp *view = poly_call_buffer_arg(call, 1);
+  ASSERT_NOT_NULL(view);
+  ASSERT_INT_EQ(view->op, POLY_OP_BUFFER_VIEW);
+  ASSERT_EQ(view->arg.kind, POLY_ARG_INT_TUPLE);
+  ASSERT_INT_EQ(view->arg.int_tuple.n, 2);
+  ASSERT_INT_EQ(view->arg.int_tuple.vals[0], 4);
+  ASSERT_INT_EQ(view->arg.int_tuple.vals[1], 2);
+
+  poly_ctx_reset_counters(ctx);
+  ASSERT_INT_EQ(poly_run_schedule(ctx, schedule, NULL, 0), 0);
+  const PolyUOp *identity = poly_uop_get_buffer_identity(scheduled_out);
+  ASSERT_NOT_NULL(identity);
+  float values[4] = {0};
+  ASSERT_INT_EQ(
+      poly_buffer_read(ctx, (PolyUOp *)identity, values, sizeof(values)), 0
+  );
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(values[i], (float)(i + 2), 1e-6f);
+  PolyCtxStats stats = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
+  ASSERT_TRUE(stats.kernel_count == 1);
+
+  poly_schedule_free(schedule);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(realize, non_contiguous_expand_still_materializes_before_consumer) {
+  /* Pinned contiguous_mops_to_view rejects an EXPAND whose flattened index is
+   * not one RANGE plus a constant offset (uop/ops.py:809-823). */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  uint8_t data[2] = {2, 4};
+  PolyUOp *base = poly_buffer_on_device(ctx, POLY_UINT8, 2, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(base);
+  ASSERT_INT_EQ(poly_buffer_allocate(ctx, base, POLY_DEVICE_CPU), 0);
+  ASSERT_INT_EQ(poly_buffer_copyin(ctx, base, data, sizeof(data)), 0);
+
+  int64_t input_shape[2] = {2, 1};
+  int64_t output_shape[2] = {2, 2};
+  PolyUOp *expanded = poly_expand(
+      ctx, poly_reshape(ctx, base, input_shape, 2), output_shape, 2
+  );
+  PolyUOp *inner = expanded ? poly_contiguous(ctx, expanded) : NULL;
+  PolyUOp *cast = inner
+                      ? poly_uop1(
+                            ctx, POLY_OP_CAST, POLY_FLOAT32, inner,
+                            poly_arg_none()
+                        )
+                      : NULL;
+  PolyUOp *outer = cast ? poly_contiguous(ctx, cast) : NULL;
+  ASSERT_NOT_NULL(outer);
+
+  PolyUOp *scheduled_out = NULL;
+  PolySchedule *schedule =
+      poly_schedule_with_vars(ctx, &outer, 1, &scheduled_out);
+  ASSERT_NOT_NULL(schedule);
+  ASSERT_NOT_NULL(scheduled_out);
+  ASSERT_INT_EQ(schedule->template->n_calls, 2);
+  ASSERT_INT_EQ(
+      count_root_ops(ctx, poly_schedule_call(schedule, 0), POLY_OP_BUFFER_VIEW), 0
+  );
+
+  poly_ctx_reset_counters(ctx);
+  ASSERT_INT_EQ(poly_run_schedule(ctx, schedule, NULL, 0), 0);
+  const PolyUOp *identity = poly_uop_get_buffer_identity(scheduled_out);
+  ASSERT_NOT_NULL(identity);
+  float values[4] = {0};
+  ASSERT_INT_EQ(
+      poly_buffer_read(ctx, (PolyUOp *)identity, values, sizeof(values)), 0
+  );
+  ASSERT_FLOAT_EQ(values[0], 2.0f, 1e-6f);
+  ASSERT_FLOAT_EQ(values[1], 2.0f, 1e-6f);
+  ASSERT_FLOAT_EQ(values[2], 4.0f, 1e-6f);
+  ASSERT_FLOAT_EQ(values[3], 4.0f, 1e-6f);
+  PolyCtxStats stats = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
+  ASSERT_TRUE(stats.kernel_count == 2);
+
+  poly_schedule_free(schedule);
   poly_ctx_destroy(ctx);
   PASS();
 }

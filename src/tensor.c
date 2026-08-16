@@ -35,6 +35,12 @@ static const PolyDType *_dtype_table_ffi[] = {
 };
 #define N_DTYPE_FFI ((int)(sizeof(_dtype_table_ffi) / sizeof(_dtype_table_ffi[0])))
 
+static int tensor_dtype_id(PolyDType dtype) {
+  for (int i = 0; i < N_DTYPE_FFI; i++)
+    if (poly_dtype_eq(dtype, *_dtype_table_ffi[i])) return i;
+  return -1;
+}
+
 PolyUOp *poly_buffer_var(
     PolyCtx *ctx,
     PolyDType dt,
@@ -1206,6 +1212,34 @@ PolyTensor *poly_tensor_alu3(
   return tensor_alu(ctx, op, inputs, 3);
 }
 
+static PolyTensor *tensor_cat_internal(
+    PolyCtx *ctx,
+    PolyTensor **tensors,
+    int n_tensors,
+    int dim
+);
+static int uop_shape(PolyCtx *ctx, PolyUOp *u, int64_t *out_shape);
+
+static PolyTensor *tensor_scalar_int_typed(
+    PolyCtx *ctx,
+    int64_t value,
+    PolyDType dtype,
+    PolyDevice device
+) {
+  int dtype_id = tensor_dtype_id(dtype);
+  PolyUOp *u = dtype_id < 0
+                   ? NULL
+                   : poly_dtype_is_float(dtype)
+                         ? poly_const_float_by_id(ctx, (double)value, dtype_id)
+                         : poly_const_int_by_id(ctx, value, dtype_id);
+  PolyTensor *out = u ? poly_tensor_create_with_roots(
+                            ctx, u, u, POLY_TENSOR_VALUE, device
+                        )
+                      : NULL;
+  if (out) out->provenance = POLY_TENSOR_PROVENANCE_COMPUTED;
+  return out;
+}
+
 /* Pinned tinygrad Tensor.cast/bitcast applies UOp.cast/bitcast directly to the
  * one current Tensor.uop (tensor.py:862-904, uop/ops.py:513-521). Polygrad keeps
  * its retained logical twin, but the executable operation is built directly
@@ -1233,7 +1267,109 @@ PolyTensor *poly_tensor_cast_by_id(PolyCtx *ctx, PolyTensor *src, int dtype_id) 
 }
 
 PolyTensor *poly_tensor_bitcast_by_id(PolyCtx *ctx, PolyTensor *src, int dtype_id) {
-  return tensor_dtype_result(ctx, src, dtype_id, true);
+  const PolyDType *target_ptr =
+      dtype_id >= 0 && dtype_id < N_DTYPE_FFI ? _dtype_table_ffi[dtype_id] : NULL;
+  PolyUOp *current = tensor_current_uop(src);
+  if (!ctx || !src || !src->uop_logical || !current || !target_ptr) return NULL;
+  PolyDType source_dtype = poly_dtype_scalar(current->dtype);
+  PolyDType target_dtype = poly_dtype_scalar(*target_ptr);
+  if (poly_dtype_eq(source_dtype, target_dtype)) return src;
+  int old_size = poly_dtype_itemsize(source_dtype);
+  int new_size = poly_dtype_itemsize(target_dtype);
+  if (old_size <= 0 || new_size <= 0) return NULL;
+
+  /* Pinned Tensor.bitcast keeps unequal-width DISK views as one BITCAST, but
+   * decomposes ordinary storage through uint shifts and Tensor movement
+   * operations (tensor.py:881-904). Equal-width casts are the raw UOp rule. */
+  if (old_size == new_size || src->device == POLY_DEVICE_DISK)
+    return tensor_dtype_result(ctx, src, dtype_id, true);
+
+  int64_t logical_shape[POLY_MAX_DIMS], physical_shape[POLY_MAX_DIMS];
+  int ndim = uop_shape(ctx, src->uop_logical, logical_shape);
+  int physical_ndim = uop_shape(ctx, current, physical_shape);
+  if (ndim <= 0 || physical_ndim != ndim) return NULL;
+  for (int i = 0; i < ndim; i++)
+    if (logical_shape[i] != physical_shape[i]) return NULL;
+  if (logical_shape[ndim - 1] < 0 ||
+      logical_shape[ndim - 1] > INT64_MAX / old_size ||
+      (logical_shape[ndim - 1] * (int64_t)old_size) % new_size != 0)
+    return NULL;
+
+  PolyDType old_uint = old_size == 1   ? POLY_UINT8
+                           : old_size == 2 ? POLY_UINT16
+                           : old_size == 4 ? POLY_UINT32
+                           : old_size == 8 ? POLY_UINT64
+                                           : POLY_VOID;
+  PolyDType new_uint = new_size == 1   ? POLY_UINT8
+                           : new_size == 2 ? POLY_UINT16
+                           : new_size == 4 ? POLY_UINT32
+                           : new_size == 8 ? POLY_UINT64
+                                           : POLY_VOID;
+  int old_uint_id = tensor_dtype_id(old_uint), new_uint_id = tensor_dtype_id(new_uint);
+  if (old_uint_id < 0 || new_uint_id < 0) return NULL;
+  PolyTensor *tmp = poly_tensor_bitcast_by_id(ctx, src, old_uint_id);
+  if (!tmp) return NULL;
+
+  if (new_size > old_size) {
+    int rate = new_size / old_size;
+    if (ndim >= POLY_MAX_DIMS || logical_shape[ndim - 1] % rate != 0) return NULL;
+    int64_t split_shape[POLY_MAX_DIMS];
+    for (int i = 0; i < ndim - 1; i++) split_shape[i] = logical_shape[i];
+    split_shape[ndim - 1] = logical_shape[ndim - 1] / rate;
+    split_shape[ndim] = rate;
+    tmp = poly_tensor_reshape(ctx, tmp, split_shape, ndim + 1);
+    if (!tmp) return NULL;
+
+    PolyTensor *combined = NULL;
+    for (int lane = 0; lane < rate; lane++) {
+      int64_t pairs[POLY_MAX_DIMS][2];
+      for (int axis = 0; axis <= ndim; axis++) {
+        pairs[axis][0] = 0;
+        pairs[axis][1] = split_shape[axis];
+      }
+      pairs[ndim][0] = lane;
+      pairs[ndim][1] = lane + 1;
+      PolyTensor *part = poly_tensor_shrink(ctx, tmp, pairs, ndim + 1);
+      part = part ? poly_tensor_cast_by_id(ctx, part, new_uint_id) : NULL;
+      PolyTensor *shift = tensor_scalar_int_typed(
+          ctx, 8LL * lane * old_size, new_uint, src->device
+      );
+      part = part && shift ? poly_tensor_alu2(ctx, POLY_OP_SHL, part, shift) : NULL;
+      combined = !part ? NULL
+                       : combined ? poly_tensor_alu2(ctx, POLY_OP_ADD, combined, part)
+                                  : part;
+      if (!combined) return NULL;
+    }
+    int64_t squeezed_shape[POLY_MAX_DIMS];
+    for (int i = 0; i < ndim; i++) squeezed_shape[i] = split_shape[i];
+    combined = poly_tensor_reshape(ctx, combined, squeezed_shape, ndim);
+    return combined ? poly_tensor_bitcast_by_id(ctx, combined, dtype_id) : NULL;
+  }
+
+  int rate = old_size / new_size;
+  PolyTensor *parts[8] = {0};
+  if (rate <= 0 || rate > 8 || ndim >= POLY_MAX_DIMS) return NULL;
+  int64_t unsqueezed_shape[POLY_MAX_DIMS];
+  for (int i = 0; i < ndim; i++) unsqueezed_shape[i] = logical_shape[i];
+  unsqueezed_shape[ndim] = 1;
+  for (int lane = 0; lane < rate; lane++) {
+    PolyTensor *shift = tensor_scalar_int_typed(
+        ctx, 8LL * lane * new_size, old_uint, src->device
+    );
+    parts[lane] = shift ? poly_tensor_alu2(ctx, POLY_OP_SHR, tmp, shift) : NULL;
+    parts[lane] = parts[lane]
+                      ? poly_tensor_reshape(ctx, parts[lane], unsqueezed_shape, ndim + 1)
+                      : NULL;
+    if (!parts[lane]) return NULL;
+  }
+  PolyTensor *stacked = tensor_cat_internal(ctx, parts, rate, ndim);
+  int64_t flattened_shape[POLY_MAX_DIMS];
+  for (int i = 0; i < ndim; i++) flattened_shape[i] = logical_shape[i];
+  if (flattened_shape[ndim - 1] > INT64_MAX / rate) return NULL;
+  flattened_shape[ndim - 1] *= rate;
+  stacked = stacked ? poly_tensor_reshape(ctx, stacked, flattened_shape, ndim) : NULL;
+  stacked = stacked ? poly_tensor_cast_by_id(ctx, stacked, new_uint_id) : NULL;
+  return stacked ? poly_tensor_bitcast_by_id(ctx, stacked, dtype_id) : NULL;
 }
 
 /* Pinned tinygrad Tensor._apply_uop (tensor.py:128-140) applies movement
@@ -4279,6 +4415,567 @@ PolyUOp *poly_triu(PolyCtx *ctx, PolyUOp *x, int diagonal) {
   return poly_where_op(ctx, mask, x, zero);
 }
 
+typedef struct {
+  PolyUOp *device_uop;
+  PolyTensor *seed;
+  PolyTensor *counter;
+} PolyRngDeviceState;
+
+/* Pinned Tensor._next_counter hashes the four-byte big-endian first-use
+ * device ordinal and then stores the digest in a uint32 Tensor
+ * (tensor.py:493-497). Only the low word survives that cast, but computing it
+ * still requires the complete one-block SHA-256 compression. */
+static uint32_t rng_rotr32(uint32_t x, unsigned n) {
+  return (x >> n) | (x << (32u - n));
+}
+
+static uint32_t rng_device_seed_low32(uint32_t ordinal) {
+  static const uint32_t k[64] = {
+      UINT32_C(0x428a2f98), UINT32_C(0x71374491), UINT32_C(0xb5c0fbcf),
+      UINT32_C(0xe9b5dba5), UINT32_C(0x3956c25b), UINT32_C(0x59f111f1),
+      UINT32_C(0x923f82a4), UINT32_C(0xab1c5ed5), UINT32_C(0xd807aa98),
+      UINT32_C(0x12835b01), UINT32_C(0x243185be), UINT32_C(0x550c7dc3),
+      UINT32_C(0x72be5d74), UINT32_C(0x80deb1fe), UINT32_C(0x9bdc06a7),
+      UINT32_C(0xc19bf174), UINT32_C(0xe49b69c1), UINT32_C(0xefbe4786),
+      UINT32_C(0x0fc19dc6), UINT32_C(0x240ca1cc), UINT32_C(0x2de92c6f),
+      UINT32_C(0x4a7484aa), UINT32_C(0x5cb0a9dc), UINT32_C(0x76f988da),
+      UINT32_C(0x983e5152), UINT32_C(0xa831c66d), UINT32_C(0xb00327c8),
+      UINT32_C(0xbf597fc7), UINT32_C(0xc6e00bf3), UINT32_C(0xd5a79147),
+      UINT32_C(0x06ca6351), UINT32_C(0x14292967), UINT32_C(0x27b70a85),
+      UINT32_C(0x2e1b2138), UINT32_C(0x4d2c6dfc), UINT32_C(0x53380d13),
+      UINT32_C(0x650a7354), UINT32_C(0x766a0abb), UINT32_C(0x81c2c92e),
+      UINT32_C(0x92722c85), UINT32_C(0xa2bfe8a1), UINT32_C(0xa81a664b),
+      UINT32_C(0xc24b8b70), UINT32_C(0xc76c51a3), UINT32_C(0xd192e819),
+      UINT32_C(0xd6990624), UINT32_C(0xf40e3585), UINT32_C(0x106aa070),
+      UINT32_C(0x19a4c116), UINT32_C(0x1e376c08), UINT32_C(0x2748774c),
+      UINT32_C(0x34b0bcb5), UINT32_C(0x391c0cb3), UINT32_C(0x4ed8aa4a),
+      UINT32_C(0x5b9cca4f), UINT32_C(0x682e6ff3), UINT32_C(0x748f82ee),
+      UINT32_C(0x78a5636f), UINT32_C(0x84c87814), UINT32_C(0x8cc70208),
+      UINT32_C(0x90befffa), UINT32_C(0xa4506ceb), UINT32_C(0xbef9a3f7),
+      UINT32_C(0xc67178f2),
+  };
+  uint32_t w[64] = {ordinal, UINT32_C(0x80000000)};
+  w[15] = 32;
+  for (int i = 16; i < 64; i++) {
+    uint32_t s0 = rng_rotr32(w[i - 15], 7) ^ rng_rotr32(w[i - 15], 18) ^
+                  (w[i - 15] >> 3);
+    uint32_t s1 = rng_rotr32(w[i - 2], 17) ^ rng_rotr32(w[i - 2], 19) ^
+                  (w[i - 2] >> 10);
+    w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+  }
+  uint32_t a = UINT32_C(0x6a09e667), b = UINT32_C(0xbb67ae85);
+  uint32_t c = UINT32_C(0x3c6ef372), d = UINT32_C(0xa54ff53a);
+  uint32_t e = UINT32_C(0x510e527f), f = UINT32_C(0x9b05688c);
+  uint32_t g = UINT32_C(0x1f83d9ab), h = UINT32_C(0x5be0cd19);
+  for (int i = 0; i < 64; i++) {
+    uint32_t s1 = rng_rotr32(e, 6) ^ rng_rotr32(e, 11) ^ rng_rotr32(e, 25);
+    uint32_t ch = (e & f) ^ (~e & g);
+    uint32_t t1 = h + s1 + ch + k[i] + w[i];
+    uint32_t s0 = rng_rotr32(a, 2) ^ rng_rotr32(a, 13) ^ rng_rotr32(a, 22);
+    uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
+    uint32_t t2 = s0 + maj;
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+  }
+  return UINT32_C(0x5be0cd19) + h;
+}
+
+static PolyTensor *rng_tensor_result(
+    PolyCtx *ctx,
+    PolyUOp *logical,
+    PolyUOp *physical,
+    PolyDevice device
+) {
+  PolyTensor *out = poly_tensor_create_with_roots(
+      ctx, logical, physical, POLY_TENSOR_VALUE, device
+  );
+  if (out) out->provenance = POLY_TENSOR_PROVENANCE_COMPUTED;
+  return out;
+}
+
+/* Core-owned storage for the two uint32 seed/counter words. The backing bytes
+ * live in the context arena, while the ordinary HOST BUFFER -> COPY(device)
+ * topology stays identical to Tensor([..], device=.., dtype=uint32). */
+static PolyTensor *rng_tensor_from_words(
+    PolyCtx *ctx,
+    uint32_t word0,
+    uint32_t word1,
+    PolyDevice device
+) {
+  uint32_t *data = poly_arena_alloc(ctx->arena, 2 * sizeof(*data), _Alignof(uint32_t));
+  if (!data) return NULL;
+  data[0] = word0;
+  data[1] = word1;
+
+  PolyUOp *unique = poly_uop0(
+      ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(poly_ctx_next_unique_id(ctx))
+  );
+  PolyUOp *host = poly_device_uop(ctx, POLY_DEVICE_HOST);
+  PolyUOp *logical = unique
+                         ? poly_uop1(
+                               ctx, POLY_OP_BUFFER, POLY_UINT32, unique, poly_arg_int(2)
+                           )
+                         : NULL;
+  PolyUOp *physical_src[2] = {unique, host};
+  PolyUOp *physical = unique && host
+                          ? poly_uop(
+                                ctx, POLY_OP_BUFFER, POLY_UINT32, physical_src, 2,
+                                poly_arg_int(2)
+                            )
+                          : NULL;
+  if (!logical || !physical) return NULL;
+  PolyBuffer imported = {
+      .ptr = data,
+      .nbytes = 2 * sizeof(*data),
+      .device = POLY_DEVICE_HOST,
+      .owned = false,
+      .valid = true,
+  };
+  poly_buffer_attach(ctx, physical, &imported);
+  if (!poly_buffer_get(ctx, physical)) return NULL;
+  PolyTensor *source = poly_tensor_create_with_roots(
+      ctx, logical, physical, POLY_TENSOR_VALUE, POLY_DEVICE_HOST
+  );
+  if (!source) return NULL;
+  source->provenance = POLY_TENSOR_PROVENANCE_CONST_INIT;
+  return poly_tensor_to_device(ctx, source, device);
+}
+
+static PolyTensor *rng_scalar_int(
+    PolyCtx *ctx,
+    int64_t value,
+    PolyDType dtype,
+    PolyDevice device
+) {
+  return tensor_scalar_int_typed(ctx, value, dtype, device);
+}
+
+static PolyTensor *rng_scalar_float(PolyCtx *ctx, double value, PolyDevice device) {
+  PolyUOp *u = poly_const_typed(ctx, POLY_FLOAT32, value);
+  return u ? rng_tensor_result(ctx, u, u, device) : NULL;
+}
+
+/* Pinned Tensor.reshape returns the original Tensor when the requested shape
+ * is already current (mixin/movement.py:145-164). Internal C composition must
+ * preserve that wrapper-level no-op rather than manufacture a RESHAPE. */
+static PolyTensor *rng_reshape_if_needed(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    const int64_t *shape,
+    int ndim
+) {
+  int64_t logical_shape[POLY_MAX_DIMS], physical_shape[POLY_MAX_DIMS];
+  int logical_ndim = uop_shape(ctx, src ? src->uop_logical : NULL, logical_shape);
+  int physical_ndim = uop_shape(ctx, src ? src->uop_physical : NULL, physical_shape);
+  if (!src || logical_ndim < 0 || physical_ndim < 0) return NULL;
+  bool same = logical_ndim == ndim && physical_ndim == ndim;
+  for (int i = 0; same && i < ndim; i++)
+    same = logical_shape[i] == shape[i] && physical_shape[i] == shape[i];
+  return same ? src : poly_tensor_reshape(ctx, src, (int64_t *)shape, ndim);
+}
+
+/* Pinned basic indexing applies one SHRINK and then the final reshape that
+ * retains a slice dimension or collapses an integer index
+ * (mixin/movement.py:63-113, mixin/__init__.py:121-146). */
+static PolyTensor *rng_getitem_1d(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    int64_t start,
+    int64_t stop,
+    bool collapse
+) {
+  int64_t pairs[1][2] = {{start, stop}};
+  PolyTensor *shrunk = poly_tensor_shrink(ctx, src, pairs, 1);
+  int64_t shape[1] = {stop - start};
+  return shrunk ? rng_reshape_if_needed(ctx, shrunk, shape, collapse ? 0 : 1) : NULL;
+}
+
+static PolyTensor *tensor_cat_internal(
+    PolyCtx *ctx,
+    PolyTensor **tensors,
+    int n_tensors,
+    int dim
+) {
+  if (!ctx || !tensors || n_tensors <= 0) return NULL;
+  PolyUOp **logical = malloc((size_t)n_tensors * sizeof(*logical));
+  PolyUOp **physical = malloc((size_t)n_tensors * sizeof(*physical));
+  if (!logical || !physical) {
+    free(logical);
+    free(physical);
+    return NULL;
+  }
+  PolyDevice device = POLY_DEVICE_AUTO;
+  for (int i = 0; i < n_tensors; i++) {
+    if (!tensors[i] || !tensors[i]->uop_logical || !tensors[i]->uop_physical) {
+      free(logical);
+      free(physical);
+      return NULL;
+    }
+    logical[i] = tensors[i]->uop_logical;
+    physical[i] = tensors[i]->uop_physical;
+    if (tensors[i]->device != POLY_DEVICE_AUTO) device = tensors[i]->device;
+  }
+  PolyUOp *logical_out = poly_cat(ctx, logical, n_tensors, dim);
+  PolyUOp *physical_out = poly_cat(ctx, physical, n_tensors, dim);
+  free(logical);
+  free(physical);
+  return logical_out && physical_out
+             ? rng_tensor_result(ctx, logical_out, physical_out, device)
+             : NULL;
+}
+
+static PolyTensor *rng_cat2(PolyCtx *ctx, PolyTensor *a, PolyTensor *b) {
+  PolyTensor *src[2] = {a, b};
+  return tensor_cat_internal(ctx, src, 2, 0);
+}
+
+static PolyTensor *rng_broadcast_like(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    PolyTensor *like
+) {
+  int64_t logical_shape[POLY_MAX_DIMS], physical_shape[POLY_MAX_DIMS];
+  int logical_ndim = uop_shape(ctx, like ? like->uop_logical : NULL, logical_shape);
+  int physical_ndim = uop_shape(ctx, like ? like->uop_physical : NULL, physical_shape);
+  if (!src || logical_ndim < 0 || physical_ndim != logical_ndim) return NULL;
+  for (int i = 0; i < logical_ndim; i++)
+    if (logical_shape[i] != physical_shape[i]) return NULL;
+  PolyUOp *logical = poly_broadcast_to(ctx, src->uop_logical, logical_shape, logical_ndim);
+  PolyUOp *physical = poly_broadcast_to(ctx, src->uop_physical, physical_shape, physical_ndim);
+  return logical && physical
+             ? rng_tensor_result(ctx, logical, physical, like->device)
+             : NULL;
+}
+
+static PolyTensor *rng_arange_u32(PolyCtx *ctx, uint64_t stop, PolyDevice device) {
+  if (stop > INT64_MAX) return NULL;
+  PolyUOp *u = poly_arange_int_by_id(
+      ctx, 0, (int64_t)stop, 1, tensor_dtype_id(POLY_UINT32)
+  );
+  return u ? rng_tensor_result(ctx, u, u, device) : NULL;
+}
+
+static PolyTensor *rng_threefry_random_bits(
+    PolyCtx *ctx,
+    PolyTensor *key,
+    PolyTensor *counts0,
+    PolyTensor *counts1
+) {
+  int uint64_id = tensor_dtype_id(POLY_UINT64);
+  int uint32_id = tensor_dtype_id(POLY_UINT32);
+  PolyDevice device = key ? key->device : POLY_DEVICE_AUTO;
+  PolyTensor *shift32 = rng_scalar_int(ctx, 32, POLY_UINT64, device);
+  PolyTensor *c1_u64 = poly_tensor_cast_by_id(ctx, counts1, uint64_id);
+  PolyTensor *c0_u64 = poly_tensor_cast_by_id(ctx, counts0, uint64_id);
+  PolyTensor *x_hi = c1_u64 && shift32
+                         ? poly_tensor_alu2(ctx, POLY_OP_SHL, c1_u64, shift32)
+                         : NULL;
+  PolyTensor *x = x_hi && c0_u64
+                      ? poly_tensor_alu2(ctx, POLY_OP_OR, x_hi, c0_u64)
+                      : NULL;
+  PolyTensor *key0 = rng_getitem_1d(ctx, key, 0, 1, true);
+  PolyTensor *key1 = rng_getitem_1d(ctx, key, 1, 2, true);
+  key0 = key0 && x ? rng_broadcast_like(ctx, key0, x) : NULL;
+  key1 = key1 && x ? rng_broadcast_like(ctx, key1, x) : NULL;
+  key0 = key0 ? poly_tensor_cast_by_id(ctx, key0, uint64_id) : NULL;
+  key1 = key1 ? poly_tensor_cast_by_id(ctx, key1, uint64_id) : NULL;
+  PolyTensor *key_hi = key1 && shift32
+                           ? poly_tensor_alu2(ctx, POLY_OP_SHL, key1, shift32)
+                           : NULL;
+  PolyTensor *packed_key = key_hi && key0
+                               ? poly_tensor_alu2(ctx, POLY_OP_OR, key_hi, key0)
+                               : NULL;
+  PolyTensor *bits = x && packed_key
+                         ? poly_tensor_alu2(ctx, POLY_OP_THREEFRY, x, packed_key)
+                         : NULL;
+  PolyTensor *mask = rng_scalar_int(ctx, INT64_C(0xffffffff), POLY_UINT64, device);
+  PolyTensor *low = bits && mask
+                        ? poly_tensor_alu2(ctx, POLY_OP_AND, bits, mask)
+                        : NULL;
+  low = low ? poly_tensor_cast_by_id(ctx, low, uint32_id) : NULL;
+  PolyTensor *high = bits && shift32
+                         ? poly_tensor_alu2(ctx, POLY_OP_SHR, bits, shift32)
+                         : NULL;
+  high = high && mask ? poly_tensor_alu2(ctx, POLY_OP_AND, high, mask) : NULL;
+  high = high ? poly_tensor_cast_by_id(ctx, high, uint32_id) : NULL;
+  return low && high ? rng_cat2(ctx, low, high) : NULL;
+}
+
+static PolyTensor *rng_random_bits(
+    PolyCtx *ctx,
+    PolyTensor *key,
+    PolyTensor *counter,
+    uint64_t num
+) {
+  PolyTensor *low = rng_getitem_1d(ctx, counter, 0, 1, false);
+  PolyTensor *high = rng_getitem_1d(ctx, counter, 1, 2, false);
+  if (!low || !high) return NULL;
+  if (num == 0) return rng_getitem_1d(ctx, counter, 0, 0, false);
+
+  const uint64_t chunk_max = UINT32_MAX;
+  PolyTensor **chunks = NULL;
+  int n_chunks = 0, chunks_cap = 0;
+  for (uint64_t i = 0; i < num;) {
+    uint64_t chunk_num = num - i < chunk_max ? num - i : chunk_max;
+    PolyTensor *low_add = rng_scalar_int(
+        ctx, (int64_t)(i & UINT32_MAX), POLY_UINT32, key->device
+    );
+    PolyTensor *high_add = rng_scalar_int(
+        ctx, (int64_t)(i >> 32), POLY_UINT32, key->device
+    );
+    PolyTensor *c_low = poly_tensor_alu2(ctx, POLY_OP_ADD, low, low_add);
+    PolyTensor *carry = c_low ? poly_tensor_alu2(ctx, POLY_OP_CMPLT, c_low, low) : NULL;
+    carry = carry ? poly_tensor_cast_by_id(ctx, carry, tensor_dtype_id(POLY_UINT32)) : NULL;
+    PolyTensor *c_high = poly_tensor_alu2(ctx, POLY_OP_ADD, high, high_add);
+    c_high = c_high && carry ? poly_tensor_alu2(ctx, POLY_OP_ADD, c_high, carry) : NULL;
+    PolyTensor *new_key = c_low && c_high
+                              ? rng_threefry_random_bits(ctx, key, c_low, c_high)
+                              : NULL;
+    uint64_t half = (chunk_num + 1) / 2;
+    PolyTensor *counts0 = rng_arange_u32(ctx, half, key->device);
+    PolyTensor *half_t = rng_scalar_int(ctx, (int64_t)half, POLY_UINT32, key->device);
+    PolyTensor *counts1 = counts0 && half_t
+                              ? poly_tensor_alu2(ctx, POLY_OP_ADD, counts0, half_t)
+                              : NULL;
+    PolyTensor *chunk = new_key && counts0 && counts1
+                            ? rng_threefry_random_bits(ctx, new_key, counts0, counts1)
+                            : NULL;
+    chunk = chunk ? rng_getitem_1d(ctx, chunk, 0, (int64_t)chunk_num, false) : NULL;
+    if (!chunk) {
+      free(chunks);
+      return NULL;
+    }
+    if (n_chunks == chunks_cap) {
+      int new_cap = chunks_cap ? chunks_cap * 2 : 4;
+      PolyTensor **new_chunks = realloc(chunks, (size_t)new_cap * sizeof(*new_chunks));
+      if (!new_chunks) {
+        free(chunks);
+        return NULL;
+      }
+      chunks = new_chunks;
+      chunks_cap = new_cap;
+    }
+    chunks[n_chunks++] = chunk;
+    i += chunk_num;
+  }
+  PolyTensor *out = tensor_cat_internal(ctx, chunks, n_chunks, 0);
+  free(chunks);
+  return out;
+}
+
+static PolyTensor *rng_bits_to_rand(
+    PolyCtx *ctx,
+    PolyTensor *bits,
+    const int64_t *shape,
+    int ndim,
+    PolyDType dtype
+) {
+  int itemsize = poly_dtype_itemsize(dtype);
+  int nmant = poly_dtype_eq(dtype, POLY_FLOAT16)   ? 10
+              : poly_dtype_eq(dtype, POLY_BFLOAT16) ? 7
+              : poly_dtype_eq(dtype, POLY_FLOAT32)  ? 23
+              : poly_dtype_eq(dtype, POLY_FLOAT64)  ? 52
+                                                    : 0;
+  PolyDType uint_dtype = itemsize == 1   ? POLY_UINT8
+                             : itemsize == 2 ? POLY_UINT16
+                             : itemsize == 4 ? POLY_UINT32
+                             : itemsize == 8 ? POLY_UINT64
+                                             : POLY_VOID;
+  int uint_id = tensor_dtype_id(uint_dtype);
+  int dtype_id = tensor_dtype_id(dtype);
+  if (!bits || nmant == 0 || uint_id < 0 || dtype_id < 0) return NULL;
+
+  PolyTensor *uint_bits = poly_tensor_bitcast_by_id(ctx, bits, uint_id);
+  PolyTensor *one = rng_scalar_int(ctx, 1, uint_dtype, bits->device);
+  one = one && uint_bits ? rng_broadcast_like(ctx, one, uint_bits) : NULL;
+  PolyTensor *float_one = one ? poly_tensor_cast_by_id(ctx, one, dtype_id) : NULL;
+  PolyTensor *float_one_bits = float_one
+                                   ? poly_tensor_bitcast_by_id(ctx, float_one, uint_id)
+                                   : NULL;
+  PolyTensor *shift = rng_scalar_int(
+      ctx, dtype.bitsize - nmant, uint_dtype, bits->device
+  );
+  PolyTensor *mantissa = uint_bits && shift
+                             ? poly_tensor_alu2(ctx, POLY_OP_SHR, uint_bits, shift)
+                             : NULL;
+  PolyTensor *one_to_two = mantissa && float_one_bits
+                               ? poly_tensor_alu2(ctx, POLY_OP_OR, mantissa, float_one_bits)
+                               : NULL;
+  one_to_two = one_to_two ? poly_tensor_bitcast_by_id(ctx, one_to_two, dtype_id) : NULL;
+  int64_t numel = poly_shape_numel_checked(shape, ndim);
+  PolyTensor *selected = numel >= 0 && one_to_two
+                             ? rng_getitem_1d(ctx, one_to_two, 0, numel, false)
+                             : NULL;
+  PolyTensor *minus_one = rng_scalar_int(ctx, 1, dtype, bits->device);
+  PolyTensor *zero_to_one = selected && minus_one
+                                ? poly_tensor_alu2(ctx, POLY_OP_SUB, selected, minus_one)
+                                : NULL;
+  return zero_to_one ? rng_reshape_if_needed(ctx, zero_to_one, shape, ndim) : NULL;
+}
+
+static PolyTensor *rng_advance_counter(
+    PolyCtx *ctx,
+    PolyTensor *counter,
+    uint64_t num
+) {
+  PolyDevice device = counter ? counter->device : POLY_DEVICE_AUTO;
+  PolyTensor *low0 = rng_getitem_1d(ctx, counter, 0, 1, false);
+  PolyTensor *high0 = rng_getitem_1d(ctx, counter, 1, 2, false);
+  PolyTensor *low_add = rng_scalar_int(
+      ctx, (int64_t)(num & UINT32_MAX), POLY_UINT32, device
+  );
+  PolyTensor *high_add = rng_scalar_int(
+      ctx, (int64_t)(num >> 32), POLY_UINT32, device
+  );
+  PolyTensor *new_low = low0 && low_add
+                            ? poly_tensor_alu2(ctx, POLY_OP_ADD, low0, low_add)
+                            : NULL;
+  PolyTensor *counter0 = rng_getitem_1d(ctx, counter, 0, 1, true);
+  PolyTensor *carry = new_low && counter0
+                          ? poly_tensor_alu2(ctx, POLY_OP_CMPLT, new_low, counter0)
+                          : NULL;
+  PolyTensor *new_high = high0 && high_add
+                             ? poly_tensor_alu2(ctx, POLY_OP_ADD, high0, high_add)
+                             : NULL;
+  new_high = new_high && carry
+                 ? poly_tensor_alu2(ctx, POLY_OP_ADD, new_high, carry)
+                 : NULL;
+  PolyTensor *new_counter = new_low && new_high ? rng_cat2(ctx, new_low, new_high) : NULL;
+  if (!new_counter || !poly_tensor_assign(ctx, counter, new_counter)) return NULL;
+
+  PolyTensor *low = rng_getitem_1d(ctx, counter, 0, 1, false);
+  low = low && low_add ? poly_tensor_alu2(ctx, POLY_OP_SUB, low, low_add) : NULL;
+  PolyTensor *high = rng_getitem_1d(ctx, counter, 1, 2, false);
+  high = high && high_add ? poly_tensor_alu2(ctx, POLY_OP_SUB, high, high_add) : NULL;
+  counter0 = rng_getitem_1d(ctx, counter, 0, 1, true);
+  carry = counter0 && low_add
+              ? poly_tensor_alu2(ctx, POLY_OP_CMPLT, counter0, low_add)
+              : NULL;
+  high = high && carry ? poly_tensor_alu2(ctx, POLY_OP_SUB, high, carry) : NULL;
+  return low && high ? rng_cat2(ctx, low, high) : NULL;
+}
+
+static PolyRngDeviceState *rng_device_state(PolyCtx *ctx, PolyDevice device) {
+  if (!ctx || !ctx->rng_states || !poly_device_can_execute(device)) return NULL;
+  PolyUOp *device_uop = poly_device_uop(ctx, device);
+  if (!device_uop) return NULL;
+  PolyRngDeviceState *state = poly_map_get(
+      ctx->rng_states, poly_ptr_hash(device_uop), device_uop, poly_ptr_eq
+  );
+  if (state) return state;
+  uint32_t ordinal = ctx->rng_device_count;
+  state = poly_arena_alloc(ctx->arena, sizeof(*state), _Alignof(PolyRngDeviceState));
+  if (!state) return NULL;
+  *state = (PolyRngDeviceState){
+      .device_uop = device_uop,
+      .seed = rng_tensor_from_words(
+          ctx, rng_device_seed_low32(ordinal), (uint32_t)ctx->rng_seed, device
+      ),
+      .counter = rng_tensor_from_words(ctx, 0, 0, device),
+  };
+  if (!state->seed || !state->counter) return NULL;
+  poly_map_set(
+      ctx->rng_states, poly_ptr_hash(device_uop), device_uop, state, poly_ptr_eq
+  );
+  ctx->rng_device_count++;
+  return state;
+}
+
+void poly_tensor_manual_seed(PolyCtx *ctx, int64_t seed) {
+  if (!ctx || !ctx->rng_states) return;
+  ctx->rng_seed = (uint64_t)seed;
+  ctx->rng_device_count = 0;
+  poly_map_clear(ctx->rng_states);
+}
+
+PolyTensor *poly_tensor_rand_by_id(
+    PolyCtx *ctx,
+    const int64_t *dims,
+    int ndim,
+    int dtype_id,
+    PolyDevice device,
+    int contiguous
+) {
+  PolyDType dtype;
+  if (!ctx || !poly_dtype_by_id(dtype_id, &dtype) ||
+      !poly_dtype_is_float(dtype) || ndim < 0 || ndim > POLY_MAX_DIMS ||
+      (ndim > 0 && !dims) || !poly_device_can_execute(device))
+    return NULL;
+  int64_t numel = poly_shape_numel_checked(dims, ndim);
+  int itemsize = poly_dtype_itemsize(dtype);
+  if (numel < 0 || itemsize <= 0 ||
+      (uint64_t)numel > (UINT64_MAX - 3) / (uint64_t)itemsize)
+    return NULL;
+  uint64_t num = ((uint64_t)numel * (uint64_t)itemsize + 3) / 4;
+  PolyRngDeviceState *state = rng_device_state(ctx, device);
+  PolyTensor *counter = state ? rng_advance_counter(ctx, state->counter, num) : NULL;
+  PolyTensor *bits = counter ? rng_random_bits(ctx, state->seed, counter, num) : NULL;
+  PolyTensor *out = bits ? rng_bits_to_rand(ctx, bits, dims, ndim, dtype) : NULL;
+  return out && contiguous ? poly_tensor_contiguous(ctx, out) : out;
+}
+
+PolyTensor *poly_tensor_randn_by_id(
+    PolyCtx *ctx,
+    const int64_t *dims,
+    int ndim,
+    int dtype_id,
+    PolyDevice device
+) {
+  PolyDType dtype;
+  if (!ctx || !poly_dtype_by_id(dtype_id, &dtype) || !poly_dtype_is_float(dtype) ||
+      ndim < 0 || ndim >= POLY_MAX_DIMS || (ndim > 0 && !dims))
+    return NULL;
+  int64_t stacked_shape[POLY_MAX_DIMS];
+  stacked_shape[0] = 2;
+  for (int i = 0; i < ndim; i++) stacked_shape[i + 1] = dims[i];
+  PolyTensor *src = poly_tensor_rand_by_id(
+      ctx, stacked_shape, ndim + 1, tensor_dtype_id(POLY_FLOAT32), device, 1
+  );
+  if (!src) return NULL;
+  int64_t pairs[POLY_MAX_DIMS][2];
+  pairs[0][0] = 0;
+  pairs[0][1] = 1;
+  for (int i = 0; i < ndim; i++) {
+    pairs[i + 1][0] = 0;
+    pairs[i + 1][1] = dims[i];
+  }
+  PolyTensor *src0 = poly_tensor_shrink(ctx, src, pairs, ndim + 1);
+  src0 = src0 ? poly_tensor_reshape(ctx, src0, (int64_t *)dims, ndim) : NULL;
+  pairs[0][0] = 1;
+  pairs[0][1] = 2;
+  PolyTensor *src1 = poly_tensor_shrink(ctx, src, pairs, ndim + 1);
+  src1 = src1 ? poly_tensor_reshape(ctx, src1, (int64_t *)dims, ndim) : NULL;
+  PolyTensor *two_pi = rng_scalar_float(ctx, 2.0 * M_PI, device);
+  PolyTensor *angle = src0 && two_pi
+                          ? poly_tensor_alu2(ctx, POLY_OP_MUL, src0, two_pi)
+                          : NULL;
+  PolyTensor *half_pi = rng_scalar_float(ctx, M_PI / 2.0, device);
+  PolyTensor *cos_arg = half_pi && angle
+                            ? poly_tensor_alu2(ctx, POLY_OP_SUB, half_pi, angle)
+                            : NULL;
+  PolyTensor *cosine = cos_arg ? poly_tensor_alu1(ctx, POLY_OP_SIN, cos_arg) : NULL;
+  PolyTensor *one = rng_scalar_float(ctx, 1.0, device);
+  PolyTensor *one_minus = one && src1
+                              ? poly_tensor_alu2(ctx, POLY_OP_SUB, one, src1)
+                              : NULL;
+  PolyTensor *logged = one_minus ? poly_tensor_log(ctx, one_minus) : NULL;
+  PolyTensor *minus_two = rng_scalar_float(ctx, -2.0, device);
+  PolyTensor *scaled = logged && minus_two
+                           ? poly_tensor_alu2(ctx, POLY_OP_MUL, logged, minus_two)
+                           : NULL;
+  PolyTensor *radius = scaled ? poly_tensor_alu1(ctx, POLY_OP_SQRT, scaled) : NULL;
+  PolyTensor *normal = cosine && radius
+                           ? poly_tensor_alu2(ctx, POLY_OP_MUL, cosine, radius)
+                           : NULL;
+  return normal ? poly_tensor_cast_by_id(ctx, normal, dtype_id) : NULL;
+}
+
 static PolyUOp *poly_rand_compute(
     PolyCtx *ctx,
     const int64_t *shape,
@@ -4311,6 +5008,12 @@ static PolyUOp *poly_rand_compute(
       poly_uop1(ctx, POLY_OP_CAST, POLY_UINT64, counter_t, poly_arg_none());
   PolyUOp *key_u64 =
       poly_uop1(ctx, POLY_OP_CAST, POLY_UINT64, key_t, poly_arg_none());
+  /* Pinned Tensor.rand feeds THREEFRY from storage-backed seed/counter Tensors
+   * (tensor.py:493-504, mixin/rand.py:12-29).  This Polygrad-only stateless
+   * helper has a literal seed, so materialize it once to preserve that runtime
+   * input boundary when a small counter is fully upcast to constants. */
+  key_u64 = poly_contiguous(ctx, key_u64);
+  if (!key_u64) return NULL;
   PolyUOp *bits_u64 =
       poly_uop2(ctx, POLY_OP_THREEFRY, POLY_UINT64, counter_u64, key_u64, poly_arg_none());
   PolyUOp *mask_u64 = poly_const_exact_int(ctx, POLY_UINT64, INT64_C(0xffffffff));

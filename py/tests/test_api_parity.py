@@ -338,9 +338,17 @@ def test_random_counter_and_tinyjit_replay_match_pinned_tinygrad():
     try:
         Tensor.manual_seed(201)
         first, second = Tensor.rand(8), Tensor.rand(8)
-        np.testing.assert_array_equal(first.cat(second).numpy(), expected[:2].reshape(-1))
-        counter = next(iter(Tensor._device_rng_counters.values()))
-        np.testing.assert_array_equal(counter.numpy(), np.array([16, 0], dtype=np.uint32))
+        pair = first.cat(second)
+        pair_ops, pair_stack = set(), [pair.uop]
+        while pair_stack:
+            uop = pair_stack.pop()
+            if uop in pair_ops:
+                continue
+            pair_ops.add(uop)
+            pair_stack.extend(uop.src)
+        assert sum(uop.op_name == 'AFTER' for uop in pair_ops) == 2
+        assert sum(uop.op_name == 'STORE' for uop in pair_ops) == 2
+        np.testing.assert_array_equal(pair.numpy(), expected[:2].reshape(-1))
 
         Tensor.manual_seed(201)
         jit_input = Tensor.zeros(8).contiguous().realize()
@@ -351,8 +359,6 @@ def test_random_counter_and_tinyjit_replay_match_pinned_tinygrad():
 
         actual = np.stack([random_jit(jit_input).numpy().copy() for _ in range(4)])
         np.testing.assert_array_equal(actual, expected)
-        counter = next(iter(Tensor._device_rng_counters.values()))
-        np.testing.assert_array_equal(counter.numpy(), np.array([32, 0], dtype=np.uint32))
 
         seen, stack, ops = set(), [random_jit.ret.uop_logical], set()
         while stack:
@@ -424,7 +430,7 @@ def test_random_crop_indices_remain_consistent_after_readback():
 
 
 def test_python_loader_checks_current_abi_before_use():
-    assert _ffi.get_lib().poly_abi_version() == _ffi.POLYGRAD_ABI_VERSION == 53
+    assert _ffi.get_lib().poly_abi_version() == _ffi.POLYGRAD_ABI_VERSION == 54
 
 
 @pytest.mark.parametrize('relative', [

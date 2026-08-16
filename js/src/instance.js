@@ -358,6 +358,8 @@ function createBoundInstanceClass(runtime) {
     }
 
     _enqueueAsync(fn) {
+      const core = this._rt && this._rt._core
+      if (core && core.enqueueAsync) return core.enqueueAsync(fn)
       const run = this._asyncTail.then(fn, fn)
       this._asyncTail = run.catch(() => {})
       return run

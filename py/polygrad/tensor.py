@@ -6,7 +6,6 @@ Supports float32 (default) and float64 dtypes.
 import contextlib
 import ctypes
 import functools
-import hashlib
 import math
 import pathlib
 import sys
@@ -523,9 +522,6 @@ class Tensor:
     """
 
     training = False  # tinygrad compat
-    _seed = 0
-    _device_seeds = {}
-    _device_rng_counters = {}
 
     # Direct port of pinned tinygrad/tensor.py:151-154. ContextDecorator is
     # observable because model examples use both `with Tensor.train()` and
@@ -1393,21 +1389,8 @@ class Tensor:
         old_size, new_size = current.itemsize, target.itemsize
         if not self.shape or (self.shape[-1] * old_size) % new_size != 0:
             raise RuntimeError('unsupported size in bitcast')
-        # Pinned tensor.py:890-891 keeps unequal-width DISK views as one
-        # BITCAST; file-backed data can be reinterpreted without bytewise ALU.
-        if new_size != old_size and not str(self.device).upper().startswith('DISK:'):
-            old_uint = to_dtype(f'uint{8 * old_size}')
-            new_uint = to_dtype(f'uint{8 * new_size}')
-            tmp = self.bitcast(old_uint)
-            if new_size > old_size:
-                rate = new_size // old_size
-                tmp = tmp.reshape(self.shape[:-1] + (self.shape[-1] // rate, rate))
-                parts = [tmp[..., i:i + 1].cast(new_uint).lshift(8 * i * old_size)
-                         for i in range(rate)]
-                combined = functools.reduce(lambda a, b: a + b, parts).squeeze(-1)
-                return combined.bitcast(target)
-            parts = [tmp.rshift(8 * i * new_size) for i in range(old_size // new_size)]
-            return Tensor.stack(*parts, dim=-1).flatten(-2).cast(new_uint).bitcast(target)
+        # Pinned tensor.py:890-898 unequal-width decomposition now lives in
+        # the C Tensor boundary so Python, JS, and direct C share one graph.
         core = _ffi._lib.poly_tensor_bitcast_by_id(
             self._ctx, self._tensor, _dtype_id(target)
         )
@@ -3225,7 +3208,7 @@ class Tensor:
 
     @staticmethod
     def rand(*shape, **kwargs):
-        _ctx, dev, requires_grad = _creation_meta(kwargs)
+        ctx, dev, requires_grad = _creation_meta(kwargs)
         shape = _shape_tuple(*shape)
         dtype_name = _dtype_name(kwargs.get('dtype', dtypes.default_float), default='float32')
         dt = to_dtype(dtype_name)
@@ -3233,12 +3216,14 @@ class Tensor:
             raise ValueError(f'rand only supports float dtypes, got {dt}')
         if any(not isinstance(s, int) or s < 0 for s in shape):
             raise ValueError(f'invalid input shape={shape}')
-        num = -(-(_prod(shape) * dt.itemsize) // 4)
-        key, counter = Tensor._next_counter(dev, num)
-        out = Tensor._rand(key, counter, shape, dt, contiguous=kwargs.get('contiguous', True))
-        if requires_grad:
-            out.requires_grad = True
-        return out
+        dims, ndim, _ = _shape_arg(shape)
+        tensor = _ffi._lib.poly_tensor_rand_by_id(
+            ctx, dims, ndim, _dtype_id(dtype_name), _device_id(dev),
+            int(bool(kwargs.get('contiguous', True))),
+        )
+        return _created_tensor(
+            ctx, tensor, dtype_name, dev, requires_grad, 'poly_tensor_rand_by_id'
+        )
 
     def rand_like(self, **kwargs):
         # Direct single-device port of pinned mixin/rand.py:70-86. Polygrad's
@@ -3252,17 +3237,19 @@ class Tensor:
 
     @staticmethod
     def randn(*shape, **kwargs):
-        _ctx, dev, requires_grad = _creation_meta(kwargs)
+        ctx, dev, requires_grad = _creation_meta(kwargs)
         shape = _shape_tuple(*shape)
         dtype_name = _dtype_name(kwargs.get('dtype', dtypes.default_float), default='float32')
         dt = to_dtype(dtype_name)
         if not dtypes.is_float(dt):
             raise ValueError(f'randn only supports float dtypes, got {dt}')
-        src = Tensor.rand(2, *shape, device=dev, dtype=dtypes.float32)
-        out = src[0].mul(2 * math.pi).cos().mul((1 - src[1]).log().mul(-2).sqrt()).cast(dt)
-        if requires_grad:
-            out.requires_grad = True
-        return out
+        dims, ndim, _ = _shape_arg(shape)
+        tensor = _ffi._lib.poly_tensor_randn_by_id(
+            ctx, dims, ndim, _dtype_id(dtype_name), _device_id(dev)
+        )
+        return _created_tensor(
+            ctx, tensor, dtype_name, dev, requires_grad, 'poly_tensor_randn_by_id'
+        )
 
     @staticmethod
     def uniform(*shape, low=0.0, high=1.0, **kwargs):
@@ -3413,82 +3400,8 @@ class Tensor:
 
     @staticmethod
     def manual_seed(seed=0):
-        Tensor._seed = int(seed)
-        Tensor._device_seeds = {}
-        Tensor._device_rng_counters = {}
-
-    @staticmethod
-    def _next_counter(device, num):
-        if device not in Tensor._device_seeds:
-            device_index = len(Tensor._device_seeds)
-            device_seed = int.from_bytes(
-                hashlib.sha256(device_index.to_bytes(4, 'big')).digest(), 'big'
-            )
-            Tensor._device_seeds[device] = Tensor(
-                [device_seed & 0xffffffff, Tensor._seed & 0xffffffff],
-                device=device,
-                dtype=dtypes.uint32,
-            )
-            Tensor._device_rng_counters[device] = Tensor(
-                [0, 0], device=device, dtype=dtypes.uint32
-            )
-        counter = Tensor._device_rng_counters[device]
-        new_low = counter[0:1] + (num & 0xffffffff)
-        new_high = counter[1:2] + (num >> 32) + (new_low < counter[0])
-        counter.assign(new_low.cat(new_high))
-        low = counter[0:1] - (num & 0xffffffff)
-        high = counter[1:2] - (num >> 32) - (counter[0] < (num & 0xffffffff))
-        return Tensor._device_seeds[device], low.cat(high)
-
-    @staticmethod
-    def _threefry_random_bits(key, counts0, counts1):
-        x = counts1.cast(dtypes.uint64).lshift(32).bitwise_or(counts0.cast(dtypes.uint64))
-        key_low = key[0]._broadcast_to_tensor(x.shape).cast(dtypes.uint64)
-        key_high = key[1]._broadcast_to_tensor(x.shape).cast(dtypes.uint64).lshift(32)
-        x = x.threefry(key_high.bitwise_or(key_low))
-        mask = 0xffffffff
-        return x.bitwise_and(mask).cast(dtypes.uint32).cat(
-            x.rshift(32).bitwise_and(mask).cast(dtypes.uint32)
-        )
-
-    @staticmethod
-    def random_bits(key, counter, num):
-        low, high = counter[0:1], counter[1:2]
-        bits = []
-        for i in range(0, num, dtypes.uint32.max):
-            chunk_num = min(num - i, dtypes.uint32.max)
-            c_low = low + (i & 0xffffffff)
-            c_high = high + (i >> 32) + (c_low < low).cast(dtypes.uint32)
-            new_key = Tensor._threefry_random_bits(key, c_low, c_high)
-            half = -(-chunk_num // 2)
-            counts0 = Tensor.arange(half, device=key.device, dtype=dtypes.uint32)
-            counts1 = counts0 + half
-            bits.append(Tensor._threefry_random_bits(new_key, counts0, counts1)[:chunk_num])
-        return bits[0].cat(*bits[1:]) if bits else counter[0:0]
-
-    @staticmethod
-    def _bits_to_rand(bits, shape, dtype):
-        _, nmant = dtypes.finfo(dtype)
-        uint_dtype = {
-            1: dtypes.uint8,
-            2: dtypes.uint16,
-            4: dtypes.uint32,
-            8: dtypes.uint64,
-        }[dtype.itemsize]
-        uint_bits = bits.bitcast(uint_dtype)
-        float_one_bits = (
-            uint_bits._ensure_tensor(1)
-            ._broadcast_to_tensor(uint_bits.shape)
-            .cast(dtype)
-            .bitcast(uint_dtype)
-        )
-        return uint_bits.rshift(dtype.bitsize - nmant).bitwise_or(float_one_bits).bitcast(dtype)[:_prod(shape)].sub(1).reshape(shape)
-
-    @staticmethod
-    def _rand(key, counter, shape, dtype, contiguous=True):
-        bits = Tensor.random_bits(key, counter, -(-(_prod(shape) * dtype.itemsize) // 4))
-        out = Tensor._bits_to_rand(bits, shape, dtype)
-        return out.contiguous() if contiguous else out
+        from . import _default_ctx
+        _ffi._lib.poly_tensor_manual_seed(_default_ctx, _require_i64(int(seed), 'seed'))
 
     def cat(self, *tensors, dim=0):
         if isinstance(self, (list, tuple)) and not tensors:

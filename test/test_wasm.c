@@ -2155,20 +2155,22 @@ TEST(wasm, packed_group_reduce_uses_simd_alu) {
 
   int n_range = 0;
   int n_reg_storage = 0;
+  int n_define_reg = 0;
   int n_vec_load = 0;
   for (int i = 0; i < n_lin; i++) {
     if (lin[i]->op == POLY_OP_RANGE) n_range++;
-    if (lin[i]->op == POLY_OP_DEFINE_REG ||
-        (lin[i]->op == POLY_OP_BUFFER && lin[i]->dtype.is_ptr &&
-         lin[i]->dtype.addrspace == POLY_ADDR_REG))
+    if (lin[i]->op == POLY_OP_BUFFER && lin[i]->arg.kind == POLY_ARG_PARAM &&
+        lin[i]->arg.param && lin[i]->arg.param->addrspace == POLY_ADDR_REG)
       n_reg_storage++;
+    if (lin[i]->op == POLY_OP_DEFINE_REG) n_define_reg++;
     if (lin[i]->op == POLY_OP_LOAD && lin[i]->dtype.count == 4) n_vec_load++;
   }
-  /* Matches current tinygrad CPU-style reduce lowering: output-axis UPCAST plus
-   * reduce-axis UNROLL becomes a small register tile, vector loads, scalar
-   * lane arithmetic, horizontal accumulation, and a packed output store. */
+  /* Pinned tinygrad codegen/__init__.py:36-44 removes pointer dtype metadata
+   * from final BUFFERs but preserves ParamArg.addrspace. The register tile is
+   * therefore BUFFER(REG), never the retired DEFINE_REG spelling. */
   ASSERT_INT_EQ(n_range, 2);
   ASSERT_TRUE(n_reg_storage >= 1);
+  ASSERT_INT_EQ(n_define_reg, 0);
   ASSERT_TRUE(n_vec_load >= 5);
 
   int wasm_size = 0;

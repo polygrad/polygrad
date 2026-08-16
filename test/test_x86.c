@@ -1183,6 +1183,7 @@ enum {
   TX86_OP_VPEXTRD = 85,
   TX86_OP_VPINSRW = 88,
   TX86_OP_IMULi = 103,
+  TX86_OP_SUBi = 101,
   TX86_OP_CMP = 116,
   TX86_OP_VADDSS = 126,
   TX86_OP_VADDPS = 128,
@@ -3398,6 +3399,45 @@ TEST_BACKEND(x86, schedule_runtime_cross_entropy_dense_axis1_keeps_fifth_arg_liv
 
   ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink, bindings, 3), 0);
   ASSERT_FLOAT_EQ(out_data[0], logf(3.0f), 1e-5f);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST_BACKEND(x86, canonical_reg_buffer_extent_survives_isel) {
+  /* Pinned tinygrad renderer/isa/x86.py:371-379 retains BUFFER size sources
+   * through isel, and codegen/late/regalloc.py:87-89 allocates
+   * max_numel*itemsize bytes. Four float lanes therefore require 16 bytes. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *size = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(4));
+  PolyParamArg param = {.slot = 0, .addrspace = POLY_ADDR_REG};
+  PolyUOp *buf = poly_uop1(ctx, POLY_OP_BUFFER, POLY_FLOAT32, size, poly_arg_param(&param));
+  PolyUOp *stores[4];
+  for (int i = 0; i < 4; i++) {
+    PolyUOp *idx = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(i));
+    PolyUOp *addr = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, buf, idx, poly_arg_none());
+    stores[i] = poly_uop2(
+        ctx, POLY_OP_STORE, POLY_VOID, addr,
+        poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float((double)i)),
+        poly_arg_none()
+    );
+  }
+  PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, stores, 4, poly_arg_none());
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize_x86_rewritten(ctx, sink, &n_lin);
+  ASSERT_NOT_NULL(lin);
+  int64_t stack_bytes = -1;
+  for (int i = 0; i < n_lin; i++) {
+    PolyUOp *u = lin[i];
+    if (!u || u->op != POLY_OP_INS || u->arg.kind != POLY_ARG_INT ||
+        u->arg.i != TX86_OP_SUBi || u->n_src != 1 || !u->src[0] ||
+        u->src[0]->op != POLY_OP_CONST || u->src[0]->arg.kind != POLY_ARG_INT)
+      continue;
+    stack_bytes = u->src[0]->arg.i;
+    break;
+  }
+  ASSERT_INT_EQ(stack_bytes, 16);
+  free(lin);
   poly_ctx_destroy(ctx);
   PASS();
 }

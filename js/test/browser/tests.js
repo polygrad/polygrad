@@ -1982,6 +1982,14 @@
           assert(bitcasted.uopLogical.src[0].key === source.uopLogical.key, "bitcast logical source mismatch");
           assert(bitcasted.uopPhysical.src[0].key === source.uopPhysical.key, "bitcast physical source mismatch");
         });
+        await test("unequal-width bitcast matches pinned lane order", async () => {
+          const wide = Tensor.full([8], 1, { dtype: "uint8" }).bitcast("uint32");
+          const narrow = Tensor.full([2], 1, { dtype: "uint32" }).bitcast("uint8");
+          assert(wide.shape.length === 1 && wide.shape[0] === 2, "wide bitcast shape mismatch");
+          assert(narrow.shape.length === 1 && narrow.shape[0] === 8, "narrow bitcast shape mismatch");
+          assertClose(await wide.toArray(), [16843009, 16843009], 0);
+          assertClose(await narrow.toArray(), [1, 0, 0, 0, 1, 0, 0, 0], 0);
+        });
         await testIf(supportsF16, "half and double convenience", async () => {
           const t = new Tensor([1, 2, 3]);
           const h = t.half();
@@ -2133,7 +2141,7 @@
           Tensor.manual_seed(11);
           const expectedDropout = Tensor.randLike(x, { dtype: "float32", contiguous: false }).ge(0.25).contiguous().where(x, 0).div(0.75);
           Tensor.training = false;
-          assert(dropped.uop.key === expectedDropout.uop.key, "dropout graph differs");
+          assert(dropped.uop.key !== expectedDropout.uop.key, "reset RNG occurrences must remain distinct");
           assertClose(await dropped.toArray(), await expectedDropout.toArray());
           const q = new Tensor(Float32Array.from({ length: 12 }, (_, i) => i / 13)).reshape(1, 2, 2, 3);
           const k = new Tensor(Float32Array.from({ length: 12 }, (_, i) => (i - 4) / 11)).reshape(1, 2, 2, 3);
@@ -3306,6 +3314,19 @@
           const b = await Tensor.rand(8).toArray();
           for (let i = 0; i < 8; i++) {
             assert(a[i] === b[i], `Not deterministic at [${i}]: ${a[i]} vs ${b[i]}`);
+          }
+          const expected = [
+            0.4886598587036133,
+            0.3479880094528198,
+            0.6593245267868042,
+            0.6364744901657104,
+            0.4711652994155884,
+            0.14146876335144043,
+            0.27809083461761475,
+            0.049955129623413086
+          ];
+          for (let i = 0; i < expected.length; i++) {
+            assert(a[i] === expected[i], `Pinned RNG mismatch at [${i}]: ${a[i]} vs ${expected[i]}`);
           }
         });
         console.log("\n-- Float64 --");

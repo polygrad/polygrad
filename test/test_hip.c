@@ -195,6 +195,58 @@ TEST_BACKEND(hip, render_shared_mem) {
   PASS();
 }
 
+TEST_BACKEND(hip, vector_local_shrink_load_store_use_typed_lvalue) {
+  /* HIPRenderer inherits the same pinned CStyleLanguage.render_access as CUDA
+   * (renderer/cstyle.py:47-58,179-184,472-520). */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyDType vec4 = poly_dtype_vec(POLY_FLOAT32, 4);
+  PolyUOp *size = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(128));
+  PolyParamArg local_arg = {.slot = 0, .addrspace = POLY_ADDR_LOCAL};
+  PolyParamArg global_arg = {.slot = 0, .addrspace = POLY_ADDR_GLOBAL};
+  PolyUOp *local =
+      poly_uop1(ctx, POLY_OP_BUFFER, POLY_FLOAT32, size, poly_arg_param(&local_arg));
+  PolyUOp *global =
+      poly_uop1(ctx, POLY_OP_PARAM, POLY_FLOAT32, size, poly_arg_param(&global_arg));
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(32));
+  PolyUOp *idx =
+      poly_uop1(ctx, POLY_OP_SPECIAL, POLY_INT32, bound, poly_arg_str("lidx0"));
+  PolyUOp *width = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(4));
+  PolyUOp *local_srcs[3] = {local, idx, width};
+  PolyUOp *local_vec =
+      poly_uop(ctx, POLY_OP_SHRINK, vec4, local_srcs, 3, poly_arg_none());
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
+  PolyUOp *global_srcs[3] = {global, zero, width};
+  PolyUOp *global_vec =
+      poly_uop(ctx, POLY_OP_SHRINK, vec4, global_srcs, 3, poly_arg_none());
+  PolyUOp *values[4];
+  for (int i = 0; i < 4; i++)
+    values[i] =
+        poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float((double)i + 1.0));
+  PolyUOp *value = poly_uop(ctx, POLY_OP_STACK, vec4, values, 4, poly_arg_none());
+  PolyUOp *local_store =
+      poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, local_vec, value, poly_arg_none());
+  PolyUOp *local_load =
+      poly_uop1(ctx, POLY_OP_LOAD, vec4, local_vec, poly_arg_none());
+  PolyUOp *global_store =
+      poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, global_vec, local_load, poly_arg_none());
+  PolyUOp *sink_srcs[2] = {local_store, global_store};
+  PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, sink_srcs, 2, poly_arg_none());
+
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize_rewritten(ctx, sink, &n_lin);
+  ASSERT_NOT_NULL(lin);
+  char *source = poly_render_hip(lin, n_lin, "local_float4_access", 32);
+  free(lin);
+  ASSERT_NOT_NULL(source);
+  const char *first = strstr(source, "*((float4*)((smem0+");
+  ASSERT_NOT_NULL(first);
+  ASSERT_NOT_NULL(strstr(first + 1, "*((float4*)((smem0+"));
+  free(source);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 /* HIP binding helpers */
 
 static int build_hip_bindings(PolyTestBufferView *out, PolyUOp **bufs, float **host_ptrs, int n) {

@@ -730,8 +730,9 @@ static int find_matching_end(PolyUOp **lin, int n, int range_pos) {
 static PolyUOp *interp_follow_storage_base(PolyUOp *u) {
   while (u) {
     if (u->op == POLY_OP_DEFINE_REG || u->op == POLY_OP_DEFINE_LOCAL) return u;
-    if (u->op == POLY_OP_BUFFER && u->dtype.is_ptr &&
-        (u->dtype.addrspace == POLY_ADDR_REG || u->dtype.addrspace == POLY_ADDR_LOCAL))
+    if (u->op == POLY_OP_BUFFER &&
+        (poly_program_memory_is(u, POLY_ADDR_REG) ||
+         poly_program_memory_is(u, POLY_ADDR_LOCAL)))
       return u;
     if ((u->op == POLY_OP_AFTER || u->op == POLY_OP_CAST || u->op == POLY_OP_BITCAST ||
          u->op == POLY_OP_INDEX || u->op == POLY_OP_SHRINK) &&
@@ -779,7 +780,9 @@ static int interp_storage_extent_for_use(PolyUOp *ptr_uop, int access_lanes) {
 }
 
 static int interp_storage_lanes_for_def(PolyUOp **lin, int n_lin, PolyUOp *def) {
-  int lanes = def->dtype.count > 1 ? def->dtype.count : 1;
+  int64_t declared = poly_program_buffer_size(def);
+  int lanes = declared > INT_MAX ? INT_MAX : (int)declared;
+  if (lanes < 1) lanes = def->dtype.count > 1 ? def->dtype.count : 1;
   for (int i = 0; i < n_lin; i++) {
     PolyUOp *u = lin[i];
     if (u->op == POLY_OP_STORE && u->n_src >= 2) {
@@ -870,14 +873,14 @@ static int interp_region(
     }
 
     case POLY_OP_BUFFER:
-      if (!(u->dtype.is_ptr &&
-            (u->dtype.addrspace == POLY_ADDR_REG || u->dtype.addrspace == POLY_ADDR_LOCAL))) {
+      if (!(poly_program_memory_is(u, POLY_ADDR_REG) ||
+            poly_program_memory_is(u, POLY_ADDR_LOCAL))) {
         fprintf(stderr, "polygrad: interp: unexpected BUFFER in program IR\n");
         return -1;
       }
       /* fallthrough */
     case POLY_OP_DEFINE_REG: {
-      PolyDType base = poly_dtype_scalar(u->dtype);
+      PolyDType base = poly_dtype_scalar(poly_program_buffer_dtype(u));
       int sz = poly_dtype_itemsize(base);
       if (sz < 1) sz = 1;
       int cnt = interp_storage_lanes_for_def(lin, n_lin, u);
@@ -1260,9 +1263,9 @@ int poly_interp_eval(PolyUOp **lin, int n_lin, void **args, int n_args) {
   /* Free register/local accumulator allocations */
   for (int i = 0; i < n_lin; i++) {
     if ((lin[i]->op == POLY_OP_DEFINE_REG || lin[i]->op == POLY_OP_DEFINE_LOCAL ||
-         (lin[i]->op == POLY_OP_BUFFER && lin[i]->dtype.is_ptr &&
-          (lin[i]->dtype.addrspace == POLY_ADDR_REG ||
-           lin[i]->dtype.addrspace == POLY_ADDR_LOCAL))) &&
+         (lin[i]->op == POLY_OP_BUFFER &&
+          (poly_program_memory_is(lin[i], POLY_ADDR_REG) ||
+           poly_program_memory_is(lin[i], POLY_ADDR_LOCAL)))) &&
         vals[i].lanes[0].p)
       free(vals[i].lanes[0].p);
   }

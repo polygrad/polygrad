@@ -473,6 +473,16 @@ function createWasmCoreFromModule(Module, device) {
     if (deviceName === 'webgpu') throw new PolyAsyncRequired(method, asyncMethod)
   }
 
+  /* Emscripten Asyncify owns one suspended C stack per loaded Module.  Keep
+   * every WebGPU entrypoint, including its WASM marshalling allocations, on a
+   * core-wide queue so Tensor, JIT, and Instance calls cannot reenter it. */
+  let asyncifyTail = Promise.resolve()
+  function enqueueAsyncify(fn) {
+    const run = asyncifyTail.then(fn, fn)
+    asyncifyTail = run.catch(() => {})
+    return run
+  }
+
   function realizeUopsSync(ctx, uops) {
     requireSyncBackend('poly_realize_uops', 'poly_realize_uops_async')
     const n = uops.length
@@ -495,29 +505,34 @@ function createWasmCoreFromModule(Module, device) {
 
   async function realizeUopsAsync(ctx, uops) {
     if (deviceName !== 'webgpu' || !Module.ccall) return realizeUopsSync(ctx, uops)
-    await ensureWebGPU()
-    const n = uops.length
-    if (n === 0) return []
-    const inPtr = Module._malloc(n * 4)
-    const outPtr = Module._malloc(n * 4)
-    const h32 = heap32()
-    for (let i = 0; i < n; i++) h32[(inPtr >> 2) + i] = uops[i]
-    for (let i = 0; i < n; i++) h32[(outPtr >> 2) + i] = 0
-    const rc = await Module.ccall(
-      'poly_realize_uops',
-      'number',
-      ['number', 'number', 'number', 'number'],
-      [ctx, inPtr, n, outPtr],
-      { async: true }
-    )
-    const out = new Array(n)
-    if (rc === 0) {
-      const h32b = heap32()
-      for (let i = 0; i < n; i++) out[i] = h32b[(outPtr >> 2) + i]
-    }
-    Module._free(inPtr)
-    Module._free(outPtr)
-    return rc === 0 ? out : null
+    return enqueueAsyncify(async () => {
+      await ensureWebGPU()
+      const n = uops.length
+      if (n === 0) return []
+      const inPtr = Module._malloc(n * 4)
+      const outPtr = Module._malloc(n * 4)
+      try {
+        const h32 = heap32()
+        for (let i = 0; i < n; i++) h32[(inPtr >> 2) + i] = uops[i]
+        for (let i = 0; i < n; i++) h32[(outPtr >> 2) + i] = 0
+        const rc = await Module.ccall(
+          'poly_realize_uops',
+          'number',
+          ['number', 'number', 'number', 'number'],
+          [ctx, inPtr, n, outPtr],
+          { async: true }
+        )
+        const out = new Array(n)
+        if (rc === 0) {
+          const h32b = heap32()
+          for (let i = 0; i < n; i++) out[i] = h32b[(outPtr >> 2) + i]
+        }
+        return rc === 0 ? out : null
+      } finally {
+        Module._free(inPtr)
+        Module._free(outPtr)
+      }
+    })
   }
 
   function realizeTensorsSync(ctx, tensors) {
@@ -542,29 +557,34 @@ function createWasmCoreFromModule(Module, device) {
 
   async function realizeTensorsAsync(ctx, tensors) {
     if (deviceName !== 'webgpu' || !Module.ccall) return realizeTensorsSync(ctx, tensors)
-    await ensureWebGPU()
-    const n = tensors.length
-    if (n === 0) return []
-    const inPtr = Module._malloc(n * 4)
-    const outPtr = Module._malloc(n * 4)
-    const h32 = heap32()
-    for (let i = 0; i < n; i++) h32[(inPtr >> 2) + i] = tensors[i]
-    for (let i = 0; i < n; i++) h32[(outPtr >> 2) + i] = 0
-    const rc = await Module.ccall(
-      'poly_realize_tensors',
-      'number',
-      ['number', 'number', 'number', 'number'],
-      [ctx, inPtr, n, outPtr],
-      { async: true }
-    )
-    const out = new Array(n)
-    if (rc === 0) {
-      const h32b = heap32()
-      for (let i = 0; i < n; i++) out[i] = h32b[(outPtr >> 2) + i]
-    }
-    Module._free(inPtr)
-    Module._free(outPtr)
-    return rc === 0 ? out : null
+    return enqueueAsyncify(async () => {
+      await ensureWebGPU()
+      const n = tensors.length
+      if (n === 0) return []
+      const inPtr = Module._malloc(n * 4)
+      const outPtr = Module._malloc(n * 4)
+      try {
+        const h32 = heap32()
+        for (let i = 0; i < n; i++) h32[(inPtr >> 2) + i] = tensors[i]
+        for (let i = 0; i < n; i++) h32[(outPtr >> 2) + i] = 0
+        const rc = await Module.ccall(
+          'poly_realize_tensors',
+          'number',
+          ['number', 'number', 'number', 'number'],
+          [ctx, inPtr, n, outPtr],
+          { async: true }
+        )
+        const out = new Array(n)
+        if (rc === 0) {
+          const h32b = heap32()
+          for (let i = 0; i < n; i++) out[i] = h32b[(outPtr >> 2) + i]
+        }
+        return rc === 0 ? out : null
+      } finally {
+        Module._free(inPtr)
+        Module._free(outPtr)
+      }
+    })
   }
 
   function jitRunSync(jit, tensors) {
@@ -575,15 +595,17 @@ function createWasmCoreFromModule(Module, device) {
 
   async function jitRunAsync(jit, tensors) {
     if (deviceName !== 'webgpu' || !Module.ccall) return jitRunSync(jit, tensors)
-    await ensureWebGPU()
-    const ptr = writePtrArrayScratch(tensors)
-    return await Module.ccall(
-      'poly_jit_run',
-      'number',
-      ['number', 'number', 'number'],
-      [jit, ptr, tensors.length],
-      { async: true }
-    )
+    return enqueueAsyncify(async () => {
+      await ensureWebGPU()
+      const ptr = writePtrArrayScratch(tensors)
+      return await Module.ccall(
+        'poly_jit_run',
+        'number',
+        ['number', 'number', 'number'],
+        [jit, ptr, tensors.length],
+        { async: true }
+      )
+    })
   }
 
   function jitEndCaptureSync(jit) {
@@ -593,14 +615,16 @@ function createWasmCoreFromModule(Module, device) {
 
   async function jitEndCaptureAsync(jit) {
     if (deviceName !== 'webgpu' || !Module.ccall) return jitEndCaptureSync(jit)
-    await ensureWebGPU()
-    return await Module.ccall(
-      'poly_jit_end_capture',
-      'number',
-      ['number'],
-      [jit],
-      { async: true }
-    )
+    return enqueueAsyncify(async () => {
+      await ensureWebGPU()
+      return await Module.ccall(
+        'poly_jit_end_capture',
+        'number',
+        ['number'],
+        [jit],
+        { async: true }
+      )
+    })
   }
 
   function bufferReadSync(ctx, buf, nbytes) {
@@ -619,21 +643,23 @@ function createWasmCoreFromModule(Module, device) {
   async function bufferReadAsync(ctx, buf, nbytes) {
     if (deviceName !== 'webgpu' || !Module.ccall) return bufferReadSync(ctx, buf, nbytes)
     if (nbytes <= 0) return new Uint8Array(0)
-    await ensureWebGPU()
-    const dst = Module._malloc(nbytes)
-    try {
-      const rc = await Module.ccall(
-        'poly_buffer_read',
-        'number',
-        ['number', 'number', 'number', 'number'],
-        [ctx, buf, dst, nbytes],
-        { async: true }
-      )
-      if (rc !== 0) throw new Error('poly_buffer_read failed (rc=' + rc + ')')
-      return heapU8().slice(dst, dst + nbytes)
-    } finally {
-      Module._free(dst)
-    }
+    return enqueueAsyncify(async () => {
+      await ensureWebGPU()
+      const dst = Module._malloc(nbytes)
+      try {
+        const rc = await Module.ccall(
+          'poly_buffer_read',
+          'number',
+          ['number', 'number', 'number', 'number'],
+          [ctx, buf, dst, nbytes],
+          { async: true }
+        )
+        if (rc !== 0) throw new Error('poly_buffer_read failed (rc=' + rc + ')')
+        return heapU8().slice(dst, dst + nbytes)
+      } finally {
+        Module._free(dst)
+      }
+    })
   }
 
   const ffi = {
@@ -839,6 +865,26 @@ function createWasmCoreFromModule(Module, device) {
       ),
     poly_tensor_eye_by_id: (ctx, n, m, dtypeId, targetDevice) =>
       Module._poly_tensor_eye_by_id(ctx, BigInt(n), BigInt(m), dtypeId, targetDevice),
+    poly_tensor_manual_seed: (ctx, seed) =>
+      Module._poly_tensor_manual_seed(ctx, BigInt(seed)),
+    poly_tensor_rand_by_id: (ctx, shape, ndim, dtypeId, targetDevice, contiguous) => {
+      const dimsPtr = writeInt64Array(shape || [])
+      try {
+        return Module._poly_tensor_rand_by_id(
+          ctx, dimsPtr, ndim, dtypeId, targetDevice, contiguous
+        )
+      } finally {
+        if (dimsPtr) Module._free(dimsPtr)
+      }
+    },
+    poly_tensor_randn_by_id: (ctx, shape, ndim, dtypeId, targetDevice) => {
+      const dimsPtr = writeInt64Array(shape || [])
+      try {
+        return Module._poly_tensor_randn_by_id(ctx, dimsPtr, ndim, dtypeId, targetDevice)
+      } finally {
+        if (dimsPtr) Module._free(dimsPtr)
+      }
+    },
 
     poly_uop_has_buffer_identity: (uop) => !!Module._poly_uop_has_buffer_identity(uop),
     poly_uop_get_buffer_identity: (uop) => Module._poly_uop_get_buffer_identity(uop),
@@ -1583,7 +1629,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 53
+  const EXPECTED_ABI = 54
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(
@@ -2131,6 +2177,7 @@ function createWasmCoreFromModule(Module, device) {
     int64: BigInt,
     readShape: readOutShape,
     canRunOp,
+    enqueueAsync: enqueueAsyncify,
     get caps() {
       return {
         simd: true,

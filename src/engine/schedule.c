@@ -380,6 +380,9 @@ static void poly_call_mark_access_param(PolyUOp *call, PolyUOp *ptr, bool *mask,
   /* Pinned ProgramInfo.from_sink reads ParamArg.slot for shaped function
    * PARAMs as well as the lowered integer-slot PARAM form
    * (tinygrad/uop/ops.py:1127-1152). */
+  if (ptr->op == POLY_OP_CAST && ptr->n_src == 1 && ptr->src[0] &&
+      ptr->src[0]->op == POLY_OP_INDEX)
+    ptr = ptr->src[0];
   if (ptr->op == POLY_OP_PARAM &&
       (ptr->arg.kind == POLY_ARG_INT ||
        (ptr->arg.kind == POLY_ARG_PARAM && ptr->arg.param))) {
@@ -389,7 +392,7 @@ static void poly_call_mark_access_param(PolyUOp *call, PolyUOp *ptr, bool *mask,
     if (idx >= 0 && idx < n_args) mask[idx] = true;
     return;
   }
-  if (ptr->op == POLY_OP_INDEX || ptr->op == POLY_OP_GEP) {
+  if (ptr->op == POLY_OP_INDEX || ptr->op == POLY_OP_SHRINK || ptr->op == POLY_OP_GEP) {
     if (ptr->n_src > 0) poly_call_mark_access_param(call, ptr->src[0], mask, n_args);
     return;
   }

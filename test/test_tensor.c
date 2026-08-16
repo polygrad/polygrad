@@ -67,6 +67,28 @@ static PolyUOp *base_buf(PolyUOp *u) {
   return u;
 }
 
+static int count_op_in_root(PolyCtx *ctx, PolyUOp *root, int op) {
+  int n_topo = 0, count = 0;
+  PolyUOp **topo = poly_toposort_alloc(ctx, root, &n_topo);
+  if (!topo) return -1;
+  for (int i = 0; i < n_topo; i++) count += topo[i]->op == op;
+  poly_toposort_free(topo);
+  return count;
+}
+
+static int read_tensor_bytes(PolyCtx *ctx, PolyTensor *tensor, void *out, size_t nbytes) {
+  PolyTensor *realized = NULL;
+  if (!ctx || !tensor || !out || poly_realize_tensors(ctx, &tensor, 1, &realized) != 0 ||
+      !realized)
+    return -1;
+  const PolyUOp *buffer = poly_uop_get_buffer_identity(realized->uop_physical);
+  return buffer ? poly_buffer_read(ctx, (PolyUOp *)buffer, out, nbytes) : -1;
+}
+
+static int read_tensor_f32(PolyCtx *ctx, PolyTensor *tensor, float *out, size_t n) {
+  return read_tensor_bytes(ctx, tensor, out, n * sizeof(*out));
+}
+
 static void set_unsigned_values(void *dst, PolyDType dtype, const uint64_t *values, int n) {
   for (int i = 0; i < n; i++) {
     if (dtype.bitsize == 8)
@@ -295,6 +317,77 @@ TEST(tensor, host_array_uses_deviceful_source_and_real_cpu_copy) {
       NULL
   );
   poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tensor, stateful_rand_matches_pinned_graph_and_values) {
+  /* Pinned Tensor._next_counter plus RandMixin._rand
+   * (tensor.py:493-504, mixin/rand.py:12-39): one public draw advances the
+   * storage-backed uint32 counter through AFTER/STORE and emits two THREEFRY
+   * nodes. The exact float32 values below are the pinned seed-1337 CPU words. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int f32_id = poly_dtype_id_by_name("float32");
+  int64_t shape[1] = {8};
+  poly_tensor_manual_seed(ctx, 1337);
+  PolyTensor *first = poly_tensor_rand_by_id(
+      ctx, shape, 1, f32_id, POLY_DEVICE_CPU, 1
+  );
+  ASSERT_NOT_NULL(first);
+  ASSERT_INT_EQ(count_op_in_root(ctx, first->uop_physical, POLY_OP_AFTER), 1);
+  ASSERT_INT_EQ(count_op_in_root(ctx, first->uop_physical, POLY_OP_STORE), 1);
+  ASSERT_INT_EQ(count_op_in_root(ctx, first->uop_physical, POLY_OP_THREEFRY), 2);
+  ASSERT_INT_EQ(count_op_in_root(ctx, first->uop_physical, POLY_OP_COPY), 2);
+  ASSERT_INT_EQ(count_op_in_root(ctx, first->uop_logical, POLY_OP_COPY), 0);
+
+  float first_values[8] = {0};
+  ASSERT_INT_EQ(read_tensor_f32(ctx, first, first_values, 8), 0);
+  const uint32_t expected_bits[8] = {
+      UINT32_C(0x3efa31a0), UINT32_C(0x3eb22b7c), UINT32_C(0x3f28c97e),
+      UINT32_C(0x3f22effe), UINT32_C(0x3ef13c94), UINT32_C(0x3e10dd30),
+      UINT32_C(0x3e8e61ec), UINT32_C(0x3d4c9dc0),
+  };
+  ASSERT_TRUE(memcmp(first_values, expected_bits, sizeof(expected_bits)) == 0);
+
+  poly_tensor_manual_seed(ctx, 1337);
+  PolyTensor *reset = poly_tensor_rand_by_id(
+      ctx, shape, 1, f32_id, POLY_DEVICE_CPU, 1
+  );
+  ASSERT_NOT_NULL(reset);
+  float reset_values[8] = {0};
+  ASSERT_INT_EQ(read_tensor_f32(ctx, reset, reset_values, 8), 0);
+  ASSERT_TRUE(memcmp(first_values, reset_values, sizeof(first_values)) == 0);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tensor, stateful_rand_is_context_local_and_advances) {
+  /* Tensor's pinned dictionaries are process-global only because Tensor owns
+   * the runtime. Polygrad adapts that state to PolyCtx ownership: equal fresh
+   * contexts reproduce the stream, while consecutive draws in one context
+   * advance it. */
+  PolyCtx *ctx0 = poly_ctx_new();
+  PolyCtx *ctx1 = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx0);
+  ASSERT_NOT_NULL(ctx1);
+  int f32_id = poly_dtype_id_by_name("float32");
+  int64_t shape[1] = {4};
+  poly_tensor_manual_seed(ctx0, 123);
+  poly_tensor_manual_seed(ctx1, 123);
+  PolyTensor *a0 = poly_tensor_rand_by_id(ctx0, shape, 1, f32_id, POLY_DEVICE_CPU, 1);
+  PolyTensor *a1 = poly_tensor_rand_by_id(ctx1, shape, 1, f32_id, POLY_DEVICE_CPU, 1);
+  PolyTensor *b0 = poly_tensor_rand_by_id(ctx0, shape, 1, f32_id, POLY_DEVICE_CPU, 1);
+  ASSERT_NOT_NULL(a0);
+  ASSERT_NOT_NULL(a1);
+  ASSERT_NOT_NULL(b0);
+  float av0[4] = {0}, av1[4] = {0}, bv0[4] = {0};
+  ASSERT_INT_EQ(read_tensor_f32(ctx0, a0, av0, 4), 0);
+  ASSERT_INT_EQ(read_tensor_f32(ctx1, a1, av1, 4), 0);
+  ASSERT_INT_EQ(read_tensor_f32(ctx0, b0, bv0, 4), 0);
+  ASSERT_TRUE(memcmp(av0, av1, sizeof(av0)) == 0);
+  ASSERT_TRUE(memcmp(av0, bv0, sizeof(av0)) != 0);
+  poly_ctx_destroy(ctx1);
+  poly_ctx_destroy(ctx0);
   PASS();
 }
 
@@ -817,9 +910,9 @@ TEST(tensor, dtype_constructors_use_exact_logical_and_physical_sources) {
   ASSERT_PTR_EQ(bitcasted->uop_logical->src[0], source->uop_logical);
   ASSERT_PTR_EQ(bitcasted->uop_physical->src[0], source->uop_physical);
 
-  /* Pinned UOp.bitcast accepts unequal scalar widths; Tensor.bitcast keeps
-   * this direct spelling for DISK-backed tensors. Shape inference scales the
-   * last dimension instead of rejecting the UOp. */
+  /* Pinned Tensor.bitcast decomposes this ordinary CPU width change and ends
+   * in one equal-width BITCAST after reshaping/combining the uint lanes
+   * (tensor.py:881-904). Shape inference scales the last dimension. */
   int64_t bytes_shape[1] = {8};
   PolyTensor *bytes = poly_tensor_empty(ctx, POLY_UINT8, bytes_shape, 1, POLY_DEVICE_CPU);
   PolyTensor *wide = poly_tensor_bitcast_by_id(ctx, bytes, f32);
@@ -829,6 +922,66 @@ TEST(tensor, dtype_constructors_use_exact_logical_and_physical_sources) {
   PolyShape wide_shape = poly_uop_max_shape_cached(ctx, wide->uop_physical);
   ASSERT_INT_EQ(wide_shape.ndim, 1);
   ASSERT_INT_EQ(wide_shape.dims[0], 2);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tensor, unequal_width_bitcast_matches_pinned_tensor_topology_and_values) {
+  /* Pinned Tensor.bitcast decomposes non-DISK width changes through uint
+   * shifts plus Tensor.usum/stack movement (tensor.py:881-904). These exact
+   * operation counts are paired with bitcast_widen_u8_u32 and
+   * bitcast_narrow_u32_u8 in the canonical graph corpus. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int u8_id = poly_dtype_id_by_name("uint8");
+  int u32_id = poly_dtype_id_by_name("uint32");
+
+  int64_t wide_source_shape[1] = {8};
+  PolyTensor *wide_source =
+      poly_tensor_empty(ctx, POLY_UINT8, wide_source_shape, 1, POLY_DEVICE_CPU);
+  PolyUOp *wide_fill_uop =
+      poly_full_int_by_id(ctx, wide_source_shape, 1, 1, u8_id);
+  PolyTensor *wide_fill = poly_tensor_create_with_roots(
+      ctx, wide_fill_uop, wide_fill_uop, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
+  );
+  ASSERT_NOT_NULL(poly_tensor_assign(ctx, wide_source, wide_fill));
+  PolyTensor *wide = poly_tensor_bitcast_by_id(ctx, wide_source, u32_id);
+  ASSERT_NOT_NULL(wide);
+  PolyShape wide_shape = poly_uop_max_shape_cached(ctx, wide->uop_physical);
+  ASSERT_INT_EQ(wide_shape.ndim, 1);
+  ASSERT_INT_EQ(wide_shape.dims[0], 2);
+  ASSERT_INT_EQ(count_op_in_root(ctx, wide->uop_physical, POLY_OP_SHRINK), 4);
+  ASSERT_INT_EQ(count_op_in_root(ctx, wide->uop_physical, POLY_OP_CAST), 4);
+  ASSERT_INT_EQ(count_op_in_root(ctx, wide->uop_physical, POLY_OP_SHL), 4);
+  ASSERT_INT_EQ(count_op_in_root(ctx, wide->uop_physical, POLY_OP_ADD), 3);
+  uint32_t wide_values[2] = {0};
+  ASSERT_INT_EQ(read_tensor_bytes(ctx, wide, wide_values, sizeof(wide_values)), 0);
+  ASSERT_INT_EQ(wide_values[0], UINT32_C(0x01010101));
+  ASSERT_INT_EQ(wide_values[1], UINT32_C(0x01010101));
+
+  int64_t narrow_source_shape[1] = {2};
+  PolyTensor *narrow_source =
+      poly_tensor_empty(ctx, POLY_UINT32, narrow_source_shape, 1, POLY_DEVICE_CPU);
+  PolyUOp *narrow_fill_uop =
+      poly_full_int_by_id(ctx, narrow_source_shape, 1, 1, u32_id);
+  PolyTensor *narrow_fill = poly_tensor_create_with_roots(
+      ctx, narrow_fill_uop, narrow_fill_uop, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
+  );
+  ASSERT_NOT_NULL(poly_tensor_assign(ctx, narrow_source, narrow_fill));
+  PolyTensor *narrow = poly_tensor_bitcast_by_id(ctx, narrow_source, u8_id);
+  ASSERT_NOT_NULL(narrow);
+  PolyShape narrow_shape = poly_uop_max_shape_cached(ctx, narrow->uop_physical);
+  ASSERT_INT_EQ(narrow_shape.ndim, 1);
+  ASSERT_INT_EQ(narrow_shape.dims[0], 8);
+  ASSERT_INT_EQ(count_op_in_root(ctx, narrow->uop_physical, POLY_OP_SHR), 4);
+  ASSERT_INT_EQ(count_op_in_root(ctx, narrow->uop_physical, POLY_OP_PAD), 4);
+  ASSERT_INT_EQ(count_op_in_root(ctx, narrow->uop_physical, POLY_OP_ADD), 3);
+  ASSERT_INT_EQ(count_op_in_root(ctx, narrow->uop_physical, POLY_OP_CAST), 1);
+  uint8_t narrow_values[8] = {0};
+  ASSERT_INT_EQ(read_tensor_bytes(ctx, narrow, narrow_values, sizeof(narrow_values)), 0);
+  const uint8_t expected_narrow[8] = {1, 0, 0, 0, 1, 0, 0, 0};
+  ASSERT_TRUE(memcmp(narrow_values, expected_narrow, sizeof(expected_narrow)) == 0);
 
   poly_ctx_destroy(ctx);
   PASS();

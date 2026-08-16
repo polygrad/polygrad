@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stddef.h>
 #include <string.h>
+#include <time.h>
 
 /* Defined in ops.c */
 void poly_init_group_ops(void);
@@ -57,6 +58,9 @@ PolyCtx *poly_ctx_new(void) {
   ctx->stats_suppression_depth = 0;
   ctx->shape_cache = poly_map_new(64);
   ctx->buffers = poly_map_new(64);
+  ctx->rng_states = poly_map_new(8);
+  ctx->rng_seed = (uint64_t)time(NULL);
+  ctx->rng_device_count = 0;
   ctx->tensors = NULL;
   ctx->n_tensors = 0;
   ctx->tensors_cap = 0;
@@ -65,7 +69,7 @@ PolyCtx *poly_ctx_new(void) {
   ctx->name_map = poly_map_new(16);
   if (!ctx->arena || !ctx->scratch || !ctx->cse || !ctx->schedule_cache || !ctx->to_program_cache ||
       !ctx->runtime_cache || !ctx->mem_used_by_device || !ctx->shape_cache || !ctx->buffers ||
-      !ctx->name_map) {
+      !ctx->rng_states || !ctx->name_map) {
     if (ctx->arena) poly_arena_destroy(ctx->arena);
     if (ctx->scratch) poly_arena_destroy(ctx->scratch);
     if (ctx->cse) poly_map_destroy(ctx->cse);
@@ -75,6 +79,7 @@ PolyCtx *poly_ctx_new(void) {
     if (ctx->mem_used_by_device) poly_map_destroy(ctx->mem_used_by_device);
     if (ctx->shape_cache) poly_map_destroy(ctx->shape_cache);
     if (ctx->buffers) poly_map_destroy(ctx->buffers);
+    if (ctx->rng_states) poly_map_destroy(ctx->rng_states);
     if (ctx->name_map) poly_map_destroy(ctx->name_map);
     free(ctx);
     return NULL;
@@ -110,6 +115,7 @@ void poly_ctx_destroy(PolyCtx *ctx) {
   /* Free owned buffer ptrs before destroying the map. */
   poly_map_foreach(ctx->buffers, free_buffer_entry, ctx);
   poly_map_destroy(ctx->buffers);
+  poly_map_destroy(ctx->rng_states);
   poly_map_destroy(ctx->mem_used_by_device);
   free(ctx->tensors);
   poly_map_destroy(ctx->name_map);

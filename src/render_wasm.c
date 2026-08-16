@@ -17,6 +17,7 @@
 #include "utils.h"
 #include "wasm_builder.h"
 #include <assert.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -175,8 +176,9 @@ static void rlm_destroy(RegLocalMap *m) {
 static PolyUOp *wasm_acc_base(PolyUOp *u) {
   if (!u) return NULL;
   if (u->op == POLY_OP_DEFINE_REG || u->op == POLY_OP_DEFINE_LOCAL) return u;
-  if (u->op == POLY_OP_BUFFER && u->dtype.is_ptr &&
-      (u->dtype.addrspace == POLY_ADDR_REG || u->dtype.addrspace == POLY_ADDR_LOCAL))
+  if (u->op == POLY_OP_BUFFER &&
+      (poly_program_memory_is(u, POLY_ADDR_REG) ||
+       poly_program_memory_is(u, POLY_ADDR_LOCAL)))
     return u;
   if ((u->op == POLY_OP_AFTER || u->op == POLY_OP_CAST || u->op == POLY_OP_BITCAST ||
        u->op == POLY_OP_INDEX) &&
@@ -188,9 +190,8 @@ static PolyUOp *wasm_acc_base(PolyUOp *u) {
 static bool wasm_is_i32_address_base(PolyUOp *u) {
   if (!u) return false;
   if (u->op == POLY_OP_PARAM) return true;
-  if (u->op == POLY_OP_BUFFER)
-    return !u->dtype.is_ptr || u->dtype.addrspace == POLY_ADDR_GLOBAL;
-  if (u->dtype.is_ptr && u->dtype.addrspace == POLY_ADDR_GLOBAL) return true;
+  if (u->op == POLY_OP_BUFFER) return poly_program_memory_is(u, POLY_ADDR_GLOBAL);
+  if (u->dtype.is_ptr && poly_program_memory_is(u, POLY_ADDR_GLOBAL)) return true;
   if ((u->op == POLY_OP_AFTER || u->op == POLY_OP_CAST || u->op == POLY_OP_BITCAST) &&
       u->n_src > 0)
     return wasm_is_i32_address_base(u->src[0]);
@@ -259,7 +260,8 @@ static bool wasm_load_shrink_native_vec(PolyUOp *u, PolyDType *vec_out) {
 }
 
 static int wasm_reg_storage_size(PolyUOp **uops, int n, PolyUOp *reg) {
-  int size = reg && reg->dtype.ptr_size > 0 ? (int)reg->dtype.ptr_size : 1;
+  int64_t declared = poly_program_buffer_size(reg);
+  int size = declared > INT_MAX ? INT_MAX : (int)declared;
   for (int i = 0; i < n; i++) {
     PolyUOp *u = uops[i];
     if (!u) continue;
@@ -1748,8 +1750,9 @@ static bool kernel_is_simdable(PolyUOp **uops, int n) {
     if (u->op == POLY_OP_CAST || u->op == POLY_OP_BITCAST) return false;
     /* Reduce kernels are not SIMD-able (V1) */
     if (u->op == POLY_OP_DEFINE_LOCAL || u->op == POLY_OP_DEFINE_REG ||
-        (u->op == POLY_OP_BUFFER && u->dtype.is_ptr &&
-         (u->dtype.addrspace == POLY_ADDR_REG || u->dtype.addrspace == POLY_ADDR_LOCAL)))
+        (u->op == POLY_OP_BUFFER &&
+         (poly_program_memory_is(u, POLY_ADDR_REG) ||
+          poly_program_memory_is(u, POLY_ADDR_LOCAL))))
       return false;
   }
   return true;
@@ -1766,8 +1769,7 @@ static bool wasm_reg_addr_index(PolyUOp *addr, PolyUOp **reg_base_out, int *idx_
   PolyUOp *reg_base = wasm_acc_base(idx->src[0]);
   if (!reg_base ||
       !(reg_base->op == POLY_OP_DEFINE_REG ||
-        (reg_base->op == POLY_OP_BUFFER && reg_base->dtype.is_ptr &&
-         reg_base->dtype.addrspace == POLY_ADDR_REG)))
+        (reg_base->op == POLY_OP_BUFFER && poly_program_memory_is(reg_base, POLY_ADDR_REG))))
     return false;
   PolyDType scalar = wasm_reg_base_dtype(reg_base->dtype);
   if (!poly_dtype_is_float(poly_dtype_scalar(scalar))) return false;
@@ -1869,8 +1871,8 @@ static void build_code_scalar(
     if (u->op == POLY_OP_RANGE) n_locals_i32++; /* loop counter always i32 */
     if (u->op == POLY_OP_LOAD) {
       bool is_reg_load =
-          (u->src[0]->op == POLY_OP_INDEX && u->src[0]->src[0]->dtype.is_ptr &&
-           u->src[0]->src[0]->dtype.addrspace == POLY_ADDR_REG);
+          u->src[0]->op == POLY_OP_INDEX &&
+          poly_program_memory_is(u->src[0]->src[0], POLY_ADDR_REG);
       PolyDType shrink_vec;
       if (wasm_load_shrink_native_vec(u, &shrink_vec)) {
         count_local(
@@ -1902,8 +1904,8 @@ static void build_code_scalar(
           &n_locals_v128
       );
     if (u->op == POLY_OP_DEFINE_REG ||
-        (u->op == POLY_OP_BUFFER && u->dtype.is_ptr && u->dtype.addrspace == POLY_ADDR_REG)) {
-      PolyDType base = wasm_reg_base_dtype(u->dtype);
+        (u->op == POLY_OP_BUFFER && poly_program_memory_is(u, POLY_ADDR_REG))) {
+      PolyDType base = wasm_reg_base_dtype(poly_program_buffer_dtype(u));
       int reg_size = wasm_reg_storage_size(uops, n, u);
       for (int r = 0; r < reg_size; r++)
         count_local(
@@ -2087,8 +2089,8 @@ static void build_code_scalar(
 
     /* --- register buffer --- */
     if (u->op == POLY_OP_DEFINE_REG ||
-        (u->op == POLY_OP_BUFFER && u->dtype.is_ptr && u->dtype.addrspace == POLY_ADDR_REG)) {
-      PolyDType base = wasm_reg_base_dtype(u->dtype);
+        (u->op == POLY_OP_BUFFER && poly_program_memory_is(u, POLY_ADDR_REG))) {
+      PolyDType base = wasm_reg_base_dtype(poly_program_buffer_dtype(u));
       int reg_size = wasm_reg_storage_size(uops, n, u);
       int *reg_slots = malloc((size_t)reg_size * sizeof(int));
       if (!reg_slots) reg_size = 0;
@@ -2274,8 +2276,8 @@ static void build_code_scalar(
       PolyUOp *acc_base = wasm_acc_base(u->src[0]);
       if (acc_base &&
           (acc_base->op == POLY_OP_DEFINE_REG ||
-           (acc_base->op == POLY_OP_BUFFER && acc_base->dtype.is_ptr &&
-            acc_base->dtype.addrspace == POLY_ADDR_REG))) {
+           (acc_base->op == POLY_OP_BUFFER &&
+            poly_program_memory_is(acc_base, POLY_ADDR_REG)))) {
         /* Register arrays are real indexed storage in tinygrad/C/WGSL. WASM
          * has no local arrays, but Qwen/reduce lowering indexes them with
          * constants after devectorization, so model each element as its own
@@ -2390,8 +2392,8 @@ static void build_code_scalar(
         PolyUOp *reg_base = wasm_acc_base(shr->src[0]);
         if (reg_base &&
             (reg_base->op == POLY_OP_DEFINE_REG ||
-             (reg_base->op == POLY_OP_BUFFER && reg_base->dtype.is_ptr &&
-              reg_base->dtype.addrspace == POLY_ADDR_REG))) {
+             (reg_base->op == POLY_OP_BUFFER &&
+              poly_program_memory_is(reg_base, POLY_ADDR_REG)))) {
           int offset = wasm_shrink_offset(shr);
           int lanes = shrink_vec.count;
           emit_v128_zero(&body);

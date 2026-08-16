@@ -162,6 +162,21 @@ static void hip_render_ctype(PolyDType dt, char *buf, int cap) {
   snprintf(buf, cap, "%s%d", hip_scalar_alias(s), (int)dt.count);
 }
 
+/* Pinned CStyleLanguage.render_access (renderer/cstyle.py:179-184).  The
+ * scalar base type stays on BUFFER; a width-changing INDEX/SHRINK is accessed
+ * by casting its address to the vector pointer type and dereferencing it. */
+static void hip_render_access_expr(
+    char *buf, int cap, const char *address, PolyDType value_dtype
+) {
+  if (value_dtype.count > 1) {
+    char value_type[128];
+    hip_render_ctype(value_dtype, value_type, sizeof(value_type));
+    snprintf(buf, cap, "*((%s*)(%s))", value_type, address ? address : "0");
+  } else {
+    snprintf(buf, cap, "*%s", address ? address : "0");
+  }
+}
+
 /* Render helpers */
 
 static char *hip_render_int64_const(int64_t v, char *buf, int cap) {
@@ -810,31 +825,39 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
       continue;
     }
 
-    /* --- DEFINE_LOCAL: shared memory array ----------------------------- */
-    if (u->op == POLY_OP_DEFINE_LOCAL) {
+    /* Pinned tinygrad's C-style renderers consume the LOCAL BUFFER emitted by
+     * pm_add_buffers_local directly. */
+    if (u->op == POLY_OP_DEFINE_LOCAL ||
+        (u->op == POLY_OP_BUFFER && poly_program_memory_is(u, POLY_ADDR_LOCAL))) {
       char name[32];
-      snprintf(name, sizeof(name), "smem%d", c_acc++);
+      snprintf(
+          name, sizeof(name), "smem%lld",
+          (long long)(u->op == POLY_OP_BUFFER ? poly_program_buffer_slot(u) : c_acc++)
+      );
       hsmap_set(&names, u, strdup(name));
 
       /* HIP shared memory: __attribute__((shared, aligned(16))) */
-      int smem_size = u->dtype.ptr_size > 0 ? u->dtype.ptr_size : 1;
-      PolyDType base = poly_dtype_scalar(u->dtype);
+      int64_t smem_size = poly_program_buffer_size(u);
+      PolyDType base = poly_dtype_scalar(poly_program_buffer_dtype(u));
       hsb_printf(
-          &decls, "  __attribute__((shared, aligned(16))) %s %s[%d];\n", hip_scalar_ctype(base),
-          name, smem_size
+          &decls, "  __attribute__((shared, aligned(16))) %s %s[%lld];\n",
+          hip_scalar_ctype(base), name, (long long)smem_size
       );
       continue;
     }
 
     /* --- register buffer --------------------------------------------- */
     if (u->op == POLY_OP_DEFINE_REG ||
-        (u->op == POLY_OP_BUFFER && u->dtype.is_ptr && u->dtype.addrspace == POLY_ADDR_REG)) {
+        (u->op == POLY_OP_BUFFER && poly_program_memory_is(u, POLY_ADDR_REG))) {
       char name[32];
-      snprintf(name, sizeof(name), "r%lld", (long long)u->arg.i);
+      snprintf(name, sizeof(name), "r%lld", (long long)poly_program_buffer_slot(u));
       hsmap_set(&names, u, strdup(name));
 
-      PolyDType base = poly_dtype_scalar(u->dtype);
-      hsb_printf(&decls, "  %s %s[1];\n", hip_scalar_ctype(base), name);
+      PolyDType base = poly_dtype_scalar(poly_program_buffer_dtype(u));
+      hsb_printf(
+          &decls, "  %s %s[%lld];\n", hip_scalar_ctype(base), name,
+          (long long)poly_program_buffer_size(u)
+      );
       continue;
     }
 
@@ -852,6 +875,8 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
       hsmap_set(&names, u, strdup(name));
 
       char *bidx = hsmap_get(&names, u->src[0]);
+      char access[512];
+      hip_render_access_expr(access, sizeof(access), bidx, u->dtype);
       {
         char ctype[128];
         hip_render_ctype(u->dtype, ctype, sizeof(ctype));
@@ -867,14 +892,14 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
       if (gate_uop && u->n_src >= 2) {
         char *gate_s = hsmap_get(&names, gate_uop);
         char *alt_s = hsmap_get(&names, u->src[1]);
-        hsb_printf(&body, "%s = (%s?(*%s):%s);\n", name, gate_s, bidx, alt_s);
+        hsb_printf(&body, "%s = (%s?%s:%s);\n", name, gate_s, access, alt_s);
       } else if (gate_uop) {
         char *gate_s = hsmap_get(&names, gate_uop);
         char ctype[128];
         hip_render_ctype(u->dtype, ctype, sizeof(ctype));
-        hsb_printf(&body, "%s = (%s?(*%s):(%s)0);\n", name, gate_s, bidx, ctype);
+        hsb_printf(&body, "%s = (%s?%s:(%s)0);\n", name, gate_s, access, ctype);
       } else {
-        hsb_printf(&body, "%s = (*%s);\n", name, bidx);
+        hsb_printf(&body, "%s = %s;\n", name, access);
       }
       continue;
     }
@@ -883,14 +908,13 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
     if (u->op == POLY_OP_STORE) {
       char *target = hsmap_get(&names, u->src[0]);
       char *val = hsmap_get(&names, u->src[1]);
+      char access[512];
+      hip_render_access_expr(
+          access, sizeof(access), target, u->src[1] ? u->src[1]->dtype : POLY_VOID
+      );
       for (int d = 0; d < depth; d++)
         hsb_puts(&body, "  ");
-      if (u->src[0]->op == POLY_OP_DEFINE_LOCAL ||
-          (u->src[0]->op == POLY_OP_BUFFER && u->src[0]->dtype.is_ptr &&
-           u->src[0]->dtype.addrspace == POLY_ADDR_LOCAL))
-        hsb_printf(&body, "%s = %s;\n", target, val);
-      else
-        hsb_printf(&body, "*%s = %s;\n", target, val);
+      hsb_printf(&body, "%s = %s;\n", access, val);
       continue;
     }
 

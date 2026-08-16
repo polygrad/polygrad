@@ -21,6 +21,7 @@
 #include "../src/ctx.h"
 #include "../src/frontend.h"
 #include "../src/engine/schedule.h"
+#include "../src/schedule/rangeify.h"
 #include "../src/simplify.h"
 
 /* Helpers */
@@ -346,6 +347,129 @@ TEST(decomp, threefry_lowered_when_no_native_support) {
   ASSERT_INT_EQ(n_threefry, 0); /* must be fully lowered */
   ASSERT_TRUE(n_add > 0);
   ASSERT_TRUE(n_xor > 0);
+  PASS();
+}
+
+/* Pinned tinygrad/uop/decompositions.py:445-456 proves floor/trunc agreement
+ * from expression bounds, not from an unsigned storage dtype. Threefry's
+ * wrapped uint32 intermediates can carry mathematical ranges crossing zero. */
+TEST(decomp, wrapped_unsigned_divmod_uses_expression_bounds) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *shape = poly_uop0(ctx, POLY_OP_STACK, POLY_VOID, poly_arg_none());
+  PolyParamArg wrapped_arg = {
+      .slot = -1,
+      .name = "wrapped",
+      .min_val = -4294967295LL,
+      .max_val = 8589934590LL,
+      .has_minmax = true,
+      .addrspace = POLY_ADDR_GLOBAL,
+  };
+  PolyParamArg nonnegative_arg = {
+      .slot = -1,
+      .name = "nonnegative",
+      .min_val = 0,
+      .max_val = 1000000,
+      .has_minmax = true,
+      .addrspace = POLY_ADDR_GLOBAL,
+  };
+  PolyUOp *wrapped =
+      poly_uop1(ctx, POLY_OP_PARAM, POLY_UINT32, shape, poly_arg_param(&wrapped_arg));
+  PolyUOp *nonnegative =
+      poly_uop1(ctx, POLY_OP_PARAM, POLY_UINT32, shape, poly_arg_param(&nonnegative_arg));
+  PolyUOp *pow2 = poly_uop0(ctx, POLY_OP_CONST, POLY_UINT32, poly_arg_int(1 << 19));
+  PolyUOp *seven = poly_uop0(ctx, POLY_OP_CONST, POLY_UINT32, poly_arg_int(7));
+  PolyUOp *roots[3] = {
+      poly_uop2(ctx, POLY_OP_FLOORDIV, POLY_UINT32, wrapped, pow2, poly_arg_none()),
+      poly_uop2(ctx, POLY_OP_FLOORDIV, POLY_UINT32, nonnegative, pow2, poly_arg_none()),
+      poly_uop2(ctx, POLY_OP_FLOORMOD, POLY_UINT32, wrapped, seven, poly_arg_none()),
+  };
+  PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, roots, 3, poly_arg_none());
+  PolyRewriteOpts opts = {
+      .optimize = false,
+      .devectorize = 1,
+      .caps = {.has_mulacc = true,
+               .has_max = true,
+               .has_exp2 = true,
+               .has_log2 = true,
+               .has_sin = true,
+               .has_fdiv = true,
+               .has_int64 = true,
+               .has_local = true,
+               .max_vec_width = 4},
+      .device = POLY_DEVICE_CUDA,
+      .opt_policy = POLY_OPT_HEURISTIC,
+  };
+  PolyUOp *rewritten = poly_full_rewrite_to_sink_ex(ctx, sink, opts);
+  ASSERT_TRUE(rewritten && rewritten->op == POLY_OP_SINK && rewritten->n_src == 3);
+
+  PolyUOp *wrapped_div = rewritten->src[0];
+  ASSERT_EQ(wrapped_div->op, POLY_OP_SUB);
+  ASSERT_INT_EQ(count_ops_in(ctx, wrapped_div, POLY_OP_SHR), 1);
+  ASSERT_INT_EQ(count_ops_in(ctx, wrapped_div, POLY_OP_CMOD), 1);
+  ASSERT_INT_EQ(count_ops_in(ctx, wrapped_div, POLY_OP_CMPLT), 1);
+  ASSERT_INT_EQ(count_ops_in(ctx, wrapped_div, POLY_OP_CMPNE), 2);
+  ASSERT_INT_EQ(count_ops_in(ctx, wrapped_div, POLY_OP_AND), 1);
+  ASSERT_INT_EQ(count_ops_in(ctx, wrapped_div, POLY_OP_CAST), 1);
+
+  PolyUOp *nonnegative_div = rewritten->src[1];
+  ASSERT_EQ(nonnegative_div->op, POLY_OP_SHR);
+  ASSERT_INT_EQ(count_ops_in(ctx, nonnegative_div, POLY_OP_CMOD), 0);
+  ASSERT_INT_EQ(count_ops_in(ctx, nonnegative_div, POLY_OP_CMPLT), 0);
+
+  PolyUOp *wrapped_mod = rewritten->src[2];
+  ASSERT_EQ(wrapped_mod->op, POLY_OP_ADD);
+  ASSERT_INT_EQ(count_ops_in(ctx, wrapped_mod, POLY_OP_CMOD), 1);
+  ASSERT_INT_EQ(count_ops_in(ctx, wrapped_mod, POLY_OP_WHERE), 1);
+  ASSERT_INT_EQ(count_ops_in(ctx, wrapped_mod, POLY_OP_CMPLT), 1);
+  ASSERT_INT_EQ(count_ops_in(ctx, wrapped_mod, POLY_OP_CMPNE), 2);
+  ASSERT_INT_EQ(count_ops_in(ctx, wrapped_mod, POLY_OP_AND), 1);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+/* Pinned tinygrad/uop/decompositions.py:318 retains the left-associated
+ * `xr1 + key + i + 1` graph. Combining i+1 changes the operation estimate and
+ * the exact renderer-facing topology even though modular values agree. */
+TEST(decomp, threefry_round_key_injection_matches_tinygrad_topology) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *shape = poly_uop0(ctx, POLY_OP_STACK, POLY_VOID, poly_arg_none());
+  PolyParamArg x_arg = {
+      .slot = -1,
+      .name = "x",
+      .min_val = 0,
+      .max_val = INT64_MAX,
+      .has_minmax = true,
+      .addrspace = POLY_ADDR_GLOBAL,
+  };
+  PolyParamArg key_arg = x_arg;
+  key_arg.name = "key";
+  PolyUOp *x = poly_uop1(ctx, POLY_OP_PARAM, POLY_UINT64, shape, poly_arg_param(&x_arg));
+  PolyUOp *key =
+      poly_uop1(ctx, POLY_OP_PARAM, POLY_UINT64, shape, poly_arg_param(&key_arg));
+  PolyUOp *root = poly_uop2(ctx, POLY_OP_THREEFRY, POLY_UINT64, x, key, poly_arg_none());
+  PolyRendererCaps caps = {
+      .has_mulacc = false,
+      .has_max = true,
+      .has_exp2 = true,
+      .has_log2 = true,
+      .has_sin = true,
+      .has_fdiv = true,
+      .has_int64 = true,
+      .has_local = true,
+      .max_vec_width = 4,
+  };
+  PolyUOp *rewritten = poly_graph_rewrite(ctx, root, poly_pm_decomp_pass_caps(caps));
+
+  ASSERT_TRUE(rewritten != NULL);
+  ASSERT_INT_EQ(count_ops_in(ctx, rewritten, POLY_OP_THREEFRY), 0);
+  ASSERT_INT_EQ(count_ops_in(ctx, rewritten, POLY_OP_ADD), 61);
+  ASSERT_INT_EQ(count_ops_in(ctx, rewritten, POLY_OP_CONST), 16);
+  ASSERT_INT_EQ(count_ops_in(ctx, rewritten, POLY_OP_SHL), 21);
+  ASSERT_INT_EQ(count_ops_in(ctx, rewritten, POLY_OP_SHR), 22);
+  ASSERT_INT_EQ(count_ops_in(ctx, rewritten, POLY_OP_XOR), 22);
+
+  poly_ctx_destroy(ctx);
   PASS();
 }
 
@@ -2478,6 +2602,28 @@ static int count_ops(PolyCtx *ctx, PolyUOp *sink, PolyOps op) {
   return count;
 }
 
+static int count_buffer_addrspace(PolyCtx *ctx, PolyUOp *sink, PolyAddrSpace addrspace) {
+  int n_topo = 0, count = 0;
+  PolyUOp **topo = poly_toposort(ctx, sink, &n_topo);
+  for (int i = 0; i < n_topo; i++) {
+    PolyUOp *u = topo[i];
+    if (u->op == POLY_OP_BUFFER && u->arg.kind == POLY_ARG_PARAM && u->arg.param &&
+        u->arg.param->addrspace == addrspace)
+      count++;
+  }
+  return count;
+}
+
+static int count_stage_addrspace(PolyCtx *ctx, PolyUOp *sink, PolyAddrSpace addrspace) {
+  int n_topo = 0, count = 0;
+  PolyUOp **topo = poly_toposort(ctx, sink, &n_topo);
+  for (int i = 0; i < n_topo; i++) {
+    PolyUOp *u = topo[i];
+    if (u->op == POLY_OP_STAGE && poly_bufferize_arg_addrspace(u->arg) == addrspace) count++;
+  }
+  return count;
+}
+
 TEST(tc, structural_matmul_ast_shape) {
   /* Verify the test AST has the expected structure: REDUCE(ADD, CAST(MUL(f16,f16))) */
   PolyCtx *ctx = poly_ctx_new();
@@ -3052,9 +3198,9 @@ static PolyUOp *build_2range_kernel(PolyCtx *ctx, int M, int N) {
 
 TEST(unify_pre, large_reduction_structural) {
   /* N=1024 reduction through the GPU optimizer plus group_for_reduce should
-   * produce DEFINE_LOCAL, BARRIER, and a second REDUCE (partial + final).
-   * tinygrad selects GROUP_REDUCE in apply_opts; pm_group_for_reduce only
-   * lowers ranges that have already been tagged. */
+   * first produce STAGE(LOCAL) and a second REDUCE. Pinned tinygrad
+   * codegen/__init__.py:84-87 then runs pm_add_buffers_local, which turns the
+   * STAGE into BUFFER(LOCAL) + BARRIER. */
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *sink = build_large_reduction_ast(ctx, 1024);
   PolyRendererCaps caps = {.has_local = true};
@@ -3065,13 +3211,19 @@ TEST(unify_pre, large_reduction_structural) {
   sink = poly_graph_rewrite(ctx, sink, poly_pm_flatten_range());
   sink = poly_group_for_reduce(ctx, sink, 256);
 
-  int n_define_local = count_ops(ctx, sink, POLY_OP_DEFINE_LOCAL);
-  int n_barrier = count_ops(ctx, sink, POLY_OP_BARRIER);
-  int n_reduce = count_ops(ctx, sink, POLY_OP_REDUCE);
+  ASSERT_TRUE(count_stage_addrspace(ctx, sink, POLY_ADDR_LOCAL) >= 1);
+  ASSERT_INT_EQ(count_buffer_addrspace(ctx, sink, POLY_ADDR_LOCAL), 0);
+  ASSERT_INT_EQ(count_ops(ctx, sink, POLY_OP_DEFINE_LOCAL), 0);
+  ASSERT_INT_EQ(count_ops(ctx, sink, POLY_OP_BARRIER), 0);
+  ASSERT_TRUE(count_ops(ctx, sink, POLY_OP_REDUCE) >= 2); /* partial + final */
 
-  ASSERT_TRUE(n_define_local >= 1);
-  ASSERT_TRUE(n_barrier >= 1);
-  ASSERT_TRUE(n_reduce >= 2); /* partial + final */
+  sink = poly_apply_add_buffers_local(ctx, sink);
+  ASSERT_NOT_NULL(sink);
+  ASSERT_INT_EQ(count_stage_addrspace(ctx, sink, POLY_ADDR_LOCAL), 0);
+  ASSERT_TRUE(count_buffer_addrspace(ctx, sink, POLY_ADDR_LOCAL) >= 1);
+  ASSERT_INT_EQ(count_ops(ctx, sink, POLY_OP_DEFINE_LOCAL), 0);
+  ASSERT_TRUE(count_ops(ctx, sink, POLY_OP_BARRIER) >= 1);
+  ASSERT_TRUE(count_ops(ctx, sink, POLY_OP_REDUCE) >= 2);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -3088,6 +3240,8 @@ TEST(unify_pre, large_reduction_gpudims_special) {
   sink = poly_apply_opts_heuristic_ex(ctx, sink, caps);
   sink = poly_graph_rewrite(ctx, sink, poly_pm_flatten_range());
   sink = poly_group_for_reduce(ctx, sink, 256);
+  sink = poly_apply_add_buffers_local(ctx, sink);
+  ASSERT_NOT_NULL(sink);
   sink = poly_apply_pm_reduce(ctx, sink);
   sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
   sink = poly_add_gpudims(ctx, sink);
@@ -3355,33 +3509,51 @@ TEST(unify_pre, control_flow_fails_cleanly_at_uop_arity_ceiling) {
 }
 
 TEST(unify_pre, full_gpu_pipeline_structural) {
-  /* Run the full GPU-style pipeline (no TC) on a large reduction and verify
-   * the final IR has SPECIAL + DEFINE_LOCAL + BARRIER + no raw RANGE. */
+  /* Run the actual shared pipeline with CUDA renderer capabilities. Pinned
+   * tinygrad codegen/__init__.py:84-87 materializes grouped STAGE storage as
+   * BUFFER(LOCAL) + BARRIER after the expander. */
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *sink = build_large_reduction_ast(ctx, 1024);
-  PolyRendererCaps caps = {.has_mulacc = true, .has_local = true};
-
-  sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
-  sink = poly_apply_opts_heuristic_ex(ctx, sink, caps);
-  sink = poly_graph_rewrite(ctx, sink, poly_pm_flatten_range());
-  sink = poly_group_for_reduce(ctx, sink, 256);
-  sink = poly_apply_pm_reduce(ctx, sink);
-  sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
-  sink = poly_graph_rewrite(ctx, sink, poly_pm_decomp_pass_caps(caps));
-  sink = poly_graph_rewrite(ctx, sink, poly_pm_transcendental_pass());
-  sink = poly_graph_rewrite(ctx, sink, poly_pm_decomp_pass_caps(caps));
-  sink = poly_add_gpudims(ctx, sink);
-  sink = poly_apply_control_flow(ctx, sink);
-
-  ASSERT_TRUE(count_ops(ctx, sink, POLY_OP_SPECIAL) >= 1);
-  ASSERT_TRUE(count_ops(ctx, sink, POLY_OP_DEFINE_LOCAL) >= 1);
-  ASSERT_TRUE(count_ops(ctx, sink, POLY_OP_BARRIER) >= 1);
-
-  /* Linearize should succeed */
+  PolyRewriteOpts opts = {
+      .optimize = true,
+      .devectorize = 1,
+      .caps =
+          {
+              .has_exp2 = true,
+              .has_log2 = true,
+              .has_sin = true,
+              .has_int64 = true,
+              .has_local = true,
+              .max_vec_width = 4,
+              .global_max = {2147483647, 65535, 65535},
+              .local_max = {1024, 1024, 64},
+          },
+      .device = POLY_DEVICE_CUDA,
+      .opt_policy = POLY_OPT_HEURISTIC,
+      .gpu_block_size = 256,
+  };
+  sink = poly_full_rewrite_to_sink_ex(ctx, sink, opts);
+  ASSERT_NOT_NULL(sink);
   int n_lin = 0;
   PolyUOp **lin = poly_linearize_rewritten(ctx, sink, &n_lin);
-  ASSERT_TRUE(n_lin > 0);
   ASSERT_NOT_NULL(lin);
+  ASSERT_TRUE(n_lin > 0);
+
+  int n_special = 0, n_local = 0, n_define_local = 0, n_barrier = 0;
+  for (int i = 0; i < n_lin; i++) {
+    PolyUOp *u = lin[i];
+    if (u->op == POLY_OP_SPECIAL) n_special++;
+    if (u->op == POLY_OP_BUFFER && u->arg.kind == POLY_ARG_PARAM && u->arg.param &&
+        u->arg.param->addrspace == POLY_ADDR_LOCAL)
+      n_local++;
+    if (u->op == POLY_OP_DEFINE_LOCAL) n_define_local++;
+    if (u->op == POLY_OP_BARRIER) n_barrier++;
+  }
+  ASSERT_TRUE(n_special >= 1);
+  ASSERT_TRUE(n_local >= 1);
+  ASSERT_INT_EQ(n_define_local, 0);
+  ASSERT_TRUE(n_barrier >= 1);
+
   free(lin);
 
   poly_ctx_destroy(ctx);

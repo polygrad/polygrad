@@ -732,6 +732,24 @@ PolyTensor *poly_tensor_from_host(
     const int64_t *dims,
     int ndim
 );
+/* Pinned Tensor.manual_seed/Tensor.rand stateful RNG surface. RNG state is
+ * owned by ctx and separated by exact device identity. */
+void poly_tensor_manual_seed(PolyCtx *ctx, int64_t seed);
+PolyTensor *poly_tensor_rand_by_id(
+    PolyCtx *ctx,
+    const int64_t *dims,
+    int ndim,
+    int dtype_id,
+    PolyDevice device,
+    int contiguous
+);
+PolyTensor *poly_tensor_randn_by_id(
+    PolyCtx *ctx,
+    const int64_t *dims,
+    int ndim,
+    int dtype_id,
+    PolyDevice device
+);
 int poly_tensor_replace_roots(
     PolyCtx *ctx,
     PolyTensor *tensor,

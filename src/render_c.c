@@ -222,7 +222,7 @@ static int uop_priority(const PolyUOp *u) {
   case POLY_OP_DEFINE_VAR:
     return -19;
   case POLY_OP_BUFFER:
-    return (u->dtype.is_ptr && u->dtype.addrspace == POLY_ADDR_LOCAL) ? -17 : -18;
+    return poly_program_memory_is(u, POLY_ADDR_LOCAL) ? -17 : -18;
   case POLY_OP_DEFINE_LOCAL:
     return -17;
   case POLY_OP_DEFINE_REG:
@@ -2044,7 +2044,6 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
       continue;
     }
 
-    /* --- DEFINE_LOCAL: accumulator variable -------------------------- */
     if (u->op == POLY_OP_DEFINE_LOCAL) {
       char name[32];
       snprintf(name, sizeof(name), "acc%d", c_acc++);
@@ -2068,25 +2067,37 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
       continue;
     }
 
+    /* Pinned tinygrad renderer/cstyle.py:13,161-164 renders final new-style
+     * LOCAL BUFFER(dtype, CONST<int>(size), ParamArg(slot, LOCAL)) storage. */
+    if (u->op == POLY_OP_BUFFER && poly_program_memory_is(u, POLY_ADDR_LOCAL)) {
+      char name[32];
+      snprintf(name, sizeof(name), "smem%lld", (long long)poly_program_buffer_slot(u));
+      smap_set(&names, u, strdup(name));
+      char dtype_s[128];
+      render_ctype(poly_program_buffer_dtype(u), dtype_s, sizeof(dtype_s));
+      sb_printf(
+          &decls, "  %s %s[%lld];\n", dtype_s, name,
+          (long long)poly_program_buffer_size(u)
+      );
+      continue;
+    }
+
     /* --- register accumulator (float r0[1];) ------------------------ */
     if (u->op == POLY_OP_DEFINE_REG ||
-        (u->op == POLY_OP_BUFFER && u->dtype.is_ptr && u->dtype.addrspace == POLY_ADDR_REG)) {
+        (u->op == POLY_OP_BUFFER && poly_program_memory_is(u, POLY_ADDR_REG))) {
       char name[32];
-      snprintf(name, sizeof(name), "r%lld", (long long)u->arg.i);
+      snprintf(name, sizeof(name), "r%lld", (long long)poly_program_buffer_slot(u));
       smap_set(&names, u, strdup(name));
 
       /* Extract the pointer's base type (preserves vec count for vec accumulators).
        * poly_dtype_scalar strips both ptr and vec; we need ptr stripped but vec kept.
        * PtrDType stores the pointee in the base dtype fields. For ptr(float.vec(4)),
        * is_ptr=true, count=4, bitsize=128. We need "float vec4" not "float". */
-      PolyDType base = u->dtype;
-      base.is_ptr = false;
-      base.addrspace = 0;
-      base.ptr_size = 0;
-      int64_t reg_size = u->dtype.ptr_size > 0 ? u->dtype.ptr_size : 1;
+      PolyDType base = poly_program_buffer_dtype(u);
+      int64_t reg_size = poly_program_buffer_size(u);
       if (base.count > 1) {
         /* Vec accumulator: float __attribute__((vector_size(N))) r0[1]; */
-        PolyDType elem = poly_dtype_scalar(u->dtype);
+          PolyDType elem = poly_dtype_scalar(base);
         int vbytes = (int)(elem.bitsize / 8) * base.count;
         sb_printf(
             &decls, "  %s __attribute__((vector_size(%d))) %s[%lld];\n", elem.name, vbytes, name,
@@ -2171,10 +2182,7 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
         sb_puts(&body, "  ");
       /* Guard: STORE src[0] is always set by construction, but null-check
        * satisfies the analyzer's path-sensitive null-deref tracking. */
-      if (u->src[0] &&
-          (u->src[0]->op == POLY_OP_DEFINE_LOCAL ||
-           (u->src[0]->op == POLY_OP_BUFFER && u->src[0]->dtype.is_ptr &&
-            u->src[0]->dtype.addrspace == POLY_ADDR_LOCAL)))
+      if (u->src[0] && poly_program_memory_is(u->src[0], POLY_ADDR_LOCAL))
         sb_printf(&body, "%s = %s;\n", target, val);
       else if (u->src[1] && u->src[1]->dtype.count > 1 &&
                poly_find_memory_slice_through_cast(u->src[0])) {

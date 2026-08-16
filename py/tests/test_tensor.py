@@ -709,6 +709,14 @@ class TestCreation:
         assert bitcasted.uop_logical.src[0] == source.uop_logical
         assert bitcasted.uop_physical.src[0] == source.uop_physical
 
+    def test_unequal_width_bitcast_matches_pinned_lane_order(self):
+        wide = Tensor.full((8,), 1, dtype='uint8').bitcast('uint32')
+        narrow = Tensor.full((2,), 1, dtype='uint32').bitcast('uint8')
+        assert wide.shape == (2,)
+        assert narrow.shape == (8,)
+        np.testing.assert_array_equal(wide.numpy(), [0x01010101, 0x01010101])
+        np.testing.assert_array_equal(narrow.numpy(), [1, 0, 0, 0, 1, 0, 0, 0])
+
     def test_zeros(self):
         t = Tensor.zeros(3, 4)
         assert t.shape == (3, 4)
@@ -788,6 +796,14 @@ class TestCreation:
         np.testing.assert_allclose(a, c)
         np.testing.assert_allclose(b, d)
         assert not np.allclose(a, b)
+
+        Tensor.manual_seed(1337)
+        pinned = Tensor.rand(8).numpy()
+        expected_bits = np.array([
+            0x3EFA31A0, 0x3EB22B7C, 0x3F28C97E, 0x3F22EFFE,
+            0x3EF13C94, 0x3E10DD30, 0x3E8E61EC, 0x3D4C9DC0,
+        ], dtype=np.uint32)
+        np.testing.assert_array_equal(pinned.view(np.uint32), expected_bits)
 
     def test_uniform_bounds_determinism_and_validation(self):
         Tensor.manual_seed(42)

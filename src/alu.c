@@ -265,6 +265,67 @@ static double round_to_bf16(double x) {
   return (double)f;
 }
 
+/* Pinned tinygrad/uop/symbolic.py:19-24 fold_bitcast uses struct pack/unpack
+ * over scalar dtype formats. Keep the same storage reinterpretation here;
+ * memcpy avoids C aliasing and numeric-cast semantics. */
+bool poly_exec_bitcast_const(PolyDType from, PolyDType to, PolyArg value, PolyArg *out) {
+  if (!out || from.is_ptr || to.is_ptr || from.count != 1 || to.count != 1 || !from.fmt ||
+      !to.fmt || from.bitsize != to.bitsize ||
+      (from.bitsize != 8 && from.bitsize != 16 && from.bitsize != 32 && from.bitsize != 64))
+    return false;
+
+  uint64_t bits = 0;
+  if (poly_dtype_is_bool(from)) {
+    bits = arg_to_bool(value) ? 1u : 0u;
+  } else if (poly_dtype_is_float(from)) {
+    double v = arg_to_float(value);
+    if (from.bitsize == 16) {
+      bits = f32_to_f16_bits_rne((float)v);
+    } else if (from.bitsize == 32) {
+      float v32 = (float)v;
+      uint32_t raw = 0;
+      memcpy(&raw, &v32, sizeof(raw));
+      bits = raw;
+    } else {
+      memcpy(&bits, &v, sizeof(bits));
+    }
+  } else if (poly_dtype_is_int(from)) {
+    bits = poly_arg_integer_to_u64_mod(value);
+  } else {
+    return false;
+  }
+
+  if (from.bitsize < 64) bits &= (UINT64_C(1) << from.bitsize) - 1;
+  if (poly_dtype_is_bool(to)) {
+    *out = poly_arg_bool(bits != 0);
+    return true;
+  }
+  if (poly_dtype_is_float(to)) {
+    if (to.bitsize == 16) {
+      *out = poly_arg_float((double)f16_bits_to_f32((uint16_t)bits));
+    } else if (to.bitsize == 32) {
+      uint32_t raw = (uint32_t)bits;
+      float v32 = 0.0f;
+      memcpy(&v32, &raw, sizeof(v32));
+      *out = poly_arg_float((double)v32);
+    } else {
+      double v64 = 0.0;
+      memcpy(&v64, &bits, sizeof(v64));
+      *out = poly_arg_float(v64);
+    }
+    return true;
+  }
+  if (!poly_dtype_is_int(to)) return false;
+
+  if (!poly_dtype_is_unsigned(to) && to.bitsize < 64 &&
+      (bits & (UINT64_C(1) << (to.bitsize - 1))))
+    bits |= ~((UINT64_C(1) << to.bitsize) - 1);
+  int64_t signed_bits = 0;
+  memcpy(&signed_bits, &bits, sizeof(signed_bits));
+  *out = poly_arg_int(signed_bits);
+  return true;
+}
+
 /* Truncate result to dtype range */
 
 static PolyArg truncate_result(PolyArg val, PolyDType dtype) {

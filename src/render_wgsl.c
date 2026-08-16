@@ -610,7 +610,7 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
   int cap_bindings = 0;
 
   /* prefix counters */
-  int c_val = 0, c_alu = 0, c_cast = 0, c_acc = 0, c_smem = 0;
+  int c_val = 0, c_alu = 0, c_cast = 0, c_acc = 0;
   int depth = 1;
 
   /* Workgroup shared memory declarations (externalized before @compute).
@@ -810,22 +810,25 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
       continue;
     }
 
-    /* --- DEFINE_LOCAL: shared memory array or scalar accumulator ------ */
-    if (u->op == POLY_OP_DEFINE_LOCAL) {
-      if (u->dtype.is_ptr && u->dtype.addrspace == POLY_ADDR_LOCAL) {
+    /* Pinned tinygrad/renderer/wgsl.py renders the LOCAL-address-space
+     * BUFFER produced by pm_add_buffers_local as workgroup storage. Keep the
+     * legacy DEFINE_LOCAL spelling until the vocabulary debt is retired. */
+    if (u->op == POLY_OP_DEFINE_LOCAL ||
+        (u->op == POLY_OP_BUFFER && poly_program_memory_is(u, POLY_ADDR_LOCAL))) {
+      if (u->op == POLY_OP_BUFFER) {
         /* Workgroup shared memory array.
          * tinygrad: var<workgroup> smemN: array<type, SIZE>;
          * Externalized before @compute (wgsl.py render_kernel lines 105-106). */
         char name[32];
-        snprintf(name, sizeof(name), "smem%d", c_smem++);
+        snprintf(name, sizeof(name), "smem%lld", (long long)poly_program_buffer_slot(u));
         wsm_set(&names, u, strdup(name));
 
-        int smem_size = u->dtype.ptr_size > 0 ? (int)u->dtype.ptr_size : 1;
-        const char *base_tn = wgsl_type_name(poly_dtype_scalar(u->dtype));
+        int64_t smem_size = poly_program_buffer_size(u);
+        const char *base_tn = wgsl_type_name(poly_dtype_scalar(poly_program_buffer_dtype(u)));
         if (n_extern_locals < 16) {
           snprintf(
-              extern_locals[n_extern_locals], 256, "var<workgroup> %s: array<%s,%d>;", name,
-              base_tn, smem_size
+              extern_locals[n_extern_locals], 256, "var<workgroup> %s: array<%s,%lld>;", name,
+              base_tn, (long long)smem_size
           );
           n_extern_locals++;
         }
@@ -853,15 +856,15 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
 
     /* --- register-local array ---------------------------------------- */
     if (u->op == POLY_OP_DEFINE_REG ||
-        (u->op == POLY_OP_BUFFER && u->dtype.is_ptr && u->dtype.addrspace == POLY_ADDR_REG)) {
+        (u->op == POLY_OP_BUFFER && poly_program_memory_is(u, POLY_ADDR_REG))) {
       char name[32];
-      snprintf(name, sizeof(name), "r%lld", (long long)u->arg.i);
+      snprintf(name, sizeof(name), "r%lld", (long long)poly_program_buffer_slot(u));
       wsm_set(&names, u, strdup(name));
 
       /* tinygrad: var rN: array<type, SIZE>; (wgsl.py:75) */
-      int reg_size = u->dtype.ptr_size > 0 ? (int)u->dtype.ptr_size : 1;
-      const char *base_tn = wgsl_type_name(poly_dtype_scalar(u->dtype));
-      wsb_printf(&decls, "  var %s: array<%s,%d>;\n", name, base_tn, reg_size);
+      int64_t reg_size = poly_program_buffer_size(u);
+      const char *base_tn = wgsl_type_name(poly_dtype_scalar(poly_program_buffer_dtype(u)));
+      wsb_printf(&decls, "  var %s: array<%s,%lld>;\n", name, base_tn, (long long)reg_size);
       continue;
     }
 
@@ -1015,11 +1018,6 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
       }
 
       PolyUOp *store_idx = poly_find_index_through_cast(u->src[0]);
-      bool store_to_local =
-          u->src[0]->op == POLY_OP_DEFINE_LOCAL ||
-          (u->src[0]->op == POLY_OP_BUFFER && u->src[0]->dtype.is_ptr &&
-           u->src[0]->dtype.addrspace == POLY_ADDR_LOCAL);
-
       if (!wgsl_emit_packed_store(&body, &names, store_idx, val, depth)) {
         for (int d = 0; d < depth; d++)
           wsb_puts(&body, "  ");

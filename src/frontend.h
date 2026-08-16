@@ -13,7 +13,7 @@
 
 /* Public C/frontend ABI version. Bump when exported symbols or public struct
  * layouts used by frontends change. */
-#define POLYGRAD_ABI_VERSION 53
+#define POLYGRAD_ABI_VERSION 54
 
 #ifdef __cplusplus
 extern "C" {
@@ -90,6 +90,22 @@ PolyTensor *poly_tensor_linspace_by_id(
     int device_id
 );
 PolyTensor *poly_tensor_eye_by_id(PolyCtx *ctx, int64_t n, int64_t m, int dtype_id, int device_id);
+void poly_tensor_manual_seed(PolyCtx *ctx, int64_t seed);
+PolyTensor *poly_tensor_rand_by_id(
+    PolyCtx *ctx,
+    const int64_t *dims,
+    int ndim,
+    int dtype_id,
+    PolyDevice device,
+    int contiguous
+);
+PolyTensor *poly_tensor_randn_by_id(
+    PolyCtx *ctx,
+    const int64_t *dims,
+    int ndim,
+    int dtype_id,
+    PolyDevice device
+);
 int poly_uop_op(PolyUOp *u);
 int poly_uop_dtype_id(PolyCtx *ctx, PolyUOp *u);
 int poly_uop_n_src(PolyUOp *u);

@@ -40,6 +40,11 @@ struct PolyCtx {
   int stats_suppression_depth;
   PolyMap *shape_cache;
   PolyMap *buffers;
+  /* Pinned Tensor._device_seeds/_device_rng_counters, keyed by the exact
+   * canonical DEVICE UOp. The state objects themselves are arena-owned. */
+  PolyMap *rng_states;
+  uint64_t rng_seed;
+  uint32_t rng_device_count;
   PolyTensor **tensors;
   int n_tensors;
   int tensors_cap;
