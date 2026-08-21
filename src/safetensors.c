@@ -22,6 +22,9 @@
 #include <string.h>
 #include <stdio.h>
 #include <inttypes.h>
+#include <limits.h>
+#include <math.h>
+#include <stdbool.h>
 
 /* Helpers */
 
@@ -37,11 +40,54 @@ static uint64_t read_le64(const uint8_t *src) {
   return v;
 }
 
-static int64_t compute_numel(const int64_t *shape, int ndim) {
+static bool compute_numel_checked(const int64_t *shape, int ndim, int64_t *out) {
+  if (!out || ndim < 0 || ndim > 8 || (ndim > 0 && !shape)) return false;
   int64_t n = 1;
-  for (int i = 0; i < ndim; i++)
+  for (int i = 0; i < ndim; i++) {
+    if (shape[i] < 0 || (shape[i] != 0 && n > INT64_MAX / shape[i])) return false;
     n *= shape[i];
-  return n;
+  }
+  *out = n;
+  return true;
+}
+
+static const char *safetensor_dtype_name(PolySafetensorDType dtype) {
+  switch (dtype) {
+  case POLY_ST_F32: return "F32";
+  case POLY_ST_F16: return "F16";
+  case POLY_ST_BF16: return "BF16";
+  case POLY_ST_F64: return "F64";
+  case POLY_ST_I64: return "I64";
+  case POLY_ST_I32: return "I32";
+  case POLY_ST_I16: return "I16";
+  case POLY_ST_I8: return "I8";
+  case POLY_ST_U8: return "U8";
+  case POLY_ST_BOOL: return "BOOL";
+  case POLY_ST_U16: return "U16";
+  case POLY_ST_U32: return "U32";
+  case POLY_ST_U64: return "U64";
+  }
+  return NULL;
+}
+
+static bool json_nonnegative_i64(const cJSON *value, int64_t *out) {
+  /* cJSON stores numbers as double.  Accept only integers in the exactly
+   * representable JSON range so the cast below cannot overflow or round. */
+  static const double JSON_MAX_EXACT_INTEGER = 9007199254740991.0;
+  if (!value || !out || !cJSON_IsNumber(value) || !isfinite(value->valuedouble) ||
+      value->valuedouble < 0.0 || value->valuedouble > JSON_MAX_EXACT_INTEGER)
+    return false;
+  int64_t parsed = (int64_t)value->valuedouble;
+  if ((double)parsed != value->valuedouble) return false;
+  *out = parsed;
+  return true;
+}
+
+static bool json_nonnegative_u64(const cJSON *value, uint64_t *out) {
+  int64_t parsed = 0;
+  if (!json_nonnegative_i64(value, &parsed)) return false;
+  *out = (uint64_t)parsed;
+  return true;
 }
 
 /* Encode */
@@ -52,12 +98,26 @@ uint8_t *poly_safetensors_encode(
     const char *metadata_json,
     int *out_len
 ) {
-  *out_len = 0;
-  if (n < 0) return NULL;
+  if (out_len) *out_len = 0;
+  if (!out_len || n < 0 || (n > 0 && !entries)) return NULL;
+
+  /* Validate public rows before deterministic ordering.  In particular, the
+   * insertion sort below compares names and therefore must never see NULL.
+   * Keep all shape/dtype/data checks together so malformed encoder input is
+   * rejected without partially constructing the archive. */
+  for (int i = 0; i < n; i++) {
+    int64_t numel = 0;
+    int elem_size = poly_safetensor_dtype_size(entries[i].dtype);
+    if (!entries[i].name || !*entries[i].name ||
+        !safetensor_dtype_name(entries[i].dtype) || elem_size <= 0 ||
+        !compute_numel_checked(entries[i].shape, entries[i].ndim, &numel) ||
+        (numel > 0 && !entries[i].data))
+      return NULL;
+  }
 
   /* Sort indices by name for deterministic output */
-  int *order = malloc(n * sizeof(int));
-  if (!order) return NULL;
+  int *order = n > 0 ? malloc((size_t)n * sizeof(int)) : NULL;
+  if (n > 0 && !order) return NULL;
   for (int i = 0; i < n; i++)
     order[i] = i;
 
@@ -73,13 +133,24 @@ uint8_t *poly_safetensors_encode(
   }
 
   /* Compute data offsets */
-  uint64_t *offsets = calloc(n, sizeof(uint64_t));
+  uint64_t *offsets = calloc((size_t)n, sizeof(uint64_t));
+  if (n > 0 && !offsets) {
+    free(order);
+    return NULL;
+  }
   uint64_t data_offset = 0;
   for (int i = 0; i < n; i++) {
     int idx = order[i];
     offsets[i] = data_offset;
-    int64_t numel = compute_numel(entries[idx].shape, entries[idx].ndim);
-    data_offset += (uint64_t)numel * sizeof(float);
+    int64_t numel = 0;
+    int elem_size = poly_safetensor_dtype_size(entries[idx].dtype);
+    if (!compute_numel_checked(entries[idx].shape, entries[idx].ndim, &numel) ||
+        (uint64_t)numel > (UINT64_MAX - data_offset) / (uint64_t)elem_size) {
+      free(order);
+      free(offsets);
+      return NULL;
+    }
+    data_offset += (uint64_t)numel * (uint64_t)elem_size;
   }
 
   /* Build JSON header */
@@ -101,16 +172,24 @@ uint8_t *poly_safetensors_encode(
   for (int i = 0; i < n; i++) {
     int idx = order[i];
     cJSON *tensor = cJSON_CreateObject();
-    cJSON_AddStringToObject(tensor, "dtype", "F32");
+    cJSON_AddStringToObject(tensor, "dtype", safetensor_dtype_name(entries[idx].dtype));
 
     cJSON *shape_arr = cJSON_CreateArray();
     for (int d = 0; d < entries[idx].ndim; d++)
       cJSON_AddItemToArray(shape_arr, cJSON_CreateNumber((double)entries[idx].shape[d]));
     cJSON_AddItemToObject(tensor, "shape", shape_arr);
 
-    int64_t numel = compute_numel(entries[idx].shape, entries[idx].ndim);
+    int64_t numel = 0;
+    if (!compute_numel_checked(entries[idx].shape, entries[idx].ndim, &numel)) {
+      cJSON_Delete(tensor);
+      cJSON_Delete(root);
+      free(order);
+      free(offsets);
+      return NULL;
+    }
+    int elem_size = poly_safetensor_dtype_size(entries[idx].dtype);
     uint64_t start = offsets[i];
-    uint64_t end = start + (uint64_t)numel * sizeof(float);
+    uint64_t end = start + (uint64_t)numel * (uint64_t)elem_size;
     cJSON *data_offs = cJSON_CreateArray();
     cJSON_AddItemToArray(data_offs, cJSON_CreateNumber((double)start));
     cJSON_AddItemToArray(data_offs, cJSON_CreateNumber((double)end));
@@ -146,6 +225,14 @@ uint8_t *poly_safetensors_encode(
     json_str[header_size + pad] = '\0';
     header_size += pad;
   }
+  if (header_size > UINT64_MAX - 8 || data_offset > UINT64_MAX - 8 - header_size ||
+      8 + header_size + data_offset > (uint64_t)INT_MAX ||
+      8 + header_size + data_offset > (uint64_t)SIZE_MAX) {
+    free(json_str);
+    free(order);
+    free(offsets);
+    return NULL;
+  }
   uint64_t total_size = 8 + header_size + data_offset;
 
   uint8_t *buf = malloc((size_t)total_size);
@@ -166,9 +253,12 @@ uint8_t *poly_safetensors_encode(
   /* Write tensor data in sorted order */
   for (int i = 0; i < n; i++) {
     int idx = order[i];
-    int64_t numel = compute_numel(entries[idx].shape, entries[idx].ndim);
+    int64_t numel = 0;
+    (void)compute_numel_checked(entries[idx].shape, entries[idx].ndim, &numel);
+    int elem_size = poly_safetensor_dtype_size(entries[idx].dtype);
     uint64_t byte_offset = 8 + header_size + offsets[i];
-    memcpy(buf + byte_offset, entries[idx].data, (size_t)numel * sizeof(float));
+    if (numel > 0)
+      memcpy(buf + byte_offset, entries[idx].data, (size_t)numel * (size_t)elem_size);
   }
 
   free(order);
@@ -185,6 +275,7 @@ PolySafetensorView *poly_safetensors_decode(
     int *n_out,
     char **metadata_out
 ) {
+  if (!n_out) return NULL;
   *n_out = 0;
   if (metadata_out) *metadata_out = NULL;
 
@@ -194,7 +285,7 @@ PolySafetensorView *poly_safetensors_decode(
   }
 
   uint64_t header_size = read_le64(data);
-  if (8 + header_size > (uint64_t)len) {
+  if (header_size > (uint64_t)len - 8) {
     fprintf(
         stderr, "poly_safetensors_decode: header_size %" PRIu64 " exceeds data length %d\n",
         header_size, len
@@ -210,8 +301,9 @@ PolySafetensorView *poly_safetensors_decode(
 
   cJSON *root = cJSON_Parse(json_str);
   free(json_str);
-  if (!root) {
+  if (!root || !cJSON_IsObject(root)) {
     fprintf(stderr, "poly_safetensors_decode: JSON parse error\n");
+    cJSON_Delete(root);
     return NULL;
   }
 
@@ -219,6 +311,7 @@ PolySafetensorView *poly_safetensors_decode(
   int count = 0;
   cJSON *item;
   cJSON_ArrayForEach(item, root) {
+    if (!item->string) goto fail_root;
     if (strcmp(item->string, "__metadata__") != 0) count++;
   }
 
@@ -267,21 +360,22 @@ PolySafetensorView *poly_safetensors_decode(
       goto fail;
     }
 
-    int64_t numel = 1;
+    int64_t numel = 0;
     for (int d = 0; d < ndim; d++) {
       cJSON *dim = cJSON_GetArrayItem(shape_arr, d);
-      if (!dim || !cJSON_IsNumber(dim)) goto fail;
-      views[vi].shape[d] = (int64_t)dim->valuedouble;
-      numel *= views[vi].shape[d];
+      if (!json_nonnegative_i64(dim, &views[vi].shape[d])) goto fail;
     }
+    if (!compute_numel_checked(views[vi].shape, ndim, &numel)) goto fail;
     views[vi].ndim = ndim;
     views[vi].numel = numel;
 
     /* Parse data_offsets */
     cJSON *offs_arr = cJSON_GetObjectItemCaseSensitive(item, "data_offsets");
     if (!offs_arr || !cJSON_IsArray(offs_arr) || cJSON_GetArraySize(offs_arr) != 2) goto fail;
-    uint64_t start = (uint64_t)cJSON_GetArrayItem(offs_arr, 0)->valuedouble;
-    uint64_t end = (uint64_t)cJSON_GetArrayItem(offs_arr, 1)->valuedouble;
+    uint64_t start = 0, end = 0;
+    if (!json_nonnegative_u64(cJSON_GetArrayItem(offs_arr, 0), &start) ||
+        !json_nonnegative_u64(cJSON_GetArrayItem(offs_arr, 1), &end))
+      goto fail;
 
     if (end < start || end > data_region_len) {
       fprintf(
@@ -302,6 +396,10 @@ PolySafetensorView *poly_safetensors_decode(
   cJSON_Delete(root);
   *n_out = count;
   return views;
+
+fail_root:
+  cJSON_Delete(root);
+  return NULL;
 
 fail:
   for (int i = 0; i < vi; i++)
@@ -329,6 +427,12 @@ int poly_safetensor_dtype_size(PolySafetensorDType dtype) {
   case POLY_ST_U8:
   case POLY_ST_BOOL:
     return 1;
+  case POLY_ST_U16:
+    return 2;
+  case POLY_ST_U32:
+    return 4;
+  case POLY_ST_U64:
+    return 8;
   }
   return 0;
 }
@@ -374,6 +478,18 @@ static int parse_safetensor_dtype(const char *s, PolySafetensorDType *out) {
     *out = POLY_ST_BOOL;
     return 0;
   }
+  if (strcmp(s, "U16") == 0) {
+    *out = POLY_ST_U16;
+    return 0;
+  }
+  if (strcmp(s, "U32") == 0) {
+    *out = POLY_ST_U32;
+    return 0;
+  }
+  if (strcmp(s, "U64") == 0) {
+    *out = POLY_ST_U64;
+    return 0;
+  }
   return -1;
 }
 
@@ -383,6 +499,7 @@ PolySafetensorViewEx *poly_safetensors_decode_ex(
     int *n_out,
     char **metadata_out
 ) {
+  if (!n_out) return NULL;
   *n_out = 0;
   if (metadata_out) *metadata_out = NULL;
 
@@ -392,7 +509,7 @@ PolySafetensorViewEx *poly_safetensors_decode_ex(
   }
 
   uint64_t header_size = read_le64(data);
-  if (8 + header_size > (uint64_t)len) {
+  if (header_size > (uint64_t)len - 8) {
     fprintf(
         stderr,
         "poly_safetensors_decode_ex: header_size %" PRIu64 " exceeds data length %" PRId64 "\n",
@@ -414,8 +531,9 @@ PolySafetensorViewEx *poly_safetensors_decode_ex(
 
   cJSON *root = cJSON_Parse(json_str);
   free(json_str);
-  if (!root) {
+  if (!root || !cJSON_IsObject(root)) {
     fprintf(stderr, "poly_safetensors_decode_ex: JSON parse error\n");
+    cJSON_Delete(root);
     return NULL;
   }
 
@@ -423,6 +541,7 @@ PolySafetensorViewEx *poly_safetensors_decode_ex(
   int count = 0;
   cJSON *item;
   cJSON_ArrayForEach(item, root) {
+    if (!item->string) goto fail_root_ex;
     if (strcmp(item->string, "__metadata__") != 0) count++;
   }
 
@@ -473,13 +592,12 @@ PolySafetensorViewEx *poly_safetensors_decode_ex(
       goto fail_ex;
     }
 
-    int64_t numel = 1;
+    int64_t numel = 0;
     for (int d = 0; d < ndim; d++) {
       cJSON *dim = cJSON_GetArrayItem(shape_arr, d);
-      if (!dim || !cJSON_IsNumber(dim)) goto fail_ex;
-      views[vi].shape[d] = (int64_t)dim->valuedouble;
-      numel *= views[vi].shape[d];
+      if (!json_nonnegative_i64(dim, &views[vi].shape[d])) goto fail_ex;
     }
+    if (!compute_numel_checked(views[vi].shape, ndim, &numel)) goto fail_ex;
     views[vi].ndim = ndim;
     views[vi].numel = numel;
     views[vi].dtype = dtype;
@@ -487,8 +605,10 @@ PolySafetensorViewEx *poly_safetensors_decode_ex(
     /* Parse data_offsets */
     cJSON *offs_arr = cJSON_GetObjectItemCaseSensitive(item, "data_offsets");
     if (!offs_arr || !cJSON_IsArray(offs_arr) || cJSON_GetArraySize(offs_arr) != 2) goto fail_ex;
-    uint64_t start = (uint64_t)cJSON_GetArrayItem(offs_arr, 0)->valuedouble;
-    uint64_t end = (uint64_t)cJSON_GetArrayItem(offs_arr, 1)->valuedouble;
+    uint64_t start = 0, end = 0;
+    if (!json_nonnegative_u64(cJSON_GetArrayItem(offs_arr, 0), &start) ||
+        !json_nonnegative_u64(cJSON_GetArrayItem(offs_arr, 1), &end))
+      goto fail_ex;
 
     if (end < start || end > data_region_len) {
       fprintf(
@@ -497,7 +617,8 @@ PolySafetensorViewEx *poly_safetensors_decode_ex(
       goto fail_ex;
     }
     int elem_size = poly_safetensor_dtype_size(dtype);
-    if (elem_size == 0 || (int64_t)(end - start) != numel * elem_size) {
+    if (elem_size == 0 || (uint64_t)numel > UINT64_MAX / (uint64_t)elem_size ||
+        (end - start) != (uint64_t)numel * (uint64_t)elem_size) {
       fprintf(stderr, "poly_safetensors_decode_ex: data size mismatch for '%s'\n", item->string);
       goto fail_ex;
     }
@@ -510,6 +631,10 @@ PolySafetensorViewEx *poly_safetensors_decode_ex(
   cJSON_Delete(root);
   *n_out = count;
   return views;
+
+fail_root_ex:
+  cJSON_Delete(root);
+  return NULL;
 
 fail_ex:
   for (int i = 0; i < vi; i++)
@@ -641,6 +766,30 @@ float *poly_safetensors_to_f32(const PolySafetensorViewEx *view) {
   case POLY_ST_BOOL:
     for (int64_t i = 0; i < view->numel; i++)
       out[i] = raw[i] ? 1.0f : 0.0f;
+    break;
+
+  case POLY_ST_U16:
+    for (int64_t i = 0; i < view->numel; i++) {
+      uint16_t v;
+      memcpy(&v, raw + i * 2, 2);
+      out[i] = (float)v;
+    }
+    break;
+
+  case POLY_ST_U32:
+    for (int64_t i = 0; i < view->numel; i++) {
+      uint32_t v;
+      memcpy(&v, raw + i * 4, 4);
+      out[i] = (float)v;
+    }
+    break;
+
+  case POLY_ST_U64:
+    for (int64_t i = 0; i < view->numel; i++) {
+      uint64_t v;
+      memcpy(&v, raw + i * 8, 8);
+      out[i] = (float)v;
+    }
     break;
 
   default:

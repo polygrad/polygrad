@@ -6,6 +6,7 @@
 #include "../src/instance.h"
 #include "../src/codegen.h"
 #include "../src/ctx.h"
+#include "../src/engine/jit.h"
 #include "../src/engine/realize.h"
 #include "../src/engine/schedule.h"
 #include "../src/ir.h"
@@ -1651,7 +1652,7 @@ TEST(instance, staged_objective_rejects_vector_output) {
   PASS();
 }
 
-TEST(instance, initialized_value_state_is_lifted_without_mutating_source_roots) {
+TEST(instance, named_value_state_preserves_logical_program_and_binds_physical_storage) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
   int64_t shape[] = {2};
@@ -1698,13 +1699,16 @@ TEST(instance, initialized_value_state_is_lifted_without_mutating_source_roots) 
 
   ASSERT_PTR_EQ(poly_tensor_uop_logical(w), source_logical);
   ASSERT_PTR_EQ(poly_tensor_uop_physical(w), source_physical);
+  ASSERT_INT_EQ(
+      instance_count_root_op(ctx, poly_instance_get_sink(inst, "forward"), POLY_OP_ADD), 0
+  );
 
   int64_t n = 0;
-  float *lifted = poly_instance_param_data(inst, 0, &n);
-  ASSERT_NOT_NULL(lifted);
+  float *state_data = poly_instance_param_data(inst, 0, &n);
+  ASSERT_NOT_NULL(state_data);
   ASSERT_INT_EQ((int)n, 2);
-  ASSERT_FLOAT_EQ(lifted[0], 4.0f, 1e-6f);
-  ASSERT_FLOAT_EQ(lifted[1], 6.0f, 1e-6f);
+  ASSERT_FLOAT_EQ(state_data[0], 4.0f, 1e-6f);
+  ASSERT_FLOAT_EQ(state_data[1], 6.0f, 1e-6f);
 
   float xv[] = {2.0f, 3.0f};
   PolyIOBinding io[] = {POLY_IO_BINDING_ARRAY("x", xv, POLY_FLOAT32)};
@@ -1719,8 +1723,44 @@ TEST(instance, initialized_value_state_is_lifted_without_mutating_source_roots) 
   uint8_t *weights = poly_instance_export_weights(inst, &weights_len);
   ASSERT_NOT_NULL(ir);
   ASSERT_NOT_NULL(weights);
+
+  /* Tinygrad load_state_dict replaces only the named Tensor's current UOp
+   * (`nn/state.py:126-160`); it does not rewrite an already-built program.
+   * Polygrad's portable divergence keeps that exact program and binds the
+   * named value only while constructing the active physical graph. */
+  PolyIrSpec portable = {0};
+  ASSERT_INT_EQ(poly_ir_import(ir, ir_len, &portable), 0);
+  PolyUOp *portable_w = NULL;
+  for (int i = 0; i < portable.n_bufs; i++)
+    if (strcmp(portable.bufs[i].name, "w") == 0) portable_w = portable.bufs[i].buffer;
+  ASSERT_NOT_NULL(portable_w);
+  ASSERT_INT_EQ(portable_w->op, POLY_OP_ADD);
+  ASSERT_INT_EQ(
+      instance_count_root_op(portable.ctx, portable.entrypoints[0].sink, POLY_OP_ADD), 1
+  );
+  ASSERT_TRUE(poly_uop_reachable(portable.ctx, portable.entrypoints[0].sink, portable_w));
+  PolyCtx *portable_ctx = portable.ctx;
+  poly_ir_spec_free(&portable);
+  poly_ctx_destroy(portable_ctx);
+
+  ASSERT_EQ(poly_instance_from_ir(ir, ir_len, NULL, 0), NULL);
+  float unrelated_data[] = {9.0f, 9.0f};
+  PolySafetensorEntry unrelated = {
+      .name = "other", .data = unrelated_data, .shape = shape, .ndim = 1,
+  };
+  int partial_len = 0;
+  uint8_t *partial = poly_safetensors_encode(&unrelated, 1, NULL, &partial_len);
+  ASSERT_NOT_NULL(partial);
+  ASSERT_EQ(poly_instance_from_ir(ir, ir_len, partial, partial_len), NULL);
+  free(partial);
   PolyInstance *restored = poly_instance_from_ir(ir, ir_len, weights, weights_len);
   ASSERT_NOT_NULL(restored);
+  ASSERT_INT_EQ(
+      instance_count_root_op(
+          poly_instance_ctx(restored), poly_instance_get_sink(restored, "forward"), POLY_OP_ADD
+      ),
+      0
+  );
   ASSERT_INT_EQ(poly_instance_forward(restored, io, 1), 0);
   out = poly_instance_buf_data_named(restored, "output", &n);
   ASSERT_NOT_NULL(out);
@@ -1735,7 +1775,1101 @@ TEST(instance, initialized_value_state_is_lifted_without_mutating_source_roots) 
   PASS();
 }
 
-TEST(instance, lifted_state_aliases_share_one_declared_resource) {
+TEST(instance, fresh_import_evaluates_closed_named_initializer_once) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int64_t shape[] = {2};
+  PolyUOp *x = poly_buffer_f32(ctx, 2);
+  PolyUOp *three = poly_full(ctx, shape, 1, 3.0);
+  PolyUOp *one = poly_full(ctx, shape, 1, 1.0);
+  PolyUOp *w = poly_add(ctx, three, one);
+  PolyUOp *y = poly_mul(ctx, x, w);
+  PolyUOp *out_buffer = poly_buffer_f32(ctx, 2);
+  PolyUOp *store = poly_store_val(ctx, out_buffer, y);
+  PolyUOp *sink = poly_sink1(ctx, store);
+  ASSERT_NOT_NULL(x);
+  ASSERT_NOT_NULL(w);
+  ASSERT_NOT_NULL(y);
+  ASSERT_NOT_NULL(out_buffer);
+  ASSERT_NOT_NULL(sink);
+  ASSERT_INT_EQ(w->op, POLY_OP_ADD);
+  ASSERT_EQ(poly_uop_get_buffer_identity(w), NULL);
+
+  PolyIrBufEntry bufs[] = {
+      {.name = "x", .role = POLY_IR_ROLE_INPUT, .buffer = x, .shape = {2}, .ndim = 1},
+      {.name = "w", .role = POLY_IR_ROLE_PARAM, .buffer = w, .shape = {2}, .ndim = 1,
+       .trainable = true, .trainable_set = true},
+      {.name = "output", .role = POLY_IR_ROLE_OUTPUT, .buffer = out_buffer,
+       .shape = {2}, .ndim = 1},
+  };
+  PolyIrEntrypoint eps[] = {{.name = "forward", .sink = sink}};
+  PolyIrSpec spec = {
+      .ctx = ctx, .bufs = bufs, .n_bufs = 3, .entrypoints = eps, .n_entrypoints = 1,
+  };
+  int ir_len = 0;
+  uint8_t *ir = poly_ir_export(&spec, &ir_len);
+  ASSERT_NOT_NULL(ir);
+
+  PolyInstance *inst = poly_instance_from_ir(ir, ir_len, NULL, 0);
+  ASSERT_NOT_NULL(inst);
+  PolyCtx *imported_ctx = poly_instance_ctx(inst);
+  ASSERT_INT_EQ(
+      instance_count_root_op(imported_ctx, poly_instance_get_sink(inst, "forward"), POLY_OP_ADD),
+      0
+  );
+  int exported_len = 0;
+  uint8_t *exported = poly_instance_export_ir(inst, &exported_len);
+  ASSERT_NOT_NULL(exported);
+  PolyIrSpec portable = {0};
+  ASSERT_INT_EQ(poly_ir_import(exported, exported_len, &portable), 0);
+  PolyUOp *portable_w = NULL;
+  for (int i = 0; i < portable.n_bufs; i++)
+    if (strcmp(portable.bufs[i].name, "w") == 0) portable_w = portable.bufs[i].buffer;
+  ASSERT_NOT_NULL(portable_w);
+  ASSERT_INT_EQ(portable_w->op, POLY_OP_ADD);
+  ASSERT_TRUE(poly_uop_reachable(portable.ctx, portable.entrypoints[0].sink, portable_w));
+  PolyCtx *portable_ctx = portable.ctx;
+  poly_ir_spec_free(&portable);
+  poly_ctx_destroy(portable_ctx);
+  free(exported);
+
+  int64_t n = 0;
+  float *weight = poly_instance_param_data(inst, 0, &n);
+  ASSERT_NOT_NULL(weight);
+  ASSERT_INT_EQ(n, 2);
+  ASSERT_FLOAT_EQ(weight[0], 4.0f, 1e-6f);
+  ASSERT_FLOAT_EQ(weight[1], 4.0f, 1e-6f);
+  float xv[] = {2.0f, 3.0f};
+  PolyIOBinding io[] = {POLY_IO_BINDING_ARRAY("x", xv, POLY_FLOAT32)};
+  ASSERT_INT_EQ(poly_instance_forward(inst, io, 1), 0);
+  float *output = poly_instance_buf_data_named(inst, "output", &n);
+  ASSERT_NOT_NULL(output);
+  ASSERT_FLOAT_EQ(output[0], 8.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(output[1], 12.0f, 1e-5f);
+  ASSERT_INT_EQ(poly_instance_forward(inst, io, 1), 0);
+  weight = poly_instance_param_data(inst, 0, &n);
+  ASSERT_FLOAT_EQ(weight[0], 4.0f, 1e-6f);
+  ASSERT_FLOAT_EQ(weight[1], 4.0f, 1e-6f);
+
+  free(ir);
+  poly_instance_free(inst);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(instance, stochastic_named_state_requires_checkpoint_for_portable_activation) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int64_t shape[] = {2};
+  const int f32_id = poly_dtype_id_by_name("float32");
+  PolyDevice device = test_ctx_execution_device(ctx);
+  poly_tensor_manual_seed(ctx, 11);
+  PolyTensor *w = poly_tensor_rand_by_id(ctx, shape, 1, f32_id, device, 1);
+  PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, device);
+  PolyTensor *out = poly_tensor_alu2(ctx, POLY_OP_MUL, x, w);
+  ASSERT_NOT_NULL(w);
+  ASSERT_NOT_NULL(x);
+  ASSERT_NOT_NULL(out);
+  ASSERT_INT_EQ(poly_tensor_uop_logical(w)->op, POLY_OP_CONTIGUOUS);
+  ASSERT_TRUE(instance_count_root_op(ctx, poly_tensor_uop_logical(w), POLY_OP_AFTER) > 0);
+  ASSERT_TRUE(instance_count_root_op(ctx, poly_tensor_uop_logical(w), POLY_OP_STORE) > 0);
+
+  PolyBindingSpec bindings[] = {
+      {.name = "x", .role = POLY_ROLE_INPUT, .tensor = x},
+      {.name = "w", .role = POLY_ROLE_PARAM, .tensor = w},
+      {.name = "output", .role = POLY_ROLE_OUTPUT, .tensor = out},
+  };
+  const char *inputs[] = {"x"};
+  const char *outputs[] = {"output"};
+  PolyEntrypointSpec entrypoints[] = {{
+      .name = "forward", .inputs = inputs, .n_inputs = 1,
+      .outputs = outputs, .n_outputs = 1,
+  }};
+  PolyInstanceError error = {0};
+  PolyInstance *inst =
+      poly_instance_from_bindings(ctx, bindings, 3, entrypoints, 1, NULL, &error);
+  ASSERT_NOT_NULL(inst);
+
+  int ir_len = 0, weights_len = 0;
+  uint8_t *ir = poly_instance_export_ir(inst, &ir_len);
+  uint8_t *weights = poly_instance_export_weights(inst, &weights_len);
+  ASSERT_NOT_NULL(ir);
+  ASSERT_NOT_NULL(weights);
+
+  /* Pinned Tensor RNG advances storage-backed per-device counters through
+   * STORE/AFTER (tensor.py:473-504).  The portable deterministic Instance
+   * contract cannot replay that history, so bytes are mandatory. */
+  ASSERT_EQ(poly_instance_from_ir(ir, ir_len, NULL, 0), NULL);
+  PolyInstance *restored = poly_instance_from_ir(ir, ir_len, weights, weights_len);
+  ASSERT_NOT_NULL(restored);
+  ASSERT_INT_EQ(
+      poly_instance_param_nbytes(restored, 0), poly_instance_param_nbytes(inst, 0)
+  );
+  ASSERT_TRUE(
+      memcmp(
+          poly_instance_param_data_raw(inst, 0, NULL),
+          poly_instance_param_data_raw(restored, 0, NULL),
+          poly_instance_param_nbytes(inst, 0)
+      ) == 0
+  );
+
+  float xv[] = {2.0f, 3.0f};
+  PolyIOBinding io[] = {POLY_IO_BINDING_ARRAY("x", xv, POLY_FLOAT32)};
+  ASSERT_INT_EQ(poly_instance_forward(inst, io, 1), 0);
+  ASSERT_INT_EQ(poly_instance_forward(restored, io, 1), 0);
+  int64_t source_n = 0, restored_n = 0;
+  float *source_out = poly_instance_buf_data_named(inst, "output", &source_n);
+  float *restored_out = poly_instance_buf_data_named(restored, "output", &restored_n);
+  ASSERT_NOT_NULL(source_out);
+  ASSERT_NOT_NULL(restored_out);
+  ASSERT_INT_EQ(source_n, restored_n);
+  for (int64_t i = 0; i < source_n; i++)
+    ASSERT_FLOAT_EQ(source_out[i], restored_out[i], 0.0f);
+
+  poly_instance_free(restored);
+  free(weights);
+  free(ir);
+  poly_instance_free(inst);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(instance, duplicate_abi_storage_alias_fails_closed_like_tinyjit) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int64_t shape[] = {2};
+  PolyTensor *x = poly_tensor_empty(
+      ctx, POLY_FLOAT32, shape, 1, test_ctx_execution_device(ctx)
+  );
+  PolyTensor *out = poly_tensor_alu2(ctx, POLY_OP_ADD, x, x);
+  ASSERT_NOT_NULL(x);
+  ASSERT_NOT_NULL(out);
+
+  PolyBindingSpec bindings[] = {
+      {.name = "a", .role = POLY_ROLE_INPUT, .tensor = x},
+      {.name = "b", .role = POLY_ROLE_INPUT, .tensor = x},
+      {.name = "output", .role = POLY_ROLE_OUTPUT, .tensor = out},
+  };
+  const char *inputs[] = {"a", "b"};
+  const char *outputs[] = {"output"};
+  PolyEntrypointSpec entries[] = {{
+      .name = "forward", .inputs = inputs, .n_inputs = 2,
+      .outputs = outputs, .n_outputs = 1,
+  }};
+  PolyInstance *inst =
+      poly_instance_from_bindings(ctx, bindings, 3, entries, 1, NULL, NULL);
+  ASSERT_EQ(inst, NULL);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(instance, dynamic_abi_storage_alias_with_persistent_state_fails_closed) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int64_t shape[] = {2};
+  PolyTensor *x = poly_tensor_empty(
+      ctx, POLY_FLOAT32, shape, 1, test_ctx_execution_device(ctx)
+  );
+  PolyTensor *out = poly_tensor_alu2(ctx, POLY_OP_ADD, x, x);
+  ASSERT_NOT_NULL(x);
+  ASSERT_NOT_NULL(out);
+
+  PolyBindingSpec bindings[] = {
+      {.name = "x", .role = POLY_ROLE_INPUT, .tensor = x},
+      {.name = "w", .role = POLY_ROLE_PARAM, .tensor = x},
+      {.name = "output", .role = POLY_ROLE_OUTPUT, .tensor = out},
+  };
+  const char *inputs[] = {"x"};
+  const char *outputs[] = {"output"};
+  PolyEntrypointSpec entries[] = {{
+      .name = "forward", .inputs = inputs, .n_inputs = 1,
+      .outputs = outputs, .n_outputs = 1,
+  }};
+  ASSERT_EQ(
+      poly_instance_from_bindings(ctx, bindings, 3, entries, 1, NULL, NULL),
+      NULL
+  );
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(instance, output_alias_of_dynamic_input_round_trips) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int64_t shape[] = {2};
+  PolyTensor *x = poly_tensor_empty(
+      ctx, POLY_FLOAT32, shape, 1, test_ctx_execution_device(ctx)
+  );
+  ASSERT_NOT_NULL(x);
+  PolyBindingSpec bindings[] = {
+      {.name = "x", .role = POLY_ROLE_INPUT, .tensor = x},
+      {.name = "output", .role = POLY_ROLE_OUTPUT, .tensor = x},
+  };
+  const char *inputs[] = {"x"};
+  const char *outputs[] = {"output"};
+  PolyEntrypointSpec entries[] = {{
+      .name = "forward", .inputs = inputs, .n_inputs = 1,
+      .outputs = outputs, .n_outputs = 1,
+  }};
+  PolyInstance *inst =
+      poly_instance_from_bindings(ctx, bindings, 2, entries, 1, NULL, NULL);
+  ASSERT_NOT_NULL(inst);
+  float value[] = {3.0f, 4.0f};
+  PolyIOBinding io[] = {POLY_IO_BINDING_ARRAY("x", value, POLY_FLOAT32)};
+  ASSERT_INT_EQ(poly_instance_forward(inst, io, 1), 0);
+  int64_t n = 0;
+  float *out = poly_instance_buf_data_named(inst, "output", &n);
+  ASSERT_NOT_NULL(out);
+  ASSERT_INT_EQ(n, 2);
+  ASSERT_FLOAT_EQ(out[0], 3.0f, 0.0f);
+  ASSERT_FLOAT_EQ(out[1], 4.0f, 0.0f);
+
+  int ir_len = 0;
+  uint8_t *ir = poly_instance_export_ir(inst, &ir_len);
+  ASSERT_NOT_NULL(ir);
+  PolyInstance *restored = poly_instance_from_ir(ir, ir_len, NULL, 0);
+  ASSERT_NOT_NULL(restored);
+  ASSERT_INT_EQ(poly_instance_forward(restored, io, 1), 0);
+  out = poly_instance_buf_data_named(restored, "output", &n);
+  ASSERT_NOT_NULL(out);
+  ASSERT_FLOAT_EQ(out[0], 3.0f, 0.0f);
+  ASSERT_FLOAT_EQ(out[1], 4.0f, 0.0f);
+
+  poly_instance_free(restored);
+  free(ir);
+  poly_instance_free(inst);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(instance, named_partial_view_state_fails_closed) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int64_t shape[] = {4};
+  int64_t x_shape[] = {2};
+  int64_t bounds[][2] = {{1, 3}};
+  PolyDevice device = test_ctx_execution_device(ctx);
+  PolyTensor *base = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, device);
+  PolyTensor *view = poly_tensor_shrink(ctx, base, bounds, 1);
+  PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, x_shape, 1, device);
+  PolyTensor *out = poly_tensor_alu2(ctx, POLY_OP_ADD, x, view);
+  ASSERT_NOT_NULL(base);
+  ASSERT_NOT_NULL(view);
+  ASSERT_NOT_NULL(x);
+  ASSERT_NOT_NULL(out);
+
+  PolyBindingSpec bindings[] = {
+      {.name = "x", .role = POLY_ROLE_INPUT, .tensor = x},
+      {.name = "base", .role = POLY_ROLE_PARAM, .tensor = base},
+      {.name = "view", .role = POLY_ROLE_PARAM, .tensor = view},
+      {.name = "output", .role = POLY_ROLE_OUTPUT, .tensor = out},
+  };
+  const char *inputs[] = {"x"};
+  const char *outputs[] = {"output"};
+  PolyEntrypointSpec entries[] = {{
+      .name = "forward", .inputs = inputs, .n_inputs = 1,
+      .outputs = outputs, .n_outputs = 1,
+  }};
+  PolyInstanceError error = {0};
+  PolyInstance *inst =
+      poly_instance_from_bindings(ctx, bindings, 4, entries, 1, NULL, &error);
+  ASSERT_EQ(inst, NULL);
+  ASSERT_TRUE(strstr(error.message, "unsupported named view state") != NULL);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(instance, input_dependent_named_state_effect_fails_closed) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int64_t shape[] = {1};
+  PolyDevice device = test_ctx_execution_device(ctx);
+  PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, device);
+  PolyTensor *w = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, device);
+  PolyTensor *sum = poly_tensor_alu2(ctx, POLY_OP_ADD, w, x);
+  ASSERT_NOT_NULL(x);
+  ASSERT_NOT_NULL(w);
+  ASSERT_NOT_NULL(sum);
+  ASSERT_PTR_EQ(poly_tensor_assign(ctx, w, sum), w);
+  ASSERT_TRUE(instance_count_root_op(ctx, poly_tensor_uop_logical(w), POLY_OP_AFTER) > 0);
+  ASSERT_TRUE(instance_count_root_op(ctx, poly_tensor_uop_logical(w), POLY_OP_STORE) > 0);
+
+  PolyBindingSpec bindings[] = {
+      {.name = "x", .role = POLY_ROLE_INPUT, .tensor = x},
+      {.name = "w", .role = POLY_ROLE_PARAM, .tensor = w},
+      {.name = "output", .role = POLY_ROLE_OUTPUT, .tensor = w},
+  };
+  const char *inputs[] = {"x"};
+  const char *outputs[] = {"output"};
+  PolyEntrypointSpec entries[] = {{
+      .name = "forward", .inputs = inputs, .n_inputs = 1,
+      .outputs = outputs, .n_outputs = 1,
+  }};
+  PolyInstanceError error = {0};
+  PolyInstance *inst =
+      poly_instance_from_bindings(ctx, bindings, 3, entries, 1, NULL, &error);
+  ASSERT_EQ(inst, NULL);
+  ASSERT_TRUE(strstr(error.message, "depends on an input or target") != NULL);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(instance, assigned_realized_input_history_fails_closed) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int64_t shape[] = {2};
+  PolyDevice device = test_ctx_execution_device(ctx);
+  PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, device);
+  PolyTensor *value = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, device);
+  ASSERT_NOT_NULL(x);
+  ASSERT_NOT_NULL(value);
+  ASSERT_PTR_EQ(poly_tensor_assign(ctx, x, value), x);
+  PolyTensor *realized = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &x, 1, &realized), 0);
+  ASSERT_PTR_EQ(realized, x);
+  ASSERT_TRUE(poly_uop_has_buffer_identity(poly_tensor_uop_physical(x)));
+  ASSERT_FALSE(poly_uop_has_buffer_identity(poly_tensor_uop_logical(x)));
+  PolyTensor *out = poly_tensor_alu2(ctx, POLY_OP_ADD, x, x);
+  ASSERT_NOT_NULL(out);
+
+  PolyBindingSpec bindings[] = {
+      {.name = "x", .role = POLY_ROLE_INPUT, .tensor = x},
+      {.name = "output", .role = POLY_ROLE_OUTPUT, .tensor = out},
+  };
+  const char *inputs[] = {"x"};
+  const char *outputs[] = {"output"};
+  PolyEntrypointSpec entries[] = {{
+      .name = "forward", .inputs = inputs, .n_inputs = 1,
+      .outputs = outputs, .n_outputs = 1,
+  }};
+  PolyInstanceError error = {0};
+  PolyInstance *inst =
+      poly_instance_from_bindings(ctx, bindings, 2, entries, 1, NULL, &error);
+  ASSERT_EQ(inst, NULL);
+  ASSERT_TRUE(strstr(error.message, "has no buffer identity") != NULL);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(instance, stochastic_output_effect_requires_named_rng_state) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int64_t shape[] = {2};
+  PolyDevice device = test_ctx_execution_device(ctx);
+  poly_tensor_manual_seed(ctx, 123);
+  PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, device);
+  PolyTensor *random = poly_tensor_rand_by_id(
+      ctx, shape, 1, poly_dtype_id_by_name("float32"), device, 1
+  );
+  PolyTensor *out = poly_tensor_alu2(ctx, POLY_OP_ADD, x, random);
+  ASSERT_NOT_NULL(x);
+  ASSERT_NOT_NULL(random);
+  ASSERT_NOT_NULL(out);
+
+  PolyBindingSpec bindings[] = {
+      {.name = "x", .role = POLY_ROLE_INPUT, .tensor = x},
+      {.name = "output", .role = POLY_ROLE_OUTPUT, .tensor = out},
+  };
+  const char *inputs[] = {"x"};
+  const char *outputs[] = {"output"};
+  PolyEntrypointSpec entries[] = {{
+      .name = "forward", .inputs = inputs, .n_inputs = 1,
+      .outputs = outputs, .n_outputs = 1,
+  }};
+  PolyInstanceError error = {0};
+  PolyInstance *inst =
+      poly_instance_from_bindings(ctx, bindings, 2, entries, 1, NULL, &error);
+  ASSERT_EQ(inst, NULL);
+  ASSERT_TRUE(strstr(error.message, "unbound storage") != NULL);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(instance, import_rejects_duplicate_abi_storage_alias) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *input = poly_buffer_f32(ctx, 2);
+  PolyUOp *output = poly_buffer_f32(ctx, 2);
+  PolyUOp *sink = poly_sink1(
+      ctx, poly_store_val(ctx, output, poly_alu2(ctx, POLY_OP_ADD, input, input))
+  );
+  ASSERT_NOT_NULL(input);
+  ASSERT_NOT_NULL(output);
+  ASSERT_NOT_NULL(sink);
+  PolyIrBufEntry bufs[] = {
+      {.name = "a", .role = POLY_IR_ROLE_INPUT, .buffer = input,
+       .shape = {2}, .ndim = 1},
+      {.name = "b", .role = POLY_IR_ROLE_INPUT, .buffer = input,
+       .shape = {2}, .ndim = 1},
+      {.name = "output", .role = POLY_IR_ROLE_OUTPUT, .buffer = output,
+       .shape = {2}, .ndim = 1},
+  };
+  const char *inputs[] = {"a", "b"};
+  const char *outputs[] = {"output"};
+  PolyIrEntrypoint entry = {
+      .name = "forward", .sink = sink, .inputs = inputs, .n_inputs = 2,
+      .outputs = outputs, .n_outputs = 1,
+  };
+  PolyIrSpec spec = {
+      .ctx = ctx, .bufs = bufs, .n_bufs = 3,
+      .entrypoints = &entry, .n_entrypoints = 1,
+  };
+  int ir_len = 0;
+  uint8_t *ir = poly_ir_export(&spec, &ir_len);
+  ASSERT_NOT_NULL(ir);
+  ASSERT_EQ(poly_instance_from_ir(ir, ir_len, NULL, 0), NULL);
+
+  free(ir);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(instance, import_rejects_dynamic_abi_alias_with_persistent_state) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *shared = poly_buffer_f32(ctx, 2);
+  PolyUOp *output = poly_buffer_f32(ctx, 2);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, output, shared));
+  ASSERT_NOT_NULL(shared);
+  ASSERT_NOT_NULL(output);
+  ASSERT_NOT_NULL(sink);
+  PolyIrBufEntry bufs[] = {
+      {.name = "x", .role = POLY_IR_ROLE_INPUT, .buffer = shared,
+       .shape = {2}, .ndim = 1},
+      {.name = "w", .role = POLY_IR_ROLE_PARAM, .buffer = shared,
+       .shape = {2}, .ndim = 1},
+      {.name = "output", .role = POLY_IR_ROLE_OUTPUT, .buffer = output,
+       .shape = {2}, .ndim = 1},
+  };
+  const char *inputs[] = {"x"};
+  const char *outputs[] = {"output"};
+  PolyIrEntrypoint entry = {
+      .name = "forward", .sink = sink, .inputs = inputs, .n_inputs = 1,
+      .outputs = outputs, .n_outputs = 1,
+  };
+  PolyIrSpec spec = {
+      .ctx = ctx, .bufs = bufs, .n_bufs = 3,
+      .entrypoints = &entry, .n_entrypoints = 1,
+  };
+  int ir_len = 0;
+  uint8_t *ir = poly_ir_export(&spec, &ir_len);
+  ASSERT_NOT_NULL(ir);
+  ASSERT_EQ(poly_instance_from_ir(ir, ir_len, NULL, 0), NULL);
+
+  free(ir);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(instance, import_rejects_named_partial_view_state) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *base = poly_buffer_f32(ctx, 4);
+  int64_t bounds[][2] = {{1, 3}};
+  PolyUOp *view = poly_shrink(ctx, base, bounds, 1);
+  PolyUOp *output = poly_buffer_f32(ctx, 2);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, output, view));
+  ASSERT_NOT_NULL(base);
+  ASSERT_NOT_NULL(view);
+  ASSERT_NOT_NULL(output);
+  ASSERT_NOT_NULL(sink);
+  PolyIrBufEntry bufs[] = {
+      {.name = "base", .role = POLY_IR_ROLE_PARAM, .buffer = base,
+       .shape = {4}, .ndim = 1},
+      {.name = "view", .role = POLY_IR_ROLE_PARAM, .buffer = view,
+       .shape = {2}, .ndim = 1},
+      {.name = "output", .role = POLY_IR_ROLE_OUTPUT, .buffer = output,
+       .shape = {2}, .ndim = 1},
+  };
+  const char *outputs[] = {"output"};
+  PolyIrEntrypoint entry = {
+      .name = "forward", .sink = sink, .outputs = outputs, .n_outputs = 1,
+  };
+  PolyIrSpec spec = {
+      .ctx = ctx, .bufs = bufs, .n_bufs = 3,
+      .entrypoints = &entry, .n_entrypoints = 1,
+  };
+  int ir_len = 0;
+  uint8_t *ir = poly_ir_export(&spec, &ir_len);
+  ASSERT_NOT_NULL(ir);
+  ASSERT_EQ(poly_instance_from_ir(ir, ir_len, NULL, 0), NULL);
+
+  free(ir);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(instance, checkpoint_import_rejects_input_dependent_named_state_effect) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *input = poly_buffer_f32(ctx, 1);
+  PolyUOp *state = poly_buffer_f32(ctx, 1);
+  PolyUOp *updated = poly_uop_after(
+      ctx, state,
+      poly_store_val(ctx, state, poly_alu2(ctx, POLY_OP_ADD, state, input))
+  );
+  PolyUOp *output = poly_buffer_f32(ctx, 1);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, output, updated));
+  ASSERT_NOT_NULL(input);
+  ASSERT_NOT_NULL(state);
+  ASSERT_NOT_NULL(updated);
+  ASSERT_NOT_NULL(output);
+  ASSERT_NOT_NULL(sink);
+  PolyIrBufEntry bufs[] = {
+      {.name = "x", .role = POLY_IR_ROLE_INPUT, .buffer = input,
+       .shape = {1}, .ndim = 1},
+      {.name = "w", .role = POLY_IR_ROLE_PARAM, .buffer = updated,
+       .shape = {1}, .ndim = 1},
+      {.name = "output", .role = POLY_IR_ROLE_OUTPUT, .buffer = output,
+       .shape = {1}, .ndim = 1},
+  };
+  const char *inputs[] = {"x"};
+  const char *outputs[] = {"output"};
+  PolyIrEntrypoint entry = {
+      .name = "forward", .sink = sink, .inputs = inputs, .n_inputs = 1,
+      .outputs = outputs, .n_outputs = 1,
+  };
+  PolyIrSpec spec = {
+      .ctx = ctx, .bufs = bufs, .n_bufs = 3,
+      .entrypoints = &entry, .n_entrypoints = 1,
+  };
+  int ir_len = 0;
+  uint8_t *ir = poly_ir_export(&spec, &ir_len);
+  ASSERT_NOT_NULL(ir);
+  float weight[] = {7.0f};
+  int64_t shape[] = {1};
+  PolySafetensorEntry weight_entry = {
+      .name = "w", .data = weight, .shape = shape, .ndim = 1,
+      .dtype = POLY_ST_F32,
+  };
+  int checkpoint_len = 0;
+  uint8_t *checkpoint =
+      poly_safetensors_encode(&weight_entry, 1, NULL, &checkpoint_len);
+  ASSERT_NOT_NULL(checkpoint);
+  ASSERT_EQ(poly_instance_from_ir(ir, ir_len, checkpoint, checkpoint_len), NULL);
+
+  free(checkpoint);
+  free(ir);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(instance, multi_entrypoint_shared_state_round_trips_across_policy_replacement) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int64_t shape[] = {2};
+  PolyDevice initial = test_ctx_execution_device(ctx);
+  PolyDevice replacement = initial == POLY_DEVICE_INTERP ? POLY_DEVICE_CPU
+                                                          : POLY_DEVICE_INTERP;
+  PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, initial);
+  PolyTensor *w = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, initial);
+  PolyTensor *shared = poly_tensor_alu2(ctx, POLY_OP_MUL, x, w);
+  PolyTensor *plus = poly_tensor_alu2(ctx, POLY_OP_ADD, shared, x);
+  PolyTensor *minus = poly_tensor_alu2(ctx, POLY_OP_SUB, shared, x);
+  ASSERT_NOT_NULL(x);
+  ASSERT_NOT_NULL(w);
+  ASSERT_NOT_NULL(shared);
+  ASSERT_NOT_NULL(plus);
+  ASSERT_NOT_NULL(minus);
+  float weights_data[] = {2.0f, 3.0f};
+  ASSERT_INT_EQ(
+      poly_buffer_write(
+          ctx, poly_tensor_uop_physical(w), weights_data, sizeof(weights_data)
+      ),
+      0
+  );
+
+  PolyBindingSpec bindings[] = {
+      {.name = "x", .role = POLY_ROLE_INPUT, .tensor = x},
+      {.name = "w", .role = POLY_ROLE_PARAM, .tensor = w},
+      {.name = "plus", .role = POLY_ROLE_OUTPUT, .tensor = plus},
+      {.name = "minus", .role = POLY_ROLE_OUTPUT, .tensor = minus},
+  };
+  const char *inputs[] = {"x"};
+  const char *plus_outputs[] = {"plus"};
+  const char *minus_outputs[] = {"minus"};
+  PolyEntrypointSpec entries[] = {
+      {
+          .name = "plus_ep", .inputs = inputs, .n_inputs = 1,
+          .outputs = plus_outputs, .n_outputs = 1,
+      },
+      {
+          .name = "minus_ep", .inputs = inputs, .n_inputs = 1,
+          .outputs = minus_outputs, .n_outputs = 1,
+      },
+  };
+  PolyInstance *inst =
+      poly_instance_from_bindings(ctx, bindings, 4, entries, 2, NULL, NULL);
+  ASSERT_NOT_NULL(inst);
+
+  int ir_before_len = 0;
+  uint8_t *ir_before = poly_instance_export_ir(inst, &ir_before_len);
+  ASSERT_NOT_NULL(ir_before);
+  float input_data[] = {4.0f, 5.0f};
+  PolyIOBinding io[] = {POLY_IO_BINDING_ARRAY("x", input_data, POLY_FLOAT32)};
+  ASSERT_INT_EQ(poly_instance_call(inst, "plus_ep", io, 1), 0);
+  int64_t n = 0;
+  float *out = poly_instance_buf_data_named(inst, "plus", &n);
+  ASSERT_NOT_NULL(out);
+  ASSERT_INT_EQ(n, 2);
+  ASSERT_FLOAT_EQ(out[0], 12.0f, 0.0f);
+  ASSERT_FLOAT_EQ(out[1], 20.0f, 0.0f);
+  ASSERT_INT_EQ(poly_instance_call(inst, "minus_ep", io, 1), 0);
+  out = poly_instance_buf_data_named(inst, "minus", &n);
+  ASSERT_NOT_NULL(out);
+  ASSERT_FLOAT_EQ(out[0], 4.0f, 0.0f);
+  ASSERT_FLOAT_EQ(out[1], 10.0f, 0.0f);
+
+  ASSERT_INT_EQ(poly_instance_set_device(inst, replacement), 0);
+  ASSERT_INT_EQ(poly_instance_call(inst, "plus_ep", io, 1), 0);
+  out = poly_instance_buf_data_named(inst, "plus", &n);
+  ASSERT_NOT_NULL(out);
+  ASSERT_FLOAT_EQ(out[0], 12.0f, 0.0f);
+  ASSERT_FLOAT_EQ(out[1], 20.0f, 0.0f);
+  ASSERT_INT_EQ(poly_instance_call(inst, "minus_ep", io, 1), 0);
+  out = poly_instance_buf_data_named(inst, "minus", &n);
+  ASSERT_NOT_NULL(out);
+  ASSERT_FLOAT_EQ(out[0], 4.0f, 0.0f);
+  ASSERT_FLOAT_EQ(out[1], 10.0f, 0.0f);
+
+  int ir_after_len = 0;
+  uint8_t *ir_after = poly_instance_export_ir(inst, &ir_after_len);
+  ASSERT_NOT_NULL(ir_after);
+  ASSERT_INT_EQ(ir_after_len, ir_before_len);
+  ASSERT_TRUE(memcmp(ir_before, ir_after, (size_t)ir_before_len) == 0);
+  int weights_len = 0;
+  uint8_t *weights = poly_instance_export_weights(inst, &weights_len);
+  ASSERT_NOT_NULL(weights);
+  PolyInstance *restored =
+      poly_instance_from_ir(ir_after, ir_after_len, weights, weights_len);
+  ASSERT_NOT_NULL(restored);
+  ASSERT_INT_EQ(poly_instance_call(restored, "plus_ep", io, 1), 0);
+  out = poly_instance_buf_data_named(restored, "plus", &n);
+  ASSERT_NOT_NULL(out);
+  ASSERT_FLOAT_EQ(out[0], 12.0f, 0.0f);
+  ASSERT_FLOAT_EQ(out[1], 20.0f, 0.0f);
+  ASSERT_INT_EQ(poly_instance_call(restored, "minus_ep", io, 1), 0);
+  out = poly_instance_buf_data_named(restored, "minus", &n);
+  ASSERT_NOT_NULL(out);
+  ASSERT_FLOAT_EQ(out[0], 4.0f, 0.0f);
+  ASSERT_FLOAT_EQ(out[1], 10.0f, 0.0f);
+
+  poly_instance_free(restored);
+  free(weights);
+  free(ir_after);
+  free(ir_before);
+  poly_instance_free(inst);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(instance, float16_state_exports_and_imports_exact_storage_bytes) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyInstance *inst = poly_instance_new(ctx, NULL);
+  ASSERT_NOT_NULL(inst);
+  int64_t shape[] = {2};
+  PolyTensor *w = poly_instance_param(inst, "w", POLY_FLOAT16, shape, 1);
+  ASSERT_NOT_NULL(w);
+  ASSERT_INT_EQ(poly_instance_output(inst, "output", w), POLY_STATUS_OK);
+  const char *outputs[] = {"output"};
+  ASSERT_INT_EQ(
+      poly_instance_entrypoint(inst, "forward", NULL, 0, outputs, 1, NULL),
+      POLY_STATUS_OK
+  );
+  ASSERT_INT_EQ(poly_instance_build(inst, NULL), POLY_STATUS_OK);
+
+  int64_t numel = 0;
+  uint16_t *raw = poly_instance_param_data_raw(inst, 0, &numel);
+  ASSERT_NOT_NULL(raw);
+  ASSERT_INT_EQ(numel, 2);
+  ASSERT_EQ(poly_instance_param_data(inst, 0, NULL), NULL);
+  ASSERT_INT_EQ(poly_instance_param_dtype_id(inst, 0), poly_dtype_id_by_name("float16"));
+  ASSERT_INT_EQ(poly_instance_param_nbytes(inst, 0), sizeof(uint16_t) * 2);
+  raw[0] = 0x3e00; /* 1.5 */
+  raw[1] = 0xc000; /* -2.0 */
+
+  int weights_len = 0;
+  uint8_t *weights = poly_instance_export_weights(inst, &weights_len);
+  ASSERT_NOT_NULL(weights);
+  int n_views = 0;
+  PolySafetensorViewEx *views =
+      poly_safetensors_decode_ex(weights, weights_len, &n_views, NULL);
+  ASSERT_NOT_NULL(views);
+  ASSERT_INT_EQ(n_views, 1);
+  ASSERT_STR_EQ(views[0].name, "w");
+  ASSERT_INT_EQ(views[0].dtype, POLY_ST_F16);
+  ASSERT_INT_EQ(views[0].numel, 2);
+  ASSERT_TRUE(memcmp(views[0].raw_data, raw, sizeof(uint16_t) * 2) == 0);
+  free(views[0].name);
+  free(views);
+
+  int ir_len = 0;
+  uint8_t *ir = poly_instance_export_ir(inst, &ir_len);
+  ASSERT_NOT_NULL(ir);
+  PolyInstance *restored = poly_instance_from_ir(ir, ir_len, weights, weights_len);
+  ASSERT_NOT_NULL(restored);
+  uint16_t *restored_raw = poly_instance_param_data_raw(restored, 0, &numel);
+  ASSERT_NOT_NULL(restored_raw);
+  ASSERT_INT_EQ(numel, 2);
+  ASSERT_TRUE(memcmp(restored_raw, raw, sizeof(uint16_t) * 2) == 0);
+  ASSERT_INT_EQ(poly_instance_param_nbytes(restored, 0), sizeof(uint16_t) * 2);
+
+  poly_instance_free(restored);
+  free(ir);
+  free(weights);
+  poly_instance_free(inst);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(instance, supported_scalar_state_dtypes_round_trip_exact_storage_bytes) {
+  const char *dtype_names[] = {
+      "float32", "float16", "bfloat16", "float64", "int64", "int32", "int16",
+      "int8", "uint8", "bool", "uint16", "uint32", "uint64",
+  };
+  for (size_t dtype_index = 0;
+       dtype_index < sizeof(dtype_names) / sizeof(dtype_names[0]); dtype_index++) {
+    PolyCtx *ctx = poly_ctx_new();
+    ASSERT_NOT_NULL(ctx);
+    PolyDType dtype;
+    int dtype_id = poly_dtype_id_by_name(dtype_names[dtype_index]);
+    ASSERT_TRUE(poly_dtype_by_id(dtype_id, &dtype));
+    int itemsize = poly_dtype_itemsize(dtype);
+    ASSERT_TRUE(itemsize > 0 && itemsize <= 8);
+
+    PolyInstance *inst = poly_instance_new(ctx, NULL);
+    ASSERT_NOT_NULL(inst);
+    int64_t shape[] = {2};
+    PolyTensor *w = poly_instance_param(inst, "w", dtype, shape, 1);
+    ASSERT_NOT_NULL(w);
+    ASSERT_INT_EQ(poly_instance_output(inst, "output", w), POLY_STATUS_OK);
+    const char *outputs[] = {"output"};
+    ASSERT_INT_EQ(
+        poly_instance_entrypoint(inst, "forward", NULL, 0, outputs, 1, NULL),
+        POLY_STATUS_OK
+    );
+    ASSERT_INT_EQ(poly_instance_build(inst, NULL), POLY_STATUS_OK);
+
+    size_t nbytes = (size_t)itemsize * 2;
+    uint8_t expected[16] = {0};
+    for (size_t i = 0; i < nbytes; i++)
+      expected[i] = (uint8_t)(17 + i * 29 + dtype_index);
+    if (strcmp(dtype_names[dtype_index], "bool") == 0) {
+      expected[0] = 0;
+      expected[1] = 1;
+    }
+    void *raw = poly_instance_param_data_raw(inst, 0, NULL);
+    ASSERT_NOT_NULL(raw);
+    ASSERT_INT_EQ(poly_instance_param_nbytes(inst, 0), nbytes);
+    memcpy(raw, expected, nbytes);
+
+    int ir_len = 0, weights_len = 0;
+    uint8_t *ir = poly_instance_export_ir(inst, &ir_len);
+    uint8_t *weights = poly_instance_export_weights(inst, &weights_len);
+    ASSERT_NOT_NULL(ir);
+    ASSERT_NOT_NULL(weights);
+    PolyInstance *restored = poly_instance_from_ir(ir, ir_len, weights, weights_len);
+    ASSERT_NOT_NULL(restored);
+    ASSERT_INT_EQ(poly_instance_param_dtype_id(restored, 0), dtype_id);
+    ASSERT_INT_EQ(poly_instance_param_nbytes(restored, 0), nbytes);
+    ASSERT_TRUE(
+        memcmp(poly_instance_param_data_raw(restored, 0, NULL), expected, nbytes) == 0
+    );
+
+    poly_instance_free(restored);
+    free(weights);
+    free(ir);
+    poly_instance_free(inst);
+    poly_ctx_destroy(ctx);
+  }
+  PASS();
+}
+
+TEST(instance, checkpoint_validation_is_shape_exact_and_transactional) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyInstance *inst = poly_instance_new(ctx, NULL);
+  ASSERT_NOT_NULL(inst);
+  int64_t shape[] = {1};
+  PolyTensor *a = poly_instance_param(inst, "a", POLY_FLOAT32, shape, 1);
+  PolyTensor *b = poly_instance_param(inst, "b", POLY_FLOAT32, shape, 1);
+  ASSERT_NOT_NULL(a);
+  ASSERT_NOT_NULL(b);
+  PolyTensor *sum = poly_tensor_alu2(ctx, POLY_OP_ADD, a, b);
+  ASSERT_NOT_NULL(sum);
+  ASSERT_INT_EQ(poly_instance_output(inst, "output", sum), POLY_STATUS_OK);
+  const char *outputs[] = {"output"};
+  ASSERT_INT_EQ(
+      poly_instance_entrypoint(inst, "forward", NULL, 0, outputs, 1, NULL),
+      POLY_STATUS_OK
+  );
+  ASSERT_INT_EQ(poly_instance_build(inst, NULL), POLY_STATUS_OK);
+
+  int64_t numel = 0;
+  float *a_data = poly_instance_param_data(inst, 0, &numel);
+  float *b_data = poly_instance_param_data(inst, 1, &numel);
+  ASSERT_NOT_NULL(a_data);
+  ASSERT_NOT_NULL(b_data);
+  a_data[0] = 1.0f;
+  b_data[0] = 2.0f;
+
+  float replacement_a[] = {9.0f};
+  float invalid_b[] = {7.0f, 8.0f};
+  int64_t bad_shape[] = {2};
+  PolySafetensorEntry rows[] = {
+      {.name = "a", .data = replacement_a, .shape = shape, .ndim = 1,
+       .dtype = POLY_ST_F32},
+      {.name = "b", .data = invalid_b, .shape = bad_shape, .ndim = 1,
+       .dtype = POLY_ST_F32},
+  };
+  int checkpoint_len = 0;
+  uint8_t *checkpoint = poly_safetensors_encode(rows, 2, NULL, &checkpoint_len);
+  ASSERT_NOT_NULL(checkpoint);
+  ASSERT_INT_EQ(poly_instance_import_weights(inst, checkpoint, checkpoint_len), -1);
+  ASSERT_FLOAT_EQ(poly_instance_param_data(inst, 0, NULL)[0], 1.0f, 0.0f);
+  ASSERT_FLOAT_EQ(poly_instance_param_data(inst, 1, NULL)[0], 2.0f, 0.0f);
+
+  free(checkpoint);
+  poly_instance_free(inst);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(instance, alias_checkpoint_payloads_follow_deterministic_name_order) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int64_t shape[] = {1};
+  PolyTensor *w = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(w);
+  float initial[] = {1.0f};
+  ASSERT_INT_EQ(poly_buffer_write(ctx, poly_tensor_uop_physical(w), initial, sizeof(initial)), 0);
+  PolyBindingSpec bindings[] = {
+      {.name = "a", .role = POLY_ROLE_PARAM, .tensor = w},
+      {.name = "b", .role = POLY_ROLE_PARAM, .tensor = w},
+      {.name = "output", .role = POLY_ROLE_OUTPUT, .tensor = w},
+  };
+  const char *outputs[] = {"output"};
+  PolyEntrypointSpec entrypoints[] = {
+      {.name = "forward", .outputs = outputs, .n_outputs = 1},
+  };
+  PolyInstance *inst =
+      poly_instance_from_bindings(ctx, bindings, 3, entrypoints, 1, NULL, NULL);
+  ASSERT_NOT_NULL(inst);
+  ASSERT_INT_EQ(poly_instance_param_count(inst), 2);
+  ASSERT_PTR_EQ(
+      poly_instance_param_data_raw(inst, 0, NULL),
+      poly_instance_param_data_raw(inst, 1, NULL)
+  );
+
+  float first[] = {3.0f};
+  float second[] = {9.0f};
+  PolySafetensorEntry rows[] = {
+      {.name = "b", .data = second, .shape = shape, .ndim = 1, .dtype = POLY_ST_F32},
+      {.name = "a", .data = first, .shape = shape, .ndim = 1, .dtype = POLY_ST_F32},
+  };
+  int checkpoint_len = 0;
+  uint8_t *checkpoint = poly_safetensors_encode(rows, 2, NULL, &checkpoint_len);
+  ASSERT_NOT_NULL(checkpoint);
+  ASSERT_INT_EQ(poly_instance_import_weights(inst, checkpoint, checkpoint_len), 0);
+  ASSERT_FLOAT_EQ(poly_instance_param_data(inst, 0, NULL)[0], 9.0f, 0.0f);
+  ASSERT_FLOAT_EQ(poly_instance_param_data(inst, 1, NULL)[0], 9.0f, 0.0f);
+
+  free(checkpoint);
+  poly_instance_free(inst);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(instance, fresh_import_rejects_special_before_scheduling) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *bound = poly_const_int(ctx, 4);
+  PolyUOp *special =
+      poly_uop1(ctx, POLY_OP_SPECIAL, POLY_INDEX, bound, poly_arg_str("gidx0"));
+  PolyUOp *value = poly_cast(ctx, special, POLY_FLOAT32);
+  PolyUOp *output = poly_buffer_f32(ctx, 1);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, output, value));
+  ASSERT_NOT_NULL(value);
+  ASSERT_NOT_NULL(sink);
+  PolyIrBufEntry bufs[] = {
+      {.name = "w", .role = POLY_IR_ROLE_PARAM, .buffer = value, .ndim = 0,
+       .trainable = true, .trainable_set = true},
+      {.name = "output", .role = POLY_IR_ROLE_OUTPUT, .buffer = output,
+       .shape = {1}, .ndim = 1},
+  };
+  PolyIrEntrypoint ep = {.name = "forward", .sink = sink};
+  PolyIrSpec spec = {.ctx = ctx, .bufs = bufs, .n_bufs = 2,
+                     .entrypoints = &ep, .n_entrypoints = 1};
+  int ir_len = 0;
+  uint8_t *ir = poly_ir_export(&spec, &ir_len);
+  ASSERT_NOT_NULL(ir);
+  ASSERT_EQ(poly_instance_from_ir(ir, ir_len, NULL, 0), NULL);
+
+  free(ir);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(instance, failed_from_bindings_does_not_snapshot_lazy_state) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int64_t shape[] = {2};
+  float init[] = {2.0f, 3.0f};
+  PolyTensor *host_w =
+      poly_tensor_from_host(ctx, init, sizeof(init), POLY_FLOAT32, shape, 1);
+  PolyTensor *w = poly_tensor_to_device(ctx, host_w, POLY_DEVICE_CPU);
+  PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+  PolyTensor *unbound = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(w);
+  ASSERT_NOT_NULL(x);
+  ASSERT_NOT_NULL(unbound);
+  poly_tensor_set_requires_grad(unbound, true);
+  PolyTensor *mul = poly_tensor_alu2(ctx, POLY_OP_MUL, x, w);
+  PolyTensor *out = poly_tensor_alu2(ctx, POLY_OP_ADD, mul, unbound);
+  ASSERT_NOT_NULL(out);
+  PolyUOp *logical_before = poly_tensor_uop_logical(w);
+  PolyUOp *physical_before = poly_tensor_uop_physical(w);
+  PolyBindingSpec bindings[] = {
+      {.name = "x", .role = POLY_ROLE_INPUT, .tensor = x},
+      {.name = "w", .role = POLY_ROLE_PARAM, .tensor = w},
+      {.name = "output", .role = POLY_ROLE_OUTPUT, .tensor = out},
+  };
+  const char *inputs[] = {"x"};
+  const char *outputs[] = {"output"};
+  PolyEntrypointSpec entrypoints[] = {
+      {.name = "forward", .inputs = inputs, .n_inputs = 1,
+       .outputs = outputs, .n_outputs = 1},
+  };
+  int tensors_before = ctx->n_tensors;
+  size_t writes_before = ctx->buffer_write_count;
+  uint64_t memory_before = ctx->mem_used;
+  bool w_requires_grad_before = w->requires_grad;
+  bool w_requires_grad_set_before = w->requires_grad_set;
+  PolyTensorProvenance w_provenance_before = w->provenance;
+  ASSERT_EQ(
+      poly_instance_from_bindings(ctx, bindings, 3, entrypoints, 1, NULL, NULL), NULL
+  );
+  ASSERT_INT_EQ(ctx->n_tensors, tensors_before);
+  ASSERT_INT_EQ(ctx->buffer_write_count, writes_before);
+  ASSERT_INT_EQ(ctx->mem_used, memory_before);
+  ASSERT_PTR_EQ(poly_tensor_uop_logical(w), logical_before);
+  ASSERT_PTR_EQ(poly_tensor_uop_physical(w), physical_before);
+  ASSERT_EQ(w->requires_grad, w_requires_grad_before);
+  ASSERT_EQ(w->requires_grad_set, w_requires_grad_set_before);
+  ASSERT_EQ(w->provenance, w_provenance_before);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(instance, later_build_failure_unwinds_named_value_snapshot_and_residency) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int64_t shape[] = {1};
+  float av[] = {2.0f};
+  float bv[] = {3.0f};
+  PolyTensor *a = poly_tensor_from_host(ctx, av, sizeof(av), POLY_FLOAT32, shape, 1);
+  PolyTensor *b = poly_tensor_from_host(ctx, bv, sizeof(bv), POLY_FLOAT32, shape, 1);
+  PolyTensor *good = poly_tensor_alu2(ctx, POLY_OP_ADD, a, b);
+  ASSERT_NOT_NULL(a);
+  ASSERT_NOT_NULL(b);
+  ASSERT_NOT_NULL(good);
+
+  /* The computed parameter above is snapshotted first.  This internal-only
+  * output fixture keeps a valid movement shape but assigns the root VOID
+  * dtype, so packing rejects it before any backend runs. */
+  PolyUOp *bad_value = poly_full(ctx, shape, 1, 1.0);
+  PolyUOp *bad_reshape = poly_reshape(ctx, bad_value, shape, 1);
+  ASSERT_NOT_NULL(bad_reshape);
+  PolyUOp *bad_root = poly_uop(
+      ctx, bad_reshape->op, POLY_VOID, bad_reshape->src, bad_reshape->n_src,
+      bad_reshape->arg
+  );
+  PolyTensor *bad_output = poly_tensor_create_with_roots(
+      ctx, bad_root, bad_root, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
+  );
+  ASSERT_NOT_NULL(bad_output);
+
+  PolyBindingSpec bindings[] = {
+      {.name = "good", .role = POLY_ROLE_PARAM, .tensor = good},
+      {.name = "output", .role = POLY_ROLE_OUTPUT, .tensor = bad_output},
+  };
+  const char *outputs[] = {"output"};
+  PolyEntrypointSpec entrypoints[] = {
+      {.name = "forward", .outputs = outputs, .n_outputs = 1},
+  };
+  int tensors_before = ctx->n_tensors;
+  uint64_t memory_before = ctx->mem_used;
+  size_t writes_before = ctx->buffer_write_count;
+  PolyCtxStats stats_before = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats_before), 0);
+  PolyUOp *a_storage = (PolyUOp *)poly_uop_get_buffer_identity(poly_tensor_uop_physical(a));
+  PolyUOp *b_storage = (PolyUOp *)poly_uop_get_buffer_identity(poly_tensor_uop_physical(b));
+  ASSERT_NOT_NULL(a_storage);
+  ASSERT_NOT_NULL(b_storage);
+  PolyBuffer *a_head_before = poly_buffer_get(ctx, a_storage);
+  PolyBuffer *b_head_before = poly_buffer_get(ctx, b_storage);
+  ASSERT_NOT_NULL(a_head_before);
+  ASSERT_NOT_NULL(b_head_before);
+  PolyBuffer a_residency_before = *a_head_before;
+  PolyBuffer b_residency_before = *b_head_before;
+  PolyInstanceError error = {0};
+  PolyInstance *failed =
+      poly_instance_from_bindings(ctx, bindings, 2, entrypoints, 1, NULL, &error);
+  if (failed) poly_instance_free(failed);
+  ASSERT_EQ(failed, NULL);
+  ASSERT_TRUE(strstr(error.message, "failed to pack runtime instance") != NULL);
+  ASSERT_INT_EQ(ctx->n_tensors, tensors_before);
+  ASSERT_INT_EQ(ctx->mem_used, memory_before);
+  ASSERT_INT_EQ(ctx->buffer_write_count, writes_before);
+  PolyCtxStats stats_after = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats_after), 0);
+  ASSERT_INT_EQ(stats_after.buffer_entries, stats_before.buffer_entries);
+  ASSERT_PTR_EQ(poly_buffer_get(ctx, a_storage), a_head_before);
+  ASSERT_PTR_EQ(poly_buffer_get(ctx, b_storage), b_head_before);
+  ASSERT_PTR_EQ(a_head_before->ptr, a_residency_before.ptr);
+  ASSERT_PTR_EQ(b_head_before->ptr, b_residency_before.ptr);
+  ASSERT_PTR_EQ(a_head_before->src, a_residency_before.src);
+  ASSERT_PTR_EQ(b_head_before->src, b_residency_before.src);
+  ASSERT_INT_EQ(a_head_before->device, a_residency_before.device);
+  ASSERT_INT_EQ(b_head_before->device, b_residency_before.device);
+  ASSERT_EQ(a_head_before->valid, a_residency_before.valid);
+  ASSERT_EQ(b_head_before->valid, b_residency_before.valid);
+
+  /* The failure remains repeatable and does not grow the long-lived caller
+   * context on each packaging attempt. */
+  memset(&error, 0, sizeof(error));
+  failed = poly_instance_from_bindings(ctx, bindings, 2, entrypoints, 1, NULL, &error);
+  if (failed) poly_instance_free(failed);
+  ASSERT_EQ(failed, NULL);
+  ASSERT_INT_EQ(ctx->n_tensors, tensors_before);
+  ASSERT_INT_EQ(ctx->mem_used, memory_before);
+  ASSERT_INT_EQ(ctx->buffer_write_count, writes_before);
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats_after), 0);
+  ASSERT_INT_EQ(stats_after.buffer_entries, stats_before.buffer_entries);
+  ASSERT_PTR_EQ(poly_buffer_get(ctx, a_storage), a_head_before);
+  ASSERT_PTR_EQ(poly_buffer_get(ctx, b_storage), b_head_before);
+  ASSERT_PTR_EQ(a_head_before->ptr, a_residency_before.ptr);
+  ASSERT_PTR_EQ(b_head_before->ptr, b_residency_before.ptr);
+  ASSERT_PTR_EQ(a_head_before->src, a_residency_before.src);
+  ASSERT_PTR_EQ(b_head_before->src, b_residency_before.src);
+  ASSERT_INT_EQ(a_head_before->device, a_residency_before.device);
+  ASSERT_INT_EQ(b_head_before->device, b_residency_before.device);
+  ASSERT_EQ(a_head_before->valid, a_residency_before.valid);
+  ASSERT_EQ(b_head_before->valid, b_residency_before.valid);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(instance, named_value_aliases_share_one_runtime_storage) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
   int64_t shape[] = {2};
@@ -1776,6 +2910,47 @@ TEST(instance, lifted_state_aliases_share_one_declared_resource) {
   ASSERT_FLOAT_EQ(p0[1], 6.0f, 1e-6f);
 
   poly_instance_free(inst);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(instance, imported_alias_extent_must_match_exact_named_value) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int64_t value_shape[] = {2};
+  PolyUOp *value = poly_add(
+      ctx, poly_full(ctx, value_shape, 1, 3.0),
+      poly_full(ctx, value_shape, 1, 1.0)
+  );
+  PolyUOp *output = poly_buffer_f32(ctx, 2);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, output, value));
+  ASSERT_NOT_NULL(value);
+  ASSERT_NOT_NULL(output);
+  ASSERT_NOT_NULL(sink);
+
+  PolyIrBufEntry bufs[] = {
+      {.name = "a", .role = POLY_IR_ROLE_PARAM, .buffer = value,
+       .shape = {2}, .ndim = 1, .trainable = true, .trainable_set = true},
+      {.name = "b", .role = POLY_IR_ROLE_PARAM, .buffer = value,
+       .shape = {3}, .ndim = 1, .trainable = true, .trainable_set = true},
+      {.name = "output", .role = POLY_IR_ROLE_OUTPUT, .buffer = output,
+       .shape = {2}, .ndim = 1},
+  };
+  PolyIrEntrypoint entrypoint = {.name = "forward", .sink = sink};
+  PolyIrSpec spec = {
+      .ctx = ctx,
+      .bufs = bufs,
+      .n_bufs = 3,
+      .entrypoints = &entrypoint,
+      .n_entrypoints = 1,
+  };
+  int ir_len = 0;
+  uint8_t *ir = poly_ir_export(&spec, &ir_len);
+  ASSERT_NOT_NULL(ir);
+  ASSERT_TRUE(ir_len > 0);
+  ASSERT_EQ(poly_instance_from_ir(ir, ir_len, NULL, 0), NULL);
+
+  free(ir);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -2164,7 +3339,7 @@ TEST(instance, from_binding_arrays_forward_e2e) {
   PASS();
 }
 
-TEST(instance, from_bindings_snapshots_realized_host_parameter) {
+TEST(instance, from_bindings_snapshots_lazy_host_parameter) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
 
@@ -2196,26 +3371,6 @@ TEST(instance, from_bindings_snapshots_realized_host_parameter) {
 
   PolyInstanceError err = {0};
   PolyInstance *inst = poly_instance_from_binding_arrays(
-      ctx, binding_names, binding_roles, binding_tensors, binding_flags, 3, entry_names,
-      entry_inputs, entry_input_counts, entry_outputs, entry_output_counts, entry_objectives,
-      entry_flags, 1, NULL, &err
-  );
-  ASSERT_TRUE(inst == NULL);
-  ASSERT_NOT_NULL(strstr(err.message, "has no current buffer identity"));
-
-  PolyTensor *realized = NULL;
-  ASSERT_INT_EQ(poly_realize_tensors(ctx, &w, 1, &realized), 0);
-  ASSERT_PTR_EQ(realized, w);
-  const PolyUOp *w_physical =
-      poly_uop_get_buffer_identity(poly_tensor_uop_physical(w));
-  const PolyUOp *w_logical =
-      poly_uop_get_buffer_identity(poly_tensor_uop_logical(w));
-  ASSERT_NOT_NULL(w_physical);
-  ASSERT_NOT_NULL(w_logical);
-  ASSERT_PTR_NEQ(w_physical, w_logical);
-
-  memset(&err, 0, sizeof(err));
-  inst = poly_instance_from_binding_arrays(
       ctx, binding_names, binding_roles, binding_tensors, binding_flags, 3, entry_names,
       entry_inputs, entry_input_counts, entry_outputs, entry_output_counts, entry_objectives,
       entry_flags, 1, NULL, &err
@@ -2563,6 +3718,93 @@ TEST(instance, train_step_sgd) {
   PASS();
 }
 
+static PolyInstance *make_tied_scalar_train_instance(PolyCtx *ctx) {
+  PolyInstance *inst = poly_instance_new(ctx, NULL);
+  int64_t shape[] = {1};
+  PolyTensor *w = inst ? poly_instance_param(inst, "w0", POLY_FLOAT32, shape, 1) : NULL;
+  if (!w || poly_instance_state(inst, "w1", w, 0) != POLY_STATUS_OK) goto fail;
+  PolyTensor *twice = poly_tensor_alu2(ctx, POLY_OP_ADD, w, w);
+  PolyTensor *loss = twice ? poly_tensor_alu2(ctx, POLY_OP_MUL, twice, twice) : NULL;
+  if (!loss || poly_instance_output(inst, "loss", loss) != POLY_STATUS_OK) goto fail;
+  const char *outputs[] = {"loss"};
+  PolyEntrypointOptions options = {.objective = "loss"};
+  if (poly_instance_entrypoint(inst, "loss", NULL, 0, outputs, 1, &options) !=
+          POLY_STATUS_OK ||
+      poly_instance_build(inst, NULL) != POLY_STATUS_OK)
+    goto fail;
+  return inst;
+
+fail:
+  poly_instance_free(inst);
+  return NULL;
+}
+
+TEST(instance, tied_parameter_aliases_receive_one_sgd_update) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyInstance *inst = make_tied_scalar_train_instance(ctx);
+  ASSERT_NOT_NULL(inst);
+  ASSERT_INT_EQ(poly_instance_param_count(inst), 2);
+  int64_t numel = 0;
+  float *w0 = poly_instance_param_data(inst, 0, &numel);
+  float *w1 = poly_instance_param_data(inst, 1, &numel);
+  ASSERT_NOT_NULL(w0);
+  ASSERT_PTR_EQ(w0, w1);
+  w0[0] = 1.0f;
+  ASSERT_INT_EQ(
+      poly_instance_set_optimizer(inst, POLY_OPTIM_SGD, 0.1f, 0.0f, 0.0f, 0.0f, 0.0f), 0
+  );
+  float loss = 0.0f;
+  ASSERT_INT_EQ(poly_instance_train_step(inst, NULL, 0, &loss), 0);
+  /* Execution may migrate the current residency.  Instance data pointers are
+   * borrowed host views and must be reacquired after any run. */
+  w0 = poly_instance_param_data(inst, 0, &numel);
+  ASSERT_NOT_NULL(w0);
+  /* Pinned tinygrad nn/optim.py:13 deduplicates [w,w].  The loss gradient is
+   * 8 at w=1, so one lr=0.1 update produces 0.2, not the pre-fix double-update
+   * result 0.04. */
+  ASSERT_FLOAT_EQ(w0[0], 0.2f, 1e-6f);
+
+  poly_instance_free(inst);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(instance, tied_parameter_aliases_share_one_adam_state_family) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyInstance *inst = make_tied_scalar_train_instance(ctx);
+  ASSERT_NOT_NULL(inst);
+  int64_t numel = 0;
+  float *w0 = poly_instance_param_data(inst, 0, &numel);
+  ASSERT_NOT_NULL(w0);
+  w0[0] = 1.0f;
+  ASSERT_INT_EQ(
+      poly_instance_set_optimizer(inst, POLY_OPTIM_ADAM, 0.1f, 0.9f, 0.999f, 1e-8f, 0.0f), 0
+  );
+  float loss = 0.0f;
+  ASSERT_INT_EQ(poly_instance_train_step(inst, NULL, 0, &loss), 0);
+  w0 = poly_instance_param_data(inst, 0, &numel);
+  ASSERT_NOT_NULL(w0);
+  ASSERT_FLOAT_EQ(w0[0], 0.9f, 1e-5f);
+  int optimizer_state = 0;
+  bool has_w0_m = false, has_w0_v = false, has_w1_state = false;
+  for (int i = 0; i < poly_instance_buf_count(inst); i++) {
+    const char *name = poly_instance_buf_name(inst, i);
+    if (!name || !strstr(name, "optim.")) continue;
+    optimizer_state++;
+    if (strcmp(name, "optim.adam.m.w0") == 0) has_w0_m = true;
+    if (strcmp(name, "optim.adam.v.w0") == 0) has_w0_v = true;
+    if (strstr(name, ".w1") != NULL) has_w1_state = true;
+  }
+  ASSERT_INT_EQ(optimizer_state, 4); /* b1_t, b2_t, m.w0, v.w0 */
+  ASSERT_TRUE(has_w0_m);
+  ASSERT_TRUE(has_w0_v);
+  ASSERT_FALSE(has_w1_state);
+
+  poly_instance_free(inst);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(instance, train_step_rewinds_vag_shape_scan_scratch) {
   PolyCtx *ctx = poly_ctx_new();
   PolyInstance *inst = poly_instance_new(ctx, NULL);
@@ -2772,7 +4014,33 @@ TEST(instance, adam_optimizer_state_is_named_checkpoint_state) {
   ASSERT_INT_EQ(
       poly_instance_set_optimizer(restored, POLY_OPTIM_ADAM, 0.05f, 0.9f, 0.999f, 1e-8f, 0.0f), 0
   );
-  ASSERT_INT_EQ(poly_instance_train_step(restored, io, 2, &loss), 0);
+  float source_loss = 0.0f, restored_loss = 0.0f;
+  ASSERT_INT_EQ(poly_instance_train_step(inst, io, 2, &source_loss), 0);
+  ASSERT_INT_EQ(poly_instance_train_step(restored, io, 2, &restored_loss), 0);
+  ASSERT_FLOAT_EQ(source_loss, restored_loss, 0.0f);
+  float *source_w = poly_instance_param_data(inst, 0, NULL);
+  float *restored_w = poly_instance_param_data(restored, 0, NULL);
+  ASSERT_NOT_NULL(source_w);
+  ASSERT_NOT_NULL(restored_w);
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(source_w[i], restored_w[i], 0.0f);
+  const char *adam_state_names[] = {
+      "optim.adam.b1_t", "optim.adam.b2_t", "optim.adam.m.w", "optim.adam.v.w",
+  };
+  for (size_t i = 0; i < sizeof(adam_state_names) / sizeof(adam_state_names[0]); i++) {
+    int source_idx = test_find_instance_buf(inst, adam_state_names[i]);
+    int restored_idx = test_find_instance_buf(restored, adam_state_names[i]);
+    ASSERT_TRUE(source_idx >= 0);
+    ASSERT_TRUE(restored_idx >= 0);
+    int64_t source_n = 0, restored_n = 0;
+    float *source_state = poly_instance_buf_data(inst, source_idx, &source_n);
+    float *restored_state = poly_instance_buf_data(restored, restored_idx, &restored_n);
+    ASSERT_NOT_NULL(source_state);
+    ASSERT_NOT_NULL(restored_state);
+    ASSERT_INT_EQ(source_n, restored_n);
+    for (int64_t j = 0; j < source_n; j++)
+      ASSERT_FLOAT_EQ(source_state[j], restored_state[j], 0.0f);
+  }
   rb1_idx = test_find_instance_buf(restored, "optim.adam.b1_t");
   rb1 = poly_instance_buf_data(restored, rb1_idx, NULL);
   ASSERT_FLOAT_EQ(rb1[0], 0.81f, 1e-5f);
@@ -2864,9 +4132,23 @@ TEST(instance, sgd_momentum_state_is_named_checkpoint_state) {
       ),
       0
   );
-  ASSERT_INT_EQ(poly_instance_train_step(restored, io, 2, &loss), 0);
+  float source_loss = 0.0f, restored_loss = 0.0f;
+  ASSERT_INT_EQ(poly_instance_train_step(inst, io, 2, &source_loss), 0);
+  ASSERT_INT_EQ(poly_instance_train_step(restored, io, 2, &restored_loss), 0);
+  ASSERT_FLOAT_EQ(source_loss, restored_loss, 0.0f);
+  float *source_w = poly_instance_param_data(inst, 0, NULL);
+  float *restored_w = poly_instance_param_data(restored, 0, NULL);
+  ASSERT_NOT_NULL(source_w);
+  ASSERT_NOT_NULL(restored_w);
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(source_w[i], restored_w[i], 0.0f);
   rb_idx = test_find_instance_buf(restored, "optim.sgd.b.w");
   rb = poly_instance_buf_data(restored, rb_idx, NULL);
+  b_idx = test_find_instance_buf(inst, "optim.sgd.b.w");
+  b = poly_instance_buf_data(inst, b_idx, NULL);
+  ASSERT_NOT_NULL(b);
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(b[i], rb[i], 0.0f);
   ASSERT_TRUE(rb[0] > 5.0f);
 
   poly_instance_free(restored);
@@ -3279,7 +4561,7 @@ TEST(instance, set_device_roundtrip) {
   PASS();
 }
 
-TEST(instance, set_device_restarts_from_logical_and_drops_readonly_copy_history) {
+TEST(instance, portable_activation_starts_from_logical_and_drops_readonly_copy_history) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
   poly_ctx_set_preferred_device(ctx, POLY_DEVICE_CPU);
@@ -3312,7 +4594,7 @@ TEST(instance, set_device_restarts_from_logical_and_drops_readonly_copy_history)
 
   PolyUOp *cpu_sink = poly_instance_get_sink(inst, "forward");
   ASSERT_NOT_NULL(cpu_sink);
-  ASSERT_INT_EQ(instance_count_root_op(ctx, cpu_sink, POLY_OP_COPY), 2);
+  ASSERT_INT_EQ(instance_count_root_op(ctx, cpu_sink, POLY_OP_COPY), 0);
   ASSERT_INT_EQ(poly_uop_device(poly_instance_get_buffer(inst, "x")), POLY_DEVICE_CPU);
 
   ASSERT_INT_EQ(poly_instance_set_device(inst, POLY_DEVICE_INTERP), 0);
@@ -3338,7 +4620,7 @@ TEST(instance, set_device_restarts_from_logical_and_drops_readonly_copy_history)
   PASS();
 }
 
-TEST(instance, moved_mutation_portable_placement_fails_without_resource_identity) {
+TEST(instance, moved_mutation_portable_activation_fails_without_resource_identity) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
   poly_ctx_set_preferred_device(ctx, POLY_DEVICE_CPU);
@@ -3372,38 +4654,15 @@ TEST(instance, moved_mutation_portable_placement_fails_without_resource_identity
       .outputs = outputs,
       .n_outputs = 1,
   }};
-  PolyInstance *inst = poly_instance_from_bindings(ctx, bindings, 3, entries, 1, NULL, NULL);
-  ASSERT_NOT_NULL(inst);
-  PolyUOp *sink = poly_instance_get_sink(inst, "forward");
-  ASSERT_INT_EQ(instance_count_root_op(ctx, sink, POLY_OP_COPY), 3);
-  ASSERT_INT_EQ(instance_count_root_op(ctx, sink, POLY_OP_AFTER), 1);
-
-  int ir_len = 0;
-  uint8_t *ir = poly_instance_export_ir(inst, &ir_len);
-  ASSERT_NOT_NULL(ir);
-  ASSERT_TRUE(ir_len > 0);
-
-  float x_data[] = {1.0f, 2.0f};
-  float v_data[] = {5.0f, 6.0f};
-  PolyIOBinding io[] = {
-      POLY_IO_BINDING_ARRAY("x", x_data, POLY_FLOAT32),
-      POLY_IO_BINDING_ARRAY("v", v_data, POLY_FLOAT32),
-  };
-  ASSERT_INT_EQ(poly_instance_forward(inst, io, 2), 0);
-  int64_t n = 0;
-  float *result = poly_instance_buf_data_named(inst, "output", &n);
-  ASSERT_NOT_NULL(result);
-  ASSERT_INT_EQ(n, 2);
-  ASSERT_FLOAT_EQ(result[0], 6.0f, 1e-6f);
-  ASSERT_FLOAT_EQ(result[1], 8.0f, 1e-6f);
-
-  /* The portable graph aliases the moved occurrence with x. Until the
-   * approved logical resource/effect identity exists, import must fail rather
-   * than silently produce [10,12]. Pinned assign is tensor.py:230-257. */
-  ASSERT_TRUE(poly_instance_from_ir(ir, ir_len, NULL, 0) == NULL);
-
-  free(ir);
-  poly_instance_free(inst);
+  PolyInstanceError error = {0};
+  PolyInstance *inst = poly_instance_from_bindings(
+      ctx, bindings, 3, entries, 1, NULL, &error
+  );
+  /* The portable graph aliases the moved occurrence with x. Until logical
+   * storage/effect identity is approved, activation must fail before exposing
+   * a runnable Instance. Pinned assign topology is tensor.py:230-257. */
+  ASSERT_EQ(inst, NULL);
+  ASSERT_TRUE(strstr(error.message, "default placement failed") != NULL);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -3464,7 +4723,7 @@ TEST(instance, module_device_map_restarts_from_logical_program) {
   PolyUOp *sink = poly_instance_get_sink(inst, "forward");
   ASSERT_NOT_NULL(sink);
   /* Portable placement starts from logical roots, so historical read-only
-   * transports disappear and only the policy's CPU->CPU:1 cut remains. */
+   * transports disappear and only the policy's CPU->CPU:1 boundary remains. */
   ASSERT_INT_EQ(instance_count_root_op(ctx, sink, POLY_OP_COPY), 1);
   ASSERT_INT_EQ(instance_count_root_op(ctx, sink, POLY_OP_STORE), 1);
   ASSERT_STR_EQ(poly_uop_device_name(ctx, poly_instance_get_buffer(inst, "x")), "CPU");
@@ -3557,7 +4816,7 @@ TEST(instance, explicit_module_device_map_places_named_regions_atomically) {
   ASSERT_INT_EQ(instance_count_root_op(ctx, direct_uniform_sink, POLY_OP_STORE), 1);
 
   PolyInstanceDeviceMapEntry forward_map[] = {
-      {.module = "layers.1", .device = "CPU:1"},
+      {.module = "layers.1", .device = "INTERP"},
       {.module = "layers.0", .device = "CPU"},
   };
   ASSERT_INT_EQ(poly_instance_set_device_map(inst, forward_map, 2), 0);
@@ -3569,11 +4828,25 @@ TEST(instance, explicit_module_device_map_places_named_regions_atomically) {
       poly_uop_device_name(ctx, poly_instance_get_buffer(inst, "layers.0.weight")), "CPU"
   );
   ASSERT_STR_EQ(
-      poly_uop_device_name(ctx, poly_instance_get_buffer(inst, "layers.1.weight")), "CPU:1"
+      poly_uop_device_name(ctx, poly_instance_get_buffer(inst, "layers.1.weight")), "INTERP"
   );
   ASSERT_STR_EQ(
-      poly_uop_device_name(ctx, poly_instance_get_buffer(inst, "output")), "CPU:1"
+      poly_uop_device_name(ctx, poly_instance_get_buffer(inst, "output")), "INTERP"
   );
+
+  /* Pinned tinygrad lowers and executes each CALL through its own runner
+   * (engine/realize.py:142-180,244-279).  The aggregate schedule device must
+   * not erase the CPU -> INTERP boundary retained by explicit placement. */
+  PolySchedule *forward_schedule = poly_schedule_effect_sink(ctx, forward_sink);
+  ASSERT_NOT_NULL(forward_schedule);
+  ASSERT_INT_EQ(forward_schedule->template->n_calls, 3);
+  PolyCompiledSchedule *forward_compiled = poly_jit_lower(ctx, forward_schedule);
+  ASSERT_NOT_NULL(forward_compiled);
+  ASSERT_INT_EQ(forward_compiled->run->calls[0].lowered_device, POLY_DEVICE_CPU);
+  ASSERT_INT_EQ(forward_compiled->run->calls[1].lowered_device, POLY_DEVICE_INTERP);
+  ASSERT_INT_EQ(forward_compiled->run->calls[2].lowered_device, POLY_DEVICE_INTERP);
+  poly_compiled_schedule_free(forward_compiled);
+  poly_schedule_free(forward_schedule);
 
   /* A -> B must be pointer-identical to direct B because both compile from
    * the same immutable logical program.  The old mutable-template implementation
@@ -3643,7 +4916,7 @@ TEST(instance, explicit_module_device_map_places_named_regions_atomically) {
   ASSERT_EQ(poly_ctx_get_preferred_device(ctx), before_failed_preferred);
 
   PolyInstanceDeviceMapEntry reverse_map[] = {
-      {.module = "layers.0", .device = "CPU:1"},
+      {.module = "layers.0", .device = "INTERP"},
       {.module = "layers.1", .device = "CPU"},
   };
   ASSERT_INT_EQ(poly_instance_set_device_map(inst, reverse_map, 2), 0);
@@ -3651,8 +4924,20 @@ TEST(instance, explicit_module_device_map_places_named_regions_atomically) {
   ASSERT_NOT_NULL(reverse_sink);
   ASSERT_PTR_NEQ(reverse_sink, forward_sink);
   ASSERT_INT_EQ(instance_count_root_op(ctx, reverse_sink, POLY_OP_COPY), 1);
-  ASSERT_STR_EQ(poly_uop_device_name(ctx, poly_instance_get_buffer(inst, "x")), "CPU:1");
+  ASSERT_STR_EQ(poly_uop_device_name(ctx, poly_instance_get_buffer(inst, "x")), "INTERP");
   ASSERT_STR_EQ(poly_uop_device_name(ctx, poly_instance_get_buffer(inst, "output")), "CPU");
+
+  PolySchedule *reverse_schedule = poly_schedule_effect_sink(ctx, reverse_sink);
+  ASSERT_NOT_NULL(reverse_schedule);
+  ASSERT_INT_EQ(reverse_schedule->template->n_calls, 3);
+  PolyCompiledSchedule *reverse_compiled = poly_jit_lower(ctx, reverse_schedule);
+  ASSERT_NOT_NULL(reverse_compiled);
+  ASSERT_INT_EQ(reverse_compiled->run->calls[0].lowered_device, POLY_DEVICE_INTERP);
+  ASSERT_INT_EQ(reverse_compiled->run->calls[1].lowered_device, POLY_DEVICE_CPU);
+  ASSERT_INT_EQ(reverse_compiled->run->calls[2].lowered_device, POLY_DEVICE_CPU);
+  poly_compiled_schedule_free(reverse_compiled);
+  poly_schedule_free(reverse_schedule);
+
   ASSERT_INT_EQ(poly_instance_forward(inst, io, 1), 0);
   out = poly_instance_buf_data_named(inst, "output", &numel);
   ASSERT_FLOAT_EQ(out[0], 8.0f, 1e-6f);

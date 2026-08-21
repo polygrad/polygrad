@@ -12,7 +12,9 @@
 TEST(safetensors, round_trip_single) {
   float data[] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
   int64_t shape[] = {2, 3};
-  PolySafetensorEntry entry = {"weight", data, shape, 2};
+  PolySafetensorEntry entry = {
+      .name = "weight", .data = data, .shape = shape, .ndim = 2, .dtype = POLY_ST_F32,
+  };
 
   int out_len = 0;
   uint8_t *bytes = poly_safetensors_encode(&entry, 1, NULL, &out_len);
@@ -50,8 +52,10 @@ TEST(safetensors, round_trip_multiple) {
   int64_t b_shape[] = {2};
 
   PolySafetensorEntry entries[] = {
-      {"layers.0.weight", w_data, w_shape, 2},
-      {"layers.0.bias", b_data, b_shape, 1},
+      {.name = "layers.0.weight", .data = w_data, .shape = w_shape, .ndim = 2,
+       .dtype = POLY_ST_F32},
+      {.name = "layers.0.bias", .data = b_data, .shape = b_shape, .ndim = 1,
+       .dtype = POLY_ST_F32},
   };
 
   int out_len = 0;
@@ -87,7 +91,9 @@ TEST(safetensors, round_trip_multiple) {
 
 TEST(safetensors, round_trip_scalar) {
   float data = 42.0f;
-  PolySafetensorEntry entry = {"loss", &data, NULL, 0};
+  PolySafetensorEntry entry = {
+      .name = "loss", .data = &data, .shape = NULL, .ndim = 0, .dtype = POLY_ST_F32,
+  };
 
   int out_len = 0;
   uint8_t *bytes = poly_safetensors_encode(&entry, 1, NULL, &out_len);
@@ -112,7 +118,9 @@ TEST(safetensors, round_trip_scalar) {
 TEST(safetensors, metadata_round_trip) {
   float data[] = {1.0f};
   int64_t shape[] = {1};
-  PolySafetensorEntry entry = {"x", data, shape, 1};
+  PolySafetensorEntry entry = {
+      .name = "x", .data = data, .shape = shape, .ndim = 1, .dtype = POLY_ST_F32,
+  };
 
   const char *meta_json = "{\"kind\":\"adamw\",\"lr\":0.001}";
   int out_len = 0;
@@ -165,6 +173,19 @@ TEST(safetensors, decode_truncated) {
   PASS();
 }
 
+TEST(safetensors, rejects_overflowing_header_and_missing_count) {
+  uint8_t huge_header[8];
+  memset(huge_header, 0xff, sizeof(huge_header));
+  int n = 7;
+  ASSERT_EQ(poly_safetensors_decode(huge_header, sizeof(huge_header), &n, NULL), NULL);
+  ASSERT_INT_EQ(n, 0);
+  ASSERT_EQ(poly_safetensors_decode_ex(huge_header, sizeof(huge_header), &n, NULL), NULL);
+  ASSERT_INT_EQ(n, 0);
+  ASSERT_EQ(poly_safetensors_decode(huge_header, sizeof(huge_header), NULL, NULL), NULL);
+  ASSERT_EQ(poly_safetensors_decode_ex(huge_header, sizeof(huge_header), NULL, NULL), NULL);
+  PASS();
+}
+
 /* Large tensor round-trip */
 
 TEST(safetensors, round_trip_large) {
@@ -174,7 +195,10 @@ TEST(safetensors, round_trip_large) {
     data[i] = (float)i * 0.001f;
 
   int64_t shape[] = {32, 32};
-  PolySafetensorEntry entry = {"big_weight", data, shape, 2};
+  PolySafetensorEntry entry = {
+      .name = "big_weight", .data = data, .shape = shape, .ndim = 2,
+      .dtype = POLY_ST_F32,
+  };
 
   int out_len = 0;
   uint8_t *bytes = poly_safetensors_encode(&entry, 1, NULL, &out_len);
@@ -206,9 +230,12 @@ TEST(safetensors, deterministic_ordering) {
 
   /* Create entries in reverse order */
   PolySafetensorEntry entries[] = {
-      {"z_param", a_data, shape, 1},
-      {"a_param", b_data, shape, 1},
-      {"m_param", c_data, shape, 1},
+      {.name = "z_param", .data = a_data, .shape = shape, .ndim = 1,
+       .dtype = POLY_ST_F32},
+      {.name = "a_param", .data = b_data, .shape = shape, .ndim = 1,
+       .dtype = POLY_ST_F32},
+      {.name = "m_param", .data = c_data, .shape = shape, .ndim = 1,
+       .dtype = POLY_ST_F32},
   };
 
   int len1 = 0, len2 = 0;
@@ -233,5 +260,113 @@ TEST(safetensors, deterministic_ordering) {
   free(views);
   free(bytes1);
   free(bytes2);
+  PASS();
+}
+
+TEST(safetensors, mixed_dtypes_preserve_exact_storage_bytes) {
+  uint16_t half_data[] = {0x3e00, 0xc000}; /* 1.5, -2.0 */
+  int32_t int_data[] = {INT32_MIN, 7, INT32_MAX};
+  double double_data[] = {1.0 / 3.0};
+  int64_t half_shape[] = {2};
+  int64_t int_shape[] = {3};
+  int64_t double_shape[] = {1};
+  PolySafetensorEntry entries[] = {
+      {.name = "half", .data = half_data, .shape = half_shape, .ndim = 1,
+       .dtype = POLY_ST_F16},
+      {.name = "integer", .data = int_data, .shape = int_shape, .ndim = 1,
+       .dtype = POLY_ST_I32},
+      {.name = "double", .data = double_data, .shape = double_shape, .ndim = 1,
+       .dtype = POLY_ST_F64},
+  };
+
+  int out_len = 0;
+  uint8_t *bytes = poly_safetensors_encode(entries, 3, NULL, &out_len);
+  ASSERT_NOT_NULL(bytes);
+  ASSERT_TRUE(out_len > 0);
+
+  int n = 0;
+  PolySafetensorViewEx *views = poly_safetensors_decode_ex(bytes, out_len, &n, NULL);
+  ASSERT_NOT_NULL(views);
+  ASSERT_INT_EQ(n, 3);
+  ASSERT_STR_EQ(views[0].name, "double");
+  ASSERT_INT_EQ(views[0].dtype, POLY_ST_F64);
+  ASSERT_INT_EQ(views[0].numel, 1);
+  ASSERT_TRUE(memcmp(views[0].raw_data, double_data, sizeof(double_data)) == 0);
+  ASSERT_STR_EQ(views[1].name, "half");
+  ASSERT_INT_EQ(views[1].dtype, POLY_ST_F16);
+  ASSERT_INT_EQ(views[1].numel, 2);
+  ASSERT_TRUE(memcmp(views[1].raw_data, half_data, sizeof(half_data)) == 0);
+  ASSERT_STR_EQ(views[2].name, "integer");
+  ASSERT_INT_EQ(views[2].dtype, POLY_ST_I32);
+  ASSERT_INT_EQ(views[2].numel, 3);
+  ASSERT_TRUE(memcmp(views[2].raw_data, int_data, sizeof(int_data)) == 0);
+
+  for (int i = 0; i < n; i++) free(views[i].name);
+  free(views);
+  free(bytes);
+  PASS();
+}
+
+TEST(safetensors, rejects_invalid_fixed_shape_rows) {
+  float value = 1.0f;
+  int64_t rank_nine[9] = {1, 1, 1, 1, 1, 1, 1, 1, 1};
+  PolySafetensorEntry too_wide = {
+      .name = "x", .data = &value, .shape = rank_nine, .ndim = 9,
+      .dtype = POLY_ST_F32,
+  };
+  int out_len = 7;
+  ASSERT_EQ(poly_safetensors_encode(&too_wide, 1, NULL, &out_len), NULL);
+  ASSERT_INT_EQ(out_len, 0);
+
+  int64_t negative_shape[] = {-1};
+  PolySafetensorEntry negative = {
+      .name = "x", .data = &value, .shape = negative_shape, .ndim = 1,
+      .dtype = POLY_ST_F32,
+  };
+  out_len = 7;
+  ASSERT_EQ(poly_safetensors_encode(&negative, 1, NULL, &out_len), NULL);
+  ASSERT_INT_EQ(out_len, 0);
+
+  int64_t overflow_shape[] = {INT64_MAX, 2};
+  PolySafetensorEntry overflow = {
+      .name = "x", .data = &value, .shape = overflow_shape, .ndim = 2,
+      .dtype = POLY_ST_F32,
+  };
+  out_len = 7;
+  ASSERT_EQ(poly_safetensors_encode(&overflow, 1, NULL, &out_len), NULL);
+  ASSERT_INT_EQ(out_len, 0);
+  PASS();
+}
+
+TEST(safetensors, rejects_invalid_names_before_deterministic_sort) {
+  float values[] = {1.0f, 2.0f};
+  int64_t shape[] = {1};
+  PolySafetensorEntry entries[] = {
+      {.name = "valid", .data = &values[0], .shape = shape, .ndim = 1,
+       .dtype = POLY_ST_F32},
+      {.name = NULL, .data = &values[1], .shape = shape, .ndim = 1,
+       .dtype = POLY_ST_F32},
+  };
+  int out_len = 7;
+  ASSERT_EQ(poly_safetensors_encode(entries, 2, NULL, &out_len), NULL);
+  ASSERT_INT_EQ(out_len, 0);
+  entries[1].name = "";
+  out_len = 7;
+  ASSERT_EQ(poly_safetensors_encode(entries, 2, NULL, &out_len), NULL);
+  ASSERT_INT_EQ(out_len, 0);
+  PASS();
+}
+
+TEST(safetensors, rejects_non_object_json_roots) {
+  uint8_t bytes[] = {
+      4, 0, 0, 0, 0, 0, 0, 0,
+      '[', '{', '}', ']',
+  };
+  int n = 7;
+  ASSERT_EQ(poly_safetensors_decode(bytes, (int)sizeof(bytes), &n, NULL), NULL);
+  ASSERT_INT_EQ(n, 0);
+  n = 7;
+  ASSERT_EQ(poly_safetensors_decode_ex(bytes, (int64_t)sizeof(bytes), &n, NULL), NULL);
+  ASSERT_INT_EQ(n, 0);
   PASS();
 }

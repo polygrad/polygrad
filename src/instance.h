@@ -268,10 +268,12 @@ void poly_instance_free(PolyInstance *inst);
 int poly_instance_param_count(const PolyInstance *inst);
 const char *poly_instance_param_name(const PolyInstance *inst, int i);
 int poly_instance_param_shape(const PolyInstance *inst, int i, int64_t *shape_out, int max_dims);
-/* Returns host pointer to param data. For GPU domains, automatically
- * copies device data to the host shadow buffer first (like tinygrad's
- * Tensor.numpy()). Returns NULL only on error. */
+/* Historical F32-only mutable view. Returns NULL for non-F32 state. */
 float *poly_instance_param_data(PolyInstance *inst, int i, int64_t *numel_out);
+/* Exact raw scalar-storage bytes in the declared dtype. */
+void *poly_instance_param_data_raw(PolyInstance *inst, int i, int64_t *numel_out);
+int poly_instance_param_dtype_id(const PolyInstance *inst, int i);
+size_t poly_instance_param_nbytes(const PolyInstance *inst, int i);
 
 /* Buffer Enumeration */
 
@@ -283,10 +285,12 @@ bool poly_instance_param_trainable(const PolyInstance *inst, int i);
 int poly_instance_set_buf_trainable(PolyInstance *inst, int i, bool trainable);
 int poly_instance_set_param_trainable(PolyInstance *inst, int i, bool trainable);
 int poly_instance_buf_shape(const PolyInstance *inst, int i, int64_t *shape_out, int max_dims);
-/* Returns host pointer to buffer data. For GPU domains, automatically
- * copies device data to the host shadow buffer first. Returns NULL
- * only on error. */
+/* Historical F32-only mutable view. Returns NULL for non-F32 state. */
 float *poly_instance_buf_data(PolyInstance *inst, int i, int64_t *numel_out);
+/* Exact raw scalar-storage bytes in the declared dtype. */
+void *poly_instance_buf_data_raw(PolyInstance *inst, int i, int64_t *numel_out);
+int poly_instance_buf_dtype_id(const PolyInstance *inst, int i);
+size_t poly_instance_buf_nbytes(const PolyInstance *inst, int i);
 
 /* Weight I/O (safetensors) */
 

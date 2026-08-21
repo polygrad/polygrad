@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 from polygrad.instance import Instance, OPTIM_SGD, OPTIM_ADAM, OPTIM_ADAMW
 from polygrad.models import MLP
+from polygrad.tensor import Tensor
 
 
 def safetensor_names(data):
@@ -153,6 +154,93 @@ class TestWeightIO:
 
         inst.free()
         inst2.free()
+
+    def test_adam_checkpoint_resume_matches_uninterrupted_training(self):
+        spec = {
+            'layers': [2, 1], 'activation': 'none',
+            'bias': False, 'loss': 'mse', 'batch_size': 1, 'seed': 7,
+        }
+        source = MLP(spec)
+        restored = None
+        try:
+            source.set_optimizer(OPTIM_ADAM, lr=0.05)
+            io = {
+                'x': np.array([1.0, 2.0], dtype=np.float32),
+                'y': np.array([3.0], dtype=np.float32),
+            }
+            for _ in range(3):
+                source.train_step(**io)
+            restored = Instance.from_ir(source.export_ir(), source.export_weights())
+            restored.set_optimizer(OPTIM_ADAM, lr=0.05)
+
+            source_loss = source.train_step(**io)
+            restored_loss = restored.train_step(**io)
+            assert source_loss == restored_loss
+            np.testing.assert_array_equal(source.param_data(0), restored.param_data(0))
+            for name in (
+                'optim.adam.b1_t', 'optim.adam.b2_t',
+                'optim.adam.m.layers.0.weight', 'optim.adam.v.layers.0.weight',
+            ):
+                source_i, restored_i = source.find_buf(name), restored.find_buf(name)
+                assert source_i >= 0 and restored_i >= 0
+                np.testing.assert_array_equal(
+                    source.buf_data(source_i), restored.buf_data(restored_i)
+                )
+        finally:
+            if restored is not None:
+                restored.free()
+            source.free()
+
+    def test_stochastic_named_state_requires_checkpoint_for_portable_activation(self):
+        Tensor.manual_seed(11)
+        w = Tensor.rand(2, requires_grad=True)
+        x = Tensor.empty(2)
+        source = Instance.from_tensors(
+            inputs={'x': x}, outputs={'output': x * w}, params={'w': w},
+        )
+        restored = None
+        try:
+            ir, weights = source.export_ir(), source.export_weights()
+            with pytest.raises(RuntimeError):
+                Instance.from_ir(ir)
+            restored = Instance.from_ir(ir, weights)
+            data = np.array([2.0, 3.0], dtype=np.float32)
+            np.testing.assert_array_equal(
+                source.forward(x=data)['output'], restored.forward(x=data)['output']
+            )
+        finally:
+            if restored is not None:
+                restored.free()
+            source.free()
+
+    @pytest.mark.parametrize('dtype,values,numpy_dtype', [
+        ('float64', [1.25, -2.5], np.float64),
+        ('int32', [1, -2], np.int32),
+        ('uint8', [1, 255], np.uint8),
+        ('bool', [True, False], np.bool_),
+        ('bfloat16', [1.5, -2.0], np.uint16),
+    ])
+    def test_typed_named_state_round_trips_exact_storage_bytes(
+        self, dtype, values, numpy_dtype
+    ):
+        w = Tensor(np.asarray(values), dtype=dtype)
+        x = Tensor.empty(2, dtype=dtype)
+        source = Instance.from_tensors(
+            inputs={'x': x}, outputs={'output': x}, params={'w': w},
+        )
+        restored = None
+        try:
+            restored = Instance.from_ir(source.export_ir(), source.export_weights())
+            before, after = source.param_data(0), restored.param_data(0)
+            assert source.param_dtype(0) == restored.param_dtype(0) == dtype
+            assert before.dtype == after.dtype == np.dtype(numpy_dtype)
+            np.testing.assert_array_equal(
+                before.view(np.uint8), after.view(np.uint8)
+            )
+        finally:
+            if restored is not None:
+                restored.free()
+            source.free()
 
 
 class TestBufferEnumeration:

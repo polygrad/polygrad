@@ -12,6 +12,7 @@
 #include "../src/engine/schedule.h"
 #include <string.h>
 #include <stdlib.h>
+#include <limits.h>
 
 /* Round-trip: simple add graph */
 
@@ -804,6 +805,65 @@ TEST(ir, import_truncated) {
   PolyIrSpec spec;
   int ret = poly_ir_import(data, 16, &spec);
   ASSERT_INT_EQ(ret, -1);
+  PASS();
+}
+
+TEST(ir, interface_shape_capacity_is_enforced_on_export_and_import) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *value = poly_buffer_f32(ctx, 1);
+  PolyUOp *sink = poly_sink1(ctx, value);
+  int64_t rank_eight[] = {1, 1, 1, 1, 1, 1, 1, 1};
+  PolyIrBufEntry row = {
+      .name = "rank_boundary", .role = POLY_IR_ROLE_PARAM, .buffer = value,
+      .shape = {1, 1, 1, 1, 1, 1, 1, 1}, .ndim = POLY_IR_MAX_DIMS,
+  };
+  PolyIrEntrypoint ep = {.name = "forward", .sink = sink};
+  PolyIrSpec spec = {.ctx = ctx, .bufs = &row, .n_bufs = 1,
+                     .entrypoints = &ep, .n_entrypoints = 1};
+
+  int ir_len = 0;
+  uint8_t *ir = poly_ir_export(&spec, &ir_len);
+  ASSERT_NOT_NULL(ir);
+  PolyIrSpec imported = {0};
+  ASSERT_INT_EQ(poly_ir_import(ir, ir_len, &imported), 0);
+  ASSERT_INT_EQ(imported.bufs[0].ndim, POLY_IR_MAX_DIMS);
+  ASSERT_TRUE(memcmp(imported.bufs[0].shape, rank_eight, sizeof(rank_eight)) == 0);
+  PolyCtx *imported_ctx = imported.ctx;
+  poly_ir_spec_free(&imported);
+  poly_ctx_destroy(imported_ctx);
+
+  /* The rank field is the four bytes immediately before the exact eight
+   * serialized dimensions. Locate that unique interface payload and turn a
+   * valid rank-8 artifact into a truncated rank-9 artifact. Import must reject
+   * it before reading beyond the fixed interface row. */
+  int rank_offset = -1;
+  for (int i = 4; i + (int)sizeof(rank_eight) <= ir_len; i++) {
+    if (ir[i - 4] == POLY_IR_MAX_DIMS && ir[i - 3] == 0 && ir[i - 2] == 0 &&
+        ir[i - 1] == 0 && memcmp(ir + i, rank_eight, sizeof(rank_eight)) == 0) {
+      ASSERT_INT_EQ(rank_offset, -1);
+      rank_offset = i - 4;
+    }
+  }
+  ASSERT_TRUE(rank_offset >= 0);
+  ir[rank_offset] = POLY_IR_MAX_DIMS + 1;
+  ASSERT_INT_EQ(poly_ir_import(ir, ir_len, &imported), -1);
+  free(ir);
+
+  row.ndim = POLY_IR_MAX_DIMS + 1;
+  ir_len = 7;
+  ASSERT_EQ(poly_ir_export(&spec, &ir_len), NULL);
+  ASSERT_INT_EQ(ir_len, 0);
+
+  row.ndim = 1;
+  row.shape[0] = -1;
+  ASSERT_EQ(poly_ir_export(&spec, &ir_len), NULL);
+  row.ndim = 2;
+  row.shape[0] = INT64_MAX;
+  row.shape[1] = 2;
+  ASSERT_EQ(poly_ir_export(&spec, &ir_len), NULL);
+
+  poly_ctx_destroy(ctx);
   PASS();
 }
 

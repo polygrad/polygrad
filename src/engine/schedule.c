@@ -8088,9 +8088,10 @@ PolyUOp *poly_compile_linear(PolyCtx *ctx, PolySchedule *schedule, PolyDevice de
       calls[i] = call;
       continue;
     }
-    PolyUOp *device_uop = poly_call_device_uop(ctx, schedule, i, device);
+    PolyDevice item_device = poly_call_device(ctx, schedule, i, device);
+    PolyUOp *device_uop = poly_call_device_uop(ctx, schedule, i, item_device);
     PolyUOp *program = poly_prepare_program_for_backend(
-        ctx, call, device_uop, device, env_stamp);
+        ctx, call, device_uop, item_device, env_stamp);
     if (!program) {
       ok = false;
       break;
@@ -8155,7 +8156,12 @@ PolyCompiledSchedule *poly_lower_schedule(PolyCtx *ctx, PolySchedule *schedule, 
   for (int k = 0; k < schedule->template->n_calls; k++) {
     PolyUOp *call = plan->linear->src[k];
     PolyUOp *scheduled_call = poly_schedule_call(schedule, k);
-    PolyUOp *device_uop = poly_call_device_uop(ctx, schedule, k, device);
+    PolyDevice item_device = poly_call_device(ctx, schedule, k, device);
+    PolyUOp *device_uop = poly_call_device_uop(ctx, schedule, k, item_device);
+    const PolyBackendDesc *item_backend = poly_backend_get(item_device);
+    if (!item_backend || !poly_device_can_execute(item_device) || !item_backend->lower_item ||
+        poly_backend_ensure_open(item_device) != 0)
+      goto cleanup;
     PolyCallRuntime *rt = &plan->run->calls[k];
     rt->call = call;
     PolyRunner *runner = &rt->prg;
@@ -8171,7 +8177,7 @@ PolyCompiledSchedule *poly_lower_schedule(PolyCtx *ctx, PolySchedule *schedule, 
     if (poly_call_is_view(call)) {
       memset(runner, 0, sizeof(*runner));
       runner->kind = POLY_RUNNER_VIEW;
-      rt->lowered_device = device;
+      rt->lowered_device = item_device;
       rt->lowered_device_uop = device_uop;
       rt->lowered_env_stamp = env_stamp;
       rt->prg_valid = true;
@@ -8179,11 +8185,12 @@ PolyCompiledSchedule *poly_lower_schedule(PolyCtx *ctx, PolySchedule *schedule, 
     }
 
     if (poly_call_is_copy(call)) {
-      if (poly_lower_copy_call(ctx, schedule, call, k, device, runner) == 0) lowered_as_copy = true;
+      if (poly_lower_copy_call(ctx, schedule, call, k, item_device, runner) == 0)
+        lowered_as_copy = true;
     }
     if (!lowered_as_copy) {
       int lower_rc = poly_lower_compute_call_cached(
-          ctx, scheduled_call, device_uop, device, env_stamp, runner, &rt->runtime_program
+          ctx, scheduled_call, device_uop, item_device, env_stamp, runner, &rt->runtime_program
       );
       if (lower_rc == -2) {
         fprintf(stderr, "polygrad: compile_schedule: kernel %d validation failed\n", k);
@@ -8192,18 +8199,18 @@ PolyCompiledSchedule *poly_lower_schedule(PolyCtx *ctx, PolySchedule *schedule, 
       if (lower_rc != 0) {
         fprintf(
             stderr, "polygrad: compile_schedule: backend '%s' failed for kernel %d\n",
-            backend->name, k
+            item_backend->name, k
         );
         goto cleanup;
       }
     }
     rt->call = call;
     rt->lowered_device_uop = device_uop;
-    rt->lowered_device = device;
+    rt->lowered_device = item_device;
     rt->lowered_env_stamp = env_stamp;
     rt->prg_valid = true;
 
-    if (poly_bind_runner_param_slots(ctx, schedule, call, k, runner, device, false) != 0) {
+    if (poly_bind_runner_param_slots(ctx, schedule, call, k, runner, item_device, false) != 0) {
       fprintf(stderr, "polygrad: compile_schedule: param remap failed for kernel %d\n", k);
       goto cleanup;
     }
@@ -10343,8 +10350,10 @@ static int poly_run_compiled_schedule_impl(
       continue;
     }
     PolyRunner *runner = &run->calls[k].prg;
+    PolyDevice item_device = run->calls[k].lowered_device;
+    if (item_device == POLY_DEVICE_AUTO) item_device = poly_call_device(plan->ctx, sched, k, plan->device);
     if (poly_call_is_view(poly_schedule_call(sched, k))) {
-      ret = poly_schedule_execute_view_call(plan->ctx, sched, k, plan->device, run);
+      ret = poly_schedule_execute_view_call(plan->ctx, sched, k, item_device, run);
       continue;
     }
 
@@ -10352,7 +10361,7 @@ static int poly_run_compiled_schedule_impl(
     used_ctx_slots = false;
     double t_call_prepare0 = timing ? poly_now_ms() : 0.0;
     if (poly_prepare_missing_compiled_call_slots(
-            plan->ctx, sched, k, plan->device, run->slot_to_data, ctx_slots, &used_ctx_slots
+            plan->ctx, sched, k, item_device, run->slot_to_data, ctx_slots, &used_ctx_slots
         ) != 0) {
       ret = -1;
       break;
@@ -10361,7 +10370,7 @@ static int poly_run_compiled_schedule_impl(
     if (timing) t_loop_prepare += t_call_execute0 - t_call_prepare0;
 
     ret = poly_schedule_execute_runner_call(
-        plan->ctx, sched, k, k, runner, plan->device, run->slot_to_data, run->kernel_args[k],
+        plan->ctx, sched, k, k, runner, item_device, run->slot_to_data, run->kernel_args[k],
         run->merged_vars, n_all, &var_int_idx, &run->var_int_storage, &run->var_int_cap, plan,
         "plan_run"
     );
@@ -10378,7 +10387,7 @@ static int poly_run_compiled_schedule_impl(
       bool raw_slot_overrides = (n_slots > 0 && slot_data);
       if (!raw_slot_overrides || used_ctx_slots) {
         const bool *commit_slots = raw_slot_overrides ? ctx_slots : NULL;
-        ret = poly_commit_call_buffer_writes(plan->ctx, sched, k, plan->device, commit_slots);
+        ret = poly_commit_call_buffer_writes(plan->ctx, sched, k, item_device, commit_slots);
       }
     }
     if (timing) t_loop_commit += poly_now_ms() - t_call_commit0;

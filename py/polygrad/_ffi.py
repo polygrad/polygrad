@@ -16,7 +16,7 @@ import sys
 _lib = None
 OPS = {}
 _has_cuda_ffi = False
-POLYGRAD_ABI_VERSION = 54
+POLYGRAD_ABI_VERSION = 55
 
 # --- Opaque pointer type (always available) ---
 _ptr = ctypes.c_void_p
@@ -1128,6 +1128,12 @@ def _declare_signatures(lib):
 
     lib.poly_instance_param_data.restype = _fp
     lib.poly_instance_param_data.argtypes = [_ptr, ctypes.c_int, _i64p]
+    lib.poly_instance_param_data_raw.restype = _ptr
+    lib.poly_instance_param_data_raw.argtypes = [_ptr, ctypes.c_int, _i64p]
+    lib.poly_instance_param_dtype_id.restype = ctypes.c_int
+    lib.poly_instance_param_dtype_id.argtypes = [_ptr, ctypes.c_int]
+    lib.poly_instance_param_nbytes.restype = ctypes.c_size_t
+    lib.poly_instance_param_nbytes.argtypes = [_ptr, ctypes.c_int]
 
     lib.poly_instance_param_trainable.restype = ctypes.c_bool
     lib.poly_instance_param_trainable.argtypes = [_ptr, ctypes.c_int]
@@ -1155,6 +1161,12 @@ def _declare_signatures(lib):
 
     lib.poly_instance_buf_data.restype = _fp
     lib.poly_instance_buf_data.argtypes = [_ptr, ctypes.c_int, _i64p]
+    lib.poly_instance_buf_data_raw.restype = _ptr
+    lib.poly_instance_buf_data_raw.argtypes = [_ptr, ctypes.c_int, _i64p]
+    lib.poly_instance_buf_dtype_id.restype = ctypes.c_int
+    lib.poly_instance_buf_dtype_id.argtypes = [_ptr, ctypes.c_int]
+    lib.poly_instance_buf_nbytes.restype = ctypes.c_size_t
+    lib.poly_instance_buf_nbytes.argtypes = [_ptr, ctypes.c_int]
 
     lib.poly_instance_export_weights.restype = _u8p
     lib.poly_instance_export_weights.argtypes = [_ptr, _ip]

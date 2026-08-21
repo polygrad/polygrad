@@ -2183,4 +2183,142 @@ TEST_BACKEND(cuda, jit_graph_batches_memory_planned_reductions) {
   PASS();
 }
 
+TEST_BACKEND(cuda, compiled_schedule_preserves_mixed_call_devices) {
+  SKIP_IF_NO_CUDA();
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  poly_ctx_set_preferred_device(ctx, POLY_DEVICE_CUDA);
+
+  int64_t shape[] = {2};
+  PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CUDA);
+  PolyTensor *w0 = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CUDA);
+  PolyTensor *w1 = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CUDA);
+  PolyTensor *hidden = poly_tensor_alu2(ctx, POLY_OP_ADD, x, w0);
+  PolyTensor *output = poly_tensor_alu2(ctx, POLY_OP_MUL, hidden, w1);
+  ASSERT_NOT_NULL(x);
+  ASSERT_NOT_NULL(w0);
+  ASSERT_NOT_NULL(w1);
+  ASSERT_NOT_NULL(hidden);
+  ASSERT_NOT_NULL(output);
+
+  float w0_data[] = {3.0f, 4.0f};
+  float w1_data[] = {2.0f, 3.0f};
+  PolyUOp *w0_buffer =
+      (PolyUOp *)poly_uop_get_buffer_identity(poly_tensor_uop_physical(w0));
+  PolyUOp *w1_buffer =
+      (PolyUOp *)poly_uop_get_buffer_identity(poly_tensor_uop_physical(w1));
+  ASSERT_NOT_NULL(w0_buffer);
+  ASSERT_NOT_NULL(w1_buffer);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, w0_buffer, w0_data, sizeof(w0_data)), 0);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, w1_buffer, w1_data, sizeof(w1_data)), 0);
+
+  PolyBindingSpec bindings[] = {
+      {.name = "x", .role = POLY_ROLE_INPUT, .tensor = x},
+      {.name = "layers.0.weight", .role = POLY_ROLE_PARAM, .tensor = w0},
+      {.name = "layers.1.weight", .role = POLY_ROLE_PARAM, .tensor = w1},
+      {.name = "output", .role = POLY_ROLE_OUTPUT, .tensor = output},
+  };
+  const char *input_names[] = {"x"};
+  const char *output_names[] = {"output"};
+  PolyEntrypointSpec entrypoints[] = {{
+      .name = "forward",
+      .inputs = input_names,
+      .n_inputs = 1,
+      .outputs = output_names,
+      .n_outputs = 1,
+  }};
+  PolyInstance *inst =
+      poly_instance_from_bindings(ctx, bindings, 4, entrypoints, 1, NULL, NULL);
+  ASSERT_NOT_NULL(inst);
+
+  PolyTensor *module0_inputs[] = {x};
+  PolyTensor *module1_inputs[] = {hidden};
+  PolyInstanceModuleSpec modules[] = {
+      {.name = "layers.0", .inputs = module0_inputs, .n_inputs = 1, .output = hidden},
+      {.name = "layers.1", .inputs = module1_inputs, .n_inputs = 1, .output = output},
+  };
+  ASSERT_INT_EQ(poly_instance_define_modules(inst, modules, 2), 0);
+  PolyInstanceDeviceMapEntry map[] = {
+      {.module = "layers.0", .device = "CUDA"},
+      {.module = "layers.1", .device = "INTERP"},
+  };
+  ASSERT_INT_EQ(poly_instance_set_device_map(inst, map, 2), 0);
+
+  float x_data[] = {1.0f, 2.0f};
+  ASSERT_INT_EQ(
+      poly_buffer_write(
+          ctx, poly_instance_get_buffer(inst, "x"), x_data, sizeof(x_data)
+      ),
+      0
+  );
+  PolySchedule *schedule =
+      poly_schedule_effect_sink(ctx, poly_instance_get_sink(inst, "forward"));
+  ASSERT_NOT_NULL(schedule);
+  ASSERT_INT_EQ(schedule->template->n_calls, 3);
+  ASSERT_EQ(poly_schedule_call_body(schedule, 0)->op, POLY_OP_SINK);
+  ASSERT_EQ(poly_schedule_call_body(schedule, 1)->op, POLY_OP_COPY);
+  ASSERT_EQ(poly_schedule_call_body(schedule, 2)->op, POLY_OP_SINK);
+
+  PolyCompiledSchedule *compiled = poly_jit_lower(ctx, schedule);
+  ASSERT_NOT_NULL(compiled);
+  ASSERT_INT_EQ(compiled->run->calls[0].lowered_device, POLY_DEVICE_CUDA);
+  ASSERT_INT_EQ(compiled->run->calls[1].lowered_device, POLY_DEVICE_INTERP);
+  ASSERT_INT_EQ(compiled->run->calls[2].lowered_device, POLY_DEVICE_INTERP);
+  ASSERT_EQ(compiled->linear->src[0]->src[0]->op, POLY_OP_PROGRAM);
+  ASSERT_EQ(compiled->linear->src[1]->src[0]->op, POLY_OP_COPY);
+  ASSERT_EQ(compiled->linear->src[2]->src[0]->op, POLY_OP_PROGRAM);
+  ASSERT_INT_EQ(
+      poly_device_from_device_uop(compiled->linear->src[0]->src[0]->src[1]),
+      POLY_DEVICE_CUDA
+  );
+  ASSERT_INT_EQ(
+      poly_device_from_device_uop(compiled->linear->src[2]->src[0]->src[1]),
+      POLY_DEVICE_INTERP
+  );
+
+  ASSERT_INT_EQ(poly_run_compiled_schedule(compiled, NULL, 0, NULL, 0), 0);
+  float got[2] = {0.0f, 0.0f};
+  ASSERT_INT_EQ(
+      poly_buffer_read(ctx, poly_instance_get_buffer(inst, "output"), got, sizeof(got)), 0
+  );
+  ASSERT_FLOAT_EQ(got[0], 8.0f, 1e-6f);
+  ASSERT_FLOAT_EQ(got[1], 18.0f, 1e-6f);
+
+  poly_compiled_schedule_free(compiled);
+  poly_schedule_free(schedule);
+
+  PolyInstanceDeviceMapEntry reverse_map[] = {
+      {.module = "layers.0", .device = "INTERP"},
+      {.module = "layers.1", .device = "CUDA"},
+  };
+  ASSERT_INT_EQ(poly_instance_set_device_map(inst, reverse_map, 2), 0);
+  ASSERT_INT_EQ(
+      poly_buffer_write(
+          ctx, poly_instance_get_buffer(inst, "x"), x_data, sizeof(x_data)
+      ),
+      0
+  );
+  schedule = poly_schedule_effect_sink(ctx, poly_instance_get_sink(inst, "forward"));
+  ASSERT_NOT_NULL(schedule);
+  ASSERT_INT_EQ(schedule->template->n_calls, 3);
+  compiled = poly_jit_lower(ctx, schedule);
+  ASSERT_NOT_NULL(compiled);
+  ASSERT_INT_EQ(compiled->run->calls[0].lowered_device, POLY_DEVICE_INTERP);
+  ASSERT_INT_EQ(compiled->run->calls[1].lowered_device, POLY_DEVICE_CUDA);
+  ASSERT_INT_EQ(compiled->run->calls[2].lowered_device, POLY_DEVICE_CUDA);
+  ASSERT_INT_EQ(poly_run_compiled_schedule(compiled, NULL, 0, NULL, 0), 0);
+  memset(got, 0, sizeof(got));
+  ASSERT_INT_EQ(
+      poly_buffer_read(ctx, poly_instance_get_buffer(inst, "output"), got, sizeof(got)), 0
+  );
+  ASSERT_FLOAT_EQ(got[0], 8.0f, 1e-6f);
+  ASSERT_FLOAT_EQ(got[1], 18.0f, 1e-6f);
+
+  poly_compiled_schedule_free(compiled);
+  poly_schedule_free(schedule);
+  poly_instance_free(inst);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 #endif /* POLY_HAS_CUDA */

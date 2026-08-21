@@ -253,18 +253,63 @@ static int read_bytes_arg(napi_env env, napi_value val, void **data, size_t *nby
   return 0;
 }
 
-static napi_value make_float32_array_copy(napi_env env, const float *src, size_t len) {
+static int instance_napi_storage_type(
+    int dtype_id,
+    napi_typedarray_type *type_out,
+    size_t *itemsize_out
+) {
+  if (!type_out || !itemsize_out) return 0;
+#define DTYPE_CASE(name, napi_type, bytes)                                                         \
+  if (dtype_id == poly_dtype_id_by_name(name)) {                                                   \
+    *type_out = napi_type;                                                                         \
+    *itemsize_out = bytes;                                                                         \
+    return 1;                                                                                      \
+  }
+  DTYPE_CASE("bool", napi_uint8_array, 1)
+  DTYPE_CASE("int8", napi_int8_array, 1)
+  DTYPE_CASE("uint8", napi_uint8_array, 1)
+  DTYPE_CASE("int16", napi_int16_array, 2)
+  DTYPE_CASE("uint16", napi_uint16_array, 2)
+  DTYPE_CASE("int32", napi_int32_array, 4)
+  DTYPE_CASE("uint32", napi_uint32_array, 4)
+  DTYPE_CASE("int64", napi_bigint64_array, 8)
+  DTYPE_CASE("uint64", napi_biguint64_array, 8)
+  /* JavaScript has no baseline Float16Array/BFloat16Array. Preserve mutable
+   * exact storage bits, as the C API does, instead of mislabelling them F32. */
+  DTYPE_CASE("float16", napi_uint16_array, 2)
+  DTYPE_CASE("bfloat16", napi_uint16_array, 2)
+  DTYPE_CASE("float32", napi_float32_array, 4)
+  DTYPE_CASE("float64", napi_float64_array, 8)
+#undef DTYPE_CASE
+  return 0;
+}
+
+static napi_value make_instance_storage_array_copy(
+    napi_env env,
+    const void *src,
+    size_t len,
+    int dtype_id
+) {
   if (!src) {
     napi_value result;
     napi_get_null(env, &result);
     return result;
   }
-
+  napi_typedarray_type type;
+  size_t itemsize = 0;
+  if (!instance_napi_storage_type(dtype_id, &type, &itemsize)) {
+    napi_throw_error(env, NULL, "polygrad: unsupported Instance storage dtype");
+    return NULL;
+  }
+  if (len > SIZE_MAX / itemsize) {
+    napi_throw_range_error(env, NULL, "polygrad: Instance storage size overflow");
+    return NULL;
+  }
   void *dst = NULL;
   napi_value arraybuf, typed;
-  NAPI_CALL(env, napi_create_arraybuffer(env, len * sizeof(float), &dst, &arraybuf));
-  memcpy(dst, src, len * sizeof(float));
-  NAPI_CALL(env, napi_create_typedarray(env, napi_float32_array, len, arraybuf, 0, &typed));
+  NAPI_CALL(env, napi_create_arraybuffer(env, len * itemsize, &dst, &arraybuf));
+  if (len > 0) memcpy(dst, src, len * itemsize);
+  NAPI_CALL(env, napi_create_typedarray(env, type, len, arraybuf, 0, &typed));
   return typed;
 }
 
@@ -4022,8 +4067,22 @@ static napi_value napi_poly_instance_param_data(napi_env env, napi_callback_info
   int32_t i;
   napi_get_value_int32(env, argv[1], &i);
   int64_t numel = 0;
-  float *data = poly_instance_param_data(inst, i, &numel);
-  return make_float32_array_copy(env, data, (size_t)(numel > 0 ? numel : 0));
+  void *data = poly_instance_param_data_raw(inst, i, &numel);
+  return make_instance_storage_array_copy(
+      env, data, (size_t)(numel > 0 ? numel : 0), poly_instance_param_dtype_id(inst, i)
+  );
+}
+
+static napi_value napi_poly_instance_param_dtype_id(napi_env env, napi_callback_info info) {
+  napi_value argv[2], result;
+  size_t argc = 2;
+  int32_t i = -1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  napi_get_value_int32(env, argv[1], &i);
+  NAPI_CALL(
+      env, napi_create_int32(env, poly_instance_param_dtype_id(get_external(env, argv[0]), i), &result)
+  );
+  return result;
 }
 
 static napi_value napi_poly_instance_param_trainable(napi_env env, napi_callback_info info) {
@@ -4148,8 +4207,22 @@ static napi_value napi_poly_instance_buf_data(napi_env env, napi_callback_info i
   int32_t i;
   napi_get_value_int32(env, argv[1], &i);
   int64_t numel = 0;
-  float *data = poly_instance_buf_data(inst, i, &numel);
-  return make_float32_array_copy(env, data, (size_t)(numel > 0 ? numel : 0));
+  void *data = poly_instance_buf_data_raw(inst, i, &numel);
+  return make_instance_storage_array_copy(
+      env, data, (size_t)(numel > 0 ? numel : 0), poly_instance_buf_dtype_id(inst, i)
+  );
+}
+
+static napi_value napi_poly_instance_buf_dtype_id(napi_env env, napi_callback_info info) {
+  napi_value argv[2], result;
+  size_t argc = 2;
+  int32_t i = -1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  napi_get_value_int32(env, argv[1], &i);
+  NAPI_CALL(
+      env, napi_create_int32(env, poly_instance_buf_dtype_id(get_external(env, argv[0]), i), &result)
+  );
+  return result;
 }
 
 static napi_value napi_poly_instance_export_weights(napi_env env, napi_callback_info info) {
@@ -5428,6 +5501,7 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_instance_param_name", napi_poly_instance_param_name),
       DECLARE_NAPI_METHOD("poly_instance_param_shape", napi_poly_instance_param_shape),
       DECLARE_NAPI_METHOD("poly_instance_param_data", napi_poly_instance_param_data),
+      DECLARE_NAPI_METHOD("poly_instance_param_dtype_id", napi_poly_instance_param_dtype_id),
       DECLARE_NAPI_METHOD("poly_instance_param_trainable", napi_poly_instance_param_trainable),
       DECLARE_NAPI_METHOD(
           "poly_instance_set_param_trainable", napi_poly_instance_set_param_trainable
@@ -5439,6 +5513,7 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_instance_set_buf_trainable", napi_poly_instance_set_buf_trainable),
       DECLARE_NAPI_METHOD("poly_instance_buf_shape", napi_poly_instance_buf_shape),
       DECLARE_NAPI_METHOD("poly_instance_buf_data", napi_poly_instance_buf_data),
+      DECLARE_NAPI_METHOD("poly_instance_buf_dtype_id", napi_poly_instance_buf_dtype_id),
       DECLARE_NAPI_METHOD("poly_instance_export_weights", napi_poly_instance_export_weights),
       DECLARE_NAPI_METHOD("poly_instance_import_weights", napi_poly_instance_import_weights),
       DECLARE_NAPI_METHOD("poly_instance_export_ir", napi_poly_instance_export_ir),

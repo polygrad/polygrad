@@ -121,7 +121,7 @@ async function runModelTests(pg) {
     assert(inst.paramTrainable(0) === false, 'state tensor should be frozen when requiresGrad is false')
   })
 
-  await test('fromBindings requires current parameter storage', async () => {
+  await test('fromBindings snapshots named lazy parameter', async () => {
     const w = new Tensor([[7]], { dtype: 'float32', requiresGrad: true })
     const x = pg.Tensor.empty([1, 1])
     const y = x.dot(w)
@@ -133,19 +133,56 @@ async function runModelTests(pg) {
     const entries = [
       { name: 'forward', inputs: ['x'], outputs: ['y'] }
     ]
-    if (pg.core === 'wasm') {
-      const inst = pg.Instance.fromBindings(bindings, entries)
-      const out = await inst.forward({ x: new Float32Array([3]) })
-      assertClose(out.y, [21])
-      return
-    }
-    let error = null
+    const inst = pg.Instance.fromBindings(bindings, entries)
+    const out = await inst.forward({ x: new Float32Array([3]) })
+    assertClose(out.y, [21])
+  })
+
+  await test('fromIR freshly initializes closed named value', async () => {
+    const w = Tensor.full([2], 3, { buffer: false, dtype: 'float32' })
+      .add(Tensor.full([2], 1, { buffer: false, dtype: 'float32' }))
+    w.requiresGrad = true
+    const x = Tensor.empty([2])
+    const y = x.mul(w)
+    const source = pg.Instance.fromBindings(
+      [
+        { name: 'x', role: 'input', tensor: x },
+        { name: 'w', role: 'state', tensor: w },
+        { name: 'output', role: 'output', tensor: y }
+      ],
+      [{ name: 'forward', inputs: ['x'], outputs: ['output'] }]
+    )
+    const fresh = pg.Instance.fromIR(source.exportIR())
     try {
-      pg.Instance.fromBindings(bindings, entries)
-    } catch (err) {
-      error = err
+      assertClose(await fresh.paramData(0), [4, 4])
+      const out = await fresh.forward({ x: new Float32Array([2, 3]) })
+      assertClose(out.output, [8, 12])
+    } finally {
+      fresh.dispose()
+      source.dispose()
     }
-    assert(error && /w.*has no buffer identity/.test(error.message), 'expected lazy storage rejection')
+  })
+
+  await test('fromIR rejects stateful RNG initializer without checkpoint', async () => {
+    Tensor.manual_seed(7)
+    const w = Tensor.rand(2)
+    w.requiresGrad = true
+    const x = Tensor.empty([2])
+    const source = pg.Instance.fromBindings(
+      [
+        { name: 'x', role: 'input', tensor: x },
+        { name: 'w', role: 'state', tensor: w },
+        { name: 'output', role: 'output', tensor: x.mul(w) }
+      ],
+      [{ name: 'forward', inputs: ['x'], outputs: ['output'] }]
+    )
+    try {
+      let error = null
+      try { pg.Instance.fromIR(source.exportIR()) } catch (err) { error = err }
+      assert(error && /failed to create PolyInstance/.test(error.message), 'expected closed-state rejection')
+    } finally {
+      source.dispose()
+    }
   })
 
   await test('fromTensors keeps tinygrad-style plain object', async () => {

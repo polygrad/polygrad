@@ -94,11 +94,23 @@ async function checkModuleDeviceMap(pg, Instance) {
   const forward = input => webgpu
     ? inst.forwardAsync(input) : inst.forward(input)
   const expected = webgpu ? [8, 10] : [8, 18]
+  const present = (value, label) => {
+    assert(value != null, `${label} returned null`)
+    return value
+  }
+  const assertOptionalBytesEqual = (actual, expectedBytes, label) => {
+    assert((actual == null) === (expectedBytes == null), `${label} presence changed`)
+    if (actual != null) assertClose(actual, expectedBytes, 0)
+  }
 
   try {
+    const irBefore = present(inst.exportIR(), 'initial IR export')
+    const weightsBefore = await inst.exportWeights()
     await place({ 'layers.0': first, 'layers.1': second })
     let result = await forward({ x: new Float32Array([1, 2]) })
-    assertClose(result.output, expected)
+    assertClose(present(result.output, 'first placed output'), expected)
+    assertClose(present(inst.exportIR(), 'first placed IR export'), irBefore, 0)
+    assertOptionalBytesEqual(await inst.exportWeights(), weightsBefore, 'first placed weight export')
 
     let rejected = false
     try {
@@ -110,9 +122,25 @@ async function checkModuleDeviceMap(pg, Instance) {
 
     await place({ 'layers.0': second, 'layers.1': first })
     result = await forward({ x: new Float32Array([1, 2]) })
-    assertClose(result.output, expected)
+    assertClose(present(result.output, 'replacement placed output'), expected)
+    const irAfter = present(inst.exportIR(), 'replacement IR export')
+    const weightsAfter = await inst.exportWeights()
+    assertClose(irAfter, irBefore, 0)
+    assertOptionalBytesEqual(weightsAfter, weightsBefore, 'replacement weight export')
+
+    const restored = Instance.fromIR(irAfter, weightsAfter)
+    try {
+      const restoredResult = webgpu
+        ? await restored.forwardAsync({ x: new Float32Array([1, 2]) })
+        : await restored.forward({ x: new Float32Array([1, 2]) })
+      assertClose(present(restoredResult.output, 'restored output'), expected)
+    } finally {
+      if (webgpu) await restored.dispose()
+      else restored.dispose()
+    }
   } finally {
-    inst.dispose()
+    if (webgpu) await inst.dispose()
+    else inst.dispose()
   }
 }
 
@@ -142,6 +170,222 @@ async function runInstanceTests(pg) {
   }
 
   console.log('\n== Instance ==')
+
+  await test('scalar rank8 and shared multi-output round trip', async () => {
+    const scalarX = pg.Tensor.empty([])
+    const scalarW = pg.Tensor.full([], 3, { dtype: 'float32', requiresGrad: true })
+    const scalar = await Instance.fromTensors({
+      inputs: { x: scalarX }, outputs: { output: scalarX.mul(scalarW) },
+      params: { w: scalarW }
+    })
+    let scalarRestored = null
+    try {
+      scalarRestored = Instance.fromIR(scalar.exportIR(), await scalar.exportWeights())
+      const result = await scalarRestored.forward({ x: new Float32Array([2]) })
+      assertClose(result.output, [6], 0)
+      assert(
+        JSON.stringify(scalarRestored.bufShape(scalarRestored.findBuf('output'))) === '[]',
+        'scalar output shape must remain []'
+      )
+    } finally {
+      if (scalarRestored) scalarRestored.dispose()
+      scalar.dispose()
+    }
+
+    const shape = [1, 1, 1, 1, 1, 1, 1, 1]
+    const x = pg.Tensor.empty(shape)
+    const w = pg.Tensor.ones(shape, { requiresGrad: true })
+    const shared = x.add(w)
+    const source = await Instance.fromTensors({
+      inputs: { x },
+      outputs: { plus: shared.add(1), minus: shared.sub(1) },
+      params: { w }
+    })
+    let restored = null
+    try {
+      restored = Instance.fromIR(source.exportIR(), await source.exportWeights())
+      const result = await restored.forward({ x: new Float32Array([2]) })
+      assertClose(result.plus, [4], 0)
+      assertClose(result.minus, [2], 0)
+      assert(
+        JSON.stringify(restored.bufShape(restored.findBuf('plus'))) === JSON.stringify(shape),
+        'rank-8 output shape was not preserved'
+      )
+    } finally {
+      if (restored) restored.dispose()
+      source.dispose()
+    }
+  })
+
+  await test('duplicate ABI storage alias fails closed like TinyJit', async () => {
+    const x = pg.Tensor.empty([2])
+    let error = null
+    try {
+      const unexpected = await Instance.fromTensors({
+        inputs: { a: x, b: x }, outputs: { output: x.add(x) }
+      })
+      unexpected.dispose()
+    } catch (err) {
+      error = err
+    }
+    assert(error, 'duplicate ABI storage must be rejected')
+  })
+
+  await test('dynamic input alias with persistent state fails closed', async () => {
+    const x = pg.Tensor.empty([2])
+    let error = null
+    try {
+      const unexpected = await Instance.fromTensors({
+        inputs: { x }, outputs: { output: x.add(x) }, params: { w: x }
+      })
+      unexpected.dispose()
+    } catch (err) {
+      error = err
+    }
+    assert(error, 'dynamic input must not alias persistent state')
+  })
+
+  await test('output alias of dynamic input round trips', async () => {
+    const x = pg.Tensor.empty([2])
+    const source = await Instance.fromTensors({ inputs: { x }, outputs: { output: x } })
+    let restored = null
+    try {
+      restored = Instance.fromIR(source.exportIR())
+      const value = new Float32Array([3, 4])
+      assertClose((await source.forward({ x: value })).output, value, 0)
+      assertClose((await restored.forward({ x: value })).output, value, 0)
+    } finally {
+      if (restored) restored.dispose()
+      source.dispose()
+    }
+  })
+
+  await test('named partial view state fails closed', async () => {
+    const base = new pg.Tensor([1, 2, 3, 4], { dtype: 'float32', requiresGrad: true })
+    const view = base.shrink([[1, 3]])
+    const x = pg.Tensor.empty([2])
+    let error = null
+    try {
+      const unexpected = await Instance.fromTensors({
+        inputs: { x }, outputs: { output: x.add(view) }, params: { base, view }
+      })
+      unexpected.dispose()
+    } catch (err) {
+      error = err
+    }
+    assert(error, 'named partial view storage must be rejected')
+  })
+
+  await test('input-dependent named state effect fails closed', async () => {
+    const x = pg.Tensor.empty([1])
+    const w = new pg.Tensor([1], { dtype: 'float32' })
+    const output = w.assign(w.add(x))
+    let error = null
+    try {
+      const unexpected = await Instance.fromTensors({
+        inputs: { x }, outputs: { output }, params: { w }
+      })
+      unexpected.dispose()
+    } catch (err) {
+      error = err
+    }
+    assert(error, 'input-dependent named state effect must be rejected')
+  })
+
+  await test('stochastic output requires named RNG state', async () => {
+    pg.Tensor.manual_seed(123)
+    const x = pg.Tensor.empty([2])
+    let error = null
+    try {
+      const unexpected = await Instance.fromTensors({
+        inputs: { x }, outputs: { output: x.add(pg.Tensor.rand(2)) }
+      })
+      unexpected.dispose()
+    } catch (err) {
+      error = err
+    }
+    assert(error, 'stochastic output without named RNG state must be rejected')
+  })
+
+  await test('state traversal preserves diamond aliases and stops cycles', async () => {
+    const shared = new pg.Tensor([1, 2], { dtype: 'float32' })
+    const root = { left: { weight: shared }, right: { weight: shared } }
+    root.self = root
+    const state = pg.nn.getStateDict(root)
+    assert(
+      JSON.stringify(Object.keys(state)) === JSON.stringify(['left.weight', 'right.weight']),
+      `unexpected state paths: ${Object.keys(state)}`
+    )
+    assert(state['left.weight'] === state['right.weight'], 'alias paths must retain one Tensor')
+    const params = pg.nn.getParameters(root)
+    assert(params.length === 2, `unexpected parameter count: ${params.length}`)
+    assert(params[0] === shared && params[1] === shared, 'parameter aliases must match state paths')
+  })
+
+  await test('float16 Instance state preserves exact storage bits', async () => {
+    const w = new pg.Tensor([1.5, -2], { dtype: 'float16', requiresGrad: true })
+    const x = pg.Tensor.empty([2], { dtype: 'float16' })
+    const inst = await Instance.fromTensors({
+      inputs: { x },
+      outputs: { output: x.add(w) },
+      params: { w }
+    })
+    try {
+      assert(inst.paramDtype(0) === 'float16', `unexpected dtype ${inst.paramDtype(0)}`)
+      const raw = await inst.paramData(0)
+      assert(raw instanceof Uint16Array, `expected Uint16Array, got ${raw.constructor.name}`)
+      assert(raw.length === 2 && raw[0] === 0x3e00 && raw[1] === 0xc000,
+        `unexpected float16 bits: ${Array.from(raw)}`)
+      const restored = Instance.fromIR(inst.exportIR(), await inst.exportWeights())
+      try {
+        assert(restored.paramDtype(0) === 'float16', 'restored dtype must remain float16')
+        const restoredRaw = await restored.paramData(0)
+        assert(restoredRaw instanceof Uint16Array,
+          'restored float16 state must remain raw Uint16Array')
+        assert(restoredRaw[0] === 0x3e00 && restoredRaw[1] === 0xc000,
+          `unexpected restored bits: ${Array.from(restoredRaw)}`)
+      } finally {
+        restored.dispose()
+      }
+    } finally {
+      inst.dispose()
+    }
+  })
+
+  await test('typed Instance state round trips exact storage bytes', async () => {
+    const cases = [
+      ['float64', [1.25, -2.5], Float64Array],
+      ['int32', [1, -2], Int32Array],
+      ['uint8', [1, 255], Uint8Array],
+      ['bool', [true, false], Uint8Array],
+      ['bfloat16', [1.5, -2], Uint16Array]
+    ]
+    for (const [dtype, values, ArrayType] of cases) {
+      const w = new pg.Tensor(values, { dtype })
+      const x = pg.Tensor.empty([2], { dtype })
+      const source = await Instance.fromTensors({
+        inputs: { x }, outputs: { output: x }, params: { w }
+      })
+      try {
+        const restored = Instance.fromIR(source.exportIR(), await source.exportWeights())
+        try {
+          const before = await source.paramData(0)
+          const after = await restored.paramData(0)
+          assert(before instanceof ArrayType,
+            `${dtype}: expected ${ArrayType.name}, got ${before.constructor.name}`)
+          assert(after instanceof ArrayType,
+            `${dtype}: restored ${after.constructor.name}`)
+          const beforeBytes = new Uint8Array(before.buffer, before.byteOffset, before.byteLength)
+          const afterBytes = new Uint8Array(after.buffer, after.byteOffset, after.byteLength)
+          assertClose(afterBytes, beforeBytes, 0)
+        } finally {
+          restored.dispose()
+        }
+      } finally {
+        source.dispose()
+      }
+    }
+  })
 
   await test('typed integer input preserves bytes and rejects float binding', async () => {
     await checkTypedIntegerInput(pg, Instance)
@@ -308,6 +552,72 @@ async function runInstanceTests(pg) {
     } finally {
       inst1.dispose()
       inst2.dispose()
+    }
+  })
+
+  await test('Adam checkpoint resumes the uninterrupted training trajectory', async () => {
+    const spec = {
+      layers: [2, 1], activation: 'none', bias: false,
+      loss: 'mse', batch_size: 1, seed: 7
+    }
+    const source = MLP(spec)
+    let restored = null
+    try {
+      source.setOptimizer(pg.OPTIM_ADAM, 0.05)
+      const io = { x: new Float32Array([1, 2]), y: new Float32Array([3]) }
+      for (let i = 0; i < 3; i++) await source.trainStep(io)
+      restored = Instance.fromIR(source.exportIR(), await source.exportWeights())
+      restored.setOptimizer(pg.OPTIM_ADAM, 0.05)
+
+      const sourceLoss = await source.trainStep(io)
+      const restoredLoss = await restored.trainStep(io)
+      assert(sourceLoss === restoredLoss,
+        `restored loss ${restoredLoss} != uninterrupted ${sourceLoss}`)
+      assertClose(await restored.paramData(0), await source.paramData(0), 0)
+      for (const name of [
+        'optim.adam.b1_t', 'optim.adam.b2_t',
+        'optim.adam.m.layers.0.weight', 'optim.adam.v.layers.0.weight'
+      ]) {
+        const sourceIndex = source.findBuf(name)
+        const restoredIndex = restored.findBuf(name)
+        assert(sourceIndex >= 0 && restoredIndex >= 0, `missing ${name}`)
+        assertClose(
+          await restored.bufData(restoredIndex), await source.bufData(sourceIndex), 0
+        )
+      }
+    } finally {
+      if (restored) restored.dispose()
+      source.dispose()
+    }
+  })
+
+  await test('stochastic named state requires checkpoint for portable activation', async () => {
+    pg.Tensor.manual_seed(11)
+    const w = pg.Tensor.rand(2, { requiresGrad: true })
+    const x = pg.Tensor.empty([2])
+    const source = await Instance.fromTensors({
+      inputs: { x }, outputs: { output: x.mul(w) }, params: { w }
+    })
+    let restored = null
+    try {
+      const ir = source.exportIR()
+      const weights = await source.exportWeights()
+      let rejected = false
+      try {
+        const unexpected = Instance.fromIR(ir)
+        unexpected.dispose()
+      } catch (err) {
+        rejected = true
+      }
+      assert(rejected, 'fresh stochastic activation must fail without checkpoint bytes')
+      restored = Instance.fromIR(ir, weights)
+      const input = new Float32Array([2, 3])
+      const sourceOut = await source.forward({ x: input })
+      const restoredOut = await restored.forward({ x: input })
+      assertClose(restoredOut.output, sourceOut.output, 0)
+    } finally {
+      if (restored) restored.dispose()
+      source.dispose()
     }
   })
 

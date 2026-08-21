@@ -18,13 +18,33 @@
 extern "C" {
 #endif
 
-/* Encode */
+/* Safetensors dtype vocabulary. This matches pinned tinygrad
+ * nn/state.py:safe_dtypes for the scalar dtypes supported by the C core. */
+typedef enum {
+  POLY_ST_F32,
+  POLY_ST_F16,
+  POLY_ST_BF16,
+  POLY_ST_F64,
+  POLY_ST_I64,
+  POLY_ST_I32,
+  POLY_ST_I16,
+  POLY_ST_I8,
+  POLY_ST_U8,
+  POLY_ST_BOOL,
+  POLY_ST_U16,
+  POLY_ST_U32,
+  POLY_ST_U64
+} PolySafetensorDType;
+
+/* Encode. `dtype` is last so historical four-field initializers default to
+ * POLY_ST_F32 (enum value zero). `data` contains exact scalar storage bytes. */
 
 typedef struct {
   const char *name;
-  const float *data;
+  const void *data;
   const int64_t *shape;
   int ndim;
+  PolySafetensorDType dtype;
 } PolySafetensorEntry;
 
 /* Encode entries into safetensors binary format.
@@ -61,19 +81,6 @@ PolySafetensorView *poly_safetensors_decode(
 );
 
 /* Multi-dtype decode */
-
-typedef enum {
-  POLY_ST_F32,
-  POLY_ST_F16,
-  POLY_ST_BF16,
-  POLY_ST_F64,
-  POLY_ST_I64,
-  POLY_ST_I32,
-  POLY_ST_I16,
-  POLY_ST_I8,
-  POLY_ST_U8,
-  POLY_ST_BOOL
-} PolySafetensorDType;
 
 typedef struct {
   char *name; /* heap-allocated (caller frees) */

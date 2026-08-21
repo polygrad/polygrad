@@ -469,6 +469,130 @@ class TestAssign:
 
 
 class TestInstanceExport:
+    def test_scalar_rank8_and_shared_multi_output_round_trip(self):
+        scalar_x = Tensor.empty(())
+        scalar_w = Tensor(3.0, requires_grad=True)
+        scalar = Instance.from_tensors(
+            inputs={"x": scalar_x},
+            outputs={"output": scalar_x * scalar_w},
+            params={"w": scalar_w},
+        )
+        scalar_restored = Instance.from_ir(scalar.export_ir(), scalar.export_weights())
+        try:
+            result = scalar_restored.forward(x=np.array(2.0, dtype=np.float32))["output"]
+            assert result.shape == ()
+            assert result.item() == 6.0
+        finally:
+            scalar_restored.free()
+            scalar.free()
+
+        rank8_shape = (1,) * 8
+        rank8_x = Tensor.empty(rank8_shape)
+        rank8_w = Tensor.ones(*rank8_shape, requires_grad=True)
+        shared = rank8_x + rank8_w
+        rank8 = Instance.from_tensors(
+            inputs={"x": rank8_x},
+            outputs={"plus": shared + 1.0, "minus": shared - 1.0},
+            params={"w": rank8_w},
+        )
+        rank8_restored = Instance.from_ir(rank8.export_ir(), rank8.export_weights())
+        try:
+            result = rank8_restored.forward(
+                x=np.full(rank8_shape, 2.0, dtype=np.float32)
+            )
+            assert result["plus"].shape == rank8_shape
+            assert result["minus"].shape == rank8_shape
+            np.testing.assert_array_equal(result["plus"], np.full(rank8_shape, 4.0))
+            np.testing.assert_array_equal(result["minus"], np.full(rank8_shape, 2.0))
+        finally:
+            rank8_restored.free()
+            rank8.free()
+
+    def test_duplicate_abi_storage_alias_fails_closed_like_tinyjit(self):
+        x = Tensor.empty(2)
+        with pytest.raises(RuntimeError):
+            Instance.from_tensors(
+                inputs={"a": x, "b": x}, outputs={"output": x + x}
+            )
+
+    def test_dynamic_input_alias_with_persistent_state_fails_closed(self):
+        x = Tensor.empty(2)
+        with pytest.raises(RuntimeError):
+            Instance.from_tensors(
+                inputs={"x": x}, outputs={"output": x + x}, params={"w": x}
+            )
+
+    def test_output_alias_of_dynamic_input_round_trips(self):
+        x = Tensor.empty(2)
+        source = Instance.from_tensors(inputs={"x": x}, outputs={"output": x})
+        restored = Instance.from_ir(source.export_ir())
+        try:
+            value = np.array([3.0, 4.0], dtype=np.float32)
+            np.testing.assert_array_equal(source.forward(x=value)["output"], value)
+            np.testing.assert_array_equal(restored.forward(x=value)["output"], value)
+        finally:
+            restored.free()
+            source.free()
+
+    def test_named_partial_view_state_fails_closed(self):
+        base = Tensor([1.0, 2.0, 3.0, 4.0], requires_grad=True)
+        view = base[1:3]
+        x = Tensor.empty(2)
+        with pytest.raises(RuntimeError, match="unsupported named view state"):
+            Instance.from_tensors(
+                inputs={"x": x}, outputs={"output": x + view},
+                params={"base": base, "view": view},
+            )
+
+    def test_input_dependent_named_state_effect_fails_closed(self):
+        x = Tensor.empty(1)
+        w = Tensor([1.0], requires_grad=False)
+        output = w.assign(w + x)
+        with pytest.raises(RuntimeError, match="depends on an input or target"):
+            Instance.from_tensors(
+                inputs={"x": x}, outputs={"output": output}, params={"w": w}
+            )
+
+    def test_stochastic_output_requires_named_rng_state(self):
+        Tensor.manual_seed(123)
+        x = Tensor.empty(2)
+        with pytest.raises(RuntimeError, match="unbound storage"):
+            Instance.from_tensors(
+                inputs={"x": x}, outputs={"output": x + Tensor.rand(2)}
+            )
+
+    def test_assigned_realized_input_history_fails_closed(self):
+        x = Tensor.empty(2)
+        x.assign(Tensor([4.0, 5.0])).realize()
+        output = x * Tensor([2.0, 3.0]) + 1.0
+        with pytest.raises(RuntimeError, match="no buffer identity"):
+            Instance.from_tensors(inputs={"x": x}, outputs={"output": output})
+
+    def test_float16_state_preserves_exact_dtype_and_storage_bits(self):
+        w = Tensor([1.5, -2.0], dtype="float16", requires_grad=True)
+        x = Tensor.empty((2,), dtype="float16")
+        source = Instance.from_tensors(
+            inputs={"x": x}, outputs={"output": x + w}, params={"w": w}
+        )
+        try:
+            raw = source.param_data(0)
+            assert raw.dtype == np.float16
+            np.testing.assert_array_equal(raw.view(np.uint16), [0x3E00, 0xC000])
+            assert source.param_dtype(0) == "float16"
+
+            restored = Instance.from_ir(source.export_ir(), source.export_weights())
+            try:
+                restored_raw = restored.param_data(0)
+                assert restored_raw.dtype == np.float16
+                np.testing.assert_array_equal(
+                    restored_raw.view(np.uint16), [0x3E00, 0xC000]
+                )
+                assert restored.param_dtype(0) == "float16"
+            finally:
+                restored.free()
+        finally:
+            source.free()
+
     def test_typed_integer_input_preserves_bytes_and_rejects_float_binding(self):
         x = Tensor.empty((3,), dtype="int32")
         out = x.cast("float32")
@@ -570,22 +694,69 @@ class TestInstanceExport:
 
         assert inst.param_trainable(0) is False
 
-    def test_from_bindings_rejects_lazy_parameter_without_current_storage(self):
+    def test_from_bindings_snapshots_named_lazy_parameter(self):
         w = Tensor([[7.0]], requires_grad=True)
         x = Tensor.empty((1, 1))
         y = x.dot(w)
 
-        with pytest.raises(RuntimeError, match="w.*has no buffer identity"):
-            Instance.from_bindings(
-                bindings=[
-                    {"name": "x", "role": "input", "tensor": x},
-                    {"name": "w", "role": "state", "tensor": w},
-                    {"name": "y", "role": "output", "tensor": y},
-                ],
-                entrypoints=[
-                    {"name": "forward", "inputs": ["x"], "outputs": ["y"]},
-                ],
-            )
+        inst = Instance.from_bindings(
+            bindings=[
+                {"name": "x", "role": "input", "tensor": x},
+                {"name": "w", "role": "state", "tensor": w},
+                {"name": "y", "role": "output", "tensor": y},
+            ],
+            entrypoints=[
+                {"name": "forward", "inputs": ["x"], "outputs": ["y"]},
+            ],
+        )
+        out = inst.forward(x=np.array([[3.0]], dtype=np.float32))
+        assert np.allclose(out["y"], [21.0], atol=1e-5)
+
+    def test_from_ir_freshly_initializes_closed_named_value(self):
+        w = (
+            Tensor.full((2,), 3.0, buffer=False)
+            + Tensor.full((2,), 1.0, buffer=False)
+        )
+        w.requires_grad = True
+        x = Tensor.empty((2,))
+        y = x * w
+        source = Instance.from_bindings(
+            bindings=[
+                {"name": "x", "role": "input", "tensor": x},
+                {"name": "w", "role": "state", "tensor": w},
+                {"name": "output", "role": "output", "tensor": y},
+            ],
+            entrypoints=[{"name": "forward", "inputs": ["x"], "outputs": ["output"]}],
+        )
+        try:
+            fresh = Instance.from_ir(source.export_ir())
+            try:
+                np.testing.assert_array_equal(fresh.param_data(0), [4.0, 4.0])
+                out = fresh.forward(x=np.array([2.0, 3.0], dtype=np.float32))
+                np.testing.assert_array_equal(out["output"], [8.0, 12.0])
+            finally:
+                fresh.free()
+        finally:
+            source.free()
+
+    def test_from_ir_rejects_stateful_rng_initializer_without_checkpoint(self):
+        Tensor.manual_seed(7)
+        w = Tensor.rand(2)
+        w.requires_grad = True
+        x = Tensor.empty((2,))
+        source = Instance.from_bindings(
+            bindings=[
+                {"name": "x", "role": "input", "tensor": x},
+                {"name": "w", "role": "state", "tensor": w},
+                {"name": "output", "role": "output", "tensor": x * w},
+            ],
+            entrypoints=[{"name": "forward", "inputs": ["x"], "outputs": ["output"]}],
+        )
+        try:
+            with pytest.raises(RuntimeError, match="NULL pointer"):
+                Instance.from_ir(source.export_ir())
+        finally:
+            source.free()
 
     def test_from_tensors_keeps_tinygrad_style_plain_object(self):
         class LinearNet:
@@ -607,7 +778,7 @@ class TestInstanceExport:
         out = inst.forward(py_trace_x=np.array([[2.0, 3.0]], dtype=np.float32))
         assert np.allclose(out["output"], [23.0], atol=1e-5)
 
-    def test_explicit_module_device_map_uses_exact_tensor_cuts(self):
+    def test_explicit_module_device_map_uses_named_value_bindings(self):
         x = Tensor.empty((2,))
         w0 = Tensor([3.0, 4.0], requires_grad=True)
         w1 = Tensor([2.0, 3.0], requires_grad=True)
@@ -623,11 +794,15 @@ class TestInstanceExport:
                 {"name": "layers.1", "inputs": [hidden], "output": output},
             ],
         )
+        ir_before = inst.export_ir()
+        weights_before = inst.export_weights()
         inst.set_device_map({"layers.0": "CPU", "layers.1": "CPU:1"})
         result = inst.forward(x=np.array([1.0, 2.0], dtype=np.float32))
         np.testing.assert_array_equal(
             result["output"], np.array([8.0, 18.0], dtype=np.float32)
         )
+        assert inst.export_ir() == ir_before
+        assert inst.export_weights() == weights_before
 
         with pytest.raises(ValueError, match="incomplete"):
             inst.set_device_map({"layers.0": "CPU"})
@@ -637,6 +812,18 @@ class TestInstanceExport:
         np.testing.assert_array_equal(
             result["output"], np.array([8.0, 18.0], dtype=np.float32)
         )
+        assert inst.export_ir() == ir_before
+        assert inst.export_weights() == weights_before
+        restored = Instance.from_ir(inst.export_ir(), inst.export_weights())
+        try:
+            restored_result = restored.forward(
+                x=np.array([1.0, 2.0], dtype=np.float32)
+            )
+            np.testing.assert_array_equal(
+                restored_result["output"], np.array([8.0, 18.0], dtype=np.float32)
+            )
+        finally:
+            restored.free()
 
     def test_constructor_state_names_survive_ir_roundtrip(self):
         w = Tensor([[2.0], [3.0]], requires_grad=True).realize()
@@ -825,6 +1012,14 @@ class TestStateDict:
         sd = get_state_dict({"left": shared, "right": shared})
         assert list(sd) == ["left", "right"]
         assert sd["left"] is sd["right"]
+
+    def test_get_state_dict_stops_cycles_without_dropping_diamond_aliases(self):
+        shared = Tensor([1.0, 2.0])
+        root = {"left": {"weight": shared}, "right": {"weight": shared}}
+        root["self"] = root
+        sd = get_state_dict(root)
+        assert list(sd) == ["left.weight", "right.weight"]
+        assert sd["left.weight"] is sd["right.weight"]
 
     def test_get_parameters(self):
         m = Linear(3, 2)

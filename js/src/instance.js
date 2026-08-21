@@ -48,6 +48,13 @@ function weightExportFlags(options) {
   return EXPORT_WEIGHTS_PARAMS | (includeOptimizer ? EXPORT_WEIGHTS_OPTIMIZER : 0)
 }
 
+function instanceDtypeName(core, dtypeId) {
+  for (const [name, id] of Object.entries(core.dtypeIds || {})) {
+    if (Number(id) === Number(dtypeId)) return name
+  }
+  throw new Error(`polygrad: unsupported Instance storage dtype id ${dtypeId}`)
+}
+
 
 function normalizeBytes(bytes, name) {
   if (bytes == null) return null
@@ -647,6 +654,11 @@ function createBoundInstanceClass(runtime) {
       return this._rt._core.instance.paramShape(this._handle, i)
     }
 
+    paramDtype(i) {
+      const core = this._rt._core
+      return instanceDtypeName(core, core.instance.paramDtypeId(this._handle, i))
+    }
+
     paramData(i) {
       this._requireSync('paramData()', 'paramDataAsync()')
       return this._paramDataRaw(i)
@@ -714,6 +726,11 @@ function createBoundInstanceClass(runtime) {
 
     bufShape(i) {
       return this._rt._core.instance.bufShape(this._handle, i)
+    }
+
+    bufDtype(i) {
+      const core = this._rt._core
+      return instanceDtypeName(core, core.instance.bufDtypeId(this._handle, i))
     }
 
     bufData(i) {

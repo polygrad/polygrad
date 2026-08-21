@@ -56,7 +56,7 @@ function createNativeCore(device) {
     if (name) ops[name] = i
   }
 
-  const EXPECTED_ABI = 54
+  const EXPECTED_ABI = 55
   const abi = binding.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(
@@ -97,6 +97,9 @@ function createNativeCore(device) {
     paramData(inst, i) {
       return binding.poly_instance_param_data(inst, i)
     },
+    paramDtypeId(inst, i) {
+      return binding.poly_instance_param_dtype_id(inst, i)
+    },
     paramTrainable(inst, i) {
       return binding.poly_instance_param_trainable(inst, i)
     },
@@ -123,6 +126,9 @@ function createNativeCore(device) {
     },
     bufData(inst, i) {
       return binding.poly_instance_buf_data(inst, i)
+    },
+    bufDtypeId(inst, i) {
+      return binding.poly_instance_buf_dtype_id(inst, i)
     },
     exportWeights(inst, flags) {
       return binding.poly_instance_export_weights(inst, flags)

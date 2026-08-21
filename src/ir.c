@@ -1,15 +1,15 @@
 /*
  * poly_ir.c -- Binary IR codec for tensor-level UOp graphs
  *
- * poly.ir.uops@8 format:
+ * poly.ir.uops@9 format:
  *   Header (32 bytes)
  *   String table (variable)
  *   Node table (variable, strict toposort order; scalar dtype ID + vector count)
- *   Interface table (named buffers with roles)
+ *   Interface table (named logical nodes with roles)
  *   Entrypoint table (named SINKs plus v2+ ABI metadata)
  *
  * Import remains backward-compatible with v1 payloads (entrypoint name + SINK)
- * and v2-v7 payloads (including integer and scalar-string device metadata).
+ * and v2-v8 payloads (including integer and scalar-string device metadata).
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -209,6 +209,17 @@ static void free_ir_entrypoint(PolyIrEntrypoint *ep) {
   free((char *)ep->objective);
 }
 
+static bool ir_interface_shape_valid(const PolyIrBufEntry *entry) {
+  if (!entry || entry->ndim < 0 || entry->ndim > POLY_IR_MAX_DIMS) return false;
+  int64_t numel = 1;
+  for (int d = 0; d < entry->ndim; d++) {
+    int64_t dim = entry->shape[d];
+    if (dim < 0 || (dim != 0 && numel > INT64_MAX / dim)) return false;
+    numel *= dim;
+  }
+  return true;
+}
+
 /* Export */
 
 uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
@@ -218,6 +229,14 @@ uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
   if (spec->n_entrypoints == 0) {
     fprintf(stderr, "poly_ir_export: no entrypoints\n");
     return NULL;
+  }
+  if (spec->n_bufs < 0 || (spec->n_bufs > 0 && !spec->bufs)) return NULL;
+  for (int i = 0; i < spec->n_bufs; i++) {
+    if (!spec->bufs[i].name || !spec->bufs[i].buffer ||
+        spec->bufs[i].role > POLY_IR_ROLE_AUX || !ir_interface_shape_valid(&spec->bufs[i])) {
+      fprintf(stderr, "poly_ir_export: invalid interface row %d\n", i);
+      return NULL;
+    }
   }
 
   /* Collect all nodes via toposort. Entrypoint sinks define executable graphs;
@@ -1050,15 +1069,20 @@ int poly_ir_import(const uint8_t *data, int len, PolyIrSpec *out) {
     uint16_t ndim = br_u16(&r);
     br_u16(&r); /* padding */
 
+    if (role > POLY_IR_ROLE_AUX || node_idx >= n_nodes || ndim > POLY_IR_MAX_DIMS ||
+        br_remaining(&r) < (int)ndim * 8)
+      goto fail_bufs;
+
     out->bufs[i].name = (name_idx < n_strings) ? strdup(strings[name_idx]) : strdup("");
     out->bufs[i].role = role;
     out->bufs[i].trainable_set = (iface_flags & 2) != 0;
     out->bufs[i].trainable =
         out->bufs[i].trainable_set ? ((iface_flags & 1) != 0) : (role == POLY_IR_ROLE_PARAM);
-    out->bufs[i].buffer = (node_idx < n_nodes) ? nodes[node_idx] : NULL;
+    out->bufs[i].buffer = nodes[node_idx];
     out->bufs[i].ndim = ndim;
-    for (int d = 0; d < ndim && d < 8; d++)
+    for (int d = 0; d < ndim; d++)
       out->bufs[i].shape[d] = br_i64(&r);
+    if (!ir_interface_shape_valid(&out->bufs[i])) goto fail_bufs;
   }
 
   /* Entrypoint table */

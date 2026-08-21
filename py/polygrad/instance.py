@@ -14,6 +14,41 @@ from .device import _device_id
 
 _get_lib = _ffi.get_lib
 
+_INSTANCE_DTYPE_NAMES = (
+    'bool', 'int8', 'uint8', 'int16', 'uint16', 'int32', 'uint32',
+    'int64', 'uint64', 'float16', 'bfloat16', 'float32', 'float64',
+)
+
+
+def _instance_dtype_name(dtype_id):
+    lib = _get_lib()
+    for name in _INSTANCE_DTYPE_NAMES:
+        if lib.poly_dtype_id_by_name(name.encode('utf-8')) == dtype_id:
+            return name
+    raise RuntimeError(f'unsupported Instance storage dtype id {dtype_id}')
+
+
+def _instance_data_view(ptr, numel, dtype_name):
+    """Return a mutable view of exact Instance scalar storage.
+
+    NumPy has no built-in bfloat16 dtype, so BF16 is exposed as its mutable
+    uint16 storage bits. All other supported dtypes use their native NumPy
+    scalar type (including float16).
+    """
+    storage = {
+        'bool': (ctypes.c_uint8, np.bool_),
+        'int8': (ctypes.c_int8, np.int8), 'uint8': (ctypes.c_uint8, np.uint8),
+        'int16': (ctypes.c_int16, np.int16), 'uint16': (ctypes.c_uint16, np.uint16),
+        'int32': (ctypes.c_int32, np.int32), 'uint32': (ctypes.c_uint32, np.uint32),
+        'int64': (ctypes.c_int64, np.int64), 'uint64': (ctypes.c_uint64, np.uint64),
+        'float16': (ctypes.c_uint16, np.float16),
+        'bfloat16': (ctypes.c_uint16, np.uint16),
+        'float32': (ctypes.c_float, np.float32), 'float64': (ctypes.c_double, np.float64),
+    }
+    ctype, npdtype = storage[dtype_name]
+    raw = np.ctypeslib.as_array(ctypes.cast(ptr, ctypes.POINTER(ctype)), shape=(numel,))
+    return raw if raw.dtype == np.dtype(npdtype) else raw.view(npdtype)
+
 # libc free for caller-frees byte arrays
 _libc = ctypes.CDLL(ctypes.util.find_library('c'))
 _libc.free.restype = None
@@ -563,12 +598,15 @@ class Instance:
         return [shape_buf[d] for d in range(ndim)]
 
     def param_data(self, i):
-        """Return a numpy view of param data (mutable, zero-copy)."""
+        """Return a mutable zero-copy NumPy view in the parameter storage dtype."""
         numel = ctypes.c_int64(0)
-        ptr = _get_lib().poly_instance_param_data(self._ptr, i, ctypes.byref(numel))
+        ptr = _get_lib().poly_instance_param_data_raw(self._ptr, i, ctypes.byref(numel))
         if not ptr:
             return None
-        return np.ctypeslib.as_array(ptr, shape=(numel.value,))
+        return _instance_data_view(ptr, numel.value, self.param_dtype(i))
+
+    def param_dtype(self, i):
+        return _instance_dtype_name(_get_lib().poly_instance_param_dtype_id(self._ptr, i))
 
     def param_trainable(self, i):
         """Whether this parameter participates in convenience optimizer steps."""
@@ -618,12 +656,15 @@ class Instance:
         return tuple(shape_buf[d] for d in range(ndim))
 
     def buf_data(self, i):
-        """Return a numpy view of buffer data (mutable, zero-copy)."""
+        """Return a mutable zero-copy NumPy view in the buffer storage dtype."""
         numel = ctypes.c_int64(0)
-        ptr = _get_lib().poly_instance_buf_data(self._ptr, i, ctypes.byref(numel))
+        ptr = _get_lib().poly_instance_buf_data_raw(self._ptr, i, ctypes.byref(numel))
         if not ptr:
             return None
-        return np.ctypeslib.as_array(ptr, shape=(numel.value,))
+        return _instance_data_view(ptr, numel.value, self.buf_dtype(i))
+
+    def buf_dtype(self, i):
+        return _instance_dtype_name(_get_lib().poly_instance_buf_dtype_id(self._ptr, i))
 
     def find_buf(self, name):
         """Find buffer index by name, or -1."""
@@ -792,5 +833,8 @@ class Instance:
                 name = self.buf_name(i)
                 data = self.buf_data(i)
                 if data is not None:
-                    result[name] = data.copy()
+                    # Tensor.numpy() preserves scalar and multidimensional
+                    # shape. Instance storage views are intentionally flat;
+                    # restore the serialized ABI shape at the Python boundary.
+                    result[name] = data.copy().reshape(self.buf_shape(i))
         return result

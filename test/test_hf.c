@@ -318,7 +318,12 @@ TEST(hf, qwen3_build_tiny_staged) {
   ASSERT_STR_EQ(poly_instance_param_name(inst, 2), "blk.0.attn_q.weight");
 
   int64_t numel = 0;
-  ASSERT_NOT_NULL(poly_instance_buf_data_named(inst, "x", &numel));
+  int x_idx = -1;
+  for (int i = 0; i < poly_instance_buf_count(inst); i++)
+    if (strcmp(poly_instance_buf_name(inst, i), "x") == 0) x_idx = i;
+  ASSERT_TRUE(x_idx >= 0);
+  ASSERT_INT_EQ(poly_instance_buf_dtype_id(inst, x_idx), poly_dtype_id_by_name("int32"));
+  ASSERT_NOT_NULL(poly_instance_buf_data_raw(inst, x_idx, &numel));
   ASSERT_INT_EQ(numel, 4);
   ASSERT_NOT_NULL(poly_instance_buf_data_named(inst, "rope_cos", &numel));
   ASSERT_INT_EQ(numel, 16);

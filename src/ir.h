@@ -1,7 +1,7 @@
 /*
  * poly_ir.h -- Binary IR codec for tensor-level UOp graphs
  *
- * Current format: poly.ir.uops@6 (v1-v5 import remains supported).
+ * Current format: poly.ir.uops@9 (v1-v8 import remains supported).
  * Scope: tensor-level graphs only (pre-scheduling).
  *        Pointer dtypes are rejected. Vector count is serialized explicitly
  *        because pinned tensor movement shape sources are weakint vectors.
@@ -26,15 +26,19 @@ extern "C" {
 #define POLY_IR_ROLE_TARGET 2
 #define POLY_IR_ROLE_OUTPUT 3
 #define POLY_IR_ROLE_AUX 4
+#define POLY_IR_MAX_DIMS 8
 
 /* IR spec: graph + metadata */
 
-/* Named buffer entry (interface table row) */
+/* Named interface/state entry. PARAM/AUX rows may name any exact logical
+ * value UOp; INPUT/TARGET/OUTPUT rows normally name their logical storage.
+ * The binary table has always stored a node index, so this does not add a new
+ * wire representation. */
 typedef struct {
   const char *name; /* e.g. "layers.0.weight", "x", "output" */
   uint8_t role; /* POLY_IR_ROLE_* */
-  PolyUOp *buffer; /* BUFFER UOp */
-  int64_t shape[8];
+  PolyUOp *buffer; /* exact named logical UOp (legacy field name) */
+  int64_t shape[POLY_IR_MAX_DIMS];
   int ndim;
   bool trainable; /* PARAM default when absent in old IR payloads */
   bool trainable_set;

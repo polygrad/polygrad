@@ -326,21 +326,43 @@ def get_state_dict(obj, prefix=""):
     """Get every named Tensor path, preserving aliases like pinned tinygrad."""
     from ..tensor import Tensor
 
-    if isinstance(obj, Tensor):
-        return {prefix.strip("."): obj}
-    if hasattr(obj, "_asdict"):
-        return get_state_dict(obj._asdict(), prefix)
-    if isinstance(obj, OrderedDict):
-        return get_state_dict(dict(obj), prefix)
-    if hasattr(obj, "__dict__"):
-        return get_state_dict(obj.__dict__, prefix)
     state = {}
-    if isinstance(obj, (list, tuple)):
-        for i, value in enumerate(obj):
-            state.update(get_state_dict(value, f"{prefix}{i}."))
-    elif isinstance(obj, dict):
-        for name, value in obj.items():
-            state.update(get_state_dict(value, f"{prefix}{name}."))
+
+    def walk(value, path, active):
+        if isinstance(value, Tensor):
+            state[path.strip(".")] = value
+            return
+
+        # Pinned tinygrad records every path rather than globally deduplicating
+        # objects. Track only the active ancestry so true cycles terminate while
+        # a shared subtree is revisited under each alias path.
+        identity = id(value)
+        if identity in active:
+            return
+
+        if hasattr(value, "_asdict"):
+            child = value._asdict()
+        elif isinstance(value, OrderedDict):
+            child = dict(value)
+        elif hasattr(value, "__dict__"):
+            child = value.__dict__
+        else:
+            child = value
+
+        if not isinstance(child, (list, tuple, dict)):
+            return
+        active.add(identity)
+        try:
+            if isinstance(child, (list, tuple)):
+                for i, item in enumerate(child):
+                    walk(item, f"{path}{i}.", active)
+            else:
+                for name, item in child.items():
+                    walk(item, f"{path}{name}.", active)
+        finally:
+            active.remove(identity)
+
+    walk(obj, prefix, set())
     return state
 
 

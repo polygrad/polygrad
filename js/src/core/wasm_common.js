@@ -354,6 +354,28 @@ function createWasmCoreFromModule(Module, device) {
     weakint: coreDTypeId('weakint')
   }
 
+  function instanceStorageInfo(dtypeId) {
+    if (dtypeId === DTYPE_IDS.bool || dtypeId === DTYPE_IDS.uint8) return [Uint8Array, 1]
+    if (dtypeId === DTYPE_IDS.int8) return [Int8Array, 1]
+    if (dtypeId === DTYPE_IDS.int16) return [Int16Array, 2]
+    if (dtypeId === DTYPE_IDS.uint16 || dtypeId === DTYPE_IDS.float16 ||
+        dtypeId === DTYPE_IDS.bfloat16) return [Uint16Array, 2]
+    if (dtypeId === DTYPE_IDS.int32) return [Int32Array, 4]
+    if (dtypeId === DTYPE_IDS.uint32) return [Uint32Array, 4]
+    if (dtypeId === DTYPE_IDS.int64) return [BigInt64Array, 8]
+    if (dtypeId === DTYPE_IDS.uint64) return [BigUint64Array, 8]
+    if (dtypeId === DTYPE_IDS.float32) return [Float32Array, 4]
+    if (dtypeId === DTYPE_IDS.float64) return [Float64Array, 8]
+    throw new Error(`polygrad: unsupported Instance storage dtype id ${dtypeId}`)
+  }
+
+  function copyInstanceStorage(dataPtr, numel, dtypeId) {
+    if (!dataPtr) return null
+    const [AT, itemsize] = instanceStorageInfo(dtypeId)
+    const bytes = heapU8().buffer.slice(dataPtr, dataPtr + numel * itemsize)
+    return new AT(bytes)
+  }
+
   function instanceBindingDTypeId(arr) {
     if (arr instanceof Int8Array) return DTYPE_IDS.int8
     if (arr instanceof Uint8Array || arr instanceof Uint8ClampedArray) return DTYPE_IDS.uint8
@@ -1663,7 +1685,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 54
+  const EXPECTED_ABI = 55
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(
@@ -1759,12 +1781,17 @@ function createWasmCoreFromModule(Module, device) {
       const read = (dataPtr) => {
         if (!dataPtr) return null
         const numel = readInt64At(_scratchNumelPtr)
-        return new Float32Array(heapF32().buffer.slice(dataPtr, dataPtr + numel * 4))
+        return copyInstanceStorage(
+          dataPtr, numel, Module._poly_instance_param_dtype_id(instPtr, i)
+        )
       }
       if (deviceName === 'webgpu' && Module.ccall) {
         return ensureInstanceDevice(instPtr).then(() => {
-          const nbytes = shapeNumel(this.paramShape(instPtr, i)) * 4
-          if (nbytes <= 0) return new Float32Array(0)
+          const dtypeId = Module._poly_instance_param_dtype_id(instPtr, i)
+          const [AT, itemsize] = instanceStorageInfo(dtypeId)
+          const numel = shapeNumel(this.paramShape(instPtr, i))
+          const nbytes = numel * itemsize
+          if (nbytes <= 0) return new AT(0)
           const dst = Module._malloc(nbytes)
           return Module.ccall(
             'poly_instance_readback_param',
@@ -1774,13 +1801,14 @@ function createWasmCoreFromModule(Module, device) {
             { async: true }
           ).then(rc => {
             if (rc !== 0) return null
-            return new Float32Array(heapF32().buffer.slice(dst, dst + nbytes))
+            return copyInstanceStorage(dst, numel, dtypeId)
           }).finally(() => Module._free(dst))
         })
       }
-      const dataPtr = Module._poly_instance_param_data(instPtr, i, _scratchNumelPtr)
+      const dataPtr = Module._poly_instance_param_data_raw(instPtr, i, _scratchNumelPtr)
       return read(dataPtr)
     },
+    paramDtypeId(instPtr, i) { return Module._poly_instance_param_dtype_id(instPtr, i) },
     paramTrainable(instPtr, i) {
       return Boolean(Module._poly_instance_param_trainable(instPtr, i))
     },
@@ -1804,12 +1832,17 @@ function createWasmCoreFromModule(Module, device) {
       const read = (dataPtr) => {
         if (!dataPtr) return null
         const numel = readInt64At(_scratchNumelPtr)
-        return new Float32Array(heapF32().buffer.slice(dataPtr, dataPtr + numel * 4))
+        return copyInstanceStorage(
+          dataPtr, numel, Module._poly_instance_buf_dtype_id(instPtr, i)
+        )
       }
       if (deviceName === 'webgpu' && Module.ccall) {
         return ensureInstanceDevice(instPtr).then(() => {
-          const nbytes = shapeNumel(this.bufShape(instPtr, i)) * 4
-          if (nbytes <= 0) return new Float32Array(0)
+          const dtypeId = Module._poly_instance_buf_dtype_id(instPtr, i)
+          const [AT, itemsize] = instanceStorageInfo(dtypeId)
+          const numel = shapeNumel(this.bufShape(instPtr, i))
+          const nbytes = numel * itemsize
+          if (nbytes <= 0) return new AT(0)
           const dst = Module._malloc(nbytes)
           return Module.ccall(
             'poly_instance_readback_buf',
@@ -1819,13 +1852,14 @@ function createWasmCoreFromModule(Module, device) {
             { async: true }
           ).then(rc => {
             if (rc !== 0) return null
-            return new Float32Array(heapF32().buffer.slice(dst, dst + nbytes))
+            return copyInstanceStorage(dst, numel, dtypeId)
           }).finally(() => Module._free(dst))
         })
       }
-      const dataPtr = Module._poly_instance_buf_data(instPtr, i, _scratchNumelPtr)
+      const dataPtr = Module._poly_instance_buf_data_raw(instPtr, i, _scratchNumelPtr)
       return read(dataPtr)
     },
+    bufDtypeId(instPtr, i) { return Module._poly_instance_buf_dtype_id(instPtr, i) },
     exportWeights(instPtr, flags) {
       const exportFlags = flags == null ? 3 : flags
       if (deviceName === 'webgpu' && Module.ccall) {

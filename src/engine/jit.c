@@ -479,7 +479,9 @@ static int poly_jit_flush_graph_batch(
 /* Direct port of pinned graph_split_rewrite's default PROGRAM batching for
  * CUDA (tinygrad/engine/jit.py:31-60). COPY batching stays disabled until the
  * required D2D COPY probe establishes its runtime dependency/update boundary. */
-static PolyUOp *poly_jit_graph_split_rewrite(PolyCtx *ctx, PolyUOp *linear, PolyDevice device) {
+static PolyUOp *poly_jit_graph_split_rewrite(PolyCtx *ctx, PolyCompiledSchedule *compiled) {
+  PolyUOp *linear = compiled ? compiled->linear : NULL;
+  PolyDevice device = compiled ? compiled->device : POLY_DEVICE_AUTO;
   if (!ctx || !linear || linear->op != POLY_OP_LINEAR) return NULL;
 #ifdef POLY_HAS_CUDA
   if (device != POLY_DEVICE_CUDA || !poly_cuda_graph_available()) return linear;
@@ -495,7 +497,8 @@ static PolyUOp *poly_jit_graph_split_rewrite(PolyCtx *ctx, PolyUOp *linear, Poly
   for (int i = 0; i < linear->n_src; i++) {
     PolyUOp *call = linear->src[i];
     bool can_graph = call && call->op == POLY_OP_CALL && call->n_src >= 1 && call->src[0] &&
-                     call->src[0]->op == POLY_OP_PROGRAM;
+                     call->src[0]->op == POLY_OP_PROGRAM && compiled->run &&
+                     compiled->run->calls[i].lowered_device == POLY_DEVICE_CUDA;
     bool can_extend = can_graph && (max_batch_size == 0 || n_batch < max_batch_size);
     if (!can_extend && n_batch > 0) {
       if (poly_jit_flush_graph_batch(
@@ -531,8 +534,7 @@ PolyCompiledSchedule *poly_jit_lower(PolyCtx *ctx, PolySchedule *schedule) {
   PolyDevice device = poly_schedule_infer_device(ctx, schedule);
   PolyCompiledSchedule *compiled = poly_lower_schedule(ctx, schedule, device);
   if (!compiled) return NULL;
-  PolyUOp *graph_linear =
-      poly_jit_graph_split_rewrite(ctx, compiled->linear, device);
+  PolyUOp *graph_linear = poly_jit_graph_split_rewrite(ctx, compiled);
   if (!graph_linear || poly_compiled_schedule_set_jit_graph(compiled, graph_linear) != 0) {
     poly_compiled_schedule_free(compiled);
     return NULL;
