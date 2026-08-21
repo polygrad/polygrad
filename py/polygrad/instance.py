@@ -178,9 +178,7 @@ def _check_ctx(name, tensor, ctx, ctx_key):
     return ctx
 
 
-def _ensure_storage_binding(name, tensor, *, realize_if_needed=False):
-    if realize_if_needed and (not tensor.uop.has_buffer_identity() or not tensor.uop.is_realized):
-        tensor.realize()
+def _ensure_storage_binding(name, tensor):
     if not tensor.uop.has_buffer_identity():
         raise RuntimeError(f'{name!r} has no buffer identity')
 
@@ -328,7 +326,7 @@ class Instance:
             _check_ctx(name, tensor, ctx, ctx_key)
             if tensor._requires_grad is not None:
                 tensor._sync_core_requires_grad(force=True)
-            if role != ROLE_OUTPUT:
+            if role in (ROLE_INPUT, ROLE_TARGET):
                 _ensure_storage_binding(name, tensor)
 
         keepalive = []
@@ -404,11 +402,6 @@ class Instance:
         for name, tensor in named_tensors:
             _check_ctx(name, tensor, ctx, ctx_key)
 
-        # Match the old export path: parameters may be lazy initializers, so
-        # materialize them first. Live-tensor retargeting rewrites output/loss
-        # graphs to read the realized storage snapshot.
-        for name, tensor in param_items:
-            _ensure_storage_binding(name, tensor, realize_if_needed=True)
         for name, tensor in list(inputs.items()) + list(targets.items()):
             _ensure_storage_binding(name, tensor)
 

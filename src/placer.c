@@ -834,50 +834,35 @@ static bool place_validate_physical_root(PolyCtx *ctx, PolyUOp *root) {
 int poly_place_roots(
     PolyCtx *ctx,
     PolyUOp **logical_roots,
-    PolyUOp **physical_templates,
     int n_roots,
     PolyUOp **logical_bindings,
-    PolyUOp **template_bindings,
     PolyUOp **target_bindings,
     int n_bindings,
     PolyUOp **out_roots
 ) {
   if (!ctx || n_roots < 0 || n_bindings < 0 || (n_roots > 0 && (!logical_roots || !out_roots)) ||
-      (n_bindings > 0 && (!logical_bindings || !target_bindings)) ||
-      (physical_templates && n_bindings > 0 && !template_bindings))
+      (n_bindings > 0 && (!logical_bindings || !target_bindings)))
     return -1;
   if (n_roots == 0) return 0;
 
-  PolyUOp **source_roots = physical_templates ? physical_templates : logical_roots;
-  PolyUOp **source_bindings = physical_templates ? template_bindings : logical_bindings;
   for (int i = 0; i < n_roots; i++) {
-    if (!logical_roots[i] || !source_roots[i] || !poly_ctx_owns_ptr(ctx, logical_roots[i]) ||
-        !poly_ctx_owns_ptr(ctx, source_roots[i]))
+    if (!logical_roots[i] || !poly_ctx_owns_ptr(ctx, logical_roots[i]))
       return -1;
-    if (!physical_templates &&
-        !place_validate_logical_root(ctx, logical_roots[i], logical_bindings, n_bindings))
+    if (!place_validate_logical_root(ctx, logical_roots[i], logical_bindings, n_bindings))
       return -1;
   }
 
   for (int i = 0; i < n_bindings; i++) {
     PolyUOp *logical = logical_bindings[i];
-    PolyUOp *source = source_bindings[i];
     PolyUOp *target = target_bindings[i];
-    /* Pinned `.to()` is an explicit COPY occurrence (tensor.py:327-335).
-     * COPY/BUFFER_VIEW/PARAM may remain nested in a physical template, but
-     * accepting one as the replaceable binding would erase that occurrence. */
-    if (!place_direct_buffer_binding(logical) || !place_direct_buffer_binding(source) ||
-        !place_direct_buffer_binding(target) || !poly_ctx_owns_ptr(ctx, logical) ||
-        !poly_ctx_owns_ptr(ctx, source) || !poly_ctx_owns_ptr(ctx, target) ||
+    if (!place_direct_buffer_binding(logical) || !place_direct_buffer_binding(target) ||
+        !poly_ctx_owns_ptr(ctx, logical) || !poly_ctx_owns_ptr(ctx, target) ||
         poly_uop_device(target) == POLY_DEVICE_AUTO ||
-        !place_binding_shape_eq(ctx, logical, target) ||
-        !place_binding_shape_eq(ctx, source, target))
+        !place_binding_shape_eq(ctx, logical, target))
       return -1;
     for (int j = 0; j < i; j++) {
       if ((logical_bindings[j] == logical && target_bindings[j] != target) ||
-          (source_bindings[j] == source && target_bindings[j] != target) ||
-          ((logical_bindings[j] != logical || source_bindings[j] != source) &&
-           target_bindings[j] == target))
+          (logical_bindings[j] != logical && target_bindings[j] == target))
         return -1;
     }
   }
@@ -885,7 +870,7 @@ int poly_place_roots(
   PolyUOp **candidates = calloc((size_t)n_roots, sizeof(*candidates));
   if (!candidates) return -1;
   int rc = poly_uop_substitute_many(
-      ctx, source_roots, n_roots, source_bindings, target_bindings, n_bindings, candidates
+      ctx, logical_roots, n_roots, logical_bindings, target_bindings, n_bindings, candidates
   );
   for (int i = 0; rc == 0 && i < n_roots; i++)
     if (!place_validate_physical_root(ctx, candidates[i])) rc = -1;
@@ -1133,7 +1118,6 @@ int poly_place_module_map(
     }
     free(region);
     if (!region_valid) goto cleanup;
-
     for (int j = 0; j < n_bindings; j++) {
       if (output_bindings[j] || target_bindings[j] || !binding_devices[j]) continue;
       target_bindings[j] =

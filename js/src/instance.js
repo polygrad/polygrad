@@ -208,10 +208,7 @@ function createBoundInstanceClass(runtime) {
     return tensor
   }
 
-  async function ensureStorageBinding(name, tensor, opts = {}) {
-    if (opts.realizeIfNeeded && (!tensor.uop || !tensor.uop.hasBufferIdentity())) {
-      await tensor.realize()
-    }
+  async function ensureStorageBinding(name, tensor) {
     if (!tensor.uop || !tensor.uop.hasBufferIdentity()) {
       throw new Error(`${name} has no buffer identity`)
     }
@@ -280,7 +277,6 @@ function createBoundInstanceClass(runtime) {
     for (const [name, tensor] of namedTensors) {
       if (tensor._ctx !== ctx) throw new Error(`${name} belongs to another PolyCtx`)
     }
-    for (const [name, tensor] of paramItems) requireStorageBinding(name, tensor)
     for (const [name, tensor] of [...Object.entries(inps), ...Object.entries(tgts)]) {
       requireStorageBinding(name, tensor)
     }
@@ -425,7 +421,9 @@ function createBoundInstanceClass(runtime) {
       const ctx = parsed[0].tensor._ctx
       for (const b of parsed) {
         if (b.tensor._ctx !== ctx) throw new Error(`${b.name} belongs to another PolyCtx`)
-        if (b.role !== ROLE_OUTPUT) requireStorageBinding(b.name, b.tensor)
+        if (b.role === ROLE_INPUT || b.role === ROLE_TARGET) {
+          requireStorageBinding(b.name, b.tensor)
+        }
       }
 
       const entries = entrypoints.map(entry => {
@@ -488,12 +486,6 @@ function createBoundInstanceClass(runtime) {
           if (tensor._ctx !== ctx) throw new Error(`${name} belongs to another PolyCtx`)
         }
 
-        // Match Python and the previous JS path: params may be lazy
-        // initializers. Realize them before packaging so live output/loss graphs
-        // are retargeted to the storage snapshot.
-        for (const [name, tensor] of paramItems) {
-          await ensureStorageBinding(name, tensor, { realizeIfNeeded: true })
-        }
         for (const [name, tensor] of [...Object.entries(inps), ...Object.entries(tgts)]) {
           await ensureStorageBinding(name, tensor)
         }

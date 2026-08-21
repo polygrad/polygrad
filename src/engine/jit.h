@@ -19,6 +19,11 @@ bool poly_jit_is_capturing(PolyJit *jit);
 int poly_jit_record_schedule(PolyJit *jit, PolySchedule *sched);
 /* Pinned CapturedJit.linear analogue for topology tests and graph lowering. */
 PolyUOp *poly_jit_captured_linear(PolyJit *jit);
+/* Pinned jit_lower retained-executable boundary for an already-built schedule.
+ * Tensor-facing PolyJit capture and logical-program Instance execution share
+ * this core lowering path; callers retain the returned compiled handle and may
+ * free the input schedule immediately. */
+PolyCompiledSchedule *poly_jit_lower(PolyCtx *ctx, PolySchedule *schedule);
 
 #ifdef __cplusplus
 }

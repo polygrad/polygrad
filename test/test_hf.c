@@ -11,6 +11,7 @@
 #include "../src/models/qwen3.h"
 #include "../src/nn.h"
 #include "../src/frontend.h"
+#include "../src/codegen.h"
 #include "../src/engine/schedule.h"
 #include <string.h>
 #include <stdlib.h>
@@ -594,6 +595,50 @@ TEST(hf, gpt2_forward_e2e) {
     if (fabsf(out[i]) > 1e-10f) all_zero = 0;
   }
   ASSERT_FALSE(all_zero);
+
+  float *baseline = malloc((size_t)numel * sizeof(*baseline));
+  ASSERT_NOT_NULL(baseline);
+  memcpy(baseline, out, (size_t)numel * sizeof(*baseline));
+
+  int ir_len = 0, weights_len = 0;
+  uint8_t *ir = poly_instance_export_ir(inst, &ir_len);
+  uint8_t *weights = poly_instance_export_weights_ex(
+      inst, &weights_len, POLY_EXPORT_WEIGHTS_PARAMS
+  );
+  ASSERT_NOT_NULL(ir);
+  ASSERT_NOT_NULL(weights);
+
+  PolyDevice place_devices[3] = {POLY_DEVICE_CPU, POLY_DEVICE_INTERP, POLY_DEVICE_AUTO};
+  int n_place_devices = 2;
+#ifdef POLY_HAS_CUDA
+  if (poly_cuda_available()) place_devices[n_place_devices++] = POLY_DEVICE_CUDA;
+#endif
+  for (int d = 0; d < n_place_devices; d++) {
+    PolyInstance *placed = poly_instance_from_ir(ir, ir_len, weights, weights_len);
+    ASSERT_NOT_NULL(placed);
+    ASSERT_INT_EQ(poly_instance_set_device(placed, place_devices[d]), 0);
+    ASSERT_INT_EQ(
+        poly_instance_write_buf_named(placed, "x", token_data, sizeof(token_data)), 0
+    );
+    ASSERT_INT_EQ(
+        poly_instance_write_buf_named(
+            placed, "positions", position_data, sizeof(position_data)
+        ),
+        0
+    );
+    ASSERT_INT_EQ(poly_instance_forward(placed, NULL, 0), 0);
+    int64_t placed_numel = 0;
+    float *placed_out = poly_instance_buf_data_named(placed, "output", &placed_numel);
+    ASSERT_NOT_NULL(placed_out);
+    ASSERT_INT_EQ(placed_numel, numel);
+    for (int64_t i = 0; i < numel; i++)
+      ASSERT_FLOAT_EQ(placed_out[i], baseline[i], 2e-5f);
+    poly_instance_free(placed);
+  }
+
+  free(weights);
+  free(ir);
+  free(baseline);
 
   poly_instance_free(inst);
   PASS();

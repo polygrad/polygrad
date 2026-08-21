@@ -526,6 +526,20 @@ fail:
   return NULL;
 }
 
+PolyCompiledSchedule *poly_jit_lower(PolyCtx *ctx, PolySchedule *schedule) {
+  if (!ctx || !schedule) return NULL;
+  PolyDevice device = poly_schedule_infer_device(ctx, schedule);
+  PolyCompiledSchedule *compiled = poly_lower_schedule(ctx, schedule, device);
+  if (!compiled) return NULL;
+  PolyUOp *graph_linear =
+      poly_jit_graph_split_rewrite(ctx, compiled->linear, device);
+  if (!graph_linear || poly_compiled_schedule_set_jit_graph(compiled, graph_linear) != 0) {
+    poly_compiled_schedule_free(compiled);
+    return NULL;
+  }
+  return compiled;
+}
+
 static int poly_jit_build_captured_linear(PolyJit *jit) {
   if (!jit || !jit->ctx || jit->n_schedules <= 0) return -1;
   PolyUOp **external = NULL;
@@ -707,20 +721,10 @@ static int poly_jit_run_captured_linear(
   PolyDevice device = poly_schedule_infer_device(jit->ctx, jit->captured_linear);
   if (!jit->compiled_linear || jit->compiled_device != device) {
     poly_compiled_schedule_free(jit->compiled_linear);
-    jit->compiled_linear = poly_lower_schedule(jit->ctx, jit->captured_linear, device);
+    jit->compiled_linear = poly_jit_lower(jit->ctx, jit->captured_linear);
     jit->compiled_device = jit->compiled_linear ? device : POLY_DEVICE_AUTO;
     if (!jit->compiled_linear) return -1;
-    jit->graphed_linear = poly_jit_graph_split_rewrite(
-        jit->ctx, jit->compiled_linear->linear, device
-    );
-    if (!jit->graphed_linear ||
-        poly_compiled_schedule_set_jit_graph(jit->compiled_linear, jit->graphed_linear) != 0) {
-      poly_compiled_schedule_free(jit->compiled_linear);
-      jit->compiled_linear = NULL;
-      jit->compiled_device = POLY_DEVICE_AUTO;
-      jit->graphed_linear = NULL;
-      return -1;
-    }
+    jit->graphed_linear = jit->compiled_linear->jit_graph_linear;
   }
   return poly_run_compiled_schedule_with_input_uops(
       jit->compiled_linear, current_inputs, jit->n_inputs, var_bindings, n_var_bindings

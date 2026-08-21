@@ -122,18 +122,14 @@ int poly_uop_substitute_many(
 );
 
 /* Compile aggregate portable roots into complete physical roots using exact
- * storage-binding rows.  When physical_templates is non-NULL, those exact
- * occurrence graphs are the source and template_bindings supplies their
- * storage identities; otherwise logical_roots/logical_bindings are used.
- * This is a pure placement kernel: caller output slots change only when every
- * candidate validates, and no Tensor/Instance/cache state is mutated. */
+ * logical storage-binding rows. This is a pure placement kernel: caller output
+ * slots change only when every candidate validates, and no prior/captured
+ * physical graph or Tensor/Instance/cache state is consumed or mutated. */
 int poly_place_roots(
     PolyCtx *ctx,
     PolyUOp **logical_roots,
-    PolyUOp **physical_templates,
     int n_roots,
     PolyUOp **logical_bindings,
-    PolyUOp **template_bindings,
     PolyUOp **target_bindings,
     int n_bindings,
     PolyUOp **out_roots

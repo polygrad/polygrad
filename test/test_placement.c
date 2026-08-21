@@ -1,4 +1,4 @@
-/* test_placement.c -- explicit aggregate logical/template placement. */
+/* test_placement.c -- explicit aggregate logical placement. */
 
 #include "test_harness.h"
 #include "../src/engine/realize.h"
@@ -47,7 +47,7 @@ TEST(placement, logical_bindings_reproduce_eager_value_and_instance_sink) {
   PolyUOp *from[2] = {logical_in, logical_out};
   PolyUOp *to[2] = {physical_in, physical_out};
   PolyUOp *placed[2] = {NULL, NULL};
-  ASSERT_INT_EQ(poly_place_roots(ctx, logical_roots, NULL, 2, from, NULL, to, 2, placed), 0);
+  ASSERT_INT_EQ(poly_place_roots(ctx, logical_roots, 2, from, to, 2, placed), 0);
   ASSERT_EQ(placed[0], eager_value);
   ASSERT_EQ(placed[1], eager_sink);
   ASSERT_FALSE(poly_tensor_root_has_unplaced_buffer(ctx, placed[0]));
@@ -57,19 +57,15 @@ TEST(placement, logical_bindings_reproduce_eager_value_and_instance_sink) {
   PASS();
 }
 
-TEST(placement, template_bindings_preserve_copy_and_assignment_occurrences) {
+TEST(placement, logical_placement_does_not_consume_bound_copy_history) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
   PolyUOp *logical_base = placement_buffer(ctx, 4, POLY_DEVICE_AUTO);
-  PolyUOp *logical_value = placement_buffer(ctx, 4, POLY_DEVICE_AUTO);
   PolyUOp *base_cpu = placement_buffer(ctx, 4, POLY_DEVICE_CPU);
   PolyUOp *base_interp = placement_buffer(ctx, 4, POLY_DEVICE_INTERP);
-  PolyUOp *value_cuda = placement_buffer(ctx, 4, POLY_DEVICE_CUDA);
   ASSERT_NOT_NULL(logical_base);
-  ASSERT_NOT_NULL(logical_value);
   ASSERT_NOT_NULL(base_cpu);
   ASSERT_NOT_NULL(base_interp);
-  ASSERT_NOT_NULL(value_cuda);
 
   PolyUOp *cuda_device = poly_device_uop(ctx, POLY_DEVICE_CUDA);
   PolyUOp *cpu_device = poly_device_uop(ctx, POLY_DEVICE_CPU);
@@ -78,36 +74,21 @@ TEST(placement, template_bindings_preserve_copy_and_assignment_occurrences) {
   PolyUOp *to_cpu_src[2] = {to_cuda, cpu_device};
   PolyUOp *roundtrip = poly_uop(ctx, POLY_OP_COPY, POLY_FLOAT32, to_cpu_src, 2, poly_arg_none());
   PolyUOp *roundtrip_template = poly_add(ctx, base_cpu, roundtrip);
-  PolyUOp *store = poly_store_val(ctx, to_cuda, value_cuda);
-  PolyUOp *assignment_template = poly_uop_after(ctx, to_cuda, store);
   ASSERT_NOT_NULL(roundtrip_template);
-  ASSERT_NOT_NULL(assignment_template);
 
-  PolyUOp *logical_roots[2] = {
-      poly_add(ctx, logical_base, logical_base),
-      poly_uop_after(ctx, logical_base, poly_store_val(ctx, logical_base, logical_value)),
-  };
-  PolyUOp *templates[2] = {roundtrip_template, assignment_template};
+  PolyUOp *logical_roots[1] = {poly_add(ctx, logical_base, logical_base)};
   PolyUOp *logical_bindings[1] = {logical_base};
-  PolyUOp *template_bindings[1] = {base_cpu};
   PolyUOp *target_bindings[1] = {base_interp};
-  PolyUOp *placed[2] = {NULL, NULL};
+  PolyUOp *placed[1] = {NULL};
   ASSERT_INT_EQ(
-      poly_place_roots(
-          ctx, logical_roots, templates, 2, logical_bindings, template_bindings, target_bindings, 1,
-          placed
-      ),
+      poly_place_roots(ctx, logical_roots, 1, logical_bindings, target_bindings, 1, placed),
       0
   );
 
   ASSERT_EQ(placed[0]->op, POLY_OP_ADD);
   ASSERT_EQ(placed[0]->src[0], base_interp);
-  ASSERT_EQ(placed[0]->src[1]->op, POLY_OP_COPY);
-  ASSERT_EQ(placed[0]->src[1]->src[0]->op, POLY_OP_COPY);
-  ASSERT_EQ(placed[1]->op, POLY_OP_AFTER);
-  ASSERT_EQ(placed[1]->src[0]->op, POLY_OP_COPY);
-  ASSERT_EQ(placed[1]->src[1]->op, POLY_OP_STORE);
-  ASSERT_EQ(placed[1]->src[1]->src[0], placed[1]->src[0]);
+  ASSERT_EQ(placed[0]->src[1], base_interp);
+  ASSERT_FALSE(poly_uop_reachable(ctx, placed[0], roundtrip_template));
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -126,7 +107,7 @@ TEST(placement, logical_missing_occurrence_evidence_fails_atomically) {
   PolyUOp *roots[1] = {effect};
   PolyUOp *from[1] = {logical};
   PolyUOp *to[1] = {physical};
-  ASSERT_INT_EQ(poly_place_roots(ctx, roots, NULL, 1, from, NULL, to, 1, out), -1);
+  ASSERT_INT_EQ(poly_place_roots(ctx, roots, 1, from, to, 1, out), -1);
   ASSERT_EQ(out[0], sentinel);
 
   PolyUOp *copy_src[2] = {
@@ -134,17 +115,15 @@ TEST(placement, logical_missing_occurrence_evidence_fails_atomically) {
       poly_device_uop(ctx, POLY_DEVICE_CUDA),
   };
   roots[0] = poly_uop(ctx, POLY_OP_COPY, POLY_FLOAT32, copy_src, 2, poly_arg_none());
-  ASSERT_INT_EQ(poly_place_roots(ctx, roots, NULL, 1, from, NULL, to, 1, out), -1);
+  ASSERT_INT_EQ(poly_place_roots(ctx, roots, 1, from, to, 1, out), -1);
   ASSERT_EQ(out[0], sentinel);
 
-  /* Template mode preserves exact topology, but it still cannot publish a
-   * graph with a second caller-visible unplaced storage identity. */
+  /* A second logical storage identity requires its own named binding. */
   PolyUOp *unbound = placement_buffer(ctx, 4, POLY_DEVICE_AUTO);
-  PolyUOp *template = poly_add(ctx, logical, unbound);
-  PolyUOp *templates[1] = {template};
+  roots[0] = poly_add(ctx, logical, unbound);
   ASSERT_NOT_NULL(unbound);
-  ASSERT_NOT_NULL(template);
-  ASSERT_INT_EQ(poly_place_roots(ctx, roots, templates, 1, from, from, to, 1, out), -1);
+  ASSERT_NOT_NULL(roots[0]);
+  ASSERT_INT_EQ(poly_place_roots(ctx, roots, 1, from, to, 1, out), -1);
   ASSERT_EQ(out[0], sentinel);
 
   poly_ctx_destroy(ctx);
@@ -169,32 +148,27 @@ TEST(placement, invalid_binding_shape_or_alias_fails_atomically) {
   PolyUOp *out[1] = {sentinel};
 
   PolyUOp *wrong_targets[2] = {target, wrong_shape};
-  ASSERT_INT_EQ(poly_place_roots(ctx, roots, NULL, 1, from, NULL, wrong_targets, 2, out), -1);
+  ASSERT_INT_EQ(poly_place_roots(ctx, roots, 1, from, wrong_targets, 2, out), -1);
   ASSERT_EQ(out[0], sentinel);
 
   PolyUOp *aliased_targets[2] = {target, target};
-  ASSERT_INT_EQ(poly_place_roots(ctx, roots, NULL, 1, from, NULL, aliased_targets, 2, out), -1);
+  ASSERT_INT_EQ(poly_place_roots(ctx, roots, 1, from, aliased_targets, 2, out), -1);
   ASSERT_EQ(out[0], sentinel);
 
   PolyUOp *partial_from[1] = {a};
   PolyUOp *partial_to[1] = {target};
-  ASSERT_INT_EQ(poly_place_roots(ctx, roots, NULL, 1, partial_from, NULL, partial_to, 1, out), -1);
+  ASSERT_INT_EQ(poly_place_roots(ctx, roots, 1, partial_from, partial_to, 1, out), -1);
   ASSERT_EQ(out[0], sentinel);
 
-  /* COPY is an occurrence inside a template, never a replaceable binding.
-   * Substituting it directly would erase pinned `.to()` topology. */
+  /* COPY is physical transport, never a portable logical binding. */
   PolyUOp *interp_device =
       poly_device_uop(ctx, POLY_DEVICE_INTERP);
   PolyUOp *copy_src[2] = {target, interp_device};
   PolyUOp *copy = poly_uop(ctx, POLY_OP_COPY, POLY_FLOAT32, copy_src, 2, poly_arg_none());
-  PolyUOp *template = poly_add(ctx, copy, copy);
-  PolyUOp *templates[1] = {template};
   PolyUOp *copy_binding[1] = {copy};
   ASSERT_NOT_NULL(copy);
-  ASSERT_NOT_NULL(template);
-  ASSERT_INT_EQ(
-      poly_place_roots(ctx, roots, templates, 1, partial_from, copy_binding, partial_to, 1, out), -1
-  );
+  PolyUOp *copy_roots[1] = {copy};
+  ASSERT_INT_EQ(poly_place_roots(ctx, copy_roots, 1, copy_binding, partial_to, 1, out), -1);
   ASSERT_EQ(out[0], sentinel);
 
   poly_ctx_destroy(ctx);

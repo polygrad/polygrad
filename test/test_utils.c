@@ -116,6 +116,33 @@ TEST(utils, ctx_uses_poly_device_env_as_preferred_device) {
   PASS();
 }
 
+TEST(utils, poly_device_env_does_not_replace_existing_context_or_tensor) {
+  EnvSave dev = save_env("POLY_DEVICE");
+  setenv("POLY_DEVICE", "CPU", 1);
+  PolyCtx *cpu_ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(cpu_ctx);
+  int64_t shape[] = {2};
+  PolyTensor *cpu_tensor =
+      poly_tensor_empty(cpu_ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(cpu_tensor);
+  PolyUOp *cpu_root = poly_tensor_uop_physical(cpu_tensor);
+  ASSERT_NOT_NULL(cpu_root);
+
+  setenv("POLY_DEVICE", "INTERP", 1);
+  ASSERT_INT_EQ(poly_ctx_get_preferred_device(cpu_ctx), POLY_DEVICE_CPU);
+  ASSERT_PTR_EQ(poly_tensor_uop_physical(cpu_tensor), cpu_root);
+  ASSERT_INT_EQ(poly_uop_device(cpu_root), POLY_DEVICE_CPU);
+
+  PolyCtx *interp_ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(interp_ctx);
+  ASSERT_INT_EQ(poly_ctx_get_preferred_device(interp_ctx), POLY_DEVICE_INTERP);
+
+  poly_ctx_destroy(interp_ctx);
+  poly_ctx_destroy(cpu_ctx);
+  restore_env(&dev);
+  PASS();
+}
+
 TEST(utils, poly_selftest_runs_portable_interp_path) {
   ASSERT_INT_EQ(poly_selftest(), 0);
   ASSERT_INT_EQ(poly_selftest_device(POLY_DEVICE_AUTO), 0);
