@@ -418,8 +418,7 @@ class Instance:
         targets = _normalize_named_tensors(targets, 'target')
         outputs = _normalize_named_tensors(outputs, 'output')
         losses = _normalize_named_tensors(losses, 'loss')
-        param_items = [(name, tensor) for name, tensor in _param_items(params)
-                       if isinstance(tensor, Tensor)]
+        param_items = list(_param_items(params))
 
         named_tensors = []
         for group in (inputs, targets, outputs, losses):
@@ -752,11 +751,19 @@ class Instance:
 
         Returns dict of output buffer names to numpy arrays.
         """
-        bindings, n = self._make_bindings(inputs)
-        ret = _get_lib().poly_instance_forward(self._ptr, bindings, n)
+        return self.call('forward', inputs)
+
+    def call(self, entrypoint, inputs=None, **kwargs):
+        """Run one named entrypoint with its exact declared input signature."""
+        if inputs is not None and kwargs:
+            raise TypeError('Instance.call accepts either an input mapping or keyword inputs')
+        io = dict(inputs or kwargs)
+        bindings, n = self._make_bindings(io)
+        ret = _get_lib().poly_instance_call(
+            self._ptr, str(entrypoint).encode('utf-8'), bindings, n)
         if ret != 0:
-            raise RuntimeError(f'forward failed (ret={ret})')
-        return self._collect_outputs()
+            raise RuntimeError(f"call('{entrypoint}') failed (ret={ret})")
+        return self._collect_outputs(str(entrypoint))
 
     def train_step(self, **io):
         """Run one training step. Pass input+target arrays as kwargs.
@@ -825,16 +832,26 @@ class Instance:
         arr._owners = owners
         return arr, n
 
-    def _collect_outputs(self):
-        """Read all output buffers into a dict."""
+    def _collect_outputs(self, entrypoint='forward'):
+        """Read only outputs declared by the selected entrypoint."""
         result = {}
-        for i in range(self.buf_count):
-            if self.buf_role(i) == ROLE_OUTPUT:
-                name = self.buf_name(i)
-                data = self.buf_data(i)
-                if data is not None:
-                    # Tensor.numpy() preserves scalar and multidimensional
-                    # shape. Instance storage views are intentionally flat;
-                    # restore the serialized ABI shape at the Python boundary.
-                    result[name] = data.copy().reshape(self.buf_shape(i))
+        lib = _get_lib()
+        encoded = str(entrypoint).encode('utf-8')
+        n_outputs = lib.poly_instance_entrypoint_output_count(self._ptr, encoded)
+        if n_outputs < 0:
+            raise RuntimeError(f"unknown Instance entrypoint '{entrypoint}'")
+        for output_index in range(n_outputs):
+            raw_name = lib.poly_instance_entrypoint_output_name(
+                self._ptr, encoded, output_index)
+            if not raw_name:
+                raise RuntimeError(f"invalid output {output_index} for entrypoint '{entrypoint}'")
+            name = raw_name.decode('utf-8')
+            i = self.find_buf(name)
+            if i < 0:
+                raise RuntimeError(f"entrypoint '{entrypoint}' references missing output '{name}'")
+            data = self.buf_data(i)
+            if data is not None:
+                # Tensor.numpy() preserves scalar and multidimensional shape.
+                # Instance storage views are flat, so restore the declared ABI.
+                result[name] = data.copy().reshape(self.buf_shape(i))
         return result

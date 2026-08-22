@@ -1772,26 +1772,21 @@ TEST_BACKEND(cuda, instance_host_write_after_set_device_reacquire_updates_cuda_i
     if (strcmp(poly_instance_buf_name(inst, i), "output") == 0) out_idx = i;
   ASSERT_TRUE(out_idx >= 0);
 
-  int64_t n = 0;
-  float *x_data = poly_instance_buf_data_named(inst, "x", &n);
-  ASSERT_NOT_NULL(x_data);
-  ASSERT_INT_EQ((int)n, 4);
   float input_a[] = {1.0f, 2.0f, 3.0f, 4.0f};
-  memcpy(x_data, input_a, sizeof(input_a));
-
-  ASSERT_INT_EQ(poly_instance_forward(inst, NULL, 0), 0);
+  PolyIOBinding input_a_io[] = {
+      POLY_IO_BINDING_ARRAY("x", input_a, POLY_FLOAT32),
+  };
+  ASSERT_INT_EQ(poly_instance_forward(inst, input_a_io, 1), 0);
   float got[4] = {0};
   ASSERT_INT_EQ(poly_instance_readback_buf(inst, out_idx, got, sizeof(got)), 0);
   for (int i = 0; i < 4; i++)
     ASSERT_FLOAT_EQ(got[i], input_a[i] + 1.0f, 1e-5f);
 
-  x_data = poly_instance_buf_data_named(inst, "x", &n);
-  ASSERT_NOT_NULL(x_data);
-  ASSERT_INT_EQ((int)n, 4);
   float input_b[] = {-5.0f, 0.25f, 7.0f, 11.0f};
-  memcpy(x_data, input_b, sizeof(input_b));
-
-  ASSERT_INT_EQ(poly_instance_forward(inst, NULL, 0), 0);
+  PolyIOBinding input_b_io[] = {
+      POLY_IO_BINDING_ARRAY("x", input_b, POLY_FLOAT32),
+  };
+  ASSERT_INT_EQ(poly_instance_forward(inst, input_b_io, 1), 0);
   memset(got, 0, sizeof(got));
   ASSERT_INT_EQ(poly_instance_readback_buf(inst, out_idx, got, sizeof(got)), 0);
   for (int i = 0; i < 4; i++)

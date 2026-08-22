@@ -16,7 +16,7 @@ import sys
 _lib = None
 OPS = {}
 _has_cuda_ffi = False
-POLYGRAD_ABI_VERSION = 55
+POLYGRAD_ABI_VERSION = 56
 
 # --- Opaque pointer type (always available) ---
 _ptr = ctypes.c_void_p
@@ -1190,6 +1190,23 @@ def _declare_signatures(lib):
 
     lib.poly_instance_forward.restype = ctypes.c_int
     lib.poly_instance_forward.argtypes = [_ptr, ctypes.POINTER(PolyIOBinding), ctypes.c_int]
+
+    lib.poly_instance_call.restype = ctypes.c_int
+    lib.poly_instance_call.argtypes = [
+        _ptr, ctypes.c_char_p, ctypes.POINTER(PolyIOBinding), ctypes.c_int]
+
+    lib.poly_instance_entrypoint_count.restype = ctypes.c_int
+    lib.poly_instance_entrypoint_count.argtypes = [_ptr]
+    lib.poly_instance_entrypoint_name.restype = ctypes.c_char_p
+    lib.poly_instance_entrypoint_name.argtypes = [_ptr, ctypes.c_int]
+    lib.poly_instance_entrypoint_input_count.restype = ctypes.c_int
+    lib.poly_instance_entrypoint_input_count.argtypes = [_ptr, ctypes.c_char_p]
+    lib.poly_instance_entrypoint_input_name.restype = ctypes.c_char_p
+    lib.poly_instance_entrypoint_input_name.argtypes = [_ptr, ctypes.c_char_p, ctypes.c_int]
+    lib.poly_instance_entrypoint_output_count.restype = ctypes.c_int
+    lib.poly_instance_entrypoint_output_count.argtypes = [_ptr, ctypes.c_char_p]
+    lib.poly_instance_entrypoint_output_name.restype = ctypes.c_char_p
+    lib.poly_instance_entrypoint_output_name.argtypes = [_ptr, ctypes.c_char_p, ctypes.c_int]
 
     lib.poly_instance_train_step.restype = ctypes.c_int
     lib.poly_instance_train_step.argtypes = [_ptr, ctypes.POINTER(PolyIOBinding), ctypes.c_int, _fp]

@@ -1,7 +1,7 @@
 /*
  * poly_ir.h -- Binary IR codec for tensor-level UOp graphs
  *
- * Current format: poly.ir.uops@9 (v1-v8 import remains supported).
+ * Current format: poly.ir.uops@10 (v1-v9 import remains supported).
  * Scope: tensor-level graphs only (pre-scheduling).
  *        Pointer dtypes are rejected. Vector count is serialized explicitly
  *        because pinned tensor movement shape sources are weakint vectors.
@@ -56,6 +56,16 @@ typedef struct {
   uint32_t flags;
 } PolyIrEntrypoint;
 
+/* Exact named logical boundary used by explicit non-uniform placement. The
+ * portable program retains the boundary; a device assignment remains a
+ * separate policy input. */
+typedef struct {
+  const char *name;
+  PolyUOp **inputs;
+  int n_inputs;
+  PolyUOp *output;
+} PolyIrModule;
+
 /* Full IR spec: graph context + named buffers + named entrypoints */
 typedef struct {
   PolyCtx *ctx; /* UOp context (not owned, caller manages) */
@@ -63,6 +73,8 @@ typedef struct {
   int n_bufs;
   PolyIrEntrypoint *entrypoints;
   int n_entrypoints;
+  PolyIrModule *modules;
+  int n_modules;
 } PolyIrSpec;
 
 /* Export */
@@ -79,6 +91,7 @@ uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len);
  * Caller must eventually:
  *   - free spec->bufs (and each name string)
  *   - free spec->entrypoints (and each name string)
+ *   - free spec->modules (and each name/input array)
  *   - poly_ctx_destroy(spec->ctx)
  * Returns 0 on success, -1 on error. */
 int poly_ir_import(const uint8_t *data, int len, PolyIrSpec *out);

@@ -4359,6 +4359,72 @@ static napi_value napi_poly_instance_forward(napi_env env, napi_callback_info in
   return result;
 }
 
+static napi_value napi_poly_instance_call(napi_env env, napi_callback_info info) {
+  napi_value argv[4];
+  size_t argc = 4;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyInstance *inst = get_external(env, argv[0]);
+  char *entrypoint = read_utf8_arg(env, argv[1], NULL);
+  if (!entrypoint) return NULL;
+
+  PolyIOBinding *bindings = NULL;
+  char **names = NULL;
+  int n = 0;
+  if (!read_io_bindings(env, argv[2], argv[3], &bindings, &names, &n)) {
+    free(entrypoint);
+    return NULL;
+  }
+
+  int rc = poly_instance_call(inst, entrypoint, bindings, n);
+  free_io_bindings(names, bindings, n);
+  free(entrypoint);
+
+  napi_value result;
+  NAPI_CALL(env, napi_create_int32(env, rc, &result));
+  return result;
+}
+
+static napi_value napi_poly_instance_entrypoint_output_count(
+    napi_env env,
+    napi_callback_info info
+) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyInstance *inst = get_external(env, argv[0]);
+  char *entrypoint = read_utf8_arg(env, argv[1], NULL);
+  if (!entrypoint) return NULL;
+  int count = poly_instance_entrypoint_output_count(inst, entrypoint);
+  free(entrypoint);
+  napi_value result;
+  NAPI_CALL(env, napi_create_int32(env, count, &result));
+  return result;
+}
+
+static napi_value napi_poly_instance_entrypoint_output_name(
+    napi_env env,
+    napi_callback_info info
+) {
+  napi_value argv[3];
+  size_t argc = 3;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyInstance *inst = get_external(env, argv[0]);
+  char *entrypoint = read_utf8_arg(env, argv[1], NULL);
+  int32_t output_index = -1;
+  if (!entrypoint) return NULL;
+  napi_get_value_int32(env, argv[2], &output_index);
+  const char *name = poly_instance_entrypoint_output_name(inst, entrypoint, output_index);
+  free(entrypoint);
+  if (!name) {
+    napi_value result;
+    napi_get_null(env, &result);
+    return result;
+  }
+  napi_value result;
+  NAPI_CALL(env, napi_create_string_utf8(env, name, NAPI_AUTO_LENGTH, &result));
+  return result;
+}
+
 static napi_value napi_poly_instance_train_step(napi_env env, napi_callback_info info) {
   napi_value argv[3];
   size_t argc = 3;
@@ -5521,6 +5587,15 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_instance_from_bundle", napi_poly_instance_from_bundle),
       DECLARE_NAPI_METHOD("poly_instance_set_optimizer", napi_poly_instance_set_optimizer),
       DECLARE_NAPI_METHOD("poly_instance_forward", napi_poly_instance_forward),
+      DECLARE_NAPI_METHOD("poly_instance_call", napi_poly_instance_call),
+      DECLARE_NAPI_METHOD(
+          "poly_instance_entrypoint_output_count",
+          napi_poly_instance_entrypoint_output_count
+      ),
+      DECLARE_NAPI_METHOD(
+          "poly_instance_entrypoint_output_name",
+          napi_poly_instance_entrypoint_output_name
+      ),
       DECLARE_NAPI_METHOD("poly_instance_train_step", napi_poly_instance_train_step),
       /* Shape-on-UOp accessors */
       DECLARE_NAPI_METHOD("poly_uop_ndim", napi_poly_uop_ndim),

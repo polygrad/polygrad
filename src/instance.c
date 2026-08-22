@@ -1548,6 +1548,51 @@ static bool runtime_module_has_input(const RuntimeModule *module, PolyUOp *u) {
   return false;
 }
 
+static bool runtime_modules_valid(
+    const PolyInstance *inst,
+    const RuntimeModule *modules,
+    int n_modules
+) {
+  if (!inst || !modules || n_modules <= 0) return false;
+  for (int i = 0; i < n_modules; i++) {
+    const RuntimeModule *module = &modules[i];
+    if (!valid_binding_name(module->name) || module->n_inputs < 0 ||
+        (module->n_inputs > 0 && !module->logical_inputs) || !module->logical_output ||
+        !poly_ctx_owns_ptr(inst->ctx, module->logical_output))
+      return false;
+    for (int j = 0; j < i; j++)
+      if (strcmp(modules[j].name, module->name) == 0 ||
+          modules[j].logical_output == module->logical_output)
+        return false;
+    for (int j = 0; j < module->n_inputs; j++) {
+      PolyUOp *input = module->logical_inputs[j];
+      if (!input || !poly_ctx_owns_ptr(inst->ctx, input) ||
+          input == module->logical_output ||
+          !poly_uop_reachable(inst->ctx, module->logical_output, input))
+        return false;
+      for (int k = 0; k < j; k++)
+        if (module->logical_inputs[k] == input) return false;
+    }
+
+    bool entry_reachable = false;
+    for (int j = 0; j < inst->n_entrypoints && !entry_reachable; j++)
+      entry_reachable = poly_uop_reachable(
+          inst->ctx, inst->entrypoints[j].logical_sink, module->logical_output
+      );
+    if (!entry_reachable) return false;
+
+    for (int j = 0; j < n_modules; j++) {
+      if (i == j || !poly_uop_reachable(
+                        inst->ctx, module->logical_output, modules[j].logical_output
+                    ))
+        continue;
+      if (j >= i || !runtime_module_has_input(module, modules[j].logical_output))
+        return false;
+    }
+  }
+  return true;
+}
+
 int poly_instance_define_modules(
     PolyInstance *inst,
     const PolyInstanceModuleSpec *modules,
@@ -1568,11 +1613,6 @@ int poly_instance_define_modules(
         (src->n_inputs > 0 && !src->inputs) || !output ||
         !poly_ctx_owns_ptr(inst->ctx, output))
       goto cleanup;
-    for (int j = 0; j < i; j++)
-      if (strcmp(candidate[j].name, src->name) == 0 ||
-          candidate[j].logical_output == output)
-        goto cleanup;
-
     candidate[i].name = dup_cstr(src->name);
     candidate[i].logical_output = output;
     candidate[i].n_inputs = src->n_inputs;
@@ -1586,29 +1626,11 @@ int poly_instance_define_modules(
       if (!input || !poly_ctx_owns_ptr(inst->ctx, input) || input == output ||
           !poly_uop_reachable(inst->ctx, output, input))
         goto cleanup;
-      for (int k = 0; k < j; k++)
-        if (candidate[i].logical_inputs[k] == input) goto cleanup;
       candidate[i].logical_inputs[j] = input;
     }
   }
 
-  for (int i = 0; i < n_modules; i++) {
-    bool entry_reachable = false;
-    for (int j = 0; j < inst->n_entrypoints && !entry_reachable; j++)
-      entry_reachable = poly_uop_reachable(
-          inst->ctx, inst->entrypoints[j].logical_sink, candidate[i].logical_output
-      );
-    if (!entry_reachable) goto cleanup;
-
-    for (int j = 0; j < n_modules; j++) {
-      if (i == j || !poly_uop_reachable(
-                        inst->ctx, candidate[i].logical_output, candidate[j].logical_output
-                    ))
-        continue;
-      if (j >= i || !runtime_module_has_input(&candidate[i], candidate[j].logical_output))
-        goto cleanup;
-    }
-  }
+  if (!runtime_modules_valid(inst, candidate, n_modules)) goto cleanup;
 
   runtime_modules_free(inst->modules, inst->n_modules);
   inst->modules = candidate;
@@ -2039,6 +2061,37 @@ static PolyInstance *instance_from_spec(
     inst->entrypoints[i].objective = dup_cstr(spec->entrypoints[i].objective);
     inst->entrypoints[i].flags = spec->entrypoints[i].flags;
   }
+
+  /* Portable PGIR v10 retains the same exact logical module boundaries used
+   * by live Instance construction. Device assignments remain external policy
+   * and are deliberately not restored here. */
+  inst->n_modules = spec->n_modules;
+  inst->modules = spec->n_modules > 0
+                      ? calloc((size_t)spec->n_modules, sizeof(*inst->modules))
+                      : NULL;
+  if (spec->n_modules > 0 && !inst->modules) goto fail;
+  for (int i = 0; i < spec->n_modules; i++) {
+    inst->modules[i].name = dup_cstr(spec->modules[i].name);
+    inst->modules[i].n_inputs = spec->modules[i].n_inputs;
+    inst->modules[i].logical_output = spec->modules[i].output;
+    inst->modules[i].logical_inputs = spec->modules[i].n_inputs > 0
+                                          ? calloc(
+                                                (size_t)spec->modules[i].n_inputs,
+                                                sizeof(PolyUOp *)
+                                            )
+                                          : NULL;
+    if (!inst->modules[i].name ||
+        (spec->modules[i].n_inputs > 0 && !inst->modules[i].logical_inputs))
+      goto fail;
+    if (spec->modules[i].n_inputs > 0)
+      memcpy(
+          inst->modules[i].logical_inputs, spec->modules[i].inputs,
+          (size_t)spec->modules[i].n_inputs * sizeof(PolyUOp *)
+      );
+  }
+  if (spec->n_modules > 0 &&
+      !runtime_modules_valid(inst, inst->modules, inst->n_modules))
+    goto fail;
 
   if (free_spec) poly_ir_spec_free(spec);
 
@@ -3030,10 +3083,35 @@ uint8_t *poly_instance_export_ir(PolyInstance *inst, int *out_len) {
     eps[i].flags = inst->entrypoints[i].flags;
   }
 
-  PolyIrSpec spec = {inst->ctx, bufs, inst->n_bufs, eps, inst->n_entrypoints};
+  PolyIrModule *modules = inst->n_modules > 0
+                              ? calloc((size_t)inst->n_modules, sizeof(*modules))
+                              : NULL;
+  if (inst->n_modules > 0 && !modules) {
+    free(bufs);
+    free(eps);
+    *out_len = 0;
+    return NULL;
+  }
+  for (int i = 0; i < inst->n_modules; i++) {
+    modules[i].name = inst->modules[i].name;
+    modules[i].inputs = inst->modules[i].logical_inputs;
+    modules[i].n_inputs = inst->modules[i].n_inputs;
+    modules[i].output = inst->modules[i].logical_output;
+  }
+
+  PolyIrSpec spec = {
+      .ctx = inst->ctx,
+      .bufs = bufs,
+      .n_bufs = inst->n_bufs,
+      .entrypoints = eps,
+      .n_entrypoints = inst->n_entrypoints,
+      .modules = modules,
+      .n_modules = inst->n_modules,
+  };
   uint8_t *bytes = poly_ir_export(&spec, out_len);
   free(bufs);
   free(eps);
+  free(modules);
   return bytes;
 }
 
@@ -3479,19 +3557,48 @@ static int prepare_instance_io(
     PolyIOBinding *io,
     int n_io
 ) {
-  if (!inst || !inst->ctx) return -1;
+  if (!inst || !inst->ctx || !entry || n_io < 0 || (n_io > 0 && !io)) return -1;
+
+  /* Pinned TinyJit records an exact ordered input signature and rejects a
+   * replay whose names or input graph/shape differs (engine/jit.py:228-246,
+   * 303-309).  Validate the complete Instance signature before any write so
+   * omitted or duplicate rows cannot reuse stale bytes. */
+  if (entry->n_inputs > 0) {
+    for (int required = 0; required < entry->n_inputs; required++) {
+      int seen = 0;
+      for (int i = 0; i < n_io; i++)
+        if (io[i].name && strcmp(io[i].name, entry->inputs[required]) == 0 && io[i].data)
+          seen++;
+      if (seen != 1) {
+        fprintf(
+            stderr, "poly_instance_call: entrypoint '%s' requires input '%s' exactly once\n",
+            entry->name, entry->inputs[required]
+        );
+        return -1;
+      }
+    }
+  }
 
   /* Validate the complete call before mutating any Instance input. A rejected
    * dtype/length in one row must not leave earlier named inputs partially
    * updated. */
   for (int i = 0; i < n_io; i++) {
-    if (!io[i].data) continue;
+    if (!io[i].data) {
+      fprintf(stderr, "poly_instance_call: input row %d has NULL data\n", i);
+      return -1;
+    }
     if (!io[i].name || !entrypoint_accepts_input(inst, entry, io[i].name)) {
       fprintf(
           stderr, "poly_instance_call: '%s' is not an input of entrypoint '%s'\n",
           io[i].name ? io[i].name : "(null)", entry && entry->name ? entry->name : "(null)"
       );
       return -1;
+    }
+    for (int prior = 0; prior < i; prior++) {
+      if (io[prior].name && strcmp(io[prior].name, io[i].name) == 0) {
+        fprintf(stderr, "poly_instance_call: duplicate input '%s'\n", io[i].name);
+        return -1;
+      }
     }
 
     int bi = find_buf_by_name(inst, io[i].name);
@@ -3596,6 +3703,48 @@ int poly_instance_call(PolyInstance *inst, const char *entrypoint, PolyIOBinding
   PolyCompiledSchedule **cached_executable =
       inst->entry_executables ? &inst->entry_executables[ep_idx] : NULL;
   return run_instance_sink(inst, &inst->entrypoints[ep_idx], sink, io, n_io, cached_executable);
+}
+
+int poly_instance_entrypoint_count(const PolyInstance *inst) {
+  return inst && inst->stage == POLY_INSTANCE_BUILT ? inst->n_entrypoints : 0;
+}
+
+const char *poly_instance_entrypoint_name(const PolyInstance *inst, int entrypoint_index) {
+  if (!inst || inst->stage != POLY_INSTANCE_BUILT || entrypoint_index < 0 ||
+      entrypoint_index >= inst->n_entrypoints)
+    return NULL;
+  return inst->entrypoints[entrypoint_index].name;
+}
+
+int poly_instance_entrypoint_input_count(const PolyInstance *inst, const char *entrypoint) {
+  int idx = inst && entrypoint ? find_entrypoint(inst, entrypoint) : -1;
+  return idx >= 0 ? inst->entrypoints[idx].n_inputs : -1;
+}
+
+const char *poly_instance_entrypoint_input_name(
+    const PolyInstance *inst,
+    const char *entrypoint,
+    int input_index
+) {
+  int idx = inst && entrypoint ? find_entrypoint(inst, entrypoint) : -1;
+  if (idx < 0 || input_index < 0 || input_index >= inst->entrypoints[idx].n_inputs) return NULL;
+  return inst->entrypoints[idx].inputs[input_index];
+}
+
+int poly_instance_entrypoint_output_count(const PolyInstance *inst, const char *entrypoint) {
+  int idx = inst && entrypoint ? find_entrypoint(inst, entrypoint) : -1;
+  return idx >= 0 ? inst->entrypoints[idx].n_outputs : -1;
+}
+
+const char *poly_instance_entrypoint_output_name(
+    const PolyInstance *inst,
+    const char *entrypoint,
+    int output_index
+) {
+  int idx = inst && entrypoint ? find_entrypoint(inst, entrypoint) : -1;
+  if (idx < 0 || output_index < 0 || output_index >= inst->entrypoints[idx].n_outputs)
+    return NULL;
+  return inst->entrypoints[idx].outputs[output_index];
 }
 
 /* Convenience wrapper */

@@ -87,9 +87,15 @@ async function runWasmOwnershipTests() {
         return run
       },
       instance: {
-        forward(handle) { events.push(`forward:${handle}`); return Promise.resolve(0) },
+        call(handle, entrypoint) {
+          if (entrypoint !== 'forward') throw new Error(`unexpected entrypoint ${entrypoint}`)
+          events.push(`forward:${handle}`)
+          return Promise.resolve(0)
+        },
         free(handle) { events.push(`free:${handle}`) },
-        bufCount() { return 0 }
+        bufCount() { return 0 },
+        entrypointOutputCount() { return 0 },
+        entrypointOutputName() { return null }
       }
     }
     const rt = lifecycleRuntime(core)

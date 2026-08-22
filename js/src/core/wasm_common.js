@@ -1685,7 +1685,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 55
+  const EXPECTED_ABI = 56
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(
@@ -2149,13 +2149,15 @@ function createWasmCoreFromModule(Module, device) {
         instPtr, kind, lr, beta1, beta2, eps, weightDecay, momentum || 0, !!nesterov, !!classic)
     },
 
-    forward(instPtr, names, arrays) {
+    call(instPtr, entrypoint, names, arrays) {
       const n = names.length
+      if (arrays.length !== n) throw new TypeError('polygrad: mismatched Instance names and arrays')
       const dtypeIds = arrays.map(instanceBindingDTypeId)
       if (dtypeIds.some(id => id < 0)) {
         throw new TypeError('polygrad: unsupported Instance binding TypedArray')
       }
       const bindingPtr = Module._malloc(Math.max(1, n) * 16)
+      const entrypointPtr = allocString(entrypoint)
       const namePtrs = new Array(n)
       const dataPtrs = new Array(n)
       for (let i = 0; i < n; i++) {
@@ -2170,22 +2172,41 @@ function createWasmCoreFromModule(Module, device) {
       const cleanup = () => {
         for (const ptr of dataPtrs) Module._free(ptr)
         for (const ptr of namePtrs) Module._free(ptr)
+        Module._free(entrypointPtr)
         Module._free(bindingPtr)
       }
       if (deviceName === 'webgpu' && Module.ccall) {
         return ensureInstanceDevice(instPtr).then(() => {
           return Module.ccall(
-            'poly_instance_forward',
+            'poly_instance_call',
             'number',
-            ['number', 'number', 'number'],
-            [instPtr, bindingPtr, n],
+            ['number', 'number', 'number', 'number'],
+            [instPtr, entrypointPtr, bindingPtr, n],
             { async: true }
           )
         }).finally(cleanup)
       }
-      const rc = Module._poly_instance_forward(instPtr, bindingPtr, n)
+      const rc = Module._poly_instance_call(instPtr, entrypointPtr, bindingPtr, n)
       cleanup()
       return rc
+    },
+
+    forward(instPtr, names, arrays) {
+      return this.call(instPtr, 'forward', names, arrays)
+    },
+
+    entrypointOutputCount(instPtr, entrypoint) {
+      const ptr = allocString(entrypoint)
+      const count = Module._poly_instance_entrypoint_output_count(instPtr, ptr)
+      Module._free(ptr)
+      return count
+    },
+
+    entrypointOutputName(instPtr, entrypoint, i) {
+      const ptr = allocString(entrypoint)
+      const namePtr = Module._poly_instance_entrypoint_output_name(instPtr, ptr, i)
+      Module._free(ptr)
+      return namePtr ? readCString(namePtr) : null
     },
 
     trainStep(instPtr, names, arrays) {

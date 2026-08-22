@@ -370,6 +370,22 @@ typedef struct {
  * Returns 0 on success. */
 int poly_instance_call(PolyInstance *inst, const char *entrypoint, PolyIOBinding *io, int n_io);
 
+/* Entrypoint signature inspection for language frontends and generic callers. */
+int poly_instance_entrypoint_count(const PolyInstance *inst);
+const char *poly_instance_entrypoint_name(const PolyInstance *inst, int entrypoint_index);
+int poly_instance_entrypoint_input_count(const PolyInstance *inst, const char *entrypoint);
+const char *poly_instance_entrypoint_input_name(
+    const PolyInstance *inst,
+    const char *entrypoint,
+    int input_index
+);
+int poly_instance_entrypoint_output_count(const PolyInstance *inst, const char *entrypoint);
+const char *poly_instance_entrypoint_output_name(
+    const PolyInstance *inst,
+    const char *entrypoint,
+    int output_index
+);
+
 /* Forward + backward for a differentiable entrypoint.
  * Builds autograd graph lazily on first call. Computes loss value
  * and per-parameter gradients. Does NOT apply optimizer updates.

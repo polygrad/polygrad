@@ -574,7 +574,7 @@ TEST(registry, instance_from_ctx_parity_with_ir) {
       {.name = "output", .role = POLY_IR_ROLE_OUTPUT, .buffer = ob, .shape = {N}, .ndim = 1},
   };
   PolyIrEntrypoint eps_b[] = {{.name = "forward", .sink = sink_b}};
-  PolyIrSpec spec_b = {ctx_b, bufs_b, 3, eps_b, 1};
+  PolyIrSpec spec_b = {ctx_b, bufs_b, 3, eps_b, 1, NULL, 0};
   int ir_len;
   uint8_t *ir = poly_ir_export(&spec_b, &ir_len);
   PolyInstance *inst_b = poly_instance_from_ir(ir, ir_len, NULL, 0);

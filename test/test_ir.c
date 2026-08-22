@@ -39,7 +39,7 @@ TEST(ir, round_trip_add) {
       {.name = "forward", .sink = sink},
   };
 
-  PolyIrSpec spec = {ctx, bufs, 3, eps, 1};
+  PolyIrSpec spec = {ctx, bufs, 3, eps, 1, NULL, 0};
 
   int out_len = 0;
   uint8_t *bytes = poly_ir_export(&spec, &out_len);
@@ -88,7 +88,7 @@ TEST(ir, export_rewinds_scratch_root_toposorts) {
       {.name = "output", .role = POLY_IR_ROLE_OUTPUT, .buffer = out_buf, .shape = {4}, .ndim = 1},
   };
   PolyIrEntrypoint eps[] = {{.name = "forward", .sink = sink}};
-  PolyIrSpec spec = {ctx, bufs, 3, eps, 1};
+  PolyIrSpec spec = {ctx, bufs, 3, eps, 1, NULL, 0};
 
   size_t scratch_before = poly_arena_used(ctx->scratch);
   int out_len = 0;
@@ -119,7 +119,7 @@ TEST(ir, round_trip_const) {
       {.name = "output", .role = POLY_IR_ROLE_OUTPUT, .buffer = out, .shape = {4}, .ndim = 1},
   };
   PolyIrEntrypoint eps[] = {{.name = "forward", .sink = sink}};
-  PolyIrSpec spec = {ctx, bufs, 2, eps, 1};
+  PolyIrSpec spec = {ctx, bufs, 2, eps, 1, NULL, 0};
 
   int out_len = 0;
   uint8_t *bytes = poly_ir_export(&spec, &out_len);
@@ -157,13 +157,13 @@ TEST(ir, round_trip_exact_bigint_arg_current_format) {
       {.name = "output", .role = POLY_IR_ROLE_OUTPUT, .buffer = out, .shape = {1}, .ndim = 1},
   };
   PolyIrEntrypoint eps[] = {{.name = "forward", .sink = sink}};
-  PolyIrSpec spec = {ctx, bufs, 1, eps, 1};
+  PolyIrSpec spec = {ctx, bufs, 1, eps, 1, NULL, 0};
 
   int out_len = 0;
   uint8_t *bytes = poly_ir_export(&spec, &out_len);
   ASSERT_NOT_NULL(bytes);
   ASSERT_TRUE(out_len > 32);
-  ASSERT_INT_EQ(bytes[4], 9);
+  ASSERT_INT_EQ(bytes[4], 10);
   ASSERT_INT_EQ(bytes[5], 0);
 
   PolyIrSpec imported;
@@ -212,7 +212,7 @@ TEST(ir, round_trip_bufferize_opts_arg) {
       {.name = "output", .role = POLY_IR_ROLE_OUTPUT, .buffer = out, .shape = {8}, .ndim = 1},
   };
   PolyIrEntrypoint eps[] = {{.name = "forward", .sink = sink}};
-  PolyIrSpec spec = {ctx, bufs, 2, eps, 1};
+  PolyIrSpec spec = {ctx, bufs, 2, eps, 1, NULL, 0};
 
   int out_len = 0;
   uint8_t *bytes = poly_ir_export(&spec, &out_len);
@@ -271,12 +271,12 @@ TEST(ir, round_trip_bufferize_opts_tuple_device) {
       {.name = "output", .role = POLY_IR_ROLE_OUTPUT, .buffer = output, .shape = {8}, .ndim = 1},
   };
   PolyIrEntrypoint eps[] = {{.name = "forward", .sink = sink}};
-  PolyIrSpec spec = {ctx, bufs, 2, eps, 1};
+  PolyIrSpec spec = {ctx, bufs, 2, eps, 1, NULL, 0};
 
   int out_len = 0;
   uint8_t *bytes = poly_ir_export(&spec, &out_len);
   ASSERT_NOT_NULL(bytes);
-  ASSERT_INT_EQ(bytes[4], 9);
+  ASSERT_INT_EQ(bytes[4], 10);
   PolyIrSpec imported;
   ASSERT_INT_EQ(poly_ir_import(bytes, out_len, &imported), 0);
 
@@ -318,12 +318,12 @@ TEST(ir, round_trip_tuple_device_arg) {
       {.name = "output", .role = POLY_IR_ROLE_OUTPUT, .buffer = output, .shape = {4}, .ndim = 1},
   };
   PolyIrEntrypoint eps[] = {{.name = "forward", .sink = sink}};
-  PolyIrSpec spec = {ctx, bufs, 2, eps, 1};
+  PolyIrSpec spec = {ctx, bufs, 2, eps, 1, NULL, 0};
 
   int out_len = 0;
   uint8_t *bytes = poly_ir_export(&spec, &out_len);
   ASSERT_NOT_NULL(bytes);
-  ASSERT_INT_EQ(bytes[4], 9);
+  ASSERT_INT_EQ(bytes[4], 10);
 
   PolyIrSpec imported;
   ASSERT_INT_EQ(poly_ir_import(bytes, out_len, &imported), 0);
@@ -366,7 +366,7 @@ TEST(ir, round_trip_paramarg_exact_device_identity) {
   ASSERT_NOT_NULL(sink);
 
   PolyIrEntrypoint eps[] = {{.name = "forward", .sink = sink}};
-  PolyIrSpec spec = {ctx, NULL, 0, eps, 1};
+  PolyIrSpec spec = {ctx, NULL, 0, eps, 1, NULL, 0};
   int out_len = 0;
   uint8_t *bytes = poly_ir_export(&spec, &out_len);
   ASSERT_NOT_NULL(bytes);
@@ -442,7 +442,7 @@ TEST(ir, round_trip_paramarg_ordered_device_tuple) {
 
   PolyUOp *sink = poly_sink1(ctx, param);
   PolyIrEntrypoint eps[] = {{.name = "forward", .sink = sink}};
-  PolyIrSpec spec = {ctx, NULL, 0, eps, 1};
+  PolyIrSpec spec = {ctx, NULL, 0, eps, 1, NULL, 0};
   int out_len = 0;
   uint8_t *bytes = poly_ir_export(&spec, &out_len);
   ASSERT_NOT_NULL(bytes);
@@ -491,7 +491,7 @@ TEST(ir, round_trip_default_call_info) {
   ASSERT_NOT_NULL(sink);
 
   PolyIrEntrypoint eps[] = {{.name = "forward", .sink = sink}};
-  PolyIrSpec spec = {ctx, NULL, 0, eps, 1};
+  PolyIrSpec spec = {ctx, NULL, 0, eps, 1, NULL, 0};
   int out_len = 0;
   uint8_t *bytes = poly_ir_export(&spec, &out_len);
   ASSERT_NOT_NULL(bytes);
@@ -545,7 +545,7 @@ TEST(ir, round_trip_multi_entry) {
       {.name = "forward", .sink = fwd_sink},
       {.name = "loss", .sink = loss_sink},
   };
-  PolyIrSpec spec = {ctx, bufs, 3, eps, 2};
+  PolyIrSpec spec = {ctx, bufs, 3, eps, 2, NULL, 0};
 
   int out_len = 0;
   uint8_t *bytes = poly_ir_export(&spec, &out_len);
@@ -578,7 +578,7 @@ TEST(ir, import_reserves_unique_ids_for_future_buffers) {
       {.name = "loss", .role = POLY_IR_ROLE_OUTPUT, .buffer = loss_out, .shape = {1}, .ndim = 1},
   };
   PolyIrEntrypoint eps[] = {{.name = "loss", .sink = sink}};
-  PolyIrSpec spec = {ctx, bufs, 2, eps, 1};
+  PolyIrSpec spec = {ctx, bufs, 2, eps, 1, NULL, 0};
 
   int out_len = 0;
   uint8_t *bytes = poly_ir_export(&spec, &out_len);
@@ -642,7 +642,7 @@ TEST(ir, round_trip_entrypoint_metadata) {
           .flags = 7,
       },
   };
-  PolyIrSpec spec = {ctx, bufs, 4, eps, 2};
+  PolyIrSpec spec = {ctx, bufs, 4, eps, 2, NULL, 0};
 
   int out_len = 0;
   uint8_t *bytes = poly_ir_export(&spec, &out_len);
@@ -696,7 +696,7 @@ TEST(ir, round_trip_roles) {
       {.name = "output", .role = POLY_IR_ROLE_OUTPUT, .buffer = out, .shape = {2}, .ndim = 1},
   };
   PolyIrEntrypoint eps[] = {{.name = "forward", .sink = sink}};
-  PolyIrSpec spec = {ctx, bufs, 3, eps, 1};
+  PolyIrSpec spec = {ctx, bufs, 3, eps, 1, NULL, 0};
 
   int out_len = 0;
   uint8_t *bytes = poly_ir_export(&spec, &out_len);
@@ -884,7 +884,11 @@ TEST(ir, round_trip_reshape) {
       {.name = "output", .role = POLY_IR_ROLE_OUTPUT, .buffer = out, .shape = {2, 3}, .ndim = 2},
   };
   PolyIrEntrypoint eps[] = {{.name = "forward", .sink = sink}};
-  PolyIrSpec spec = {ctx, bufs, 2, eps, 1};
+  PolyUOp *module_inputs[] = {a};
+  PolyIrModule modules[] = {
+      {.name = "reshape", .inputs = module_inputs, .n_inputs = 1, .output = reshaped},
+  };
+  PolyIrSpec spec = {ctx, bufs, 2, eps, 1, modules, 1};
 
   int out_len = 0;
   uint8_t *bytes = poly_ir_export(&spec, &out_len);
@@ -894,6 +898,11 @@ TEST(ir, round_trip_reshape) {
   int ret = poly_ir_import(bytes, out_len, &imported);
   ASSERT_INT_EQ(ret, 0);
   ASSERT_INT_EQ(imported.n_bufs, 2);
+  ASSERT_INT_EQ(imported.n_modules, 1);
+  ASSERT_STR_EQ(imported.modules[0].name, "reshape");
+  ASSERT_INT_EQ(imported.modules[0].n_inputs, 1);
+  ASSERT_INT_EQ(imported.modules[0].inputs[0]->op, POLY_OP_BUFFER);
+  ASSERT_INT_EQ(imported.modules[0].output->op, POLY_OP_RESHAPE);
   PolyUOp *imported_sink = imported.entrypoints[0].sink;
   ASSERT_NOT_NULL(imported_sink);
   ASSERT_INT_EQ(imported_sink->op, POLY_OP_SINK);

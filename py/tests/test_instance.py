@@ -89,6 +89,50 @@ class TestForward:
         np.testing.assert_array_equal(out1['output'], out2['output'])
         inst.free()
 
+    def test_missing_required_input_rejects_instead_of_reusing_stale_bytes(self):
+        x, y = Tensor.empty(2), Tensor.empty(2)
+        inst = Instance.from_tensors(
+            inputs={'x': x, 'y': y}, outputs={'output': x + y},
+        )
+        try:
+            inst.forward(
+                x=np.array([1.0, 2.0], dtype=np.float32),
+                y=np.array([3.0, 4.0], dtype=np.float32),
+            )
+            with pytest.raises(RuntimeError):
+                inst.forward(x=np.array([9.0, 9.0], dtype=np.float32))
+        finally:
+            inst.free()
+
+    def test_generic_call_returns_only_selected_entrypoint_outputs(self):
+        x = Tensor.empty(2)
+        plus, minus = x + 1.0, x - 1.0
+        inst = Instance.from_tensors(
+            inputs={'x': x},
+            outputs={'plus': plus, 'minus': minus},
+            entrypoints=[
+                {'name': 'plus_ep', 'inputs': ['x'], 'outputs': ['plus']},
+                {'name': 'minus_ep', 'inputs': ['x'], 'outputs': ['minus']},
+            ],
+        )
+        try:
+            data = np.array([3.0, 5.0], dtype=np.float32)
+            plus_out = inst.call('plus_ep', x=data)
+            minus_out = inst.call('minus_ep', {'x': data})
+            assert set(plus_out) == {'plus'}
+            assert set(minus_out) == {'minus'}
+            np.testing.assert_array_equal(plus_out['plus'], [4.0, 6.0])
+            np.testing.assert_array_equal(minus_out['minus'], [2.0, 4.0])
+        finally:
+            inst.free()
+
+    def test_invalid_parameter_is_rejected_not_silently_filtered(self):
+        x = Tensor.empty(2)
+        with pytest.raises(TypeError, match='not a Tensor'):
+            Instance.from_tensors(
+                inputs={'x': x}, outputs={'output': x + 1.0}, params={'bad': object()},
+            )
+
 
 class TestTrain:
     def test_train_sgd(self):

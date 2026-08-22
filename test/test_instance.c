@@ -74,7 +74,7 @@ static uint8_t *make_add_ir(int *out_len) {
       {.name = "output", .role = POLY_IR_ROLE_OUTPUT, .buffer = out_buf, .shape = {4}, .ndim = 1},
   };
   PolyIrEntrypoint eps[] = {{.name = "forward", .sink = sink}};
-  PolyIrSpec spec = {ctx, bufs, 3, eps, 1};
+  PolyIrSpec spec = {ctx, bufs, 3, eps, 1, NULL, 0};
 
   uint8_t *bytes = poly_ir_export(&spec, out_len);
   poly_ctx_destroy(ctx);
@@ -822,7 +822,7 @@ static uint8_t *make_train_ir(int n, int *out_len) {
       {.name = "forward", .sink = fwd_sink},
       {.name = "loss", .sink = loss_sink},
   };
-  PolyIrSpec spec = {ctx, bufs, 5, eps, 2};
+  PolyIrSpec spec = {ctx, bufs, 5, eps, 2, NULL, 0};
 
   uint8_t *bytes = poly_ir_export(&spec, out_len);
   poly_ctx_destroy(ctx);
@@ -1173,7 +1173,26 @@ TEST(instance, typed_io_preserves_integer_bytes_and_rejects_partial_updates) {
   ASSERT_FLOAT_EQ(out_data[1], 5.0f, 0.0f);
   ASSERT_FLOAT_EQ(out_data[2], 7.0f, 0.0f);
 
+  /* Pinned TinyJit rejects a replay whose complete input signature differs
+   * (tinygrad/engine/jit.py:303-309). Missing and duplicate rows must fail
+   * before either input buffer is changed. */
   int32_t replacement_x[] = {9, 9, 9};
+  PolyIOBinding missing_y[] = {
+      POLY_IO_BINDING_ARRAY("x", replacement_x, POLY_INT32),
+  };
+  ASSERT_TRUE(poly_instance_forward(inst, missing_y, 1) < 0);
+  ASSERT_INT_EQ(poly_instance_read_buf_named(inst, "x", stored_x, sizeof(stored_x)), 0);
+  ASSERT_INT_EQ(stored_x[0], 0);
+
+  PolyIOBinding duplicate_x[] = {
+      POLY_IO_BINDING_ARRAY("x", replacement_x, POLY_INT32),
+      POLY_IO_BINDING_ARRAY("x", replacement_x, POLY_INT32),
+      POLY_IO_BINDING_ARRAY("y", y_data, POLY_INT32),
+  };
+  ASSERT_TRUE(poly_instance_forward(inst, duplicate_x, 3) < 0);
+  ASSERT_INT_EQ(poly_instance_read_buf_named(inst, "x", stored_x, sizeof(stored_x)), 0);
+  ASSERT_INT_EQ(stored_x[0], 0);
+
   float wrong_y[] = {1.0f, 2.0f, 3.0f};
   PolyIOBinding wrong_dtype[] = {
       POLY_IO_BINDING_ARRAY("x", replacement_x, POLY_INT32),
@@ -2407,6 +2426,15 @@ TEST(instance, multi_entrypoint_shared_state_round_trips_across_policy_replaceme
   PolyInstance *inst =
       poly_instance_from_bindings(ctx, bindings, 4, entries, 2, NULL, NULL);
   ASSERT_NOT_NULL(inst);
+  ASSERT_INT_EQ(poly_instance_entrypoint_count(inst), 2);
+  ASSERT_STR_EQ(poly_instance_entrypoint_name(inst, 0), "plus_ep");
+  ASSERT_INT_EQ(poly_instance_entrypoint_input_count(inst, "plus_ep"), 1);
+  ASSERT_STR_EQ(poly_instance_entrypoint_input_name(inst, "plus_ep", 0), "x");
+  ASSERT_INT_EQ(poly_instance_entrypoint_output_count(inst, "plus_ep"), 1);
+  ASSERT_STR_EQ(poly_instance_entrypoint_output_name(inst, "plus_ep", 0), "plus");
+  ASSERT_INT_EQ(poly_instance_entrypoint_output_count(inst, "minus_ep"), 1);
+  ASSERT_STR_EQ(poly_instance_entrypoint_output_name(inst, "minus_ep", 0), "minus");
+  ASSERT_EQ(poly_instance_entrypoint_output_count(inst, "missing"), -1);
 
   int ir_before_len = 0;
   uint8_t *ir_before = poly_instance_export_ir(inst, &ir_before_len);
@@ -4797,6 +4825,41 @@ TEST(instance, explicit_module_device_map_places_named_regions_atomically) {
       {.name = "layers.1", .inputs = module1_inputs, .n_inputs = 1, .output = output},
   };
   ASSERT_INT_EQ(poly_instance_define_modules(inst, modules, 2), 0);
+
+  /* Exact logical module boundaries are portable program metadata. Device
+   * assignments are not: the imported Instance must accept a newly supplied
+   * policy against the restored boundaries. */
+  int portable_ir_len = 0;
+  uint8_t *portable_ir = poly_instance_export_ir(inst, &portable_ir_len);
+  int portable_weights_len = 0;
+  uint8_t *portable_weights =
+      poly_instance_export_weights(inst, &portable_weights_len);
+  ASSERT_NOT_NULL(portable_ir);
+  ASSERT_NOT_NULL(portable_weights);
+  PolyInstance *restored = poly_instance_from_ir(
+      portable_ir, portable_ir_len, portable_weights, portable_weights_len
+  );
+  ASSERT_NOT_NULL(restored);
+  PolyInstanceDeviceMapEntry restored_map[] = {
+      {.module = "layers.0", .device = "CPU"},
+      {.module = "layers.1", .device = "INTERP"},
+  };
+  ASSERT_INT_EQ(poly_instance_set_device_map(restored, restored_map, 2), 0);
+  float restored_x[] = {1.0f, 2.0f};
+  PolyIOBinding restored_io[] = {
+      POLY_IO_BINDING_ARRAY("x", restored_x, POLY_FLOAT32),
+  };
+  ASSERT_INT_EQ(poly_instance_forward(restored, restored_io, 1), 0);
+  int64_t restored_numel = 0;
+  float *restored_output =
+      poly_instance_buf_data_named(restored, "output", &restored_numel);
+  ASSERT_NOT_NULL(restored_output);
+  ASSERT_INT_EQ(restored_numel, 2);
+  ASSERT_FLOAT_EQ(restored_output[0], 8.0f, 1e-6f);
+  ASSERT_FLOAT_EQ(restored_output[1], 18.0f, 1e-6f);
+  poly_instance_free(restored);
+  free(portable_weights);
+  free(portable_ir);
 
   /* Explicit placement is replacement from the immutable logical program, never
    * implicit composition over the current placed graph.  Pinned Tensor.to

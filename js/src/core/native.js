@@ -56,7 +56,7 @@ function createNativeCore(device) {
     if (name) ops[name] = i
   }
 
-  const EXPECTED_ABI = 55
+  const EXPECTED_ABI = 56
   const abi = binding.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(
@@ -220,6 +220,15 @@ function createNativeCore(device) {
     },
     forward(inst, names, arrays) {
       return binding.poly_instance_forward(inst, names, arrays)
+    },
+    call(inst, entrypoint, names, arrays) {
+      return binding.poly_instance_call(inst, entrypoint, names, arrays)
+    },
+    entrypointOutputCount(inst, entrypoint) {
+      return binding.poly_instance_entrypoint_output_count(inst, entrypoint)
+    },
+    entrypointOutputName(inst, entrypoint, i) {
+      return binding.poly_instance_entrypoint_output_name(inst, entrypoint, i)
     },
     trainStep(inst, names, arrays) {
       return binding.poly_instance_train_step(inst, names, arrays)

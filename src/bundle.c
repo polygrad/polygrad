@@ -7,6 +7,7 @@
 #include "safetensors.h"
 #include "instance.h"
 #include <stdbool.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -126,7 +127,12 @@ static char *bundle_metadata_from_ir(const uint8_t *ir_data, int ir_len) {
   if (poly_ir_import(ir_data, ir_len, &spec) != 0) return NULL;
 
   JsonBuf b = {0};
-  jb_add(&b, "{\"format\":\"poly.bundle@1\",\"ir_format\":\"poly.ir.uops@5\",\"entrypoints\":[");
+  /* poly_ir_import validated the header and supported version above. Report
+   * the version carried by this exact IR section instead of duplicating the
+   * current codec version in bundle metadata. */
+  jb_add(&b, "{\"format\":\"poly.bundle@1\",\"ir_format\":\"poly.ir.uops@");
+  jb_add_u32(&b, read_le32(ir_data + 4));
+  jb_add(&b, "\",\"entrypoints\":[");
   for (int i = 0; i < spec.n_entrypoints; i++) {
     PolyIrEntrypoint *ep = &spec.entrypoints[i];
     if (i) jb_add(&b, ",");
@@ -167,9 +173,9 @@ uint8_t *poly_bundle_encode(
     const char *metadata_json,
     int *out_len
 ) {
+  if (out_len) *out_len = 0;
   if (!ir_data || ir_len <= 0) {
     fprintf(stderr, "poly_bundle_encode: IR section is required\n");
-    if (out_len) *out_len = 0;
     return NULL;
   }
 
@@ -178,19 +184,27 @@ uint8_t *poly_bundle_encode(
   if (weights_data && weights_len > 0) n_sections++;
   if (metadata_json && metadata_json[0]) n_sections++;
 
-  int meta_len = metadata_json ? (int)strlen(metadata_json) : 0;
+  size_t meta_size = metadata_json ? strlen(metadata_json) : 0;
+  if (meta_size > INT_MAX) return NULL;
+  int meta_len = (int)meta_size;
 
   /* Calculate total size:
    *   header: 8 (magic) + 4 (version) + 4 (flags) + 4 (n_sections) = 20
    *   per section: 4 (type) + 4 (length) + data */
-  int total = 20;
-  total += 8 + ir_len; /* IR section header + data */
-  if (weights_data && weights_len > 0) total += 8 + weights_len;
-  if (meta_len > 0) total += 8 + meta_len;
+  size_t total = 20;
+#define ADD_SECTION_SIZE(n)                                                                    \
+  do {                                                                                         \
+    size_t _n = (size_t)(n);                                                                   \
+    if (total > (size_t)INT_MAX - 8 || _n > (size_t)INT_MAX - total - 8) return NULL;            \
+    total += 8 + _n;                                                                           \
+  } while (0)
+  ADD_SECTION_SIZE(ir_len);
+  if (weights_data && weights_len > 0) ADD_SECTION_SIZE(weights_len);
+  if (meta_len > 0) ADD_SECTION_SIZE(meta_len);
+#undef ADD_SECTION_SIZE
 
-  uint8_t *buf = malloc((size_t)total);
+  uint8_t *buf = malloc(total);
   if (!buf) {
-    if (out_len) *out_len = 0;
     return NULL;
   }
 
@@ -277,7 +291,7 @@ int poly_bundle_decode(const uint8_t *data, int len, PolyBundleSections *out) {
     uint32_t slen = read_le32(data + pos);
     pos += 4;
 
-    if (pos + (int)slen > len) {
+    if (slen > (uint32_t)(len - pos)) {
       fprintf(
           stderr, "poly_bundle_decode: section %u truncated (need %u, have %d)\n", stype, slen,
           len - pos

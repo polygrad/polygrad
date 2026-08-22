@@ -8,6 +8,7 @@
 #include "../src/instance.h"
 #include "../src/frontend.h"
 #include "../src/models/mlp.h"
+#include <limits.h>
 #include <string.h>
 
 /* Basic encode/decode */
@@ -75,6 +76,30 @@ TEST(bundle, decode_truncated) {
 TEST(bundle, decode_null_input) {
   PolyBundleSections sec;
   ASSERT_INT_EQ(poly_bundle_decode(NULL, 0, &sec), -1);
+  PASS();
+}
+
+TEST(bundle, decode_rejects_section_length_above_signed_api_range) {
+  uint8_t bundle[28] = {0};
+  memcpy(bundle, POLY_BUNDLE_MAGIC, 8);
+  bundle[8] = POLY_BUNDLE_VERSION;
+  bundle[16] = 1; /* one section */
+  bundle[20] = POLY_BUNDLE_IR;
+  bundle[24] = 0xff;
+  bundle[25] = 0xff;
+  bundle[26] = 0xff;
+  bundle[27] = 0xff;
+
+  PolyBundleSections sec;
+  ASSERT_INT_EQ(poly_bundle_decode(bundle, (int)sizeof(bundle), &sec), -1);
+  PASS();
+}
+
+TEST(bundle, encode_rejects_signed_length_overflow_before_allocation) {
+  uint8_t byte = 0;
+  int out_len = 7;
+  ASSERT_EQ(poly_bundle_encode(&byte, INT_MAX, NULL, 0, NULL, &out_len), NULL);
+  ASSERT_INT_EQ(out_len, 0);
   PASS();
 }
 
@@ -195,7 +220,7 @@ TEST(bundle, instance_save_includes_entrypoint_manifest_metadata) {
   meta[sections.metadata_len] = '\0';
 
   ASSERT_TRUE(strstr(meta, "\"format\":\"poly.bundle@1\"") != NULL);
-  ASSERT_TRUE(strstr(meta, "\"ir_format\":\"poly.ir.uops@5\"") != NULL);
+  ASSERT_TRUE(strstr(meta, "\"ir_format\":\"poly.ir.uops@10\"") != NULL);
   ASSERT_TRUE(strstr(meta, "\"name\":\"forward\"") != NULL);
   ASSERT_TRUE(strstr(meta, "\"inputs\":[\"x\"]") != NULL);
   ASSERT_TRUE(strstr(meta, "\"outputs\":[\"logits\"]") != NULL);

@@ -569,13 +569,13 @@ TEST(hf, gpt2_forward_e2e) {
     token_data[j] = j % 4;
     position_data[j] = j;
   }
-  ASSERT_INT_EQ(poly_instance_write_buf_named(inst, "x", token_data, sizeof(token_data)), 0);
-  ASSERT_INT_EQ(
-      poly_instance_write_buf_named(inst, "positions", position_data, sizeof(position_data)), 0
-  );
+  PolyIOBinding forward_io[] = {
+      POLY_IO_BINDING_ARRAY("x", token_data, POLY_INT32),
+      POLY_IO_BINDING_ARRAY("positions", position_data, POLY_INT32),
+  };
 
   /* Run forward pass */
-  int ret = poly_instance_forward(inst, NULL, 0);
+  int ret = poly_instance_forward(inst, forward_io, 2);
   ASSERT_INT_EQ(ret, 0);
 
   /* Check output: (1, 8, 32) logits */
@@ -622,16 +622,7 @@ TEST(hf, gpt2_forward_e2e) {
     PolyInstance *placed = poly_instance_from_ir(ir, ir_len, weights, weights_len);
     ASSERT_NOT_NULL(placed);
     ASSERT_INT_EQ(poly_instance_set_device(placed, place_devices[d]), 0);
-    ASSERT_INT_EQ(
-        poly_instance_write_buf_named(placed, "x", token_data, sizeof(token_data)), 0
-    );
-    ASSERT_INT_EQ(
-        poly_instance_write_buf_named(
-            placed, "positions", position_data, sizeof(position_data)
-        ),
-        0
-    );
-    ASSERT_INT_EQ(poly_instance_forward(placed, NULL, 0), 0);
+    ASSERT_INT_EQ(poly_instance_forward(placed, forward_io, 2), 0);
     int64_t placed_numel = 0;
     float *placed_out = poly_instance_buf_data_named(placed, "output", &placed_numel);
     ASSERT_NOT_NULL(placed_out);
@@ -688,10 +679,10 @@ TEST(hf, gpt2_training_loss_decreases) {
     token_data[j] = j % 4;
     position_data[j] = j;
   }
-  ASSERT_INT_EQ(poly_instance_write_buf_named(inst, "x", token_data, sizeof(token_data)), 0);
-  ASSERT_INT_EQ(
-      poly_instance_write_buf_named(inst, "positions", position_data, sizeof(position_data)), 0
-  );
+  PolyIOBinding train_io[] = {
+      POLY_IO_BINDING_ARRAY("x", token_data, POLY_INT32),
+      POLY_IO_BINDING_ARRAY("positions", position_data, POLY_INT32),
+  };
 
   /* Configure Adam optimizer */
   int ret = poly_instance_set_optimizer(inst, POLY_OPTIM_ADAM, 0.001f, 0.9f, 0.999f, 1e-8f, 0.0f);
@@ -700,7 +691,7 @@ TEST(hf, gpt2_training_loss_decreases) {
   /* Train for 5 steps */
   float losses[5];
   for (int step = 0; step < 5; step++) {
-    ret = poly_instance_train_step(inst, NULL, 0, &losses[step]);
+    ret = poly_instance_train_step(inst, train_io, 2, &losses[step]);
     ASSERT_INT_EQ(ret, 0);
     ASSERT_TRUE(isfinite(losses[step]));
   }

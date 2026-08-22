@@ -266,7 +266,7 @@ function createBoundInstanceClass(runtime) {
     const tgts = normalizeNamed(targets, 'target')
     const outs = normalizeNamed(outputs, 'output')
     const lossMap = normalizeNamed(losses, 'loss')
-    const paramItems = normalizeParams(params).filter(([, tensor]) => tensor && tensor._tensor)
+    const paramItems = normalizeParams(params)
 
     const namedTensors = []
     for (const group of [inps, tgts, outs, lossMap]) {
@@ -474,7 +474,7 @@ function createBoundInstanceClass(runtime) {
         const tgts = normalizeNamed(targets, 'target')
         const outs = normalizeNamed(outputs, 'output')
         const lossMap = normalizeNamed(losses, 'loss')
-        const paramItems = normalizeParams(params).filter(([, tensor]) => tensor && tensor._tensor)
+        const paramItems = normalizeParams(params)
 
         const namedTensors = []
         for (const group of [inps, tgts, outs, lossMap]) {
@@ -816,26 +816,35 @@ function createBoundInstanceClass(runtime) {
     }
 
     forward(io) {
-      this._requireSync('forward()', 'forwardAsync()')
+      return this.call('forward', io)
+    }
+
+    call(entrypoint, io) {
+      this._requireSync('call()', 'callAsync()')
       const { names, arrays } = normalizeBindings(io)
-      const rc = this._rt._core.instance.forward(this._handle, names, arrays)
-      if (isPromiseLike(rc)) throw new PolyAsyncRequired('forward()', 'forwardAsync()')
-      if (rc !== 0) throw new Error(`polygrad: forward failed (rc=${rc})`)
-      return this._collectOutputsRaw()
+      const rc = this._rt._core.instance.call(this._handle, String(entrypoint), names, arrays)
+      if (isPromiseLike(rc)) throw new PolyAsyncRequired('call()', 'callAsync()')
+      if (rc !== 0) throw new Error(`polygrad: call('${entrypoint}') failed (rc=${rc})`)
+      return this._collectOutputsRaw(String(entrypoint))
     }
 
     forwardAsync(io) {
+      return this.callAsync('forward', io)
+    }
+
+    callAsync(entrypoint, io) {
+      entrypoint = String(entrypoint)
       const { names, arrays } = normalizeBindings(io)
       const run = () => {
-        const rc = this._rt._core.instance.forward(this._handle, names, arrays)
+        const rc = this._rt._core.instance.call(this._handle, entrypoint, names, arrays)
         if (isPromiseLike(rc)) {
           return rc.then(v => {
-            if (v !== 0) throw new Error(`polygrad: forward failed (rc=${v})`)
-            return this._collectOutputsRawAsync()
+            if (v !== 0) throw new Error(`polygrad: call('${entrypoint}') failed (rc=${v})`)
+            return this._collectOutputsRawAsync(entrypoint)
           })
         }
-        if (rc !== 0) throw new Error(`polygrad: forward failed (rc=${rc})`)
-        return this._collectOutputsRaw()
+        if (rc !== 0) throw new Error(`polygrad: call('${entrypoint}') failed (rc=${rc})`)
+        return this._collectOutputsRaw(entrypoint)
       }
       if (this._usesAsyncHostBridge()) return this._enqueueAsync(run)
       return Promise.resolve(run())
@@ -867,22 +876,34 @@ function createBoundInstanceClass(runtime) {
       return Promise.resolve(run())
     }
 
-    _collectOutputsRaw() {
+    _collectOutputsRaw(entrypoint = 'forward') {
       const outputs = {}
-      for (let i = 0; i < this.bufCount; i++) {
-        if (this.bufRole(i) === ROLE_OUTPUT) {
-          outputs[this.bufName(i)] = this._bufDataRaw(i)
+      const api = this._rt._core.instance
+      const nOutputs = api.entrypointOutputCount(this._handle, entrypoint)
+      if (nOutputs < 0) throw new Error(`polygrad: unknown Instance entrypoint '${entrypoint}'`)
+      for (let i = 0; i < nOutputs; i++) {
+        const name = api.entrypointOutputName(this._handle, entrypoint, i)
+        const bi = this.findBuf(name)
+        if (name == null || bi < 0) {
+          throw new Error(`polygrad: entrypoint '${entrypoint}' references a missing output`)
         }
+        outputs[name] = this._bufDataRaw(bi)
       }
       return outputs
     }
 
-    async _collectOutputsRawAsync() {
+    async _collectOutputsRawAsync(entrypoint = 'forward') {
       const outputs = {}
-      for (let i = 0; i < this.bufCount; i++) {
-        if (this.bufRole(i) === ROLE_OUTPUT) {
-          outputs[this.bufName(i)] = await this._bufDataRaw(i)
+      const api = this._rt._core.instance
+      const nOutputs = api.entrypointOutputCount(this._handle, entrypoint)
+      if (nOutputs < 0) throw new Error(`polygrad: unknown Instance entrypoint '${entrypoint}'`)
+      for (let i = 0; i < nOutputs; i++) {
+        const name = api.entrypointOutputName(this._handle, entrypoint, i)
+        const bi = this.findBuf(name)
+        if (name == null || bi < 0) {
+          throw new Error(`polygrad: entrypoint '${entrypoint}' references a missing output`)
         }
+        outputs[name] = await this._bufDataRaw(bi)
       }
       return outputs
     }

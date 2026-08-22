@@ -69,7 +69,7 @@ def run_core(work: Path, core: str, source_after: Instance, expected_loss: float
     try:
         output = inference.forward(x=np.array([1.25, -0.5], dtype=np.float32))['output']
         np.testing.assert_allclose(
-            output, np.asarray(result['inferenceOutput'], dtype=np.float32),
+            output.reshape(-1), np.asarray(result['inferenceOutput'], dtype=np.float32),
             rtol=0.0, atol=atol,
         )
     finally:

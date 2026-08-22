@@ -1,15 +1,16 @@
 /*
  * poly_ir.c -- Binary IR codec for tensor-level UOp graphs
  *
- * poly.ir.uops@9 format:
+ * poly.ir.uops@10 format:
  *   Header (32 bytes)
  *   String table (variable)
  *   Node table (variable, strict toposort order; scalar dtype ID + vector count)
  *   Interface table (named logical nodes with roles)
  *   Entrypoint table (named SINKs plus v2+ ABI metadata)
+ *   Module table (v10+, exact named logical placement boundaries)
  *
  * Import remains backward-compatible with v1 payloads (entrypoint name + SINK)
- * and v2-v8 payloads (including integer and scalar-string device metadata).
+ * and v2-v9 payloads (including integer and scalar-string device metadata).
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -135,7 +136,7 @@ static double br_f64(ByteReader *r) {
 /* Magic */
 
 #define IR_MAGIC 0x52494750 /* "PGIR" LE */
-#define IR_VERSION 9
+#define IR_VERSION 10
 #define IR_MIN_VERSION 1
 
 /* Dtype index table */
@@ -209,6 +210,12 @@ static void free_ir_entrypoint(PolyIrEntrypoint *ep) {
   free((char *)ep->objective);
 }
 
+static void free_ir_module(PolyIrModule *module) {
+  if (!module) return;
+  free((char *)module->name);
+  free(module->inputs);
+}
+
 static bool ir_interface_shape_valid(const PolyIrBufEntry *entry) {
   if (!entry || entry->ndim < 0 || entry->ndim > POLY_IR_MAX_DIMS) return false;
   int64_t numel = 1;
@@ -223,10 +230,11 @@ static bool ir_interface_shape_valid(const PolyIrBufEntry *entry) {
 /* Export */
 
 uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
+  if (!out_len) return NULL;
   *out_len = 0;
   if (!spec || !spec->ctx) return NULL;
 
-  if (spec->n_entrypoints == 0) {
+  if (spec->n_entrypoints <= 0 || !spec->entrypoints) {
     fprintf(stderr, "poly_ir_export: no entrypoints\n");
     return NULL;
   }
@@ -236,6 +244,37 @@ uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
         spec->bufs[i].role > POLY_IR_ROLE_AUX || !ir_interface_shape_valid(&spec->bufs[i])) {
       fprintf(stderr, "poly_ir_export: invalid interface row %d\n", i);
       return NULL;
+    }
+  }
+  if (spec->n_modules < 0 || (spec->n_modules > 0 && !spec->modules)) return NULL;
+  for (int i = 0; i < spec->n_modules; i++) {
+    const PolyIrModule *module = &spec->modules[i];
+    if (!module->name || !module->output || module->n_inputs < 0 ||
+        (module->n_inputs > 0 && !module->inputs) ||
+        !poly_ctx_owns_ptr(spec->ctx, module->output)) {
+      fprintf(stderr, "poly_ir_export: invalid module row %d\n", i);
+      return NULL;
+    }
+    for (int j = 0; j < i; j++) {
+      if (strcmp(spec->modules[j].name, module->name) == 0 ||
+          spec->modules[j].output == module->output) {
+        fprintf(stderr, "poly_ir_export: duplicate module row %d\n", i);
+        return NULL;
+      }
+    }
+    for (int j = 0; j < module->n_inputs; j++) {
+      if (!module->inputs[j] || module->inputs[j] == module->output ||
+          !poly_ctx_owns_ptr(spec->ctx, module->inputs[j]) ||
+          !poly_uop_reachable(spec->ctx, module->output, module->inputs[j])) {
+        fprintf(stderr, "poly_ir_export: invalid module input %d:%d\n", i, j);
+        return NULL;
+      }
+      for (int k = 0; k < j; k++) {
+        if (module->inputs[k] == module->inputs[j]) {
+          fprintf(stderr, "poly_ir_export: duplicate module input %d:%d\n", i, j);
+          return NULL;
+        }
+      }
     }
   }
 
@@ -318,6 +357,10 @@ uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
     uint32_t idx;
   } NodeMapEntry;
   NodeMapEntry *node_map = malloc(n_nodes * sizeof(NodeMapEntry));
+  if (!node_map) {
+    if (topo_is_heap) free(topo);
+    return NULL;
+  }
   for (int i = 0; i < n_nodes; i++) {
     node_map[i].uop = topo[i];
     node_map[i].idx = (uint32_t)i;
@@ -334,6 +377,26 @@ uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
       }                                                                                            \
     _idx;                                                                                          \
   })
+
+  /* Module boundaries are metadata over the exported program, not extra graph
+   * roots. Reject rows outside the selected entrypoint/interface closure
+   * instead of serializing UINT32_MAX node references. */
+  for (int i = 0; i < spec->n_modules; i++) {
+    if (FIND_IDX(spec->modules[i].output) == UINT32_MAX) {
+      fprintf(stderr, "poly_ir_export: module row %d is outside the program\n", i);
+      free(node_map);
+      if (topo_is_heap) free(topo);
+      return NULL;
+    }
+    for (int j = 0; j < spec->modules[i].n_inputs; j++) {
+      if (FIND_IDX(spec->modules[i].inputs[j]) == UINT32_MAX) {
+        fprintf(stderr, "poly_ir_export: module input %d:%d is outside the program\n", i, j);
+        free(node_map);
+        if (topo_is_heap) free(topo);
+        return NULL;
+      }
+    }
+  }
 
   /* Tensor/package IR keeps vector dtypes (notably shape STACK[weakintN])
    * as scalar dtype ID + existing PolyDType.count. Pointer dtypes remain
@@ -406,6 +469,8 @@ uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
     st_add(&strings, spec->bufs[i].name);
   for (int i = 0; i < spec->n_entrypoints; i++)
     st_add_entrypoint_strings(&strings, &spec->entrypoints[i]);
+  for (int i = 0; i < spec->n_modules; i++)
+    st_add(&strings, spec->modules[i].name);
 
   /* Compute flags */
   uint32_t flags = 0;
@@ -427,7 +492,7 @@ uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
   bb_u32(&buf, (uint32_t)strings.n);
   bb_u32(&buf, (uint32_t)spec->n_bufs);
   bb_u32(&buf, (uint32_t)spec->n_entrypoints);
-  bb_u32(&buf, 0); /* reserved */
+  bb_u32(&buf, (uint32_t)spec->n_modules);
 
   /* String table */
   for (int i = 0; i < strings.n; i++) {
@@ -644,6 +709,17 @@ uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
       bb_u32(&buf, st_add(&strings, ep->outputs[j]));
   }
 
+  /* Exact logical module boundaries. Devices are intentionally absent: the
+   * same portable program can be placed under a different policy. */
+  for (int i = 0; i < spec->n_modules; i++) {
+    const PolyIrModule *module = &spec->modules[i];
+    bb_u32(&buf, st_add(&strings, module->name));
+    bb_u32(&buf, (uint32_t)module->n_inputs);
+    for (int j = 0; j < module->n_inputs; j++)
+      bb_u32(&buf, FIND_IDX(module->inputs[j]));
+    bb_u32(&buf, FIND_IDX(module->output));
+  }
+
 #undef FIND_IDX
 
   free(node_map);
@@ -682,7 +758,13 @@ int poly_ir_import(const uint8_t *data, int len, PolyIrSpec *out) {
   uint32_t n_strings = br_u32(&r);
   uint32_t n_entries = br_u32(&r);
   uint32_t n_entrypts = br_u32(&r);
-  /*uint32_t reserved =*/br_u32(&r);
+  uint32_t n_modules = br_u32(&r);
+  if (version < 10) n_modules = 0; /* historical reserved header word */
+  if (n_nodes > INT_MAX || n_strings > INT_MAX || n_entries > INT_MAX ||
+      n_entrypts > INT_MAX || n_modules > INT_MAX) {
+    fprintf(stderr, "poly_ir_import: header count exceeds supported range\n");
+    return -1;
+  }
 
   /* String table */
   char **strings = calloc(n_strings, sizeof(char *));
@@ -1129,6 +1211,34 @@ int poly_ir_import(const uint8_t *data, int len, PolyIrSpec *out) {
     }
   }
 
+  /* Exact logical placement modules (v10+). */
+  out->n_modules = (int)n_modules;
+  out->modules = calloc(n_modules, sizeof(PolyIrModule));
+  if (n_modules > 0 && !out->modules) goto fail_modules;
+  for (uint32_t i = 0; i < n_modules; i++) {
+    if (br_remaining(&r) < 12) goto fail_modules;
+    uint32_t name_idx = br_u32(&r);
+    uint32_t n_inputs = br_u32(&r);
+    if (name_idx >= n_strings || n_inputs > INT32_MAX ||
+        br_remaining(&r) < (int64_t)n_inputs * 4 + 4)
+      goto fail_modules;
+    out->modules[i].name = strdup(strings[name_idx]);
+    out->modules[i].n_inputs = (int)n_inputs;
+    out->modules[i].inputs = n_inputs > 0
+                                 ? calloc(n_inputs, sizeof(PolyUOp *))
+                                 : NULL;
+    if (!out->modules[i].name || (n_inputs > 0 && !out->modules[i].inputs))
+      goto fail_modules;
+    for (uint32_t j = 0; j < n_inputs; j++) {
+      uint32_t node_idx = br_u32(&r);
+      if (node_idx >= n_nodes) goto fail_modules;
+      out->modules[i].inputs[j] = nodes[node_idx];
+    }
+    uint32_t output_idx = br_u32(&r);
+    if (output_idx >= n_nodes) goto fail_modules;
+    out->modules[i].output = nodes[output_idx];
+  }
+
   out->ctx = ctx;
 
   /* Cleanup temp arrays */
@@ -1138,6 +1248,10 @@ int poly_ir_import(const uint8_t *data, int len, PolyIrSpec *out) {
   free(nodes);
   return 0;
 
+fail_modules:
+  for (int i = 0; i < out->n_modules; i++)
+    free_ir_module(&out->modules[i]);
+  free(out->modules);
 fail_ep:
   for (int i = 0; i < out->n_entrypoints; i++)
     free_ir_entrypoint(&out->entrypoints[i]);
@@ -1164,8 +1278,13 @@ void poly_ir_spec_free(PolyIrSpec *spec) {
   for (int i = 0; i < spec->n_entrypoints; i++)
     free_ir_entrypoint(&spec->entrypoints[i]);
   free(spec->entrypoints);
+  for (int i = 0; i < spec->n_modules; i++)
+    free_ir_module(&spec->modules[i]);
+  free(spec->modules);
   spec->bufs = NULL;
   spec->entrypoints = NULL;
+  spec->modules = NULL;
   spec->n_bufs = 0;
   spec->n_entrypoints = 0;
+  spec->n_modules = 0;
 }

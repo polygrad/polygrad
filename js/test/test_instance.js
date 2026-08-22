@@ -56,12 +56,62 @@ async function checkTypedIntegerInput(pg, Instance) {
     try {
       await inst.forward({ typed_x: new Float32Array([0, 1, 2]) })
     } catch (e) {
-      rejected = /forward failed/.test(String(e && e.message))
+      rejected = /call\('forward'\) failed/.test(String(e && e.message))
     }
     assert(rejected, 'float32 bytes must not bind to an int32 Instance input')
   } finally {
     inst.dispose()
   }
+}
+
+async function checkCallSignatureAndSelectedOutputs(pg, Instance) {
+  const x = pg.Tensor.empty([2])
+  const y = pg.Tensor.empty([2])
+  const inst = await Instance.fromTensors({
+    inputs: { x, y },
+    outputs: { plus: x.add(y), minus: x.sub(y) },
+    entrypoints: [
+      { name: 'plus_ep', inputs: ['x', 'y'], outputs: ['plus'] },
+      { name: 'minus_ep', inputs: ['x', 'y'], outputs: ['minus'] }
+    ]
+  })
+  const webgpu = String(pg.device).toLowerCase() === 'webgpu'
+  const call = (entrypoint, io) => webgpu
+    ? inst.callAsync(entrypoint, io) : inst.call(entrypoint, io)
+  try {
+    const io = {
+      x: new Float32Array([5, 7]),
+      y: new Float32Array([2, 3])
+    }
+    const plus = await call('plus_ep', io)
+    const minus = await call('minus_ep', io)
+    assert(Object.keys(plus).join(',') === 'plus', 'plus_ep returned undeclared outputs')
+    assert(Object.keys(minus).join(',') === 'minus', 'minus_ep returned undeclared outputs')
+    assertClose(plus.plus, [7, 10], 0)
+    assertClose(minus.minus, [3, 4], 0)
+
+    let rejected = false
+    try {
+      await call('plus_ep', { x: new Float32Array([9, 9]) })
+    } catch (err) {
+      rejected = /call\('plus_ep'\) failed/.test(String(err && err.message))
+    }
+    assert(rejected, 'missing required input must not reuse stale Instance bytes')
+  } finally {
+    if (webgpu) await inst.dispose()
+    else inst.dispose()
+  }
+
+  let invalidParamRejected = false
+  try {
+    const unexpected = await Instance.fromTensors({
+      inputs: { x }, outputs: { output: x.add(1) }, params: { bad: {} }
+    })
+    unexpected.dispose()
+  } catch (err) {
+    invalidParamRejected = /not a Tensor/.test(String(err && err.message))
+  }
+  assert(invalidParamRejected, 'invalid parameter must not be silently filtered')
 }
 
 async function checkModuleDeviceMap(pg, Instance) {
@@ -170,6 +220,10 @@ async function runInstanceTests(pg) {
   }
 
   console.log('\n== Instance ==')
+
+  await test('generic call validates signature and returns selected outputs', async () => {
+    await checkCallSignatureAndSelectedOutputs(pg, Instance)
+  })
 
   await test('scalar rank8 and shared multi-output round trip', async () => {
     const scalarX = pg.Tensor.empty([])
@@ -870,6 +924,10 @@ async function runInstanceSmokeTests(pg) {
 
   await test('typed integer input preserves bytes and rejects float binding', async () => {
     await checkTypedIntegerInput(pg, Instance)
+  })
+
+  await test('generic call validates signature and returns selected outputs', async () => {
+    await checkCallSignatureAndSelectedOutputs(pg, Instance)
   })
 
   await test('webgpu module device map places exact Tensor cuts atomically', async () => {

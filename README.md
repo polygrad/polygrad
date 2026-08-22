@@ -239,10 +239,14 @@ The C core owns graph construction, scheduling, placement, runtime caches, and
 backend dispatch. Frontends are thin wrappers over the same concepts.
 
 ```text
-logical tensor graph
-  -> placed tensor graph
+default Tensor construction
+  -> eager tinygrad-shaped physical tensor graph
   -> LINEAR schedule graph with CALLs
   -> PROGRAM/SOURCE/BINARY plus runtime runner
+
+portable logical program + named state + explicit policy
+  -> place from scratch
+  -> replacement complete physical tensor graph
 ```
 
 The key invariant is that exportable logical tensor roots stay independent from
@@ -273,6 +277,8 @@ The policy places the aggregate retained graph once, keeps module state with
 its module, and inserts explicit `COPY` nodes at cross-device cuts. CPU sibling
 identities are executable today; nonzero CUDA/HIP identities, automatic
 sharding, pipeline schedules, offload, and VRAM planning remain future work.
+PGIR preserves the exact named module boundaries but not their device
+assignments, so an imported program can be placed under a new map.
 
 ## High-Level APIs
 

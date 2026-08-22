@@ -602,7 +602,7 @@ class TestInstanceExport:
         np.testing.assert_array_equal(
             result["typed_out"], np.array([0, 1, 2], dtype=np.float32)
         )
-        with pytest.raises(RuntimeError, match="forward failed"):
+        with pytest.raises(RuntimeError, match=r"call\('forward'\) failed"):
             inst.forward(typed_x=np.array([0, 1, 2], dtype=np.float32))
 
     def test_functional_model_exports_selected_forward_entrypoint(self):
