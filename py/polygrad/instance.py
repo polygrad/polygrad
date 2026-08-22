@@ -327,6 +327,23 @@ class Instance:
         return Instance(ptr)
 
     @staticmethod
+    def from_program(program_bytes, weights_bytes=None):
+        """Load an ABI/device-bound compiled program plus separate weights.
+
+        Unlike :meth:`from_ir`, this does not retain portable logical IR and
+        cannot be re-placed onto another device.
+        """
+        program_buf = (ctypes.c_uint8 * len(program_bytes)).from_buffer_copy(program_bytes)
+        w_buf = None
+        w_len = 0
+        if weights_bytes:
+            w_buf = (ctypes.c_uint8 * len(weights_bytes)).from_buffer_copy(weights_bytes)
+            w_len = len(weights_bytes)
+        ptr = _get_lib().poly_instance_from_program(
+            program_buf, len(program_bytes), w_buf, w_len)
+        return Instance(ptr)
+
+    @staticmethod
     def from_bindings(bindings, entrypoints, *, modules=None):
         """Create an Instance from explicit binding and entrypoint records.
 
@@ -704,6 +721,16 @@ class Instance:
         """Export IR graph as binary bytes."""
         out_len = ctypes.c_int(0)
         ptr = _get_lib().poly_instance_export_ir(self._ptr, ctypes.byref(out_len))
+        if not ptr:
+            return None
+        data = bytes(ctypes.cast(ptr, ctypes.POINTER(ctypes.c_uint8 * out_len.value)).contents)
+        _libc.free(ptr)
+        return data
+
+    def export_program(self):
+        """Export the current placed compiled entrypoints as bound bytes."""
+        out_len = ctypes.c_int(0)
+        ptr = _get_lib().poly_instance_export_program(self._ptr, ctypes.byref(out_len))
         if not ptr:
             return None
         data = bytes(ctypes.cast(ptr, ctypes.POINTER(ctypes.c_uint8 * out_len.value)).contents)

@@ -56,7 +56,7 @@ function createNativeCore(device) {
     if (name) ops[name] = i
   }
 
-  const EXPECTED_ABI = 56
+  const EXPECTED_ABI = 57
   const abi = binding.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(
@@ -69,6 +69,9 @@ function createNativeCore(device) {
     fromIR(irBytes, weightsBytes) {
       const inst = binding.poly_instance_from_ir(irBytes, weightsBytes ?? null)
       return setInstanceDevice(inst)
+    },
+    fromProgram(programBytes, weightsBytes) {
+      return binding.poly_instance_from_program(programBytes, weightsBytes ?? null)
     },
     mlp(specJson) {
       const inst = binding.poly_mlp_from_json(specJson, deviceId)
@@ -138,6 +141,9 @@ function createNativeCore(device) {
     },
     exportIR(inst) {
       return binding.poly_instance_export_ir(inst)
+    },
+    exportProgram(inst) {
+      return binding.poly_instance_export_program(inst)
     },
     saveBundle(inst, flags) {
       return binding.poly_instance_save_bundle(inst, flags)

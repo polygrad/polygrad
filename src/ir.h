@@ -99,6 +99,13 @@ int poly_ir_import(const uint8_t *data, int len, PolyIrSpec *out);
 /* Free an imported PolyIrSpec (frees names, arrays; does NOT destroy ctx). */
 void poly_ir_spec_free(PolyIrSpec *spec);
 
+/* Internal executable-graph codec used by Instance program export.  It shares
+ * the graph/interface tables above, but uses a distinct ABI-bound format that
+ * permits lowered pointer dtypes, PROGRAM metadata, SOURCE and BINARY nodes.
+ * It is not portable PGIR and must never be used as a placement source. */
+uint8_t *poly_program_graph_export(const PolyIrSpec *spec, int *out_len);
+int poly_program_graph_import(const uint8_t *data, int len, PolyIrSpec *out);
+
 #ifdef __cplusplus
 }
 #endif

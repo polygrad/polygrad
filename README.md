@@ -280,6 +280,42 @@ sharding, pipeline schedules, offload, and VRAM planning remain future work.
 PGIR preserves the exact named module boundaries but not their device
 assignments, so an imported program can be placed under a new map.
 
+## Export Products
+
+Polygrad keeps portable graphs, bound programs, and weights separate:
+
+- `export_ir()` / `exportIR()` returns portable logical PGIR. Import it with a
+  new placement policy when the target device layout may change.
+- `export_program()` / `exportProgram()` returns the currently compiled,
+  device-bound PROGRAM/LINEAR artifact. It starts without rebuilding the model
+  graph, but requires the same Polygrad ABI and a compatible backend/device.
+- `export_weights()` / `exportWeights()` returns named safetensors state. Pass
+  it separately to either import path when the model has parameters/state.
+
+Python:
+
+```python
+program = model.export_program()
+weights = model.export_weights()
+fast_model = Instance.from_program(program, weights)
+result = fast_model.call("forward", {"x": input_array})
+```
+
+JavaScript (native/Wasm synchronous runtimes):
+
+```js
+const program = model.exportProgram()
+const weights = model.exportWeights()
+const fastModel = Instance.fromProgram(program, weights)
+const result = fastModel.call('forward', { x: inputArray })
+```
+
+WebGPU startup is asynchronous, so use `await model.exportProgramAsync()` and
+`await Instance.fromProgramAsync(program, weights)`. A bound-program Instance
+is inference/call-only: it has no portable logical graph and cannot be
+re-placed, trained, differentiated, or exported as PGIR. The existing bundle
+format remains the portable PGIR-plus-weights product.
+
 ## High-Level APIs
 
 Polygrad includes the usual tensor building blocks:
@@ -291,7 +327,8 @@ Polygrad includes the usual tensor building blocks:
 - structured linalg: QR, triangular solve, Cholesky, Cholesky solve, solve, and
   least squares;
 - tinygrad-style raw Tensor JIT capture/replay;
-- portable bundles for saving IR and weights together;
+- portable bundles for saving IR and weights together, plus separate bound
+  compiled-program export for compatible runtimes;
 - model loading paths for supported safetensors/GGUF workflows.
 
 Structured linalg is implemented as portable tensor-composed fallback code. It

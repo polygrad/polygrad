@@ -411,6 +411,37 @@ function createBoundInstanceClass(runtime) {
       return new Instance(inst)
     }
 
+    static fromProgram(programBytes, weightsBytes) {
+      const api = _runtime._core.instance
+      if (!api) throw new Error('polygrad: model runtime unavailable for this core')
+      if (_runtime._usesAsyncHostBridge()) {
+        throw new PolyAsyncRequired('Instance.fromProgram()', 'Instance.fromProgramAsync()')
+      }
+      const inst = api.fromProgram(
+        normalizeBytes(programBytes, 'programBytes'),
+        normalizeBytes(weightsBytes, 'weightsBytes')
+      )
+      if (!inst) throw new Error('polygrad: failed to create PolyInstance from program')
+      return new Instance(inst)
+    }
+
+    static async fromProgramAsync(programBytes, weightsBytes) {
+      const api = _runtime._core.instance
+      if (!api) throw new Error('polygrad: model runtime unavailable for this core')
+      const release = _runtime._beginAsync()
+      try {
+        const program = normalizeBytes(programBytes, 'programBytes')
+        const weights = normalizeBytes(weightsBytes, 'weightsBytes')
+        const inst = api.fromProgramAsync
+          ? await api.fromProgramAsync(program, weights)
+          : api.fromProgram(program, weights)
+        if (!inst) throw new Error('polygrad: failed to create PolyInstance from program')
+        return new Instance(inst)
+      } finally {
+        release()
+      }
+    }
+
     static fromBindings(bindings, entrypoints, modules = null) {
       bindings = Array.from(bindings || [])
       entrypoints = Array.from(entrypoints || [])
@@ -773,6 +804,17 @@ function createBoundInstanceClass(runtime) {
 
     exportIR() {
       return this._rt._core.instance.exportIR(this._handle)
+    }
+
+    exportProgram() {
+      this._requireSync('exportProgram()', 'exportProgramAsync()')
+      return this._rt._core.instance.exportProgram(this._handle)
+    }
+
+    exportProgramAsync() {
+      const run = () => this._rt._core.instance.exportProgram(this._handle)
+      if (this._usesAsyncHostBridge()) return this._enqueueAsync(run)
+      return Promise.resolve(run())
     }
 
     saveBundle(options = null) {

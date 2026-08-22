@@ -700,6 +700,44 @@ async function runInstanceTests(pg) {
     }
   })
 
+  await test('bound program export uses separate weights and has no portable IR', async () => {
+    const inst1 = MLP({
+      layers: [2, 4, 1],
+      activation: 'relu',
+      bias: true,
+      loss: 'none',
+      batch_size: 1,
+      seed: 42
+    })
+    let inst2 = null
+    try {
+      const program = await inst1.exportProgramAsync()
+      const weights = await inst1.exportWeights()
+      assert(program && new TextDecoder().decode(program.subarray(0, 4)) === 'PGPM',
+        'compiled program magic mismatch')
+      let missingWeightsRejected = false
+      try {
+        const unexpected = Instance.fromProgram(program)
+        await unexpected.dispose()
+      } catch (err) {
+        missingWeightsRejected = true
+      }
+      assert(missingWeightsRejected, 'bound state must require separate weights')
+      inst2 = Instance.fromProgram(program, weights)
+      const input = new Float32Array([1.25, -0.5])
+      const out1 = (await inst1.forward({ x: input })).output
+      const out2 = (await inst2.forward({ x: input })).output
+      assertClose(out2, out1, 0)
+      const portable = inst2.exportIR()
+      assert(!portable || portable.length === 0, 'program-only Instance exposed portable IR')
+      const program2 = await inst2.exportProgramAsync()
+      assertClose(program2, program, 0)
+    } finally {
+      if (inst2) await inst2.dispose()
+      await inst1.dispose()
+    }
+  })
+
   await test('mlp batch_size=32 forward produces correct shape', async () => {
     const inst = MLP({
       layers: [4, 8, 3],

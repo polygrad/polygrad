@@ -3573,6 +3573,53 @@ static napi_value napi_poly_instance_from_ir(napi_env env, napi_callback_info in
   return make_external(env, inst);
 }
 
+static napi_value napi_poly_instance_from_program(napi_env env, napi_callback_info info) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+
+  napi_typedarray_type program_type;
+  size_t program_len = 0, program_offset = 0;
+  void *program_data = NULL;
+  napi_value program_buf;
+  NAPI_CALL(
+      env, napi_get_typedarray_info(
+               env, argv[0], &program_type, &program_len, &program_data,
+               &program_buf, &program_offset
+           )
+  );
+  (void)program_type;
+
+  const uint8_t *weights_data = NULL;
+  size_t weights_len = 0;
+  if (argc > 1) {
+    napi_valuetype weights_type;
+    napi_typeof(env, argv[1], &weights_type);
+    if (weights_type != napi_null && weights_type != napi_undefined) {
+      napi_typedarray_type wa_type;
+      void *wa_data = NULL;
+      size_t wa_offset = 0;
+      napi_value wa_buf;
+      NAPI_CALL(
+          env, napi_get_typedarray_info(
+                   env, argv[1], &wa_type, &weights_len, &wa_data, &wa_buf, &wa_offset
+               )
+      );
+      (void)wa_type;
+      weights_data = (const uint8_t *)wa_data;
+    }
+  }
+  PolyInstance *inst = poly_instance_from_program(
+      (const uint8_t *)program_data, (int)program_len, weights_data, (int)weights_len
+  );
+  if (!inst) {
+    napi_value result;
+    napi_get_null(env, &result);
+    return result;
+  }
+  return make_external(env, inst);
+}
+
 static void free_string_array_items(char **items, uint32_t n) {
   if (!items) return;
   for (uint32_t i = 0; i < n; i++)
@@ -4267,6 +4314,18 @@ static napi_value napi_poly_instance_export_ir(napi_env env, napi_callback_info 
   PolyInstance *inst = get_external(env, argv[0]);
   int out_len = 0;
   uint8_t *bytes = poly_instance_export_ir(inst, &out_len);
+  napi_value result = make_uint8_array_copy(env, bytes, (size_t)(out_len > 0 ? out_len : 0));
+  free(bytes);
+  return result;
+}
+
+static napi_value napi_poly_instance_export_program(napi_env env, napi_callback_info info) {
+  napi_value argv[1];
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyInstance *inst = get_external(env, argv[0]);
+  int out_len = 0;
+  uint8_t *bytes = poly_instance_export_program(inst, &out_len);
   napi_value result = make_uint8_array_copy(env, bytes, (size_t)(out_len > 0 ? out_len : 0));
   free(bytes);
   return result;
@@ -5548,6 +5607,7 @@ NAPI_MODULE_INIT() {
 
       /* PolyInstance / model runtime */
       DECLARE_NAPI_METHOD("poly_instance_from_ir", napi_poly_instance_from_ir),
+      DECLARE_NAPI_METHOD("poly_instance_from_program", napi_poly_instance_from_program),
       DECLARE_NAPI_METHOD("poly_instance_from_sinks", napi_poly_instance_from_sinks),
       DECLARE_NAPI_METHOD(
           "poly_instance_from_binding_arrays", napi_poly_instance_from_binding_arrays
@@ -5583,6 +5643,7 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_instance_export_weights", napi_poly_instance_export_weights),
       DECLARE_NAPI_METHOD("poly_instance_import_weights", napi_poly_instance_import_weights),
       DECLARE_NAPI_METHOD("poly_instance_export_ir", napi_poly_instance_export_ir),
+      DECLARE_NAPI_METHOD("poly_instance_export_program", napi_poly_instance_export_program),
       DECLARE_NAPI_METHOD("poly_instance_save_bundle", napi_poly_instance_save_bundle),
       DECLARE_NAPI_METHOD("poly_instance_from_bundle", napi_poly_instance_from_bundle),
       DECLARE_NAPI_METHOD("poly_instance_set_optimizer", napi_poly_instance_set_optimizer),

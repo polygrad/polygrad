@@ -306,6 +306,18 @@ int poly_instance_import_weights(PolyInstance *inst, const uint8_t *data, int le
 /* IR Export */
 
 uint8_t *poly_instance_export_ir(PolyInstance *inst, int *out_len);
+
+/* Bound compiled-program export. The artifact contains placed PROGRAM-backed
+ * LINEAR entrypoints and their named physical buffer ABI. It is ABI/device
+ * bound, is not PGIR, and is never a placement source. Weights remain a
+ * separate safetensors artifact. */
+uint8_t *poly_instance_export_program(PolyInstance *inst, int *out_len);
+PolyInstance *poly_instance_from_program(
+    const uint8_t *program_data,
+    int program_len,
+    const uint8_t *weights_data,
+    int weights_len
+);
 uint8_t *poly_instance_save_bundle_ex(PolyInstance *inst, int *out_len, uint32_t weight_flags);
 
 /* Device configuration */

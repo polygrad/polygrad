@@ -227,11 +227,13 @@ static PolyUOp *poly_program_source(PolyUOp *program) {
   return (source && source->op == POLY_OP_SOURCE) ? source : NULL;
 }
 
+#ifdef POLY_HAS_X86
 static PolyUOp *poly_program_binary(PolyUOp *program) {
   if (!program || program->op != POLY_OP_PROGRAM || program->n_src < 5) return NULL;
   PolyUOp *binary = program->src[4];
   return (binary && binary->op == POLY_OP_BINARY) ? binary : NULL;
 }
+#endif
 
 #ifndef __EMSCRIPTEN__
 static const char *poly_program_source_text(PolyUOp *program) {
@@ -1191,6 +1193,7 @@ static PolyUOp *poly_program_attach_source(
   return poly_uop(ctx, POLY_OP_PROGRAM, POLY_VOID, src, 4, program->arg);
 }
 
+#ifdef POLY_HAS_X86
 static PolyUOp *poly_program_attach_binary(
     PolyCtx *ctx,
     PolyUOp *program,
@@ -1206,6 +1209,7 @@ static PolyUOp *poly_program_attach_binary(
   PolyUOp *src[5] = {program->src[0], program->src[1], program->src[2], program->src[3], binary};
   return poly_uop(ctx, POLY_OP_PROGRAM, POLY_VOID, src, 5, program->arg);
 }
+#endif
 
 static int webgpu_collect_param_order(PolyUOp **lin, int n_lin, int *order, int cap, int *n_out) {
   int seen = 0;
@@ -6621,6 +6625,31 @@ static const char *poly_program_arg_name(PolyUOp *program) {
   return program->arg.str;
 }
 
+/* Pinned tinygrad compile_linear sends both SINK and PROGRAM call bodies to
+ * to_program. do_to_program starts from an existing PROGRAM and pm_to_program
+ * only fills missing LINEAR/SOURCE/BINARY stages, so a complete PROGRAM is a
+ * fixed point (tinygrad/codegen/__init__.py:208-248 and
+ * tinygrad/engine/realize.py:243-253). Imported executable artifacts cross
+ * this same boundary: reconstruct runtime handles, but never run their kernel
+ * body through backend rewrites a second time. */
+static bool poly_program_is_complete_for_backend(
+    PolyUOp *program,
+    const PolyBackendDesc *backend,
+    PolyDevice device
+) {
+  if (!program || program->op != POLY_OP_PROGRAM || !backend) return false;
+#ifdef POLY_HAS_X86
+  if (device == POLY_DEVICE_X86)
+    return poly_program_linear(program) &&
+           (poly_program_binary(program) || poly_program_source(program));
+#else
+  (void)device;
+#endif
+  if (!backend->rewrite_program) return true;
+  if (!poly_program_linear(program)) return false;
+  return !backend->render_source || poly_program_source(program);
+}
+
 #ifdef POLY_HAS_X86
 static PolyUOp *poly_prepare_x86_program_for_backend(
     PolyCtx *ctx,
@@ -6641,12 +6670,13 @@ static PolyUOp *poly_prepare_program_for_backend(
   if (!ctx || !call || call->op != POLY_OP_CALL) return NULL;
   PolyUOp *ast = poly_call_raw_body(call);
   if (!ast) return NULL;
+  const PolyBackendDesc *backend = poly_backend_get(device);
+  if (!backend) return NULL;
+  if (poly_program_is_complete_for_backend(ast, backend, device)) return ast;
 #ifdef POLY_HAS_X86
   if (device == POLY_DEVICE_X86)
     return poly_prepare_x86_program_for_backend(ctx, call, device_uop, device, env_stamp);
 #endif
-  const PolyBackendDesc *backend = poly_backend_get(device);
-  if (!backend) return NULL;
 
   /* Pinned to_program caches the raw SINK ast.key before do_to_program builds
    * ProgramInfo (codegen/__init__.py:244-250). A PROGRAM input remains a

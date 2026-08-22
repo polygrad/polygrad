@@ -238,6 +238,39 @@ async function runWebGpuLifecycleChecks() {
     }
   })
 
+  await test('webgpu bound program imports into a cold runtime', async () => {
+    const sourceRt = polygrad.create({ core: 'wasm', device: 'webgpu' })
+    const targetRt = polygrad.create({ core: 'wasm', device: 'webgpu' })
+    let source = null
+    let restored = null
+    try {
+      source = sourceRt.models.MLP({
+        layers: [2, 4, 1], activation: 'relu', loss: 'none', batch_size: 1, seed: 42
+      })
+      const program = await source.exportProgramAsync()
+      const weights = await source.exportWeightsAsync()
+      let syncRejected = false
+      try { targetRt.Instance.fromProgram(program, weights) } catch (e) {
+        syncRejected = /fromProgramAsync/.test(String(e.message || e))
+      }
+      if (!syncRejected) throw new Error('synchronous WebGPU program import did not require async API')
+      restored = await targetRt.Instance.fromProgramAsync(program, weights)
+      const input = new Float32Array([1.25, -0.5])
+      const expected = await source.forwardAsync({ x: input })
+      const actual = await restored.forwardAsync({ x: input })
+      if (actual.output.length !== expected.output.length) throw new Error('program output size changed')
+      for (let i = 0; i < actual.output.length; i++) {
+        if (actual.output[i] !== expected.output[i]) throw new Error('program output bytes changed')
+      }
+      if (restored.exportIR()) throw new Error('bound program exposed portable IR')
+    } finally {
+      if (restored) await restored.dispose()
+      if (source) await source.dispose()
+      await targetRt.dispose()
+      await sourceRt.dispose()
+    }
+  })
+
   return { passed, failed, skipped: 0 }
 }
 

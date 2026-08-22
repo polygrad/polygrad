@@ -1685,7 +1685,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 56
+  const EXPECTED_ABI = 57
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(
@@ -1741,6 +1741,26 @@ function createWasmCoreFromModule(Module, device) {
       Module._free(irPtr)
       if (weightsPtr) Module._free(weightsPtr)
       return configureInstanceDevice(inst)
+    },
+
+    fromProgram(programBytes, weightsBytes) {
+      const programPtr = allocBytes(programBytes)
+      let weightsPtr = 0
+      let weightsLen = 0
+      if (weightsBytes && weightsBytes.length > 0) {
+        weightsPtr = allocBytes(weightsBytes)
+        weightsLen = weightsBytes.length
+      }
+      const inst = Module._poly_instance_from_program(
+        programPtr, programBytes.length, weightsPtr, weightsLen)
+      Module._free(programPtr)
+      if (weightsPtr) Module._free(weightsPtr)
+      return inst
+    },
+
+    async fromProgramAsync(programBytes, weightsBytes) {
+      if (deviceName === 'webgpu') await ensureWebGPU()
+      return this.fromProgram(programBytes, weightsBytes)
     },
 
     mlp(specJson) {
@@ -1894,6 +1914,24 @@ function createWasmCoreFromModule(Module, device) {
     },
     exportIR(instPtr) {
       const bytesPtr = Module._poly_instance_export_ir(instPtr, _scratchLenPtr)
+      if (!bytesPtr) return null
+      const len = heap32()[_scratchLenPtr >> 2]
+      const bytes = new Uint8Array(heapU8().buffer.slice(bytesPtr, bytesPtr + len))
+      Module._free(bytesPtr)
+      return bytes
+    },
+    exportProgram(instPtr) {
+      if (deviceName === 'webgpu') {
+        return ensureInstanceDevice(instPtr).then(() => {
+          const bytesPtr = Module._poly_instance_export_program(instPtr, _scratchLenPtr)
+          if (!bytesPtr) return null
+          const len = heap32()[_scratchLenPtr >> 2]
+          const bytes = new Uint8Array(heapU8().buffer.slice(bytesPtr, bytesPtr + len))
+          Module._free(bytesPtr)
+          return bytes
+        })
+      }
+      const bytesPtr = Module._poly_instance_export_program(instPtr, _scratchLenPtr)
       if (!bytesPtr) return null
       const len = heap32()[_scratchLenPtr >> 2]
       const bytes = new Uint8Array(heapU8().buffer.slice(bytesPtr, bytesPtr + len))

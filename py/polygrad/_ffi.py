@@ -16,7 +16,7 @@ import sys
 _lib = None
 OPS = {}
 _has_cuda_ffi = False
-POLYGRAD_ABI_VERSION = 56
+POLYGRAD_ABI_VERSION = 57
 
 # --- Opaque pointer type (always available) ---
 _ptr = ctypes.c_void_p
@@ -1081,6 +1081,8 @@ def _declare_signatures(lib):
     # --- PolyInstance (instance.h) ---
     lib.poly_instance_from_ir.restype = _ptr
     lib.poly_instance_from_ir.argtypes = [_u8p, ctypes.c_int, _u8p, ctypes.c_int]
+    lib.poly_instance_from_program.restype = _ptr
+    lib.poly_instance_from_program.argtypes = [_u8p, ctypes.c_int, _u8p, ctypes.c_int]
 
     lib.poly_instance_from_sinks.restype = _ptr
     lib.poly_instance_from_sinks.argtypes = [
@@ -1178,6 +1180,8 @@ def _declare_signatures(lib):
 
     lib.poly_instance_export_ir.restype = _u8p
     lib.poly_instance_export_ir.argtypes = [_ptr, _ip]
+    lib.poly_instance_export_program.restype = _u8p
+    lib.poly_instance_export_program.argtypes = [_ptr, _ip]
 
     # Bundle format
     lib.poly_instance_save_bundle.restype = _u8p

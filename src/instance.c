@@ -172,6 +172,7 @@ typedef struct {
 struct PolyInstance {
   PolyCtx *ctx;
   bool owns_ctx; /* true: poly_instance_free destroys ctx */
+  bool has_portable_source; /* false for bound compiled-program imports */
   PolyInstanceStage stage;
   PolyInstanceBuildState *build;
   PolyInstanceError last_error;
@@ -1875,6 +1876,7 @@ static PolyInstance *instance_from_spec(
   if (!inst) return NULL;
   inst->ctx = spec->ctx;
   inst->owns_ctx = owns_ctx;
+  inst->has_portable_source = true;
   inst->stage = POLY_INSTANCE_BUILT;
   inst->has_physical_capture = physical_buffers && physical_sinks;
   if ((physical_buffers != NULL) != (physical_sinks != NULL)) goto fail;
@@ -3054,7 +3056,8 @@ int poly_instance_import_weights(PolyInstance *inst, const uint8_t *data, int le
 /* IR Export */
 
 uint8_t *poly_instance_export_ir(PolyInstance *inst, int *out_len) {
-  if (!inst || inst->stage != POLY_INSTANCE_BUILT) {
+  if (!out_len) return NULL;
+  if (!inst || inst->stage != POLY_INSTANCE_BUILT || !inst->has_portable_source) {
     *out_len = 0;
     return NULL;
   }
@@ -3113,6 +3116,127 @@ uint8_t *poly_instance_export_ir(PolyInstance *inst, int *out_len) {
   free(eps);
   free(modules);
   return bytes;
+}
+
+static PolyCompiledSchedule *instance_ensure_entry_executable(
+    PolyInstance *inst,
+    int entrypoint_index
+) {
+  if (!inst || !inst->ctx || !inst->entry_executables || entrypoint_index < 0 ||
+      entrypoint_index >= inst->n_entrypoints)
+    return NULL;
+  if (inst->entry_executables[entrypoint_index]) return inst->entry_executables[entrypoint_index];
+
+  PolyUOp *root = inst->entrypoints[entrypoint_index].sink;
+  PolySchedule *schedule = root && root->op == POLY_OP_LINEAR
+                               ? poly_create_schedule_from_linear(inst->ctx, root, POLY_MODE_CALL)
+                               : poly_schedule_effect_sink(inst->ctx, root);
+  if (!schedule) return NULL;
+  PolyCompiledSchedule *compiled = poly_jit_lower(inst->ctx, schedule);
+  poly_schedule_free(schedule);
+  if (!compiled) return NULL;
+  inst->entry_executables[entrypoint_index] = compiled;
+  return compiled;
+}
+
+uint8_t *poly_instance_export_program(PolyInstance *inst, int *out_len) {
+  if (!out_len) return NULL;
+  *out_len = 0;
+  if (!inst || inst->stage != POLY_INSTANCE_BUILT || inst->n_entrypoints <= 0 ||
+      !inst->entrypoints || !inst->entry_executables)
+    return NULL;
+
+  PolyIrBufEntry *bufs = inst->n_bufs > 0 ? calloc((size_t)inst->n_bufs, sizeof(*bufs)) : NULL;
+  PolyIrEntrypoint *eps = calloc((size_t)inst->n_entrypoints, sizeof(*eps));
+  if ((inst->n_bufs > 0 && !bufs) || !eps) {
+    free(bufs);
+    free(eps);
+    return NULL;
+  }
+
+  for (int i = 0; i < inst->n_bufs; i++) {
+    bufs[i].name = inst->bufs[i].name;
+    bufs[i].role = inst->bufs[i].role;
+    bufs[i].buffer = inst->bufs[i].buffer;
+    bufs[i].ndim = inst->bufs[i].ndim;
+    bufs[i].trainable = inst->bufs[i].trainable;
+    bufs[i].trainable_set = true;
+    memcpy(bufs[i].shape, inst->bufs[i].shape, (size_t)inst->bufs[i].ndim * sizeof(*bufs[i].shape));
+  }
+  for (int i = 0; i < inst->n_entrypoints; i++) {
+    PolyCompiledSchedule *compiled = instance_ensure_entry_executable(inst, i);
+    if (!compiled || !compiled->linear || compiled->linear->op != POLY_OP_LINEAR) {
+      free(bufs);
+      free(eps);
+      return NULL;
+    }
+    eps[i] = (PolyIrEntrypoint){
+        .name = inst->entrypoints[i].name,
+        .sink = compiled->linear,
+        .inputs = (const char **)inst->entrypoints[i].inputs,
+        .n_inputs = inst->entrypoints[i].n_inputs,
+        .outputs = (const char **)inst->entrypoints[i].outputs,
+        .n_outputs = inst->entrypoints[i].n_outputs,
+        .objective = inst->entrypoints[i].objective,
+        .flags = inst->entrypoints[i].flags,
+    };
+  }
+
+  PolyIrSpec spec = {
+      .ctx = inst->ctx,
+      .bufs = bufs,
+      .n_bufs = inst->n_bufs,
+      .entrypoints = eps,
+      .n_entrypoints = inst->n_entrypoints,
+  };
+  uint8_t *bytes = poly_program_graph_export(&spec, out_len);
+  free(bufs);
+  free(eps);
+  return bytes;
+}
+
+PolyInstance *poly_instance_from_program(
+    const uint8_t *program_data,
+    int program_len,
+    const uint8_t *weights_data,
+    int weights_len
+) {
+  PolyIrSpec spec = {0};
+  if (poly_program_graph_import(program_data, program_len, &spec) != 0) {
+    fprintf(stderr, "poly_instance_from_program: program import failed\n");
+    return NULL;
+  }
+  PolyInstance *inst = instance_from_spec(&spec, NULL, NULL, true, true);
+  if (!inst) return NULL;
+  inst->has_portable_source = false;
+
+  bool has_state = false;
+  for (int i = 0; i < inst->n_bufs; i++)
+    if (instance_role_is_state(inst->bufs[i].role)) {
+      has_state = true;
+      break;
+    }
+  if (has_state && (!weights_data || weights_len <= 0)) {
+    fprintf(stderr, "poly_instance_from_program: bound state requires weights\n");
+    poly_instance_free(inst);
+    return NULL;
+  }
+  if (weights_data && weights_len > 0) {
+    if (instance_validate_checkpoint(inst, weights_data, weights_len, true) != 0 ||
+        poly_instance_import_weights(inst, weights_data, weights_len) != 0) {
+      fprintf(stderr, "poly_instance_from_program: weight import failed\n");
+      poly_instance_free(inst);
+      return NULL;
+    }
+  }
+
+  for (int i = 0; i < inst->n_entrypoints; i++)
+    if (!instance_ensure_entry_executable(inst, i)) {
+      fprintf(stderr, "poly_instance_from_program: executable reconstruction failed\n");
+      poly_instance_free(inst);
+      return NULL;
+    }
+  return inst;
 }
 
 /* Device configuration */
@@ -3383,8 +3507,8 @@ int poly_instance_set_device_map(
     const PolyInstanceDeviceMapEntry *entries,
     int n_entries
 ) {
-  if (!inst || inst->stage != POLY_INSTANCE_BUILT || !inst->ctx || !entries ||
-      n_entries <= 0 || n_entries != inst->n_modules || !inst->modules)
+  if (!inst || inst->stage != POLY_INSTANCE_BUILT || !inst->has_portable_source || !inst->ctx ||
+      !entries || n_entries <= 0 || n_entries != inst->n_modules || !inst->modules)
     return -1;
 
   size_t nb = (size_t)(unsigned)inst->n_bufs;
@@ -3489,7 +3613,7 @@ int poly_instance_set_device_map_arrays(
 }
 
 int poly_instance_set_device(PolyInstance *inst, PolyDevice device) {
-  if (!inst || inst->stage != POLY_INSTANCE_BUILT) return -1;
+  if (!inst || inst->stage != POLY_INSTANCE_BUILT || !inst->has_portable_source) return -1;
 
   /* Resolve AUTO the same way tensor placement does: an explicit environment
    * device wins, otherwise use the platform default. */
@@ -3779,7 +3903,7 @@ int poly_instance_set_optimizer_ex(
     bool nesterov,
     bool classic
 ) {
-  if (!inst || inst->stage != POLY_INSTANCE_BUILT) return -1;
+  if (!inst || inst->stage != POLY_INSTANCE_BUILT || !inst->has_portable_source) return -1;
   if (momentum < 0.0f) return -1;
 
   inst->optim.kind = kind;
@@ -3959,7 +4083,8 @@ int poly_instance_value_and_grad(
     int n_io,
     float *loss_out
 ) {
-  if (!inst || inst->stage != POLY_INSTANCE_BUILT || !entrypoint) return -1;
+  if (!inst || inst->stage != POLY_INSTANCE_BUILT || !inst->has_portable_source || !entrypoint)
+    return -1;
 
   int ep_idx = find_entrypoint(inst, entrypoint);
   if (ep_idx < 0) {
@@ -4227,7 +4352,7 @@ static int ensure_train_graph(PolyInstance *inst, int loss_ep_idx) {
 /* Train Step */
 
 int poly_instance_train_step(PolyInstance *inst, PolyIOBinding *io, int n_io, float *loss_out) {
-  if (!inst || inst->stage != POLY_INSTANCE_BUILT) return -1;
+  if (!inst || inst->stage != POLY_INSTANCE_BUILT || !inst->has_portable_source) return -1;
   if (inst->optim.kind == POLY_OPTIM_NONE) {
     fprintf(stderr, "poly_instance_train_step: no optimizer configured\n");
     return -1;

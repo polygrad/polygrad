@@ -22,6 +22,36 @@ class TestModelConstructors:
         assert callable(MLP)
 
 
+class TestCompiledProgramExport:
+    def test_bound_program_and_separate_weights_roundtrip(self):
+        source = MLP({
+            'layers': [2, 3, 1], 'activation': 'relu',
+            'bias': True, 'loss': 'mse', 'batch_size': 1, 'seed': 42,
+        })
+        restored = None
+        try:
+            program = source.export_program()
+            weights = source.export_weights()
+            assert program[:4] == b'PGPM'
+            assert program != source.export_ir()
+            with pytest.raises(RuntimeError):
+                Instance.from_program(program)
+            restored = Instance.from_program(program, weights)
+            x = np.array([1.25, -0.5], dtype=np.float32)
+            y = np.array([0.75], dtype=np.float32)
+            np.testing.assert_array_equal(
+                restored.forward(x=x)['output'], source.forward(x=x)['output'])
+            np.testing.assert_array_equal(
+                restored.call('loss', x=x, y=y)['loss'],
+                source.call('loss', x=x, y=y)['loss'])
+            assert restored.export_ir() is None
+            assert restored.export_program() == program
+        finally:
+            if restored is not None:
+                restored.free()
+            source.free()
+
+
 class TestMLPCreate:
     def test_create_simple(self):
         inst = MLP(
