@@ -113,6 +113,55 @@ async function runTensorTests(pg) {
     assertClose(await t.toArray(), [1, 2, 3])
   })
 
+  await test('Tensor dispose retires its exact core owner', async () => {
+    const before = pg.stats().coreStats.tensorRecords
+    const t = Tensor.empty([8], { dtype: 'float32' })
+    assert(pg.stats().coreStats.tensorRecords === before + 1,
+      'Tensor construction should add one core owner')
+    await t.dispose()
+    assert(pg.stats().coreStats.tensorRecords === before,
+      'Tensor dispose should retire its exact core owner')
+    await t.dispose()
+  })
+
+  await test('raw UOp owns residency after Tensor dispose', async () => {
+    const before = pg.stats().coreStats
+    const t = Tensor.empty([1024], { dtype: 'float32' })
+    t.copyFrom(new Float32Array(1024))
+    const uop = t.uop
+    await t.dispose()
+    let stats = pg.stats().coreStats
+    assert(stats.tensorRecords === before.tensorRecords,
+      'raw UOp ownership should not retain the Tensor record')
+    assert(stats.memUsed === before.memUsed + 4096,
+      'raw physical UOp should retain its storage')
+    await uop.dispose()
+    stats = pg.stats().coreStats
+    assert(stats.memUsed === before.memUsed,
+      'raw UOp dispose should retire its storage')
+  })
+
+  await test('downstream core graph owns disposed input residency', async () => {
+    const before = pg.stats().coreStats
+    const input = Tensor.empty([1024], { dtype: 'float32' })
+    input.copyFrom(new Float32Array(1024))
+    const one = new Tensor(1, { dtype: 'float32' })
+    const out = input.add(one)
+    await input.dispose()
+    await one.dispose()
+    let stats = pg.stats().coreStats
+    assert(stats.memUsed === before.memUsed + 4096,
+      'downstream physical UOp graph should retain input storage')
+    await out.realize()
+    stats = pg.stats().coreStats
+    assert(stats.memUsed === before.memUsed + 4096,
+      'realized output should replace obsolete input storage')
+    await out.dispose()
+    stats = pg.stats().coreStats
+    assert(stats.memUsed === before.memUsed,
+      'last downstream owner should retire output storage')
+  })
+
   await test('array and TypedArray dtype inference matches tinygrad', async () => {
     assert(new Tensor([[1, 2], [3, 4]]).dtype === 'int32', 'nested integers should infer int32')
     assert(new Tensor([true, false]).dtype === 'bool', 'booleans should infer bool')

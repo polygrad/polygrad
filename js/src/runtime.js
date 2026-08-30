@@ -26,13 +26,19 @@ function normalizeOptions(opts) {
 class PolyRuntime {
   constructor(binding) {
     this._core = binding
+    const caps = binding && binding.caps
+    this._lifetime = {
+      alive: true,
+      core: binding,
+      asyncHost: Boolean(caps && caps.core === 'wasm' && caps.device === 'webgpu')
+    }
     this._closing = false
     this._disposePromise = null
     this._activeAsync = 0
     this._asyncDrain = []
     this.supportsInstance = Boolean(binding.instance)
-    this.Tensor = createBoundTensorClass(this)
     this.uop = createBoundUopNamespace(this)
+    this.Tensor = createBoundTensorClass(this)
     this.jit = createBoundJit(this)
     this.compile = this.jit.compile
     this.jitAsync = this.jit.async
@@ -79,6 +85,9 @@ class PolyRuntime {
   }
 
   stats() {
+    if (this._activeAsync > 0) {
+      throw new Error('polygrad runtime has active async work')
+    }
     const coreStats = this._core && this._core.ffi && this._core.ffi.poly_ctx_stats
       ? this._core.ffi.poly_ctx_stats(this._core.ctx)
       : null
@@ -171,14 +180,22 @@ class PolyRuntime {
     this._closing = true
 
     if (!asyncHost) {
+      if (this.Instance && this.Instance._disposeAll) this.Instance._disposeAll()
       if (this.jit && this.jit.disposeAll) this.jit.disposeAll(true)
+      if (this.Tensor && this.Tensor._disposeAll) this.Tensor._disposeAll()
+      if (this.uop && this.uop._disposeAll) this.uop._disposeAll()
+      if (this._lifetime) this._lifetime.alive = false
       if (core.destroy) core.destroy()
       this._core = null
       return undefined
     }
 
-    this._disposePromise = this._waitForAsync().then(() => {
+    this._disposePromise = this._waitForAsync().then(async () => {
+      if (this.Instance && this.Instance._disposeAll) await this.Instance._disposeAll()
       if (this.jit && this.jit.disposeAll) this.jit.disposeAll(true)
+      if (this.Tensor && this.Tensor._disposeAll) await this.Tensor._disposeAll()
+      if (this.uop && this.uop._disposeAll) this.uop._disposeAll()
+      if (this._lifetime) this._lifetime.alive = false
       return core.destroy ? core.destroy() : undefined
     }).finally(() => {
       this._core = null

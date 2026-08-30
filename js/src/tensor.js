@@ -324,6 +324,7 @@ function sumAccumulatorDtype(dtype) {
 
 function createBoundTensorClass(runtime) {
   const _runtime = runtime
+  const lifetime = _runtime._lifetime
   const DTYPE_ID = _runtime._core.dtypeIds
   if (!DTYPE_ID) throw new Error('polygrad: core missing dtypeIds')
   const DTYPE_NAME_BY_ID = new Map(
@@ -331,6 +332,12 @@ function createBoundTensorClass(runtime) {
   )
   const ffi = _runtime._core.ffi
   const ops = _runtime._core.ops || {}
+  const liveCore = () => {
+    if (!lifetime.alive || !_runtime._core) {
+      throw new Error('polygrad runtime has been disposed')
+    }
+    return _runtime._core
+  }
   const POLY_TENSOR_VALUE = 0
   const normalizeDevice = (device) => String(device || _runtime.device || 'cpu').toLowerCase()
   const deviceId = (device) => ffi.poly_device_by_name(normalizeDevice(device))
@@ -342,6 +349,24 @@ function createBoundTensorClass(runtime) {
   const tensorUopPhysical = (tensor) => ffi.poly_tensor_uop_physical(tensor)
   const tensorUopLogical = (tensor) => ffi.poly_tensor_uop_logical(tensor)
   const tensorDevice = (tensor) => ffi.poly_tensor_device(tensor)
+  const tensorFinalizer = typeof FinalizationRegistry === 'undefined'
+    ? null
+    : new FinalizationRegistry((owner) => {
+        const pending = releaseTensorOwner(owner)
+        if (pending && typeof pending.then === 'function') pending.catch(() => {})
+      })
+  function releaseTensorOwner(owner, token = null) {
+    if (!owner || !owner.active) return undefined
+    owner.active = false
+    if (tensorFinalizer && token) tensorFinalizer.unregister(token)
+    if (!owner.state.alive) return undefined
+    const release = () => owner.ffi.poly_tensor_release(owner.tensor)
+    if (owner.state.asyncHost && owner.state.core && owner.state.core.enqueueAsync) {
+      return owner.state.core.enqueueAsync(release)
+    }
+    release()
+    return undefined
+  }
   const uopKey = (uop) => {
     if (!uop) return '0'
     if (ffi.poly_uop_key) return String(ffi.poly_uop_key(uop))
@@ -388,19 +413,23 @@ function createBoundTensorClass(runtime) {
         // Hash-consed duplicate sources share one AFTER. tinygrad uses the
         // first matching CALL slot and passes its accumulated gradient once.
         if (activeAfter && !activeSeen.has(activeKey)) {
-          const afterSrc = new UOp(ctx, ffi, activeAfter).src
+          const afterSrc = new UOp(ctx, ffi, activeAfter, false).src
           if (afterSrc.length !== 2 || afterSrc[1].op !== ops.CALL) {
             throw new Error('customKernel active output is not AFTER(data, CALL)')
           }
+          const activeCall = afterSrc[1].raw
           const callSrc = afterSrc[1].src
-          if (callSrc.length !== rec.args.length + 1) {
+          if (uopKey(activeCall) !== rec.call) {
+            throw new Error('customKernel active CALL identity changed')
+          }
+          if (callSrc.length !== rec.nArgs + 1) {
             throw new Error('customKernel active CALL argument count changed')
           }
           activeSeen.add(activeKey)
           // Pinned tinygrad mixin/gradient.py:90-91 and :25-31 passes the
           // exact reachable CALL and its matching argument slot to
           // call_gradient. Select both from this active AFTER representation.
-          active.push({ after: activeAfter, arg: callSrc[i + 1].raw, call: afterSrc[1].raw })
+          active.push({ after: activeAfter, arg: callSrc[i + 1].raw, call: activeCall })
         }
       }
       if (active.length) out.push({ rec, active })
@@ -470,6 +499,9 @@ function createBoundTensorClass(runtime) {
      * @param {object} opts
      */
     constructor(data, opts) {
+      if (!lifetime.alive || !_runtime._core) {
+        throw new Error('polygrad runtime has been disposed')
+      }
       if (!opts) opts = {}
       const core = _runtime._core
       if (data instanceof UOp && !opts._uop) {
@@ -488,7 +520,9 @@ function createBoundTensorClass(runtime) {
       this._grad = null
       this._isParam = Boolean(opts.isParam || opts.is_param || opts._isParam)
       this._device = normalizeDevice(opts._device || opts.device || _runtime.device || 'cpu')
-      this._tensor = opts._tensor || null
+      this._tensor = null
+      this._tensorOwner = null
+      if (opts._tensor) this._adoptCoreTensor(opts._tensor)
       let currentUop = null
       let importedTensorFromHost = false
       const optUop = opts._uop || (this._tensor ? tensorUop(this._tensor) : null)
@@ -497,7 +531,7 @@ function createBoundTensorClass(runtime) {
         // Internal construction from ops -- shape is on the UOp.
         // Accept either a UOp wrapper instance or a raw handle.
         const raw = rawUop(optUop)
-        currentUop = optUop instanceof UOp ? optUop : new UOp(this._ctx, core.ffi, raw)
+        currentUop = optUop instanceof UOp ? optUop : new UOp(this._ctx, core.ffi, raw, false)
         this._data = opts._data || null
         this._dtype = dtypeNameForUop(this._ctx, raw, opts._dtype)
       } else {
@@ -518,18 +552,18 @@ function createBoundTensorClass(runtime) {
           const targetDeviceId = deviceId(this._device)
           if (dt === 'bool' || isIntegerDtype(dt)) {
             const value = dt === 'bool' ? (data ? 1 : 0) : Math.trunc(Number(data))
-            this._tensor = ffi.poly_tensor_const_int_by_id(
+            this._adoptCoreTensor(ffi.poly_tensor_const_int_by_id(
               this._ctx, value, dtypeId, targetDeviceId
-            )
+            ))
           } else {
-            this._tensor = ffi.poly_tensor_const_float_by_id(
+            this._adoptCoreTensor(ffi.poly_tensor_const_float_by_id(
               this._ctx, Number(data), dtypeId, targetDeviceId
-            )
+            ))
           }
           if (!this._tensor) throw new Error('C-owned scalar Tensor construction failed')
           const physical = tensorUopPhysical(this._tensor)
           if (!physical) throw new Error('scalar Tensor has no physical root')
-          currentUop = new UOp(this._ctx, core.ffi, physical)
+          currentUop = new UOp(this._ctx, core.ffi, physical, false)
           this._dtype = dt
           this._data = null
         } else if (ArrayBuffer.isView(data) && !(data instanceof DataView)) {
@@ -556,27 +590,30 @@ function createBoundTensorClass(runtime) {
           // unspecified/scalar host buffer and applies its scalar numel fallback.
           const dims = shape.length ? shape : null
           let ownerUop = null
-          this._tensor = ffi.poly_tensor_from_host_by_id(
+          this._adoptCoreTensor(ffi.poly_tensor_from_host_by_id(
             this._ctx, flat, flat.byteLength, dtypeId, dims, dims ? dims.length : 0
-          )
+          ))
           if (!this._tensor) throw new Error('poly_tensor_from_host_by_id failed')
           const physical = tensorUopPhysical(this._tensor)
           if (!physical) throw new Error('host Tensor source has no physical root')
-          currentUop = new UOp(this._ctx, core.ffi, physical)
+          currentUop = new UOp(this._ctx, core.ffi, physical, false)
           ownerUop = currentUop
           if (postCastDtype) {
-            this._tensor = ffi.poly_tensor_cast_by_id(
+            const castTensor = ffi.poly_tensor_cast_by_id(
               this._ctx, this._tensor, DTYPE_ID[postCastDtype]
             )
-            if (!this._tensor) {
+            if (!castTensor) {
               throw new Error(`poly_tensor_cast_by_id failed for dtype ${postCastDtype}`)
             }
+            this._adoptCoreTensor(castTensor)
             const castPhysical = tensorUopPhysical(this._tensor)
             if (!castPhysical) throw new Error('cast host Tensor has no physical root')
-            currentUop = new UOp(this._ctx, core.ffi, castPhysical)
+            currentUop = new UOp(this._ctx, core.ffi, castPhysical, false)
           }
           importedTensorFromHost = true
-          const buffer = ownerUop && ownerUop.buffer ? ownerUop.buffer.raw : null
+          const buffer = ownerUop
+            ? core.ffi.poly_uop_buffer(this._ctx, ownerUop.raw)
+            : null
           const needsFrontendHostOwner =
             Boolean(buffer && core.ffi.poly_buffer_get_key) &&
             (!core.caps || core.caps.core !== 'wasm')
@@ -594,14 +631,47 @@ function createBoundTensorClass(runtime) {
         const targetDeviceId = deviceId(this._device)
         const sourceDeviceId = tensorDevice(this._tensor)
         if (targetDeviceId !== sourceDeviceId) {
-          this._tensor = ffi.poly_tensor_to_device(this._ctx, this._tensor, targetDeviceId)
-          if (!this._tensor) throw new Error(`poly_tensor_to_device failed for ${this._device}`)
+          const movedTensor = ffi.poly_tensor_to_device(this._ctx, this._tensor, targetDeviceId)
+          if (!movedTensor) throw new Error(`poly_tensor_to_device failed for ${this._device}`)
+          this._adoptCoreTensor(movedTensor)
         }
       } else if (!this._tensor && currentUop) {
-        this._tensor = this._coreCreate(currentUop.raw, POLY_TENSOR_VALUE, this._device)
+        this._adoptCoreTensor(
+          this._coreCreate(currentUop.raw, POLY_TENSOR_VALUE, this._device)
+        )
       }
       this._syncCoreRequiresGrad()
       registerTensor(this)
+    }
+
+    _adoptCoreTensor(tensor) {
+      if (!tensor) return null
+      if (this._tensorOwner) {
+        const pending = releaseTensorOwner(this._tensorOwner, this)
+        if (pending && typeof pending.then === 'function') pending.catch(() => {})
+      }
+      this._tensor = tensor
+      this._tensorOwner = { state: lifetime, ffi, tensor, active: true }
+      if (tensorFinalizer) tensorFinalizer.register(this, this._tensorOwner, this)
+      return tensor
+    }
+
+    _takeCoreTensor() {
+      const tensor = this._tensor
+      if (this._tensorOwner) {
+        this._tensorOwner.active = false
+        if (tensorFinalizer) tensorFinalizer.unregister(this)
+      }
+      this._tensorOwner = null
+      this._tensor = null
+      return tensor
+    }
+
+    dispose() {
+      const owner = this._tensorOwner
+      this._tensorOwner = null
+      this._tensor = null
+      return releaseTensorOwner(owner, this)
     }
 
     _coreCreate(uop, role, device) {
@@ -622,9 +692,26 @@ function createBoundTensorClass(runtime) {
       }
     }
 
-    _currentUopRaw() { return this._tensor ? tensorUop(this._tensor) : null }
-    _logicalUopRaw() { return this._tensor ? tensorUopLogical(this._tensor) : null }
-    _physicalUopRaw() { return this._tensor ? tensorUopPhysical(this._tensor) : null }
+    _requireLive() {
+      if (!lifetime.alive || !_runtime._core) {
+        throw new Error('polygrad runtime has been disposed')
+      }
+    }
+
+    _currentUopRaw() {
+      this._requireLive()
+      return this._tensor ? tensorUop(this._tensor) : null
+    }
+
+    _logicalUopRaw() {
+      this._requireLive()
+      return this._tensor ? tensorUopLogical(this._tensor) : null
+    }
+
+    _physicalUopRaw() {
+      this._requireLive()
+      return this._tensor ? tensorUopPhysical(this._tensor) : null
+    }
     _coreToDevice(device) {
       if (!this._tensor) throw new Error('Tensor has no core PolyTensor')
       return ffi.poly_tensor_to_device(this._ctx, this._tensor, deviceId(device))
@@ -648,8 +735,8 @@ function createBoundTensorClass(runtime) {
 
     get _uop() { return this._currentUopRaw() }
     get _buffer() {
-      const u = this.uop
-      return u && u.buffer ? u.buffer.raw : null
+      const raw = this._currentUopRaw()
+      return raw ? ffi.poly_uop_buffer(this._ctx, raw) : null
     }
     get uop() {
       const raw = this._currentUopRaw()
@@ -775,7 +862,8 @@ function createBoundTensorClass(runtime) {
       const numel = this.numel()
       const AT = TA_BY_DTYPE[this._dtype] || Float32Array
       const itemsize = AT.BYTES_PER_ELEMENT
-      const bufRaw = this.uop && this.uop.buffer ? this.uop.buffer.raw : null
+      const current = this._currentUopRaw()
+      const bufRaw = current ? ffi.poly_uop_buffer(this._ctx, current) : null
       if (!bufRaw) throw new Error('toArray: tensor has no buffer identity')
       let raw
       const bufferKey = ffi.poly_buffer_get_key ? ffi.poly_buffer_get_key(ctx, bufRaw) : 0
@@ -816,7 +904,8 @@ function createBoundTensorClass(runtime) {
       const numel = this.numel()
       const AT = TA_BY_DTYPE[this._dtype] || Float32Array
       const itemsize = AT.BYTES_PER_ELEMENT
-      const bufRaw = this.uop && this.uop.buffer ? this.uop.buffer.raw : null
+      const current = this._currentUopRaw()
+      const bufRaw = current ? ffi.poly_uop_buffer(this._ctx, current) : null
       if (!bufRaw) throw new Error('toArray: tensor has no buffer identity')
       let raw
       const bufferKey = ffi.poly_buffer_get_key ? ffi.poly_buffer_get_key(ctx, bufRaw) : 0
@@ -1023,7 +1112,6 @@ function createBoundTensorClass(runtime) {
       })
       const cloned = ffi.poly_tensor_clone_into(this._ctx, t._tensor, this._tensor)
       if (!cloned) throw new Error('poly_tensor_clone_into failed')
-      t._tensor = cloned
       t._isParam = this._isParam
       if (this._grad) t._grad = this._grad.clone(dev)
       return t
@@ -1049,7 +1137,6 @@ function createBoundTensorClass(runtime) {
       }
       const assigned = ffi.poly_tensor_assign(this._ctx, this._tensor, x._tensor)
       if (!assigned) throw new Error('poly_tensor_assign failed')
-      this._tensor = assigned
       this._syncCoreRequiresGrad()
       this._data = null
       return this
@@ -1062,8 +1149,7 @@ function createBoundTensorClass(runtime) {
         )
       }
       const logicalRaw = this._logicalUopRaw() || this._currentUopRaw()
-      const logical = logicalRaw ? new UOp(this._ctx, this._rt._core.ffi, logicalRaw) : null
-      const buf = logical && logical.buffer ? logical.buffer.raw : null
+      const buf = logicalRaw ? ffi.poly_uop_buffer(this._ctx, logicalRaw) : null
       if (!buf) throw new Error('copyFrom requires a tensor backed by a BUFFER UOp')
       const AT = TA_BY_DTYPE[this._dtype] || Float32Array
       const expectedBytes = this.numel() * AT.BYTES_PER_ELEMENT
@@ -1088,8 +1174,7 @@ function createBoundTensorClass(runtime) {
       let physicalRaw = this._physicalUopRaw()
       let writeBuf = buf
       if (physicalRaw) {
-        const physical = new UOp(this._ctx, this._rt._core.ffi, physicalRaw)
-        const physicalBuf = physical && physical.buffer ? physical.buffer.raw : null
+        const physicalBuf = ffi.poly_uop_buffer(this._ctx, physicalRaw)
         if (physicalBuf && uopKey(physicalBuf) !== uopKey(buf)) {
           writeBuf = physicalBuf
         } else if (!physicalBuf) {
@@ -1116,6 +1201,7 @@ function createBoundTensorClass(runtime) {
     to(device) {
       const dev = normalizeDevice(device)
       if (dev === this._device) return this
+      if (Number(ffi.poly_uop_device(this._currentUopRaw())) === deviceId('auto')) return this
       const coreTensor = this._coreToDevice(dev)
       const t = new Tensor(null, {
         _ctx: this._ctx,
@@ -1133,7 +1219,7 @@ function createBoundTensorClass(runtime) {
     to_(device) {
       const moved = this.to(device)
       if (moved === this) return this
-      this._tensor = moved._tensor
+      this._adoptCoreTensor(moved._takeCoreTensor())
       this._data = moved._data
       this._dtype = moved._dtype
       this._device = moved._device
@@ -1215,7 +1301,7 @@ function createBoundTensorClass(runtime) {
         return graph && ffi.poly_uop_op && ffi.poly_uop_op(graph) === ops.AFTER ? t : t.contiguous()
       })
       const placeholders = contig.map(
-        (t, i) => UOp.placeholderLike(new UOp(t._ctx, ffi, t._currentUopRaw()), i)
+        (t, i) => UOp.placeholderLike(new UOp(t._ctx, ffi, t._currentUopRaw(), false), i)
       )
       const body = fxn(...placeholders)
       if (!(body instanceof UOp)) throw new TypeError('customKernel function must return a UOp SINK body')
@@ -1227,7 +1313,7 @@ function createBoundTensorClass(runtime) {
       }
       const physicalAfters = []
       const outs = contig.map((t, i) => {
-        const physical = new UOp(t._ctx, ffi, tensorUopPhysical(cores[i]))
+        const physical = tensorUopPhysical(cores[i])
         physicalAfters.push(physical)
         return new Tensor(null, {
           _ctx: t._ctx,
@@ -1237,11 +1323,14 @@ function createBoundTensorClass(runtime) {
           requiresGrad: t._requiresGrad
         })
       })
-      const call = physicalAfters[0].src[1]
+      const call = ffi.poly_uop_src(physicalAfters[0], 1)
+      if (!call || Number(ffi.poly_uop_op(call)) !== ops.CALL) {
+        throw new Error('customKernel physical output is not AFTER(data, CALL)')
+      }
       customKernelGradRecords.push({
         ctx: this._ctx,
-        call,
-        args: call.src.slice(1),
+        call: uopKey(call),
+        nArgs: Number(ffi.poly_uop_n_src(call)) - 1,
         physicalAfters,
         gradFxn
       })
@@ -2700,7 +2789,7 @@ function createBoundTensorClass(runtime) {
       if (operands.some(t => !t || !t._tensor || !t._ctx)) {
         throw new TypeError('einsum operands must be Tensors')
       }
-      const { ffi } = _runtime._core
+      const { ffi } = liveCore()
       const ctx = operands[0]._ctx
       if (operands.some(t => t._ctx !== ctx)) {
         throw new Error('einsum operands must belong to the same Polygrad context')
@@ -2781,9 +2870,9 @@ function createBoundTensorClass(runtime) {
           const upstreams = activeAliases
             .filter(({ afterRaw }) => presentByRoot.get(uopKey(afterRaw)) === true)
             .map(({ afterRaw }) => gradByRoot.get(uopKey(afterRaw)))
-            .map(raw => new UOp(this._ctx, ffi, raw))
+            .map(raw => new UOp(this._ctx, ffi, raw, false))
           if (!upstreams.length) continue
-          const call = new UOp(this._ctx, ffi, activeCall)
+          const call = new UOp(this._ctx, ffi, activeCall, false)
           const callArgs = call.src.slice(1)
           if (!rec.gradFxn) {
             const needsCallGrad = callArgs.some(arg => targetUops.some(target =>
@@ -2888,7 +2977,7 @@ function createBoundTensorClass(runtime) {
       if (typeof shape === 'number') shape = [shape]
       shape = Array.from(shape, Number)
       opts = opts ? { ...opts } : {}
-      const ctx = opts._ctx || _runtime._core.ctx
+      const ctx = opts._ctx || liveCore().ctx
       const device = normalizeDevice(opts._device || opts.device || _runtime.device || 'cpu')
       const dtypeExplicit = Object.prototype.hasOwnProperty.call(opts, 'dtype')
       const buffer = opts.buffer !== false
@@ -2922,7 +3011,7 @@ function createBoundTensorClass(runtime) {
       if (step === undefined) step = 1
       if (step === 0) throw new Error('Tensor.arange step must not be zero')
       opts = opts ? { ...opts } : {}
-      const ctx = opts._ctx || _runtime._core.ctx
+      const ctx = opts._ctx || liveCore().ctx
       const device = normalizeDevice(opts._device || opts.device || _runtime.device || 'cpu')
       const dtype = opts.dtype || (
         [start, stop, step].every(Number.isInteger) ? 'int32' : 'float32'
@@ -2946,7 +3035,7 @@ function createBoundTensorClass(runtime) {
 
     static manual_seed(seed = 0) {
       // Pinned tinygrad tensor.py:475-504 resets all per-device RNG versions.
-      ffi.poly_tensor_manual_seed(_runtime._core.ctx, Math.trunc(Number(seed)))
+      ffi.poly_tensor_manual_seed(liveCore().ctx, Math.trunc(Number(seed)))
     }
 
     static rand(...args) {
@@ -2965,13 +3054,14 @@ function createBoundTensorClass(runtime) {
       if (!isFloatDtype(dtype)) throw new Error(`rand only supports float dtypes, got ${dtype}`)
       const device = normalizeDevice(opts.device || _runtime.device || 'cpu')
       const dtypeId = DTYPE_ID[dtype]
+      const ctx = liveCore().ctx
       const tensor = ffi.poly_tensor_rand_by_id(
-        _runtime._core.ctx, shape, shape.length, dtypeId, deviceId(device),
+        ctx, shape, shape.length, dtypeId, deviceId(device),
         opts.contiguous === false ? 0 : 1
       )
       if (!tensor) throw new Error('poly_tensor_rand_by_id failed')
       return new Tensor(null, {
-        _ctx: _runtime._core.ctx, _tensor: tensor, _dtype: dtype, _device: device,
+        _ctx: ctx, _tensor: tensor, _dtype: dtype, _device: device,
         requiresGrad: Boolean(opts.requiresGrad || opts.requires_grad)
       })
     }
@@ -3007,12 +3097,13 @@ function createBoundTensorClass(runtime) {
         throw new Error(`invalid input shape=${JSON.stringify(shape)}`)
       }
       if (!isFloatDtype(dtype)) throw new Error(`randn only supports float dtypes, got ${dtype}`)
+      const ctx = liveCore().ctx
       const tensor = ffi.poly_tensor_randn_by_id(
-        _runtime._core.ctx, shape, shape.length, DTYPE_ID[dtype], deviceId(device)
+        ctx, shape, shape.length, DTYPE_ID[dtype], deviceId(device)
       )
       if (!tensor) throw new Error('poly_tensor_randn_by_id failed')
       return new Tensor(null, {
-        _ctx: _runtime._core.ctx, _tensor: tensor, _dtype: dtype, _device: device,
+        _ctx: ctx, _tensor: tensor, _dtype: dtype, _device: device,
         requiresGrad: Boolean(opts.requiresGrad || opts.requires_grad)
       })
     }
@@ -3116,7 +3207,7 @@ function createBoundTensorClass(runtime) {
 
     static linspace(start, stop, steps, opts) {
       opts = opts ? { ...opts } : {}
-      const ctx = opts._ctx || _runtime._core.ctx
+      const ctx = opts._ctx || liveCore().ctx
       const device = normalizeDevice(opts._device || opts.device || _runtime.device || 'cpu')
       const dtype = opts.dtype || 'float32'
       const dtypeId = DTYPE_ID[dtype]
@@ -3134,7 +3225,7 @@ function createBoundTensorClass(runtime) {
     static eye(n, m, opts) {
       if (typeof m === 'object' && m !== null) { opts = m; m = undefined }
       opts = opts ? { ...opts } : {}
-      const ctx = opts._ctx || _runtime._core.ctx
+      const ctx = opts._ctx || liveCore().ctx
       const device = normalizeDevice(opts._device || opts.device || _runtime.device || 'cpu')
       const dtype = opts.dtype || 'float32'
       const dtypeId = DTYPE_ID[dtype]
@@ -3163,7 +3254,7 @@ function createBoundTensorClass(runtime) {
       if (opts && Object.prototype.hasOwnProperty.call(opts, 'name')) {
         throw new TypeError('Tensor.empty does not accept name; pass names to Instance.fromTensors')
       }
-      const ctx = (opts && opts._ctx) || _runtime._core.ctx
+      const ctx = (opts && opts._ctx) || liveCore().ctx
       const dtype = (opts && opts.dtype) || 'float32'
       const dtypeId = DTYPE_ID[dtype] || DTYPE_ID.float32
       const tensorDevice = normalizeDevice(
@@ -3261,12 +3352,21 @@ function createBoundTensorClass(runtime) {
     }
 
     toString() {
-      return `Tensor(shape=[${this.shape}], dtype=${this.dtype}, realized=${this.uop.hasBufferIdentity()})`
+      return `Tensor(shape=[${this.shape}], dtype=${this.dtype}, realized=${ffi.poly_uop_has_buffer_identity(this._currentUopRaw())})`
     }
   }
 
   Tensor.training = false
   Tensor._liveTensorSnapshot = liveTensorSnapshot
+  Tensor._disposeAll = () => {
+    const pending = []
+    for (const tensor of liveTensorSnapshot()) {
+      const result = tensor.dispose()
+      if (result && typeof result.then === 'function') pending.push(result)
+    }
+    customKernelGradRecords.length = 0
+    return pending.length ? Promise.all(pending) : undefined
+  }
   return Tensor
 }
 

@@ -8,11 +8,23 @@ architecture factories live in ``polygrad.models``.
 import ctypes
 import ctypes.util
 import pathlib
+import weakref
 import numpy as np
 from . import _ffi
 from .device import _device_id
 
 _get_lib = _ffi.get_lib
+_live_instances = weakref.WeakSet()
+
+
+def _dispose_instances_for_ctx(ctx):
+    """Free borrowed-context Instances before their PolyCtx is destroyed."""
+    from .tensor import _ptr_value
+
+    ctx_key = _ptr_value(ctx)
+    for inst in list(_live_instances):
+        if inst._ptr and _ptr_value(inst._ctx) == ctx_key:
+            inst.free()
 
 _INSTANCE_DTYPE_NAMES = (
     'bool', 'int8', 'uint8', 'int16', 'uint16', 'int32', 'uint32',
@@ -271,7 +283,7 @@ def _instance_from_binding_specs(ctx, binding_rows, entry_rows, keepalive):
         func = err.func.decode('utf-8', 'replace') if err.func else 'poly_instance_from_bindings'
         detail = f'{func}: {msg}' if msg else func
         raise RuntimeError(f'poly_instance_from_bindings failed: {detail}')
-    return Instance(ptr)
+    return Instance(ptr, _ctx=ctx)
 
 
 class Instance:
@@ -279,7 +291,7 @@ class Instance:
 
     def __init__(self, ptr=None, *, inputs=None, targets=None, state=None,
                  outputs=None, entrypoints=None, params=None, losses=None,
-                 modules=None):
+                 modules=None, _ctx=None):
         spec_args = (inputs, targets, state, outputs, entrypoints, params, losses, modules)
         has_spec = any(v is not None for v in spec_args)
         if has_spec:
@@ -296,17 +308,25 @@ class Instance:
                 modules=modules,
             )
             self._ptr = built._ptr
+            self._ctx = built._ctx
             built._ptr = None
+            built._ctx = None
+            if self._ctx:
+                _live_instances.add(self)
             return
 
         if not ptr:
             raise RuntimeError('Failed to create PolyInstance (NULL pointer)')
         self._ptr = ptr
+        self._ctx = _ctx
+        if self._ctx:
+            _live_instances.add(self)
 
     def free(self):
         if self._ptr:
             _get_lib().poly_instance_free(self._ptr)
             self._ptr = None
+            self._ctx = None
 
     def __del__(self):
         if hasattr(self, '_ptr') and self._ptr:

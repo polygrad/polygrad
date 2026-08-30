@@ -2650,6 +2650,10 @@ cleanup:
   free(pending_out);
   free(pending_roots);
   free(pending_tensors);
+  /* Tensor realization is a context-thread safe point after current roots and
+   * JIT capture owners are published. Retire residency made unreachable by
+   * the same becomes-map update (Tinygrad tensor.py:195-203). */
+  if (rc == 0 && ctx->collection_dirty && poly_ctx_collect(ctx) != 0) rc = -1;
   return rc;
 }
 

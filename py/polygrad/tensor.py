@@ -26,6 +26,20 @@ from polygrad.helpers import TRAINING
 all_tensors: dict[weakref.ref, None] = {}
 _custom_kernel_grad_records = []
 
+
+def _dispose_tensors_for_ctx(ctx):
+    ctx_key = _ptr_value(ctx)
+    for ref in list(all_tensors):
+        tensor = ref()
+        if tensor is None:
+            all_tensors.pop(ref, None)
+        elif _ptr_value(tensor._ctx) == ctx_key:
+            tensor.dispose()
+            tensor._ctx = None
+    _custom_kernel_grad_records[:] = [
+        rec for rec in _custom_kernel_grad_records if rec.get('ctx') != ctx_key
+    ]
+
 # Strong frontend owner registry keyed by the C-side PolyBuffer* address value.
 # This is intentionally keyed by the retired/imported residency object, not by
 # BUFFER UOp identity. The core explicitly calls frontend_buffer_release(buffer)
@@ -68,7 +82,7 @@ def _ptr_value(ptr):
     raw = _uop_raw(ptr)
     if isinstance(raw, ctypes.c_void_p):
         return 0 if raw.value is None else int(raw.value)
-    return int(raw)
+    return int(raw) if raw else 0
 
 
 def _device_name_from_id(device_id):
@@ -664,13 +678,14 @@ class Tensor:
                     current_uop = UOp(self._ctx, current_raw)
                     owner_uop = current_uop
                     if post_cast_dt is not None:
-                        self._tensor = _ffi._lib.poly_tensor_cast_by_id(
+                        cast_tensor = _ffi._lib.poly_tensor_cast_by_id(
                             self._ctx, self._tensor, _dtype_id(post_cast_dt)
                         )
-                        if not self._tensor:
+                        if not cast_tensor:
                             raise RuntimeError(
                                 f'poly_tensor_cast_by_id failed for dtype {post_cast_dt}'
                             )
+                        self._replace_core_tensor(cast_tensor)
                         current_raw = self._core_uop_physical_raw(self._tensor)
                         if not current_raw:
                             raise RuntimeError('cast host Tensor has no physical root')
@@ -699,27 +714,58 @@ class Tensor:
             source_device_id = int(_ffi._lib.poly_tensor_device(self._tensor))
             target_device_id = _device_id(self._device)
             if target_device_id != source_device_id:
-                self._tensor = _ffi._lib.poly_tensor_to_device(
+                moved_tensor = _ffi._lib.poly_tensor_to_device(
                     self._ctx, self._tensor, target_device_id
                 )
-                if not self._tensor:
+                if not moved_tensor:
                     raise RuntimeError(f'poly_tensor_to_device failed for {self._device}')
+                self._replace_core_tensor(moved_tensor)
         elif self._tensor is None and current_uop is not None:
             source_device = disk_device if imported_from_disk else 'CPU'
             target_device_id = _device_id(self._device)
             source_device_id = _device_id(source_device)
             if imported_from_disk and target_device_id != source_device_id:
                 source = self._core_create(current_uop, _POLY_TENSOR_VALUE, source_device)
-                self._tensor = _ffi._lib.poly_tensor_to_device(
-                    self._ctx, source, target_device_id
-                )
-                if not self._tensor:
-                    raise RuntimeError(f'poly_tensor_to_device failed for {self._device}')
+                try:
+                    self._tensor = _ffi._lib.poly_tensor_to_device(
+                        self._ctx, source, target_device_id
+                    )
+                    if not self._tensor:
+                        raise RuntimeError(f'poly_tensor_to_device failed for {self._device}')
+                finally:
+                    if source:
+                        _ffi._lib.poly_tensor_release(source)
             else:
                 self._tensor = self._core_create(current_uop, _POLY_TENSOR_VALUE, self._device)
         self._grad = None
         self._is_param = True
         all_tensors[weakref.ref(self)] = None
+
+    def _replace_core_tensor(self, tensor):
+        old = getattr(self, '_tensor', None)
+        if _ptr_value(old) == _ptr_value(tensor):
+            self._tensor = tensor
+            return tensor
+        self._tensor = tensor
+        if old:
+            _ffi._lib.poly_tensor_release(old)
+        return tensor
+
+    def _take_core_tensor(self):
+        tensor = getattr(self, '_tensor', None)
+        self._tensor = None
+        return tensor
+
+    def dispose(self):
+        tensor = self._take_core_tensor()
+        if tensor:
+            _ffi._lib.poly_tensor_release(tensor)
+
+    def __del__(self):
+        try:
+            self.dispose()
+        except Exception:
+            pass
 
     # --- Core PolyTensor bridge ---
 
@@ -782,22 +828,30 @@ class Tensor:
 
     @property
     def uop(self):
+        if self._ctx is None:
+            raise RuntimeError('polygrad runtime has been disposed')
         raw = self._core_uop_raw(self._tensor)
         return _uop_wrap(self._ctx, raw)
 
     @property
     def uop_logical(self):
+        if self._ctx is None:
+            raise RuntimeError('polygrad runtime has been disposed')
         raw = self._core_uop_logical_raw(self._tensor)
         return _uop_wrap(self._ctx, raw)
 
     @property
     def uop_physical(self):
+        if self._ctx is None:
+            raise RuntimeError('polygrad runtime has been disposed')
         raw = self._core_uop_physical_raw(self._tensor)
         return _uop_wrap(self._ctx, raw)
 
     @property
     def shape(self):
         """Read shape from cached UOp fields (O(1), no allocation)."""
+        if self._ctx is None:
+            raise RuntimeError('polygrad runtime has been disposed')
         if getattr(self, '_shape_override', None) is not None:
             return self._shape_override
         if self._tensor is None:
@@ -820,6 +874,8 @@ class Tensor:
 
     @property
     def device(self):
+        if self._ctx is None:
+            raise RuntimeError('polygrad runtime has been disposed')
         if self._tensor is None:
             raise RuntimeError("Tensor has no core PolyTensor")
         raw = _ffi._lib.poly_device_name(
@@ -896,8 +952,8 @@ class Tensor:
         outs = []
         physical_afters = []
         for t, core in zip(contig, output_arr):
-            physical = _uop_wrap(t._ctx, self._core_uop_physical_raw(core))
-            physical_afters.append(physical)
+            physical = self._core_uop_physical_raw(core)
+            physical_afters.append(_ptr_value(physical))
             out = Tensor(
                 _ctx=t._ctx,
                 _tensor=core,
@@ -905,11 +961,13 @@ class Tensor:
                 _device=t._device,
             )
             outs.append(out)
-        call = physical_afters[0].src[1]
+        call = _ffi._lib.poly_uop_src(physical_afters[0], 1)
+        if not call or _ffi._lib.poly_uop_op(call) != _ffi.OPS.get('CALL'):
+            raise RuntimeError('custom_kernel physical output is not AFTER(data, CALL)')
         _custom_kernel_grad_records.append({
             'ctx': _ptr_value(self._ctx),
-            'call': call,
-            'args': tuple(call.src[1:]),
+            'call': _ptr_value(call),
+            'n_args': _ffi._lib.poly_uop_n_src(call) - 1,
             'physical_afters': tuple(physical_afters),
             'grad_fxn': grad_fxn,
         })
@@ -995,7 +1053,9 @@ class Tensor:
                             after_src[1].op != _ffi.OPS.get('CALL')):
                         raise RuntimeError('custom_kernel active output is not AFTER(data, CALL)')
                     call_src = after_src[1].src
-                    if len(call_src) != len(rec['args']) + 1:
+                    if _ptr_value(after_src[1]) != rec['call']:
+                        raise RuntimeError('custom_kernel active CALL identity changed')
+                    if len(call_src) != rec['n_args'] + 1:
                         raise RuntimeError('custom_kernel active CALL argument count changed')
                     active_seen.add(active_key)
                     # tinygrad mixin/gradient.py:90-91 and :25-31 passes the
@@ -1076,7 +1136,7 @@ class Tensor:
         assigned = self._core_assign(x)
         if not assigned:
             raise RuntimeError('poly_tensor_assign failed')
-        self._tensor = assigned
+        self._replace_core_tensor(assigned)
         self._data = None
         return self
 
@@ -1263,7 +1323,7 @@ class Tensor:
         cloned = _ffi._lib.poly_tensor_clone_into(self._ctx, ret._tensor, self._tensor)
         if not cloned:
             raise RuntimeError('poly_tensor_clone_into failed')
-        ret._tensor = cloned
+        ret._replace_core_tensor(cloned)
         if self._grad is not None:
             ret._grad = self._grad.clone(device=dev)
         ret._is_param = self._is_param
@@ -1277,6 +1337,8 @@ class Tensor:
             return self
 
         core_tensor = self._core_to_device(dev)
+        if _ptr_value(core_tensor) == _ptr_value(self._tensor):
+            return self
 
         out = Tensor(
             _ctx=self._ctx,
@@ -1293,7 +1355,7 @@ class Tensor:
         moved = self.to(device)
         if moved is self:
             return self
-        self._tensor = moved._tensor
+        self._replace_core_tensor(moved._take_core_tensor())
         self._data = moved._data
         self._dtype_str = moved._dtype_str
         self._device = moved._device

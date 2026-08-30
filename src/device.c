@@ -486,6 +486,8 @@ void poly_buffer_attach(PolyCtx *ctx, PolyUOp *buf, const PolyBuffer *handle) {
   PolyBuffer *h = poly_arena_alloc(ctx->arena, sizeof(PolyBuffer), _Alignof(PolyBuffer));
   *h = *handle;
   h->owned = false;
+  /* Borrowed MultiBuffer attachments share the child array; only adopt owns it. */
+  h->owns_bufs = false;
   h->src = NULL;
   h->valid = h->base ? h->base->valid : true;
   h->frontend_release = NULL;
@@ -886,6 +888,14 @@ bool poly_uop_contiguous_view_info(
   return true;
 }
 
+static PolyBuffer *poly_buffer_view_metadata(
+    PolyCtx *ctx,
+    PolyUOp *key,
+    PolyBuffer *parent,
+    size_t nbytes,
+    size_t byte_offset
+);
+
 PolyUOp *poly_buffer_view(
     PolyCtx *ctx,
     PolyUOp *base,
@@ -917,20 +927,7 @@ PolyUOp *poly_buffer_view(
   );
   if (!view) return NULL;
 
-  PolyBuffer *root = parent->base ? parent->base : parent;
-  PolyBuffer alias = *parent;
-  alias.ptr = NULL;
-  alias.nbytes = nbytes;
-  alias.base = root;
-  alias.offset = (parent->base ? parent->offset : 0) + byte_offset;
-  alias.owned = false;
-  alias.src = NULL;
-  alias.frontend_release = NULL;
-  alias.memory_accounted = false;
-  alias.memory_device = POLY_DEVICE_AUTO;
-  alias.memory_device_uop = NULL;
-  poly_buffer_attach(ctx, view, &alias);
-  return view;
+  return poly_buffer_view_metadata(ctx, view, parent, nbytes, byte_offset) ? view : NULL;
 }
 
 static PolyBuffer *poly_multi_buffer_for_tuple_buffer(PolyCtx *ctx, PolyUOp *buffer) {
@@ -1279,6 +1276,7 @@ static int poly_buffer_alloc_residency(
   }
   const PolyAllocator *alloc = be->get_allocator();
   if (!alloc) return -1;
+  if (poly_ctx_collect_before_allocation(ctx, buf) != 0) return -1;
   void *ptr = alloc->alloc(nbytes, alloc->dev_ctx);
   if (!ptr) {
     fprintf(stderr, "poly_buffer_allocate: alloc(%zu) failed\n", nbytes);
@@ -1310,12 +1308,19 @@ static int poly_buffer_alloc_residency(
   return 0;
 }
 
-static int poly_buffer_alloc_host_root(PolyCtx *ctx, size_t nbytes, bool valid, PolyBuffer **out) {
-  if (!ctx || !out) return -1;
+static int poly_buffer_alloc_host_root(
+    PolyCtx *ctx,
+    PolyUOp *owner,
+    size_t nbytes,
+    bool valid,
+    PolyBuffer **out
+) {
+  if (!ctx || !owner || !out) return -1;
   PolyDevice device = poly_device_default();
   const PolyBackendDesc *be = poly_backend_get(device);
   const PolyAllocator *alloc = be ? be->get_allocator() : NULL;
   if (!alloc || !alloc->host_addressable || !alloc->alloc) return -1;
+  if (poly_ctx_collect_before_allocation(ctx, owner) != 0) return -1;
   void *ptr = alloc->alloc(nbytes, alloc->dev_ctx);
   if (!ptr) return -1;
   PolyBuffer *h = poly_arena_alloc(ctx->arena, sizeof(PolyBuffer), _Alignof(PolyBuffer));
@@ -1396,7 +1401,7 @@ int poly_buffer_ensure_host_current(PolyCtx *ctx, PolyUOp *buf, PolyBuffer **hos
   }
 
   size_t nbytes = cur->nbytes ? cur->nbytes : poly_buffer_nbytes_for_uop(buf);
-  if (poly_buffer_alloc_host_root(ctx, nbytes, false, &root) != 0) return -1;
+  if (poly_buffer_alloc_host_root(ctx, buf, nbytes, false, &root) != 0) return -1;
   if (cur->valid) {
     size_t copied = poly_buffer_copy_nbytes(root, cur);
     if (poly_buffer_copy(root, cur) != 0) {
@@ -1430,7 +1435,7 @@ int poly_buffer_alloc_owned_host(
   }
 
   PolyBuffer *host = NULL;
-  if (poly_buffer_alloc_host_root(ctx, nbytes, true, &host) != 0) return -1;
+  if (poly_buffer_alloc_host_root(ctx, buf, nbytes, true, &host) != 0) return -1;
   if (zero && host->ptr) memset(host->ptr, 0, nbytes);
   poly_map_set(ctx->buffers, poly_ptr_hash(buf), buf, host, poly_ptr_eq);
   if (host_out) *host_out = host;
@@ -1455,7 +1460,7 @@ static int poly_buffer_ensure_host_root_for_write(
     int alloc_rc = declared == POLY_DEVICE_HOST
                        ? poly_buffer_alloc_residency(
                              ctx, buf, declared, nbytes, false, NULL, &root)
-                       : poly_buffer_alloc_host_root(ctx, nbytes, false, &root);
+                       : poly_buffer_alloc_host_root(ctx, buf, nbytes, false, &root);
     if (alloc_rc != 0) return -1;
     poly_map_set(ctx->buffers, poly_ptr_hash(buf), buf, root, poly_ptr_eq);
     if (host_out) *host_out = root;
@@ -1471,7 +1476,7 @@ static int poly_buffer_ensure_host_root_for_write(
   }
   PolyBuffer *root = NULL;
   size_t nbytes = cur->nbytes ? cur->nbytes : poly_buffer_nbytes_for_uop(buf);
-  if (poly_buffer_alloc_host_root(ctx, nbytes, false, &root) != 0) return -1;
+  if (poly_buffer_alloc_host_root(ctx, buf, nbytes, false, &root) != 0) return -1;
   cur->src = root;
   if (host_out) *host_out = root;
   return 0;

@@ -156,6 +156,40 @@ async function runWebGpuLifecycleChecks() {
     if (!coreRejected) throw new Error('destroyed core admitted later Asyncify work')
   })
 
+  await test('webgpu Tensor and UOp releases share the core Asyncify queue', async () => {
+    const rt = polygrad.create({ core: 'wasm', device: 'webgpu' })
+    let openGate
+    let blocked
+    try {
+      const tensor = new rt.Tensor([1, 2, 3, 4])
+      await tensor.realizeAsync()
+      const uop = tensor.uop
+      const before = rt.stats().coreStats
+      blocked = rt._core.enqueueAsync(() => new Promise(resolve => { openGate = resolve }))
+      while (!openGate) await new Promise(resolve => setTimeout(resolve, 0))
+
+      const tensorDisposed = tensor.dispose()
+      const uopDisposed = uop.dispose()
+      const queued = rt.stats().coreStats
+      if (queued.tensorRecords !== before.tensorRecords) {
+        throw new Error('Tensor release bypassed the blocked Asyncify queue')
+      }
+
+      openGate()
+      await blocked
+      await tensorDisposed
+      await uopDisposed
+      const after = rt.stats().coreStats
+      if (after.tensorRecords !== before.tensorRecords - 1) {
+        throw new Error('queued Tensor release did not retire its core owner')
+      }
+    } finally {
+      if (openGate) openGate()
+      if (blocked) await blocked
+      await rt.dispose()
+    }
+  })
+
   await test('webgpu JIT dispose waits for admitted replay', async () => {
     const rt = polygrad.create({ core: 'wasm', device: 'webgpu' })
     const f = rt.jitAsync(x => x.add(1))

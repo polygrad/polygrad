@@ -799,6 +799,10 @@ struct PolyTensor {
   bool requires_grad;
   bool requires_grad_set;
   PolyTensorProvenance provenance;
+  /* C mechanics for Tinygrad's weak live-Tensor registry. */
+  PolyCtx *owner_ctx;
+  uint32_t owner_refs;
+  int owner_slot;
 };
 
 PolyTensor *poly_tensor_create_with_roots(
@@ -808,6 +812,10 @@ PolyTensor *poly_tensor_create_with_roots(
     PolyTensorRole role,
     PolyDevice device
 );
+/* Tensor constructors return one owned handle. Internal accessors and
+ * same-object mutators are borrowed. */
+PolyTensor *poly_tensor_retain(PolyTensor *tensor);
+void poly_tensor_release(PolyTensor *tensor);
 PolyTensor *poly_tensor_empty(
     PolyCtx *ctx,
     PolyDType scalar_dtype,
@@ -1177,9 +1185,18 @@ struct PolyUOp {
   void *ended_ranges_cache;
 };
 
+/* Every PolyUOp pointer returned by this C API is borrowed from PolyCtx's
+ * arena and becomes invalid at poly_ctx_destroy(). A borrowed UOp does not
+ * keep ctx->buffers residency alive. Call poly_uop_retain() before storing a
+ * raw UOp beyond its owning Tensor/Instance/JIT scope, then pair it with one
+ * poly_uop_release(); the next allocation, execution, stats, or explicit
+ * poly_ctx_collect() may reclaim residency after the last owner is released. */
+
 /* Context owns the arena, CSE, to_program/runtime caches, and all UOps. */
 PolyCtx *poly_ctx_new(void);
 void poly_ctx_destroy(PolyCtx *ctx);
+/* Explicit safe-point collection for retired owners. */
+int poly_ctx_collect(PolyCtx *ctx);
 void poly_ctx_set_preferred_device(PolyCtx *ctx, PolyDevice device);
 PolyDevice poly_ctx_get_preferred_device(PolyCtx *ctx);
 bool poly_ctx_owns_ptr(PolyCtx *ctx, const void *p);
@@ -1227,6 +1244,11 @@ uint64_t poly_ctx_mem_used_for_device(PolyCtx *ctx, PolyDevice device);
 uint64_t poly_buffer_get_key(PolyCtx *ctx, PolyUOp *buf);
 int poly_buffer_read(PolyCtx *ctx, PolyUOp *buf, void *dst, size_t nbytes);
 PolyArena *poly_ctx_arena(PolyCtx *ctx);
+
+/* Upgrade/downgrade a borrowed UOp to an explicit residency owner. These
+ * calls do not control UOp arena storage. */
+int poly_uop_retain(PolyCtx *ctx, PolyUOp *uop);
+void poly_uop_release(PolyCtx *ctx, PolyUOp *uop);
 
 /* Create a UOp (with CSE deduplication) */
 PolyUOp *poly_uop(PolyCtx *ctx, PolyOps op, PolyDType dtype, PolyUOp **src, int n_src, PolyArg arg);

@@ -6433,6 +6433,74 @@ TEST(realize, poly_jit_replays_raw_tensor_realize_with_new_input) {
   PASS();
 }
 
+TEST(realize, live_jit_owns_captured_residency_after_tensor_release) {
+  /* Tinygrad 2026-08-22 engine/jit.py:250-280 retains the final captured
+   * LINEAR after dropping the pre-plan graph and frontend Tensor owners. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int64_t shape[1] = {1024};
+  float first_values[1024] = {0};
+  PolyTensor *input = poly_tensor_empty(
+      ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU
+  );
+  ASSERT_NOT_NULL(input);
+  ASSERT_INT_EQ(
+      poly_buffer_write(
+          ctx, input->uop_physical, first_values, sizeof(first_values)
+      ),
+      0
+  );
+
+  PolyJit *jit = poly_jit_new(ctx);
+  ASSERT_NOT_NULL(jit);
+  ASSERT_INT_EQ(poly_jit_begin_capture(jit, &input, 1), 0);
+  int f32 = poly_dtype_id_by_name("float32");
+  PolyTensor *one = poly_tensor_const_float_by_id(
+      ctx, 1.0, f32, POLY_DEVICE_CPU
+  );
+  PolyTensor *out = poly_tensor_alu2(ctx, POLY_OP_ADD, input, one);
+  ASSERT_NOT_NULL(one);
+  ASSERT_NOT_NULL(out);
+  PolyTensor *realized = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &out, 1, &realized), 0);
+  ASSERT_INT_EQ(poly_jit_end_capture(jit, ctx->tensors, ctx->n_tensors), 0);
+  PolyUOp *out_buffer = (PolyUOp *)poly_uop_get_buffer_identity(out->uop_physical);
+  ASSERT_NOT_NULL(out_buffer);
+  ASSERT_TRUE(poly_buffer_is_allocated(ctx, out_buffer));
+
+  poly_tensor_release(input);
+  poly_tensor_release(one);
+  poly_tensor_release(out);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  ASSERT_TRUE(poly_buffer_is_allocated(ctx, out_buffer));
+  PolyCtxStats stats = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
+  ASSERT_TRUE(stats.mem_used == 4096);
+
+  float next_values[1024];
+  for (int i = 0; i < 1024; i++) next_values[i] = (float)i;
+  PolyTensor *next = poly_tensor_empty(
+      ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU
+  );
+  ASSERT_NOT_NULL(next);
+  ASSERT_INT_EQ(
+      poly_buffer_write(ctx, next->uop_physical, next_values, sizeof(next_values)), 0
+  );
+  ASSERT_INT_EQ(poly_jit_run(jit, &next, 1), 0);
+  float got[1024] = {0};
+  ASSERT_INT_EQ(poly_buffer_read(ctx, out_buffer, got, sizeof(got)), 0);
+  ASSERT_FLOAT_EQ(got[0], 1.0f, 1e-6f);
+  ASSERT_FLOAT_EQ(got[1023], 1024.0f, 1e-6f);
+
+  poly_tensor_release(next);
+  poly_jit_free(jit);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
+  ASSERT_TRUE(stats.mem_used == 0);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(realize, poly_jit_replays_tuple_device_mstack_calls_like_pinned) {
   /* Pinned TinyJit concatenates captured LINEAR calls, substitutes input
    * PARAM leaves with walk=True, and resolves MSTACK on capture execution and
@@ -8010,6 +8078,68 @@ TEST(realize, tuple_buffer_and_mstack_use_pinned_multibuffer_ownership) {
   ASSERT_PTR_EQ(poly_uop_buffer_handle(ctx, select1), scalar1);
   ASSERT_PTR_EQ(poly_uop_buffer(ctx, select1), cpu1);
 
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(realize, collecting_tuple_buffer_view_preserves_live_parent_lanes) {
+  /* Tinygrad 2026-08-22 a9069c17 UOp.buffer builds one Buffer.view per
+   * MultiBuffer lane; collecting those views cannot deallocate their bases
+   * (uop/ops.py:922-934, device.py:215-217). */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  const char *names[] = {"CPU", "CPU:1"};
+  PolyUOp *tuple_device = poly_device_uop_from_names(ctx, names, 2);
+  PolyUOp *tuple_buffer = poly_uop_new_buffer(
+      ctx, tuple_device, 4, POLY_INT32, poly_ctx_next_unique_id(ctx)
+  );
+  ASSERT_NOT_NULL(tuple_buffer);
+  ASSERT_PTR_EQ(poly_uop_buffer(ctx, tuple_buffer), tuple_buffer);
+  PolyBuffer *parent = poly_uop_buffer_handle(ctx, tuple_buffer);
+  ASSERT_NOT_NULL(parent);
+  ASSERT_TRUE(poly_buffer_is_multi(parent));
+  ASSERT_TRUE(parent->owns_bufs);
+
+  void *parent_ptrs[2] = {0};
+  for (int lane = 0; lane < 2; lane++) {
+    PolyBuffer *child = poly_buffer_multi_child(parent, lane);
+    ASSERT_NOT_NULL(child);
+    ASSERT_INT_EQ(poly_buffer_handle_ensure_allocated(ctx, child), 0);
+    ASSERT_NOT_NULL(child->ptr);
+    parent_ptrs[lane] = child->ptr;
+    for (int i = 0; i < 4; i++) ((int32_t *)child->ptr)[i] = lane * 10 + i;
+    child->valid = true;
+  }
+
+  PolyTensor *parent_tensor = poly_tensor_create_with_roots(
+      ctx, tuple_buffer, tuple_buffer, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
+  );
+  ASSERT_NOT_NULL(parent_tensor);
+  PolyUOp *view = poly_buffer_view(ctx, tuple_buffer, POLY_INT32, 2, 0);
+  ASSERT_NOT_NULL(view);
+  PolyBuffer *view_handle = poly_buffer_get(ctx, view);
+  ASSERT_NOT_NULL(view_handle);
+  ASSERT_TRUE(poly_buffer_is_multi(view_handle));
+
+  PolyTensor *view_tensor = poly_tensor_create_with_roots(
+      ctx, view, view, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
+  );
+  ASSERT_NOT_NULL(view_tensor);
+  poly_tensor_release(view_tensor);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  ASSERT_TRUE(poly_buffer_get(ctx, view) == NULL);
+
+  ASSERT_PTR_EQ(poly_uop_buffer_handle(ctx, tuple_buffer), parent);
+  for (int lane = 0; lane < 2; lane++) {
+    PolyBuffer *child = poly_buffer_multi_child(parent, lane);
+    ASSERT_NOT_NULL(child);
+    ASSERT_PTR_EQ(child->ptr, parent_ptrs[lane]);
+    ASSERT_TRUE(child->valid);
+    for (int i = 0; i < 4; i++)
+      ASSERT_INT_EQ(((int32_t *)child->ptr)[i], lane * 10 + i);
+  }
+
+  poly_tensor_release(parent_tensor);
   poly_ctx_destroy(ctx);
   PASS();
 }

@@ -459,7 +459,7 @@ def test_random_crop_indices_remain_consistent_after_readback():
 
 
 def test_python_loader_checks_current_abi_before_use():
-    assert _ffi.get_lib().poly_abi_version() == _ffi.POLYGRAD_ABI_VERSION == 63
+    assert _ffi.get_lib().poly_abi_version() == _ffi.POLYGRAD_ABI_VERSION == 64
 
 
 @pytest.mark.parametrize('relative', [

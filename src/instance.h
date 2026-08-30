@@ -343,6 +343,14 @@ int poly_instance_set_device_map_arrays(
     int n_entries
 );
 
+#ifdef POLY_TESTING
+/* Deterministically fail Instance owner-root preparation after N additions. */
+void poly_instance_test_fail_residency_roots_after(int additions);
+bool poly_instance_test_has_vag(const PolyInstance *inst);
+bool poly_instance_test_has_train(const PolyInstance *inst);
+int poly_instance_test_optimizer_kind(const PolyInstance *inst);
+#endif
+
 /* Explicit readback/upload for device-resident buffers */
 
 int poly_instance_read_buf(PolyInstance *inst, int i, void *host_dst, size_t dst_len);

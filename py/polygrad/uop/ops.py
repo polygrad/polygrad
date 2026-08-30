@@ -7,6 +7,9 @@ expected by ctypes (argtype `c_void_p`), so existing FFI call sites need no
 change when `Tensor.uop` is migrated to hold a `UOp` instance.
 """
 
+import ctypes
+import weakref
+
 from .. import _ffi
 from ..dtype import DTYPES_DICT, INVERSE_DTYPES_DICT, dtypes, to_dtype
 from enum import IntEnum
@@ -72,14 +75,63 @@ class KernelInfo:
         self.opts_to_apply = opts_to_apply
 
 
+all_uops: dict[int, weakref.ReferenceType] = {}
+
+
+def _remove_uop_ref(identity, ref):
+    if all_uops.get(identity) is ref:
+        all_uops.pop(identity, None)
+
+
+def _ptr_value(ptr):
+    if isinstance(ptr, ctypes.c_void_p):
+        return 0 if ptr.value is None else int(ptr.value)
+    return int(ptr) if ptr else 0
+
+
+def _dispose_uops_for_ctx(ctx):
+    ctx_key = _ptr_value(ctx)
+    for identity, ref in list(all_uops.items()):
+        uop = ref()
+        if uop is None:
+            all_uops.pop(identity, None)
+        elif _ptr_value(uop.ctx) == ctx_key:
+            uop._dispose()
+
+
 class UOp:
-    __slots__ = ('ctx', 'raw')
+    __slots__ = ('ctx', 'raw', '_owned', '__weakref__')
 
     def __init__(self, ctx, raw):
         # raw: int returned by ctypes for a c_void_p restype (or None).
         # ctypes returns 0/None interchangeably; normalize to None for falsy.
         self.ctx = ctx
         self.raw = raw if raw else None
+        self._owned = False
+        if self.raw is not None:
+            if _ffi._lib.poly_uop_retain(self.ctx, self.raw) != 0:
+                self.raw = None
+                raise RuntimeError('poly_uop_retain failed')
+            self._owned = True
+        identity = id(self)
+        ref = weakref.ref(self, lambda dead, identity=identity: _remove_uop_ref(identity, dead))
+        all_uops[identity] = ref
+
+    def _dispose(self):
+        raw = getattr(self, 'raw', None)
+        ctx = getattr(self, 'ctx', None)
+        owned = getattr(self, '_owned', False)
+        self.raw = None
+        self._owned = False
+        self.ctx = None
+        if raw is not None and owned and ctx is not None:
+            _ffi._lib.poly_uop_release(ctx, raw)
+
+    def __del__(self):
+        try:
+            self._dispose()
+        except Exception:
+            pass
 
     # ctypes hook: when a UOp instance is passed as an argument to a ctypes
     # function declared with argtype c_void_p, ctypes looks up
@@ -104,6 +156,8 @@ class UOp:
     @property
     def op(self):
         """Integer Ops value, mirroring tinygrad's UOp.op."""
+        if self.ctx is None:
+            raise RuntimeError('polygrad runtime has been disposed')
         return _ffi._lib.poly_uop_op(self.raw) if self.raw is not None else 0
 
     @property
@@ -113,6 +167,8 @@ class UOp:
 
     @property
     def dtype(self):
+        if self.ctx is None:
+            raise RuntimeError('polygrad runtime has been disposed')
         dtype_id = _ffi._lib.poly_uop_dtype_id(self.ctx, self.raw) if self.raw is not None else -1
         if _ffi._lib.poly_dtype_id_by_name(b'void') == dtype_id:
             return dtypes.void
@@ -127,6 +183,8 @@ class UOp:
 
     @property
     def src(self):
+        if self.ctx is None:
+            raise RuntimeError('polygrad runtime has been disposed')
         if self.raw is None:
             return ()
         n = _ffi._lib.poly_uop_n_src(self.raw)

@@ -85,6 +85,266 @@ static int read_tensor_bytes(PolyCtx *ctx, PolyTensor *tensor, void *out, size_t
   return buffer ? poly_buffer_read(ctx, (PolyUOp *)buffer, out, nbytes) : -1;
 }
 
+TEST(tensor, released_handles_retire_exact_buffer_residency) {
+  /* Tinygrad 2026-08-22 UOp/Buffer destruction drops each allocation when
+   * its final Tensor/UOp owner dies.  Polygrad exposes that lifetime
+   * explicitly for C callers and collects only at a context safe point. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int64_t shape[1] = {1024};
+  float values[1024] = {0};
+  PolyTensor *first = poly_tensor_empty(
+      ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU
+  );
+  PolyTensor *second = poly_tensor_empty(
+      ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU
+  );
+  ASSERT_NOT_NULL(first);
+  ASSERT_NOT_NULL(second);
+  ASSERT_INT_EQ(
+      poly_buffer_write(ctx, first->uop_physical, values, sizeof(values)), 0
+  );
+  ASSERT_INT_EQ(
+      poly_buffer_write(ctx, second->uop_physical, values, sizeof(values)), 0
+  );
+
+  PolyCtxStats stats = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
+  ASSERT_TRUE(stats.mem_used == 8192);
+
+  poly_tensor_release(second);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
+  ASSERT_TRUE(stats.mem_used == 4096);
+
+  poly_tensor_release(first);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
+  ASSERT_TRUE(stats.mem_used == 0);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tensor, dirty_residency_is_collected_before_replacement_allocation) {
+  /* Tinygrad 2026-08-22 device.py:163-191 deallocates dead Buffer storage
+   * before a replacement Buffer allocates.  Polygrad defers the traversal to
+   * this next allocation safe point. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int64_t shape[1] = {1000000};
+  float *values = calloc((size_t)shape[0], sizeof(*values));
+  ASSERT_NOT_NULL(values);
+
+  PolyTensor *first = poly_tensor_empty(
+      ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU
+  );
+  ASSERT_NOT_NULL(first);
+  ASSERT_INT_EQ(
+      poly_buffer_write(
+          ctx, first->uop_physical, values, (size_t)shape[0] * sizeof(*values)
+      ),
+      0
+  );
+  ASSERT_TRUE(poly_ctx_mem_used_for_device(ctx, POLY_DEVICE_CPU) == 4000000);
+  poly_tensor_release(first);
+
+  PolyTensor *second = poly_tensor_empty(
+      ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU
+  );
+  ASSERT_NOT_NULL(second);
+  ASSERT_INT_EQ(
+      poly_buffer_write(
+          ctx, second->uop_physical, values, (size_t)shape[0] * sizeof(*values)
+      ),
+      0
+  );
+  ASSERT_TRUE(poly_ctx_mem_used_for_device(ctx, POLY_DEVICE_CPU) == 4000000);
+
+  poly_tensor_release(second);
+  free(values);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tensor, retained_physical_uop_owns_residency_but_logical_uop_does_not) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int64_t shape[1] = {1024};
+  float values[1024] = {0};
+
+  PolyTensor *physical_owner = poly_tensor_empty(
+      ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU
+  );
+  ASSERT_NOT_NULL(physical_owner);
+  ASSERT_INT_EQ(
+      poly_buffer_write(
+          ctx, physical_owner->uop_physical, values, sizeof(values)
+      ),
+      0
+  );
+  PolyUOp *physical = physical_owner->uop_physical;
+  ASSERT_INT_EQ(poly_uop_retain(ctx, physical), 0);
+  poly_tensor_release(physical_owner);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  PolyCtxStats stats = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
+  ASSERT_TRUE(stats.mem_used == 4096);
+  poly_uop_release(ctx, physical);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
+  ASSERT_TRUE(stats.mem_used == 0);
+
+  PolyTensor *logical_owner = poly_tensor_empty(
+      ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU
+  );
+  ASSERT_NOT_NULL(logical_owner);
+  ASSERT_INT_EQ(
+      poly_buffer_write(ctx, logical_owner->uop_physical, values, sizeof(values)), 0
+  );
+  PolyUOp *logical = logical_owner->uop_logical;
+  ASSERT_INT_EQ(poly_uop_retain(ctx, logical), 0);
+  poly_tensor_release(logical_owner);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
+  ASSERT_TRUE(stats.mem_used == 0);
+  poly_uop_release(ctx, logical);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tensor, movement_view_keeps_base_residency_until_last_handle_release) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int64_t shape[1] = {1024};
+  float values[1024] = {0};
+  PolyTensor *base = poly_tensor_empty(
+      ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU
+  );
+  ASSERT_NOT_NULL(base);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, base->uop_physical, values, sizeof(values)), 0);
+  int64_t view_shape[2] = {256, 4};
+  PolyTensor *view = poly_tensor_reshape(ctx, base, view_shape, 2);
+  ASSERT_NOT_NULL(view);
+
+  poly_tensor_release(base);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  PolyCtxStats stats = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
+  ASSERT_TRUE(stats.mem_used == 4096);
+
+  poly_tensor_release(view);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
+  ASSERT_TRUE(stats.mem_used == 0);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tensor, downstream_graph_owns_input_residency_after_input_handle_release) {
+  /* Tinygrad 2026-08-22 UOp src edges keep input Buffers live until the
+   * downstream Tensor is realized; its realized BUFFER then replaces that
+   * computation root (tensor.py:195-203). */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int64_t shape[1] = {1024};
+  float values[1024] = {0};
+  PolyTensor *input = poly_tensor_empty(
+      ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU
+  );
+  PolyTensor *one = poly_tensor_const_float_by_id(
+      ctx, 1.0, poly_dtype_id_by_name("float32"), POLY_DEVICE_CPU
+  );
+  PolyTensor *out = poly_tensor_alu2(ctx, POLY_OP_ADD, input, one);
+  ASSERT_NOT_NULL(input);
+  ASSERT_NOT_NULL(one);
+  ASSERT_NOT_NULL(out);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, input->uop_physical, values, sizeof(values)), 0);
+
+  poly_tensor_release(input);
+  poly_tensor_release(one);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  PolyCtxStats stats = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
+  ASSERT_TRUE(stats.mem_used == 4096);
+
+  PolyTensor *realized = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &out, 1, &realized), 0);
+  ASSERT_PTR_EQ(realized, out);
+  ASSERT_TRUE(ctx->mem_used == 4096);
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
+  ASSERT_TRUE(stats.mem_used == 4096);
+
+  poly_tensor_release(out);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
+  ASSERT_TRUE(stats.mem_used == 0);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tensor, rng_state_owns_only_seed_and_counter_handles) {
+  /* Tinygrad 2026-08-22 Tensor._next_counter keeps exactly the device seed and
+   * counter wrappers after call-local RNG temporaries die. manual_seed drops
+   * both dictionaries (tensor.py:621-653). */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  poly_tensor_manual_seed(ctx, 123);
+  int64_t shape[] = {1024};
+  int f32_id = poly_dtype_id_by_name("float32");
+  PolyTensor *out = poly_tensor_rand_by_id(
+      ctx, shape, 1, f32_id, POLY_DEVICE_CPU, 1
+  );
+  ASSERT_NOT_NULL(out);
+  PolyTensor *realized = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &out, 1, &realized), 0);
+  ASSERT_NOT_NULL(realized);
+
+  poly_tensor_release(out);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  PolyCtxStats stats = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
+  ASSERT_INT_EQ(stats.tensor_records, 2);
+
+  poly_tensor_manual_seed(ctx, 456);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
+  ASSERT_INT_EQ(stats.tensor_records, 0);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tensor, randn_reset_keeps_rng_source_owners_valid) {
+  /* Tinygrad 2026-08-22 Tensor.manual_seed replaces the seed/counter maps;
+   * nested randn construction must leave their source ownership valid until
+   * that replacement, even after call-local Tensor wrappers retire. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int64_t shape[] = {5};
+  int f32_id = poly_dtype_id_by_name("float32");
+  float first[5] = {0}, second[5] = {0}, reset[5] = {0};
+
+  poly_tensor_manual_seed(ctx, 42);
+  PolyTensor *a = poly_tensor_randn_by_id(ctx, shape, 1, f32_id, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(a);
+  ASSERT_INT_EQ(read_tensor_bytes(ctx, a, first, sizeof(first)), 0);
+  poly_tensor_release(a);
+
+  PolyTensor *b = poly_tensor_randn_by_id(ctx, shape, 1, f32_id, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(b);
+  ASSERT_INT_EQ(read_tensor_bytes(ctx, b, second, sizeof(second)), 0);
+  poly_tensor_release(b);
+
+  poly_tensor_manual_seed(ctx, 42);
+  PolyTensor *c = poly_tensor_randn_by_id(ctx, shape, 1, f32_id, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(c);
+  ASSERT_INT_EQ(read_tensor_bytes(ctx, c, reset, sizeof(reset)), 0);
+  ASSERT_TRUE(memcmp(first, second, sizeof(first)) != 0);
+  ASSERT_TRUE(memcmp(first, reset, sizeof(first)) == 0);
+  poly_tensor_release(c);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 static int read_tensor_f32(PolyCtx *ctx, PolyTensor *tensor, float *out, size_t n) {
   return read_tensor_bytes(ctx, tensor, out, n * sizeof(*out));
 }

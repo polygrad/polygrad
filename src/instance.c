@@ -116,6 +116,7 @@ typedef struct {
   PolyUOp *buffer; /* portable logical binding identity */
   PolyUOp *physical_buffer; /* exact default runtime identity, when constructed */
   PolyUOp *initial_data_buffer; /* exact capture-time residency source */
+  bool snapshot_residency_retained; /* owns fresh snapshot bytes until build adopts them */
   PolyUOp *declared_logical_value; /* exact source Tensor root named by this binding */
   PolyUOp *declared_physical_value; /* exact current value to snapshot, never rewritten */
   bool needs_snapshot;
@@ -128,6 +129,7 @@ typedef struct {
   PolyBuffer **heads;
   PolyBuffer *saved_heads;
   int n;
+  int n_retained;
 } BuildBufferTransaction;
 
 typedef struct {
@@ -211,10 +213,154 @@ struct PolyInstance {
 
   /* Optimizer state */
   OptimState optim;
+
+  /* C mechanics for Instance-owned physical residency. Logical-only source
+   * remains arena-valid and does not own bytes. */
+  PolyUOp **residency_roots;
+  int n_residency_roots;
 };
 
 static void runtime_modules_free(RuntimeModule *modules, int n_modules);
 static int instance_place_uniform_device(PolyInstance *inst, PolyDevice device);
+
+#ifdef POLY_TESTING
+static int test_residency_root_fail_after = -1;
+
+void poly_instance_test_fail_residency_roots_after(int additions) {
+  test_residency_root_fail_after = additions;
+}
+
+bool poly_instance_test_has_vag(const PolyInstance *inst) {
+  return inst && inst->vag;
+}
+
+bool poly_instance_test_has_train(const PolyInstance *inst) {
+  return inst && inst->train;
+}
+
+int poly_instance_test_optimizer_kind(const PolyInstance *inst) {
+  return inst ? inst->optim.kind : -1;
+}
+#endif
+
+static bool instance_append_residency_root(
+    PolyUOp ***roots,
+    int *count,
+    int *capacity,
+    PolyUOp *root
+) {
+  if (!root) return true;
+#ifdef POLY_TESTING
+  if (test_residency_root_fail_after == 0) {
+    test_residency_root_fail_after = -1;
+    return false;
+  }
+  if (test_residency_root_fail_after > 0) test_residency_root_fail_after--;
+#endif
+  for (int i = 0; i < *count; i++)
+    if ((*roots)[i] == root) return true;
+  if (*count >= *capacity) {
+    int new_capacity = *capacity ? *capacity * 2 : 16;
+    PolyUOp **new_roots = realloc(
+        *roots, (size_t)new_capacity * sizeof(*new_roots)
+    );
+    if (!new_roots) return false;
+    *roots = new_roots;
+    *capacity = new_capacity;
+  }
+  (*roots)[(*count)++] = root;
+  return true;
+}
+
+typedef struct {
+  PolyUOp **items;
+  int count;
+} InstanceResidencyRoots;
+
+/* PolyInstance-only C ownership mechanics: prepare every root before callers
+ * publish the state that refers to it. Tinygrad has no Instance equivalent. */
+static int instance_prepare_residency_roots(
+    const PolyInstance *state,
+    InstanceResidencyRoots *prepared
+) {
+  if (!state || !state->ctx || !prepared) return -1;
+  *prepared = (InstanceResidencyRoots){0};
+  PolyUOp **roots = NULL;
+  int count = 0, capacity = 0;
+#define ADD_INSTANCE_ROOT(root)                                                                    \
+  do {                                                                                             \
+    if (!instance_append_residency_root(&roots, &count, &capacity, (root))) goto fail;             \
+  } while (0)
+  for (int i = 0; i < state->n_bufs; i++) {
+    ADD_INSTANCE_ROOT(state->bufs[i].buffer);
+    if (state->has_physical_capture) ADD_INSTANCE_ROOT(state->bufs[i].capture_buffer);
+  }
+  for (int i = 0; i < state->n_entrypoints; i++) {
+    ADD_INSTANCE_ROOT(state->entrypoints[i].sink);
+    if (state->has_physical_capture) ADD_INSTANCE_ROOT(state->entrypoints[i].capture_sink);
+    if (state->entry_executables) ADD_INSTANCE_ROOT(state->entry_executables[i].linear);
+  }
+  if (state->vag) {
+    ADD_INSTANCE_ROOT(state->vag->combined_sink);
+    ADD_INSTANCE_ROOT(state->vag->executable.linear);
+    ADD_INSTANCE_ROOT(state->vag->loss_out_buf);
+    for (int i = 0; i < state->n_params; i++)
+      ADD_INSTANCE_ROOT(state->vag->grad_out_bufs[i]);
+  }
+  if (state->train) {
+    ADD_INSTANCE_ROOT(state->train->combined_sink);
+    ADD_INSTANCE_ROOT(state->train->executable.linear);
+    ADD_INSTANCE_ROOT(state->train->loss_out_buf);
+    ADD_INSTANCE_ROOT(state->train->bc1_buf);
+    ADD_INSTANCE_ROOT(state->train->bc2_buf);
+    for (int i = 0; i < state->train->n_moment_bufs; i++) {
+      if (state->train->m_bufs) ADD_INSTANCE_ROOT(state->train->m_bufs[i]);
+      if (state->train->v_bufs) ADD_INSTANCE_ROOT(state->train->v_bufs[i]);
+    }
+  }
+#undef ADD_INSTANCE_ROOT
+  for (int i = 0; i < count; i++)
+    if (poly_uop_retain(state->ctx, roots[i]) != 0) {
+      for (int j = 0; j < i; j++) poly_uop_release(state->ctx, roots[j]);
+      goto fail;
+    }
+  prepared->items = roots;
+  prepared->count = count;
+  return 0;
+
+fail:
+  free(roots);
+  return -1;
+}
+
+static void instance_discard_prepared_residency_roots(
+    PolyCtx *ctx,
+    InstanceResidencyRoots *prepared
+) {
+  if (!prepared) return;
+  for (int i = 0; i < prepared->count; i++) poly_uop_release(ctx, prepared->items[i]);
+  free(prepared->items);
+  *prepared = (InstanceResidencyRoots){0};
+}
+
+static void instance_publish_residency_roots(
+    PolyInstance *inst,
+    InstanceResidencyRoots *prepared
+) {
+  for (int i = 0; i < inst->n_residency_roots; i++)
+    poly_uop_release(inst->ctx, inst->residency_roots[i]);
+  free(inst->residency_roots);
+  inst->residency_roots = prepared->items;
+  inst->n_residency_roots = prepared->count;
+  *prepared = (InstanceResidencyRoots){0};
+}
+
+static int instance_refresh_residency_roots(PolyInstance *inst) {
+  InstanceResidencyRoots prepared = {0};
+  if (instance_prepare_residency_roots(inst, &prepared) != 0) return -1;
+  instance_publish_residency_roots(inst, &prepared);
+  return 0;
+}
 
 /* Approved logical/physical boundary: portable BUFFERs use deviceless
  * BUFFER(UNIQUE, size); executable Tinygrad-shaped BUFFERs use ParamArg(device). */
@@ -959,7 +1105,10 @@ static void capture_build_buffer_binding(
   capture->transaction->saved_heads[i] = *(PolyBuffer *)value;
 }
 
-static void build_buffer_transaction_discard(BuildBufferTransaction *transaction);
+static void build_buffer_transaction_discard(
+    PolyCtx *ctx,
+    BuildBufferTransaction *transaction
+);
 
 static bool build_buffer_transaction_begin(
     PolyCtx *ctx,
@@ -983,13 +1132,30 @@ static bool build_buffer_transaction_begin(
   }
   BuildBufferTransactionCapture capture = {.transaction = transaction, .cap = cap};
   poly_map_foreach(ctx->buffers, capture_build_buffer_binding, &capture);
-  if (transaction->n == cap) return true;
-  build_buffer_transaction_discard(transaction);
-  return false;
+  if (transaction->n != cap) {
+    build_buffer_transaction_discard(ctx, transaction);
+    return false;
+  }
+  /* Polygrad's C-only Instance transaction replaces Tinygrad's live Tensor
+   * ownership (2026-08-22/a9069c177a9d tensor.py:247-262).  Keep captured
+   * residency alive across allocation safe points until commit or rollback. */
+  for (int i = 0; i < transaction->n; i++) {
+    if (poly_uop_retain(ctx, transaction->keys[i]) != 0) {
+      build_buffer_transaction_discard(ctx, transaction);
+      return false;
+    }
+    transaction->n_retained++;
+  }
+  return true;
 }
 
-static void build_buffer_transaction_discard(BuildBufferTransaction *transaction) {
+static void build_buffer_transaction_discard(
+    PolyCtx *ctx,
+    BuildBufferTransaction *transaction
+) {
   if (!transaction) return;
+  for (int i = 0; i < transaction->n_retained; i++)
+    poly_uop_release(ctx, transaction->keys[i]);
   free(transaction->keys);
   free(transaction->heads);
   free(transaction->saved_heads);
@@ -1101,7 +1267,11 @@ static void release_build_named_value_snapshots(
         break;
       }
     }
-    if (first) poly_buffer_remove(ctx, binding->physical_buffer);
+    if (first) {
+      if (binding->snapshot_residency_retained)
+        poly_uop_release(ctx, binding->physical_buffer);
+      poly_buffer_remove(ctx, binding->physical_buffer);
+    }
   }
   for (int i = 0; i < build->n_bindings; i++) {
     BuildBinding *binding = &build->bindings[i];
@@ -1109,6 +1279,7 @@ static void release_build_named_value_snapshots(
     binding->buffer = NULL;
     binding->physical_buffer = NULL;
     binding->initial_data_buffer = NULL;
+    binding->snapshot_residency_retained = false;
   }
 }
 
@@ -1137,6 +1308,11 @@ static PolyStatus snapshot_build_named_value(PolyInstance *inst, BuildBinding *b
 
   binding->buffer = logical_buffer;
   binding->physical_buffer = physical_buffer;
+  /* Tinygrad keeps a realized named Tensor's UOp live until its bytes are
+   * consumed. Instance's C-only build adapter needs the equivalent explicit
+   * owner across allocation safe points before the built Instance exists. */
+  if (poly_uop_retain(inst->ctx, physical_buffer) != 0) return POLY_STATUS_ERROR;
+  binding->snapshot_residency_retained = true;
 
   /* A current BUFFER/view already owns the requested bytes.  Otherwise
    * evaluate the exact eager physical value into the fresh resource without
@@ -1538,7 +1714,7 @@ PolyStatus poly_instance_build(PolyInstance *inst, PolyInstanceError *err) {
     goto fail;
   }
   PolyInstanceOptions opts = build->opts;
-  build_buffer_transaction_discard(&buffer_transaction);
+  build_buffer_transaction_discard(inst->ctx, &buffer_transaction);
   buffer_transaction_active = false;
   build_state_free(build);
   *inst = *built;
@@ -1563,7 +1739,7 @@ fail:
       );
       st = POLY_STATUS_ERROR;
     }
-    build_buffer_transaction_discard(&buffer_transaction);
+    build_buffer_transaction_discard(inst->ctx, &buffer_transaction);
   }
   inst->stage = POLY_INSTANCE_FAILED;
   if (build && build->opts.own_ctx_on_failure) inst->owns_ctx = true;
@@ -2128,6 +2304,7 @@ static PolyInstance *instance_from_spec(
   /* Default optimizer: none */
   inst->optim.kind = POLY_OPTIM_NONE;
 
+  if (instance_refresh_residency_roots(inst) != 0) goto fail;
   return inst;
 
 fail:
@@ -2600,6 +2777,12 @@ static void runtime_modules_free(RuntimeModule *modules, int n_modules) {
 void poly_instance_free(PolyInstance *inst) {
   if (!inst) return;
 
+  for (int i = 0; i < inst->n_residency_roots; i++)
+    poly_uop_release(inst->ctx, inst->residency_roots[i]);
+  free(inst->residency_roots);
+  inst->residency_roots = NULL;
+  inst->n_residency_roots = 0;
+
   build_state_free(inst->build);
   inst->build = NULL;
 
@@ -2797,6 +2980,19 @@ static int ensure_optimizer_state_buffer(
   return 0;
 }
 
+static void discard_appended_named_buffers(
+    PolyCtx *ctx,
+    NamedBuf *bufs,
+    int first,
+    int count
+) {
+  if (!ctx || !bufs) return;
+  for (int i = first; i < count; i++) {
+    poly_buffer_remove(ctx, bufs[i].buffer);
+    free(bufs[i].name);
+  }
+}
+
 void *poly_instance_param_data_raw(PolyInstance *inst, int i, int64_t *numel_out) {
   if (!inst || i < 0 || i >= inst->n_params) return NULL;
   int bi = inst->param_indices[i];
@@ -2849,38 +3045,75 @@ bool poly_instance_param_trainable(const PolyInstance *inst, int i) {
   return inst->bufs[inst->param_indices[i]].trainable;
 }
 
-static void rebuild_trainable_param_indices(PolyInstance *inst) {
-  if (!inst) return;
+static int build_trainable_param_indices(
+    const PolyInstance *inst,
+    int **indices_out,
+    int *count_out
+) {
+  if (!inst || !indices_out || !count_out) return -1;
+  *indices_out = NULL;
+  *count_out = 0;
   int n = 0;
   for (int i = 0; i < inst->n_params; i++) {
     int bi = inst->param_indices[i];
     if (inst->bufs[bi].trainable) n++;
   }
   int *indices = n > 0 ? malloc((size_t)n * sizeof(int)) : NULL;
+  if (n > 0 && !indices) return -1;
   int j = 0;
   for (int i = 0; i < inst->n_params; i++) {
     int bi = inst->param_indices[i];
     if (inst->bufs[bi].trainable) indices[j++] = bi;
   }
-  free(inst->trainable_param_indices);
-  inst->trainable_param_indices = indices;
-  inst->n_trainable_params = n;
+  *indices_out = indices;
+  *count_out = n;
+  return 0;
 }
 
 int poly_instance_set_buf_trainable(PolyInstance *inst, int i, bool trainable) {
   if (!inst || i < 0 || i >= inst->n_bufs) return -1;
-  PolyUOp *shared = inst->bufs[i].buffer;
+  NamedBuf *candidate_bufs = malloc((size_t)inst->n_bufs * sizeof(*candidate_bufs));
+  if (!candidate_bufs) return -1;
+  memcpy(candidate_bufs, inst->bufs, (size_t)inst->n_bufs * sizeof(*candidate_bufs));
+
+  PolyUOp *shared = candidate_bufs[i].buffer;
   for (int j = 0; j < inst->n_bufs; j++)
-    if (inst->bufs[j].buffer == shared) inst->bufs[j].trainable = trainable;
-  if (inst->train) {
-    train_free(inst->train, inst->n_params);
-    inst->train = NULL;
+    if (candidate_bufs[j].buffer == shared) candidate_bufs[j].trainable = trainable;
+  PolyInstance candidate = *inst;
+  candidate.bufs = candidate_bufs;
+  candidate.train = NULL;
+  candidate.vag = NULL;
+  int *candidate_indices = NULL;
+  int n_candidate_indices = 0;
+  if (build_trainable_param_indices(
+          &candidate, &candidate_indices, &n_candidate_indices
+      ) != 0) {
+    free(candidate_bufs);
+    return -1;
   }
-  if (inst->vag) {
-    vag_free(inst->vag, inst->n_params);
-    inst->vag = NULL;
+  candidate.trainable_param_indices = candidate_indices;
+  candidate.n_trainable_params = n_candidate_indices;
+  InstanceResidencyRoots prepared_roots = {0};
+  if (instance_prepare_residency_roots(&candidate, &prepared_roots) != 0) {
+    free(candidate_indices);
+    free(candidate_bufs);
+    return -1;
   }
-  rebuild_trainable_param_indices(inst);
+
+  NamedBuf *old_bufs = inst->bufs;
+  int *old_indices = inst->trainable_param_indices;
+  VagState *old_vag = inst->vag;
+  TrainState *old_train = inst->train;
+  inst->bufs = candidate_bufs;
+  inst->trainable_param_indices = candidate_indices;
+  inst->n_trainable_params = n_candidate_indices;
+  inst->vag = NULL;
+  inst->train = NULL;
+  instance_publish_residency_roots(inst, &prepared_roots);
+  free(old_bufs);
+  free(old_indices);
+  vag_free(old_vag, inst->n_params);
+  train_free(old_train, inst->n_params);
   return 0;
 }
 
@@ -3162,6 +3395,62 @@ uint8_t *poly_instance_export_ir(PolyInstance *inst, int *out_len) {
   return bytes;
 }
 
+static int instance_publish_cached_executable(
+    PolyInstance *inst,
+    PolyLinearEntry *slot,
+    PolyLinearEntry *built
+) {
+  if (!inst || !slot || !built || !built->linear) return -1;
+
+  PolyInstance candidate = *inst;
+  PolyLinearEntry *candidate_entries = NULL;
+  VagState candidate_vag = {0};
+  TrainState candidate_train = {0};
+  bool found = false;
+  if (inst->entry_executables) {
+    for (int i = 0; i < inst->n_entrypoints; i++) {
+      if (slot != &inst->entry_executables[i]) continue;
+      candidate_entries = malloc(
+          (size_t)inst->n_entrypoints * sizeof(*candidate_entries)
+      );
+      if (!candidate_entries) return -1;
+      memcpy(
+          candidate_entries, inst->entry_executables,
+          (size_t)inst->n_entrypoints * sizeof(*candidate_entries)
+      );
+      candidate_entries[i] = *built;
+      candidate.entry_executables = candidate_entries;
+      found = true;
+      break;
+    }
+  }
+  if (!found && inst->vag && slot == &inst->vag->executable) {
+    candidate_vag = *inst->vag;
+    candidate_vag.executable = *built;
+    candidate.vag = &candidate_vag;
+    found = true;
+  }
+  if (!found && inst->train && slot == &inst->train->executable) {
+    candidate_train = *inst->train;
+    candidate_train.executable = *built;
+    candidate.train = &candidate_train;
+    found = true;
+  }
+  if (!found) {
+    free(candidate_entries);
+    return -1;
+  }
+
+  InstanceResidencyRoots prepared_roots = {0};
+  int rc = instance_prepare_residency_roots(&candidate, &prepared_roots);
+  free(candidate_entries);
+  if (rc != 0) return -1;
+  *slot = *built;
+  *built = (PolyLinearEntry){0};
+  instance_publish_residency_roots(inst, &prepared_roots);
+  return 0;
+}
+
 static PolyLinearEntry *instance_ensure_entry_executable(
     PolyInstance *inst,
     int entrypoint_index
@@ -3185,7 +3474,11 @@ static PolyLinearEntry *instance_ensure_entry_executable(
     free(var_bindings);
     return NULL;
   }
-  *entry = (PolyLinearEntry){compiled, var_bindings, n_var_bindings};
+  PolyLinearEntry built = {compiled, var_bindings, n_var_bindings};
+  if (instance_publish_cached_executable(inst, entry, &built) != 0) {
+    cached_executable_clear(&built);
+    return NULL;
+  }
   return entry;
 }
 
@@ -3458,10 +3751,15 @@ static int instance_publish_placement(
 ) {
   if (!inst || !target_bindings || !placed_roots) return -1;
   size_t nb = (size_t)(unsigned)inst->n_bufs;
+  size_t ne = (size_t)(unsigned)inst->n_entrypoints;
   void **target_data = calloc(nb, sizeof(*target_data));
   uint8_t *target_existed = calloc(nb, sizeof(*target_existed));
+  NamedBuf *candidate_bufs = malloc(nb * sizeof(*candidate_bufs));
+  RuntimeEntrypoint *candidate_entrypoints = malloc(ne * sizeof(*candidate_entrypoints));
+  InstanceResidencyRoots prepared_roots = {0};
   int rc = -1;
-  if (!target_data || !target_existed) goto cleanup;
+  if (!target_data || !target_existed || !candidate_bufs || !candidate_entrypoints)
+    goto cleanup;
 
   for (int i = 0; i < inst->n_bufs; i++) {
     PolyUOp *device_uop = poly_uop_device_uop_cached(inst->ctx, target_bindings[i], NULL);
@@ -3471,6 +3769,22 @@ static int instance_publish_placement(
       goto cleanup;
     target_existed[i] = poly_buffer_get(inst->ctx, target_bindings[i]) != NULL;
   }
+
+  memcpy(candidate_bufs, inst->bufs, nb * sizeof(*candidate_bufs));
+  memcpy(
+      candidate_entrypoints, inst->entrypoints,
+      ne * sizeof(*candidate_entrypoints)
+  );
+  for (int i = 0; i < inst->n_bufs; i++) candidate_bufs[i].buffer = target_bindings[i];
+  for (int i = 0; i < inst->n_entrypoints; i++)
+    candidate_entrypoints[i].sink = placed_roots[i];
+  PolyInstance candidate = *inst;
+  candidate.bufs = candidate_bufs;
+  candidate.entrypoints = candidate_entrypoints;
+  candidate.entry_executables = NULL;
+  candidate.vag = NULL;
+  candidate.train = NULL;
+  if (instance_prepare_residency_roots(&candidate, &prepared_roots) != 0) goto cleanup;
 
   /* Prepare every target residency before publishing a new binding/root set.
    * Aliases share one target UOp and are migrated exactly once. */
@@ -3523,6 +3837,7 @@ static int instance_publish_placement(
   inst->vag = NULL;
   train_free(inst->train, inst->n_params);
   inst->train = NULL;
+  instance_publish_residency_roots(inst, &prepared_roots);
   rc = 0;
   goto cleanup;
 
@@ -3531,6 +3846,9 @@ cleanup_residencies:
       inst, target_bindings, target_existed, inst->n_bufs
   );
 cleanup:
+  instance_discard_prepared_residency_roots(inst->ctx, &prepared_roots);
+  free(candidate_entrypoints);
+  free(candidate_bufs);
   free(target_existed);
   free(target_data);
   return rc;
@@ -3874,8 +4192,16 @@ static int run_instance_sink(
     );
     PolyUOp *compiled = linear ? poly_compile_linear(inst->ctx, linear, -1) : NULL;
     if (compiled) {
-      *executable = (PolyLinearEntry){compiled, var_bindings, n_var_bindings};
-      if (cached_executable) *cached_executable = *executable;
+      PolyLinearEntry built = {compiled, var_bindings, n_var_bindings};
+      if (cached_executable) {
+        if (instance_publish_cached_executable(inst, cached_executable, &built) != 0) {
+          cached_executable_clear(&built);
+          return -1;
+        }
+        executable = cached_executable;
+      } else {
+        local = built;
+      }
     } else {
       free(var_bindings);
     }
@@ -3993,22 +4319,29 @@ int poly_instance_set_optimizer_ex(
   if (!inst || inst->stage != POLY_INSTANCE_BUILT || !inst->has_portable_source) return -1;
   if (momentum < 0.0f) return -1;
 
-  inst->optim.kind = kind;
-  inst->optim.lr = lr;
-  inst->optim.beta1 = beta1;
-  inst->optim.beta2 = beta2;
-  inst->optim.eps = eps;
-  inst->optim.weight_decay = weight_decay;
-  inst->optim.momentum = momentum;
-  inst->optim.nesterov = nesterov;
-  inst->optim.classic = classic;
-  inst->optim.step = 0;
+  OptimState next = {
+      .kind = kind,
+      .lr = lr,
+      .beta1 = beta1,
+      .beta2 = beta2,
+      .eps = eps,
+      .weight_decay = weight_decay,
+      .momentum = momentum,
+      .nesterov = nesterov,
+      .classic = classic,
+      .step = 0,
+  };
+  PolyInstance candidate = *inst;
+  candidate.optim = next;
+  candidate.train = NULL;
+  InstanceResidencyRoots prepared_roots = {0};
+  if (instance_prepare_residency_roots(&candidate, &prepared_roots) != 0) return -1;
 
-  /* Invalidate training state and slot cache (will be rebuilt lazily) */
-  if (inst->train) {
-    train_free(inst->train, inst->n_params);
-    inst->train = NULL;
-  }
+  TrainState *old_train = inst->train;
+  inst->optim = next;
+  inst->train = NULL;
+  instance_publish_residency_roots(inst, &prepared_roots);
+  train_free(old_train, inst->n_params);
 
   return 0;
 }
@@ -4159,7 +4492,15 @@ static int ensure_vag_graph(PolyInstance *inst, int loss_ep_idx) {
   free(grads);
   free(param_bufs);
 
+  PolyInstance candidate = *inst;
+  candidate.vag = vag;
+  InstanceResidencyRoots prepared_roots = {0};
+  if (instance_prepare_residency_roots(&candidate, &prepared_roots) != 0) {
+    vag_free(vag, inst->n_params);
+    return -1;
+  }
   inst->vag = vag;
+  instance_publish_residency_roots(inst, &prepared_roots);
   return 0;
 }
 
@@ -4218,11 +4559,9 @@ static int param_ordinal_for_buf(const PolyInstance *inst, int buf_idx) {
  * Gradients are consumed directly by AFTER/STORE update effects, not
  * materialized to separate output buffers (D1: no grad stores in optimizer
  * SINK). */
-static int ensure_train_graph(PolyInstance *inst, int loss_ep_idx) {
-  if (inst->train) return 0; /* already built */
-
-  /* Build fwd+bwd first (gives us loss_value and grad UOps) */
-  if (ensure_vag_graph(inst, loss_ep_idx) != 0) return -1;
+static int build_train_graph(PolyInstance *inst, TrainState **out) {
+  if (!inst || !out || !inst->vag) return -1;
+  *out = NULL;
   VagState *vag = inst->vag;
 
   PolyCtx *ctx = inst->ctx;
@@ -4432,8 +4771,48 @@ static int ensure_train_graph(PolyInstance *inst, int loss_ep_idx) {
   ts->combined_sink = poly_sink_n(ctx, sink_srcs, n_sink_srcs);
   free(sink_srcs);
 
-  inst->train = ts;
+  *out = ts;
   return 0;
+}
+
+static int ensure_train_graph(PolyInstance *inst, int loss_ep_idx) {
+  if (inst->train) return 0;
+  if (ensure_vag_graph(inst, loss_ep_idx) != 0) return -1;
+
+  int old_n_bufs = inst->n_bufs;
+  NamedBuf *candidate_bufs = old_n_bufs > 0
+                                 ? malloc((size_t)old_n_bufs * sizeof(*candidate_bufs))
+                                 : NULL;
+  if (old_n_bufs > 0 && !candidate_bufs) return -1;
+  if (old_n_bufs > 0)
+    memcpy(candidate_bufs, inst->bufs, (size_t)old_n_bufs * sizeof(*candidate_bufs));
+
+  PolyInstance candidate = *inst;
+  candidate.bufs = candidate_bufs;
+  candidate.train = NULL;
+  TrainState *train = NULL;
+  InstanceResidencyRoots prepared_roots = {0};
+  if (build_train_graph(&candidate, &train) != 0) goto fail;
+  candidate.train = train;
+  if (instance_prepare_residency_roots(&candidate, &prepared_roots) != 0) goto fail;
+
+  NamedBuf *old_bufs = inst->bufs;
+  inst->bufs = candidate.bufs;
+  inst->n_bufs = candidate.n_bufs;
+  inst->train = train;
+  instance_publish_residency_roots(inst, &prepared_roots);
+  free(old_bufs);
+  return 0;
+
+fail:
+  instance_discard_prepared_residency_roots(inst->ctx, &prepared_roots);
+  if (candidate.bufs)
+    discard_appended_named_buffers(
+        inst->ctx, candidate.bufs, old_n_bufs, candidate.n_bufs
+    );
+  free(candidate.bufs);
+  train_free(train, inst->n_params);
+  return -1;
 }
 
 /* Train Step */

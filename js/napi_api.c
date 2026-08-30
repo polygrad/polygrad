@@ -1465,6 +1465,22 @@ static napi_value napi_poly_tensor_create_with_roots(napi_env env, napi_callback
   );
 }
 
+static napi_value napi_poly_tensor_retain(napi_env env, napi_callback_info info) {
+  napi_value argv[1];
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  return make_external(env, poly_tensor_retain(get_external(env, argv[0])));
+}
+
+static napi_value napi_poly_tensor_release(napi_env env, napi_callback_info info) {
+  napi_value argv[1], out;
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  poly_tensor_release(get_external(env, argv[0]));
+  NAPI_CALL(env, napi_get_undefined(env, &out));
+  return out;
+}
+
 static napi_value napi_poly_tensor_replace_roots(napi_env env, napi_callback_info info) {
   napi_value argv[6];
   size_t argc = 6;
@@ -2204,6 +2220,24 @@ static napi_value napi_poly_tensor_uop(napi_env env, napi_callback_info info) {
   return make_external(env, poly_tensor_uop(tensor));
 }
 
+static napi_value napi_poly_uop_retain(napi_env env, napi_callback_info info) {
+  napi_value argv[2], out;
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  int rc = poly_uop_retain(get_external(env, argv[0]), get_external(env, argv[1]));
+  NAPI_CALL(env, napi_create_int32(env, rc, &out));
+  return out;
+}
+
+static napi_value napi_poly_uop_release(napi_env env, napi_callback_info info) {
+  napi_value argv[2], out;
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  poly_uop_release(get_external(env, argv[0]), get_external(env, argv[1]));
+  NAPI_CALL(env, napi_get_undefined(env, &out));
+  return out;
+}
+
 static napi_value napi_poly_tensor_uop_logical(napi_env env, napi_callback_info info) {
   napi_value argv[1];
   size_t argc = 1;
@@ -2842,6 +2876,15 @@ static napi_value napi_poly_ctx_stats(napi_env env, napi_callback_info info) {
   set_named_double(env, out, "timeSumS", s.time_sum_s);
   set_named_u64(env, out, "kernelCount", s.kernel_count);
   set_named_u64(env, out, "memUsed", s.mem_used);
+  return out;
+}
+
+static napi_value napi_poly_ctx_collect(napi_env env, napi_callback_info info) {
+  napi_value argv[1], out;
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  int rc = poly_ctx_collect(get_external(env, argv[0]));
+  NAPI_CALL(env, napi_create_int32(env, rc, &out));
   return out;
 }
 
@@ -5583,7 +5626,11 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_tensor_gather_dim", napi_poly_tensor_gather_dim),
       DECLARE_NAPI_METHOD("poly_tensor_index_select", napi_poly_tensor_index_select),
       DECLARE_NAPI_METHOD("poly_tensor_clone_into", napi_poly_tensor_clone_into),
+      DECLARE_NAPI_METHOD("poly_tensor_retain", napi_poly_tensor_retain),
+      DECLARE_NAPI_METHOD("poly_tensor_release", napi_poly_tensor_release),
       DECLARE_NAPI_METHOD("poly_tensor_uop", napi_poly_tensor_uop),
+      DECLARE_NAPI_METHOD("poly_uop_retain", napi_poly_uop_retain),
+      DECLARE_NAPI_METHOD("poly_uop_release", napi_poly_uop_release),
       DECLARE_NAPI_METHOD("poly_tensor_uop_logical", napi_poly_tensor_uop_logical),
       DECLARE_NAPI_METHOD("poly_tensor_uop_physical", napi_poly_tensor_uop_physical),
       DECLARE_NAPI_METHOD("poly_tensor_device", napi_poly_tensor_device),
@@ -5598,6 +5645,7 @@ NAPI_MODULE_INIT() {
           "poly_buffer_ensure_device_allocated", napi_poly_buffer_ensure_device_allocated
       ),
       DECLARE_NAPI_METHOD("poly_ctx_set_preferred_device", napi_poly_ctx_set_preferred_device),
+      DECLARE_NAPI_METHOD("poly_ctx_collect", napi_poly_ctx_collect),
       DECLARE_NAPI_METHOD("poly_ctx_stats", napi_poly_ctx_stats),
       DECLARE_NAPI_METHOD("poly_ctx_reset_counters", napi_poly_ctx_reset_counters),
       DECLARE_NAPI_METHOD("poly_can_run_op", napi_poly_can_run_op),

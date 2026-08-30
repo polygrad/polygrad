@@ -25,6 +25,31 @@ const AxisType = Object.freeze({
   LOOP: 11
 })
 
+const uopFinalizer = typeof FinalizationRegistry === 'undefined'
+  ? null
+  : new FinalizationRegistry((owner) => {
+      const pending = releaseUopOwner(owner)
+      if (pending && typeof pending.then === 'function') pending.catch(() => {})
+    })
+
+function releaseUopOwner(owner, token = null) {
+  if (!owner || !owner.active) return undefined
+  owner.active = false
+  if (uopFinalizer && token) uopFinalizer.unregister(token)
+  if (!owner.state.alive) return undefined
+  const release = () => owner.ffi.poly_uop_release(owner.ctx, owner.raw)
+  if (owner.state.asyncHost && owner.state.core && owner.state.core.enqueueAsync) {
+    return owner.state.core.enqueueAsync(release)
+  }
+  release()
+  return undefined
+}
+
+function lifetimeFor(ctx, ffi) {
+  const lifetimes = ffi && ffi.__polygradLifetimes
+  return lifetimes ? lifetimes.get(ctx) : null
+}
+
 class KernelInfo {
   constructor(opts = {}) {
     if (typeof opts === 'string') opts = { name: opts }
@@ -34,10 +59,35 @@ class KernelInfo {
 }
 
 class UOp {
-  constructor(ctx, ffi, raw) {
+  constructor(ctx, ffi, raw, owned = true) {
     this.ctx = ctx
     this.ffi = ffi
-    this.raw = raw || null
+    this._state = lifetimeFor(ctx, ffi)
+    this._raw = raw || null
+    this._owner = null
+    const state = owned && this._raw ? this._state : null
+    if (state && ffi.poly_uop_retain) {
+      if (ffi.poly_uop_retain(ctx, this._raw) !== 0) {
+        this._raw = null
+        throw new Error('poly_uop_retain failed')
+      }
+      this._owner = { state, ctx, ffi, raw: this._raw, active: true }
+      if (uopFinalizer) uopFinalizer.register(this, this._owner, this)
+    }
+  }
+
+  get raw() {
+    if (this._state && !this._state.alive) {
+      throw new Error('polygrad runtime has been disposed')
+    }
+    return this._raw
+  }
+
+  dispose() {
+    const owner = this._owner
+    this._owner = null
+    this._raw = null
+    return releaseUopOwner(owner, this)
   }
 
   toString() { return `UOp(${this.raw})` }
@@ -346,6 +396,11 @@ function rawUop(value) {
 
 function createBoundUopNamespace(runtime) {
   const { ffi, ctx, dtypeIds } = runtime._core
+  const state = runtime._lifetime
+  if (!Object.prototype.hasOwnProperty.call(ffi, '__polygradLifetimes')) {
+    Object.defineProperty(ffi, '__polygradLifetimes', { value: new Map() })
+  }
+  ffi.__polygradLifetimes.set(ctx, state)
   ffi.__polygradOps = runtime._core.ops || {}
   const dtypeNameById = {}
   for (const [name, id] of Object.entries(dtypeIds || {})) dtypeNameById[Number(id)] = name
@@ -357,10 +412,15 @@ function createBoundUopNamespace(runtime) {
     return new UOp(ctx, ffi, value)
   }
 
+  function disposeAll() {
+    ffi.__polygradLifetimes.delete(ctx)
+  }
+
   return {
     UOp,
     AxisType,
     KernelInfo,
+    _disposeAll: disposeAll,
     wrap,
     range(bound, axisId = 0, axisType = AxisType.WEAK) {
       return UOp.range(ctx, ffi, bound, axisId, axisType)
@@ -382,10 +442,12 @@ function createBoundUopNamespace(runtime) {
       throw new TypeError(`cannot convert ${typeof value} to UOp`)
     },
     placeholderLike(value, slot = 0) {
-      return UOp.placeholderLike(wrap(rawUop(value)), slot)
+      const raw = ffi.poly_uop_placeholder_like(ctx, rawUop(value), Number(slot))
+      return raw ? new UOp(ctx, ffi, raw) : null
     },
     key(value) {
-      return wrap(rawUop(value)).key
+      const raw = rawUop(value)
+      return raw && ffi.poly_uop_key ? String(ffi.poly_uop_key(raw)) : String(raw || 0)
     },
     shape(value) {
       const raw = rawUop(value)
@@ -399,13 +461,20 @@ function createBoundUopNamespace(runtime) {
       return dtypeNameById[id] || String(id)
     },
     op(value) {
-      return wrap(rawUop(value)).op
+      const raw = rawUop(value)
+      return raw && ffi.poly_uop_op ? Number(ffi.poly_uop_op(raw)) : 0
     },
     hasBufferIdentity(value) {
-      return wrap(rawUop(value)).hasBufferIdentity()
+      const raw = rawUop(value)
+      return Boolean(raw && ffi.poly_uop_has_buffer_identity(raw))
     },
     buffer(value) {
-      return wrap(rawUop(value)).buffer
+      const raw = rawUop(value)
+      if (!raw) return null
+      const buffer = ffi.poly_uop_buffer
+        ? ffi.poly_uop_buffer(ctx, raw)
+        : ffi.poly_uop_get_buffer_identity(raw)
+      return buffer ? new UOp(ctx, ffi, buffer) : null
     }
   }
 }

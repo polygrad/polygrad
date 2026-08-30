@@ -255,7 +255,7 @@ test-symbolic-z3: build/libpolygrad.so
 
 build/polygrad_test: $(SRC) $(CODEC_SRC) $(TEST_SRC)
 	@mkdir -p build
-	$(CC) $(CFLAGS_DEBUG) -o $@ $(filter %.c,$^) $(LDFLAGS_DEBUG)
+	$(CC) $(CFLAGS_DEBUG) -DPOLY_TESTING -o $@ $(filter %.c,$^) $(LDFLAGS_DEBUG)
 
 build/polygrad_test_filc: $(FILC_SRC) $(CODEC_SRC) $(TEST_SRC)
 	@mkdir -p build
@@ -494,9 +494,11 @@ test-js: test-js-wasm test-js-native test-js-package
 
 test-js-wasm: verify-source-mirrors wasm-pkg
 	$(NODE) js/test/test_wasm.js
+	$(NODE) --expose-gc js/test/test_gc.js wasm
 
 test-js-native: verify-source-mirrors js/build/Release/polygrad_napi.node
 	$(NODE) js/test/test_native.js
+	$(NODE) --expose-gc js/test/test_gc.js native
 
 test-js-package: verify-source-mirrors wasm-pkg
 	cd js && bash scripts/build-browser.sh && $(NODE) test/test_package_exports.js

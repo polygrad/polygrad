@@ -1,17 +1,121 @@
 """Tests for the polygrad Python Tensor class."""
 
 import ctypes
+import gc
 import math
 import numpy as np
 import pytest
+import subprocess
+import sys
 
 from polygrad import Device, Jit, JitError, Runtime, Tensor, Variable, _ffi, can_run, compile as pg_compile, jit, stats as pg_stats
 from polygrad.dtype import dtypes
 from polygrad.helpers import Context
-from polygrad.uop.ops import AxisType, KernelInfo, UOp
+from polygrad.uop.ops import AxisType, KernelInfo, UOp, _dispose_uops_for_ctx
 
 
 class TestCreation:
+    def test_runtime_dispose_invalidates_borrowed_instance_and_bound_wrappers(self):
+        # Polygrad's C arena is an approved ownership divergence from Tinygrad's
+        # live Python UOps; disposal must invalidate every borrowed wrapper.
+        code = r'''
+from polygrad import Runtime
+
+rt = Runtime(device='cpu')
+Tensor = rt.Tensor
+Variable = rt.Variable
+x = Tensor([1.0, 2.0]).realize()
+uop = x.uop
+inst = rt.Instance.from_tensors(inputs={'x': x}, outputs={'output': x + 1})
+rt.dispose()
+assert inst._ptr is None
+inst.free()
+for call in (lambda: Tensor.empty(2), lambda: Variable('n', 1, 2), lambda: x.shape,
+             lambda: uop.op):
+    try:
+        call()
+    except RuntimeError as exc:
+        assert 'disposed' in str(exc)
+    else:
+        raise AssertionError('stale runtime wrapper remained usable')
+print('teardown_ok')
+'''
+        proc = subprocess.run(
+            [sys.executable, '-c', code], capture_output=True, text=True, check=False
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert proc.stdout.strip() == 'teardown_ok'
+        assert proc.stderr == ''
+
+    def test_default_context_exit_frees_live_borrowed_instance_first(self):
+        code = r'''
+from polygrad import Instance, Tensor
+
+x = Tensor([1.0, 2.0]).realize()
+inst = Instance.from_tensors(inputs={'x': x}, outputs={'output': x + 1})
+assert inst._ptr
+print('leaving_live_instance')
+'''
+        proc = subprocess.run(
+            [sys.executable, '-c', code], capture_output=True, text=True, check=False
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert proc.stdout.strip() == 'leaving_live_instance'
+
+    def test_runtime_dispose_retires_every_wrapper_for_the_same_uop(self):
+        runtime = Runtime(device='cpu')
+        tensor = runtime.Tensor.empty(4)
+        first, second = tensor.uop, tensor.uop
+        assert first is not second and first.raw == second.raw
+        try:
+            _dispose_uops_for_ctx(runtime._ctx)
+            assert first.raw is None
+            assert second.raw is None
+        finally:
+            # Keep the failing pre-fix regression from releasing through a
+            # context that Runtime.dispose() is about to destroy.
+            first._dispose()
+            second._dispose()
+            runtime.dispose()
+
+    def test_runtime_tensor_gc_retires_core_handle_and_residency(self):
+        runtime = Runtime(device='cpu')
+        try:
+            tensor = runtime.Tensor.empty(1024)
+            tensor.copy_from(np.zeros(1024, dtype=np.float32))
+            assert runtime.stats()['tensor_records'] == 1
+            assert runtime.stats()['mem_used'] == 4096
+            del tensor
+            gc.collect()
+            assert runtime.stats()['tensor_records'] == 0
+            assert runtime.stats()['mem_used'] == 0
+        finally:
+            runtime.dispose()
+
+    def test_custom_kernel_gradient_metadata_does_not_own_residency(self):
+        runtime = Runtime(device='cpu')
+        Tensor = runtime.Tensor
+
+        def copy_kernel(out, src):
+            out, src = out.flatten(), src.flatten()
+            i = UOp.range(out.ctx, out.numel(), 0)
+            return out[i].store(src[i]).end(i).sink(
+                arg=KernelInfo(name='gc_custom_copy')
+            )
+
+        try:
+            before = runtime.stats()['mem_used']
+            out = Tensor.empty(1 << 20)
+            src = Tensor(np.zeros(1 << 20, dtype=np.float32))
+            result = out.custom_kernel(src, fxn=copy_kernel, grad_fxn=lambda grad, call: (None, grad))[0]
+            result.realize()
+            assert runtime.stats()['mem_used'] >= before + (2 << 22)
+            del result, out, src
+            gc.collect()
+            assert runtime.stats()['mem_used'] == before
+        finally:
+            runtime.dispose()
+
     def test_from_list(self):
         t = Tensor([1.0, 2.0, 3.0])
         assert t.shape == (3,)

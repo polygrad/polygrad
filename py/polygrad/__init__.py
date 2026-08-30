@@ -10,20 +10,23 @@ from . import _ffi
 # Module-level default context (triggers lazy library load)
 _default_ctx = _ffi.get_lib().poly_ctx_new()
 
-from .tensor import Tensor, Variable, BoundVariable
+from .tensor import Tensor, Variable, BoundVariable, _dispose_tensors_for_ctx
 from .dtype import DType, INVERSE_DTYPES_DICT, dtypes
 from .device import Device
-from .instance import Instance
+from .instance import Instance, _dispose_instances_for_ctx
 from .jit import CompiledCallable, Jit, JitError, TinyJit, _dispose_jits_for_ctx, compile, jit
 from .function import function
-from .uop.ops import UOp
+from .uop.ops import UOp, _dispose_uops_for_ctx
 from .helpers import Context, fetch, getenv
 from . import nn as nn
 
 def _dispose_default_ctx():
     global _default_ctx
     if _default_ctx:
+        _dispose_instances_for_ctx(_default_ctx)
         _dispose_jits_for_ctx(_default_ctx)
+        _dispose_tensors_for_ctx(_default_ctx)
+        _dispose_uops_for_ctx(_default_ctx)
         _ffi.get_lib().poly_ctx_destroy(_default_ctx)
         _default_ctx = None
 
@@ -177,80 +180,84 @@ def _can_run_ctx(ctx, op=None, *, dtype='float32', shape=None, shapes=None, devi
     return rc == 1
 
 
-def _bound_tensor_class(ctx):
+def _bound_tensor_class(ctx, runtime):
+    def live_ctx():
+        runtime._check_live()
+        return ctx
+
     class RuntimeTensor(Tensor):
         def __init__(self, data=None, *args, **kwargs):
-            kwargs.setdefault('_ctx', ctx)
+            kwargs.setdefault('_ctx', live_ctx())
             super().__init__(data, *args, **kwargs)
 
         @staticmethod
         def from_url(url, gunzip=False, **kwargs):
-            kwargs.setdefault('_ctx', ctx)
+            kwargs.setdefault('_ctx', live_ctx())
             return Tensor.from_url(url, gunzip=gunzip, **kwargs)
 
         @staticmethod
         def zeros(*shape, **kwargs):
-            kwargs.setdefault('_ctx', ctx)
+            kwargs.setdefault('_ctx', live_ctx())
             return Tensor.zeros(*shape, **kwargs)
 
         @staticmethod
         def ones(*shape, **kwargs):
-            kwargs.setdefault('_ctx', ctx)
+            kwargs.setdefault('_ctx', live_ctx())
             return Tensor.ones(*shape, **kwargs)
 
         @staticmethod
         def full(shape, fill_value, **kwargs):
-            kwargs.setdefault('_ctx', ctx)
+            kwargs.setdefault('_ctx', live_ctx())
             return Tensor.full(shape, fill_value, **kwargs)
 
         @staticmethod
         def arange(start, stop=None, step=1, **kwargs):
-            kwargs.setdefault('_ctx', ctx)
+            kwargs.setdefault('_ctx', live_ctx())
             return Tensor.arange(start, stop, step, **kwargs)
 
         @staticmethod
         def rand(*shape, **kwargs):
-            kwargs.setdefault('_ctx', ctx)
+            kwargs.setdefault('_ctx', live_ctx())
             return Tensor.rand(*shape, **kwargs)
 
         @staticmethod
         def randn(*shape, **kwargs):
-            kwargs.setdefault('_ctx', ctx)
+            kwargs.setdefault('_ctx', live_ctx())
             return Tensor.randn(*shape, **kwargs)
 
         @staticmethod
         def kaiming_uniform(*shape, **kwargs):
-            kwargs.setdefault('_ctx', ctx)
+            kwargs.setdefault('_ctx', live_ctx())
             return Tensor.kaiming_uniform(*shape, **kwargs)
 
         @staticmethod
         def randint(*shape, **kwargs):
-            kwargs.setdefault('_ctx', ctx)
+            kwargs.setdefault('_ctx', live_ctx())
             return Tensor.randint(*shape, **kwargs)
 
         @staticmethod
         def randperm(n, **kwargs):
-            kwargs.setdefault('_ctx', ctx)
+            kwargs.setdefault('_ctx', live_ctx())
             return Tensor.randperm(n, **kwargs)
 
         @staticmethod
         def linspace(start, stop, steps, **kwargs):
-            kwargs.setdefault('_ctx', ctx)
+            kwargs.setdefault('_ctx', live_ctx())
             return Tensor.linspace(start, stop, steps, **kwargs)
 
         @staticmethod
         def eye(n, m=None, **kwargs):
-            kwargs.setdefault('_ctx', ctx)
+            kwargs.setdefault('_ctx', live_ctx())
             return Tensor.eye(n, m, **kwargs)
 
         @staticmethod
         def empty(*shape, **kwargs):
-            kwargs.setdefault('_ctx', ctx)
+            kwargs.setdefault('_ctx', live_ctx())
             return Tensor.empty(*shape, **kwargs)
 
         @staticmethod
         def manual_seed(seed=0):
-            _ffi.get_lib().poly_tensor_manual_seed(ctx, int(seed))
+            _ffi.get_lib().poly_tensor_manual_seed(live_ctx(), int(seed))
 
     RuntimeTensor.__name__ = 'Tensor'
     RuntimeTensor.__qualname__ = 'Tensor'
@@ -267,8 +274,11 @@ class Runtime:
       dev_id = lib.poly_device_by_name(str(device).lower().encode('utf-8'))
       if dev_id >= 0 and hasattr(lib, 'poly_ctx_set_preferred_device'):
           lib.poly_ctx_set_preferred_device(self._ctx, dev_id)
-      self.Tensor = _bound_tensor_class(self._ctx)
-      self.Variable = lambda name, min_val, max_val: Variable(name, min_val, max_val, _ctx=self._ctx)
+      self.Tensor = _bound_tensor_class(self._ctx, self)
+      def runtime_variable(name, min_val, max_val):
+          self._check_live()
+          return Variable(name, min_val, max_val, _ctx=self._ctx)
+      self.Variable = runtime_variable
       self.Instance = Instance
       self.GlobalCounters = _global_counters_class(self._ctx)
       self.jit = jit
@@ -284,7 +294,10 @@ class Runtime:
 
     def dispose(self):
       if not self._disposed:
+          _dispose_instances_for_ctx(self._ctx)
           _dispose_jits_for_ctx(self._ctx)
+          _dispose_tensors_for_ctx(self._ctx)
+          _dispose_uops_for_ctx(self._ctx)
           _ffi.get_lib().poly_ctx_destroy(self._ctx)
           self._disposed = True
           self._ctx = None

@@ -95,11 +95,20 @@ static void tensor_replace_roots_commit(
     PolyTensorRole role,
     PolyDevice device
 ) {
+  PolyTensor *source = role != POLY_TENSOR_PLACE ? tensor->source : NULL;
+  /* Tinygrad 2026-08-22 tensor.py:195-203 replaces Tensor.uop through the
+   * becomes-map. A changed physical root invalidates the last residency mark
+   * set even when no Tensor owner was released. */
+  if (tensor->owner_ctx && tensor->uop_physical != uop_physical)
+    tensor->owner_ctx->collection_dirty = true;
   tensor->uop_logical = uop_logical;
   tensor->uop_physical = uop_physical;
   tensor->role = role;
   if (device != POLY_DEVICE_AUTO) tensor->device = device;
-  if (role != POLY_TENSOR_PLACE) tensor->source = NULL;
+  if (source) {
+    tensor->source = NULL;
+    poly_tensor_release(source);
+  }
 }
 
 static bool tensor_assign_anchor_op(PolyOps op) {
@@ -416,6 +425,80 @@ void poly_tensor_ctx_cleanup(PolyCtx *ctx) {
   }
 }
 
+PolyTensor *poly_tensor_retain(PolyTensor *tensor) {
+  if (!tensor || !tensor->owner_ctx || tensor->owner_refs == UINT32_MAX) return NULL;
+  tensor->owner_refs++;
+  return tensor;
+}
+
+void poly_tensor_release(PolyTensor *tensor) {
+  if (!tensor || !tensor->owner_ctx || tensor->owner_refs == 0) return;
+  if (--tensor->owner_refs > 0) return;
+  PolyCtx *ctx = tensor->owner_ctx;
+  PolyTensor *source = tensor->source;
+  tensor->source = NULL;
+  int slot = tensor->owner_slot;
+  if (slot < 0 || slot >= ctx->n_tensors || ctx->tensors[slot] != tensor) {
+    slot = -1;
+    for (int i = 0; i < ctx->n_tensors; i++)
+      if (ctx->tensors[i] == tensor) {
+        slot = i;
+        break;
+      }
+  }
+  if (slot >= 0) {
+    PolyTensor *last = ctx->tensors[--ctx->n_tensors];
+    if (slot < ctx->n_tensors) {
+      ctx->tensors[slot] = last;
+      last->owner_slot = slot;
+    }
+  }
+  tensor->owner_ctx = NULL;
+  tensor->owner_slot = -1;
+  free(tensor);
+  ctx->collection_dirty = true;
+  if (source) poly_tensor_release(source);
+}
+
+static int tensor_order_cmp(const void *a, const void *b) {
+  const PolyTensor *ta = *(PolyTensor *const *)a;
+  const PolyTensor *tb = *(PolyTensor *const *)b;
+  return ta->order < tb->order ? -1 : ta->order > tb->order;
+}
+
+/* C ownership mechanics for Tinygrad call-local Tensor wrappers. UOps remain
+ * arena-owned; only handles created by this composite call lose their local
+ * owner, in creation order so retained `.to()` source edges stay valid. */
+static void tensor_release_temporaries(
+    PolyCtx *ctx,
+    uint64_t first_order,
+    PolyTensor **keep,
+    int n_keep
+) {
+  if (!ctx) return;
+  int count = 0;
+  for (int i = 0; i < ctx->n_tensors; i++)
+    if (ctx->tensors[i] && ctx->tensors[i]->order >= first_order) count++;
+  if (count == 0) return;
+  PolyTensor **created = malloc((size_t)count * sizeof(*created));
+  if (!created) return;
+  int n_created = 0;
+  for (int i = 0; i < ctx->n_tensors; i++)
+    if (ctx->tensors[i] && ctx->tensors[i]->order >= first_order)
+      created[n_created++] = ctx->tensors[i];
+  qsort(created, (size_t)n_created, sizeof(*created), tensor_order_cmp);
+  for (int i = 0; i < n_created; i++) {
+    bool retained = false;
+    for (int j = 0; j < n_keep; j++)
+      if (created[i] == keep[j]) {
+        retained = true;
+        break;
+      }
+    if (!retained) poly_tensor_release(created[i]);
+  }
+  free(created);
+}
+
 PolyTensor *poly_tensor_create_with_roots(
     PolyCtx *ctx,
     PolyUOp *uop_logical,
@@ -441,6 +524,9 @@ PolyTensor *poly_tensor_create_with_roots(
   tensor->device = device;
   tensor->order = ctx->next_tensor_order++;
   tensor->provenance = POLY_TENSOR_PROVENANCE_UNKNOWN;
+  tensor->owner_ctx = ctx;
+  tensor->owner_refs = 1;
+  tensor->owner_slot = ctx->n_tensors;
 
   ctx->tensors[ctx->n_tensors++] = tensor;
   return tensor;
@@ -1497,7 +1583,7 @@ PolyTensor *poly_tensor_to_device(PolyCtx *ctx, PolyTensor *tensor, PolyDevice d
   PolyTensor *placed =
       poly_tensor_create_with_roots(ctx, tensor->uop_logical, physical, POLY_TENSOR_PLACE, device);
   if (placed) {
-    placed->source = tensor;
+    placed->source = poly_tensor_retain(tensor);
     placed->requires_grad = tensor->requires_grad;
     placed->requires_grad_set = tensor->requires_grad_set;
     placed->provenance = tensor->provenance;
@@ -4202,6 +4288,15 @@ typedef struct {
   PolyTensor *counter;
 } PolyRngDeviceState;
 
+static void release_rng_state(const void *key, void *value, void *userdata) {
+  (void)key;
+  (void)userdata;
+  PolyRngDeviceState *state = value;
+  if (!state) return;
+  poly_tensor_release(state->seed);
+  poly_tensor_release(state->counter);
+}
+
 /* Pinned Tensor._next_counter hashes the four-byte big-endian first-use
  * device ordinal and then stores the digest in a uint32 Tensor
  * (tensor.py:493-497). Only the low word survives that cast, but computing it
@@ -4608,6 +4703,7 @@ static PolyRngDeviceState *rng_device_state(PolyCtx *ctx, PolyDevice device) {
 
 void poly_tensor_manual_seed(PolyCtx *ctx, int64_t seed) {
   if (!ctx || !ctx->rng_states) return;
+  poly_map_foreach(ctx->rng_states, release_rng_state, NULL);
   ctx->rng_seed = (uint64_t)seed;
   ctx->rng_device_count = 0;
   poly_map_clear(ctx->rng_states);
@@ -4671,6 +4767,28 @@ static PolyTensor *rng_tensor_rand_from_state(
              : NULL;
 }
 
+static PolyTensor *tensor_rand_by_id(
+    PolyCtx *ctx,
+    const int64_t *dims,
+    int ndim,
+    int dtype_id,
+    PolyDevice device,
+    int contiguous,
+    PolyRngDeviceState **out_state
+) {
+  if (out_state) *out_state = NULL;
+  PolyDType dtype;
+  if (!ctx || !poly_dtype_by_id(dtype_id, &dtype) ||
+      !poly_device_can_execute(device))
+    return NULL;
+  PolyRngDeviceState *state = rng_device_state(ctx, device);
+  if (out_state) *out_state = state;
+  return state ? rng_tensor_rand_from_state(
+                     ctx, state->seed, state->counter, dims, ndim, dtype, contiguous
+                 )
+               : NULL;
+}
+
 PolyTensor *poly_tensor_rand_by_id(
     PolyCtx *ctx,
     const int64_t *dims,
@@ -4679,15 +4797,18 @@ PolyTensor *poly_tensor_rand_by_id(
     PolyDevice device,
     int contiguous
 ) {
-  PolyDType dtype;
-  if (!ctx || !poly_dtype_by_id(dtype_id, &dtype) ||
-      !poly_device_can_execute(device))
-    return NULL;
-  PolyRngDeviceState *state = rng_device_state(ctx, device);
-  return state ? rng_tensor_rand_from_state(
-                     ctx, state->seed, state->counter, dims, ndim, dtype, contiguous
-                 )
-               : NULL;
+  uint64_t first_order = ctx ? ctx->next_tensor_order : 0;
+  PolyRngDeviceState *state = NULL;
+  PolyTensor *out = tensor_rand_by_id(
+      ctx, dims, ndim, dtype_id, device, contiguous, &state
+  );
+  PolyTensor *keep[] = {
+      out,
+      state ? state->seed : NULL,
+      state ? state->counter : NULL,
+  };
+  tensor_release_temporaries(ctx, first_order, keep, 3);
+  return out;
 }
 
 /* Current RandMixin.randn_like Box-Muller composition
@@ -4745,13 +4866,25 @@ PolyTensor *poly_tensor_randn_by_id(
   if (!ctx || !poly_dtype_by_id(dtype_id, &dtype) || !poly_dtype_is_float(dtype) ||
       ndim < 0 || ndim >= POLY_MAX_DIMS || (ndim > 0 && !dims))
     return NULL;
+  uint64_t first_order = ctx->next_tensor_order;
   int64_t stacked_shape[POLY_MAX_DIMS];
   stacked_shape[0] = 2;
   for (int i = 0; i < ndim; i++) stacked_shape[i + 1] = dims[i];
-  PolyTensor *src = poly_tensor_rand_by_id(
-      ctx, stacked_shape, ndim + 1, tensor_dtype_id(POLY_FLOAT32), device, 1
+  /* Current randn_like composes one rand graph in the same Python call scope.
+   * Retire that complete scope below; invoking the public owner-closing rand
+   * wrapper here would release nested source owners twice. */
+  PolyTensor *src = tensor_rand_by_id(
+      ctx, stacked_shape, ndim + 1, tensor_dtype_id(POLY_FLOAT32), device, 1, NULL
   );
-  return src ? rng_randn_like(ctx, src, dims, ndim, dtype_id) : NULL;
+  PolyTensor *out = src ? rng_randn_like(ctx, src, dims, ndim, dtype_id) : NULL;
+  PolyRngDeviceState *state = rng_device_state(ctx, device);
+  PolyTensor *keep[] = {
+      out,
+      state ? state->seed : NULL,
+      state ? state->counter : NULL,
+  };
+  tensor_release_temporaries(ctx, first_order, keep, 3);
+  return out;
 }
 
 /* Explicit-seed C adaptation of Tensor._next_counter. The local key/counter
@@ -4788,10 +4921,13 @@ PolyUOp *poly_rand_by_id(
 ) {
   PolyDType dtype;
   if (!ffi_dtype_is_float_like(dtype_id, &dtype)) return NULL;
+  uint64_t first_order = ctx ? ctx->next_tensor_order : 0;
   PolyTensor *out = rng_tensor_rand_from_seed(
       ctx, shape, ndim, seed, tensor_dtype_id(dtype), 1
   );
-  return out ? out->uop_physical : NULL;
+  PolyUOp *root = out ? out->uop_physical : NULL;
+  tensor_release_temporaries(ctx, first_order, NULL, 0);
+  return root;
 }
 
 PolyUOp *poly_rand(PolyCtx *ctx, const int64_t *shape, int ndim, uint64_t seed) {
@@ -4809,6 +4945,7 @@ PolyUOp *poly_randn_by_id(
   if (!ffi_dtype_is_float_like(dtype_id, &dtype) || ndim < 0 ||
       ndim >= POLY_MAX_DIMS || (ndim > 0 && !shape))
     return NULL;
+  uint64_t first_order = ctx ? ctx->next_tensor_order : 0;
   int64_t stacked_shape[POLY_MAX_DIMS];
   stacked_shape[0] = 2;
   for (int i = 0; i < ndim; i++) stacked_shape[i + 1] = shape[i];
@@ -4820,7 +4957,9 @@ PolyUOp *poly_randn_by_id(
                               ctx, src, shape, ndim, tensor_dtype_id(dtype)
                           )
                         : NULL;
-  return out ? out->uop_physical : NULL;
+  PolyUOp *root = out ? out->uop_physical : NULL;
+  tensor_release_temporaries(ctx, first_order, NULL, 0);
+  return root;
 }
 
 PolyUOp *poly_randn(PolyCtx *ctx, const int64_t *shape, int ndim, uint64_t seed) {

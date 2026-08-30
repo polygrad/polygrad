@@ -45,6 +45,11 @@ async function runWasmOwnershipTests() {
   function lifecycleRuntime(core) {
     const rt = Object.create(PolyRuntime.prototype)
     rt._core = core
+    rt._lifetime = {
+      alive: true,
+      core,
+      asyncHost: Boolean(core.caps && core.caps.core === 'wasm' && core.caps.device === 'webgpu')
+    }
     rt._closing = false
     rt._disposePromise = null
     rt._activeAsync = 0
@@ -74,6 +79,23 @@ async function runWasmOwnershipTests() {
       throw new Error(`unexpected runtime teardown order: ${events}`)
     }
     if (rt.dispose() !== disposed) throw new Error('runtime disposal is not idempotent')
+  })
+
+  await test('stats rejects collection while async core work is suspended', async () => {
+    const rt = lifecycleRuntime({
+      caps: { core: 'wasm', device: 'webgpu' },
+      ffi: { poly_ctx_stats() { return {} } },
+      ctx: 1
+    })
+    rt.Tensor = { _disposeAll() {} }
+    rt.uop = { _disposeAll() {} }
+    const release = rt._beginAsync()
+    let rejected = false
+    try { rt.stats() } catch (err) {
+      rejected = /active async work/.test(String(err && err.message))
+    }
+    release()
+    if (!rejected) throw new Error('stats collected residency during active async work')
   })
 
   await test('async Instance disposal follows its admitted forward on the core queue', async () => {

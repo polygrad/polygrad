@@ -28,6 +28,7 @@ struct PolyJit {
   int n_var_bindings;
   int var_bindings_cap;
   PolyUOp *captured_linear;
+  bool captured_root_retained;
   bool prune;
   bool capturing;
   bool captured;
@@ -42,6 +43,10 @@ static int poly_jit_run_captured_linear(
 
 static void poly_jit_clear(PolyJit *jit) {
   if (!jit) return;
+  if (jit->captured_root_retained && jit->ctx && jit->captured_linear)
+    poly_uop_release(jit->ctx, jit->captured_linear);
+  for (int i = 0; jit->ctx && i < jit->n_linears; i++)
+    poly_uop_release(jit->ctx, jit->linears[i]);
   free(jit->linears);
   free(jit->var_bindings);
   free(jit->input_buffers);
@@ -51,6 +56,7 @@ static void poly_jit_clear(PolyJit *jit) {
   jit->linears = NULL;
   jit->var_bindings = NULL;
   jit->captured_linear = NULL;
+  jit->captured_root_retained = false;
   jit->input_buffers = NULL;
   jit->input_views = NULL;
   jit->input_dtypes = NULL;
@@ -700,7 +706,11 @@ static int poly_jit_build_captured_linear(
   );
   free(held);
   if (!jit->captured_linear) return -1;
+  if (poly_uop_retain(jit->ctx, jit->captured_linear) != 0) return -1;
+  jit->captured_root_retained = true;
   jit->n_recorded_linears = jit->n_linears;
+  for (int i = 0; i < jit->n_linears; i++)
+    poly_uop_release(jit->ctx, jit->linears[i]);
   free(jit->linears);
   jit->linears = NULL;
   jit->n_linears = 0;
@@ -842,6 +852,10 @@ int poly_jit_record_linear(
             var_bindings[i].var, var_bindings[i].value
         ) != 0)
       return -1;
+  /* Current _TinyJit.add_linear keeps every LINEAR live until capture creates
+   * CapturedJit (engine/jit.py:193-209,250-281). This retain is C ownership
+   * mechanics for the same interval. */
+  if (poly_uop_retain(jit->ctx, linear) != 0) return -1;
   jit->linears[jit->n_linears++] = linear;
   return 0;
 }

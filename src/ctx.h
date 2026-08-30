@@ -41,6 +41,12 @@ struct PolyCtx {
   int stats_suppression_depth;
   PolyMap *shape_cache;
   PolyMap *buffers;
+  /* C analogue of Tinygrad's weak UOp/Buffer ownership. Values are positive
+   * retain counts encoded as uintptr_t. UOps remain arena-owned. */
+  PolyMap *retained_uops;
+  bool collection_dirty;
+  bool collecting;
+  int execution_depth;
   /* Pinned Tensor._device_seeds/_device_rng_counters, keyed by the exact
    * canonical DEVICE UOp. The state objects themselves are arena-owned. */
   PolyMap *rng_states;
@@ -101,6 +107,7 @@ void poly_ctx_record_memory_free_exact(
     size_t nbytes
 );
 uint64_t poly_ctx_mem_used_for_device_uop(PolyCtx *ctx, PolyUOp *device_uop);
+int poly_ctx_collect_before_allocation(PolyCtx *ctx, PolyUOp *transient_root);
 void poly_ctx_reserve_unique_id(PolyCtx *ctx, int64_t id);
 void poly_ctx_reserve_buf_tag(PolyCtx *ctx, int32_t tag);
 

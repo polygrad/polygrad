@@ -209,6 +209,31 @@ function isInstanceSpec(v) {
 
 function createBoundInstanceClass(runtime) {
   const _runtime = runtime
+  const liveInstanceOwners = new Set()
+  const instanceFinalizer = typeof FinalizationRegistry === 'undefined'
+    ? null
+    : new FinalizationRegistry(owner => {
+        const pending = releaseInstanceOwner(owner)
+        if (pending && typeof pending.then === 'function') pending.catch(() => {})
+      })
+
+  function releaseInstanceOwner(owner, token = null) {
+    if (!owner || !owner.active) return undefined
+    owner.active = false
+    liveInstanceOwners.delete(owner)
+    if (instanceFinalizer && token) instanceFinalizer.unregister(token)
+    const instance = owner.ref && owner.ref.deref ? owner.ref.deref() : null
+    if (instance) {
+      instance._owner = null
+      instance._handle = null
+      instance._closing = true
+    }
+    if (!owner.state.alive || !owner.core || !owner.handle) return undefined
+    const free = () => owner.core.instance.free(owner.handle)
+    if (owner.asyncHost && owner.core.enqueueAsync) return owner.core.enqueueAsync(free)
+    free()
+    return undefined
+  }
 
   function requireTensor(name, tensor) {
     if (!tensor || !tensor._tensor) throw new Error(`${name} is not a Tensor`)
@@ -355,6 +380,16 @@ function createBoundInstanceClass(runtime) {
       this._activeAsync = 0
       this._idleWaiters = []
       this._disposePromise = null
+      this._owner = {
+        state: _runtime._lifetime,
+        core: _runtime._core,
+        handle,
+        asyncHost: this._asyncHostBridge,
+        active: true,
+        ref: typeof WeakRef === 'undefined' ? null : new WeakRef(this)
+      }
+      liveInstanceOwners.add(this._owner)
+      if (instanceFinalizer) instanceFinalizer.register(this, this._owner, this)
     }
 
     _usesAsyncHostBridge() {
@@ -615,24 +650,21 @@ function createBoundInstanceClass(runtime) {
       if (!this._handle) return undefined
       this._closing = true
       if (!this._rt || !this._rt._core) {
+        if (this._owner) {
+          this._owner.active = false
+          liveInstanceOwners.delete(this._owner)
+          if (instanceFinalizer) instanceFinalizer.unregister(this)
+          this._owner = null
+        }
         this._handle = null
         return undefined
       }
       if (!this._usesAsyncHostBridge()) {
-        this._rt._core.instance.free(this._handle)
-        this._handle = null
-        return undefined
+        return releaseInstanceOwner(this._owner, this)
       }
-      const handle = this._handle
       this._disposePromise = this._rt._withAsync(async () => {
         await this._waitForAsync()
-        const core = this._rt._core
-        if (core && core.enqueueAsync) {
-          await core.enqueueAsync(() => core.instance.free(handle))
-        } else if (core) {
-          core.instance.free(handle)
-        }
-        this._handle = null
+        await releaseInstanceOwner(this._owner, this)
       })
       return this._disposePromise
     }
@@ -1002,6 +1034,15 @@ function createBoundInstanceClass(runtime) {
       return losses
     }
 
+  }
+
+  Instance._disposeAll = () => {
+    const pending = []
+    for (const owner of Array.from(liveInstanceOwners)) {
+      const result = releaseInstanceOwner(owner)
+      if (isPromiseLike(result)) pending.push(result)
+    }
+    return pending.length ? Promise.all(pending) : undefined
   }
 
   Instance.ROLE_PARAM = ROLE_PARAM

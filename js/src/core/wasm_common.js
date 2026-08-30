@@ -1026,6 +1026,10 @@ function createWasmCoreFromModule(Module, device) {
     },
     poly_tensor_create_with_roots: (ctx, logical, physical, role, device) =>
       Module._poly_tensor_create_with_roots(ctx, logical, physical, role, device),
+    poly_tensor_retain: (tensor) => Module._poly_tensor_retain(tensor),
+    poly_tensor_release: (tensor) => Module._poly_tensor_release(tensor),
+    poly_uop_retain: (ctx, uop) => Module._poly_uop_retain(ctx, uop),
+    poly_uop_release: (ctx, uop) => Module._poly_uop_release(ctx, uop),
     poly_tensor_replace_roots: (ctx, tensor, logical, physical, role, device) =>
       Module._poly_tensor_replace_roots(
         ctx, tensor, logical || 0, physical || 0, role, device
@@ -1375,6 +1379,7 @@ function createWasmCoreFromModule(Module, device) {
         if (ptr) Module._free(ptr)
       }
     },
+    poly_ctx_collect: (ctx) => Module._poly_ctx_collect(ctx),
     poly_ctx_stats: readCtxStats,
     poly_ctx_reset_counters: (ctx) => Module._poly_ctx_reset_counters(ctx),
     poly_grad: Module._poly_grad,
@@ -1711,7 +1716,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 63
+  const EXPECTED_ABI = 64
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(

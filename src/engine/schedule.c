@@ -3847,9 +3847,9 @@ fail:
 }
 #endif
 
-/* Current Tinygrad engine/realize.py:run_linear. LINEAR is consumed directly;
- * no secondary schedule/template/runtime graph is constructed. */
-int poly_run_linear(
+/* C control body for current Tinygrad run_linear; the public wrapper below
+ * scopes deferred residency collection across every early return. */
+static int run_linear_impl(
     PolyCtx *ctx,
     PolyUOp *linear,
     PolyVarBinding *var_bindings,
@@ -3860,10 +3860,6 @@ int poly_run_linear(
     bool jit,
     bool wait
 ) {
-  if (!ctx || !linear || linear->op != POLY_OP_LINEAR || n_var_bindings < 0 ||
-      n_input_uops < 0 || (n_var_bindings > 0 && !var_bindings) ||
-      (n_input_uops > 0 && !input_uops))
-    return -1;
   /* Approved PG-PARITY-013 boundary: unsupported exact accelerator ordinals
    * fail before the backend-class enum can alias them to ordinal zero. */
   if (!poly_uop_explicit_devices_supported(ctx, linear)) return -1;
@@ -3957,4 +3953,33 @@ int poly_run_linear(
     }
   }
   return 0;
+}
+
+/* Current Tinygrad engine/realize.py:run_linear. LINEAR is consumed directly;
+ * no secondary schedule/template/runtime graph is constructed. */
+int poly_run_linear(
+    PolyCtx *ctx,
+    PolyUOp *linear,
+    PolyVarBinding *var_bindings,
+    int n_var_bindings,
+    PolyUOp **input_uops,
+    int n_input_uops,
+    bool update_stats,
+    bool jit,
+    bool wait
+) {
+  if (!ctx || !linear || linear->op != POLY_OP_LINEAR || n_var_bindings < 0 ||
+      n_input_uops < 0 || (n_var_bindings > 0 && !var_bindings) ||
+      (n_input_uops > 0 && !input_uops))
+    return -1;
+  bool resweep = ctx->collection_dirty;
+  if (poly_ctx_collect_before_allocation(ctx, linear) != 0) return -1;
+  ctx->execution_depth++;
+  int rc = run_linear_impl(
+      ctx, linear, var_bindings, n_var_bindings, input_uops, n_input_uops,
+      update_stats, jit, wait
+  );
+  ctx->execution_depth--;
+  if (resweep) ctx->collection_dirty = true;
+  return rc;
 }
