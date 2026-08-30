@@ -220,7 +220,9 @@ TEST(bundle, instance_save_includes_entrypoint_manifest_metadata) {
   meta[sections.metadata_len] = '\0';
 
   ASSERT_TRUE(strstr(meta, "\"format\":\"poly.bundle@1\"") != NULL);
-  ASSERT_TRUE(strstr(meta, "\"ir_format\":\"poly.ir.uops@10\"") != NULL);
+  char ir_format[64];
+  snprintf(ir_format, sizeof(ir_format), "\"ir_format\":\"poly.ir.uops@%d\"", POLY_IR_VERSION);
+  ASSERT_TRUE(strstr(meta, ir_format) != NULL);
   ASSERT_TRUE(strstr(meta, "\"name\":\"forward\"") != NULL);
   ASSERT_TRUE(strstr(meta, "\"inputs\":[\"x\"]") != NULL);
   ASSERT_TRUE(strstr(meta, "\"outputs\":[\"logits\"]") != NULL);

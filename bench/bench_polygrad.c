@@ -10,8 +10,10 @@
  * Usage: ./build/bench_polygrad [N] [iters_elementwise] [iters_graph]
  */
 
-#include "../src/codegen.h"
+#include "../src/codegen/codegen.h"
+#include "../src/engine/realize.h"
 #include "../src/engine/schedule.h"
+#include "buffer.h"
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -73,32 +75,29 @@ static Kernel make_unop(PolyOps op, int n) {
 
 static int compile_from_sink(PolyCtx *ctx, PolyUOp *sink, const char *fn_name, PolyProgram **prog_out) {
   int n_lin = 0;
-  PolySchedule *schedule = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
-  if (!schedule) return 0;
-  if (schedule->template->n_calls != 1 || poly_schedule_call_is_copy(schedule, 0)) {
-    poly_schedule_free(schedule);
+  PolyVarBinding *vars = NULL;
+  int n_vars = 0;
+  PolyUOp *linear = poly_linear_effect_sink(ctx, sink, &vars, &n_vars);
+  if (!linear || linear->n_src != 1 || n_vars != 0) {
+    free(vars);
     return 0;
   }
-  PolyUOp *body = poly_schedule_call_body(schedule, 0);
-  if (!body) {
-    poly_schedule_free(schedule);
-    return 0;
-  }
+  PolyUOp *call = linear->src[0];
+  PolyUOp *body = call && call->op == POLY_OP_CALL && call->n_src > 0
+                     ? call->src[0]
+                     : NULL;
+  free(vars);
+  if (!body || body->op != POLY_OP_SINK) return 0;
   PolyUOp **lin = poly_linearize(ctx, body, &n_lin);
-  if (!lin) {
-    poly_schedule_free(schedule);
-    return 0;
-  }
-  char *src = poly_render_c(lin, n_lin, fn_name);
+  if (!lin) return 0;
+  char *src = poly_render_c(ctx, lin, n_lin, fn_name);
   if (!src) {
     free(lin);
-    poly_schedule_free(schedule);
     return 0;
   }
   PolyProgram *prog = poly_compile_c(src, fn_name);
   free(src);
   free(lin);
-  poly_schedule_free(schedule);
   if (!prog) return 0;
   *prog_out = prog;
   return 1;
@@ -131,7 +130,7 @@ static int run_binop_case(const char *name, PolyOps op, int n, int iters) {
   Kernel kern = make_binop(op, n);
   int n_lin = 0;
   PolyUOp **lin = poly_linearize(kern.ctx, kern.sink, &n_lin);
-  char *src = lin ? poly_render_c(lin, n_lin, fn_name) : NULL;
+  char *src = lin ? poly_render_c(kern.ctx, lin, n_lin, fn_name) : NULL;
   PolyProgram *prog = src ? poly_compile_c(src, fn_name) : NULL;
   double compile_us = now_us() - t0;
 
@@ -193,7 +192,7 @@ static int run_unop_case(const char *name, PolyOps op, int n, int iters) {
   Kernel kern = make_unop(op, n);
   int n_lin = 0;
   PolyUOp **lin = poly_linearize(kern.ctx, kern.sink, &n_lin);
-  char *src = lin ? poly_render_c(lin, n_lin, fn_name) : NULL;
+  char *src = lin ? poly_render_c(kern.ctx, lin, n_lin, fn_name) : NULL;
   PolyProgram *prog = src ? poly_compile_c(src, fn_name) : NULL;
   double compile_us = now_us() - t0;
 
@@ -253,8 +252,8 @@ static int run_reduce_sum_axis1_case(int n, int iters) {
 
   double t0 = now_us();
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, total);
-  PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, rows);
+  PolyUOp *a = poly_bench_buffer(ctx, POLY_FLOAT32, total, POLY_DEVICE_CPU);
+  PolyUOp *out = poly_bench_buffer(ctx, POLY_FLOAT32, rows, POLY_DEVICE_CPU);
   int64_t shape[] = {rows, cols};
   int64_t axes[] = {1};
   PolyUOp *a2d = poly_reshape(ctx, a, shape, 2);
@@ -306,8 +305,8 @@ static int run_chain_pad_flip_case(int n, int iters) {
 
   double t0 = now_us();
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, n);
-  PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, out_n);
+  PolyUOp *a = poly_bench_buffer(ctx, POLY_FLOAT32, n, POLY_DEVICE_CPU);
+  PolyUOp *out = poly_bench_buffer(ctx, POLY_FLOAT32, out_n, POLY_DEVICE_CPU);
   int64_t pad_pairs[][2] = {{1, 1}};
   int64_t axes[] = {0};
   PolyUOp *p = poly_pad(ctx, a, pad_pairs, 1);
@@ -360,12 +359,12 @@ static int run_grad_mul_sum_case(int n, int iters) {
 
   double t0 = now_us();
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *x = poly_buffer(ctx, POLY_FLOAT32, n);
+  PolyUOp *x = poly_bench_buffer(ctx, POLY_FLOAT32, n, POLY_DEVICE_CPU);
   PolyUOp *xx = poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT32, x, x, poly_arg_none());
   int64_t axes[] = {0};
   PolyUOp *loss = poly_reduce_axis(ctx, POLY_OP_ADD, xx, axes, 1);
   PolyUOp *gx = poly_grad(ctx, loss, x);
-  PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, n);
+  PolyUOp *out = poly_bench_buffer(ctx, POLY_FLOAT32, n, POLY_DEVICE_CPU);
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out, gx, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
   PolyProgram *prog = NULL;
@@ -413,12 +412,12 @@ static int run_grad_exp2_sum_case(int n, int iters) {
 
   double t0 = now_us();
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *x = poly_buffer(ctx, POLY_FLOAT32, n);
+  PolyUOp *x = poly_bench_buffer(ctx, POLY_FLOAT32, n, POLY_DEVICE_CPU);
   PolyUOp *e = poly_uop1(ctx, POLY_OP_EXP2, POLY_FLOAT32, x, poly_arg_none());
   int64_t axes[] = {0};
   PolyUOp *loss = poly_reduce_axis(ctx, POLY_OP_ADD, e, axes, 1);
   PolyUOp *gx = poly_grad(ctx, loss, x);
-  PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, n);
+  PolyUOp *out = poly_bench_buffer(ctx, POLY_FLOAT32, n, POLY_DEVICE_CPU);
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out, gx, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
   PolyProgram *prog = NULL;
@@ -470,13 +469,13 @@ static int run_grad_fdiv_sum_y_case(int n, int iters) {
 
   double t0 = now_us();
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *x = poly_buffer(ctx, POLY_FLOAT32, n);
-  PolyUOp *y = poly_buffer(ctx, POLY_FLOAT32, n);
+  PolyUOp *x = poly_bench_buffer(ctx, POLY_FLOAT32, n, POLY_DEVICE_CPU);
+  PolyUOp *y = poly_bench_buffer(ctx, POLY_FLOAT32, n, POLY_DEVICE_CPU);
   PolyUOp *q = poly_uop2(ctx, POLY_OP_FDIV, POLY_FLOAT32, x, y, poly_arg_none());
   int64_t axes[] = {0};
   PolyUOp *loss = poly_reduce_axis(ctx, POLY_OP_ADD, q, axes, 1);
   PolyUOp *gy = poly_grad(ctx, loss, y);
-  PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, n);
+  PolyUOp *out = poly_bench_buffer(ctx, POLY_FLOAT32, n, POLY_DEVICE_CPU);
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out, gy, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
   PolyProgram *prog = NULL;
@@ -529,7 +528,7 @@ static int run_grad_chain_movement_case(int n, int iters) {
 
   double t0 = now_us();
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *x = poly_buffer(ctx, POLY_FLOAT32, total);
+  PolyUOp *x = poly_bench_buffer(ctx, POLY_FLOAT32, total, POLY_DEVICE_CPU);
   int64_t shape[] = {rows, cols};
   int64_t perm[] = {1, 0};
   int64_t axes[] = {0, 1};
@@ -537,7 +536,7 @@ static int run_grad_chain_movement_case(int n, int iters) {
   PolyUOp *xp = poly_permute(ctx, xr, perm, 2);
   PolyUOp *loss = poly_reduce_axis(ctx, POLY_OP_ADD, xp, axes, 2);
   PolyUOp *gx = poly_grad(ctx, loss, x);
-  PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, total);
+  PolyUOp *out = poly_bench_buffer(ctx, POLY_FLOAT32, total, POLY_DEVICE_CPU);
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out, gx, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
   PolyProgram *prog = NULL;

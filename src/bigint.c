@@ -629,3 +629,72 @@ int poly_arg_integer_cmp(PolyArg a, PolyArg b, bool *ok) {
   if (ok) *ok = valid;
   return out;
 }
+
+int poly_arg_integer_cmp_float(PolyArg integer, double value) {
+  /* Python compares arbitrary-size ints and binary64 values exactly. */
+  if (isnan(value)) return 0;
+  if (isinf(value)) return value < 0.0 ? 1 : -1;
+
+  PolyInt lhs = {0};
+  if (!poly_int_from_arg(&lhs, integer)) return 0;
+  if (value == 0.0) {
+    int ret = lhs.sign < 0 ? -1 : lhs.sign > 0 ? 1 : 0;
+    poly_int_free(&lhs);
+    return ret;
+  }
+
+  int float_sign = signbit(value) ? -1 : 1;
+  if (lhs.sign != float_sign) {
+    int ret = lhs.sign < float_sign ? -1 : 1;
+    poly_int_free(&lhs);
+    return ret;
+  }
+  lhs.sign = 1;
+
+  uint64_t bits = 0;
+  memcpy(&bits, &value, sizeof(bits));
+  uint64_t exponent = (bits >> 52) & UINT64_C(0x7ff);
+  uint64_t significand = bits & UINT64_C(0x000fffffffffffff);
+  int shift;
+  if (exponent == 0) {
+    shift = -1074;
+  } else {
+    significand |= UINT64_C(1) << 52;
+    shift = (int)exponent - 1023 - 52;
+  }
+
+  PolyInt rhs = {0}, scaled = {0};
+  bool ok = poly_int_from_i64(&rhs, (int64_t)significand);
+  int magnitude_cmp = 0;
+  if (ok && shift >= 0) {
+    ok = poly_int_shl(&scaled, &rhs, (uint64_t)shift);
+    if (ok) magnitude_cmp = poly_int_cmp(&lhs, &scaled);
+  } else if (ok) {
+    ok = poly_int_shl(&scaled, &lhs, (uint64_t)-shift);
+    if (ok) magnitude_cmp = poly_int_cmp(&scaled, &rhs);
+  }
+  poly_int_free(&scaled);
+  poly_int_free(&rhs);
+  poly_int_free(&lhs);
+  if (!ok) return 0;
+  return float_sign < 0 ? -magnitude_cmp : magnitude_cmp;
+}
+
+bool poly_arg_python_numeric_eq(PolyArg a, PolyArg b) {
+  /* Tinygrad UPat.match uses Python == for literal arguments. */
+  bool a_int = a.kind == POLY_ARG_BOOL || a.kind == POLY_ARG_INT ||
+               a.kind == POLY_ARG_BIGINT;
+  bool b_int = b.kind == POLY_ARG_BOOL || b.kind == POLY_ARG_INT ||
+               b.kind == POLY_ARG_BIGINT;
+  if (a_int && b_int) {
+    bool ok = false;
+    return poly_arg_integer_cmp(a, b, &ok) == 0 && ok;
+  }
+  if (a_int && b.kind == POLY_ARG_FLOAT)
+    return !isnan(b.f) && poly_arg_integer_cmp_float(a, b.f) == 0;
+  if (a.kind == POLY_ARG_FLOAT && b_int)
+    return !isnan(a.f) && poly_arg_integer_cmp_float(b, a.f) == 0;
+  if (a.kind == POLY_ARG_FLOAT && b.kind == POLY_ARG_FLOAT)
+    return (isnan(a.f) && isnan(b.f)) || a.f == b.f;
+  return false;
+}

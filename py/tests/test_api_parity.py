@@ -7,9 +7,21 @@ import pytest
 from extra.lr_scheduler import OneCycleLR
 from polygrad import _ffi
 from polygrad import Context, GlobalCounters, Jit, Tensor, TinyJit, UOp, Variable, dtypes, fetch, getenv, nn
-from polygrad.helpers import Context as HelperContext, fetch as helper_fetch, getenv as helper_getenv
-from polygrad.nn import SGD
+from polygrad.helpers import Context as HelperContext, TRAINING, fetch as helper_fetch, getenv as helper_getenv
+from polygrad.nn.optim import SGD
 from polygrad.uop.ops import UOp as OpsUOp, resolve
+
+
+def test_dtype_has_no_pointer_or_image_subclasses():
+    # Tinygrad 2026-07-07 removed PtrDType and 2026-07-08 removed ImageDType;
+    # ParamArg and UOp shape carry storage metadata.
+    assert not hasattr(dtypes.float, "ptr")
+    assert not hasattr(dtypes, "imagef")
+
+
+def test_dtype_is_scalar_only_like_current_tinygrad():
+    # Tinygrad 2026-07-12 removed dtype.vec; UOp shape carries lane width.
+    assert not hasattr(dtypes.float, "vec")
 
 
 def test_top_level_public_exports_are_defining_module_objects():
@@ -40,6 +52,23 @@ def test_uop_resolve_simplifies_before_using_bounds():
         resolve(v)
 
 
+def test_uop_literals_and_binary_promotion_match_current_tinygrad():
+    ctx = Variable('literal_ctx', 0, 4)._ctx
+    integer = UOp.const(ctx, 1)
+    floating = UOp.const(ctx, 1.0)
+    value = UOp.variable(ctx, 'literal_float', 0, 4, dtype=dtypes.float32, param=True)
+    out = value + 1
+
+    assert integer.dtype is dtypes.weakint
+    assert floating.dtype is dtypes.weakfloat
+    assert out.dtype is dtypes.float32
+    assert out.src[1].dtype is dtypes.weakfloat
+    assert UOp.const(ctx, True).dtype is dtypes.bool
+    assert UOp.const(ctx, 1, dtypes.float32).dtype is dtypes.float32
+    assert UOp.const(ctx, 1.75, dtypes.int32).dtype is dtypes.int32
+    assert UOp.const(ctx, 2, dtypes.bool).dtype is dtypes.bool
+
+
 def test_tensor_module_cast_is_typing_cast_identity():
     # Pinned tinygrad/tensor.py:5 imports this public name from typing; it is
     # not a Tensor CAST operation.
@@ -49,32 +78,32 @@ def test_tensor_module_cast_is_typing_cast_identity():
     assert cast(list[int], value) is value
 
 
-def test_tensor_train_is_pinned_context_decorator_and_restores_state():
+def test_training_is_shared_context_var_and_restores_state():
     events = []
 
-    @Tensor.train()
+    @Context(TRAINING=1)
     def decorated(value):
-        events.append(("decorated", Tensor.training))
+        events.append(("decorated", TRAINING.value))
         return value + 1
 
     assert decorated(4) == 5
-    assert Tensor.training is False
-    with Tensor.train(False) as entered:
+    assert TRAINING.value == 0
+    with Context(TRAINING=0) as entered:
         assert entered is None
-        events.append(("outer", Tensor.training))
-        with Tensor.train(True):
-            events.append(("inner", Tensor.training))
-        events.append(("restored_outer", Tensor.training))
-    assert Tensor.training is False
+        events.append(("outer", TRAINING.value))
+        with Context(TRAINING=1):
+            events.append(("inner", TRAINING.value))
+        events.append(("restored_outer", TRAINING.value))
+    assert TRAINING.value == 0
     with pytest.raises(RuntimeError, match="probe"):
-        with Tensor.train(True):
+        with Context(TRAINING=1):
             raise RuntimeError("probe")
-    assert Tensor.training is False
+    assert TRAINING.value == 0
     assert events == [
-        ("decorated", True),
-        ("outer", False),
-        ("inner", True),
-        ("restored_outer", False),
+        ("decorated", 1),
+        ("outer", 0),
+        ("inner", 1),
+        ("restored_outer", 0),
     ]
 
 
@@ -127,7 +156,8 @@ def test_tinyjit_rejects_nested_capture_and_recovers_context():
 
 
 def test_top_level_nn_and_global_counters_match_tinygrad_surface():
-    assert nn.SGD is SGD
+    assert not hasattr(nn, "SGD")
+    assert nn.optim.SGD is SGD
     # Pinned Tensor.arange is device-free and realize() is a no-op. Use the
     # host-backed path to exercise one real CPU call and its counters.
     x = Tensor(np.arange(8, dtype=np.float32)).realize(do_update_stats=False)
@@ -188,7 +218,7 @@ def test_tinyjit_symbolic_input_view_replays_current_binding():
             if not uop or uop in seen:
                 continue
             seen.add(uop)
-            bind_count += uop.op_name == 'BIND'
+            bind_count += uop.is_bound_var
             stack.extend(uop.src)
         assert batch.uop_logical.op_name == 'SHRINK'
         assert bind_count == 1
@@ -378,7 +408,6 @@ def test_backward_uses_realized_random_parameter_version():
     try:
         Tensor.manual_seed(42)
         weight = (Tensor.rand(2, 2) * 0.5 - 0.25).realize()
-        weight.requires_grad = True
         x = Tensor([[0.2, -0.4], [0.7, 0.3]], dtype='float32')
         target = Tensor([[0.1, -0.2], [0.3, 0.4]], dtype='float32')
 
@@ -430,7 +459,7 @@ def test_random_crop_indices_remain_consistent_after_readback():
 
 
 def test_python_loader_checks_current_abi_before_use():
-    assert _ffi.get_lib().poly_abi_version() == _ffi.POLYGRAD_ABI_VERSION == 57
+    assert _ffi.get_lib().poly_abi_version() == _ffi.POLYGRAD_ABI_VERSION == 63
 
 
 @pytest.mark.parametrize('relative', [
@@ -466,8 +495,9 @@ def test_python_loader_rejects_mismatched_abi_before_declaring_signatures(monkey
     assert _ffi._lib is None
 
 
+@Context(TRAINING=1)
 def test_optimizer_lr_is_assignable_tensor_and_feeds_c_graph():
-    p = Tensor([1.0], requires_grad=True).realize()
+    p = Tensor([1.0]).realize()
     opt = SGD([p], lr=0.1)
 
     assert isinstance(opt.lr, Tensor)
@@ -478,8 +508,21 @@ def test_optimizer_lr_is_assignable_tensor_and_feeds_c_graph():
     np.testing.assert_allclose(p.numpy(), [0.8], rtol=1e-6, atol=1e-6)
 
 
+def test_optimizer_schedule_requires_shared_training_context():
+    p = Tensor([1.0]).realize()
+    p._grad = Tensor([1.0])
+    opt = SGD([p], lr=0.1, fused=False)
+
+    with pytest.raises(RuntimeError, match="TRAINING=0, TRAINING must be enabled"):
+        opt.schedule_step()
+    with Context(TRAINING=1):
+        scheduled = opt.schedule_step()
+    assert [tensor.uop.op_name for tensor in scheduled] == ["AFTER"]
+
+
+@Context(TRAINING=1)
 def test_sgd_momentum_commits_lazy_backward_gradient_before_view_state_assign():
-    p = Tensor([1.0], requires_grad=True).realize()
+    p = Tensor([1.0]).realize()
     x = Tensor([1.0]).realize()
     opt = SGD(
         [p], lr=0.02, momentum=0.85, nesterov=True,
@@ -496,14 +539,14 @@ def test_sgd_momentum_commits_lazy_backward_gradient_before_view_state_assign():
 
 
 def test_sgd_vector_momentum_state_is_writable_and_elementwise():
-    p = Tensor([1.0, 2.0], requires_grad=True).realize()
+    p = Tensor([1.0, 2.0]).realize()
     p._grad = Tensor([0.25, -0.5], dtype=p.dtype)
     opt = SGD(
         [p], lr=0.1, momentum=0.9, nesterov=True,
         weight_decay=0.1, fused=False,
     )
 
-    with Tensor.train(True):
+    with Context(TRAINING=1):
         scheduled = opt.schedule_step()
         assert len(scheduled) == 2
         assert scheduled[0] is opt.b[0]
@@ -514,9 +557,10 @@ def test_sgd_vector_momentum_state_is_writable_and_elementwise():
     np.testing.assert_allclose(p.numpy(), [0.9335, 2.057], rtol=1e-6, atol=1e-6)
 
 
+@Context(TRAINING=1)
 def test_optimizer_mixed_device_failure_does_not_mutate_earlier_param():
-    p0 = Tensor([1.0], requires_grad=True, device='CPU').realize()
-    p1 = Tensor([2.0], requires_grad=True, device='CUDA')
+    p0 = Tensor([1.0], device='CPU').realize()
+    p1 = Tensor([2.0], device='CUDA')
     p0._grad = Tensor([1.0], device='CPU')
     p1._grad = Tensor([1.0], device='CUDA')
     opt = SGD([p0, p1], lr=0.1)
@@ -532,7 +576,7 @@ def test_optimizer_mixed_device_failure_does_not_mutate_earlier_param():
 
 
 def test_onecyclelr_initial_and_step_values_match_tinygrad_probe():
-    p = Tensor([1.0], requires_grad=True).realize()
+    p = Tensor([1.0]).realize()
     opt = SGD([p], lr=0.001)
     scheduler = OneCycleLR(
         opt,
@@ -556,8 +600,9 @@ def test_onecyclelr_initial_and_step_values_match_tinygrad_probe():
     )
 
 
+@Context(TRAINING=1)
 def test_tinyjit_optimizer_replay_uses_current_onecyclelr_tensor():
-    p = Tensor([1.0], requires_grad=True).realize()
+    p = Tensor([1.0]).realize()
     p._grad = Tensor([1.0]).realize()
     opt = SGD([p], lr=0.01, momentum=0.0, fused=False)
     scheduler = OneCycleLR(

@@ -1,13 +1,26 @@
 /* selftest.c -- embeddable runtime sanity checks */
 
 #include "polygrad.h"
+#include "ctx.h"
 #include "device.h"
 #include "engine/realize.h"
-#include "engine/schedule.h"
-#include "pat.h"
+#include "uop/upat.h"
 
 #include <math.h>
 #include <stddef.h>
+#include <stdlib.h>
+
+/* C argument adaptation for current Tinygrad UOp.new_buffer. */
+static PolyUOp *selftest_new_buffer(
+    PolyCtx *ctx, PolyDType dtype, int64_t size, PolyDevice device
+) {
+  PolyUOp *device_uop = poly_device_uop(ctx, device);
+  return device_uop
+             ? poly_uop_new_buffer(
+                   ctx, device_uop, size, dtype, poly_ctx_next_unique_id(ctx)
+               )
+             : NULL;
+}
 
 static int selftest_alu(void) {
   PolyArg add_ops[2] = {poly_arg_int(2), poly_arg_int(3)};
@@ -32,17 +45,20 @@ int poly_selftest_device(PolyDevice device) {
   if (selftest_alu() != 0) return -1;
 
   if (device == POLY_DEVICE_AUTO) device = POLY_DEVICE_INTERP;
-  if (device == POLY_DEVICE_HOST || !poly_device_can_execute(device)) return -1;
+  if (!poly_device_can_execute(device)) return -1;
 
   int rc = -1;
   PolyCtx *ctx = poly_ctx_new();
-  PolySchedule *sched = NULL;
+  PolyVarBinding *var_bindings = NULL;
+  int n_var_bindings = 0;
   if (!ctx) return -1;
   poly_ctx_set_preferred_device(ctx, device);
 
-  PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, 4);
-  PolyUOp *b = poly_buffer(ctx, POLY_FLOAT32, 4);
-  PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, 4);
+  /* Tinygrad@2026-08-22/a9069c177a9d UOp.new_buffer creates executable
+   * BUFFER(shape, ParamArg(device)); the self-test exercises execution. */
+  PolyUOp *a = selftest_new_buffer(ctx, POLY_FLOAT32, 4, device);
+  PolyUOp *b = selftest_new_buffer(ctx, POLY_FLOAT32, 4, device);
+  PolyUOp *out = selftest_new_buffer(ctx, POLY_FLOAT32, 4, device);
   if (!a || !b || !out) goto cleanup;
 
   const float av[4] = {1.0f, -2.0f, 3.5f, 8.0f};
@@ -58,9 +74,15 @@ int poly_selftest_device(PolyDevice device) {
   PolyUOp *sink = poly_sink1(ctx, store);
   if (!sum || !store || !sink) goto cleanup;
 
-  sched = poly_schedule_effect_sink(ctx, sink);
-  if (!sched) goto cleanup;
-  if (poly_run_schedule(ctx, sched, NULL, 0) != 0) goto cleanup;
+  PolyUOp *linear = poly_linear_effect_sink(
+      ctx, sink, &var_bindings, &n_var_bindings
+  );
+  if (!linear) goto cleanup;
+  if (poly_run_linear(
+          ctx, linear, var_bindings, n_var_bindings,
+          NULL, 0, true, false, false
+      ) != 0)
+    goto cleanup;
   if (poly_buffer_read(ctx, out, got, sizeof(got)) != 0) goto cleanup;
 
   for (int i = 0; i < 4; i++) {
@@ -69,7 +91,7 @@ int poly_selftest_device(PolyDevice device) {
   rc = 0;
 
 cleanup:
-  poly_schedule_free(sched);
+  free(var_bindings);
   poly_ctx_destroy(ctx);
   return rc;
 }

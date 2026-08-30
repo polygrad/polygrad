@@ -17,7 +17,11 @@
 #include <stdint.h>
 #include <float.h>
 
+#include "../src/ctx.h"
+#include "../src/codegen/codegen.h"
 #include "../src/engine/realize.h"
+#include "../src/schedule/rangeify.h"
+#include "../src/schedule/schedule.h"
 #include "../src/tensor.h"
 
 typedef void (*TestFn)(int *passed, int *failed);
@@ -28,6 +32,220 @@ typedef struct {
   TestFn fn;
   unsigned flags;
 } TestEntry;
+
+/* Test-only spelling of Tinygrad's full_rewrite_to_sink -> do_linearize boundary. */
+static inline PolyUOp **poly_test_full_rewrite_and_linearize_ex(
+    PolyCtx *ctx, PolyUOp *sink, PolyRewriteOpts opts, int *n_out
+) {
+  PolyUOp *rewritten = poly_full_rewrite_to_sink_ex(ctx, sink, opts);
+  if (!rewritten) {
+    if (n_out) *n_out = 0;
+    return NULL;
+  }
+  return poly_do_linearize(ctx, rewritten, n_out);
+}
+
+static inline PolyUOp **poly_test_full_rewrite_and_linearize(
+    PolyCtx *ctx, PolyUOp *sink, int *n_out
+) {
+  PolyUOp *rewritten = poly_full_rewrite_to_sink(ctx, sink);
+  if (!rewritten) {
+    if (n_out) *n_out = 0;
+    return NULL;
+  }
+  return poly_do_linearize(ctx, rewritten, n_out);
+}
+
+/* Current Tinygrad UOp.new_buffer(canonicalize_device(device), ...). */
+static inline PolyUOp *poly_test_buffer_on_device(
+    PolyCtx *ctx, PolyDType dtype, int64_t size, PolyDevice device
+) {
+  if (device == POLY_DEVICE_AUTO) {
+    device = poly_ctx_get_preferred_device(ctx);
+    if (!poly_device_can_execute(device)) device = poly_device_default();
+  }
+  PolyUOp *device_uop = poly_device_uop(ctx, device);
+  return device_uop
+             ? poly_uop_new_buffer(
+                   ctx, device_uop, size, dtype, poly_ctx_next_unique_id(ctx)
+               )
+             : NULL;
+}
+
+static inline PolyUOp *poly_test_buffer(
+    PolyCtx *ctx, PolyDType dtype, int64_t size
+) {
+  return poly_test_buffer_on_device(ctx, dtype, size, POLY_DEVICE_AUTO);
+}
+
+/* Approved Polygrad portable logical-storage fixture. */
+static inline PolyUOp *poly_test_logical_buffer(
+    PolyCtx *ctx, PolyDType dtype, int64_t size
+) {
+  return poly_uop_new_logical_buffer(ctx, dtype, size);
+}
+
+/* Test-only adapter for tinygrad CreationMixin.empty with UOp dimensions. */
+static inline PolyTensor *poly_test_tensor_empty_var_on_device(
+    PolyCtx *ctx,
+    PolyDType dtype,
+    PolyUOp *batch_var,
+    const int64_t *inner_dims,
+    int n_inner,
+    PolyDevice device
+) {
+  if (!ctx || !batch_var || n_inner < 0 || n_inner >= POLY_MAX_DIMS ||
+      (n_inner > 0 && !inner_dims))
+    return NULL;
+  if (device == POLY_DEVICE_AUTO) {
+    device = poly_ctx_get_preferred_device(ctx);
+    if (!poly_device_can_execute(device)) device = poly_device_default();
+  }
+  PolyUOp *shape[POLY_MAX_DIMS];
+  shape[0] = batch_var;
+  for (int i = 0; i < n_inner; i++)
+    shape[i + 1] = poly_uop0(
+        ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(inner_dims[i])
+    );
+  return poly_tensor_empty_uop(ctx, dtype, shape, n_inner + 1, device);
+}
+
+static inline PolyUOp *poly_test_buffer_var(
+    PolyCtx *ctx,
+    PolyDType dtype,
+    PolyUOp *batch_var,
+    const int64_t *inner_dims,
+    int n_inner
+) {
+  PolyTensor *tensor = poly_test_tensor_empty_var_on_device(
+      ctx, dtype, batch_var, inner_dims, n_inner, POLY_DEVICE_AUTO
+  );
+  return tensor ? poly_tensor_uop_physical(tensor) : NULL;
+}
+
+static inline PolyUOp *poly_test_buffer_var_by_id(
+    PolyCtx *ctx,
+    int dtype_id,
+    PolyUOp *batch_var,
+    const int64_t *inner_dims,
+    int n_inner,
+    PolyDevice device
+) {
+  PolyDType dtype;
+  if (!poly_dtype_by_id(dtype_id, &dtype)) return NULL;
+  PolyTensor *tensor = poly_test_tensor_empty_var_on_device(
+      ctx, dtype, batch_var, inner_dims, n_inner, device
+  );
+  return tensor ? poly_tensor_uop_physical(tensor) : NULL;
+}
+
+/* Current Tinygrad transform_to_call -> create_linear_with_vars boundary for
+ * explicit C effect sinks. */
+static inline PolyUOp *poly_test_create_linear(PolyCtx *ctx, PolyUOp *sink) {
+  PolyVarBinding *vars = NULL;
+  int n_vars = 0;
+  PolyUOp *linear = poly_linear_effect_sink(ctx, sink, &vars, &n_vars);
+  free(vars);
+  return linear;
+}
+
+/* tinygrad@2026-08-22/a9069c177a9d schedule/rangeify.py:83-89 stores
+ * through a value-shaped view while the allocator owns the flat BUFFER. */
+static inline PolyUOp *poly_test_store_to_buffer(
+    PolyCtx *ctx, PolyUOp *buffer, PolyUOp *value
+) {
+  if (!ctx || !buffer || !value) return NULL;
+  int ndim = poly_uop_ndim(ctx, value);
+  if (ndim < 0 || ndim > POLY_MAX_DIMS) return NULL;
+  PolyUOp *shape[POLY_MAX_DIMS];
+  for (int i = 0; i < ndim; i++) {
+    shape[i] = poly_uop_shape_dim(ctx, value, i);
+    if (!shape[i]) return NULL;
+  }
+  PolyUOp *target = poly_reshape_uop(ctx, buffer, shape, ndim);
+  return target ? poly_store_val(ctx, target, value) : NULL;
+}
+
+/* Current Tinygrad compiler kernels require SINK(arg=KernelInfo). */
+static inline PolyUOp *poly_test_kernel_sink(
+    PolyCtx *ctx, PolyUOp **src, int n_src, const char *name
+) {
+  PolyKernelInfo info = {.name = name};
+  return poly_uop(
+      ctx, POLY_OP_SINK, POLY_VOID, src, n_src, poly_arg_kernel_info(&info)
+  );
+}
+
+/* tinygrad@2026-08-22/a9069c177a9d UOp.placeholder: final-program storage
+ * parameters are scalar value UOps with their flat extent in src[0]. */
+static inline PolyUOp *poly_test_program_param(
+    PolyCtx *ctx, PolyDType dtype, int64_t numel, int slot
+) {
+  int64_t shape[] = {numel};
+  return poly_uop_placeholder(
+      ctx, shape, 1, dtype, slot, POLY_ADDR_GLOBAL, NULL, false
+  );
+}
+
+/* Current Tinygrad UOp.param: scalar dtype plus UOp shape and ParamArg storage metadata. */
+static inline PolyUOp *poly_test_uop_param(
+    PolyCtx *ctx,
+    PolyDType dtype,
+    int64_t numel,
+    int slot,
+    PolyAddrSpace addrspace
+) {
+  PolyUOp *shape = numel < 0
+                       ? poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_none())
+                       : poly_const_int(ctx, numel);
+  PolyParamArg arg = {.slot = slot, .dtype = dtype, .addrspace = addrspace};
+  PolyOps op = addrspace == POLY_ADDR_GLOBAL ? POLY_OP_PARAM : POLY_OP_BUFFER;
+  return shape ? poly_uop1(ctx, op, dtype, shape, poly_arg_param(&arg)) : NULL;
+}
+
+static inline PolyUOp *poly_test_linear_call_body(PolyUOp *linear, int index) {
+  if (!linear || linear->op != POLY_OP_LINEAR || index < 0 || index >= linear->n_src)
+    return NULL;
+  PolyUOp *call = linear->src[index];
+  return call && call->op == POLY_OP_CALL && call->n_src > 0 ? call->src[0] : NULL;
+}
+
+static inline PolyUOp *poly_test_linear_call(PolyUOp *linear, int index) {
+  return linear && linear->op == POLY_OP_LINEAR && index >= 0 && index < linear->n_src &&
+                 linear->src[index] && linear->src[index]->op == POLY_OP_CALL
+             ? linear->src[index]
+             : NULL;
+}
+
+static inline bool poly_test_linear_call_is_copy(PolyUOp *linear, int index) {
+  PolyUOp *body = poly_test_linear_call_body(linear, index);
+  return body && body->op == POLY_OP_COPY;
+}
+
+static inline int poly_test_linear_call_n_buffers(PolyUOp *linear, int index) {
+  PolyUOp *call = poly_test_linear_call(linear, index);
+  return call ? call->n_src - 1 : -1;
+}
+
+static inline PolyUOp *poly_test_linear_call_buffer(
+    PolyUOp *linear, int call_index, int buffer_index
+) {
+  PolyUOp *call = poly_test_linear_call(linear, call_index);
+  return call && buffer_index >= 0 && buffer_index + 1 < call->n_src
+             ? call->src[buffer_index + 1]
+             : NULL;
+}
+
+static inline PolyUOp *poly_test_linear_values(
+    PolyCtx *ctx, PolyUOp **values, int n_values, PolyUOp **realized
+) {
+  PolyVarBinding *vars = NULL;
+  int n_vars = 0;
+  PolyUOp *linear =
+      poly_linear_with_vars(ctx, values, n_values, realized, &vars, &n_vars);
+  free(vars);
+  return linear;
+}
 
 enum {
   POLY_TEST_COMMON = 1u << 0,
@@ -274,7 +492,7 @@ static inline size_t poly_test_buffer_nbytes(PolyCtx *ctx, PolyUOp *buf) {
   if (shape.ndim > 0 && shape.dims) free(shape.dims);
   if (numel < 0 && buf->arg.kind == POLY_ARG_INT) numel = buf->arg.i;
   if (numel < 0) numel = 0;
-  return (size_t)numel * (size_t)poly_dtype_itemsize(poly_dtype_scalar(buf->dtype));
+  return (size_t)numel * (size_t)poly_dtype_itemsize(buf->dtype);
 }
 
 static inline void poly_test_attach_buffer_views(
@@ -307,16 +525,19 @@ static inline int poly_test_readback_buffer_views(
   return 0;
 }
 
-static inline int poly_test_run_schedule_buffer_views(
+static inline int poly_test_run_linear_buffer_views(
     PolyCtx *ctx,
-    PolySchedule *sched,
+    PolyUOp *linear,
     PolyTestBufferView *views,
     int n_views,
     PolyVarBinding *vars,
     int n_vars
 ) {
   poly_test_attach_buffer_views(ctx, views, n_views);
-  int ret = poly_run_schedule(ctx, sched, vars, n_vars);
+  /* Current Tinygrad executes LINEAR directly through run_linear
+   * (tinygrad/engine/realize.py:315-323). */
+  int ret = poly_run_linear(
+      ctx, linear, vars, n_vars, NULL, 0, true, false, false);
   if (ret != 0) return ret;
   return poly_test_readback_buffer_views(ctx, views, n_views);
 }
@@ -344,10 +565,35 @@ static inline int poly_test_realize_buffer_views_vars(
     int n_vars
 ) {
   poly_test_attach_buffer_views(ctx, views, n_views);
-  PolySchedule *sched = poly_schedule_effect_sink(ctx, sink);
-  if (!sched) return -1;
-  int ret = poly_test_run_schedule_buffer_views(ctx, sched, views, n_views, vars, n_vars);
-  poly_schedule_free(sched);
+  PolyVarBinding *default_vars = NULL;
+  int n_default_vars = 0;
+  PolyUOp *linear = poly_linear_effect_sink(
+      ctx, sink, &default_vars, &n_default_vars);
+  if (!linear) return -1;
+  int total_vars = n_default_vars + n_vars;
+  PolyVarBinding *merged = total_vars > 0
+                               ? malloc((size_t)total_vars * sizeof(*merged))
+                               : NULL;
+  if (total_vars > 0 && !merged) {
+    free(default_vars);
+    return -1;
+  }
+  if (n_default_vars > 0)
+    memcpy(merged, default_vars, (size_t)n_default_vars * sizeof(*merged));
+  int n_merged = n_default_vars;
+  for (int i = 0; i < n_vars; i++) {
+    int found = -1;
+    for (int j = 0; j < n_merged; j++)
+      if (merged[j].var == vars[i].var) found = j;
+    if (found >= 0)
+      merged[found].value = vars[i].value;
+    else
+      merged[n_merged++] = vars[i];
+  }
+  int ret = poly_test_run_linear_buffer_views(
+      ctx, linear, views, n_views, merged, n_merged);
+  free(merged);
+  free(default_vars);
   return ret;
 }
 

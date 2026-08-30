@@ -1,9 +1,9 @@
 /*
- * test_pat.c — Tests for pattern matcher: PolyPat, PatternMatcher, graph_rewrite
+ * test_pat.c — Tests for pattern matcher: PolyUPat, PatternMatcher, graph_rewrite
  */
 
 #include "test_harness.h"
-#include "../src/pat.h"
+#include "../src/uop/upat.h"
 
 typedef struct {
   const char *key;
@@ -51,34 +51,34 @@ static PolyUOp *rewrite_accept_a_equal_two(
 
 TEST(pat, match_op_literal) {
   /* Pattern: match CONST op */
-  PolyPat *p = poly_pat_op(POLY_OP_CONST, NULL, 0, NULL);
+  PolyUPat *p = poly_upat_op(POLY_OP_CONST, NULL, 0, NULL);
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *c = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(42));
   PolyUOp *a = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(1));
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, c, a, poly_arg_none());
 
   PolyBindings b = {.n = 0};
-  ASSERT_TRUE(poly_pat_match(p, c, &b));
+  ASSERT_TRUE(poly_upat_match(p, c, &b));
   b.n = 0;
-  ASSERT_FALSE(poly_pat_match(p, add, &b));
+  ASSERT_FALSE(poly_upat_match(p, add, &b));
 
-  poly_pat_free(p);
+  poly_upat_free(p);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
 TEST(pat, match_wildcard_binding) {
   /* Pattern: match any UOp, bind to "x" */
-  PolyPat *p = poly_pat_any("x");
+  PolyUPat *p = poly_upat_any("x");
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *c = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(5));
 
   PolyBindings b = {.n = 0};
-  ASSERT_TRUE(poly_pat_match(p, c, &b));
+  ASSERT_TRUE(poly_upat_match(p, c, &b));
   ASSERT_INT_EQ(b.n, 1);
   ASSERT_PTR_EQ(poly_bind(&b, "x"), c);
 
-  poly_pat_free(p);
+  poly_upat_free(p);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -87,26 +87,26 @@ TEST(pat, match_more_than_inline_bindings) {
   enum { N = 20 };
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *srcs[N];
-  PolyPat *pats[N];
+  PolyUPat *pats[N];
   char names[N][8];
 
   for (int i = 0; i < N; i++) {
     snprintf(names[i], sizeof(names[i]), "x%d", i);
     srcs[i] = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(i));
-    pats[i] = poly_pat_any(names[i]);
+    pats[i] = poly_upat_any(names[i]);
   }
 
-  PolyPat *p = poly_pat_op(POLY_OP_SINK, pats, N, NULL);
+  PolyUPat *p = poly_upat_op(POLY_OP_SINK, pats, N, NULL);
   PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, srcs, N, poly_arg_none());
 
   PolyBindings b = {.n = 0};
-  ASSERT_TRUE(poly_pat_match(p, sink, &b));
+  ASSERT_TRUE(poly_upat_match(p, sink, &b));
   ASSERT_INT_EQ(b.n, N);
   ASSERT_PTR_EQ(poly_bind(&b, "x0"), srcs[0]);
   ASSERT_PTR_EQ(poly_bind(&b, "x19"), srcs[19]);
 
   poly_bindings_free(&b);
-  poly_pat_free(p);
+  poly_upat_free(p);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -115,35 +115,35 @@ TEST(pat, failed_match_rolls_back_heap_backed_bindings) {
   enum { N = POLY_BINDINGS_INLINE + 2 };
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *src[N];
-  PolyPat *pats[N];
+  PolyUPat *pats[N];
   char names[N - 1][8];
   for (int i = 0; i < N; i++)
     src[i] = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(i));
   for (int i = 0; i < N - 1; i++) {
     snprintf(names[i], sizeof(names[i]), "x%d", i);
-    pats[i] = poly_pat_any(names[i]);
+    pats[i] = poly_upat_any(names[i]);
   }
   /* The last source reuses x0 but is a different UOp, after bindings have
    * crossed the inline/heap boundary. */
-  pats[N - 1] = poly_pat_any("x0");
-  PolyPat *p = poly_pat_op(POLY_OP_SINK, pats, N, NULL);
+  pats[N - 1] = poly_upat_any("x0");
+  PolyUPat *p = poly_upat_op(POLY_OP_SINK, pats, N, NULL);
   PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, src, N, poly_arg_none());
 
   PolyBindings binds = {.n = 0};
-  ASSERT_FALSE(poly_pat_match(p, sink, &binds));
+  ASSERT_FALSE(poly_upat_match(p, sink, &binds));
   ASSERT_INT_EQ(binds.n, 0);
 
   poly_bindings_free(&binds);
-  poly_pat_free(p);
+  poly_upat_free(p);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
 TEST(pat, match_src_children) {
   /* Pattern: ADD(CONST, CONST) */
-  PolyPat *p = poly_pat_op2(
-      POLY_OP_ADD, poly_pat_op(POLY_OP_CONST, NULL, 0, NULL),
-      poly_pat_op(POLY_OP_CONST, NULL, 0, NULL), NULL
+  PolyUPat *p = poly_upat_op2(
+      POLY_OP_ADD, poly_upat_op(POLY_OP_CONST, NULL, 0, NULL),
+      poly_upat_op(POLY_OP_CONST, NULL, 0, NULL), NULL
   );
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(2));
@@ -151,21 +151,21 @@ TEST(pat, match_src_children) {
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, a, b, poly_arg_none());
 
   PolyBindings binds = {.n = 0};
-  ASSERT_TRUE(poly_pat_match(p, add, &binds));
+  ASSERT_TRUE(poly_upat_match(p, add, &binds));
 
   /* Should fail for ADD(CONST, ADD) */
   PolyUOp *add2 = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, a, add, poly_arg_none());
   binds.n = 0;
-  ASSERT_FALSE(poly_pat_match(p, add2, &binds));
+  ASSERT_FALSE(poly_upat_match(p, add2, &binds));
 
-  poly_pat_free(p);
+  poly_upat_free(p);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
 TEST(pat, match_named_identity) {
   /* Pattern: IDIV(x, x) — same UOp in both positions */
-  PolyPat *p = poly_pat_op2(POLY_OP_IDIV, poly_pat_any("x"), poly_pat_any("x"), NULL);
+  PolyUPat *p = poly_upat_op2(POLY_OP_IDIV, poly_upat_any("x"), poly_upat_any("x"), NULL);
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(7));
   PolyUOp *b = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(3));
@@ -173,23 +173,23 @@ TEST(pat, match_named_identity) {
   /* Same pointer: should match */
   PolyUOp *div1 = poly_uop2(ctx, POLY_OP_IDIV, POLY_INT32, a, a, poly_arg_none());
   PolyBindings binds = {.n = 0};
-  ASSERT_TRUE(poly_pat_match(p, div1, &binds));
+  ASSERT_TRUE(poly_upat_match(p, div1, &binds));
   ASSERT_PTR_EQ(poly_bind(&binds, "x"), a);
 
   /* Different pointers: should fail */
   PolyUOp *div2 = poly_uop2(ctx, POLY_OP_IDIV, POLY_INT32, a, b, poly_arg_none());
   binds.n = 0;
-  ASSERT_FALSE(poly_pat_match(p, div2, &binds));
+  ASSERT_FALSE(poly_upat_match(p, div2, &binds));
 
-  poly_pat_free(p);
+  poly_upat_free(p);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
 TEST(pat, match_commutative) {
   /* Pattern: ADD(var("x"), CONST(0)) with commutative */
-  PolyPat *p =
-      poly_pat_op2c(POLY_OP_ADD, poly_pat_any("x"), poly_pat_const_val(poly_arg_int(0)), NULL);
+  PolyUPat *p =
+      poly_upat_op2c(POLY_OP_ADD, poly_upat_any("x"), poly_upat_const_val(poly_arg_int(0)), NULL);
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *x = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(5));
   PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
@@ -197,16 +197,16 @@ TEST(pat, match_commutative) {
   /* x + 0: should match */
   PolyUOp *add1 = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, x, zero, poly_arg_none());
   PolyBindings binds = {.n = 0};
-  ASSERT_TRUE(poly_pat_match(p, add1, &binds));
+  ASSERT_TRUE(poly_upat_match(p, add1, &binds));
   ASSERT_PTR_EQ(poly_bind(&binds, "x"), x);
 
   /* 0 + x: should also match (commutative) */
   PolyUOp *add2 = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, zero, x, poly_arg_none());
   binds.n = 0;
-  ASSERT_TRUE(poly_pat_match(p, add2, &binds));
+  ASSERT_TRUE(poly_upat_match(p, add2, &binds));
   ASSERT_PTR_EQ(poly_bind(&binds, "x"), x);
 
-  poly_pat_free(p);
+  poly_upat_free(p);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -217,10 +217,10 @@ TEST(pat, nested_commutative_backtracks_across_later_binding) {
    * (uop/ops.py:1237,1310). The inner ADD must retry its other ordering when
    * the repeated outer "x" binding rejects the first locally valid ordering.
    */
-  PolyPat *p = poly_pat_op2c(
+  PolyUPat *p = poly_upat_op2c(
       POLY_OP_ADD,
-      poly_pat_op2c(POLY_OP_ADD, poly_pat_any("a"), poly_pat_any("x"), NULL),
-      poly_pat_any("x"), NULL
+      poly_upat_op2c(POLY_OP_ADD, poly_upat_any("a"), poly_upat_any("x"), NULL),
+      poly_upat_any("x"), NULL
   );
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *x = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(5));
@@ -229,11 +229,11 @@ TEST(pat, nested_commutative_backtracks_across_later_binding) {
   PolyUOp *root = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, inner, x, poly_arg_none());
 
   PolyBindings binds = {.n = 0};
-  ASSERT_TRUE(poly_pat_match(p, root, &binds));
+  ASSERT_TRUE(poly_upat_match(p, root, &binds));
   ASSERT_PTR_EQ(poly_bind(&binds, "a"), y);
   ASSERT_PTR_EQ(poly_bind(&binds, "x"), x);
 
-  poly_pat_free(p);
+  poly_upat_free(p);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -246,7 +246,7 @@ TEST(pat, rewrite_retries_commutative_binding_after_null_callback) {
   PolyUOp *two = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(2));
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, one, two, poly_arg_none());
   PolyRule rules[] = {{
-      poly_pat_op2c(POLY_OP_ADD, poly_pat_any("a"), poly_pat_any("b"), NULL),
+      poly_upat_op2c(POLY_OP_ADD, poly_upat_any("a"), poly_upat_any("b"), NULL),
       rewrite_accept_a_equal_two,
   }};
   PolyPatternMatcher *pm = poly_pm_new(rules, 1);
@@ -254,7 +254,7 @@ TEST(pat, rewrite_retries_commutative_binding_after_null_callback) {
   ASSERT_PTR_EQ(poly_pm_rewrite(pm, ctx, add), two);
 
   poly_pm_destroy(pm);
-  poly_pat_free(rules[0].pat);
+  poly_upat_free(rules[0].pat);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -265,75 +265,76 @@ TEST(pat, or_casted_is_direct_first_and_one_wrapper) {
   PolyUOp *cast1 = poly_uop1(ctx, POLY_OP_CAST, POLY_INT64, value, poly_arg_none());
   PolyUOp *cast2 = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, cast1, poly_arg_none());
 
-  PolyPat *wild = poly_pat_or_casted(poly_pat_any("x"));
+  PolyUPat *wild = poly_upat_or_casted(poly_upat_any("x"));
   PolyBindings binds = {.n = 0};
-  ASSERT_TRUE(poly_pat_match(wild, cast1, &binds));
+  ASSERT_TRUE(poly_upat_match(wild, cast1, &binds));
   ASSERT_PTR_EQ(poly_bind(&binds, "x"), cast1);
-  poly_pat_free(wild);
+  poly_upat_free(wild);
 
-  PolyPat *constant =
-      poly_pat_or_casted(poly_pat_op(POLY_OP_CONST, NULL, 0, NULL));
+  PolyUPat *constant =
+      poly_upat_or_casted(poly_upat_op(POLY_OP_CONST, NULL, 0, NULL));
   binds.n = 0;
-  ASSERT_TRUE(poly_pat_match(constant, cast1, &binds));
+  ASSERT_TRUE(poly_upat_match(constant, cast1, &binds));
   binds.n = 0;
-  ASSERT_FALSE(poly_pat_match(constant, cast2, &binds));
+  ASSERT_FALSE(poly_upat_match(constant, cast2, &binds));
 
-  poly_pat_free(constant);
+  poly_upat_free(constant);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
 TEST(pat, match_cvar) {
-  /* cvar matches CONST and VCONST */
-  PolyPat *p = poly_pat_cvar("c");
+  /* Current tinygrad cvar matches only scalar CONST UOps. */
+  PolyUPat *p = poly_upat_cvar("c");
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *c = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(42));
-  PolyUOp *v = poly_uop0(ctx, POLY_OP_VCONST, POLY_INT32, poly_arg_int(7));
+  PolyUOp *vsrc[] = {c, c};
+  PolyUOp *v = poly_uop(ctx, POLY_OP_STACK, POLY_INT32, vsrc, 2, poly_arg_none());
   PolyUOp *x = poly_uop0(ctx, POLY_OP_ADD, POLY_INT32, poly_arg_none());
 
   PolyBindings b = {.n = 0};
-  ASSERT_TRUE(poly_pat_match(p, c, &b));
+  ASSERT_TRUE(poly_upat_match(p, c, &b));
   b.n = 0;
-  ASSERT_TRUE(poly_pat_match(p, v, &b));
+  ASSERT_FALSE(poly_upat_match(p, v, &b));
   b.n = 0;
-  ASSERT_FALSE(poly_pat_match(p, x, &b));
+  ASSERT_FALSE(poly_upat_match(p, x, &b));
 
-  poly_pat_free(p);
+  poly_upat_free(p);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
 TEST(pat, match_const_val) {
   /* Match CONST with specific arg value */
-  PolyPat *p = poly_pat_const_val(poly_arg_int(0));
+  PolyUPat *p = poly_upat_const_val(poly_arg_int(0));
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
   PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(1));
 
   PolyBindings b = {.n = 0};
-  ASSERT_TRUE(poly_pat_match(p, zero, &b));
+  ASSERT_TRUE(poly_upat_match(p, zero, &b));
   b.n = 0;
-  ASSERT_FALSE(poly_pat_match(p, one, &b));
+  ASSERT_FALSE(poly_upat_match(p, one, &b));
 
-  poly_pat_free(p);
+  poly_upat_free(p);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
 TEST(pat, match_opset) {
   /* Match any op from GroupOp.Unary */
-  PolyPat *p = poly_pat_ops1(POLY_GROUP_UNARY, poly_pat_cvar(NULL), "a");
+  PolyUPat *p = poly_upat_ops1(POLY_GROUP_UNARY, poly_upat_cvar(NULL), "a");
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *c = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(4.0));
   PolyUOp *neg = poly_uop1(ctx, POLY_OP_NEG, POLY_FLOAT32, c, poly_arg_none());
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, c, c, poly_arg_none());
 
   PolyBindings b = {.n = 0};
-  ASSERT_TRUE(poly_pat_match(p, neg, &b));
+  ASSERT_TRUE(poly_upat_match(p, neg, &b));
   b.n = 0;
-  ASSERT_FALSE(poly_pat_match(p, add, &b));
+  ASSERT_FALSE(poly_upat_match(p, add, &b));
 
-  poly_pat_free(p);
+  poly_upat_free(p);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -349,8 +350,8 @@ static PolyUOp *test_rewrite_identity(PolyCtx *ctx, PolyUOp *root, const PolyBin
 
 TEST(pat, pm_rewrite_basic) {
   /* Single rule: ADD(x, CONST(0)) -> x */
-  PolyPat *p =
-      poly_pat_op2c(POLY_OP_ADD, poly_pat_any("x"), poly_pat_const_val(poly_arg_int(0)), NULL);
+  PolyUPat *p =
+      poly_upat_op2c(POLY_OP_ADD, poly_upat_any("x"), poly_upat_const_val(poly_arg_int(0)), NULL);
   PolyRule rules[] = {{p, test_rewrite_identity}};
   PolyPatternMatcher *pm = poly_pm_new(rules, 1);
 
@@ -368,16 +369,16 @@ TEST(pat, pm_rewrite_basic) {
   ASSERT_TRUE(poly_pm_rewrite(pm, ctx, mul) == NULL);
 
   poly_pm_destroy(pm);
-  poly_pat_free(p);
+  poly_upat_free(p);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
 TEST(pat, pm_early_reject) {
   /* The early_reject optimization should skip patterns quickly */
-  PolyPat *p = poly_pat_op2(
-      POLY_OP_ADD, poly_pat_op(POLY_OP_MUL, NULL, 0, NULL),
-      poly_pat_op(POLY_OP_CONST, NULL, 0, NULL), NULL
+  PolyUPat *p = poly_upat_op2(
+      POLY_OP_ADD, poly_upat_op(POLY_OP_MUL, NULL, 0, NULL),
+      poly_upat_op(POLY_OP_CONST, NULL, 0, NULL), NULL
   );
   PolyRule rules[] = {{p, test_rewrite_identity}};
   PolyPatternMatcher *pm = poly_pm_new(rules, 1);
@@ -390,7 +391,7 @@ TEST(pat, pm_early_reject) {
   ASSERT_TRUE(poly_pm_rewrite(pm, ctx, add) == NULL);
 
   poly_pm_destroy(pm);
-  poly_pat_free(p);
+  poly_upat_free(p);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -405,8 +406,8 @@ TEST(pat, pm_rule_stats_disabled_by_default) {
   unsetenv("POLY_PRINT_MATCH_STATS");
   unsetenv("PRINT_MATCH_STATS");
 
-  PolyPat *p =
-      poly_pat_op2c(POLY_OP_ADD, poly_pat_any("x"), poly_pat_const_val(poly_arg_int(0)), NULL);
+  PolyUPat *p =
+      poly_upat_op2c(POLY_OP_ADD, poly_upat_any("x"), poly_upat_const_val(poly_arg_int(0)), NULL);
   PolyNamedRule rules[] = {POLY_RULE(p, test_rewrite_identity)};
   PolyPatternMatcher *pm = poly_pm_new_named(rules, 1);
 
@@ -425,7 +426,7 @@ TEST(pat, pm_rule_stats_disabled_by_default) {
   ASSERT_INT_EQ((int)stats.rewrites, 0);
 
   poly_pm_destroy(pm);
-  poly_pat_free(p);
+  poly_upat_free(p);
   poly_ctx_destroy(ctx);
   pat_restore_env(&print_tg);
   pat_restore_env(&print);
@@ -438,8 +439,8 @@ TEST(pat, pm_rule_stats_track_named_rewrites) {
   PatEnvSave track = pat_save_env("POLY_TRACK_MATCH_STATS");
   setenv("POLY_TRACK_MATCH_STATS", "1", 1);
 
-  PolyPat *p =
-      poly_pat_op2c(POLY_OP_ADD, poly_pat_any("x"), poly_pat_const_val(poly_arg_int(0)), NULL);
+  PolyUPat *p =
+      poly_upat_op2c(POLY_OP_ADD, poly_upat_any("x"), poly_upat_const_val(poly_arg_int(0)), NULL);
   PolyNamedRule rules[] = {POLY_RULE(p, test_rewrite_identity)};
   PolyPatternMatcher *pm = poly_pm_new_named(rules, 1);
   ASSERT_INT_EQ(poly_pm_rule_count(pm), 1);
@@ -469,7 +470,7 @@ TEST(pat, pm_rule_stats_track_named_rewrites) {
   ASSERT_INT_EQ(poly_pm_get_rule_stats(pm, 1, &stats), -1);
 
   poly_pm_destroy(pm);
-  poly_pat_free(p);
+  poly_upat_free(p);
   poly_ctx_destroy(ctx);
   pat_restore_env(&track);
   PASS();
@@ -481,8 +482,8 @@ TEST(pat, pm_rewrite_trace_json_env) {
   remove(path);
   setenv("POLY_REWRITE_TRACE_JSON", path, 1);
 
-  PolyPat *p =
-      poly_pat_op2c(POLY_OP_ADD, poly_pat_any("x"), poly_pat_const_val(poly_arg_int(0)), NULL);
+  PolyUPat *p =
+      poly_upat_op2c(POLY_OP_ADD, poly_upat_any("x"), poly_upat_const_val(poly_arg_int(0)), NULL);
   PolyNamedRule rules[] = {POLY_RULE(p, test_rewrite_identity)};
   PolyPatternMatcher *pm = poly_pm_new_named(rules, 1);
 
@@ -507,7 +508,7 @@ TEST(pat, pm_rewrite_trace_json_env) {
   ASSERT_TRUE(strstr(buf, "\"after_op\":\"CONST\"") != NULL);
 
   remove(path);
-  poly_pat_free(p);
+  poly_upat_free(p);
   poly_ctx_destroy(ctx);
   pat_restore_env(&trace);
   PASS();
@@ -517,8 +518,8 @@ TEST(pat, pm_rewrite_trace_json_env) {
 
 TEST(pat, graph_rewrite_noop) {
   /* No rules match — graph should be unchanged */
-  PolyPat *p =
-      poly_pat_op2c(POLY_OP_ADD, poly_pat_any("x"), poly_pat_const_val(poly_arg_int(999)), NULL);
+  PolyUPat *p =
+      poly_upat_op2c(POLY_OP_ADD, poly_upat_any("x"), poly_upat_const_val(poly_arg_int(999)), NULL);
   PolyRule rules[] = {{p, test_rewrite_identity}};
   PolyPatternMatcher *pm = poly_pm_new(rules, 1);
 
@@ -531,15 +532,15 @@ TEST(pat, graph_rewrite_noop) {
   ASSERT_PTR_EQ(result, add);
 
   poly_pm_destroy(pm);
-  poly_pat_free(p);
+  poly_upat_free(p);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
 TEST(pat, graph_rewrite_simple) {
   /* Rewrite x+0 -> x in a graph */
-  PolyPat *p =
-      poly_pat_op2c(POLY_OP_ADD, poly_pat_any("x"), poly_pat_const_val(poly_arg_int(0)), NULL);
+  PolyUPat *p =
+      poly_upat_op2c(POLY_OP_ADD, poly_upat_any("x"), poly_upat_const_val(poly_arg_int(0)), NULL);
   PolyRule rules[] = {{p, test_rewrite_identity}};
   PolyPatternMatcher *pm = poly_pm_new(rules, 1);
 
@@ -552,15 +553,15 @@ TEST(pat, graph_rewrite_simple) {
   ASSERT_PTR_EQ(result, five);
 
   poly_pm_destroy(pm);
-  poly_pat_free(p);
+  poly_upat_free(p);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
 TEST(pat, graph_rewrite_nested) {
   /* Rewrite (a + 0) + 0 -> a (double application) */
-  PolyPat *p =
-      poly_pat_op2c(POLY_OP_ADD, poly_pat_any("x"), poly_pat_const_val(poly_arg_int(0)), NULL);
+  PolyUPat *p =
+      poly_upat_op2c(POLY_OP_ADD, poly_upat_any("x"), poly_upat_const_val(poly_arg_int(0)), NULL);
   PolyRule rules[] = {{p, test_rewrite_identity}};
   PolyPatternMatcher *pm = poly_pm_new(rules, 1);
 
@@ -574,19 +575,18 @@ TEST(pat, graph_rewrite_nested) {
   ASSERT_PTR_EQ(result, a);
 
   poly_pm_destroy(pm);
-  poly_pat_free(p);
+  poly_upat_free(p);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
 TEST(pat, const_like_preserves_reference_shape) {
-  /* Pinned UOp.const_like -> UOp.const(..., shape=self._shape)
-   * (uop/ops.py:496-497,553-561). A scalar constant matching a shaped
-   * reference must be RESHAPEd to ones and EXPANDed to the exact shape. */
+  /* Current UOp.const_like creates one typed scalar CONST and raw-prefix
+   * EXPANDs it directly to the reference shape (uop/ops.py:581-583). */
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *ref = poly_reshape(
       ctx,
-      poly_buffer_on_device(ctx, POLY_INT32, 0, POLY_DEVICE_CPU),
+      poly_test_buffer_on_device(ctx, POLY_INT32, 0, POLY_DEVICE_CPU),
       (int64_t[]){2, 0, 3},
       3
   );
@@ -594,11 +594,12 @@ TEST(pat, const_like_preserves_reference_shape) {
   ASSERT_NOT_NULL(like);
   ASSERT_EQ(like->op, POLY_OP_EXPAND);
   ASSERT_INT_EQ(like->n_src, 2);
-  ASSERT_EQ(like->src[0]->op, POLY_OP_RESHAPE);
-  ASSERT_INT_EQ(like->src[0]->n_src, 2);
-  ASSERT_EQ(like->src[0]->src[0]->op, POLY_OP_CONST);
-  ASSERT_INT_EQ(like->src[0]->src[0]->arg.kind, POLY_ARG_INT);
-  ASSERT_INT_EQ(like->src[0]->src[0]->arg.i, -7);
+  ASSERT_EQ(like->src[0]->op, POLY_OP_CONST);
+  ASSERT_INT_EQ(like->src[0]->arg.kind, POLY_ARG_INT);
+  ASSERT_INT_EQ(like->src[0]->arg.i, -7);
+  ASSERT_EQ(like->src[1]->op, POLY_OP_STACK);
+  ASSERT_TRUE(poly_dtype_eq(like->src[1]->dtype, POLY_WEAKINT));
+  ASSERT_INT_EQ(like->src[1]->n_src, 3);
   PolyShape shape = poly_uop_max_shape_cached(ctx, like);
   ASSERT_INT_EQ(shape.ndim, 3);
   ASSERT_INT_EQ(shape.dims[0], 2);
@@ -608,35 +609,29 @@ TEST(pat, const_like_preserves_reference_shape) {
   PASS();
 }
 
-TEST(pat, const_like_preserves_vector_pointer_base_and_symbolic_shape) {
-  /* Pinned const_like uses dtype.base and the exact `_shape`: ordinary vector
-   * constants stay vector constants, pointer metadata is removed, and
-   * symbolic dimensions remain the same UOps. */
+TEST(pat, const_like_preserves_vector_and_symbolic_shape) {
+  /* Current const_like uses the exact UOp shape; storage metadata is not a DType. */
   PolyCtx *ctx = poly_ctx_new();
-  PolyDType vec4 = poly_dtype_vec(POLY_FLOAT32, 4);
-  PolyUOp *vector_ref = poly_uop0(ctx, POLY_OP_CONST, vec4, poly_arg_float(2.0));
+  PolyUOp *lane = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(2.0));
+  PolyUOp *vector_src[] = {lane, lane, lane, lane};
+  PolyUOp *vector_ref = poly_uop_stack(ctx, vector_src, 4);
   PolyUOp *vector_like = poly_const_like_int(ctx, vector_ref, 0);
   ASSERT_NOT_NULL(vector_like);
-  ASSERT_EQ(vector_like->op, POLY_OP_CONST);
-  ASSERT_TRUE(poly_dtype_eq(vector_like->dtype, vec4));
+  ASSERT_EQ(vector_like->op, POLY_OP_EXPAND);
+  ASSERT_TRUE(poly_dtype_eq(vector_like->dtype, POLY_FLOAT32));
+  ASSERT_INT_EQ(poly_uop_max_numel(ctx, vector_like), 4);
 
-  PolyDType ptr_vec = poly_dtype_ptr(vec4, 7, POLY_ADDR_GLOBAL);
-  ptr_vec.vcount = 4;
-  PolyUOp *pointer_ref = poly_uop0(ctx, POLY_OP_PARAM, ptr_vec, poly_arg_int(0));
-  PolyUOp *pointer_like = poly_const_like_int(ctx, pointer_ref, 0);
-  ASSERT_NOT_NULL(pointer_like);
-  ASSERT_EQ(pointer_like->op, POLY_OP_EXPAND);
-  ASSERT_TRUE(poly_dtype_eq(pointer_like->dtype, vec4));
-  ASSERT_FALSE(pointer_like->dtype.is_ptr);
-  PolyShape shape = poly_uop_max_shape_cached(ctx, pointer_like);
+  PolyUOp *shaped_ref = poly_test_uop_param(ctx, POLY_FLOAT32, 7, 0, POLY_ADDR_GLOBAL);
+  PolyUOp *shaped_like = poly_const_like_int(ctx, shaped_ref, 0);
+  ASSERT_NOT_NULL(shaped_like);
+  ASSERT_EQ(shaped_like->op, POLY_OP_EXPAND);
+  ASSERT_TRUE(poly_dtype_eq(shaped_like->dtype, POLY_FLOAT32));
+  PolyShape shape = poly_uop_max_shape_cached(ctx, shaped_like);
   ASSERT_INT_EQ(shape.ndim, 1);
   ASSERT_INT_EQ(shape.dims[0], 7);
 
-  PolyUOp *n = poly_uop0(
-      ctx, POLY_OP_DEFINE_VAR, POLY_INDEX,
-      poly_arg_define_var("const_like_n", 1, 8)
-  );
-  PolyUOp *dynamic = poly_buffer_var(ctx, POLY_FLOAT32, n, NULL, 0);
+  PolyUOp *n = poly_uop_variable(ctx, "const_like_n", 1, 8, POLY_WEAKINT, 1, false);
+  PolyUOp *dynamic = poly_test_buffer_var(ctx, POLY_FLOAT32, n, NULL, 0);
   PolyUOp *dynamic_like = poly_const_like_int(ctx, dynamic, 3);
   ASSERT_NOT_NULL(dynamic_like);
   ASSERT_EQ(dynamic_like->op, POLY_OP_EXPAND);
@@ -656,9 +651,9 @@ static PolyUOp *test_rewrite_div_self(PolyCtx *ctx, PolyUOp *root, const PolyBin
 }
 
 TEST(pat, pm_concat) {
-  PolyPat *p1 =
-      poly_pat_op2c(POLY_OP_ADD, poly_pat_any("x"), poly_pat_const_val(poly_arg_int(0)), NULL);
-  PolyPat *p2 = poly_pat_op2(POLY_OP_IDIV, poly_pat_any("x"), poly_pat_any("x"), NULL);
+  PolyUPat *p1 =
+      poly_upat_op2c(POLY_OP_ADD, poly_upat_any("x"), poly_upat_const_val(poly_arg_int(0)), NULL);
+  PolyUPat *p2 = poly_upat_op2(POLY_OP_IDIV, poly_upat_any("x"), poly_upat_any("x"), NULL);
   PolyNamedRule r1[] = {POLY_RULE(p1, test_rewrite_identity)};
   PolyNamedRule r2[] = {POLY_RULE(p2, test_rewrite_div_self)};
 
@@ -685,8 +680,8 @@ TEST(pat, pm_concat) {
   poly_pm_destroy(pm1);
   poly_pm_destroy(pm2);
   poly_pm_destroy(combined);
-  poly_pat_free(p1);
-  poly_pat_free(p2);
+  poly_upat_free(p1);
+  poly_upat_free(p2);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -716,7 +711,7 @@ TEST(pat, graph_rewrite_skips_call_body) {
   PolyUOp *call = poly_uop2(ctx, POLY_OP_CALL, POLY_FLOAT32, callee_neg, add, poly_arg_none());
 
   /* Pattern: NEG(x) -> CONST(0) */
-  PolyPat *neg_pat = poly_pat_op1(POLY_OP_NEG, poly_pat_any("x"), NULL);
+  PolyUPat *neg_pat = poly_upat_op1(POLY_OP_NEG, poly_upat_any("x"), NULL);
   PolyRule rules[] = {{neg_pat, rewrite_neg_to_zero}};
   PolyPatternMatcher *pm = poly_pm_new(rules, 1);
 
@@ -737,7 +732,7 @@ TEST(pat, graph_rewrite_skips_call_body) {
   ASSERT_TRUE(add_result->src[0]->op == POLY_OP_CONST); /* outer NEG was rewritten to 0 */
 
   poly_pm_destroy(pm);
-  poly_pat_free(neg_pat);
+  poly_upat_free(neg_pat);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -750,7 +745,7 @@ TEST(pat, graph_rewrite_call_args_do_not_inherit_callee_body_gating) {
   PolyUOp *shared_neg = poly_uop1(ctx, POLY_OP_NEG, POLY_FLOAT32, c1, poly_arg_none());
   PolyUOp *callee = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, shared_neg, c2, poly_arg_none());
 
-  PolyPat *neg_pat = poly_pat_op1(POLY_OP_NEG, poly_pat_any("x"), NULL);
+  PolyUPat *neg_pat = poly_upat_op1(POLY_OP_NEG, poly_upat_any("x"), NULL);
   PolyRule rules[] = {{neg_pat, rewrite_neg_to_zero}};
   PolyPatternMatcher *pm = poly_pm_new(rules, 1);
 
@@ -776,7 +771,7 @@ TEST(pat, graph_rewrite_call_args_do_not_inherit_callee_body_gating) {
   }
 
   poly_pm_destroy(pm);
-  poly_pat_free(neg_pat);
+  poly_upat_free(neg_pat);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -789,7 +784,7 @@ TEST(pat, walk_rewrite_call_args_do_not_inherit_callee_body_gating) {
   PolyUOp *shared_neg = poly_uop1(ctx, POLY_OP_NEG, POLY_FLOAT32, c1, poly_arg_none());
   PolyUOp *callee = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, shared_neg, c2, poly_arg_none());
 
-  PolyPat *neg_pat = poly_pat_op1(POLY_OP_NEG, poly_pat_any("x"), NULL);
+  PolyUPat *neg_pat = poly_upat_op1(POLY_OP_NEG, poly_upat_any("x"), NULL);
   PolyRule rules[] = {{neg_pat, rewrite_neg_to_zero}};
   PolyPatternMatcher *pm = poly_pm_new(rules, 1);
 
@@ -814,7 +809,7 @@ TEST(pat, walk_rewrite_call_args_do_not_inherit_callee_body_gating) {
   }
 
   poly_pm_destroy(pm);
-  poly_pat_free(neg_pat);
+  poly_upat_free(neg_pat);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -829,14 +824,72 @@ static PolyUOp *rewrite_sub_to_add(PolyCtx *ctx, PolyUOp *root, const PolyBindin
   return poly_uop(ctx, POLY_OP_ADD, root->dtype, root->src, root->n_src, root->arg);
 }
 
+static PolyUOp *rewrite_weak_one_to_int(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+  (void)b;
+  if (root->op == POLY_OP_CONST && poly_dtype_is_index(root->dtype) &&
+      root->arg.kind == POLY_ARG_INT && root->arg.i == 1)
+    return poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(1));
+  return NULL;
+}
+
+TEST(pat, graph_rewrite_rederives_dtype_from_rewritten_sources) {
+  /* Current tinygrad uop/ops.py:1667,1726,1746-1750 (commit 341c4ed4f):
+   * rewriting one weakint child to int32 rebuilds ADD at promo_dtype(int,
+   * weakint)=int rather than preserving its stale weakint dtype. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(1));
+  PolyUOp *two = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(2));
+  PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_WEAKINT, one, two, poly_arg_none());
+  PolyUPat *pat = poly_upat_cvar("c");
+  PolyRule rules[] = {{pat, rewrite_weak_one_to_int}};
+  PolyPatternMatcher *pm = poly_pm_new(rules, 1);
+
+  PolyUOp *result = poly_graph_rewrite(ctx, add, pm);
+  ASSERT_NOT_NULL(result);
+  ASSERT_INT_EQ(result->op, POLY_OP_ADD);
+  ASSERT_TRUE(poly_dtype_eq(result->dtype, POLY_INT32));
+  ASSERT_TRUE(poly_dtype_eq(result->src[0]->dtype, POLY_INT32));
+  ASSERT_TRUE(poly_dtype_eq(result->src[1]->dtype, POLY_WEAKINT));
+
+  poly_pm_destroy(pm);
+  poly_upat_free(pat);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pat, graph_rewrite_rederives_stack_dtype_without_vector_carry) {
+  /* Current dtype_from_uop(Ops.STACK) returns only promo_dtype(src); shape,
+   * not dtype, carries the lane count (tinygrad/uop/ops.py:149-152). */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(1));
+  PolyUOp *two = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(2));
+  PolyUOp *src[] = {one, two};
+  PolyUOp *stack = poly_uop(
+      ctx, POLY_OP_STACK, POLY_WEAKINT, src, 2, poly_arg_none()
+  );
+  PolyUPat *pat = poly_upat_cvar("c");
+  PolyRule rules[] = {{pat, rewrite_weak_one_to_int}};
+  PolyPatternMatcher *pm = poly_pm_new(rules, 1);
+
+  PolyUOp *result = poly_graph_rewrite(ctx, stack, pm);
+  ASSERT_NOT_NULL(result);
+  ASSERT_INT_EQ(result->op, POLY_OP_STACK);
+  ASSERT_TRUE(poly_dtype_eq(result->dtype, POLY_INT32));
+
+  poly_pm_destroy(pm);
+  poly_upat_free(pat);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(pat, graph_rewrite_bottom_up_cycle_fails_closed) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(1));
   PolyUOp *b = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(2));
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, a, b, poly_arg_none());
 
-  PolyPat *add_pat = poly_pat_op2(POLY_OP_ADD, poly_pat_any("x"), poly_pat_any("y"), NULL);
-  PolyPat *sub_pat = poly_pat_op2(POLY_OP_SUB, poly_pat_any("x"), poly_pat_any("y"), NULL);
+  PolyUPat *add_pat = poly_upat_op2(POLY_OP_ADD, poly_upat_any("x"), poly_upat_any("y"), NULL);
+  PolyUPat *sub_pat = poly_upat_op2(POLY_OP_SUB, poly_upat_any("x"), poly_upat_any("y"), NULL);
   PolyRule rules[] = {{add_pat, rewrite_add_to_sub}, {sub_pat, rewrite_sub_to_add}};
   PolyPatternMatcher *pm = poly_pm_new(rules, 2);
 
@@ -844,8 +897,8 @@ TEST(pat, graph_rewrite_bottom_up_cycle_fails_closed) {
   ASSERT_TRUE(result == NULL);
 
   poly_pm_destroy(pm);
-  poly_pat_free(add_pat);
-  poly_pat_free(sub_pat);
+  poly_upat_free(add_pat);
+  poly_upat_free(sub_pat);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -857,7 +910,7 @@ TEST(pat, graph_rewrite_stack_limit_fails_closed) {
     src[i] = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(i));
   PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, src, 32, poly_arg_none());
 
-  PolyPat *never_pat = poly_pat_op(POLY_OP_ADD, NULL, 0, NULL);
+  PolyUPat *never_pat = poly_upat_op(POLY_OP_ADD, NULL, 0, NULL);
   PolyRule rules[] = {{never_pat, test_rewrite_identity}};
   PolyPatternMatcher *pm = poly_pm_new(rules, 1);
 
@@ -867,7 +920,7 @@ TEST(pat, graph_rewrite_stack_limit_fails_closed) {
   ASSERT_TRUE(result == NULL);
 
   poly_pm_destroy(pm);
-  poly_pat_free(never_pat);
+  poly_upat_free(never_pat);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -901,12 +954,12 @@ TEST(pat, walk_rewrite_no_retraversal) {
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, c5, c1, poly_arg_none());
 
   /* bpm: 5 -> 6 */
-  PolyPat *p_bpm = poly_pat_cvar("c");
+  PolyUPat *p_bpm = poly_upat_cvar("c");
   PolyRule r_bpm[] = {{p_bpm, rewrite_const5_to_const6}};
   PolyPatternMatcher *bpm = poly_pm_new(r_bpm, 1);
 
   /* pm: 6 -> 7 */
-  PolyPat *p_pm = poly_pat_cvar("c");
+  PolyUPat *p_pm = poly_upat_cvar("c");
   PolyRule r_pm[] = {{p_pm, rewrite_const6_to_const7}};
   PolyPatternMatcher *pm = poly_pm_new(r_pm, 1);
 
@@ -920,8 +973,8 @@ TEST(pat, walk_rewrite_no_retraversal) {
 
   poly_pm_destroy(bpm);
   poly_pm_destroy(pm);
-  poly_pat_free(p_bpm);
-  poly_pat_free(p_pm);
+  poly_upat_free(p_bpm);
+  poly_upat_free(p_pm);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -934,7 +987,7 @@ TEST(pat, walk_rewrite_bpm_short_circuits) {
   PolyUOp *c2 = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(2.0));
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, neg, c2, poly_arg_none());
 
-  PolyPat *neg_pat = poly_pat_op1(POLY_OP_NEG, poly_pat_any("x"), NULL);
+  PolyUPat *neg_pat = poly_upat_op1(POLY_OP_NEG, poly_upat_any("x"), NULL);
   PolyRule r_bpm[] = {{neg_pat, rewrite_neg_to_zero}};
   PolyPatternMatcher *bpm = poly_pm_new(r_bpm, 1);
 
@@ -946,7 +999,7 @@ TEST(pat, walk_rewrite_bpm_short_circuits) {
   ASSERT_TRUE(result->src[0]->arg.f == 0.0);
 
   poly_pm_destroy(bpm);
-  poly_pat_free(neg_pat);
+  poly_upat_free(neg_pat);
   poly_ctx_destroy(ctx);
   PASS();
 }

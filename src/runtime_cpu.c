@@ -16,7 +16,7 @@
 
 #define _POSIX_C_SOURCE 200809L
 
-#include "codegen.h"
+#include "codegen/codegen.h"
 #include "utils.h"
 #include <stdio.h>
 #include <stdlib.h>

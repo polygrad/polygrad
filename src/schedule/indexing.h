@@ -1,18 +1,62 @@
-/*
- * indexing.h — Movement op index transforms for rangeify
- *
- * Ports tinygrad's indexing.py apply_movement_op() to C11.
- * Transforms output ranges through movement ops to compute input ranges.
- */
+/* C declarations for tinygrad schedule/indexing.py. */
 
 #ifndef POLY_INDEXING_H
 #define POLY_INDEXING_H
 
 #include "polygrad.h"
+#include "uop/ops.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+typedef struct {
+  PolyUOp **items;
+  int count;
+  int cap;
+} PolyConsumerList;
+
+typedef struct {
+  int *axes;
+  int n_axes;
+} PolyRealizeInfo;
+
+typedef struct {
+  PolyUOp **in_rngs;
+  int n_in;
+  PolyUOp **out_rngs;
+  int n_out;
+  PolyUOp *valid;
+} PolyRangeEntry;
+
+typedef struct {
+  PolyCtx *ctx;
+  PolyMap *consumer_map;
+  PolyMap *realize_map;
+  PolyMap *non_removable;
+  PolyMap *range_map;
+  PolyMap *shape_cache;
+  int next_range_id;
+} PolyIndexingCtx;
+
+PolyIndexingCtx *poly_indexing_ctx_new(PolyCtx *ctx);
+void poly_indexing_ctx_destroy(PolyIndexingCtx *ictx);
+PolyMap *poly_consumer_map_build(PolyCtx *ctx, PolyUOp *sink);
+PolyConsumerList *poly_consumer_map_get(PolyMap *cmap, PolyUOp *u);
+void poly_realize_map_build(PolyIndexingCtx *ictx, PolyUOp *sink);
+bool poly_is_realized(PolyIndexingCtx *ictx, PolyUOp *u);
+void poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink);
+PolyRangeEntry *poly_range_map_get(PolyIndexingCtx *ictx, PolyUOp *u);
+PolyUOp *poly_apply_rangeify(PolyIndexingCtx *ictx, PolyUOp *sink);
+PolyUOp *poly_run_rangeify(PolyCtx *ctx, PolyUOp *sink, bool debug);
+
+/* C encoding of indexing.py:BufferizeOpts(device=s.device, ...). */
+PolyUOp *poly_bufferize_device_hint(PolyCtx *ctx, PolyUOp *value, PolyMap *device_memo);
+PolyArg poly_bufferize_opts_for_device(
+    PolyUOp *device,
+    PolyAddrSpace addrspace,
+    bool removable
+);
 
 /* Apply a movement op's index transform to output ranges.
  *
@@ -45,15 +89,18 @@ bool poly_apply_movement_op(
     PolyUOp **valid_out
 );
 
-/* Pinned tinygrad UOp.get_idx/get_valid projection for scheduler index
- * coordinates. STACK is projected lane-wise; only
- * WHERE(valid, index, Invalid) separates into an index and a validity guard. */
-PolyUOp *poly_index_get_idx(PolyCtx *ctx, PolyUOp *coord);
-PolyUOp *poly_index_get_valid(PolyCtx *ctx, PolyUOp *coord);
-
-/* Compute flat index from multi-dimensional ranges and shape strides.
- * Returns a UOp expression: ranges[0]*stride[0] + ranges[1]*stride[1] + ... */
-PolyUOp *poly_compute_flat_index(PolyCtx *ctx, PolyUOp **ranges, int ndim, PolyShape shape);
+/* Current tinygrad schedule/indexing.py:_apply_reshape. */
+bool poly_apply_reshape(
+    PolyCtx *ctx,
+    PolyUOp **in_shape,
+    int n_in,
+    PolyUOp **out_shape,
+    int n_out,
+    PolyUOp **out_ranges,
+    int n_ranges,
+    PolyUOp **in_ranges,
+    int *n_in_out
+);
 
 /* Compute the exact RESHAPE index transform from the movement UOp's symbolic
  * input/output shapes. Partial indexing follows pinned _mop_index: an
@@ -66,17 +113,6 @@ bool poly_reshape_indices(
     int n_out,
     PolyUOp **in_ranges,
     int *n_in_out
-);
-
-/* Compute flat index from multi-dimensional ranges and UOp bounds.
- * Like poly_compute_flat_index, but bounds are UOp* (can be CONST or DEFINE_VAR).
- * When all bounds are CONST, produces the same result as poly_compute_flat_index.
- * When bounds include DEFINE_VAR, strides are UOp MUL chains. */
-PolyUOp *poly_compute_flat_index_symbolic(
-    PolyCtx *ctx,
-    PolyUOp **ranges,
-    PolyUOp **bounds,
-    int ndim
 );
 
 #ifdef __cplusplus

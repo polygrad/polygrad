@@ -8,9 +8,8 @@ const dstDir = path.resolve(__dirname, '..', 'csrc')
 
 // JS native builds do not consume the browser-only render/WASM sources.
 const EXCLUDE = new Set([
-  'render_wasm.c',
+  'wasm.c',
   'wasm_builder.c',
-  'render_wgsl.c',
   'llama3.c',
   'resnet.c',
   'vit.c'

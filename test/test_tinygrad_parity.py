@@ -61,20 +61,8 @@ def _cpu_target() -> Target:
     return Target.parse(f"CPU:CLANG:{arch}")
 
 
-def _tensor(data, *, requires_grad=None, **kwargs) -> Tensor:
-    if requires_grad is None:
-        return Tensor(data, **kwargs)
-    try:
-        return Tensor(data, requires_grad=requires_grad, **kwargs)
-    except TypeError as exc:
-        if "requires_grad" not in str(exc):
-            raise
-    t = Tensor(data, **kwargs)
-    if hasattr(t, "is_param"):
-        t.is_param = bool(requires_grad)
-    else:
-        t.requires_grad = bool(requires_grad)
-    return t
+def _tensor(data, **kwargs) -> Tensor:
+    return Tensor(data, **kwargs)
 
 
 def _flatten(x) -> np.ndarray:
@@ -176,33 +164,33 @@ def build_chain_pad_flip() -> tuple[Tensor, ...]:
 
 
 def build_grad_mul_sum() -> tuple[Tensor, ...]:
-    x = _tensor(np.arange(-3, 5, dtype=np.float32), requires_grad=True)
+    x = _tensor(np.arange(-3, 5, dtype=np.float32))
     (x * x).sum().backward()
     return (x.grad,)
 
 
 def build_grad_exp2_sum() -> tuple[Tensor, ...]:
-    x = _tensor(np.array([-2.0, -1.0, 0.0, 0.5, 1.0, 2.0], dtype=np.float32), requires_grad=True)
+    x = _tensor(np.array([-2.0, -1.0, 0.0, 0.5, 1.0, 2.0], dtype=np.float32))
     x.exp2().sum().backward()
     return (x.grad,)
 
 
 def build_grad_fdiv_sum_x() -> tuple[Tensor, ...]:
-    x = _tensor(np.array([1.0, 2.0, 3.0, -1.0, -2.0, 4.0], dtype=np.float32), requires_grad=True)
-    y = _tensor(np.array([2.0, 4.0, -2.0, 5.0, -3.0, 8.0], dtype=np.float32), requires_grad=False)
+    x = _tensor(np.array([1.0, 2.0, 3.0, -1.0, -2.0, 4.0], dtype=np.float32))
+    y = _tensor(np.array([2.0, 4.0, -2.0, 5.0, -3.0, 8.0], dtype=np.float32))
     (x / y).sum().backward()
     return (x.grad,)
 
 
 def build_grad_fdiv_sum_y() -> tuple[Tensor, ...]:
-    x = _tensor(np.array([1.0, 2.0, 3.0, -1.0, -2.0, 4.0], dtype=np.float32), requires_grad=False)
-    y = _tensor(np.array([2.0, 4.0, -2.0, 5.0, -3.0, 8.0], dtype=np.float32), requires_grad=True)
+    x = _tensor(np.array([1.0, 2.0, 3.0, -1.0, -2.0, 4.0], dtype=np.float32))
+    y = _tensor(np.array([2.0, 4.0, -2.0, 5.0, -3.0, 8.0], dtype=np.float32))
     (x / y).sum().backward()
     return (y.grad,)
 
 
 def build_grad_chain_movement() -> tuple[Tensor, ...]:
-    x = _tensor(np.arange(1, 7, dtype=np.float32), requires_grad=True)
+    x = _tensor(np.arange(1, 7, dtype=np.float32))
     x.reshape(2, 3).permute(1, 0).sum().backward()
     return (x.grad,)
 
@@ -261,25 +249,25 @@ def build_multi_movement() -> tuple[Tensor, ...]:
 
 
 def build_grad_log2_sum() -> tuple[Tensor, ...]:
-    x = _tensor(np.array([0.25, 0.5, 1.0, 2.0, 4.0, 8.0], dtype=np.float32), requires_grad=True)
+    x = _tensor(np.array([0.25, 0.5, 1.0, 2.0, 4.0, 8.0], dtype=np.float32))
     x.log2().sum().backward()
     return (x.grad,)
 
 
 def build_grad_sqrt_sum() -> tuple[Tensor, ...]:
-    x = _tensor(np.array([1.0, 4.0, 9.0, 16.0, 25.0, 0.25], dtype=np.float32), requires_grad=True)
+    x = _tensor(np.array([1.0, 4.0, 9.0, 16.0, 25.0, 0.25], dtype=np.float32))
     x.sqrt().sum().backward()
     return (x.grad,)
 
 
 def build_grad_where_sum() -> tuple[Tensor, ...]:
-    x = _tensor(np.arange(-3, 5, dtype=np.float32), requires_grad=True)
+    x = _tensor(np.arange(-3, 5, dtype=np.float32))
     (x > 0).where(x, 0).sum().backward()
     return (x.grad,)
 
 
 def build_grad_multi_use() -> tuple[Tensor, ...]:
-    x = _tensor(np.array([-2.0, -1.0, 0.0, 1.0, 2.0, 3.0], dtype=np.float32), requires_grad=True)
+    x = _tensor(np.array([-2.0, -1.0, 0.0, 1.0, 2.0, 3.0], dtype=np.float32))
     ((x * x) + (x * 2.0)).sum().backward()
     return (x.grad,)
 
@@ -450,8 +438,6 @@ STRUCTURE_KEYS: tuple[str, ...] = (
     "LOAD",
     "INDEX",
     "AFTER",
-    "DEFINE_LOCAL",
-    "DEFINE_REG",
 )
 
 
@@ -478,12 +464,6 @@ def kernel_structure(ops: list[str]) -> dict[str, int]:
 def run_polygrad_case(runner: pathlib.Path, case: str, mode: str, optimize: bool,
                       cuda: bool = False, hip: bool = False) -> dict:
     env = os.environ.copy()
-    # Bind both engines to the same optimization mode inside this harness.
-    # Pinned full_rewrite_to_sink receives `optimize` directly; Polygrad's
-    # env-aware parity linearizer reads POLY_OPTIMIZE. Depending on the caller
-    # (the Make target versus a direct invocation) previously compared
-    # optimized Tinygrad against unoptimized Polygrad.
-    env["POLY_OPTIMIZE"] = "1" if optimize else "0"
     # ASan-instrumented parity_runner is spawned from Python. On this platform,
     # detect_leaks=0 alone can produce recursive DEADLYSIGNAL reports in the
     # child process; halt_on_error=0 preserves the intended non-leak behavior
@@ -501,7 +481,8 @@ def run_polygrad_case(runner: pathlib.Path, case: str, mode: str, optimize: bool
         env["POLY_PARITY_CUDA"] = "1"
     if hip:
         env["POLY_PARITY_HIP"] = "1"
-    raw = subprocess.check_output([str(runner), case], text=True, env=env)
+    command = [str(runner), case] + ([] if optimize else ["--no-opt"])
+    raw = subprocess.check_output(command, text=True, env=env)
     payload = json.loads(raw)
 
     if "n_kernels" not in payload or "kernels" not in payload:
@@ -535,42 +516,33 @@ def run_polygrad_case(runner: pathlib.Path, case: str, mode: str, optimize: bool
 
 
 def evaluate_tinygrad_case(case_builder: CaseBuilder) -> np.ndarray:
-    # Older tinygrad CPU could render invalid C for vector bool masks under
-    # DEVECTORIZE=0. Current tinygrad removed that context key; keep the
-    # override only when the reference checkout still exposes it.
-    with _tiny_context(DEVECTORIZE=1):
-        outputs = _to_output_tuple(case_builder())
-        return _concat_outputs(outputs)
+    outputs = _to_output_tuple(case_builder())
+    return _concat_outputs(outputs)
 
 
 def extract_tinygrad_kernels(case_builder: CaseBuilder, optimize: bool = True, renderer=None) -> dict:
-    # Some older tinygrad backends produced non-runnable IR when
-    # DEVECTORIZE=-1. Current tinygrad removed that context key.
-    with _tiny_context(DEVECTORIZE=0):
-        outputs = _to_output_tuple(case_builder())
-        linear_schedule = outputs[0].schedule_linear(*outputs[1:])
+    outputs = _to_output_tuple(case_builder())
+    linear_schedule = outputs[0].schedule_linear(*outputs[1:])
 
-        if renderer is None:
-            renderer = ClangRenderer(_cpu_target())
-        kernels = []
-        for call in linear_schedule.src:
-            if call.op is not Ops.CALL or len(call.src) == 0:
-                continue
-            ast = call.src[0]
-            # Current tinygrad schedule_linear includes COPY calls for host
-            # transfers. The historical parity report compares only lowered
-            # compute SINK kernels, matching the Polygrad runner metadata.
-            if ast.op is not Ops.SINK:
-                continue
-            if optimize:
-                program = to_program(ast, renderer)
-                ops = _program_linear_ops(program)
-            else:
-                rw = full_rewrite_to_sink(ast, renderer, optimize=False)
-                ops = [u.op.name for u in linearize(rw)]
-            kernels.append({"ops": ops, "structure": kernel_structure(ops)})
+    if renderer is None:
+        renderer = ClangRenderer(_cpu_target())
+    kernels = []
+    for call in linear_schedule.src:
+        if call.op is not Ops.CALL or len(call.src) == 0:
+            continue
+        ast = call.src[0]
+        # Compare lowered compute SINKs; schedule_linear also includes host COPY calls.
+        if ast.op is not Ops.SINK:
+            continue
+        if optimize:
+            program = to_program(ast, renderer)
+            ops = _program_linear_ops(program)
+        else:
+            rw = full_rewrite_to_sink(ast, renderer, optimize=False)
+            ops = [u.op.name for u in linearize(rw)]
+        kernels.append({"ops": ops, "structure": kernel_structure(ops)})
 
-        return {"n_kernels": len(kernels), "kernels": kernels}
+    return {"n_kernels": len(kernels), "kernels": kernels}
 
 
 def first_mismatch(a: np.ndarray, b: np.ndarray, atol: float, rtol: float):

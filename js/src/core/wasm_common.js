@@ -200,10 +200,8 @@ function createWasmCoreFromModule(Module, device) {
     'scratchBytes',
     'scratchHighWater',
     'cseEntries',
-    'scheduleCacheEntries',
     'toProgramCacheEntries',
     'runtimeCacheEntries',
-    'programCacheEntries',
     'shapeCacheEntries',
     'bufferEntries',
     'bufferOwnedBytes',
@@ -215,8 +213,6 @@ function createWasmCoreFromModule(Module, device) {
     'compiledArtifactBytes',
     'runtimeArtifactEntries',
     'launchCount',
-    'scheduleCacheHits',
-    'scheduleCacheMisses',
     'runtimeCacheHits',
     'runtimeCacheMisses',
     'bufferReadCount',
@@ -228,7 +224,7 @@ function createWasmCoreFromModule(Module, device) {
   ]
 
   function readCtxStats(ctx) {
-    const ptr = Module._malloc(160)
+    const ptr = Module._malloc(144)
     try {
       const rc = Module._poly_ctx_stats(ctx, ptr)
       if (rc !== 0) throw new Error('poly_ctx_stats failed (rc=' + rc + ')')
@@ -243,11 +239,11 @@ function createWasmCoreFromModule(Module, device) {
         const hi = view.getUint32(ptr + offset + 4, true)
         return hi * 0x100000000 + lo
       }
-      out.globalOps = readU64(120)
-      out.globalMem = readU64(128)
-      out.timeSumS = view.getFloat64(ptr + 136, true)
-      out.kernelCount = readU64(144)
-      out.memUsed = readU64(152)
+      out.globalOps = readU64(104)
+      out.globalMem = readU64(112)
+      out.timeSumS = view.getFloat64(ptr + 120, true)
+      out.kernelCount = readU64(128)
+      out.memUsed = readU64(136)
       return out
     } finally {
       Module._free(ptr)
@@ -349,13 +345,21 @@ function createWasmCoreFromModule(Module, device) {
     uint64: coreDTypeId('uint64'),
     float16: coreDTypeId('float16'),
     bfloat16: coreDTypeId('bfloat16'),
+    fp8e4m3: coreDTypeId('fp8e4m3'),
+    fp8e5m2: coreDTypeId('fp8e5m2'),
+    fp8e4m3fnuz: coreDTypeId('fp8e4m3fnuz'),
+    fp8e5m2fnuz: coreDTypeId('fp8e5m2fnuz'),
     float32: coreDTypeId('float32'),
     float64: coreDTypeId('float64'),
-    weakint: coreDTypeId('weakint')
+    weakint: coreDTypeId('weakint'),
+    weakfloat: coreDTypeId('weakfloat')
   }
 
   function instanceStorageInfo(dtypeId) {
-    if (dtypeId === DTYPE_IDS.bool || dtypeId === DTYPE_IDS.uint8) return [Uint8Array, 1]
+    if (dtypeId === DTYPE_IDS.bool || dtypeId === DTYPE_IDS.uint8 ||
+        dtypeId === DTYPE_IDS.fp8e4m3 || dtypeId === DTYPE_IDS.fp8e5m2 ||
+        dtypeId === DTYPE_IDS.fp8e4m3fnuz || dtypeId === DTYPE_IDS.fp8e5m2fnuz)
+      return [Uint8Array, 1]
     if (dtypeId === DTYPE_IDS.int8) return [Int8Array, 1]
     if (dtypeId === DTYPE_IDS.int16) return [Int16Array, 2]
     if (dtypeId === DTYPE_IDS.uint16 || dtypeId === DTYPE_IDS.float16 ||
@@ -664,20 +668,22 @@ function createWasmCoreFromModule(Module, device) {
     })
   }
 
-  function jitEndCaptureSync(jit) {
+  function jitEndCaptureSync(jit, tensors) {
     requireSyncBackend('poly_jit_end_capture', 'poly_jit_end_capture_async')
-    return Module._poly_jit_end_capture(jit)
+    const ptr = writePtrArrayScratch(tensors)
+    return Module._poly_jit_end_capture(jit, ptr, tensors.length)
   }
 
-  async function jitEndCaptureAsync(jit) {
-    if (deviceName !== 'webgpu' || !Module.ccall) return jitEndCaptureSync(jit)
+  async function jitEndCaptureAsync(jit, tensors) {
+    if (deviceName !== 'webgpu' || !Module.ccall) return jitEndCaptureSync(jit, tensors)
     return enqueueAsyncify(async () => {
       await ensureWebGPU()
+      const ptr = writePtrArrayScratch(tensors)
       return await Module.ccall(
         'poly_jit_end_capture',
         'number',
-        ['number'],
-        [jit],
+        ['number', 'number', 'number'],
+        [jit, ptr, tensors.length],
         { async: true }
       )
     })
@@ -734,6 +740,7 @@ function createWasmCoreFromModule(Module, device) {
     poly_contiguous: Module._poly_contiguous,
     poly_alu1: Module._poly_alu1,
     poly_alu2: Module._poly_alu2,
+    poly_binop: Module._poly_binop,
     poly_alu3: Module._poly_alu3,
     poly_store_val: Module._poly_store_val,
     poly_sink1: Module._poly_sink1,
@@ -748,11 +755,11 @@ function createWasmCoreFromModule(Module, device) {
     poly_uop_placeholder_like: Module._poly_uop_placeholder_like,
     poly_uop_range: (ctx, bound, axisId, axisType) =>
       Module._poly_uop_range(ctx, BigInt(bound), BigInt(axisId), axisType),
-    poly_uop_index: (ctx, base, indices, keepPtr) => {
+    poly_uop_index: (ctx, base, indices) => {
       const idx = indices || []
       const ptr = writePtrArray(idx)
       try {
-        return Module._poly_uop_index(ctx, base, ptr, idx.length, keepPtr ? 1 : 0)
+        return Module._poly_uop_index(ctx, base, ptr, idx.length)
       } finally {
         if (ptr) Module._free(ptr)
       }
@@ -857,53 +864,64 @@ function createWasmCoreFromModule(Module, device) {
     poly_buffer_f32: (ctx, size) => Module._poly_buffer_f32(ctx, BigInt(size)),
     poly_buffer_f64: (ctx, size) => Module._poly_buffer_f64(ctx, BigInt(size)),
 
-    // Matches poly_buffer_from_host (device.h). For the unified WebGPU path,
-    // browser HOST stays JS-owned and the C core stores only a HOST residency
-    // key; no eager copy into wasm memory happens at import. Non-WebGPU wasm
-    // runtimes still stage bytes into wasm memory at construction.
+    // Tinygrad UOp._frompy keeps imported bytes in PYTHON storage until COPY.
+    // Browser HOST bytes stay JS-owned and the C core stores their buffer key.
     poly_buffer_from_host: (ctx, typedArray, nbytes, dtypeId, dims, ndim) => {
-      let ptr = 0
-      if (deviceName !== 'webgpu') {
-        ptr = Module._malloc(nbytes)
-        heapU8().set(new Uint8Array(typedArray.buffer, typedArray.byteOffset, nbytes), ptr)
-      }
       const dimsPtr = (dims && ndim > 0) ? writeInt64Array(Array.from(dims)) : 0
-      const uop = Module._poly_buffer_from_host(ctx, ptr, nbytes, dtypeId, dimsPtr, ndim)
+      const uop = Module._poly_buffer_from_host(ctx, 0, nbytes, dtypeId, dimsPtr, ndim)
       if (dimsPtr) Module._free(dimsPtr)
+      const buffer = uop ? Module._poly_uop_buffer(ctx, uop) : 0
+      const bufferKey = buffer ? Module._poly_buffer_get_key(ctx, buffer) : 0
+      if (bufferKey) {
+        const bytes = new Uint8Array(typedArray.buffer, typedArray.byteOffset, nbytes).slice()
+        Module.__polygradHostBuffers.set(String(bufferKey), bytes)
+      }
       return uop
     },
     poly_tensor_from_host_by_id: (ctx, typedArray, nbytes, dtypeId, dims, ndim) => {
-      let ptr = 0
-      if (deviceName !== 'webgpu') {
-        ptr = Module._malloc(nbytes)
-        heapU8().set(new Uint8Array(typedArray.buffer, typedArray.byteOffset, nbytes), ptr)
-      }
       const dimsPtr = (dims && ndim > 0) ? writeInt64Array(Array.from(dims)) : 0
       const tensor = Module._poly_tensor_from_host_by_id(
-        ctx, ptr, nbytes, dtypeId, dimsPtr, ndim
+        ctx, 0, nbytes, dtypeId, dimsPtr, ndim
       )
       if (dimsPtr) Module._free(dimsPtr)
+      const root = tensor ? Module._poly_tensor_uop_physical(tensor) : 0
+      const buffer = root ? Module._poly_uop_buffer(ctx, root) : 0
+      const bufferKey = buffer ? Module._poly_buffer_get_key(ctx, buffer) : 0
+      if (bufferKey) {
+        const bytes = new Uint8Array(typedArray.buffer, typedArray.byteOffset, nbytes).slice()
+        Module.__polygradHostBuffers.set(String(bufferKey), bytes)
+      }
       return tensor
     },
     poly_tensor_const_int_by_id: (ctx, value, dtypeId, targetDevice) =>
       Module._poly_tensor_const_int_by_id(ctx, BigInt(value), dtypeId, targetDevice),
     poly_tensor_const_float_by_id: (ctx, value, dtypeId, targetDevice) =>
       Module._poly_tensor_const_float_by_id(ctx, value, dtypeId, targetDevice),
-    poly_tensor_full_int_by_id: (ctx, shape, ndim, value, dtypeId, targetDevice) => {
+    poly_tensor_const_like_int: (ctx, ref, value) =>
+      Module._poly_tensor_const_like_int(ctx, ref, BigInt(value)),
+    poly_tensor_const_like_float: (ctx, ref, value) =>
+      Module._poly_tensor_const_like_float(ctx, ref, value),
+    poly_tensor_full_int_by_id: (
+      ctx, shape, ndim, value, dtypeId, targetDevice, dtypeExplicit, buffer
+    ) => {
       const dimsPtr = writeInt64Array(shape || [])
       try {
         return Module._poly_tensor_full_int_by_id(
-          ctx, dimsPtr, ndim, BigInt(value), dtypeId, targetDevice
+          ctx, dimsPtr, ndim, BigInt(value), dtypeId, targetDevice,
+          dtypeExplicit ? 1 : 0, buffer ? 1 : 0
         )
       } finally {
         if (dimsPtr) Module._free(dimsPtr)
       }
     },
-    poly_tensor_full_float_by_id: (ctx, shape, ndim, value, dtypeId, targetDevice) => {
+    poly_tensor_full_float_by_id: (
+      ctx, shape, ndim, value, dtypeId, targetDevice, dtypeExplicit, buffer
+    ) => {
       const dimsPtr = writeInt64Array(shape || [])
       try {
         return Module._poly_tensor_full_float_by_id(
-          ctx, dimsPtr, ndim, value, dtypeId, targetDevice
+          ctx, dimsPtr, ndim, value, dtypeId, targetDevice,
+          dtypeExplicit ? 1 : 0, buffer ? 1 : 0
         )
       } finally {
         if (dimsPtr) Module._free(dimsPtr)
@@ -990,9 +1008,9 @@ function createWasmCoreFromModule(Module, device) {
         if (Module._poly_tensor_custom_kernel(ctx, body, inputsPtr, n, outputsPtr) !== 0) {
           return null
         }
-        return Array.from(
-          { length: n }, (_, i) => h32[(outputsPtr >> 2) + i] >>> 0
-        )
+        /* C graph construction may grow Wasm memory. Reacquire HEAP32 before
+         * reading outputs, as the realization and gradient bridges do. */
+        return readPtrArray(outputsPtr, n).map(x => x >>> 0)
       } finally {
         Module._free(inputsPtr)
         Module._free(outputsPtr)
@@ -1028,6 +1046,10 @@ function createWasmCoreFromModule(Module, device) {
       Module._poly_tensor_exp(ctx, src),
     poly_tensor_log: (ctx, src) =>
       Module._poly_tensor_log(ctx, src),
+    poly_tensor_cos: (ctx, src) =>
+      Module._poly_tensor_cos(ctx, src),
+    poly_tensor_tan: (ctx, src) =>
+      Module._poly_tensor_tan(ctx, src),
     poly_tensor_log1p: (ctx, src) =>
       Module._poly_tensor_log1p(ctx, src),
     poly_tensor_expm1: (ctx, src) =>
@@ -1133,8 +1155,12 @@ function createWasmCoreFromModule(Module, device) {
       callWithInt64(Module._poly_tensor_shrink, ctx, tensor, flat, npairs),
     poly_tensor_flip: (ctx, tensor, axes, len) =>
       callWithInt64(Module._poly_tensor_flip, ctx, tensor, axes, len),
-    poly_tensor_pad_value: (ctx, tensor, flat, npairs, value) =>
-      callWithInt64(Module._poly_tensor_pad_value, ctx, tensor, flat, npairs, value),
+    poly_tensor_pad_value_bool: (ctx, tensor, flat, npairs, value) =>
+      callWithInt64(Module._poly_tensor_pad_value_bool, ctx, tensor, flat, npairs, value),
+    poly_tensor_pad_value_int: (ctx, tensor, flat, npairs, value) =>
+      callWithInt64(Module._poly_tensor_pad_value_int, ctx, tensor, flat, npairs, BigInt(value)),
+    poly_tensor_pad_value_float: (ctx, tensor, flat, npairs, value) =>
+      callWithInt64(Module._poly_tensor_pad_value_float, ctx, tensor, flat, npairs, value),
     poly_tensor_pool: (ctx, tensor, kernel, nKernel, stride, dilation) => {
       const kernelPtr = writeInt64Array(kernel)
       const stridePtr = writeInt64Array(stride)
@@ -1685,7 +1711,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 57
+  const EXPECTED_ABI = 63
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(

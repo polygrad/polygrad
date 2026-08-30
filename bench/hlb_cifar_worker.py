@@ -22,12 +22,13 @@ import numpy as np
 
 
 ROOT = Path(__file__).resolve().parents[1]
-HLB = ROOT / "references" / "tinygrad_latest" / "examples" / "hlb_cifar10.py"
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--engine", choices=("tinygrad", "polygrad"), required=True)
+parser.add_argument("--hlb-source", type=Path, required=True)
 parser.add_argument("--prepare-state", action="store_true")
 args = parser.parse_args()
+HLB = args.hlb_source.resolve()
 is_tinygrad = args.engine == "tinygrad"
 if args.prepare_state and not is_tinygrad:
     parser.error("--prepare-state requires --engine tinygrad")

@@ -1,5 +1,5 @@
 /*
- * uop.c — UOp creation with CSE, toposort, pretty-print
+ * uop/ops.c — UOp creation with CSE, toposort, pretty-print
  *
  * Mirrors tinygrad's UOp class and UOpMetaClass hash-consing cache.
  * All UOps are allocated from the context's arena.
@@ -9,12 +9,339 @@
 #include "bigint.h"
 #include "utils.h"
 #include "ctx.h"
+#include "device.h"
+#include "uop/upat.h"
+#include "schedule/rangeify.h"
+#include "uop/ops.h"
+#include <limits.h>
 #include <math.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
+static bool uop_invalid_gate(PolyUOp *u) {
+  return u && u->op == POLY_OP_WHERE && u->n_src == 3 && u->src[2] &&
+         u->src[2]->op == POLY_OP_CONST && u->src[2]->arg.kind == POLY_ARG_INVALID;
+}
+
+bool poly_uop_addrspace(const PolyUOp *u, PolyAddrSpace *out) {
+  if (!u || !out || !u->addrspace_cached) return false;
+  *out = u->addrspace_cache;
+  return true;
+}
+
+/* tinygrad@2026-08-22/a9069c177a9d uop/ops.py:866-878 uses
+ * @recursive_property. UOps are immutable, so construction-time evaluation
+ * is the equivalent C cache and avoids repeated walks of shared DAGs. */
+static void cache_uop_addrspace(PolyUOp *u) {
+  if (!u) return;
+  u->addrspace_cached = false;
+  if (u->op == POLY_OP_PARAM || u->op == POLY_OP_BUFFER) {
+    if (u->arg.kind != POLY_ARG_PARAM || !u->arg.param) return;
+    u->addrspace_cache = u->arg.param->addrspace;
+    u->addrspace_cached = true;
+    return;
+  }
+  if (u->op == POLY_OP_SPECIAL || u->op == POLY_OP_RANGE || u->op == POLY_OP_LOAD) {
+    u->addrspace_cache = POLY_ADDR_ALU;
+    u->addrspace_cached = true;
+    return;
+  }
+  if (u->op == POLY_OP_INDEX || u->op == POLY_OP_CAST || u->op == POLY_OP_AFTER ||
+      u->op == POLY_OP_REDUCE || u->op == POLY_OP_STORE || u->op == POLY_OP_MSTACK ||
+      u->op == POLY_OP_MSELECT || u->op == POLY_OP_END || u->op == POLY_OP_UNSHARD ||
+      poly_opset_has(POLY_GROUP_MOVEMENT, u->op)) {
+    if (u->n_src > 0 && u->src[0]->addrspace_cached) {
+      u->addrspace_cache = u->src[0]->addrspace_cache;
+      u->addrspace_cached = true;
+    }
+    return;
+  }
+  if (u->op == POLY_OP_STACK || u->op == POLY_OP_WMMA || u->op == POLY_OP_GROUP ||
+      poly_opset_has(POLY_GROUP_ELEMENTWISE, u->op)) {
+    bool found = false;
+    PolyAddrSpace common = POLY_ADDR_GLOBAL;
+    for (int i = 0; i < u->n_src; i++) {
+      if (!u->src[i]->addrspace_cached) continue;
+      PolyAddrSpace candidate = u->src[i]->addrspace_cache;
+      if (found && candidate != common) return;
+      common = candidate;
+      found = true;
+    }
+    if (!found) return;
+    u->addrspace_cache = common;
+    u->addrspace_cached = true;
+  }
+}
+
+/* Tinygrad 2026-08-22/a9069c177a9d uop/ops.py:UOp.get_idx. */
+PolyUOp *poly_uop_get_idx(PolyCtx *ctx, PolyUOp *u) {
+  if (!ctx || !u) return NULL;
+  if (u->op == POLY_OP_STACK) {
+    PolyUOp *stack_src[16];
+    PolyUOp **src = u->n_src <= (int)(sizeof(stack_src) / sizeof(stack_src[0]))
+                        ? stack_src
+                        : malloc((size_t)u->n_src * sizeof(*src));
+    if (!src) return NULL;
+    for (int i = 0; i < u->n_src; i++) {
+      src[i] = poly_uop_get_idx(ctx, u->src[i]);
+      if (!src[i]) {
+        if (src != stack_src) free(src);
+        return NULL;
+      }
+    }
+    PolyUOp *ret = poly_uop(ctx, POLY_OP_STACK, u->dtype, src, u->n_src, poly_arg_none());
+    if (src != stack_src) free(src);
+    return ret;
+  }
+  return uop_invalid_gate(u) ? u->src[1] : u;
+}
+
+/* Tinygrad 2026-08-22/a9069c177a9d uop/ops.py:UOp.get_valid. */
+PolyUOp *poly_uop_get_valid(PolyCtx *ctx, PolyUOp *u) {
+  if (!ctx || !u) return NULL;
+  if (u->op == POLY_OP_STACK) {
+    PolyUOp *stack_src[16];
+    PolyUOp **src = u->n_src <= (int)(sizeof(stack_src) / sizeof(stack_src[0]))
+                        ? stack_src
+                        : malloc((size_t)u->n_src * sizeof(*src));
+    if (!src) return NULL;
+    for (int i = 0; i < u->n_src; i++) {
+      src[i] = poly_uop_get_valid(ctx, u->src[i]);
+      if (!src[i]) {
+        if (src != stack_src) free(src);
+        return NULL;
+      }
+    }
+    PolyUOp *ret = poly_uop_stack(ctx, src, u->n_src);
+    if (src != stack_src) free(src);
+    return ret;
+  }
+  if (uop_invalid_gate(u)) return u->src[0];
+  return poly_uop0(
+      ctx, POLY_OP_CONST, POLY_BOOL,
+      poly_arg_bool(!(u->op == POLY_OP_CONST && u->arg.kind == POLY_ARG_INVALID))
+  );
+}
+
+char poly_axis_letter(PolyArg arg) {
+  static const char letters[] = {
+      [POLY_AXIS_DEVICE] = 'd',       [POLY_AXIS_GLOBAL] = 'g',
+      [POLY_AXIS_WARP] = 'w',         [POLY_AXIS_LOCAL] = 'l',
+      [POLY_AXIS_WEAK] = 'L',         [POLY_AXIS_GROUP_REDUCE] = 'G',
+      [POLY_AXIS_REDUCE] = 'R',       [POLY_AXIS_UPCAST] = 'u',
+      [POLY_AXIS_UNROLL] = 'r',       [POLY_AXIS_THREAD] = 't',
+      [POLY_AXIS_PLACEHOLDER] = '\0', [POLY_AXIS_LOOP] = 'L',
+  };
+  PolyAxisType axis_type = poly_range_axis_type(arg);
+  if (axis_type < 0 || axis_type >= (int)(sizeof(letters) / sizeof(letters[0])) ||
+      !letters[axis_type])
+    return '\0';
+  return letters[axis_type];
+}
+
+char *poly_range_str(PolyArg arg) {
+  int n_extra = poly_range_n_extra(arg);
+  size_t cap = 24 + (size_t)n_extra * 24;
+  char *name = malloc(cap);
+  if (!name) return NULL;
+  int used = 0;
+  for (int i = -1; i < n_extra; i++) {
+    int64_t value = i < 0 ? poly_range_axis_id(arg) : poly_range_extra(arg)[i];
+    uint64_t magnitude = value < 0 ? (uint64_t)(-(value + 1)) + 1 : (uint64_t)value;
+    used += snprintf(
+        name + used, cap - (size_t)used, "%s%s%llu", i < 0 ? "" : "_",
+        value < 0 ? "m" : "", (unsigned long long)magnitude
+    );
+  }
+  return name;
+}
+
+typedef struct {
+  PolyUOp **items;
+  int count;
+  int capacity;
+} SplitUOps;
+
+static bool split_uops_append(SplitUOps *out, PolyUOp *u) {
+  if (out->count == out->capacity) {
+    if (out->capacity > INT_MAX / 2) return false;
+    int capacity = out->capacity ? out->capacity * 2 : 16;
+    PolyUOp **items = realloc(out->items, (size_t)capacity * sizeof(*items));
+    if (!items) return false;
+    out->items = items;
+    out->capacity = capacity;
+  }
+  out->items[out->count++] = u;
+  return true;
+}
+
+static bool split_uops_collect(PolyUOp *u, PolyOps sep, SplitUOps *out) {
+  if (u->op != sep) return split_uops_append(out, u);
+  for (int i = 0; i < u->n_src; i++)
+    if (!split_uops_collect(u->src[i], sep, out)) return false;
+  return true;
+}
+
+PolyUOp **poly_uop_split(PolyUOp *u, PolyOps sep, int *n_out) {
+  if (n_out) *n_out = 0;
+  if (!u || !n_out) return NULL;
+  SplitUOps out = {0};
+  if (!split_uops_collect(u, sep, &out)) {
+    free(out.items);
+    return NULL;
+  }
+  *n_out = out.count;
+  return out.items;
+}
+
+int poly_uop_resolve(PolyCtx *ctx, PolyUOp *u, int default_value) {
+  if (!ctx || !u || !poly_dtype_eq(u->dtype, POLY_BOOL)) return -1;
+  PolyUOp *simplified = poly_graph_rewrite(ctx, u, poly_symbolic());
+  if (!simplified) return -1;
+  int64_t vmin = 0, vmax = 0;
+  poly_uop_minmax(ctx, simplified, &vmin, &vmax);
+  return vmin == vmax ? (vmin != 0) : (default_value != 0);
+}
+
+/* Current tinygrad UOp.contiguous_view_offset rewrites
+ * flatten().index(RANGE) through pm_mops+symbolic, then accepts only a unit
+ * range plus a constant offset. */
+int poly_uop_contiguous_view_offset(PolyCtx *ctx, PolyUOp *u, int64_t *out) {
+  if (!ctx || !u || !out) return -1;
+  const char *device = poly_uop_device_name(ctx, u);
+  if (device && (!strncmp(device, "WEBGPU", 6) || !strncmp(device, "CL", 2))) return -1;
+
+  int ndim = poly_uop_ndim(ctx, u);
+  if (ndim < 0 || ndim > POLY_MAX_DIMS) return -1;
+  PolyUOp *numel = poly_const_int(ctx, 1);
+  for (int i = 0; i < ndim; i++) {
+    PolyUOp *dim = poly_uop_shape_dim(ctx, u, i);
+    if (!dim || !(numel = poly_uop2(
+                      ctx, POLY_OP_MUL, POLY_WEAKINT, numel, dim, poly_arg_none())))
+      return -1;
+  }
+  numel = poly_graph_rewrite(ctx, numel, poly_symbolic());
+  if (!numel) return -1;
+
+  PolyUOp *flat = poly_reshape_uop(ctx, u, &numel, 1);
+  PolyUOp *range = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_WEAKINT, numel,
+      poly_arg_range(0, POLY_AXIS_WEAK));
+  PolyUOp *indexed = range ? poly_uop_index(ctx, flat, &range, 1) : NULL;
+  PolyPatternMatcher *pm = poly_pm_concat(poly_pm_mops(), poly_symbolic());
+  PolyUOp *rewritten = indexed && pm ? poly_graph_rewrite(ctx, indexed, pm) : NULL;
+  poly_pm_destroy(pm);
+  if (!rewritten || rewritten->op != POLY_OP_INDEX || rewritten->n_src != 2 ||
+      poly_opset_has(POLY_GROUP_MOVEMENT, rewritten->src[0]->op))
+    return -1;
+
+  PolyUOp *index = rewritten->src[1];
+  if (index->op == POLY_OP_RANGE) {
+    *out = 0;
+    return 0;
+  }
+  if (index->op == POLY_OP_ADD && index->n_src == 2) {
+    PolyUOp *constant = NULL;
+    if (index->src[0]->op == POLY_OP_RANGE) constant = index->src[1];
+    if (index->src[1]->op == POLY_OP_RANGE) constant = index->src[0];
+    if (constant && poly_uop_bind_value(constant, out) == 0) return 0;
+  }
+
+  int64_t concrete_numel = 0;
+  return poly_uop_bind_value(numel, &concrete_numel) == 0 && concrete_numel == 1
+             ? poly_uop_bind_value(index, out)
+             : -1;
+}
+
 /* PolyArg equality and hashing */
+
+static uint32_t hash_mix(uint32_t h, uint32_t v);
+
+static bool poly_opt_eq(const PolyOpt *a, const PolyOpt *b) {
+  if (a->op != b->op || a->has_axis != b->has_axis ||
+      (a->has_axis && a->axis != b->axis) || a->arg_kind != b->arg_kind)
+    return false;
+  if (a->arg_kind == POLY_OPT_ARG_INT) return a->arg == b->arg;
+  if (a->arg_kind != POLY_OPT_ARG_INT_TUPLE) return true;
+  return a->n_arg_tuple == b->n_arg_tuple &&
+         (a->n_arg_tuple == 0 ||
+          (a->arg_tuple && b->arg_tuple &&
+           memcmp(
+               a->arg_tuple, b->arg_tuple,
+               (size_t)a->n_arg_tuple * sizeof(*a->arg_tuple)) == 0));
+}
+
+static bool poly_opts_eq(const PolyOpt *a, int na, const PolyOpt *b, int nb) {
+  if (na != nb || (na > 0 && (!a || !b))) return false;
+  for (int i = 0; i < na; i++)
+    if (!poly_opt_eq(&a[i], &b[i])) return false;
+  return true;
+}
+
+bool poly_kernel_info_eq(const PolyKernelInfo *a, const PolyKernelInfo *b) {
+  if (a == b) return true;
+  if (!a || !b || a->dont_use_locals != b->dont_use_locals ||
+      a->n_axis_types != b->n_axis_types ||
+      a->has_opts_to_apply != b->has_opts_to_apply || a->beam != b->beam ||
+      (a->name != b->name && (!a->name || !b->name || strcmp(a->name, b->name) != 0)))
+    return false;
+  if (a->n_axis_types > 0 &&
+      (!a->axis_types || !b->axis_types ||
+       memcmp(
+           a->axis_types, b->axis_types,
+           (size_t)a->n_axis_types * sizeof(*a->axis_types)) != 0))
+    return false;
+  if (!poly_opts_eq(a->applied_opts, a->n_applied_opts,
+                    b->applied_opts, b->n_applied_opts) ||
+      !poly_opts_eq(a->opts_to_apply, a->n_opts_to_apply,
+                    b->opts_to_apply, b->n_opts_to_apply))
+    return false;
+  if (a->estimates == b->estimates) return true;
+  return a->estimates && b->estimates &&
+         a->estimates->ops == b->estimates->ops &&
+         a->estimates->lds == b->estimates->lds &&
+         a->estimates->mem == b->estimates->mem;
+}
+
+static uint32_t poly_opt_hash(uint32_t h, const PolyOpt *opt) {
+  h = hash_mix(h, (uint32_t)opt->op);
+  h = hash_mix(h, opt->has_axis ? (uint32_t)opt->axis + 1u : 0u);
+  h = hash_mix(h, (uint32_t)opt->arg_kind);
+  if (opt->arg_kind == POLY_OPT_ARG_INT)
+    h = hash_mix(h, (uint32_t)(opt->arg ^ (opt->arg >> 32)));
+  else if (opt->arg_kind == POLY_OPT_ARG_INT_TUPLE) {
+    h = hash_mix(h, (uint32_t)opt->n_arg_tuple);
+    for (int i = 0; i < opt->n_arg_tuple; i++)
+      h = hash_mix(
+          h, (uint32_t)(opt->arg_tuple[i] ^ (opt->arg_tuple[i] >> 32)));
+  }
+  return h;
+}
+
+uint32_t poly_kernel_info_hash(const PolyKernelInfo *info) {
+  if (!info) return 0;
+  uint32_t h = UINT32_C(2166136261);
+  if (info->name)
+    for (const char *p = info->name; *p; p++) h = hash_mix(h, (uint32_t)*p);
+  h = hash_mix(h, info->dont_use_locals ? 1u : 0u);
+  h = hash_mix(h, (uint32_t)info->n_axis_types);
+  for (int i = 0; i < info->n_axis_types; i++)
+    h = hash_mix(h, (uint32_t)info->axis_types[i]);
+  h = hash_mix(h, (uint32_t)info->n_applied_opts);
+  for (int i = 0; i < info->n_applied_opts; i++)
+    h = poly_opt_hash(h, &info->applied_opts[i]);
+  h = hash_mix(h, info->has_opts_to_apply ? 1u : 0u);
+  h = hash_mix(h, (uint32_t)info->n_opts_to_apply);
+  for (int i = 0; i < info->n_opts_to_apply; i++)
+    h = poly_opt_hash(h, &info->opts_to_apply[i]);
+  if (info->estimates) {
+    h = hash_mix(h, (uint32_t)(uintptr_t)info->estimates->ops);
+    h = hash_mix(h, (uint32_t)(uintptr_t)info->estimates->lds);
+    h = hash_mix(h, (uint32_t)(uintptr_t)info->estimates->mem);
+  }
+  return hash_mix(h, (uint32_t)info->beam);
+}
 
 bool poly_arg_eq(PolyArg a, PolyArg b) {
   if (a.kind != b.kind) return false;
@@ -54,32 +381,34 @@ bool poly_arg_eq(PolyArg a, PolyArg b) {
     return true;
   case POLY_ARG_OPS:
     return a.ops == b.ops;
+  case POLY_ARG_REDUCE:
+    return a.reduce.op == b.reduce.op && a.reduce.num_axes == b.reduce.num_axes;
+  case POLY_ARG_ALLREDUCE:
+    if (a.allreduce.op != b.allreduce.op ||
+        a.allreduce.device_is_tuple != b.allreduce.device_is_tuple)
+      return false;
+    if (a.allreduce.device_is_tuple) {
+      if (a.allreduce.n_devices != b.allreduce.n_devices) return false;
+      for (int i = 0; i < a.allreduce.n_devices; i++) {
+        const char *av = a.allreduce.devices ? a.allreduce.devices[i] : NULL;
+        const char *bv = b.allreduce.devices ? b.allreduce.devices[i] : NULL;
+        if (av != bv && (!av || !bv || strcmp(av, bv) != 0)) return false;
+      }
+      return true;
+    }
+    return a.allreduce.device == b.allreduce.device ||
+           (a.allreduce.device && b.allreduce.device &&
+            strcmp(a.allreduce.device, b.allreduce.device) == 0);
   case POLY_ARG_INT_TUPLE:
     if (a.int_tuple.n != b.int_tuple.n) return false;
     if (a.int_tuple.n == 0) return true;
     return memcmp(a.int_tuple.vals, b.int_tuple.vals, a.int_tuple.n * sizeof(int64_t)) == 0;
-  case POLY_ARG_PAIR_TUPLE:
-    if (a.pair_tuple.n != b.pair_tuple.n) return false;
-    if (a.pair_tuple.n == 0) return true;
-    return memcmp(a.pair_tuple.pairs, b.pair_tuple.pairs, a.pair_tuple.n * 2 * sizeof(int64_t)) ==
-           0;
-  case POLY_ARG_REDUCE_AXIS:
-    if (a.reduce_axis.op != b.reduce_axis.op) return false;
-    if (a.reduce_axis.n != b.reduce_axis.n) return false;
-    if (a.reduce_axis.n == 0) return true;
-    return memcmp(a.reduce_axis.axes, b.reduce_axis.axes, a.reduce_axis.n * sizeof(int64_t)) == 0;
   case POLY_ARG_RANGE:
     if (a.range.axis_id != b.range.axis_id) return false;
     if (a.range.axis_type != b.range.axis_type) return false;
     if (a.range.n_extra != b.range.n_extra) return false;
     if (a.range.n_extra == 0) return true;
     return memcmp(a.range.extra, b.range.extra, (size_t)a.range.n_extra * sizeof(int64_t)) == 0;
-  case POLY_ARG_DEFINE_VAR:
-    if (a.define_var.min_val != b.define_var.min_val) return false;
-    if (a.define_var.max_val != b.define_var.max_val) return false;
-    if (a.define_var.name == b.define_var.name) return true;
-    if (!a.define_var.name || !b.define_var.name) return false;
-    return strcmp(a.define_var.name, b.define_var.name) == 0;
   case POLY_ARG_BUFFERIZE_OPTS:
     if (a.bufferize_opts.device_is_tuple != b.bufferize_opts.device_is_tuple ||
         a.bufferize_opts.addrspace != b.bufferize_opts.addrspace ||
@@ -99,13 +428,29 @@ bool poly_arg_eq(PolyArg a, PolyArg b) {
             strcmp(a.bufferize_opts.device, b.bufferize_opts.device) == 0);
   case POLY_ARG_TENSOR_CORE:
     if (a.tensor_core.threads != b.tensor_core.threads ||
+        a.tensor_core.has_upcast_axes != b.tensor_core.has_upcast_axes ||
+        !poly_dtype_eq(a.tensor_core.dtype_in, b.tensor_core.dtype_in) ||
         memcmp(a.tensor_core.dims, b.tensor_core.dims, sizeof(a.tensor_core.dims)) != 0)
       return false;
-    if (a.tensor_core.name == b.tensor_core.name) return true;
-    return a.tensor_core.name && b.tensor_core.name &&
-           strcmp(a.tensor_core.name, b.tensor_core.name) == 0;
+    if (a.tensor_core.device != b.tensor_core.device &&
+        (!a.tensor_core.device || !b.tensor_core.device ||
+         strcmp(a.tensor_core.device, b.tensor_core.device) != 0))
+      return false;
+    for (int d = 0; d < 3; d++) {
+      if (a.tensor_core.n_upcast_axes[d] != b.tensor_core.n_upcast_axes[d]) return false;
+      if (a.tensor_core.n_upcast_axes[d] > 0 &&
+          (!a.tensor_core.upcast_axes[d] || !b.tensor_core.upcast_axes[d] ||
+           memcmp(
+               a.tensor_core.upcast_axes[d], b.tensor_core.upcast_axes[d],
+               (size_t)a.tensor_core.n_upcast_axes[d] * sizeof(*a.tensor_core.upcast_axes[d])
+           ) != 0))
+        return false;
+    }
+    return true;
   case POLY_ARG_PROGRAM_INFO:
     return poly_program_info_eq(a.program_info, b.program_info);
+  case POLY_ARG_KERNEL_INFO:
+    return poly_kernel_info_eq(a.kernel_info, b.kernel_info);
   case POLY_ARG_BYTES:
     if (a.bytes.n != b.bytes.n) return false;
     if (a.bytes.n == 0) return true;
@@ -114,12 +459,15 @@ bool poly_arg_eq(PolyArg a, PolyArg b) {
   case POLY_ARG_PARAM:
     if (a.param == b.param) return true;
     if (!a.param || !b.param) return false;
-    if (a.param->slot != b.param->slot || a.param->min_val != b.param->min_val ||
+    if (a.param->slot != b.param->slot || !poly_dtype_eq(a.param->dtype, b.param->dtype) ||
+        a.param->min_val != b.param->min_val ||
         a.param->max_val != b.param->max_val || a.param->has_minmax != b.param->has_minmax ||
+        a.param->multiple_of != b.param->multiple_of ||
+        a.param->has_multiple_of != b.param->has_multiple_of ||
         a.param->addrspace != b.param->addrspace || a.param->axis != b.param->axis ||
         a.param->has_axis != b.param->has_axis ||
         a.param->device_is_tuple != b.param->device_is_tuple ||
-        a.param->n_devices != b.param->n_devices)
+        a.param->n_devices != b.param->n_devices || a.param->volatile_ != b.param->volatile_)
       return false;
     if (a.param->device != b.param->device &&
         (!a.param->device || !b.param->device || strcmp(a.param->device, b.param->device) != 0))
@@ -143,6 +491,8 @@ bool poly_arg_eq(PolyArg a, PolyArg b) {
     return a.call_info->name == b.call_info->name ||
            (a.call_info->name && b.call_info->name &&
             strcmp(a.call_info->name, b.call_info->name) == 0);
+  case POLY_ARG_DTYPE:
+    return poly_dtype_eq(a.dtype, b.dtype);
   }
   return false;
 }
@@ -196,34 +546,34 @@ uint32_t poly_arg_hash(PolyArg a) {
   case POLY_ARG_OPS:
     h = hash_mix(h, (uint32_t)a.ops);
     break;
+  case POLY_ARG_REDUCE:
+    h = hash_mix(h, (uint32_t)a.reduce.op);
+    h = hash_mix(h, (uint32_t)a.reduce.num_axes);
+    break;
+  case POLY_ARG_ALLREDUCE:
+    h = hash_mix(h, (uint32_t)a.allreduce.op);
+    h = hash_mix(h, a.allreduce.device_is_tuple ? 2u : 1u);
+    if (a.allreduce.device_is_tuple) {
+      h = hash_mix(h, (uint32_t)a.allreduce.n_devices);
+      for (int i = 0; i < a.allreduce.n_devices; i++) {
+        const char *value = a.allreduce.devices ? a.allreduce.devices[i] : NULL;
+        if (value)
+          for (const char *p = value; *p; p++) h = hash_mix(h, (uint32_t)*p);
+        h = hash_mix(h, UINT32_C(0xff));
+      }
+    } else if (a.allreduce.device) {
+      for (const char *p = a.allreduce.device; *p; p++) h = hash_mix(h, (uint32_t)*p);
+    }
+    break;
   case POLY_ARG_INT_TUPLE:
     for (int i = 0; i < a.int_tuple.n; i++)
       h = hash_mix(h, (uint32_t)(a.int_tuple.vals[i] ^ (a.int_tuple.vals[i] >> 32)));
-    break;
-  case POLY_ARG_PAIR_TUPLE:
-    for (int i = 0; i < a.pair_tuple.n; i++) {
-      h = hash_mix(h, (uint32_t)(a.pair_tuple.pairs[i][0] ^ (a.pair_tuple.pairs[i][0] >> 32)));
-      h = hash_mix(h, (uint32_t)(a.pair_tuple.pairs[i][1] ^ (a.pair_tuple.pairs[i][1] >> 32)));
-    }
-    break;
-  case POLY_ARG_REDUCE_AXIS:
-    h = hash_mix(h, (uint32_t)a.reduce_axis.op);
-    for (int i = 0; i < a.reduce_axis.n; i++)
-      h = hash_mix(h, (uint32_t)(a.reduce_axis.axes[i] ^ (a.reduce_axis.axes[i] >> 32)));
     break;
   case POLY_ARG_RANGE:
     h = hash_mix(h, (uint32_t)(a.range.axis_id ^ (a.range.axis_id >> 32)));
     h = hash_mix(h, (uint32_t)a.range.axis_type);
     for (int i = 0; i < a.range.n_extra; i++)
       h = hash_mix(h, (uint32_t)(a.range.extra[i] ^ (a.range.extra[i] >> 32)));
-    break;
-  case POLY_ARG_DEFINE_VAR:
-    if (a.define_var.name) {
-      for (const char *p = a.define_var.name; *p; p++)
-        h = hash_mix(h, (uint32_t)*p);
-    }
-    h = hash_mix(h, (uint32_t)(a.define_var.min_val ^ (a.define_var.min_val >> 32)));
-    h = hash_mix(h, (uint32_t)(a.define_var.max_val ^ (a.define_var.max_val >> 32)));
     break;
   case POLY_ARG_BUFFERIZE_OPTS:
     h = hash_mix(h, a.bufferize_opts.device_is_tuple ? 2u : 1u);
@@ -244,15 +594,28 @@ uint32_t poly_arg_hash(PolyArg a) {
     h = hash_mix(h, a.bufferize_opts.removable ? 1u : 0u);
     break;
   case POLY_ARG_TENSOR_CORE:
-    if (a.tensor_core.name) {
-      for (const char *p = a.tensor_core.name; *p; p++)
+    if (a.tensor_core.device) {
+      for (const char *p = a.tensor_core.device; *p; p++)
         h = hash_mix(h, (uint32_t)*p);
     }
     for (int i = 0; i < 3; i++) h = hash_mix(h, (uint32_t)a.tensor_core.dims[i]);
+    h = hash_mix(h, (uint32_t)a.tensor_core.dtype_in.priority);
+    h = hash_mix(h, (uint32_t)a.tensor_core.dtype_in.bitsize);
     h = hash_mix(h, (uint32_t)a.tensor_core.threads);
+    h = hash_mix(h, a.tensor_core.has_upcast_axes ? 1u : 0u);
+    for (int d = 0; d < 3; d++) {
+      h = hash_mix(h, (uint32_t)a.tensor_core.n_upcast_axes[d]);
+      for (int i = 0; i < a.tensor_core.n_upcast_axes[d]; i++) {
+        h = hash_mix(h, (uint32_t)a.tensor_core.upcast_axes[d][i][0]);
+        h = hash_mix(h, (uint32_t)a.tensor_core.upcast_axes[d][i][1]);
+      }
+    }
     break;
   case POLY_ARG_PROGRAM_INFO:
     h = hash_mix(h, poly_program_info_hash(a.program_info));
+    break;
+  case POLY_ARG_KERNEL_INFO:
+    h = hash_mix(h, poly_kernel_info_hash(a.kernel_info));
     break;
   case POLY_ARG_BYTES:
     for (int i = 0; i < a.bytes.n; i++)
@@ -261,6 +624,8 @@ uint32_t poly_arg_hash(PolyArg a) {
   case POLY_ARG_PARAM:
     if (a.param) {
       h = hash_mix(h, (uint32_t)(a.param->slot ^ (a.param->slot >> 32)));
+      h = hash_mix(h, (uint32_t)a.param->dtype.priority);
+      h = hash_mix(h, (uint32_t)a.param->dtype.bitsize);
       if (a.param->device)
         for (const char *p = a.param->device; *p; p++)
           h = hash_mix(h, (uint32_t)*p);
@@ -278,6 +643,9 @@ uint32_t poly_arg_hash(PolyArg a) {
       h = hash_mix(h, a.param->has_minmax ? 1u : 0u);
       h = hash_mix(h, (uint32_t)(a.param->min_val ^ (a.param->min_val >> 32)));
       h = hash_mix(h, (uint32_t)(a.param->max_val ^ (a.param->max_val >> 32)));
+      h = hash_mix(h, a.param->has_multiple_of ? 1u : 0u);
+      h = hash_mix(h, (uint32_t)(a.param->multiple_of ^ (a.param->multiple_of >> 32)));
+      h = hash_mix(h, a.param->volatile_ ? 1u : 0u);
       if (a.param->name) {
         for (const char *p = a.param->name; *p; p++) h = hash_mix(h, (uint32_t)*p);
       }
@@ -293,6 +661,12 @@ uint32_t poly_arg_hash(PolyArg a) {
       h = hash_mix(h, a.call_info->has_metadata ? 1u : 0u);
       h = hash_mix(h, a.call_info->has_aux ? 1u : 0u);
     }
+    break;
+  case POLY_ARG_DTYPE:
+    h = hash_mix(h, (uint32_t)a.dtype.priority);
+    h = hash_mix(h, (uint32_t)a.dtype.bitsize);
+    if (a.dtype.name)
+      for (const char *p = a.dtype.name; *p; p++) h = hash_mix(h, (uint32_t)*p);
     break;
   }
   return h;
@@ -314,11 +688,6 @@ static uint32_t cse_hash(const CseKey *k) {
   uint32_t h = (uint32_t)k->op;
   h = hash_mix(h, (uint32_t)k->dtype.priority);
   h = hash_mix(h, (uint32_t)k->dtype.bitsize);
-  h = hash_mix(h, (uint32_t)k->dtype.count);
-  h = hash_mix(h, k->dtype.is_ptr ? 1u : 0u);
-  h = hash_mix(h, (uint32_t)k->dtype.addrspace);
-  h = hash_mix(h, (uint32_t)k->dtype.vcount);
-  h = hash_mix(h, (uint32_t)(k->dtype.ptr_size ^ (k->dtype.ptr_size >> 32)));
   if (k->dtype.name) {
     const unsigned char *p = (const unsigned char *)k->dtype.name;
     while (*p)
@@ -358,9 +727,7 @@ static bool rank_tuple_valid(const void *data, int n) {
 
 static bool shape_value_rank_valid(PolyUOp *shape) {
   if (!shape) return false;
-  int rank = shape->op == POLY_OP_STACK
-                 ? shape->n_src
-                 : (shape->op == POLY_OP_CONST ? shape->dtype.count : 1);
+  int rank = shape->op == POLY_OP_STACK ? shape->n_src : 1;
   return rank >= 0 && rank <= POLY_MAX_DIMS;
 }
 
@@ -371,12 +738,59 @@ static bool string_tuple_valid(const char **vals, int n) {
   return true;
 }
 
+static bool opt_valid(const PolyOpt *opt) {
+  if (!opt || opt->op < POLY_OPT_TC || opt->op > POLY_OPT_SWAP ||
+      opt->arg_kind < POLY_OPT_ARG_NONE || opt->arg_kind > POLY_OPT_ARG_INT_TUPLE)
+    return false;
+  return opt->arg_kind != POLY_OPT_ARG_INT_TUPLE ||
+         (opt->n_arg_tuple >= 0 &&
+          (opt->n_arg_tuple == 0 || opt->arg_tuple));
+}
+
+static bool kernel_info_valid(const PolyKernelInfo *info) {
+  if (!info || !info->name || !info->name[0] || info->beam < 0 ||
+      info->n_axis_types < 0 || info->n_applied_opts < 0 ||
+      info->n_opts_to_apply < 0 ||
+      (info->n_axis_types > 0 && !info->axis_types) ||
+      (info->n_applied_opts > 0 && !info->applied_opts) ||
+      (info->n_opts_to_apply > 0 && !info->opts_to_apply) ||
+      (!info->has_opts_to_apply && info->n_opts_to_apply != 0))
+    return false;
+  for (int i = 0; i < info->n_axis_types; i++)
+    if (info->axis_types[i] < POLY_AXIS_DEVICE ||
+        info->axis_types[i] > POLY_AXIS_LOOP)
+      return false;
+  for (int i = 0; i < info->n_applied_opts; i++)
+    if (!opt_valid(&info->applied_opts[i])) return false;
+  for (int i = 0; i < info->n_opts_to_apply; i++)
+    if (!opt_valid(&info->opts_to_apply[i])) return false;
+  return true;
+}
+
 static bool uop_rank_arg_valid(PolyOps op, PolyUOp **src, int n_src, PolyArg arg) {
   switch (op) {
+  case POLY_OP_SINK:
+    return arg.kind == POLY_ARG_NONE ||
+           (arg.kind == POLY_ARG_KERNEL_INFO && kernel_info_valid(arg.kernel_info));
   case POLY_OP_DEVICE:
     return arg.kind == POLY_ARG_NONE || (arg.kind == POLY_ARG_STRING && arg.str && arg.str[0]) ||
            (arg.kind == POLY_ARG_STRING_TUPLE &&
             string_tuple_valid(arg.string_tuple.vals, arg.string_tuple.n));
+  case POLY_OP_BUFFER:
+    /* tinygrad@2026-08-22/a9069c177a9d UOp.new_buffer stores shape as the
+     * sole source and device in ParamArg. Polygrad's portable BUFFER keeps
+     * one UNIQUE source; the retired BUFFER(UNIQUE, DEVICE) form is invalid. */
+    if (arg.kind != POLY_ARG_PARAM) return n_src == 1 && src;
+    if (!arg.param || n_src != 1 || !src || arg.param->n_devices < 0) return false;
+    if (arg.param->device_is_tuple)
+      return !arg.param->device &&
+             string_tuple_valid(arg.param->devices, arg.param->n_devices);
+    return arg.param->n_devices == 0 && !arg.param->devices;
+  case POLY_OP_COPY:
+    return n_src == 1 && src &&
+           (arg.kind == POLY_ARG_STRING ||
+            (arg.kind == POLY_ARG_STRING_TUPLE &&
+             string_tuple_valid(arg.string_tuple.vals, arg.string_tuple.n)));
   case POLY_OP_RESHAPE:
     /* Pinned spec.py accepts any shape-value UOp in src[1]. UOp.as_shape
      * decodes CONST, STACK, and scalar symbolic expressions (ops.py:697-700). */
@@ -394,23 +808,32 @@ static bool uop_rank_arg_valid(PolyOps op, PolyUOp **src, int n_src, PolyArg arg
     return arg.kind == POLY_ARG_NONE && n_src == 2 && src &&
            shape_value_rank_valid(src[1]);
   case POLY_OP_SHRINK:
-    if (arg.kind == POLY_ARG_NONE) return true;
-    return arg.kind == POLY_ARG_PAIR_TUPLE &&
-           rank_tuple_valid(arg.pair_tuple.pairs, arg.pair_tuple.n);
+    return arg.kind == POLY_ARG_NONE && n_src == 3 && src &&
+           shape_value_rank_valid(src[1]) && shape_value_rank_valid(src[2]);
   case POLY_OP_PAD:
-    if (arg.kind == POLY_ARG_NONE)
-      return n_src == 3 && src && shape_value_rank_valid(src[1]) && shape_value_rank_valid(src[2]);
-    return arg.kind == POLY_ARG_PAIR_TUPLE &&
-           rank_tuple_valid(arg.pair_tuple.pairs, arg.pair_tuple.n);
+    return arg.kind == POLY_ARG_NONE && n_src == 3 && src &&
+           shape_value_rank_valid(src[1]) && shape_value_rank_valid(src[2]);
+  case POLY_OP_UNSHARD:
+    /* tinygrad@2026-08-22/a9069c177a9d uop/spec.py:180-182 requires integer
+     * axis labels, but does not require nonnegative or sorted labels. */
+    if (arg.kind != POLY_ARG_INT_TUPLE || arg.int_tuple.n <= 0 ||
+        !rank_tuple_valid(arg.int_tuple.vals, arg.int_tuple.n) ||
+        n_src != arg.int_tuple.n + 1 || !src)
+      return false;
+    for (int i = 0; i < arg.int_tuple.n; i++) {
+      if (!src[i + 1] || !poly_dtype_is_int(src[i + 1]->dtype))
+        return false;
+    }
+    return true;
   case POLY_OP_REDUCE:
-    if (arg.kind == POLY_ARG_OPS) return n_src >= 1;
-    return arg.kind == POLY_ARG_REDUCE_AXIS && n_src == 1 &&
-           rank_tuple_valid(arg.reduce_axis.axes, arg.reduce_axis.n);
-  case POLY_OP_REDUCE_AXIS:
-    return arg.kind == POLY_ARG_REDUCE_AXIS &&
-           rank_tuple_valid(arg.reduce_axis.axes, arg.reduce_axis.n);
-  case POLY_OP_ASSIGN:
-    return arg.kind != POLY_ARG_INT_TUPLE || rank_tuple_valid(arg.int_tuple.vals, arg.int_tuple.n);
+    return arg.kind == POLY_ARG_REDUCE && arg.reduce.num_axes >= 0 && n_src >= 1;
+  case POLY_OP_ALLREDUCE:
+    if (arg.kind != POLY_ARG_ALLREDUCE || n_src != 1 || !src) return false;
+    if (arg.allreduce.device_is_tuple)
+      return !arg.allreduce.device &&
+             string_tuple_valid(arg.allreduce.devices, arg.allreduce.n_devices);
+    return arg.allreduce.device && arg.allreduce.device[0] &&
+           !arg.allreduce.devices && arg.allreduce.n_devices == 0;
   case POLY_OP_PARAM:
     if (arg.kind != POLY_ARG_PARAM) return true;
     if (!arg.param || arg.param->n_devices < 0) return false;
@@ -464,16 +887,6 @@ static void poly_arg_copy_to_arena(PolyArena *arena, PolyArg *dst) {
         limbs, dst->bigint.limbs, (size_t)dst->bigint.n_limbs * sizeof(uint32_t)
     );
     dst->bigint.limbs = limbs;
-  } else if (dst->kind == POLY_ARG_PAIR_TUPLE && dst->pair_tuple.n > 0) {
-    int64_t(*pairs)[2] =
-        poly_arena_alloc(arena, dst->pair_tuple.n * 2 * sizeof(int64_t), _Alignof(int64_t));
-    memcpy(pairs, dst->pair_tuple.pairs, dst->pair_tuple.n * 2 * sizeof(int64_t));
-    dst->pair_tuple.pairs = pairs;
-  } else if (dst->kind == POLY_ARG_REDUCE_AXIS && dst->reduce_axis.n > 0) {
-    int64_t *axes =
-        poly_arena_alloc(arena, dst->reduce_axis.n * sizeof(int64_t), _Alignof(int64_t));
-    memcpy(axes, dst->reduce_axis.axes, dst->reduce_axis.n * sizeof(int64_t));
-    dst->reduce_axis.axes = axes;
   } else if (dst->kind == POLY_ARG_RANGE && dst->range.n_extra > 0) {
     int64_t *extra = poly_arena_alloc(
         arena, (size_t)dst->range.n_extra * sizeof(int64_t), _Alignof(int64_t)
@@ -496,11 +909,24 @@ static void poly_arg_copy_to_arena(PolyArena *arena, PolyArg *dst) {
       vals[i] = value;
     }
     dst->string_tuple.vals = vals;
-  } else if (dst->kind == POLY_ARG_DEFINE_VAR && dst->define_var.name) {
-    size_t len = strlen(dst->define_var.name);
-    char *s = poly_arena_alloc(arena, len + 1, 1);
-    memcpy(s, dst->define_var.name, len + 1);
-    dst->define_var.name = s;
+  } else if (dst->kind == POLY_ARG_ALLREDUCE && dst->allreduce.device_is_tuple &&
+             dst->allreduce.n_devices > 0) {
+    const char **vals = poly_arena_alloc(
+        arena, (size_t)dst->allreduce.n_devices * sizeof(*vals),
+        _Alignof(const char *)
+    );
+    for (int i = 0; i < dst->allreduce.n_devices; i++) {
+      size_t len = strlen(dst->allreduce.devices[i]);
+      char *value = poly_arena_alloc(arena, len + 1, 1);
+      memcpy(value, dst->allreduce.devices[i], len + 1);
+      vals[i] = value;
+    }
+    dst->allreduce.devices = vals;
+  } else if (dst->kind == POLY_ARG_ALLREDUCE && dst->allreduce.device) {
+    size_t len = strlen(dst->allreduce.device);
+    char *value = poly_arena_alloc(arena, len + 1, 1);
+    memcpy(value, dst->allreduce.device, len + 1);
+    dst->allreduce.device = value;
   } else if (dst->kind == POLY_ARG_BUFFERIZE_OPTS &&
              dst->bufferize_opts.device_is_tuple && dst->bufferize_opts.n_devices > 0) {
     const char **vals = poly_arena_alloc(
@@ -518,11 +944,22 @@ static void poly_arg_copy_to_arena(PolyArena *arena, PolyArg *dst) {
     char *s = poly_arena_alloc(arena, len + 1, 1);
     memcpy(s, dst->bufferize_opts.device, len + 1);
     dst->bufferize_opts.device = s;
-  } else if (dst->kind == POLY_ARG_TENSOR_CORE && dst->tensor_core.name) {
-    size_t len = strlen(dst->tensor_core.name);
-    char *s = poly_arena_alloc(arena, len + 1, 1);
-    memcpy(s, dst->tensor_core.name, len + 1);
-    dst->tensor_core.name = s;
+  } else if (dst->kind == POLY_ARG_TENSOR_CORE) {
+    if (dst->tensor_core.device) {
+      size_t len = strlen(dst->tensor_core.device);
+      char *s = poly_arena_alloc(arena, len + 1, 1);
+      memcpy(s, dst->tensor_core.device, len + 1);
+      dst->tensor_core.device = s;
+    }
+    for (int d = 0; d < 3; d++) {
+      int n = dst->tensor_core.n_upcast_axes[d];
+      if (n <= 0) continue;
+      int64_t (*pairs)[2] = poly_arena_alloc(
+          arena, (size_t)n * sizeof(*pairs), _Alignof(int64_t)
+      );
+      memcpy(pairs, dst->tensor_core.upcast_axes[d], (size_t)n * sizeof(*pairs));
+      dst->tensor_core.upcast_axes[d] = pairs;
+    }
   } else if (dst->kind == POLY_ARG_BYTES && dst->bytes.n > 0 && dst->bytes.data) {
     uint8_t *data = poly_arena_alloc(arena, (size_t)dst->bytes.n, 1);
     memcpy(data, dst->bytes.data, (size_t)dst->bytes.n);
@@ -566,6 +1003,53 @@ static void poly_arg_copy_to_arena(PolyArena *arena, PolyArg *dst) {
       info->name = name;
     }
     dst->call_info = info;
+  } else if (dst->kind == POLY_ARG_KERNEL_INFO && dst->kernel_info) {
+    const PolyKernelInfo *src = dst->kernel_info;
+    PolyKernelInfo *info =
+        poly_arena_alloc(arena, sizeof(*info), _Alignof(PolyKernelInfo));
+    *info = *src;
+    if (src->name) {
+      size_t len = strlen(src->name);
+      char *name = poly_arena_alloc(arena, len + 1, 1);
+      memcpy(name, src->name, len + 1);
+      info->name = name;
+    }
+    if (src->n_axis_types > 0) {
+      PolyAxisType *axis_types = poly_arena_alloc(
+          arena, (size_t)src->n_axis_types * sizeof(*axis_types),
+          _Alignof(PolyAxisType));
+      memcpy(
+          axis_types, src->axis_types,
+          (size_t)src->n_axis_types * sizeof(*axis_types));
+      info->axis_types = axis_types;
+    }
+    const PolyOpt *option_sets[2] = {src->applied_opts, src->opts_to_apply};
+    int option_counts[2] = {src->n_applied_opts, src->n_opts_to_apply};
+    const PolyOpt **destinations[2] = {&info->applied_opts, &info->opts_to_apply};
+    for (int set = 0; set < 2; set++) {
+      if (option_counts[set] <= 0) continue;
+      PolyOpt *opts = poly_arena_alloc(
+          arena, (size_t)option_counts[set] * sizeof(*opts), _Alignof(PolyOpt));
+      memcpy(opts, option_sets[set], (size_t)option_counts[set] * sizeof(*opts));
+      for (int i = 0; i < option_counts[set]; i++) {
+        if (opts[i].arg_kind != POLY_OPT_ARG_INT_TUPLE || opts[i].n_arg_tuple <= 0)
+          continue;
+        int64_t *tuple = poly_arena_alloc(
+            arena, (size_t)opts[i].n_arg_tuple * sizeof(*tuple), _Alignof(int64_t));
+        memcpy(
+            tuple, opts[i].arg_tuple,
+            (size_t)opts[i].n_arg_tuple * sizeof(*tuple));
+        opts[i].arg_tuple = tuple;
+      }
+      *destinations[set] = opts;
+    }
+    if (src->estimates) {
+      PolyEstimates *estimates =
+          poly_arena_alloc(arena, sizeof(*estimates), _Alignof(PolyEstimates));
+      *estimates = *src->estimates;
+      info->estimates = estimates;
+    }
+    dst->kernel_info = info;
   }
 }
 
@@ -580,17 +1064,30 @@ static PolyUOp *poly_uop_internal(
     PolyArg tag_arg
 ) {
   if (!ctx || n_src < 0 || n_src > UINT16_MAX || (n_src > 0 && !src)) return NULL;
+  for (int i = 0; i < n_src; i++)
+    if (!src[i]) return NULL;
   /* Python ints have one value identity regardless of construction history.
    * Canonicalize the C carrier before hashing so signed-64 values cannot
    * acquire a second BIGINT CSE identity. */
   if (!poly_arg_canonicalize_bigint(&arg) ||
       !poly_arg_canonicalize_bigint(&tag_arg))
     return NULL;
-  /* Canonicalize legacy RANGE(axis_id as INT) at the UOp boundary. tinygrad
-   * stores RANGE args as (axis_id, AxisType, ...); keeping the legacy form out
-   * of CSE lets PolyArg equality stay exact by kind. */
-  if (op == POLY_OP_RANGE && arg.kind == POLY_ARG_INT) {
-    arg = poly_arg_range(arg.i, POLY_AXIS_LOOP);
+  /* Current tinygrad stores the target DType as CAST/BITCAST.arg and derives
+   * the node dtype from it (uop/ops.py:169-172, mixin/dtype.py:16-50).
+   * Keep accepting the old internal NONE spelling only at this constructor
+   * boundary so every newly interned UOp has the current exact identity. */
+  if (op == POLY_OP_CAST || op == POLY_OP_BITCAST) {
+    if (arg.kind == POLY_ARG_NONE) arg = poly_arg_dtype(dtype);
+    if (n_src != 1 || arg.kind != POLY_ARG_DTYPE || !poly_dtype_eq(arg.dtype, dtype))
+      return NULL;
+  }
+
+  PolyParamArg normalized_param;
+  if (arg.kind == POLY_ARG_PARAM && arg.param) {
+    normalized_param = *arg.param;
+    if (normalized_param.dtype.bitsize == 0)
+      normalized_param.dtype = dtype;
+    arg.param = &normalized_param;
   }
 
   if (!uop_rank_arg_valid(op, src, n_src, arg)) return NULL;
@@ -599,18 +1096,10 @@ static PolyUOp *poly_uop_internal(
   CseKey key = {op, dtype, src, (uint16_t)n_src, arg, tag, tag_arg};
   uint32_t h = cse_hash(&key);
 
-  /* DEFINE_LOCAL represents mutable accumulators — each REDUCE needs its
-   * own unique accumulator, so skip CSE dedup for this op.  Without this,
-   * two reductions in a multi-store kernel that happen to share identity
-   * value and outer-range deps would get merged into a single acc variable,
-   * corrupting both computations. */
-  bool cse_lookup = op != POLY_OP_DEFINE_LOCAL;
-  if (op == POLY_OP_INS)
-    cse_lookup = n_src == 0 && tag == 0 && tag_arg.kind == POLY_ARG_NONE;
-  if (cse_lookup) {
-    PolyUOp *existing = poly_map_get(ctx->cse, h, &key, cse_eq);
-    if (existing) return existing;
-  }
+  /* tinygrad@2026-08-22/a9069c177a9d uop/ops.py:186-202 interns every
+   * (op,dtype,src,arg,tag), including INS. Tags distinguish occurrences. */
+  PolyUOp *existing = poly_map_get(ctx->cse, h, &key, cse_eq);
+  if (existing) return existing;
 
   /* Allocate new UOp in arena */
   PolyUOp *u = poly_arena_alloc(ctx->arena, sizeof(PolyUOp), _Alignof(PolyUOp));
@@ -621,6 +1110,8 @@ static PolyUOp *poly_uop_internal(
   u->tag = tag;
   u->tag_arg = tag_arg;
   u->hash = h;
+  u->addrspace_cached = false;
+  u->addrspace_cache = POLY_ADDR_GLOBAL;
   u->minmax_cached = false;
   u->minmax_vmin = 0;
   u->minmax_vmax = 0;
@@ -638,6 +1129,7 @@ static PolyUOp *poly_uop_internal(
   /* Copy arg/tag data that needs arena allocation */
   poly_arg_copy_to_arena(ctx->arena, &u->arg);
   poly_arg_copy_to_arena(ctx->arena, &u->tag_arg);
+  cache_uop_addrspace(u);
 
   /* Also store the CSE key in the arena so it persists for hash map lookups */
   CseKey *stored_key = poly_arena_alloc(ctx->arena, sizeof(CseKey), _Alignof(CseKey));
@@ -656,6 +1148,75 @@ PolyUOp *poly_uop(
     PolyArg arg
 ) {
   return poly_uop_internal(ctx, op, dtype, src, n_src, arg, 0, poly_arg_none());
+}
+
+/* Current tinygrad UOp.unshard (`tinygrad/uop/ops.py:667-681`). C callers
+ * pass sorted axes explicitly; each axis keeps its sharding expression. */
+PolyUOp *poly_unshard(
+    PolyCtx *ctx,
+    PolyUOp *value,
+    const int64_t *axes,
+    PolyUOp **ranges,
+    int n_axes
+) {
+  if (!ctx || !value || !axes || !ranges || n_axes <= 0 || n_axes > POLY_MAX_DIMS)
+    return NULL;
+  PolyUOp *src[POLY_MAX_DIMS + 1];
+  int64_t sorted_axes[POLY_MAX_DIMS];
+  PolyUOp *sorted_ranges[POLY_MAX_DIMS];
+  for (int i = 0; i < n_axes; i++) {
+    if (axes[i] < 0 || axes[i] >= POLY_MAX_DIMS || !ranges[i] ||
+        !poly_dtype_is_int(ranges[i]->dtype))
+      return NULL;
+    int pos = i;
+    while (pos > 0 && sorted_axes[pos - 1] > axes[i]) {
+      sorted_axes[pos] = sorted_axes[pos - 1];
+      sorted_ranges[pos] = sorted_ranges[pos - 1];
+      pos--;
+    }
+    if (pos > 0 && sorted_axes[pos - 1] == axes[i]) return NULL;
+    sorted_axes[pos] = axes[i];
+    sorted_ranges[pos] = ranges[i];
+  }
+  src[0] = value;
+  for (int i = 0; i < n_axes; i++) src[i + 1] = sorted_ranges[i];
+  return poly_uop(
+      ctx, POLY_OP_UNSHARD, value->dtype, src, n_axes + 1,
+      poly_arg_int_tuple(sorted_axes, n_axes)
+  );
+}
+
+/* Current tinygrad UOp.allreduce (`tinygrad/uop/ops.py:654-656`). */
+PolyUOp *poly_allreduce(
+    PolyCtx *ctx, PolyUOp *value, PolyOps op, PolyUOp *device
+) {
+  if (!ctx || !value || !device || device->op != POLY_OP_DEVICE) return NULL;
+  PolyArg arg;
+  if (device->arg.kind == POLY_ARG_STRING_TUPLE)
+    arg = poly_arg_allreduce(
+        op, NULL, device->arg.string_tuple.vals, device->arg.string_tuple.n);
+  else if (device->arg.kind == POLY_ARG_STRING)
+    arg = poly_arg_allreduce(op, device->arg.str, NULL, 0);
+  else
+    return NULL;
+  return poly_uop1(ctx, POLY_OP_ALLREDUCE, value->dtype, value, arg);
+}
+
+/* Current tinygrad UOp.range (`tinygrad/uop/ops.py:563-565`). */
+PolyUOp *poly_range(
+    PolyCtx *ctx,
+    int64_t bound,
+    int64_t axis_id,
+    PolyAxisType axis_type
+) {
+  if (!ctx || bound < 0 || axis_type < POLY_AXIS_DEVICE || axis_type > POLY_AXIS_LOOP)
+    return NULL;
+  PolyUOp *bound_uop = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(bound));
+  return bound_uop
+             ? poly_uop1(
+                   ctx, POLY_OP_RANGE, POLY_WEAKINT, bound_uop,
+                   poly_arg_range(axis_id, axis_type))
+             : NULL;
 }
 
 PolyUOp *poly_uop_tagged(
@@ -683,6 +1244,17 @@ PolyUOp *poly_uop_tagged_arg(
   return poly_uop_internal(ctx, op, dtype, src, n_src, arg, tag, tag_arg);
 }
 
+/* Current Tinygrad uop/ops.py:UOp.replace(src=...). */
+PolyUOp *poly_uop_replace_src(PolyCtx *ctx, PolyUOp *u, PolyUOp **src) {
+  if (!ctx || !u || (u->n_src > 0 && !src)) return NULL;
+  return (u->tag != 0 || u->tag_arg.kind != POLY_ARG_NONE)
+             ? poly_uop_tagged_arg(
+                   ctx, u->op, u->dtype, src, u->n_src, u->arg, u->tag,
+                   u->tag_arg
+               )
+             : poly_uop(ctx, u->op, u->dtype, src, u->n_src, u->arg);
+}
+
 PolyUOp *poly_uop0(PolyCtx *ctx, PolyOps op, PolyDType dtype, PolyArg arg) {
   return poly_uop(ctx, op, dtype, NULL, 0, arg);
 }
@@ -690,6 +1262,84 @@ PolyUOp *poly_uop0(PolyCtx *ctx, PolyOps op, PolyDType dtype, PolyArg arg) {
 PolyUOp *poly_uop1(PolyCtx *ctx, PolyOps op, PolyDType dtype, PolyUOp *s0, PolyArg arg) {
   PolyUOp *src[] = {s0};
   return poly_uop(ctx, op, dtype, src, 1, arg);
+}
+
+PolyUOp *poly_shape_to_shape_arg(PolyCtx *ctx, PolyUOp **items, int n_items) {
+  /* Exact C port of current tinygrad uop/ops.py:shape_to_shape_arg: a sole
+   * dimension is the shape argument itself; all other ranks use STACK. */
+  if (!ctx || !rank_tuple_valid(items, n_items)) return NULL;
+  for (int i = 0; i < n_items; i++)
+    if (!items[i] || !poly_dtype_is_int(items[i]->dtype)) return NULL;
+  if (n_items == 1) return items[0];
+  return poly_uop(
+      ctx, POLY_OP_STACK, n_items == 0 ? POLY_VOID : POLY_WEAKINT, items, n_items,
+      poly_arg_none()
+  );
+}
+
+int poly_broadcast_shape(
+    PolyCtx *ctx,
+    PolyUOp **src,
+    int n_src,
+    PolyUOp **out_dims,
+    int max_dims
+) {
+  if (!ctx || !src || n_src <= 0 || !out_dims || max_dims < 0) return -1;
+  int ndim = 0;
+  for (int i = 0; i < n_src; i++) {
+    if (!src[i]) return -1;
+    int source_ndim = poly_uop_ndim(ctx, src[i]);
+    if (source_ndim < 0 || source_ndim > max_dims) return -1;
+    if (source_ndim > ndim) ndim = source_ndim;
+  }
+
+  for (int axis = 0; axis < ndim; axis++) {
+    PolyUOp *selected = NULL;
+    int64_t selected_value = 0;
+    bool selected_is_const = false;
+    for (int i = 0; i < n_src; i++) {
+      int source_ndim = poly_uop_ndim(ctx, src[i]);
+      int source_axis = axis - (ndim - source_ndim);
+      PolyUOp *dim = source_axis >= 0
+                         ? poly_uop_shape_dim(ctx, src[i], source_axis)
+                         : poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(1));
+      int64_t value = 0;
+      bool is_const = dim && poly_uop_const_i64(dim, &value) == 0;
+      if (!dim) return -1;
+      if (is_const && value == 1) continue;
+      if (!selected) {
+        selected = dim;
+        selected_value = value;
+        selected_is_const = is_const;
+      } else if (selected != dim &&
+                 !(selected_is_const && is_const && selected_value == value)) {
+        return -1;
+      }
+    }
+    out_dims[axis] = selected ? selected
+                              : poly_uop0(
+                                    ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(1)
+                                );
+  }
+  return ndim;
+}
+
+int poly_uop_as_shape(
+    PolyCtx *ctx,
+    PolyUOp *shape_arg,
+    PolyUOp **items,
+    int max_items
+) {
+  if (!ctx || !shape_arg || max_items < 0) return -1;
+  int n = shape_arg->op == POLY_OP_STACK ? shape_arg->n_src : 1;
+  if (n < 0 || n > max_items || (n > 0 && !items)) return -1;
+  for (int i = 0; i < n; i++) {
+    PolyUOp *item = shape_arg->op == POLY_OP_STACK ? shape_arg->src[i] : shape_arg;
+    if (!item || !poly_dtype_is_int(item->dtype)) return -1;
+    items[i] = poly_graph_rewrite(ctx, item, poly_symbolic());
+    if (!items[i]) return -1;
+  }
+  return n;
 }
 
 PolyUOp *poly_uop2(
@@ -715,6 +1365,96 @@ PolyUOp *poly_uop3(
 ) {
   PolyUOp *src[] = {s0, s1, s2};
   return poly_uop(ctx, op, dtype, src, 3, arg);
+}
+
+/* Exact C port of current UOp._rop (tinygrad/uop/ops.py:630-638).
+ * Public reduction axes are sorted, proved-singleton axes are skipped, actual
+ * reduction axes are moved to the prefix, and REDUCE stores only their count. */
+PolyUOp *poly_reduce_axis(
+    PolyCtx *ctx,
+    PolyOps reduce_op,
+    PolyUOp *src,
+    int64_t *axes,
+    int n_axes
+) {
+  if (!ctx || !src || !rank_tuple_valid(axes, n_axes)) return NULL;
+  if (n_axes == 0) return src;
+
+  int ndim = poly_uop_ndim(ctx, src);
+  if (ndim < 0 || ndim > POLY_MAX_DIMS) return NULL;
+  int64_t requested[POLY_MAX_DIMS];
+  for (int i = 0; i < n_axes; i++) {
+    int64_t axis = axes[i] < 0 ? axes[i] + ndim : axes[i];
+    if (axis < 0 || axis >= ndim) return NULL;
+    requested[i] = axis;
+  }
+  for (int i = 1; i < n_axes; i++) {
+    int64_t axis = requested[i];
+    int j = i - 1;
+    while (j >= 0 && requested[j] > axis) {
+      requested[j + 1] = requested[j];
+      j--;
+    }
+    requested[j + 1] = axis;
+  }
+  for (int i = 1; i < n_axes; i++)
+    if (requested[i] == requested[i - 1]) return NULL;
+
+  int64_t reduced[POLY_MAX_DIMS];
+  int n_reduced = 0;
+  for (int i = 0; i < n_axes; i++) {
+    PolyUOp *dim = poly_uop_shape_dim(ctx, src, (int)requested[i]);
+    int64_t vmin = 0, vmax = 0;
+    if (!dim) return NULL;
+    poly_uop_minmax(ctx, dim, &vmin, &vmax);
+    if (vmin == 1 && vmax == 1) continue;
+    reduced[n_reduced++] = requested[i];
+  }
+
+  PolyUOp *ret = src;
+  if (n_reduced > 0) {
+    int64_t perm[POLY_MAX_DIMS];
+    int n_perm = 0;
+    for (int i = 0; i < n_reduced; i++) perm[n_perm++] = reduced[i];
+    for (int axis = 0; axis < ndim; axis++) {
+      bool is_reduced = false;
+      for (int i = 0; i < n_reduced; i++)
+        if (reduced[i] == axis) {
+          is_reduced = true;
+          break;
+        }
+      if (!is_reduced) perm[n_perm++] = axis;
+    }
+    bool identity = n_perm == ndim;
+    for (int i = 0; identity && i < ndim; i++) identity = perm[i] == i;
+    PolyUOp *ordered = identity ? src : poly_permute(ctx, src, perm, ndim);
+    ret = ordered
+              ? poly_uop1(
+                    ctx, POLY_OP_REDUCE, src->dtype, ordered,
+                    poly_arg_reduce(reduce_op, n_reduced)
+                )
+              : NULL;
+    if (!ret) return NULL;
+  }
+
+  if (n_reduced != n_axes) {
+    PolyUOp *shape[POLY_MAX_DIMS];
+    int n_shape = 0;
+    for (int axis = 0; axis < ndim; axis++) {
+      bool requested_axis = false;
+      for (int i = 0; i < n_axes; i++)
+        if (requested[i] == axis) {
+          requested_axis = true;
+          break;
+        }
+      if (!requested_axis) {
+        shape[n_shape] = poly_uop_shape_dim(ctx, src, axis);
+        if (!shape[n_shape++]) return NULL;
+      }
+    }
+    ret = poly_reshape_uop(ctx, ret, shape, n_shape);
+  }
+  return ret;
 }
 
 /* Toposort (iterative DFS, mirrors tinygrad's toposort) */
@@ -940,28 +1680,23 @@ void poly_toposort_free(PolyUOp **topo) {
   free(topo);
 }
 
-/* Local duplicate of codegen.c's range_start_for_op table so uop.c can
- * compute ended_ranges without pulling codegen.h (which depends on uop).
- * The two definitions must stay in sync — both mirror tinygrad's
- * `range_start` dict (uop/ops.py:29). */
-static int uop_range_start_for_op(PolyOps op) {
+/* Current tinygrad uop/ops.py:range_start. */
+int poly_range_start(PolyOps op) {
   switch (op) {
   case POLY_OP_STAGE:
     return 1;
   case POLY_OP_REDUCE:
     return 1;
-  case POLY_OP_STORE:
-    return 2;
   case POLY_OP_WMMA:
     return 3;
   case POLY_OP_END:
     return 1;
   case POLY_OP_CALL:
     return 1;
-  case POLY_OP_COPY:
-    return 2;
-  case POLY_OP_BUFFER_VIEW:
+  case POLY_OP_FUNCTION:
     return 1;
+  case POLY_OP_LINEAR:
+    return 0;
   default:
     return -1;
   }
@@ -979,16 +1714,13 @@ static int uop_range_start_for_op(PolyOps op) {
  *               plus ({u} if u.op == RANGE else {})
  *
  * `ended_ranges(u)` follows tinygrad's semantics:
- *   - Ops with range_start_for_op(op) in {BUFFERIZE:1, REDUCE:1, STORE:2,
- *     WMMA:3, END:1, CALL:1, COPY:2, BUFFER_VIEW:1}: trailing srcs past
- *     range_start are the ended ranges.
+ *   - Ops in current tinygrad `range_start`: trailing sources past the
+ *     recorded position are ended ranges.
  *   - AFTER: flatten(ended_ranges(src) for src in u.src[1:]) — recursive.
- *   - CONTRACT: the RANGE elements of ranges(src[0]) whose axis_id appears
- *     in u.arg.pair_tuple (first element of each pair).
  *   - otherwise: empty.
  *
  * When an ended entry is not itself a RANGE (e.g. a bound expression like
- * DEFINE_VAR, a symbolic bound, an AFTER value), tinygrad's `_ranges`
+ * ALU BUFFER variable, a symbolic bound, an AFTER value), tinygrad's `_ranges`
  * removes every range in that entry's `ranges` set from the result — not
  * just the entry itself. We mirror that exactly.
  *
@@ -1097,7 +1829,7 @@ static bool compute_ended_ranges_node(
     PolyMap *ranges_memo,
     PolyMap *ended_memo
 ) {
-  int rs = uop_range_start_for_op(u->op);
+    int rs = poly_range_start(u->op);
   if (rs >= 0) {
     if (rs > u->n_src) rs = u->n_src;
     for (int i = rs; i < u->n_src; i++) {
@@ -1118,23 +1850,6 @@ static bool compute_ended_ranges_node(
       const PolyRangeSet *src_ended = ended_memo_get(ended_memo, u->src[i]);
       if (!src_ended) return false;
       range_set_union(ctx, out, src_ended);
-    }
-    return true;
-  }
-  if (u->op == POLY_OP_CONTRACT && u->n_src >= 1 && u->arg.kind == POLY_ARG_PAIR_TUPLE) {
-    const PolyRangeSet *s0 = ranges_memo_get(ranges_memo, u->src[0]);
-    if (!s0) return false;
-    int n_pairs = u->arg.pair_tuple.n;
-    for (int i = 0; i < s0->n; i++) {
-      PolyUOp *r = s0->items[i];
-      if (r->op != POLY_OP_RANGE) continue;
-      int64_t axis_id = poly_range_axis_id(r->arg);
-      for (int j = 0; j < n_pairs; j++) {
-        if (u->arg.pair_tuple.pairs[j][0] == axis_id) {
-          range_set_add(ctx, out, r);
-          break;
-        }
-      }
     }
     return true;
   }
@@ -1254,7 +1969,7 @@ void poly_uop_cache_destroy(PolyUOpCache *c) {
  * (BUFFER / BUFFER_VIEW / PARAM), or NULL if `u` has no buffer identity. */
 const PolyUOp *poly_uop_get_buffer_identity(const PolyUOp *u) {
   while (u) {
-    if (u->op == POLY_OP_RESHAPE || u->op == POLY_OP_MULTI) {
+    if (u->op == POLY_OP_RESHAPE || u->op == POLY_OP_UNSHARD) {
       if (u->n_src < 1) return NULL;
       u = u->src[0];
       continue;
@@ -1265,6 +1980,72 @@ const PolyUOp *poly_uop_get_buffer_identity(const PolyUOp *u) {
     return NULL;
   }
   return NULL;
+}
+
+/* Current Tinygrad uop/ops.py:UOp.base. */
+PolyUOp *poly_uop_base(PolyUOp *u) {
+  while (u && u->n_src > 0 &&
+         (poly_opset_has(POLY_GROUP_MOVEMENT, u->op) || u->op == POLY_OP_DETACH))
+    u = u->src[0];
+  return u;
+}
+
+/* Current Tinygrad uop/ops.py:UOp.unsharded_base. */
+PolyUOp *poly_uop_unsharded_base(PolyUOp *u) {
+  while (u && u->n_src > 0 &&
+         (poly_opset_has(POLY_GROUP_MOVEMENT, u->op) || u->op == POLY_OP_DETACH ||
+          u->op == POLY_OP_UNSHARD))
+    u = u->src[0];
+  return u;
+}
+
+/* Current Tinygrad uop/ops.py:UOp.op_in_backward_slice_with_self. */
+bool poly_uop_op_in_backward_slice_with_self(PolyCtx *ctx, PolyUOp *u, PolyOps op) {
+  if (!ctx || !u) return false;
+  int n = 0;
+  PolyUOp **topo = poly_toposort_alloc(ctx, u, &n);
+  bool found = false;
+  for (int i = 0; i < n && !found; i++) found = topo[i]->op == op;
+  poly_toposort_free(topo);
+  return found;
+}
+
+/* Current Tinygrad uop/ops.py:UOp.buf_uop. */
+PolyUOp *poly_uop_buf_uop(PolyCtx *ctx, PolyUOp *u) {
+  if (!ctx || !u) return NULL;
+  if (u->op == POLY_OP_BUFFER || u->op == POLY_OP_PARAM) return u;
+  if (u->op == POLY_OP_MSELECT) {
+    PolyUOp *src = u->n_src == 1 ? poly_uop_buf_uop(ctx, u->src[0]) : NULL;
+    return src ? poly_uop1(ctx, POLY_OP_MSELECT, u->dtype, src, u->arg) : NULL;
+  }
+  if (u->op == POLY_OP_MSTACK) {
+    PolyUOp **src = u->n_src > 0 ? malloc((size_t)u->n_src * sizeof(*src)) : NULL;
+    if (u->n_src > 0 && !src) return NULL;
+    bool ok = true;
+    for (int i = 0; i < u->n_src; i++) {
+      src[i] = poly_uop_buf_uop(ctx, u->src[i]);
+      if (!src[i]) ok = false;
+    }
+    PolyUOp *ret = ok
+                       ? poly_uop(
+                             ctx, POLY_OP_MSTACK, u->dtype, src, u->n_src,
+                             poly_arg_none()
+                         )
+                       : NULL;
+    free(src);
+    return ret;
+  }
+
+  PolyUOp *base = poly_uop_base(u);
+  if (base && base->op == POLY_OP_AFTER && base->n_src > 0) {
+    PolyUOp *target = poly_uop_buf_uop(ctx, base->src[0]);
+    return poly_uop_base(target);
+  }
+  PolyUOp *s = u;
+  while (s && s->n_src > 0 && s->op != POLY_OP_BUFFER && s->op != POLY_OP_PARAM &&
+         s->op != POLY_OP_STAGE && s->op != POLY_OP_MSTACK)
+    s = s->src[0];
+  return s;
 }
 
 /* Port of tinygrad's UOp.has_buffer_identity.
@@ -1378,6 +2159,30 @@ int poly_uop_ranges_ex(PolyCtx *ctx, PolyUOp *u, PolyUOp **out, int max_out, Pol
 
 /* Pretty-print */
 
+/* DType.__repr__ uses the public dtypes attribute name, which intentionally
+ * differs from several renderer/C names (tinygrad/dtype.py:44-67). */
+static const char *dtype_arg_repr_name(PolyDType dtype) {
+  const char *name = poly_dtype_name(dtype);
+  if (!name) return "void";
+  if (strcmp(name, "signed char") == 0) return "char";
+  if (strcmp(name, "unsigned char") == 0) return "uchar";
+  if (strcmp(name, "short") == 0) return "short";
+  if (strcmp(name, "unsigned short") == 0) return "ushort";
+  if (strcmp(name, "int") == 0) return "int";
+  if (strcmp(name, "unsigned int") == 0) return "uint";
+  if (strcmp(name, "long") == 0) return "long";
+  if (strcmp(name, "unsigned long") == 0) return "ulong";
+  if (strcmp(name, "__fp16") == 0) return "half";
+  if (strcmp(name, "__bf16") == 0) return "bfloat16";
+  if (strcmp(name, "float8_e4m3") == 0) return "fp8e4m3";
+  if (strcmp(name, "float8_e5m2") == 0) return "fp8e5m2";
+  if (strcmp(name, "float8_e4m3fnuz") == 0) return "fp8e4m3fnuz";
+  if (strcmp(name, "float8_e5m2fnuz") == 0) return "fp8e5m2fnuz";
+  if (strcmp(name, "float") == 0) return "float";
+  if (strcmp(name, "double") == 0) return "double";
+  return name;
+}
+
 static void uop_print_one(PolyUOp *u, char *buf, int *pos, int cap) {
   int written = snprintf(buf + *pos, cap - *pos, "UOp(%s", poly_op_name(u->op));
   if (written > 0) *pos += written;
@@ -1396,38 +2201,37 @@ static void uop_print_one(PolyUOp *u, char *buf, int *pos, int cap) {
     written = snprintf(buf + *pos, cap - *pos, ", %ld", (long)u->arg.i);
     if (written > 0) *pos += written;
     break;
+  case POLY_ARG_ALLREDUCE:
+    written = snprintf(
+        buf + *pos, cap - *pos, ", (%s,", poly_op_name(u->arg.allreduce.op));
+    if (written > 0) *pos += written;
+    if (u->arg.allreduce.device_is_tuple) {
+      written = snprintf(buf + *pos, cap - *pos, "(");
+      if (written > 0) *pos += written;
+      for (int i = 0; i < u->arg.allreduce.n_devices; i++) {
+        written = snprintf(
+            buf + *pos, cap - *pos, "%s'%s'", i ? "," : "",
+            u->arg.allreduce.devices[i]);
+        if (written > 0) *pos += written;
+      }
+      written = snprintf(buf + *pos, cap - *pos, "))");
+    } else {
+      written = snprintf(
+          buf + *pos, cap - *pos, "'%s')", u->arg.allreduce.device);
+    }
+    if (written > 0) *pos += written;
+    break;
   case POLY_ARG_BIGINT: {
     char *decimal = poly_arg_integer_to_decimal(u->arg);
     written = snprintf(buf + *pos, cap - *pos, ", %s", decimal ? decimal : "0");
     free(decimal);
     if (written > 0) *pos += written;
   } break;
-  case POLY_ARG_PAIR_TUPLE:
-    written = snprintf(buf + *pos, cap - *pos, ", (");
-    if (written > 0) *pos += written;
-    for (int i = 0; i < u->arg.pair_tuple.n; i++) {
-      written = snprintf(
-          buf + *pos, cap - *pos, "%s(%ld,%ld)", i ? "," : "",
-          (long)u->arg.pair_tuple.pairs[i][0], (long)u->arg.pair_tuple.pairs[i][1]
-      );
-      if (written > 0) *pos += written;
-    }
-    written = snprintf(buf + *pos, cap - *pos, ")");
-    if (written > 0) *pos += written;
-    break;
-  case POLY_ARG_REDUCE_AXIS:
+  case POLY_ARG_REDUCE:
     written = snprintf(
-        buf + *pos, cap - *pos, ", (%s,(", poly_op_name(u->arg.reduce_axis.op)
+        buf + *pos, cap - *pos, ", (%s,%d)", poly_op_name(u->arg.reduce.op),
+        u->arg.reduce.num_axes
     );
-    if (written > 0) *pos += written;
-    for (int i = 0; i < u->arg.reduce_axis.n; i++) {
-      written = snprintf(
-          buf + *pos, cap - *pos, "%s%ld", i ? "," : "",
-          (long)u->arg.reduce_axis.axes[i]
-      );
-      if (written > 0) *pos += written;
-    }
-    written = snprintf(buf + *pos, cap - *pos, "))");
     if (written > 0) *pos += written;
     break;
   case POLY_ARG_FLOAT:
@@ -1493,14 +2297,6 @@ static void uop_print_one(PolyUOp *u, char *buf, int *pos, int cap) {
     written = snprintf(buf + *pos, cap - *pos, ")");
     if (written > 0) *pos += written;
     break;
-  case POLY_ARG_DEFINE_VAR:
-    written = snprintf(
-        buf + *pos, cap - *pos, ", (\"%s\",%ld,%ld)",
-        u->arg.define_var.name ? u->arg.define_var.name : "?", (long)u->arg.define_var.min_val,
-        (long)u->arg.define_var.max_val
-    );
-    if (written > 0) *pos += written;
-    break;
   case POLY_ARG_BUFFERIZE_OPTS:
     written = snprintf(buf + *pos, cap - *pos, ", BufferizeOpts(device=");
     if (written > 0) *pos += written;
@@ -1530,9 +2326,11 @@ static void uop_print_one(PolyUOp *u, char *buf, int *pos, int cap) {
     break;
   case POLY_ARG_TENSOR_CORE:
     written = snprintf(
-        buf + *pos, cap - *pos, ", TensorCore(\"%s\",(%d,%d,%d),threads=%d)",
-        u->arg.tensor_core.name ? u->arg.tensor_core.name : "?", u->arg.tensor_core.dims[0],
-        u->arg.tensor_core.dims[1], u->arg.tensor_core.dims[2], u->arg.tensor_core.threads
+        buf + *pos, cap - *pos, ", WMMA((%d,%d,%d),%s,%s,threads=%d,axes=%s)",
+        u->arg.tensor_core.dims[0], u->arg.tensor_core.dims[1],
+        u->arg.tensor_core.dims[2], poly_dtype_name(u->arg.tensor_core.dtype_in),
+        u->arg.tensor_core.device ? u->arg.tensor_core.device : "?",
+        u->arg.tensor_core.threads, u->arg.tensor_core.has_upcast_axes ? "set" : "None"
     );
     if (written > 0) *pos += written;
     break;
@@ -1542,12 +2340,21 @@ static void uop_print_one(PolyUOp *u, char *buf, int *pos, int cap) {
       if (written > 0) *pos += written;
       break;
     }
-    written = snprintf(buf + *pos, cap - *pos, ", ParamArg(%ld", (long)u->arg.param->slot);
+    written = snprintf(
+        buf + *pos, cap - *pos, ", ParamArg(%ld, dtypes.%s",
+        (long)u->arg.param->slot, dtype_arg_repr_name(u->arg.param->dtype)
+    );
     if (written > 0) *pos += written;
     if (u->arg.param->has_minmax) {
       written = snprintf(
           buf + *pos, cap - *pos, ", vmin_vmax=(%ld, %ld)",
           (long)u->arg.param->min_val, (long)u->arg.param->max_val);
+      if (written > 0) *pos += written;
+    }
+    if (u->arg.param->has_multiple_of) {
+      written = snprintf(
+          buf + *pos, cap - *pos, ", multiple_of=%ld", (long)u->arg.param->multiple_of
+      );
       if (written > 0) *pos += written;
     }
     if (u->arg.param->name) {
@@ -1559,6 +2366,8 @@ static void uop_print_one(PolyUOp *u, char *buf, int *pos, int cap) {
                                   ? "AddrSpace.LOCAL"
                               : u->arg.param->addrspace == POLY_ADDR_REG
                                   ? "AddrSpace.REG"
+                              : u->arg.param->addrspace == POLY_ADDR_ALU
+                                  ? "AddrSpace.ALU"
                                   : "AddrSpace.UNKNOWN";
       written = snprintf(buf + *pos, cap - *pos, ", addrspace=%s", addrspace);
       if (written > 0) *pos += written;
@@ -1584,6 +2393,10 @@ static void uop_print_one(PolyUOp *u, char *buf, int *pos, int cap) {
           buf + *pos, cap - *pos, ", device='%s'", u->arg.param->device);
       if (written > 0) *pos += written;
     }
+    if (u->arg.param->volatile_) {
+      written = snprintf(buf + *pos, cap - *pos, ", volatile=True");
+      if (written > 0) *pos += written;
+    }
     written = snprintf(buf + *pos, cap - *pos, ")");
     if (written > 0) *pos += written;
     break;
@@ -1599,6 +2412,21 @@ static void uop_print_one(PolyUOp *u, char *buf, int *pos, int cap) {
           info->precompile ? "True" : "False",
           info->precompile_backward ? "True" : "False");
     }
+    if (written > 0) *pos += written;
+    break;
+  case POLY_ARG_KERNEL_INFO:
+    written = snprintf(
+        buf + *pos, cap - *pos, ", KernelInfo(name='%s', beam=%d)",
+        u->arg.kernel_info && u->arg.kernel_info->name
+            ? u->arg.kernel_info->name
+            : "test",
+        u->arg.kernel_info ? u->arg.kernel_info->beam : 0);
+    if (written > 0) *pos += written;
+    break;
+  case POLY_ARG_DTYPE:
+    written = snprintf(
+        buf + *pos, cap - *pos, ", dtypes.%s", dtype_arg_repr_name(u->arg.dtype)
+    );
     if (written > 0) *pos += written;
     break;
   default:
@@ -1660,38 +2488,31 @@ void poly_uop_dump_tree(FILE *fp, PolyUOp *u, int depth, int max_depth) {
   case POLY_ARG_OPS:
     fprintf(fp, " op=%s", poly_op_name(u->arg.ops));
     break;
+  case POLY_ARG_REDUCE:
+    fprintf(
+        fp, " reduce=(%s,%d)", poly_op_name(u->arg.reduce.op),
+        u->arg.reduce.num_axes
+    );
+    break;
+  case POLY_ARG_ALLREDUCE:
+    fprintf(fp, " allreduce=(%s,", poly_op_name(u->arg.allreduce.op));
+    if (u->arg.allreduce.device_is_tuple) {
+      fprintf(fp, "(");
+      for (int i = 0; i < u->arg.allreduce.n_devices; i++)
+        fprintf(fp, "%s\"%s\"", i ? "," : "", u->arg.allreduce.devices[i]);
+      fprintf(fp, "))");
+    } else {
+      fprintf(fp, "%s)", u->arg.allreduce.device);
+    }
+    break;
   case POLY_ARG_STRING_TUPLE:
     fprintf(fp, " strings=(");
     for (int i = 0; i < u->arg.string_tuple.n; i++)
       fprintf(fp, "%s\"%s\"", i ? "," : "", u->arg.string_tuple.vals[i]);
     fprintf(fp, ")");
     break;
-  case POLY_ARG_PAIR_TUPLE:
-    fprintf(fp, " pairs=(");
-    for (int i = 0; i < u->arg.pair_tuple.n; i++)
-      fprintf(
-          fp, "%s(%lld,%lld)", i ? "," : "",
-          (long long)u->arg.pair_tuple.pairs[i][0],
-          (long long)u->arg.pair_tuple.pairs[i][1]
-      );
-    fprintf(fp, ")");
-    break;
-  case POLY_ARG_REDUCE_AXIS:
-    fprintf(fp, " reduce=(%s,(", poly_op_name(u->arg.reduce_axis.op));
-    for (int i = 0; i < u->arg.reduce_axis.n; i++)
-      fprintf(
-          fp, "%s%lld", i ? "," : "", (long long)u->arg.reduce_axis.axes[i]
-      );
-    fprintf(fp, "))");
-    break;
   case POLY_ARG_RANGE:
     fprintf(fp, " axis=%lld", (long long)u->arg.range.axis_id);
-    break;
-  case POLY_ARG_DEFINE_VAR:
-    fprintf(
-        fp, " var=%s[%lld,%lld]", u->arg.define_var.name ? u->arg.define_var.name : "?",
-        (long long)u->arg.define_var.min_val, (long long)u->arg.define_var.max_val
-    );
     break;
   case POLY_ARG_BUFFERIZE_OPTS:
     fprintf(fp, " bufferize_opts=(device=");
@@ -1710,9 +2531,11 @@ void poly_uop_dump_tree(FILE *fp, PolyUOp *u, int depth, int max_depth) {
     break;
   case POLY_ARG_TENSOR_CORE:
     fprintf(
-        fp, " tensor_core=%s[(%d,%d,%d),threads=%d]",
-        u->arg.tensor_core.name ? u->arg.tensor_core.name : "?", u->arg.tensor_core.dims[0],
-        u->arg.tensor_core.dims[1], u->arg.tensor_core.dims[2], u->arg.tensor_core.threads
+        fp, " wmma=((%d,%d,%d),%s,%s,threads=%d,axes=%s)",
+        u->arg.tensor_core.dims[0], u->arg.tensor_core.dims[1],
+        u->arg.tensor_core.dims[2], poly_dtype_name(u->arg.tensor_core.dtype_in),
+        u->arg.tensor_core.device ? u->arg.tensor_core.device : "?",
+        u->arg.tensor_core.threads, u->arg.tensor_core.has_upcast_axes ? "set" : "None"
     );
     break;
   case POLY_ARG_PARAM:
@@ -1734,6 +2557,17 @@ void poly_uop_dump_tree(FILE *fp, PolyUOp *u, int depth, int max_depth) {
         u->arg.call_info && u->arg.call_info->has_grad_fxn ? ",grad_fxn" : "",
         u->arg.call_info && u->arg.call_info->has_metadata ? ",metadata" : "",
         u->arg.call_info && u->arg.call_info->has_aux ? ",aux" : "");
+    break;
+  case POLY_ARG_KERNEL_INFO:
+    fprintf(
+        fp, " kernel_info=(name=%s,beam=%d)",
+        u->arg.kernel_info && u->arg.kernel_info->name
+            ? u->arg.kernel_info->name
+            : "test",
+        u->arg.kernel_info ? u->arg.kernel_info->beam : 0);
+    break;
+  case POLY_ARG_DTYPE:
+    fprintf(fp, " dtype=dtypes.%s", dtype_arg_repr_name(u->arg.dtype));
     break;
   default:
     break;
@@ -1830,12 +2664,10 @@ static PolyUOp *register_named(
   for (int i = 0; i < ndim; i++)
     numel *= shape[i];
 
-  /* Create BUFFER UOp with unique tag to avoid CSE dedup.
-   * Use scalar dtype (not PtrDType) — matches poly_buffer() in the retired
-   * single-kernel scheduler path.
-   * The scheduling pipeline creates proper PARAM ptrs during lowering. */
-  PolyUOp *buf =
-      poly_uop_tagged(ctx, POLY_OP_BUFFER, dt, NULL, 0, poly_arg_int(numel), ctx->next_buf_tag++);
+  /* PolyInstance names an approved deviceless logical resource. Explicit
+   * placement later creates Tinygrad-shaped physical BUFFER metadata. */
+  PolyUOp *buf = poly_uop_new_logical_buffer(ctx, dt, numel);
+  if (!buf) return NULL;
 
   /* Arena-alloc entry */
   PolyRegEntry *entry = poly_arena_alloc(ctx->arena, sizeof(PolyRegEntry), _Alignof(PolyRegEntry));
@@ -2143,7 +2975,7 @@ int poly_op_count(void) {
 }
 
 PolyUOp *poly_const_float(PolyCtx *ctx, double value) {
-  return poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(value));
+  return poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKFLOAT, poly_arg_float(value));
 }
 
 PolyUOp *poly_const_double(PolyCtx *ctx, double value) {
@@ -2151,25 +2983,275 @@ PolyUOp *poly_const_double(PolyCtx *ctx, double value) {
 }
 
 PolyUOp *poly_const_int(PolyCtx *ctx, int64_t value) {
-  return poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(value));
+  return poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(value));
+}
+
+static bool uop_base_is_invalid(PolyUOp *u) {
+  while (u && u->n_src > 0 &&
+         (poly_opset_has(POLY_GROUP_MOVEMENT, u->op) || u->op == POLY_OP_DETACH))
+    u = u->src[0];
+  return u && u->op == POLY_OP_CONST && u->arg.kind == POLY_ARG_INVALID;
+}
+
+static bool promo_dtype(PolyUOp **src, int n_src, PolyDType *out) {
+  if (!src || n_src <= 0 || !src[0] || !out) return false;
+  PolyDType dtype = src[0]->dtype;
+  for (int i = 1; i < n_src; i++)
+    if (!src[i] || !poly_dtype_least_upper(dtype, src[i]->dtype, &dtype)) return false;
+  *out = dtype;
+  return true;
+}
+
+static bool param_is_image_shape(const PolyUOp *u) {
+  if (!u || u->op != POLY_OP_PARAM || u->n_src != 1 || !u->src[0] ||
+      u->src[0]->op != POLY_OP_STACK || u->src[0]->n_src != 3)
+    return false;
+  int64_t channels = 0;
+  return poly_uop_const_i64(u->src[0]->src[2], &channels) == 0 && channels == 4;
+}
+
+bool poly_uop_is_image_shape(PolyCtx *ctx, const PolyUOp *u) {
+  if (!ctx || !u) return false;
+  PolyShape shape = poly_uop_max_shape_cached(ctx, u);
+  return shape.ndim == 3 && shape.dims && shape.dims[2] == 4;
+}
+
+bool poly_dtype_from_uop(
+    PolyOps op,
+    PolyUOp **src,
+    int n_src,
+    PolyArg arg,
+    PolyDType current_dtype,
+    PolyDType *out
+) {
+  /* Direct C port of current tinygrad uop/ops.py:dtype_from_uop.  Polygrad's
+   * retained compatibility ops have no upstream production rule and return
+   * false, which makes _rebuild_dtype preserve their explicit dtype. */
+  if (!out || n_src < 0 || (n_src > 0 && !src)) return false;
+  switch (op) {
+  case POLY_OP_STORE:
+  case POLY_OP_LINEAR:
+  case POLY_OP_SINK:
+  case POLY_OP_PROGRAM:
+  case POLY_OP_SOURCE:
+  case POLY_OP_END:
+  case POLY_OP_BARRIER:
+  case POLY_OP_GROUP:
+  case POLY_OP_IF:
+  case POLY_OP_ENDIF:
+  case POLY_OP_TUPLE:
+  case POLY_OP_FUNCTION:
+  case POLY_OP_CUSTOM_FUNCTION:
+  case POLY_OP_REWRITE_ERROR:
+    *out = POLY_VOID;
+    return true;
+  case POLY_OP_CALL:
+    if (n_src > 0 && poly_dtype_eq(src[0]->dtype, POLY_VOID)) {
+      *out = POLY_VOID;
+      return true;
+    }
+    return false;
+  case POLY_OP_CUSTOM:
+  case POLY_OP_CUSTOMI:
+  case POLY_OP_INS:
+  case POLY_OP_NOOP:
+    return false;
+  case POLY_OP_INDEX:
+    if (n_src <= 0) return false;
+    *out = param_is_image_shape(src[0]) ? POLY_FLOAT32 : src[0]->dtype;
+    return true;
+  case POLY_OP_LOAD:
+  case POLY_OP_AFTER:
+  case POLY_OP_RANGE:
+  case POLY_OP_CONTIGUOUS:
+  case POLY_OP_CONTIGUOUS_BACKWARD:
+  case POLY_OP_COPY:
+  case POLY_OP_STAGE:
+  case POLY_OP_DETACH:
+  case POLY_OP_MSTACK:
+  case POLY_OP_MSELECT:
+  case POLY_OP_ALLREDUCE:
+  case POLY_OP_SPECIAL:
+  case POLY_OP_REDUCE:
+    if (n_src <= 0) return false;
+    *out = src[0]->dtype;
+    return true;
+  case POLY_OP_CMPLT:
+  case POLY_OP_CMPNE:
+  case POLY_OP_CMPEQ:
+    *out = POLY_BOOL;
+    return true;
+  case POLY_OP_SIN:
+  case POLY_OP_LOG2:
+  case POLY_OP_EXP2:
+  case POLY_OP_SQRT:
+  case POLY_OP_RECIPROCAL:
+    if (n_src <= 0) return false;
+    if (uop_base_is_invalid(src[0])) {
+      *out = POLY_BOOL;
+      return true;
+    }
+    return poly_dtype_least_upper_float(src[0]->dtype, out);
+  case POLY_OP_WHERE:
+    if (n_src != 3 || !poly_dtype_is_bool(src[0]->dtype)) return false;
+    return promo_dtype(src + 1, 2, out);
+  case POLY_OP_STACK:
+    if (n_src == 0) {
+      *out = POLY_VOID;
+      return true;
+    }
+    return promo_dtype(src, n_src, out);
+  case POLY_OP_WMMA:
+    if (n_src < 3) return false;
+    *out = src[2]->dtype;
+    return true;
+  case POLY_OP_GETTUPLE: {
+    if (n_src != 1 || arg.kind != POLY_ARG_INT || arg.i < 0) return false;
+    PolyUOp *tuple = src[0];
+    if (tuple->op == POLY_OP_FUNCTION && tuple->n_src > 0) tuple = tuple->src[0];
+    if (tuple->op != POLY_OP_TUPLE || arg.i >= tuple->n_src) return false;
+    *out = tuple->src[arg.i]->dtype;
+    return true;
+  }
+  case POLY_OP_SHL:
+  case POLY_OP_SHR:
+    if (n_src <= 0) return false;
+    *out = src[0]->dtype;
+    return true;
+  case POLY_OP_BINARY:
+    *out = POLY_UINT8;
+    return true;
+  case POLY_OP_CAST:
+  case POLY_OP_BITCAST:
+    if (arg.kind != POLY_ARG_DTYPE) return false;
+    *out = arg.dtype;
+    return true;
+  default:
+    break;
+  }
+
+  if (poly_opset_has(POLY_GROUP_UNARY, op)) {
+    if (n_src <= 0) return false;
+    *out = src[0]->dtype;
+    return true;
+  }
+  if (poly_opset_has(POLY_GROUP_BROADCASTABLE, op)) return promo_dtype(src, n_src, out);
+  if (poly_opset_has(POLY_GROUP_MOVEMENT, op)) {
+    if (n_src <= 0) return false;
+    *out = src[0]->dtype;
+    return true;
+  }
+  return false;
+}
+
+PolyDType poly_rebuild_dtype(PolyUOp *u, PolyUOp **new_src) {
+  if (!u || (u->n_src > 0 && !new_src)) return u ? u->dtype : POLY_VOID;
+  bool same = true;
+  for (int i = 0; i < u->n_src; i++)
+    if (!poly_dtype_eq(u->src[i]->dtype, new_src[i]->dtype)) {
+      same = false;
+      break;
+    }
+  if (same) return u->dtype;
+  PolyDType dtype = u->dtype;
+  return poly_dtype_from_uop(u->op, new_src, u->n_src, u->arg, u->dtype, &dtype)
+             ? dtype
+             : u->dtype;
+}
+
+/* Current UOp.const(b, dtype) routes the Python value through DType.const
+ * before hash-consing the CONST (uop/ops.py:609-615, dtype.py:77-82).
+ * Keep this scalar-only C carrier shared by const_like's optional dtype and
+ * Tensor weak-CONST promotion so changing a weak dtype cannot retain the old
+ * integer/float argument representation. */
+PolyUOp *poly_uop_const(PolyCtx *ctx, PolyArg val, PolyDType dtype) {
+  if (!ctx) return NULL;
+  /* Current UOp.const ignores an explicit dtype for Invalid because Invalid
+   * is the promotion-lattice bottom represented by a bool CONST. */
+  if (val.kind == POLY_ARG_INVALID) dtype = POLY_BOOL;
+  if (val.kind == POLY_ARG_INT || val.kind == POLY_ARG_BIGINT || val.kind == POLY_ARG_FLOAT ||
+      val.kind == POLY_ARG_BOOL) {
+    if (poly_dtype_is_float(dtype)) {
+      double dval = (val.kind == POLY_ARG_BIGINT) ? poly_arg_integer_to_double(val)
+                    : (val.kind == POLY_ARG_INT)  ? (double)val.i
+                    : (val.kind == POLY_ARG_BOOL) ? (val.b ? 1.0 : 0.0)
+                                                  : val.f;
+      /* Current DType.const rounds concrete floats before UOp CSE
+       * (tinygrad/dtype.py:77-82). Weakfloat remains mathematical. */
+      PolyArg typed = poly_arg_float(dval);
+      if (!poly_dtype_is_weak(dtype))
+        typed = poly_exec_alu(POLY_OP_CAST, dtype, &typed, 1, true);
+      return poly_uop0(ctx, POLY_OP_CONST, dtype, typed);
+    } else if (poly_dtype_is_bool(dtype)) {
+      bool bval = (val.kind == POLY_ARG_BIGINT)
+                      ? poly_arg_integer_to_u64_mod(val) != 0 || val.bigint.n_limbs > 2
+                  : (val.kind == POLY_ARG_INT)  ? val.i != 0
+                  : (val.kind == POLY_ARG_BOOL) ? val.b
+                                                : val.f != 0.0;
+      return poly_uop0(ctx, POLY_OP_CONST, dtype, poly_arg_bool(bval));
+    } else {
+      /* DType.const raises for NaN/Inf-to-int. C has no exception carrier, so
+       * retain the original ALU by declining that rewrite. */
+      if (val.kind == POLY_ARG_FLOAT && !isfinite(val.f)) return NULL;
+      PolyArg ival = val.kind == POLY_ARG_BIGINT ? val
+                                                 : poly_arg_int(
+                                                       val.kind == POLY_ARG_INT    ? val.i
+                                                       : val.kind == POLY_ARG_BOOL ? (val.b ? 1 : 0)
+                                                                                   : (int64_t)val.f
+                                                   );
+      return poly_uop0(ctx, POLY_OP_CONST, dtype, ival);
+    }
+  }
+  return poly_uop0(ctx, POLY_OP_CONST, dtype, val);
 }
 
 PolyUOp *poly_const_typed(PolyCtx *ctx, PolyDType dt, double value) {
-  if (poly_dtype_is_float(dt)) return poly_uop0(ctx, POLY_OP_CONST, dt, poly_arg_float(value));
-  /* tinygrad/uop/ops.py:553-561: dtype.const owns the canonical scalar
-   * representation, so a bool CONST has one identity regardless of caller. */
-  if (poly_dtype_is_bool(dt)) return poly_uop0(ctx, POLY_OP_CONST, dt, poly_arg_bool(value != 0.0));
-  return poly_uop0(ctx, POLY_OP_CONST, dt, poly_arg_int((int64_t)value));
+  return poly_uop_const(ctx, poly_arg_float(value), dt);
+}
+
+PolyUOp *poly_const_like_dtype(PolyCtx *ctx, PolyUOp *ref, PolyArg val, PolyDType dtype) {
+  if (!ctx || !ref) return NULL;
+  PolyUOp *scalar = poly_uop_const(ctx, val, dtype);
+  if (!scalar) return NULL;
+
+  /* Current UOp.const_like(b, dtype) creates one scalar CONST and broadcasts
+   * it to the reference shape (uop/ops.py:581-583). */
+  int ref_ndim = poly_uop_ndim(ctx, ref);
+  if (ref_ndim <= 0) return scalar;
+  if (ref_ndim > POLY_MAX_DIMS) return NULL;
+  PolyUOp *dims[POLY_MAX_DIMS];
+  for (int i = 0; i < ref_ndim; i++) {
+    dims[i] = poly_uop_shape_dim(ctx, ref, i);
+    if (!dims[i]) return NULL;
+  }
+  return poly_expand_uop(ctx, scalar, dims, ref_ndim);
+}
+
+PolyUOp *poly_const_like(PolyCtx *ctx, PolyUOp *ref, PolyArg val) {
+  if (!ctx || !ref) return NULL;
+
+  return poly_const_like_dtype(ctx, ref, val, ref->dtype);
+}
+
+PolyUOp *poly_const_like_int(PolyCtx *ctx, PolyUOp *ref, int64_t val) {
+  return poly_const_like(ctx, ref, poly_arg_int(val));
+}
+
+PolyUOp *poly_const_like_float(PolyCtx *ctx, PolyUOp *ref, double val) {
+  return poly_const_like(ctx, ref, poly_arg_float(val));
+}
+
+PolyUOp *poly_const_like_bool(PolyCtx *ctx, PolyUOp *ref, bool val) {
+  return poly_const_like(ctx, ref, poly_arg_bool(val));
 }
 
 PolyUOp *poly_identity_element(PolyCtx *ctx, PolyOps op, PolyDType dtype) {
   /* Pinned identity_element returns dtype.const({ADD:0, MUL:1,
    * MAX:dtype.min}) (uop/ops.py:47, dtype.py:82-92). Keep the identity typed;
    * routing floating -infinity through an integer cast is not equivalent. */
-  if (!ctx || (op != POLY_OP_ADD && op != POLY_OP_MUL && op != POLY_OP_MAX) ||
-      dtype.is_ptr)
+  if (!ctx || (op != POLY_OP_ADD && op != POLY_OP_MUL && op != POLY_OP_MAX))
     return NULL;
-  PolyDType scalar = poly_dtype_scalar(dtype);
+  PolyDType scalar = dtype;
   if (poly_dtype_is_float(scalar)) {
     double value = op == POLY_OP_ADD ? 0.0 : op == POLY_OP_MUL ? 1.0 : -INFINITY;
     return poly_uop0(ctx, POLY_OP_CONST, dtype, poly_arg_float(value));
@@ -2187,27 +3269,342 @@ PolyUOp *poly_identity_element(PolyCtx *ctx, PolyOps op, PolyDType dtype) {
   return poly_uop0(ctx, POLY_OP_CONST, dtype, poly_arg_int(value));
 }
 
+PolyUOp *poly_uop_stack(PolyCtx *ctx, PolyUOp **src, int n_src) {
+  if (!ctx || n_src < 0 || n_src > UINT16_MAX || (n_src > 0 && !src)) return NULL;
+  if (n_src == 0)
+    return poly_uop(ctx, POLY_OP_STACK, POLY_VOID, NULL, 0, poly_arg_none());
+
+  /* Current UOp._mop(Ops.STACK) derives promo_dtype(src), converts scalar
+   * CONST arguments directly to that dtype, and casts other non-invalid
+   * values before constructing STACK (uop/ops.py:793-800). */
+  PolyDType dtype = src[0]->dtype;
+  for (int i = 1; i < n_src; i++)
+    if (!src[i] || !poly_dtype_least_upper(dtype, src[i]->dtype, &dtype)) return NULL;
+
+  PolyUOp *inline_src[16];
+  PolyUOp **promoted = n_src > (int)(sizeof(inline_src) / sizeof(inline_src[0]))
+                           ? malloc((size_t)n_src * sizeof(*promoted))
+                           : inline_src;
+  if (!promoted) return NULL;
+  for (int i = 0; i < n_src; i++) {
+    PolyUOp *u = src[i];
+    if (uop_base_is_invalid(u) || poly_dtype_eq(u->dtype, dtype)) {
+      promoted[i] = u;
+    } else if (u->op == POLY_OP_CONST) {
+      promoted[i] = poly_uop_const(ctx, u->arg, dtype);
+    } else {
+      promoted[i] = poly_uop1(ctx, POLY_OP_CAST, dtype, u, poly_arg_none());
+    }
+    if (!promoted[i]) {
+      if (promoted != inline_src) free(promoted);
+      return NULL;
+    }
+  }
+  PolyUOp *ret = poly_uop(ctx, POLY_OP_STACK, dtype, promoted, n_src, poly_arg_none());
+  if (promoted != inline_src) free(promoted);
+  return ret;
+}
+
+PolyUOp *poly_uop_index(
+    PolyCtx *ctx,
+    PolyUOp *base,
+    PolyUOp **indices,
+    int n_indices
+) {
+  if (!ctx || !base || n_indices < 0 || n_indices > POLY_MAX_DIMS ||
+      (n_indices > 0 && !indices))
+    return NULL;
+
+  /* Current UOp.index returns a constant lane of STACK directly.  This is
+   * core UOp composition used by codegen devectorization as well as the FFI;
+   * frontends must not reimplement it (uop/ops.py:559-562). */
+  if (n_indices == 1 && base->op == POLY_OP_STACK && indices[0] &&
+      indices[0]->op == POLY_OP_CONST) {
+    int64_t lane = 0;
+    if (poly_uop_const_i64(indices[0], &lane) != 0) return NULL;
+    if (lane < 0) lane += base->n_src;
+    return lane >= 0 && lane < base->n_src ? base->src[lane] : NULL;
+  }
+
+  PolyUOp *src[POLY_MAX_DIMS + 1];
+  src[0] = base;
+  for (int i = 0; i < n_indices; i++) {
+    if (!indices[i]) return NULL;
+    src[1 + i] = indices[i];
+  }
+  PolyDType out_dt = base->dtype;
+  if (!poly_dtype_from_uop(
+          POLY_OP_INDEX, src, n_indices + 1, poly_arg_none(), out_dt, &out_dt))
+    return NULL;
+  return poly_uop(ctx, POLY_OP_INDEX, out_dt, src, n_indices + 1, poly_arg_none());
+}
+
+PolyUOp *poly_uop_placeholder(
+    PolyCtx *ctx,
+    const int64_t *shape,
+    int ndim,
+    PolyDType dtype,
+    int64_t slot,
+    PolyAddrSpace addrspace,
+    const char *device,
+    bool volatile_
+) {
+  if (!ctx || ndim < 0 || ndim > POLY_MAX_DIMS || (ndim > 0 && !shape) ||
+      (addrspace != POLY_ADDR_GLOBAL && addrspace != POLY_ADDR_LOCAL &&
+       addrspace != POLY_ADDR_REG) ||
+      (addrspace != POLY_ADDR_GLOBAL && device))
+    return NULL;
+
+  int64_t numel = 1;
+  for (int i = 0; i < ndim; i++) {
+    if (shape[i] < 0 || __builtin_mul_overflow(numel, shape[i], &numel)) return NULL;
+  }
+
+  /* Current tinygrad uop/ops.py:UOp.placeholder commits a strong value dtype,
+   * stores prod(shape), then restores rank above the storage UOp. */
+  dtype = poly_dtype_strong(dtype);
+  PolyUOp *extent = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(numel));
+  PolyParamArg param = {
+      .slot = slot,
+      .dtype = dtype,
+      .addrspace = addrspace,
+      .device = device,
+      .volatile_ = volatile_,
+  };
+  PolyOps op = addrspace == POLY_ADDR_GLOBAL ? POLY_OP_PARAM : POLY_OP_BUFFER;
+  PolyUOp *storage = extent ? poly_uop1(ctx, op, dtype, extent, poly_arg_param(&param)) : NULL;
+  if (!storage || ndim <= 1) return storage;
+  return poly_reshape(ctx, storage, (int64_t *)shape, ndim);
+}
+
 PolyUOp *poly_alu1(PolyCtx *ctx, PolyOps op, PolyUOp *src) {
-  return poly_uop1(ctx, op, src->dtype, src, poly_arg_none());
+  if (!ctx || !src) return NULL;
+  PolyDType dtype = src->dtype;
+  if (op == POLY_OP_SIN || op == POLY_OP_LOG2 || op == POLY_OP_EXP2 ||
+      op == POLY_OP_SQRT || op == POLY_OP_RECIPROCAL) {
+    /* Current UOp dtype inference keeps the operand graph intact and derives
+     * the result type here (uop/ops.py:144-145,758-761; dtype.py:187-188). */
+    if (uop_base_is_invalid(src)) {
+      dtype = POLY_BOOL;
+    } else if (!poly_dtype_least_upper_float(src->dtype, &dtype)) {
+      return NULL;
+    }
+  }
+  return poly_uop1(ctx, op, dtype, src, poly_arg_none());
 }
 
 PolyUOp *poly_alu2(PolyCtx *ctx, PolyOps op, PolyUOp *a, PolyUOp *b) {
   PolyDType dt;
   if (op == POLY_OP_CMPLT || op == POLY_OP_CMPNE || op == POLY_OP_CMPEQ) {
     dt = POLY_BOOL;
-  } else if (poly_dtype_is_float(a->dtype)) {
-    dt = a->dtype;
-  } else if (poly_dtype_is_float(b->dtype)) {
-    dt = b->dtype;
   } else {
     dt = a->dtype;
+    if (!poly_dtype_eq(a->dtype, b->dtype) &&
+        !poly_dtype_least_upper(a->dtype, b->dtype, &dt))
+      return NULL;
   }
   return poly_uop2(ctx, op, dt, a, b, poly_arg_none());
 }
 
 PolyUOp *poly_alu3(PolyCtx *ctx, PolyOps op, PolyUOp *a, PolyUOp *b, PolyUOp *c) {
-  PolyDType dt = (op == POLY_OP_WHERE) ? b->dtype : a->dtype;
+  PolyDType dt = a->dtype;
+  if (op == POLY_OP_WHERE) {
+    if (!poly_dtype_is_bool(a->dtype)) return NULL;
+    dt = b->dtype;
+    if (!poly_dtype_eq(b->dtype, c->dtype) &&
+        !poly_dtype_least_upper(b->dtype, c->dtype, &dt))
+      return NULL;
+  }
   return poly_uop3(ctx, op, dt, a, b, c, poly_arg_none());
+}
+
+/* Tinygrad 2026-08-22/a9069c177a9d UOp.cast keeps lanes in UOp shape, not
+ * DType, and returns self on exact scalar dtype identity (uop/ops.py:787). */
+PolyUOp *poly_cast(PolyCtx *ctx, PolyUOp *x, PolyDType target) {
+  if (!ctx || !x) return NULL;
+  if (poly_dtype_eq(x->dtype, target)) return x;
+  return poly_uop1(ctx, POLY_OP_CAST, target, x, poly_arg_none());
+}
+
+/* Current Tinygrad UOp.param/param_like (tinygrad/uop/ops.py:1158-1162). */
+PolyUOp *poly_uop_param(PolyCtx *ctx, int slot, PolyUOp *like) {
+  PolyUOp *variable = poly_uop_is_bound_var(like) ? like->src[0] : like;
+  if (ctx && slot >= 0 && poly_uop_is_variable(variable)) {
+    PolyParamArg param_arg = *variable->arg.param;
+    char name[32];
+    snprintf(name, sizeof(name), "p%d", slot);
+    param_arg.slot = slot;
+    param_arg.name = name;
+    return poly_uop(
+        ctx, POLY_OP_PARAM, variable->dtype, variable->src, variable->n_src,
+        poly_arg_param(&param_arg)
+    );
+  }
+  if (!ctx || slot < 0 || !like || poly_dtype_is_weak(like->dtype)) return NULL;
+
+  int ndim = poly_uop_ndim(ctx, like);
+  const int64_t *max_shape = poly_uop_max_shape_dims(ctx, like);
+  if (ndim < 0 || ndim > POLY_MAX_DIMS || (ndim > 0 && !max_shape)) return NULL;
+  PolyUOp *dim_src[POLY_MAX_DIMS];
+  for (int i = 0; i < ndim; i++) {
+    dim_src[i] = poly_uop_shape_dim(ctx, like, i);
+    if (!dim_src[i]) dim_src[i] = poly_const_int(ctx, max_shape[i]);
+    if (!dim_src[i]) return NULL;
+  }
+  PolyUOp *shape = poly_shape_to_shape_arg(ctx, dim_src, ndim);
+  if (!shape) return NULL;
+
+  PolyUOp *device = poly_uop_device_uop_cached(ctx, like, NULL);
+  PolyParamArg param_arg = {
+      .slot = slot,
+      .name = NULL,
+      .min_val = 0,
+      .max_val = 0,
+      .has_minmax = false,
+      .addrspace = POLY_ADDR_GLOBAL,
+      .axis = 0,
+      .has_axis = false,
+      .device = device && device->arg.kind == POLY_ARG_STRING ? device->arg.str : NULL,
+      .devices = device && device->arg.kind == POLY_ARG_STRING_TUPLE
+                     ? device->arg.string_tuple.vals
+                     : NULL,
+      .n_devices = device && device->arg.kind == POLY_ARG_STRING_TUPLE
+                       ? device->arg.string_tuple.n
+                       : 0,
+      .device_is_tuple = device && device->arg.kind == POLY_ARG_STRING_TUPLE,
+  };
+  PolyUOp *src[1] = {shape};
+  return poly_uop(
+      ctx, POLY_OP_PARAM, like->dtype, src, 1, poly_arg_param(&param_arg)
+  );
+}
+
+PolyUOp *poly_uop_variable(
+    PolyCtx *ctx,
+    const char *name,
+    int64_t min_val,
+    int64_t max_val,
+    PolyDType dtype,
+    int64_t multiple_of,
+    bool param
+) {
+  if (!ctx || !name || min_val > max_val || multiple_of <= 0) return NULL;
+  PolyUOp *shape = poly_uop0(ctx, POLY_OP_STACK, POLY_VOID, poly_arg_none());
+  PolyParamArg arg = {
+      .slot = -1,
+      .dtype = dtype,
+      .name = name,
+      .min_val = min_val,
+      .max_val = max_val,
+      .has_minmax = true,
+      .multiple_of = multiple_of,
+      .has_multiple_of = true,
+      .addrspace = POLY_ADDR_ALU,
+  };
+  return shape ? poly_uop1(
+                     ctx, param ? POLY_OP_PARAM : POLY_OP_BUFFER, dtype, shape,
+                     poly_arg_param(&arg)
+                 )
+               : NULL;
+}
+
+bool poly_uop_is_variable(const PolyUOp *u) {
+  return u && u->op == POLY_OP_BUFFER && u->n_src == 1 && u->src[0] &&
+         u->src[0]->op == POLY_OP_STACK && u->src[0]->n_src == 0 &&
+         u->arg.kind == POLY_ARG_PARAM && u->arg.param && u->arg.param->has_minmax &&
+         u->arg.param->addrspace == POLY_ADDR_ALU;
+}
+
+bool poly_uop_is_bound_var(const PolyUOp *u) {
+  return u && u->op == POLY_OP_AFTER && u->n_src == 2 && poly_uop_is_variable(u->src[0]) &&
+         u->src[1] && u->src[1]->op == POLY_OP_STORE && u->src[1]->n_src == 2 &&
+         u->src[1]->src[0] == u->src[0] && u->src[1]->src[1] &&
+         u->src[1]->src[1]->op == POLY_OP_CONST;
+}
+
+bool poly_uop_is_alu_param(const PolyUOp *u) {
+  return u && u->op == POLY_OP_PARAM && u->arg.kind == POLY_ARG_PARAM && u->arg.param &&
+         u->arg.param->addrspace == POLY_ADDR_ALU;
+}
+
+/* Approved Polygrad logical/placement boundary. Physical execution must use
+ * current Tinygrad UOp.new_buffer below, never this deviceless representation. */
+PolyUOp *poly_uop_new_logical_buffer_with_slot(
+    PolyCtx *ctx, PolyDType dtype, int64_t size, int64_t slot
+) {
+  if (!ctx || size < 0 || poly_dtype_is_weak(dtype)) return NULL;
+  PolyUOp *unique = poly_uop0(
+      ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(slot)
+  );
+  return unique
+             ? poly_uop1(ctx, POLY_OP_BUFFER, dtype, unique, poly_arg_int(size))
+             : NULL;
+}
+
+PolyUOp *poly_uop_new_logical_buffer(
+    PolyCtx *ctx, PolyDType dtype, int64_t size
+) {
+  return ctx
+             ? poly_uop_new_logical_buffer_with_slot(
+                   ctx, dtype, size, poly_ctx_next_unique_id(ctx)
+               )
+             : NULL;
+}
+
+/* Current tinygrad uop/ops.py:UOp.new_buffer.  The DEVICE UOp is C-only
+ * transport for the same str/tuple ParamArg.device value. */
+PolyUOp *poly_uop_new_buffer(
+    PolyCtx *ctx,
+    PolyUOp *device,
+    int64_t size,
+    PolyDType dtype,
+    int64_t slot
+) {
+  if (!ctx || !device || device->op != POLY_OP_DEVICE || size < 0 ||
+      poly_dtype_is_weak(dtype) ||
+      (device->arg.kind != POLY_ARG_STRING &&
+       device->arg.kind != POLY_ARG_STRING_TUPLE) ||
+      (device->arg.kind == POLY_ARG_STRING_TUPLE &&
+       device->arg.string_tuple.n <= 0))
+    return NULL;
+  PolyUOp *shape = poly_uop0(
+      ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(size)
+  );
+  PolyParamArg param = {
+      .slot = slot,
+      .dtype = dtype,
+      .addrspace = POLY_ADDR_GLOBAL,
+      .device = device->arg.kind == POLY_ARG_STRING ? device->arg.str : NULL,
+      .devices = device->arg.kind == POLY_ARG_STRING_TUPLE
+                     ? device->arg.string_tuple.vals
+                     : NULL,
+      .n_devices = device->arg.kind == POLY_ARG_STRING_TUPLE
+                       ? device->arg.string_tuple.n
+                       : 0,
+      .device_is_tuple = device->arg.kind == POLY_ARG_STRING_TUPLE,
+  };
+  return shape
+             ? poly_uop1(ctx, POLY_OP_BUFFER, dtype, shape, poly_arg_param(&param))
+             : NULL;
+}
+
+const char *poly_uop_expr(const PolyUOp *u) {
+  if (poly_uop_is_bound_var(u)) u = u->src[0];
+  if (!u || (u->op != POLY_OP_PARAM && u->op != POLY_OP_BUFFER) ||
+      u->arg.kind != POLY_ARG_PARAM || !u->arg.param)
+    return NULL;
+  return u->arg.param->name;
+}
+
+PolyUOp *poly_uop_bind(PolyCtx *ctx, PolyUOp *var, int64_t value) {
+  if (!ctx || !poly_uop_is_variable(var)) return NULL;
+  const PolyParamArg *arg = var->arg.param;
+  if (value < arg->min_val || value > arg->max_val ||
+      (arg->has_multiple_of && value % arg->multiple_of != 0))
+    return NULL;
+  PolyUOp *val = poly_uop0(ctx, POLY_OP_CONST, var->dtype, poly_arg_int(value));
+  PolyUOp *store = val ? poly_store_val(ctx, var, val) : NULL;
+  return store ? poly_uop2(ctx, POLY_OP_AFTER, var->dtype, var, store, poly_arg_none()) : NULL;
 }
 
 PolyUOp *poly_store_val(PolyCtx *ctx, PolyUOp *buf, PolyUOp *value) {

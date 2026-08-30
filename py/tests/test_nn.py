@@ -1,11 +1,11 @@
 """Tests for polygrad.nn module — layers, optimizers, state dict."""
 
 import base64
-import math
 import zlib
 import numpy as np
 import pytest
-from polygrad import GlobalCounters, Instance, Tensor, _ffi
+from polygrad import Context, GlobalCounters, Instance, Tensor, _ffi
+from polygrad.helpers import TRAINING
 from polygrad.nn import (
     Linear,
     LayerNorm,
@@ -18,14 +18,11 @@ from polygrad.nn import (
     BatchNorm,
     BatchNorm2d,
     BatchNorm3d,
-    SGD,
-    Adam,
-    AdamW,
-    OptimizerGroup,
     get_parameters,
     get_state_dict,
     load_state_dict,
 )
+from polygrad.nn.optim import Adam, AdamW, OptimizerGroup, SGD
 from polygrad.nn.state import safe_load, safe_load_metadata, torch_load
 
 
@@ -68,9 +65,9 @@ class TestLinear:
     def test_weight_initializer_stays_lazy_like_tinygrad(self):
         m = Linear(2, 3)
         assert not m.weight.uop.has_buffer_identity()
-        assert m.weight.requires_grad
+        assert m.weight.is_param
         assert not m.bias.uop.has_buffer_identity()
-        assert m.bias.requires_grad
+        assert m.bias.is_param
 
     def test_backward(self):
         m = Linear(2, 1)
@@ -124,18 +121,15 @@ class TestLayerNorm:
         assert graph_op_counts(out.uop) == {
             "ADD": 3,
             "BUFFER": 3,
-            "CONST": 6,
+            "CONST": 7,
             "COPY": 1,
-            "DEVICE": 2,
-            "EXPAND": 7,
             "MUL": 6,
-            "PERMUTE": 2,
+            "PERMUTE": 4,
             "RECIPROCAL": 2,
             "REDUCE": 2,
-            "RESHAPE": 6,
+            "RESHAPE": 3,
             "SQRT": 1,
-            "STACK": 5,
-            "UNIQUE": 3,
+            "STACK": 2,
         }
         nhwc = xv.transpose(0, 2, 3, 1)
         centered = nhwc - nhwc.mean(axis=-1, keepdims=True)
@@ -225,9 +219,8 @@ class TestBatchNorm:
     def test_forward_shape(self):
         bn = BatchNorm(4)
         x = Tensor.rand(2, 4, 3, 3)
-        Tensor.training = True
-        y = bn(x)
-        Tensor.training = False
+        with Context(TRAINING=1):
+            y = bn(x)
         assert y.shape == (2, 4, 3, 3)
 
     def test_running_stats_update(self):
@@ -236,9 +229,8 @@ class TestBatchNorm:
         before_mean = bn.running_mean.numpy().copy()
         before_var = bn.running_var.numpy().copy()
         before_count = bn.num_batches_tracked.numpy().copy()
-        Tensor.training = True
-        _ = bn(x).realize()
-        Tensor.training = False
+        with Context(TRAINING=1):
+            _ = bn(x).realize()
         after_mean = bn.running_mean.numpy()
         after_var = bn.running_var.numpy()
         after_count = bn.num_batches_tracked.numpy()
@@ -250,9 +242,8 @@ class TestBatchNorm:
         bn = BatchNorm(4, momentum=0.1)
         x_np = np.arange(2 * 4 * 3 * 3, dtype=np.float32).reshape(2, 4, 3, 3)
         x = Tensor(x_np)
-        Tensor.training = True
-        _ = bn(x).realize()
-        Tensor.training = False
+        with Context(TRAINING=1):
+            _ = bn(x).realize()
 
         # Expected update: rv = 0.9*1 + 0.1*(N/(N-C))*batch_var
         mean = x_np.mean(axis=(0, 2, 3))
@@ -267,10 +258,9 @@ class TestBatchNorm:
     def test_backward(self):
         bn = BatchNorm(4)
         x = Tensor.rand(2, 4, 3, 3)
-        Tensor.training = True
-        loss = bn(x).sum()
-        loss.backward()
-        Tensor.training = False
+        with Context(TRAINING=1):
+            loss = bn(x).sum()
+            loss.backward()
         assert bn.weight.grad is not None
         assert bn.bias.grad is not None
 
@@ -318,25 +308,25 @@ class TestEmbedding:
 
 class TestDropout:
     def test_eval_passthrough(self):
-        Tensor.training = False
         d = Dropout(0.5)
         x = Tensor([1.0, 2.0, 3.0])
-        y = d(x)
+        with Context(TRAINING=0):
+            y = d(x)
         assert approx(y.numpy(), x.numpy())
 
     def test_zero_p_passthrough(self):
-        Tensor.training = True
         d = Dropout(0.0)
         x = Tensor([1.0, 2.0, 3.0])
-        y = d(x)
+        with Context(TRAINING=1):
+            y = d(x)
         assert approx(y.numpy(), x.numpy())
-        Tensor.training = False
 
 
 # ── SGD ──
 
 
 class TestSGD:
+    @Context(TRAINING=1)
     def test_step_updates(self):
         m = Linear(2, 1)
         opt = SGD(get_parameters(m), lr=0.1)
@@ -348,6 +338,7 @@ class TestSGD:
         new_w = m.weight.numpy()
         assert not np.allclose(old_w, new_w)
 
+    @Context(TRAINING=1)
     def test_loss_decreases(self):
         Tensor.manual_seed(42)
         m = Linear(2, 1)
@@ -374,9 +365,10 @@ class TestSGD:
         opt.zero_grad()
         assert m.weight.grad is None
 
+    @Context(TRAINING=1)
     def test_optimizer_group(self):
-        p1 = Tensor([1.0], requires_grad=True).realize()
-        p2 = Tensor([2.0], requires_grad=True).realize()
+        p1 = Tensor([1.0]).realize()
+        p2 = Tensor([2.0]).realize()
         p1._grad = Tensor([1.0])
         p2._grad = Tensor([2.0])
         group = OptimizerGroup(SGD([p1], lr=0.1), SGD([p2], lr=0.2))
@@ -389,6 +381,7 @@ class TestSGD:
 
 
 class TestAdam:
+    @Context(TRAINING=1)
     def test_loss_decreases(self):
         Tensor.manual_seed(42)
         m = Linear(2, 1)
@@ -404,8 +397,9 @@ class TestAdam:
             losses.append(loss.item())
         assert losses[-1] < losses[0]
 
+    @Context(TRAINING=1)
     def test_beta_power_state_updates_in_graph(self):
-        p = Tensor([1.0], requires_grad=True).realize()
+        p = Tensor([1.0]).realize()
         opt = Adam([p], lr=0.1)
         p._grad = Tensor([1.0])
         scheduled = opt.schedule_step()
@@ -427,6 +421,7 @@ class TestAdam:
 
 
 class TestAdamW:
+    @Context(TRAINING=1)
     def test_loss_decreases(self):
         Tensor.manual_seed(42)
         m = Linear(2, 1)
@@ -442,8 +437,9 @@ class TestAdamW:
             losses.append(loss.item())
         assert losses[-1] < losses[0]
 
+    @Context(TRAINING=1)
     def test_weight_decay_uses_core_update(self):
-        p = Tensor([1.0], requires_grad=True).realize()
+        p = Tensor([1.0]).realize()
         opt = AdamW([p], lr=0.1, weight_decay=0.01)
         p._grad = Tensor([0.0])
         opt.step()
@@ -471,7 +467,7 @@ class TestAssign:
 class TestInstanceExport:
     def test_scalar_rank8_and_shared_multi_output_round_trip(self):
         scalar_x = Tensor.empty(())
-        scalar_w = Tensor(3.0, requires_grad=True)
+        scalar_w = Tensor(3.0)
         scalar = Instance.from_tensors(
             inputs={"x": scalar_x},
             outputs={"output": scalar_x * scalar_w},
@@ -488,7 +484,7 @@ class TestInstanceExport:
 
         rank8_shape = (1,) * 8
         rank8_x = Tensor.empty(rank8_shape)
-        rank8_w = Tensor.ones(*rank8_shape, requires_grad=True)
+        rank8_w = Tensor.ones(*rank8_shape)
         shared = rank8_x + rank8_w
         rank8 = Instance.from_tensors(
             inputs={"x": rank8_x},
@@ -535,7 +531,7 @@ class TestInstanceExport:
             source.free()
 
     def test_named_partial_view_state_fails_closed(self):
-        base = Tensor([1.0, 2.0, 3.0, 4.0], requires_grad=True)
+        base = Tensor([1.0, 2.0, 3.0, 4.0])
         view = base[1:3]
         x = Tensor.empty(2)
         with pytest.raises(RuntimeError, match="unsupported named view state"):
@@ -546,7 +542,7 @@ class TestInstanceExport:
 
     def test_input_dependent_named_state_effect_fails_closed(self):
         x = Tensor.empty(1)
-        w = Tensor([1.0], requires_grad=False)
+        w = Tensor([1.0])
         output = w.assign(w + x)
         with pytest.raises(RuntimeError, match="depends on an input or target"):
             Instance.from_tensors(
@@ -569,7 +565,7 @@ class TestInstanceExport:
             Instance.from_tensors(inputs={"x": x}, outputs={"output": output})
 
     def test_float16_state_preserves_exact_dtype_and_storage_bits(self):
-        w = Tensor([1.5, -2.0], dtype="float16", requires_grad=True)
+        w = Tensor([1.5, -2.0], dtype="float16")
         x = Tensor.empty((2,), dtype="float16")
         source = Instance.from_tensors(
             inputs={"x": x}, outputs={"output": x + w}, params={"w": w}
@@ -608,7 +604,7 @@ class TestInstanceExport:
     def test_functional_model_exports_selected_forward_entrypoint(self):
         from polygrad import _ffi
 
-        w = Tensor([[2.0], [3.0]], requires_grad=True).realize()
+        w = Tensor([[2.0], [3.0]]).realize()
         x = Tensor.empty((1, 2))
         y = x.dot(w)
         assert _ffi._lib.poly_uop_reachable(
@@ -636,7 +632,7 @@ class TestInstanceExport:
     def test_from_tensors_uses_instance_local_bindings(self):
         from polygrad import _ffi
 
-        w = Tensor([[2.0]], requires_grad=True).realize()
+        w = Tensor([[2.0]]).realize()
         x = Tensor.empty((1, 1))
         y = x.dot(w)
         before = _ffi._lib.poly_ctx_named_count(x._ctx)
@@ -655,7 +651,7 @@ class TestInstanceExport:
     def test_from_bindings_primitive_uses_instance_local_bindings(self):
         from polygrad import _ffi
 
-        w = Tensor([[7.0]], requires_grad=True).realize()
+        w = Tensor([[7.0]]).realize()
         x = Tensor.empty((1, 1))
         y = x.dot(w)
         before = _ffi._lib.poly_ctx_named_count(x._ctx)
@@ -676,15 +672,15 @@ class TestInstanceExport:
         out = inst.forward(bind_x=np.array([[3.0]], dtype=np.float32))
         assert np.allclose(out["bind_y"], [21.0], atol=1e-5)
 
-    def test_from_bindings_uses_tensor_requires_grad_for_trainability(self):
-        w = Tensor([[7.0]], requires_grad=False).realize()
+    def test_from_bindings_aux_role_is_nontrainable(self):
+        w = Tensor([[7.0]]).realize()
         x = Tensor.empty((1, 1))
         y = x.dot(w)
 
         inst = Instance.from_bindings(
             bindings=[
                 {"name": "x", "role": "input", "tensor": x},
-                {"name": "w", "role": "state", "tensor": w},
+                {"name": "w", "role": "aux", "tensor": w},
                 {"name": "y", "role": "output", "tensor": y},
             ],
             entrypoints=[
@@ -695,7 +691,7 @@ class TestInstanceExport:
         assert inst.param_trainable(0) is False
 
     def test_from_bindings_snapshots_named_lazy_parameter(self):
-        w = Tensor([[7.0]], requires_grad=True)
+        w = Tensor([[7.0]])
         x = Tensor.empty((1, 1))
         y = x.dot(w)
 
@@ -717,7 +713,6 @@ class TestInstanceExport:
             Tensor.full((2,), 3.0, buffer=False)
             + Tensor.full((2,), 1.0, buffer=False)
         )
-        w.requires_grad = True
         x = Tensor.empty((2,))
         y = x * w
         source = Instance.from_bindings(
@@ -742,7 +737,6 @@ class TestInstanceExport:
     def test_from_ir_rejects_stateful_rng_initializer_without_checkpoint(self):
         Tensor.manual_seed(7)
         w = Tensor.rand(2)
-        w.requires_grad = True
         x = Tensor.empty((2,))
         source = Instance.from_bindings(
             bindings=[
@@ -761,7 +755,7 @@ class TestInstanceExport:
     def test_from_tensors_keeps_tinygrad_style_plain_object(self):
         class LinearNet:
             def __init__(self):
-                self.weight = Tensor([[4.0], [5.0]], requires_grad=True).realize()
+                self.weight = Tensor([[4.0], [5.0]]).realize()
 
             def __call__(self, x):
                 return x.dot(self.weight)
@@ -780,8 +774,8 @@ class TestInstanceExport:
 
     def test_explicit_module_device_map_uses_named_value_bindings(self):
         x = Tensor.empty((2,))
-        w0 = Tensor([3.0, 4.0], requires_grad=True)
-        w1 = Tensor([2.0, 3.0], requires_grad=True)
+        w0 = Tensor([3.0, 4.0])
+        w1 = Tensor([2.0, 3.0])
         hidden = x + w0
         output = hidden * w1
 
@@ -826,7 +820,7 @@ class TestInstanceExport:
             restored.free()
 
     def test_constructor_state_names_survive_ir_roundtrip(self):
-        w = Tensor([[2.0], [3.0]], requires_grad=True).realize()
+        w = Tensor([[2.0], [3.0]]).realize()
         x = Tensor.empty((1, 2))
         logits = x.dot(w)
 
@@ -852,13 +846,15 @@ class TestInstanceExport:
     def test_tinygrad_training_aliases_exist(self):
         t = Tensor.kaiming_uniform(2, 3)
         assert t.shape == (2, 3)
-        before = Tensor.training
-        with Tensor.train():
-            assert Tensor.training
-        assert Tensor.training == before
+        assert not hasattr(Tensor, "training")
+        assert not hasattr(Tensor, "train")
+        before = TRAINING.value
+        with Context(TRAINING=1):
+            assert TRAINING.value == 1
+        assert TRAINING.value == before
 
     def test_model_fit_uses_instance_training_path(self):
-        w = Tensor([[1.0]], requires_grad=True).realize()
+        w = Tensor([[1.0]]).realize()
         x = Tensor.empty((1, 1))
         y = Tensor.empty((1, 1))
         pred = x.dot(w)
@@ -924,12 +920,10 @@ class TestStateDict:
         assert graph_op_counts(loaded["float"].uop) == {
             "BITCAST": 1,
             "BUFFER": 1,
-            "CONST": 5,
-            "DEVICE": 1,
+            "CONST": 6,
             "RESHAPE": 1,
             "SHRINK": 2,
-            "STACK": 5,
-            "UNIQUE": 1,
+            "STACK": 1,
         }
         assert loaded["float"].uop.src[0].op_name == "BITCAST"
         assert loaded["float"].uop.src[0].src[0].op_name == "SHRINK"
@@ -1081,15 +1075,12 @@ class TestParameterMarkerParity:
         assert (source + 1).is_param is True
         assert source.clone().is_param is False
 
-    def test_optimizer_uses_marker_and_enables_polygrad_autograd(self):
+    def test_optimizer_uses_only_parameter_marker(self):
         param = Tensor.zeros(1)
         buffer = Tensor.ones(1).is_param_(False)
-        assert param.requires_grad is False
         opt = SGD([param, buffer], lr=0.1)
         assert opt.params == [param]
         assert opt.buffers == [buffer]
-        assert param.requires_grad is True
-        assert buffer.requires_grad is False
 
     def test_hlb_style_custom_norm_split(self):
         class CustomNorm:
@@ -1123,11 +1114,7 @@ class TestLiveTensorBackward:
         Tensor.manual_seed(42)
         x = Tensor.rand(1, 4).realize()
         w1 = (Tensor.rand(4, 4) * 0.1).realize()
-        w1.requires_grad = True
-        w1._requires_grad = True
         w2 = (Tensor.rand(2, 4) * 0.1).realize()
-        w2.requires_grad = True
-        w2._requires_grad = True
 
         h = x.matmul(w1.T)
         out = h.matmul(w2.T)
@@ -1146,14 +1133,8 @@ class TestLiveTensorBackward:
         Tensor.manual_seed(42)
         x = Tensor.rand(1, 4).realize()
         w1 = (Tensor.rand(4, 4) * 0.1).realize()
-        w1.requires_grad = True
-        w1._requires_grad = True
         w2 = (Tensor.rand(4, 4) * 0.1).realize()
-        w2.requires_grad = True
-        w2._requires_grad = True
         w3 = (Tensor.rand(2, 4) * 0.1).realize()
-        w3.requires_grad = True
-        w3._requires_grad = True
 
         h1 = x.matmul(w1.T)
         h2 = h1.matmul(w2.T)
@@ -1174,7 +1155,7 @@ class TestLiveTensorBackward:
         w_np = (rng.randn(4, 4) * 0.1).astype(np.float32)
         x_np = rng.randn(1, 4).astype(np.float32)
 
-        w1 = Tensor(w_np, requires_grad=True)
+        w1 = Tensor(w_np)
         x1 = Tensor(x_np)
         h1 = x1.matmul(w1.T)
         loss1 = h1.mean()
@@ -1184,8 +1165,6 @@ class TestLiveTensorBackward:
         # Same graph from realized source buffers, without materializing the
         # trainable path before backward.
         w2 = Tensor(w_np.copy()).realize()
-        w2.requires_grad = True
-        w2._requires_grad = True
         x2 = Tensor(x_np.copy()).realize()
         h2 = x2.matmul(w2.T)
         loss2 = h2.mean()
@@ -1198,11 +1177,7 @@ class TestLiveTensorBackward:
         """Backward through q @ k.T pattern (attention-style)."""
         Tensor.manual_seed(42)
         q = Tensor.rand(1, 2, 4, 8).realize()
-        q.requires_grad = True
-        q._requires_grad = True
         k = Tensor.rand(1, 2, 4, 8).realize()
-        k.requires_grad = True
-        k._requires_grad = True
 
         scores = q.matmul(k.transpose(-2, -1))
         loss = (scores * 0.25).sum()
@@ -1215,8 +1190,6 @@ class TestLiveTensorBackward:
         """Backward through softmax produces usable gradients."""
         Tensor.manual_seed(42)
         x = Tensor.rand(2, 4).realize()
-        x.requires_grad = True
-        x._requires_grad = True
 
         # Use a non-trivial loss (weighted sum, not plain sum which has trivial zero grad)
         w = Tensor([[1.0, 2.0, 3.0, 4.0], [4.0, 3.0, 2.0, 1.0]])
@@ -1232,8 +1205,6 @@ class TestLiveTensorBackward:
         Tensor.manual_seed(42)
         ln = LayerNorm(4)
         x = Tensor.rand(2, 4).realize()
-        x.requires_grad = True
-        x._requires_grad = True
 
         y = ln(x)
         loss = y.sum()
@@ -1266,8 +1237,6 @@ class TestLiveTensorBackward:
         """A parameter used through multiple lazy paths gets accumulated gradient."""
         Tensor.manual_seed(42)
         w = (Tensor.rand(4, 4) * 0.1).realize()
-        w.requires_grad = True
-        w._requires_grad = True
 
         x = Tensor.rand(1, 4).realize()
         h1 = x.matmul(w.T)
@@ -1280,6 +1249,7 @@ class TestLiveTensorBackward:
         # Gradient should be non-zero (accumulated from both segments)
         assert np.linalg.norm(w.grad.numpy()) > 0
 
+    @Context(TRAINING=1)
     def test_mlp_training_with_sgd(self):
         """End-to-end: MLP training reduces loss."""
         Tensor.manual_seed(42)
@@ -1308,8 +1278,6 @@ class TestLiveTensorBackward:
         x = Tensor.rand(1, 4, 8)
         # w shape (8, 24) so x @ w gives (1, 4, 24) which splits into 3 × 8
         w = (Tensor.rand(8, 24) * 0.1).realize()
-        w.requires_grad = True
-        w._requires_grad = True
 
         # Attention-like pattern: shared projection split 3 ways
         qkv = x.dot(w)
@@ -1339,8 +1307,6 @@ class TestLiveTensorBackward:
         Tensor.manual_seed(42)
         x = Tensor.rand(1, 4, 8)
         w = (Tensor.rand(8, 24) * 0.1).realize()
-        w.requires_grad = True
-        w._requires_grad = True
 
         losses = []
         for _ in range(5):

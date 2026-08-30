@@ -32,16 +32,11 @@ extern "C" {
  * This keeps bindings from having to match Polygrad's C runtime allocator. */
 void poly_free(void *ptr);
 
-/* Polygrad's public op enum keeps a few C-side compatibility ops. Use
- * poly_op_value(op) where tinygrad's Ops.value ordering is required. */
+/* Use poly_op_value(op) where tinygrad's Ops.value ordering is required. */
 
 typedef enum {
   /* 1 — defines/special */
-  POLY_OP_DEFINE_VAR = 1,
-  POLY_OP_BIND,
-  POLY_OP_SPECIAL,
-  POLY_OP_DEFINE_LOCAL,
-  POLY_OP_DEFINE_REG,
+  POLY_OP_SPECIAL = 1,
 
   /* 2 — non-op uops */
   POLY_OP_NOOP,
@@ -56,9 +51,7 @@ typedef enum {
   POLY_OP_SINK,
   POLY_OP_AFTER,
   POLY_OP_GROUP,
-  POLY_OP_GEP,
   POLY_OP_STACK,
-  POLY_OP_VECTORIZE = POLY_OP_STACK, /* source-compatible old name */
   POLY_OP_TUPLE,
   POLY_OP_GETTUPLE,
 
@@ -69,7 +62,6 @@ typedef enum {
 
   /* 4 — math */
   POLY_OP_WMMA,
-  POLY_OP_SHAPED_WMMA,
   /* unary */
   POLY_OP_CAST,
   POLY_OP_BITCAST,
@@ -112,7 +104,6 @@ typedef enum {
   POLY_OP_IF,
   POLY_OP_END,
   POLY_OP_ENDIF,
-  POLY_OP_VCONST,
   POLY_OP_CONST,
   POLY_OP_CUSTOM,
   POLY_OP_CUSTOMI,
@@ -121,7 +112,6 @@ typedef enum {
   /* 6 — ops that don't exist in programs */
   POLY_OP_UNIQUE,
   POLY_OP_DEVICE,
-  POLY_OP_LUNIQUE,
   POLY_OP_CONTIGUOUS,
   POLY_OP_CONTIGUOUS_BACKWARD,
   POLY_OP_DETACH,
@@ -138,21 +128,9 @@ typedef enum {
   POLY_OP_PAD,
   POLY_OP_SHRINK,
   POLY_OP_FLIP,
-  POLY_OP_MULTI,
+  POLY_OP_UNSHARD,
   POLY_OP_REDUCE,
   POLY_OP_ALLREDUCE,
-  POLY_OP_UNROLL,
-  POLY_OP_CONTRACT,
-  POLY_OP_VCAT,
-  POLY_OP_PTRCAT,
-
-  /* Polygrad-only compatibility ops. Current tinygrad spells assign as
-   * AFTER(target, STORE(target, value)); REDUCE_AXIS is retained for legacy
-   * raw/import graphs while normal Tensor construction uses REDUCE; ENCDEC is
-   * not present upstream. */
-  POLY_OP_ASSIGN,
-  POLY_OP_ENCDEC,
-  POLY_OP_REDUCE_AXIS,
 
   POLY_OP_COUNT /* sentinel — total number of ops */
 } PolyOps;
@@ -167,6 +145,7 @@ typedef struct {
 extern PolyOpSet POLY_GROUP_UNARY;
 extern PolyOpSet POLY_GROUP_BINARY;
 extern PolyOpSet POLY_GROUP_TERNARY;
+extern PolyOpSet POLY_GROUP_BROADCASTABLE;
 extern PolyOpSet POLY_GROUP_ALU;
 extern PolyOpSet POLY_GROUP_ELEMENTWISE;
 extern PolyOpSet POLY_GROUP_MOVEMENT;
@@ -175,7 +154,7 @@ extern PolyOpSet POLY_GROUP_ASSOCIATIVE;
 extern PolyOpSet POLY_GROUP_IDEMPOTENT;
 extern PolyOpSet POLY_GROUP_COMPARISON;
 extern PolyOpSet POLY_GROUP_UNSAFEPAD;
-extern PolyOpSet POLY_GROUP_BUFFER;
+extern PolyOpSet POLY_GROUP_DEFINES;
 extern PolyOpSet POLY_GROUP_IRREDUCIBLE;
 
 /* Must be called before using any opset globals.
@@ -209,6 +188,7 @@ static inline bool poly_opset_subset(PolyOpSet sub, PolyOpSet super) {
 
 const char *poly_op_name(PolyOps op);
 int poly_op_value(PolyOps op);
+int poly_range_start(PolyOps op);
 
 /* DType */
 
@@ -216,6 +196,7 @@ typedef enum {
   POLY_ADDR_GLOBAL = 0,
   POLY_ADDR_LOCAL,
   POLY_ADDR_REG,
+  POLY_ADDR_ALU,
 } PolyAddrSpace;
 
 typedef struct {
@@ -223,17 +204,12 @@ typedef struct {
   uint16_t bitsize;
   const char *name; /* C type name, e.g. "float", "int" */
   char fmt; /* struct pack format char, 0 if none */
-  uint16_t count; /* vector width, 1 for scalars */
-  /* pointer fields (0/defaults for non-pointer dtypes) */
-  bool is_ptr;
-  PolyAddrSpace addrspace;
-  uint16_t vcount; /* pointer vector count */
-  int64_t ptr_size; /* -1 = unlimited */
 } PolyDType;
 
 /* Predefined scalar dtypes */
 extern const PolyDType POLY_VOID;
-extern const PolyDType POLY_INDEX;
+extern const PolyDType POLY_WEAKINT;
+extern const PolyDType POLY_WEAKFLOAT;
 extern const PolyDType POLY_BOOL;
 extern const PolyDType POLY_INT8;
 extern const PolyDType POLY_UINT8;
@@ -243,6 +219,10 @@ extern const PolyDType POLY_INT32;
 extern const PolyDType POLY_UINT32;
 extern const PolyDType POLY_INT64;
 extern const PolyDType POLY_UINT64;
+extern const PolyDType POLY_FP8E4M3;
+extern const PolyDType POLY_FP8E5M2;
+extern const PolyDType POLY_FP8E4M3FNUZ;
+extern const PolyDType POLY_FP8E5M2FNUZ;
 extern const PolyDType POLY_FLOAT16;
 extern const PolyDType POLY_BFLOAT16;
 extern const PolyDType POLY_FLOAT32;
@@ -250,49 +230,113 @@ extern const PolyDType POLY_FLOAT64;
 
 bool poly_dtype_eq(PolyDType a, PolyDType b);
 bool poly_dtype_is_float(PolyDType dt);
+bool poly_dtype_is_fp8(PolyDType dt);
+bool poly_dtype_is_fp8_fnuz(PolyDType dt);
 bool poly_dtype_is_int(PolyDType dt);
 bool poly_dtype_is_index(PolyDType dt);
+bool poly_dtype_is_weak(PolyDType dt);
 bool poly_dtype_is_unsigned(PolyDType dt);
 bool poly_dtype_is_bool(PolyDType dt);
-PolyDType poly_dtype_scalar(PolyDType dt);
+PolyDType poly_dtype_strong(PolyDType dt);
+PolyDType poly_dtype_weak(PolyDType dt);
 bool poly_dtype_least_upper(PolyDType a, PolyDType b, PolyDType *out);
+bool poly_dtype_least_upper_float(PolyDType dt, PolyDType *out);
+bool poly_sum_acc_dtype(PolyDType dt, PolyDType *out);
 bool poly_dtype_can_lossless_cast(PolyDType dt0, PolyDType dt1);
-PolyDType poly_dtype_vec(PolyDType dt, int sz);
-PolyDType poly_dtype_ptr(PolyDType dt, int64_t size, PolyAddrSpace addrspace);
 int poly_dtype_itemsize(PolyDType dt);
 const char *poly_dtype_name(PolyDType dt);
 int poly_dtype_count(void);
 bool poly_dtype_by_id(int id, PolyDType *out);
 int poly_dtype_id_by_name(const char *name);
+uint8_t poly_float_to_fp8(double x, PolyDType dtype);
+double poly_fp8_to_float(uint8_t x, PolyDType dtype);
 
 /* Axis metadata for RANGE args (tinygrad AxisType parity) */
 
 typedef enum {
-  POLY_AXIS_GLOBAL = 0,
+  POLY_AXIS_DEVICE = 0,
+  POLY_AXIS_GLOBAL,
   POLY_AXIS_WARP,
   POLY_AXIS_LOCAL,
-  POLY_AXIS_LOOP,
+  POLY_AXIS_WEAK,
   POLY_AXIS_GROUP_REDUCE,
   POLY_AXIS_REDUCE,
   POLY_AXIS_UPCAST,
   POLY_AXIS_UNROLL,
   POLY_AXIS_THREAD,
   POLY_AXIS_PLACEHOLDER,
+  POLY_AXIS_LOOP,
 } PolyAxisType;
 
 /* PolyArg — tagged union for UOp arg field */
 
+typedef struct PolyUOp PolyUOp;
 typedef struct PolyProgramInfo PolyProgramInfo;
+
+/* Current Tinygrad codegen/opt/__init__.py:OptOps and Opt. */
+typedef enum {
+  POLY_OPT_TC = 1,
+  POLY_OPT_UPCAST,
+  POLY_OPT_UNROLL,
+  POLY_OPT_LOCAL,
+  POLY_OPT_THREAD,
+  POLY_OPT_GROUP,
+  POLY_OPT_GROUPTOP,
+  POLY_OPT_NOLOCALS,
+  POLY_OPT_PADTO,
+  POLY_OPT_SWAP,
+} PolyOptOps;
+
+typedef enum {
+  POLY_OPT_ARG_NONE = 0,
+  POLY_OPT_ARG_INT,
+  POLY_OPT_ARG_INT_TUPLE,
+} PolyOptArgKind;
+
+typedef struct {
+  PolyOptOps op;
+  bool has_axis;
+  int axis;
+  PolyOptArgKind arg_kind;
+  int64_t arg;
+  const int64_t *arg_tuple;
+  int n_arg_tuple;
+} PolyOpt;
+
+/* tinygrad.renderer.Estimates; expressions remain symbolic until execution. */
+typedef struct {
+  PolyUOp *ops;
+  PolyUOp *lds;
+  PolyUOp *mem;
+} PolyEstimates;
+
+/* Current Tinygrad uop/ops.py:KernelInfo. */
+typedef struct {
+  const char *name;
+  const PolyAxisType *axis_types;
+  int n_axis_types;
+  bool dont_use_locals;
+  const PolyOpt *applied_opts;
+  int n_applied_opts;
+  const PolyOpt *opts_to_apply;
+  int n_opts_to_apply;
+  bool has_opts_to_apply;
+  const PolyEstimates *estimates;
+  int beam;
+} PolyKernelInfo;
 
 /* Pinned tinygrad ParamArg metadata. Value-level call PARAMs carry shape in
  * src[0] and keep slot/device here; rangeify later lowers them to the existing
  * pointer PARAM form whose arg is the kernel-local integer slot. */
 typedef struct {
   int64_t slot;
+  PolyDType dtype;
   const char *name;
   int64_t min_val;
   int64_t max_val;
   bool has_minmax;
+  int64_t multiple_of;
+  bool has_multiple_of;
   PolyAddrSpace addrspace;
   int32_t axis;
   bool has_axis;
@@ -303,6 +347,7 @@ typedef struct {
   const char **devices;
   int32_t n_devices;
   bool device_is_tuple;
+  bool volatile_;
 } PolyParamArg;
 
 /* Pinned tinygrad CallInfo metadata for CALL/FUNCTION UOps
@@ -334,14 +379,13 @@ typedef enum {
   POLY_ARG_FLOAT,
   POLY_ARG_BOOL,
   POLY_ARG_INT_TUPLE,
-  POLY_ARG_PAIR_TUPLE, /* array of (int64_t, int64_t) pairs */
   POLY_ARG_STRING,
   POLY_ARG_OPS,
-  POLY_ARG_REDUCE_AXIS, /* (PolyOps, int64_t[], n) */
+  POLY_ARG_REDUCE, /* current tinygrad tensor/lowered REDUCE: (PolyOps, num_axes) */
+  POLY_ARG_ALLREDUCE, /* current tinygrad ALLREDUCE: (PolyOps, str|tuple[str,...]) */
   POLY_ARG_RANGE, /* (axis_id, axis_type, extra...) */
-  POLY_ARG_DEFINE_VAR, /* (name, min_val, max_val) */
   POLY_ARG_BUFFERIZE_OPTS, /* (exact scalar/tuple device, addrspace, removable) */
-  POLY_ARG_TENSOR_CORE, /* tinygrad WMMA metadata: (name, dims, threads) */
+  POLY_ARG_TENSOR_CORE, /* tinygrad WMMA metadata: (dims,dtype_in,device,threads,upcast_axes) */
   POLY_ARG_PROGRAM_INFO, /* PolyProgramInfo* value metadata for PROGRAM */
   POLY_ARG_BYTES, /* immutable runtime bytes for BINARY UOps */
   POLY_ARG_INVALID,
@@ -349,6 +393,8 @@ typedef enum {
   POLY_ARG_BIGINT, /* exact signed arbitrary-precision integer CONST */
   POLY_ARG_STRING_TUPLE, /* ordered immutable string tuple (for DEVICE.arg) */
   POLY_ARG_CALL_INFO, /* pinned tinygrad CallInfo* for CALL/FUNCTION */
+  POLY_ARG_DTYPE, /* pinned DType arg for CAST/BITCAST */
+  POLY_ARG_KERNEL_INFO, /* pinned tinygrad KernelInfo* for compiler SINK */
 } PolyArgKind;
 
 typedef struct {
@@ -363,10 +409,6 @@ typedef struct {
       int n;
     } int_tuple;
     struct {
-      int64_t (*pairs)[2];
-      int n;
-    } pair_tuple;
-    struct {
       const char **vals;
       int n;
     } string_tuple;
@@ -374,20 +416,21 @@ typedef struct {
     PolyOps ops;
     struct {
       PolyOps op;
-      int64_t *axes;
-      int n;
-    } reduce_axis;
+      int num_axes;
+    } reduce;
+    struct {
+      PolyOps op;
+      const char *device;
+      const char **devices;
+      int32_t n_devices;
+      bool device_is_tuple;
+    } allreduce;
     struct {
       int64_t axis_id;
       PolyAxisType axis_type;
       int64_t *extra;
       int n_extra;
     } range;
-    struct {
-      const char *name;
-      int64_t min_val;
-      int64_t max_val;
-    } define_var;
     struct {
       /* Pinned BufferizeOpts.device is str | tuple[str, ...] | int | None
        * (tinygrad/schedule/indexing.py:38-43). Global physical scheduling uses
@@ -400,13 +443,19 @@ typedef struct {
       bool removable;
     } bufferize_opts;
     struct {
-      const char *name;
       int dims[3];
+      PolyDType dtype_in;
+      const char *device;
       int threads;
+      int64_t (*upcast_axes[3])[2];
+      int n_upcast_axes[3];
+      bool has_upcast_axes;
     } tensor_core;
     const PolyProgramInfo *program_info;
+    const PolyKernelInfo *kernel_info;
     const PolyParamArg *param;
     const PolyCallInfo *call_info;
+    PolyDType dtype;
     struct {
       const uint8_t *data;
       int n;
@@ -431,8 +480,28 @@ static inline PolyArg poly_arg_float(double v) {
 static inline PolyArg poly_arg_bool(bool v) {
   return (PolyArg){.kind = POLY_ARG_BOOL, .b = v};
 }
+static inline PolyArg poly_arg_int_tuple(int64_t *vals, int n) {
+  return (PolyArg){.kind = POLY_ARG_INT_TUPLE, .int_tuple = {.vals = vals, .n = n}};
+}
 static inline PolyArg poly_arg_ops(PolyOps op) {
   return (PolyArg){.kind = POLY_ARG_OPS, .ops = op};
+}
+static inline PolyArg poly_arg_reduce(PolyOps op, int num_axes) {
+  return (PolyArg){.kind = POLY_ARG_REDUCE, .reduce = {.op = op, .num_axes = num_axes}};
+}
+static inline PolyArg poly_arg_allreduce(
+    PolyOps op, const char *device, const char **devices, int32_t n_devices
+) {
+  return (PolyArg){
+      .kind = POLY_ARG_ALLREDUCE,
+      .allreduce = {
+          .op = op,
+          .device = device,
+          .devices = devices,
+          .n_devices = n_devices,
+          .device_is_tuple = devices != NULL,
+      },
+  };
 }
 static inline PolyArg poly_arg_invalid(void) {
   return (PolyArg){.kind = POLY_ARG_INVALID};
@@ -445,6 +514,12 @@ static inline PolyArg poly_arg_string_tuple(const char **vals, int n) {
 }
 static inline PolyArg poly_arg_call_info(const PolyCallInfo *info) {
   return (PolyArg){.kind = POLY_ARG_CALL_INFO, .call_info = info};
+}
+static inline PolyArg poly_arg_dtype(PolyDType dtype) {
+  return (PolyArg){.kind = POLY_ARG_DTYPE, .dtype = dtype};
+}
+static inline PolyArg poly_arg_kernel_info(const PolyKernelInfo *info) {
+  return (PolyArg){.kind = POLY_ARG_KERNEL_INFO, .kernel_info = info};
 }
 static inline PolyArg poly_arg_range(int64_t axis_id, PolyAxisType axis_type) {
   return (PolyArg
@@ -462,11 +537,6 @@ static inline PolyArg poly_arg_range_ex(
     .range = {.axis_id = axis_id, .axis_type = axis_type, .extra = extra, .n_extra = n_extra}};
 }
 
-static inline PolyArg poly_arg_define_var(const char *name, int64_t min_val, int64_t max_val) {
-  return (PolyArg
-  ){.kind = POLY_ARG_DEFINE_VAR,
-    .define_var = {.name = name, .min_val = min_val, .max_val = max_val}};
-}
 /* tinygrad BufferizeOpts equivalent.
  *
  * device is the exact canonical physical identity for the intermediate buffer
@@ -507,13 +577,33 @@ static inline PolyArg poly_arg_bufferize_opts_tuple(
         .removable = removable,
     }};
 }
-static inline PolyArg poly_arg_tensor_core(const char *name, const int dims[3], int threads) {
+static inline PolyArg poly_arg_tensor_core(
+    const int dims[3],
+    PolyDType dtype_in,
+    const char *device,
+    int threads,
+    int64_t (*upcast_axes[3])[2],
+    const int n_upcast_axes[3],
+    bool has_upcast_axes
+) {
   return (PolyArg
   ){.kind = POLY_ARG_TENSOR_CORE,
     .tensor_core = {
-        .name = name,
         .dims = {dims ? dims[0] : 0, dims ? dims[1] : 0, dims ? dims[2] : 0},
+        .dtype_in = dtype_in,
+        .device = device,
         .threads = threads,
+        .upcast_axes = {
+            upcast_axes ? upcast_axes[0] : NULL,
+            upcast_axes ? upcast_axes[1] : NULL,
+            upcast_axes ? upcast_axes[2] : NULL,
+        },
+        .n_upcast_axes = {
+            n_upcast_axes ? n_upcast_axes[0] : 0,
+            n_upcast_axes ? n_upcast_axes[1] : 0,
+            n_upcast_axes ? n_upcast_axes[2] : 0,
+        },
+        .has_upcast_axes = has_upcast_axes,
     }};
 }
 static inline PolyArg poly_arg_program_info(const PolyProgramInfo *info) {
@@ -528,9 +618,11 @@ static inline PolyArg poly_arg_param(const PolyParamArg *param) {
 
 bool poly_program_info_eq(const PolyProgramInfo *a, const PolyProgramInfo *b);
 uint32_t poly_program_info_hash(const PolyProgramInfo *info);
+bool poly_kernel_info_eq(const PolyKernelInfo *a, const PolyKernelInfo *b);
+uint32_t poly_kernel_info_hash(const PolyKernelInfo *info);
 
 /* RANGE metadata helpers. New RANGE UOps store POLY_ARG_RANGE; poly_uop()
- * canonicalizes legacy POLY_ARG_INT range ids to LOOP ranges at creation. */
+ * canonicalizes legacy POLY_ARG_INT range ids to WEAK ranges at creation. */
 static inline int64_t poly_range_axis_id(PolyArg a) {
   if (a.kind == POLY_ARG_RANGE) return a.range.axis_id;
   if (a.kind == POLY_ARG_INT) return a.i;
@@ -538,7 +630,7 @@ static inline int64_t poly_range_axis_id(PolyArg a) {
 }
 static inline PolyAxisType poly_range_axis_type(PolyArg a) {
   if (a.kind == POLY_ARG_RANGE) return a.range.axis_type;
-  return POLY_AXIS_LOOP;
+  return POLY_AXIS_WEAK;
 }
 static inline int poly_range_n_extra(PolyArg a) {
   return (a.kind == POLY_ARG_RANGE) ? a.range.n_extra : 0;
@@ -633,7 +725,7 @@ void poly_map_foreach(PolyMap *m, PolyMapIterFn fn, void *userdata);
 
 typedef enum {
   POLY_DEVICE_AUTO = 0,
-  POLY_DEVICE_HOST, /* imported frontend data, never a kernel target */
+  POLY_DEVICE_HOST, /* Tinygrad PYTHON storage/runtime; may own frontend bytes */
   POLY_DEVICE_CPU, /* native compiled CPU backend */
   POLY_DEVICE_INTERP, /* interpreter (shares CPU/WASM storage) */
   POLY_DEVICE_WASM, /* WASM JIT backend */
@@ -670,7 +762,6 @@ int poly_selftest(void);
 int poly_selftest_device(PolyDevice device);
 
 typedef struct PolyCtx PolyCtx;
-typedef struct PolyUOp PolyUOp;
 typedef struct PolyJit PolyJit;
 
 /* Core frontend tensor handle.
@@ -721,6 +812,13 @@ PolyTensor *poly_tensor_empty(
     PolyCtx *ctx,
     PolyDType scalar_dtype,
     const int64_t *dims,
+    int ndim,
+    PolyDevice device
+);
+PolyTensor *poly_tensor_empty_uop(
+    PolyCtx *ctx,
+    PolyDType scalar_dtype,
+    PolyUOp **dims,
     int ndim,
     PolyDevice device
 );
@@ -790,6 +888,8 @@ PolyTensor *poly_tensor_alu3(PolyCtx *ctx, PolyOps op, PolyTensor *a, PolyTensor
 PolyTensor *poly_tensor_div(PolyCtx *ctx, PolyTensor *dividend, PolyTensor *divisor);
 PolyTensor *poly_tensor_exp(PolyCtx *ctx, PolyTensor *src);
 PolyTensor *poly_tensor_log(PolyCtx *ctx, PolyTensor *src);
+PolyTensor *poly_tensor_cos(PolyCtx *ctx, PolyTensor *src);
+PolyTensor *poly_tensor_tan(PolyCtx *ctx, PolyTensor *src);
 PolyTensor *poly_tensor_log1p(PolyCtx *ctx, PolyTensor *src);
 PolyTensor *poly_tensor_expm1(PolyCtx *ctx, PolyTensor *src);
 PolyTensor *poly_tensor_gelu(PolyCtx *ctx, PolyTensor *src);
@@ -854,6 +954,8 @@ PolyTensor *poly_tensor_rope(
 );
 PolyTensor *poly_tensor_cast_by_id(PolyCtx *ctx, PolyTensor *src, int dtype_id);
 PolyTensor *poly_tensor_bitcast_by_id(PolyCtx *ctx, PolyTensor *src, int dtype_id);
+PolyTensor *poly_tensor_const_like_int(PolyCtx *ctx, PolyTensor *ref, int64_t value);
+PolyTensor *poly_tensor_const_like_float(PolyCtx *ctx, PolyTensor *ref, double value);
 PolyTensor *poly_tensor_contiguous(PolyCtx *ctx, PolyTensor *src);
 PolyTensor *poly_tensor_reshape(PolyCtx *ctx, PolyTensor *src, int64_t *dims, int ndim);
 PolyTensor *poly_tensor_reshape_uop(PolyCtx *ctx, PolyTensor *src, PolyUOp **dims, int ndim);
@@ -869,7 +971,21 @@ PolyTensor *poly_tensor_shrink_uop(
     int ndim
 );
 PolyTensor *poly_tensor_flip(PolyCtx *ctx, PolyTensor *src, int64_t *axes, int n_axes);
-PolyTensor *poly_tensor_pad_value(
+PolyTensor *poly_tensor_pad_value_bool(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    int64_t (*pairs)[2],
+    int ndim,
+    bool value
+);
+PolyTensor *poly_tensor_pad_value_int(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    int64_t (*pairs)[2],
+    int ndim,
+    int64_t value
+);
+PolyTensor *poly_tensor_pad_value_float(
     PolyCtx *ctx,
     PolyTensor *src,
     int64_t (*pairs)[2],
@@ -981,7 +1097,7 @@ int poly_realize_tensors_ex(
 );
 
 typedef struct PolyVarBinding {
-  PolyUOp *var; /* DEFINE_VAR UOp */
+  PolyUOp *var; /* ALU BUFFER variable */
   int32_t value; /* concrete runtime value */
 } PolyVarBinding;
 
@@ -995,7 +1111,7 @@ typedef struct PolyVarBinding {
  * substitution boundary. Input
  * compatibility and runtime variable values follow
  * tinygrad/engine/jit.py:_prepare_jit_inputs: the physical base is replaced by
- * NOOP, the remaining view is unbound, and current BIND values override the
+ * NOOP, the remaining view is unbound, and current AFTER/STORE values override the
  * captured schedule defaults. Polygrad's logical provenance root is not part
  * of this execution-layer signature.
  */
@@ -1003,7 +1119,11 @@ PolyJit *poly_jit_new(PolyCtx *ctx);
 void poly_jit_free(PolyJit *jit);
 int poly_jit_set_prune(PolyJit *jit, bool prune);
 int poly_jit_begin_capture(PolyJit *jit, PolyTensor **inputs, int n_inputs);
-int poly_jit_end_capture(PolyJit *jit);
+int poly_jit_end_capture(
+    PolyJit *jit,
+    PolyTensor **live_tensors,
+    int n_live_tensors
+);
 void poly_jit_cancel_capture(PolyJit *jit);
 bool poly_jit_is_captured(PolyJit *jit);
 int poly_jit_schedule_count(PolyJit *jit);
@@ -1048,6 +1168,8 @@ struct PolyUOp {
   int32_t tag;
   PolyArg tag_arg;
   uint32_t hash;
+  bool addrspace_cached;
+  PolyAddrSpace addrspace_cache;
   bool minmax_cached;
   int64_t minmax_vmin;
   int64_t minmax_vmax;
@@ -1055,7 +1177,7 @@ struct PolyUOp {
   void *ended_ranges_cache;
 };
 
-/* Context owns the arena, CSE cache, schedule/to-program/runtime caches, and all UOps */
+/* Context owns the arena, CSE, to_program/runtime caches, and all UOps. */
 PolyCtx *poly_ctx_new(void);
 void poly_ctx_destroy(PolyCtx *ctx);
 void poly_ctx_set_preferred_device(PolyCtx *ctx, PolyDevice device);
@@ -1068,11 +1190,8 @@ typedef struct {
   size_t scratch_bytes;
   size_t scratch_high_water;
   size_t cse_entries;
-  size_t schedule_cache_entries;
   size_t to_program_cache_entries;
   size_t runtime_cache_entries;
-  /* Compatibility alias for runtime_cache_entries. */
-  size_t program_cache_entries;
   size_t shape_cache_entries;
   size_t buffer_entries;
   size_t buffer_owned_bytes;
@@ -1084,8 +1203,6 @@ typedef struct {
   size_t compiled_artifact_bytes;
   size_t runtime_artifact_entries;
   size_t launch_count;
-  size_t schedule_cache_hits;
-  size_t schedule_cache_misses;
   size_t runtime_cache_hits;
   size_t runtime_cache_misses;
   size_t buffer_read_count;
@@ -1136,6 +1253,9 @@ PolyUOp *poly_uop_tagged_arg(
     int32_t tag,
     PolyArg tag_arg
 );
+/* Current Tinygrad UOp.replace(src=...): rebuild one immutable node while
+ * preserving its op, dtype, arg, and tag metadata. */
+PolyUOp *poly_uop_replace_src(PolyCtx *ctx, PolyUOp *u, PolyUOp **src);
 
 /* Convenience: create a UOp with 0, 1, 2, or 3 sources */
 PolyUOp *poly_uop0(PolyCtx *ctx, PolyOps op, PolyDType dtype, PolyArg arg);
@@ -1250,7 +1370,7 @@ void poly_uop_cache_destroy(PolyUOpCache *c);
  *   ranges(u) = union(ranges(s) for s in u.src) - ended_ranges(u) + ({u} if RANGE)
  *
  * where ended_ranges() matches ops.py:351-358 (trailing srcs past range_start,
- * AFTER: recursive flatten, CONTRACT: filter by axis_id). See src/uop.c.
+ * AFTER recursively flattens effect dependencies. See src/uop/ops.c.
  *
  * Every helper has a public entry point and an `_ex` variant that takes a
  * caller-owned PolyUOpCache for batch queries. Use the `_ex` form in hot loops
@@ -1258,6 +1378,14 @@ void poly_uop_cache_destroy(PolyUOpCache *c);
 /* Returns the terminal buffer-identity UOp (BUFFER / BUFFER_VIEW / PARAM)
  * after unwrapping RESHAPE/MULTI, or NULL if `u` has no buffer identity. */
 const PolyUOp *poly_uop_get_buffer_identity(const PolyUOp *u);
+
+PolyUOp *poly_uop_base(PolyUOp *u);
+PolyUOp *poly_uop_unsharded_base(PolyUOp *u);
+bool poly_uop_op_in_backward_slice_with_self(PolyCtx *ctx, PolyUOp *u, PolyOps op);
+
+/* Current Tinygrad UOp.buf_uop: return the storage-state UOp used by
+ * scheduling and access analysis, preserving MSELECT/MSTACK structure. */
+PolyUOp *poly_uop_buf_uop(PolyCtx *ctx, PolyUOp *u);
 
 /* True iff `u` is a buffer view (RESHAPE/MULTI over BUFFER/BUFFER_VIEW/PARAM).
  * Frontends use this to decide whether a tensor needs materialization
@@ -1304,6 +1432,8 @@ void poly_uop_minmax_ex(
     int64_t *vmin,
     int64_t *vmax
 );
+/* Current tinygrad uop/ops.py:resolve. */
+int poly_uop_resolve(PolyCtx *ctx, PolyUOp *u, int default_value);
 
 /* Pretty-print a UOp graph to a buffer (returns malloc'd string, caller frees) */
 char *poly_uop_str(PolyUOp *u);
@@ -1328,6 +1458,8 @@ typedef struct {
 
 PolyShape poly_uop_max_shape(PolyCtx *ctx, PolyUOp *u);
 int64_t poly_shape_numel(PolyShape s);
+/* Current tinygrad UOp.max_numel(): product of the concrete maximum shape. */
+int64_t poly_uop_max_numel(PolyCtx *ctx, const PolyUOp *u);
 bool poly_shape_eq(PolyShape a, PolyShape b);
 
 /* Lazy cached shape accessors -- computes on first access, O(1) thereafter.
@@ -1335,12 +1467,62 @@ bool poly_shape_eq(PolyShape a, PolyShape b);
 int poly_uop_ndim(PolyCtx *ctx, const PolyUOp *u);
 const int64_t *poly_uop_max_shape_dims(PolyCtx *ctx, const PolyUOp *u);
 PolyUOp *poly_uop_shape_dim(PolyCtx *ctx, const PolyUOp *u, int dim);
+/* Current tinygrad uop/ops.py:shape_to_shape_arg. */
+PolyUOp *poly_shape_to_shape_arg(PolyCtx *ctx, PolyUOp **items, int n_items);
+/* Current tinygrad uop/ops.py:_broadcast_shape over UOp source shapes. */
+int poly_broadcast_shape(
+    PolyCtx *ctx,
+    PolyUOp **src,
+    int n_src,
+    PolyUOp **out_dims,
+    int max_dims
+);
+/* Current tinygrad UOp.as_shape: one non-STACK UOp is one dimension and STACK
+ * exposes its ordered sources. Items are symbolically simplified UOps so C
+ * consumers retain exact symbolic shape expressions. Returns item count or -1. */
+int poly_uop_as_shape(
+    PolyCtx *ctx,
+    PolyUOp *shape_arg,
+    PolyUOp **items,
+    int max_items
+);
+/* Exact C port of tinygrad/uop/ops.py:broadcast_axes. Returns the number of
+ * output axes that are added/expanded, or -1 for incompatible ranks. */
+int poly_broadcast_axes(
+    PolyCtx *ctx,
+    const PolyUOp *src,
+    const PolyUOp *out,
+    int *axes,
+    int max_axes
+);
 /* Pinned UOp.axis query for multi-device shard propagation
  * (tinygrad/uop/ops.py:623-651). Returns false when the value is unsharded. */
 bool poly_uop_axis(PolyCtx *ctx, const PolyUOp *u, int *out_axis);
+/* Current tinygrad UOp.unshard: preserve ordered shard axes and their RANGE
+ * sources in the tensor graph (`tinygrad/uop/ops.py:667-681`). */
+PolyUOp *poly_unshard(
+    PolyCtx *ctx,
+    PolyUOp *value,
+    const int64_t *axes,
+    PolyUOp **ranges,
+    int n_axes
+);
+/* Current tinygrad UOp.allreduce(op, device). */
+PolyUOp *poly_allreduce(
+    PolyCtx *ctx, PolyUOp *value, PolyOps op, PolyUOp *device
+);
+/* Current tinygrad UOp.range (`tinygrad/uop/ops.py:563-565`). */
+PolyUOp *poly_range(
+    PolyCtx *ctx,
+    int64_t bound,
+    int64_t axis_id,
+    PolyAxisType axis_type
+);
 int poly_uop_const_i64(const PolyUOp *u, int64_t *out);
 PolyUOp *poly_uop_unbind_var(PolyUOp *u);
 int poly_uop_bind_value(PolyUOp *u, int64_t *out);
+/* Current tinygrad UOp.contiguous_view_offset. */
+int poly_uop_contiguous_view_offset(PolyCtx *ctx, PolyUOp *u, int64_t *out);
 PolyShape poly_uop_max_shape_cached(PolyCtx *ctx, const PolyUOp *u);
 PolyArena *poly_ctx_arena(PolyCtx *ctx);
 
@@ -1517,8 +1699,46 @@ int poly_op_count(void);
 PolyUOp *poly_const_float(PolyCtx *ctx, double value);
 PolyUOp *poly_const_double(PolyCtx *ctx, double value);
 PolyUOp *poly_const_int(PolyCtx *ctx, int64_t value);
+PolyUOp *poly_uop_const(PolyCtx *ctx, PolyArg value, PolyDType dtype);
 PolyUOp *poly_const_typed(PolyCtx *ctx, PolyDType dt, double value);
+PolyUOp *poly_const_like_dtype(PolyCtx *ctx, PolyUOp *ref, PolyArg val, PolyDType dtype);
+PolyUOp *poly_const_like(PolyCtx *ctx, PolyUOp *ref, PolyArg val);
+PolyUOp *poly_const_like_int(PolyCtx *ctx, PolyUOp *ref, int64_t val);
+PolyUOp *poly_const_like_float(PolyCtx *ctx, PolyUOp *ref, double val);
+PolyUOp *poly_const_like_bool(PolyCtx *ctx, PolyUOp *ref, bool val);
 PolyUOp *poly_identity_element(PolyCtx *ctx, PolyOps op, PolyDType dtype);
+PolyUOp *poly_cast(PolyCtx *ctx, PolyUOp *x, PolyDType target);
+PolyUOp *poly_elementwise_promote(PolyCtx *ctx, PolyUOp *root, PolyDType common);
+bool poly_broadcasted_pair(PolyCtx *ctx, PolyUOp **a, PolyUOp **b);
+PolyUOp *poly_binop(PolyCtx *ctx, PolyOps op, PolyUOp *a, PolyUOp *b);
+PolyUOp *poly_uop_variable(
+    PolyCtx *ctx,
+    const char *name,
+    int64_t min_val,
+    int64_t max_val,
+    PolyDType dtype,
+    int64_t multiple_of,
+    bool param
+);
+PolyUOp *poly_uop_param(PolyCtx *ctx, int slot, PolyUOp *like);
+bool poly_uop_is_variable(const PolyUOp *u);
+bool poly_uop_is_bound_var(const PolyUOp *u);
+bool poly_uop_is_alu_param(const PolyUOp *u);
+const char *poly_uop_expr(const PolyUOp *u);
+PolyUOp *poly_uop_bind(PolyCtx *ctx, PolyUOp *var, int64_t value);
+
+/* Current tinygrad uop/ops.py:dtype_from_uop and _rebuild_dtype.  The first
+ * returns false for operations whose dtype remains explicitly owned by the
+ * node; the second preserves that stored dtype in exactly those cases. */
+bool poly_dtype_from_uop(
+    PolyOps op,
+    PolyUOp **src,
+    int n_src,
+    PolyArg arg,
+    PolyDType current_dtype,
+    PolyDType *out
+);
+PolyDType poly_rebuild_dtype(PolyUOp *u, PolyUOp **new_src);
 
 PolyUOp *poly_alu1(PolyCtx *ctx, PolyOps op, PolyUOp *src);
 PolyUOp *poly_alu2(PolyCtx *ctx, PolyOps op, PolyUOp *a, PolyUOp *b);
@@ -1528,14 +1748,44 @@ PolyUOp *poly_store_val(PolyCtx *ctx, PolyUOp *buf, PolyUOp *value);
 PolyUOp *poly_sink1(PolyCtx *ctx, PolyUOp *store);
 PolyUOp *poly_sink_n(PolyCtx *ctx, PolyUOp **stores, int n);
 
-PolyUOp *poly_buffer_on_device(
-    PolyCtx *ctx,
-    PolyDType scalar_dtype,
-    int64_t size,
-    PolyDevice device
+/* Approved Polygrad portable logical-storage identity. Never executable. */
+PolyUOp *poly_uop_new_logical_buffer(
+    PolyCtx *ctx, PolyDType dtype, int64_t size
 );
-PolyUOp *poly_buffer(PolyCtx *ctx, PolyDType scalar_dtype, int64_t size);
+PolyUOp *poly_uop_new_logical_buffer_with_slot(
+    PolyCtx *ctx, PolyDType dtype, int64_t size, int64_t slot
+);
+/* Current tinygrad UOp.new_buffer(device, size, dtype, num=slot). */
+PolyUOp *poly_uop_new_buffer(
+    PolyCtx *ctx,
+    PolyUOp *device,
+    int64_t size,
+    PolyDType dtype,
+    int64_t slot
+);
+/* Current tinygrad UOp.copy_to_device: COPY has one value source and carries
+ * the exact scalar/tuple target device in arg. */
+PolyUOp *poly_copy_to_device_uop(PolyCtx *ctx, PolyUOp *value, PolyUOp *device);
 PolyUOp *poly_reshape(PolyCtx *ctx, PolyUOp *src, int64_t *dims, int ndim);
+PolyUOp *poly_reshape_uop(PolyCtx *ctx, PolyUOp *src, PolyUOp **dims, int ndim);
+PolyUOp *poly_uop_stack(PolyCtx *ctx, PolyUOp **src, int n_src);
+/* Current UOp.index composition. */
+PolyUOp *poly_uop_index(
+    PolyCtx *ctx, PolyUOp *base, PolyUOp **indices, int n_indices
+);
+/* Current tinygrad UOp.placeholder: storage is flat prod(shape), with rank
+ * restored by RESHAPE. */
+PolyUOp *poly_uop_placeholder(
+    PolyCtx *ctx,
+    const int64_t *shape,
+    int ndim,
+    PolyDType dtype,
+    int64_t slot,
+    PolyAddrSpace addrspace,
+    const char *device,
+    bool volatile_
+);
+PolyUOp *poly_stack(PolyCtx *ctx, PolyUOp **src, int n_src, int dim);
 PolyUOp *poly_expand(PolyCtx *ctx, PolyUOp *src, int64_t *dims, int ndim);
 PolyUOp *poly_expand_uop(PolyCtx *ctx, PolyUOp *src, PolyUOp **dims, int ndim);
 PolyUOp *poly_permute(PolyCtx *ctx, PolyUOp *src, int64_t *perm, int ndim);

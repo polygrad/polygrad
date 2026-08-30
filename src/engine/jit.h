@@ -9,21 +9,40 @@
 #define POLYGRAD_ENGINE_JIT_H
 
 #include "polygrad.h"
-#include "engine/schedule.h"
+#include "engine/realize.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 bool poly_jit_is_capturing(PolyJit *jit);
-int poly_jit_record_schedule(PolyJit *jit, PolySchedule *sched);
+/* Current Tinygrad engine/jit.py:create_graph_call. */
+PolyUOp *poly_create_graph_call(PolyCtx *ctx, PolyUOp **calls, int n_calls);
+int poly_jit_record_linear(
+    PolyJit *jit,
+    PolyUOp *linear,
+    PolyVarBinding *var_bindings,
+    int n_var_bindings
+);
 /* Pinned CapturedJit.linear analogue for topology tests and graph lowering. */
 PolyUOp *poly_jit_captured_linear(PolyJit *jit);
-/* Pinned jit_lower retained-executable boundary for an already-built schedule.
- * Tensor-facing PolyJit capture and logical-program Instance execution share
- * this core lowering path; callers retain the returned compiled handle and may
- * free the input schedule immediately. */
-PolyCompiledSchedule *poly_jit_lower(PolyCtx *ctx, PolySchedule *schedule);
+/* C mechanics for Tinygrad engine/jit.py's buffers|all_tensors held set. */
+int poly_jit_collect_held_bufs(
+    PolyCtx *ctx,
+    PolyTensor **live_tensors,
+    int n_live_tensors,
+    PolyUOp ***held_out,
+    int *n_held_out
+);
+/* Current Tinygrad engine/jit.py:jit_lower. */
+PolyUOp *poly_jit_lower(
+    PolyCtx *ctx,
+    PolyUOp *linear,
+    PolyUOp **held_bufs,
+    int n_held_bufs,
+    PolyUOp **input_uops,
+    int n_input_uops
+);
 
 #ifdef __cplusplus
 }

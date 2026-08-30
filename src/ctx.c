@@ -16,7 +16,7 @@ void poly_init_group_ops(void);
 /* Optional cleanup hooks (defined in other files, linked weakly). */
 void poly_frontend_ctx_cleanup(PolyCtx *ctx) __attribute__((weak));
 void poly_tensor_ctx_cleanup(PolyCtx *ctx) __attribute__((weak));
-void poly_schedule_ctx_cleanup(PolyCtx *ctx) __attribute__((weak));
+void poly_engine_ctx_cleanup(PolyCtx *ctx) __attribute__((weak));
 
 static void free_buffer_entry(const void *key, void *value, void *userdata) {
   (void)key;
@@ -35,11 +35,10 @@ PolyCtx *poly_ctx_new(void) {
   ctx->schedule_cache = poly_map_new(16);
   ctx->to_program_cache = poly_map_new(16);
   ctx->runtime_cache = poly_map_new(16);
+  ctx->graph_cache = poly_map_new(8);
   ctx->runtime_artifact_entries = 0;
   ctx->runtime_artifact_live_bytes = 0;
   ctx->launch_count = 0;
-  ctx->schedule_cache_hits = 0;
-  ctx->schedule_cache_misses = 0;
   ctx->runtime_cache_hits = 0;
   ctx->runtime_cache_misses = 0;
   ctx->buffer_read_count = 0;
@@ -67,8 +66,10 @@ PolyCtx *poly_ctx_new(void) {
   ctx->next_tensor_order = 1;
   ctx->active_jit_capture = NULL;
   ctx->name_map = poly_map_new(16);
-  if (!ctx->arena || !ctx->scratch || !ctx->cse || !ctx->schedule_cache || !ctx->to_program_cache ||
-      !ctx->runtime_cache || !ctx->mem_used_by_device || !ctx->shape_cache || !ctx->buffers ||
+  if (!ctx->arena || !ctx->scratch || !ctx->cse || !ctx->schedule_cache ||
+      !ctx->to_program_cache ||
+      !ctx->runtime_cache || !ctx->graph_cache || !ctx->mem_used_by_device ||
+      !ctx->shape_cache || !ctx->buffers ||
       !ctx->rng_states || !ctx->name_map) {
     if (ctx->arena) poly_arena_destroy(ctx->arena);
     if (ctx->scratch) poly_arena_destroy(ctx->scratch);
@@ -76,6 +77,7 @@ PolyCtx *poly_ctx_new(void) {
     if (ctx->schedule_cache) poly_map_destroy(ctx->schedule_cache);
     if (ctx->to_program_cache) poly_map_destroy(ctx->to_program_cache);
     if (ctx->runtime_cache) poly_map_destroy(ctx->runtime_cache);
+    if (ctx->graph_cache) poly_map_destroy(ctx->graph_cache);
     if (ctx->mem_used_by_device) poly_map_destroy(ctx->mem_used_by_device);
     if (ctx->shape_cache) poly_map_destroy(ctx->shape_cache);
     if (ctx->buffers) poly_map_destroy(ctx->buffers);
@@ -107,10 +109,11 @@ void poly_ctx_destroy(PolyCtx *ctx) {
   if (!ctx) return;
   if (poly_frontend_ctx_cleanup) poly_frontend_ctx_cleanup(ctx);
   if (poly_tensor_ctx_cleanup) poly_tensor_ctx_cleanup(ctx);
-  if (poly_schedule_ctx_cleanup) poly_schedule_ctx_cleanup(ctx);
+  if (poly_engine_ctx_cleanup) poly_engine_ctx_cleanup(ctx);
   poly_map_destroy(ctx->schedule_cache);
   poly_map_destroy(ctx->to_program_cache);
   poly_map_destroy(ctx->runtime_cache);
+  poly_map_destroy(ctx->graph_cache);
   poly_map_destroy(ctx->shape_cache);
   /* Free owned buffer ptrs before destroying the map. */
   poly_map_foreach(ctx->buffers, free_buffer_entry, ctx);
@@ -177,10 +180,8 @@ int poly_ctx_stats(PolyCtx *ctx, PolyCtxStats *out) {
   out->scratch_bytes = poly_arena_used(ctx->scratch);
   out->scratch_high_water = poly_arena_high_water(ctx->scratch);
   out->cse_entries = poly_map_len(ctx->cse);
-  out->schedule_cache_entries = poly_map_len(ctx->schedule_cache);
   out->to_program_cache_entries = poly_map_len(ctx->to_program_cache);
   out->runtime_cache_entries = poly_map_len(ctx->runtime_cache);
-  out->program_cache_entries = out->runtime_cache_entries;
   out->runtime_artifact_entries = ctx->runtime_artifact_entries;
   out->shape_cache_entries = poly_map_len(ctx->shape_cache);
   out->buffer_entries = poly_map_len(ctx->buffers);
@@ -194,8 +195,6 @@ int poly_ctx_stats(PolyCtx *ctx, PolyCtxStats *out) {
   out->entrypoint_entries = (size_t)ctx->n_ep;
   out->compiled_artifact_bytes = poly_runtime_cache_artifact_bytes(ctx);
   out->launch_count = ctx->launch_count;
-  out->schedule_cache_hits = ctx->schedule_cache_hits;
-  out->schedule_cache_misses = ctx->schedule_cache_misses;
   out->runtime_cache_hits = ctx->runtime_cache_hits;
   out->runtime_cache_misses = ctx->runtime_cache_misses;
   out->buffer_read_count = ctx->buffer_read_count;
@@ -296,12 +295,12 @@ void poly_ctx_record_memory_free(PolyCtx *ctx, PolyDevice device, size_t nbytes)
 #ifdef __EMSCRIPTEN__
 /* wasm_common.js reads this public struct manually. Keep the ABI facts
  * compile-checked instead of relying on an unverified offset table. */
-_Static_assert(offsetof(PolyCtxStats, global_ops) == 120, "wasm PolyCtxStats.global_ops offset");
-_Static_assert(offsetof(PolyCtxStats, global_mem) == 128, "wasm PolyCtxStats.global_mem offset");
-_Static_assert(offsetof(PolyCtxStats, time_sum_s) == 136, "wasm PolyCtxStats.time_sum_s offset");
-_Static_assert(offsetof(PolyCtxStats, kernel_count) == 144, "wasm PolyCtxStats.kernel_count offset");
-_Static_assert(offsetof(PolyCtxStats, mem_used) == 152, "wasm PolyCtxStats.mem_used offset");
-_Static_assert(sizeof(PolyCtxStats) == 160, "wasm PolyCtxStats size");
+_Static_assert(offsetof(PolyCtxStats, global_ops) == 104, "wasm PolyCtxStats.global_ops offset");
+_Static_assert(offsetof(PolyCtxStats, global_mem) == 112, "wasm PolyCtxStats.global_mem offset");
+_Static_assert(offsetof(PolyCtxStats, time_sum_s) == 120, "wasm PolyCtxStats.time_sum_s offset");
+_Static_assert(offsetof(PolyCtxStats, kernel_count) == 128, "wasm PolyCtxStats.kernel_count offset");
+_Static_assert(offsetof(PolyCtxStats, mem_used) == 136, "wasm PolyCtxStats.mem_used offset");
+_Static_assert(sizeof(PolyCtxStats) == 144, "wasm PolyCtxStats size");
 #endif
 
 PolyScratchMark poly_ctx_scratch_mark(PolyCtx *ctx) {

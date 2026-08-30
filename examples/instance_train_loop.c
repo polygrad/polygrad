@@ -15,7 +15,7 @@ int main(void) {
   PolyCtx *ctx = poly_ctx_new();
   int64_t shape[] = {1};
 
-  PolyUOp *w = poly_buffer(ctx, POLY_FLOAT32, 1);
+  PolyUOp *w = poly_uop_new_logical_buffer(ctx, POLY_FLOAT32, 1);
   float w_data[] = {1.0f};
   poly_buffer_set(ctx, w, w_data, sizeof(w_data), POLY_DEVICE_CPU);
   poly_register_existing_buffer(ctx, POLY_ROLE_PARAM, w, shape, 1, "w", true);

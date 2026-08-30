@@ -7,7 +7,7 @@
 
 #ifdef POLY_HAS_CUDA
 
-#include "codegen.h"
+#include "codegen/codegen.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -43,6 +43,26 @@ typedef struct {
   void **kernelParams;
   void **extra;
 } PolyCudaKernelNodeParams;
+
+/* Current CUDA_MEMCPY3D_v2 layout used by runtime/graph/cuda.py. */
+typedef struct {
+  size_t srcXInBytes, srcY, srcZ, srcLOD;
+  int srcMemoryType;
+  void *srcHost;
+  CUdeviceptr srcDevice;
+  void *srcArray;
+  void *reserved0;
+  size_t srcPitch, srcHeight;
+  size_t dstXInBytes, dstY, dstZ, dstLOD;
+  int dstMemoryType;
+  void *dstHost;
+  CUdeviceptr dstDevice;
+  void *dstArray;
+  void *reserved1;
+  size_t dstPitch, dstHeight, WidthInBytes, Height, Depth;
+} PolyCudaMemcpy3D;
+
+#define CU_MEMORYTYPE_DEVICE 2
 
 /* CUresult codes we check */
 #define CUDA_SUCCESS 0
@@ -87,11 +107,17 @@ typedef CUresult (*cuGraphCreate_fn)(CUgraph *, unsigned int);
 typedef CUresult (*cuGraphAddKernelNode_fn)(
     CUgraphNode *, CUgraph, const CUgraphNode *, size_t, const PolyCudaKernelNodeParams *
 );
+typedef CUresult (*cuGraphAddMemcpyNode_fn)(
+    CUgraphNode *, CUgraph, const CUgraphNode *, size_t, const PolyCudaMemcpy3D *, CUcontext
+);
 typedef CUresult (*cuGraphInstantiate_v2_fn)(
     CUgraphExec *, CUgraph, CUgraphNode *, char *, size_t
 );
 typedef CUresult (*cuGraphExecKernelNodeSetParams_fn)(
     CUgraphExec, CUgraphNode, const PolyCudaKernelNodeParams *
+);
+typedef CUresult (*cuGraphExecMemcpyNodeSetParams_fn)(
+    CUgraphExec, CUgraphNode, const PolyCudaMemcpy3D *, CUcontext
 );
 typedef CUresult (*cuGraphLaunch_fn)(CUgraphExec, CUstream);
 typedef CUresult (*cuGraphDestroy_fn)(CUgraph);
@@ -130,8 +156,10 @@ static struct {
   cuModuleUnload_fn cuModuleUnload;
   cuGraphCreate_fn cuGraphCreate;
   cuGraphAddKernelNode_fn cuGraphAddKernelNode;
+  cuGraphAddMemcpyNode_fn cuGraphAddMemcpyNode;
   cuGraphInstantiate_v2_fn cuGraphInstantiate_v2;
   cuGraphExecKernelNodeSetParams_fn cuGraphExecKernelNodeSetParams;
+  cuGraphExecMemcpyNodeSetParams_fn cuGraphExecMemcpyNodeSetParams;
   cuGraphLaunch_fn cuGraphLaunch;
   cuGraphDestroy_fn cuGraphDestroy;
   cuGraphExecDestroy_fn cuGraphExecDestroy;
@@ -214,8 +242,10 @@ static bool load_cuda_libs(void) {
 #define LOAD_CUDA_GRAPH(name) *(void **)&cuda_api.name = dlsym(cuda_api.libcuda, #name)
   LOAD_CUDA_GRAPH(cuGraphCreate);
   LOAD_CUDA_GRAPH(cuGraphAddKernelNode);
+  LOAD_CUDA_GRAPH(cuGraphAddMemcpyNode);
   LOAD_CUDA_GRAPH(cuGraphInstantiate_v2);
   LOAD_CUDA_GRAPH(cuGraphExecKernelNodeSetParams);
+  LOAD_CUDA_GRAPH(cuGraphExecMemcpyNodeSetParams);
   LOAD_CUDA_GRAPH(cuGraphLaunch);
   LOAD_CUDA_GRAPH(cuGraphDestroy);
   LOAD_CUDA_GRAPH(cuGraphExecDestroy);
@@ -301,6 +331,11 @@ bool poly_cuda_available(void) {
 int poly_cuda_arch_major(void) {
   if (cuda_state == CUDA_NOT_TRIED) poly_cuda_init();
   return cuda_arch_major;
+}
+
+int poly_cuda_arch_minor(void) {
+  if (cuda_state == CUDA_NOT_TRIED) poly_cuda_init();
+  return cuda_arch_minor;
 }
 
 unsigned long long poly_cuda_alloc(size_t bytes) {
@@ -522,7 +557,9 @@ void poly_cuda_program_destroy(PolyCudaProgram *prog) {
 
 typedef struct {
   CUgraphNode node;
+  PolyCudaGraphCallKind kind;
   PolyCudaKernelNodeParams params;
+  PolyCudaMemcpy3D copy;
   CUdeviceptr *buffer_values;
   int *scalar_values;
   void **kernel_params;
@@ -540,37 +577,62 @@ struct PolyCudaGraph {
 bool poly_cuda_graph_available(void) {
   if (cuda_state == CUDA_NOT_TRIED && poly_cuda_init() != 0) return false;
   return cuda_state == CUDA_INIT_OK && cuda_api.cuGraphCreate && cuda_api.cuGraphAddKernelNode &&
-         cuda_api.cuGraphInstantiate_v2 && cuda_api.cuGraphExecKernelNodeSetParams &&
+         cuda_api.cuGraphAddMemcpyNode && cuda_api.cuGraphInstantiate_v2 &&
+         cuda_api.cuGraphExecKernelNodeSetParams && cuda_api.cuGraphExecMemcpyNodeSetParams &&
          cuda_api.cuGraphLaunch && cuda_api.cuGraphDestroy && cuda_api.cuGraphExecDestroy;
 }
 
 static int poly_cuda_graph_node_update(
     PolyCudaGraphNode *node,
-    const PolyCudaGraphKernelSpec *spec
+    const PolyCudaGraphCallSpec *spec
 ) {
-  if (!node || !spec || !spec->program || !spec->args || spec->n_buffer_args < 0 ||
-      spec->n_args < spec->n_buffer_args || node->n_buffer_args != spec->n_buffer_args ||
-      node->n_args != spec->n_args)
+  if (!node || !spec || node->kind != spec->kind) return -1;
+  if (spec->kind == POLY_CUDA_GRAPH_COPY) {
+    if (!spec->value.copy.dst || !spec->value.copy.src || spec->value.copy.nbytes == 0)
+      return -1;
+    node->copy = (PolyCudaMemcpy3D){
+        .srcMemoryType = CU_MEMORYTYPE_DEVICE,
+        .srcDevice = (CUdeviceptr)(uintptr_t)spec->value.copy.src,
+        .srcPitch = spec->value.copy.nbytes,
+        .srcHeight = 1,
+        .dstMemoryType = CU_MEMORYTYPE_DEVICE,
+        .dstDevice = (CUdeviceptr)(uintptr_t)spec->value.copy.dst,
+        .dstPitch = spec->value.copy.nbytes,
+        .dstHeight = 1,
+        .WidthInBytes = spec->value.copy.nbytes,
+        .Height = 1,
+        .Depth = 1,
+    };
+    return 0;
+  }
+
+  PolyCudaProgram *program = spec->value.program.program;
+  void **args = spec->value.program.args;
+  int n_buffer_args = spec->value.program.n_buffer_args;
+  int n_args = spec->value.program.n_args;
+  if (spec->kind != POLY_CUDA_GRAPH_PROGRAM || !program || !args || n_buffer_args < 0 ||
+      n_args < n_buffer_args || node->n_buffer_args != n_buffer_args ||
+      node->n_args != n_args)
     return -1;
 
-  for (int i = 0; i < spec->n_buffer_args; i++) {
-    node->buffer_values[i] = (CUdeviceptr)(uintptr_t)spec->args[i];
+  for (int i = 0; i < n_buffer_args; i++) {
+    node->buffer_values[i] = (CUdeviceptr)(uintptr_t)args[i];
     node->kernel_params[i] = &node->buffer_values[i];
   }
-  for (int i = spec->n_buffer_args; i < spec->n_args; i++) {
-    int scalar_idx = i - spec->n_buffer_args;
-    if (!spec->args[i]) return -1;
-    node->scalar_values[scalar_idx] = *(int *)spec->args[i];
+  for (int i = n_buffer_args; i < n_args; i++) {
+    int scalar_idx = i - n_buffer_args;
+    if (!args[i]) return -1;
+    node->scalar_values[scalar_idx] = *(int *)args[i];
     node->kernel_params[i] = &node->scalar_values[scalar_idx];
   }
 
-  node->params.func = (CUfunction)spec->program->function;
-  node->params.gridDimX = (unsigned int)(spec->grid[0] > 0 ? spec->grid[0] : 1);
-  node->params.gridDimY = (unsigned int)(spec->grid[1] > 0 ? spec->grid[1] : 1);
-  node->params.gridDimZ = (unsigned int)(spec->grid[2] > 0 ? spec->grid[2] : 1);
-  node->params.blockDimX = (unsigned int)(spec->block[0] > 0 ? spec->block[0] : 1);
-  node->params.blockDimY = (unsigned int)(spec->block[1] > 0 ? spec->block[1] : 1);
-  node->params.blockDimZ = (unsigned int)(spec->block[2] > 0 ? spec->block[2] : 1);
+  node->params.func = (CUfunction)program->function;
+  node->params.gridDimX = (unsigned int)(spec->value.program.grid[0] > 0 ? spec->value.program.grid[0] : 1);
+  node->params.gridDimY = (unsigned int)(spec->value.program.grid[1] > 0 ? spec->value.program.grid[1] : 1);
+  node->params.gridDimZ = (unsigned int)(spec->value.program.grid[2] > 0 ? spec->value.program.grid[2] : 1);
+  node->params.blockDimX = (unsigned int)(spec->value.program.block[0] > 0 ? spec->value.program.block[0] : 1);
+  node->params.blockDimY = (unsigned int)(spec->value.program.block[1] > 0 ? spec->value.program.block[1] : 1);
+  node->params.blockDimZ = (unsigned int)(spec->value.program.block[2] > 0 ? spec->value.program.block[2] : 1);
   node->params.sharedMemBytes = 0;
   node->params.kernelParams = node->kernel_params;
   node->params.extra = NULL;
@@ -591,7 +653,7 @@ void poly_cuda_graph_destroy(PolyCudaGraph *graph) {
   free(graph);
 }
 
-PolyCudaGraph *poly_cuda_graph_create(const PolyCudaGraphKernelSpec *specs, int n_specs) {
+PolyCudaGraph *poly_cuda_graph_create(const PolyCudaGraphCallSpec *specs, int n_specs) {
   if (!specs || n_specs <= 0 || !poly_cuda_graph_available()) return NULL;
   PolyCudaGraph *graph = calloc(1, sizeof(*graph));
   if (!graph) return NULL;
@@ -606,24 +668,32 @@ PolyCudaGraph *poly_cuda_graph_create(const PolyCudaGraphKernelSpec *specs, int 
   }
 
   for (int i = 0; i < n_specs; i++) {
-    const PolyCudaGraphKernelSpec *spec = &specs[i];
+    const PolyCudaGraphCallSpec *spec = &specs[i];
     PolyCudaGraphNode *node = &graph->nodes[i];
-    if (!spec->program || !spec->args || spec->n_buffer_args < 0 ||
-        spec->n_args < spec->n_buffer_args || spec->n_dependencies < 0)
+    if (spec->n_dependencies < 0) goto fail;
+    node->kind = spec->kind;
+    if (spec->kind == POLY_CUDA_GRAPH_PROGRAM) {
+      int n_buffer_args = spec->value.program.n_buffer_args;
+      int n_args = spec->value.program.n_args;
+      if (!spec->value.program.program || !spec->value.program.args || n_buffer_args < 0 ||
+          n_args < n_buffer_args)
+        goto fail;
+      node->n_buffer_args = n_buffer_args;
+      node->n_args = n_args;
+      int n_scalars = n_args - n_buffer_args;
+      node->buffer_values = calloc(
+          (size_t)(n_buffer_args > 0 ? n_buffer_args : 1), sizeof(*node->buffer_values)
+      );
+      node->scalar_values =
+          calloc((size_t)(n_scalars > 0 ? n_scalars : 1), sizeof(*node->scalar_values));
+      node->kernel_params =
+          calloc((size_t)(n_args > 0 ? n_args : 1), sizeof(*node->kernel_params));
+      if (!node->buffer_values || !node->scalar_values || !node->kernel_params)
+        goto fail;
+    } else if (spec->kind != POLY_CUDA_GRAPH_COPY) {
       goto fail;
-    node->n_buffer_args = spec->n_buffer_args;
-    node->n_args = spec->n_args;
-    int n_scalars = spec->n_args - spec->n_buffer_args;
-    node->buffer_values = calloc(
-        (size_t)(spec->n_buffer_args > 0 ? spec->n_buffer_args : 1), sizeof(*node->buffer_values)
-    );
-    node->scalar_values =
-        calloc((size_t)(n_scalars > 0 ? n_scalars : 1), sizeof(*node->scalar_values));
-    node->kernel_params =
-        calloc((size_t)(spec->n_args > 0 ? spec->n_args : 1), sizeof(*node->kernel_params));
-    if (!node->buffer_values || !node->scalar_values || !node->kernel_params ||
-        poly_cuda_graph_node_update(node, spec) != 0)
-      goto fail;
+    }
+    if (poly_cuda_graph_node_update(node, spec) != 0) goto fail;
 
     CUgraphNode deps_inline[32];
     CUgraphNode *deps = deps_inline;
@@ -644,10 +714,15 @@ PolyCudaGraph *poly_cuda_graph_create(const PolyCudaGraphKernelSpec *specs, int 
       if (deps != deps_inline) free(deps);
       goto fail;
     }
-    err = cuda_api.cuGraphAddKernelNode(
-        &node->node, graph->graph, spec->n_dependencies ? deps : NULL,
-        (size_t)spec->n_dependencies, &node->params
-    );
+    err = spec->kind == POLY_CUDA_GRAPH_PROGRAM
+              ? cuda_api.cuGraphAddKernelNode(
+                    &node->node, graph->graph, spec->n_dependencies ? deps : NULL,
+                    (size_t)spec->n_dependencies, &node->params
+                )
+              : cuda_api.cuGraphAddMemcpyNode(
+                    &node->node, graph->graph, spec->n_dependencies ? deps : NULL,
+                    (size_t)spec->n_dependencies, &node->copy, cuda_ctx
+                );
     if (deps != deps_inline) free(deps);
     if (err != CUDA_SUCCESS) {
       fprintf(stderr, "polygrad: cuda: cuGraphAddKernelNode failed (CUresult=%d)\n", err);
@@ -667,13 +742,18 @@ fail:
   return NULL;
 }
 
-int poly_cuda_graph_update(PolyCudaGraph *graph, const PolyCudaGraphKernelSpec *specs, int n_specs) {
+int poly_cuda_graph_update(PolyCudaGraph *graph, const PolyCudaGraphCallSpec *specs, int n_specs) {
   if (!graph || !graph->instance || !specs || n_specs != graph->n_nodes) return -1;
   for (int i = 0; i < n_specs; i++) {
     PolyCudaGraphNode *node = &graph->nodes[i];
     if (poly_cuda_graph_node_update(node, &specs[i]) != 0) return -1;
-    CUresult err =
-        cuda_api.cuGraphExecKernelNodeSetParams(graph->instance, node->node, &node->params);
+    CUresult err = specs[i].kind == POLY_CUDA_GRAPH_PROGRAM
+                       ? cuda_api.cuGraphExecKernelNodeSetParams(
+                             graph->instance, node->node, &node->params
+                         )
+                       : cuda_api.cuGraphExecMemcpyNodeSetParams(
+                             graph->instance, node->node, &node->copy, cuda_ctx
+                         );
     if (err != CUDA_SUCCESS) {
       fprintf(
           stderr, "polygrad: cuda: cuGraphExecKernelNodeSetParams failed (CUresult=%d)\n", err

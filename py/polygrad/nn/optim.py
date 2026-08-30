@@ -2,6 +2,7 @@
 
 from .. import _ffi
 from ..dtype import dtypes, least_upper_dtype, to_dtype
+from ..helpers import TRAINING
 from ..tensor import Tensor, _ptr_value
 
 
@@ -51,13 +52,6 @@ class Optimizer:
         if not self.params:
             raise AssertionError("optimizer must have at least one param")
         self.buffers = _dedup([p for p in params if not p.is_param])
-        # tinygrad's current autograd discovers every reachable floating Tensor
-        # and uses is_param only for optimizer membership.  Polygrad retains a
-        # separate internal autograd switch, so selected parameters must enable
-        # it without conflating buffers with non-differentiable values.
-        for p in self.params:
-            if not p.requires_grad:
-                p.requires_grad_(True)
         self.device = device or self.params[0].device
         self._ctx = self.params[0]._ctx
         if lr_tensor is not None:
@@ -77,7 +71,6 @@ class Optimizer:
                 dtype=least_upper_dtype(dtypes.default_float, dtypes.float32),
                 device=self.device,
                 _ctx=self._ctx,
-                requires_grad=False,
             )
 
     def zero_grad(self):
@@ -91,6 +84,13 @@ class Optimizer:
         return None, None, None, None, []
 
     def schedule_step(self):
+        # Current tinygrad/nn/optim.py:41-47. Optimizer effects are only valid
+        # inside the shared training context used by dropout and BatchNorm.
+        if not TRAINING:
+            raise RuntimeError(
+                f"TRAINING={TRAINING.value}, TRAINING must be enabled to use the optimizer.\n"
+                "                - help: Consider using Context(TRAINING=1) before calling Optimizer.step()."
+            )
         grads = []
         for p in self.params:
             if p.grad is None:
@@ -187,7 +187,7 @@ class SGD(Optimizer):
         self.nesterov = bool(nesterov)
         self.classic = bool(classic)
         self.b = [
-            Tensor.zeros(p.shape, dtype="float32", device=self.device, _ctx=self._ctx, requires_grad=False)
+            Tensor.zeros(p.shape, dtype="float32", device=self.device, _ctx=self._ctx)
             for p in self.params
         ] if self.momentum else []
         self.velocities = self.b
@@ -228,18 +228,18 @@ class Adam(Optimizer):
         self.eps = float(eps)
         self.weight_decay = 0.0
         self.m = [
-            Tensor.zeros(p.shape, dtype="float32", device=self.device, _ctx=self._ctx, requires_grad=False)
+            Tensor.zeros(p.shape, dtype="float32", device=self.device, _ctx=self._ctx)
             for p in self.params
         ]
         self.v = [
-            Tensor.zeros(p.shape, dtype="float32", device=self.device, _ctx=self._ctx, requires_grad=False)
+            Tensor.zeros(p.shape, dtype="float32", device=self.device, _ctx=self._ctx)
             for p in self.params
         ]
         self.b1_t = Tensor.ones(
-            1, dtype="float32", device=self.device, _ctx=self._ctx, requires_grad=False,
+            1, dtype="float32", device=self.device, _ctx=self._ctx,
         ).is_param_(False)
         self.b2_t = Tensor.ones(
-            1, dtype="float32", device=self.device, _ctx=self._ctx, requires_grad=False,
+            1, dtype="float32", device=self.device, _ctx=self._ctx,
         ).is_param_(False)
         self._bc1 = self.b1_t
         self._bc2 = self.b2_t

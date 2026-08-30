@@ -13,9 +13,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PY_SYNC = ROOT / "py" / "scripts" / "sync-csrc.py"
 JS_EXCLUDE = {
-    "render_wasm.c",
+    "wasm.c",
     "wasm_builder.c",
-    "render_wgsl.c",
+    "wgsl.c",
     "llama3.c",
     "resnet.c",
     "vit.c",

@@ -53,10 +53,6 @@ class PolyIntTuple(ctypes.Structure):
     _fields_ = [("vals", ctypes.POINTER(ctypes.c_int64)), ("n", ctypes.c_int)]
 
 
-class PolyPairTuple(ctypes.Structure):
-    _fields_ = [("pairs", ctypes.POINTER(ctypes.c_int64 * 2)), ("n", ctypes.c_int)]
-
-
 class PolyReduceAxisArg(ctypes.Structure):
     _fields_ = [
         ("op", ctypes.c_int),
@@ -74,11 +70,24 @@ class PolyRangeArg(ctypes.Structure):
     ]
 
 
-class PolyDefineVarArg(ctypes.Structure):
+class PolyParamArg(ctypes.Structure):
     _fields_ = [
+        ("slot", ctypes.c_int64),
+        ("dtype", PolyDType),
         ("name", ctypes.c_char_p),
         ("min_val", ctypes.c_int64),
         ("max_val", ctypes.c_int64),
+        ("has_minmax", ctypes.c_bool),
+        ("multiple_of", ctypes.c_int64),
+        ("has_multiple_of", ctypes.c_bool),
+        ("addrspace", ctypes.c_int),
+        ("axis", ctypes.c_int32),
+        ("has_axis", ctypes.c_bool),
+        ("device", ctypes.c_char_p),
+        ("devices", ctypes.POINTER(ctypes.c_char_p)),
+        ("n_devices", ctypes.c_int32),
+        ("device_is_tuple", ctypes.c_bool),
+        ("volatile_", ctypes.c_bool),
     ]
 
 
@@ -99,12 +108,11 @@ class PolyArgValue(ctypes.Union):
         ("f", ctypes.c_double),
         ("b", ctypes.c_bool),
         ("int_tuple", PolyIntTuple),
-        ("pair_tuple", PolyPairTuple),
         ("str", ctypes.c_char_p),
         ("ops", ctypes.c_int),
         ("reduce_axis", PolyReduceAxisArg),
         ("range", PolyRangeArg),
-        ("define_var", PolyDefineVarArg),
+        ("param", ctypes.POINTER(PolyParamArg)),
         ("bufferize_opts", PolyBufferizeOptsArg),
         ("program_info", ctypes.c_void_p),
     ]
@@ -138,8 +146,8 @@ PolyUOp._fields_ = [
 
 ARG_INT = 1
 ARG_BOOL = 3
-ARG_RANGE = 9
-ARG_DEFINE_VAR = 10
+ARG_RANGE = 10
+ARG_PARAM = 16
 AXIS_LOOP = 3
 
 
@@ -170,15 +178,6 @@ def arg_int(value: int) -> PolyArg:
     return a
 
 
-def arg_define_var(name: str, lo: int, hi: int) -> PolyArg:
-    a = PolyArg()
-    a.kind = ARG_DEFINE_VAR
-    a.value.define_var.name = name.encode()
-    a.value.define_var.min_val = int(lo)
-    a.value.define_var.max_val = int(hi)
-    return a
-
-
 def load_lib() -> ctypes.CDLL:
     path = Path(os.environ.get("POLYGRAD_LIB", DEFAULT_LIB))
     if not path.exists():
@@ -198,8 +197,13 @@ def load_lib() -> ctypes.CDLL:
 
     lib.poly_const_int.restype = PolyUOpPtr
     lib.poly_const_int.argtypes = [ctypes.c_void_p, ctypes.c_int64]
-    lib.poly_define_var.restype = PolyUOpPtr
-    lib.poly_define_var.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int64, ctypes.c_int64]
+    lib.poly_dtype_id_by_name.restype = ctypes.c_int
+    lib.poly_dtype_id_by_name.argtypes = [ctypes.c_char_p]
+    lib.poly_uop_variable_by_id.restype = PolyUOpPtr
+    lib.poly_uop_variable_by_id.argtypes = [
+        ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int64, ctypes.c_int64,
+        ctypes.c_int, ctypes.c_int64, ctypes.c_bool,
+    ]
     lib.poly_alu1.restype = PolyUOpPtr
     lib.poly_alu1.argtypes = [ctypes.c_void_p, ctypes.c_int, PolyUOpPtr]
     lib.poly_alu2.restype = PolyUOpPtr
@@ -241,7 +245,7 @@ class Poly:
             if lib.poly_op_name(i)
         }
         self.int32 = PolyDType.in_dll(lib, "POLY_INT32")
-        self.index = PolyDType.in_dll(lib, "POLY_INDEX")
+        self.weakint = PolyDType.in_dll(lib, "POLY_WEAKINT")
         self.fixed_dtypes = {
             name: PolyDType.in_dll(lib, f"POLY_{name.upper()}")
             for name in ("int8", "uint8", "int16", "uint16", "int32", "uint32", "int64", "uint64")
@@ -259,14 +263,12 @@ class Poly:
         return self.lib.poly_uop0(self.ctx, self.ops["CONST"], dtype, arg_int(value))
 
     def var(self, name: str, lo: int, hi: int) -> PolyUOpPtr:
-        return self.lib.poly_define_var(self.ctx, name.encode(), lo, hi)
+        return self.var_typed(self.weakint, name, lo, hi)
 
     def var_typed(self, dtype: PolyDType, name: str, lo: int, hi: int) -> PolyUOpPtr:
-        return self.lib.poly_uop0(
-            self.ctx,
-            self.ops["DEFINE_VAR"],
-            dtype,
-            arg_define_var(name, lo, hi),
+        dtype_id = self.lib.poly_dtype_id_by_name(dtype_name(dtype).encode())
+        return self.lib.poly_uop_variable_by_id(
+            self.ctx, name.encode(), lo, hi, dtype_id, 1, False,
         )
 
     def range(self, bound: PolyUOpPtr, axis_id: int, dtype: PolyDType | None = None) -> PolyUOpPtr:
@@ -310,8 +312,8 @@ class Poly:
                 arg = f" arg={node.arg.value.i}"
             elif node.arg.kind == ARG_BOOL:
                 arg = f" arg={bool(node.arg.value.b)}"
-            elif node.arg.kind == ARG_DEFINE_VAR:
-                var = node.arg.value.define_var
+            elif node.arg.kind == ARG_PARAM and node.arg.value.param:
+                var = node.arg.value.param.contents
                 arg = f" arg=({var.name.decode()},{var.min_val},{var.max_val})"
             lines.append(f"{'  ' * depth}{op}:{dtype_name(node.dtype)}{arg}")
             if depth >= max_depth:
@@ -436,12 +438,13 @@ class Z3Translator:
                 )
             else:
                 raise NotImplementedError(f"unsupported CONST arg kind {node.arg.kind}")
-        elif op == "DEFINE_VAR":
-            if node.arg.kind != ARG_DEFINE_VAR:
-                raise NotImplementedError("DEFINE_VAR without DEFINE_VAR arg")
-            name = node.arg.value.define_var.name.decode()
-            lo = int(node.arg.value.define_var.min_val)
-            hi = int(node.arg.value.define_var.max_val)
+        elif op in ("BUFFER", "PARAM") and node.arg.kind == ARG_PARAM and node.arg.value.param:
+            param = node.arg.value.param.contents
+            if not param.has_minmax or param.addrspace != 3:
+                raise NotImplementedError(f"non-variable {op}")
+            name = param.name.decode()
+            lo = int(param.min_val)
+            hi = int(param.max_val)
             var_key = f"var:{name}:{dtype_name(node.dtype)}"
             out = self.z3_vars.get(var_key)
             if out is None:
@@ -546,8 +549,8 @@ class Z3Translator:
             elif op == "WHERE":
                 out = z3.If(src[0], src[1], src[2])
             elif op == "CAST" and self.fixed_width:
-                if node.n_src != 1 or node.dtype.count != 1 or node.src[0].contents.dtype.count != 1:
-                    raise NotImplementedError("non-scalar fixed-width CAST")
+                if node.n_src != 1:
+                    raise NotImplementedError("malformed fixed-width CAST")
                 out = bv_cast(src[0], node.src[0].contents.dtype, node.dtype)
             else:
                 raise NotImplementedError(f"unsupported op {op}")

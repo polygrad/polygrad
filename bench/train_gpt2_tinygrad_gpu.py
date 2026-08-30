@@ -9,7 +9,7 @@ import math
 
 os.environ['DEBUG'] = '0'
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'references', 'tinygrad'))
-from tinygrad import Tensor, Device
+from tinygrad import Context, Device, Tensor
 from tinygrad.nn.optim import Adam
 from tinygrad.nn.state import get_parameters
 Device.DEFAULT = 'CUDA'
@@ -111,9 +111,9 @@ LR = 0.001
 N_WARMUP = 1
 
 
+@Context(TRAINING=1)
 def run_config(cfg):
     Tensor.manual_seed(42)
-    Tensor.training = True
     np.random.seed(42)
 
     model = GPT2(

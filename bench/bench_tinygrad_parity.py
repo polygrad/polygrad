@@ -73,28 +73,16 @@ def _check(actual: np.ndarray, expected: np.ndarray) -> dict[str, Any]:
     return {"ok": ok, "max_abs_err": max_abs_err, "reason": None if ok else "value mismatch"}
 
 
-def _tensor_make(Tensor: Any, data: np.ndarray, *, requires_grad: bool = False):
-    if not requires_grad:
-        return Tensor(data)
-    try:
-        return Tensor(data, requires_grad=True)
-    except TypeError as exc:
-        if "requires_grad" not in str(exc):
-            raise
-    t = Tensor(data)
-    if hasattr(t, "is_param"):
-        t.is_param = True
-    else:
-        t.requires_grad = True
-    return t
+def _tensor_make(Tensor: Any, data: np.ndarray):
+    return Tensor(data)
 
 
 def _build_workload(Tensor: Any, name: str, mode: str) -> tuple[Callable[[], Any], np.ndarray]:
     if name in FRESH_ONLY and mode != "fresh-inputs":
         raise ValueError(f"{name} requires --mode fresh-inputs or --mode both")
 
-    def tensor(x: np.ndarray, *, requires_grad: bool = False):
-        return _tensor_make(Tensor, x, requires_grad=requires_grad)
+    def tensor(x: np.ndarray):
+        return _tensor_make(Tensor, x)
 
     if name == "add_1024":
         a_np = np.linspace(-1.0, 1.0, 1024, dtype=np.float32)
@@ -149,7 +137,7 @@ def _build_workload(Tensor: Any, name: str, mode: str) -> tuple[Callable[[], Any
         expected = np.float32(2.0) * a_np
 
         def run_backward():
-            a = tensor(a_np, requires_grad=True)
+            a = tensor(a_np)
             loss = (a * a).sum()
             loss.backward()
             return a.grad
@@ -232,11 +220,16 @@ def _import_polygrad(repo_root: Path, lib_path: Path) -> tuple[Any, Callable[[],
     if loaded != expected:
         raise RuntimeError(f"Polygrad loaded {loaded}, expected {expected}")
 
-    _ffi._lib.poly_schedule_cache_len.restype = ctypes.c_size_t
-    _ffi._lib.poly_schedule_cache_len.argtypes = [_ffi._ptr]
+    _ffi._lib.poly_to_program_cache_len.restype = ctypes.c_size_t
+    _ffi._lib.poly_to_program_cache_len.argtypes = [_ffi._ptr]
+    _ffi._lib.poly_runtime_cache_len.restype = ctypes.c_size_t
+    _ffi._lib.poly_runtime_cache_len.argtypes = [_ffi._ptr]
 
     def cache_stats() -> dict[str, int]:
-        return {"schedule_cache": int(_ffi._lib.poly_schedule_cache_len(_default_ctx))}
+        return {
+            "to_program_cache": int(_ffi._lib.poly_to_program_cache_len(_default_ctx)),
+            "runtime_cache": int(_ffi._lib.poly_runtime_cache_len(_default_ctx)),
+        }
 
     return Tensor, cache_stats
 

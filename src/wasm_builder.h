@@ -2,7 +2,7 @@
  * wasm_builder.h — WASM binary module builder
  *
  * Utilities for constructing valid WASM binary modules byte-by-byte.
- * Used by render_wasm.c to emit fused kernels as WASM bytecodes.
+ * Used by renderer/wasm.c to emit fused kernels as WASM bytecodes.
  *
  * Reference: WebAssembly Binary Format Specification
  * https://webassembly.github.io/spec/core/binary/

@@ -1,13 +1,13 @@
 /*
- * render_wgsl.c — WGSL compute shader renderer
+ * renderer/wgsl.c — current Tinygrad renderer/wgsl.py port
  *
- * Walks linearized UOps (same input as render_c.c) and emits a WGSL
+ * Walks linearized UOps and emits a WGSL
  * compute shader string. Buffers become storage bindings, loops use
  * WGSL syntax, WHERE maps to select().
  *
  * GPU ops: SPECIAL (gidx/lidx → workgroup_id/local_invocation_id),
- * BARRIER (workgroupBarrier), DEFINE_LOCAL (var<workgroup> shared arrays),
- * DEFINE_REG (register-local arrays), AFTER (passthrough).
+ * BARRIER (workgroupBarrier), BUFFER(LOCAL) workgroup arrays, BUFFER(REG)
+ * register-local arrays, and AFTER passthrough.
  *
  * Parity target: tinygrad renderer/wgsl.py (WGSLRenderer)
  *
@@ -22,7 +22,9 @@
 
 #define _POSIX_C_SOURCE 200809L
 
-#include "codegen.h"
+#include "codegen/codegen.h"
+#include "runtime_webgpu.h"
+#include "uop/ops.h"
 #include "bigint.h"
 #include "engine/schedule.h" /* POLY_DEVICE_WEBGPU */
 #include <stdio.h>
@@ -30,6 +32,7 @@
 #include <string.h>
 #include <stdarg.h>
 #include <math.h>
+#include <limits.h>
 #include "utils.h"
 
 static int wgsl_launch_dim_upper_bound(PolyUOp *expr) {
@@ -41,7 +44,7 @@ static int wgsl_launch_dim_upper_bound(PolyUOp *expr) {
   return (int)hi;
 }
 
-/* String builder (same as render_c.c) */
+/* C storage for Tinygrad's string-renderer output. */
 
 typedef struct {
   char *buf;
@@ -76,7 +79,7 @@ static void wsb_puts(WgslStrBuf *sb, const char *s) {
   wsb_printf(sb, "%s", s);
 }
 
-/* Pointer → string hash map (same as render_c.c) */
+/* C storage for Tinygrad's per-UOp rendered-expression dictionary. */
 
 typedef struct {
   PolyUOp **keys;
@@ -159,7 +162,7 @@ static void wgsl_bindings_free(WgslBinding *bindings, int n_bindings) {
 /* WGSL type name */
 
 static const char *wgsl_type_name(PolyDType dt) {
-  PolyDType s = poly_dtype_scalar(dt);
+  PolyDType s = dt;
   /* f16 for half (tinygrad: dtypes.half -> "f16") */
   if (s.priority == POLY_FLOAT16.priority && s.bitsize == POLY_FLOAT16.bitsize) return "f16";
   if (poly_dtype_is_float(dt)) return "f32";
@@ -170,7 +173,7 @@ static const char *wgsl_type_name(PolyDType dt) {
 }
 
 static bool wgsl_dtype_is_packed_storage(PolyDType dt) {
-  PolyDType s = poly_dtype_scalar(dt);
+  PolyDType s = dt;
   int itemsize = poly_dtype_itemsize(s);
   /* tinygrad WGSL packs sub-32-bit non-half storage through atomic<u32>.
    * WGSL scalar bool is valid, but bool storage buffers are not host-shareable,
@@ -184,7 +187,7 @@ static const char *wgsl_buffer_type_name(PolyDType dt) {
 
 static bool wgsl_packed_params(PolyDType dt, int *itemsize, int *elems, unsigned *mask) {
   if (!wgsl_dtype_is_packed_storage(dt)) return false;
-  int is = poly_dtype_itemsize(poly_dtype_scalar(dt));
+  int is = poly_dtype_itemsize(dt);
   if (is != 1 && is != 2) return false;
   if (itemsize) *itemsize = is;
   if (elems) *elems = 4 / is;
@@ -194,7 +197,7 @@ static bool wgsl_packed_params(PolyDType dt, int *itemsize, int *elems, unsigned
 
 static bool wgsl_index_uses_packed_buffer(PolyUOp *idx_uop, PolyDType *buf_dt_out) {
   if (!idx_uop || idx_uop->op != POLY_OP_INDEX || idx_uop->n_src < 2) return false;
-  PolyDType buf_dt = poly_dtype_scalar(idx_uop->src[0]->dtype);
+  PolyDType buf_dt = idx_uop->src[0]->dtype;
   if (!wgsl_dtype_is_packed_storage(buf_dt)) return false;
   if (buf_dt_out) *buf_dt_out = buf_dt;
   return true;
@@ -224,7 +227,7 @@ static bool wgsl_make_packed_load_expr(
       idx_s, elems, idx_s, elems, 8u * (unsigned)itemsize, mask
   );
 
-  PolyDType scalar = poly_dtype_scalar(load_dt);
+  PolyDType scalar = load_dt;
   if (poly_dtype_is_bool(scalar)) {
     snprintf(out, out_sz, "(%s != 0u)", raw);
   } else if (!poly_dtype_is_unsigned(scalar) && poly_dtype_is_int(scalar)) {
@@ -255,7 +258,7 @@ static bool wgsl_emit_packed_store(
   if (!buf_s || !idx_s || !val) return false;
 
   char val_u32[512];
-  if (poly_dtype_is_bool(poly_dtype_scalar(buf_dt)))
+  if (poly_dtype_is_bool(buf_dt))
     snprintf(val_u32, sizeof(val_u32), "select(0u, 1u, %s)", val);
   else
     snprintf(val_u32, sizeof(val_u32), "u32(%s)", val);
@@ -285,10 +288,10 @@ static bool wgsl_uop_tree_contains_target(PolyUOp *u, PolyUOp *target) {
   return false;
 }
 
-static PolyUOp *wgsl_pick_lane_uop(PolyUOp *u, int lane) {
-  if (!u || u->dtype.count <= 1) return u;
+static PolyUOp *wgsl_pick_lane_uop(PolyCtx *ctx, PolyUOp *u, int lane) {
+  if (!u || poly_uop_max_numel(ctx, u) <= 1) return u;
   if (lane < 0) lane = 0;
-  if (u->op == POLY_OP_VECTORIZE || u->op == POLY_OP_VCONST) {
+  if (u->op == POLY_OP_STACK) {
     if (u->n_src <= 0) return NULL;
     if (lane >= u->n_src) lane = u->n_src - 1;
     return u->src[lane];
@@ -296,11 +299,12 @@ static PolyUOp *wgsl_pick_lane_uop(PolyUOp *u, int lane) {
   return NULL;
 }
 
-static int wgsl_infer_gated_load_lane(PolyUOp *idx_expr, PolyUOp *vec_gate) {
-  if (!idx_expr || !vec_gate || vec_gate->dtype.count <= 1) return -1;
+static int wgsl_infer_gated_load_lane(PolyCtx *ctx, PolyUOp *idx_expr, PolyUOp *vec_gate) {
+  int64_t lanes = poly_uop_max_numel(ctx, vec_gate);
+  if (!idx_expr || !vec_gate || lanes <= 1 || lanes > INT_MAX) return -1;
   int found = -1;
-  for (int lane = 0; lane < vec_gate->dtype.count; lane++) {
-    PolyUOp *gate_lane = wgsl_pick_lane_uop(vec_gate, lane);
+  for (int lane = 0; lane < lanes; lane++) {
+    PolyUOp *gate_lane = wgsl_pick_lane_uop(ctx, vec_gate, lane);
     if (!gate_lane) continue;
     if (!wgsl_uop_tree_contains_target(idx_expr, gate_lane)) continue;
     if (found != -1 && found != lane) return -1;
@@ -330,138 +334,6 @@ static int wgsl_next_vector_lane(
   return 0;
 }
 
-static int wgsl_pos_mod_i64(int64_t x, int mod) {
-  if (mod <= 0) return 0;
-  int64_t r = x % mod;
-  if (r < 0) r += mod;
-  return (int)r;
-}
-
-static bool wgsl_const_i64(PolyUOp *u, int64_t *out) {
-  if (!u) return false;
-  if ((u->op == POLY_OP_CAST || u->op == POLY_OP_BITCAST) && u->n_src > 0)
-    return wgsl_const_i64(u->src[0], out);
-  if (u->op != POLY_OP_CONST || poly_dtype_is_float(poly_dtype_scalar(u->dtype))) return false;
-  if (out) *out = u->arg.i;
-  return true;
-}
-
-static bool wgsl_expr_mod_const(PolyUOp *u, int mod, int *out) {
-  if (!u || mod <= 0) return false;
-  int64_t c0 = 0, c1 = 0;
-  int r0 = 0, r1 = 0;
-  switch (u->op) {
-  case POLY_OP_CONST:
-    if (!wgsl_const_i64(u, &c0)) return false;
-    if (out) *out = wgsl_pos_mod_i64(c0, mod);
-    return true;
-  case POLY_OP_RANGE:
-  case POLY_OP_SPECIAL:
-  case POLY_OP_DEFINE_VAR:
-  case POLY_OP_PARAM:
-    if (out) *out = 0;
-    return true;
-  case POLY_OP_CAST:
-  case POLY_OP_BITCAST:
-    return u->n_src > 0 && wgsl_expr_mod_const(u->src[0], mod, out);
-  case POLY_OP_ADD:
-    if (u->n_src < 2 || !wgsl_expr_mod_const(u->src[0], mod, &r0) ||
-        !wgsl_expr_mod_const(u->src[1], mod, &r1))
-      return false;
-    if (out) *out = (r0 + r1) % mod;
-    return true;
-  case POLY_OP_SUB:
-    if (u->n_src < 2 || !wgsl_expr_mod_const(u->src[0], mod, &r0) ||
-        !wgsl_expr_mod_const(u->src[1], mod, &r1))
-      return false;
-    if (out) *out = wgsl_pos_mod_i64((int64_t)r0 - r1, mod);
-    return true;
-  case POLY_OP_MUL:
-    if (u->n_src < 2) return false;
-    if (wgsl_const_i64(u->src[0], &c0) && (c0 % mod) == 0) {
-      if (out) *out = 0;
-      return true;
-    }
-    if (wgsl_const_i64(u->src[1], &c1) && (c1 % mod) == 0) {
-      if (out) *out = 0;
-      return true;
-    }
-    if (!wgsl_expr_mod_const(u->src[0], mod, &r0) ||
-        !wgsl_expr_mod_const(u->src[1], mod, &r1))
-      return false;
-    if (out) *out = (int)(((int64_t)r0 * r1) % mod);
-    return true;
-  case POLY_OP_MULACC: {
-    if (u->n_src < 3) return false;
-    int racc = 0;
-    if (!wgsl_expr_mod_const(u->src[2], mod, &racc)) return false;
-    if ((wgsl_const_i64(u->src[0], &c0) && (c0 % mod) == 0) ||
-        (wgsl_const_i64(u->src[1], &c1) && (c1 % mod) == 0)) {
-      if (out) *out = racc;
-      return true;
-    }
-    if (!wgsl_expr_mod_const(u->src[0], mod, &r0) ||
-        !wgsl_expr_mod_const(u->src[1], mod, &r1))
-      return false;
-    if (out) *out = (int)(((int64_t)r0 * r1 + racc) % mod);
-    return true;
-  }
-  case POLY_OP_SHL:
-    if (u->n_src < 2 || !wgsl_const_i64(u->src[1], &c1) || c1 < 0 || c1 >= 62) return false;
-    if ((((int64_t)1 << c1) % mod) == 0) {
-      if (out) *out = 0;
-      return true;
-    }
-    if (!wgsl_expr_mod_const(u->src[0], mod, &r0)) return false;
-    if (out) *out = (int)(((int64_t)r0 * ((int64_t)1 << c1)) % mod);
-    return true;
-  default:
-    return false;
-  }
-}
-
-static int wgsl_value_lane_count(PolyUOp *u) {
-  while (u && (u->op == POLY_OP_COPY || u->op == POLY_OP_UNROLL) && u->n_src > 0)
-    u = u->src[0];
-  if (!u) return 1;
-  if ((u->op == POLY_OP_VECTORIZE || u->op == POLY_OP_VCONST) && u->n_src > 1) return u->n_src;
-  if (u->dtype.count > 1) return u->dtype.count;
-  return 1;
-}
-
-static int wgsl_store_target_lane(PolyUOp *target, int lanes) {
-  if (lanes <= 1) return 0;
-  PolyUOp *idx = poly_find_memory_slice_through_cast(target);
-  if (!idx || idx->n_src < 2) return 0;
-  int lane = 0;
-  return wgsl_expr_mod_const(idx->src[1], lanes, &lane) ? lane : 0;
-}
-
-static bool wgsl_wraps_unroll(PolyUOp *u) {
-  if (!u) return false;
-  if (u->op == POLY_OP_UNROLL) return true;
-  if (u->op == POLY_OP_COPY && u->n_src > 0) return wgsl_wraps_unroll(u->src[0]);
-  return false;
-}
-
-static char *wgsl_render_lane_expr(WgslStrMap *names, PolyUOp *u, int lane) {
-  if (!u) return strdup("0");
-  if (u->op == POLY_OP_COPY && u->n_src > 0) return wgsl_render_lane_expr(names, u->src[0], lane);
-  if (u->op == POLY_OP_UNROLL && u->n_src > 0) return wgsl_render_lane_expr(names, u->src[0], lane);
-  if ((u->op == POLY_OP_VECTORIZE || u->op == POLY_OP_VCONST) && u->n_src > 0) {
-    int pick = wgsl_pos_mod_i64(lane, u->n_src);
-    char *s = wsm_get(names, u->src[pick]);
-    return strdup(s ? s : "0");
-  }
-  char *s = wsm_get(names, u);
-  if (!s) return strdup("0");
-  if (u->dtype.count > 1) {
-    char expr[256];
-    snprintf(expr, sizeof(expr), "%s[%d]", s, wgsl_pos_mod_i64(lane, u->dtype.count));
-    return strdup(expr);
-  }
-  return strdup(s);
-}
 
 /* WGSL float constant */
 
@@ -479,6 +351,45 @@ static char *render_float_const_wgsl(double v, char *buf, int cap) {
   }
   /* no 'f' suffix in WGSL */
   return buf;
+}
+
+/* Current renderer/cstyle.py base_rewrite and renderer/wgsl.py render
+ * CAST(strong, CONST(weak/bool)) directly as a destination-typed literal. */
+static char *wgsl_render_const_literal(PolyUOp *c, PolyDType dtype) {
+  if (!c || c->op != POLY_OP_CONST) return NULL;
+  PolyDType scalar = dtype;
+  char val[192];
+  if (poly_dtype_is_float(scalar)) {
+    if (isinf(c->arg.f)) {
+      snprintf(val, sizeof(val), c->arg.f > 0 ? "INFINITY" : "(-INFINITY)");
+    } else if (isnan(c->arg.f)) {
+      snprintf(val, sizeof(val), "nan()");
+    } else if (scalar.priority == POLY_FLOAT16.priority && scalar.bitsize == 16) {
+      char f32buf[64];
+      render_float_const_wgsl(c->arg.f, f32buf, sizeof(f32buf));
+      snprintf(val, sizeof(val), "f16(%s)", f32buf);
+    } else {
+      render_float_const_wgsl(c->arg.f, val, sizeof(val));
+    }
+  } else if (poly_dtype_is_bool(scalar)) {
+    snprintf(val, sizeof(val), "%s", c->arg.b ? "true" : "false");
+  } else if (poly_dtype_is_unsigned(scalar)) {
+    bool negative = c->arg.kind == POLY_ARG_BIGINT ? c->arg.bigint.sign < 0 : c->arg.i < 0;
+    if (negative) {
+      char *decimal = poly_arg_integer_to_decimal(c->arg);
+      if (!decimal) return NULL;
+      snprintf(val, sizeof(val), "bitcast<u32>(%s)", decimal);
+      free(decimal);
+    } else {
+      snprintf(
+          val, sizeof(val), "%uu",
+          (unsigned)(uint32_t)poly_arg_integer_to_u64_mod(c->arg)
+      );
+    }
+  } else {
+    snprintf(val, sizeof(val), "%d", (int32_t)poly_arg_integer_to_u64_mod(c->arg));
+  }
+  return strdup(val);
 }
 
 /* WGSL ALU expression */
@@ -587,22 +498,22 @@ static void render_alu_wgsl(
 
 /* WGSL Renderer */
 
-char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
+char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
   WgslStrBuf body;
   wsb_init(&body);
 
   /* Function-scope declarations buffer (WGSL has block scoping, so
    * variables used across loop boundaries must be declared at function scope).
-   * Mirrors render_c.c's decls buffer pattern. */
+   * Mirrors CStyleLanguage's function-scope declaration list. */
   WgslStrBuf decls;
   wsb_init(&decls);
 
   WgslStrMap names;
   wsm_init(&names, n);
 
-  /* Kernel parameter bindings: PARAM (storage) and DEFINE_VAR (uniform).
+  /* Kernel parameter bindings use ParamArg.addrspace.
    * Match tinygrad exactly here:
-   *   - cstyle.py collects PARAM/DEFINE_VAR into one ordered `bufs` list
+   *   - cstyle.py collects PARAMs into one ordered `bufs` list
    *   - wgsl.py assigns bindings sequentially from that list
    * So WGSL binding numbers follow encounter order, not PARAM.arg. */
   WgslBinding *bindings = NULL;
@@ -638,7 +549,7 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
       }
     }
     /* f16: check all UOps for half dtype */
-    PolyDType s = poly_dtype_scalar(uops[i]->dtype);
+    PolyDType s = uops[i]->dtype;
     if (s.priority == POLY_FLOAT16.priority && s.bitsize == POLY_FLOAT16.bitsize) uses_f16 = true;
   }
 
@@ -650,27 +561,18 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
     /* --- SINK/NOOP/GROUP: skip ---------------------------------------- */
     if (u->op == POLY_OP_SINK || u->op == POLY_OP_NOOP || u->op == POLY_OP_GROUP) continue;
 
-    /* --- PARAM: storage buffer binding -------------------------------- */
+    /* Current cstyle uses ALU address space for scalar uniforms and GLOBAL
+     * for storage buffers; both remain one numbered PARAM sequence. */
     if (u->op == POLY_OP_PARAM) {
+      int64_t slot = poly_program_buffer_slot(u);
+      if (slot < 0) goto fail;
       char name[32];
-      snprintf(name, sizeof(name), "data%lld", (long long)u->arg.i);
+      snprintf(name, sizeof(name), "data%lld", (long long)slot);
       wsm_set(&names, u, strdup(name));
 
       if (!wgsl_binding_append(
-              &bindings, &n_bindings, &cap_bindings, name, poly_dtype_scalar(u->dtype), true
-          ))
-        goto fail;
-      continue;
-    }
-
-    /* --- DEFINE_VAR: scalar uniform binding --------------------------- */
-    if (u->op == POLY_OP_DEFINE_VAR) {
-      const char *vname = u->arg.kind == POLY_ARG_DEFINE_VAR ? u->arg.define_var.name
-                                                             : (u->arg.str ? u->arg.str : "var");
-      wsm_set(&names, u, strdup(vname));
-
-      if (!wgsl_binding_append(
-              &bindings, &n_bindings, &cap_bindings, vname, poly_dtype_scalar(u->dtype), false
+              &bindings, &n_bindings, &cap_bindings, name, u->dtype,
+              !poly_uop_is_alu_param(u)
           ))
         goto fail;
       continue;
@@ -722,48 +624,9 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
 
     /* --- CONST: inline literal ---------------------------------------- */
     if (u->op == POLY_OP_CONST) {
-      char val[128];
-      if (poly_dtype_is_float(u->dtype)) {
-        PolyDType s = poly_dtype_scalar(u->dtype);
-        if (isinf(u->arg.f)) {
-          /* Use INFINITY uniform (tinygrad wgsl.py:109) */
-          snprintf(val, sizeof(val), u->arg.f > 0 ? "INFINITY" : "(-INFINITY)");
-        } else if (isnan(u->arg.f)) {
-          /* Use nan() function (tinygrad wgsl.py:108) */
-          snprintf(val, sizeof(val), "nan()");
-        } else if (s.priority == POLY_FLOAT16.priority && s.bitsize == POLY_FLOAT16.bitsize) {
-          /* f16 const: cast from f32 literal */
-          char f32buf[64];
-          render_float_const_wgsl(u->arg.f, f32buf, sizeof(f32buf));
-          snprintf(val, sizeof(val), "f16(%s)", f32buf);
-        } else {
-          render_float_const_wgsl(u->arg.f, val, sizeof(val));
-        }
-      } else if (poly_dtype_is_bool(u->dtype)) {
-        snprintf(val, sizeof(val), "%s", u->arg.b ? "true" : "false");
-      } else if (poly_dtype_is_unsigned(u->dtype)) {
-        /* Unsigned consts: negative → bitcast, positive → Nu suffix
-         * (tinygrad wgsl.py:72) */
-        bool negative = u->arg.kind == POLY_ARG_BIGINT ? u->arg.bigint.sign < 0
-                                                       : u->arg.i < 0;
-        if (negative) {
-          char *decimal = poly_arg_integer_to_decimal(u->arg);
-          if (!decimal) return NULL;
-          snprintf(val, sizeof(val), "bitcast<u32>(%s)", decimal);
-          free(decimal);
-        } else {
-          snprintf(
-              val, sizeof(val), "%uu",
-              (unsigned)(uint32_t)poly_arg_integer_to_u64_mod(u->arg)
-          );
-        }
-      } else {
-        snprintf(
-            val, sizeof(val), "%d",
-            (int32_t)poly_arg_integer_to_u64_mod(u->arg)
-        );
-      }
-      wsm_set(&names, u, strdup(val));
+      char *literal = wgsl_render_const_literal(u, u->dtype);
+      if (!literal) goto fail;
+      wsm_set(&names, u, literal);
       continue;
     }
 
@@ -789,9 +652,11 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
 
     /* --- RANGE: for loop --------------------------------------------- */
     if (u->op == POLY_OP_RANGE) {
-      char name[32];
-      snprintf(name, sizeof(name), "ridx%lld", (long long)poly_range_axis_id(u->arg));
-      wsm_set(&names, u, strdup(name));
+      char *range = poly_range_str(u->arg);
+      char *name = malloc(strlen(range) + 6);
+      snprintf(name, strlen(range) + 6, "%cidx%s", poly_axis_letter(u->arg), range);
+      free(range);
+      wsm_set(&names, u, name);
 
       char *bound = wsm_get(&names, u->src[0]);
       for (int d = 0; d < depth; d++)
@@ -810,60 +675,34 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
       continue;
     }
 
-    /* Pinned tinygrad/renderer/wgsl.py renders the LOCAL-address-space
-     * BUFFER produced by pm_add_buffers_local as workgroup storage. Keep the
-     * legacy DEFINE_LOCAL spelling until the vocabulary debt is retired. */
-    if (u->op == POLY_OP_DEFINE_LOCAL ||
-        (u->op == POLY_OP_BUFFER && poly_program_memory_is(u, POLY_ADDR_LOCAL))) {
-      if (u->op == POLY_OP_BUFFER) {
-        /* Workgroup shared memory array.
-         * tinygrad: var<workgroup> smemN: array<type, SIZE>;
-         * Externalized before @compute (wgsl.py render_kernel lines 105-106). */
-        char name[32];
-        snprintf(name, sizeof(name), "smem%lld", (long long)poly_program_buffer_slot(u));
-        wsm_set(&names, u, strdup(name));
+    /* tinygrad@2026-08-22/a9069c177a9d renderer/wgsl.py renders LOCAL
+     * BUFFER storage as a module-scope workgroup array. */
+    if (u->op == POLY_OP_BUFFER && poly_program_memory_is(u, POLY_ADDR_LOCAL)) {
+      char name[32];
+      snprintf(name, sizeof(name), "smem%lld", (long long)poly_program_buffer_slot(u));
+      wsm_set(&names, u, strdup(name));
 
-        int64_t smem_size = poly_program_buffer_size(u);
-        const char *base_tn = wgsl_type_name(poly_dtype_scalar(poly_program_buffer_dtype(u)));
-        if (n_extern_locals < 16) {
-          snprintf(
-              extern_locals[n_extern_locals], 256, "var<workgroup> %s: array<%s,%lld>;", name,
-              base_tn, (long long)smem_size
-          );
-          n_extern_locals++;
-        }
-      } else {
-        /* Scalar accumulator (non-pointer dtype).
-         * Used by pm_reduce for reduction accumulators. */
-        char name[32];
-        snprintf(name, sizeof(name), "acc%d", c_acc++);
-        wsm_set(&names, u, strdup(name));
-
-        char initval[64];
-        if (u->arg.kind == POLY_ARG_FLOAT)
-          render_float_const_wgsl(u->arg.f, initval, sizeof(initval));
-        else
-          snprintf(initval, sizeof(initval), "0.0");
-
-        const char *tn = wgsl_type_name(u->dtype);
-        wsb_printf(&decls, "  var %s: %s;\n", name, tn);
-        for (int d = 0; d < depth; d++)
-          wsb_puts(&body, "  ");
-        wsb_printf(&body, "%s = %s;\n", name, initval);
+      int64_t smem_size = poly_program_buffer_size(u);
+      const char *base_tn = wgsl_type_name(poly_program_buffer_dtype(u));
+      if (n_extern_locals < 16) {
+        snprintf(
+            extern_locals[n_extern_locals], 256, "var<workgroup> %s: array<%s,%lld>;", name,
+            base_tn, (long long)smem_size
+        );
+        n_extern_locals++;
       }
       continue;
     }
 
     /* --- register-local array ---------------------------------------- */
-    if (u->op == POLY_OP_DEFINE_REG ||
-        (u->op == POLY_OP_BUFFER && poly_program_memory_is(u, POLY_ADDR_REG))) {
+    if (u->op == POLY_OP_BUFFER && poly_program_memory_is(u, POLY_ADDR_REG)) {
       char name[32];
       snprintf(name, sizeof(name), "r%lld", (long long)poly_program_buffer_slot(u));
       wsm_set(&names, u, strdup(name));
 
       /* tinygrad: var rN: array<type, SIZE>; (wgsl.py:75) */
       int64_t reg_size = poly_program_buffer_size(u);
-      const char *base_tn = wgsl_type_name(poly_dtype_scalar(poly_program_buffer_dtype(u)));
+      const char *base_tn = wgsl_type_name(poly_program_buffer_dtype(u));
       wsb_printf(&decls, "  var %s: array<%s,%lld>;\n", name, base_tn, (long long)reg_size);
       continue;
     }
@@ -875,8 +714,8 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
       continue;
     }
 
-    /* --- COPY / UNROLL: transparent placement and expansion wrappers -- */
-    if ((u->op == POLY_OP_COPY || u->op == POLY_OP_UNROLL) && u->n_src > 0) {
+    /* --- COPY: transparent placement wrapper ------------------------- */
+    if (u->op == POLY_OP_COPY && u->n_src > 0) {
       char *src_name = wsm_get(&names, u->src[0]);
       if (src_name) wsm_set(&names, u, strdup(src_name));
       continue;
@@ -902,31 +741,31 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
       wsb_printf(&decls, "  var %s: %s;\n", name, tn);
       /* Gated load: select(alt, load, gate) -- tinygrad WGSL parity */
       PolyUOp *gate_uop =
-          (u->n_src >= 3 && poly_dtype_is_bool(poly_dtype_scalar(u->src[2]->dtype)))
+          (u->n_src >= 3 && poly_dtype_is_bool(u->src[2]->dtype))
               ? u->src[2]
               : ((idx_uop && idx_uop->n_src >= 3 &&
-                  poly_dtype_is_bool(poly_dtype_scalar(idx_uop->src[2]->dtype)))
+                  poly_dtype_is_bool(idx_uop->src[2]->dtype))
                      ? idx_uop->src[2]
                      : NULL);
       if (gate_uop && u->n_src >= 2) {
         PolyUOp *alt_uop = u->src[1];
-        if (u->dtype.count == 1 &&
-            ((gate_uop && gate_uop->dtype.count > 1) || (alt_uop && alt_uop->dtype.count > 1))) {
-          int lane = wgsl_infer_gated_load_lane(idx_uop->src[1], gate_uop);
-          int lanes = 0;
-          if (gate_uop && gate_uop->dtype.count > lanes) lanes = gate_uop->dtype.count;
-          if (alt_uop && alt_uop->dtype.count > lanes) lanes = alt_uop->dtype.count;
+        int64_t u_lanes = poly_uop_max_numel(ctx, u);
+        int64_t gate_lanes = gate_uop ? poly_uop_max_numel(ctx, gate_uop) : 1;
+        int64_t alt_lanes = alt_uop ? poly_uop_max_numel(ctx, alt_uop) : 1;
+        if (u_lanes == 1 && (gate_lanes > 1 || alt_lanes > 1)) {
+          int lane = wgsl_infer_gated_load_lane(ctx, idx_uop->src[1], gate_uop);
+          int64_t lanes = gate_lanes > alt_lanes ? gate_lanes : alt_lanes;
           if (lane < 0 && lanes > 1) {
-            PolyUOp *lane_key = (gate_uop && gate_uop->dtype.count > 1)
+            PolyUOp *lane_key = gate_lanes > 1
                                     ? gate_uop
-                                    : ((alt_uop && alt_uop->dtype.count > 1) ? alt_uop : NULL);
+                                    : (alt_lanes > 1 ? alt_uop : NULL);
             lane = wgsl_next_vector_lane(
-                lane_key, lanes, gated_lane_keys, gated_lane_next, &n_gated_lane_keys
+                lane_key, (int)lanes, gated_lane_keys, gated_lane_next, &n_gated_lane_keys
             );
           }
           if (lane >= 0) {
-            PolyUOp *lane_gate = wgsl_pick_lane_uop(gate_uop, lane);
-            PolyUOp *lane_alt = wgsl_pick_lane_uop(alt_uop, lane);
+            PolyUOp *lane_gate = wgsl_pick_lane_uop(ctx, gate_uop, lane);
+            PolyUOp *lane_alt = wgsl_pick_lane_uop(ctx, alt_uop, lane);
             if (lane_gate) gate_uop = lane_gate;
             if (lane_alt) alt_uop = lane_alt;
           }
@@ -935,16 +774,18 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
         char *alt_s = wsm_get(&names, alt_uop);
         wsb_printf(&body, "%s = select(%s, %s, %s);\n", name, alt_s, load_expr, gate_s);
       } else if (gate_uop) {
-        if (u->dtype.count == 1 && gate_uop && gate_uop->dtype.count > 1) {
-          int lane = wgsl_infer_gated_load_lane(idx_uop->src[1], gate_uop);
+        int64_t u_lanes = poly_uop_max_numel(ctx, u);
+        int64_t gate_lanes = gate_uop ? poly_uop_max_numel(ctx, gate_uop) : 1;
+        if (u_lanes == 1 && gate_lanes > 1) {
+          int lane = wgsl_infer_gated_load_lane(ctx, idx_uop->src[1], gate_uop);
           if (lane < 0) {
             lane = wgsl_next_vector_lane(
-                gate_uop, gate_uop->dtype.count, gated_lane_keys, gated_lane_next,
+                gate_uop, (int)gate_lanes, gated_lane_keys, gated_lane_next,
                 &n_gated_lane_keys
             );
           }
           if (lane >= 0) {
-            PolyUOp *lane_gate = wgsl_pick_lane_uop(gate_uop, lane);
+            PolyUOp *lane_gate = wgsl_pick_lane_uop(ctx, gate_uop, lane);
             if (lane_gate) gate_uop = lane_gate;
           }
         }
@@ -956,32 +797,8 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
       continue;
     }
 
-    /* --- GEP: extract element from vector/array (devectorized access) -- */
-    if (u->op == POLY_OP_GEP) {
-      if (u->n_src < 1) {
-        wsm_set(&names, u, strdup("0"));
-        continue;
-      }
-      char *src_s = wsm_get(&names, u->src[0]);
-      if (!src_s) src_s = "0";
-      if (u->arg.kind == POLY_ARG_INT_TUPLE && u->arg.int_tuple.n == 1) {
-        /* Single-lane GEP: src[i] */
-        char expr[256];
-        snprintf(expr, sizeof(expr), "%s[%lld]", src_s, (long long)u->arg.int_tuple.vals[0]);
-        wsm_set(&names, u, strdup(expr));
-      } else if (u->arg.kind == POLY_ARG_INT) {
-        char expr[256];
-        snprintf(expr, sizeof(expr), "%s[%lld]", src_s, (long long)u->arg.i);
-        wsm_set(&names, u, strdup(expr));
-      } else {
-        /* Identity GEP or unsupported: alias source */
-        wsm_set(&names, u, strdup(src_s));
-      }
-      continue;
-    }
-
     /* --- VECTORIZE: vector constructor (scalar after devectorize) ----- */
-    if (u->op == POLY_OP_VECTORIZE || u->op == POLY_OP_VCONST) {
+    if (u->op == POLY_OP_STACK) {
       if (u->n_src == 1) {
         /* Single source: alias */
         char *s = wsm_get(&names, u->src[0]);
@@ -989,7 +806,7 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
       } else if (u->n_src > 1) {
         /* Multi-source: vec constructor. Shouldn't appear for scalar WGSL
          * (supports_float4=false), but handle for robustness. */
-        const char *tn = wgsl_type_name(poly_dtype_scalar(u->dtype));
+        const char *tn = wgsl_type_name(u->dtype);
         WgslStrBuf vexpr;
         wsb_init(&vexpr);
         wsb_printf(&vexpr, "vec%d<%s>(", u->n_src, tn);
@@ -1009,13 +826,6 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
     if (u->op == POLY_OP_STORE) {
       char *target = wsm_get(&names, u->src[0]);
       char *val = wsm_get(&names, u->src[1]);
-      char *owned_val = NULL;
-      if (wgsl_wraps_unroll(u->src[1])) {
-        int lanes = wgsl_value_lane_count(u->src[1]);
-        int lane = wgsl_store_target_lane(u->src[0], lanes);
-        owned_val = wgsl_render_lane_expr(&names, u->src[1], lane);
-        val = owned_val;
-      }
 
       PolyUOp *store_idx = poly_find_index_through_cast(u->src[0]);
       if (!wgsl_emit_packed_store(&body, &names, store_idx, val, depth)) {
@@ -1024,20 +834,28 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
         wsb_printf(&body, "%s = %s;\n", target, val);
       }
 
-      free(owned_val);
       continue;
     }
 
     /* --- CAST / BITCAST: type conversion ----------------------------- */
     if (u->op == POLY_OP_CAST || u->op == POLY_OP_BITCAST) {
+      if (u->op == POLY_OP_CAST && u->n_src == 1 && u->src[0] &&
+          u->src[0]->op == POLY_OP_CONST &&
+          (poly_dtype_is_weak(u->src[0]->dtype) || poly_dtype_is_bool(u->src[0]->dtype)) &&
+          poly_uop_max_numel(ctx, u) == 1) {
+        char *literal = wgsl_render_const_literal(u->src[0], u->dtype);
+        if (!literal) goto fail;
+        wsm_set(&names, u, literal);
+        continue;
+      }
       char name[32];
       snprintf(name, sizeof(name), "cast%d", c_cast++);
       wsm_set(&names, u, strdup(name));
 
       char *src_s = wsm_get(&names, u->src[0]);
       const char *tn = wgsl_type_name(u->dtype);
-      PolyDType dst_s = poly_dtype_scalar(u->dtype);
-      PolyDType src_dt = poly_dtype_scalar(u->src[0]->dtype);
+      PolyDType dst_s = u->dtype;
+      PolyDType src_dt = u->src[0]->dtype;
 
       char expr[256];
       if (u->op == POLY_OP_BITCAST) {
@@ -1192,7 +1010,7 @@ static PolyUOp *rule_wgsl_shift_u32(PolyCtx *ctx, PolyUOp *u, const PolyBindings
   if (u->n_src < 2) return NULL;
   PolyUOp *amount = u->src[1];
   /* Already u32? No rewrite. */
-  if (poly_dtype_eq(poly_dtype_scalar(amount->dtype), POLY_UINT32)) return NULL;
+  if (poly_dtype_eq(amount->dtype, POLY_UINT32)) return NULL;
   /* Cast shift amount to u32 */
   PolyUOp *cast_amount = poly_uop1(ctx, POLY_OP_CAST, POLY_UINT32, amount, poly_arg_none());
   return poly_uop2(ctx, u->op, u->dtype, u->src[0], cast_amount, u->arg);
@@ -1205,17 +1023,16 @@ static PolyUOp *rule_wgsl_shift_u32(PolyCtx *ctx, PolyUOp *u, const PolyBindings
 static PolyUOp *rule_wgsl_bool_alu(PolyCtx *ctx, PolyUOp *u, const PolyBindings *bindings) {
   (void)bindings;
   if (u->n_src < 2) return NULL;
-  bool src0_bool = poly_dtype_is_bool(poly_dtype_scalar(u->src[0]->dtype));
-  bool src1_bool = poly_dtype_is_bool(poly_dtype_scalar(u->src[1]->dtype));
+  bool src0_bool = poly_dtype_is_bool(u->src[0]->dtype);
+  bool src1_bool = poly_dtype_is_bool(u->src[1]->dtype);
   if (!src0_bool && !src1_bool) return NULL;
   if ((u->op == POLY_OP_CMPEQ || u->op == POLY_OP_CMPNE) && src0_bool && src1_bool)
     return NULL;
   PolyUOp *a = poly_uop1(ctx, POLY_OP_CAST, POLY_INT32, u->src[0], poly_arg_none());
   PolyUOp *b = poly_uop1(ctx, POLY_OP_CAST, POLY_INT32, u->src[1], poly_arg_none());
-  PolyDType result_dt =
-      (u->op == POLY_OP_XOR) ? POLY_INT32 : ((u->dtype.count > 1) ? poly_dtype_vec(POLY_BOOL, u->dtype.count) : POLY_BOOL);
+  PolyDType result_dt = (u->op == POLY_OP_XOR) ? POLY_INT32 : POLY_BOOL;
   PolyUOp *result = poly_uop2(ctx, u->op, result_dt, a, b, poly_arg_none());
-  if (poly_dtype_is_bool(poly_dtype_scalar(result->dtype))) return result;
+  if (poly_dtype_is_bool(result->dtype)) return result;
   return poly_uop1(ctx, POLY_OP_CAST, POLY_BOOL, result, poly_arg_none());
 }
 
@@ -1236,9 +1053,9 @@ PolyPatternMatcher *poly_pm_wgsl_extra(void) {
 
   PolyRule rules[] = {
       /* WGSL shift amounts must be u32 (tinygrad wgsl.py:49-50) */
-      {poly_pat_ops(shift_set, NULL, 0, NULL), rule_wgsl_shift_u32},
+      {poly_upat_ops(shift_set, NULL, 0, NULL), rule_wgsl_shift_u32},
       /* WGSL bool ALU normalization: tinygrad wgsl.py:41-42 plus mixed equality guard. */
-      {poly_pat_ops(bool_alu_set, NULL, 0, NULL), rule_wgsl_bool_alu},
+      {poly_upat_ops(bool_alu_set, NULL, 0, NULL), rule_wgsl_bool_alu},
   };
 
   g_pm_wgsl_extra =
@@ -1251,21 +1068,19 @@ PolyPatternMatcher *poly_pm_wgsl_extra(void) {
 /* Linearize a kernel for WebGPU: full codegen pipeline with GPU dims.
  *
  * Pipeline: full_rewrite_to_sink_ex (with device=WEBGPU, triggering
- * add_gpudims + group_for_reduce) → apply_control_flow → linearize.
+ * add_gpudims + pm_reduce_local) → apply_control_flow → linearize.
  *
  * WebGPU constraints (matching tinygrad WGSLRenderer):
- *   - supports_float4=false → devectorize=1
- *   - local_max=(256,256,64) → gpu_block_size=256
  *   - No MULACC/THREEFRY hardware support
  *   - No tensor cores
  *   - extra_matcher: shift u32 normalization, bool CMPLT/XOR */
 PolyUOp *poly_rewrite_webgpu(PolyCtx *ctx, PolyUOp *sink) {
   PolyRewriteOpts opts = {
       .optimize = poly_kernel_optimize_enabled(sink),
-      .devectorize = 1, /* supports_float4=false: full devectorize */
-      .beam_width = 0,
+      .beam_width = poly_kernel_beam(sink),
       .caps =
           {
+              .device = "WEBGPU",
               .has_mulacc = false,
               .has_threefry = false,
               .has_exp2 = true,
@@ -1274,6 +1089,10 @@ PolyUOp *poly_rewrite_webgpu(PolyCtx *ctx, PolyUOp *sink) {
               /* Pinned WGSLRenderer inherits RECIPROCAL and does not
                * advertise FDIV (renderer/wgsl.py:56-66). */
               .has_fdiv = false,
+              /* Tinygrad 2026-08-22/a9069c177a9d WGSLRenderer.supported_dtypes
+               * includes half only when shader-f16 is in Target.arch. */
+              .supports_float16 = poly_webgpu_supports_float16(),
+              .supports_bfloat16 = false,
               .has_int64 = false,
               .has_local = true,
               .global_max = {65535, 65535, 65535},
@@ -1282,11 +1101,7 @@ PolyUOp *poly_rewrite_webgpu(PolyCtx *ctx, PolyUOp *sink) {
           },
       .device = POLY_DEVICE_WEBGPU,
       .opt_policy = POLY_OPT_HEURISTIC,
-      /* Pinned codegen/__init__.py:120-140 runs pm_dtype_decomps before the
-       * WGSL renderer's final extra_matcher. WGSL has no native BF16. */
-      .dtype_matcher = poly_pm_bf16_non_native(),
       .extra_matcher = poly_pm_wgsl_extra(),
-      .gpu_block_size = 256, /* WebGPU local_max[0] */
   };
   return poly_full_rewrite_to_sink_ex(ctx, sink, opts);
 }
@@ -1294,5 +1109,5 @@ PolyUOp *poly_rewrite_webgpu(PolyCtx *ctx, PolyUOp *sink) {
 PolyUOp **poly_linearize_webgpu(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
   sink = poly_rewrite_webgpu(ctx, sink);
   /* apply_control_flow already called inside full_rewrite_to_sink_ex (codegen.c:5674) */
-  return poly_linearize_rewritten(ctx, sink, n_out);
+  return poly_do_linearize(ctx, sink, n_out);
 }

@@ -12,8 +12,8 @@ from polygrad import Instance, Tensor, nn
 class Net:
     def __init__(self):
         self.fc = nn.Linear(2, 1)
-        self.fc.weight = Tensor([[1.0, 1.0]], requires_grad=True).realize()
-        self.fc.bias = Tensor([0.0], requires_grad=True).realize()
+        self.fc.weight = Tensor([[1.0, 1.0]]).realize()
+        self.fc.bias = Tensor([0.0]).realize()
 
     def __call__(self, x):
         return self.fc(x)

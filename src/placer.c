@@ -91,11 +91,10 @@ static bool device_uop_identity_supported(PolyUOp *device) {
 
 static char no_device_uop_cache_value;
 
-/* Exact-device counterpart of pinned UOp.device
- * (tinygrad/uop/ops.py:770-783).  DEVICE is the concrete identity, COPY and
- * BUFFER take src[1], AFTER follows its value, and generic UOps take the first
- * concrete source.  This deliberately does not collapse identities to a
- * PolyDevice backend kind or reconcile mixed-device sources. */
+/* Exact-device counterpart of tinygrad@2026-08-22/a9069c177a9d
+ * uop/ops.py:847-861. DEVICE transports explicit placement policy in C;
+ * PARAM/STAGE/BUFFER use ParamArg, COPY uses arg, AFTER follows its value,
+ * and generic UOps take the first concrete source. */
 PolyUOp *poly_uop_device_uop_cached(PolyCtx *ctx, PolyUOp *u, PolyMap *cache) {
   if (!ctx || !u) return NULL;
   if (cache) {
@@ -106,7 +105,8 @@ PolyUOp *poly_uop_device_uop_cached(PolyCtx *ctx, PolyUOp *u, PolyMap *cache) {
   PolyUOp *result = NULL;
   if (u->op == POLY_OP_DEVICE) {
     if (u->arg.kind == POLY_ARG_STRING || u->arg.kind == POLY_ARG_STRING_TUPLE) result = u;
-  } else if (u->op == POLY_OP_PARAM && u->arg.kind == POLY_ARG_PARAM && u->arg.param) {
+  } else if ((u->op == POLY_OP_PARAM || u->op == POLY_OP_BUFFER) &&
+             u->arg.kind == POLY_ARG_PARAM && u->arg.param) {
     if (u->arg.param->device_is_tuple)
       result = poly_device_uop_from_names(
           ctx, u->arg.param->devices, u->arg.param->n_devices
@@ -120,8 +120,15 @@ PolyUOp *poly_uop_device_uop_cached(PolyCtx *ctx, PolyUOp *u, PolyMap *cache) {
       );
     else if (u->arg.bufferize_opts.device)
       result = poly_device_uop_from_name(ctx, u->arg.bufferize_opts.device);
-  } else if ((u->op == POLY_OP_COPY || u->op == POLY_OP_BUFFER) && u->n_src >= 2) {
-    result = poly_uop_device_uop_cached(ctx, u->src[1], cache);
+  } else if (u->op == POLY_OP_COPY && u->arg.kind == POLY_ARG_STRING) {
+    result = poly_device_uop_from_name(ctx, u->arg.str);
+  } else if (u->op == POLY_OP_COPY && u->arg.kind == POLY_ARG_STRING_TUPLE) {
+    result = poly_device_uop_from_names(ctx, u->arg.string_tuple.vals, u->arg.string_tuple.n);
+  } else if (u->op == POLY_OP_ALLREDUCE && u->arg.kind == POLY_ARG_ALLREDUCE) {
+    result = u->arg.allreduce.device_is_tuple
+                 ? poly_device_uop_from_names(
+                       ctx, u->arg.allreduce.devices, u->arg.allreduce.n_devices)
+                 : poly_device_uop_from_name(ctx, u->arg.allreduce.device);
   } else if (u->op == POLY_OP_AFTER && u->n_src >= 1) {
     result = poly_uop_device_uop_cached(ctx, u->src[0], cache);
   } else if (u->op == POLY_OP_MSELECT && u->n_src >= 1 && u->arg.kind == POLY_ARG_INT) {
@@ -143,7 +150,7 @@ PolyUOp *poly_uop_device_uop_cached(PolyCtx *ctx, PolyUOp *u, PolyMap *cache) {
     if (complete)
       result = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_string_tuple(names, u->n_src));
     free(names);
-  } else if (u->op != POLY_OP_CONST && u->op != POLY_OP_VCONST) {
+  } else if (u->op != POLY_OP_CONST) {
     for (int i = 0; i < u->n_src && !result; i++)
       result = poly_uop_device_uop_cached(ctx, u->src[i], cache);
   }
@@ -172,6 +179,8 @@ PolyDevice poly_device_from_device_uop(PolyUOp *device) {
   return POLY_DEVICE_AUTO;
 }
 
+/* Polygrad's approved fail-closed accelerator-identity boundary for Tinygrad's
+ * exact ParamArg.device semantics (device.py:19-35; uop/ops.py:847-860). */
 bool poly_uop_explicit_devices_supported(PolyCtx *ctx, PolyUOp *root) {
   if (!ctx || !root) return false;
   PolyScratchMark scratch = poly_ctx_scratch_mark(ctx);
@@ -189,7 +198,8 @@ bool poly_uop_explicit_devices_supported(PolyCtx *ctx, PolyUOp *root) {
       supported = false;
       break;
     }
-    if (u && u->op == POLY_OP_PARAM && u->arg.kind == POLY_ARG_PARAM && u->arg.param &&
+    if (u && (u->op == POLY_OP_PARAM || u->op == POLY_OP_BUFFER) &&
+        u->arg.kind == POLY_ARG_PARAM && u->arg.param &&
         u->arg.param->device_is_tuple) {
       if (u->arg.param->n_devices <= 0 || !u->arg.param->devices) {
         supported = false;
@@ -202,8 +212,9 @@ bool poly_uop_explicit_devices_supported(PolyCtx *ctx, PolyUOp *root) {
         }
       }
       if (!supported) break;
-    } else if (u && u->op == POLY_OP_PARAM && u->arg.kind == POLY_ARG_PARAM &&
-               u->arg.param && !device_identity_name_supported(u->arg.param->device)) {
+    } else if (u && (u->op == POLY_OP_PARAM || u->op == POLY_OP_BUFFER) &&
+               u->arg.kind == POLY_ARG_PARAM && u->arg.param &&
+               !device_identity_name_supported(u->arg.param->device)) {
       supported = false;
       break;
     }
@@ -232,12 +243,9 @@ bool poly_uop_explicit_devices_supported(PolyCtx *ctx, PolyUOp *root) {
 
 /* Derived physical-device property for a UOp graph.
  *
- * Tinygrad exposes this as UOp.device backed by cached UOp._device:
- * DEVICE returns itself, COPY/BUFFER take their second source's DEVICE, AFTER
- * follows its value source, and generic ops inherit the first concrete device
- * found in their sources. Polygrad uses the same structural rule after
- * placement because physical graphs carry device as DEVICE/COPY/BUFFER UOps,
- * while logical/pre-placement graphs may still return AUTO.
+ * tinygrad@2026-08-22/a9069c177a9d uop/ops.py:847-861 reads COPY.arg and
+ * BUFFER/ParamArg.device. Polygrad DEVICE remains C placement-policy metadata;
+ * portable logical BUFFERs have no device and return AUTO.
  *
  * This public wrapper is for one-off queries. Hot passes should use the
  * cached backing helper below with a pass-local PolyMap.
@@ -273,14 +281,15 @@ PolyDevice poly_uop_device_cached(PolyUOp *u, PolyMap *cache) {
       poly_map_set(cache, poly_ptr_hash(u), u, (void *)(intptr_t)(result + 1), poly_ptr_eq);
     return result;
   }
-  if (u->op == POLY_OP_COPY && u->n_src >= 2) {
-    result = poly_device_from_device_uop(u->src[1]);
+  if (u->op == POLY_OP_COPY && u->arg.kind == POLY_ARG_STRING) {
+    result = device_from_string_arg(u->arg.str);
     if (cache)
       poly_map_set(cache, poly_ptr_hash(u), u, (void *)(intptr_t)(result + 1), poly_ptr_eq);
     return result;
   }
-  if (u->op == POLY_OP_BUFFER && u->n_src >= 2) {
-    result = poly_device_from_device_uop(u->src[1]);
+  if (u->op == POLY_OP_BUFFER && u->arg.kind == POLY_ARG_PARAM && u->arg.param &&
+      u->arg.param->device) {
+    result = device_from_string_arg(u->arg.param->device);
     if (cache)
       poly_map_set(cache, poly_ptr_hash(u), u, (void *)(intptr_t)(result + 1), poly_ptr_eq);
     return result;
@@ -307,7 +316,7 @@ PolyDevice poly_uop_device_cached(PolyUOp *u, PolyMap *cache) {
     return result;
   }
 
-  if (u->op != POLY_OP_CONST && u->op != POLY_OP_VCONST) {
+  if (u->op != POLY_OP_CONST) {
     for (int i = 0; i < u->n_src; i++) {
       PolyDevice child = poly_uop_device_cached(u->src[i], cache);
       if (child == POLY_DEVICE_AUTO) continue;
@@ -328,13 +337,23 @@ static PolyUOp *make_device_uop(PolyCtx *ctx, PolyDevice device) {
   return poly_device_uop(ctx, device);
 }
 
+PolyUOp *poly_copy_to_device_uop(PolyCtx *ctx, PolyUOp *value, PolyUOp *device) {
+  if (!ctx || !value || !device || device->op != POLY_OP_DEVICE) return NULL;
+  PolyArg arg = poly_arg_none();
+  if (device->arg.kind == POLY_ARG_STRING)
+    arg = poly_arg_str(device->arg.str);
+  else if (device->arg.kind == POLY_ARG_STRING_TUPLE)
+    arg = poly_arg_string_tuple(device->arg.string_tuple.vals, device->arg.string_tuple.n);
+  else
+    return NULL;
+  return poly_uop1(ctx, POLY_OP_COPY, value->dtype, value, arg);
+}
+
 static PolyUOp *copy_to_device(PolyCtx *ctx, PolyUOp *value, PolyDevice device) {
   if (!ctx || !value || device == POLY_DEVICE_AUTO) return value;
-  if (value->op == POLY_OP_COPY && value->n_src >= 2 &&
-      poly_device_from_device_uop(value->src[1]) == device)
+  if (value->op == POLY_OP_COPY && poly_uop_device(value) == device)
     return value;
-  PolyUOp *src[2] = {value, make_device_uop(ctx, device)};
-  return poly_uop(ctx, POLY_OP_COPY, value->dtype, src, 2, poly_arg_none());
+  return poly_copy_to_device_uop(ctx, value, make_device_uop(ctx, device));
 }
 
 static bool placement_devices_share_storage(PolyDevice a, PolyDevice b) {
@@ -382,9 +401,8 @@ static void physicalizer_destroy(PolyPhysicalizer *p) {
 
 static bool placement_rebuilds_sources(PolyUOp *u) {
   if (!u) return false;
-  if (u->op == POLY_OP_CONST || u->op == POLY_OP_VCONST || u->op == POLY_OP_DEFINE_VAR ||
-      u->op == POLY_OP_BIND || u->op == POLY_OP_DEVICE || u->op == POLY_OP_UNIQUE ||
-      u->op == POLY_OP_LUNIQUE)
+  if (u->op == POLY_OP_CONST || poly_uop_is_variable(u) ||
+      poly_uop_is_bound_var(u) || u->op == POLY_OP_DEVICE || u->op == POLY_OP_UNIQUE)
     return false;
   return true;
 }
@@ -687,20 +705,6 @@ static PolyUOp *lower_effect(PolyPhysicalizer *p, PolyUOp *u, PolyDevice device)
     return result;
   }
 
-  if (u->op == POLY_OP_ASSIGN && u->n_src >= 2) {
-    PolyUOp *value = lower_value(p, u->src[1], device);
-    if (!value) return NULL;
-    if (value == u->src[1]) return u;
-    PolyUOp *stack_src[16];
-    PolyUOp **src = u->n_src > 16 ? malloc((size_t)u->n_src * sizeof(*src)) : stack_src;
-    if (!src) return NULL;
-    memcpy(src, u->src, (size_t)u->n_src * sizeof(*src));
-    src[1] = value;
-    PolyUOp *result = placement_rebuild_with_sources(p, u, src);
-    if (src != stack_src) free(src);
-    return result;
-  }
-
   return lower_value(p, u, device);
 }
 
@@ -756,9 +760,9 @@ static bool place_lowered_op(PolyOps op) {
 }
 
 static bool place_logical_forbidden_op(PolyOps op) {
-  return op == POLY_OP_SINK || op == POLY_OP_STORE || op == POLY_OP_AFTER || op == POLY_OP_ASSIGN ||
+  return op == POLY_OP_SINK || op == POLY_OP_STORE || op == POLY_OP_AFTER ||
          op == POLY_OP_DEVICE || op == POLY_OP_COPY || op == POLY_OP_CALL ||
-         op == POLY_OP_FUNCTION || op == POLY_OP_CUSTOM_FUNCTION || op == POLY_OP_MULTI ||
+         op == POLY_OP_FUNCTION || op == POLY_OP_CUSTOM_FUNCTION || op == POLY_OP_UNSHARD ||
          op == POLY_OP_MSELECT || op == POLY_OP_MSTACK || op == POLY_OP_ALLREDUCE ||
          place_lowered_op(op);
 }
@@ -903,8 +907,7 @@ static PolyUOp *place_exact_copy_to_device(PolyCtx *ctx, PolyUOp *value, PolyUOp
   PolyUOp *current = poly_uop_device_uop_cached(ctx, value, cache);
   poly_map_destroy(cache);
   if (place_same_device_uop(current, device)) return value;
-  PolyUOp *src[2] = {value, device};
-  return poly_uop(ctx, POLY_OP_COPY, value->dtype, src, 2, poly_arg_none());
+  return poly_copy_to_device_uop(ctx, value, device);
 }
 
 static PolyUOp *place_binding_on_device_uop(PolyCtx *ctx, PolyUOp *logical, PolyUOp *device) {
@@ -913,13 +916,20 @@ static PolyUOp *place_binding_on_device_uop(PolyCtx *ctx, PolyUOp *logical, Poly
       device->op != POLY_OP_DEVICE || device->arg.kind != POLY_ARG_STRING ||
       !device_uop_identity_supported(device))
     return NULL;
-  PolyUOp *src[2] = {logical->src[0], device};
+  int64_t size = logical->arg.kind == POLY_ARG_INT ? logical->arg.i : -1;
+  int64_t slot = logical->src[0]->arg.kind == POLY_ARG_INT ? logical->src[0]->arg.i : -1;
+  if (size < 0 || slot < 0) return NULL;
+  PolyUOp *physical = poly_uop_new_buffer(
+      ctx, device, size, logical->dtype, slot
+  );
+  if (!physical) return NULL;
   return (logical->tag != 0 || logical->tag_arg.kind != POLY_ARG_NONE)
              ? poly_uop_tagged_arg(
-                   ctx, POLY_OP_BUFFER, logical->dtype, src, 2, logical->arg,
+                   ctx, POLY_OP_BUFFER, physical->dtype, physical->src,
+                   physical->n_src, physical->arg,
                    logical->tag, logical->tag_arg
                )
-             : poly_uop(ctx, POLY_OP_BUFFER, logical->dtype, src, 2, logical->arg);
+             : physical;
 }
 
 static int place_module_output_index(
@@ -954,7 +964,7 @@ static bool place_scalar_devices_valid(PolyCtx *ctx, PolyUOp *root) {
   bool valid = true;
   for (int i = 0; i < n_topo && valid; i++) {
     PolyUOp *u = topo[i];
-    if (!u || place_lowered_op(u->op) || u->op == POLY_OP_MULTI ||
+    if (!u || place_lowered_op(u->op) || u->op == POLY_OP_UNSHARD ||
         u->op == POLY_OP_MSELECT || u->op == POLY_OP_MSTACK ||
         u->op == POLY_OP_ALLREDUCE) {
       valid = false;
@@ -965,13 +975,13 @@ static bool place_scalar_devices_valid(PolyCtx *ctx, PolyUOp *root) {
       continue;
     }
     if (u->op == POLY_OP_BUFFER) {
-      valid = u->n_src == 2 && u->src[1] && u->src[1]->op == POLY_OP_DEVICE &&
-              device_uop_identity_supported(u->src[1]);
+      valid = u->n_src == 1 && u->arg.kind == POLY_ARG_PARAM && u->arg.param &&
+              device_identity_name_supported(u->arg.param->device);
       continue;
     }
     if (u->op == POLY_OP_COPY) {
-      valid = u->n_src == 2 && u->src[1] && u->src[1]->op == POLY_OP_DEVICE &&
-              device_uop_identity_supported(u->src[1]);
+      valid = u->n_src == 1 && u->arg.kind == POLY_ARG_STRING &&
+              device_identity_name_supported(u->arg.str);
       continue;
     }
     if (u->op == POLY_OP_SINK) continue;

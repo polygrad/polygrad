@@ -267,7 +267,7 @@ class TestWeightIO:
 
     def test_stochastic_named_state_requires_checkpoint_for_portable_activation(self):
         Tensor.manual_seed(11)
-        w = Tensor.rand(2, requires_grad=True)
+        w = Tensor.rand(2)
         x = Tensor.empty(2)
         source = Instance.from_tensors(
             inputs={'x': x}, outputs={'output': x * w}, params={'w': w},
@@ -543,7 +543,7 @@ class TestInstanceTensorParity:
         inst.free()
 
         # Tensor path (manual SGD)
-        W = Tensor(W_init.reshape(1, 2), requires_grad=True)
+        W = Tensor(W_init.reshape(1, 2))
         tensor_losses = []
         for _ in range(5):
             x = Tensor(x_data.reshape(1, 2))
@@ -554,7 +554,7 @@ class TestInstanceTensorParity:
             tensor_losses.append(loss.item())
             loss.backward()
             # Manual SGD: W = W - lr * grad
-            W = Tensor((W.numpy() - 0.01 * W.grad.numpy()), requires_grad=True)
+            W = Tensor((W.numpy() - 0.01 * W.grad.numpy()))
 
         for i in range(5):
             np.testing.assert_allclose(inst_losses[i], tensor_losses[i], rtol=1e-4,

@@ -6,7 +6,7 @@ import time
 import weakref
 
 from . import _ffi
-from .tensor import BoundVariable, Tensor, Variable
+from .tensor import BoundVariable, Tensor, Variable, all_tensors
 from polygrad.uop.ops import UOp
 
 
@@ -205,6 +205,20 @@ def _tensor_array(inputs):
     return arr, n
 
 
+def _live_tensor_array(ctx):
+    live, stale = [], []
+    ctx_key = _raw_int(ctx)
+    for tref in list(all_tensors):
+        tensor = tref()
+        if tensor is None:
+            stale.append(tref)
+        elif _raw_int(tensor._ctx) == ctx_key:
+            live.append(tensor)
+    for tref in stale:
+        all_tensors.pop(tref, None)
+    return _tensor_array(live)
+
+
 class TinyJit:
     """Tinygrad-style capture/replay wrapper for Tensor functions.
 
@@ -320,7 +334,8 @@ class TinyJit:
             try:
                 ret = self.fxn(*args, **kwargs)
                 _realize_return(ret)
-                if _ffi._lib.poly_jit_end_capture(self._jit) != 0:
+                live_arr, n_live = _live_tensor_array(ctx)
+                if _ffi._lib.poly_jit_end_capture(self._jit, live_arr, n_live) != 0:
                     raise JitError("didn't JIT anything")
             except Exception:
                 _ffi._lib.poly_jit_cancel_capture(self._jit)

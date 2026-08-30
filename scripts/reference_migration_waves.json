@@ -1,0 +1,831 @@
+{
+  "schema_version": 1,
+  "baseline_ref": "references/tinygrad_20260621",
+  "target_ref": "references/tinygrad_20260822",
+  "graph_report": "temp/parity_graph/report.json",
+  "rule_groups": [
+    {
+      "id": "uop_data_invalid",
+      "tinygrad": {"path": "tinygrad/uop/symbolic.py", "matcher": "pm_data_invalid", "rule_count": 13},
+      "polygrad": {
+        "path": "src/uop/symbolic.c",
+        "matcher": "poly_pm_data_invalid",
+        "callbacks": [
+          "rule_propagate_invalid_stack", "rule_propagate_invalid_unary",
+          "rule_propagate_invalid_unary", "rule_propagate_invalid_binary",
+          "rule_propagate_invalid_binary", "rule_propagate_invalid_binary",
+          "rule_propagate_invalid_where", "rule_propagate_invalid_where",
+          "rule_propagate_invalid_where", "rule_propagate_invalid_where",
+          "rule_propagate_invalid_where", "rule_fold_invalid_load_store",
+          "rule_fold_invalid_load_store"
+        ]
+      },
+      "tests": ["test/test_sym.c"]
+    },
+    {
+      "id": "uop_mop_cleanup",
+      "tinygrad": {"path": "tinygrad/uop/movement.py", "matcher": "mop_cleanup", "rule_count": 8},
+      "polygrad": {
+        "path": "src/uop/movement.c",
+        "matcher": "poly_mop_cleanup",
+        "callbacks": [
+          "merge_adjacent_reshape", "remove_noop_reshape", "merge_permute",
+          "remove_noop_permute", "stack_of_ordered_indexes", "const_index_into_stack",
+          "index_on_index", "index_on_shaped_index"
+        ]
+      },
+      "tests": ["test/test_uop.c"]
+    },
+    {
+      "id": "uop_symbolic_simple_local",
+      "tinygrad": {"path": "tinygrad/uop/symbolic.py", "matcher": "symbolic_simple", "rule_count": 50},
+      "polygrad": {
+        "path": "src/uop/symbolic.c",
+        "matcher": "poly_symbolic_simple",
+        "callbacks": [
+          "rule_identity", "rule_identity", "rule_identity", "rule_div_self", "rule_identity",
+          "rule_div_neg1", "rule_xor_cancel", "rule_nested_mod_identity", "rule_fold_add_divmod_recombine",
+          "rule_bool_and_const", "rule_bool_or_const", "rule_identity", "rule_idempotent",
+          "rule_double_logical_not", "rule_where_bool_identity", "rule_where_bool_identity",
+          "rule_bool_cmpne_const", "rule_trunc_integral_identity", "rule_lt_self", "rule_mod_self",
+          "rule_xor_self", "rule_mul_zero", "rule_drop_redundant_low_mask",
+          "rule_drop_redundant_low_mask", "rule_cmpne_self", "rule_cast_const",
+          "rule_const_fold_unary", "rule_const_fold_binary", "rule_const_fold_ternary",
+          "rule_bool_mul_to_and", "rule_bool_add_to_or", "rule_bool_max_to_or",
+          "rule_zero_div_zero", "rule_zero_product_div_zero", "rule_reciprocal_self_product",
+          "rule_mul_reciprocal_cancel", "rule_mul_zero", "rule_cast_noop", "rule_bitcast_const",
+          "rule_cast_roundtrip_lossless", "rule_bitcast_twice", "rule_cast_bool",
+          "rule_simplify_pow_const_exp", "rule_simplify_pow_const_base",
+          "rule_threefry_unpack_low", "rule_threefry_unpack_high", "rule_where_same",
+          "rule_where_const_gate", "rule_nested_where", "rule_nested_where_or"
+        ]
+      },
+      "tests": ["test/test_sym.c"]
+    },
+    {
+      "id": "uop_commutative",
+      "tinygrad": {"path": "tinygrad/uop/symbolic.py", "matcher": "commutative", "rule_count": 1},
+      "polygrad": {
+        "path": "src/uop/symbolic.c",
+        "matcher": "poly_commutative",
+        "callbacks": ["rule_commutative_index_tuplize_order"]
+      },
+      "tests": ["test/test_sym.c"]
+    },
+    {
+      "id": "uop_symbolic_local",
+      "tinygrad": {
+        "path": "tinygrad/uop/symbolic.py", "matcher": "symbolic", "rule_count": 43,
+        "starred_expansions": {"21": ["ADD", "MUL", "MAX", "OR", "AND"]}
+      },
+      "polygrad": {
+        "path": "src/uop/symbolic.c",
+        "matcher": "poly_symbolic",
+        "callbacks": [
+          "rule_bool_or_logical_not", "rule_combine_mul_coefficients", "rule_combine_mul_coefficients",
+          "rule_combine_one_plus_coefficient", "rule_combine_one_plus_coefficient",
+          "rule_combine_one_plus_coefficient", "rule_add_self", "rule_add_assoc_self",
+          "rule_combine_nested_division", "rule_distribute_negated_add",
+          "rule_distribute_const_mul_over_add", "rule_where_logical_not", "rule_fold_where_closure",
+          "rule_combine_where_binary", "rule_combine_where_add_assoc",
+          "rule_combine_complementary_where", "rule_const_when_minmax_point",
+          "rule_const_when_minmax_point", "rule_where_to_max", "rule_where_to_max", "rule_max_fold",
+          "rule_assoc_fold_consts", "rule_assoc_fold_consts", "rule_assoc_fold_consts",
+          "rule_assoc_fold_consts", "rule_assoc_fold_consts", "fold_nested_floordiv_constants",
+          "rule_cmplt_add_const_bound", "rule_cmplt_mul_const_bound", "rule_cmplt_floordiv_const_bound",
+          "rule_move_const_to_end", "rule_move_const_to_end", "rule_lt_folding",
+          "rule_reverse_negative_compare", "rule_canonicalize_simplex", "rule_range_own_bound",
+          "rule_range_own_bound", "fold_lossless_nested_cast", "fold_bounded_nested_cast",
+          "rule_narrow_proven_long_binary", "rule_cast_index_add_const_to_add_casts",
+          "rule_after_canonicalize", "rule_after_end_single"
+        ]
+      },
+      "tests": ["test/test_sym.c"]
+    },
+    {
+      "id": "uop_div_and_mod_symbolic",
+      "tinygrad": {"path": "tinygrad/uop/divandmod.py", "matcher": "div_and_mod_symbolic", "rule_count": 3},
+      "polygrad": {
+        "path": "src/uop/symbolic.c",
+        "matcher": "poly_div_and_mod_symbolic",
+        "callbacks": ["fold_divmod_quotient_add", "fold_divmod_add_constant", "rule_cancel_divmod"]
+      },
+      "tests": ["test/test_sym.c"]
+    },
+    {
+      "id": "uop_simplify_valid",
+      "tinygrad": {"path": "tinygrad/uop/symbolic.py", "matcher": "pm_simplify_valid", "rule_count": 2},
+      "polygrad": {
+        "path": "src/uop/symbolic.c",
+        "matcher": "poly_pm_simplify_valid",
+        "callbacks": ["rule_simplify_valid", "rule_gated_given_valid"]
+      },
+      "tests": ["test/test_sym.c"]
+    },
+    {
+      "id": "uop_sym_local",
+      "tinygrad": {"path": "tinygrad/uop/symbolic.py", "matcher": "sym", "rule_count": 17},
+      "polygrad": {
+        "path": "src/uop/symbolic.c",
+        "matcher": "poly_sym",
+        "callbacks": [
+          "sym_reorder_alu_stack", "sym_push_cast_to_where", "xpow_rewrite", "sym_store_noop",
+          "sym_gate_store", "sym_store_noop", "sym_gate_store", "rule_reciprocal_square",
+          "rule_reciprocal_cube", "rule_reciprocal_const_factor",
+          "rule_reciprocal_product_one_minus", "rule_reciprocal_product_scaled_one_minus",
+          "rule_reciprocal_product_sum", "rule_sym_reduce_mul_chain", "rule_sym_reduce_mul_chain",
+          "sym_distribute_negated_add", "rule_sym_distribute_weak_mul_over_add"
+        ]
+      },
+      "tests": ["test/test_sym.c"]
+    },
+    {
+      "id": "uop_clean_up_group_sink",
+      "tinygrad": {"path": "tinygrad/uop/symbolic.py", "matcher": "pm_clean_up_group_sink", "rule_count": 2},
+      "polygrad": {
+        "path": "src/uop/symbolic.c",
+        "matcher": "poly_pm_clean_up_group_sink",
+        "callbacks": ["rule_group_singleton", "rule_clean_up_group_sink"]
+      },
+      "tests": ["test/test_sym.c"]
+    },
+    {
+      "id": "codegen_expander2",
+      "tinygrad": {"path": "tinygrad/codegen/__init__.py", "matcher": "expander2", "rule_count": 3},
+      "polygrad": {
+        "path": "src/codegen/codegen.c",
+        "matcher": "poly_pm_expander2",
+        "callbacks": ["poly_expand_reduce", "poly_expand_range", "poly_expand_wmma"]
+      },
+      "mapping": [
+        {"tinygrad_rule": 0, "polygrad_symbols": ["poly_expand_reduce"]},
+        {"tinygrad_rule": 1, "polygrad_symbols": ["poly_expand_range"]},
+        {"tinygrad_rule": 2, "polygrad_symbols": ["poly_expand_wmma"]}
+      ],
+      "tests": ["test/test_codegen.c"]
+    },
+    {
+      "id": "codegen_wmma_add",
+      "tinygrad": {"path": "tinygrad/codegen/__init__.py", "matcher": "pm_wmma_add", "rule_count": 3},
+      "polygrad": {
+        "path": "src/codegen/codegen.c",
+        "matcher": "poly_pm_wmma_add",
+        "callbacks": ["wmma_add", "permute_wmma_add", "permute_reshape_wmma_add"]
+      },
+      "mapping": [
+        {"tinygrad_rule": 0, "polygrad_symbols": ["wmma_add"]},
+        {"tinygrad_rule": 1, "polygrad_symbols": ["permute_wmma_add"]},
+        {"tinygrad_rule": 2, "polygrad_symbols": ["permute_reshape_wmma_add"]}
+      ],
+      "tests": ["test/test_codegen.c"]
+    },
+    {
+      "id": "codegen_expand_broadcast",
+      "tinygrad": {"path": "tinygrad/codegen/__init__.py", "matcher": "pm_expand_broadcast", "rule_count": 2},
+      "polygrad": {
+        "path": "src/codegen/codegen.c",
+        "matcher": "poly_pm_expand_broadcast",
+        "callbacks": ["poly_expand_broadcast", "poly_broadcast_and_devec_wmma"]
+      },
+      "mapping": [
+        {"tinygrad_rule": 0, "polygrad_symbols": ["poly_expand_broadcast"]},
+        {"tinygrad_rule": 1, "polygrad_symbols": ["poly_broadcast_and_devec_wmma"]}
+      ],
+      "tests": ["test/test_codegen.c"]
+    },
+    {
+      "id": "codegen_devectorizer2",
+      "tinygrad": {"path": "tinygrad/codegen/__init__.py", "matcher": "devectorizer2", "rule_count": 8},
+      "polygrad": {
+        "path": "src/codegen/codegen.c",
+        "matcher": "poly_devectorizer2",
+        "callbacks": [
+          "poly_do_devectorize", "poly_empty_index", "poly_do_stack_wmma",
+          "poly_index_buffer_stack", "poly_index_buffer_reshape", "poly_reshape_void",
+          "poly_reshape_single_to_scalar", "poly_expand_scalar_to_stack"
+        ]
+      },
+      "mapping": [
+        {"tinygrad_rule": 0, "polygrad_symbols": ["poly_do_devectorize"]},
+        {"tinygrad_rule": 1, "polygrad_symbols": ["poly_empty_index"]},
+        {"tinygrad_rule": 2, "polygrad_symbols": ["poly_do_stack_wmma"]},
+        {"tinygrad_rule": 3, "polygrad_symbols": ["poly_index_buffer_stack"]},
+        {"tinygrad_rule": 4, "polygrad_symbols": ["poly_index_buffer_reshape"]},
+        {"tinygrad_rule": 5, "polygrad_symbols": ["poly_reshape_void"]},
+        {"tinygrad_rule": 6, "polygrad_symbols": ["poly_reshape_single_to_scalar"]},
+        {"tinygrad_rule": 7, "polygrad_symbols": ["poly_expand_scalar_to_stack"]}
+      ],
+      "tests": ["test/test_codegen.c"]
+    },
+    {
+      "id": "codegen_ew_devectorizer",
+      "tinygrad": {"path": "tinygrad/codegen/__init__.py", "matcher": "ew_devectorizer", "rule_count": 1},
+      "polygrad": {
+        "path": "src/codegen/codegen.c",
+        "matcher": "poly_ew_devectorizer",
+        "callbacks": ["poly_do_devectorize"]
+      },
+      "mapping": [{"tinygrad_rule": 0, "polygrad_symbols": ["poly_do_devectorize"]}],
+      "tests": ["test/test_codegen.c"]
+    },
+    {
+      "id": "codegen_reduce_local",
+      "tinygrad": {"path": "tinygrad/codegen/__init__.py", "matcher": "pm_reduce_local", "rule_count": 4},
+      "polygrad": {
+        "path": "src/codegen/codegen.c",
+        "matcher": "poly_pm_reduce_local",
+        "callbacks": [
+          "poly_fix_group_for_reduce", "rule_reduce_to_acc",
+          "poly_expand_horizontal_reduce", "rule_merge_reduce_ends"
+        ]
+      },
+      "mapping": [
+        {"tinygrad_rule": 0, "polygrad_symbols": ["poly_fix_group_for_reduce"]},
+        {"tinygrad_rule": 1, "polygrad_symbols": ["rule_reduce_to_acc"]},
+        {"tinygrad_rule": 2, "polygrad_symbols": ["poly_expand_horizontal_reduce"]},
+        {"tinygrad_rule": 3, "polygrad_symbols": ["rule_merge_reduce_ends"]}
+      ],
+      "tests": ["test/test_codegen.c"]
+    },
+    {
+      "id": "codegen_add_loads",
+      "tinygrad": {"path": "tinygrad/codegen/__init__.py", "matcher": "pm_add_loads", "rule_count": 2},
+      "polygrad": {
+        "path": "src/codegen/codegen.c",
+        "matcher": "poly_pm_add_loads",
+        "callbacks": ["add_value_loads", "add_store_load"]
+      },
+      "mapping": [
+        {"tinygrad_rule": 0, "polygrad_symbols": ["add_value_loads"]},
+        {"tinygrad_rule": 1, "polygrad_symbols": ["add_store_load"]}
+      ],
+      "tests": ["test/test_codegen.c"]
+    },
+    {
+      "id": "codegen_add_local_buffers",
+      "tinygrad": {"path": "tinygrad/codegen/__init__.py", "matcher": "pm_add_local_buffers", "rule_count": 1},
+      "polygrad": {
+        "path": "src/codegen/codegen.c",
+        "matcher": "poly_pm_add_local_buffers",
+        "callbacks": ["poly_add_local_buffer"]
+      },
+      "mapping": [{"tinygrad_rule": 0, "polygrad_symbols": ["poly_add_local_buffer"]}],
+      "tests": ["test/test_codegen.c"]
+    },
+    {
+      "id": "codegen_implicit_barriers",
+      "tinygrad": {"path": "tinygrad/codegen/__init__.py", "matcher": "pm_implicit_barriers", "rule_count": 2},
+      "polygrad": {
+        "path": "src/codegen/codegen.c",
+        "matcher": "poly_pm_implicit_barriers",
+        "callbacks": ["rule_add_raw_barrier", "rule_add_war_barrier"]
+      },
+      "mapping": [
+        {"tinygrad_rule": 0, "polygrad_symbols": ["rule_add_raw_barrier"]},
+        {"tinygrad_rule": 1, "polygrad_symbols": ["rule_add_war_barrier"]}
+      ],
+      "tests": ["test/test_codegen.c"]
+    },
+    {
+      "id": "uop_cast_weak",
+      "tinygrad": {"path": "tinygrad/uop/weak.py", "matcher": "pm_cast_weak", "rule_count": 2},
+      "polygrad": {
+        "path": "src/uop/weak.c",
+        "matcher": "poly_pm_cast_weak",
+        "callbacks": ["cast_weak_srcs", "commit_weak_cast_const"]
+      },
+      "mapping": [
+        {"tinygrad_rule": 0, "polygrad_symbols": ["cast_weak_srcs"]},
+        {"tinygrad_rule": 1, "polygrad_symbols": ["commit_weak_cast_const"]}
+      ],
+      "tests": ["test/test_codegen.c", "test/test_pat.c"]
+    },
+    {
+      "id": "uop_commit_weak",
+      "tinygrad": {"path": "tinygrad/uop/weak.py", "matcher": "pm_commit_weak", "rule_count": 2},
+      "polygrad": {
+        "path": "src/uop/weak.c",
+        "matcher": "poly_pm_commit_weak",
+        "callbacks": ["commit_weak_srcs", "commit_weak_store"]
+      },
+      "mapping": [
+        {"tinygrad_rule": 0, "polygrad_symbols": ["commit_weak_srcs"]},
+        {"tinygrad_rule": 1, "polygrad_symbols": ["commit_weak_store"]}
+      ],
+      "tests": ["test/test_codegen.c", "test/test_pat.c"]
+    },
+    {
+      "id": "uop_lower_weak",
+      "tinygrad": {"path": "tinygrad/uop/weak.py", "matcher": "pm_lower_weak", "rule_count": 4},
+      "polygrad": {
+        "path": "src/uop/weak.c",
+        "matcher": "poly_pm_lower_weak",
+        "callbacks": ["lower_weak_const", "lower_stacked_weak_casts", "lower_weak_alu_resource", "lower_weak_node"]
+      },
+      "mapping": [
+        {"tinygrad_rule": 0, "polygrad_symbols": ["lower_weak_const"]},
+        {"tinygrad_rule": 1, "polygrad_symbols": ["lower_stacked_weak_casts"]},
+        {"tinygrad_rule": 2, "polygrad_symbols": ["lower_weak_alu_resource"]},
+        {"tinygrad_rule": 3, "polygrad_symbols": ["lower_weak_node"]}
+      ],
+      "tests": ["test/test_codegen.c", "test/test_pat.c"]
+    },
+    {
+      "id": "uop_lower_index_dtype",
+      "tinygrad": {"path": "tinygrad/uop/weak.py", "matcher": "pm_lower_index_dtype", "rule_count": 2},
+      "polygrad": {
+        "path": "src/uop/weak.c",
+        "matcher": "poly_pm_lower_index_dtype",
+        "callbacks": ["poly_lower_weak_srcs", "narrow_gated_long_index"]
+      },
+      "mapping": [
+        {"tinygrad_rule": 0, "polygrad_symbols": ["poly_lower_weak_srcs"]},
+        {"tinygrad_rule": 1, "polygrad_symbols": ["narrow_gated_long_index"]}
+      ],
+      "tests": ["test/test_codegen.c"]
+    },
+    {
+      "id": "uop_move_where_on_load",
+      "tinygrad": {"path": "tinygrad/uop/symbolic.py", "matcher": "pm_move_where_on_load", "rule_count": 2},
+      "polygrad": {
+        "path": "src/uop/symbolic.c",
+        "matcher": "poly_pm_move_where_on_load",
+        "callbacks": ["where_on_load_rule", "where_on_load_reverse_rule"]
+      },
+      "mapping": [
+        {"tinygrad_rule": 0, "polygrad_symbols": ["where_on_load_rule"]},
+        {"tinygrad_rule": 1, "polygrad_symbols": ["where_on_load_reverse_rule"]}
+      ],
+      "tests": ["test/test_codegen.c"]
+    },
+    {
+      "id": "codegen_late_gater",
+      "tinygrad": {"path": "tinygrad/codegen/late/gater.py", "matcher": "pm_move_gates_from_index", "rule_count": 6},
+      "polygrad": {
+        "path": "src/codegen/late/gater.c",
+        "matcher": "poly_pm_move_gates_from_index",
+        "callbacks": [
+          "move_gated_image_index_to_load", "move_gated_image_index_to_store",
+          "move_gated_index_to_load", "move_gated_index_to_store",
+          "move_where_gated_load", "move_where_reverse_gated_load"
+        ]
+      },
+      "mapping": [
+        {"tinygrad_rule": 0, "polygrad_symbols": ["move_gated_image_index_to_load"]},
+        {"tinygrad_rule": 1, "polygrad_symbols": ["move_gated_image_index_to_store"]},
+        {"tinygrad_rule": 2, "polygrad_symbols": ["move_gated_index_to_load"]},
+        {"tinygrad_rule": 3, "polygrad_symbols": ["move_gated_index_to_store"]},
+        {"tinygrad_rule": 4, "polygrad_symbols": ["move_where_gated_load"]},
+        {"tinygrad_rule": 5, "polygrad_symbols": ["move_where_reverse_gated_load"]}
+      ],
+      "tests": ["test/test_codegen.c"]
+    },
+    {
+      "id": "codegen_late_split_ends",
+      "tinygrad": {"path": "tinygrad/codegen/late/linearizer.py", "matcher": "pm_split_ends", "rule_count": 1},
+      "polygrad": {
+        "path": "src/codegen/late/linearizer.c",
+        "matcher": "poly_pm_split_ends",
+        "callbacks": ["do_split_ends"]
+      },
+      "mapping": [{"tinygrad_rule": 0, "polygrad_symbols": ["do_split_ends"]}],
+      "tests": ["test/test_codegen.c"]
+    },
+    {
+      "id": "codegen_indexing_simplify",
+      "tinygrad": {"path": "tinygrad/codegen/late/coalesce.py", "matcher": "indexing_simplify", "rule_count": 2},
+      "polygrad": {
+        "path": "src/codegen/late/coalesce.c",
+        "matcher": "poly_indexing_simplify",
+        "callbacks": [
+          "rule_simplify_valid_index", "poly_simplify_valid_image_load"
+        ]
+      },
+      "mapping": [
+        {"tinygrad_rule": 0, "polygrad_symbols": ["rule_simplify_valid_index"]},
+        {"tinygrad_rule": 1, "polygrad_symbols": ["poly_simplify_valid_image_load"]}
+      ],
+      "tests": ["test/test_codegen.c"]
+    },
+    {
+      "id": "codegen_simplify_add_image",
+      "tinygrad": {"path": "tinygrad/codegen/late/coalesce.py", "matcher": "pm_simplify_add_image", "rule_count": 4},
+      "polygrad": {
+        "path": "src/codegen/late/coalesce.c",
+        "matcher": "poly_pm_simplify_add_image",
+        "callbacks": [
+          "poly_transform_to_image", "poly_image_load_to_float",
+          "poly_image_store_to_float", "poly_remove_image_cast_roundtrip"
+        ]
+      },
+      "mapping": [
+        {"tinygrad_rule": 0, "polygrad_symbols": ["poly_transform_to_image"]},
+        {"tinygrad_rule": 1, "polygrad_symbols": ["poly_image_load_to_float"]},
+        {"tinygrad_rule": 2, "polygrad_symbols": ["poly_image_store_to_float"]},
+        {"tinygrad_rule": 3, "polygrad_symbols": ["poly_remove_image_cast_roundtrip"]}
+      ],
+      "tests": ["test/test_codegen.c"]
+    },
+    {
+      "id": "float_dtype_decomposition",
+      "tinygrad": {
+        "path": "tinygrad/codegen/decomp/dtype.py",
+        "matcher": "pm_float_decomp",
+        "rule_count": 11
+      },
+      "polygrad": {
+        "path": "src/codegen/decomp/dtype.c",
+        "matcher": "poly_pm_float_decomp",
+        "callbacks": [
+          "float_define", "float_index", "float_load", "float_bitcast_load",
+          "float_bitcast_from", "float_bitcast_to", "float_cast", "float_const",
+          "float_op", "float_store_bitcast", "float_store"
+        ]
+      },
+      "mapping": [
+        {"tinygrad_rule": 0, "polygrad_symbols": ["float_define"]},
+        {"tinygrad_rule": 1, "polygrad_symbols": ["float_index"]},
+        {"tinygrad_rule": 2, "polygrad_symbols": ["float_load"]},
+        {"tinygrad_rule": 3, "polygrad_symbols": ["float_bitcast_load"]},
+        {"tinygrad_rule": 4, "polygrad_symbols": ["float_bitcast_from"]},
+        {"tinygrad_rule": 5, "polygrad_symbols": ["float_bitcast_to"]},
+        {"tinygrad_rule": 6, "polygrad_symbols": ["float_cast"]},
+        {"tinygrad_rule": 7, "polygrad_symbols": ["float_const"]},
+        {"tinygrad_rule": 8, "polygrad_symbols": ["float_op"]},
+        {"tinygrad_rule": 9, "polygrad_symbols": ["float_store_bitcast"]},
+        {"tinygrad_rule": 10, "polygrad_symbols": ["float_store"]}
+      ],
+      "tests": [
+        "test/test_f16.c",
+        "test/test_codegen.c",
+        "temp/reference_upgrade_20260828_tg_python_f16_probe.py",
+        "temp/reference_upgrade_20260829_float_decomp_correspondence.md"
+      ]
+    },
+    {
+      "id": "long_dtype_decomposition",
+      "tinygrad": {
+        "path": "tinygrad/codegen/decomp/dtype.py",
+        "matcher": "pm_long_decomp",
+        "rule_count": 12
+      },
+      "polygrad": {
+        "path": "src/codegen/decomp/dtype.c",
+        "matcher": "poly_pm_long_decomp",
+        "callbacks": [
+          "long_define", "long_index", "long_store", "long_comparison",
+          "long_cast_long", "long_cast_to", "long_cast_from", "long_shift",
+          "long_where", "long_alu", "long_load", "long_const"
+        ]
+      },
+      "mapping": [
+        {"tinygrad_rule": 0, "polygrad_symbols": ["long_define"]},
+        {"tinygrad_rule": 1, "polygrad_symbols": ["long_index"]},
+        {"tinygrad_rule": 2, "polygrad_symbols": ["long_store"]},
+        {"tinygrad_rule": 3, "polygrad_symbols": ["long_comparison"]},
+        {"tinygrad_rule": 4, "polygrad_symbols": ["long_cast_long"]},
+        {"tinygrad_rule": 5, "polygrad_symbols": ["long_cast_to"]},
+        {"tinygrad_rule": 6, "polygrad_symbols": ["long_cast_from"]},
+        {"tinygrad_rule": 7, "polygrad_symbols": ["long_shift"]},
+        {"tinygrad_rule": 8, "polygrad_symbols": ["long_where"]},
+        {"tinygrad_rule": 9, "polygrad_symbols": ["long_alu"]},
+        {"tinygrad_rule": 10, "polygrad_symbols": ["long_load"]},
+        {"tinygrad_rule": 11, "polygrad_symbols": ["long_const"]}
+      ],
+      "tests": [
+        "test/test_codegen.c",
+        "temp/tg_long_decomp_rows_probe_20260829.py",
+        "temp/pg_long_decomp_rows_probe_20260829.c",
+        "temp/reference_upgrade_20260829_long_decomp_correspondence.md"
+      ]
+    },
+    {
+      "id": "dtype_decomposition_outer",
+      "tinygrad": {
+        "path": "tinygrad/codegen/decomp/dtype.py",
+        "matcher": "pm_dtype_decomps",
+        "rule_count": 2
+      },
+      "polygrad": {
+        "path": "src/codegen/decomp/dtype.c",
+        "matcher": "poly_pm_dtype_decomps",
+        "callbacks": ["detect_dtype_decomp", "do_dtype_decomps"]
+      },
+      "mapping": [
+        {"tinygrad_rule": 0, "polygrad_symbols": ["detect_dtype_decomp"]},
+        {"tinygrad_rule": 1, "polygrad_symbols": ["do_dtype_decomps"]}
+      ],
+      "tests": ["test/test_codegen.c", "test/test_wasm.c"]
+    }
+  ],
+  "matcher_aggregates": [
+    {
+      "id": "symbolic_simple",
+      "rule_count": 71,
+      "components": ["uop_data_invalid", "uop_symbolic_simple_local", "uop_mop_cleanup"]
+    },
+    {
+      "id": "symbolic",
+      "rule_count": 118,
+      "components": [
+        "uop_data_invalid", "uop_symbolic_simple_local", "uop_mop_cleanup",
+        "uop_commutative", "uop_symbolic_local", "uop_div_and_mod_symbolic"
+      ]
+    },
+    {
+      "id": "sym",
+      "rule_count": 139,
+      "components": [
+        "uop_data_invalid", "uop_symbolic_simple_local", "uop_mop_cleanup",
+        "uop_commutative", "uop_symbolic_local", "uop_div_and_mod_symbolic",
+        "uop_simplify_valid", "uop_sym_local", "uop_clean_up_group_sink"
+      ]
+    }
+  ],
+  "waves": [
+    {
+      "id": "tensor_core",
+      "title": "Tensor-core inventory, selection, shape and renderer lowering",
+      "source_status": "closed",
+      "implementation_status": "closed",
+      "runtime_status": "cuda_green_hip_structural_green",
+      "tinygrad_paths": [
+        "tinygrad/codegen/opt/tc.py",
+        "tinygrad/codegen/__init__.py",
+        "tinygrad/uop/ops.py",
+        "tinygrad/renderer/cstyle.py"
+      ],
+      "symbol_patterns": [
+        "TensorCore", "tensor_cores", "get_tc", "ALLOW_TF32", "WMMA",
+        "wmma", "_shape"
+      ],
+      "polygrad_owners": [
+        "src/codegen/opt/tc.c",
+        "src/codegen/codegen.c",
+        "src/shape.c",
+        "src/renderer/cstyle.c",
+        "src/renderer/cuda.c",
+        "src/renderer/hip.c"
+      ],
+      "case_patterns": ["matmul", "wmma", "tensor_core", "float16", "bfloat16", "fp8"],
+      "acceptance_probes": [
+        "temp/tc_cuda_e2e_probe_20260830.py: matching Tinygrad/Polygrad half-matmul values and inline PTX",
+        "temp/tg_shape_inference_batch_probe_20260830.py: current late shape semantics",
+        "test/test_codegen.c: current tensor-core tables and selection",
+        "test/test_cuda.c: current CUDA inline-PTX rendering",
+        "test/test_hip.c: current AMD architecture matrix rendering"
+      ]
+    },
+    {
+      "id": "shape_devectorization",
+      "title": "Shape broadcast, devectorization and memory index lowering",
+      "source_status": "open",
+      "implementation_status": "closed",
+      "runtime_status": "broad_green",
+      "tinygrad_paths": [
+        "tinygrad/uop/ops.py",
+        "tinygrad/codegen/__init__.py",
+        "tinygrad/schedule/indexing.py"
+      ],
+      "symbol_patterns": [
+        "shape", "broadcast", "expand_broadcast", "devectorize", "index",
+        "stack", "load", "store"
+      ],
+      "polygrad_owners": [
+        "src/uop/ops.c",
+        "src/shape.c",
+        "src/codegen/codegen.c",
+        "src/codegen/gpudims.c",
+        "src/schedule/indexing.c"
+      ],
+      "case_patterns": [
+        "gather", "index", "one_hot", "eye", "scalar", "shape", "movement",
+        "reduce", "matmul", "conv", "pool", "optimizer"
+      ],
+      "acceptance_probes": [
+        "temp/reference_upgrade_20260823/index_lower_weak_probe.py: current TG/PG advanced-index values and final kernel topology",
+        "temp/reference_upgrade_20260823/weak_vector_consumer_tg_probe.py: shaped scalar-dtype elementwise devectorization",
+        "test/test_codegen.c: exact current devectorizer/index-lowering topology"
+      ]
+    },
+    {
+      "id": "coalescing_final_codegen",
+      "title": "Late codegen coalescing, gates, ENDs, weak/index lowering and SPEC=2 validation",
+      "source_status": "open",
+      "implementation_status": "closed",
+      "runtime_status": "broad_green",
+      "tinygrad_paths": [
+        "tinygrad/uop/symbolic.py",
+        "tinygrad/uop/spec.py",
+        "tinygrad/uop/weak.py",
+        "tinygrad/codegen/__init__.py",
+        "tinygrad/codegen/late/coalesce.py",
+        "tinygrad/codegen/late/gater.py",
+        "tinygrad/codegen/late/linearizer.py"
+      ],
+      "symbol_patterns": [
+        "coalesce", "valid", "indexing_simplify", "memory_coalescing",
+        "lower_index", "lower_weak", "casted_const", "gater", "split_ends",
+        "move_where_on_load", "spec", "type_verify"
+      ],
+      "polygrad_owners": [
+        "src/uop/weak.c",
+        "src/uop/symbolic.c",
+        "src/uop/ops.c",
+        "src/codegen/codegen.c",
+        "src/codegen/late/coalesce.c",
+        "src/codegen/late/gater.c",
+        "src/codegen/late/linearizer.c"
+      ],
+      "case_patterns": [
+        "gather", "index", "one_hot", "eye", "reduce", "matmul", "conv", "pool"
+      ],
+      "acceptance_probes": [
+        "temp/reference_upgrade_20260823/index_lower_weak_probe.py: current TG/PG advanced-index values and final kernel topology",
+        "test/test_codegen.c: exact current coalescing/final-lowering topology",
+        "current SPEC=2 type verification on every focused kernel"
+      ]
+    },
+    {
+      "id": "storage_identity",
+      "title": "BUFFER, ParamArg, device and COPY identity",
+      "source_status": "open",
+      "implementation_status": "closed",
+      "runtime_status": "broad_green",
+      "tinygrad_paths": [
+        "tinygrad/tensor.py",
+        "tinygrad/uop/ops.py",
+        "tinygrad/device.py",
+        "tinygrad/schedule/memory.py",
+        "tinygrad/engine/realize.py"
+      ],
+      "symbol_patterns": ["buffer", "copy", "device", "realize", "replace"],
+      "polygrad_owners": [
+        "src/tensor.c",
+        "src/uop/ops.c",
+        "src/device.c",
+        "src/engine/realize.c",
+        "src/schedule/indexing.c"
+      ],
+      "case_patterns": ["buffer", "copy", "roundtrip", "move", "device", "realize", "clone", "contiguous", "scalar_"]
+    },
+    {
+      "id": "weak_scalars",
+      "title": "Weak scalar construction, promotion and lowering",
+      "source_status": "open",
+      "implementation_status": "closed",
+      "runtime_status": "broad_green",
+      "tinygrad_paths": [
+        "tinygrad/dtype.py",
+        "tinygrad/uop/ops.py",
+        "tinygrad/uop/weak.py",
+        "tinygrad/mixin/elementwise.py"
+      ],
+      "symbol_patterns": ["weak", "const", "promote", "broadcast", "cast", "alu", "ufix"],
+      "polygrad_owners": [
+        "src/dtype.c",
+        "src/uop/ops.c",
+        "src/uop/weak.c",
+        "src/tensor.c",
+        "py/polygrad/tensor.py",
+        "js/src/tensor.js"
+      ],
+      "case_patterns": ["scalar", "occurrence", "abs", "sign", "neg", "sub", "where", "clamp", "round", "sin", "cos", "tan", "log", "exp", "sqrt", "sigmoid", "gelu", "relu", "silu", "elu"],
+      "acceptance_probes": [
+        "test/test_pat.c: graph_rewrite_rederives_dtype_from_rewritten_sources",
+        "src/uop/weak.c: shared weakint/weakfloat lowering",
+        "current graph slice: 166/166 exact with zero findings"
+      ]
+    },
+    {
+      "id": "movement_shape",
+      "title": "Shape sources and movement composition",
+      "source_status": "open",
+      "implementation_status": "closed",
+      "runtime_status": "broad_green",
+      "tinygrad_paths": [
+        "tinygrad/mixin/movement.py",
+        "tinygrad/uop/movement.py",
+        "tinygrad/uop/ops.py",
+        "tinygrad/schedule/indexing.py"
+      ],
+      "symbol_patterns": ["shape", "reshape", "expand", "broadcast", "permute", "shrink", "pad", "flip", "index"],
+      "polygrad_owners": [
+        "src/mixin/movement.c",
+        "src/shape.c",
+        "src/uop/ops.c",
+        "src/schedule/indexing.c"
+      ],
+      "case_patterns": ["shape", "reshape", "expand", "broadcast", "permute", "shrink", "pad", "flip", "slice", "squeeze", "rearrange", "tril", "triu"]
+    },
+    {
+      "id": "reduction_autograd",
+      "title": "Reduction topology and gradients",
+      "source_status": "open",
+      "implementation_status": "closed",
+      "runtime_status": "broad_green",
+      "tinygrad_paths": [
+        "tinygrad/mixin/reduce.py",
+        "tinygrad/mixin/gradient.py",
+        "tinygrad/gradient.py",
+        "tinygrad/tensor.py",
+        "tinygrad/uop/ops.py"
+      ],
+      "symbol_patterns": ["reduce", "sum", "prod", "max", "arg", "softmax", "gradient", "backward"],
+      "polygrad_owners": [
+        "src/tensor.c",
+        "src/autograd.c",
+        "src/uop/ops.c",
+        "src/engine/schedule.c"
+      ],
+      "case_patterns": ["reduce", "sum", "prod", "max", "arg", "softmax", "sort", "topk", "backward", "optimizer", "sgd", "adam"]
+    },
+    {
+      "id": "resources_effects",
+      "title": "Resource identity, STORE/AFTER effects and serialization",
+      "source_status": "open",
+      "implementation_status": "closed",
+      "runtime_status": "broad_green",
+      "tinygrad_paths": [
+        "tinygrad/tensor.py",
+        "tinygrad/uop/ops.py",
+        "tinygrad/schedule/memory.py",
+        "tinygrad/engine/realize.py"
+      ],
+      "symbol_patterns": ["assign", "store", "after", "buffer", "bind", "replace", "realize"],
+      "polygrad_owners": [
+        "src/tensor.c",
+        "src/ir.c",
+        "src/instance.c",
+        "src/placer.c",
+        "src/engine/realize.c"
+      ],
+      "case_patterns": ["assign", "bind", "view", "rng", "dropout", "instance", "rebuilt_after_realize"]
+    },
+    {
+      "id": "scheduler_codegen",
+      "title": "SPEC=2 scheduling, rangeify, decomposition and codegen",
+      "source_status": "open",
+      "implementation_status": "closed",
+      "runtime_status": "broad_green",
+      "tinygrad_paths": [
+        "tinygrad/uop/spec.py",
+        "tinygrad/uop/symbolic.py",
+        "tinygrad/schedule",
+        "tinygrad/codegen",
+        "tinygrad/engine/realize.py"
+      ],
+      "symbol_patterns": ["schedule", "range", "rewrite", "linear", "program", "lower", "codegen", "spec"],
+      "polygrad_owners": [
+        "src/engine/schedule.c",
+        "src/schedule/rangeify.c",
+        "src/schedule/indexing.c",
+        "src/codegen/codegen.c",
+        "src/codegen/simplify.c"
+      ],
+      "case_patterns": ["reduce", "matmul", "conv", "pool", "mlp", "linear", "layernorm", "rmsnorm", "embedding"]
+    },
+    {
+      "id": "multi_device",
+      "title": "UNSHARD, device ranges and allreduce",
+      "source_status": "open",
+      "implementation_status": "focused_closed",
+      "runtime_status": "synthetic_green",
+      "tinygrad_paths": [
+        "tinygrad/schedule/multi.py",
+        "tinygrad/schedule/allreduce.py",
+        "tinygrad/uop/ops.py",
+        "tinygrad/device.py"
+      ],
+      "symbol_patterns": ["unshard", "multi", "shard", "device", "allreduce", "copy"],
+      "polygrad_owners": [
+        "src/placer.c",
+        "src/device.c",
+        "src/schedule/rangeify.c",
+        "src/engine/realize.c"
+      ],
+      "case_patterns": ["multi", "shard", "device", "copy", "sibling_moves"]
+    },
+    {
+      "id": "jit_program",
+      "title": "JIT capture, LINEAR/PROGRAM and bound artifacts",
+      "source_status": "open",
+      "implementation_status": "closed",
+      "runtime_status": "broad_green",
+      "tinygrad_paths": [
+        "tinygrad/engine/jit.py",
+        "tinygrad/engine/realize.py",
+        "tinygrad/uop/ops.py"
+      ],
+      "symbol_patterns": ["jit", "capture", "linear", "program", "compile", "cache"],
+      "polygrad_owners": [
+        "src/engine/jit.c",
+        "src/engine/realize.c",
+        "src/engine/schedule.c",
+        "src/instance.c",
+        "src/bundle.c"
+      ],
+      "case_patterns": ["jit", "program", "function", "custom", "rng", "dropout", "optimizer"]
+    }
+  ]
+}

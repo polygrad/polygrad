@@ -34,7 +34,7 @@
  */
 
 #include "interp.h"
-#include "codegen.h"
+#include "codegen/codegen.h"
 #include "bigint.h"
 #include "utils.h"
 #include <stdio.h>
@@ -140,7 +140,7 @@ static uint64_t as_uint(InterpLane v, PolyDType dt) {
 }
 
 static bool interp_is_bf16(PolyDType dt) {
-  PolyDType s = poly_dtype_scalar(dt);
+  PolyDType s = dt;
   return poly_dtype_is_float(s) && s.bitsize == 16 && s.name && strcmp(s.name, "__bf16") == 0;
 }
 
@@ -262,6 +262,11 @@ static InterpLane mem_load_scalar(void *ptr, PolyDType s) {
   bool is_flt = poly_dtype_is_float(s);
   bool is_uns = poly_dtype_is_unsigned(s);
 
+  if (poly_dtype_is_fp8(s)) {
+    uint8_t bits;
+    memcpy(&bits, ptr, 1);
+    return il_flt(poly_fp8_to_float(bits, s));
+  }
   if (is_flt && bs == 32) {
     float v;
     memcpy(&v, ptr, 4);
@@ -338,6 +343,11 @@ static void mem_store_scalar(void *ptr, InterpLane v, PolyDType s) {
   bool is_flt = poly_dtype_is_float(s);
   bool is_uns = poly_dtype_is_unsigned(s);
 
+  if (poly_dtype_is_fp8(s)) {
+    uint8_t bits = poly_float_to_fp8(v.f, s);
+    memcpy(ptr, &bits, 1);
+    return;
+  }
   if (is_flt && bs == 32) {
     float sv = (float)v.f;
     memcpy(ptr, &sv, 4);
@@ -546,7 +556,9 @@ static InterpLane eval_alu(PolyOps op, PolyDType dt, InterpLane *srcs, int n_src
 /* Truncate integer lane to dtype width (matches alu.c truncate_result). */
 static InterpLane interp_truncate_lane(InterpLane v, PolyDType dt) {
   if (poly_dtype_is_float(dt)) {
-    PolyDType s = poly_dtype_scalar(dt);
+    PolyDType s = dt;
+    if (poly_dtype_is_fp8(s))
+      return il_flt(poly_fp8_to_float(poly_float_to_fp8(v.f, s), s));
     if (interp_is_bf16(s)) {
       uint16_t bits = interp_f32_to_bf16_bits((float)v.f);
       return il_flt(interp_bf16_bits_to_f32(bits));
@@ -577,14 +589,18 @@ static InterpLane bitcast_lane(InterpLane src, PolyDType src_dt, PolyDType dst_d
     /* Pinned tinygrad/uop/ops.py:1199-1207 packs using the source storage
      * format and unpacks using the destination storage format. */
     uint8_t bits;
-    if (poly_dtype_is_bool(src_dt))
+    if (poly_dtype_is_fp8(src_dt))
+      bits = poly_float_to_fp8(src.f, src_dt);
+    else if (poly_dtype_is_bool(src_dt))
       bits = src.i ? 1 : 0;
     else if (poly_dtype_is_unsigned(src_dt))
       bits = (uint8_t)src.u;
     else
       bits = (uint8_t)src.i;
 
-    if (poly_dtype_is_bool(dst_dt))
+    if (poly_dtype_is_fp8(dst_dt))
+      return il_flt(poly_fp8_to_float(bits, dst_dt));
+    else if (poly_dtype_is_bool(dst_dt))
       return il_int(bits ? 1 : 0);
     else if (poly_dtype_is_unsigned(dst_dt))
       return il_uint(bits);
@@ -658,8 +674,10 @@ static InterpLane bitcast_lane(InterpLane src, PolyDType src_dt, PolyDType dst_d
 
 /* CAST one lane: value conversion with truncation. */
 static InterpLane cast_lane(InterpLane src, PolyDType src_dt, PolyDType dst_dt) {
-  if (poly_dtype_is_float(dst_dt))
-    return il_flt(as_float(src, src_dt));
+  if (poly_dtype_is_float(dst_dt)) {
+    InterpLane out = il_flt(as_float(src, src_dt));
+    return poly_dtype_is_fp8(dst_dt) ? interp_truncate_lane(out, dst_dt) : out;
+  }
   else if (poly_dtype_is_unsigned(dst_dt))
     return interp_truncate_lane(il_uint(as_uint(src, src_dt)), dst_dt);
   else
@@ -729,7 +747,6 @@ static int find_matching_end(PolyUOp **lin, int n, int range_pos) {
  * node's nominal dtype. */
 static PolyUOp *interp_follow_storage_base(PolyUOp *u) {
   while (u) {
-    if (u->op == POLY_OP_DEFINE_REG || u->op == POLY_OP_DEFINE_LOCAL) return u;
     if (u->op == POLY_OP_BUFFER &&
         (poly_program_memory_is(u, POLY_ADDR_REG) ||
          poly_program_memory_is(u, POLY_ADDR_LOCAL)))
@@ -745,10 +762,11 @@ static PolyUOp *interp_follow_storage_base(PolyUOp *u) {
   return NULL;
 }
 
-static int interp_uop_lane_count(PolyUOp *u) {
+static int interp_uop_lane_count(PolyCtx *ctx, PolyUOp *u) {
   if (!u) return 1;
-  if (u->op == POLY_OP_VECTORIZE && u->n_src > 1) return u->n_src;
-  return u->dtype.count > 1 ? u->dtype.count : 1;
+  if (u->op == POLY_OP_STACK) return u->n_src;
+  int64_t count = poly_uop_max_numel(ctx, u);
+  return count > 1 && count <= UINT16_MAX ? (int)count : 1;
 }
 
 static int interp_storage_extent_for_use(PolyUOp *ptr_uop, int access_lanes) {
@@ -779,20 +797,26 @@ static int interp_storage_extent_for_use(PolyUOp *ptr_uop, int access_lanes) {
   return (int)need;
 }
 
-static int interp_storage_lanes_for_def(PolyUOp **lin, int n_lin, PolyUOp *def) {
+static int interp_storage_lanes_for_def(
+    PolyCtx *ctx,
+    PolyUOp **lin,
+    int n_lin,
+    PolyUOp *def
+) {
   int64_t declared = poly_program_buffer_size(def);
   int lanes = declared > INT_MAX ? INT_MAX : (int)declared;
-  if (lanes < 1) lanes = def->dtype.count > 1 ? def->dtype.count : 1;
+  if (lanes < 1) lanes = interp_uop_lane_count(ctx, def);
   for (int i = 0; i < n_lin; i++) {
     PolyUOp *u = lin[i];
     if (u->op == POLY_OP_STORE && u->n_src >= 2) {
       if (interp_follow_storage_base(u->src[0]) == def) {
-        int need = interp_storage_extent_for_use(u->src[0], interp_uop_lane_count(u->src[1]));
+        int need =
+            interp_storage_extent_for_use(u->src[0], interp_uop_lane_count(ctx, u->src[1]));
         if (need > lanes) lanes = need;
       }
     } else if (u->op == POLY_OP_LOAD && u->n_src >= 1) {
       if (interp_follow_storage_base(u->src[0]) == def) {
-        int need = interp_storage_extent_for_use(u->src[0], interp_uop_lane_count(u));
+        int need = interp_storage_extent_for_use(u->src[0], interp_uop_lane_count(ctx, u));
         if (need > lanes) lanes = need;
       }
     }
@@ -803,6 +827,7 @@ static int interp_storage_lanes_for_def(PolyUOp **lin, int n_lin, PolyUOp *def) 
 /* Region interpreter */
 
 static int interp_region(
+    PolyCtx *ctx,
     PolyUOp **lin,
     int n_lin,
     int start,
@@ -810,6 +835,7 @@ static int interp_region(
     InterpVal *vals,
     void **args,
     int n_args,
+    const int *param_arg_indices,
     const UOpIndexMap *idx_map,
     InterpLane *arena
 ) {
@@ -818,33 +844,22 @@ static int interp_region(
 
     switch (u->op) {
 
-    case POLY_OP_PARAM:
-      if (u->arg.i >= 0 && u->arg.i < n_args) {
-        vals[i] = iv_scalar(il_ptr(args[u->arg.i]));
+    case POLY_OP_PARAM: {
+      int arg_index = param_arg_indices[i];
+      if (arg_index >= 0 && arg_index < n_args && args[arg_index]) {
+        vals[i] = iv_scalar(
+            poly_uop_is_alu_param(u)
+                ? mem_load_scalar(args[arg_index], u->dtype)
+                : il_ptr(args[arg_index])
+        );
         iv_fixup(&vals[i]);
       } else {
         fprintf(
-            stderr, "polygrad: interp: PARAM index %lld out of range (n_args=%d)\n",
-            (long long)u->arg.i, n_args
+            stderr, "polygrad: interp: compact PARAM index %d out of range (n_args=%d)\n",
+            arg_index, n_args
         );
         return -1;
       }
-      break;
-
-    case POLY_OP_DEFINE_VAR: {
-      int n_buf_params = 0, var_ord = 0;
-      for (int j = 0; j < i; j++) {
-        if (lin[j]->op == POLY_OP_PARAM) n_buf_params++;
-        if (lin[j]->op == POLY_OP_DEFINE_VAR) var_ord++;
-      }
-      int slot = n_buf_params + var_ord;
-      if (slot >= 0 && slot < n_args && args[slot]) {
-        int *vp = (int *)args[slot];
-        vals[i] = iv_scalar(il_int(*vp));
-      } else {
-        vals[i] = iv_scalar(il_int(0));
-      }
-      iv_fixup(&vals[i]);
       break;
     }
 
@@ -859,7 +874,7 @@ static int interp_region(
       else
         lane = il_int((int64_t)poly_arg_integer_to_u64_mod(u->arg));
       /* Fill all lanes with the same value */
-      int cnt = u->dtype.count > 0 ? u->dtype.count : 1;
+      int cnt = interp_uop_lane_count(ctx, u);
       vals[i].count = (uint16_t)cnt;
       if (cnt == 1) {
         vals[i].inline0 = lane;
@@ -878,16 +893,15 @@ static int interp_region(
         fprintf(stderr, "polygrad: interp: unexpected BUFFER in program IR\n");
         return -1;
       }
-      /* fallthrough */
-    case POLY_OP_DEFINE_REG: {
-      PolyDType base = poly_dtype_scalar(poly_program_buffer_dtype(u));
-      int sz = poly_dtype_itemsize(base);
-      if (sz < 1) sz = 1;
-      int cnt = interp_storage_lanes_for_def(lin, n_lin, u);
-      vals[i] = iv_scalar(il_ptr(calloc(1, (size_t)(sz * cnt))));
-      iv_fixup(&vals[i]);
-      break;
-    }
+      {
+        PolyDType base = poly_program_buffer_dtype(u);
+        int sz = poly_dtype_itemsize(base);
+        if (sz < 1) sz = 1;
+        int cnt = interp_storage_lanes_for_def(ctx, lin, n_lin, u);
+        vals[i] = iv_scalar(il_ptr(calloc(1, (size_t)(sz * cnt))));
+        iv_fixup(&vals[i]);
+        break;
+      }
 
     case POLY_OP_RANGE: {
       int src0 = uop_index_map_get(idx_map, u->src[0]);
@@ -901,7 +915,11 @@ static int interp_region(
       for (int ridx = 0; ridx < bound; ridx++) {
         vals[i] = iv_scalar(il_int(ridx));
         iv_fixup(&vals[i]);
-        int rc = interp_region(lin, n_lin, i + 1, end_pos, vals, args, n_args, idx_map, arena);
+        int rc =
+            interp_region(
+                ctx, lin, n_lin, i + 1, end_pos, vals, args, n_args,
+                param_arg_indices, idx_map, arena
+            );
         if (rc < 0) return rc;
       }
       i = end_pos; /* skip past END */
@@ -939,14 +957,35 @@ static int interp_region(
         iv_fixup(&vals[i]);
         break;
       }
-      PolyDType base_dt = poly_dtype_scalar(u->dtype);
+      if (poly_uop_is_image_shape(ctx, u->src[0])) {
+        /* Tinygrad 2026-08-22/a9069c177a9d runtime/ops_python.py:110-116
+         * linearizes image (y,x) into four-channel storage. */
+        if (u->n_src != 3 || !poly_dtype_eq(u->src[0]->dtype, POLY_FLOAT32)) {
+          fprintf(stderr, "polygrad: interp: half image execution is unsupported\n");
+          return -1;
+        }
+        int src2 = uop_index_map_get(idx_map, u->src[2]);
+        PolyShape shape = poly_uop_max_shape_cached(ctx, u->src[0]);
+        if (src2 < 0 || shape.ndim != 3) return -1;
+        int64_t y = as_int(iv_get(&vals[src1], 0), u->src[1]->dtype);
+        int64_t x = as_int(iv_get(&vals[src2], 0), u->src[2]->dtype);
+        if (y < 0 || y >= shape.dims[0] || x < 0 || x >= shape.dims[1]) {
+          vals[i] = iv_scalar(il_ptr(NULL));
+        } else {
+          char *base_ptr = (char *)iv_get(&vals[src0], 0).p;
+          int itemsize = poly_dtype_itemsize(u->src[0]->dtype);
+          int64_t offset = (x + y * shape.dims[1]) * 4;
+          vals[i] = iv_scalar(il_ptr(base_ptr + offset * itemsize));
+        }
+        iv_fixup(&vals[i]);
+        break;
+      }
+      PolyDType base_dt = u->dtype;
       int itemsize = poly_dtype_itemsize(base_dt);
       if (itemsize < 1) itemsize = 1;
-      /* Include vector count in stride for vector loads */
-      int vec_count = u->dtype.count > 1 ? u->dtype.count : 1;
       char *base_ptr = (char *)iv_get(&vals[src0], 0).p;
       int64_t offset = as_int(iv_get(&vals[src1], 0), u->src[1]->dtype);
-      vals[i] = iv_scalar(il_ptr(base_ptr + offset * itemsize * vec_count));
+      vals[i] = iv_scalar(il_ptr(base_ptr + offset * itemsize));
       iv_fixup(&vals[i]);
       break;
     }
@@ -958,7 +997,7 @@ static int interp_region(
         fprintf(stderr, "polygrad: interp: SHRINK src not found\n");
         return -1;
       }
-      PolyDType scalar_dt = poly_dtype_scalar(u->dtype);
+      PolyDType scalar_dt = u->dtype;
       int itemsize = poly_dtype_itemsize(scalar_dt);
       if (itemsize < 1) itemsize = 1;
       char *base_ptr = (char *)iv_get(&vals[src0], 0).p;
@@ -981,7 +1020,7 @@ static int interp_region(
         int gate_i = uop_index_map_get(idx_map, gate_uop);
         if (gate_i >= 0 && !as_int(iv_get(&vals[gate_i], 0), gate_uop->dtype)) {
           /* Gate is false: use alt value or zero */
-          int cnt = u->dtype.count > 0 ? u->dtype.count : 1;
+          int cnt = interp_uop_lane_count(ctx, u);
           vals[i].count = (uint16_t)cnt;
           if (cnt == 1) vals[i].lanes = &vals[i].inline0;
           if (u->n_src >= 2) {
@@ -1001,9 +1040,9 @@ static int interp_region(
         }
       }
 
-      /* Load dt.count contiguous scalars */
-      PolyDType scalar_dt = poly_dtype_scalar(u->dtype);
-      int cnt = u->dtype.count > 0 ? u->dtype.count : 1;
+      /* Tinygrad PythonProgram sizes shaped LOADs with u.max_numel(). */
+      PolyDType scalar_dt = u->dtype;
+      int cnt = interp_uop_lane_count(ctx, u);
       int scalar_size = poly_dtype_itemsize(scalar_dt);
       if (scalar_size < 1) scalar_size = 1;
       char *ptr = (char *)iv_get(&vals[src0], 0).p;
@@ -1011,7 +1050,9 @@ static int interp_region(
       vals[i].count = (uint16_t)cnt;
       if (cnt == 1) vals[i].lanes = &vals[i].inline0;
       for (int k = 0; k < cnt; k++)
-        iv_set(&vals[i], k, mem_load_scalar(ptr + k * scalar_size, scalar_dt));
+        iv_set(
+            &vals[i], k,
+            ptr ? mem_load_scalar(ptr + k * scalar_size, scalar_dt) : il_flt(0.0));
       break;
     }
 
@@ -1022,39 +1063,25 @@ static int interp_region(
         fprintf(stderr, "polygrad: interp: STORE src not found\n");
         return -1;
       }
-      PolyDType store_dt = poly_dtype_scalar(u->src[0]->dtype);
+      PolyDType store_dt = u->src[0]->dtype;
       int scalar_size = poly_dtype_itemsize(store_dt);
       if (scalar_size < 1) scalar_size = 1;
       char *ptr = (char *)iv_get(&vals[src0], 0).p;
+      if (!ptr && u->src[0]->op == POLY_OP_INDEX &&
+          poly_uop_is_image_shape(ctx, u->src[0]->src[0]))
+        break;
       int cnt = vals[src1].count;
       for (int k = 0; k < cnt; k++)
         mem_store_scalar(ptr + k * scalar_size, iv_get(&vals[src1], k), store_dt);
       break;
     }
 
-    case POLY_OP_DEFINE_LOCAL: {
-      PolyDType base = poly_dtype_scalar(u->dtype);
-      int sz = poly_dtype_itemsize(base);
-      if (sz < 1) sz = 1;
-      int cnt = interp_storage_lanes_for_def(lin, n_lin, u);
-      vals[i] = iv_scalar(il_ptr(calloc(1, (size_t)(sz * cnt))));
-      iv_fixup(&vals[i]);
-      break;
-    }
-
     case POLY_OP_CAST: {
       int src0 = uop_index_map_get(idx_map, u->src[0]);
-      PolyDType src_dt = poly_dtype_scalar(u->src[0]->dtype);
-      PolyDType dst_dt = poly_dtype_scalar(u->dtype);
-      int dst_cnt = u->dtype.count > 0 ? u->dtype.count : 1;
+      PolyDType src_dt = u->src[0]->dtype;
+      PolyDType dst_dt = u->dtype;
+      int dst_cnt = interp_uop_lane_count(ctx, u);
       int src_cnt = vals[src0].count;
-
-      /* Pointer CAST: pass through (used for type coercion on INDEX) */
-      if (u->dtype.is_ptr) {
-        vals[i] = vals[src0];
-        iv_fixup(&vals[i]);
-        break;
-      }
 
       vals[i].count = (uint16_t)dst_cnt;
       if (dst_cnt == 1) vals[i].lanes = &vals[i].inline0;
@@ -1068,9 +1095,9 @@ static int interp_region(
 
     case POLY_OP_BITCAST: {
       int src0 = uop_index_map_get(idx_map, u->src[0]);
-      PolyDType src_dt = poly_dtype_scalar(u->src[0]->dtype);
-      PolyDType dst_dt = poly_dtype_scalar(u->dtype);
-      int dst_cnt = u->dtype.count > 0 ? u->dtype.count : 1;
+      PolyDType src_dt = u->src[0]->dtype;
+      PolyDType dst_dt = u->dtype;
+      int dst_cnt = interp_uop_lane_count(ctx, u);
       int src_cnt = vals[src0].count;
 
       vals[i].count = (uint16_t)dst_cnt;
@@ -1083,57 +1110,10 @@ static int interp_region(
       break;
     }
 
-    case POLY_OP_GEP: {
-      /* Lane extraction from vector source.
-       * arg is an int_tuple of lane indices.
-       * src[0] is the vector to extract from. */
-      int src0 = uop_index_map_get(idx_map, u->src[0]);
-      if (src0 < 0) {
-        vals[i] = iv_scalar(il_int(0));
-        iv_fixup(&vals[i]);
-        break;
-      }
-
-      int n_idxs = 0;
-      int scalar_lane_idx = 0;
-      if (u->arg.kind == POLY_ARG_INT_TUPLE) {
-        n_idxs = u->arg.int_tuple.n;
-      } else if (u->arg.kind == POLY_ARG_INT) {
-        n_idxs = 1;
-        scalar_lane_idx = (int)u->arg.i;
-      }
-
-      if (n_idxs == 1) {
-        /* Single lane extraction: out = src.lanes[idx].
-         * Linearized GEPs can carry either a scalar int arg (lane extract) or
-         * an int_tuple. tinygrad treats both as scalar lane selection. */
-        int lane_idx = (u->arg.kind == POLY_ARG_INT_TUPLE) ? (int)u->arg.int_tuple.vals[0]
-                                                           : scalar_lane_idx;
-        InterpLane lane = iv_get(&vals[src0], lane_idx);
-        vals[i] = iv_scalar(lane);
-        iv_fixup(&vals[i]);
-      } else if (n_idxs > 1) {
-        /* Multi-lane GEP: out.lanes[k] = src.lanes[idxs[k]] */
-        vals[i].count = (uint16_t)n_idxs;
-        if (n_idxs == 1) vals[i].lanes = &vals[i].inline0;
-        /* lanes pointer from arena pre-alloc */
-        for (int k = 0; k < n_idxs; k++) {
-          int lane_idx = (int)u->arg.int_tuple.vals[k];
-          iv_set(&vals[i], k, iv_get(&vals[src0], lane_idx));
-        }
-      } else {
-        /* Fallback: passthrough */
-        vals[i] = vals[src0];
-        iv_fixup(&vals[i]);
-      }
-      break;
-    }
-
-    case POLY_OP_VECTORIZE: {
-      /* Construct vector from scalar sources.
-       * out.count = n_src, out.lanes[k] = src[k].lanes[0] */
+    case POLY_OP_STACK: {
+      /* tinygrad@2026-08-22/a9069c177a9d PythonProgram maps STACK to the
+       * exact src_values list; rank-zero STACK() therefore has zero lanes. */
       int cnt = u->n_src;
-      if (cnt < 1) cnt = 1;
       vals[i].count = (uint16_t)cnt;
       if (cnt == 1) vals[i].lanes = &vals[i].inline0;
       for (int k = 0; k < cnt; k++) {
@@ -1151,12 +1131,12 @@ static int interp_region(
     default: {
       /* ALU operations: dispatch to eval_alu with lane loop */
       if (poly_opset_has(POLY_GROUP_ALU, u->op)) {
-        PolyDType alu_dt = poly_dtype_scalar(u->dtype);
-        int out_cnt = u->dtype.count > 0 ? u->dtype.count : 1;
+        PolyDType alu_dt = u->dtype;
+        int out_cnt = interp_uop_lane_count(ctx, u);
 
         /* Comparisons produce bool but operate on source dtype */
         bool is_cmp = (u->op == POLY_OP_CMPLT || u->op == POLY_OP_CMPNE || u->op == POLY_OP_CMPEQ);
-        if (is_cmp && u->n_src > 0) alu_dt = poly_dtype_scalar(u->src[0]->dtype);
+        if (is_cmp && u->n_src > 0) alu_dt = u->src[0]->dtype;
 
         /* Resolve source indices */
         int src_idx[3] = {-1, -1, -1};
@@ -1174,7 +1154,7 @@ static int interp_region(
           iv_set(
               &vals[i], k,
               interp_truncate_lane(
-                  eval_alu(u->op, alu_dt, lane_srcs, u->n_src), poly_dtype_scalar(u->dtype)
+                  eval_alu(u->op, alu_dt, lane_srcs, u->n_src), u->dtype
               )
           );
         }
@@ -1191,17 +1171,17 @@ static int interp_region(
 
 /* Public API */
 
-int poly_interp_eval(PolyUOp **lin, int n_lin, void **args, int n_args) {
-  if (!lin || n_lin <= 0) return -1;
-  (void)n_args;
+int poly_interp_eval(PolyCtx *ctx, PolyUOp **lin, int n_lin, void **args, int n_args) {
+  if (!ctx || !lin || n_lin <= 0) return -1;
 
   if (poly_dump_kernels_enabled()) {
     fprintf(stderr, "=== INTERP KERNEL (%d ops) ===\n", n_lin);
     for (int i = 0; i < n_lin; i++) {
       PolyUOp *u = lin[i];
       fprintf(
-          stderr, "  [%3d] %-16s dt=%s count=%d nsrc=%d", i, poly_op_name(u->op),
-          u->dtype.name ? u->dtype.name : "?", u->dtype.count, u->n_src
+          stderr, "  [%3d] %-16s dt=%s lanes=%lld nsrc=%d", i, poly_op_name(u->op),
+          u->dtype.name ? u->dtype.name : "?", (long long)poly_uop_max_numel(ctx, u),
+          u->n_src
       );
       if (u->op == POLY_OP_CONST) {
         if (poly_dtype_is_float(u->dtype))
@@ -1217,20 +1197,39 @@ int poly_interp_eval(PolyUOp **lin, int n_lin, void **args, int n_args) {
   /* Pre-scan: count total vector lanes needed for arena allocation */
   int total_vec_lanes = 0;
   for (int i = 0; i < n_lin; i++) {
-    int cnt = lin[i]->dtype.count;
+    int cnt = interp_uop_lane_count(ctx, lin[i]);
     if (cnt > 1) total_vec_lanes += cnt;
-    /* VECTORIZE: output count = n_src (may differ from dtype.count) */
-    if (lin[i]->op == POLY_OP_VECTORIZE && lin[i]->n_src > 1) total_vec_lanes += lin[i]->n_src;
   }
 
   InterpVal *vals = calloc((size_t)n_lin, sizeof(InterpVal));
   if (!vals) return -1;
+
+  /* Tinygrad 2026-08-22/a9069c177a9d PythonProgram consumes separate compact
+   * PARAM queues (`pbufs`/`pvals`) in linear occurrence order; ProgramInfo
+   * retains sparse slots only to select the caller's arguments. */
+  int *param_arg_indices = malloc((size_t)n_lin * sizeof(*param_arg_indices));
+  if (!param_arg_indices) {
+    free(vals);
+    return -1;
+  }
+  int n_buffer_params = 0;
+  for (int i = 0; i < n_lin; i++) {
+    param_arg_indices[i] = -1;
+    if (lin[i]->op == POLY_OP_PARAM && !poly_uop_is_alu_param(lin[i])) n_buffer_params++;
+  }
+  int next_buffer = 0, next_alu = n_buffer_params;
+  for (int i = 0; i < n_lin; i++) {
+    if (lin[i]->op != POLY_OP_PARAM) continue;
+    param_arg_indices[i] =
+        poly_uop_is_alu_param(lin[i]) ? next_alu++ : next_buffer++;
+  }
 
   /* Allocate lane arena: one contiguous block for all vector UOps */
   InterpLane *arena = NULL;
   if (total_vec_lanes > 0) {
     arena = calloc((size_t)total_vec_lanes, sizeof(InterpLane));
     if (!arena) {
+      free(param_arg_indices);
       free(vals);
       return -1;
     }
@@ -1239,9 +1238,7 @@ int poly_interp_eval(PolyUOp **lin, int n_lin, void **args, int n_args) {
   /* Assign arena slices to vector UOps */
   int arena_offset = 0;
   for (int i = 0; i < n_lin; i++) {
-    int cnt = lin[i]->dtype.count;
-    /* VECTORIZE uses n_src as count */
-    if (lin[i]->op == POLY_OP_VECTORIZE && lin[i]->n_src > 1) cnt = lin[i]->n_src;
+    int cnt = interp_uop_lane_count(ctx, lin[i]);
     if (cnt > 1) {
       vals[i].count = (uint16_t)cnt;
       vals[i].lanes = arena + arena_offset;
@@ -1256,21 +1253,24 @@ int poly_interp_eval(PolyUOp **lin, int n_lin, void **args, int n_args) {
   for (int i = 0; i < n_lin; i++)
     uop_index_map_set(&idx_map, lin[i], i);
 
-  int ret = interp_region(lin, n_lin, 0, n_lin, vals, args, n_args, &idx_map, arena);
+  int ret = interp_region(
+      ctx, lin, n_lin, 0, n_lin, vals, args, n_args, param_arg_indices, &idx_map,
+      arena
+  );
 
   uop_index_map_free(&idx_map);
 
   /* Free register/local accumulator allocations */
   for (int i = 0; i < n_lin; i++) {
-    if ((lin[i]->op == POLY_OP_DEFINE_REG || lin[i]->op == POLY_OP_DEFINE_LOCAL ||
-         (lin[i]->op == POLY_OP_BUFFER &&
-          (poly_program_memory_is(lin[i], POLY_ADDR_REG) ||
-           poly_program_memory_is(lin[i], POLY_ADDR_LOCAL)))) &&
+    if (lin[i]->op == POLY_OP_BUFFER &&
+        (poly_program_memory_is(lin[i], POLY_ADDR_REG) ||
+         poly_program_memory_is(lin[i], POLY_ADDR_LOCAL)) &&
         vals[i].lanes[0].p)
       free(vals[i].lanes[0].p);
   }
 
   free(arena);
+  free(param_arg_indices);
   free(vals);
   return ret;
 }

@@ -7,7 +7,7 @@
  */
 
 #include "polygrad.h"
-#include "pat.h"
+#include "uop/upat.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,7 +42,7 @@ static PolyUOp *mk_const(PolyCtx *ctx, int64_t v) {
 }
 
 static PolyUOp *mk_dvar(PolyCtx *ctx, const char *name, int64_t lo, int64_t hi) {
-  return poly_uop0(ctx, POLY_OP_DEFINE_VAR, POLY_INT32, poly_arg_define_var(name, lo, hi));
+  return poly_uop_variable(ctx, name, lo, hi, POLY_INT32, 1, true);
 }
 
 static PolyUOp *mk_range(PolyCtx *ctx, PolyUOp *bound, int64_t axis_id) {
@@ -63,6 +63,16 @@ static bool safe_mul_i64(int64_t a, int64_t b, int64_t *out) {
 
 static bool sym_eval_i64(PolyUOp *u, const SymEnv *env, int64_t *out) {
   if (!u || !env || !out) return false;
+  if (poly_uop_is_variable(u) || poly_uop_is_alu_param(u)) {
+    const char *name = poly_uop_expr(u);
+    for (int i = 0; name && i < env->n_vars; i++) {
+      if (strcmp(env->var_names[i], name) == 0) {
+        *out = env->var_values[i];
+        return true;
+      }
+    }
+    return false;
+  }
   switch (u->op) {
   case POLY_OP_CONST:
     if (u->arg.kind == POLY_ARG_BOOL) {
@@ -78,15 +88,6 @@ static bool sym_eval_i64(PolyUOp *u, const SymEnv *env, int64_t *out) {
     *out = env->ranges[axis];
     return true;
   }
-  case POLY_OP_DEFINE_VAR:
-    if (u->arg.kind != POLY_ARG_DEFINE_VAR) return false;
-    for (int i = 0; i < env->n_vars; i++) {
-      if (strcmp(env->var_names[i], u->arg.define_var.name) == 0) {
-        *out = env->var_values[i];
-        return true;
-      }
-    }
-    return false;
   default:
     break;
   }

@@ -9,29 +9,12 @@ from pathlib import Path
 import subprocess
 
 
-# Classification never makes a finding pass. The canonical register owns the
-# status and stage policy; open/pending/unregistered findings remain failures.
-OP_PAIR_IDS = {
-    ("REDUCE", "REDUCE_AXIS"): "PG-PARITY-006",
-}
-
-
 def load(path):
     return json.loads(Path(path).read_text())
 
 
 def node_label(node):
     return node["op"], node["dtype"], node["arg"]
-
-
-def classify(_case, _kind, _path, tg_node, pg_node):
-    pair = (
-        tg_node["op"] if tg_node else None,
-        pg_node["op"] if pg_node else None,
-    )
-    if pair in OP_PAIR_IDS:
-        return OP_PAIR_IDS[pair]
-    return None
 
 
 def compare_graph(case, tg_graph, pg_graph):
@@ -47,7 +30,7 @@ def compare_graph(case, tg_graph, pg_graph):
         findings.append({
             "kind": kind,
             "path": path,
-            "id": finding_id or classify(case, kind, path, tg_node, pg_node),
+            "id": finding_id,
             "tinygrad": tg_node,
             "polygrad": pg_node,
             "detail": detail,

@@ -8,8 +8,8 @@
 #include "../src/tensor.h"
 
 static PolyUOp *placement_buffer(PolyCtx *ctx, int64_t n, PolyDevice device) {
-  return device == POLY_DEVICE_AUTO ? poly_buffer(ctx, POLY_FLOAT32, n)
-                                    : poly_buffer_on_device(ctx, POLY_FLOAT32, n, device);
+  return device == POLY_DEVICE_AUTO ? poly_test_logical_buffer(ctx, POLY_FLOAT32, n)
+                                    : poly_test_buffer_on_device(ctx, POLY_FLOAT32, n, device);
 }
 
 static PolyUOp *placement_binding_on_device(
@@ -17,8 +17,14 @@ static PolyUOp *placement_binding_on_device(
     PolyUOp *logical,
     PolyDevice device
 ) {
-  PolyUOp *src[2] = {logical->src[0], poly_device_uop(ctx, device)};
-  return poly_uop(ctx, POLY_OP_BUFFER, logical->dtype, src, 2, logical->arg);
+  if (!logical || logical->op != POLY_OP_BUFFER || logical->n_src != 1 ||
+      !logical->src[0] || logical->src[0]->op != POLY_OP_UNIQUE ||
+      logical->arg.kind != POLY_ARG_INT || logical->src[0]->arg.kind != POLY_ARG_INT)
+    return NULL;
+  return poly_uop_new_buffer(
+      ctx, poly_device_uop(ctx, device), logical->arg.i, logical->dtype,
+      logical->src[0]->arg.i
+  );
 }
 
 TEST(placement, logical_bindings_reproduce_eager_value_and_instance_sink) {
@@ -69,10 +75,8 @@ TEST(placement, logical_placement_does_not_consume_bound_copy_history) {
 
   PolyUOp *cuda_device = poly_device_uop(ctx, POLY_DEVICE_CUDA);
   PolyUOp *cpu_device = poly_device_uop(ctx, POLY_DEVICE_CPU);
-  PolyUOp *to_cuda_src[2] = {base_cpu, cuda_device};
-  PolyUOp *to_cuda = poly_uop(ctx, POLY_OP_COPY, POLY_FLOAT32, to_cuda_src, 2, poly_arg_none());
-  PolyUOp *to_cpu_src[2] = {to_cuda, cpu_device};
-  PolyUOp *roundtrip = poly_uop(ctx, POLY_OP_COPY, POLY_FLOAT32, to_cpu_src, 2, poly_arg_none());
+  PolyUOp *to_cuda = poly_copy_to_device_uop(ctx, base_cpu, cuda_device);
+  PolyUOp *roundtrip = poly_copy_to_device_uop(ctx, to_cuda, cpu_device);
   PolyUOp *roundtrip_template = poly_add(ctx, base_cpu, roundtrip);
   ASSERT_NOT_NULL(roundtrip_template);
 
@@ -110,11 +114,9 @@ TEST(placement, logical_missing_occurrence_evidence_fails_atomically) {
   ASSERT_INT_EQ(poly_place_roots(ctx, roots, 1, from, to, 1, out), -1);
   ASSERT_EQ(out[0], sentinel);
 
-  PolyUOp *copy_src[2] = {
-      logical,
-      poly_device_uop(ctx, POLY_DEVICE_CUDA),
-  };
-  roots[0] = poly_uop(ctx, POLY_OP_COPY, POLY_FLOAT32, copy_src, 2, poly_arg_none());
+  roots[0] = poly_copy_to_device_uop(
+      ctx, logical, poly_device_uop(ctx, POLY_DEVICE_CUDA)
+  );
   ASSERT_INT_EQ(poly_place_roots(ctx, roots, 1, from, to, 1, out), -1);
   ASSERT_EQ(out[0], sentinel);
 
@@ -163,8 +165,7 @@ TEST(placement, invalid_binding_shape_or_alias_fails_atomically) {
   /* COPY is physical transport, never a portable logical binding. */
   PolyUOp *interp_device =
       poly_device_uop(ctx, POLY_DEVICE_INTERP);
-  PolyUOp *copy_src[2] = {target, interp_device};
-  PolyUOp *copy = poly_uop(ctx, POLY_OP_COPY, POLY_FLOAT32, copy_src, 2, poly_arg_none());
+  PolyUOp *copy = poly_copy_to_device_uop(ctx, target, interp_device);
   PolyUOp *copy_binding[1] = {copy};
   ASSERT_NOT_NULL(copy);
   PolyUOp *copy_roots[1] = {copy};
@@ -225,9 +226,8 @@ TEST(placement, explicit_module_map_inserts_exact_cross_device_cut) {
   ASSERT_PTR_EQ(target_bindings[2], pw1);
   ASSERT_PTR_EQ(target_bindings[3], pout);
   PolyUOp *expected_module0 = poly_add(ctx, px, pw0);
-  PolyUOp *copy_src[2] = {expected_module0, modules[1].device};
   PolyUOp *expected_cut =
-      poly_uop(ctx, POLY_OP_COPY, POLY_FLOAT32, copy_src, 2, poly_arg_none());
+      poly_copy_to_device_uop(ctx, expected_module0, modules[1].device);
   PolyUOp *expected_module1 = poly_mul(ctx, expected_cut, pw1);
   PolyUOp *expected_sink = poly_sink1(ctx, poly_store_val(ctx, pout, expected_module1));
   ASSERT_PTR_EQ(placed[0], expected_sink);
@@ -236,7 +236,8 @@ TEST(placement, explicit_module_map_inserts_exact_cross_device_cut) {
   ASSERT_EQ(placed[1]->op, POLY_OP_MUL);
   ASSERT_EQ(placed[1]->src[0]->op, POLY_OP_COPY);
   ASSERT_PTR_EQ(placed[1]->src[0]->src[0], placed[2]);
-  ASSERT_PTR_EQ(placed[1]->src[0]->src[1], modules[1].device);
+  ASSERT_INT_EQ(placed[1]->src[0]->arg.kind, POLY_ARG_STRING);
+  ASSERT_STR_EQ(placed[1]->src[0]->arg.str, "INTERP");
   ASSERT_EQ(poly_uop_device(placed[1]), POLY_DEVICE_INTERP);
 
   PolyUOp *ordered_roots[3] = {module0, module1, logical_sink};
@@ -266,7 +267,8 @@ TEST(placement, explicit_module_map_inserts_exact_cross_device_cut) {
       0
   );
   ASSERT_EQ(reverse_placed[1]->src[0]->op, POLY_OP_COPY);
-  ASSERT_PTR_EQ(reverse_placed[1]->src[0]->src[1], reverse_devices[1].device);
+  ASSERT_INT_EQ(reverse_placed[1]->src[0]->arg.kind, POLY_ARG_STRING);
+  ASSERT_STR_EQ(reverse_placed[1]->src[0]->arg.str, "CPU");
   ASSERT_EQ(poly_uop_device(reverse_placed[1]), POLY_DEVICE_CPU);
   ASSERT_EQ(poly_uop_device(reverse_targets[3]), POLY_DEVICE_CPU);
 

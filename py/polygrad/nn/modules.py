@@ -2,13 +2,8 @@
 
 import math
 from ..dtype import dtypes
+from ..helpers import TRAINING
 from ..tensor import Tensor
-
-
-def _mark_param(t):
-    """Mark a tensor as a model parameter without changing its lazy graph."""
-    t._is_param = True
-    return t
 
 
 class Linear:
@@ -16,13 +11,9 @@ class Linear:
     def __init__(self, in_features, out_features, bias=True):
         bound = 1 / math.sqrt(in_features)
         self.weight = Tensor.uniform(out_features, in_features, low=-bound, high=bound)
-        self.weight.requires_grad = True
-        _mark_param(self.weight)
         self.bias = None
         if bias:
             self.bias = Tensor.uniform(out_features, low=-bound, high=bound)
-            self.bias.requires_grad = True
-            _mark_param(self.bias)
 
     def __call__(self, x):
         # Pinned nn/__init__.py:156-174 stores (out,in) and transposes at the
@@ -42,11 +33,7 @@ class LayerNorm:
         self.bias = None
         if elementwise_affine:
             self.weight = Tensor.ones(*normalized_shape).realize()
-            self.weight.requires_grad = True
-            _mark_param(self.weight)
             self.bias = Tensor.zeros(*normalized_shape).realize()
-            self.bias.requires_grad = True
-            _mark_param(self.bias)
 
     def __call__(self, x):
         axis = -1
@@ -76,11 +63,7 @@ class GroupNorm:
         self.bias = None
         if affine:
             self.weight = Tensor.ones(num_channels)
-            self.weight.requires_grad = True
-            _mark_param(self.weight)
             self.bias = Tensor.zeros(num_channels)
-            self.bias.requires_grad = True
-            _mark_param(self.bias)
 
     def __call__(self, x):
         # Literal pinned tinygrad/nn/__init__.py:200-207 composition.
@@ -103,9 +86,6 @@ class RMSNorm:
     def __init__(self, dim, eps=1e-6, elementwise_affine=True):
         self.eps = eps
         self.weight = Tensor.ones(dim) if elementwise_affine else None
-        if self.weight is not None:
-            self.weight.requires_grad = True
-            _mark_param(self.weight)
 
     def _norm(self, x):
         # Literal pinned tinygrad/nn/__init__.py:301 expression.
@@ -127,8 +107,6 @@ class Embedding:
         # Pinned nn.Embedding uses this exact initializer
         # (tinygrad/nn/__init__.py:384-385; mixin/rand.py:191-204).
         self.weight = Tensor.glorot_uniform(vocab_size, embed_dim)
-        self.weight.requires_grad = True
-        _mark_param(self.weight)
         self.vocab_size = vocab_size
         self.embed_dim = embed_dim
 
@@ -152,7 +130,7 @@ class Dropout:
         self.p = p
 
     def __call__(self, x):
-        if not Tensor.training or self.p == 0:
+        if not TRAINING or self.p == 0:
             return x
         mask = Tensor.rand(*x.shape).gt(self.p)
         return x * mask / (1.0 - self.p)
@@ -179,13 +157,9 @@ class Conv2d:
         self.weight = Tensor.uniform(
             out_channels, in_channels // groups, *kernel_size, low=-bound, high=bound
         )
-        self.weight.requires_grad = True
-        _mark_param(self.weight)
         self.bias = None
         if bias:
             self.bias = Tensor.uniform(out_channels, low=-bound, high=bound)
-            self.bias.requires_grad = True
-            _mark_param(self.bias)
 
     def __call__(self, x):
         return x.conv2d(self.weight, self.bias, self.groups, self.stride, self.dilation, self.padding)
@@ -202,16 +176,10 @@ class BatchNorm:
         if track_running_stats:
             self.running_mean = Tensor.zeros(num_features).is_param_(False)
             self.running_var = Tensor.ones(num_features).is_param_(False)
-        if self.weight is not None:
-            self.weight.requires_grad = True
-            _mark_param(self.weight)
-        if self.bias is not None:
-            self.bias.requires_grad = True
-            _mark_param(self.bias)
 
     def calc_stats(self, x):
         shape_mask = [1, -1, *([1] * (x.ndim - 2))]
-        if self.track_running_stats and not Tensor.training:
+        if self.track_running_stats and not TRAINING:
             return self.running_mean, self.running_var.reshape(shape=shape_mask).expand(x.shape)
         reduce_axes = tuple(axis for axis in range(x.ndim) if axis != 1)
         batch_mean = x.mean(axis=reduce_axes)
@@ -221,7 +189,7 @@ class BatchNorm:
 
     def __call__(self, x):
         batch_mean, batch_var = self.calc_stats(x)
-        if self.track_running_stats and Tensor.training:
+        if self.track_running_stats and TRAINING:
             self.running_mean.assign(
                 (1 - self.momentum) * self.running_mean + self.momentum * batch_mean.detach()
             )

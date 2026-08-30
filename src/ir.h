@@ -1,10 +1,9 @@
 /*
  * poly_ir.h -- Binary IR codec for tensor-level UOp graphs
  *
- * Current format: poly.ir.uops@10 (v1-v9 import remains supported).
+ * Current portable format: poly.ir.uops@16.
  * Scope: tensor-level graphs only (pre-scheduling).
- *        Pointer dtypes are rejected. Vector count is serialized explicitly
- *        because pinned tensor movement shape sources are weakint vectors.
+ *        Pointer dtypes are rejected. UOp shape carries storage extent.
  *
  * Used by PolyInstance for portable graph serialization.
  */
@@ -14,6 +13,9 @@
 
 #include "polygrad.h"
 #include <stdint.h>
+
+#define POLY_IR_VERSION 16
+#define POLY_PROGRAM_VERSION 8
 
 #ifdef __cplusplus
 extern "C" {

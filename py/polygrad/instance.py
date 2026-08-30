@@ -376,8 +376,6 @@ class Instance:
         ctx_key = _ptr_value(ctx)
         for name, role, tensor, _ in parsed:
             _check_ctx(name, tensor, ctx, ctx_key)
-            if tensor._requires_grad is not None:
-                tensor._sync_core_requires_grad(force=True)
             if role in (ROLE_INPUT, ROLE_TARGET):
                 _ensure_storage_binding(name, tensor)
 
@@ -424,7 +422,7 @@ class Instance:
         modules=None,
     ):
         """Package named Tensor roots as a runnable/exportable Instance."""
-        from .tensor import Tensor, _ptr_value
+        from .tensor import _ptr_value
 
         if params is not None and state is not None:
             raise ValueError('Instance.from_tensors accepts params or state, not both')

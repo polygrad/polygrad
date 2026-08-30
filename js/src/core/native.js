@@ -30,9 +30,14 @@ function createNativeCore(device) {
     uint64: binding.poly_dtype_id_by_name('uint64'),
     float16: binding.poly_dtype_id_by_name('float16'),
     bfloat16: binding.poly_dtype_id_by_name('bfloat16'),
+    fp8e4m3: binding.poly_dtype_id_by_name('fp8e4m3'),
+    fp8e5m2: binding.poly_dtype_id_by_name('fp8e5m2'),
+    fp8e4m3fnuz: binding.poly_dtype_id_by_name('fp8e4m3fnuz'),
+    fp8e5m2fnuz: binding.poly_dtype_id_by_name('fp8e5m2fnuz'),
     float32: binding.poly_dtype_id_by_name('float32'),
     float64: binding.poly_dtype_id_by_name('float64'),
-    weakint: binding.poly_dtype_id_by_name('weakint')
+    weakint: binding.poly_dtype_id_by_name('weakint'),
+    weakfloat: binding.poly_dtype_id_by_name('weakfloat')
   }
 
   const ctx = binding.poly_ctx_new()
@@ -56,7 +61,7 @@ function createNativeCore(device) {
     if (name) ops[name] = i
   }
 
-  const EXPECTED_ABI = 57
+  const EXPECTED_ABI = 63
   const abi = binding.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(

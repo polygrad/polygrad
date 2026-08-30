@@ -6,12 +6,12 @@ Run from repo root:
 
 import numpy as np
 
-from polygrad import Instance, Tensor, nn
+from polygrad import Context, Instance, Tensor, nn
 
 
 class LinearNet:
     def __init__(self):
-        self.weight = Tensor([[1.0], [1.0]], requires_grad=True).realize()
+        self.weight = Tensor([[1.0], [1.0]]).realize()
 
     def __call__(self, x):
         return x.dot(self.weight)
@@ -22,7 +22,7 @@ opt = nn.optim.Adam([model.weight], lr=0.05)
 x = Tensor([[1.0, 2.0]])
 y = Tensor([[4.0]])
 
-with Tensor.train():
+with Context(TRAINING=1):
     losses = []
     for _ in range(6):
         opt.zero_grad()

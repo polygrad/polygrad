@@ -18,13 +18,23 @@ import re
 
 ENGINE = os.environ.get("ENGINE", "tinygrad")
 if ENGINE == "tinygrad":
-    from tinygrad import Tensor, dtypes, nn
+    from tinygrad import Context, Tensor, dtypes, nn
     from tinygrad.nn.optim import Adam, AdamW, SGD
+    from tinygrad.uop.ops import UOp
 elif ENGINE == "polygrad":
-    from polygrad import Tensor, _ffi, dtypes, nn
-    from polygrad.nn import Adam, AdamW, SGD
+    from polygrad import Context, Tensor, Variable, _ffi, dtypes, nn
+    from polygrad.nn.optim import Adam, AdamW, SGD
 else:
     raise RuntimeError(f"unknown ENGINE={ENGINE!r}")
+
+
+def training_context():
+    # The June control uses Tensor.train(); current Tinygrad and Polygrad use
+    # the shared TRAINING ContextVar. This is an explicit reference-lane
+    # adapter, not a graph-divergence suppression.
+    if hasattr(Tensor, "train"):
+        return Tensor.train()
+    return Context(TRAINING=1)
 
 if ENGINE == "polygrad":
     class _PolyDType(ctypes.Structure):
@@ -33,15 +43,24 @@ if ENGINE == "polygrad":
             ("bitsize", ctypes.c_uint16),
             ("name", ctypes.c_char_p),
             ("fmt", ctypes.c_char),
-            ("count", ctypes.c_uint16),
-            ("is_ptr", ctypes.c_bool),
-            ("addrspace", ctypes.c_int),
-            ("vcount", ctypes.c_uint16),
-            ("ptr_size", ctypes.c_int64),
         ]
 
     class _PolyUOpHead(ctypes.Structure):
         _fields_ = [("op", ctypes.c_int), ("dtype", _PolyDType)]
+
+    class _PolyArgValue(ctypes.Union):
+        # Only the union alignment is needed to locate PolyArg.kind. The full
+        # C union is larger, but its first member begins at the same offset.
+        _fields_ = [("i", ctypes.c_int64), ("f", ctypes.c_double), ("ptr", ctypes.c_void_p)]
+
+    class _PolyArgHead(ctypes.Structure):
+        _fields_ = [("kind", ctypes.c_int), ("value", _PolyArgValue)]
+
+    class _PolyUOpArgHead(ctypes.Structure):
+        _fields_ = [
+            ("op", ctypes.c_int), ("dtype", _PolyDType), ("src", ctypes.c_void_p),
+            ("n_src", ctypes.c_uint16), ("arg", _PolyArgHead),
+        ]
 
 
 def node_key(node):
@@ -63,7 +82,7 @@ def dtype_name(node):
     # Pinned tinygrad names float16 semantically as "half", while its BF16
     # semantic name is the literal "__bf16". Only normalize the former.
     name = {"__fp16": "half"}.get(name, name)
-    return f"{name}{dtype.count}" if dtype.count > 1 else name
+    return name
 
 
 def diagnostic_dtype_name(node):
@@ -127,13 +146,19 @@ def normalize_arg(node, arg):
         # C runtime calls it HOST because no Python executor exists in core;
         # pinned tinygrad calls the same graph role PYTHON.
         return "PYTHON" if name in {"HOST", "PYTHON"} else name
+    if op == "COPY" and len(arg) >= 2 and arg[0] in {'"', "'"} and arg[-1] == arg[0]:
+        return arg[1:-1].upper()
     if op == "CONST" and dtype_name(node) in {
         "half", "float", "double", "bfloat16", "float16", "float32", "float64",
-        "__fp16", "__bf16",
+        "__fp16", "__bf16", "weakfloat",
     }:
         # tinygrad's diagnostic wraps float constants in ConstFloat(...);
         # Polygrad prints the same typed value directly. Compare the value,
         # retaining signed zero and non-finite classes.
+        if ENGINE == "polygrad":
+            kind = ctypes.cast(node.raw, ctypes.POINTER(_PolyUOpArgHead)).contents.arg.kind
+            if kind != 2:  # POLY_ARG_FLOAT
+                return f"<invalid-float-arg-kind:{kind}:{arg}>"
         value_text = arg
         if value_text.startswith("ConstFloat(") and value_text.endswith(")"):
             value_text = value_text[len("ConstFloat("):-1]
@@ -235,6 +260,28 @@ def case_bfloat16_host_add():
     return {"physical": out.uop, "logical": logical(out)}
 
 
+def fp8_host_add(dtype):
+    t = Tensor([0.1, 1.5], dtype=dtype)
+    out = t + t
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_fp8e4m3_host_add():
+    return fp8_host_add("fp8e4m3")
+
+
+def case_fp8e5m2_host_add():
+    return fp8_host_add("fp8e5m2")
+
+
+def case_fp8e4m3fnuz_host_add():
+    return fp8_host_add("fp8e4m3fnuz")
+
+
+def case_fp8e5m2fnuz_host_add():
+    return fp8_host_add("fp8e5m2fnuz")
+
+
 def case_sub_float32():
     out = typed_realized_empty("float32") - typed_realized_empty("float32")
     return {"physical": out.uop, "logical": logical(out)}
@@ -282,6 +329,26 @@ def case_sin_float64():
 
 def case_sin_uint64():
     out = typed_realized_empty("uint64").sin()
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_exp2_int32():
+    out = typed_realized_empty("int32").exp2()
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_log2_int32():
+    out = typed_realized_empty("int32").log2()
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_sqrt_int32():
+    out = typed_realized_empty("int32").sqrt()
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_reciprocal_int32():
+    out = typed_realized_empty("int32").reciprocal()
     return {"physical": out.uop, "logical": logical(out)}
 
 
@@ -694,6 +761,14 @@ def case_mlp_dense_cross_entropy():
     return {"physical": out.uop, "logical": logical(out)}
 
 
+def case_bound_dense_cross_entropy():
+    logits = realized_input(8, 10)
+    labels = realized_input(8, 10)
+    i = UOp.variable("i", 0, 4).bind(0) if ENGINE == "tinygrad" else Variable("i", 0, 4).bind(0)
+    out = -(labels[i:i + 4] * logits[i:i + 4].log_softmax(axis=1)).sum(axis=1).mean()
+    return {"physical": out.uop, "logical": logical(out)}
+
+
 def case_nn_layernorm_apply():
     x = Tensor.empty(2, 4, device="CPU").realize()
     weight = Tensor.empty(4, device="CPU").realize()
@@ -774,6 +849,26 @@ def case_sum_axis_int16():
     return {"physical": out.uop, "logical": logical(out)}
 
 
+def case_sum_axis_keepdim_float32():
+    out = realized_empty(2, 3, 4).sum(axis=1, keepdim=True)
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_sum_singleton_float32():
+    out = realized_empty(2, 1, 4).sum(axis=1)
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_sum_singleton_keepdim_float32():
+    out = realized_empty(2, 1, 4).sum(axis=1, keepdim=True)
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_sum_mixed_singleton_float32():
+    out = realized_empty(2, 1, 4).sum(axis=(0, 1))
+    return {"physical": out.uop, "logical": logical(out)}
+
+
 def case_mean_axis_float32():
     out = typed_realized_empty("float32").mean(axis=1)
     return {"physical": out.uop, "logical": logical(out)}
@@ -794,6 +889,21 @@ def case_mean_axes_float32():
     return {"physical": out.uop, "logical": logical(out)}
 
 
+def case_div_scalar_float32():
+    out = typed_realized_empty("float32").div(2)
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_div_scalar_int32():
+    out = typed_realized_empty("int32").div(2)
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_rdiv_scalar_float32():
+    out = 2.0 / typed_realized_empty("float32")
+    return {"physical": out.uop, "logical": logical(out)}
+
+
 def case_max_axes_float32():
     out = realized_empty(2, 3, 4).max(axis=(1, 2))
     return {"physical": out.uop, "logical": logical(out)}
@@ -801,6 +911,33 @@ def case_max_axes_float32():
 
 def case_dot_float32():
     out = realized_empty(2, 3).dot(realized_empty(3, 4))
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_dot_singleton_batch():
+    out = realized_empty(1, 12).dot(realized_empty(12, 10))
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_dot_float16_default():
+    out = Tensor.empty(2, 3, device="CPU", dtype=dtypes.float16).realize().dot(
+        Tensor.empty(3, 2, device="CPU", dtype=dtypes.float16).realize()
+    )
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_dot_float16_acc_float32():
+    out = Tensor.empty(2, 3, device="CPU", dtype=dtypes.float16).realize().dot(
+        Tensor.empty(3, 2, device="CPU", dtype=dtypes.float16).realize(),
+        dtype=dtypes.float32,
+    )
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_dot_mixed_float16_float32():
+    out = Tensor.empty(2, 3, device="CPU", dtype=dtypes.float16).realize().dot(
+        Tensor.empty(3, 2, device="CPU", dtype=dtypes.float32).realize()
+    )
     return {"physical": out.uop, "logical": logical(out)}
 
 
@@ -1061,6 +1198,21 @@ def case_expand():
     return {"physical": out.uop, "logical": logical(out)}
 
 
+def case_expand_rank_add():
+    out = realized_empty(3).expand(2, 3)
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_expand_middle_axis():
+    out = realized_empty(2, 1, 3).expand(2, 4, 3)
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_const_like_float_shape():
+    out = realized_empty(2, 2).const_like(True)
+    return {"physical": out.uop, "logical": logical(out)}
+
+
 def case_pad():
     out = realized_empty(2, 3).pad(((1, 0), (0, 2)))
     return {"physical": out.uop, "logical": logical(out)}
@@ -1078,6 +1230,21 @@ def case_pad_noop():
 
 def case_pad_value():
     out = realized_empty(3).pad(((1, 2),), value=5)
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_pad_int_source_int_value():
+    out = Tensor.empty(3, dtype="int32", device="CPU").realize().pad(((1, 2),), value=5)
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_pad_int_source_float_value():
+    out = Tensor.empty(3, dtype="int32", device="CPU").realize().pad(((1, 2),), value=5.5)
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_pad_int_source_bool_value():
+    out = Tensor.empty(3, dtype="int32", device="CPU").realize().pad(((1, 2),), value=True)
     return {"physical": out.uop, "logical": logical(out)}
 
 
@@ -1299,6 +1466,36 @@ def case_rng_two_draw():
     return {"physical": out.uop, "logical": logical(out)}
 
 
+def case_rng_float16():
+    Tensor.manual_seed(123)
+    out = Tensor.rand(4, device="CPU", dtype="float16", contiguous=False)
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_rng_float64():
+    Tensor.manual_seed(123)
+    out = Tensor.rand(4, device="CPU", dtype="float64", contiguous=False)
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_rng_bfloat16():
+    Tensor.manual_seed(123)
+    out = Tensor.rand(4, device="CPU", dtype="bfloat16", contiguous=False)
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_rng_zero_extent():
+    Tensor.manual_seed(123)
+    out = Tensor.rand(0, device="CPU", contiguous=False)
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_randn_float32():
+    Tensor.manual_seed(123)
+    out = Tensor.randn(4, device="CPU")
+    return {"physical": out.uop, "logical": logical(out)}
+
+
 def case_bitcast_widen_u8_u32():
     out = Tensor.full((8,), 1, dtype="uint8").bitcast("uint32")
     return {"physical": out.uop, "logical": logical(out)}
@@ -1312,11 +1509,8 @@ def case_bitcast_narrow_u32_u8():
 def case_dropout_stateful_rng():
     x = realized_input(2, 2)
     Tensor.manual_seed(11)
-    Tensor.training = True
-    try:
+    with training_context():
         out = x.dropout(0.25)
-    finally:
-        Tensor.training = False
     return {"physical": out.uop, "logical": logical(out)}
 
 
@@ -1346,9 +1540,51 @@ def case_grad_scale():
     return {"physical": out}
 
 
+def primitive_gradient(method, values=(-2.5, -1.0, 0.5, 1.0, 2.5)):
+    x = Tensor(list(values))
+    return {"physical": raw_gradient(method(x).sum(), x)}
+
+
+def case_grad_reciprocal():
+    return primitive_gradient(lambda x: x.reciprocal())
+
+
+def case_grad_sin():
+    return primitive_gradient(lambda x: x.sin())
+
+
+def case_grad_log2():
+    return primitive_gradient(lambda x: x.log2(), (0.5, 1.0, 2.0, 4.0, 8.0))
+
+
+def case_grad_exp2():
+    return primitive_gradient(lambda x: x.exp2())
+
+
+def case_grad_sqrt():
+    return primitive_gradient(lambda x: x.sqrt(), (0.25, 1.0, 4.0, 9.0, 16.0))
+
+
 def case_grad_max_axes():
     x = realized_input(2, 3)
     return {"physical": raw_gradient(x.max(axis=1).sum(), x)}
+
+
+def case_grad_expand_reduce():
+    x = realized_empty(1)
+    expanded = x.reshape(()).reshape((1,)).expand((5,))
+    return {"physical": raw_gradient(expanded.sum(), x)}
+
+
+def case_grad_no_path_zero():
+    x = realized_empty(5)
+    y = realized_empty(5)
+    return {"physical": raw_gradient(x.sum(), y)}
+
+
+def case_reshape_scalar_roundtrip_expand():
+    x = realized_empty(1)
+    return {"physical": x.reshape(()).reshape((1,)).expand((5,)).uop}
 
 
 def case_nn_conv2d_initializer():
@@ -1424,6 +1660,21 @@ def case_grad_pow_exponent():
     return pow_tensor_gradient(1)
 
 
+def pow_broadcast_gradient(target_index):
+    base = realized_empty(2, 1)
+    exponent = realized_empty(1, 3)
+    targets = (base, exponent)
+    return {"physical": raw_gradient((base**exponent).sum(), targets[target_index])}
+
+
+def case_grad_pow_broadcast_base():
+    return pow_broadcast_gradient(0)
+
+
+def case_grad_pow_broadcast_exponent():
+    return pow_broadcast_gradient(1)
+
+
 def case_grad_silu():
     return composite_gradient(lambda x: x.silu())
 
@@ -1458,8 +1709,6 @@ def case_grad_hardtanh():
 
 def case_backward_square():
     x = Tensor([1.0, 2.0, 3.0, 4.0])
-    if ENGINE == "polygrad":
-        x.requires_grad = True
     (x * x).sum().backward()
     out = x.grad.uop if ENGINE == "tinygrad" else x.grad.uop_physical
     return {"physical": out}
@@ -1467,10 +1716,9 @@ def case_backward_square():
 
 def optimizer_step_graph(construct):
     param = Tensor([1.0, 2.0], device="CPU").is_param_()
-    param.requires_grad = True
     param.realize()
     optim = construct(param)
-    with Tensor.train():
+    with training_context():
         (param * param).sum().backward()
         scheduled = optim.schedule_step()
     if ENGINE == "polygrad":
@@ -1522,6 +1770,10 @@ CASES = {
     "batchnorm_float32": ("tensor", case_batchnorm_float32),
     "batchnorm_occurrence": ("tensor", case_batchnorm_occurrence),
     "bfloat16_host_add": ("tensor", case_bfloat16_host_add),
+    "fp8e4m3_host_add": ("tensor", case_fp8e4m3_host_add),
+    "fp8e5m2_host_add": ("tensor", case_fp8e5m2_host_add),
+    "fp8e4m3fnuz_host_add": ("tensor", case_fp8e4m3fnuz_host_add),
+    "fp8e5m2fnuz_host_add": ("tensor", case_fp8e5m2fnuz_host_add),
     "ceil_int32": ("tensor", case_ceil_int32),
     "ceil_occurrence": ("tensor", case_ceil_occurrence),
     "clone": ("tensor", case_clone),
@@ -1533,6 +1785,7 @@ CASES = {
     "contiguous": ("tensor", case_contiguous),
     "contiguous_deviceless": ("tensor", case_contiguous_deviceless),
     "conv2d_float32": ("tensor", case_conv2d_float32),
+    "const_like_float_shape": ("tensor", case_const_like_float_shape),
     "conv2d_occurrence": ("tensor", case_conv2d_occurrence),
     "cos_bfloat16": ("tensor", case_cos_bfloat16),
     "cos_float16": ("tensor", case_cos_float16),
@@ -1542,14 +1795,21 @@ CASES = {
     "cos_uint64": ("tensor", case_cos_uint64),
     "detach_float32": ("tensor", case_detach_float32),
     "dot_float32": ("tensor", case_dot_float32),
+    "dot_singleton_batch": ("tensor", case_dot_singleton_batch),
+    "dot_float16_default": ("tensor", case_dot_float16_default),
+    "dot_float16_acc_float32": ("tensor", case_dot_float16_acc_float32),
+    "dot_mixed_float16_float32": ("tensor", case_dot_mixed_float16_float32),
     "dot_occurrence": ("tensor", case_dot_occurrence),
     "empty_storage": ("tensor", case_empty_storage),
     "exp_float16": ("tensor", case_exp_float16),
     "exp_float32": ("tensor", case_exp_float32),
+    "exp2_int32": ("tensor", case_exp2_int32),
     "exp_int32": ("tensor", case_exp_int32),
     "eye": ("tensor", case_eye),
     "elu_occurrence": ("tensor", case_elu_occurrence),
     "expand": ("tensor", case_expand),
+    "expand_middle_axis": ("tensor", case_expand_middle_axis),
+    "expand_rank_add": ("tensor", case_expand_rank_add),
     "flip": ("tensor", case_flip),
     "flip_scalar_noop": ("tensor", case_flip_scalar_noop),
     "floor_occurrence": ("tensor", case_floor_occurrence),
@@ -1567,24 +1827,34 @@ CASES = {
     "backward_square": ("tensor", case_backward_square),
     "grad_ceil": ("tensor", case_grad_ceil),
     "grad_elu": ("tensor", case_grad_elu),
+    "grad_exp2": ("tensor", case_grad_exp2),
     "grad_floor": ("tensor", case_grad_floor),
     "grad_gelu": ("tensor", case_grad_gelu),
     "grad_hardsigmoid": ("tensor", case_grad_hardsigmoid),
     "grad_hardswish": ("tensor", case_grad_hardswish),
     "grad_hardtanh": ("tensor", case_grad_hardtanh),
     "grad_leaky_relu": ("tensor", case_grad_leaky_relu),
+    "grad_log2": ("tensor", case_grad_log2),
+    "grad_expand_reduce": ("tensor", case_grad_expand_reduce),
+    "grad_no_path_zero": ("tensor", case_grad_no_path_zero),
+    "reshape_scalar_roundtrip_expand": ("tensor", case_reshape_scalar_roundtrip_expand),
     "grad_max_axes": ("tensor", case_grad_max_axes),
     "nn_batchnorm_initializer": ("tensor", case_nn_batchnorm_initializer),
     "nn_conv2d_initializer": ("tensor", case_nn_conv2d_initializer),
     "nn_linear_initializer": ("tensor", case_nn_linear_initializer),
     "grad_pow3": ("tensor", case_grad_pow3),
     "grad_pow_base": ("tensor", case_grad_pow_base),
+    "grad_pow_broadcast_base": ("tensor", case_grad_pow_broadcast_base),
+    "grad_pow_broadcast_exponent": ("tensor", case_grad_pow_broadcast_exponent),
     "grad_pow_exponent": ("tensor", case_grad_pow_exponent),
     "grad_quick_gelu": ("tensor", case_grad_quick_gelu),
     "grad_relu6": ("tensor", case_grad_relu6),
+    "grad_reciprocal": ("tensor", case_grad_reciprocal),
     "grad_scale": ("tensor", case_grad_scale),
     "grad_sigmoid": ("tensor", case_grad_sigmoid),
+    "grad_sin": ("tensor", case_grad_sin),
     "grad_silu": ("tensor", case_grad_silu),
+    "grad_sqrt": ("tensor", case_grad_sqrt),
     "grad_square": ("tensor", case_grad_square),
     "grad_swish": ("tensor", case_grad_swish),
     "grad_tanh": ("tensor", case_grad_tanh),
@@ -1631,10 +1901,13 @@ CASES = {
     "log_float16": ("tensor", case_log_float16),
     "log_float32": ("tensor", case_log_float32),
     "log_int32": ("tensor", case_log_int32),
+    "log2_int32": ("tensor", case_log2_int32),
     "logaddexp_broadcast_occurrence": ("tensor", case_logaddexp_broadcast_occurrence),
     "logaddexp_scalar_occurrence": ("tensor", case_logaddexp_scalar_occurrence),
     "log_softmax_float16": ("tensor", case_log_softmax_float16),
     "log_softmax_float32": ("tensor", case_log_softmax_float32),
+    "div_scalar_float32": ("tensor", case_div_scalar_float32),
+    "div_scalar_int32": ("tensor", case_div_scalar_int32),
     "mean_axis_float32": ("tensor", case_mean_axis_float32),
     "mean_axis_float16": ("tensor", case_mean_axis_float16),
     "mean_axis_int32": ("tensor", case_mean_axis_int32),
@@ -1652,6 +1925,9 @@ CASES = {
     "pad_noop": ("tensor", case_pad_noop),
     "pad_scalar_noop": ("tensor", case_pad_scalar_noop),
     "pad_scalar_value": ("tensor", case_pad_scalar_value),
+    "pad_int_source_bool_value": ("tensor", case_pad_int_source_bool_value),
+    "pad_int_source_float_value": ("tensor", case_pad_int_source_float_value),
+    "pad_int_source_int_value": ("tensor", case_pad_int_source_int_value),
     "pad_value": ("tensor", case_pad_value),
     "one_hot_int32": ("tensor", case_one_hot_int32),
     "permute": ("tensor", case_permute),
@@ -1676,14 +1952,22 @@ CASES = {
     "round_float64": ("tensor", case_round_float64),
     "round_int32": ("tensor", case_round_int32),
     "round_occurrence": ("tensor", case_round_occurrence),
+    "reciprocal_int32": ("tensor", case_reciprocal_int32),
+    "rdiv_scalar_float32": ("tensor", case_rdiv_scalar_float32),
     "roundtrip_occurrence": ("tensor", case_roundtrip_occurrence),
     "rng_single_draw": ("tensor", case_rng_single_draw),
     "rng_two_draw": ("tensor", case_rng_two_draw),
+    "rng_float16": ("tensor", case_rng_float16),
+    "rng_float64": ("tensor", case_rng_float64),
+    "rng_bfloat16": ("tensor", case_rng_bfloat16),
+    "rng_zero_extent": ("tensor", case_rng_zero_extent),
+    "randn_float32": ("tensor", case_randn_float32),
     "bitcast_widen_u8_u32": ("tensor", case_bitcast_widen_u8_u32),
     "bitcast_narrow_u32_u8": ("tensor", case_bitcast_narrow_u32_u8),
     "dropout_stateful_rng": ("tensor", case_dropout_stateful_rng),
     "relu_float32": ("tensor", case_relu_float32),
     "mlp_dense_cross_entropy": ("tensor", case_mlp_dense_cross_entropy),
+    "bound_dense_cross_entropy": ("tensor", case_bound_dense_cross_entropy),
     "mlp_linear_relu": ("tensor", case_mlp_linear_relu),
     "mlp_mse": ("tensor", case_mlp_mse),
     "nn_embedding_apply": ("tensor", case_nn_embedding_apply),
@@ -1724,6 +2008,10 @@ CASES = {
     "sum_axes_float32": ("tensor", case_sum_axes_float32),
     "sum_axis_float16": ("tensor", case_sum_axis_float16),
     "sum_axis_int16": ("tensor", case_sum_axis_int16),
+    "sum_axis_keepdim_float32": ("tensor", case_sum_axis_keepdim_float32),
+    "sum_singleton_float32": ("tensor", case_sum_singleton_float32),
+    "sum_singleton_keepdim_float32": ("tensor", case_sum_singleton_keepdim_float32),
+    "sum_mixed_singleton_float32": ("tensor", case_sum_mixed_singleton_float32),
     "tan_bfloat16": ("tensor", case_tan_bfloat16),
     "tan_float64": ("tensor", case_tan_float64),
     "tan_int32": ("tensor", case_tan_int32),
@@ -1740,6 +2028,7 @@ CASES = {
     "shrink": ("tensor", case_shrink),
     "shrink_noop": ("tensor", case_shrink_noop),
     "shrink_scalar_noop": ("tensor", case_shrink_scalar_noop),
+    "sqrt_int32": ("tensor", case_sqrt_int32),
     "view_assign": ("tensor", case_view_assign),
     "uint_neg": ("tensor", case_uint_neg),
     "uint_sub": ("tensor", case_uint_sub),

@@ -1,8 +1,14 @@
 #include "runtime_webgpu.h"
 
-#ifdef __EMSCRIPTEN__
+#ifndef __EMSCRIPTEN__
 
-#include "codegen.h"
+bool poly_webgpu_supports_float16(void) {
+  return false;
+}
+
+#else
+
+#include "codegen/codegen.h"
 #include "utils.h"
 
 #include <emscripten.h>
@@ -18,14 +24,23 @@ typedef struct {
   int n_bindings;
 } PolyWebGpuRunnerHandle;
 
+EM_JS(int, js_webgpu_supports_float16, (), {
+  const st = Module.__polygradWebGpuState;
+  return st && st.hasShaderF16 ? 1 : 0;
+})
+
+bool poly_webgpu_supports_float16(void) {
+  return js_webgpu_supports_float16() != 0;
+}
+
 static PolyUOp *webgpu_program_kernel_body(PolyUOp *program) {
   if (!program || program->op != POLY_OP_PROGRAM || program->n_src < 1) return NULL;
   return program->src[0];
 }
 
 static const char *webgpu_program_source_text(PolyUOp *program) {
-  if (!program || program->op != POLY_OP_PROGRAM || program->n_src < 4) return NULL;
-  PolyUOp *source = program->src[3];
+  if (!program || program->op != POLY_OP_PROGRAM || program->n_src < 3) return NULL;
+  PolyUOp *source = program->src[2];
   if (!source || source->op != POLY_OP_SOURCE || source->arg.kind != POLY_ARG_STRING)
     return NULL;
   return source->arg.str;
@@ -71,7 +86,7 @@ static void webgpu_extract_dims(PolyCtx *ctx, PolyUOp **lin, int n_lin, int grid
 }
 
 static bool webgpu_dtype_is_unsupported(PolyDType dt) {
-  PolyDType s = poly_dtype_scalar(dt);
+  PolyDType s = dt;
   /* tinygrad's WEBGPU dtype support excludes float64. WGSL has no normal f64
    * arithmetic path, so treating double as f32 here silently corrupts values. */
   return s.priority == POLY_FLOAT64.priority && s.bitsize == POLY_FLOAT64.bitsize;
@@ -466,6 +481,10 @@ static int webgpu_copy_in(
   (void)dev_ctx;
   if (!dst || !dst->ptr || !src) return -1;
   if (src->device == POLY_DEVICE_HOST) {
+    if (src->ptr)
+      return js_webgpu_write_buffer_from_wasm(
+          (uintptr_t)dst->ptr, (const uint8_t *)src->ptr, (int)nbytes
+      );
     return js_webgpu_write_buffer_from_hostkey(
         (uintptr_t)dst->ptr, (uintptr_t)(src->src ? src->src : src), (int)nbytes
     );
@@ -484,6 +503,10 @@ static int webgpu_copy_out(
   (void)dev_ctx;
   if (!dst || !src || !src->ptr) return -1;
   if (dst->device == POLY_DEVICE_HOST) {
+    if (dst->ptr)
+      return js_webgpu_read_buffer_to_wasm(
+          (uint8_t *)dst->ptr, (uintptr_t)src->ptr, (int)nbytes
+      );
     return js_webgpu_read_buffer_to_hostkey(
         (uintptr_t)(dst->src ? dst->src : dst), (uintptr_t)src->ptr, (int)nbytes
     );
@@ -537,12 +560,12 @@ char *poly_webgpu_render_source(PolyCtx *ctx, PolyUOp *program, const char *fn_n
     n_lin = linear->n_src;
     lin = linear->src;
   } else {
-    lin = poly_linearize_rewritten(ctx, scheduled_root, &n_lin);
+    lin = poly_do_linearize(ctx, scheduled_root, &n_lin);
     lin_owned = true;
   }
   if (!lin) return NULL;
 
-  char *wgsl = poly_render_wgsl(lin, n_lin, fn_name);
+  char *wgsl = poly_render_wgsl(ctx, lin, n_lin, fn_name);
   if (lin_owned) free(lin);
   return wgsl;
 }
@@ -577,7 +600,7 @@ int poly_webgpu_lower_item(
     n_lin = linear->n_src;
     lin = linear->src;
   } else {
-    lin = poly_linearize_rewritten(ctx, scheduled_root, &n_lin);
+    lin = poly_do_linearize(ctx, scheduled_root, &n_lin);
     lin_owned = true;
   }
   if (!lin) return -1;
@@ -587,7 +610,7 @@ int poly_webgpu_lower_item(
   webgpu_extract_dims(ctx, lin, n_lin, grid, local);
 
   const char *source = webgpu_program_source_text(program);
-  char *wgsl = source ? webgpu_strdup(source) : poly_render_wgsl(lin, n_lin, fn_name);
+  char *wgsl = source ? webgpu_strdup(source) : poly_render_wgsl(ctx, lin, n_lin, fn_name);
   if (lin_owned) free(lin);
   if (!wgsl) return -1;
   double t_render = timing ? poly_now_ms() : 0.0;

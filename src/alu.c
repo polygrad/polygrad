@@ -5,7 +5,7 @@
  * Used by symbolic simplification for constant folding.
  */
 
-#include "pat.h"
+#include "uop/upat.h"
 #include "bigint.h"
 #include <limits.h>
 #include <math.h>
@@ -269,8 +269,8 @@ static double round_to_bf16(double x) {
  * over scalar dtype formats. Keep the same storage reinterpretation here;
  * memcpy avoids C aliasing and numeric-cast semantics. */
 bool poly_exec_bitcast_const(PolyDType from, PolyDType to, PolyArg value, PolyArg *out) {
-  if (!out || from.is_ptr || to.is_ptr || from.count != 1 || to.count != 1 || !from.fmt ||
-      !to.fmt || from.bitsize != to.bitsize ||
+  if (!out || (!from.fmt && !poly_dtype_is_fp8(from)) ||
+      (!to.fmt && !poly_dtype_is_fp8(to)) || from.bitsize != to.bitsize ||
       (from.bitsize != 8 && from.bitsize != 16 && from.bitsize != 32 && from.bitsize != 64))
     return false;
 
@@ -279,7 +279,9 @@ bool poly_exec_bitcast_const(PolyDType from, PolyDType to, PolyArg value, PolyAr
     bits = arg_to_bool(value) ? 1u : 0u;
   } else if (poly_dtype_is_float(from)) {
     double v = arg_to_float(value);
-    if (from.bitsize == 16) {
+    if (poly_dtype_is_fp8(from)) {
+      bits = poly_float_to_fp8(v, from);
+    } else if (from.bitsize == 16) {
       bits = f32_to_f16_bits_rne((float)v);
     } else if (from.bitsize == 32) {
       float v32 = (float)v;
@@ -301,7 +303,9 @@ bool poly_exec_bitcast_const(PolyDType from, PolyDType to, PolyArg value, PolyAr
     return true;
   }
   if (poly_dtype_is_float(to)) {
-    if (to.bitsize == 16) {
+    if (poly_dtype_is_fp8(to)) {
+      *out = poly_arg_float(poly_fp8_to_float((uint8_t)bits, to));
+    } else if (to.bitsize == 16) {
       *out = poly_arg_float((double)f16_bits_to_f32((uint16_t)bits));
     } else if (to.bitsize == 32) {
       uint32_t raw = (uint32_t)bits;
@@ -349,9 +353,11 @@ static PolyArg truncate_result(PolyArg val, PolyDType dtype) {
   }
 
   if (poly_dtype_is_float(dtype)) {
-    PolyDType sdt = poly_dtype_scalar(dtype);
+    PolyDType sdt = dtype;
     double v = arg_to_float(val);
-    if (sdt.priority == POLY_FLOAT16.priority && sdt.bitsize == 16)
+    if (poly_dtype_is_fp8(sdt))
+      v = poly_fp8_to_float(poly_float_to_fp8(v, sdt), sdt);
+    else if (sdt.priority == POLY_FLOAT16.priority && sdt.bitsize == 16)
       v = round_to_f16(v);
     else if (sdt.priority == POLY_BFLOAT16.priority && sdt.bitsize == 16)
       v = round_to_bf16(v);

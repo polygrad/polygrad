@@ -4,7 +4,7 @@
 
 #define _POSIX_C_SOURCE 200809L
 #include "test_harness.h"
-#include "../src/pat.h"
+#include "../src/uop/upat.h"
 #include "../src/schedule/rangeify.h"
 #include <pthread.h>
 
@@ -31,9 +31,9 @@ static void *threading_context_worker(void *opaque) {
   PolyUOp *mul = poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, v, two, poly_arg_none());
   PolyUOp *expr = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, mul, three, poly_arg_none());
 
-  PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, 16);
-  PolyUOp *b = poly_buffer(ctx, POLY_FLOAT32, 16);
-  PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, 16);
+  PolyUOp *a = poly_test_buffer(ctx, POLY_FLOAT32, 16);
+  PolyUOp *b = poly_test_buffer(ctx, POLY_FLOAT32, 16);
+  PolyUOp *out = poly_test_buffer(ctx, POLY_FLOAT32, 16);
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, a, b, poly_arg_none());
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out, add, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
@@ -44,11 +44,7 @@ static void *threading_context_worker(void *opaque) {
 
   poly_uop_minmax(ctx, expr, &r->min_v, &r->max_v);
 
-  poly_rangeify_stats_reset();
-  PolyIndexingCtx *ictx = poly_indexing_ctx_new(ctx);
-  if (!ictx) goto done;
-  PolyUOp *rangeified = poly_run_rangeify(ictx, sink);
-  poly_indexing_ctx_destroy(ictx);
+  PolyUOp *rangeified = poly_run_rangeify(ctx, sink, false);
   if (!rangeified) goto done;
 
   r->ok = true;
@@ -59,8 +55,6 @@ done:
 }
 
 TEST(threading, independent_contexts_smoke) {
-  PolyRangeifyStats main_before = poly_rangeify_stats_get();
-
   ThreadingResult a = {.tid = 0};
   ThreadingResult b = {.tid = 1};
   pthread_t ta, tb;
@@ -74,9 +68,6 @@ TEST(threading, independent_contexts_smoke) {
   ASSERT_INT_EQ(a.min_v, 3);
   ASSERT_INT_EQ(b.min_v, 3);
 
-  PolyRangeifyStats main_after = poly_rangeify_stats_get();
-  ASSERT_INT_EQ(main_after.buffer_alt_created, main_before.buffer_alt_created);
-  ASSERT_INT_EQ(main_after.buffer_alt_max_count, main_before.buffer_alt_max_count);
   PASS();
 }
 
@@ -138,15 +129,15 @@ static bool threading_linear_has_only_expected_op(
   return has_expected && !has_other;
 }
 
-static void *threading_scache_disabled_worker(void *opaque) {
+static void *threading_linear_worker(void *opaque) {
   ThreadingLowerResult *r = opaque;
   r->ok = false;
 
   PolyCtx *ctx = poly_ctx_new();
   if (!ctx) return NULL;
-  PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, 16);
-  PolyUOp *b = poly_buffer(ctx, POLY_FLOAT32, 16);
-  PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, 16);
+  PolyUOp *a = poly_test_buffer(ctx, POLY_FLOAT32, 16);
+  PolyUOp *b = poly_test_buffer(ctx, POLY_FLOAT32, 16);
+  PolyUOp *out = poly_test_buffer(ctx, POLY_FLOAT32, 16);
   PolyUOp *value = poly_uop2(ctx, r->expected_op, POLY_FLOAT32, a, b, poly_arg_none());
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out, value, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
@@ -155,10 +146,9 @@ static void *threading_scache_disabled_worker(void *opaque) {
   bool all_ok = true;
   for (int i = 0; i < 5000; i++) {
     if (!threading_lower_gate_wait(r->gate)) goto done;
-    PolyUOp *linear = poly_lower_sink_to_linear(ctx, sink, POLY_MODE_CALL);
+    PolyUOp *linear = poly_test_create_linear(ctx, sink);
     if (!linear || linear->op != POLY_OP_LINEAR ||
-        !threading_linear_has_only_expected_op(ctx, linear, r->expected_op, r->other_op) ||
-        poly_schedule_cache_len(ctx) != 0)
+        !threading_linear_has_only_expected_op(ctx, linear, r->expected_op, r->other_op))
       all_ok = false;
   }
   r->ok = all_ok;
@@ -168,15 +158,7 @@ done:
   return NULL;
 }
 
-TEST(threading, independent_contexts_scache_disabled_lowering) {
-  const char *old_scache = getenv("POLY_SCACHE");
-  char *saved_scache = old_scache ? strdup(old_scache) : NULL;
-  if (old_scache && !saved_scache) FAIL("failed to save POLY_SCACHE");
-  if (setenv("POLY_SCACHE", "0", 1) != 0) {
-    free(saved_scache);
-    FAIL("failed to set POLY_SCACHE=0");
-  }
-
+TEST(threading, independent_contexts_create_linear) {
   ThreadingLowerGate gate = {.arrived = 0, .generation = 0, .stopped = false};
   int mutex_rc = pthread_mutex_init(&gate.mutex, NULL);
   int cond_rc = mutex_rc == 0 ? pthread_cond_init(&gate.cond, NULL) : -1;
@@ -187,8 +169,8 @@ TEST(threading, independent_contexts_scache_disabled_lowering) {
       .gate = &gate, .expected_op = POLY_OP_MUL, .other_op = POLY_OP_ADD,
   };
   pthread_t ta, tb;
-  int create_a = cond_rc == 0 ? pthread_create(&ta, NULL, threading_scache_disabled_worker, &a) : -1;
-  int create_b = create_a == 0 ? pthread_create(&tb, NULL, threading_scache_disabled_worker, &b) : -1;
+  int create_a = cond_rc == 0 ? pthread_create(&ta, NULL, threading_linear_worker, &a) : -1;
+  int create_b = create_a == 0 ? pthread_create(&tb, NULL, threading_linear_worker, &b) : -1;
   if (create_a == 0 && create_b != 0) {
     pthread_mutex_lock(&gate.mutex);
     gate.stopped = true;
@@ -202,29 +184,24 @@ TEST(threading, independent_contexts_scache_disabled_lowering) {
   if (cond_rc == 0) pthread_cond_destroy(&gate.cond);
   if (mutex_rc == 0) pthread_mutex_destroy(&gate.mutex);
 
-  int restore_rc = saved_scache ? setenv("POLY_SCACHE", saved_scache, 1)
-                                : unsetenv("POLY_SCACHE");
-  free(saved_scache);
-
   ASSERT_INT_EQ(mutex_rc, 0);
   ASSERT_INT_EQ(cond_rc, 0);
   ASSERT_INT_EQ(create_a, 0);
   ASSERT_INT_EQ(create_b, 0);
   ASSERT_INT_EQ(join_a, 0);
   ASSERT_INT_EQ(join_b, 0);
-  ASSERT_INT_EQ(restore_rc, 0);
   ASSERT_TRUE(a.ok);
   ASSERT_TRUE(b.ok);
   PASS();
 }
 
 typedef struct {
-  PolyPat *pat;
+  PolyUPat *pat;
   bool creator_ok;
   bool consumer_ok;
 } ThreadingPatHandoff;
 
-static PolyUOp *threading_pat_unwrap(
+static PolyUOp *threading_upat_unwrap(
     PolyCtx *ctx,
     PolyUOp *matched,
     const PolyBindings *bindings
@@ -234,17 +211,17 @@ static PolyUOp *threading_pat_unwrap(
   return poly_bind(bindings, "x");
 }
 
-static void *threading_pat_creator(void *opaque) {
+static void *threading_upat_creator(void *opaque) {
   ThreadingPatHandoff *handoff = opaque;
-  handoff->pat = poly_pat_op1(POLY_OP_NEG, poly_pat_any("x"), NULL);
+  handoff->pat = poly_upat_op1(POLY_OP_NEG, poly_upat_any("x"), NULL);
   handoff->creator_ok = handoff->pat != NULL;
   return NULL;
 }
 
-static void *threading_pat_consumer(void *opaque) {
+static void *threading_upat_consumer(void *opaque) {
   ThreadingPatHandoff *handoff = opaque;
-  PolyPat *pat = handoff->pat;
-  PolyRule rule = {.pat = pat, .fn = threading_pat_unwrap};
+  PolyUPat *pat = handoff->pat;
+  PolyRule rule = {.pat = pat, .fn = threading_upat_unwrap};
   PolyPatternMatcher *pm = pat ? poly_pm_new(&rule, 1) : NULL;
   PolyCtx *ctx = pm ? poly_ctx_new() : NULL;
   PolyUOp *one = ctx ? poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0)) : NULL;
@@ -253,7 +230,7 @@ static void *threading_pat_consumer(void *opaque) {
   handoff->consumer_ok = rewritten == one;
 
   poly_pm_destroy(pm);
-  poly_pat_free(pat);
+  poly_upat_free(pat);
   poly_ctx_destroy(ctx);
   return NULL;
 }
@@ -261,10 +238,10 @@ static void *threading_pat_consumer(void *opaque) {
 TEST(threading, public_pattern_survives_creator_thread_exit) {
   ThreadingPatHandoff handoff = {0};
   pthread_t creator, consumer;
-  int create_creator = pthread_create(&creator, NULL, threading_pat_creator, &handoff);
+  int create_creator = pthread_create(&creator, NULL, threading_upat_creator, &handoff);
   int join_creator = create_creator == 0 ? pthread_join(creator, NULL) : -1;
   int create_consumer = join_creator == 0
-                            ? pthread_create(&consumer, NULL, threading_pat_consumer, &handoff)
+                            ? pthread_create(&consumer, NULL, threading_upat_consumer, &handoff)
                             : -1;
   int join_consumer = create_consumer == 0 ? pthread_join(consumer, NULL) : -1;
 
@@ -281,13 +258,13 @@ typedef struct {
   bool ok;
 } ThreadingPatCacheResult;
 
-static void *threading_pat_cache_worker(void *opaque) {
+static void *threading_upat_cache_worker(void *opaque) {
   ThreadingPatCacheResult *result = opaque;
-  PolyPat *pat = poly_pat_op1(POLY_OP_NEG, poly_pat_any("x"), NULL);
-  PolyRule rule = {.pat = pat, .fn = threading_pat_unwrap};
+  PolyUPat *pat = poly_upat_op1(POLY_OP_NEG, poly_upat_any("x"), NULL);
+  PolyRule rule = {.pat = pat, .fn = threading_upat_unwrap};
   PolyPatternMatcher *pm = pat ? poly_pm_new(&rule, 1) : NULL;
   if (!pm) {
-    poly_pat_free(pat);
+    poly_upat_free(pat);
     return NULL;
   }
   result->ok = poly_pm_thread_cache(pm) == pm;
@@ -297,7 +274,7 @@ static void *threading_pat_cache_worker(void *opaque) {
 TEST(threading, compiler_pattern_cache_releases_at_thread_exit) {
   ThreadingPatCacheResult result = {0};
   pthread_t worker;
-  ASSERT_INT_EQ(pthread_create(&worker, NULL, threading_pat_cache_worker, &result), 0);
+  ASSERT_INT_EQ(pthread_create(&worker, NULL, threading_upat_cache_worker, &result), 0);
   ASSERT_INT_EQ(pthread_join(worker, NULL), 0);
   ASSERT_TRUE(result.ok);
   PASS();

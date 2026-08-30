@@ -11,16 +11,18 @@
  */
 
 const AxisType = Object.freeze({
-  GLOBAL: 0,
-  WARP: 1,
-  LOCAL: 2,
-  LOOP: 3,
-  GROUP_REDUCE: 4,
-  REDUCE: 5,
-  UPCAST: 6,
-  UNROLL: 7,
-  THREAD: 8,
-  PLACEHOLDER: 9
+  DEVICE: 0,
+  GLOBAL: 1,
+  WARP: 2,
+  LOCAL: 3,
+  WEAK: 4,
+  GROUP_REDUCE: 5,
+  REDUCE: 6,
+  UPCAST: 7,
+  UNROLL: 8,
+  THREAD: 9,
+  PLACEHOLDER: 10,
+  LOOP: 11
 })
 
 class KernelInfo {
@@ -124,7 +126,7 @@ class UOp {
     return raw ? new UOp(uop.ctx, uop.ffi, raw) : null
   }
 
-  static range(ctx, ffi, bound, axisId = 0, axisType = AxisType.LOOP) {
+  static range(ctx, ffi, bound, axisId = 0, axisType = AxisType.WEAK) {
     const raw = ffi.poly_uop_range(ctx, Number(bound), Number(axisId), Number(axisType))
     return raw ? new UOp(ctx, ffi, raw) : null
   }
@@ -147,7 +149,7 @@ class UOp {
       if (Number.isInteger(x)) return this.ffi.poly_const_int(this.ctx, x)
       throw new TypeError(`unsupported index type ${typeof x}`)
     })
-    const raw = this.ffi.poly_uop_index(this.ctx, this.raw, rawIdx, false)
+    const raw = this.ffi.poly_uop_index(this.ctx, this.raw, rawIdx)
     return raw ? new UOp(this.ctx, this.ffi, raw) : null
   }
 
@@ -213,6 +215,10 @@ class UOp {
 
   _coerce(value) {
     if (value instanceof UOp) return value
+    if (typeof value === 'boolean') {
+      const dtypeId = (this.ffi.__polygradDtypeIds || {}).bool
+      return new UOp(this.ctx, this.ffi, this.ffi.poly_const_int_by_id(this.ctx, value ? 1 : 0, dtypeId))
+    }
     if (Number.isInteger(value)) return new UOp(this.ctx, this.ffi, this.ffi.poly_const_int(this.ctx, value))
     if (typeof value === 'number') return new UOp(this.ctx, this.ffi, this.ffi.poly_const_float(this.ctx, value))
     throw new TypeError(`cannot convert ${typeof value} to UOp`)
@@ -244,7 +250,7 @@ class UOp {
     }
     const dtype = ref instanceof UOp ? ref._dtypeName() : null
     if (dtype === 'float64') return new UOp(this.ctx, this.ffi, this.ffi.poly_const_double(this.ctx, value))
-    if (dtype && (dtype.startsWith('float') || dtype === 'bfloat16')) {
+    if (dtype && (dtype.startsWith('float') || dtype.startsWith('fp8') || dtype === 'bfloat16')) {
       return new UOp(this.ctx, this.ffi, this.ffi.poly_const_float(this.ctx, value))
     }
     if (Number.isInteger(value)) return new UOp(this.ctx, this.ffi, this.ffi.poly_const_int(this.ctx, value))
@@ -264,8 +270,8 @@ class UOp {
   }
 
   _alu2(name, other) {
-    const b = this._coerceLike(other, this)
-    const raw = this.ffi.poly_alu2(this.ctx, this._op(name), this.raw, b.raw)
+    const b = this._coerce(other)
+    const raw = this.ffi.poly_binop(this.ctx, this._op(name), this.raw, b.raw)
     return raw ? new UOp(this.ctx, this.ffi, raw) : null
   }
 
@@ -315,10 +321,10 @@ class UOp {
     return raw ? new UOp(this.ctx, this.ffi, raw) : null
   }
   where(yes, no) {
-    const ref = yes instanceof UOp ? yes : no instanceof UOp ? no : this
-    const y = this._coerceLike(yes, ref)
-    const n = this._coerceLike(no, ref)
-    return this._alu3('WHERE', y, n)
+    const y = this._coerce(yes)
+    const n = this._coerce(no)
+    const raw = this.ffi.poly_where_op(this.ctx, this.raw, y.raw, n.raw)
+    return raw ? new UOp(this.ctx, this.ffi, raw) : null
   }
   mulacc(mul, acc) { return this._alu3('MULACC', mul, acc) }
 
@@ -356,10 +362,21 @@ function createBoundUopNamespace(runtime) {
     AxisType,
     KernelInfo,
     wrap,
-    range(bound, axisId = 0, axisType = AxisType.LOOP) {
+    range(bound, axisId = 0, axisType = AxisType.WEAK) {
       return UOp.range(ctx, ffi, bound, axisId, axisType)
     },
-    constant(value) {
+    constant(value, dtype = null) {
+      if (dtype !== null && dtype !== undefined) {
+        const dtypeId = dtypeIds[String(dtype)]
+        if (dtypeId === undefined || dtypeId < 0) throw new TypeError(`unknown dtype ${dtype}`)
+        const raw = (typeof value === 'boolean' || Number.isInteger(value))
+          ? ffi.poly_const_int_by_id(ctx, typeof value === 'boolean' ? (value ? 1 : 0) : value, dtypeId)
+          : ffi.poly_const_float_by_id(ctx, value, dtypeId)
+        return raw ? new UOp(ctx, ffi, raw) : null
+      }
+      if (typeof value === 'boolean') {
+        return new UOp(ctx, ffi, ffi.poly_const_int_by_id(ctx, value ? 1 : 0, dtypeIds.bool))
+      }
       if (Number.isInteger(value)) return new UOp(ctx, ffi, ffi.poly_const_int(ctx, value))
       if (typeof value === 'number') return new UOp(ctx, ffi, ffi.poly_const_float(ctx, value))
       throw new TypeError(`cannot convert ${typeof value} to UOp`)

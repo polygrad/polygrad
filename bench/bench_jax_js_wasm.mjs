@@ -184,7 +184,8 @@ async function buildDirectPolygradJit(pg, workload) {
   try {
     ret = workload.build(...workload.args);
     await ret.realize();
-    if (ffi.poly_jit_end_capture(jit) !== 0) {
+    const live = pg.Tensor._liveTensorSnapshot().map((t) => t._tensor);
+    if (ffi.poly_jit_end_capture(jit, live) !== 0) {
       throw new Error(`poly_jit_end_capture failed for ${workload.name}`);
     }
   } catch (err) {

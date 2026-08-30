@@ -140,26 +140,26 @@ def main():
 
 
 def _grad_mul_sum(x):
-    t = Tensor(x.copy(), requires_grad=True)
+    t = Tensor(x.copy())
     (t * t).sum().backward()
     return t.grad.numpy()
 
 
 def _grad_exp2_sum(x):
-    t = Tensor(x.copy(), requires_grad=True)
+    t = Tensor(x.copy())
     t.exp2().sum().backward()
     return t.grad.numpy()
 
 
 def _grad_fdiv_sum_y(x, y):
-    tx = Tensor(x.copy(), requires_grad=False)
-    ty = Tensor(y.copy(), requires_grad=True)
+    tx = Tensor(x.copy())
+    ty = Tensor(y.copy())
     (tx / ty).sum().backward()
     return ty.grad.numpy()
 
 
 def _grad_chain_movement(x, rows, cols):
-    t = Tensor(x.copy(), requires_grad=True)
+    t = Tensor(x.copy())
     t.reshape(rows, cols).permute(1, 0).sum().backward()
     return t.grad.numpy()
 

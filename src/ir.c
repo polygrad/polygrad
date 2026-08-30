@@ -1,16 +1,13 @@
 /*
  * poly_ir.c -- Binary IR codec for tensor-level UOp graphs
  *
- * poly.ir.uops@10 format:
+ * poly.ir.uops@16 format:
  *   Header (32 bytes)
  *   String table (variable)
- *   Node table (variable, strict toposort order; scalar dtype ID + vector count)
+ *   Node table (variable, strict toposort order; scalar dtype ID and UOp shape)
  *   Interface table (named logical nodes with roles)
- *   Entrypoint table (named SINKs plus v2+ ABI metadata)
- *   Module table (v10+, exact named logical placement boundaries)
- *
- * Import remains backward-compatible with v1 payloads (entrypoint name + SINK)
- * and v2-v9 payloads (including integer and scalar-string device metadata).
+ *   Entrypoint table (named SINKs plus ABI metadata)
+ *   Module table (exact named logical placement boundaries)
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -135,6 +132,54 @@ static double br_f64(ByteReader *r) {
   return d;
 }
 
+/* Current Tinygrad codegen/opt/__init__.py:Opt wire value. */
+static void bb_opt(ByteBuf *buf, const PolyOpt *opt) {
+  bb_u8(buf, (uint8_t)opt->op);
+  bb_u8(buf, opt->has_axis ? 1 : 0);
+  bb_i32(buf, opt->axis);
+  bb_u8(buf, (uint8_t)opt->arg_kind);
+  if (opt->arg_kind == POLY_OPT_ARG_INT) {
+    bb_i64(buf, opt->arg);
+  } else if (opt->arg_kind == POLY_OPT_ARG_INT_TUPLE) {
+    bb_u16(buf, (uint16_t)opt->n_arg_tuple);
+    for (int i = 0; i < opt->n_arg_tuple; i++) bb_i64(buf, opt->arg_tuple[i]);
+  }
+}
+
+static bool br_opt(ByteReader *r, PolyOpt *opt) {
+  if (!r || !opt || br_remaining(r) < 7) return false;
+  memset(opt, 0, sizeof(*opt));
+  opt->op = (PolyOptOps)br_u8(r);
+  opt->has_axis = br_u8(r) != 0;
+  opt->axis = br_i32(r);
+  opt->arg_kind = (PolyOptArgKind)br_u8(r);
+  if (opt->op < POLY_OPT_TC || opt->op > POLY_OPT_SWAP ||
+      opt->arg_kind < POLY_OPT_ARG_NONE || opt->arg_kind > POLY_OPT_ARG_INT_TUPLE)
+    return false;
+  if (opt->arg_kind == POLY_OPT_ARG_INT) {
+    if (br_remaining(r) < 8) return false;
+    opt->arg = br_i64(r);
+  } else if (opt->arg_kind == POLY_OPT_ARG_INT_TUPLE) {
+    if (br_remaining(r) < 2) return false;
+    uint16_t n = br_u16(r);
+    if (br_remaining(r) < (int64_t)n * 8) return false;
+    int64_t *tuple = n > 0 ? malloc((size_t)n * sizeof(*tuple)) : NULL;
+    if (n > 0 && !tuple) return false;
+    for (int i = 0; i < n; i++) tuple[i] = br_i64(r);
+    opt->arg_tuple = tuple;
+    opt->n_arg_tuple = n;
+  }
+  return true;
+}
+
+static void free_opts(PolyOpt *opts, int n) {
+  if (!opts) return;
+  for (int i = 0; i < n; i++)
+    if (opts[i].arg_kind == POLY_OPT_ARG_INT_TUPLE)
+      free((void *)opts[i].arg_tuple);
+  free(opts);
+}
+
 static bool br_prior_node_ref(
     ByteReader *r,
     PolyUOp **nodes,
@@ -156,37 +201,25 @@ static bool br_prior_node_ref(
 /* Magic */
 
 #define IR_MAGIC 0x52494750 /* "PGIR" LE */
-#define IR_VERSION 10
-#define IR_MIN_VERSION 1
-
 #define PROGRAM_MAGIC 0x4d504750 /* "PGPM" LE */
-#define PROGRAM_VERSION 1
 
 /* Dtype index table */
 
-#define N_DTYPES 15
+#define N_DTYPES 20
 
 static const PolyDType *dtype_table[N_DTYPES] = {
     &POLY_VOID,    &POLY_BOOL,     &POLY_INT8,    &POLY_UINT8,   &POLY_INT16,
     &POLY_UINT16,  &POLY_INT32,    &POLY_UINT32,  &POLY_INT64,   &POLY_UINT64,
-    &POLY_FLOAT16, &POLY_BFLOAT16, &POLY_FLOAT32, &POLY_FLOAT64, &POLY_INDEX,
+    &POLY_FLOAT16, &POLY_BFLOAT16, &POLY_FLOAT32, &POLY_FLOAT64, &POLY_WEAKINT,
+    &POLY_WEAKFLOAT, &POLY_FP8E4M3, &POLY_FP8E5M2, &POLY_FP8E4M3FNUZ,
+    &POLY_FP8E5M2FNUZ,
 };
 
 static int dtype_to_index(PolyDType dt) {
-  dt = poly_dtype_scalar(dt);
+  dt = dt;
   for (int i = 0; i < N_DTYPES; i++)
     if (poly_dtype_eq(dt, *dtype_table[i])) return i;
   return -1;
-}
-
-static int dtype_base_to_index(PolyDType dt) {
-  if (dt.is_ptr) {
-    dt.is_ptr = false;
-    dt.addrspace = POLY_ADDR_GLOBAL;
-    dt.vcount = 0;
-    dt.ptr_size = 0;
-  }
-  return dtype_to_index(dt);
 }
 
 /* String table builder */
@@ -278,7 +311,7 @@ static bool br_program_tag_arg(
     uint32_t n_strings,
     PolyArg *out
 ) {
-  if (!r || !out || kind > POLY_ARG_CALL_INFO) return false;
+  if (!r || !out || kind > POLY_ARG_DTYPE) return false;
   *out = poly_arg_none();
   out->kind = (PolyArgKind)kind;
   switch (out->kind) {
@@ -382,10 +415,8 @@ static bool node_list_append_unique(
   return true;
 }
 
-/* ProgramInfo keeps immutable references to launch expressions, variables and
- * estimates outside the ordinary UOp src array.  Make those references true
- * serialization dependencies so every recorded node index is backward and
- * import can rebuild the hash-consed PROGRAM in one pass. */
+/* ProgramInfo launch metadata and KernelInfo estimates reference UOps outside
+ * ordinary src arrays. Make them serialization dependencies. */
 static bool program_topo_with_metadata(PolyCtx *ctx, PolyUOp ***topo_io, int *n_topo_io) {
   PolyUOp **old = *topo_io;
   int n_old = *n_topo_io;
@@ -398,7 +429,7 @@ static bool program_topo_with_metadata(PolyCtx *ctx, PolyUOp ***topo_io, int *n_
         !program->arg.program_info)
       continue;
     const PolyProgramInfo *info = program->arg.program_info;
-    int n_refs = 6 + info->n_vars + 3;
+    int n_refs = 6 + info->n_vars;
     if (info->n_vars < 0 || n_refs < 0) goto fail;
     PolyUOp **refs = calloc((size_t)(n_refs > 0 ? n_refs : 1), sizeof(*refs));
     if (!refs) goto fail;
@@ -409,9 +440,6 @@ static bool program_topo_with_metadata(PolyCtx *ctx, PolyUOp ***topo_io, int *n_
       refs[nr++] = info->local_exprs[d];
     for (int v = 0; v < info->n_vars; v++)
       refs[nr++] = info->vars[v];
-    refs[nr++] = info->estimates.ops;
-    refs[nr++] = info->estimates.lds;
-    refs[nr++] = info->estimates.mem;
     for (int r = 0; r < nr; r++) {
       if (!refs[r]) continue;
       if (!poly_ctx_owns_ptr(ctx, refs[r])) {
@@ -435,6 +463,32 @@ static bool program_topo_with_metadata(PolyCtx *ctx, PolyUOp ***topo_io, int *n_
       poly_toposort_free(dep);
     }
     free(refs);
+  }
+  for (int i = 0; i < n_old; i++) {
+    PolyUOp *sink = old[i];
+    if (!sink || sink->op != POLY_OP_SINK ||
+        sink->arg.kind != POLY_ARG_KERNEL_INFO || !sink->arg.kernel_info ||
+        !sink->arg.kernel_info->estimates)
+      continue;
+    PolyUOp *refs[3] = {
+        sink->arg.kernel_info->estimates->ops,
+        sink->arg.kernel_info->estimates->lds,
+        sink->arg.kernel_info->estimates->mem,
+    };
+    for (int r = 0; r < 3; r++) {
+      if (!refs[r]) continue;
+      if (!poly_ctx_owns_ptr(ctx, refs[r])) goto fail;
+      int n_dep = 0;
+      PolyUOp **dep = poly_toposort_alloc(ctx, refs[r], &n_dep);
+      if (!dep && n_dep != 0) goto fail;
+      for (int j = 0; j < n_dep; j++) {
+        if (!node_list_append_unique(&ordered, &n_ordered, &cap_ordered, dep[j])) {
+          poly_toposort_free(dep);
+          goto fail;
+        }
+      }
+      poly_toposort_free(dep);
+    }
   }
   for (int i = 0; i < n_old; i++)
     if (!node_list_append_unique(&ordered, &n_ordered, &cap_ordered, old[i])) goto fail;
@@ -582,8 +636,8 @@ static uint8_t *poly_graph_export(const PolyIrSpec *spec, int *out_len, bool exe
     if (topo_is_heap) free(topo);
     return NULL;
   }
-  if (executable && !program_topo_with_metadata(spec->ctx, &topo, &n_nodes)) {
-    fprintf(stderr, "poly_program_export: invalid PROGRAM metadata dependency\n");
+  if (!program_topo_with_metadata(spec->ctx, &topo, &n_nodes)) {
+    fprintf(stderr, "poly_ir_export: invalid metadata dependency\n");
     free(topo);
     return NULL;
   }
@@ -636,20 +690,11 @@ static uint8_t *poly_graph_export(const PolyIrSpec *spec, int *out_len, bool exe
     }
   }
 
-  /* Tensor/package IR keeps vector dtypes (notably shape STACK[weakintN])
-   * as scalar dtype ID + existing PolyDType.count. Pointer dtypes remain
-   * lowered/execution state and are not portable tensor IR. */
+  /* Tinygrad 2026-08-22/a9069c177a9d DType is scalar; vector width lives in
+   * UOp shape and is therefore already encoded by the graph. */
   for (int i = 0; i < n_nodes; i++) {
     PolyDType dt = topo[i]->dtype;
-    if ((!executable && dt.is_ptr) || dt.count == 0 ||
-        (dt.is_ptr &&
-         (dt.addrspace < POLY_ADDR_GLOBAL || dt.addrspace > POLY_ADDR_REG || dt.vcount == 0))) {
-      fprintf(stderr, "poly_ir_export: node %d has unsupported pointer/empty dtype\n", i);
-      free(node_map);
-      if (topo_is_heap) free(topo);
-      return NULL;
-    }
-    if ((executable ? dtype_base_to_index(dt) : dtype_to_index(dt)) < 0) {
+    if (dtype_to_index(dt) < 0) {
       fprintf(
           stderr, "poly_ir_export: node %d has unknown dtype '%s'\n", i, dt.name ? dt.name : "?"
       );
@@ -681,7 +726,11 @@ static uint8_t *poly_graph_export(const PolyIrSpec *spec, int *out_len, bool exe
     if (a.kind == POLY_ARG_STRING_TUPLE)
       for (int j = 0; j < a.string_tuple.n; j++)
         st_add(&strings, a.string_tuple.vals[j]);
-    if (a.kind == POLY_ARG_DEFINE_VAR && a.define_var.name) st_add(&strings, a.define_var.name);
+    if (a.kind == POLY_ARG_ALLREDUCE && a.allreduce.device_is_tuple)
+      for (int j = 0; j < a.allreduce.n_devices; j++)
+        st_add(&strings, a.allreduce.devices[j]);
+    else if (a.kind == POLY_ARG_ALLREDUCE && a.allreduce.device)
+      st_add(&strings, a.allreduce.device);
     if (a.kind == POLY_ARG_BUFFERIZE_OPTS && a.bufferize_opts.device_is_tuple) {
       if (a.bufferize_opts.n_devices <= 0 || a.bufferize_opts.n_devices > UINT16_MAX ||
           !a.bufferize_opts.devices) {
@@ -704,8 +753,8 @@ static uint8_t *poly_graph_export(const PolyIrSpec *spec, int *out_len, bool exe
     } else if (a.kind == POLY_ARG_BUFFERIZE_OPTS && a.bufferize_opts.device) {
       st_add(&strings, a.bufferize_opts.device);
     }
-    if (a.kind == POLY_ARG_TENSOR_CORE && a.tensor_core.name)
-      st_add(&strings, a.tensor_core.name);
+    if (a.kind == POLY_ARG_TENSOR_CORE && a.tensor_core.device)
+      st_add(&strings, a.tensor_core.device);
     if (a.kind == POLY_ARG_PARAM && a.param && a.param->name)
       st_add(&strings, a.param->name);
     if (a.kind == POLY_ARG_PARAM && a.param && a.param->device) st_add(&strings, a.param->device);
@@ -714,9 +763,25 @@ static uint8_t *poly_graph_export(const PolyIrSpec *spec, int *out_len, bool exe
         st_add(&strings, a.param->devices[j]);
     if (a.kind == POLY_ARG_CALL_INFO && a.call_info && a.call_info->name)
       st_add(&strings, a.call_info->name);
+    if (a.kind == POLY_ARG_KERNEL_INFO) {
+      const PolyKernelInfo *info = a.kernel_info;
+      if (!info || !info->name || info->n_axis_types < 0 ||
+          info->n_axis_types > UINT16_MAX || info->n_applied_opts < 0 ||
+          info->n_opts_to_apply < 0 ||
+          (info->n_axis_types > 0 && !info->axis_types) ||
+          (info->n_applied_opts > 0 && !info->applied_opts) ||
+          (info->n_opts_to_apply > 0 && !info->opts_to_apply)) {
+        fprintf(stderr, "poly_ir_export: invalid KernelInfo metadata\n");
+        free(node_map);
+        if (topo_is_heap) free(topo);
+        st_free(&strings);
+        return NULL;
+      }
+      st_add(&strings, info->name);
+    }
     if (a.kind == POLY_ARG_PROGRAM_INFO) {
       const PolyProgramInfo *info = a.program_info;
-      if (!executable || !info || info->n_vars < 0 || info->n_globals < 0 || info->n_outs < 0 ||
+      if (!executable || !info || !info->target || info->n_vars < 0 || info->n_globals < 0 || info->n_outs < 0 ||
           info->n_ins < 0 || (info->n_vars > 0 && !info->vars) ||
           (info->n_globals > 0 && !info->globals) || (info->n_outs > 0 && !info->outs) ||
           (info->n_ins > 0 && !info->ins)) {
@@ -727,6 +792,7 @@ static uint8_t *poly_graph_export(const PolyIrSpec *spec, int *out_len, bool exe
         return NULL;
       }
       if (info->name) st_add(&strings, info->name);
+      st_add(&strings, info->target);
     }
     if (a.kind == POLY_ARG_BYTES &&
         (!executable || a.bytes.n < 0 || (a.bytes.n > 0 && !a.bytes.data))) {
@@ -759,7 +825,7 @@ static uint8_t *poly_graph_export(const PolyIrSpec *spec, int *out_len, bool exe
 
   /* Header (32 bytes) */
   bb_u32(&buf, executable ? PROGRAM_MAGIC : IR_MAGIC);
-  bb_u32(&buf, executable ? PROGRAM_VERSION : IR_VERSION);
+  bb_u32(&buf, executable ? POLY_PROGRAM_VERSION : POLY_IR_VERSION);
   bb_u32(&buf, executable ? POLYGRAD_ABI_VERSION : flags);
   bb_u32(&buf, (uint32_t)n_nodes);
   bb_u32(&buf, (uint32_t)strings.n);
@@ -778,19 +844,11 @@ static uint8_t *poly_graph_export(const PolyIrSpec *spec, int *out_len, bool exe
   for (int i = 0; i < n_nodes; i++) {
     PolyUOp *u = topo[i];
     bb_u16(&buf, (uint16_t)u->op);
-    bb_u8(&buf, (uint8_t)(executable ? dtype_base_to_index(u->dtype) : dtype_to_index(u->dtype)));
-    bb_u16(&buf, u->dtype.count);
+    bb_u8(&buf, (uint8_t)dtype_to_index(u->dtype));
     bb_i32(&buf, u->tag);
     bb_u16(&buf, u->n_src);
     bb_u8(&buf, (uint8_t)u->arg.kind);
     bb_u8(&buf, executable ? (uint8_t)u->tag_arg.kind : 0);
-    if (executable) {
-      bb_u8(&buf, u->dtype.is_ptr ? 1 : 0);
-      bb_u8(&buf, (uint8_t)u->dtype.addrspace);
-      bb_u16(&buf, u->dtype.vcount);
-      bb_i64(&buf, u->dtype.ptr_size);
-    }
-
     /* Sources */
     for (int s = 0; s < u->n_src; s++) {
       uint32_t idx = FIND_IDX(u->src[s]);
@@ -829,13 +887,6 @@ static uint8_t *poly_graph_export(const PolyIrSpec *spec, int *out_len, bool exe
       for (int t = 0; t < u->arg.int_tuple.n; t++)
         bb_i64(&buf, u->arg.int_tuple.vals[t]);
       break;
-    case POLY_ARG_PAIR_TUPLE:
-      bb_u16(&buf, (uint16_t)u->arg.pair_tuple.n);
-      for (int t = 0; t < u->arg.pair_tuple.n; t++) {
-        bb_i64(&buf, u->arg.pair_tuple.pairs[t][0]);
-        bb_i64(&buf, u->arg.pair_tuple.pairs[t][1]);
-      }
-      break;
     case POLY_ARG_STRING:
       bb_u32(&buf, st_add(&strings, u->arg.str));
       break;
@@ -847,11 +898,21 @@ static uint8_t *poly_graph_export(const PolyIrSpec *spec, int *out_len, bool exe
     case POLY_ARG_OPS:
       bb_u16(&buf, (uint16_t)u->arg.ops);
       break;
-    case POLY_ARG_REDUCE_AXIS:
-      bb_u16(&buf, (uint16_t)u->arg.reduce_axis.op);
-      bb_u16(&buf, (uint16_t)u->arg.reduce_axis.n);
-      for (int t = 0; t < u->arg.reduce_axis.n; t++)
-        bb_i64(&buf, u->arg.reduce_axis.axes[t]);
+    case POLY_ARG_REDUCE:
+      bb_u16(&buf, (uint16_t)u->arg.reduce.op);
+      bb_u16(&buf, (uint16_t)u->arg.reduce.num_axes);
+      break;
+    case POLY_ARG_ALLREDUCE:
+      bb_u16(&buf, (uint16_t)u->arg.allreduce.op);
+      if (u->arg.allreduce.device_is_tuple) {
+        bb_u8(&buf, 2);
+        bb_u16(&buf, (uint16_t)u->arg.allreduce.n_devices);
+        for (int d = 0; d < u->arg.allreduce.n_devices; d++)
+          bb_u32(&buf, st_add(&strings, u->arg.allreduce.devices[d]));
+      } else {
+        bb_u8(&buf, 1);
+        bb_u32(&buf, st_add(&strings, u->arg.allreduce.device));
+      }
       break;
     case POLY_ARG_RANGE:
       bb_i64(&buf, u->arg.range.axis_id);
@@ -859,11 +920,6 @@ static uint8_t *poly_graph_export(const PolyIrSpec *spec, int *out_len, bool exe
       bb_u16(&buf, (uint16_t)u->arg.range.n_extra);
       for (int t = 0; t < u->arg.range.n_extra; t++)
         bb_i64(&buf, u->arg.range.extra[t]);
-      break;
-    case POLY_ARG_DEFINE_VAR:
-      bb_u32(&buf, st_add(&strings, u->arg.define_var.name));
-      bb_i64(&buf, u->arg.define_var.min_val);
-      bb_i64(&buf, u->arg.define_var.max_val);
       break;
     case POLY_ARG_BUFFERIZE_OPTS:
       if (u->arg.bufferize_opts.device_is_tuple) {
@@ -881,9 +937,18 @@ static uint8_t *poly_graph_export(const PolyIrSpec *spec, int *out_len, bool exe
       bb_u8(&buf, u->arg.bufferize_opts.removable ? 1 : 0);
       break;
     case POLY_ARG_TENSOR_CORE:
-      bb_u32(&buf, st_add(&strings, u->arg.tensor_core.name));
       for (int d = 0; d < 3; d++) bb_i64(&buf, u->arg.tensor_core.dims[d]);
+      bb_u8(&buf, (uint8_t)dtype_to_index(u->arg.tensor_core.dtype_in));
+      bb_u32(&buf, st_add(&strings, u->arg.tensor_core.device));
       bb_i64(&buf, u->arg.tensor_core.threads);
+      bb_u8(&buf, u->arg.tensor_core.has_upcast_axes ? 1 : 0);
+      for (int d = 0; d < 3; d++) {
+        bb_u16(&buf, (uint16_t)u->arg.tensor_core.n_upcast_axes[d]);
+        for (int i = 0; i < u->arg.tensor_core.n_upcast_axes[d]; i++) {
+          bb_i64(&buf, u->arg.tensor_core.upcast_axes[d][i][0]);
+          bb_i64(&buf, u->arg.tensor_core.upcast_axes[d][i][1]);
+        }
+      }
       break;
     case POLY_ARG_PROGRAM_INFO:
       if (!executable || !u->arg.program_info) {
@@ -896,8 +961,9 @@ static uint8_t *poly_graph_export(const PolyIrSpec *spec, int *out_len, bool exe
       } else {
         const PolyProgramInfo *info = u->arg.program_info;
         bb_u32(&buf, info->name ? st_add(&strings, info->name) : UINT32_MAX);
-        bb_u8(&buf, info->optimize ? 1 : 0);
+        bb_u32(&buf, st_add(&strings, info->target));
         bb_u8(&buf, info->has_local_size ? 1 : 0);
+        bb_u8(&buf, 0);
         bb_u16(&buf, 0);
         for (int d = 0; d < 3; d++)
           bb_i32(&buf, info->global_size[d]);
@@ -919,11 +985,37 @@ static uint8_t *poly_graph_export(const PolyIrSpec *spec, int *out_len, bool exe
         bb_u32(&buf, (uint32_t)info->n_ins);
         for (int in = 0; in < info->n_ins; in++)
           bb_i32(&buf, info->ins[in]);
-        bb_u32(&buf, info->estimates.ops ? FIND_IDX(info->estimates.ops) : UINT32_MAX);
-        bb_u32(&buf, info->estimates.lds ? FIND_IDX(info->estimates.lds) : UINT32_MAX);
-        bb_u32(&buf, info->estimates.mem ? FIND_IDX(info->estimates.mem) : UINT32_MAX);
       }
       break;
+    case POLY_ARG_KERNEL_INFO: {
+      const PolyKernelInfo *info = u->arg.kernel_info;
+      bb_u32(&buf, st_add(&strings, info->name));
+      bb_u16(&buf, (uint16_t)info->n_axis_types);
+      for (int axis = 0; axis < info->n_axis_types; axis++)
+        bb_u8(&buf, (uint8_t)info->axis_types[axis]);
+      bb_u8(&buf, info->dont_use_locals ? 1 : 0);
+      bb_u32(&buf, (uint32_t)info->n_applied_opts);
+      for (int opt = 0; opt < info->n_applied_opts; opt++)
+        bb_opt(&buf, &info->applied_opts[opt]);
+      bb_u8(&buf, info->has_opts_to_apply ? 1 : 0);
+      bb_u32(&buf, (uint32_t)info->n_opts_to_apply);
+      for (int opt = 0; opt < info->n_opts_to_apply; opt++)
+        bb_opt(&buf, &info->opts_to_apply[opt]);
+      bb_u32(
+          &buf, info->estimates && info->estimates->ops
+                    ? FIND_IDX(info->estimates->ops)
+                    : UINT32_MAX);
+      bb_u32(
+          &buf, info->estimates && info->estimates->lds
+                    ? FIND_IDX(info->estimates->lds)
+                    : UINT32_MAX);
+      bb_u32(
+          &buf, info->estimates && info->estimates->mem
+                    ? FIND_IDX(info->estimates->mem)
+                    : UINT32_MAX);
+      bb_i32(&buf, info->beam);
+      break;
+    }
     case POLY_ARG_BYTES:
       if (!executable || u->arg.bytes.n < 0 || (u->arg.bytes.n > 0 && !u->arg.bytes.data)) {
         fprintf(stderr, "poly_ir_export: BINARY byte payloads are not exportable IR\n");
@@ -985,6 +1077,10 @@ static uint8_t *poly_graph_export(const PolyIrSpec *spec, int *out_len, bool exe
       bb_u8(&buf, u->arg.call_info->precompile ? 1 : 0);
       bb_u8(&buf, u->arg.call_info->precompile_backward ? 1 : 0);
       break;
+    case POLY_ARG_DTYPE:
+      /* CAST/BITCAST.arg is required to equal the node dtype. The kind is
+       * the complete wire identity; the existing dtype header is its payload. */
+      break;
     }
     if (executable) bb_program_tag_arg(&buf, &strings, u->tag_arg);
   }
@@ -993,10 +1089,7 @@ static uint8_t *poly_graph_export(const PolyIrSpec *spec, int *out_len, bool exe
   for (int i = 0; i < spec->n_bufs; i++) {
     bb_u32(&buf, st_add(&strings, spec->bufs[i].name));
     bb_u8(&buf, spec->bufs[i].role);
-    /* Interface flags live in the first historical padding byte so old
-     * poly.ir.uops@1 payloads still import.
-     *   bit0 = trainable value
-     *   bit1 = trainability metadata present */
+    /* Interface flags: bit0 is trainable; bit1 marks explicit metadata. */
     bool trainable = spec->bufs[i].trainable_set ? spec->bufs[i].trainable
                                                  : (spec->bufs[i].role == POLY_IR_ROLE_PARAM);
     bb_u8(&buf, 2 | (trainable ? 1 : 0));
@@ -1081,8 +1174,7 @@ static int poly_graph_import(const uint8_t *data, int len, PolyIrSpec *out, bool
     return -1;
   }
   uint32_t version = br_u32(&r);
-  if ((executable && version != PROGRAM_VERSION) ||
-      (!executable && (version < IR_MIN_VERSION || version > IR_VERSION))) {
+  if (version != (executable ? POLY_PROGRAM_VERSION : POLY_IR_VERSION)) {
     fprintf(
         stderr, "%s: unsupported version %u\n",
         executable ? "poly_program_import" : "poly_ir_import", version
@@ -1102,7 +1194,6 @@ static int poly_graph_import(const uint8_t *data, int len, PolyIrSpec *out, bool
   uint32_t n_entries = br_u32(&r);
   uint32_t n_entrypts = br_u32(&r);
   uint32_t n_modules = br_u32(&r);
-  if (!executable && version < 10) n_modules = 0; /* historical reserved header word */
   if (executable && n_modules != 0) {
     fprintf(stderr, "poly_program_import: module table is not executable metadata\n");
     return -1;
@@ -1135,28 +1226,16 @@ static int poly_graph_import(const uint8_t *data, int len, PolyIrSpec *out, bool
 
   /* Node table */
   for (uint32_t i = 0; i < n_nodes; i++) {
-    int node_header_bytes = executable ? 25 : (version >= 3 ? 13 : 11);
+    int node_header_bytes = executable ? 23 : 11;
     if (br_remaining(&r) < node_header_bytes) goto fail_nodes;
 
     uint16_t op_val = br_u16(&r);
     uint8_t dtype_idx = br_u8(&r);
-    uint16_t dtype_count = (executable || version >= 3) ? br_u16(&r) : 1;
     int32_t tag = br_i32(&r);
     uint16_t n_src = br_u16(&r);
     uint8_t arg_kind = br_u8(&r);
     uint8_t tag_arg_kind = br_u8(&r);
-    bool dtype_is_ptr = false;
-    PolyAddrSpace dtype_addrspace = POLY_ADDR_GLOBAL;
-    uint16_t dtype_vcount = 0;
-    int64_t dtype_ptr_size = 0;
-    if (executable) {
-      dtype_is_ptr = br_u8(&r) != 0;
-      dtype_addrspace = (PolyAddrSpace)br_u8(&r);
-      dtype_vcount = br_u16(&r);
-      dtype_ptr_size = br_i64(&r);
-    }
-
-    if (op_val >= POLY_OP_COUNT) {
+    if (op_val == 0 || op_val >= POLY_OP_COUNT) {
       fprintf(stderr, "poly_ir_import: invalid op %u at node %u\n", op_val, i);
       goto fail_nodes;
     }
@@ -1164,20 +1243,6 @@ static int poly_graph_import(const uint8_t *data, int len, PolyIrSpec *out, bool
       fprintf(stderr, "poly_ir_import: invalid dtype index %u at node %u\n", dtype_idx, i);
       goto fail_nodes;
     }
-    if (dtype_count == 0 || (dtype_idx == 0 && dtype_count != 1)) {
-      fprintf(
-          stderr, "poly_ir_import: invalid dtype count %u for dtype index %u at node %u\n",
-          dtype_count, dtype_idx, i
-      );
-      goto fail_nodes;
-    }
-    if (executable && ((dtype_is_ptr && (dtype_addrspace < POLY_ADDR_GLOBAL ||
-                                         dtype_addrspace > POLY_ADDR_REG || dtype_vcount == 0)) ||
-                       (!dtype_is_ptr && (dtype_vcount != 0 || dtype_ptr_size != 0)))) {
-      fprintf(stderr, "poly_program_import: invalid pointer dtype at node %u\n", i);
-      goto fail_nodes;
-    }
-
     /* Read sources */
     if (br_remaining(&r) < (int)(n_src * 4)) goto fail_nodes;
     PolyUOp **srcs = NULL;
@@ -1200,10 +1265,19 @@ static int poly_graph_import(const uint8_t *data, int len, PolyIrSpec *out, bool
     arg.kind = (PolyArgKind)arg_kind;
     PolyParamArg param_arg_tmp;
     PolyCallInfo call_info_tmp;
+    PolyKernelInfo kernel_info_tmp;
+    PolyEstimates kernel_estimates_tmp;
+    PolyAxisType *kernel_axis_types_tmp = NULL;
+    PolyOpt *kernel_applied_opts_tmp = NULL;
+    PolyOpt *kernel_opts_to_apply_tmp = NULL;
     const char **param_devices_tmp = NULL;
     const char **bufferize_devices_tmp = NULL;
+    const char **allreduce_devices_tmp = NULL;
+    int64_t (*wmma_upcast_axes_tmp[3])[2] = {NULL, NULL, NULL};
     memset(&param_arg_tmp, 0, sizeof(param_arg_tmp));
     memset(&call_info_tmp, 0, sizeof(call_info_tmp));
+    memset(&kernel_info_tmp, 0, sizeof(kernel_info_tmp));
+    memset(&kernel_estimates_tmp, 0, sizeof(kernel_estimates_tmp));
 
     switch (arg.kind) {
     case POLY_ARG_NONE:
@@ -1212,7 +1286,7 @@ static int poly_graph_import(const uint8_t *data, int len, PolyIrSpec *out, bool
       arg.i = br_i64(&r);
       break;
     case POLY_ARG_BIGINT: {
-      if ((!executable && version < 4) || br_remaining(&r) < 5) {
+      if (br_remaining(&r) < 5) {
         if (srcs) free(srcs);
         goto fail_nodes;
       }
@@ -1249,17 +1323,6 @@ static int poly_graph_import(const uint8_t *data, int len, PolyIrSpec *out, bool
       arg.int_tuple.n = count;
       break;
     }
-    case POLY_ARG_PAIR_TUPLE: {
-      uint16_t count = br_u16(&r);
-      int64_t(*pairs)[2] = malloc(count * sizeof(int64_t[2]));
-      for (int t = 0; t < count; t++) {
-        pairs[t][0] = br_i64(&r);
-        pairs[t][1] = br_i64(&r);
-      }
-      arg.pair_tuple.pairs = pairs;
-      arg.pair_tuple.n = count;
-      break;
-    }
     case POLY_ARG_STRING: {
       uint32_t str_idx = br_u32(&r);
       if (str_idx < n_strings)
@@ -1269,7 +1332,7 @@ static int poly_graph_import(const uint8_t *data, int len, PolyIrSpec *out, bool
       break;
     }
     case POLY_ARG_STRING_TUPLE: {
-      if ((!executable && version < 6) || br_remaining(&r) < 2) {
+      if (br_remaining(&r) < 2) {
         if (srcs) free(srcs);
         goto fail_nodes;
       }
@@ -1299,14 +1362,47 @@ static int poly_graph_import(const uint8_t *data, int len, PolyIrSpec *out, bool
     case POLY_ARG_OPS:
       arg.ops = (PolyOps)br_u16(&r);
       break;
-    case POLY_ARG_REDUCE_AXIS: {
-      arg.reduce_axis.op = (PolyOps)br_u16(&r);
-      uint16_t n_axes = br_u16(&r);
-      int64_t *axes = malloc(n_axes * sizeof(int64_t));
-      for (int t = 0; t < n_axes; t++)
-        axes[t] = br_i64(&r);
-      arg.reduce_axis.axes = axes;
-      arg.reduce_axis.n = n_axes;
+    case POLY_ARG_REDUCE:
+      arg.reduce.op = (PolyOps)br_u16(&r);
+      arg.reduce.num_axes = (int)br_u16(&r);
+      break;
+    case POLY_ARG_ALLREDUCE: {
+      arg.allreduce.op = (PolyOps)br_u16(&r);
+      uint8_t device_kind = br_u8(&r);
+      if (device_kind == 1) {
+        uint32_t device_idx = br_u32(&r);
+        if (device_idx >= n_strings) {
+          if (srcs) free(srcs);
+          goto fail_nodes;
+        }
+        arg.allreduce.device = strings[device_idx];
+      } else if (device_kind == 2) {
+        uint16_t count = br_u16(&r);
+        if (count == 0) {
+          if (srcs) free(srcs);
+          goto fail_nodes;
+        }
+        allreduce_devices_tmp = malloc((size_t)count * sizeof(*allreduce_devices_tmp));
+        if (!allreduce_devices_tmp) {
+          if (srcs) free(srcs);
+          goto fail_nodes;
+        }
+        for (int d = 0; d < count; d++) {
+          uint32_t device_idx = br_u32(&r);
+          if (device_idx >= n_strings) {
+            free(allreduce_devices_tmp);
+            if (srcs) free(srcs);
+            goto fail_nodes;
+          }
+          allreduce_devices_tmp[d] = strings[device_idx];
+        }
+        arg.allreduce.devices = allreduce_devices_tmp;
+        arg.allreduce.n_devices = count;
+        arg.allreduce.device_is_tuple = true;
+      } else {
+        if (srcs) free(srcs);
+        goto fail_nodes;
+      }
       break;
     }
     case POLY_ARG_RANGE: {
@@ -1324,73 +1420,82 @@ static int poly_graph_import(const uint8_t *data, int len, PolyIrSpec *out, bool
       arg.range.n_extra = n_extra;
       break;
     }
-    case POLY_ARG_DEFINE_VAR: {
-      uint32_t name_idx = br_u32(&r);
-      arg.define_var.name = (name_idx < n_strings) ? strings[name_idx] : "";
-      arg.define_var.min_val = br_i64(&r);
-      arg.define_var.max_val = br_i64(&r);
-      break;
-    }
     case POLY_ARG_BUFFERIZE_OPTS: {
-      if (executable || version >= 8) {
-        uint8_t device_kind = br_u8(&r);
-        if (device_kind == 1) {
-          uint32_t device_idx = br_u32(&r);
-          arg.bufferize_opts.device = device_idx < n_strings ? strings[device_idx] : NULL;
-          if (!arg.bufferize_opts.device) {
-            if (srcs) free(srcs);
-            goto fail_nodes;
-          }
-        } else if (device_kind == 2) {
-          uint16_t count = br_u16(&r);
-          if (count == 0 || br_remaining(&r) < (int)((uint32_t)count * sizeof(uint32_t))) {
-            if (srcs) free(srcs);
-            goto fail_nodes;
-          }
-          bufferize_devices_tmp = malloc((size_t)count * sizeof(*bufferize_devices_tmp));
-          if (!bufferize_devices_tmp) {
-            if (srcs) free(srcs);
-            goto fail_nodes;
-          }
-          for (int d = 0; d < count; d++) {
-            uint32_t device_idx = br_u32(&r);
-            if (device_idx >= n_strings) {
-              free(bufferize_devices_tmp);
-              if (srcs) free(srcs);
-              goto fail_nodes;
-            }
-            bufferize_devices_tmp[d] = strings[device_idx];
-          }
-          arg.bufferize_opts.devices = bufferize_devices_tmp;
-          arg.bufferize_opts.n_devices = count;
-          arg.bufferize_opts.device_is_tuple = true;
-        } else if (device_kind != 0) {
+      uint8_t device_kind = br_u8(&r);
+      if (device_kind == 1) {
+        uint32_t device_idx = br_u32(&r);
+        arg.bufferize_opts.device = device_idx < n_strings ? strings[device_idx] : NULL;
+        if (!arg.bufferize_opts.device) {
           if (srcs) free(srcs);
           goto fail_nodes;
         }
-      } else if (version >= 5) {
-        uint32_t device_idx = br_u32(&r);
-        arg.bufferize_opts.device = device_idx < n_strings ? strings[device_idx] : NULL;
-      } else {
-        int64_t legacy_device = br_i64(&r);
-        arg.bufferize_opts.device =
-            legacy_device > POLY_DEVICE_AUTO && legacy_device <= POLY_DEVICE_DISK
-                ? poly_device_name((PolyDevice)legacy_device)
-                : NULL;
+      } else if (device_kind == 2) {
+        uint16_t count = br_u16(&r);
+        if (count == 0 || br_remaining(&r) < (int)((uint32_t)count * sizeof(uint32_t))) {
+          if (srcs) free(srcs);
+          goto fail_nodes;
+        }
+        bufferize_devices_tmp = malloc((size_t)count * sizeof(*bufferize_devices_tmp));
+        if (!bufferize_devices_tmp) {
+          if (srcs) free(srcs);
+          goto fail_nodes;
+        }
+        for (int d = 0; d < count; d++) {
+          uint32_t device_idx = br_u32(&r);
+          if (device_idx >= n_strings) {
+            free(bufferize_devices_tmp);
+            if (srcs) free(srcs);
+            goto fail_nodes;
+          }
+          bufferize_devices_tmp[d] = strings[device_idx];
+        }
+        arg.bufferize_opts.devices = bufferize_devices_tmp;
+        arg.bufferize_opts.n_devices = count;
+        arg.bufferize_opts.device_is_tuple = true;
+      } else if (device_kind != 0) {
+        if (srcs) free(srcs);
+        goto fail_nodes;
       }
       arg.bufferize_opts.addrspace = (PolyAddrSpace)br_u8(&r);
       arg.bufferize_opts.removable = br_u8(&r) != 0;
       break;
     }
     case POLY_ARG_TENSOR_CORE: {
-      uint32_t name_idx = br_u32(&r);
-      arg.tensor_core.name = (name_idx < n_strings) ? strings[name_idx] : "";
       for (int d = 0; d < 3; d++) arg.tensor_core.dims[d] = (int)br_i64(&r);
+      uint8_t input_dtype_idx = br_u8(&r);
+      uint32_t device_idx = br_u32(&r);
+      if (input_dtype_idx >= N_DTYPES || device_idx >= n_strings) {
+        if (srcs) free(srcs);
+        goto fail_nodes;
+      }
+      arg.tensor_core.dtype_in = *dtype_table[input_dtype_idx];
+      arg.tensor_core.device = strings[device_idx];
       arg.tensor_core.threads = (int)br_i64(&r);
+      arg.tensor_core.has_upcast_axes = br_u8(&r) != 0;
+      for (int d = 0; d < 3; d++) {
+        uint16_t count = br_u16(&r);
+        if (br_remaining(&r) < (int64_t)count * 16) {
+          if (srcs) free(srcs);
+          goto fail_nodes;
+        }
+        if (count > 0) {
+          wmma_upcast_axes_tmp[d] = malloc((size_t)count * sizeof(*wmma_upcast_axes_tmp[d]));
+          if (!wmma_upcast_axes_tmp[d]) {
+            if (srcs) free(srcs);
+            goto fail_nodes;
+          }
+          for (int i = 0; i < count; i++) {
+            wmma_upcast_axes_tmp[d][i][0] = br_i64(&r);
+            wmma_upcast_axes_tmp[d][i][1] = br_i64(&r);
+          }
+        }
+        arg.tensor_core.upcast_axes[d] = wmma_upcast_axes_tmp[d];
+        arg.tensor_core.n_upcast_axes[d] = count;
+      }
       break;
     }
     case POLY_ARG_PROGRAM_INFO: {
-      if (!executable || br_remaining(&r) < 80) {
+      if (!executable || br_remaining(&r) < 76) {
         if (!executable) fprintf(stderr, "poly_ir_import: PROGRAM metadata is not package IR\n");
         if (srcs) free(srcs);
         goto fail_nodes;
@@ -1417,8 +1522,21 @@ static int poly_graph_import(const uint8_t *data, int len, PolyIrSpec *out, bool
         memcpy(name, strings[name_idx], name_len + 1);
         info->name = name;
       }
-      info->optimize = br_u8(&r) != 0;
+      uint32_t target_idx = br_u32(&r);
+      if (target_idx >= n_strings) {
+        if (srcs) free(srcs);
+        goto fail_nodes;
+      }
+      size_t target_len = strlen(strings[target_idx]);
+      char *target = poly_arena_alloc(ctx->arena, target_len + 1, 1);
+      if (!target) {
+        if (srcs) free(srcs);
+        goto fail_nodes;
+      }
+      memcpy(target, strings[target_idx], target_len + 1);
+      info->target = target;
       info->has_local_size = br_u8(&r) != 0;
+      (void)br_u8(&r);
       (void)br_u16(&r);
       for (int d = 0; d < 3; d++)
         info->global_size[d] = br_i32(&r);
@@ -1484,13 +1602,111 @@ static int poly_graph_import(const uint8_t *data, int len, PolyIrSpec *out, bool
       READ_PROGRAM_INT_ARRAY(outs, n_outs);
       READ_PROGRAM_INT_ARRAY(ins, n_ins);
 #undef READ_PROGRAM_INT_ARRAY
-      if (!br_prior_node_ref(&r, nodes, i, true, &info->estimates.ops) ||
-          !br_prior_node_ref(&r, nodes, i, true, &info->estimates.lds) ||
-          !br_prior_node_ref(&r, nodes, i, true, &info->estimates.mem)) {
+      arg.program_info = info;
+      break;
+    }
+    case POLY_ARG_KERNEL_INFO: {
+      if (br_remaining(&r) < 11) {
         if (srcs) free(srcs);
         goto fail_nodes;
       }
-      arg.program_info = info;
+      uint32_t name_idx = br_u32(&r);
+      if (name_idx >= n_strings) {
+        if (srcs) free(srcs);
+        goto fail_nodes;
+      }
+      kernel_info_tmp.name = strings[name_idx];
+      uint16_t n_axis_types = br_u16(&r);
+      if (br_remaining(&r) < n_axis_types) {
+        if (srcs) free(srcs);
+        goto fail_nodes;
+      }
+      if (n_axis_types > 0) {
+        kernel_axis_types_tmp =
+            malloc((size_t)n_axis_types * sizeof(*kernel_axis_types_tmp));
+        if (!kernel_axis_types_tmp) {
+          if (srcs) free(srcs);
+          goto fail_nodes;
+        }
+        for (int axis = 0; axis < n_axis_types; axis++)
+          kernel_axis_types_tmp[axis] = (PolyAxisType)br_u8(&r);
+      }
+      kernel_info_tmp.axis_types = kernel_axis_types_tmp;
+      kernel_info_tmp.n_axis_types = n_axis_types;
+      if (br_remaining(&r) < 5) {
+        free(kernel_axis_types_tmp);
+        if (srcs) free(srcs);
+        goto fail_nodes;
+      }
+      kernel_info_tmp.dont_use_locals = br_u8(&r) != 0;
+      uint32_t n_applied = br_u32(&r);
+      if (n_applied > INT_MAX) {
+        free(kernel_axis_types_tmp);
+        if (srcs) free(srcs);
+        goto fail_nodes;
+      }
+      kernel_applied_opts_tmp =
+          n_applied > 0 ? calloc((size_t)n_applied, sizeof(*kernel_applied_opts_tmp)) : NULL;
+      if (n_applied > 0 && !kernel_applied_opts_tmp) {
+        free(kernel_axis_types_tmp);
+        if (srcs) free(srcs);
+        goto fail_nodes;
+      }
+      for (uint32_t opt = 0; opt < n_applied; opt++) {
+        if (br_opt(&r, &kernel_applied_opts_tmp[opt])) continue;
+        free_opts(kernel_applied_opts_tmp, (int)n_applied);
+        free(kernel_axis_types_tmp);
+        if (srcs) free(srcs);
+        goto fail_nodes;
+      }
+      kernel_info_tmp.applied_opts = kernel_applied_opts_tmp;
+      kernel_info_tmp.n_applied_opts = (int)n_applied;
+      if (br_remaining(&r) < 5) {
+        free_opts(kernel_applied_opts_tmp, (int)n_applied);
+        free(kernel_axis_types_tmp);
+        if (srcs) free(srcs);
+        goto fail_nodes;
+      }
+      kernel_info_tmp.has_opts_to_apply = br_u8(&r) != 0;
+      uint32_t n_to_apply = br_u32(&r);
+      if (n_to_apply > INT_MAX || (!kernel_info_tmp.has_opts_to_apply && n_to_apply != 0)) {
+        free_opts(kernel_applied_opts_tmp, (int)n_applied);
+        free(kernel_axis_types_tmp);
+        if (srcs) free(srcs);
+        goto fail_nodes;
+      }
+      kernel_opts_to_apply_tmp =
+          n_to_apply > 0 ? calloc((size_t)n_to_apply, sizeof(*kernel_opts_to_apply_tmp)) : NULL;
+      if (n_to_apply > 0 && !kernel_opts_to_apply_tmp) {
+        free_opts(kernel_applied_opts_tmp, (int)n_applied);
+        free(kernel_axis_types_tmp);
+        if (srcs) free(srcs);
+        goto fail_nodes;
+      }
+      for (uint32_t opt = 0; opt < n_to_apply; opt++) {
+        if (br_opt(&r, &kernel_opts_to_apply_tmp[opt])) continue;
+        free_opts(kernel_opts_to_apply_tmp, (int)n_to_apply);
+        free_opts(kernel_applied_opts_tmp, (int)n_applied);
+        free(kernel_axis_types_tmp);
+        if (srcs) free(srcs);
+        goto fail_nodes;
+      }
+      kernel_info_tmp.opts_to_apply = kernel_opts_to_apply_tmp;
+      kernel_info_tmp.n_opts_to_apply = (int)n_to_apply;
+      if (!br_prior_node_ref(&r, nodes, i, true, &kernel_estimates_tmp.ops) ||
+          !br_prior_node_ref(&r, nodes, i, true, &kernel_estimates_tmp.lds) ||
+          !br_prior_node_ref(&r, nodes, i, true, &kernel_estimates_tmp.mem) ||
+          br_remaining(&r) < 4) {
+        free_opts(kernel_opts_to_apply_tmp, (int)n_to_apply);
+        free_opts(kernel_applied_opts_tmp, (int)n_applied);
+        free(kernel_axis_types_tmp);
+        if (srcs) free(srcs);
+        goto fail_nodes;
+      }
+      if (kernel_estimates_tmp.ops || kernel_estimates_tmp.lds || kernel_estimates_tmp.mem)
+        kernel_info_tmp.estimates = &kernel_estimates_tmp;
+      kernel_info_tmp.beam = br_i32(&r);
+      arg.kernel_info = &kernel_info_tmp;
       break;
     }
     case POLY_ARG_BYTES: {
@@ -1514,46 +1730,36 @@ static int poly_graph_import(const uint8_t *data, int len, PolyIrSpec *out, bool
       break;
     case POLY_ARG_PARAM: {
       param_arg_tmp.slot = br_i64(&r);
-      if (executable || version >= 7) {
-        uint8_t device_kind = br_u8(&r);
-        if (device_kind == 1) {
-          uint32_t device_idx = br_u32(&r);
-          param_arg_tmp.device = device_idx < n_strings ? strings[device_idx] : NULL;
-          if (!param_arg_tmp.device) {
-            if (srcs) free(srcs);
-            goto fail_nodes;
-          }
-        } else if (device_kind == 2) {
-          uint16_t count = br_u16(&r);
-          param_devices_tmp = count > 0 ? malloc((size_t)count * sizeof(*param_devices_tmp)) : NULL;
-          if (count > 0 && !param_devices_tmp) {
-            if (srcs) free(srcs);
-            goto fail_nodes;
-          }
-          for (int d = 0; d < count; d++) {
-            uint32_t device_idx = br_u32(&r);
-            if (device_idx >= n_strings) {
-              free(param_devices_tmp);
-              if (srcs) free(srcs);
-              goto fail_nodes;
-            }
-            param_devices_tmp[d] = strings[device_idx];
-          }
-          param_arg_tmp.devices = param_devices_tmp;
-          param_arg_tmp.n_devices = count;
-          param_arg_tmp.device_is_tuple = true;
-        } else if (device_kind != 0) {
+      uint8_t device_kind = br_u8(&r);
+      if (device_kind == 1) {
+        uint32_t device_idx = br_u32(&r);
+        param_arg_tmp.device = device_idx < n_strings ? strings[device_idx] : NULL;
+        if (!param_arg_tmp.device) {
           if (srcs) free(srcs);
           goto fail_nodes;
         }
-      } else if (version >= 5) {
-        uint32_t device_idx = br_u32(&r);
-        param_arg_tmp.device = device_idx < n_strings ? strings[device_idx] : NULL;
-      } else {
-        int32_t legacy_device = br_i32(&r);
-        param_arg_tmp.device = legacy_device > POLY_DEVICE_AUTO && legacy_device <= POLY_DEVICE_DISK
-                                   ? poly_device_name((PolyDevice)legacy_device)
-                                   : NULL;
+      } else if (device_kind == 2) {
+        uint16_t count = br_u16(&r);
+        param_devices_tmp = count > 0 ? malloc((size_t)count * sizeof(*param_devices_tmp)) : NULL;
+        if (count > 0 && !param_devices_tmp) {
+          if (srcs) free(srcs);
+          goto fail_nodes;
+        }
+        for (int d = 0; d < count; d++) {
+          uint32_t device_idx = br_u32(&r);
+          if (device_idx >= n_strings) {
+            free(param_devices_tmp);
+            if (srcs) free(srcs);
+            goto fail_nodes;
+          }
+          param_devices_tmp[d] = strings[device_idx];
+        }
+        param_arg_tmp.devices = param_devices_tmp;
+        param_arg_tmp.n_devices = count;
+        param_arg_tmp.device_is_tuple = true;
+      } else if (device_kind != 0) {
+        if (srcs) free(srcs);
+        goto fail_nodes;
       }
       param_arg_tmp.addrspace = (PolyAddrSpace)br_u8(&r);
       param_arg_tmp.has_axis = br_u8(&r) != 0;
@@ -1567,7 +1773,7 @@ static int poly_graph_import(const uint8_t *data, int len, PolyIrSpec *out, bool
       break;
     }
     case POLY_ARG_CALL_INFO: {
-      if ((!executable && version < 9) || br_remaining(&r) < 6) {
+      if (br_remaining(&r) < 6) {
         if (srcs) free(srcs);
         goto fail_nodes;
       }
@@ -1582,6 +1788,8 @@ static int poly_graph_import(const uint8_t *data, int len, PolyIrSpec *out, bool
       arg.call_info = &call_info_tmp;
       break;
     }
+    case POLY_ARG_DTYPE:
+      break;
     default:
       fprintf(stderr, "poly_ir_import: unknown arg kind %u at node %u\n", arg_kind, i);
       if (srcs) free(srcs);
@@ -1597,11 +1805,7 @@ static int poly_graph_import(const uint8_t *data, int len, PolyIrSpec *out, bool
 
     /* Create UOp -- restore tag to preserve BUFFER CSE-distinctness */
     PolyDType dtype = *dtype_table[dtype_idx];
-    if (dtype_count > 1) dtype = poly_dtype_vec(dtype, dtype_count);
-    if (dtype_is_ptr) {
-      dtype = poly_dtype_ptr(dtype, dtype_ptr_size, dtype_addrspace);
-      dtype.vcount = dtype_vcount;
-    }
+    if (arg.kind == POLY_ARG_DTYPE) arg.dtype = dtype;
     PolyUOp *u =
         (tag != 0 || tag_arg.kind != POLY_ARG_NONE)
             ? poly_uop_tagged_arg(ctx, (PolyOps)op_val, dtype, srcs, n_src, arg, tag, tag_arg)
@@ -1612,16 +1816,20 @@ static int poly_graph_import(const uint8_t *data, int len, PolyIrSpec *out, bool
       free(arg.int_tuple.vals);
     else if (arg.kind == POLY_ARG_BIGINT && arg.bigint.limbs)
       free((void *)arg.bigint.limbs);
-    else if (arg.kind == POLY_ARG_PAIR_TUPLE && arg.pair_tuple.pairs)
-      free(arg.pair_tuple.pairs);
-    else if (arg.kind == POLY_ARG_REDUCE_AXIS && arg.reduce_axis.axes)
-      free(arg.reduce_axis.axes);
     else if (arg.kind == POLY_ARG_RANGE && arg.range.extra)
       free(arg.range.extra);
     else if (arg.kind == POLY_ARG_STRING_TUPLE && arg.string_tuple.vals)
       free((void *)arg.string_tuple.vals);
+    else if (arg.kind == POLY_ARG_TENSOR_CORE)
+      for (int d = 0; d < 3; d++) free(wmma_upcast_axes_tmp[d]);
+    else if (arg.kind == POLY_ARG_KERNEL_INFO) {
+      free_opts(kernel_opts_to_apply_tmp, kernel_info_tmp.n_opts_to_apply);
+      free_opts(kernel_applied_opts_tmp, kernel_info_tmp.n_applied_opts);
+      free(kernel_axis_types_tmp);
+    }
     if (tag_arg.kind == POLY_ARG_INT_TUPLE && tag_arg.int_tuple.vals) free(tag_arg.int_tuple.vals);
     if (bufferize_devices_tmp) free(bufferize_devices_tmp);
+    if (allreduce_devices_tmp) free(allreduce_devices_tmp);
     if (param_devices_tmp) free(param_devices_tmp);
 
     if (tag > 0) poly_ctx_reserve_buf_tag(ctx, tag);
@@ -1675,45 +1883,43 @@ static int poly_graph_import(const uint8_t *data, int len, PolyIrSpec *out, bool
     out->entrypoints[i].name = (name_idx < n_strings) ? strdup(strings[name_idx]) : strdup("");
     out->entrypoints[i].sink = (node_idx < n_nodes) ? nodes[node_idx] : NULL;
 
-    if (executable || version >= 2) {
-      if (br_remaining(&r) < 12) goto fail_ep;
-      out->entrypoints[i].flags = br_u32(&r);
-      uint16_t n_inputs = br_u16(&r);
-      uint16_t n_outputs = br_u16(&r);
-      uint32_t objective_idx = br_u32(&r);
-      out->entrypoints[i].n_inputs = n_inputs;
-      out->entrypoints[i].n_outputs = n_outputs;
-      if (objective_idx != UINT32_MAX) {
-        if (executable && objective_idx >= n_strings) goto fail_ep;
-        out->entrypoints[i].objective =
-            (objective_idx < n_strings) ? strdup(strings[objective_idx]) : strdup("");
+    if (br_remaining(&r) < 12) goto fail_ep;
+    out->entrypoints[i].flags = br_u32(&r);
+    uint16_t n_inputs = br_u16(&r);
+    uint16_t n_outputs = br_u16(&r);
+    uint32_t objective_idx = br_u32(&r);
+    out->entrypoints[i].n_inputs = n_inputs;
+    out->entrypoints[i].n_outputs = n_outputs;
+    if (objective_idx != UINT32_MAX) {
+      if (executable && objective_idx >= n_strings) goto fail_ep;
+      out->entrypoints[i].objective =
+          (objective_idx < n_strings) ? strdup(strings[objective_idx]) : strdup("");
+    }
+    if (n_inputs > 0) {
+      char **inputs = calloc(n_inputs, sizeof(char *));
+      if (!inputs) goto fail_ep;
+      out->entrypoints[i].inputs = (const char **)inputs;
+      for (uint16_t j = 0; j < n_inputs; j++) {
+        if (br_remaining(&r) < 4) goto fail_ep;
+        uint32_t idx = br_u32(&r);
+        if (executable && idx >= n_strings) goto fail_ep;
+        inputs[j] = (idx < n_strings) ? strdup(strings[idx]) : strdup("");
       }
-      if (n_inputs > 0) {
-        char **inputs = calloc(n_inputs, sizeof(char *));
-        if (!inputs) goto fail_ep;
-        out->entrypoints[i].inputs = (const char **)inputs;
-        for (uint16_t j = 0; j < n_inputs; j++) {
-          if (br_remaining(&r) < 4) goto fail_ep;
-          uint32_t idx = br_u32(&r);
-          if (executable && idx >= n_strings) goto fail_ep;
-          inputs[j] = (idx < n_strings) ? strdup(strings[idx]) : strdup("");
-        }
-      }
-      if (n_outputs > 0) {
-        char **outputs = calloc(n_outputs, sizeof(char *));
-        if (!outputs) goto fail_ep;
-        out->entrypoints[i].outputs = (const char **)outputs;
-        for (uint16_t j = 0; j < n_outputs; j++) {
-          if (br_remaining(&r) < 4) goto fail_ep;
-          uint32_t idx = br_u32(&r);
-          if (executable && idx >= n_strings) goto fail_ep;
-          outputs[j] = (idx < n_strings) ? strdup(strings[idx]) : strdup("");
-        }
+    }
+    if (n_outputs > 0) {
+      char **outputs = calloc(n_outputs, sizeof(char *));
+      if (!outputs) goto fail_ep;
+      out->entrypoints[i].outputs = (const char **)outputs;
+      for (uint16_t j = 0; j < n_outputs; j++) {
+        if (br_remaining(&r) < 4) goto fail_ep;
+        uint32_t idx = br_u32(&r);
+        if (executable && idx >= n_strings) goto fail_ep;
+        outputs[j] = (idx < n_strings) ? strdup(strings[idx]) : strdup("");
       }
     }
   }
 
-  /* Exact logical placement modules (v10+). */
+  /* Exact logical placement modules. */
   out->n_modules = (int)n_modules;
   out->modules = calloc(n_modules, sizeof(PolyIrModule));
   if (n_modules > 0 && !out->modules) goto fail_modules;

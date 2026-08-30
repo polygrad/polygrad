@@ -3,7 +3,7 @@
   "reference": {
     "project": "tinygrad",
     "root": "references/tinygrad_latest",
-    "commit": "ba1d3baae81c96b3ed72900cde87bb307933c61f"
+    "commit": "a9069c177a9da9cca18593edf55acd2e6073cca6"
   },
   "policy": {
     "accepted_status": "approved",
@@ -26,6 +26,7 @@
       "status": "approved",
       "stages": ["logical", "placement", "instance", "export"],
       "area": "retained logical and explicit placement capability",
+      "vocabulary": {"tinygrad_only": [], "polygrad_only": ["DEVICE", "UNIQUE"]},
       "tinygrad": "Tensor owns one mutable, deviceful Tensor.uop",
       "polygrad": "Default uop_physical is eagerly constructed in C and must match tinygrad Tensor.uop; Polygrad may additionally retain a deviceless logical graph and physical template for Instance, export, and explicit place outside default realization",
       "rationale": "Portable logical retention, export, explicit placement, and PolyInstance capture are approved Polygrad superset capabilities; default physical construction and execution are parity surfaces.",
@@ -109,7 +110,7 @@
       "approval": "documented backend divergence",
       "evidence": [
         "ARCHITECTURE.md:Renderers And Codegen",
-        "src/render_wgsl.c"
+        "src/renderer/wgsl.c"
       ],
       "close_when": "Re-evaluate when the pinned tinygrad behavior changes."
     },
@@ -153,61 +154,75 @@
     },
     {
       "id": "PG-PARITY-002",
-      "status": "open_debt",
+      "status": "resolved",
       "stages": ["tensor", "scheduler", "lowered"],
       "area": "symbolic variable representation",
       "vocabulary": {"tinygrad_only": [], "polygrad_only": ["DEFINE_VAR"]},
       "tinygrad": "Variables are PARAM(STACK(), ParamArg(slot=-1, name, vmin_vmax, AddrSpace.ALU))",
-      "polygrad": "DEFINE_VAR and BIND remain first-class vocabulary through multiple stages",
+      "polygrad": "Variables use BUFFER/PARAM with ParamArg AddrSpace.ALU; binding uses AFTER(variable, STORE(variable, value))",
       "rationale": "This is shared IR vocabulary debt, not an approved divergence.",
       "approval": null,
       "evidence": [
         "references/tinygrad_latest/tinygrad/uop/ops.py",
-        "src/polygrad.h:POLY_OP_DEFINE_VAR"
+        "src/uop/ops.c:poly_uop_variable",
+        "test/test_sym.c:variable_and_bind_use_current_alu_storage_topology",
+        "temp/reference_upgrade_20260824_symbolic_param_correspondence.md"
       ],
-      "close_when": "The migrated stage-scoped subset uses pinned PARAM/ParamArg/AddrSpace.ALU topology."
+      "resolution": {
+        "evidence": "Removed DEFINE_VAR/BIND and their argument carrier from the C IR, serialization, symbolic passes, scheduler, rangeify, renderers, and tests. Exact symbolic, callify, runtime scalar, and JIT regressions use current BUFFER/PARAM/AFTER+STORE topology.",
+        "closed_on": "2026-08-24"
+      }
     },
     {
       "id": "PG-PARITY-003",
-      "status": "open_debt",
+      "status": "resolved",
       "stages": ["scheduler", "lowered"],
       "area": "local and register staging",
       "vocabulary": {"tinygrad_only": [], "polygrad_only": ["DEFINE_LOCAL", "DEFINE_REG"]},
-      "tinygrad": "STAGE plus address-space metadata represents staged storage",
-      "polygrad": "DEFINE_LOCAL and DEFINE_REG remain alongside partial STAGE support",
-      "rationale": "Legacy lowering vocabulary must migrate stage by stage.",
+      "tinygrad": "BUFFER with ParamArg addrspace REG or LOCAL represents compiler storage",
+      "polygrad": "BUFFER with ParamArg addrspace REG or LOCAL represents compiler storage",
+      "rationale": "Historical vocabulary debt is closed; resolved rows preserve the audit trail.",
       "approval": null,
       "evidence": [
-        "references/tinygrad_latest/tinygrad/uop/__init__.py:Ops.STAGE",
-        "src/polygrad.h:POLY_OP_DEFINE_LOCAL",
-        "src/polygrad.h:POLY_OP_DEFINE_REG"
+        "references/tinygrad_latest/tinygrad/uop/spec.py",
+        "temp/reference_upgrade_20260824_reduce_accumulator_tg_probe.log",
+        "temp/reference_upgrade_20260823/final_codegen_rules_tg_probe.log",
+        "test/test_codegen.c:renderers_size_register_buffer_from_casted_shape_const"
       ],
-      "close_when": "Reachable lowering uses STAGE with the pinned address-space spelling and legacy ops leave the gated stages."
+      "resolution": {
+        "evidence": "Removed DEFINE_LOCAL/DEFINE_REG from the C op enum, renderers, interpreter, compiler helpers, and tests; current BUFFER(REG/LOCAL) remains.",
+        "closed_on": "2026-08-26"
+      }
     },
     {
       "id": "PG-PARITY-004",
-      "status": "open_debt",
+      "status": "resolved",
       "stages": ["tensor", "scheduler", "lowered"],
       "area": "vector constants",
       "vocabulary": {"tinygrad_only": [], "polygrad_only": ["VCONST"]},
       "tinygrad": "Vector constants are STACKs of scalar CONST sources",
-      "polygrad": "VCONST is a separate UOp",
+      "polygrad": "Vector constants use STACKs of scalar CONST sources",
       "rationale": "This is shared IR topology debt.",
       "approval": null,
       "evidence": [
         "references/tinygrad_latest/tinygrad/uop/__init__.py",
-        "src/polygrad.h:POLY_OP_VCONST"
+        "src/uop/upat.c:poly_upat_cvar",
+        "test/test_pat.c:match_cvar",
+        "temp/reference_upgrade_20260824/tg_current_lane_vocabulary_probe.log"
       ],
-      "close_when": "The gated stages emit STACK-of-CONST topology and no reachable VCONST."
+      "resolution": {
+        "evidence": "Removed VCONST from the C IR, symbolic passes, placement, Instance validation, codegen, renderers, and tests; current vector constants use STACK(CONST, ...).",
+        "closed_on": "2026-08-24"
+      }
     },
     {
       "id": "PG-PARITY-005",
       "status": "open_debt",
       "stages": ["tensor", "schedule", "runtime"],
       "area": "storage slices",
-      "vocabulary": {"tinygrad_only": ["SLICE"], "polygrad_only": ["BUFFER_VIEW"]},
-      "tinygrad": "SLICE is the storage-view identity",
-      "polygrad": "BUFFER_VIEW is the current storage-view identity and SLICE is absent",
+      "vocabulary": {"tinygrad_only": [], "polygrad_only": ["BUFFER_VIEW"]},
+      "tinygrad": "Current storage views are Buffer base/offset state derived from contiguous_view; Ops.SLICE was removed",
+      "polygrad": "BUFFER_VIEW remains as a storage-view UOp identity",
       "rationale": "This is shared storage/view vocabulary debt; it is not the approved deviceless logical graph divergence.",
       "approval": null,
       "evidence": [
@@ -219,20 +234,25 @@
     },
     {
       "id": "PG-PARITY-006",
-      "status": "open_debt",
+      "status": "resolved",
       "stages": ["raw_import"],
       "area": "legacy reduction spelling",
       "vocabulary": {"tinygrad_only": [], "polygrad_only": ["REDUCE_AXIS"]},
       "tinygrad": "Tensor graphs use REDUCE with axes encoded in the UOp argument",
-      "polygrad": "Normal Tensor construction now matches REDUCE; REDUCE_AXIS remains only for legacy raw/import compatibility while that migration is incomplete",
+      "polygrad": "All reduction construction and import use REDUCE with (op, num_axes); REDUCE_AXIS is deleted",
       "rationale": "The extra enum is not an approved permanent shared-IR divergence.",
       "approval": null,
       "evidence": [
         "references/tinygrad_latest/tinygrad/uop/ops.py",
-        "src/polygrad.h:POLY_OP_REDUCE_AXIS",
-        "src/shape.c:poly_reduce_axis"
+        "src/shape.c:poly_reduce_axis",
+        "test/test_shape.c:shape.reduce",
+        "test/test_uop.c:print_preserves_pair_and_reduce_args"
       ],
-      "close_when": "Legacy raw/import construction is migrated to the default physical Tensor lifecycle and REDUCE_AXIS is removed from the runtime vocabulary."
+      "resolution": {
+        "evidence": "REDUCE_AXIS and its separate argument carrier were removed from enum, UOp identity, shape inference, symbolic ordering, rendering, IR, realization, and tests; current REDUCE topology gates pass.",
+        "closed_on": "2026-08-26"
+      },
+      "close_when": null
     },
     {
       "id": "PG-PARITY-007",
@@ -372,49 +392,56 @@
     },
     {
       "id": "PG-PARITY-015",
-      "status": "open_debt",
+      "status": "resolved",
       "stages": ["tensor", "autograd", "placement", "rangeify", "realize"],
       "area": "assignment IR spelling",
       "vocabulary": {"tinygrad_only": [], "polygrad_only": ["ASSIGN"]},
       "tinygrad": "Assignment is AFTER(target, STORE(target, value)); current Ops has no ASSIGN member",
-      "polygrad": "Public Tensor.assign and current optimizers build AFTER/STORE, but raw/imported UOps can still carry POLY_OP_ASSIGN and core handlers preserve it across autograd, placement, rangeify, and realization",
+      "polygrad": "All assignment construction uses AFTER(target, STORE(target, value)); ASSIGN is deleted",
       "rationale": "Two live spellings for the same mutation semantics prevent exact graph parity and make the moved/view mutation gate ambiguous.",
       "approval": null,
       "evidence": [
         "references/tinygrad_latest/tinygrad/tensor.py:Tensor.assign",
         "references/tinygrad_latest/tinygrad/uop/__init__.py:Ops",
-        "src/ir.c:poly_ir_import",
-        "src/polygrad.h:poly_uop",
-        "src/schedule/rangeify.c"
+        "src/polygrad.h:PolyOps",
+        "test/test_rangeify.c:realize_assign_src_copy_unrealized",
+        "test/test_rangeify.c:realize_assign_src_war_forces_realize"
       ],
-      "close_when": "Every reachable assignment boundary uses pinned AFTER/STORE topology and POLY_OP_ASSIGN is absent from the gated stages or deleted."
+      "resolution": {
+        "evidence": "ASSIGN was removed from shared IR, autograd, placement, rangeify, realization, serialization, and raw tests; mutation gates use AFTER/STORE.",
+        "closed_on": "2026-08-26"
+      },
+      "close_when": null
     },
     {
       "id": "PG-PARITY-016",
-      "status": "pending_evidence",
+      "status": "resolved",
       "stages": ["ir", "rangeify", "schedule"],
       "area": "ENCDEC vocabulary",
       "vocabulary": {"tinygrad_only": [], "polygrad_only": ["ENCDEC"]},
       "tinygrad": "Current Ops has no ENCDEC member",
-      "polygrad": "POLY_OP_ENCDEC remains in the op vocabulary and rangeify/schedule guards, but no constructor is currently proven reachable",
+      "polygrad": "ENCDEC is absent from the op vocabulary and compiler paths",
       "rationale": "Near-dead vocabulary must be proved unreachable and removed or registered as an approved product boundary; silence is not parity.",
       "approval": null,
       "evidence": [
         "references/tinygrad_latest/tinygrad/uop/__init__.py:Ops",
-        "src/polygrad.h:POLY_OP_ENCDEC",
-        "src/schedule/rangeify.c",
-        "src/engine/schedule.c"
+        "src/polygrad.h:PolyOps",
+        "test/op_vocabulary_census.py"
       ],
-      "close_when": "A reachable-stage census proves no constructor/import path and ENCDEC is deleted, or exact source/probe evidence establishes a separately approved boundary."
+      "resolution": {
+        "evidence": "ENCDEC and its rangeify/schedule guards were deleted; the runtime op census no longer reports it.",
+        "closed_on": "2026-08-26"
+      },
+      "close_when": null
     },
     {
       "id": "PG-PARITY-017",
-      "status": "open_debt",
+      "status": "resolved",
       "stages": ["ir", "raw-uop"],
       "area": "invalid op sentinel exposure",
       "vocabulary": {"tinygrad_only": [], "polygrad_only": ["INVALID"]},
       "tinygrad": "Current Ops has no INVALID member and cannot construct or import it as a UOp",
-      "polygrad": "POLY_OP_INVALID is reported by poly_op_count/poly_op_name and op value 0 passes the binary IR import range check into generic UOp construction",
+      "polygrad": "Enum slot zero has no public name and PGIR rejects it before UOp construction",
       "rationale": "An internal sentinel must not be accepted as public graph vocabulary.",
       "approval": null,
       "evidence": [
@@ -422,9 +449,14 @@
         "src/polygrad.h:PolyOps",
         "src/ops.c:poly_op_name",
         "src/ir.c:poly_ir_import",
-        "temp/op_vocabulary_probe_20260726.json"
+        "test/test_uop.c:ops.op_name",
+        "test/test_ir.c:ir.import_rejects_zero_op_slot"
       ],
-      "close_when": "INVALID is excluded from the public/executable/importable op surface and malformed raw/imported INVALID nodes fail loudly."
+      "resolution": {
+        "evidence": "poly_op_name(0) returns no public op and current-version PGIR with op zero is rejected before construction.",
+        "closed_on": "2026-08-26"
+      },
+      "close_when": null
     },
     {
       "id": "PG-PARITY-018",
@@ -547,11 +579,28 @@
         "references/tinygrad_latest/tinygrad/codegen/late/linearizer.py:pm_add_control_flow",
         "references/tinygrad_latest/tinygrad/uop/ops.py:UOp.replace",
         "src/polygrad.h:PolyUOp",
-        "src/render_c.c:poly_apply_control_flow",
+        "src/codegen/late/linearizer.c:poly_apply_control_flow",
         "test/test_future_passes.c:control_flow_fails_cleanly_at_uop_arity_ceiling",
         "temp/tg_control_flow_max_range_probe_20260809.py"
       ],
       "close_when": "A separately approved arity representation migration carries every UOp/CSE/IR/ABI consumer beyond uint16 and the 65,536-source result matches pinned tinygrad, or the accepted public graph contract explicitly rejects the input before construction."
+    },
+    {
+      "id": "PG-PARITY-024",
+      "status": "open_debt",
+      "stages": ["pattern", "spec"],
+      "area": "pattern literal vocabulary",
+      "vocabulary": {"tinygrad_only": ["PYLITERAL"], "polygrad_only": []},
+      "tinygrad": "PYLITERAL carries immutable Python literals used by compiled UPat CUSTOM predicates",
+      "polygrad": "The C pattern compiler has no PYLITERAL UOp or equivalent current compiled-UPat topology",
+      "rationale": "This is August pattern/compiler vocabulary debt, not an approved semantic divergence.",
+      "approval": null,
+      "evidence": [
+        "references/tinygrad_latest/tinygrad/uop/__init__.py:Ops.PYLITERAL",
+        "references/tinygrad_latest/tinygrad/uop/upat.py",
+        "references/tinygrad_latest/tinygrad/uop/spec.py"
+      ],
+      "close_when": "The dependency-closed UPat/SPEC migration either ports PYLITERAL with exact compiled-pattern topology or proves the C representation uses the same semantics without exposing a different shared UOp vocabulary."
     }
   ]
 }

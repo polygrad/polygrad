@@ -1,38 +1,47 @@
 /*
  * dtype.c — DType system
  *
- * Mirrors tinygrad's dtype.py: predefined scalar types, vectorization,
- * pointer types, type classification helpers.
+ * Mirrors current tinygrad dtype.py scalar DTypes. Shape and storage metadata
+ * belong to UOps and ParamArg.
  */
 
 #include "polygrad.h"
+#include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* Predefined scalar dtypes */
-/* priority, bitsize, name, fmt, count, is_ptr, addrspace, vcount, ptr_size */
+/* priority, bitsize, name, fmt */
 
-const PolyDType POLY_VOID = {-1, 0, "void", 0, 1, false, 0, 0, 0};
-const PolyDType POLY_INDEX = {0, 800, "weakint", 0, 1, false, 0, 0, 0};
-const PolyDType POLY_BOOL = {0, 1, "bool", '?', 1, false, 0, 0, 0};
-const PolyDType POLY_INT8 = {1, 8, "signed char", 'b', 1, false, 0, 0, 0};
-const PolyDType POLY_UINT8 = {2, 8, "unsigned char", 'B', 1, false, 0, 0, 0};
-const PolyDType POLY_INT16 = {3, 16, "short", 'h', 1, false, 0, 0, 0};
-const PolyDType POLY_UINT16 = {4, 16, "unsigned short", 'H', 1, false, 0, 0, 0};
-const PolyDType POLY_INT32 = {5, 32, "int", 'i', 1, false, 0, 0, 0};
-const PolyDType POLY_UINT32 = {6, 32, "unsigned int", 'I', 1, false, 0, 0, 0};
-const PolyDType POLY_INT64 = {7, 64, "long", 'q', 1, false, 0, 0, 0};
-const PolyDType POLY_UINT64 = {8, 64, "unsigned long", 'Q', 1, false, 0, 0, 0};
-const PolyDType POLY_FLOAT16 = {11, 16, "__fp16", 'e', 1, false, 0, 0, 0};
-const PolyDType POLY_BFLOAT16 = {12, 16, "__bf16", 0, 1, false, 0, 0, 0};
-const PolyDType POLY_FLOAT32 = {13, 32, "float", 'f', 1, false, 0, 0, 0};
-const PolyDType POLY_FLOAT64 = {14, 64, "double", 'd', 1, false, 0, 0, 0};
+const PolyDType POLY_VOID = {-1, 0, "void", 0};
+const PolyDType POLY_WEAKINT = {0, 800, "weakint", 0};
+const PolyDType POLY_BOOL = {0, 1, "bool", '?'};
+const PolyDType POLY_INT8 = {1, 8, "signed char", 'b'};
+const PolyDType POLY_UINT8 = {2, 8, "unsigned char", 'B'};
+const PolyDType POLY_INT16 = {3, 16, "short", 'h'};
+const PolyDType POLY_UINT16 = {4, 16, "unsigned short", 'H'};
+const PolyDType POLY_INT32 = {5, 32, "int", 'i'};
+const PolyDType POLY_UINT32 = {6, 32, "unsigned int", 'I'};
+const PolyDType POLY_INT64 = {7, 64, "long", 'q'};
+const PolyDType POLY_UINT64 = {8, 64, "unsigned long", 'Q'};
+const PolyDType POLY_WEAKFLOAT = {9, 800, "weakfloat", 0};
+const PolyDType POLY_FP8E4M3 = {10, 8, "float8_e4m3", 0};
+const PolyDType POLY_FP8E5M2 = {11, 8, "float8_e5m2", 0};
+const PolyDType POLY_FP8E4M3FNUZ = {10, 8, "float8_e4m3fnuz", 0};
+const PolyDType POLY_FP8E5M2FNUZ = {11, 8, "float8_e5m2fnuz", 0};
+const PolyDType POLY_FLOAT16 = {12, 16, "__fp16", 'e'};
+const PolyDType POLY_BFLOAT16 = {13, 16, "__bf16", 0};
+const PolyDType POLY_FLOAT32 = {14, 32, "float", 'f'};
+const PolyDType POLY_FLOAT64 = {15, 64, "double", 'd'};
 
 /* FFI-friendly dtype lookup: id -> PolyDType. The id ordering matches the
  * _DTYPE_IDS dict in py/polygrad/_ffi.py and js/src/ffi.js. */
 static const PolyDType *_dtype_table[] = {
     &POLY_VOID,    &POLY_BOOL,     &POLY_INT8,    &POLY_UINT8,   &POLY_INT16,
     &POLY_UINT16,  &POLY_INT32,    &POLY_UINT32,  &POLY_INT64,   &POLY_UINT64,
-    &POLY_FLOAT16, &POLY_BFLOAT16, &POLY_FLOAT32, &POLY_FLOAT64, &POLY_INDEX,
+    &POLY_FLOAT16, &POLY_BFLOAT16, &POLY_FLOAT32, &POLY_FLOAT64, &POLY_WEAKINT,
+    &POLY_WEAKFLOAT, &POLY_FP8E4M3, &POLY_FP8E5M2, &POLY_FP8E4M3FNUZ,
+    &POLY_FP8E5M2FNUZ,
 };
 #define N_DTYPE_TABLE ((int)(sizeof(_dtype_table) / sizeof(_dtype_table[0])))
 
@@ -63,80 +72,90 @@ int poly_dtype_id_by_name(const char *name) {
   if (strcmp(name, "float32") == 0 || strcmp(name, "float") == 0) return 12;
   if (strcmp(name, "float64") == 0 || strcmp(name, "double") == 0) return 13;
   if (strcmp(name, "weakint") == 0) return 14;
+  if (strcmp(name, "weakfloat") == 0) return 15;
+  if (strcmp(name, "fp8e4m3") == 0 || strcmp(name, "float8_e4m3") == 0) return 16;
+  if (strcmp(name, "fp8e5m2") == 0 || strcmp(name, "float8_e5m2") == 0) return 17;
+  if (strcmp(name, "fp8e4m3fnuz") == 0 || strcmp(name, "float8_e4m3fnuz") == 0)
+    return 18;
+  if (strcmp(name, "fp8e5m2fnuz") == 0 || strcmp(name, "float8_e5m2fnuz") == 0)
+    return 19;
   return -1;
 }
 
 bool poly_dtype_eq(PolyDType a, PolyDType b) {
-  return a.priority == b.priority && a.bitsize == b.bitsize && a.count == b.count &&
-         a.is_ptr == b.is_ptr && a.addrspace == b.addrspace && a.vcount == b.vcount &&
-         a.ptr_size == b.ptr_size &&
+  return a.priority == b.priority && a.bitsize == b.bitsize &&
          (a.name == b.name || (a.name && b.name && strcmp(a.name, b.name) == 0));
 }
 
 static bool dtype_is_weakint_like(PolyDType dt) {
-  if (dt.is_ptr || !dt.name || dt.priority != POLY_INDEX.priority) return false;
-  return strcmp(dt.name, POLY_INDEX.name) == 0;
+  if (!dt.name || dt.priority != POLY_WEAKINT.priority) return false;
+  return strcmp(dt.name, POLY_WEAKINT.name) == 0;
+}
+
+static bool dtype_is_weakfloat_like(PolyDType dt) {
+  if (!dt.name || dt.priority != POLY_WEAKFLOAT.priority) return false;
+  return strcmp(dt.name, POLY_WEAKFLOAT.name) == 0;
 }
 
 bool poly_dtype_is_float(PolyDType dt) {
-  PolyDType s = poly_dtype_scalar(dt);
-  return s.priority >= 9 && s.priority <= 14; /* fp8 through float64 */
+  return dtype_is_weakfloat_like(dt) || poly_dtype_eq(dt, POLY_FP8E4M3) ||
+         poly_dtype_eq(dt, POLY_FP8E5M2) || poly_dtype_eq(dt, POLY_FP8E4M3FNUZ) ||
+         poly_dtype_eq(dt, POLY_FP8E5M2FNUZ) ||
+         (dt.priority >= POLY_FLOAT16.priority && dt.priority <= POLY_FLOAT64.priority);
+}
+
+bool poly_dtype_is_fp8(PolyDType dt) {
+  return poly_dtype_eq(dt, POLY_FP8E4M3) || poly_dtype_eq(dt, POLY_FP8E5M2) ||
+         poly_dtype_eq(dt, POLY_FP8E4M3FNUZ) || poly_dtype_eq(dt, POLY_FP8E5M2FNUZ);
+}
+
+bool poly_dtype_is_fp8_fnuz(PolyDType dt) {
+  return poly_dtype_eq(dt, POLY_FP8E4M3FNUZ) || poly_dtype_eq(dt, POLY_FP8E5M2FNUZ);
 }
 
 bool poly_dtype_is_index(PolyDType dt) {
-  /* tinygrad dtypes are interned, so `dtype.scalar() is dtypes.weakint`
-   * recognizes all weak-index vector/scalar forms. Polygrad stores dtypes as
-   * value structs, and some late index rewrites can carry a weakint name with
-   * non-canonical bit metadata. Treat the weakint name+priority as the stable
-   * identity and lower it before rendering, matching tinygrad's
-   * pm_lower_index_dtype boundary. */
-  return dtype_is_weakint_like(poly_dtype_scalar(dt));
+  /* Polygrad stores DTypes by value, so non-canonical weak metadata can reach
+   * the current pm_lower_index_dtype boundary. Name and priority identify it. */
+  return dtype_is_weakint_like(dt);
+}
+
+bool poly_dtype_is_weak(PolyDType dt) {
+  return dtype_is_weakint_like(dt) || dtype_is_weakfloat_like(dt);
 }
 
 bool poly_dtype_is_int(PolyDType dt) {
-  PolyDType s = poly_dtype_scalar(dt);
-  return (s.priority >= 1 && s.priority <= 8) || poly_dtype_is_index(s);
+  return (dt.priority >= 1 && dt.priority <= 8) || poly_dtype_is_index(dt);
 }
 
 bool poly_dtype_is_unsigned(PolyDType dt) {
-  PolyDType s = poly_dtype_scalar(dt);
-  return s.priority == 2 || s.priority == 4 || s.priority == 6 || s.priority == 8;
+  return dt.priority == 2 || dt.priority == 4 || dt.priority == 6 || dt.priority == 8;
 }
 
 bool poly_dtype_is_bool(PolyDType dt) {
-  PolyDType s = poly_dtype_scalar(dt);
-  return s.priority == 0 && s.bitsize == 1;
+  return dt.priority == 0 && dt.bitsize == 1;
 }
 
-PolyDType poly_dtype_scalar(PolyDType dt) {
-  if (dtype_is_weakint_like(dt)) return POLY_INDEX;
-  if (dt.count == 1) return dt;
-  /* Match tinygrad DType.scalar(): vector dtypes return the canonical scalar
-   * dtype, including its fmt field. */
-  PolyDType s = dt;
-  s.count = 1;
-  s.bitsize = dt.bitsize / dt.count;
-  if (dtype_is_weakint_like(s)) return POLY_INDEX;
-  if (!s.is_ptr) {
-    for (int i = 0; i < N_DTYPE_TABLE; i++) {
-      const PolyDType *canon = _dtype_table[i];
-      if (canon->priority == s.priority && canon->bitsize == s.bitsize && canon->count == 1 &&
-          canon->name && s.name && strcmp(canon->name, s.name) == 0)
-        return *canon;
-    }
-  }
-  return s;
+/* Current tinygrad dtype.py:165-168. Weak values have a kind but no storage
+ * width; these helpers commit them only at an explicit storage/consumer
+ * boundary and derive the weak kind used by scalar promotion. */
+PolyDType poly_dtype_strong(PolyDType dt) {
+  if (dtype_is_weakint_like(dt)) return POLY_INT32;
+  if (dtype_is_weakfloat_like(dt)) return POLY_FLOAT32;
+  return dt;
+}
+
+PolyDType poly_dtype_weak(PolyDType dt) {
+  if (poly_dtype_is_float(dt)) return POLY_WEAKFLOAT;
+  if (poly_dtype_is_int(dt)) return POLY_WEAKINT;
+  return dt;
 }
 
 /*
- * Pinned tinygrad dtype.py:235-249 defines the JAX-style promotion lattice
- * and least_upper_dtype over scalar dtypes. Polygrad does not yet expose fp8,
- * so this is the exact induced subgraph over its supported scalar vocabulary.
+ * Current tinygrad dtype.py:171-188 defines the JAX-style promotion lattice
+ * and least_upper_dtype over scalar dtypes.
  */
 bool poly_dtype_least_upper(PolyDType a, PolyDType b, PolyDType *out) {
-  if (!out || a.is_ptr || b.is_ptr) return false;
-  a = poly_dtype_scalar(a);
-  b = poly_dtype_scalar(b);
+  if (!out) return false;
   if (poly_dtype_eq(a, b)) {
     *out = a;
     return true;
@@ -153,6 +172,11 @@ bool poly_dtype_least_upper(PolyDType a, PolyDType b, PolyDType *out) {
     PROMO_UINT32,
     PROMO_INT64,
     PROMO_UINT64,
+    PROMO_WEAKFLOAT,
+    PROMO_FP8E4M3,
+    PROMO_FP8E5M2,
+    PROMO_FP8E4M3FNUZ,
+    PROMO_FP8E5M2FNUZ,
     PROMO_FLOAT16,
     PROMO_BFLOAT16,
     PROMO_FLOAT32,
@@ -160,11 +184,13 @@ bool poly_dtype_least_upper(PolyDType a, PolyDType b, PolyDType *out) {
     PROMO_COUNT,
   };
   static const PolyDType *const types[PROMO_COUNT] = {
-      &POLY_BOOL,    &POLY_INDEX,    &POLY_INT8,    &POLY_UINT8,   &POLY_INT16,
+      &POLY_BOOL,    &POLY_WEAKINT,    &POLY_INT8,    &POLY_UINT8,   &POLY_INT16,
       &POLY_UINT16,  &POLY_INT32,    &POLY_UINT32,  &POLY_INT64,   &POLY_UINT64,
-      &POLY_FLOAT16, &POLY_BFLOAT16, &POLY_FLOAT32, &POLY_FLOAT64,
+      &POLY_WEAKFLOAT, &POLY_FP8E4M3, &POLY_FP8E5M2, &POLY_FP8E4M3FNUZ,
+      &POLY_FP8E5M2FNUZ, &POLY_FLOAT16, &POLY_BFLOAT16, &POLY_FLOAT32,
+      &POLY_FLOAT64,
   };
-  static const uint16_t parents[PROMO_COUNT] = {
+  static const uint32_t parents[PROMO_COUNT] = {
       [PROMO_BOOL] = 1u << PROMO_WEAKINT,
       [PROMO_WEAKINT] = (1u << PROMO_INT8) | (1u << PROMO_UINT8),
       [PROMO_INT8] = 1u << PROMO_INT16,
@@ -173,8 +199,14 @@ bool poly_dtype_least_upper(PolyDType a, PolyDType b, PolyDType *out) {
       [PROMO_UINT16] = (1u << PROMO_INT32) | (1u << PROMO_UINT32),
       [PROMO_INT32] = 1u << PROMO_INT64,
       [PROMO_UINT32] = (1u << PROMO_INT64) | (1u << PROMO_UINT64),
-      [PROMO_INT64] = 1u << PROMO_UINT64,
-      [PROMO_UINT64] = (1u << PROMO_FLOAT16) | (1u << PROMO_BFLOAT16),
+      [PROMO_INT64] = 1u << PROMO_WEAKFLOAT,
+      [PROMO_UINT64] = 1u << PROMO_WEAKFLOAT,
+      [PROMO_WEAKFLOAT] = (1u << PROMO_FP8E4M3) | (1u << PROMO_FP8E5M2) |
+                          (1u << PROMO_FP8E4M3FNUZ) | (1u << PROMO_FP8E5M2FNUZ),
+      [PROMO_FP8E4M3] = (1u << PROMO_FLOAT16) | (1u << PROMO_BFLOAT16),
+      [PROMO_FP8E5M2] = (1u << PROMO_FLOAT16) | (1u << PROMO_BFLOAT16),
+      [PROMO_FP8E4M3FNUZ] = (1u << PROMO_FLOAT16) | (1u << PROMO_BFLOAT16),
+      [PROMO_FP8E5M2FNUZ] = (1u << PROMO_FLOAT16) | (1u << PROMO_BFLOAT16),
       [PROMO_FLOAT16] = 1u << PROMO_FLOAT32,
       [PROMO_BFLOAT16] = 1u << PROMO_FLOAT32,
       [PROMO_FLOAT32] = 1u << PROMO_FLOAT64,
@@ -187,17 +219,17 @@ bool poly_dtype_least_upper(PolyDType a, PolyDType b, PolyDType *out) {
   }
   if (ai < 0 || bi < 0) return false;
 
-  uint16_t closures[2] = {(uint16_t)(1u << ai), (uint16_t)(1u << bi)};
+  uint32_t closures[2] = {1u << ai, 1u << bi};
   for (int c = 0; c < 2; c++) {
     for (;;) {
-      uint16_t expanded = closures[c];
+      uint32_t expanded = closures[c];
       for (int i = 0; i < PROMO_COUNT; i++)
         if (closures[c] & (1u << i)) expanded |= parents[i];
       if (expanded == closures[c]) break;
       closures[c] = expanded;
     }
   }
-  uint16_t common = closures[0] & closures[1];
+  uint32_t common = closures[0] & closures[1];
   for (int i = 0; i < PROMO_COUNT; i++) {
     if (!(common & (1u << i))) continue;
     *out = *types[i];
@@ -206,25 +238,72 @@ bool poly_dtype_least_upper(PolyDType a, PolyDType b, PolyDType *out) {
   return false;
 }
 
+/* Current tinygrad dtype.py:187-188. Transcendental ALU ops preserve an
+ * existing floating dtype, promote weakint to weakfloat, and otherwise meet
+ * the input with default_float. Tensor-stage dtypes are scalar in current
+ * tinygrad; keep Polygrad's still-live late vector form lane-preserving while
+ * that separate compiler representation is migrated. */
+bool poly_dtype_least_upper_float(PolyDType dt, PolyDType *out) {
+  if (!out) return false;
+  PolyDType scalar = dt;
+  if (poly_dtype_eq(scalar, POLY_WEAKINT)) {
+    scalar = POLY_WEAKFLOAT;
+  } else if (poly_dtype_is_float(scalar)) {
+    *out = dt;
+    return true;
+  } else if (!poly_dtype_least_upper(scalar, POLY_FLOAT32, &scalar)) {
+    return false;
+  }
+  *out = scalar;
+  return true;
+}
+
+/* Current tinygrad dtype.py:212-216.  SUM_DTYPE applies only to the
+ * floating default; integer and unsigned accumulators retain their exact
+ * current Tinygrad floors. */
+bool poly_sum_acc_dtype(PolyDType dt, PolyDType *out) {
+  if (!out) return false;
+  PolyDType floor;
+  if (poly_dtype_is_unsigned(dt)) {
+    floor = POLY_UINT32;
+  } else if (poly_dtype_is_int(dt) || poly_dtype_is_bool(dt)) {
+    floor = POLY_INT32;
+  } else {
+    floor = POLY_FLOAT32;
+    const char *name = getenv("SUM_DTYPE");
+    if (name && name[0]) {
+      int id = poly_dtype_id_by_name(name);
+      if (id < 0 || !poly_dtype_by_id(id, &floor)) return false;
+    }
+  }
+  return poly_dtype_least_upper(dt, floor, out);
+}
+
 /* Pinned tinygrad dtype.py:256-270. Return whether dt1 preserves every value
  * representable by dt0. Exact equality and bool sources are lossless before
  * tinygrad's scalar-only target table is consulted. */
 bool poly_dtype_can_lossless_cast(PolyDType dt0, PolyDType dt1) {
   if (poly_dtype_eq(dt0, dt1)) return true;
   if (poly_dtype_eq(dt0, POLY_BOOL)) return true;
-  if (dt0.is_ptr || dt1.is_ptr || dt0.count != 1 || dt1.count != 1) return false;
 
 #define DT_IS(dt, type) poly_dtype_eq((dt), (type))
   if (poly_dtype_is_index(dt1))
     return poly_dtype_is_int(dt0) && !poly_dtype_is_index(dt0) && !poly_dtype_is_bool(dt0);
   if (DT_IS(dt1, POLY_FLOAT64))
     return DT_IS(dt0, POLY_FLOAT32) || DT_IS(dt0, POLY_FLOAT16) || DT_IS(dt0, POLY_BFLOAT16) ||
+           DT_IS(dt0, POLY_FP8E4M3) || DT_IS(dt0, POLY_FP8E5M2) ||
+           DT_IS(dt0, POLY_FP8E4M3FNUZ) || DT_IS(dt0, POLY_FP8E5M2FNUZ) ||
            DT_IS(dt0, POLY_UINT32) || DT_IS(dt0, POLY_UINT16) || DT_IS(dt0, POLY_UINT8) ||
            DT_IS(dt0, POLY_INT32) || DT_IS(dt0, POLY_INT16) || DT_IS(dt0, POLY_INT8);
   if (DT_IS(dt1, POLY_FLOAT32))
     return DT_IS(dt0, POLY_FLOAT16) || DT_IS(dt0, POLY_BFLOAT16) || DT_IS(dt0, POLY_UINT16) ||
+           DT_IS(dt0, POLY_FP8E4M3) || DT_IS(dt0, POLY_FP8E5M2) ||
+           DT_IS(dt0, POLY_FP8E4M3FNUZ) || DT_IS(dt0, POLY_FP8E5M2FNUZ) ||
            DT_IS(dt0, POLY_UINT8) || DT_IS(dt0, POLY_INT16) || DT_IS(dt0, POLY_INT8);
-  if (DT_IS(dt1, POLY_FLOAT16)) return DT_IS(dt0, POLY_UINT8) || DT_IS(dt0, POLY_INT8);
+  if (DT_IS(dt1, POLY_FLOAT16))
+    return DT_IS(dt0, POLY_FP8E4M3) || DT_IS(dt0, POLY_FP8E5M2) ||
+           DT_IS(dt0, POLY_FP8E4M3FNUZ) || DT_IS(dt0, POLY_FP8E5M2FNUZ) ||
+           DT_IS(dt0, POLY_UINT8) || DT_IS(dt0, POLY_INT8);
   if (DT_IS(dt1, POLY_UINT64))
     return DT_IS(dt0, POLY_UINT32) || DT_IS(dt0, POLY_UINT16) || DT_IS(dt0, POLY_UINT8);
   if (DT_IS(dt1, POLY_UINT32)) return DT_IS(dt0, POLY_UINT16) || DT_IS(dt0, POLY_UINT8);
@@ -240,22 +319,91 @@ bool poly_dtype_can_lossless_cast(PolyDType dt0, PolyDType dt1) {
   return false;
 }
 
-PolyDType poly_dtype_vec(PolyDType dt, int sz) {
-  if (sz == 1 || poly_dtype_eq(dt, POLY_VOID)) return dt;
-  PolyDType v = dt;
-  v.bitsize = dt.bitsize * sz;
-  v.count = sz;
-  v.fmt = 0; /* no format for vector types */
-  return v;
+/* Current tinygrad dtype.py:228-291 float_to_fp8/fp8_to_float. */
+typedef struct {
+  int bias;
+  int sig_bits;
+  uint8_t mant_mask;
+  uint64_t min_denorm_half;
+  uint64_t ovf_threshold;
+  uint8_t max_norm;
+  uint64_t min_norm;
+} PolyFP8Config;
+
+static PolyFP8Config fp8_config(PolyDType dtype) {
+  if (poly_dtype_eq(dtype, POLY_FP8E4M3))
+    return (PolyFP8Config){7, 4, 0x7, UINT64_C(0x3f50000000000000),
+                           UINT64_C(0x407d000000000000), 0x7e,
+                           UINT64_C(0x3f90000000000000)};
+  if (poly_dtype_eq(dtype, POLY_FP8E5M2))
+    return (PolyFP8Config){15, 3, 0x3, UINT64_C(0x3ee0000000000000),
+                           UINT64_C(0x40ee000000000000) - 1, 0x7b,
+                           UINT64_C(0x3f10000000000000)};
+  if (poly_dtype_eq(dtype, POLY_FP8E4M3FNUZ))
+    return (PolyFP8Config){8, 4, 0x7, UINT64_C(0x3f40000000000000),
+                           UINT64_C(0x406f000000000000) - 1, 0x7f,
+                           UINT64_C(0x3f80000000000000)};
+  return (PolyFP8Config){16, 3, 0x3, UINT64_C(0x3ed0000000000000),
+                         UINT64_C(0x40ee000000000000) - 1, 0x7f,
+                         UINT64_C(0x3f00000000000000)};
 }
 
-PolyDType poly_dtype_ptr(PolyDType dt, int64_t size, PolyAddrSpace addrspace) {
-  PolyDType p = dt;
-  p.is_ptr = true;
-  p.addrspace = addrspace;
-  p.vcount = 1;
-  p.ptr_size = size;
-  return p;
+uint8_t poly_float_to_fp8(double x, PolyDType dtype) {
+  bool fnuz = poly_dtype_is_fp8_fnuz(dtype);
+  if (fnuz && !isfinite(x)) return 0x80;
+  if (fnuz && x == 0.0) return 0x00;
+  if (poly_dtype_eq(dtype, POLY_FP8E4M3) && !isfinite(x))
+    return copysign(1.0, x) > 0 ? 0x7f : 0xff;
+  if (poly_dtype_eq(dtype, POLY_FP8E5M2) && !isfinite(x))
+    return (uint8_t)((copysign(1.0, x) > 0 ? 0 : 0x80) | (isinf(x) ? 0x7c : 0x7f));
+
+  PolyFP8Config cfg = fp8_config(dtype);
+  uint64_t xbits;
+  memcpy(&xbits, &x, sizeof(xbits));
+  uint64_t half_ulp = UINT64_C(1) << (52 - cfg.sig_bits);
+  uint8_t sign = (uint8_t)(((xbits >> 63) & 1u) << 7);
+  int exp = (int)((xbits >> 52) & 0x7ffu) - 1023 + cfg.bias;
+  uint64_t mantissa = (xbits >> (53 - cfg.sig_bits)) & cfg.mant_mask;
+  uint64_t absx = xbits & UINT64_C(0x7fffffffffffffff);
+  uint64_t res;
+  if (absx <= cfg.min_denorm_half) {
+    res = 0;
+  } else if (absx > cfg.ovf_threshold) {
+    res = cfg.max_norm;
+  } else if (absx >= cfg.min_norm) {
+    res = ((uint64_t)exp << (cfg.sig_bits - 1)) | mantissa;
+    uint64_t round_bits = xbits & ((half_ulp << 1) - 1);
+    if (round_bits > half_ulp || (round_bits == half_ulp && (mantissa & 1))) res++;
+  } else {
+    int shift = 1 - exp;
+    mantissa |= UINT64_C(1) << (cfg.sig_bits - 1);
+    res = mantissa >> shift;
+    uint64_t half = half_ulp << shift;
+    uint64_t round_bits = (xbits | (UINT64_C(1) << 52)) & ((half << 1) - 1);
+    if (round_bits > half || (round_bits == half && (res & 1))) res++;
+  }
+  return (uint8_t)(fnuz && res == 0 ? 0 : res | sign);
+}
+
+double poly_fp8_to_float(uint8_t x, PolyDType dtype) {
+  bool fnuz = poly_dtype_is_fp8_fnuz(dtype);
+  if (fnuz && x == 0x80) return NAN;
+  if ((x & 0x7f) == 0) return x & 0x80 ? -0.0 : 0.0;
+
+  PolyFP8Config cfg = fp8_config(dtype);
+  int mant_bits = cfg.sig_bits - 1, exp_bits = 8 - cfg.sig_bits;
+  int exp_max = (1 << exp_bits) - 1, mant_max = (1 << mant_bits) - 1;
+  int sign = (x >> 7) & 1, exp = (x >> mant_bits) & exp_max, mantissa = x & mant_max;
+  if (!fnuz && exp == exp_max) {
+    if (poly_dtype_eq(dtype, POLY_FP8E5M2))
+      return copysign(mantissa ? NAN : INFINITY, sign ? -1.0 : 1.0);
+    if (mantissa == mant_max) return NAN;
+  }
+  double val = exp == 0
+                   ? ((double)mantissa / (mant_max + 1)) * ldexp(1.0, 1 - cfg.bias)
+                   : (1.0 + (double)mantissa / (mant_max + 1)) *
+                         ldexp(1.0, exp - cfg.bias);
+  return sign ? -val : val;
 }
 
 int poly_dtype_itemsize(PolyDType dt) {

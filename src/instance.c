@@ -19,7 +19,7 @@
 #include "engine/realize.h"
 #include "engine/schedule.h"
 #include "device.h"
-#include "codegen.h" /* poly_cuda_available (POLY_HAS_CUDA) */
+#include "codegen/codegen.h" /* poly_cuda_available (POLY_HAS_CUDA) */
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -47,7 +47,7 @@ typedef struct {
 static bool named_buf_nbytes_checked(const NamedBuf *b, size_t *out) {
   if (out) *out = 0;
   if (!b || !out || !b->buffer || b->numel < 0) return false;
-  size_t itemsize = poly_dtype_itemsize(poly_dtype_scalar(b->buffer->dtype));
+  size_t itemsize = poly_dtype_itemsize(b->buffer->dtype);
   if (itemsize == 0 || (uint64_t)b->numel > (uint64_t)SIZE_MAX / itemsize) return false;
   *out = (size_t)b->numel * itemsize;
   return true;
@@ -67,11 +67,18 @@ typedef struct {
   int step;
 } OptimState;
 
+/* C-owned form of Tinygrad's `(LINEAR, var_vals)` execution tuple. */
+typedef struct {
+  PolyUOp *linear;
+  PolyVarBinding *var_bindings;
+  int n_var_bindings;
+} PolyLinearEntry;
+
 /* Value-and-grad metadata (built lazily on first train call) */
 
 typedef struct {
   PolyUOp *combined_sink; /* combined fwd+bwd SINK */
-  PolyCompiledSchedule *executable; /* retained core executable for stable value+grad */
+  PolyLinearEntry executable;
   PolyUOp *loss_out_buf; /* BUFFER UOp for loss output */
   PolyUOp **grad_out_bufs; /* [n_params] gradient BUFFER UOps */
   float **grad_datas; /* [n_params] gradient host data */
@@ -84,7 +91,7 @@ typedef struct {
 
 typedef struct {
   PolyUOp *combined_sink; /* fwd+bwd+optimizer SINK */
-  PolyCompiledSchedule *executable; /* retained core executable for stable training */
+  PolyLinearEntry executable;
   PolyUOp *loss_out_buf; /* BUFFER UOp for loss scalar output */
   float loss_data; /* scalar loss value after step */
 
@@ -190,7 +197,7 @@ struct PolyInstance {
   /* Entrypoints */
   RuntimeEntrypoint *entrypoints;
   int n_entrypoints;
-  PolyCompiledSchedule **entry_executables; /* lazy retained core executable per entrypoint */
+  PolyLinearEntry *entry_executables; /* lazy compiled LINEAR per entrypoint */
 
   /* Explicit product-layer regions used only by non-uniform place(). */
   RuntimeModule *modules;
@@ -208,6 +215,13 @@ struct PolyInstance {
 
 static void runtime_modules_free(RuntimeModule *modules, int n_modules);
 static int instance_place_uniform_device(PolyInstance *inst, PolyDevice device);
+
+/* Approved logical/physical boundary: portable BUFFERs use deviceless
+ * BUFFER(UNIQUE, size); executable Tinygrad-shaped BUFFERs use ParamArg(device). */
+static bool instance_is_portable_buffer(const PolyUOp *u) {
+  return u && u->op == POLY_OP_BUFFER && u->n_src == 1 && u->src[0] &&
+         u->src[0]->op == POLY_OP_UNIQUE && u->arg.kind == POLY_ARG_INT;
+}
 
 /* Helpers */
 
@@ -512,13 +526,13 @@ static PolyTensor *make_bound_storage_tensor(
     poly_instance_set_error(inst, POLY_STATUS_INVALID, __func__, "invalid tensor shape");
     return NULL;
   }
-  PolyDType scalar = poly_dtype_scalar(dt);
+  PolyDType scalar = dt;
   PolyDevice device = poly_ctx_get_preferred_device(inst->ctx);
   if (!poly_device_can_execute(device)) device = poly_device_default();
-  /* Pinned UOp.empty/new_buffer constructs BUFFER(UNIQUE, DEVICE(device))
+  /* Pinned UOp.empty/new_buffer constructs BUFFER(shape, ParamArg(device))
    * before ordinary Tensor composition (uop/ops.py:733-746). Instance also
    * retains the paired device-free BUFFER for portable IR; poly_tensor_empty
-   * supplies both roots from one UNIQUE without placement or correspondence. */
+   * gives both roots one numeric slot without placement or correspondence. */
   PolyTensor *tensor = poly_tensor_empty(inst->ctx, scalar, shape, ndim, device);
   if (!tensor) {
     poly_instance_set_error(inst, POLY_STATUS_ERROR, __func__, "failed to create tensor");
@@ -895,28 +909,36 @@ static bool make_build_snapshot_buffers(
       !poly_device_can_execute(device))
     return false;
 
-  /* This is the unwrapped BUFFER pair produced by poly_tensor_empty: one
-   * UNIQUE, a device-free portable identity and the tinygrad-shaped deviceful
-   * execution identity.  Snapshot storage is attempt-owned plumbing, not a
-   * live Tensor, so registering a temporary PolyTensor would pollute the
-   * caller's Tensor set on failed packaging. */
-  PolyUOp *unique =
-      poly_uop0(ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(poly_ctx_next_unique_id(ctx)));
+  /* Polygrad's portable resource identity and current UOp.new_buffer physical
+   * form share one numeric slot. Snapshot plumbing is not a live Tensor. */
+  int64_t slot = poly_ctx_next_unique_id(ctx);
   PolyUOp *device_uop = poly_device_uop(ctx, device);
-  PolyUOp *logical = unique
-                         ? poly_uop1(ctx, POLY_OP_BUFFER, dtype, unique, poly_arg_int(numel))
-                         : NULL;
-  PolyUOp *physical_src[2] = {unique, device_uop};
-  PolyUOp *physical = unique && device_uop
-                          ? poly_uop(
-                                ctx, POLY_OP_BUFFER, dtype, physical_src, 2,
-                                poly_arg_int(numel)
+  PolyUOp *logical = poly_uop_new_logical_buffer_with_slot(
+      ctx, dtype, numel, slot
+  );
+  PolyUOp *physical = logical && device_uop
+                          ? poly_uop_new_buffer(
+                                ctx, device_uop, numel, dtype, slot
                             )
                           : NULL;
   if (!logical || !physical) return false;
   *logical_out = logical;
   *physical_out = physical;
   return true;
+}
+
+/* C argument adaptation for current Tinygrad UOp.new_buffer. */
+static PolyUOp *instance_new_buffer(
+    PolyCtx *ctx, PolyDType dtype, int64_t numel
+) {
+  PolyDevice device = poly_ctx_get_preferred_device(ctx);
+  if (!poly_device_can_execute(device)) device = poly_device_default();
+  PolyUOp *device_uop = poly_device_uop(ctx, device);
+  return device_uop
+             ? poly_uop_new_buffer(
+                   ctx, device_uop, numel, dtype, poly_ctx_next_unique_id(ctx)
+               )
+             : NULL;
 }
 
 typedef struct {
@@ -1102,9 +1124,14 @@ static PolyStatus snapshot_build_named_value(PolyInstance *inst, BuildBinding *b
 
   PolyUOp *logical_buffer = NULL;
   PolyUOp *physical_buffer = NULL;
+  /* Tinygrad 2026-08-22/a9069c177a9d UOp.new_buffer forbids weak storage;
+   * UOp.empty_like commits inferred values with strong_dtype
+   * (uop/ops.py:814-827). A named initializer crosses the same persistent
+   * storage boundary while its preserved logical value remains weak. */
+  PolyDType storage_dtype =
+      poly_dtype_strong(binding->declared_logical_value->dtype);
   if (!make_build_snapshot_buffers(
-          inst->ctx, poly_dtype_scalar(binding->declared_logical_value->dtype), numel,
-          device, &logical_buffer, &physical_buffer
+          inst->ctx, storage_dtype, numel, device, &logical_buffer, &physical_buffer
       ))
     return POLY_STATUS_ERROR;
 
@@ -1413,7 +1440,9 @@ PolyStatus poly_instance_build(PolyInstance *inst, PolyInstanceError *err) {
     if (b->role == POLY_ROLE_OUTPUT) {
       PolyUOp *value = b->declared_logical_value;
       int64_t numel = poly_shape_numel_checked(b->shape, b->ndim);
-      b->buffer = poly_buffer(inst->ctx, poly_dtype_scalar(value->dtype), numel);
+      b->buffer = poly_uop_new_logical_buffer(
+          inst->ctx, poly_dtype_strong(value->dtype), numel
+      );
       if (!b->buffer) {
         poly_instance_set_error(
             inst, POLY_STATUS_ERROR, __func__, "failed to create output buffer '%s'", b->name
@@ -1894,10 +1923,12 @@ static PolyInstance *instance_from_spec(
   for (int i = 0; i < spec->n_bufs; i++) {
     PolyUOp *logical_value = spec->bufs[i].buffer;
     int64_t numel = compute_numel(spec->bufs[i].shape, spec->bufs[i].ndim);
-    PolyDType value_dtype = logical_value ? poly_dtype_scalar(logical_value->dtype) : POLY_VOID;
+    PolyDType value_dtype = logical_value ? logical_value->dtype : POLY_VOID;
+    /* Instance keeps the exact logical initializer but allocates persistent
+     * storage at Tinygrad's UOp.empty_like strong_dtype boundary. */
+    PolyDType storage_dtype = poly_dtype_strong(value_dtype);
     if (!logical_value || !poly_ctx_owns_ptr(spec->ctx, logical_value) || numel < 0 ||
-        logical_value->dtype.is_ptr || logical_value->dtype.count != 1 ||
-        poly_dtype_eq(value_dtype, POLY_VOID) || poly_dtype_eq(value_dtype, POLY_INDEX))
+        poly_dtype_eq(value_dtype, POLY_VOID))
       goto fail;
     PolyShape actual_shape = poly_uop_max_shape_cached(spec->ctx, logical_value);
     int64_t actual_numel = poly_shape_numel_checked(actual_shape.dims, actual_shape.ndim);
@@ -1946,7 +1977,7 @@ static PolyInstance *instance_from_spec(
     if (alias >= 0 &&
         (inst->bufs[alias].numel != numel ||
          !poly_dtype_eq(
-             poly_dtype_scalar(inst->bufs[alias].logical_value->dtype), value_dtype
+             inst->bufs[alias].logical_value->dtype, value_dtype
          )))
       goto fail;
     inst->bufs[i].name = strdup(spec->bufs[i].name);
@@ -1954,15 +1985,12 @@ static PolyInstance *instance_from_spec(
     inst->bufs[i].trainable = spec->bufs[i].trainable_set ? spec->bufs[i].trainable
                                                           : (spec->bufs[i].role == POLY_ROLE_PARAM);
     inst->bufs[i].logical_value = logical_value;
-    inst->bufs[i].logical_buffer = alias >= 0
-                                       ? inst->bufs[alias].logical_buffer
-                                       : (value_identity
-                                              ? (PolyUOp *)value_identity
-                                              : poly_buffer(
-                                                    spec->ctx,
-                                                    value_dtype,
-                                                    numel
-                                                ));
+    inst->bufs[i].logical_buffer =
+        alias >= 0
+            ? inst->bufs[alias].logical_buffer
+            : (instance_is_portable_buffer(value_identity)
+                   ? (PolyUOp *)value_identity
+                   : poly_uop_new_logical_buffer(spec->ctx, storage_dtype, numel));
     if (!inst->bufs[i].logical_buffer) goto fail;
     inst->bufs[i].capture_buffer = inst->has_physical_capture
                                        ? physical_buffers[i]
@@ -2117,7 +2145,7 @@ static void instance_free_safetensor_views(PolySafetensorViewEx *views, int n_vi
 
 static bool instance_safetensor_dtype(PolyDType dtype, PolySafetensorDType *out) {
   if (!out) return false;
-  dtype = poly_dtype_scalar(dtype);
+  dtype = dtype;
 #define MAP_DTYPE(poly, safe)                                                                      \
   if (poly_dtype_eq(dtype, poly)) {                                                                \
     *out = safe;                                                                                   \
@@ -2219,7 +2247,7 @@ static bool instance_is_computed_state(const NamedBuf *binding) {
 }
 
 static bool instance_closed_initializer_op(PolyOps op) {
-  return op == POLY_OP_CONST || op == POLY_OP_VCONST || op == POLY_OP_GEP ||
+  return op == POLY_OP_CONST ||
          op == POLY_OP_STACK || op == POLY_OP_CONTIGUOUS || op == POLY_OP_DETACH ||
          op == POLY_OP_REDUCE || poly_opset_has(POLY_GROUP_ELEMENTWISE, op) ||
          poly_opset_has(POLY_GROUP_MOVEMENT, op);
@@ -2274,8 +2302,8 @@ static int instance_initialize_closed_computed_state(PolyInstance *inst) {
     PolyShape declared = {(int64_t *)binding->shape, binding->ndim};
     if (!poly_shape_eq(actual, declared) ||
         !poly_dtype_eq(
-            poly_dtype_scalar(binding->logical_value->dtype),
-            poly_dtype_scalar(binding->logical_buffer->dtype)
+            poly_dtype_strong(binding->logical_value->dtype),
+            binding->logical_buffer->dtype
         ))
       goto cleanup;
     logical[n_init] = binding->logical_value;
@@ -2457,7 +2485,8 @@ static PolyInstance *instance_from_named_sinks(
   PolyInstance *inst = instance_from_spec(&spec, NULL, NULL, false, false);
   if (inst) {
     for (int i = 0; i < inst->n_bufs; i++) {
-      PolyBuffer *src = poly_buffer_get(ctx, inst->bufs[i].buffer);
+      PolyUOp *source = bufs[i].buffer;
+      PolyBuffer *src = poly_buffer_get(ctx, source);
       size_t nbytes = named_buf_nbytes(&inst->bufs[i]);
       if (!src || !src->ptr || src->nbytes < nbytes || nbytes == 0) continue;
       /* Instances own host-side ABI storage, but the source tensor may already
@@ -2466,9 +2495,17 @@ static PolyInstance *instance_from_named_sinks(
        * still read the current residency, so do not reject invalid host shadows.
        * Fall back to direct copy only for valid legacy host buffers whose
        * allocator cannot service copyout. */
-      if (poly_buffer_read(ctx, inst->bufs[i].buffer, inst->bufs[i].data, nbytes) != 0 &&
+      if (poly_buffer_read(ctx, source, inst->bufs[i].data, nbytes) != 0 &&
           src->valid && poly_device_is_host_addressable(src->device))
         memcpy(inst->bufs[i].data, src->ptr, nbytes);
+    }
+    /* Approved Instance boundary: registry sinks are portable logical roots.
+     * Activate them before exposing the Instance so create_linear_with_vars
+     * receives device-bound BUFFER arguments, as in Tinygrad 2026-08-22
+     * uop/ops.py:814-816 and schedule/__init__.py:181-209. */
+    if (poly_instance_set_device(inst, POLY_DEVICE_AUTO) != 0) {
+      poly_instance_free(inst);
+      inst = NULL;
     }
   }
 
@@ -2511,7 +2548,7 @@ PolyInstance *poly_instance_from_sinks(
   return instance_from_named_sinks(ctx, names, sinks, n_sinks);
 }
 
-static void cached_executable_clear(PolyCompiledSchedule **executable);
+static void cached_executable_clear(PolyLinearEntry *executable);
 
 static void vag_free(VagState *vag, int n_params) {
   if (!vag) return;
@@ -2526,11 +2563,10 @@ static void vag_free(VagState *vag, int n_params) {
   free(vag);
 }
 
-static void cached_executable_clear(PolyCompiledSchedule **executable) {
-  if (executable) {
-    poly_compiled_schedule_free(*executable);
-    *executable = NULL;
-  }
+static void cached_executable_clear(PolyLinearEntry *executable) {
+  if (!executable) return;
+  free(executable->var_bindings);
+  memset(executable, 0, sizeof(*executable));
 }
 
 static void train_plan_clear(TrainState *ts) {
@@ -2664,6 +2700,9 @@ static int append_runtime_named_buffer(
 
   int64_t numel = poly_shape_numel_checked(shape, ndim);
   if (numel < 0) return -1;
+  if (buffer->op != POLY_OP_BUFFER || buffer->arg.kind != POLY_ARG_PARAM ||
+      !buffer->arg.param)
+    return -1;
 
   NamedBuf *next = realloc(inst->bufs, (size_t)(inst->n_bufs + 1) * sizeof(NamedBuf));
   if (!next) return -1;
@@ -2674,9 +2713,14 @@ static int append_runtime_named_buffer(
   if (!nb.name) return -1;
   nb.role = role;
   nb.flags = flags;
+  PolyUOp *logical = poly_uop_new_logical_buffer_with_slot(
+      inst->ctx, buffer->dtype, numel,
+      buffer->arg.param->slot
+  );
+  if (!logical) return -1;
   nb.buffer = buffer;
-  nb.logical_value = buffer;
-  nb.logical_buffer = buffer;
+  nb.logical_value = logical;
+  nb.logical_buffer = logical;
   nb.capture_buffer = buffer;
   nb.ndim = ndim;
   if (ndim > 0) memcpy(nb.shape, shape, (size_t)ndim * sizeof(int64_t));
@@ -2730,7 +2774,7 @@ static int ensure_optimizer_state_buffer(
   int bi = find_buf_by_name(inst, name);
   if (bi >= 0) {
     NamedBuf *b = &inst->bufs[bi];
-    if (!b->buffer || b->role != POLY_ROLE_AUX || !poly_dtype_eq(poly_dtype_scalar(b->buffer->dtype), POLY_FLOAT32) ||
+    if (!b->buffer || b->role != POLY_ROLE_AUX || !poly_dtype_eq(b->buffer->dtype, POLY_FLOAT32) ||
         b->numel != numel)
       return -1;
     b->flags |= POLY_BIND_F_OPTIM;
@@ -2738,7 +2782,7 @@ static int ensure_optimizer_state_buffer(
     return 0;
   }
 
-  PolyUOp *buf = poly_buffer(inst->ctx, POLY_FLOAT32, numel);
+  PolyUOp *buf = instance_new_buffer(inst->ctx, POLY_FLOAT32, numel);
   if (!buf) return -1;
   if (append_runtime_named_buffer(
           inst, name, POLY_ROLE_AUX, POLY_BIND_F_OPTIM, buf, shape, ndim, false, true, &bi
@@ -2770,7 +2814,7 @@ float *poly_instance_param_data(PolyInstance *inst, int i, int64_t *numel_out) {
 int poly_instance_param_dtype_id(const PolyInstance *inst, int i) {
   if (!inst || i < 0 || i >= inst->n_params) return -1;
   const NamedBuf *b = &inst->bufs[inst->param_indices[i]];
-  return b->buffer ? poly_dtype_id_by_name(poly_dtype_name(poly_dtype_scalar(b->buffer->dtype)))
+  return b->buffer ? poly_dtype_id_by_name(poly_dtype_name(b->buffer->dtype))
                    : -1;
 }
 
@@ -2868,7 +2912,7 @@ float *poly_instance_buf_data(PolyInstance *inst, int i, int64_t *numel_out) {
 int poly_instance_buf_dtype_id(const PolyInstance *inst, int i) {
   if (!inst || i < 0 || i >= inst->n_bufs) return -1;
   const NamedBuf *b = &inst->bufs[i];
-  return b->buffer ? poly_dtype_id_by_name(poly_dtype_name(poly_dtype_scalar(b->buffer->dtype)))
+  return b->buffer ? poly_dtype_id_by_name(poly_dtype_name(b->buffer->dtype))
                    : -1;
 }
 
@@ -3118,25 +3162,31 @@ uint8_t *poly_instance_export_ir(PolyInstance *inst, int *out_len) {
   return bytes;
 }
 
-static PolyCompiledSchedule *instance_ensure_entry_executable(
+static PolyLinearEntry *instance_ensure_entry_executable(
     PolyInstance *inst,
     int entrypoint_index
 ) {
   if (!inst || !inst->ctx || !inst->entry_executables || entrypoint_index < 0 ||
       entrypoint_index >= inst->n_entrypoints)
     return NULL;
-  if (inst->entry_executables[entrypoint_index]) return inst->entry_executables[entrypoint_index];
+  PolyLinearEntry *entry = &inst->entry_executables[entrypoint_index];
+  if (entry->linear) return entry;
 
   PolyUOp *root = inst->entrypoints[entrypoint_index].sink;
-  PolySchedule *schedule = root && root->op == POLY_OP_LINEAR
-                               ? poly_create_schedule_from_linear(inst->ctx, root, POLY_MODE_CALL)
-                               : poly_schedule_effect_sink(inst->ctx, root);
-  if (!schedule) return NULL;
-  PolyCompiledSchedule *compiled = poly_jit_lower(inst->ctx, schedule);
-  poly_schedule_free(schedule);
-  if (!compiled) return NULL;
-  inst->entry_executables[entrypoint_index] = compiled;
-  return compiled;
+  PolyVarBinding *var_bindings = NULL;
+  int n_var_bindings = 0;
+  PolyUOp *linear = root && root->op == POLY_OP_LINEAR
+                        ? root
+                        : poly_linear_effect_sink(
+                              inst->ctx, root, &var_bindings, &n_var_bindings
+                          );
+  PolyUOp *compiled = linear ? poly_compile_linear(inst->ctx, linear, -1) : NULL;
+  if (!compiled) {
+    free(var_bindings);
+    return NULL;
+  }
+  *entry = (PolyLinearEntry){compiled, var_bindings, n_var_bindings};
+  return entry;
 }
 
 uint8_t *poly_instance_export_program(PolyInstance *inst, int *out_len) {
@@ -3164,7 +3214,7 @@ uint8_t *poly_instance_export_program(PolyInstance *inst, int *out_len) {
     memcpy(bufs[i].shape, inst->bufs[i].shape, (size_t)inst->bufs[i].ndim * sizeof(*bufs[i].shape));
   }
   for (int i = 0; i < inst->n_entrypoints; i++) {
-    PolyCompiledSchedule *compiled = instance_ensure_entry_executable(inst, i);
+    PolyLinearEntry *compiled = instance_ensure_entry_executable(inst, i);
     if (!compiled || !compiled->linear || compiled->linear->op != POLY_OP_LINEAR) {
       free(bufs);
       free(eps);
@@ -3206,7 +3256,31 @@ PolyInstance *poly_instance_from_program(
     fprintf(stderr, "poly_instance_from_program: program import failed\n");
     return NULL;
   }
-  PolyInstance *inst = instance_from_spec(&spec, NULL, NULL, true, true);
+  PolyUOp **physical_buffers =
+      spec.n_bufs > 0 ? malloc((size_t)spec.n_bufs * sizeof(*physical_buffers)) : NULL;
+  PolyUOp **physical_sinks = spec.n_entrypoints > 0
+                                 ? malloc(
+                                       (size_t)spec.n_entrypoints * sizeof(*physical_sinks)
+                                   )
+                                 : NULL;
+  if ((spec.n_bufs > 0 && !physical_buffers) ||
+      (spec.n_entrypoints > 0 && !physical_sinks)) {
+    free(physical_buffers);
+    free(physical_sinks);
+    poly_ir_spec_free(&spec);
+    return NULL;
+  }
+  for (int i = 0; i < spec.n_bufs; i++) physical_buffers[i] = spec.bufs[i].buffer;
+  for (int i = 0; i < spec.n_entrypoints; i++)
+    physical_sinks[i] = spec.entrypoints[i].sink;
+  /* Bound import is Polygrad's approved export boundary. As current Tinygrad
+   * PROGRAM replay does, retain the exact LINEAR buffer operands
+   * (engine/realize.py:263-319); portable placement never consumes them. */
+  PolyInstance *inst = instance_from_spec(
+      &spec, physical_buffers, physical_sinks, true, true
+  );
+  free(physical_buffers);
+  free(physical_sinks);
   if (!inst) return NULL;
   inst->has_portable_source = false;
 
@@ -3318,22 +3392,28 @@ fail:
 }
 
 static PolyUOp *instance_binding_on_device(PolyCtx *ctx, PolyUOp *logical, PolyDevice device) {
-  if (!ctx || !logical || logical->op != POLY_OP_BUFFER || logical->n_src != 1 ||
-      !logical->src[0] || logical->src[0]->op != POLY_OP_UNIQUE ||
-      !poly_device_can_execute(device))
+  if (!ctx || !instance_is_portable_buffer(logical) || !poly_device_can_execute(device))
     return NULL;
-  /* Pinned UOp.empty/new_buffer creates BUFFER(UNIQUE, DEVICE(device))
-   * (uop/ops.py:733-746).  The portable binding already owns the UNIQUE, so
-   * uniform placement adds only the DEVICE-bearing physical occurrence. */
+  /* Polygrad's portable binding owns the slot. Current UOp.new_buffer creates
+   * the physical one-source BUFFER (uop/ops.py:811-817). */
   PolyUOp *device_uop = poly_device_uop(ctx, device);
-  PolyUOp *src[2] = {logical->src[0], device_uop};
-  if (!device_uop) return NULL;
+  int64_t size = logical->arg.kind == POLY_ARG_INT ? logical->arg.i : -1;
+  int64_t slot = logical->src[0]->arg.kind == POLY_ARG_INT
+                     ? logical->src[0]->arg.i
+                     : -1;
+  PolyUOp *physical = device_uop
+                          ? poly_uop_new_buffer(
+                                ctx, device_uop, size, logical->dtype, slot
+                            )
+                          : NULL;
+  if (!physical) return NULL;
   return (logical->tag != 0 || logical->tag_arg.kind != POLY_ARG_NONE)
              ? poly_uop_tagged_arg(
-                   ctx, POLY_OP_BUFFER, logical->dtype, src, 2, logical->arg,
+                   ctx, POLY_OP_BUFFER, physical->dtype, physical->src,
+                   physical->n_src, physical->arg,
                    logical->tag, logical->tag_arg
                )
-             : poly_uop(ctx, POLY_OP_BUFFER, logical->dtype, src, 2, logical->arg);
+             : physical;
 }
 
 static void instance_discard_candidate_residencies(
@@ -3729,7 +3809,7 @@ static int prepare_instance_io(
     if (bi < 0) return -1;
     size_t nbytes = named_buf_nbytes(&inst->bufs[bi]);
     PolyDType supplied_dtype;
-    PolyDType expected_dtype = poly_dtype_scalar(inst->bufs[bi].buffer->dtype);
+    PolyDType expected_dtype = inst->bufs[bi].buffer->dtype;
     if (io[i].nbytes != nbytes) {
       fprintf(
           stderr, "poly_instance_call: input '%s' has %zu bytes, expected %zu\n", io[i].name,
@@ -3738,7 +3818,7 @@ static int prepare_instance_io(
       return -1;
     }
     if (!poly_dtype_by_id(io[i].dtype_id, &supplied_dtype) ||
-        !poly_dtype_eq(poly_dtype_scalar(supplied_dtype), expected_dtype)) {
+        !poly_dtype_eq(supplied_dtype, expected_dtype)) {
       fprintf(
           stderr, "poly_instance_call: input '%s' dtype id %d does not match %s\n", io[i].name,
           io[i].dtype_id, poly_dtype_name(expected_dtype)
@@ -3765,7 +3845,7 @@ static int run_instance_sink(
     PolyUOp *sink,
     PolyIOBinding *io,
     int n_io,
-    PolyCompiledSchedule **cached_executable
+    PolyLinearEntry *cached_executable
 ) {
   bool timing = poly_debug_at_least(2);
   double t0 = timing ? poly_now_ms() : 0.0;
@@ -3782,25 +3862,32 @@ static int run_instance_sink(
    * their output/effect storage. Skip tensor output allocation, but retain the
    * shared tinygrad-style concrete-buffer -> shaped-PARAM call boundary before
    * rangeify. */
-  PolyCompiledSchedule *executable = cached_executable ? *cached_executable : NULL;
-  bool executable_owned = false;
-  if (!executable) {
-    PolySchedule *schedule = poly_schedule_effect_sink(inst->ctx, sink);
-    if (schedule) {
-      executable = poly_jit_lower(inst->ctx, schedule);
-      poly_schedule_free(schedule);
-    }
-    if (cached_executable) {
-      *cached_executable = executable;
+  PolyLinearEntry local = {0};
+  PolyLinearEntry *executable = cached_executable && cached_executable->linear
+                                    ? cached_executable
+                                    : &local;
+  if (!executable->linear) {
+    PolyVarBinding *var_bindings = NULL;
+    int n_var_bindings = 0;
+    PolyUOp *linear = poly_linear_effect_sink(
+        inst->ctx, sink, &var_bindings, &n_var_bindings
+    );
+    PolyUOp *compiled = linear ? poly_compile_linear(inst->ctx, linear, -1) : NULL;
+    if (compiled) {
+      *executable = (PolyLinearEntry){compiled, var_bindings, n_var_bindings};
+      if (cached_executable) *cached_executable = *executable;
     } else {
-      executable_owned = true;
+      free(var_bindings);
     }
   }
   double t_sched = timing ? poly_now_ms() : 0.0;
   int ret = -1;
-  if (executable)
-    ret = poly_run_compiled_schedule(executable, NULL, 0, NULL, 0);
-  if (executable_owned) poly_compiled_schedule_free(executable);
+  if (executable->linear)
+    ret = poly_run_linear(
+        inst->ctx, executable->linear, executable->var_bindings,
+        executable->n_var_bindings, NULL, 0, true, true, false
+    );
+  if (!cached_executable) cached_executable_clear(&local);
   if (timing) {
     double t_done = poly_now_ms();
     fprintf(
@@ -3808,7 +3895,7 @@ static int run_instance_sink(
         "[polygrad:instance] input=%.3fms schedule=%.3fms run=%.3fms total=%.3fms "
         "ret=%d cached=%d\n",
         t_attach - t0, t_sched - t_attach, t_done - t_sched, t_done - t0, ret,
-        cached_executable && *cached_executable
+        cached_executable && cached_executable->linear
     );
   }
   return ret;
@@ -3824,7 +3911,7 @@ int poly_instance_call(PolyInstance *inst, const char *entrypoint, PolyIOBinding
   }
 
   PolyUOp *sink = inst->entrypoints[ep_idx].sink;
-  PolyCompiledSchedule **cached_executable =
+  PolyLinearEntry *cached_executable =
       inst->entry_executables ? &inst->entry_executables[ep_idx] : NULL;
   return run_instance_sink(inst, &inst->entrypoints[ep_idx], sink, io, n_io, cached_executable);
 }
@@ -4020,9 +4107,9 @@ static int ensure_vag_graph(PolyInstance *inst, int loss_ep_idx) {
   PolyUOp **stores = calloc((size_t)n_stores, sizeof(PolyUOp *));
 
   /* Loss output buffer (1 element) */
-  PolyDType out_dt = poly_dtype_scalar(loss_value->dtype);
+  PolyDType out_dt = loss_value->dtype;
   if (!poly_dtype_is_float(out_dt)) out_dt = POLY_FLOAT32;
-  vag->loss_out_buf = poly_buffer(inst->ctx, out_dt, 1);
+  vag->loss_out_buf = instance_new_buffer(inst->ctx, out_dt, 1);
 
   PolyUOp *loss_flat = loss_value;
   if (uop_numel(inst->ctx, loss_value) != 1) {
@@ -4046,9 +4133,9 @@ static int ensure_vag_graph(PolyInstance *inst, int loss_ep_idx) {
       vag_free(vag, inst->n_params);
       return -1;
     }
-    PolyDType gdt = poly_dtype_scalar(grads[i]->dtype);
+    PolyDType gdt = grads[i]->dtype;
     if (!poly_dtype_is_float(gdt)) gdt = POLY_FLOAT32;
-    PolyUOp *gbuf = poly_buffer(inst->ctx, gdt, numel);
+    PolyUOp *gbuf = instance_new_buffer(inst->ctx, gdt, numel);
     vag->grad_out_bufs[i] = gbuf;
 
     /* Flatten gradient if needed */
@@ -4150,9 +4237,9 @@ static int ensure_train_graph(PolyInstance *inst, int loss_ep_idx) {
   if (!ts) return -1;
 
   /* Loss output buffer (1 scalar, same as vag) */
-  PolyDType out_dt = poly_dtype_scalar(vag->loss_value->dtype);
+  PolyDType out_dt = vag->loss_value->dtype;
   if (!poly_dtype_is_float(out_dt)) out_dt = POLY_FLOAT32;
-  ts->loss_out_buf = poly_buffer(ctx, out_dt, 1);
+  ts->loss_out_buf = instance_new_buffer(ctx, out_dt, 1);
 
   if (poly_buffer_write(ctx, ts->loss_out_buf, &ts->loss_data, sizeof(float)) != 0) {
     train_free(ts, np);
@@ -4462,7 +4549,7 @@ static PolyTensor *register_inline_tensor(
   switch (b->role) {
   case POLY_ROLE_PARAM:
     ret = poly_instance_param(
-        parent, full, poly_dtype_scalar(b->logical_value->dtype), b->shape, b->ndim
+        parent, full, b->logical_value->dtype, b->shape, b->ndim
     );
     if (ret) poly_tensor_set_requires_grad(ret, trainable);
     break;
@@ -4473,14 +4560,14 @@ static PolyTensor *register_inline_tensor(
     break;
   case POLY_ROLE_OUTPUT:
     ret = poly_tensor_empty(
-        parent->ctx, poly_dtype_scalar(b->logical_value->dtype), b->shape, b->ndim,
+        parent->ctx, b->logical_value->dtype, b->shape, b->ndim,
         device
     );
     break;
   case POLY_ROLE_AUX:
   default:
     ret = poly_tensor_empty(
-        parent->ctx, poly_dtype_scalar(b->logical_value->dtype), b->shape, b->ndim,
+        parent->ctx, b->logical_value->dtype, b->shape, b->ndim,
         device
     );
     if (ret && poly_instance_aux(parent, full, ret, b->flags) != POLY_STATUS_OK) ret = NULL;

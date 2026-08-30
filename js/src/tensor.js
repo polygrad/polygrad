@@ -98,6 +98,10 @@ const TA_BY_DTYPE = {
   uint64: BigUint64Array,
   float16: Uint16Array,
   bfloat16: Uint16Array,
+  fp8e4m3: Uint8Array,
+  fp8e5m2: Uint8Array,
+  fp8e4m3fnuz: Uint8Array,
+  fp8e5m2fnuz: Uint8Array,
   float32: Float32Array,
   float64: Float64Array
 }
@@ -295,11 +299,16 @@ function product(xs) {
 }
 
 function isIntegerDtype(dtype) {
-  return ['int8', 'uint8', 'int16', 'uint16', 'int32', 'uint32', 'int64', 'uint64'].includes(dtype)
+  return ['weakint', 'int8', 'uint8', 'int16', 'uint16', 'int32', 'uint32', 'int64', 'uint64'].includes(dtype)
 }
 
 function isFloatDtype(dtype) {
-  return ['float16', 'bfloat16', 'float32', 'float64'].includes(dtype)
+  return ['weakfloat', 'fp8e4m3', 'fp8e5m2', 'fp8e4m3fnuz', 'fp8e5m2fnuz',
+    'float16', 'bfloat16', 'float32', 'float64'].includes(dtype)
+}
+
+function isFp8Dtype(dtype) {
+  return ['fp8e4m3', 'fp8e5m2', 'fp8e4m3fnuz', 'fp8e5m2fnuz'].includes(dtype)
 }
 
 // Pinned tinygrad dtype.py:274-278. This is the induced sum_acc_dtype
@@ -502,7 +511,7 @@ function createBoundTensorClass(runtime) {
         let dt, flat, shape
         if (scalarData) {
           dt = opts.dtype || (
-            typeof data === 'boolean' ? 'bool' : Number.isInteger(data) ? 'int32' : 'float32'
+            typeof data === 'boolean' ? 'bool' : Number.isInteger(data) ? 'weakint' : 'weakfloat'
           )
           const dtypeId = DTYPE_ID[dt]
           if (dtypeId === undefined) throw new Error(`unsupported dtype: ${dt}`)
@@ -528,16 +537,16 @@ function createBoundTensorClass(runtime) {
           // Pinned UOp._frompy stages numeric BF16 values as float32 bytes and
           // then casts the Tensor graph (uop/ops.py:752-764). Uint16Array here
           // would truncate the numeric values before the graph-level cast.
-          flat = numericTypedArray(data, dt === 'bfloat16' ? 'float32' : dt)
+          flat = numericTypedArray(data, dt === 'bfloat16' || isFp8Dtype(dt) ? 'float32' : dt)
           shape = [data.length]
         } else {
           dt = (opts && opts.dtype) || inferArrayDtype(data)
-          const r = flattenArray(data, dt === 'bfloat16' ? 'float32' : dt)
+          const r = flattenArray(data, dt === 'bfloat16' || isFp8Dtype(dt) ? 'float32' : dt)
           flat = r.data; shape = r.shape
         }
         if (!scalarData) {
           this._dtype = dt
-          const postCastDtype = dt === 'bfloat16' ? dt : null
+          const postCastDtype = dt === 'bfloat16' || isFp8Dtype(dt) ? dt : null
           this._data = flat
           const importDtype = postCastDtype ? 'float32' : dt
           const dtypeId = DTYPE_ID[importDtype]
@@ -570,7 +579,7 @@ function createBoundTensorClass(runtime) {
           const buffer = ownerUop && ownerUop.buffer ? ownerUop.buffer.raw : null
           const needsFrontendHostOwner =
             Boolean(buffer && core.ffi.poly_buffer_get_key) &&
-            (!core.caps || core.caps.core !== 'wasm' || core.caps.device === 'webgpu')
+            (!core.caps || core.caps.core !== 'wasm')
           if (needsFrontendHostOwner && buffer && core.ffi.poly_buffer_get_key) {
             const bufferKey = core.ffi.poly_buffer_get_key(this._ctx, buffer)
             if (bufferKey) {
@@ -842,7 +851,9 @@ function createBoundTensorClass(runtime) {
         return new AT(0)
       }
       let t = this
-      if (this._dtype === 'float16' || this._dtype === 'bfloat16') t = t.cast('float32')
+      if (this._dtype === 'weakint') t = t.cast('int32')
+      if (this._dtype === 'weakfloat' || this._dtype === 'float16' ||
+          this._dtype === 'bfloat16' || isFp8Dtype(this._dtype)) t = t.cast('float32')
       t = t.contiguous()
       // Pinned tensor.py:259-266 clones a device-free source to CPU for
       // readback. Wrapper device metadata is not executable UOp placement.
@@ -860,7 +871,9 @@ function createBoundTensorClass(runtime) {
         return new AT(0)
       }
       let t = this
-      if (this._dtype === 'float16' || this._dtype === 'bfloat16') t = t.cast('float32')
+      if (this._dtype === 'weakint') t = t.cast('int32')
+      if (this._dtype === 'weakfloat' || this._dtype === 'float16' ||
+          this._dtype === 'bfloat16' || isFp8Dtype(this._dtype)) t = t.cast('float32')
       t = t.contiguous()
       if (Number(ffi.poly_uop_device(this._currentUopRaw())) === deviceId('auto')) {
         t = t.clone('cpu')
@@ -892,7 +905,8 @@ function createBoundTensorClass(runtime) {
       const prepared = tensors.map(t => {
         if (t.numel() === 0) return t
         let out = t
-        if (out._dtype === 'float16' || out._dtype === 'bfloat16') out = out.cast('float32')
+        if (out._dtype === 'float16' || out._dtype === 'bfloat16' || isFp8Dtype(out._dtype))
+          out = out.cast('float32')
         out = out.contiguous()
         if (Number(ffi.poly_uop_device(t._currentUopRaw())) === deviceId('auto')) {
           out = out.clone('cpu')
@@ -927,7 +941,8 @@ function createBoundTensorClass(runtime) {
         const prepared = tensors.map(t => {
           if (t.numel() === 0) return t
           let out = t
-          if (out._dtype === 'float16' || out._dtype === 'bfloat16') out = out.cast('float32')
+          if (out._dtype === 'float16' || out._dtype === 'bfloat16' || isFp8Dtype(out._dtype))
+            out = out.cast('float32')
           out = out.contiguous()
           if (Number(ffi.poly_uop_device(t._currentUopRaw())) === deviceId('auto')) {
             out = out.clone('cpu')
@@ -1238,13 +1253,8 @@ function createBoundTensorClass(runtime) {
     _ensureTensor(other) {
       if (other instanceof Tensor) return other
       if (typeof other === 'number' || typeof other === 'boolean') {
-        const sourceIsFloat = ['float16', 'bfloat16', 'float32', 'float64'].includes(this._dtype)
-        const sourceKeepsInteger = isIntegerDtype(this._dtype) &&
-          typeof other === 'number' && Number.isInteger(other)
-        const dtype = sourceIsFloat || sourceKeepsInteger
-          ? this._dtype
-          : typeof other === 'boolean' ? 'bool'
-            : Number.isInteger(other) ? 'int32' : 'float32'
+        const dtype = typeof other === 'boolean' ? 'bool'
+          : Number.isInteger(other) ? 'weakint' : 'weakfloat'
         const dtypeId = DTYPE_ID[dtype]
         if (dtypeId === undefined) throw new Error(`unsupported dtype: ${dtype}`)
         const tensor = dtype === 'bool' || isIntegerDtype(dtype)
@@ -1264,12 +1274,19 @@ function createBoundTensorClass(runtime) {
     }
 
     constLike(value) {
-      // Pinned creation.py:13 and uop/ops.py:496-507: same-dtype CONST with
-      // this Tensor's shape, not a materialized full BUFFER. Polygrad's
-      // multi-context wrapper must allocate that CONST in the receiver's ctx.
-      return new Tensor(value, {
-        _ctx: this._ctx, dtype: this._dtype, device: this._device
-      })._broadcastTensor(this.shape)
+      // Pinned uop/ops.py:581-583: one typed scalar CONST broadcast to this
+      // Tensor's exact shape. C owns the shared Python/JS graph construction.
+      if (typeof value !== 'number' && typeof value !== 'boolean') {
+        throw new TypeError(`constLike value must be numeric, got ${typeof value}`)
+      }
+      const core = typeof value === 'boolean' || Number.isInteger(value)
+        ? this._rt._core.ffi.poly_tensor_const_like_int(
+            this._ctx, this._tensor, value === true ? 1 : value === false ? 0 : value
+          )
+        : this._rt._core.ffi.poly_tensor_const_like_float(
+            this._ctx, this._tensor, Number(value)
+          )
+      return this._makeResultFromCore(core, [this])
     }
 
     const_like(value) { return this.constLike(value) }
@@ -1293,23 +1310,7 @@ function createBoundTensorClass(runtime) {
     }
 
     _broadcastTensor(targetShape) {
-      if (arraysEqual(this.shape, targetShape)) return this
-      if (this.shape.length > targetShape.length) {
-        throw new Error(
-          `cannot broadcast tensor to fewer dimensions. shape=[${this.shape}] ` +
-          `to newShape=[${targetShape}]`
-        )
-      }
-      const aligned = new Array(targetShape.length - this.shape.length)
-        .fill(1).concat(this.shape)
-      for (let i = 0; i < aligned.length; i++) {
-        if (aligned[i] !== targetShape[i] && aligned[i] !== 1) {
-          throw new Error(`cannot broadcast [${this.shape}] to newShape=[${targetShape}]`)
-        }
-      }
-      const reshaped = this.reshape(aligned)
-      const expanded = reshaped.expand(targetShape)
-      return arraysEqual(expanded.shape, reshaped.shape) ? reshaped : expanded
+      return this.expand(targetShape)
     }
 
     _binop(other, opName, reverse = false) {
@@ -1317,9 +1318,6 @@ function createBoundTensorClass(runtime) {
       other = this._ensureTensor(other)
       let x = reverse ? other : this
       let y = reverse ? this : other
-      const outShape = x._broadcastShape(y.shape)
-      x = x._broadcastTensor(outShape)
-      y = y._broadcastTensor(outShape)
       const core = ffi.poly_tensor_alu2(this._ctx, ops[opName], x._tensor, y._tensor)
       return this._makeResultFromCore(core, [x, y])
     }
@@ -1352,7 +1350,18 @@ function createBoundTensorClass(runtime) {
       if (roundingMode === 'floor') return result.floor()
       throw new Error(`rounding_mode='${roundingMode}' is not supported`)
     }
-    pow(other) { return this._binop(other, 'POW') }
+    pow(other, reverse = false) {
+      // Tinygrad 2026-08-22/a9069c177a9d mixin/elementwise.py:545-564
+      // validates scalar integer POW after promotion and preserves ordering.
+      const scalar = !(other instanceof Tensor)
+      const result = this._binop(other, 'POW', reverse)
+      const nonnegativeInteger = typeof other === 'boolean' ||
+        (typeof other === 'number' && Number.isInteger(other) && other >= 0)
+      if (!isFloatDtype(result.dtype) && scalar && !nonnegativeInteger) {
+        throw new Error('base needs to be float')
+      }
+      return result
+    }
     lt(other) { return this._binop(other, 'CMPLT') }
 
     neg() {
@@ -1386,30 +1395,13 @@ function createBoundTensorClass(runtime) {
 
     where(x, y) {
       const { ffi, ops } = this._rt._core
-      // Pinned tensor.py:750-772 anchors branch promotion on an existing
-      // branch Tensor, not on the boolean condition.
-      let branchShape
-      if (x instanceof Tensor) {
-        y = x._ensureTensor(y)
-        branchShape = _broadcastShapes(x.shape, y.shape)
-      } else if (y instanceof Tensor) {
-        x = y._ensureTensor(x)
-        branchShape = _broadcastShapes(x.shape, y.shape)
-      } else {
-        // Pinned tensor.py:769-770 uses self.ufix(x)._broadcasted(y): shape
-        // the scalar like the condition before branch dtype promotion.
-        x = this._ensureTensor(x)._broadcastTensor(this.shape)
-        y = x._ensureTensor(y)
-        branchShape = _broadcastShapes(x.shape, y.shape)
-      }
-      x = x._broadcastTensor(branchShape)
-      y = y._broadcastTensor(branchShape)
-      const outShape = _broadcastShapes(this.shape, branchShape)
-      const cond = this.cast('bool')._broadcastTensor(outShape)
-      x = x._broadcastTensor(outShape)
-      y = y._broadcastTensor(outShape)
-      const core = ffi.poly_tensor_alu3(this._ctx, ops.WHERE, cond._tensor, x._tensor, y._tensor)
-      return this._makeResultFromCore(core, [cond, x, y])
+      // Current ElementwiseMixin.where uses one branch Tensor only to wrap
+      // host scalars. C owns promotion and broadcast shape inference.
+      const ref = x instanceof Tensor ? x : y instanceof Tensor ? y : this
+      if (!(x instanceof Tensor)) x = ref._ensureTensor(x)
+      if (!(y instanceof Tensor)) y = ref._ensureTensor(y)
+      const core = ffi.poly_tensor_alu3(this._ctx, ops.WHERE, this._tensor, x._tensor, y._tensor)
+      return this._makeResultFromCore(core, [this, x, y])
     }
 
     maximum(other) {
@@ -1461,19 +1453,19 @@ function createBoundTensorClass(runtime) {
 
     bitcast(dtype) {
       dtype = String(dtype).toLowerCase()
+      if (['weakint', 'weakfloat'].includes(this._dtype) || ['weakint', 'weakfloat'].includes(dtype)) {
+        throw new Error(`bitcast requires concrete dtypes, got ${this._dtype} -> ${dtype}`)
+      }
       if (dtype === this._dtype) return this
       const id = DTYPE_ID[dtype]
       if (id === undefined) throw new Error(`unsupported bitcast target dtype: ${dtype}`)
-      const sourceType = TA_BY_DTYPE[this._dtype]
-      const targetType = TA_BY_DTYPE[dtype]
-      /* Pinned UOp.bitcast and Tensor._bits_to_rand allow equal-total-byte
-       * scalar-width changes and update shape accordingly (uop/ops.py:922-929,
-       * mixin/rand.py:31-39). The C Tensor core owns that shape transform. */
-      if (!sourceType || !targetType) throw new Error('unsupported dtype in bitcast')
+      /* Current DTypeMixin.bitcast emits one raw BITCAST; C owns concrete
+       * dtype validation and UOp._shape last-axis scaling
+       * (mixin/dtype.py:35-50, uop/ops.py:404-411). */
       const core = this._rt._core.ffi.poly_tensor_bitcast_by_id(
         this._ctx, this._tensor, id
       )
-      if (!core) throw new Error(`poly_tensor_bitcast_by_id failed for dtype ${dtype}`)
+      if (!core) throw new Error('unsupported size in bitcast')
       return this._makeResultFromCore(core, [this], dtype)
     }
 
@@ -1505,33 +1497,29 @@ function createBoundTensorClass(runtime) {
 
     exp2() {
       const { ffi, ops } = this._rt._core
-      // Pinned _ensure_float().alu(EXP2) (mixin/elementwise.py:517-527).
-      const base = isFloatDtype(this._dtype) ? this : this.cast('float32')
-      const core = ffi.poly_tensor_alu1(base._ctx, ops.EXP2, base._tensor)
-      return base._makeResultFromCore(core, [base])
+      // Current Tinygrad emits the raw ALU op; C owns least_upper_float.
+      const core = ffi.poly_tensor_alu1(this._ctx, ops.EXP2, this._tensor)
+      return this._makeResultFromCore(core, [this])
     }
 
     log2() {
       const { ffi, ops } = this._rt._core
-      // Pinned _ensure_float().alu(LOG2) (mixin/elementwise.py:505-515).
-      const base = isFloatDtype(this._dtype) ? this : this.cast('float32')
-      const core = ffi.poly_tensor_alu1(base._ctx, ops.LOG2, base._tensor)
-      return base._makeResultFromCore(core, [base])
+      // Current Tinygrad emits the raw ALU op; C owns the result dtype.
+      const core = ffi.poly_tensor_alu1(this._ctx, ops.LOG2, this._tensor)
+      return this._makeResultFromCore(core, [this])
     }
 
     sqrt() {
       const { ffi, ops } = this._rt._core
-      // Pinned _ensure_float().alu(SQRT) (mixin/elementwise.py:460-468).
-      const base = isFloatDtype(this._dtype) ? this : this.cast('float32')
-      const core = ffi.poly_tensor_alu1(base._ctx, ops.SQRT, base._tensor)
-      return base._makeResultFromCore(core, [base])
+      // Current Tinygrad emits the raw ALU op; C owns the result dtype.
+      const core = ffi.poly_tensor_alu1(this._ctx, ops.SQRT, this._tensor)
+      return this._makeResultFromCore(core, [this])
     }
 
     reciprocal() {
       const { ffi, ops } = this._rt._core
-      const base = isFloatDtype(this._dtype) ? this : this.cast('float32')
-      const core = ffi.poly_tensor_alu1(base._ctx, ops.RECIPROCAL, base._tensor)
-      return base._makeResultFromCore(core, [base])
+      const core = ffi.poly_tensor_alu1(this._ctx, ops.RECIPROCAL, this._tensor)
+      return this._makeResultFromCore(core, [this])
     }
 
     trunc() {
@@ -1561,28 +1549,23 @@ function createBoundTensorClass(runtime) {
     }
 
     sin() {
-      // Pinned _ensure_float().alu(SIN), consuming the exact current Tensor
-      // occurrence (mixin/elementwise.py:437-478; tensor.py:128-140).
-      const base = isFloatDtype(this._dtype) ? this : this.cast('float32')
       const { ffi, ops } = this._rt._core
-      const core = ffi.poly_tensor_alu1(this._ctx, ops.SIN, base._tensor)
-      return base._makeResultFromCore(core, [base])
+      // Current Tinygrad emits SIN over the exact Tensor occurrence; C owns
+      // its least_upper_float result (mixin/elementwise.py:468-478).
+      const core = ffi.poly_tensor_alu1(this._ctx, ops.SIN, this._tensor)
+      return this._makeResultFromCore(core, [this])
     }
 
     cos() {
-      // Pinned floating COS promotes against float32, subtracts from pi/2,
-      // applies SIN, then casts back (mixin/elementwise.py:480-489).
-      if (isFloatDtype(this._dtype)) {
-        const work = this.cast(this._dtype === 'float64' ? 'float64' : 'float32')
-        return work._binop(Math.PI / 2, 'SUB', true).sin().cast(this._dtype)
-      }
-      return this._binop(Math.PI / 2, 'SUB', true).sin()
+      // Current least_upper_float/float32 composition is shared in C.
+      const core = this._rt._core.ffi.poly_tensor_cos(this._ctx, this._tensor)
+      return this._makeResultFromCore(core, [this])
     }
 
     tan() {
-      // Pinned tan is the high-level SIN/COS quotient
-      // (mixin/elementwise.py:902-910).
-      return this.sin().div(this.cos())
+      // Current self.sin()/self.cos() composition is shared in C.
+      const core = this._rt._core.ffi.poly_tensor_tan(this._ctx, this._tensor)
+      return this._makeResultFromCore(core, [this])
     }
 
     sigmoid() {
@@ -1805,12 +1788,10 @@ function createBoundTensorClass(runtime) {
       if (shape.length === 1 && Array.isArray(shape[0])) shape = shape[0]
       shape = normalizeExpandShape(this.shape, shape)
       if (arraysEqual(this.shape, shape)) return this
-      const aligned = new Array(shape.length - this.shape.length).fill(1).concat(this.shape)
-      const reshaped = this.reshape(aligned)
       const core = this._rt._core.ffi.poly_tensor_expand(
-        this._ctx, reshaped._tensor, shape, shape.length
+        this._ctx, this._tensor, shape, shape.length
       )
-      return reshaped._makeResultFromCore(core, [reshaped])
+      return this._makeResultFromCore(core, [this])
     }
 
     shrink(arg) {
@@ -1834,9 +1815,13 @@ function createBoundTensorClass(runtime) {
       // Pinned _pad_constant shrinks negative pads before emitting a
       // non-negative PAD (mixin/__init__.py:359-368). The shared C boundary
       // owns that policy for zero and nonzero fill values alike.
-      const core = this._rt._core.ffi.poly_tensor_pad_value(
-        this._ctx, this._tensor, flat, arg.length, Number(value)
-      )
+      let fn
+      if (typeof value === 'boolean') fn = this._rt._core.ffi.poly_tensor_pad_value_bool
+      else if (typeof value === 'number' && Number.isInteger(value)) {
+        fn = this._rt._core.ffi.poly_tensor_pad_value_int
+      } else if (typeof value === 'number') fn = this._rt._core.ffi.poly_tensor_pad_value_float
+      else throw new TypeError(`pad value must be boolean or number, got ${typeof value}`)
+      const core = fn(this._ctx, this._tensor, flat, arg.length, value)
       return this._makeResultFromCore(core, [this])
     }
 
@@ -2883,7 +2868,9 @@ function createBoundTensorClass(runtime) {
       }
       if (shape.length === 1 && Array.isArray(shape[0])) shape = shape[0]
       shape = shape.map(x => Number(x))
-      return Tensor.full(shape, 0, { ...(opts || {}), dtype: (opts && opts.dtype) || 'float32' })
+      /* Tinygrad 2026-08-22/a9069c177a9d CreationMixin.zeros passes Python
+       * 0.0 to full, preserving a weakfloat initializer (creation.py:106-120). */
+      return Tensor.full(shape, 0, { ...(opts || {}), _inferredDtype: 'weakfloat' })
     }
 
     static ones(...args) {
@@ -2894,7 +2881,7 @@ function createBoundTensorClass(runtime) {
       }
       if (shape.length === 1 && Array.isArray(shape[0])) shape = shape[0]
       shape = shape.map(x => Number(x))
-      return Tensor.full(shape, 1, { ...(opts || {}), dtype: (opts && opts.dtype) || 'float32' })
+      return Tensor.full(shape, 1, { ...(opts || {}), _inferredDtype: 'weakfloat' })
     }
 
     static full(shape, fillValue, opts) {
@@ -2903,8 +2890,10 @@ function createBoundTensorClass(runtime) {
       opts = opts ? { ...opts } : {}
       const ctx = opts._ctx || _runtime._core.ctx
       const device = normalizeDevice(opts._device || opts.device || _runtime.device || 'cpu')
-      const dtype = opts.dtype || (
-        typeof fillValue === 'boolean' ? 'bool' : Number.isInteger(fillValue) ? 'int32' : 'float32'
+      const dtypeExplicit = Object.prototype.hasOwnProperty.call(opts, 'dtype')
+      const buffer = opts.buffer !== false
+      const dtype = opts.dtype || opts._inferredDtype || (
+        typeof fillValue === 'boolean' ? 'bool' : Number.isInteger(fillValue) ? 'weakint' : 'weakfloat'
       )
       const dtypeId = DTYPE_ID[dtype]
       if (dtypeId === undefined) throw new Error(`unsupported dtype: ${dtype}`)
@@ -2913,17 +2902,17 @@ function createBoundTensorClass(runtime) {
         ? ffi.poly_tensor_full_int_by_id(
             ctx, shape, shape.length,
             typeof fillValue === 'boolean' ? (fillValue ? 1 : 0) : Math.trunc(Number(fillValue)),
-            dtypeId, targetDevice
+            dtypeId, targetDevice, dtypeExplicit, buffer
           )
         : ffi.poly_tensor_full_float_by_id(
-            ctx, shape, shape.length, Number(fillValue), dtypeId, targetDevice
+            ctx, shape, shape.length, Number(fillValue), dtypeId, targetDevice,
+            dtypeExplicit, buffer
           )
       if (!tensor) throw new Error('C-owned Tensor.full construction failed')
-      const value = new Tensor(null, {
+      return new Tensor(null, {
         _ctx: ctx, _tensor: tensor, _dtype: dtype, _device: device,
         requiresGrad: Boolean(opts.requiresGrad || opts.requires_grad)
       })
-      return opts.buffer === false ? value : value.clone(device)
     }
 
     static arange(start, stop, step, opts) {
@@ -3277,6 +3266,7 @@ function createBoundTensorClass(runtime) {
   }
 
   Tensor.training = false
+  Tensor._liveTensorSnapshot = liveTensorSnapshot
   return Tensor
 }
 

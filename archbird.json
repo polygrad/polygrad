@@ -305,10 +305,14 @@
       "ignore": ["poly_uop_key"],
       "providers": [
         {
-          "kind": "make_variable",
-          "path": "Makefile",
-          "variable": "WASM_EXPORTS",
-          "pattern": "_?(poly_[A-Za-z0-9_]+)"
+          "kind": "file_pattern",
+          "path": "js/src/core/wasm_common.js",
+          "pattern": "\\bModule\\._(poly_[A-Za-z0-9_]+)\\b"
+        },
+        {
+          "kind": "file_pattern",
+          "path": "js/src/core/wasm_common.js",
+          "pattern": "\\b(?:cwrap|ccall)\\(\\s*['\\\"](poly_[A-Za-z0-9_]+)"
         }
       ]
     },
@@ -406,12 +410,12 @@
     }
   ],
   "components": [
-    {"name": "ir", "paths": ["src/uop.c", "src/ir.c", "src/pat.c", "src/sym.c"], "description": "UOp IR, patterns, and symbolic algebra"},
-    {"name": "tensor", "paths": ["src/tensor.c", "src/ops.c", "src/shape.c"], "description": "tensor graph construction and shape semantics"},
+    {"name": "ir", "paths": ["src/uop/ops.c", "src/uop/weak.c", "src/uop/symbolic.c", "src/ir.c", "src/uop/upat.c"], "description": "UOp IR, weak lowering, patterns, and symbolic algebra"},
+    {"name": "tensor", "paths": ["src/tensor.c", "src/ops.c", "src/mixin/movement.c", "src/shape.c"], "description": "tensor graph construction and shape semantics"},
     {"name": "autograd", "paths": ["src/autograd.c"], "description": "gradient construction"},
     {"name": "schedule", "paths": ["src/engine/schedule.c", "src/schedule/**/*.c", "src/placer.c"], "description": "schedule construction, placement, range/index lowering"},
     {"name": "realize", "paths": ["src/engine/realize.c"], "description": "schedule execution and realization"},
-    {"name": "codegen", "paths": ["src/codegen.c", "src/render_*.c"], "description": "linearization and backend rendering"},
+    {"name": "codegen", "paths": ["src/codegen/**", "src/render_*.c"], "description": "linearization and backend rendering"},
     {"name": "runtime", "paths": ["src/device.c", "src/runtime_*.c", "src/interp.c"], "description": "device and runtime execution"},
     {"name": "jit", "paths": ["src/engine/jit.c"], "description": "capture and replay"},
     {"name": "frontends", "paths": ["py/polygrad/**/*.py", "py/examples/**/*.py", "py/extra/**/*.py", "js/src/**/*.js", "js/src/**/*.mjs", "r/R/**/*.R", "js/napi_api.c", "r/src/polygrad_wrapper.c"], "description": "public language, example/tooling, and browser surfaces"}
@@ -566,7 +570,7 @@
       "selectors": ["*permute*"],
       "min": 4,
       "required_routes": [
-        "src/shape.c",
+        "src/mixin/movement.c",
         "src/placer.c",
         "py/polygrad/tensor.py",
         "js/src/tensor.js"
@@ -579,7 +583,9 @@
     "REQUIRED-MAPPED-PATHS": {
       "kind": "required_paths",
       "paths": [
-        "src/uop.c",
+        "src/uop/ops.c",
+        "src/uop/weak.c",
+        "src/mixin/movement.c",
         "src/engine/schedule.c",
         "src/engine/realize.c",
         "py/polygrad/tensor.py",

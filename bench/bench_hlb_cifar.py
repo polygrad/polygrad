@@ -26,12 +26,12 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKER = ROOT / "bench" / "hlb_cifar_worker.py"
-TINYGRAD = ROOT / "references" / "tinygrad_latest"
+TINYGRAD = ROOT / "references" / "tinygrad_20260822"
 DEFAULT_PYTHON = ROOT / "references" / ".venv-tinygrad-py311" / "bin" / "python"
 DEFAULT_LIB = ROOT / "build" / "libpolygrad.so"
 RESULT_PREFIX = "HLB_RESULT "
-EXPECTED_TINYGRAD_COMMIT = "ba1d3baae81c96b3ed72900cde87bb307933c61f"
-EXPECTED_HLB_SHA256 = "942edfefc75647c0d0f440b2114964a7c4c69bf4f88ab45803f387d86231baae"
+EXPECTED_TINYGRAD_COMMIT = "a9069c177a9da9cca18593edf55acd2e6073cca6"
+EXPECTED_HLB_SHA256 = "9d692a09c52219f274c26199a6a1cb0143a1c004e019f5e563a06dd3480363ba"
 MAX_RTOL = 1e-5
 MAX_ATOL = 1e-5
 EXPECTED_FORWARD_KEYS = {"whitening", "input", "logits"}
@@ -381,7 +381,11 @@ def prepare_initial_state(
     })
     env.pop("HLB_FINAL_STATE_OUT", None)
     env.pop("HLB_FORWARD_OUT", None)
-    command = [str(python), str(WORKER), "--engine", "tinygrad", "--prepare-state"]
+    command = [
+        str(python), str(WORKER), "--engine", "tinygrad",
+        "--hlb-source", str(TINYGRAD / "examples" / "hlb_cifar10.py"),
+        "--prepare-state",
+    ]
     result = subprocess.run(
         command,
         cwd=ROOT,
@@ -419,7 +423,10 @@ def run_worker(
         capture_forward=capture_forward,
         capture_final_state=capture_final_state,
     )
-    command = [str(python), str(WORKER), "--engine", engine]
+    command = [
+        str(python), str(WORKER), "--engine", engine,
+        "--hlb-source", str(TINYGRAD / "examples" / "hlb_cifar10.py"),
+    ]
     result = subprocess.run(
         command,
         cwd=ROOT,

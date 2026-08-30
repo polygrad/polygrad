@@ -3,7 +3,6 @@ Tensor class for polygrad, lazy evaluation backed by the C compiler core.
 Supports float32 (default) and float64 dtypes.
 """
 
-import contextlib
 import ctypes
 import functools
 import math
@@ -15,9 +14,10 @@ from typing import cast as cast
 import numpy as np
 
 from . import _ffi
-from .dtype import INVERSE_DTYPES_DICT, _from_np_dtype, _to_np_dtype, dtypes, least_upper_dtype, least_upper_float, to_dtype
+from .dtype import INVERSE_DTYPES_DICT, _from_np_dtype, _to_np_dtype, dtypes, least_upper_dtype, least_upper_float, strong_dtype, to_dtype
 from polygrad.uop.ops import UOp
 from polygrad.device import Buffer
+from polygrad.helpers import TRAINING
 
 
 # Global registry of live Tensors. Keys are weakrefs so GC'd tensors vanish
@@ -106,8 +106,8 @@ def _shape_from_uop(ctx, uop):
     """Read tinygrad-style shape tuple from a UOp.
 
     Static dimensions are returned as ints. Symbolic dimensions are returned as
-    UOp wrappers around DEFINE_VAR/BIND expressions, matching tinygrad's
-    `uop.shape`. `poly_uop_max_shape_dims` exposes max_shape storage.
+    UOp wrappers around ALU BUFFER variables and AFTER/STORE bindings, matching
+    tinygrad's `uop.shape`. `poly_uop_max_shape_dims` exposes max_shape storage.
     """
     ndim = _ffi._lib.poly_uop_ndim(ctx, uop)
     if ndim <= 0:
@@ -139,6 +139,7 @@ I64_MAX = (1 << 63) - 1
 _KNOWN_DTYPE_NAMES = (
     'bool', 'int8', 'uint8', 'int16', 'uint16', 'int32', 'uint32',
     'int64', 'uint64', 'float16', 'bfloat16', 'float32', 'float64',
+    'fp8e4m3', 'fp8e5m2', 'fp8e4m3fnuz', 'fp8e5m2fnuz', 'weakint', 'weakfloat',
 )
 _DTYPE_ID_CACHE = {}
 _DTYPE_NAME_BY_ID = {}
@@ -156,7 +157,7 @@ def _dtype_name(dtype, default='float32'):
             dt = to_dtype(target)
         except AttributeError:
             dt = _from_np_dtype(np.dtype(target))
-    sdt = dt.scalar()
+    sdt = dt
     if sdt == dtypes.bool:
         return 'bool'
     if sdt == dtypes.int8:
@@ -269,7 +270,7 @@ def _prod(vals):
 
 
 def _dtype_min_value(dtype_name):
-    dt = to_dtype(dtype_name).scalar()
+    dt = to_dtype(dtype_name)
     if dtypes.is_float(dt):
         return -math.inf
     if dt == dtypes.bool:
@@ -282,7 +283,7 @@ def _dtype_min_value(dtype_name):
 
 def _sum_acc_dtype(dtype):
     """Pinned tinygrad dtype.py:274-278 default sum accumulation dtype."""
-    dt = to_dtype(dtype).scalar()
+    dt = to_dtype(dtype)
     floor = dtypes.uint32 if dtypes.is_unsigned(dt) else (
         dtypes.int32 if dtypes.is_int(dt) or dtypes.is_bool(dt) else dtypes.float32
     )
@@ -304,8 +305,7 @@ def _creation_meta(kwargs):
     from .device import Device
     ctx = kwargs.get('_ctx') or _default_ctx
     dev = Device.canonicalize(kwargs.get('_device') if '_device' in kwargs else kwargs.get('device'))
-    requires_grad = kwargs.get('requires_grad', False)
-    return ctx, dev, requires_grad
+    return ctx, dev
 
 
 def _shape_arg(shape):
@@ -402,7 +402,7 @@ def _uop_add_const_delta(value, base):
 
 
 def _symbolic_slice_size_uop(ctx, start_obj, stop_obj, start_u, stop_u):
-    if isinstance(start_obj, int) and start_obj == 0 and isinstance(stop_obj, (BoundVariable, UOp)):
+    if isinstance(start_obj, int) and start_obj == 0:
         return stop_u
     delta = _uop_add_const_delta(stop_u, start_u)
     if delta is not None:
@@ -425,7 +425,7 @@ def _require_i64(value, what):
     return ivalue
 
 
-def _created_tensor(ctx, tensor, dtype_name, device, requires_grad, op_name):
+def _created_tensor(ctx, tensor, dtype_name, device, op_name):
     # Constructors should trust the core for final shape metadata so Python
     # does not grow a second copy of shape or dual-root ownership logic.
     if not tensor:
@@ -433,9 +433,10 @@ def _created_tensor(ctx, tensor, dtype_name, device, requires_grad, op_name):
     uop = _ffi._lib.poly_tensor_uop(tensor)
     if not uop:
         raise RuntimeError(f'{op_name} returned a Tensor without a current UOp')
+    dtype_name = _dtype_name_from_id(int(_ffi._lib.poly_uop_dtype_id(ctx, uop)))
     return Tensor(
         _ctx=ctx, _tensor=tensor, _shape=_shape_from_uop(ctx, uop),
-        requires_grad=requires_grad, _dtype=dtype_name, _device=device,
+        _dtype=dtype_name, _device=device,
     )
 
 
@@ -521,22 +522,7 @@ class Tensor:
     .numpy() or .item() is called.
     """
 
-    training = False  # tinygrad compat
-
-    # Direct port of pinned tinygrad/tensor.py:151-154. ContextDecorator is
-    # observable because model examples use both `with Tensor.train()` and
-    # `@Tensor.train()` forms.
-    class train(contextlib.ContextDecorator):
-        def __init__(self, mode=True):
-            self.mode = mode
-
-        def __enter__(self):
-            self.prev, Tensor.training = Tensor.training, self.mode
-
-        def __exit__(self, exc_type, exc_value, traceback):
-            Tensor.training = self.prev
-
-    def __init__(self, data=None, requires_grad=False, *, dtype=None, device=None, _ctx=None, _uop=None,
+    def __init__(self, data=None, *, dtype=None, device=None, _ctx=None, _uop=None,
                  _data=None, _shape=None, _dtype=None, _device=None, _tensor=None):
         """Create a tensor from a list, numpy array, or scalar."""
         from . import _default_ctx
@@ -603,8 +589,8 @@ class Tensor:
                 else:
                     default_dt = (
                         'bool' if isinstance(data, bool)
-                        else 'int32' if isinstance(data, int)
-                        else 'float32'
+                        else 'weakint' if isinstance(data, int)
+                        else 'weakfloat'
                     )
                 dt = _dtype_name(dtype, default=default_dt)
                 scalar_dt = to_dtype(dt)
@@ -643,7 +629,7 @@ class Tensor:
                 import_dt = dt
                 post_cast_dt = None
                 np_dt = _to_np_dtype(dt)
-                if dt == 'bfloat16':
+                if to_dtype(dt) in {dtypes.bfloat16, *dtypes.fp8s}:
                     import_dt = 'float32'
                     post_cast_dt = dt
                     np_dt = np.float32
@@ -709,7 +695,6 @@ class Tensor:
                 if key:
                     _host_buffers[key] = self._data
 
-        self._requires_grad = bool(requires_grad)
         if imported_tensor_from_host:
             source_device_id = int(_ffi._lib.poly_tensor_device(self._tensor))
             target_device_id = _device_id(self._device)
@@ -732,13 +717,7 @@ class Tensor:
                     raise RuntimeError(f'poly_tensor_to_device failed for {self._device}')
             else:
                 self._tensor = self._core_create(current_uop, _POLY_TENSOR_VALUE, self._device)
-        if self._requires_grad:
-            self._sync_core_requires_grad(force=True)
-
         self._grad = None
-        # Match tinygrad's public parameter marker.  This is independent from
-        # Polygrad's private requires_grad switch, which controls which live
-        # logical roots the C autograd bridge targets.
         self._is_param = True
         all_tensors[weakref.ref(self)] = None
 
@@ -766,10 +745,6 @@ class Tensor:
         return Tensor._core_create_with_roots_for(
             self._ctx, logical, physical, role, self._device if device is None else device
         )
-
-    def _sync_core_requires_grad(self, *, force=False):
-        if self._tensor and (force or self._requires_grad):
-            _ffi._lib.poly_tensor_set_requires_grad(self._tensor, bool(self._requires_grad))
 
     @staticmethod
     def _core_uop_raw(tensor):
@@ -858,19 +833,6 @@ class Tensor:
         return canonical
 
     @property
-    def requires_grad(self):
-        return self._requires_grad
-
-    @requires_grad.setter
-    def requires_grad(self, val):
-        self._requires_grad = bool(val)
-        self._sync_core_requires_grad(force=True)
-
-    def requires_grad_(self, val=True):
-        self.requires_grad = val
-        return self
-
-    @property
     def is_param(self):
         return self._is_param
 
@@ -942,8 +904,6 @@ class Tensor:
                 _dtype=t._dtype_str,
                 _device=t._device,
             )
-            if t._requires_grad:
-                out.requires_grad = True
             outs.append(out)
         call = physical_afters[0].src[1]
         _custom_kernel_grad_records.append({
@@ -960,8 +920,8 @@ class Tensor:
     def _live_grad_targets(self):
         """Find gradient targets the same way tinygrad does.
 
-        Pinned tinygrad discovers targets only through each current
-        ``Tensor.uop`` (tensor.py:527-543). Polygrad's corresponding root is
+        Current tinygrad discovers targets only through each current
+        ``Tensor.uop`` (tensor.py:657-677). Polygrad's corresponding root is
         the mandatory physical/current root; retained logical provenance is
         never an execution fallback.
         """
@@ -975,10 +935,11 @@ class Tensor:
             if t is None:
                 stale_refs.append(tref)
                 continue
-            if _ptr_value(t._ctx) != ctx_key or not t._requires_grad:
+            if _ptr_value(t._ctx) != ctx_key or not dtypes.is_float(t.dtype):
                 continue
             current_raw = Tensor._core_uop_raw(t._tensor)
-            if current_raw and _ffi._lib.poly_uop_reachable(self._ctx, root, current_raw):
+            if (current_raw and int(_ffi._lib.poly_uop_device(current_raw)) != 0 and
+                    _ffi._lib.poly_uop_reachable(self._ctx, root, current_raw)):
                 targets.append((t, current_raw))
         for tref in stale_refs:
             all_tensors.pop(tref, None)
@@ -1097,7 +1058,6 @@ class Tensor:
         self._data = x._data
         self._dtype_str = x._dtype_str
         self._device = x._device
-        self._sync_core_requires_grad(force=True)
         return self
 
     def assign(self, x):
@@ -1117,8 +1077,6 @@ class Tensor:
         if not assigned:
             raise RuntimeError('poly_tensor_assign failed')
         self._tensor = assigned
-        if self._requires_grad:
-            self._sync_core_requires_grad(force=True)
         self._data = None
         return self
 
@@ -1207,7 +1165,7 @@ class Tensor:
         # source) to CPU for readback. Default execution must not recover the old implicit
         # realize-time placement merely because wrapper metadata names a
         # preferred execution backend.
-        x = self.cast(to_dtype(self._dtype_str).base).contiguous()
+        x = self.cast(to_dtype(self._dtype_str)).contiguous()
         if int(_ffi._lib.poly_uop_device(self.uop.raw)) == 0 or isinstance(self._device, tuple):
             x = x.clone("CPU")
         x.realize()
@@ -1215,8 +1173,10 @@ class Tensor:
 
     def data(self):
         """Return tensor contents as a shaped memoryview, matching tinygrad."""
+        dtype = to_dtype(self._dtype_str)
+        if dtype in dtypes.weaks:
+            return self.cast(strong_dtype(dtype)).data()
         shape = self.shape
-        dtype = to_dtype(self._dtype_str).base
         if 0 in shape:
             return memoryview(bytearray(0)).cast(dtype.fmt)
         assert _shape_all_int(shape), f'no data if shape is symbolic, self.shape={shape}'
@@ -1230,7 +1190,9 @@ class Tensor:
         from .dtype import _to_np_dtype
         shape = self.shape
         dtype = to_dtype(self._dtype_str)
-        if dtype.base in {dtypes.bfloat16, *dtypes.fp8s}:
+        if dtype in dtypes.weaks:
+            return self.cast(strong_dtype(dtype)).numpy()
+        if dtype in {dtypes.bfloat16, *dtypes.fp8s}:
             return self.float().numpy()
         np_dt = _to_np_dtype(dtype)
         if 0 in shape:
@@ -1272,16 +1234,14 @@ class Tensor:
         # Pinned tensor.py:285-300 widens half through the graph before
         # returning Python values. This is distinct from widening values after
         # reading rounded float16 storage through numpy().
-        if to_dtype(self._dtype_str).base == dtypes.half:
+        if to_dtype(self._dtype_str) == dtypes.half:
             return self.float().tolist()
         return self.numpy().tolist()
 
     def detach(self):
         # Pinned mixin/elementwise.py:33-37 is one DETACH Tensor ALU.
         core = _ffi._lib.poly_tensor_detach(self._ctx, self._tensor)
-        ret = self._make_result_from_core(core, self.shape, [self])
-        ret.requires_grad = False
-        return ret
+        return self._make_result_from_core(core, self.shape, [self])
 
     def contiguous_backward(self):
         """Insert a contiguous operation in the backward pass."""
@@ -1297,7 +1257,6 @@ class Tensor:
         ret = Tensor.empty(
             self.shape,
             _ctx=self._ctx,
-            requires_grad=self._requires_grad,
             dtype=self._dtype_str,
             device=dev,
         )
@@ -1325,7 +1284,6 @@ class Tensor:
             _data=self._data,
             _dtype=self._dtype_str,
             _device=dev,
-            requires_grad=self._requires_grad,
         )
         out._grad = self._grad.to(dev) if self._grad is not None else None
         out._is_param = self._is_param
@@ -1339,7 +1297,6 @@ class Tensor:
         self._data = moved._data
         self._dtype_str = moved._dtype_str
         self._device = moved._device
-        self._requires_grad = moved._requires_grad
         self._grad = moved._grad
         self._is_param = moved._is_param
         return self
@@ -1384,21 +1341,20 @@ class Tensor:
         """Bit reinterpretation matching tinygrad Tensor.bitcast."""
         target = to_dtype(dtype)
         current = to_dtype(self._dtype_str)
+        if current in (dtypes.weakint, dtypes.weakfloat) or target in (dtypes.weakint, dtypes.weakfloat):
+            raise RuntimeError(f'bitcast requires concrete dtypes, got {current} -> {target}')
         if current == target:
             return self
-        old_size, new_size = current.itemsize, target.itemsize
-        if not self.shape or (self.shape[-1] * old_size) % new_size != 0:
-            raise RuntimeError('unsupported size in bitcast')
-        # Pinned tensor.py:890-898 unequal-width decomposition now lives in
-        # the C Tensor boundary so Python, JS, and direct C share one graph.
+        # Current DTypeMixin.bitcast constructs one raw BITCAST and leaves
+        # last-axis validation/inference to UOp._shape (mixin/dtype.py:35-50,
+        # uop/ops.py:404-411). The C core owns both roots and that shape rule.
         core = _ffi._lib.poly_tensor_bitcast_by_id(
             self._ctx, self._tensor, _dtype_id(target)
         )
         if not core:
-            raise RuntimeError(f'poly_tensor_bitcast_by_id failed for dtype {target}')
-        # Unequal-width DISK BITCAST changes the final dimension. Derive the
-        # wrapper shape from the returned UOp, matching Tensor.shape's pinned
-        # UOp ownership instead of copying the source wrapper shape.
+            raise RuntimeError('unsupported size in bitcast')
+        # Unequal-width BITCAST changes the final dimension. Derive the
+        # wrapper shape from the returned UOp instead of copying source shape.
         result_raw = self._core_uop_raw(core)
         return self._make_result_from_core(
             core, _shape_from_uop(self._ctx, result_raw), [self]
@@ -1452,11 +1408,8 @@ class Tensor:
         ret._shape_override = tuple(shape) if shape is not None else None
         ret._data = None
         ret._dtype_str = _uop_dtype_name(self._ctx, current, self._dtype_str)
-        ret._requires_grad = any(t._requires_grad for t in inputs)
         ret._grad = None
         ret._is_param = True
-        if ret._requires_grad:
-            ret._sync_core_requires_grad(force=True)
         all_tensors[weakref.ref(ret)] = None
         return ret
 
@@ -1490,11 +1443,7 @@ class Tensor:
         if isinstance(other, np.generic):
             other = other.item()
         if isinstance(other, (bool, int, float)):
-            self_dt = to_dtype(self._dtype_str)
-            if dtypes.is_float(self_dt) or (dtypes.is_int(self_dt) and isinstance(other, int) and not isinstance(other, bool)):
-                const_dtype = self_dt
-            else:
-                const_dtype = dtypes.from_py(other)
+            const_dtype = dtypes.from_py(other)
             const_dtype_name = _dtype_name(const_dtype, default='float32')
             dt = to_dtype(const_dtype_name)
             normalized = dt.const(other)
@@ -1511,16 +1460,29 @@ class Tensor:
                     self._ctx, float(normalized), dtype_id, _device_id(self._device)
                 )
             return _created_tensor(
-                self._ctx, tensor, const_dtype_name, self._device, False,
+                self._ctx, tensor, const_dtype_name, self._device,
                 'C-owned internal scalar Tensor construction',
             )
         raise TypeError(f'Cannot convert {type(other)} to Tensor')
 
     def const_like(self, value):
         """Pinned CreationMixin.const_like: typed CONST broadcast to this shape."""
-        return Tensor(
-            value, dtype=self.dtype, device=self.device, _ctx=self._ctx
-        )._broadcast_to_tensor(self.shape)
+        if isinstance(value, np.generic):
+            value = value.item()
+        if not isinstance(value, (bool, int, float)):
+            raise TypeError(f'const_like value must be numeric, got {type(value)}')
+        if isinstance(value, (bool, int)):
+            normalized = int(bool(value)) if isinstance(value, bool) else int(value)
+            if normalized < I64_MIN or normalized > I64_MAX:
+                raise ValueError(f'scalar {normalized} is out of int64 range')
+            core = _ffi._lib.poly_tensor_const_like_int(
+                self._ctx, self._tensor, normalized
+            )
+        else:
+            core = _ffi._lib.poly_tensor_const_like_float(
+                self._ctx, self._tensor, float(value)
+            )
+        return self._make_result_from_core(core, self.shape, [self])
 
     def _broadcast_shape(self, other_shape):
         """Compute broadcast shape between self.shape and other_shape."""
@@ -1551,20 +1513,7 @@ class Tensor:
         Tensor occurrences, then Tensor.alu consumes their current UOps
         (mixin/__init__.py:439-449, mixin/movement.py:116-128).
         """
-        target_shape = tuple(target_shape)
-        if self.shape == target_shape:
-            return self
-        if self.ndim > len(target_shape):
-            raise ValueError(
-                f"cannot broadcast tensor to fewer dimensions. shape={self.shape} "
-                f"to new_shape={target_shape}"
-            )
-        aligned_shape = (1,) * (len(target_shape) - self.ndim) + tuple(self.shape)
-        if not all(s == ns or s == 1 for s, ns in zip(aligned_shape, target_shape)):
-            raise ValueError(f"cannot broadcast {self.shape} to new_shape={target_shape}")
-        reshaped = self.reshape(aligned_shape)
-        expanded = reshaped.expand(target_shape)
-        return reshaped if expanded.shape == reshaped.shape else expanded
+        return self.expand(tuple(target_shape))
 
     # --- Element-wise arithmetic ---
 
@@ -1572,10 +1521,6 @@ class Tensor:
         other = self._ensure_tensor(other)
         x, y = (self, other) if not reverse else (other, self)
         out_shape = x._broadcast_shape(y.shape)
-        x, y = x._broadcast_to_tensor(out_shape), y._broadcast_to_tensor(out_shape)
-        if x.dtype != y.dtype:
-            out_dtype = least_upper_dtype(to_dtype(x.dtype), to_dtype(y.dtype))
-            x, y = x.cast(out_dtype), y.cast(out_dtype)
         return x, y, out_shape
 
     def _binop(self, other, op_name, reverse=False):
@@ -1584,7 +1529,7 @@ class Tensor:
         core = _ffi._lib.poly_tensor_alu2(
             self._ctx, _ffi.OPS[op_name], x._tensor, y._tensor
         )
-        return self._make_result_from_core(core, out_shape, [x, y])
+        return self._make_result_from_core(core, None, [x, y])
 
     def bitwise_and(self, other, reverse=False):
         if not (dtypes.is_int(to_dtype(self.dtype)) or dtypes.is_bool(to_dtype(self.dtype))):
@@ -1720,16 +1665,16 @@ class Tensor:
         if isinstance(other, np.generic):
             other = other.item()
         base, exponent, out_shape = self._broadcasted(other, reverse)
-        if (not dtypes.is_float(base.dtype) and
+        # Tinygrad 2026-08-22/a9069c177a9d mixin/elementwise.py:545-564
+        # validates the promoted scalar pair and returns the raw POW.
+        common = least_upper_dtype(to_dtype(base.dtype), to_dtype(exponent.dtype))
+        if (not dtypes.is_float(common) and
                 not isinstance(other, Tensor) and not (isinstance(other, int) and other >= 0)):
             raise RuntimeError("base needs to be float")
         core = _ffi._lib.poly_tensor_alu2(
             self._ctx, _ffi.OPS['POW'], base._tensor, exponent._tensor
         )
-        ret = self._make_result_from_core(core, out_shape, [base, exponent])
-        if not reverse and not dtypes.is_float(self.dtype) and dtypes.is_float(exponent.dtype):
-            return ret.round().cast(self.dtype)
-        return ret
+        return self._make_result_from_core(core, out_shape, [base, exponent])
 
     def __pow__(self, other):
         return self.pow(other)
@@ -1769,25 +1714,16 @@ class Tensor:
 
     def where(self, x, y):
         """self is condition: where(cond, x, y)."""
-        # Pinned tensor.py:750-772 anchors branch promotion on an existing
-        # branch Tensor, not on the boolean condition.
-        if isinstance(x, Tensor):
-            x, y, branch_shape = x._broadcasted(y)
-        elif isinstance(y, Tensor):
-            y, x, branch_shape = y._broadcasted(x)
-        else:
-            # Pinned tensor.py:769-770 uses self.ufix(x)._broadcasted(y).
-            # ufix shapes the scalar like the condition before branch
-            # promotion (uop/ops.py:496-508), so movement precedes CAST.
-            x, y, branch_shape = self._ensure_tensor(x)._broadcast_to_tensor(self.shape)._broadcasted(y)
-        out_shape = _broadcast_shapes(self.shape, branch_shape)
-        cond = self.cast('bool')._broadcast_to_tensor(out_shape)
-        x = x._broadcast_to_tensor(out_shape)
-        y = y._broadcast_to_tensor(out_shape)
+        # Current ElementwiseMixin.where selects a branch Tensor only to own
+        # host-scalar conversion. C owns branch promotion and ALU shape
+        # inference for both frontends (mixin/elementwise.py:422-434).
+        ref = x if isinstance(x, Tensor) else y if isinstance(y, Tensor) else self
+        x = x if isinstance(x, Tensor) else ref._ensure_tensor(x)
+        y = y if isinstance(y, Tensor) else ref._ensure_tensor(y)
         core = _ffi._lib.poly_tensor_alu3(
-            self._ctx, _ffi.OPS['WHERE'], cond._tensor, x._tensor, y._tensor
+            self._ctx, _ffi.OPS['WHERE'], self._tensor, x._tensor, y._tensor
         )
-        return self._make_result_from_core(core, out_shape, [cond, x, y])
+        return self._make_result_from_core(core, None, [self, x, y])
 
     def maximum(self, other):
         return self._binop(other, 'MAX')
@@ -1816,35 +1752,32 @@ class Tensor:
     # --- Unary math (C core composed ops) ---
 
     def exp2(self):
-        # Pinned _ensure_float().alu(EXP2) (mixin/elementwise.py:517-527).
-        base = self if dtypes.is_float(self.dtype) else self.cast(least_upper_float(to_dtype(self.dtype)))
+        # Current Tinygrad emits the raw ALU op and lets UOp.dtype own
+        # least_upper_float (mixin/elementwise.py:513-531, uop/ops.py:144-145).
         core = _ffi._lib.poly_tensor_alu1(
-            base._ctx, _ffi.OPS['EXP2'], base._tensor
+            self._ctx, _ffi.OPS['EXP2'], self._tensor
         )
-        return base._make_result_from_core(core, base.shape, [base])
+        return self._make_result_from_core(core, self.shape, [self])
 
     def log2(self):
-        # Pinned _ensure_float().alu(LOG2) (mixin/elementwise.py:505-515).
-        base = self if dtypes.is_float(self.dtype) else self.cast(least_upper_float(to_dtype(self.dtype)))
+        # Current Tinygrad emits the raw ALU op; result dtype is C-owned.
         core = _ffi._lib.poly_tensor_alu1(
-            base._ctx, _ffi.OPS['LOG2'], base._tensor
+            self._ctx, _ffi.OPS['LOG2'], self._tensor
         )
-        return base._make_result_from_core(core, base.shape, [base])
+        return self._make_result_from_core(core, self.shape, [self])
 
     def sqrt(self):
-        # Pinned _ensure_float().alu(SQRT) (mixin/elementwise.py:460-468).
-        base = self if dtypes.is_float(self.dtype) else self.cast(least_upper_float(to_dtype(self.dtype)))
+        # Current Tinygrad emits the raw ALU op; result dtype is C-owned.
         core = _ffi._lib.poly_tensor_alu1(
-            base._ctx, _ffi.OPS['SQRT'], base._tensor
+            self._ctx, _ffi.OPS['SQRT'], self._tensor
         )
-        return base._make_result_from_core(core, base.shape, [base])
+        return self._make_result_from_core(core, self.shape, [self])
 
     def reciprocal(self):
-        base = self if dtypes.is_float(self.dtype) else self.cast(least_upper_float(to_dtype(self.dtype)))
         core = _ffi._lib.poly_tensor_alu1(
-            base._ctx, _ffi.OPS['RECIPROCAL'], base._tensor
+            self._ctx, _ffi.OPS['RECIPROCAL'], self._tensor
         )
-        return base._make_result_from_core(core, base.shape, [base])
+        return self._make_result_from_core(core, self.shape, [self])
 
     def trunc(self):
         core = _ffi._lib.poly_tensor_alu1(
@@ -1869,26 +1802,24 @@ class Tensor:
         return self._make_result_from_core(core, self.shape, [self])
 
     def sin(self):
-        # Pinned _ensure_float().alu(SIN), consuming the exact current Tensor
-        # occurrence (mixin/elementwise.py:437-478; tensor.py:128-140).
-        base = self if dtypes.is_float(self.dtype) else self.cast(least_upper_float(to_dtype(self.dtype)))
+        # Current Tinygrad emits SIN over the exact Tensor occurrence and lets
+        # UOp.dtype promote its result (mixin/elementwise.py:468-478).
         core = _ffi._lib.poly_tensor_alu1(
-            base._ctx, _ffi.OPS['SIN'], base._tensor
+            self._ctx, _ffi.OPS['SIN'], self._tensor
         )
-        return base._make_result_from_core(core, base.shape, [base])
+        return self._make_result_from_core(core, self.shape, [self])
 
     def cos(self):
-        # Pinned floating COS promotes against float32, subtracts from pi/2,
-        # applies SIN, then casts back (mixin/elementwise.py:480-489).
-        if dtypes.is_float(self.dtype):
-            work = self.cast(least_upper_dtype(to_dtype(self.dtype), dtypes.float32))
-            return (math.pi / 2 - work).sin().cast(self.dtype)
-        return (math.pi / 2 - self).sin()
+        # Current least_upper_float/float32 composition is shared in C
+        # (mixin/elementwise.py:480-489).
+        core = _ffi._lib.poly_tensor_cos(self._ctx, self._tensor)
+        return self._make_result_from_core(core, self.shape, [self])
 
     def tan(self):
-        # Pinned tan is the high-level SIN/COS quotient
-        # (mixin/elementwise.py:902-910).
-        return self.sin() / self.cos()
+        # Current self.sin()/self.cos() composition is shared in C
+        # (mixin/elementwise.py:917-927).
+        core = _ffi._lib.poly_tensor_tan(self._ctx, self._tensor)
+        return self._make_result_from_core(core, self.shape, [self])
 
     def sigmoid(self):
         # Pinned mixin/elementwise.py:667-677.
@@ -2027,7 +1958,7 @@ class Tensor:
         # Direct port of pinned tensor.py:809-829.
         if not 0 <= p <= 1:
             raise ValueError(f'p={p} is out of range [0, 1]')
-        if not Tensor.training or p == 0:
+        if not TRAINING or p == 0:
             return self
         if p == 1:
             return self.const_like(0)
@@ -2114,28 +2045,19 @@ class Tensor:
         if self.shape == shape:
             return self
         if _shape_has_symbolic(shape):
-            aligned = (1,) * (len(shape) - self.ndim) + tuple(self.shape)
-            if aligned != self.shape:
-                if not _shape_all_int(aligned):
-                    raise NotImplementedError('symbolic movement reshape is not implemented')
-                reshaped = self.reshape(aligned)
-            else:
-                reshaped = self
             dims = _shape_uop_array(self._ctx, shape)
             core = _ffi._lib.poly_tensor_expand_uop(
-                self._ctx, reshaped._tensor, dims, len(shape)
+                self._ctx, self._tensor, dims, len(shape)
             )
             if not core:
                 raise RuntimeError('poly_tensor_expand_uop failed')
             current = self._core_uop_raw(core)
-            return reshaped._make_result_from_core(
-                core, _shape_from_uop(self._ctx, current), [reshaped]
+            return self._make_result_from_core(
+                core, _shape_from_uop(self._ctx, current), [self]
             )
-        aligned = (1,) * (len(shape) - self.ndim) + tuple(self.shape)
-        reshaped = self.reshape(aligned)
         dims, n = _int64_array(shape)
-        core = _ffi._lib.poly_tensor_expand(reshaped._ctx, reshaped._tensor, dims, n)
-        return reshaped._make_result_from_core(core, shape, [reshaped])
+        core = _ffi._lib.poly_tensor_expand(self._ctx, self._tensor, dims, n)
+        return self._make_result_from_core(core, shape, [self])
 
     def shrink(self, arg):
         """arg is tuple of (start, end) pairs per dimension."""
@@ -2157,9 +2079,15 @@ class Tensor:
         # Pinned _pad_constant shrinks negative pads before emitting a
         # non-negative PAD (mixin/__init__.py:359-368). Keep that policy in
         # the shared C boundary for both zero and nonzero fill values.
-        core = _ffi._lib.poly_tensor_pad_value(
-            self._ctx, self._tensor, flat, n, float(value)
-        )
+        if isinstance(value, bool):
+            fn, scalar = _ffi._lib.poly_tensor_pad_value_bool, value
+        elif isinstance(value, int):
+            fn, scalar = _ffi._lib.poly_tensor_pad_value_int, value
+        elif isinstance(value, float):
+            fn, scalar = _ffi._lib.poly_tensor_pad_value_float, value
+        else:
+            raise TypeError(f"pad value must be bool, int, or float, got {type(value).__name__}")
+        core = fn(self._ctx, self._tensor, flat, n, scalar)
         new_shape = tuple(s + b + a for s, (b, a) in zip(self.shape, arg))
         return self._make_result_from_core(core, new_shape, [self])
 
@@ -2359,7 +2287,6 @@ class Tensor:
             tuple(s for i, s in enumerate(self.shape) if i != axis)
         )
         result = self._make_result_from_core(core, shape, [self])
-        result.requires_grad = False
         return result
 
     def sort(self, dim=-1, descending=False):
@@ -2374,7 +2301,6 @@ class Tensor:
             raise RuntimeError('poly_tensor_sort failed')
         vals = self._make_result_from_core(values, self.shape, [self])
         idx = self._make_result_from_core(indices, self.shape, [self])
-        idx.requires_grad = False
         return vals, idx
 
     def argsort(self, dim=-1, descending=False):
@@ -2398,7 +2324,6 @@ class Tensor:
         out_shape[dim] = int(k)
         vals = self._make_result_from_core(values, tuple(out_shape), [self])
         idx = self._make_result_from_core(indices, tuple(out_shape), [self])
-        idx.requires_grad = False
         return vals, idx
 
     def min(self, axis=None, keepdim=False):
@@ -3152,9 +3077,10 @@ class Tensor:
     @staticmethod
     def full(shape, fill_value, **kwargs):
         buffer = bool(kwargs.pop('buffer', True))
-        ctx, dev, requires_grad = _creation_meta(kwargs)
+        ctx, dev = _creation_meta(kwargs)
         shape = (shape,) if isinstance(shape, int) else _shape_tuple(shape)
         fill_value = _py_scalar(fill_value)
+        dtype_explicit = 'dtype' in kwargs
         inferred = kwargs.get('dtype', dtypes.from_py(fill_value))
         dtype_name = _dtype_name(inferred, default='float32')
         dtype_id = _dtype_id(dtype_name)
@@ -3163,20 +3089,21 @@ class Tensor:
         dt = to_dtype(dtype_name)
         if dtypes.is_float(dt):
             tensor = _ffi._lib.poly_tensor_full_float_by_id(
-                ctx, dims, ndim, float(fill_value), dtype_id, _device_id(dev)
+                ctx, dims, ndim, float(fill_value), dtype_id, _device_id(dev),
+                dtype_explicit, buffer,
             )
         else:
             tensor = _ffi._lib.poly_tensor_full_int_by_id(
-                ctx, dims, ndim, _require_i64(fill_value, 'fill_value'), dtype_id, _device_id(dev)
+                ctx, dims, ndim, _require_i64(fill_value, 'fill_value'), dtype_id,
+                _device_id(dev), dtype_explicit, buffer,
             )
-        value = _created_tensor(
-            ctx, tensor, dtype_name, dev, requires_grad, 'poly_tensor_full_*_by_id'
+        return _created_tensor(
+            ctx, tensor, dtype_name, dev, 'poly_tensor_full_*_by_id'
         )
-        return value.clone(device=dev) if buffer else value
 
     @staticmethod
     def arange(start, stop=None, step=1, **kwargs):
-        ctx, dev, requires_grad = _creation_meta(kwargs)
+        ctx, dev = _creation_meta(kwargs)
         start = _py_scalar(start)
         stop = _py_scalar(stop) if stop is not None else None
         step = _py_scalar(step)
@@ -3205,12 +3132,12 @@ class Tensor:
                 _device_id(dev),
             )
         return _created_tensor(
-            ctx, tensor, dtype_name, dev, requires_grad, 'poly_tensor_arange_*_by_id'
+            ctx, tensor, dtype_name, dev, 'poly_tensor_arange_*_by_id'
         )
 
     @staticmethod
     def rand(*shape, **kwargs):
-        ctx, dev, requires_grad = _creation_meta(kwargs)
+        ctx, dev = _creation_meta(kwargs)
         shape = _shape_tuple(*shape)
         dtype_name = _dtype_name(kwargs.get('dtype', dtypes.default_float), default='float32')
         dt = to_dtype(dtype_name)
@@ -3224,7 +3151,7 @@ class Tensor:
             int(bool(kwargs.get('contiguous', True))),
         )
         return _created_tensor(
-            ctx, tensor, dtype_name, dev, requires_grad, 'poly_tensor_rand_by_id'
+            ctx, tensor, dtype_name, dev, 'poly_tensor_rand_by_id'
         )
 
     def rand_like(self, **kwargs):
@@ -3239,7 +3166,7 @@ class Tensor:
 
     @staticmethod
     def randn(*shape, **kwargs):
-        ctx, dev, requires_grad = _creation_meta(kwargs)
+        ctx, dev = _creation_meta(kwargs)
         shape = _shape_tuple(*shape)
         dtype_name = _dtype_name(kwargs.get('dtype', dtypes.default_float), default='float32')
         dt = to_dtype(dtype_name)
@@ -3250,7 +3177,7 @@ class Tensor:
             ctx, dims, ndim, _dtype_id(dtype_name), _device_id(dev)
         )
         return _created_tensor(
-            ctx, tensor, dtype_name, dev, requires_grad, 'poly_tensor_randn_by_id'
+            ctx, tensor, dtype_name, dev, 'poly_tensor_randn_by_id'
         )
 
     @classmethod
@@ -3318,7 +3245,7 @@ class Tensor:
 
     @staticmethod
     def linspace(start, stop, steps, **kwargs):
-        ctx, dev, requires_grad = _creation_meta(kwargs)
+        ctx, dev = _creation_meta(kwargs)
         dtype_name = _dtype_name(kwargs.get('dtype', dtypes.default_float), default='float32')
         tensor = _ffi._lib.poly_tensor_linspace_by_id(
             ctx,
@@ -3329,12 +3256,12 @@ class Tensor:
             _device_id(dev),
         )
         return _created_tensor(
-            ctx, tensor, dtype_name, dev, requires_grad, 'poly_tensor_linspace_by_id'
+            ctx, tensor, dtype_name, dev, 'poly_tensor_linspace_by_id'
         )
 
     @staticmethod
     def eye(n, m=None, **kwargs):
-        ctx, dev, requires_grad = _creation_meta(kwargs)
+        ctx, dev = _creation_meta(kwargs)
         dtype_name = _dtype_name(kwargs.get('dtype', dtypes.default_float), default='float32')
         rows = _require_i64(_py_scalar(n), 'n')
         cols = rows if m is None else _require_i64(_py_scalar(m), 'm')
@@ -3342,47 +3269,28 @@ class Tensor:
             ctx, rows, cols, _dtype_id(dtype_name), _device_id(dev)
         )
         return _created_tensor(
-            ctx, tensor, dtype_name, dev, requires_grad, 'poly_tensor_eye_by_id'
+            ctx, tensor, dtype_name, dev, 'poly_tensor_eye_by_id'
         )
 
     @staticmethod
     def empty(*shape, **kwargs):
         if 'name' in kwargs:
             raise TypeError('Tensor.empty does not accept name; pass names to Instance.from_tensors')
-        ctx, dev, requires_grad = _creation_meta(kwargs)
+        ctx, dev = _creation_meta(kwargs)
         dtype_name = _dtype_name(kwargs.get('dtype', dtypes.default_float), default='float32')
         if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
             shape = tuple(shape[0])
         shape = tuple(_py_scalar(x) for x in shape)
         if any(_is_symbolic_dim(x) for x in shape):
-            if not shape or not _is_symbolic_dim(shape[0]):
-                raise NotImplementedError('symbolic Tensor.empty currently requires the leading dimension to be symbolic')
-            if any(_is_symbolic_dim(x) for x in shape[1:]):
-                raise NotImplementedError('symbolic Tensor.empty currently supports one leading symbolic dimension')
-            batch_raw = _symbolic_dim_raw(shape[0])
-            if not batch_raw or not _ffi._lib.poly_uop_unbind_var(batch_raw):
-                raise ValueError('symbolic Tensor.empty dimension must be a Variable, BoundVariable, or variable UOp')
-            inner = tuple(_require_i64(_py_scalar(x), 'shape') for x in shape[1:])
-            if any(dim < 0 for dim in inner):
-                raise ValueError(f'negative dimensions are not allowed: {shape}')
-            dims, n_inner = _int64_array(inner) if inner else (None, 0)
-            dtype_id = _dtype_id(dtype_name)
-            logical = _ffi._lib.poly_buffer_var_by_id(
-                ctx, dtype_id, batch_raw, dims, n_inner, 0
-            )
-            physical = _ffi._lib.poly_buffer_var_by_id(
-                ctx, dtype_id, batch_raw, dims, n_inner, _device_id(dev)
-            )
-            if not logical or not physical:
-                raise RuntimeError('poly_buffer_var_by_id failed')
-            tensor = _ffi._lib.poly_tensor_create_with_roots(
-                ctx, logical, physical, _POLY_TENSOR_VALUE, _device_id(dev)
+            dims = _shape_uop_array(ctx, shape)
+            tensor = _ffi._lib.poly_tensor_empty_uop_by_id(
+                ctx, _dtype_id(dtype_name), dims, len(shape), _device_id(dev)
             )
             if not tensor:
-                raise RuntimeError('poly_tensor_create_with_roots failed')
+                raise RuntimeError('poly_tensor_empty_uop_by_id failed')
             return Tensor(
-                _ctx=ctx, _uop=logical, _tensor=tensor, _shape=shape,
-                requires_grad=requires_grad, _dtype=dtype_name, _device=dev,
+                _ctx=ctx, _tensor=tensor, _shape=shape,
+                _dtype=dtype_name, _device=dev,
             )
 
         shape = tuple(_require_i64(x, 'shape') for x in shape)
@@ -3397,7 +3305,7 @@ class Tensor:
             raise RuntimeError('poly_tensor_empty_by_id failed')
         return Tensor(
             _ctx=ctx, _tensor=tensor, _shape=shape,
-            requires_grad=requires_grad, _dtype=dtype_name, _device=dev,
+            _dtype=dtype_name, _device=dev,
         )
 
     @staticmethod
@@ -3478,15 +3386,29 @@ class Tensor:
 
     # --- Autograd ---
 
-    def backward(self):
-        """Compute gradients for live tensors reachable from this loss UOp."""
-        target_entries = self._live_grad_targets()
-        if not target_entries:
-            raise RuntimeError('No leaf tensors require grad')
+    def gradient(self, *targets, gradient=None):
+        """Compute gradients of ``targets`` with respect to this Tensor."""
+        if gradient is None:
+            assert self.shape == (), (
+                'when no gradient is provided, backward must be called on a scalar tensor'
+            )
+            initial_grad = None
+        else:
+            if not isinstance(gradient, Tensor):
+                raise TypeError('gradient must be a Tensor')
+            if _ptr_value(gradient._ctx) != _ptr_value(self._ctx):
+                raise RuntimeError('gradient must share the differentiated Tensor context')
+            initial_grad = Tensor._core_uop_raw(gradient._tensor)
+        if not dtypes.is_float(self.dtype) or any(
+            not isinstance(target, Tensor) or not dtypes.is_float(target.dtype)
+            for target in targets
+        ):
+            raise RuntimeError('only float Tensors have gradient')
+        if any(_ptr_value(target._ctx) != _ptr_value(self._ctx) for target in targets):
+            raise RuntimeError('gradient targets must share the differentiated Tensor context')
 
         root = _uop_wrap(self._ctx, Tensor._core_uop_raw(self._tensor))
-        targets = tuple(t for t, _ in target_entries)
-        target_roots = tuple(grad_root for _, grad_root in target_entries)
+        target_roots = tuple(Tensor._core_uop_raw(target._tensor) for target in targets)
         custom_records = Tensor._custom_grad_records_for(self._ctx, root)
         if custom_records:
             # Pinned tinygrad differentiates AFTER(data, CALL) along two
@@ -3521,7 +3443,7 @@ class Tensor:
                 active_by_call.append((rec, tuple(active_aliases), active_call))
 
             temp_grads, temp_present = Tensor._grad_many_raw(
-                self._ctx, root, None, temp_wrts, return_present=True
+                self._ctx, root, initial_grad, temp_wrts, return_present=True
             )
             grad_by_root = {
                 _ptr_value(raw): grad for raw, grad in zip(temp_wrts, temp_grads)
@@ -3587,15 +3509,24 @@ class Tensor:
                         )
                         present_by_root[key] = True
             out_grads = tuple(grad_by_root.get(_ptr_value(raw)) for raw in target_roots)
+            out_present = tuple(
+                present_by_root.get(_ptr_value(raw), False) for raw in target_roots
+            )
         else:
             # tinygrad calls gradient(*targets), so every live target is handled by
             # one reverse pass. Calling poly_grad repeatedly can observe frontend
             # retargeting side effects between targets.
-            out_grads = Tensor._grad_many_raw(self._ctx, root, None, target_roots)
+            out_grads, out_present = Tensor._grad_many_raw(
+                self._ctx, root, initial_grad, target_roots, return_present=True
+            )
 
-        for target, grad_uop in zip(targets, out_grads):
+        grads = []
+        for target, grad_uop, present in zip(targets, out_grads, out_present):
+            if not present:
+                grads.append(target.const_like(0))
+                continue
             if not grad_uop:
-                raise RuntimeError('poly_grad_many returned NULL for a live target')
+                raise RuntimeError('poly_grad_many returned NULL for a present target')
             grad_handle = Tensor._core_create_with_roots_for(
                 self._ctx, grad_uop, grad_uop, _POLY_TENSOR_VALUE, target._device
             )
@@ -3607,6 +3538,19 @@ class Tensor:
             )
             if int(_ffi._lib.poly_uop_device(grad_uop)) == 0:
                 grad_tensor = grad_tensor.clone(device=target._device)
+            grads.append(grad_tensor)
+        return grads
+
+    def backward(self, gradient=None):
+        """Populate gradients for every live reachable floating Tensor."""
+        target_entries = self._live_grad_targets()
+        targets = tuple(target for target, _ in target_entries)
+        for target, grad_tensor in zip(
+            targets, self.gradient(*targets, gradient=gradient)
+        ):
+            assert grad_tensor.shape == target.shape, (
+                f'grad shape must match tensor shape, {grad_tensor.shape!r} != {target.shape!r}'
+            )
             if target._grad is not None:
                 target._grad.assign(target._grad + grad_tensor.to(target._grad.device))
             else:

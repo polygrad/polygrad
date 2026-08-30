@@ -52,5 +52,7 @@ uint64_t poly_arg_integer_to_u64_mod(PolyArg arg);
 double poly_arg_integer_to_double(PolyArg arg);
 char *poly_arg_integer_to_decimal(PolyArg arg);
 int poly_arg_integer_cmp(PolyArg a, PolyArg b, bool *ok);
+int poly_arg_integer_cmp_float(PolyArg integer, double value);
+bool poly_arg_python_numeric_eq(PolyArg a, PolyArg b);
 
 #endif

@@ -34,8 +34,8 @@ bool poly_structural_eq(const void *a, const void *b);
  * identities until rangeify lowers them to kernel pointer PARAMs. */
 static inline bool poly_uop_is_shaped_value_param(const PolyUOp *u) {
   return u && u->op == POLY_OP_PARAM && u->arg.kind == POLY_ARG_PARAM && u->arg.param &&
-         !u->dtype.is_ptr && !u->arg.param->name && u->n_src == 1 && u->src[0] &&
-         u->src[0]->op == POLY_OP_STACK;
+         !u->arg.param->name && u->n_src == 1 && u->src[0] &&
+         (u->src[0]->op == POLY_OP_STACK || poly_dtype_is_int(u->src[0]->dtype));
 }
 
 /* DFS to collect BUFFER/BUFFER_VIEW and callified shaped PARAM identities in
@@ -88,7 +88,6 @@ int poly_collect_output_buffers_in_sink(PolyUOp *tensor_sink, PolyUOp **out, int
 /* Validates Polygrad ownership/non-NULL-source structure and the integer
  * INDEX-coordinate predicate from pinned spec_tensor. This is not a complete
  * spec_tensor implementation. Returns false with a diagnostic on stderr. */
-bool poly_validate_kernel_graph(PolyCtx *ctx, PolyUOp *root);
 
 /* Reject caller-visible explicit DEVICE identities which the current runtime
  * cannot address.  An absent DEVICE and internal DEVICE(None) remain valid;
@@ -98,10 +97,6 @@ bool poly_uop_explicit_devices_supported(PolyCtx *ctx, PolyUOp *root);
 /* Memoized backing helper for poly_uop_device(), matching tinygrad's cached
  * UOp._device property without storing pass-local cache state on every UOp. */
 PolyDevice poly_uop_device_cached(PolyUOp *u, PolyMap *cache);
-
-/* Pass-local exact concrete DEVICE identity query.  The returned UOp is owned
- * by the input graph's context; the cache owns neither keys nor values. */
-PolyUOp *poly_uop_device_uop_cached(PolyCtx *ctx, PolyUOp *u, PolyMap *cache);
 
 /* Pass-local backing cache for pinned UOp.axis. NULL/false is represented
  * explicitly in the map so shared unsharded subgraphs are not revisited. */

@@ -2,7 +2,7 @@
 
 #ifdef __EMSCRIPTEN__
 
-#include "codegen.h"
+#include "codegen/codegen.h"
 #include "utils.h"
 
 #include <emscripten.h>
@@ -247,11 +247,11 @@ int poly_wasm_lower_item(
       n_lin = linear->n_src;
       lin = linear->src;
     } else {
-      lin = poly_linearize_rewritten(ctx, scheduled_root, &n_lin);
+      lin = poly_do_linearize(ctx, scheduled_root, &n_lin);
       lin_owned = true;
     }
     if (!lin) return -1;
-    wasm_bytes = poly_render_wasm(lin, n_lin, &wasm_len, true);
+    wasm_bytes = poly_render_wasm(ctx, lin, n_lin, &wasm_len, true);
     if (lin_owned) free(lin);
   }
   if (kernel_id < 0 && (!wasm_bytes || wasm_len <= 0)) return -1;

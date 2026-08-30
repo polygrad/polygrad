@@ -22,35 +22,35 @@ assert _loaded == os.path.join(_TG_ROOT, "tinygrad"), \
     f"loaded tinygrad from {_loaded}, expected {_TG_ROOT}/tinygrad"
 print(f"# tinygrad loaded from: {_loaded}")
 
-from tinygrad.uop.ops import UOp, Ops, ParamArg
+from tinygrad.uop.ops import UOp, Ops
 from tinygrad.dtype import dtypes
 
 def mm(name, u):
     print("[%s] vmin=%s vmax=%s" % (name, u.vmin, u.vmax))
 
-# === CONST / VCONST / DEFINE_VAR / BIND ===
-c0  = UOp.const(dtypes.int32, 0)
-c1  = UOp.const(dtypes.int32, 1)
-c3  = UOp.const(dtypes.int32, 3)
-c5  = UOp.const(dtypes.int32, 5)
-c10 = UOp.const(dtypes.int32, 10)
-c20 = UOp.const(dtypes.int32, 20)
-cn1 = UOp.const(dtypes.int32, -1)
-cn2 = UOp.const(dtypes.int32, -2)
-cn5 = UOp.const(dtypes.int32, -5)
+# === CONST / variable / binding ===
+c0  = UOp.const(0, dtypes.int32)
+c1  = UOp.const(1, dtypes.int32)
+c3  = UOp.const(3, dtypes.int32)
+c5  = UOp.const(5, dtypes.int32)
+c10 = UOp.const(10, dtypes.int32)
+c20 = UOp.const(20, dtypes.int32)
+cn1 = UOp.const(-1, dtypes.int32)
+cn2 = UOp.const(-2, dtypes.int32)
+cn5 = UOp.const(-5, dtypes.int32)
 dv  = UOp.variable("x", 2, 7, dtype=dtypes.int32)
 dvn = UOp.variable("y", -3, 4, dtype=dtypes.int32)
 bv  = UOp.variable("z", -1000, 1000, dtype=dtypes.int32)
 
-print("=== CONST / DEFINE_VAR ===")
+print("=== CONST / variable ===")
 mm("CONST 5",           c5)
 mm("CONST -2",          cn2)
-mm("DEFINE_VAR[2..7]",  dv)
-mm("DEFINE_VAR[-3..4]", dvn)
+mm("VARIABLE[2..7]",  dv)
+mm("VARIABLE[-3..4]", dvn)
 
 print("=== STACK constants ===")
-vc_pos = UOp(Ops.STACK, dtypes.int32.vec(3), tuple(UOp.const(dtypes.int32, x) for x in (1, 2, 3)))
-vc_mix = UOp(Ops.STACK, dtypes.int32.vec(4), tuple(UOp.const(dtypes.int32, x) for x in (-2, 0, 5, 10)))
+vc_pos = UOp.stack(*(UOp.const(x, dtypes.int32) for x in (1, 2, 3)))
+vc_mix = UOp.stack(*(UOp.const(x, dtypes.int32) for x in (-2, 0, 5, 10)))
 mm("STACK(1,2,3)",       vc_pos)
 mm("STACK(-2,0,5,10)",   vc_mix)
 
@@ -83,8 +83,8 @@ mm("r//3",  r10 // c3)
 mm("r//5",  r10 // c5)
 mm("dv//3", dv // c3)
 min_i64 = UOp.variable("min_i64", -(1 << 63), -(1 << 63), dtype=dtypes.int64)
-mm("i64_min cdiv -1", UOp(Ops.CDIV, dtypes.int64, (min_i64, UOp.const(dtypes.int64, -1))))
-mm("i64_min floordiv -1", UOp(Ops.FLOORDIV, dtypes.int64, (min_i64, UOp.const(dtypes.int64, -1))))
+mm("i64_min cdiv -1", UOp(Ops.CDIV, dtypes.int64, (min_i64, UOp.const(-1, dtypes.int64))))
+mm("i64_min floordiv -1", UOp(Ops.FLOORDIV, dtypes.int64, (min_i64, UOp.const(-1, dtypes.int64))))
 empty = UOp.range(0, 0)
 mm("empty cdiv 3", UOp(Ops.CDIV, dtypes.int, (empty, c3)))
 mm("empty floordiv 3", UOp(Ops.FLOORDIV, dtypes.int, (empty, c3)))
@@ -101,9 +101,9 @@ mm("negative i64 cmod", UOp(Ops.CMOD, dtypes.int64, (numerator_i64, negative_div
 mm("negative i64 floormod", UOp(Ops.FLOORMOD, dtypes.int64, (numerator_i64, negative_divisor_i64)))
 
 print("=== SHL / SHR (const rhs) ===")
-mm("r<<2",  r10 << UOp.const(dtypes.int32, 2))
-mm("r>>1",  r10 >> UOp.const(dtypes.int32, 1))
-mm("dv<<1", dv << UOp.const(dtypes.int32, 1))
+mm("r<<2",  r10 << UOp.const(2, dtypes.int32))
+mm("r>>1",  r10 >> UOp.const(1, dtypes.int32))
+mm("dv<<1", dv << UOp.const(1, dtypes.int32))
 
 print("=== XOR with -1 (bitwise NOT) ===")
 mm("r xor -1", r10 ^ cn1)
@@ -136,24 +136,22 @@ cond2 = r10 < c10
 mm("AND(r<5, r<10)", cond1 & cond2)
 mm("OR(r<5, r<-1)",  cond1 | (r10 < cn1))
 
-print("=== VECTOR BOOL / GEP / AND ===")
-f32x4 = dtypes.float32.vec(4)
-bool4 = dtypes.bool.vec(4)
-base = UOp(Ops.PARAM, f32x4, arg=ParamArg(0))
-exponent = UOp(Ops.PARAM, f32x4, arg=ParamArg(1))
-zero_vec = UOp(Ops.CONST, f32x4, arg=0.0)
-base_eq = UOp(Ops.CMPEQ, bool4, (base, zero_vec))
-exp_eq = UOp(Ops.CMPEQ, bool4, (exponent, zero_vec))
-base_lane = UOp(Ops.GEP, dtypes.bool, (base_eq,), (0,))
-exp_lane = UOp(Ops.GEP, dtypes.bool, (exp_eq,), (0,))
+print("=== SHAPED BOOL / INDEX / AND ===")
+base = UOp.placeholder((4,), dtypes.float32, 0)
+exponent = UOp.placeholder((4,), dtypes.float32, 1)
+zero_vec = UOp.const(0.0, dtypes.float32).broadcast(4)
+base_eq = base.eq(zero_vec)
+exp_eq = exponent.eq(zero_vec)
+base_lane = base_eq.index(0)
+exp_lane = exp_eq.index(0)
 both = UOp(Ops.AND, dtypes.bool, (base_lane, exp_lane))
 gate = UOp(Ops.CMPNE, dtypes.bool, (
     UOp(Ops.CAST, dtypes.float32, (UOp(Ops.CAST, dtypes.int32, (both,)),)),
-    UOp.const(dtypes.float32, 0.0),
+    UOp.const(0.0, dtypes.float32),
 ))
-mm("CMPEQ f32x4", base_eq)
-mm("GEP(CMPEQ f32x4)", base_lane)
-mm("AND(GEP comparisons)", both)
+mm("CMPEQ float32 shape4", base_eq)
+mm("INDEX(CMPEQ shape4)", base_lane)
+mm("AND(INDEX comparisons)", both)
 mm("casted bool gate", gate)
 
 print("=== WHERE (int branches only) ===")
@@ -166,20 +164,20 @@ mm("CAST dv i32->i16", dv.cast(dtypes.int16))    # (2, 7)
 mm("CAST r i32->i8",   r10.cast(dtypes.int8))    # (0, 9)
 mm("CAST dv i32->f32", dv.cast(dtypes.float32))  # float — int target: (2, 7)
 
-print("=== GEP / UNROLL / VECTORIZE / BIND ===")
-vec = UOp(Ops.STACK, dtypes.int32.vec(3), src=(c3, c5, dv))
+print("=== STACK / INDEX / binding ===")
+vec = UOp.stack(c3, c5, dv)
 mm("STACK(3,5,dv)", vec)   # union over srcs
-mm("GEP[0] of vec",     vec.gep(0))
-mm("GEP[2] of vec",     vec.gep(2))
+mm("INDEX[0] of vec",     vec.index(0))
+mm("INDEX[2] of vec",     vec.index(2))
 
 print("=== Chained (diamond stress) ===")
 # (r+3)*2
-mm("(r+3)*2",        (r10 + c3) * UOp.const(dtypes.int32, 2))
+mm("(r+3)*2",        (r10 + c3) * UOp.const(2, dtypes.int32))
 # ((dv*2) - dvn) + 1
-mm("(dv*2-dvn)+1",   ((dv * UOp.const(dtypes.int32, 2)) - dvn) + c1)
+mm("(dv*2-dvn)+1",   ((dv * UOp.const(2, dtypes.int32)) - dvn) + c1)
 
 print("=== Float fallthrough (sentinel: dtype range) ===")
 # polygrad uses (INT64_MIN, INT64_MAX) sentinel; tinygrad uses Python floats.
 # Just document the tinygrad value for reference — polygrad skips float bounds.
-mm("CONST 1.5f", UOp.const(dtypes.float32, 1.5))
-mm("CONST 0.0f", UOp.const(dtypes.float32, 0.0))
+mm("CONST 1.5f", UOp.const(1.5, dtypes.float32))
+mm("CONST 0.0f", UOp.const(0.0, dtypes.float32))

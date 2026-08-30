@@ -1,13 +1,17 @@
 /*
- * sym.c — Symbolic simplification rules (phase 1)
+ * uop/symbolic.c — symbolic simplification rules
  *
  * Mirrors tinygrad's symbolic_simple: self-folding, zero-folding,
  * constant folding, cast folding, basic identities.
  */
 
-#include "pat.h"
+#include "uop/upat.h"
 #include "bigint.h"
 #include "ctx.h"
+#include "uop/movement.h"
+#include "uop/ops.h"
+#include "uop/symbolic.h"
+#include "uop/weak.h"
 #include <math.h>
 #include <stdint.h>
 #include <limits.h>
@@ -146,7 +150,7 @@ static bool exact_integer_alu(
   }
 
   if (truncate_output && !poly_dtype_is_index(dtype)) {
-    PolyDType scalar = poly_dtype_scalar(dtype);
+    PolyDType scalar = dtype;
     PolyInt truncated = {0};
     if (!poly_int_truncate(&truncated, &result, scalar.bitsize, poly_dtype_is_unsigned(scalar)))
       goto done;
@@ -204,154 +208,9 @@ static bool exec_symbolic_const_alu(
   return true;
 }
 
-/* Pinned tinygrad/uop/symbolic.py:128-130 folds scalar constant THREEFRY
- * before late decomposition.  The folded argument is the exact mathematical
- * integer produced by decompositions.py:308-320 followed by simplify(), not a
- * prematurely wrapped uint64.  Keeping this phase ordering is material: the
- * parent uint32 mask/cast performs the intended truncation before float
- * conversion. */
-static bool threefry_const_floordiv(PolyInt *out, const PolyInt *a, const PolyInt *b) {
-  PolyInt remainder = {0};
-  if (!poly_int_divmod(out, &remainder, a, b, true)) return false;
-  poly_int_free(&remainder);
-  return true;
-}
-
-static bool threefry_const_eval(
-    PolyArg x_arg,
-    PolyArg key_arg,
-    PolyArg *out,
-    PolyInt *owned
-) {
-  PolyInt x = {0}, key = {0}, mask = {0}, two32 = {0}, parity = {0};
-  PolyInt x0 = {0}, x1 = {0}, key0 = {0}, key1 = {0};
-  PolyInt xq = {0}, keyq = {0};
-  PolyInt ks[3] = {{0}, {0}, {0}};
-  PolyInt xr0 = {0}, xr1 = {0}, tmp0 = {0};
-  PolyInt result = {0};
-  bool ok = false;
-
-  if (!poly_int_from_arg(&x, x_arg) || !poly_int_from_arg(&key, key_arg) ||
-      !poly_int_from_i64(&mask, INT64_C(0xffffffff)) ||
-      !poly_int_from_i64(&two32, INT64_C(1) << 32) ||
-      !poly_int_from_i64(&parity, INT64_C(0x1BD11BDA)))
-    goto done;
-  if (!poly_int_bitwise(&x0, POLY_OP_AND, &x, &mask) ||
-      !threefry_const_floordiv(&xq, &x, &two32) ||
-      !poly_int_bitwise(&x1, POLY_OP_AND, &xq, &mask) ||
-      !poly_int_bitwise(&key0, POLY_OP_AND, &key, &mask) ||
-      !threefry_const_floordiv(&keyq, &key, &two32) ||
-      !poly_int_bitwise(&key1, POLY_OP_AND, &keyq, &mask))
-    goto done;
-
-  if (!poly_int_copy(&ks[0], &key1) ||
-      !poly_int_bitwise(&tmp0, POLY_OP_XOR, &key0, &key1) ||
-      !poly_int_bitwise(&ks[1], POLY_OP_XOR, &tmp0, &parity) ||
-      !poly_int_copy(&ks[2], &key0) || !poly_int_add(&xr0, &x0, &ks[2]) ||
-      !poly_int_add(&xr1, &x1, &ks[0]))
-    goto done;
-  poly_int_free(&tmp0);
-
-  static const int rotations[2][4] = {
-      {13, 15, 26, 6},
-      {17, 29, 16, 24},
-  };
-  for (int i = 0; i < 5; i++) {
-    for (int j = 0; j < 4; j++) {
-      int r = rotations[i & 1][j];
-      PolyInt sum = {0}, left_scale = {0}, right_scale = {0};
-      PolyInt left = {0}, right = {0}, rotated = {0}, next1 = {0};
-      bool round_ok =
-          poly_int_add(&sum, &xr0, &xr1) &&
-          poly_int_from_i64(&left_scale, INT64_C(1) << r) &&
-          poly_int_from_i64(&right_scale, INT64_C(1) << (32 - r)) &&
-          poly_int_mul(&left, &xr1, &left_scale) &&
-          threefry_const_floordiv(&right, &xr1, &right_scale) &&
-          poly_int_add(&rotated, &left, &right) &&
-          poly_int_bitwise(&next1, POLY_OP_XOR, &sum, &rotated);
-      poly_int_free(&left_scale);
-      poly_int_free(&right_scale);
-      poly_int_free(&left);
-      poly_int_free(&right);
-      poly_int_free(&rotated);
-      if (!round_ok) {
-        poly_int_free(&sum);
-        poly_int_free(&next1);
-        goto done;
-      }
-      poly_int_free(&xr0);
-      poly_int_free(&xr1);
-      xr0 = sum;
-      xr1 = next1;
-    }
-
-    PolyInt round_add = {0}, next0 = {0}, keyed1 = {0}, next1 = {0};
-    bool inject_ok = poly_int_from_i64(&round_add, i + 1) &&
-                     poly_int_add(&next0, &xr0, &ks[i % 3]) &&
-                     poly_int_add(&keyed1, &xr1, &ks[(i + 1) % 3]) &&
-                     poly_int_add(&next1, &keyed1, &round_add);
-    poly_int_free(&round_add);
-    poly_int_free(&keyed1);
-    if (!inject_ok) {
-      poly_int_free(&next0);
-      poly_int_free(&next1);
-      goto done;
-    }
-    poly_int_free(&xr0);
-    poly_int_free(&xr1);
-    xr0 = next0;
-    xr1 = next1;
-  }
-
-  if (!poly_int_mul(&tmp0, &xr1, &two32) ||
-      !poly_int_bitwise(&result, POLY_OP_OR, &tmp0, &xr0))
-    goto done;
-  *owned = result;
-  poly_int_init(&result);
-  *out = poly_int_as_arg(owned);
-  ok = true;
-
-done:
-  poly_int_free(&x);
-  poly_int_free(&key);
-  poly_int_free(&mask);
-  poly_int_free(&two32);
-  poly_int_free(&parity);
-  poly_int_free(&x0);
-  poly_int_free(&x1);
-  poly_int_free(&key0);
-  poly_int_free(&key1);
-  poly_int_free(&xq);
-  poly_int_free(&keyq);
-  for (int i = 0; i < 3; i++)
-    poly_int_free(&ks[i]);
-  poly_int_free(&xr0);
-  poly_int_free(&xr1);
-  poly_int_free(&tmp0);
-  poly_int_free(&result);
-  return ok;
-}
-
-static PolyUOp *rule_threefry_const(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
-  (void)b;
-  if (!root || root->op != POLY_OP_THREEFRY || root->n_src != 2 ||
-      root->dtype.count != 1 || !poly_dtype_is_int(root->dtype) ||
-      root->src[0]->op != POLY_OP_CONST || root->src[1]->op != POLY_OP_CONST ||
-      !arg_is_exact_integer(root->src[0]->arg) || !arg_is_exact_integer(root->src[1]->arg))
-    return NULL;
-  PolyArg value;
-  PolyInt owned = {0};
-  if (!threefry_const_eval(root->src[0]->arg, root->src[1]->arg, &value, &owned)) return NULL;
-  PolyUOp *ret = poly_const_like(ctx, root, value);
-  poly_int_free(&owned);
-  return ret;
-}
-
-/* vmin/vmax bounds (port of tinygrad's UOp._min_max) *
- * Full port of the pinned tinygrad/uop/ops.py UOp._min_max. The switch is
- * gated on GroupOp.Binary with an outer `not dtypes.is_float(self.dtype)`.
- * Polygrad
- * mirrors the exact case ordering and guards; see inline tinygrad refs.
+/* Integer vmin/vmax bounds for index and integer symbolic consumers.
+ * Ports tinygrad@2026-08-22/a9069c177a9d uop/ops.py:1046-1109 for the
+ * non-float branch. Float semantic consumers use poly_uop_typed_minmax below.
  *
  * Ops covered:
  *   Binary block (non-float dtype):
@@ -371,34 +230,28 @@ static PolyUOp *rule_threefry_const(PolyCtx *ctx, PolyUOp *root, const PolyBindi
  *     AND  line 882 (bool dtype)
  *   Post-Binary:
  *     WHERE        line 884 (int dtype only)
- *     DEFINE_VAR   line 887
- *     RANGE/SPECIAL line 888 (src[0].vmax - 1 via identity (s-1).vmax)
- *     BIND         line 889 (passthrough src[0])
- *     UNROLL/STACK (min/max over srcs; VECTORIZE aliases STACK in Polygrad)
- *     CONST        line 891
- *     VCONST       line 892
- *     GEP          line 893 (passthrough src[0])
- *     CAST         lines 895-896 (monotone targets only: float/signed int)
+ *     PARAM/BUFFER with ParamArg.vmin_vmax
+ *     RANGE/SPECIAL (src[0].vmax - 1)
+ *     AFTER (passthrough src[0])
+ *     STACK (min/max over srcs)
+ *     CONST
+ *     INDEX (passthrough src[0])
+ *     CAST (monotone targets only)
  *
- * Not ported (deliberate divergences):
+ * Deliberate fallthroughs inherited from Tinygrad:
  *   - NEG: tinygrad's _min_max has no NEG case; falls through to dtype
  *     bounds. Polygrad does likewise for strict parity.
  *   - CMPEQ: in GroupOp.Binary but no dispatch case in tinygrad's switch
  *     (only CMPLT and CMPNE are handled). Falls through to dtype bounds.
  *   - BITCAST: not monotone, falls through to dtype bounds.
- *   - PARAM: tinygrad's rule reads src[2].arg/src[3].arg; polygrad's
- *     POLY_OP_PARAM (rangeify.c:1582) is a zero-src buffer index with
- *     no bounds info. Falls through to dtype bounds.
- *   - Float dtype: conservative int64 sentinel bounds. Float constants do not
- *     narrow those bounds because infinities, NaNs, and fractional values are
- *     not representable in this integer-only cache. Constant expressions are
- *     handled by the ordinary ALU constant-fold rules instead.
+ * Polygrad's PARAM bounds live in PolyParamArg instead of PARAM sources; the
+ * query below reads that C representation directly.
  *
  * Parity: test/parity_scripts/tg_minmax_gt.py captures the ground truth,
  * test/test_sym.c asserts every case verbatim. */
 
 static int64_t dtype_min(PolyDType dt) {
-  dt = poly_dtype_scalar(dt);
+  dt = dt;
   if (poly_dtype_eq(dt, POLY_BOOL)) return 0;
   if (poly_dtype_eq(dt, POLY_INT8)) return INT8_MIN;
   if (poly_dtype_eq(dt, POLY_UINT8)) return 0;
@@ -413,7 +266,7 @@ static int64_t dtype_min(PolyDType dt) {
 }
 
 static int64_t dtype_max(PolyDType dt) {
-  dt = poly_dtype_scalar(dt);
+  dt = dt;
   if (poly_dtype_eq(dt, POLY_BOOL)) return 1;
   if (poly_dtype_eq(dt, POLY_INT8)) return INT8_MAX;
   if (poly_dtype_eq(dt, POLY_UINT8)) return UINT8_MAX;
@@ -495,7 +348,7 @@ static bool poly_uop_minmax_node(PolyCtx *ctx, PolyUOp *u, int64_t *vmin, int64_
       *vmin = *vmax = u->arg.b ? 1 : 0;
     } else if (u->arg.kind == POLY_ARG_INT) {
       /* Pinned tinygrad ops.py:1010-1017 returns CONST.arg directly. */
-      if (poly_dtype_is_unsigned(u->dtype) && poly_dtype_scalar(u->dtype).bitsize == 64 &&
+      if (poly_dtype_is_unsigned(u->dtype) && u->dtype.bitsize == 64 &&
           u->arg.i < 0) {
         minmax_default(u, vmin, vmax);
       } else {
@@ -506,31 +359,11 @@ static bool poly_uop_minmax_node(PolyCtx *ctx, PolyUOp *u, int64_t *vmin, int64_
     return true;
   }
 
-  /* VCONST — child CONSTs in src[]. Min/max over lanes. */
-  if (u->op == POLY_OP_VCONST && u->n_src > 0) {
-    int64_t lo = INT64_MAX, hi = INT64_MIN;
-    for (int i = 0; i < u->n_src; i++) {
-      int64_t a, b;
-      if (!minmax_src(u->src[i], &a, &b)) return false;
-      if (a < lo) lo = a;
-      if (b > hi) hi = b;
-    }
-    *vmin = lo;
-    *vmax = hi;
-    return true;
-  }
-
-  /* DEFINE_VAR: (name, min_val, max_val) */
-  if (u->op == POLY_OP_DEFINE_VAR && u->arg.kind == POLY_ARG_DEFINE_VAR) {
-    *vmin = u->arg.define_var.min_val;
-    *vmax = u->arg.define_var.max_val;
-    return true;
-  }
-
   /* Pinned tinygrad UOp._min_max returns ParamArg.vmin_vmax directly
    * (tinygrad/uop/ops.py:1010). This is the ordinary int64 query equivalent
    * of exact_int_range_node's existing arbitrary-precision PARAM rule. */
-  if (u->op == POLY_OP_PARAM && u->arg.kind == POLY_ARG_PARAM && u->arg.param &&
+  if ((u->op == POLY_OP_PARAM || u->op == POLY_OP_BUFFER) &&
+      u->arg.kind == POLY_ARG_PARAM && u->arg.param &&
       u->arg.param->has_minmax) {
     *vmin = u->arg.param->min_val;
     *vmax = u->arg.param->max_val;
@@ -551,18 +384,18 @@ static bool poly_uop_minmax_node(PolyCtx *ctx, PolyUOp *u, int64_t *vmin, int64_
     return true;
   }
 
-  /* BIND: passthrough src[0] (ignore bound value) */
-  if (u->op == POLY_OP_BIND && u->n_src >= 1) {
+  /* AFTER preserves the value and range of its first source. */
+  if (u->op == POLY_OP_AFTER && u->n_src >= 1) {
     return minmax_src(u->src[0], vmin, vmax);
   }
 
-  /* GEP: passthrough src[0] */
-  if (u->op == POLY_OP_GEP && u->n_src >= 1) {
+  /* Current INDEX preserves its source range. */
+  if (u->op == POLY_OP_INDEX && u->n_src >= 1) {
     return minmax_src(u->src[0], vmin, vmax);
   }
 
-  /* UNROLL/VECTORIZE: min/max over all srcs */
-  if ((u->op == POLY_OP_UNROLL || u->op == POLY_OP_VECTORIZE) && u->n_src > 0) {
+  /* VECTORIZE: min/max over all lanes. */
+  if (u->op == POLY_OP_STACK && u->n_src > 0) {
     int64_t lo = INT64_MAX, hi = INT64_MIN;
     for (int i = 0; i < u->n_src; i++) {
       int64_t a, b;
@@ -935,6 +768,94 @@ void poly_uop_minmax_ex(
   poly_uop_minmax(ctx, u, vmin, vmax);
 }
 
+/* C representation of tinygrad@2026-08-22/a9069c177a9d
+ * uop/ops.py:1046-1109 `PyConst` bounds for semantic rewrites. Integer
+ * expressions reuse the exact int64 query; float expressions preserve
+ * constants and dtype infinities. */
+typedef struct {
+  bool is_float;
+  int64_t i;
+  double f;
+} PolyBoundValue;
+
+typedef struct {
+  PolyBoundValue min;
+  PolyBoundValue max;
+} PolyTypedMinMax;
+
+static PolyBoundValue bound_int(int64_t value) {
+  return (PolyBoundValue){.is_float = false, .i = value, .f = 0.0};
+}
+
+static PolyBoundValue bound_float(double value) {
+  return (PolyBoundValue){.is_float = true, .i = 0, .f = value};
+}
+
+static long double bound_number(PolyBoundValue value) {
+  return value.is_float ? (long double)value.f : (long double)value.i;
+}
+
+static PolyTypedMinMax poly_uop_typed_minmax(PolyCtx *ctx, PolyUOp *u) {
+  if (!u) return (PolyTypedMinMax){bound_int(0), bound_int(0)};
+
+  /* Tinygrad 2026-08-22/a9069c177a9d uop/ops.py:1083-1084 evaluates
+   * comparison bounds from the operands' PyConst bounds, including floats. */
+  if (u->n_src == 2 && (u->op == POLY_OP_CMPLT || u->op == POLY_OP_CMPNE)) {
+    PolyTypedMinMax lhs = poly_uop_typed_minmax(ctx, u->src[0]);
+    PolyTypedMinMax rhs = poly_uop_typed_minmax(ctx, u->src[1]);
+    long double lhs_min = bound_number(lhs.min), lhs_max = bound_number(lhs.max);
+    long double rhs_min = bound_number(rhs.min), rhs_max = bound_number(rhs.max);
+    bool min = false, max = false;
+    if (u->op == POLY_OP_CMPLT) {
+      min = lhs_max < rhs_min;
+      max = lhs_min < rhs_max;
+    } else {
+      min = lhs_max < rhs_min || rhs_max < lhs_min;
+      max = !(lhs_min == lhs_max && lhs_max == rhs_min && rhs_min == rhs_max);
+    }
+    return (PolyTypedMinMax){bound_int(min), bound_int(max)};
+  }
+
+  if (!poly_dtype_is_float(u->dtype)) {
+    int64_t lo = 0, hi = 0;
+    poly_uop_minmax(ctx, u, &lo, &hi);
+    return (PolyTypedMinMax){bound_int(lo), bound_int(hi)};
+  }
+
+  if (u->op == POLY_OP_CONST && u->arg.kind != POLY_ARG_INVALID) {
+    double value = 0.0;
+    if (u->arg.kind == POLY_ARG_FLOAT)
+      value = u->arg.f;
+    else if (u->arg.kind == POLY_ARG_INT)
+      value = (double)u->arg.i;
+    else if (u->arg.kind == POLY_ARG_BOOL)
+      value = u->arg.b ? 1.0 : 0.0;
+    else
+      return (PolyTypedMinMax){bound_float(-INFINITY), bound_float(INFINITY)};
+    return (PolyTypedMinMax){bound_float(value), bound_float(value)};
+  }
+
+  if ((u->op == POLY_OP_PARAM || u->op == POLY_OP_BUFFER) &&
+      u->arg.kind == POLY_ARG_PARAM && u->arg.param && u->arg.param->has_minmax)
+    return (PolyTypedMinMax){
+        bound_int(u->arg.param->min_val), bound_int(u->arg.param->max_val)};
+
+  if ((u->op == POLY_OP_AFTER || u->op == POLY_OP_INDEX) && u->n_src > 0)
+    return poly_uop_typed_minmax(ctx, u->src[0]);
+
+  if (u->op == POLY_OP_STACK && u->n_src > 0) {
+    PolyTypedMinMax result = poly_uop_typed_minmax(ctx, u->src[0]);
+    for (int i = 1; i < u->n_src; i++) {
+      PolyTypedMinMax lane = poly_uop_typed_minmax(ctx, u->src[i]);
+      if (bound_number(lane.min) < bound_number(result.min)) result.min = lane.min;
+      if (bound_number(lane.max) > bound_number(result.max)) result.max = lane.max;
+    }
+    return result;
+  }
+
+  return (PolyTypedMinMax){bound_float(-INFINITY), bound_float(INFINITY)};
+}
+
 /* Rewrite callbacks */
 
 /* Self-folding: return x */
@@ -942,6 +863,143 @@ static PolyUOp *rule_identity(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b
   (void)ctx;
   (void)root;
   return poly_bind(b, "x");
+}
+
+/* tinygrad@2026-08-22/a9069c177a9d uop/symbolic.py:117-118. */
+static PolyUOp *rule_xor_cancel(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+  (void)ctx;
+  (void)root;
+  return poly_bind(b, "x");
+}
+
+/* tinygrad@2026-08-22/a9069c177a9d uop/symbolic.py:118. */
+static PolyUOp *rule_nested_mod_identity(
+    PolyCtx *ctx, PolyUOp *root, const PolyBindings *b
+) {
+  (void)ctx;
+  (void)root;
+  return poly_bind(b, "base");
+}
+
+static bool const_integer_eq_i64(PolyUOp *u, int64_t value) {
+  if (!u || u->op != POLY_OP_CONST || !arg_is_exact_integer(u->arg)) return false;
+  bool ok = false;
+  return poly_arg_integer_cmp(u->arg, poly_arg_int(value), &ok) == 0 && ok;
+}
+
+/* tinygrad@2026-08-22/a9069c177a9d uop/symbolic.py:123-130. */
+static PolyUOp *rule_bool_cmpne_const(
+    PolyCtx *ctx, PolyUOp *root, const PolyBindings *b
+) {
+  (void)b;
+  if (!root || root->op != POLY_OP_CMPNE || root->n_src != 2) return NULL;
+  PolyUOp *cast = NULL, *c = NULL;
+  if (root->src[0]->op == POLY_OP_CAST && root->src[1]->op == POLY_OP_CONST) {
+    cast = root->src[0];
+    c = root->src[1];
+  } else if (root->src[1]->op == POLY_OP_CAST && root->src[0]->op == POLY_OP_CONST) {
+    cast = root->src[1];
+    c = root->src[0];
+  }
+  if (!cast || cast->n_src != 1 || !poly_dtype_is_bool(cast->src[0]->dtype) ||
+      (!poly_dtype_is_int(cast->dtype) && !poly_dtype_is_index(cast->dtype)) ||
+      !arg_is_exact_integer(c->arg))
+    return NULL;
+  if (const_integer_eq_i64(c, 0)) return cast->src[0];
+  if (const_integer_eq_i64(c, 1)) {
+    PolyUOp *true_uop = poly_const_like_bool(ctx, cast->src[0], true);
+    return poly_uop2(
+        ctx, POLY_OP_CMPNE, POLY_BOOL, cast->src[0], true_uop, poly_arg_none()
+    );
+  }
+  return poly_const_like_bool(ctx, root, true);
+}
+
+/* tinygrad@2026-08-22/a9069c177a9d uop/symbolic.py:125. */
+static PolyUOp *rule_double_logical_not(
+    PolyCtx *ctx, PolyUOp *root, const PolyBindings *b
+) {
+  (void)ctx;
+  (void)root;
+  return poly_bind(b, "x");
+}
+
+static bool positive_power_of_two(const PolyInt *value) {
+  if (!value || value->sign <= 0) return false;
+  bool seen = false;
+  for (size_t i = 0; i < value->n_limbs; i++) {
+    uint32_t limb = value->limbs[i];
+    if (limb == 0) continue;
+    if (seen || (limb & (limb - 1)) != 0) return false;
+    seen = true;
+  }
+  return seen;
+}
+
+static bool mask_covers_low_bits(PolyArg mask_arg, const PolyInt *low_bits) {
+  PolyInt mask = {0}, combined = {0}, minus_one = {0};
+  bool ok = poly_int_from_arg(&mask, mask_arg) &&
+            poly_int_bitwise(&combined, POLY_OP_OR, &mask, low_bits) &&
+            poly_int_from_i64(&minus_one, -1) && poly_int_cmp(&combined, &minus_one) == 0;
+  poly_int_free(&mask);
+  poly_int_free(&combined);
+  poly_int_free(&minus_one);
+  return ok;
+}
+
+/* tinygrad@2026-08-22/a9069c177a9d uop/symbolic.py:138-141. */
+static PolyUOp *rule_drop_redundant_low_mask(
+    PolyCtx *ctx, PolyUOp *root, const PolyBindings *b
+) {
+  PolyUOp *x = poly_bind(b, "x");
+  PolyUOp *mask = poly_bind(b, "mask");
+  PolyUOp *amount = root && root->op == POLY_OP_SHR ? poly_bind(b, "k") : poly_bind(b, "c");
+  if (!root || !x || !mask || !amount || mask->op != POLY_OP_CONST ||
+      amount->op != POLY_OP_CONST || !arg_is_exact_integer(mask->arg) ||
+      !arg_is_exact_integer(amount->arg))
+    return NULL;
+
+  PolyInt low = {0}, amount_i = {0}, one = {0}, shifted = {0};
+  bool drop = false;
+  if (!poly_int_from_arg(&amount_i, amount->arg) || !poly_int_from_i64(&one, 1)) goto done;
+  if (root->op == POLY_OP_SHR) {
+    int64_t shift = 0;
+    if (!poly_int_to_i64(&amount_i, &shift) || shift < 0 ||
+        !poly_int_shl(&shifted, &one, (uint64_t)shift) ||
+        !poly_int_sub(&low, &shifted, &one))
+      goto done;
+  } else if (root->op == POLY_OP_FLOORDIV) {
+    if (!positive_power_of_two(&amount_i) || !poly_int_sub(&low, &amount_i, &one)) goto done;
+  } else {
+    goto done;
+  }
+  drop = mask_covers_low_bits(mask->arg, &low);
+
+done:
+  poly_int_free(&low);
+  poly_int_free(&amount_i);
+  poly_int_free(&one);
+  poly_int_free(&shifted);
+  return drop ? poly_uop2(ctx, root->op, root->dtype, x, amount, poly_arg_none()) : NULL;
+}
+
+/* tinygrad@2026-08-22/a9069c177a9d uop/symbolic.py:155. */
+static PolyUOp *rule_bool_max_to_or(
+    PolyCtx *ctx, PolyUOp *root, const PolyBindings *b
+) {
+  (void)b;
+  if (!root || root->op != POLY_OP_MAX || root->n_src != 2 ||
+      !poly_dtype_is_bool(root->src[0]->dtype) || !poly_dtype_is_bool(root->src[1]->dtype))
+    return NULL;
+  return poly_uop2(ctx, POLY_OP_OR, root->dtype, root->src[0], root->src[1], poly_arg_none());
+}
+
+/* tinygrad@2026-08-22/a9069c177a9d uop/symbolic.py:173. */
+static PolyUOp *rule_bitcast_twice(
+    PolyCtx *ctx, PolyUOp *root, const PolyBindings *b
+) {
+  PolyUOp *x = poly_bind(b, "x");
+  return x ? poly_uop1(ctx, POLY_OP_BITCAST, root->dtype, x, poly_arg_none()) : NULL;
 }
 
 /* x+0 -> x, x*1 -> x, x^0 -> x, x//1 -> x */
@@ -986,17 +1044,9 @@ static PolyUOp *rule_trunc_integral_identity(PolyCtx *ctx, PolyUOp *root, const 
 /* Zero-folding: x < x -> False */
 static PolyUOp *false_comparison_like(PolyCtx *ctx, PolyUOp *x) {
   if (!ctx || !x) return NULL;
-  /* Pinned tinygrad/uop/symbolic.py:107-108,120-121 first constructs the
-   * false value like the operand, then casts it to the comparison's scalar or
-   * vector bool dtype. Omitting the CAST changes CMPLT/CMPNE<bool> into an
-   * integer CONST when x is integer. */
-  PolyUOp *value = poly_const_like_bool(ctx, x, false);
-  if (!value) return NULL;
-  PolyDType bool_dtype =
-      x->dtype.count > 1 ? poly_dtype_vec(POLY_BOOL, x->dtype.count) : POLY_BOOL;
-  return poly_dtype_eq(value->dtype, bool_dtype)
-             ? value
-             : poly_uop1(ctx, POLY_OP_CAST, bool_dtype, value, poly_arg_none());
+  /* tinygrad@2026-08-22/a9069c177a9d uop/symbolic.py:133,143 passes
+   * dtypes.bool explicitly while preserving x.shape. */
+  return poly_const_like_dtype(ctx, x, poly_arg_bool(false), POLY_BOOL);
 }
 
 static PolyUOp *rule_lt_self(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
@@ -1046,30 +1096,44 @@ static PolyUOp *rule_bool_add_to_or(PolyCtx *ctx, PolyUOp *root, const PolyBindi
   return poly_uop2(ctx, POLY_OP_OR, root->dtype, x, y, poly_arg_none());
 }
 
-/* AND(x, false) -> false */
-static PolyUOp *rule_and_zero(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
-  return poly_const_like_bool(ctx, poly_bind(b, "x"), false);
+/* tinygrad 2026-08-22/a9069c177a9d uop/symbolic.py:120-121. */
+static PolyUOp *rule_bool_and_const(
+    PolyCtx *ctx, PolyUOp *root, const PolyBindings *b
+) {
+  (void)ctx;
+  (void)root;
+  PolyUOp *x = poly_bind(b, "x"), *c = poly_bind(b, "c");
+  if (!x || !c) return NULL;
+  if (poly_arg_python_numeric_eq(c->arg, poly_arg_bool(false))) return c;
+  return poly_arg_python_numeric_eq(c->arg, poly_arg_bool(true)) ? x : NULL;
 }
 
-/* OR(x, true) -> true */
-static PolyUOp *rule_or_one(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
-  return poly_const_like_bool(ctx, poly_bind(b, "x"), true);
+static PolyUOp *rule_bool_or_const(
+    PolyCtx *ctx, PolyUOp *root, const PolyBindings *b
+) {
+  (void)ctx;
+  (void)root;
+  PolyUOp *x = poly_bind(b, "x"), *c = poly_bind(b, "c");
+  if (!x || !c) return NULL;
+  if (poly_arg_python_numeric_eq(c->arg, poly_arg_bool(true))) return c;
+  return poly_arg_python_numeric_eq(c->arg, poly_arg_bool(false)) ? x : NULL;
 }
 
 /* ALU/variable min==max -> CONST.
  * tinygrad symbolic.py:
  *   UPat({Ops.CMPLT, Ops.CMPNE, Ops.FLOORDIV, Ops.FLOORMOD,
- *         Ops.PARAM, Ops.BIND, Ops.SPECIAL})
+ *         Ops.PARAM, Ops.AFTER, Ops.SPECIAL})
  *     -> CONST when vmin == vmax.
  */
 static PolyUOp *rule_const_when_minmax_point(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   (void)b;
-  int64_t vmin = 0, vmax = 0;
-  poly_uop_minmax(ctx, root, &vmin, &vmax);
+  PolyTypedMinMax bounds = poly_uop_typed_minmax(ctx, root);
+  long double vmin = bound_number(bounds.min), vmax = bound_number(bounds.max);
   if (vmin != vmax) return NULL;
-  if (poly_dtype_eq(root->dtype, POLY_BOOL)) return poly_const_like_bool(ctx, root, vmin != 0);
+  if (poly_dtype_eq(root->dtype, POLY_BOOL)) return poly_const_like_bool(ctx, root, vmin != 0.0L);
   if (poly_dtype_is_float(root->dtype)) return poly_const_like_float(ctx, root, (double)vmin);
-  return poly_const_like_int(ctx, root, vmin);
+  if (vmin < (long double)INT64_MIN || vmin > (long double)INT64_MAX) return NULL;
+  return poly_const_like_int(ctx, root, (int64_t)vmin);
 }
 
 /* max folding
@@ -1078,11 +1142,10 @@ static PolyUOp *rule_const_when_minmax_point(PolyCtx *ctx, PolyUOp *root, const 
 static PolyUOp *rule_max_fold(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   (void)b;
   if (!root || root->op != POLY_OP_MAX || root->n_src != 2) return NULL;
-  int64_t x_min = 0, x_max = 0, y_min = 0, y_max = 0;
-  poly_uop_minmax(ctx, root->src[0], &x_min, &x_max);
-  poly_uop_minmax(ctx, root->src[1], &y_min, &y_max);
-  if (x_min >= y_max) return root->src[0];
-  if (x_max <= y_min) return root->src[1];
+  PolyTypedMinMax x = poly_uop_typed_minmax(ctx, root->src[0]);
+  PolyTypedMinMax y = poly_uop_typed_minmax(ctx, root->src[1]);
+  if (bound_number(x.min) >= bound_number(y.max)) return root->src[0];
+  if (bound_number(x.max) <= bound_number(y.min)) return root->src[1];
   return NULL;
 }
 
@@ -1092,7 +1155,7 @@ static bool const_lane_arg(PolyUOp *u, int lane, PolyArg *out) {
     *out = u->arg;
     return true;
   }
-  if (u->op != POLY_OP_VCONST && u->op != POLY_OP_STACK) return false;
+  if (u->op != POLY_OP_STACK) return false;
   if (lane < u->n_src && u->src[lane] && u->src[lane]->op == POLY_OP_CONST) {
     *out = u->src[lane]->arg;
     return true;
@@ -1102,6 +1165,21 @@ static bool const_lane_arg(PolyUOp *u, int lane, PolyArg *out) {
     return true;
   }
   return false;
+}
+
+/* tinygrad@2026-08-22/a9069c177a9d symbolic.py::const_arg represents CONST
+ * as one scalar and STACK(CONST, ...) as a tuple. */
+static int const_arg_lane_count(PolyUOp *u, bool *is_tuple) {
+  if (!u) return -1;
+  if (u->op == POLY_OP_CONST) {
+    if (is_tuple) *is_tuple = false;
+    return 1;
+  }
+  if (u->op != POLY_OP_STACK) return -1;
+  for (int i = 0; i < u->n_src; i++)
+    if (!u->src[i] || u->src[i]->op != POLY_OP_CONST) return -1;
+  if (is_tuple) *is_tuple = true;
+  return u->n_src;
 }
 
 static bool numeric_negative_shift_arg(PolyArg a) {
@@ -1171,15 +1249,33 @@ static bool normalize_vector_const_arg(PolyDType dtype, PolyArg val, PolyArg *ou
   return true;
 }
 
-static PolyUOp *build_vector_const_fold(PolyCtx *ctx, PolyUOp *root, PolyOps op, int n_ops) {
-  if (!root || root->dtype.count <= 1 || root->dtype.count > 128 || n_ops < 1 || n_ops > 3)
-    return NULL;
+static PolyUOp *build_const_alu_fold(PolyCtx *ctx, PolyUOp *root, PolyOps op, int n_ops) {
+  if (!root || n_ops < 1 || n_ops > 3) return NULL;
+  bool has_tuple = false;
+  int n_lanes = 1;
+  for (int i = 0; i < n_ops; i++) {
+    bool is_tuple = false;
+    int lanes = const_arg_lane_count(root->src[i], &is_tuple);
+    if (lanes < 0) return NULL;
+    if (is_tuple) {
+      has_tuple = true;
+      if (lanes > n_lanes) n_lanes = lanes;
+    }
+  }
+  if (!has_tuple) return NULL;
+  if (n_lanes < 0 || n_lanes > 128) return NULL;
+  for (int i = 0; i < n_ops; i++) {
+    bool is_tuple = false;
+    int lanes = const_arg_lane_count(root->src[i], &is_tuple);
+    if (lanes < 0 || (is_tuple && lanes != n_lanes)) return NULL;
+  }
+
   PolyUOp *elts[128];
-  PolyDType lane_dt = poly_dtype_scalar(root->dtype);
+  PolyDType lane_dt = root->dtype;
   PolyDType exec_dt = lane_dt;
   if ((op == POLY_OP_CMPLT || op == POLY_OP_CMPNE || op == POLY_OP_CMPEQ) && root->n_src >= 1)
-    exec_dt = poly_dtype_scalar(root->src[0]->dtype);
-  for (int lane = 0; lane < root->dtype.count; lane++) {
+    exec_dt = root->src[0]->dtype;
+  for (int lane = 0; lane < n_lanes; lane++) {
     PolyArg lane_ops[3];
     for (int i = 0; i < n_ops; i++) {
       if (!const_lane_arg(root->src[i], lane, &lane_ops[i])) return NULL;
@@ -1212,13 +1308,23 @@ static PolyUOp *build_vector_const_fold(PolyCtx *ctx, PolyUOp *root, PolyOps op,
   /* Current tinygrad represents lane-wise constants as STACK(CONST, ...).
    * Keeping child CONST lanes here also preserves Invalid lanes instead of
    * turning them into scalar zero. */
-  return poly_uop(ctx, POLY_OP_STACK, root->dtype, elts, root->dtype.count, poly_arg_none());
+  return poly_uop_stack(ctx, elts, n_lanes);
+}
+
+static bool const_alu_has_lanes(PolyUOp *root, int n_ops) {
+  if (!root) return false;
+  for (int i = 0; i < n_ops; i++) {
+    bool is_tuple = false;
+    if (const_arg_lane_count(root->src[i], &is_tuple) >= 0 && is_tuple) return true;
+  }
+  return false;
 }
 
 /* Constant folding: Unary(CONST/STACK) -> CONST/STACK */
 static PolyUOp *rule_const_fold_unary(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   PolyUOp *a = poly_bind(b, "a");
-  if (a->dtype.count > 1) return build_vector_const_fold(ctx, a, a->op, 1);
+  if (const_arg_lane_count(a->src[0], NULL) < 0) return NULL;
+  if (const_alu_has_lanes(a, 1)) return build_const_alu_fold(ctx, a, a->op, 1);
   PolyArg operand = a->src[0]->arg;
   PolyArg result;
   PolyInt owned = {0};
@@ -1231,13 +1337,15 @@ static PolyUOp *rule_const_fold_unary(PolyCtx *ctx, PolyUOp *root, const PolyBin
 /* Constant folding: Binary(CONST/STACK, CONST/STACK) -> CONST/STACK */
 static PolyUOp *rule_const_fold_binary(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   PolyUOp *a = poly_bind(b, "a");
-  if (a->dtype.count > 1) return build_vector_const_fold(ctx, a, a->op, 2);
+  for (int i = 0; i < 2; i++)
+    if (const_arg_lane_count(a->src[i], NULL) < 0) return NULL;
+  if (const_alu_has_lanes(a, 2)) return build_const_alu_fold(ctx, a, a->op, 2);
   if ((a->op == POLY_OP_SHL || a->op == POLY_OP_SHR) && numeric_negative_shift_arg(a->src[1]->arg))
     return NULL;
   PolyArg operands[2] = {a->src[0]->arg, a->src[1]->arg};
   PolyDType exec_dtype = a->dtype;
   if ((a->op == POLY_OP_CMPLT || a->op == POLY_OP_CMPNE || a->op == POLY_OP_CMPEQ) && a->n_src >= 1)
-    exec_dtype = poly_dtype_scalar(a->src[0]->dtype);
+    exec_dtype = a->src[0]->dtype;
   PolyArg result;
   PolyInt owned = {0};
   if (!exec_symbolic_const_alu(a->op, exec_dtype, operands, 2, false, &result, &owned)) return NULL;
@@ -1249,7 +1357,9 @@ static PolyUOp *rule_const_fold_binary(PolyCtx *ctx, PolyUOp *root, const PolyBi
 /* Constant folding: Ternary(CONST/STACK, ...) -> CONST/STACK */
 static PolyUOp *rule_const_fold_ternary(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   PolyUOp *a = poly_bind(b, "a");
-  if (a->dtype.count > 1) return build_vector_const_fold(ctx, a, a->op, 3);
+  for (int i = 0; i < 3; i++)
+    if (const_arg_lane_count(a->src[i], NULL) < 0) return NULL;
+  if (const_alu_has_lanes(a, 3)) return build_const_alu_fold(ctx, a, a->op, 3);
   PolyArg operands[3] = {a->src[0]->arg, a->src[1]->arg, a->src[2]->arg};
   PolyArg result;
   PolyInt owned = {0};
@@ -1262,6 +1372,10 @@ static PolyUOp *rule_const_fold_ternary(PolyCtx *ctx, PolyUOp *root, const PolyB
 /* CAST(CONST) -> CONST with new dtype */
 static PolyUOp *rule_cast_const(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   (void)b;
+  /* Current tinygrad/uop/symbolic.py:145-147 matches the destination against
+   * dtypes.all, which excludes weakint/weakfloat.  A single weak CAST is
+   * consumer provenance for pm_lower_index_dtype and must survive here. */
+  if (poly_dtype_is_weak(root->dtype)) return NULL;
   PolyUOp *c = root->src[0];
   return poly_const_like(ctx, root, c->arg);
 }
@@ -1284,23 +1398,6 @@ static bool const_uop_integer_eq(PolyUOp *u, uint64_t value) {
          poly_arg_integer_to_u64_mod(u->arg) == value;
 }
 
-/* Pinned tinygrad/uop/symbolic.py:159:
- *   (x:uint64 & 0xffffffff).cast(uint32) -> x.cast(uint32). */
-static PolyUOp *rule_threefry_low_lane_cast(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
-  (void)b;
-  if (!root || root->op != POLY_OP_CAST || root->n_src != 1 ||
-      !poly_dtype_eq(root->dtype, POLY_UINT32))
-    return NULL;
-  PolyUOp *and = root->src[0];
-  if (!and || and->op != POLY_OP_AND || and->n_src != 2 ||
-      !poly_dtype_eq(and->dtype, POLY_UINT64))
-    return NULL;
-  PolyUOp *x = NULL;
-  if (const_uop_integer_eq(and->src[1], UINT64_C(0xffffffff))) x = and->src[0];
-  if (const_uop_integer_eq(and->src[0], UINT64_C(0xffffffff))) x = and->src[1];
-  return x ? poly_uop1(ctx, POLY_OP_CAST, POLY_UINT32, x, poly_arg_none()) : NULL;
-}
-
 static PolyUOp *match_u64_cast_from_u32(PolyUOp *u) {
   return u && u->op == POLY_OP_CAST && u->n_src == 1 &&
                  poly_dtype_eq(u->dtype, POLY_UINT64) &&
@@ -1312,10 +1409,6 @@ static PolyUOp *match_u64_cast_from_u32(PolyUOp *u) {
 static PolyUOp *match_u64_shift32_value(PolyUOp *u) {
   if (!u || u->n_src != 2 || !poly_dtype_eq(u->dtype, POLY_UINT64)) return NULL;
   if (u->op == POLY_OP_SHL && const_uop_integer_eq(u->src[1], 32)) return u->src[0];
-  if (u->op == POLY_OP_MUL && const_uop_integer_eq(u->src[1], UINT64_C(1) << 32))
-    return u->src[0];
-  if (u->op == POLY_OP_MUL && const_uop_integer_eq(u->src[0], UINT64_C(1) << 32))
-    return u->src[1];
   return NULL;
 }
 
@@ -1334,7 +1427,7 @@ static bool match_u64_pack(PolyUOp *u, PolyUOp **high, PolyUOp **low) {
   return false;
 }
 
-/* Pinned tinygrad/uop/symbolic.py:160,162: casting a packed uint64 to uint32
+/* Tinygrad 2026-08-22/a9069c177a9d uop/symbolic.py:180: casting a packed uint64 to uint32
  * returns the exact low uint32 occurrence. */
 static PolyUOp *rule_threefry_unpack_low(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   (void)ctx;
@@ -1346,16 +1439,13 @@ static PolyUOp *rule_threefry_unpack_low(PolyCtx *ctx, PolyUOp *root, const Poly
   return match_u64_pack(root->src[0], &high, &low) ? low : NULL;
 }
 
-/* Pinned tinygrad/uop/symbolic.py:161,163: dividing/shifting a packed uint64
- * by 2**32 returns the exact high occurrence. */
+/* Tinygrad 2026-08-22/a9069c177a9d uop/symbolic.py:181-182: shifting a
+ * packed uint64 by 32 returns the exact high occurrence. */
 static PolyUOp *rule_threefry_unpack_high(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   (void)ctx;
   (void)b;
   if (!root || root->n_src != 2 || !poly_dtype_eq(root->dtype, POLY_UINT64)) return NULL;
-  bool high_extract =
-      (root->op == POLY_OP_SHR && const_uop_integer_eq(root->src[1], 32)) ||
-      (root->op == POLY_OP_FLOORDIV &&
-       const_uop_integer_eq(root->src[1], UINT64_C(1) << 32));
+  bool high_extract = root->op == POLY_OP_SHR && const_uop_integer_eq(root->src[1], 32);
   if (!high_extract) return NULL;
   PolyUOp *high = NULL, *low = NULL;
   return match_u64_pack(root->src[0], &high, &low) ? high : NULL;
@@ -1437,8 +1527,8 @@ static bool exact_int_range_i64(ExactIntRange *out, int64_t lo, int64_t hi) {
 /* Pinned tinygrad dtype.py:84-91. Integer endpoints are Python integers,
  * including uint64 [0, 2**64-1] and weakint [-2**799, 2**799-1]. */
 static bool exact_int_range_dtype(ExactIntRange *out, PolyDType dtype) {
-  PolyDType scalar = poly_dtype_scalar(dtype);
-  if (scalar.is_ptr || (!poly_dtype_is_int(scalar) && !poly_dtype_is_bool(scalar))) return false;
+  PolyDType scalar = dtype;
+  if (!poly_dtype_is_int(scalar) && !poly_dtype_is_bool(scalar)) return false;
   if (poly_dtype_is_bool(scalar)) return exact_int_range_i64(out, 0, 1);
 
   int bits = scalar.bitsize;
@@ -1561,13 +1651,13 @@ static bool exact_int_range_node(PolyUOp *u, PolyMap *memo, ExactIntRange *out) 
     out->valid = true;
     return true;
   }
-  if (u->op == POLY_OP_DEFINE_VAR && u->arg.kind == POLY_ARG_DEFINE_VAR)
-    return exact_int_range_i64(out, u->arg.define_var.min_val, u->arg.define_var.max_val);
-  if (u->op == POLY_OP_PARAM && u->arg.kind == POLY_ARG_PARAM && u->arg.param &&
+  if ((u->op == POLY_OP_PARAM || u->op == POLY_OP_BUFFER) &&
+      u->arg.kind == POLY_ARG_PARAM && u->arg.param &&
       u->arg.param->has_minmax)
     return exact_int_range_i64(out, u->arg.param->min_val, u->arg.param->max_val);
 
-  if ((u->op == POLY_OP_BIND || u->op == POLY_OP_GEP) && u->n_src >= 1) {
+  if ((u->op == POLY_OP_AFTER || u->op == POLY_OP_INDEX) &&
+      u->n_src >= 1) {
     ExactIntRange *src = exact_int_range_get(memo, u->src[0]);
     if (src && src->valid) return exact_int_range_copy(out, &src->lo, &src->hi);
   }
@@ -1583,8 +1673,7 @@ static bool exact_int_range_node(PolyUOp *u, PolyMap *memo, ExactIntRange *out) 
     if (ok) return true;
   }
 
-  if ((u->op == POLY_OP_UNROLL || u->op == POLY_OP_VECTORIZE || u->op == POLY_OP_VCONST) &&
-      u->n_src > 0) {
+  if (u->op == POLY_OP_STACK && u->n_src > 0) {
     ExactIntRange *first = exact_int_range_get(memo, u->src[0]);
     if (first && first->valid && exact_int_range_copy(out, &first->lo, &first->hi)) {
       for (int i = 1; i < u->n_src; i++) {
@@ -1618,13 +1707,13 @@ static bool exact_int_range_node(PolyUOp *u, PolyMap *memo, ExactIntRange *out) 
   }
 
   if (u->op == POLY_OP_CAST && u->n_src >= 1) {
-    PolyDType scalar = poly_dtype_scalar(u->dtype);
-    /* Pinned tinygrad/uop/ops.py:1017-1018 matches exact scalar signed/weak
-     * dtypes here. Vector CASTs fall back to their full dtype bounds. */
+    PolyDType scalar = u->dtype;
+    /* Tinygrad 2026-08-22/a9069c177a9d uop/ops.py:1098-1104 applies the
+     * monotone CAST range rule to scalar DType; shape is independent. */
     bool monotone =
-        u->dtype.count == 1 && (poly_dtype_is_index(scalar) ||
-                                (poly_dtype_is_int(scalar) && !poly_dtype_is_unsigned(scalar) &&
-                                 !poly_dtype_is_bool(scalar)));
+        poly_dtype_is_index(scalar) ||
+        (poly_dtype_is_int(scalar) && !poly_dtype_is_unsigned(scalar) &&
+         !poly_dtype_is_bool(scalar));
     ExactIntRange *src = exact_int_range_get(memo, u->src[0]);
     ExactIntRange dtype_range = {0};
     if (monotone && src && src->valid && exact_int_range_dtype(&dtype_range, scalar) &&
@@ -1798,8 +1887,8 @@ static bool exact_int_range_node(PolyUOp *u, PolyMap *memo, ExactIntRange *out) 
     }
   }
 
-  PolyDType scalar = poly_dtype_scalar(u->dtype);
-  if (scalar.is_ptr || (!poly_dtype_is_int(scalar) && !poly_dtype_is_bool(scalar))) return true;
+  PolyDType scalar = u->dtype;
+  if (!poly_dtype_is_int(scalar) && !poly_dtype_is_bool(scalar)) return true;
   return exact_int_range_dtype(out, scalar);
 }
 
@@ -1850,21 +1939,19 @@ static PolyUOp *rule_narrow_proven_long_binary(
   (void)b;
   if (!root || root->n_src != 2 || !poly_opset_has(POLY_GROUP_BINARY, root->op)) return NULL;
   PolyUOp *x = root->src[0], *y = root->src[1];
-  if (!x || !y || !poly_dtype_eq(poly_dtype_scalar(x->dtype), POLY_INT64) ||
-      !poly_dtype_eq(poly_dtype_scalar(y->dtype), POLY_INT64))
+  if (!x || !y || !poly_dtype_eq(x->dtype, POLY_INT64) ||
+      !poly_dtype_eq(y->dtype, POLY_INT64))
     return NULL;
   if (!exact_int_range_fits_dtype(ctx, root, POLY_INT32) ||
       !exact_int_range_fits_dtype(ctx, x, POLY_INT32) ||
       !exact_int_range_fits_dtype(ctx, y, POLY_INT32))
     return NULL;
 
-  PolyDType x_int = x->dtype.count > 1 ? poly_dtype_vec(POLY_INT32, x->dtype.count) : POLY_INT32;
-  PolyDType y_int = y->dtype.count > 1 ? poly_dtype_vec(POLY_INT32, y->dtype.count) : POLY_INT32;
+  PolyDType x_int = POLY_INT32;
+  PolyDType y_int = POLY_INT32;
   PolyDType result_int = poly_opset_has(POLY_GROUP_COMPARISON, root->op)
                              ? root->dtype
-                             : (root->dtype.count > 1
-                                    ? poly_dtype_vec(POLY_INT32, root->dtype.count)
-                                    : POLY_INT32);
+                             : POLY_INT32;
   PolyUOp *x_cast = poly_uop1(ctx, POLY_OP_CAST, x_int, x, poly_arg_none());
   PolyUOp *y_cast = poly_uop1(ctx, POLY_OP_CAST, y_int, y, poly_arg_none());
   PolyUOp *narrow = poly_uop2(ctx, root->op, result_int, x_cast, y_cast, root->arg);
@@ -1873,40 +1960,60 @@ static PolyUOp *rule_narrow_proven_long_binary(
              : poly_uop1(ctx, POLY_OP_CAST, root->dtype, narrow, poly_arg_none());
 }
 
-/* Pinned tinygrad/uop/symbolic.py:297-301:
- *   x.cast(a).cast(b) -> x.cast(b)
- * when a preserves every x value, either by dtype or by the proved integer
- * bounds of this value. Unlike the earlier roundtrip rule, b may differ from
- * x.dtype. UOp.cast returns x when b already equals x.dtype. */
-static PolyUOp *rule_compose_nested_casts(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+/* Tinygrad 2026-08-22/a9069c177a9d uop/symbolic.py:294. */
+static PolyUOp *fold_lossless_nested_cast(
+    PolyCtx *ctx, PolyUOp *root, const PolyBindings *b
+) {
   (void)b;
   if (!root || root->op != POLY_OP_CAST || root->n_src != 1) return NULL;
   PolyUOp *inner = root->src[0];
   if (!inner || inner->op != POLY_OP_CAST || inner->n_src != 1) return NULL;
   PolyUOp *x = inner->src[0];
-  if (!x) return NULL;
+  if (!x || !poly_dtype_can_lossless_cast(x->dtype, inner->dtype)) return NULL;
+  return poly_dtype_eq(x->dtype, root->dtype)
+             ? x
+             : poly_uop1(ctx, POLY_OP_CAST, root->dtype, x, poly_arg_none());
+}
 
-  bool intermediate_preserves_x = poly_dtype_can_lossless_cast(x->dtype, inner->dtype);
-  if (!intermediate_preserves_x && !x->dtype.is_ptr && !inner->dtype.is_ptr &&
-      poly_dtype_is_int(x->dtype) && poly_dtype_is_int(inner->dtype)) {
-    ExactIntRange x_bounds = {0}, intermediate_bounds = {0};
-    if (exact_int_range(ctx, x, &x_bounds) &&
-        exact_int_range_dtype(&intermediate_bounds, inner->dtype))
-      intermediate_preserves_x = poly_int_cmp(&intermediate_bounds.lo, &x_bounds.lo) <= 0 &&
-                                 poly_int_cmp(&x_bounds.hi, &intermediate_bounds.hi) <= 0;
-    exact_int_range_free(&x_bounds);
-    exact_int_range_free(&intermediate_bounds);
-  }
-  if (!intermediate_preserves_x) return NULL;
-  if (poly_dtype_eq(x->dtype, root->dtype)) return x;
-  return poly_uop1(ctx, POLY_OP_CAST, root->dtype, x, poly_arg_none());
+/* Tinygrad 2026-08-22/a9069c177a9d uop/symbolic.py:295-296. */
+static PolyUOp *fold_bounded_nested_cast(
+    PolyCtx *ctx, PolyUOp *root, const PolyBindings *b
+) {
+  (void)b;
+  if (!root || root->op != POLY_OP_CAST || root->n_src != 1) return NULL;
+  PolyUOp *inner = root->src[0];
+  if (!inner || inner->op != POLY_OP_CAST || inner->n_src != 1) return NULL;
+  PolyUOp *x = inner->src[0];
+  if (!x || !poly_dtype_is_int(x->dtype) || !poly_dtype_is_int(inner->dtype)) return NULL;
+  ExactIntRange x_bounds = {0}, intermediate_bounds = {0};
+  bool preserves = exact_int_range(ctx, x, &x_bounds) &&
+                   exact_int_range_dtype(&intermediate_bounds, inner->dtype) &&
+                   poly_int_cmp(&intermediate_bounds.lo, &x_bounds.lo) <= 0 &&
+                   poly_int_cmp(&x_bounds.hi, &intermediate_bounds.hi) <= 0;
+  exact_int_range_free(&x_bounds);
+  exact_int_range_free(&intermediate_bounds);
+  if (!preserves) return NULL;
+  return poly_dtype_eq(x->dtype, root->dtype)
+             ? x
+             : poly_uop1(ctx, POLY_OP_CAST, root->dtype, x, poly_arg_none());
 }
 
 static bool after_dependency_is_effect(PolyOps op) {
   /* Pinned tinygrad/uop/symbolic.py:306-309 exact allowlist. */
   return op == POLY_OP_RANGE || op == POLY_OP_STORE || op == POLY_OP_CALL ||
          op == POLY_OP_FUNCTION || op == POLY_OP_BARRIER || op == POLY_OP_END ||
-         op == POLY_OP_UNROLL || op == POLY_OP_LINEAR || op == POLY_OP_STAGE;
+         op == POLY_OP_LINEAR || op == POLY_OP_STAGE;
+}
+
+/* tinygrad@2026-08-22/a9069c177a9d uop/symbolic.py:306-308. */
+static PolyUOp *rule_after_end_single(
+    PolyCtx *ctx,
+    PolyUOp *root,
+    const PolyBindings *b
+) {
+  (void)ctx;
+  (void)b;
+  return root && root->n_src == 1 ? root->src[0] : NULL;
 }
 
 /* Pinned tinygrad/uop/symbolic.py:306-311. Preserve the AFTER value source,
@@ -1961,24 +2068,69 @@ static PolyUOp *rule_after_canonicalize(PolyCtx *ctx, PolyUOp *root, const PolyB
   return result;
 }
 
-/* NEG(NEG(x)) -> x */
-static PolyUOp *rule_double_neg(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
-  (void)ctx;
-  (void)root;
-  return poly_bind(b, "x");
-}
-
-/* x / x -> 1 (float division) */
-static PolyUOp *rule_fdiv_self(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
-  return poly_const_like_float(ctx, poly_bind(b, "x"), 1.0);
-}
-
 /* Pinned ElementwiseMixin.div constructs true division as
  * a * b.reciprocal() (mixin/elementwise.py:219-241), so symbolic.py:136-145
  * x/x -> 1 matches MUL(x, RECIPROCAL(x)), not only raw FDIV(x,x). */
 static PolyUOp *rule_reciprocal_self_product(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   (void)root;
   return poly_const_like_float(ctx, poly_bind(b, "x"), 1.0);
+}
+
+static PolyUOp *rule_zero_div_zero(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+  /* Tinygrad 2026-08-22/a9069c177a9d uop/symbolic.py:157. */
+  (void)b;
+  return poly_const_like_float(ctx, root, NAN);
+}
+
+static PolyUOp *rule_zero_product_div_zero(
+    PolyCtx *ctx,
+    PolyUOp *root,
+    const PolyBindings *b
+) {
+  /* Tinygrad 2026-08-22/a9069c177a9d uop/symbolic.py:158. */
+  (void)b;
+  return poly_const_like_float(ctx, root, NAN);
+}
+
+/* Tinygrad 2026-08-22/a9069c177a9d uop/symbolic.py:159-161. */
+static PolyUOp *rule_mul_reciprocal_cancel(
+    PolyCtx *ctx,
+    PolyUOp *root,
+    const PolyBindings *b
+) {
+  (void)ctx;
+  (void)root;
+  return poly_bind(b, "x");
+}
+
+/* tinygrad@2026-08-22/a9069c177a9d uop/symbolic.py:461-463 factors
+ * reciprocals so constants fold and repeated factors remain explicit. */
+static PolyUOp *rule_reciprocal_square(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+  (void)root;
+  PolyUOp *x = poly_bind(b, "x");
+  PolyUOp *rx = x ? poly_alu1(ctx, POLY_OP_RECIPROCAL, x) : NULL;
+  return rx ? poly_binop(ctx, POLY_OP_MUL, rx, rx) : NULL;
+}
+
+static PolyUOp *rule_reciprocal_cube(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+  (void)root;
+  PolyUOp *x = poly_bind(b, "x");
+  PolyUOp *rx = x ? poly_alu1(ctx, POLY_OP_RECIPROCAL, x) : NULL;
+  PolyUOp *square = rx ? poly_binop(ctx, POLY_OP_MUL, rx, rx) : NULL;
+  return square ? poly_binop(ctx, POLY_OP_MUL, square, rx) : NULL;
+}
+
+static PolyUOp *rule_reciprocal_const_factor(
+    PolyCtx *ctx,
+    PolyUOp *root,
+    const PolyBindings *b
+) {
+  (void)root;
+  PolyUOp *x = poly_bind(b, "x");
+  PolyUOp *c = poly_bind(b, "c");
+  PolyUOp *rx = x ? poly_alu1(ctx, POLY_OP_RECIPROCAL, x) : NULL;
+  PolyUOp *rc = c ? poly_alu1(ctx, POLY_OP_RECIPROCAL, c) : NULL;
+  return rx && rc ? poly_binop(ctx, POLY_OP_MUL, rx, rc) : NULL;
 }
 
 static bool pow_const_double(PolyUOp *c, double *out) {
@@ -2124,61 +2276,62 @@ static PolyUOp *rule_simplify_pow_const_base(PolyCtx *ctx, PolyUOp *root, const 
   return poly_uop1(ctx, POLY_OP_EXP2, root->dtype, arg, poly_arg_none());
 }
 
-/* tinygrad decompositions.py:xpow, invoked from symbolic.py:sym for remaining POW. */
-static PolyUOp *rule_decomp_pow_generic(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+/* Tinygrad 2026-08-22/a9069c177a9d
+ * codegen/decomp/transcendental.py:xpow, invoked by uop/symbolic.py:sym for
+ * every remaining POW. Integer inputs deliberately produce a float graph. */
+static PolyUOp *xpow_rewrite(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   (void)b;
   if (!root || root->op != POLY_OP_POW || root->n_src < 2) return NULL;
-  if (!poly_dtype_is_float(root->dtype)) return NULL;
   PolyUOp *base = root->src[0];
   PolyUOp *exponent = root->src[1];
-  PolyDType ft = root->dtype;
-  PolyDType bt = (ft.count > 1) ? poly_dtype_vec(POLY_BOOL, ft.count) : POLY_BOOL;
-  PolyDType it = (ft.count > 1) ? poly_dtype_vec(POLY_INT32, ft.count) : POLY_INT32;
+  PolyDType ft;
+  if (!poly_dtype_least_upper_float(base->dtype, &ft)) return NULL;
+  PolyDType bt = POLY_BOOL;
+  PolyDType it = POLY_INT32;
 
-  PolyUOp *base_zero = poly_const_like_float(ctx, base, 0.0);
-  PolyUOp *exp_zero = poly_const_like_float(ctx, exponent, 0.0);
-  PolyUOp *one = poly_const_like_float(ctx, root, 1.0);
-  PolyUOp *nanv = poly_const_like_float(ctx, root, NAN);
-
-  PolyUOp *base_lt0 = poly_uop2(ctx, POLY_OP_CMPLT, bt, base, base_zero, poly_arg_none());
-  PolyUOp *abs_base = poly_uop3(
-      ctx, POLY_OP_WHERE, base->dtype, base_lt0,
-      poly_uop1(ctx, POLY_OP_NEG, base->dtype, base, poly_arg_none()), base, poly_arg_none()
+  PolyUOp *base_zero = poly_const_like_int(ctx, base, 0);
+  PolyUOp *exp_zero = poly_const_like_int(ctx, exponent, 0);
+  PolyUOp *base_lt0 = poly_alu2(ctx, POLY_OP_CMPLT, base, base_zero);
+  PolyUOp *abs_base = poly_alu3(
+      ctx, POLY_OP_WHERE, base_lt0, poly_alu1(ctx, POLY_OP_NEG, base), base
+  );
+  PolyUOp *log_abs = poly_alu1(ctx, POLY_OP_LOG2, abs_base);
+  PolyUOp *exp_float = poly_cast(ctx, exponent, ft);
+  PolyUOp *ret = poly_alu1(
+      ctx, POLY_OP_EXP2, poly_alu2(ctx, POLY_OP_MUL, log_abs, exp_float)
   );
 
-  PolyUOp *log_abs = poly_uop1(ctx, POLY_OP_LOG2, ft, abs_base, poly_arg_none());
-  PolyUOp *scaled = poly_uop2(ctx, POLY_OP_MUL, ft, log_abs, exponent, poly_arg_none());
-  PolyUOp *ret = poly_uop1(ctx, POLY_OP_EXP2, ft, scaled, poly_arg_none());
-
-  PolyUOp *exp_int = poly_uop1(ctx, POLY_OP_CAST, it, exponent, poly_arg_none());
-  PolyUOp *exp_back = poly_uop1(ctx, POLY_OP_CAST, ft, exp_int, poly_arg_none());
-  PolyUOp *non_int = poly_uop2(ctx, POLY_OP_CMPNE, bt, exponent, exp_back, poly_arg_none());
-
-  PolyUOp *exp_lt0 = poly_uop2(ctx, POLY_OP_CMPLT, bt, exponent, exp_zero, poly_arg_none());
-  PolyUOp *abs_exp = poly_uop3(
-      ctx, POLY_OP_WHERE, ft, exp_lt0, poly_uop1(ctx, POLY_OP_NEG, ft, exponent, poly_arg_none()),
-      exponent, poly_arg_none()
+  PolyUOp *exp_int = poly_cast(ctx, exponent, it);
+  PolyUOp *exp_back = poly_cast(ctx, exp_int, exponent->dtype);
+  PolyUOp *non_int = poly_alu2(ctx, POLY_OP_CMPNE, exponent, exp_back);
+  PolyUOp *exp_lt0 = poly_alu2(ctx, POLY_OP_CMPLT, exponent, exp_zero);
+  PolyUOp *abs_exp = poly_alu3(
+      ctx, POLY_OP_WHERE, exp_lt0, poly_alu1(ctx, POLY_OP_NEG, exponent), exponent
   );
-  PolyUOp *abs_exp_int = poly_uop1(ctx, POLY_OP_CAST, it, abs_exp, poly_arg_none());
-  PolyUOp *rem = poly_uop2(
-      ctx, POLY_OP_FLOORMOD, it, abs_exp_int, poly_const_like_int(ctx, abs_exp_int, 2),
-      poly_arg_none()
+  PolyUOp *abs_exp_int = poly_cast(ctx, abs_exp, it);
+  PolyUOp *rem = poly_alu2(
+      ctx, POLY_OP_FLOORMOD, abs_exp_int, poly_const_like_int(ctx, abs_exp_int, 2)
   );
-  PolyUOp *is_odd = poly_uop1(ctx, POLY_OP_CAST, bt, rem, poly_arg_none());
+  PolyUOp *is_odd = poly_cast(ctx, rem, bt);
 
-  PolyUOp *signed_ret = poly_uop3(
-      ctx, POLY_OP_WHERE, ft, is_odd, poly_uop1(ctx, POLY_OP_NEG, ft, ret, poly_arg_none()), ret,
-      poly_arg_none()
+  PolyUOp *base_float = poly_cast(ctx, base, ft);
+  PolyUOp *base_not_neg_inf = poly_alu2(
+      ctx, POLY_OP_CMPNE, base_float, poly_const_like_float(ctx, ret, -INFINITY)
   );
-  PolyUOp *neg_base_result =
-      poly_uop3(ctx, POLY_OP_WHERE, ft, non_int, nanv, signed_ret, poly_arg_none());
-
-  PolyUOp *base_eq0 = poly_uop2(ctx, POLY_OP_CMPEQ, bt, base, base_zero, poly_arg_none());
-  PolyUOp *exp_eq0 = poly_uop2(ctx, POLY_OP_CMPEQ, bt, exponent, exp_zero, poly_arg_none());
-  PolyUOp *zero_pow_zero = poly_uop2(ctx, POLY_OP_AND, bt, base_eq0, exp_eq0, poly_arg_none());
-  PolyUOp *base_result =
-      poly_uop3(ctx, POLY_OP_WHERE, ft, base_lt0, neg_base_result, ret, poly_arg_none());
-  return poly_uop3(ctx, POLY_OP_WHERE, ft, zero_pow_zero, one, base_result, poly_arg_none());
+  PolyUOp *non_int_result = poly_alu3(
+      ctx, POLY_OP_WHERE, base_not_neg_inf, poly_const_like_float(ctx, ret, NAN), ret
+  );
+  PolyUOp *odd_result = poly_alu3(
+      ctx, POLY_OP_WHERE, is_odd, poly_alu1(ctx, POLY_OP_NEG, ret), ret
+  );
+  PolyUOp *negative_base = poly_alu3(
+      ctx, POLY_OP_WHERE, non_int, non_int_result, odd_result
+  );
+  PolyUOp *base_result = poly_alu3(ctx, POLY_OP_WHERE, base_lt0, negative_base, ret);
+  PolyUOp *exp_nonzero = poly_alu2(ctx, POLY_OP_CMPNE, exponent, exp_zero);
+  return poly_alu3(
+      ctx, POLY_OP_WHERE, exp_nonzero, base_result, poly_const_like_float(ctx, ret, 1.0)
+  );
 }
 
 /* WHERE(cond, val, val) -> val */
@@ -2190,13 +2343,19 @@ static PolyUOp *rule_where_same(PolyCtx *ctx, PolyUOp *root, const PolyBindings 
 
 /* WHERE(true/false_const, c0, c1) -> c0 or c1 */
 static PolyUOp *rule_where_const_gate(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
-  (void)ctx;
   PolyUOp *gate = poly_bind(b, "gate");
   PolyUOp *c0 = poly_bind(b, "c0");
   PolyUOp *c1 = poly_bind(b, "c1");
-  if (gate->arg.kind == POLY_ARG_BOOL) return gate->arg.b ? c0 : c1;
-  if (gate->arg.kind == POLY_ARG_INT) return gate->arg.i ? c0 : c1;
-  return NULL;
+  PolyUOp *selected = NULL;
+  if (gate->arg.kind == POLY_ARG_BOOL) selected = gate->arg.b ? c0 : c1;
+  if (gate->arg.kind == POLY_ARG_INT) selected = gate->arg.i ? c0 : c1;
+  if (!selected) return NULL;
+  /* tinygrad@2026-08-22/a9069c177a9d uop/symbolic.py:104-107 keeps a
+   * strong WHERE strong when its selected branch is a weak CONST. */
+  return selected->op == POLY_OP_CONST && poly_dtype_is_weak(selected->dtype) &&
+                 !poly_dtype_is_weak(root->dtype)
+             ? poly_commit_weak(ctx, selected, root->dtype)
+             : selected;
 }
 
 static bool is_invalid_const_uop(PolyUOp *u) {
@@ -2224,18 +2383,6 @@ typedef struct {
   PolyUOp *fake;
 } PolyValidExprBound;
 
-static int valid_split_op(PolyUOp *u, PolyOps op, PolyUOp **out, int max_n) {
-  if (!u || !out || max_n <= 0) return 0;
-  if (u->op != op) {
-    out[0] = u;
-    return 1;
-  }
-  int n = 0;
-  for (int i = 0; i < u->n_src && n < max_n; i++)
-    n += valid_split_op(u->src[i], op, out + n, max_n - n);
-  return n;
-}
-
 static bool valid_true_const(PolyUOp *u) {
   return u && u->op == POLY_OP_CONST &&
          ((u->arg.kind == POLY_ARG_BOOL && u->arg.b) ||
@@ -2252,7 +2399,193 @@ static PolyUOp *valid_and_all(PolyCtx *ctx, PolyUOp **clauses, int n) {
   return acc ? acc : poly_const_typed(ctx, POLY_BOOL, 1.0);
 }
 
-static bool valid_parse_clause(
+static bool uop_in_list(PolyUOp *u, PolyUOp **items, int n) {
+  for (int i = 0; i < n; i++)
+    if (items[i] == u) return true;
+  return false;
+}
+
+/* Tinygrad 2026-08-22/a9069c177a9d
+ * uop/symbolic.py:where_on_load.can_move. */
+static bool where_on_load_can_move(PolyCtx *ctx, PolyUOp *clause, PolyUOp *idx) {
+  int n_idx_topo = 0, n_clause_topo = 0;
+  PolyUOp **idx_topo = poly_toposort_alloc(ctx, idx, &n_idx_topo);
+  PolyUOp **clause_topo = poly_toposort_alloc(ctx, clause, &n_clause_topo);
+  if (!idx_topo || !clause_topo) {
+    poly_toposort_free(idx_topo);
+    poly_toposort_free(clause_topo);
+    return false;
+  }
+
+  PolyUOp **idx_ranges = malloc((size_t)n_idx_topo * sizeof(*idx_ranges));
+  PolyUOp **clause_ranges = malloc((size_t)n_clause_topo * sizeof(*clause_ranges));
+  if (!idx_ranges || !clause_ranges) {
+    free(idx_ranges);
+    free(clause_ranges);
+    poly_toposort_free(idx_topo);
+    poly_toposort_free(clause_topo);
+    return false;
+  }
+  int n_idx_ranges = poly_uop_ranges(ctx, idx, idx_ranges, n_idx_topo);
+  int n_clause_ranges = poly_uop_ranges(ctx, clause, clause_ranges, n_clause_topo);
+  bool can_move = true;
+  for (int i = 0; i < n_clause_ranges; i++) {
+    if (!uop_in_list(clause_ranges[i], idx_ranges, n_idx_ranges)) {
+      can_move = false;
+      break;
+    }
+  }
+  for (int i = 0; can_move && i < n_clause_topo; i++) {
+    if (clause_topo[i]->op == POLY_OP_INDEX &&
+        !uop_in_list(clause_topo[i], idx_topo, n_idx_topo))
+      can_move = false;
+  }
+
+  free(idx_ranges);
+  free(clause_ranges);
+  poly_toposort_free(idx_topo);
+  poly_toposort_free(clause_topo);
+  return can_move;
+}
+
+static bool zero_const(PolyUOp *u) {
+  if (!u || u->op != POLY_OP_CONST) return false;
+  if (u->arg.kind == POLY_ARG_BOOL) return !u->arg.b;
+  if (u->arg.kind == POLY_ARG_INT) return u->arg.i == 0;
+  if (u->arg.kind == POLY_ARG_FLOAT) return u->arg.f == 0.0;
+  if (u->arg.kind == POLY_ARG_BIGINT) {
+    PolyInt value = {0};
+    bool ret = poly_int_from_arg(&value, u->arg) && poly_int_is_zero(&value);
+    poly_int_free(&value);
+    return ret;
+  }
+  return false;
+}
+
+static PolyUOp *rebuild_index(PolyCtx *ctx, PolyUOp *index, PolyUOp *coord) {
+  PolyUOp *src[2] = {index->src[0], coord};
+  return (index->tag != 0 || index->tag_arg.kind != POLY_ARG_NONE)
+             ? poly_uop_tagged_arg(
+                   ctx, POLY_OP_INDEX, index->dtype, src, 2, index->arg, index->tag,
+                   index->tag_arg
+               )
+             : poly_uop(ctx, POLY_OP_INDEX, index->dtype, src, 2, index->arg);
+}
+
+/* Tinygrad 2026-08-22/a9069c177a9d uop/symbolic.py:where_on_load. */
+static PolyUOp *where_on_load(
+    PolyCtx *ctx,
+    PolyUOp *cond,
+    PolyUOp *index,
+    PolyUOp *or_cast
+) {
+  PolyUOp *idx = index->src[1];
+  PolyUOp *load_valid = poly_uop_get_valid(ctx, idx);
+  int n_where = 0, n_load = 0;
+  PolyUOp **where_clauses = poly_uop_split(cond, POLY_OP_AND, &n_where);
+  PolyUOp **load_clauses = poly_uop_split(load_valid, POLY_OP_AND, &n_load);
+  if (!where_clauses || !load_clauses) {
+    free(where_clauses);
+    free(load_clauses);
+    return NULL;
+  }
+  PolyUOp **moved = malloc((size_t)n_where * sizeof(*moved));
+  PolyUOp **keep = malloc((size_t)n_where * sizeof(*keep));
+  if (!moved || !keep) {
+    free(where_clauses);
+    free(load_clauses);
+    free(moved);
+    free(keep);
+    return NULL;
+  }
+
+  int n_moved = 0, n_keep = 0;
+  for (int i = 0; i < n_where; i++) {
+    PolyUOp *clause = where_clauses[i];
+    if (uop_in_list(clause, load_clauses, n_load)) continue;
+    if (where_on_load_can_move(ctx, clause, idx))
+      moved[n_moved++] = clause;
+    else
+      keep[n_keep++] = clause;
+  }
+  free(where_clauses);
+  free(load_clauses);
+  if (n_keep == n_where) {
+    free(moved);
+    free(keep);
+    return NULL;
+  }
+
+  PolyUOp **valids = malloc((size_t)(n_moved + 1) * sizeof(*valids));
+  if (!valids) {
+    free(moved);
+    free(keep);
+    return NULL;
+  }
+  valids[0] = load_valid;
+  for (int i = 0; i < n_moved; i++) valids[i + 1] = moved[i];
+  PolyUOp *new_valid = valid_and_all(ctx, valids, n_moved + 1);
+  PolyUOp *base_idx = poly_uop_get_idx(ctx, idx);
+  PolyUOp *invalid = poly_uop_const(ctx, poly_arg_invalid(), idx->dtype);
+  PolyUOp *new_coord = poly_uop3(
+      ctx, POLY_OP_WHERE, idx->dtype, new_valid, base_idx, invalid, poly_arg_none()
+  );
+  PolyUOp *ret_idx = rebuild_index(ctx, index, new_coord);
+  if (or_cast != index) ret_idx = poly_cast(ctx, ret_idx, or_cast->dtype);
+  PolyUOp *keep_cond = valid_and_all(ctx, keep, n_keep);
+  PolyUOp *zero = poly_const_like_int(ctx, ret_idx, 0);
+  PolyUOp *ret = poly_uop3(
+      ctx, POLY_OP_WHERE, ret_idx->dtype, keep_cond, ret_idx, zero, poly_arg_none()
+  );
+  free(valids);
+  free(moved);
+  free(keep);
+  return ret;
+}
+
+static PolyUOp *where_on_load_rule(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+  (void)b;
+  if (!root || root->op != POLY_OP_WHERE || root->n_src != 3 || !zero_const(root->src[2]))
+    return NULL;
+  PolyUOp *or_cast = root->src[1];
+  PolyUOp *index = or_cast;
+  if (or_cast->op == POLY_OP_CAST && or_cast->n_src == 1) index = or_cast->src[0];
+  if (!index || index->op != POLY_OP_INDEX || index->n_src != 2) return NULL;
+  return where_on_load(ctx, root->src[0], index, or_cast);
+}
+
+static PolyUOp *where_on_load_reverse_rule(
+    PolyCtx *ctx,
+    PolyUOp *root,
+    const PolyBindings *b
+) {
+  (void)b;
+  if (!root || root->op != POLY_OP_WHERE || root->n_src != 3 || !zero_const(root->src[1]))
+    return NULL;
+  PolyUOp *or_cast = root->src[2];
+  PolyUOp *index = or_cast;
+  if (or_cast->op == POLY_OP_CAST && or_cast->n_src == 1) index = or_cast->src[0];
+  if (!index || index->op != POLY_OP_INDEX || index->n_src != 2) return NULL;
+  PolyUOp *not_cond = poly_uop2(
+      ctx, POLY_OP_CMPNE, POLY_BOOL, root->src[0],
+      poly_const_typed(ctx, POLY_BOOL, 1.0), poly_arg_none()
+  );
+  return where_on_load(ctx, not_cond, index, or_cast);
+}
+
+static _Thread_local PolyPatternMatcher *g_pm_move_where_on_load = NULL;
+PolyPatternMatcher *poly_pm_move_where_on_load(void) {
+  if (g_pm_move_where_on_load) return g_pm_move_where_on_load;
+  PolyRule rules[] = {
+      {poly_upat_op(POLY_OP_WHERE, NULL, 0, "w"), where_on_load_rule},
+      {poly_upat_op(POLY_OP_WHERE, NULL, 0, "w"), where_on_load_reverse_rule},
+  };
+  g_pm_move_where_on_load =
+      poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
+  return g_pm_move_where_on_load;
+}
+
+bool poly_parse_valid(
     PolyCtx *ctx,
     PolyUOp *clause,
     PolyUOp **expr_out,
@@ -2275,6 +2608,18 @@ static bool valid_parse_clause(
   }
   if (clause->op == POLY_OP_CMPLT && clause->n_src == 2 &&
       poly_dtype_is_int(clause->src[0]->dtype)) {
+    /* Tinygrad 2026-08-22/a9069c177a9d uop/symbolic.py:317-319:
+     * c < X is the lower bound X >= c+1. */
+    if (clause->src[0]->op == POLY_OP_CONST &&
+        arg_is_exact_integer(clause->src[0]->arg)) {
+      int64_t bound = 0;
+      if (!poly_arg_integer_to_i64(clause->src[0]->arg, &bound) || bound == INT64_MAX)
+        return false;
+      *expr_out = clause->src[1];
+      *is_upper_out = false;
+      *bound_out = bound + 1;
+      return true;
+    }
     int64_t lo = 0, hi = 0;
     poly_uop_minmax(ctx, clause->src[1], &lo, &hi);
     if (hi == INT64_MIN) return false;
@@ -2319,23 +2664,27 @@ PolyUOp *poly_uop_given_valid(
 ) {
   if (!ctx || !valid || !uop) return uop;
 
-  PolyUOp *clauses[128];
-  int n_clauses = valid_split_op(valid, POLY_OP_AND, clauses, 128);
-  PolyValidExprBound bounds[128] = {0};
+  int n_clauses = 0;
+  PolyUOp **clauses = poly_uop_split(valid, POLY_OP_AND, &n_clauses);
+  if (!clauses) return uop;
+  PolyValidExprBound *bounds = calloc((size_t)n_clauses, sizeof(*bounds));
+  if (!bounds) {
+    free(clauses);
+    return uop;
+  }
   int n_bounds = 0;
   for (int i = 0; i < n_clauses; i++) {
     PolyUOp *expr = NULL;
     bool is_upper = false;
     int64_t bound = 0;
-    if (!valid_parse_clause(ctx, clauses[i], &expr, &is_upper, &bound)) continue;
+    if (!poly_parse_valid(ctx, clauses[i], &expr, &is_upper, &bound)) continue;
     int at = -1;
     for (int j = 0; j < n_bounds; j++)
       if (bounds[j].expr == expr) {
         at = j;
         break;
-      }
+    }
     if (at < 0) {
-      if (n_bounds >= 128) break;
       at = n_bounds++;
       bounds[at].expr = expr;
     }
@@ -2347,7 +2696,11 @@ PolyUOp *poly_uop_given_valid(
       bounds[at].has_lo = true;
     }
   }
-  if (n_bounds == 0) return uop;
+  free(clauses);
+  if (n_bounds == 0) {
+    free(bounds);
+    return uop;
+  }
 
   for (int i = 0; i < n_bounds; i++) {
     int64_t vmin = 0, vmax = 0;
@@ -2356,35 +2709,35 @@ PolyUOp *poly_uop_given_valid(
     if (!bounds[i].has_hi) bounds[i].hi = vmax;
     if (bounds[i].lo > bounds[i].hi) continue;
     char name[48];
-    snprintf(name, sizeof(name), "valid_bound_%d", i);
-    bounds[i].fake = poly_uop0(
-        ctx, POLY_OP_DEFINE_VAR, bounds[i].expr->dtype,
-        poly_arg_define_var(name, bounds[i].lo, bounds[i].hi)
+    snprintf(name, sizeof(name), "fake%d", i);
+    bounds[i].fake = poly_uop_variable(
+        ctx, name, bounds[i].lo, bounds[i].hi, bounds[i].expr->dtype, 1, true
     );
     if (!bounds[i].fake) continue;
 
-    PolyUOp *exprs[1] = {bounds[i].expr};
-    PolyUOp *fakes[1] = {bounds[i].fake};
-    uop = valid_simplify_substitution(ctx, uop, exprs, fakes, 1);
+    if (try_simplex && poly_uop_reachable(ctx, uop, bounds[i].expr)) {
+      PolyUOp *exprs[1] = {bounds[i].expr};
+      PolyUOp *fakes[1] = {bounds[i].fake};
+      uop = valid_simplify_substitution(ctx, uop, exprs, fakes, 1);
+    }
 
     if (try_simplex && bounds[i].lo == 1 && bounds[i].expr->op == POLY_OP_ADD) {
-      PolyUOp *terms[128];
-      int n_terms = valid_split_op(bounds[i].expr, POLY_OP_ADD, terms, 128);
+      int n_terms = 0;
+      PolyUOp **terms = poly_uop_split(bounds[i].expr, POLY_OP_ADD, &n_terms);
       bool irreducible = n_terms > 0;
       for (int j = 0; j < n_terms; j++)
-        if (!poly_opset_has(POLY_GROUP_IRREDUCIBLE, terms[j]->op)) irreducible = false;
+        if (!poly_opset_has(POLY_GROUP_IRREDUCIBLE, terms[j]->op) ||
+            !poly_uop_reachable(ctx, uop, terms[j]))
+          irreducible = false;
       if (irreducible) {
-        PolyUOp *candidates[128];
-        bool complete = true;
-        for (int j = 0; j < n_terms; j++) {
+        PolyUOp **candidates = malloc((size_t)n_terms * sizeof(*candidates));
+        bool complete = candidates != NULL;
+        for (int j = 0; candidates && j < n_terms; j++) {
           int64_t term_lo = 0, term_hi = 0;
           poly_uop_minmax(ctx, terms[j], &term_lo, &term_hi);
           (void)term_lo;
-          char term_name[64];
-          snprintf(term_name, sizeof(term_name), "valid_simplex_%d_%d", i, j);
-          PolyUOp *fake = poly_uop0(
-              ctx, POLY_OP_DEFINE_VAR, terms[j]->dtype,
-              poly_arg_define_var(term_name, 1, term_hi)
+          PolyUOp *fake = poly_uop_variable(
+              ctx, name, 1, term_hi, terms[j]->dtype, 1, true
           );
           if (!fake) {
             complete = false;
@@ -2414,13 +2767,16 @@ PolyUOp *poly_uop_given_valid(
                 ctx, uop->op, uop->dtype, srcs, 2, uop->arg, uop->tag, uop->tag_arg
             );
         }
+        free(candidates);
       }
+      free(terms);
     }
   }
 
-  PolyUOp *exprs[128], *fakes[128];
+  PolyUOp **exprs = malloc((size_t)n_bounds * sizeof(*exprs));
+  PolyUOp **fakes = malloc((size_t)n_bounds * sizeof(*fakes));
   int n_candidates = 0;
-  for (int i = 0; i < n_bounds; i++) {
+  for (int i = 0; exprs && fakes && i < n_bounds; i++) {
     if (!bounds[i].fake) continue;
     exprs[n_candidates] = bounds[i].expr;
     fakes[n_candidates] = bounds[i].fake;
@@ -2428,6 +2784,9 @@ PolyUOp *poly_uop_given_valid(
   }
   if (n_candidates > 0)
     uop = valid_simplify_substitution(ctx, uop, exprs, fakes, n_candidates);
+  free(exprs);
+  free(fakes);
+  free(bounds);
   return uop;
 }
 
@@ -2443,7 +2802,7 @@ static int valid_priority(PolyCtx *ctx, PolyUOp *clause, PolyUOp **clauses, int 
   PolyUOp *expr = NULL;
   bool upper = false;
   int64_t bound = 0;
-  if (!valid_parse_clause(ctx, clause, &expr, &upper, &bound)) return 0;
+  if (!poly_parse_valid(ctx, clause, &expr, &upper, &bound)) return 0;
   (void)upper;
   (void)bound;
   int score = 0;
@@ -2455,9 +2814,16 @@ static int valid_priority(PolyCtx *ctx, PolyUOp *clause, PolyUOp **clauses, int 
 static PolyUOp *rule_simplify_valid(PolyCtx *ctx, PolyUOp *valid, const PolyBindings *b) {
   (void)b;
   if (!valid || valid->op != POLY_OP_AND || valid_contains_op(valid, POLY_OP_INDEX)) return NULL;
-  PolyUOp *clauses[128];
-  int n = valid_split_op(valid, POLY_OP_AND, clauses, 128);
-  int priorities[128];
+  int n = 0;
+  PolyUOp **clauses = poly_uop_split(valid, POLY_OP_AND, &n);
+  int *priorities = n > 0 ? malloc((size_t)n * sizeof(*priorities)) : NULL;
+  PolyUOp **ret = n > 0 ? malloc((size_t)n * sizeof(*ret)) : NULL;
+  if (!clauses || !priorities || !ret) {
+    free(clauses);
+    free(priorities);
+    free(ret);
+    return NULL;
+  }
   for (int i = 0; i < n; i++) priorities[i] = valid_priority(ctx, clauses[i], clauses, n);
   for (int i = 1; i < n; i++) {
     PolyUOp *clause = clauses[i];
@@ -2470,8 +2836,6 @@ static PolyUOp *rule_simplify_valid(PolyCtx *ctx, PolyUOp *valid, const PolyBind
     clauses[j] = clause;
     priorities[j] = priority;
   }
-
-  PolyUOp *ret[128];
   int n_ret = 0;
   bool changed = false;
   for (int i = 0; i < n; i++) {
@@ -2492,14 +2856,19 @@ static PolyUOp *rule_simplify_valid(PolyCtx *ctx, PolyUOp *valid, const PolyBind
     if (stmt != clauses[i]) changed = true;
     ret[n_ret++] = stmt;
   }
-  return changed ? valid_and_all(ctx, ret, n_ret) : NULL;
+  PolyUOp *out = changed ? valid_and_all(ctx, ret, n_ret) : NULL;
+  free(clauses);
+  free(priorities);
+  free(ret);
+  return out;
 }
 
 static PolyUOp *rule_gated_given_valid(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   (void)b;
   PolyUOp *cond = NULL, *value = NULL, *invalid = NULL;
   if (!invalid_gate_parts(root, &cond, &value, &invalid) ||
-      !poly_dtype_eq(poly_dtype_scalar(value->dtype), POLY_INDEX))
+      !poly_dtype_eq(value->dtype, POLY_WEAKINT) ||
+      valid_contains_op(value, POLY_OP_INDEX))
     return NULL;
   PolyUOp *simplified = poly_uop_given_valid(ctx, cond, value, false);
   if (!simplified || simplified == value) return NULL;
@@ -2523,13 +2892,24 @@ static PolyUOp *rule_drop_and_clauses(PolyCtx *ctx, PolyUOp *root, const PolyBin
   (void)b;
   PolyUOp *cond = NULL, *value = NULL, *invalid = NULL;
   if (!invalid_gate_parts(root, &cond, &value, &invalid)) return NULL;
-  PolyUOp *clauses[128], *keep[128];
-  int n = valid_split_op(cond, POLY_OP_AND, clauses, 128), n_keep = 0;
+  int n = 0, n_keep = 0;
+  PolyUOp **clauses = poly_uop_split(cond, POLY_OP_AND, &n);
+  PolyUOp **keep = n > 0 ? malloc((size_t)n * sizeof(*keep)) : NULL;
+  if (!clauses || !keep) {
+    free(clauses);
+    free(keep);
+    return NULL;
+  }
   for (int i = 0; i < n; i++)
     if (valid_clause_reaches_value_range(ctx, clauses[i], value)) keep[n_keep++] = clauses[i];
-  if (n_keep == n) return NULL;
-  PolyUOp *new_cond = valid_and_all(ctx, keep, n_keep);
-  return poly_uop3(ctx, POLY_OP_WHERE, root->dtype, new_cond, value, invalid, poly_arg_none());
+  PolyUOp *out = NULL;
+  if (n_keep != n) {
+    PolyUOp *new_cond = valid_and_all(ctx, keep, n_keep);
+    out = poly_uop3(ctx, POLY_OP_WHERE, root->dtype, new_cond, value, invalid, poly_arg_none());
+  }
+  free(clauses);
+  free(keep);
+  return out;
 }
 
 static _Thread_local PolyPatternMatcher *g_pm_simplify_valid = NULL;
@@ -2538,8 +2918,8 @@ static _Thread_local PolyPatternMatcher *g_pm_drop_and_clauses = NULL;
 PolyPatternMatcher *poly_pm_simplify_valid(void) {
   if (g_pm_simplify_valid) return g_pm_simplify_valid;
   PolyRule rules[] = {
-      {poly_pat_op(POLY_OP_AND, NULL, 0, "valid"), rule_simplify_valid},
-      {poly_pat_op(POLY_OP_WHERE, NULL, 0, "root"), rule_gated_given_valid},
+      {poly_upat_op(POLY_OP_AND, NULL, 0, "valid"), rule_simplify_valid},
+      {poly_upat_op(POLY_OP_WHERE, NULL, 0, "root"), rule_gated_given_valid},
   };
   g_pm_simplify_valid =
       poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
@@ -2549,19 +2929,16 @@ PolyPatternMatcher *poly_pm_simplify_valid(void) {
 PolyPatternMatcher *poly_pm_drop_and_clauses(void) {
   if (g_pm_drop_and_clauses) return g_pm_drop_and_clauses;
   PolyRule rules[] = {
-      {poly_pat_op(POLY_OP_WHERE, NULL, 0, "root"), rule_drop_and_clauses},
+      {poly_upat_op(POLY_OP_WHERE, NULL, 0, "root"), rule_drop_and_clauses},
   };
   g_pm_drop_and_clauses =
       poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
   return g_pm_drop_and_clauses;
 }
 
-static bool invalid_propagation_comparison(PolyOps op) {
-  return op == POLY_OP_CMPLT || op == POLY_OP_CMPEQ || op == POLY_OP_CMPNE;
-}
-
 /*
- * Pinned tinygrad/uop/symbolic.py:60-86 `propagate_invalid`.
+ * Tinygrad 2026-08-22/a9069c177a9d uop/symbolic.py:70-96
+ * `pm_data_invalid`.
  *
  * Invalid is a masked-index sentinel, not an ordinary constant. Lift it
  * through ALU before identities such as x*0 -> 0 can erase the mask:
@@ -2569,19 +2946,21 @@ static bool invalid_propagation_comparison(PolyOps op) {
  *   ALU(WHERE(gate, x, Invalid), y)
  *     -> WHERE(gate, ALU(x, y), Invalid)
  */
-static PolyUOp *rule_propagate_invalid_cast(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+/* Tinygrad 2026-08-22/a9069c177a9d uop/symbolic.py:75. */
+static PolyUOp *rule_propagate_invalid_stack(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+  (void)ctx;
   (void)b;
-  if (!root || root->op != POLY_OP_CAST || root->n_src != 1) return NULL;
-  PolyUOp *value = NULL;
-  PolyUOp *invalid = NULL;
-  if (!invalid_gate_parts(root->src[0], NULL, &value, &invalid)) return NULL;
-  if (!poly_dtype_is_index(poly_dtype_scalar(invalid->dtype))) return NULL;
-  return poly_uop1(ctx, POLY_OP_CAST, root->dtype, value, root->arg);
+  if (!root || root->op != POLY_OP_STACK || root->n_src <= 0) return NULL;
+  for (int i = 0; i < root->n_src; i++)
+    if (!is_invalid_const_uop(root->src[i])) return NULL;
+  return root->src[0];
 }
 
 static PolyUOp *rule_propagate_invalid_unary(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   (void)b;
-  if (!root || root->n_src != 1 || !poly_opset_has(POLY_GROUP_UNARY, root->op)) return NULL;
+  bool unary = root && (poly_opset_has(POLY_GROUP_UNARY, root->op) ||
+                        root->op == POLY_OP_CAST || root->op == POLY_OP_BITCAST);
+  if (!unary || root->n_src != 1) return NULL;
   PolyUOp *cond = NULL;
   PolyUOp *value = NULL;
   PolyUOp *invalid = NULL;
@@ -2596,7 +2975,6 @@ static PolyUOp *rule_propagate_invalid_binary(PolyCtx *ctx, PolyUOp *root, const
   (void)b;
   if (!root || root->n_src != 2 || !poly_opset_has(POLY_GROUP_BINARY, root->op)) return NULL;
 
-  bool comparison = invalid_propagation_comparison(root->op);
   for (int side = 0; side < 2; side++) {
     PolyUOp *cond = NULL;
     PolyUOp *value = NULL;
@@ -2605,13 +2983,10 @@ static PolyUOp *rule_propagate_invalid_binary(PolyCtx *ctx, PolyUOp *root, const
     PolyUOp *src[2] = {root->src[0], root->src[1]};
     src[side] = value;
     PolyUOp *inner = poly_uop2(ctx, root->op, root->dtype, src[0], src[1], root->arg);
-    if (comparison && poly_dtype_is_index(poly_dtype_scalar(invalid->dtype))) return inner;
-    PolyUOp *fallback =
-        comparison ? poly_uop1(ctx, POLY_OP_CAST, root->dtype, invalid, poly_arg_none()) : invalid;
-    return poly_uop3(ctx, POLY_OP_WHERE, root->dtype, cond, inner, fallback, poly_arg_none());
+    return poly_uop3(ctx, POLY_OP_WHERE, root->dtype, cond, inner, invalid, poly_arg_none());
   }
 
-  if (!comparison) {
+  if (!poly_opset_has(POLY_GROUP_COMPARISON, root->op)) {
     if (is_invalid_const_uop(root->src[0])) return root->src[0];
     if (is_invalid_const_uop(root->src[1])) return root->src[1];
   }
@@ -2625,6 +3000,20 @@ static PolyUOp *rule_propagate_invalid_where(PolyCtx *ctx, PolyUOp *root, const 
   PolyUOp *bval = root->src[1];
   PolyUOp *cval = root->src[2];
 
+  if (is_invalid_const_uop(a)) return a;
+
+  PolyUOp *cond = NULL;
+  PolyUOp *value = NULL;
+  PolyUOp *invalid = NULL;
+  if (invalid_gate_parts(a, &cond, &value, &invalid)) {
+    PolyUOp *inner = poly_uop3(
+        ctx, POLY_OP_WHERE, root->dtype, value, bval, cval, poly_arg_none()
+    );
+    return poly_uop3(
+        ctx, POLY_OP_WHERE, root->dtype, cond, inner, invalid, poly_arg_none()
+    );
+  }
+
   /* where(cond, Invalid, value) -> where(!cond, value, Invalid). */
   if (is_invalid_const_uop(bval)) {
     if (is_invalid_const_uop(cval)) return bval;
@@ -2634,17 +3023,11 @@ static PolyUOp *rule_propagate_invalid_where(PolyCtx *ctx, PolyUOp *root, const 
     return poly_uop3(ctx, POLY_OP_WHERE, root->dtype, not_a, cval, bval, poly_arg_none());
   }
 
-  PolyUOp *cond = NULL;
-  PolyUOp *value = NULL;
-  PolyUOp *invalid = NULL;
   if (invalid_gate_parts(bval, &cond, &value, &invalid) && !is_invalid_const_uop(cval)) {
-    PolyUOp *new_gate = cond;
-    if (a != cond) {
-      PolyUOp *not_a = poly_uop2(
-          ctx, POLY_OP_CMPNE, a->dtype, a, poly_const_like_bool(ctx, a, true), poly_arg_none()
-      );
-      new_gate = poly_uop2(ctx, POLY_OP_OR, a->dtype, not_a, cond, poly_arg_none());
-    }
+    PolyUOp *not_a = poly_uop2(
+        ctx, POLY_OP_CMPNE, a->dtype, a, poly_const_like_bool(ctx, a, true), poly_arg_none()
+    );
+    PolyUOp *new_gate = poly_uop2(ctx, POLY_OP_OR, a->dtype, not_a, cond, poly_arg_none());
     PolyUOp *inner = poly_uop3(ctx, POLY_OP_WHERE, root->dtype, a, value, cval, poly_arg_none());
     return poly_uop3(ctx, POLY_OP_WHERE, root->dtype, new_gate, inner, invalid, poly_arg_none());
   }
@@ -2655,21 +3038,6 @@ static PolyUOp *rule_propagate_invalid_where(PolyCtx *ctx, PolyUOp *root, const 
     return poly_uop3(ctx, POLY_OP_WHERE, root->dtype, new_gate, inner, invalid, poly_arg_none());
   }
   return NULL;
-}
-
-static PolyUOp *rule_propagate_invalid_bitcast(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
-  (void)b;
-  if (!root || root->op != POLY_OP_BITCAST || root->n_src != 1) return NULL;
-  if (is_invalid_const_uop(root->src[0]))
-    return poly_uop1(ctx, POLY_OP_CAST, root->dtype, root->src[0], poly_arg_none());
-
-  PolyUOp *cond = NULL;
-  PolyUOp *value = NULL;
-  PolyUOp *invalid = NULL;
-  if (!invalid_gate_parts(root->src[0], &cond, &value, &invalid)) return NULL;
-  PolyUOp *true_value = poly_uop1(ctx, POLY_OP_BITCAST, root->dtype, value, root->arg);
-  PolyUOp *false_value = poly_uop1(ctx, POLY_OP_BITCAST, root->dtype, invalid, root->arg);
-  return poly_uop3(ctx, POLY_OP_WHERE, root->dtype, cond, true_value, false_value, poly_arg_none());
 }
 
 static bool is_true_const_uop(PolyUOp *u) {
@@ -2721,6 +3089,130 @@ static PolyUOp *rule_where_logical_not(PolyCtx *ctx, PolyUOp *root, const PolyBi
   return poly_uop3(ctx, POLY_OP_WHERE, root->dtype, cond, f, t, poly_arg_none());
 }
 
+/* tinygrad 2026-08-22/a9069c177a9d uop/symbolic.py:218-223
+ * `fold_where_closure`: the condition is true in the true branch and false
+ * in the false branch. INDEX validity is handled by its dedicated passes. */
+static PolyUOp *rule_fold_where_closure(
+    PolyCtx *ctx,
+    PolyUOp *root,
+    const PolyBindings *b
+) {
+  (void)b;
+  if (!root || root->op != POLY_OP_WHERE || root->n_src != 3 ||
+      !poly_dtype_eq(root->src[0]->dtype, POLY_BOOL))
+    return NULL;
+  PolyUOp *cond = root->src[0], *t = root->src[1], *f = root->src[2];
+  if (!poly_uop_reachable(ctx, t, cond) && !poly_uop_reachable(ctx, f, cond))
+    return NULL;
+  if (valid_contains_op(cond, POLY_OP_INDEX) || valid_contains_op(t, POLY_OP_INDEX) ||
+      valid_contains_op(f, POLY_OP_INDEX))
+    return NULL;
+
+  PolyUOp *from[1] = {cond};
+  PolyUOp *true_cond = poly_const_like_bool(ctx, cond, true);
+  PolyUOp *false_cond = poly_const_like_bool(ctx, cond, false);
+  PolyUOp *to_true[1] = {true_cond}, *to_false[1] = {false_cond};
+  PolyUOp *new_t = poly_uop_substitute(ctx, t, from, to_true, 1);
+  PolyUOp *new_f = poly_uop_substitute(ctx, f, from, to_false, 1);
+  if (!new_t || !new_f) return NULL;
+  return poly_uop3(
+      ctx, POLY_OP_WHERE, root->dtype, cond, new_t, new_f, poly_arg_none()
+  );
+}
+
+/* Tinygrad 2026-08-22/a9069c177a9d uop/symbolic.py:231. */
+static PolyUOp *rule_bool_or_logical_not(
+    PolyCtx *ctx, PolyUOp *root, const PolyBindings *b
+) {
+  (void)root;
+  return poly_const_like_bool(ctx, poly_bind(b, "x"), true);
+}
+
+/* Tinygrad 2026-08-22/a9069c177a9d uop/symbolic.py:233-234. */
+static PolyUOp *rule_combine_mul_coefficients(
+    PolyCtx *ctx, PolyUOp *root, const PolyBindings *b
+) {
+  (void)root;
+  PolyUOp *x = poly_bind(b, "x"), *c0 = poly_bind(b, "c0"), *c1 = poly_bind(b, "c1");
+  PolyUOp *sum = c0 && c1 ? poly_binop(ctx, POLY_OP_ADD, c0, c1) : NULL;
+  PolyUOp *scaled = sum ? poly_binop(ctx, POLY_OP_MUL, x, sum) : NULL;
+  PolyUOp *y = poly_bind(b, "y");
+  return scaled && y ? poly_binop(ctx, POLY_OP_ADD, y, scaled) : scaled;
+}
+
+/* Tinygrad 2026-08-22/a9069c177a9d uop/symbolic.py:235-237. */
+static PolyUOp *rule_combine_one_plus_coefficient(
+    PolyCtx *ctx, PolyUOp *root, const PolyBindings *b
+) {
+  (void)root;
+  PolyUOp *x = poly_bind(b, "x"), *c = poly_bind(b, "c");
+  PolyUOp *one = c ? poly_const_like_int(ctx, c, 1) : NULL;
+  PolyUOp *coefficient = one ? poly_binop(ctx, POLY_OP_ADD, c, one) : NULL;
+  PolyUOp *scaled = coefficient ? poly_binop(ctx, POLY_OP_MUL, x, coefficient) : NULL;
+  PolyUOp *y = poly_bind(b, "y");
+  return scaled && y ? poly_binop(ctx, POLY_OP_ADD, y, scaled) : scaled;
+}
+
+/* Tinygrad 2026-08-22/a9069c177a9d uop/symbolic.py:240. */
+static PolyUOp *rule_combine_nested_division(
+    PolyCtx *ctx, PolyUOp *root, const PolyBindings *b
+) {
+  PolyUOp *x = poly_bind(b, "x"), *x2 = poly_bind(b, "x2"), *x3 = poly_bind(b, "x3");
+  if (!x || !x2 || !x3 || x2 == x3) return NULL;
+  PolyUOp *denominator = poly_binop(ctx, POLY_OP_MUL, x2, x3);
+  PolyUOp *reciprocal = denominator
+                            ? poly_uop1(ctx, POLY_OP_RECIPROCAL, denominator->dtype,
+                                        denominator, poly_arg_none())
+                            : NULL;
+  return reciprocal ? poly_binop(ctx, POLY_OP_MUL, x, reciprocal) : NULL;
+}
+
+/* Tinygrad 2026-08-22/a9069c177a9d uop/symbolic.py:249-255. */
+static PolyUOp *rule_combine_where_binary(
+    PolyCtx *ctx, PolyUOp *root, const PolyBindings *b
+) {
+  PolyUOp *c = poly_bind(b, "c"), *t = poly_bind(b, "t"), *tt = poly_bind(b, "tt");
+  PolyUOp *f = poly_bind(b, "f"), *ff = poly_bind(b, "ff");
+  if (!root || !c || !t || !tt || !f || !ff ||
+      !((t->op == POLY_OP_CONST && tt->op == POLY_OP_CONST) ||
+        (f->op == POLY_OP_CONST && ff->op == POLY_OP_CONST)))
+    return NULL;
+  PolyUOp *true_value = poly_uop2(ctx, root->op, root->dtype, t, tt, root->arg);
+  PolyUOp *false_value = poly_uop2(ctx, root->op, root->dtype, f, ff, root->arg);
+  return poly_uop3(
+      ctx, POLY_OP_WHERE, root->dtype, c, true_value, false_value, poly_arg_none());
+}
+
+static PolyUOp *rule_combine_where_add_assoc(
+    PolyCtx *ctx, PolyUOp *root, const PolyBindings *b
+) {
+  PolyUOp *y = poly_bind(b, "y");
+  PolyUOp *merged = rule_combine_where_binary(ctx, root, b);
+  return y && merged ? poly_binop(ctx, POLY_OP_ADD, y, merged) : NULL;
+}
+
+static PolyUOp *rule_combine_complementary_where(
+    PolyCtx *ctx, PolyUOp *root, const PolyBindings *b
+) {
+  (void)root;
+  PolyUOp *c = poly_bind(b, "c"), *t = poly_bind(b, "t"), *f = poly_bind(b, "f");
+  return c && t && f
+             ? poly_uop3(ctx, POLY_OP_WHERE, t->dtype, c, t, f, poly_arg_none())
+             : NULL;
+}
+
+/* Tinygrad 2026-08-22/a9069c177a9d uop/symbolic.py:261-262. */
+static PolyUOp *rule_where_to_max(
+    PolyCtx *ctx, PolyUOp *root, const PolyBindings *b
+) {
+  (void)root;
+  PolyUOp *a = poly_bind(b, "a"), *bval = poly_bind(b, "b"), *c = poly_bind(b, "c");
+  if (!a || !bval || !c || a->op != POLY_OP_CONST || c->op != POLY_OP_CONST ||
+      !poly_arg_eq(a->arg, c->arg))
+    return NULL;
+  return poly_binop(ctx, POLY_OP_MAX, a, bval);
+}
+
 static PolyUOp *strip_casted_index_ptr(PolyUOp *u) {
   while (u && u->op == POLY_OP_CAST && u->n_src >= 1)
     u = u->src[0];
@@ -2743,28 +3235,22 @@ static PolyUOp *rule_fold_invalid_load_store(PolyCtx *ctx, PolyUOp *root, const 
   return poly_const_like_int(ctx, root, 0);
 }
 
-/* Pinned tinygrad/uop/symbolic.py:247: x+x -> x*2. The replacement keeps the
- * matched ADD dtype; x can have a concrete integer dtype under a weak-index
- * result in Polygrad's current shape adapter. */
+/* Current tinygrad/uop/symbolic.py:238: x+x -> x*2. Python literal 2 enters
+ * through UOp.ufix as weakint, then _binop promotes the pair. */
 static PolyUOp *rule_add_self(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   PolyUOp *x = poly_bind(b, "x");
-  PolyUOp *two = poly_const_like_int(ctx, x, 2);
-  return poly_uop2(ctx, POLY_OP_MUL, root->dtype, x, two, poly_arg_none());
+  PolyUOp *two = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(2));
+  return two ? poly_binop(ctx, POLY_OP_MUL, x, two) : NULL;
 }
 
-/* ADD(ADD(a, x), x) -> ADD(a, MUL(x, 2))
- * Associative grouping of identical addends — handles the gradient
- * accumulation pattern where the same variable contributes via different
- * paths and ends up in nested ADDs. Commutative matching on both the
- * inner and outer ADD covers all orderings. */
+/* Current tinygrad/uop/symbolic.py:239: (y+x)+x -> y+x*2. */
 static PolyUOp *rule_add_assoc_self(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
-  PolyUOp *a = poly_bind(b, "a");
+  (void)root;
+  PolyUOp *y = poly_bind(b, "y");
   PolyUOp *x = poly_bind(b, "x");
-  PolyUOp *two = poly_const_like_int(ctx, x, 2);
-  /* Pinned tinygrad/uop/symbolic.py:248 keeps y+x*2 in the matched weak-index
-   * algebra even when Polygrad's current variable adapter is concrete int32. */
-  PolyUOp *mul = poly_uop2(ctx, POLY_OP_MUL, root->dtype, x, two, poly_arg_none());
-  return poly_uop2(ctx, POLY_OP_ADD, root->dtype, a, mul, poly_arg_none());
+  PolyUOp *two = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(2));
+  PolyUOp *mul = two ? poly_binop(ctx, POLY_OP_MUL, x, two) : NULL;
+  return mul ? poly_binop(ctx, POLY_OP_ADD, y, mul) : NULL;
 }
 
 static bool is_scalar_const_uop(PolyUOp *u) {
@@ -2800,30 +3286,12 @@ static bool match_binary_one_const(PolyUOp *u, PolyUOp **out_x, PolyUOp **out_c)
  *   x*c0 + x*c1 -> x*(c0+c1)
  * Keep this scoped to weak-index shape algebra: reassociating float terms can
  * change rounding, and this dependency group proves only as_shape parity. */
-static PolyUOp *rule_add_same_base_const_terms(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
-  (void)b;
-  if (!root || root->op != POLY_OP_ADD || root->n_src != 2 || !poly_dtype_is_index(root->dtype))
-    return NULL;
-
-  PolyUOp *x0 = NULL, *c0 = NULL, *x1 = NULL, *c1 = NULL;
-  if (!match_binary_one_const(root->src[0], &x0, &c0) ||
-      !match_binary_one_const(root->src[1], &x1, &c1) || root->src[0]->op != POLY_OP_MUL ||
-      root->src[1]->op != POLY_OP_MUL || x0 != x1 || c0->arg.kind != POLY_ARG_INT ||
-      c1->arg.kind != POLY_ARG_INT)
-    return NULL;
-
-  int64_t coefficient = 0;
-  if (!i64_add_ok(c0->arg.i, c1->arg.i, &coefficient)) return NULL;
-  PolyUOp *combined = poly_const_like_int(ctx, c0, coefficient);
-  return combined ? poly_uop2(ctx, POLY_OP_MUL, root->dtype, x0, combined, poly_arg_none()) : NULL;
-}
-
 /* tinygrad symbolic.py:
  *   (x:weakint + c).cast(signed_int) -> x.cast(signed_int) + c.cast(signed_int)
  *
  * This turns Tensor.arange's `(range + 1).cast(int) + -1` class index into
  * `range.cast(int)`, exposing the sparse one-hot load-collapse rule. Keep it
- * scoped to POLY_INDEX sources and signed integer destinations, matching
+ * scoped to POLY_WEAKINT sources and signed integer destinations, matching
  * dtypes.weakint -> dtypes.sints. */
 static PolyUOp *rule_cast_index_add_const_to_add_casts(
     PolyCtx *ctx,
@@ -2838,7 +3306,7 @@ static PolyUOp *rule_cast_index_add_const_to_add_casts(
 
   PolyUOp *add = root->src[0];
   if (!add || add->op != POLY_OP_ADD || add->n_src != 2) return NULL;
-  if (!poly_dtype_eq(poly_dtype_scalar(add->dtype), POLY_INDEX)) return NULL;
+  if (!poly_dtype_eq(add->dtype, POLY_WEAKINT)) return NULL;
 
   PolyUOp *x = NULL;
   PolyUOp *c = NULL;
@@ -2909,6 +3377,143 @@ static PolyUOp *rule_cmplt_add_const_bound(
   return bound ? poly_uop2(ctx, POLY_OP_CMPLT, root->dtype, x, bound, poly_arg_none()) : NULL;
 }
 
+/* Tinygrad 2026-08-22/a9069c177a9d uop/symbolic.py:274-276. */
+static PolyUOp *rule_cmplt_mul_const_bound(
+    PolyCtx *ctx, PolyUOp *root, const PolyBindings *b
+) {
+  PolyUOp *x = poly_bind(b, "x"), *c0 = poly_bind(b, "c0"), *c1 = poly_bind(b, "c1");
+  if (!x || !c0 || !c1) return NULL;
+
+  PolyInt coefficient = {0}, bound = {0}, abs_coefficient = {0};
+  PolyInt one = {0}, neg_bound = {0}, quotient = {0}, remainder = {0}, ceil_bound = {0};
+  bool ok = poly_int_from_arg(&coefficient, c0->arg) &&
+            poly_int_from_arg(&bound, c1->arg) && poly_int_from_i64(&one, 1);
+  if (!ok || poly_int_is_zero(&coefficient)) goto done;
+  ok = coefficient.sign > 0 ? poly_int_copy(&abs_coefficient, &coefficient)
+                            : poly_int_neg(&abs_coefficient, &coefficient);
+  if (!ok || poly_int_cmp(&abs_coefficient, &one) <= 0 ||
+      !poly_int_neg(&neg_bound, &bound) ||
+      !poly_int_divmod(&quotient, &remainder, &neg_bound, &abs_coefficient, true) ||
+      !poly_int_neg(&ceil_bound, &quotient))
+    goto done;
+
+  PolyUOp *lhs = x;
+  if (coefficient.sign < 0) {
+    PolyUOp *negative_one = poly_const_like_int(ctx, x, -1);
+    lhs = negative_one ? poly_binop(ctx, POLY_OP_MUL, x, negative_one) : NULL;
+  }
+  PolyUOp *rhs = poly_const_like(ctx, c1, poly_int_as_arg(&ceil_bound));
+  PolyUOp *ret = lhs && rhs
+                     ? poly_uop2(ctx, POLY_OP_CMPLT, root->dtype, lhs, rhs, poly_arg_none())
+                     : NULL;
+  poly_int_free(&coefficient);
+  poly_int_free(&bound);
+  poly_int_free(&abs_coefficient);
+  poly_int_free(&one);
+  poly_int_free(&neg_bound);
+  poly_int_free(&quotient);
+  poly_int_free(&remainder);
+  poly_int_free(&ceil_bound);
+  return ret;
+
+done:
+  poly_int_free(&coefficient);
+  poly_int_free(&bound);
+  poly_int_free(&abs_coefficient);
+  poly_int_free(&one);
+  poly_int_free(&neg_bound);
+  poly_int_free(&quotient);
+  poly_int_free(&remainder);
+  poly_int_free(&ceil_bound);
+  return NULL;
+}
+
+/* Tinygrad 2026-08-22/a9069c177a9d uop/symbolic.py:277-279. */
+static PolyUOp *rule_cmplt_floordiv_const_bound(
+    PolyCtx *ctx, PolyUOp *root, const PolyBindings *b
+) {
+  PolyUOp *x = poly_bind(b, "x"), *d = poly_bind(b, "d"), *c = poly_bind(b, "c");
+  if (!x || !d || !c) return NULL;
+  PolyInt divisor = {0}, limit = {0}, product = {0};
+  if (!poly_int_from_arg(&divisor, d->arg) || !poly_int_from_arg(&limit, c->arg) ||
+      poly_int_is_zero(&divisor) || !poly_int_mul(&product, &limit, &divisor)) {
+    poly_int_free(&divisor);
+    poly_int_free(&limit);
+    poly_int_free(&product);
+    return NULL;
+  }
+  PolyUOp *bound = poly_const_like(ctx, c, poly_int_as_arg(&product));
+  PolyUOp *ret = divisor.sign > 0
+                     ? poly_uop2(ctx, POLY_OP_CMPLT, root->dtype, x, bound, poly_arg_none())
+                     : poly_uop2(ctx, POLY_OP_CMPLT, root->dtype, bound, x, poly_arg_none());
+  poly_int_free(&divisor);
+  poly_int_free(&limit);
+  poly_int_free(&product);
+  return ret;
+}
+
+/* Tinygrad 2026-08-22/a9069c177a9d uop/symbolic.py:286. */
+static PolyUOp *rule_reverse_negative_compare(
+    PolyCtx *ctx, PolyUOp *root, const PolyBindings *b
+) {
+  PolyUOp *x = poly_bind(b, "x"), *y = poly_bind(b, "y");
+  return x && y ? poly_uop2(ctx, POLY_OP_CMPLT, root->dtype, y, x, poly_arg_none()) : NULL;
+}
+
+/* Tinygrad 2026-08-22/a9069c177a9d uop/symbolic.py:201-212,287-288. */
+static PolyUOp *rule_canonicalize_simplex(
+    PolyCtx *ctx, PolyUOp *root, const PolyBindings *b
+) {
+  PolyUOp *x = poly_bind(b, "x");
+  int n_terms = 0;
+  PolyUOp **terms = poly_uop_split(x, POLY_OP_ADD, &n_terms);
+  if (!terms || n_terms == 0) {
+    free(terms);
+    return NULL;
+  }
+
+  bool changed = false, valid = true;
+  for (int i = 0; i < n_terms; i++) {
+    PolyUOp *term = terms[i];
+    if (term->op == POLY_OP_MUL && term->n_src == 2 && term->src[1]->op == POLY_OP_CONST) {
+      PolyInt coefficient = {0};
+      bool positive = poly_int_from_arg(&coefficient, term->src[1]->arg) && coefficient.sign > 0;
+      poly_int_free(&coefficient);
+      if (positive) {
+        terms[i] = term->src[0];
+        changed = true;
+      }
+    }
+    int64_t vmin = 0, vmax = 0;
+    poly_uop_minmax(ctx, terms[i], &vmin, &vmax);
+    if (!poly_opset_has(POLY_GROUP_IRREDUCIBLE, terms[i]->op) || vmin < 0) {
+      valid = false;
+      break;
+    }
+  }
+
+  PolyUOp *new_x = valid && changed ? terms[0] : NULL;
+  for (int i = 1; new_x && i < n_terms; i++)
+    new_x = poly_binop(ctx, POLY_OP_ADD, new_x, terms[i]);
+  free(terms);
+  if (!new_x) return NULL;
+  PolyUOp *one = poly_const_like_int(ctx, x, 1);
+  PolyUOp *lt = one ? poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, new_x, one, poly_arg_none()) : NULL;
+  PolyUOp *truth = poly_const_like_bool(ctx, root, true);
+  return lt && truth
+             ? poly_uop2(ctx, POLY_OP_CMPNE, root->dtype, lt, truth, poly_arg_none())
+             : NULL;
+}
+
+/* Tinygrad 2026-08-22/a9069c177a9d uop/symbolic.py:289-291. */
+static PolyUOp *rule_range_own_bound(
+    PolyCtx *ctx, PolyUOp *root, const PolyBindings *b
+) {
+  PolyUOp *range = poly_bind(b, "range");
+  if (!range) return NULL;
+  return root->op == POLY_OP_FLOORMOD ? range : poly_const_like_int(ctx, range, 0);
+}
+
 /* tinygrad symbolic.py:
  *   y * (x + c) -> (y * x) + (y * c)
  *
@@ -2925,7 +3530,7 @@ static PolyUOp *rule_distribute_const_mul_over_add(
 ) {
   (void)b;
   if (!root || root->op != POLY_OP_MUL || root->n_src != 2) return NULL;
-  if (!poly_dtype_eq(poly_dtype_scalar(root->dtype), POLY_INDEX)) return NULL;
+  if (!poly_dtype_eq(root->dtype, POLY_WEAKINT)) return NULL;
 
   for (int swap = 0; swap < 2; swap++) {
     PolyUOp *c = root->src[swap];
@@ -3024,8 +3629,8 @@ static PolyUOp *rule_sym_distribute_weak_mul_over_add(
     PolyUOp *add = root->src[swap ^ 1];
     if (!is_scalar_const_uop(c) || !add || add->op != POLY_OP_ADD || add->n_src != 2)
       continue;
-    if (!poly_dtype_eq(poly_dtype_scalar(add->src[0]->dtype), POLY_INDEX) &&
-        !poly_dtype_eq(poly_dtype_scalar(add->src[1]->dtype), POLY_INDEX))
+    if (!poly_dtype_eq(add->src[0]->dtype, POLY_WEAKINT) &&
+        !poly_dtype_eq(add->src[1]->dtype, POLY_WEAKINT))
       continue;
 
     PolyUOp *lhs =
@@ -3035,6 +3640,82 @@ static PolyUOp *rule_sym_distribute_weak_mul_over_add(
     return poly_uop2(ctx, POLY_OP_ADD, root->dtype, lhs, rhs, poly_arg_none());
   }
   return NULL;
+}
+
+/* Tinygrad 2026-08-22/a9069c177a9d uop/symbolic.py:443-444. UPat's repeated
+ * child binds only uniform STACK sources; C checks that condition directly. */
+static PolyUOp *sym_reorder_alu_stack(
+    PolyCtx *ctx, PolyUOp *root, const PolyBindings *b
+) {
+  PolyUOp *xs = poly_bind(b, "xs"), *ys = poly_bind(b, "ys");
+  if (!root || !xs || !ys || xs->n_src <= 0 || ys->n_src <= 0) return NULL;
+  for (int i = 1; i < xs->n_src; i++)
+    if (xs->src[i] != xs->src[0]) return NULL;
+  for (int i = 1; i < ys->n_src; i++)
+    if (ys->src[i] != ys->src[0]) return NULL;
+  PolyUOp *alu = poly_alu2(ctx, root->op, xs->src[0], ys->src[0]);
+  return alu ? poly_uop1(ctx, POLY_OP_STACK, alu->dtype, alu, poly_arg_none()) : NULL;
+}
+
+/* Tinygrad 2026-08-22/a9069c177a9d uop/symbolic.py:447-448 pushes CAST
+ * through WHERE and commits weak branches to the CAST dtype. */
+static PolyUOp *sym_push_cast_to_where(
+    PolyCtx *ctx, PolyUOp *root, const PolyBindings *b
+) {
+  PolyUOp *s = poly_bind(b, "s"), *a = poly_bind(b, "a"), *bval = poly_bind(b, "b");
+  if (!root || !s || !a || !bval) return NULL;
+  PolyUOp *committed_a = poly_commit_weak(ctx, a, root->dtype);
+  PolyUOp *committed_b = poly_commit_weak(ctx, bval, root->dtype);
+  return committed_a && committed_b
+             ? poly_uop3(
+                   ctx, POLY_OP_WHERE, root->dtype, s, committed_a, committed_b,
+                   poly_arg_none())
+             : NULL;
+}
+
+/* Tinygrad 2026-08-22/a9069c177a9d uop/symbolic.py:453,459. */
+static PolyUOp *sym_store_noop(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+  (void)root;
+  (void)b;
+  return poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_none());
+}
+
+/* Tinygrad 2026-08-22/a9069c177a9d uop/symbolic.py:454-461 moves a STORE
+ * condition into the INDEX validity and stores only the live value. */
+static PolyUOp *sym_gate_store(
+    PolyCtx *ctx, PolyUOp *root, const PolyBindings *b
+) {
+  (void)root;
+  PolyUOp *index = poly_bind(b, "index");
+  PolyUOp *gate = poly_bind(b, "gate");
+  PolyUOp *value = poly_bind(b, "value");
+  if (!index || index->n_src < 2 || !gate || !value) return NULL;
+  PolyUOp *invalid = poly_uop_const(ctx, poly_arg_invalid(), index->src[1]->dtype);
+  PolyUOp *valid = invalid ? poly_uop3(
+                                   ctx, POLY_OP_WHERE, index->src[1]->dtype, gate,
+                                   index->src[1], invalid, poly_arg_none())
+                             : NULL;
+  PolyUOp *gated_index = valid ? poly_uop2(
+                                       ctx, POLY_OP_INDEX, index->dtype, index->src[0], valid,
+                                       poly_arg_none())
+                               : NULL;
+  return gated_index
+             ? poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, gated_index, value, poly_arg_none())
+             : NULL;
+}
+
+/* Tinygrad 2026-08-22/a9069c177a9d uop/symbolic.py:473 distributes only the
+ * exact -1 coefficient; the broader weakint coefficient rule follows it. */
+static PolyUOp *sym_distribute_negated_add(
+    PolyCtx *ctx, PolyUOp *root, const PolyBindings *b
+) {
+  PolyUOp *x = poly_bind(b, "x"), *y = poly_bind(b, "y"), *neg_one = poly_bind(b, "neg_one");
+  if (!root || !x || !y || !const_uop_is_negative_one(neg_one)) return NULL;
+  PolyUOp *neg_x = poly_uop2(ctx, POLY_OP_MUL, root->dtype, x, neg_one, poly_arg_none());
+  PolyUOp *neg_y = poly_uop2(ctx, POLY_OP_MUL, root->dtype, y, neg_one, poly_arg_none());
+  return neg_x && neg_y
+             ? poly_uop2(ctx, POLY_OP_ADD, root->dtype, neg_x, neg_y, poly_arg_none())
+             : NULL;
 }
 
 /* Pinned tinygrad symbolic.py:286-287
@@ -3085,11 +3766,6 @@ static int dtype_tuplize_cmp(PolyDType a, PolyDType b) {
   int ret;
   if ((ret = cmp_i64(a.priority, b.priority))) return ret;
   if ((ret = cmp_u16(a.bitsize, b.bitsize))) return ret;
-  if ((ret = cmp_u16(a.count, b.count))) return ret;
-  if ((ret = cmp_bool(a.is_ptr, b.is_ptr))) return ret;
-  if ((ret = cmp_i64(a.addrspace, b.addrspace))) return ret;
-  if ((ret = cmp_u16(a.vcount, b.vcount))) return ret;
-  if ((ret = cmp_i64(a.ptr_size, b.ptr_size))) return ret;
   return cmp_cstr(a.name, b.name);
 }
 
@@ -3097,17 +3773,6 @@ static int arg_int_tuple_cmp(const int64_t *a, int an, const int64_t *b, int bn)
   int n = an < bn ? an : bn;
   for (int i = 0; i < n; i++) {
     int ret = cmp_i64(a[i], b[i]);
-    if (ret) return ret;
-  }
-  return (an > bn) - (an < bn);
-}
-
-static int arg_pair_tuple_cmp(int64_t (*a)[2], int an, int64_t (*b)[2], int bn) {
-  int n = an < bn ? an : bn;
-  for (int i = 0; i < n; i++) {
-    int ret = cmp_i64(a[i][0], b[i][0]);
-    if (ret) return ret;
-    ret = cmp_i64(a[i][1], b[i][1]);
     if (ret) return ret;
   }
   return (an > bn) - (an < bn);
@@ -3146,10 +3811,6 @@ static int arg_tuplize_cmp(PolyArg a, PolyArg b) {
     return cmp_bool(a.b, b.b);
   case POLY_ARG_INT_TUPLE:
     return arg_int_tuple_cmp(a.int_tuple.vals, a.int_tuple.n, b.int_tuple.vals, b.int_tuple.n);
-  case POLY_ARG_PAIR_TUPLE:
-    return arg_pair_tuple_cmp(
-        a.pair_tuple.pairs, a.pair_tuple.n, b.pair_tuple.pairs, b.pair_tuple.n
-    );
   case POLY_ARG_STRING:
     return cmp_cstr(a.str, b.str);
   case POLY_ARG_STRING_TUPLE:
@@ -3158,12 +3819,20 @@ static int arg_tuplize_cmp(PolyArg a, PolyArg b) {
     );
   case POLY_ARG_OPS:
     return cmp_i64((int64_t)a.ops, (int64_t)b.ops);
-  case POLY_ARG_REDUCE_AXIS: {
-    int ret = cmp_i64((int64_t)a.reduce_axis.op, (int64_t)b.reduce_axis.op);
+  case POLY_ARG_REDUCE: {
+    int ret = cmp_i64((int64_t)a.reduce.op, (int64_t)b.reduce.op);
+    return ret ? ret : cmp_i64(a.reduce.num_axes, b.reduce.num_axes);
+  }
+  case POLY_ARG_ALLREDUCE: {
+    int ret = cmp_i64((int64_t)a.allreduce.op, (int64_t)b.allreduce.op);
     if (ret) return ret;
-    return arg_int_tuple_cmp(
-        a.reduce_axis.axes, a.reduce_axis.n, b.reduce_axis.axes, b.reduce_axis.n
-    );
+    ret = cmp_bool(a.allreduce.device_is_tuple, b.allreduce.device_is_tuple);
+    if (ret) return ret;
+    return a.allreduce.device_is_tuple
+               ? arg_string_tuple_cmp(
+                     a.allreduce.devices, a.allreduce.n_devices,
+                     b.allreduce.devices, b.allreduce.n_devices)
+               : cmp_cstr(a.allreduce.device, b.allreduce.device);
   }
   case POLY_ARG_RANGE: {
     int ret = cmp_i64(a.range.axis_id, b.range.axis_id);
@@ -3171,13 +3840,6 @@ static int arg_tuplize_cmp(PolyArg a, PolyArg b) {
     ret = cmp_i64((int64_t)a.range.axis_type, (int64_t)b.range.axis_type);
     if (ret) return ret;
     return arg_int_tuple_cmp(a.range.extra, a.range.n_extra, b.range.extra, b.range.n_extra);
-  }
-  case POLY_ARG_DEFINE_VAR: {
-    int ret = cmp_cstr(a.define_var.name, b.define_var.name);
-    if (ret) return ret;
-    ret = cmp_i64(a.define_var.min_val, b.define_var.min_val);
-    if (ret) return ret;
-    return cmp_i64(a.define_var.max_val, b.define_var.max_val);
   }
   case POLY_ARG_BUFFERIZE_OPTS: {
     int ret = cmp_bool(a.bufferize_opts.device_is_tuple, b.bufferize_opts.device_is_tuple);
@@ -3195,19 +3857,39 @@ static int arg_tuplize_cmp(PolyArg a, PolyArg b) {
     return cmp_bool(a.bufferize_opts.removable, b.bufferize_opts.removable);
   }
   case POLY_ARG_TENSOR_CORE: {
-    int ret = cmp_cstr(a.tensor_core.name, b.tensor_core.name);
-    if (ret) return ret;
+    int ret = 0;
     for (int i = 0; i < 3; i++) {
       ret = cmp_i64(a.tensor_core.dims[i], b.tensor_core.dims[i]);
       if (ret) return ret;
     }
-    return cmp_i64(a.tensor_core.threads, b.tensor_core.threads);
+    ret = arg_tuplize_cmp(poly_arg_dtype(a.tensor_core.dtype_in), poly_arg_dtype(b.tensor_core.dtype_in));
+    if (ret) return ret;
+    ret = cmp_cstr(a.tensor_core.device, b.tensor_core.device);
+    if (ret) return ret;
+    ret = cmp_i64(a.tensor_core.threads, b.tensor_core.threads);
+    if (ret) return ret;
+    ret = cmp_bool(a.tensor_core.has_upcast_axes, b.tensor_core.has_upcast_axes);
+    if (ret) return ret;
+    for (int d = 0; d < 3; d++) {
+      ret = arg_int_tuple_cmp(
+          (int64_t *)a.tensor_core.upcast_axes[d], a.tensor_core.n_upcast_axes[d] * 2,
+          (int64_t *)b.tensor_core.upcast_axes[d], b.tensor_core.n_upcast_axes[d] * 2
+      );
+      if (ret) return ret;
+    }
+    return 0;
   }
   case POLY_ARG_PROGRAM_INFO: {
     uint32_t ah = poly_program_info_hash(a.program_info);
     uint32_t bh = poly_program_info_hash(b.program_info);
     if (ah != bh) return (ah > bh) - (ah < bh);
     return (a.program_info > b.program_info) - (a.program_info < b.program_info);
+  }
+  case POLY_ARG_KERNEL_INFO: {
+    uint32_t ah = poly_kernel_info_hash(a.kernel_info);
+    uint32_t bh = poly_kernel_info_hash(b.kernel_info);
+    if (ah != bh) return (ah > bh) - (ah < bh);
+    return (a.kernel_info > b.kernel_info) - (a.kernel_info < b.kernel_info);
   }
   case POLY_ARG_BYTES: {
     int n = a.bytes.n < b.bytes.n ? a.bytes.n : b.bytes.n;
@@ -3267,6 +3949,12 @@ static int arg_tuplize_cmp(PolyArg a, PolyArg b) {
     if (ret) return ret;
     return cmp_bool(a.call_info->has_aux, b.call_info->has_aux);
   }
+  case POLY_ARG_DTYPE:
+    if (poly_dtype_eq(a.dtype, b.dtype)) return 0;
+    if (a.dtype.priority != b.dtype.priority)
+      return cmp_i64(a.dtype.priority, b.dtype.priority);
+    if (a.dtype.bitsize != b.dtype.bitsize) return cmp_i64(a.dtype.bitsize, b.dtype.bitsize);
+    return cmp_cstr(a.dtype.name, b.dtype.name);
   }
   return 0;
 }
@@ -3280,7 +3968,7 @@ static int uop_tuplize_cmp(PolyUOp *a, PolyUOp *b) {
    *   (op.value, arg, dtype) + tuple(src.tuplize for src in src)
    * This is used only by the weak-index commutative rule below, so it stays
    * local to symbolic rewriting instead of becoming a general identity rule. */
-  int ret = cmp_i64((int64_t)a->op, (int64_t)b->op);
+  int ret = cmp_i64(poly_op_value(a->op), poly_op_value(b->op));
   if (ret) return ret;
   ret = arg_tuplize_cmp(a->arg, b->arg);
   if (ret) return ret;
@@ -3299,7 +3987,7 @@ static int uop_tuplize_cmp(PolyUOp *a, PolyUOp *b) {
  *   UPat(GroupOp.Commutative, dtype=dtypes.weakint)
  *     -> reverse srcs if src[1].tuplize < src[0].tuplize
  *
- * Polygrad's weak index dtype is POLY_INDEX. Keep the rule scoped there; doing
+ * Polygrad's weak index dtype is POLY_WEAKINT. Keep the rule scoped there; doing
  * this for ordinary numeric ALU can disturb vector math merging, matching the
  * warning in tinygrad's own comment. */
 static PolyUOp *rule_commutative_index_tuplize_order(
@@ -3309,7 +3997,7 @@ static PolyUOp *rule_commutative_index_tuplize_order(
 ) {
   (void)b;
   if (!root || root->n_src != 2) return NULL;
-  if (!poly_dtype_eq(poly_dtype_scalar(root->dtype), POLY_INDEX)) return NULL;
+  if (!poly_dtype_eq(root->dtype, POLY_WEAKINT)) return NULL;
   if (!poly_opset_has(POLY_GROUP_COMMUTATIVE, root->op)) return NULL;
   if (uop_tuplize_cmp(root->src[1], root->src[0]) >= 0) return NULL;
   return poly_uop2(ctx, root->op, root->dtype, root->src[1], root->src[0], root->arg);
@@ -3392,8 +4080,8 @@ static PolyUOp *rule_sym_reduce_mul_chain(
 ) {
   (void)b;
   if (!root || root->op != POLY_OP_REDUCE || root->n_src < 2 ||
-      root->arg.kind != POLY_ARG_OPS ||
-      (root->arg.ops != POLY_OP_ADD && root->arg.ops != POLY_OP_MAX) ||
+      root->arg.kind != POLY_ARG_REDUCE ||
+      (root->arg.reduce.op != POLY_OP_ADD && root->arg.reduce.op != POLY_OP_MAX) ||
       !poly_dtype_eq(root->dtype, root->src[0]->dtype) || root->src[0]->op != POLY_OP_MUL)
     return NULL;
 
@@ -3410,8 +4098,8 @@ static PolyUOp *rule_sym_reduce_mul_chain(
       depends_on_reduce = poly_uop_reachable(ctx, factor, root->src[j]);
 
     bool may_move = !depends_on_reduce;
-    if (may_move && root->arg.ops == POLY_OP_MAX) {
-      if (poly_dtype_is_float(poly_dtype_scalar(factor->dtype))) {
+    if (may_move && root->arg.reduce.op == POLY_OP_MAX) {
+      if (poly_dtype_is_float(factor->dtype)) {
         may_move = factor->op == POLY_OP_CONST && factor->arg.kind == POLY_ARG_FLOAT &&
                    factor->arg.f >= 0.0;
       } else {
@@ -3648,7 +4336,7 @@ static PolyUOp *rule_lt_folding(PolyCtx *ctx, PolyUOp *root, const PolyBindings 
   (void)b;
   if (!ctx || !root || root->op != POLY_OP_CMPLT || root->n_src != 2) return NULL;
   PolyUOp *x = root->src[0], *c = root->src[1];
-  if (!poly_dtype_eq(poly_dtype_scalar(x->dtype), POLY_INDEX) ||
+  if (!poly_dtype_eq(x->dtype, POLY_WEAKINT) ||
       c->op != POLY_OP_CONST ||
       (c->arg.kind != POLY_ARG_INT && c->arg.kind != POLY_ARG_BIGINT))
     return NULL;
@@ -4325,13 +5013,213 @@ static PolyUOp *rule_cancel_divmod(PolyCtx *ctx, PolyUOp *root, const PolyBindin
   return fold_divmod_general(ctx, root);
 }
 
-/* fold_add_divmod_recombine: dynamic divmod cancellation on ADD.
- * Port of tinygrad symbolic.py:28-48.  Replaces the old hardcoded pattern.
- * Handles:
- *   (base%div)*mul + (base//div)*(div*mul) -> base*mul
- *   ((base//d)%div)*mul + (base//(d*div))*(div*mul) -> (base//d)*mul
- *   ((base//div)%d)*div + base%div -> base%(div*d)
- */
+/* tinygrad@2026-08-22/a9069c177a9d uop/symbolic.py:269-270.
+ * Combine (x//c1)//c2 before div/mod recombination when c2 is positive. */
+static PolyUOp *fold_nested_floordiv_constants(
+    PolyCtx *ctx, PolyUOp *root, const PolyBindings *b
+) {
+  (void)b;
+  if (!root || root->op != POLY_OP_FLOORDIV || root->n_src != 2 ||
+      root->src[0]->op != POLY_OP_FLOORDIV || root->src[0]->n_src != 2 ||
+      !arg_is_exact_integer(root->src[0]->src[1]->arg) ||
+      !arg_is_exact_integer(root->src[1]->arg))
+    return NULL;
+
+  PolyInt c1 = {0}, c2 = {0}, zero = {0}, product = {0};
+  PolyUOp *ret = NULL;
+  if (!poly_int_from_arg(&c1, root->src[0]->src[1]->arg) ||
+      !poly_int_from_arg(&c2, root->src[1]->arg) ||
+      !poly_int_from_i64(&zero, 0) || poly_int_cmp(&c2, &zero) <= 0 ||
+      !poly_int_mul(&product, &c1, &c2))
+    goto done;
+  PolyUOp *denominator = poly_const_like(ctx, root->src[1], poly_int_as_arg(&product));
+  if (denominator)
+    ret = poly_uop2(
+        ctx, POLY_OP_FLOORDIV, root->dtype, root->src[0]->src[0], denominator,
+        poly_arg_none());
+
+done:
+  poly_int_free(&c1);
+  poly_int_free(&c2);
+  poly_int_free(&zero);
+  poly_int_free(&product);
+  return ret;
+}
+
+/* tinygrad@2026-08-22/a9069c177a9d uop/divandmod.py:99-101.
+ * Merge (x//c+a)//d into (x+a*c)//(c*d) for positive d. */
+static PolyUOp *fold_divmod_quotient_add(
+    PolyCtx *ctx, PolyUOp *root, const PolyBindings *b
+) {
+  (void)b;
+  if (!root || root->op != POLY_OP_FLOORDIV || root->n_src != 2 ||
+      !arg_is_exact_integer(root->src[1]->arg))
+    return NULL;
+  PolyUOp *numerator = root->src[0];
+  if (numerator->op != POLY_OP_ADD || numerator->n_src != 2) return NULL;
+  PolyUOp *quotient = numerator->src[0], *addend = numerator->src[1];
+  if (addend->op != POLY_OP_CONST || !arg_is_exact_integer(addend->arg) ||
+      quotient->op != POLY_OP_FLOORDIV || quotient->n_src != 2 ||
+      quotient->src[1]->op != POLY_OP_CONST ||
+      !arg_is_exact_integer(quotient->src[1]->arg))
+    return NULL;
+
+  PolyInt a = {0}, c = {0}, d = {0}, zero = {0}, ac = {0}, cd = {0};
+  PolyUOp *ret = NULL;
+  if (!poly_int_from_arg(&a, addend->arg) ||
+      !poly_int_from_arg(&c, quotient->src[1]->arg) ||
+      !poly_int_from_arg(&d, root->src[1]->arg) ||
+      !poly_int_from_i64(&zero, 0) || poly_int_cmp(&d, &zero) <= 0 ||
+      !poly_int_mul(&ac, &a, &c) || !poly_int_mul(&cd, &c, &d))
+    goto done;
+  PolyUOp *scaled_addend = poly_const_like(ctx, addend, poly_int_as_arg(&ac));
+  PolyUOp *denominator = poly_const_like(ctx, root->src[1], poly_int_as_arg(&cd));
+  if (scaled_addend && denominator) {
+    PolyUOp *new_numerator = poly_uop2(
+        ctx, POLY_OP_ADD, numerator->dtype, quotient->src[0], scaled_addend,
+        poly_arg_none());
+    if (new_numerator)
+      ret = poly_uop2(
+          ctx, POLY_OP_FLOORDIV, root->dtype, new_numerator, denominator,
+          poly_arg_none());
+  }
+
+done:
+  poly_int_free(&a);
+  poly_int_free(&c);
+  poly_int_free(&d);
+  poly_int_free(&zero);
+  poly_int_free(&ac);
+  poly_int_free(&cd);
+  return ret;
+}
+
+/* tinygrad@2026-08-22/a9069c177a9d uop/divandmod.py:102-105.
+ * Move a nonzero divisor's whole multiples out of an additive constant. */
+static PolyUOp *fold_divmod_add_constant(
+    PolyCtx *ctx, PolyUOp *root, const PolyBindings *b
+) {
+  (void)b;
+  if (!root || (root->op != POLY_OP_FLOORDIV && root->op != POLY_OP_FLOORMOD) ||
+      root->n_src != 2 || !poly_dtype_eq(root->dtype, POLY_WEAKINT) ||
+      root->src[1]->op != POLY_OP_CONST || !arg_is_exact_integer(root->src[1]->arg))
+    return NULL;
+  PolyUOp *numerator = root->src[0];
+  if (numerator->op != POLY_OP_ADD || numerator->n_src != 2 ||
+      numerator->src[1]->op != POLY_OP_CONST ||
+      !arg_is_exact_integer(numerator->src[1]->arg))
+    return NULL;
+
+  PolyInt c = {0}, d = {0}, quotient = {0}, remainder = {0};
+  PolyUOp *ret = NULL;
+  if (!poly_int_from_arg(&c, numerator->src[1]->arg) ||
+      !poly_int_from_arg(&d, root->src[1]->arg) || poly_int_is_zero(&d) ||
+      !poly_int_divmod(&quotient, &remainder, &c, &d, true) ||
+      poly_int_cmp(&remainder, &c) == 0)
+    goto done;
+  PolyUOp *rem = poly_const_like(ctx, numerator->src[1], poly_int_as_arg(&remainder));
+  if (!rem) goto done;
+  PolyUOp *new_numerator = poly_uop2(
+      ctx, POLY_OP_ADD, numerator->dtype, numerator->src[0], rem, poly_arg_none());
+  if (!new_numerator) goto done;
+  ret = poly_uop2(ctx, root->op, root->dtype, new_numerator, root->src[1], poly_arg_none());
+  if (ret && root->op == POLY_OP_FLOORDIV) {
+    PolyUOp *quo = poly_const_like(ctx, root, poly_int_as_arg(&quotient));
+    ret = quo ? poly_uop2(ctx, POLY_OP_ADD, root->dtype, ret, quo, poly_arg_none()) : NULL;
+  }
+
+done:
+  poly_int_free(&c);
+  poly_int_free(&d);
+  poly_int_free(&quotient);
+  poly_int_free(&remainder);
+  return ret;
+}
+
+static bool pop_integer_const(
+    PolyUOp *u, PolyOps op, PolyUOp **value, PolyInt *constant
+) {
+  if (!u || !value || !constant) return false;
+  if (u->op == op && u->n_src == 2 && u->src[1]->op == POLY_OP_CONST &&
+      arg_is_exact_integer(u->src[1]->arg)) {
+    *value = u->src[0];
+    return poly_int_from_arg(constant, u->src[1]->arg);
+  }
+  *value = u;
+  return poly_int_from_i64(constant, op == POLY_OP_MUL ? 1 : 0);
+}
+
+/* tinygrad@2026-08-22/a9069c177a9d uop/symbolic.py:_quotient_base.
+ * Return B when q == B//div and B%div == base%div. Python integer constants
+ * are unbounded, so use PolyInt rather than declining valid >int64 folds. */
+static PolyUOp *quotient_base(
+    PolyCtx *ctx, PolyUOp *q_input, PolyUOp *base, const PolyInt *div
+) {
+  PolyInt s = {0}, a = {0}, qdiv = {0}, zero = {0}, d = {0}, c = {0};
+  PolyInt scaled_a = {0}, product = {0}, xa = {0}, pa = {0};
+  PolyInt sum = {0}, t = {0}, quotient = {0}, remainder = {0};
+  PolyInt k = {0}, kdiv = {0}, neg_kdiv = {0};
+  PolyUOp *q = NULL, *num = NULL, *x = NULL, *p = NULL, *ret = NULL;
+
+  if (!pop_integer_const(q_input, POLY_OP_ADD, &q, &s) ||
+      !pop_integer_const(base, POLY_OP_ADD, &num, &a) ||
+      !q || q->op != POLY_OP_FLOORDIV || q->n_src != 2 ||
+      q->src[1]->op != POLY_OP_CONST ||
+      !poly_int_from_arg(&qdiv, q->src[1]->arg) ||
+      !poly_int_from_i64(&zero, 0))
+    goto done;
+
+  if (poly_int_cmp(div, &zero) > 0 && num->op == POLY_OP_FLOORDIV &&
+      num->n_src == 2 && num->src[1]->op == POLY_OP_CONST &&
+      poly_int_from_arg(&c, num->src[1]->arg) &&
+      poly_int_mul(&product, &c, div) && poly_int_cmp(&qdiv, &product) == 0) {
+    if (!poly_int_mul(&scaled_a, &a, &c) || !poly_int_copy(&d, &product)) goto done;
+    poly_int_free(&a);
+    a = scaled_a;
+    poly_int_init(&scaled_a);
+    num = num->src[0];
+  } else {
+    if (poly_int_cmp(&qdiv, div) != 0 || !poly_int_copy(&d, div)) goto done;
+  }
+
+  if (!pop_integer_const(num, POLY_OP_ADD, &x, &xa) ||
+      !pop_integer_const(q->src[0], POLY_OP_ADD, &p, &pa) || p != x ||
+      !poly_int_add(&sum, &xa, &a) || !poly_int_sub(&t, &sum, &pa) ||
+      !poly_int_divmod(&quotient, &remainder, &t, &d, true) ||
+      !poly_int_is_zero(&remainder) || !poly_int_sub(&k, &quotient, &s))
+    goto done;
+  if (poly_int_is_zero(&k)) {
+    ret = base;
+    goto done;
+  }
+  if (!poly_int_mul(&kdiv, &k, div) || !poly_int_neg(&neg_kdiv, &kdiv)) goto done;
+  PolyUOp *offset = poly_const_like(ctx, base, poly_int_as_arg(&neg_kdiv));
+  if (offset)
+    ret = poly_uop2(ctx, POLY_OP_ADD, base->dtype, base, offset, poly_arg_none());
+
+done:
+  poly_int_free(&s); poly_int_free(&a); poly_int_free(&qdiv); poly_int_free(&zero);
+  poly_int_free(&d); poly_int_free(&c); poly_int_free(&scaled_a); poly_int_free(&product);
+  poly_int_free(&xa); poly_int_free(&pa); poly_int_free(&sum); poly_int_free(&t);
+  poly_int_free(&quotient); poly_int_free(&remainder); poly_int_free(&k);
+  poly_int_free(&kdiv); poly_int_free(&neg_kdiv);
+  return ret;
+}
+
+static PolyUOp *sum_other_terms(
+    PolyCtx *ctx, PolyDType dtype, PolyUOp *first, PolyUOp **terms, int n, int skip0, int skip1
+) {
+  PolyUOp *ret = first;
+  for (int i = 0; i < n; i++) {
+    if (i == skip0 || i == skip1) continue;
+    ret = poly_uop2(ctx, POLY_OP_ADD, dtype, ret, terms[i], poly_arg_none());
+    if (!ret) return NULL;
+  }
+  return ret;
+}
+
+/* tinygrad@2026-08-22/a9069c177a9d
+ * uop/symbolic.py:fold_add_divmod_recombine. */
 static PolyUOp *rule_fold_add_divmod_recombine(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   (void)b;
   if (root->op != POLY_OP_ADD) return NULL;
@@ -4343,114 +5231,76 @@ static PolyUOp *rule_fold_add_divmod_recombine(PolyCtx *ctx, PolyUOp *root, cons
     add_term_list_free(&terms);
     return NULL;
   }
-  int n = terms.count;
   PolyUOp *ret = NULL;
+  PolyInt zero = {0}, one = {0};
+  if (!poly_int_from_i64(&zero, 0) || !poly_int_from_i64(&one, 1)) goto cleanup;
 
-  for (int i = 0; i < n; i++) {
-    PolyUOp *u = terms.items[i];
-    PolyUOp *base = NULL;
-    int64_t div_val = 0, mul_val = 0;
-
-    /* Match: base%div (mul=1) */
-    if (u->op == POLY_OP_FLOORMOD && u->n_src == 2 && u->src[1]->op == POLY_OP_CONST &&
-        u->src[1]->arg.kind == POLY_ARG_INT) {
-      base = u->src[0];
-      div_val = u->src[1]->arg.i;
-      mul_val = 1;
+  for (int i = 0; i < terms.count; i++) {
+    PolyUOp *mod = NULL;
+    PolyInt mul = {0}, div = {0};
+    if (!pop_integer_const(terms.items[i], POLY_OP_MUL, &mod, &mul) ||
+        !mod || mod->op != POLY_OP_FLOORMOD || mod->n_src != 2 ||
+        mod->src[1]->op != POLY_OP_CONST ||
+        !poly_int_from_arg(&div, mod->src[1]->arg) || poly_int_is_zero(&div)) {
+      poly_int_free(&mul); poly_int_free(&div);
+      continue;
     }
-    /* Match: (base%div)*mul */
-    else if (u->op == POLY_OP_MUL && u->n_src == 2 && u->src[1]->op == POLY_OP_CONST &&
-             u->src[1]->arg.kind == POLY_ARG_INT) {
-      PolyUOp *m = u->src[0];
-      if (m->op == POLY_OP_FLOORMOD && m->n_src == 2 && m->src[1]->op == POLY_OP_CONST &&
-          m->src[1]->arg.kind == POLY_ARG_INT) {
-        base = m->src[0];
-        div_val = m->src[1]->arg.i;
-        mul_val = u->src[1]->arg.i;
-      }
-    }
-    if (!base || div_val == 0) continue;
-
-    int64_t scaled_div;
-    if (!i64_mul_ok(div_val, mul_val, &scaled_div)) continue;
-
-    for (int j = 0; j < n; j++) {
+    PolyUOp *base = mod->src[0];
+    for (int j = 0; j < terms.count; j++) {
       if (i == j) continue;
-      PolyUOp *v = terms.items[j];
-      /* v must be MUL(q, div*mul) */
-      if (v->op != POLY_OP_MUL || v->n_src != 2 || v->src[1]->op != POLY_OP_CONST ||
-          v->src[1]->arg.kind != POLY_ARG_INT || v->src[1]->arg.i != scaled_div)
+      PolyUOp *q = NULL;
+      PolyInt scale = {0}, wanted = {0};
+      if (!pop_integer_const(terms.items[j], POLY_OP_MUL, &q, &scale) ||
+          !poly_int_mul(&wanted, &div, &mul) || poly_int_cmp(&scale, &wanted) != 0) {
+        poly_int_free(&scale); poly_int_free(&wanted);
         continue;
-      PolyUOp *q = v->src[0];
-      bool exact = false;
+      }
 
-      /* (base%div)*mul + (base//div)*(div*mul) -> base*mul */
-      if (q->op == POLY_OP_FLOORDIV && q->n_src == 2 && q->src[1]->op == POLY_OP_CONST &&
-          q->src[1]->arg.kind == POLY_ARG_INT && q->src[1]->arg.i == div_val && q->src[0] == base) {
-        exact = true;
+      PolyUOp *recombined = quotient_base(ctx, q, base, &div);
+      if (recombined) {
+        PolyUOp *scaled = recombined;
+        if (poly_int_cmp(&mul, &one) != 0) {
+          PolyUOp *factor = poly_const_like(ctx, root, poly_int_as_arg(&mul));
+          scaled = factor ? poly_uop2(
+                                ctx, POLY_OP_MUL, root->dtype, recombined, factor,
+                                poly_arg_none()) : NULL;
+        }
+        ret = scaled ? sum_other_terms(
+                           ctx, root->dtype, scaled, terms.items, terms.count, i, j) : NULL;
+      } else if (q && q->op == POLY_OP_FLOORMOD && q->n_src == 2 &&
+                 q->src[1]->op == POLY_OP_CONST) {
+        PolyInt d = {0}, modulus = {0};
+        if (poly_int_from_arg(&d, q->src[1]->arg) && poly_int_cmp(&d, &zero) > 0 &&
+            (recombined = quotient_base(ctx, q->src[0], base, &div)) &&
+            poly_int_mul(&modulus, &div, &d)) {
+          PolyUOp *modulus_uop = poly_const_like(ctx, root, poly_int_as_arg(&modulus));
+          PolyUOp *partial = modulus_uop ? poly_uop2(
+              ctx, POLY_OP_FLOORMOD, root->dtype, recombined, modulus_uop,
+              poly_arg_none()) : NULL;
+          if (partial && poly_int_cmp(&mul, &one) != 0) {
+            PolyUOp *factor = poly_const_like(ctx, root, poly_int_as_arg(&mul));
+            partial = factor ? poly_uop2(
+                                   ctx, POLY_OP_MUL, root->dtype, partial, factor,
+                                   poly_arg_none()) : NULL;
+          }
+          ret = partial ? sum_other_terms(
+                              ctx, root->dtype, partial, terms.items, terms.count, i, j) : NULL;
+        }
+        poly_int_free(&d); poly_int_free(&modulus);
       }
-      /* ((base//d)%div)*mul + (base//(d*div))*(div*mul) -> (base//d)*mul */
-      if (!exact && div_val > 0 && base->op == POLY_OP_FLOORDIV && base->n_src == 2 &&
-          base->src[1]->op == POLY_OP_CONST && base->src[1]->arg.kind == POLY_ARG_INT) {
-        int64_t nested_div;
-        if (q->op == POLY_OP_FLOORDIV && q->n_src == 2 && q->src[1]->op == POLY_OP_CONST &&
-            q->src[1]->arg.kind == POLY_ARG_INT && q->src[0] == base->src[0] &&
-            i64_mul_ok(base->src[1]->arg.i, div_val, &nested_div) &&
-            q->src[1]->arg.i == nested_div) {
-          exact = true;
-        }
-      }
-      if (exact) {
-        /* result = base * mul + sum of remaining terms */
-        PolyUOp *result;
-        if (mul_val == 1) {
-          result = base;
-        } else {
-          PolyUOp *mc = poly_const_like_int(ctx, root, mul_val);
-          PolyUOp *ms[2] = {base, mc};
-          result = poly_uop(ctx, POLY_OP_MUL, root->dtype, ms, 2, poly_arg_none());
-        }
-        for (int k = 0; k < n; k++) {
-          if (k == i || k == j) continue;
-          PolyUOp *as[2] = {result, terms.items[k]};
-          result = poly_uop(ctx, POLY_OP_ADD, root->dtype, as, 2, poly_arg_none());
-        }
-        ret = result;
+      poly_int_free(&scale); poly_int_free(&wanted);
+      if (ret) {
+        poly_int_free(&mul); poly_int_free(&div);
         goto cleanup;
       }
-
-      /* ((base//div)%d)*div + base%div -> base%(div*d) */
-      if (mul_val == 1 && div_val > 0 && q->op == POLY_OP_FLOORMOD && q->n_src == 2 &&
-          q->src[1]->op == POLY_OP_CONST && q->src[1]->arg.kind == POLY_ARG_INT) {
-        int64_t d = q->src[1]->arg.i;
-        int64_t combined_modulus;
-        if (d > 0 && q->src[0]->op == POLY_OP_FLOORDIV && q->src[0]->n_src == 2 &&
-            q->src[0]->src[0] == base && q->src[0]->src[1]->op == POLY_OP_CONST &&
-            q->src[0]->src[1]->arg.kind == POLY_ARG_INT && q->src[0]->src[1]->arg.i == div_val &&
-            i64_mul_ok(div_val, d, &combined_modulus)) {
-          PolyUOp *new_mod_c = poly_const_like_int(ctx, root, combined_modulus);
-          PolyUOp *ms[2] = {base, new_mod_c};
-          PolyUOp *result = poly_uop(ctx, POLY_OP_FLOORMOD, root->dtype, ms, 2, poly_arg_none());
-          for (int k = 0; k < n; k++) {
-            if (k == i || k == j) continue;
-            PolyUOp *as[2] = {result, terms.items[k]};
-            result = poly_uop(ctx, POLY_OP_ADD, root->dtype, as, 2, poly_arg_none());
-          }
-          ret = result;
-          goto cleanup;
-        }
-      }
     }
+    poly_int_free(&mul); poly_int_free(&div);
   }
 
 cleanup:
+  poly_int_free(&zero); poly_int_free(&one);
   add_term_list_free(&terms);
   return ret;
-}
-
-/* (x * y) / y → x.  Ref: tinygrad symbolic_simple line 90 */
-static PolyUOp *rule_mul_fdiv_cancel(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
-  return poly_bind(b, "x");
 }
 
 /* WHERE(a, WHERE(b, c, d), d) → WHERE(AND(a, b), c, d).  Ref: tinygrad line 117 */
@@ -4463,242 +5313,14 @@ static PolyUOp *rule_nested_where(PolyCtx *ctx, PolyUOp *root, const PolyBinding
   return poly_uop3(ctx, POLY_OP_WHERE, root->dtype, cond, c, d, poly_arg_none());
 }
 
-/* GEP(VECTORIZE(...)) -> VECTORIZE(select...) or scalar select */
-static PolyUOp *rule_gep_vectorize(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
-  (void)b;
-  if (root->op != POLY_OP_GEP || root->n_src < 1) return NULL;
-  PolyUOp *vec = root->src[0];
-  if (!vec || vec->op != POLY_OP_VECTORIZE || vec->n_src <= 0) return NULL;
-
-  if (root->arg.kind == POLY_ARG_INT) {
-    int64_t idx = root->arg.i;
-    if (idx < 0 || idx >= vec->n_src) return NULL;
-    return vec->src[idx];
-  }
-  if (root->arg.kind != POLY_ARG_INT_TUPLE || root->arg.int_tuple.n <= 0) return NULL;
-  int n = root->arg.int_tuple.n;
-  if (n == 1) {
-    int64_t idx = root->arg.int_tuple.vals[0];
-    if (idx < 0 || idx >= vec->n_src) return NULL;
-    return vec->src[idx];
-  }
-  PolyUOp **elts = calloc((size_t)n, sizeof(*elts));
-  if (!elts) return NULL;
-  for (int i = 0; i < n; i++) {
-    int64_t idx = root->arg.int_tuple.vals[i];
-    if (idx < 0 || idx >= vec->n_src) {
-      free(elts);
-      return NULL;
-    }
-    elts[i] = vec->src[idx];
-  }
-  PolyUOp *ret = poly_uop(ctx, POLY_OP_VECTORIZE, root->dtype, elts, n, poly_arg_none());
-  free(elts);
-  return ret;
-}
-
-/* GEP(CONST/VCONST) -> selected CONST(s). */
-static PolyUOp *rule_gep_const(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
-  (void)b;
-  if (root->op != POLY_OP_GEP || root->n_src < 1) return NULL;
-  PolyUOp *c = root->src[0];
-  if (!c) return NULL;
-  if (c->op == POLY_OP_CONST) {
-    if (c->dtype.count <= 1) return c;
-    if (root->arg.kind == POLY_ARG_INT)
-      return poly_uop0(ctx, POLY_OP_CONST, poly_dtype_scalar(c->dtype), c->arg);
-    if (root->arg.kind != POLY_ARG_INT_TUPLE || root->arg.int_tuple.n <= 0) return NULL;
-    if (root->arg.int_tuple.n == 1)
-      return poly_uop0(ctx, POLY_OP_CONST, poly_dtype_scalar(c->dtype), c->arg);
-    return poly_uop0(ctx, POLY_OP_CONST, root->dtype, c->arg);
-  }
-  if (c->op != POLY_OP_VCONST) return NULL;
-
-  if (root->arg.kind == POLY_ARG_INT) {
-    int64_t idx = root->arg.i;
-    if (idx < 0) return NULL;
-    if (c->n_src > idx) return c->src[idx];
-    if (c->arg.kind == POLY_ARG_INT_TUPLE && idx < c->arg.int_tuple.n)
-      return poly_uop0(
-          ctx, POLY_OP_CONST, poly_dtype_scalar(c->dtype), poly_arg_int(c->arg.int_tuple.vals[idx])
-      );
-    return NULL;
-  }
-  if (root->arg.kind != POLY_ARG_INT_TUPLE || root->arg.int_tuple.n <= 0) return NULL;
-  int n = root->arg.int_tuple.n;
-  if (n == 1) {
-    int64_t idx = root->arg.int_tuple.vals[0];
-    if (idx < 0) return NULL;
-    if (c->n_src > idx) return c->src[idx];
-    if (c->arg.kind == POLY_ARG_INT_TUPLE && idx < c->arg.int_tuple.n)
-      return poly_uop0(
-          ctx, POLY_OP_CONST, poly_dtype_scalar(c->dtype), poly_arg_int(c->arg.int_tuple.vals[idx])
-      );
-    return NULL;
-  }
-  PolyUOp **elts = calloc((size_t)n, sizeof(*elts));
-  if (!elts) return NULL;
-  for (int i = 0; i < n; i++) {
-    int64_t idx = root->arg.int_tuple.vals[i];
-    if (idx < 0) {
-      free(elts);
-      return NULL;
-    }
-    if (c->n_src > idx)
-      elts[i] = c->src[idx];
-    else if (c->arg.kind == POLY_ARG_INT_TUPLE && idx < c->arg.int_tuple.n)
-      elts[i] = poly_uop0(
-          ctx, POLY_OP_CONST, poly_dtype_scalar(c->dtype), poly_arg_int(c->arg.int_tuple.vals[idx])
-      );
-    else {
-      free(elts);
-      return NULL;
-    }
-  }
-  PolyUOp *ret = poly_uop(ctx, POLY_OP_VECTORIZE, root->dtype, elts, n, poly_arg_none());
-  free(elts);
-  return ret;
-}
-
-/* Pinned tinygrad/uop/symbolic.py:213-214. GEP only selects value lanes;
- * a void effect has no lanes, so the wrapper is always the effect itself. */
-static PolyUOp *rule_gep_void(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
-  (void)ctx;
-  (void)b;
-  if (!root || root->op != POLY_OP_GEP || root->n_src != 1 || !root->src[0]) return NULL;
-  return poly_dtype_eq(root->src[0]->dtype, POLY_VOID) ? root->src[0] : NULL;
-}
-
-/* GEP in natural order is identity. */
-static PolyUOp *rule_gep_identity(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
-  (void)ctx;
-  (void)b;
-  if (root->op != POLY_OP_GEP || root->n_src < 1) return NULL;
-  PolyUOp *src = root->src[0];
-  if (!src || src->dtype.is_ptr) return NULL;
-
-  if (root->arg.kind == POLY_ARG_INT) {
-    if (src->dtype.count == 1 && root->arg.i == 0) return src;
-    return NULL;
-  }
-  if (root->arg.kind != POLY_ARG_INT_TUPLE || root->arg.int_tuple.n <= 0) return NULL;
-  int n = root->arg.int_tuple.n;
-  if (src->dtype.count == 1 && n == 1 && root->arg.int_tuple.vals[0] == 0) return src;
-  if (n != src->dtype.count) return NULL;
-  for (int i = 0; i < n; i++) {
-    if (root->arg.int_tuple.vals[i] != i) return NULL;
-  }
-  return src;
-}
-
-/* GEP through ALU: GEP(ALU(a,b), i) → ALU(GEP(a,i), GEP(b,i))
- * (tinygrad symbolic.py:192-194, gep_pushing) */
-static PolyUOp *rule_gep_through_alu(PolyCtx *ctx, PolyUOp *gep, const PolyBindings *b) {
-  (void)b;
-  if (gep->op != POLY_OP_GEP || gep->n_src < 1) return NULL;
-  if (gep->dtype.is_ptr) return NULL;
-  /* Only push GEP through integer ALU (index arithmetic).
-   * tinygrad gates on dtype=dtypes.index; polygrad uses POLY_INT32 for indices. */
-  if (!poly_dtype_is_int(poly_dtype_scalar(gep->dtype))) return NULL;
-  PolyUOp *alu = gep->src[0];
-  if (!alu || alu->dtype.is_ptr) return NULL;
-  if (!poly_opset_has(POLY_GROUP_ALU, alu->op) && alu->op != POLY_OP_CAST &&
-      alu->op != POLY_OP_BITCAST)
-    return NULL;
-  if (alu->dtype.count <= 1) return NULL; /* already scalar */
-  /* Build new ALU with GEP pushed to each source */
-  PolyUOp *srcs[8];
-  if (alu->n_src > 8) return NULL;
-  int gep_count = 1;
-  if (gep->arg.kind == POLY_ARG_INT_TUPLE) gep_count = gep->arg.int_tuple.n;
-  PolyDType new_dt = (gep_count > 1) ? poly_dtype_vec(poly_dtype_scalar(alu->dtype), gep_count)
-                                     : poly_dtype_scalar(alu->dtype);
-  for (int i = 0; i < alu->n_src; i++) {
-    PolyUOp *s = alu->src[i];
-    if (s->dtype.count > 1) {
-      PolyDType s_new_dt = (gep_count > 1) ? poly_dtype_vec(poly_dtype_scalar(s->dtype), gep_count)
-                                           : poly_dtype_scalar(s->dtype);
-      srcs[i] = poly_uop1(ctx, POLY_OP_GEP, s_new_dt, s, gep->arg);
-    } else {
-      srcs[i] = s; /* scalar source passes through */
-    }
-  }
-  if (alu->n_src == 1) return poly_uop1(ctx, alu->op, new_dt, srcs[0], alu->arg);
-  if (alu->n_src == 2) return poly_uop2(ctx, alu->op, new_dt, srcs[0], srcs[1], alu->arg);
-  if (alu->n_src == 3) return poly_uop3(ctx, alu->op, new_dt, srcs[0], srcs[1], srcs[2], alu->arg);
-  return poly_uop(ctx, alu->op, new_dt, srcs, alu->n_src, alu->arg);
-}
-
-/* Tinygrad symbolic.py: VCAT cannot be rendered directly, so expand it into
- * VECTORIZE of per-lane GEPs early enough for later scalarization passes. */
-static PolyUOp *rule_vcat_to_vectorize(PolyCtx *ctx, PolyUOp *x, const PolyBindings *b) {
-  (void)b;
-  if (!x || x->op != POLY_OP_VCAT || x->n_src <= 0 || x->dtype.is_ptr) return NULL;
-  int total = 0;
-  for (int i = 0; i < x->n_src; i++) {
-    int cnt = x->src[i]->dtype.count > 0 ? x->src[i]->dtype.count : 1;
-    if (cnt > INT32_MAX - total) return NULL;
-    total += cnt;
-  }
-  if (total <= 0) return NULL;
-  PolyUOp **elts = calloc((size_t)total, sizeof(*elts));
-  if (!elts) return NULL;
-  int p = 0;
-  for (int i = 0; i < x->n_src; i++) {
-    PolyUOp *src = x->src[i];
-    int cnt = src->dtype.count > 0 ? src->dtype.count : 1;
-    for (int j = 0; j < cnt; j++) {
-      elts[p++] = poly_uop1(ctx, POLY_OP_GEP, poly_dtype_scalar(src->dtype), src, poly_arg_int(j));
-    }
-  }
-  PolyUOp *ret = poly_uop(ctx, POLY_OP_VECTORIZE, x->dtype, elts, p, poly_arg_none());
-  free(elts);
-  return ret;
-}
-
-/* VECTORIZE(GEP(x, a0), GEP(x, a1), ...) where all GEPs share same source x
- * → x.gep((a0, a1, ...))  (collapse to single GEP with tuple arg)
- * Port of tinygrad symbolic.py:199:
- *   (UPat(Ops.VECTORIZE, src=UPat(Ops.GEP, src=(UPat.var("x"),))),
- *    lambda v,x: x.gep(tuple(get_single_element(i.arg) for i in v.src))) */
-static PolyUOp *rule_vectorize_same_gep(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
-  (void)b;
-  if (root->op != POLY_OP_VECTORIZE || root->n_src < 2) return NULL;
-
-  /* All sources must be single-lane GEP from the same source UOp */
-  PolyUOp *base = NULL;
-  for (int i = 0; i < root->n_src; i++) {
-    PolyUOp *s = root->src[i];
-    if (!s || s->op != POLY_OP_GEP || s->n_src < 1) return NULL;
-    /* Accept both INT arg and INT_TUPLE with n=1 (tinygrad uses tuple form) */
-    if (s->arg.kind != POLY_ARG_INT &&
-        !(s->arg.kind == POLY_ARG_INT_TUPLE && s->arg.int_tuple.n == 1))
-      return NULL;
-    if (i == 0)
-      base = s->src[0];
-    else if (s->src[0] != base)
-      return NULL;
-  }
-  if (!base) return NULL;
-
-  /* Collect lane indices into tuple (stack — poly_uop copies to arena) */
-  int n = root->n_src;
-  int64_t *lanes = calloc((size_t)n, sizeof(*lanes));
-  if (!lanes) return NULL;
-  for (int i = 0; i < n; i++) {
-    PolyUOp *s = root->src[i];
-    lanes[i] = (s->arg.kind == POLY_ARG_INT) ? s->arg.i : s->arg.int_tuple.vals[0];
-  }
-
-  /* Create single GEP with tuple arg: base.gep((lane0, lane1, ...))
-   * Then rule_gep_identity handles (0,1,...,N-1) → identity. */
-  PolyArg tup;
-  tup.kind = POLY_ARG_INT_TUPLE;
-  tup.int_tuple.vals = lanes;
-  tup.int_tuple.n = n;
-  PolyUOp *ret = poly_uop1(ctx, POLY_OP_GEP, root->dtype, base, tup);
-  free(lanes);
-  return ret;
+/* Current tinygrad/uop/symbolic.py:189-190 merges equal true branches. */
+static PolyUOp *rule_nested_where_or(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+  PolyUOp *a = poly_bind(b, "a");
+  PolyUOp *bb = poly_bind(b, "b");
+  PolyUOp *c = poly_bind(b, "c");
+  PolyUOp *d = poly_bind(b, "d");
+  PolyUOp *cond = poly_uop2(ctx, POLY_OP_OR, POLY_BOOL, a, bb, poly_arg_none());
+  return poly_uop3(ctx, POLY_OP_WHERE, root->dtype, cond, c, d, poly_arg_none());
 }
 
 /* tinygrad symbolic.py: clean up singleton GROUP wrappers that appear after
@@ -4711,25 +5333,88 @@ static PolyUOp *rule_group_singleton(PolyCtx *ctx, PolyUOp *root, const PolyBind
   return root->src[0];
 }
 
-/* GEP pushing PM (for combined devec pass) */
+static bool sink_like_child(PolyUOp *u) {
+  return u && (u->op == POLY_OP_NOOP || u->op == POLY_OP_STACK ||
+               u->op == POLY_OP_SINK || u->op == POLY_OP_GROUP);
+}
 
-static _Thread_local PolyPatternMatcher *g_pm_gep_pushing = NULL;
+/* Current tinygrad symbolic.py:431-439 flattens effect-group carriers only in
+ * pm_clean_up_group_sink, after the ordinary symbolic rules have finished. */
+static PolyUOp *rule_clean_up_group_sink(
+    PolyCtx *ctx,
+    PolyUOp *root,
+    const PolyBindings *b
+) {
+  (void)b;
+  if (!root || (root->op != POLY_OP_SINK && root->op != POLY_OP_GROUP)) return NULL;
+  int n_src = 0;
+  bool changed = false;
+  for (int i = 0; i < root->n_src; i++) {
+    PolyUOp *src = root->src[i];
+    if (sink_like_child(src)) {
+      n_src += src->n_src;
+      changed = true;
+    } else {
+      n_src++;
+    }
+  }
+  if (!changed) return NULL;
+  PolyUOp **src = n_src ? malloc((size_t)n_src * sizeof(*src)) : NULL;
+  if (n_src && !src) return NULL;
+  int at = 0;
+  for (int i = 0; i < root->n_src; i++) {
+    PolyUOp *child = root->src[i];
+    if (sink_like_child(child)) {
+      for (int j = 0; j < child->n_src; j++) src[at++] = child->src[j];
+    } else {
+      src[at++] = child;
+    }
+  }
+  PolyUOp *ret = poly_uop_tagged_arg(
+      ctx, root->op, root->dtype, src, n_src, root->arg, root->tag, root->tag_arg
+  );
+  free(src);
+  return ret;
+}
 
-PolyPatternMatcher *poly_pm_gep_pushing(void) {
-  if (g_pm_gep_pushing) return g_pm_gep_pushing;
-  PolyRule rules[] = {
-      {poly_pat_op(POLY_OP_GEP, NULL, 0, NULL), rule_gep_vectorize},
-      {poly_pat_op(POLY_OP_GEP, NULL, 0, NULL), rule_gep_const},
-      {poly_pat_op(POLY_OP_GEP, NULL, 0, NULL), rule_gep_void},
-      {poly_pat_op(POLY_OP_GEP, NULL, 0, NULL), rule_gep_identity},
-      {poly_pat_op(POLY_OP_GEP, NULL, 0, NULL), rule_gep_through_alu},
-      /* VECTORIZE(GEP(x,a0), GEP(x,a1), ...) → x.gep((a0,a1,...))
-       * tinygrad symbolic.py:199 */
-      {poly_pat_op(POLY_OP_VECTORIZE, NULL, 0, NULL), rule_vectorize_same_gep},
-  };
-  g_pm_gep_pushing =
-      poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
-  return g_pm_gep_pushing;
+static PolyUOp *rule_remove_invalid_gate(
+    PolyCtx *ctx,
+    PolyUOp *where,
+    const PolyBindings *b
+) {
+  (void)b;
+  PolyUOp *cond = NULL, *value = NULL;
+  if (!invalid_gate_parts(where, &cond, &value, NULL)) return NULL;
+  PolyUOp *zero = poly_const_like_int(ctx, where, 0);
+  return zero ? poly_uop3(ctx, POLY_OP_WHERE, where->dtype, cond, value, zero, where->arg)
+              : NULL;
+}
+
+static PolyUOp *rule_remove_invalid_stack(
+    PolyCtx *ctx,
+    PolyUOp *stack,
+    const PolyBindings *b
+) {
+  (void)b;
+  if (!stack || stack->op != POLY_OP_STACK || stack->n_src <= 0) return NULL;
+  bool changed = false;
+  PolyUOp **src = malloc((size_t)stack->n_src * sizeof(*src));
+  if (!src) return NULL;
+  for (int i = 0; i < stack->n_src; i++) {
+    if (is_invalid_const_uop(stack->src[i])) {
+      src[i] = poly_const_like_int(ctx, stack, 0);
+      changed = true;
+    } else {
+      src[i] = stack->src[i];
+    }
+  }
+  PolyUOp *ret = changed ? poly_uop_tagged_arg(
+                               ctx, stack->op, stack->dtype, src, stack->n_src,
+                               stack->arg, stack->tag, stack->tag_arg
+                           )
+                         : NULL;
+  free(src);
+  return ret;
 }
 
 /* Build the symbolic_simple PatternMatcher */
@@ -4737,381 +5422,841 @@ PolyPatternMatcher *poly_pm_gep_pushing(void) {
 static _Thread_local PolyPatternMatcher *g_symbolic_simple = NULL;
 static _Thread_local PolyPatternMatcher *g_symbolic = NULL;
 static _Thread_local PolyPatternMatcher *g_sym = NULL;
+static _Thread_local PolyPatternMatcher *g_pm_data_invalid = NULL;
+static _Thread_local PolyPatternMatcher *g_commutative = NULL;
+static _Thread_local PolyPatternMatcher *g_div_and_mod_symbolic = NULL;
+static _Thread_local PolyPatternMatcher *g_pm_clean_up_group_sink = NULL;
+static _Thread_local PolyPatternMatcher *g_pm_remove_invalid = NULL;
+
+PolyPatternMatcher *poly_pm_clean_up_group_sink(void) {
+  if (g_pm_clean_up_group_sink) return g_pm_clean_up_group_sink;
+  PolyOpSet sink_group =
+      poly_opset_add(poly_opset_add((PolyOpSet){{0, 0}}, POLY_OP_SINK), POLY_OP_GROUP);
+  PolyRule rules[] = {
+      {poly_upat_op1(POLY_OP_GROUP, poly_upat_any("x"), NULL), rule_group_singleton},
+      {poly_upat_ops(sink_group, NULL, 0, "root"), rule_clean_up_group_sink},
+  };
+  g_pm_clean_up_group_sink =
+      poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
+  return g_pm_clean_up_group_sink;
+}
+
+PolyPatternMatcher *poly_pm_remove_invalid(void) {
+  if (g_pm_remove_invalid) return g_pm_remove_invalid;
+  PolyRule rules[] = {
+      {poly_upat_op(POLY_OP_WHERE, NULL, 0, "where"), rule_remove_invalid_gate},
+      {poly_upat_op(POLY_OP_STACK, NULL, 0, "stack"), rule_remove_invalid_stack},
+  };
+  g_pm_remove_invalid =
+      poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
+  return g_pm_remove_invalid;
+}
+
+static PolyUPat *upat_invalid(void) {
+  return poly_upat_const_val(poly_arg_invalid());
+}
+
+static PolyUPat *upat_invalid_gate(void) {
+  return poly_upat_op3(
+      POLY_OP_WHERE, poly_upat_any("cond"), poly_upat_any("x"), upat_invalid(), NULL
+  );
+}
+
+static PolyUPat *upat_invalid_index(void) {
+  return poly_upat_or_casted(poly_upat_allow_any_len(poly_upat_op2(
+      POLY_OP_INDEX, poly_upat_any(NULL), upat_invalid(), NULL
+  )));
+}
+
+/* Tinygrad 2026-08-22/a9069c177a9d uop/symbolic.py:74-96. */
+static PolyPatternMatcher *poly_pm_data_invalid(void) {
+  if (g_pm_data_invalid) return g_pm_data_invalid;
+  PolyOpSet unary = poly_opset_union(
+      POLY_GROUP_UNARY,
+      poly_opset_add(poly_opset_add((PolyOpSet){{0, 0}}, POLY_OP_CAST), POLY_OP_BITCAST)
+  );
+  PolyOpSet binary_non_comparison = POLY_GROUP_BINARY;
+  binary_non_comparison.bits[0] &= ~POLY_GROUP_COMPARISON.bits[0];
+  binary_non_comparison.bits[1] &= ~POLY_GROUP_COMPARISON.bits[1];
+  PolyRule rules[] = {
+      {poly_upat_repeat_src(poly_upat_op(POLY_OP_STACK, NULL, 0, NULL), upat_invalid()),
+       rule_propagate_invalid_stack},
+      {poly_upat_ops1(unary, upat_invalid(), NULL), rule_propagate_invalid_unary},
+      {poly_upat_ops1(unary, upat_invalid_gate(), "op"), rule_propagate_invalid_unary},
+      {poly_upat_ops2(POLY_GROUP_BINARY, upat_invalid_gate(), poly_upat_any("y"), "alu"),
+       rule_propagate_invalid_binary},
+      {poly_upat_ops2(POLY_GROUP_BINARY, poly_upat_any("y"), upat_invalid_gate(), "alu"),
+       rule_propagate_invalid_binary},
+      {poly_upat_ops2c(binary_non_comparison, upat_invalid(), poly_upat_any(NULL), NULL),
+       rule_propagate_invalid_binary},
+      {poly_upat_op3(POLY_OP_WHERE, upat_invalid(), poly_upat_any(NULL), poly_upat_any(NULL), NULL),
+       rule_propagate_invalid_where},
+      {poly_upat_op3(POLY_OP_WHERE, upat_invalid_gate(), poly_upat_any("a"), poly_upat_any("b"), NULL),
+       rule_propagate_invalid_where},
+      {poly_upat_op3(POLY_OP_WHERE, poly_upat_any("cond"), upat_invalid(), poly_upat_any("val"), NULL),
+       rule_propagate_invalid_where},
+      {poly_upat_op3(POLY_OP_WHERE, poly_upat_any("a"), upat_invalid_gate(), poly_upat_any("c"), NULL),
+       rule_propagate_invalid_where},
+      {poly_upat_op3(POLY_OP_WHERE, poly_upat_any("a"), poly_upat_any("b"), upat_invalid_gate(), NULL),
+       rule_propagate_invalid_where},
+      {poly_upat_op2(POLY_OP_STORE, upat_invalid_index(), poly_upat_any(NULL), NULL),
+       rule_fold_invalid_load_store},
+      {poly_upat_allow_any_len(poly_upat_op1(POLY_OP_LOAD, upat_invalid_index(), "x")),
+       rule_fold_invalid_load_store},
+  };
+  g_pm_data_invalid =
+      poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
+  return g_pm_data_invalid;
+}
 
 PolyPatternMatcher *poly_symbolic_simple(void) {
   if (g_symbolic_simple) return g_symbolic_simple;
+  PolyDType bool_dtype[] = {POLY_BOOL};
+  PolyDType weakint_dtype[] = {POLY_WEAKINT};
+  PolyDType integer_bool_dtypes[] = {
+      POLY_UINT8, POLY_UINT16, POLY_UINT32, POLY_UINT64,
+      POLY_INT8, POLY_INT16, POLY_INT32, POLY_INT64,
+      POLY_BOOL, POLY_WEAKINT,
+  };
+  PolyDType integer_dtypes[] = {
+      POLY_UINT8, POLY_UINT16, POLY_UINT32, POLY_UINT64,
+      POLY_INT8, POLY_INT16, POLY_INT32, POLY_INT64, POLY_WEAKINT,
+  };
+  PolyDType strong_dtypes[] = {
+      POLY_FLOAT16, POLY_BFLOAT16, POLY_FLOAT32, POLY_FLOAT64,
+      POLY_UINT8, POLY_UINT16, POLY_UINT32, POLY_UINT64,
+      POLY_INT8, POLY_INT16, POLY_INT32, POLY_INT64, POLY_BOOL,
+  };
+  PolyDType uint32_dtype[] = {POLY_UINT32};
+  PolyDType uint64_dtype[] = {POLY_UINT64};
 
-  /* Exclude THREEFRY from binary const fold */
   PolyOpSet binary_no_threefry = POLY_GROUP_BINARY;
   binary_no_threefry.bits[POLY_OP_THREEFRY / 64] &= ~((uint64_t)1 << (POLY_OP_THREEFRY % 64));
-
-  /* CAST | BITCAST set */
   PolyOpSet cast_set =
       poly_opset_add(poly_opset_add((PolyOpSet){{0, 0}}, POLY_OP_CAST), POLY_OP_BITCAST);
+  PolyOpSet add_xor_or = poly_opset_add(
+      poly_opset_add(poly_opset_add((PolyOpSet){{0, 0}}, POLY_OP_ADD), POLY_OP_XOR), POLY_OP_OR
+  );
+  PolyOpSet shifts =
+      poly_opset_add(poly_opset_add((PolyOpSet){{0, 0}}, POLY_OP_SHL), POLY_OP_SHR);
   PolyOpSet constant_fold_value_set = poly_opset_add(
-      poly_opset_add(poly_opset_add((PolyOpSet){{0, 0}}, POLY_OP_CONST), POLY_OP_VCONST),
-      POLY_OP_STACK
+      poly_opset_add((PolyOpSet){{0, 0}}, POLY_OP_CONST), POLY_OP_STACK
   );
 
+  PolyUPat *threefry_unpack_low = poly_upat_set_dtype(
+      poly_upat_op1(
+          POLY_OP_CAST,
+          poly_upat_set_dtype(
+              poly_upat_op2c(
+                  POLY_OP_OR,
+                  poly_upat_set_dtype(
+                      poly_upat_op2(
+                          POLY_OP_SHL, poly_upat_dtype(NULL, uint64_dtype, 1),
+                          poly_upat_const_val(poly_arg_int(32)), NULL
+                      ),
+                      uint64_dtype, 1
+                  ),
+                  poly_upat_set_dtype(
+                      poly_upat_op1(
+                          POLY_OP_CAST, poly_upat_dtype("y", uint32_dtype, 1), NULL
+                      ),
+                      uint64_dtype, 1
+                  ),
+                  NULL
+              ),
+              uint64_dtype, 1
+          ),
+          NULL
+      ),
+      uint32_dtype, 1
+  );
+  PolyUPat *threefry_unpack_high = poly_upat_set_dtype(
+      poly_upat_op2(
+          POLY_OP_SHR,
+          poly_upat_set_dtype(
+              poly_upat_op2c(
+                  POLY_OP_OR,
+                  poly_upat_set_dtype(
+                      poly_upat_op2(
+                          POLY_OP_SHL,
+                          poly_upat_set_dtype(
+                              poly_upat_op1(
+                                  POLY_OP_CAST, poly_upat_dtype("x", uint32_dtype, 1), NULL
+                              ),
+                              uint64_dtype, 1
+                          ),
+                          poly_upat_const_val(poly_arg_int(32)), NULL
+                      ),
+                      uint64_dtype, 1
+                  ),
+                  poly_upat_set_dtype(
+                      poly_upat_op1(
+                          POLY_OP_CAST, poly_upat_dtype(NULL, uint32_dtype, 1), NULL
+                      ),
+                      uint64_dtype, 1
+                  ),
+                  NULL
+              ),
+              uint64_dtype, 1
+          ),
+          poly_upat_const_val(poly_arg_int(32)), NULL
+      ),
+      uint64_dtype, 1
+  );
+
+  /* Tinygrad 2026-08-22/a9069c177a9d uop/symbolic.py:109-191, one C row
+   * per ordered PatternMatcher row. */
   PolyRule rules[] = {
-      /*
-       * Pinned tinygrad/uop/symbolic.py:60-86. These must precede ordinary
-       * symbolic identities so Invalid remains a validity sentinel.
-       */
-      {poly_pat_op(POLY_OP_CAST, NULL, 0, "root"), rule_propagate_invalid_cast},
-      {poly_pat_ops(POLY_GROUP_UNARY, NULL, 0, "root"), rule_propagate_invalid_unary},
-      {poly_pat_ops(POLY_GROUP_BINARY, NULL, 0, "root"), rule_propagate_invalid_binary},
-      {poly_pat_op(POLY_OP_WHERE, NULL, 0, "root"), rule_propagate_invalid_where},
-      {poly_pat_op(POLY_OP_BITCAST, NULL, 0, "root"), rule_propagate_invalid_bitcast},
-
-      /* -- Bool algebra (must come before generic ADD/MUL rules) -- */
-      /* bool * bool -> AND */
-      {poly_pat_op2(POLY_OP_MUL, poly_pat_any("x"), poly_pat_any("y"), NULL), rule_bool_mul_to_and},
-      /* bool + bool -> OR */
-      {poly_pat_op2(POLY_OP_ADD, poly_pat_any("x"), poly_pat_any("y"), NULL), rule_bool_add_to_or},
-
-      /* -- Self-folding -- */
-      /* x + 0 -> x */
-      {poly_pat_op2c(POLY_OP_ADD, poly_pat_any("x"), poly_pat_const_val(poly_arg_int(0)), NULL),
+      {poly_upat_ops2c(add_xor_or, poly_upat_any("x"), poly_upat_const_val(poly_arg_int(0)), NULL),
        rule_identity},
-      /* x + 0.0 -> x (float) */
-      {poly_pat_op2c(POLY_OP_ADD, poly_pat_any("x"), poly_pat_const_val(poly_arg_float(0.0)), NULL),
+      {poly_upat_ops2(shifts, poly_upat_any("x"), poly_upat_const_val(poly_arg_int(0)), NULL),
        rule_identity},
-      /* x * 1 -> x */
-      {poly_pat_op2c(POLY_OP_MUL, poly_pat_any("x"), poly_pat_const_val(poly_arg_int(1)), NULL),
+      {poly_upat_op2c(POLY_OP_MUL, poly_upat_any("x"), poly_upat_const_val(poly_arg_int(1)), NULL),
        rule_identity},
-      /* x * 1.0 -> x (float) */
-      {poly_pat_op2c(POLY_OP_MUL, poly_pat_any("x"), poly_pat_const_val(poly_arg_float(1.0)), NULL),
+      {poly_upat_op2(POLY_OP_FLOORDIV, poly_upat_any("x"), poly_upat_any("x"), NULL), rule_div_self},
+      {poly_upat_op2(POLY_OP_FLOORDIV, poly_upat_any("x"), poly_upat_const_val(poly_arg_int(1)), NULL),
        rule_identity},
-      /* AND(x, true) -> x */
-      {poly_pat_op2c(POLY_OP_AND, poly_pat_any("x"), poly_pat_const_val(poly_arg_bool(true)), NULL),
-       rule_identity},
-      /* AND(x, false) -> false */
-      {poly_pat_op2c(
-           POLY_OP_AND, poly_pat_any("x"), poly_pat_const_val(poly_arg_bool(false)), NULL
-       ),
-       rule_and_zero},
-      /* OR(x, false) -> x */
-      {poly_pat_op2c(POLY_OP_OR, poly_pat_any("x"), poly_pat_const_val(poly_arg_bool(false)), NULL),
-       rule_identity},
-      /* OR(x, true) -> true */
-      {poly_pat_op2c(POLY_OP_OR, poly_pat_any("x"), poly_pat_const_val(poly_arg_bool(true)), NULL),
-       rule_or_one},
-      /* x // x -> 1 */
-      {poly_pat_op2(POLY_OP_FLOORDIV, poly_pat_any("x"), poly_pat_any("x"), NULL), rule_div_self},
-      /* x // 1 -> x */
-      {poly_pat_op2(POLY_OP_FLOORDIV, poly_pat_any("x"), poly_pat_const_val(poly_arg_int(1)), NULL),
-       rule_identity},
-      /* x // -1 -> -x */
-      {poly_pat_op2(
-           POLY_OP_FLOORDIV, poly_pat_any("x"), poly_pat_const_val(poly_arg_int(-1)), NULL
+      {poly_upat_op2(
+           POLY_OP_FLOORDIV, poly_upat_any("x"), poly_upat_const_val(poly_arg_int(-1)), NULL
        ),
        rule_div_neg1},
-      /* Idempotent(x, x) -> x */
-      {poly_pat_ops2(POLY_GROUP_IDEMPOTENT, poly_pat_any("x"), poly_pat_any("x"), NULL),
-       rule_idempotent},
-      /* TRUNC(x) -> x for int/bool/weakint (tinygrad symbolic.py:114) */
-      {poly_pat_op1(POLY_OP_TRUNC, poly_pat_any("x"), NULL), rule_trunc_integral_identity},
-
-      /* -- Zero-folding -- */
-      /* x < x -> False */
-      {poly_pat_op2(POLY_OP_CMPLT, poly_pat_any("x"), poly_pat_any("x"), NULL), rule_lt_self},
-      /* x != x -> False (int/bool only) */
-      {poly_pat_op2(POLY_OP_CMPNE, poly_pat_any("x"), poly_pat_any("x"), NULL), rule_cmpne_self},
-      /* x % x -> 0 */
-      {poly_pat_op2(POLY_OP_FLOORMOD, poly_pat_any("x"), poly_pat_any("x"), NULL), rule_mod_self},
-      /* x ^ 0 -> x */
-      {poly_pat_op2c(POLY_OP_XOR, poly_pat_any("x"), poly_pat_const_val(poly_arg_int(0)), NULL),
+      {poly_upat_op2c(
+           POLY_OP_XOR,
+           poly_upat_op2c(POLY_OP_XOR, poly_upat_any("x"), poly_upat_any("y"), NULL),
+           poly_upat_any("y"), NULL
+       ),
+       rule_xor_cancel},
+      {poly_upat_op2(
+           POLY_OP_FLOORMOD,
+           poly_upat_op2(POLY_OP_FLOORMOD, poly_upat_any("x"), poly_upat_any("y"), "base"),
+           poly_upat_any("y"), NULL
+       ),
+       rule_nested_mod_identity},
+      {poly_upat_set_dtype(poly_upat_op(POLY_OP_ADD, NULL, 0, "x"), weakint_dtype, 1),
+       rule_fold_add_divmod_recombine},
+      {poly_upat_op2c(POLY_OP_AND, poly_upat_dtype("x", bool_dtype, 1), poly_upat_cvar("c"), NULL),
+       rule_bool_and_const},
+      {poly_upat_op2c(POLY_OP_OR, poly_upat_dtype("x", bool_dtype, 1), poly_upat_cvar("c"), NULL),
+       rule_bool_or_const},
+      {poly_upat_op2c(
+           POLY_OP_CMPNE, poly_upat_dtype("x", bool_dtype, 1),
+           poly_upat_const(poly_arg_bool(false), POLY_BOOL), NULL
+       ),
        rule_identity},
-      /* x ^ x -> 0 */
-      {poly_pat_op2(POLY_OP_XOR, poly_pat_any("x"), poly_pat_any("x"), NULL), rule_xor_self},
-      /* x & 0 -> 0 (tinygrad symbolic.py:98) */
-      {poly_pat_op2c(POLY_OP_AND, poly_pat_any("x"), poly_pat_const_val(poly_arg_int(0)), NULL),
-       rule_mul_zero},
-      /* x * 0 -> 0 */
-      {poly_pat_op2c(POLY_OP_MUL, poly_pat_any("x"), poly_pat_const_val(poly_arg_int(0)), NULL),
-       rule_mul_zero},
-      /* x * 0.0 -> 0 (float) */
-      {poly_pat_op2c(POLY_OP_MUL, poly_pat_any("x"), poly_pat_const_val(poly_arg_float(0.0)), NULL),
-       rule_mul_zero},
-
-      /* -- Constant folding -- */
-      /* Unary(CONST/STACK) -> CONST/STACK */
-      {poly_pat_ops1(POLY_GROUP_UNARY, poly_pat_ops(constant_fold_value_set, NULL, 0, NULL), "a"),
-       rule_const_fold_unary},
-      /* Binary(CONST/STACK, CONST/STACK) -> CONST/STACK (excl. THREEFRY) */
-      {poly_pat_ops2(
-           binary_no_threefry, poly_pat_ops(constant_fold_value_set, NULL, 0, NULL),
-           poly_pat_ops(constant_fold_value_set, NULL, 0, NULL), "a"
-       ),
-       rule_const_fold_binary},
-      /* THREEFRY(CONST, CONST) -> exact threefry2x32(...).simplify().arg.
-       * Pinned tinygrad/uop/symbolic.py:128-130. */
-      {poly_pat_op2(
-           POLY_OP_THREEFRY, poly_pat_cvar("x"), poly_pat_cvar("key"), "a"
-       ),
-       rule_threefry_const},
-      /* Ternary(CONST/STACK, ...) -> CONST/STACK */
-      {poly_pat_ops3(
-           POLY_GROUP_TERNARY, poly_pat_ops(constant_fold_value_set, NULL, 0, NULL),
-           poly_pat_ops(constant_fold_value_set, NULL, 0, NULL),
-           poly_pat_ops(constant_fold_value_set, NULL, 0, NULL), "a"
-       ),
-       rule_const_fold_ternary},
-      /* GEP simplifications */
-      {poly_pat_op(POLY_OP_GEP, NULL, 0, NULL), rule_gep_vectorize},
-      {poly_pat_op(POLY_OP_GEP, NULL, 0, NULL), rule_gep_const},
-      {poly_pat_op(POLY_OP_GEP, NULL, 0, NULL), rule_gep_identity},
-      /* VCAT -> VECTORIZE(GEP...) */
-      {poly_pat_op(POLY_OP_VCAT, NULL, 0, "x"), rule_vcat_to_vectorize},
-      /* GROUP(x) -> x */
-      {poly_pat_op(POLY_OP_GROUP, NULL, 0, NULL), rule_group_singleton},
-      /* VECTORIZE(GEP(x,a0), ...) → x.gep((a0,...)) is in gep_pushing (tinygrad symbolic.py:199).
-       * Then rule_gep_identity handles the (0,1,...,N-1) → identity case. */
-
-      /* -- POW folding (tinygrad symbolic.py:simplify_pow) -- */
-      {poly_pat_op2(POLY_OP_POW, poly_pat_any("x"), poly_pat_cvar("c"), NULL),
-       rule_simplify_pow_const_exp},
-      {poly_pat_op2(POLY_OP_POW, poly_pat_cvar("c"), poly_pat_any("x"), NULL),
-       rule_simplify_pow_const_base},
-
-      /* -- Cast folding -- */
-      /* Pinned symbolic.py:148 matches UPat.cvar, i.e. scalar CONST only.
-       * Keep vector CAST(STACK) explicit for renderer and weak-index parity. */
-      {poly_pat_op1(POLY_OP_CAST, poly_pat_op(POLY_OP_CONST, NULL, 0, "c"), NULL), rule_cast_const},
-      {poly_pat_op1(POLY_OP_BITCAST, poly_pat_op(POLY_OP_CONST, NULL, 0, "c"), NULL),
-       rule_bitcast_const},
-      /* CAST/BITCAST same dtype -> identity */
-      {poly_pat_ops(cast_set, NULL, 0, NULL), rule_cast_noop},
-      /* b.cast(a).cast(b) -> b when a is lossless for b */
-      {poly_pat_op1(POLY_OP_CAST, poly_pat_op1(POLY_OP_CAST, poly_pat_any("x"), NULL), NULL),
-       rule_cast_roundtrip_lossless},
-      /* CAST(x, bool) -> CMPNE(x, 0) */
-      {poly_pat_op1(POLY_OP_CAST, poly_pat_any("x"), NULL), rule_cast_bool},
-      /* Pinned symbolic.py:159-163 Threefry pack/unpack identities. */
-      {poly_pat_op1(POLY_OP_CAST, poly_pat_any(NULL), NULL), rule_threefry_low_lane_cast},
-      {poly_pat_op1(POLY_OP_CAST, poly_pat_any(NULL), NULL), rule_threefry_unpack_low},
-      {poly_pat_ops2(
-           poly_opset_add(
-               poly_opset_add((PolyOpSet){{0, 0}}, POLY_OP_SHR), POLY_OP_FLOORDIV
+      {poly_upat_ops2(POLY_GROUP_IDEMPOTENT, poly_upat_any("x"), poly_upat_any("x"), NULL),
+       rule_idempotent},
+      {poly_upat_op2c(
+           POLY_OP_CMPNE,
+           poly_upat_op2c(
+               POLY_OP_CMPNE, poly_upat_dtype("x", bool_dtype, 1),
+               poly_upat_const_val(poly_arg_bool(true)), NULL
            ),
-           poly_pat_any(NULL), poly_pat_any(NULL), NULL
+           poly_upat_const_val(poly_arg_bool(true)), NULL
        ),
-       rule_threefry_unpack_high},
-
-      /* -- Double negation -- */
-      /* NEG(NEG(x)) -> x */
-      {poly_pat_op1(POLY_OP_NEG, poly_pat_op1(POLY_OP_NEG, poly_pat_any("x"), NULL), NULL),
-       rule_double_neg},
-
-      /* -- Division identities -- */
-      /* Pinned symbolic.py:136-145, with ElementwiseMixin.div's ordinary
-       * MUL(x, RECIPROCAL(x)) spelling. */
-      {poly_pat_op2c(
-           POLY_OP_MUL, poly_pat_any("x"),
-           poly_pat_op1(POLY_OP_RECIPROCAL, poly_pat_any("x"), NULL), NULL
-       ),
-       rule_reciprocal_self_product},
-      /* Keep raw FDIV self-cancellation for graphs introduced by an
-       * FDIV-capable renderer's late decomposition. */
-      {poly_pat_op2(POLY_OP_FDIV, poly_pat_any("x"), poly_pat_any("x"), NULL), rule_fdiv_self},
-      /* (x * y) / y -> x */
-      {poly_pat_op2(
-           POLY_OP_FDIV, poly_pat_op2c(POLY_OP_MUL, poly_pat_any("x"), poly_pat_any("y"), NULL),
-           poly_pat_any("y"), NULL
-       ),
-       rule_mul_fdiv_cancel},
-
-      /* -- Where folding -- */
-      /* WHERE(CMPNE(cond, true), t, f) -> WHERE(cond, f, t) */
-      {poly_pat_op3(
-           POLY_OP_WHERE,
-           poly_pat_op2c(
-               POLY_OP_CMPNE, poly_pat_dtype("cond", (PolyDType[]){POLY_BOOL}, 1),
-               poly_pat_any("trueish"), NULL
-           ),
-           poly_pat_any("t"), poly_pat_any("f"), NULL
-       ),
-       rule_where_logical_not},
-      /* WHERE(a, WHERE(b, c, d), d) -> WHERE(AND(a, b), c, d) */
-      {poly_pat_op3(
-           POLY_OP_WHERE, poly_pat_any("a"),
-           poly_pat_op3(
-               POLY_OP_WHERE, poly_pat_any("b"), poly_pat_any("c"), poly_pat_any("d"), NULL
-           ),
-           poly_pat_any("d"), NULL
-       ),
-       rule_nested_where},
-      /* WHERE(cond, val, val) -> val */
-      {poly_pat_op3(
-           POLY_OP_WHERE, poly_pat_any(NULL), poly_pat_any("val"), poly_pat_any("val"), NULL
-       ),
-       rule_where_same},
-      /* WHERE(cond, true, false) -> cond; WHERE(cond, false, true) -> cond.logical_not() */
-      {poly_pat_op3(
-           POLY_OP_WHERE, poly_pat_dtype("cond", (PolyDType[]){POLY_BOOL}, 1), poly_pat_cvar(NULL),
-           poly_pat_cvar(NULL), NULL
+       rule_double_logical_not},
+      {poly_upat_op3(
+           POLY_OP_WHERE, poly_upat_dtype("x", bool_dtype, 1),
+           poly_upat_const(poly_arg_bool(true), POLY_BOOL),
+           poly_upat_const(poly_arg_bool(false), POLY_BOOL), NULL
        ),
        rule_where_bool_identity},
-      /* LOAD/STORE with Invalid index folds away */
-      {poly_pat_allow_any_len(poly_pat_op(POLY_OP_LOAD, NULL, 0, "x")),
-       rule_fold_invalid_load_store},
-      {poly_pat_allow_any_len(poly_pat_op(POLY_OP_STORE, NULL, 0, "x")),
-       rule_fold_invalid_load_store},
-      /* WHERE(const_gate, c0, c1) -> c0 or c1 */
-      {poly_pat_op3(
-           POLY_OP_WHERE, poly_pat_cvar("gate"), poly_pat_any("c0"), poly_pat_any("c1"), NULL
+      {poly_upat_op3(
+           POLY_OP_WHERE, poly_upat_dtype("x", bool_dtype, 1),
+           poly_upat_const(poly_arg_bool(false), POLY_BOOL),
+           poly_upat_const(poly_arg_bool(true), POLY_BOOL), NULL
        ),
-       rule_where_const_gate},
-
-      /* -- vmin/vmax const folding -- */
-      {poly_pat_ops(
-           poly_opset_add(
-               poly_opset_add(
-                   poly_opset_add(
-                       poly_opset_add(
-                           poly_opset_add((PolyOpSet){{0, 0}}, POLY_OP_CMPLT), POLY_OP_CMPNE
-                       ),
-                       POLY_OP_FLOORDIV
-                   ),
-                   POLY_OP_FLOORMOD
-               ),
-               POLY_OP_DEFINE_VAR
+       rule_where_bool_identity},
+      {poly_upat_op2c(
+           POLY_OP_CMPNE,
+           poly_upat_set_dtype(
+               poly_upat_op1(POLY_OP_CAST, poly_upat_dtype("x", bool_dtype, 1), NULL),
+               integer_dtypes, 9
            ),
-           NULL, 0, "x"
+           poly_upat_cvar("c"), NULL
        ),
-       rule_const_when_minmax_point},
-      {poly_pat_ops(
-           poly_opset_add(poly_opset_add((PolyOpSet){{0, 0}}, POLY_OP_BIND), POLY_OP_SPECIAL), NULL,
-           0, "x"
+       rule_bool_cmpne_const},
+      {poly_upat_op1(POLY_OP_TRUNC, poly_upat_dtype("x", integer_bool_dtypes, 10), NULL),
+       rule_trunc_integral_identity},
+      {poly_upat_op2(POLY_OP_CMPLT, poly_upat_any("x"), poly_upat_any("x"), NULL), rule_lt_self},
+      {poly_upat_op2(POLY_OP_FLOORMOD, poly_upat_any("x"), poly_upat_any("x"), NULL), rule_mod_self},
+      {poly_upat_op2(POLY_OP_XOR, poly_upat_any("x"), poly_upat_any("x"), NULL), rule_xor_self},
+      {poly_upat_op2c(POLY_OP_AND, poly_upat_any("x"), poly_upat_const_val(poly_arg_int(0)), NULL),
+       rule_mul_zero},
+      {poly_upat_op2(
+           POLY_OP_SHR,
+           poly_upat_op2c(POLY_OP_AND, poly_upat_any("x"), poly_upat_cvar("mask"), NULL),
+           poly_upat_cvar("k"), NULL
        ),
-       rule_const_when_minmax_point},
-      {poly_pat_op1(POLY_OP_RANGE, poly_pat_op(POLY_OP_CONST, NULL, 0, NULL), "x"),
-       rule_const_when_minmax_point},
-      {poly_pat_op2(POLY_OP_MAX, poly_pat_any("x"), poly_pat_any("y"), NULL), rule_max_fold},
-
-      /* -- divmod recombine (dynamic): handles all divmod cancel patterns -- */
-      /* (base%div)*mul + (base//div)*(div*mul) -> base*mul and variants */
-      {poly_pat_op(POLY_OP_ADD, NULL, 0, NULL), rule_fold_add_divmod_recombine},
-
-      /* -- cancel_divmod: weak-index FLOORMOD/FLOORDIV simplification via vmin/vmax -- */
-      {poly_pat_ops2(
-           poly_opset_add(poly_opset_add((PolyOpSet){{0, 0}}, POLY_OP_FLOORMOD), POLY_OP_FLOORDIV),
-           poly_pat_any(NULL), poly_pat_any(NULL), NULL
+       rule_drop_redundant_low_mask},
+      {poly_upat_op2(
+           POLY_OP_FLOORDIV,
+           poly_upat_op2c(POLY_OP_AND, poly_upat_any("x"), poly_upat_cvar("mask"), NULL),
+           poly_upat_cvar("c"), NULL
        ),
-       rule_cancel_divmod},
+       rule_drop_redundant_low_mask},
+      {poly_upat_op2(
+           POLY_OP_CMPNE, poly_upat_dtype("x", integer_bool_dtypes, 10),
+           poly_upat_dtype("x", integer_bool_dtypes, 10), NULL
+       ),
+       rule_cmpne_self},
+      {poly_upat_set_dtype(
+           poly_upat_op1(POLY_OP_CAST, poly_upat_cvar("c"), "root"),
+           strong_dtypes, 13
+       ),
+       rule_cast_const},
+      {poly_upat_ops1(POLY_GROUP_UNARY, poly_upat_ops(constant_fold_value_set, NULL, 0, NULL), "a"),
+       rule_const_fold_unary},
+      {poly_upat_ops2(
+           binary_no_threefry, poly_upat_ops(constant_fold_value_set, NULL, 0, NULL),
+           poly_upat_ops(constant_fold_value_set, NULL, 0, NULL), "a"
+       ),
+       rule_const_fold_binary},
+      {poly_upat_ops3(
+           POLY_GROUP_TERNARY, poly_upat_ops(constant_fold_value_set, NULL, 0, NULL),
+           poly_upat_ops(constant_fold_value_set, NULL, 0, NULL),
+           poly_upat_ops(constant_fold_value_set, NULL, 0, NULL), "a"
+       ),
+       rule_const_fold_ternary},
+      {poly_upat_op2(POLY_OP_MUL, poly_upat_dtype("x", bool_dtype, 1), poly_upat_dtype("y", bool_dtype, 1), NULL),
+       rule_bool_mul_to_and},
+      {poly_upat_op2(POLY_OP_ADD, poly_upat_dtype("x", bool_dtype, 1), poly_upat_dtype("y", bool_dtype, 1), NULL),
+       rule_bool_add_to_or},
+      {poly_upat_op2(POLY_OP_MAX, poly_upat_dtype("x", bool_dtype, 1), poly_upat_dtype("y", bool_dtype, 1), NULL),
+       rule_bool_max_to_or},
+      {poly_upat_op2c(
+           POLY_OP_MUL,
+           poly_upat_named(poly_upat_const_val(poly_arg_int(0)), "x"),
+           poly_upat_op1(POLY_OP_RECIPROCAL, poly_upat_const_val(poly_arg_int(0)), NULL), NULL
+       ),
+       rule_zero_div_zero},
+      {poly_upat_op2c(
+           POLY_OP_MUL,
+           poly_upat_op2c(
+               POLY_OP_MUL, poly_upat_any("x"), poly_upat_const_val(poly_arg_int(0)), NULL
+           ),
+           poly_upat_op1(POLY_OP_RECIPROCAL, poly_upat_const_val(poly_arg_int(0)), NULL), NULL
+       ),
+       rule_zero_product_div_zero},
+      {poly_upat_op2c(
+           POLY_OP_MUL, poly_upat_any("x"),
+           poly_upat_op1(POLY_OP_RECIPROCAL, poly_upat_any("x"), NULL), NULL
+       ),
+       rule_reciprocal_self_product},
+      {poly_upat_op2c(
+           POLY_OP_MUL,
+           poly_upat_op2c(POLY_OP_MUL, poly_upat_any("x"), poly_upat_any("x2"), NULL),
+           poly_upat_op1(POLY_OP_RECIPROCAL, poly_upat_any("x2"), NULL), NULL
+       ),
+       rule_mul_reciprocal_cancel},
+      {poly_upat_op2c(POLY_OP_MUL, poly_upat_any("x"), poly_upat_const_val(poly_arg_int(0)), NULL),
+       rule_mul_zero},
+      {poly_upat_ops(cast_set, NULL, 0, "root"), rule_cast_noop},
+      {poly_upat_op1(POLY_OP_BITCAST, poly_upat_op(POLY_OP_CONST, NULL, 0, "c"), NULL),
+       rule_bitcast_const},
+      {poly_upat_op1(
+           POLY_OP_CAST,
+           poly_upat_op1(POLY_OP_CAST, poly_upat_any("x"), "a"), "b"
+       ),
+       rule_cast_roundtrip_lossless},
+      {poly_upat_op1(
+           POLY_OP_BITCAST, poly_upat_op1(POLY_OP_BITCAST, poly_upat_any("x"), NULL), "b"
+       ),
+       rule_bitcast_twice},
+      {poly_upat_set_dtype(poly_upat_op1(POLY_OP_CAST, poly_upat_any("x"), NULL), bool_dtype, 1),
+       rule_cast_bool},
+      {poly_upat_op2(POLY_OP_POW, poly_upat_any("x"), poly_upat_cvar("c"), NULL),
+       rule_simplify_pow_const_exp},
+      {poly_upat_op2(POLY_OP_POW, poly_upat_cvar("c"), poly_upat_any("x"), NULL),
+       rule_simplify_pow_const_base},
+      {threefry_unpack_low, rule_threefry_unpack_low},
+      {threefry_unpack_high, rule_threefry_unpack_high},
+      {poly_upat_op3(
+           POLY_OP_WHERE, poly_upat_any(NULL), poly_upat_any("val"), poly_upat_any("val"), NULL
+       ),
+       rule_where_same},
+      {poly_upat_named(poly_upat_op3(
+           POLY_OP_WHERE, poly_upat_cvar("gate"), poly_upat_any("c0"), poly_upat_any("c1"), NULL
+       ), "w"),
+       rule_where_const_gate},
+      {poly_upat_op3(
+           POLY_OP_WHERE, poly_upat_any("a"),
+           poly_upat_op3(
+               POLY_OP_WHERE, poly_upat_any("b"), poly_upat_any("c"), poly_upat_any("d"), NULL
+           ),
+           poly_upat_any("d"), NULL
+       ),
+       rule_nested_where},
+      {poly_upat_op3(
+           POLY_OP_WHERE, poly_upat_any("a"), poly_upat_any("c"),
+           poly_upat_op3(
+               POLY_OP_WHERE, poly_upat_any("b"), poly_upat_any("c"), poly_upat_any("d"), NULL
+           ),
+           NULL
+       ),
+       rule_nested_where_or},
   };
 
   int n = sizeof(rules) / sizeof(rules[0]);
-  g_symbolic_simple = poly_pm_thread_cache(poly_pm_new(rules, n));
+  PolyPatternMatcher *local = poly_pm_new(rules, n);
+  PolyPatternMatcher *with_invalid = poly_pm_concat(poly_pm_data_invalid(), local);
+  g_symbolic_simple =
+      poly_pm_thread_cache(poly_pm_concat(with_invalid, poly_mop_cleanup()));
+  poly_pm_destroy(with_invalid);
+  poly_pm_destroy(local);
   return g_symbolic_simple;
+}
+
+/* Tinygrad 2026-08-22/a9069c177a9d uop/symbolic.py:214-219. */
+static PolyPatternMatcher *poly_commutative(void) {
+  if (g_commutative) return g_commutative;
+  PolyRule rules[] = {
+      {poly_upat_ops2(
+           POLY_GROUP_COMMUTATIVE, poly_upat_any(NULL), poly_upat_any(NULL), "x"
+       ),
+       rule_commutative_index_tuplize_order},
+  };
+  g_commutative =
+      poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
+  return g_commutative;
+}
+
+/* Tinygrad 2026-08-22/a9069c177a9d uop/divandmod.py:84-94. */
+static PolyPatternMatcher *poly_div_and_mod_symbolic(void) {
+  if (g_div_and_mod_symbolic) return g_div_and_mod_symbolic;
+  PolyRule rules[] = {
+      {poly_upat_op2(POLY_OP_FLOORDIV, poly_upat_any(NULL), poly_upat_cvar(NULL), NULL),
+       fold_divmod_quotient_add},
+      {poly_upat_ops2(
+           poly_opset_add(
+               poly_opset_add((PolyOpSet){{0, 0}}, POLY_OP_FLOORMOD), POLY_OP_FLOORDIV
+           ),
+           poly_upat_any(NULL), poly_upat_cvar(NULL), NULL
+       ),
+       fold_divmod_add_constant},
+      {poly_upat_ops2(
+           poly_opset_add(
+               poly_opset_add((PolyOpSet){{0, 0}}, POLY_OP_FLOORMOD), POLY_OP_FLOORDIV
+           ),
+           poly_upat_any(NULL), poly_upat_any(NULL), NULL
+       ),
+       rule_cancel_divmod},
+  };
+  g_div_and_mod_symbolic =
+      poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
+  return g_div_and_mod_symbolic;
 }
 
 PolyPatternMatcher *poly_symbolic(void) {
   if (g_symbolic) return g_symbolic;
+  PolyDType bool_dtype[] = {POLY_BOOL};
+  PolyDType weakint_dtype[] = {POLY_WEAKINT};
+  PolyDType integer_dtypes[] = {
+      POLY_UINT8, POLY_UINT16, POLY_UINT32, POLY_UINT64,
+      POLY_INT8, POLY_INT16, POLY_INT32, POLY_INT64, POLY_WEAKINT,
+  };
+  PolyOpSet after_end = {{0, 0}};
+  after_end = poly_opset_add(after_end, POLY_OP_AFTER);
+  after_end = poly_opset_add(after_end, POLY_OP_END);
+  PolyOpSet point_ops = {{0, 0}};
+  PolyOps point_op_values[] = {
+      POLY_OP_CMPLT, POLY_OP_CMPNE, POLY_OP_FLOORDIV, POLY_OP_FLOORMOD,
+      POLY_OP_PARAM, POLY_OP_AFTER, POLY_OP_SPECIAL,
+  };
+  for (size_t i = 0; i < sizeof(point_op_values) / sizeof(point_op_values[0]); i++)
+    point_ops = poly_opset_add(point_ops, point_op_values[i]);
+
   PolyRule rules[] = {
-      /* Pinned symbolic.py:297-301 general nested-CAST composition. */
-      {poly_pat_op1(POLY_OP_CAST, poly_pat_op1(POLY_OP_CAST, poly_pat_any("x"), NULL), NULL),
-       rule_compose_nested_casts},
-      {poly_pat_ops2(POLY_GROUP_BINARY, poly_pat_any("x"), poly_pat_any("y"), "u"),
-       rule_narrow_proven_long_binary},
-      /* Pinned symbolic.py:306-311 generic AFTER effect canonicalization. */
-      {poly_pat_op(POLY_OP_AFTER, NULL, 0, "x"), rule_after_canonicalize},
-      {poly_pat_ops2(POLY_GROUP_COMMUTATIVE, poly_pat_any(NULL), poly_pat_any(NULL), "x"),
-       rule_commutative_index_tuplize_order},
-      {poly_pat_op(POLY_OP_ADD, NULL, 0, "add"), rule_add_same_base_const_terms},
-      /* Pinned symbolic.py:237-248 keeps term-combination out of
-       * symbolic_simple. Late renderer decomposition uses only the simple
-       * matcher, while ordinary full symbolic retains these rewrites. */
-      {poly_pat_op2c(POLY_OP_ADD, poly_pat_any("x"), poly_pat_any("x"), NULL), rule_add_self},
-      {poly_pat_op2c(
-           POLY_OP_ADD, poly_pat_op2c(POLY_OP_ADD, poly_pat_any("a"), poly_pat_any("x"), NULL),
-           poly_pat_any("x"), NULL
+      /* Tinygrad 2026-08-22/a9069c177a9d uop/symbolic.py:228-309, in order. */
+      {poly_upat_op2c(
+           POLY_OP_OR, poly_upat_dtype("x", bool_dtype, 1),
+           poly_upat_op2c(
+               POLY_OP_CMPNE, poly_upat_dtype("x", bool_dtype, 1),
+               poly_upat_const_val(poly_arg_bool(true)), NULL
+           ),
+           NULL
+       ),
+       rule_bool_or_logical_not},
+      {poly_upat_op2c(
+           POLY_OP_ADD,
+           poly_upat_op2c(POLY_OP_MUL, poly_upat_any("x"), poly_upat_cvar("c0"), NULL),
+           poly_upat_op2c(POLY_OP_MUL, poly_upat_any("x"), poly_upat_cvar("c1"), NULL), NULL
+       ),
+       rule_combine_mul_coefficients},
+      {poly_upat_op2c(
+           POLY_OP_ADD,
+           poly_upat_op2c(
+               POLY_OP_ADD, poly_upat_any("y"),
+               poly_upat_op2c(POLY_OP_MUL, poly_upat_any("x"), poly_upat_cvar("c0"), NULL), NULL
+           ),
+           poly_upat_op2c(POLY_OP_MUL, poly_upat_any("x"), poly_upat_cvar("c1"), NULL), NULL
+       ),
+       rule_combine_mul_coefficients},
+      {poly_upat_op2c(
+           POLY_OP_ADD, poly_upat_any("x"),
+           poly_upat_op2c(POLY_OP_MUL, poly_upat_any("x"), poly_upat_cvar("c"), NULL), NULL
+       ),
+       rule_combine_one_plus_coefficient},
+      {poly_upat_op2c(
+           POLY_OP_ADD,
+           poly_upat_op2c(POLY_OP_ADD, poly_upat_any("y"), poly_upat_any("x"), NULL),
+           poly_upat_op2c(POLY_OP_MUL, poly_upat_any("x"), poly_upat_cvar("c"), NULL), NULL
+       ),
+       rule_combine_one_plus_coefficient},
+      {poly_upat_op2c(
+           POLY_OP_ADD,
+           poly_upat_op2c(
+               POLY_OP_ADD, poly_upat_any("y"),
+               poly_upat_op2c(POLY_OP_MUL, poly_upat_any("x"), poly_upat_cvar("c"), NULL), NULL
+           ),
+           poly_upat_any("x"), NULL
+       ),
+       rule_combine_one_plus_coefficient},
+      {poly_upat_op2c(POLY_OP_ADD, poly_upat_any("x"), poly_upat_any("x"), NULL), rule_add_self},
+      {poly_upat_op2c(
+           POLY_OP_ADD, poly_upat_op2c(POLY_OP_ADD, poly_upat_any("y"), poly_upat_any("x"), NULL),
+           poly_upat_any("x"), NULL
        ),
        rule_add_assoc_self},
-      {poly_pat_op1(POLY_OP_CAST, poly_pat_any("x"), "cast"),
-       rule_cast_index_add_const_to_add_casts},
-      {poly_pat_ops2(POLY_GROUP_ASSOCIATIVE, poly_pat_any(NULL), poly_pat_any(NULL), "alu"),
-       rule_assoc_fold_consts},
-      {poly_pat_op2(
-           POLY_OP_CMPLT,
-           poly_pat_op2c(
-               POLY_OP_ADD, poly_pat_any("x"),
-               poly_pat_op(POLY_OP_CONST, NULL, 0, "c0"), NULL
+      {poly_upat_op2c(
+           POLY_OP_MUL,
+           poly_upat_op2c(
+               POLY_OP_MUL, poly_upat_any("x"),
+               poly_upat_op1(POLY_OP_RECIPROCAL, poly_upat_any("x2"), NULL), NULL
            ),
-           poly_pat_op(POLY_OP_CONST, NULL, 0, "c1"), NULL
+           poly_upat_op1(POLY_OP_RECIPROCAL, poly_upat_any("x3"), NULL), NULL
+       ),
+       rule_combine_nested_division},
+      {poly_upat_op(POLY_OP_MUL, NULL, 0, "mul"), rule_distribute_negated_add},
+      {poly_upat_op(POLY_OP_MUL, NULL, 0, "mul"), rule_distribute_const_mul_over_add},
+      {poly_upat_op3(
+           POLY_OP_WHERE,
+           poly_upat_op2c(
+               POLY_OP_CMPNE, poly_upat_dtype("cond", bool_dtype, 1),
+               poly_upat_const_val(poly_arg_bool(true)), NULL
+           ),
+           poly_upat_any("t"), poly_upat_any("f"), NULL
+      ),
+       rule_where_logical_not},
+      {poly_upat_op3(
+           POLY_OP_WHERE, poly_upat_dtype("cond", bool_dtype, 1),
+           poly_upat_any("t"), poly_upat_any("f"), NULL
+       ),
+       rule_fold_where_closure},
+      {poly_upat_ops2(
+           POLY_GROUP_BINARY,
+           poly_upat_op3(
+               POLY_OP_WHERE, poly_upat_any("c"), poly_upat_any("t"), poly_upat_any("f"), NULL
+           ),
+           poly_upat_op3(
+               POLY_OP_WHERE, poly_upat_any("c"), poly_upat_any("tt"), poly_upat_any("ff"), NULL
+           ),
+           "alu"
+       ),
+       rule_combine_where_binary},
+      {poly_upat_op2c(
+           POLY_OP_ADD,
+           poly_upat_op2c(
+               POLY_OP_ADD, poly_upat_any("y"),
+               poly_upat_op3(
+                   POLY_OP_WHERE, poly_upat_any("c"), poly_upat_any("t"), poly_upat_any("f"), NULL
+               ),
+               NULL
+           ),
+           poly_upat_op3(
+               POLY_OP_WHERE, poly_upat_any("c"), poly_upat_any("tt"), poly_upat_any("ff"), NULL
+           ),
+           NULL
+       ),
+       rule_combine_where_add_assoc},
+      {poly_upat_op2c(
+           POLY_OP_ADD,
+           poly_upat_op3(
+               POLY_OP_WHERE, poly_upat_any("c"), poly_upat_any("t"),
+               poly_upat_const_val(poly_arg_int(0)), NULL
+           ),
+           poly_upat_op3(
+               POLY_OP_WHERE, poly_upat_any("c"), poly_upat_const_val(poly_arg_int(0)),
+               poly_upat_any("f"), NULL
+           ),
+           NULL
+       ),
+       rule_combine_complementary_where},
+      {poly_upat_ops(point_ops, NULL, 0, "x"), rule_const_when_minmax_point},
+      {poly_upat_op1(POLY_OP_RANGE, poly_upat_op(POLY_OP_CONST, NULL, 0, NULL), "x"),
+       rule_const_when_minmax_point},
+      {poly_upat_op3(
+           POLY_OP_WHERE,
+           poly_upat_op2(POLY_OP_CMPLT, poly_upat_cvar("a"), poly_upat_any("b"), NULL),
+           poly_upat_any("b"), poly_upat_cvar("c"), NULL
+       ),
+       rule_where_to_max},
+      {poly_upat_op3(
+           POLY_OP_WHERE,
+           poly_upat_op2(POLY_OP_CMPLT, poly_upat_any("b"), poly_upat_cvar("a"), NULL),
+           poly_upat_cvar("c"), poly_upat_any("b"), NULL
+       ),
+       rule_where_to_max},
+      {poly_upat_op2(POLY_OP_MAX, poly_upat_any("x"), poly_upat_any("y"), NULL), rule_max_fold},
+      {poly_upat_op2c(
+           POLY_OP_ADD,
+           poly_upat_op2c(POLY_OP_ADD, poly_upat_any("x"), poly_upat_cvar("c1"), NULL),
+           poly_upat_cvar("c2"), "f"
+       ), rule_assoc_fold_consts},
+      {poly_upat_op2c(
+           POLY_OP_MUL,
+           poly_upat_op2c(POLY_OP_MUL, poly_upat_any("x"), poly_upat_cvar("c1"), NULL),
+           poly_upat_cvar("c2"), "f"
+       ), rule_assoc_fold_consts},
+      {poly_upat_op2c(
+           POLY_OP_MAX,
+           poly_upat_op2c(POLY_OP_MAX, poly_upat_any("x"), poly_upat_cvar("c1"), NULL),
+           poly_upat_cvar("c2"), "f"
+       ), rule_assoc_fold_consts},
+      {poly_upat_op2c(
+           POLY_OP_OR,
+           poly_upat_op2c(POLY_OP_OR, poly_upat_any("x"), poly_upat_cvar("c1"), NULL),
+           poly_upat_cvar("c2"), "f"
+       ), rule_assoc_fold_consts},
+      {poly_upat_op2c(
+           POLY_OP_AND,
+           poly_upat_op2c(POLY_OP_AND, poly_upat_any("x"), poly_upat_cvar("c1"), NULL),
+           poly_upat_cvar("c2"), "f"
+       ), rule_assoc_fold_consts},
+      {poly_upat_op2(
+           POLY_OP_FLOORDIV,
+           poly_upat_op2(POLY_OP_FLOORDIV, poly_upat_any(NULL), poly_upat_cvar(NULL), NULL),
+           poly_upat_cvar(NULL), NULL
+       ),
+       fold_nested_floordiv_constants},
+      {poly_upat_op2(
+           POLY_OP_CMPLT,
+           poly_upat_op2c(
+               POLY_OP_ADD, poly_upat_dtype("x", integer_dtypes, 9), poly_upat_cvar("c0"), NULL
+           ),
+           poly_upat_cvar("c1"), NULL
        ),
        rule_cmplt_add_const_bound},
-      /* Pinned tinygrad/uop/symbolic.py:174-178,290 generic weak-index
-       * less-than factor folding. The callback proves every precondition and
-       * returns no rewrite for non-positive or non-divisible bounds. */
-      {poly_pat_op2(
-           POLY_OP_CMPLT, poly_pat_any(NULL),
-           poly_pat_op(POLY_OP_CONST, NULL, 0, NULL), NULL
+      {poly_upat_op2(
+           POLY_OP_CMPLT,
+           poly_upat_op2c(
+               POLY_OP_MUL, poly_upat_dtype("x", weakint_dtype, 1), poly_upat_cvar("c0"), NULL
+           ),
+           poly_upat_cvar("c1"), NULL
+       ),
+       rule_cmplt_mul_const_bound},
+      {poly_upat_op2(
+           POLY_OP_CMPLT,
+           poly_upat_op2(
+               POLY_OP_FLOORDIV, poly_upat_dtype("x", weakint_dtype, 1), poly_upat_cvar("d"), NULL
+           ),
+           poly_upat_cvar("c"), NULL
+       ),
+       rule_cmplt_floordiv_const_bound},
+      {poly_upat_op(POLY_OP_ADD, NULL, 0, "add"), rule_move_const_to_end},
+      {poly_upat_op(POLY_OP_MUL, NULL, 0, "mul"), rule_move_const_to_end},
+      {poly_upat_op2(
+           POLY_OP_CMPLT, poly_upat_dtype("x", weakint_dtype, 1), poly_upat_cvar("c"), NULL
        ),
        rule_lt_folding},
-      /* Remaining POW lowers through xpow, matching tinygrad symbolic.py:sym. */
-      {poly_pat_op(POLY_OP_POW, NULL, 0, NULL), rule_decomp_pow_generic},
-      /* Pinned tinygrad/uop/symbolic.py:478-480. d is exactly
-       * reciprocal(1+x); retain the three source spellings and output order. */
-      {poly_pat_op2c(
-           POLY_OP_MUL, poly_pat_any("x"),
-           poly_pat_op1(
-               POLY_OP_RECIPROCAL,
-               poly_pat_op2c(POLY_OP_ADD, poly_pat_cvar("one"), poly_pat_any("x"), NULL), "d"
+      {poly_upat_op2(
+           POLY_OP_CMPLT,
+           poly_upat_op2c(
+               POLY_OP_MUL, poly_upat_dtype("x", weakint_dtype, 1),
+               poly_upat_const_val(poly_arg_int(-1)), NULL
+           ),
+           poly_upat_op2c(
+               POLY_OP_MUL, poly_upat_any("y"), poly_upat_const_val(poly_arg_int(-1)), NULL
            ),
            NULL
        ),
-       rule_reciprocal_product_one_minus},
-      {poly_pat_op2c(
-           POLY_OP_MUL, poly_pat_any("x"),
-           poly_pat_op2c(
-               POLY_OP_MUL,
-               poly_pat_op1(
-                   POLY_OP_RECIPROCAL,
-                   poly_pat_op2c(POLY_OP_ADD, poly_pat_cvar("one"), poly_pat_any("x"), NULL), "d"
+       rule_reverse_negative_compare},
+      {poly_upat_op2(
+           POLY_OP_CMPNE,
+           poly_upat_op2(
+               POLY_OP_CMPLT, poly_upat_dtype("x", weakint_dtype, 1),
+               poly_upat_const_val(poly_arg_int(1)), NULL
+           ),
+           poly_upat_const_val(poly_arg_bool(true)), NULL
+       ),
+       rule_canonicalize_simplex},
+      {poly_upat_op2(
+           POLY_OP_FLOORMOD, poly_upat_op1(POLY_OP_RANGE, poly_upat_any("end"), "range"),
+           poly_upat_any("end"), NULL
+       ),
+       rule_range_own_bound},
+      {poly_upat_op2(
+           POLY_OP_FLOORDIV, poly_upat_op1(POLY_OP_RANGE, poly_upat_any("end"), "range"),
+           poly_upat_any("end"), NULL
+       ),
+       rule_range_own_bound},
+      {poly_upat_op1(
+           POLY_OP_CAST, poly_upat_op1(POLY_OP_CAST, poly_upat_any("x"), "a"), "b"
+       ), fold_lossless_nested_cast},
+      {poly_upat_op1(
+           POLY_OP_CAST,
+           poly_upat_set_dtype(
+               poly_upat_op1(
+                   POLY_OP_CAST, poly_upat_dtype("x", integer_dtypes, 9), "a"
                ),
-               poly_pat_any("y"), NULL
+               integer_dtypes, 9
            ),
-           NULL
-       ),
-       rule_reciprocal_product_scaled_one_minus},
-      {poly_pat_op2c(
-           POLY_OP_MUL, poly_pat_any("x"),
-           poly_pat_op2c(
-               POLY_OP_ADD,
-               poly_pat_op1(
-                   POLY_OP_RECIPROCAL,
-                   poly_pat_op2c(POLY_OP_ADD, poly_pat_cvar("one"), poly_pat_any("x"), NULL), "d"
-               ),
-               poly_pat_any("y"), NULL
-           ),
-           NULL
-       ),
-       rule_reciprocal_product_sum},
-      {poly_pat_op(POLY_OP_MUL, NULL, 0, "mul"), rule_distribute_negated_add},
-      {poly_pat_op(POLY_OP_MUL, NULL, 0, "mul"), rule_distribute_const_mul_over_add},
-      {poly_pat_op(POLY_OP_ADD, NULL, 0, "add"), rule_move_const_to_end},
-      {poly_pat_op(POLY_OP_MUL, NULL, 0, "mul"), rule_move_const_to_end},
+           "b"
+       ), fold_bounded_nested_cast},
+      {poly_upat_ops2(POLY_GROUP_BINARY, poly_upat_any("x"), poly_upat_any("y"), "u"),
+       rule_narrow_proven_long_binary},
+      {poly_upat_op1(POLY_OP_CAST, poly_upat_any("x"), "cast"),
+       rule_cast_index_add_const_to_add_casts},
+      {poly_upat_op(POLY_OP_AFTER, NULL, 0, "x"), rule_after_canonicalize},
+      {poly_upat_ops1(after_end, poly_upat_any("s"), NULL), rule_after_end_single},
   };
-  PolyPatternMatcher *extra = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
-  PolyPatternMatcher *with_extra = poly_pm_concat(poly_symbolic_simple(), extra);
-  poly_pm_destroy(extra); /* concat copies rules; the temporary matcher is no longer needed. */
-  g_symbolic = poly_pm_thread_cache(poly_pm_concat(with_extra, poly_pm_gep_pushing()));
-  poly_pm_destroy(with_extra);
+  PolyPatternMatcher *local = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
+  PolyPatternMatcher *with_commutative =
+      poly_pm_concat(poly_symbolic_simple(), poly_commutative());
+  PolyPatternMatcher *with_local = poly_pm_concat(with_commutative, local);
+  PolyPatternMatcher *with_divmod =
+      poly_pm_concat(with_local, poly_div_and_mod_symbolic());
+  poly_pm_destroy(local);
+  poly_pm_destroy(with_commutative);
+  poly_pm_destroy(with_local);
+  g_symbolic = poly_pm_thread_cache(with_divmod);
   return g_symbolic;
 }
 
 PolyPatternMatcher *poly_sym(void) {
   if (g_sym) return g_sym;
+  PolyDType weakint_dtype[] = {POLY_WEAKINT};
+  PolyUPat *stack_x = poly_upat_op(POLY_OP_STACK, NULL, 0, "xs");
+  PolyUPat *stack_y = poly_upat_op(POLY_OP_STACK, NULL, 0, "ys");
+  PolyUPat *cast_where = poly_upat_op3(
+      POLY_OP_WHERE, poly_upat_any("s"), poly_upat_any("a"), poly_upat_any("b"), NULL
+  );
+  PolyUPat *store_index = poly_upat_op(POLY_OP_INDEX, NULL, 0, "index");
+  PolyUPat *load_index = poly_upat_op(POLY_OP_INDEX, NULL, 0, "index");
+  PolyUPat *gated_load_index = poly_upat_op(POLY_OP_INDEX, NULL, 0, "index");
+  PolyUPat *invalid = poly_upat_const_val(poly_arg_invalid());
+  PolyUPat *reduce_const = poly_upat_allow_any_len(poly_upat_op1(
+      POLY_OP_REDUCE,
+      poly_upat_op2c(POLY_OP_MUL, poly_upat_any("x"), poly_upat_cvar("c"), NULL), "r"
+  ));
+  reduce_const->match_arg = true;
+  reduce_const->arg = poly_arg_reduce(POLY_OP_ADD, 0);
   PolyRule rules[] = {
-      {poly_pat_op(POLY_OP_REDUCE, NULL, 0, "reduce"), rule_sym_reduce_mul_chain},
-      {poly_pat_op(POLY_OP_MUL, NULL, 0, "mul"), rule_sym_distribute_weak_mul_over_add},
+      /* Tinygrad 2026-08-22/a9069c177a9d uop/symbolic.py:441-475, in order. */
+      {poly_upat_ops2(POLY_GROUP_ALU, stack_x, stack_y, "alu"), sym_reorder_alu_stack},
+      {poly_upat_op1(POLY_OP_CAST, cast_where, "cast"), sym_push_cast_to_where},
+      {poly_upat_op(POLY_OP_POW, NULL, 0, "p"), xpow_rewrite},
+      {poly_upat_op2(
+           POLY_OP_STORE, store_index,
+           poly_upat_op1(POLY_OP_LOAD, load_index, NULL), NULL
+       ),
+       sym_store_noop},
+      {poly_upat_op2(
+           POLY_OP_STORE, poly_upat_op(POLY_OP_INDEX, NULL, 0, "index"),
+           poly_upat_op3(
+               POLY_OP_WHERE, poly_upat_any("gate"), poly_upat_any("value"),
+               poly_upat_op1(POLY_OP_LOAD, gated_load_index, NULL), NULL
+           ),
+           NULL
+       ),
+       sym_gate_store},
+      {poly_upat_op2(POLY_OP_STORE, poly_upat_any(NULL), invalid, NULL), sym_store_noop},
+      {poly_upat_op2(
+           POLY_OP_STORE, poly_upat_op(POLY_OP_INDEX, NULL, 0, "index"),
+           poly_upat_op3(
+               POLY_OP_WHERE, poly_upat_any("gate"), poly_upat_any("value"),
+               poly_upat_const_val(poly_arg_invalid()), NULL
+           ),
+           NULL
+       ),
+       sym_gate_store},
+      {poly_upat_op1(
+           POLY_OP_RECIPROCAL,
+           poly_upat_op2c(POLY_OP_MUL, poly_upat_any("x"), poly_upat_any("x"), NULL), NULL
+       ),
+       rule_reciprocal_square},
+      {poly_upat_op1(
+           POLY_OP_RECIPROCAL,
+           poly_upat_op2c(
+               POLY_OP_MUL,
+               poly_upat_op2c(POLY_OP_MUL, poly_upat_any("x"), poly_upat_any("x"), NULL),
+               poly_upat_any("x"), NULL
+           ),
+           NULL
+       ),
+       rule_reciprocal_cube},
+      {poly_upat_op1(
+           POLY_OP_RECIPROCAL,
+           poly_upat_op2c(POLY_OP_MUL, poly_upat_any("x"), poly_upat_cvar("c"), NULL), NULL
+       ),
+       rule_reciprocal_const_factor},
+      {poly_upat_op2c(
+           POLY_OP_MUL, poly_upat_any("x"),
+           poly_upat_op1(
+               POLY_OP_RECIPROCAL,
+               poly_upat_op2c(POLY_OP_ADD, poly_upat_cvar("one"), poly_upat_any("x"), NULL),
+               "d"
+           ),
+           NULL
+       ),
+       rule_reciprocal_product_one_minus},
+      {poly_upat_op2c(
+           POLY_OP_MUL, poly_upat_any("x"),
+           poly_upat_op2c(
+               POLY_OP_MUL,
+               poly_upat_op1(
+                   POLY_OP_RECIPROCAL,
+                   poly_upat_op2c(
+                       POLY_OP_ADD, poly_upat_cvar("one"), poly_upat_any("x"), NULL
+                   ),
+                   "d"
+               ),
+               poly_upat_any("y"), NULL
+           ),
+           NULL
+       ),
+       rule_reciprocal_product_scaled_one_minus},
+      {poly_upat_op2c(
+           POLY_OP_MUL, poly_upat_any("x"),
+           poly_upat_op2c(
+               POLY_OP_ADD,
+               poly_upat_op1(
+                   POLY_OP_RECIPROCAL,
+                   poly_upat_op2c(
+                       POLY_OP_ADD, poly_upat_cvar("one"), poly_upat_any("x"), NULL
+                   ),
+                   "d"
+               ),
+               poly_upat_any("y"), NULL
+           ),
+           NULL
+       ),
+       rule_reciprocal_product_sum},
+      {reduce_const, rule_sym_reduce_mul_chain},
+      {poly_upat_allow_any_len(poly_upat_op1(
+           POLY_OP_REDUCE, poly_upat_op(POLY_OP_MUL, NULL, 0, NULL), "r"
+       )),
+       rule_sym_reduce_mul_chain},
+      {poly_upat_op2c(
+           POLY_OP_MUL,
+           poly_upat_op2c(POLY_OP_ADD, poly_upat_any("x"), poly_upat_any("y"), NULL),
+           poly_upat_cvar("neg_one"), NULL
+       ),
+       sym_distribute_negated_add},
+      {poly_upat_op2c(
+           POLY_OP_MUL,
+           poly_upat_op2c(
+               POLY_OP_ADD, poly_upat_dtype("x", weakint_dtype, 1), poly_upat_any("y"), NULL
+           ),
+           poly_upat_cvar("c"), "mul"
+       ),
+       rule_sym_distribute_weak_mul_over_add},
   };
   PolyPatternMatcher *extra = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
   PolyPatternMatcher *with_valid = poly_pm_concat(poly_symbolic(), poly_pm_simplify_valid());
-  g_sym = poly_pm_thread_cache(poly_pm_concat(with_valid, extra));
+  PolyPatternMatcher *with_extra = poly_pm_concat(with_valid, extra);
+  g_sym = poly_pm_thread_cache(poly_pm_concat(with_extra, poly_pm_clean_up_group_sink()));
   poly_pm_destroy(with_valid);
+  poly_pm_destroy(with_extra);
   poly_pm_destroy(extra);
   return g_sym;
 }

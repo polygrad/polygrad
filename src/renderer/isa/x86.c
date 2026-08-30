@@ -1,5 +1,5 @@
 /*
- * render_x86.c -- tinygrad-style x86 ISA backend.
+ * renderer/isa/x86.c -- tinygrad X86Renderer port and C encoder mechanics.
  *
  * This backend ports tinygrad's X86Renderer shape:
  *   rewritten SINK -> POLY_OP_INS -> regalloc/post-regalloc -> SOURCE/BINARY.
@@ -7,7 +7,8 @@
  * CPU/C remains the Clang-backed backend; this file is the direct ISA path.
  */
 
-#include "codegen.h"
+#include "codegen/codegen.h"
+#include "renderer/isa/x86.h"
 #include "bigint.h"
 #include "ctx.h"
 #include "engine/schedule.h"
@@ -18,6 +19,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -46,181 +48,6 @@ static void x86_dump_binary_if_requested(const uint8_t *code, int code_size) {
   (void)fwrite(code, 1, (size_t)code_size, fp);
   fclose(fp);
 }
-
-typedef enum {
-  POLY_X86_FRAME_INDEX = 1,
-  POLY_X86_LABEL,
-  POLY_X86_DEFINE,
-  POLY_X86_LEA,
-  POLY_X86_MOV,
-  POLY_X86_MOVm,
-  POLY_X86_MOVi,
-  POLY_X86_MOVABS,
-  POLY_X86_VMOVSS,
-  POLY_X86_VMOVSD,
-  POLY_X86_VMOVUPS,
-  POLY_X86_VMOVSSm,
-  POLY_X86_VMOVSDm,
-  POLY_X86_VMOVUPSm,
-  POLY_X86_MOVZX,
-  POLY_X86_MOVSX,
-  POLY_X86_MOVSXD,
-  POLY_X86_VPMOVZXBW,
-  POLY_X86_VPMOVZXBD,
-  POLY_X86_VPMOVZXBQ,
-  POLY_X86_VPMOVZXWD,
-  POLY_X86_VPMOVZXWQ,
-  POLY_X86_VPMOVZXDQ,
-  POLY_X86_VPMOVSXBW,
-  POLY_X86_VPMOVSXBD,
-  POLY_X86_VPMOVSXBQ,
-  POLY_X86_VPMOVSXWD,
-  POLY_X86_VPMOVSXWQ,
-  POLY_X86_VPMOVSXDQ,
-  POLY_X86_VCVTDQ2PS,
-  POLY_X86_VCVTDQ2PD,
-  POLY_X86_VCVTTPS2DQ,
-  POLY_X86_VCVTTPD2DQ,
-  POLY_X86_VCVTPH2PS,
-  POLY_X86_VCVTPS2PH,
-  POLY_X86_VCVTPS2PD,
-  POLY_X86_VCVTPD2PS,
-  POLY_X86_VCVTSS2SD,
-  POLY_X86_VCVTSD2SS,
-  POLY_X86_VCVTSI2SS,
-  POLY_X86_VCVTSI2SD,
-  POLY_X86_VCVTTSS2SI,
-  POLY_X86_VCVTTSD2SI,
-  POLY_X86_VMOVD,
-  POLY_X86_VMOVQ,
-  POLY_X86_VMOVDm,
-  POLY_X86_VMOVQm,
-  POLY_X86_VUCOMISS,
-  POLY_X86_VUCOMISD,
-  POLY_X86_VCMPSS,
-  POLY_X86_VCMPSD,
-  POLY_X86_VCMPPS,
-  POLY_X86_VCMPPD,
-  POLY_X86_VPCMPGTB,
-  POLY_X86_VPCMPGTW,
-  POLY_X86_VPCMPGTD,
-  POLY_X86_VPCMPGTQ,
-  POLY_X86_VPCMPEQB,
-  POLY_X86_VPCMPEQW,
-  POLY_X86_VPCMPEQD,
-  POLY_X86_VPCMPEQQ,
-  POLY_X86_SETNE,
-  POLY_X86_SETE,
-  POLY_X86_SETL,
-  POLY_X86_SETB,
-  POLY_X86_CMOVNE,
-  POLY_X86_CMOVE,
-  POLY_X86_CMOVL,
-  POLY_X86_CMOVB,
-  POLY_X86_VPBLENDVB,
-  POLY_X86_VBLENDVPS,
-  POLY_X86_VBLENDVPD,
-  POLY_X86_JNE,
-  POLY_X86_JE,
-  POLY_X86_JL,
-  POLY_X86_JB,
-  POLY_X86_JGE,
-  POLY_X86_JMP,
-  POLY_X86_VSHUFPS,
-  POLY_X86_VSHUFPD,
-  POLY_X86_VINSERTPS,
-  POLY_X86_VPSRLDQ,
-  POLY_X86_VPEXTRB,
-  POLY_X86_VPEXTRW,
-  POLY_X86_VPEXTRD,
-  POLY_X86_VPEXTRQ,
-  POLY_X86_VPINSRB,
-  POLY_X86_VPINSRW,
-  POLY_X86_VPINSRD,
-  POLY_X86_VPINSRQ,
-  POLY_X86_VPBROADCASTB,
-  POLY_X86_VPBROADCASTW,
-  POLY_X86_VPBROADCASTD,
-  POLY_X86_VPBROADCASTQ,
-  POLY_X86_VBROADCASTSS,
-  POLY_X86_IDIV,
-  POLY_X86_DIV,
-  POLY_X86_ADD,
-  POLY_X86_ADDi,
-  POLY_X86_SUB,
-  POLY_X86_SUBi,
-  POLY_X86_IMUL,
-  POLY_X86_IMULi,
-  POLY_X86_AND,
-  POLY_X86_ANDi,
-  POLY_X86_XOR,
-  POLY_X86_XORi,
-  POLY_X86_OR,
-  POLY_X86_ORi,
-  POLY_X86_SHL,
-  POLY_X86_SHLi,
-  POLY_X86_SHR,
-  POLY_X86_SHRi,
-  POLY_X86_SAR,
-  POLY_X86_SARi,
-  POLY_X86_CMP,
-  POLY_X86_CMPi,
-  POLY_X86_VROUNDSS,
-  POLY_X86_VROUNDSD,
-  POLY_X86_VROUNDPS,
-  POLY_X86_VROUNDPD,
-  POLY_X86_VSQRTSS,
-  POLY_X86_VSQRTSD,
-  POLY_X86_VSQRTPS,
-  POLY_X86_VSQRTPD,
-  POLY_X86_VADDSS,
-  POLY_X86_VADDSD,
-  POLY_X86_VADDPS,
-  POLY_X86_VADDPD,
-  POLY_X86_VSUBSS,
-  POLY_X86_VSUBSD,
-  POLY_X86_VSUBPS,
-  POLY_X86_VSUBPD,
-  POLY_X86_VMULSS,
-  POLY_X86_VMULSD,
-  POLY_X86_VMULPS,
-  POLY_X86_VMULPD,
-  POLY_X86_VDIVSS,
-  POLY_X86_VDIVSD,
-  POLY_X86_VDIVPS,
-  POLY_X86_VDIVPD,
-  POLY_X86_VMAXSS,
-  POLY_X86_VMAXSD,
-  POLY_X86_VMAXPS,
-  POLY_X86_VMAXPD,
-  POLY_X86_VMINSS,
-  POLY_X86_VMINSD,
-  POLY_X86_VMINPS,
-  POLY_X86_VMINPD,
-  POLY_X86_VPADDB,
-  POLY_X86_VPADDW,
-  POLY_X86_VPADDD,
-  POLY_X86_VPADDQ,
-  POLY_X86_VPSUBB,
-  POLY_X86_VPSUBW,
-  POLY_X86_VPSUBD,
-  POLY_X86_VPSUBQ,
-  POLY_X86_VPMULLW,
-  POLY_X86_VPMULLD,
-  POLY_X86_VPAND,
-  POLY_X86_VPOR,
-  POLY_X86_VPXOR,
-  POLY_X86_VPSLLVD,
-  POLY_X86_VPSLLVQ,
-  POLY_X86_VPSRLVD,
-  POLY_X86_VPSRLVQ,
-  POLY_X86_VPSRAVD,
-  POLY_X86_VFMADD213SS,
-  POLY_X86_VFMADD213SD,
-  POLY_X86_VFMADD213PS,
-  POLY_X86_VFMADD213PD,
-  POLY_X86_RET,
-} PolyX86Op;
 
 typedef enum {
   X86_REG_RAX = 0,
@@ -295,6 +122,7 @@ static const char *x86_op_name(PolyX86Op op) {
   case POLY_X86_FRAME_INDEX: return "FRAME_INDEX";
   case POLY_X86_LABEL: return "LABEL";
   case POLY_X86_DEFINE: return "DEFINE";
+  case POLY_X86_LOOP_CMP: return "LOOP_CMP";
   case POLY_X86_LEA: return "LEA";
   case POLY_X86_MOV: return "MOV";
   case POLY_X86_MOVm: return "MOVm";
@@ -347,11 +175,6 @@ static const char *x86_op_name(PolyX86Op op) {
   case POLY_X86_VPINSRW: return "VPINSRW";
   case POLY_X86_VPINSRD: return "VPINSRD";
   case POLY_X86_VPINSRQ: return "VPINSRQ";
-  case POLY_X86_VPBROADCASTB: return "VPBROADCASTB";
-  case POLY_X86_VPBROADCASTW: return "VPBROADCASTW";
-  case POLY_X86_VPBROADCASTD: return "VPBROADCASTD";
-  case POLY_X86_VPBROADCASTQ: return "VPBROADCASTQ";
-  case POLY_X86_VBROADCASTSS: return "VBROADCASTSS";
   case POLY_X86_VUCOMISS: return "VUCOMISS";
   case POLY_X86_VUCOMISD: return "VUCOMISD";
   case POLY_X86_VCMPSS: return "VCMPSS";
@@ -383,8 +206,6 @@ static const char *x86_op_name(PolyX86Op op) {
   case POLY_X86_JB: return "JB";
   case POLY_X86_JGE: return "JGE";
   case POLY_X86_JMP: return "JMP";
-  case POLY_X86_VSHUFPS: return "VSHUFPS";
-  case POLY_X86_VSHUFPD: return "VSHUFPD";
   case POLY_X86_VINSERTPS: return "VINSERTPS";
   case POLY_X86_VPSRLDQ: return "VPSRLDQ";
   case POLY_X86_IDIV: return "IDIV";
@@ -433,14 +254,6 @@ static const char *x86_op_name(PolyX86Op op) {
   case POLY_X86_VDIVSD: return "VDIVSD";
   case POLY_X86_VDIVPS: return "VDIVPS";
   case POLY_X86_VDIVPD: return "VDIVPD";
-  case POLY_X86_VMAXSS: return "VMAXSS";
-  case POLY_X86_VMAXSD: return "VMAXSD";
-  case POLY_X86_VMAXPS: return "VMAXPS";
-  case POLY_X86_VMAXPD: return "VMAXPD";
-  case POLY_X86_VMINSS: return "VMINSS";
-  case POLY_X86_VMINSD: return "VMINSD";
-  case POLY_X86_VMINPS: return "VMINPS";
-  case POLY_X86_VMINPD: return "VMINPD";
   case POLY_X86_VPADDB: return "VPADDB";
   case POLY_X86_VPADDW: return "VPADDW";
   case POLY_X86_VPADDD: return "VPADDD";
@@ -459,10 +272,6 @@ static const char *x86_op_name(PolyX86Op op) {
   case POLY_X86_VPSRLVD: return "VPSRLVD";
   case POLY_X86_VPSRLVQ: return "VPSRLVQ";
   case POLY_X86_VPSRAVD: return "VPSRAVD";
-  case POLY_X86_VFMADD213SS: return "VFMADD213SS";
-  case POLY_X86_VFMADD213SD: return "VFMADD213SD";
-  case POLY_X86_VFMADD213PS: return "VFMADD213PS";
-  case POLY_X86_VFMADD213PD: return "VFMADD213PD";
   case POLY_X86_RET: return "RET";
   default: return "X86?";
   }
@@ -549,15 +358,12 @@ static bool x86_op_in(const PolyX86Op *ops, int n, PolyX86Op op) {
 }
 
 static bool x86_readmem2nd(PolyX86Op op);
-static bool x86_readmem3rd(PolyX86Op op);
-
 static bool x86_is_two_address(PolyX86Op op) {
   static const PolyX86Op ops[] = {
       POLY_X86_ADD, POLY_X86_ADDi, POLY_X86_AND, POLY_X86_ANDi, POLY_X86_XOR,
       POLY_X86_XORi, POLY_X86_OR, POLY_X86_ORi, POLY_X86_IMUL, POLY_X86_SUB,
       POLY_X86_SUBi, POLY_X86_SHL, POLY_X86_SHLi, POLY_X86_SHR, POLY_X86_SHRi,
-      POLY_X86_SAR, POLY_X86_SARi, POLY_X86_IDIV, POLY_X86_DIV, POLY_X86_VFMADD213SS,
-      POLY_X86_VFMADD213SD, POLY_X86_VFMADD213PS, POLY_X86_VFMADD213PD, POLY_X86_CMOVNE,
+      POLY_X86_SAR, POLY_X86_SARi, POLY_X86_IDIV, POLY_X86_DIV, POLY_X86_CMOVNE,
       POLY_X86_CMOVE, POLY_X86_CMOVL, POLY_X86_CMOVB,
   };
   return x86_op_in(ops, (int)(sizeof(ops) / sizeof(ops[0])), op);
@@ -575,16 +381,15 @@ static bool x86_readmem1st(PolyX86Op op) {
       POLY_X86_VCVTDQ2PD, POLY_X86_VCVTTPS2DQ, POLY_X86_VCVTTPD2DQ, POLY_X86_VCVTTSS2SI,
       POLY_X86_VCVTTSD2SI, POLY_X86_VCVTPH2PS, POLY_X86_VCVTPS2PD, POLY_X86_VCVTPD2PS,
       POLY_X86_VROUNDPS, POLY_X86_VROUNDPD, POLY_X86_VSQRTPS, POLY_X86_VSQRTPD,
-      POLY_X86_VPBROADCASTB, POLY_X86_VPBROADCASTW, POLY_X86_VPBROADCASTD,
-      POLY_X86_VPBROADCASTQ, POLY_X86_VBROADCASTSS, POLY_X86_CMPi, POLY_X86_IMULi, POLY_X86_LEA,
+      POLY_X86_CMPi, POLY_X86_IMULi, POLY_X86_LEA,
   };
   return x86_op_in(ops, (int)(sizeof(ops) / sizeof(ops[0])), op);
 }
 
 static bool x86_readmem2nd(PolyX86Op op) {
   static const PolyX86Op ops[] = {
-      POLY_X86_ADD, POLY_X86_SUB, POLY_X86_AND, POLY_X86_OR, POLY_X86_XOR, POLY_X86_SHL,
-      POLY_X86_SHR, POLY_X86_SAR, POLY_X86_IMUL, POLY_X86_CMP, POLY_X86_VADDSS,
+      POLY_X86_ADD, POLY_X86_SUB, POLY_X86_AND, POLY_X86_OR, POLY_X86_XOR,
+      POLY_X86_IMUL, POLY_X86_CMP, POLY_X86_VADDSS,
       POLY_X86_VADDSD, POLY_X86_VADDPS, POLY_X86_VADDPD, POLY_X86_VSUBSS, POLY_X86_VSUBSD,
       POLY_X86_VSUBPS, POLY_X86_VSUBPD, POLY_X86_VMULSS, POLY_X86_VMULSD, POLY_X86_VMULPS,
       POLY_X86_VMULPD, POLY_X86_VDIVSS, POLY_X86_VDIVSD, POLY_X86_VDIVPS, POLY_X86_VDIVPD,
@@ -595,25 +400,14 @@ static bool x86_readmem2nd(PolyX86Op op) {
       POLY_X86_VPCMPGTW, POLY_X86_VPCMPGTD, POLY_X86_VPCMPGTQ, POLY_X86_VCMPSS,
       POLY_X86_VCMPSD, POLY_X86_VCMPPS, POLY_X86_VCMPPD, POLY_X86_VPMULLW,
       POLY_X86_VPMULLD, POLY_X86_VROUNDSS, POLY_X86_VROUNDSD, POLY_X86_VSQRTSS,
-      POLY_X86_VSQRTSD, POLY_X86_VSHUFPS, POLY_X86_VSHUFPD, POLY_X86_VINSERTPS,
+      POLY_X86_VSQRTSD, POLY_X86_VINSERTPS,
       POLY_X86_VPINSRB, POLY_X86_VPINSRW, POLY_X86_VPINSRD, POLY_X86_VPINSRQ,
       POLY_X86_VPAND, POLY_X86_VPOR, POLY_X86_VPXOR, POLY_X86_VPSLLVD, POLY_X86_VPSLLVQ,
       POLY_X86_VPSRLVD, POLY_X86_VPSRLVQ, POLY_X86_VPSRAVD, POLY_X86_CMOVNE,
-      POLY_X86_CMOVE, POLY_X86_CMOVL, POLY_X86_CMOVB, POLY_X86_VMAXSS, POLY_X86_VMAXSD,
-      POLY_X86_VMAXPS, POLY_X86_VMAXPD, POLY_X86_VMINSS, POLY_X86_VMINSD, POLY_X86_VMINPS,
-      POLY_X86_VMINPD, POLY_X86_VCVTSI2SS, POLY_X86_VCVTSI2SD, POLY_X86_VCVTSS2SD,
+      POLY_X86_CMOVE, POLY_X86_CMOVL, POLY_X86_CMOVB, POLY_X86_VCVTSI2SS,
+      POLY_X86_VCVTSI2SD, POLY_X86_VCVTSS2SD,
       POLY_X86_VCVTSD2SS, POLY_X86_VUCOMISS, POLY_X86_VUCOMISD, POLY_X86_IDIV,
       POLY_X86_DIV,
-  };
-  return x86_op_in(ops, (int)(sizeof(ops) / sizeof(ops[0])), op);
-}
-
-static bool x86_readmem3rd(PolyX86Op op) {
-  static const PolyX86Op ops[] = {
-      POLY_X86_VFMADD213SS,
-      POLY_X86_VFMADD213SD,
-      POLY_X86_VFMADD213PS,
-      POLY_X86_VFMADD213PD,
   };
   return x86_op_in(ops, (int)(sizeof(ops) / sizeof(ops[0])), op);
 }
@@ -627,7 +421,8 @@ static bool x86_writemem(PolyX86Op op) {
   static const PolyX86Op ops[] = {
       POLY_X86_MOVm, POLY_X86_MOVi, POLY_X86_VMOVSSm, POLY_X86_VMOVSDm, POLY_X86_VMOVUPSm,
       POLY_X86_VMOVDm, POLY_X86_VMOVQm, POLY_X86_ADDi, POLY_X86_SUBi, POLY_X86_ANDi,
-      POLY_X86_ORi, POLY_X86_XORi, POLY_X86_SHLi, POLY_X86_SHRi, POLY_X86_SARi,
+      POLY_X86_ORi, POLY_X86_XORi, POLY_X86_SHL, POLY_X86_SHLi, POLY_X86_SHR,
+      POLY_X86_SHRi, POLY_X86_SAR, POLY_X86_SARi,
       POLY_X86_SETNE, POLY_X86_SETE, POLY_X86_SETL, POLY_X86_SETB, POLY_X86_VCVTPS2PH,
       POLY_X86_VPEXTRB, POLY_X86_VPEXTRW, POLY_X86_VPEXTRD, POLY_X86_VPEXTRQ,
   };
@@ -661,6 +456,9 @@ static bool x86_is_jump(PolyX86Op op) {
 
 static int x86_uop_reg(PolyUOp *u) {
   if (!u) return -1;
+  /* tinygrad@2026-08-22/a9069c177a9d renderer/isa/__init__.py:25-28. */
+  if ((u->op == POLY_OP_NOOP || u->op == POLY_OP_AFTER) && u->n_src > 0)
+    return x86_uop_reg(u->src[0]);
   if (u->tag_arg.kind == POLY_ARG_INT_TUPLE && u->tag_arg.int_tuple.n > 0)
     return (int)u->tag_arg.int_tuple.vals[0];
   if (u->tag != 0) return u->tag;
@@ -688,17 +486,9 @@ static bool x86_tag_is_virtual(int32_t tag);
 static int x86_virtual_id(int32_t tag);
 static PolyUOp *x86_disp_const(PolyCtx *ctx, int64_t disp);
 static PolyX86Op x86_mov_op_for_dtype(PolyDType dt, bool store);
-static bool x86_ins_is_load_addr(PolyUOp *u);
-static PolyUOp *x86_graph_scalar_load_from_reg_vector_lane(
-    PolyCtx *ctx,
-    PolyUOp *load,
-    PolyDType lane_dtype,
-    int lane
-);
-static PolyX86Op x86_float_bin_op(PolyOps op, PolyDType dt);
-static PolyX86Op x86_int_bin_op(PolyOps op, PolyDType dt, bool imm);
-static PolyX86Op x86_vector_int_extend_op(PolyDType src_dt, PolyDType dst_dt);
-static bool x86_ins_has_memory_tuple_at(PolyUOp *u, int src_idx);
+static PolyX86Op x86_float_bin_op(PolyOps op, PolyDType dt, bool vec);
+static PolyX86Op x86_int_bin_op(PolyOps op, PolyDType dt, bool imm, bool vec);
+static PolyX86Op x86_vector_int_extend_op(PolyDType src_dt, PolyDType dst_dt, bool vec);
 static PolyUOp *x86_clone_with_regs(
     PolyCtx *ctx,
     PolyUOp *u,
@@ -709,13 +499,22 @@ static PolyUOp *x86_clone_with_regs(
 );
 
 static bool x86_uop_const_i64(PolyUOp *u, int64_t *out) {
-  if (!u || u->op != POLY_OP_CONST || u->arg.kind != POLY_ARG_INT) return false;
-  if (out) *out = u->arg.i;
+  /* tinygrad@2026-08-22/a9069c177a9d renderer/isa/x86.py:612-677 reads
+   * encoder literals from tagged CAST(strong, CONST(weak)). */
+  if (!u || u->op != POLY_OP_CAST || u->n_src != 1 || !u->src[0] ||
+      u->src[0]->op != POLY_OP_CONST || u->src[0]->arg.kind != POLY_ARG_INT)
+    return false;
+  if (out) *out = u->src[0]->arg.i;
   return true;
 }
 
+static bool x86_uop_const_eq(PolyUOp *u, int64_t expected) {
+  int64_t value = 0;
+  return x86_uop_const_i64(u, &value) && value == expected;
+}
+
 static int x86_dtype_itemsize(PolyDType dt) {
-  return poly_dtype_itemsize(poly_dtype_scalar(dt));
+  return poly_dtype_itemsize(dt);
 }
 
 static PolyArg x86_arg_int_tuple(int64_t *vals, int n) {
@@ -729,14 +528,17 @@ static PolyArg x86_arg_string(const char *s) {
   return poly_arg_str(s);
 }
 
-static bool x86_const_is_imm(PolyUOp *u) {
-  return u && u->op == POLY_OP_CONST && u->tag_arg.kind == POLY_ARG_BOOL && u->tag_arg.b;
-}
-
 static PolyUOp *x86_const_i(PolyCtx *ctx, PolyDType dt, int64_t v) {
-  return poly_uop_tagged_arg(
-      ctx, POLY_OP_CONST, dt, NULL, 0, poly_arg_int(v), 0, poly_arg_bool(true)
-  );
+  /* tinygrad@2026-08-22/a9069c177a9d renderer/isa/x86.py:227 imm():
+   * tagged CAST(strong, CONST(weak)) keeps literal width at the consumer. */
+  PolyUOp *literal = poly_uop0(ctx, POLY_OP_CONST, poly_dtype_weak(dt), poly_arg_int(v));
+  if (!literal) return NULL;
+  PolyUOp *cast = poly_uop1(ctx, POLY_OP_CAST, dt, literal, poly_arg_dtype(dt));
+  return cast ? poly_uop_tagged_arg(
+                    ctx, cast->op, cast->dtype, cast->src, cast->n_src, cast->arg, 0,
+                    poly_arg_bool(true)
+                )
+              : NULL;
 }
 
 static PolyUOp *x86_noop(PolyCtx *ctx) {
@@ -748,22 +550,19 @@ static PolyDType x86_u64(void) {
 }
 
 static X86RegClass x86_class_for_dtype(PolyDType dt, bool buffer_value) {
-  if (buffer_value || dt.is_ptr)
+  if (buffer_value)
     return X86_REG_CLASS_WGPR;
-  if (dt.count > 1)
-    return X86_REG_CLASS_XMM;
-  if (poly_dtype_is_int(poly_dtype_scalar(dt)) || poly_dtype_is_bool(poly_dtype_scalar(dt)))
+  if (poly_dtype_is_int(dt) || poly_dtype_is_bool(dt))
     return X86_REG_CLASS_WGPR;
   return X86_REG_CLASS_XMM;
 }
 
 static int x86_value_size(PolyDType dt, bool buffer_value) {
-  if (buffer_value || dt.is_ptr) return 8;
-  PolyDType s = poly_dtype_scalar(dt);
+  if (buffer_value) return 8;
+  PolyDType s = dt;
   int item = poly_dtype_itemsize(s);
   if (item <= 0) item = 8;
-  int count = dt.count > 1 ? dt.count : 1;
-  return item * count;
+  return item;
 }
 
 static PolyUOp *x86_ins_ex(
@@ -836,13 +635,6 @@ static PolyUOp *x86_def_scratch(PolyCtx *ctx, PolyDType dtype) {
   return x86_define_reg(ctx, dtype, 0);
 }
 
-static PolyUOp *x86_stack_arg_slot(PolyCtx *ctx, int64_t caller_disp, int32_t reg_tag) {
-  int32_t defs[1] = {reg_tag};
-  return x86_ins_ex(
-      ctx, POLY_X86_FRAME_INDEX, x86_u64(), NULL, 0, defs, 1, poly_arg_int(-caller_disp)
-  );
-}
-
 static bool x86_const_as_i64(PolyUOp *u, int64_t *out) {
   if (!u || u->op != POLY_OP_CONST) return false;
   if (u->arg.kind == POLY_ARG_INT) {
@@ -860,17 +652,9 @@ static bool x86_const_as_i64(PolyUOp *u, int64_t *out) {
   return false;
 }
 
-static PolyUOp *x86_imm_for_const(PolyCtx *ctx, PolyUOp *c) {
-  int64_t v = 0;
-  if (!x86_const_as_i64(c, &v)) return NULL;
-  PolyDType dt = c->dtype;
-  PolyDType scalar = poly_dtype_scalar(dt);
-  if (poly_dtype_eq(scalar, POLY_INT64) || poly_dtype_eq(scalar, POLY_UINT64)) {
-    int64_t sx = (int64_t)(int32_t)v;
-    if ((uint64_t)sx != (uint64_t)v) return NULL;
-    dt = POLY_INT32;
-  }
-  return x86_const_i(ctx, dt, v);
+static bool x86_cast_const_as_i64(PolyUOp *u, int64_t *out) {
+  return u && u->op == POLY_OP_CAST && u->n_src == 1 && u->src[0] &&
+         x86_const_as_i64(u->src[0], out);
 }
 
 static int32_t x86_virtual_tag_for_dtype(PolyDType dt, bool buffer_value, int *next_vreg) {
@@ -960,65 +744,83 @@ static int x86_vec_push(X86UOpVec *v, PolyUOp *u) {
   return 0;
 }
 
-static int x86_replace_srcs(PolyUOp **dst, int max_dst, PolyUOp *u, X86UOpMap *map) {
-  if (!u || u->n_src > max_dst) return -1;
-  for (int i = 0; i < u->n_src; i++)
-    dst[i] = x86_map_get(map, u->src[i]);
-  return u->n_src;
-}
-
 static bool x86_dtype_is_float_bits(PolyDType dt, int bits) {
-  PolyDType s = poly_dtype_scalar(dt);
-  return poly_dtype_is_float(s) && s.bitsize == bits;
+  PolyDType s = dt;
+  return poly_dtype_is_float(s) && !poly_dtype_is_weak(s) && s.bitsize == bits;
 }
 
 static bool x86_is_float_dtype(PolyDType dt) {
-  return poly_dtype_is_float(poly_dtype_scalar(dt));
+  PolyDType s = dt;
+  return poly_dtype_is_float(s) && !poly_dtype_is_weak(s);
 }
 
 static bool x86_is_int_dtype(PolyDType dt) {
-  PolyDType s = poly_dtype_scalar(dt);
-  return poly_dtype_is_int(s) || poly_dtype_is_bool(s);
+  PolyDType s = dt;
+  return (poly_dtype_is_int(s) && !poly_dtype_is_weak(s)) || poly_dtype_is_bool(s);
+}
+
+static bool x86_is_strong_int_dtype(PolyDType dt) {
+  PolyDType s = dt;
+  return poly_dtype_is_int(s) && !poly_dtype_is_weak(s);
+}
+
+/* Current tinygrad x86.py:227-232. Program literals are
+ * CAST(strong, CONST(weak)); consumers select the strong immediate directly. */
+static PolyUOp *x86_to_imm(PolyCtx *ctx, PolyUOp *u) {
+  if (!u || !x86_cast_const_as_i64(u, NULL)) return NULL;
+  PolyUOp *c = u->src[0];
+  PolyDType dt = u->dtype;
+  int64_t v = 0;
+  if (!x86_const_as_i64(c, &v) || !x86_is_int_dtype(dt)) return NULL;
+  PolyDType scalar = dt;
+  if (poly_dtype_eq(scalar, POLY_INT64) || poly_dtype_eq(scalar, POLY_UINT64)) {
+    int64_t sx = (int64_t)(int32_t)v;
+    if ((uint64_t)sx != (uint64_t)v) return NULL;
+    dt = POLY_INT32;
+  }
+  return x86_const_i(ctx, dt, v);
+}
+
+static PolyUOp *x86_cconst(PolyCtx *ctx, PolyDType dtype, PolyArg value) {
+  PolyDType weak = poly_dtype_weak(dtype);
+  PolyUOp *literal = poly_uop0(ctx, POLY_OP_CONST, weak, value);
+  return literal ? poly_uop1(ctx, POLY_OP_CAST, dtype, literal, poly_arg_dtype(dtype)) : NULL;
 }
 
 static PolyDType x86_int_for_float(PolyDType dt) {
-  PolyDType s = poly_dtype_scalar(dt);
-  if (s.bitsize == 16) return dt.count > 1 ? poly_dtype_vec(POLY_INT16, dt.count) : POLY_INT16;
-  if (s.bitsize == 32) return dt.count > 1 ? poly_dtype_vec(POLY_INT32, dt.count) : POLY_INT32;
-  return dt.count > 1 ? poly_dtype_vec(POLY_INT64, dt.count) : POLY_INT64;
-}
-
-static PolyDType x86_dtype_with_lanes(PolyDType scalar, int lanes) {
-  return lanes > 1 ? poly_dtype_vec(scalar, lanes) : scalar;
+  PolyDType s = dt;
+  if (s.bitsize == 16) return POLY_INT16;
+  if (s.bitsize == 32) return POLY_INT32;
+  return POLY_INT64;
 }
 
 static bool x86_dtype_is_float16(PolyDType dt) {
-  PolyDType s = poly_dtype_scalar(dt);
+  PolyDType s = dt;
   return poly_dtype_is_float(s) && s.bitsize == 16;
 }
 
 static bool x86_dtype_is_float32(PolyDType dt) {
-  PolyDType s = poly_dtype_scalar(dt);
+  PolyDType s = dt;
   return poly_dtype_is_float(s) && s.bitsize == 32;
 }
 
 static bool x86_dtype_is_float64(PolyDType dt) {
-  PolyDType s = poly_dtype_scalar(dt);
+  PolyDType s = dt;
   return poly_dtype_is_float(s) && s.bitsize == 64;
 }
 
 static bool x86_dtype_is_int_bits_any_sign(PolyDType dt, int bits) {
-  PolyDType s = poly_dtype_scalar(dt);
+  PolyDType s = dt;
   return poly_dtype_is_int(s) && s.bitsize == bits;
 }
 
 static bool x86_dtype_is_int8_or_bool(PolyDType dt) {
-  PolyDType s = poly_dtype_scalar(dt);
+  PolyDType s = dt;
   return poly_dtype_is_bool(s) || (poly_dtype_is_int(s) && s.bitsize == 8);
 }
 
 static bool x86_dtype_is_int16(PolyDType dt) {
-  PolyDType s = poly_dtype_scalar(dt);
+  PolyDType s = dt;
   return poly_dtype_is_int(s) && s.bitsize == 16;
 }
 
@@ -1061,8 +863,8 @@ static bool x86_op_is_alu_for_extra(PolyOps op) {
 static PolyUOp *rule_x86_bool_cmp_legalize(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
   (void)b;
   if (!u || !x86_op_is_comparison(u->op) || u->n_src != 2) return NULL;
-  if (!poly_dtype_is_bool(poly_dtype_scalar(u->src[0]->dtype)) ||
-      !poly_dtype_is_bool(poly_dtype_scalar(u->src[1]->dtype)))
+  if (!poly_dtype_is_bool(u->src[0]->dtype) ||
+      !poly_dtype_is_bool(u->src[1]->dtype))
     return NULL;
   PolyUOp *x = u->src[0];
   PolyUOp *y = u->src[1];
@@ -1084,48 +886,47 @@ static PolyUOp *rule_x86_cast_legalize(PolyCtx *ctx, PolyUOp *u, const PolyBindi
   PolyUOp *y = u->src[0];
   PolyDType src = y->dtype;
   PolyDType dst = u->dtype;
-  PolyDType dst_s = poly_dtype_scalar(dst);
-  int lanes = dst.count > 1 ? dst.count : 1;
+  PolyDType dst_s = dst;
 
   if (x86_dtype_is_float16(src) &&
       (x86_dtype_is_float64(dst) || poly_dtype_is_int(dst_s) || poly_dtype_is_bool(dst_s))) {
-    PolyUOp *f32 = poly_uop1(ctx, POLY_OP_CAST, x86_dtype_with_lanes(POLY_FLOAT32, lanes), y, poly_arg_none());
+    PolyUOp *f32 = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, y, poly_arg_none());
     return poly_uop1(ctx, POLY_OP_CAST, dst, f32, u->arg);
   }
 
-  if ((x86_dtype_is_float64(src) || poly_dtype_is_int(poly_dtype_scalar(src)) ||
-       poly_dtype_is_bool(poly_dtype_scalar(src))) &&
+  if ((x86_dtype_is_float64(src) || poly_dtype_is_int(src) ||
+       poly_dtype_is_bool(src)) &&
       x86_dtype_is_float16(dst)) {
-    PolyUOp *f32 = poly_uop1(ctx, POLY_OP_CAST, x86_dtype_with_lanes(POLY_FLOAT32, lanes), y, poly_arg_none());
+    PolyUOp *f32 = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, y, poly_arg_none());
     return poly_uop1(ctx, POLY_OP_CAST, dst, f32, u->arg);
   }
 
   if (x86_is_float_dtype(src) && (x86_dtype_is_int8_or_bool(dst) || x86_dtype_is_int16(dst))) {
-    PolyUOp *i32 = poly_uop1(ctx, POLY_OP_CAST, x86_dtype_with_lanes(POLY_INT32, lanes), y, poly_arg_none());
+    PolyUOp *i32 = poly_uop1(ctx, POLY_OP_CAST, POLY_INT32, y, poly_arg_none());
     return poly_uop1(ctx, POLY_OP_CAST, dst, i32, u->arg);
   }
 
   if ((x86_dtype_is_int8_or_bool(src) || x86_dtype_is_int16(src)) && x86_is_float_dtype(dst)) {
-    PolyUOp *i32 = poly_uop1(ctx, POLY_OP_CAST, x86_dtype_with_lanes(POLY_INT32, src.count), y, poly_arg_none());
+    PolyUOp *i32 = poly_uop1(ctx, POLY_OP_CAST, POLY_INT32, y, poly_arg_none());
     return poly_uop1(ctx, POLY_OP_CAST, dst, i32, u->arg);
   }
 
-  if (poly_dtype_eq(poly_dtype_scalar(src), POLY_UINT32) && x86_is_float_dtype(dst)) {
-    PolyUOp *i64 = poly_uop1(ctx, POLY_OP_CAST, x86_dtype_with_lanes(POLY_INT64, src.count), y, poly_arg_none());
+  if (poly_dtype_eq(src, POLY_UINT32) && x86_is_float_dtype(dst)) {
+    PolyUOp *i64 = poly_uop1(ctx, POLY_OP_CAST, POLY_INT64, y, poly_arg_none());
     return poly_uop1(ctx, POLY_OP_CAST, dst, i64, u->arg);
   }
 
-  if (poly_dtype_eq(poly_dtype_scalar(src), POLY_UINT64) && x86_is_float_dtype(dst)) {
+  if (poly_dtype_eq(src, POLY_UINT64) && x86_is_float_dtype(dst)) {
     PolyUOp *one = poly_const_like_int(ctx, y, 1);
     PolyUOp *two_f = poly_const_like_float(ctx, u, 2.0);
     PolyUOp *shr = poly_uop2(ctx, POLY_OP_SHR, src, y, one, poly_arg_none());
-    PolyUOp *shr_i64 = poly_uop1(ctx, POLY_OP_CAST, x86_dtype_with_lanes(POLY_INT64, src.count), shr, poly_arg_none());
+    PolyUOp *shr_i64 = poly_uop1(ctx, POLY_OP_CAST, POLY_INT64, shr, poly_arg_none());
     PolyUOp *hi = poly_uop2(
         ctx, POLY_OP_MUL, dst,
         poly_uop1(ctx, POLY_OP_CAST, dst, shr_i64, poly_arg_none()), two_f, poly_arg_none()
     );
     PolyUOp *lo_bits = poly_uop2(ctx, POLY_OP_AND, src, y, one, poly_arg_none());
-    PolyUOp *lo_i64 = poly_uop1(ctx, POLY_OP_CAST, x86_dtype_with_lanes(POLY_INT64, src.count), lo_bits, poly_arg_none());
+    PolyUOp *lo_i64 = poly_uop1(ctx, POLY_OP_CAST, POLY_INT64, lo_bits, poly_arg_none());
     PolyUOp *lo = poly_uop1(ctx, POLY_OP_CAST, dst, lo_i64, poly_arg_none());
     return poly_uop2(ctx, POLY_OP_ADD, dst, hi, lo, poly_arg_none());
   }
@@ -1137,7 +938,7 @@ static PolyUOp *rule_x86_int8_mul_legalize(PolyCtx *ctx, PolyUOp *u, const PolyB
   (void)b;
   if (!u || u->op != POLY_OP_MUL || u->n_src != 2 || !x86_dtype_is_int_bits_any_sign(u->dtype, 8))
     return NULL;
-  PolyDType i16 = x86_dtype_with_lanes(POLY_INT16, u->dtype.count);
+  PolyDType i16 = POLY_INT16;
   PolyUOp *a = poly_uop1(ctx, POLY_OP_CAST, i16, u->src[0], poly_arg_none());
   PolyUOp *bb = poly_uop1(ctx, POLY_OP_CAST, i16, u->src[1], poly_arg_none());
   PolyUOp *mul = poly_uop2(ctx, POLY_OP_MUL, i16, a, bb, poly_arg_none());
@@ -1146,7 +947,7 @@ static PolyUOp *rule_x86_int8_mul_legalize(PolyCtx *ctx, PolyUOp *u, const PolyB
 
 static PolyUOp *rule_x86_int8_where_legalize(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
   (void)b;
-  if (!u || u->op != POLY_OP_WHERE || u->n_src != 3 || u->dtype.count != 1 ||
+  if (!u || u->op != POLY_OP_WHERE || u->n_src != 3 || poly_uop_max_numel(ctx, u) != 1 ||
       !x86_dtype_is_int8_or_bool(u->dtype))
     return NULL;
   PolyUOp *a = poly_uop1(ctx, POLY_OP_CAST, POLY_INT16, u->src[1], poly_arg_none());
@@ -1159,11 +960,11 @@ static PolyUOp *rule_x86_float16_alu_legalize(PolyCtx *ctx, PolyUOp *u, const Po
   (void)b;
   if (!u || !x86_op_is_alu_for_extra(u->op) || !x86_dtype_is_float16(u->dtype)) return NULL;
   if (u->op == POLY_OP_CAST || u->op == POLY_OP_BITCAST || x86_op_is_comparison(u->op)) return NULL;
-  PolyDType f32 = x86_dtype_with_lanes(POLY_FLOAT32, u->dtype.count);
+  PolyDType f32 = POLY_FLOAT32;
   PolyUOp *srcs[8];
   if (u->n_src > 8) return NULL;
   for (int i = 0; i < u->n_src; i++) {
-    if (poly_dtype_is_bool(poly_dtype_scalar(u->src[i]->dtype)))
+    if (poly_dtype_is_bool(u->src[i]->dtype))
       srcs[i] = u->src[i];
     else
       srcs[i] = poly_uop1(ctx, POLY_OP_CAST, f32, u->src[i], poly_arg_none());
@@ -1176,7 +977,7 @@ static PolyUOp *rule_x86_float16_cmp_legalize(PolyCtx *ctx, PolyUOp *u, const Po
   (void)b;
   if (!u || !x86_op_is_comparison(u->op) || u->n_src != 2 || !x86_dtype_is_float16(u->src[0]->dtype))
     return NULL;
-  PolyDType f32 = x86_dtype_with_lanes(POLY_FLOAT32, u->src[0]->dtype.count);
+  PolyDType f32 = POLY_FLOAT32;
   PolyUOp *a = poly_uop1(ctx, POLY_OP_CAST, f32, u->src[0], poly_arg_none());
   PolyUOp *bb = poly_uop1(ctx, POLY_OP_CAST, f32, u->src[1], poly_arg_none());
   return poly_uop2(ctx, u->op, u->dtype, a, bb, poly_arg_none());
@@ -1192,16 +993,16 @@ static PolyUOp *rule_x86_mixed_float_int_cmp_legalize(PolyCtx *ctx, PolyUOp *u, 
   if (a_float == b_float) return NULL;
 
   PolyDType int_dt = a_float ? b_dt : a_dt;
-  PolyDType int_s = poly_dtype_scalar(int_dt);
+  PolyDType int_s = int_dt;
   if (!poly_dtype_is_int(int_s) || poly_dtype_is_bool(int_s)) return NULL;
 
   PolyDType float_dt = a_float ? a_dt : b_dt;
-  int float_lanes = float_dt.count > 1 ? float_dt.count : 1;
-  int int_lanes = int_dt.count > 1 ? int_dt.count : 1;
-  if (float_lanes != int_lanes) return NULL;
+  if (poly_uop_max_numel(ctx, a_float ? u->src[0] : u->src[1]) !=
+      poly_uop_max_numel(ctx, a_float ? u->src[1] : u->src[0]))
+    return NULL;
 
   PolyDType cmp_dt = x86_dtype_is_float16(float_dt)
-                         ? x86_dtype_with_lanes(POLY_FLOAT32, float_lanes)
+                         ? POLY_FLOAT32
                          : float_dt;
   PolyUOp *a = a_float ? u->src[0] : poly_uop1(ctx, POLY_OP_CAST, cmp_dt, u->src[0], poly_arg_none());
   PolyUOp *bb = b_float ? u->src[1] : poly_uop1(ctx, POLY_OP_CAST, cmp_dt, u->src[1], poly_arg_none());
@@ -1214,8 +1015,9 @@ static PolyUOp *rule_x86_mixed_float_int_cmp_legalize(PolyCtx *ctx, PolyUOp *u, 
 
 static PolyUOp *rule_x86_packed_int_cmpne_legalize(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
   (void)b;
-  if (!u || u->op != POLY_OP_CMPNE || u->n_src != 2 || u->src[0]->dtype.count <= 1 ||
-      !poly_dtype_is_int(poly_dtype_scalar(u->src[0]->dtype)))
+  if (!u || u->op != POLY_OP_CMPNE || u->n_src != 2 ||
+      poly_uop_max_numel(ctx, u->src[0]) <= 1 ||
+      !poly_dtype_is_int(u->src[0]->dtype))
     return NULL;
   PolyUOp *eq = poly_uop2(ctx, POLY_OP_CMPEQ, u->dtype, u->src[0], u->src[1], poly_arg_none());
   return poly_uop2(ctx, POLY_OP_XOR, u->dtype, eq, poly_const_like_bool(ctx, eq, true), poly_arg_none());
@@ -1225,12 +1027,11 @@ static PolyUOp *rule_x86_float_where_mask_legalize(PolyCtx *ctx, PolyUOp *u, con
   (void)b;
   if (!u || u->op != POLY_OP_WHERE || u->n_src != 3 || !x86_is_float_dtype(u->dtype)) return NULL;
   PolyUOp *m = u->src[0];
-  if (!m || !poly_dtype_is_bool(poly_dtype_scalar(m->dtype))) return NULL;
+  if (!m || !poly_dtype_is_bool(m->dtype)) return NULL;
   if (m->n_src > 0 && x86_is_float_dtype(m->src[0]->dtype)) return NULL;
   PolyUOp *cast = poly_uop1(ctx, POLY_OP_CAST, u->dtype, m, poly_arg_none());
   PolyUOp *zero = poly_const_like_float(ctx, cast, 0.0);
-  PolyDType mask_dtype = u->dtype.count > 1 ? poly_dtype_vec(POLY_BOOL, u->dtype.count) : POLY_BOOL;
-  PolyUOp *mask = poly_uop2(ctx, POLY_OP_CMPNE, mask_dtype, cast, zero, poly_arg_none());
+  PolyUOp *mask = poly_uop2(ctx, POLY_OP_CMPNE, POLY_BOOL, cast, zero, poly_arg_none());
   return poly_uop3(ctx, POLY_OP_WHERE, u->dtype, mask, u->src[1], u->src[2], poly_arg_none());
 }
 
@@ -1239,7 +1040,7 @@ static PolyUOp *rule_x86_neg_to_sub(PolyCtx *ctx, PolyUOp *u, const PolyBindings
   if (!u || u->op != POLY_OP_NEG || u->n_src != 1) return NULL;
   /* tinygrad UOp.const_like uses dtype.base, so a vector NEG is legalized with
    * a scalar zero that graph isel broadcasts before linearization. */
-  PolyDType zero_dtype = poly_dtype_scalar(u->dtype);
+  PolyDType zero_dtype = u->dtype;
   PolyArg zero_arg = poly_dtype_is_float(zero_dtype) ? poly_arg_float(0.0)
                      : poly_dtype_is_bool(zero_dtype) ? poly_arg_bool(false)
                                                       : poly_arg_int(0);
@@ -1255,123 +1056,27 @@ static PolyUOp *rule_x86_cmod_to_cdiv(PolyCtx *ctx, PolyUOp *u, const PolyBindin
   return poly_uop2(ctx, POLY_OP_SUB, u->dtype, u->src[0], prod, poly_arg_none());
 }
 
-/* tinygrad intentionally leaves tensor integer POW unsupported, and its X86
- * renderer consequently treats the remaining POW as a float value. Polygrad's
- * C renderer already exposes integer tensor POW, so the X86 backend keeps that
- * superset behavior with exact fixed-width exponentiation rather than a float
- * round-trip. Negative exponents follow integer cast semantics: +/-1 retain
- * their exact reciprocal and every other integer base yields zero. */
-static PolyUOp *rule_x86_int_pow_legalize(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
-  (void)b;
-  if (!u || u->op != POLY_OP_POW || u->n_src != 2 || u->dtype.count != 1 ||
-      !poly_dtype_is_int(u->dtype) || poly_dtype_is_bool(u->dtype))
-    return NULL;
-
-  PolyUOp *base = u->src[0];
-  PolyUOp *exponent = u->src[1];
-  PolyDType exponent_scalar = poly_dtype_scalar(exponent->dtype);
-  if (exponent->dtype.count != 1 || !poly_dtype_is_int(exponent_scalar) ||
-      poly_dtype_is_bool(exponent_scalar))
-    return NULL;
-
-  PolyDType unsigned_exponent;
-  switch (exponent_scalar.bitsize) {
-  case 8:
-    unsigned_exponent = POLY_UINT8;
-    break;
-  case 16:
-    unsigned_exponent = POLY_UINT16;
-    break;
-  case 32:
-    unsigned_exponent = POLY_UINT32;
-    break;
-  case 64:
-    unsigned_exponent = POLY_UINT64;
-    break;
-  default:
-    return NULL;
-  }
-
-  PolyUOp *zero_exp = poly_const_like_int(ctx, exponent, 0);
-  PolyUOp *negative = NULL;
-  if (!poly_dtype_is_unsigned(exponent_scalar))
-    negative = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, exponent, zero_exp, poly_arg_none());
-  PolyUOp *exponent_unsigned =
-      poly_uop1(ctx, POLY_OP_CAST, unsigned_exponent, exponent, poly_arg_none());
-  PolyUOp *zero_unsigned = poly_const_like_int(ctx, exponent_unsigned, 0);
-  PolyUOp *one_unsigned = poly_const_like_int(ctx, exponent_unsigned, 1);
-  PolyUOp *magnitude = exponent_unsigned;
-  if (!poly_dtype_is_unsigned(exponent_scalar)) {
-    PolyUOp *negated = poly_uop2(
-        ctx, POLY_OP_SUB, unsigned_exponent, zero_unsigned, exponent_unsigned, poly_arg_none()
-    );
-    magnitude = poly_uop3(
-        ctx, POLY_OP_WHERE, unsigned_exponent, negative, negated, exponent_unsigned, poly_arg_none()
-    );
-  }
-
-  PolyUOp *one = poly_const_like_int(ctx, base, 1);
-  PolyUOp *result = one;
-  PolyUOp *factor = base;
-  PolyUOp *remaining = magnitude;
-  for (int bit = 0; bit < exponent_scalar.bitsize; bit++) {
-    PolyUOp *low_bit =
-        poly_uop2(ctx, POLY_OP_AND, unsigned_exponent, remaining, one_unsigned, poly_arg_none());
-    PolyUOp *selected =
-        poly_uop2(ctx, POLY_OP_CMPNE, POLY_BOOL, low_bit, zero_unsigned, poly_arg_none());
-    PolyUOp *product = poly_uop2(ctx, POLY_OP_MUL, u->dtype, result, factor, poly_arg_none());
-    result = poly_uop3(ctx, POLY_OP_WHERE, u->dtype, selected, product, result, poly_arg_none());
-    remaining =
-        poly_uop2(ctx, POLY_OP_SHR, unsigned_exponent, remaining, one_unsigned, poly_arg_none());
-    if (bit + 1 < exponent_scalar.bitsize)
-      factor = poly_uop2(ctx, POLY_OP_MUL, u->dtype, factor, factor, poly_arg_none());
-  }
-
-  if (poly_dtype_is_unsigned(exponent_scalar)) return result;
-
-  PolyUOp *zero = poly_const_like_int(ctx, base, 0);
-  PolyUOp *minus_one = poly_const_like_int(ctx, base, -1);
-  PolyUOp *base_is_one = poly_uop2(ctx, POLY_OP_CMPEQ, POLY_BOOL, base, one, poly_arg_none());
-  PolyUOp *base_is_minus_one =
-      poly_uop2(ctx, POLY_OP_CMPEQ, POLY_BOOL, base, minus_one, poly_arg_none());
-  PolyUOp *magnitude_low_bit =
-      poly_uop2(ctx, POLY_OP_AND, unsigned_exponent, magnitude, one_unsigned, poly_arg_none());
-  PolyUOp *magnitude_is_odd =
-      poly_uop2(ctx, POLY_OP_CMPNE, POLY_BOOL, magnitude_low_bit, zero_unsigned, poly_arg_none());
-  PolyUOp *minus_one_power =
-      poly_uop3(ctx, POLY_OP_WHERE, u->dtype, magnitude_is_odd, minus_one, one, poly_arg_none());
-  PolyUOp *negative_result = poly_uop3(
-      ctx, POLY_OP_WHERE, u->dtype, base_is_minus_one, minus_one_power, zero, poly_arg_none()
-  );
-  negative_result =
-      poly_uop3(ctx, POLY_OP_WHERE, u->dtype, base_is_one, one, negative_result, poly_arg_none());
-  return poly_uop3(
-      ctx, POLY_OP_WHERE, u->dtype, negative, negative_result, result, poly_arg_none()
-  );
-}
-
 static _Thread_local PolyPatternMatcher *g_pm_x86_extra = NULL;
 static PolyPatternMatcher *poly_pm_x86_extra(void) {
   if (g_pm_x86_extra) return g_pm_x86_extra;
   PolyRule rules[] = {
-      {poly_pat_op(POLY_OP_CMPNE, NULL, 0, NULL), rule_x86_bool_cmp_legalize},
-      {poly_pat_op(POLY_OP_CMPEQ, NULL, 0, NULL), rule_x86_bool_cmp_legalize},
-      {poly_pat_op(POLY_OP_CMPLT, NULL, 0, NULL), rule_x86_bool_cmp_legalize},
-      {poly_pat_op(POLY_OP_CAST, NULL, 0, NULL), rule_x86_cast_legalize},
-      {poly_pat_op(POLY_OP_MUL, NULL, 0, NULL), rule_x86_int8_mul_legalize},
-      {poly_pat_op(POLY_OP_WHERE, NULL, 0, NULL), rule_x86_int8_where_legalize},
-      {poly_pat_ops(POLY_GROUP_ALU, NULL, 0, NULL), rule_x86_float16_alu_legalize},
-      {poly_pat_op(POLY_OP_CMPLT, NULL, 0, NULL), rule_x86_float16_cmp_legalize},
-      {poly_pat_op(POLY_OP_CMPEQ, NULL, 0, NULL), rule_x86_float16_cmp_legalize},
-      {poly_pat_op(POLY_OP_CMPNE, NULL, 0, NULL), rule_x86_float16_cmp_legalize},
-      {poly_pat_op(POLY_OP_CMPLT, NULL, 0, NULL), rule_x86_mixed_float_int_cmp_legalize},
-      {poly_pat_op(POLY_OP_CMPEQ, NULL, 0, NULL), rule_x86_mixed_float_int_cmp_legalize},
-      {poly_pat_op(POLY_OP_CMPNE, NULL, 0, NULL), rule_x86_mixed_float_int_cmp_legalize},
-      {poly_pat_op(POLY_OP_CMPNE, NULL, 0, NULL), rule_x86_packed_int_cmpne_legalize},
-      {poly_pat_op(POLY_OP_WHERE, NULL, 0, NULL), rule_x86_float_where_mask_legalize},
-      {poly_pat_op(POLY_OP_NEG, NULL, 0, NULL), rule_x86_neg_to_sub},
-      {poly_pat_op(POLY_OP_CMOD, NULL, 0, NULL), rule_x86_cmod_to_cdiv},
-      {poly_pat_op(POLY_OP_POW, NULL, 0, NULL), rule_x86_int_pow_legalize},
+      {poly_upat_op(POLY_OP_CMPNE, NULL, 0, NULL), rule_x86_bool_cmp_legalize},
+      {poly_upat_op(POLY_OP_CMPEQ, NULL, 0, NULL), rule_x86_bool_cmp_legalize},
+      {poly_upat_op(POLY_OP_CMPLT, NULL, 0, NULL), rule_x86_bool_cmp_legalize},
+      {poly_upat_op(POLY_OP_CAST, NULL, 0, NULL), rule_x86_cast_legalize},
+      {poly_upat_op(POLY_OP_MUL, NULL, 0, NULL), rule_x86_int8_mul_legalize},
+      {poly_upat_op(POLY_OP_WHERE, NULL, 0, NULL), rule_x86_int8_where_legalize},
+      {poly_upat_ops(POLY_GROUP_ALU, NULL, 0, NULL), rule_x86_float16_alu_legalize},
+      {poly_upat_op(POLY_OP_CMPLT, NULL, 0, NULL), rule_x86_float16_cmp_legalize},
+      {poly_upat_op(POLY_OP_CMPEQ, NULL, 0, NULL), rule_x86_float16_cmp_legalize},
+      {poly_upat_op(POLY_OP_CMPNE, NULL, 0, NULL), rule_x86_float16_cmp_legalize},
+      {poly_upat_op(POLY_OP_CMPLT, NULL, 0, NULL), rule_x86_mixed_float_int_cmp_legalize},
+      {poly_upat_op(POLY_OP_CMPEQ, NULL, 0, NULL), rule_x86_mixed_float_int_cmp_legalize},
+      {poly_upat_op(POLY_OP_CMPNE, NULL, 0, NULL), rule_x86_mixed_float_int_cmp_legalize},
+      {poly_upat_op(POLY_OP_CMPNE, NULL, 0, NULL), rule_x86_packed_int_cmpne_legalize},
+      {poly_upat_op(POLY_OP_WHERE, NULL, 0, NULL), rule_x86_float_where_mask_legalize},
+      {poly_upat_op(POLY_OP_NEG, NULL, 0, NULL), rule_x86_neg_to_sub},
+      {poly_upat_op(POLY_OP_CMOD, NULL, 0, NULL), rule_x86_cmod_to_cdiv},
   };
   /* Pinned tinygrad renderer/isa/x86.py:933 excludes bfloat16 from X86
    * supported_dtypes, and codegen/__init__.py:121 runs pm_dtype_decomps
@@ -1381,82 +1086,22 @@ static PolyPatternMatcher *poly_pm_x86_extra(void) {
   return g_pm_x86_extra;
 }
 
-static bool x86_pre_isel_op_has_structural_width(PolyOps op) {
-  switch (op) {
-  case POLY_OP_CAST:
-  case POLY_OP_BITCAST:
-  case POLY_OP_EXP2:
-  case POLY_OP_LOG2:
-  case POLY_OP_SIN:
-  case POLY_OP_SQRT:
-  case POLY_OP_NEG:
-  case POLY_OP_TRUNC:
-  case POLY_OP_ADD:
-  case POLY_OP_MUL:
-  case POLY_OP_SHL:
-  case POLY_OP_SHR:
-  case POLY_OP_CDIV:
-  case POLY_OP_MAX:
-  case POLY_OP_CMPLT:
-  case POLY_OP_CMPNE:
-  case POLY_OP_CMPEQ:
-  case POLY_OP_XOR:
-  case POLY_OP_OR:
-  case POLY_OP_AND:
-  case POLY_OP_SUB:
-  case POLY_OP_FDIV:
-  case POLY_OP_WHERE:
-  case POLY_OP_MULACC:
-    return true;
-  default:
-    return false;
-  }
-}
-
-static PolyUOp *rule_x86_pre_isel_structural_width(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
-  (void)b;
-  if (!u || u->dtype.is_ptr || poly_dtype_eq(u->dtype, POLY_VOID)) return NULL;
-  int c = 1;
-  if (u->op == POLY_OP_STACK) {
-    c = u->n_src;
-  } else if (x86_pre_isel_op_has_structural_width(u->op)) {
-    for (int i = 0; i < u->n_src; i++) {
-      if (!u->src[i] || u->src[i]->dtype.is_ptr) continue;
-      if (u->src[i]->dtype.count > c) c = u->src[i]->dtype.count;
-    }
-  } else {
-    return NULL;
-  }
-  if (c <= 1 || c == u->dtype.count) return NULL;
-  PolyDType dt = poly_dtype_vec(poly_dtype_scalar(u->dtype), c);
-  return poly_uop_tagged_arg(ctx, u->op, dt, u->src, u->n_src, u->arg, u->tag, u->tag_arg);
-}
-
-static PolyUOp *rule_x86_pre_isel_load_shrink_width(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
-  (void)b;
-  if (!u || u->op != POLY_OP_LOAD || u->n_src < 1 || u->dtype.is_ptr ||
-      poly_dtype_eq(u->dtype, POLY_VOID))
-    return NULL;
-  PolyUOp *addr = u->src[0];
-  if (!addr || addr->op != POLY_OP_SHRINK || addr->n_src < 3) return NULL;
-  int64_t c = 0;
-  if (!x86_const_as_i64(addr->src[2], &c) || c <= u->dtype.count) return NULL;
-  PolyDType dt = poly_dtype_vec(poly_dtype_scalar(u->dtype), (int)c);
-  return poly_uop_tagged_arg(ctx, u->op, dt, u->src, u->n_src, u->arg, u->tag, u->tag_arg);
-}
-
 static PolyUOp *x86_pre_isel_addr_as_u64(PolyCtx *ctx, PolyUOp *addr) {
   if (!addr) return NULL;
   return poly_uop_tagged_arg(ctx, addr->op, POLY_UINT64, addr->src, addr->n_src,
                              addr->arg, addr->tag, addr->tag_arg);
 }
 
-static PolyUOp *x86_pre_isel_local_buffer(PolyCtx *ctx, PolyDType elem_dt, int count) {
+/* tinygrad@2026-08-22/a9069c177a9d renderer/isa/x86.py:164-165 scratch_buffer. */
+static PolyUOp *x86_pre_isel_local_buffer(
+    PolyCtx *ctx, PolyDType elem_dt, int count, int64_t slot
+) {
   if (!ctx) return NULL;
   if (count <= 0) count = 1;
-  PolyDType ptr = poly_dtype_ptr(poly_dtype_scalar(elem_dt), count, POLY_ADDR_LOCAL);
-  int32_t tag = ctx->next_buf_tag++;
-  return poly_uop_tagged(ctx, POLY_OP_BUFFER, ptr, NULL, 0, poly_arg_int(tag), tag);
+  int64_t shape[] = {count};
+  return poly_uop_placeholder(
+      ctx, shape, 1, elem_dt, slot, POLY_ADDR_LOCAL, NULL, false
+  );
 }
 
 static PolyUOp *rule_x86_pre_isel_gated_load(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
@@ -1467,12 +1112,19 @@ static PolyUOp *rule_x86_pre_isel_gated_load(PolyCtx *ctx, PolyUOp *u, const Pol
     return NULL;
   PolyUOp *alt = u->src[1];
   PolyUOp *gate = u->src[2];
-  if (!alt || !gate || !poly_dtype_is_bool(poly_dtype_scalar(gate->dtype))) return NULL;
+  if (!alt || !gate || !poly_dtype_is_bool(gate->dtype)) return NULL;
 
-  int count = u->dtype.count > 1 ? u->dtype.count : 1;
-  PolyUOp *local = x86_pre_isel_local_buffer(ctx, poly_dtype_scalar(addr->src[0]->dtype), count);
+  int64_t numel = poly_uop_max_numel(ctx, u);
+  int count = numel > 0 && numel <= INT_MAX ? (int)numel : 1;
+  int *next_slot = (int *)poly_graph_rewrite_userctx();
+  if (!next_slot) return NULL;
+  PolyUOp *local = x86_pre_isel_local_buffer(
+      ctx, addr->src[0]->dtype, count, (*next_slot)--
+  );
   if (!local) return NULL;
-  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
+  /* tinygrad@2026-08-22/a9069c177a9d renderer/isa/x86.py:168 uses
+   * UOp.cconst so fold_address recognizes the scratch displacement. */
+  PolyUOp *zero = x86_cconst(ctx, POLY_INT32, poly_arg_int(0));
   PolyUOp *local_idx = poly_uop2(ctx, POLY_OP_INDEX, POLY_UINT64, local, zero, poly_arg_none());
   PolyUOp *addr_u64 = x86_pre_isel_addr_as_u64(ctx, addr);
   if (!addr_u64) return NULL;
@@ -1494,12 +1146,17 @@ static PolyUOp *rule_x86_pre_isel_gated_store(PolyCtx *ctx, PolyUOp *u, const Po
     return NULL;
   PolyUOp *val = u->src[1];
   PolyUOp *gate = u->src[2];
-  if (!val || !gate || !poly_dtype_is_bool(poly_dtype_scalar(gate->dtype))) return NULL;
+  if (!val || !gate || !poly_dtype_is_bool(gate->dtype)) return NULL;
 
-  int count = val->dtype.count > 1 ? val->dtype.count : 1;
-  PolyUOp *local = x86_pre_isel_local_buffer(ctx, poly_dtype_scalar(addr->src[0]->dtype), count);
+  int64_t numel = poly_uop_max_numel(ctx, val);
+  int count = numel > 0 && numel <= INT_MAX ? (int)numel : 1;
+  PolyUOp *local = x86_pre_isel_local_buffer(
+      ctx, addr->src[0]->dtype, count, -1
+  );
   if (!local) return NULL;
-  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
+  /* tinygrad@2026-08-22/a9069c177a9d renderer/isa/x86.py:177 uses
+   * UOp.cconst so fold_address recognizes the scratch displacement. */
+  PolyUOp *zero = x86_cconst(ctx, POLY_INT32, poly_arg_int(0));
   PolyUOp *local_idx = poly_uop2(ctx, POLY_OP_INDEX, POLY_UINT64, local, zero, poly_arg_none());
   PolyUOp *addr_u64 = x86_pre_isel_addr_as_u64(ctx, addr);
   if (!addr_u64) return NULL;
@@ -1517,16 +1174,18 @@ static PolyUOp *rule_x86_pre_isel_cast_noop(PolyCtx *ctx, PolyUOp *u, const Poly
   (void)b;
   if (!u || u->op != POLY_OP_CAST || u->n_src != 1) return NULL;
   PolyUOp *y = u->src[0];
-  PolyDType ys = poly_dtype_scalar(y->dtype);
-  PolyDType xs = poly_dtype_scalar(u->dtype);
-  if (poly_dtype_eq(ys, POLY_UINT32) && poly_dtype_is_int(xs) &&
-      poly_dtype_itemsize(xs) == 8 && y->dtype.count == 1)
+  PolyDType ys = y->dtype;
+  PolyDType xs = u->dtype;
+  int64_t y_numel = poly_uop_max_numel(ctx, y);
+  if (poly_dtype_eq(ys, POLY_UINT32) && x86_is_strong_int_dtype(xs) &&
+      poly_dtype_itemsize(xs) == 8 && y_numel == 1)
     return x86_pre_isel_noop(ctx, u->dtype, y);
-  if ((poly_dtype_is_int(ys) || poly_dtype_is_bool(ys)) && poly_dtype_is_int(xs) &&
-      poly_dtype_itemsize(ys) == poly_dtype_itemsize(xs))
+  if ((x86_is_strong_int_dtype(ys) || poly_dtype_is_bool(ys)) &&
+      x86_is_strong_int_dtype(xs) && poly_dtype_itemsize(ys) == poly_dtype_itemsize(xs) &&
+      y_numel == 1)
     return x86_pre_isel_noop(ctx, u->dtype, y);
-  if (poly_dtype_is_int(ys) && poly_dtype_is_int(xs) &&
-      poly_dtype_itemsize(xs) < poly_dtype_itemsize(ys) && y->dtype.count == 1)
+  if (x86_is_strong_int_dtype(ys) && x86_is_strong_int_dtype(xs) &&
+      poly_dtype_itemsize(xs) < poly_dtype_itemsize(ys) && y_numel == 1)
     return x86_pre_isel_noop(ctx, u->dtype, y);
   return NULL;
 }
@@ -1534,118 +1193,40 @@ static PolyUOp *rule_x86_pre_isel_cast_noop(PolyCtx *ctx, PolyUOp *u, const Poly
 static PolyUOp *rule_x86_pre_isel_bitcast_noop(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
   (void)b;
   if (!u || u->op != POLY_OP_BITCAST || u->n_src != 1) return NULL;
-  PolyDType ys = poly_dtype_scalar(u->src[0]->dtype);
-  PolyDType xs = poly_dtype_scalar(u->dtype);
-  bool real_scalar_float_int = u->src[0]->dtype.count == 1 && u->dtype.count == 1 &&
+  PolyDType ys = u->src[0]->dtype;
+  PolyDType xs = u->dtype;
+  bool real_scalar_float_int = poly_uop_max_numel(ctx, u->src[0]) == 1 &&
+      poly_uop_max_numel(ctx, u) == 1 &&
       ((poly_dtype_is_float(ys) && poly_dtype_is_int(xs)) ||
        (poly_dtype_is_int(ys) && poly_dtype_is_float(xs)));
   if (real_scalar_float_int) return NULL;
   return x86_pre_isel_noop(ctx, u->dtype, u->src[0]);
 }
 
-static PolyUOp *rule_x86_pre_isel_noop_of_noop(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
-  (void)b;
-  if (!u || u->op != POLY_OP_NOOP || u->n_src != 1 || u->src[0]->op != POLY_OP_NOOP ||
-      u->src[0]->n_src != 1)
-    return NULL;
-  return x86_pre_isel_noop(ctx, u->dtype, u->src[0]->src[0]);
-}
-
-static int x86_const_lane_from_uop(PolyUOp *u, bool *ok) {
-  *ok = false;
-  if (!u) return 0;
-  if (u->op == POLY_OP_GEP) {
-    if (u->arg.kind == POLY_ARG_INT) {
-      *ok = true;
-      return (int)u->arg.i;
-    }
-    if (u->arg.kind == POLY_ARG_INT_TUPLE && u->arg.int_tuple.n > 0) {
-      *ok = true;
-      return (int)u->arg.int_tuple.vals[0];
-    }
-    return 0;
-  }
-  if (u->op == POLY_OP_INDEX && u->n_src >= 2) {
-    int64_t v = 0;
-    if (x86_const_as_i64(u->src[1], &v)) {
-      *ok = true;
-      return (int)v;
-    }
-  }
-  return 0;
-}
-
-static PolyUOp *x86_lane_base_uop(PolyUOp *u) {
-  if (!u) return NULL;
-  if ((u->op == POLY_OP_GEP || u->op == POLY_OP_INDEX) && u->n_src >= 1)
-    return u->src[0];
-  return NULL;
-}
-
-static PolyUOp *rule_x86_pre_isel_stack_sequential_noop(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
-  (void)b;
-  if (!u || u->op != POLY_OP_STACK || u->n_src <= 1) return NULL;
-  PolyUOp *base = x86_lane_base_uop(u->src[0]);
-  if (!base) return NULL;
-  for (int i = 0; i < u->n_src; i++) {
-    if (x86_lane_base_uop(u->src[i]) != base) return NULL;
-    bool ok = false;
-    int lane = x86_const_lane_from_uop(u->src[i], &ok);
-    if (!ok || lane != i) return NULL;
-  }
-  return x86_pre_isel_noop(ctx, u->dtype, base);
-}
-
 static PolyUOp *rule_x86_pre_isel_scalar_where_gate_compare(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
   (void)b;
-  if (!u || u->op != POLY_OP_WHERE || u->n_src != 3 || u->dtype.count != 1) return NULL;
+  if (!u || u->op != POLY_OP_WHERE || u->n_src != 3 || poly_uop_max_numel(ctx, u) != 1)
+    return NULL;
   PolyUOp *m = u->src[0];
-  if (!m || !poly_dtype_is_bool(poly_dtype_scalar(m->dtype)) || x86_op_is_comparison(m->op)) return NULL;
-  PolyUOp *zero = poly_const_like_int(ctx, m, 0);
-  PolyUOp *cmp = poly_uop2(ctx, POLY_OP_CMPNE, POLY_BOOL, m, zero, poly_arg_none());
+  if (!m || !poly_dtype_is_bool(m->dtype) || x86_op_is_comparison(m->op)) return NULL;
+  /* tinygrad@2026-08-22/a9069c177a9d renderer/isa/x86.py:198-201 calls
+   * m.ne(cconst(0, int)); UOp broadcasting casts the bool value to int. */
+  PolyUOp *m_int = poly_uop1(ctx, POLY_OP_CAST, POLY_INT32, m, poly_arg_dtype(POLY_INT32));
+  PolyUOp *zero = x86_cconst(ctx, POLY_INT32, poly_arg_int(0));
+  PolyUOp *cmp = poly_uop2(ctx, POLY_OP_CMPNE, POLY_BOOL, m_int, zero, poly_arg_none());
   return poly_uop3(ctx, POLY_OP_WHERE, u->dtype, cmp, u->src[1], u->src[2], u->arg);
 }
 
 static _Thread_local PolyPatternMatcher *g_pm_x86_pre_isel = NULL;
 static PolyPatternMatcher *poly_pm_x86_pre_isel(void) {
   if (g_pm_x86_pre_isel) return g_pm_x86_pre_isel;
-  PolyOpSet pre_set = {{0, 0}};
-  pre_set = poly_opset_add(pre_set, POLY_OP_STACK);
-  pre_set = poly_opset_add(pre_set, POLY_OP_CAST);
-  pre_set = poly_opset_add(pre_set, POLY_OP_BITCAST);
-  pre_set = poly_opset_add(pre_set, POLY_OP_EXP2);
-  pre_set = poly_opset_add(pre_set, POLY_OP_LOG2);
-  pre_set = poly_opset_add(pre_set, POLY_OP_SIN);
-  pre_set = poly_opset_add(pre_set, POLY_OP_SQRT);
-  pre_set = poly_opset_add(pre_set, POLY_OP_NEG);
-  pre_set = poly_opset_add(pre_set, POLY_OP_TRUNC);
-  pre_set = poly_opset_add(pre_set, POLY_OP_ADD);
-  pre_set = poly_opset_add(pre_set, POLY_OP_MUL);
-  pre_set = poly_opset_add(pre_set, POLY_OP_SHL);
-  pre_set = poly_opset_add(pre_set, POLY_OP_SHR);
-  pre_set = poly_opset_add(pre_set, POLY_OP_CDIV);
-  pre_set = poly_opset_add(pre_set, POLY_OP_MAX);
-  pre_set = poly_opset_add(pre_set, POLY_OP_CMPLT);
-  pre_set = poly_opset_add(pre_set, POLY_OP_CMPNE);
-  pre_set = poly_opset_add(pre_set, POLY_OP_CMPEQ);
-  pre_set = poly_opset_add(pre_set, POLY_OP_XOR);
-  pre_set = poly_opset_add(pre_set, POLY_OP_OR);
-  pre_set = poly_opset_add(pre_set, POLY_OP_AND);
-  pre_set = poly_opset_add(pre_set, POLY_OP_SUB);
-  pre_set = poly_opset_add(pre_set, POLY_OP_FDIV);
-  pre_set = poly_opset_add(pre_set, POLY_OP_WHERE);
-  pre_set = poly_opset_add(pre_set, POLY_OP_MULACC);
   PolyRule rules[] = {
-      {poly_pat_op(POLY_OP_LOAD, NULL, 0, NULL), rule_x86_pre_isel_load_shrink_width},
-      {poly_pat_op(POLY_OP_NEG, NULL, 0, NULL), rule_x86_neg_to_sub},
-      {poly_pat_ops(pre_set, NULL, 0, NULL), rule_x86_pre_isel_structural_width},
-      {poly_pat_op(POLY_OP_CAST, NULL, 0, NULL), rule_x86_pre_isel_cast_noop},
-      {poly_pat_op(POLY_OP_BITCAST, NULL, 0, NULL), rule_x86_pre_isel_bitcast_noop},
-      {poly_pat_op(POLY_OP_NOOP, NULL, 0, NULL), rule_x86_pre_isel_noop_of_noop},
-      {poly_pat_op(POLY_OP_STACK, NULL, 0, NULL), rule_x86_pre_isel_stack_sequential_noop},
-      {poly_pat_op(POLY_OP_LOAD, NULL, 0, NULL), rule_x86_pre_isel_gated_load},
-      {poly_pat_op(POLY_OP_STORE, NULL, 0, NULL), rule_x86_pre_isel_gated_store},
-      {poly_pat_op(POLY_OP_WHERE, NULL, 0, NULL), rule_x86_pre_isel_scalar_where_gate_compare},
+      {poly_upat_op(POLY_OP_NEG, NULL, 0, NULL), rule_x86_neg_to_sub},
+      {poly_upat_op(POLY_OP_CAST, NULL, 0, NULL), rule_x86_pre_isel_cast_noop},
+      {poly_upat_op(POLY_OP_BITCAST, NULL, 0, NULL), rule_x86_pre_isel_bitcast_noop},
+      {poly_upat_op(POLY_OP_LOAD, NULL, 0, NULL), rule_x86_pre_isel_gated_load},
+      {poly_upat_op(POLY_OP_STORE, NULL, 0, NULL), rule_x86_pre_isel_gated_store},
+      {poly_upat_op(POLY_OP_WHERE, NULL, 0, NULL), rule_x86_pre_isel_scalar_where_gate_compare},
   };
   g_pm_x86_pre_isel =
       poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
@@ -1655,7 +1236,6 @@ static PolyPatternMatcher *poly_pm_x86_pre_isel(void) {
 typedef struct {
   PolyMap *uses;
   PolyMap *single_consumer;
-  PolyMap *structural_consts;
   PolyMap *address_memory_uses;
   PolyUOp **func_args;
   int n_func_args;
@@ -1665,14 +1245,14 @@ typedef struct {
 static int x86_func_arg_key0(PolyUOp *u) {
   if (!u) return 3;
   if (u->op == POLY_OP_SPECIAL) return 2;
-  if (u->op == POLY_OP_PARAM && u->arg.kind == POLY_ARG_INT) return 0;
+  if (u->op == POLY_OP_PARAM && poly_program_buffer_slot(u) >= 0) return 0;
   return 1;
 }
 
 static int64_t x86_func_arg_key1(PolyUOp *u) {
   if (!u) return 0;
-  if ((u->op == POLY_OP_PARAM || u->op == POLY_OP_SPECIAL) && u->arg.kind == POLY_ARG_INT)
-    return u->arg.i;
+  if (u->op == POLY_OP_PARAM) return poly_program_buffer_slot(u);
+  if (u->op == POLY_OP_SPECIAL && u->arg.kind == POLY_ARG_INT) return u->arg.i;
   return (int64_t)(uintptr_t)u;
 }
 
@@ -1701,11 +1281,6 @@ static PolyUOp *x86_isel_single_consumer(X86IselUseCtx *uctx, PolyUOp *u) {
   return (PolyUOp *)poly_map_get(uctx->single_consumer, poly_ptr_hash(u), u, poly_ptr_eq);
 }
 
-static bool x86_isel_is_structural_const(X86IselUseCtx *uctx, PolyUOp *u) {
-  return uctx && uctx->structural_consts && u &&
-         poly_map_get(uctx->structural_consts, poly_ptr_hash(u), u, poly_ptr_eq) != NULL;
-}
-
 static bool x86_isel_is_memory_address_use(X86IselUseCtx *uctx, PolyUOp *u) {
   return uctx && uctx->address_memory_uses && u &&
          poly_map_get(uctx->address_memory_uses, poly_ptr_hash(u), u, poly_ptr_eq) != NULL;
@@ -1723,38 +1298,94 @@ static void x86_isel_note_consumer(PolyMap *map, PolyUOp *producer, PolyUOp *con
     poly_map_set(map, poly_ptr_hash(producer), producer, consumer, poly_ptr_eq);
 }
 
-static void x86_isel_mark_structural_const(PolyMap *map, PolyUOp *u) {
-  if (!map || !u || u->op != POLY_OP_CONST) return;
-  poly_map_set(map, poly_ptr_hash(u), u, u, poly_ptr_eq);
-}
-
 static void x86_isel_mark_memory_address_use(PolyMap *map, PolyUOp *u) {
   if (!map || !u || (u->op != POLY_OP_INDEX && u->op != POLY_OP_SHRINK)) return;
   poly_map_set(map, poly_ptr_hash(u), u, u, poly_ptr_eq);
 }
 
-static int x86_src_count(PolyUOp *consumer, PolyUOp *src) {
-  if (!consumer || !src) return 0;
-  int n = 0;
-  for (int i = 0; i < consumer->n_src; i++)
-    if (consumer->src[i] == src) n++;
-  return n;
+static bool x86_op_is_xmm_result(PolyX86Op op) {
+  switch (op) {
+  case POLY_X86_VPEXTRB:
+  case POLY_X86_VPEXTRW:
+  case POLY_X86_VPEXTRD:
+  case POLY_X86_VPEXTRQ:
+  case POLY_X86_VCVTTSS2SI:
+  case POLY_X86_VCVTTSD2SI:
+  case POLY_X86_VMOVDm:
+  case POLY_X86_VMOVQm:
+    return false;
+  default: {
+    const char *name = x86_op_name(op);
+    return name && name[0] == 'V';
+  }
+  }
 }
 
-static bool x86_isel_foldable(X86IselUseCtx *uctx, PolyUOp *consumer, PolyUOp *producer) {
-  return x86_isel_use_count(uctx, producer) == 1 && x86_src_count(consumer, producer) == 1;
-}
-
-static bool x86_dtype_can_fma(PolyDType dt) {
-  if (!x86_is_float_dtype(dt)) return false;
-  int bits = poly_dtype_scalar(dt).bitsize;
-  return bits == 32 || bits == 64;
+static bool x86_graph_is_vec_xmm(PolyCtx *ctx, PolyUOp *u) {
+  if (!u) return false;
+  PolyX86Op op = 0;
+  if (x86_ins_op(u, &op)) return x86_op_is_xmm_result(op);
+  if (u->op == POLY_OP_BUFFER || u->op == POLY_OP_PARAM || u->op == POLY_OP_AFTER)
+    return false;
+  return poly_uop_max_numel(ctx, u) > 1;
 }
 
 static int32_t x86_graph_vreg(PolyDType dt, bool buffer_value) {
   X86IselUseCtx *uctx = (X86IselUseCtx *)poly_graph_rewrite_userctx();
   int local_next = 0;
   return x86_virtual_tag_for_dtype(dt, buffer_value, uctx ? &uctx->next_vreg : &local_next);
+}
+
+static int32_t x86_graph_vreg_for_op(PolyDType dt, PolyX86Op op, bool buffer_value) {
+  X86IselUseCtx *uctx = (X86IselUseCtx *)poly_graph_rewrite_userctx();
+  int local_next = 0;
+  int *next = uctx ? &uctx->next_vreg : &local_next;
+  X86RegClass cls = buffer_value ? X86_REG_CLASS_WGPR
+                                 : x86_op_is_xmm_result(op) ? X86_REG_CLASS_XMM
+                                                            : x86_class_for_dtype(dt, false);
+  return x86_tag_virtual(cls, (*next)++);
+}
+
+/* tinygrad@2026-08-22/a9069c177a9d renderer/isa/x86.py:358-370. */
+static PolyUOp *x86_graph_rtag(PolyCtx *ctx, PolyUOp *u) {
+  if (!ctx || !u) return NULL;
+  return poly_uop_tagged_arg(
+      ctx, u->op, u->dtype, u->src, u->n_src, u->arg, 0, poly_arg_bool(true)
+  );
+}
+
+static PolyUOp *x86_alloc_vregs(
+    PolyCtx *ctx,
+    PolyUOp *u,
+    const PolyBindings *b
+) {
+  (void)b;
+  if (!u || (u->op != POLY_OP_INS && u->op != POLY_OP_BUFFER) || x86_uop_reg(u) >= 0)
+    return NULL;
+  if (u->op == POLY_OP_INS) {
+    PolyX86Op op = 0;
+    if (!x86_ins_op(u, &op) || op == POLY_X86_LOOP_CMP || op == POLY_X86_FRAME_INDEX ||
+        poly_dtype_eq(u->dtype, POLY_VOID))
+      return NULL;
+    int32_t def = x86_graph_vreg_for_op(u->dtype, op, false);
+    return x86_ins_ex(ctx, op, u->dtype, u->src, u->n_src, &def, 1, poly_arg_none());
+  }
+  PolyUOp **srcs = u->n_src > 0 ? malloc((size_t)u->n_src * sizeof(*srcs)) : NULL;
+  if (u->n_src > 0 && !srcs) return NULL;
+  for (int i = 0; i < u->n_src; i++) {
+    srcs[i] = x86_graph_rtag(ctx, u->src[i]);
+    if (!srcs[i]) {
+      free(srcs);
+      return NULL;
+    }
+  }
+  int32_t def = x86_graph_vreg(x86_u64(), true);
+  PolyUOp *ret = poly_uop_tagged_arg(
+      ctx, POLY_OP_BUFFER, u->dtype, srcs, u->n_src, u->arg, def,
+      x86_arg_int_tuple((int64_t[]){def}, 1)
+  );
+  free(srcs);
+  return ret;
 }
 
 static int32_t x86_graph_fixed_wgpr(int real_reg) {
@@ -1764,7 +1395,7 @@ static int32_t x86_graph_fixed_wgpr(int real_reg) {
 }
 
 static PolyDType x86_graph_abi_dtype(PolyUOp *u) {
-  if (u && u->op == POLY_OP_PARAM) return x86_u64();
+  if (u && u->op == POLY_OP_PARAM && !poly_uop_is_alu_param(u)) return x86_u64();
   return u ? u->dtype : POLY_VOID;
 }
 
@@ -1773,39 +1404,76 @@ static PolyUOp *rule_x86_isel_abi_graph(PolyCtx *ctx, PolyUOp *u, const PolyBind
   if (!u || (u->op != POLY_OP_PARAM && u->op != POLY_OP_SPECIAL)) return NULL;
   if (x86_uop_reg(u) >= 0) return NULL;
   X86IselUseCtx *uctx = (X86IselUseCtx *)poly_graph_rewrite_userctx();
-  int arg_idx = (u->op == POLY_OP_PARAM && u->arg.kind == POLY_ARG_INT)
-                    ? (int)u->arg.i
-                    : x86_func_arg_index(uctx, u);
+  int arg_idx = x86_func_arg_index(uctx, u);
+  if (arg_idx < 0) return NULL;
   int abi = x86_abi_gpr_for_arg(arg_idx);
-  if (abi < 0) return NULL;
   PolyDType dt = x86_graph_abi_dtype(u);
-  PolyUOp *arg = poly_uop_tagged_arg(
-      ctx, u->op, dt, NULL, 0, u->arg,
-      x86_tag_real(X86_REG_CLASS_WGPR, abi), poly_arg_none()
+  PolyUOp *mov_srcs[4];
+  int n_mov_srcs = 0;
+  if (abi >= 0) {
+    PolyUOp **shape_srcs = u->n_src > 0 ? malloc((size_t)u->n_src * sizeof(*shape_srcs)) : NULL;
+    if (u->n_src > 0 && !shape_srcs) return NULL;
+    for (int i = 0; i < u->n_src; i++) {
+      shape_srcs[i] = x86_graph_rtag(ctx, u->src[i]);
+      if (!shape_srcs[i]) {
+        free(shape_srcs);
+        return NULL;
+      }
+    }
+    int32_t real = x86_tag_real(X86_REG_CLASS_WGPR, abi);
+    mov_srcs[n_mov_srcs++] = poly_uop_tagged_arg(
+        ctx, u->op, dt, shape_srcs, u->n_src, u->arg, real,
+        x86_arg_int_tuple((int64_t[]){real}, 1)
+    );
+    free(shape_srcs);
+  } else {
+    /* tinygrad@2026-08-22/a9069c177a9d renderer/isa/x86.py:300-312.
+     * C stores FRAME_INDEX's integer tag in tag_arg because tag holds registers. */
+    int64_t caller_disp = ((int64_t)arg_idx - 5) * 8;
+    mov_srcs[n_mov_srcs++] = x86_define_reg(
+        ctx, x86_u64(), x86_tag_real(X86_REG_CLASS_WGPR, X86_REG_RSP)
+    );
+    mov_srcs[n_mov_srcs++] = x86_noop(ctx);
+    mov_srcs[n_mov_srcs++] = x86_ins_ex(
+        ctx, POLY_X86_FRAME_INDEX, POLY_INT32, NULL, 0, NULL, 0,
+        poly_arg_int(caller_disp)
+    );
+    mov_srcs[n_mov_srcs++] = x86_const_i(ctx, POLY_UINT8, 8);
+  }
+  return x86_ins(
+      ctx, POLY_X86_MOV, dt, mov_srcs, n_mov_srcs,
+      x86_graph_vreg(dt, u->op == POLY_OP_PARAM && !poly_uop_is_alu_param(u))
   );
-  PolyUOp *srcs[1] = {arg};
-  return x86_ins(ctx, POLY_X86_MOV, dt, srcs, 1, x86_graph_vreg(dt, u->op == POLY_OP_PARAM));
 }
 
 static int64_t x86_float_bits(PolyDType dt, double v);
 
-static PolyUOp *rule_x86_isel_const_graph(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
+static PolyUOp *rule_x86_isel_casted_const_graph(
+    PolyCtx *ctx,
+    PolyUOp *u,
+    const PolyBindings *b
+) {
   (void)b;
-  if (!u || u->op != POLY_OP_CONST || x86_const_is_imm(u) || u->dtype.count > 1)
+  if (!u || u->op != POLY_OP_CAST || u->n_src != 1 || !u->src[0] ||
+      u->src[0]->op != POLY_OP_CONST || poly_uop_max_numel(ctx, u) > 1 || u->tag != 0 ||
+      u->tag_arg.kind != POLY_ARG_NONE)
     return NULL;
-  X86IselUseCtx *uctx = (X86IselUseCtx *)poly_graph_rewrite_userctx();
-  if (x86_isel_is_structural_const(uctx, u)) return NULL;
-  if (u->arg.kind == POLY_ARG_INT || u->arg.kind == POLY_ARG_BOOL) {
-    int64_t v = u->arg.kind == POLY_ARG_BOOL ? (u->arg.b ? 1 : 0) : u->arg.i;
+  PolyUOp *c = u->src[0];
+  if ((c->arg.kind == POLY_ARG_INT || c->arg.kind == POLY_ARG_BIGINT ||
+       c->arg.kind == POLY_ARG_BOOL) &&
+      (x86_is_int_dtype(u->dtype) || poly_dtype_is_bool(u->dtype))) {
+    int64_t v = c->arg.kind == POLY_ARG_BOOL
+                    ? (c->arg.b ? 1 : 0)
+                    : (int64_t)poly_arg_integer_to_u64_mod(c->arg);
     PolyUOp *imm = x86_const_i(ctx, u->dtype, v);
     PolyUOp *srcs[1] = {imm};
     PolyX86Op op = x86_value_size(u->dtype, false) == 8 ? POLY_X86_MOVABS : POLY_X86_MOVi;
     return x86_ins(ctx, op, u->dtype, srcs, 1, x86_graph_vreg(u->dtype, false));
   }
-  if (u->arg.kind == POLY_ARG_FLOAT && x86_is_float_dtype(u->dtype)) {
+  if (c->arg.kind == POLY_ARG_FLOAT && x86_is_float_dtype(u->dtype)) {
     PolyDType idt = x86_int_for_float(u->dtype);
-    PolyUOp *bits = poly_uop0(ctx, POLY_OP_CONST, idt, poly_arg_int(x86_float_bits(u->dtype, u->arg.f)));
-    return poly_uop1(ctx, POLY_OP_BITCAST, u->dtype, bits, poly_arg_none());
+    PolyUOp *bits = x86_cconst(ctx, idt, poly_arg_int(x86_float_bits(u->dtype, c->arg.f)));
+    return bits ? poly_uop1(ctx, POLY_OP_BITCAST, u->dtype, bits, poly_arg_dtype(u->dtype)) : NULL;
   }
   return NULL;
 }
@@ -1816,47 +1484,6 @@ static PolyUOp *rule_x86_isel_cast_void_graph(PolyCtx *ctx, PolyUOp *u, const Po
   if (!u || u->op != POLY_OP_CAST || u->n_src != 1 || !poly_dtype_eq(u->dtype, POLY_VOID))
     return NULL;
   return poly_dtype_eq(u->src[0]->dtype, POLY_VOID) ? u->src[0] : NULL;
-}
-
-static PolyUOp *rule_x86_isel_float_index_lane0_graph(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
-  (void)b;
-  if (!u || u->op != POLY_OP_INDEX || u->n_src != 2 || !x86_is_float_dtype(u->dtype))
-    return NULL;
-  PolyUOp *base = u->src[0];
-  if (!base || base->dtype.count <= 1) return NULL;
-  int64_t lane = -1;
-  if (!x86_const_as_i64(u->src[1], &lane) || lane != 0) return NULL;
-  PolyUOp *scalar_load =
-      x86_graph_scalar_load_from_reg_vector_lane(ctx, base, u->dtype, (int)lane);
-  if (scalar_load) return scalar_load;
-  return poly_uop1(ctx, POLY_OP_NOOP, u->dtype, base, poly_arg_none());
-}
-
-static PolyUOp *rule_x86_isel_wide_load_lane_graph(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
-  (void)b;
-  if (!u || u->op != POLY_OP_INDEX || u->n_src != 2) return NULL;
-  PolyUOp *load = u->src[0];
-  if (!load || load->op != POLY_OP_LOAD || load->n_src != 1 || load->dtype.count <= 1)
-    return NULL;
-  if (x86_value_size(load->dtype, false) <= 16) return NULL;
-  int64_t lane = -1;
-  if (!x86_const_as_i64(u->src[1], &lane) || lane < 0 || lane >= load->dtype.count)
-    return NULL;
-  PolyUOp *shr = load->src[0];
-  if (!shr || shr->op != POLY_OP_SHRINK || shr->n_src < 3) return NULL;
-  PolyUOp *base = shr->src[0];
-  PolyUOp *start = shr->src[1];
-  if (!base || !start) return NULL;
-  PolyUOp *idx = start;
-  int64_t start_i = 0;
-  if (x86_const_as_i64(start, &start_i)) {
-    idx = poly_uop0(ctx, POLY_OP_CONST, start->dtype, poly_arg_int(start_i + lane));
-  } else if (lane != 0) {
-    PolyUOp *lane_uop = poly_uop0(ctx, POLY_OP_CONST, start->dtype, poly_arg_int(lane));
-    idx = poly_uop2(ctx, POLY_OP_ADD, start->dtype, start, lane_uop, poly_arg_none());
-  }
-  PolyUOp *addr = poly_uop2(ctx, POLY_OP_INDEX, base->dtype, base, idx, poly_arg_none());
-  return poly_uop1(ctx, POLY_OP_LOAD, u->dtype, addr, poly_arg_none());
 }
 
 static int x86_compare_mask_lane_itemsize(PolyUOp *base) {
@@ -1893,37 +1520,27 @@ static PolyUOp *x86_extract_compare_mask_bool_lane(PolyCtx *ctx, PolyUOp *base, 
   PolyX86Op op = item == 2 ? POLY_X86_VPEXTRW : item == 4 ? POLY_X86_VPEXTRD : POLY_X86_VPEXTRQ;
   PolyDType idt = x86_uint_dtype_for_itemsize(item);
   PolyUOp *srcs[2] = {base, x86_const_i(ctx, POLY_UINT8, lane)};
-  PolyUOp *bits = x86_ins(ctx, op, idt, srcs, 2, x86_graph_vreg(idt, false));
+  PolyUOp *bits = x86_ins(ctx, op, idt, srcs, 2, x86_graph_vreg_for_op(idt, op, false));
   PolyUOp *one = x86_const_i(ctx, idt, 1);
-  PolyUOp *one_imm = x86_imm_for_const(ctx, one);
-  if (!one_imm) return NULL;
-  PolyUOp *and_srcs[2] = {bits, one_imm};
-  PolyUOp *one_bit = x86_ins(ctx, POLY_X86_ANDi, idt, and_srcs, 2, x86_graph_vreg(idt, false));
+  if (!one) return NULL;
+  PolyUOp *and_srcs[2] = {bits, one};
+  PolyUOp *one_bit = x86_ins(
+      ctx, POLY_X86_ANDi, idt, and_srcs, 2,
+      x86_graph_vreg_for_op(idt, POLY_X86_ANDi, false)
+  );
   return poly_uop1(ctx, POLY_OP_NOOP, POLY_BOOL, one_bit, poly_arg_none());
 }
 
 static PolyUOp *rule_x86_isel_vector_index_graph(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
   (void)b;
-  if (!u || (u->op != POLY_OP_INDEX && u->op != POLY_OP_GEP)) return NULL;
+  if (!u || u->op != POLY_OP_INDEX) return NULL;
   PolyUOp *base = u->n_src > 0 ? u->src[0] : NULL;
-  if (!base || base->dtype.is_ptr || base->dtype.count <= 1) return NULL;
-  PolyX86Op base_op = 0;
-  if (!x86_ins_op(base, &base_op)) return NULL;
+  if (!base || !x86_graph_is_vec_xmm(ctx, base)) return NULL;
   int64_t lane = -1;
-  if (u->op == POLY_OP_INDEX) {
-    if (u->n_src < 2 || !x86_const_as_i64(u->src[1], &lane)) return NULL;
-  } else if (u->arg.kind == POLY_ARG_INT) {
-    lane = u->arg.i;
-  } else if (u->arg.kind == POLY_ARG_INT_TUPLE && u->arg.int_tuple.n == 1) {
-    lane = u->arg.int_tuple.vals[0];
-  } else {
-    return NULL;
-  }
-  if (lane < 0 || lane >= base->dtype.count) return NULL;
-  PolyUOp *scalar_load =
-      x86_graph_scalar_load_from_reg_vector_lane(ctx, base, u->dtype, (int)lane);
-  if (scalar_load) return scalar_load;
-  if (poly_dtype_is_bool(poly_dtype_scalar(u->dtype))) {
+  if (u->n_src < 2 || !x86_cast_const_as_i64(u->src[1], &lane)) return NULL;
+  int item = x86_dtype_itemsize(u->dtype);
+  if (lane < 0 || item <= 0 || lane >= 16 / item) return NULL;
+  if (poly_dtype_is_bool(u->dtype)) {
     PolyUOp *mask_lane = x86_extract_compare_mask_bool_lane(ctx, base, (int)lane);
     if (mask_lane) return mask_lane;
   }
@@ -1934,7 +1551,7 @@ static PolyUOp *rule_x86_isel_vector_index_graph(PolyCtx *ctx, PolyUOp *u, const
                                                     : POLY_X86_VPEXTRQ;
   int64_t immv = x86_is_float_dtype(u->dtype) ? lane * x86_dtype_itemsize(u->dtype) : lane;
   PolyUOp *srcs[2] = {base, x86_const_i(ctx, POLY_UINT8, immv)};
-  return x86_ins(ctx, op, u->dtype, srcs, 2, x86_graph_vreg(u->dtype, false));
+  return x86_ins(ctx, op, u->dtype, srcs, 2, x86_graph_vreg_for_op(u->dtype, op, false));
 }
 
 static PolyUOp *rule_x86_isel_range_graph(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
@@ -1943,10 +1560,10 @@ static PolyUOp *rule_x86_isel_range_graph(PolyCtx *ctx, PolyUOp *u, const PolyBi
   PolyUOp *srcs[8];
   bool changed = false;
   for (int i = 0; i < u->n_src; i++) srcs[i] = u->src[i];
+  PolyUOp *bound_src = u->src[0];
   int64_t bound = 0;
-  if (u->src[0] && u->src[0]->op == POLY_OP_CONST && !x86_const_is_imm(u->src[0]) &&
-      x86_const_as_i64(u->src[0], &bound)) {
-    srcs[0] = x86_const_i(ctx, u->src[0]->dtype, bound);
+  if (x86_cast_const_as_i64(bound_src, &bound)) {
+    srcs[0] = x86_const_i(ctx, u->dtype, bound);
     changed = true;
   }
   int32_t tag = u->tag;
@@ -1956,6 +1573,21 @@ static PolyUOp *rule_x86_isel_range_graph(PolyCtx *ctx, PolyUOp *u, const PolyBi
   }
   if (!changed) return NULL;
   return poly_uop_tagged_arg(ctx, POLY_OP_RANGE, u->dtype, srcs, u->n_src, u->arg, tag, u->tag_arg);
+}
+
+static PolyUOp *rule_x86_isel_loop_cmp_graph(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
+  (void)b;
+  if (!u || u->op != POLY_OP_END || u->n_src != 3 || !u->src[2] ||
+      !x86_op_is_comparison(u->src[2]->op) || u->src[2]->n_src != 2)
+    return NULL;
+  PolyUOp *cond = u->src[2];
+  PolyUOp *srcs[4] = {cond->src[0], cond->src[1], u->src[0], u->src[1]};
+  /* tinygrad@2026-08-22/a9069c177a9d renderer/isa/x86.py:358-360.
+   * PolyUOp.tag stores registers, so C carries cond.op in tag_arg. */
+  return poly_uop_tagged_arg(
+      ctx, POLY_OP_INS, cond->dtype, srcs, 4, poly_arg_int(POLY_X86_LOOP_CMP), 0,
+      poly_arg_int(cond->op)
+  );
 }
 
 static int x86_graph_fold_address(PolyCtx *ctx, PolyUOp *addr, PolyUOp *out[4]);
@@ -1988,19 +1620,11 @@ static bool x86_graph_stack_base_lane(PolyUOp *u, PolyUOp **base, int *lane) {
   }
   if (u->op == POLY_OP_INDEX && u->n_src >= 2) {
     int64_t li = 0;
-    if (!x86_const_as_i64(u->src[1], &li)) return false;
+    /* tinygrad@2026-08-22/a9069c177a9d renderer/isa/x86.py:218-220 reads
+     * the lane from INDEX.src[1].src[0], the current cconst topology. */
+    if (!x86_cast_const_as_i64(u->src[1], &li)) return false;
     *base = u->src[0];
     *lane = (int)li;
-    return *base != NULL;
-  }
-  if (u->op == POLY_OP_GEP && u->n_src >= 1) {
-    if (u->arg.kind == POLY_ARG_INT)
-      *lane = (int)u->arg.i;
-    else if (u->arg.kind == POLY_ARG_INT_TUPLE && u->arg.int_tuple.n > 0)
-      *lane = (int)u->arg.int_tuple.vals[0];
-    else
-      return false;
-    *base = u->src[0];
     return *base != NULL;
   }
   return true;
@@ -2011,166 +1635,58 @@ static PolyUOp *rule_x86_isel_stack_graph(PolyCtx *ctx, PolyUOp *u, const PolyBi
   if (!u || u->op != POLY_OP_STACK || u->n_src <= 1) return NULL;
   int ns = u->n_src;
 
-  if (x86_is_float_dtype(u->dtype) && x86_dtype_is_float_bits(u->dtype, 64)) {
-    if (!(ns == 2 || ns == 4)) return NULL;
-    PolyUOp *base[4] = {0};
-    int lane[4] = {0};
-    for (int i = 0; i < ns; i++) {
-      if (!x86_graph_stack_base_lane(u->src[i], &base[i], &lane[i])) return NULL;
-    }
-    if (lane[0] > 1 || lane[1] > 1) return NULL;
-    if (ns == 4 && !(base[0] == base[2] && base[1] == base[3] && lane[2] > 1 && lane[3] > 1))
-      return NULL;
-
-    int64_t immv = 0;
-    for (int i = 0; i < ns; i++)
-      immv |= ((int64_t)lane[i] & 0x3) << i;
-    PolyUOp *imm = x86_const_i(ctx, POLY_UINT8, immv);
-    PolyUOp *srcs[3] = {base[0], base[1], imm};
-    return x86_ins(ctx, POLY_X86_VSHUFPD, u->dtype, srcs, 3, x86_graph_vreg(u->dtype, false));
-  }
-
   if (x86_is_float_dtype(u->dtype) && x86_dtype_is_float_bits(u->dtype, 32)) {
-    bool same = true;
-    for (int i = 1; i < ns; i++) {
-      if (u->src[i] != u->src[0]) {
-        same = false;
-        break;
-      }
-    }
-    if (same) {
-      PolyUOp *srcs[1] = {u->src[0]};
-      return x86_ins(ctx, POLY_X86_VBROADCASTSS, u->dtype, srcs, 1, x86_graph_vreg(u->dtype, false));
-    }
-    if (ns == 4) {
-      PolyUOp *base[4] = {0};
-      int lane[4] = {0};
-      bool ok = true;
-      for (int i = 0; i < 4; i++) {
-        if (!x86_graph_stack_base_lane(u->src[i], &base[i], &lane[i]) || lane[i] < 0 || lane[i] > 3) {
-          ok = false;
-          break;
-        }
-      }
-      if (ok && base[0] == base[1] && base[2] == base[3]) {
-        int64_t immv = 0;
-        for (int i = 0; i < 4; i++)
-          immv |= ((int64_t)lane[i] & 0x3) << (2 * i);
-        PolyUOp *srcs[3] = {base[0], base[2], x86_const_i(ctx, POLY_UINT8, immv)};
-        return x86_ins(ctx, POLY_X86_VSHUFPS, u->dtype, srcs, 3, x86_graph_vreg(u->dtype, false));
-      }
-    }
-    PolyUOp *cur = x86_def_scratch(ctx, u->dtype);
-    bool cur_is_def = true;
+    /* tinygrad@2026-08-22/a9069c177a9d renderer/isa/x86.py:245-251
+     * builds STACK(float32) only by ordered VINSERTPS operations. */
+    PolyUOp *cur = x86_define_reg(
+        ctx, u->dtype, x86_graph_vreg_for_op(u->dtype, POLY_X86_VINSERTPS, false)
+    );
     for (int i = 0; i < ns; i++) {
       PolyUOp *base = NULL;
       int lane = 0;
       if (!x86_graph_stack_base_lane(u->src[i], &base, &lane) || lane < 0 || lane > 3)
         return NULL;
-      if (i == 0 && lane == 0) {
-        cur = base;
-        cur_is_def = false;
-        continue;
-      }
       PolyUOp *srcs[3] = {
           cur, base, x86_const_i(ctx, POLY_UINT8, ((int64_t)lane << 6) | ((int64_t)i << 4)),
       };
-      cur = x86_ins(ctx, POLY_X86_VINSERTPS, u->dtype, srcs, 3, x86_graph_vreg(u->dtype, false));
-      cur_is_def = false;
+      cur = x86_ins(
+          ctx, POLY_X86_VINSERTPS, u->dtype, srcs, 3,
+          x86_graph_vreg_for_op(u->dtype, POLY_X86_VINSERTPS, false)
+      );
     }
-    return cur_is_def ? NULL : cur;
+    return cur;
   }
 
   if (x86_dtype_is_float16(u->dtype)) {
-    PolyUOp *cur = x86_def_scratch(ctx, u->dtype);
-    PolyUOp *cache_src[16] = {0};
-    PolyUOp *cache_word[16] = {0};
-    int n_cache = 0;
+    /* tinygrad@2026-08-22/a9069c177a9d renderer/isa/x86.py:439-440
+     * routes float16 lanes through int16 before the shared VPINS lowering. */
+    PolyUOp *cur = x86_define_reg(
+        ctx, u->dtype, x86_graph_vreg_for_op(u->dtype, POLY_X86_VPINSRW, false)
+    );
     for (int i = 0; i < ns; i++) {
-      PolyUOp *src = u->src[i];
-      if (src && src->op == POLY_OP_LOAD && src->n_src == 1) {
-        PolyUOp *word = NULL;
-        for (int j = 0; j < n_cache; j++) {
-          if (cache_src[j] == src) {
-            word = cache_word[j];
-            break;
-          }
-        }
-        if (word) {
-          PolyUOp *srcs[3] = {cur, word, x86_const_i(ctx, POLY_UINT8, i)};
-          cur = x86_ins(ctx, POLY_X86_VPINSRW, u->dtype, srcs, 3, x86_graph_vreg(u->dtype, false));
-          continue;
-        }
-        PolyUOp *addr[4];
-        if (x86_graph_fold_address(ctx, src->src[0], addr) != 0) return NULL;
-        PolyUOp *srcs[6] = {
-            cur, addr[0], addr[1], addr[2], addr[3], x86_const_i(ctx, POLY_UINT8, i),
-        };
-        cur = x86_ins(ctx, POLY_X86_VPINSRW, u->dtype, srcs, 6, x86_graph_vreg(u->dtype, false));
-        if (n_cache < (int)(sizeof(cache_src) / sizeof(cache_src[0]))) {
-          PolyUOp *ext_srcs[2] = {cur, x86_const_i(ctx, POLY_UINT8, i)};
-          cache_word[n_cache] = x86_ins(
-              ctx, POLY_X86_VPEXTRW, POLY_INT16, ext_srcs, 2, x86_graph_vreg(POLY_INT16, false)
-          );
-          cache_src[n_cache++] = src;
-        }
-      } else if (src && x86_ins_op(src, NULL)) {
-        PolyUOp *ext_srcs[2] = {src, x86_const_i(ctx, POLY_UINT8, 0)};
-        PolyUOp *word = x86_ins(
-            ctx, POLY_X86_VPEXTRW, POLY_INT16, ext_srcs, 2, x86_graph_vreg(POLY_INT16, false)
-        );
-        PolyUOp *srcs[3] = {cur, word, x86_const_i(ctx, POLY_UINT8, i)};
-        cur = x86_ins(ctx, POLY_X86_VPINSRW, u->dtype, srcs, 3, x86_graph_vreg(u->dtype, false));
-      } else {
-        return NULL;
-      }
+      PolyUOp *word = poly_uop1(ctx, POLY_OP_BITCAST, POLY_INT16, u->src[i], poly_arg_dtype(POLY_INT16));
+      PolyUOp *srcs[3] = {cur, word, x86_const_i(ctx, POLY_UINT8, i)};
+      cur = x86_ins(
+          ctx, POLY_X86_VPINSRW, u->dtype, srcs, 3,
+          x86_graph_vreg_for_op(u->dtype, POLY_X86_VPINSRW, false)
+      );
     }
     return cur;
   }
 
   if (x86_is_int_dtype(u->dtype)) {
-    bool same = true;
-    for (int i = 1; i < ns; i++) {
-      if (u->src[i] != u->src[0]) {
-        same = false;
-        break;
-      }
-    }
-    int item = x86_dtype_itemsize(poly_dtype_scalar(u->dtype));
+    int item = x86_dtype_itemsize(u->dtype);
     if (item <= 0) return NULL;
-    if (same) {
-      PolyX86Op bcast = item == 1 ? POLY_X86_VPBROADCASTB
-                         : item == 2 ? POLY_X86_VPBROADCASTW
-                         : item == 4 ? POLY_X86_VPBROADCASTD
-                                     : POLY_X86_VPBROADCASTQ;
-      PolyUOp *src = u->src[0];
-      PolyUOp *srcs[1] = {src};
-      PolyUOp *candidate = x86_ins(ctx, bcast, u->dtype, srcs, 1, x86_graph_vreg(u->dtype, false));
-      X86IselUseCtx *uctx = (X86IselUseCtx *)poly_graph_rewrite_userctx();
-      if (src && src->op == POLY_OP_LOAD && src->n_src == 1 &&
-          x86_isel_foldable(uctx, candidate, src))
-        return candidate;
-
-      /* tinygrad x86.py:vpbroadcast: VPBROADCAST* takes an xmm/mem scalar
-       * source. If the source is not a foldable load, move the integer scalar
-       * to xmm by bitcasting through the same-size float dtype first. */
-      if (item == 1) {
-        src = poly_uop1(ctx, POLY_OP_CAST, POLY_INT16, src, poly_arg_none());
-        item = 2;
-      }
-      PolyDType fdt = item == 2 ? POLY_FLOAT16 : item == 4 ? POLY_FLOAT32 : POLY_FLOAT64;
-      src = poly_uop1(ctx, POLY_OP_BITCAST, fdt, src, poly_arg_none());
-      srcs[0] = src;
-      return x86_ins(ctx, bcast, u->dtype, srcs, 1, x86_graph_vreg(u->dtype, false));
-    }
+    /* tinygrad@2026-08-22/a9069c177a9d renderer/isa/x86.py:253-256
+     * inserts every integer lane; the June broadcast route was removed. */
     PolyX86Op op = item == 1 ? POLY_X86_VPINSRB
                     : item == 2 ? POLY_X86_VPINSRW
                     : item == 4 ? POLY_X86_VPINSRD
                                 : POLY_X86_VPINSRQ;
-    PolyUOp *cur = x86_def_scratch(ctx, u->dtype);
+    PolyUOp *cur = x86_define_reg(ctx, u->dtype, x86_graph_vreg_for_op(u->dtype, op, false));
     for (int i = 0; i < ns; i++) {
       PolyUOp *srcs[3] = {cur, u->src[i], x86_const_i(ctx, POLY_UINT8, i)};
-      cur = x86_ins(ctx, op, u->dtype, srcs, 3, x86_graph_vreg(u->dtype, false));
+      cur = x86_ins(ctx, op, u->dtype, srcs, 3, x86_graph_vreg_for_op(u->dtype, op, false));
     }
     return cur;
   }
@@ -2187,7 +1703,7 @@ static PolyUOp *x86_graph_scalar_low_lane(PolyUOp *u) {
 
 static PolyUOp *x86_graph_address_index_src(PolyCtx *ctx, PolyUOp *idx) {
   if (!idx) return NULL;
-  PolyDType s = poly_dtype_scalar(idx->dtype);
+  PolyDType s = idx->dtype;
   if (!poly_dtype_is_int(s) || poly_dtype_is_unsigned(s) || s.bitsize >= 64)
     return idx;
   int64_t vmin = 0, vmax = 0;
@@ -2217,12 +1733,12 @@ static int x86_graph_fold_address(PolyCtx *ctx, PolyUOp *addr, PolyUOp *out[4]) 
   int64_t c = 0;
   out[0] = base;
   out[3] = x86_const_i(ctx, POLY_UINT8, size);
-  if (x86_const_as_i64(idx, &c)) {
+  if (x86_cast_const_as_i64(idx, &c)) {
     out[1] = x86_noop(ctx);
     out[2] = x86_disp_const(ctx, c * scale);
     return 0;
   }
-  if (idx->op == POLY_OP_ADD && idx->n_src == 2 && x86_const_as_i64(idx->src[1], &c)) {
+  if (idx->op == POLY_OP_ADD && idx->n_src == 2 && x86_cast_const_as_i64(idx->src[1], &c)) {
     out[1] = x86_graph_address_index_src(ctx, idx->src[0]);
     out[2] = x86_disp_const(ctx, c * scale);
     return out[1] ? 0 : -1;
@@ -2232,105 +1748,73 @@ static int x86_graph_fold_address(PolyCtx *ctx, PolyUOp *addr, PolyUOp *out[4]) 
   return out[1] ? 0 : -1;
 }
 
-static bool x86_graph_address_is_reg_backed(PolyUOp *addr[4]) {
-  return addr && addr[0] && poly_program_memory_is(addr[0], POLY_ADDR_REG);
-}
-
-static bool x86_graph_load_address_tuple(PolyCtx *ctx, PolyUOp *load, PolyUOp *addr[4]) {
-  if (!ctx || !load || !addr) return false;
-  if (load->op == POLY_OP_LOAD && load->n_src == 1)
-    return x86_graph_fold_address(ctx, load->src[0], addr) == 0;
-  if (x86_ins_is_load_addr(load)) {
-    for (int i = 0; i < 4; i++) addr[i] = load->src[i];
-    return true;
-  }
-  return false;
-}
-
-static PolyUOp *x86_graph_scalar_load_from_reg_vector_lane(
-    PolyCtx *ctx,
-    PolyUOp *load,
-    PolyDType lane_dtype,
-    int lane
-) {
-  if (!ctx || !load || lane < 0 || !x86_is_float_dtype(lane_dtype))
-    return NULL;
-  PolyUOp *addr[4];
-  if (!x86_graph_load_address_tuple(ctx, load, addr) ||
-      !x86_graph_address_is_reg_backed(addr))
-    return NULL;
-  int item = x86_dtype_itemsize(lane_dtype);
-  if (item <= 0) return NULL;
-  int64_t disp = 0;
-  if (!x86_const_as_i64(addr[2], &disp)) return NULL;
-  addr[2] = x86_disp_const(ctx, disp + (int64_t)lane * item);
-  addr[3] = x86_const_i(ctx, POLY_UINT8, item);
-  return x86_ins(
-      ctx, x86_mov_op_for_dtype(lane_dtype, false), lane_dtype, addr, 4,
-      x86_graph_vreg(lane_dtype, false)
-  );
-}
-
-static PolyX86Op x86_vector_int_cmp_op(PolyOps op, PolyDType dt, bool *swap);
-static PolyUOp *x86_alias_value_as_dtype(PolyCtx *ctx, PolyUOp *src, PolyDType dtype);
+static PolyX86Op x86_vector_int_cmp_op(PolyOps op, PolyDType dt, bool vec, bool *swap);
 static PolyUOp *x86_graph_flag_compare(PolyCtx *ctx, PolyUOp *mask);
 
-static PolyUOp *rule_x86_isel_fma_graph(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
-  (void)b;
-  if (!u || u->op != POLY_OP_ADD || u->n_src != 2 || !x86_dtype_can_fma(u->dtype))
-    return NULL;
-  X86IselUseCtx *uctx = (X86IselUseCtx *)poly_graph_rewrite_userctx();
-  for (int side = 0; side < 2; side++) {
-    PolyUOp *mul = u->src[side];
-    if (!mul || mul->op != POLY_OP_MUL || mul->n_src != 2) continue;
-    if (!poly_dtype_eq(mul->dtype, u->dtype)) continue;
-    if (!x86_isel_foldable(uctx, u, mul)) continue;
-    PolyUOp *addend = u->src[side ^ 1];
-    return poly_uop3(ctx, POLY_OP_MULACC, u->dtype, mul->src[0], mul->src[1], addend, poly_arg_none());
-  }
-  return NULL;
+static int x86_graph_value_size(PolyCtx *ctx, PolyUOp *u) {
+  int64_t numel = poly_uop_max_numel(ctx, u);
+  int item = u ? x86_dtype_itemsize(u->dtype) : 0;
+  return numel > 0 && item > 0 && numel <= INT_MAX / item ? (int)numel * item : -1;
 }
 
-static bool x86_graph_load_dtype_supported(PolyDType dt) {
-  if (x86_dtype_is_float16(dt)) {
-    int bytes = x86_value_size(dt, false);
-    return dt.count <= 1 || bytes == 4 || bytes == 8 || bytes == 16;
-  }
-  if (x86_dtype_is_float_bits(dt, 64) && dt.count > 1 && x86_value_size(dt, false) != 16)
-    return false;
-  return true;
+static PolyX86Op x86_graph_xmm_sz(PolyCtx *ctx, PolyUOp *u, bool store) {
+  int bytes = x86_graph_value_size(ctx, u);
+  if (bytes >= 16) return store ? POLY_X86_VMOVUPSm : POLY_X86_VMOVUPS;
+  if (bytes >= 8) return store ? POLY_X86_VMOVSDm : POLY_X86_VMOVSD;
+  return store ? POLY_X86_VMOVSSm : POLY_X86_VMOVSS;
+}
+
+static bool x86_graph_load_dtype_supported(PolyCtx *ctx, PolyUOp *u) {
+  int64_t numel = poly_uop_max_numel(ctx, u);
+  int bytes = x86_graph_value_size(ctx, u);
+  if (numel <= 0 || bytes <= 0 || bytes > 16) return false;
+  if (x86_dtype_is_float16(u->dtype)) return numel == 1 || bytes == 4 || bytes == 8 || bytes == 16;
+  return !(x86_dtype_is_float_bits(u->dtype, 64) && numel > 1 && bytes != 16);
 }
 
 static PolyUOp *rule_x86_isel_load_graph(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
   (void)b;
-  if (!u || u->op != POLY_OP_LOAD || u->n_src != 1 || !x86_graph_load_dtype_supported(u->dtype))
+  if (!u || u->op != POLY_OP_LOAD || u->n_src != 1 || !x86_graph_load_dtype_supported(ctx, u))
     return NULL;
   PolyUOp *addr[4];
   if (x86_graph_fold_address(ctx, u->src[0], addr) != 0) return NULL;
-  int32_t def = x86_graph_vreg(u->dtype, false);
-  if (x86_dtype_is_float16(u->dtype) && u->dtype.count <= 1) {
+  int64_t numel = poly_uop_max_numel(ctx, u);
+  int bytes = x86_graph_value_size(ctx, u);
+  PolyX86Op op = 0;
+  if (x86_is_float_dtype(u->dtype)) {
+    op = x86_dtype_is_float16(u->dtype) && bytes == 2 ? POLY_X86_VPINSRW
+                                                       : x86_graph_xmm_sz(ctx, u, false);
+  } else if (x86_is_int_dtype(u->dtype)) {
+    op = numel == 1 ? POLY_X86_MOV
+         : bytes == 2 ? POLY_X86_VPINSRW
+                      : x86_graph_xmm_sz(ctx, u, false);
+  }
+  if (!op) return NULL;
+  int32_t def = x86_graph_vreg_for_op(u->dtype, op, false);
+  if (op == POLY_X86_VPINSRW) {
     PolyUOp *srcs[6] = {
         x86_define_reg(ctx, u->dtype, def), addr[0], addr[1], addr[2], addr[3],
         x86_const_i(ctx, POLY_UINT8, 0),
     };
-    return x86_ins(ctx, POLY_X86_VPINSRW, u->dtype, srcs, 6, def);
+    return x86_ins(ctx, op, u->dtype, srcs, 6, def);
   }
-  return x86_ins(ctx, x86_mov_op_for_dtype(u->dtype, false), u->dtype, addr, 4, def);
+  return x86_ins(ctx, op, u->dtype, addr, 4, def);
 }
 
 static PolyUOp *rule_x86_isel_float_bin_graph(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
   (void)b;
   if (!u || u->n_src != 2 || !x86_is_float_dtype(u->dtype) || x86_dtype_is_float16(u->dtype))
     return NULL;
-  PolyX86Op op = x86_float_bin_op(u->op, u->dtype);
+  bool vec = poly_uop_max_numel(ctx, u) > 1;
+  PolyX86Op op = x86_float_bin_op(u->op, u->dtype, vec);
   if (!op) return NULL;
   PolyUOp *srcs[2] = {u->src[0], u->src[1]};
-  if (u->dtype.count <= 1) {
+  if (!vec) {
     srcs[0] = x86_graph_scalar_low_lane(srcs[0]);
     srcs[1] = x86_graph_scalar_low_lane(srcs[1]);
     if (!srcs[0] || !srcs[1]) return NULL;
   }
-  return x86_ins(ctx, op, u->dtype, srcs, 2, x86_graph_vreg(u->dtype, false));
+  return x86_ins(ctx, op, u->dtype, srcs, 2, x86_graph_vreg_for_op(u->dtype, op, false));
 }
 
 static PolyUOp *rule_x86_isel_float_unary_graph(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
@@ -2338,23 +1822,24 @@ static PolyUOp *rule_x86_isel_float_unary_graph(PolyCtx *ctx, PolyUOp *u, const 
   if (!u || u->n_src != 1 || !x86_is_float_dtype(u->dtype) || x86_dtype_is_float16(u->dtype))
     return NULL;
   PolyX86Op op = 0;
+  bool vec = poly_uop_max_numel(ctx, u) > 1;
   PolyUOp *srcs[3];
   int ns = 0;
   srcs[ns++] = u->src[0];
   if (u->op == POLY_OP_SQRT) {
     op = x86_dtype_is_float_bits(u->dtype, 64)
-             ? (u->dtype.count > 1 ? POLY_X86_VSQRTPD : POLY_X86_VSQRTSD)
-             : (u->dtype.count > 1 ? POLY_X86_VSQRTPS : POLY_X86_VSQRTSS);
-    if (u->dtype.count == 1) srcs[ns++] = u->src[0];
+             ? (vec ? POLY_X86_VSQRTPD : POLY_X86_VSQRTSD)
+             : (vec ? POLY_X86_VSQRTPS : POLY_X86_VSQRTSS);
+    if (!vec) srcs[ns++] = u->src[0];
   } else if (u->op == POLY_OP_TRUNC) {
     op = x86_dtype_is_float_bits(u->dtype, 64)
-             ? (u->dtype.count > 1 ? POLY_X86_VROUNDPD : POLY_X86_VROUNDSD)
-             : (u->dtype.count > 1 ? POLY_X86_VROUNDPS : POLY_X86_VROUNDSS);
-    if (u->dtype.count == 1) srcs[ns++] = u->src[0];
+             ? (vec ? POLY_X86_VROUNDPD : POLY_X86_VROUNDSD)
+             : (vec ? POLY_X86_VROUNDPS : POLY_X86_VROUNDSS);
+    if (!vec) srcs[ns++] = u->src[0];
     srcs[ns++] = x86_const_i(ctx, POLY_UINT8, 3);
   }
   if (!op) return NULL;
-  return x86_ins(ctx, op, u->dtype, srcs, ns, x86_graph_vreg(u->dtype, false));
+  return x86_ins(ctx, op, u->dtype, srcs, ns, x86_graph_vreg_for_op(u->dtype, op, false));
 }
 
 static PolyUOp *rule_x86_isel_compare_graph(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
@@ -2368,68 +1853,69 @@ static PolyUOp *rule_x86_isel_compare_graph(PolyCtx *ctx, PolyUOp *u, const Poly
     return NULL;
   PolyUOp *lhs = u->src[0];
   PolyUOp *rhs = u->src[1];
-  if (u->dtype.count <= 1) {
+  bool vec = poly_uop_max_numel(ctx, u) > 1;
+  if (!vec) {
     lhs = x86_graph_scalar_low_lane(lhs);
     rhs = x86_graph_scalar_low_lane(rhs);
     if (!lhs || !rhs) return NULL;
   }
   PolyDType src_dt = lhs->dtype;
-  if (poly_dtype_eq(u->dtype, POLY_BOOL) && x86_is_float_dtype(src_dt) &&
+  if (!vec && poly_dtype_eq(u->dtype, POLY_BOOL) && x86_is_float_dtype(src_dt) &&
       !x86_dtype_is_float16(src_dt)) {
     PolyUOp *imm = x86_const_i(
         ctx, POLY_UINT8,
         u->op == POLY_OP_CMPLT ? 1 : u->op == POLY_OP_CMPNE ? 4 : 0
     );
     PolyUOp *cmp_srcs[3] = {lhs, rhs, imm};
-    int32_t mask_def = x86_graph_vreg(src_dt, false);
     PolyX86Op cmp_op = x86_dtype_is_float_bits(src_dt, 64) ? POLY_X86_VCMPSD : POLY_X86_VCMPSS;
+    int32_t mask_def = x86_graph_vreg_for_op(src_dt, cmp_op, false);
     PolyUOp *mask = x86_ins(ctx, cmp_op, src_dt, cmp_srcs, 3, mask_def);
     PolyDType idt = x86_int_for_float(src_dt);
-    int32_t mov_def = x86_graph_vreg(idt, false);
-    PolyUOp *mov_srcs[1] = {mask};
     PolyX86Op mov_op = x86_dtype_itemsize(idt) == 8 ? POLY_X86_VMOVQm : POLY_X86_VMOVDm;
+    int32_t mov_def = x86_graph_vreg_for_op(idt, mov_op, false);
+    PolyUOp *mov_srcs[1] = {mask};
     PolyUOp *bits = x86_ins(ctx, mov_op, idt, mov_srcs, 1, mov_def);
-    PolyUOp *one = x86_const_i(ctx, idt, 1);
-    PolyUOp *one_imm = x86_imm_for_const(ctx, one);
-    if (!one_imm) return NULL;
-    PolyUOp *and_srcs[2] = {bits, one_imm};
+    PolyUOp *one = x86_to_imm(ctx, x86_cconst(ctx, idt, poly_arg_int(1)));
+    if (!one) return NULL;
+    PolyUOp *and_srcs[2] = {bits, one};
     PolyUOp *one_bit = x86_ins(ctx, POLY_X86_ANDi, idt, and_srcs, 2, x86_graph_vreg(idt, false));
     return poly_uop1(ctx, POLY_OP_NOOP, POLY_BOOL, one_bit, poly_arg_none());
   }
-  if (poly_dtype_eq(u->dtype, POLY_BOOL) && x86_is_int_dtype(src_dt)) {
+  if (!vec && poly_dtype_eq(u->dtype, POLY_BOOL) && x86_is_int_dtype(src_dt)) {
     PolyUOp *flag = x86_graph_flag_compare(ctx, u);
     if (!flag) return NULL;
     PolyX86Op setop = u->op == POLY_OP_CMPLT
-                          ? (poly_dtype_is_unsigned(poly_dtype_scalar(src_dt)) ? POLY_X86_SETB
+                          ? (poly_dtype_is_unsigned(src_dt) ? POLY_X86_SETB
                                                                                 : POLY_X86_SETL)
                       : u->op == POLY_OP_CMPEQ ? POLY_X86_SETE
                                                : POLY_X86_SETNE;
     PolyUOp *srcs[1] = {flag};
-    return x86_ins(ctx, setop, u->dtype, srcs, 1, x86_graph_vreg(u->dtype, false));
+    return x86_ins(ctx, setop, u->dtype, srcs, 1, x86_graph_vreg_for_op(u->dtype, setop, false));
   }
   if (x86_is_float_dtype(src_dt) && !x86_dtype_is_float16(src_dt) &&
-      (!poly_dtype_eq(u->dtype, POLY_BOOL) || src_dt.count > 1)) {
+      (!poly_dtype_eq(u->dtype, POLY_BOOL) || vec)) {
     PolyUOp *imm = x86_const_i(
         ctx, POLY_UINT8,
         u->op == POLY_OP_CMPLT ? 1 : u->op == POLY_OP_CMPNE ? 4 : 0
     );
     PolyUOp *srcs[3] = {lhs, rhs, imm};
     PolyX86Op op = x86_dtype_is_float_bits(src_dt, 64)
-                       ? (src_dt.count > 1 ? POLY_X86_VCMPPD : POLY_X86_VCMPSD)
-                       : (src_dt.count > 1 ? POLY_X86_VCMPPS : POLY_X86_VCMPSS);
-    return x86_ins(ctx, op, u->dtype, srcs, 3, x86_graph_vreg(u->dtype, false));
+                       ? (vec ? POLY_X86_VCMPPD : POLY_X86_VCMPSD)
+                       : (vec ? POLY_X86_VCMPPS : POLY_X86_VCMPSS);
+    return x86_ins(ctx, op, u->dtype, srcs, 3, x86_graph_vreg_for_op(u->dtype, op, false));
   }
   bool swap = false;
-  PolyX86Op op = x86_vector_int_cmp_op(u->op, src_dt, &swap);
+  PolyX86Op op = x86_vector_int_cmp_op(u->op, src_dt, vec, &swap);
   if (!op) return NULL;
   PolyUOp *srcs[2] = {swap ? rhs : lhs, swap ? lhs : rhs};
-  return x86_ins(ctx, op, u->dtype, srcs, 2, x86_graph_vreg(u->dtype, false));
+  return x86_ins(ctx, op, u->dtype, srcs, 2, x86_graph_vreg_for_op(u->dtype, op, false));
 }
 
 static PolyUOp *x86_graph_cmp_mask_as_value(PolyCtx *ctx, PolyUOp *mask) {
   if (!ctx || !mask || !x86_op_is_comparison(mask->op) || mask->n_src != 2) return NULL;
   PolyUOp *srcs[2] = {mask->src[0], mask->src[1]};
-  if (mask->dtype.count <= 1 || srcs[0]->dtype.count <= 1 || srcs[1]->dtype.count <= 1) {
+  if (poly_uop_max_numel(ctx, mask) <= 1 || poly_uop_max_numel(ctx, srcs[0]) <= 1 ||
+      poly_uop_max_numel(ctx, srcs[1]) <= 1) {
     srcs[0] = x86_graph_scalar_low_lane(srcs[0]);
     srcs[1] = x86_graph_scalar_low_lane(srcs[1]);
     if (!srcs[0] || !srcs[1]) return NULL;
@@ -2438,18 +1924,24 @@ static PolyUOp *x86_graph_cmp_mask_as_value(PolyCtx *ctx, PolyUOp *mask) {
 }
 
 static PolyUOp *x86_graph_materialize_scalar_int_const(PolyCtx *ctx, PolyUOp *u) {
-  if (!u || u->op != POLY_OP_CONST || u->dtype.count > 1 || !x86_is_int_dtype(u->dtype))
+  if (!u || poly_uop_max_numel(ctx, u) > 1 || !x86_is_int_dtype(u->dtype))
     return u;
-  if (u->arg.kind != POLY_ARG_INT && u->arg.kind != POLY_ARG_BIGINT &&
-      u->arg.kind != POLY_ARG_BOOL)
+  PolyUOp *c = u;
+  if (u->op == POLY_OP_CAST && u->n_src == 1 && u->src[0] &&
+      u->src[0]->op == POLY_OP_CONST)
+    c = u->src[0];
+  else if (u->op != POLY_OP_CONST)
     return u;
-  int64_t v = u->arg.kind == POLY_ARG_BOOL
-                  ? (u->arg.b ? 1 : 0)
-                  : (int64_t)poly_arg_integer_to_u64_mod(u->arg);
+  if (c->arg.kind != POLY_ARG_INT && c->arg.kind != POLY_ARG_BIGINT &&
+      c->arg.kind != POLY_ARG_BOOL)
+    return u;
+  int64_t v = c->arg.kind == POLY_ARG_BOOL
+                  ? (c->arg.b ? 1 : 0)
+                  : (int64_t)poly_arg_integer_to_u64_mod(c->arg);
   PolyUOp *imm = x86_const_i(ctx, u->dtype, v);
   PolyUOp *srcs[1] = {imm};
   PolyX86Op op = x86_value_size(u->dtype, false) == 8 ? POLY_X86_MOVABS : POLY_X86_MOVi;
-  return x86_ins(ctx, op, u->dtype, srcs, 1, x86_graph_vreg(u->dtype, false));
+  return x86_ins(ctx, op, u->dtype, srcs, 1, x86_graph_vreg_for_op(u->dtype, op, false));
 }
 
 static PolyUOp *x86_graph_materialize_cmp_lhs(PolyCtx *ctx, PolyUOp *u) {
@@ -2457,7 +1949,7 @@ static PolyUOp *x86_graph_materialize_cmp_lhs(PolyCtx *ctx, PolyUOp *u) {
   u = x86_graph_materialize_scalar_int_const(ctx, u);
   if (!u) return NULL;
   if (u->op != POLY_OP_LOAD) return u;
-  if (u->n_src != 1 || !x86_graph_load_dtype_supported(u->dtype)) return NULL;
+  if (u->n_src != 1 || !x86_graph_load_dtype_supported(ctx, u)) return NULL;
   PolyUOp *addr[4];
   if (x86_graph_fold_address(ctx, u->src[0], addr) != 0) return NULL;
   return x86_ins(
@@ -2476,7 +1968,7 @@ static PolyUOp *x86_graph_flag_compare(PolyCtx *ctx, PolyUOp *mask) {
   if (x86_is_float_dtype(lhs_dt)) {
     cmp_op = x86_dtype_is_float_bits(lhs_dt, 64) ? POLY_X86_VUCOMISD : POLY_X86_VUCOMISS;
   } else {
-    PolyUOp *imm = mask->src[1] && mask->src[1]->op == POLY_OP_CONST ? x86_imm_for_const(ctx, mask->src[1]) : NULL;
+    PolyUOp *imm = x86_to_imm(ctx, mask->src[1]);
     if (imm) {
       srcs[1] = imm;
       cmp_op = POLY_X86_CMPi;
@@ -2492,28 +1984,7 @@ static PolyUOp *rule_x86_isel_where_graph(PolyCtx *ctx, PolyUOp *u, const PolyBi
   if (!u || u->op != POLY_OP_WHERE || u->n_src != 3) return NULL;
   PolyUOp *mask = u->src[0];
   if (!mask || !x86_op_is_comparison(mask->op) || mask->n_src != 2) return NULL;
-
-  if (x86_is_float_dtype(u->dtype) && mask->op == POLY_OP_CMPLT &&
-      x86_is_float_dtype(mask->src[0]->dtype)) {
-    PolyUOp *srcs[2] = {mask->src[0], mask->src[1]};
-    if (u->dtype.count <= 1) {
-      srcs[0] = x86_graph_scalar_low_lane(srcs[0]);
-      srcs[1] = x86_graph_scalar_low_lane(srcs[1]);
-      if (!srcs[0] || !srcs[1]) return NULL;
-    }
-    if (u->src[1] == mask->src[1] && u->src[2] == mask->src[0]) {
-      PolyX86Op op = x86_dtype_is_float_bits(u->dtype, 64)
-                         ? (u->dtype.count > 1 ? POLY_X86_VMAXPD : POLY_X86_VMAXSD)
-                         : (u->dtype.count > 1 ? POLY_X86_VMAXPS : POLY_X86_VMAXSS);
-      return x86_ins(ctx, op, u->dtype, srcs, 2, x86_graph_vreg(u->dtype, false));
-    }
-    if (u->src[1] == mask->src[0] && u->src[2] == mask->src[1]) {
-      PolyX86Op op = x86_dtype_is_float_bits(u->dtype, 64)
-                         ? (u->dtype.count > 1 ? POLY_X86_VMINPD : POLY_X86_VMINSD)
-                         : (u->dtype.count > 1 ? POLY_X86_VMINPS : POLY_X86_VMINSS);
-      return x86_ins(ctx, op, u->dtype, srcs, 2, x86_graph_vreg(u->dtype, false));
-    }
-  }
+  bool vec = poly_uop_max_numel(ctx, u) > 1;
 
   if (x86_is_float_dtype(u->dtype) && x86_is_float_dtype(mask->src[0]->dtype)) {
     PolyUOp *mask_value = x86_graph_cmp_mask_as_value(ctx, mask);
@@ -2522,26 +1993,29 @@ static PolyUOp *rule_x86_isel_where_graph(PolyCtx *ctx, PolyUOp *u, const PolyBi
                                                          : POLY_X86_VBLENDVPS;
     PolyUOp *falsev = u->src[2];
     PolyUOp *truev = u->src[1];
-    if (u->dtype.count <= 1) {
+    if (!vec) {
       falsev = x86_graph_scalar_low_lane(falsev);
       truev = x86_graph_scalar_low_lane(truev);
       if (!falsev || !truev) return NULL;
     }
     PolyUOp *srcs[3] = {falsev, truev, mask_value};
-    return x86_ins(ctx, op, u->dtype, srcs, 3, x86_graph_vreg(u->dtype, false));
+    return x86_ins(ctx, op, u->dtype, srcs, 3, x86_graph_vreg_for_op(u->dtype, op, false));
   }
 
-  if (u->dtype.count > 1 && x86_is_int_dtype(u->dtype) && x86_is_int_dtype(mask->src[0]->dtype)) {
+  if (vec && x86_is_int_dtype(u->dtype) && x86_is_int_dtype(mask->src[0]->dtype)) {
     PolyUOp *mask_value = x86_graph_cmp_mask_as_value(ctx, mask);
     if (!mask_value) return NULL;
     PolyUOp *srcs[3] = {u->src[2], u->src[1], mask_value};
-    return x86_ins(ctx, POLY_X86_VPBLENDVB, u->dtype, srcs, 3, x86_graph_vreg(u->dtype, false));
+    return x86_ins(
+        ctx, POLY_X86_VPBLENDVB, u->dtype, srcs, 3,
+        x86_graph_vreg_for_op(u->dtype, POLY_X86_VPBLENDVB, false)
+    );
   }
 
-  if (u->dtype.count <= 1) {
+  if (!vec) {
     PolyUOp *flag = x86_graph_flag_compare(ctx, mask);
     if (!flag) return NULL;
-    PolyDType mask_src = poly_dtype_scalar(mask->src[0]->dtype);
+    PolyDType mask_src = mask->src[0]->dtype;
     bool signed_int = poly_dtype_is_int(mask_src) && !poly_dtype_is_unsigned(mask_src);
     PolyX86Op op = mask->op == POLY_OP_CMPLT   ? (signed_int ? POLY_X86_CMOVL : POLY_X86_CMOVB)
                    : mask->op == POLY_OP_CMPEQ ? POLY_X86_CMOVE
@@ -2551,7 +2025,7 @@ static PolyUOp *rule_x86_isel_where_graph(PolyCtx *ctx, PolyUOp *u, const PolyBi
         x86_graph_materialize_scalar_int_const(ctx, u->src[1]),
         flag,
     };
-    return x86_ins(ctx, op, u->dtype, srcs, 3, x86_graph_vreg(u->dtype, false));
+    return x86_ins(ctx, op, u->dtype, srcs, 3, x86_graph_vreg_for_op(u->dtype, op, false));
   }
   return NULL;
 }
@@ -2564,7 +2038,7 @@ static PolyUOp *rule_x86_isel_if_graph(PolyCtx *ctx, PolyUOp *u, const PolyBindi
   if (u->tag_arg.kind != POLY_ARG_STRING || !u->tag_arg.str) return NULL;
   PolyUOp *flag = x86_graph_flag_compare(ctx, mask);
   if (!flag) return NULL;
-  PolyDType mask_src = poly_dtype_scalar(mask->src[0]->dtype);
+  PolyDType mask_src = mask->src[0]->dtype;
   bool signed_int = poly_dtype_is_int(mask_src) && !poly_dtype_is_unsigned(mask_src);
   PolyX86Op op = mask->op == POLY_OP_CMPLT   ? (signed_int ? POLY_X86_JL : POLY_X86_JB)
                  : mask->op == POLY_OP_CMPEQ ? POLY_X86_JE
@@ -2580,34 +2054,54 @@ static PolyUOp *rule_x86_isel_scalar_int_bin_graph(
 ) {
   (void)b;
   if (!u || u->n_src != 2 || !x86_is_int_dtype(u->dtype)) return NULL;
-  if (u->dtype.count > 1) {
-    PolyX86Op op = x86_int_bin_op(u->op, u->dtype, false);
+  bool vec = poly_uop_max_numel(ctx, u) > 1;
+  if (vec) {
+    PolyX86Op op = x86_int_bin_op(u->op, u->dtype, false, true);
     if (!op) return NULL;
     PolyUOp *srcs[2] = {u->src[0], u->src[1]};
-    return x86_ins(ctx, op, u->dtype, srcs, 2, x86_graph_vreg(u->dtype, false));
+    return x86_ins(ctx, op, u->dtype, srcs, 2, x86_graph_vreg_for_op(u->dtype, op, false));
   }
   bool imm = false;
   PolyUOp *rhs = u->src[1];
-  if (rhs && rhs->op == POLY_OP_CONST) {
-    rhs = x86_imm_for_const(ctx, rhs);
-    if (!rhs) return NULL;
-    if (u->op == POLY_OP_SHL || u->op == POLY_OP_SHR)
-      rhs = x86_const_i(ctx, POLY_UINT8, rhs->arg.i);
+  if ((rhs = x86_to_imm(ctx, rhs)) != NULL) {
+    if (u->op == POLY_OP_SHL || u->op == POLY_OP_SHR) {
+      int64_t shift = 0;
+      if (!x86_uop_const_i64(rhs, &shift)) return NULL;
+      rhs = x86_const_i(ctx, POLY_UINT8, shift);
+    }
     imm = true;
+  } else {
+    rhs = u->src[1];
   }
-  PolyX86Op op = x86_int_bin_op(u->op, u->dtype, imm);
+  PolyX86Op op = x86_int_bin_op(u->op, u->dtype, imm, false);
   if (!op) return NULL;
+  if (!imm && (u->op == POLY_OP_SHL || u->op == POLY_OP_SHR)) {
+    /* tinygrad x86.py:277-280,470-472: variable shifts use CL.  Keep the
+     * shifted value out of RCX and materialize the count in RCX. */
+    PolyUOp *value_srcs[1] = {u->src[0]};
+    PolyUOp *count_srcs[1] = {rhs};
+    PolyUOp *value = x86_ins(
+        ctx, POLY_X86_MOV, u->dtype, value_srcs, 1,
+        x86_graph_vreg_for_op(u->dtype, POLY_X86_MOV, false)
+    );
+    PolyUOp *count = x86_ins(
+        ctx, POLY_X86_MOV, rhs->dtype, count_srcs, 1,
+        x86_tag_real(X86_REG_CLASS_WGPR, X86_REG_RCX)
+    );
+    PolyUOp *srcs[2] = {value, count};
+    return x86_ins(ctx, op, u->dtype, srcs, 2, x86_graph_vreg_for_op(u->dtype, op, false));
+  }
   PolyUOp *srcs[2] = {u->src[0], rhs};
-  return x86_ins(ctx, op, u->dtype, srcs, 2, x86_graph_vreg(u->dtype, false));
+  return x86_ins(ctx, op, u->dtype, srcs, 2, x86_graph_vreg_for_op(u->dtype, op, false));
 }
 
 static PolyUOp *rule_x86_isel_cdiv_graph(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
   (void)b;
-  if (!u || u->op != POLY_OP_CDIV || u->n_src != 2 || u->dtype.count > 1 ||
+  if (!u || u->op != POLY_OP_CDIV || u->n_src != 2 || poly_uop_max_numel(ctx, u) > 1 ||
       !x86_is_int_dtype(u->dtype))
     return NULL;
 
-  PolyDType sdt = poly_dtype_scalar(u->dtype);
+  PolyDType sdt = u->dtype;
   int bytes = x86_dtype_itemsize(u->dtype);
   if (bytes <= 0) return NULL;
   bool is_unsigned = poly_dtype_is_unsigned(sdt);
@@ -2676,13 +2170,14 @@ static PolyUOp *rule_x86_isel_cast_graph(PolyCtx *ctx, PolyUOp *u, const PolyBin
   PolyUOp *srcs[3];
   int ns = 1;
   srcs[0] = src;
+  bool vec = poly_uop_max_numel(ctx, u) > 1;
 
   if (x86_is_int_dtype(src->dtype) && x86_is_float_dtype(u->dtype)) {
-    if (src->dtype.count > 1) {
-      if (poly_dtype_eq(poly_dtype_scalar(src->dtype), POLY_INT32) &&
+    if (vec) {
+      if (poly_dtype_eq(src->dtype, POLY_INT32) &&
           x86_dtype_is_float32(u->dtype))
         op = POLY_X86_VCVTDQ2PS;
-      else if (poly_dtype_eq(poly_dtype_scalar(src->dtype), POLY_INT32) &&
+      else if (poly_dtype_eq(src->dtype, POLY_INT32) &&
                x86_dtype_is_float_bits(u->dtype, 64))
         op = POLY_X86_VCVTDQ2PD;
       else
@@ -2694,8 +2189,8 @@ static PolyUOp *rule_x86_isel_cast_graph(PolyCtx *ctx, PolyUOp *u, const PolyBin
       ns = 2;
     }
   } else if (x86_is_float_dtype(src->dtype) && x86_is_int_dtype(u->dtype)) {
-    if (src->dtype.count > 1) {
-      if (poly_dtype_eq(poly_dtype_scalar(u->dtype), POLY_INT32))
+    if (vec) {
+      if (poly_dtype_eq(u->dtype, POLY_INT32))
         op = x86_dtype_is_float_bits(src->dtype, 64) ? POLY_X86_VCVTTPD2DQ : POLY_X86_VCVTTPS2DQ;
       else
         return NULL;
@@ -2710,7 +2205,7 @@ static PolyUOp *rule_x86_isel_cast_graph(PolyCtx *ctx, PolyUOp *u, const PolyBin
       srcs[1] = x86_const_i(ctx, POLY_UINT8, 4);
       ns = 2;
     } else if (x86_dtype_is_float32(src->dtype) && x86_dtype_is_float64(u->dtype)) {
-      if (src->dtype.count > 1) {
+      if (vec) {
         op = POLY_X86_VCVTPS2PD;
       } else {
         op = POLY_X86_VCVTSS2SD;
@@ -2718,7 +2213,7 @@ static PolyUOp *rule_x86_isel_cast_graph(PolyCtx *ctx, PolyUOp *u, const PolyBin
         ns = 2;
       }
     } else if (x86_dtype_is_float64(src->dtype) && x86_dtype_is_float32(u->dtype)) {
-      if (src->dtype.count > 1) {
+      if (vec) {
         op = POLY_X86_VCVTPD2PS;
       } else {
         op = POLY_X86_VCVTSD2SS;
@@ -2729,23 +2224,23 @@ static PolyUOp *rule_x86_isel_cast_graph(PolyCtx *ctx, PolyUOp *u, const PolyBin
       return NULL;
     }
   } else if (x86_is_int_dtype(src->dtype) && x86_is_int_dtype(u->dtype)) {
-    if ((op = x86_vector_int_extend_op(src->dtype, u->dtype)) != 0) {
+    if ((op = x86_vector_int_extend_op(src->dtype, u->dtype, vec)) != 0) {
       /* vector extend */
-    } else if (src->dtype.count <= 1 &&
-               poly_dtype_eq(poly_dtype_scalar(src->dtype), POLY_INT32) &&
+    } else if (!vec &&
+               poly_dtype_eq(src->dtype, POLY_INT32) &&
                x86_dtype_itemsize(u->dtype) == 8) {
       op = POLY_X86_MOVSXD;
-    } else if (src->dtype.count <= 1 &&
+    } else if (!vec &&
                x86_dtype_itemsize(u->dtype) > x86_dtype_itemsize(src->dtype)) {
-      op = poly_dtype_is_unsigned(poly_dtype_scalar(src->dtype)) ||
-           poly_dtype_is_bool(poly_dtype_scalar(src->dtype)) ? POLY_X86_MOVZX
+      op = poly_dtype_is_unsigned(src->dtype) ||
+           poly_dtype_is_bool(src->dtype) ? POLY_X86_MOVZX
                                                              : POLY_X86_MOVSX;
     } else {
       return NULL;
     }
   }
   if (!op) return NULL;
-  return x86_ins(ctx, op, u->dtype, srcs, ns, x86_graph_vreg(u->dtype, false));
+  return x86_ins(ctx, op, u->dtype, srcs, ns, x86_graph_vreg_for_op(u->dtype, op, false));
 }
 
 static PolyUOp *rule_x86_isel_bitcast_graph(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
@@ -2768,64 +2263,7 @@ static PolyUOp *rule_x86_isel_bitcast_graph(PolyCtx *ctx, PolyUOp *u, const Poly
   } else {
     return NULL;
   }
-  return x86_ins(ctx, op, u->dtype, srcs, ns, x86_graph_vreg(u->dtype, false));
-}
-
-static PolyUOp *rule_x86_isel_mulacc_ins_graph(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
-  (void)b;
-  if (!u || u->op != POLY_OP_MULACC || u->n_src != 3 || !x86_dtype_can_fma(u->dtype))
-    return NULL;
-  PolyX86Op op = x86_dtype_is_float_bits(u->dtype, 64)
-                     ? (u->dtype.count > 1 ? POLY_X86_VFMADD213PD : POLY_X86_VFMADD213SD)
-                     : (u->dtype.count > 1 ? POLY_X86_VFMADD213PS : POLY_X86_VFMADD213SS);
-  PolyUOp *srcs[3] = {u->src[0], u->src[1], u->src[2]};
-  return x86_ins(ctx, op, u->dtype, srcs, 3, x86_graph_vreg(u->dtype, false));
-}
-
-static PolyUOp *rule_x86_isel_readmem_graph(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
-  (void)b;
-  if (!u || u->op != POLY_OP_INS) return NULL;
-  PolyX86Op op = 0;
-  if (!x86_ins_op(u, &op)) return NULL;
-  X86IselUseCtx *uctx = (X86IselUseCtx *)poly_graph_rewrite_userctx();
-
-  int candidates[3];
-  int n_candidates = 0;
-  if (x86_readmem3rd(op) && u->n_src >= 3) candidates[n_candidates++] = 2;
-  if (x86_readmem2nd(op) && u->n_src >= 2) candidates[n_candidates++] = 1;
-  if (x86_readmem1st(op) && u->n_src >= 1) candidates[n_candidates++] = 0;
-  for (int ci = 0; ci < n_candidates; ci++) {
-    int cand = candidates[ci];
-    if (x86_ins_has_memory_tuple_at(u, cand)) continue;
-    if (op == POLY_X86_VINSERTPS && cand == 1 && u->n_src >= 3) {
-      int64_t immv = 0;
-      if (x86_const_as_i64(u->src[2], &immv) && ((immv >> 6) & 0x3) != 0)
-        continue;
-    }
-    PolyUOp *load = u->src[cand];
-    if (!load) continue;
-    if (!x86_isel_foldable(uctx, u, load)) continue;
-    PolyUOp *addr[4];
-    if (!x86_graph_load_address_tuple(ctx, load, addr)) return NULL;
-
-    int ns = u->n_src - 1 + 4;
-    PolyUOp **srcs = malloc((size_t)ns * sizeof(*srcs));
-    if (!srcs) return NULL;
-    int pos = 0;
-    for (int s = 0; s < u->n_src; s++) {
-      if (s == cand) {
-        for (int a = 0; a < 4; a++) srcs[pos++] = addr[a];
-      } else {
-        srcs[pos++] = u->src[s];
-      }
-    }
-    int32_t defs[8];
-    int n_defs = x86_uop_def_regs(u, defs, (int)(sizeof(defs) / sizeof(defs[0])));
-    PolyUOp *out = x86_clone_with_regs(ctx, u, srcs, ns, defs, n_defs);
-    free(srcs);
-    return out;
-  }
-  return NULL;
+  return x86_ins(ctx, op, u->dtype, srcs, ns, x86_graph_vreg_for_op(u->dtype, op, false));
 }
 
 static PolyUOp *rule_x86_isel_store_graph(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
@@ -2840,14 +2278,18 @@ static PolyUOp *rule_x86_isel_store_graph(PolyCtx *ctx, PolyUOp *u, const PolyBi
   int ns = 5;
   srcs[4] = value;
   PolyX86Op op = 0;
-  if (value->op == POLY_OP_CONST && x86_is_int_dtype(value->dtype) && value->dtype.count <= 1) {
+  PolyUOp *imm = x86_to_imm(ctx, value);
+  int64_t numel = poly_uop_max_numel(ctx, value);
+  int bytes = x86_graph_value_size(ctx, value);
+  if (imm && numel == 1) {
     op = POLY_X86_MOVi;
-    srcs[4] = x86_imm_for_const(ctx, value);
-    if (!srcs[4]) return NULL;
-  } else if (x86_dtype_is_float16(value->dtype) && value->dtype.count == 1) {
+    srcs[4] = imm;
+  } else if (x86_dtype_is_float16(value->dtype) && bytes == 2) {
     op = POLY_X86_VPEXTRW;
     srcs[5] = x86_const_i(ctx, POLY_UINT8, 0);
     ns = 6;
+  } else if (numel > 1) {
+    op = x86_graph_xmm_sz(ctx, value, true);
   } else {
     op = x86_mov_op_for_dtype(value->dtype, true);
   }
@@ -2862,7 +2304,7 @@ static PolyUOp *rule_x86_isel_wide_stack_store_graph(PolyCtx *ctx, PolyUOp *u, c
   if (!addr || addr->op != POLY_OP_SHRINK || addr->n_src < 3 ||
       !value || value->op != POLY_OP_STACK || value->n_src <= 1)
     return NULL;
-  if (!x86_dtype_is_float_bits(value->dtype, 64) || x86_value_size(value->dtype, false) <= 16)
+  if (!x86_dtype_is_float_bits(value->dtype, 64) || x86_graph_value_size(ctx, value) <= 16)
     return NULL;
   PolyUOp *base = addr->src[0];
   PolyUOp *start = addr->src[1];
@@ -2870,7 +2312,7 @@ static PolyUOp *rule_x86_isel_wide_stack_store_graph(PolyCtx *ctx, PolyUOp *u, c
   PolyUOp **stores = malloc(sizeof(PolyUOp *) * (size_t)value->n_src);
   if (!stores) return NULL;
   int64_t start_i = 0;
-  bool start_const = x86_const_as_i64(start, &start_i);
+  bool start_const = x86_cast_const_as_i64(start, &start_i);
   for (int lane = 0; lane < value->n_src; lane++) {
     PolyUOp *idx = start;
     if (start_const) {
@@ -2899,7 +2341,7 @@ static PolyUOp *rule_x86_isel_address_lea_graph(PolyCtx *ctx, PolyUOp *u, const 
     if (x86_const_as_i64(u->src[2], &width) && width > 1) return NULL;
   }
   PolyUOp *base = u->src[0];
-  if (!base || base->dtype.count != 1) return NULL;
+  if (!base || x86_graph_is_vec_xmm(ctx, base)) return NULL;
   PolyUOp *addr[4];
   if (x86_graph_fold_address(ctx, u, addr) != 0) return NULL;
   return x86_ins(ctx, POLY_X86_LEA, x86_u64(), addr, 4, x86_graph_vreg(x86_u64(), false));
@@ -2924,75 +2366,57 @@ static PolyUOp *rule_x86_isel_sink_graph(PolyCtx *ctx, PolyUOp *u, const PolyBin
   return poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, ret, u->arg);
 }
 
-static _Thread_local PolyPatternMatcher *g_pm_x86_graph_readmem = NULL;
-static PolyPatternMatcher *poly_pm_x86_graph_readmem(void) {
-  if (g_pm_x86_graph_readmem) return g_pm_x86_graph_readmem;
-  PolyRule rules[] = {
-      {poly_pat_op(POLY_OP_INS, NULL, 0, NULL), rule_x86_isel_readmem_graph},
-  };
-  g_pm_x86_graph_readmem =
-      poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
-  return g_pm_x86_graph_readmem;
-}
-
 static _Thread_local PolyPatternMatcher *g_pm_x86_graph_isel_ordered = NULL;
 static PolyPatternMatcher *poly_pm_x86_graph_isel_ordered(void) {
   if (g_pm_x86_graph_isel_ordered) return g_pm_x86_graph_isel_ordered;
   PolyNamedRule rules[] = {
       /* Op -> Op, matching tinygrad's first isel block. */
-      {.pat = poly_pat_op(POLY_OP_CAST, NULL, 0, NULL), .fn = rule_x86_isel_cast_void_graph, .name = "x86.isel.cast_void"},
-      {.pat = poly_pat_op(POLY_OP_INDEX, NULL, 0, NULL), .fn = rule_x86_isel_wide_load_lane_graph, .name = "x86.isel.wide_load_lane"},
-      {.pat = poly_pat_op(POLY_OP_INDEX, NULL, 0, NULL), .fn = rule_x86_isel_float_index_lane0_graph, .name = "x86.isel.float_index_lane0"},
-      {.pat = poly_pat_op(POLY_OP_RANGE, NULL, 0, NULL), .fn = rule_x86_isel_range_graph, .name = "x86.isel.range"},
+      {.pat = poly_upat_op(POLY_OP_CAST, NULL, 0, NULL), .fn = rule_x86_isel_cast_void_graph, .name = "x86.isel.cast_void"},
+      {.pat = poly_upat_op(POLY_OP_RANGE, NULL, 0, NULL), .fn = rule_x86_isel_range_graph, .name = "x86.isel.range"},
+      {.pat = poly_upat_op(POLY_OP_END, NULL, 0, NULL), .fn = rule_x86_isel_loop_cmp_graph, .name = "x86.isel.loop_cmp"},
 
       /* Op -> X86Op. Keep these in tinygrad x86.py isel_matcher order. */
-      {.pat = poly_pat_op(POLY_OP_SINK, NULL, 0, NULL), .fn = rule_x86_isel_sink_graph, .name = "x86.isel.sink_ret"},
-      {.pat = poly_pat_op(POLY_OP_PARAM, NULL, 0, NULL), .fn = rule_x86_isel_abi_graph, .name = "x86.isel.abi_param"},
-      {.pat = poly_pat_op(POLY_OP_SPECIAL, NULL, 0, NULL), .fn = rule_x86_isel_abi_graph, .name = "x86.isel.abi_special"},
-      {.pat = poly_pat_op(POLY_OP_CONST, NULL, 0, NULL), .fn = rule_x86_isel_const_graph, .name = "x86.isel.const"},
+      {.pat = poly_upat_op(POLY_OP_SINK, NULL, 0, NULL), .fn = rule_x86_isel_sink_graph, .name = "x86.isel.sink_ret"},
+      {.pat = poly_upat_op(POLY_OP_PARAM, NULL, 0, NULL), .fn = rule_x86_isel_abi_graph, .name = "x86.isel.abi_param"},
+      {.pat = poly_upat_op(POLY_OP_SPECIAL, NULL, 0, NULL), .fn = rule_x86_isel_abi_graph, .name = "x86.isel.abi_special"},
+      {.pat = poly_upat_op(POLY_OP_CAST, NULL, 0, NULL), .fn = rule_x86_isel_casted_const_graph, .name = "x86.isel.casted_const"},
 
-      {.pat = poly_pat_op(POLY_OP_WHERE, NULL, 0, NULL), .fn = rule_x86_isel_where_graph, .name = "x86.isel.where"},
-      {.pat = poly_pat_op(POLY_OP_IF, NULL, 0, NULL), .fn = rule_x86_isel_if_graph, .name = "x86.isel.if"},
-      {.pat = poly_pat_op(POLY_OP_CMPLT, NULL, 0, NULL), .fn = rule_x86_isel_compare_graph, .name = "x86.isel.compare_lt"},
-      {.pat = poly_pat_op(POLY_OP_CMPEQ, NULL, 0, NULL), .fn = rule_x86_isel_compare_graph, .name = "x86.isel.compare_eq"},
-      {.pat = poly_pat_op(POLY_OP_CMPNE, NULL, 0, NULL), .fn = rule_x86_isel_compare_graph, .name = "x86.isel.compare_ne"},
+      {.pat = poly_upat_op(POLY_OP_WHERE, NULL, 0, NULL), .fn = rule_x86_isel_where_graph, .name = "x86.isel.where"},
+      {.pat = poly_upat_op(POLY_OP_IF, NULL, 0, NULL), .fn = rule_x86_isel_if_graph, .name = "x86.isel.if"},
+      {.pat = poly_upat_op(POLY_OP_CMPLT, NULL, 0, NULL), .fn = rule_x86_isel_compare_graph, .name = "x86.isel.compare_lt"},
+      {.pat = poly_upat_op(POLY_OP_CMPEQ, NULL, 0, NULL), .fn = rule_x86_isel_compare_graph, .name = "x86.isel.compare_eq"},
+      {.pat = poly_upat_op(POLY_OP_CMPNE, NULL, 0, NULL), .fn = rule_x86_isel_compare_graph, .name = "x86.isel.compare_ne"},
 
-      {.pat = poly_pat_op(POLY_OP_SQRT, NULL, 0, NULL), .fn = rule_x86_isel_float_unary_graph, .name = "x86.isel.float_unary_sqrt"},
-      {.pat = poly_pat_op(POLY_OP_TRUNC, NULL, 0, NULL), .fn = rule_x86_isel_float_unary_graph, .name = "x86.isel.float_unary_trunc"},
-      {.pat = poly_pat_op(POLY_OP_STACK, NULL, 0, NULL), .fn = rule_x86_isel_stack_graph, .name = "x86.isel.stack_shuffle"},
-      {.pat = poly_pat_op(POLY_OP_INDEX, NULL, 0, NULL), .fn = rule_x86_isel_vector_index_graph, .name = "x86.isel.vector_index"},
-      {.pat = poly_pat_op(POLY_OP_GEP, NULL, 0, NULL), .fn = rule_x86_isel_vector_index_graph, .name = "x86.isel.vector_gep"},
+      {.pat = poly_upat_op(POLY_OP_SQRT, NULL, 0, NULL), .fn = rule_x86_isel_float_unary_graph, .name = "x86.isel.float_unary_sqrt"},
+      {.pat = poly_upat_op(POLY_OP_TRUNC, NULL, 0, NULL), .fn = rule_x86_isel_float_unary_graph, .name = "x86.isel.float_unary_trunc"},
+      {.pat = poly_upat_op(POLY_OP_STACK, NULL, 0, NULL), .fn = rule_x86_isel_stack_graph, .name = "x86.isel.stack"},
+      {.pat = poly_upat_op(POLY_OP_INDEX, NULL, 0, NULL), .fn = rule_x86_isel_vector_index_graph, .name = "x86.isel.vector_index"},
 
-      {.pat = poly_pat_op(POLY_OP_ADD, NULL, 0, NULL), .fn = rule_x86_isel_fma_graph, .name = "x86.isel.fma"},
-      {.pat = poly_pat_op(POLY_OP_MULACC, NULL, 0, NULL), .fn = rule_x86_isel_mulacc_ins_graph, .name = "x86.isel.mulacc"},
+      {.pat = poly_upat_op(POLY_OP_ADD, NULL, 0, NULL), .fn = rule_x86_isel_float_bin_graph, .name = "x86.isel.float_add"},
+      {.pat = poly_upat_op(POLY_OP_SUB, NULL, 0, NULL), .fn = rule_x86_isel_float_bin_graph, .name = "x86.isel.float_sub"},
+      {.pat = poly_upat_op(POLY_OP_MUL, NULL, 0, NULL), .fn = rule_x86_isel_float_bin_graph, .name = "x86.isel.float_mul"},
+      {.pat = poly_upat_op(POLY_OP_FDIV, NULL, 0, NULL), .fn = rule_x86_isel_float_bin_graph, .name = "x86.isel.float_fdiv"},
+      {.pat = poly_upat_op(POLY_OP_CDIV, NULL, 0, NULL), .fn = rule_x86_isel_cdiv_graph, .name = "x86.isel.cdiv"},
+      {.pat = poly_upat_op(POLY_OP_ADD, NULL, 0, NULL), .fn = rule_x86_isel_scalar_int_bin_graph, .name = "x86.isel.int_add"},
+      {.pat = poly_upat_op(POLY_OP_SUB, NULL, 0, NULL), .fn = rule_x86_isel_scalar_int_bin_graph, .name = "x86.isel.int_sub"},
+      {.pat = poly_upat_op(POLY_OP_MUL, NULL, 0, NULL), .fn = rule_x86_isel_scalar_int_bin_graph, .name = "x86.isel.int_mul"},
+      {.pat = poly_upat_op(POLY_OP_AND, NULL, 0, NULL), .fn = rule_x86_isel_scalar_int_bin_graph, .name = "x86.isel.int_and"},
+      {.pat = poly_upat_op(POLY_OP_OR, NULL, 0, NULL), .fn = rule_x86_isel_scalar_int_bin_graph, .name = "x86.isel.int_or"},
+      {.pat = poly_upat_op(POLY_OP_XOR, NULL, 0, NULL), .fn = rule_x86_isel_scalar_int_bin_graph, .name = "x86.isel.int_xor"},
+      {.pat = poly_upat_op(POLY_OP_SHL, NULL, 0, NULL), .fn = rule_x86_isel_scalar_int_bin_graph, .name = "x86.isel.int_shl"},
+      {.pat = poly_upat_op(POLY_OP_SHR, NULL, 0, NULL), .fn = rule_x86_isel_scalar_int_bin_graph, .name = "x86.isel.int_shr"},
 
-      {.pat = poly_pat_op(POLY_OP_ADD, NULL, 0, NULL), .fn = rule_x86_isel_float_bin_graph, .name = "x86.isel.float_add"},
-      {.pat = poly_pat_op(POLY_OP_SUB, NULL, 0, NULL), .fn = rule_x86_isel_float_bin_graph, .name = "x86.isel.float_sub"},
-      {.pat = poly_pat_op(POLY_OP_MUL, NULL, 0, NULL), .fn = rule_x86_isel_float_bin_graph, .name = "x86.isel.float_mul"},
-      {.pat = poly_pat_op(POLY_OP_FDIV, NULL, 0, NULL), .fn = rule_x86_isel_float_bin_graph, .name = "x86.isel.float_fdiv"},
-      {.pat = poly_pat_op(POLY_OP_MAX, NULL, 0, NULL), .fn = rule_x86_isel_float_bin_graph, .name = "x86.isel.float_max"},
+      {.pat = poly_upat_op(POLY_OP_CAST, NULL, 0, NULL), .fn = rule_x86_isel_cast_graph, .name = "x86.isel.cast"},
+      {.pat = poly_upat_op(POLY_OP_BITCAST, NULL, 0, NULL), .fn = rule_x86_isel_bitcast_graph, .name = "x86.isel.bitcast"},
 
-      {.pat = poly_pat_op(POLY_OP_CDIV, NULL, 0, NULL), .fn = rule_x86_isel_cdiv_graph, .name = "x86.isel.cdiv"},
-      {.pat = poly_pat_op(POLY_OP_ADD, NULL, 0, NULL), .fn = rule_x86_isel_scalar_int_bin_graph, .name = "x86.isel.int_add"},
-      {.pat = poly_pat_op(POLY_OP_SUB, NULL, 0, NULL), .fn = rule_x86_isel_scalar_int_bin_graph, .name = "x86.isel.int_sub"},
-      {.pat = poly_pat_op(POLY_OP_MUL, NULL, 0, NULL), .fn = rule_x86_isel_scalar_int_bin_graph, .name = "x86.isel.int_mul"},
-      {.pat = poly_pat_op(POLY_OP_AND, NULL, 0, NULL), .fn = rule_x86_isel_scalar_int_bin_graph, .name = "x86.isel.int_and"},
-      {.pat = poly_pat_op(POLY_OP_OR, NULL, 0, NULL), .fn = rule_x86_isel_scalar_int_bin_graph, .name = "x86.isel.int_or"},
-      {.pat = poly_pat_op(POLY_OP_XOR, NULL, 0, NULL), .fn = rule_x86_isel_scalar_int_bin_graph, .name = "x86.isel.int_xor"},
-      {.pat = poly_pat_op(POLY_OP_SHL, NULL, 0, NULL), .fn = rule_x86_isel_scalar_int_bin_graph, .name = "x86.isel.int_shl"},
-      {.pat = poly_pat_op(POLY_OP_SHR, NULL, 0, NULL), .fn = rule_x86_isel_scalar_int_bin_graph, .name = "x86.isel.int_shr"},
+      {.pat = poly_upat_op(POLY_OP_INDEX, NULL, 0, NULL), .fn = rule_x86_isel_address_lea_graph, .name = "x86.isel.address_index"},
+      {.pat = poly_upat_op(POLY_OP_SHRINK, NULL, 0, NULL), .fn = rule_x86_isel_address_lea_graph, .name = "x86.isel.address_shrink"},
+      {.pat = poly_upat_op(POLY_OP_LOAD, NULL, 0, NULL), .fn = rule_x86_isel_load_graph, .name = "x86.isel.load"},
+      {.pat = poly_upat_op(POLY_OP_STORE, NULL, 0, NULL), .fn = rule_x86_isel_wide_stack_store_graph, .name = "x86.isel.wide_stack_store"},
+      {.pat = poly_upat_op(POLY_OP_STORE, NULL, 0, NULL), .fn = rule_x86_isel_store_graph, .name = "x86.isel.store"},
+      {.pat = poly_upat_op(POLY_OP_INS, NULL, 0, NULL), .fn = x86_alloc_vregs, .name = "x86.isel.alloc_vregs"},
+      {.pat = poly_upat_op(POLY_OP_BUFFER, NULL, 0, NULL), .fn = x86_alloc_vregs, .name = "x86.isel.alloc_vregs"},
 
-      {.pat = poly_pat_op(POLY_OP_CAST, NULL, 0, NULL), .fn = rule_x86_isel_cast_graph, .name = "x86.isel.cast"},
-      {.pat = poly_pat_op(POLY_OP_BITCAST, NULL, 0, NULL), .fn = rule_x86_isel_bitcast_graph, .name = "x86.isel.bitcast"},
-
-      {.pat = poly_pat_op(POLY_OP_INDEX, NULL, 0, NULL), .fn = rule_x86_isel_address_lea_graph, .name = "x86.isel.address_index"},
-      {.pat = poly_pat_op(POLY_OP_SHRINK, NULL, 0, NULL), .fn = rule_x86_isel_address_lea_graph, .name = "x86.isel.address_shrink"},
-      {.pat = poly_pat_op(POLY_OP_LOAD, NULL, 0, NULL), .fn = rule_x86_isel_load_graph, .name = "x86.isel.load"},
-      {.pat = poly_pat_op(POLY_OP_STORE, NULL, 0, NULL), .fn = rule_x86_isel_wide_stack_store_graph, .name = "x86.isel.wide_stack_store"},
-      {.pat = poly_pat_op(POLY_OP_STORE, NULL, 0, NULL), .fn = rule_x86_isel_store_graph, .name = "x86.isel.store"},
-
-      /* X86Op -> X86Op and vreg allocation happen last in tinygrad. */
-      {.pat = poly_pat_op(POLY_OP_INS, NULL, 0, NULL), .fn = rule_x86_isel_readmem_graph, .name = "x86.isel.readmem"},
   };
   g_pm_x86_graph_isel_ordered =
       poly_pm_thread_cache(poly_pm_new_named(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
@@ -3012,14 +2436,12 @@ static PolyUOp *poly_graph_rewrite_x86_with_uses(
   X86IselUseCtx uctx = {
       .uses = poly_map_new((size_t)(n > 0 ? n * 2 : 16)),
       .single_consumer = poly_map_new((size_t)(n > 0 ? n : 16)),
-      .structural_consts = poly_map_new((size_t)(n > 0 ? n : 16)),
       .address_memory_uses = poly_map_new((size_t)(n > 0 ? n : 16)),
       .next_vreg = next_vreg ? *next_vreg : 0,
   };
-  if (!uctx.uses || !uctx.single_consumer || !uctx.structural_consts || !uctx.address_memory_uses) {
+  if (!uctx.uses || !uctx.single_consumer || !uctx.address_memory_uses) {
     poly_map_destroy(uctx.uses);
     poly_map_destroy(uctx.single_consumer);
-    poly_map_destroy(uctx.structural_consts);
     poly_map_destroy(uctx.address_memory_uses);
     poly_toposort_free(topo);
     return NULL;
@@ -3033,19 +2455,6 @@ static PolyUOp *poly_graph_rewrite_x86_with_uses(
       if (u->op == POLY_OP_LOAD || u->op == POLY_OP_STORE || u->op == POLY_OP_INS)
         x86_isel_mark_memory_address_use(uctx.address_memory_uses, u->src[s]);
     }
-    if (u->op == POLY_OP_RANGE && u->n_src > 0)
-      x86_isel_mark_structural_const(uctx.structural_consts, u->src[0]);
-    /* Pinned tinygrad renderer/isa/x86.py:371-379 carries BUFFER shape
-     * sources through isel as rtag() metadata. They size the regalloc stack
-     * object and must not be materialized as value-producing instructions. */
-    if (u->op == POLY_OP_BUFFER && u->n_src > 0)
-      x86_isel_mark_structural_const(uctx.structural_consts, u->src[0]);
-    if ((u->op == POLY_OP_INDEX || u->op == POLY_OP_GEP) && u->n_src > 1)
-      x86_isel_mark_structural_const(uctx.structural_consts, u->src[1]);
-    if (u->op == POLY_OP_SHRINK) {
-      if (u->n_src > 1) x86_isel_mark_structural_const(uctx.structural_consts, u->src[1]);
-      if (u->n_src > 2) x86_isel_mark_structural_const(uctx.structural_consts, u->src[2]);
-    }
     if (u->op == POLY_OP_PARAM || u->op == POLY_OP_SPECIAL) uctx.n_func_args++;
   }
   if (uctx.n_func_args > 0) {
@@ -3053,7 +2462,6 @@ static PolyUOp *poly_graph_rewrite_x86_with_uses(
     if (!uctx.func_args) {
       poly_map_destroy(uctx.uses);
       poly_map_destroy(uctx.single_consumer);
-      poly_map_destroy(uctx.structural_consts);
       poly_map_destroy(uctx.address_memory_uses);
       poly_toposort_free(topo);
       return NULL;
@@ -3080,34 +2488,22 @@ static PolyUOp *poly_graph_rewrite_x86_with_uses(
   free(uctx.func_args);
   poly_map_destroy(uctx.uses);
   poly_map_destroy(uctx.single_consumer);
-  poly_map_destroy(uctx.structural_consts);
   poly_map_destroy(uctx.address_memory_uses);
   return out;
 }
 
-static PolyUOp *poly_graph_rewrite_x86_isel(PolyCtx *ctx, PolyUOp *sink) {
+/* tinygrad@2026-08-22/a9069c177a9d renderer/isa/x86.py:X86Renderer.isel_matcher. */
+PolyUOp *poly_x86_isel(PolyCtx *ctx, PolyUOp *sink) {
   if (!ctx || !sink) return NULL;
   int next_vreg = 0;
   PolyUOp *out = poly_graph_rewrite_x86_with_uses(
       ctx, sink, poly_pm_x86_graph_isel_ordered(), &next_vreg
   );
-  if (!out) return NULL;
-  /* tinygrad's single ordered isel matcher includes X86Op->X86Op ReadMem
-   * folding and graph_rewrite reaches a fixed point. Polygrad's C rewrite can
-   * expose new ReadMem candidates after LOAD becomes INS(VMOV*) or after a
-   * previous fold removes an intermediate load, so close the selected graph
-   * under the ReadMem rule with fresh use counts before linearization. */
-  for (int i = 0; i < 4; i++) {
-    PolyUOp *next =
-        poly_graph_rewrite_x86_with_uses(ctx, out, poly_pm_x86_graph_readmem(), &next_vreg);
-    if (!next) return NULL;
-    if (next == out) return out;
-    out = next;
-  }
   return out;
 }
 
 static bool x86_graph_isel_residual_allowed(PolyUOp *u) {
+  /* tinygrad@2026-08-22/a9069c177a9d codegen/late/regalloc.py:PSEUDO_OPS. */
   if (!u) return true;
   switch (u->op) {
   case POLY_OP_NOOP:
@@ -3117,11 +2513,12 @@ static bool x86_graph_isel_residual_allowed(PolyUOp *u) {
   case POLY_OP_PARAM:
   case POLY_OP_SPECIAL:
   case POLY_OP_CONST:
+  case POLY_OP_CAST:
   case POLY_OP_INS:
   case POLY_OP_RANGE:
   case POLY_OP_END:
-  case POLY_OP_DEFINE_VAR:
   case POLY_OP_BUFFER:
+  case POLY_OP_STACK:
   case POLY_OP_SINK:
     return true;
   default:
@@ -3148,7 +2545,7 @@ static bool x86_validate_graph_isel_residuals(PolyUOp **lin, int n) {
 }
 
 static int64_t x86_float_bits(PolyDType dt, double v) {
-  PolyDType s = poly_dtype_scalar(dt);
+  PolyDType s = dt;
   if (s.bitsize == 16) {
     float f = (float)v;
     uint32_t bits = 0;
@@ -3193,75 +2590,14 @@ static int64_t x86_float_bits(PolyDType dt, double v) {
   return (int64_t)bits;
 }
 
-typedef struct {
-  PolyCtx *ctx;
-  X86UOpMap map;
-  X86UOpVec out;
-  int next_vreg;
-  int next_label;
-  int n_buffer_args;
-  int next_var_arg;
-  int core_id_arg;
-} X86IselCtx;
-
-static int x86_isel_one(X86IselCtx *isel, PolyUOp *u);
-static int x86_emit_const(X86IselCtx *isel, PolyUOp *u);
-
-static int x86_emit_and_map(X86IselCtx *isel, PolyUOp *old, PolyUOp *new_uop) {
-  if (x86_vec_push(&isel->out, new_uop) != 0) return -1;
-  return old ? x86_map_put(&isel->map, old, new_uop) : 0;
-}
-
-static PolyUOp *x86_mapped_src(X86IselCtx *isel, PolyUOp *u) {
-  return x86_map_get(&isel->map, u);
-}
-
-static PolyUOp *x86_materialized_src(X86IselCtx *isel, PolyUOp *u) {
-  PolyUOp *m = x86_mapped_src(isel, u);
-  if (!m) return NULL;
-  if (m->op == POLY_OP_CONST) {
-    if (x86_emit_const(isel, m) != 0) return NULL;
-    m = x86_mapped_src(isel, m);
-  }
-  return m;
-}
-
-static PolyUOp *x86_alias_value_as_dtype(PolyCtx *ctx, PolyUOp *src, PolyDType dtype) {
-  if (!src) return NULL;
-  int32_t reg = x86_uop_reg(src);
-  return poly_uop_tagged_arg(ctx, src->op, dtype, src->src, src->n_src, src->arg, src->tag,
-                             reg >= 0 ? x86_arg_int_tuple((int64_t[]){reg}, 1) : src->tag_arg);
-}
-
 static int64_t x86_local_buffer_nbytes(PolyUOp *u) {
-  if (!u || (u->op != POLY_OP_BUFFER && u->op != POLY_OP_DEFINE_REG &&
-             u->op != POLY_OP_DEFINE_LOCAL))
-    return 0;
-  PolyDType s = poly_dtype_scalar(poly_program_buffer_dtype(u));
+  if (!u || u->op != POLY_OP_BUFFER) return 0;
+  PolyDType s = poly_program_buffer_dtype(u);
   int item = poly_dtype_itemsize(s);
   if (item <= 0) item = 1;
-  int count = s.count > 1 ? s.count : 1;
   int64_t n = poly_program_buffer_size(u);
-  int64_t bytes = n * (int64_t)item * (int64_t)count;
+  int64_t bytes = n * (int64_t)item;
   return bytes > 0 ? bytes : item;
-}
-
-static int x86_emit_buffer(X86IselCtx *isel, PolyUOp *u) {
-  if (!u || (u->op != POLY_OP_BUFFER && u->op != POLY_OP_DEFINE_REG &&
-             u->op != POLY_OP_DEFINE_LOCAL))
-    return -1;
-  PolyAddrSpace addrspace = poly_program_memory_addrspace(u);
-  if (addrspace != POLY_ADDR_REG && addrspace != POLY_ADDR_LOCAL) return -1;
-  int32_t def = x86_virtual_tag_for_dtype(x86_u64(), true, &isel->next_vreg);
-  /* Pinned tinygrad renderer/isa/x86.py:371-379 retains BUFFER size sources
-   * through virtual-register allocation (tagging them with rtag only so they
-   * are not materialized). The C size source is already a non-register
-   * metadata CONST, so preserve it verbatim for regalloc stack sizing. */
-  PolyUOp *buf = poly_uop_tagged_arg(
-      isel->ctx, POLY_OP_BUFFER, u->dtype, u->src, u->n_src, u->arg, def,
-      x86_arg_int_tuple((int64_t[]){def}, 1)
-  );
-  return x86_emit_and_map(isel, u, buf);
 }
 
 static PolyUOp *x86_disp_const(PolyCtx *ctx, int64_t disp) {
@@ -3272,14 +2608,13 @@ static PolyUOp *x86_disp_const(PolyCtx *ctx, int64_t disp) {
 static PolyX86Op x86_mov_op_for_dtype(PolyDType dt, bool store) {
   int bytes = x86_value_size(dt, false);
   if (bytes >= 16) return store ? POLY_X86_VMOVUPSm : POLY_X86_VMOVUPS;
-  if (dt.count <= 1 && x86_is_int_dtype(dt)) return store ? POLY_X86_MOVm : POLY_X86_MOV;
+  if (x86_is_int_dtype(dt)) return store ? POLY_X86_MOVm : POLY_X86_MOV;
   if (bytes == 8) return store ? POLY_X86_VMOVSDm : POLY_X86_VMOVSD;
   return store ? POLY_X86_VMOVSSm : POLY_X86_VMOVSS;
 }
 
-static PolyX86Op x86_float_bin_op(PolyOps op, PolyDType dt) {
+static PolyX86Op x86_float_bin_op(PolyOps op, PolyDType dt, bool vec) {
   bool f64 = x86_dtype_is_float_bits(dt, 64);
-  bool vec = dt.count > 1;
   switch (op) {
   case POLY_OP_ADD: return f64 ? (vec ? POLY_X86_VADDPD : POLY_X86_VADDSD)
                                : (vec ? POLY_X86_VADDPS : POLY_X86_VADDSS);
@@ -3289,15 +2624,13 @@ static PolyX86Op x86_float_bin_op(PolyOps op, PolyDType dt) {
                                : (vec ? POLY_X86_VMULPS : POLY_X86_VMULSS);
   case POLY_OP_FDIV: return f64 ? (vec ? POLY_X86_VDIVPD : POLY_X86_VDIVSD)
                                 : (vec ? POLY_X86_VDIVPS : POLY_X86_VDIVSS);
-  case POLY_OP_MAX: return f64 ? (vec ? POLY_X86_VMAXPD : POLY_X86_VMAXSD)
-                               : (vec ? POLY_X86_VMAXPS : POLY_X86_VMAXSS);
   default: return 0;
   }
 }
 
-static PolyX86Op x86_int_bin_op(PolyOps op, PolyDType dt, bool imm) {
-  if (dt.count > 1) {
-    int bits = poly_dtype_scalar(dt).bitsize;
+static PolyX86Op x86_int_bin_op(PolyOps op, PolyDType dt, bool imm, bool vec) {
+  if (vec) {
+    int bits = dt.bitsize;
     switch (op) {
     case POLY_OP_ADD:
       return bits <= 8 ? POLY_X86_VPADDB : bits <= 16 ? POLY_X86_VPADDW
@@ -3311,7 +2644,7 @@ static PolyX86Op x86_int_bin_op(PolyOps op, PolyDType dt, bool imm) {
     case POLY_OP_XOR: return POLY_X86_VPXOR;
     case POLY_OP_SHL: return bits == 32 ? POLY_X86_VPSLLVD : bits == 64 ? POLY_X86_VPSLLVQ : 0;
     case POLY_OP_SHR:
-      if (poly_dtype_is_unsigned(poly_dtype_scalar(dt)))
+      if (poly_dtype_is_unsigned(dt))
         return bits == 32 ? POLY_X86_VPSRLVD : bits == 64 ? POLY_X86_VPSRLVQ : 0;
       return bits == 32 ? POLY_X86_VPSRAVD : 0;
     default: return 0;
@@ -3325,21 +2658,21 @@ static PolyX86Op x86_int_bin_op(PolyOps op, PolyDType dt, bool imm) {
   case POLY_OP_OR: return imm ? POLY_X86_ORi : POLY_X86_OR;
   case POLY_OP_XOR: return imm ? POLY_X86_XORi : POLY_X86_XOR;
   case POLY_OP_SHL: return imm ? POLY_X86_SHLi : POLY_X86_SHL;
-  case POLY_OP_SHR: return poly_dtype_is_unsigned(poly_dtype_scalar(dt)) ? (imm ? POLY_X86_SHRi : POLY_X86_SHR)
+  case POLY_OP_SHR: return poly_dtype_is_unsigned(dt) ? (imm ? POLY_X86_SHRi : POLY_X86_SHR)
                                                                          : (imm ? POLY_X86_SARi : POLY_X86_SAR);
   default: return 0;
   }
 }
 
-static PolyX86Op x86_vector_int_cmp_op(PolyOps op, PolyDType dt, bool *swap) {
+static PolyX86Op x86_vector_int_cmp_op(PolyOps op, PolyDType dt, bool vec, bool *swap) {
   if (swap) *swap = false;
-  if (dt.count <= 1 || !x86_is_int_dtype(dt)) return 0;
-  int bits = poly_dtype_scalar(dt).bitsize;
+  if (!vec || !x86_is_int_dtype(dt)) return 0;
+  int bits = dt.bitsize;
   if (op == POLY_OP_CMPEQ) {
     return bits <= 8 ? POLY_X86_VPCMPEQB : bits <= 16 ? POLY_X86_VPCMPEQW
                                                        : bits <= 32 ? POLY_X86_VPCMPEQD : POLY_X86_VPCMPEQQ;
   }
-  if (op == POLY_OP_CMPLT && !poly_dtype_is_unsigned(poly_dtype_scalar(dt))) {
+  if (op == POLY_OP_CMPLT && !poly_dtype_is_unsigned(dt)) {
     if (swap) *swap = true;
     return bits <= 8 ? POLY_X86_VPCMPGTB : bits <= 16 ? POLY_X86_VPCMPGTW
                                                        : bits <= 32 ? POLY_X86_VPCMPGTD : POLY_X86_VPCMPGTQ;
@@ -3347,14 +2680,14 @@ static PolyX86Op x86_vector_int_cmp_op(PolyOps op, PolyDType dt, bool *swap) {
   return 0;
 }
 
-static PolyX86Op x86_vector_int_extend_op(PolyDType src_dt, PolyDType dst_dt) {
-  if (src_dt.count <= 1 || dst_dt.count <= 1) return 0;
+static PolyX86Op x86_vector_int_extend_op(PolyDType src_dt, PolyDType dst_dt, bool vec) {
+  if (!vec) return 0;
   if (!x86_is_int_dtype(src_dt) || !x86_is_int_dtype(dst_dt)) return 0;
-  int sb = poly_dtype_scalar(src_dt).bitsize;
-  int db = poly_dtype_scalar(dst_dt).bitsize;
+  int sb = src_dt.bitsize;
+  int db = dst_dt.bitsize;
   if (db <= sb) return 0;
-  bool uns = poly_dtype_is_unsigned(poly_dtype_scalar(src_dt)) ||
-             poly_dtype_is_bool(poly_dtype_scalar(src_dt));
+  bool uns = poly_dtype_is_unsigned(src_dt) ||
+             poly_dtype_is_bool(src_dt);
   if (uns) {
     if (sb == 8 && db == 16) return POLY_X86_VPMOVZXBW;
     if (sb == 8 && db == 32) return POLY_X86_VPMOVZXBD;
@@ -3371,266 +2704,6 @@ static PolyX86Op x86_vector_int_extend_op(PolyDType src_dt, PolyDType dst_dt) {
     if (sb == 32 && db == 64) return POLY_X86_VPMOVSXDQ;
   }
   return 0;
-}
-
-static int x86_emit_param(X86IselCtx *isel, PolyUOp *u) {
-  int arg_idx = (u->arg.kind == POLY_ARG_INT) ? (int)u->arg.i : 0;
-  int abi = x86_abi_gpr_for_arg(arg_idx);
-  int32_t v = x86_virtual_tag_for_dtype(x86_u64(), true, &isel->next_vreg);
-  PolyUOp *mov = NULL;
-  if (abi >= 0) {
-    PolyUOp *def = x86_define_reg(isel->ctx, x86_u64(), x86_tag_real(X86_REG_CLASS_WGPR, abi));
-    PolyUOp *srcs[1] = {def};
-    mov = x86_ins(isel->ctx, POLY_X86_MOV, x86_u64(), srcs, 1, v);
-    if (x86_vec_push(&isel->out, def) != 0) return -1;
-  } else {
-    if (arg_idx < 6) return -1;
-    int64_t caller_disp = ((int64_t)arg_idx - 5) * 8;
-    int32_t addr_v = x86_virtual_tag_for_dtype(x86_u64(), true, &isel->next_vreg);
-    PolyUOp *addr = x86_stack_arg_slot(isel->ctx, caller_disp, addr_v);
-    if (x86_vec_push(&isel->out, addr) != 0) return -1;
-    PolyUOp *srcs[4] = {
-        addr, x86_noop(isel->ctx), x86_disp_const(isel->ctx, 0), x86_const_i(isel->ctx, POLY_UINT8, 8),
-    };
-    mov = x86_ins(isel->ctx, POLY_X86_MOV, x86_u64(), srcs, 4, v);
-  }
-  if (x86_emit_and_map(isel, u, mov) != 0) return -1;
-  return 0;
-}
-
-static bool x86_is_core_id_var(PolyUOp *u) {
-  return u && u->op == POLY_OP_DEFINE_VAR && u->arg.kind == POLY_ARG_DEFINE_VAR &&
-         u->arg.define_var.name && strcmp(u->arg.define_var.name, "core_id") == 0;
-}
-
-static int x86_emit_define_var(X86IselCtx *isel, PolyUOp *u) {
-  bool is_core_id = x86_is_core_id_var(u);
-  int arg_idx = is_core_id ? isel->core_id_arg : isel->next_var_arg++;
-  if (arg_idx < 0) return -1;
-  int abi = x86_abi_gpr_for_arg(arg_idx);
-
-  if (is_core_id) {
-    if (abi < 0) return -1;
-    int32_t val_v = x86_virtual_tag_for_dtype(u->dtype, false, &isel->next_vreg);
-    PolyUOp *def = x86_define_reg(isel->ctx, u->dtype, x86_tag_real(X86_REG_CLASS_WGPR, abi));
-    PolyUOp *srcs[1] = {def};
-    if (x86_vec_push(&isel->out, def) != 0) return -1;
-    return x86_emit_and_map(isel, u, x86_ins(isel->ctx, POLY_X86_MOV, u->dtype, srcs, 1, val_v));
-  }
-
-  int32_t ptr_v = x86_virtual_tag_for_dtype(x86_u64(), true, &isel->next_vreg);
-  PolyUOp *ptr = NULL;
-  if (abi >= 0) {
-    PolyUOp *def = x86_define_reg(isel->ctx, x86_u64(), x86_tag_real(X86_REG_CLASS_WGPR, abi));
-    PolyUOp *srcs[1] = {def};
-    ptr = x86_ins(isel->ctx, POLY_X86_MOV, x86_u64(), srcs, 1, ptr_v);
-    if (x86_vec_push(&isel->out, def) != 0) return -1;
-    if (x86_vec_push(&isel->out, ptr) != 0) return -1;
-  } else {
-    int64_t caller_disp = ((int64_t)arg_idx - 5) * 8;
-    int32_t addr_v = x86_virtual_tag_for_dtype(x86_u64(), true, &isel->next_vreg);
-    PolyUOp *addr = x86_stack_arg_slot(isel->ctx, caller_disp, addr_v);
-    if (x86_vec_push(&isel->out, addr) != 0) return -1;
-    PolyUOp *srcs[4] = {
-        addr, x86_noop(isel->ctx), x86_disp_const(isel->ctx, 0), x86_const_i(isel->ctx, POLY_UINT8, 8),
-    };
-    ptr = x86_ins(isel->ctx, POLY_X86_MOV, x86_u64(), srcs, 4, ptr_v);
-    if (x86_vec_push(&isel->out, ptr) != 0) return -1;
-  }
-
-  int32_t val_v = x86_virtual_tag_for_dtype(u->dtype, false, &isel->next_vreg);
-  PolyUOp *load_srcs[4] = {
-      ptr, x86_noop(isel->ctx), x86_disp_const(isel->ctx, 0),
-      x86_const_i(isel->ctx, POLY_UINT8, x86_value_size(u->dtype, false)),
-  };
-  PolyUOp *load = x86_ins(isel->ctx, POLY_X86_MOV, u->dtype, load_srcs, 4, val_v);
-  return x86_emit_and_map(isel, u, load);
-}
-
-static int x86_emit_const(X86IselCtx *isel, PolyUOp *u) {
-  if (u->arg.kind == POLY_ARG_INT || u->arg.kind == POLY_ARG_BOOL) {
-    int64_t v = u->arg.kind == POLY_ARG_BOOL ? (u->arg.b ? 1 : 0) : u->arg.i;
-    PolyDType dt = u->dtype;
-    int32_t def = x86_virtual_tag_for_dtype(dt, false, &isel->next_vreg);
-    PolyUOp *imm = x86_const_i(isel->ctx, dt, v);
-    PolyUOp *srcs[1] = {imm};
-    PolyX86Op op = x86_value_size(dt, false) == 8 ? POLY_X86_MOVABS : POLY_X86_MOVi;
-    return x86_emit_and_map(isel, u, x86_ins(isel->ctx, op, dt, srcs, 1, def));
-  }
-  if (u->arg.kind == POLY_ARG_FLOAT) {
-    PolyDType idt = x86_int_for_float(u->dtype);
-    int64_t bits = x86_float_bits(u->dtype, u->arg.f);
-    PolyUOp *ic = x86_const_i(isel->ctx, idt, bits);
-    if (x86_emit_const(isel, ic) != 0) return -1;
-    PolyUOp *imov = x86_mapped_src(isel, ic);
-    int32_t def = x86_virtual_tag_for_dtype(u->dtype, false, &isel->next_vreg);
-    PolyUOp *srcs[1] = {imov};
-    PolyX86Op op = x86_dtype_is_float_bits(u->dtype, 64) ? POLY_X86_VMOVQ : POLY_X86_VMOVD;
-    return x86_emit_and_map(isel, u, x86_ins(isel->ctx, op, u->dtype, srcs, 1, def));
-  }
-  return -1;
-}
-
-static int x86_emit_prebuilt_ins(X86IselCtx *isel, PolyUOp *u) {
-  if (!isel || !u || u->op != POLY_OP_INS) return -1;
-  PolyUOp *src_stack[32];
-  PolyUOp **srcs = u->n_src > (int)(sizeof(src_stack) / sizeof(src_stack[0]))
-                       ? malloc((size_t)u->n_src * sizeof(*srcs))
-                       : src_stack;
-  if (u->n_src > 0 && !srcs) return -1;
-  for (int i = 0; i < u->n_src; i++) {
-    PolyUOp *s = u->src[i];
-    if (!s || (s->op == POLY_OP_NOOP && s->n_src == 0)) {
-      srcs[i] = s;
-      continue;
-    }
-    if (s->op == POLY_OP_CONST && !x86_is_float_dtype(s->dtype)) {
-      srcs[i] = s;
-      continue;
-    }
-    srcs[i] = x86_materialized_src(isel, s);
-    if (!srcs[i]) {
-      if (srcs != src_stack) free(srcs);
-      return -1;
-    }
-  }
-
-  int32_t defs[8];
-  int n_defs = x86_uop_def_regs(u, defs, (int)(sizeof(defs) / sizeof(defs[0])));
-  if (n_defs == 0 && !poly_dtype_eq(u->dtype, POLY_VOID)) {
-    defs[n_defs++] = x86_virtual_tag_for_dtype(u->dtype, false, &isel->next_vreg);
-  }
-  PolyUOp *nu = x86_clone_with_regs(isel->ctx, u, srcs, u->n_src, defs, n_defs);
-  if (srcs != src_stack) free(srcs);
-  return nu ? x86_emit_and_map(isel, u, nu) : -1;
-}
-
-static int x86_emit_range(X86IselCtx *isel, PolyUOp *u) {
-  PolyUOp *srcs[8];
-  int ns = x86_replace_srcs(srcs, 8, u, &isel->map);
-  if (ns < 1) return -1;
-  if (u->src[0]->op == POLY_OP_CONST) srcs[0] = x86_imm_for_const(isel->ctx, u->src[0]);
-  int32_t def = x86_virtual_tag_for_dtype(u->dtype, false, &isel->next_vreg);
-  PolyUOp *ru = poly_uop_tagged_arg(
-      isel->ctx, POLY_OP_RANGE, u->dtype, srcs, ns, u->arg, def,
-      x86_arg_int_tuple((int64_t[]){def}, 1)
-  );
-  return x86_emit_and_map(isel, u, ru);
-}
-
-static int x86_emit_end(X86IselCtx *isel, PolyUOp *u) {
-  PolyUOp *srcs[8];
-  int ns = x86_replace_srcs(srcs, 8, u, &isel->map);
-  if (ns < 1) return -1;
-  PolyUOp *eu = poly_uop(isel->ctx, POLY_OP_END, u->dtype, srcs, ns, u->arg);
-  return x86_emit_and_map(isel, u, eu);
-}
-
-static int x86_isel_one(X86IselCtx *isel, PolyUOp *u) {
-  if (!u) return -1;
-  switch (u->op) {
-  case POLY_OP_NOOP:
-    if (u->n_src > 0) {
-      PolyUOp *base = x86_mapped_src(isel, u->src[0]);
-      if (!base) return -1;
-      if (base->op == POLY_OP_STACK && base->n_src > 0 && u->dtype.count <= 1)
-        return x86_map_put(&isel->map, u, base->src[0]);
-      if (!poly_dtype_eq(base->dtype, u->dtype))
-        base = x86_alias_value_as_dtype(isel->ctx, base, u->dtype);
-      return x86_map_put(&isel->map, u, base);
-    }
-    return x86_map_put(&isel->map, u, u);
-  case POLY_OP_GROUP:
-  case POLY_OP_BARRIER:
-    return x86_map_put(&isel->map, u, u);
-  case POLY_OP_AFTER:
-    if (u->n_src > 0) {
-      PolyUOp *base = x86_mapped_src(isel, u->src[0]);
-      return base ? x86_map_put(&isel->map, u, base) : -1;
-    }
-    return x86_map_put(&isel->map, u, u);
-  case POLY_OP_PARAM:
-  case POLY_OP_SPECIAL:
-    if (x86_uop_reg(u) >= 0)
-      return x86_map_put(&isel->map, u, u);
-    return x86_emit_param(isel, u);
-  case POLY_OP_DEFINE_VAR:
-    return x86_emit_define_var(isel, u);
-  case POLY_OP_BUFFER:
-    return x86_emit_buffer(isel, u);
-  case POLY_OP_CONST:
-    return x86_map_put(&isel->map, u, u);
-  case POLY_OP_INS:
-    return x86_emit_prebuilt_ins(isel, u);
-  case POLY_OP_RANGE:
-    return x86_emit_range(isel, u);
-  case POLY_OP_END:
-    return x86_emit_end(isel, u);
-  case POLY_OP_SINK: {
-    if (u->n_src > 0) {
-      PolyUOp *first = x86_mapped_src(isel, u->src[0]);
-      PolyX86Op first_op = 0;
-      if (first && x86_ins_op(first, &first_op) && first_op == POLY_X86_RET)
-        return x86_map_put(&isel->map, u, first);
-    }
-    PolyUOp *srcs[80];
-    int ns = x86_replace_srcs(srcs, 64, u, &isel->map);
-    if (ns < 0) return -1;
-    for (int i = 0; i < (int)(sizeof(x86_callee_saved_gprs) / sizeof(x86_callee_saved_gprs[0])); i++) {
-      if (ns >= (int)(sizeof(srcs) / sizeof(srcs[0]))) return -1;
-      int32_t reg = x86_tag_real(X86_REG_CLASS_WGPR, x86_callee_saved_gprs[i]);
-      PolyUOp *def = x86_define_reg(isel->ctx, x86_u64(), reg);
-      if (x86_vec_push(&isel->out, def) != 0) return -1;
-      srcs[ns++] = def;
-    }
-    PolyUOp *ret = x86_ins_nodef(isel->ctx, POLY_X86_RET, POLY_VOID, srcs, ns);
-    return x86_emit_and_map(isel, u, ret);
-  }
-  default:
-    fprintf(stderr, "x86 isel: unsupported op %s\n", poly_op_name(u->op));
-    return -1;
-  }
-}
-
-static PolyUOp **x86_isel_linear(PolyCtx *ctx, PolyUOp **lin, int n, int *n_out) {
-  if (n_out) *n_out = 0;
-  X86IselCtx isel = {.ctx = ctx};
-  int max_param = -1;
-  int max_graph_vreg = -1;
-  int n_define_vars = 0;
-  for (int i = 0; i < n; i++) {
-    PolyUOp *u = lin[i];
-    if (!u) continue;
-    int32_t defs[16];
-    int n_defs = x86_uop_def_regs(u, defs, (int)(sizeof(defs) / sizeof(defs[0])));
-    for (int d = 0; d < n_defs; d++) {
-      if (x86_tag_is_virtual(defs[d]) && x86_virtual_id(defs[d]) > max_graph_vreg)
-        max_graph_vreg = x86_virtual_id(defs[d]);
-    }
-    if ((u->op == POLY_OP_PARAM || u->op == POLY_OP_SPECIAL) && u->arg.kind == POLY_ARG_INT &&
-        u->arg.i > max_param)
-      max_param = (int)u->arg.i;
-    if (u->op == POLY_OP_DEFINE_VAR && !x86_is_core_id_var(u)) n_define_vars++;
-  }
-  isel.n_buffer_args = max_param + 1;
-  isel.next_var_arg = isel.n_buffer_args;
-  isel.core_id_arg = isel.n_buffer_args + n_define_vars;
-  isel.next_vreg = max_graph_vreg + 1;
-  for (int i = 0; i < n; i++) {
-    if (x86_isel_one(&isel, lin[i]) != 0) {
-      if (poly_debug_at_least(4)) {
-        char *s = poly_uop_str(lin[i]);
-        fprintf(stderr, "x86 isel failed at %d: %s\n", i, s ? s : "<uop>");
-        free(s);
-      }
-      free(isel.out.items);
-      x86_map_free(&isel.map);
-      return NULL;
-    }
-  }
-  x86_map_free(&isel.map);
-  if (n_out) *n_out = isel.out.n;
-  return isel.out.items;
 }
 
 typedef struct {
@@ -3729,30 +2802,6 @@ static PolyUOp **x86_sort_reg_defs_for_regalloc(PolyUOp **lin, int n, int *n_out
   }
   if (n_out) *n_out = pos;
   return out;
-}
-
-static bool x86_ins_is_load_addr(PolyUOp *u) {
-  PolyX86Op op = 0;
-  if (!u || !x86_ins_op(u, &op) || u->n_src != 4 || poly_dtype_eq(u->dtype, POLY_VOID))
-    return false;
-  switch (op) {
-  case POLY_X86_MOV:
-  case POLY_X86_VMOVSS:
-  case POLY_X86_VMOVSD:
-  case POLY_X86_VMOVUPS:
-  case POLY_X86_VMOVD:
-  case POLY_X86_VMOVQ:
-    return true;
-  default:
-    return false;
-  }
-}
-
-static bool x86_ins_has_memory_tuple_at(PolyUOp *u, int src_idx) {
-  if (!u || src_idx < 0 || src_idx + 3 >= u->n_src) return false;
-  PolyUOp *disp = u->src[src_idx + 2];
-  PolyUOp *size = u->src[src_idx + 3];
-  return disp && disp->op == POLY_OP_CONST && size && size->op == POLY_OP_CONST;
 }
 
 static bool x86_tag_is_virtual(int32_t tag);
@@ -4016,7 +3065,7 @@ static int x86_spill_slot(X86RegAllocCtx *ra, int32_t vreg, PolyDType dt, bool b
     ra->spills = ns;
     ra->cap_spills = nc;
   }
-  int size = x86_value_size(dt, buffer_value);
+  int size = x86_tag_class(vreg) == X86_REG_CLASS_XMM ? 16 : x86_value_size(dt, buffer_value);
   if (size <= 0) size = 8;
   int align = size > 16 ? 16 : size;
   int offset = ra->stack_size;
@@ -4043,17 +3092,6 @@ static int x86_preserve_future_abi_source_before(
   return x86_loop_live_set_push(&ra->spill_before_by_idx[idx], real, real);
 }
 
-static int x86_stack_alloc(X86RegAllocCtx *ra, int size, int align) {
-  if (size <= 0) size = 1;
-  if (align <= 0) align = 1;
-  if (align > 16) align = 16;
-  int offset = ra->stack_size;
-  int rem = offset % align;
-  if (rem) offset += align - rem;
-  ra->stack_size = offset + size;
-  return offset;
-}
-
 static PolyUOp *x86_rsp(PolyCtx *ctx) {
   return x86_define_reg(ctx, x86_u64(), x86_tag_real(X86_REG_CLASS_WGPR, X86_REG_RSP));
 }
@@ -4067,39 +3105,20 @@ static void x86_stack_address(PolyCtx *ctx, int offset, int size, PolyUOp *out[4
 
 static PolyUOp *x86_fill_from_slot(PolyCtx *ctx, const X86SpillSlot *slot, int32_t real) {
   PolyDType dtype = slot->buffer_value ? x86_u64() : slot->dtype;
-  if (!slot->buffer_value && poly_dtype_eq(poly_dtype_scalar(dtype), POLY_FLOAT16) &&
-      dtype.count == 1) {
-    /* tinygrad x86.py:881-889 runs fills through typed LOAD isel; its
-     * dt_16bit LOAD rule uses VPINSRW and keeps the two-byte spill slot. */
-    PolyUOp *srcs[6] = {
-        x86_define_reg(ctx, dtype, real), NULL, NULL, NULL, NULL, x86_const_i(ctx, POLY_UINT8, 0),
-    };
-    x86_stack_address(ctx, slot->offset, slot->size, &srcs[1]);
-    return x86_ins(ctx, POLY_X86_VPINSRW, dtype, srcs, 6, real);
-  }
   PolyUOp *srcs[4];
   x86_stack_address(ctx, slot->offset, slot->size, srcs);
-  return x86_ins(ctx, x86_mov_op_for_dtype(dtype, false), dtype, srcs, 4, real);
+  PolyX86Op op = x86_tag_class(real) == X86_REG_CLASS_XMM ? POLY_X86_VMOVUPS : POLY_X86_MOV;
+  return x86_ins(ctx, op, dtype, srcs, 4, real);
 }
 
 static PolyUOp *x86_spill_to_slot(PolyCtx *ctx, const X86SpillSlot *slot, PolyUOp *value) {
-  PolyDType dtype = slot->buffer_value ? x86_u64() : slot->dtype;
-  PolyUOp *srcs[6];
+  PolyUOp *srcs[5];
   x86_stack_address(ctx, slot->offset, slot->size, srcs);
   srcs[4] = value;
-  int n_src = 5;
-  PolyX86Op op;
-  if (!slot->buffer_value && poly_dtype_eq(poly_dtype_scalar(dtype), POLY_FLOAT16) &&
-      dtype.count == 1) {
-    /* tinygrad x86.py:881-885 runs spills through typed STORE isel; its
-     * dt_16bit STORE rule extracts lane zero with VPEXTRW. */
-    op = POLY_X86_VPEXTRW;
-    srcs[5] = x86_const_i(ctx, POLY_UINT8, 0);
-    n_src = 6;
-  } else {
-    op = x86_mov_op_for_dtype(dtype, true);
-  }
-  return x86_ins_nodef(ctx, op, POLY_VOID, srcs, n_src);
+  PolyX86Op op = x86_tag_class(x86_uop_reg(value)) == X86_REG_CLASS_XMM
+                     ? POLY_X86_VMOVUPSm
+                     : POLY_X86_MOVm;
+  return x86_ins_nodef(ctx, op, POLY_VOID, srcs, 5);
 }
 
 static PolyUOp *x86_copy_to_reg(PolyCtx *ctx, PolyUOp *src, int32_t real);
@@ -4150,6 +3169,10 @@ static void x86_avoid_push(int32_t *avoid, int *n_avoid, int cap, int32_t real) 
 static void x86_fixed_source_avoids(PolyUOp *u, int src_idx, int32_t *avoid, int *n_avoid, int cap) {
   PolyX86Op op;
   if (!u || !x86_ins_op(u, &op)) return;
+  if ((op == POLY_X86_SHL || op == POLY_X86_SHR || op == POLY_X86_SAR) && src_idx == 0)
+    x86_avoid_push(
+        avoid, n_avoid, cap, x86_tag_real(X86_REG_CLASS_WGPR, X86_REG_RCX)
+    );
   if ((op == POLY_X86_DIV || op == POLY_X86_IDIV) && src_idx == 1) {
     /* tinygrad's idiv selector constrains the divisor to WGPR - {RAX,RDX}.
      * RAX/RDX are the implicit dividend/remainder registers for DIV/IDIV. */
@@ -4263,8 +3286,10 @@ static bool x86_loop_live_class_saturated(X86LoopLiveSet *set, int32_t vreg) {
 
 static bool x86_regalloc_pseudo_op(PolyUOp *u) {
   if (!u) return true;
-  return u->op == POLY_OP_CONST || u->op == POLY_OP_NOOP || u->op == POLY_OP_AFTER ||
-         u->op == POLY_OP_BARRIER || u->op == POLY_OP_GROUP || u->op == POLY_OP_STACK;
+  /* tinygrad@2026-08-22/a9069c177a9d codegen/late/regalloc.py:7. */
+  return u->op == POLY_OP_CONST || u->op == POLY_OP_CAST || u->op == POLY_OP_NOOP ||
+         u->op == POLY_OP_AFTER || u->op == POLY_OP_BARRIER || u->op == POLY_OP_GROUP ||
+         u->op == POLY_OP_STACK;
 }
 
 static bool x86_small_vreg_seen(int32_t *items, int n, int32_t v) {
@@ -4850,7 +3875,23 @@ static PolyUOp **x86_regalloc_linear(PolyCtx *ctx, PolyUOp **lin, int n, int *n_
     PolyUOp *u = lin[i];
     if (!u) continue;
     if (x86_regalloc_pseudo_op(u)) {
-      if (x86_vec_push(&out, u) != 0) goto fail;
+      PolyUOp *srcs_stack[64];
+      PolyUOp **srcs = u->n_src > 64 ? malloc((size_t)u->n_src * sizeof(*srcs)) : srcs_stack;
+      if (u->n_src > 0 && !srcs) goto fail;
+      bool changed = false;
+      for (int j = 0; j < u->n_src; j++) {
+        srcs[j] = x86_map_get(&rewrite_map, u->src[j]);
+        changed |= srcs[j] != u->src[j];
+      }
+      /* tinygrad@2026-08-22/a9069c177a9d codegen/__init__.py:411-419:
+       * line_rewrite rebuilds pseudo sources even when their matcher is a no-op. */
+      PolyUOp *nu = changed
+                        ? poly_uop_tagged_arg(
+                              ctx, u->op, u->dtype, srcs, u->n_src, u->arg, u->tag, u->tag_arg
+                          )
+                        : u;
+      if (srcs != srcs_stack) free(srcs);
+      if (x86_map_put(&rewrite_map, u, nu) != 0 || x86_vec_push(&out, nu) != 0) goto fail;
       continue;
     }
 
@@ -4907,19 +3948,16 @@ static PolyUOp **x86_regalloc_linear(PolyCtx *ctx, PolyUOp **lin, int n, int *n_
       x86_stack_address(ctx, ra.local_offsets[i], 1, addr);
       nu = x86_ins(ctx, POLY_X86_LEA, x86_u64(), addr, 4, new_defs[0]);
     } else if (x86_ins_op(u, &xop) && xop == POLY_X86_FRAME_INDEX) {
-      if (n_defs != 1 || u->tag_arg.kind != POLY_ARG_INT) {
+      if (n_defs != 0 || u->tag_arg.kind != POLY_ARG_INT) {
         if (new_srcs != new_srcs_stack) free(new_srcs);
         goto fail;
       }
-      if (u->tag_arg.i < 0) {
-        nu = x86_ins_ex(ctx, POLY_X86_FRAME_INDEX, x86_u64(), NULL, 0, new_defs, n_defs, u->tag_arg);
-      } else {
-        int size = (u->tag_arg.i > 0 && u->tag_arg.i <= INT32_MAX) ? (int)u->tag_arg.i : 1;
-        int offset = x86_stack_alloc(&ra, size, size >= 16 ? 16 : size);
-        PolyUOp *addr[4];
-        x86_stack_address(ctx, offset, 1, addr);
-        nu = x86_ins(ctx, POLY_X86_LEA, x86_u64(), addr, 4, new_defs[0]);
+      int64_t disp = (int64_t)ra.stack_size + u->tag_arg.i;
+      if (disp < INT32_MIN || disp > INT32_MAX) {
+        if (new_srcs != new_srcs_stack) free(new_srcs);
+        goto fail;
       }
+      nu = x86_const_i(ctx, u->dtype, disp);
     } else {
       nu = x86_clone_with_regs(ctx, u, new_srcs, u->n_src, new_defs, n_defs);
     }
@@ -4956,16 +3994,7 @@ static PolyUOp **x86_regalloc_linear(PolyCtx *ctx, PolyUOp **lin, int n, int *n_
   }
 
   int stack_size = ra.stack_size;
-  bool has_caller_stack_args = false;
-  for (int i = 0; i < out.n; i++) {
-    PolyX86Op op = 0;
-    if (x86_ins_op(out.items[i], &op) && op == POLY_X86_FRAME_INDEX &&
-        out.items[i]->tag_arg.kind == POLY_ARG_INT && out.items[i]->tag_arg.i < 0) {
-      has_caller_stack_args = true;
-      break;
-    }
-  }
-  if (stack_size > 0 || has_caller_stack_args) {
+  if (stack_size > 0) {
     X86UOpVec framed = {0};
     PolyUOp *rsp = x86_rsp(ctx);
     PolyUOp *imm = x86_const_i(ctx, POLY_INT32, stack_size);
@@ -4975,21 +4004,11 @@ static PolyUOp **x86_regalloc_linear(PolyCtx *ctx, PolyUOp **lin, int n, int *n_
     if (stack_size > 0)
       x86_vec_push(&framed, x86_ins(ctx, POLY_X86_SUBi, x86_u64(), sub_srcs, 2, rsp_def));
     for (int i = 0; i < out.n; i++) {
-      if (i == out.n - 1 && stack_size > 0)
+      /* tinygrad@2026-08-22/a9069c177a9d codegen/late/regalloc.py:126-130:
+       * SINK is last, so restore RSP immediately before the preceding RET. */
+      if (i == out.n - 2 && stack_size > 0)
         x86_vec_push(&framed, x86_ins(ctx, POLY_X86_ADDi, x86_u64(), add_srcs, 2, rsp_def));
-      PolyX86Op op = 0;
-      if (x86_ins_op(out.items[i], &op) && op == POLY_X86_FRAME_INDEX &&
-          out.items[i]->tag_arg.kind == POLY_ARG_INT && out.items[i]->tag_arg.i < 0) {
-        int32_t def = x86_uop_reg(out.items[i]);
-        int64_t caller_disp = -out.items[i]->tag_arg.i;
-        int64_t off64 = (int64_t)stack_size + caller_disp;
-        if (off64 < INT32_MIN || off64 > INT32_MAX) goto fail;
-        PolyUOp *addr[4];
-        x86_stack_address(ctx, (int)off64, 1, addr);
-        x86_vec_push(&framed, x86_ins(ctx, POLY_X86_LEA, x86_u64(), addr, 4, def));
-      } else {
-        x86_vec_push(&framed, out.items[i]);
-      }
+      x86_vec_push(&framed, out.items[i]);
     }
     free(out.items);
     out = framed;
@@ -5085,7 +4104,7 @@ static PolyUOp *x86_copy_to_reg(PolyCtx *ctx, PolyUOp *src, int32_t real) {
   if (src->op == POLY_OP_CONST &&
       (src->arg.kind == POLY_ARG_INT || src->arg.kind == POLY_ARG_BIGINT ||
        src->arg.kind == POLY_ARG_BOOL) &&
-      dt.count <= 1 && x86_is_int_dtype(dt)) {
+      poly_uop_max_numel(ctx, src) == 1 && x86_is_int_dtype(dt)) {
     int64_t v = src->arg.kind == POLY_ARG_BOOL
                     ? (src->arg.b ? 1 : 0)
                     : (int64_t)poly_arg_integer_to_u64_mod(src->arg);
@@ -5094,7 +4113,9 @@ static PolyUOp *x86_copy_to_reg(PolyCtx *ctx, PolyUOp *src, int32_t real) {
     PolyX86Op op = x86_value_size(dt, false) == 8 ? POLY_X86_MOVABS : POLY_X86_MOVi;
     return x86_ins(ctx, op, dt, srcs, 1, real);
   }
-  PolyX86Op op = x86_mov_op_for_dtype(dt, false);
+  PolyX86Op op = poly_uop_max_numel(ctx, src) > 1
+                     ? x86_graph_xmm_sz(ctx, src, false)
+                     : x86_mov_op_for_dtype(dt, false);
   PolyUOp *srcs[1] = {src};
   return x86_ins(ctx, op, dt, srcs, 1, real);
 }
@@ -5120,7 +4141,7 @@ static int x86_post_regalloc_one(
     PolyUOp *mov_srcs[1] = {zero};
     PolyUOp *cmp_srcs[2] = {x86_alias_with_reg(ctx, u, acc), u->src[0]};
     PolyUOp *cmp = x86_ins_nodef(
-        ctx, u->src[0]->op == POLY_OP_CONST ? POLY_X86_CMPi : POLY_X86_CMP, POLY_VOID, cmp_srcs, 2
+        ctx, u->src[0]->op == POLY_OP_CAST ? POLY_X86_CMPi : POLY_X86_CMP, POLY_VOID, cmp_srcs, 2
     );
     PolyUOp *jmp_srcs[1] = {cmp};
     (void)one;
@@ -5160,6 +4181,32 @@ static int x86_post_regalloc_one(
     if (x86_vec_push(out, x86_ins_jump(ctx, POLY_X86_JMP, NULL, 0, lbl->loop_label)) != 0) return -1;
     if (x86_vec_push(out, x86_ins_label(ctx, lbl->out_label)) != 0) return -1;
     return 0;
+  }
+  PolyX86Op xop = 0;
+  if (x86_ins_op(u, &xop) && xop == POLY_X86_LOOP_CMP) {
+    if (u->n_src != 4 || u->tag_arg.kind != POLY_ARG_INT) return -1;
+    X86LoopLabel *lbl = x86_loop_label_for(loops, u->src[3]);
+    if (!lbl) return -1;
+    PolyOps cmp_op = (PolyOps)u->tag_arg.i;
+    if (!x86_op_is_comparison(cmp_op)) return -1;
+    PolyUOp *cmp_srcs[2] = {u->src[0], u->src[1]};
+    PolyX86Op ins_cmp = 0;
+    if (x86_is_float_dtype(cmp_srcs[0]->dtype)) {
+      ins_cmp = x86_dtype_is_float_bits(cmp_srcs[0]->dtype, 64)
+                    ? POLY_X86_VUCOMISD
+                    : POLY_X86_VUCOMISS;
+    } else {
+      ins_cmp = cmp_srcs[1]->op == POLY_OP_CAST ? POLY_X86_CMPi : POLY_X86_CMP;
+    }
+    PolyUOp *flag = x86_ins_nodef(ctx, ins_cmp, POLY_VOID, cmp_srcs, 2);
+    PolyDType lhs = cmp_srcs[0]->dtype;
+    bool signed_int = poly_dtype_is_int(lhs) && !poly_dtype_is_unsigned(lhs);
+    PolyX86Op jump = cmp_op == POLY_OP_CMPLT   ? (signed_int ? POLY_X86_JL : POLY_X86_JB)
+                     : cmp_op == POLY_OP_CMPEQ ? POLY_X86_JE
+                                               : POLY_X86_JNE;
+    PolyUOp *jump_srcs[1] = {flag};
+    if (x86_vec_push(out, flag) != 0) return -1;
+    return x86_vec_push(out, x86_ins_jump(ctx, jump, jump_srcs, 1, lbl->loop_label));
   }
   if (u->op != POLY_OP_INS || u->arg.kind != POLY_ARG_INT) {
     return x86_vec_push(out, u);
@@ -5233,9 +4280,17 @@ static int x86_emit_encode(
   int idx = (idx_uop && idx_uop->op != POLY_OP_NOOP) ? x86_uop_reg_index(idx_uop) : 4;
   if (reg < 0 || rm < 0 || idx < 0) return -1;
 
-  int rm_sz = (sz_uop && sz_uop->op == POLY_OP_CONST) ? (int)sz_uop->arg.i
-                                                       : x86_value_size(rm_uop->dtype, false);
-  int reg_sz = reg_uop ? x86_value_size(reg_uop->dtype, false) : 0;
+  int64_t encoded_size = 0;
+  int rm_sz = sz_uop && x86_uop_const_i64(sz_uop, &encoded_size)
+                  ? (int)encoded_size
+                  : x86_tag_class(x86_uop_reg(rm_uop)) == X86_REG_CLASS_XMM
+                        ? 16
+                        : x86_value_size(rm_uop->dtype, false);
+  int reg_sz = reg_uop
+                   ? (x86_tag_class(x86_uop_reg(reg_uop)) == X86_REG_CLASS_XMM
+                          ? 16
+                          : x86_value_size(reg_uop->dtype, false))
+                   : 0;
   int sz = reg_sz ? reg_sz : rm_sz;
 
   if (sel) {
@@ -5333,6 +4388,7 @@ static int x86_encode_op(
         rest[n_rest++] = x->src[i];
     }
     if (n_rest < 1) return -1;
+    PolyUOp *imm = rest[0]->op == POLY_OP_CAST ? rest[0] : NULL;
     if (fixed_reg < 0)
       return x86_emit_encode(
           b, x, opc, -1, pp, sel, we, rest[0], address[0], address[1], address[2],
@@ -5340,7 +4396,7 @@ static int x86_encode_op(
       );
     return x86_emit_encode(
         b, x, opc, fixed_reg, pp, sel, we, NULL, address[0], address[1], address[2],
-        address[3], NULL, rest[0]
+        address[3], NULL, imm
     );
   }
 
@@ -5356,7 +4412,7 @@ static int x86_encode_op(
       for (int i = 1; i < x->n_src && n_rest < 8; i++)
         rest[n_rest++] = x->src[i];
     }
-    PolyUOp *imm = (n_rest > 0 && rest[0]->op == POLY_OP_CONST) ? rest[0] : NULL;
+    PolyUOp *imm = (n_rest > 0 && rest[0]->op == POLY_OP_CAST) ? rest[0] : NULL;
     if (fixed_reg < 0)
       return x86_emit_encode(
           b, x, opc, -1, pp, sel, we, x, address[0], address[1], address[2], address[3],
@@ -5365,53 +4421,6 @@ static int x86_encode_op(
     return x86_emit_encode(
         b, x, opc, fixed_reg, pp, sel, we, NULL, address[0], address[1], address[2],
         address[3], sel ? x : NULL, imm
-    );
-  }
-
-  if (x86_readmem3rd(op) && x86_is_two_address(op)) {
-    if (x->n_src > 4) {
-      address[0] = x->src[1];
-      address[1] = x->src[2];
-      address[2] = x->src[3];
-      address[3] = x->src[4];
-      rest[0] = x->src[0];
-      n_rest = 1;
-      for (int i = 5; i < x->n_src && n_rest < 8; i++)
-        rest[n_rest++] = x->src[i];
-    } else {
-      if (x->n_src < 2) return -1;
-      address[0] = x->src[1];
-      rest[0] = x->src[0];
-      n_rest = 1;
-      for (int i = 2; i < x->n_src && n_rest < 8; i++)
-        rest[n_rest++] = x->src[i];
-    }
-    return x86_emit_encode(
-        b, x, opc, fixed_reg, pp, sel, we, x, address[0], address[1], address[2],
-        address[3], rest[0], n_rest > 1 ? rest[1] : NULL
-    );
-  }
-
-  if (x86_readmem3rd(op) && x->n_src >= 3) {
-    if (x->n_src > 5) {
-      address[0] = x->src[2];
-      address[1] = x->src[3];
-      address[2] = x->src[4];
-      address[3] = x->src[5];
-      rest[0] = x->src[0];
-      rest[1] = x->src[1];
-      n_rest = 2;
-      for (int i = 6; i < x->n_src && n_rest < 8; i++)
-        rest[n_rest++] = x->src[i];
-    } else {
-      address[0] = x->src[2];
-      rest[0] = x->src[0];
-      rest[1] = x->src[1];
-      n_rest = 2;
-    }
-    return x86_emit_encode(
-        b, x, opc, fixed_reg, pp, sel, we, x, address[0], address[1], address[2],
-        address[3], rest[0], rest[1]
     );
   }
 
@@ -5520,14 +4529,14 @@ static int x86_encode_instruction(X86Buf *b, PolyUOp *u, PolyX86Op op) {
   case POLY_X86_VCVTSI2SS:
     return x86_encode_op(
         b, u, op, 0x2A, -1, 2, 1,
-        (u->n_src > 4 && u->src[4]->op == POLY_OP_CONST) ? (u->src[4]->arg.i == 8)
-                                                          : (u->n_src > 1 && x86_dtype_itemsize(u->src[1]->dtype) == 8)
+        u->n_src > 4 ? x86_uop_const_eq(u->src[4], 8)
+            : (u->n_src > 1 && x86_dtype_itemsize(u->src[1]->dtype) == 8)
     );
   case POLY_X86_VCVTSI2SD:
     return x86_encode_op(
         b, u, op, 0x2A, -1, 3, 1,
-        (u->n_src > 4 && u->src[4]->op == POLY_OP_CONST) ? (u->src[4]->arg.i == 8)
-                                                          : (u->n_src > 1 && x86_dtype_itemsize(u->src[1]->dtype) == 8)
+        u->n_src > 4 ? x86_uop_const_eq(u->src[4], 8)
+            : (u->n_src > 1 && x86_dtype_itemsize(u->src[1]->dtype) == 8)
     );
   case POLY_X86_VCVTTSS2SI:
     return x86_encode_op(b, u, op, 0x2C, -1, 2, 1, x86_dtype_itemsize(u->dtype) == 8);
@@ -5536,8 +4545,11 @@ static int x86_encode_instruction(X86Buf *b, PolyUOp *u, PolyX86Op op) {
 
   case POLY_X86_IDIV: return x86_encode_op(b, u, op, 0xF7, 7, 0, 0, 0);
   case POLY_X86_DIV: return x86_encode_op(b, u, op, 0xF7, 6, 0, 0, 0);
+  case POLY_X86_SHL: return x86_encode_op(b, u, op, 0xD3, 4, 0, 0, 0);
   case POLY_X86_SHLi: return x86_encode_op(b, u, op, 0xC1, 4, 0, 0, 0);
+  case POLY_X86_SHR: return x86_encode_op(b, u, op, 0xD3, 5, 0, 0, 0);
   case POLY_X86_SHRi: return x86_encode_op(b, u, op, 0xC1, 5, 0, 0, 0);
+  case POLY_X86_SAR: return x86_encode_op(b, u, op, 0xD3, 7, 0, 0, 0);
   case POLY_X86_SARi: return x86_encode_op(b, u, op, 0xC1, 7, 0, 0, 0);
   case POLY_X86_ADD: return x86_encode_op(b, u, op, 0x03, -1, 0, 0, 0);
   case POLY_X86_ADDi: return x86_encode_op(b, u, op, 0x81, 0, 0, 0, 0);
@@ -5615,38 +4627,18 @@ static int x86_encode_instruction(X86Buf *b, PolyUOp *u, PolyX86Op op) {
   case POLY_X86_VCMPPS: return x86_encode_op(b, u, op, 0xC2, -1, 0, 1, 0);
   case POLY_X86_VCMPSD: return x86_encode_op(b, u, op, 0xC2, -1, 3, 1, 0);
   case POLY_X86_VCMPPD: return x86_encode_op(b, u, op, 0xC2, -1, 1, 1, 0);
-  case POLY_X86_VMAXSS: return x86_encode_op(b, u, op, 0x5F, -1, 2, 1, 0);
-  case POLY_X86_VMAXPS: return x86_encode_op(b, u, op, 0x5F, -1, 0, 1, 0);
-  case POLY_X86_VMAXSD: return x86_encode_op(b, u, op, 0x5F, -1, 3, 1, 0);
-  case POLY_X86_VMAXPD: return x86_encode_op(b, u, op, 0x5F, -1, 1, 1, 0);
-  case POLY_X86_VMINSS: return x86_encode_op(b, u, op, 0x5D, -1, 2, 1, 0);
-  case POLY_X86_VMINPS: return x86_encode_op(b, u, op, 0x5D, -1, 0, 1, 0);
-  case POLY_X86_VMINSD: return x86_encode_op(b, u, op, 0x5D, -1, 3, 1, 0);
-  case POLY_X86_VMINPD: return x86_encode_op(b, u, op, 0x5D, -1, 1, 1, 0);
-
   case POLY_X86_CMOVB: return x86_encode_op(b, u, op, 0x0F42, -1, 0, 0, 0);
   case POLY_X86_CMOVL: return x86_encode_op(b, u, op, 0x0F4C, -1, 0, 0, 0);
   case POLY_X86_CMOVE: return x86_encode_op(b, u, op, 0x0F44, -1, 0, 0, 0);
   case POLY_X86_CMOVNE: return x86_encode_op(b, u, op, 0x0F45, -1, 0, 0, 0);
-  case POLY_X86_VFMADD213SS: return x86_encode_op(b, u, op, 0xA9, -1, 1, 2, 0);
-  case POLY_X86_VFMADD213SD: return x86_encode_op(b, u, op, 0xA9, -1, 1, 2, 1);
-  case POLY_X86_VFMADD213PS: return x86_encode_op(b, u, op, 0xA8, -1, 1, 2, 0);
-  case POLY_X86_VFMADD213PD: return x86_encode_op(b, u, op, 0xA8, -1, 1, 2, 1);
   case POLY_X86_VBLENDVPS: return x86_encode_op(b, u, op, 0x4A, -1, 1, 3, 0);
   case POLY_X86_VBLENDVPD: return x86_encode_op(b, u, op, 0x4B, -1, 1, 3, 0);
   case POLY_X86_VPBLENDVB: return x86_encode_op(b, u, op, 0x4C, -1, 1, 3, 0);
-  case POLY_X86_VPBROADCASTB: return x86_encode_op(b, u, op, 0x78, -1, 1, 2, 0);
-  case POLY_X86_VPBROADCASTW: return x86_encode_op(b, u, op, 0x79, -1, 1, 2, 0);
-  case POLY_X86_VPBROADCASTD: return x86_encode_op(b, u, op, 0x58, -1, 1, 2, 0);
-  case POLY_X86_VPBROADCASTQ: return x86_encode_op(b, u, op, 0x59, -1, 1, 2, 0);
-  case POLY_X86_VBROADCASTSS: return x86_encode_op(b, u, op, 0x18, -1, 1, 2, 0);
   case POLY_X86_VPSRLDQ: return x86_encode_op(b, u, op, 0x73, 3, 1, 1, 0);
   case POLY_X86_VPINSRB: return x86_encode_op(b, u, op, 0x20, -1, 1, 3, 0);
   case POLY_X86_VPINSRW: return x86_encode_op(b, u, op, 0xC4, -1, 1, 1, 0);
   case POLY_X86_VPINSRD: return x86_encode_op(b, u, op, 0x22, -1, 1, 3, 0);
   case POLY_X86_VPINSRQ: return x86_encode_op(b, u, op, 0x22, -1, 1, 3, 1);
-  case POLY_X86_VSHUFPS: return x86_encode_op(b, u, op, 0xC6, -1, 0, 1, 0);
-  case POLY_X86_VSHUFPD: return x86_encode_op(b, u, op, 0xC6, -1, 1, 1, 0);
   case POLY_X86_VINSERTPS: return x86_encode_op(b, u, op, 0x21, -1, 1, 3, 0);
   case POLY_X86_VPEXTRB: return x86_encode_op(b, u, op, 0x14, -1, 1, 3, 0);
   case POLY_X86_VPEXTRW: return x86_encode_op(b, u, op, 0x15, -1, 1, 3, 0);
@@ -5729,15 +4721,17 @@ uint8_t *poly_render_x86(PolyUOp **uops, int n, int *size_out) {
 
   for (int i = 0; i < n; i++) {
     PolyUOp *u = uops[i];
-    if (u->op == POLY_OP_SINK || u->op == POLY_OP_GROUP || u->op == POLY_OP_NOOP) continue;
+    /* tinygrad@2026-08-22/a9069c177a9d renderer/isa/x86.py:868-885. */
+    if (u->op != POLY_OP_INS) continue;
     PolyX86Op op;
     if (!x86_ins_op(u, &op)) {
-      fprintf(stderr, "x86 renderer: expected POLY_OP_INS, got %s at %d\n", poly_op_name(u->op), i);
+      fprintf(stderr, "x86 renderer: invalid INS opcode at %d\n", i);
       free(b.data);
       free(labels);
       free(fixups);
       return NULL;
     }
+    if (op == POLY_X86_DEFINE) continue;
     if (op == POLY_X86_LABEL) {
       if (label_pos_add(&labels, &n_labels, &cap_labels, x86_uop_label(u), b.len) != 0) {
         free(b.data);
@@ -5842,7 +4836,7 @@ char *poly_render_x86_source(PolyUOp **uops, int n) {
 }
 
 static int x86_thread_count(void) {
-  int n_env = poly_getenv_int("CPU_COUNT", 0);
+  int n_env = poly_getenv_int("NUM_CPU_THREADS", 0);
   if (n_env > 0) return n_env;
 #ifdef _SC_NPROCESSORS_ONLN
   long n = sysconf(_SC_NPROCESSORS_ONLN);
@@ -5854,12 +4848,15 @@ static int x86_thread_count(void) {
 static PolyRendererCaps poly_x86_caps(void) {
   bool has_threads = poly_getenv_flag_default("THREADS", true);
   return (PolyRendererCaps){
+      .device = "CPU",
       /* tinygrad X86Renderer does not advertise Ops.MULACC to generic rewrite.
        * It folds MUL+ADD to VFMADD only inside x86 instruction selection when
        * the MUL is foldable. */
       .has_mulacc = false,
       .has_threefry = false,
       .has_fdiv = true,
+      .supports_float16 = true,
+      .supports_bfloat16 = false,
       .has_int64 = true,
       .has_local = false,
       .has_threads = has_threads,
@@ -5888,11 +4885,10 @@ uint32_t poly_x86_feature_stamp(void) {
 PolyUOp *poly_rewrite_x86(PolyCtx *ctx, PolyUOp *sink) {
   PolyRewriteOpts opts = {
       .optimize = poly_kernel_optimize_enabled(sink),
-      .devectorize = 1,
+      .beam_width = poly_kernel_beam(sink),
       .caps = poly_x86_caps(),
       .device = POLY_DEVICE_CPU,
       .opt_policy = POLY_OPT_HEURISTIC,
-      .dtype_matcher = poly_pm_bf16_non_native(),
       .extra_matcher = poly_pm_x86_extra(),
   };
   return poly_full_rewrite_to_sink_ex(ctx, sink, opts);
@@ -5901,12 +4897,15 @@ PolyUOp *poly_rewrite_x86(PolyCtx *ctx, PolyUOp *sink) {
 PolyUOp **poly_linearize_x86_rewritten(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
   double t0 = poly_now_ms();
   if (poly_debug_at_least(4)) fprintf(stderr, "x86 linearize: pre-isel rewrite begin\n");
-  sink = poly_graph_rewrite_ex(ctx, sink, poly_pm_x86_pre_isel(), true);
+  int next_scratch_slot = -1;
+  sink = poly_graph_rewrite_ctx_ex(
+      ctx, sink, poly_pm_x86_pre_isel(), &next_scratch_slot, true
+  );
   if (poly_debug_at_least(4))
     fprintf(stderr, "x86 linearize: pre-isel rewrite done %.3fms\n", poly_now_ms() - t0);
   t0 = poly_now_ms();
   if (poly_debug_at_least(4)) fprintf(stderr, "x86 linearize: isel rewrite begin\n");
-  sink = poly_graph_rewrite_x86_isel(ctx, sink);
+  sink = poly_x86_isel(ctx, sink);
   if (poly_debug_at_least(4))
     fprintf(stderr, "x86 linearize: isel rewrite done %.3fms\n", poly_now_ms() - t0);
   if (!sink) {
@@ -5914,7 +4913,7 @@ PolyUOp **poly_linearize_x86_rewritten(PolyCtx *ctx, PolyUOp *sink, int *n_out) 
     return NULL;
   }
   int n_base = 0;
-  PolyUOp **base = poly_linearize_rewritten(ctx, sink, &n_base);
+  PolyUOp **base = poly_do_linearize(ctx, sink, &n_base);
   if (!base) {
     if (n_out) *n_out = 0;
     return NULL;
@@ -5924,24 +4923,10 @@ PolyUOp **poly_linearize_x86_rewritten(PolyCtx *ctx, PolyUOp *sink, int *n_out) 
     if (n_out) *n_out = 0;
     return NULL;
   }
-  int n_isel = 0;
-  PolyUOp **isel = x86_isel_linear(ctx, base, n_base, &n_isel);
-  free(base);
-  if (!isel) {
-    if (poly_debug_at_least(4)) fprintf(stderr, "x86 linearize: isel failed\n");
-    if (n_out) *n_out = 0;
-    return NULL;
-  }
-  if (poly_debug_at_least(4)) {
-    fprintf(stderr, "x86 linearize: isel n=%d\n", n_isel);
-    for (int i = 0; i < n_isel; i++) {
-      char *s = poly_uop_str(isel[i]);
-      fprintf(stderr, "  isel %02d %s tag=%d tag_arg=%d\n", i, s ? s : "<uop>", isel[i]->tag, isel[i]->tag_arg.kind);
-      free(s);
-    }
-  }
-  PolyUOp **fold = isel;
-  int n_fold = n_isel;
+  /* tinygrad@2026-08-22/a9069c177a9d codegen/__init__.py:421-433:
+   * graph isel feeds LINEAR directly into pre-regalloc. */
+  PolyUOp **fold = base;
+  int n_fold = n_base;
   if (poly_debug_at_least(4)) fprintf(stderr, "x86 linearize: fold-loads n=%d (graph)\n", n_fold);
   int n_pre = 0;
   PolyUOp **pre = x86_pre_regalloc_linear(fold, n_fold, &n_pre);
@@ -6179,18 +5164,20 @@ int poly_x86_program_call(PolyX86Program *prog, void **args, int n_args) {
   }
 }
 
-int poly_x86_program_call_core(PolyX86Program *prog, void **args, int n_args, int core_id) {
-  if (!prog || !args || n_args < 0) return -1;
+int poly_x86_program_call_core(
+    PolyX86Program *prog, void **args, int n_args, int core_id_slot, int core_id
+) {
+  if (!prog || !args || n_args < 0 || core_id_slot < 0 || core_id_slot >= n_args) return -1;
   enum { STACK_CAP = 32 };
   void *stack_args[STACK_CAP];
   void **call_args = stack_args;
-  if (n_args + 1 > STACK_CAP) {
-    call_args = malloc((size_t)(n_args + 1) * sizeof(void *));
+  if (n_args > STACK_CAP) {
+    call_args = malloc((size_t)n_args * sizeof(void *));
     if (!call_args) return -1;
   }
   for (int i = 0; i < n_args; i++) call_args[i] = args[i];
-  call_args[n_args] = (void *)(intptr_t)core_id;
-  int rc = poly_x86_program_call(prog, call_args, n_args + 1);
+  call_args[core_id_slot] = (void *)(intptr_t)core_id;
+  int rc = poly_x86_program_call(prog, call_args, n_args);
   if (call_args != stack_args) free(call_args);
   return rc;
 }
@@ -6209,6 +5196,7 @@ typedef struct {
   PolyX86Program *prog;
   void **args;
   int n_args;
+  int core_id_slot;
   int requested_threads;
   int active_workers;
   uint64_t generation;
@@ -6245,11 +5233,12 @@ static void *poly_x86_thread_call_main(void *opaque) {
     PolyX86Program *prog = p->prog;
     void **args = p->args;
     int n_args = p->n_args;
+    int core_id_slot = p->core_id_slot;
     int core_id = tc->core_id;
     seen_generation = p->generation;
     pthread_mutex_unlock(&p->mu);
 
-    (void)poly_x86_program_call_core(prog, args, n_args, core_id);
+    (void)poly_x86_program_call_core(prog, args, n_args, core_id_slot, core_id);
 
     pthread_mutex_lock(&p->mu);
     p->active_workers--;
@@ -6290,9 +5279,11 @@ static void poly_x86_thread_pool_shutdown(void) {
   }
 }
 
-int poly_x86_program_call_threaded(PolyX86Program *prog, void **args, int n_args, int threads) {
-  if (!prog || !args) return -1;
-  if (threads <= 1) return poly_x86_program_call(prog, args, n_args);
+int poly_x86_program_call_threaded(
+    PolyX86Program *prog, void **args, int n_args, int core_id_slot, int threads
+) {
+  if (!prog || !args || core_id_slot < 0 || core_id_slot >= n_args) return -1;
+  if (threads <= 1) return poly_x86_program_call_core(prog, args, n_args, core_id_slot, 0);
 
   pthread_once(&g_x86_thread_pool_once, poly_x86_thread_pool_once);
   threads = poly_x86_thread_cap(threads);
@@ -6307,6 +5298,7 @@ int poly_x86_program_call_threaded(PolyX86Program *prog, void **args, int n_args
   p->prog = prog;
   p->args = args;
   p->n_args = n_args;
+  p->core_id_slot = core_id_slot;
   p->requested_threads = threads;
   p->active_workers = 0;
   for (int t = 1; t < threads; t++)
@@ -6316,13 +5308,13 @@ int poly_x86_program_call_threaded(PolyX86Program *prog, void **args, int n_args
   pthread_cond_broadcast(&p->start_cv);
   pthread_mutex_unlock(&p->mu);
 
-  int rc = poly_x86_program_call_core(prog, args, n_args, 0);
+  int rc = poly_x86_program_call_core(prog, args, n_args, core_id_slot, 0);
 
   pthread_mutex_lock(&p->mu);
   for (int t = 1; t < threads; t++) {
     if (p->workers[t].live) continue;
     pthread_mutex_unlock(&p->mu);
-    int worker_rc = poly_x86_program_call_core(prog, args, n_args, t);
+    int worker_rc = poly_x86_program_call_core(prog, args, n_args, core_id_slot, t);
     if (worker_rc != 0) rc = worker_rc;
     pthread_mutex_lock(&p->mu);
   }
@@ -6332,6 +5324,7 @@ int poly_x86_program_call_threaded(PolyX86Program *prog, void **args, int n_args
   p->prog = NULL;
   p->args = NULL;
   p->n_args = 0;
+  p->core_id_slot = -1;
   pthread_cond_broadcast(&p->done_cv);
   pthread_mutex_unlock(&p->mu);
   return rc;

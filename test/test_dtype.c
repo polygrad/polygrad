@@ -33,8 +33,8 @@ TEST(dtype, classification) {
 
   ASSERT_TRUE(poly_dtype_is_int(POLY_INT32));
   ASSERT_TRUE(poly_dtype_is_int(POLY_UINT64));
-  ASSERT_TRUE(poly_dtype_is_int(POLY_INDEX));
-  ASSERT_TRUE(poly_dtype_is_index(POLY_INDEX));
+  ASSERT_TRUE(poly_dtype_is_int(POLY_WEAKINT));
+  ASSERT_TRUE(poly_dtype_is_index(POLY_WEAKINT));
   ASSERT_FALSE(poly_dtype_is_int(POLY_FLOAT32));
 
   ASSERT_TRUE(poly_dtype_is_unsigned(POLY_UINT8));
@@ -47,27 +47,68 @@ TEST(dtype, classification) {
 }
 
 TEST(dtype, weakint_identity_uses_tinygrad_scalar_semantics) {
-  PolyDType weak_like = POLY_INDEX;
+  PolyDType weak_like = POLY_WEAKINT;
   weak_like.bitsize = 144;
-  weak_like.count = 1;
 
-  ASSERT_FALSE(poly_dtype_eq(weak_like, POLY_INDEX));
+  ASSERT_FALSE(poly_dtype_eq(weak_like, POLY_WEAKINT));
   ASSERT_TRUE(poly_dtype_is_index(weak_like));
   ASSERT_TRUE(poly_dtype_is_int(weak_like));
-  ASSERT_TRUE(poly_dtype_eq(poly_dtype_scalar(weak_like), POLY_INDEX));
   PASS();
 }
 
 TEST(dtype, ffi_roundtrips_internal_weakint_without_renumbering_public_types) {
-  /* Pinned UOp.range exposes dtypes.weakint through ordinary UOp dtype
-   * reflection (uop/ops.py:563-565); keep existing FFI ids stable and append
-   * that internal dtype after float64. */
+  /* Current weakint and weakfloat are both public UOp scalar kinds. Keep the
+   * existing FFI ids stable and append them after float64. */
   ASSERT_INT_EQ(poly_dtype_id_by_name("float64"), 13);
   ASSERT_INT_EQ(poly_dtype_id_by_name("weakint"), 14);
-  ASSERT_INT_EQ(poly_dtype_count(), 15);
+  ASSERT_INT_EQ(poly_dtype_id_by_name("weakfloat"), 15);
+  ASSERT_INT_EQ(poly_dtype_count(), 20);
   PolyDType dt = POLY_VOID;
   ASSERT_TRUE(poly_dtype_by_id(14, &dt));
-  ASSERT_TRUE(poly_dtype_eq(dt, POLY_INDEX));
+  ASSERT_TRUE(poly_dtype_eq(dt, POLY_WEAKINT));
+  ASSERT_TRUE(poly_dtype_by_id(15, &dt));
+  ASSERT_TRUE(poly_dtype_eq(dt, POLY_WEAKFLOAT));
+  PASS();
+}
+
+TEST(dtype, fp8_identities_append_without_renumbering_existing_types) {
+  ASSERT_INT_EQ(poly_dtype_id_by_name("fp8e4m3"), 16);
+  ASSERT_INT_EQ(poly_dtype_id_by_name("float8_e4m3"), 16);
+  ASSERT_INT_EQ(poly_dtype_id_by_name("fp8e5m2"), 17);
+  ASSERT_INT_EQ(poly_dtype_id_by_name("float8_e5m2"), 17);
+  ASSERT_INT_EQ(poly_dtype_id_by_name("fp8e4m3fnuz"), 18);
+  ASSERT_INT_EQ(poly_dtype_id_by_name("float8_e4m3fnuz"), 18);
+  ASSERT_INT_EQ(poly_dtype_id_by_name("fp8e5m2fnuz"), 19);
+  ASSERT_INT_EQ(poly_dtype_id_by_name("float8_e5m2fnuz"), 19);
+  ASSERT_INT_EQ(poly_dtype_count(), 20);
+  PASS();
+}
+
+TEST(dtype, fp8_storage_conversion_matches_current_tinygrad) {
+  const double values[] = {-INFINITY, -1.5, -0.0, 0.0, 0.1, 1.0, 1.5, 448.0,
+                           INFINITY, NAN};
+  const PolyDType dtypes[] = {
+      POLY_FP8E4M3, POLY_FP8E5M2, POLY_FP8E4M3FNUZ, POLY_FP8E5M2FNUZ,
+  };
+  const uint8_t expected[][10] = {
+      {255, 188, 128, 0, 29, 56, 60, 126, 127, 127},
+      {252, 190, 128, 0, 46, 60, 62, 95, 124, 127},
+      {128, 196, 0, 0, 37, 64, 68, 127, 128, 128},
+      {128, 194, 0, 0, 50, 64, 66, 99, 128, 128},
+  };
+  for (int d = 0; d < 4; d++) {
+    ASSERT_TRUE(poly_dtype_is_fp8(dtypes[d]));
+    ASSERT_INT_EQ(poly_dtype_is_fp8_fnuz(dtypes[d]), d >= 2);
+    for (int i = 0; i < 10; i++)
+      ASSERT_INT_EQ(poly_float_to_fp8(values[i], dtypes[d]), expected[d][i]);
+  }
+
+  ASSERT_TRUE(isnan(poly_fp8_to_float(0xff, POLY_FP8E4M3)));
+  ASSERT_FLOAT_EQ(poly_fp8_to_float(0xbc, POLY_FP8E4M3), -1.5, 0.0);
+  ASSERT_FLOAT_EQ(poly_fp8_to_float(0x1d, POLY_FP8E4M3), 0.1015625, 0.0);
+  ASSERT_TRUE(isinf(poly_fp8_to_float(0x7c, POLY_FP8E5M2)));
+  ASSERT_TRUE(isnan(poly_fp8_to_float(0x80, POLY_FP8E4M3FNUZ)));
+  ASSERT_FLOAT_EQ(poly_fp8_to_float(0x63, POLY_FP8E5M2FNUZ), 448.0, 0.0);
   PASS();
 }
 
@@ -78,36 +119,6 @@ TEST(dtype, itemsize) {
   ASSERT_INT_EQ(poly_dtype_itemsize(POLY_INT8), 1);
   ASSERT_INT_EQ(poly_dtype_itemsize(POLY_BOOL), 1);
   ASSERT_INT_EQ(poly_dtype_itemsize(POLY_FLOAT16), 2);
-  PASS();
-}
-
-TEST(dtype, vec) {
-  PolyDType v4 = poly_dtype_vec(POLY_FLOAT32, 4);
-  ASSERT_INT_EQ(v4.count, 4);
-  ASSERT_INT_EQ(v4.bitsize, 128);
-  ASSERT_TRUE(poly_dtype_is_float(v4));
-
-  /* vec(1) returns scalar */
-  PolyDType v1 = poly_dtype_vec(POLY_FLOAT32, 1);
-  ASSERT_TRUE(poly_dtype_eq(v1, POLY_FLOAT32));
-
-  /* void doesn't vectorize */
-  PolyDType vv = poly_dtype_vec(POLY_VOID, 4);
-  ASSERT_TRUE(poly_dtype_eq(vv, POLY_VOID));
-  PASS();
-}
-
-TEST(dtype, scalar) {
-  PolyDType v4 = poly_dtype_vec(POLY_FLOAT32, 4);
-  PolyDType s = poly_dtype_scalar(v4);
-  ASSERT_INT_EQ(s.count, 1);
-  ASSERT_INT_EQ(s.bitsize, 32);
-  ASSERT_TRUE(poly_dtype_eq(s, POLY_FLOAT32));
-  ASSERT_EQ(s.fmt, POLY_FLOAT32.fmt);
-
-  /* scalar of scalar is identity */
-  PolyDType s2 = poly_dtype_scalar(POLY_INT64);
-  ASSERT_TRUE(poly_dtype_eq(s2, POLY_INT64));
   PASS();
 }
 
@@ -125,28 +136,14 @@ TEST(dtype, least_upper_matches_tinygrad_promotion_lattice) {
 }
 
 TEST(dtype, can_lossless_cast_matches_tinygrad_supported_table) {
-  ASSERT_TRUE(poly_dtype_can_lossless_cast(POLY_INT32, POLY_INDEX));
-  ASSERT_TRUE(poly_dtype_can_lossless_cast(POLY_INT64, POLY_INDEX));
-  ASSERT_FALSE(poly_dtype_can_lossless_cast(POLY_FLOAT32, POLY_INDEX));
-  ASSERT_TRUE(poly_dtype_can_lossless_cast(POLY_BOOL, poly_dtype_vec(POLY_INT32, 2)));
-  ASSERT_TRUE(
-      poly_dtype_can_lossless_cast(POLY_BOOL, poly_dtype_ptr(POLY_INT32, 4, POLY_ADDR_GLOBAL))
-  );
+  ASSERT_TRUE(poly_dtype_can_lossless_cast(POLY_INT32, POLY_WEAKINT));
+  ASSERT_TRUE(poly_dtype_can_lossless_cast(POLY_INT64, POLY_WEAKINT));
+  ASSERT_FALSE(poly_dtype_can_lossless_cast(POLY_FLOAT32, POLY_WEAKINT));
+  ASSERT_TRUE(poly_dtype_can_lossless_cast(POLY_BOOL, POLY_INT32));
   ASSERT_TRUE(poly_dtype_can_lossless_cast(POLY_UINT16, POLY_INT32));
   ASSERT_TRUE(poly_dtype_can_lossless_cast(POLY_INT8, POLY_FLOAT16));
   ASSERT_FALSE(poly_dtype_can_lossless_cast(POLY_INT32, POLY_FLOAT32));
   ASSERT_FALSE(poly_dtype_can_lossless_cast(POLY_INT32, POLY_INT16));
-  ASSERT_FALSE(
-      poly_dtype_can_lossless_cast(poly_dtype_vec(POLY_INT32, 2), poly_dtype_vec(POLY_INDEX, 2))
-  );
-  PASS();
-}
-
-TEST(dtype, ptr) {
-  PolyDType p = poly_dtype_ptr(POLY_FLOAT32, 1024, POLY_ADDR_GLOBAL);
-  ASSERT_TRUE(p.is_ptr);
-  ASSERT_INT_EQ(p.ptr_size, 1024);
-  ASSERT_INT_EQ(p.addrspace, POLY_ADDR_GLOBAL);
   PASS();
 }
 

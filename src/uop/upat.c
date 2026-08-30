@@ -1,14 +1,13 @@
 /*
- * pat.c — Pattern matcher: PolyPat, PolyPatternMatcher, graph_rewrite
+ * upat.c — Pattern matcher: PolyUPat, PolyPatternMatcher, graph_rewrite
  *
  * Mirrors tinygrad's UPat.match(), PatternMatcher.rewrite(), and
  * unified_rewrite (top-down mode).
  */
 
-#include "pat.h"
+#include "uop/upat.h"
 #include "arena.h"
 #include "bigint.h"
-#include <math.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -24,51 +23,51 @@
  * caches own those allocations; ordinary public patterns and matchers retain
  * their caller-managed lifetime. The current Emscripten build is single-threaded
  * and keeps its caches for the lifetime of the module. */
-typedef struct PolyPatThreadOwned {
+typedef struct PolyUPatThreadOwned {
   void *ptr;
   bool matcher;
-  struct PolyPatThreadOwned *next;
-} PolyPatThreadOwned;
+  struct PolyUPatThreadOwned *next;
+} PolyUPatThreadOwned;
 
 typedef struct {
-  PolyPatThreadOwned *head;
-} PolyPatThreadRegistry;
+  PolyUPatThreadOwned *head;
+} PolyUPatThreadRegistry;
 
-static void pat_free_one(PolyPat *p);
+static void upat_free_one(PolyUPat *p);
 static void pm_destroy_one(PolyPatternMatcher *pm);
 
 #ifndef __EMSCRIPTEN__
-static pthread_key_t g_pat_thread_key;
-static pthread_once_t g_pat_thread_key_once = PTHREAD_ONCE_INIT;
-static bool g_pat_thread_key_ready = false;
+static pthread_key_t g_upat_thread_key;
+static pthread_once_t g_upat_thread_key_once = PTHREAD_ONCE_INIT;
+static bool g_upat_thread_key_ready = false;
 
-static void pat_thread_registry_destroy(void *opaque) {
-  PolyPatThreadRegistry *registry = opaque;
+static void upat_thread_registry_destroy(void *opaque) {
+  PolyUPatThreadRegistry *registry = opaque;
   if (!registry) return;
-  for (PolyPatThreadOwned *owned = registry->head; owned; owned = owned->next)
+  for (PolyUPatThreadOwned *owned = registry->head; owned; owned = owned->next)
     if (owned->matcher) pm_destroy_one((PolyPatternMatcher *)owned->ptr);
-  for (PolyPatThreadOwned *owned = registry->head; owned; owned = owned->next)
-    if (!owned->matcher) pat_free_one((PolyPat *)owned->ptr);
+  for (PolyUPatThreadOwned *owned = registry->head; owned; owned = owned->next)
+    if (!owned->matcher) upat_free_one((PolyUPat *)owned->ptr);
   while (registry->head) {
-    PolyPatThreadOwned *owned = registry->head;
+    PolyUPatThreadOwned *owned = registry->head;
     registry->head = owned->next;
     free(owned);
   }
   free(registry);
 }
 
-static void pat_thread_key_init(void) {
-  g_pat_thread_key_ready = pthread_key_create(&g_pat_thread_key, pat_thread_registry_destroy) == 0;
+static void upat_thread_key_init(void) {
+  g_upat_thread_key_ready = pthread_key_create(&g_upat_thread_key, upat_thread_registry_destroy) == 0;
 }
 
-static PolyPatThreadRegistry *pat_thread_registry_get(bool create) {
-  if (pthread_once(&g_pat_thread_key_once, pat_thread_key_init) != 0 || !g_pat_thread_key_ready)
+static PolyUPatThreadRegistry *upat_thread_registry_get(bool create) {
+  if (pthread_once(&g_upat_thread_key_once, upat_thread_key_init) != 0 || !g_upat_thread_key_ready)
     return NULL;
-  PolyPatThreadRegistry *registry = pthread_getspecific(g_pat_thread_key);
+  PolyUPatThreadRegistry *registry = pthread_getspecific(g_upat_thread_key);
   if (!registry && create) {
     registry = calloc(1, sizeof(*registry));
     if (!registry) return NULL;
-    if (pthread_setspecific(g_pat_thread_key, registry) != 0) {
+    if (pthread_setspecific(g_upat_thread_key, registry) != 0) {
       free(registry);
       return NULL;
     }
@@ -76,26 +75,26 @@ static PolyPatThreadRegistry *pat_thread_registry_get(bool create) {
   return registry;
 }
 
-static bool pat_thread_register(void *ptr, bool matcher) {
+static bool upat_thread_register(void *ptr, bool matcher) {
   if (!ptr) return false;
-  PolyPatThreadRegistry *registry = pat_thread_registry_get(true);
+  PolyUPatThreadRegistry *registry = upat_thread_registry_get(true);
   if (!registry) return false;
-  for (PolyPatThreadOwned *owned = registry->head; owned; owned = owned->next)
+  for (PolyUPatThreadOwned *owned = registry->head; owned; owned = owned->next)
     if (owned->ptr == ptr && owned->matcher == matcher) return true;
-  PolyPatThreadOwned *owned = malloc(sizeof(*owned));
+  PolyUPatThreadOwned *owned = malloc(sizeof(*owned));
   if (!owned) return false;
-  *owned = (PolyPatThreadOwned){.ptr = ptr, .matcher = matcher, .next = registry->head};
+  *owned = (PolyUPatThreadOwned){.ptr = ptr, .matcher = matcher, .next = registry->head};
   registry->head = owned;
   return true;
 }
 
-static void pat_thread_unregister(void *ptr, bool matcher) {
+static void upat_thread_unregister(void *ptr, bool matcher) {
   if (!ptr) return;
-  PolyPatThreadRegistry *registry = pat_thread_registry_get(false);
+  PolyUPatThreadRegistry *registry = upat_thread_registry_get(false);
   if (!registry) return;
-  PolyPatThreadOwned **link = &registry->head;
+  PolyUPatThreadOwned **link = &registry->head;
   while (*link) {
-    PolyPatThreadOwned *owned = *link;
+    PolyUPatThreadOwned *owned = *link;
     if (owned->ptr == ptr && owned->matcher == matcher) {
       *link = owned->next;
       free(owned);
@@ -105,12 +104,12 @@ static void pat_thread_unregister(void *ptr, bool matcher) {
   }
 }
 #else
-static bool pat_thread_register(void *ptr, bool matcher) {
+static bool upat_thread_register(void *ptr, bool matcher) {
   (void)matcher;
   return ptr != NULL;
 }
 
-static void pat_thread_unregister(void *ptr, bool matcher) {
+static void upat_thread_unregister(void *ptr, bool matcher) {
   (void)ptr;
   (void)matcher;
 }
@@ -130,11 +129,11 @@ static PolyOps opset_first(PolyOpSet s) {
 
 /* Pattern constructors */
 
-static PolyPat *pat_alloc(void) {
-  return calloc(1, sizeof(PolyPat));
+static PolyUPat *upat_alloc(void) {
+  return calloc(1, sizeof(PolyUPat));
 }
 
-static PolyOpSet compute_early_reject(PolyPat **src, int n_src) {
+static PolyOpSet compute_early_reject(PolyUPat **src, int n_src) {
   PolyOpSet rej = {{0, 0}};
   if (!src) return rej;
   for (int i = 0; i < n_src; i++) {
@@ -144,30 +143,29 @@ static PolyOpSet compute_early_reject(PolyPat **src, int n_src) {
   return rej;
 }
 
-static PolyPat **dup_src(PolyPat **src, int n) {
+static PolyUPat **dup_src(PolyUPat **src, int n) {
   if (!src || n == 0) return NULL;
-  PolyPat **d = malloc(n * sizeof(PolyPat *));
-  memcpy(d, src, n * sizeof(PolyPat *));
+  PolyUPat **d = malloc(n * sizeof(PolyUPat *));
+  memcpy(d, src, n * sizeof(PolyUPat *));
   return d;
 }
 
-PolyPat *poly_pat_any(const char *name) {
-  PolyPat *p = pat_alloc();
+PolyUPat *poly_upat_any(const char *name) {
+  PolyUPat *p = upat_alloc();
   p->name = name;
   return p;
 }
 
-PolyPat *poly_pat_cvar(const char *name) {
-  PolyPat *p = pat_alloc();
+PolyUPat *poly_upat_cvar(const char *name) {
+  PolyUPat *p = upat_alloc();
   p->has_ops = true;
-  /* CONST | VCONST */
-  p->ops = poly_opset_add(poly_opset_add((PolyOpSet){{0, 0}}, POLY_OP_CONST), POLY_OP_VCONST);
+  p->ops = poly_opset_add((PolyOpSet){{0, 0}}, POLY_OP_CONST);
   p->name = name;
   return p;
 }
 
-PolyPat *poly_pat_const_val(PolyArg val) {
-  PolyPat *p = pat_alloc();
+PolyUPat *poly_upat_const_val(PolyArg val) {
+  PolyUPat *p = upat_alloc();
   p->has_ops = true;
   p->ops = poly_opset_add((PolyOpSet){{0, 0}}, POLY_OP_CONST);
   p->match_arg = true;
@@ -175,8 +173,22 @@ PolyPat *poly_pat_const_val(PolyArg val) {
   return p;
 }
 
-PolyPat *poly_pat_op(PolyOps op, PolyPat **src, int n_src, const char *name) {
-  PolyPat *p = pat_alloc();
+PolyUPat *poly_upat_const(PolyArg val, PolyDType dtype) {
+  /* tinygrad 2026-08-22/a9069c177a9d uop/ops.py:1368 UPat.const. */
+  PolyUPat *p = poly_upat_const_val(val);
+  if (!p) return NULL;
+  p->dtypes = malloc(sizeof(*p->dtypes));
+  if (!p->dtypes) {
+    upat_free_one(p);
+    return NULL;
+  }
+  p->dtypes[0] = dtype;
+  p->n_dtypes = 1;
+  return p;
+}
+
+PolyUPat *poly_upat_op(PolyOps op, PolyUPat **src, int n_src, const char *name) {
+  PolyUPat *p = upat_alloc();
   p->has_ops = true;
   p->ops = poly_opset_add((PolyOpSet){{0, 0}}, op);
   p->src = dup_src(src, n_src);
@@ -187,8 +199,8 @@ PolyPat *poly_pat_op(PolyOps op, PolyPat **src, int n_src, const char *name) {
   return p;
 }
 
-PolyPat *poly_pat_ops(PolyOpSet ops, PolyPat **src, int n_src, const char *name) {
-  PolyPat *p = pat_alloc();
+PolyUPat *poly_upat_ops(PolyOpSet ops, PolyUPat **src, int n_src, const char *name) {
+  PolyUPat *p = upat_alloc();
   p->has_ops = true;
   p->ops = ops;
   p->src = dup_src(src, n_src);
@@ -199,45 +211,85 @@ PolyPat *poly_pat_ops(PolyOpSet ops, PolyPat **src, int n_src, const char *name)
   return p;
 }
 
-PolyPat *poly_pat_op1(PolyOps op, PolyPat *s0, const char *name) {
-  PolyPat *arr[] = {s0};
-  return poly_pat_op(op, arr, 1, name);
+PolyUPat *poly_upat_op1(PolyOps op, PolyUPat *s0, const char *name) {
+  PolyUPat *arr[] = {s0};
+  return poly_upat_op(op, arr, 1, name);
 }
 
-PolyPat *poly_pat_op2(PolyOps op, PolyPat *s0, PolyPat *s1, const char *name) {
-  PolyPat *arr[] = {s0, s1};
-  return poly_pat_op(op, arr, 2, name);
+PolyUPat *poly_upat_op2(PolyOps op, PolyUPat *s0, PolyUPat *s1, const char *name) {
+  PolyUPat *arr[] = {s0, s1};
+  return poly_upat_op(op, arr, 2, name);
 }
 
-PolyPat *poly_pat_op2c(PolyOps op, PolyPat *s0, PolyPat *s1, const char *name) {
-  PolyPat *arr[] = {s0, s1};
-  PolyPat *p = poly_pat_op(op, arr, 2, name);
+PolyUPat *poly_upat_op2c(PolyOps op, PolyUPat *s0, PolyUPat *s1, const char *name) {
+  PolyUPat *arr[] = {s0, s1};
+  PolyUPat *p = poly_upat_op(op, arr, 2, name);
   p->commutative = true;
   return p;
 }
 
-PolyPat *poly_pat_op3(PolyOps op, PolyPat *s0, PolyPat *s1, PolyPat *s2, const char *name) {
-  PolyPat *arr[] = {s0, s1, s2};
-  return poly_pat_op(op, arr, 3, name);
+PolyUPat *poly_upat_op3(PolyOps op, PolyUPat *s0, PolyUPat *s1, PolyUPat *s2, const char *name) {
+  PolyUPat *arr[] = {s0, s1, s2};
+  return poly_upat_op(op, arr, 3, name);
 }
 
-PolyPat *poly_pat_ops1(PolyOpSet ops, PolyPat *s0, const char *name) {
-  PolyPat *arr[] = {s0};
-  return poly_pat_ops(ops, arr, 1, name);
+PolyUPat *poly_upat_ops1(PolyOpSet ops, PolyUPat *s0, const char *name) {
+  PolyUPat *arr[] = {s0};
+  return poly_upat_ops(ops, arr, 1, name);
 }
 
-PolyPat *poly_pat_ops2(PolyOpSet ops, PolyPat *s0, PolyPat *s1, const char *name) {
-  PolyPat *arr[] = {s0, s1};
-  return poly_pat_ops(ops, arr, 2, name);
+PolyUPat *poly_upat_ops2(PolyOpSet ops, PolyUPat *s0, PolyUPat *s1, const char *name) {
+  PolyUPat *arr[] = {s0, s1};
+  return poly_upat_ops(ops, arr, 2, name);
 }
 
-PolyPat *poly_pat_ops3(PolyOpSet ops, PolyPat *s0, PolyPat *s1, PolyPat *s2, const char *name) {
-  PolyPat *arr[] = {s0, s1, s2};
-  return poly_pat_ops(ops, arr, 3, name);
+PolyUPat *poly_upat_ops2c(PolyOpSet ops, PolyUPat *s0, PolyUPat *s1, const char *name) {
+  PolyUPat *p = poly_upat_ops2(ops, s0, s1, name);
+  if (p) p->commutative = true;
+  return p;
 }
 
-PolyPat *poly_pat_dtype(const char *name, PolyDType *dtypes, int n) {
-  PolyPat *p = pat_alloc();
+PolyUPat *poly_upat_ops3(PolyOpSet ops, PolyUPat *s0, PolyUPat *s1, PolyUPat *s2, const char *name) {
+  PolyUPat *arr[] = {s0, s1, s2};
+  return poly_upat_ops(ops, arr, 3, name);
+}
+
+PolyUPat *poly_upat_repeat_src(PolyUPat *p, PolyUPat *src) {
+  /* Tinygrad 2026-08-22/a9069c177a9d uop/ops.py:1299-1301 stores
+   * `src=UPat(...)` as one repeated source pattern. */
+  if (!p || !src) return NULL;
+  PolyUPat **repeated = malloc(sizeof(*repeated));
+  if (!repeated) return NULL;
+  repeated[0] = src;
+  free(p->src);
+  p->src = repeated;
+  p->n_src = 1;
+  p->repeat_src = true;
+  p->strict_length = false;
+  p->early_reject = compute_early_reject(p->src, p->n_src);
+  return p;
+}
+
+PolyUPat *poly_upat_named(PolyUPat *p, const char *name) {
+  /* Tinygrad 2026-08-22/a9069c177a9d uop/ops.py:1380 UPat.named. */
+  if (p) p->name = name;
+  return p;
+}
+
+PolyUPat *poly_upat_set_dtype(PolyUPat *p, const PolyDType *dtypes, int n) {
+  /* C constructor mechanics for Tinygrad UPat(..., dtype=...). */
+  if (!p || !dtypes || n <= 0) return p;
+  PolyDType *copy = malloc((size_t)n * sizeof(*copy));
+  if (!copy) return NULL;
+  memcpy(copy, dtypes, (size_t)n * sizeof(*copy));
+  free(p->dtypes);
+  p->dtypes = copy;
+  p->n_dtypes = n;
+  return p;
+}
+
+PolyUPat *poly_upat_dtype(const char *name, PolyDType *dtypes, int n) {
+  PolyUPat *p = upat_alloc();
   p->name = name;
   p->dtypes = malloc(n * sizeof(PolyDType));
   memcpy(p->dtypes, dtypes, n * sizeof(PolyDType));
@@ -245,37 +297,37 @@ PolyPat *poly_pat_dtype(const char *name, PolyDType *dtypes, int n) {
   return p;
 }
 
-PolyPat *poly_pat_allow_any_len(PolyPat *p) {
+PolyUPat *poly_upat_allow_any_len(PolyUPat *p) {
   if (!p) return NULL;
   p->strict_length = false;
   return p;
 }
 
-PolyPat *poly_pat_or_casted(PolyPat *p) {
+PolyUPat *poly_upat_or_casted(PolyUPat *p) {
   if (!p) return NULL;
   p->or_casted = true;
   return p;
 }
 
-PolyPat *poly_pat_set_early_reject(PolyPat *p, PolyOpSet early_reject) {
+PolyUPat *poly_upat_set_early_reject(PolyUPat *p, PolyOpSet early_reject) {
   if (!p) return NULL;
   p->early_reject = early_reject;
   return p;
 }
 
-static void pat_free_one(PolyPat *p) {
+static void upat_free_one(PolyUPat *p) {
   if (!p) return;
   free(p->src);
   free(p->dtypes);
   free(p);
 }
 
-void poly_pat_free(PolyPat *p) {
+void poly_upat_free(PolyUPat *p) {
   if (!p) return;
   for (int i = 0; p->src && i < p->n_src; i++)
-    poly_pat_free(p->src[i]);
-  pat_thread_unregister(p, false);
-  pat_free_one(p);
+    poly_upat_free(p->src[i]);
+  upat_thread_unregister(p, false);
+  upat_free_one(p);
 }
 
 /* Pattern matching */
@@ -333,29 +385,31 @@ static bool bindings_add(PolyBindings *b, const char *name, PolyUOp *uop) {
   return true;
 }
 
-typedef bool (*PatMatchContinuation)(PolyBindings *binds, void *opaque);
+typedef bool (*UPatMatchContinuation)(PolyBindings *binds, void *opaque);
 
 typedef struct {
-  const PolyPat *pat;
+  const PolyUPat *pat;
   PolyUOp *uop;
   int src_index;
   bool swapped;
-  PatMatchContinuation continuation;
+  UPatMatchContinuation continuation;
   void *opaque;
-} PatSourceMatch;
+} UPatSourceMatch;
 
-static bool pat_match_continue(
-    const PolyPat *pat, PolyUOp *uop, PolyBindings *binds,
-    PatMatchContinuation continuation, void *opaque, bool allow_cast
+static bool upat_match_continue(
+    const PolyUPat *pat, PolyUOp *uop, PolyBindings *binds,
+    UPatMatchContinuation continuation, void *opaque, bool allow_cast
 );
 
-static bool pat_match_sources_continue(PolyBindings *binds, void *opaque) {
-  PatSourceMatch *state = opaque;
-  if (state->src_index == state->pat->n_src)
+static bool upat_match_sources_continue(PolyBindings *binds, void *opaque) {
+  UPatSourceMatch *state = opaque;
+  int source_count = state->pat->repeat_src ? state->uop->n_src : state->pat->n_src;
+  if (state->src_index == source_count)
     return state->continuation(binds, state->opaque);
 
   int uop_index = state->swapped ? 1 - state->src_index : state->src_index;
-  PatSourceMatch next = {
+  int pattern_index = state->pat->repeat_src ? 0 : state->src_index;
+  UPatSourceMatch next = {
       .pat = state->pat,
       .uop = state->uop,
       .src_index = state->src_index + 1,
@@ -363,15 +417,15 @@ static bool pat_match_sources_continue(PolyBindings *binds, void *opaque) {
       .continuation = state->continuation,
       .opaque = state->opaque,
   };
-  return pat_match_continue(
-      state->pat->src[state->src_index], state->uop->src[uop_index], binds,
-      pat_match_sources_continue, &next, true
+  return upat_match_continue(
+      state->pat->src[pattern_index], state->uop->src[uop_index], binds,
+      upat_match_sources_continue, &next, true
   );
 }
 
-static bool pat_match_continue(
-    const PolyPat *pat, PolyUOp *uop, PolyBindings *binds,
-    PatMatchContinuation continuation, void *opaque, bool allow_cast
+static bool upat_match_continue(
+    const PolyUPat *pat, PolyUOp *uop, PolyBindings *binds,
+    UPatMatchContinuation continuation, void *opaque, bool allow_cast
 ) {
   int saved = binds->n;
 
@@ -389,7 +443,7 @@ static bool pat_match_continue(
 
   if (pat->n_dtypes > 0) {
     bool found = false;
-    PolyDType scalar = poly_dtype_scalar(uop->dtype);
+    PolyDType scalar = uop->dtype;
     for (int i = 0; i < pat->n_dtypes; i++) {
       if (poly_dtype_eq(pat->dtypes[i], uop->dtype) ||
           poly_dtype_eq(pat->dtypes[i], scalar)) {
@@ -400,8 +454,12 @@ static bool pat_match_continue(
     if (!found) goto no_match;
   }
 
-  if (pat->match_arg && !poly_arg_eq(pat->arg, uop->arg)) goto no_match;
-  if (uop->n_src < pat->n_src) goto no_match;
+  /* tinygrad 2026-08-22/a9069c177a9d uop/ops.py:1403-1410 uses Python
+   * argument equality, so literal 0 also matches ConstFloat(0.0). */
+  if (pat->match_arg && !poly_arg_eq(pat->arg, uop->arg) &&
+      !poly_arg_python_numeric_eq(pat->arg, uop->arg))
+    goto no_match;
+  if (!pat->repeat_src && uop->n_src < pat->n_src) goto no_match;
   if (pat->strict_length && uop->n_src != pat->n_src) goto no_match;
 
   if (pat->src == NULL) {
@@ -410,7 +468,7 @@ static bool pat_match_continue(
   }
 
   int source_saved = binds->n;
-  PatSourceMatch sources = {
+  UPatSourceMatch sources = {
       .pat = pat,
       .uop = uop,
       .src_index = 0,
@@ -418,7 +476,7 @@ static bool pat_match_continue(
       .continuation = continuation,
       .opaque = opaque,
   };
-  if (pat_match_sources_continue(binds, &sources)) return true;
+  if (upat_match_sources_continue(binds, &sources)) return true;
   binds->n = source_saved;
 
   /*
@@ -429,7 +487,7 @@ static bool pat_match_continue(
    */
   if (pat->commutative && pat->n_src == 2) {
     sources.swapped = true;
-    if (pat_match_sources_continue(binds, &sources)) return true;
+    if (upat_match_sources_continue(binds, &sources)) return true;
   }
 
 no_match:
@@ -437,20 +495,20 @@ no_match:
   /* Pinned tinygrad UPat.or_casted is any(self, CAST(self)): direct-first and
    * exactly one CAST wrapper, not recursively CAST-tolerant. */
   if (allow_cast && pat->or_casted && uop->op == POLY_OP_CAST && uop->n_src == 1)
-    return pat_match_continue(
+    return upat_match_continue(
         pat, uop->src[0], binds, continuation, opaque, false
     );
   return false;
 }
 
-static bool pat_match_accept(PolyBindings *binds, void *opaque) {
+static bool upat_match_accept(PolyBindings *binds, void *opaque) {
   (void)binds;
   (void)opaque;
   return true;
 }
 
-bool poly_pat_match(const PolyPat *pat, PolyUOp *uop, PolyBindings *binds) {
-  return pat_match_continue(pat, uop, binds, pat_match_accept, NULL, true);
+bool poly_upat_match(const PolyUPat *pat, PolyUOp *uop, PolyBindings *binds) {
+  return upat_match_continue(pat, uop, binds, upat_match_accept, NULL, true);
 }
 
 /* PatternMatcher */
@@ -577,7 +635,7 @@ static PolyPatternMatcher *poly_pm_new_impl(
     pm->stats[i].name = (names && names[i]) ? names[i] : "<unnamed>";
 
   for (int i = 0; i < n_rules; i++) {
-    PolyPat *p = rules[i].pat;
+    PolyUPat *p = rules[i].pat;
     if (!p->has_ops) {
       /* Pattern matches any op — add to all op lists */
       for (int j = 0; j < POLY_OP_COUNT; j++)
@@ -616,18 +674,18 @@ PolyPatternMatcher *poly_pm_new_named(const PolyNamedRule *rules, int n_rules) {
   return pm;
 }
 
-static void pat_thread_cache_register_pattern(PolyPat *pat) {
+static void upat_thread_cache_register_pattern(PolyUPat *pat) {
   if (!pat) return;
-  (void)pat_thread_register(pat, false);
+  (void)upat_thread_register(pat, false);
   for (int i = 0; pat->src && i < pat->n_src; i++)
-    pat_thread_cache_register_pattern(pat->src[i]);
+    upat_thread_cache_register_pattern(pat->src[i]);
 }
 
 PolyPatternMatcher *poly_pm_thread_cache(PolyPatternMatcher *pm) {
   if (!pm) return NULL;
   for (int i = 0; i < pm->n_rules; i++)
-    pat_thread_cache_register_pattern(pm->rules[i].pat);
-  (void)pat_thread_register(pm, true);
+    upat_thread_cache_register_pattern(pm->rules[i].pat);
+  (void)upat_thread_register(pm, true);
   return pm;
 }
 
@@ -643,7 +701,7 @@ static void pm_destroy_one(PolyPatternMatcher *pm) {
 
 void poly_pm_destroy(PolyPatternMatcher *pm) {
   if (!pm) return;
-  pat_thread_unregister(pm, true);
+  upat_thread_unregister(pm, true);
   pm_destroy_one(pm);
 }
 
@@ -655,7 +713,7 @@ typedef struct {
   bool matched;
 } PatRewriteContinuation;
 
-static bool pat_rewrite_continue(PolyBindings *binds, void *opaque) {
+static bool upat_rewrite_continue(PolyBindings *binds, void *opaque) {
   PatRewriteContinuation *state = opaque;
   state->matched = true;
   state->result = state->rule->fn(state->ctx, state->uop, binds);
@@ -695,8 +753,8 @@ PolyUOp *poly_pm_rewrite(PolyPatternMatcher *pm, PolyCtx *ctx, PolyUOp *uop) {
         .ctx = ctx,
         .uop = uop,
     };
-    bool accepted = pat_match_continue(
-        rule->pat, uop, &binds, pat_rewrite_continue, &rewrite, true
+    bool accepted = upat_match_continue(
+        rule->pat, uop, &binds, upat_rewrite_continue, &rewrite, true
     );
     poly_bindings_free(&binds);
     if (rewrite.matched && st) st->pattern_matches++;
@@ -746,8 +804,10 @@ PolyPatternMatcher *poly_pm_concat(PolyPatternMatcher *a, PolyPatternMatcher *b)
     free(names);
     return NULL;
   }
-  memcpy(combined, a->rules, (size_t)a->n_rules * sizeof(PolyRule));
-  memcpy(combined + a->n_rules, b->rules, (size_t)b->n_rules * sizeof(PolyRule));
+  if (a->n_rules > 0)
+    memcpy(combined, a->rules, (size_t)a->n_rules * sizeof(PolyRule));
+  if (b->n_rules > 0)
+    memcpy(combined + a->n_rules, b->rules, (size_t)b->n_rules * sizeof(PolyRule));
   for (int i = 0; i < a->n_rules; i++)
     names[i] = (a->stats && a->stats[i].name) ? a->stats[i].name : NULL;
   for (int i = 0; i < b->n_rules; i++)
@@ -1035,18 +1095,30 @@ PolyUOp *poly_graph_rewrite_ctx_ex2(
           continue;
         }
       } else {
+        PolyDType rebuilt_dtype = poly_rebuild_dtype(new_n, new_src);
+        PolyArg rebuilt_arg =
+            (new_n->op == POLY_OP_CAST || new_n->op == POLY_OP_BITCAST)
+                ? poly_arg_dtype(rebuilt_dtype)
+                : new_n->arg;
         new_src_n = (new_n->tag != 0 || new_n->tag_arg.kind != POLY_ARG_NONE)
                         ? poly_uop_tagged_arg(
                               ctx,
                               new_n->op,
-                              new_n->dtype,
+                              rebuilt_dtype,
                               new_src,
                               new_n->n_src,
-                              new_n->arg,
+                              rebuilt_arg,
                               new_n->tag,
                               new_n->tag_arg
                           )
-                        : poly_uop(ctx, new_n->op, new_n->dtype, new_src, new_n->n_src, new_n->arg);
+                        : poly_uop(
+                              ctx,
+                              new_n->op,
+                              rebuilt_dtype,
+                              new_src,
+                              new_n->n_src,
+                              rebuilt_arg
+                          );
       }
       if (heap_src) free(new_src);
 
@@ -1178,11 +1250,23 @@ PolyUOp *poly_graph_walk_rewrite(
 
       PolyUOp *new_n;
       if (changed) {
+        PolyDType rebuilt_dtype = poly_rebuild_dtype(n, new_src);
+        PolyArg rebuilt_arg =
+            (n->op == POLY_OP_CAST || n->op == POLY_OP_BITCAST)
+                ? poly_arg_dtype(rebuilt_dtype)
+                : n->arg;
         new_n = (n->tag != 0 || n->tag_arg.kind != POLY_ARG_NONE)
                     ? poly_uop_tagged_arg(
-                          ctx, n->op, n->dtype, new_src, n->n_src, n->arg, n->tag, n->tag_arg
+                          ctx,
+                          n->op,
+                          rebuilt_dtype,
+                          new_src,
+                          n->n_src,
+                          rebuilt_arg,
+                          n->tag,
+                          n->tag_arg
                       )
-                    : poly_uop(ctx, n->op, n->dtype, new_src, n->n_src, n->arg);
+                    : poly_uop(ctx, n->op, rebuilt_dtype, new_src, n->n_src, rebuilt_arg);
       } else {
         new_n = n;
       }
@@ -1236,113 +1320,4 @@ PolyUOp *poly_graph_rewrite_ex(
     bool bottom_up
 ) {
   return poly_graph_rewrite_ctx_ex2(ctx, sink, pm, NULL, bottom_up, true);
-}
-
-/* UOp helpers for rewrite callbacks */
-
-PolyUOp *poly_const_like(PolyCtx *ctx, PolyUOp *ref, PolyArg val) {
-  if (!ctx || !ref) return NULL;
-
-  /* UOp.const_like uses dtype.base, which removes pointer metadata but keeps
-   * an ordinary vector dtype intact (uop/ops.py:496-497, dtype.py:79,106). */
-  PolyDType dtype = ref->dtype;
-  if (dtype.is_ptr) {
-    dtype.is_ptr = false;
-    dtype.addrspace = 0;
-    dtype.vcount = 0;
-    dtype.ptr_size = 0;
-  }
-
-  /* Normalise the arg kind to match the const dtype.
-   *
-   * Tinygrad parity: every const construction goes through DType.const(b)
-   * which converts to ConstFloat(float(b)) / bool(b) / int(b) based on the
-   * target dtype (uop/ops.py:498-499 -> dtype.py:92-100). polygrad must do
-   * the same here, otherwise rule_cast_const (sym.c:534) would propagate
-   * a CONST_INT(5) into a float-tagged CONST and the codegen would mis-
-   * interpret arg.i as arg.f, lowering it to a denormal/zero. Verified
-   * against test/parity_scripts/tg_cast_const_fold_gt.py cases A-E. */
-  PolyUOp *scalar = NULL;
-  if (val.kind == POLY_ARG_INT || val.kind == POLY_ARG_BIGINT ||
-      val.kind == POLY_ARG_FLOAT || val.kind == POLY_ARG_BOOL) {
-    if (poly_dtype_is_float(dtype)) {
-      double dval = (val.kind == POLY_ARG_BIGINT) ? poly_arg_integer_to_double(val)
-                    : (val.kind == POLY_ARG_INT)  ? (double)val.i
-                    : (val.kind == POLY_ARG_BOOL) ? (val.b ? 1.0 : 0.0)
-                                                  : val.f;
-      scalar = poly_uop0(ctx, POLY_OP_CONST, dtype, poly_arg_float(dval));
-    } else if (poly_dtype_is_bool(dtype)) {
-      bool bval = (val.kind == POLY_ARG_BIGINT)
-                      ? poly_arg_integer_to_u64_mod(val) != 0 ||
-                            val.bigint.n_limbs > 2
-                    : (val.kind == POLY_ARG_INT) ? (val.i != 0)
-                  : (val.kind == POLY_ARG_BOOL) ? val.b
-                                                : (val.f != 0.0);
-      scalar = poly_uop0(ctx, POLY_OP_CONST, dtype, poly_arg_bool(bval));
-    } else {
-      /* Pinned DType.const uses int(val), which raises for NaN/Inf
-       * (dtype.py:92-100). C has no exception carrier, so decline this
-       * rewrite and retain the original ALU instead of casting nonfinite
-       * floating storage to int64_t. */
-      if (val.kind == POLY_ARG_FLOAT && !isfinite(val.f)) return NULL;
-      PolyArg ival =
-          val.kind == POLY_ARG_BIGINT
-              ? val
-              : poly_arg_int(
-                    val.kind == POLY_ARG_INT     ? val.i
-                    : val.kind == POLY_ARG_BOOL ? (val.b ? 1 : 0)
-                                                : (int64_t)val.f
-                );
-      scalar = poly_uop0(ctx, POLY_OP_CONST, dtype, ival);
-    }
-  } else {
-    /* Non-numeric arg kinds (NONE, OPS, RANGE, etc.) are passed through as-is
-     * for callers like rule_const_fold_unary that synthesize the right kind
-     * via poly_exec_alu. */
-    scalar = poly_uop0(ctx, POLY_OP_CONST, dtype, val);
-  }
-  if (!scalar) return NULL;
-
-  /* Exact UOp.const(..., shape=ref._shape) topology
-   * (uop/ops.py:553-561): keep a matching CONST shape, otherwise reshape to
-   * rank-many ones and expand to the reference's exact symbolic dimensions. */
-  int ref_ndim = poly_uop_ndim(ctx, ref);
-  if (ref_ndim <= 0) return scalar; /* shape None or scalar */
-  if (ref_ndim > POLY_MAX_DIMS) return NULL;
-
-  bool same_shape = poly_uop_ndim(ctx, scalar) == ref_ndim;
-  for (int i = 0; same_shape && i < ref_ndim; i++) {
-    PolyUOp *a = poly_uop_shape_dim(ctx, scalar, i);
-    PolyUOp *b = poly_uop_shape_dim(ctx, ref, i);
-    int64_t av = 0, bv = 0;
-    if (a != b &&
-        !(poly_uop_const_i64(a, &av) == 0 && poly_uop_const_i64(b, &bv) == 0 && av == bv))
-      same_shape = false;
-  }
-  if (same_shape) return scalar;
-
-  int64_t ones[POLY_MAX_DIMS];
-  PolyUOp *dims[POLY_MAX_DIMS];
-  bool all_one = true;
-  for (int i = 0; i < ref_ndim; i++) {
-    ones[i] = 1;
-    dims[i] = poly_uop_shape_dim(ctx, ref, i);
-    if (!dims[i]) return NULL;
-    int64_t dim = 0;
-    if (poly_uop_const_i64(dims[i], &dim) != 0 || dim != 1) all_one = false;
-  }
-  PolyUOp *reshaped = poly_reshape(ctx, scalar, ones, ref_ndim);
-  return !reshaped || all_one ? reshaped : poly_expand_uop(ctx, reshaped, dims, ref_ndim);
-}
-
-PolyUOp *poly_const_like_int(PolyCtx *ctx, PolyUOp *ref, int64_t val) {
-  return poly_const_like(ctx, ref, poly_arg_int(val));
-}
-
-PolyUOp *poly_const_like_float(PolyCtx *ctx, PolyUOp *ref, double val) {
-  return poly_const_like(ctx, ref, poly_arg_float(val));
-}
-
-PolyUOp *poly_const_like_bool(PolyCtx *ctx, PolyUOp *ref, bool val) {
-  return poly_const_like(ctx, ref, poly_arg_bool(val));
 }

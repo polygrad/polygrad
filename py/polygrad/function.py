@@ -96,14 +96,6 @@ class _function:
             _ctx=ctx, _tensor=output_arr[i], _dtype=results[i]._dtype_str,
             _device=results[i]._device,
         ) for i in range(len(results)))
-        # Polygrad's private autograd bridge predates pinned tinygrad's
-        # all-floating-live-Tensor discovery. Preserve the ordinary Tensor op
-        # rule here: a FUNCTION result participates when any explicit or
-        # captured input participates. This flag does not alter either UOp
-        # surface.
-        if any(t._requires_grad for t in tensors):
-            for output in outputs:
-                output.requires_grad = True
         return outputs if tuple_result else outputs[0]
 
 

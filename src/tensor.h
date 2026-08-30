@@ -41,17 +41,6 @@ int poly_tensor_apply_realize_map(
     PolyDevice device
 );
 
-/* Dynamic BUFFER helper used by C tests/probes and low-level callers. The
- * first runtime dimension is a DEFINE_VAR or BIND, while allocation reserves
- * the variable max bound times the fixed inner dimensions. */
-PolyUOp *poly_buffer_var(
-    PolyCtx *ctx,
-    PolyDType dt,
-    PolyUOp *batch_var,
-    const int64_t *inner_dims,
-    int n_inner_dims
-);
-
 /* Full-buffer STORE effect for optimizer/direct core SINKs.
  * Tensor.assign itself still uses tinygrad's current-value shape:
  * AFTER(target, STORE(target, value)). Direct effect SINKs already sequence
@@ -144,10 +133,6 @@ PolyUOp *poly_cumalu(PolyCtx *ctx, PolyUOp *x, int axis, PolyOps op, bool includ
 
 /* Broadcasting (matches tinygrad's _broadcasted) */
 
-/* Tensor-stage RESHAPE with exact symbolic shape sources, matching
- * shape_to_shape_arg in pinned tinygrad. */
-PolyUOp *poly_reshape_uop(PolyCtx *ctx, PolyUOp *src, PolyUOp **dims, int ndim);
-
 /* Broadcast a UOp to a target shape via reshape + expand.
  * Equivalent to tinygrad's _broadcast_to: left-pad dims with 1, then expand. */
 PolyUOp *poly_broadcast_to(PolyCtx *ctx, PolyUOp *x, const int64_t *shape, int ndim);
@@ -168,6 +153,8 @@ PolyUOp *poly_add(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
 PolyUOp *poly_sub(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
 PolyUOp *poly_mul(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
 PolyUOp *poly_div(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
+bool poly_broadcasted_pair(PolyCtx *ctx, PolyUOp **a, PolyUOp **b);
+PolyUOp *poly_binop(PolyCtx *ctx, PolyOps op, PolyUOp *a, PolyUOp *b);
 
 /* Contiguous (realize barrier) */
 

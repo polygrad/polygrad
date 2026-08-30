@@ -14,14 +14,15 @@ struct PolyCtx {
   PolyArena *arena;
   PolyArena *scratch;
   PolyMap *cse;
+  /* Current Tinygrad schedule/__init__.py:schedule_cache. */
   PolyMap *schedule_cache;
   PolyMap *to_program_cache;
   PolyMap *runtime_cache;
+  /* Current Tinygrad engine/realize.py:graph_cache. */
+  PolyMap *graph_cache;
   size_t runtime_artifact_entries;
   size_t runtime_artifact_live_bytes;
   size_t launch_count;
-  size_t schedule_cache_hits;
-  size_t schedule_cache_misses;
   size_t runtime_cache_hits;
   size_t runtime_cache_misses;
   size_t buffer_read_count;

@@ -21,6 +21,9 @@ PolyUOp *poly_device_uop_from_name(PolyCtx *ctx, const char *name);
 PolyUOp *poly_device_uop_from_names(PolyCtx *ctx, const char **names, int n);
 PolyUOp *poly_device_uop(PolyCtx *ctx, PolyDevice device);
 
+/* Current Tinygrad UOp.device query with optional pass-local memoization. */
+PolyUOp *poly_uop_device_uop_cached(PolyCtx *ctx, PolyUOp *u, PolyMap *cache);
+
 typedef struct PolyAllocator {
   void *(*alloc)(size_t nbytes, void *dev_ctx);
   void (*free)(const PolyBuffer *buffer, void *dev_ctx);
@@ -52,6 +55,11 @@ typedef struct PolyAllocator {
 struct PolyBuffer {
   void *ptr;
   size_t nbytes;
+  /* Current tinygrad Buffer._base/offset runtime metadata (device.py:102-155).
+   * A view exists before allocation; ensure_allocated materializes its base
+   * first, then derives this handle without changing UOp topology. */
+  PolyBuffer *base;
+  size_t offset;
   PolyDevice device;
   bool owned; /* should allocator->free be called when this residency is retired? */
   const PolyAllocator *allocator; /* allocator for this buffer (set at allocation time) */
@@ -93,9 +101,8 @@ PolyUOp *poly_buffer_from_host(
     int64_t *dims, int ndim
 );
 
-/* Build a device-annotated frontend-host BUFFER from an existing UNIQUE and
- * attach the imported bytes only to that physical BUFFER. Returns the actual
- * source residency domain (HOST, or WASM for staged Emscripten bytes). */
+/* Build a frontend-host BUFFER from an existing UNIQUE and attach imported
+ * bytes only to that physical BUFFER. The source storage domain is HOST. */
 PolyUOp *poly_buffer_from_host_unique(
     PolyCtx *ctx,
     PolyUOp *unique,
@@ -156,6 +163,16 @@ PolyBuffer *poly_buffer_multi_child(PolyBuffer *buffer, int index);
  * runtime handle. This is used after MultiBuffer lane resolution, where a
  * child has no independent BUFFER UOp key. */
 int poly_buffer_handle_ensure_allocated(PolyCtx *ctx, PolyBuffer *buffer);
+
+/* Current Tinygrad Buffer.get_buf(device) analogue for a resolved scalar
+ * runtime handle. Browser HOST imports are JS-owned keys; HOST execution
+ * materializes such a key into addressable Wasm memory on first use. */
+int poly_buffer_handle_get_buf(
+    PolyCtx *ctx,
+    PolyBuffer *buffer,
+    PolyDevice device,
+    void **out
+);
 
 /* Free this residency's ptr if owned. Resets ptr=NULL, owned=false, valid=false.
  * Does NOT touch b->src. Does not remove from the side table.

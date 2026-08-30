@@ -11,7 +11,7 @@
 #include "../src/models/qwen3.h"
 #include "../src/nn.h"
 #include "../src/frontend.h"
-#include "../src/codegen.h"
+#include "../src/codegen/codegen.h"
 #include "../src/engine/schedule.h"
 #include <string.h>
 #include <stdlib.h>
@@ -415,7 +415,7 @@ TEST(hf, poly_gather_basic) {
 
   /* indices: (2,) -- reshape buffer to give it a shape */
   int64_t idx_shape[] = {2};
-  PolyUOp *indices = poly_reshape(ctx, poly_buffer(ctx, POLY_INT32, 2), idx_shape, 1);
+  PolyUOp *indices = poly_reshape(ctx, poly_test_buffer(ctx, POLY_INT32, 2), idx_shape, 1);
 
   PolyUOp *result = poly_gather(ctx, table, indices);
   ASSERT_NOT_NULL(result);
@@ -438,7 +438,7 @@ TEST(hf, poly_gather_2d_indices) {
 
   /* indices: (2, 3) -- batch of indices, reshape buffer to give it a shape */
   int64_t idx_shape[] = {2, 3};
-  PolyUOp *indices = poly_reshape(ctx, poly_buffer(ctx, POLY_INT32, 6), idx_shape, 2);
+  PolyUOp *indices = poly_reshape(ctx, poly_test_buffer(ctx, POLY_INT32, 6), idx_shape, 2);
 
   PolyUOp *result = poly_gather(ctx, table, indices);
   ASSERT_NOT_NULL(result);

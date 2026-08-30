@@ -8,7 +8,7 @@
 
 #include "test_harness.h"
 #include "../src/models/qwen3.h"
-#include "../src/codegen.h"
+#include "../src/codegen/codegen.h"
 #include "../src/loaders/gguf_decode.h"
 #include "../src/instance.h"
 #include "../src/engine/schedule.h"

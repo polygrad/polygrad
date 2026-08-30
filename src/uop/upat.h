@@ -1,12 +1,12 @@
 /*
- * pat.h — Pattern matcher for UOp graph rewriting
+ * upat.h — Pattern matcher for UOp graph rewriting
  *
  * Mirrors tinygrad's UPat + PatternMatcher + graph_rewrite.
  * Patterns are descriptor structs; callbacks are C function pointers.
  */
 
-#ifndef POLY_PAT_H
-#define POLY_PAT_H
+#ifndef POLY_UPAT_H
+#define POLY_UPAT_H
 
 #include "polygrad.h"
 #include <string.h>
@@ -33,8 +33,8 @@ void poly_bindings_free(PolyBindings *b);
 
 /* Pattern descriptor (mirrors UPat) */
 
-typedef struct PolyPat PolyPat;
-struct PolyPat {
+typedef struct PolyUPat PolyUPat;
+struct PolyUPat {
   PolyOpSet ops; /* acceptable ops (bitmask) */
   bool has_ops; /* false = match any op */
   PolyDType *dtypes; /* acceptable dtypes (NULL = any) */
@@ -42,48 +42,54 @@ struct PolyPat {
   PolyArg arg; /* arg to match */
   bool match_arg; /* if true, check arg equality */
   const char *name; /* binding name (NULL = don't bind) */
-  PolyPat **src; /* child patterns (NULL = don't check sources) */
+  PolyUPat **src; /* child patterns (NULL = don't check sources) */
   int n_src;
+  bool repeat_src; /* src=UPat(...): match this pattern against every source */
   bool strict_length; /* require exact source count */
   bool commutative; /* try both orderings for 2-src */
   bool or_casted; /* match pattern or CAST(pattern) */
   PolyOpSet early_reject;
 };
 
-/* Pattern constructors (heap-allocated, caller frees with poly_pat_free) */
-PolyPat *poly_pat_any(const char *name);
-PolyPat *poly_pat_cvar(const char *name);
-PolyPat *poly_pat_const_val(PolyArg val);
-PolyPat *poly_pat_op(PolyOps op, PolyPat **src, int n_src, const char *name);
-PolyPat *poly_pat_ops(PolyOpSet ops, PolyPat **src, int n_src, const char *name);
-PolyPat *poly_pat_op1(PolyOps op, PolyPat *s0, const char *name);
-PolyPat *poly_pat_op2(PolyOps op, PolyPat *s0, PolyPat *s1, const char *name);
-PolyPat *poly_pat_op2c(PolyOps op, PolyPat *s0, PolyPat *s1, const char *name);
-PolyPat *poly_pat_op3(PolyOps op, PolyPat *s0, PolyPat *s1, PolyPat *s2, const char *name);
-PolyPat *poly_pat_ops1(PolyOpSet ops, PolyPat *s0, const char *name);
-PolyPat *poly_pat_ops2(PolyOpSet ops, PolyPat *s0, PolyPat *s1, const char *name);
-PolyPat *poly_pat_ops3(PolyOpSet ops, PolyPat *s0, PolyPat *s1, PolyPat *s2, const char *name);
-PolyPat *poly_pat_dtype(const char *name, PolyDType *dtypes, int n);
-PolyPat *poly_pat_allow_any_len(PolyPat *p);
-PolyPat *poly_pat_or_casted(PolyPat *p);
-PolyPat *poly_pat_set_early_reject(PolyPat *p, PolyOpSet early_reject);
-void poly_pat_free(PolyPat *p);
+/* Pattern constructors (heap-allocated, caller frees with poly_upat_free) */
+PolyUPat *poly_upat_any(const char *name);
+PolyUPat *poly_upat_cvar(const char *name);
+PolyUPat *poly_upat_const_val(PolyArg val);
+PolyUPat *poly_upat_const(PolyArg val, PolyDType dtype);
+PolyUPat *poly_upat_op(PolyOps op, PolyUPat **src, int n_src, const char *name);
+PolyUPat *poly_upat_ops(PolyOpSet ops, PolyUPat **src, int n_src, const char *name);
+PolyUPat *poly_upat_op1(PolyOps op, PolyUPat *s0, const char *name);
+PolyUPat *poly_upat_op2(PolyOps op, PolyUPat *s0, PolyUPat *s1, const char *name);
+PolyUPat *poly_upat_op2c(PolyOps op, PolyUPat *s0, PolyUPat *s1, const char *name);
+PolyUPat *poly_upat_op3(PolyOps op, PolyUPat *s0, PolyUPat *s1, PolyUPat *s2, const char *name);
+PolyUPat *poly_upat_ops1(PolyOpSet ops, PolyUPat *s0, const char *name);
+PolyUPat *poly_upat_ops2(PolyOpSet ops, PolyUPat *s0, PolyUPat *s1, const char *name);
+PolyUPat *poly_upat_ops2c(PolyOpSet ops, PolyUPat *s0, PolyUPat *s1, const char *name);
+PolyUPat *poly_upat_ops3(PolyOpSet ops, PolyUPat *s0, PolyUPat *s1, PolyUPat *s2, const char *name);
+PolyUPat *poly_upat_repeat_src(PolyUPat *p, PolyUPat *src);
+PolyUPat *poly_upat_named(PolyUPat *p, const char *name);
+PolyUPat *poly_upat_set_dtype(PolyUPat *p, const PolyDType *dtypes, int n);
+PolyUPat *poly_upat_dtype(const char *name, PolyDType *dtypes, int n);
+PolyUPat *poly_upat_allow_any_len(PolyUPat *p);
+PolyUPat *poly_upat_or_casted(PolyUPat *p);
+PolyUPat *poly_upat_set_early_reject(PolyUPat *p, PolyOpSet early_reject);
+void poly_upat_free(PolyUPat *p);
 
 /* Match */
 
-bool poly_pat_match(const PolyPat *pat, PolyUOp *uop, PolyBindings *binds);
+bool poly_upat_match(const PolyUPat *pat, PolyUOp *uop, PolyBindings *binds);
 
 /* Rewrite callback */
 
 typedef PolyUOp *(*PolyRewriteFn)(PolyCtx *ctx, PolyUOp *matched, const PolyBindings *b);
 
 typedef struct {
-  PolyPat *pat;
+  PolyUPat *pat;
   PolyRewriteFn fn;
 } PolyRule;
 
 typedef struct {
-  PolyPat *pat;
+  PolyUPat *pat;
   PolyRewriteFn fn;
   /* Borrowed diagnostic name. It must outlive the matcher. */
   const char *name;
@@ -161,13 +167,6 @@ PolyUOp *poly_graph_walk_rewrite(
 /* Returns current graph_rewrite user_ctx for callbacks in the active pass. */
 void *poly_graph_rewrite_userctx(void);
 
-/* UOp helpers used by rewrite callbacks */
-
-PolyUOp *poly_const_like(PolyCtx *ctx, PolyUOp *ref, PolyArg val);
-PolyUOp *poly_const_like_int(PolyCtx *ctx, PolyUOp *ref, int64_t val);
-PolyUOp *poly_const_like_float(PolyCtx *ctx, PolyUOp *ref, double val);
-PolyUOp *poly_const_like_bool(PolyCtx *ctx, PolyUOp *ref, bool val);
-
 /* ALU constant-fold executor */
 
 /* Pinned tinygrad exec_alu exposes truncate_output: symbolic constant folding
@@ -195,7 +194,6 @@ PolyPatternMatcher *poly_symbolic_simple(void);
 PolyPatternMatcher *poly_symbolic(void);
 /* Pinned tinygrad's broader codegen-stage `sym` matcher. */
 PolyPatternMatcher *poly_sym(void);
-PolyPatternMatcher *poly_pm_gep_pushing(void);
 /* Pinned tinygrad/uop/symbolic.py validity-aware matcher components. */
 PolyUOp *poly_uop_given_valid(
     PolyCtx *ctx,
@@ -205,9 +203,11 @@ PolyUOp *poly_uop_given_valid(
 );
 PolyPatternMatcher *poly_pm_simplify_valid(void);
 PolyPatternMatcher *poly_pm_drop_and_clauses(void);
+PolyPatternMatcher *poly_pm_clean_up_group_sink(void);
+PolyPatternMatcher *poly_pm_remove_invalid(void);
 
 /* Codegen pipeline (port of full_rewrite_to_sink) */
 
 PolyUOp *poly_full_rewrite_to_sink(PolyCtx *ctx, PolyUOp *sink);
 
-#endif /* POLY_PAT_H */
+#endif /* POLY_UPAT_H */

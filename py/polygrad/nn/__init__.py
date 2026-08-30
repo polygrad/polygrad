@@ -12,7 +12,6 @@ from .modules import (
     Conv2d,
     BatchNorm,
 )
-from .optim import Optimizer, OptimizerGroup, SGD, Adam, AdamW
 from .state import get_state_dict, load_state_dict, get_parameters, safe_load, safe_load_metadata
 
 # Pinned tinygrad/nn/__init__.py:60: dimensional BatchNorm spellings are exact
@@ -33,11 +32,6 @@ __all__ = [
     "BatchNorm3d",
     "datasets",
     "optim",
-    "Optimizer",
-    "OptimizerGroup",
-    "SGD",
-    "Adam",
-    "AdamW",
     "get_state_dict",
     "load_state_dict",
     "get_parameters",

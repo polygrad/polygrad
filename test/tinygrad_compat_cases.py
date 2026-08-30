@@ -24,6 +24,7 @@ else:
     raise RuntimeError(f"unknown ENGINE={ENGINE!r}")
 
 Tensor, TinyJit, nn = tinygrad.Tensor, tinygrad.TinyJit, tinygrad.nn
+Context = tinygrad.Context
 function = tinygrad.function
 ROOT = Path(__file__).resolve().parents[1]
 BEAUTIFUL_MNIST = ROOT / "references" / "tinygrad_latest" / "examples" / "beautiful_mnist.py"
@@ -139,7 +140,7 @@ def case_mlp_mnist():
     forward_value = forward.numpy().copy()
 
     optimizer = nn.optim.SGD(nn.state.get_parameters(model), lr=0.05, fused=False)
-    with Tensor.train():
+    with Context(TRAINING=1):
         optimizer.zero_grad()
         loss = ((model(x) - target).square()).mean().backward()
         loss_value = float(loss.item())
@@ -196,7 +197,7 @@ def case_function_mlp():
     forward_value = forward.numpy().copy()
 
     optimizer = nn.optim.SGD(nn.state.get_parameters(model), lr=0.05, fused=False)
-    with Tensor.train():
+    with Context(TRAINING=1):
         optimizer.zero_grad()
         loss = ((model(x) - target).square()).mean().backward()
         loss_value = float(loss.item())
@@ -321,7 +322,7 @@ def case_convnext():
     names_by_id = {id(value): name for name, value in state.items()}
     optimizer = nn.optim.SGD(params, lr=0.001, fused=False)
     target = Tensor([[0.1, -0.2, 0.3, -0.4, 0.5]], device="CPU")
-    with Tensor.train():
+    with Context(TRAINING=1):
         optimizer.zero_grad()
         loss = (model(Tensor(x_data.tolist(), device="CPU")) - target).square().mean().backward()
         loss_value = float(loss.item())

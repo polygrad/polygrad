@@ -87,7 +87,7 @@ def bench_backward(n, iters):
     a_np = np.random.randn(n).astype(np.float32)
 
     def run():
-        a = Tensor(a_np, requires_grad=True)
+        a = Tensor(a_np)
         loss = (a * a).sum()
         loss.backward()
         a.grad.numpy()

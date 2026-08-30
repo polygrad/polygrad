@@ -8,11 +8,85 @@
 #ifdef POLY_HAS_HIP
 
 #include "test_harness.h"
-#include "../src/codegen.h"
+#include "../src/codegen/codegen.h"
 #include "../src/frontend.h"
 #include "../src/engine/schedule.h"
 #include "../src/schedule/rangeify.h"
 #include <string.h>
+
+TEST_BACKEND(hip, native_fp8_types_and_casts_match_current_renderer) {
+  /* Tinygrad 2026-08-22/a9069c177a9d HIPRenderer.type_map and
+   * string_rewrite use byte storage plus AMD FP8 conversion builtins. */
+  const PolyDType dtypes[] = {POLY_FP8E4M3, POLY_FP8E5M2};
+  const char *types[] = {"hip_fp8", "hip_bf8"};
+  const char *builtins[] = {"__builtin_amdgcn_cvt_f32_fp8", "__builtin_amdgcn_cvt_f32_bf8"};
+  for (int i = 0; i < 2; i++) {
+    PolyCtx *ctx = poly_ctx_new();
+    ASSERT_NOT_NULL(ctx);
+    PolyUOp *out = poly_test_program_param(ctx, POLY_FLOAT32, 1, 0);
+    PolyUOp *in = poly_test_program_param(ctx, dtypes[i], 1, 1);
+    PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(0));
+    PolyUOp *out_idx = poly_uop_index(ctx, out, &zero, 1);
+    PolyUOp *in_idx = poly_uop_index(ctx, in, &zero, 1);
+    PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, dtypes[i], in_idx, poly_arg_none());
+    PolyUOp *cast = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, load, poly_arg_none());
+    PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out_idx, cast, poly_arg_none());
+    PolyUOp *sink = poly_test_kernel_sink(ctx, &store, 1, "fp8_load");
+    int n_linear = 0;
+    PolyUOp **linear = poly_do_linearize(ctx, sink, &n_linear);
+    ASSERT_NOT_NULL(linear);
+    char *source = poly_render_hip(ctx, linear, n_linear, "fp8_load", 1, "gfx950");
+    free(linear);
+    ASSERT_NOT_NULL(source);
+    ASSERT_NOT_NULL(strstr(source, "typedef unsigned char hip_bf8;"));
+    ASSERT_NOT_NULL(strstr(source, "typedef unsigned char hip_fp8;"));
+    char pointer_type[64];
+    snprintf(pointer_type, sizeof(pointer_type), "%s*", types[i]);
+    ASSERT_NOT_NULL(strstr(source, pointer_type));
+    ASSERT_NOT_NULL(strstr(source, builtins[i]));
+    free(source);
+
+    PolyUOp *fp8_out = poly_test_program_param(ctx, dtypes[i], 1, 2);
+    PolyUOp *f32_in = poly_test_program_param(ctx, POLY_FLOAT32, 1, 3);
+    PolyUOp *fp8_out_idx = poly_uop_index(ctx, fp8_out, &zero, 1);
+    PolyUOp *f32_in_idx = poly_uop_index(ctx, f32_in, &zero, 1);
+    PolyUOp *f32_load =
+        poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, f32_in_idx, poly_arg_none());
+    PolyUOp *to_fp8 =
+        poly_uop1(ctx, POLY_OP_CAST, dtypes[i], f32_load, poly_arg_none());
+    PolyUOp *fp8_store =
+        poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, fp8_out_idx, to_fp8, poly_arg_none());
+    sink = poly_test_kernel_sink(ctx, &fp8_store, 1, "fp8_store");
+    linear = poly_do_linearize(ctx, sink, &n_linear);
+    ASSERT_NOT_NULL(linear);
+    source = poly_render_hip(ctx, linear, n_linear, "fp8_store", 1, "gfx950");
+    free(linear);
+    ASSERT_NOT_NULL(source);
+    char helper_call[64];
+    snprintf(helper_call, sizeof(helper_call), "f32_to_fp8(");
+    ASSERT_NOT_NULL(strstr(source, helper_call));
+    ASSERT_NOT_NULL(strstr(source, "__builtin_amdgcn_cvt_pk_"));
+    free(source);
+    if (i == 0) {
+      PolyUOp *nan =
+          poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKFLOAT, poly_arg_float(NAN));
+      PolyUOp *fp8_inf =
+          poly_uop1(ctx, POLY_OP_CAST, dtypes[i], nan, poly_arg_none());
+      fp8_store =
+          poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, fp8_out_idx, fp8_inf, poly_arg_none());
+      sink = poly_test_kernel_sink(ctx, &fp8_store, 1, "fp8_const_store");
+      linear = poly_do_linearize(ctx, sink, &n_linear);
+      ASSERT_NOT_NULL(linear);
+      source = poly_render_hip(ctx, linear, n_linear, "fp8_const_store", 1, "gfx950");
+      free(linear);
+      ASSERT_NOT_NULL(source);
+      ASSERT_NOT_NULL(strstr(source, "f32_to_fp8(NAN, 0)"));
+      free(source);
+    }
+    poly_ctx_destroy(ctx);
+  }
+  PASS();
+}
 
 /* Skip helper: PASS immediately if no GPU */
 #define SKIP_IF_NO_HIP()                                                                           \
@@ -33,9 +107,9 @@ typedef struct {
 
 static HipTensorVecadd hip_make_tensor_vecadd(int n) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, n);
-  PolyUOp *b = poly_buffer(ctx, POLY_FLOAT32, n);
-  PolyUOp *c = poly_buffer(ctx, POLY_FLOAT32, n);
+  PolyUOp *a = poly_test_buffer(ctx, POLY_FLOAT32, n);
+  PolyUOp *b = poly_test_buffer(ctx, POLY_FLOAT32, n);
+  PolyUOp *c = poly_test_buffer(ctx, POLY_FLOAT32, n);
   PolyUOp *add = poly_alu2(ctx, POLY_OP_ADD, a, b);
   PolyUOp *store = poly_store_val(ctx, c, add);
   PolyUOp *sink = poly_sink1(ctx, store);
@@ -47,18 +121,16 @@ static HipTensorVecadd hip_make_tensor_vecadd(int n) {
 TEST_BACKEND(hip, render_vecadd) {
   /* Test HIP source generation -- no GPU needed */
   PolyCtx *ctx = poly_ctx_new();
-  PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
-
-  PolyUOp *p0 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(0));
-  PolyUOp *p1 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(1));
-  PolyUOp *p2 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(2));
+  PolyUOp *p0 = poly_test_uop_param(ctx, POLY_FLOAT32, -1, 0, POLY_ADDR_GLOBAL);
+  PolyUOp *p1 = poly_test_uop_param(ctx, POLY_FLOAT32, -1, 1, POLY_ADDR_GLOBAL);
+  PolyUOp *p2 = poly_test_uop_param(ctx, POLY_FLOAT32, -1, 2, POLY_ADDR_GLOBAL);
 
   PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(10));
   PolyUOp *special = poly_uop1(ctx, POLY_OP_SPECIAL, POLY_INT32, bound, poly_arg_str("gidx0"));
 
-  PolyUOp *idx0 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p0, special, poly_arg_none());
-  PolyUOp *idx1 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p1, special, poly_arg_none());
-  PolyUOp *idx2 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p2, special, poly_arg_none());
+  PolyUOp *idx0 = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, p0, special, poly_arg_none());
+  PolyUOp *idx1 = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, p1, special, poly_arg_none());
+  PolyUOp *idx2 = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, p2, special, poly_arg_none());
 
   PolyUOp *ld0 = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx0, poly_arg_none());
   PolyUOp *ld1 = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx1, poly_arg_none());
@@ -67,10 +139,10 @@ TEST_BACKEND(hip, render_vecadd) {
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
   int n_lin;
-  PolyUOp **lin = poly_linearize_rewritten(ctx, sink, &n_lin);
+  PolyUOp **lin = poly_do_linearize(ctx, sink, &n_lin);
   ASSERT_NOT_NULL(lin);
 
-  char *src = poly_render_hip(lin, n_lin, "test_kernel", 256);
+  char *src = poly_render_hip(ctx, lin, n_lin, "test_kernel", 256, "gfx1100");
   free(lin);
   ASSERT_NOT_NULL(src);
 
@@ -92,23 +164,49 @@ TEST_BACKEND(hip, render_vecadd) {
   PASS();
 }
 
+TEST_BACKEND(hip, renderer_inlines_current_casted_literals) {
+  /* Current tinygrad renderer/cstyle.py:26-47,238-241. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *shape = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(32));
+  PolyParamArg arg = {.slot = 0, .addrspace = POLY_ADDR_GLOBAL};
+  PolyUOp *out = poly_uop1(ctx, POLY_OP_PARAM, POLY_INT32, shape, poly_arg_param(&arg));
+  PolyUOp *weak_index = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(20));
+  PolyUOp *index = poly_uop1(ctx, POLY_OP_CAST, POLY_INT32, weak_index, poly_arg_none());
+  PolyUOp *address = poly_uop2(ctx, POLY_OP_INDEX, POLY_INT32, out, index, poly_arg_none());
+  PolyUOp *weak_value = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(7));
+  PolyUOp *value = poly_uop1(ctx, POLY_OP_CAST, POLY_INT32, weak_value, poly_arg_none());
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, address, value, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
+  int n = 0;
+  PolyUOp **uops = poly_toposort(ctx, sink, &n);
+  ASSERT_NOT_NULL(uops);
+  char *source = poly_render_hip(ctx, uops, n, "casted_const", 1, "gfx1100");
+  ASSERT_NOT_NULL(source);
+  ASSERT_NOT_NULL(strstr(source, "data0+20"));
+  ASSERT_NOT_NULL(strstr(source, " = 7;"));
+  ASSERT_TRUE(strstr(source, "cast0") == NULL);
+  free(source);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST_BACKEND(hip, render_muladd_matches_pinned_hipstyle) {
   /* Pinned HIPRenderer does not advertise Ops.MULACC
    * (renderer/cstyle.py:128-136,472-508), so ordinary MUL+ADD must not be
    * fused by the shared late matcher. Explicit WMMA/MULACC rendering remains
-   * a separate renderer ability. */
+  * a separate renderer ability. */
   PolyCtx *ctx = poly_ctx_new();
-  PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
-  PolyUOp *p0 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(0));
-  PolyUOp *p1 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(1));
-  PolyUOp *p2 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(2));
-  PolyUOp *p3 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(3));
+  PolyUOp *p0 = poly_test_uop_param(ctx, POLY_FLOAT32, -1, 0, POLY_ADDR_GLOBAL);
+  PolyUOp *p1 = poly_test_uop_param(ctx, POLY_FLOAT32, -1, 1, POLY_ADDR_GLOBAL);
+  PolyUOp *p2 = poly_test_uop_param(ctx, POLY_FLOAT32, -1, 2, POLY_ADDR_GLOBAL);
+  PolyUOp *p3 = poly_test_uop_param(ctx, POLY_FLOAT32, -1, 3, POLY_ADDR_GLOBAL);
   PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(4));
   PolyUOp *range = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_int(0));
-  PolyUOp *idx0 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p0, range, poly_arg_none());
-  PolyUOp *idx1 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p1, range, poly_arg_none());
-  PolyUOp *idx2 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p2, range, poly_arg_none());
-  PolyUOp *idx3 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p3, range, poly_arg_none());
+  PolyUOp *idx0 = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, p0, range, poly_arg_none());
+  PolyUOp *idx1 = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, p1, range, poly_arg_none());
+  PolyUOp *idx2 = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, p2, range, poly_arg_none());
+  PolyUOp *idx3 = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, p3, range, poly_arg_none());
   PolyUOp *ld0 = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx0, poly_arg_none());
   PolyUOp *ld1 = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx1, poly_arg_none());
   PolyUOp *ld2 = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx2, poly_arg_none());
@@ -131,7 +229,7 @@ TEST_BACKEND(hip, render_muladd_matches_pinned_hipstyle) {
   ASSERT_INT_EQ(mulacc_count, 0);
   ASSERT_TRUE(mul_count >= 1);
   ASSERT_TRUE(add_count >= 1);
-  char *src = poly_render_hip(lin, n_lin, "fma_test", 256);
+  char *src = poly_render_hip(ctx, lin, n_lin, "fma_test", 256, "gfx1100");
   free(lin);
   ASSERT_NOT_NULL(src);
   ASSERT_TRUE(strstr(src, "__builtin_fmaf(") == NULL);
@@ -144,22 +242,21 @@ TEST_BACKEND(hip, render_muladd_matches_pinned_hipstyle) {
 TEST_BACKEND(hip, render_math_intrinsics) {
   /* HIP renderer must emit __ocml_* for transcendentals -- no GPU needed. */
   PolyCtx *ctx = poly_ctx_new();
-  PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
-  PolyUOp *p0 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(0));
-  PolyUOp *p1 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(1));
+  PolyUOp *p0 = poly_test_uop_param(ctx, POLY_FLOAT32, -1, 0, POLY_ADDR_GLOBAL);
+  PolyUOp *p1 = poly_test_uop_param(ctx, POLY_FLOAT32, -1, 1, POLY_ADDR_GLOBAL);
   PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(4));
   PolyUOp *special = poly_uop1(ctx, POLY_OP_SPECIAL, POLY_INT32, bound, poly_arg_str("gidx0"));
-  PolyUOp *idx0 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p0, special, poly_arg_none());
-  PolyUOp *idx1 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p1, special, poly_arg_none());
+  PolyUOp *idx0 = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, p0, special, poly_arg_none());
+  PolyUOp *idx1 = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, p1, special, poly_arg_none());
   PolyUOp *ld0 = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx0, poly_arg_none());
   PolyUOp *exp2 = poly_uop1(ctx, POLY_OP_EXP2, POLY_FLOAT32, ld0, poly_arg_none());
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx1, exp2, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
   int n_lin;
-  PolyUOp **lin = poly_linearize_rewritten(ctx, sink, &n_lin);
+  PolyUOp **lin = poly_do_linearize(ctx, sink, &n_lin);
   ASSERT_NOT_NULL(lin);
-  char *src = poly_render_hip(lin, n_lin, "math_test", 256);
+  char *src = poly_render_hip(ctx, lin, n_lin, "math_test", 256, "gfx1100");
   free(lin);
   ASSERT_NOT_NULL(src);
   ASSERT_TRUE(strstr(src, "__ocml_exp2_f32") != NULL);
@@ -171,20 +268,22 @@ TEST_BACKEND(hip, render_math_intrinsics) {
 }
 
 TEST_BACKEND(hip, render_shared_mem) {
-  /* HIP renderer must emit __attribute__((shared, aligned(16))) for DEFINE_LOCAL. */
+  /* Current C-style HIP renders BUFFER(LOCAL) as shared storage. */
   PolyCtx *ctx = poly_ctx_new();
-  PolyDType smem_ptr = poly_dtype_ptr(POLY_FLOAT32, 64, POLY_ADDR_LOCAL);
-  PolyUOp *local = poly_uop0(ctx, POLY_OP_DEFINE_LOCAL, smem_ptr, poly_arg_none());
+  PolyUOp *size = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(64));
+  PolyParamArg local_arg = {.slot = 0, .addrspace = POLY_ADDR_LOCAL};
+  PolyUOp *local =
+      poly_uop1(ctx, POLY_OP_BUFFER, POLY_FLOAT32, size, poly_arg_param(&local_arg));
   PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
-  PolyUOp *idx = poly_uop2(ctx, POLY_OP_INDEX, smem_ptr, local, zero, poly_arg_none());
+  PolyUOp *idx = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, local, zero, poly_arg_none());
   PolyUOp *cst = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0));
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx, cst, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
   int n_lin;
-  PolyUOp **lin = poly_linearize_rewritten(ctx, sink, &n_lin);
+  PolyUOp **lin = poly_do_linearize(ctx, sink, &n_lin);
   ASSERT_NOT_NULL(lin);
-  char *src = poly_render_hip(lin, n_lin, "smem_test", 256);
+  char *src = poly_render_hip(ctx, lin, n_lin, "smem_test", 256, "gfx1100");
   free(lin);
   ASSERT_NOT_NULL(src);
   ASSERT_TRUE(strstr(src, "__attribute__((shared, aligned(16)))") != NULL);
@@ -200,7 +299,6 @@ TEST_BACKEND(hip, vector_local_shrink_load_store_use_typed_lvalue) {
    * (renderer/cstyle.py:47-58,179-184,472-520). */
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
-  PolyDType vec4 = poly_dtype_vec(POLY_FLOAT32, 4);
   PolyUOp *size = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(128));
   PolyParamArg local_arg = {.slot = 0, .addrspace = POLY_ADDR_LOCAL};
   PolyParamArg global_arg = {.slot = 0, .addrspace = POLY_ADDR_GLOBAL};
@@ -214,29 +312,30 @@ TEST_BACKEND(hip, vector_local_shrink_load_store_use_typed_lvalue) {
   PolyUOp *width = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(4));
   PolyUOp *local_srcs[3] = {local, idx, width};
   PolyUOp *local_vec =
-      poly_uop(ctx, POLY_OP_SHRINK, vec4, local_srcs, 3, poly_arg_none());
+      poly_uop(ctx, POLY_OP_SHRINK, POLY_FLOAT32, local_srcs, 3, poly_arg_none());
   PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
   PolyUOp *global_srcs[3] = {global, zero, width};
   PolyUOp *global_vec =
-      poly_uop(ctx, POLY_OP_SHRINK, vec4, global_srcs, 3, poly_arg_none());
+      poly_uop(ctx, POLY_OP_SHRINK, POLY_FLOAT32, global_srcs, 3, poly_arg_none());
   PolyUOp *values[4];
   for (int i = 0; i < 4; i++)
     values[i] =
         poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float((double)i + 1.0));
-  PolyUOp *value = poly_uop(ctx, POLY_OP_STACK, vec4, values, 4, poly_arg_none());
+  PolyUOp *value = poly_uop(ctx, POLY_OP_STACK, POLY_FLOAT32, values, 4, poly_arg_none());
   PolyUOp *local_store =
       poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, local_vec, value, poly_arg_none());
   PolyUOp *local_load =
-      poly_uop1(ctx, POLY_OP_LOAD, vec4, local_vec, poly_arg_none());
+      poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, local_vec, poly_arg_none());
   PolyUOp *global_store =
       poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, global_vec, local_load, poly_arg_none());
   PolyUOp *sink_srcs[2] = {local_store, global_store};
   PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, sink_srcs, 2, poly_arg_none());
 
   int n_lin = 0;
-  PolyUOp **lin = poly_linearize_rewritten(ctx, sink, &n_lin);
+  PolyUOp **lin = poly_do_linearize(ctx, sink, &n_lin);
   ASSERT_NOT_NULL(lin);
-  char *source = poly_render_hip(lin, n_lin, "local_float4_access", 32);
+  char *source =
+      poly_render_hip(ctx, lin, n_lin, "local_float4_access", 32, "gfx1100");
   free(lin);
   ASSERT_NOT_NULL(source);
   const char *first = strstr(source, "*((float4*)((smem0+");
@@ -251,7 +350,7 @@ TEST_BACKEND(hip, vector_local_shrink_load_store_use_typed_lvalue) {
 
 static int build_hip_bindings(PolyTestBufferView *out, PolyUOp **bufs, float **host_ptrs, int n) {
   for (int i = 0; i < n; i++) {
-    size_t nbytes = (size_t)bufs[i]->arg.i * poly_dtype_itemsize(poly_dtype_scalar(bufs[i]->dtype));
+    size_t nbytes = (size_t)bufs[i]->arg.i * poly_dtype_itemsize(bufs[i]->dtype);
     void *dptr = poly_hip_alloc(nbytes);
     if (!dptr) return -1;
     if (host_ptrs[i])
@@ -259,7 +358,12 @@ static int build_hip_bindings(PolyTestBufferView *out, PolyUOp **bufs, float **h
     else
       poly_hip_memset(dptr, 0, nbytes);
     out[i].buffer = bufs[i];
-    out[i].handle = (PolyBuffer){dptr, nbytes, POLY_DEVICE_HIP, true};
+    out[i].handle = (PolyBuffer){
+        .ptr = dptr,
+        .nbytes = nbytes,
+        .device = POLY_DEVICE_HIP,
+        .owned = true,
+    };
   }
   return 0;
 }
@@ -325,8 +429,8 @@ TEST_BACKEND(hip, e2e_neg) {
 
   int n = 512;
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *buf_a = poly_buffer(ctx, POLY_FLOAT32, n);
-  PolyUOp *buf_c = poly_buffer(ctx, POLY_FLOAT32, n);
+  PolyUOp *buf_a = poly_test_buffer(ctx, POLY_FLOAT32, n);
+  PolyUOp *buf_c = poly_test_buffer(ctx, POLY_FLOAT32, n);
   PolyUOp *neg = poly_alu1(ctx, POLY_OP_NEG, buf_a);
   PolyUOp *store = poly_store_val(ctx, buf_c, neg);
   PolyUOp *sink = poly_sink1(ctx, store);
@@ -363,8 +467,8 @@ TEST_BACKEND(hip, e2e_exp2) {
 
   int n = 256;
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *buf_a = poly_buffer(ctx, POLY_FLOAT32, n);
-  PolyUOp *buf_c = poly_buffer(ctx, POLY_FLOAT32, n);
+  PolyUOp *buf_a = poly_test_buffer(ctx, POLY_FLOAT32, n);
+  PolyUOp *buf_c = poly_test_buffer(ctx, POLY_FLOAT32, n);
   PolyUOp *exp = poly_alu1(ctx, POLY_OP_EXP2, buf_a);
   PolyUOp *store = poly_store_val(ctx, buf_c, exp);
   PolyUOp *sink = poly_sink1(ctx, store);
@@ -401,8 +505,8 @@ TEST_BACKEND(hip, e2e_reduce_sum) {
 
   int n = 512;
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *buf_a = poly_buffer(ctx, POLY_FLOAT32, n);
-  PolyUOp *buf_c = poly_buffer(ctx, POLY_FLOAT32, 1);
+  PolyUOp *buf_a = poly_test_buffer(ctx, POLY_FLOAT32, n);
+  PolyUOp *buf_c = poly_test_buffer(ctx, POLY_FLOAT32, 1);
   int64_t axes[] = {0};
   PolyUOp *red = poly_reduce_axis(ctx, POLY_OP_ADD, buf_a, axes, 1);
   PolyUOp *store = poly_store_val(ctx, buf_c, red);
@@ -587,7 +691,7 @@ TEST_BACKEND(hip, instance_hip_roundtrip) {
   PASS();
 }
 
-/* Regression: realize_ex with poly_full + DEFINE_VAR shape on GPU */
+/* Regression: realize_ex with poly_full + an ALU BUFFER shape variable on GPU. */
 /* Originally landed (pre-Phase-B) as a guard for the const-registry buffer
  * migration path: poly_full used to malloc a host buffer and stash it via
  * g_const_bindings, which only worked on GPU after the realize-time
@@ -595,17 +699,17 @@ TEST_BACKEND(hip, instance_hip_roundtrip) {
  * a pure UOp (CONST -> reshape -> expand), and Phase E deleted the
  * const-registry entirely, so this test now exercises a different code
  * path entirely: the only HIP smoke that runs poly_test_realize_buffer_views_vars with a
- * DEFINE_VAR'd dynamic shape. Renamed accordingly. */
+ * dynamic ALU BUFFER shape. Renamed accordingly. */
 TEST_BACKEND(hip, realize_ex_full_plus_buffer_dyn_shape) {
   SKIP_IF_NO_HIP();
   PolyCtx *ctx = poly_ctx_new();
 
-  /* out[N] = full(3.14)[N] + a[N], with N as DEFINE_VAR */
-  PolyUOp *N = poly_define_var(ctx, "N", 1, 16);
+  /* out[N] = full(3.14)[N] + a[N], with N symbolic. */
+  PolyUOp *N = poly_uop_variable(ctx, "N", 1, 16, POLY_WEAKINT, 1, false);
   int64_t shape_max[] = {16};
   PolyUOp *fill = poly_full(ctx, shape_max, 1, 3.14);
-  PolyUOp *buf_a = poly_buffer_var(ctx, POLY_FLOAT32, N, NULL, 0);
-  PolyUOp *buf_out = poly_buffer_var(ctx, POLY_FLOAT32, N, NULL, 0);
+  PolyUOp *buf_a = poly_test_buffer_var(ctx, POLY_FLOAT32, N, NULL, 0);
+  PolyUOp *buf_out = poly_test_buffer_var(ctx, POLY_FLOAT32, N, NULL, 0);
   PolyUOp *add = poly_alu2(ctx, POLY_OP_ADD, fill, buf_a);
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, buf_out, add, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
@@ -629,107 +733,144 @@ TEST_BACKEND(hip, realize_ex_full_plus_buffer_dyn_shape) {
   PASS();
 }
 
-/* WMMA rendering smoke test (no GPU needed) */
-TEST_BACKEND(hip, render_wmma_mfma) {
-  /* Build minimal linearized IR with a WMMA op and verify the HIP
-   * renderer emits the MFMA macro and vector type declarations. */
-  PolyCtx *ctx = poly_ctx_new();
-
-  /* Params: A (half*), B (half*), C (float*) */
-  PolyDType ptr_f16 = poly_dtype_ptr(POLY_FLOAT16, -1, POLY_ADDR_GLOBAL);
-  PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
-  PolyUOp *p0 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f16, poly_arg_int(0)); /* A */
-  PolyUOp *p1 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f16, poly_arg_int(1)); /* B */
-  PolyUOp *p2 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(2)); /* C out */
-
-  /* Thread index (gidx0) as placeholder */
-  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(64));
-  PolyUOp *special = poly_uop1(ctx, POLY_OP_SPECIAL, POLY_INT32, bound, poly_arg_str("gidx0"));
-
-  /* Create vector types: half4 for A/B input, float4 for C accumulator */
-  PolyDType f16v4 = poly_dtype_vec(POLY_FLOAT16, 4);
-  PolyDType f32v4 = poly_dtype_vec(POLY_FLOAT32, 4);
-
-  /* Fake A/B loads as CONST vectors (just for render testing) */
-  PolyUOp *zero_f16 = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT16, poly_arg_float(0.0));
-  PolyUOp *a_vec_srcs[4] = {zero_f16, zero_f16, zero_f16, zero_f16};
-  PolyUOp *a_vec = poly_uop(ctx, POLY_OP_VECTORIZE, f16v4, a_vec_srcs, 4, poly_arg_none());
-  PolyUOp *b_vec = poly_uop(ctx, POLY_OP_VECTORIZE, f16v4, a_vec_srcs, 4, poly_arg_none());
-
-  /* Zero accumulator */
-  PolyUOp *zero_f32 = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(0.0));
-  PolyUOp *c_vec_srcs[4] = {zero_f32, zero_f32, zero_f32, zero_f32};
-  PolyUOp *c_vec = poly_uop(ctx, POLY_OP_VECTORIZE, f32v4, c_vec_srcs, 4, poly_arg_none());
-
-  /* WMMA: result = mfma(A, B, C) */
-  PolyUOp *wmma_srcs[3] = {a_vec, b_vec, c_vec};
-  PolyUOp *wmma =
-      poly_uop(ctx, POLY_OP_WMMA, f32v4, wmma_srcs, 3, poly_arg_str("mfma_f32_16x16x16f16"));
-
-  /* Extract lane 0 and store (just to complete the kernel) */
-  PolyUOp *lane0 = poly_uop1(ctx, POLY_OP_GEP, POLY_FLOAT32, wmma, poly_arg_int(0));
-  PolyUOp *idx_c = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p2, special, poly_arg_none());
-  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx_c, lane0, poly_arg_none());
-  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
-
-  /* Linearize (skip optimization passes -- raw render test) */
-  int n_lin;
-  PolyUOp **lin = poly_linearize_rewritten(ctx, sink, &n_lin);
-  ASSERT_NOT_NULL(lin);
-
-  char *src = poly_render_hip(lin, n_lin, "wmma_test", 64);
-  free(lin);
-  ASSERT_NOT_NULL(src);
-
-  /* Verify MFMA builtin call appears directly with 6 args */
-  ASSERT_TRUE(strstr(src, "__builtin_amdgcn_mfma_f32_16x16x16f16") != NULL);
-  ASSERT_TRUE(strstr(src, ", 0, 0, 0)") != NULL);
-
-  /* Verify vector type handling (ext_vector_type for half/float) */
-  ASSERT_TRUE(strstr(src, "ext_vector_type") != NULL);
-
-  /* Verify VECTORIZE renders as vector construction */
-  ASSERT_TRUE(strstr(src, "vec") != NULL || strstr(src, "{") != NULL);
-
+static PolyUOp *hip_test_fragment(
+    PolyCtx *ctx, PolyDType dtype, int lanes
+) {
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, dtype, poly_arg_float(0.0));
+  PolyUOp **src = malloc((size_t)lanes * sizeof(*src));
+  if (!src) return NULL;
+  for (int i = 0; i < lanes; i++) src[i] = zero;
+  PolyUOp *fragment =
+      poly_uop(ctx, POLY_OP_STACK, dtype, src, lanes, poly_arg_none());
   free(src);
+  return fragment;
+}
+
+static char *hip_render_test_wmma(
+    PolyDType dtype_in,
+    PolyDType dtype_out,
+    const int dims[3],
+    const int lanes[3],
+    int threads,
+    const char *arch
+) {
+  PolyCtx *ctx = poly_ctx_new();
+  if (!ctx) return NULL;
+  PolyUOp *src[3] = {
+      hip_test_fragment(ctx, dtype_in, lanes[0]),
+      hip_test_fragment(ctx, dtype_in, lanes[1]),
+      hip_test_fragment(ctx, dtype_out, lanes[2]),
+  };
+  PolyUOp *wmma = poly_uop(
+      ctx, POLY_OP_WMMA, dtype_out, src, 3,
+      poly_arg_tensor_core(dims, dtype_in, "AMD", threads, NULL, NULL, false)
+  );
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, wmma, poly_arg_none());
+  int n_lin = 0;
+  PolyUOp **lin = poly_do_linearize(ctx, sink, &n_lin);
+  char *source = lin ? poly_render_hip(ctx, lin, n_lin, "wmma_test", threads, arch) : NULL;
+  free(lin);
   poly_ctx_destroy(ctx);
+  return source;
+}
+
+TEST_BACKEND(hip, render_wmma_matches_current_architecture_matrix) {
+  /* Tinygrad 2026-08-22/a9069c177a9d renderer/cstyle.py:528-563 emits one
+   * architecture-specific binding for every wmma_args signature. */
+  const int k32[] = {16, 16, 32}, k128[] = {16, 16, 128};
+  const int k16[] = {16, 16, 16};
+  const int cdna32_lanes[] = {8, 8, 4}, cdna128_lanes[] = {32, 32, 4};
+  const int rdna3_lanes[] = {16, 16, 8}, rdna4_lanes[] = {8, 8, 8};
+
+  char *gfx942 = hip_render_test_wmma(
+      POLY_FP8E4M3, POLY_FLOAT32, k32, cdna32_lanes, 64, "gfx942"
+  );
+  ASSERT_NOT_NULL(gfx942);
+  ASSERT_NOT_NULL(strstr(
+      gfx942,
+      "#define __WMMA_16_16_32_float8_e4m3_float "
+      "__builtin_amdgcn_mfma_f32_16x16x32_fp8_fp8"
+  ));
+  ASSERT_NOT_NULL(strstr(gfx942, ", 0, 0, 0);"));
+  free(gfx942);
+
+  char *gfx950 = hip_render_test_wmma(
+      POLY_FP8E5M2, POLY_FLOAT32, k128, cdna128_lanes, 64, "gfx950"
+  );
+  ASSERT_NOT_NULL(gfx950);
+  ASSERT_NOT_NULL(strstr(
+      gfx950,
+      "#define __WMMA_16_16_128_float8_e5m2_float "
+      "__builtin_amdgcn_mfma_scale_f32_16x16x128_f8f6f4"
+  ));
+  ASSERT_NOT_NULL(strstr(gfx950, ", 1, 1, 0, 0, 0, 0);"));
+  free(gfx950);
+
+  char *gfx1100_i8 = hip_render_test_wmma(
+      POLY_INT8, POLY_INT32, k16, rdna3_lanes, 32, "gfx1100"
+  );
+  ASSERT_NOT_NULL(gfx1100_i8);
+  ASSERT_NOT_NULL(strstr(gfx1100_i8, "typedef int wmma_int4"));
+  ASSERT_NOT_NULL(strstr(
+      gfx1100_i8, "__builtin_amdgcn_wmma_i32_16x16x16_iu8_w32"
+  ));
+  free(gfx1100_i8);
+
+  char *gfx1100_f16 = hip_render_test_wmma(
+      POLY_FLOAT16, POLY_FLOAT16, k16, rdna3_lanes, 32, "gfx1100"
+  );
+  ASSERT_NOT_NULL(gfx1100_f16);
+  ASSERT_NOT_NULL(strstr(gfx1100_f16, "half16 c_frag = {};"));
+  ASSERT_NOT_NULL(strstr(
+      gfx1100_f16, "__builtin_amdgcn_wmma_f16_16x16x16_f16_w32"
+  ));
+  free(gfx1100_f16);
+
+  char *gfx1200 = hip_render_test_wmma(
+      POLY_BFLOAT16, POLY_BFLOAT16, k16, rdna4_lanes, 32, "gfx1200"
+  );
+  ASSERT_NOT_NULL(gfx1200);
+  ASSERT_NOT_NULL(strstr(
+      gfx1200,
+      "#define __WMMA_16_16_16___bf16___bf16 "
+      "__builtin_amdgcn_wmma_bf16_16x16x16_bf16_w32_gfx12"
+  ));
+  free(gfx1200);
   PASS();
 }
 
 TEST_BACKEND(hip, rewrite_bf16_wmma_preserves_native_fragments) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
-  PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
-  PolyDType bf16x4 = poly_dtype_vec(POLY_BFLOAT16, 4);
-  PolyDType f32x4 = poly_dtype_vec(POLY_FLOAT32, 4);
 
-  PolyUOp *out = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(0));
+  PolyUOp *out = poly_test_uop_param(ctx, POLY_FLOAT32, -1, 0, POLY_ADDR_GLOBAL);
   PolyUOp *bound =
       poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(1));
   PolyUOp *special =
       poly_uop1(ctx, POLY_OP_SPECIAL, POLY_INT32, bound, poly_arg_str("gidx0"));
   PolyUOp *out_idx =
-      poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, out, special, poly_arg_none());
+      poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, out, special, poly_arg_none());
 
   PolyUOp *one =
       poly_uop0(ctx, POLY_OP_CONST, POLY_BFLOAT16, poly_arg_float(1.0));
   PolyUOp *bf16_lanes[] = {one, one, one, one};
   PolyUOp *a =
-      poly_uop(ctx, POLY_OP_STACK, bf16x4, bf16_lanes, 4, poly_arg_none());
+      poly_uop(ctx, POLY_OP_STACK, POLY_BFLOAT16, bf16_lanes, 4, poly_arg_none());
   PolyUOp *b =
-      poly_uop(ctx, POLY_OP_STACK, bf16x4, bf16_lanes, 4, poly_arg_none());
+      poly_uop(ctx, POLY_OP_STACK, POLY_BFLOAT16, bf16_lanes, 4, poly_arg_none());
   PolyUOp *zero =
       poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(0.0));
   PolyUOp *f32_lanes[] = {zero, zero, zero, zero};
   PolyUOp *acc =
-      poly_uop(ctx, POLY_OP_STACK, f32x4, f32_lanes, 4, poly_arg_none());
+      poly_uop(ctx, POLY_OP_STACK, POLY_FLOAT32, f32_lanes, 4, poly_arg_none());
   PolyUOp *wmma_src[] = {a, b, acc};
+  int dims[] = {16, 16, 16};
   PolyUOp *wmma = poly_uop(
-      ctx, POLY_OP_WMMA, f32x4, wmma_src, 3,
-      poly_arg_str("mfma_f32_16x16x16bf16_1k")
+      ctx, POLY_OP_WMMA, POLY_FLOAT32, wmma_src, 3,
+      poly_arg_tensor_core(dims, POLY_BFLOAT16, "AMD", 64, NULL, NULL, false)
   );
-  PolyUOp *lane =
-      poly_uop1(ctx, POLY_OP_GEP, POLY_FLOAT32, wmma, poly_arg_int(0));
+  PolyUOp *lane_idx = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(0));
+  PolyUOp *lane = poly_uop_index(ctx, wmma, &lane_idx, 1);
   PolyUOp *store =
       poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out_idx, lane, poly_arg_none());
   PolyUOp *sink_src[] = {store};
@@ -751,14 +892,14 @@ TEST_BACKEND(hip, rewrite_bf16_wmma_preserves_native_fragments) {
   ASSERT_INT_EQ(n_wmma, 1);
   ASSERT_NOT_NULL(rewritten_wmma);
   ASSERT_INT_EQ(rewritten_wmma->n_src, 3);
-  ASSERT_TRUE(poly_dtype_eq(rewritten_wmma->src[0]->dtype, bf16x4));
-  ASSERT_TRUE(poly_dtype_eq(rewritten_wmma->src[1]->dtype, bf16x4));
+  ASSERT_TRUE(poly_dtype_eq(rewritten_wmma->src[0]->dtype, POLY_BFLOAT16));
+  ASSERT_TRUE(poly_dtype_eq(rewritten_wmma->src[1]->dtype, POLY_BFLOAT16));
 
   int n_lin = 0;
-  PolyUOp **lin = poly_linearize_rewritten(ctx, rewritten, &n_lin);
+  PolyUOp **lin = poly_do_linearize(ctx, rewritten, &n_lin);
   ASSERT_NOT_NULL(lin);
   char *source =
-      poly_render_hip(lin, n_lin, "bf16_wmma_rewrite", 64);
+      poly_render_hip(ctx, lin, n_lin, "bf16_wmma_rewrite", 64, "gfx942");
   free(lin);
   ASSERT_NOT_NULL(source);
   ASSERT_NOT_NULL(
@@ -788,15 +929,13 @@ TEST_BACKEND(hip, wmma_mfma_e2e) {
    *   stores float4 result to C. With all inputs = 1.0h, every output = 16.0f. */
   PolyCtx *ctx = poly_ctx_new();
 
-  PolyDType ptr_f16 = poly_dtype_ptr(POLY_FLOAT16, -1, POLY_ADDR_GLOBAL);
-  PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
-  PolyDType f16v4 = poly_dtype_vec(POLY_FLOAT16, 4);
-  PolyDType f32v4 = poly_dtype_vec(POLY_FLOAT32, 4);
+  PolyDType f16v4 = POLY_FLOAT16;
+  PolyDType f32v4 = POLY_FLOAT32;
 
   /* Kernel params: A (half*), B (half*), C (float*) */
-  PolyUOp *pA = poly_uop0(ctx, POLY_OP_PARAM, ptr_f16, poly_arg_int(0));
-  PolyUOp *pB = poly_uop0(ctx, POLY_OP_PARAM, ptr_f16, poly_arg_int(1));
-  PolyUOp *pC = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(2));
+  PolyUOp *pA = poly_test_uop_param(ctx, POLY_FLOAT16, -1, 0, POLY_ADDR_GLOBAL);
+  PolyUOp *pB = poly_test_uop_param(ctx, POLY_FLOAT16, -1, 1, POLY_ADDR_GLOBAL);
+  PolyUOp *pC = poly_test_uop_param(ctx, POLY_FLOAT32, -1, 2, POLY_ADDR_GLOBAL);
 
   /* Thread index: lidx0 in [0, 64) */
   PolyUOp *bound64 = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(64));
@@ -812,43 +951,47 @@ TEST_BACKEND(hip, wmma_mfma_e2e) {
     PolyUOp *ci = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(i));
     PolyUOp *idx = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, offset, ci, poly_arg_none());
 
-    PolyUOp *a_ptr = poly_uop2(ctx, POLY_OP_INDEX, ptr_f16, pA, idx, poly_arg_none());
+    PolyUOp *a_ptr = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT16, pA, idx, poly_arg_none());
     a_elems[i] = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT16, a_ptr, poly_arg_none());
 
-    PolyUOp *b_ptr = poly_uop2(ctx, POLY_OP_INDEX, ptr_f16, pB, idx, poly_arg_none());
+    PolyUOp *b_ptr = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT16, pB, idx, poly_arg_none());
     b_elems[i] = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT16, b_ptr, poly_arg_none());
   }
-  PolyUOp *a_vec = poly_uop(ctx, POLY_OP_VECTORIZE, f16v4, a_elems, 4, poly_arg_none());
-  PolyUOp *b_vec = poly_uop(ctx, POLY_OP_VECTORIZE, f16v4, b_elems, 4, poly_arg_none());
+  PolyUOp *a_vec = poly_uop(ctx, POLY_OP_STACK, f16v4, a_elems, 4, poly_arg_none());
+  PolyUOp *b_vec = poly_uop(ctx, POLY_OP_STACK, f16v4, b_elems, 4, poly_arg_none());
 
   /* Zero accumulator (float4) */
   PolyUOp *zero_f32 = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(0.0));
   PolyUOp *c_elems[4] = {zero_f32, zero_f32, zero_f32, zero_f32};
-  PolyUOp *c_vec = poly_uop(ctx, POLY_OP_VECTORIZE, f32v4, c_elems, 4, poly_arg_none());
+  PolyUOp *c_vec = poly_uop(ctx, POLY_OP_STACK, f32v4, c_elems, 4, poly_arg_none());
 
   /* WMMA: D = A * B + C */
   PolyUOp *wmma_srcs[3] = {a_vec, b_vec, c_vec};
-  PolyUOp *d_vec =
-      poly_uop(ctx, POLY_OP_WMMA, f32v4, wmma_srcs, 3, poly_arg_str("mfma_f32_16x16x16f16"));
+  int dims[] = {16, 16, 16};
+  PolyUOp *d_vec = poly_uop(
+      ctx, POLY_OP_WMMA, f32v4, wmma_srcs, 3,
+      poly_arg_tensor_core(dims, POLY_FLOAT16, "AMD", 64, NULL, NULL, false)
+  );
 
   /* Store all 4 output lanes */
   PolyUOp *stores[4];
   for (int i = 0; i < 4; i++) {
-    PolyUOp *lane = poly_uop1(ctx, POLY_OP_GEP, POLY_FLOAT32, d_vec, poly_arg_int(i));
+    PolyUOp *lane_idx = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(i));
+    PolyUOp *lane = poly_uop_index(ctx, d_vec, &lane_idx, 1);
     PolyUOp *ci = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(i));
     PolyUOp *idx = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, offset, ci, poly_arg_none());
-    PolyUOp *c_ptr = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, pC, idx, poly_arg_none());
+    PolyUOp *c_ptr = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, pC, idx, poly_arg_none());
     stores[i] = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, c_ptr, lane, poly_arg_none());
   }
   PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, stores, 4, poly_arg_none());
 
   /* Linearize (raw IR, no optimization passes) */
   int n_lin;
-  PolyUOp **lin = poly_linearize_rewritten(ctx, sink, &n_lin);
+  PolyUOp **lin = poly_do_linearize(ctx, sink, &n_lin);
   ASSERT_NOT_NULL(lin);
 
   /* Render to HIP source */
-  char *src = poly_render_hip(lin, n_lin, "mfma_e2e", 64);
+  char *src = poly_render_hip(ctx, lin, n_lin, "mfma_e2e", 64, poly_hip_arch());
   free(lin);
   ASSERT_NOT_NULL(src);
 
@@ -946,9 +1089,9 @@ TEST_BACKEND(hip, tc_auto_matmul_e2e) {
   const int M = 16, N = 16, K = 16;
 
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *buf_a = poly_buffer(ctx, POLY_FLOAT16, M * K); /* f16[256] */
-  PolyUOp *buf_b = poly_buffer(ctx, POLY_FLOAT16, K * N); /* f16[256] */
-  PolyUOp *buf_c = poly_buffer(ctx, POLY_FLOAT32, M * N); /* f32[256] */
+  PolyUOp *buf_a = poly_test_buffer(ctx, POLY_FLOAT16, M * K); /* f16[256] */
+  PolyUOp *buf_b = poly_test_buffer(ctx, POLY_FLOAT16, K * N); /* f16[256] */
+  PolyUOp *buf_c = poly_test_buffer(ctx, POLY_FLOAT32, M * N); /* f32[256] */
 
   /* A: [M*K] -> [M, 1, K] -> expand [M, N, K] */
   int64_t a_3d[] = {M, 1, K};
@@ -1008,11 +1151,11 @@ TEST_BACKEND(hip, tc_auto_matmul_e2e) {
   };
 
   /* Execute through full poly_test_realize_buffer_views path */
-  setenv("POLY_TC_OPT", "1", 1);
-  setenv("POLY_USE_TC", "1", 1);
+  setenv("TC_OPT", "1", 1);
+  setenv("TC", "1", 1);
   int ret = poly_test_realize_buffer_views(ctx, sink, hip_binds, 3);
-  unsetenv("POLY_TC_OPT");
-  unsetenv("POLY_USE_TC");
+  unsetenv("TC_OPT");
+  unsetenv("TC");
 
   if (ret != 0) {
     fprintf(stderr, "  tc_auto_matmul: poly_test_realize_buffer_views failed (ret=%d)\n", ret);
@@ -1055,9 +1198,9 @@ TEST_BACKEND(hip, tc_auto_matmul_unique_values) {
   const int M = 16, N = 16, K = 16;
 
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *buf_a = poly_buffer(ctx, POLY_FLOAT16, M * K);
-  PolyUOp *buf_b = poly_buffer(ctx, POLY_FLOAT16, K * N);
-  PolyUOp *buf_c = poly_buffer(ctx, POLY_FLOAT32, M * N);
+  PolyUOp *buf_a = poly_test_buffer(ctx, POLY_FLOAT16, M * K);
+  PolyUOp *buf_b = poly_test_buffer(ctx, POLY_FLOAT16, K * N);
+  PolyUOp *buf_c = poly_test_buffer(ctx, POLY_FLOAT32, M * N);
 
   /* Same matmul graph as tc_auto_matmul_e2e */
   int64_t a_3d[] = {M, 1, K};
@@ -1128,11 +1271,11 @@ TEST_BACKEND(hip, tc_auto_matmul_unique_values) {
       {.buffer = buf_b, .handle = {d_b, b_bytes, POLY_DEVICE_HIP, true}},
   };
 
-  setenv("POLY_TC_OPT", "1", 1);
-  setenv("POLY_USE_TC", "1", 1);
+  setenv("TC_OPT", "1", 1);
+  setenv("TC", "1", 1);
   int ret = poly_test_realize_buffer_views(ctx, sink, hip_binds, 3);
-  unsetenv("POLY_TC_OPT");
-  unsetenv("POLY_USE_TC");
+  unsetenv("TC_OPT");
+  unsetenv("TC");
   ASSERT_INT_EQ(ret, 0);
 
   float h_c[M * N];

@@ -8,7 +8,7 @@
 
 #include "../src/polygrad.h"
 #include "../src/frontend.h"
-#include "../src/codegen.h"
+#include "../src/codegen/codegen.h"
 #include "../src/engine/schedule.h"
 #ifdef POLY_EXEC_PLAN_H
 /* already pulled in by frontend.h on the branch */

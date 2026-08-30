@@ -6,9 +6,10 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'py'))
 
-from polygrad import Tensor
+from polygrad import Context, Tensor
 from polygrad.device import Device
-from polygrad.nn import Adam, get_parameters
+from polygrad.nn import get_parameters
+from polygrad.nn.optim import Adam
 from polygrad.nn.gpt2 import GPT2
 import numpy as np
 
@@ -28,6 +29,7 @@ LR = 0.001
 N_WARMUP = 1
 
 
+@Context(TRAINING=1)
 def run_config(cfg):
     Tensor.manual_seed(42)
     np.random.seed(42)

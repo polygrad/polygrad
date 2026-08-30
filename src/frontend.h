@@ -13,7 +13,11 @@
 
 /* Public C/frontend ABI version. Bump when exported symbols or public struct
  * layouts used by frontends change. */
-#define POLYGRAD_ABI_VERSION 57
+#define POLYGRAD_ABI_VERSION 63
+
+/* Current ElementwiseMixin._binop for language UOp operators. Compiler
+ * matchers keep using raw poly_alu2. */
+PolyUOp *poly_binop(PolyCtx *ctx, PolyOps op, PolyUOp *a, PolyUOp *b);
 
 #ifdef __cplusplus
 extern "C" {
@@ -22,20 +26,28 @@ extern "C" {
 /* FFI buffer constructors for bindings that cannot pass PolyDType by value. */
 PolyUOp *poly_buffer_by_id(PolyCtx *ctx, int dtype_id, int64_t size);
 PolyUOp *poly_buffer_on_device_by_id(PolyCtx *ctx, int dtype_id, int64_t size, int device_id);
-PolyUOp *poly_buffer_var_by_id(
-    PolyCtx *ctx,
-    int dtype_id,
-    PolyUOp *batch_var,
-    const int64_t *inner_dims,
-    int n_inner,
-    int device_id
-);
 PolyUOp *poly_buffer_f32(PolyCtx *ctx, int64_t size);
 PolyUOp *poly_buffer_f64(PolyCtx *ctx, int64_t size);
+PolyUOp *poly_uop_variable_by_id(
+    PolyCtx *ctx,
+    const char *name,
+    int64_t min_val,
+    int64_t max_val,
+    int dtype_id,
+    int64_t multiple_of,
+    bool param
+);
 PolyTensor *poly_tensor_empty_by_id(
     PolyCtx *ctx,
     int dtype_id,
     const int64_t *dims,
+    int ndim,
+    int device_id
+);
+PolyTensor *poly_tensor_empty_uop_by_id(
+    PolyCtx *ctx,
+    int dtype_id,
+    PolyUOp **dims,
     int ndim,
     int device_id
 );
@@ -49,13 +61,17 @@ PolyTensor *poly_tensor_from_host_by_id(
 );
 PolyTensor *poly_tensor_const_int_by_id(PolyCtx *ctx, int64_t value, int dtype_id, int device_id);
 PolyTensor *poly_tensor_const_float_by_id(PolyCtx *ctx, double value, int dtype_id, int device_id);
+PolyTensor *poly_tensor_const_like_int(PolyCtx *ctx, PolyTensor *ref, int64_t value);
+PolyTensor *poly_tensor_const_like_float(PolyCtx *ctx, PolyTensor *ref, double value);
 PolyTensor *poly_tensor_full_int_by_id(
     PolyCtx *ctx,
     const int64_t *dims,
     int ndim,
     int64_t value,
     int dtype_id,
-    int device_id
+    int device_id,
+    bool dtype_explicit,
+    bool buffer
 );
 PolyTensor *poly_tensor_full_float_by_id(
     PolyCtx *ctx,
@@ -63,7 +79,9 @@ PolyTensor *poly_tensor_full_float_by_id(
     int ndim,
     double value,
     int dtype_id,
-    int device_id
+    int device_id,
+    bool dtype_explicit,
+    bool buffer
 );
 PolyTensor *poly_tensor_arange_int_by_id(
     PolyCtx *ctx,
@@ -122,8 +140,7 @@ PolyUOp *poly_uop_index(
     PolyCtx *ctx,
     PolyUOp *base,
     PolyUOp **indices,
-    int n_indices,
-    int keep_ptr
+    int n_indices
 );
 PolyUOp *poly_uop_load(PolyCtx *ctx, PolyUOp *addr);
 PolyUOp *poly_uop_store(PolyCtx *ctx, PolyUOp *addr, PolyUOp *value);
@@ -143,14 +160,6 @@ PolyUOp *poly_uop_reduce(
 );
 PolyUOp *poly_uop_flatten(PolyCtx *ctx, PolyUOp *u);
 int64_t poly_uop_numel(PolyCtx *ctx, PolyUOp *u);
-
-/* Dynamic shapes (DEFINE_VAR / BIND) */
-
-/* Create a symbolic integer variable with bounds [min_val, max_val]. */
-PolyUOp *poly_define_var(PolyCtx *ctx, const char *name, int64_t min_val, int64_t max_val);
-
-/* Bind a concrete value to a DEFINE_VAR (creates BIND UOp). */
-PolyUOp *poly_bind_var(PolyCtx *ctx, PolyUOp *var, int64_t value);
 
 /* ABI version (callers check at load time for compatibility). */
 int poly_abi_version(void);
@@ -185,7 +194,6 @@ void poly_debug_opsets(void);
 void poly_cpu_cache_flush(void);
 
 /* Free cached schedule results (param-to-binding mappings). */
-void poly_sched_cache_flush(void);
 
 #ifdef __cplusplus
 }

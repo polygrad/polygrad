@@ -15,9 +15,10 @@ def run_polygrad(device, cfg):
 import sys, os, time, json
 sys.path.insert(0, os.path.join(os.path.dirname('{__file__}'), '..', 'py'))
 import numpy as np
-from polygrad import Tensor
+from polygrad import Context, Tensor
 from polygrad.device import Device
-from polygrad.nn import Adam, get_parameters
+from polygrad.nn import get_parameters
+from polygrad.nn.optim import Adam
 from polygrad.nn.gpt2 import GPT2
 
 Device.DEFAULT = '{device}'
@@ -33,20 +34,21 @@ tokens = np.random.randint(0, {cfg['vocab_size']}, (1, {cfg['seq_len']})).astype
 
 results = []
 cum = 0.0
-for i in range({cfg['iters']}):
-    t0 = time.perf_counter()
-    opt.zero_grad()
-    x = Tensor(tokens)
-    logits = model(x)
-    logits.realize()
-    loss = (logits * logits).sum()
-    loss.realize()
-    loss.backward()
-    lv = loss.item()
-    opt.step()
-    elapsed = (time.perf_counter() - t0) * 1000
-    cum += elapsed
-    results.append({{'t': cum, 'loss': lv}})
+with Context(TRAINING=1):
+    for i in range({cfg['iters']}):
+        t0 = time.perf_counter()
+        opt.zero_grad()
+        x = Tensor(tokens)
+        logits = model(x)
+        logits.realize()
+        loss = (logits * logits).sum()
+        loss.realize()
+        loss.backward()
+        lv = loss.item()
+        opt.step()
+        elapsed = (time.perf_counter() - t0) * 1000
+        cum += elapsed
+        results.append({{'t': cum, 'loss': lv}})
 
 print(json.dumps(results))
 """
@@ -158,7 +160,7 @@ import os, sys, time, json, math
 os.environ['DEBUG'] = '0'
 sys.path.insert(0, os.path.join('{os.path.dirname(os.path.abspath(__file__))}', '..', 'references', 'tinygrad'))
 import numpy as np
-from tinygrad import Tensor, Device
+from tinygrad import Context, Device, Tensor
 from tinygrad.nn.optim import Adam
 from tinygrad.nn.state import get_parameters
 Device.DEFAULT = '{"CUDA" if device == "CUDA" else "CPU"}'
@@ -214,7 +216,7 @@ class GPT2:
         for block in self.h: h = block(h, mask)
         return self.lm_head(self.ln_f(h))
 
-Tensor.manual_seed(42); Tensor.training = True
+Tensor.manual_seed(42)
 np.random.seed(42)
 model = GPT2({cfg['n_layers']}, {cfg['n_heads']}, {cfg['dim']}, {cfg['vocab_size']}, {cfg['seq_len']*2})
 params = get_parameters(model)
@@ -223,18 +225,19 @@ tokens = np.random.randint(0, {cfg['vocab_size']}, (1, {cfg['seq_len']}))
 
 results = []
 cum = 0.0
-for i in range({cfg['iters']}):
-    t0 = time.perf_counter()
-    x = Tensor(tokens)
-    logits = model(x)
-    loss = (logits * logits).sum()
-    lv = loss.numpy().item()
-    loss.backward()
-    opt.step()
-    opt.zero_grad()
-    elapsed = (time.perf_counter() - t0) * 1000
-    cum += elapsed
-    results.append({{'t': cum, 'loss': lv}})
+with Context(TRAINING=1):
+    for i in range({cfg['iters']}):
+        t0 = time.perf_counter()
+        x = Tensor(tokens)
+        logits = model(x)
+        loss = (logits * logits).sum()
+        lv = loss.numpy().item()
+        loss.backward()
+        opt.step()
+        opt.zero_grad()
+        elapsed = (time.perf_counter() - t0) * 1000
+        cum += elapsed
+        results.append({{'t': cum, 'loss': lv}})
 
 print(json.dumps(results))
 """

@@ -233,6 +233,9 @@ BEAM = ContextVar("BEAM", 0)
 JIT = ContextVar("JIT", 2 if OSX and ARCH_X86 else 1)
 WINO = ContextVar("WINO", 0)
 NO_COLOR = ContextVar("NO_COLOR", 0)
+# Current tinygrad/helpers.py:237. Dropout, BatchNorm, and optimizers share one
+# scoped training-mode owner rather than storing mode on Tensor.
+TRAINING = ContextVar("TRAINING", 0)
 
 cache_dir = os.path.join(
     getenv(

@@ -3,12 +3,9 @@ Uses CLANG backend for C code comparison with polygrad."""
 import os
 os.environ["CLANG"] = "1"  # Force CPU/C backend
 
-from tinygrad import Tensor, nn, dtypes, Device
-from tinygrad.nn.optim import SGD
+from tinygrad import Tensor
 from tinygrad.engine.schedule import create_schedule
 import numpy as np
-
-Tensor.training = True
 
 # Fixed weights for reproducible comparison
 x_data = np.array([[0,0],[0,1],[1,0],[1,1]], dtype=np.float32)
@@ -19,11 +16,6 @@ l1_w = Tensor(np.ones((8,2), dtype=np.float32) * 0.1)
 l1_b = Tensor(np.zeros(8, dtype=np.float32))
 l2_w = Tensor(np.ones((1,8), dtype=np.float32) * 0.1)
 l2_b = Tensor(np.zeros(1, dtype=np.float32))
-
-l1_w.requires_grad = True
-l1_b.requires_grad = True
-l2_w.requires_grad = True
-l2_b.requires_grad = True
 
 x = Tensor(x_data)
 y = Tensor(y_data)

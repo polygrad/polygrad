@@ -26,7 +26,7 @@ from pathlib import Path
 
 import numpy as np
 
-from tinygrad import Tensor, Device
+from tinygrad import Context, Device, Tensor
 from tinygrad.helpers import DEV
 from tinygrad.nn.optim import SGD
 
@@ -54,20 +54,8 @@ def sync_cuda() -> None:
     Device["CUDA"].synchronize()
 
 
-def tg_tensor(data: np.ndarray, *, requires_grad: bool = False) -> Tensor:
-    if not requires_grad:
-        return Tensor(data)
-    try:
-        return Tensor(data, requires_grad=True)
-    except TypeError as exc:
-        if "requires_grad" not in str(exc):
-            raise
-    t = Tensor(data)
-    if hasattr(t, "is_param"):
-        t.is_param = True
-    else:
-        t.requires_grad = True
-    return t
+def tg_tensor(data: np.ndarray) -> Tensor:
+    return Tensor(data)
 
 
 def init_arrays(layers: list[int], batch: int) -> tuple[np.ndarray, np.ndarray, list[tuple[np.ndarray, np.ndarray]]]:
@@ -106,14 +94,14 @@ def tinygrad_forward_case(case: dict) -> float:
     return median_us(run, iters)
 
 
+@Context(TRAINING=1)
 def tinygrad_train_case(case: dict) -> float:
     layers, batch, iters = case["layers"], case["batch"], case["iters"]
     x_np, y_np, params_np = init_arrays(layers, batch)
-    Tensor.training = True
     params = []
     for w_np, b_np in params_np:
-        w = tg_tensor(w_np, requires_grad=True).realize()
-        b = tg_tensor(b_np, requires_grad=True).realize()
+        w = tg_tensor(w_np).realize()
+        b = tg_tensor(b_np).realize()
         params.extend([w, b])
     opt = SGD(params, lr=0.01)
     sync_cuda()

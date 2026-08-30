@@ -1,5 +1,5 @@
 /*
- * simplify.h -- ports of tinygrad/codegen/simplify.py
+ * codegen/simplify.h -- ports of tinygrad/codegen/simplify.py
  *
  * This header exposes the simplify.py stage helpers used by:
  *   - codegen full_rewrite_to_sink (Stage 2-5 parity work)
@@ -10,23 +10,19 @@
 #define POLY_SIMPLIFY_H
 
 #include "polygrad.h"
-#include "pat.h"
+#include "uop/upat.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-typedef struct {
-  PolyUOp *r[POLY_MAX_DIMS];
-  PolyUOp *c[POLY_MAX_DIMS];
-  int n;
-} SplitRangeCtx;
 
 /* simplify.py stage helpers used by full_rewrite_to_sink. */
 PolyPatternMatcher *poly_pm_flatten_range(void);
 PolyPatternMatcher *poly_pm_split_ranges(void);
 PolyPatternMatcher *poly_pm_simplify_ranges(void);
 PolyPatternMatcher *poly_pm_load_collapse(void);
+PolyPatternMatcher *poly_pm_reduce_unparented(void);
+PolyPatternMatcher *poly_pm_reduce_simplify(void);
 
 /* rangeify Phase D entrypoints. */
 PolyUOp *poly_apply_reduce_simplify(PolyCtx *ctx, PolyUOp *sink);

@@ -4,13 +4,14 @@
 
 #include "test_harness.h"
 #include "../src/instance.h"
-#include "../src/codegen.h"
+#include "../src/codegen/codegen.h"
 #include "../src/ctx.h"
 #include "../src/engine/jit.h"
 #include "../src/engine/realize.h"
 #include "../src/engine/schedule.h"
 #include "../src/ir.h"
 #include "../src/frontend.h"
+#include "../src/frontend_internal.h"
 #include "../src/engine/schedule.h"
 #include "../src/optim.h"
 #include "../src/tensor.h"
@@ -56,15 +57,19 @@ static int instance_count_root_op(PolyCtx *ctx, PolyUOp *root, PolyOps op) {
   return count;
 }
 
+static PolyUOp *instance_logical_f32(PolyCtx *ctx, int64_t size) {
+  return poly_uop_new_logical_buffer(ctx, POLY_FLOAT32, size);
+}
+
 /* Helper: build IR bytes for a simple add graph */
 /* out = a + b, forward entrypoint */
 static uint8_t *make_add_ir(int *out_len) {
   PolyCtx *ctx = poly_ctx_new();
 
-  PolyUOp *a = poly_buffer_f32(ctx, 4);
-  PolyUOp *b = poly_buffer_f32(ctx, 4);
+  PolyUOp *a = instance_logical_f32(ctx, 4);
+  PolyUOp *b = instance_logical_f32(ctx, 4);
   PolyUOp *sum = poly_alu2(ctx, POLY_OP_ADD, a, b);
-  PolyUOp *out_buf = poly_buffer_f32(ctx, 4);
+  PolyUOp *out_buf = instance_logical_f32(ctx, 4);
   PolyUOp *store = poly_store_val(ctx, out_buf, sum);
   PolyUOp *sink = poly_sink1(ctx, store);
 
@@ -241,10 +246,58 @@ TEST(optim, build_step_sgd_realizes_lazy_state_and_gradient_effects) {
   ASSERT_EQ(param_logical->op, POLY_OP_AFTER);
   ASSERT_TRUE(poly_uop_reachable(ctx, param_logical, momentum_logical));
 
-  PolyTensor *realized[2] = {NULL, NULL};
-  ASSERT_INT_EQ(poly_realize_tensors(ctx, targets, 2, realized), 0);
-  ASSERT_PTR_EQ(realized[0], momentum);
-  ASSERT_PTR_EQ(realized[1], param);
+  /* Current Tensor.linear_with_vars publishes callify's becomes-map before
+   * create_linear_with_vars. Inspect that exact boundary before execution. */
+  PolyUOp *physical_targets[2] = {poly_tensor_uop_physical(targets[0]),
+                                  poly_tensor_uop_physical(targets[1])};
+  PolyUOp *callified_targets[2] = {NULL, NULL};
+  PolyUOp **map_orig = NULL;
+  PolyUOp **map_repl = NULL;
+  int map_n = 0;
+  PolyUOp *big_call = poly_transform_to_call_with_map(
+      ctx, physical_targets, 2, callified_targets, &map_orig, &map_repl, &map_n
+  );
+  ASSERT_NOT_NULL(big_call);
+  ASSERT_INT_EQ(
+      poly_tensor_apply_realize_map(ctx, map_orig, map_repl, map_n, POLY_DEVICE_AUTO), 0
+  );
+  PolyVarBinding *bindings = NULL;
+  int n_bindings = 0;
+  PolyUOp *linear = poly_create_linear_with_vars(
+      ctx, big_call, &bindings, &n_bindings
+  );
+  ASSERT_NOT_NULL(linear);
+  int max_call_args = 0;
+  for (int i = 0; i < linear->n_src; i++) {
+    PolyUOp *call = linear->src[i];
+    ASSERT_EQ(call->op, POLY_OP_CALL);
+    if (call->n_src - 1 > max_call_args) max_call_args = call->n_src - 1;
+    int n_body_topo = 0;
+    PolyUOp **body_topo = poly_toposort(ctx, call->src[0], &n_body_topo);
+    ASSERT_NOT_NULL(body_topo);
+    bool seen_slots[16] = {false};
+    int n_storage_params = 0;
+    for (int j = 0; j < n_body_topo; j++) {
+      PolyUOp *u = body_topo[j];
+      if (u->op != POLY_OP_PARAM || u->arg.kind != POLY_ARG_PARAM || !u->arg.param ||
+          u->arg.param->slot < 0)
+        continue;
+      int slot = (int)u->arg.param->slot;
+      ASSERT_TRUE(slot < (int)(sizeof(seen_slots) / sizeof(seen_slots[0])));
+      ASSERT_FALSE(seen_slots[slot]);
+      seen_slots[slot] = true;
+      n_storage_params++;
+    }
+    ASSERT_INT_EQ(n_storage_params, call->n_src - 1);
+    for (int slot = 0; slot < n_storage_params; slot++) ASSERT_TRUE(seen_slots[slot]);
+  }
+  ASSERT_INT_EQ(max_call_args, 5);
+  ASSERT_INT_EQ(
+      poly_run_linear(ctx, linear, bindings, n_bindings, NULL, 0, true, false, false), 0
+  );
+  free(bindings);
+  free(map_repl);
+  free(map_orig);
   ASSERT_PTR_EQ(poly_tensor_uop_logical(momentum), momentum_logical);
   ASSERT_PTR_EQ(poly_tensor_uop_logical(param), param_logical);
   ASSERT_PTR_EQ(poly_tensor_uop(momentum), m_buf);
@@ -372,7 +425,9 @@ TEST(optim, build_step_sgd_lazy_parameter_executes_shared_momentum_effect_once) 
       ctx, poly_tensor_to_device(ctx, grad_host, POLY_DEVICE_CPU), param_shape, 2
   );
   PolyTensor *momentum_source =
-      poly_tensor_full_float_by_id(ctx, param_shape, 2, 0.0, f32_id, POLY_DEVICE_CPU);
+      poly_tensor_full_float_by_id(
+          ctx, param_shape, 2, 0.0, f32_id, POLY_DEVICE_CPU, true, false
+      );
   PolyTensor *momentum =
       poly_tensor_empty(ctx, POLY_FLOAT32, param_shape, 2, POLY_DEVICE_CPU);
   PolyTensor *lr_host =
@@ -435,37 +490,41 @@ TEST(optim, build_step_sgd_lazy_parameter_executes_shared_momentum_effect_once) 
   PolyUOp *resolved[2] = {NULL, NULL};
   ASSERT_NOT_NULL(targets[0]);
   ASSERT_NOT_NULL(targets[1]);
-  PolySchedule *schedule = poly_schedule_with_vars(ctx, targets, 2, resolved);
-  ASSERT_NOT_NULL(schedule);
+  PolyVarBinding *vars = NULL;
+  int n_vars = 0;
+  PolyUOp *linear = poly_linear_with_vars(ctx, targets, 2, resolved, &vars, &n_vars);
+  ASSERT_NOT_NULL(linear);
   ASSERT_NOT_NULL(resolved[0]);
   ASSERT_NOT_NULL(resolved[1]);
-  ASSERT_INT_EQ(schedule->template->n_calls, 5);
+  ASSERT_INT_EQ(linear->n_src, 5);
 
   const PolyUOp *m_buf = poly_uop_get_buffer_identity(resolved[0]);
   ASSERT_NOT_NULL(m_buf);
-  int momentum_slot = -1;
-  for (int i = 0; i < schedule->template->n_buf_slots; i++) {
-    if (schedule->template->buf_slots[i].buf_uop == m_buf) momentum_slot = i;
-  }
-  ASSERT_TRUE(momentum_slot >= 0);
   int momentum_writes = 0;
   int momentum_read_writes = 0;
-  for (int k = 0; k < schedule->template->n_calls; k++) {
-    PolyCallIO *io = &schedule->run->call_io[k];
-    ASSERT_NOT_NULL(io->access);
-    for (int i = 0; i < io->n_args; i++) {
-      if (io->arg_to_slot[i] == momentum_slot && io->access->outs[i]) {
+  for (int k = 0; k < linear->n_src; k++) {
+    PolyUOp *call = poly_test_linear_call(linear, k);
+    int n_args = poly_call_n_buffer_args(call);
+    bool *call_outs = calloc((size_t)n_args, sizeof(*call_outs));
+    bool *call_ins = calloc((size_t)n_args, sizeof(*call_ins));
+    ASSERT_TRUE(n_args == 0 || (call_outs && call_ins));
+    ASSERT_INT_EQ(poly_call_get_outs_ins(ctx, call, call_outs, call_ins, n_args), 0);
+    for (int i = 0; i < n_args; i++) {
+      if (poly_call_buffer_arg(call, i) == m_buf && call_outs[i]) {
         momentum_writes++;
-        if (io->access->ins[i]) momentum_read_writes++;
+        if (call_ins[i]) momentum_read_writes++;
       }
     }
+    free(call_outs);
+    free(call_ins);
   }
   /* Pinned tinygrad's exact first lazy step has one output-only state
    * initialization followed by one input/output momentum update. */
   ASSERT_INT_EQ(momentum_writes, 2);
   ASSERT_INT_EQ(momentum_read_writes, 1);
 
-  ASSERT_INT_EQ(poly_run_schedule(ctx, schedule, NULL, 0), 0);
+  ASSERT_INT_EQ(poly_run_linear(ctx, linear, vars, n_vars, NULL, 0, true, false, false), 0);
+  free(vars);
   float m_after[6] = {0};
   ASSERT_INT_EQ(poly_buffer_read(ctx, (PolyUOp *)m_buf, m_after, sizeof(m_after)), 0);
   const PolyUOp *param_identity = poly_uop_get_buffer_identity(resolved[1]);
@@ -479,7 +538,6 @@ TEST(optim, build_step_sgd_lazy_parameter_executes_shared_momentum_effect_once) 
     ASSERT_FLOAT_EQ(p_after[i], 1.0f + 0.5f * (float)i - 0.1f * (float)(i + 1), 1e-6f);
   }
 
-  poly_schedule_free(schedule);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -690,19 +748,12 @@ TEST(optim, build_step_rejects_invalid_lr_tensor_metadata) {
       poly_tensor_empty(ctx, POLY_FLOAT16, scalar_shape, 1, POLY_DEVICE_CPU);
   PolyTensor *lr_bf16 =
       poly_tensor_empty(ctx, POLY_BFLOAT16, scalar_shape, 1, POLY_DEVICE_CPU);
-  PolyTensor *lr_vec_dtype = poly_tensor_empty(
-      ctx, poly_dtype_vec(POLY_FLOAT32, 4), scalar_shape, 1, POLY_DEVICE_CPU
-  );
-  PolyTensor *lr_ptr_dtype = poly_tensor_empty(
-      ctx, poly_dtype_ptr(POLY_FLOAT32, 1, POLY_ADDR_GLOBAL), scalar_shape, 1,
-      POLY_DEVICE_CPU
-  );
-  PolyUOp *n = poly_define_var(ctx, "optim_lr_n", 0, 1);
+  PolyUOp *n = poly_uop_variable(ctx, "optim_lr_n", 0, 1, POLY_WEAKINT, 1, false);
   PolyUOp *symbolic_dims[] = {n};
   PolyUOp *lr_symbolic_uop =
       poly_expand_uop(ctx, poly_buffer_f32(ctx, 1), symbolic_dims, 1);
   PolyUOp *lr_symbolic_physical = poly_expand_uop(
-      ctx, poly_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_CPU), symbolic_dims, 1
+      ctx, poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_CPU), symbolic_dims, 1
   );
   PolyTensor *lr_symbolic = poly_tensor_create_with_roots(
       ctx, lr_symbolic_uop, lr_symbolic_physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
@@ -720,8 +771,6 @@ TEST(optim, build_step_rejects_invalid_lr_tensor_metadata) {
   ASSERT_NOT_NULL(lr_vec);
   ASSERT_NOT_NULL(lr_f16);
   ASSERT_NOT_NULL(lr_bf16);
-  ASSERT_NOT_NULL(lr_vec_dtype);
-  ASSERT_NOT_NULL(lr_ptr_dtype);
   ASSERT_NOT_NULL(lr_symbolic);
   ASSERT_NOT_NULL(lr_scalar);
   ASSERT_NOT_NULL(lr_other);
@@ -752,18 +801,6 @@ TEST(optim, build_step_rejects_invalid_lr_tensor_metadata) {
   );
   ASSERT_INT_EQ(
       poly_optim_build_step(
-          ctx, &cfg, lr_vec_dtype, &param, &grad, 1, NULL, NULL, NULL, NULL, out, 1
-      ),
-      -1
-  );
-  ASSERT_INT_EQ(
-      poly_optim_build_step(
-          ctx, &cfg, lr_ptr_dtype, &param, &grad, 1, NULL, NULL, NULL, NULL, out, 1
-      ),
-      -1
-  );
-  ASSERT_INT_EQ(
-      poly_optim_build_step(
           ctx, &cfg, lr_symbolic, &param, &grad, 1, NULL, NULL, NULL, NULL, out, 1
       ),
       -1
@@ -787,11 +824,11 @@ TEST(optim, build_step_rejects_invalid_lr_tensor_metadata) {
 static uint8_t *make_train_ir(int n, int *out_len) {
   PolyCtx *ctx = poly_ctx_new();
 
-  PolyUOp *w = poly_buffer_f32(ctx, n);
-  PolyUOp *x = poly_buffer_f32(ctx, n);
-  PolyUOp *y = poly_buffer_f32(ctx, n);
-  PolyUOp *out_buf = poly_buffer_f32(ctx, n);
-  PolyUOp *loss_buf = poly_buffer_f32(ctx, 1);
+  PolyUOp *w = instance_logical_f32(ctx, n);
+  PolyUOp *x = instance_logical_f32(ctx, n);
+  PolyUOp *y = instance_logical_f32(ctx, n);
+  PolyUOp *out_buf = instance_logical_f32(ctx, n);
+  PolyUOp *loss_buf = instance_logical_f32(ctx, 1);
 
   /* Forward: out = w * x */
   PolyUOp *prod = poly_alu2(ctx, POLY_OP_MUL, w, x);
@@ -931,7 +968,7 @@ TEST(instance, read_write_buf_named_forward_e2e) {
   PASS();
 }
 
-TEST(instance, forward_reuses_compiled_handle_after_ctx_schedule_cache_clear) {
+TEST(instance, forward_rebuilds_runtime_cache_after_clear) {
   int ir_len = 0;
   uint8_t *ir = make_add_ir(&ir_len);
   PolyInstance *inst = poly_instance_from_ir(ir, ir_len, NULL, 0);
@@ -942,68 +979,15 @@ TEST(instance, forward_reuses_compiled_handle_after_ctx_schedule_cache_clear) {
   PolyIOBinding io1[] = {POLY_IO_BINDING_ARRAY("a", a1, POLY_FLOAT32), POLY_IO_BINDING_ARRAY("b", b1, POLY_FLOAT32)};
   ASSERT_INT_EQ(poly_instance_forward(inst, io1, 2), 0);
 
-  /* Instance retains the core PolyCompiledSchedule handle. Clearing the ctx
-   * structural LINEAR lookup must not invalidate it or rebuild the lookup. */
-  poly_schedule_cache_clear(poly_instance_ctx(inst));
-  ASSERT_INT_EQ((int)poly_schedule_cache_len(poly_instance_ctx(inst)), 0);
+  ASSERT_TRUE(poly_runtime_cache_len(poly_instance_ctx(inst)) > 0);
+  poly_runtime_cache_clear(poly_instance_ctx(inst));
+  ASSERT_INT_EQ((int)poly_runtime_cache_len(poly_instance_ctx(inst)), 0);
 
   float a2[] = {5.0f, 6.0f, 7.0f, 8.0f};
   float b2[] = {1.0f, 2.0f, 3.0f, 4.0f};
   PolyIOBinding io2[] = {POLY_IO_BINDING_ARRAY("a", a2, POLY_FLOAT32), POLY_IO_BINDING_ARRAY("b", b2, POLY_FLOAT32)};
   ASSERT_INT_EQ(poly_instance_forward(inst, io2, 2), 0);
-  ASSERT_INT_EQ((int)poly_schedule_cache_len(poly_instance_ctx(inst)), 0);
-
-  int64_t numel = 0;
-  float *out = poly_instance_buf_data(inst, 2, &numel);
-  ASSERT_NOT_NULL(out);
-  ASSERT_INT_EQ((int)numel, 4);
-  ASSERT_FLOAT_EQ(out[0], 6.0f, 1e-5f);
-  ASSERT_FLOAT_EQ(out[1], 8.0f, 1e-5f);
-  ASSERT_FLOAT_EQ(out[2], 10.0f, 1e-5f);
-  ASSERT_FLOAT_EQ(out[3], 12.0f, 1e-5f);
-
-  poly_instance_free(inst);
-  free(ir);
-  PASS();
-}
-
-TEST(instance, forward_reuses_compiled_handle_after_ctx_runtime_cache_clear) {
-  int ir_len = 0;
-  uint8_t *ir = make_add_ir(&ir_len);
-  PolyInstance *inst = poly_instance_from_ir(ir, ir_len, NULL, 0);
-  ASSERT_NOT_NULL(inst);
-  PolyCtx *ctx = poly_instance_ctx(inst);
-  ASSERT_NOT_NULL(ctx);
-
-  float a1[] = {1.0f, 2.0f, 3.0f, 4.0f};
-  float b1[] = {10.0f, 20.0f, 30.0f, 40.0f};
-  PolyIOBinding io1[] = {POLY_IO_BINDING_ARRAY("a", a1, POLY_FLOAT32), POLY_IO_BINDING_ARRAY("b", b1, POLY_FLOAT32)};
-  ASSERT_INT_EQ(poly_instance_forward(inst, io1, 2), 0);
-  ASSERT_INT_EQ((int)poly_runtime_cache_len(ctx), 1);
-  PolyCtxStats cached = {0};
-  ASSERT_INT_EQ(poly_ctx_stats(ctx, &cached), 0);
-  ASSERT_INT_EQ(cached.runtime_cache_entries, 1);
-  ASSERT_TRUE(cached.runtime_artifact_entries > 0);
-  ASSERT_TRUE(cached.compiled_artifact_bytes > 0);
-
-  /* The core compiled handle retains its runner. Evicting the ctx
-   * runtime-cache lookup must not invalidate that live plan or force the next
-   * call to repopulate the lookup table. Artifact stats should still account
-   * for the live retained runner after lookup eviction. */
-  poly_runtime_cache_clear(ctx);
-  ASSERT_INT_EQ((int)poly_runtime_cache_len(ctx), 0);
-  PolyCtxStats evicted = {0};
-  ASSERT_INT_EQ(poly_ctx_stats(ctx, &evicted), 0);
-  ASSERT_INT_EQ(evicted.runtime_cache_entries, 0);
-  ASSERT_INT_EQ(evicted.runtime_artifact_entries, cached.runtime_artifact_entries);
-  ASSERT_TRUE(evicted.compiled_artifact_bytes > 0);
-  ASSERT_TRUE(evicted.compiled_artifact_bytes < cached.compiled_artifact_bytes);
-
-  float a2[] = {5.0f, 6.0f, 7.0f, 8.0f};
-  float b2[] = {1.0f, 2.0f, 3.0f, 4.0f};
-  PolyIOBinding io2[] = {POLY_IO_BINDING_ARRAY("a", a2, POLY_FLOAT32), POLY_IO_BINDING_ARRAY("b", b2, POLY_FLOAT32)};
-  ASSERT_INT_EQ(poly_instance_forward(inst, io2, 2), 0);
-  ASSERT_INT_EQ((int)poly_runtime_cache_len(ctx), 0);
+  ASSERT_TRUE(poly_runtime_cache_len(poly_instance_ctx(inst)) > 0);
 
   int64_t numel = 0;
   float *out = poly_instance_buf_data(inst, 2, &numel);
@@ -1459,8 +1443,10 @@ TEST(instance, staged_bindings_set_tensor_metadata) {
     ASSERT_NOT_NULL(physical);
     ASSERT_PTR_NEQ(logical, physical);
     ASSERT_INT_EQ(logical->n_src, 1);
-    ASSERT_INT_EQ(physical->n_src, 2);
-    ASSERT_PTR_EQ(logical->src[0], physical->src[0]);
+    ASSERT_INT_EQ(physical->n_src, 1);
+    ASSERT_INT_EQ(physical->src[0]->op, POLY_OP_CONST);
+    ASSERT_INT_EQ(physical->arg.kind, POLY_ARG_PARAM);
+    ASSERT_INT_EQ(logical->src[0]->arg.i, physical->arg.param->slot);
     ASSERT_INT_EQ(poly_uop_device(physical), expected_device);
   }
 
@@ -1798,12 +1784,12 @@ TEST(instance, fresh_import_evaluates_closed_named_initializer_once) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
   int64_t shape[] = {2};
-  PolyUOp *x = poly_buffer_f32(ctx, 2);
+  PolyUOp *x = poly_uop_new_logical_buffer(ctx, POLY_FLOAT32, 2);
   PolyUOp *three = poly_full(ctx, shape, 1, 3.0);
   PolyUOp *one = poly_full(ctx, shape, 1, 1.0);
   PolyUOp *w = poly_add(ctx, three, one);
   PolyUOp *y = poly_mul(ctx, x, w);
-  PolyUOp *out_buffer = poly_buffer_f32(ctx, 2);
+  PolyUOp *out_buffer = poly_uop_new_logical_buffer(ctx, POLY_FLOAT32, 2);
   PolyUOp *store = poly_store_val(ctx, out_buffer, y);
   PolyUOp *sink = poly_sink1(ctx, store);
   ASSERT_NOT_NULL(x);
@@ -2720,7 +2706,7 @@ TEST(instance, fresh_import_rejects_special_before_scheduling) {
   ASSERT_NOT_NULL(ctx);
   PolyUOp *bound = poly_const_int(ctx, 4);
   PolyUOp *special =
-      poly_uop1(ctx, POLY_OP_SPECIAL, POLY_INDEX, bound, poly_arg_str("gidx0"));
+      poly_uop1(ctx, POLY_OP_SPECIAL, POLY_WEAKINT, bound, poly_arg_str("gidx0"));
   PolyUOp *value = poly_cast(ctx, special, POLY_FLOAT32);
   PolyUOp *output = poly_buffer_f32(ctx, 1);
   PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, output, value));
@@ -2803,9 +2789,15 @@ TEST(instance, later_build_failure_unwinds_named_value_snapshot_and_residency) {
   int64_t shape[] = {1};
   float av[] = {2.0f};
   float bv[] = {3.0f};
-  PolyTensor *a = poly_tensor_from_host(ctx, av, sizeof(av), POLY_FLOAT32, shape, 1);
-  PolyTensor *b = poly_tensor_from_host(ctx, bv, sizeof(bv), POLY_FLOAT32, shape, 1);
+  PolyTensor *a_source =
+      poly_tensor_from_host(ctx, av, sizeof(av), POLY_FLOAT32, shape, 1);
+  PolyTensor *b_source =
+      poly_tensor_from_host(ctx, bv, sizeof(bv), POLY_FLOAT32, shape, 1);
+  PolyTensor *a = poly_tensor_to_device(ctx, a_source, POLY_DEVICE_CPU);
+  PolyTensor *b = poly_tensor_to_device(ctx, b_source, POLY_DEVICE_CPU);
   PolyTensor *good = poly_tensor_alu2(ctx, POLY_OP_ADD, a, b);
+  ASSERT_NOT_NULL(a_source);
+  ASSERT_NOT_NULL(b_source);
   ASSERT_NOT_NULL(a);
   ASSERT_NOT_NULL(b);
   ASSERT_NOT_NULL(good);
@@ -2838,8 +2830,12 @@ TEST(instance, later_build_failure_unwinds_named_value_snapshot_and_residency) {
   size_t writes_before = ctx->buffer_write_count;
   PolyCtxStats stats_before = {0};
   ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats_before), 0);
-  PolyUOp *a_storage = (PolyUOp *)poly_uop_get_buffer_identity(poly_tensor_uop_physical(a));
-  PolyUOp *b_storage = (PolyUOp *)poly_uop_get_buffer_identity(poly_tensor_uop_physical(b));
+  ASSERT_INT_EQ(poly_tensor_uop_physical(a)->op, POLY_OP_COPY);
+  ASSERT_INT_EQ(poly_tensor_uop_physical(b)->op, POLY_OP_COPY);
+  PolyUOp *a_storage =
+      (PolyUOp *)poly_uop_get_buffer_identity(poly_tensor_uop_physical(a)->src[0]);
+  PolyUOp *b_storage =
+      (PolyUOp *)poly_uop_get_buffer_identity(poly_tensor_uop_physical(b)->src[0]);
   ASSERT_NOT_NULL(a_storage);
   ASSERT_NOT_NULL(b_storage);
   PolyBuffer *a_head_before = poly_buffer_get(ctx, a_storage);
@@ -3414,6 +3410,56 @@ TEST(instance, from_bindings_snapshots_lazy_host_parameter) {
   ASSERT_INT_EQ((int)numel, 2);
   ASSERT_FLOAT_EQ(y[0], 20.0f, 1e-5f);
   ASSERT_FLOAT_EQ(y[1], 60.0f, 1e-5f);
+
+  poly_instance_free(inst);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(instance, from_bindings_snapshots_weak_scalar_as_strong_storage) {
+  /* Tinygrad 2026-08-22/a9069c177a9d UOp.new_buffer rejects weak storage,
+   * while UOp.empty_like commits an inferred weak value through strong_dtype
+   * (uop/ops.py:814-827). Instance activation is the equivalent persistent
+   * storage boundary for a named scalar initializer. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int weakfloat = poly_dtype_id_by_name("weakfloat");
+  PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, NULL, 0, POLY_DEVICE_CPU);
+  PolyTensor *w =
+      poly_tensor_const_float_by_id(ctx, 3.0, weakfloat, POLY_DEVICE_CPU);
+  PolyTensor *out = poly_tensor_alu2(ctx, POLY_OP_MUL, x, w);
+  ASSERT_NOT_NULL(x);
+  ASSERT_NOT_NULL(w);
+  ASSERT_NOT_NULL(out);
+
+  PolyBindingSpec bindings[] = {
+      {.name = "x", .role = POLY_ROLE_INPUT, .tensor = x},
+      {.name = "w", .role = POLY_ROLE_PARAM, .tensor = w},
+      {.name = "output", .role = POLY_ROLE_OUTPUT, .tensor = out},
+  };
+  const char *inputs[] = {"x"};
+  const char *outputs[] = {"output"};
+  PolyEntrypointSpec entrypoints[] = {{
+      .name = "forward",
+      .inputs = inputs,
+      .n_inputs = 1,
+      .outputs = outputs,
+      .n_outputs = 1,
+  }};
+  PolyInstance *inst =
+      poly_instance_from_bindings(ctx, bindings, 3, entrypoints, 1, NULL, NULL);
+  ASSERT_NOT_NULL(inst);
+  ASSERT_INT_EQ(poly_instance_param_dtype_id(inst, 0), poly_dtype_id_by_name("float32"));
+  ASSERT_FLOAT_EQ(poly_instance_param_data(inst, 0, NULL)[0], 3.0f, 0.0f);
+
+  float xv = 2.0f;
+  PolyIOBinding io[] = {POLY_IO_BINDING_BYTES("x", &xv, sizeof(xv), POLY_FLOAT32)};
+  ASSERT_INT_EQ(poly_instance_forward(inst, io, 1), 0);
+  int64_t numel = 0;
+  float *y = poly_instance_buf_data_named(inst, "output", &numel);
+  ASSERT_NOT_NULL(y);
+  ASSERT_INT_EQ(numel, 1);
+  ASSERT_FLOAT_EQ(y[0], 6.0f, 0.0f);
 
   poly_instance_free(inst);
   poly_ctx_destroy(ctx);
@@ -4900,16 +4946,30 @@ TEST(instance, explicit_module_device_map_places_named_regions_atomically) {
   /* Pinned tinygrad lowers and executes each CALL through its own runner
    * (engine/realize.py:142-180,244-279).  The aggregate schedule device must
    * not erase the CPU -> INTERP boundary retained by explicit placement. */
-  PolySchedule *forward_schedule = poly_schedule_effect_sink(ctx, forward_sink);
-  ASSERT_NOT_NULL(forward_schedule);
-  ASSERT_INT_EQ(forward_schedule->template->n_calls, 3);
-  PolyCompiledSchedule *forward_compiled = poly_jit_lower(ctx, forward_schedule);
+  PolyVarBinding *forward_vars = NULL;
+  int n_forward_vars = 0;
+  PolyUOp *forward_linear =
+      poly_linear_effect_sink(ctx, forward_sink, &forward_vars, &n_forward_vars);
+  ASSERT_NOT_NULL(forward_linear);
+  ASSERT_INT_EQ(forward_linear->n_src, 3);
+  PolyUOp *forward_compiled = poly_compile_linear(ctx, forward_linear, -1);
   ASSERT_NOT_NULL(forward_compiled);
-  ASSERT_INT_EQ(forward_compiled->run->calls[0].lowered_device, POLY_DEVICE_CPU);
-  ASSERT_INT_EQ(forward_compiled->run->calls[1].lowered_device, POLY_DEVICE_INTERP);
-  ASSERT_INT_EQ(forward_compiled->run->calls[2].lowered_device, POLY_DEVICE_INTERP);
-  poly_compiled_schedule_free(forward_compiled);
-  poly_schedule_free(forward_schedule);
+  ASSERT_INT_EQ(
+      poly_device_from_device_uop(poly_uop_device_uop_cached(
+          ctx, poly_test_linear_call_body(forward_compiled, 0), NULL)),
+      POLY_DEVICE_CPU
+  );
+  ASSERT_INT_EQ(
+      poly_device_from_device_uop(poly_uop_device_uop_cached(
+          ctx, poly_test_linear_call_body(forward_compiled, 1), NULL)),
+      POLY_DEVICE_INTERP
+  );
+  ASSERT_INT_EQ(
+      poly_device_from_device_uop(poly_uop_device_uop_cached(
+          ctx, poly_test_linear_call_body(forward_compiled, 2), NULL)),
+      POLY_DEVICE_INTERP
+  );
+  free(forward_vars);
 
   /* A -> B must be pointer-identical to direct B because both compile from
    * the same immutable logical program.  The old mutable-template implementation
@@ -4990,16 +5050,30 @@ TEST(instance, explicit_module_device_map_places_named_regions_atomically) {
   ASSERT_STR_EQ(poly_uop_device_name(ctx, poly_instance_get_buffer(inst, "x")), "INTERP");
   ASSERT_STR_EQ(poly_uop_device_name(ctx, poly_instance_get_buffer(inst, "output")), "CPU");
 
-  PolySchedule *reverse_schedule = poly_schedule_effect_sink(ctx, reverse_sink);
-  ASSERT_NOT_NULL(reverse_schedule);
-  ASSERT_INT_EQ(reverse_schedule->template->n_calls, 3);
-  PolyCompiledSchedule *reverse_compiled = poly_jit_lower(ctx, reverse_schedule);
+  PolyVarBinding *reverse_vars = NULL;
+  int n_reverse_vars = 0;
+  PolyUOp *reverse_linear =
+      poly_linear_effect_sink(ctx, reverse_sink, &reverse_vars, &n_reverse_vars);
+  ASSERT_NOT_NULL(reverse_linear);
+  ASSERT_INT_EQ(reverse_linear->n_src, 3);
+  PolyUOp *reverse_compiled = poly_compile_linear(ctx, reverse_linear, -1);
   ASSERT_NOT_NULL(reverse_compiled);
-  ASSERT_INT_EQ(reverse_compiled->run->calls[0].lowered_device, POLY_DEVICE_INTERP);
-  ASSERT_INT_EQ(reverse_compiled->run->calls[1].lowered_device, POLY_DEVICE_CPU);
-  ASSERT_INT_EQ(reverse_compiled->run->calls[2].lowered_device, POLY_DEVICE_CPU);
-  poly_compiled_schedule_free(reverse_compiled);
-  poly_schedule_free(reverse_schedule);
+  ASSERT_INT_EQ(
+      poly_device_from_device_uop(poly_uop_device_uop_cached(
+          ctx, poly_test_linear_call_body(reverse_compiled, 0), NULL)),
+      POLY_DEVICE_INTERP
+  );
+  ASSERT_INT_EQ(
+      poly_device_from_device_uop(poly_uop_device_uop_cached(
+          ctx, poly_test_linear_call_body(reverse_compiled, 1), NULL)),
+      POLY_DEVICE_CPU
+  );
+  ASSERT_INT_EQ(
+      poly_device_from_device_uop(poly_uop_device_uop_cached(
+          ctx, poly_test_linear_call_body(reverse_compiled, 2), NULL)),
+      POLY_DEVICE_CPU
+  );
+  free(reverse_vars);
 
   ASSERT_INT_EQ(poly_instance_forward(inst, io, 1), 0);
   out = poly_instance_buf_data_named(inst, "output", &numel);

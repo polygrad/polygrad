@@ -58,7 +58,6 @@ Autograd:
 from polygrad import Tensor
 
 x = Tensor([1.0, 2.0, 3.0])
-x.requires_grad = True
 
 loss = (x * x).sum()
 loss.backward()
@@ -152,20 +151,22 @@ buffer identity for compiled replay.
 ## Training
 
 ```python
-from polygrad import Tensor
-from polygrad.nn import Linear, SGD, get_parameters
+from polygrad import Context, Tensor
+from polygrad.nn import Linear, get_parameters
+from polygrad.nn.optim import SGD
 
 Tensor.manual_seed(42)
 model = Linear(2, 1)
 opt = SGD(get_parameters(model), lr=0.01)
 
-for _ in range(100):
-    opt.zero_grad()
-    x = Tensor([[1.0, 2.0], [3.0, 4.0]])
-    y = Tensor([[5.0], [11.0]])
-    loss = (model(x) - y).square().mean()
-    loss.backward()
-    opt.step()
+with Context(TRAINING=1):
+    for _ in range(100):
+        opt.zero_grad()
+        x = Tensor([[1.0, 2.0], [3.0, 4.0]])
+        y = Tensor([[5.0], [11.0]])
+        loss = (model(x) - y).square().mean()
+        loss.backward()
+        opt.step()
 
 print(loss.item())
 ```
@@ -296,7 +297,6 @@ Autograd:
 
 ```python
 x = Tensor([1.0, 2.0, 3.0])
-x.requires_grad = True
 
 loss = (x * x).sum()
 loss.backward()
@@ -306,8 +306,9 @@ print(x.grad.numpy())
 Training loop:
 
 ```python
-from polygrad import Tensor
-from polygrad.nn import Linear, SGD, get_parameters
+from polygrad import Context, Tensor
+from polygrad.nn import Linear, get_parameters
+from polygrad.nn.optim import SGD
 
 model = Linear(4, 1)
 opt = SGD(get_parameters(model), lr=0.01)
@@ -315,10 +316,11 @@ opt = SGD(get_parameters(model), lr=0.01)
 x = Tensor.randn(8, 4)
 target = Tensor.randn(8, 1)
 
-opt.zero_grad()
-loss = (model(x) - target).square().mean()
-loss.backward()
-opt.step()
+with Context(TRAINING=1):
+    opt.zero_grad()
+    loss = (model(x) - target).square().mean()
+    loss.backward()
+    opt.step()
 ```
 
 Devices and explicit runtime ownership:
@@ -427,7 +429,8 @@ NumPy readback.
 
 ```python
 from polygrad.nn import Linear, LayerNorm, RMSNorm, Embedding
-from polygrad.nn import SGD, Adam, AdamW, get_parameters
+from polygrad.nn import get_parameters
+from polygrad.nn.optim import SGD, Adam, AdamW
 ```
 
 Layers include `Linear`, `LayerNorm`, `RMSNorm`, `Embedding`, `Dropout`,

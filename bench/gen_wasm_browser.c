@@ -6,7 +6,7 @@
  *   bench/browser/wasm/<op>_<N>.wasm
  */
 
-#include "../src/codegen.h"
+#include "../src/codegen/codegen.h"
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>

@@ -280,9 +280,9 @@ TEST(mlp, forward_deterministic) {
 
 TEST(mlp, forward_and_train_replay_stats_plateau) {
   MlpEnvSave pcache = mlp_save_env("POLY_PCACHE");
-  MlpEnvSave scache = mlp_save_env("POLY_SCACHE");
+  MlpEnvSave scache = mlp_save_env("SCACHE");
   setenv("POLY_PCACHE", "1", 1);
-  setenv("POLY_SCACHE", "1", 1);
+  setenv("SCACHE", "1", 1);
 
   PolyInstance *inst = poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
@@ -297,7 +297,6 @@ TEST(mlp, forward_and_train_replay_stats_plateau) {
   ASSERT_INT_EQ(poly_instance_forward(inst, forward_io, 1), 0);
   PolyCtxStats forward_first = {0};
   ASSERT_INT_EQ(poly_ctx_stats(ctx, &forward_first), 0);
-  ASSERT_INT_EQ(forward_first.schedule_cache_entries, 1);
   /* Pinned compile_linear sends every CALL(SINK) through to_program, including
    * PythonRenderer, whose cache is keyed on the raw SINK before compilation
    * (engine/realize.py:244-267; codegen/__init__.py:244-250). INTERP is the
@@ -312,7 +311,6 @@ TEST(mlp, forward_and_train_replay_stats_plateau) {
   ASSERT_INT_EQ(poly_ctx_stats(ctx, &forward_replay), 0);
   ASSERT_INT_EQ(forward_replay.arena_bytes, forward_first.arena_bytes);
   ASSERT_INT_EQ(forward_replay.cse_entries, forward_first.cse_entries);
-  ASSERT_INT_EQ(forward_replay.schedule_cache_entries, forward_first.schedule_cache_entries);
   ASSERT_INT_EQ(forward_replay.to_program_cache_entries, forward_first.to_program_cache_entries);
   ASSERT_INT_EQ(forward_replay.runtime_cache_entries, forward_first.runtime_cache_entries);
   ASSERT_INT_EQ(forward_replay.shape_cache_entries, forward_first.shape_cache_entries);
@@ -328,7 +326,6 @@ TEST(mlp, forward_and_train_replay_stats_plateau) {
 
   PolyCtxStats train_first = {0};
   ASSERT_INT_EQ(poly_ctx_stats(ctx, &train_first), 0);
-  ASSERT_TRUE(train_first.schedule_cache_entries >= forward_first.schedule_cache_entries);
   ASSERT_TRUE(train_first.to_program_cache_entries >= forward_first.to_program_cache_entries);
   ASSERT_TRUE(train_first.runtime_cache_entries >= forward_first.runtime_cache_entries);
 
@@ -341,7 +338,6 @@ TEST(mlp, forward_and_train_replay_stats_plateau) {
   ASSERT_INT_EQ(poly_ctx_stats(ctx, &train_replay), 0);
   ASSERT_INT_EQ(train_replay.arena_bytes, train_first.arena_bytes);
   ASSERT_INT_EQ(train_replay.cse_entries, train_first.cse_entries);
-  ASSERT_INT_EQ(train_replay.schedule_cache_entries, train_first.schedule_cache_entries);
   ASSERT_INT_EQ(train_replay.to_program_cache_entries, train_first.to_program_cache_entries);
   ASSERT_INT_EQ(train_replay.runtime_cache_entries, train_first.runtime_cache_entries);
   ASSERT_INT_EQ(train_replay.shape_cache_entries, train_first.shape_cache_entries);

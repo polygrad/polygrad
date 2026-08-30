@@ -136,6 +136,27 @@ async function runTensorTests(pg) {
     assertClose(await t.toArray(), [1.0, 2.0])
   })
 
+  await test('fp8 host values match current tinygrad', async () => {
+    const values = [-Infinity, -1.5, -0, 0, 0.1, 1, 1.5, 448, Infinity, NaN]
+    const cases = {
+      fp8e4m3: [NaN, -1.5, -0, 0, 0.1015625, 1, 1.5, 448, NaN, NaN],
+      fp8e5m2: [-Infinity, -1.5, -0, 0, 0.09375, 1, 1.5, 448, Infinity, NaN],
+      fp8e4m3fnuz: [NaN, -1.5, 0, 0, 0.1015625, 1, 1.5, 240, NaN, NaN],
+      fp8e5m2fnuz: [NaN, -1.5, 0, 0, 0.09375, 1, 1.5, 448, NaN, NaN]
+    }
+    for (const [dtype, expected] of Object.entries(cases)) {
+      const tensor = new Tensor(values, { dtype })
+      assert(tensor.dtype === dtype, `${dtype}: got ${tensor.dtype}`)
+      assert(countGraphOp(tensor.uop, pg._core.ops.COPY) === 1, `${dtype}: missing creation COPY`)
+      const actual = await tensor.cast('float32').toArray()
+      assert(actual.length === expected.length, `${dtype}: length mismatch`)
+      for (let i = 0; i < actual.length; i++) {
+        if (Number.isNaN(expected[i])) assert(Number.isNaN(actual[i]), `${dtype}[${i}] expected NaN`)
+        else assert(Object.is(actual[i], expected[i]), `${dtype}[${i}] ${actual[i]} != ${expected[i]}`)
+      }
+    }
+  })
+
   await testIf(supportsF16, 'numeric float16 host values preserve pinned bits and direct topology', async () => {
     const values = [1.5, -2.25, 0.5, NaN, Infinity, -Infinity, 65504]
     const inputs = [
@@ -183,10 +204,10 @@ async function runTensorTests(pg) {
   await test('from scalar', async () => {
     const cases = [
       [new Tensor(true), 'bool', true],
-      [new Tensor(42), 'int32', 42],
+      [new Tensor(42), 'weakint', 42],
       [new Tensor(42.0, { dtype: 'float32' }), 'float32', 42],
-      [new Tensor(7, { device: 'cuda' }), 'int32', 7],
-      [new Tensor(1.5, { device: 'cuda' }), 'float32', 1.5]
+      [new Tensor(7, { device: 'cuda' }), 'weakint', 7],
+      [new Tensor(1.5, { device: 'cuda' }), 'weakfloat', 1.5]
     ]
     for (const [tensor, dtype, value] of cases) {
       assertShape(tensor.shape, [])
@@ -212,13 +233,13 @@ async function runTensorTests(pg) {
     assert(t.uop.hasBufferIdentity(), 'empty should be backed by a BUFFER UOp')
     assert(t.uopPhysical, 'empty should have a physical root at construction')
     assert(
-      t.uopLogical.buffer.src[0].key === t.uopPhysical.buffer.src[0].key,
-      'logical and physical empty storage should share one UNIQUE'
+      t.uopLogical.buffer.src[0].op === pg._core.ops.UNIQUE,
+      'logical BUFFER should retain the portable resource identity'
     )
     assert(t.uopLogical.buffer.src.length === 1, 'logical BUFFER should stay device-free')
     assert(
-      t.uopPhysical.buffer.src[1].op === pg._core.ops.DEVICE,
-      'physical BUFFER should carry DEVICE'
+      t.uopPhysical.buffer.src[0].op === pg._core.ops.CONST,
+      'physical BUFFER should encode the same resource slot in ParamArg'
     )
   })
 
@@ -395,15 +416,10 @@ async function runTensorTests(pg) {
     assert(pg.uop, 'runtime should expose pg.uop')
     assertShape(pg.uop.shape(t.uop), [2, 2])
     assert(pg.uop.dtype(t.uop) === 'int32', `expected int32, got ${pg.uop.dtype(t.uop)}`)
-    // Pinned UOp.has_buffer_identity is false for native's lazy host COPY
-    // (uop/ops.py:825-828). WASM bytes already reside in linear memory, so
-    // that backend intentionally imports an immediately identifiable BUFFER.
-    const wasmLinearMemory = pg.core === 'wasm' && pg.device === 'wasm'
-    assert(
-      pg.uop.hasBufferIdentity(t.uop) === wasmLinearMemory,
-      'host import identity should match the runtime storage boundary'
-    )
-    if (!wasmLinearMemory) await t.realize()
+    // Tinygrad 2026-08-22/a9069c177a9d uop/ops.py:828-839 keeps the host
+    // BUFFER behind a lazy COPY on every target, including Wasm.
+    assert(!pg.uop.hasBufferIdentity(t.uop), 'host import should remain a lazy COPY')
+    await t.realize()
     assert(pg.uop.hasBufferIdentity(t.uop), 'realized host tensor should have buffer identity')
     assert(pg.uop.buffer(t.uop), 'pg.uop.buffer should return a UOp')
   })
@@ -664,10 +680,9 @@ async function runTensorTests(pg) {
       const i = pg.uop.range(x.numel(), 0)
       const q = x.index(i).floordiv(y.index(i))
       const r = x.index(i).floormod(y.index(i))
-      return out.index(i).store(q).end(i).sink(
-        out.index(i.add(x.numel())).store(r).end(i),
-        new pg.uop.KernelInfo('custom_signed_div_mod')
-      )
+      return out.index(i).store(q)
+        .group(out.index(i.add(x.numel())).store(r))
+        .end(i).sink(new pg.uop.KernelInfo('custom_signed_div_mod'))
     }
     const x = new Tensor(new Int32Array([-7, -7, 7, 7, -1, 1, 0]), { dtype: 'int32' })
     const y = new Tensor(new Int32Array([3, -3, -3, 3, 4, -4, 3]), { dtype: 'int32' })
@@ -686,11 +701,13 @@ async function runTensorTests(pg) {
       const xv = x.index(i)
       const sameAdd = xv.sub(1).div(xv.add(1))
       const sameMul = xv.mul(2).div(xv.mul(3))
+      assert(pg.uop.dtype(xv.add(1).src[1]) === 'weakfloat', 'float scalar promotion should retain weakfloat')
+      assert(pg.uop.dtype(pg.uop.constant(true)) === 'bool', 'boolean literals should retain bool')
+      assert(pg.uop.dtype(pg.uop.constant(1, 'float32')) === 'float32', 'typed int should convert to float')
+      assert(pg.uop.dtype(pg.uop.constant(1.75, 'int32')) === 'int32', 'typed float should convert to int')
       const s0 = out.index(i).store(sameAdd)
       const s1 = out.index(i.add(x.numel())).store(sameMul)
-      return s0.end(i).sink(
-        s1.end(i), new pg.uop.KernelInfo('custom_numeric_literals')
-      )
+      return s0.group(s1).end(i).sink(new pg.uop.KernelInfo('custom_numeric_literals'))
     }
     const xData = new Float32Array(16)
     for (let i = 0; i < xData.length; i++) xData[i] = i / 10 + 1
@@ -805,195 +822,55 @@ async function runTensorTests(pg) {
     compiled.dispose()
   })
 
-  await test('compile captures customKernel fused reduction and replays after input update', async () => {
-    function summaryKernel(out, a, b) {
-      out = out.flatten(); a = a.flatten(); b = b.flatten()
-      const c = pg.uop.range(2, 0)
-      const r = pg.uop.range(4, 1, pg.uop.AxisType.REDUCE)
-      const offset = c.mul(4).add(r)
-      const term = a.index(offset).mul(b.index(r))
-      const sum = term.sum(r)
-      return out.index(c).store(sum).end(c).sink(
-        new pg.uop.KernelInfo('custom_fused_reduction')
-      )
+  await test('compile captures current custom sum and replays after input update', async () => {
+    function sumKernel(out, a) {
+      out = out.flatten(); a = a.flatten()
+      const r = pg.uop.range(8, 0, pg.uop.AxisType.REDUCE)
+      let acc = out.index(0).set(0.0)
+      acc = acc.index(0).set(acc.after(r).index(0).add(a.index(r)), r)
+      return acc.sink(new pg.uop.KernelInfo({ name: 'custom_sum_8', opts_to_apply: [] }))
     }
     const a = Tensor.empty([8], { dtype: 'float32' })
-    const b = new Tensor([1, 2, 3, 4], { dtype: 'float32' })
     a.copyFrom(new Float32Array([1, 2, 3, 4, 5, 6, 7, 8]))
-    const compiled = await pg.compile((x, y) => {
-      const out = Tensor.empty([2], { dtype: 'float32' })
-      return out.customKernel(x, y, summaryKernel)[0]
-    }, [a, b])
+    const compiled = await pg.compile((x) => {
+      const out = Tensor.empty([1], { dtype: 'float32' })
+      return out.customKernel(x, sumKernel)[0]
+    }, [a])
     assert(compiled.scheduleCount === 1, `expected one captured schedule, got ${compiled.scheduleCount}`)
-    assertClose(await (await compiled.run([a, b])).toArray(), [30, 70])
+    assertClose(await (await compiled.run([a])).toArray(), [36])
     a.copyFrom(new Float32Array([2, 3, 4, 5, 6, 7, 8, 9]))
-    assertClose(await (await compiled.run([a, b])).toArray(), [40, 80])
+    assertClose(await (await compiled.run([a])).toArray(), [44])
     assert(compiled.stats().runCount === 2, 'compiled custom reduction should replay twice')
     compiled.dispose()
   })
 
-  await test('compile captures customKernel multi-output fused reductions', async () => {
-    function summaryKernel(out0, out1, a, b) {
+  await test('compile captures current customKernel multi-output addmul', async () => {
+    function addmulKernel(out0, out1, a, b) {
       out0 = out0.flatten(); out1 = out1.flatten(); a = a.flatten(); b = b.flatten()
-      const c = pg.uop.range(2, 0)
-      const r = pg.uop.range(4, 1, pg.uop.AxisType.REDUCE)
-      const term = a.index(c.mul(4).add(r))
-      const s0 = term.sum(r)
-      const s1 = term.mul(b.index(r)).sum(r)
-      const st0 = out0.index(c).store(s0)
-      const st1 = out1.index(c).store(s1)
-      return st0.end(c).sink(
-        st1.end(c), new pg.uop.KernelInfo('custom_multi_output_reduction')
+      const i = pg.uop.range(4, 0)
+      const st0 = out0.index(i).store(a.index(i).add(b.index(i)))
+      const st1 = out1.index(i).store(a.index(i).mul(b.index(i)))
+      return st0.group(st1).end(i).sink(
+        new pg.uop.KernelInfo('custom_addmul_4')
       )
     }
-    const a = Tensor.empty([8], { dtype: 'float32' })
+    const a = Tensor.empty([4], { dtype: 'float32' })
     const b = new Tensor([1, 2, 3, 4], { dtype: 'float32' })
-    a.copyFrom(new Float32Array([1, 2, 3, 4, 5, 6, 7, 8]))
+    a.copyFrom(new Float32Array([1, 2, 3, 4]))
     const compiled = await pg.compile((x, y) => {
-      const out0 = Tensor.empty([2], { dtype: 'float32' })
-      const out1 = Tensor.empty([2], { dtype: 'float32' })
-      const outs = out0.customKernel(out1, x, y, summaryKernel)
+      const out0 = Tensor.empty([4], { dtype: 'float32' })
+      const out1 = Tensor.empty([4], { dtype: 'float32' })
+      const outs = out0.customKernel(out1, x, y, addmulKernel)
       return [outs[0], outs[1]]
     }, [a, b])
     const got0 = await compiled.run([a, b])
-    assertClose(await got0[0].toArray(), [10, 26])
-    assertClose(await got0[1].toArray(), [30, 70])
-    a.copyFrom(new Float32Array([2, 3, 4, 5, 6, 7, 8, 9]))
+    assertClose(await got0[0].toArray(), [2, 4, 6, 8])
+    assertClose(await got0[1].toArray(), [1, 4, 9, 16])
+    a.copyFrom(new Float32Array([2, 3, 4, 5]))
     const got1 = await compiled.run([a, b])
-    assertClose(await got1[0].toArray(), [14, 30])
-    assertClose(await got1[1].toArray(), [40, 80])
+    assertClose(await got1[0].toArray(), [3, 5, 7, 9])
+    assertClose(await got1[1].toArray(), [2, 6, 12, 20])
     assert(compiled.stats().runCount === 2, 'compiled custom multi-output reduction should replay twice')
-    compiled.dispose()
-  })
-
-  await test('compile captures grouped customKernel compact summary with intercept reductions', async () => {
-    function summaryKernel(out, x, y) {
-      out = out.flatten(); x = x.flatten(); y = y.flatten()
-      const candidates = 2
-      const rows = 128
-      const c = pg.uop.range(candidates, 0)
-      const r = pg.uop.range(rows, 1, pg.uop.AxisType.REDUCE)
-      // Pinned UOp.const requires an explicit dtype. JavaScript has one Number
-      // type, so spell the intended float intercept with the existing CAST.
-      const one = pg.uop.constant(1).cast('float32')
-      const xv = x.index(c.mul(rows).add(r))
-      const yv = y.index(r)
-      const stats = [
-        one.sum(r),
-        xv.sum(r),
-        xv.mul(xv).sum(r),
-        yv.sum(r),
-        xv.mul(yv).sum(r),
-      ]
-      const stores = stats.map((s, stat) => out.index(c.add(stat * candidates)).store(s))
-      return stores[0].group(...stores.slice(1)).end(c).sink(
-        new pg.uop.KernelInfo('custom_compact_summary')
-      )
-    }
-    const makeX = (shift = 0) => Float32Array.from({ length: 256 }, (_, i) => i + 1 + shift)
-    const makeY = () => Float32Array.from({ length: 128 }, (_, i) => i + 1)
-    const expected = (xv, yv) => {
-      const out = new Float32Array(10)
-      out[0] = out[1] = 128
-      for (let c = 0; c < 2; c++) {
-        for (let r = 0; r < 128; r++) {
-          const xval = xv[c * 128 + r]
-          const yval = yv[r]
-          out[c + 2] += xval
-          out[c + 4] += xval * xval
-          out[c + 6] += yval
-          out[c + 8] += xval * yval
-        }
-      }
-      return Array.from(out)
-    }
-    const x = Tensor.empty([256], { dtype: 'float32' })
-    const yData = makeY()
-    const y = new Tensor(yData)
-    const x0 = makeX(0)
-    x.copyFrom(x0)
-    const compiled = await pg.compile((tx, ty) => {
-      const out = Tensor.empty([10], { dtype: 'float32' })
-      return out.customKernel(tx, ty, summaryKernel)[0]
-    }, [x, y])
-    assertClose(await (await compiled.run([x, y])).toArray(), expected(x0, yData))
-    const x1 = makeX(1)
-    x.copyFrom(x1)
-    assertClose(await (await compiled.run([x, y])).toArray(), expected(x1, yData))
-    compiled.dispose()
-  })
-
-  await test('compile captures sym-style customKernel fused summary reductions', async () => {
-    const candidates = 4
-    const rows = 32
-    const terms = 5
-    const statsPerCandidate = 2 + 2 * terms + (terms * (terms + 1)) / 2
-    function summaryKernel(out, x, y) {
-      out = out.flatten(); x = x.flatten(); y = y.flatten()
-      const c = pg.uop.range(candidates, 0)
-      const r = pg.uop.range(rows, 1, pg.uop.AxisType.REDUCE)
-      // Pinned UOp.const requires an explicit dtype. JavaScript has one Number
-      // type, so spell the intended float intercept with the existing CAST.
-      const one = pg.uop.constant(1).cast('float32')
-      const yv = y.index(r)
-      const termAt = (t) => x.index(c.mul(terms).add(t).mul(rows).add(r))
-      const stats = [one.sum(r), yv.sum(r)]
-      for (let t = 0; t < terms; t++) {
-        const tv = termAt(t)
-        stats.push(tv.sum(r))
-        stats.push(tv.mul(yv).sum(r))
-      }
-      for (let i = 0; i < terms; i++) {
-        const ti = termAt(i)
-        for (let j = i; j < terms; j++) stats.push(ti.mul(termAt(j)).sum(r))
-      }
-      const stores = stats.map((s, stat) => out.index(c.add(stat * candidates)).store(s))
-      return stores[0].group(...stores.slice(1)).end(c).sink(
-        new pg.uop.KernelInfo('custom_sym_summary')
-      )
-    }
-    const makeX = (shift = 0) => Float32Array.from(
-      { length: candidates * terms * rows },
-      (_, i) => Math.sin((i + shift) * 0.013) + Math.cos((i % 17) * 0.07) + 0.001 * i
-    )
-    const yData = Float32Array.from({ length: rows }, (_, i) => Math.cos(i * 0.05) - 0.25)
-    const expected = (xv) => {
-      const out = new Float32Array(candidates * statsPerCandidate)
-      for (let c = 0; c < candidates; c++) {
-        out[c] = rows
-        for (let r = 0; r < rows; r++) out[c + candidates] += yData[r]
-        let stat = 2
-        for (let t = 0; t < terms; t++) {
-          for (let r = 0; r < rows; r++) {
-            const tv = xv[(c * terms + t) * rows + r]
-            out[c + stat * candidates] += tv
-            out[c + (stat + 1) * candidates] += tv * yData[r]
-          }
-          stat += 2
-        }
-        for (let i = 0; i < terms; i++) {
-          for (let j = i; j < terms; j++) {
-            for (let r = 0; r < rows; r++) {
-              out[c + stat * candidates] += xv[(c * terms + i) * rows + r] * xv[(c * terms + j) * rows + r]
-            }
-            stat += 1
-          }
-        }
-      }
-      return Array.from(out)
-    }
-    const x = Tensor.empty([candidates * terms * rows], { dtype: 'float32' })
-    const y = new Tensor(yData)
-    const x0 = makeX(0)
-    x.copyFrom(x0)
-    const compiled = await pg.compile((tx, ty) => {
-      const out = Tensor.empty([candidates * statsPerCandidate], { dtype: 'float32' })
-      return out.customKernel(tx, ty, summaryKernel)[0]
-    }, [x, y])
-    assertClose(await (await compiled.run([x, y])).toArray(), expected(x0), 2e-3)
-    const x1 = makeX(3)
-    x.copyFrom(x1)
-    assertClose(await (await compiled.run([x, y])).toArray(), expected(x1), 2e-3)
     compiled.dispose()
   })
 
@@ -1024,59 +901,6 @@ async function runTensorTests(pg) {
     compiled.dispose()
   })
 
-  await test('compile captures staged customKernel outputs feeding another customKernel', async () => {
-    const candidates = 4
-    const rows = 64
-    function termKernel(t0, t1, x, y) {
-      t0 = t0.flatten(); t1 = t1.flatten(); x = x.flatten(); y = y.flatten()
-      const c = pg.uop.range(candidates, 0)
-      const r = pg.uop.range(rows, 1)
-      const idx = c.mul(rows).add(r)
-      const xv = x.index(idx)
-      const yv = y.index(r)
-      const st0 = t0.index(idx).store(xv.add(yv))
-      const st1 = t1.index(idx).store(xv.mul(yv))
-      return st0.group(st1).end(c, r).sink(
-        new pg.uop.KernelInfo({ name: 'custom_stage_terms_4_64', opts_to_apply: [] })
-      )
-    }
-    function summaryKernel(out, t0, t1) {
-      out = out.flatten(); t0 = t0.flatten(); t1 = t1.flatten()
-      const c = pg.uop.range(candidates, 0)
-      const r = pg.uop.range(rows, 1, pg.uop.AxisType.REDUCE)
-      const idx = c.mul(rows).add(r)
-      const s0 = t0.index(idx).sum(r)
-      const s1 = t1.index(idx).sum(r)
-      const st0 = out.index(c).store(s0)
-      const st1 = out.index(c.add(candidates)).store(s1)
-      return st0.group(st1).end(c).sink(
-        new pg.uop.KernelInfo({ name: 'custom_stage_summary_4_64', opts_to_apply: [] })
-      )
-    }
-    const xData = Float32Array.from({ length: candidates * rows }, (_, i) => Math.sin(i * 0.01) + i * 0.001)
-    const yData = Float32Array.from({ length: rows }, (_, i) => Math.cos(i * 0.02) - 0.25)
-    const expected = new Float32Array(candidates * 2)
-    for (let c = 0; c < candidates; c++) {
-      for (let r = 0; r < rows; r++) {
-        const xv = xData[c * rows + r]
-        const yv = yData[r]
-        expected[c] += xv + yv
-        expected[c + candidates] += xv * yv
-      }
-    }
-    const x = new Tensor(xData)
-    const y = new Tensor(yData)
-    const compiled = await pg.compile((tx, ty) => {
-      const t0 = Tensor.empty([candidates * rows], { dtype: 'float32' })
-      const t1 = Tensor.empty([candidates * rows], { dtype: 'float32' })
-      const staged = t0.customKernel(t1, tx, ty, termKernel)
-      const out = Tensor.empty([candidates * 2], { dtype: 'float32' })
-      return out.customKernel(staged[0], staged[1], summaryKernel)[0]
-    }, [x, y])
-    assertClose(await (await compiled.run([x, y])).toArray(), Array.from(expected), 1e-4)
-    compiled.dispose()
-  })
-
   await test('compiled customKernel consumer reads producer output after readback', async () => {
     const n = 1024
     function producerKernel(out, x) {
@@ -1089,9 +913,11 @@ async function runTensorTests(pg) {
     function consumerKernel(out, y) {
       out = out.flatten(); y = y.flatten()
       const r = pg.uop.range(n, 0, pg.uop.AxisType.REDUCE)
-      return out.index(0).store(y.index(r).sum(r)).sink(
-        new pg.uop.KernelInfo({ name: 'custom_consumer_readback_rebind', opts_to_apply: [] })
-      )
+      let acc = out.index(0).set(0.0)
+      acc = acc.index(0).set(acc.after(r).index(0).add(y.index(r)), r)
+      return acc.sink(new pg.uop.KernelInfo({
+        name: 'custom_consumer_readback_rebind', opts_to_apply: []
+      }))
     }
     const x0 = Float32Array.from({ length: n }, (_, i) => i / 17)
     const x1 = Float32Array.from({ length: n }, (_, i) => 10 + i / 11)
@@ -1354,13 +1180,11 @@ async function runTensorTests(pg) {
     const cond = new Tensor([[true, false], [false, true]], { dtype: 'bool' })
     const out = cond.where(0, -Infinity)
 
-    // Pinned tensor.py:769-770 and uop/ops.py:496-508: self.ufix(0)
-    // carries the condition shape, so RESHAPE/EXPAND precede CAST.
+    // Tinygrad 2026-08-22/a9069c177a9d mixin/elementwise.py:422-435 keeps
+    // scalar branches as weak CONSTs; broadcasting is implicit.
     const zeroBranch = out.uop.src[1]
-    assert(zeroBranch.op === pg._core.ops.CAST, 'expected promoted CAST branch')
-    assert(zeroBranch.src[0].op === pg._core.ops.EXPAND, 'expected EXPAND before CAST')
-    assert(zeroBranch.src[0].src[0].op === pg._core.ops.RESHAPE, 'expected RESHAPE before EXPAND')
-    assert(zeroBranch.src[0].src[0].src[0].op === pg._core.ops.CONST, 'expected scalar CONST source')
+    assert(zeroBranch.op === pg._core.ops.CONST, 'expected scalar CONST branch')
+    assert(pg.uop.dtype(zeroBranch) === 'weakfloat', 'expected promoted weakfloat branch')
     const values = await out.toArray()
     assert(values[0] === 0 && values[1] === -Infinity && values[2] === -Infinity && values[3] === 0,
       `unexpected where values ${Array.from(values)}`)
@@ -1406,12 +1230,16 @@ async function runTensorTests(pg) {
 
   await test('sin cos tan match pinned promotion', async () => {
     const integer = new Tensor([0, 1, 2], { dtype: 'int32' })
-    assertClose(
-      await integer.sin().toArray(),
-      [0, Math.sin(1), Math.sin(2)],
-      1e-6
-    )
-    assert(integer.sin().dtype === 'float32', 'integer sin should promote to float32')
+    for (const [name, actual, expected] of [
+      ['sin', integer.sin(), [0, Math.sin(1), Math.sin(2)]],
+      ['cos', integer.cos(), [1, Math.cos(1), Math.cos(2)]],
+      ['tan', integer.tan(), [0, Math.tan(1), Math.tan(2)]]
+    ]) {
+      assert(actual.dtype === 'float32', `integer ${name} should promote to float32`)
+      assertClose(await actual.toArray(), expected, 1e-6)
+    }
+    assert(integer.sin().uop.src[0].op !== pg._core.ops.CAST,
+      'integer SIN should retain its original source without a frontend CAST')
 
     const bool = new Tensor([false, true], { dtype: 'bool' })
     assertClose(await bool.sin().toArray(), [0, Math.sin(1)], 1e-6)
@@ -1474,8 +1302,8 @@ async function runTensorTests(pg) {
     const moved = (await new Tensor([1, 2], { device: 'cpu' }).realize())
       .to('cuda').to('cpu')
     for (const out of [moved.add(3, true), moved.mul(3, true)]) {
-      assert(out.uop.src[0].op === pg._core.ops.EXPAND,
-        'reverse scalar should be the first broadcast operand')
+      assert(out.uop.src[0].op === pg._core.ops.CONST,
+        'reverse scalar should be the first implicit-broadcast operand')
       assert(out.uop.src[1].key === moved.uop.key,
         'nested current occurrence should be the second operand')
     }
@@ -1575,55 +1403,12 @@ async function runTensorTests(pg) {
     const roundedInt = new Tensor(
       new Int32Array([-2, -1, 0, 1, 2]), { dtype: 'int32' }
     ).round()
-    assert(roundedInt.dtype === 'float32', `expected float32, got ${roundedInt.dtype}`)
+    assert(roundedInt.dtype === 'weakfloat', `expected weakfloat, got ${roundedInt.dtype}`)
     assertClose(await roundedInt.toArray(), [-2, -1, 0, 1, 2])
 
     const roundedBool = new Tensor([false, true], { dtype: 'bool' }).round()
-    assert(roundedBool.dtype === 'float32', `expected float32, got ${roundedBool.dtype}`)
+    assert(roundedBool.dtype === 'weakfloat', `expected weakfloat, got ${roundedBool.dtype}`)
     assertClose(await roundedBool.toArray(), [0, 1])
-
-    const topologyInt = (await Tensor.empty(
-      [2, 2], { dtype: 'int32', device: 'cpu' }
-    ).realize()).round()
-    const topologyBool = (await Tensor.empty(
-      [2, 2], { dtype: 'bool', device: 'cpu' }
-    ).realize()).round()
-    assert(countGraphNodes(topologyInt.uop) === 50,
-      'round(int32) should match pinned 50-node topology')
-    assert(countGraphNodes(topologyBool.uop) === 51,
-      'round(bool) should match pinned 51-node topology')
-    assert(countGraphOp(topologyInt.uop, pg._core.ops.CAST) === 2,
-      'round(int32) should not cast an integer spelling of pinned 2.0')
-    assert(countGraphOp(topologyBool.uop, pg._core.ops.CAST) === 3,
-      'round(bool) should not add integer promotion before pinned 2.0')
-    assert(countGraphOp(topologyInt.uop, pg._core.ops.EXPAND) === 6,
-      'round(int32) should retain pinned scalar broadcasts')
-    assert(countGraphOp(topologyBool.uop, pg._core.ops.EXPAND) === 6,
-      'round(bool) should retain pinned scalar broadcasts')
-    const floatingTopologyDtypes = ['float32', 'bfloat16']
-    if (supportsF16) floatingTopologyDtypes.push('float16')
-    if (supportsF64) floatingTopologyDtypes.push('float64')
-    for (const dtype of floatingTopologyDtypes) {
-      const topology = (await Tensor.empty(
-        [2, 2], { dtype, device: 'cpu' }
-      ).realize()).round()
-      assert(countGraphNodes(topology.uop) === 48,
-        `round(${dtype}) should match pinned 48-node topology`)
-      assert(countGraphOp(topology.uop, pg._core.ops.CAST) === 0,
-        `round(${dtype}) should keep scalar literals in the receiver dtype`)
-    }
-    let intLiteralPath = topologyInt.uop
-    for (const index of [0, 0, 1, 0, 0, 0, 1, 0]) {
-      intLiteralPath = intLiteralPath.src[index]
-    }
-    assert(intLiteralPath.op === pg._core.ops.EXPAND,
-      'round(int32) pinned 2.0 path should be a direct float EXPAND')
-    let boolLiteralPath = topologyBool.uop
-    for (const index of [0, 0, 1, 0, 0, 0, 0, 0]) {
-      boolLiteralPath = boolLiteralPath.src[index]
-    }
-    assert(boolLiteralPath.op === pg._core.ops.TRUNC,
-      'round(bool) path should reach TRUNC without an extra int32 CAST')
 
     // Pinned mixin/elementwise.py:596-604 independently gates each sign.
     const infinityValues = new Tensor(
@@ -1874,6 +1659,13 @@ async function runTensorTests(pg) {
     const moved = Tensor.arange(12).reshape(3, 4).pad([[-1, 2], [1, -1]])
     assertShape(moved.shape, [4, 4])
     assertClose(await moved.toArray(), [0, 4, 5, 6, 0, 8, 9, 10, 0, 0, 0, 0, 0, 0, 0, 0])
+
+    const promoted = new Tensor([1, 2], { dtype: 'int32' }).pad([[1, 1]], 'constant', 5.5)
+    assert(promoted.dtype === 'weakfloat', `expected weakfloat, got ${promoted.dtype}`)
+    assertClose(await promoted.toArray(), [5.5, 1, 2, 5.5])
+    const boolFill = new Tensor([1, 2], { dtype: 'int32' }).pad([[1, 1]], 'constant', true)
+    assert(boolFill.dtype === 'int32', `expected int32, got ${boolFill.dtype}`)
+    assertClose(await boolFill.toArray(), [1, 1, 2, 1])
   })
 
   await test('pad readback preserves non-float dtype', async () => {
@@ -1908,7 +1700,7 @@ async function runTensorTests(pg) {
   await test('oneHot matches tinygrad probe', async () => {
     const out = new Tensor(new Int32Array([0, 2, 1]), { dtype: 'int32' }).oneHot(4)
     assertShape(out.shape, [3, 4])
-    assert(out.dtype === 'int32', `expected int32, got ${out.dtype}`)
+    assert(out.dtype === 'weakint', `expected weakint, got ${out.dtype}`)
     assertClose(await out.toArray(), [1, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0])
   })
 
@@ -2106,6 +1898,26 @@ async function runTensorTests(pg) {
     assert(narrow.shape.length === 1 && narrow.shape[0] === 8, 'narrow bitcast shape mismatch')
     assertClose(await wide.toArray(), [0x01010101, 0x01010101], 0)
     assertClose(await narrow.toArray(), [1, 0, 0, 0, 1, 0, 0, 0], 0)
+    let invalid = null
+    try { Tensor.empty([3], { dtype: 'uint8' }).bitcast('uint32') } catch (err) { invalid = err }
+    assert(invalid && /unsupported size in bitcast/.test(invalid.message),
+      'statically non-divisible bitcast must fail in the C Tensor boundary')
+    let weak = null
+    try { Tensor.full([1], 1.5, { buffer: false }).bitcast('uint32') } catch (err) { weak = err }
+    assert(weak && /bitcast requires concrete dtypes/.test(weak.message),
+      'weak bitcast must fail at the Tensor API boundary')
+  })
+
+  await test('bitcast view assign matches current tinygrad', async () => {
+    const a = new Tensor([1, 2, 3, 4], { dtype: 'float32' })
+    await a.realize()
+    const view = a.bitcast('uint32')
+    view.assign(new Tensor(
+      [0x40800000, 0x40400000, 0x40000000, 0x3f800000],
+      { dtype: 'uint32' }
+    ))
+    await view.realize()
+    assertClose(await a.toArray(), [4, 3, 2, 1], 0)
   })
 
   await testIf(supportsF16, 'half and double convenience', async () => {
@@ -2515,7 +2327,7 @@ async function runTensorTests(pg) {
     const mixedB = new Tensor([0.5, -1, 2, 0.25, -0.75, 3]).reshape(3, 2)
     const mixed = mixedA.dot(mixedB)
     assert(mixed.dtype === 'float32', `expected mixed dot float32, got ${mixed.dtype}`)
-    assert(mixed.uop.op === mixed.uop.ffi.__polygradOps.RESHAPE, 'expected mixed dot RESHAPE')
+    assert(mixed.uop.op === mixed.uop.ffi.__polygradOps.REDUCE, 'expected mixed dot REDUCE')
     assertClose(await mixed.toArray(), [-3.75, -0.25, 3.125, -7.4375], 1e-5)
   })
 
@@ -3316,7 +3128,40 @@ async function runTensorTests(pg) {
 
   await test('full', async () => {
     const t = Tensor.full([3], 7)
+    assert(t.dtype === 'int32', `buffered integer full should commit int32 storage, got ${t.dtype}`)
+    assert(t.uop.op === pg._core.ops.AFTER, 'buffered full should produce AFTER')
+    assert(t.uop.src[0].op === pg._core.ops.BUFFER, 'buffered full should own BUFFER storage')
+    assert(t.uop.src[1].op === pg._core.ops.STORE, 'buffered full should contain STORE')
+    assert(t.uop.src[1].src[0].key === t.uop.src[0].key, 'STORE must target the same BUFFER')
+    assert(t.uop.src[1].src[1].op === pg._core.ops.EXPAND, 'STORE value should stay EXPAND')
     assertClose(await t.toArray(), [7, 7, 7])
+
+    const raw = Tensor.full([3], 7, { buffer: false })
+    assert(raw.dtype === 'weakint', `unbuffered integer full should stay weakint, got ${raw.dtype}`)
+    assert(raw.uop.op === pg._core.ops.EXPAND, 'unbuffered full should stay EXPAND')
+
+    // Current ElementwiseMixin._broadcasted promotes shaped weak constants
+    // through const_like(root), rebuilding each as direct CONST -> EXPAND
+    // (mixin/elementwise.py:19-29, uop/ops.py:581-583).
+    const zeroBroadcast = Tensor.full([0, 3], 1.5, { buffer: false })
+      .add(Tensor.full([1, 3], 2.5, { buffer: false }))
+    assertShape(zeroBroadcast.shape, [0, 3])
+    assert(zeroBroadcast.uop.op === pg._core.ops.ADD, 'weak full add should stay ADD')
+    for (const source of zeroBroadcast.uop.src) {
+      assert(source.op === pg._core.ops.EXPAND, 'promoted weak full should be direct EXPAND')
+      assert(source.src[0].op === pg._core.ops.CONST, 'promoted weak full should drop old movement chain')
+    }
+    assertClose(await zeroBroadcast.toArray(), [])
+    const nonempty = Tensor.full([2, 3], 1.5, { buffer: false })
+      .add(Tensor.full([1, 3], 2.5, { buffer: false }))
+    assertClose(await nonempty.toArray(), [4, 4, 4, 4, 4, 4])
+
+    let weakFullRejected = false
+    try { Tensor.full([2], 1.0, { dtype: 'weakfloat' }) } catch (_) { weakFullRejected = true }
+    assert(weakFullRejected, 'explicit weak full storage must be rejected')
+    let weakEmptyRejected = false
+    try { Tensor.empty([2], { dtype: 'weakfloat' }) } catch (_) { weakEmptyRejected = true }
+    assert(weakEmptyRejected, 'explicit weak empty storage must be rejected')
   })
 
   await test('arange', async () => {
@@ -3352,8 +3197,8 @@ async function runTensorTests(pg) {
   await test('internal scalars store typed current roots', async () => {
     const cases = [
       [Tensor.empty([2], { dtype: 'bool' }), true, 'bool'],
-      [Tensor.empty([2], { dtype: 'int32' }), 7, 'int32'],
-      [Tensor.empty([2], { dtype: 'float32' }), 1, 'float32']
+      [Tensor.empty([2], { dtype: 'int32' }), 7, 'weakint'],
+      [Tensor.empty([2], { dtype: 'float32' }), 1, 'weakint']
     ]
     for (const [source, value, dtype] of cases) {
       const scalar = source._ensureTensor(value)
@@ -3701,6 +3546,33 @@ async function runTensorTests(pg) {
     assertClose(await r.toArray(), [2, 3, 4])
   })
 
+  await test('pow scalar promotion and validation match tinygrad', async () => {
+    const t = new Tensor([2, 3], { dtype: 'int32' })
+    // JavaScript erases the lexical distinction between 2 and 2.0.
+    const exponent = new Tensor(2.0, { dtype: 'weakfloat' })
+    const promoted = t.pow(exponent)
+    assert(promoted.dtype === 'weakfloat', `expected weakfloat, got ${promoted.dtype}`)
+    assert(promoted.uop.op === pg._core.ops.POW, 'promoted pow should remain a raw POW')
+    assertClose(await promoted.toArray(), [4, 9])
+
+    const reverse = t.pow(exponent, true)
+    assert(reverse.dtype === 'weakfloat', `expected reverse weakfloat, got ${reverse.dtype}`)
+    assertClose(await reverse.toArray(), [4, 8])
+
+    let rejected = false
+    try { t.pow(-1) } catch (e) { rejected = e.message.includes('base needs to be float') }
+    assert(rejected, 'negative integer scalar exponent should reject an integer common dtype')
+
+    const tensorExponent = t.pow(new Tensor([-1, -2], { dtype: 'int32' }))
+    assert(tensorExponent.dtype === 'int32', `expected int32, got ${tensorExponent.dtype}`)
+    assert(tensorExponent.uop.op === pg._core.ops.POW, 'integer Tensor pow should remain raw POW')
+    // Tinygrad 2026-08-22/a9069c177a9d accepts the raw integer graph, while
+    // its xpow lowering cannot STORE the float result into integer storage.
+    // Backend compilation failure is not a portable Tensor API contract.
+    const strong = t.cast('float32').pow(new Tensor([-1, -2], { dtype: 'float32' }))
+    assertClose(await strong.toArray(), [0.5, 1 / 9])
+  })
+
   await test('reciprocal', async () => {
     const t = new Tensor([2, 4, 5])
     const r = t.reciprocal()
@@ -3867,7 +3739,7 @@ async function runTensorTests(pg) {
     const out = mod.call(new Tensor(input).reshape(2, 3, 2, 2))
     assertShape(out.shape, [2, 3, 2, 2])
     assert(out.uop.op === pg._core.ops.PERMUTE, 'LayerNorm2d root must be PERMUTE')
-    assert(countGraphOp(out.uop, pg._core.ops.PERMUTE) === 2, 'expected two PERMUTEs')
+    assert(countGraphOp(out.uop, pg._core.ops.PERMUTE) === 4, 'expected four PERMUTEs')
     assert(countGraphOp(out.uop, pg._core.ops.REDUCE) === 2, 'expected two REDUCE nodes')
     const values = await out.toArray()
     for (let n = 0; n < 2; n++) for (let h = 0; h < 2; h++) for (let w = 0; w < 2; w++) {

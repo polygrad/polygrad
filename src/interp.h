@@ -22,12 +22,12 @@ extern "C" {
  * lin/n_lin: linearized UOps (output of poly_linearize, includes
  *            full_rewrite_to_sink decompositions).
  * args:      buffer pointers, indexed by PARAM arg.i, followed by
- *            int* pointers for DEFINE_VAR params.
+ *            int* pointers for ALU PARAMs.
  * n_args:    total number of args (buffer params + var params).
  *
  * Returns 0 on success, <0 on error.
  */
-int poly_interp_eval(PolyUOp **lin, int n_lin, void **args, int n_args);
+int poly_interp_eval(PolyCtx *ctx, PolyUOp **lin, int n_lin, void **args, int n_args);
 
 #ifdef __cplusplus
 }

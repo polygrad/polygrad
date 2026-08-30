@@ -10,8 +10,9 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'py'))
 
-from polygrad import Tensor
-from polygrad.nn import Linear, SGD, get_parameters
+from polygrad import Context, Tensor
+from polygrad.nn import Linear, get_parameters
+from polygrad.nn.optim import SGD
 import numpy as np
 
 # ── Configuration ──────────────────────────────────────────────────────
@@ -27,6 +28,7 @@ LR = 0.001
 N_WARMUP = 1
 
 
+@Context(TRAINING=1)
 def run_config(cfg):
     dims = cfg['dims']
     batch = cfg['batch']
@@ -118,6 +120,6 @@ for cfg in CONFIGS:
     print()
 
 print(f"{'='*70}")
-print(f"Schedule caching eliminates poly_schedule_v2() on cache hit.")
+print("Compiled PROGRAM and runtime caches remove repeated lowering on cache hits.")
 print(f"Remaining warm time is pure kernel execution (scalar C loops).")
 print(f"{'='*70}")

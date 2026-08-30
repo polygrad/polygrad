@@ -100,7 +100,7 @@ static PolyTensor *fusion_build_case(
       int64_t x_shape[] = {3, 4};
       PolyTensor *x = fusion_host_f32(ctx, x_data, x_shape, 2, device);
       if (!x) return NULL;
-      PolyTensor *p = poly_tensor_pad_value(
+      PolyTensor *p = poly_tensor_pad_value_float(
           ctx, x, (int64_t[][2]){{1, 0}, {0, 1}}, 2, 0.0
       );
       PolyTensor *s = p ? poly_tensor_shrink(
@@ -108,9 +108,9 @@ static PolyTensor *fusion_build_case(
                           )
                         : NULL;
       PolyTensor *scale =
-          poly_tensor_full_float_by_id(ctx, x_shape, 2, 0.25, f32, device);
+          poly_tensor_full_float_by_id(ctx, x_shape, 2, 0.25, f32, device, true, false);
       PolyTensor *one =
-          poly_tensor_full_float_by_id(ctx, x_shape, 2, 1.0, f32, device);
+          poly_tensor_full_float_by_id(ctx, x_shape, 2, 1.0, f32, device, true, false);
       PolyTensor *scaled =
           (s && scale) ? poly_tensor_alu2(ctx, POLY_OP_MUL, s, scale) : NULL;
       PolyTensor *y =
@@ -129,9 +129,9 @@ static PolyTensor *fusion_build_case(
       int64_t shape[] = {4, 4};
       PolyTensor *x = fusion_host_f32(ctx, x_data, shape, 2, device);
       PolyTensor *seven =
-          poly_tensor_full_float_by_id(ctx, shape, 2, 7.0, f32, device);
+          poly_tensor_full_float_by_id(ctx, shape, 2, 7.0, f32, device, true, false);
       PolyTensor *neg =
-          poly_tensor_full_float_by_id(ctx, shape, 2, -2.0, f32, device);
+          poly_tensor_full_float_by_id(ctx, shape, 2, -2.0, f32, device, true, false);
       PolyTensor *mask =
           (x && seven) ? poly_tensor_alu2(ctx, POLY_OP_CMPLT, x, seven) : NULL;
       PolyTensor *sel =
@@ -145,7 +145,7 @@ static PolyTensor *fusion_build_case(
       int64_t shape[] = {3, 3};
       PolyTensor *x = fusion_host_f32(ctx, x_data, shape, 2, device);
       PolyTensor *one =
-          poly_tensor_full_float_by_id(ctx, shape, 2, 1.0, f32, device);
+          poly_tensor_full_float_by_id(ctx, shape, 2, 1.0, f32, device, true, false);
       PolyTensor *y =
           (x && one) ? poly_tensor_alu2(ctx, POLY_OP_ADD, x, one) : NULL;
       PolyTensor *square = y ? poly_tensor_alu2(ctx, POLY_OP_MUL, y, y) : NULL;
@@ -159,7 +159,7 @@ static PolyTensor *fusion_build_case(
       int64_t shape[] = {3, 3};
       PolyTensor *x = fusion_host_f32(ctx, x_data, shape, 2, device);
       PolyTensor *one =
-          poly_tensor_full_float_by_id(ctx, shape, 2, 1.0, f32, device);
+          poly_tensor_full_float_by_id(ctx, shape, 2, 1.0, f32, device, true, false);
       PolyTensor *mid =
           (x && one) ? poly_tensor_alu2(ctx, POLY_OP_ADD, x, one) : NULL;
       PolyTensor *mid_t = mid ? fusion_realize_value(ctx, mid) : NULL;

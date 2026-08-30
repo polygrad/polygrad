@@ -27,8 +27,9 @@ from pathlib import Path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'py'))
 
 import numpy as np
-from polygrad import Tensor
-from polygrad.nn import Linear, SGD, get_parameters
+from polygrad import Context, Tensor
+from polygrad.nn import Linear, get_parameters
+from polygrad.nn.optim import SGD
 
 # -- Optional baselines -------------------------------------------------------
 
@@ -149,7 +150,7 @@ def pg_backward(n, iters):
     np.random.seed(42)
     a_np = np.random.randn(n).astype(np.float32)
     def run():
-        a = Tensor(a_np, requires_grad=True)
+        a = Tensor(a_np)
         loss = (a * a).sum()
         loss.backward()
         a.grad.numpy()
@@ -157,6 +158,7 @@ def pg_backward(n, iters):
         run()
     return _time_iters(run, iters)
 
+@Context(TRAINING=1)
 def pg_mlp_train(iters):
     Tensor.manual_seed(42)
     np.random.seed(42)
@@ -168,7 +170,7 @@ def pg_mlp_train(iters):
     y_np = np.random.randn(4, 1).astype(np.float32)
     def run():
         opt.zero_grad()
-        x = Tensor(x_np, requires_grad=False)
+        x = Tensor(x_np)
         h = l1(x).relu()
         pred = l2(h)
         loss = ((pred - Tensor(y_np)) * (pred - Tensor(y_np))).sum()
@@ -311,7 +313,7 @@ def check_correct(name, n):
             pg = ((a + b) * (a - b) + a * b).numpy()
             ref = (a_np + b_np) * (a_np - b_np) + a_np * b_np
         elif name == 'backward':
-            a = Tensor(a_np, requires_grad=True)
+            a = Tensor(a_np)
             loss = (a * a).sum()
             loss.backward()
             pg = a.grad.numpy()

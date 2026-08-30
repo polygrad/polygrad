@@ -41,7 +41,7 @@ def test_function_tuple_outputs_share_one_function_and_backward():
     def pair(a):
         return a + 1.0, a * 2.0
 
-    x = Tensor([3.0, 4.0]).realize().requires_grad_(True)
+    x = Tensor([3.0, 4.0]).realize()
     first, second = pair(x)
     assert first.uop.src[0].raw == second.uop.src[0].raw
     counts = _op_counts(first, second)
@@ -59,15 +59,13 @@ def test_function_bound_state_backward_matches_pinned_values():
         def __init__(self):
             self.weight = Tensor([[2.0, -1.0], [0.5, 3.0]]).realize()
             self.bias = Tensor([0.25, -0.5]).realize()
-            self.weight.requires_grad_(True)
-            self.bias.requires_grad_(True)
 
         @function
         def __call__(self, x):
             return x @ self.weight + self.bias
 
     model = Affine()
-    x = Tensor([[1.0, 2.0], [-3.0, 0.5]]).realize().requires_grad_(True)
+    x = Tensor([[1.0, 2.0], [-3.0, 0.5]]).realize()
     out = model(x)
     np.testing.assert_array_equal(out.numpy(), [[3.25, 4.5], [-5.5, 4.0]])
     loss = out.square().mean().backward()
@@ -126,6 +124,17 @@ def test_function_precompile_executes_multiple_outputs_in_dependency_order():
     assert counts['GETTUPLE'] == 2
     np.testing.assert_array_equal(first.numpy(), [3.0, 4.0])
     np.testing.assert_array_equal(second.numpy(), [4.0, 6.0])
+
+
+def test_function_nested_precompile_flattens_recursive_linear_calls():
+    # Current tinygrad schedule/__init__.py:100-114,181-188 recursively
+    # resolves CALL(LINEAR, ...) and flattens the resulting schedule.
+    @function(precompile=True)
+    def twice(x):
+        return x * 2.0
+
+    out = twice(twice(Tensor([1.0, 2.0, 3.0]))) + 1.0
+    np.testing.assert_array_equal(out.numpy(), [5.0, 9.0, 13.0])
 
 
 def test_function_precompile_backward_flag_does_not_change_forward():

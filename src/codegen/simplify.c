@@ -1,5 +1,5 @@
 /*
- * simplify.c -- port of tinygrad/codegen/simplify.py
+ * codegen/simplify.c -- port of tinygrad/codegen/simplify.py
  */
 
 #include "simplify.h"
@@ -7,118 +7,105 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "pat.h"
+#include "uop/upat.h"
 #include "polygrad.h"
+#include "bigint.h"
 #include "ctx.h"
+#include "schedule/indexing.h"
 #include "tensor.h"
 #include "utils.h"
 
-/* simplify.py: flatten_range */
-
-int range_start_for_op(PolyOps op) {
-  switch (op) {
-  case POLY_OP_STAGE:
-    return 1;
-  case POLY_OP_REDUCE:
-    return 1;
-  case POLY_OP_STORE:
-    return 2;
-  case POLY_OP_WMMA:
-    return 3;
-  case POLY_OP_END:
-    return 1;
-  case POLY_OP_CALL:
-    return 1;
-  case POLY_OP_COPY:
-    return 2;
-  case POLY_OP_BUFFER_VIEW:
-    return 1;
-  default:
-    return -1;
-  }
-}
-
-static int collect_unique_ranges(
-    PolyCtx *ctx,
-    PolyUOp **rngs,
-    int n_rngs,
-    PolyUOp **out,
-    int max_out
-) {
-  if (!rngs || n_rngs <= 0 || max_out <= 0) return 0;
-  PolyUOp *tmp_sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, rngs, n_rngs, poly_arg_none());
-  int n_topo = 0;
-  PolyUOp **topo = poly_toposort_alloc(ctx, tmp_sink, &n_topo);
-  int n_out = 0;
-  for (int i = 0; i < n_topo && n_out < max_out; i++) {
-    if (topo[i]->op != POLY_OP_RANGE) continue;
-    bool dup = false;
-    for (int j = 0; j < n_out; j++)
-      if (out[j] == topo[i]) {
-        dup = true;
-        break;
-      }
-    if (!dup) out[n_out++] = topo[i];
-  }
-  poly_toposort_free(topo);
-  return n_out;
-}
-
+/* tinygrad@2026-08-22/a9069c177a9d codegen/simplify.py:flatten_range. */
 static PolyUOp *flatten_range(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   (void)b;
-  int off = range_start_for_op(root->op);
+  int off = poly_range_start(root->op);
   if (off < 0 || root->n_src <= off) return NULL;
   int n_rngs = root->n_src - off;
-  if (n_rngs <= 0) return NULL;
-
-  PolyUOp *flat_rngs[POLY_MAX_DIMS];
-  int n_flat = collect_unique_ranges(ctx, &root->src[off], n_rngs, flat_rngs, POLY_MAX_DIMS);
-  if (n_flat <= 0) return NULL;
-
-  bool same = (n_flat == n_rngs);
-  if (same) {
-    for (int i = 0; i < n_flat; i++) {
-      if (flat_rngs[i] != root->src[off + i]) {
-        same = false;
-        break;
-      }
-    }
+  PolyUOp **ordinary = malloc((size_t)n_rngs * sizeof(*ordinary));
+  PolyUOp **backedge = malloc((size_t)n_rngs * sizeof(*backedge));
+  if (!ordinary || !backedge) {
+    free(ordinary);
+    free(backedge);
+    return NULL;
   }
-  if (same) return NULL;
+  int n_ordinary = 0, n_backedge = 0;
+  for (int i = off; i < root->n_src; i++) {
+    PolyUOp *u = root->src[i];
+    if (poly_dtype_eq(u->dtype, POLY_VOID) || poly_dtype_eq(u->dtype, POLY_BOOL))
+      backedge[n_backedge++] = u;
+    else
+      ordinary[n_ordinary++] = u;
+  }
 
-  PolyUOp *new_src[POLY_MAX_DIMS + 8];
-  int n_new = 0;
-  for (int i = 0; i < off; i++)
-    new_src[n_new++] = root->src[i];
-  for (int i = 0; i < n_flat; i++)
-    new_src[n_new++] = flat_rngs[i];
-  return (root->tag != 0 || root->tag_arg.kind != POLY_ARG_NONE)
-             ? poly_uop_tagged_arg(
-                   ctx, root->op, root->dtype, new_src, n_new, root->arg, root->tag, root->tag_arg
-               )
-             : poly_uop(ctx, root->op, root->dtype, new_src, n_new, root->arg);
+  PolyUOp **flat = NULL;
+  int n_flat = 0;
+  if (n_ordinary > 0) {
+    PolyUOp *sink = poly_uop(
+        ctx, POLY_OP_SINK, POLY_VOID, ordinary, n_ordinary, poly_arg_none());
+    int n_topo = 0;
+    PolyUOp **topo = sink ? poly_toposort_alloc(ctx, sink, &n_topo) : NULL;
+    flat = n_topo > 0 ? malloc((size_t)n_topo * sizeof(*flat)) : NULL;
+    if (!topo || n_topo <= 0 || !flat) {
+      poly_toposort_free(topo);
+      free(flat);
+      free(ordinary);
+      free(backedge);
+      return NULL;
+    }
+    n_flat = poly_uop_ranges(ctx, sink, flat, n_topo);
+    poly_toposort_free(topo);
+  }
+
+  int n_new = off + n_flat + n_backedge;
+  PolyUOp **new_src = malloc((size_t)n_new * sizeof(*new_src));
+  if (!new_src) {
+    free(flat);
+    free(ordinary);
+    free(backedge);
+    return NULL;
+  }
+  int at = 0;
+  for (int i = 0; i < off; i++) new_src[at++] = root->src[i];
+  for (int i = 0; i < n_flat; i++) new_src[at++] = flat[i];
+  for (int i = 0; i < n_backedge; i++) new_src[at++] = backedge[i];
+  bool same = n_new == root->n_src;
+  for (int i = 0; same && i < n_new; i++) same = new_src[i] == root->src[i];
+  PolyUOp *ret = NULL;
+  if (!same)
+    ret = (root->tag != 0 || root->tag_arg.kind != POLY_ARG_NONE)
+              ? poly_uop_tagged_arg(
+                    ctx, root->op, root->dtype, new_src, n_new, root->arg,
+                    root->tag, root->tag_arg)
+              : poly_uop(ctx, root->op, root->dtype, new_src, n_new, root->arg);
+  free(new_src);
+  free(flat);
+  free(ordinary);
+  free(backedge);
+  return ret;
 }
 
 static _Thread_local PolyPatternMatcher *g_pm_flatten_range = NULL;
 PolyPatternMatcher *poly_pm_flatten_range(void) {
   if (g_pm_flatten_range) return g_pm_flatten_range;
-  PolyOpSet ops = {{0, 0}};
-  ops = poly_opset_add(ops, POLY_OP_REDUCE);
-  ops = poly_opset_add(ops, POLY_OP_STORE);
-  ops = poly_opset_add(ops, POLY_OP_END);
+  PolyOpSet ops = poly_opset_add(
+      poly_opset_add((PolyOpSet){{0, 0}}, POLY_OP_REDUCE), POLY_OP_END);
   PolyRule rules[] = {
-      {poly_pat_allow_any_len(poly_pat_ops(ops, NULL, 0, NULL)), flatten_range},
+      {poly_upat_allow_any_len(poly_upat_ops(ops, NULL, 0, NULL)), flatten_range},
   };
   g_pm_flatten_range =
       poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
   return g_pm_flatten_range;
 }
 
-/* simplify.py: count_divmod / simplify_merge_adjacent / pm_simplify_ranges */
+/* tinygrad@2026-08-22/a9069c177a9d codegen/simplify.py:count_divmod. */
 
 static int count_divmod(PolyCtx *ctx, PolyUOp *u) {
   int n_topo = 0;
   PolyUOp **topo = poly_toposort_alloc(ctx, u, &n_topo);
+  if (!topo || n_topo <= 0) {
+    poly_toposort_free(topo);
+    return -1;
+  }
   int n = 0;
   for (int i = 0; i < n_topo; i++) {
     if (topo[i]->op == POLY_OP_FLOORDIV || topo[i]->op == POLY_OP_FLOORMOD) n++;
@@ -127,56 +114,287 @@ static int count_divmod(PolyCtx *ctx, PolyUOp *u) {
   return n;
 }
 
-static bool is_const_bound_range(PolyUOp *r, int64_t *bound) {
-  if (!r || r->op != POLY_OP_RANGE || r->n_src <= 0 || r->src[0]->op != POLY_OP_CONST) return false;
-  if (r->src[0]->arg.kind != POLY_ARG_INT) return false;
-  if (bound) *bound = r->src[0]->arg.i;
-  return true;
-}
-
+/* C mechanics for simplify_merge_adjacent's substitution dictionary. */
 static PolyUOp *try_merge_two_ranges(PolyCtx *ctx, PolyUOp *root, PolyUOp *r0, PolyUOp *r1) {
-  int64_t s0, s1;
-  if (!is_const_bound_range(r0, &s0) || !is_const_bound_range(r1, &s1)) return NULL;
+  if (!r0 || !r1 || r0->n_src < 1 || r1->n_src < 1) return NULL;
   if (poly_range_axis_type(r0->arg) != poly_range_axis_type(r1->arg)) return NULL;
-  if (s0 <= 0 || s1 <= 0) return NULL;
-
-  PolyUOp *prod = poly_uop0(ctx, POLY_OP_CONST, r0->dtype, poly_arg_int(s0 * s1));
-  PolyUOp *new_range = poly_uop1(ctx, POLY_OP_RANGE, r0->dtype, prod, r0->arg);
-  PolyUOp *s1c = poly_uop0(ctx, POLY_OP_CONST, r0->dtype, poly_arg_int(s1));
+  PolyUOp *prod = poly_uop2(
+      ctx, POLY_OP_MUL, r0->dtype, r0->src[0], r1->src[0], poly_arg_none());
+  PolyUOp *new_range =
+      (r0->tag != 0 || r0->tag_arg.kind != POLY_ARG_NONE)
+          ? poly_uop_tagged_arg(
+                ctx, POLY_OP_RANGE, r0->dtype, &prod, 1, r0->arg, r0->tag, r0->tag_arg)
+          : poly_uop1(ctx, POLY_OP_RANGE, r0->dtype, prod, r0->arg);
+  if (!new_range) return NULL;
   PolyUOp *sub0 =
-      poly_uop2(ctx, POLY_OP_FLOORDIV, r0->dtype, new_range, s1c, poly_arg_none());
+      poly_uop2(ctx, POLY_OP_FLOORDIV, r0->dtype, new_range, r1->src[0], poly_arg_none());
   PolyUOp *sub1 =
-      poly_uop2(ctx, POLY_OP_FLOORMOD, r1->dtype, new_range, s1c, poly_arg_none());
+      poly_uop2(ctx, POLY_OP_FLOORMOD, r1->dtype, new_range, r1->src[0], poly_arg_none());
+  if (!sub0 || !sub1) return NULL;
   PolyUOp *from[2] = {r0, r1};
   PolyUOp *to[2] = {sub0, sub1};
   PolyUOp *cand = poly_uop_substitute(ctx, root, from, to, 2);
-  cand = poly_graph_rewrite(ctx, cand, poly_symbolic());
-  cand = poly_graph_rewrite(ctx, cand, poly_pm_flatten_range());
+  if (!cand) return NULL;
+  PolyPatternMatcher *rewrite = poly_pm_concat(poly_symbolic(), poly_pm_flatten_range());
+  if (!rewrite) return NULL;
+  cand = poly_graph_rewrite(ctx, cand, rewrite);
+  poly_pm_destroy(rewrite);
   return cand;
 }
 
+/* tinygrad@2026-08-22/a9069c177a9d
+ * codegen/simplify.py:simplify_merge_adjacent. */
 static PolyUOp *simplify_merge_adjacent(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   (void)b;
-  int off = range_start_for_op(root->op);
+  int off = poly_range_start(root->op);
   if (off < 0 || root->n_src <= off + 1) return NULL;
-
+  for (int i = off; i < root->n_src; i++)
+    if (root->src[i]->op != POLY_OP_RANGE) return NULL;
   PolyUOp *best = root;
   int best_cost = count_divmod(ctx, root);
+  if (best_cost < 0) return NULL;
   int n_rng = root->n_src - off;
-
-  for (int i = 0; i + 1 < n_rng; i++) {
-    PolyUOp *r0 = root->src[off + i];
-    PolyUOp *r1 = root->src[off + i + 1];
-    if (r0->op != POLY_OP_RANGE || r1->op != POLY_OP_RANGE) continue;
-    PolyUOp *cand = try_merge_two_ranges(ctx, best, r0, r1);
-    if (!cand) continue;
-    int c = count_divmod(ctx, cand);
-    if (c <= best_cost) {
-      best = cand;
-      best_cost = c;
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort_alloc(ctx, root, &n_topo);
+  if (!topo || n_topo <= 0) {
+    poly_toposort_free(topo);
+    return NULL;
+  }
+  for (int i = 0; i < n_rng; i++) {
+    int j_begin = root->op == POLY_OP_END ? i + 1 : 0;
+    int j_end = root->op == POLY_OP_END ? i + 2 : n_rng;
+    for (int j = j_begin; j < j_end && j < n_rng; j++) {
+      if (i == j) continue;
+      PolyUOp *r0 = root->src[off + i], *r1 = root->src[off + j];
+      if (poly_range_axis_type(r0->arg) != poly_range_axis_type(r1->arg)) continue;
+      bool same_reduces = true;
+      for (int k = 0; k < n_topo; k++) {
+        if (topo[k]->op != POLY_OP_REDUCE) continue;
+        if (poly_uop_in_ranges(ctx, topo[k], r0) != poly_uop_in_ranges(ctx, topo[k], r1)) {
+          same_reduces = false;
+          break;
+        }
+      }
+      if (!same_reduces) continue;
+      PolyUOp *cand = try_merge_two_ranges(ctx, best, r0, r1);
+      if (!cand) continue;
+      int cost = count_divmod(ctx, cand);
+      if (cost >= 0 && cost <= best_cost) {
+        best = cand;
+        best_cost = cost;
+      }
     }
   }
+  poly_toposort_free(topo);
   return (best != root) ? best : NULL;
+}
+
+static PolyMap *current_range_ctx(void) {
+  return (PolyMap *)poly_graph_rewrite_userctx();
+}
+
+static void range_ctx_set(PolyMap *state, PolyUOp *range, PolyUOp *bound) {
+  if (state && range && bound)
+    poly_map_set(state, poly_ptr_hash(range), range, bound, poly_ptr_eq);
+}
+
+static PolyUOp *range_ctx_get(PolyMap *state, PolyUOp *range) {
+  return state ? poly_map_get(state, poly_ptr_hash(range), range, poly_ptr_eq) : NULL;
+}
+
+typedef struct {
+  PolyMap *state;
+} MergeGuardCtx;
+
+/* C callback for mark_gated's max-bound dictionary update. */
+static void merge_guard_bound(const void *key, void *value, void *userdata) {
+  PolyUOp *range = (PolyUOp *)key, *bound = (PolyUOp *)value;
+  PolyMap *state = ((MergeGuardCtx *)userdata)->state;
+  PolyUOp *current = range_ctx_get(state, range);
+  if (!current) {
+    range_ctx_set(state, range, bound);
+    return;
+  }
+  if (current->op != POLY_OP_CONST || bound->op != POLY_OP_CONST) return;
+  bool ok = false;
+  if (poly_arg_integer_cmp(current->arg, bound->arg, &ok) < 0 && ok)
+    range_ctx_set(state, range, bound);
+}
+
+/* tinygrad@2026-08-22/a9069c177a9d codegen/simplify.py:mark_gated. */
+static PolyUOp *mark_gated(PolyCtx *ctx, PolyUOp *idx, const PolyBindings *b) {
+  (void)b;
+  PolyMap *state = current_range_ctx();
+  if (!state || !idx || idx->op != POLY_OP_INDEX) return NULL;
+  PolyMap *guards = poly_map_new(8);
+  if (!guards) return NULL;
+  PolyUOp *range_source = idx;
+  if (idx->n_src > 1 && idx->src[1]->op == POLY_OP_WHERE) {
+    PolyUOp *coord = idx->src[1];
+    range_source = poly_uop_get_idx(ctx, coord);
+    PolyUOp *cond = poly_uop_get_valid(ctx, coord);
+    int cap = 8, top = 0;
+    PolyUOp **stack = malloc((size_t)cap * sizeof(*stack));
+    if (cond && !stack) {
+      poly_map_destroy(guards);
+      return NULL;
+    }
+    if (cond) stack[top++] = cond;
+    bool failed = false;
+    while (top > 0) {
+      PolyUOp *term = stack[--top];
+      if (term->op == POLY_OP_AND && term->n_src == 2) {
+        if (top + 2 > cap) {
+          cap *= 2;
+          PolyUOp **grown = realloc(stack, (size_t)cap * sizeof(*stack));
+          if (!grown) {
+            failed = true;
+            break;
+          }
+          stack = grown;
+        }
+        stack[top++] = term->src[1];
+        stack[top++] = term->src[0];
+      } else if (term->op == POLY_OP_CMPLT && term->n_src == 2 &&
+                 term->src[0]->op == POLY_OP_RANGE && term->src[1]->op == POLY_OP_CONST) {
+        range_ctx_set(guards, term->src[0], term->src[1]);
+      }
+    }
+    free(stack);
+    if (failed) {
+      poly_map_destroy(guards);
+      return NULL;
+    }
+  }
+
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort_alloc(ctx, range_source, &n_topo);
+  if (!topo || n_topo <= 0) {
+    poly_toposort_free(topo);
+    poly_map_destroy(guards);
+    return NULL;
+  }
+  PolyUOp **ranges = n_topo > 0 ? malloc((size_t)n_topo * sizeof(*ranges)) : NULL;
+  if (!ranges) {
+    poly_toposort_free(topo);
+    poly_map_destroy(guards);
+    return NULL;
+  }
+  int n_ranges = poly_uop_ranges(ctx, range_source, ranges, n_topo);
+  MergeGuardCtx merge = {.state = state};
+  poly_map_foreach(guards, merge_guard_bound, &merge);
+  for (int i = 0; i < n_ranges; i++)
+    if (!range_ctx_get(guards, ranges[i]) && ranges[i]->n_src > 0)
+      range_ctx_set(state, ranges[i], ranges[i]->src[0]);
+  free(ranges);
+  poly_toposort_free(topo);
+  poly_map_destroy(guards);
+  return NULL;
+}
+
+/* tinygrad@2026-08-22/a9069c177a9d pm_simplify_ranges REDUCE rule. */
+static PolyUOp *mark_reduce_ranges(PolyCtx *ctx, PolyUOp *red, const PolyBindings *b) {
+  (void)ctx;
+  (void)b;
+  PolyMap *state = current_range_ctx();
+  if (!state || !red) return NULL;
+  for (int i = 1; i < red->n_src; i++)
+    if (red->src[i]->op == POLY_OP_RANGE && red->src[i]->n_src > 0)
+      range_ctx_set(state, red->src[i], red->src[i]->src[0]);
+  return NULL;
+}
+
+typedef struct {
+  PolyCtx *ctx;
+  PolyUOp **from;
+  PolyUOp **to;
+  int n;
+  bool split;
+  bool failed;
+} RangeSubstitution;
+
+/* C closure mechanics for simplify.py:do_substitute. */
+static void build_range_substitution(const void *key, void *value, void *userdata) {
+  RangeSubstitution *sub = userdata;
+  PolyUOp *range = (PolyUOp *)key, *bound = (PolyUOp *)value;
+  PolyUOp *replacement = NULL;
+  if (!sub->split) {
+    replacement =
+        (range->tag != 0 || range->tag_arg.kind != POLY_ARG_NONE)
+            ? poly_uop_tagged_arg(
+                  sub->ctx, POLY_OP_RANGE, range->dtype, &bound, 1, range->arg,
+                  range->tag, range->tag_arg)
+            : poly_uop1(sub->ctx, POLY_OP_RANGE, range->dtype, bound, range->arg);
+  } else {
+    int n_extra = poly_range_n_extra(range->arg);
+    int64_t *extra0 = malloc((size_t)(n_extra + 1) * sizeof(*extra0));
+    int64_t *extra1 = malloc((size_t)(n_extra + 1) * sizeof(*extra1));
+    if (!extra0 || !extra1) {
+      free(extra0);
+      free(extra1);
+      sub->failed = true;
+      return;
+    }
+    const int64_t *old_extra = poly_range_extra(range->arg);
+    for (int i = 0; i < n_extra; i++) extra0[i] = extra1[i] = old_extra[i];
+    extra0[n_extra] = 0;
+    extra1[n_extra] = 1;
+    PolyArg outer_arg = poly_arg_range_ex(
+        poly_range_axis_id(range->arg), poly_range_axis_type(range->arg), extra0, n_extra + 1);
+    PolyArg inner_arg = poly_arg_range_ex(
+        poly_range_axis_id(range->arg), poly_range_axis_type(range->arg), extra1, n_extra + 1);
+    PolyUOp *outer_bound = poly_uop2(
+        sub->ctx, POLY_OP_FLOORDIV, range->dtype, range->src[0], bound, poly_arg_none());
+    PolyUOp *outer = poly_uop1(sub->ctx, POLY_OP_RANGE, range->dtype, outer_bound, outer_arg);
+    PolyUOp *inner = poly_uop1(sub->ctx, POLY_OP_RANGE, range->dtype, bound, inner_arg);
+    PolyUOp *scaled = poly_uop2(
+        sub->ctx, POLY_OP_MUL, range->dtype, outer, bound, poly_arg_none());
+    replacement = poly_uop2(
+        sub->ctx, POLY_OP_ADD, range->dtype, scaled, inner, poly_arg_none());
+    free(extra0);
+    free(extra1);
+  }
+  if (!replacement) {
+    sub->failed = true;
+    return;
+  }
+  sub->from[sub->n] = range;
+  sub->to[sub->n] = replacement;
+  sub->n++;
+}
+
+static PolyUOp *do_range_substitute(PolyCtx *ctx, PolyUOp *root, bool split) {
+  PolyMap *state = current_range_ctx();
+  if (!state) return NULL;
+  size_t count = poly_map_len(state);
+  if (count == 0) return NULL;
+  PolyUOp **from = malloc(count * sizeof(*from));
+  PolyUOp **to = malloc(count * sizeof(*to));
+  if (!from || !to) {
+    free(from);
+    free(to);
+    poly_map_clear(state);
+    return NULL;
+  }
+  RangeSubstitution sub = {.ctx = ctx, .from = from, .to = to, .split = split};
+  poly_map_foreach(state, build_range_substitution, &sub);
+  poly_map_clear(state);
+  if (sub.failed) {
+    free(from);
+    free(to);
+    return NULL;
+  }
+  PolyUOp *ret = sub.n > 0 ? poly_uop_substitute(ctx, root, from, to, sub.n) : root;
+  free(from);
+  free(to);
+  return ret != root ? poly_graph_rewrite(ctx, ret, poly_symbolic()) : NULL;
+}
+
+static PolyUOp *substitute_shrunk_ranges(
+    PolyCtx *ctx, PolyUOp *root, const PolyBindings *b
+) {
+  (void)b;
+  return do_range_substitute(ctx, root, false);
 }
 
 static _Thread_local PolyPatternMatcher *g_pm_simplify_ranges = NULL;
@@ -186,99 +404,56 @@ PolyPatternMatcher *poly_pm_simplify_ranges(void) {
   ops = poly_opset_add(ops, POLY_OP_END);
   ops = poly_opset_add(ops, POLY_OP_REDUCE);
   PolyRule rules[] = {
-      {poly_pat_allow_any_len(poly_pat_ops(ops, NULL, 0, NULL)), simplify_merge_adjacent},
+      {poly_upat_allow_any_len(poly_upat_ops(ops, NULL, 0, NULL)), simplify_merge_adjacent},
+      {poly_upat_allow_any_len(poly_upat_op(POLY_OP_INDEX, NULL, 0, NULL)), mark_gated},
+      {poly_upat_allow_any_len(poly_upat_op(POLY_OP_REDUCE, NULL, 0, NULL)), mark_reduce_ranges},
+      {poly_upat_allow_any_len(poly_upat_op(POLY_OP_SINK, NULL, 0, NULL)),
+       substitute_shrunk_ranges},
   };
   g_pm_simplify_ranges =
       poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
   return g_pm_simplify_ranges;
 }
 
-/* simplify.py: mark_range_mod / do_substitute / pm_split_ranges */
-
-static SplitRangeCtx *current_split_ctx(void) {
-  return (SplitRangeCtx *)poly_graph_rewrite_userctx();
-}
-
+/* tinygrad@2026-08-22/a9069c177a9d codegen/simplify.py:mark_range_mod. */
 static PolyUOp *mark_range_mod(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   (void)ctx;
   PolyUOp *r = poly_bind(b, "r");
   PolyUOp *c = poly_bind(b, "c");
-  if (!r || !c) return NULL;
-  if (r->op != POLY_OP_RANGE || c->op != POLY_OP_CONST || c->arg.kind != POLY_ARG_INT) return NULL;
-  if (!(r->n_src > 0 && r->src[0]->op == POLY_OP_CONST && r->src[0]->arg.kind == POLY_ARG_INT))
+  PolyMap *state = current_range_ctx();
+  if (!state || !r || !c || range_ctx_get(state, r)) return NULL;
+  PolyAxisType axis_type = poly_range_axis_type(r->arg);
+  if (axis_type == POLY_AXIS_WARP || axis_type == POLY_AXIS_DEVICE ||
+      r->op != POLY_OP_RANGE || r->n_src < 1 || r->src[0]->op != POLY_OP_CONST ||
+      c->op != POLY_OP_CONST)
     return NULL;
-  int64_t rv = r->src[0]->arg.i, cv = c->arg.i;
-  if (cv <= 1 || rv <= 0) return NULL;
-  if ((rv % cv) != 0) return NULL;
-
-  SplitRangeCtx *sctx = current_split_ctx();
-  if (!sctx) return NULL;
-  for (int i = 0; i < sctx->n; i++)
-    if (sctx->r[i] == r) return NULL;
-  if (sctx->n < POLY_MAX_DIMS) {
-    sctx->r[sctx->n] = r;
-    sctx->c[sctx->n] = c;
-    sctx->n++;
-  }
+  PolyInt dividend = {0}, divisor = {0}, quotient = {0}, remainder = {0};
+  bool divides = poly_int_from_arg(&dividend, r->src[0]->arg) &&
+                 poly_int_from_arg(&divisor, c->arg) && !poly_int_is_zero(&divisor) &&
+                 poly_int_divmod(&quotient, &remainder, &dividend, &divisor, true) &&
+                 poly_int_is_zero(&remainder);
+  poly_int_free(&dividend);
+  poly_int_free(&divisor);
+  poly_int_free(&quotient);
+  poly_int_free(&remainder);
+  if (divides) range_ctx_set(state, r, c);
   return NULL;
 }
 
-static PolyUOp *do_substitute(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+static PolyUOp *substitute_split_ranges(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   (void)b;
-  SplitRangeCtx *sctx = current_split_ctx();
-  if (!sctx || sctx->n <= 0) return NULL;
-
-  PolyUOp *from[POLY_MAX_DIMS];
-  PolyUOp *to[POLY_MAX_DIMS];
-  int n_sub = 0;
-
-  for (int i = 0; i < sctx->n && n_sub < POLY_MAX_DIMS; i++) {
-    PolyUOp *r = sctx->r[i], *v = sctx->c[i];
-    if (!r || !v) continue;
-    int n_extra = poly_range_n_extra(r->arg);
-    if (n_extra + 1 > POLY_MAX_DIMS) n_extra = POLY_MAX_DIMS - 1;
-    int64_t extra0[POLY_MAX_DIMS], extra1[POLY_MAX_DIMS];
-    const int64_t *src_extra = poly_range_extra(r->arg);
-    for (int j = 0; j < n_extra; j++) {
-      extra0[j] = src_extra[j];
-      extra1[j] = src_extra[j];
-    }
-    extra0[n_extra] = 0;
-    extra1[n_extra] = 1;
-    PolyArg k0_arg = poly_arg_range_ex(
-        poly_range_axis_id(r->arg), poly_range_axis_type(r->arg), extra0, n_extra + 1
-    );
-    PolyArg k1_arg = poly_arg_range_ex(
-        poly_range_axis_id(r->arg), poly_range_axis_type(r->arg), extra1, n_extra + 1
-    );
-    PolyUOp *k0_bound =
-        poly_uop2(ctx, POLY_OP_FLOORDIV, r->dtype, r->src[0], v, poly_arg_none());
-    PolyUOp *k0 = poly_uop1(ctx, POLY_OP_RANGE, r->dtype, k0_bound, k0_arg);
-    PolyUOp *k1 = poly_uop1(ctx, POLY_OP_RANGE, r->dtype, v, k1_arg);
-    PolyUOp *k0_mul = poly_uop2(ctx, POLY_OP_MUL, r->dtype, k0, v, poly_arg_none());
-    PolyUOp *expr = poly_uop2(ctx, POLY_OP_ADD, r->dtype, k0_mul, k1, poly_arg_none());
-    from[n_sub] = r;
-    to[n_sub] = expr;
-    n_sub++;
-  }
-  sctx->n = 0;
-  if (n_sub <= 0) return NULL;
-
-  PolyUOp *out = poly_uop_substitute(ctx, root, from, to, n_sub);
-  out = poly_graph_rewrite(ctx, out, poly_symbolic());
-  out = poly_graph_rewrite(ctx, out, poly_pm_flatten_range());
-  return out;
+  return do_range_substitute(ctx, root, true);
 }
 
 static _Thread_local PolyPatternMatcher *g_pm_split_ranges = NULL;
 PolyPatternMatcher *poly_pm_split_ranges(void) {
   if (g_pm_split_ranges) return g_pm_split_ranges;
   PolyRule rules[] = {
-      {poly_pat_op2(
-           POLY_OP_FLOORMOD, poly_pat_any("r"), poly_pat_cvar("c"), NULL
+      {poly_upat_op2(
+           POLY_OP_FLOORMOD, poly_upat_any("r"), poly_upat_cvar("c"), NULL
        ),
        mark_range_mod},
-      {poly_pat_op(POLY_OP_SINK, NULL, 0, NULL), do_substitute},
+      {poly_upat_op(POLY_OP_SINK, NULL, 0, NULL), substitute_split_ranges},
   };
   g_pm_split_ranges =
       poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
@@ -287,42 +462,35 @@ PolyPatternMatcher *poly_pm_split_ranges(void) {
 
 /* C helpers shared by reduce/load collapse ports. */
 
-/* Test whether a UOp is one of the "external dependency" leaves that
- * reduce_collapse must NOT wrap in a DEFINE_VAR. Mirrors tinygrad's
- * exclusion list at simplify.py:136:
- *   {Ops.CONST, Ops.VCONST, Ops.PARAM, Ops.DEFINE_LOCAL, Ops.DEFINE_VAR}
- */
+/* Current reduce_collapse leaves CONST, PARAM, and BUFFER dependencies
+ * intact and replaces every other external expression with an ALU PARAM. */
 static bool is_external_leaf(PolyUOp *u) {
   switch (u->op) {
   case POLY_OP_CONST:
-  case POLY_OP_VCONST:
   case POLY_OP_PARAM:
-  case POLY_OP_DEFINE_LOCAL:
-  case POLY_OP_DEFINE_VAR:
+  case POLY_OP_BUFFER:
     return true;
   default:
     return false;
   }
 }
 
-/* Pointer-key map helpers (mirror src/uop.c:363-368). */
+/* Pointer-key map helpers (mirror src/uop/ops.c). */
 
-/* Construct a DEFINE_VAR with arbitrary dtype (frontend.c:poly_define_var
- * is INT32-only). Name is arena-copied by poly_uop_create. */
-static PolyUOp *make_define_var(
+static PolyUOp *make_reduce_param(
     PolyCtx *ctx,
     const char *name,
     PolyDType dt,
     int64_t vmin,
     int64_t vmax
 ) {
-  return poly_uop0(ctx, POLY_OP_DEFINE_VAR, dt, poly_arg_define_var(name, vmin, vmax));
+  return poly_uop_variable(ctx, name, vmin, vmax, dt, 1, true);
 }
 
 /* CONST in a target dtype, value taken as a double and re-encoded into the
  * arg kind matching the dtype. Sole reason for existing: ensures we never
  * construct a CONST with mismatched dtype/arg.kind (the bug fixed in
- * pat.c:poly_const_like). */
+ * upat.c:poly_const_like). */
 static PolyUOp *typed_const(PolyCtx *ctx, PolyDType dt, double v) {
   if (poly_dtype_is_float(dt)) return poly_uop0(ctx, POLY_OP_CONST, dt, poly_arg_float(v));
   if (poly_dtype_is_bool(dt)) return poly_uop0(ctx, POLY_OP_CONST, dt, poly_arg_bool(v != 0.0));
@@ -360,8 +528,8 @@ static PolyUOp *cast_to(PolyCtx *ctx, PolyUOp *x, PolyDType dt) {
  */
 static PolyUOp *reduce_unparented(PolyCtx *ctx, PolyUOp *red, const PolyBindings *b) {
   (void)b;
-  if (red->arg.kind != POLY_ARG_OPS) return NULL;
-  PolyOps rop = red->arg.ops;
+  if (red->arg.kind != POLY_ARG_REDUCE) return NULL;
+  PolyOps rop = red->arg.reduce.op;
   if (rop != POLY_OP_ADD && rop != POLY_OP_MAX && rop != POLY_OP_MUL) return NULL;
   if (red->n_src < 2) return NULL;
   for (uint16_t i = 1; i < red->n_src; i++)
@@ -480,7 +648,7 @@ static bool match_where_cmplt_reduce(
     PolyUOp **out_fval
 ) {
   if (red->op != POLY_OP_REDUCE) return false;
-  if (red->arg.kind != POLY_ARG_OPS || red->arg.ops != POLY_OP_ADD) return false;
+  if (red->arg.kind != POLY_ARG_REDUCE || red->arg.reduce.op != POLY_OP_ADD) return false;
   if (red->n_src != 2) return false; /* exactly one range */
   PolyUOp *r = red->src[1];
   if (r->op != POLY_OP_RANGE) return false;
@@ -578,7 +746,7 @@ static PolyUOp *rule_collapse_fold_range_two_sided(
 ) {
   (void)b;
   if (red->op != POLY_OP_REDUCE) return NULL;
-  if (red->arg.kind != POLY_ARG_OPS || red->arg.ops != POLY_OP_ADD) return NULL;
+  if (red->arg.kind != POLY_ARG_REDUCE || red->arg.reduce.op != POLY_OP_ADD) return NULL;
   if (red->n_src != 2) return NULL;
   PolyUOp *r = red->src[1];
   if (r->op != POLY_OP_RANGE) return NULL;
@@ -642,7 +810,7 @@ static PolyUOp *rule_collapse_reduce_add_distribute(
 ) {
   (void)b;
   if (red->op != POLY_OP_REDUCE) return NULL;
-  if (red->arg.kind != POLY_ARG_OPS || red->arg.ops != POLY_OP_ADD) return NULL;
+  if (red->arg.kind != POLY_ARG_REDUCE || red->arg.reduce.op != POLY_OP_ADD) return NULL;
   if (red->n_src < 2) return NULL;
   PolyUOp *value = red->src[0];
   if (value->op != POLY_OP_ADD || value->n_src != 2) return NULL;
@@ -664,13 +832,13 @@ static PolyUOp *rule_collapse_reduce_add_distribute(
 }
 
 /* Rule 7: and_on_where
- *   ((DEFINE_VAR & y).where(c, 0)).reduce_add(*ranges)
+ *   ((PARAM & y).where(c, 0)).reduce_add(*ranges)
  *     -> y.where(c, 0).reduce_add(*ranges) * x.cast(c.dtype)
  * tinygrad simplify.py:115-116 */
 static PolyUOp *rule_collapse_and_on_where(PolyCtx *ctx, PolyUOp *red, const PolyBindings *b) {
   (void)b;
   if (red->op != POLY_OP_REDUCE) return NULL;
-  if (red->arg.kind != POLY_ARG_OPS || red->arg.ops != POLY_OP_ADD) return NULL;
+  if (red->arg.kind != POLY_ARG_REDUCE || red->arg.reduce.op != POLY_OP_ADD) return NULL;
   if (red->n_src < 2) return NULL;
   PolyUOp *where = red->src[0];
   if (where->op != POLY_OP_WHERE || where->n_src != 3) return NULL;
@@ -681,12 +849,12 @@ static PolyUOp *rule_collapse_and_on_where(PolyCtx *ctx, PolyUOp *red, const Pol
   if (!fval_is_zero) return NULL;
   PolyUOp *and_op = where->src[0];
   if (and_op->op != POLY_OP_AND || and_op->n_src != 2) return NULL;
-  /* One side must be DEFINE_VAR, the other is "y" */
+  /* One side must be the ALU PARAM introduced by reduce_collapse. */
   PolyUOp *x = NULL, *y = NULL;
-  if (and_op->src[0]->op == POLY_OP_DEFINE_VAR) {
+  if (and_op->src[0]->op == POLY_OP_PARAM) {
     x = and_op->src[0];
     y = and_op->src[1];
-  } else if (and_op->src[1]->op == POLY_OP_DEFINE_VAR) {
+  } else if (and_op->src[1]->op == POLY_OP_PARAM) {
     x = and_op->src[1];
     y = and_op->src[0];
   } else {
@@ -738,9 +906,8 @@ static PolyUOp *rule_collapse_mul_casted_bool(PolyCtx *ctx, PolyUOp *mul, const 
  *       replaces = {}
  *       for u in included:
  *         for s in u.src:
- *           if s in included or s in replaces or s.op in
- *               {CONST, VCONST, PARAM, DEFINE_LOCAL, DEFINE_VAR}: continue
- *           replaces[s] = DEFINE_VAR(name=f'in{len(replaces)}', vmin, vmax)
+ *           if s in included or s in replaces or s.op in {CONST, PARAM, BUFFER}: continue
+ *           replaces[s] = UOp.variable(..., param=True)
  *       collapse_form = u.substitute(replaces).reduce(r, arg=ADD)
  *       sink = graph_rewrite(collapse_form, pm)
  *       if not no_range(sink): return None
@@ -815,7 +982,7 @@ static PolyUOp *reduce_collapse(
 
     /* Build replaces: for each included node's external src that is not
      * itself included, not already replaced, and not an excluded leaf,
-     * mint a fresh DEFINE_VAR carrying its current vmin/vmax. */
+     * mint a fresh bounded ALU PARAM carrying its current vmin/vmax. */
     if (replaces_map) poly_map_destroy(replaces_map);
     replaces_map = poly_map_new(16);
     PolyUOp *from_arr[256];
@@ -832,7 +999,7 @@ static PolyUOp *reduce_collapse(
         int64_t vmin, vmax;
         poly_uop_minmax_ex(ctx, s, cache, &vmin, &vmax);
         snprintf(namebuf, sizeof(namebuf), "in%d", n_repl);
-        PolyUOp *dv = make_define_var(ctx, namebuf, s->dtype, vmin, vmax);
+        PolyUOp *dv = make_reduce_param(ctx, namebuf, s->dtype, vmin, vmax);
         if (n_repl >= 256) goto fail;
         from_arr[n_repl] = s;
         to_arr[n_repl] = dv;
@@ -845,8 +1012,9 @@ static PolyUOp *reduce_collapse(
      * no_range, substitute back. */
     PolyUOp *substituted = poly_uop_substitute(ctx, u, from_arr, to_arr, n_repl);
     PolyUOp *one_range_srcs[2] = {substituted, r};
-    PolyUOp *collapse_form =
-        poly_uop(ctx, POLY_OP_REDUCE, red->dtype, one_range_srcs, 2, poly_arg_ops(POLY_OP_ADD));
+    PolyUOp *collapse_form = poly_uop(
+        ctx, POLY_OP_REDUCE, red->dtype, one_range_srcs, 2, poly_arg_reduce(POLY_OP_ADD, 0)
+    );
     PolyUOp *sink = poly_graph_rewrite(ctx, collapse_form, pm);
     if (dbg)
       fprintf(
@@ -854,7 +1022,7 @@ static PolyUOp *reduce_collapse(
           poly_op_name(sink->op), (int)poly_no_range_ex(ctx, sink, cache)
       );
     if (!poly_no_range_ex(ctx, sink, cache)) goto fail;
-    /* Substitute back: from = to_arr (DEFINE_VARs), to = from_arr (originals) */
+    /* Substitute the original external expressions back after collapse. */
     u = poly_uop_substitute(ctx, sink, to_arr, from_arr, n_repl);
   }
 
@@ -879,23 +1047,20 @@ fail:
 static PolyUOp *reduce_simplify(PolyCtx *ctx, PolyUOp *red, const PolyBindings *b) {
   (void)b;
   if (red->op != POLY_OP_REDUCE) return NULL;
-  if (red->arg.kind != POLY_ARG_OPS || red->arg.ops != POLY_OP_ADD) return NULL;
+  if (red->arg.kind != POLY_ARG_REDUCE || red->arg.reduce.op != POLY_OP_ADD) return NULL;
   if (red->n_src < 2) return NULL;
   return reduce_collapse(ctx, red, red->src[0], pm_reduce_collapse_get());
 }
 
-/* D5: pm_reduce_simplify combinator *
+/* Current tinygrad codegen/simplify.py:pm_reduce_simplify.
  * Tinygrad source (codegen/simplify.py:147-149):
  *   pm_reduce_simplify = pm_reduce_unparented + PatternMatcher([
  *     (UPat(Ops.REDUCE, src=(UPat.var("u"),), allow_any_len=True,
  *           arg=Ops.ADD, name="red"), reduce_collapse),
  *   ])
  *
- * Tinygrad runs pm_reduce_simplify fused with `symbolic + pm_const_buffer
- * _folding + pm_remove_bufferize` in one graph_rewrite at rangeify.py:579.
- * Polygrad concatenates pm_reduce_unparented + entry rule + symbolic
- * for that fusion. pm_remove_bufferize runs separately as a polygrad-side
- * stage before this pass — see src/rangeify.c.
+ * Rangeify concatenates this matcher with symbolic and its cleanup matchers,
+ * matching schedule/rangeify.py:get_kernel_graph.
  */
 static _Thread_local PolyPatternMatcher *g_pm_reduce_unparented = NULL;
 static _Thread_local PolyPatternMatcher *g_pm_reduce_collapse_base = NULL;
@@ -905,10 +1070,10 @@ static _Thread_local PolyPatternMatcher *g_pm_reduce_simplify_base = NULL;
 static _Thread_local PolyPatternMatcher *g_pm_reduce_simplify = NULL;
 static _Thread_local PolyPatternMatcher *g_pm_symbolic_reduce_simplify = NULL;
 
-static PolyPatternMatcher *pm_reduce_unparented_get(void) {
+PolyPatternMatcher *poly_pm_reduce_unparented(void) {
   if (g_pm_reduce_unparented) return g_pm_reduce_unparented;
   PolyRule rules[] = {
-      {poly_pat_op(POLY_OP_REDUCE, NULL, 0, "red"), reduce_unparented},
+      {poly_upat_op(POLY_OP_REDUCE, NULL, 0, "red"), reduce_unparented},
   };
   g_pm_reduce_unparented =
       poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
@@ -918,15 +1083,15 @@ static PolyPatternMatcher *pm_reduce_unparented_get(void) {
 static PolyPatternMatcher *pm_reduce_collapse_base_get(void) {
   if (g_pm_reduce_collapse_base) return g_pm_reduce_collapse_base;
   PolyRule rules[] = {
-      {poly_pat_op(POLY_OP_REDUCE, NULL, 0, "red"), reduce_unparented},
-      {poly_pat_op(POLY_OP_CMPLT, NULL, 0, "x"), rule_collapse_lift_add_from_cmplt},
-      {poly_pat_op(POLY_OP_CMPLT, NULL, 0, "x"), rule_collapse_lift_mul_from_cmplt},
-      {poly_pat_op(POLY_OP_REDUCE, NULL, 0, "red"), rule_collapse_fold_range_below},
-      {poly_pat_op(POLY_OP_REDUCE, NULL, 0, "red"), rule_collapse_fold_range_two_sided},
-      {poly_pat_op(POLY_OP_REDUCE, NULL, 0, "red"), rule_collapse_fold_range_above},
-      {poly_pat_op(POLY_OP_REDUCE, NULL, 0, "red"), rule_collapse_reduce_add_distribute},
-      {poly_pat_op(POLY_OP_REDUCE, NULL, 0, "red"), rule_collapse_and_on_where},
-      {poly_pat_op(POLY_OP_MUL, NULL, 0, "mul"), rule_collapse_mul_casted_bool},
+      {poly_upat_op(POLY_OP_REDUCE, NULL, 0, "red"), reduce_unparented},
+      {poly_upat_op(POLY_OP_CMPLT, NULL, 0, "x"), rule_collapse_lift_add_from_cmplt},
+      {poly_upat_op(POLY_OP_CMPLT, NULL, 0, "x"), rule_collapse_lift_mul_from_cmplt},
+      {poly_upat_op(POLY_OP_REDUCE, NULL, 0, "red"), rule_collapse_fold_range_below},
+      {poly_upat_op(POLY_OP_REDUCE, NULL, 0, "red"), rule_collapse_fold_range_two_sided},
+      {poly_upat_op(POLY_OP_REDUCE, NULL, 0, "red"), rule_collapse_fold_range_above},
+      {poly_upat_op(POLY_OP_REDUCE, NULL, 0, "red"), rule_collapse_reduce_add_distribute},
+      {poly_upat_op(POLY_OP_REDUCE, NULL, 0, "red"), rule_collapse_and_on_where},
+      {poly_upat_op(POLY_OP_MUL, NULL, 0, "mul"), rule_collapse_mul_casted_bool},
   };
   g_pm_reduce_collapse_base =
       poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
@@ -981,7 +1146,7 @@ static PolyUOp *rule_reduce_gated_load_collapse(
 ) {
   (void)b;
   if (!red || red->op != POLY_OP_REDUCE) return NULL;
-  if (red->arg.kind != POLY_ARG_OPS || red->arg.ops != POLY_OP_ADD) return NULL;
+  if (red->arg.kind != POLY_ARG_REDUCE || red->arg.reduce.op != POLY_OP_ADD) return NULL;
   if (red->n_src != 2 || red->src[1]->op != POLY_OP_RANGE) return NULL;
 
   PolyUOp *r = red->src[1];
@@ -1010,7 +1175,7 @@ static PolyUOp *rule_reduce_gated_load_collapse(
       poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, idx_cast, cast_to(ctx, r->src[0], r->dtype), poly_arg_none());
   PolyUOp *valid = poly_uop2(ctx, POLY_OP_AND, POLY_BOOL, ge_zero, lt_dim, poly_arg_none());
 
-  PolyUOp *invalid = poly_uop0(ctx, POLY_OP_CONST, r->dtype, poly_arg_invalid());
+  PolyUOp *invalid = poly_uop_const(ctx, poly_arg_invalid(), r->dtype);
   PolyUOp *idx_valid = poly_uop3(ctx, POLY_OP_WHERE, r->dtype, valid, idx_cast, invalid, poly_arg_none());
   PolyUOp *from[1] = {r};
   PolyUOp *to[1] = {idx_valid};
@@ -1022,8 +1187,8 @@ static PolyUOp *rule_reduce_gated_load_collapse(
 static PolyPatternMatcher *pm_reduce_load_collapse_get(void) {
   if (g_pm_reduce_load_collapse) return g_pm_reduce_load_collapse;
   PolyRule extra_rules[] = {
-      {poly_pat_op(POLY_OP_CMPNE, NULL, 0, "cmpne"), rule_lift_add_from_cmpne},
-      {poly_pat_op(POLY_OP_REDUCE, NULL, 0, "red"), rule_reduce_gated_load_collapse},
+      {poly_upat_op(POLY_OP_CMPNE, NULL, 0, "cmpne"), rule_lift_add_from_cmpne},
+      {poly_upat_op(POLY_OP_REDUCE, NULL, 0, "red"), rule_reduce_gated_load_collapse},
   };
   PolyPatternMatcher *extra =
       poly_pm_new(extra_rules, (int)(sizeof(extra_rules) / sizeof(extra_rules[0])));
@@ -1036,16 +1201,16 @@ static PolyPatternMatcher *pm_reduce_load_collapse_get(void) {
 static PolyUOp *reduce_load_collapse(PolyCtx *ctx, PolyUOp *red, const PolyBindings *b) {
   (void)b;
   if (red->op != POLY_OP_REDUCE) return NULL;
-  if (red->arg.kind != POLY_ARG_OPS || red->arg.ops != POLY_OP_ADD) return NULL;
+  if (red->arg.kind != POLY_ARG_REDUCE || red->arg.reduce.op != POLY_OP_ADD) return NULL;
   if (red->n_src < 2) return NULL;
   return reduce_collapse(ctx, red, red->src[0], pm_reduce_load_collapse_get());
 }
 
-static PolyPatternMatcher *pm_reduce_simplify_base_get(void) {
+PolyPatternMatcher *poly_pm_reduce_simplify(void) {
   if (g_pm_reduce_simplify_base) return g_pm_reduce_simplify_base;
   PolyRule rules[] = {
-      {poly_pat_op(POLY_OP_REDUCE, NULL, 0, "red"), reduce_unparented},
-      {poly_pat_op(POLY_OP_REDUCE, NULL, 0, "red"), reduce_simplify},
+      {poly_upat_op(POLY_OP_REDUCE, NULL, 0, "red"), reduce_unparented},
+      {poly_upat_op(POLY_OP_REDUCE, NULL, 0, "red"), reduce_simplify},
   };
   g_pm_reduce_simplify_base =
       poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
@@ -1055,14 +1220,14 @@ static PolyPatternMatcher *pm_reduce_simplify_base_get(void) {
 static PolyPatternMatcher *pm_reduce_simplify_get(void) {
   if (g_pm_reduce_simplify) return g_pm_reduce_simplify;
   g_pm_reduce_simplify =
-      poly_pm_thread_cache(poly_pm_concat(pm_reduce_simplify_base_get(), poly_symbolic()));
+      poly_pm_thread_cache(poly_pm_concat(poly_pm_reduce_simplify(), poly_symbolic()));
   return g_pm_reduce_simplify;
 }
 
 static PolyPatternMatcher *pm_symbolic_reduce_simplify_get(void) {
   if (g_pm_symbolic_reduce_simplify) return g_pm_symbolic_reduce_simplify;
   g_pm_symbolic_reduce_simplify = poly_pm_thread_cache(
-      poly_pm_concat(poly_symbolic(), pm_reduce_simplify_base_get())
+      poly_pm_concat(poly_symbolic(), poly_pm_reduce_simplify())
   );
   return g_pm_symbolic_reduce_simplify;
 }
@@ -1102,8 +1267,8 @@ static _Thread_local PolyPatternMatcher *g_pm_load_collapse = NULL;
 PolyPatternMatcher *poly_pm_load_collapse(void) {
   if (g_pm_load_collapse) return g_pm_load_collapse;
   PolyRule rules[] = {
-      {poly_pat_op(POLY_OP_REDUCE, NULL, 0, "red"), reduce_load_collapse},
-      {poly_pat_op(POLY_OP_CMPLT, NULL, 0, "cmplt"), undo_loaded_index_math},
+      {poly_upat_op(POLY_OP_REDUCE, NULL, 0, "red"), reduce_load_collapse},
+      {poly_upat_op(POLY_OP_CMPLT, NULL, 0, "cmplt"), undo_loaded_index_math},
   };
   g_pm_load_collapse =
       poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
@@ -1115,7 +1280,7 @@ PolyPatternMatcher *poly_pm_load_collapse(void) {
 PolyUOp *poly_apply_reduce_unparented_only(PolyCtx *ctx, PolyUOp *sink) {
   /* Test-only entry: standalone pm_reduce_unparented (no symbolic concat).
    * Mirrors test/parity_scripts/tg_reduce_unparented_gt.py ground truth. */
-  return poly_graph_rewrite(ctx, sink, pm_reduce_unparented_get());
+  return poly_graph_rewrite(ctx, sink, poly_pm_reduce_unparented());
 }
 
 PolyUOp *poly_apply_reduce_simplify(PolyCtx *ctx, PolyUOp *sink) {

@@ -1,5 +1,6 @@
 """Tests for the polygrad Python Tensor class."""
 
+import ctypes
 import math
 import numpy as np
 import pytest
@@ -26,10 +27,10 @@ class TestCreation:
     def test_from_scalar(self):
         cases = [
             (Tensor(True), (), "bool", True),
-            (Tensor(42), (), "int32", 42),
-            (Tensor(42.0), (), "float32", 42.0),
-            (Tensor(7, device="CUDA"), (), "int32", 7),
-            (Tensor(1.5, device="CUDA"), (), "float32", 1.5),
+            (Tensor(42), (), "weakint", 42),
+            (Tensor(42.0), (), "weakfloat", 42.0),
+            (Tensor(7, device="CUDA"), (), "weakint", 7),
+            (Tensor(1.5, device="CUDA"), (), "weakfloat", 1.5),
         ]
         for tensor, shape, dtype, value in cases:
             assert tensor.shape == shape
@@ -42,8 +43,8 @@ class TestCreation:
     def test_internal_scalar_stores_typed_current_root(self):
         cases = [
             (Tensor.empty(2, dtype="bool"), True, "bool"),
-            (Tensor.empty(2, dtype="int32"), 7, "int32"),
-            (Tensor.empty(2, dtype="float32"), 1, "float32"),
+            (Tensor.empty(2, dtype="int32"), 7, "weakint"),
+            (Tensor.empty(2, dtype="float32"), 1, "weakint"),
         ]
         for source, value, dtype in cases:
             scalar = source._ensure_tensor(value)
@@ -79,9 +80,9 @@ class TestCreation:
         assert t.uop.has_buffer_identity()
         assert not t.uop.is_realized
         assert t.uop_physical is not None
-        assert t.uop_logical.buffer.src[0].raw == t.uop_physical.buffer.src[0].raw
+        assert t.uop_logical.buffer.src[0].op_name == 'UNIQUE'
         assert t.uop_logical.buffer.src[1:] == ()
-        assert t.uop_physical.buffer.src[1].op_name == 'DEVICE'
+        assert t.uop_physical.buffer.src[0].op_name == 'CONST'
 
     def test_movement_is_realized_through_recursive_base(self):
         source = Tensor([1.0, 2.0, 3.0, 4.0]).realize()
@@ -106,7 +107,7 @@ class TestCreation:
             Tensor.empty(1, 2, 16).flatten(0, 3)
 
     def test_clone_is_lazy_separate_and_preserves_state(self):
-        source = Tensor.empty((4,), dtype='float32', requires_grad=True).is_param_(False)
+        source = Tensor.empty((4,), dtype='float32').is_param_(False)
         source.copy_from(np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32))
         source.sum().backward()
 
@@ -114,7 +115,6 @@ class TestCreation:
         assert cloned.uop_logical.op_name == 'AFTER'
         assert [u.op_name for u in cloned.uop_logical.src] == ['BUFFER', 'STORE']
         assert cloned.uop_logical.src[0].buffer.raw != source.uop.buffer.raw
-        assert cloned.requires_grad is True
         assert cloned.is_param is False
         assert cloned.grad is not None
         assert cloned.grad.uop_logical.op_name == 'AFTER'
@@ -123,13 +123,12 @@ class TestCreation:
         np.testing.assert_allclose(cloned.grad.numpy(), np.ones(4, dtype=np.float32))
 
     def test_detach_is_a_lazy_graph_boundary(self):
-        source = Tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
+        source = Tensor([[1.0, 2.0], [3.0, 4.0]])
         detached = source.detach()
 
         assert detached.shape == source.shape
         assert detached.dtype == source.dtype
         assert detached.device == source.device
-        assert detached.requires_grad is False
         assert detached.uop_logical.op_name == 'DETACH'
         assert detached.uop_logical.src[0].raw == source.uop_logical.raw
         if detached.uop_physical is not None:
@@ -140,7 +139,7 @@ class TestCreation:
         np.testing.assert_allclose(source.grad.numpy(), np.zeros((2, 2), dtype=np.float32))
 
     def test_contiguous_backward_has_exact_gradient_barrier(self):
-        source = Tensor([1.0, -2.0, 3.0], requires_grad=True)
+        source = Tensor([1.0, -2.0, 3.0])
         result = (source * 2.0).contiguous_backward()
 
         assert result.uop_logical.op_name == 'CONTIGUOUS_BACKWARD'
@@ -167,7 +166,7 @@ class TestCreation:
         assert cloned.item() == pytest.approx(3.0)
 
     def test_backward_clones_deviceless_grad_and_accumulates_in_place(self):
-        x = Tensor.empty((4,), dtype='float32', requires_grad=True)
+        x = Tensor.empty((4,), dtype='float32')
         loss = x.sum()
         loss.backward()
         first_grad = x.grad
@@ -190,7 +189,7 @@ class TestCreation:
         np.testing.assert_allclose(x.grad.numpy(), np.full(4, 2.0, dtype=np.float32))
 
     def test_backward_through_clone_reaches_source(self):
-        source = Tensor.empty((4,), dtype='float32', requires_grad=True)
+        source = Tensor.empty((4,), dtype='float32')
         source.copy_from(np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32))
         cloned = source.clone()
         cloned.sum().backward()
@@ -198,10 +197,10 @@ class TestCreation:
         np.testing.assert_allclose(cloned.grad.numpy(), np.ones(4, dtype=np.float32))
 
     def test_backward_retains_distinct_wrappers_sharing_one_uop(self):
-        x = Tensor([1.0, 2.0, 3.0, 4.0], requires_grad=True)
+        x = Tensor([1.0, 2.0, 3.0, 4.0])
         # Pinned Tensor.__init__ wraps an existing current Tensor.uop directly
         # (tensor.py:92-121); retained logical provenance is not executable.
-        y = Tensor(x.uop, requires_grad=True)
+        y = Tensor(x.uop)
         assert x is not y
         assert x.uop.raw == y.uop.raw
 
@@ -279,12 +278,12 @@ class TestCreation:
         a_np = rng.standard_normal((4, 4), dtype=np.float32)
         b_np = rng.standard_normal((4, 4), dtype=np.float32)
 
-        a_ref = Tensor(a_np, requires_grad=True)
-        b_ref = Tensor(b_np, requires_grad=True)
+        a_ref = Tensor(a_np)
+        b_ref = Tensor(b_np)
         ((a_ref + b_ref).sum() + (a_ref * b_ref).sum()).backward()
 
-        a = Tensor(a_np, requires_grad=True)
-        b = Tensor(b_np, requires_grad=True)
+        a = Tensor(a_np)
+        b = Tensor(b_np)
         a.realize(b)
         a_physical, b_physical = a.uop_physical, b.uop_physical
         c, d, _, _ = Tensor.empty((4, 4)).custom_kernel(
@@ -306,7 +305,7 @@ class TestCreation:
             assert call.op_name == 'CALL'
             return (None,)
 
-        x = Tensor.empty((4,), dtype='float32', requires_grad=True)
+        x = Tensor.empty((4,), dtype='float32')
         x.copy_from(np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32))
         y = x.custom_kernel(fxn=identity_kernel, grad_fxn=backward_identity)[0]
         assert y.uop_logical.op_name == 'AFTER'
@@ -325,8 +324,8 @@ class TestCreation:
             assert call.op_name == 'CALL'
             return (None, grad)
 
-        out = Tensor.empty((4,), dtype='float32', requires_grad=True)
-        x = Tensor([1.0, 2.0, 3.0, 4.0], requires_grad=True)
+        out = Tensor.empty((4,), dtype='float32')
+        x = Tensor([1.0, 2.0, 3.0, 4.0])
         y = out.custom_kernel(x, fxn=identity_kernel, grad_fxn=backward_identity)[0]
         y.sum().backward()
 
@@ -351,7 +350,7 @@ class TestCreation:
             return (None, None, grads[0])
 
         out = Tensor.empty((4,), dtype='float32')
-        x = Tensor([1.0, 2.0, 3.0, 4.0], requires_grad=True)
+        x = Tensor([1.0, 2.0, 3.0, 4.0])
         y0, y1, _ = out.custom_kernel(
             out, x, fxn=identity_kernel, grad_fxn=backward_identity
         )
@@ -368,7 +367,7 @@ class TestCreation:
             return out[i].store(x[i]).end(i).sink(arg=KernelInfo(name='missing_grad_fxn'))
 
         out = Tensor.empty((4,), dtype='float32')
-        x = Tensor([1.0, 2.0, 3.0, 4.0], requires_grad=True)
+        x = Tensor([1.0, 2.0, 3.0, 4.0])
         y = out.custom_kernel(x, fxn=identity_kernel)[0]
         with pytest.raises(
             AssertionError, match='expected TUPLE body for gradient, got Ops.SINK'
@@ -383,8 +382,8 @@ class TestCreation:
             i = UOp.range(out.ctx, out.numel(), 0)
             return out[i].store(x[i]).end(i).sink(arg=KernelInfo(name='stopped_custom_grad'))
 
-        out = Tensor.empty((4,), dtype='float32', requires_grad=True)
-        x = Tensor([1.0, 2.0, 3.0, 4.0], requires_grad=True)
+        out = Tensor.empty((4,), dtype='float32')
+        x = Tensor([1.0, 2.0, 3.0, 4.0])
         y = out.custom_kernel(x, fxn=identity_kernel)[0]
         y.detach().sum().backward()
         np.testing.assert_allclose(x.grad.numpy(), np.zeros(4, dtype=np.float32))
@@ -396,8 +395,8 @@ class TestCreation:
             calls.append(grad.op_name)
             return (None, (Tensor(grad) + 7).uop)
 
-        out = Tensor.empty((4,), dtype='float32', requires_grad=True)
-        x = Tensor([1.0, 2.0, 3.0, 4.0], requires_grad=True)
+        out = Tensor.empty((4,), dtype='float32')
+        x = Tensor([1.0, 2.0, 3.0, 4.0])
         y = out.custom_kernel(x, fxn=identity_kernel, grad_fxn=backward_identity)[0]
         (y < 0).float().sum().backward()
         assert calls == []
@@ -445,6 +444,24 @@ class TestCreation:
 
         with pytest.raises(AssertionError, match='no data if shape is symbolic'):
             y.numpy()
+
+    def test_empty_accepts_symbolic_dimensions_and_expressions_in_any_axis(self):
+        n = Variable('N_any_axis', 1, 8)
+        m = Variable('M_expression', 1, 6)
+        x = Tensor.empty(2, n.bind(3), m.bind(2) * 2)
+
+        assert x.shape[0] == 2
+        assert not isinstance(x.shape[1], int)
+        assert not isinstance(x.shape[2], int)
+        assert x.uop_logical.base.op_name == 'BUFFER'
+        assert x.uop_logical.base.src[0].op_name == 'UNIQUE'
+
+        physical = UOp(x._ctx, _ffi._lib.poly_tensor_uop_physical(x._tensor))
+        assert physical.base.op_name == 'BUFFER'
+        assert physical.base.src[0].op_name == 'CONST'
+        alloc = ctypes.c_int64()
+        assert _ffi._lib.poly_uop_const_i64(physical.base.src[0].raw, ctypes.byref(alloc)) == 0
+        assert alloc.value == 2 * 8 * (6 * 2)
 
     def test_bound_variable_slice_matches_tinygrad_hlb_batcher(self):
         x = Tensor.arange(20).reshape(10, 2)
@@ -514,10 +531,12 @@ class TestCreation:
         assert repeated.shape[1] == view.shape[1]
         assert repeated.shape[2:] == (1, 8)
         assert repeated.uop.op_name == 'RESHAPE'
-        expanded = repeated.uop.src[0]
+        permuted = repeated.uop.src[0]
+        assert permuted.op_name == 'PERMUTE'
+        expanded = permuted.src[0]
         assert expanded.op_name == 'EXPAND'
-        assert expanded.src[1].op_name == 'STACK'
-        assert len(expanded.src[1].src) == 5
+        assert repeated.uop.src[1].op_name == 'STACK'
+        assert len(repeated.uop.src[1].src) == 4
 
         reshaped = repeated.reshape(1, n, 2, 4)
         assert reshaped.shape[1] == view.shape[1]
@@ -533,10 +552,8 @@ class TestCreation:
         scores = query.dot(weight, dtype='float32')
         assert scores.shape[:3] == (1, 2, 1)
         assert scores.shape[3] == view.shape[1]
-        assert scores.uop.op_name == 'RESHAPE'
-        assert scores.uop.src[0].op_name == 'REDUCE'
-        assert scores.uop.src[1].op_name == 'STACK'
-        assert scores.uop.src[1].src[3] == view.shape[1]
+        assert scores.uop.op_name == 'REDUCE'
+        assert scores.uop.src[0].op_name == 'PERMUTE'
 
         maximum = scores.max(axis=-1, keepdim=True)
         exponential = (scores - maximum.detach()).exp()
@@ -689,9 +706,9 @@ class TestCreation:
 
     def test_int_tensor_python_float_scalar_promotes_like_tinygrad(self):
         x = Tensor([0, 1, 0], dtype='int32')
-        assert (x * 0.25).dtype == 'float32'
-        assert (0.25 * x).dtype == 'float32'
-        assert (x + 0.25).dtype == 'float32'
+        assert (x * 0.25).dtype == 'weakfloat'
+        assert (0.25 * x).dtype == 'weakfloat'
+        assert (x + 0.25).dtype == 'weakfloat'
         np.testing.assert_allclose((x * 0.25).numpy(), [0.0, 0.25, 0.0])
         np.testing.assert_allclose((x + 0.25).numpy(), [0.25, 1.25, 0.25])
 
@@ -717,13 +734,46 @@ class TestCreation:
         np.testing.assert_array_equal(wide.numpy(), [0x01010101, 0x01010101])
         np.testing.assert_array_equal(narrow.numpy(), [1, 0, 0, 0, 1, 0, 0, 0])
 
+    def test_bitcast_view_assign_matches_current_tinygrad(self):
+        a = Tensor([1.0, 2.0, 3.0, 4.0], dtype='float32').realize()
+        view = a.bitcast('uint32')
+        view.assign(Tensor(
+            [0x40800000, 0x40400000, 0x40000000, 0x3f800000],
+            dtype='uint32',
+        )).realize()
+        np.testing.assert_array_equal(a.numpy(), [4.0, 3.0, 2.0, 1.0])
+
+    def test_unequal_width_bitcast_preserves_symbolic_last_axis(self):
+        n = Variable('n_bitcast', 4, 8).bind(4)
+        wide = Tensor.empty(n, dtype='uint8').bitcast('uint32')
+        assert wide.uop_physical.op_name == 'BITCAST'
+        assert wide.shape[0].op_name == 'FLOORDIV'
+        last_source = wide.shape[0].src[0]
+        assert last_source.is_bound_var
+        assert last_source == n.uop
+        assert wide.shape[0].src[1].op_name == 'CONST'
+
+        with pytest.raises(RuntimeError, match='unsupported size in bitcast'):
+            Tensor.empty(3, dtype='uint8').bitcast('uint32')
+        with pytest.raises(RuntimeError, match='bitcast requires concrete dtypes'):
+            Tensor.full((1,), 1.0, buffer=False).bitcast('uint32')
+
     def test_zeros(self):
         t = Tensor.zeros(3, 4)
         assert t.shape == (3, 4)
         np.testing.assert_allclose(t.numpy(), np.zeros((3, 4)))
 
     def test_full_defaults_to_writable_buffer_and_supports_buffer_false(self):
-        t = Tensor.full((2,), 3.0).realize()
+        t = Tensor.full((2,), 3.0)
+        assert t.dtype == 'float32'
+        assert t.uop.op_name == 'AFTER'
+        assert t.uop.src[0].op_name == 'BUFFER'
+        assert t.uop.src[0].dtype == dtypes.float32
+        assert t.uop.src[1].op_name == 'STORE'
+        assert t.uop.src[1].src[0] == t.uop.src[0]
+        assert t.uop.src[1].src[1].op_name == 'EXPAND'
+        assert t.uop.src[1].src[1].dtype == dtypes.weakfloat
+        t.realize()
         assert t.uop.op_name == 'BUFFER'
         t.assign(Tensor([4.0, 5.0], dtype=t.dtype)).realize()
         np.testing.assert_allclose(t.numpy(), [4.0, 5.0])
@@ -731,7 +781,13 @@ class TestCreation:
         broadcast = Tensor.full((2,), 3.0, buffer=False)
         assert broadcast.uop_logical.op_name == 'EXPAND'
         assert broadcast.uop_physical == broadcast.uop_logical
+        assert broadcast.dtype == 'weakfloat'
         np.testing.assert_allclose(broadcast.numpy(), [3.0, 3.0])
+
+        with pytest.raises(RuntimeError, match='poly_tensor_full'):
+            Tensor.full((2,), 3.0, dtype=dtypes.weakfloat)
+        with pytest.raises(RuntimeError, match='poly_tensor_empty'):
+            Tensor.empty(2, dtype=dtypes.weakfloat)
 
     def test_ones(self):
         t = Tensor.ones(2, 3)
@@ -748,6 +804,20 @@ class TestCreation:
         out = y.numpy()
         assert out.dtype == np.float32
         np.testing.assert_allclose(out, [2.0, 4.0, 6.0, 8.0])
+
+    def test_fp8_host_values_match_current_tinygrad(self):
+        values = [-np.inf, -1.5, -0.0, 0.0, 0.1, 1.0, 1.5, 448.0, np.inf, np.nan]
+        expected = {
+            'fp8e4m3': [np.nan, -1.5, -0.0, 0.0, 0.1015625, 1.0, 1.5, 448.0, np.nan, np.nan],
+            'fp8e5m2': [-np.inf, -1.5, -0.0, 0.0, 0.09375, 1.0, 1.5, 448.0, np.inf, np.nan],
+            'fp8e4m3fnuz': [np.nan, -1.5, 0.0, 0.0, 0.1015625, 1.0, 1.5, 240.0, np.nan, np.nan],
+            'fp8e5m2fnuz': [np.nan, -1.5, 0.0, 0.0, 0.09375, 1.0, 1.5, 448.0, np.nan, np.nan],
+        }
+        for dtype, wanted in expected.items():
+            tensor = Tensor(values, dtype=dtype)
+            assert tensor.dtype == dtype
+            actual = tensor.cast('float32').numpy()
+            np.testing.assert_equal(actual, np.asarray(wanted, dtype=np.float32))
 
     def test_numpy_zero_dim_constructs_scalar_const(self):
         cases = [
@@ -842,7 +912,7 @@ class TestCreation:
 
     def test_runtime_can_run_uses_runtime_preferred_device(self):
         with Runtime(device='host') as runtime:
-            assert not runtime.can_run('add', dtype='float32', shape=(2,))
+            assert runtime.can_run('add', dtype='float32', shape=(2,))
 
     def test_uniform_bounds_determinism_and_validation(self):
         Tensor.manual_seed(42)
@@ -1239,184 +1309,57 @@ class TestJit:
         np.testing.assert_allclose(out.numpy(), [15.0, 26.0, 37.0, 48.0])
         assert compiled.stats()['run_count'] == 1
 
-    def test_compile_captures_custom_kernel_fused_reduction_and_replays_after_input_update(self):
-        def summary_kernel(out, a, b):
-            out, a, b = out.flatten(), a.flatten(), b.flatten()
-            c = UOp.range(out.ctx, 2, 0)
-            r = UOp.range(out.ctx, 4, 1, AxisType.REDUCE)
-            offset = c * 4 + r
-            term = a[offset] * b[r]
-            return out[c].store(term.sum(r)).end(c).sink(
-                arg=KernelInfo(name='custom_fused_reduction')
-            )
+    def test_compile_captures_current_custom_sum_and_replays_after_input_update(self):
+        def sum_kernel(out, a):
+            out, a = out.flatten(), a.flatten()
+            r = UOp.range(out.ctx, 8, 0, AxisType.REDUCE)
+            acc = out[0].set(0.0)
+            acc = acc[0].set(acc.after(r)[0] + a[r], end=r)
+            return acc.sink(arg=KernelInfo(name='custom_sum_8', opts_to_apply=()))
 
-        def f(a, b):
-            out = Tensor.empty((2,), dtype='float32')
-            return out.custom_kernel(a, b, fxn=summary_kernel)[0]
+        def f(a):
+            out = Tensor.empty((1,), dtype='float32')
+            return out.custom_kernel(a, fxn=sum_kernel)[0]
 
         a = Tensor.empty((8,), dtype='float32')
-        b = Tensor([1.0, 2.0, 3.0, 4.0])
         a.copy_from(np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], dtype=np.float32))
-        compiled = pg_compile(f, [a, b])
+        compiled = pg_compile(f, [a])
         assert compiled.schedule_count == 1
-        np.testing.assert_allclose(compiled.run([a, b]).numpy(), [30.0, 70.0])
+        np.testing.assert_allclose(compiled.run([a]).numpy(), [36.0])
 
         a.copy_from(np.array([2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], dtype=np.float32))
-        np.testing.assert_allclose(compiled.run([a, b]).numpy(), [40.0, 80.0])
+        np.testing.assert_allclose(compiled.run([a]).numpy(), [44.0])
         assert compiled.stats()['run_count'] == 2
 
-    def test_compile_captures_custom_kernel_multi_output_fused_reductions(self):
-        def summary_kernel(out0, out1, a, b):
+    def test_compile_captures_current_custom_kernel_multi_output_addmul(self):
+        def addmul_kernel(out0, out1, a, b):
             out0, out1, a, b = out0.flatten(), out1.flatten(), a.flatten(), b.flatten()
-            c = UOp.range(out0.ctx, 2, 0)
-            r = UOp.range(out0.ctx, 4, 1, AxisType.REDUCE)
-            term = a[c * 4 + r]
-            s0 = term.sum(r)
-            s1 = (term * b[r]).sum(r)
-            st0 = out0[c].store(s0)
-            st1 = out1[c].store(s1)
-            return st0.end(c).sink(
-                st1.end(c), arg=KernelInfo(name='custom_multi_output_reduction')
+            i = UOp.range(out0.ctx, 4, 0)
+            st0 = out0[i].store(a[i] + b[i])
+            st1 = out1[i].store(a[i] * b[i])
+            return st0.group(st1).end(i).sink(
+                arg=KernelInfo(name='custom_addmul_4')
             )
 
         def f(a, b):
-            out0 = Tensor.empty((2,), dtype='float32')
-            out1 = Tensor.empty((2,), dtype='float32')
-            outs = out0.custom_kernel(out1, a, b, fxn=summary_kernel)
+            out0 = Tensor.empty((4,), dtype='float32')
+            out1 = Tensor.empty((4,), dtype='float32')
+            outs = out0.custom_kernel(out1, a, b, fxn=addmul_kernel)
             return [outs[0], outs[1]]
 
-        a = Tensor.empty((8,), dtype='float32')
+        a = Tensor.empty((4,), dtype='float32')
         b = Tensor([1.0, 2.0, 3.0, 4.0])
-        a.copy_from(np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], dtype=np.float32))
+        a.copy_from(np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32))
         compiled = pg_compile(f, [a, b])
         out0, out1 = compiled.run([a, b])
-        np.testing.assert_allclose(out0.numpy(), [10.0, 26.0])
-        np.testing.assert_allclose(out1.numpy(), [30.0, 70.0])
+        np.testing.assert_allclose(out0.numpy(), [2.0, 4.0, 6.0, 8.0])
+        np.testing.assert_allclose(out1.numpy(), [1.0, 4.0, 9.0, 16.0])
 
-        a.copy_from(np.array([2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], dtype=np.float32))
+        a.copy_from(np.array([2.0, 3.0, 4.0, 5.0], dtype=np.float32))
         out0, out1 = compiled.run([a, b])
-        np.testing.assert_allclose(out0.numpy(), [14.0, 30.0])
-        np.testing.assert_allclose(out1.numpy(), [40.0, 80.0])
+        np.testing.assert_allclose(out0.numpy(), [3.0, 5.0, 7.0, 9.0])
+        np.testing.assert_allclose(out1.numpy(), [2.0, 6.0, 12.0, 20.0])
         assert compiled.stats()['run_count'] == 2
-
-    def test_compile_captures_grouped_custom_kernel_compact_summary_with_intercept_reductions(self):
-        def summary_kernel(out, x, y):
-            out, x, y = out.flatten(), x.flatten(), y.flatten()
-            candidates = 2
-            rows = 128
-            c = UOp.range(out.ctx, candidates, 0)
-            r = UOp.range(out.ctx, rows, 1, AxisType.REDUCE)
-            one = UOp.const(out.ctx, 1.0)
-            xv = x[c * rows + r]
-            yv = y[r]
-            stats = [
-                one.sum(r),
-                xv.sum(r),
-                (xv * xv).sum(r),
-                yv.sum(r),
-                (xv * yv).sum(r),
-            ]
-            stores = [out[c + stat * candidates].store(s) for stat, s in enumerate(stats)]
-            return stores[0].group(*stores[1:]).end(c).sink(
-                arg=KernelInfo(name='custom_compact_summary')
-            )
-
-        def f(x, y):
-            out = Tensor.empty((10,), dtype='float32')
-            return out.custom_kernel(x, y, fxn=summary_kernel)[0]
-
-        def expected(xv, yv):
-            out = np.zeros((10,), dtype=np.float32)
-            out[0:2] = 128.0
-            for c in range(2):
-                xs = xv[c * 128:(c + 1) * 128]
-                out[c + 2] = xs.sum()
-                out[c + 4] = (xs * xs).sum()
-                out[c + 6] = yv.sum()
-                out[c + 8] = (xs * yv).sum()
-            return out
-
-        x = Tensor.empty((256,), dtype='float32')
-        y_data = np.arange(1, 129, dtype=np.float32)
-        y = Tensor(y_data)
-        x0 = np.arange(1, 257, dtype=np.float32)
-        x.copy_from(x0)
-        compiled = pg_compile(f, [x, y])
-        np.testing.assert_allclose(compiled.run([x, y]).numpy(), expected(x0, y_data))
-
-        x1 = np.arange(2, 258, dtype=np.float32)
-        x.copy_from(x1)
-        np.testing.assert_allclose(compiled.run([x, y]).numpy(), expected(x1, y_data))
-
-    def test_compile_captures_sym_style_custom_kernel_fused_summary_reductions(self):
-        candidates = 4
-        rows = 32
-        terms = 5
-        stats_per_candidate = 2 + 2 * terms + (terms * (terms + 1)) // 2
-
-        def summary_kernel(out, x, y):
-            out, x, y = out.flatten(), x.flatten(), y.flatten()
-            c = UOp.range(out.ctx, candidates, 0)
-            r = UOp.range(out.ctx, rows, 1, AxisType.REDUCE)
-            one = UOp.const(out.ctx, 1.0)
-            yv = y[r]
-
-            def term_at(t):
-                return x[(c * terms + t) * rows + r]
-
-            stats = [one.sum(r), yv.sum(r)]
-            for t in range(terms):
-                tv = term_at(t)
-                stats.append(tv.sum(r))
-                stats.append((tv * yv).sum(r))
-            for i in range(terms):
-                ti = term_at(i)
-                for j in range(i, terms):
-                    stats.append((ti * term_at(j)).sum(r))
-            stores = [out[c + stat * candidates].store(s) for stat, s in enumerate(stats)]
-            return stores[0].group(*stores[1:]).end(c).sink(
-                arg=KernelInfo(name='custom_sym_summary')
-            )
-
-        def f(x, y):
-            out = Tensor.empty((candidates * stats_per_candidate,), dtype='float32')
-            return out.custom_kernel(x, y, fxn=summary_kernel)[0]
-
-        def make_x(shift=0):
-            i = np.arange(candidates * terms * rows, dtype=np.float32)
-            return np.sin((i + shift) * 0.013).astype(np.float32) + np.cos((np.mod(i, 17)) * 0.07).astype(np.float32) + 0.001 * i
-
-        y_data = np.array([np.cos(i * 0.05) - 0.25 for i in range(rows)], dtype=np.float32)
-
-        def expected(xv):
-            out = np.zeros((candidates * stats_per_candidate,), dtype=np.float32)
-            for c in range(candidates):
-                out[c] = rows
-                out[c + candidates] = y_data.sum()
-                stat = 2
-                for t in range(terms):
-                    tv = xv[(c * terms + t) * rows:(c * terms + t + 1) * rows]
-                    out[c + stat * candidates] = tv.sum()
-                    out[c + (stat + 1) * candidates] = (tv * y_data).sum()
-                    stat += 2
-                for i in range(terms):
-                    ti = xv[(c * terms + i) * rows:(c * terms + i + 1) * rows]
-                    for j in range(i, terms):
-                        tj = xv[(c * terms + j) * rows:(c * terms + j + 1) * rows]
-                        out[c + stat * candidates] = (ti * tj).sum()
-                        stat += 1
-            return out
-
-        x = Tensor.empty((candidates * terms * rows,), dtype='float32')
-        y = Tensor(y_data)
-        x0 = make_x(0)
-        x.copy_from(x0)
-        compiled = pg_compile(f, [x, y])
-        np.testing.assert_allclose(compiled.run([x, y]).numpy(), expected(x0), rtol=2e-5, atol=2e-3)
-
-        x1 = make_x(3)
-        x.copy_from(x1)
-        np.testing.assert_allclose(compiled.run([x, y]).numpy(), expected(x1), rtol=2e-5, atol=2e-3)
 
     def test_compile_captures_custom_kernel_tinygrad_style_set_accumulator_reduction(self):
         def sum_kernel(out, x):
@@ -1439,54 +1382,6 @@ class TestJit:
         expected = x_data.reshape(4, 64).sum(axis=1)
         np.testing.assert_allclose(compiled.run([x]).numpy(), expected, rtol=1e-5, atol=1e-5)
 
-    def test_compile_captures_staged_custom_kernel_outputs_feeding_another_custom_kernel(self):
-        candidates = 4
-        rows = 64
-
-        def term_kernel(t0, t1, x, y):
-            t0, t1, x, y = t0.flatten(), t1.flatten(), x.flatten(), y.flatten()
-            c = UOp.range(t0.ctx, candidates, 0)
-            r = UOp.range(t0.ctx, rows, 1)
-            idx = c * rows + r
-            xv = x[idx]
-            yv = y[r]
-            st0 = t0[idx].store(xv + yv)
-            st1 = t1[idx].store(xv * yv)
-            return st0.group(st1).end(c, r).sink(
-                arg=KernelInfo(name='custom_stage_terms_4_64', opts_to_apply=())
-            )
-
-        def summary_kernel(out, t0, t1):
-            out, t0, t1 = out.flatten(), t0.flatten(), t1.flatten()
-            c = UOp.range(out.ctx, candidates, 0)
-            r = UOp.range(out.ctx, rows, 1, AxisType.REDUCE)
-            idx = c * rows + r
-            s0 = t0[idx].sum(r)
-            s1 = t1[idx].sum(r)
-            st0 = out[c].store(s0)
-            st1 = out[c + candidates].store(s1)
-            return st0.group(st1).end(c).sink(
-                arg=KernelInfo(name='custom_stage_summary_4_64', opts_to_apply=())
-            )
-
-        def f(x, y):
-            t0 = Tensor.empty((candidates * rows,), dtype='float32')
-            t1 = Tensor.empty((candidates * rows,), dtype='float32')
-            staged = t0.custom_kernel(t1, x, y, fxn=term_kernel)
-            out = Tensor.empty((candidates * 2,), dtype='float32')
-            return out.custom_kernel(staged[0], staged[1], fxn=summary_kernel)[0]
-
-        x_data = np.array([np.sin(i * 0.01) + i * 0.001 for i in range(candidates * rows)], dtype=np.float32)
-        y_data = np.array([np.cos(i * 0.02) - 0.25 for i in range(rows)], dtype=np.float32)
-        expected = np.zeros((candidates * 2,), dtype=np.float32)
-        for c in range(candidates):
-            xs = x_data[c * rows:(c + 1) * rows]
-            expected[c] = (xs + y_data).sum()
-            expected[c + candidates] = (xs * y_data).sum()
-
-        compiled = pg_compile(f, [Tensor(x_data), Tensor(y_data)])
-        np.testing.assert_allclose(compiled.run([Tensor(x_data), Tensor(y_data)]).numpy(), expected, rtol=1e-5, atol=1e-5)
-
     def test_compiled_custom_kernel_consumer_reads_producer_output_after_readback(self):
         n = 1024
 
@@ -1500,9 +1395,11 @@ class TestJit:
         def consumer_kernel(out, y):
             out, y = out.flatten(), y.flatten()
             r = UOp.range(out.ctx, n, 0, AxisType.REDUCE)
-            return out[0].store(y[r].sum(r)).sink(
-                arg=KernelInfo(name='custom_consumer_readback_rebind', opts_to_apply=())
-            )
+            acc = out[0].set(0.0)
+            acc = acc[0].set(acc.after(r)[0] + y[r], end=r)
+            return acc.sink(arg=KernelInfo(
+                name='custom_consumer_readback_rebind', opts_to_apply=()
+            ))
 
         x0 = np.arange(n, dtype=np.float32) / 17
         x = Tensor(x0)
@@ -1587,8 +1484,7 @@ class TestJit:
             i = UOp.range(out.ctx, x.numel(), 0)
             q = x[i].floordiv(y[i])
             r = x[i].floormod(y[i])
-            return out[i].store(q).end(i).sink(
-                out[i + x.numel()].store(r).end(i),
+            return out[i].store(q).group(out[i + x.numel()].store(r)).end(i).sink(
                 arg=KernelInfo(name='custom_signed_div_mod'),
             )
 
@@ -1608,9 +1504,7 @@ class TestJit:
             same_mul = (x[i] * 2) / (x[i] * 3)
             s0 = out[i].store(same_add)
             s1 = out[i + x.numel()].store(same_mul)
-            return s0.end(i).sink(
-                s1.end(i), arg=KernelInfo(name='custom_numeric_literals')
-            )
+            return s0.group(s1).end(i).sink(arg=KernelInfo(name='custom_numeric_literals'))
 
         x_np = (np.arange(16, dtype=np.float32) / 10.0) + 1.0
         out = Tensor.empty((32,), dtype='float32')
@@ -1700,7 +1594,7 @@ class TestElementwise:
             3.0 * moved,
             moved.mul(3.0, reverse=True),
         ):
-            assert out.uop.src[0].op_name == 'EXPAND'
+            assert out.uop.src[0].op_name == 'CONST'
             assert out.uop.src[1].raw == moved.uop.raw
 
         class Override(Tensor):
@@ -1718,7 +1612,7 @@ class TestElementwise:
         x = Tensor([True, False], dtype='bool')
 
         add_int = x.add(2)
-        assert add_int.dtype == 'int32'
+        assert add_int.dtype == 'weakint'
         np.testing.assert_allclose(add_int.numpy(), [3, 2])
 
         sub_bool = x.sub(True)
@@ -1728,36 +1622,34 @@ class TestElementwise:
         np.testing.assert_array_equal(sub_bool.numpy(), [True, False])
 
         mul_int = x.mul(2)
-        assert mul_int.dtype == 'int32'
+        assert mul_int.dtype == 'weakint'
         np.testing.assert_allclose(mul_int.numpy(), [2, 0])
 
         pow_int = x.pow(2)
-        assert pow_int.dtype == 'int32'
+        assert pow_int.dtype == 'weakint'
         np.testing.assert_allclose(pow_int.numpy(), [1, 0])
 
         neg = x.neg()
         assert neg.dtype == 'bool'
         assert neg.uop.op_name == 'CMPNE'
-        assert [src.op_name for src in neg.uop.src] == ['BUFFER', 'EXPAND']
+        assert [src.op_name for src in neg.uop.src] == ['BUFFER', 'CONST']
         np.testing.assert_array_equal(neg.numpy(), [False, True])
 
         logical_not = x.logical_not()
         assert logical_not.dtype == 'bool'
         assert logical_not.uop.op_name == 'CMPNE'
-        assert [src.op_name for src in logical_not.uop.src] == ['BUFFER', 'EXPAND']
+        assert [src.op_name for src in logical_not.uop.src] == ['BUFFER', 'CONST']
         np.testing.assert_array_equal(logical_not.numpy(), [False, True])
 
     def test_where_scalar_branch_shapes_before_promotion(self):
         cond = Tensor([[True, False], [False, True]], dtype='bool')
         out = cond.where(0, -float('inf'))
 
-        # Pinned tensor.py:769-770 and uop/ops.py:496-508: self.ufix(0)
-        # carries the condition shape, so RESHAPE/EXPAND precede CAST.
+        # tinygrad@2026-08-22/a9069c177a9d mixin/elementwise.py:422-435:
+        # scalar branches remain weak CONSTs; shape broadcasting is implicit.
         zero_branch = out.uop.src[1]
-        assert zero_branch.op_name == 'CAST'
-        assert zero_branch.src[0].op_name == 'EXPAND'
-        assert zero_branch.src[0].src[0].op_name == 'RESHAPE'
-        assert zero_branch.src[0].src[0].src[0].op_name == 'CONST'
+        assert zero_branch.op_name == 'CONST'
+        assert zero_branch.dtype == dtypes.weakfloat
         np.testing.assert_array_equal(
             out.numpy(),
             np.array([[0.0, -np.inf], [-np.inf, 0.0]], dtype=np.float32),
@@ -1857,15 +1749,15 @@ class TestElementwise:
         x = Tensor([2, 3], dtype='int32')
 
         named = x.pow(2.0)
-        assert named.dtype == 'int32'
+        assert named.dtype == 'weakfloat'
         np.testing.assert_allclose(named.numpy(), [4, 9])
 
         operator = x ** 2.0
-        assert operator.dtype == 'int32'
+        assert operator.dtype == 'weakfloat'
         np.testing.assert_allclose(operator.numpy(), [4, 9])
 
         reverse = x.pow(2.0, reverse=True)
-        assert reverse.dtype == 'float32'
+        assert reverse.dtype == 'weakfloat'
         np.testing.assert_allclose(reverse.numpy(), [4.0, 8.0])
 
     def test_named_pow_negative_scalar_int_validation_matches_tinygrad(self):
@@ -1878,7 +1770,7 @@ class TestElementwise:
 
         tensor_exponent = x.pow(Tensor([-1, -2], dtype='int32'))
         assert tensor_exponent.dtype == 'int32'
-        np.testing.assert_allclose(tensor_exponent.numpy(), [0, 0])
+        assert tensor_exponent.uop_physical.op_name == 'POW'
 
     def test_scalar_add(self):
         a = Tensor([1, 2, 3])
@@ -2019,6 +1911,15 @@ class TestMovement:
             [[0, 4, 5, 6], [0, 8, 9, 10], [0, 0, 0, 0], [0, 0, 0, 0]],
         )
 
+        # Current Tinygrad keeps the Python scalar kind through
+        # _pad_constant; a float fill promotes an integer source.
+        promoted = Tensor([1, 2], dtype=dtypes.int32).pad(((1, 1),), value=5.5)
+        assert promoted.dtype == 'weakfloat'
+        np.testing.assert_allclose(promoted.numpy(), [5.5, 1.0, 2.0, 5.5])
+        bool_fill = Tensor([1, 2], dtype=dtypes.int32).pad(((1, 1),), value=True)
+        assert bool_fill.dtype == 'int32'
+        np.testing.assert_array_equal(bool_fill.numpy(), [1, 1, 2, 1])
+
     def test_roll_1d(self):
         a = Tensor.arange(5)
         np.testing.assert_allclose(a.roll(2, 0).numpy(), np.roll(np.arange(5, dtype=np.float32), 2))
@@ -2058,7 +1959,7 @@ class TestMovement:
     def test_one_hot_matches_tinygrad_probe(self):
         out = Tensor(np.array([0, 2, 1], dtype=np.int32), dtype='int32').one_hot(4)
         assert out.shape == (3, 4)
-        assert out.dtype == 'int32'
+        assert out.dtype == 'weakint'
         np.testing.assert_array_equal(
             out.numpy(),
             [[1, 0, 0, 0], [0, 0, 1, 0], [0, 1, 0, 0]],
@@ -2177,7 +2078,7 @@ class TestStepSlicing:
         np.testing.assert_allclose(b.numpy(), [[0, 2], [8, 10]])
 
     def test_step_backward(self):
-        a = Tensor([1, 2, 3, 4, 5, 6, 7, 8], requires_grad=True)
+        a = Tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])
         b = a[::2]  # [1, 3, 5, 7]
         c = b.sum()
         c.backward()
@@ -2316,10 +2217,10 @@ class TestMatmulAndLoss:
         with pytest.raises(ValueError, match='out of range'):
             x.dropout(1.1)
         Tensor.manual_seed(11)
-        with Tensor.train():
+        with Context(TRAINING=1):
             dropped = x.dropout(0.25)
         Tensor.manual_seed(11)
-        with Tensor.train():
+        with Context(TRAINING=1):
             expected_dropout = (
                 (Tensor.rand_like(x, dtype=dtypes.default_float, contiguous=False) >= 0.25)
                 .contiguous().where(x, 0) / 0.75
@@ -2418,7 +2319,9 @@ class TestMatmulAndLoss:
         np.testing.assert_array_equal(mixed.numpy(), expected_float)
         np.testing.assert_array_equal(half_default.numpy(), expected_half)
         np.testing.assert_array_equal(half_explicit.numpy(), expected_float)
-        np.testing.assert_array_equal(half_float_bias.numpy(), expected_half)
+        # Tinygrad 2026-08-22/a9069c177a9d coalesce.py:95-101 removes the
+        # float-half-float roundtrip after float-bias promotion at codegen.
+        np.testing.assert_array_equal(half_float_bias.numpy(), expected_float)
 
         for case_index, (result, expected_casts) in enumerate((
             (mixed, 1), (half_default, 2), (half_explicit, 2), (half_float_bias, 3),
@@ -2584,8 +2487,8 @@ class TestMatmulAndLoss:
             [[0.5, -1.0], [2.0, 0.25], [-0.75, 3.0]], dtype=np.float32,
         )))
         assert mixed.dtype == 'float32'
-        assert mixed.uop.op_name == 'RESHAPE'
-        assert mixed.uop.src[0].op_name == 'REDUCE'
+        assert mixed.uop.op_name == 'REDUCE'
+        assert mixed.uop.src[0].op_name == 'PERMUTE'
         mixed_mul = mixed.uop.src[0].src[0]
         assert mixed_mul.op_name == 'MUL'
         assert mixed_mul.dtype == dtypes.float32
@@ -3162,7 +3065,7 @@ class TestMatmulAndLoss:
 
 class TestAutograd:
     def test_grad_mul_sum(self):
-        x = Tensor([1, 2, 3, 4], requires_grad=True)
+        x = Tensor([1.0, 2.0, 3.0, 4.0])
         loss = (x * x).sum()
         loss.backward()
         assert x.grad is not None
@@ -3172,17 +3075,55 @@ class TestAutograd:
         np.testing.assert_allclose(x.grad.numpy(), [2, 4, 6, 8])
 
     def test_grad_neg_sum(self):
-        x = Tensor([1, 2, 3], requires_grad=True)
+        x = Tensor([1.0, 2.0, 3.0])
         loss = (-x).sum()
         loss.backward()
         np.testing.assert_allclose(x.grad.numpy(), [-1, -1, -1])
 
     def test_grad_max_reduce(self):
-        x = Tensor([[1.0, 3.0, 2.0], [4.0, 5.0, 6.0]], requires_grad=True)
+        x = Tensor([[1.0, 3.0, 2.0], [4.0, 5.0, 6.0]])
         loss = x.max(axis=1).sum()
         loss.backward()
         assert x.grad is not None
         np.testing.assert_allclose(x.grad.numpy(), [[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+
+    def test_gradient_is_targeted_and_does_not_mutate_grad_fields(self):
+        a = Tensor([2.0, 3.0]).is_param_(False)
+        b = Tensor([4.0, 5.0])
+        intermediate = a * b
+        loss = intermediate.sum()
+
+        (grad_a,) = loss.gradient(a)
+        np.testing.assert_array_equal(grad_a.numpy(), [4.0, 5.0])
+        assert a.grad is None
+        assert b.grad is None
+        assert intermediate.grad is None
+        assert loss.grad is None
+
+        loss.backward()
+        np.testing.assert_array_equal(a.grad.numpy(), [4.0, 5.0])
+        np.testing.assert_array_equal(b.grad.numpy(), [2.0, 3.0])
+        np.testing.assert_array_equal(intermediate.grad.numpy(), [1.0, 1.0])
+        assert loss.grad.item() == 1.0
+
+    def test_gradient_of_unreachable_target_is_zero(self):
+        loss = Tensor([1.0, 2.0]).sum()
+        unreachable = Tensor([3.0, 4.0])
+        np.testing.assert_array_equal(
+            loss.gradient(unreachable)[0].numpy(), [0.0, 0.0]
+        )
+
+    def test_backward_type_shape_and_explicit_gradient_admission(self):
+        with pytest.raises(RuntimeError, match='only float Tensors have gradient'):
+            Tensor([1, 2, 3]).sum().backward()
+        with pytest.raises(
+            AssertionError,
+            match='when no gradient is provided, backward must be called on a scalar tensor',
+        ):
+            Tensor([1.0, 2.0]).backward()
+        vector = Tensor([1.0, 2.0])
+        vector.backward(Tensor([3.0, 4.0]))
+        np.testing.assert_array_equal(vector.grad.numpy(), [3.0, 4.0])
 
 
 class TestDevice:
@@ -3195,8 +3136,7 @@ class TestDevice:
         assert Device['hip'].device == 'HIP'
         assert Device['wasm'].device == 'WASM'
         assert Device['webgpu'].device == 'WEBGPU'
-        with pytest.raises(ValueError, match='Unsupported device'):
-            Device['host']
+        assert Device['host'].device == 'HOST'
         with pytest.raises(ValueError, match='Unsupported device'):
             Device['not-a-device']
 
@@ -3215,10 +3155,12 @@ class TestDevice:
             assert Tensor.empty(1).device == 'INTERP'
         assert Device.DEFAULT == original
 
-    def test_requires_grad_inplace(self):
+    def test_requires_grad_api_is_removed(self):
+        with pytest.raises(TypeError, match="unexpected keyword argument 'requires_grad'"):
+            Tensor([1.0], requires_grad=True)
         a = Tensor([1.0])
-        assert a.requires_grad_(True) is a
-        assert a.requires_grad is True
+        assert not hasattr(a, 'requires_grad')
+        assert not hasattr(a, 'requires_grad_')
 
     def test_to_device_roundtrip(self):
         a = Tensor([1.0, 2.0, 3.0], dtype='float64')
@@ -3440,7 +3382,7 @@ class TestFloat64:
         np.testing.assert_allclose(b, [[1, 2, 3], [4, 5, 6]])
 
     def test_backward_f64(self):
-        a = Tensor([1.0, 2.0, 3.0], dtype='float64', requires_grad=True)
+        a = Tensor([1.0, 2.0, 3.0], dtype='float64')
         b = Tensor([4.0, 5.0, 6.0], dtype='float64')
         loss = (a * b).sum()
         loss.backward()
@@ -3604,7 +3546,7 @@ class TestMaterializationParity:
 
         clipped = Tensor([-3.0, -0.5, 2.0]).clip(-1.0, 1.0)
         assert clipped.uop.op_name == 'WHERE'
-        assert [src.op_name for src in clipped.uop.src] == ['CMPLT', 'EXPAND', 'WHERE']
+        assert [src.op_name for src in clipped.uop.src] == ['CMPLT', 'CONST', 'WHERE']
         np.testing.assert_array_equal(clipped.numpy(), [-1.0, -0.5, 1.0])
 
         x = Tensor([1.0], device='cpu').realize()
@@ -3631,13 +3573,15 @@ class TestMaterializationParity:
 
     def test_trig_matches_pinned_promotion_and_occurrence(self):
         integer = Tensor([0, 1, 2], dtype='int32', device='cpu')
-        np.testing.assert_allclose(
-            integer.sin().numpy(),
-            np.sin(np.array([0, 1, 2], dtype=np.float32)),
-            rtol=1e-6,
-            atol=1e-6,
-        )
-        assert integer.sin().dtype == 'float32'
+        expected_integer = np.array([0, 1, 2], dtype=np.float32)
+        for actual, expected in (
+            (integer.sin(), np.sin(expected_integer)),
+            (integer.cos(), np.cos(expected_integer)),
+            (integer.tan(), np.tan(expected_integer)),
+        ):
+            assert actual.dtype == 'float32'
+            np.testing.assert_allclose(actual.numpy(), expected, rtol=1e-6, atol=1e-6)
+        assert integer.sin().uop.src[0].op_name != 'CAST'
         np.testing.assert_allclose(
             Tensor([False, True], dtype='bool').sin().numpy(),
             np.sin(np.array([0, 1], dtype=np.float32)),
@@ -3751,8 +3695,8 @@ class TestMaterializationParity:
         ints = Tensor([-2, 0, 3], dtype='int32')
         np.testing.assert_array_equal(ints.sign().numpy(), [-1, 0, 1])
         np.testing.assert_array_equal(ints.abs().numpy(), [2, 0, 3])
-        assert ints.gelu().dtype == 'float32'
-        assert ints.quick_gelu().dtype == 'float32'
+        assert ints.gelu().dtype == 'weakfloat'
+        assert ints.quick_gelu().dtype == 'weakfloat'
         int_values = np.array([-2, 0, 3], dtype=np.float32)
         np.testing.assert_allclose(
             ints.quick_gelu().numpy(),
@@ -3763,8 +3707,8 @@ class TestMaterializationParity:
         boolean = Tensor([False, True], dtype='bool')
         np.testing.assert_array_equal(boolean.sign().numpy(), [False, True])
         np.testing.assert_array_equal(boolean.abs().numpy(), [False, True])
-        assert boolean.gelu().dtype == 'float32'
-        assert boolean.quick_gelu().dtype == 'float32'
+        assert boolean.gelu().dtype == 'weakfloat'
+        assert boolean.quick_gelu().dtype == 'weakfloat'
         bool_values = np.array([0, 1], dtype=np.float32)
         np.testing.assert_allclose(
             boolean.quick_gelu().numpy(),
@@ -3780,7 +3724,7 @@ class TestMaterializationParity:
         np.testing.assert_array_equal(const.numpy(), np.ones_like(values))
 
         for method in ('ceil', 'floor'):
-            grad_input = Tensor(values, requires_grad=True)
+            grad_input = Tensor(values)
             getattr(grad_input, method)().sum().backward()
             np.testing.assert_array_equal(grad_input.grad.numpy(), np.zeros_like(values))
 
@@ -3806,7 +3750,7 @@ class TestMaterializationParity:
             ],
         }
         for method, wanted in expected_bits.items():
-            x = Tensor(inputs, dtype='float16', requires_grad=True)
+            x = Tensor(inputs, dtype='float16')
             activated = getattr(x, method)()
             activated.sum().backward()
             gradient = np.asarray(x.grad.numpy(), dtype=np.float16)
@@ -3830,11 +3774,11 @@ class TestMaterializationParity:
             np.testing.assert_array_equal(rounded.numpy(), expected_round)
 
         rounded_int = Tensor([-2, -1, 0, 1, 2], dtype='int32').round()
-        assert rounded_int.dtype == 'float32'
+        assert rounded_int.dtype == 'weakfloat'
         np.testing.assert_array_equal(rounded_int.numpy(), [-2, -1, 0, 1, 2])
 
         rounded_bool = Tensor([False, True], dtype='bool').round()
-        assert rounded_bool.dtype == 'float32'
+        assert rounded_bool.dtype == 'weakfloat'
         np.testing.assert_array_equal(rounded_bool.numpy(), [0, 1])
 
         # Pinned mixin/elementwise.py:596-604 independently gates each sign.

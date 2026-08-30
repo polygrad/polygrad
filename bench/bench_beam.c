@@ -6,7 +6,7 @@
  * Reports execution time and speedup ratio.
  */
 
-#include "../src/codegen.h"
+#include "../src/codegen/codegen.h"
 #include "../src/frontend.h"
 #include "../src/engine/schedule.h"
 #include <math.h>
@@ -57,9 +57,7 @@ typedef struct {
 
 static BenchResult bench_vecadd(int N, int beam_width) {
   /* Heuristic */
-  setenv("POLY_OPTIMIZE", "1", 1);
-  setenv("POLY_DEVECTORIZE", "1", 1);
-  unsetenv("POLY_BEAM");
+  unsetenv("BEAM");
 
   PolyCtx *ctx1 = poly_ctx_new();
   PolyUOp *a1 = poly_buffer_f32(ctx1, N);
@@ -83,7 +81,7 @@ static BenchResult bench_vecadd(int N, int beam_width) {
   /* BEAM */
   char bw[16];
   snprintf(bw, sizeof(bw), "%d", beam_width);
-  setenv("POLY_BEAM", bw, 1);
+  setenv("BEAM", bw, 1);
 
   PolyCtx *ctx2 = poly_ctx_new();
   PolyUOp *a2 = poly_buffer_f32(ctx2, N);
@@ -99,16 +97,14 @@ static BenchResult bench_vecadd(int N, int beam_width) {
   };
   double t_beam = bench_realize(ctx2, sk2, bind2, 3, 3, 20);
   poly_ctx_destroy(ctx2);
-  unsetenv("POLY_BEAM");
+  unsetenv("BEAM");
 
   free(da); free(db); free(dout);
   return (BenchResult){ "vecadd", t_heur, t_beam };
 }
 
 static BenchResult bench_reduce_sum(int N, int beam_width) {
-  setenv("POLY_OPTIMIZE", "1", 1);
-  setenv("POLY_DEVECTORIZE", "1", 1);
-  unsetenv("POLY_BEAM");
+  unsetenv("BEAM");
 
   PolyCtx *ctx1 = poly_ctx_new();
   PolyUOp *a1 = poly_buffer_f32(ctx1, N);
@@ -131,7 +127,7 @@ static BenchResult bench_reduce_sum(int N, int beam_width) {
   /* BEAM */
   char bw[16];
   snprintf(bw, sizeof(bw), "%d", beam_width);
-  setenv("POLY_BEAM", bw, 1);
+  setenv("BEAM", bw, 1);
 
   PolyCtx *ctx2 = poly_ctx_new();
   PolyUOp *a2 = poly_buffer_f32(ctx2, N);
@@ -146,16 +142,14 @@ static BenchResult bench_reduce_sum(int N, int beam_width) {
   };
   double t_beam = bench_realize(ctx2, sk2, bind2, 2, 3, 20);
   poly_ctx_destroy(ctx2);
-  unsetenv("POLY_BEAM");
+  unsetenv("BEAM");
 
   free(da);
   return (BenchResult){ "reduce_sum", t_heur, t_beam };
 }
 
 static BenchResult bench_chain_fused(int N, int beam_width) {
-  setenv("POLY_OPTIMIZE", "1", 1);
-  setenv("POLY_DEVECTORIZE", "1", 1);
-  unsetenv("POLY_BEAM");
+  unsetenv("BEAM");
 
   PolyCtx *ctx1 = poly_ctx_new();
   PolyUOp *a1 = poly_buffer_f32(ctx1, N);
@@ -181,7 +175,7 @@ static BenchResult bench_chain_fused(int N, int beam_width) {
 
   char bw[16];
   snprintf(bw, sizeof(bw), "%d", beam_width);
-  setenv("POLY_BEAM", bw, 1);
+  setenv("BEAM", bw, 1);
 
   PolyCtx *ctx2 = poly_ctx_new();
   PolyUOp *a2 = poly_buffer_f32(ctx2, N);
@@ -200,16 +194,14 @@ static BenchResult bench_chain_fused(int N, int beam_width) {
   };
   double t_beam = bench_realize(ctx2, sk2, bind2, 3, 3, 20);
   poly_ctx_destroy(ctx2);
-  unsetenv("POLY_BEAM");
+  unsetenv("BEAM");
 
   free(da); free(db); free(dout);
   return (BenchResult){ "chain_fused", t_heur, t_beam };
 }
 
 static BenchResult bench_matmul(int M, int K, int N, int beam_width) {
-  setenv("POLY_OPTIMIZE", "1", 1);
-  setenv("POLY_DEVECTORIZE", "1", 1);
-  unsetenv("POLY_BEAM");
+  unsetenv("BEAM");
 
   PolyCtx *ctx1 = poly_ctx_new();
   PolyUOp *a1 = poly_buffer_f32(ctx1, M * K);
@@ -238,7 +230,7 @@ static BenchResult bench_matmul(int M, int K, int N, int beam_width) {
 
   char bw[16];
   snprintf(bw, sizeof(bw), "%d", beam_width);
-  setenv("POLY_BEAM", bw, 1);
+  setenv("BEAM", bw, 1);
 
   PolyCtx *ctx2 = poly_ctx_new();
   PolyUOp *a2 = poly_buffer_f32(ctx2, M * K);
@@ -259,7 +251,7 @@ static BenchResult bench_matmul(int M, int K, int N, int beam_width) {
   };
   double t_beam = bench_realize(ctx2, sk2, bind2, 3, 2, 10);
   poly_ctx_destroy(ctx2);
-  unsetenv("POLY_BEAM");
+  unsetenv("BEAM");
 
   free(da); free(db); free(dout);
   return (BenchResult){ "matmul", t_heur, t_beam };

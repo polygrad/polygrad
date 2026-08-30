@@ -20,8 +20,10 @@ from pathlib import Path
 import numpy as np
 
 import polygrad
-from polygrad import Device, Tensor, Variable, dtypes
-from polygrad.nn import Conv2d, Linear, SGD, get_parameters
+from polygrad import Context, Device, Tensor, Variable, dtypes
+from polygrad.helpers import TRAINING
+from polygrad.nn import Conv2d, Linear, get_parameters
+from polygrad.nn.optim import SGD
 
 
 CIFAR_MEAN = np.array(
@@ -204,13 +206,11 @@ class UnsyncedBatchNorm:
         self.track_running_stats = track_running_stats
         self.weight = Tensor.ones(channels, dtype="float32").is_param_(False) if affine else None
         self.bias = Tensor.zeros(channels, dtype="float32") if affine else None
-        if self.bias is not None:
-            self.bias.requires_grad = True
         self.running_mean = Tensor.zeros(1, channels, dtype="float32").is_param_(False)
         self.running_var = Tensor.ones(1, channels, dtype="float32").is_param_(False)
 
     def calc_stats(self, x: Tensor):
-        if Tensor.training or not self.track_running_stats:
+        if TRAINING or not self.track_running_stats:
             batch_mean = x.mean(axis=(1, 3, 4))
             y = x - batch_mean.detach().reshape((batch_mean.shape[0], 1, -1, 1, 1))
             batch_var = (y * y).mean(axis=(1, 3, 4))
@@ -382,7 +382,7 @@ def eval_model(model, x_test: Tensor, y_test: Tensor, bs: int, flatten: bool, li
         cutmix_steps=0,
         cutmix_size=1,
     )
-    with Tensor.train(False):
+    with Context(TRAINING=0):
         for _ in range(0, total, bs):
             x_t, y_t = next(batches)
             logits = model(x_t)
@@ -483,7 +483,7 @@ def main() -> None:
         opt.lr = lr_for_step(step, steps, lr, final_lr_ratio)
         before = polygrad.stats()
         st = time.perf_counter()
-        with Tensor.train(True):
+        with Context(TRAINING=1):
             opt.zero_grad()
             logits = model(xb)
             loss = cross_entropy(logits, yb, label_smoothing=label_smoothing)
@@ -493,7 +493,7 @@ def main() -> None:
         elapsed_ms = (time.perf_counter() - st) * 1e3
         after = polygrad.stats()
         launches = stat_delta(before, after, "launch_count")
-        schedules = stat_delta(before, after, "schedule_cache_misses")
+        schedules = stat_delta(before, after, "runtime_cache_misses")
         print(
             f"{step:3d} {elapsed_ms:8.2f} ms run, "
             f"{loss_value:8.4f} loss, {opt.lr:.6f} LR, "

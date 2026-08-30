@@ -2,7 +2,7 @@
  * poly_bundle.h -- Portable model bundle format (poly.bundle@1)
  *
  * A single-file container for a complete PolyInstance:
- *   - IR section: tensor-level UOp graph (poly.ir.uops@1)
+ *   - IR section: current tensor-level UOp graph
  *   - WEIGHTS section: parameter data (safetensors format)
  *   - METADATA section: JSON (model family, entrypoint info, etc.)
  *
@@ -17,7 +17,7 @@
  *     [N bytes]  section_data
  *
  * Section types:
- *   0x01  POLY_BUNDLE_IR        poly.ir.uops@1 payload
+ *   0x01  POLY_BUNDLE_IR        current poly.ir.uops payload
  *   0x02  POLY_BUNDLE_WEIGHTS   safetensors payload
  *   0x03  POLY_BUNDLE_METADATA  UTF-8 JSON
  *
@@ -48,7 +48,7 @@ extern "C" {
 /* Encode */
 
 /* Encode a bundle from IR bytes + optional weights bytes + optional metadata JSON.
- * ir_data/ir_len: required (poly.ir.uops@1 bytes from poly_ir_export)
+ * ir_data/ir_len: required bytes from poly_ir_export
  * weights_data/weights_len: optional (safetensors bytes, pass NULL/0 to omit)
  * metadata_json: optional (UTF-8 JSON string, pass NULL to omit)
  * Returns malloc'd bytes. Caller frees. Sets *out_len.

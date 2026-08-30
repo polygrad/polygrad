@@ -102,8 +102,6 @@ def _can_run_dtype(dtype):
     if dtype is None:
         return 'float32'
     if isinstance(dtype, DType):
-        if dtype.count != 1:
-            return ''
         name = INVERSE_DTYPES_DICT.get(dtype.name, dtype.name)
     else:
         name = str(dtype).lower()

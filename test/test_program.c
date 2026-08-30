@@ -11,9 +11,9 @@
 static uint8_t *program_test_ir(bool with_param, int *out_len) {
   PolyCtx *ctx = poly_ctx_new();
   if (!ctx) return NULL;
-  PolyUOp *x = poly_buffer_f32(ctx, 2);
-  PolyUOp *rhs = poly_buffer_f32(ctx, 2);
-  PolyUOp *out = poly_buffer_f32(ctx, 2);
+  PolyUOp *x = poly_uop_new_logical_buffer(ctx, POLY_FLOAT32, 2);
+  PolyUOp *rhs = poly_uop_new_logical_buffer(ctx, POLY_FLOAT32, 2);
+  PolyUOp *out = poly_uop_new_logical_buffer(ctx, POLY_FLOAT32, 2);
   PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, poly_alu2(ctx, POLY_OP_MUL, x, rhs)));
   const char *inputs[] = {"x"};
   const char *outputs[] = {"output"};
@@ -75,7 +75,7 @@ TEST(program, compiled_roundtrip_exact_bytes_and_values) {
   ASSERT_NOT_NULL(program);
   ASSERT_TRUE(program_len > 32);
   ASSERT_TRUE(memcmp(program, "PGPM", 4) == 0);
-  ASSERT_INT_EQ(program[4], 1);
+  ASSERT_INT_EQ(program[4], POLY_PROGRAM_VERSION);
   ASSERT_INT_EQ(program[8], POLYGRAD_ABI_VERSION);
 
   poly_program_source_render_count_reset();
@@ -90,32 +90,32 @@ TEST(program, compiled_roundtrip_exact_bytes_and_values) {
   PolyUOp *body = linear->src[0]->src[0];
   ASSERT_INT_EQ(body->op, POLY_OP_PROGRAM);
   ASSERT_INT_EQ(body->src[0]->op, POLY_OP_SINK);
-  ASSERT_INT_EQ(body->src[1]->op, POLY_OP_DEVICE);
   if (poly_uop_device(body) == POLY_DEVICE_INTERP) {
-    /* Polygrad's approved interpreter backend executes the tensor SINK
-     * directly and therefore has no renderer-owned LINEAR/SOURCE/BINARY
-     * stages. The two-source PROGRAM is already complete for that backend. */
+    /* PG-DIV-004: the C interpreter retains Tinygrad's compiled LINEAR but
+     * has no PythonRenderer SOURCE/BINARY payload. */
     ASSERT_INT_EQ(body->n_src, 2);
+    ASSERT_INT_EQ(body->src[1]->op, POLY_OP_LINEAR);
   } else {
-    ASSERT_TRUE(body->n_src == 4 || body->n_src == 5);
-    ASSERT_INT_EQ(body->src[2]->op, POLY_OP_LINEAR);
-    ASSERT_INT_EQ(body->src[3]->op, POLY_OP_SOURCE);
-    if (body->n_src == 5) ASSERT_INT_EQ(body->src[4]->op, POLY_OP_BINARY);
+    ASSERT_TRUE(body->n_src == 3 || body->n_src == 4);
+    ASSERT_INT_EQ(body->src[1]->op, POLY_OP_LINEAR);
+    ASSERT_INT_EQ(body->src[2]->op, POLY_OP_SOURCE);
+    if (body->n_src == 4) ASSERT_INT_EQ(body->src[3]->op, POLY_OP_BINARY);
   }
 
-  bool saw_pointer = false;
+  bool saw_value_param = false;
   int n_tag_bool = 0, n_tag_int_tuple = 0, n_tag_string = 0;
   int n_body = 0;
   PolyUOp **body_topo = poly_toposort_alloc(poly_instance_ctx(loaded), body, &n_body);
   ASSERT_NOT_NULL(body_topo);
   for (int i = 0; i < n_body; i++) {
-    saw_pointer |= body_topo[i]->dtype.is_ptr;
+    saw_value_param |= body_topo[i]->op == POLY_OP_PARAM && body_topo[i]->n_src == 1 &&
+                       body_topo[i]->arg.kind == POLY_ARG_PARAM;
     n_tag_bool += body_topo[i]->tag_arg.kind == POLY_ARG_BOOL;
     n_tag_int_tuple += body_topo[i]->tag_arg.kind == POLY_ARG_INT_TUPLE;
     n_tag_string += body_topo[i]->tag_arg.kind == POLY_ARG_STRING;
   }
   poly_toposort_free(body_topo);
-  ASSERT_TRUE(saw_pointer);
+  ASSERT_TRUE(saw_value_param);
   if (poly_uop_device(body) == POLY_DEVICE_X86) {
     /* X86 stores immediate markers, register lists, and labels in tag_arg.
      * Dropping these fields changes UOp identity and collapses the imported

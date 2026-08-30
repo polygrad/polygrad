@@ -11,7 +11,7 @@
 
 #ifdef POLY_HAS_HIP
 
-#include "codegen.h"
+#include "codegen/codegen.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

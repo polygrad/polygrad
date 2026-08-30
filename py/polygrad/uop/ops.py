@@ -13,21 +13,25 @@ from enum import IntEnum
 
 
 class AxisType(IntEnum):
-    GLOBAL = 0
-    WARP = 1
-    LOCAL = 2
-    LOOP = 3
-    GROUP_REDUCE = 4
-    REDUCE = 5
-    UPCAST = 6
-    UNROLL = 7
-    THREAD = 8
-    PLACEHOLDER = 9
+    DEVICE = 0
+    GLOBAL = 1
+    WARP = 2
+    LOCAL = 3
+    WEAK = 4
+    GROUP_REDUCE = 5
+    REDUCE = 6
+    UPCAST = 7
+    UNROLL = 8
+    THREAD = 9
+    PLACEHOLDER = 10
+    LOOP = 11
 
 
+POLY_AXIS_DEVICE = int(AxisType.DEVICE)
 POLY_AXIS_GLOBAL = int(AxisType.GLOBAL)
 POLY_AXIS_WARP = int(AxisType.WARP)
 POLY_AXIS_LOCAL = int(AxisType.LOCAL)
+POLY_AXIS_WEAK = int(AxisType.WEAK)
 POLY_AXIS_LOOP = int(AxisType.LOOP)
 POLY_AXIS_GROUP_REDUCE = int(AxisType.GROUP_REDUCE)
 POLY_AXIS_REDUCE = int(AxisType.REDUCE)
@@ -38,7 +42,7 @@ POLY_AXIS_PLACEHOLDER = int(AxisType.PLACEHOLDER)
 
 _BASE_OPS = frozenset(
     _ffi.OPS[name]
-    for name in ('RESHAPE', 'EXPAND', 'PERMUTE', 'PAD', 'SHRINK', 'FLIP', 'MULTI', 'DETACH')
+    for name in ('RESHAPE', 'EXPAND', 'PERMUTE', 'PAD', 'SHRINK', 'FLIP', 'UNSHARD', 'DETACH')
 )
 _DIRECT_REALIZED_OPS = frozenset((_ffi.OPS['BUFFER'], _ffi.OPS['BUFFER_VIEW']))
 
@@ -114,6 +118,8 @@ class UOp:
             return dtypes.void
         if _ffi._lib.poly_dtype_id_by_name(b'weakint') == dtype_id:
             return dtypes.weakint
+        if _ffi._lib.poly_dtype_id_by_name(b'weakfloat') == dtype_id:
+            return dtypes.weakfloat
         for name, dtype in DTYPES_DICT.items():
             if _ffi._lib.poly_dtype_id_by_name(name.encode('utf-8')) == dtype_id:
                 return dtype
@@ -126,6 +132,14 @@ class UOp:
         n = _ffi._lib.poly_uop_n_src(self.raw)
         return tuple(UOp(self.ctx, _ffi._lib.poly_uop_src(self.raw, i)) for i in range(n))
 
+    @property
+    def is_variable(self):
+        return bool(self.raw and _ffi._lib.poly_uop_is_variable(self.raw))
+
+    @property
+    def is_bound_var(self):
+        return bool(self.raw and _ffi._lib.poly_uop_is_bound_var(self.raw))
+
     # --- Factories ---
 
     @staticmethod
@@ -137,14 +151,22 @@ class UOp:
         return UOp(ctx, raw) if raw else None
 
     @staticmethod
-    def variable(ctx, name, min_val, max_val):
-        """Mirrors tinygrad's UOp.variable: creates a DEFINE_VAR UOp."""
-        raw = _ffi._lib.poly_define_var(ctx, name.encode() if isinstance(name, str) else name, min_val, max_val)
+    def variable(ctx, name, min_val, max_val, dtype=dtypes.weakint, multiple_of=1, param=False):
+        """Create Tinygrad's ALU-address-space BUFFER/PARAM variable."""
+        dtype = to_dtype(dtype)
+        dtype_name = INVERSE_DTYPES_DICT.get(dtype.name, dtype.name)
+        dtype_id = _ffi._lib.poly_dtype_id_by_name(dtype_name.encode('utf-8'))
+        if dtype_id < 0:
+            raise ValueError(f'unknown dtype {dtype}')
+        raw = _ffi._lib.poly_uop_variable_by_id(
+            ctx, name.encode() if isinstance(name, str) else name,
+            min_val, max_val, dtype_id, multiple_of, param,
+        )
         return UOp(ctx, raw) if raw else None
 
     def bind(self, value):
-        """Mirrors tinygrad's UOp.bind: binds a DEFINE_VAR to a concrete value."""
-        raw = _ffi._lib.poly_bind_var(self.ctx, self.raw, value)
+        """Bind an integer through AFTER(variable, STORE(variable, CONST))."""
+        raw = _ffi._lib.poly_uop_bind(self.ctx, self.raw, value)
         return UOp(self.ctx, raw) if raw else None
 
     # --- UOp-level op constructors (mirror tinygrad's UOp.contiguous / etc.) ---
@@ -162,7 +184,7 @@ class UOp:
         return UOp(uop.ctx, raw) if raw else None
 
     @staticmethod
-    def range(ctx, bound, axis_id=0, axis_type=AxisType.LOOP):
+    def range(ctx, bound, axis_id=0, axis_type=AxisType.WEAK):
         raw = _ffi._lib.poly_uop_range(ctx, int(bound), int(axis_id), int(axis_type))
         return UOp(ctx, raw) if raw else None
 
@@ -176,7 +198,7 @@ class UOp:
         raw = _ffi._lib.poly_uop_flatten(self.ctx, self.raw)
         return UOp(self.ctx, raw) if raw else None
 
-    def index(self, *idx, ptr=False):
+    def index(self, *idx):
         if len(idx) == 1 and isinstance(idx[0], (tuple, list)):
             idx = tuple(idx[0])
         indices = []
@@ -188,7 +210,7 @@ class UOp:
             else:
                 raise TypeError(f'unsupported index type {type(x).__name__}')
         arr = (_ffi._ptr * len(indices))(*indices) if indices else None
-        raw = _ffi._lib.poly_uop_index(self.ctx, self.raw, arr, len(indices), int(bool(ptr)))
+        raw = _ffi._lib.poly_uop_index(self.ctx, self.raw, arr, len(indices))
         return UOp(self.ctx, raw) if raw else None
 
     def __getitem__(self, idx):
@@ -260,6 +282,9 @@ class UOp:
     def _coerce(self, value):
         if isinstance(value, UOp):
             return value
+        if isinstance(value, bool):
+            dtype_id = _ffi._lib.poly_dtype_id_by_name(b'bool')
+            return UOp(self.ctx, _ffi._lib.poly_const_int_by_id(self.ctx, int(value), dtype_id))
         if isinstance(value, int):
             return UOp(self.ctx, _ffi._lib.poly_const_int(self.ctx, value))
         if isinstance(value, float):
@@ -283,9 +308,20 @@ class UOp:
         return self._coerce(value)
 
     @staticmethod
-    def const(ctx, value):
+    def const(ctx, value, dtype=None):
         if isinstance(value, UOp):
-            return value
+            return value if dtype is None else value.cast(dtype)
+        if dtype is not None:
+            dtype = to_dtype(dtype)
+            dtype_name = INVERSE_DTYPES_DICT.get(dtype.name, dtype.name)
+            dtype_id = _ffi._lib.poly_dtype_id_by_name(dtype_name.encode('utf-8'))
+            raw = (_ffi._lib.poly_const_int_by_id(ctx, value, dtype_id)
+                   if isinstance(value, int)
+                   else _ffi._lib.poly_const_float_by_id(ctx, float(value), dtype_id))
+            return UOp(ctx, raw) if raw else None
+        if isinstance(value, bool):
+            dtype_id = _ffi._lib.poly_dtype_id_by_name(b'bool')
+            return UOp(ctx, _ffi._lib.poly_const_int_by_id(ctx, int(value), dtype_id))
         if isinstance(value, int):
             return UOp(ctx, _ffi._lib.poly_const_int(ctx, value))
         if isinstance(value, float):
@@ -297,8 +333,8 @@ class UOp:
         return UOp(self.ctx, raw) if raw else None
 
     def _alu2(self, op_name, other):
-        other = self._coerce_like(other, self)
-        raw = _ffi._lib.poly_alu2(self.ctx, _ffi.OPS[op_name], self.raw, other.raw)
+        other = self._coerce(other)
+        raw = _ffi._lib.poly_binop(self.ctx, _ffi.OPS[op_name], self.raw, other.raw)
         return UOp(self.ctx, raw) if raw else None
 
     def _alu3(self, op_name, b, c):
@@ -309,7 +345,7 @@ class UOp:
 
     def cast(self, dtype):
         dtype = to_dtype(dtype)
-        name = INVERSE_DTYPES_DICT.get(dtype.scalar().name, dtype.scalar().name)
+        name = INVERSE_DTYPES_DICT.get(dtype.name, dtype.name)
         dtype_id = _ffi._lib.poly_dtype_id_by_name(name.encode('utf-8'))
         if dtype_id < 0:
             raise ValueError(f'unknown dtype {dtype}')
@@ -320,25 +356,33 @@ class UOp:
         return self._alu2('ADD', other)
 
     def __radd__(self, other):
-        return self._coerce_like(other, self)._alu2('ADD', self)
+        other = self._coerce(other)
+        raw = _ffi._lib.poly_binop(self.ctx, _ffi.OPS['ADD'], other.raw, self.raw)
+        return UOp(self.ctx, raw) if raw else None
 
     def __sub__(self, other):
         return self._alu2('SUB', other)
 
     def __rsub__(self, other):
-        return self._coerce_like(other, self)._alu2('SUB', self)
+        other = self._coerce(other)
+        raw = _ffi._lib.poly_binop(self.ctx, _ffi.OPS['SUB'], other.raw, self.raw)
+        return UOp(self.ctx, raw) if raw else None
 
     def __mul__(self, other):
         return self._alu2('MUL', other)
 
     def __rmul__(self, other):
-        return self._coerce_like(other, self)._alu2('MUL', self)
+        other = self._coerce(other)
+        raw = _ffi._lib.poly_binop(self.ctx, _ffi.OPS['MUL'], other.raw, self.raw)
+        return UOp(self.ctx, raw) if raw else None
 
     def __truediv__(self, other):
         return self._alu2('FDIV', other)
 
     def __rtruediv__(self, other):
-        return self._coerce_like(other, self)._alu2('FDIV', self)
+        other = self._coerce(other)
+        raw = _ffi._lib.poly_binop(self.ctx, _ffi.OPS['FDIV'], other.raw, self.raw)
+        return UOp(self.ctx, raw) if raw else None
 
     def __neg__(self):
         return self._alu1('NEG')
@@ -356,7 +400,9 @@ class UOp:
         return self.floordiv(other)
 
     def __rfloordiv__(self, other):
-        return self._coerce_like(other, self)._alu2('FLOORDIV', self)
+        other = self._coerce(other)
+        raw = _ffi._lib.poly_binop(self.ctx, _ffi.OPS['FLOORDIV'], other.raw, self.raw)
+        return UOp(self.ctx, raw) if raw else None
 
     def floormod(self, other):
         return self._alu2('FLOORMOD', other)
@@ -365,7 +411,9 @@ class UOp:
         return self.floormod(other)
 
     def __rmod__(self, other):
-        return self._coerce_like(other, self)._alu2('FLOORMOD', self)
+        other = self._coerce(other)
+        raw = _ffi._lib.poly_binop(self.ctx, _ffi.OPS['FLOORMOD'], other.raw, self.raw)
+        return UOp(self.ctx, raw) if raw else None
 
     def mod(self, other):
         return self.floormod(other)
@@ -439,7 +487,9 @@ class UOp:
         return self._alu1('TRUNC')
 
     def where(self, yes, no):
-        return self._alu3('WHERE', yes, no)
+        yes, no = self._coerce(yes), self._coerce(no)
+        raw = _ffi._lib.poly_where_op(self.ctx, self.raw, yes.raw, no.raw)
+        return UOp(self.ctx, raw) if raw else None
 
     def mulacc(self, mul, acc):
         return self._alu3('MULACC', mul, acc)
@@ -492,7 +542,7 @@ class UOp:
         """Runtime buffer for a directly realized storage UOp, otherwise None.
 
         Tinygrad restricts this to BUFFER/MSTACK. Polygrad's physical
-        BUFFER_VIEW is also direct storage; movement/MULTI wrappers are handled
+        BUFFER_VIEW is also direct storage; movement/UNSHARD wrappers are handled
         only by ``is_realized`` through ``base``.
         """
         if self.op not in _DIRECT_REALIZED_OPS:

@@ -44,8 +44,9 @@ def main():
         )
 
     pg_ops = {
-        _ffi._lib.poly_op_name(i).decode("utf-8")
+        name.decode("utf-8")
         for i in range(_ffi._lib.poly_op_count())
+        if (name := _ffi._lib.poly_op_name(i))
     }
     tg_ops = {op.name for op in Ops}
     actual = {
@@ -55,6 +56,8 @@ def main():
 
     owners = {"tinygrad_only": {}, "polygrad_only": {}}
     for entry in entries:
+        if entry["status"] == "resolved":
+            continue
         for side, names in entry.get("vocabulary", {}).items():
             if side not in owners:
                 raise RuntimeError(f"{entry['id']}: unknown vocabulary side {side}")

@@ -9,12 +9,12 @@ Tinygrad source: codegen/simplify.py:94-149
     # 4. fold_range_two_sided: ((r>=lower)&(r<upper)).where(val,0).reduce_add(r) -> ...
     # 5. fold_range_above:    ((r<cut).where(val,0)).reduce_add(r) -> ...
     # 6. reduce_add_distribute: (x+y).reduce_add(*r) -> x.reduce_add(*r) + y.reduce_add(*r)
-    # 7. and_on_where:        ((DEFINE_VAR & y).where(c,0)).reduce_add(*r) -> ...
+    # 7. and_on_where:        ((variable & y).where(c,0)).reduce_add(*r) -> ...
     # 8. mul_casted_bool:     x * gate.cast() -> gate.where(x, 0)
   ]) + symbolic
 
   reduce_collapse(red, u, pm) walks each reduce range, gates the value subtree
-  on `r in node.ranges`, replaces external deps with fresh DEFINE_VARs (with
+  on `r in node.ranges`, replaces external deps with fresh variables (with
   their vmin/vmax), graph_rewrites the substituted form, checks no_range, and
   substitutes back. Lines 129-142.
 

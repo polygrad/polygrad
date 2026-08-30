@@ -394,8 +394,11 @@ TEST(registry, instance_from_ctx_basic) {
   ASSERT_STR_EQ(poly_instance_param_name(inst, 0), "w");
 
   /* Verify named accessors */
-  ASSERT_TRUE(poly_instance_get_buffer(inst, "w") == w);
-  ASSERT_TRUE(poly_instance_get_sink(inst, "forward") == sink);
+  /* Approved Instance placement boundary: the registry supplies immutable
+   * logical roots; activation publishes a complete physical graph. */
+  ASSERT_TRUE(poly_instance_get_buffer(inst, "w") != w);
+  ASSERT_TRUE(poly_instance_get_sink(inst, "forward") != sink);
+  ASSERT_FALSE(poly_tensor_root_has_unplaced_buffer(ctx, poly_instance_get_sink(inst, "forward")));
   ASSERT_TRUE(poly_instance_ctx(inst) == ctx);
   ASSERT_INT_EQ(poly_instance_buf_numel_named(inst, "w"), 4);
 
@@ -562,9 +565,9 @@ TEST(registry, instance_from_ctx_parity_with_ir) {
 
   /* Manual PolyIrSpec fixture. */
   PolyCtx *ctx_b = poly_ctx_new();
-  PolyUOp *wb = poly_buffer_f32(ctx_b, N);
-  PolyUOp *xb = poly_buffer_f32(ctx_b, N);
-  PolyUOp *ob = poly_buffer_f32(ctx_b, N);
+  PolyUOp *wb = poly_uop_new_logical_buffer(ctx_b, POLY_FLOAT32, N);
+  PolyUOp *xb = poly_uop_new_logical_buffer(ctx_b, POLY_FLOAT32, N);
+  PolyUOp *ob = poly_uop_new_logical_buffer(ctx_b, POLY_FLOAT32, N);
   PolyUOp *prod_b = poly_alu2(ctx_b, POLY_OP_MUL, wb, xb);
   PolyUOp *st_b = poly_store_val(ctx_b, ob, prod_b);
   PolyUOp *sink_b = poly_sink1(ctx_b, st_b);

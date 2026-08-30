@@ -9,12 +9,12 @@
 
 #include "test_harness.h"
 #include "../src/polygrad.h"
-#include "../src/simplify.h"
+#include "../src/codegen/simplify.h"
 #include "../src/tensor.h"
-#include "../src/pat.h"
+#include "../src/uop/upat.h"
 #include "../src/engine/schedule.h" /* poly_get_kernel_graph, poly_reshape, poly_reduce_axis */
 #include "../src/schedule/rangeify.h"
-#include "../src/codegen.h" /* poly_linearize */
+#include "../src/codegen/codegen.h" /* poly_linearize */
 #include "../src/frontend.h" /* poly_buffer_f32, poly_sink1, poly_store_val */
 
 /* helpers */
@@ -23,15 +23,8 @@
  * reduce_simplify, so they need the executable scheduled root instead of the
  * earlier public kernel-graph boundary. */
 static PolyUOp *single_scheduled_root(PolyCtx *ctx, PolyUOp *sink) {
-  PolySchedule *schedule = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
-  if (!schedule) return NULL;
-  if (schedule->template->n_calls != 1 || !poly_schedule_call_body(schedule, 0)) {
-    poly_schedule_free(schedule);
-    return NULL;
-  }
-  PolyUOp *root = poly_schedule_call_body(schedule, 0);
-  poly_schedule_free(schedule);
-  return root;
+  PolyUOp *linear = poly_test_create_linear(ctx, sink);
+  return linear && linear->n_src == 1 ? poly_test_linear_call_body(linear, 0) : NULL;
 }
 
 /* Build a fresh RANGE(count, axis_id, LOOP). */
@@ -53,7 +46,7 @@ static PolyUOp *mk_reduce(
   srcs[0] = value;
   for (int i = 0; i < n_ranges; i++)
     srcs[1 + i] = ranges[i];
-  return poly_uop(ctx, POLY_OP_REDUCE, dt, srcs, 1 + n_ranges, poly_arg_ops(op));
+  return poly_uop(ctx, POLY_OP_REDUCE, dt, srcs, 1 + n_ranges, poly_arg_reduce(op, 0));
 }
 
 /* D1 stub smoke tests (kept after D2 lands) */
@@ -70,12 +63,78 @@ TEST(reduce_simplify, split_ranges_without_ctx_is_noop_not_abort) {
   PASS();
 }
 
-TEST(reduce_simplify, reduce_pass_without_ctx_is_noop_not_abort) {
+TEST(reduce_simplify, flatten_range_preserves_bool_backedge) {
+  /* tinygrad@2026-08-22/a9069c177a9d codegen/simplify.py:8-18. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *r = poly_range(ctx, 16, 0, POLY_AXIS_LOOP);
+  PolyUOp *four = poly_const_int(ctx, 4);
+  PolyUOp *gate = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, r, four, poly_arg_none());
+  PolyUOp *value = poly_const_int(ctx, 1);
+  PolyUOp *src[2] = {value, gate};
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, src, 2, poly_arg_none());
+
+  ASSERT_PTR_EQ(poly_graph_rewrite(ctx, end, poly_pm_flatten_range()), end);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(reduce_simplify, simplify_ranges_uses_largest_index_guard) {
+  /* tinygrad@2026-08-22/a9069c177a9d codegen/simplify.py:43-60. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *r = poly_range(ctx, 16, 0, POLY_AXIS_LOOP);
+  PolyUOp *buf = poly_test_program_param(ctx, POLY_FLOAT32, 16, 0);
+  PolyUOp *invalid = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_invalid());
+  PolyUOp *indices[2];
+  for (int i = 0; i < 2; i++) {
+    PolyUOp *bound = poly_const_int(ctx, i == 0 ? 4 : 8);
+    PolyUOp *gate = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, r, bound, poly_arg_none());
+    PolyUOp *coord = poly_uop3(
+        ctx, POLY_OP_WHERE, POLY_WEAKINT, gate, r, invalid, poly_arg_none());
+    indices[i] = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, buf, coord, poly_arg_none());
+  }
+  PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, indices, 2, poly_arg_none());
+  PolyMap *state = poly_map_new(16);
+  PolyUOp *out = poly_graph_rewrite_ctx(ctx, sink, poly_pm_simplify_ranges(), state);
+  poly_map_destroy(state);
+
+  int n = 0;
+  PolyUOp **topo = poly_toposort(ctx, out, &n);
+  int ranges = 0;
+  for (int i = 0; i < n; i++) {
+    if (topo[i]->op != POLY_OP_RANGE) continue;
+    ranges++;
+    ASSERT_INT_EQ(topo[i]->src[0]->op, POLY_OP_CONST);
+    ASSERT_INT_EQ(topo[i]->src[0]->arg.i, 8);
+  }
+  ASSERT_INT_EQ(ranges, 1);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(reduce_simplify, split_ranges_excludes_device_axis) {
+  /* tinygrad@2026-08-22/a9069c177a9d codegen/simplify.py:62-65. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *r = poly_range(ctx, 16, 1, POLY_AXIS_DEVICE);
+  PolyUOp *four = poly_const_int(ctx, 4);
+  PolyUOp *mod = poly_uop2(
+      ctx, POLY_OP_FLOORMOD, POLY_WEAKINT, r, four, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, mod, poly_arg_none());
+  PolyMap *state = poly_map_new(16);
+
+  ASSERT_PTR_EQ(poly_graph_rewrite_ctx(ctx, sink, poly_pm_split_ranges(), state), sink);
+  poly_map_destroy(state);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(reduce_simplify, reduce_local_without_reduces_is_noop) {
+  /* Tinygrad 2026-08-22/a9069c177a9d codegen/__init__.py:324-325 runs the
+   * complete reduction stage with a pass-local ReduceContext. */
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *c = poly_const_int(ctx, 1);
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, c, poly_arg_none());
 
-  PolyUOp *out = poly_graph_rewrite(ctx, sink, poly_pm_reduce_pass());
+  PolyUOp *out = poly_apply_pm_reduce(ctx, sink);
   ASSERT_PTR_EQ(out, sink);
 
   poly_ctx_destroy(ctx);
@@ -136,8 +195,9 @@ TEST(reduce_simplify, d2_unparented_add_one_unused) {
   ASSERT_INT_EQ(new_red->n_src, 2); /* value + r0 only */
   ASSERT_TRUE(new_red->src[0] == val);
   ASSERT_TRUE(new_red->src[1] == r0);
-  ASSERT_TRUE(new_red->arg.kind == POLY_ARG_OPS);
-  ASSERT_TRUE(new_red->arg.ops == POLY_OP_ADD);
+  ASSERT_TRUE(new_red->arg.kind == POLY_ARG_REDUCE);
+  ASSERT_TRUE(new_red->arg.reduce.op == POLY_OP_ADD);
+  ASSERT_INT_EQ(new_red->arg.reduce.num_axes, 0);
 
   /* int32 == int32, so no CAST is emitted -- out->src[1] is bare CONST(7) */
   PolyUOp *count = out->src[1];
@@ -155,7 +215,7 @@ TEST(reduce_simplify, d2_unparented_add_const_all_unused) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *r0 = mk_range(ctx, 5, 0);
   PolyUOp *r1 = mk_range(ctx, 7, 1);
-  PolyUOp *val = poly_const_int(ctx, 4);
+  PolyUOp *val = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(4));
   PolyUOp *ranges[] = {r0, r1};
   PolyUOp *red = mk_reduce(ctx, POLY_OP_ADD, POLY_INT32, val, ranges, 2);
 
@@ -202,7 +262,9 @@ TEST(reduce_simplify, d2_unparented_mul_one_unused) {
   ASSERT_TRUE(new_red->op == POLY_OP_REDUCE);
   ASSERT_INT_EQ(new_red->n_src, 2);
   ASSERT_TRUE(new_red->src[1] == r0);
-  ASSERT_TRUE(new_red->arg.ops == POLY_OP_MUL);
+  ASSERT_TRUE(new_red->arg.kind == POLY_ARG_REDUCE);
+  ASSERT_TRUE(new_red->arg.reduce.op == POLY_OP_MUL);
+  ASSERT_INT_EQ(new_red->arg.reduce.num_axes, 0);
   ASSERT_TRUE(out->src[1]->op == POLY_OP_CONST);
   ASSERT_INT_EQ((int)out->src[1]->arg.i, 7);
 
@@ -229,7 +291,9 @@ TEST(reduce_simplify, d2_unparented_max_one_unused) {
   ASSERT_INT_EQ(out->n_src, 2); /* value + r0 only */
   ASSERT_TRUE(out->src[0] == val);
   ASSERT_TRUE(out->src[1] == r0);
-  ASSERT_TRUE(out->arg.ops == POLY_OP_MAX);
+  ASSERT_TRUE(out->arg.kind == POLY_ARG_REDUCE);
+  ASSERT_TRUE(out->arg.reduce.op == POLY_OP_MAX);
+  ASSERT_INT_EQ(out->arg.reduce.num_axes, 0);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -305,7 +369,7 @@ TEST(reduce_simplify, d9_arange_collapses_to_single_kernel) {
   PolyUOp *kernel = single_scheduled_root(ctx, sink);
   ASSERT_NOT_NULL(kernel);
   int n_lin = 0;
-  PolyUOp **lin = poly_linearize(ctx, kernel, &n_lin);
+  PolyUOp **lin = poly_test_full_rewrite_and_linearize(ctx, kernel, &n_lin);
   ASSERT_NOT_NULL(lin);
   ASSERT_TRUE(n_lin > 0);
 
@@ -326,13 +390,15 @@ TEST(reduce_simplify, d9_eye_collapses) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *e = poly_eye(ctx, 4);
   ASSERT_NOT_NULL(e);
-  PolyUOp *out = poly_buffer_f32(ctx, 16);
+  /* Tinygrad 2026-08-22 a9069c17 Tensor.eye(4).clone("CPU") stores through
+   * RESHAPE(BUFFER[16], (4,4)); keep the destination shape identical. */
+  PolyUOp *out = poly_reshape(ctx, poly_buffer_f32(ctx, 16), (int64_t[]){4, 4}, 2);
   PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, e));
 
   PolyUOp *kernel = single_scheduled_root(ctx, sink);
   ASSERT_NOT_NULL(kernel);
   int n_lin = 0;
-  PolyUOp **lin = poly_linearize(ctx, kernel, &n_lin);
+  PolyUOp **lin = poly_test_full_rewrite_and_linearize(ctx, kernel, &n_lin);
   ASSERT_NOT_NULL(lin);
 
   int n_reduce = 0;
@@ -361,7 +427,7 @@ TEST(reduce_simplify, d9_sum_of_buffer_no_collapse) {
   PolyUOp *kernel = single_scheduled_root(ctx, sink);
   ASSERT_NOT_NULL(kernel);
   int n_lin = 0;
-  PolyUOp **lin = poly_linearize(ctx, kernel, &n_lin);
+  PolyUOp **lin = poly_test_full_rewrite_and_linearize(ctx, kernel, &n_lin);
   ASSERT_NOT_NULL(lin);
 
   /* Reduction MUST survive: summing a real buffer is not collapsible. */
@@ -384,7 +450,7 @@ TEST(reduce_simplify, d9_sum_of_buffer_no_collapse) {
 }
 
 /* cumalu(MUL) must not crash even though pm_reduce_collapse is ADD-only.
- * The driver entry rule guards on red->arg.ops == ADD, so a MUL reduce
+ * The driver entry rule guards on red->arg.reduce.op == ADD, so a MUL reduce
  * should reach the inner pm_reduce_collapse only if it appears within the
  * substituted subtree -- and even then must not corrupt the graph. */
 TEST(reduce_simplify, d9_cumalu_mul_noregress) {
@@ -417,13 +483,9 @@ static bool contains_invalid_const(PolyCtx *ctx, PolyUOp *root) {
 }
 
 static PolyUOp *make_take1d_sink(PolyCtx *ctx) {
-  PolyDType ptr_i32_out = poly_dtype_ptr(POLY_INT32, 2, POLY_ADDR_GLOBAL);
-  PolyDType ptr_i32_idx = poly_dtype_ptr(POLY_INT32, 2, POLY_ADDR_GLOBAL);
-  PolyDType ptr_i32_data = poly_dtype_ptr(POLY_INT32, 4, POLY_ADDR_GLOBAL);
-
-  PolyUOp *p_out = poly_uop0(ctx, POLY_OP_PARAM, ptr_i32_out, poly_arg_int(0));
-  PolyUOp *p_idx = poly_uop0(ctx, POLY_OP_PARAM, ptr_i32_idx, poly_arg_int(1));
-  PolyUOp *p_data = poly_uop0(ctx, POLY_OP_PARAM, ptr_i32_data, poly_arg_int(2));
+  PolyUOp *p_out = poly_test_uop_param(ctx, POLY_INT32, 2, 0, POLY_ADDR_GLOBAL);
+  PolyUOp *p_idx = poly_test_uop_param(ctx, POLY_INT32, 2, 1, POLY_ADDR_GLOBAL);
+  PolyUOp *p_data = poly_test_uop_param(ctx, POLY_INT32, 4, 2, POLY_ADDR_GLOBAL);
 
   PolyUOp *bound_loop = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(2));
   PolyUOp *bound_reduce = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(4));
@@ -434,14 +496,15 @@ static PolyUOp *make_take1d_sink(PolyCtx *ctx) {
   PolyUOp *r_reduce =
       poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound_reduce, poly_arg_range(0, POLY_AXIS_REDUCE));
 
-  PolyUOp *out_idx = poly_uop2(ctx, POLY_OP_INDEX, ptr_i32_out, p_out, r_loop, poly_arg_none());
+  PolyUOp *out_idx = poly_uop2(ctx, POLY_OP_INDEX, POLY_INT32, p_out, r_loop, poly_arg_none());
   PolyUOp *idx_val = poly_uop2(ctx, POLY_OP_INDEX, POLY_INT32, p_idx, r_loop, poly_arg_none());
   PolyUOp *data_val = poly_uop2(ctx, POLY_OP_INDEX, POLY_INT32, p_data, r_reduce, poly_arg_none());
   PolyUOp *cmp = poly_uop2(ctx, POLY_OP_CMPNE, POLY_BOOL, idx_val, r_reduce, poly_arg_none());
   PolyUOp *sel = poly_uop3(ctx, POLY_OP_WHERE, POLY_INT32, cmp, zero, data_val, poly_arg_none());
 
   PolyUOp *red_srcs[2] = {sel, r_reduce};
-  PolyUOp *red = poly_uop(ctx, POLY_OP_REDUCE, POLY_INT32, red_srcs, 2, poly_arg_ops(POLY_OP_ADD));
+  PolyUOp *red =
+      poly_uop(ctx, POLY_OP_REDUCE, POLY_INT32, red_srcs, 2, poly_arg_reduce(POLY_OP_ADD, 0));
 
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out_idx, red, poly_arg_none());
   PolyUOp *end_srcs[2] = {store, r_loop};
@@ -467,8 +530,7 @@ TEST(reduce_simplify, s2_take1d_reduce_is_removed) {
 
 TEST(reduce_simplify, s2_loaded_index_add_lt_is_undone) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyDType ptr_i32 = poly_dtype_ptr(POLY_INT32, 8, POLY_ADDR_GLOBAL);
-  PolyUOp *p = poly_uop0(ctx, POLY_OP_PARAM, ptr_i32, poly_arg_int(0));
+  PolyUOp *p = poly_test_uop_param(ctx, POLY_INT32, 8, 0, POLY_ADDR_GLOBAL);
   PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(8));
   PolyUOp *r = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_range(0, POLY_AXIS_LOOP));
   PolyUOp *idx = poly_uop2(ctx, POLY_OP_INDEX, POLY_INT32, p, r, poly_arg_none());

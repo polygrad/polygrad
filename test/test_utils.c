@@ -150,8 +150,8 @@ TEST(utils, poly_selftest_runs_portable_interp_path) {
   PASS();
 }
 
-TEST(utils, poly_selftest_rejects_non_execution_device) {
-  ASSERT_INT_EQ(poly_selftest_device(POLY_DEVICE_HOST), -1);
+TEST(utils, poly_selftest_runs_python_equivalent_host_path) {
+  ASSERT_INT_EQ(poly_selftest_device(POLY_DEVICE_HOST), 0);
   PASS();
 }
 
