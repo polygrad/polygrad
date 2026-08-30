@@ -80,6 +80,10 @@ static void realize_or_die(PolyCtx *ctx, PolyTensor *tensor, const char *name) {
   (void)out;
 }
 
+/* Tinygrad 2026-08-22/a9069c177a9d Tensor.__del__ retires loop-local wrappers.
+ * C callers own handles explicitly, so the benchmark must release each call. */
+static void release_tensor(PolyTensor *tensor) { poly_tensor_release(tensor); }
+
 static double bench_sum_1024(int iters, int warmup) {
   const int64_t n = 1024;
   int64_t shape[1] = {n};
@@ -96,15 +100,18 @@ static double bench_sum_1024(int iters, int warmup) {
   for (int i = 0; i < warmup; i++) {
     PolyTensor *sum = poly_tensor_sum(ctx, a, axes, 1, false);
     realize_or_die(ctx, sum, "sum_1024 warmup");
+    release_tensor(sum);
   }
 
   double t0 = now_us();
   for (int i = 0; i < iters; i++) {
     PolyTensor *sum = poly_tensor_sum(ctx, a, axes, 1, false);
     realize_or_die(ctx, sum, "sum_1024");
+    release_tensor(sum);
   }
   double ret = (now_us() - t0) / (double)iters;
 
+  release_tensor(a);
   poly_ctx_destroy(ctx);
   free(data);
   return ret;
@@ -129,6 +136,9 @@ static double bench_movement_1024(int iters, int warmup) {
     PolyTensor *p = poly_tensor_permute(ctx, r, perm, 2);
     PolyTensor *c = poly_tensor_contiguous(ctx, p);
     realize_or_die(ctx, c, "movement_1024 warmup");
+    release_tensor(c);
+    release_tensor(p);
+    release_tensor(r);
   }
 
   double t0 = now_us();
@@ -137,9 +147,13 @@ static double bench_movement_1024(int iters, int warmup) {
     PolyTensor *p = poly_tensor_permute(ctx, r, perm, 2);
     PolyTensor *c = poly_tensor_contiguous(ctx, p);
     realize_or_die(ctx, c, "movement_1024");
+    release_tensor(c);
+    release_tensor(p);
+    release_tensor(r);
   }
   double ret = (now_us() - t0) / (double)iters;
 
+  release_tensor(a);
   poly_ctx_destroy(ctx);
   free(data);
   return ret;
@@ -168,6 +182,9 @@ static double bench_chain_1024(int iters, int warmup) {
     PolyTensor *scaled = poly_tensor_alu2(ctx, POLY_OP_MUL, sum, two);
     PolyTensor *expr = poly_tensor_alu2(ctx, POLY_OP_SUB, scaled, b);
     realize_or_die(ctx, expr, "chain_1024 warmup");
+    release_tensor(expr);
+    release_tensor(scaled);
+    release_tensor(sum);
   }
 
   double t0 = now_us();
@@ -176,9 +193,15 @@ static double bench_chain_1024(int iters, int warmup) {
     PolyTensor *scaled = poly_tensor_alu2(ctx, POLY_OP_MUL, sum, two);
     PolyTensor *expr = poly_tensor_alu2(ctx, POLY_OP_SUB, scaled, b);
     realize_or_die(ctx, expr, "chain_1024");
+    release_tensor(expr);
+    release_tensor(scaled);
+    release_tensor(sum);
   }
   double ret = (now_us() - t0) / (double)iters;
 
+  release_tensor(two);
+  release_tensor(b);
+  release_tensor(a);
   poly_ctx_destroy(ctx);
   free(a_data);
   free(b_data);
@@ -207,15 +230,19 @@ static double bench_matmul_16(int iters, int warmup) {
   for (int i = 0; i < warmup; i++) {
     PolyTensor *dot = poly_tensor_dot(ctx, a, b);
     realize_or_die(ctx, dot, "matmul_16 warmup");
+    release_tensor(dot);
   }
 
   double t0 = now_us();
   for (int i = 0; i < iters; i++) {
     PolyTensor *dot = poly_tensor_dot(ctx, a, b);
     realize_or_die(ctx, dot, "matmul_16");
+    release_tensor(dot);
   }
   double ret = (now_us() - t0) / (double)iters;
 
+  release_tensor(b);
+  release_tensor(a);
   poly_ctx_destroy(ctx);
   free(a_data);
   free(b_data);
