@@ -1500,7 +1500,6 @@ TEST_BACKEND(cuda, large_mlp_train_cuda_codegen_no_wide_f32_vectors) {
         poly_toposort(ctx, poly_test_linear_call_body(sched, i), &n_body);
     ASSERT_NOT_NULL(body_topo);
     ASSERT_INT_EQ(count_lin_ops(body_topo, n_body, POLY_OP_BUFFER), 0);
-    ASSERT_INT_EQ(count_lin_ops(body_topo, n_body, POLY_OP_BUFFER_VIEW), 0);
     int n_lin = 0;
     PolyUOp **lin =
         poly_linearize_cuda(ctx, poly_test_linear_call_body(sched, i), &n_lin);

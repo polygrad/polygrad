@@ -118,7 +118,6 @@ typedef enum {
   POLY_OP_STAGE,
   POLY_OP_COPY,
   POLY_OP_BUFFER,
-  POLY_OP_BUFFER_VIEW,
   POLY_OP_MSELECT,
   POLY_OP_MSTACK,
   POLY_OP_CUSTOM_FUNCTION,
@@ -1397,7 +1396,7 @@ void poly_uop_cache_destroy(PolyUOpCache *c);
  * Every helper has a public entry point and an `_ex` variant that takes a
  * caller-owned PolyUOpCache for batch queries. Use the `_ex` form in hot loops
  * that need a pass-local cache distinct from UOp-local cached properties. */
-/* Returns the terminal buffer-identity UOp (BUFFER / BUFFER_VIEW / PARAM)
+/* Returns the terminal buffer-identity UOp (BUFFER / PARAM)
  * after unwrapping RESHAPE/MULTI, or NULL if `u` has no buffer identity. */
 const PolyUOp *poly_uop_get_buffer_identity(const PolyUOp *u);
 
@@ -1409,9 +1408,7 @@ bool poly_uop_op_in_backward_slice_with_self(PolyCtx *ctx, PolyUOp *u, PolyOps o
  * scheduling and access analysis, preserving MSELECT/MSTACK structure. */
 PolyUOp *poly_uop_buf_uop(PolyCtx *ctx, PolyUOp *u);
 
-/* True iff `u` is a buffer view (RESHAPE/MULTI over BUFFER/BUFFER_VIEW/PARAM).
- * Frontends use this to decide whether a tensor needs materialization
- * (matches tinygrad's UOp.has_buffer_identity). */
+/* Current Tinygrad UOp.has_buffer_identity. */
 bool poly_uop_has_buffer_identity(const PolyUOp *u);
 
 /* tinygrad UOp.buffer analogue. Returns a direct buffer identity, or the exact

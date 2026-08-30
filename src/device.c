@@ -896,40 +896,6 @@ static PolyBuffer *poly_buffer_view_metadata(
     size_t byte_offset
 );
 
-PolyUOp *poly_buffer_view(
-    PolyCtx *ctx,
-    PolyUOp *base,
-    PolyDType dtype,
-    int64_t numel,
-    size_t byte_offset
-) {
-  if (!ctx || !base || numel < 0) return NULL;
-  const PolyUOp *identity = poly_uop_get_buffer_identity(base);
-  if (!identity) return NULL;
-  PolyBuffer *parent = poly_buffer_get(ctx, (PolyUOp *)identity);
-  if (!parent) return NULL;
-  size_t itemsize = poly_dtype_itemsize(dtype);
-  if (itemsize == 0 || (uint64_t)numel > SIZE_MAX / itemsize) return NULL;
-  size_t nbytes = (size_t)numel * itemsize;
-  if (byte_offset > parent->nbytes || nbytes > parent->nbytes - byte_offset) return NULL;
-
-  PolyUOp *unique = poly_uop0(
-      ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(poly_ctx_next_unique_id(ctx))
-  );
-  int64_t view_arg_values[2] = {numel, (int64_t)byte_offset};
-  PolyArg view_arg = {
-      .kind = POLY_ARG_INT_TUPLE,
-      .int_tuple = {view_arg_values, 2},
-  };
-  PolyUOp *view_src[2] = {(PolyUOp *)identity, unique};
-  PolyUOp *view = poly_uop(
-      ctx, POLY_OP_BUFFER_VIEW, dtype, view_src, 2, view_arg
-  );
-  if (!view) return NULL;
-
-  return poly_buffer_view_metadata(ctx, view, parent, nbytes, byte_offset) ? view : NULL;
-}
-
 static PolyBuffer *poly_multi_buffer_for_tuple_buffer(PolyCtx *ctx, PolyUOp *buffer) {
   if (!ctx || !buffer || buffer->op != POLY_OP_BUFFER) return NULL;
   PolyUOp *device = poly_uop_device_uop_cached(ctx, buffer, NULL);

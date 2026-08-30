@@ -544,7 +544,7 @@ static PolyUOp *rangeify_to_index_dtype(PolyCtx *ctx, PolyUOp *u) {
 
 static bool rangeify_is_indexable_source(PolyUOp *u) {
   if (!u) return false;
-  return u->op == POLY_OP_BUFFER || u->op == POLY_OP_PARAM || u->op == POLY_OP_BUFFER_VIEW ||
+  return u->op == POLY_OP_BUFFER || u->op == POLY_OP_PARAM ||
          u->op == POLY_OP_MSTACK || u->op == POLY_OP_MSELECT || u->op == POLY_OP_AFTER;
 }
 
@@ -788,8 +788,6 @@ static bool is_always_contiguous(PolyOps op) {
   case POLY_OP_CONTIGUOUS:
   case POLY_OP_AFTER:
   case POLY_OP_BUFFER:
-  /* BUFFER_VIEW is Polygrad's storage-alias boundary. */
-  case POLY_OP_BUFFER_VIEW:
   case POLY_OP_CONST:
   case POLY_OP_MSELECT:
   case POLY_OP_MSTACK:
@@ -1680,8 +1678,6 @@ PolyUOp *poly_apply_rangeify(PolyIndexingCtx *ictx, PolyUOp *sink) {
 
   for (int i = 0; i < n_uops; i++) {
     PolyUOp *u = topo[i];
-    if (u->op == POLY_OP_BUFFER_VIEW) continue;
-
     bool src_changed = false;
     PolyUOp *new_src_buf[16] = {0};
     PolyUOp **new_src =

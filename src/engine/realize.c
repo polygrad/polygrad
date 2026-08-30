@@ -1211,6 +1211,41 @@ static PolyUOp *poly_transform_to_call_finalize_tags(
   return ret;
 }
 
+/* Tinygrad 2026-08-22/a9069c177a9d tensor.py:_make_buffer_view. Build the
+ * canonical SHRINK/BITCAST storage argument and attach Buffer.view metadata
+ * to that exact UOp. */
+static PolyUOp *make_buffer_view(PolyCtx *ctx, PolyUOp *value) {
+  if (!ctx || !value) return NULL;
+  PolyUOp *view_key = poly_uop_buffer(ctx, value);
+  if (!view_key || poly_uop_has_buffer_identity(view_key)) return NULL;
+  PolyBuffer *view_storage = poly_buffer_get(ctx, view_key);
+  PolyUOp *base = value;
+  while (base && base->n_src > 0 && !poly_uop_has_buffer_identity(base) &&
+         (poly_opset_has(POLY_GROUP_MOVEMENT, base->op) ||
+          base->op == POLY_OP_BITCAST))
+    base = base->src[0];
+  base = (PolyUOp *)poly_uop_get_buffer_identity(base);
+  PolyBuffer *base_storage = base ? poly_buffer_get(ctx, base) : NULL;
+  if (!base || !view_storage || !base_storage) return NULL;
+
+  PolyShape base_shape = poly_uop_max_shape_cached(ctx, base);
+  size_t base_itemsize = poly_dtype_itemsize(base->dtype);
+  if (base_shape.ndim != 1 || base_itemsize == 0 ||
+      view_storage->offset % base_itemsize != 0 ||
+      view_storage->nbytes % base_itemsize != 0)
+    return NULL;
+  uint64_t begin = view_storage->offset / base_itemsize;
+  uint64_t length = view_storage->nbytes / base_itemsize;
+  if (begin > INT64_MAX || length > INT64_MAX - begin) return NULL;
+  int64_t bounds[1][2] = {{(int64_t)begin, (int64_t)(begin + length)}};
+  PolyUOp *view = poly_shrink(ctx, base, bounds, 1);
+  if (view && !poly_dtype_eq(view->dtype, value->dtype))
+    view = poly_uop1(
+        ctx, POLY_OP_BITCAST, value->dtype, view, poly_arg_none()
+    );
+  return view && poly_uop_buffer(ctx, view) == view ? view : NULL;
+}
+
 static PolyUOp *poly_transform_to_call_materialize_view_copy(
     PolyCtx *ctx,
     PolyUOp *copy,
@@ -1219,66 +1254,12 @@ static PolyUOp *poly_transform_to_call_materialize_view_copy(
   if (!ctx || !copy || !tctx || copy->op != POLY_OP_COPY || copy->n_src < 1)
     return NULL;
 
-  PolyUOp *view = (PolyUOp *)poly_uop_get_buffer_identity(copy->src[0]);
-  PolyUOp *base =
-      (view && view->op == POLY_OP_BUFFER_VIEW && view->n_src >= 1)
-          ? (PolyUOp *)poly_uop_get_buffer_identity(view->src[0])
-          : NULL;
-  if (!base) {
-    PolyShape view_shape = {.ndim = -1};
-    int64_t view_numel = -1;
-    size_t view_byte_offset = 0;
-    PolyUOp *copy_value = copy->src[0];
-
-    /* Pinned late_buffer_view rewrites a staged DISK BITCAST to a typed
-     * SLICE before split_store (schedule/rangeify.py:355-374,573-590).
-     * Polygrad's reviewed PG-PARITY-005 spelling is BUFFER_VIEW. Preserve the
-     * same byte span while changing only the view dtype and element count;
-     * scalar BITCAST codegen is not a storage-view implementation. */
-    if (copy_value->op == POLY_OP_BITCAST && copy_value->n_src == 1) {
-      PolyUOp *source = copy_value->src[0];
-      PolyShape source_shape = poly_uop_max_shape_cached(ctx, source);
-      int64_t source_numel = poly_shape_numel(source_shape);
-      const PolyUOp *source_identity = poly_uop_get_buffer_identity(source);
-      if (source_identity) {
-        PolyBuffer *storage = poly_buffer_get(ctx, (PolyUOp *)source_identity);
-        if (!storage || (!storage->ptr && storage->nbytes != 0) || !storage->valid)
-          return NULL;
-        base = (PolyUOp *)source_identity;
-      } else if (!poly_uop_contiguous_view_info(
-                     ctx, source, &base, &source_shape, &source_numel,
-                     &view_byte_offset
-                 )) {
-        return NULL;
-      }
-
-      view_shape = poly_uop_max_shape_cached(ctx, copy_value);
-      view_numel = poly_shape_numel(view_shape);
-      size_t source_itemsize = poly_dtype_itemsize(source->dtype);
-      size_t view_itemsize = poly_dtype_itemsize(copy_value->dtype);
-      if (source_numel < 0 || view_numel < 0 || source_itemsize == 0 || view_itemsize == 0 ||
-          (uint64_t)source_numel > SIZE_MAX / source_itemsize ||
-          (uint64_t)view_numel > SIZE_MAX / view_itemsize ||
-          (size_t)source_numel * source_itemsize != (size_t)view_numel * view_itemsize)
-        return NULL;
-    } else {
-      /* Pinned callify._make_buffer_view turns a provably contiguous movement
-       * source into SLICE before a creation-device COPY (callify.py:59-70,
-       * 145-149). BUFFER_VIEW is Polygrad's schedule/runtime equivalent. */
-      if (!poly_uop_contiguous_view_info(
-              ctx, copy_value, &base, &view_shape, &view_numel,
-              &view_byte_offset
-          ))
-        return NULL;
-    }
-    view = poly_buffer_view(
-        ctx, base, copy_value->dtype, view_numel, view_byte_offset
-    );
-  }
-  if (!base) return NULL;
-
-  PolyUOp *copy_value =
-      poly_transform_to_call_rebuild_view(ctx, view, copy->src[0], NULL);
+  PolyUOp *view = make_buffer_view(ctx, copy->src[0]);
+  PolyUOp *copy_value = view
+                            ? poly_transform_to_call_rebuild_view(
+                                  ctx, view, copy->src[0], NULL
+                              )
+                            : NULL;
   if (!copy_value) return NULL;
   PolyUOp **copy_src = malloc((size_t)copy->n_src * sizeof(*copy_src));
   if (!copy_src) return NULL;
@@ -1628,30 +1609,20 @@ static PolyUOp *poly_transform_to_call_contiguous_mops_to_view(
     return NULL;
 
   PolyShape shape = poly_uop_max_shape_cached(ctx, contiguous);
-  PolyUOp *base = NULL;
-  PolyShape view_shape = {.ndim = -1};
-  int64_t view_numel = -1;
-  size_t byte_offset = 0;
   /* Pinned contiguous_mops_to_view accepts only static movement graphs whose
    * flattened index is one contiguous range (callify.py:59-89).  Polygrad's
    * existing proof returns that same base/range for realized storage. */
   if (shape.ndim < 0 ||
-      !poly_transform_to_call_is_static_max_shape(ctx, contiguous, shape) ||
-      !poly_uop_contiguous_view_info(
-          ctx, contiguous->src[0], &base, &view_shape, &view_numel,
-          &byte_offset
-      ))
+      !poly_transform_to_call_is_static_max_shape(ctx, contiguous, shape))
     return NULL;
 
-  PolyUOp *view = poly_buffer_view(
-      ctx, base, contiguous->src[0]->dtype, view_numel, byte_offset
-  );
+  PolyUOp *view = make_buffer_view(ctx, contiguous->src[0]);
   PolyUOp *shaped = view
                         ? poly_transform_to_call_rebuild_view(
                               ctx, view, contiguous->src[0], NULL
                           )
                         : NULL;
-  return shaped && poly_uop_has_buffer_identity(shaped) ? shaped : NULL;
+  return shaped && poly_uop_buffer(ctx, shaped) ? shaped : NULL;
 }
 
 /* tinygrad callify tags every CONTIGUOUS, not only the requested outer root.
@@ -1743,11 +1714,8 @@ static PolyUOp *poly_transform_to_call_rewrite_nested_contiguous(
     return movement_view;
   }
 
-  /* Pinned callify turns a contiguous movement view into a SLICE effect before
-   * splitting the creation-device COPY that consumes it.  Polygrad's existing
-   * physical counterpart is BUFFER_VIEW followed by COPY.  Route that case
-   * through the dedicated materializer before the generic creation-COPY rule
-   * can hide the view inside AFTER/STORE compute IR. */
+  /* Tinygrad 2026-08-22/a9069c177a9d callify keeps a contiguous movement view
+   * as the COPY argument and attaches Buffer.view storage outside IR. */
   if (ret->op == POLY_OP_COPY) {
     PolyUOp *view_rewrite =
         poly_transform_to_call_materialize_view_copy(ctx, ret, tctx);
@@ -2351,8 +2319,8 @@ PolyUOp *poly_linear_effect_sink(
 
   /* Imported/Instance graphs already own their output/effect storage, so they
    * skip tensor output allocation. They do not skip tinygrad's input-buffer
-   * normalization: rangeify must see a shaped-PARAM function body, with the
-   * concrete BUFFER/BUFFER_VIEW identities retained as outer CALL arguments. */
+   * normalization: rangeify must see a shaped-PARAM function body, with exact
+   * BUFFER/SHRINK/BITCAST storage occurrences as outer CALL arguments. */
   bool timing = poly_debug_at_least(2);
   double t0 = timing ? poly_now_ms() : 0.0;
   if (timing) {

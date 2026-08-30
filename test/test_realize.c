@@ -4153,7 +4153,9 @@ TEST(realize, transform_to_call_view_copy_is_reachable_store_effect) {
       .valid = true,
   };
   poly_buffer_attach(ctx, base, &base_storage);
-  PolyUOp *view = poly_buffer_view(ctx, base, POLY_FLOAT32, 1, 0);
+  int64_t bounds[1][2] = {{0, 1}};
+  PolyUOp *view = poly_shrink(ctx, base, bounds, 1);
+  ASSERT_PTR_EQ(poly_uop_buffer(ctx, view), view);
   PolyUOp *device = poly_device_uop(ctx, POLY_DEVICE_CPU);
   PolyUOp *copy = poly_copy_to_device_uop(ctx, view, device);
   PolyUOp *realized = NULL;
@@ -4180,6 +4182,42 @@ TEST(realize, transform_to_call_view_copy_is_reachable_store_effect) {
   PASS();
 }
 
+TEST(realize, view_copy_uses_existing_movement_uop_as_storage_argument) {
+  /* Tinygrad 2026-08-22/a9069c177a9d keeps the exact SHRINK as the COPY input
+   * and attaches Buffer.view metadata outside shared IR (tensor.py:178-220,
+   * uop/ops.py:907-934). */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  float data[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+  PolyUOp *base =
+      poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_HOST);
+  PolyBuffer storage = {
+      .ptr = data,
+      .nbytes = sizeof(data),
+      .device = POLY_DEVICE_HOST,
+      .owned = false,
+      .valid = true,
+  };
+  poly_buffer_attach(ctx, base, &storage);
+  int64_t bounds[1][2] = {{1, 3}};
+  PolyUOp *view = poly_shrink(ctx, base, bounds, 1);
+  ASSERT_NOT_NULL(view);
+  ASSERT_PTR_EQ(poly_uop_buffer(ctx, view), view);
+
+  PolyUOp *copy = poly_copy_to_device_uop(
+      ctx, view, poly_device_uop(ctx, POLY_DEVICE_CPU)
+  );
+  PolyUOp *realized = NULL;
+  PolyUOp *call = poly_transform_to_call(ctx, &copy, 1, &realized);
+  ASSERT_NOT_NULL(call);
+  ASSERT_NOT_NULL(realized);
+  ASSERT_TRUE(poly_uop_reachable(ctx, call, view));
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(realize, transform_to_call_keeps_only_reachable_view_copy_effects) {
   for (int mode = 0; mode < 3; mode++) {
     bool live = mode != 0;
@@ -4199,7 +4237,9 @@ TEST(realize, transform_to_call_keeps_only_reachable_view_copy_effects) {
         .valid = true,
     };
     poly_buffer_attach(ctx, base, &host_storage);
-    PolyUOp *view = poly_buffer_view(ctx, base, POLY_FLOAT32, 1, 0);
+    int64_t bounds[1][2] = {{0, 1}};
+    PolyUOp *view = poly_shrink(ctx, base, bounds, 1);
+    ASSERT_PTR_EQ(poly_uop_buffer(ctx, view), view);
     PolyUOp *device = poly_device_uop(ctx, POLY_DEVICE_CPU);
     PolyUOp *copy = poly_copy_to_device_uop(ctx, view, device);
     ASSERT_NOT_NULL(view);
@@ -4269,7 +4309,7 @@ TEST(realize, transform_to_call_keeps_only_reachable_view_copy_effects) {
       ASSERT_INT_EQ(count_root_ops(ctx, call_graph, POLY_OP_AFTER), nested ? 2 : 1);
       ASSERT_INT_EQ(count_root_ops(ctx, call_graph, POLY_OP_STORE), nested ? 2 : 1);
       ASSERT_INT_EQ(count_root_ops(ctx, call_graph, POLY_OP_COPY), 1);
-      ASSERT_INT_EQ(count_root_ops(ctx, call_graph, POLY_OP_BUFFER_VIEW), 1);
+      ASSERT_TRUE(poly_uop_reachable(ctx, call_graph, view));
       ASSERT_INT_EQ(copy_rows, 1);
       ASSERT_INT_EQ(requested_rows, 1);
       ASSERT_INT_EQ(synthetic_rows, 0);
@@ -4293,7 +4333,7 @@ TEST(realize, transform_to_call_keeps_only_reachable_view_copy_effects) {
       ASSERT_INT_EQ(count_root_ops(ctx, call_graph, POLY_OP_AFTER), 1);
       ASSERT_INT_EQ(count_root_ops(ctx, call_graph, POLY_OP_STORE), 1);
       ASSERT_INT_EQ(count_root_ops(ctx, call_graph, POLY_OP_COPY), 0);
-      ASSERT_INT_EQ(count_root_ops(ctx, call_graph, POLY_OP_BUFFER_VIEW), 0);
+      ASSERT_FALSE(poly_uop_reachable(ctx, call_graph, view));
       ASSERT_INT_EQ(copy_rows, 0);
       ASSERT_INT_EQ(requested_rows, 1);
       ASSERT_INT_EQ(synthetic_rows, 0);
@@ -7734,7 +7774,6 @@ TEST(realize, contiguous_realized_view_is_only_physical_at_tensor_boundary) {
   ASSERT_NOT_NULL(value_tensor);
   PolyUOp *value_physical = poly_tensor_physicalize(ctx, value_tensor);
   ASSERT_NOT_NULL(value_physical);
-  ASSERT_INT_EQ(count_root_ops(ctx, value_physical, POLY_OP_BUFFER_VIEW), 0);
   ASSERT_INT_EQ(count_root_ops(ctx, value_physical, POLY_OP_SHRINK), 1);
 
   int64_t root_bounds[1][2] = {{2, 5}};
@@ -7744,10 +7783,9 @@ TEST(realize, contiguous_realized_view_is_only_physical_at_tensor_boundary) {
   ASSERT_NOT_NULL(root_tensor);
   PolyUOp *root_physical = poly_tensor_physicalize(ctx, root_tensor);
   ASSERT_NOT_NULL(root_physical);
-  const PolyUOp *root_identity = poly_uop_get_buffer_identity(root_physical);
-  ASSERT_NOT_NULL(root_identity);
-  ASSERT_EQ(root_identity->op, POLY_OP_BUFFER_VIEW);
-  PolyBuffer *alias = poly_buffer_get(ctx, (PolyUOp *)root_identity);
+  ASSERT_PTR_EQ(root_physical, root_view);
+  ASSERT_PTR_EQ(poly_uop_buffer(ctx, root_physical), root_physical);
+  PolyBuffer *alias = poly_buffer_get(ctx, root_physical);
   ASSERT_NOT_NULL(alias);
   ASSERT_PTR_EQ(alias->base, poly_buffer_get(ctx, base));
   ASSERT_TRUE(alias->offset == 2 * sizeof(float));
@@ -8115,8 +8153,10 @@ TEST(realize, collecting_tuple_buffer_view_preserves_live_parent_lanes) {
       ctx, tuple_buffer, tuple_buffer, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
   );
   ASSERT_NOT_NULL(parent_tensor);
-  PolyUOp *view = poly_buffer_view(ctx, tuple_buffer, POLY_INT32, 2, 0);
+  int64_t bounds[1][2] = {{0, 2}};
+  PolyUOp *view = poly_shrink(ctx, tuple_buffer, bounds, 1);
   ASSERT_NOT_NULL(view);
+  ASSERT_PTR_EQ(poly_uop_buffer(ctx, view), view);
   PolyBuffer *view_handle = poly_buffer_get(ctx, view);
   ASSERT_NOT_NULL(view_handle);
   ASSERT_TRUE(poly_buffer_is_multi(view_handle));
@@ -8335,11 +8375,9 @@ TEST(realize, nested_contiguous_movement_view_is_one_consumer_call) {
   ASSERT_INT_EQ(poly_call_n_buffer_args(call), 2);
   PolyUOp *view = poly_call_buffer_arg(call, 1);
   ASSERT_NOT_NULL(view);
-  ASSERT_INT_EQ(view->op, POLY_OP_BUFFER_VIEW);
-  ASSERT_EQ(view->arg.kind, POLY_ARG_INT_TUPLE);
-  ASSERT_INT_EQ(view->arg.int_tuple.n, 2);
-  ASSERT_INT_EQ(view->arg.int_tuple.vals[0], 4);
-  ASSERT_INT_EQ(view->arg.int_tuple.vals[1], 2);
+  ASSERT_INT_EQ(view->op, POLY_OP_SHRINK);
+  ASSERT_PTR_EQ(view->src[0], base);
+  ASSERT_NOT_NULL(poly_buffer_get(ctx, view));
 
   poly_ctx_reset_counters(ctx);
   ASSERT_INT_EQ(poly_run_linear(ctx, schedule, NULL, 0, NULL, 0, true, false, false), 0);
@@ -8392,10 +8430,6 @@ TEST(realize, non_contiguous_expand_still_materializes_before_consumer) {
   ASSERT_NOT_NULL(schedule);
   ASSERT_NOT_NULL(scheduled_out);
   ASSERT_INT_EQ(schedule->n_src, 2);
-  ASSERT_INT_EQ(
-      count_root_ops(ctx, poly_test_linear_call(schedule, 0), POLY_OP_BUFFER_VIEW), 0
-  );
-
   poly_ctx_reset_counters(ctx);
   ASSERT_INT_EQ(poly_run_linear(ctx, schedule, NULL, 0, NULL, 0, true, false, false), 0);
   const PolyUOp *identity = poly_uop_get_buffer_identity(scheduled_out);
@@ -8561,7 +8595,7 @@ TEST(realize, direct_movement_disk_copy_matches_pinned_creation_pipeline) {
 
   /* Pinned Tensor.to builds COPY(RESHAPE(SHRINK(BUFFER@DISK)), arg=device)
    * directly (tensor.py:3661-3663). This is the stored execution root:
-   * no placement call or BUFFER_VIEW projection is involved. */
+   * no placement or storage-view projection is involved. */
   ASSERT_INT_EQ(copy->op, POLY_OP_COPY);
   ASSERT_INT_EQ(copy->n_src, 1);
   ASSERT_INT_EQ(copy->src[0]->op, POLY_OP_RESHAPE);
@@ -8569,7 +8603,6 @@ TEST(realize, direct_movement_disk_copy_matches_pinned_creation_pipeline) {
   ASSERT_PTR_EQ(copy->src[0]->src[0]->src[0], disk_buffer);
   ASSERT_INT_EQ(copy->n_src, 1);
   ASSERT_INT_EQ(poly_uop_device(copy), POLY_DEVICE_CPU);
-  ASSERT_INT_EQ(count_root_ops(ctx, copy, POLY_OP_BUFFER_VIEW), 0);
 
   /* tinygrad@2026-08-22/a9069c177a9d keeps the source view in COPY's buffer
    * metadata and emits one COPY CALL (schedule/__init__.py:155-176). */
@@ -8688,7 +8721,6 @@ TEST(realize, typed_disk_view_copy_matches_pinned_slice_pipeline) {
   ASSERT_INT_EQ(copy->src[0]->op, POLY_OP_BITCAST);
   ASSERT_INT_EQ(copy->src[0]->src[0]->op, POLY_OP_SHRINK);
   ASSERT_PTR_EQ(copy->src[0]->src[0]->src[0], disk_buffer);
-  ASSERT_INT_EQ(count_root_ops(ctx, copy, POLY_OP_BUFFER_VIEW), 0);
 
   PolyUOp *scheduled_out = NULL;
   PolyUOp *schedule = poly_test_linear_values(ctx, &copy, 1, &scheduled_out);
@@ -8786,16 +8818,12 @@ TEST(realize, nested_disk_view_copies_feed_compute_as_ordered_calls) {
   ASSERT_NOT_NULL(schedule);
   ASSERT_NOT_NULL(scheduled_out);
   ASSERT_INT_EQ(schedule->n_src, 3);
-  int view_calls = 0, copy_calls = 0;
+  int copy_calls = 0;
   for (int i = 0; i < 2; i++) {
     PolyUOp *body = poly_test_linear_call_body(schedule, i);
     ASSERT_NOT_NULL(body);
-    if (poly_test_linear_call_is_copy(schedule, i))
-      copy_calls++;
-    else if (body->op == POLY_OP_BUFFER_VIEW)
-      view_calls++;
+    if (poly_test_linear_call_is_copy(schedule, i)) copy_calls++;
   }
-  ASSERT_INT_EQ(view_calls, 0);
   ASSERT_INT_EQ(copy_calls, 2);
   PolyUOp *compute = poly_test_linear_call_body(schedule, 2);
   ASSERT_NOT_NULL(compute);
@@ -8803,7 +8831,6 @@ TEST(realize, nested_disk_view_copies_feed_compute_as_ordered_calls) {
   ASSERT_INT_EQ(count_root_ops(ctx, compute, POLY_OP_SHRINK), 0);
   ASSERT_INT_EQ(count_root_ops(ctx, compute, POLY_OP_PAD), 0);
   ASSERT_INT_EQ(count_root_ops(ctx, compute, POLY_OP_BUFFER), 0);
-  ASSERT_INT_EQ(count_root_ops(ctx, compute, POLY_OP_BUFFER_VIEW), 0);
   ASSERT_INT_EQ(count_root_ops(ctx, compute, POLY_OP_UNIQUE), 0);
   ASSERT_INT_EQ(count_root_ops(ctx, compute, POLY_OP_PARAM), 3);
   ASSERT_TRUE(count_root_ops(ctx, compute, POLY_OP_INDEX) > 0);

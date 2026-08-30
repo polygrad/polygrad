@@ -19,8 +19,6 @@ extern "C" {
 
 /* Constants */
 
-#define POLY_MAX_REALIZE_BUFS 2048
-#define POLY_MAX_STRUCT_NODES 8192
 #define POLY_SCHED_CACHE_VERSION 3u
 
 /* Structural hashing/equality (for cache keying by graph shape) */
@@ -37,29 +35,6 @@ static inline bool poly_uop_is_shaped_value_param(const PolyUOp *u) {
          !u->arg.param->name && u->n_src == 1 && u->src[0] &&
          (u->src[0]->op == POLY_OP_STACK || poly_dtype_is_int(u->src[0]->dtype));
 }
-
-/* DFS to collect BUFFER/BUFFER_VIEW and callified shaped PARAM identities in
- * structural order. buf_order written up to POLY_MAX_REALIZE_BUFS.
- * visited/n_visited are caller-provided scratch (POLY_MAX_STRUCT_NODES). */
-void poly_collect_buf_order(
-    PolyUOp *u,
-    PolyUOp **buf_order,
-    int *n_bufs,
-    PolyUOp **visited,
-    int *n_visited
-);
-
-/* Owned dynamic version of poly_collect_buf_order. Caller frees *out_buf_order
- * with free(). */
-bool poly_collect_buf_order_alloc(
-    PolyUOp *u,
-    PolyUOp ***out_buf_order,
-    int *out_n_bufs,
-    int *out_n_visited
-);
-
-/* Linear scan for an external storage identity in a buf_order array. */
-int poly_find_buf_position(PolyUOp *buf, PolyUOp **buf_order, int n_bufs);
 
 /* Collect ordered external buffers (output-first, then inputs).
  * Returns count of buffers found, up to max_bufs. */
@@ -78,10 +53,6 @@ bool poly_collect_ordered_buffers_alloc(
     PolyUOp ***out_ordered,
     int *out_n_ordered
 );
-
-/* Collect output BUFFER UOps from SINK -> STORE -> BUFFER chain.
- * Returns count written to out[], up to cap. */
-int poly_collect_output_buffers_in_sink(PolyUOp *tensor_sink, PolyUOp **out, int cap);
 
 /* Graph validation */
 

@@ -794,10 +794,6 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
               : make_entry_none(ctx);
   }
 
-  /* BUFFER_VIEW: 1D shape from arg tuple first element */
-  if (op == POLY_OP_BUFFER_VIEW && u->arg.kind == POLY_ARG_INT_TUPLE && u->arg.int_tuple.n > 0)
-    return make_entry_1d(ctx, u->arg.int_tuple.vals[0]);
-
   /* Tinygrad 2026-08-22/a9069c177a9d UOp._shape: PARAM shape is src[0]. */
   if (op == POLY_OP_PARAM) {
     if (u->n_src >= 1 && u->src[0] && u->src[0]->op == POLY_OP_STACK) {

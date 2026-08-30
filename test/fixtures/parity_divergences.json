@@ -217,20 +217,25 @@
     },
     {
       "id": "PG-PARITY-005",
-      "status": "open_debt",
+      "status": "resolved",
       "stages": ["tensor", "schedule", "runtime"],
       "area": "storage slices",
       "vocabulary": {"tinygrad_only": [], "polygrad_only": ["BUFFER_VIEW"]},
-      "tinygrad": "Current storage views are Buffer base/offset state derived from contiguous_view; Ops.SLICE was removed",
-      "polygrad": "BUFFER_VIEW remains as a storage-view UOp identity",
+      "tinygrad": "Storage views retain exact SHRINK/BITCAST UOps while Buffer.view owns base/offset runtime state",
+      "polygrad": "Exact SHRINK/BITCAST UOps now key the same non-owning runtime view metadata",
       "rationale": "This is shared storage/view vocabulary debt; it is not the approved deviceless logical graph divergence.",
       "approval": null,
       "evidence": [
-        "references/tinygrad_latest/tinygrad/uop/__init__.py:Ops.SLICE",
-        "references/tinygrad_latest/tinygrad/uop/ops.py:UOp.has_buffer_identity",
-        "src/polygrad.h:POLY_OP_BUFFER_VIEW"
+        "references/tinygrad_latest/tinygrad/tensor.py:replace_input_view",
+        "references/tinygrad_latest/tinygrad/uop/ops.py:UOp.buffer",
+        "src/engine/realize.c:make_buffer_view",
+        "test/test_realize.c:view_copy_uses_existing_movement_uop_as_storage_argument",
+        "temp/current_view_identity_correspondence_20260830.md"
       ],
-      "close_when": "The gated storage-view path has pinned SLICE topology and matching alias/runtime behavior."
+      "resolution": {
+        "evidence": "Removed the synthetic UOp and constructor; callification retains exact movement UOps while ctx buffer metadata owns aliases.",
+        "closed_on": "2026-08-30"
+      }
     },
     {
       "id": "PG-PARITY-006",

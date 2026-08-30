@@ -408,15 +408,12 @@ static PolyUOp *debuf(
     );
   }
   bool shaped_param = poly_uop_is_shaped_value_param(root);
-  /* Pinned tinygrad schedule/rangeify.py:497-503,528-535 debufs BUFFER,
-   * MSTACK, and MSELECT as one kernel argument. In particular, stop at an
-   * aggregate occurrence instead of exposing its per-device children as
-   * independent PARAMs inside the kernel body. BUFFER_VIEW is Polygrad's
-   * current pre-SLICE storage spelling and shaped PARAM is the existing
-   * call-body adaptation. */
+  /* Tinygrad 2026-08-22/a9069c177a9d schedule/rangeify.py:497-503 debufs
+   * BUFFER, MSTACK, MSELECT, and callified shaped PARAMs. Exact runtime views
+   * are outer CALL arguments and have already become PARAMs in the body. */
   bool aggregate = root->op == POLY_OP_MSTACK || root->op == POLY_OP_MSELECT;
-  if (root->op != POLY_OP_BUFFER && root->op != POLY_OP_BUFFER_VIEW &&
-      !aggregate && !(shaped_param && root->tag == POLY_RANGEIFY_PARAM_TAG))
+  if (root->op != POLY_OP_BUFFER && !aggregate &&
+      !(shaped_param && root->tag == POLY_RANGEIFY_PARAM_TAG))
     return NULL;
 
   PolyDType scalar = root->dtype;
@@ -424,9 +421,8 @@ static PolyUOp *debuf(
   int64_t max_numel = max_shape.ndim >= 0 ? poly_shape_numel(max_shape) : -1;
   if (max_numel <= 0 || max_shape.ndim > POLY_MAX_DIMS) return NULL;
 
-  const PolyUOp *identity = poly_uop_get_buffer_identity(root);
   PolyAddrSpace addrspace = POLY_ADDR_GLOBAL;
-  (void)poly_uop_addrspace(identity, &addrspace);
+  (void)poly_uop_addrspace(root, &addrspace);
   PolyUOp *device = poly_uop_device_uop_cached(ctx, root, NULL);
   PolyParamArg param_arg = {
       .slot = lctx->dg,
@@ -627,8 +623,7 @@ static PolyUOp *validate_find_bufs(
 static PolyPatternMatcher *poly_to_define_global(void) {
   static _Thread_local PolyPatternMatcher *pm = NULL;
   if (pm) return pm;
-  PolyOpSet storage_set =
-      poly_opset_add(poly_opset_add((PolyOpSet){{0, 0}}, POLY_OP_BUFFER), POLY_OP_BUFFER_VIEW);
+  PolyOpSet storage_set = poly_opset_add((PolyOpSet){{0, 0}}, POLY_OP_BUFFER);
   storage_set = poly_opset_add(storage_set, POLY_OP_MSTACK);
   storage_set = poly_opset_add(storage_set, POLY_OP_MSELECT);
   PolyRule rules[] = {

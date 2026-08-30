@@ -1260,7 +1260,7 @@ static int count_reduce_arg_kind(PolyCtx *ctx, PolyUOp *root, PolyArgKind kind) 
 }
 
 static bool is_direct_storage_source(PolyUOp *u) {
-  return u && (u->op == POLY_OP_BUFFER || u->op == POLY_OP_PARAM || u->op == POLY_OP_BUFFER_VIEW);
+  return u && (u->op == POLY_OP_BUFFER || u->op == POLY_OP_PARAM);
 }
 
 static int count_alu_direct_storage_sources(PolyCtx *ctx, PolyUOp *root) {
@@ -6308,7 +6308,6 @@ TEST(rangeify, range_start_all) {
   ASSERT_INT_EQ(poly_range_start(POLY_OP_LINEAR), 0);
   ASSERT_INT_EQ(poly_range_start(POLY_OP_STORE), -1);
   ASSERT_INT_EQ(poly_range_start(POLY_OP_COPY), -1);
-  ASSERT_INT_EQ(poly_range_start(POLY_OP_BUFFER_VIEW), -1);
   ASSERT_INT_EQ(poly_range_start(POLY_OP_ADD), -1);
   ASSERT_INT_EQ(poly_range_start(POLY_OP_CONST), -1);
   PASS();

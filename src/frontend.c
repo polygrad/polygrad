@@ -714,8 +714,6 @@ cleanup:
   return rc;
 }
 
-/* POLY_MAX_REALIZE_BUFS defined in frontend_internal.h */
-
 static bool uop_vec_append(PolyUOp ***items, int *count, int *cap, PolyUOp *u) {
   if (!items || !count || !cap) return false;
   if (*count >= *cap) {
@@ -738,11 +736,12 @@ static bool uop_vec_contains(PolyUOp **items, int count, PolyUOp *u) {
 typedef bool (*CollectBufferFn)(PolyUOp *u, void *user_data);
 
 static bool collect_input_buffers_postorder(
+    PolyCtx *ctx,
     PolyUOp *root,
     CollectBufferFn collect,
     void *user_data
 ) {
-  if (!root || !collect) return false;
+  if (!ctx || !root || !collect) return false;
 
   PolyMap *visited = poly_map_new(256);
   if (!visited) return false;
@@ -773,11 +772,12 @@ static bool collect_input_buffers_postorder(
 
     if (s == 0) {
       state[stack_top - 1] = 1;
-      /* BUFFER_VIEW is an executable storage identity, not a value
-       * computation. Its sources describe alias provenance and must not add
-       * the arena/base bookkeeping buffers as separate CALL arguments. */
-      if (u->op != POLY_OP_BUFFER && u->op != POLY_OP_BUFFER_VIEW &&
-          !poly_uop_is_bound_var(u)) {
+      /* Tinygrad 2026-08-22/a9069c177a9d tensor.py:replace_input_view treats
+       * callify-owned SHRINK/BITCAST views as complete call arguments. Their
+       * source BUFFER is alias provenance, not another argument. */
+      bool view = (u->op == POLY_OP_SHRINK || u->op == POLY_OP_BITCAST) &&
+                  poly_buffer_get(ctx, u) != NULL;
+      if (u->op != POLY_OP_BUFFER && !view && !poly_uop_is_bound_var(u)) {
         for (int i = u->n_src - 1; i >= 0; i--) {
           PolyUOp *src = u->src[i];
           if (!src) continue;
@@ -807,8 +807,9 @@ static bool collect_input_buffers_postorder(
     stack_top--;
     if (poly_map_get(visited, h, u, poly_ptr_eq) != NULL) continue;
     poly_map_set(visited, h, u, (void *)(uintptr_t)1, poly_ptr_eq);
-    if ((((u->op == POLY_OP_BUFFER || u->op == POLY_OP_BUFFER_VIEW) &&
-          !poly_uop_is_variable(u)) ||
+    bool view = (u->op == POLY_OP_SHRINK || u->op == POLY_OP_BITCAST) &&
+                poly_buffer_get(ctx, u) != NULL;
+    if ((((u->op == POLY_OP_BUFFER || view) && !poly_uop_is_variable(u)) ||
          poly_uop_is_bound_var(u)) &&
         !collect(u, user_data)) {
       free(stack);
@@ -873,8 +874,7 @@ bool poly_collect_ordered_buffers_alloc(
   for (int i = 0; i < tensor_sink->n_src; i++) {
     PolyUOp *store = tensor_sink->src[i];
     if (store && store->op == POLY_OP_STORE && store->n_src >= 1 &&
-        (store->src[0]->op == POLY_OP_BUFFER ||
-         store->src[0]->op == POLY_OP_BUFFER_VIEW) &&
+        store->src[0]->op == POLY_OP_BUFFER &&
         !poly_uop_is_variable(store->src[0])) {
       PolyUOp *buf = store->src[0];
       if (!uop_vec_contains(ordered, n, buf) && !uop_vec_append(&ordered, &n, &cap, buf)) {
@@ -887,7 +887,9 @@ bool poly_collect_ordered_buffers_alloc(
   /* Input buffers in toposort order. This is a local scan, like tinygrad's
    * temporary UOp.toposort() result, so do not grow the persistent ctx arena. */
   DynamicBufferCollect collect = {.ordered = &ordered, .n = &n, .cap = &cap};
-  if (!collect_input_buffers_postorder(tensor_sink, collect_dynamic_buffer, &collect)) {
+  if (!collect_input_buffers_postorder(
+          ctx, tensor_sink, collect_dynamic_buffer, &collect
+      )) {
     free(ordered);
     return false;
   }
@@ -910,8 +912,7 @@ int poly_collect_ordered_buffers(
   for (int i = 0; i < tensor_sink->n_src; i++) {
     PolyUOp *store = tensor_sink->src[i];
     if (store && store->op == POLY_OP_STORE && store->n_src >= 1 &&
-        (store->src[0]->op == POLY_OP_BUFFER ||
-         store->src[0]->op == POLY_OP_BUFFER_VIEW) &&
+        store->src[0]->op == POLY_OP_BUFFER &&
         !poly_uop_is_variable(store->src[0])) {
       PolyUOp *buf = store->src[0];
       if (!uop_vec_contains(ordered, n < max_bufs ? n : max_bufs, buf)) {
@@ -922,7 +923,10 @@ int poly_collect_ordered_buffers(
   }
 
   FixedBufferCollect collect = {.ordered = ordered, .n = &n, .max_bufs = max_bufs};
-  if (!collect_input_buffers_postorder(tensor_sink, collect_fixed_buffer, &collect)) return 0;
+  if (!collect_input_buffers_postorder(
+          ctx, tensor_sink, collect_fixed_buffer, &collect
+      ))
+    return 0;
   return n;
 }
 
@@ -937,11 +941,10 @@ void poly_frontend_ctx_cleanup(PolyCtx *ctx) {
  * Cached schedules/programs need to match computations that are structurally
  * identical but use different BUFFER UOp instances, such as fresh training
  * step buffers. We hash/compare the computation DAG structure: ops, dtypes,
- * args, and connectivity, treating BUFFER and BUFFER_VIEW storage identities
- * as positional placeholders (first encountered = 0, etc.).
+ * args, and connectivity, treating BUFFER storage identities as positional
+ * placeholders (first encountered = 0, etc.). Exact movement views remain
+ * ordinary graph topology, matching current Tinygrad call arguments.
  */
-
-/* POLY_MAX_STRUCT_NODES defined in frontend_internal.h */
 
 typedef struct {
   PolyMap *visited; /* UOp* -> 1-based index into hashes. Dynamic for model-scale DAGs. */
@@ -960,10 +963,8 @@ static uint32_t struct_hash_impl(PolyUOp *u, StructHashCtx *ctx) {
 
   uint32_t h = 0x811c9dc5; /* FNV-1a offset basis */
 
-  if (u->op == POLY_OP_BUFFER || u->op == POLY_OP_BUFFER_VIEW) {
-    /* Storage identities: use positional ID instead of pointer identity.
-     * BUFFER_VIEW metadata remains in op/dtype/arg; its provenance sources
-     * are deliberately outside the executable schedule-cache identity. */
+  if (u->op == POLY_OP_BUFFER) {
+    /* Storage identities use positional IDs instead of pointer identity. */
     int buf_id = -1;
     for (int i = 0; i < ctx->n_bufs; i++) {
       if (ctx->bufs[i] == u) {
@@ -1058,8 +1059,8 @@ static bool struct_eq_impl(PolyUOp *a, PolyUOp *b, BufPairs *bp, EqVisited *ev) 
   poly_map_set(ev->b_to_a, poly_ptr_hash(b), b, a, poly_ptr_eq);
 
   /* Both executable storage identities? Track positional correspondence. */
-  bool a_storage = a->op == POLY_OP_BUFFER || a->op == POLY_OP_BUFFER_VIEW;
-  bool b_storage = b->op == POLY_OP_BUFFER || b->op == POLY_OP_BUFFER_VIEW;
+  bool a_storage = a->op == POLY_OP_BUFFER;
+  bool b_storage = b->op == POLY_OP_BUFFER;
   if (a_storage || b_storage) {
     if (!a_storage || !b_storage || a->op != b->op) return false;
     if (!poly_dtype_eq(a->dtype, b->dtype)) return false;
@@ -1104,176 +1105,9 @@ bool poly_structural_eq(const void *a, const void *b) {
   return ok;
 }
 
-/* DFS to assign positional IDs to BUFFER/BUFFER_VIEW or shaped call PARAM
- * storage identities, matching source traversal order.
- * Children are visited left-to-right, same as struct_hash_impl().
- * n_bufs counts total BUFFERs found (may exceed buf_order capacity).
- * buf_order is only written up to POLY_MAX_REALIZE_BUFS entries.
- * Callers must check *n_bufs <= POLY_MAX_REALIZE_BUFS after the call. */
-void poly_collect_buf_order(
-    PolyUOp *u,
-    PolyUOp **buf_order,
-    int *n_bufs,
-    PolyUOp **visited,
-    int *n_visited
-) {
-  if (!u || !n_bufs || !n_visited) return;
-
-  /* Model-scale graphs exceed POLY_MAX_STRUCT_NODES. Keep the public scratch
-   * arrays for ABI compatibility, but use a dynamic visited map so traversal
-   * stays O(nodes) instead of revisiting shared DAG tails after the cap. */
-  PolyMap *seen = poly_map_new(1024);
-  if (!seen) return;
-  int initial_visited = *n_visited;
-  for (int i = 0; visited && i < initial_visited && i < POLY_MAX_STRUCT_NODES; i++) {
-    if (visited[i])
-      poly_map_set(seen, poly_ptr_hash(visited[i]), visited[i], visited[i], poly_ptr_eq);
-  }
-
-  int cap = 1024;
-  int sp = 0;
-  PolyUOp **stack = malloc((size_t)cap * sizeof(PolyUOp *));
-  if (!stack) {
-    poly_map_destroy(seen);
-    return;
-  }
-  stack[sp++] = u;
-
-  while (sp > 0) {
-    PolyUOp *cur = stack[--sp];
-    if (!cur) continue;
-    if (poly_map_get(seen, poly_ptr_hash(cur), cur, poly_ptr_eq)) continue;
-    poly_map_set(seen, poly_ptr_hash(cur), cur, cur, poly_ptr_eq);
-    if (visited && *n_visited < POLY_MAX_STRUCT_NODES) visited[*n_visited] = cur;
-    (*n_visited)++;
-
-    if (cur->op == POLY_OP_BUFFER || cur->op == POLY_OP_BUFFER_VIEW ||
-        poly_uop_is_shaped_value_param(cur)) {
-      if (buf_order && *n_bufs < POLY_MAX_REALIZE_BUFS) buf_order[*n_bufs] = cur;
-      (*n_bufs)++; /* always count, even past capacity */
-      continue;
-    }
-
-    /* Pinned UOp traversal keeps CALL/FUNCTION bodies opaque unless a pass
-     * explicitly opts in (tinygrad/uop/ops.py:188-198). External storage
-     * order comes from caller arguments, never from body-local PARAM slots. */
-    int first_src = (cur->op == POLY_OP_CALL || cur->op == POLY_OP_FUNCTION) ? 1 : 0;
-    int n_children = cur->n_src - first_src;
-    if (sp + n_children > cap) {
-      int new_cap = cap;
-      while (sp + n_children > new_cap)
-        new_cap *= 2;
-      PolyUOp **new_stack = realloc(stack, (size_t)new_cap * sizeof(PolyUOp *));
-      if (!new_stack) break;
-      stack = new_stack;
-      cap = new_cap;
-    }
-    for (int i = cur->n_src - 1; i >= first_src; i--)
-      stack[sp++] = cur->src[i];
-  }
-
-  free(stack);
-  poly_map_destroy(seen);
-}
-
-bool poly_collect_buf_order_alloc(
-    PolyUOp *u,
-    PolyUOp ***out_buf_order,
-    int *out_n_bufs,
-    int *out_n_visited
-) {
-  if (!u || !out_buf_order || !out_n_bufs || !out_n_visited) return false;
-  *out_buf_order = NULL;
-  *out_n_bufs = 0;
-  *out_n_visited = 0;
-
-  PolyMap *seen = poly_map_new(1024);
-  if (!seen) return false;
-
-  int stack_cap = 1024;
-  int sp = 0;
-  PolyUOp **stack = malloc((size_t)stack_cap * sizeof(PolyUOp *));
-  if (!stack) {
-    poly_map_destroy(seen);
-    return false;
-  }
-  stack[sp++] = u;
-
-  PolyUOp **buf_order = NULL;
-  int n_bufs = 0, buf_cap = 0;
-  bool ok = true;
-
-  while (ok && sp > 0) {
-    PolyUOp *cur = stack[--sp];
-    if (!cur) continue;
-    if (poly_map_get(seen, poly_ptr_hash(cur), cur, poly_ptr_eq)) continue;
-    poly_map_set(seen, poly_ptr_hash(cur), cur, cur, poly_ptr_eq);
-    (*out_n_visited)++;
-
-    if (cur->op == POLY_OP_BUFFER || cur->op == POLY_OP_BUFFER_VIEW ||
-        poly_uop_is_shaped_value_param(cur)) {
-      ok = uop_vec_append(&buf_order, &n_bufs, &buf_cap, cur);
-      continue;
-    }
-
-    int first_src = (cur->op == POLY_OP_CALL || cur->op == POLY_OP_FUNCTION) ? 1 : 0;
-    int n_children = cur->n_src - first_src;
-    if (sp + n_children > stack_cap) {
-      int new_cap = stack_cap;
-      while (sp + n_children > new_cap)
-        new_cap *= 2;
-      PolyUOp **new_stack = realloc(stack, (size_t)new_cap * sizeof(PolyUOp *));
-      if (!new_stack) {
-        ok = false;
-        break;
-      }
-      stack = new_stack;
-      stack_cap = new_cap;
-    }
-    for (int i = cur->n_src - 1; i >= first_src; i--)
-      stack[sp++] = cur->src[i];
-  }
-
-  free(stack);
-  poly_map_destroy(seen);
-  if (!ok) {
-    free(buf_order);
-    return false;
-  }
-  *out_buf_order = buf_order;
-  *out_n_bufs = n_bufs;
-  return true;
-}
-
-int poly_find_buf_position(PolyUOp *buf, PolyUOp **buf_order, int n_bufs) {
-  for (int i = 0; i < n_bufs; i++)
-    if (buf_order[i] == buf) return i;
-  return -1;
-}
-
 /* POLY_SCHED_CACHE_VERSION defined in frontend_internal.h */
 
 /* CPU realize (not available in Emscripten) */
-
-int poly_collect_output_buffers_in_sink(PolyUOp *tensor_sink, PolyUOp **out, int cap) {
-  if (!tensor_sink || tensor_sink->op != POLY_OP_SINK) return 0;
-  int n_seen = 0;
-  for (int i = 0; i < tensor_sink->n_src; i++) {
-    PolyUOp *store = tensor_sink->src[i];
-    if (!store || store->op != POLY_OP_STORE || store->n_src < 1) continue;
-    PolyUOp *buf = store->src[0];
-    if (!buf || (buf->op != POLY_OP_BUFFER && buf->op != POLY_OP_BUFFER_VIEW)) continue;
-    bool dup = false;
-    for (int j = 0; j < n_seen; j++) {
-      if (out[j] == buf) {
-        dup = true;
-        break;
-      }
-    }
-    if (!dup && n_seen < cap) out[n_seen++] = buf;
-  }
-  return n_seen;
-}
 
 void poly_cpu_cache_flush(void) {
   /* Retained for ABI/frontend cleanup paths. CPU program caches are per-context

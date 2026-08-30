@@ -76,7 +76,6 @@ static const char *op_names[] = {
     [POLY_OP_STAGE] = "STAGE",
     [POLY_OP_COPY] = "COPY",
     [POLY_OP_BUFFER] = "BUFFER",
-    [POLY_OP_BUFFER_VIEW] = "BUFFER_VIEW",
     [POLY_OP_MSELECT] = "MSELECT",
     [POLY_OP_MSTACK] = "MSTACK",
     [POLY_OP_CUSTOM_FUNCTION] = "CUSTOM_FUNCTION",
@@ -175,7 +174,6 @@ static const int op_values[POLY_OP_COUNT] = {
     [POLY_OP_ALLREDUCE] = 79,
     [POLY_OP_UNIQUE] = 81,
     [POLY_OP_DEVICE] = 82,
-    [POLY_OP_BUFFER_VIEW] = 84,
 };
 
 int poly_op_value(PolyOps op) {

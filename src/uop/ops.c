@@ -1965,8 +1965,7 @@ void poly_uop_cache_destroy(PolyUOpCache *c) {
   free(c);
 }
 
-/* Walks RESHAPE/MULTI wrappers and returns the terminal buffer-identity UOp
- * (BUFFER / BUFFER_VIEW / PARAM), or NULL if `u` has no buffer identity. */
+/* Current Tinygrad 2026-08-22/a9069c177a9d UOp.has_buffer_identity. */
 const PolyUOp *poly_uop_get_buffer_identity(const PolyUOp *u) {
   while (u) {
     if (u->op == POLY_OP_RESHAPE || u->op == POLY_OP_UNSHARD) {
@@ -1974,7 +1973,7 @@ const PolyUOp *poly_uop_get_buffer_identity(const PolyUOp *u) {
       u = u->src[0];
       continue;
     }
-    if (u->op == POLY_OP_BUFFER || u->op == POLY_OP_BUFFER_VIEW || u->op == POLY_OP_PARAM) {
+    if (u->op == POLY_OP_BUFFER || u->op == POLY_OP_PARAM) {
       return u;
     }
     return NULL;
@@ -2048,11 +2047,8 @@ PolyUOp *poly_uop_buf_uop(PolyCtx *ctx, PolyUOp *u) {
   return s;
 }
 
-/* Port of tinygrad's UOp.has_buffer_identity.
- * Unwraps RESHAPE/MULTI via src[0], then returns true iff the terminus is
- * BUFFER / BUFFER_VIEW / PARAM. tinygrad also handles GETTUPLE(TUPLE(...));
- * polygrad does not yet have those ops, so that part is intentionally
- * omitted. */
+/* Current Tinygrad UOp.has_buffer_identity; aggregate selection uses the
+ * existing MSELECT/UNSHARD wrappers rather than a synthetic storage-view op. */
 bool poly_uop_has_buffer_identity(const PolyUOp *u) {
   return poly_uop_get_buffer_identity(u) != NULL;
 }

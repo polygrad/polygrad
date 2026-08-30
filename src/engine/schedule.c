@@ -698,17 +698,6 @@ static int poly_call_get_outs_ins_from_body(
     ins[1] = true;
     return 0;
   }
-  if (body->op == POLY_OP_BUFFER_VIEW) {
-    if (n_args < 2) return -1;
-    if (globals) {
-      globals[0] = true;
-      globals[1] = true;
-    }
-    outs[0] = true;
-    ins[1] = true;
-    return 0;
-  }
-
   int cap = 64, n_stack = 0;
   PolyUOp **stack = malloc((size_t)cap * sizeof(PolyUOp *));
   PolyMap *seen = poly_map_new(128);

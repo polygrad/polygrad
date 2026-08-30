@@ -1443,7 +1443,7 @@ TEST(uop, toposort_enter_calls_false) {
  *   - no_range(u)   : walks backward slice, True iff no RANGE anywhere
  *                     (structural — doesn't subtract ended ranges).
  *   - u.ranges      : set of *active* ranges at u's position — REDUCE,
- *                     STORE, END, BUFFERIZE, WMMA, CALL, COPY, BUFFER_VIEW
+ *                     STORE, END, BUFFERIZE, WMMA, CALL, COPY
  *                     end their trailing RANGE srcs. */
 
 static PolyUOp *make_range(PolyCtx *ctx, int64_t n, int64_t axis_id) {

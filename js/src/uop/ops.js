@@ -141,7 +141,7 @@ class UOp {
 
   get realized() {
     const ops = this.ffi.__polygradOps || {}
-    if (this.op !== ops.BUFFER && this.op !== ops.BUFFER_VIEW) return null
+    if (this.op !== ops.BUFFER) return null
     const buf = this.buffer
     if (!buf || !this.ffi.poly_buffer_is_allocated) return null
     return this.ffi.poly_buffer_is_allocated(this.ctx, buf.raw) ? buf : null

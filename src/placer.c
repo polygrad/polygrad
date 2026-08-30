@@ -439,13 +439,9 @@ static PolyUOp *lower_assign_target(PolyPhysicalizer *p, PolyUOp *target, PolyDe
   return lower_value(p, target, device);
 }
 
-/* At a tensor materialization boundary, a contiguous SHRINK of an already
- * realized buffer is a Buffer view in tinygrad: no kernel is scheduled, and a
- * later .to(device) copies only the selected byte range. Reuse Polygrad's
- * existing BUFFER_VIEW identity for that physical fact while retaining the
- * logical SHRINK/RESHAPE graph. This must not run during recursive value
- * lowering: tinygrad keeps nested movement logical and parameterizes an
- * already-realized slice only when it becomes a CALL argument. */
+/* Tinygrad 2026-08-22/a9069c177a9d UOp.buffer keeps the exact movement UOp
+ * and attaches Buffer.view metadata outside the graph (uop/ops.py:907-934).
+ * Explicit placement does the same when the selected device shares storage. */
 static PolyUOp *lower_contiguous_realized_view(PolyPhysicalizer *p, PolyUOp *u, PolyDevice device) {
   if (!p || !u) return NULL;
   PolyUOp *identity = NULL;
@@ -458,10 +454,7 @@ static PolyUOp *lower_contiguous_realized_view(PolyPhysicalizer *p, PolyUOp *u, 
   if (!storage) return NULL;
   if (!placement_devices_share_storage(storage->device, device)) return NULL;
 
-  PolyUOp *view = poly_buffer_view(p->ctx, identity, u->dtype, numel, byte_offset);
-  if (!view) return NULL;
-  if (shape.ndim == 1 && shape.dims[0] == numel) return view;
-  return poly_reshape(p->ctx, view, shape.dims, shape.ndim);
+  return poly_uop_buffer(p->ctx, u) ? u : NULL;
 }
 
 static PolyUOp *find_assign_store_for_after(PolyUOp *u) {

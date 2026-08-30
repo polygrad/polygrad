@@ -1480,7 +1480,7 @@ static PolyStatus validate_build_reachable_storage(PolyInstance *inst) {
 
     for (int j = 0; j < n_topo; j++) {
       PolyUOp *u = topo[j];
-      if (!u || (u->op != POLY_OP_BUFFER && u->op != POLY_OP_BUFFER_VIEW && u->op != POLY_OP_PARAM))
+      if (!u || (u->op != POLY_OP_BUFFER && u->op != POLY_OP_PARAM))
         continue;
       if (find_build_storage_binding(build, u)) continue;
       PolyTensor *leaf_tensor = poly_tensor_find_storage_identity(inst->ctx, u);

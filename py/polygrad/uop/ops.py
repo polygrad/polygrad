@@ -47,7 +47,7 @@ _BASE_OPS = frozenset(
     _ffi.OPS[name]
     for name in ('RESHAPE', 'EXPAND', 'PERMUTE', 'PAD', 'SHRINK', 'FLIP', 'UNSHARD', 'DETACH')
 )
-_DIRECT_REALIZED_OPS = frozenset((_ffi.OPS['BUFFER'], _ffi.OPS['BUFFER_VIEW']))
+_DIRECT_REALIZED_OPS = frozenset((_ffi.OPS['BUFFER'],))
 
 
 def resolve(x, default=True):
@@ -599,9 +599,8 @@ class UOp:
     def realized(self):
         """Runtime buffer for a directly realized storage UOp, otherwise None.
 
-        Tinygrad restricts this to BUFFER/MSTACK. Polygrad's physical
-        BUFFER_VIEW is also direct storage; movement/UNSHARD wrappers are handled
-        only by ``is_realized`` through ``base``.
+        Current Tinygrad restricts direct scalar storage to BUFFER; movement
+        wrappers are handled only by ``is_realized`` through ``base``.
         """
         if self.op not in _DIRECT_REALIZED_OPS:
             return None

@@ -117,17 +117,9 @@ PolyUOp *poly_buffer_from_host_unique(
  * file owns its lifetime through ctx->buffers and is excluded from mem_used. */
 PolyUOp *poly_buffer_from_file(PolyCtx *ctx, const char *path, int dtype_id);
 
-/* Create an attached typed BUFFER_VIEW alias into an existing realized buffer.
- * BUFFER_VIEW is Polygrad's reviewed schedule/runtime spelling for tinygrad
- * SLICE, whose dtype may differ from the underlying storage dtype. */
-PolyUOp *poly_buffer_view(
-    PolyCtx *ctx, PolyUOp *base, PolyDType dtype, int64_t numel, size_t byte_offset
-);
-
 /* Prove the currently supported static contiguous movement-view subset
  * (RESHAPE/SHRINK over valid realized storage) without creating a UOp.
- * This is shared by tinygrad-style UOp.buffer access and the preserved
- * legacy placement boundary. */
+ * This is shared by Tinygrad-style UOp.buffer access and explicit placement. */
 bool poly_uop_contiguous_view_info(
     PolyCtx *ctx,
     PolyUOp *u,
