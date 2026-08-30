@@ -379,6 +379,6 @@ if unknown_cases:
 print(json.dumps({
     "schema_version": 1,
     "engine": ENGINE,
-    "reference_commit": "ba1d3baae81c96b3ed72900cde87bb307933c61f",
+    "reference_commit": "a9069c177a9da9cca18593edf55acd2e6073cca6",
     "cases": {name: case_builders[name]() for name in selected_cases},
 }, sort_keys=True))

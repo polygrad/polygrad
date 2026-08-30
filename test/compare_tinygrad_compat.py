@@ -32,10 +32,16 @@ def compare_values(name, tinygrad, polygrad, findings):
     ta, pa = np.asarray(tinygrad), np.asarray(polygrad)
     if ta.shape != pa.shape:
         findings.append(f"{name}: shape {ta.shape} != {pa.shape}")
+    elif ta.dtype.kind not in "iufc" or pa.dtype.kind not in "iufc":
+        if not np.array_equal(ta, pa):
+            findings.append(f"{name}: differs")
     elif not np.isfinite(ta).all() or not np.isfinite(pa).all():
         findings.append(f"{name}: non-finite value")
     elif not np.allclose(ta, pa, rtol=1e-5, atol=1e-6):
-        findings.append(f"{name}: max_abs={float(np.max(np.abs(ta-pa)))}")
+        findings.append(
+            f"{name}: max_abs={float(np.max(np.abs(ta-pa)))}"
+            if ta.size else f"{name}: differs"
+        )
 
 
 def main():
