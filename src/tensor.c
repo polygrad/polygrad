@@ -902,7 +902,6 @@ static int tensor_function_build_surface(
       .precompile = precompile,
       .precompile_backward = precompile_backward,
       .has_grad_fxn = false,
-      .has_metadata = false,
       .has_aux = false,
   };
   PolyUOp *function = poly_uop(
@@ -931,7 +930,8 @@ int poly_tensor_function(
     PolyCtx *ctx,
     PolyTensor **results,
     int n_results,
-    PolyTensor **inputs,
+    PolyUOp **input_logical_roots,
+    PolyUOp **input_physical_roots,
     int n_inputs,
     const char *name,
     bool allow_implicit,
@@ -939,7 +939,8 @@ int poly_tensor_function(
     bool precompile_backward,
     PolyTensor **outputs
 ) {
-  if (!ctx || !results || n_results <= 0 || !outputs || n_inputs < 0 || (n_inputs > 0 && !inputs))
+  if (!ctx || !results || n_results <= 0 || !outputs || n_inputs < 0 ||
+      (n_inputs > 0 && (!input_logical_roots || !input_physical_roots)))
     return -1;
   PolyUOp **logical_roots = calloc((size_t)n_results, sizeof(*logical_roots));
   PolyUOp **physical_roots = calloc((size_t)n_results, sizeof(*physical_roots));
@@ -961,10 +962,14 @@ int poly_tensor_function(
   }
   int selected = 0;
   for (int i = 0; i < n_inputs; i++) {
-    if (!tensor_roots_owned_by_ctx(ctx, inputs[i])) goto done;
-    if (!poly_uop_device_uop_cached(ctx, inputs[i]->uop_physical, NULL)) continue;
-    logical_inputs[selected] = inputs[i]->uop_logical;
-    physical_inputs[selected] = inputs[i]->uop_physical;
+    PolyUOp *logical = input_logical_roots[i];
+    PolyUOp *physical = input_physical_roots[i];
+    if (!logical || !physical || !poly_ctx_owns_ptr(ctx, logical) ||
+        !poly_ctx_owns_ptr(ctx, physical))
+      goto done;
+    if (!poly_uop_device_uop_cached(ctx, physical, NULL)) continue;
+    logical_inputs[selected] = logical;
+    physical_inputs[selected] = physical;
     selected++;
   }
   rc = tensor_function_build_surface(

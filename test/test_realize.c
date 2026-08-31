@@ -4613,11 +4613,13 @@ TEST(realize, precompiled_function_becomes_opaque_output_call) {
   ASSERT_NOT_NULL(sum);
 
   PolyTensor *results[1] = {sum};
-  PolyTensor *inputs[2] = {a, b};
+  PolyUOp *logical_inputs[2] = {a->uop_logical, b->uop_logical};
+  PolyUOp *physical_inputs[2] = {a->uop_physical, b->uop_physical};
   PolyTensor *output = NULL;
   ASSERT_INT_EQ(
       poly_tensor_function(
-          ctx, results, 1, inputs, 2, "precompiled_add", false, true, false, &output
+          ctx, results, 1, logical_inputs, physical_inputs, 2, "precompiled_add", false, true,
+          false, &output
       ),
       0
   );
@@ -4686,11 +4688,13 @@ TEST(realize, precompiled_multioutput_orders_one_shared_input_copy_first) {
   ASSERT_NOT_NULL(mul);
 
   PolyTensor *results[2] = {add, mul};
-  PolyTensor *inputs[1] = {x};
+  PolyUOp *logical_inputs[1] = {x->uop_logical};
+  PolyUOp *physical_inputs[1] = {x->uop_physical};
   PolyTensor *outputs[2] = {NULL, NULL};
   ASSERT_INT_EQ(
       poly_tensor_function(
-          ctx, results, 2, inputs, 1, "precompiled_pair", false, true, false, outputs
+          ctx, results, 2, logical_inputs, physical_inputs, 1, "precompiled_pair", false, true,
+          false, outputs
       ),
       0
   );

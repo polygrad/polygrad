@@ -459,9 +459,8 @@ static PolyMap *grad_reverse_pass(
         GRAD_REVERSE_FAIL();
       }
       if (u->arg.kind != POLY_ARG_CALL_INFO || !u->arg.call_info ||
-          u->arg.call_info->has_grad_fxn || u->arg.call_info->has_metadata ||
-          u->arg.call_info->has_aux || u->arg.call_info->precompile ||
-          u->arg.call_info->precompile_backward) {
+          u->arg.call_info->has_grad_fxn || u->arg.call_info->has_aux ||
+          u->arg.call_info->precompile || u->arg.call_info->precompile_backward) {
         fprintf(stderr, "polygrad: autograd: unsupported FUNCTION CallInfo\n");
         GRAD_REVERSE_FAIL();
       }
@@ -614,7 +613,6 @@ static PolyMap *grad_reverse_pass(
             .precompile = false,
             .precompile_backward = false,
             .has_grad_fxn = false,
-            .has_metadata = false,
             .has_aux = false,
         };
         PolyUOp *backward_function = poly_uop(

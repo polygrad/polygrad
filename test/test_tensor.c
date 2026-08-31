@@ -358,10 +358,14 @@ TEST(tensor, function_builds_ordered_logical_and_physical_value_calls) {
   PolyTensor *sum = poly_tensor_alu2(ctx, POLY_OP_ADD, a, b);
   ASSERT_NOT_NULL(sum);
   PolyTensor *results[1] = {sum};
-  PolyTensor *inputs[2] = {a, b};
+  PolyUOp *logical_inputs[2] = {a->uop_logical, b->uop_logical};
+  PolyUOp *physical_inputs[2] = {a->uop_physical, b->uop_physical};
   PolyTensor *outputs[1] = {NULL};
   ASSERT_INT_EQ(
-      poly_tensor_function(ctx, results, 1, inputs, 2, "ordered_add", false, false, false, outputs),
+      poly_tensor_function(
+          ctx, results, 1, logical_inputs, physical_inputs, 2, "ordered_add", false, false, false,
+          outputs
+      ),
       0
   );
   ASSERT_NOT_NULL(outputs[0]);
@@ -403,6 +407,53 @@ TEST(tensor, function_builds_ordered_logical_and_physical_value_calls) {
   ASSERT_INT_EQ(functions, 1);
   ASSERT_INT_EQ(gettuples, 1);
   poly_toposort_free(topo);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tensor, function_uses_pre_body_input_occurrences) {
+  /* Tinygrad 2026-08-22/a9069c177a9d function.py:43-46 snapshots call_uops
+   * before executing a body that may assign into a captured Tensor. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  float state_data[1] = {1.0f}, x_data[1] = {3.0f};
+  int64_t shape[1] = {1};
+  PolyTensor *state_host =
+      poly_tensor_from_host(ctx, state_data, sizeof(state_data), POLY_FLOAT32, shape, 1);
+  PolyTensor *x_host = poly_tensor_from_host(ctx, x_data, sizeof(x_data), POLY_FLOAT32, shape, 1);
+  PolyTensor *state = poly_tensor_to_device(ctx, state_host, POLY_DEVICE_CPU);
+  PolyTensor *x = poly_tensor_to_device(ctx, x_host, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(state);
+  ASSERT_NOT_NULL(x);
+
+  PolyUOp *before_logical = state->uop_logical;
+  PolyUOp *before_physical = state->uop_physical;
+  int f32 = poly_dtype_id_by_name("float32");
+  PolyTensor *one = poly_tensor_const_float_by_id(ctx, 1.0, f32, POLY_DEVICE_CPU);
+  PolyTensor *incremented = poly_tensor_alu2(ctx, POLY_OP_ADD, state, one);
+  ASSERT_PTR_EQ(poly_tensor_assign(ctx, state, incremented), state);
+  ASSERT_PTR_NEQ(state->uop_logical, before_logical);
+  ASSERT_PTR_NEQ(state->uop_physical, before_physical);
+
+  PolyTensor *two = poly_tensor_const_float_by_id(ctx, 2.0, f32, POLY_DEVICE_CPU);
+  PolyTensor *result = poly_tensor_alu2(ctx, POLY_OP_ADD, x, two);
+  PolyTensor *results[1] = {result};
+  PolyUOp *logical_inputs[2] = {before_logical, x->uop_logical};
+  PolyUOp *physical_inputs[2] = {before_physical, x->uop_physical};
+  PolyTensor *output = NULL;
+  ASSERT_INT_EQ(
+      poly_tensor_function(
+          ctx, results, 1, logical_inputs, physical_inputs, 2, "stateful", false, false, false,
+          &output
+      ),
+      0
+  );
+  ASSERT_NOT_NULL(output);
+  ASSERT_TRUE(poly_uop_reachable(ctx, output->uop_logical, before_logical));
+  ASSERT_FALSE(poly_uop_reachable(ctx, output->uop_logical, state->uop_logical));
+  ASSERT_TRUE(poly_uop_reachable(ctx, output->uop_physical, before_physical));
+  ASSERT_FALSE(poly_uop_reachable(ctx, output->uop_physical, state->uop_physical));
+
   poly_ctx_destroy(ctx);
   PASS();
 }

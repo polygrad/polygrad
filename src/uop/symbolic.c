@@ -3789,8 +3789,6 @@ static int arg_tuplize_cmp(PolyArg a, PolyArg b) {
     if (!a.call_info || !b.call_info) return (a.call_info != NULL) - (b.call_info != NULL);
     int ret = cmp_bool(a.call_info->has_grad_fxn, b.call_info->has_grad_fxn);
     if (ret) return ret;
-    ret = cmp_bool(a.call_info->has_metadata, b.call_info->has_metadata);
-    if (ret) return ret;
     ret = cmp_cstr(a.call_info->name, b.call_info->name);
     if (ret) return ret;
     ret = cmp_bool(a.call_info->precompile, b.call_info->precompile);

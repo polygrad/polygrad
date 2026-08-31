@@ -51,12 +51,18 @@ class _function:
 
     def __call__(self, *args, **kwargs):
         values = _state_values((args, kwargs))
-        tensors = []
+        inputs = []
         for value in values:
             if isinstance(value, Tensor):
-                tensors.append(value)
+                logical = value._core_uop_logical_raw(value._tensor)
+                physical = value._core_uop_physical_raw(value._tensor)
+                ctx = value._ctx
             else:
-                tensors.append(Tensor(_ctx=value.ctx, _uop=value))
+                logical = physical = value.raw
+                ctx = value.ctx
+            if not logical or not physical:
+                raise RuntimeError('function input lacks a logical or physical root')
+            inputs.append((ctx, logical, physical))
 
         _function.depth += 1
         try:
@@ -74,16 +80,18 @@ class _function:
         if not results:
             raise RuntimeError('function cannot return an empty tuple')
         ctx = results[0]._ctx
-        if any(t._ctx != ctx for t in (*results, *tensors)):
+        if any(t._ctx != ctx for t in results) or any(x[0] != ctx for x in inputs):
             raise ValueError('function tensors must share a context')
 
         result_arr = (_ffi._ptr * len(results))(*[t._tensor for t in results])
-        input_arr = ((_ffi._ptr * len(tensors))(*[t._tensor for t in tensors])
-                     if tensors else None)
+        logical_arr = ((_ffi._ptr * len(inputs))(*[x[1] for x in inputs])
+                       if inputs else None)
+        physical_arr = ((_ffi._ptr * len(inputs))(*[x[2] for x in inputs])
+                        if inputs else None)
         output_arr = (_ffi._ptr * len(results))()
         name = getattr(self.fxn, '__qualname__', None) or type(self.fxn).__qualname__
         rc = _ffi._lib.poly_tensor_function(
-            ctx, result_arr, len(results), input_arr, len(tensors),
+            ctx, result_arr, len(results), logical_arr, physical_arr, len(inputs),
             name.encode('utf-8'), self.allow_implicit,
             self.precompile, self.precompile_backward, output_arr,
         )

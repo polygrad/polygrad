@@ -593,7 +593,6 @@ TEST(ir, round_trip_default_call_info) {
   ASSERT_FALSE(imported_function->arg.call_info->precompile);
   ASSERT_FALSE(imported_function->arg.call_info->precompile_backward);
   ASSERT_FALSE(imported_function->arg.call_info->has_grad_fxn);
-  ASSERT_FALSE(imported_function->arg.call_info->has_metadata);
   ASSERT_FALSE(imported_function->arg.call_info->has_aux);
 
   poly_ir_spec_free(&imported);

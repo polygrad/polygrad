@@ -18,6 +18,39 @@ def _op_counts(*roots):
     return counts
 
 
+def _reachable(root, target):
+    seen, stack = set(), [root]
+    while stack:
+        node = stack.pop()
+        if node.raw in seen:
+            continue
+        if node.raw == target.raw:
+            return True
+        seen.add(node.raw)
+        stack.extend(node.src)
+    return False
+
+
+def test_function_snapshots_explicit_inputs_before_state_mutation():
+    # Tinygrad 2026-08-22/a9069c177a9d function.py:43-46 snapshots call_uops
+    # before body execution, so assign() cannot retarget the captured slot.
+    class Stateful:
+        def __init__(self):
+            self.state = Tensor([1.0], device='CPU')
+
+        @function
+        def __call__(self, x):
+            self.state.assign(self.state + 1.0)
+            return x + 2.0
+
+    model = Stateful()
+    before = model.state.uop
+    out = model(Tensor([3.0], device='CPU'))
+    after = model.state.uop
+    assert _reachable(out.uop, before)
+    assert not _reachable(out.uop, after)
+
+
 def test_function_explicit_forward_has_pinned_value_topology():
     # Pinned tinygrad/function.py:39-94 and uop/ops.py:1083-1092 build one
     # TUPLE/FUNCTION and one GETTUPLE selector around ordered PARAM inputs.

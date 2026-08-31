@@ -1058,9 +1058,8 @@ static uint8_t *poly_graph_export(const PolyIrSpec *spec, int *out_len, bool exe
       bb_i64(&buf, u->arg.param->max_val);
       break;
     case POLY_ARG_CALL_INFO:
-      if (!u->arg.call_info || u->arg.call_info->has_grad_fxn || u->arg.call_info->has_metadata ||
-          u->arg.call_info->has_aux) {
-        fprintf(stderr, "poly_ir_export: unsupported CallInfo callback/metadata/aux\n");
+      if (!u->arg.call_info || u->arg.call_info->has_grad_fxn || u->arg.call_info->has_aux) {
+        fprintf(stderr, "poly_ir_export: unsupported CallInfo callback/aux\n");
         free(node_map);
         if (topo_is_heap) free(topo);
         st_free(&strings);

@@ -471,7 +471,6 @@ bool poly_arg_eq(PolyArg a, PolyArg b) {
     if (a.call_info->precompile != b.call_info->precompile ||
         a.call_info->precompile_backward != b.call_info->precompile_backward ||
         a.call_info->has_grad_fxn != b.call_info->has_grad_fxn ||
-        a.call_info->has_metadata != b.call_info->has_metadata ||
         a.call_info->has_aux != b.call_info->has_aux)
       return false;
     return a.call_info->name == b.call_info->name ||
@@ -650,7 +649,6 @@ uint32_t poly_arg_hash(PolyArg a) {
       h = hash_mix(h, a.call_info->precompile ? 1u : 0u);
       h = hash_mix(h, a.call_info->precompile_backward ? 1u : 0u);
       h = hash_mix(h, a.call_info->has_grad_fxn ? 1u : 0u);
-      h = hash_mix(h, a.call_info->has_metadata ? 1u : 0u);
       h = hash_mix(h, a.call_info->has_aux ? 1u : 0u);
     }
     break;
@@ -2322,11 +2320,11 @@ static void uop_print_one(PolyUOp *u, char *buf, int *pos, int cap) {
     break;
   case POLY_ARG_CALL_INFO:
     if (!u->arg.call_info) {
-      written = snprintf(buf + *pos, cap - *pos, ", CallInfo(None,(),None,False,False)");
+      written = snprintf(buf + *pos, cap - *pos, ", CallInfo(None,None,False,False)");
     } else {
       const PolyCallInfo *info = u->arg.call_info;
       written = snprintf(
-          buf + *pos, cap - *pos, ", CallInfo(%s,(),%s%s%s,%s,%s)",
+          buf + *pos, cap - *pos, ", CallInfo(%s,%s%s%s,%s,%s)",
           info->has_grad_fxn ? "<callback>" : "None", info->name ? "'" : "",
           info->name ? info->name : "None", info->name ? "'" : "",
           info->precompile ? "True" : "False", info->precompile_backward ? "True" : "False"
@@ -2464,12 +2462,11 @@ void poly_uop_dump_tree(FILE *fp, PolyUOp *u, int depth, int max_depth) {
     break;
   case POLY_ARG_CALL_INFO:
     fprintf(
-        fp, " call_info=(name=%s,precompile=%d,precompile_backward=%d%s%s%s)",
+        fp, " call_info=(name=%s,precompile=%d,precompile_backward=%d%s%s)",
         u->arg.call_info && u->arg.call_info->name ? u->arg.call_info->name : "None",
         u->arg.call_info ? (int)u->arg.call_info->precompile : 0,
         u->arg.call_info ? (int)u->arg.call_info->precompile_backward : 0,
         u->arg.call_info && u->arg.call_info->has_grad_fxn ? ",grad_fxn" : "",
-        u->arg.call_info && u->arg.call_info->has_metadata ? ",metadata" : "",
         u->arg.call_info && u->arg.call_info->has_aux ? ",aux" : ""
     );
     break;

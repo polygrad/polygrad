@@ -349,17 +349,14 @@ typedef struct {
   bool volatile_;
 } PolyParamArg;
 
-/* Pinned tinygrad CallInfo metadata for CALL/FUNCTION UOps
- * (tinygrad/uop/ops.py:1158-1170). The current C value-function boundary
- * supports the serializable default subset: no Python grad callback, empty
- * metadata, optional name, no aux, and non-precompiled forward/backward. The
- * presence bits keep unsupported variants distinguishable and fail-closed. */
+/* Tinygrad 2026-08-22/a9069c177a9d CallInfo for CALL/FUNCTION UOps
+ * (uop/ops.py:1261-1271). C stores the serializable fields and fail-closed
+ * presence bits for Python callback/aux values. */
 typedef struct {
   const char *name;
   bool precompile;
   bool precompile_backward;
   bool has_grad_fxn;
-  bool has_metadata;
   bool has_aux;
 } PolyCallInfo;
 
@@ -879,15 +876,14 @@ int poly_tensor_custom_kernel(
     int n_inputs,
     PolyTensor **outputs
 );
-/* Build pinned value-producing FUNCTION roots from already-constructed Tensor
- * results and ordered argument/state Tensors. The Python decorator owns only
- * object traversal; all UOp composition and implicit-input discovery stays in
- * the C core (tinygrad/function.py:39-94, uop/ops.py:1077-1092). */
+/* Build value-producing FUNCTION roots from result Tensors and ordered input
+ * UOps captured before body execution (tinygrad/function.py:43-79). */
 int poly_tensor_function(
     PolyCtx *ctx,
     PolyTensor **results,
     int n_results,
-    PolyTensor **inputs,
+    PolyUOp **logical_inputs,
+    PolyUOp **physical_inputs,
     int n_inputs,
     const char *name,
     bool allow_implicit,

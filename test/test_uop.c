@@ -745,7 +745,7 @@ TEST(uop, call_info_is_value_metadata) {
   ASSERT_STR_EQ(a->arg.call_info->name, "forward");
   char *text = poly_uop_str(a);
   ASSERT_NOT_NULL(text);
-  ASSERT_STR_EQ(text, "UOp(FUNCTION, CallInfo(None,(),'forward',False,False), src=1)");
+  ASSERT_STR_EQ(text, "UOp(FUNCTION, CallInfo(None,'forward',False,False), src=1)");
   free(text);
   poly_ctx_destroy(ctx);
   PASS();
