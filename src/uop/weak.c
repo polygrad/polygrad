@@ -9,13 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-static PolyUOp *replace_uop(
-    PolyCtx *ctx,
-    PolyUOp *u,
-    PolyDType dtype,
-    PolyUOp **src,
-    int n_src
-) {
+static PolyUOp *replace_uop(PolyCtx *ctx, PolyUOp *u, PolyDType dtype, PolyUOp **src, int n_src) {
   PolyArg arg =
       (u->op == POLY_OP_CAST || u->op == POLY_OP_BITCAST) ? poly_arg_dtype(dtype) : u->arg;
   return (u->tag != 0 || u->tag_arg.kind != POLY_ARG_NONE)
@@ -75,21 +69,20 @@ static bool least_upper_src_dtype(
  * broadcastable subset reachable from weak lowering. */
 static PolyDType dtype_from_uop(PolyUOp *u, PolyUOp **src, int n_src) {
   PolyDType dtype = u->dtype;
-  return poly_dtype_from_uop(u->op, src, n_src, u->arg, u->dtype, &dtype) ? dtype
-                                                                         : u->dtype;
+  return poly_dtype_from_uop(u->op, src, n_src, u->arg, u->dtype, &dtype) ? dtype : u->dtype;
 }
 
 /* tinygrad/uop/weak.py:commit_srcs_at. */
 static PolyUOp *commit_srcs_at(PolyCtx *ctx, PolyUOp *u, PolyDType dtype) {
   PolyUOp *src_inline[16];
   PolyUOp **src = u->n_src > (int)(sizeof(src_inline) / sizeof(src_inline[0]))
-                        ? malloc((size_t)u->n_src * sizeof(*src))
-                        : src_inline;
+                      ? malloc((size_t)u->n_src * sizeof(*src))
+                      : src_inline;
   if (!src) return NULL;
   bool changed = false;
   for (int i = 0; i < u->n_src; i++) {
-    src[i] = poly_dtype_is_weak(u->src[i]->dtype) ? poly_commit_weak(ctx, u->src[i], dtype)
-                                                   : u->src[i];
+    src[i] =
+        poly_dtype_is_weak(u->src[i]->dtype) ? poly_commit_weak(ctx, u->src[i], dtype) : u->src[i];
     changed |= src[i] != u->src[i];
   }
   PolyUOp *result =
@@ -99,9 +92,8 @@ static PolyUOp *commit_srcs_at(PolyCtx *ctx, PolyUOp *u, PolyDType dtype) {
 }
 
 static PolyUOp *weak_cast_src(PolyUOp *u) {
-  return u && u->op == POLY_OP_CAST && u->n_src == 1 && poly_dtype_is_weak(u->dtype)
-             ? u->src[0]
-             : NULL;
+  return u && u->op == POLY_OP_CAST && u->n_src == 1 && poly_dtype_is_weak(u->dtype) ? u->src[0]
+                                                                                     : NULL;
 }
 
 /* Tinygrad 2026-08-22/a9069c177a9d uop/weak.py:52. */
@@ -112,9 +104,7 @@ static PolyUOp *lower_weak_const(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b
 }
 
 /* Tinygrad 2026-08-22/a9069c177a9d uop/weak.py:53-56. */
-static PolyUOp *lower_stacked_weak_casts(
-    PolyCtx *ctx, PolyUOp *u, const PolyBindings *b
-) {
+static PolyUOp *lower_stacked_weak_casts(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
   (void)b;
   PolyUOp *x = u->src[0]->src[0];
   if (poly_dtype_is_weak(x->dtype)) return NULL;
@@ -126,12 +116,9 @@ static PolyUOp *lower_stacked_weak_casts(
 }
 
 /* Tinygrad 2026-08-22/a9069c177a9d uop/weak.py:57-58. */
-static PolyUOp *lower_weak_alu_resource(
-    PolyCtx *ctx, PolyUOp *u, const PolyBindings *b
-) {
+static PolyUOp *lower_weak_alu_resource(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
   (void)b;
-  if (u->arg.kind != POLY_ARG_PARAM || !u->arg.param ||
-      u->arg.param->addrspace != POLY_ADDR_ALU)
+  if (u->arg.kind != POLY_ARG_PARAM || !u->arg.param || u->arg.param->addrspace != POLY_ADDR_ALU)
     return NULL;
   PolyDType dtype = default_dtype(ctx, u);
   PolyParamArg arg = *u->arg.param;
@@ -145,8 +132,8 @@ static PolyUOp *lower_weak_node(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b)
   (void)b;
   PolyUOp *src_inline[16];
   PolyUOp **src = u->n_src > (int)(sizeof(src_inline) / sizeof(src_inline[0]))
-                        ? malloc((size_t)u->n_src * sizeof(*src))
-                        : src_inline;
+                      ? malloc((size_t)u->n_src * sizeof(*src))
+                      : src_inline;
   if (!src) return NULL;
   bool changed = false;
   int start = u->op == POLY_OP_WHERE ? 1 : 0;
@@ -200,26 +187,30 @@ PolyPatternMatcher *poly_pm_lower_weak(void) {
   lower_weak_ops = poly_opset_add(lower_weak_ops, POLY_OP_STACK);
   lower_weak_ops = poly_opset_add(lower_weak_ops, POLY_OP_SPECIAL);
   PolyNamedRule rules[] = {
-      POLY_RULE(poly_upat_set_dtype(poly_upat_op(POLY_OP_CONST, NULL, 0, "u"), weaks, 2),
-                lower_weak_const),
-      POLY_RULE(poly_upat_set_dtype(
-                    poly_upat_op1(
-                        POLY_OP_CAST,
-                        poly_upat_set_dtype(
-                            poly_upat_op1(POLY_OP_CAST, poly_upat_any("x"), NULL), weaks, 2
-                        ),
-                        "u"
-                    ),
-                    weaks, 2
-                ),
-                lower_stacked_weak_casts),
-      POLY_RULE(poly_upat_set_dtype(poly_upat_ops(resources, NULL, 0, "u"), weakint, 1),
-                lower_weak_alu_resource),
+      POLY_RULE(
+          poly_upat_set_dtype(poly_upat_op(POLY_OP_CONST, NULL, 0, "u"), weaks, 2), lower_weak_const
+      ),
+      POLY_RULE(
+          poly_upat_set_dtype(
+              poly_upat_op1(
+                  POLY_OP_CAST,
+                  poly_upat_set_dtype(
+                      poly_upat_op1(POLY_OP_CAST, poly_upat_any("x"), NULL), weaks, 2
+                  ),
+                  "u"
+              ),
+              weaks, 2
+          ),
+          lower_stacked_weak_casts
+      ),
+      POLY_RULE(
+          poly_upat_set_dtype(poly_upat_ops(resources, NULL, 0, "u"), weakint, 1),
+          lower_weak_alu_resource
+      ),
       POLY_RULE(poly_upat_ops(lower_weak_ops, NULL, 0, "u"), lower_weak_node),
   };
-  g_pm_lower_weak = poly_pm_thread_cache(
-      poly_pm_new_named(rules, (int)(sizeof(rules) / sizeof(rules[0])))
-  );
+  g_pm_lower_weak =
+      poly_pm_thread_cache(poly_pm_new_named(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
   return g_pm_lower_weak;
 }
 
@@ -234,8 +225,7 @@ static PolyUOp *commit_weak_srcs(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b
   (void)b;
   if (!u || !has_weak_src(u)) return NULL;
   PolyDType dtype = u->src[0]->dtype;
-  if (!least_upper_src_dtype(u->src, u->n_src, 1, dtype, &dtype) ||
-      poly_dtype_is_weak(dtype))
+  if (!least_upper_src_dtype(u->src, u->n_src, 1, dtype, &dtype) || poly_dtype_is_weak(dtype))
     return NULL;
   return commit_srcs_at(ctx, u, dtype);
 }
@@ -245,8 +235,8 @@ static PolyUOp *commit_weak_store(PolyCtx *ctx, PolyUOp *u, const PolyBindings *
   (void)b;
   PolyUOp *src_inline[16];
   PolyUOp **src = u->n_src > (int)(sizeof(src_inline) / sizeof(src_inline[0]))
-                        ? malloc((size_t)u->n_src * sizeof(*src))
-                        : src_inline;
+                      ? malloc((size_t)u->n_src * sizeof(*src))
+                      : src_inline;
   if (!src) return NULL;
   memcpy(src, u->src, (size_t)u->n_src * sizeof(*src));
   src[1] = poly_commit_weak(ctx, src[1], src[0]->dtype);
@@ -261,14 +251,15 @@ PolyPatternMatcher *poly_pm_commit_weak(void) {
   PolyDType weaks[] = {POLY_WEAKINT, POLY_WEAKFLOAT};
   PolyNamedRule rules[] = {
       POLY_RULE(poly_upat_ops(POLY_GROUP_BROADCASTABLE, NULL, 0, "u"), commit_weak_srcs),
-      POLY_RULE(poly_upat_allow_any_len(poly_upat_op2(
-                    POLY_OP_STORE, poly_upat_any(NULL), poly_upat_dtype(NULL, weaks, 2), "u"
-                )),
-                commit_weak_store),
+      POLY_RULE(
+          poly_upat_allow_any_len(poly_upat_op2(
+              POLY_OP_STORE, poly_upat_any(NULL), poly_upat_dtype(NULL, weaks, 2), "u"
+          )),
+          commit_weak_store
+      ),
   };
-  g_pm_commit_weak = poly_pm_thread_cache(
-      poly_pm_new_named(rules, (int)(sizeof(rules) / sizeof(rules[0])))
-  );
+  g_pm_commit_weak =
+      poly_pm_thread_cache(poly_pm_new_named(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
   return g_pm_commit_weak;
 }
 
@@ -292,9 +283,7 @@ static PolyUOp *cast_weak_srcs(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) 
 }
 
 /* Tinygrad 2026-08-22/a9069c177a9d uop/weak.py:29. */
-static PolyUOp *commit_weak_cast_const(
-    PolyCtx *ctx, PolyUOp *u, const PolyBindings *b
-) {
+static PolyUOp *commit_weak_cast_const(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
   (void)b;
   return poly_commit_weak(ctx, u->src[0], u->dtype);
 }
@@ -304,24 +293,23 @@ PolyPatternMatcher *poly_pm_cast_weak(void) {
   if (g_pm_cast_weak) return g_pm_cast_weak;
   PolyDType weaks[] = {POLY_WEAKINT, POLY_WEAKFLOAT};
   PolyNamedRule rules[] = {
-      POLY_RULE(poly_upat_op1(
-                    POLY_OP_CAST,
-                    poly_upat_set_dtype(
-                        poly_upat_ops(POLY_GROUP_ALU, NULL, 0, "u"), weaks, 2
-                    ),
-                    "c"
-                ),
-                cast_weak_srcs),
-      POLY_RULE(poly_upat_op1(
-                    POLY_OP_CAST,
-                    poly_upat_set_dtype(poly_upat_op(POLY_OP_CONST, NULL, 0, "u"), weaks, 2),
-                    "c"
-                ),
-                commit_weak_cast_const),
+      POLY_RULE(
+          poly_upat_op1(
+              POLY_OP_CAST,
+              poly_upat_set_dtype(poly_upat_ops(POLY_GROUP_ALU, NULL, 0, "u"), weaks, 2), "c"
+          ),
+          cast_weak_srcs
+      ),
+      POLY_RULE(
+          poly_upat_op1(
+              POLY_OP_CAST,
+              poly_upat_set_dtype(poly_upat_op(POLY_OP_CONST, NULL, 0, "u"), weaks, 2), "c"
+          ),
+          commit_weak_cast_const
+      ),
   };
-  g_pm_cast_weak = poly_pm_thread_cache(
-      poly_pm_new_named(rules, (int)(sizeof(rules) / sizeof(rules[0])))
-  );
+  g_pm_cast_weak =
+      poly_pm_thread_cache(poly_pm_new_named(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
   return g_pm_cast_weak;
 }
 
@@ -337,13 +325,12 @@ PolyUOp *poly_lower_weak_srcs(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
 
   PolyUOp *src_inline[16];
   PolyUOp **src = u->n_src > (int)(sizeof(src_inline) / sizeof(src_inline[0]))
-                        ? malloc((size_t)u->n_src * sizeof(*src))
-                        : src_inline;
+                      ? malloc((size_t)u->n_src * sizeof(*src))
+                      : src_inline;
   if (!src) return NULL;
   bool changed = false;
   for (int i = 0; i < u->n_src; i++) {
-    src[i] = poly_dtype_is_weak(u->src[i]->dtype) ? lower_weak_source(ctx, u->src[i])
-                                                   : u->src[i];
+    src[i] = poly_dtype_is_weak(u->src[i]->dtype) ? lower_weak_source(ctx, u->src[i]) : u->src[i];
     changed |= src[i] != u->src[i];
   }
   PolyUOp *ret = changed ? replace_uop(ctx, u, u->dtype, src, u->n_src) : NULL;
@@ -352,9 +339,7 @@ PolyUOp *poly_lower_weak_srcs(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
 }
 
 /* Tinygrad 2026-08-22/a9069c177a9d uop/weak.py:77-81. */
-static PolyUOp *narrow_gated_long_index(
-    PolyCtx *ctx, PolyUOp *idx, const PolyBindings *b
-) {
+static PolyUOp *narrow_gated_long_index(PolyCtx *ctx, PolyUOp *idx, const PolyBindings *b) {
   (void)b;
   PolyUOp *coord = idx->src[1];
   int64_t max_numel = poly_uop_max_numel(ctx, idx->src[0]);
@@ -381,19 +366,19 @@ PolyPatternMatcher *poly_pm_lower_index_dtype(void) {
       poly_opset_add(poly_opset_add((PolyOpSet){{0, 0}}, POLY_OP_INDEX), POLY_OP_SHRINK);
   PolyNamedRule rules[] = {
       POLY_RULE(poly_upat_any("u"), poly_lower_weak_srcs),
-      POLY_RULE(poly_upat_allow_any_len(poly_upat_ops2(
-                    index_shrink, poly_upat_any("buf"),
-                    poly_upat_op3(
-                        POLY_OP_WHERE, poly_upat_any("gate"),
-                        poly_upat_dtype("idx", int64_dtype, 1),
-                        poly_upat_const_val(poly_arg_invalid()), NULL
-                    ),
-                    "u"
-                )),
-                narrow_gated_long_index),
+      POLY_RULE(
+          poly_upat_allow_any_len(poly_upat_ops2(
+              index_shrink, poly_upat_any("buf"),
+              poly_upat_op3(
+                  POLY_OP_WHERE, poly_upat_any("gate"), poly_upat_dtype("idx", int64_dtype, 1),
+                  poly_upat_const_val(poly_arg_invalid()), NULL
+              ),
+              "u"
+          )),
+          narrow_gated_long_index
+      ),
   };
-  PolyPatternMatcher *local =
-      poly_pm_new_named(rules, (int)(sizeof(rules) / sizeof(rules[0])));
+  PolyPatternMatcher *local = poly_pm_new_named(rules, (int)(sizeof(rules) / sizeof(rules[0])));
   PolyPatternMatcher *weak = poly_pm_concat(poly_pm_commit_weak(), poly_pm_cast_weak());
   g_pm_lower_index_dtype = poly_pm_thread_cache(poly_pm_concat(weak, local));
   poly_pm_destroy(weak);

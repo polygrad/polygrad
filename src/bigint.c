@@ -6,7 +6,8 @@
 #include <string.h>
 
 static void normalize(PolyInt *v) {
-  while (v->n_limbs > 0 && v->limbs[v->n_limbs - 1] == 0) v->n_limbs--;
+  while (v->n_limbs > 0 && v->limbs[v->n_limbs - 1] == 0)
+    v->n_limbs--;
   if (v->n_limbs == 0) {
     free(v->limbs);
     v->limbs = NULL;
@@ -40,8 +41,7 @@ bool poly_int_copy(PolyInt *out, const PolyInt *value) {
 
 bool poly_int_from_i64(PolyInt *out, int64_t value) {
   if (!out) return false;
-  uint64_t magnitude =
-      value < 0 ? (uint64_t)(-(value + 1)) + UINT64_C(1) : (uint64_t)value;
+  uint64_t magnitude = value < 0 ? (uint64_t)(-(value + 1)) + UINT64_C(1) : (uint64_t)value;
   size_t n = magnitude > UINT32_MAX ? 2 : magnitude ? 1 : 0;
   if (!alloc_limbs(out, n)) return false;
   if (n > 0) out->limbs[0] = (uint32_t)magnitude;
@@ -54,8 +54,7 @@ bool poly_int_from_arg(PolyInt *out, PolyArg arg) {
   if (!out) return false;
   if (arg.kind == POLY_ARG_INT) return poly_int_from_i64(out, arg.i);
   if (arg.kind == POLY_ARG_BOOL) return poly_int_from_i64(out, arg.b ? 1 : 0);
-  if (arg.kind != POLY_ARG_BIGINT || arg.bigint.n_limbs == 0 || !arg.bigint.limbs)
-    return false;
+  if (arg.kind != POLY_ARG_BIGINT || arg.bigint.n_limbs == 0 || !arg.bigint.limbs) return false;
   if (!alloc_limbs(out, arg.bigint.n_limbs)) return false;
   memcpy(out->limbs, arg.bigint.limbs, arg.bigint.n_limbs * sizeof(uint32_t));
   out->sign = arg.bigint.sign < 0 ? -1 : 1;
@@ -110,7 +109,8 @@ uint64_t poly_int_to_u64_mod(const PolyInt *value) {
 double poly_int_to_double(const PolyInt *value) {
   if (!value) return 0.0;
   double out = 0.0;
-  for (size_t i = value->n_limbs; i-- > 0;) out = ldexp(out, 32) + value->limbs[i];
+  for (size_t i = value->n_limbs; i-- > 0;)
+    out = ldexp(out, 32) + value->limbs[i];
   return value->sign < 0 ? -out : out;
 }
 
@@ -242,8 +242,7 @@ static bool shr_abs(PolyInt *out, const PolyInt *a, uint64_t shift, bool *discar
   uint32_t carry = 0;
   for (size_t i = a->n_limbs; i-- > words;) {
     uint32_t cur = a->limbs[i];
-    out->limbs[i - words] =
-        bits ? (cur >> bits) | (carry << (32 - bits)) : cur;
+    out->limbs[i - words] = bits ? (cur >> bits) | (carry << (32 - bits)) : cur;
     carry = bits ? cur & ((UINT32_C(1) << bits) - 1) : 0;
   }
   out->sign = 1;
@@ -410,7 +409,7 @@ bool poly_int_bitwise(PolyInt *out, PolyOps op, const PolyInt *a, const PolyInt 
   to_twos(ta, n, a);
   to_twos(tb, n, b);
   for (size_t i = 0; i < n; i++)
-    out->limbs[i] = op == POLY_OP_AND ? ta[i] & tb[i]
+    out->limbs[i] = op == POLY_OP_AND  ? ta[i] & tb[i]
                     : op == POLY_OP_OR ? ta[i] | tb[i]
                                        : ta[i] ^ tb[i];
   bool negative = (out->limbs[n - 1] >> ((bits - 1) % 32)) & 1u;
@@ -529,7 +528,8 @@ char *poly_int_to_decimal(const PolyInt *value) {
     return NULL;
   }
   size_t n_chunks = 0;
-  while (!poly_int_is_zero(&tmp)) chunks[n_chunks++] = div_small_inplace(&tmp, 1000000000u);
+  while (!poly_int_is_zero(&tmp))
+    chunks[n_chunks++] = div_small_inplace(&tmp, 1000000000u);
   size_t pos = 0;
   if (value->sign < 0) digits[pos++] = '-';
   pos += (size_t)snprintf(digits + pos, cap - pos, "%u", chunks[n_chunks - 1]);
@@ -682,10 +682,8 @@ int poly_arg_integer_cmp_float(PolyArg integer, double value) {
 
 bool poly_arg_python_numeric_eq(PolyArg a, PolyArg b) {
   /* Tinygrad UPat.match uses Python == for literal arguments. */
-  bool a_int = a.kind == POLY_ARG_BOOL || a.kind == POLY_ARG_INT ||
-               a.kind == POLY_ARG_BIGINT;
-  bool b_int = b.kind == POLY_ARG_BOOL || b.kind == POLY_ARG_INT ||
-               b.kind == POLY_ARG_BIGINT;
+  bool a_int = a.kind == POLY_ARG_BOOL || a.kind == POLY_ARG_INT || a.kind == POLY_ARG_BIGINT;
+  bool b_int = b.kind == POLY_ARG_BOOL || b.kind == POLY_ARG_INT || b.kind == POLY_ARG_BIGINT;
   if (a_int && b_int) {
     bool ok = false;
     return poly_arg_integer_cmp(a, b, &ok) == 0 && ok;

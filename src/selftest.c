@@ -12,13 +12,14 @@
 
 /* C argument adaptation for current Tinygrad UOp.new_buffer. */
 static PolyUOp *selftest_new_buffer(
-    PolyCtx *ctx, PolyDType dtype, int64_t size, PolyDevice device
+    PolyCtx *ctx,
+    PolyDType dtype,
+    int64_t size,
+    PolyDevice device
 ) {
   PolyUOp *device_uop = poly_device_uop(ctx, device);
   return device_uop
-             ? poly_uop_new_buffer(
-                   ctx, device_uop, size, dtype, poly_ctx_next_unique_id(ctx)
-               )
+             ? poly_uop_new_buffer(ctx, device_uop, size, dtype, poly_ctx_next_unique_id(ctx))
              : NULL;
 }
 
@@ -74,14 +75,9 @@ int poly_selftest_device(PolyDevice device) {
   PolyUOp *sink = poly_sink1(ctx, store);
   if (!sum || !store || !sink) goto cleanup;
 
-  PolyUOp *linear = poly_linear_effect_sink(
-      ctx, sink, &var_bindings, &n_var_bindings
-  );
+  PolyUOp *linear = poly_linear_effect_sink(ctx, sink, &var_bindings, &n_var_bindings);
   if (!linear) goto cleanup;
-  if (poly_run_linear(
-          ctx, linear, var_bindings, n_var_bindings,
-          NULL, 0, true, false, false
-      ) != 0)
+  if (poly_run_linear(ctx, linear, var_bindings, n_var_bindings, NULL, 0, true, false, false) != 0)
     goto cleanup;
   if (poly_buffer_read(ctx, out, got, sizeof(got)) != 0) goto cleanup;
 

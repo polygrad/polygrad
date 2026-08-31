@@ -51,7 +51,8 @@ static int run_grad_expr(
       free(buffers);
       return -1;
     }
-    for (int i = 0; i < n_args; i++) bindings[i] = POLY_TEST_HOST_VIEW(buffers[i], args[i]);
+    for (int i = 0; i < n_args; i++)
+      bindings[i] = POLY_TEST_HOST_VIEW(buffers[i], args[i]);
     free(buffers);
     int ret = poly_test_realize_buffer_views(ctx, sink, bindings, n_args);
     free(bindings);
@@ -311,8 +312,7 @@ TEST(autograd, pow_zero_base_gradients_match_pinned) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *base = poly_test_buffer(ctx, POLY_FLOAT32, 4);
   PolyUOp *exponent = poly_test_buffer(ctx, POLY_FLOAT32, 4);
-  PolyUOp *power =
-      poly_uop2(ctx, POLY_OP_POW, POLY_FLOAT32, base, exponent, poly_arg_none());
+  PolyUOp *power = poly_uop2(ctx, POLY_OP_POW, POLY_FLOAT32, base, exponent, poly_arg_none());
   PolyUOp *loss = poly_reduce_axis(ctx, POLY_OP_ADD, power, (int64_t[]){0}, 1);
   PolyUOp *base_grad = poly_grad(ctx, loss, base);
   PolyUOp *exponent_grad = poly_grad(ctx, loss, exponent);
@@ -325,9 +325,7 @@ TEST(autograd, pow_zero_base_gradients_match_pinned) {
 
   PolyUOp *exponent_out = poly_test_buffer(ctx, POLY_FLOAT32, 4);
   void *exponent_args[3] = {exponent_grad_data, base_data, exponent_data};
-  RUN_GRAD_EXPR(
-      ctx, exponent_out, exponent_grad, "ad_pow_zero_exponent", exponent_args, 3
-  );
+  RUN_GRAD_EXPR(ctx, exponent_out, exponent_grad, "ad_pow_zero_exponent", exponent_args, 3);
 
   float expected_base[4] = {0.0f, 0.0f, 12.0f, 0.25f};
   float expected_exponent[4] = {0.0f, 0.0f, 5.54517746f, 2.77258873f};
@@ -350,12 +348,9 @@ TEST(autograd, raw_pow_uses_current_weak_literal_topology) {
   PolyUOp *base_storage = poly_test_buffer(ctx, POLY_FLOAT32, 2);
   PolyUOp *exponent_storage = poly_test_buffer(ctx, POLY_FLOAT32, 3);
   PolyUOp *base = poly_reshape(ctx, base_storage, (int64_t[]){2, 1}, 2);
-  PolyUOp *exponent =
-      poly_reshape(ctx, exponent_storage, (int64_t[]){1, 3}, 2);
-  PolyUOp *power =
-      poly_uop2(ctx, POLY_OP_POW, POLY_FLOAT32, base, exponent, poly_arg_none());
-  PolyUOp *loss =
-      poly_reduce_axis(ctx, POLY_OP_ADD, power, (int64_t[]){0, 1}, 2);
+  PolyUOp *exponent = poly_reshape(ctx, exponent_storage, (int64_t[]){1, 3}, 2);
+  PolyUOp *power = poly_uop2(ctx, POLY_OP_POW, POLY_FLOAT32, base, exponent, poly_arg_none());
+  PolyUOp *loss = poly_reduce_axis(ctx, POLY_OP_ADD, power, (int64_t[]){0, 1}, 2);
   PolyUOp *base_grad = poly_grad(ctx, loss, base_storage);
   PolyUOp *exponent_grad = poly_grad(ctx, loss, exponent_storage);
   ASSERT_NOT_NULL(base_grad);

@@ -18,9 +18,7 @@
  * schedule and pull back the one scheduled root explicitly. */
 static PolyUOp *single_scheduled_root(PolyCtx *ctx, PolyUOp *sink) {
   PolyUOp *linear = poly_test_create_linear(ctx, sink);
-  return linear && linear->n_src > 0
-             ? poly_test_linear_call_body(linear, linear->n_src - 1)
-             : NULL;
+  return linear && linear->n_src > 0 ? poly_test_linear_call_body(linear, linear->n_src - 1) : NULL;
 }
 
 static PolyBuffer *test_realized_buffer(PolyCtx *ctx, PolyUOp *realized) {
@@ -248,13 +246,11 @@ TEST(sched, from_host_copy_precedes_vector_compute) {
   data[1] = 2.0f;
   data[2] = 3.0f;
   int64_t shape[] = {3};
-  PolyTensor *a_source = poly_tensor_from_host(
-      ctx, data, 3 * sizeof(float), POLY_FLOAT32, shape, 1
-  );
+  PolyTensor *a_source =
+      poly_tensor_from_host(ctx, data, 3 * sizeof(float), POLY_FLOAT32, shape, 1);
   PolyTensor *a = poly_tensor_to_device(ctx, a_source, POLY_DEVICE_CPU);
-  PolyTensor *one = poly_tensor_const_float_by_id(
-      ctx, 1.0, poly_dtype_id_by_name("float32"), POLY_DEVICE_CPU
-  );
+  PolyTensor *one =
+      poly_tensor_const_float_by_id(ctx, 1.0, poly_dtype_id_by_name("float32"), POLY_DEVICE_CPU);
   PolyTensor *x = poly_tensor_alu2(ctx, POLY_OP_ADD, a, one);
   ASSERT_NOT_NULL(a_source);
   ASSERT_NOT_NULL(a);
@@ -274,7 +270,8 @@ TEST(sched, from_host_copy_precedes_vector_compute) {
   ASSERT_INT_EQ(poly_run_linear(ctx, linear, NULL, 0, NULL, 0, true, false, false), 0);
   float got[3] = {0};
   ASSERT_INT_EQ(poly_buffer_read(ctx, out, got, sizeof(got)), 0);
-  for (int i = 0; i < 3; i++) ASSERT_FLOAT_EQ(got[i], data[i] + 1.0f, 1e-6f);
+  for (int i = 0; i < 3; i++)
+    ASSERT_FLOAT_EQ(got[i], data[i] + 1.0f, 1e-6f);
   poly_ctx_destroy(ctx);
   free(data);
   PASS();
@@ -320,8 +317,9 @@ TEST(sched, placement_computed_copy_source_materializes_before_copy) {
       ASSERT_INT_EQ(count_root_ops(ctx, poly_test_linear_call_body(linear, i), POLY_OP_COPY), 0);
       ASSERT_TRUE(poly_test_linear_call_n_buffers(linear, i) >= 1);
       ASSERT_INT_EQ(
-          poly_device_from_device_uop(poly_uop_device_uop_cached(
-              ctx, poly_test_linear_call_buffer(linear, i, 0), NULL)),
+          poly_device_from_device_uop(
+              poly_uop_device_uop_cached(ctx, poly_test_linear_call_buffer(linear, i, 0), NULL)
+          ),
           POLY_DEVICE_CPU
       );
     }
@@ -340,14 +338,9 @@ TEST(sched, from_host_scalar_copy_precedes_compute_with_realized_peer) {
   int64_t shape[] = {1};
 
   PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
-  PolyUOp *x_buffer = x
-                          ? (PolyUOp *)poly_uop_get_buffer_identity(
-                                poly_tensor_uop_physical(x)
-                            )
-                          : NULL;
-  PolyTensor *y_source = poly_tensor_from_host(
-      ctx, y_data, sizeof(y_data), POLY_FLOAT32, shape, 1
-  );
+  PolyUOp *x_buffer =
+      x ? (PolyUOp *)poly_uop_get_buffer_identity(poly_tensor_uop_physical(x)) : NULL;
+  PolyTensor *y_source = poly_tensor_from_host(ctx, y_data, sizeof(y_data), POLY_FLOAT32, shape, 1);
   PolyTensor *y = poly_tensor_to_device(ctx, y_source, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(x);
   ASSERT_NOT_NULL(x_buffer);
@@ -1663,8 +1656,7 @@ TEST(sched, realize_vecadd) {
   }
 
   PolyTestBufferView bindings[] = {
-      POLY_TEST_HOST_VIEW(a, a_d), POLY_TEST_HOST_VIEW(b, b_d), POLY_TEST_HOST_VIEW(c, c_d)
-  };
+      POLY_TEST_HOST_VIEW(a, a_d), POLY_TEST_HOST_VIEW(b, b_d), POLY_TEST_HOST_VIEW(c, c_d)};
   int ret = poly_test_realize_buffer_views(ctx, sink, bindings, 3);
   ASSERT_INT_EQ(ret, 0);
   for (int i = 0; i < N; i++)
@@ -1781,12 +1773,13 @@ TEST(sched, custom_kernel_set_accumulator_noopt_executes) {
   ASSERT_TRUE(poly_dtype_eq(rows_const->dtype, POLY_WEAKINT));
   ASSERT_TRUE(poly_dtype_eq(offset->dtype, POLY_WEAKINT));
 
-  PolyUOp *acc = poly_uop_set(ctx, poly_uop_index(ctx, pout, out_idx, 1), poly_const_float(ctx, 0.0f), NULL, 0);
+  PolyUOp *acc = poly_uop_set(
+      ctx, poly_uop_index(ctx, pout, out_idx, 1), poly_const_float(ctx, 0.0f), NULL, 0
+  );
   ASSERT_NOT_NULL(acc);
   PolyUOp *acc_after_r = poly_uop_after(ctx, acc, r);
   PolyUOp *sum = poly_alu2(
-      ctx, POLY_OP_ADD,
-      poly_uop_index(ctx, acc_after_r, out_idx, 1),
+      ctx, POLY_OP_ADD, poly_uop_index(ctx, acc_after_r, out_idx, 1),
       poly_uop_index(ctx, px, x_idx, 1)
   );
   acc = poly_uop_set(ctx, poly_uop_index(ctx, acc, out_idx, 1), sum, &r, 1);
@@ -1905,20 +1898,17 @@ TEST(sched, estimates_match_tinygrad_edge_semantics) {
   ASSERT_TRUE(ops == 4);
 
   PolyUOp *four = poly_uop0(ctx, POLY_OP_CONST, POLY_INT64, poly_arg_int(4));
-  PolyUOp *range4 = poly_uop1(
-      ctx, POLY_OP_RANGE, POLY_INT64, four, poly_arg_range(0, POLY_AXIS_LOOP)
-  );
+  PolyUOp *range4 =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INT64, four, poly_arg_range(0, POLY_AXIS_LOOP));
   PolyUOp *range_end_src[] = {add, range4};
-  PolyUOp *range_end =
-      poly_uop(ctx, POLY_OP_END, POLY_VOID, range_end_src, 2, poly_arg_none());
+  PolyUOp *range_end = poly_uop(ctx, POLY_OP_END, POLY_VOID, range_end_src, 2, poly_arg_none());
   PolyUOp *range_uops[] = {range4, add, range_end};
   ASSERT_INT_EQ(poly_estimates_from_uops(ctx, range_uops, 3, false, &est), 0);
   ASSERT_INT_EQ(poly_estimates_infer(&est, NULL, 0, &ops, &lds, &mem), 0);
   ASSERT_TRUE(ops == 4);
 
   PolyUOp *eight = poly_uop0(ctx, POLY_OP_CONST, POLY_INT64, poly_arg_int(8));
-  PolyUOp *special =
-      poly_uop1(ctx, POLY_OP_SPECIAL, POLY_INT64, eight, poly_arg_str("gidx0"));
+  PolyUOp *special = poly_uop1(ctx, POLY_OP_SPECIAL, POLY_INT64, eight, poly_arg_str("gidx0"));
   PolyUOp *special_uops[] = {special, add};
   ASSERT_INT_EQ(poly_estimates_from_uops(ctx, special_uops, 2, false, &est), 0);
   ASSERT_INT_EQ(poly_estimates_infer(&est, NULL, 0, &ops, &lds, &mem), 0);
@@ -1936,9 +1926,8 @@ TEST(sched, estimates_match_tinygrad_edge_semantics) {
   ASSERT_INT_EQ(poly_estimates_infer(&est, NULL, 0, &ops, &lds, &mem), 0);
   ASSERT_TRUE(ops == 0 && lds == 4 && mem == 4);
 
-  PolyUOp *range8 = poly_uop1(
-      ctx, POLY_OP_RANGE, POLY_INT64, eight, poly_arg_range(1, POLY_AXIS_LOOP)
-  );
+  PolyUOp *range8 =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INT64, eight, poly_arg_range(1, POLY_AXIS_LOOP));
   PolyUOp *idx0 = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, param, range8, poly_arg_none());
   PolyUOp *idx1_expr = poly_alu2(ctx, POLY_OP_ADD, range8, poly_const_int(ctx, 0));
   PolyUOp *idx1 = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, param, idx1_expr, poly_arg_none());
@@ -1953,12 +1942,10 @@ TEST(sched, estimates_match_tinygrad_edge_semantics) {
   ASSERT_TRUE(ops == 0 && lds == 96 && mem == 64);
 
   PolyUOp *n = poly_uop_variable(ctx, "n", 1, 8, POLY_WEAKINT, 1, false);
-  PolyUOp *dynamic_range = poly_uop1(
-      ctx, POLY_OP_RANGE, POLY_INT32, n, poly_arg_range(2, POLY_AXIS_LOOP)
-  );
+  PolyUOp *dynamic_range =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, n, poly_arg_range(2, POLY_AXIS_LOOP));
   PolyUOp *dynamic_end_src[] = {add, dynamic_range};
-  PolyUOp *dynamic_end =
-      poly_uop(ctx, POLY_OP_END, POLY_VOID, dynamic_end_src, 2, poly_arg_none());
+  PolyUOp *dynamic_end = poly_uop(ctx, POLY_OP_END, POLY_VOID, dynamic_end_src, 2, poly_arg_none());
   PolyUOp *dynamic_uops[] = {dynamic_range, add, dynamic_end};
   PolyVarBinding binding = {.var = n, .value = 4};
   ASSERT_INT_EQ(poly_estimates_from_uops(ctx, dynamic_uops, 3, false, &est), 0);
@@ -1986,12 +1973,10 @@ TEST(sched, estimates_unbounded_range_does_not_scale_work) {
   ASSERT_NOT_NULL(ctx);
 
   PolyUOp *noop = poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_none());
-  PolyUOp *loop = poly_uop1(
-      ctx, POLY_OP_RANGE, POLY_VOID, noop, poly_arg_range(0, POLY_AXIS_WEAK));
-  PolyUOp *add = poly_alu2(ctx, POLY_OP_ADD, poly_const_float(ctx, 1.0),
-                          poly_const_float(ctx, 2.0));
-  PolyUOp *condition =
-      poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_bool(true));
+  PolyUOp *loop = poly_uop1(ctx, POLY_OP_RANGE, POLY_VOID, noop, poly_arg_range(0, POLY_AXIS_WEAK));
+  PolyUOp *add =
+      poly_alu2(ctx, POLY_OP_ADD, poly_const_float(ctx, 1.0), poly_const_float(ctx, 2.0));
+  PolyUOp *condition = poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_bool(true));
   PolyUOp *end_src[] = {add, loop, condition};
   PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 3, poly_arg_none());
   PolyUOp *uops[] = {loop, add, end};
@@ -2013,8 +1998,7 @@ TEST(sched, estimates_param_uses_uop_storage_extent) {
 
   PolyUOp *extent = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(8));
   PolyParamArg arg = {.slot = 0, .dtype = POLY_FLOAT32, .addrspace = POLY_ADDR_GLOBAL};
-  PolyUOp *param = poly_uop1(
-      ctx, POLY_OP_PARAM, POLY_FLOAT32, extent, poly_arg_param(&arg));
+  PolyUOp *param = poly_uop1(ctx, POLY_OP_PARAM, POLY_FLOAT32, extent, poly_arg_param(&arg));
   ASSERT_INT_EQ(param->n_src, 1);
   ASSERT_PTR_EQ(param->src[0], extent);
   ASSERT_INT_EQ(param->src[0]->op, POLY_OP_CONST);
@@ -2026,9 +2010,8 @@ TEST(sched, estimates_param_uses_uop_storage_extent) {
   ASSERT_INT_EQ(param_shape.dims[0], 8);
 
   PolyUOp *sixteen = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(16));
-  PolyUOp *range = poly_uop1(
-      ctx, POLY_OP_RANGE, POLY_INT32, sixteen, poly_arg_range(0, POLY_AXIS_LOOP)
-  );
+  PolyUOp *range =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, sixteen, poly_arg_range(0, POLY_AXIS_LOOP));
   PolyUOp *index = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, param, range, poly_arg_none());
   PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, index, poly_arg_none());
   PolyUOp *end = poly_uop2(ctx, POLY_OP_END, POLY_VOID, load, range, poly_arg_none());
@@ -2079,13 +2062,10 @@ TEST(sched, estimate_inference_uses_unwrapped_host_symbolic_arithmetic) {
    * arithmetic. int32 intermediates and CASTs are not width-wrapped. */
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
-  PolyUOp *max =
-      poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(INT32_MAX));
+  PolyUOp *max = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(INT32_MAX));
   PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(1));
-  PolyUOp *sum =
-      poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, max, one, poly_arg_none());
-  PolyUOp *cast =
-      poly_uop1(ctx, POLY_OP_CAST, POLY_INT32, sum, poly_arg_none());
+  PolyUOp *sum = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, max, one, poly_arg_none());
+  PolyUOp *cast = poly_uop1(ctx, POLY_OP_CAST, POLY_INT32, sum, poly_arg_none());
   PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(0));
   PolyEstimates estimates = {.ops = sum, .lds = zero, .mem = zero};
   uint64_t ops = 0, lds = 0, mem = 0;

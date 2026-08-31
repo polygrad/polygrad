@@ -17,7 +17,8 @@ static int count_root_ops(PolyCtx *ctx, PolyUOp *root, PolyOps op) {
   int n_topo = 0;
   PolyUOp **topo = poly_toposort_alloc(ctx, root, &n_topo);
   int count = 0;
-  for (int i = 0; i < n_topo; i++) count += topo[i]->op == op;
+  for (int i = 0; i < n_topo; i++)
+    count += topo[i]->op == op;
   poly_toposort_free(topo);
   return count;
 }
@@ -198,21 +199,16 @@ TEST(schedule_runtime, compile_linear_sets_kernel_info_beam) {
   /* Tinygrad compile_linear's pm_beam changes only KernelInfo.beam. Tagging
    * the SINK skips optimization so this regression tests topology, not search. */
   PolyUOp *tagged = poly_uop_tagged_arg(
-      ctx, POLY_OP_SINK, body->dtype, body->src, body->n_src,
-      body->arg, 1, body->tag_arg
+      ctx, POLY_OP_SINK, body->dtype, body->src, body->n_src, body->arg, 1, body->tag_arg
   );
   PolyUOp **call_src = malloc((size_t)call->n_src * sizeof(*call_src));
   ASSERT_NOT_NULL(call_src);
   memcpy(call_src, call->src, (size_t)call->n_src * sizeof(*call_src));
   call_src[0] = tagged;
-  PolyUOp *tagged_call = poly_uop(
-      ctx, POLY_OP_CALL, call->dtype, call_src, call->n_src, call->arg
-  );
+  PolyUOp *tagged_call = poly_uop(ctx, POLY_OP_CALL, call->dtype, call_src, call->n_src, call->arg);
   free(call_src);
   ASSERT_NOT_NULL(tagged_call);
-  PolyUOp *tagged_linear = poly_uop1(
-      ctx, POLY_OP_LINEAR, POLY_VOID, tagged_call, poly_arg_none()
-  );
+  PolyUOp *tagged_linear = poly_uop1(ctx, POLY_OP_LINEAR, POLY_VOID, tagged_call, poly_arg_none());
   PolyUOp *compiled = poly_compile_linear(ctx, tagged_linear, 4);
   ASSERT_NOT_NULL(compiled);
   PolyUOp *program = poly_test_linear_call_body(compiled, 0);
@@ -246,7 +242,8 @@ TEST(schedule_runtime, run_linear_executes_current_call_graph) {
 
   ASSERT_INT_EQ(poly_run_linear(ctx, linear, vars, n_vars, NULL, 0, true, false, false), 0);
   ASSERT_INT_EQ(poly_buffer_read(ctx, realized, got, sizeof(got)), 0);
-  for (int i = 0; i < 4; i++) ASSERT_FLOAT_EQ(got[i], a_data[i] + b_data[i], 1e-6f);
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(got[i], a_data[i] + b_data[i], 1e-6f);
 
   free(vars);
   poly_ctx_destroy(ctx);
@@ -326,12 +323,10 @@ TEST(schedule_runtime, memory_plan_tuple_view_resolves_before_arena_allocation) 
   ASSERT_NOT_NULL(ctx);
   const char *devices[] = {"CPU", "CPU:1"};
   PolyUOp *device = poly_device_uop_from_names(ctx, devices, 2);
-  PolyUOp *arena = poly_uop_new_buffer(
-      ctx, device, 256, POLY_INT8, poly_ctx_next_unique_id(ctx));
+  PolyUOp *arena = poly_uop_new_buffer(ctx, device, 256, POLY_INT8, poly_ctx_next_unique_id(ctx));
   ASSERT_NOT_NULL(arena);
   PolyUOp *slice = poly_shrink(ctx, arena, (int64_t[][2]){{0, 16}}, 1);
-  PolyUOp *view = poly_uop1(
-      ctx, POLY_OP_BITCAST, POLY_FLOAT32, slice, poly_arg_none());
+  PolyUOp *view = poly_uop1(ctx, POLY_OP_BITCAST, POLY_FLOAT32, slice, poly_arg_none());
   ASSERT_NOT_NULL(view);
 
   /* Tinygrad 2026-08-22 a9069c17 UOp.buffer recursively creates base Buffer
@@ -370,9 +365,7 @@ TEST(schedule_runtime, memory_plan_rewrite_plans_tuple_device_buffer) {
   const char *names[] = {"CPU", "CPU:1"};
   PolyUOp *device = poly_device_uop_from_names(ctx, names, 2);
   ASSERT_NOT_NULL(device);
-  PolyUOp *buffer = poly_uop_new_buffer(
-      ctx, device, 4, POLY_FLOAT32, poly_ctx_next_unique_id(ctx)
-  );
+  PolyUOp *buffer = poly_uop_new_buffer(ctx, device, 4, POLY_FLOAT32, poly_ctx_next_unique_id(ctx));
   ASSERT_NOT_NULL(buffer);
   PolyUOp *body = poly_uop0(ctx, POLY_OP_CUSTOM_FUNCTION, POLY_VOID, poly_arg_str("probe"));
   PolyUOp *call_src[] = {body, buffer};
@@ -408,9 +401,7 @@ TEST(schedule_runtime, jit_capture_records_linear_before_memory_plan) {
   PolyUOp *realized = NULL;
   PolyVarBinding *vars = NULL;
   int n_vars = 0;
-  PolyUOp *returned = poly_linear_with_vars(
-      ctx, &value, 1, &realized, &vars, &n_vars
-  );
+  PolyUOp *returned = poly_linear_with_vars(ctx, &value, 1, &realized, &vars, &n_vars);
   ASSERT_NOT_NULL(returned);
   ASSERT_NOT_NULL(realized);
 

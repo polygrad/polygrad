@@ -38,7 +38,7 @@ double poly_now_ms(void);
  * POLY_DUMP_KERNELS remains a compatibility override and enables all three.
  */
 bool poly_dump_kernels_enabled(void); /* POLY_DUMP_KERNELS or DEBUG >= 4 */
-bool poly_dump_graph_enabled(void);   /* POLY_DUMP_KERNELS or DEBUG >= 5 */
-bool poly_dump_linear_enabled(void);  /* POLY_DUMP_KERNELS or DEBUG >= 6 */
+bool poly_dump_graph_enabled(void); /* POLY_DUMP_KERNELS or DEBUG >= 5 */
+bool poly_dump_linear_enabled(void); /* POLY_DUMP_KERNELS or DEBUG >= 6 */
 
 #endif /* POLY_UTILS_H */

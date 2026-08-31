@@ -18,7 +18,7 @@ extern "C" {
 typedef struct PolyBindIndex PolyBindIndex;
 
 PolyBindIndex *poly_bind_index_create(PolyInstance *inst);
-void           poly_bind_index_destroy(PolyBindIndex *idx);
+void poly_bind_index_destroy(PolyBindIndex *idx);
 
 /*
  * Copy F32 tensor data into the named buffer of the bound PolyInstance.
@@ -34,7 +34,8 @@ int poly_import_copy_named_tensor(
     const float *src_data,
     const int64_t *src_shape,
     int src_ndim,
-    int transpose_2d);
+    int transpose_2d
+);
 
 /*
  * Lookup destination shape for a named buffer.
@@ -44,7 +45,8 @@ int poly_bind_index_dst_shape(
     const PolyBindIndex *idx,
     const char *name,
     int64_t *shape_out,
-    int max_dims);
+    int max_dims
+);
 
 #ifdef __cplusplus
 }

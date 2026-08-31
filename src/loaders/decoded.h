@@ -23,33 +23,33 @@ extern "C" {
  * Decoders map format-native codes to these at decode time.
  */
 enum {
-    /* Native types (shared by HF and GGUF) */
-    POLY_DECODED_F32  = 0,
-    POLY_DECODED_F16  = 1,
-    POLY_DECODED_BF16 = 2,
-    POLY_DECODED_F64  = 3,
-    POLY_DECODED_I64  = 4,
-    POLY_DECODED_I32  = 5,
-    POLY_DECODED_I16  = 6,
-    POLY_DECODED_I8   = 7,
-    POLY_DECODED_U8   = 8,
-    POLY_DECODED_BOOL = 9,
-    /* GGML quantized types (no HF equivalent) */
-    POLY_DECODED_Q4_0 = 100,
-    POLY_DECODED_Q4_1 = 101,
-    POLY_DECODED_Q8_0 = 102,
-    POLY_DECODED_Q4_K = 103,
-    POLY_DECODED_Q5_K = 104,
-    POLY_DECODED_Q6_K = 105,
+  /* Native types (shared by HF and GGUF) */
+  POLY_DECODED_F32 = 0,
+  POLY_DECODED_F16 = 1,
+  POLY_DECODED_BF16 = 2,
+  POLY_DECODED_F64 = 3,
+  POLY_DECODED_I64 = 4,
+  POLY_DECODED_I32 = 5,
+  POLY_DECODED_I16 = 6,
+  POLY_DECODED_I8 = 7,
+  POLY_DECODED_U8 = 8,
+  POLY_DECODED_BOOL = 9,
+  /* GGML quantized types (no HF equivalent) */
+  POLY_DECODED_Q4_0 = 100,
+  POLY_DECODED_Q4_1 = 101,
+  POLY_DECODED_Q8_0 = 102,
+  POLY_DECODED_Q4_K = 103,
+  POLY_DECODED_Q5_K = 104,
+  POLY_DECODED_Q6_K = 105,
 };
 
 typedef struct {
-    char       *name;       /* owned string (freed by parent decoded_free) */
-    const void *data;       /* raw bytes in format-native dtype (zero-copy) */
-    int64_t     shape[8];
-    int         ndim;
-    int64_t     numel;
-    int         dtype;      /* POLY_DECODED_* unified code */
+  char *name; /* owned string (freed by parent decoded_free) */
+  const void *data; /* raw bytes in format-native dtype (zero-copy) */
+  int64_t shape[8];
+  int ndim;
+  int64_t numel;
+  int dtype; /* POLY_DECODED_* unified code */
 } PolyDecodedTensor;
 
 /*

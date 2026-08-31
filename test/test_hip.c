@@ -50,10 +50,8 @@ TEST_BACKEND(hip, native_fp8_types_and_casts_match_current_renderer) {
     PolyUOp *f32_in = poly_test_program_param(ctx, POLY_FLOAT32, 1, 3);
     PolyUOp *fp8_out_idx = poly_uop_index(ctx, fp8_out, &zero, 1);
     PolyUOp *f32_in_idx = poly_uop_index(ctx, f32_in, &zero, 1);
-    PolyUOp *f32_load =
-        poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, f32_in_idx, poly_arg_none());
-    PolyUOp *to_fp8 =
-        poly_uop1(ctx, POLY_OP_CAST, dtypes[i], f32_load, poly_arg_none());
+    PolyUOp *f32_load = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, f32_in_idx, poly_arg_none());
+    PolyUOp *to_fp8 = poly_uop1(ctx, POLY_OP_CAST, dtypes[i], f32_load, poly_arg_none());
     PolyUOp *fp8_store =
         poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, fp8_out_idx, to_fp8, poly_arg_none());
     sink = poly_test_kernel_sink(ctx, &fp8_store, 1, "fp8_store");
@@ -68,12 +66,9 @@ TEST_BACKEND(hip, native_fp8_types_and_casts_match_current_renderer) {
     ASSERT_NOT_NULL(strstr(source, "__builtin_amdgcn_cvt_pk_"));
     free(source);
     if (i == 0) {
-      PolyUOp *nan =
-          poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKFLOAT, poly_arg_float(NAN));
-      PolyUOp *fp8_inf =
-          poly_uop1(ctx, POLY_OP_CAST, dtypes[i], nan, poly_arg_none());
-      fp8_store =
-          poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, fp8_out_idx, fp8_inf, poly_arg_none());
+      PolyUOp *nan = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKFLOAT, poly_arg_float(NAN));
+      PolyUOp *fp8_inf = poly_uop1(ctx, POLY_OP_CAST, dtypes[i], nan, poly_arg_none());
+      fp8_store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, fp8_out_idx, fp8_inf, poly_arg_none());
       sink = poly_test_kernel_sink(ctx, &fp8_store, 1, "fp8_const_store");
       linear = poly_do_linearize(ctx, sink, &n_linear);
       ASSERT_NOT_NULL(linear);
@@ -88,12 +83,10 @@ TEST_BACKEND(hip, native_fp8_types_and_casts_match_current_renderer) {
   PASS();
 }
 
-/* Skip helper: PASS immediately if no GPU */
+/* Renderer-only tests remain runnable without hardware; runtime tests skip. */
 #define SKIP_IF_NO_HIP()                                                                           \
   do {                                                                                             \
-    if (!poly_hip_available()) {                                                                   \
-      PASS();                                                                                      \
-    }                                                                                              \
+    if (!poly_hip_available()) SKIP("HIP runtime unavailable");                                    \
   } while (0)
 
 /* Helper: build vecadd kernel IR (tensor-level) */
@@ -195,7 +188,7 @@ TEST_BACKEND(hip, render_muladd_matches_pinned_hipstyle) {
   /* Pinned HIPRenderer does not advertise Ops.MULACC
    * (renderer/cstyle.py:128-136,472-508), so ordinary MUL+ADD must not be
    * fused by the shared late matcher. Explicit WMMA/MULACC rendering remains
-  * a separate renderer ability. */
+   * a separate renderer ability. */
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *p0 = poly_test_uop_param(ctx, POLY_FLOAT32, -1, 0, POLY_ADDR_GLOBAL);
   PolyUOp *p1 = poly_test_uop_param(ctx, POLY_FLOAT32, -1, 1, POLY_ADDR_GLOBAL);
@@ -272,8 +265,7 @@ TEST_BACKEND(hip, render_shared_mem) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *size = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(64));
   PolyParamArg local_arg = {.slot = 0, .addrspace = POLY_ADDR_LOCAL};
-  PolyUOp *local =
-      poly_uop1(ctx, POLY_OP_BUFFER, POLY_FLOAT32, size, poly_arg_param(&local_arg));
+  PolyUOp *local = poly_uop1(ctx, POLY_OP_BUFFER, POLY_FLOAT32, size, poly_arg_param(&local_arg));
   PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
   PolyUOp *idx = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, local, zero, poly_arg_none());
   PolyUOp *cst = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0));
@@ -302,30 +294,24 @@ TEST_BACKEND(hip, vector_local_shrink_load_store_use_typed_lvalue) {
   PolyUOp *size = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(128));
   PolyParamArg local_arg = {.slot = 0, .addrspace = POLY_ADDR_LOCAL};
   PolyParamArg global_arg = {.slot = 0, .addrspace = POLY_ADDR_GLOBAL};
-  PolyUOp *local =
-      poly_uop1(ctx, POLY_OP_BUFFER, POLY_FLOAT32, size, poly_arg_param(&local_arg));
-  PolyUOp *global =
-      poly_uop1(ctx, POLY_OP_PARAM, POLY_FLOAT32, size, poly_arg_param(&global_arg));
+  PolyUOp *local = poly_uop1(ctx, POLY_OP_BUFFER, POLY_FLOAT32, size, poly_arg_param(&local_arg));
+  PolyUOp *global = poly_uop1(ctx, POLY_OP_PARAM, POLY_FLOAT32, size, poly_arg_param(&global_arg));
   PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(32));
-  PolyUOp *idx =
-      poly_uop1(ctx, POLY_OP_SPECIAL, POLY_INT32, bound, poly_arg_str("lidx0"));
+  PolyUOp *idx = poly_uop1(ctx, POLY_OP_SPECIAL, POLY_INT32, bound, poly_arg_str("lidx0"));
   PolyUOp *width = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(4));
   PolyUOp *local_srcs[3] = {local, idx, width};
-  PolyUOp *local_vec =
-      poly_uop(ctx, POLY_OP_SHRINK, POLY_FLOAT32, local_srcs, 3, poly_arg_none());
+  PolyUOp *local_vec = poly_uop(ctx, POLY_OP_SHRINK, POLY_FLOAT32, local_srcs, 3, poly_arg_none());
   PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
   PolyUOp *global_srcs[3] = {global, zero, width};
   PolyUOp *global_vec =
       poly_uop(ctx, POLY_OP_SHRINK, POLY_FLOAT32, global_srcs, 3, poly_arg_none());
   PolyUOp *values[4];
   for (int i = 0; i < 4; i++)
-    values[i] =
-        poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float((double)i + 1.0));
+    values[i] = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float((double)i + 1.0));
   PolyUOp *value = poly_uop(ctx, POLY_OP_STACK, POLY_FLOAT32, values, 4, poly_arg_none());
   PolyUOp *local_store =
       poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, local_vec, value, poly_arg_none());
-  PolyUOp *local_load =
-      poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, local_vec, poly_arg_none());
+  PolyUOp *local_load = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, local_vec, poly_arg_none());
   PolyUOp *global_store =
       poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, global_vec, local_load, poly_arg_none());
   PolyUOp *sink_srcs[2] = {local_store, global_store};
@@ -334,8 +320,7 @@ TEST_BACKEND(hip, vector_local_shrink_load_store_use_typed_lvalue) {
   int n_lin = 0;
   PolyUOp **lin = poly_do_linearize(ctx, sink, &n_lin);
   ASSERT_NOT_NULL(lin);
-  char *source =
-      poly_render_hip(ctx, lin, n_lin, "local_float4_access", 32, "gfx1100");
+  char *source = poly_render_hip(ctx, lin, n_lin, "local_float4_access", 32, "gfx1100");
   free(lin);
   ASSERT_NOT_NULL(source);
   const char *first = strstr(source, "*((float4*)((smem0+");
@@ -397,8 +382,8 @@ TEST_BACKEND(hip, e2e_vecadd) {
 
   /* CPU reference */
   PolyTestBufferView cpu_binds[] = {
-      POLY_TEST_HOST_VIEW(tv.buf_c, c_cpu), POLY_TEST_HOST_VIEW(tv.buf_a, a), POLY_TEST_HOST_VIEW(tv.buf_b, b)
-  };
+      POLY_TEST_HOST_VIEW(tv.buf_c, c_cpu), POLY_TEST_HOST_VIEW(tv.buf_a, a),
+      POLY_TEST_HOST_VIEW(tv.buf_b, b)};
   int ret = poly_test_realize_buffer_views(tv.ctx, tv.sink, cpu_binds, 3);
   ASSERT_TRUE(ret == 0);
 
@@ -441,7 +426,8 @@ TEST_BACKEND(hip, e2e_neg) {
   for (int i = 0; i < n; i++)
     a[i] = (float)i - 256.0f;
 
-  PolyTestBufferView cpu_binds[] = {POLY_TEST_HOST_VIEW(buf_c, c_cpu), POLY_TEST_HOST_VIEW(buf_a, a)};
+  PolyTestBufferView cpu_binds[] = {
+      POLY_TEST_HOST_VIEW(buf_c, c_cpu), POLY_TEST_HOST_VIEW(buf_a, a)};
   ASSERT_TRUE(poly_test_realize_buffer_views(ctx, sink, cpu_binds, 2) == 0);
 
   PolyUOp *bufs[] = {buf_c, buf_a};
@@ -479,7 +465,8 @@ TEST_BACKEND(hip, e2e_exp2) {
   for (int i = 0; i < n; i++)
     a[i] = (float)i * 0.05f - 6.0f;
 
-  PolyTestBufferView cpu_binds[] = {POLY_TEST_HOST_VIEW(buf_c, c_cpu), POLY_TEST_HOST_VIEW(buf_a, a)};
+  PolyTestBufferView cpu_binds[] = {
+      POLY_TEST_HOST_VIEW(buf_c, c_cpu), POLY_TEST_HOST_VIEW(buf_a, a)};
   ASSERT_TRUE(poly_test_realize_buffer_views(ctx, sink, cpu_binds, 2) == 0);
 
   PolyUOp *bufs[] = {buf_c, buf_a};
@@ -517,7 +504,8 @@ TEST_BACKEND(hip, e2e_reduce_sum) {
   for (int i = 0; i < n; i++)
     a[i] = 1.0f;
 
-  PolyTestBufferView cpu_binds[] = {POLY_TEST_HOST_VIEW(buf_c, &c_cpu), POLY_TEST_HOST_VIEW(buf_a, a)};
+  PolyTestBufferView cpu_binds[] = {
+      POLY_TEST_HOST_VIEW(buf_c, &c_cpu), POLY_TEST_HOST_VIEW(buf_a, a)};
   ASSERT_TRUE(poly_test_realize_buffer_views(ctx, sink, cpu_binds, 2) == 0);
 
   PolyUOp *bufs[] = {buf_c, buf_a};
@@ -733,15 +721,13 @@ TEST_BACKEND(hip, realize_ex_full_plus_buffer_dyn_shape) {
   PASS();
 }
 
-static PolyUOp *hip_test_fragment(
-    PolyCtx *ctx, PolyDType dtype, int lanes
-) {
+static PolyUOp *hip_test_fragment(PolyCtx *ctx, PolyDType dtype, int lanes) {
   PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, dtype, poly_arg_float(0.0));
   PolyUOp **src = malloc((size_t)lanes * sizeof(*src));
   if (!src) return NULL;
-  for (int i = 0; i < lanes; i++) src[i] = zero;
-  PolyUOp *fragment =
-      poly_uop(ctx, POLY_OP_STACK, dtype, src, lanes, poly_arg_none());
+  for (int i = 0; i < lanes; i++)
+    src[i] = zero;
+  PolyUOp *fragment = poly_uop(ctx, POLY_OP_STACK, dtype, src, lanes, poly_arg_none());
   free(src);
   return fragment;
 }
@@ -782,58 +768,44 @@ TEST_BACKEND(hip, render_wmma_matches_current_architecture_matrix) {
   const int cdna32_lanes[] = {8, 8, 4}, cdna128_lanes[] = {32, 32, 4};
   const int rdna3_lanes[] = {16, 16, 8}, rdna4_lanes[] = {8, 8, 8};
 
-  char *gfx942 = hip_render_test_wmma(
-      POLY_FP8E4M3, POLY_FLOAT32, k32, cdna32_lanes, 64, "gfx942"
-  );
+  char *gfx942 = hip_render_test_wmma(POLY_FP8E4M3, POLY_FLOAT32, k32, cdna32_lanes, 64, "gfx942");
   ASSERT_NOT_NULL(gfx942);
   ASSERT_NOT_NULL(strstr(
-      gfx942,
-      "#define __WMMA_16_16_32_float8_e4m3_float "
-      "__builtin_amdgcn_mfma_f32_16x16x32_fp8_fp8"
+      gfx942, "#define __WMMA_16_16_32_float8_e4m3_float "
+              "__builtin_amdgcn_mfma_f32_16x16x32_fp8_fp8"
   ));
   ASSERT_NOT_NULL(strstr(gfx942, ", 0, 0, 0);"));
   free(gfx942);
 
-  char *gfx950 = hip_render_test_wmma(
-      POLY_FP8E5M2, POLY_FLOAT32, k128, cdna128_lanes, 64, "gfx950"
-  );
+  char *gfx950 =
+      hip_render_test_wmma(POLY_FP8E5M2, POLY_FLOAT32, k128, cdna128_lanes, 64, "gfx950");
   ASSERT_NOT_NULL(gfx950);
   ASSERT_NOT_NULL(strstr(
-      gfx950,
-      "#define __WMMA_16_16_128_float8_e5m2_float "
-      "__builtin_amdgcn_mfma_scale_f32_16x16x128_f8f6f4"
+      gfx950, "#define __WMMA_16_16_128_float8_e5m2_float "
+              "__builtin_amdgcn_mfma_scale_f32_16x16x128_f8f6f4"
   ));
   ASSERT_NOT_NULL(strstr(gfx950, ", 1, 1, 0, 0, 0, 0);"));
   free(gfx950);
 
-  char *gfx1100_i8 = hip_render_test_wmma(
-      POLY_INT8, POLY_INT32, k16, rdna3_lanes, 32, "gfx1100"
-  );
+  char *gfx1100_i8 = hip_render_test_wmma(POLY_INT8, POLY_INT32, k16, rdna3_lanes, 32, "gfx1100");
   ASSERT_NOT_NULL(gfx1100_i8);
   ASSERT_NOT_NULL(strstr(gfx1100_i8, "typedef int wmma_int4"));
-  ASSERT_NOT_NULL(strstr(
-      gfx1100_i8, "__builtin_amdgcn_wmma_i32_16x16x16_iu8_w32"
-  ));
+  ASSERT_NOT_NULL(strstr(gfx1100_i8, "__builtin_amdgcn_wmma_i32_16x16x16_iu8_w32"));
   free(gfx1100_i8);
 
-  char *gfx1100_f16 = hip_render_test_wmma(
-      POLY_FLOAT16, POLY_FLOAT16, k16, rdna3_lanes, 32, "gfx1100"
-  );
+  char *gfx1100_f16 =
+      hip_render_test_wmma(POLY_FLOAT16, POLY_FLOAT16, k16, rdna3_lanes, 32, "gfx1100");
   ASSERT_NOT_NULL(gfx1100_f16);
   ASSERT_NOT_NULL(strstr(gfx1100_f16, "half16 c_frag = {};"));
-  ASSERT_NOT_NULL(strstr(
-      gfx1100_f16, "__builtin_amdgcn_wmma_f16_16x16x16_f16_w32"
-  ));
+  ASSERT_NOT_NULL(strstr(gfx1100_f16, "__builtin_amdgcn_wmma_f16_16x16x16_f16_w32"));
   free(gfx1100_f16);
 
-  char *gfx1200 = hip_render_test_wmma(
-      POLY_BFLOAT16, POLY_BFLOAT16, k16, rdna4_lanes, 32, "gfx1200"
-  );
+  char *gfx1200 =
+      hip_render_test_wmma(POLY_BFLOAT16, POLY_BFLOAT16, k16, rdna4_lanes, 32, "gfx1200");
   ASSERT_NOT_NULL(gfx1200);
   ASSERT_NOT_NULL(strstr(
-      gfx1200,
-      "#define __WMMA_16_16_16___bf16___bf16 "
-      "__builtin_amdgcn_wmma_bf16_16x16x16_bf16_w32_gfx12"
+      gfx1200, "#define __WMMA_16_16_16___bf16___bf16 "
+               "__builtin_amdgcn_wmma_bf16_16x16x16_bf16_w32_gfx12"
   ));
   free(gfx1200);
   PASS();
@@ -844,25 +816,17 @@ TEST_BACKEND(hip, rewrite_bf16_wmma_preserves_native_fragments) {
   ASSERT_NOT_NULL(ctx);
 
   PolyUOp *out = poly_test_uop_param(ctx, POLY_FLOAT32, -1, 0, POLY_ADDR_GLOBAL);
-  PolyUOp *bound =
-      poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(1));
-  PolyUOp *special =
-      poly_uop1(ctx, POLY_OP_SPECIAL, POLY_INT32, bound, poly_arg_str("gidx0"));
-  PolyUOp *out_idx =
-      poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, out, special, poly_arg_none());
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(1));
+  PolyUOp *special = poly_uop1(ctx, POLY_OP_SPECIAL, POLY_INT32, bound, poly_arg_str("gidx0"));
+  PolyUOp *out_idx = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, out, special, poly_arg_none());
 
-  PolyUOp *one =
-      poly_uop0(ctx, POLY_OP_CONST, POLY_BFLOAT16, poly_arg_float(1.0));
+  PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_BFLOAT16, poly_arg_float(1.0));
   PolyUOp *bf16_lanes[] = {one, one, one, one};
-  PolyUOp *a =
-      poly_uop(ctx, POLY_OP_STACK, POLY_BFLOAT16, bf16_lanes, 4, poly_arg_none());
-  PolyUOp *b =
-      poly_uop(ctx, POLY_OP_STACK, POLY_BFLOAT16, bf16_lanes, 4, poly_arg_none());
-  PolyUOp *zero =
-      poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(0.0));
+  PolyUOp *a = poly_uop(ctx, POLY_OP_STACK, POLY_BFLOAT16, bf16_lanes, 4, poly_arg_none());
+  PolyUOp *b = poly_uop(ctx, POLY_OP_STACK, POLY_BFLOAT16, bf16_lanes, 4, poly_arg_none());
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(0.0));
   PolyUOp *f32_lanes[] = {zero, zero, zero, zero};
-  PolyUOp *acc =
-      poly_uop(ctx, POLY_OP_STACK, POLY_FLOAT32, f32_lanes, 4, poly_arg_none());
+  PolyUOp *acc = poly_uop(ctx, POLY_OP_STACK, POLY_FLOAT32, f32_lanes, 4, poly_arg_none());
   PolyUOp *wmma_src[] = {a, b, acc};
   int dims[] = {16, 16, 16};
   PolyUOp *wmma = poly_uop(
@@ -871,11 +835,9 @@ TEST_BACKEND(hip, rewrite_bf16_wmma_preserves_native_fragments) {
   );
   PolyUOp *lane_idx = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(0));
   PolyUOp *lane = poly_uop_index(ctx, wmma, &lane_idx, 1);
-  PolyUOp *store =
-      poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out_idx, lane, poly_arg_none());
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out_idx, lane, poly_arg_none());
   PolyUOp *sink_src[] = {store};
-  PolyUOp *sink =
-      poly_uop_sink_ex(ctx, sink_src, 1, "bf16_wmma_rewrite", 0);
+  PolyUOp *sink = poly_uop_sink_ex(ctx, sink_src, 1, "bf16_wmma_rewrite", 0);
 
   PolyUOp *rewritten = poly_rewrite_hip(ctx, sink);
   ASSERT_NOT_NULL(rewritten);
@@ -898,17 +860,13 @@ TEST_BACKEND(hip, rewrite_bf16_wmma_preserves_native_fragments) {
   int n_lin = 0;
   PolyUOp **lin = poly_do_linearize(ctx, rewritten, &n_lin);
   ASSERT_NOT_NULL(lin);
-  char *source =
-      poly_render_hip(ctx, lin, n_lin, "bf16_wmma_rewrite", 64, "gfx942");
+  char *source = poly_render_hip(ctx, lin, n_lin, "bf16_wmma_rewrite", 64, "gfx942");
   free(lin);
   ASSERT_NOT_NULL(source);
-  ASSERT_NOT_NULL(
-      strstr(source, "__builtin_amdgcn_mfma_f32_16x16x16bf16_1k")
-  );
+  ASSERT_NOT_NULL(strstr(source, "__builtin_amdgcn_mfma_f32_16x16x16bf16_1k"));
 
   if (poly_hip_available()) {
-    PolyHipProgram *program =
-        poly_compile_hip(source, "bf16_wmma_rewrite");
+    PolyHipProgram *program = poly_compile_hip(source, "bf16_wmma_rewrite");
     ASSERT_NOT_NULL(program);
     poly_hip_program_destroy(program);
   }

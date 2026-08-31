@@ -180,9 +180,7 @@ static int cuda_uop_lanes(PolyCtx *ctx, const PolyUOp *u) {
   return 1;
 }
 
-static void cuda_render_uop_ctype(
-    PolyCtx *ctx, const PolyUOp *u, char *buf, int cap
-) {
+static void cuda_render_uop_ctype(PolyCtx *ctx, const PolyUOp *u, char *buf, int cap) {
   cuda_render_ctype_nonptr(u->dtype, cuda_uop_lanes(ctx, u), buf, cap);
 }
 
@@ -216,17 +214,10 @@ static char *cuda_render_const_literal(PolyUOp *c, PolyDType dtype) {
     }
     cuda_render_int64_const(c->arg.i, val, sizeof(val));
   } else if (poly_dtype_eq(scalar, POLY_UINT64)) {
-    snprintf(
-        val, sizeof(val), "%lluull",
-        (unsigned long long)poly_arg_integer_to_u64_mod(c->arg)
-    );
+    snprintf(val, sizeof(val), "%lluull", (unsigned long long)poly_arg_integer_to_u64_mod(c->arg));
   } else if (poly_dtype_eq(scalar, POLY_UINT32)) {
-    snprintf(
-        val, sizeof(val), "%uu",
-        (unsigned)(uint32_t)poly_arg_integer_to_u64_mod(c->arg)
-    );
-  } else if (poly_dtype_eq(scalar, POLY_UINT8) || poly_dtype_eq(scalar, POLY_UINT16) ||
-             poly_dtype_eq(scalar, POLY_INT8) || poly_dtype_eq(scalar, POLY_INT16)) {
+    snprintf(val, sizeof(val), "%uu", (unsigned)(uint32_t)poly_arg_integer_to_u64_mod(c->arg));
+  } else if (poly_dtype_eq(scalar, POLY_UINT8) || poly_dtype_eq(scalar, POLY_UINT16) || poly_dtype_eq(scalar, POLY_INT8) || poly_dtype_eq(scalar, POLY_INT16)) {
     char type[64];
     cuda_render_ctype_nonptr(scalar, 1, type, sizeof(type));
     if (poly_dtype_is_unsigned(scalar))
@@ -249,7 +240,11 @@ static char *cuda_render_const_literal(PolyUOp *c, PolyDType dtype) {
  * pointer to the accessed vector dtype.  The devectorizer proves alignment
  * before producing this vector LOAD/STORE; the PARAM itself remains scalar. */
 static void cuda_render_access_expr(
-    PolyCtx *ctx, char *buf, int cap, const char *address, const PolyUOp *index
+    PolyCtx *ctx,
+    char *buf,
+    int cap,
+    const char *address,
+    const PolyUOp *index
 ) {
   int lanes = cuda_uop_lanes(ctx, index);
   if (lanes > 1) {
@@ -266,8 +261,7 @@ static bool cuda_vector_needs_prefix(PolyDType dtype, int count) {
   if (poly_dtype_eq(dtype, POLY_FP8E4M3) || poly_dtype_eq(dtype, POLY_FP8E5M2))
     return count == 2 || count == 4 || count == 8 || count == 16;
   return (count == 4 || count == 8) &&
-         (dtype.priority == POLY_FLOAT16.priority ||
-          dtype.priority == POLY_BFLOAT16.priority);
+         (dtype.priority == POLY_FLOAT16.priority || dtype.priority == POLY_BFLOAT16.priority);
 }
 
 static const char *cuda_lane_name(int idx) {
@@ -322,14 +316,12 @@ static const char *cuda_wmma_dtype_out(PolyDType dtype) {
 /* Tinygrad 2026-08-22/a9069c177a9d CUDARenderer.render_kernel emits one
  * inline-PTX helper per signature returned by wmma_args. */
 static bool cuda_render_wmma_helper(CudaStrBuf *out, PolyCtx *ctx, PolyUOp *wmma) {
-  if (!wmma || wmma->n_src != 3 || wmma->arg.kind != POLY_ARG_TENSOR_CORE)
-    return false;
+  if (!wmma || wmma->n_src != 3 || wmma->arg.kind != POLY_ARG_TENSOR_CORE) return false;
   char name[128], types[3][64];
   if (!poly_wmma_name(wmma, name, sizeof(name))) return false;
   int sizes[3], n_operands[3];
   PolyDType dtypes[3] = {
-      wmma->arg.tensor_core.dtype_in, wmma->arg.tensor_core.dtype_in, wmma->dtype
-  };
+      wmma->arg.tensor_core.dtype_in, wmma->arg.tensor_core.dtype_in, wmma->dtype};
   for (int i = 0; i < 3; i++) {
     int64_t lanes = poly_uop_max_numel(ctx, wmma->src[i]);
     if (lanes <= 0 || lanes > INT_MAX) return false;
@@ -343,14 +335,13 @@ static bool cuda_render_wmma_helper(CudaStrBuf *out, PolyCtx *ctx, PolyUOp *wmma
   if (!dtype_in || !dtype_out) return false;
 
   csb_printf(
-      out, "__device__ %s __%s(%s a, %s b, %s c){\n", types[2], name,
-      types[0], types[1], types[2]
+      out, "__device__ %s __%s(%s a, %s b, %s c){\n", types[2], name, types[0], types[1], types[2]
   );
   csb_puts(out, "  int *a_pk = (int *)(&a), *b_pk = (int *)(&b), *c_pk = (int *)(&c);\n");
   csb_printf(
       out, "  asm(\"mma.sync.aligned.m%dn%dk%d.row.col.%s.%s.%s.%s\"\n",
-      wmma->arg.tensor_core.dims[1], wmma->arg.tensor_core.dims[0],
-      wmma->arg.tensor_core.dims[2], dtype_out, dtype_in, dtype_in, dtype_out
+      wmma->arg.tensor_core.dims[1], wmma->arg.tensor_core.dims[0], wmma->arg.tensor_core.dims[2],
+      dtype_out, dtype_in, dtype_in, dtype_out
   );
   csb_puts(out, "      \"{");
   for (int i = 0; i < n_operands[2]; i++) {
@@ -431,7 +422,6 @@ static char *cuda_render_vector_expr(PolyCtx *ctx, CudaStrMap *names, PolyUOp *u
   }
   return expr.buf;
 }
-
 
 static bool cuda_is_half(PolyDType dt) {
   PolyDType s = dt;
@@ -570,9 +560,7 @@ static char *cuda_render_alu(
     csb_printf(&out, "((%s>%s)?%s:%s)", s0, s1, s0, s1);
     break;
   case POLY_OP_POW:
-    csb_printf(
-        &out, poly_dtype_eq(dtype, POLY_FLOAT64) ? "pow(%s, %s)" : "powf(%s, %s)", s0, s1
-    );
+    csb_printf(&out, poly_dtype_eq(dtype, POLY_FLOAT64) ? "pow(%s, %s)" : "powf(%s, %s)", s0, s1);
     break;
   case POLY_OP_WHERE:
     csb_printf(&out, "(%s?%s:%s)", s0, s1, s2);
@@ -611,7 +599,7 @@ PolyUOp *poly_rewrite_cuda(PolyCtx *ctx, PolyUOp *sink) {
   /* tinygrad CUDA still uses the normal postrange apply_opts path for
    * non-TC kernels. Tensor core matching is only the first branch inside
    * that heuristic. Keep CUDA on the shared heuristic policy so LOCAL/UNROLL
-  * scheduling still happens on ordinary kernels such as broadcast matmul. */
+   * scheduling still happens on ordinary kernels such as broadcast matmul. */
   int arch = poly_cuda_arch_major() * 10 + poly_cuda_arch_minor();
   int n_tensor_cores = 0;
   const PolyTensorCore *tensor_cores = poly_tc_get_cuda(arch, &n_tensor_cores);
@@ -642,7 +630,7 @@ PolyUOp *poly_rewrite_cuda(PolyCtx *ctx, PolyUOp *sink) {
               .local_max = {1024, 1024, 64},
               .tensor_cores = tensor_cores,
               .n_tensor_cores = n_tensor_cores,
-      },
+          },
       .device = POLY_DEVICE_CUDA,
       .opt_policy = POLY_OPT_HEURISTIC,
       .extra_matcher = poly_cuda_renderer_extra_matcher(),
@@ -658,7 +646,11 @@ PolyUOp **poly_linearize_cuda(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
 /* CUDA Renderer */
 
 char *poly_render_cuda(
-    PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name, int launch_bounds
+    PolyCtx *ctx,
+    PolyUOp **uops,
+    int n,
+    const char *fn_name,
+    int launch_bounds
 ) {
   if (!ctx) return NULL;
   CudaStrBuf decls, body;
@@ -765,7 +757,9 @@ char *poly_render_cuda(
       if (poly_is_program_memory_base(u->src[0]))
         snprintf(expr, sizeof(expr), "(%s+%s)", buf_s, idx_s);
       else if (u->src[1] && u->src[1]->op == POLY_OP_CONST && u->src[1]->arg.kind == POLY_ARG_INT)
-        snprintf(expr, sizeof(expr), "%s.%s", buf_s ? buf_s : "0", cuda_lane_name((int)u->src[1]->arg.i));
+        snprintf(
+            expr, sizeof(expr), "%s.%s", buf_s ? buf_s : "0", cuda_lane_name((int)u->src[1]->arg.i)
+        );
       else
         snprintf(expr, sizeof(expr), "((&(%s).x)[%s])", buf_s ? buf_s : "0", idx_s ? idx_s : "0");
       csmap_set(&names, u, strdup(expr));
@@ -902,10 +896,7 @@ char *poly_render_cuda(
      * pm_add_buffers_local directly. */
     if (u->op == POLY_OP_BUFFER && poly_program_memory_is(u, POLY_ADDR_LOCAL)) {
       char name[32];
-      snprintf(
-          name, sizeof(name), "smem%lld",
-          (long long)poly_program_buffer_slot(u)
-      );
+      snprintf(name, sizeof(name), "smem%lld", (long long)poly_program_buffer_slot(u));
       csmap_set(&names, u, strdup(name));
 
       int64_t smem_size = poly_program_buffer_size(u);
@@ -962,9 +953,7 @@ char *poly_render_cuda(
 
       /* Pinned tinygrad final IR: LOAD(INDEX(buf, idx), alt, gate). */
       PolyUOp *gate_uop =
-          (u->n_src >= 3 && poly_dtype_is_bool(u->src[2]->dtype))
-              ? u->src[2]
-              : NULL;
+          (u->n_src >= 3 && poly_dtype_is_bool(u->src[2]->dtype)) ? u->src[2] : NULL;
       if (gate_uop && u->n_src >= 2) {
         char *gate_s = csmap_get(&names, gate_uop);
         char *alt_s = csmap_get(&names, u->src[1]);
@@ -989,9 +978,7 @@ char *poly_render_cuda(
        * stores (renderer/cstyle.py:58,179-184).  In particular a vector
        * SHRINK over scalar shared memory is a typed vector-pointer lvalue. */
       char access[512];
-      cuda_render_access_expr(
-          ctx, access, sizeof(access), target, u->src[0]
-      );
+      cuda_render_access_expr(ctx, access, sizeof(access), target, u->src[0]);
       csb_printf(&body, "%s = %s;\n", access, val ? val : "null");
 
       continue;
@@ -1061,11 +1048,11 @@ char *poly_render_cuda(
       csmap_set(&names, u, strdup(name));
       cuda_render_uop_ctype(ctx, u, ctype, sizeof(ctype));
       csb_printf(&decls, "  %s %s;\n", ctype, name);
-      for (int d = 0; d < depth; d++) csb_puts(&body, "  ");
+      for (int d = 0; d < depth; d++)
+        csb_puts(&body, "  ");
       csb_printf(
-          &body, "%s = __%s(%s, %s, %s);\n", name, helper,
-          csmap_get(&names, u->src[0]), csmap_get(&names, u->src[1]),
-          csmap_get(&names, u->src[2])
+          &body, "%s = __%s(%s, %s, %s);\n", name, helper, csmap_get(&names, u->src[0]),
+          csmap_get(&names, u->src[1]), csmap_get(&names, u->src[2])
       );
       continue;
     }
@@ -1074,9 +1061,8 @@ char *poly_render_cuda(
     if (poly_opset_has(POLY_GROUP_ALU, u->op)) {
       const char *rendered[3] = {"", "", ""};
       char *stripped[3] = {NULL, NULL, NULL};
-      bool associative =
-          u->op == POLY_OP_ADD || u->op == POLY_OP_MUL || u->op == POLY_OP_XOR ||
-          u->op == POLY_OP_OR || u->op == POLY_OP_AND;
+      bool associative = u->op == POLY_OP_ADD || u->op == POLY_OP_MUL || u->op == POLY_OP_XOR ||
+                         u->op == POLY_OP_OR || u->op == POLY_OP_AND;
       for (int j = 0; j < u->n_src && j < 3; j++) {
         const char *source = csmap_get(&names, u->src[j]);
         if (!source) source = "";
@@ -1087,8 +1073,7 @@ char *poly_render_cuda(
           rendered[j] = source;
         }
       }
-      char *expr =
-          cuda_render_alu(u->op, u->dtype, rendered[0], rendered[1], rendered[2]);
+      char *expr = cuda_render_alu(u->op, u->dtype, rendered[0], rendered[1], rendered[2]);
       for (int j = 0; j < 3; j++)
         free(stripped[j]);
       if (!expr) {
@@ -1100,8 +1085,7 @@ char *poly_render_cuda(
 
       /* Pinned CStyleLanguage._render: one-consumer non-WHERE ALU remains an
        * expression unless EXPAND_SSA requests explicit statements. */
-      bool expand_ssa =
-          poly_getenv_flag("EXPAND_SSA") || poly_getenv_flag("POLY_EXPAND_SSA");
+      bool expand_ssa = poly_getenv_flag("EXPAND_SSA") || poly_getenv_flag("POLY_EXPAND_SSA");
       if (u->op != POLY_OP_WHERE && cuda_child_count(uops, n, u) == 1 && !expand_ssa) {
         csmap_set(&names, u, expr);
         continue;

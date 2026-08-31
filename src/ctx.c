@@ -70,11 +70,9 @@ PolyCtx *poly_ctx_new(void) {
   ctx->next_tensor_order = 1;
   ctx->active_jit_capture = NULL;
   ctx->name_map = poly_map_new(16);
-  if (!ctx->arena || !ctx->scratch || !ctx->cse || !ctx->schedule_cache ||
-      !ctx->to_program_cache ||
-      !ctx->runtime_cache || !ctx->graph_cache || !ctx->mem_used_by_device ||
-      !ctx->shape_cache || !ctx->buffers || !ctx->retained_uops ||
-      !ctx->rng_states || !ctx->name_map) {
+  if (!ctx->arena || !ctx->scratch || !ctx->cse || !ctx->schedule_cache || !ctx->to_program_cache ||
+      !ctx->runtime_cache || !ctx->graph_cache || !ctx->mem_used_by_device || !ctx->shape_cache ||
+      !ctx->buffers || !ctx->retained_uops || !ctx->rng_states || !ctx->name_map) {
     if (ctx->arena) poly_arena_destroy(ctx->arena);
     if (ctx->scratch) poly_arena_destroy(ctx->scratch);
     if (ctx->cse) poly_map_destroy(ctx->cse);
@@ -138,27 +136,21 @@ void poly_ctx_destroy(PolyCtx *ctx) {
 
 int poly_uop_retain(PolyCtx *ctx, PolyUOp *uop) {
   if (!ctx || !uop || !poly_ctx_owns_ptr(ctx, uop)) return -1;
-  uintptr_t count = (uintptr_t)poly_map_get(
-      ctx->retained_uops, poly_ptr_hash(uop), uop, poly_ptr_eq
-  );
+  uintptr_t count =
+      (uintptr_t)poly_map_get(ctx->retained_uops, poly_ptr_hash(uop), uop, poly_ptr_eq);
   if (count == UINTPTR_MAX) return -1;
-  poly_map_set(
-      ctx->retained_uops, poly_ptr_hash(uop), uop, (void *)(count + 1), poly_ptr_eq
-  );
+  poly_map_set(ctx->retained_uops, poly_ptr_hash(uop), uop, (void *)(count + 1), poly_ptr_eq);
   return 0;
 }
 
 void poly_uop_release(PolyCtx *ctx, PolyUOp *uop) {
   if (!ctx || !uop) return;
-  uintptr_t count = (uintptr_t)poly_map_get(
-      ctx->retained_uops, poly_ptr_hash(uop), uop, poly_ptr_eq
-  );
+  uintptr_t count =
+      (uintptr_t)poly_map_get(ctx->retained_uops, poly_ptr_hash(uop), uop, poly_ptr_eq);
   if (count <= 1)
     poly_map_remove(ctx->retained_uops, poly_ptr_hash(uop), uop, poly_ptr_eq);
   else
-    poly_map_set(
-        ctx->retained_uops, poly_ptr_hash(uop), uop, (void *)(count - 1), poly_ptr_eq
-    );
+    poly_map_set(ctx->retained_uops, poly_ptr_hash(uop), uop, (void *)(count - 1), poly_ptr_eq);
   ctx->collection_dirty = true;
 }
 
@@ -220,22 +212,14 @@ static bool residency_mark_root(ResidencyMarker *marker, PolyUOp *root) {
   marker->stack[marker->n_stack++] = root;
   while (marker->n_stack > 0) {
     PolyUOp *uop = marker->stack[--marker->n_stack];
-    if (!uop || poly_map_get(
-                    marker->visited, poly_ptr_hash(uop), uop, poly_ptr_eq
-                ))
-      continue;
-    poly_map_set(
-        marker->visited, poly_ptr_hash(uop), uop, uop, poly_ptr_eq
-    );
-    if (poly_map_get(
-            marker->ctx->buffers, poly_ptr_hash(uop), uop, poly_ptr_eq
-        ))
-      poly_map_set(
-          marker->marked, poly_ptr_hash(uop), uop, uop, poly_ptr_eq
-      );
+    if (!uop || poly_map_get(marker->visited, poly_ptr_hash(uop), uop, poly_ptr_eq)) continue;
+    poly_map_set(marker->visited, poly_ptr_hash(uop), uop, uop, poly_ptr_eq);
+    if (poly_map_get(marker->ctx->buffers, poly_ptr_hash(uop), uop, poly_ptr_eq))
+      poly_map_set(marker->marked, poly_ptr_hash(uop), uop, uop, poly_ptr_eq);
     if (uop->n_src > marker->cap_stack - marker->n_stack) {
       int capacity = marker->cap_stack;
-      while (capacity - marker->n_stack < uop->n_src) capacity *= 2;
+      while (capacity - marker->n_stack < uop->n_src)
+        capacity *= 2;
       PolyUOp **stack = realloc(marker->stack, (size_t)capacity * sizeof(*stack));
       if (!stack) return false;
       marker->stack = stack;
@@ -253,8 +237,7 @@ static bool residency_mark_root(ResidencyMarker *marker, PolyUOp *root) {
 static void mark_retained_uop(const void *key, void *value, void *userdata) {
   (void)value;
   ResidencyMarker *marker = (ResidencyMarker *)userdata;
-  if (!marker || marker->failed)
-    return;
+  if (!marker || marker->failed) return;
   marker->failed = !residency_mark_root(marker, (PolyUOp *)key);
 }
 
@@ -274,12 +257,10 @@ static int poly_ctx_collect_with_root(PolyCtx *ctx, PolyUOp *transient_root) {
       failed = !residency_mark_root(&roots, tensor->uop_physical);
   }
   for (int i = 0; !failed && i < ctx->n_entries; i++)
-    if (ctx->entries[i])
-      failed = !residency_mark_root(&roots, ctx->entries[i]->buffer);
+    if (ctx->entries[i]) failed = !residency_mark_root(&roots, ctx->entries[i]->buffer);
   for (int i = 0; !failed && i < ctx->n_ep; i++)
     failed = !residency_mark_root(&roots, ctx->ep[i].sink);
-  if (!failed && transient_root)
-    failed = !residency_mark_root(&roots, transient_root);
+  if (!failed && transient_root) failed = !residency_mark_root(&roots, transient_root);
   roots.failed = failed;
   if (!failed) poly_map_foreach(ctx->retained_uops, mark_retained_uop, &roots);
   failed = failed || roots.failed;
@@ -303,26 +284,21 @@ static int poly_ctx_collect_with_root(PolyCtx *ctx, PolyUOp *transient_root) {
             row_by_buffer, poly_ptr_hash(rows.buffers[i]), rows.buffers[i],
             (void *)(uintptr_t)(i + 1), poly_ptr_eq
         );
-        if (poly_map_get(
-                marked, poly_ptr_hash(rows.items[i]), rows.items[i], poly_ptr_eq
-            ))
+        if (poly_map_get(marked, poly_ptr_hash(rows.items[i]), rows.items[i], poly_ptr_eq))
           alias_stack[n_alias++] = i;
       }
       while (n_alias > 0) {
         PolyBuffer *buffer = rows.buffers[alias_stack[--n_alias]];
         int n_owned = buffer->n_bufs + 2;
         for (int i = 0; i < n_owned; i++) {
-          PolyBuffer *owned = i == 0 ? buffer->base
-                                     : i == 1 ? buffer->src : buffer->bufs[i - 2];
-          uintptr_t row = owned ? (uintptr_t)poly_map_get(
-                                      row_by_buffer, poly_ptr_hash(owned), owned, poly_ptr_eq
-                                  )
-                                : 0;
+          PolyBuffer *owned = i == 0 ? buffer->base : i == 1 ? buffer->src : buffer->bufs[i - 2];
+          uintptr_t row =
+              owned
+                  ? (uintptr_t)poly_map_get(row_by_buffer, poly_ptr_hash(owned), owned, poly_ptr_eq)
+                  : 0;
           if (!row) continue;
           int j = (int)row - 1;
-          if (poly_map_get(
-                  marked, poly_ptr_hash(rows.items[j]), rows.items[j], poly_ptr_eq
-              ))
+          if (poly_map_get(marked, poly_ptr_hash(rows.items[j]), rows.items[j], poly_ptr_eq))
             continue;
           poly_map_set(
               marked, poly_ptr_hash(rows.items[j]), rows.items[j], rows.items[j], poly_ptr_eq
@@ -336,9 +312,7 @@ static int poly_ctx_collect_with_root(PolyCtx *ctx, PolyUOp *transient_root) {
   }
   if (!failed) {
     for (int i = 0; i < rows.count; i++)
-      if (!poly_map_get(
-              marked, poly_ptr_hash(rows.items[i]), rows.items[i], poly_ptr_eq
-          ))
+      if (!poly_map_get(marked, poly_ptr_hash(rows.items[i]), rows.items[i], poly_ptr_eq))
         poly_buffer_remove(ctx, rows.items[i]);
     ctx->collection_dirty = false;
   }
@@ -384,8 +358,12 @@ void poly_ctx_set_frontend_buffer_release(PolyCtx *ctx, PolyFrontendBufferReleas
   ctx->frontend_buffer_release = fn;
 }
 
-PolyArena *poly_ctx_arena(PolyCtx *ctx) { return ctx->arena; }
-PolyMap *poly_ctx_shape_cache(PolyCtx *ctx) { return ctx->shape_cache; }
+PolyArena *poly_ctx_arena(PolyCtx *ctx) {
+  return ctx->arena;
+}
+PolyMap *poly_ctx_shape_cache(PolyCtx *ctx) {
+  return ctx->shape_cache;
+}
 
 typedef struct {
   size_t current;
@@ -528,7 +506,10 @@ void poly_ctx_record_memory_free(PolyCtx *ctx, PolyDevice device, size_t nbytes)
 _Static_assert(offsetof(PolyCtxStats, global_ops) == 104, "wasm PolyCtxStats.global_ops offset");
 _Static_assert(offsetof(PolyCtxStats, global_mem) == 112, "wasm PolyCtxStats.global_mem offset");
 _Static_assert(offsetof(PolyCtxStats, time_sum_s) == 120, "wasm PolyCtxStats.time_sum_s offset");
-_Static_assert(offsetof(PolyCtxStats, kernel_count) == 128, "wasm PolyCtxStats.kernel_count offset");
+_Static_assert(
+    offsetof(PolyCtxStats, kernel_count) == 128,
+    "wasm PolyCtxStats.kernel_count offset"
+);
 _Static_assert(offsetof(PolyCtxStats, mem_used) == 136, "wasm PolyCtxStats.mem_used offset");
 _Static_assert(sizeof(PolyCtxStats) == 144, "wasm PolyCtxStats size");
 #endif

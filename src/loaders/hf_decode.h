@@ -22,10 +22,10 @@ extern "C" {
  * Contains parsed config JSON and all decoded tensor views.
  */
 typedef struct {
-    cJSON              *config;      /* parsed config.json (owned) */
-    const char         *model_type;  /* borrowed from config */
-    PolyDecodedTensor  *tensors;     /* array of decoded tensor views */
-    int                 n_tensors;
+  cJSON *config; /* parsed config.json (owned) */
+  const char *model_type; /* borrowed from config */
+  PolyDecodedTensor *tensors; /* array of decoded tensor views */
+  int n_tensors;
 } PolyHfDecoded;
 
 /*
@@ -36,10 +36,13 @@ typedef struct {
  * Caller must keep weight_files buffers alive until *out is freed.
  */
 int poly_hf_decode(
-    const char *config_json, int config_len,
-    const uint8_t **weight_files, const int64_t *weight_lens,
+    const char *config_json,
+    int config_len,
+    const uint8_t **weight_files,
+    const int64_t *weight_lens,
     int n_weight_files,
-    PolyHfDecoded **out);
+    PolyHfDecoded **out
+);
 
 void poly_hf_decoded_free(PolyHfDecoded *hf);
 

@@ -49,18 +49,20 @@ EM_JS(int, js_compile_wasm_kernel, (const uint8_t *bytes, int len), {
     mod = new WebAssembly.Module(HEAPU8.subarray(bytes, bytes + len));
   } catch (e) {
     var dbg = 0;
-    if (typeof globalThis !== 'undefined' && globalThis.__polygradDebugLevel)
+    if (typeof globalThis != = 'undefined' && globalThis.__polygradDebugLevel)
       dbg = Number(globalThis.__polygradDebugLevel) | 0;
-    if (typeof process !== 'undefined' && process.env) {
+    if (typeof process != = 'undefined' && process.env) {
       var envDbg = Number(process.env.POLY_DEBUG || process.env.DEBUG || 0);
       if (Number.isFinite(envDbg) && envDbg > dbg) dbg = envDbg | 0;
     }
     if (dbg >= 4)
-      console.error('[polygrad:wasm] WebAssembly.Module failed len=' + len + ': ' +
-                    (e && e.message ? e.message : String(e)));
+      console.error(
+          '[polygrad:wasm] WebAssembly.Module failed len=' + len + ': ' +
+          (e && e.message ? e.message : String(e))
+      );
     if (dbg >= 4) {
       var msg = e && e.message ? e.message : String(e);
-      var m = /@\\+(\\d+)/.exec(msg);
+      var m = / @\\+ (\\d +) /.exec(msg);
       if (m) {
         var off = Number(m[1]) | 0;
         var start = Math.max(0, off - 32), end = Math.min(len, off + 32);
@@ -97,41 +99,69 @@ var kernel = inst.exports.kernel;
 var n_params = kernel.length;
 var launcher;
 switch (n_params) {
-  case 0: launcher = function(args) { kernel(); }; break;
-  case 1: launcher = function(args) {
-    var h = HEAP32, p = args >> 2; kernel(h[p]);
-  }; break;
-  case 2: launcher = function(args) {
-    var h = HEAP32, p = args >> 2; kernel(h[p], h[p + 1]);
-  }; break;
-  case 3: launcher = function(args) {
-    var h = HEAP32, p = args >> 2; kernel(h[p], h[p + 1], h[p + 2]);
-  }; break;
-  case 4: launcher = function(args) {
-    var h = HEAP32, p = args >> 2; kernel(h[p], h[p + 1], h[p + 2], h[p + 3]);
-  }; break;
-  case 5: launcher = function(args) {
-    var h = HEAP32, p = args >> 2; kernel(h[p], h[p + 1], h[p + 2], h[p + 3], h[p + 4]);
-  }; break;
-  case 6: launcher = function(args) {
+case 0:
+  launcher = function(args) {
+    kernel();
+  };
+  break;
+case 1:
+  launcher = function(args) {
+    var h = HEAP32, p = args >> 2;
+    kernel(h[p]);
+  };
+  break;
+case 2:
+  launcher = function(args) {
+    var h = HEAP32, p = args >> 2;
+    kernel(h[p], h[p + 1]);
+  };
+  break;
+case 3:
+  launcher = function(args) {
+    var h = HEAP32, p = args >> 2;
+    kernel(h[p], h[p + 1], h[p + 2]);
+  };
+  break;
+case 4:
+  launcher = function(args) {
+    var h = HEAP32, p = args >> 2;
+    kernel(h[p], h[p + 1], h[p + 2], h[p + 3]);
+  };
+  break;
+case 5:
+  launcher = function(args) {
+    var h = HEAP32, p = args >> 2;
+    kernel(h[p], h[p + 1], h[p + 2], h[p + 3], h[p + 4]);
+  };
+  break;
+case 6:
+  launcher = function(args) {
     var h = HEAP32, p = args >> 2;
     kernel(h[p], h[p + 1], h[p + 2], h[p + 3], h[p + 4], h[p + 5]);
-  }; break;
-  case 7: launcher = function(args) {
+  };
+  break;
+case 7:
+  launcher = function(args) {
     var h = HEAP32, p = args >> 2;
     kernel(h[p], h[p + 1], h[p + 2], h[p + 3], h[p + 4], h[p + 5], h[p + 6]);
-  }; break;
-  case 8: launcher = function(args) {
+  };
+  break;
+case 8:
+  launcher = function(args) {
     var h = HEAP32, p = args >> 2;
     kernel(h[p], h[p + 1], h[p + 2], h[p + 3], h[p + 4], h[p + 5], h[p + 6], h[p + 7]);
-  }; break;
-  default: launcher = function(args) {
+  };
+  break;
+default:
+  launcher = function(args) {
     var h = HEAP32, p = args >> 2, params = [];
-    for (var i = 0; i < n_params; i++) params.push(h[p + i]);
+    for (var i = 0; i < n_params; i++)
+      params.push(h[p + i]);
     kernel.apply(null, params);
-  }; break;
+  };
+  break;
 }
-Module._polyKernelCache.push({ inst: inst, launch: launcher });
+Module._polyKernelCache.push({inst : inst, launch : launcher});
 return Module._polyKernelCache.length - 1;
 });
 
@@ -197,7 +227,12 @@ static int wasm_copy_out(const PolyBuffer *dst, const PolyBuffer *src, size_t n,
   return 0;
 }
 
-static int wasm_copy_between(const PolyBuffer *dst, const PolyBuffer *src, size_t n, void *dev_ctx) {
+static int wasm_copy_between(
+    const PolyBuffer *dst,
+    const PolyBuffer *src,
+    size_t n,
+    void *dev_ctx
+) {
   (void)dev_ctx;
   if (!dst || !dst->ptr || !src || !src->ptr) return -1;
   memcpy(dst->ptr, src->ptr, n);
@@ -214,12 +249,7 @@ static const PolyAllocator POLY_WASM_ALLOCATOR = {
     .dev_ctx = NULL,
 };
 
-int poly_wasm_lower_item(
-    PolyCtx *ctx,
-    PolyUOp *program,
-    const char *fn_name,
-    PolyRunner *out
-) {
+int poly_wasm_lower_item(PolyCtx *ctx, PolyUOp *program, const char *fn_name, PolyRunner *out) {
   (void)fn_name;
   PolyUOp *scheduled_root = wasm_program_kernel_body(program);
   if (!scheduled_root) return -1;
@@ -236,8 +266,7 @@ int poly_wasm_lower_item(
     free(wasm_bytes);
     wasm_bytes = NULL;
     wasm_len = 0;
-    if (kernel_id < 0)
-      wasm_bytes = poly_render_wasm_matmul(scheduled_root, &wasm_len, false);
+    if (kernel_id < 0) wasm_bytes = poly_render_wasm_matmul(scheduled_root, &wasm_len, false);
   }
   if (kernel_id < 0 && !wasm_bytes) {
     wasm_bytes = poly_render_wasm_reduce(scheduled_root, &wasm_len);
@@ -256,8 +285,7 @@ int poly_wasm_lower_item(
   }
   if (kernel_id < 0 && (!wasm_bytes || wasm_len <= 0)) return -1;
 
-  if (kernel_id < 0)
-    kernel_id = js_compile_wasm_kernel(wasm_bytes, wasm_len);
+  if (kernel_id < 0) kernel_id = js_compile_wasm_kernel(wasm_bytes, wasm_len);
   free(wasm_bytes);
   if (kernel_id < 0) return -1;
 
@@ -285,7 +313,8 @@ int poly_wasm_execute(PolyRunner *runner, void **args, int n_args) {
   double t0 = timing ? poly_now_ms() : 0.0;
   if (n_args > wh->iargs_cap) {
     int new_cap = wh->iargs_cap > 0 ? wh->iargs_cap : 8;
-    while (new_cap < n_args) new_cap *= 2;
+    while (new_cap < n_args)
+      new_cap *= 2;
     int *new_iargs = realloc(wh->iargs, (size_t)new_cap * sizeof(*new_iargs));
     if (!new_iargs) return -1;
     wh->iargs = new_iargs;

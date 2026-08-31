@@ -261,9 +261,7 @@ static bool instance_append_residency_root(
     if ((*roots)[i] == root) return true;
   if (*count >= *capacity) {
     int new_capacity = *capacity ? *capacity * 2 : 16;
-    PolyUOp **new_roots = realloc(
-        *roots, (size_t)new_capacity * sizeof(*new_roots)
-    );
+    PolyUOp **new_roots = realloc(*roots, (size_t)new_capacity * sizeof(*new_roots));
     if (!new_roots) return false;
     *roots = new_roots;
     *capacity = new_capacity;
@@ -321,7 +319,8 @@ static int instance_prepare_residency_roots(
 #undef ADD_INSTANCE_ROOT
   for (int i = 0; i < count; i++)
     if (poly_uop_retain(state->ctx, roots[i]) != 0) {
-      for (int j = 0; j < i; j++) poly_uop_release(state->ctx, roots[j]);
+      for (int j = 0; j < i; j++)
+        poly_uop_release(state->ctx, roots[j]);
       goto fail;
     }
   prepared->items = roots;
@@ -338,15 +337,13 @@ static void instance_discard_prepared_residency_roots(
     InstanceResidencyRoots *prepared
 ) {
   if (!prepared) return;
-  for (int i = 0; i < prepared->count; i++) poly_uop_release(ctx, prepared->items[i]);
+  for (int i = 0; i < prepared->count; i++)
+    poly_uop_release(ctx, prepared->items[i]);
   free(prepared->items);
   *prepared = (InstanceResidencyRoots){0};
 }
 
-static void instance_publish_residency_roots(
-    PolyInstance *inst,
-    InstanceResidencyRoots *prepared
-) {
+static void instance_publish_residency_roots(PolyInstance *inst, InstanceResidencyRoots *prepared) {
   for (int i = 0; i < inst->n_residency_roots; i++)
     poly_uop_release(inst->ctx, inst->residency_roots[i]);
   free(inst->residency_roots);
@@ -684,17 +681,15 @@ static PolyTensor *make_bound_storage_tensor(
     poly_instance_set_error(inst, POLY_STATUS_ERROR, __func__, "failed to create tensor");
     return NULL;
   }
-  PolyUOp *buf =
-      (PolyUOp *)poly_uop_get_buffer_identity(poly_tensor_uop_logical(tensor));
-  PolyUOp *physical_buf =
-      (PolyUOp *)poly_uop_get_buffer_identity(poly_tensor_uop_physical(tensor));
+  PolyUOp *buf = (PolyUOp *)poly_uop_get_buffer_identity(poly_tensor_uop_logical(tensor));
+  PolyUOp *physical_buf = (PolyUOp *)poly_uop_get_buffer_identity(poly_tensor_uop_physical(tensor));
   if (!buf || !physical_buf) {
     poly_instance_set_error(inst, POLY_STATUS_ERROR, __func__, "failed to create storage buffer");
     return NULL;
   }
   if (append_build_binding(
-          inst, name, role, 0, tensor, buf, physical_buf, buf, shape, ndim,
-          default_requires_grad, provenance
+          inst, name, role, 0, tensor, buf, physical_buf, buf, shape, ndim, default_requires_grad,
+          provenance
       ) != POLY_STATUS_OK)
     return NULL;
   return tensor;
@@ -728,8 +723,9 @@ static PolyStatus append_existing_tensor_binding(
   const PolyUOp *identity = poly_uop_get_buffer_identity(logical_value);
   if (identity) buffer = (PolyUOp *)identity;
   bool may_snapshot = role == POLY_ROLE_PARAM || role == POLY_ROLE_AUX;
-  if (require_buffer && !buffer && (!may_snapshot || !logical_value || !physical_value ||
-                                   poly_tensor_root_has_unplaced_buffer(inst->ctx, physical_value))) {
+  if (require_buffer && !buffer &&
+      (!may_snapshot || !logical_value || !physical_value ||
+       poly_tensor_root_has_unplaced_buffer(inst->ctx, physical_value))) {
     poly_instance_set_error(
         inst, POLY_STATUS_INVALID, __func__, "binding '%s' has no buffer identity", name
     );
@@ -738,14 +734,12 @@ static PolyStatus append_existing_tensor_binding(
   PolyUOp *initial_data_buffer = NULL;
   PolyUOp *physical_buffer = NULL;
   if (role != POLY_ROLE_OUTPUT) {
-    const PolyUOp *current_identity =
-        poly_uop_get_buffer_identity(poly_tensor_uop(tensor));
+    const PolyUOp *current_identity = poly_uop_get_buffer_identity(poly_tensor_uop(tensor));
     if (require_buffer && buffer && !current_identity) {
       if (!may_snapshot || !physical_value ||
           poly_tensor_root_has_unplaced_buffer(inst->ctx, physical_value)) {
         poly_instance_set_error(
-            inst, POLY_STATUS_INVALID, __func__,
-            "binding '%s' has no current buffer identity", name
+            inst, POLY_STATUS_INVALID, __func__, "binding '%s' has no current buffer identity", name
         );
         return POLY_STATUS_INVALID;
       }
@@ -787,17 +781,16 @@ static int copy_initial_buffer_data(
   for (int i = 0; i < inst->n_bufs; i++) {
     const BuildBinding *binding = &build->bindings[i];
     PolyUOp *source = binding->initial_data_buffer;
-    PolyBuffer *physical = binding->physical_buffer
-                               ? poly_buffer_get(ctx, binding->physical_buffer)
-                               : NULL;
+    PolyBuffer *physical =
+        binding->physical_buffer ? poly_buffer_get(ctx, binding->physical_buffer) : NULL;
     if (physical && (physical->valid || (physical->src && physical->src->valid)))
       source = binding->physical_buffer;
     if (!source) continue;
     PolyBuffer *src = poly_buffer_get(ctx, source);
     size_t nbytes = named_buf_nbytes(&inst->bufs[i]);
     if (!src || !src->ptr || src->nbytes < nbytes || nbytes == 0) continue;
-    if (poly_buffer_read(ctx, source, inst->bufs[i].data, nbytes) != 0 &&
-        src->valid && poly_device_is_host_addressable(src->device))
+    if (poly_buffer_read(ctx, source, inst->bufs[i].data, nbytes) != 0 && src->valid &&
+        poly_device_is_host_addressable(src->device))
       memcpy(inst->bufs[i].data, src->ptr, nbytes);
   }
   return 0;
@@ -990,10 +983,7 @@ static BuildBinding *find_build_storage_binding(
   return NULL;
 }
 
-static bool build_snapshot_bindings_are_one_alias(
-    const BuildBinding *a,
-    const BuildBinding *b
-) {
+static bool build_snapshot_bindings_are_one_alias(const BuildBinding *a, const BuildBinding *b) {
   if (!a || !b) return false;
   if (a->tensor == b->tensor) return true;
   const PolyUOp *a_storage = poly_uop_get_buffer_identity(a->declared_physical_value);
@@ -1007,8 +997,7 @@ static bool build_snapshot_bindings_are_one_alias(
  * closed instead of being snapshotted as independent parameters. */
 static bool instance_value_is_movement_view_of(const PolyUOp *view, const PolyUOp *base) {
   if (!view || !base || view == base) return false;
-  while (view && view != base && view->n_src > 0 &&
-         poly_opset_has(POLY_GROUP_MOVEMENT, view->op))
+  while (view && view != base && view->n_src > 0 && poly_opset_has(POLY_GROUP_MOVEMENT, view->op))
     view = view->src[0];
   return view == base;
 }
@@ -1021,21 +1010,15 @@ static bool instance_role_is_abi_input(uint8_t role) {
   return role == POLY_ROLE_INPUT || role == POLY_ROLE_TARGET;
 }
 
-static bool build_snapshot_depends_on_abi_input(
-    PolyInstance *inst,
-    const BuildBinding *state
-) {
-  if (!inst || !inst->ctx || !inst->build || !state || !state->declared_logical_value)
-    return true;
+static bool build_snapshot_depends_on_abi_input(PolyInstance *inst, const BuildBinding *state) {
+  if (!inst || !inst->ctx || !inst->build || !state || !state->declared_logical_value) return true;
   for (int i = 0; i < inst->build->n_bindings; i++) {
     const BuildBinding *abi = &inst->build->bindings[i];
     if (!instance_role_is_abi_input(abi->role)) continue;
     if ((abi->declared_logical_value &&
-         poly_uop_reachable(
-             inst->ctx, state->declared_logical_value, abi->declared_logical_value
-         )) ||
-        (abi->buffer &&
-         poly_uop_reachable(inst->ctx, state->declared_logical_value, abi->buffer)))
+         poly_uop_reachable(inst->ctx, state->declared_logical_value, abi->declared_logical_value)
+        ) ||
+        (abi->buffer && poly_uop_reachable(inst->ctx, state->declared_logical_value, abi->buffer)))
       return true;
   }
   return false;
@@ -1051,22 +1034,16 @@ static bool make_build_snapshot_buffers(
 ) {
   if (logical_out) *logical_out = NULL;
   if (physical_out) *physical_out = NULL;
-  if (!ctx || !logical_out || !physical_out || numel < 0 ||
-      !poly_device_can_execute(device))
+  if (!ctx || !logical_out || !physical_out || numel < 0 || !poly_device_can_execute(device))
     return false;
 
   /* Polygrad's portable resource identity and current UOp.new_buffer physical
    * form share one numeric slot. Snapshot plumbing is not a live Tensor. */
   int64_t slot = poly_ctx_next_unique_id(ctx);
   PolyUOp *device_uop = poly_device_uop(ctx, device);
-  PolyUOp *logical = poly_uop_new_logical_buffer_with_slot(
-      ctx, dtype, numel, slot
-  );
-  PolyUOp *physical = logical && device_uop
-                          ? poly_uop_new_buffer(
-                                ctx, device_uop, numel, dtype, slot
-                            )
-                          : NULL;
+  PolyUOp *logical = poly_uop_new_logical_buffer_with_slot(ctx, dtype, numel, slot);
+  PolyUOp *physical =
+      logical && device_uop ? poly_uop_new_buffer(ctx, device_uop, numel, dtype, slot) : NULL;
   if (!logical || !physical) return false;
   *logical_out = logical;
   *physical_out = physical;
@@ -1074,16 +1051,12 @@ static bool make_build_snapshot_buffers(
 }
 
 /* C argument adaptation for current Tinygrad UOp.new_buffer. */
-static PolyUOp *instance_new_buffer(
-    PolyCtx *ctx, PolyDType dtype, int64_t numel
-) {
+static PolyUOp *instance_new_buffer(PolyCtx *ctx, PolyDType dtype, int64_t numel) {
   PolyDevice device = poly_ctx_get_preferred_device(ctx);
   if (!poly_device_can_execute(device)) device = poly_device_default();
   PolyUOp *device_uop = poly_device_uop(ctx, device);
   return device_uop
-             ? poly_uop_new_buffer(
-                   ctx, device_uop, numel, dtype, poly_ctx_next_unique_id(ctx)
-               )
+             ? poly_uop_new_buffer(ctx, device_uop, numel, dtype, poly_ctx_next_unique_id(ctx))
              : NULL;
 }
 
@@ -1092,11 +1065,7 @@ typedef struct {
   int cap;
 } BuildBufferTransactionCapture;
 
-static void capture_build_buffer_binding(
-    const void *key,
-    void *value,
-    void *userdata
-) {
+static void capture_build_buffer_binding(const void *key, void *value, void *userdata) {
   BuildBufferTransactionCapture *capture = userdata;
   if (!capture || !capture->transaction || capture->transaction->n >= capture->cap) return;
   int i = capture->transaction->n++;
@@ -1105,15 +1074,9 @@ static void capture_build_buffer_binding(
   capture->transaction->saved_heads[i] = *(PolyBuffer *)value;
 }
 
-static void build_buffer_transaction_discard(
-    PolyCtx *ctx,
-    BuildBufferTransaction *transaction
-);
+static void build_buffer_transaction_discard(PolyCtx *ctx, BuildBufferTransaction *transaction);
 
-static bool build_buffer_transaction_begin(
-    PolyCtx *ctx,
-    BuildBufferTransaction *transaction
-) {
+static bool build_buffer_transaction_begin(PolyCtx *ctx, BuildBufferTransaction *transaction) {
   if (!ctx || !transaction) return false;
   memset(transaction, 0, sizeof(*transaction));
   size_t cap_size = poly_map_len(ctx->buffers);
@@ -1149,10 +1112,7 @@ static bool build_buffer_transaction_begin(
   return true;
 }
 
-static void build_buffer_transaction_discard(
-    PolyCtx *ctx,
-    BuildBufferTransaction *transaction
-) {
+static void build_buffer_transaction_discard(PolyCtx *ctx, BuildBufferTransaction *transaction) {
   if (!transaction) return;
   for (int i = 0; i < transaction->n_retained; i++)
     poly_uop_release(ctx, transaction->keys[i]);
@@ -1193,9 +1153,8 @@ static bool build_buffer_transaction_rollback(
   size_t current_cap_size = poly_map_len(ctx->buffers);
   if (current_cap_size > INT_MAX) return false;
   int current_cap = (int)current_cap_size;
-  PolyUOp **current_keys = current_cap > 0
-                               ? calloc((size_t)current_cap, sizeof(*current_keys))
-                               : NULL;
+  PolyUOp **current_keys =
+      current_cap > 0 ? calloc((size_t)current_cap, sizeof(*current_keys)) : NULL;
   if (current_cap > 0 && !current_keys) return false;
   BuildBufferCurrentKeys current = {
       .keys = current_keys,
@@ -1220,7 +1179,8 @@ static bool build_buffer_transaction_rollback(
     PolyBuffer *head = poly_buffer_get(ctx, key);
     if (head != saved_head) {
       PolyBuffer *cursor = head;
-      while (cursor && cursor != saved_head) cursor = cursor->src;
+      while (cursor && cursor != saved_head)
+        cursor = cursor->src;
       if (cursor != saved_head) {
         ok = false;
         continue;
@@ -1232,9 +1192,7 @@ static bool build_buffer_transaction_rollback(
         poly_buffer_free(ctx, cursor);
         cursor = next;
       }
-      poly_map_set(
-          ctx->buffers, poly_ptr_hash(key), key, saved_head, poly_ptr_eq
-      );
+      poly_map_set(ctx->buffers, poly_ptr_hash(key), key, saved_head, poly_ptr_eq);
     }
     *saved_head = transaction->saved_heads[prior];
   }
@@ -1244,17 +1202,12 @@ static bool build_buffer_transaction_rollback(
     PolyUOp *key = transaction->keys[i];
     if (poly_buffer_get(ctx, key)) continue;
     *transaction->heads[i] = transaction->saved_heads[i];
-    poly_map_set(
-        ctx->buffers, poly_ptr_hash(key), key, transaction->heads[i], poly_ptr_eq
-    );
+    poly_map_set(ctx->buffers, poly_ptr_hash(key), key, transaction->heads[i], poly_ptr_eq);
   }
   return ok;
 }
 
-static void release_build_named_value_snapshots(
-    PolyCtx *ctx,
-    PolyInstanceBuildState *build
-) {
+static void release_build_named_value_snapshots(PolyCtx *ctx, PolyInstanceBuildState *build) {
   if (!ctx || !build) return;
   for (int i = 0; i < build->n_bindings; i++) {
     BuildBinding *binding = &build->bindings[i];
@@ -1268,8 +1221,7 @@ static void release_build_named_value_snapshots(
       }
     }
     if (first) {
-      if (binding->snapshot_residency_retained)
-        poly_uop_release(ctx, binding->physical_buffer);
+      if (binding->snapshot_residency_retained) poly_uop_release(ctx, binding->physical_buffer);
       poly_buffer_remove(ctx, binding->physical_buffer);
     }
   }
@@ -1299,8 +1251,7 @@ static PolyStatus snapshot_build_named_value(PolyInstance *inst, BuildBinding *b
    * UOp.empty_like commits inferred values with strong_dtype
    * (uop/ops.py:814-827). A named initializer crosses the same persistent
    * storage boundary while its preserved logical value remains weak. */
-  PolyDType storage_dtype =
-      poly_dtype_strong(binding->declared_logical_value->dtype);
+  PolyDType storage_dtype = poly_dtype_strong(binding->declared_logical_value->dtype);
   if (!make_build_snapshot_buffers(
           inst->ctx, storage_dtype, numel, device, &logical_buffer, &physical_buffer
       ))
@@ -1319,9 +1270,7 @@ static PolyStatus snapshot_build_named_value(PolyInstance *inst, BuildBinding *b
    * publishing callify's becomes-map to any live Tensor. */
   if (!binding->initial_data_buffer && numel > 0) {
     int64_t flat[] = {numel};
-    PolyUOp *flat_value = poly_reshape(
-        inst->ctx, binding->declared_physical_value, flat, 1
-    );
+    PolyUOp *flat_value = poly_reshape(inst->ctx, binding->declared_physical_value, flat, 1);
     PolyUOp *store = flat_value ? poly_store_val(inst->ctx, physical_buffer, flat_value) : NULL;
     PolyUOp *sink = store ? poly_sink1(inst->ctx, store) : NULL;
     if (!sink || poly_realize_sink(inst->ctx, sink) != 0) return POLY_STATUS_ERROR;
@@ -1342,8 +1291,8 @@ static PolyStatus prepare_build_named_value_snapshots(PolyInstance *inst) {
     if (!binding->needs_snapshot || !instance_role_is_state(binding->role)) continue;
     if (build_snapshot_depends_on_abi_input(inst, binding)) {
       poly_instance_set_error(
-          inst, POLY_STATUS_INVALID, __func__,
-          "named state '%s' depends on an input or target", binding->name
+          inst, POLY_STATUS_INVALID, __func__, "named state '%s' depends on an input or target",
+          binding->name
       );
       return POLY_STATUS_INVALID;
     }
@@ -1369,8 +1318,8 @@ static PolyStatus prepare_build_named_value_snapshots(PolyInstance *inst) {
               b->declared_physical_value, a->declared_physical_value
           )) {
         poly_instance_set_error(
-            inst, POLY_STATUS_INVALID, __func__,
-            "unsupported named view state for '%s' and '%s'", b->name, a->name
+            inst, POLY_STATUS_INVALID, __func__, "unsupported named view state for '%s' and '%s'",
+            b->name, a->name
         );
         return POLY_STATUS_INVALID;
       }
@@ -1388,15 +1337,15 @@ static PolyStatus prepare_build_named_value_snapshots(PolyInstance *inst) {
       const bool same_alias = build_snapshot_bindings_are_one_alias(a, b);
       if (same_logical && !same_alias) {
         poly_instance_set_error(
-            inst, POLY_STATUS_INVALID, __func__,
-            "ambiguous state occurrence for '%s' and '%s'", b->name, a->name
+            inst, POLY_STATUS_INVALID, __func__, "ambiguous state occurrence for '%s' and '%s'",
+            b->name, a->name
         );
         return POLY_STATUS_INVALID;
       }
       if (!same_logical && same_alias) {
         poly_instance_set_error(
-            inst, POLY_STATUS_INVALID, __func__,
-            "unsupported named view state for '%s' and '%s'", b->name, a->name
+            inst, POLY_STATUS_INVALID, __func__, "unsupported named view state for '%s' and '%s'",
+            b->name, a->name
         );
         return POLY_STATUS_INVALID;
       }
@@ -1444,8 +1393,7 @@ static bool build_named_value_gate(PolyUOp *u, void *user_data) {
   if (!u || !gate || !gate->build) return false;
   for (int i = 0; i < gate->build->n_bindings; i++) {
     const BuildBinding *binding = &gate->build->bindings[i];
-    if (binding->role != POLY_ROLE_OUTPUT && binding->declared_logical_value == u)
-      return false;
+    if (binding->role != POLY_ROLE_OUTPUT && binding->declared_logical_value == u) return false;
   }
   return true;
 }
@@ -1468,9 +1416,8 @@ static PolyStatus validate_build_reachable_storage(PolyInstance *inst) {
 
     BuildNamedValueGate gate = {build};
     int n_topo = 0;
-    PolyUOp **topo = poly_toposort_ex_user_alloc(
-        inst->ctx, root, &n_topo, build_named_value_gate, &gate, false
-    );
+    PolyUOp **topo =
+        poly_toposort_ex_user_alloc(inst->ctx, root, &n_topo, build_named_value_gate, &gate, false);
     if (!topo && n_topo != 0) {
       poly_instance_set_error(
           inst, POLY_STATUS_ERROR, __func__, "failed to walk output '%s' graph", out->name
@@ -1480,8 +1427,7 @@ static PolyStatus validate_build_reachable_storage(PolyInstance *inst) {
 
     for (int j = 0; j < n_topo; j++) {
       PolyUOp *u = topo[j];
-      if (!u || (u->op != POLY_OP_BUFFER && u->op != POLY_OP_PARAM))
-        continue;
+      if (!u || (u->op != POLY_OP_BUFFER && u->op != POLY_OP_PARAM)) continue;
       if (find_build_storage_binding(build, u)) continue;
       PolyTensor *leaf_tensor = poly_tensor_find_storage_identity(inst->ctx, u);
       if (leaf_tensor && poly_tensor_requires_grad(leaf_tensor)) {
@@ -1616,9 +1562,7 @@ PolyStatus poly_instance_build(PolyInstance *inst, PolyInstanceError *err) {
     if (b->role == POLY_ROLE_OUTPUT) {
       PolyUOp *value = b->declared_logical_value;
       int64_t numel = poly_shape_numel_checked(b->shape, b->ndim);
-      b->buffer = poly_uop_new_logical_buffer(
-          inst->ctx, poly_dtype_strong(value->dtype), numel
-      );
+      b->buffer = poly_uop_new_logical_buffer(inst->ctx, poly_dtype_strong(value->dtype), numel);
       if (!b->buffer) {
         poly_instance_set_error(
             inst, POLY_STATUS_ERROR, __func__, "failed to create output buffer '%s'", b->name
@@ -1772,8 +1716,7 @@ static bool runtime_modules_valid(
         return false;
     for (int j = 0; j < module->n_inputs; j++) {
       PolyUOp *input = module->logical_inputs[j];
-      if (!input || !poly_ctx_owns_ptr(inst->ctx, input) ||
-          input == module->logical_output ||
+      if (!input || !poly_ctx_owns_ptr(inst->ctx, input) || input == module->logical_output ||
           !poly_uop_reachable(inst->ctx, module->logical_output, input))
         return false;
       for (int k = 0; k < j; k++)
@@ -1782,18 +1725,15 @@ static bool runtime_modules_valid(
 
     bool entry_reachable = false;
     for (int j = 0; j < inst->n_entrypoints && !entry_reachable; j++)
-      entry_reachable = poly_uop_reachable(
-          inst->ctx, inst->entrypoints[j].logical_sink, module->logical_output
-      );
+      entry_reachable =
+          poly_uop_reachable(inst->ctx, inst->entrypoints[j].logical_sink, module->logical_output);
     if (!entry_reachable) return false;
 
     for (int j = 0; j < n_modules; j++) {
-      if (i == j || !poly_uop_reachable(
-                        inst->ctx, module->logical_output, modules[j].logical_output
-                    ))
+      if (i == j ||
+          !poly_uop_reachable(inst->ctx, module->logical_output, modules[j].logical_output))
         continue;
-      if (j >= i || !runtime_module_has_input(module, modules[j].logical_output))
-        return false;
+      if (j >= i || !runtime_module_has_input(module, modules[j].logical_output)) return false;
     }
   }
   return true;
@@ -1804,8 +1744,7 @@ int poly_instance_define_modules(
     const PolyInstanceModuleSpec *modules,
     int n_modules
 ) {
-  if (!inst || inst->stage != POLY_INSTANCE_BUILT || !inst->ctx || !modules ||
-      n_modules <= 0)
+  if (!inst || inst->stage != POLY_INSTANCE_BUILT || !inst->ctx || !modules || n_modules <= 0)
     return -1;
 
   RuntimeModule *candidate = calloc((size_t)n_modules, sizeof(*candidate));
@@ -1816,17 +1755,14 @@ int poly_instance_define_modules(
     const PolyInstanceModuleSpec *src = &modules[i];
     PolyUOp *output = src->output ? poly_tensor_uop_logical(src->output) : NULL;
     if (!valid_binding_name(src->name) || src->n_inputs < 0 ||
-        (src->n_inputs > 0 && !src->inputs) || !output ||
-        !poly_ctx_owns_ptr(inst->ctx, output))
+        (src->n_inputs > 0 && !src->inputs) || !output || !poly_ctx_owns_ptr(inst->ctx, output))
       goto cleanup;
     candidate[i].name = dup_cstr(src->name);
     candidate[i].logical_output = output;
     candidate[i].n_inputs = src->n_inputs;
-    candidate[i].logical_inputs = src->n_inputs > 0
-                                      ? calloc((size_t)src->n_inputs, sizeof(PolyUOp *))
-                                      : NULL;
-    if (!candidate[i].name || (src->n_inputs > 0 && !candidate[i].logical_inputs))
-      goto cleanup;
+    candidate[i].logical_inputs =
+        src->n_inputs > 0 ? calloc((size_t)src->n_inputs, sizeof(PolyUOp *)) : NULL;
+    if (!candidate[i].name || (src->n_inputs > 0 && !candidate[i].logical_inputs)) goto cleanup;
     for (int j = 0; j < src->n_inputs; j++) {
       PolyUOp *input = src->inputs[j] ? poly_tensor_uop_logical(src->inputs[j]) : NULL;
       if (!input || !poly_ctx_owns_ptr(inst->ctx, input) || input == output ||
@@ -1858,8 +1794,7 @@ int poly_instance_define_module_arrays(
     int n_modules
 ) {
   if (!inst || !names || !input_counts || !outputs || n_modules <= 0) return -1;
-  PolyInstanceModuleSpec *modules =
-      calloc((size_t)n_modules, sizeof(PolyInstanceModuleSpec));
+  PolyInstanceModuleSpec *modules = calloc((size_t)n_modules, sizeof(PolyInstanceModuleSpec));
   if (!modules) return -1;
   int input_off = 0;
   int rc = -1;
@@ -1899,8 +1834,7 @@ PolyInstance *poly_instance_from_bindings(
     bool requires_grad_set;
     PolyTensorProvenance provenance;
   } TensorMetadataSnapshot;
-  TensorMetadataSnapshot *metadata =
-      calloc((size_t)n_bindings, sizeof(*metadata));
+  TensorMetadataSnapshot *metadata = calloc((size_t)n_bindings, sizeof(*metadata));
   int n_metadata = 0;
   if (!metadata) {
     poly_instance_set_error(inst, POLY_STATUS_NOMEM, __func__, "out of memory");
@@ -2117,25 +2051,18 @@ static PolyInstance *instance_from_spec(
         if (!instance_role_is_state(inst->bufs[j].role) ||
             logical_value == inst->bufs[j].logical_value)
           continue;
-        const PolyUOp *prior_identity =
-            poly_uop_get_buffer_identity(inst->bufs[j].logical_value);
+        const PolyUOp *prior_identity = poly_uop_get_buffer_identity(inst->bufs[j].logical_value);
         if (value_identity && prior_identity == value_identity) continue;
-        if (instance_value_is_movement_view_of(
-                logical_value, inst->bufs[j].logical_value
-            ) ||
-            instance_value_is_movement_view_of(
-                inst->bufs[j].logical_value, logical_value
-            ))
+        if (instance_value_is_movement_view_of(logical_value, inst->bufs[j].logical_value) ||
+            instance_value_is_movement_view_of(inst->bufs[j].logical_value, logical_value))
           goto fail;
       }
     }
 
     int alias = -1;
     for (int j = 0; j < i; j++) {
-      const PolyUOp *prior_identity =
-          poly_uop_get_buffer_identity(inst->bufs[j].logical_value);
-      PolyUOp *prior_key = prior_identity ? (PolyUOp *)prior_identity
-                                          : inst->bufs[j].logical_value;
+      const PolyUOp *prior_identity = poly_uop_get_buffer_identity(inst->bufs[j].logical_value);
+      PolyUOp *prior_key = prior_identity ? (PolyUOp *)prior_identity : inst->bufs[j].logical_value;
       if (prior_key == resource_key) {
         alias = j;
         break;
@@ -2146,15 +2073,10 @@ static PolyInstance *instance_from_spec(
       const bool prior_abi = instance_role_is_abi_input(inst->bufs[alias].role);
       const bool current_state = instance_role_is_state(spec->bufs[i].role);
       const bool prior_state = instance_role_is_state(inst->bufs[alias].role);
-      if ((current_abi && (prior_abi || prior_state)) ||
-          (prior_abi && current_state))
-        goto fail;
+      if ((current_abi && (prior_abi || prior_state)) || (prior_abi && current_state)) goto fail;
     }
-    if (alias >= 0 &&
-        (inst->bufs[alias].numel != numel ||
-         !poly_dtype_eq(
-             inst->bufs[alias].logical_value->dtype, value_dtype
-         )))
+    if (alias >= 0 && (inst->bufs[alias].numel != numel ||
+                       !poly_dtype_eq(inst->bufs[alias].logical_value->dtype, value_dtype)))
       goto fail;
     inst->bufs[i].name = strdup(spec->bufs[i].name);
     inst->bufs[i].role = spec->bufs[i].role;
@@ -2162,16 +2084,15 @@ static PolyInstance *instance_from_spec(
                                                           : (spec->bufs[i].role == POLY_ROLE_PARAM);
     inst->bufs[i].logical_value = logical_value;
     inst->bufs[i].logical_buffer =
-        alias >= 0
-            ? inst->bufs[alias].logical_buffer
-            : (instance_is_portable_buffer(value_identity)
-                   ? (PolyUOp *)value_identity
-                   : poly_uop_new_logical_buffer(spec->ctx, storage_dtype, numel));
+        alias >= 0 ? inst->bufs[alias].logical_buffer
+                   : (instance_is_portable_buffer(value_identity)
+                          ? (PolyUOp *)value_identity
+                          : poly_uop_new_logical_buffer(spec->ctx, storage_dtype, numel));
     if (!inst->bufs[i].logical_buffer) goto fail;
-    inst->bufs[i].capture_buffer = inst->has_physical_capture
-                                       ? physical_buffers[i]
-                                       : (alias >= 0 ? inst->bufs[alias].capture_buffer
-                                                     : inst->bufs[i].logical_buffer);
+    inst->bufs[i].capture_buffer =
+        inst->has_physical_capture
+            ? physical_buffers[i]
+            : (alias >= 0 ? inst->bufs[alias].capture_buffer : inst->bufs[i].logical_buffer);
     inst->bufs[i].buffer = inst->bufs[i].capture_buffer;
     inst->bufs[i].ndim = spec->bufs[i].ndim;
     memcpy(inst->bufs[i].shape, spec->bufs[i].shape, spec->bufs[i].ndim * sizeof(int64_t));
@@ -2190,7 +2111,8 @@ static PolyInstance *instance_from_spec(
       if (nbytes > 0 &&
           poly_buffer_alloc_owned_host(spec->ctx, inst->bufs[i].buffer, nbytes, true, &host) != 0) {
         fprintf(
-            stderr, "poly_instance: host buffer allocation FAILED for '%s' (%lld elements = %lld MB)\n",
+            stderr,
+            "poly_instance: host buffer allocation FAILED for '%s' (%lld elements = %lld MB)\n",
             spec->bufs[i].name ? spec->bufs[i].name : "?", (long long)inst->bufs[i].numel,
             (long long)(nbytes / 1024 / 1024)
         );
@@ -2209,8 +2131,7 @@ static PolyInstance *instance_from_spec(
    * an ABI input or target, even when checkpoint bytes are supplied. */
   for (int i = 0; i < inst->n_bufs; i++) {
     NamedBuf *state = &inst->bufs[i];
-    if (!instance_role_is_state(state->role) ||
-        poly_uop_get_buffer_identity(state->logical_value))
+    if (!instance_role_is_state(state->role) || poly_uop_get_buffer_identity(state->logical_value))
       continue;
     for (int j = 0; j < inst->n_bufs; j++) {
       NamedBuf *abi = &inst->bufs[j];
@@ -2272,20 +2193,16 @@ static PolyInstance *instance_from_spec(
    * by live Instance construction. Device assignments remain external policy
    * and are deliberately not restored here. */
   inst->n_modules = spec->n_modules;
-  inst->modules = spec->n_modules > 0
-                      ? calloc((size_t)spec->n_modules, sizeof(*inst->modules))
-                      : NULL;
+  inst->modules =
+      spec->n_modules > 0 ? calloc((size_t)spec->n_modules, sizeof(*inst->modules)) : NULL;
   if (spec->n_modules > 0 && !inst->modules) goto fail;
   for (int i = 0; i < spec->n_modules; i++) {
     inst->modules[i].name = dup_cstr(spec->modules[i].name);
     inst->modules[i].n_inputs = spec->modules[i].n_inputs;
     inst->modules[i].logical_output = spec->modules[i].output;
-    inst->modules[i].logical_inputs = spec->modules[i].n_inputs > 0
-                                          ? calloc(
-                                                (size_t)spec->modules[i].n_inputs,
-                                                sizeof(PolyUOp *)
-                                            )
-                                          : NULL;
+    inst->modules[i].logical_inputs =
+        spec->modules[i].n_inputs > 0 ? calloc((size_t)spec->modules[i].n_inputs, sizeof(PolyUOp *))
+                                      : NULL;
     if (!inst->modules[i].name ||
         (spec->modules[i].n_inputs > 0 && !inst->modules[i].logical_inputs))
       goto fail;
@@ -2295,8 +2212,7 @@ static PolyInstance *instance_from_spec(
           (size_t)spec->modules[i].n_inputs * sizeof(PolyUOp *)
       );
   }
-  if (spec->n_modules > 0 &&
-      !runtime_modules_valid(inst, inst->modules, inst->n_modules))
+  if (spec->n_modules > 0 && !runtime_modules_valid(inst, inst->modules, inst->n_modules))
     goto fail;
 
   if (free_spec) poly_ir_spec_free(spec);
@@ -2355,8 +2271,7 @@ static bool instance_checkpoint_row_matches(
   PolySafetensorDType expected;
   size_t nbytes = 0;
   if (!instance_safetensor_dtype(binding->buffer->dtype, &expected) || expected != view->dtype ||
-      !named_buf_nbytes_checked(binding, &nbytes) ||
-      poly_safetensor_dtype_size(view->dtype) <= 0 ||
+      !named_buf_nbytes_checked(binding, &nbytes) || poly_safetensor_dtype_size(view->dtype) <= 0 ||
       (uint64_t)view->numel > SIZE_MAX / (size_t)poly_safetensor_dtype_size(view->dtype) ||
       nbytes != (size_t)view->numel * (size_t)poly_safetensor_dtype_size(view->dtype))
     return false;
@@ -2368,8 +2283,7 @@ static bool instance_checkpoint_row_matches(
 static bool instance_checkpoint_binding_required(const NamedBuf *binding) {
   if (!binding) return false;
   if (binding->role == POLY_ROLE_PARAM) return true;
-  return binding->role == POLY_ROLE_AUX &&
-         !poly_uop_get_buffer_identity(binding->logical_value);
+  return binding->role == POLY_ROLE_AUX && !poly_uop_get_buffer_identity(binding->logical_value);
 }
 
 static int instance_validate_checkpoint_views(
@@ -2418,16 +2332,14 @@ static int instance_validate_checkpoint(
 }
 
 static bool instance_is_computed_state(const NamedBuf *binding) {
-  return binding &&
-         (binding->role == POLY_ROLE_PARAM || binding->role == POLY_ROLE_AUX) &&
+  return binding && (binding->role == POLY_ROLE_PARAM || binding->role == POLY_ROLE_AUX) &&
          !poly_uop_get_buffer_identity(binding->logical_value);
 }
 
 static bool instance_closed_initializer_op(PolyOps op) {
-  return op == POLY_OP_CONST ||
-         op == POLY_OP_STACK || op == POLY_OP_CONTIGUOUS || op == POLY_OP_DETACH ||
-         op == POLY_OP_REDUCE || poly_opset_has(POLY_GROUP_ELEMENTWISE, op) ||
-         poly_opset_has(POLY_GROUP_MOVEMENT, op);
+  return op == POLY_OP_CONST || op == POLY_OP_STACK || op == POLY_OP_CONTIGUOUS ||
+         op == POLY_OP_DETACH || op == POLY_OP_REDUCE ||
+         poly_opset_has(POLY_GROUP_ELEMENTWISE, op) || poly_opset_has(POLY_GROUP_MOVEMENT, op);
 }
 
 static bool instance_closed_initializer_graph(PolyCtx *ctx, PolyUOp *root) {
@@ -2479,8 +2391,7 @@ static int instance_initialize_closed_computed_state(PolyInstance *inst) {
     PolyShape declared = {(int64_t *)binding->shape, binding->ndim};
     if (!poly_shape_eq(actual, declared) ||
         !poly_dtype_eq(
-            poly_dtype_strong(binding->logical_value->dtype),
-            binding->logical_buffer->dtype
+            poly_dtype_strong(binding->logical_value->dtype), binding->logical_buffer->dtype
         ))
       goto cleanup;
     logical[n_init] = binding->logical_value;
@@ -2504,9 +2415,7 @@ static int instance_initialize_closed_computed_state(PolyInstance *inst) {
     if (!realized[i] || !poly_uop_has_buffer_identity(realized[i])) goto cleanup;
     if (nbytes > 0 &&
         (poly_buffer_read(inst->ctx, realized[i], binding->data, nbytes) != 0 ||
-         poly_buffer_write(
-             inst->ctx, binding->logical_buffer, binding->data, nbytes
-         ) != 0))
+         poly_buffer_write(inst->ctx, binding->logical_buffer, binding->data, nbytes) != 0))
       goto cleanup;
   }
   rc = 0;
@@ -2514,8 +2423,7 @@ static int instance_initialize_closed_computed_state(PolyInstance *inst) {
 cleanup:
   if (realized)
     for (int i = 0; i < n_init; i++)
-      if (realized[i] &&
-          realized[i] != inst->bufs[binding_indices[i]].logical_buffer)
+      if (realized[i] && realized[i] != inst->bufs[binding_indices[i]].logical_buffer)
         poly_buffer_remove(inst->ctx, realized[i]);
   free(binding_indices);
   free(realized);
@@ -2544,18 +2452,12 @@ PolyInstance *poly_instance_from_ir(
     /* Checkpoint import remains strict for computed state. A supplied partial
      * archive never silently falls back to initializers for missing names. */
     if (instance_validate_checkpoint(inst, weights_data, weights_len, true) != 0) {
-      fprintf(
-          stderr,
-          "poly_instance_from_ir: checkpoint does not match required named state\n"
-      );
+      fprintf(stderr, "poly_instance_from_ir: checkpoint does not match required named state\n");
       poly_instance_free(inst);
       return NULL;
     }
   } else if (instance_initialize_closed_computed_state(inst) != 0) {
-    fprintf(
-        stderr,
-        "poly_instance_from_ir: computed named state is not a closed initializer\n"
-    );
+    fprintf(stderr, "poly_instance_from_ir: computed named state is not a closed initializer\n");
     poly_instance_free(inst);
     return NULL;
   }
@@ -2672,8 +2574,8 @@ static PolyInstance *instance_from_named_sinks(
        * still read the current residency, so do not reject invalid host shadows.
        * Fall back to direct copy only for valid legacy host buffers whose
        * allocator cannot service copyout. */
-      if (poly_buffer_read(ctx, source, inst->bufs[i].data, nbytes) != 0 &&
-          src->valid && poly_device_is_host_addressable(src->device))
+      if (poly_buffer_read(ctx, source, inst->bufs[i].data, nbytes) != 0 && src->valid &&
+          poly_device_is_host_addressable(src->device))
         memcpy(inst->bufs[i].data, src->ptr, nbytes);
     }
     /* Approved Instance boundary: registry sinks are portable logical roots.
@@ -2876,15 +2778,13 @@ static int append_runtime_named_buffer(
     int *out_index
 ) {
   if (out_index) *out_index = -1;
-  if (!inst || !name || !buffer || ndim < 0 || ndim > POLY_IR_MAX_DIMS ||
-      (ndim > 0 && !shape))
+  if (!inst || !name || !buffer || ndim < 0 || ndim > POLY_IR_MAX_DIMS || (ndim > 0 && !shape))
     return -1;
   if (!valid_binding_name(name) || find_buf_by_name(inst, name) >= 0) return -1;
 
   int64_t numel = poly_shape_numel_checked(shape, ndim);
   if (numel < 0) return -1;
-  if (buffer->op != POLY_OP_BUFFER || buffer->arg.kind != POLY_ARG_PARAM ||
-      !buffer->arg.param)
+  if (buffer->op != POLY_OP_BUFFER || buffer->arg.kind != POLY_ARG_PARAM || !buffer->arg.param)
     return -1;
 
   NamedBuf *next = realloc(inst->bufs, (size_t)(inst->n_bufs + 1) * sizeof(NamedBuf));
@@ -2897,8 +2797,7 @@ static int append_runtime_named_buffer(
   nb.role = role;
   nb.flags = flags;
   PolyUOp *logical = poly_uop_new_logical_buffer_with_slot(
-      inst->ctx, buffer->dtype, numel,
-      buffer->arg.param->slot
+      inst->ctx, buffer->dtype, numel, buffer->arg.param->slot
   );
   if (!logical) return -1;
   nb.buffer = buffer;
@@ -2925,7 +2824,11 @@ static int append_runtime_named_buffer(
   return 0;
 }
 
-static char *optimizer_param_state_name(const char *optimizer, const char *kind, const char *param_name) {
+static char *optimizer_param_state_name(
+    const char *optimizer,
+    const char *kind,
+    const char *param_name
+) {
   if (!optimizer || !kind || !param_name) return NULL;
   const char *prefix = "optim.";
   size_t lp = strlen(prefix), lo = strlen(optimizer), lk = strlen(kind), ln = strlen(param_name);
@@ -2980,12 +2883,7 @@ static int ensure_optimizer_state_buffer(
   return 0;
 }
 
-static void discard_appended_named_buffers(
-    PolyCtx *ctx,
-    NamedBuf *bufs,
-    int first,
-    int count
-) {
+static void discard_appended_named_buffers(PolyCtx *ctx, NamedBuf *bufs, int first, int count) {
   if (!ctx || !bufs) return;
   for (int i = first; i < count; i++) {
     poly_buffer_remove(ctx, bufs[i].buffer);
@@ -3010,8 +2908,7 @@ float *poly_instance_param_data(PolyInstance *inst, int i, int64_t *numel_out) {
 int poly_instance_param_dtype_id(const PolyInstance *inst, int i) {
   if (!inst || i < 0 || i >= inst->n_params) return -1;
   const NamedBuf *b = &inst->bufs[inst->param_indices[i]];
-  return b->buffer ? poly_dtype_id_by_name(poly_dtype_name(b->buffer->dtype))
-                   : -1;
+  return b->buffer ? poly_dtype_id_by_name(poly_dtype_name(b->buffer->dtype)) : -1;
 }
 
 size_t poly_instance_param_nbytes(const PolyInstance *inst, int i) {
@@ -3085,9 +2982,7 @@ int poly_instance_set_buf_trainable(PolyInstance *inst, int i, bool trainable) {
   candidate.vag = NULL;
   int *candidate_indices = NULL;
   int n_candidate_indices = 0;
-  if (build_trainable_param_indices(
-          &candidate, &candidate_indices, &n_candidate_indices
-      ) != 0) {
+  if (build_trainable_param_indices(&candidate, &candidate_indices, &n_candidate_indices) != 0) {
     free(candidate_bufs);
     return -1;
   }
@@ -3145,8 +3040,7 @@ float *poly_instance_buf_data(PolyInstance *inst, int i, int64_t *numel_out) {
 int poly_instance_buf_dtype_id(const PolyInstance *inst, int i) {
   if (!inst || i < 0 || i >= inst->n_bufs) return -1;
   const NamedBuf *b = &inst->bufs[i];
-  return b->buffer ? poly_dtype_id_by_name(poly_dtype_name(b->buffer->dtype))
-                   : -1;
+  return b->buffer ? poly_dtype_id_by_name(poly_dtype_name(b->buffer->dtype)) : -1;
 }
 
 size_t poly_instance_buf_nbytes(const PolyInstance *inst, int i) {
@@ -3168,13 +3062,23 @@ int poly_instance_write_buf(PolyInstance *inst, int i, const void *host_src, siz
   return rc;
 }
 
-int poly_instance_read_buf_named(PolyInstance *inst, const char *name, void *host_dst, size_t dst_len) {
+int poly_instance_read_buf_named(
+    PolyInstance *inst,
+    const char *name,
+    void *host_dst,
+    size_t dst_len
+) {
   int idx = find_buf_by_name(inst, name);
   if (idx < 0) return -1;
   return poly_instance_read_buf(inst, idx, host_dst, dst_len);
 }
 
-int poly_instance_write_buf_named(PolyInstance *inst, const char *name, const void *host_src, size_t src_len) {
+int poly_instance_write_buf_named(
+    PolyInstance *inst,
+    const char *name,
+    const void *host_src,
+    size_t src_len
+) {
   int idx = find_buf_by_name(inst, name);
   if (idx < 0) return -1;
   return poly_instance_write_buf(inst, idx, host_src, src_len);
@@ -3285,9 +3189,11 @@ int poly_instance_import_weights(PolyInstance *inst, const uint8_t *data, int le
     if (seen) continue;
     size_t nbytes = named_buf_nbytes(&inst->bufs[bi]);
     uint8_t *before = nbytes > 0 ? malloc(nbytes) : NULL;
-    if ((nbytes > 0 && (!before || poly_buffer_read(inst->ctx, inst->bufs[bi].buffer, before, nbytes) != 0))) {
+    if ((nbytes > 0 &&
+         (!before || poly_buffer_read(inst->ctx, inst->bufs[bi].buffer, before, nbytes) != 0))) {
       free(before);
-      for (int j = 0; j < n_undo; j++) free(undo[j].before);
+      for (int j = 0; j < n_undo; j++)
+        free(undo[j].before);
       free(undo);
       instance_free_safetensor_views(views, n_views);
       free(metadata);
@@ -3304,9 +3210,8 @@ int poly_instance_import_weights(PolyInstance *inst, const uint8_t *data, int le
       continue;
     }
     size_t nbytes = named_buf_nbytes(&inst->bufs[bi]);
-    if (nbytes > 0 && poly_buffer_write(
-            inst->ctx, inst->bufs[bi].buffer, views[i].raw_data, nbytes
-        ) != 0) {
+    if (nbytes > 0 &&
+        poly_buffer_write(inst->ctx, inst->bufs[bi].buffer, views[i].raw_data, nbytes) != 0) {
       fprintf(stderr, "poly_instance_import_weights: write failed for '%s'\n", views[i].name);
       rc = -1;
       break;
@@ -3363,9 +3268,8 @@ uint8_t *poly_instance_export_ir(PolyInstance *inst, int *out_len) {
     eps[i].flags = inst->entrypoints[i].flags;
   }
 
-  PolyIrModule *modules = inst->n_modules > 0
-                              ? calloc((size_t)inst->n_modules, sizeof(*modules))
-                              : NULL;
+  PolyIrModule *modules =
+      inst->n_modules > 0 ? calloc((size_t)inst->n_modules, sizeof(*modules)) : NULL;
   if (inst->n_modules > 0 && !modules) {
     free(bufs);
     free(eps);
@@ -3410,9 +3314,7 @@ static int instance_publish_cached_executable(
   if (inst->entry_executables) {
     for (int i = 0; i < inst->n_entrypoints; i++) {
       if (slot != &inst->entry_executables[i]) continue;
-      candidate_entries = malloc(
-          (size_t)inst->n_entrypoints * sizeof(*candidate_entries)
-      );
+      candidate_entries = malloc((size_t)inst->n_entrypoints * sizeof(*candidate_entries));
       if (!candidate_entries) return -1;
       memcpy(
           candidate_entries, inst->entry_executables,
@@ -3451,10 +3353,7 @@ static int instance_publish_cached_executable(
   return 0;
 }
 
-static PolyLinearEntry *instance_ensure_entry_executable(
-    PolyInstance *inst,
-    int entrypoint_index
-) {
+static PolyLinearEntry *instance_ensure_entry_executable(PolyInstance *inst, int entrypoint_index) {
   if (!inst || !inst->ctx || !inst->entry_executables || entrypoint_index < 0 ||
       entrypoint_index >= inst->n_entrypoints)
     return NULL;
@@ -3466,9 +3365,7 @@ static PolyLinearEntry *instance_ensure_entry_executable(
   int n_var_bindings = 0;
   PolyUOp *linear = root && root->op == POLY_OP_LINEAR
                         ? root
-                        : poly_linear_effect_sink(
-                              inst->ctx, root, &var_bindings, &n_var_bindings
-                          );
+                        : poly_linear_effect_sink(inst->ctx, root, &var_bindings, &n_var_bindings);
   PolyUOp *compiled = linear ? poly_compile_linear(inst->ctx, linear, -1) : NULL;
   if (!compiled) {
     free(var_bindings);
@@ -3551,27 +3448,22 @@ PolyInstance *poly_instance_from_program(
   }
   PolyUOp **physical_buffers =
       spec.n_bufs > 0 ? malloc((size_t)spec.n_bufs * sizeof(*physical_buffers)) : NULL;
-  PolyUOp **physical_sinks = spec.n_entrypoints > 0
-                                 ? malloc(
-                                       (size_t)spec.n_entrypoints * sizeof(*physical_sinks)
-                                   )
-                                 : NULL;
-  if ((spec.n_bufs > 0 && !physical_buffers) ||
-      (spec.n_entrypoints > 0 && !physical_sinks)) {
+  PolyUOp **physical_sinks =
+      spec.n_entrypoints > 0 ? malloc((size_t)spec.n_entrypoints * sizeof(*physical_sinks)) : NULL;
+  if ((spec.n_bufs > 0 && !physical_buffers) || (spec.n_entrypoints > 0 && !physical_sinks)) {
     free(physical_buffers);
     free(physical_sinks);
     poly_ir_spec_free(&spec);
     return NULL;
   }
-  for (int i = 0; i < spec.n_bufs; i++) physical_buffers[i] = spec.bufs[i].buffer;
+  for (int i = 0; i < spec.n_bufs; i++)
+    physical_buffers[i] = spec.bufs[i].buffer;
   for (int i = 0; i < spec.n_entrypoints; i++)
     physical_sinks[i] = spec.entrypoints[i].sink;
   /* Bound import is Polygrad's approved export boundary. As current Tinygrad
    * PROGRAM replay does, retain the exact LINEAR buffer operands
    * (engine/realize.py:263-319); portable placement never consumes them. */
-  PolyInstance *inst = instance_from_spec(
-      &spec, physical_buffers, physical_sinks, true, true
-  );
+  PolyInstance *inst = instance_from_spec(&spec, physical_buffers, physical_sinks, true, true);
   free(physical_buffers);
   free(physical_sinks);
   if (!inst) return NULL;
@@ -3614,11 +3506,7 @@ static PolyUOp *instance_binding_source(const NamedBuf *binding) {
   return identity ? (PolyUOp *)identity : binding->logical_value;
 }
 
-static PolyUOp *instance_shaped_storage(
-    PolyCtx *ctx,
-    const NamedBuf *binding,
-    PolyUOp *buffer
-) {
+static PolyUOp *instance_shaped_storage(PolyCtx *ctx, const NamedBuf *binding, PolyUOp *buffer) {
   if (!ctx || !binding || !buffer) return NULL;
   if (binding->ndim == 1 && binding->shape[0] == binding->numel) return buffer;
   return poly_reshape(ctx, buffer, (int64_t *)binding->shape, binding->ndim);
@@ -3634,9 +3522,7 @@ static int instance_bind_named_values(
     int n_roots,
     PolyUOp **out_roots
 ) {
-  if (!inst || !inst->ctx || n_roots < 0 ||
-      (n_roots > 0 && (!roots || !out_roots)))
-    return -1;
+  if (!inst || !inst->ctx || n_roots < 0 || (n_roots > 0 && (!roots || !out_roots))) return -1;
   PolyUOp **from = calloc((size_t)inst->n_bufs, sizeof(*from));
   PolyUOp **to = calloc((size_t)inst->n_bufs, sizeof(*to));
   if (inst->n_bufs > 0 && (!from || !to)) {
@@ -3667,12 +3553,9 @@ static int instance_bind_named_values(
   }
   int rc = 0;
   if (n_subs == 0) {
-    if (n_roots > 0)
-      memcpy(out_roots, roots, (size_t)n_roots * sizeof(*out_roots));
+    if (n_roots > 0) memcpy(out_roots, roots, (size_t)n_roots * sizeof(*out_roots));
   } else {
-    rc = poly_uop_substitute_many(
-        inst->ctx, roots, n_roots, from, to, n_subs, out_roots
-    );
+    rc = poly_uop_substitute_many(inst->ctx, roots, n_roots, from, to, n_subs, out_roots);
   }
   free(to);
   free(from);
@@ -3691,20 +3574,14 @@ static PolyUOp *instance_binding_on_device(PolyCtx *ctx, PolyUOp *logical, PolyD
    * the physical one-source BUFFER (uop/ops.py:811-817). */
   PolyUOp *device_uop = poly_device_uop(ctx, device);
   int64_t size = logical->arg.kind == POLY_ARG_INT ? logical->arg.i : -1;
-  int64_t slot = logical->src[0]->arg.kind == POLY_ARG_INT
-                     ? logical->src[0]->arg.i
-                     : -1;
-  PolyUOp *physical = device_uop
-                          ? poly_uop_new_buffer(
-                                ctx, device_uop, size, logical->dtype, slot
-                            )
-                          : NULL;
+  int64_t slot = logical->src[0]->arg.kind == POLY_ARG_INT ? logical->src[0]->arg.i : -1;
+  PolyUOp *physical =
+      device_uop ? poly_uop_new_buffer(ctx, device_uop, size, logical->dtype, slot) : NULL;
   if (!physical) return NULL;
   return (logical->tag != 0 || logical->tag_arg.kind != POLY_ARG_NONE)
              ? poly_uop_tagged_arg(
-                   ctx, POLY_OP_BUFFER, physical->dtype, physical->src,
-                   physical->n_src, physical->arg,
-                   logical->tag, logical->tag_arg
+                   ctx, POLY_OP_BUFFER, physical->dtype, physical->src, physical->n_src,
+                   physical->arg, logical->tag, logical->tag_arg
                )
              : physical;
 }
@@ -3724,9 +3601,7 @@ static void instance_discard_candidate_residencies(
     if (duplicate) continue;
     PolyBuffer *candidate = poly_buffer_get(inst->ctx, targets[i]);
     if (!candidate) continue;
-    poly_map_remove(
-        inst->ctx->buffers, poly_ptr_hash(targets[i]), targets[i], poly_ptr_eq
-    );
+    poly_map_remove(inst->ctx->buffers, poly_ptr_hash(targets[i]), targets[i], poly_ptr_eq);
     poly_buffer_free_chain(inst->ctx, candidate);
   }
 }
@@ -3758,8 +3633,7 @@ static int instance_publish_placement(
   RuntimeEntrypoint *candidate_entrypoints = malloc(ne * sizeof(*candidate_entrypoints));
   InstanceResidencyRoots prepared_roots = {0};
   int rc = -1;
-  if (!target_data || !target_existed || !candidate_bufs || !candidate_entrypoints)
-    goto cleanup;
+  if (!target_data || !target_existed || !candidate_bufs || !candidate_entrypoints) goto cleanup;
 
   for (int i = 0; i < inst->n_bufs; i++) {
     PolyUOp *device_uop = poly_uop_device_uop_cached(inst->ctx, target_bindings[i], NULL);
@@ -3771,11 +3645,9 @@ static int instance_publish_placement(
   }
 
   memcpy(candidate_bufs, inst->bufs, nb * sizeof(*candidate_bufs));
-  memcpy(
-      candidate_entrypoints, inst->entrypoints,
-      ne * sizeof(*candidate_entrypoints)
-  );
-  for (int i = 0; i < inst->n_bufs; i++) candidate_bufs[i].buffer = target_bindings[i];
+  memcpy(candidate_entrypoints, inst->entrypoints, ne * sizeof(*candidate_entrypoints));
+  for (int i = 0; i < inst->n_bufs; i++)
+    candidate_bufs[i].buffer = target_bindings[i];
   for (int i = 0; i < inst->n_entrypoints; i++)
     candidate_entrypoints[i].sink = placed_roots[i];
   PolyInstance candidate = *inst;
@@ -3807,9 +3679,8 @@ static int instance_publish_placement(
     size_t nbytes = named_buf_nbytes(&inst->bufs[i]);
     if (nbytes > 0 && target != old) {
       PolyBuffer *host = NULL;
-      if (poly_buffer_ensure_host_current(inst->ctx, old, &host) != 0 || !host ||
-          !host->ptr || host->nbytes < nbytes ||
-          poly_buffer_write(inst->ctx, target, host->ptr, nbytes) != 0)
+      if (poly_buffer_ensure_host_current(inst->ctx, old, &host) != 0 || !host || !host->ptr ||
+          host->nbytes < nbytes || poly_buffer_write(inst->ctx, target, host->ptr, nbytes) != 0)
         goto cleanup_residencies;
     }
     if (nbytes > 0 && inst->bufs[i].role != POLY_ROLE_OUTPUT &&
@@ -3817,8 +3688,7 @@ static int instance_publish_placement(
       goto cleanup_residencies;
     if (nbytes > 0) {
       PolyBuffer *host = NULL;
-      if (poly_buffer_ensure_host_current(inst->ctx, target, &host) != 0 || !host ||
-          !host->ptr)
+      if (poly_buffer_ensure_host_current(inst->ctx, target, &host) != 0 || !host || !host->ptr)
         goto cleanup_residencies;
       target_data[i] = host->ptr;
     }
@@ -3842,9 +3712,7 @@ static int instance_publish_placement(
   goto cleanup;
 
 cleanup_residencies:
-  instance_discard_candidate_residencies(
-      inst, target_bindings, target_existed, inst->n_bufs
-  );
+  instance_discard_candidate_residencies(inst, target_bindings, target_existed, inst->n_bufs);
 cleanup:
   instance_discard_prepared_residency_roots(inst->ctx, &prepared_roots);
   free(candidate_entrypoints);
@@ -3867,26 +3735,22 @@ static int instance_place_uniform_device(PolyInstance *inst, PolyDevice device) 
   PolyUOp **logical_bindings = calloc(nb, sizeof(*logical_bindings));
   PolyUOp **target_bindings = calloc(nb, sizeof(*target_bindings));
   int rc = -1;
-  if (!logical_roots || !bound_roots || !placed_roots || !logical_bindings ||
-      !target_bindings)
+  if (!logical_roots || !bound_roots || !placed_roots || !logical_bindings || !target_bindings)
     goto cleanup;
 
   for (int i = 0; i < inst->n_entrypoints; i++)
     logical_roots[i] = inst->entrypoints[i].logical_sink;
-  if (instance_bind_named_values(
-          inst, logical_roots, inst->n_entrypoints, bound_roots
-      ) != 0)
+  if (instance_bind_named_values(inst, logical_roots, inst->n_entrypoints, bound_roots) != 0)
     goto cleanup;
   for (int i = 0; i < inst->n_bufs; i++) {
     logical_bindings[i] = inst->bufs[i].logical_buffer;
-    target_bindings[i] =
-        instance_binding_on_device(inst->ctx, logical_bindings[i], device);
+    target_bindings[i] = instance_binding_on_device(inst->ctx, logical_bindings[i], device);
     if (!target_bindings[i]) goto cleanup;
   }
 
   if (poly_place_roots(
-          inst->ctx, bound_roots, inst->n_entrypoints, logical_bindings,
-          target_bindings, inst->n_bufs, placed_roots
+          inst->ctx, bound_roots, inst->n_entrypoints, logical_bindings, target_bindings,
+          inst->n_bufs, placed_roots
       ) != 0)
     goto cleanup;
 
@@ -3936,9 +3800,7 @@ int poly_instance_set_device_map(
     for (int j = 0; j < inst->modules[i].n_inputs; j++)
       placement_inputs[place_off++] = inst->modules[i].logical_inputs[j];
   }
-  if (instance_bind_named_values(
-          inst, placement_inputs, n_place_nodes, placement_values
-      ) != 0)
+  if (instance_bind_named_values(inst, placement_inputs, n_place_nodes, placement_values) != 0)
     goto cleanup;
   place_off = 0;
   for (int i = 0; i < inst->n_entrypoints; i++)
@@ -3973,9 +3835,8 @@ int poly_instance_set_device_map(
     if (!entry_used[i]) goto cleanup;
 
   if (poly_place_module_map(
-          inst->ctx, logical_roots, inst->n_entrypoints,
-          logical_bindings, inst->n_bufs, modules, inst->n_modules,
-          target_bindings, placed_roots
+          inst->ctx, logical_roots, inst->n_entrypoints, logical_bindings, inst->n_bufs, modules,
+          inst->n_modules, target_bindings, placed_roots
       ) != 0)
     goto cleanup;
 
@@ -4089,8 +3950,7 @@ static int prepare_instance_io(
     for (int required = 0; required < entry->n_inputs; required++) {
       int seen = 0;
       for (int i = 0; i < n_io; i++)
-        if (io[i].name && strcmp(io[i].name, entry->inputs[required]) == 0 && io[i].data)
-          seen++;
+        if (io[i].name && strcmp(io[i].name, entry->inputs[required]) == 0 && io[i].data) seen++;
       if (seen != 1) {
         fprintf(
             stderr, "poly_instance_call: entrypoint '%s' requires input '%s' exactly once\n",
@@ -4181,15 +4041,12 @@ static int run_instance_sink(
    * shared tinygrad-style concrete-buffer -> shaped-PARAM call boundary before
    * rangeify. */
   PolyLinearEntry local = {0};
-  PolyLinearEntry *executable = cached_executable && cached_executable->linear
-                                    ? cached_executable
-                                    : &local;
+  PolyLinearEntry *executable =
+      cached_executable && cached_executable->linear ? cached_executable : &local;
   if (!executable->linear) {
     PolyVarBinding *var_bindings = NULL;
     int n_var_bindings = 0;
-    PolyUOp *linear = poly_linear_effect_sink(
-        inst->ctx, sink, &var_bindings, &n_var_bindings
-    );
+    PolyUOp *linear = poly_linear_effect_sink(inst->ctx, sink, &var_bindings, &n_var_bindings);
     PolyUOp *compiled = linear ? poly_compile_linear(inst->ctx, linear, -1) : NULL;
     if (compiled) {
       PolyLinearEntry built = {compiled, var_bindings, n_var_bindings};
@@ -4210,8 +4067,8 @@ static int run_instance_sink(
   int ret = -1;
   if (executable->linear)
     ret = poly_run_linear(
-        inst->ctx, executable->linear, executable->var_bindings,
-        executable->n_var_bindings, NULL, 0, true, true, false
+        inst->ctx, executable->linear, executable->var_bindings, executable->n_var_bindings, NULL,
+        0, true, true, false
     );
   if (!cached_executable) cached_executable_clear(&local);
   if (timing) {
@@ -4279,8 +4136,7 @@ const char *poly_instance_entrypoint_output_name(
     int output_index
 ) {
   int idx = inst && entrypoint ? find_entrypoint(inst, entrypoint) : -1;
-  if (idx < 0 || output_index < 0 || output_index >= inst->entrypoints[idx].n_outputs)
-    return NULL;
+  if (idx < 0 || output_index < 0 || output_index >= inst->entrypoints[idx].n_outputs) return NULL;
   return inst->entrypoints[idx].outputs[output_index];
 }
 
@@ -4301,7 +4157,9 @@ int poly_instance_set_optimizer(
     float eps,
     float weight_decay
 ) {
-  return poly_instance_set_optimizer_ex(inst, kind, lr, beta1, beta2, eps, weight_decay, 0.0f, false, false);
+  return poly_instance_set_optimizer_ex(
+      inst, kind, lr, beta1, beta2, eps, weight_decay, 0.0f, false, false
+  );
 }
 
 int poly_instance_set_optimizer_ex(
@@ -4590,8 +4448,10 @@ static int build_train_graph(PolyInstance *inst, TrainState **out) {
   bool sgd_momentum = (o->kind == POLY_OPTIM_SGD && o->momentum > 0.0f);
   bool has_m_bufs = is_adam || sgd_momentum;
   int n_sink_srcs = 1 + np; /* loss_store + param assigns */
-  if (is_adam) n_sink_srcs += 2 * np + 2; /* + m/v assigns + b1_t/b2_t assigns */
-  else if (sgd_momentum) n_sink_srcs += np; /* + momentum assigns */
+  if (is_adam)
+    n_sink_srcs += 2 * np + 2; /* + m/v assigns + b1_t/b2_t assigns */
+  else if (sgd_momentum)
+    n_sink_srcs += np; /* + momentum assigns */
 
   PolyUOp **sink_srcs = calloc((size_t)n_sink_srcs, sizeof(PolyUOp *));
   if (!sink_srcs) {
@@ -4646,10 +4506,12 @@ static int build_train_graph(PolyInstance *inst, TrainState **out) {
       char *m_name = optimizer_param_state_name("adam", "m", pb->name);
       char *v_name = optimizer_param_state_name("adam", "v", pb->name);
       if (!m_name || !v_name ||
-          ensure_optimizer_state_buffer(inst, m_name, opt_shape, opt_ndim, false, 0.0f, &ts->m_bufs[i]) !=
-              0 ||
-          ensure_optimizer_state_buffer(inst, v_name, opt_shape, opt_ndim, false, 0.0f, &ts->v_bufs[i]) !=
-              0) {
+          ensure_optimizer_state_buffer(
+              inst, m_name, opt_shape, opt_ndim, false, 0.0f, &ts->m_bufs[i]
+          ) != 0 ||
+          ensure_optimizer_state_buffer(
+              inst, v_name, opt_shape, opt_ndim, false, 0.0f, &ts->v_bufs[i]
+          ) != 0) {
         free(m_name);
         free(v_name);
         free(sink_srcs);
@@ -4666,9 +4528,9 @@ static int build_train_graph(PolyInstance *inst, TrainState **out) {
       int opt_ndim = pb->ndim;
       if (opt_ndim > 0) memcpy(opt_shape, pb->shape, (size_t)opt_ndim * sizeof(int64_t));
       char *b_name = optimizer_param_state_name("sgd", "b", pb->name);
-      if (!b_name ||
-          ensure_optimizer_state_buffer(inst, b_name, opt_shape, opt_ndim, false, 0.0f, &ts->m_bufs[i]) !=
-              0) {
+      if (!b_name || ensure_optimizer_state_buffer(
+                         inst, b_name, opt_shape, opt_ndim, false, 0.0f, &ts->m_bufs[i]
+                     ) != 0) {
         free(b_name);
         free(sink_srcs);
         train_free(ts, np);
@@ -4780,9 +4642,8 @@ static int ensure_train_graph(PolyInstance *inst, int loss_ep_idx) {
   if (ensure_vag_graph(inst, loss_ep_idx) != 0) return -1;
 
   int old_n_bufs = inst->n_bufs;
-  NamedBuf *candidate_bufs = old_n_bufs > 0
-                                 ? malloc((size_t)old_n_bufs * sizeof(*candidate_bufs))
-                                 : NULL;
+  NamedBuf *candidate_bufs =
+      old_n_bufs > 0 ? malloc((size_t)old_n_bufs * sizeof(*candidate_bufs)) : NULL;
   if (old_n_bufs > 0 && !candidate_bufs) return -1;
   if (old_n_bufs > 0)
     memcpy(candidate_bufs, inst->bufs, (size_t)old_n_bufs * sizeof(*candidate_bufs));
@@ -4807,9 +4668,7 @@ static int ensure_train_graph(PolyInstance *inst, int loss_ep_idx) {
 fail:
   instance_discard_prepared_residency_roots(inst->ctx, &prepared_roots);
   if (candidate.bufs)
-    discard_appended_named_buffers(
-        inst->ctx, candidate.bufs, old_n_bufs, candidate.n_bufs
-    );
+    discard_appended_named_buffers(inst->ctx, candidate.bufs, old_n_bufs, candidate.n_bufs);
   free(candidate.bufs);
   train_free(train, inst->n_params);
   return -1;
@@ -4915,9 +4774,8 @@ static PolyTensor *register_inline_tensor(
   for (int i = 0; i < *n_aliases; i++) {
     if (aliases[i].child_buf != b->logical_buffer) continue;
     PolyTensor *aliased = aliases[i].parent_tensor;
-    int rc = b->role == POLY_ROLE_PARAM
-                 ? poly_instance_state(parent, full, aliased, b->flags)
-                 : POLY_STATUS_OK;
+    int rc = b->role == POLY_ROLE_PARAM ? poly_instance_state(parent, full, aliased, b->flags)
+                                        : POLY_STATUS_OK;
     free(full);
     return rc == POLY_STATUS_OK ? aliased : NULL;
   }
@@ -4927,9 +4785,7 @@ static PolyTensor *register_inline_tensor(
   if (!poly_device_can_execute(device)) device = poly_device_default();
   switch (b->role) {
   case POLY_ROLE_PARAM:
-    ret = poly_instance_param(
-        parent, full, b->logical_value->dtype, b->shape, b->ndim
-    );
+    ret = poly_instance_param(parent, full, b->logical_value->dtype, b->shape, b->ndim);
     if (ret) poly_tensor_set_requires_grad(ret, trainable);
     break;
   case POLY_ROLE_INPUT:
@@ -4938,17 +4794,11 @@ static PolyTensor *register_inline_tensor(
      * second ABI input would make the composed entrypoint incomplete. */
     break;
   case POLY_ROLE_OUTPUT:
-    ret = poly_tensor_empty(
-        parent->ctx, b->logical_value->dtype, b->shape, b->ndim,
-        device
-    );
+    ret = poly_tensor_empty(parent->ctx, b->logical_value->dtype, b->shape, b->ndim, device);
     break;
   case POLY_ROLE_AUX:
   default:
-    ret = poly_tensor_empty(
-        parent->ctx, b->logical_value->dtype, b->shape, b->ndim,
-        device
-    );
+    ret = poly_tensor_empty(parent->ctx, b->logical_value->dtype, b->shape, b->ndim, device);
     if (ret && poly_instance_aux(parent, full, ret, b->flags) != POLY_STATUS_OK) ret = NULL;
     break;
   }
@@ -4983,11 +4833,10 @@ static PolyUOp *clone_uop_into_ctx(PolyCtx *dst_ctx, PolyMap *memo, PolyUOp *u) 
 
   /* Preserve nonzero tags when cloning cross-ctx UOps so BUFFER uniqueness and
    * imported UNIQUE-like identities remain stable inside the destination ctx. */
-  PolyUOp *cloned = (u->tag || u->tag_arg.kind != POLY_ARG_NONE)
-                        ? poly_uop_tagged_arg(
-                              dst_ctx, u->op, u->dtype, src, u->n_src, u->arg, u->tag, u->tag_arg
-                          )
-                        : poly_uop(dst_ctx, u->op, u->dtype, src, u->n_src, u->arg);
+  PolyUOp *cloned =
+      (u->tag || u->tag_arg.kind != POLY_ARG_NONE)
+          ? poly_uop_tagged_arg(dst_ctx, u->op, u->dtype, src, u->n_src, u->arg, u->tag, u->tag_arg)
+          : poly_uop(dst_ctx, u->op, u->dtype, src, u->n_src, u->arg);
   if (src != stack_src) free(src);
   if (cloned) poly_map_set(memo, poly_ptr_hash(u), u, cloned, poly_ptr_eq);
   return cloned;
@@ -5016,8 +4865,8 @@ int poly_instance_inline_entrypoint(
     int *out_n_outputs
 ) {
   if (out_n_outputs) *out_n_outputs = 0;
-  if (!parent || parent->stage != POLY_INSTANCE_BUILDING || !parent->ctx || !child ||
-      !entrypoint || !outputs || max_outputs < 0)
+  if (!parent || parent->stage != POLY_INSTANCE_BUILDING || !parent->ctx || !child || !entrypoint ||
+      !outputs || max_outputs < 0)
     return -1;
   PolyCtx *dst_ctx = parent->ctx;
   int ep_idx = find_entrypoint(child, entrypoint);
@@ -5028,8 +4877,8 @@ int poly_instance_inline_entrypoint(
    * which has already crossed explicit placement.  Never substitute the
    * unplaced logical root as executable state merely because capture is absent. */
   bool use_capture = child->has_physical_capture;
-  PolyUOp *physical_sink = use_capture ? child->entrypoints[ep_idx].capture_sink
-                                       : child->entrypoints[ep_idx].sink;
+  PolyUOp *physical_sink =
+      use_capture ? child->entrypoints[ep_idx].capture_sink : child->entrypoints[ep_idx].sink;
   if (!logical_sink || logical_sink->op != POLY_OP_SINK || !physical_sink ||
       physical_sink->op != POLY_OP_SINK)
     return -1;
@@ -5057,17 +4906,16 @@ int poly_instance_inline_entrypoint(
     const PolyInstanceInlineBinding *binding = find_inline_binding(bindings, n_bindings, b->name);
     PolyTensor *replacement = binding ? binding->tensor : NULL;
     if (!replacement)
-      replacement = register_inline_tensor(
-          parent, b, prefix, trainable, aliases, &n_aliases, child->n_bufs
-      );
+      replacement =
+          register_inline_tensor(parent, b, prefix, trainable, aliases, &n_aliases, child->n_bufs);
     if (!replacement || !replacement->uop_logical || !replacement->uop_physical) goto done;
     poly_map_set(
-        logical_memo, poly_ptr_hash(logical_source), logical_source,
-        replacement->uop_logical, poly_ptr_eq
+        logical_memo, poly_ptr_hash(logical_source), logical_source, replacement->uop_logical,
+        poly_ptr_eq
     );
     poly_map_set(
-        physical_memo, poly_ptr_hash(physical_buffer), physical_buffer,
-        replacement->uop_physical, poly_ptr_eq
+        physical_memo, poly_ptr_hash(physical_buffer), physical_buffer, replacement->uop_physical,
+        poly_ptr_eq
     );
   }
 
@@ -5087,8 +4935,7 @@ int poly_instance_inline_entrypoint(
     PolyDevice device = poly_ctx_get_preferred_device(dst_ctx);
     if (!poly_device_can_execute(device)) device = poly_device_default();
     PolyTensor *value = poly_tensor_create_with_roots(
-        dst_ctx, logical_value, physical_value, POLY_TENSOR_VALUE,
-        device
+        dst_ctx, logical_value, physical_value, POLY_TENSOR_VALUE, device
     );
     if (!value) goto done;
     value->provenance = POLY_TENSOR_PROVENANCE_COMPUTED;

@@ -151,12 +151,7 @@ static int poly_jit_append_var_binding(
   return 0;
 }
 
-static int append_unique_uop(
-    PolyUOp ***items,
-    int *n_items,
-    int *capacity,
-    PolyUOp *item
-) {
+static int append_unique_uop(PolyUOp ***items, int *n_items, int *capacity, PolyUOp *item) {
   for (int i = 0; i < *n_items; i++)
     if ((*items)[i] == item) return 0;
   if (*n_items >= *capacity) {
@@ -194,24 +189,16 @@ PolyUOp *poly_create_graph_call(PolyCtx *ctx, PolyUOp **calls, int n_calls) {
     }
   }
 
-  PolyUOp *nested = poly_uop(
-      ctx, POLY_OP_LINEAR, POLY_VOID, calls, n_calls, poly_arg_none()
-  );
-  PolyUOp *function = nested
-                          ? poly_uop1(
-                                ctx, POLY_OP_CUSTOM_FUNCTION, POLY_VOID, nested,
-                                poly_arg_str("graph")
-                            )
-                          : NULL;
-  PolyUOp **src = function
-                      ? malloc((size_t)(n_params + 1) * sizeof(*src))
-                      : NULL;
+  PolyUOp *nested = poly_uop(ctx, POLY_OP_LINEAR, POLY_VOID, calls, n_calls, poly_arg_none());
+  PolyUOp *function =
+      nested ? poly_uop1(ctx, POLY_OP_CUSTOM_FUNCTION, POLY_VOID, nested, poly_arg_str("graph"))
+             : NULL;
+  PolyUOp **src = function ? malloc((size_t)(n_params + 1) * sizeof(*src)) : NULL;
   if (!src) goto fail;
   src[0] = function;
-  for (int i = 0; i < n_params; i++) src[i + 1] = params[i];
-  PolyUOp *ret = poly_uop(
-      ctx, POLY_OP_CALL, POLY_VOID, src, n_params + 1, poly_arg_none()
-  );
+  for (int i = 0; i < n_params; i++)
+    src[i + 1] = params[i];
+  PolyUOp *ret = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, src, n_params + 1, poly_arg_none());
   free(src);
   free(params);
   return ret;
@@ -225,8 +212,8 @@ static bool graph_cuda_device(PolyUOp *device) {
   if (!device || device->op != POLY_OP_DEVICE) return false;
   if (device->arg.kind == POLY_ARG_STRING)
     return device->arg.str && strncmp(device->arg.str, "CUDA", 4) == 0;
-  if (device->arg.kind != POLY_ARG_STRING_TUPLE ||
-      device->arg.string_tuple.n <= 0 || !device->arg.string_tuple.vals)
+  if (device->arg.kind != POLY_ARG_STRING_TUPLE || device->arg.string_tuple.n <= 0 ||
+      !device->arg.string_tuple.vals)
     return false;
   for (int i = 0; i < device->arg.string_tuple.n; i++)
     if (!device->arg.string_tuple.vals[i] ||
@@ -238,8 +225,7 @@ static bool graph_cuda_device(PolyUOp *device) {
 /* Current CUDAGraph is a MultiGraphRunner: PROGRAM and same-runtime COPY
  * calls are graphable when every concrete argument belongs to CUDA. */
 static bool graph_cuda_supports_call(PolyCtx *ctx, PolyUOp *call) {
-  if (!ctx || !call || call->op != POLY_OP_CALL || call->n_src < 2 ||
-      !call->src[0] ||
+  if (!ctx || !call || call->op != POLY_OP_CALL || call->n_src < 2 || !call->src[0] ||
       (call->src[0]->op != POLY_OP_PROGRAM && call->src[0]->op != POLY_OP_COPY))
     return false;
   bool saw_device = false;
@@ -273,23 +259,15 @@ static int flush_graph_batch(
 
 /* Current Tinygrad engine/jit.py:graph_split_rewrite for the implemented
  * CUDAGraph runtime. */
-static PolyUOp *poly_graph_split_rewrite(
-    PolyCtx *ctx,
-    PolyUOp *linear,
-    int max_batch_size
-) {
+static PolyUOp *poly_graph_split_rewrite(PolyCtx *ctx, PolyUOp *linear, int max_batch_size) {
   if (!ctx || !linear || linear->op != POLY_OP_LINEAR) return NULL;
 #ifdef POLY_HAS_CUDA
   if (!poly_cuda_graph_available()) return linear;
 #else
   return linear;
 #endif
-  PolyUOp **out = malloc(
-      (size_t)(linear->n_src > 0 ? linear->n_src : 1) * sizeof(*out)
-  );
-  PolyUOp **batch = malloc(
-      (size_t)(linear->n_src > 0 ? linear->n_src : 1) * sizeof(*batch)
-  );
+  PolyUOp **out = malloc((size_t)(linear->n_src > 0 ? linear->n_src : 1) * sizeof(*out));
+  PolyUOp **batch = malloc((size_t)(linear->n_src > 0 ? linear->n_src : 1) * sizeof(*batch));
   if (!out || !batch) {
     free(out);
     free(batch);
@@ -301,19 +279,17 @@ static PolyUOp *poly_graph_split_rewrite(
     bool graphable = graph_cuda_supports_call(ctx, call);
     bool extend = graphable && (max_batch_size == 0 || n_batch < max_batch_size);
     if (!extend && n_batch > 0) {
-      if (flush_graph_batch(ctx, batch, n_batch, out, &n_out, &max_batch_size) != 0)
-        goto fail;
+      if (flush_graph_batch(ctx, batch, n_batch, out, &n_out, &max_batch_size) != 0) goto fail;
       n_batch = 0;
     }
-    if (graphable) batch[n_batch++] = call;
-    else out[n_out++] = call;
+    if (graphable)
+      batch[n_batch++] = call;
+    else
+      out[n_out++] = call;
   }
-  if (n_batch > 0 &&
-      flush_graph_batch(ctx, batch, n_batch, out, &n_out, &max_batch_size) != 0)
+  if (n_batch > 0 && flush_graph_batch(ctx, batch, n_batch, out, &n_out, &max_batch_size) != 0)
     goto fail;
-  PolyUOp *ret = poly_uop(
-      ctx, POLY_OP_LINEAR, POLY_VOID, out, n_out, linear->arg
-  );
+  PolyUOp *ret = poly_uop(ctx, POLY_OP_LINEAR, POLY_VOID, out, n_out, linear->arg);
   free(out);
   free(batch);
   return ret;
@@ -369,9 +345,7 @@ static int poly_jit_prepare_input_view(
     PolyUOp *value_uop = u->src[1]->src[1];
     int64_t value = 0;
     if (poly_uop_const_i64(value_uop, &value) != 0 ||
-        poly_jit_append_var_binding(
-            &bindings, &n_bindings, &cap_bindings, var, value
-        ) != 0) {
+        poly_jit_append_var_binding(&bindings, &n_bindings, &cap_bindings, var, value) != 0) {
       rc = -1;
       break;
     }
@@ -514,9 +488,7 @@ static int poly_prune_linear(
   for (int i = 0; i < linear->n_src; i++) {
     PolyUOp **call_bufs = NULL;
     int n_call_bufs = 0, cap_call_bufs = 0;
-    if (!poly_call_collect_bufs(
-            linear->src[i], &call_bufs, &n_call_bufs, &cap_call_bufs
-        )) {
+    if (!poly_call_collect_bufs(linear->src[i], &call_bufs, &n_call_bufs, &cap_call_bufs)) {
       free(call_bufs);
       goto fail;
     }
@@ -556,17 +528,12 @@ typedef struct {
   bool failed;
 } HeldBuffers;
 
-static void collect_runtime_buffer(
-    const void *key,
-    void *value,
-    void *userdata
-) {
+static void collect_runtime_buffer(const void *key, void *value, void *userdata) {
   (void)value;
   HeldBuffers *held = userdata;
   if (!held || held->failed || !key) return;
-  if (poly_jit_append_unique_buffer(
-          &held->items, &held->count, &held->capacity, (PolyUOp *)key
-      ) < 0)
+  if (poly_jit_append_unique_buffer(&held->items, &held->count, &held->capacity, (PolyUOp *)key) <
+      0)
     held->failed = true;
 }
 
@@ -579,8 +546,8 @@ int poly_jit_collect_held_bufs(
     PolyUOp ***held_out,
     int *n_held_out
 ) {
-  if (!ctx || n_live_tensors < 0 || (n_live_tensors > 0 && !live_tensors) ||
-      !held_out || !n_held_out)
+  if (!ctx || n_live_tensors < 0 || (n_live_tensors > 0 && !live_tensors) || !held_out ||
+      !n_held_out)
     return -1;
   HeldBuffers held = {0};
   poly_map_foreach(ctx->buffers, collect_runtime_buffer, &held);
@@ -595,9 +562,7 @@ int poly_jit_collect_held_bufs(
     }
     for (int j = 0; j < n_topo; j++)
       if (topo[j]->op == POLY_OP_BUFFER &&
-          poly_jit_append_unique_buffer(
-              &held.items, &held.count, &held.capacity, topo[j]
-          ) < 0) {
+          poly_jit_append_unique_buffer(&held.items, &held.count, &held.capacity, topo[j]) < 0) {
         held.failed = true;
         break;
       }
@@ -621,13 +586,10 @@ PolyUOp *poly_jit_lower(
     PolyUOp **input_uops,
     int n_input_uops
 ) {
-  if (!ctx || !linear || linear->op != POLY_OP_LINEAR || n_held_bufs < 0 ||
-      n_input_uops < 0 || (n_held_bufs > 0 && !held_bufs) ||
-      (n_input_uops > 0 && !input_uops))
+  if (!ctx || !linear || linear->op != POLY_OP_LINEAR || n_held_bufs < 0 || n_input_uops < 0 ||
+      (n_held_bufs > 0 && !held_bufs) || (n_input_uops > 0 && !input_uops))
     return NULL;
-  PolyUOp **params = n_input_uops > 0
-                         ? malloc((size_t)n_input_uops * sizeof(*params))
-                         : NULL;
+  PolyUOp **params = n_input_uops > 0 ? malloc((size_t)n_input_uops * sizeof(*params)) : NULL;
   if (n_input_uops > 0 && !params) return NULL;
   for (int i = 0; i < n_input_uops; i++) {
     params[i] = poly_uop_param(ctx, i, input_uops[i]);
@@ -637,18 +599,14 @@ PolyUOp *poly_jit_lower(
     }
   }
   PolyUOp *parameterized = n_input_uops > 0
-                               ? poly_uop_substitute(
-                                     ctx, linear, input_uops, params, n_input_uops
-                                 )
+                               ? poly_uop_substitute(ctx, linear, input_uops, params, n_input_uops)
                                : linear;
   free(params);
   PolyUOp *planned = poly_memory_plan_rewrite(ctx, parameterized, held_bufs, n_held_bufs);
   int beam = poly_getenv_int("JITBEAM", poly_getenv_int("BEAM", 0));
   PolyUOp *compiled = planned ? poly_compile_linear(ctx, planned, beam) : NULL;
   if (!compiled || poly_getenv_int("JIT", 1) >= 2) return compiled;
-  return poly_graph_split_rewrite(
-      ctx, compiled, poly_getenv_int("JIT_BATCH_SIZE", 32)
-  );
+  return poly_graph_split_rewrite(ctx, compiled, poly_getenv_int("JIT_BATCH_SIZE", 32));
 }
 
 static int poly_jit_build_captured_linear(
@@ -669,15 +627,11 @@ static int poly_jit_build_captured_linear(
   int at = 0;
   for (int i = 0; i < jit->n_linears; i++) {
     if (jit->linears[i]->n_src > 0)
-      memcpy(
-          &calls[at], jit->linears[i]->src,
-          (size_t)jit->linears[i]->n_src * sizeof(*calls)
-      );
+      memcpy(&calls[at], jit->linears[i]->src, (size_t)jit->linears[i]->n_src * sizeof(*calls));
     at += jit->linears[i]->n_src;
   }
-  PolyUOp *big_linear = poly_uop(
-      jit->ctx, POLY_OP_LINEAR, POLY_VOID, calls, n_calls, poly_arg_none()
-  );
+  PolyUOp *big_linear =
+      poly_uop(jit->ctx, POLY_OP_LINEAR, POLY_VOID, calls, n_calls, poly_arg_none());
   free(calls);
   if (!big_linear) return -1;
 
@@ -688,8 +642,7 @@ static int poly_jit_build_captured_linear(
         ) != 0)
       return -1;
     if (poly_run_linear(
-            jit->ctx, onetime, jit->var_bindings, jit->n_var_bindings,
-            NULL, 0, true, false, false
+            jit->ctx, onetime, jit->var_bindings, jit->n_var_bindings, NULL, 0, true, false, false
         ) != 0)
       return -1;
     big_linear = kept;
@@ -697,13 +650,10 @@ static int poly_jit_build_captured_linear(
 
   PolyUOp **held = NULL;
   int n_held = 0;
-  if (poly_jit_collect_held_bufs(
-          jit->ctx, live_tensors, n_live_tensors, &held, &n_held
-      ) != 0)
+  if (poly_jit_collect_held_bufs(jit->ctx, live_tensors, n_live_tensors, &held, &n_held) != 0)
     return -1;
-  jit->captured_linear = poly_jit_lower(
-      jit->ctx, big_linear, held, n_held, jit->input_buffers, jit->n_inputs
-  );
+  jit->captured_linear =
+      poly_jit_lower(jit->ctx, big_linear, held, n_held, jit->input_buffers, jit->n_inputs);
   free(held);
   if (!jit->captured_linear) return -1;
   if (poly_uop_retain(jit->ctx, jit->captured_linear) != 0) return -1;
@@ -782,11 +732,7 @@ int poly_jit_begin_capture(PolyJit *jit, PolyTensor **inputs, int n_inputs) {
   return 0;
 }
 
-int poly_jit_end_capture(
-    PolyJit *jit,
-    PolyTensor **live_tensors,
-    int n_live_tensors
-) {
+int poly_jit_end_capture(PolyJit *jit, PolyTensor **live_tensors, int n_live_tensors) {
   if (!jit || !jit->ctx || !jit->capturing || n_live_tensors < 0 ||
       (n_live_tensors > 0 && !live_tensors))
     return -1;
@@ -836,8 +782,8 @@ int poly_jit_record_linear(
     PolyVarBinding *var_bindings,
     int n_var_bindings
 ) {
-  if (!jit || !jit->capturing || !linear || linear->op != POLY_OP_LINEAR ||
-      n_var_bindings < 0 || (n_var_bindings > 0 && !var_bindings))
+  if (!jit || !jit->capturing || !linear || linear->op != POLY_OP_LINEAR || n_var_bindings < 0 ||
+      (n_var_bindings > 0 && !var_bindings))
     return -1;
   if (jit->n_linears >= jit->linears_cap) {
     int new_cap = jit->linears_cap ? jit->linears_cap * 2 : 4;
@@ -848,8 +794,8 @@ int poly_jit_record_linear(
   }
   for (int i = 0; i < n_var_bindings; i++)
     if (poly_jit_append_var_binding(
-            &jit->var_bindings, &jit->n_var_bindings, &jit->var_bindings_cap,
-            var_bindings[i].var, var_bindings[i].value
+            &jit->var_bindings, &jit->n_var_bindings, &jit->var_bindings_cap, var_bindings[i].var,
+            var_bindings[i].value
         ) != 0)
       return -1;
   /* Current _TinyJit.add_linear keeps every LINEAR live until capture creates
@@ -886,19 +832,18 @@ static int poly_jit_run_captured_linear(
   int n_effective = 0, cap_effective = 0;
   for (int i = 0; i < jit->n_var_bindings; i++)
     if (poly_jit_override_var_binding(
-            &effective, &n_effective, &cap_effective,
-            jit->var_bindings[i].var, jit->var_bindings[i].value
+            &effective, &n_effective, &cap_effective, jit->var_bindings[i].var,
+            jit->var_bindings[i].value
         ) != 0)
       goto fail;
   for (int i = 0; i < n_var_bindings; i++)
     if (poly_jit_override_var_binding(
-            &effective, &n_effective, &cap_effective,
-            var_bindings[i].var, var_bindings[i].value
+            &effective, &n_effective, &cap_effective, var_bindings[i].var, var_bindings[i].value
         ) != 0)
       goto fail;
   int rc = poly_run_linear(
-      jit->ctx, jit->captured_linear, effective, n_effective,
-      current_inputs, jit->n_inputs, true, true, false
+      jit->ctx, jit->captured_linear, effective, n_effective, current_inputs, jit->n_inputs, true,
+      true, false
   );
   free(effective);
   return rc;

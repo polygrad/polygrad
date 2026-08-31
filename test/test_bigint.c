@@ -104,11 +104,7 @@ TEST(bigint, fixed_width_truncation_matches_pinned_exec_alu) {
   PASS();
 }
 
-static PolyUOp *bigint_const(
-    PolyCtx *ctx,
-    PolyDType dtype,
-    const char *decimal
-) {
+static PolyUOp *bigint_const(PolyCtx *ctx, PolyDType dtype, const char *decimal) {
   PolyInt value = {0};
   if (!bigint_from(&value, decimal)) return NULL;
   PolyUOp *out = poly_uop0(ctx, POLY_OP_CONST, dtype, poly_int_as_arg(&value));
@@ -117,8 +113,7 @@ static PolyUOp *bigint_const(
 }
 
 static PolyUOp *stack2(PolyCtx *ctx, PolyDType dtype, int64_t value) {
-  PolyUOp *lane =
-      poly_uop0(ctx, POLY_OP_CONST, dtype, poly_arg_int(value));
+  PolyUOp *lane = poly_uop0(ctx, POLY_OP_CONST, dtype, poly_arg_int(value));
   PolyUOp *src[2] = {lane, lane};
   return poly_uop(ctx, POLY_OP_STACK, dtype, src, 2, poly_arg_none());
 }
@@ -137,16 +132,12 @@ TEST(bigint, uop_identity_and_vector_carriers_match_pinned_tinygrad) {
   uint32_t noncanonical_small[] = {42, 0};
   uint32_t noncanonical_zero[] = {0};
   ASSERT_TRUE(
-      poly_uop0(
-          ctx, POLY_OP_CONST, POLY_WEAKINT,
-          poly_arg_bigint(1, noncanonical_small, 2)
-      ) == poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(42))
+      poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_bigint(1, noncanonical_small, 2)) ==
+      poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(42))
   );
   ASSERT_TRUE(
-      poly_uop0(
-          ctx, POLY_OP_CONST, POLY_WEAKINT,
-          poly_arg_bigint(-1, noncanonical_zero, 1)
-      ) == poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(0))
+      poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_bigint(-1, noncanonical_zero, 1)) ==
+      poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(0))
   );
 
   PolyUOp *product = poly_graph_rewrite(
@@ -171,10 +162,7 @@ TEST(bigint, uop_identity_and_vector_carriers_match_pinned_tinygrad) {
   );
   PolyUOp *shifted = poly_graph_rewrite(
       ctx,
-      poly_uop2(
-          ctx, POLY_OP_SHR, POLY_UINT64, sum, stack2(ctx, POLY_UINT64, 1),
-          poly_arg_none()
-      ),
+      poly_uop2(ctx, POLY_OP_SHR, POLY_UINT64, sum, stack2(ctx, POLY_UINT64, 1), poly_arg_none()),
       poly_symbolic_simple()
   );
   ASSERT_NOT_NULL(shifted);
@@ -189,8 +177,7 @@ TEST(bigint, uop_identity_and_vector_carriers_match_pinned_tinygrad) {
       ctx,
       poly_uop2(
           ctx, POLY_OP_ADD, POLY_WEAKINT, huge,
-          poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(7)),
-          poly_arg_none()
+          poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(7)), poly_arg_none()
       ),
       poly_symbolic_simple()
   );

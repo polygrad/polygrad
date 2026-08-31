@@ -66,7 +66,7 @@ struct PolyCtx {
   struct {
     const char *name;
     PolyUOp *sink;
-  } *ep;
+  } * ep;
   int n_ep;
   int ep_cap;
   int32_t next_buf_tag;

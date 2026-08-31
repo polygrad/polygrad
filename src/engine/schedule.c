@@ -191,9 +191,8 @@ static int poly_call_param_index_for_identity(PolyUOp *call, const PolyUOp *iden
   if (identity->op == POLY_OP_PARAM &&
       (identity->arg.kind == POLY_ARG_INT ||
        (identity->arg.kind == POLY_ARG_PARAM && identity->arg.param))) {
-    int idx = identity->arg.kind == POLY_ARG_INT
-                  ? (int)identity->arg.i
-                  : (int)identity->arg.param->slot;
+    int idx =
+        identity->arg.kind == POLY_ARG_INT ? (int)identity->arg.i : (int)identity->arg.param->slot;
     return (idx >= 0 && idx < n_args) ? idx : -1;
   }
   for (int i = 0; i < n_args; i++) {
@@ -208,15 +207,11 @@ static void poly_call_mark_access_param(PolyUOp *call, PolyUOp *ptr, bool *mask,
   /* Pinned ProgramInfo.from_sink reads ParamArg.slot for shaped function
    * PARAMs as well as the lowered integer-slot PARAM form
    * (tinygrad/uop/ops.py:1127-1152). */
-  if (ptr->op == POLY_OP_CAST && ptr->n_src == 1 && ptr->src[0] &&
-      ptr->src[0]->op == POLY_OP_INDEX)
+  if (ptr->op == POLY_OP_CAST && ptr->n_src == 1 && ptr->src[0] && ptr->src[0]->op == POLY_OP_INDEX)
     ptr = ptr->src[0];
   if (ptr->op == POLY_OP_PARAM &&
-      (ptr->arg.kind == POLY_ARG_INT ||
-       (ptr->arg.kind == POLY_ARG_PARAM && ptr->arg.param))) {
-    int idx = ptr->arg.kind == POLY_ARG_INT
-                  ? (int)ptr->arg.i
-                  : (int)ptr->arg.param->slot;
+      (ptr->arg.kind == POLY_ARG_INT || (ptr->arg.kind == POLY_ARG_PARAM && ptr->arg.param))) {
+    int idx = ptr->arg.kind == POLY_ARG_INT ? (int)ptr->arg.i : (int)ptr->arg.param->slot;
     if (idx >= 0 && idx < n_args) mask[idx] = true;
     return;
   }
@@ -271,8 +266,7 @@ const PolyProgramInfo *poly_program_info(PolyCtx *ctx, PolyUOp *program) {
 /* Current Tinygrad stores estimates on PROGRAM.src[0].arg KernelInfo. */
 static const PolyEstimates *poly_program_estimates(PolyUOp *program) {
   PolyUOp *sink = poly_program_kernel_body(program);
-  return sink && sink->op == POLY_OP_SINK &&
-                 sink->arg.kind == POLY_ARG_KERNEL_INFO &&
+  return sink && sink->op == POLY_OP_SINK && sink->arg.kind == POLY_ARG_KERNEL_INFO &&
                  sink->arg.kernel_info
              ? sink->arg.kernel_info->estimates
              : NULL;
@@ -285,8 +279,7 @@ static PolyUOp *estimate_const(PolyCtx *ctx, int64_t value) {
 static PolyUOp *estimate_i64(PolyCtx *ctx, PolyUOp *value) {
   if (!ctx || !value) return NULL;
   PolyDType scalar = value->dtype;
-  if (poly_dtype_eq(scalar, POLY_INT64))
-    return value;
+  if (poly_dtype_eq(scalar, POLY_INT64)) return value;
   return poly_uop1(ctx, POLY_OP_CAST, POLY_INT64, value, poly_arg_none());
 }
 
@@ -508,8 +501,7 @@ int poly_estimates_from_uops(
       if (!mults) rc = -1;
       continue;
     }
-    if (poly_uop_is_alu_param(u) && poly_uop_expr(u) &&
-        strcmp(poly_uop_expr(u), "core_id") == 0) {
+    if (poly_uop_is_alu_param(u) && poly_uop_expr(u) && strcmp(poly_uop_expr(u), "core_id") == 0) {
       int64_t cores_count = 0;
       if (__builtin_add_overflow(u->arg.param->max_val, INT64_C(1), &cores_count) ||
           cores_count < 0) {
@@ -524,27 +516,23 @@ int poly_estimates_from_uops(
 
     PolyAddrSpace addrspace = POLY_ADDR_GLOBAL;
     bool has_addrspace = u->n_src > 0 && poly_uop_addrspace(u->src[0], &addrspace);
-    if (u->op == POLY_OP_LOAD && u->n_src > 0 &&
-        (!has_addrspace || addrspace != POLY_ADDR_REG)) {
+    if (u->op == POLY_OP_LOAD && u->n_src > 0 && (!has_addrspace || addrspace != POLY_ADDR_REG)) {
       int64_t bytes = 0;
       PolyUOp *amount =
-          estimate_i64_product(
-              estimate_max_numel(ctx, u), poly_dtype_itemsize(u->dtype), &bytes
-          )
+          estimate_i64_product(estimate_max_numel(ctx, u), poly_dtype_itemsize(u->dtype), &bytes)
               ? estimate_const(ctx, bytes)
               : NULL;
       amount = amount ? estimate_mul(ctx, amount, mults) : NULL;
       lds = amount ? estimate_add(ctx, lds, amount) : NULL;
       if (!lds) rc = -1;
-    } else if (u->op == POLY_OP_STORE && u->n_src > 1 &&
-               (!has_addrspace || addrspace != POLY_ADDR_REG)) {
+    } else if (u->op == POLY_OP_STORE && u->n_src > 1 && (!has_addrspace || addrspace != POLY_ADDR_REG)) {
       int64_t bytes = 0;
-      PolyUOp *amount = estimate_i64_product(
-                            estimate_max_numel(ctx, u),
-                            poly_dtype_itemsize(u->src[1]->dtype), &bytes
-                        )
-                            ? estimate_const(ctx, bytes)
-                            : NULL;
+      PolyUOp *amount =
+          estimate_i64_product(
+              estimate_max_numel(ctx, u), poly_dtype_itemsize(u->src[1]->dtype), &bytes
+          )
+              ? estimate_const(ctx, bytes)
+              : NULL;
       amount = amount ? estimate_mul(ctx, amount, mults) : NULL;
       lds = amount ? estimate_add(ctx, lds, amount) : NULL;
       if (!lds) rc = -1;
@@ -797,9 +785,8 @@ static bool poly_program_info_collect_launch(PolyCtx *ctx, PolyUOp *body, PolyPr
   PolyUOp **topo = poly_toposort_alloc(ctx, body, &n_topo);
   if (!topo) return false;
   if (n_topo > 0) {
-    info->vars = poly_arena_alloc(
-        ctx->arena, (size_t)n_topo * sizeof(PolyUOp *), _Alignof(PolyUOp *)
-    );
+    info->vars =
+        poly_arena_alloc(ctx->arena, (size_t)n_topo * sizeof(PolyUOp *), _Alignof(PolyUOp *));
     if (!info->vars) {
       poly_toposort_free(topo);
       return false;
@@ -809,7 +796,8 @@ static bool poly_program_info_collect_launch(PolyCtx *ctx, PolyUOp *body, PolyPr
     PolyUOp *u = topo[i];
     if (poly_uop_is_alu_param(u)) {
       bool duplicate = false;
-      for (int v = 0; v < info->n_vars; v++) duplicate |= info->vars[v] == u;
+      for (int v = 0; v < info->n_vars; v++)
+        duplicate |= info->vars[v] == u;
       if (!duplicate) info->vars[info->n_vars++] = u;
       if (u->arg.param->name && strcmp(u->arg.param->name, "core_id") == 0) {
         int64_t n = u->arg.param->max_val + 1;
@@ -942,8 +930,7 @@ static PolyUOp *poly_program_from_call_body(
   PolyProgramInfo *info = poly_program_info_build(ctx, call, body, program_name, device);
   if (!info) return NULL;
 
-  PolyUOp *program =
-      poly_uop1(ctx, POLY_OP_PROGRAM, POLY_VOID, body, poly_arg_program_info(info));
+  PolyUOp *program = poly_uop1(ctx, POLY_OP_PROGRAM, POLY_VOID, body, poly_arg_program_info(info));
   if (!program) return NULL;
   return program;
 }
@@ -961,25 +948,25 @@ static PolyUOp *poly_program_with_linear(PolyCtx *ctx, PolyUOp *program, PolyUOp
       linear->op != POLY_OP_LINEAR)
     return NULL;
   PolyUOp *sink = program->src[0];
-  if (!sink || sink->op != POLY_OP_SINK ||
-      sink->arg.kind != POLY_ARG_KERNEL_INFO || !sink->arg.kernel_info)
+  if (!sink || sink->op != POLY_OP_SINK || sink->arg.kind != POLY_ARG_KERNEL_INFO ||
+      !sink->arg.kernel_info)
     return NULL;
   PolyUOp *estimated_sink = sink;
   if (!sink->arg.kernel_info->estimates) {
     PolyEstimates estimates = {0};
-    if (poly_estimates_from_uops(
-            ctx, linear->src, linear->n_src, true, &estimates) != 0)
+    if (poly_estimates_from_uops(ctx, linear->src, linear->n_src, true, &estimates) != 0)
       return NULL;
     PolyKernelInfo kernel_info = *sink->arg.kernel_info;
     kernel_info.estimates = &estimates;
     estimated_sink = sink->tag || sink->tag_arg.kind != POLY_ARG_NONE
                          ? poly_uop_tagged_arg(
-                               ctx, POLY_OP_SINK, sink->dtype, sink->src,
-                               sink->n_src, poly_arg_kernel_info(&kernel_info),
-                               sink->tag, sink->tag_arg)
+                               ctx, POLY_OP_SINK, sink->dtype, sink->src, sink->n_src,
+                               poly_arg_kernel_info(&kernel_info), sink->tag, sink->tag_arg
+                           )
                          : poly_uop(
-                               ctx, POLY_OP_SINK, sink->dtype, sink->src,
-                               sink->n_src, poly_arg_kernel_info(&kernel_info));
+                               ctx, POLY_OP_SINK, sink->dtype, sink->src, sink->n_src,
+                               poly_arg_kernel_info(&kernel_info)
+                           );
     if (!estimated_sink) return NULL;
   }
 
@@ -989,9 +976,8 @@ static PolyUOp *poly_program_with_linear(PolyCtx *ctx, PolyUOp *program, PolyUOp
     uint64_t ops = 0, lds = 0, mem = 0;
     int rc = estimates ? poly_estimates_infer(estimates, NULL, 0, &ops, &lds, &mem) : -1;
     fprintf(
-        stderr, "POLY_TRACE_PROGRAM index=%d rc=%d ops=%llu lds=%llu mem=%llu\n",
-        ++trace_program, rc, (unsigned long long)ops, (unsigned long long)lds,
-        (unsigned long long)mem
+        stderr, "POLY_TRACE_PROGRAM index=%d rc=%d ops=%llu lds=%llu mem=%llu\n", ++trace_program,
+        rc, (unsigned long long)ops, (unsigned long long)lds, (unsigned long long)mem
     );
   }
 
@@ -1289,20 +1275,14 @@ static void poly_runner_apply_program_launch_info(
   }
 }
 
-static PolyUOp *linear_rebuild_preserving_metadata(
-    PolyCtx *ctx,
-    PolyUOp *original,
-    PolyUOp **src
-) {
+static PolyUOp *linear_rebuild_preserving_metadata(PolyCtx *ctx, PolyUOp *original, PolyUOp **src) {
   if (!ctx || !original || (original->n_src > 0 && !src)) return NULL;
   if (original->tag || original->tag_arg.kind != POLY_ARG_NONE)
     return poly_uop_tagged_arg(
-        ctx, original->op, original->dtype, src, original->n_src, original->arg,
-        original->tag, original->tag_arg
+        ctx, original->op, original->dtype, src, original->n_src, original->arg, original->tag,
+        original->tag_arg
     );
-  return poly_uop(
-      ctx, original->op, original->dtype, src, original->n_src, original->arg
-  );
+  return poly_uop(ctx, original->op, original->dtype, src, original->n_src, original->arg);
 }
 
 /* C-owned runner lifetime below Tinygrad's runtime_cache
@@ -1451,11 +1431,7 @@ size_t poly_runtime_cache_len(PolyCtx *ctx) {
   return ctx && ctx->runtime_cache ? poly_map_len(ctx->runtime_cache) : 0;
 }
 
-static void poly_runtime_cache_artifact_size_accum(
-    const void *key,
-    void *value,
-    void *userdata
-) {
+static void poly_runtime_cache_artifact_size_accum(const void *key, void *value, void *userdata) {
   (void)key;
   size_t *total = userdata;
   PolyRuntimeCacheMapEntry *entry = value;
@@ -1868,10 +1844,10 @@ static PolyUOp *poly_prepare_program_for_backend(
 
   PolyUOp *rewritten = backend->rewrite_program ? backend->rewrite_program(ctx, body) : body;
   if (!rewritten) return NULL;
-  PolyUOp *prepared = !backend->rewrite_program && ast->op == POLY_OP_PROGRAM
-                          ? ast
-                          : poly_program_from_call_body(
-                                ctx, call, rewritten, poly_program_arg_name(ast), device);
+  PolyUOp *prepared =
+      !backend->rewrite_program && ast->op == POLY_OP_PROGRAM
+          ? ast
+          : poly_program_from_call_body(ctx, call, rewritten, poly_program_arg_name(ast), device);
   if (!prepared) return NULL;
   if (backend->rewrite_program) {
     prepared = poly_program_attach_linear(ctx, prepared);
@@ -2082,9 +2058,8 @@ static int cpu_lower_item_impl(
   }
   if (!lin) return -1;
   const PolyProgramInfo *program_info = poly_program_info(ctx, program);
-  int cpu_threads = program_info && program_info->global_size[0] > 1
-                        ? program_info->global_size[0]
-                        : 1;
+  int cpu_threads =
+      program_info && program_info->global_size[0] > 1 ? program_info->global_size[0] : 1;
 
   const char *src = poly_program_source_text(program);
   char *src_owned = NULL;
@@ -2480,8 +2455,7 @@ static int hip_lower_item(PolyCtx *ctx, PolyUOp *program, const char *fn_name, P
   const char *src = poly_program_source_text(program);
   char *src_owned = NULL;
   if (!src) {
-    src_owned =
-        poly_render_hip(ctx, lin, n_lin, fn_name, block_size, poly_hip_arch());
+    src_owned = poly_render_hip(ctx, lin, n_lin, fn_name, block_size, poly_hip_arch());
     src = src_owned;
   }
   if (lin_owned) free(lin);
@@ -2578,9 +2552,8 @@ static int x86_execute_fn(void *self, void **args, int n_args) {
   int core_id_slot = -1;
   for (int i = 0; i < info->n_vars; i++) {
     PolyUOp *var = info->vars[i];
-    int slot = var && var->arg.kind == POLY_ARG_PARAM && var->arg.param
-                   ? (int)var->arg.param->slot
-                   : -1;
+    int slot =
+        var && var->arg.kind == POLY_ARG_PARAM && var->arg.param ? (int)var->arg.param->slot : -1;
     if (slot < 0) return -1;
     if (slot + 1 > abi_n_args) abi_n_args = slot + 1;
     if (poly_program_var_is_runtime(var)) core_id_slot = slot;
@@ -2591,7 +2564,8 @@ static int x86_execute_fn(void *self, void **args, int n_args) {
                         ? stack_args
                         : calloc((size_t)abi_n_args, sizeof(*abi_args));
   if (!abi_args) return -1;
-  for (int i = 0; i < runner->n_params; i++) abi_args[i] = args[i];
+  for (int i = 0; i < runner->n_params; i++)
+    abi_args[i] = args[i];
   for (int v = 0; v < runner->n_vars; v++) {
     int info_idx = runner->var_indices ? runner->var_indices[v] : -1;
     if (info_idx < 0 || info_idx >= info->n_vars || !args[runner->n_params + v]) {
@@ -2742,9 +2716,7 @@ static int x86_lower_item(PolyCtx *ctx, PolyUOp *program, const char *fn_name, P
   out->handle = prog;
   out->handle_size = code_size;
   const PolyProgramInfo *program_info = poly_program_info(ctx, program);
-  int threads = program_info && program_info->global_size[0] > 1
-                    ? program_info->global_size[0]
-                    : 1;
+  int threads = program_info && program_info->global_size[0] > 1 ? program_info->global_size[0] : 1;
   out->grid[0] = threads;
   out->grid[1] = 1;
   out->grid[2] = 1;
@@ -2793,8 +2765,8 @@ static const PolyBackendDesc BACKENDS[] = {
     [POLY_DEVICE_CPU] = {NULL, POLY_DEVICE_CPU, false, NULL, NULL, NULL, NULL, NULL, NULL, NULL},
 #endif
     [POLY_DEVICE_INTERP] =
-        {"interp", POLY_DEVICE_INTERP, false, interp_rewrite_program, NULL, interp_lower_item, interp_execute,
-         interp_free_runner, backend_noop_ensure_open, interp_get_allocator},
+        {"interp", POLY_DEVICE_INTERP, false, interp_rewrite_program, NULL, interp_lower_item,
+         interp_execute, interp_free_runner, backend_noop_ensure_open, interp_get_allocator},
 #ifdef POLY_HAS_CUDA
     [POLY_DEVICE_CUDA] =
         {"cuda", POLY_DEVICE_CUDA, false, poly_rewrite_cuda, cuda_render_source, cuda_lower_item,
@@ -2913,23 +2885,22 @@ static PolyUOp *poly_call_device_num_var(PolyCtx *ctx, PolyUOp *body) {
 
 /* Current Tinygrad engine/realize.py:pm_beam. */
 static PolyUOp *poly_apply_call_beam(PolyCtx *ctx, PolyUOp *call, int beam) {
-  if (!ctx || !call || call->op != POLY_OP_CALL || call->n_src < 1 || beam < 1)
-    return call;
+  if (!ctx || !call || call->op != POLY_OP_CALL || call->n_src < 1 || beam < 1) return call;
   PolyUOp *sink = call->src[0];
-  if (!sink || sink->op != POLY_OP_SINK ||
-      sink->arg.kind != POLY_ARG_KERNEL_INFO || !sink->arg.kernel_info ||
-      sink->arg.kernel_info->beam != 0)
+  if (!sink || sink->op != POLY_OP_SINK || sink->arg.kind != POLY_ARG_KERNEL_INFO ||
+      !sink->arg.kernel_info || sink->arg.kernel_info->beam != 0)
     return call;
   PolyKernelInfo info = *sink->arg.kernel_info;
   info.beam = beam;
-  PolyUOp *new_sink = sink->tag || sink->tag_arg.kind != POLY_ARG_NONE
-                            ? poly_uop_tagged_arg(
-                                  ctx, POLY_OP_SINK, sink->dtype, sink->src,
-                                  sink->n_src, poly_arg_kernel_info(&info),
-                                  sink->tag, sink->tag_arg)
-                            : poly_uop(
-                                  ctx, POLY_OP_SINK, sink->dtype, sink->src,
-                                  sink->n_src, poly_arg_kernel_info(&info));
+  PolyUOp *new_sink =
+      sink->tag || sink->tag_arg.kind != POLY_ARG_NONE
+          ? poly_uop_tagged_arg(
+                ctx, POLY_OP_SINK, sink->dtype, sink->src, sink->n_src, poly_arg_kernel_info(&info),
+                sink->tag, sink->tag_arg
+            )
+          : poly_uop(
+                ctx, POLY_OP_SINK, sink->dtype, sink->src, sink->n_src, poly_arg_kernel_info(&info)
+            );
   if (!new_sink) return NULL;
   PolyUOp **src = malloc((size_t)call->n_src * sizeof(*src));
   if (!src) return NULL;
@@ -2959,9 +2930,8 @@ PolyUOp *poly_compile_linear(PolyCtx *ctx, PolyUOp *linear, int beam) {
       calls[i] = call;
       continue;
     }
-    PolyUOp *device_uop = call->n_src > 1
-                              ? poly_uop_device_uop_cached(ctx, call->src[1], NULL)
-                              : NULL;
+    PolyUOp *device_uop =
+        call->n_src > 1 ? poly_uop_device_uop_cached(ctx, call->src[1], NULL) : NULL;
     if (device_uop && device_uop->arg.kind == POLY_ARG_STRING_TUPLE &&
         device_uop->arg.string_tuple.n > 0)
       device_uop = poly_device_uop_from_name(ctx, device_uop->arg.string_tuple.vals[0]);
@@ -2970,8 +2940,8 @@ PolyUOp *poly_compile_linear(PolyCtx *ctx, PolyUOp *linear, int beam) {
       ok = false;
       break;
     }
-    PolyUOp *program = poly_prepare_program_for_backend(
-        ctx, call, device_uop, item_device, env_stamp);
+    PolyUOp *program =
+        poly_prepare_program_for_backend(ctx, call, device_uop, item_device, env_stamp);
     if (!program) {
       ok = false;
       break;
@@ -3012,8 +2982,8 @@ static PolyUOp *poly_resolve_linear_param(
 ) {
   if (!ctx || !uop || n_inputs < 0 || (n_inputs > 0 && !inputs)) return NULL;
   if (uop->op == POLY_OP_PARAM) {
-    if (uop->arg.kind != POLY_ARG_PARAM || !uop->arg.param ||
-        uop->arg.param->slot < 0 || uop->arg.param->slot >= n_inputs)
+    if (uop->arg.kind != POLY_ARG_PARAM || !uop->arg.param || uop->arg.param->slot < 0 ||
+        uop->arg.param->slot >= n_inputs)
       return NULL;
     return inputs[uop->arg.param->slot];
   }
@@ -3032,8 +3002,8 @@ static PolyUOp *poly_resolve_linear_param(
     free(src);
     return resolved;
   }
-  if ((uop->op == POLY_OP_MSELECT || uop->op == POLY_OP_SHRINK) &&
-      uop->n_src > 0 && uop->src[0] && uop->src[0]->op == POLY_OP_PARAM) {
+  if ((uop->op == POLY_OP_MSELECT || uop->op == POLY_OP_SHRINK) && uop->n_src > 0 && uop->src[0] &&
+      uop->src[0]->op == POLY_OP_PARAM) {
     PolyUOp **src = malloc((size_t)uop->n_src * sizeof(*src));
     if (!src) return NULL;
     memcpy(src, uop->src, (size_t)uop->n_src * sizeof(*src));
@@ -3087,8 +3057,7 @@ static int poly_ensure_linear_arg_buffer(PolyCtx *ctx, PolyUOp *uop, bool read) 
    * immutable-UOp device binding before exposing the runtime handle. */
   if (identity && device_uop && device_uop->arg.kind != POLY_ARG_STRING_TUPLE &&
       device != POLY_DEVICE_AUTO) {
-    if (poly_buffer_ensure_allocated(ctx, (PolyUOp *)identity, device) != 0)
-      return -1;
+    if (poly_buffer_ensure_allocated(ctx, (PolyUOp *)identity, device) != 0) return -1;
     buffer = poly_uop_buffer_handle(ctx, uop);
   }
   if (buffer && !poly_buffer_is_multi(buffer)) {
@@ -3098,19 +3067,20 @@ static int poly_ensure_linear_arg_buffer(PolyCtx *ctx, PolyUOp *uop, bool read) 
           stderr,
           "[polygrad:run_linear] buffer op=%s ensure=%d read=%d valid=%d base=%p ptr=%p "
           "bytes=%zu offset=%zu\n",
-          poly_op_name(uop->op), rc, read, buffer->valid, (void *)buffer->base,
-          buffer->ptr, buffer->nbytes, buffer->offset
+          poly_op_name(uop->op), rc, read, buffer->valid, (void *)buffer->base, buffer->ptr,
+          buffer->nbytes, buffer->offset
       );
     if (poly_debug_at_least(7) && buffer->base && rc != 0)
       fprintf(
-          stderr,
-          "[polygrad:run_linear] base device=%d valid=%d ptr=%p bytes=%zu src=%p\n",
-          buffer->base->device, buffer->base->valid, buffer->base->ptr,
-          buffer->base->nbytes, (void *)buffer->base->src
+          stderr, "[polygrad:run_linear] base device=%d valid=%d ptr=%p bytes=%zu src=%p\n",
+          buffer->base->device, buffer->base->valid, buffer->base->ptr, buffer->base->nbytes,
+          (void *)buffer->base->src
       );
     if (poly_debug_at_least(7) && (rc != 0 || (read && !buffer->valid))) {
       char *graph = poly_graph_str(uop);
-      fprintf(stderr, "[polygrad:run_linear] buffer graph=%s\n", graph ? graph : "<allocation failure>");
+      fprintf(
+          stderr, "[polygrad:run_linear] buffer graph=%s\n", graph ? graph : "<allocation failure>"
+      );
       free(graph);
     }
     if (rc != 0) return -1;
@@ -3119,8 +3089,8 @@ static int poly_ensure_linear_arg_buffer(PolyCtx *ctx, PolyUOp *uop, bool read) 
   if (poly_debug_at_least(7)) {
     char *graph = poly_graph_str(uop);
     fprintf(
-        stderr, "[polygrad:run_linear] unresolved buffer op=%s graph=%s\n",
-        poly_op_name(uop->op), graph ? graph : "<allocation failure>"
+        stderr, "[polygrad:run_linear] unresolved buffer op=%s graph=%s\n", poly_op_name(uop->op),
+        graph ? graph : "<allocation failure>"
     );
     free(graph);
   }
@@ -3147,9 +3117,7 @@ static int poly_resolve_linear_arg(
   if (!out->container) return -1;
   if (poly_buffer_is_multi(out->container)) {
     out->n_items = out->container->n_bufs;
-    out->items = out->n_items > 0
-                     ? malloc((size_t)out->n_items * sizeof(*out->items))
-                     : NULL;
+    out->items = out->n_items > 0 ? malloc((size_t)out->n_items * sizeof(*out->items)) : NULL;
     if (out->n_items <= 0 || !out->items) return -1;
     memcpy(out->items, out->container->bufs, (size_t)out->n_items * sizeof(*out->items));
   } else {
@@ -3163,7 +3131,8 @@ static int poly_resolve_linear_arg(
 
 static void poly_resolved_linear_args_free(PolyResolvedLinearArg *args, int n_args) {
   if (!args) return;
-  for (int i = 0; i < n_args; i++) free(args[i].items);
+  for (int i = 0; i < n_args; i++)
+    free(args[i].items);
   free(args);
 }
 
@@ -3227,9 +3196,8 @@ static int poly_linear_stats(
 ) {
   if (!ctx || !update_stats || ctx->stats_suppression_depth > 0) return 0;
   uint64_t ops = 0, mem = copy_bytes, lds = 0;
-  const PolyEstimates *estimates = body && body->op == POLY_OP_PROGRAM
-                                       ? poly_program_estimates(body)
-                                       : NULL;
+  const PolyEstimates *estimates =
+      body && body->op == POLY_OP_PROGRAM ? poly_program_estimates(body) : NULL;
   if (estimates && estimates->ops && estimates->lds && estimates->mem &&
       poly_estimates_infer(estimates, bindings, n_bindings, &ops, &lds, &mem) != 0)
     return -1;
@@ -3264,18 +3232,13 @@ static int poly_exec_linear_copy(
     if (dst->base) dst->base->valid = true;
     if (dst->src) dst->src->valid = false;
     ctx->launch_count++;
-    if (poly_linear_stats(ctx, NULL, NULL, 0, dst->nbytes, elapsed, update_stats) != 0)
-      return -1;
+    if (poly_linear_stats(ctx, NULL, NULL, 0, dst->nbytes, elapsed, update_stats) != 0) return -1;
   }
   return 0;
 }
 
 /* Current exec_kernel publishes every ProgramInfo.outs buffer after launch. */
-static int poly_commit_resolved_write(
-    PolyCtx *ctx,
-    PolyResolvedLinearArg *arg,
-    int lane
-) {
+static int poly_commit_resolved_write(PolyCtx *ctx, PolyResolvedLinearArg *arg, int lane) {
   if (!ctx || !arg || lane < 0 || lane >= arg->n_items || !arg->items) return -1;
   PolyBuffer *written = arg->items[lane];
   if (!written) return -1;
@@ -3317,20 +3280,20 @@ static int poly_exec_linear_program(
     PolyUOp *device_uop = poly_device_uop(ctx, device);
     /* Tinygrad 2026-08-22 a9069c17 exec_kernel selects the runtime from
      * ProgramInfo.target even when symbolic folding leaves globals empty. */
-    if (!device_uop || device == POLY_DEVICE_AUTO || !poly_device_can_execute(device))
-      return -1;
+    if (!device_uop || device == POLY_DEVICE_AUTO || !poly_device_can_execute(device)) return -1;
 
     PolyRunner runner = {0};
     PolyRuntimeCacheEntry *runtime_entry = NULL;
     int lower_rc = poly_lower_compute_call_cached(
-        ctx, call, device_uop, device, poly_runtime_cache_env_stamp(),
-        &runner, &runtime_entry
+        ctx, call, device_uop, device, poly_runtime_cache_env_stamp(), &runner, &runtime_entry
     );
     if (lower_rc != 0) return -1;
     runner.n_params = info->n_globals;
     if (poly_bind_runner_vars(ctx, &runner) != 0) {
-      if (runtime_entry) poly_runtime_cache_entry_release(runtime_entry);
-      else poly_runner_cleanup(&runner, device);
+      if (runtime_entry)
+        poly_runtime_cache_entry_release(runtime_entry);
+      else
+        poly_runner_cleanup(&runner, device);
       return -1;
     }
 
@@ -3373,10 +3336,9 @@ static int poly_exec_linear_program(
     bool timing = update_stats && ctx->stats_suppression_depth == 0 && poly_debug_at_least(2);
     double start = timing ? poly_now_ms() : 0.0;
     const PolyBackendDesc *backend = poly_backend_get(device);
-    int exec_rc = runner.execute ? runner.execute(&runner, args, n_runtime_args)
-                                 : backend && backend->execute
-                                       ? backend->execute(&runner, args, n_runtime_args)
-                                       : -1;
+    int exec_rc = runner.execute                ? runner.execute(&runner, args, n_runtime_args)
+                  : backend && backend->execute ? backend->execute(&runner, args, n_runtime_args)
+                                                : -1;
 #ifdef POLY_HAS_CUDA
     if (exec_rc == 0 && wait && device == POLY_DEVICE_CUDA) exec_rc = poly_cuda_sync();
 #endif
@@ -3393,13 +3355,12 @@ static int poly_exec_linear_program(
         goto lane_cleanup;
     }
     ctx->launch_count++;
-    if (poly_linear_stats(
-            ctx, program, lane_bindings, n_lane_bindings, 0, elapsed, update_stats
-        ) != 0)
+    if (poly_linear_stats(ctx, program, lane_bindings, n_lane_bindings, 0, elapsed, update_stats) !=
+        0)
       goto lane_cleanup;
     rc = 0;
 
-lane_cleanup:
+  lane_cleanup:
     free(args);
     free(var_values);
     free(lane_bindings);
@@ -3535,9 +3496,7 @@ static int graph_collect_dependencies(
 ) {
   for (int i = 0; i < map->n; i++)
     if (graph_resource_overlaps(&map->items[i], base, start, end) &&
-        graph_append_dependency(
-            dependencies, n_dependencies, capacity, map->items[i].node
-        ) != 0)
+        graph_append_dependency(dependencies, n_dependencies, capacity, map->items[i].node) != 0)
       return -1;
   return 0;
 }
@@ -3558,9 +3517,7 @@ static int graph_build_dependencies(
       PolyBuffer *base = NULL;
       size_t start = 0, end = 0;
       if (prepared[node].resolved[arg].n_items != 1 ||
-          graph_resource_bounds(
-              prepared[node].resolved[arg].items[0], &base, &start, &end
-          ) != 0 ||
+          graph_resource_bounds(prepared[node].resolved[arg].items[0], &base, &start, &end) != 0 ||
           graph_collect_dependencies(
               &writes, base, start, end, &owned[node], &n_dependencies, &capacity
           ) != 0 ||
@@ -3576,9 +3533,7 @@ static int graph_build_dependencies(
       if (!prepared[node].ins[arg] && !prepared[node].outs[arg]) continue;
       PolyBuffer *base = NULL;
       size_t start = 0, end = 0;
-      if (graph_resource_bounds(
-              prepared[node].resolved[arg].items[0], &base, &start, &end
-          ) != 0)
+      if (graph_resource_bounds(prepared[node].resolved[arg].items[0], &base, &start, &end) != 0)
         goto fail;
       GraphResourceRange range = {base, start, end, node};
       if (prepared[node].outs[arg]) {
@@ -3597,7 +3552,8 @@ static int graph_build_dependencies(
   return 0;
 
 fail:
-  for (int i = 0; i < n_calls; i++) free(owned[i]);
+  for (int i = 0; i < n_calls; i++)
+    free(owned[i]);
   free(owned);
   free(reads.items);
   free(writes.items);
@@ -3649,26 +3605,20 @@ static int poly_exec_linear_graph(
 ) {
   PolyUOp *function = call && call->n_src > 0 ? call->src[0] : NULL;
   PolyUOp *linear = function && function->op == POLY_OP_CUSTOM_FUNCTION &&
-                            function->arg.kind == POLY_ARG_STRING &&
-                            function->arg.str && strcmp(function->arg.str, "graph") == 0 &&
-                            function->n_src == 1
+                            function->arg.kind == POLY_ARG_STRING && function->arg.str &&
+                            strcmp(function->arg.str, "graph") == 0 && function->n_src == 1
                         ? function->src[0]
                         : NULL;
   if (!linear || linear->op != POLY_OP_LINEAR || linear->n_src <= 0) return -1;
 
-  PolyGraphCacheEntry *entry = poly_map_get(
-      ctx->graph_cache, poly_ptr_hash(function), function, poly_ptr_eq
-  );
+  PolyGraphCacheEntry *entry =
+      poly_map_get(ctx->graph_cache, poly_ptr_hash(function), function, poly_ptr_eq);
   bool new_entry = entry == NULL;
   if (new_entry && !(entry = graph_cache_entry_new(linear->n_src))) return -1;
   if (entry->n_nodes != linear->n_src) goto fail;
 
-  PreparedGraphCall *prepared = calloc(
-      (size_t)linear->n_src, sizeof(*prepared)
-  );
-  PolyCudaGraphCallSpec *specs = calloc(
-      (size_t)linear->n_src, sizeof(*specs)
-  );
+  PreparedGraphCall *prepared = calloc((size_t)linear->n_src, sizeof(*prepared));
+  PolyCudaGraphCallSpec *specs = calloc((size_t)linear->n_src, sizeof(*specs));
   int **owned_dependencies = NULL;
   if (!prepared || !specs) goto fail_prepared;
 
@@ -3676,18 +3626,13 @@ static int poly_exec_linear_graph(
   for (int node = 0; node < linear->n_src; node++) {
     PreparedGraphCall *item = &prepared[node];
     item->call = linear->src[node];
-    if (!item->call || item->call->op != POLY_OP_CALL || item->call->n_src < 1)
-      goto fail_prepared;
+    if (!item->call || item->call->op != POLY_OP_CALL || item->call->n_src < 1) goto fail_prepared;
     item->n_args = poly_call_n_buffer_args(item->call);
     item->outs = calloc((size_t)(item->n_args > 0 ? item->n_args : 1), sizeof(*item->outs));
     item->ins = calloc((size_t)(item->n_args > 0 ? item->n_args : 1), sizeof(*item->ins));
-    item->resolved = calloc(
-        (size_t)(item->n_args > 0 ? item->n_args : 1), sizeof(*item->resolved)
-    );
+    item->resolved = calloc((size_t)(item->n_args > 0 ? item->n_args : 1), sizeof(*item->resolved));
     if (!item->outs || !item->ins || !item->resolved ||
-        poly_call_get_outs_ins(
-            ctx, item->call, item->outs, item->ins, item->n_args
-        ) != 0)
+        poly_call_get_outs_ins(ctx, item->call, item->outs, item->ins, item->n_args) != 0)
       goto fail_prepared;
     for (int arg = 0; arg < item->n_args; arg++) {
       PolyUOp *resolved = poly_resolve_linear_param(
@@ -3706,8 +3651,8 @@ static int poly_exec_linear_graph(
       PolyBuffer *dst = item->resolved[0].items[0];
       PolyBuffer *src = item->resolved[1].items[0];
       if (poly_buffer_handle_ensure_allocated(ctx, dst) != 0 ||
-          poly_buffer_handle_ensure_allocated(ctx, src) != 0 || !src->valid ||
-          !dst->ptr || !src->ptr || dst->nbytes != src->nbytes)
+          poly_buffer_handle_ensure_allocated(ctx, src) != 0 || !src->valid || !dst->ptr ||
+          !src->ptr || dst->nbytes != src->nbytes)
         goto fail_prepared;
       specs[node].kind = POLY_CUDA_GRAPH_COPY;
       specs[node].value.copy.dst = dst->ptr;
@@ -3724,27 +3669,22 @@ static int poly_exec_linear_graph(
     if (new_entry) {
       PolyUOp *device_uop = poly_device_uop(ctx, POLY_DEVICE_CUDA);
       if (!device_uop || poly_lower_compute_call_cached(
-                        ctx, item->call, device_uop, POLY_DEVICE_CUDA,
-                        poly_runtime_cache_env_stamp(), runner,
-                        &entry->runtime_entries[node]
-                    ) != 0)
+                             ctx, item->call, device_uop, POLY_DEVICE_CUDA,
+                             poly_runtime_cache_env_stamp(), runner, &entry->runtime_entries[node]
+                         ) != 0)
         goto fail_prepared;
       runner->n_params = info->n_globals;
       if (poly_bind_runner_vars(ctx, runner) != 0) goto fail_prepared;
     }
     CudaRunnerHandle *handle = (CudaRunnerHandle *)runner->handle;
-    if (!handle || !handle->prog || runner->n_params != info->n_globals)
-      goto fail_prepared;
+    if (!handle || !handle->prog || runner->n_params != info->n_globals) goto fail_prepared;
 
     int n_runtime_args = runner->n_params + runner->n_vars;
-    item->runtime_args = calloc(
-        (size_t)(n_runtime_args > 0 ? n_runtime_args : 1), sizeof(*item->runtime_args)
-    );
-    item->scalar_values = runner->n_vars > 0
-                              ? calloc((size_t)runner->n_vars, sizeof(*item->scalar_values))
-                              : NULL;
-    if (!item->runtime_args || (runner->n_vars > 0 && !item->scalar_values))
-      goto fail_prepared;
+    item->runtime_args =
+        calloc((size_t)(n_runtime_args > 0 ? n_runtime_args : 1), sizeof(*item->runtime_args));
+    item->scalar_values =
+        runner->n_vars > 0 ? calloc((size_t)runner->n_vars, sizeof(*item->scalar_values)) : NULL;
+    if (!item->runtime_args || (runner->n_vars > 0 && !item->scalar_values)) goto fail_prepared;
     for (int i = 0; i < runner->n_params; i++) {
       int arg = info->globals[i];
       PolyBuffer *buffer = item->resolved[arg].items[0];
@@ -3765,8 +3705,7 @@ static int poly_exec_linear_graph(
       }
       if (!found) goto fail_prepared;
     }
-    if (poly_resolve_runner_launch_dims(runner, bindings, n_bindings) != 0)
-      goto fail_prepared;
+    if (poly_resolve_runner_launch_dims(runner, bindings, n_bindings) != 0) goto fail_prepared;
     specs[node].kind = POLY_CUDA_GRAPH_PROGRAM;
     specs[node].value.program.program = handle->prog;
     specs[node].value.program.args = item->runtime_args;
@@ -3778,8 +3717,7 @@ static int poly_exec_linear_graph(
     }
     uint64_t ops = 0, lds = 0, mem = 0;
     const PolyEstimates *estimates = poly_program_estimates(body);
-    if (!estimates ||
-        poly_estimates_infer(estimates, bindings, n_bindings, &ops, &lds, &mem) != 0)
+    if (!estimates || poly_estimates_infer(estimates, bindings, n_bindings, &ops, &lds, &mem) != 0)
       goto fail_prepared;
     total_ops = poly_counter_add_sat(total_ops, ops);
     total_mem = poly_counter_add_sat(total_mem, mem);
@@ -3790,18 +3728,14 @@ static int poly_exec_linear_graph(
   if (new_entry) {
     entry->graph = poly_cuda_graph_create(specs, linear->n_src);
     if (!entry->graph) goto fail_prepared;
-    poly_map_set(
-        ctx->graph_cache, poly_ptr_hash(function), function, entry, poly_ptr_eq
-    );
+    poly_map_set(ctx->graph_cache, poly_ptr_hash(function), function, entry, poly_ptr_eq);
   } else if (poly_cuda_graph_update(entry->graph, specs, linear->n_src) != 0) {
     goto fail_prepared;
   }
 
-  bool timing = update_stats && ctx->stats_suppression_depth == 0 &&
-                poly_debug_at_least(2);
+  bool timing = update_stats && ctx->stats_suppression_depth == 0 && poly_debug_at_least(2);
   double start = timing ? poly_now_ms() : 0.0;
-  if (poly_cuda_graph_launch(entry->graph) != 0 ||
-      ((wait || timing) && poly_cuda_sync() != 0))
+  if (poly_cuda_graph_launch(entry->graph) != 0 || ((wait || timing) && poly_cuda_sync() != 0))
     goto fail_prepared;
   double elapsed = timing ? poly_now_ms() - start : -1.0;
   for (int node = 0; node < linear->n_src; node++)
@@ -3817,7 +3751,8 @@ static int poly_exec_linear_graph(
     if (elapsed >= 0.0) ctx->time_sum_s += elapsed / 1000.0;
   }
 
-  for (int i = 0; i < linear->n_src; i++) free(owned_dependencies[i]);
+  for (int i = 0; i < linear->n_src; i++)
+    free(owned_dependencies[i]);
   free(owned_dependencies);
   free(specs);
   prepared_graph_calls_free(prepared, linear->n_src);
@@ -3825,7 +3760,8 @@ static int poly_exec_linear_graph(
 
 fail_prepared:
   if (owned_dependencies) {
-    for (int i = 0; i < linear->n_src; i++) free(owned_dependencies[i]);
+    for (int i = 0; i < linear->n_src; i++)
+      free(owned_dependencies[i]);
     free(owned_dependencies);
   }
   free(specs);
@@ -3862,18 +3798,15 @@ static int run_linear_impl(
     PolyUOp *body = call->src[0];
     if (debug)
       fprintf(
-          stderr, "[polygrad:run_linear] call=%d/%d body=%s args=%d\n",
-          call_index, executable->n_src, poly_op_name(body->op),
-          poly_call_n_buffer_args(call)
+          stderr, "[polygrad:run_linear] call=%d/%d body=%s args=%d\n", call_index,
+          executable->n_src, poly_op_name(body->op), poly_call_n_buffer_args(call)
       );
-    bool graph = body->op == POLY_OP_CUSTOM_FUNCTION &&
-                 body->arg.kind == POLY_ARG_STRING && body->arg.str &&
-                 strcmp(body->arg.str, "graph") == 0;
+    bool graph = body->op == POLY_OP_CUSTOM_FUNCTION && body->arg.kind == POLY_ARG_STRING &&
+                 body->arg.str && strcmp(body->arg.str, "graph") == 0;
     if (graph) {
 #ifdef POLY_HAS_CUDA
       if (poly_exec_linear_graph(
-              ctx, call, var_bindings, n_var_bindings, input_uops,
-              n_input_uops, update_stats, wait
+              ctx, call, var_bindings, n_var_bindings, input_uops, n_input_uops, update_stats, wait
           ) != 0)
         return -1;
       continue;
@@ -3886,8 +3819,7 @@ static int run_linear_impl(
     int n_args = poly_call_n_buffer_args(call);
     bool *outs = n_args > 0 ? calloc((size_t)n_args, sizeof(*outs)) : NULL;
     bool *ins = n_args > 0 ? calloc((size_t)n_args, sizeof(*ins)) : NULL;
-    PolyResolvedLinearArg *resolved =
-        n_args > 0 ? calloc((size_t)n_args, sizeof(*resolved)) : NULL;
+    PolyResolvedLinearArg *resolved = n_args > 0 ? calloc((size_t)n_args, sizeof(*resolved)) : NULL;
     if ((n_args > 0 && (!outs || !ins || !resolved)) ||
         poly_call_get_outs_ins(ctx, call, outs, ins, n_args) != 0) {
       free(outs);
@@ -3898,8 +3830,8 @@ static int run_linear_impl(
 
     bool ok = true;
     for (int i = 0; i < n_args; i++) {
-      PolyUOp *arg = poly_resolve_linear_param(
-          ctx, poly_call_buffer_arg(call, i), input_uops, n_input_uops);
+      PolyUOp *arg =
+          poly_resolve_linear_param(ctx, poly_call_buffer_arg(call, i), input_uops, n_input_uops);
       if (!arg || poly_resolve_linear_arg(ctx, arg, ins[i], &resolved[i]) != 0) {
         if (debug)
           fprintf(
@@ -3927,7 +3859,8 @@ static int run_linear_impl(
       if (ok) rc = poly_exec_linear_copy(ctx, resolved, n_args, lanes, update_stats);
     } else if (ok) {
       rc = poly_exec_linear_program(
-          ctx, call, resolved, n_args, var_bindings, n_var_bindings, update_stats, wait);
+          ctx, call, resolved, n_args, var_bindings, n_var_bindings, update_stats, wait
+      );
     }
     free(outs);
     free(ins);
@@ -3935,8 +3868,8 @@ static int run_linear_impl(
     if (rc != 0) {
       if (debug)
         fprintf(
-            stderr, "[polygrad:run_linear] call=%d body=%s execution failed\n",
-            call_index, poly_op_name(body->op)
+            stderr, "[polygrad:run_linear] call=%d body=%s execution failed\n", call_index,
+            poly_op_name(body->op)
         );
       return -1;
     }
@@ -3957,16 +3890,14 @@ int poly_run_linear(
     bool jit,
     bool wait
 ) {
-  if (!ctx || !linear || linear->op != POLY_OP_LINEAR || n_var_bindings < 0 ||
-      n_input_uops < 0 || (n_var_bindings > 0 && !var_bindings) ||
-      (n_input_uops > 0 && !input_uops))
+  if (!ctx || !linear || linear->op != POLY_OP_LINEAR || n_var_bindings < 0 || n_input_uops < 0 ||
+      (n_var_bindings > 0 && !var_bindings) || (n_input_uops > 0 && !input_uops))
     return -1;
   bool resweep = ctx->collection_dirty;
   if (poly_ctx_collect_before_allocation(ctx, linear) != 0) return -1;
   ctx->execution_depth++;
   int rc = run_linear_impl(
-      ctx, linear, var_bindings, n_var_bindings, input_uops, n_input_uops,
-      update_stats, jit, wait
+      ctx, linear, var_bindings, n_var_bindings, input_uops, n_input_uops, update_stats, jit, wait
   );
   ctx->execution_depth--;
   if (resweep) ctx->collection_dirty = true;

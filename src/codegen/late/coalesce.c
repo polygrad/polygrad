@@ -38,10 +38,10 @@ typedef struct {
 /* Implements Tinygrad's defaultdict key and sorted offset traversal. */
 static int memory_coalescing_record_cmp(const void *ap, const void *bp) {
   const MemoryCoalescingRecord *a = ap, *b = bp;
-#define CMP_FIELD(x, y)                                                                          \
-  do {                                                                                            \
-    if ((x) < (y)) return -1;                                                                     \
-    if ((x) > (y)) return 1;                                                                      \
+#define CMP_FIELD(x, y)                                                                            \
+  do {                                                                                             \
+    if ((x) < (y)) return -1;                                                                      \
+    if ((x) > (y)) return 1;                                                                       \
   } while (0)
   CMP_FIELD(a->op, b->op);
   CMP_FIELD((uintptr_t)a->buf, (uintptr_t)b->buf);
@@ -58,8 +58,8 @@ static bool memory_coalescing_same_key(
     const MemoryCoalescingRecord *a,
     const MemoryCoalescingRecord *b
 ) {
-  return a->op == b->op && a->buf == b->buf && a->base_kind == b->base_kind &&
-         a->base == b->base && a->valid == b->valid;
+  return a->op == b->op && a->buf == b->buf && a->base_kind == b->base_kind && a->base == b->base &&
+         a->valid == b->valid;
 }
 
 /* Current coalesce.py's ordinary scalar storage classes. */
@@ -102,11 +102,7 @@ static PolyUOp *memory_coalescing_offset(
  * after devectorizer2 has made each memory occurrence scalar, groups adjacent
  * symbolic-base-plus-constant offsets globally, and rebuilds shaped SHRINK
  * loads/stores. */
-PolyUOp *poly_memory_coalescing(
-    PolyCtx *ctx,
-    PolyUOp *sink,
-    PolyRendererCaps caps
-) {
+PolyUOp *poly_memory_coalescing(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps) {
   if (!ctx || !sink || poly_getenv_flag("DMC")) return sink;
   int n_topo = 0;
   PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n_topo);
@@ -186,8 +182,8 @@ PolyUOp *poly_memory_coalescing(
   int n_sub = 0;
   for (int key_start = 0; key_start < n_records;) {
     int key_end = key_start + 1;
-    while (key_end < n_records &&
-           memory_coalescing_same_key(&records[key_start], &records[key_end]))
+    while (key_end < n_records && memory_coalescing_same_key(&records[key_start], &records[key_end])
+    )
       key_end++;
 
     int n_key = key_end - key_start;
@@ -206,7 +202,8 @@ PolyUOp *poly_memory_coalescing(
     int n_unique = 0;
     for (int i = key_start; i < key_end;) {
       int j = i + 1;
-      while (j < key_end && records[j].offset == records[i].offset) j++;
+      while (j < key_end && records[j].offset == records[i].offset)
+        j++;
       offsets[n_unique] = records[i].offset;
       starts[n_unique] = i;
       counts[n_unique++] = j - i;
@@ -215,7 +212,8 @@ PolyUOp *poly_memory_coalescing(
 
     for (int run_start = 0; run_start < n_unique;) {
       int run_end = run_start + 1;
-      while (run_end < n_unique && offsets[run_end] == offsets[run_end - 1] + 1) run_end++;
+      while (run_end < n_unique && offsets[run_end] == offsets[run_end - 1] + 1)
+        run_end++;
       for (int pos = run_start; pos < run_end;) {
         MemoryCoalescingRecord *r = &records[starts[pos]];
         int remaining = run_end - pos;
@@ -236,8 +234,8 @@ PolyUOp *poly_memory_coalescing(
             candidates[1] = 1;
             n_candidates = 2;
           }
-          if (poly_dtype_eq(r->buf->dtype, POLY_FLOAT16) &&
-              caps.max_vec_width >= 8 && poly_getenv_flag("ALLOW_HALF8")) {
+          if (poly_dtype_eq(r->buf->dtype, POLY_FLOAT16) && caps.max_vec_width >= 8 &&
+              poly_getenv_flag("ALLOW_HALF8")) {
             candidates[0] = 8;
             candidates[1] = 4;
             candidates[2] = 2;
@@ -307,7 +305,8 @@ PolyUOp *poly_memory_coalescing(
           }
           PolyUOp *value = length > 1 ? poly_uop_stack(ctx, data, length) : data[0];
           free(data);
-          PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, address, value, poly_arg_none());
+          PolyUOp *store =
+              poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, address, value, poly_arg_none());
           for (int lane = 0; lane < length; lane++) {
             from[n_sub] = records[starts[pos + lane]].u;
             to[n_sub++] = store;
@@ -317,8 +316,7 @@ PolyUOp *poly_memory_coalescing(
           for (int lane = 0; lane < length; lane++) {
             PolyUOp *value = load;
             if (length > 1) {
-              PolyUOp *lane_uop =
-                  poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(lane));
+              PolyUOp *lane_uop = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(lane));
               value = poly_uop_index(ctx, load, &lane_uop, 1);
             }
             for (int k = 0; k < counts[pos + lane]; k++) {
@@ -363,18 +361,12 @@ static bool is_invalid_const(PolyUOp *u) {
   return u && u->op == POLY_OP_CONST && u->arg.kind == POLY_ARG_INVALID;
 }
 
-
 /* Current tinygrad/codegen/late/coalesce.py:43-46,57-61. */
-static PolyUOp *rule_simplify_valid_index(
-    PolyCtx *ctx,
-    PolyUOp *index,
-    const PolyBindings *b
-) {
+static PolyUOp *rule_simplify_valid_index(PolyCtx *ctx, PolyUOp *index, const PolyBindings *b) {
   (void)b;
   if (!index || index->op != POLY_OP_INDEX || index->n_src != 2) return NULL;
   PolyUOp *coord = index->src[1];
-  if (!coord || coord->op != POLY_OP_WHERE || coord->n_src != 3 ||
-      !is_invalid_const(coord->src[2]))
+  if (!coord || coord->op != POLY_OP_WHERE || coord->n_src != 3 || !is_invalid_const(coord->src[2]))
     return NULL;
   PolyUOp *simplified = poly_uop_given_valid(ctx, coord->src[0], coord->src[1], true);
   if (!simplified || simplified == coord->src[1]) return NULL;
@@ -402,9 +394,7 @@ PolyPatternMatcher *poly_indexing_simplify(void) {
    * The common scalar INDEX rule is shared by both current rewrite stages. */
   PolyNamedRule rules[] = {
       POLY_RULE(poly_upat_op(POLY_OP_INDEX, NULL, 0, "idx"), rule_simplify_valid_index),
-      POLY_RULE(
-          poly_upat_op(POLY_OP_INDEX, NULL, 0, "idx"),
-          poly_simplify_valid_image_load),
+      POLY_RULE(poly_upat_op(POLY_OP_INDEX, NULL, 0, "idx"), poly_simplify_valid_image_load),
   };
   g_indexing_simplify =
       poly_pm_thread_cache(poly_pm_new_named(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
@@ -427,12 +417,7 @@ static bool image_ctx_lookup(
   return false;
 }
 
-static bool image_ctx_store(
-    PolyImageRewriteCtx *ctx,
-    int64_t slot,
-    int64_t height,
-    int64_t width
-) {
+static bool image_ctx_store(PolyImageRewriteCtx *ctx, int64_t slot, int64_t height, int64_t width) {
   if (!ctx) return false;
   for (int i = 0; i < ctx->count; i++) {
     if (ctx->slots[i] != slot) continue;
@@ -590,14 +575,11 @@ static int drop_valid_stmts(
           for (int j = 0; rest && j < n_terms; j++)
             if (terms[j] != variable) rest[n_rest++] = terms[j];
           PolyUOp *rest_sum = rest ? sum_uops(ctx, rest, n_rest) : NULL;
-          PolyUOp *replacement = rest_sum
-                                     ? poly_uop2(
-                                           ctx, POLY_OP_SUB, fake->dtype, fake, rest_sum,
-                                           poly_arg_none())
-                                     : NULL;
-          if (replacement &&
-              (image_coord_out_of_bounds(ctx, x, variable, replacement, width) ||
-               image_coord_out_of_bounds(ctx, y, variable, replacement, height)))
+          PolyUOp *replacement =
+              rest_sum ? poly_uop2(ctx, POLY_OP_SUB, fake->dtype, fake, rest_sum, poly_arg_none())
+                       : NULL;
+          if (replacement && (image_coord_out_of_bounds(ctx, x, variable, replacement, width) ||
+                              image_coord_out_of_bounds(ctx, y, variable, replacement, height)))
             dropped[i] = true;
           free(rest);
         }
@@ -607,10 +589,14 @@ static int drop_valid_stmts(
     free(terms);
   }
 
-  if (clauses_out) *clauses_out = clauses;
-  else free(clauses);
-  if (dropped_out) *dropped_out = dropped;
-  else free(dropped);
+  if (clauses_out)
+    *clauses_out = clauses;
+  else
+    free(clauses);
+  if (dropped_out)
+    *dropped_out = dropped;
+  else
+    free(dropped);
   if (count_out) *count_out = count;
   return dropped_count;
 }
@@ -619,8 +605,8 @@ static PolyUOp *valid_and(PolyCtx *ctx, PolyUOp **clauses, bool *dropped, int co
   PolyUOp *ret = NULL;
   for (int i = 0; i < count; i++) {
     if (dropped[i]) continue;
-    ret = ret ? poly_uop2(ctx, POLY_OP_AND, POLY_BOOL, ret, clauses[i], poly_arg_none())
-              : clauses[i];
+    ret =
+        ret ? poly_uop2(ctx, POLY_OP_AND, POLY_BOOL, ret, clauses[i], poly_arg_none()) : clauses[i];
   }
   return ret;
 }
@@ -628,8 +614,7 @@ static PolyUOp *valid_and(PolyCtx *ctx, PolyUOp **clauses, bool *dropped, int co
 static PolyUOp *valid_coord(PolyCtx *ctx, PolyUOp *coord, PolyUOp *valid) {
   if (!valid) return coord;
   PolyUOp *invalid = poly_uop_const(ctx, poly_arg_invalid(), POLY_BOOL);
-  return poly_uop3(
-      ctx, POLY_OP_WHERE, coord->dtype, valid, coord, invalid, poly_arg_none());
+  return poly_uop3(ctx, POLY_OP_WHERE, coord->dtype, valid, coord, invalid, poly_arg_none());
 }
 
 /* Tinygrad 2026-08-22/a9069c177a9d
@@ -644,10 +629,9 @@ static PolyUOp *poly_simplify_valid_image_load(
       !poly_uop_is_image_shape(ctx, index->src[0]))
     return NULL;
   PolyUOp *gated_y = index->src[1], *gated_x = index->src[2];
-  if (!gated_y || !gated_x || gated_y->op != POLY_OP_WHERE ||
-      gated_x->op != POLY_OP_WHERE || gated_y->n_src != 3 || gated_x->n_src != 3 ||
-      gated_y->src[0] != gated_x->src[0] || !is_invalid_const(gated_y->src[2]) ||
-      !is_invalid_const(gated_x->src[2]))
+  if (!gated_y || !gated_x || gated_y->op != POLY_OP_WHERE || gated_x->op != POLY_OP_WHERE ||
+      gated_y->n_src != 3 || gated_x->n_src != 3 || gated_y->src[0] != gated_x->src[0] ||
+      !is_invalid_const(gated_y->src[2]) || !is_invalid_const(gated_x->src[2]))
     return NULL;
 
   PolyUOp *valid = gated_y->src[0];
@@ -666,8 +650,8 @@ static PolyUOp *poly_simplify_valid_image_load(
   bool *dropped = NULL;
   int n_clauses = 0;
   int n_dropped = drop_valid_stmts(
-      ctx, valid, simplified, shape.dims[0], shape.dims[1], &clauses, &dropped,
-      &n_clauses);
+      ctx, valid, simplified, shape.dims[0], shape.dims[1], &clauses, &dropped, &n_clauses
+  );
   if (n_dropped < 0) return NULL;
   if (n_dropped == 0 && simplified == start) {
     free(clauses);
@@ -679,8 +663,7 @@ static PolyUOp *poly_simplify_valid_image_load(
   PolyUOp *zero = poly_const_int(ctx, 0), *one = poly_const_int(ctx, 1);
   idx_x = poly_uop_index(ctx, simplified, &zero, 1);
   idx_y = poly_uop_index(ctx, simplified, &one, 1);
-  PolyUOp *coords[2] = {
-      valid_coord(ctx, idx_y, new_valid), valid_coord(ctx, idx_x, new_valid)};
+  PolyUOp *coords[2] = {valid_coord(ctx, idx_y, new_valid), valid_coord(ctx, idx_x, new_valid)};
   PolyUOp *ret = poly_uop_index(ctx, index->src[0], coords, 2);
   free(clauses);
   free(dropped);
@@ -694,12 +677,7 @@ typedef struct {
 
 /* Tinygrad 2026-08-22/a9069c177a9d
  * codegen/late/coalesce.py:image_valid_dims. */
-static ImageDim *image_valid_dims(
-    PolyDType base,
-    int64_t size,
-    const char *arch,
-    int *count_out
-) {
+static ImageDim *image_valid_dims(PolyDType base, int64_t size, const char *arch, int *count_out) {
   if (count_out) *count_out = 0;
   const char *key = arch ? strstr(arch, "IMAGE_PITCH_ALIGNMENT=") : NULL;
   if (!key || size < 0) return NULL;
@@ -714,16 +692,19 @@ static ImageDim *image_valid_dims(
 
   ImageDim *dims = NULL;
   int count = 0, capacity = 0;
-#define APPEND_IMAGE_DIM(h_, w_)                                                                 \
-  do {                                                                                            \
-    if (count == capacity) {                                                                      \
-      int next = capacity ? capacity * 2 : 8;                                                     \
-      ImageDim *grown = realloc(dims, (size_t)next * sizeof(*grown));                             \
-      if (!grown) { free(dims); return NULL; }                                                    \
-      dims = grown;                                                                               \
-      capacity = next;                                                                            \
-    }                                                                                             \
-    dims[count++] = (ImageDim){(h_), (w_)};                                                       \
+#define APPEND_IMAGE_DIM(h_, w_)                                                                   \
+  do {                                                                                             \
+    if (count == capacity) {                                                                       \
+      int next = capacity ? capacity * 2 : 8;                                                      \
+      ImageDim *grown = realloc(dims, (size_t)next * sizeof(*grown));                              \
+      if (!grown) {                                                                                \
+        free(dims);                                                                                \
+        return NULL;                                                                               \
+      }                                                                                            \
+      dims = grown;                                                                                \
+      capacity = next;                                                                             \
+    }                                                                                              \
+    dims[count++] = (ImageDim){(h_), (w_)};                                                        \
   } while (0)
 
   if (size % ((int64_t)alignment * 4) != 0) {
@@ -733,8 +714,8 @@ static ImageDim *image_valid_dims(
 #else
     int64_t byte_alignment = alignment;
 #endif
-    if (itemsize > 0 && size <= INT64_MAX / itemsize &&
-        (itemsize * size) % byte_alignment == 0 && pixels <= max_width)
+    if (itemsize > 0 && size <= INT64_MAX / itemsize && (itemsize * size) % byte_alignment == 0 &&
+        pixels <= max_width)
       APPEND_IMAGE_DIM(1, pixels);
   } else {
     int64_t units = pixels / alignment;
@@ -749,26 +730,19 @@ static ImageDim *image_valid_dims(
 }
 
 static bool image_target_supported(const char *device) {
-  return device &&
-         (!strcmp(device, "QCOM") || !strcmp(device, "CL") ||
-          !strcmp(device, "PYTHON") || !strcmp(device, "NULL"));
+  return device && (!strcmp(device, "QCOM") || !strcmp(device, "CL") || !strcmp(device, "PYTHON") ||
+                    !strcmp(device, "NULL"));
 }
 
-static PolyUOp *image_coordinate(
-    PolyCtx *ctx,
-    PolyUOp *x,
-    int64_t width
-) {
+static PolyUOp *image_coordinate(PolyCtx *ctx, PolyUOp *x, int64_t width) {
   if (!x || width <= 0 || width > INT64_MAX / 4) return NULL;
   PolyUOp *four = poly_const_like_int(ctx, x, 4);
   PolyUOp *row_width = poly_const_like_int(ctx, x, 4 * width);
   PolyUOp *width_uop = poly_const_like_int(ctx, x, width);
-  PolyUOp *x_div_four =
-      poly_uop2(ctx, POLY_OP_FLOORDIV, x->dtype, x, four, poly_arg_none());
-  PolyUOp *coord_x = poly_uop2(
-      ctx, POLY_OP_FLOORMOD, x->dtype, x_div_four, width_uop, poly_arg_none());
-  PolyUOp *coord_y = poly_uop2(
-      ctx, POLY_OP_FLOORDIV, x->dtype, x, row_width, poly_arg_none());
+  PolyUOp *x_div_four = poly_uop2(ctx, POLY_OP_FLOORDIV, x->dtype, x, four, poly_arg_none());
+  PolyUOp *coord_x =
+      poly_uop2(ctx, POLY_OP_FLOORMOD, x->dtype, x_div_four, width_uop, poly_arg_none());
+  PolyUOp *coord_y = poly_uop2(ctx, POLY_OP_FLOORDIV, x->dtype, x, row_width, poly_arg_none());
   PolyUOp *src[2] = {coord_x, coord_y};
   return poly_uop_stack(ctx, src, 2);
 }
@@ -793,9 +767,8 @@ static PolyUOp *poly_transform_to_image(
 ) {
   (void)bindings;
   PolyImageRewriteCtx *image_ctx = poly_graph_rewrite_userctx();
-  if (!image_ctx || !poly_getenv_flag("IMAGE") ||
-      !image_target_supported(image_ctx->caps.device) || !shrink ||
-      shrink->op != POLY_OP_SHRINK || shrink->n_src != 3 ||
+  if (!image_ctx || !poly_getenv_flag("IMAGE") || !image_target_supported(image_ctx->caps.device) ||
+      !shrink || shrink->op != POLY_OP_SHRINK || shrink->n_src != 3 ||
       shrink->src[0]->op != POLY_OP_PARAM)
     return NULL;
   int64_t lanes = 0;
@@ -816,8 +789,8 @@ static PolyUOp *poly_transform_to_image(
     dims[0] = (ImageDim){known_height, known_width};
     n_dims = 1;
   } else {
-    dims = image_valid_dims(
-        buf->dtype, poly_uop_max_numel(ctx, buf), image_ctx->caps.arch, &n_dims);
+    dims =
+        image_valid_dims(buf->dtype, poly_uop_max_numel(ctx, buf), image_ctx->caps.arch, &n_dims);
   }
   if (!dims || n_dims == 0) {
     free(dims);
@@ -831,8 +804,8 @@ static PolyUOp *poly_transform_to_image(
     PolyUOp *candidate = image_coordinate(ctx, x, dims[i].width);
     candidate = candidate ? poly_uop_given_valid(ctx, valid, candidate, true) : NULL;
     if (!candidate) continue;
-    int dropped = drop_valid_stmts(
-        ctx, valid, candidate, dims[i].height, dims[i].width, NULL, NULL, NULL);
+    int dropped =
+        drop_valid_stmts(ctx, valid, candidate, dims[i].height, dims[i].width, NULL, NULL, NULL);
     if (dropped < 0) continue;
     int complexity = image_index_complexity(ctx, candidate);
     if (dropped > best_drop || (dropped == best_drop && complexity < best_complexity)) {
@@ -847,12 +820,10 @@ static PolyUOp *poly_transform_to_image(
   if (!best_idx || !image_ctx_store(image_ctx, slot, best_height, best_width)) return NULL;
 
   PolyUOp *shape_src[3] = {
-      poly_const_int(ctx, best_height), poly_const_int(ctx, best_width),
-      poly_const_int(ctx, 4)};
+      poly_const_int(ctx, best_height), poly_const_int(ctx, best_width), poly_const_int(ctx, 4)};
   PolyUOp *shape = poly_shape_to_shape_arg(ctx, shape_src, 3);
   PolyUOp *param_src[1] = {shape};
-  PolyUOp *image_buf = rebuild_preserve_tag(
-      ctx, buf, buf->dtype, param_src, 1);
+  PolyUOp *image_buf = rebuild_preserve_tag(ctx, buf, buf->dtype, param_src, 1);
   PolyUOp *zero = poly_const_int(ctx, 0), *one = poly_const_int(ctx, 1);
   PolyUOp *idx_x = poly_uop_index(ctx, best_idx, &zero, 1);
   PolyUOp *idx_y = poly_uop_index(ctx, best_idx, &one, 1);
@@ -874,8 +845,7 @@ static PolyUOp *poly_image_load_to_float(
       !poly_dtype_eq(load->dtype, POLY_FLOAT16) || load->src[0]->op != POLY_OP_INDEX ||
       !poly_dtype_eq(load->src[0]->dtype, POLY_FLOAT32))
     return NULL;
-  PolyUOp *float_load =
-      poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, load->src[0], poly_arg_none());
+  PolyUOp *float_load = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, load->src[0], poly_arg_none());
   return float_load ? poly_cast(ctx, float_load, POLY_FLOAT16) : NULL;
 }
 
@@ -886,8 +856,7 @@ static PolyUOp *poly_image_store_to_float(
 ) {
   (void)bindings;
   if (!store || store->op != POLY_OP_STORE || store->n_src != 2 ||
-      store->src[0]->op != POLY_OP_INDEX ||
-      !poly_dtype_eq(store->src[0]->dtype, POLY_FLOAT32) ||
+      store->src[0]->op != POLY_OP_INDEX || !poly_dtype_eq(store->src[0]->dtype, POLY_FLOAT32) ||
       !poly_dtype_eq(store->src[1]->dtype, POLY_FLOAT16))
     return NULL;
   PolyUOp *value = poly_cast(ctx, store->src[1], POLY_FLOAT32);

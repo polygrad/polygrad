@@ -17,21 +17,18 @@ extern "C" {
 #endif
 
 typedef struct {
-    int max_batch;
-    int max_seq_len;
-    PolyDevice device;
+  int max_batch;
+  int max_seq_len;
+  PolyDevice device;
 } PolyGenericImportOpts;
 
 typedef struct {
-    const char *model_type;
+  const char *model_type;
 
-    PolyInstance *(*from_hf_decoded)(
-        const PolyHfDecoded *hf,
-        const PolyGenericImportOpts *opts);
+  PolyInstance *(*from_hf_decoded)(const PolyHfDecoded *hf, const PolyGenericImportOpts *opts);
 
-    PolyInstance *(*from_gguf_decoded)(
-        const PolyGgufDecoded *gguf,
-        const PolyGenericImportOpts *opts);
+  PolyInstance *(*from_gguf_decoded
+  )(const PolyGgufDecoded *gguf, const PolyGenericImportOpts *opts);
 } PolyImportDesc;
 
 const PolyImportDesc *poly_import_desc_find(const char *model_type);

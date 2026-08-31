@@ -165,8 +165,8 @@ static double interp_f16_bits_to_f64(uint16_t bits) {
   uint32_t exp = (bits >> 10) & 0x1f;
   uint32_t mant = bits & 0x3ff;
   if (exp == 0x1f && mant != 0) {
-    uint64_t f64 = ((uint64_t)(bits & 0x8000u) << 48) | (UINT64_C(0x7ff) << 52) |
-                   ((uint64_t)mant << 42);
+    uint64_t f64 =
+        ((uint64_t)(bits & 0x8000u) << 48) | (UINT64_C(0x7ff) << 52) | ((uint64_t)mant << 42);
     double out;
     memcpy(&out, &f64, sizeof(out));
     return out;
@@ -557,8 +557,7 @@ static InterpLane eval_alu(PolyOps op, PolyDType dt, InterpLane *srcs, int n_src
 static InterpLane interp_truncate_lane(InterpLane v, PolyDType dt) {
   if (poly_dtype_is_float(dt)) {
     PolyDType s = dt;
-    if (poly_dtype_is_fp8(s))
-      return il_flt(poly_fp8_to_float(poly_float_to_fp8(v.f, s), s));
+    if (poly_dtype_is_fp8(s)) return il_flt(poly_fp8_to_float(poly_float_to_fp8(v.f, s), s));
     if (interp_is_bf16(s)) {
       uint16_t bits = interp_f32_to_bf16_bits((float)v.f);
       return il_flt(interp_bf16_bits_to_f32(bits));
@@ -677,8 +676,7 @@ static InterpLane cast_lane(InterpLane src, PolyDType src_dt, PolyDType dst_dt) 
   if (poly_dtype_is_float(dst_dt)) {
     InterpLane out = il_flt(as_float(src, src_dt));
     return poly_dtype_is_fp8(dst_dt) ? interp_truncate_lane(out, dst_dt) : out;
-  }
-  else if (poly_dtype_is_unsigned(dst_dt))
+  } else if (poly_dtype_is_unsigned(dst_dt))
     return interp_truncate_lane(il_uint(as_uint(src, src_dt)), dst_dt);
   else
     return interp_truncate_lane(il_int(as_int(src, src_dt)), dst_dt);
@@ -748,8 +746,7 @@ static int find_matching_end(PolyUOp **lin, int n, int range_pos) {
 static PolyUOp *interp_follow_storage_base(PolyUOp *u) {
   while (u) {
     if (u->op == POLY_OP_BUFFER &&
-        (poly_program_memory_is(u, POLY_ADDR_REG) ||
-         poly_program_memory_is(u, POLY_ADDR_LOCAL)))
+        (poly_program_memory_is(u, POLY_ADDR_REG) || poly_program_memory_is(u, POLY_ADDR_LOCAL)))
       return u;
     if ((u->op == POLY_OP_AFTER || u->op == POLY_OP_CAST || u->op == POLY_OP_BITCAST ||
          u->op == POLY_OP_INDEX || u->op == POLY_OP_SHRINK) &&
@@ -772,7 +769,7 @@ static int interp_uop_lane_count(PolyCtx *ctx, PolyUOp *u) {
 static int interp_storage_extent_for_use(PolyUOp *ptr_uop, int access_lanes) {
   int64_t base_hi = 0;
   bool saw_index = false;
-  for (PolyUOp *u = ptr_uop; u; ) {
+  for (PolyUOp *u = ptr_uop; u;) {
     if ((u->op == POLY_OP_INDEX || u->op == POLY_OP_SHRINK) && u->n_src > 1) {
       int64_t lo = 0, hi = 0;
       poly_uop_minmax(NULL, u->src[1], &lo, &hi);
@@ -797,12 +794,7 @@ static int interp_storage_extent_for_use(PolyUOp *ptr_uop, int access_lanes) {
   return (int)need;
 }
 
-static int interp_storage_lanes_for_def(
-    PolyCtx *ctx,
-    PolyUOp **lin,
-    int n_lin,
-    PolyUOp *def
-) {
+static int interp_storage_lanes_for_def(PolyCtx *ctx, PolyUOp **lin, int n_lin, PolyUOp *def) {
   int64_t declared = poly_program_buffer_size(def);
   int lanes = declared > INT_MAX ? INT_MAX : (int)declared;
   if (lanes < 1) lanes = interp_uop_lane_count(ctx, def);
@@ -810,8 +802,7 @@ static int interp_storage_lanes_for_def(
     PolyUOp *u = lin[i];
     if (u->op == POLY_OP_STORE && u->n_src >= 2) {
       if (interp_follow_storage_base(u->src[0]) == def) {
-        int need =
-            interp_storage_extent_for_use(u->src[0], interp_uop_lane_count(ctx, u->src[1]));
+        int need = interp_storage_extent_for_use(u->src[0], interp_uop_lane_count(ctx, u->src[1]));
         if (need > lanes) lanes = need;
       }
     } else if (u->op == POLY_OP_LOAD && u->n_src >= 1) {
@@ -848,9 +839,8 @@ static int interp_region(
       int arg_index = param_arg_indices[i];
       if (arg_index >= 0 && arg_index < n_args && args[arg_index]) {
         vals[i] = iv_scalar(
-            poly_uop_is_alu_param(u)
-                ? mem_load_scalar(args[arg_index], u->dtype)
-                : il_ptr(args[arg_index])
+            poly_uop_is_alu_param(u) ? mem_load_scalar(args[arg_index], u->dtype)
+                                     : il_ptr(args[arg_index])
         );
         iv_fixup(&vals[i]);
       } else {
@@ -888,8 +878,8 @@ static int interp_region(
     }
 
     case POLY_OP_BUFFER:
-      if (!(poly_program_memory_is(u, POLY_ADDR_REG) ||
-            poly_program_memory_is(u, POLY_ADDR_LOCAL))) {
+      if (!(poly_program_memory_is(u, POLY_ADDR_REG) || poly_program_memory_is(u, POLY_ADDR_LOCAL)
+          )) {
         fprintf(stderr, "polygrad: interp: unexpected BUFFER in program IR\n");
         return -1;
       }
@@ -915,11 +905,9 @@ static int interp_region(
       for (int ridx = 0; ridx < bound; ridx++) {
         vals[i] = iv_scalar(il_int(ridx));
         iv_fixup(&vals[i]);
-        int rc =
-            interp_region(
-                ctx, lin, n_lin, i + 1, end_pos, vals, args, n_args,
-                param_arg_indices, idx_map, arena
-            );
+        int rc = interp_region(
+            ctx, lin, n_lin, i + 1, end_pos, vals, args, n_args, param_arg_indices, idx_map, arena
+        );
         if (rc < 0) return rc;
       }
       i = end_pos; /* skip past END */
@@ -1050,9 +1038,7 @@ static int interp_region(
       vals[i].count = (uint16_t)cnt;
       if (cnt == 1) vals[i].lanes = &vals[i].inline0;
       for (int k = 0; k < cnt; k++)
-        iv_set(
-            &vals[i], k,
-            ptr ? mem_load_scalar(ptr + k * scalar_size, scalar_dt) : il_flt(0.0));
+        iv_set(&vals[i], k, ptr ? mem_load_scalar(ptr + k * scalar_size, scalar_dt) : il_flt(0.0));
       break;
     }
 
@@ -1067,8 +1053,7 @@ static int interp_region(
       int scalar_size = poly_dtype_itemsize(store_dt);
       if (scalar_size < 1) scalar_size = 1;
       char *ptr = (char *)iv_get(&vals[src0], 0).p;
-      if (!ptr && u->src[0]->op == POLY_OP_INDEX &&
-          poly_uop_is_image_shape(ctx, u->src[0]->src[0]))
+      if (!ptr && u->src[0]->op == POLY_OP_INDEX && poly_uop_is_image_shape(ctx, u->src[0]->src[0]))
         break;
       int cnt = vals[src1].count;
       for (int k = 0; k < cnt; k++)
@@ -1153,9 +1138,7 @@ static int interp_region(
             lane_srcs[j] = (src_idx[j] >= 0) ? iv_get(&vals[src_idx[j]], k) : il_int(0);
           iv_set(
               &vals[i], k,
-              interp_truncate_lane(
-                  eval_alu(u->op, alu_dt, lane_srcs, u->n_src), u->dtype
-              )
+              interp_truncate_lane(eval_alu(u->op, alu_dt, lane_srcs, u->n_src), u->dtype)
           );
         }
       } else {
@@ -1180,8 +1163,7 @@ int poly_interp_eval(PolyCtx *ctx, PolyUOp **lin, int n_lin, void **args, int n_
       PolyUOp *u = lin[i];
       fprintf(
           stderr, "  [%3d] %-16s dt=%s lanes=%lld nsrc=%d", i, poly_op_name(u->op),
-          u->dtype.name ? u->dtype.name : "?", (long long)poly_uop_max_numel(ctx, u),
-          u->n_src
+          u->dtype.name ? u->dtype.name : "?", (long long)poly_uop_max_numel(ctx, u), u->n_src
       );
       if (u->op == POLY_OP_CONST) {
         if (poly_dtype_is_float(u->dtype))
@@ -1220,8 +1202,7 @@ int poly_interp_eval(PolyCtx *ctx, PolyUOp **lin, int n_lin, void **args, int n_
   int next_buffer = 0, next_alu = n_buffer_params;
   for (int i = 0; i < n_lin; i++) {
     if (lin[i]->op != POLY_OP_PARAM) continue;
-    param_arg_indices[i] =
-        poly_uop_is_alu_param(lin[i]) ? next_alu++ : next_buffer++;
+    param_arg_indices[i] = poly_uop_is_alu_param(lin[i]) ? next_alu++ : next_buffer++;
   }
 
   /* Allocate lane arena: one contiguous block for all vector UOps */
@@ -1254,8 +1235,7 @@ int poly_interp_eval(PolyCtx *ctx, PolyUOp **lin, int n_lin, void **args, int n_
     uop_index_map_set(&idx_map, lin[i], i);
 
   int ret = interp_region(
-      ctx, lin, n_lin, 0, n_lin, vals, args, n_args, param_arg_indices, &idx_map,
-      arena
+      ctx, lin, n_lin, 0, n_lin, vals, args, n_args, param_arg_indices, &idx_map, arena
   );
 
   uop_index_map_free(&idx_map);

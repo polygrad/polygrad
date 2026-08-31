@@ -85,12 +85,7 @@ static PolyTensor *apply_activation(PolyCtx *ctx, PolyTensor *x, ActivationKind 
   return x;
 }
 
-static PolyTensor *mlp_linear(
-    PolyCtx *ctx,
-    PolyTensor *x,
-    PolyTensor *weight,
-    PolyTensor *bias
-) {
+static PolyTensor *mlp_linear(PolyCtx *ctx, PolyTensor *x, PolyTensor *weight, PolyTensor *bias) {
   /* Pinned nn.Linear stores (out,in), transposes it, then calls Tensor.linear;
    * Tensor.linear is dot followed by optional add
    * (nn/__init__.py:156-177; mixin/__init__.py:1335-1350). */
@@ -103,9 +98,8 @@ static PolyTensor *mlp_linear(
 static PolyTensor *mlp_int_scalar(PolyCtx *ctx, int64_t value) {
   PolyUOp *constant = poly_const_typed(ctx, POLY_INT32, (double)value);
   if (!constant) return NULL;
-  PolyTensor *out = poly_tensor_create_with_roots(
-      ctx, constant, constant, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO
-  );
+  PolyTensor *out =
+      poly_tensor_create_with_roots(ctx, constant, constant, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
   if (out) {
     poly_tensor_set_requires_grad(out, false);
     poly_tensor_set_provenance(out, POLY_TENSOR_PROVENANCE_CONST_INIT);
@@ -134,18 +128,13 @@ static PolyTensor *mlp_mse(PolyCtx *ctx, PolyTensor *pred, PolyTensor *target) {
   return square ? mlp_mean_all(ctx, square) : NULL;
 }
 
-static PolyTensor *mlp_dense_cross_entropy(
-    PolyCtx *ctx,
-    PolyTensor *logits,
-    PolyTensor *target
-) {
+static PolyTensor *mlp_dense_cross_entropy(PolyCtx *ctx, PolyTensor *logits, PolyTensor *target) {
   PolyUOp *physical = poly_tensor_uop_physical(logits);
   int ndim = physical ? poly_uop_ndim(ctx, physical) : -1;
   int classes_dim = ndim == 1 ? 0 : 1;
   if (ndim < 1) return NULL;
   PolyTensor *log_probs = poly_tensor_log_softmax(ctx, logits, classes_dim);
-  PolyTensor *weighted =
-      log_probs ? poly_tensor_alu2(ctx, POLY_OP_MUL, log_probs, target) : NULL;
+  PolyTensor *weighted = log_probs ? poly_tensor_alu2(ctx, POLY_OP_MUL, log_probs, target) : NULL;
   int64_t axis[] = {classes_dim};
   PolyTensor *reduced = weighted ? poly_tensor_sum(ctx, weighted, axis, 1, false) : NULL;
   PolyTensor *mean = reduced ? mlp_mean_all(ctx, reduced) : NULL;
@@ -219,8 +208,7 @@ PolyInstance *poly_mlp(const MLPConfig *cfg, PolyDevice device) {
     if (!x) goto fail_pre_build;
   }
 
-  if (poly_instance_output(inst, "output", x) != POLY_STATUS_OK)
-    goto fail_pre_build;
+  if (poly_instance_output(inst, "output", x) != POLY_STATUS_OK) goto fail_pre_build;
   const char *forward_inputs[] = {"x"};
   const char *forward_outputs[] = {"output"};
   if (poly_instance_entrypoint(inst, "forward", forward_inputs, 1, forward_outputs, 1, NULL) !=

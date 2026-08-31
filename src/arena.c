@@ -57,8 +57,7 @@ void *poly_arena_alloc(PolyArena *a, size_t size, size_t align) {
   void *ptr = b->data + offset;
   b->used = offset + size;
   a->total_used += size;
-  if (a->total_used > a->high_water)
-    a->high_water = a->total_used;
+  if (a->total_used > a->high_water) a->high_water = a->total_used;
   return ptr;
 }
 

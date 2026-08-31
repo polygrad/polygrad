@@ -57,7 +57,8 @@ static void upat_thread_registry_destroy(void *opaque) {
 }
 
 static void upat_thread_key_init(void) {
-  g_upat_thread_key_ready = pthread_key_create(&g_upat_thread_key, upat_thread_registry_destroy) == 0;
+  g_upat_thread_key_ready =
+      pthread_key_create(&g_upat_thread_key, upat_thread_registry_destroy) == 0;
 }
 
 static PolyUPatThreadRegistry *upat_thread_registry_get(bool create) {
@@ -249,7 +250,13 @@ PolyUPat *poly_upat_ops2c(PolyOpSet ops, PolyUPat *s0, PolyUPat *s1, const char 
   return p;
 }
 
-PolyUPat *poly_upat_ops3(PolyOpSet ops, PolyUPat *s0, PolyUPat *s1, PolyUPat *s2, const char *name) {
+PolyUPat *poly_upat_ops3(
+    PolyOpSet ops,
+    PolyUPat *s0,
+    PolyUPat *s1,
+    PolyUPat *s2,
+    const char *name
+) {
   PolyUPat *arr[] = {s0, s1, s2};
   return poly_upat_ops(ops, arr, 3, name);
 }
@@ -397,15 +404,18 @@ typedef struct {
 } UPatSourceMatch;
 
 static bool upat_match_continue(
-    const PolyUPat *pat, PolyUOp *uop, PolyBindings *binds,
-    UPatMatchContinuation continuation, void *opaque, bool allow_cast
+    const PolyUPat *pat,
+    PolyUOp *uop,
+    PolyBindings *binds,
+    UPatMatchContinuation continuation,
+    void *opaque,
+    bool allow_cast
 );
 
 static bool upat_match_sources_continue(PolyBindings *binds, void *opaque) {
   UPatSourceMatch *state = opaque;
   int source_count = state->pat->repeat_src ? state->uop->n_src : state->pat->n_src;
-  if (state->src_index == source_count)
-    return state->continuation(binds, state->opaque);
+  if (state->src_index == source_count) return state->continuation(binds, state->opaque);
 
   int uop_index = state->swapped ? 1 - state->src_index : state->src_index;
   int pattern_index = state->pat->repeat_src ? 0 : state->src_index;
@@ -424,8 +434,12 @@ static bool upat_match_sources_continue(PolyBindings *binds, void *opaque) {
 }
 
 static bool upat_match_continue(
-    const PolyUPat *pat, PolyUOp *uop, PolyBindings *binds,
-    UPatMatchContinuation continuation, void *opaque, bool allow_cast
+    const PolyUPat *pat,
+    PolyUOp *uop,
+    PolyBindings *binds,
+    UPatMatchContinuation continuation,
+    void *opaque,
+    bool allow_cast
 ) {
   int saved = binds->n;
 
@@ -445,8 +459,7 @@ static bool upat_match_continue(
     bool found = false;
     PolyDType scalar = uop->dtype;
     for (int i = 0; i < pat->n_dtypes; i++) {
-      if (poly_dtype_eq(pat->dtypes[i], uop->dtype) ||
-          poly_dtype_eq(pat->dtypes[i], scalar)) {
+      if (poly_dtype_eq(pat->dtypes[i], uop->dtype) || poly_dtype_eq(pat->dtypes[i], scalar)) {
         found = true;
         break;
       }
@@ -495,9 +508,7 @@ no_match:
   /* Pinned tinygrad UPat.or_casted is any(self, CAST(self)): direct-first and
    * exactly one CAST wrapper, not recursively CAST-tolerant. */
   if (allow_cast && pat->or_casted && uop->op == POLY_OP_CAST && uop->n_src == 1)
-    return upat_match_continue(
-        pat, uop->src[0], binds, continuation, opaque, false
-    );
+    return upat_match_continue(pat, uop->src[0], binds, continuation, opaque, false);
   return false;
 }
 
@@ -528,17 +539,14 @@ struct PolyPatternMatcher {
 };
 
 static bool pm_stats_env_enabled(void) {
-  int tracked = poly_getenv_int(
-      "POLY_TRACK_MATCH_STATS",
-      poly_getenv_int("TRACK_MATCH_STATS", 0)
-  );
+  int tracked = poly_getenv_int("POLY_TRACK_MATCH_STATS", poly_getenv_int("TRACK_MATCH_STATS", 0));
   return tracked > 0 || poly_getenv_flag("POLY_PRINT_MATCH_STATS") ||
          poly_getenv_flag("PRINT_MATCH_STATS");
 }
 
 static bool pm_trace_env_false(const char *v) {
-  return !v || !v[0] || strcmp(v, "0") == 0 || strcmp(v, "false") == 0 ||
-         strcmp(v, "False") == 0 || strcmp(v, "no") == 0 || strcmp(v, "NO") == 0;
+  return !v || !v[0] || strcmp(v, "0") == 0 || strcmp(v, "false") == 0 || strcmp(v, "False") == 0 ||
+         strcmp(v, "no") == 0 || strcmp(v, "NO") == 0;
 }
 
 static FILE *pm_trace_open(bool *owned) {
@@ -560,17 +568,33 @@ static void pm_trace_json_string(FILE *fp, const char *s) {
   if (s) {
     for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
       switch (*p) {
-        case '\\': fputs("\\\\", fp); break;
-        case '"': fputs("\\\"", fp); break;
-        case '\b': fputs("\\b", fp); break;
-        case '\f': fputs("\\f", fp); break;
-        case '\n': fputs("\\n", fp); break;
-        case '\r': fputs("\\r", fp); break;
-        case '\t': fputs("\\t", fp); break;
-        default:
-          if (*p < 0x20) fprintf(fp, "\\u%04x", (unsigned)*p);
-          else fputc((int)*p, fp);
-          break;
+      case '\\':
+        fputs("\\\\", fp);
+        break;
+      case '"':
+        fputs("\\\"", fp);
+        break;
+      case '\b':
+        fputs("\\b", fp);
+        break;
+      case '\f':
+        fputs("\\f", fp);
+        break;
+      case '\n':
+        fputs("\\n", fp);
+        break;
+      case '\r':
+        fputs("\\r", fp);
+        break;
+      case '\t':
+        fputs("\\t", fp);
+        break;
+      default:
+        if (*p < 0x20)
+          fprintf(fp, "\\u%04x", (unsigned)*p);
+        else
+          fputc((int)*p, fp);
+        break;
       }
     }
   }
@@ -753,9 +777,8 @@ PolyUOp *poly_pm_rewrite(PolyPatternMatcher *pm, PolyCtx *ctx, PolyUOp *uop) {
         .ctx = ctx,
         .uop = uop,
     };
-    bool accepted = upat_match_continue(
-        rule->pat, uop, &binds, upat_rewrite_continue, &rewrite, true
-    );
+    bool accepted =
+        upat_match_continue(rule->pat, uop, &binds, upat_rewrite_continue, &rewrite, true);
     poly_bindings_free(&binds);
     if (rewrite.matched && st) st->pattern_matches++;
     if (accepted && rewrite.result != NULL) {
@@ -767,8 +790,7 @@ PolyUOp *poly_pm_rewrite(PolyPatternMatcher *pm, PolyCtx *ctx, PolyUOp *uop) {
         }
         st->total_ms += dt;
       }
-      if (rewrite.result != uop)
-        pm_trace_emit_rewrite(pm, trace_st, uop, rewrite.result, dt);
+      if (rewrite.result != uop) pm_trace_emit_rewrite(pm, trace_st, uop, rewrite.result, dt);
       return rewrite.result;
     }
     if (st) st->total_ms += poly_now_ms() - t0;
@@ -804,8 +826,7 @@ PolyPatternMatcher *poly_pm_concat(PolyPatternMatcher *a, PolyPatternMatcher *b)
     free(names);
     return NULL;
   }
-  if (a->n_rules > 0)
-    memcpy(combined, a->rules, (size_t)a->n_rules * sizeof(PolyRule));
+  if (a->n_rules > 0) memcpy(combined, a->rules, (size_t)a->n_rules * sizeof(PolyRule));
   if (b->n_rules > 0)
     memcpy(combined + a->n_rules, b->rules, (size_t)b->n_rules * sizeof(PolyRule));
   for (int i = 0; i < a->n_rules; i++)
@@ -1008,8 +1029,8 @@ PolyUOp *poly_graph_rewrite_ctx_ex2(
               }
               for (int si = 0; si < n_seen_inline; si++)
                 poly_map_set(
-                    seen, poly_ptr_hash(seen_inline[si]), seen_inline[si],
-                    (void *)(uintptr_t)1, poly_ptr_eq
+                    seen, poly_ptr_hash(seen_inline[si]), seen_inline[si], (void *)(uintptr_t)1,
+                    poly_ptr_eq
                 );
             }
             poly_map_set(seen, poly_ptr_hash(cur), cur, (void *)(uintptr_t)1, poly_ptr_eq);
@@ -1096,29 +1117,16 @@ PolyUOp *poly_graph_rewrite_ctx_ex2(
         }
       } else {
         PolyDType rebuilt_dtype = poly_rebuild_dtype(new_n, new_src);
-        PolyArg rebuilt_arg =
-            (new_n->op == POLY_OP_CAST || new_n->op == POLY_OP_BITCAST)
-                ? poly_arg_dtype(rebuilt_dtype)
-                : new_n->arg;
-        new_src_n = (new_n->tag != 0 || new_n->tag_arg.kind != POLY_ARG_NONE)
-                        ? poly_uop_tagged_arg(
-                              ctx,
-                              new_n->op,
-                              rebuilt_dtype,
-                              new_src,
-                              new_n->n_src,
-                              rebuilt_arg,
-                              new_n->tag,
-                              new_n->tag_arg
-                          )
-                        : poly_uop(
-                              ctx,
-                              new_n->op,
-                              rebuilt_dtype,
-                              new_src,
-                              new_n->n_src,
-                              rebuilt_arg
-                          );
+        PolyArg rebuilt_arg = (new_n->op == POLY_OP_CAST || new_n->op == POLY_OP_BITCAST)
+                                  ? poly_arg_dtype(rebuilt_dtype)
+                                  : new_n->arg;
+        new_src_n =
+            (new_n->tag != 0 || new_n->tag_arg.kind != POLY_ARG_NONE)
+                ? poly_uop_tagged_arg(
+                      ctx, new_n->op, rebuilt_dtype, new_src, new_n->n_src, rebuilt_arg, new_n->tag,
+                      new_n->tag_arg
+                  )
+                : poly_uop(ctx, new_n->op, rebuilt_dtype, new_src, new_n->n_src, rebuilt_arg);
       }
       if (heap_src) free(new_src);
 
@@ -1251,22 +1259,15 @@ PolyUOp *poly_graph_walk_rewrite(
       PolyUOp *new_n;
       if (changed) {
         PolyDType rebuilt_dtype = poly_rebuild_dtype(n, new_src);
-        PolyArg rebuilt_arg =
-            (n->op == POLY_OP_CAST || n->op == POLY_OP_BITCAST)
-                ? poly_arg_dtype(rebuilt_dtype)
-                : n->arg;
-        new_n = (n->tag != 0 || n->tag_arg.kind != POLY_ARG_NONE)
-                    ? poly_uop_tagged_arg(
-                          ctx,
-                          n->op,
-                          rebuilt_dtype,
-                          new_src,
-                          n->n_src,
-                          rebuilt_arg,
-                          n->tag,
-                          n->tag_arg
-                      )
-                    : poly_uop(ctx, n->op, rebuilt_dtype, new_src, n->n_src, rebuilt_arg);
+        PolyArg rebuilt_arg = (n->op == POLY_OP_CAST || n->op == POLY_OP_BITCAST)
+                                  ? poly_arg_dtype(rebuilt_dtype)
+                                  : n->arg;
+        new_n =
+            (n->tag != 0 || n->tag_arg.kind != POLY_ARG_NONE)
+                ? poly_uop_tagged_arg(
+                      ctx, n->op, rebuilt_dtype, new_src, n->n_src, rebuilt_arg, n->tag, n->tag_arg
+                  )
+                : poly_uop(ctx, n->op, rebuilt_dtype, new_src, n->n_src, rebuilt_arg);
       } else {
         new_n = n;
       }

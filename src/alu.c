@@ -186,7 +186,6 @@ static bool is_cmp_op(PolyOps op) {
   return op == POLY_OP_CMPLT || op == POLY_OP_CMPNE || op == POLY_OP_CMPEQ;
 }
 
-
 static float f16_bits_to_f32(uint16_t h) {
   uint32_t sign = ((uint32_t)h & 0x8000u) << 16;
   uint32_t exp = ((uint32_t)h >> 10) & 0x1fu;
@@ -269,8 +268,8 @@ static double round_to_bf16(double x) {
  * over scalar dtype formats. Keep the same storage reinterpretation here;
  * memcpy avoids C aliasing and numeric-cast semantics. */
 bool poly_exec_bitcast_const(PolyDType from, PolyDType to, PolyArg value, PolyArg *out) {
-  if (!out || (!from.fmt && !poly_dtype_is_fp8(from)) ||
-      (!to.fmt && !poly_dtype_is_fp8(to)) || from.bitsize != to.bitsize ||
+  if (!out || (!from.fmt && !poly_dtype_is_fp8(from)) || (!to.fmt && !poly_dtype_is_fp8(to)) ||
+      from.bitsize != to.bitsize ||
       (from.bitsize != 8 && from.bitsize != 16 && from.bitsize != 32 && from.bitsize != 64))
     return false;
 
@@ -321,8 +320,7 @@ bool poly_exec_bitcast_const(PolyDType from, PolyDType to, PolyArg value, PolyAr
   }
   if (!poly_dtype_is_int(to)) return false;
 
-  if (!poly_dtype_is_unsigned(to) && to.bitsize < 64 &&
-      (bits & (UINT64_C(1) << (to.bitsize - 1))))
+  if (!poly_dtype_is_unsigned(to) && to.bitsize < 64 && (bits & (UINT64_C(1) << (to.bitsize - 1))))
     bits |= ~((UINT64_C(1) << to.bitsize) - 1);
   int64_t signed_bits = 0;
   memcpy(&signed_bits, &bits, sizeof(signed_bits));
@@ -371,13 +369,7 @@ static PolyArg truncate_result(PolyArg val, PolyDType dtype) {
 
 /* exec_alu: evaluate an ALU op on constant operands */
 
-PolyArg poly_exec_alu(
-    PolyOps op,
-    PolyDType dtype,
-    PolyArg *ops,
-    int n_ops,
-    bool truncate_output
-) {
+PolyArg poly_exec_alu(PolyOps op, PolyDType dtype, PolyArg *ops, int n_ops, bool truncate_output) {
   if (op == POLY_OP_CAST && n_ops == 1) {
     if (poly_dtype_is_bool(dtype)) return poly_arg_bool(arg_to_bool(ops[0]));
     if (poly_dtype_is_int(dtype)) {

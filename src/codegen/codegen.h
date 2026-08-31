@@ -39,15 +39,13 @@ static inline bool poly_kernel_optimize_enabled(PolyUOp *sink) {
 
 static inline const char *poly_kernel_name(PolyUOp *sink, const char *fallback) {
   if (sink && sink->op == POLY_OP_SINK && sink->arg.kind == POLY_ARG_KERNEL_INFO &&
-      sink->arg.kernel_info && sink->arg.kernel_info->name &&
-      sink->arg.kernel_info->name[0])
+      sink->arg.kernel_info && sink->arg.kernel_info->name && sink->arg.kernel_info->name[0])
     return sink->arg.kernel_info->name;
   return fallback ? fallback : "test";
 }
 
 static inline int poly_kernel_beam(PolyUOp *sink) {
-  return sink && sink->op == POLY_OP_SINK &&
-                 sink->arg.kind == POLY_ARG_KERNEL_INFO &&
+  return sink && sink->op == POLY_OP_SINK && sink->arg.kind == POLY_ARG_KERNEL_INFO &&
                  sink->arg.kernel_info
              ? sink->arg.kernel_info->beam
              : 0;
@@ -213,9 +211,7 @@ PolyUOp **poly_linearize_cuda(PolyCtx *ctx, PolyUOp *sink, int *n_out);
 
 /* Render linearized UOps to CUDA C source code.
  * Returns malloc'd string. Caller must free(). */
-char *poly_render_cuda(
-    PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name, int launch_bounds
-);
+char *poly_render_cuda(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name, int launch_bounds);
 
 /* CUDA Runtime */
 typedef struct PolyCudaProgram PolyCudaProgram;

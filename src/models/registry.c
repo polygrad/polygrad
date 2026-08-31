@@ -8,7 +8,7 @@
 /* PolyModelConfig (cJSON wrapper) */
 
 struct PolyModelConfig {
-  cJSON *root;  /* owned */
+  cJSON *root; /* owned */
 };
 
 PolyModelConfig *poly_model_config_new(void) {
@@ -43,7 +43,11 @@ float poly_model_config_get_float(const PolyModelConfig *cfg, const char *key, f
   return (float)item->valuedouble;
 }
 
-const char *poly_model_config_get_string(const PolyModelConfig *cfg, const char *key, const char *default_val) {
+const char *poly_model_config_get_string(
+    const PolyModelConfig *cfg,
+    const char *key,
+    const char *default_val
+) {
   if (!cfg || !cfg->root) return default_val;
   cJSON *item = cJSON_GetObjectItemCaseSensitive(cfg->root, key);
   if (!item || !cJSON_IsString(item)) return default_val;
@@ -67,5 +71,3 @@ void poly_model_config_free(PolyModelConfig *config) {
   if (config->root) cJSON_Delete(config->root);
   free(config);
 }
-
-

@@ -53,19 +53,32 @@ static bool compute_numel_checked(const int64_t *shape, int ndim, int64_t *out) 
 
 static const char *safetensor_dtype_name(PolySafetensorDType dtype) {
   switch (dtype) {
-  case POLY_ST_F32: return "F32";
-  case POLY_ST_F16: return "F16";
-  case POLY_ST_BF16: return "BF16";
-  case POLY_ST_F64: return "F64";
-  case POLY_ST_I64: return "I64";
-  case POLY_ST_I32: return "I32";
-  case POLY_ST_I16: return "I16";
-  case POLY_ST_I8: return "I8";
-  case POLY_ST_U8: return "U8";
-  case POLY_ST_BOOL: return "BOOL";
-  case POLY_ST_U16: return "U16";
-  case POLY_ST_U32: return "U32";
-  case POLY_ST_U64: return "U64";
+  case POLY_ST_F32:
+    return "F32";
+  case POLY_ST_F16:
+    return "F16";
+  case POLY_ST_BF16:
+    return "BF16";
+  case POLY_ST_F64:
+    return "F64";
+  case POLY_ST_I64:
+    return "I64";
+  case POLY_ST_I32:
+    return "I32";
+  case POLY_ST_I16:
+    return "I16";
+  case POLY_ST_I8:
+    return "I8";
+  case POLY_ST_U8:
+    return "U8";
+  case POLY_ST_BOOL:
+    return "BOOL";
+  case POLY_ST_U16:
+    return "U16";
+  case POLY_ST_U32:
+    return "U32";
+  case POLY_ST_U64:
+    return "U64";
   }
   return NULL;
 }
@@ -108,9 +121,8 @@ uint8_t *poly_safetensors_encode(
   for (int i = 0; i < n; i++) {
     int64_t numel = 0;
     int elem_size = poly_safetensor_dtype_size(entries[i].dtype);
-    if (!entries[i].name || !*entries[i].name ||
-        !safetensor_dtype_name(entries[i].dtype) || elem_size <= 0 ||
-        !compute_numel_checked(entries[i].shape, entries[i].ndim, &numel) ||
+    if (!entries[i].name || !*entries[i].name || !safetensor_dtype_name(entries[i].dtype) ||
+        elem_size <= 0 || !compute_numel_checked(entries[i].shape, entries[i].ndim, &numel) ||
         (numel > 0 && !entries[i].data))
       return NULL;
   }
@@ -257,8 +269,7 @@ uint8_t *poly_safetensors_encode(
     (void)compute_numel_checked(entries[idx].shape, entries[idx].ndim, &numel);
     int elem_size = poly_safetensor_dtype_size(entries[idx].dtype);
     uint64_t byte_offset = 8 + header_size + offsets[i];
-    if (numel > 0)
-      memcpy(buf + byte_offset, entries[idx].data, (size_t)numel * (size_t)elem_size);
+    if (numel > 0) memcpy(buf + byte_offset, entries[idx].data, (size_t)numel * (size_t)elem_size);
   }
 
   free(order);

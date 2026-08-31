@@ -223,8 +223,7 @@ TEST(hf, gpt2_build_tiny) {
       .n_layer = 1,
       .max_seq_len = 8,
       .batch_size = 1,
-      .norm_eps = 1e-5f
-  };
+      .norm_eps = 1e-5f};
 
   PolyInstance *inst = poly_gpt2(&cfg, POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
@@ -272,8 +271,7 @@ TEST(hf, gpt2_build_multi_layer) {
       .n_layer = 3,
       .max_seq_len = 16,
       .batch_size = 2,
-      .norm_eps = 1e-5f
-  };
+      .norm_eps = 1e-5f};
 
   PolyInstance *inst = poly_gpt2(&cfg, POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
@@ -537,8 +535,7 @@ TEST(hf, gpt2_forward_e2e) {
       .n_layer = 1,
       .max_seq_len = 8,
       .batch_size = 1,
-      .norm_eps = 1e-5f
-  };
+      .norm_eps = 1e-5f};
 
   PolyInstance *inst = poly_gpt2(&cfg, POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
@@ -607,9 +604,8 @@ TEST(hf, gpt2_forward_e2e) {
 
   int ir_len = 0, weights_len = 0;
   uint8_t *ir = poly_instance_export_ir(inst, &ir_len);
-  uint8_t *weights = poly_instance_export_weights_ex(
-      inst, &weights_len, POLY_EXPORT_WEIGHTS_PARAMS
-  );
+  uint8_t *weights =
+      poly_instance_export_weights_ex(inst, &weights_len, POLY_EXPORT_WEIGHTS_PARAMS);
   ASSERT_NOT_NULL(ir);
   ASSERT_NOT_NULL(weights);
 
@@ -650,8 +646,7 @@ TEST(hf, gpt2_training_loss_decreases) {
       .n_layer = 1,
       .max_seq_len = 8,
       .batch_size = 1,
-      .norm_eps = 1e-5f
-  };
+      .norm_eps = 1e-5f};
 
   PolyInstance *inst = poly_gpt2(&cfg, POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);

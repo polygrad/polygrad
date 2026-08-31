@@ -81,7 +81,18 @@ typedef hipError_t (*hipMemcpy_fn)(void *, const void *, size_t, int);
 typedef hipError_t (*hipMemset_fn)(void *, int, size_t);
 typedef hipError_t (*hipModuleLoadData_fn)(hipModule_t *, const void *);
 typedef hipError_t (*hipModuleGetFunction_fn)(hipFunction_t *, hipModule_t, const char *);
-typedef hipError_t (*hipModuleLaunchKernel_fn)(hipFunction_t, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, void *, void **, void **);
+typedef hipError_t (*hipModuleLaunchKernel_fn
+)(hipFunction_t,
+  unsigned int,
+  unsigned int,
+  unsigned int,
+  unsigned int,
+  unsigned int,
+  unsigned int,
+  unsigned int,
+  void *,
+  void **,
+  void **);
 typedef hipError_t (*hipDeviceSynchronize_fn)(void);
 typedef hipError_t (*hipModuleUnload_fn)(hipModule_t);
 
@@ -91,11 +102,8 @@ typedef amd_comgr_status_t (*comgr_destroy_action_info_fn)(amd_comgr_action_info
 typedef amd_comgr_status_t (*comgr_set_language_fn)(amd_comgr_action_info_t, int);
 typedef amd_comgr_status_t (*comgr_set_isa_name_fn)(amd_comgr_action_info_t, const char *);
 typedef amd_comgr_status_t (*comgr_set_logging_fn)(amd_comgr_action_info_t, bool);
-typedef amd_comgr_status_t (*comgr_set_option_list_fn)(
-    amd_comgr_action_info_t,
-    const char *const *,
-    size_t
-);
+typedef amd_comgr_status_t (*comgr_set_option_list_fn
+)(amd_comgr_action_info_t, const char *const *, size_t);
 typedef amd_comgr_status_t (*comgr_create_data_set_fn)(amd_comgr_data_set_t *);
 typedef amd_comgr_status_t (*comgr_destroy_data_set_fn)(amd_comgr_data_set_t);
 typedef amd_comgr_status_t (*comgr_create_data_fn)(int kind, amd_comgr_data_t *);
@@ -104,13 +112,10 @@ typedef amd_comgr_status_t (*comgr_set_data_fn)(amd_comgr_data_t, size_t, const 
 typedef amd_comgr_status_t (*comgr_set_data_name_fn)(amd_comgr_data_t, const char *);
 typedef amd_comgr_status_t (*comgr_get_data_fn)(amd_comgr_data_t, size_t *, char *);
 typedef amd_comgr_status_t (*comgr_data_set_add_fn)(amd_comgr_data_set_t, amd_comgr_data_t);
-typedef amd_comgr_status_t (*comgr_do_action_fn)(
-    int action,
-    amd_comgr_action_info_t,
-    amd_comgr_data_set_t,
-    amd_comgr_data_set_t
-);
-typedef amd_comgr_status_t (*comgr_action_data_get_data_fn)(amd_comgr_data_set_t, int kind, size_t index, amd_comgr_data_t *);
+typedef amd_comgr_status_t (*comgr_do_action_fn
+)(int action, amd_comgr_action_info_t, amd_comgr_data_set_t, amd_comgr_data_set_t);
+typedef amd_comgr_status_t (*comgr_action_data_get_data_fn
+)(amd_comgr_data_set_t, int kind, size_t index, amd_comgr_data_t *);
 typedef amd_comgr_status_t (*comgr_get_version_fn)(uint64_t *, uint64_t *);
 
 /* Loaded symbols */

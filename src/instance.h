@@ -355,8 +355,18 @@ int poly_instance_test_optimizer_kind(const PolyInstance *inst);
 
 int poly_instance_read_buf(PolyInstance *inst, int i, void *host_dst, size_t dst_len);
 int poly_instance_write_buf(PolyInstance *inst, int i, const void *host_src, size_t src_len);
-int poly_instance_read_buf_named(PolyInstance *inst, const char *name, void *host_dst, size_t dst_len);
-int poly_instance_write_buf_named(PolyInstance *inst, const char *name, const void *host_src, size_t src_len);
+int poly_instance_read_buf_named(
+    PolyInstance *inst,
+    const char *name,
+    void *host_dst,
+    size_t dst_len
+);
+int poly_instance_write_buf_named(
+    PolyInstance *inst,
+    const char *name,
+    const void *host_src,
+    size_t src_len
+);
 
 /* Compatibility names for the original copy-style API. */
 int poly_instance_readback_buf(PolyInstance *inst, int i, void *host_dst, size_t dst_len);
@@ -376,12 +386,14 @@ typedef struct {
   int dtype_id;
 } PolyIOBinding;
 
-#define POLY_IO_BINDING_BYTES(name_, data_, nbytes_, dtype_)                                  \
-  ((PolyIOBinding){                                                                            \
-      .name = (name_), .data = (data_), .nbytes = (nbytes_),                                  \
-      .dtype_id = poly_dtype_id_by_name(poly_dtype_name(dtype_)),                             \
+#define POLY_IO_BINDING_BYTES(name_, data_, nbytes_, dtype_)                                       \
+  ((PolyIOBinding){                                                                                \
+      .name = (name_),                                                                             \
+      .data = (data_),                                                                             \
+      .nbytes = (nbytes_),                                                                         \
+      .dtype_id = poly_dtype_id_by_name(poly_dtype_name(dtype_)),                                  \
   })
-#define POLY_IO_BINDING_ARRAY(name_, data_, dtype_)                                            \
+#define POLY_IO_BINDING_ARRAY(name_, data_, dtype_)                                                \
   POLY_IO_BINDING_BYTES((name_), (data_), sizeof(data_), (dtype_))
 
 /* Generic entrypoint execution. Compiles lazily on first call.

@@ -63,7 +63,7 @@ struct PolyBuffer {
   PolyDevice device;
   bool owned; /* should allocator->free be called when this residency is retired? */
   const PolyAllocator *allocator; /* allocator for this buffer (set at allocation time) */
-  PolyBuffer *src;  /* root source buffer (usually host), or NULL */
+  PolyBuffer *src; /* root source buffer (usually host), or NULL */
   bool valid; /* does ptr contain current logical contents? */
   PolyFrontendBufferReleaseFn frontend_release; /* imported HOST owner release hook */
   bool memory_accounted; /* contributes to ctx GlobalCounters.mem_used */
@@ -97,8 +97,12 @@ void poly_buffer_attach(PolyCtx *ctx, PolyUOp *buf, const PolyBuffer *handle);
 void poly_buffer_adopt(PolyCtx *ctx, PolyUOp *buf, const PolyBuffer *handle);
 
 PolyUOp *poly_buffer_from_host(
-    PolyCtx *ctx, void *ptr, size_t nbytes, int dtype_id,
-    int64_t *dims, int ndim
+    PolyCtx *ctx,
+    void *ptr,
+    size_t nbytes,
+    int dtype_id,
+    int64_t *dims,
+    int ndim
 );
 
 /* Build a frontend-host BUFFER from an existing UNIQUE and attach imported
@@ -159,12 +163,7 @@ int poly_buffer_handle_ensure_allocated(PolyCtx *ctx, PolyBuffer *buffer);
 /* Current Tinygrad Buffer.get_buf(device) analogue for a resolved scalar
  * runtime handle. Browser HOST imports are JS-owned keys; HOST execution
  * materializes such a key into addressable Wasm memory on first use. */
-int poly_buffer_handle_get_buf(
-    PolyCtx *ctx,
-    PolyBuffer *buffer,
-    PolyDevice device,
-    void **out
-);
+int poly_buffer_handle_get_buf(PolyCtx *ctx, PolyBuffer *buffer, PolyDevice device, void **out);
 
 /* Free this residency's ptr if owned. Resets ptr=NULL, owned=false, valid=false.
  * Does NOT touch b->src. Does not remove from the side table.

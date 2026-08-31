@@ -16,8 +16,7 @@ static PolyUOp *gater_rebuild(PolyCtx *ctx, PolyUOp *u, PolyUOp **src, int n_src
 static bool gater_invalid_where(PolyUOp *u, PolyUOp **gate, PolyUOp **index) {
   if (!u || u->op != POLY_OP_WHERE || u->n_src != 3 || !u->src[2] ||
       u->src[2]->op != POLY_OP_CONST || u->src[2]->arg.kind != POLY_ARG_INVALID ||
-      !poly_dtype_is_bool(u->src[0]->dtype) ||
-      !poly_dtype_is_int(u->src[1]->dtype))
+      !poly_dtype_is_bool(u->src[0]->dtype) || !poly_dtype_is_int(u->src[1]->dtype))
     return false;
   if (gate) *gate = u->src[0];
   if (index) *index = u->src[1];
@@ -46,18 +45,15 @@ static PolyUOp *ungated_first_index(PolyCtx *ctx, PolyUOp *mop, PolyUOp **gate_o
   if (!src) return NULL;
   src[0] = mop->src[0];
   src[1] = idx;
-  for (int i = 2; i < mop->n_src; i++) src[i] = mop->src[i];
+  for (int i = 2; i < mop->n_src; i++)
+    src[i] = mop->src[i];
   PolyUOp *ret = gater_rebuild(ctx, mop, src, mop->n_src);
   free(src);
   if (ret && gate_out) *gate_out = gate;
   return ret;
 }
 
-static PolyUOp *move_gated_image_index_to_load(
-    PolyCtx *ctx,
-    PolyUOp *load,
-    const PolyBindings *b
-) {
+static PolyUOp *move_gated_image_index_to_load(PolyCtx *ctx, PolyUOp *load, const PolyBindings *b) {
   (void)b;
   if (!load || load->op != POLY_OP_LOAD || load->n_src < 1 || load->n_src >= 3) return NULL;
   PolyUOp *gate = NULL;
@@ -83,11 +79,7 @@ static PolyUOp *move_gated_image_index_to_store(
 }
 
 /* Tinygrad gater.py:14-16 moves one gated coordinate to LOAD's gate. */
-static PolyUOp *move_gated_index_to_load(
-    PolyCtx *ctx,
-    PolyUOp *load,
-    const PolyBindings *b
-) {
+static PolyUOp *move_gated_index_to_load(PolyCtx *ctx, PolyUOp *load, const PolyBindings *b) {
   (void)b;
   if (!load || load->op != POLY_OP_LOAD || load->n_src < 1 || load->n_src >= 3) return NULL;
   PolyUOp *gate = NULL;
@@ -99,11 +91,7 @@ static PolyUOp *move_gated_index_to_load(
 }
 
 /* Tinygrad gater.py:17 moves one gated coordinate to STORE's gate. */
-static PolyUOp *move_gated_index_to_store(
-    PolyCtx *ctx,
-    PolyUOp *store,
-    const PolyBindings *b
-) {
+static PolyUOp *move_gated_index_to_store(PolyCtx *ctx, PolyUOp *store, const PolyBindings *b) {
   (void)b;
   if (!store || store->op != POLY_OP_STORE || store->n_src != 2) return NULL;
   PolyUOp *gate = NULL;
@@ -115,16 +103,14 @@ static PolyUOp *move_gated_index_to_store(
 
 static PolyUOp *unwrap_casted_load(PolyUOp *u) {
   if (u && u->op == POLY_OP_LOAD) return u;
-  return u && u->op == POLY_OP_CAST && u->n_src == 1 && u->src[0] &&
-                 u->src[0]->op == POLY_OP_LOAD
+  return u && u->op == POLY_OP_CAST && u->n_src == 1 && u->src[0] && u->src[0]->op == POLY_OP_LOAD
              ? u->src[0]
              : NULL;
 }
 
 static bool is_logical_not(PolyUOp *u, PolyUOp *gate) {
-  return u && u->op == POLY_OP_CMPNE && u->n_src == 2 && u->src[0] == gate &&
-         u->src[1] && u->src[1]->op == POLY_OP_CONST &&
-         u->src[1]->arg.kind == POLY_ARG_BOOL && u->src[1]->arg.b;
+  return u && u->op == POLY_OP_CMPNE && u->n_src == 2 && u->src[0] == gate && u->src[1] &&
+         u->src[1]->op == POLY_OP_CONST && u->src[1]->arg.kind == POLY_ARG_BOOL && u->src[1]->arg.b;
 }
 
 /* Current Tinygrad gater.py:move_where_load. */
@@ -134,8 +120,7 @@ static PolyUOp *move_where_load(PolyCtx *ctx, PolyUOp *where, PolyUOp *load, Pol
     load_alt = poly_const_like_int(ctx, load, 0);
   else if (alt->op == POLY_OP_CONST)
     load_alt = poly_const_like(ctx, load, alt->arg);
-  else if (alt->op == POLY_OP_CAST && alt->n_src == 1 &&
-           poly_dtype_eq(alt->src[0]->dtype, load->dtype))
+  else if (alt->op == POLY_OP_CAST && alt->n_src == 1 && poly_dtype_eq(alt->src[0]->dtype, load->dtype))
     load_alt = alt->src[0];
   else
     load_alt = poly_cast(ctx, alt, load->dtype);
@@ -145,11 +130,7 @@ static PolyUOp *move_where_load(PolyCtx *ctx, PolyUOp *where, PolyUOp *load, Pol
   return ret ? poly_cast(ctx, ret, where->dtype) : NULL;
 }
 
-static PolyUOp *move_where_gated_load(
-    PolyCtx *ctx,
-    PolyUOp *where,
-    const PolyBindings *b
-) {
+static PolyUOp *move_where_gated_load(PolyCtx *ctx, PolyUOp *where, const PolyBindings *b) {
   (void)b;
   if (!where || where->op != POLY_OP_WHERE || where->n_src != 3) return NULL;
   PolyUOp *load = unwrap_casted_load(where->src[1]);
@@ -157,11 +138,7 @@ static PolyUOp *move_where_gated_load(
   return move_where_load(ctx, where, load, where->src[2]);
 }
 
-static PolyUOp *move_where_reverse_gated_load(
-    PolyCtx *ctx,
-    PolyUOp *where,
-    const PolyBindings *b
-) {
+static PolyUOp *move_where_reverse_gated_load(PolyCtx *ctx, PolyUOp *where, const PolyBindings *b) {
   (void)b;
   if (!where || where->op != POLY_OP_WHERE || where->n_src != 3) return NULL;
   PolyUOp *load = unwrap_casted_load(where->src[2]);

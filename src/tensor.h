@@ -354,7 +354,14 @@ PolyUOp *poly_rearrange(
 
 PolyUOp *poly_gather(PolyCtx *ctx, PolyUOp *table, PolyUOp *indices);
 PolyUOp *poly_gather_dim(PolyCtx *ctx, PolyUOp *x, int dim, PolyUOp *index);
-PolyUOp *poly_scatter(PolyCtx *ctx, PolyUOp *self, int dim, PolyUOp *index, PolyUOp *src, const char *reduce);
+PolyUOp *poly_scatter(
+    PolyCtx *ctx,
+    PolyUOp *self,
+    int dim,
+    PolyUOp *index,
+    PolyUOp *src,
+    const char *reduce
+);
 PolyUOp *poly_scatter_reduce(
     PolyCtx *ctx,
     PolyUOp *self,

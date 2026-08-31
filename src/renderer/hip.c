@@ -157,7 +157,11 @@ static void hip_render_ctype(PolyDType dtype, int lanes, char *buf, int cap) {
  * scalar base type stays on BUFFER; a width-changing INDEX/SHRINK is accessed
  * by casting its address to the vector pointer type and dereferencing it. */
 static void hip_render_access_expr(
-    char *buf, int cap, const char *address, PolyDType value_dtype, int lanes
+    char *buf,
+    int cap,
+    const char *address,
+    PolyDType value_dtype,
+    int lanes
 ) {
   if (lanes > 1) {
     char value_type[128];
@@ -248,27 +252,17 @@ static char *hip_render_const_literal(PolyUOp *c, PolyDType dtype) {
     }
     hip_render_int64_const(c->arg.i, val, sizeof(val));
   } else if (poly_dtype_eq(scalar, POLY_UINT64)) {
-    snprintf(
-        val, sizeof(val), "%lluull",
-        (unsigned long long)poly_arg_integer_to_u64_mod(c->arg)
-    );
+    snprintf(val, sizeof(val), "%lluull", (unsigned long long)poly_arg_integer_to_u64_mod(c->arg));
   } else if (poly_dtype_eq(scalar, POLY_UINT32)) {
-    snprintf(
-        val, sizeof(val), "%uu",
-        (unsigned)(uint32_t)poly_arg_integer_to_u64_mod(c->arg)
-    );
-  } else if (poly_dtype_eq(scalar, POLY_UINT8) || poly_dtype_eq(scalar, POLY_UINT16) ||
-             poly_dtype_eq(scalar, POLY_INT8) || poly_dtype_eq(scalar, POLY_INT16)) {
+    snprintf(val, sizeof(val), "%uu", (unsigned)(uint32_t)poly_arg_integer_to_u64_mod(c->arg));
+  } else if (poly_dtype_eq(scalar, POLY_UINT8) || poly_dtype_eq(scalar, POLY_UINT16) || poly_dtype_eq(scalar, POLY_INT8) || poly_dtype_eq(scalar, POLY_INT16)) {
     if (poly_dtype_is_unsigned(scalar))
       snprintf(
           val, sizeof(val), "((%s)(%uu))", hip_scalar_ctype(scalar),
           (unsigned)(uint32_t)poly_arg_integer_to_u64_mod(c->arg)
       );
     else
-      snprintf(
-          val, sizeof(val), "((%s)(%lld))", hip_scalar_ctype(scalar),
-          (long long)c->arg.i
-      );
+      snprintf(val, sizeof(val), "((%s)(%lld))", hip_scalar_ctype(scalar), (long long)c->arg.i);
   } else if (c->arg.kind == POLY_ARG_BIGINT) {
     return poly_arg_integer_to_decimal(c->arg);
   } else {
@@ -510,8 +504,7 @@ static void hip_scan_used_funcs(PolyCtx *ctx, PolyUOp **uops, int n, HipUsedFunc
     if (poly_dtype_eq(u->dtype, POLY_BFLOAT16)) used->uses_bf16 = true;
     if (poly_dtype_is_fp8(u->dtype)) used->uses_fp8 = true;
     if (u->op == POLY_OP_CAST && u->n_src == 1 && poly_dtype_is_fp8(u->dtype) &&
-        (poly_dtype_eq(u->src[0]->dtype, POLY_FLOAT32) ||
-         u->src[0]->op == POLY_OP_CONST))
+        (poly_dtype_eq(u->src[0]->dtype, POLY_FLOAT32) || u->src[0]->op == POLY_OP_CONST))
       used->uses_f32_to_fp8 = true;
     bool is_f64 = poly_dtype_eq(u->dtype, POLY_FLOAT64);
     switch (u->op) {
@@ -584,11 +577,8 @@ static const char *hip_wmma_type_name(PolyDType dtype) {
 
 /* Tinygrad 2026-08-22/a9069c177a9d HIPRenderer.render_kernel emits the
  * architecture-specific builtin binding for each wmma_args signature. */
-static bool hip_render_wmma_prefix(
-    HipStrBuf *out, PolyUOp *wmma, const char *arch
-) {
-  if (!wmma || wmma->n_src != 3 || wmma->arg.kind != POLY_ARG_TENSOR_CORE)
-    return false;
+static bool hip_render_wmma_prefix(HipStrBuf *out, PolyUOp *wmma, const char *arch) {
+  if (!wmma || wmma->n_src != 3 || wmma->arg.kind != POLY_ARG_TENSOR_CORE) return false;
   char name[128];
   if (!poly_wmma_name(wmma, name, sizeof(name))) return false;
   int n = wmma->arg.tensor_core.dims[0];
@@ -623,8 +613,7 @@ static bool hip_render_wmma_prefix(
     const char *input = hip_wmma_type_name(dtype_in);
     if (!dtype_out || !input) return false;
     hsb_printf(
-        out, "#define __%s __builtin_amdgcn_wmma_%s_16x16x16_%s_w32_gfx12\n",
-        name, dtype_out, input
+        out, "#define __%s __builtin_amdgcn_wmma_%s_16x16x16_%s_w32_gfx12\n", name, dtype_out, input
     );
     return true;
   }
@@ -633,8 +622,10 @@ static bool hip_render_wmma_prefix(
     hsb_puts(out, "typedef int wmma_int4 __attribute__((ext_vector_type(4)));\n");
     hsb_printf(
         out,
-        "static inline __attribute__((device)) int8 __%s(signed_char16 a, signed_char16 b, int8 c) {\n"
-        "  return __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(true, __builtin_bit_cast(wmma_int4, a),\n"
+        "static inline __attribute__((device)) int8 __%s(signed_char16 a, signed_char16 b, int8 c) "
+        "{\n"
+        "  return __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(true, __builtin_bit_cast(wmma_int4, "
+        "a),\n"
         "    true, __builtin_bit_cast(wmma_int4, b), c, false);\n}\n",
         name
     );
@@ -642,14 +633,10 @@ static bool hip_render_wmma_prefix(
   }
   if (poly_dtype_eq(wmma->dtype, POLY_FLOAT32)) {
     const char *input = poly_dtype_eq(dtype_in, POLY_FLOAT16) ? "f16" : "bf16";
-    hsb_printf(
-        out, "#define __%s __builtin_amdgcn_wmma_f32_16x16x16_%s_w32\n", name,
-        input
-    );
+    hsb_printf(out, "#define __%s __builtin_amdgcn_wmma_f32_16x16x16_%s_w32\n", name, input);
     return true;
   }
-  if (poly_dtype_eq(wmma->dtype, POLY_FLOAT16) &&
-      poly_dtype_eq(dtype_in, POLY_FLOAT16)) {
+  if (poly_dtype_eq(wmma->dtype, POLY_FLOAT16) && poly_dtype_eq(dtype_in, POLY_FLOAT16)) {
     hsb_printf(
         out,
         "static inline __attribute__((device)) half8 __%s(half16 a, half16 b, half8 c) {\n"
@@ -747,8 +734,7 @@ char *poly_render_hip(
       PolyDType base = u->dtype;
       char type[64];
       snprintf(
-          type, sizeof(type), poly_uop_is_alu_param(u) ? "const %s" : "%s*",
-          hip_scalar_ctype(base)
+          type, sizeof(type), poly_uop_is_alu_param(u) ? "const %s" : "%s*", hip_scalar_ctype(base)
       );
       param_types[n_params] = strdup(type);
       param_names[n_params] = strdup(name);
@@ -899,18 +885,15 @@ char *poly_render_hip(
      * pm_add_buffers_local directly. */
     if (u->op == POLY_OP_BUFFER && poly_program_memory_is(u, POLY_ADDR_LOCAL)) {
       char name[32];
-      snprintf(
-          name, sizeof(name), "smem%lld",
-          (long long)poly_program_buffer_slot(u)
-      );
+      snprintf(name, sizeof(name), "smem%lld", (long long)poly_program_buffer_slot(u));
       hsmap_set(&names, u, strdup(name));
 
       /* HIP shared memory: __attribute__((shared, aligned(16))) */
       int64_t smem_size = poly_program_buffer_size(u);
       PolyDType base = poly_program_buffer_dtype(u);
       hsb_printf(
-          &decls, "  __attribute__((shared, aligned(16))) %s %s[%lld];\n",
-          hip_scalar_ctype(base), name, (long long)smem_size
+          &decls, "  __attribute__((shared, aligned(16))) %s %s[%lld];\n", hip_scalar_ctype(base),
+          name, (long long)smem_size
       );
       continue;
     }
@@ -955,9 +938,8 @@ char *poly_render_hip(
         hsb_puts(&body, "  ");
 
       /* Pinned tinygrad final IR: LOAD(INDEX(buf, idx), alt, gate). */
-      PolyUOp *gate_uop = (u->n_src >= 3 && poly_dtype_is_bool(u->src[2]->dtype))
-                              ? u->src[2]
-                              : NULL;
+      PolyUOp *gate_uop =
+          (u->n_src >= 3 && poly_dtype_is_bool(u->src[2]->dtype)) ? u->src[2] : NULL;
       if (gate_uop && u->n_src >= 2) {
         char *gate_s = hsmap_get(&names, gate_uop);
         char *alt_s = hsmap_get(&names, u->src[1]);
@@ -998,9 +980,7 @@ char *poly_render_hip(
         else if (isinf(u->src[0]->arg.f))
           snprintf(value, sizeof(value), u->src[0]->arg.f > 0 ? "INFINITY" : "-INFINITY");
         else
-          hip_render_float_const(
-              u->src[0]->arg.f, POLY_FLOAT32, value, sizeof(value)
-          );
+          hip_render_float_const(u->src[0]->arg.f, POLY_FLOAT32, value, sizeof(value));
         char expr[160];
         snprintf(
             expr, sizeof(expr), "f32_to_fp8(%s, %d)", value,
@@ -1029,14 +1009,12 @@ char *poly_render_hip(
       }
       for (int d = 0; d < depth; d++)
         hsb_puts(&body, "  ");
-      if (poly_dtype_is_fp8(u->dtype) &&
-          poly_dtype_eq(u->src[0]->dtype, POLY_FLOAT32)) {
+      if (poly_dtype_is_fp8(u->dtype) && poly_dtype_eq(u->src[0]->dtype, POLY_FLOAT32)) {
         hsb_printf(
             &body, "%s = f32_to_fp8(%s, %d);\n", name, src_s,
             poly_dtype_eq(u->dtype, POLY_FP8E5M2) ? 1 : 0
         );
-      } else if (poly_dtype_eq(u->dtype, POLY_FLOAT32) &&
-                 poly_dtype_is_fp8(u->src[0]->dtype)) {
+      } else if (poly_dtype_eq(u->dtype, POLY_FLOAT32) && poly_dtype_is_fp8(u->src[0]->dtype)) {
         hsb_printf(
             &body, "%s = __builtin_amdgcn_cvt_f32_%s((unsigned int)%s, 0);\n", name,
             poly_dtype_eq(u->src[0]->dtype, POLY_FP8E5M2) ? "bf8" : "fp8", src_s
@@ -1059,8 +1037,7 @@ char *poly_render_hip(
       char dst_type[128], src_type[128];
       hip_render_ctype(u->dtype, (int)poly_uop_max_numel(ctx, u), dst_type, sizeof(dst_type));
       hip_render_ctype(
-          u->src[0]->dtype, (int)poly_uop_max_numel(ctx, u->src[0]), src_type,
-          sizeof(src_type)
+          u->src[0]->dtype, (int)poly_uop_max_numel(ctx, u->src[0]), src_type, sizeof(src_type)
       );
       hsb_printf(&decls, "  %s %s;\n", dst_type, name);
       for (int d = 0; d < depth; d++)
@@ -1148,8 +1125,8 @@ char *poly_render_hip(
       char helper[128];
       if (!poly_wmma_name(u, helper, sizeof(helper))) return NULL;
       hsb_printf(
-          &body, "%s = __%s(%s, %s, %s", name, helper, a_s ? a_s : "0",
-          b_s ? b_s : "0", c_s ? c_s : "0"
+          &body, "%s = __%s(%s, %s, %s", name, helper, a_s ? a_s : "0", b_s ? b_s : "0",
+          c_s ? c_s : "0"
       );
       if (hip_is_cdna(arch)) {
         if (u->arg.tensor_core.dims[2] == 128) {
@@ -1275,9 +1252,7 @@ char *poly_render_hip(
     char tname[64];
     hip_render_ctype(vdt, lanes, tname, sizeof(tname));
     const char *sctype = hip_scalar_ctype(vdt);
-    hsb_printf(
-        &out, "typedef %s %s __attribute__((ext_vector_type(%d)));\n", sctype, tname, lanes
-    );
+    hsb_printf(&out, "typedef %s %s __attribute__((ext_vector_type(%d)));\n", sctype, tname, lanes);
   }
 
   char wmma_names[32][128];
@@ -1291,8 +1266,7 @@ char *poly_render_hip(
       if (strcmp(wmma_names[j], name) == 0) seen = true;
     if (seen) continue;
     if (!hip_render_wmma_prefix(&out, uops[i], arch)) return NULL;
-    if (n_wmma_names < 32)
-      snprintf(wmma_names[n_wmma_names++], sizeof(wmma_names[0]), "%s", name);
+    if (n_wmma_names < 32) snprintf(wmma_names[n_wmma_names++], sizeof(wmma_names[0]), "%s", name);
   }
 
   hsb_puts(&out, "\n");

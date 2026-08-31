@@ -136,12 +136,7 @@ int poly_uop_resolve(PolyCtx *ctx, PolyUOp *u, int default_value);
  * These only build UOps; execution still flows through normal CALL scheduling. */
 PolyUOp *poly_uop_placeholder_like(PolyCtx *ctx, PolyUOp *like, int slot);
 PolyUOp *poly_uop_range(PolyCtx *ctx, int64_t bound, int64_t axis_id, int axis_type);
-PolyUOp *poly_uop_index(
-    PolyCtx *ctx,
-    PolyUOp *base,
-    PolyUOp **indices,
-    int n_indices
-);
+PolyUOp *poly_uop_index(PolyCtx *ctx, PolyUOp *base, PolyUOp **indices, int n_indices);
 PolyUOp *poly_uop_load(PolyCtx *ctx, PolyUOp *addr);
 PolyUOp *poly_uop_store(PolyCtx *ctx, PolyUOp *addr, PolyUOp *value);
 PolyUOp *poly_uop_set(PolyCtx *ctx, PolyUOp *addr, PolyUOp *value, PolyUOp **ranges, int n_ranges);

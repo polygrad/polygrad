@@ -28,13 +28,11 @@ bool poly_wmma_name(const PolyUOp *uop, char *out, size_t out_size) {
   const char *dtype_in = poly_dtype_eq(uop->arg.tensor_core.dtype_in, POLY_FLOAT16)
                              ? "half"
                              : poly_dtype_name(uop->arg.tensor_core.dtype_in);
-  const char *dtype_out = poly_dtype_eq(uop->dtype, POLY_FLOAT16)
-                              ? "half"
-                              : poly_dtype_name(uop->dtype);
+  const char *dtype_out =
+      poly_dtype_eq(uop->dtype, POLY_FLOAT16) ? "half" : poly_dtype_name(uop->dtype);
   int written = snprintf(
       out, out_size, "WMMA_%d_%d_%d_%s_%s", uop->arg.tensor_core.dims[0],
-      uop->arg.tensor_core.dims[1], uop->arg.tensor_core.dims[2], dtype_in,
-      dtype_out
+      uop->arg.tensor_core.dims[1], uop->arg.tensor_core.dims[2], dtype_in, dtype_out
   );
   if (written < 0 || (size_t)written >= out_size) return false;
   for (char *p = out; *p; p++)
@@ -157,23 +155,17 @@ PolyRendererCaps poly_c_renderer_caps(void) {
   };
 }
 
-static PolyUOp *replace_dtype_src(
-    PolyCtx *ctx, PolyUOp *u, PolyDType dtype, PolyUOp **src
-) {
+static PolyUOp *replace_dtype_src(PolyCtx *ctx, PolyUOp *u, PolyDType dtype, PolyUOp **src) {
   /* C construction mechanics for Tinygrad UOp.replace(dtype=..., src=...). */
   PolyArg arg =
       (u->op == POLY_OP_CAST || u->op == POLY_OP_BITCAST) ? poly_arg_dtype(dtype) : u->arg;
   return (u->tag != 0 || u->tag_arg.kind != POLY_ARG_NONE)
-             ? poly_uop_tagged_arg(
-                   ctx, u->op, dtype, src, u->n_src, arg, u->tag, u->tag_arg
-               )
+             ? poly_uop_tagged_arg(ctx, u->op, dtype, src, u->n_src, arg, u->tag, u->tag_arg)
              : poly_uop(ctx, u->op, dtype, src, u->n_src, arg);
 }
 
 /* Tinygrad 2026-08-22/a9069c177a9d renderer/cstyle.py:76-89. */
-static PolyUOp *non_native_float_where(
-    PolyCtx *ctx, PolyUOp *w, const PolyBindings *bindings
-) {
+static PolyUOp *non_native_float_where(PolyCtx *ctx, PolyUOp *w, const PolyBindings *bindings) {
   (void)bindings;
   PolyUOp *src[] = {
       w->src[0],
@@ -184,9 +176,7 @@ static PolyUOp *non_native_float_where(
   return where ? poly_uop1(ctx, POLY_OP_CAST, w->dtype, where, poly_arg_none()) : NULL;
 }
 
-static PolyUOp *non_native_float_alu(
-    PolyCtx *ctx, PolyUOp *u, const PolyBindings *bindings
-) {
+static PolyUOp *non_native_float_alu(PolyCtx *ctx, PolyUOp *u, const PolyBindings *bindings) {
   (void)bindings;
   PolyUOp **src = malloc((size_t)u->n_src * sizeof(*src));
   if (u->n_src > 0 && !src) return NULL;
@@ -198,7 +188,9 @@ static PolyUOp *non_native_float_alu(
 }
 
 static PolyUOp *non_native_float_comparison(
-    PolyCtx *ctx, PolyUOp *alu, const PolyBindings *bindings
+    PolyCtx *ctx,
+    PolyUOp *alu,
+    const PolyBindings *bindings
 ) {
   (void)bindings;
   PolyUOp *src[] = {
@@ -208,9 +200,7 @@ static PolyUOp *non_native_float_comparison(
   return replace_dtype_src(ctx, alu, alu->dtype, src);
 }
 
-static PolyUOp *non_native_float_cast_to(
-    PolyCtx *ctx, PolyUOp *y, const PolyBindings *bindings
-) {
+static PolyUOp *non_native_float_cast_to(PolyCtx *ctx, PolyUOp *y, const PolyBindings *bindings) {
   (void)bindings;
   PolyUOp *x = y->src[0];
   if (poly_dtype_eq(x->dtype, POLY_FLOAT32)) return NULL;
@@ -218,9 +208,7 @@ static PolyUOp *non_native_float_cast_to(
   return poly_uop1(ctx, POLY_OP_CAST, y->dtype, f32, poly_arg_none());
 }
 
-static PolyUOp *non_native_float_cast_from(
-    PolyCtx *ctx, PolyUOp *x, const PolyBindings *bindings
-) {
+static PolyUOp *non_native_float_cast_from(PolyCtx *ctx, PolyUOp *x, const PolyBindings *bindings) {
   (void)bindings;
   if (poly_dtype_eq(x->dtype, POLY_FLOAT32)) return NULL;
   PolyUOp *f32 = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, x->src[0], poly_arg_none());
@@ -228,22 +216,23 @@ static PolyUOp *non_native_float_cast_from(
 }
 
 static PolyPatternMatcher *create_non_native_float_pats(
-    const PolyDType *dtypes, int n_dtypes, bool casting
+    const PolyDType *dtypes,
+    int n_dtypes,
+    bool casting
 ) {
   if (!dtypes || n_dtypes <= 0) return NULL;
   PolyOpSet alu_without_where = POLY_GROUP_ALU;
   alu_without_where.bits[POLY_OP_WHERE / 64] &= ~(UINT64_C(1) << (POLY_OP_WHERE % 64));
 
   PolyUPat *where_src[] = {
-      poly_upat_any("b"), poly_upat_dtype("x", (PolyDType *)dtypes, n_dtypes),
+      poly_upat_any("b"),
+      poly_upat_dtype("x", (PolyDType *)dtypes, n_dtypes),
       poly_upat_dtype("y", (PolyDType *)dtypes, n_dtypes),
   };
-  PolyUPat *where = poly_upat_set_dtype(
-      poly_upat_op(POLY_OP_WHERE, where_src, 3, "w"), dtypes, n_dtypes
-  );
-  PolyUPat *alu = poly_upat_set_dtype(
-      poly_upat_ops(alu_without_where, NULL, 0, "x"), dtypes, n_dtypes
-  );
+  PolyUPat *where =
+      poly_upat_set_dtype(poly_upat_op(POLY_OP_WHERE, where_src, 3, "w"), dtypes, n_dtypes);
+  PolyUPat *alu =
+      poly_upat_set_dtype(poly_upat_ops(alu_without_where, NULL, 0, "x"), dtypes, n_dtypes);
   PolyDType bool_dtype = POLY_BOOL;
   PolyUPat *comparison = poly_upat_set_dtype(
       poly_upat_ops2(
@@ -261,15 +250,11 @@ static PolyPatternMatcher *create_non_native_float_pats(
   int n_rules = 3;
   if (casting) {
     rules[n_rules++] = POLY_RULE(
-        poly_upat_set_dtype(
-            poly_upat_op1(POLY_OP_CAST, poly_upat_any("x"), "y"), dtypes, n_dtypes
-        ),
+        poly_upat_set_dtype(poly_upat_op1(POLY_OP_CAST, poly_upat_any("x"), "y"), dtypes, n_dtypes),
         non_native_float_cast_to
     );
     rules[n_rules++] = POLY_RULE(
-        poly_upat_op1(
-            POLY_OP_CAST, poly_upat_dtype("y", (PolyDType *)dtypes, n_dtypes), "x"
-        ),
+        poly_upat_op1(POLY_OP_CAST, poly_upat_dtype("y", (PolyDType *)dtypes, n_dtypes), "x"),
         non_native_float_cast_from
     );
   }
@@ -286,10 +271,8 @@ static PolyUOp *cast_float_to_bf16(PolyCtx *ctx, PolyUOp *x, PolyDType bf16_dtyp
   PolyUOp *c7fff = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(0x7fff));
   PolyUOp *cffff = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(0xffff));
   PolyUOp *c10000 = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(0x10000));
-  PolyUOp *c7f800000 =
-      poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(0x7f800000));
-  PolyUOp *neg_bits =
-      poly_uop2(ctx, POLY_OP_MUL, POLY_UINT32, bits, minus_one, poly_arg_none());
+  PolyUOp *c7f800000 = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(0x7f800000));
+  PolyUOp *neg_bits = poly_uop2(ctx, POLY_OP_MUL, POLY_UINT32, bits, minus_one, poly_arg_none());
   PolyUOp *is_finite = poly_uop2(
       ctx, POLY_OP_CMPNE, POLY_BOOL,
       poly_uop2(ctx, POLY_OP_AND, POLY_UINT32, neg_bits, c7f800000, poly_arg_none()), zero,
@@ -310,31 +293,24 @@ static PolyUOp *cast_float_to_bf16(PolyCtx *ctx, PolyUOp *x, PolyDType bf16_dtyp
   );
   PolyUOp *low_nonzero = poly_uop2(
       ctx, POLY_OP_CMPNE, POLY_BOOL,
-      poly_uop2(ctx, POLY_OP_AND, POLY_UINT32, bits, cffff, poly_arg_none()), zero,
-      poly_arg_none()
+      poly_uop2(ctx, POLY_OP_AND, POLY_UINT32, bits, cffff, poly_arg_none()), zero, poly_arg_none()
   );
   PolyUOp *nan_adjusted = poly_uop3(
       ctx, POLY_OP_WHERE, POLY_UINT32, low_nonzero,
-      poly_uop2(ctx, POLY_OP_OR, POLY_UINT32, bits, c10000, poly_arg_none()), bits,
-      poly_arg_none()
+      poly_uop2(ctx, POLY_OP_OR, POLY_UINT32, bits, c10000, poly_arg_none()), bits, poly_arg_none()
   );
-  PolyUOp *selected = poly_uop3(
-      ctx, POLY_OP_WHERE, POLY_UINT32, is_finite, rounded, nan_adjusted, poly_arg_none()
-  );
+  PolyUOp *selected =
+      poly_uop3(ctx, POLY_OP_WHERE, POLY_UINT32, is_finite, rounded, nan_adjusted, poly_arg_none());
   PolyUOp *raw = poly_uop1(
       ctx, POLY_OP_CAST, POLY_UINT16,
-      poly_uop2(ctx, POLY_OP_SHR, POLY_UINT32, selected, c16, poly_arg_none()),
-      poly_arg_none()
+      poly_uop2(ctx, POLY_OP_SHR, POLY_UINT32, selected, c16, poly_arg_none()), poly_arg_none()
   );
   return poly_uop1(ctx, POLY_OP_BITCAST, bf16_dtype, raw, poly_arg_none());
 }
 
-static PolyUOp *manual_bf16_to_float(
-    PolyCtx *ctx, PolyUOp *root, const PolyBindings *bindings
-) {
+static PolyUOp *manual_bf16_to_float(PolyCtx *ctx, PolyUOp *root, const PolyBindings *bindings) {
   (void)bindings;
-  PolyUOp *raw =
-      poly_uop1(ctx, POLY_OP_BITCAST, POLY_UINT16, root->src[0], poly_arg_none());
+  PolyUOp *raw = poly_uop1(ctx, POLY_OP_BITCAST, POLY_UINT16, root->src[0], poly_arg_none());
   PolyUOp *wide = poly_uop1(ctx, POLY_OP_CAST, POLY_UINT32, raw, poly_arg_none());
   PolyUOp *shift = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(16));
   return poly_uop1(
@@ -343,9 +319,7 @@ static PolyUOp *manual_bf16_to_float(
   );
 }
 
-static PolyUOp *manual_float_to_bf16(
-    PolyCtx *ctx, PolyUOp *root, const PolyBindings *bindings
-) {
+static PolyUOp *manual_float_to_bf16(PolyCtx *ctx, PolyUOp *root, const PolyBindings *bindings) {
   (void)bindings;
   return cast_float_to_bf16(ctx, root->src[0], root->dtype);
 }
@@ -370,18 +344,14 @@ PolyPatternMatcher *poly_pm_manual_bf16_cast(void) {
           manual_float_to_bf16
       ),
   };
-  g_pm_manual_bf16_cast = poly_pm_thread_cache(
-      poly_pm_new_named(rules, (int)(sizeof(rules) / sizeof(rules[0])))
-  );
+  g_pm_manual_bf16_cast =
+      poly_pm_thread_cache(poly_pm_new_named(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
   return g_pm_manual_bf16_cast;
 }
 
-static PolyUOp *cast_via_float(
-    PolyCtx *ctx, PolyUOp *root, const PolyBindings *bindings
-) {
+static PolyUOp *cast_via_float(PolyCtx *ctx, PolyUOp *root, const PolyBindings *bindings) {
   (void)bindings;
-  PolyUOp *f32 =
-      poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, root->src[0], poly_arg_none());
+  PolyUOp *f32 = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, root->src[0], poly_arg_none());
   return poly_uop1(ctx, POLY_OP_CAST, root->dtype, f32, poly_arg_none());
 }
 
@@ -423,30 +393,22 @@ PolyPatternMatcher *poly_clang_renderer_extra_matcher(void) {
   return g_clang_renderer_extra;
 }
 
-static PolyUOp *hip_bf16_const(
-    PolyCtx *ctx, PolyUOp *root, const PolyBindings *bindings
-) {
+static PolyUOp *hip_bf16_const(PolyCtx *ctx, PolyUOp *root, const PolyBindings *bindings) {
   (void)bindings;
   PolyUOp *f32 = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, root->arg);
   return cast_float_to_bf16(ctx, f32, root->dtype);
 }
 
-static PolyUOp *fp8_cast_via_float(
-    PolyCtx *ctx, PolyUOp *root, const PolyBindings *bindings
-) {
+static PolyUOp *fp8_cast_via_float(PolyCtx *ctx, PolyUOp *root, const PolyBindings *bindings) {
   (void)bindings;
   if (!root || root->n_src != 1 || !poly_dtype_is_fp8(root->dtype) ||
-      !poly_dtype_is_fp8(root->src[0]->dtype) ||
-      poly_dtype_eq(root->dtype, root->src[0]->dtype))
+      !poly_dtype_is_fp8(root->src[0]->dtype) || poly_dtype_eq(root->dtype, root->src[0]->dtype))
     return NULL;
-  PolyUOp *f32 =
-      poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, root->src[0], poly_arg_none());
+  PolyUOp *f32 = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, root->src[0], poly_arg_none());
   return poly_uop1(ctx, POLY_OP_CAST, root->dtype, f32, poly_arg_none());
 }
 
-static PolyUOp *hip_fp8_wmma_bitcast(
-    PolyCtx *ctx, PolyUOp *root, const PolyBindings *bindings
-) {
+static PolyUOp *hip_fp8_wmma_bitcast(PolyCtx *ctx, PolyUOp *root, const PolyBindings *bindings) {
   (void)bindings;
   bool ocp_input = root && root->n_src > 0 &&
                    (poly_dtype_eq(root->src[0]->dtype, POLY_FP8E4M3) ||
@@ -469,13 +431,14 @@ static _Thread_local PolyPatternMatcher *g_cuda_renderer_extra = NULL;
 PolyPatternMatcher *poly_cuda_renderer_extra_matcher(void) {
   if (g_cuda_renderer_extra) return g_cuda_renderer_extra;
   PolyDType fp8s[] = {
-      POLY_FP8E4M3, POLY_FP8E5M2, POLY_FP8E4M3FNUZ, POLY_FP8E5M2FNUZ,
+      POLY_FP8E4M3,
+      POLY_FP8E5M2,
+      POLY_FP8E4M3FNUZ,
+      POLY_FP8E5M2FNUZ,
   };
   PolyPatternMatcher *non_native = create_non_native_float_pats(fp8s, 4, false);
   PolyUPat *cross_src = poly_upat_dtype("x", fp8s, 4);
-  PolyUPat *cross = poly_upat_set_dtype(
-      poly_upat_op1(POLY_OP_CAST, cross_src, "y"), fp8s, 4
-  );
+  PolyUPat *cross = poly_upat_set_dtype(poly_upat_op1(POLY_OP_CAST, cross_src, "y"), fp8s, 4);
   PolyNamedRule cast_rules[] = {POLY_RULE(cross, fp8_cast_via_float)};
   PolyPatternMatcher *casts = poly_pm_new_named(cast_rules, 1);
   PolyPatternMatcher *complete = poly_pm_concat(non_native, casts);
@@ -491,17 +454,13 @@ static _Thread_local PolyPatternMatcher *g_hip_renderer_extra = NULL;
 PolyPatternMatcher *poly_hip_renderer_extra_matcher(void) {
   if (g_hip_renderer_extra) return g_hip_renderer_extra;
   PolyDType non_native_dtypes[] = {
-      POLY_BFLOAT16, POLY_FP8E4M3, POLY_FP8E5M2, POLY_FP8E4M3FNUZ,
-      POLY_FP8E5M2FNUZ,
+      POLY_BFLOAT16, POLY_FP8E4M3, POLY_FP8E5M2, POLY_FP8E4M3FNUZ, POLY_FP8E5M2FNUZ,
   };
   PolyDType bf16 = POLY_BFLOAT16, f32 = POLY_FLOAT32;
-  PolyPatternMatcher *non_native =
-      create_non_native_float_pats(non_native_dtypes, 5, true);
+  PolyPatternMatcher *non_native = create_non_native_float_pats(non_native_dtypes, 5, true);
   PolyNamedRule hip_rules[] = {
       POLY_RULE(
-          poly_upat_set_dtype(
-              poly_upat_op(POLY_OP_WMMA, NULL, 0, "x"), &f32, 1
-          ),
+          poly_upat_set_dtype(poly_upat_op(POLY_OP_WMMA, NULL, 0, "x"), &f32, 1),
           hip_fp8_wmma_bitcast
       ),
       POLY_RULE(poly_upat_set_dtype(poly_upat_cvar("x"), &bf16, 1), hip_bf16_const),
@@ -538,10 +497,7 @@ static char *render_float_const(double v, PolyDType dt, char *buf, int cap) {
     if (is_f64)
       snprintf(buf, cap, v > 0 ? "__builtin_inf()" : "(-__builtin_inf())");
     else if (is_f16)
-      snprintf(
-          buf, cap, v > 0 ? "((__fp16)(__builtin_inff()))"
-                          : "((__fp16)(-__builtin_inff()))"
-      );
+      snprintf(buf, cap, v > 0 ? "((__fp16)(__builtin_inff()))" : "((__fp16)(-__builtin_inff()))");
     else
       snprintf(buf, cap, v > 0 ? "__builtin_inff()" : "(-__builtin_inff())");
     return buf;
@@ -626,15 +582,9 @@ static char *render_const_literal(PolyUOp *c, PolyDType dtype, bool vector_bool)
     }
     render_int64_const(c->arg.i, val, sizeof(val));
   } else if (poly_dtype_eq(scalar, POLY_UINT64)) {
-    snprintf(
-        val, sizeof(val), "%lluull",
-        (unsigned long long)poly_arg_integer_to_u64_mod(c->arg)
-    );
+    snprintf(val, sizeof(val), "%lluull", (unsigned long long)poly_arg_integer_to_u64_mod(c->arg));
   } else if (poly_dtype_eq(scalar, POLY_UINT32)) {
-    snprintf(
-        val, sizeof(val), "%uu",
-        (unsigned)(uint32_t)poly_arg_integer_to_u64_mod(c->arg)
-    );
+    snprintf(val, sizeof(val), "%uu", (unsigned)(uint32_t)poly_arg_integer_to_u64_mod(c->arg));
   } else if (poly_dtype_eq(scalar, POLY_UINT8) || poly_dtype_eq(scalar, POLY_UINT16)) {
     char type[64];
     render_ctype_nonptr(scalar, 1, type, sizeof(type));
@@ -966,14 +916,12 @@ char *poly_render_c(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
   }
   for (int i = 0; i < n; i++) {
     for (int j = 0; j < uops[i]->n_src; j++) {
-      int *source_index = poly_map_get(
-          uop_indices, poly_ptr_hash(uops[i]->src[j]), uops[i]->src[j], poly_ptr_eq
-      );
+      int *source_index =
+          poly_map_get(uop_indices, poly_ptr_hash(uops[i]->src[j]), uops[i]->src[j], poly_ptr_eq);
       if (source_index) child_count[*source_index]++;
     }
   }
-  bool expand_ssa =
-      poly_getenv_flag("EXPAND_SSA") || poly_getenv_flag("POLY_EXPAND_SSA");
+  bool expand_ssa = poly_getenv_flag("EXPAND_SSA") || poly_getenv_flag("POLY_EXPAND_SSA");
 
   /* function parameter entries: (type_str, name_str, sort_key) */
   RenderParam params[POLY_RENDER_MAX_PARAMS];
@@ -1037,8 +985,8 @@ char *poly_render_c(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
       render_ctype_nonptr(base, 1, base_type, sizeof(base_type));
       bool is_alu = poly_uop_is_alu_param(u);
       snprintf(
-          params[n_params].type, sizeof(params[n_params].type), is_alu ? "const %s" : "%s* restrict",
-          base_type
+          params[n_params].type, sizeof(params[n_params].type),
+          is_alu ? "const %s" : "%s* restrict", base_type
       );
       snprintf(params[n_params].name, sizeof(params[n_params].name), "%s", name);
       params[n_params].sort_key = (int)slot;
@@ -1215,10 +1163,7 @@ char *poly_render_c(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
       smap_set(&names, u, strdup(name));
       char dtype_s[128];
       render_ctype(poly_program_buffer_dtype(u), 1, dtype_s, sizeof(dtype_s));
-      sb_printf(
-          &decls, "  %s %s[%lld];\n", dtype_s, name,
-          (long long)poly_program_buffer_size(u)
-      );
+      sb_printf(&decls, "  %s %s[%lld];\n", dtype_s, name, (long long)poly_program_buffer_size(u));
       continue;
     }
 
@@ -1264,9 +1209,7 @@ char *poly_render_c(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
       bool is_lane_load =
           idx_uop && idx_uop->n_src >= 1 && !poly_is_program_memory_base(idx_uop->src[0]);
       PolyUOp *gate_uop =
-          (u->n_src >= 3 && poly_dtype_is_bool(u->src[2]->dtype))
-              ? u->src[2]
-              : NULL;
+          (u->n_src >= 3 && poly_dtype_is_bool(u->src[2]->dtype)) ? u->src[2] : NULL;
       if (gate_uop && u->n_src >= 2) {
         char *gate_s = smap_get(&names, gate_uop);
         char *alt_s = smap_get(&names, u->src[1]);
@@ -1319,8 +1262,7 @@ char *poly_render_c(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
        * satisfies the analyzer's path-sensitive null-deref tracking. */
       if (u->src[0] && poly_program_memory_is(u->src[0], POLY_ADDR_LOCAL))
         sb_printf(&body, "%s = %s;\n", target, val);
-      else if (u->src[1] && lanes > 1 &&
-               poly_find_memory_slice_through_cast(u->src[0])) {
+      else if (u->src[1] && lanes > 1 && poly_find_memory_slice_through_cast(u->src[0])) {
         char dtype_s[128];
         render_ctype(u->src[1]->dtype, lanes, dtype_s, sizeof(dtype_s));
         sb_printf(&body, "*((%s*)(%s)) = %s;\n", dtype_s, target, val);
@@ -1410,9 +1352,8 @@ char *poly_render_c(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
 
     /* --- ALU ops: arithmetic expressions ---------------------------- */
     if (poly_opset_has(POLY_GROUP_ALU, u->op)) {
-      const bool associative =
-          u->op == POLY_OP_ADD || u->op == POLY_OP_MUL || u->op == POLY_OP_XOR ||
-          u->op == POLY_OP_OR || u->op == POLY_OP_AND;
+      const bool associative = u->op == POLY_OP_ADD || u->op == POLY_OP_MUL ||
+                               u->op == POLY_OP_XOR || u->op == POLY_OP_OR || u->op == POLY_OP_AND;
       char *stripped[3] = {NULL, NULL, NULL};
       const char *sources[3] = {"", "", ""};
       for (int j = 0; j < u->n_src && j < 3; j++) {
@@ -1427,13 +1368,15 @@ char *poly_render_c(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
       const char *s0 = sources[0], *s1 = sources[1], *s2 = sources[2];
       size_t expr_cap = strlen(s0 ? s0 : "") + strlen(s1 ? s1 : "") + strlen(s2 ? s2 : "") + 1024;
       char *expr = malloc(expr_cap);
-      if (!expr) expr = strdup("0");
+      if (!expr)
+        expr = strdup("0");
       else
         render_alu(
             expr, (int)expr_cap, u->op, u->dtype, render_uop_lanes(ctx, u), s0 ? s0 : "",
             s1 ? s1 : "", s2 ? s2 : ""
         );
-      for (int j = 0; j < 3; j++) free(stripped[j]);
+      for (int j = 0; j < 3; j++)
+        free(stripped[j]);
 
       /* Pinned cstyle.py:232-237 keeps WHERE materialized but directly embeds
        * a one-use ALU expression in its consumer by default. */

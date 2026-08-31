@@ -37,11 +37,10 @@ const PolyDType POLY_FLOAT64 = {15, 64, "double", 'd'};
 /* FFI-friendly dtype lookup: id -> PolyDType. The id ordering matches the
  * _DTYPE_IDS dict in py/polygrad/_ffi.py and js/src/ffi.js. */
 static const PolyDType *_dtype_table[] = {
-    &POLY_VOID,    &POLY_BOOL,     &POLY_INT8,    &POLY_UINT8,   &POLY_INT16,
-    &POLY_UINT16,  &POLY_INT32,    &POLY_UINT32,  &POLY_INT64,   &POLY_UINT64,
-    &POLY_FLOAT16, &POLY_BFLOAT16, &POLY_FLOAT32, &POLY_FLOAT64, &POLY_WEAKINT,
-    &POLY_WEAKFLOAT, &POLY_FP8E4M3, &POLY_FP8E5M2, &POLY_FP8E4M3FNUZ,
-    &POLY_FP8E5M2FNUZ,
+    &POLY_VOID,      &POLY_BOOL,     &POLY_INT8,    &POLY_UINT8,       &POLY_INT16,
+    &POLY_UINT16,    &POLY_INT32,    &POLY_UINT32,  &POLY_INT64,       &POLY_UINT64,
+    &POLY_FLOAT16,   &POLY_BFLOAT16, &POLY_FLOAT32, &POLY_FLOAT64,     &POLY_WEAKINT,
+    &POLY_WEAKFLOAT, &POLY_FP8E4M3,  &POLY_FP8E5M2, &POLY_FP8E4M3FNUZ, &POLY_FP8E5M2FNUZ,
 };
 #define N_DTYPE_TABLE ((int)(sizeof(_dtype_table) / sizeof(_dtype_table[0])))
 
@@ -75,10 +74,8 @@ int poly_dtype_id_by_name(const char *name) {
   if (strcmp(name, "weakfloat") == 0) return 15;
   if (strcmp(name, "fp8e4m3") == 0 || strcmp(name, "float8_e4m3") == 0) return 16;
   if (strcmp(name, "fp8e5m2") == 0 || strcmp(name, "float8_e5m2") == 0) return 17;
-  if (strcmp(name, "fp8e4m3fnuz") == 0 || strcmp(name, "float8_e4m3fnuz") == 0)
-    return 18;
-  if (strcmp(name, "fp8e5m2fnuz") == 0 || strcmp(name, "float8_e5m2fnuz") == 0)
-    return 19;
+  if (strcmp(name, "fp8e4m3fnuz") == 0 || strcmp(name, "float8_e4m3fnuz") == 0) return 18;
+  if (strcmp(name, "fp8e5m2fnuz") == 0 || strcmp(name, "float8_e5m2fnuz") == 0) return 19;
   return -1;
 }
 
@@ -184,11 +181,10 @@ bool poly_dtype_least_upper(PolyDType a, PolyDType b, PolyDType *out) {
     PROMO_COUNT,
   };
   static const PolyDType *const types[PROMO_COUNT] = {
-      &POLY_BOOL,    &POLY_WEAKINT,    &POLY_INT8,    &POLY_UINT8,   &POLY_INT16,
-      &POLY_UINT16,  &POLY_INT32,    &POLY_UINT32,  &POLY_INT64,   &POLY_UINT64,
-      &POLY_WEAKFLOAT, &POLY_FP8E4M3, &POLY_FP8E5M2, &POLY_FP8E4M3FNUZ,
-      &POLY_FP8E5M2FNUZ, &POLY_FLOAT16, &POLY_BFLOAT16, &POLY_FLOAT32,
-      &POLY_FLOAT64,
+      &POLY_BOOL,      &POLY_WEAKINT,  &POLY_INT8,    &POLY_UINT8,       &POLY_INT16,
+      &POLY_UINT16,    &POLY_INT32,    &POLY_UINT32,  &POLY_INT64,       &POLY_UINT64,
+      &POLY_WEAKFLOAT, &POLY_FP8E4M3,  &POLY_FP8E5M2, &POLY_FP8E4M3FNUZ, &POLY_FP8E5M2FNUZ,
+      &POLY_FLOAT16,   &POLY_BFLOAT16, &POLY_FLOAT32, &POLY_FLOAT64,
   };
   static const uint32_t parents[PROMO_COUNT] = {
       [PROMO_BOOL] = 1u << PROMO_WEAKINT,
@@ -291,19 +287,18 @@ bool poly_dtype_can_lossless_cast(PolyDType dt0, PolyDType dt1) {
     return poly_dtype_is_int(dt0) && !poly_dtype_is_index(dt0) && !poly_dtype_is_bool(dt0);
   if (DT_IS(dt1, POLY_FLOAT64))
     return DT_IS(dt0, POLY_FLOAT32) || DT_IS(dt0, POLY_FLOAT16) || DT_IS(dt0, POLY_BFLOAT16) ||
-           DT_IS(dt0, POLY_FP8E4M3) || DT_IS(dt0, POLY_FP8E5M2) ||
-           DT_IS(dt0, POLY_FP8E4M3FNUZ) || DT_IS(dt0, POLY_FP8E5M2FNUZ) ||
-           DT_IS(dt0, POLY_UINT32) || DT_IS(dt0, POLY_UINT16) || DT_IS(dt0, POLY_UINT8) ||
-           DT_IS(dt0, POLY_INT32) || DT_IS(dt0, POLY_INT16) || DT_IS(dt0, POLY_INT8);
+           DT_IS(dt0, POLY_FP8E4M3) || DT_IS(dt0, POLY_FP8E5M2) || DT_IS(dt0, POLY_FP8E4M3FNUZ) ||
+           DT_IS(dt0, POLY_FP8E5M2FNUZ) || DT_IS(dt0, POLY_UINT32) || DT_IS(dt0, POLY_UINT16) ||
+           DT_IS(dt0, POLY_UINT8) || DT_IS(dt0, POLY_INT32) || DT_IS(dt0, POLY_INT16) ||
+           DT_IS(dt0, POLY_INT8);
   if (DT_IS(dt1, POLY_FLOAT32))
     return DT_IS(dt0, POLY_FLOAT16) || DT_IS(dt0, POLY_BFLOAT16) || DT_IS(dt0, POLY_UINT16) ||
-           DT_IS(dt0, POLY_FP8E4M3) || DT_IS(dt0, POLY_FP8E5M2) ||
-           DT_IS(dt0, POLY_FP8E4M3FNUZ) || DT_IS(dt0, POLY_FP8E5M2FNUZ) ||
-           DT_IS(dt0, POLY_UINT8) || DT_IS(dt0, POLY_INT16) || DT_IS(dt0, POLY_INT8);
+           DT_IS(dt0, POLY_FP8E4M3) || DT_IS(dt0, POLY_FP8E5M2) || DT_IS(dt0, POLY_FP8E4M3FNUZ) ||
+           DT_IS(dt0, POLY_FP8E5M2FNUZ) || DT_IS(dt0, POLY_UINT8) || DT_IS(dt0, POLY_INT16) ||
+           DT_IS(dt0, POLY_INT8);
   if (DT_IS(dt1, POLY_FLOAT16))
-    return DT_IS(dt0, POLY_FP8E4M3) || DT_IS(dt0, POLY_FP8E5M2) ||
-           DT_IS(dt0, POLY_FP8E4M3FNUZ) || DT_IS(dt0, POLY_FP8E5M2FNUZ) ||
-           DT_IS(dt0, POLY_UINT8) || DT_IS(dt0, POLY_INT8);
+    return DT_IS(dt0, POLY_FP8E4M3) || DT_IS(dt0, POLY_FP8E5M2) || DT_IS(dt0, POLY_FP8E4M3FNUZ) ||
+           DT_IS(dt0, POLY_FP8E5M2FNUZ) || DT_IS(dt0, POLY_UINT8) || DT_IS(dt0, POLY_INT8);
   if (DT_IS(dt1, POLY_UINT64))
     return DT_IS(dt0, POLY_UINT32) || DT_IS(dt0, POLY_UINT16) || DT_IS(dt0, POLY_UINT8);
   if (DT_IS(dt1, POLY_UINT32)) return DT_IS(dt0, POLY_UINT16) || DT_IS(dt0, POLY_UINT8);
@@ -332,28 +327,47 @@ typedef struct {
 
 static PolyFP8Config fp8_config(PolyDType dtype) {
   if (poly_dtype_eq(dtype, POLY_FP8E4M3))
-    return (PolyFP8Config){7, 4, 0x7, UINT64_C(0x3f50000000000000),
-                           UINT64_C(0x407d000000000000), 0x7e,
-                           UINT64_C(0x3f90000000000000)};
+    return (PolyFP8Config
+    ){7,
+      4,
+      0x7,
+      UINT64_C(0x3f50000000000000),
+      UINT64_C(0x407d000000000000),
+      0x7e,
+      UINT64_C(0x3f90000000000000)};
   if (poly_dtype_eq(dtype, POLY_FP8E5M2))
-    return (PolyFP8Config){15, 3, 0x3, UINT64_C(0x3ee0000000000000),
-                           UINT64_C(0x40ee000000000000) - 1, 0x7b,
-                           UINT64_C(0x3f10000000000000)};
+    return (PolyFP8Config
+    ){15,
+      3,
+      0x3,
+      UINT64_C(0x3ee0000000000000),
+      UINT64_C(0x40ee000000000000) - 1,
+      0x7b,
+      UINT64_C(0x3f10000000000000)};
   if (poly_dtype_eq(dtype, POLY_FP8E4M3FNUZ))
-    return (PolyFP8Config){8, 4, 0x7, UINT64_C(0x3f40000000000000),
-                           UINT64_C(0x406f000000000000) - 1, 0x7f,
-                           UINT64_C(0x3f80000000000000)};
-  return (PolyFP8Config){16, 3, 0x3, UINT64_C(0x3ed0000000000000),
-                         UINT64_C(0x40ee000000000000) - 1, 0x7f,
-                         UINT64_C(0x3f00000000000000)};
+    return (PolyFP8Config
+    ){8,
+      4,
+      0x7,
+      UINT64_C(0x3f40000000000000),
+      UINT64_C(0x406f000000000000) - 1,
+      0x7f,
+      UINT64_C(0x3f80000000000000)};
+  return (PolyFP8Config
+  ){16,
+    3,
+    0x3,
+    UINT64_C(0x3ed0000000000000),
+    UINT64_C(0x40ee000000000000) - 1,
+    0x7f,
+    UINT64_C(0x3f00000000000000)};
 }
 
 uint8_t poly_float_to_fp8(double x, PolyDType dtype) {
   bool fnuz = poly_dtype_is_fp8_fnuz(dtype);
   if (fnuz && !isfinite(x)) return 0x80;
   if (fnuz && x == 0.0) return 0x00;
-  if (poly_dtype_eq(dtype, POLY_FP8E4M3) && !isfinite(x))
-    return copysign(1.0, x) > 0 ? 0x7f : 0xff;
+  if (poly_dtype_eq(dtype, POLY_FP8E4M3) && !isfinite(x)) return copysign(1.0, x) > 0 ? 0x7f : 0xff;
   if (poly_dtype_eq(dtype, POLY_FP8E5M2) && !isfinite(x))
     return (uint8_t)((copysign(1.0, x) > 0 ? 0 : 0x80) | (isinf(x) ? 0x7c : 0x7f));
 
@@ -399,10 +413,8 @@ double poly_fp8_to_float(uint8_t x, PolyDType dtype) {
       return copysign(mantissa ? NAN : INFINITY, sign ? -1.0 : 1.0);
     if (mantissa == mant_max) return NAN;
   }
-  double val = exp == 0
-                   ? ((double)mantissa / (mant_max + 1)) * ldexp(1.0, 1 - cfg.bias)
-                   : (1.0 + (double)mantissa / (mant_max + 1)) *
-                         ldexp(1.0, exp - cfg.bias);
+  double val = exp == 0 ? ((double)mantissa / (mant_max + 1)) * ldexp(1.0, 1 - cfg.bias)
+                        : (1.0 + (double)mantissa / (mant_max + 1)) * ldexp(1.0, exp - cfg.bias);
   return sign ? -val : val;
 }
 

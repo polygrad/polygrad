@@ -192,11 +192,11 @@ uint8_t *poly_bundle_encode(
    *   header: 8 (magic) + 4 (version) + 4 (flags) + 4 (n_sections) = 20
    *   per section: 4 (type) + 4 (length) + data */
   size_t total = 20;
-#define ADD_SECTION_SIZE(n)                                                                    \
-  do {                                                                                         \
-    size_t _n = (size_t)(n);                                                                   \
-    if (total > (size_t)INT_MAX - 8 || _n > (size_t)INT_MAX - total - 8) return NULL;            \
-    total += 8 + _n;                                                                           \
+#define ADD_SECTION_SIZE(n)                                                                        \
+  do {                                                                                             \
+    size_t _n = (size_t)(n);                                                                       \
+    if (total > (size_t)INT_MAX - 8 || _n > (size_t)INT_MAX - total - 8) return NULL;              \
+    total += 8 + _n;                                                                               \
   } while (0)
   ADD_SECTION_SIZE(ir_len);
   if (weights_data && weights_len > 0) ADD_SECTION_SIZE(weights_len);

@@ -85,10 +85,12 @@ TEST(dtype, fp8_identities_append_without_renumbering_existing_types) {
 }
 
 TEST(dtype, fp8_storage_conversion_matches_current_tinygrad) {
-  const double values[] = {-INFINITY, -1.5, -0.0, 0.0, 0.1, 1.0, 1.5, 448.0,
-                           INFINITY, NAN};
+  const double values[] = {-INFINITY, -1.5, -0.0, 0.0, 0.1, 1.0, 1.5, 448.0, INFINITY, NAN};
   const PolyDType dtypes[] = {
-      POLY_FP8E4M3, POLY_FP8E5M2, POLY_FP8E4M3FNUZ, POLY_FP8E5M2FNUZ,
+      POLY_FP8E4M3,
+      POLY_FP8E5M2,
+      POLY_FP8E4M3FNUZ,
+      POLY_FP8E5M2FNUZ,
   };
   const uint8_t expected[][10] = {
       {255, 188, 128, 0, 29, 56, 60, 126, 127, 127},

@@ -23,9 +23,8 @@ static void *threading_context_worker(void *opaque) {
   if (!ctx) return NULL;
 
   PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(8));
-  PolyUOp *v = poly_uop1(
-      ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_range(r->tid + 1, POLY_AXIS_LOOP)
-  );
+  PolyUOp *v =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_range(r->tid + 1, POLY_AXIS_LOOP));
   PolyUOp *two = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(2));
   PolyUOp *three = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(3));
   PolyUOp *mul = poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, v, two, poly_arg_none());
@@ -163,10 +162,14 @@ TEST(threading, independent_contexts_create_linear) {
   int mutex_rc = pthread_mutex_init(&gate.mutex, NULL);
   int cond_rc = mutex_rc == 0 ? pthread_cond_init(&gate.cond, NULL) : -1;
   ThreadingLowerResult a = {
-      .gate = &gate, .expected_op = POLY_OP_ADD, .other_op = POLY_OP_MUL,
+      .gate = &gate,
+      .expected_op = POLY_OP_ADD,
+      .other_op = POLY_OP_MUL,
   };
   ThreadingLowerResult b = {
-      .gate = &gate, .expected_op = POLY_OP_MUL, .other_op = POLY_OP_ADD,
+      .gate = &gate,
+      .expected_op = POLY_OP_MUL,
+      .other_op = POLY_OP_ADD,
   };
   pthread_t ta, tb;
   int create_a = cond_rc == 0 ? pthread_create(&ta, NULL, threading_linear_worker, &a) : -1;
@@ -240,9 +243,8 @@ TEST(threading, public_pattern_survives_creator_thread_exit) {
   pthread_t creator, consumer;
   int create_creator = pthread_create(&creator, NULL, threading_upat_creator, &handoff);
   int join_creator = create_creator == 0 ? pthread_join(creator, NULL) : -1;
-  int create_consumer = join_creator == 0
-                            ? pthread_create(&consumer, NULL, threading_upat_consumer, &handoff)
-                            : -1;
+  int create_consumer =
+      join_creator == 0 ? pthread_create(&consumer, NULL, threading_upat_consumer, &handoff) : -1;
   int join_consumer = create_consumer == 0 ? pthread_join(consumer, NULL) : -1;
 
   ASSERT_INT_EQ(create_creator, 0);

@@ -108,9 +108,7 @@ PolyUOp *poly_uop_device_uop_cached(PolyCtx *ctx, PolyUOp *u, PolyMap *cache) {
   } else if ((u->op == POLY_OP_PARAM || u->op == POLY_OP_BUFFER) &&
              u->arg.kind == POLY_ARG_PARAM && u->arg.param) {
     if (u->arg.param->device_is_tuple)
-      result = poly_device_uop_from_names(
-          ctx, u->arg.param->devices, u->arg.param->n_devices
-      );
+      result = poly_device_uop_from_names(ctx, u->arg.param->devices, u->arg.param->n_devices);
     else if (u->arg.param->device)
       result = poly_device_uop_from_name(ctx, u->arg.param->device);
   } else if (u->op == POLY_OP_STAGE && u->arg.kind == POLY_ARG_BUFFERIZE_OPTS) {
@@ -125,10 +123,10 @@ PolyUOp *poly_uop_device_uop_cached(PolyCtx *ctx, PolyUOp *u, PolyMap *cache) {
   } else if (u->op == POLY_OP_COPY && u->arg.kind == POLY_ARG_STRING_TUPLE) {
     result = poly_device_uop_from_names(ctx, u->arg.string_tuple.vals, u->arg.string_tuple.n);
   } else if (u->op == POLY_OP_ALLREDUCE && u->arg.kind == POLY_ARG_ALLREDUCE) {
-    result = u->arg.allreduce.device_is_tuple
-                 ? poly_device_uop_from_names(
-                       ctx, u->arg.allreduce.devices, u->arg.allreduce.n_devices)
-                 : poly_device_uop_from_name(ctx, u->arg.allreduce.device);
+    result =
+        u->arg.allreduce.device_is_tuple
+            ? poly_device_uop_from_names(ctx, u->arg.allreduce.devices, u->arg.allreduce.n_devices)
+            : poly_device_uop_from_name(ctx, u->arg.allreduce.device);
   } else if (u->op == POLY_OP_AFTER && u->n_src >= 1) {
     result = poly_uop_device_uop_cached(ctx, u->src[0], cache);
   } else if (u->op == POLY_OP_MSELECT && u->n_src >= 1 && u->arg.kind == POLY_ARG_INT) {
@@ -185,8 +183,7 @@ bool poly_uop_explicit_devices_supported(PolyCtx *ctx, PolyUOp *root) {
   if (!ctx || !root) return false;
   PolyScratchMark scratch = poly_ctx_scratch_mark(ctx);
   int n = 0;
-  PolyUOp **topo =
-      poly_toposort_ex_user_scratch(ctx, root, &n, NULL, NULL, false);
+  PolyUOp **topo = poly_toposort_ex_user_scratch(ctx, root, &n, NULL, NULL, false);
   if (!topo) {
     poly_ctx_scratch_rewind(ctx, scratch);
     return false;
@@ -198,9 +195,8 @@ bool poly_uop_explicit_devices_supported(PolyCtx *ctx, PolyUOp *root) {
       supported = false;
       break;
     }
-    if (u && (u->op == POLY_OP_PARAM || u->op == POLY_OP_BUFFER) &&
-        u->arg.kind == POLY_ARG_PARAM && u->arg.param &&
-        u->arg.param->device_is_tuple) {
+    if (u && (u->op == POLY_OP_PARAM || u->op == POLY_OP_BUFFER) && u->arg.kind == POLY_ARG_PARAM &&
+        u->arg.param && u->arg.param->device_is_tuple) {
       if (u->arg.param->n_devices <= 0 || !u->arg.param->devices) {
         supported = false;
         break;
@@ -296,8 +292,7 @@ PolyDevice poly_uop_device_cached(PolyUOp *u, PolyMap *cache) {
   }
   if (u->op == POLY_OP_PARAM && u->arg.kind == POLY_ARG_PARAM && u->arg.param &&
       (u->arg.param->device || u->arg.param->device_is_tuple)) {
-    result = u->arg.param->device ? device_from_string_arg(u->arg.param->device)
-                                  : POLY_DEVICE_AUTO;
+    result = u->arg.param->device ? device_from_string_arg(u->arg.param->device) : POLY_DEVICE_AUTO;
     if (cache)
       poly_map_set(cache, poly_ptr_hash(u), u, (void *)(intptr_t)(result + 1), poly_ptr_eq);
     return result;
@@ -351,8 +346,7 @@ PolyUOp *poly_copy_to_device_uop(PolyCtx *ctx, PolyUOp *value, PolyUOp *device) 
 
 static PolyUOp *copy_to_device(PolyCtx *ctx, PolyUOp *value, PolyDevice device) {
   if (!ctx || !value || device == POLY_DEVICE_AUTO) return value;
-  if (value->op == POLY_OP_COPY && poly_uop_device(value) == device)
-    return value;
+  if (value->op == POLY_OP_COPY && poly_uop_device(value) == device) return value;
   return poly_copy_to_device_uop(ctx, value, make_device_uop(ctx, device));
 }
 
@@ -401,8 +395,8 @@ static void physicalizer_destroy(PolyPhysicalizer *p) {
 
 static bool placement_rebuilds_sources(PolyUOp *u) {
   if (!u) return false;
-  if (u->op == POLY_OP_CONST || poly_uop_is_variable(u) ||
-      poly_uop_is_bound_var(u) || u->op == POLY_OP_DEVICE || u->op == POLY_OP_UNIQUE)
+  if (u->op == POLY_OP_CONST || poly_uop_is_variable(u) || poly_uop_is_bound_var(u) ||
+      u->op == POLY_OP_DEVICE || u->op == POLY_OP_UNIQUE)
     return false;
   return true;
 }
@@ -753,11 +747,10 @@ static bool place_lowered_op(PolyOps op) {
 }
 
 static bool place_logical_forbidden_op(PolyOps op) {
-  return op == POLY_OP_SINK || op == POLY_OP_STORE || op == POLY_OP_AFTER ||
-         op == POLY_OP_DEVICE || op == POLY_OP_COPY || op == POLY_OP_CALL ||
-         op == POLY_OP_FUNCTION || op == POLY_OP_CUSTOM_FUNCTION || op == POLY_OP_UNSHARD ||
-         op == POLY_OP_MSELECT || op == POLY_OP_MSTACK || op == POLY_OP_ALLREDUCE ||
-         place_lowered_op(op);
+  return op == POLY_OP_SINK || op == POLY_OP_STORE || op == POLY_OP_AFTER || op == POLY_OP_DEVICE ||
+         op == POLY_OP_COPY || op == POLY_OP_CALL || op == POLY_OP_FUNCTION ||
+         op == POLY_OP_CUSTOM_FUNCTION || op == POLY_OP_UNSHARD || op == POLY_OP_MSELECT ||
+         op == POLY_OP_MSTACK || op == POLY_OP_ALLREDUCE || place_lowered_op(op);
 }
 
 static bool place_validate_pure_logical(
@@ -843,8 +836,7 @@ int poly_place_roots(
   if (n_roots == 0) return 0;
 
   for (int i = 0; i < n_roots; i++) {
-    if (!logical_roots[i] || !poly_ctx_owns_ptr(ctx, logical_roots[i]))
-      return -1;
+    if (!logical_roots[i] || !poly_ctx_owns_ptr(ctx, logical_roots[i])) return -1;
     if (!place_validate_logical_root(ctx, logical_roots[i], logical_bindings, n_bindings))
       return -1;
   }
@@ -904,32 +896,24 @@ static PolyUOp *place_exact_copy_to_device(PolyCtx *ctx, PolyUOp *value, PolyUOp
 }
 
 static PolyUOp *place_binding_on_device_uop(PolyCtx *ctx, PolyUOp *logical, PolyUOp *device) {
-  if (!ctx || !place_direct_buffer_binding(logical) || logical->n_src != 1 ||
-      !logical->src[0] || logical->src[0]->op != POLY_OP_UNIQUE || !device ||
-      device->op != POLY_OP_DEVICE || device->arg.kind != POLY_ARG_STRING ||
-      !device_uop_identity_supported(device))
+  if (!ctx || !place_direct_buffer_binding(logical) || logical->n_src != 1 || !logical->src[0] ||
+      logical->src[0]->op != POLY_OP_UNIQUE || !device || device->op != POLY_OP_DEVICE ||
+      device->arg.kind != POLY_ARG_STRING || !device_uop_identity_supported(device))
     return NULL;
   int64_t size = logical->arg.kind == POLY_ARG_INT ? logical->arg.i : -1;
   int64_t slot = logical->src[0]->arg.kind == POLY_ARG_INT ? logical->src[0]->arg.i : -1;
   if (size < 0 || slot < 0) return NULL;
-  PolyUOp *physical = poly_uop_new_buffer(
-      ctx, device, size, logical->dtype, slot
-  );
+  PolyUOp *physical = poly_uop_new_buffer(ctx, device, size, logical->dtype, slot);
   if (!physical) return NULL;
   return (logical->tag != 0 || logical->tag_arg.kind != POLY_ARG_NONE)
              ? poly_uop_tagged_arg(
-                   ctx, POLY_OP_BUFFER, physical->dtype, physical->src,
-                   physical->n_src, physical->arg,
-                   logical->tag, logical->tag_arg
+                   ctx, POLY_OP_BUFFER, physical->dtype, physical->src, physical->n_src,
+                   physical->arg, logical->tag, logical->tag_arg
                )
              : physical;
 }
 
-static int place_module_output_index(
-    const PolyPlaceModule *modules,
-    int n_modules,
-    PolyUOp *u
-) {
+static int place_module_output_index(const PolyPlaceModule *modules, int n_modules, PolyUOp *u) {
   if (!modules || !u) return -1;
   for (int i = 0; i < n_modules; i++)
     if (modules[i].output == u) return i;
@@ -957,9 +941,8 @@ static bool place_scalar_devices_valid(PolyCtx *ctx, PolyUOp *root) {
   bool valid = true;
   for (int i = 0; i < n_topo && valid; i++) {
     PolyUOp *u = topo[i];
-    if (!u || place_lowered_op(u->op) || u->op == POLY_OP_UNSHARD ||
-        u->op == POLY_OP_MSELECT || u->op == POLY_OP_MSTACK ||
-        u->op == POLY_OP_ALLREDUCE) {
+    if (!u || place_lowered_op(u->op) || u->op == POLY_OP_UNSHARD || u->op == POLY_OP_MSELECT ||
+        u->op == POLY_OP_MSTACK || u->op == POLY_OP_ALLREDUCE) {
       valid = false;
       break;
     }
@@ -1031,13 +1014,13 @@ int poly_place_module_map(
   int max_inputs = 0;
   for (int i = 0; i < n_modules; i++)
     if (modules[i].n_inputs > max_inputs) max_inputs = modules[i].n_inputs;
-  size_t max_subs = (size_t)n_bindings +
-                    (size_t)(max_inputs > n_modules ? max_inputs : n_modules) + 16;
+  size_t max_subs =
+      (size_t)n_bindings + (size_t)(max_inputs > n_modules ? max_inputs : n_modules) + 16;
   PolyUOp **from = calloc(max_subs, sizeof(*from));
   PolyUOp **to = calloc(max_subs, sizeof(*to));
   int rc = -1;
-  if (!placed_modules || (n_bindings > 0 && (!target_bindings || !binding_devices ||
-                                             !output_bindings)) ||
+  if (!placed_modules ||
+      (n_bindings > 0 && (!target_bindings || !binding_devices || !output_bindings)) ||
       !candidates || !from || !to)
     goto cleanup;
 
@@ -1141,16 +1124,15 @@ int poly_place_module_map(
       int producer = place_module_output_index(modules, i, input);
       int binding = place_binding_index(logical_bindings, n_bindings, input);
       PolyUOp *placed_input = producer >= 0 ? placed_modules[producer]
-                                           : (binding >= 0 ? target_bindings[binding] : NULL);
+                                            : (binding >= 0 ? target_bindings[binding] : NULL);
       PolyUOp *on_device = place_exact_copy_to_device(ctx, placed_input, module->device);
       if (!on_device) goto cleanup;
       from[n_subs] = input;
       to[n_subs++] = on_device;
     }
     PolyUOp *module_root = module->output;
-    if (poly_uop_substitute_many(
-            ctx, &module_root, 1, from, to, n_subs, &placed_modules[i]
-        ) != 0 || !placed_modules[i] || !place_scalar_devices_valid(ctx, placed_modules[i]))
+    if (poly_uop_substitute_many(ctx, &module_root, 1, from, to, n_subs, &placed_modules[i]) != 0 ||
+        !placed_modules[i] || !place_scalar_devices_valid(ctx, placed_modules[i]))
       goto cleanup;
     PolyMap *cache = poly_map_new(32);
     PolyUOp *output_device =
@@ -1189,17 +1171,15 @@ int poly_place_module_map(
       int binding = place_binding_index(logical_bindings, n_bindings, store->src[0]);
       PolyUOp *placed_value = NULL;
       PolyUOp *value_root = store->src[1];
-      if (binding < 0 || poly_uop_substitute_many(
-                             ctx, &value_root, 1, from, to, value_subs, &placed_value
-                         ) != 0 ||
+      if (binding < 0 ||
+          poly_uop_substitute_many(ctx, &value_root, 1, from, to, value_subs, &placed_value) != 0 ||
           !placed_value)
         goto cleanup;
       PolyMap *cache = poly_map_new(32);
       PolyUOp *device = cache ? poly_uop_device_uop_cached(ctx, placed_value, cache) : NULL;
       poly_map_destroy(cache);
       if (!device || device->op != POLY_OP_DEVICE ||
-          (binding_devices[binding] &&
-           !place_same_device_uop(binding_devices[binding], device)))
+          (binding_devices[binding] && !place_same_device_uop(binding_devices[binding], device)))
         goto cleanup;
       binding_devices[binding] = device;
     }
@@ -1215,10 +1195,9 @@ int poly_place_module_map(
         goto cleanup;
     }
     for (int j = 0; j < i; j++) {
-      if ((logical_bindings[j] == logical_bindings[i] &&
-           target_bindings[j] != target_bindings[i]) ||
-          (logical_bindings[j] != logical_bindings[i] &&
-           target_bindings[j] == target_bindings[i]))
+      if ((logical_bindings[j] == logical_bindings[i] && target_bindings[j] != target_bindings[i]
+          ) ||
+          (logical_bindings[j] != logical_bindings[i] && target_bindings[j] == target_bindings[i]))
         goto cleanup;
     }
   }
@@ -1232,9 +1211,7 @@ int poly_place_module_map(
     from[n_subs] = modules[i].output;
     to[n_subs++] = placed_modules[i];
   }
-  if (poly_uop_substitute_many(
-          ctx, logical_roots, n_roots, from, to, n_subs, candidates
-      ) != 0)
+  if (poly_uop_substitute_many(ctx, logical_roots, n_roots, from, to, n_subs, candidates) != 0)
     goto cleanup;
   for (int i = 0; i < n_roots; i++)
     if (!place_validate_physical_root(ctx, candidates[i]) ||

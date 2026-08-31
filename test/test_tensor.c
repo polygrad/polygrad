@@ -71,15 +71,15 @@ static int count_op_in_root(PolyCtx *ctx, PolyUOp *root, int op) {
   int n_topo = 0, count = 0;
   PolyUOp **topo = poly_toposort_alloc(ctx, root, &n_topo);
   if (!topo) return -1;
-  for (int i = 0; i < n_topo; i++) count += topo[i]->op == op;
+  for (int i = 0; i < n_topo; i++)
+    count += topo[i]->op == op;
   poly_toposort_free(topo);
   return count;
 }
 
 static int read_tensor_bytes(PolyCtx *ctx, PolyTensor *tensor, void *out, size_t nbytes) {
   PolyTensor *realized = NULL;
-  if (!ctx || !tensor || !out || poly_realize_tensors(ctx, &tensor, 1, &realized) != 0 ||
-      !realized)
+  if (!ctx || !tensor || !out || poly_realize_tensors(ctx, &tensor, 1, &realized) != 0 || !realized)
     return -1;
   const PolyUOp *buffer = poly_uop_get_buffer_identity(realized->uop_physical);
   return buffer ? poly_buffer_read(ctx, (PolyUOp *)buffer, out, nbytes) : -1;
@@ -93,20 +93,12 @@ TEST(tensor, released_handles_retire_exact_buffer_residency) {
   ASSERT_NOT_NULL(ctx);
   int64_t shape[1] = {1024};
   float values[1024] = {0};
-  PolyTensor *first = poly_tensor_empty(
-      ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU
-  );
-  PolyTensor *second = poly_tensor_empty(
-      ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU
-  );
+  PolyTensor *first = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+  PolyTensor *second = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(first);
   ASSERT_NOT_NULL(second);
-  ASSERT_INT_EQ(
-      poly_buffer_write(ctx, first->uop_physical, values, sizeof(values)), 0
-  );
-  ASSERT_INT_EQ(
-      poly_buffer_write(ctx, second->uop_physical, values, sizeof(values)), 0
-  );
+  ASSERT_INT_EQ(poly_buffer_write(ctx, first->uop_physical, values, sizeof(values)), 0);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, second->uop_physical, values, sizeof(values)), 0);
 
   PolyCtxStats stats = {0};
   ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
@@ -135,28 +127,18 @@ TEST(tensor, dirty_residency_is_collected_before_replacement_allocation) {
   float *values = calloc((size_t)shape[0], sizeof(*values));
   ASSERT_NOT_NULL(values);
 
-  PolyTensor *first = poly_tensor_empty(
-      ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU
-  );
+  PolyTensor *first = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(first);
   ASSERT_INT_EQ(
-      poly_buffer_write(
-          ctx, first->uop_physical, values, (size_t)shape[0] * sizeof(*values)
-      ),
-      0
+      poly_buffer_write(ctx, first->uop_physical, values, (size_t)shape[0] * sizeof(*values)), 0
   );
   ASSERT_TRUE(poly_ctx_mem_used_for_device(ctx, POLY_DEVICE_CPU) == 4000000);
   poly_tensor_release(first);
 
-  PolyTensor *second = poly_tensor_empty(
-      ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU
-  );
+  PolyTensor *second = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(second);
   ASSERT_INT_EQ(
-      poly_buffer_write(
-          ctx, second->uop_physical, values, (size_t)shape[0] * sizeof(*values)
-      ),
-      0
+      poly_buffer_write(ctx, second->uop_physical, values, (size_t)shape[0] * sizeof(*values)), 0
   );
   ASSERT_TRUE(poly_ctx_mem_used_for_device(ctx, POLY_DEVICE_CPU) == 4000000);
 
@@ -172,16 +154,9 @@ TEST(tensor, retained_physical_uop_owns_residency_but_logical_uop_does_not) {
   int64_t shape[1] = {1024};
   float values[1024] = {0};
 
-  PolyTensor *physical_owner = poly_tensor_empty(
-      ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU
-  );
+  PolyTensor *physical_owner = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(physical_owner);
-  ASSERT_INT_EQ(
-      poly_buffer_write(
-          ctx, physical_owner->uop_physical, values, sizeof(values)
-      ),
-      0
-  );
+  ASSERT_INT_EQ(poly_buffer_write(ctx, physical_owner->uop_physical, values, sizeof(values)), 0);
   PolyUOp *physical = physical_owner->uop_physical;
   ASSERT_INT_EQ(poly_uop_retain(ctx, physical), 0);
   poly_tensor_release(physical_owner);
@@ -194,13 +169,9 @@ TEST(tensor, retained_physical_uop_owns_residency_but_logical_uop_does_not) {
   ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
   ASSERT_TRUE(stats.mem_used == 0);
 
-  PolyTensor *logical_owner = poly_tensor_empty(
-      ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU
-  );
+  PolyTensor *logical_owner = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(logical_owner);
-  ASSERT_INT_EQ(
-      poly_buffer_write(ctx, logical_owner->uop_physical, values, sizeof(values)), 0
-  );
+  ASSERT_INT_EQ(poly_buffer_write(ctx, logical_owner->uop_physical, values, sizeof(values)), 0);
   PolyUOp *logical = logical_owner->uop_logical;
   ASSERT_INT_EQ(poly_uop_retain(ctx, logical), 0);
   poly_tensor_release(logical_owner);
@@ -217,9 +188,7 @@ TEST(tensor, movement_view_keeps_base_residency_until_last_handle_release) {
   ASSERT_NOT_NULL(ctx);
   int64_t shape[1] = {1024};
   float values[1024] = {0};
-  PolyTensor *base = poly_tensor_empty(
-      ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU
-  );
+  PolyTensor *base = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(base);
   ASSERT_INT_EQ(poly_buffer_write(ctx, base->uop_physical, values, sizeof(values)), 0);
   int64_t view_shape[2] = {256, 4};
@@ -248,12 +217,9 @@ TEST(tensor, downstream_graph_owns_input_residency_after_input_handle_release) {
   ASSERT_NOT_NULL(ctx);
   int64_t shape[1] = {1024};
   float values[1024] = {0};
-  PolyTensor *input = poly_tensor_empty(
-      ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU
-  );
-  PolyTensor *one = poly_tensor_const_float_by_id(
-      ctx, 1.0, poly_dtype_id_by_name("float32"), POLY_DEVICE_CPU
-  );
+  PolyTensor *input = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+  PolyTensor *one =
+      poly_tensor_const_float_by_id(ctx, 1.0, poly_dtype_id_by_name("float32"), POLY_DEVICE_CPU);
   PolyTensor *out = poly_tensor_alu2(ctx, POLY_OP_ADD, input, one);
   ASSERT_NOT_NULL(input);
   ASSERT_NOT_NULL(one);
@@ -291,9 +257,7 @@ TEST(tensor, rng_state_owns_only_seed_and_counter_handles) {
   poly_tensor_manual_seed(ctx, 123);
   int64_t shape[] = {1024};
   int f32_id = poly_dtype_id_by_name("float32");
-  PolyTensor *out = poly_tensor_rand_by_id(
-      ctx, shape, 1, f32_id, POLY_DEVICE_CPU, 1
-  );
+  PolyTensor *out = poly_tensor_rand_by_id(ctx, shape, 1, f32_id, POLY_DEVICE_CPU, 1);
   ASSERT_NOT_NULL(out);
   PolyTensor *realized = NULL;
   ASSERT_INT_EQ(poly_realize_tensors(ctx, &out, 1, &realized), 0);
@@ -387,10 +351,8 @@ TEST(tensor, function_builds_ordered_logical_and_physical_value_calls) {
   ASSERT_NOT_NULL(ctx);
   float av[2] = {1.0f, 2.0f}, bv[2] = {3.0f, 4.0f};
   int64_t shape[1] = {2};
-  PolyTensor *a_host = poly_tensor_from_host(
-      ctx, av, sizeof(av), POLY_FLOAT32, shape, 1);
-  PolyTensor *b_host = poly_tensor_from_host(
-      ctx, bv, sizeof(bv), POLY_FLOAT32, shape, 1);
+  PolyTensor *a_host = poly_tensor_from_host(ctx, av, sizeof(av), POLY_FLOAT32, shape, 1);
+  PolyTensor *b_host = poly_tensor_from_host(ctx, bv, sizeof(bv), POLY_FLOAT32, shape, 1);
   PolyTensor *a = poly_tensor_to_device(ctx, a_host, POLY_DEVICE_CPU);
   PolyTensor *b = poly_tensor_to_device(ctx, b_host, POLY_DEVICE_CPU);
   PolyTensor *sum = poly_tensor_alu2(ctx, POLY_OP_ADD, a, b);
@@ -399,13 +361,12 @@ TEST(tensor, function_builds_ordered_logical_and_physical_value_calls) {
   PolyTensor *inputs[2] = {a, b};
   PolyTensor *outputs[1] = {NULL};
   ASSERT_INT_EQ(
-      poly_tensor_function(
-          ctx, results, 1, inputs, 2, "ordered_add", false, false, false, outputs),
-      0);
+      poly_tensor_function(ctx, results, 1, inputs, 2, "ordered_add", false, false, false, outputs),
+      0
+  );
   ASSERT_NOT_NULL(outputs[0]);
 
-  PolyUOp *surfaces[2] = {
-      outputs[0]->uop_logical, outputs[0]->uop_physical};
+  PolyUOp *surfaces[2] = {outputs[0]->uop_logical, outputs[0]->uop_physical};
   for (int surface = 0; surface < 2; surface++) {
     PolyUOp *selected = surfaces[surface];
     ASSERT_NOT_NULL(selected);
@@ -427,8 +388,7 @@ TEST(tensor, function_builds_ordered_logical_and_physical_value_calls) {
     ASSERT_INT_EQ(add->src[1]->arg.param->slot, 1);
   }
 
-  PolyUOp *grad = poly_grad(
-      ctx, outputs[0]->uop_physical, a->uop_physical);
+  PolyUOp *grad = poly_grad(ctx, outputs[0]->uop_physical, a->uop_physical);
   ASSERT_NOT_NULL(grad);
   int n_topo = 0;
   PolyUOp **topo = poly_toposort_alloc(ctx, grad, &n_topo);
@@ -484,17 +444,13 @@ TEST(tensor, root_mutators_require_complete_physical_root) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *logical = poly_buffer_f32(ctx, 2);
   PolyUOp *physical = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 2, POLY_DEVICE_CPU);
-  PolyTensor *tensor = poly_tensor_create_with_roots(
-      ctx, logical, physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
-  );
+  PolyTensor *tensor =
+      poly_tensor_create_with_roots(ctx, logical, physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(tensor);
 
   PolyUOp *realized = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 2, POLY_DEVICE_CPU);
   ASSERT_INT_EQ(
-      poly_tensor_set_physical(
-          ctx, tensor, realized, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
-      ),
-      0
+      poly_tensor_set_physical(ctx, tensor, realized, POLY_TENSOR_VALUE, POLY_DEVICE_CPU), 0
   );
   ASSERT_PTR_EQ(tensor->uop_logical, logical);
   ASSERT_PTR_EQ(tensor->uop_physical, realized);
@@ -528,8 +484,7 @@ TEST(tensor, host_array_stages_creation_device_before_requested_copy) {
   PolyCtx *ctx = poly_ctx_new();
   float data[4] = {1.0f, 2.0f, 3.0f, 4.0f};
   int64_t shape[2] = {2, 2};
-  PolyTensor *source =
-      poly_tensor_from_host(ctx, data, sizeof(data), POLY_FLOAT32, shape, 2);
+  PolyTensor *source = poly_tensor_from_host(ctx, data, sizeof(data), POLY_FLOAT32, shape, 2);
   ASSERT_NOT_NULL(source);
   ASSERT_INT_EQ(source->device, POLY_DEVICE_HOST);
   ASSERT_INT_EQ(source->uop_logical->op, POLY_OP_RESHAPE);
@@ -556,18 +511,15 @@ TEST(tensor, host_array_stages_creation_device_before_requested_copy) {
   PolyTensor *realized = NULL;
   ASSERT_INT_EQ(poly_realize_tensors(ctx, &moved, 1, &realized), 0);
   ASSERT_NOT_NULL(realized);
-  PolyUOp *realized_buffer =
-      (PolyUOp *)poly_uop_get_buffer_identity(realized->uop_physical);
+  PolyUOp *realized_buffer = (PolyUOp *)poly_uop_get_buffer_identity(realized->uop_physical);
   ASSERT_NOT_NULL(realized_buffer);
   ASSERT_PTR_NEQ(realized_buffer, physical_buffer);
   float out[4] = {0};
   ASSERT_INT_EQ(poly_buffer_read(ctx, realized_buffer, out, sizeof(out)), 0);
-  for (int i = 0; i < 4; i++) ASSERT_FLOAT_NEAR(out[i], data[i], 4, 1e-6);
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_NEAR(out[i], data[i], 4, 1e-6);
 
-  ASSERT_EQ(
-      poly_tensor_from_host(ctx, data, sizeof(data) - 1, POLY_FLOAT32, shape, 2),
-      NULL
-  );
+  ASSERT_EQ(poly_tensor_from_host(ctx, data, sizeof(data) - 1, POLY_FLOAT32, shape, 2), NULL);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -582,9 +534,7 @@ TEST(tensor, stateful_rand_matches_pinned_graph_and_values) {
   int f32_id = poly_dtype_id_by_name("float32");
   int64_t shape[1] = {8};
   poly_tensor_manual_seed(ctx, 1337);
-  PolyTensor *first = poly_tensor_rand_by_id(
-      ctx, shape, 1, f32_id, POLY_DEVICE_CPU, 1
-  );
+  PolyTensor *first = poly_tensor_rand_by_id(ctx, shape, 1, f32_id, POLY_DEVICE_CPU, 1);
   ASSERT_NOT_NULL(first);
   ASSERT_INT_EQ(count_op_in_root(ctx, first->uop_physical, POLY_OP_AFTER), 1);
   ASSERT_INT_EQ(count_op_in_root(ctx, first->uop_physical, POLY_OP_STORE), 1);
@@ -595,16 +545,13 @@ TEST(tensor, stateful_rand_matches_pinned_graph_and_values) {
   float first_values[8] = {0};
   ASSERT_INT_EQ(read_tensor_f32(ctx, first, first_values, 8), 0);
   const uint32_t expected_bits[8] = {
-      UINT32_C(0x3efa31a0), UINT32_C(0x3eb22b7c), UINT32_C(0x3f28c97e),
-      UINT32_C(0x3f22effe), UINT32_C(0x3ef13c94), UINT32_C(0x3e10dd30),
-      UINT32_C(0x3e8e61ec), UINT32_C(0x3d4c9dc0),
+      UINT32_C(0x3efa31a0), UINT32_C(0x3eb22b7c), UINT32_C(0x3f28c97e), UINT32_C(0x3f22effe),
+      UINT32_C(0x3ef13c94), UINT32_C(0x3e10dd30), UINT32_C(0x3e8e61ec), UINT32_C(0x3d4c9dc0),
   };
   ASSERT_TRUE(memcmp(first_values, expected_bits, sizeof(expected_bits)) == 0);
 
   poly_tensor_manual_seed(ctx, 1337);
-  PolyTensor *reset = poly_tensor_rand_by_id(
-      ctx, shape, 1, f32_id, POLY_DEVICE_CPU, 1
-  );
+  PolyTensor *reset = poly_tensor_rand_by_id(ctx, shape, 1, f32_id, POLY_DEVICE_CPU, 1);
   ASSERT_NOT_NULL(reset);
   float reset_values[8] = {0};
   ASSERT_INT_EQ(read_tensor_f32(ctx, reset, reset_values, 8), 0);
@@ -652,9 +599,7 @@ TEST(tensor, stateful_rand_zero_extent_constructs_current_empty_graph) {
   int f32_id = poly_dtype_id_by_name("float32");
   int64_t shape[1] = {0};
   poly_tensor_manual_seed(ctx, 123);
-  PolyTensor *out = poly_tensor_rand_by_id(
-      ctx, shape, 1, f32_id, POLY_DEVICE_CPU, 0
-  );
+  PolyTensor *out = poly_tensor_rand_by_id(ctx, shape, 1, f32_id, POLY_DEVICE_CPU, 0);
   ASSERT_NOT_NULL(out);
   PolyShape out_shape = poly_uop_max_shape_cached(ctx, out->uop_physical);
   ASSERT_INT_EQ(out_shape.ndim, 1);
@@ -673,10 +618,8 @@ TEST(tensor, scalar_constructors_store_exact_const_as_both_roots) {
   ASSERT_TRUE(int_id >= 0);
   ASSERT_TRUE(float_id >= 0);
 
-  PolyTensor *i =
-      poly_tensor_const_int_by_id(ctx, 7, int_id, POLY_DEVICE_CUDA);
-  PolyTensor *f =
-      poly_tensor_const_float_by_id(ctx, 1.5, float_id, POLY_DEVICE_CPU);
+  PolyTensor *i = poly_tensor_const_int_by_id(ctx, 7, int_id, POLY_DEVICE_CUDA);
+  PolyTensor *f = poly_tensor_const_float_by_id(ctx, 1.5, float_id, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(i);
   ASSERT_NOT_NULL(f);
   ASSERT_PTR_EQ(i->uop_logical, i->uop_physical);
@@ -702,10 +645,8 @@ TEST(tensor, weak_const_promotion_retypes_the_const_argument) {
   ASSERT_NOT_NULL(ctx);
   int weakint = poly_dtype_id_by_name("weakint");
   int weakfloat = poly_dtype_id_by_name("weakfloat");
-  PolyTensor *zero =
-      poly_tensor_const_int_by_id(ctx, 0, weakint, POLY_DEVICE_CPU);
-  PolyTensor *one =
-      poly_tensor_const_float_by_id(ctx, 1.0, weakfloat, POLY_DEVICE_CPU);
+  PolyTensor *zero = poly_tensor_const_int_by_id(ctx, 0, weakint, POLY_DEVICE_CPU);
+  PolyTensor *one = poly_tensor_const_float_by_id(ctx, 1.0, weakfloat, POLY_DEVICE_CPU);
   PolyTensor *sum = poly_tensor_alu2(ctx, POLY_OP_ADD, zero, one);
   ASSERT_NOT_NULL(sum);
 
@@ -736,9 +677,8 @@ TEST(tensor, current_full_commits_weak_value_only_at_storage_boundary) {
   int weakfloat = poly_dtype_id_by_name("weakfloat");
   int64_t shape[] = {2};
 
-  PolyTensor *buffered = poly_tensor_full_float_by_id(
-      ctx, shape, 1, 0.0, weakfloat, POLY_DEVICE_CPU, false, true
-  );
+  PolyTensor *buffered =
+      poly_tensor_full_float_by_id(ctx, shape, 1, 0.0, weakfloat, POLY_DEVICE_CPU, false, true);
   ASSERT_NOT_NULL(buffered);
   PolyUOp *root = buffered->uop_physical;
   ASSERT_NOT_NULL(root);
@@ -754,17 +694,17 @@ TEST(tensor, current_full_commits_weak_value_only_at_storage_boundary) {
   ASSERT_TRUE(poly_dtype_eq(root->src[1]->src[1]->dtype, POLY_WEAKFLOAT));
   ASSERT_PTR_NEQ(buffered->uop_logical, buffered->uop_physical);
 
-  PolyTensor *unbuffered = poly_tensor_full_float_by_id(
-      ctx, shape, 1, 0.0, weakfloat, POLY_DEVICE_CPU, false, false
-  );
+  PolyTensor *unbuffered =
+      poly_tensor_full_float_by_id(ctx, shape, 1, 0.0, weakfloat, POLY_DEVICE_CPU, false, false);
   ASSERT_NOT_NULL(unbuffered);
   ASSERT_PTR_EQ(unbuffered->uop_logical, unbuffered->uop_physical);
   ASSERT_EQ(unbuffered->uop_physical->op, POLY_OP_EXPAND);
   ASSERT_TRUE(poly_dtype_eq(unbuffered->uop_physical->dtype, POLY_WEAKFLOAT));
 
-  ASSERT_TRUE(poly_tensor_full_float_by_id(
-      ctx, shape, 1, 0.0, weakfloat, POLY_DEVICE_CPU, true, true
-  ) == NULL);
+  ASSERT_TRUE(
+      poly_tensor_full_float_by_id(ctx, shape, 1, 0.0, weakfloat, POLY_DEVICE_CPU, true, true) ==
+      NULL
+  );
   ASSERT_TRUE(poly_tensor_empty(ctx, POLY_WEAKFLOAT, shape, 1, POLY_DEVICE_CPU) == NULL);
 
   poly_ctx_destroy(ctx);
@@ -782,9 +722,7 @@ TEST(tensor, pure_constructors_store_one_device_free_root) {
   int64_t shape[] = {2, 3};
   PolyTensor *values[] = {
       poly_tensor_full_int_by_id(ctx, shape, 2, 2, i32, POLY_DEVICE_CPU, true, false),
-      poly_tensor_full_float_by_id(
-          ctx, shape, 2, 2.0, f32, POLY_DEVICE_CPU, true, false
-      ),
+      poly_tensor_full_float_by_id(ctx, shape, 2, 2.0, f32, POLY_DEVICE_CPU, true, false),
       poly_tensor_arange_int_by_id(ctx, 0, 4, 1, i32, POLY_DEVICE_CPU),
       poly_tensor_arange_float_by_id(ctx, 0.0, 4.0, 1.0, f32, POLY_DEVICE_CPU),
       poly_tensor_linspace_by_id(ctx, 0.0, 1.0, 4, f32, POLY_DEVICE_CPU),
@@ -799,11 +737,8 @@ TEST(tensor, pure_constructors_store_one_device_free_root) {
 
   int64_t singleton_shape[] = {1};
   PolyTensor *singleton_full =
-      poly_tensor_full_int_by_id(
-          ctx, singleton_shape, 1, 2, i32, POLY_DEVICE_CPU, true, false
-      );
-  PolyTensor *singleton_arange =
-      poly_tensor_arange_int_by_id(ctx, 0, 1, 1, i32, POLY_DEVICE_CPU);
+      poly_tensor_full_int_by_id(ctx, singleton_shape, 1, 2, i32, POLY_DEVICE_CPU, true, false);
+  PolyTensor *singleton_arange = poly_tensor_arange_int_by_id(ctx, 0, 1, 1, i32, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(singleton_full);
   ASSERT_NOT_NULL(singleton_arange);
   ASSERT_EQ(singleton_full->uop_physical->op, POLY_OP_RESHAPE);
@@ -865,9 +800,8 @@ TEST(tensor, movement_constructors_use_exact_logical_and_physical_sources) {
    * Tensor composition must reject it instead of reconstructing execution
    * state from the logical graph. */
   PolyUOp *legacy_uop = poly_buffer_f32(ctx, 3);
-  PolyTensor *legacy = poly_tensor_create_with_roots(
-      ctx, legacy_uop, NULL, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
-  );
+  PolyTensor *legacy =
+      poly_tensor_create_with_roots(ctx, legacy_uop, NULL, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
   int64_t legacy_shape[2] = {3, 1};
   PolyTensor *legacy_reshape = poly_tensor_reshape(ctx, legacy, legacy_shape, 2);
   ASSERT_NOT_NULL(legacy);
@@ -883,30 +817,25 @@ TEST(tensor, symbolic_shrink_uses_exact_logical_and_physical_sources) {
   ASSERT_NOT_NULL(ctx);
 
   PolyUOp *logical = make_buf(ctx, (int64_t[]){10, 2}, 2);
-  PolyUOp *physical_buffer =
-      poly_test_buffer_on_device(ctx, POLY_FLOAT32, 20, POLY_DEVICE_CPU);
-  PolyUOp *physical =
-      poly_reshape(ctx, physical_buffer, (int64_t[]){10, 2}, 2);
-  PolyTensor *source = poly_tensor_create_with_roots(
-      ctx, logical, physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
-  );
+  PolyUOp *physical_buffer = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 20, POLY_DEVICE_CPU);
+  PolyUOp *physical = poly_reshape(ctx, physical_buffer, (int64_t[]){10, 2}, 2);
+  PolyTensor *source =
+      poly_tensor_create_with_roots(ctx, logical, physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(source);
   ASSERT_PTR_NEQ(source->uop_logical, source->uop_physical);
 
   float data[20];
-  for (int i = 0; i < 20; i++) data[i] = (float)i;
+  for (int i = 0; i < 20; i++)
+    data[i] = (float)i;
 
   PolyUOp *i = poly_uop_variable(ctx, "i", 0, 8, POLY_WEAKINT, 1, false);
   PolyUOp *ib = poly_uop_bind(ctx, i, 4);
   PolyUOp *starts[2] = {ib, poly_const_int(ctx, 0)};
   PolyUOp *sizes[2] = {poly_const_int(ctx, 2), poly_const_int(ctx, 2)};
-  PolyUOp *expected_logical =
-      poly_shrink_uop(ctx, source->uop_logical, starts, sizes, 2);
-  PolyUOp *expected_physical =
-      poly_shrink_uop(ctx, source->uop_physical, starts, sizes, 2);
+  PolyUOp *expected_logical = poly_shrink_uop(ctx, source->uop_logical, starts, sizes, 2);
+  PolyUOp *expected_physical = poly_shrink_uop(ctx, source->uop_physical, starts, sizes, 2);
 
-  PolyTensor *slice =
-      poly_tensor_shrink_uop(ctx, source, starts, sizes, 2);
+  PolyTensor *slice = poly_tensor_shrink_uop(ctx, source, starts, sizes, 2);
   ASSERT_NOT_NULL(slice);
   ASSERT_PTR_EQ(slice->uop_logical, expected_logical);
   ASSERT_PTR_EQ(slice->uop_physical, expected_physical);
@@ -921,8 +850,8 @@ TEST(tensor, symbolic_shrink_uses_exact_logical_and_physical_sources) {
   ASSERT_INT_EQ(
       realize_uop(
           ctx, slice->uop_physical,
-          poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_CPU), out,
-          leaf_buffers, leaf_data, 1
+          poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_CPU), out, leaf_buffers,
+          leaf_data, 1
       ),
       0
   );
@@ -940,26 +869,20 @@ TEST(tensor, symbolic_expand_uses_exact_logical_and_physical_sources) {
   ASSERT_NOT_NULL(ctx);
 
   PolyUOp *logical = make_buf(ctx, (int64_t[]){1, 2}, 2);
-  PolyUOp *physical_buffer =
-      poly_test_buffer_on_device(ctx, POLY_FLOAT32, 2, POLY_DEVICE_CPU);
-  PolyUOp *physical =
-      poly_reshape(ctx, physical_buffer, (int64_t[]){1, 2}, 2);
-  PolyTensor *source = poly_tensor_create_with_roots(
-      ctx, logical, physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
-  );
+  PolyUOp *physical_buffer = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 2, POLY_DEVICE_CPU);
+  PolyUOp *physical = poly_reshape(ctx, physical_buffer, (int64_t[]){1, 2}, 2);
+  PolyTensor *source =
+      poly_tensor_create_with_roots(ctx, logical, physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(source);
   ASSERT_PTR_NEQ(source->uop_logical, source->uop_physical);
 
   PolyUOp *n = poly_uop_variable(ctx, "n", 1, 4, POLY_WEAKINT, 1, false);
   PolyUOp *nb = poly_uop_bind(ctx, n, 3);
   PolyUOp *dims[2] = {nb, poly_const_int(ctx, 2)};
-  PolyUOp *expected_logical =
-      poly_expand_uop(ctx, source->uop_logical, dims, 2);
-  PolyUOp *expected_physical =
-      poly_expand_uop(ctx, source->uop_physical, dims, 2);
+  PolyUOp *expected_logical = poly_expand_uop(ctx, source->uop_logical, dims, 2);
+  PolyUOp *expected_physical = poly_expand_uop(ctx, source->uop_physical, dims, 2);
 
-  PolyTensor *expanded =
-      poly_tensor_expand_uop(ctx, source, dims, 2);
+  PolyTensor *expanded = poly_tensor_expand_uop(ctx, source, dims, 2);
   ASSERT_NOT_NULL(expanded);
   ASSERT_PTR_EQ(expanded->uop_logical, expected_logical);
   ASSERT_PTR_EQ(expanded->uop_physical, expected_physical);
@@ -972,8 +895,7 @@ TEST(tensor, symbolic_expand_uses_exact_logical_and_physical_sources) {
 
   PolyUOp *starts[2] = {poly_const_int(ctx, 0), poly_const_int(ctx, 0)};
   PolyUOp *sizes[2] = {poly_const_int(ctx, 3), poly_const_int(ctx, 2)};
-  PolyUOp *static_view =
-      poly_shrink_uop(ctx, expanded->uop_physical, starts, sizes, 2);
+  PolyUOp *static_view = poly_shrink_uop(ctx, expanded->uop_physical, starts, sizes, 2);
   ASSERT_NOT_NULL(static_view);
   float data[2] = {1.0f, 2.0f};
   float out[6] = {0};
@@ -981,8 +903,7 @@ TEST(tensor, symbolic_expand_uses_exact_logical_and_physical_sources) {
   float *leaf_data[1] = {data};
   ASSERT_INT_EQ(
       realize_uop(
-          ctx, static_view,
-          poly_test_buffer_on_device(ctx, POLY_FLOAT32, 6, POLY_DEVICE_CPU), out,
+          ctx, static_view, poly_test_buffer_on_device(ctx, POLY_FLOAT32, 6, POLY_DEVICE_CPU), out,
           leaf_buffers, leaf_data, 1
       ),
       0
@@ -1001,36 +922,37 @@ TEST(tensor, symbolic_reshape_uses_exact_logical_and_physical_sources) {
   ASSERT_NOT_NULL(ctx);
 
   PolyUOp *logical = make_buf(ctx, (int64_t[]){1, 8, 1, 8}, 4);
-  PolyUOp *physical_buffer =
-      poly_test_buffer_on_device(ctx, POLY_FLOAT32, 64, POLY_DEVICE_CPU);
-  PolyUOp *physical =
-      poly_reshape(ctx, physical_buffer, (int64_t[]){1, 8, 1, 8}, 4);
-  PolyTensor *source = poly_tensor_create_with_roots(
-      ctx, logical, physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
-  );
+  PolyUOp *physical_buffer = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 64, POLY_DEVICE_CPU);
+  PolyUOp *physical = poly_reshape(ctx, physical_buffer, (int64_t[]){1, 8, 1, 8}, 4);
+  PolyTensor *source =
+      poly_tensor_create_with_roots(ctx, logical, physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(source);
 
   PolyUOp *n = poly_uop_variable(ctx, "n", 1, 7, POLY_WEAKINT, 1, false);
   PolyUOp *nb = poly_uop_bind(ctx, n, 3);
   PolyUOp *starts[4] = {
-      poly_const_int(ctx, 0), poly_const_int(ctx, 0),
-      poly_const_int(ctx, 0), poly_const_int(ctx, 0),
+      poly_const_int(ctx, 0),
+      poly_const_int(ctx, 0),
+      poly_const_int(ctx, 0),
+      poly_const_int(ctx, 0),
   };
   PolyUOp *sizes[4] = {
-      poly_const_int(ctx, 1), nb,
-      poly_const_int(ctx, 1), poly_const_int(ctx, 8),
+      poly_const_int(ctx, 1),
+      nb,
+      poly_const_int(ctx, 1),
+      poly_const_int(ctx, 8),
   };
   PolyTensor *slice = poly_tensor_shrink_uop(ctx, source, starts, sizes, 4);
   ASSERT_NOT_NULL(slice);
 
   PolyUOp *dims[4] = {
-      poly_const_int(ctx, 1), nb,
-      poly_const_int(ctx, 2), poly_const_int(ctx, 4),
+      poly_const_int(ctx, 1),
+      nb,
+      poly_const_int(ctx, 2),
+      poly_const_int(ctx, 4),
   };
-  PolyUOp *expected_logical =
-      poly_reshape_uop(ctx, slice->uop_logical, dims, 4);
-  PolyUOp *expected_physical =
-      poly_reshape_uop(ctx, slice->uop_physical, dims, 4);
+  PolyUOp *expected_logical = poly_reshape_uop(ctx, slice->uop_logical, dims, 4);
+  PolyUOp *expected_physical = poly_reshape_uop(ctx, slice->uop_physical, dims, 4);
   PolyTensor *reshaped = poly_tensor_reshape_uop(ctx, slice, dims, 4);
   ASSERT_NOT_NULL(reshaped);
   ASSERT_PTR_EQ(reshaped->uop_logical, expected_logical);
@@ -1048,8 +970,10 @@ TEST(tensor, symbolic_reshape_uses_exact_logical_and_physical_sources) {
   /* Pinned UOp._shape rejects symbolic reshapes whose exact products differ
    * (uop/ops.py:318-336); the Tensor bridge must fail closed as well. */
   PolyUOp *bad_dims[4] = {
-      poly_const_int(ctx, 1), nb,
-      poly_const_int(ctx, 3), poly_const_int(ctx, 4),
+      poly_const_int(ctx, 1),
+      nb,
+      poly_const_int(ctx, 3),
+      poly_const_int(ctx, 4),
   };
   ASSERT_EQ(poly_tensor_reshape_uop(ctx, slice, bad_dims, 4), NULL);
 
@@ -1067,9 +991,8 @@ TEST(tensor, symbolic_dot_preserves_noncontracted_bind_dimension) {
   PolyUOp *q_logical = make_buf(ctx, (int64_t[]){1, 2, 1, 4}, 4);
   PolyUOp *q_buffer = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 8, POLY_DEVICE_CPU);
   PolyUOp *q_physical = poly_reshape(ctx, q_buffer, (int64_t[]){1, 2, 1, 4}, 4);
-  PolyTensor *query = poly_tensor_create_with_roots(
-      ctx, q_logical, q_physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
-  );
+  PolyTensor *query =
+      poly_tensor_create_with_roots(ctx, q_logical, q_physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
 
   PolyUOp *k_logical_base = make_buf(ctx, (int64_t[]){1, 8, 2, 4}, 4);
   PolyUOp *k_buffer = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 64, POLY_DEVICE_CPU);
@@ -1078,12 +1001,16 @@ TEST(tensor, symbolic_dot_preserves_noncontracted_bind_dimension) {
       ctx, k_logical_base, k_physical_base, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
   );
   PolyUOp *starts[4] = {
-      poly_const_int(ctx, 0), poly_const_int(ctx, 0),
-      poly_const_int(ctx, 0), poly_const_int(ctx, 0),
+      poly_const_int(ctx, 0),
+      poly_const_int(ctx, 0),
+      poly_const_int(ctx, 0),
+      poly_const_int(ctx, 0),
   };
   PolyUOp *sizes[4] = {
-      poly_const_int(ctx, 1), nb,
-      poly_const_int(ctx, 2), poly_const_int(ctx, 4),
+      poly_const_int(ctx, 1),
+      nb,
+      poly_const_int(ctx, 2),
+      poly_const_int(ctx, 4),
   };
   PolyTensor *key = poly_tensor_shrink_uop(ctx, key_base, starts, sizes, 4);
   int64_t perm[4] = {0, 2, 3, 1};
@@ -1116,12 +1043,16 @@ TEST(tensor, symbolic_softmax_and_max_preserve_exact_bind_dimension) {
   PolyUOp *nb = poly_uop_bind(ctx, n, 3);
   PolyUOp *base = make_buf(ctx, (int64_t[]){1, 2, 1, 7}, 4);
   PolyUOp *starts[4] = {
-      poly_const_int(ctx, 0), poly_const_int(ctx, 0),
-      poly_const_int(ctx, 0), poly_const_int(ctx, 0),
+      poly_const_int(ctx, 0),
+      poly_const_int(ctx, 0),
+      poly_const_int(ctx, 0),
+      poly_const_int(ctx, 0),
   };
   PolyUOp *sizes[4] = {
-      poly_const_int(ctx, 1), poly_const_int(ctx, 2),
-      poly_const_int(ctx, 1), nb,
+      poly_const_int(ctx, 1),
+      poly_const_int(ctx, 2),
+      poly_const_int(ctx, 1),
+      nb,
   };
   PolyUOp *x = poly_shrink_uop(ctx, base, starts, sizes, 4);
   ASSERT_NOT_NULL(x);
@@ -1165,12 +1096,9 @@ TEST(tensor, custom_kernel_uses_ordered_roots_and_one_call_per_graph) {
   ASSERT_NOT_NULL(ctx);
 
   int64_t shape[1] = {4};
-  PolyTensor *c =
-      poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
-  PolyTensor *a =
-      poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
-  PolyTensor *b =
-      poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+  PolyTensor *c = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+  PolyTensor *a = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+  PolyTensor *b = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(c);
   ASSERT_NOT_NULL(a);
   ASSERT_NOT_NULL(b);
@@ -1183,9 +1111,7 @@ TEST(tensor, custom_kernel_uses_ordered_roots_and_one_call_per_graph) {
   PolyUOp *ci = poly_uop_index(ctx, pc, idxs, 1);
   PolyUOp *ai = poly_uop_index(ctx, pa, idxs, 1);
   PolyUOp *bi = poly_uop_index(ctx, pb, idxs, 1);
-  PolyUOp *sum = poly_alu2(
-      ctx, POLY_OP_ADD, poly_uop_load(ctx, ai), poly_uop_load(ctx, bi)
-  );
+  PolyUOp *sum = poly_alu2(ctx, POLY_OP_ADD, poly_uop_load(ctx, ai), poly_uop_load(ctx, bi));
   PolyUOp *store = poly_uop_store(ctx, ci, sum);
   PolyUOp *end = poly_uop_end(ctx, store, &r, 1);
   PolyUOp *body = poly_uop_sink_ex(ctx, &end, 1, "custom_add_4", 1);
@@ -1220,15 +1146,12 @@ TEST(tensor, custom_kernel_uses_ordered_roots_and_one_call_per_graph) {
    * preserves its three ordered buffer arguments. The following consumer is
    * a separate raw SINK until compile_linear (schedule/__init__.py:94-105,
    * 118-128). */
-  PolyUOp *consumer =
-      poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_CPU);
-  PolyUOp *probe_store =
-      poly_store_val(ctx, consumer, outputs[0]->uop_physical);
+  PolyUOp *consumer = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_CPU);
+  PolyUOp *probe_store = poly_store_val(ctx, consumer, outputs[0]->uop_physical);
   PolyUOp *probe_sink = poly_sink1(ctx, probe_store);
   PolyVarBinding *probe_vars = NULL;
   int n_probe_vars = 0;
-  PolyUOp *probe_linear =
-      poly_linear_effect_sink(ctx, probe_sink, &probe_vars, &n_probe_vars);
+  PolyUOp *probe_linear = poly_linear_effect_sink(ctx, probe_sink, &probe_vars, &n_probe_vars);
   ASSERT_NOT_NULL(probe_linear);
   ASSERT_INT_EQ(n_probe_vars, 0);
   free(probe_vars);
@@ -1243,18 +1166,13 @@ TEST(tensor, custom_kernel_uses_ordered_roots_and_one_call_per_graph) {
   float c_data[4] = {0};
   float a_data[4] = {1.0f, 2.0f, 3.0f, 4.0f};
   float b_data[4] = {10.0f, 20.0f, 30.0f, 40.0f};
-  PolyUOp *leaf_buffers[3] = {
-      c->uop_physical, a->uop_physical, b->uop_physical
-  };
+  PolyUOp *leaf_buffers[3] = {c->uop_physical, a->uop_physical, b->uop_physical};
   float *leaf_data[3] = {c_data, a_data, b_data};
   PolyTestBufferView views[3];
   for (int i = 0; i < 3; i++)
     views[i] = POLY_TEST_HOST_VIEW(leaf_buffers[i], leaf_data[i]);
   ASSERT_INT_EQ(
-      poly_test_realize_buffer_views(
-          ctx, poly_sink1(ctx, outputs[0]->uop_physical), views, 3
-      ),
-      0
+      poly_test_realize_buffer_views(ctx, poly_sink1(ctx, outputs[0]->uop_physical), views, 3), 0
   );
   ASSERT_FLOAT_EQ(c_data[0], 11.0f, 0.0);
   ASSERT_FLOAT_EQ(c_data[1], 22.0f, 0.0);
@@ -1316,8 +1234,7 @@ TEST(tensor, unequal_width_bitcast_matches_pinned_tensor_topology_and_values) {
   int64_t wide_source_shape[1] = {8};
   PolyTensor *wide_source =
       poly_tensor_empty(ctx, POLY_UINT8, wide_source_shape, 1, POLY_DEVICE_CPU);
-  PolyUOp *wide_fill_uop =
-      poly_full_int_by_id(ctx, wide_source_shape, 1, 1, u8_id);
+  PolyUOp *wide_fill_uop = poly_full_int_by_id(ctx, wide_source_shape, 1, 1, u8_id);
   PolyTensor *wide_fill = poly_tensor_create_with_roots(
       ctx, wide_fill_uop, wide_fill_uop, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
   );
@@ -1340,8 +1257,7 @@ TEST(tensor, unequal_width_bitcast_matches_pinned_tensor_topology_and_values) {
   int64_t narrow_source_shape[1] = {2};
   PolyTensor *narrow_source =
       poly_tensor_empty(ctx, POLY_UINT32, narrow_source_shape, 1, POLY_DEVICE_CPU);
-  PolyUOp *narrow_fill_uop =
-      poly_full_int_by_id(ctx, narrow_source_shape, 1, 1, u32_id);
+  PolyUOp *narrow_fill_uop = poly_full_int_by_id(ctx, narrow_source_shape, 1, 1, u32_id);
   PolyTensor *narrow_fill = poly_tensor_create_with_roots(
       ctx, narrow_fill_uop, narrow_fill_uop, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
   );
@@ -1437,32 +1353,21 @@ TEST(tensor, einsum_rearrange_reject_invalid_and_foreign_inputs) {
   ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, valid)[0], 2);
   ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, valid)[1], 3);
 
-  PolyUOp *cuda =
-      poly_device_uop(ctx, POLY_DEVICE_CUDA);
-  PolyUOp *cpu =
-      poly_device_uop(ctx, POLY_DEVICE_CPU);
+  PolyUOp *cuda = poly_device_uop(ctx, POLY_DEVICE_CUDA);
+  PolyUOp *cpu = poly_device_uop(ctx, POLY_DEVICE_CPU);
   PolyUOp *to_cuda = poly_copy_to_device_uop(ctx, x, cuda);
   PolyUOp *physical = poly_copy_to_device_uop(ctx, to_cuda, cpu);
-  PolyTensor *tensor = poly_tensor_create_with_roots(
-      ctx, x, physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
-  );
+  PolyTensor *tensor =
+      poly_tensor_create_with_roots(ctx, x, physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(tensor);
-  PolyUOp *expected_logical =
-      poly_rearrange(ctx, "(h w)->h w", x, "h w", axis_values, 2);
-  PolyUOp *expected_physical =
-      poly_rearrange(ctx, "(h w)->h w", physical, "h w", axis_values, 2);
-  PolyTensor *tensor_valid = poly_tensor_rearrange(
-      ctx, "(h w)->h w", tensor, "h w", axis_values, 2
-  );
+  PolyUOp *expected_logical = poly_rearrange(ctx, "(h w)->h w", x, "h w", axis_values, 2);
+  PolyUOp *expected_physical = poly_rearrange(ctx, "(h w)->h w", physical, "h w", axis_values, 2);
+  PolyTensor *tensor_valid =
+      poly_tensor_rearrange(ctx, "(h w)->h w", tensor, "h w", axis_values, 2);
   ASSERT_NOT_NULL(tensor_valid);
   ASSERT_EQ(poly_tensor_uop_logical(tensor_valid), expected_logical);
   ASSERT_EQ(poly_tensor_uop_physical(tensor_valid), expected_physical);
-  ASSERT_EQ(
-      poly_tensor_rearrange(
-          foreign_ctx, "(h w)->h w", tensor, "h w", axis_values, 2
-      ),
-      NULL
-  );
+  ASSERT_EQ(poly_tensor_rearrange(foreign_ctx, "(h w)->h w", tensor, "h w", axis_values, 2), NULL);
 
   char long_formula[320];
   memset(long_formula, 'a', sizeof(long_formula) - 1);
@@ -1485,10 +1390,7 @@ TEST(tensor, einsum_rearrange_reject_invalid_and_foreign_inputs) {
   );
 
   int64_t overflow_values[] = {INT64_MAX, 2};
-  ASSERT_EQ(
-      poly_rearrange(ctx, "(h w)->h w", x, "h w", overflow_values, 2),
-      NULL
-  );
+  ASSERT_EQ(poly_rearrange(ctx, "(h w)->h w", x, "h w", overflow_values, 2), NULL);
 
   poly_ctx_destroy(foreign_ctx);
   poly_ctx_destroy(ctx);
@@ -1955,9 +1857,8 @@ TEST(pe, tensor_argmax_builds_both_roots_from_exact_occurrences) {
   PolyUOp *cpu = poly_device_uop(ctx, POLY_DEVICE_CPU);
   PolyUOp *to_cuda = poly_copy_to_device_uop(ctx, logical, cuda);
   PolyUOp *physical = poly_copy_to_device_uop(ctx, to_cuda, cpu);
-  PolyTensor *src = poly_tensor_create_with_roots(
-      ctx, logical, physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
-  );
+  PolyTensor *src =
+      poly_tensor_create_with_roots(ctx, logical, physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(src);
   poly_tensor_set_requires_grad(src, true);
 
@@ -1985,8 +1886,7 @@ TEST(pe, tensor_argmax_rejects_foreign_context) {
   PolyCtx *foreign = poly_ctx_new();
   ASSERT_NOT_NULL(owner);
   ASSERT_NOT_NULL(foreign);
-  PolyTensor *src =
-      poly_tensor_empty(owner, POLY_FLOAT32, (int64_t[]){2, 3}, 2, POLY_DEVICE_CPU);
+  PolyTensor *src = poly_tensor_empty(owner, POLY_FLOAT32, (int64_t[]){2, 3}, 2, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(src);
   ASSERT_EQ(poly_tensor_argmax(foreign, src, 1, false), NULL);
   poly_ctx_destroy(foreign);
@@ -2005,9 +1905,8 @@ TEST(pe, tensor_gelu_family_builds_both_roots_from_exact_occurrences) {
   PolyUOp *cpu = poly_device_uop(ctx, POLY_DEVICE_CPU);
   PolyUOp *to_cuda = poly_copy_to_device_uop(ctx, logical, cuda);
   PolyUOp *physical = poly_copy_to_device_uop(ctx, to_cuda, cpu);
-  PolyTensor *src = poly_tensor_create_with_roots(
-      ctx, logical, physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
-  );
+  PolyTensor *src =
+      poly_tensor_create_with_roots(ctx, logical, physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(src);
   poly_tensor_set_requires_grad(src, true);
 
@@ -2052,9 +1951,8 @@ TEST(pe, tensor_log1p_expm1_build_both_roots_from_exact_occurrences) {
   PolyUOp *cpu = poly_device_uop(ctx, POLY_DEVICE_CPU);
   PolyUOp *to_cuda = poly_copy_to_device_uop(ctx, logical, cuda);
   PolyUOp *physical = poly_copy_to_device_uop(ctx, to_cuda, cpu);
-  PolyTensor *src = poly_tensor_create_with_roots(
-      ctx, logical, physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
-  );
+  PolyTensor *src =
+      poly_tensor_create_with_roots(ctx, logical, physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(src);
   poly_tensor_set_requires_grad(src, true);
 
@@ -2097,8 +1995,7 @@ TEST(pe, cast_same_dtype_elides_and_scalar_target_preserves_vector_lanes) {
   ASSERT_PTR_EQ(scalar_cast->src[0], scalar);
 
   PolyUOp *lanes[2] = {poly_const_int(ctx, 1), poly_const_int(ctx, 2)};
-  PolyUOp *vector =
-      poly_uop(ctx, POLY_OP_STACK, POLY_INT32, lanes, 2, poly_arg_none());
+  PolyUOp *vector = poly_uop(ctx, POLY_OP_STACK, POLY_INT32, lanes, 2, poly_arg_none());
   PolyUOp *cast = poly_cast(ctx, vector, POLY_FLOAT32);
   ASSERT_NOT_NULL(cast);
   ASSERT_INT_EQ(cast->op, POLY_OP_CAST);
@@ -2232,22 +2129,17 @@ TEST(pe, tensor_scatter_builds_both_roots_from_exact_occurrences) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
   int64_t shape[2] = {1, 5};
-  PolyTensor *self =
-      poly_tensor_empty(ctx, POLY_FLOAT32, shape, 2, POLY_DEVICE_CPU);
-  PolyTensor *index =
-      poly_tensor_empty(ctx, POLY_INT32, shape, 2, POLY_DEVICE_CPU);
-  PolyTensor *src =
-      poly_tensor_empty(ctx, POLY_FLOAT32, shape, 2, POLY_DEVICE_CPU);
+  PolyTensor *self = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 2, POLY_DEVICE_CPU);
+  PolyTensor *index = poly_tensor_empty(ctx, POLY_INT32, shape, 2, POLY_DEVICE_CPU);
+  PolyTensor *src = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 2, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(self);
   ASSERT_NOT_NULL(index);
   ASSERT_NOT_NULL(src);
 
-  PolyUOp *logical_scatter = poly_scatter(
-      ctx, self->uop_logical, 1, index->uop_logical, src->uop_logical, NULL
-  );
-  PolyUOp *physical_scatter = poly_scatter(
-      ctx, self->uop_physical, 1, index->uop_physical, src->uop_physical, NULL
-  );
+  PolyUOp *logical_scatter =
+      poly_scatter(ctx, self->uop_logical, 1, index->uop_logical, src->uop_logical, NULL);
+  PolyUOp *physical_scatter =
+      poly_scatter(ctx, self->uop_physical, 1, index->uop_physical, src->uop_physical, NULL);
   PolyTensor *scatter = poly_tensor_scatter(ctx, self, 1, index, src, NULL);
   ASSERT_NOT_NULL(scatter);
   ASSERT_PTR_EQ(scatter->uop_logical, logical_scatter);
@@ -2259,8 +2151,7 @@ TEST(pe, tensor_scatter_builds_both_roots_from_exact_occurrences) {
   PolyUOp *physical_sum = poly_scatter_reduce(
       ctx, self->uop_physical, 1, index->uop_physical, src->uop_physical, "sum", 1
   );
-  PolyTensor *sum =
-      poly_tensor_scatter_reduce(ctx, self, 1, index, src, "sum", 1);
+  PolyTensor *sum = poly_tensor_scatter_reduce(ctx, self, 1, index, src, "sum", 1);
   ASSERT_NOT_NULL(sum);
   ASSERT_PTR_EQ(sum->uop_logical, logical_sum);
   ASSERT_PTR_EQ(sum->uop_physical, physical_sum);
@@ -2282,8 +2173,8 @@ TEST(pe, tensor_scatter_builds_both_roots_from_exact_occurrences) {
   ASSERT_INT_EQ(
       realize_uop(
           ctx, scatter->uop_physical,
-          poly_test_buffer_on_device(ctx, POLY_FLOAT32, 5, POLY_DEVICE_CPU), scatter_values,
-          leaves, leaf_data, 3
+          poly_test_buffer_on_device(ctx, POLY_FLOAT32, 5, POLY_DEVICE_CPU), scatter_values, leaves,
+          leaf_data, 3
       ),
       0
   );
@@ -2294,9 +2185,8 @@ TEST(pe, tensor_scatter_builds_both_roots_from_exact_occurrences) {
   float sum_values[5] = {0};
   ASSERT_INT_EQ(
       realize_uop(
-          ctx, sum->uop_physical,
-          poly_test_buffer_on_device(ctx, POLY_FLOAT32, 5, POLY_DEVICE_CPU), sum_values,
-          leaves, leaf_data, 3
+          ctx, sum->uop_physical, poly_test_buffer_on_device(ctx, POLY_FLOAT32, 5, POLY_DEVICE_CPU),
+          sum_values, leaves, leaf_data, 3
       ),
       0
   );
@@ -2312,22 +2202,17 @@ TEST(pe, tensor_einsum_builds_both_roots_from_exact_occurrences) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
   int64_t shape[2] = {2, 2};
-  PolyTensor *a =
-      poly_tensor_empty(ctx, POLY_FLOAT32, shape, 2, POLY_DEVICE_CPU);
-  PolyTensor *b =
-      poly_tensor_empty(ctx, POLY_FLOAT32, shape, 2, POLY_DEVICE_CPU);
+  PolyTensor *a = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 2, POLY_DEVICE_CPU);
+  PolyTensor *b = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 2, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(a);
   ASSERT_NOT_NULL(b);
 
   PolyUOp *logical_inputs[2] = {a->uop_logical, b->uop_logical};
   PolyUOp *physical_inputs[2] = {a->uop_physical, b->uop_physical};
-  PolyUOp *logical =
-      poly_einsum(ctx, "ij,jk->ik", logical_inputs, 2);
-  PolyUOp *physical =
-      poly_einsum(ctx, "ij,jk->ik", physical_inputs, 2);
+  PolyUOp *logical = poly_einsum(ctx, "ij,jk->ik", logical_inputs, 2);
+  PolyUOp *physical = poly_einsum(ctx, "ij,jk->ik", physical_inputs, 2);
   PolyTensor *inputs[2] = {a, b};
-  PolyTensor *out =
-      poly_tensor_einsum(ctx, "ij,jk->ik", inputs, 2);
+  PolyTensor *out = poly_tensor_einsum(ctx, "ij,jk->ik", inputs, 2);
   ASSERT_NOT_NULL(out);
   ASSERT_PTR_EQ(out->uop_logical, logical);
   ASSERT_PTR_EQ(out->uop_physical, physical);
@@ -2342,9 +2227,8 @@ TEST(pe, tensor_einsum_builds_both_roots_from_exact_occurrences) {
   float values[4] = {0};
   ASSERT_INT_EQ(
       realize_uop(
-          ctx, out->uop_physical,
-          poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_CPU), values,
-          leaves, leaf_data, 2
+          ctx, out->uop_physical, poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_CPU),
+          values, leaves, leaf_data, 2
       ),
       0
   );
@@ -2362,17 +2246,17 @@ TEST(pe, unsigned_scatter_amin_matches_pinned_inverse_max_inverse) {
    * (mixin/__init__.py:1206-1211, mixin/elementwise.py:379-393). */
   PolyDType dtypes[] = {POLY_UINT8, POLY_UINT16, POLY_UINT32, POLY_UINT64};
   const char *maxima[] = {
-      "255", "65535", "4294967295", "18446744073709551615",
+      "255",
+      "65535",
+      "4294967295",
+      "18446744073709551615",
   };
   for (int d = 0; d < 4; d++) {
     PolyCtx *ctx = poly_ctx_new();
     PolyDType dtype = dtypes[d];
-    PolyUOp *self =
-        poly_reshape(ctx, poly_test_buffer(ctx, dtype, 2), (int64_t[]){1, 2}, 2);
-    PolyUOp *idx =
-        poly_reshape(ctx, poly_test_buffer(ctx, POLY_INT32, 2), (int64_t[]){1, 2}, 2);
-    PolyUOp *src =
-        poly_reshape(ctx, poly_test_buffer(ctx, dtype, 2), (int64_t[]){1, 2}, 2);
+    PolyUOp *self = poly_reshape(ctx, poly_test_buffer(ctx, dtype, 2), (int64_t[]){1, 2}, 2);
+    PolyUOp *idx = poly_reshape(ctx, poly_test_buffer(ctx, POLY_INT32, 2), (int64_t[]){1, 2}, 2);
+    PolyUOp *src = poly_reshape(ctx, poly_test_buffer(ctx, dtype, 2), (int64_t[]){1, 2}, 2);
     PolyUOp *result = poly_scatter_reduce(ctx, self, 1, idx, src, "amin", 0);
     ASSERT_NOT_NULL(result);
 
@@ -2404,14 +2288,12 @@ TEST(pe, unsigned_scatter_amin_matches_pinned_inverse_max_inverse) {
     set_unsigned_values(src_data.bytes, dtype, src_values, 2);
     PolyUOp *leaves[] = {base_buf(self), base_buf(idx), base_buf(src)};
     float *data[] = {
-        (float *)self_data.bytes, (float *)idx_data, (float *)src_data.bytes,
+        (float *)self_data.bytes,
+        (float *)idx_data,
+        (float *)src_data.bytes,
     };
     ASSERT_INT_EQ(
-        realize_uop(
-            ctx, result, poly_test_buffer(ctx, dtype, 2),
-            output.bytes, leaves, data, 3
-        ),
-        0
+        realize_uop(ctx, result, poly_test_buffer(ctx, dtype, 2), output.bytes, leaves, data, 3), 0
     );
     ASSERT_TRUE(get_unsigned_value(output.bytes, dtype, 0) == 0);
     ASSERT_TRUE(get_unsigned_value(output.bytes, dtype, 1) == 100);
@@ -2438,7 +2320,9 @@ TEST(pe, sort_topk_e2e_matches_tinygrad_probe) {
   float got_vals[10] = {0}, got_idx[10] = {0};
   int32_t got_idx_i32[10] = {0};
   ASSERT_INT_EQ(realize_uop(ctx, vals, out_vals, got_vals, leaves, ld, 1), 0);
-  ASSERT_INT_EQ(realize_uop(ctx, poly_cast(ctx, idx, POLY_FLOAT32), out_idx, got_idx, leaves, ld, 1), 0);
+  ASSERT_INT_EQ(
+      realize_uop(ctx, poly_cast(ctx, idx, POLY_FLOAT32), out_idx, got_idx, leaves, ld, 1), 0
+  );
   ASSERT_INT_EQ(realize_uop(ctx, idx, out_idx_i32, got_idx_i32, leaves, ld, 1), 0);
   const float exp_vals[] = {0.1f, 0.5f, 1.2f, 2.1f, 3.4f, 0.3f, 0.8f, 1.9f, 2.2f, 4.5f};
   const float exp_idx[] = {0, 1, 2, 4, 3, 2, 4, 1, 0, 3};
@@ -2458,7 +2342,12 @@ TEST(pe, sort_topk_e2e_matches_tinygrad_probe) {
   float got_top_vals[4] = {0}, got_top_idx[4] = {0};
   int32_t got_top_idx_i32[4] = {0};
   ASSERT_INT_EQ(realize_uop(ctx, top_vals, out_top_vals, got_top_vals, leaves, ld, 1), 0);
-  ASSERT_INT_EQ(realize_uop(ctx, poly_cast(ctx, top_idx, POLY_FLOAT32), out_top_idx, got_top_idx, leaves, ld, 1), 0);
+  ASSERT_INT_EQ(
+      realize_uop(
+          ctx, poly_cast(ctx, top_idx, POLY_FLOAT32), out_top_idx, got_top_idx, leaves, ld, 1
+      ),
+      0
+  );
   ASSERT_INT_EQ(realize_uop(ctx, top_idx, out_top_idx_i32, got_top_idx_i32, leaves, ld, 1), 0);
   const float exp_top_vals[] = {3.4f, 2.1f, 4.5f, 2.2f};
   const float exp_top_idx[] = {3, 4, 3, 0};
@@ -2479,24 +2368,17 @@ TEST(pe, tensor_topk_builds_both_roots_from_exact_occurrences) {
   PolyUOp *cpu = poly_device_uop(ctx, POLY_DEVICE_CPU);
   PolyUOp *to_cuda = poly_copy_to_device_uop(ctx, logical, cuda);
   PolyUOp *physical = poly_copy_to_device_uop(ctx, to_cuda, cpu);
-  PolyTensor *src = poly_tensor_create_with_roots(
-      ctx, logical, physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
-  );
+  PolyTensor *src =
+      poly_tensor_create_with_roots(ctx, logical, physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(src);
 
   PolyUOp *expected_logical_values = NULL, *expected_logical_indices = NULL;
   PolyUOp *expected_physical_values = NULL, *expected_physical_indices = NULL;
   ASSERT_INT_EQ(
-      poly_topk(
-          ctx, logical, 2, 0, 1, 1, &expected_logical_values, &expected_logical_indices
-      ),
-      0
+      poly_topk(ctx, logical, 2, 0, 1, 1, &expected_logical_values, &expected_logical_indices), 0
   );
   ASSERT_INT_EQ(
-      poly_topk(
-          ctx, physical, 2, 0, 1, 1, &expected_physical_values, &expected_physical_indices
-      ),
-      0
+      poly_topk(ctx, physical, 2, 0, 1, 1, &expected_physical_values, &expected_physical_indices), 0
   );
 
   PolyTensor *values = NULL, *indices = NULL;
@@ -2517,32 +2399,17 @@ TEST(pe, tensor_linalg_builds_both_roots_from_exact_occurrences) {
   ASSERT_NOT_NULL(ctx);
   int64_t matrix_shape[2] = {2, 2};
   int64_t vector_shape[1] = {2};
-  PolyTensor *a =
-      poly_tensor_empty(ctx, POLY_FLOAT32, matrix_shape, 2, POLY_DEVICE_CPU);
-  PolyTensor *b =
-      poly_tensor_empty(ctx, POLY_FLOAT32, vector_shape, 1, POLY_DEVICE_CPU);
+  PolyTensor *a = poly_tensor_empty(ctx, POLY_FLOAT32, matrix_shape, 2, POLY_DEVICE_CPU);
+  PolyTensor *b = poly_tensor_empty(ctx, POLY_FLOAT32, vector_shape, 1, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(a);
   ASSERT_NOT_NULL(b);
 
   PolyUOp *logical_q = NULL, *logical_r = NULL;
   PolyUOp *physical_q = NULL, *physical_r = NULL;
-  ASSERT_INT_EQ(
-      poly_qr_ex(
-          ctx, a->uop_logical, POLY_QR_COMPLETE, &logical_q, &logical_r
-      ),
-      0
-  );
-  ASSERT_INT_EQ(
-      poly_qr_ex(
-          ctx, a->uop_physical, POLY_QR_COMPLETE, &physical_q, &physical_r
-      ),
-      0
-  );
+  ASSERT_INT_EQ(poly_qr_ex(ctx, a->uop_logical, POLY_QR_COMPLETE, &logical_q, &logical_r), 0);
+  ASSERT_INT_EQ(poly_qr_ex(ctx, a->uop_physical, POLY_QR_COMPLETE, &physical_q, &physical_r), 0);
   PolyTensor *q = NULL, *r = NULL;
-  ASSERT_INT_EQ(
-      poly_tensor_qr_ex(ctx, a, POLY_QR_COMPLETE, &q, &r),
-      0
-  );
+  ASSERT_INT_EQ(poly_tensor_qr_ex(ctx, a, POLY_QR_COMPLETE, &q, &r), 0);
   ASSERT_NOT_NULL(q);
   ASSERT_NOT_NULL(r);
   ASSERT_PTR_EQ(q->uop_logical, logical_q);
@@ -2550,10 +2417,8 @@ TEST(pe, tensor_linalg_builds_both_roots_from_exact_occurrences) {
   ASSERT_PTR_EQ(r->uop_logical, logical_r);
   ASSERT_PTR_EQ(r->uop_physical, physical_r);
 
-  PolyUOp *logical_tri =
-      poly_triangular_solve(ctx, a->uop_logical, b->uop_logical, 0, 0, 0);
-  PolyUOp *physical_tri =
-      poly_triangular_solve(ctx, a->uop_physical, b->uop_physical, 0, 0, 0);
+  PolyUOp *logical_tri = poly_triangular_solve(ctx, a->uop_logical, b->uop_logical, 0, 0, 0);
+  PolyUOp *physical_tri = poly_triangular_solve(ctx, a->uop_physical, b->uop_physical, 0, 0, 0);
   PolyTensor *tri = poly_tensor_triangular_solve(ctx, a, b, 0, 0, 0);
   ASSERT_NOT_NULL(tri);
   ASSERT_PTR_EQ(tri->uop_logical, logical_tri);
@@ -2566,10 +2431,8 @@ TEST(pe, tensor_linalg_builds_both_roots_from_exact_occurrences) {
   ASSERT_PTR_EQ(chol->uop_logical, logical_chol);
   ASSERT_PTR_EQ(chol->uop_physical, physical_chol);
 
-  PolyUOp *logical_chol_solve =
-      poly_cholesky_solve(ctx, chol->uop_logical, b->uop_logical, 0);
-  PolyUOp *physical_chol_solve =
-      poly_cholesky_solve(ctx, chol->uop_physical, b->uop_physical, 0);
+  PolyUOp *logical_chol_solve = poly_cholesky_solve(ctx, chol->uop_logical, b->uop_logical, 0);
+  PolyUOp *physical_chol_solve = poly_cholesky_solve(ctx, chol->uop_physical, b->uop_physical, 0);
   PolyTensor *chol_solve = poly_tensor_cholesky_solve(ctx, chol, b, 0);
   ASSERT_NOT_NULL(chol_solve);
   ASSERT_PTR_EQ(chol_solve->uop_logical, logical_chol_solve);
@@ -2584,16 +2447,12 @@ TEST(pe, tensor_linalg_builds_both_roots_from_exact_occurrences) {
 
   int64_t tall_shape[2] = {3, 2};
   int64_t tall_rhs_shape[1] = {3};
-  PolyTensor *tall =
-      poly_tensor_empty(ctx, POLY_FLOAT32, tall_shape, 2, POLY_DEVICE_CPU);
-  PolyTensor *tall_rhs =
-      poly_tensor_empty(ctx, POLY_FLOAT32, tall_rhs_shape, 1, POLY_DEVICE_CPU);
+  PolyTensor *tall = poly_tensor_empty(ctx, POLY_FLOAT32, tall_shape, 2, POLY_DEVICE_CPU);
+  PolyTensor *tall_rhs = poly_tensor_empty(ctx, POLY_FLOAT32, tall_rhs_shape, 1, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(tall);
   ASSERT_NOT_NULL(tall_rhs);
-  PolyUOp *logical_lstsq =
-      poly_lstsq(ctx, tall->uop_logical, tall_rhs->uop_logical);
-  PolyUOp *physical_lstsq =
-      poly_lstsq(ctx, tall->uop_physical, tall_rhs->uop_physical);
+  PolyUOp *logical_lstsq = poly_lstsq(ctx, tall->uop_logical, tall_rhs->uop_logical);
+  PolyUOp *physical_lstsq = poly_lstsq(ctx, tall->uop_physical, tall_rhs->uop_physical);
   PolyTensor *lstsq = poly_tensor_lstsq(ctx, tall, tall_rhs);
   ASSERT_NOT_NULL(lstsq);
   ASSERT_PTR_EQ(lstsq->uop_logical, logical_lstsq);
@@ -2608,26 +2467,20 @@ TEST(pe, tensor_linalg_builds_both_roots_from_exact_occurrences) {
   float q_values[4] = {0}, r_values[4] = {0};
   ASSERT_INT_EQ(
       realize_uop(
-          ctx, q->uop_physical,
-          poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_CPU), q_values,
-          a_leaves, a_leaf_data, 1
+          ctx, q->uop_physical, poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_CPU),
+          q_values, a_leaves, a_leaf_data, 1
       ),
       0
   );
   ASSERT_INT_EQ(
       realize_uop(
-          ctx, r->uop_physical,
-          poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_CPU), r_values,
-          a_leaves, a_leaf_data, 1
+          ctx, r->uop_physical, poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_CPU),
+          r_values, a_leaves, a_leaf_data, 1
       ),
       0
   );
-  float expected_q[4] = {
-      -0.89442706f, 0.44721359f, -0.44721359f, -0.89442718f
-  };
-  float expected_r[4] = {
-      -4.47213554f, -4.02492189f, 5.4168083e-9f, -3.57770872f
-  };
+  float expected_q[4] = {-0.89442706f, 0.44721359f, -0.44721359f, -0.89442718f};
+  float expected_r[4] = {-4.47213554f, -4.02492189f, 5.4168083e-9f, -3.57770872f};
   for (int i = 0; i < 4; i++) {
     ASSERT_FLOAT_EQ(q_values[i], expected_q[i], 2e-5f);
     ASSERT_FLOAT_EQ(r_values[i], expected_r[i], 2e-5f);
@@ -2639,8 +2492,8 @@ TEST(pe, tensor_linalg_builds_both_roots_from_exact_occurrences) {
   ASSERT_INT_EQ(
       realize_uop(
           ctx, solve->uop_physical,
-          poly_test_buffer_on_device(ctx, POLY_FLOAT32, 2, POLY_DEVICE_CPU),
-          solve_values, solve_leaves, solve_leaf_data, 2
+          poly_test_buffer_on_device(ctx, POLY_FLOAT32, 2, POLY_DEVICE_CPU), solve_values,
+          solve_leaves, solve_leaf_data, 2
       ),
       0
   );
@@ -2656,18 +2509,13 @@ TEST(pe, tensor_sort_topk_reject_foreign_context) {
   PolyCtx *foreign = poly_ctx_new();
   ASSERT_NOT_NULL(owner);
   ASSERT_NOT_NULL(foreign);
-  PolyTensor *src =
-      poly_tensor_empty(owner, POLY_FLOAT32, (int64_t[]){4}, 1, POLY_DEVICE_CPU);
+  PolyTensor *src = poly_tensor_empty(owner, POLY_FLOAT32, (int64_t[]){4}, 1, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(src);
 
   PolyTensor *sort_values = NULL, *sort_indices = NULL;
   PolyTensor *topk_values = NULL, *topk_indices = NULL;
-  int sort_rc = poly_tensor_sort(
-      foreign, src, 0, 0, &sort_values, &sort_indices
-  );
-  int topk_rc = poly_tensor_topk(
-      foreign, src, 2, 0, 1, 1, &topk_values, &topk_indices
-  );
+  int sort_rc = poly_tensor_sort(foreign, src, 0, 0, &sort_values, &sort_indices);
+  int topk_rc = poly_tensor_topk(foreign, src, 2, 0, 1, 1, &topk_values, &topk_indices);
 
   /* Destroy the contaminated destination first on the pre-fix run: its CSE
    * can contain source pointers into owner. Assertions follow cleanup so the
@@ -2766,8 +2614,7 @@ TEST(tensor, sum_and_dot_accumulation_dtype_match_pinned_topology) {
   ASSERT_INT_EQ(sum_default_root->src[0]->src[0]->src[0]->op, POLY_OP_CAST);
   ASSERT_TRUE(poly_dtype_eq(sum_default_root->src[0]->src[0]->src[0]->dtype, POLY_FLOAT32));
 
-  PolyTensor *sum_explicit =
-      poly_tensor_sum_dtype_by_id(ctx, a, axis, 1, false, f32);
+  PolyTensor *sum_explicit = poly_tensor_sum_dtype_by_id(ctx, a, axis, 1, false, f32);
   PolyUOp *sum_explicit_root = poly_tensor_uop(sum_explicit);
   ASSERT_NOT_NULL(sum_explicit_root);
   ASSERT_INT_EQ(sum_explicit_root->op, POLY_OP_REDUCE);
@@ -2807,10 +2654,8 @@ TEST(tensor, sum_and_dot_accumulation_dtype_match_pinned_topology) {
   ASSERT_TRUE(poly_dtype_eq(mixed_mul->src[0]->dtype, POLY_FLOAT32));
   ASSERT_FALSE(mixed_mul->src[1]->op == POLY_OP_CAST);
 
-  PolyTensor *v0 =
-      poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){3}, 1, POLY_DEVICE_CPU);
-  PolyTensor *v1 =
-      poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){3}, 1, POLY_DEVICE_CPU);
+  PolyTensor *v0 = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){3}, 1, POLY_DEVICE_CPU);
+  PolyTensor *v1 = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){3}, 1, POLY_DEVICE_CPU);
   PolyTensor *scalar_dot = poly_tensor_dot(ctx, v0, v1);
   ASSERT_NOT_NULL(scalar_dot);
   ASSERT_INT_EQ(poly_uop_ndim(ctx, poly_tensor_uop(scalar_dot)), 0);
@@ -2839,12 +2684,10 @@ TEST(tensor, conv2d_promotion_accumulation_and_bias_match_pinned_topology) {
   ASSERT_NOT_NULL(b_half);
   ASSERT_NOT_NULL(b_float);
 
-  PolyTensor *mixed = poly_tensor_conv2d(
-      ctx, x, w_float, b_float, 1, NULL, NULL, NULL, 0);
-  PolyTensor *half_default = poly_tensor_conv2d(
-      ctx, x, w_half, b_half, 1, NULL, NULL, NULL, 0);
-  PolyTensor *half_explicit = poly_tensor_conv2d_dtype_by_id(
-      ctx, x, w_half, b_half, 1, NULL, NULL, NULL, 0, f32);
+  PolyTensor *mixed = poly_tensor_conv2d(ctx, x, w_float, b_float, 1, NULL, NULL, NULL, 0);
+  PolyTensor *half_default = poly_tensor_conv2d(ctx, x, w_half, b_half, 1, NULL, NULL, NULL, 0);
+  PolyTensor *half_explicit =
+      poly_tensor_conv2d_dtype_by_id(ctx, x, w_half, b_half, 1, NULL, NULL, NULL, 0, f32);
   ASSERT_NOT_NULL(mixed);
   ASSERT_NOT_NULL(half_default);
   ASSERT_NOT_NULL(half_explicit);
@@ -2864,8 +2707,7 @@ TEST(tensor, conv2d_promotion_accumulation_and_bias_match_pinned_topology) {
       muls += topo[i]->op == POLY_OP_MUL;
       reduces += topo[i]->op == POLY_OP_REDUCE;
       adds += topo[i]->op == POLY_OP_ADD;
-      if (topo[i]->op == POLY_OP_REDUCE)
-        ASSERT_TRUE(poly_dtype_eq(topo[i]->dtype, POLY_FLOAT32));
+      if (topo[i]->op == POLY_OP_REDUCE) ASSERT_TRUE(poly_dtype_eq(topo[i]->dtype, POLY_FLOAT32));
       if (topo[i]->op == POLY_OP_MUL)
         ASSERT_TRUE(poly_dtype_eq(topo[i]->dtype, r == 0 ? POLY_FLOAT32 : POLY_FLOAT16));
     }
@@ -3060,24 +2902,23 @@ TEST(pe, triangular_solve_matches_numpy_torch_probe) {
   float b_vec[] = {2, 7, 9};
   float b_mat[] = {2, 1, 7, 2, 9, 3};
   float lower_batch[] = {
-      2, 0, 0, 1, 3, 0, -2, 0.5f, 4,
-      3, 0, 0, 1, 4, 0, -2, 0.5f, 5,
+      2, 0, 0, 1, 3, 0, -2, 0.5f, 4, 3, 0, 0, 1, 4, 0, -2, 0.5f, 5,
   };
   float b_batch[] = {
-      2, 1, 7, 2, 9, 3,
-      3, 2, 8, 3, 10, 4,
+      2, 1, 7, 2, 9, 3, 3, 2, 8, 3, 10, 4,
   };
 
   float expect_lower_vec[] = {1, 2, 2.5f};
   float expect_lower_mat[] = {1, 0.5f, 2, 0.5f, 2.5f, 0.9375f};
-  float expect_upper_mat[] = {
-      0.8541666865f, 0.3958333433f, 0.8333333135f, 0.1666666716f, 2.25f, 0.75f};
-  float expect_lower_trans[] = {
-      2.2708332539f, 0.9791666865f, 1.9583333731f, 0.5416666865f, 2.25f, 0.75f};
-  float expect_upper_trans[] = {1, 0.5f, 2.6666667461f, 0.8333333135f, 0.7916666865f, 0.2708333433f};
+  float expect_upper_mat[] = {0.8541666865f, 0.3958333433f, 0.8333333135f,
+                              0.1666666716f, 2.25f,         0.75f};
+  float expect_lower_trans[] = {2.2708332539f, 0.9791666865f, 1.9583333731f,
+                                0.5416666865f, 2.25f,         0.75f};
+  float expect_upper_trans[] = {
+      1, 0.5f, 2.6666667461f, 0.8333333135f, 0.7916666865f, 0.2708333433f};
   float expect_lower_unit[] = {2, 1, 5, 1, 10.5f, 4.5f};
   float expect_batch[] = {
-      1, 0.5f, 2, 0.5f, 2.5f, 0.9375f,
+      1, 0.5f,          2,     0.5f,          2.5f,          0.9375f,
       1, 0.6666666865f, 1.75f, 0.5833333135f, 2.2249999046f, 1.0083333254f,
   };
 
@@ -3145,21 +2986,14 @@ TEST(pe, cholesky_matches_numpy_torch_probe) {
   float e2_upper[] = {2, 1, 0, 2};
   float a3[] = {6, 2, 1, 2, 5, 2, 1, 2, 4};
   float e3[] = {
-      2.4494898319f, 0, 0,
-      0.8164966106f, 2.0816659927f, 0,
-      0.4082483053f, 0.8006407619f, 1.7867029905f,
+      2.4494898319f, 0, 0, 0.8164966106f, 2.0816659927f, 0, 0.4082483053f, 0.8006407619f,
+      1.7867029905f,
   };
   float a4_eye[] = {
-      4, 0, 0, 0,
-      0, 4, 0, 0,
-      0, 0, 4, 0,
-      0, 0, 0, 4,
+      4, 0, 0, 0, 0, 4, 0, 0, 0, 0, 4, 0, 0, 0, 0, 4,
   };
   float e4_eye[] = {
-      2, 0, 0, 0,
-      0, 2, 0, 0,
-      0, 0, 2, 0,
-      0, 0, 0, 2,
+      2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2,
   };
   float abat[] = {4, 2, 2, 5, 9, 3, 3, 2};
   float ebat[] = {2, 0, 1, 2, 3, 0, 1, 1};
@@ -3172,12 +3006,9 @@ TEST(pe, cholesky_matches_numpy_torch_probe) {
     float *expected;
     int64_t n_out;
   } cases[] = {
-      {shape1, 2, a1, 0, e1, 1},
-      {shape2, 2, a2, 0, e2, 4},
-      {shape2, 2, a2, 1, e2_upper, 4},
-      {shape3, 2, a3, 0, e3, 9},
-      {shape4, 2, a4_eye, 0, e4_eye, 16},
-      {shape_batch, 3, abat, 0, ebat, 8},
+      {shape1, 2, a1, 0, e1, 1},          {shape2, 2, a2, 0, e2, 4},
+      {shape2, 2, a2, 1, e2_upper, 4},    {shape3, 2, a3, 0, e3, 9},
+      {shape4, 2, a4_eye, 0, e4_eye, 16}, {shape_batch, 3, abat, 0, ebat, 8},
   };
 
   for (int c = 0; c < (int)(sizeof(cases) / sizeof(cases[0])); c++) {
@@ -3288,7 +3119,9 @@ TEST(pe, cholesky_solve_and_solve_match_numpy_torch_probe) {
   float got_vec[2] = {0};
   PolyUOp *vec_leaves[] = {base_buf(a_vec), base_buf(b_v)};
   float *vec_ld[] = {a2, b_vec};
-  ASSERT_INT_EQ(realize_uop(ctx, x_vec, poly_buffer_f32(ctx, 2), got_vec, vec_leaves, vec_ld, 2), 0);
+  ASSERT_INT_EQ(
+      realize_uop(ctx, x_vec, poly_buffer_f32(ctx, 2), got_vec, vec_leaves, vec_ld, 2), 0
+  );
   for (int i = 0; i < 2; i++)
     ASSERT_FLOAT_EQ(got_vec[i], expect_vec[i], 3e-4f);
 
@@ -3300,7 +3133,9 @@ TEST(pe, cholesky_solve_and_solve_match_numpy_torch_probe) {
   float got_mat[4] = {0};
   PolyUOp *mat_leaves[] = {base_buf(a_mat), base_buf(b_m)};
   float *mat_ld[] = {a2, rhs_mat};
-  ASSERT_INT_EQ(realize_uop(ctx, x_mat, poly_buffer_f32(ctx, 4), got_mat, mat_leaves, mat_ld, 2), 0);
+  ASSERT_INT_EQ(
+      realize_uop(ctx, x_mat, poly_buffer_f32(ctx, 4), got_mat, mat_leaves, mat_ld, 2), 0
+  );
   for (int i = 0; i < 4; i++)
     ASSERT_FLOAT_EQ(got_mat[i], expect_mat[i], 3e-4f);
 
@@ -3315,7 +3150,9 @@ TEST(pe, cholesky_solve_and_solve_match_numpy_torch_probe) {
   PolyUOp *pivot_vec_leaves[] = {base_buf(pa_vec), base_buf(pb_vec)};
   float *pivot_vec_ld[] = {pivot_a, pivot_b_vec};
   ASSERT_INT_EQ(
-      realize_uop(ctx, px_vec, poly_buffer_f32(ctx, 2), got_pivot_vec, pivot_vec_leaves, pivot_vec_ld, 2),
+      realize_uop(
+          ctx, px_vec, poly_buffer_f32(ctx, 2), got_pivot_vec, pivot_vec_leaves, pivot_vec_ld, 2
+      ),
       0
   );
   for (int i = 0; i < 2; i++)
@@ -3331,7 +3168,9 @@ TEST(pe, cholesky_solve_and_solve_match_numpy_torch_probe) {
   PolyUOp *pivot_mat_leaves[] = {base_buf(pa_mat), base_buf(pb_mat)};
   float *pivot_mat_ld[] = {pivot_a, pivot_b_mat};
   ASSERT_INT_EQ(
-      realize_uop(ctx, px_mat, poly_buffer_f32(ctx, 4), got_pivot_mat, pivot_mat_leaves, pivot_mat_ld, 2),
+      realize_uop(
+          ctx, px_mat, poly_buffer_f32(ctx, 4), got_pivot_mat, pivot_mat_leaves, pivot_mat_ld, 2
+      ),
       0
   );
   for (int i = 0; i < 4; i++)
@@ -3343,12 +3182,10 @@ TEST(pe, cholesky_solve_and_solve_match_numpy_torch_probe) {
   float public_b[] = {1, 4};
   int64_t public_a_shape[] = {2, 2};
   int64_t public_b_shape[] = {2};
-  PolyTensor *public_ah = poly_tensor_from_host_by_id(
-      ctx, public_a, sizeof(public_a), f32_id, public_a_shape, 2
-  );
-  PolyTensor *public_bh = poly_tensor_from_host_by_id(
-      ctx, public_b, sizeof(public_b), f32_id, public_b_shape, 1
-  );
+  PolyTensor *public_ah =
+      poly_tensor_from_host_by_id(ctx, public_a, sizeof(public_a), f32_id, public_a_shape, 2);
+  PolyTensor *public_bh =
+      poly_tensor_from_host_by_id(ctx, public_b, sizeof(public_b), f32_id, public_b_shape, 1);
   PolyTensor *public_at = poly_tensor_to_device(ctx, public_ah, POLY_DEVICE_CPU);
   PolyTensor *public_bt = poly_tensor_to_device(ctx, public_bh, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(public_ah);
@@ -3371,8 +3208,7 @@ TEST(pe, cholesky_solve_and_solve_match_numpy_torch_probe) {
   float b_batch[] = {1, 2, 3, 4, 2, 3, 4, 5};
   float b_batch_vec[] = {1, 4, 2, 5};
   float expect_batch[] = {
-      0, 0.4f, 1, 1.2f,
-      0.3636363745f, 0.6363636255f, 0.9090909362f, 1.0909091234f,
+      0, 0.4f, 1, 1.2f, 0.3636363745f, 0.6363636255f, 0.9090909362f, 1.0909091234f,
   };
   float expect_batch_vec[] = {-0.2f, 1.4f, 0.27272728f, 1.1818182f};
   PolyUOp *ab = make_buf(ctx, batch_shape, 3);
@@ -3382,7 +3218,9 @@ TEST(pe, cholesky_solve_and_solve_match_numpy_torch_probe) {
   float got_batch[8] = {0};
   PolyUOp *batch_leaves[] = {base_buf(ab), base_buf(bb)};
   float *batch_ld[] = {a_batch, b_batch};
-  ASSERT_INT_EQ(realize_uop(ctx, xb, poly_buffer_f32(ctx, 8), got_batch, batch_leaves, batch_ld, 2), 0);
+  ASSERT_INT_EQ(
+      realize_uop(ctx, xb, poly_buffer_f32(ctx, 8), got_batch, batch_leaves, batch_ld, 2), 0
+  );
   for (int i = 0; i < 8; i++)
     ASSERT_FLOAT_EQ(got_batch[i], expect_batch[i], 3e-4f);
 
@@ -3392,7 +3230,12 @@ TEST(pe, cholesky_solve_and_solve_match_numpy_torch_probe) {
   float got_batch_vec[4] = {0};
   PolyUOp *batch_vec_leaves[] = {base_buf(ab), base_buf(bbv)};
   float *batch_vec_ld[] = {a_batch, b_batch_vec};
-  ASSERT_INT_EQ(realize_uop(ctx, xbv, poly_buffer_f32(ctx, 4), got_batch_vec, batch_vec_leaves, batch_vec_ld, 2), 0);
+  ASSERT_INT_EQ(
+      realize_uop(
+          ctx, xbv, poly_buffer_f32(ctx, 4), got_batch_vec, batch_vec_leaves, batch_vec_ld, 2
+      ),
+      0
+  );
   for (int i = 0; i < 4; i++)
     ASSERT_FLOAT_EQ(got_batch_vec[i], expect_batch_vec[i], 4e-4f);
 
@@ -3407,7 +3250,10 @@ TEST(pe, cholesky_solve_and_solve_match_numpy_torch_probe) {
   PolyUOp *pivot_batch_leaves[] = {base_buf(pab), base_buf(pbbv)};
   float *pivot_batch_ld[] = {pivot_batch_a, pivot_batch_bv};
   ASSERT_INT_EQ(
-      realize_uop(ctx, pxbv, poly_buffer_f32(ctx, 4), got_pivot_batch_vec, pivot_batch_leaves, pivot_batch_ld, 2),
+      realize_uop(
+          ctx, pxbv, poly_buffer_f32(ctx, 4), got_pivot_batch_vec, pivot_batch_leaves,
+          pivot_batch_ld, 2
+      ),
       0
   );
   for (int i = 0; i < 4; i++)
@@ -3421,7 +3267,10 @@ TEST(pe, cholesky_solve_and_solve_match_numpy_torch_probe) {
   PolyUOp *broadcast_vec_leaves[] = {base_buf(ab), base_buf(bbv_single)};
   float *broadcast_vec_ld[] = {a_batch, b_vec};
   ASSERT_INT_EQ(
-      realize_uop(ctx, xbv_single, poly_buffer_f32(ctx, 4), got_broadcast_vec, broadcast_vec_leaves, broadcast_vec_ld, 2),
+      realize_uop(
+          ctx, xbv_single, poly_buffer_f32(ctx, 4), got_broadcast_vec, broadcast_vec_leaves,
+          broadcast_vec_ld, 2
+      ),
       0
   );
   for (int i = 0; i < 4; i++)
@@ -3432,14 +3281,16 @@ TEST(pe, cholesky_solve_and_solve_match_numpy_torch_probe) {
   PolyUOp *xb_single_batch = poly_solve(ctx, ab, bb_single_batch);
   ASSERT_NOT_NULL(xb_single_batch);
   float expect_single_batch[] = {
-      0, 0.4f, 1, 1.2f,
-      0.09090909f, 0.36363637f, 0.7272727f, 0.9090909f,
+      0, 0.4f, 1, 1.2f, 0.09090909f, 0.36363637f, 0.7272727f, 0.9090909f,
   };
   float got_single_batch[8] = {0};
   PolyUOp *single_batch_leaves[] = {base_buf(ab), base_buf(bb_single_batch)};
   float *single_batch_ld[] = {a_batch, rhs_mat};
   ASSERT_INT_EQ(
-      realize_uop(ctx, xb_single_batch, poly_buffer_f32(ctx, 8), got_single_batch, single_batch_leaves, single_batch_ld, 2),
+      realize_uop(
+          ctx, xb_single_batch, poly_buffer_f32(ctx, 8), got_single_batch, single_batch_leaves,
+          single_batch_ld, 2
+      ),
       0
   );
   for (int i = 0; i < 8; i++)
@@ -3455,7 +3306,9 @@ TEST(pe, cholesky_solve_and_solve_match_numpy_torch_probe) {
   PolyUOp *tri_leaves[] = {base_buf(tri_a), base_buf(tri_b)};
   float *tri_ld[] = {tri_batch, b_vec};
   ASSERT_INT_EQ(
-      realize_uop(ctx, tri_x, poly_buffer_f32(ctx, 4), got_tri_broadcast_vec, tri_leaves, tri_ld, 2),
+      realize_uop(
+          ctx, tri_x, poly_buffer_f32(ctx, 4), got_tri_broadcast_vec, tri_leaves, tri_ld, 2
+      ),
       0
   );
   for (int i = 0; i < 4; i++)
@@ -3471,19 +3324,16 @@ TEST(pe, cholesky_solve_and_solve_match_numpy_torch_probe) {
   float tall_b_vec[] = {1, 2, 2.5f};
   float tall_b_mat[] = {1, 0.5f, 2, 1, 2.5f, 1.5f};
   float tall_a_batch[] = {
-      1, 0, 1, 1, 1, 2,
-      1, 0, 1, 1.5f, 1, 3,
+      1, 0, 1, 1, 1, 2, 1, 0, 1, 1.5f, 1, 3,
   };
   float tall_b_batch[] = {
-      1, 0.5f, 2, 1, 2.5f, 1.5f,
-      1.25f, 0.75f, 2.25f, 1.25f, 2.75f, 1.75f,
+      1, 0.5f, 2, 1, 2.5f, 1.5f, 1.25f, 0.75f, 2.25f, 1.25f, 2.75f, 1.75f,
   };
   float tall_b_batch_vec[] = {1, 2, 2.5f, 1.25f, 2.25f, 2.75f};
   float expect_lstsq_vec[] = {1.0833334f, 0.75f};
   float expect_lstsq_mat[] = {1.0833334f, 0.5f, 0.75f, 0.5f};
   float expect_lstsq_batch[] = {
-      1.0833334f, 0.5f, 0.75f, 0.5f,
-      1.3333334f, 0.75f, 0.5f, 0.33333334f,
+      1.0833334f, 0.5f, 0.75f, 0.5f, 1.3333334f, 0.75f, 0.5f, 0.33333334f,
   };
   float expect_lstsq_batch_vec[] = {1.0833334f, 0.75f, 1.3333334f, 0.5f};
 
@@ -3494,7 +3344,9 @@ TEST(pe, cholesky_solve_and_solve_match_numpy_torch_probe) {
   float got_lxv[2] = {0};
   PolyUOp *lvec_leaves[] = {base_buf(la), base_buf(lbv)};
   float *lvec_ld[] = {tall_a, tall_b_vec};
-  ASSERT_INT_EQ(realize_uop(ctx, lxv, poly_buffer_f32(ctx, 2), got_lxv, lvec_leaves, lvec_ld, 2), 0);
+  ASSERT_INT_EQ(
+      realize_uop(ctx, lxv, poly_buffer_f32(ctx, 2), got_lxv, lvec_leaves, lvec_ld, 2), 0
+  );
   for (int i = 0; i < 2; i++)
     ASSERT_FLOAT_EQ(got_lxv[i], expect_lstsq_vec[i], 4e-4f);
 
@@ -3504,7 +3356,9 @@ TEST(pe, cholesky_solve_and_solve_match_numpy_torch_probe) {
   float got_lxm[4] = {0};
   PolyUOp *lmat_leaves[] = {base_buf(la), base_buf(lB)};
   float *lmat_ld[] = {tall_a, tall_b_mat};
-  ASSERT_INT_EQ(realize_uop(ctx, lxm, poly_buffer_f32(ctx, 4), got_lxm, lmat_leaves, lmat_ld, 2), 0);
+  ASSERT_INT_EQ(
+      realize_uop(ctx, lxm, poly_buffer_f32(ctx, 4), got_lxm, lmat_leaves, lmat_ld, 2), 0
+  );
   for (int i = 0; i < 4; i++)
     ASSERT_FLOAT_EQ(got_lxm[i], expect_lstsq_mat[i], 4e-4f);
 
@@ -3515,7 +3369,9 @@ TEST(pe, cholesky_solve_and_solve_match_numpy_torch_probe) {
   float got_lxb[8] = {0};
   PolyUOp *lbatch_leaves[] = {base_buf(lab), base_buf(lbb)};
   float *lbatch_ld[] = {tall_a_batch, tall_b_batch};
-  ASSERT_INT_EQ(realize_uop(ctx, lxb, poly_buffer_f32(ctx, 8), got_lxb, lbatch_leaves, lbatch_ld, 2), 0);
+  ASSERT_INT_EQ(
+      realize_uop(ctx, lxb, poly_buffer_f32(ctx, 8), got_lxb, lbatch_leaves, lbatch_ld, 2), 0
+  );
   for (int i = 0; i < 8; i++)
     ASSERT_FLOAT_EQ(got_lxb[i], expect_lstsq_batch[i], 5e-4f);
 
@@ -3525,7 +3381,12 @@ TEST(pe, cholesky_solve_and_solve_match_numpy_torch_probe) {
   float got_lxbv[4] = {0};
   PolyUOp *lbatch_vec_leaves[] = {base_buf(lab), base_buf(lbbv)};
   float *lbatch_vec_ld[] = {tall_a_batch, tall_b_batch_vec};
-  ASSERT_INT_EQ(realize_uop(ctx, lxbv, poly_buffer_f32(ctx, 4), got_lxbv, lbatch_vec_leaves, lbatch_vec_ld, 2), 0);
+  ASSERT_INT_EQ(
+      realize_uop(
+          ctx, lxbv, poly_buffer_f32(ctx, 4), got_lxbv, lbatch_vec_leaves, lbatch_vec_ld, 2
+      ),
+      0
+  );
   for (int i = 0; i < 4; i++)
     ASSERT_FLOAT_EQ(got_lxbv[i], expect_lstsq_batch_vec[i], 5e-4f);
 
@@ -3537,7 +3398,10 @@ TEST(pe, cholesky_solve_and_solve_match_numpy_torch_probe) {
   PolyUOp *lbatch_broadcast_leaves[] = {base_buf(lab), base_buf(lbbv_single)};
   float *lbatch_broadcast_ld[] = {tall_a_batch, tall_b_vec};
   ASSERT_INT_EQ(
-      realize_uop(ctx, lxbv_single, poly_buffer_f32(ctx, 4), got_lxbv_single, lbatch_broadcast_leaves, lbatch_broadcast_ld, 2),
+      realize_uop(
+          ctx, lxbv_single, poly_buffer_f32(ctx, 4), got_lxbv_single, lbatch_broadcast_leaves,
+          lbatch_broadcast_ld, 2
+      ),
       0
   );
   for (int i = 0; i < 4; i++)
@@ -3551,9 +3415,7 @@ TEST(pe, cholesky_solve_and_solve_match_numpy_torch_probe) {
   float wide_b_mat[] = {1, 3, 2, 4};
   float expect_wide_vec[] = {-0.33333334f, 0.6666667f, 1.3333334f};
   float expect_wide_mat[] = {
-      -0.33333334f, -0.33333334f,
-      0.6666667f, 1.6666666f,
-      1.3333334f, 2.3333333f,
+      -0.33333334f, -0.33333334f, 0.6666667f, 1.6666666f, 1.3333334f, 2.3333333f,
   };
   PolyUOp *lwa = make_buf(ctx, wide_shape, 2);
   PolyUOp *lwv = make_buf(ctx, wide_vec_shape, 1);
@@ -3562,7 +3424,10 @@ TEST(pe, cholesky_solve_and_solve_match_numpy_torch_probe) {
   float got_lwxv[3] = {0};
   PolyUOp *lwide_vec_leaves[] = {base_buf(lwa), base_buf(lwv)};
   float *lwide_vec_ld[] = {wide_a, wide_b_vec};
-  ASSERT_INT_EQ(realize_uop(ctx, lwxv, poly_buffer_f32(ctx, 3), got_lwxv, lwide_vec_leaves, lwide_vec_ld, 2), 0);
+  ASSERT_INT_EQ(
+      realize_uop(ctx, lwxv, poly_buffer_f32(ctx, 3), got_lwxv, lwide_vec_leaves, lwide_vec_ld, 2),
+      0
+  );
   for (int i = 0; i < 3; i++)
     ASSERT_FLOAT_EQ(got_lwxv[i], expect_wide_vec[i], 6e-4f);
 
@@ -3572,7 +3437,10 @@ TEST(pe, cholesky_solve_and_solve_match_numpy_torch_probe) {
   float got_lwxm[6] = {0};
   PolyUOp *lwide_mat_leaves[] = {base_buf(lwa), base_buf(lwB)};
   float *lwide_mat_ld[] = {wide_a, wide_b_mat};
-  ASSERT_INT_EQ(realize_uop(ctx, lwxm, poly_buffer_f32(ctx, 6), got_lwxm, lwide_mat_leaves, lwide_mat_ld, 2), 0);
+  ASSERT_INT_EQ(
+      realize_uop(ctx, lwxm, poly_buffer_f32(ctx, 6), got_lwxm, lwide_mat_leaves, lwide_mat_ld, 2),
+      0
+  );
   for (int i = 0; i < 6; i++)
     ASSERT_FLOAT_EQ(got_lwxm[i], expect_wide_mat[i], 8e-4f);
 
@@ -3593,7 +3461,12 @@ TEST(pe, cholesky_solve_and_solve_match_numpy_torch_probe) {
   float got_rd_sq_v[2] = {0};
   PolyUOp *rd_sq_v_leaves[] = {base_buf(rd_sq_a), base_buf(rd_sq_bv)};
   float *rd_sq_v_ld[] = {rankdef_square_a, rankdef_square_bv};
-  ASSERT_INT_EQ(realize_uop(ctx, rd_sq_xv, poly_buffer_f32(ctx, 2), got_rd_sq_v, rd_sq_v_leaves, rd_sq_v_ld, 2), 0);
+  ASSERT_INT_EQ(
+      realize_uop(
+          ctx, rd_sq_xv, poly_buffer_f32(ctx, 2), got_rd_sq_v, rd_sq_v_leaves, rd_sq_v_ld, 2
+      ),
+      0
+  );
   ASSERT_FLOAT_EQ(got_rd_sq_v[0], 1.5f, 1e-3f);
   ASSERT_FLOAT_EQ(got_rd_sq_v[1], 1.5f, 1e-3f);
 
@@ -3603,7 +3476,12 @@ TEST(pe, cholesky_solve_and_solve_match_numpy_torch_probe) {
   float got_rd_sq_m[4] = {0};
   PolyUOp *rd_sq_m_leaves[] = {base_buf(rd_sq_a), base_buf(rd_sq_bm)};
   float *rd_sq_m_ld[] = {rankdef_square_a, rankdef_square_bm};
-  ASSERT_INT_EQ(realize_uop(ctx, rd_sq_xm, poly_buffer_f32(ctx, 4), got_rd_sq_m, rd_sq_m_leaves, rd_sq_m_ld, 2), 0);
+  ASSERT_INT_EQ(
+      realize_uop(
+          ctx, rd_sq_xm, poly_buffer_f32(ctx, 4), got_rd_sq_m, rd_sq_m_leaves, rd_sq_m_ld, 2
+      ),
+      0
+  );
   float expect_rd_sq_m[] = {1.5f, 0.5f, 1.5f, 0.5f};
   for (int i = 0; i < 4; i++)
     ASSERT_FLOAT_EQ(got_rd_sq_m[i], expect_rd_sq_m[i], 1e-3f);
@@ -3615,7 +3493,12 @@ TEST(pe, cholesky_solve_and_solve_match_numpy_torch_probe) {
   float got_rd_tall[2] = {0};
   PolyUOp *rd_tall_leaves[] = {base_buf(rd_tall_a), base_buf(rd_tall_bv)};
   float *rd_tall_ld[] = {rankdef_tall_a, rankdef_tall_bv};
-  ASSERT_INT_EQ(realize_uop(ctx, rd_tall_x, poly_buffer_f32(ctx, 2), got_rd_tall, rd_tall_leaves, rd_tall_ld, 2), 0);
+  ASSERT_INT_EQ(
+      realize_uop(
+          ctx, rd_tall_x, poly_buffer_f32(ctx, 2), got_rd_tall, rd_tall_leaves, rd_tall_ld, 2
+      ),
+      0
+  );
   ASSERT_FLOAT_EQ(got_rd_tall[0], 0.5f, 1e-3f);
   ASSERT_FLOAT_EQ(got_rd_tall[1], 0.5f, 1e-3f);
 
@@ -3626,7 +3509,12 @@ TEST(pe, cholesky_solve_and_solve_match_numpy_torch_probe) {
   float got_rd_wide[3] = {0};
   PolyUOp *rd_wide_leaves[] = {base_buf(rd_wide_a), base_buf(rd_wide_bv)};
   float *rd_wide_ld[] = {rankdef_wide_a, rankdef_square_bv};
-  ASSERT_INT_EQ(realize_uop(ctx, rd_wide_x, poly_buffer_f32(ctx, 3), got_rd_wide, rd_wide_leaves, rd_wide_ld, 2), 0);
+  ASSERT_INT_EQ(
+      realize_uop(
+          ctx, rd_wide_x, poly_buffer_f32(ctx, 3), got_rd_wide, rd_wide_leaves, rd_wide_ld, 2
+      ),
+      0
+  );
   ASSERT_FLOAT_EQ(got_rd_wide[0], 1.5f, 1e-3f);
   ASSERT_FLOAT_EQ(got_rd_wide[1], 1.5f, 1e-3f);
   ASSERT_FLOAT_EQ(got_rd_wide[2], 0.0f, 1e-3f);
@@ -3673,11 +3561,9 @@ TEST_COMMON(pe, linalg_structured_boundaries_backend_common) {
   float spd[] = {4, 2, 2, 5};
   float rhs_mat[] = {1, 2, 3, 4};
   float expect_cholsolve[] = {-0.0625f, 0.125f, 0.625f, 0.75f};
-  PolyTensor *chol_ah =
-      poly_tensor_from_host_by_id(ctx, spd, sizeof(spd), f32_id, shape2, 2);
-  PolyTensor *chol_bh = poly_tensor_from_host_by_id(
-      ctx, rhs_mat, sizeof(rhs_mat), f32_id, shape2, 2
-  );
+  PolyTensor *chol_ah = poly_tensor_from_host_by_id(ctx, spd, sizeof(spd), f32_id, shape2, 2);
+  PolyTensor *chol_bh =
+      poly_tensor_from_host_by_id(ctx, rhs_mat, sizeof(rhs_mat), f32_id, shape2, 2);
   PolyTensor *chol_a = poly_tensor_to_device(ctx, chol_ah, device);
   PolyTensor *chol_b = poly_tensor_to_device(ctx, chol_bh, device);
   ASSERT_NOT_NULL(chol_ah);
@@ -3701,8 +3587,7 @@ TEST_COMMON(pe, linalg_structured_boundaries_backend_common) {
   float a2[] = {2, 1, 1, 3};
   float b_vec[] = {1, 4};
   float expect_vec[] = {-0.2f, 1.4f};
-  PolyTensor *solve_ah =
-      poly_tensor_from_host_by_id(ctx, a2, sizeof(a2), f32_id, shape2, 2);
+  PolyTensor *solve_ah = poly_tensor_from_host_by_id(ctx, a2, sizeof(a2), f32_id, shape2, 2);
   PolyTensor *solve_bh =
       poly_tensor_from_host_by_id(ctx, b_vec, sizeof(b_vec), f32_id, vec_shape, 1);
   PolyTensor *solve_a = poly_tensor_to_device(ctx, solve_ah, device);
@@ -3827,20 +3712,17 @@ TEST(shape_uop, gettuple_function_resolves_symbolic_param_shape_and_axis) {
       .has_minmax = true,
       .addrspace = POLY_ADDR_GLOBAL,
   };
-  PolyUOp *dim_param = poly_uop1(
-      ctx, POLY_OP_PARAM, POLY_WEAKINT, empty, poly_arg_param(&dim_arg));
+  PolyUOp *dim_param = poly_uop1(ctx, POLY_OP_PARAM, POLY_WEAKINT, empty, poly_arg_param(&dim_arg));
   PolyUOp *body_dims[2] = {dim_param, poly_const_int(ctx, 4)};
-  PolyUOp *body_shape = poly_uop(
-      ctx, POLY_OP_STACK, POLY_WEAKINT, body_dims, 2,
-      poly_arg_none());
+  PolyUOp *body_shape = poly_uop(ctx, POLY_OP_STACK, POLY_WEAKINT, body_dims, 2, poly_arg_none());
   PolyParamArg value_arg = {
       .slot = 0,
       .addrspace = POLY_ADDR_GLOBAL,
       .axis = 1,
       .has_axis = true,
   };
-  PolyUOp *value = poly_uop1(
-      ctx, POLY_OP_PARAM, POLY_FLOAT32, body_shape, poly_arg_param(&value_arg));
+  PolyUOp *value =
+      poly_uop1(ctx, POLY_OP_PARAM, POLY_FLOAT32, body_shape, poly_arg_param(&value_arg));
   PolyUOp *body = poly_uop1(ctx, POLY_OP_TUPLE, POLY_VOID, value, poly_arg_none());
 
   PolyUOp *actual = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 20, POLY_DEVICE_CPU);
@@ -3848,11 +3730,9 @@ TEST(shape_uop, gettuple_function_resolves_symbolic_param_shape_and_axis) {
   PolyUOp *size = poly_uop_variable(ctx, "size", 1, 8, POLY_WEAKINT, 1, false);
   PolyUOp *bound = poly_uop_bind(ctx, size, 5);
   PolyUOp *function_src[3] = {body, actual, bound};
-  PolyUOp *function = poly_uop(
-      ctx, POLY_OP_FUNCTION, POLY_VOID, function_src, 3,
-      poly_arg_str("symbolic_shape"));
-  PolyUOp *selected = poly_uop1(
-      ctx, POLY_OP_GETTUPLE, POLY_FLOAT32, function, poly_arg_int(0));
+  PolyUOp *function =
+      poly_uop(ctx, POLY_OP_FUNCTION, POLY_VOID, function_src, 3, poly_arg_str("symbolic_shape"));
+  PolyUOp *selected = poly_uop1(ctx, POLY_OP_GETTUPLE, POLY_FLOAT32, function, poly_arg_int(0));
 
   ASSERT_INT_EQ(poly_uop_ndim(ctx, selected), 2);
   ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, selected)[0], 8);
@@ -3885,7 +3765,8 @@ TEST(shape_uop, shrink_uop_with_bound_start_matches_tinygrad_form) {
   ASSERT_INT_EQ(slice_dim0->arg.i, 2);
 
   float data[20];
-  for (int j = 0; j < 20; j++) data[j] = (float)j;
+  for (int j = 0; j < 20; j++)
+    data[j] = (float)j;
   float out[4] = {0};
   PolyUOp *out_buf = poly_buffer_f32(ctx, 4);
   PolyUOp *leaves[1] = {base_buf(x)};
@@ -4019,9 +3900,7 @@ TEST(shape_uop, smoothed_bound_slice_multiplies_static_batch_shape) {
   ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, labels)[1], 10);
 
   PolyUOp *smoothed = poly_add(
-      ctx,
-      poly_mul(ctx, labels, poly_const_float(ctx, 0.9f)),
-      poly_const_float(ctx, 0.01f)
+      ctx, poly_mul(ctx, labels, poly_const_float(ctx, 0.9f)), poly_const_float(ctx, 0.01f)
   );
   PolyUOp *static_logp = make_buf(ctx, (int64_t[]){2, 10}, 2);
   PolyUOp *prod = poly_mul(ctx, smoothed, static_logp);
@@ -4389,12 +4268,10 @@ TEST(shape_uop, parity_cross_entropy) {
 TEST(shape_uop, parity_gather) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *table = make_buf(ctx, (int64_t[]){5, 4}, 2);
-  PolyUOp *idx =
-      poly_reshape(ctx, poly_test_buffer(ctx, POLY_INT32, 3), (int64_t[]){3}, 1);
+  PolyUOp *idx = poly_reshape(ctx, poly_test_buffer(ctx, POLY_INT32, 3), (int64_t[]){3}, 1);
   PolyUOp *g = poly_gather(ctx, table, idx);
   ASSERT_INT_EQ(check_shape_parity(ctx, g), 0);
-  PolyUOp *float_idx =
-      poly_reshape(ctx, poly_test_buffer(ctx, POLY_FLOAT32, 3), (int64_t[]){3}, 1);
+  PolyUOp *float_idx = poly_reshape(ctx, poly_test_buffer(ctx, POLY_FLOAT32, 3), (int64_t[]){3}, 1);
   ASSERT_TRUE(poly_gather(ctx, table, float_idx) == NULL);
   poly_ctx_destroy(ctx);
   PASS();
@@ -4405,22 +4282,18 @@ TEST(shape_uop, gather_integer_promotion_scalar_and_rank_match_tinygrad) {
    * integer indices and promote the index/class-range pair before CMPNE. */
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
-  PolyUOp *table =
-      poly_reshape(ctx, poly_test_buffer(ctx, POLY_FLOAT32, 12), (int64_t[]){4, 3}, 2);
+  PolyUOp *table = poly_reshape(ctx, poly_test_buffer(ctx, POLY_FLOAT32, 12), (int64_t[]){4, 3}, 2);
   ASSERT_NOT_NULL(table);
 
   struct {
     PolyDType input;
     PolyDType expected_cmp;
   } cases[] = {
-      {POLY_INT8, POLY_INT32},   {POLY_UINT8, POLY_INT32},
-      {POLY_INT32, POLY_INT32}, {POLY_INT64, POLY_INT64},
-      {POLY_UINT64, POLY_WEAKFLOAT},
+      {POLY_INT8, POLY_INT32},  {POLY_UINT8, POLY_INT32},      {POLY_INT32, POLY_INT32},
+      {POLY_INT64, POLY_INT64}, {POLY_UINT64, POLY_WEAKFLOAT},
   };
   for (int ci = 0; ci < (int)(sizeof(cases) / sizeof(cases[0])); ci++) {
-    PolyUOp *idx = poly_reshape(
-        ctx, poly_test_buffer(ctx, cases[ci].input, 2), (int64_t[]){2}, 1
-    );
+    PolyUOp *idx = poly_reshape(ctx, poly_test_buffer(ctx, cases[ci].input, 2), (int64_t[]){2}, 1);
     PolyUOp *g = poly_gather(ctx, table, idx);
     ASSERT_NOT_NULL(g);
     PolyUOp *value_cmp = NULL;
@@ -4428,8 +4301,7 @@ TEST(shape_uop, gather_integer_promotion_scalar_and_rank_match_tinygrad) {
     PolyUOp **topo = poly_toposort(ctx, g, &n_topo);
     for (int i = 0; i < n_topo; i++) {
       PolyUOp *u = topo[i];
-      if (u && u->op == POLY_OP_CMPNE && u->n_src == 2 &&
-          !poly_dtype_is_bool(u->src[0]->dtype)) {
+      if (u && u->op == POLY_OP_CMPNE && u->n_src == 2 && !poly_dtype_is_bool(u->src[0]->dtype)) {
         value_cmp = u;
         break;
       }
@@ -4448,8 +4320,7 @@ TEST(shape_uop, gather_integer_promotion_scalar_and_rank_match_tinygrad) {
   PolyUOp **weak_topo = poly_toposort(ctx, weak_gather, &n_weak_topo);
   for (int i = 0; i < n_weak_topo; i++) {
     PolyUOp *u = weak_topo[i];
-    if (u && u->op == POLY_OP_CMPNE && u->n_src == 2 &&
-        !poly_dtype_is_bool(u->src[0]->dtype)) {
+    if (u && u->op == POLY_OP_CMPNE && u->n_src == 2 && !poly_dtype_is_bool(u->src[0]->dtype)) {
       weak_cmp = u;
       break;
     }
@@ -4467,7 +4338,8 @@ TEST(shape_uop, gather_integer_promotion_scalar_and_rank_match_tinygrad) {
   free(scalar_shape.dims);
 
   int64_t ones[POLY_MAX_DIMS];
-  for (int i = 0; i < POLY_MAX_DIMS; i++) ones[i] = 1;
+  for (int i = 0; i < POLY_MAX_DIMS; i++)
+    ones[i] = 1;
   PolyUOp *rank14 =
       poly_reshape(ctx, poly_test_buffer(ctx, POLY_INT32, 1), ones, POLY_MAX_DIMS - 2);
   PolyUOp *rank15 =
@@ -4541,28 +4413,23 @@ TEST(tensor, contiguous_backward_constructs_exact_barrier_and_gradient) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
   int64_t shape[] = {3};
-  PolyTensor *source =
-      poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+  PolyTensor *source = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
   PolyTensor *result = poly_tensor_contiguous_backward(ctx, source);
   ASSERT_NOT_NULL(source);
   ASSERT_NOT_NULL(result);
   ASSERT_INT_EQ(poly_tensor_uop_logical(result)->op, POLY_OP_CONTIGUOUS_BACKWARD);
-  ASSERT_PTR_EQ(
-      poly_tensor_uop_logical(result)->src[0], poly_tensor_uop_logical(source)
-  );
+  ASSERT_PTR_EQ(poly_tensor_uop_logical(result)->src[0], poly_tensor_uop_logical(source));
   ASSERT_INT_EQ(poly_tensor_uop_physical(result)->op, POLY_OP_CONTIGUOUS_BACKWARD);
-  ASSERT_PTR_EQ(
-      poly_tensor_uop_physical(result)->src[0], poly_tensor_uop_physical(source)
-  );
+  ASSERT_PTR_EQ(poly_tensor_uop_physical(result)->src[0], poly_tensor_uop_physical(source));
 
-  PolyUOp *grad = poly_grad(
-      ctx, poly_tensor_uop_physical(result), poly_tensor_uop_physical(source)
-  );
+  PolyUOp *grad =
+      poly_grad(ctx, poly_tensor_uop_physical(result), poly_tensor_uop_physical(source));
   ASSERT_NOT_NULL(grad);
   int n_topo = 0, contiguous_count = 0;
   PolyUOp **topo = poly_toposort_alloc(ctx, grad, &n_topo);
   ASSERT_NOT_NULL(topo);
-  for (int i = 0; i < n_topo; i++) contiguous_count += topo[i]->op == POLY_OP_CONTIGUOUS;
+  for (int i = 0; i < n_topo; i++)
+    contiguous_count += topo[i]->op == POLY_OP_CONTIGUOUS;
   ASSERT_INT_EQ(contiguous_count, 1);
   free(topo);
 
@@ -4575,10 +4442,8 @@ TEST(tensor, binary_alu_uses_implicit_shape_broadcast_like_tinygrad) {
   ASSERT_NOT_NULL(ctx);
   int64_t value_shape[] = {4, 3};
   int64_t bias_shape[] = {3};
-  PolyTensor *value =
-      poly_tensor_empty(ctx, POLY_FLOAT32, value_shape, 2, POLY_DEVICE_CPU);
-  PolyTensor *bias =
-      poly_tensor_empty(ctx, POLY_FLOAT32, bias_shape, 1, POLY_DEVICE_CPU);
+  PolyTensor *value = poly_tensor_empty(ctx, POLY_FLOAT32, value_shape, 2, POLY_DEVICE_CPU);
+  PolyTensor *bias = poly_tensor_empty(ctx, POLY_FLOAT32, bias_shape, 1, POLY_DEVICE_CPU);
   PolyTensor *sum = poly_tensor_alu2(ctx, POLY_OP_ADD, value, bias);
   ASSERT_NOT_NULL(value);
   ASSERT_NOT_NULL(bias);
@@ -4600,12 +4465,11 @@ TEST(tensor, binary_alu_uses_implicit_shape_broadcast_like_tinygrad) {
   free(physical_shape.dims);
 
   float value_data[12];
-  for (int i = 0; i < 12; i++) value_data[i] = (float)i;
+  for (int i = 0; i < 12; i++)
+    value_data[i] = (float)i;
   float bias_data[] = {10.0f, 20.0f, 30.0f};
-  PolyUOp *value_buffer =
-      (PolyUOp *)poly_uop_get_buffer_identity(poly_tensor_uop_physical(value));
-  PolyUOp *bias_buffer =
-      (PolyUOp *)poly_uop_get_buffer_identity(poly_tensor_uop_physical(bias));
+  PolyUOp *value_buffer = (PolyUOp *)poly_uop_get_buffer_identity(poly_tensor_uop_physical(value));
+  PolyUOp *bias_buffer = (PolyUOp *)poly_uop_get_buffer_identity(poly_tensor_uop_physical(bias));
   ASSERT_NOT_NULL(value_buffer);
   ASSERT_NOT_NULL(bias_buffer);
   ASSERT_INT_EQ(poly_buffer_write(ctx, value_buffer, value_data, sizeof(value_data)), 0);
@@ -4621,9 +4485,7 @@ TEST(tensor, binary_alu_uses_implicit_shape_broadcast_like_tinygrad) {
   ASSERT_INT_EQ(poly_buffer_read(ctx, result_buffer, result, sizeof(result)), 0);
   for (int row = 0; row < 4; row++)
     for (int col = 0; col < 3; col++)
-      ASSERT_FLOAT_NEAR(
-          result[row * 3 + col], value_data[row * 3 + col] + bias_data[col], 4, 1e-6
-      );
+      ASSERT_FLOAT_NEAR(result[row * 3 + col], value_data[row * 3 + col] + bias_data[col], 4, 1e-6);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -4642,11 +4504,15 @@ TEST(tensor, realization_replaces_value_with_current_buffer_topology) {
 
   float av[] = {1.0f, 2.0f}, bv[] = {3.0f, 4.0f};
   ASSERT_INT_EQ(
-      poly_buffer_write(ctx, (PolyUOp *)poly_uop_get_buffer_identity(a->uop_physical), av, sizeof(av)),
+      poly_buffer_write(
+          ctx, (PolyUOp *)poly_uop_get_buffer_identity(a->uop_physical), av, sizeof(av)
+      ),
       0
   );
   ASSERT_INT_EQ(
-      poly_buffer_write(ctx, (PolyUOp *)poly_uop_get_buffer_identity(b->uop_physical), bv, sizeof(bv)),
+      poly_buffer_write(
+          ctx, (PolyUOp *)poly_uop_get_buffer_identity(b->uop_physical), bv, sizeof(bv)
+      ),
       0
   );
 
@@ -6222,12 +6088,10 @@ TEST(pe, triu_tril_batched_last_two_dims_match_tinygrad) {
   ASSERT_INT_EQ(realize_uop(ctx, lower, poly_buffer_f32(ctx, 18), got_lower, leaves, ld, 1), 0);
 
   float expect_upper[18] = {
-      1, 2, 3, 0, 5, 6, 0, 0, 9,
-      10, 11, 12, 0, 14, 15, 0, 0, 18,
+      1, 2, 3, 0, 5, 6, 0, 0, 9, 10, 11, 12, 0, 14, 15, 0, 0, 18,
   };
   float expect_lower[18] = {
-      1, 2, 0, 4, 5, 6, 7, 8, 9,
-      10, 11, 0, 13, 14, 15, 16, 17, 18,
+      1, 2, 0, 4, 5, 6, 7, 8, 9, 10, 11, 0, 13, 14, 15, 16, 17, 18,
   };
   for (int i = 0; i < 18; i++) {
     ASSERT_FLOAT_EQ(got_upper[i], expect_upper[i], 1e-5);

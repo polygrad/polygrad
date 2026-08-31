@@ -41,8 +41,8 @@ static PolyUOp *l2i_clone(
 
 static bool l2i_lane(PolyUOp *u, int *lane, PolyDType *dtype) {
   if (!u || u->tag_arg.kind != POLY_ARG_DTYPE ||
-      (!poly_dtype_eq(u->tag_arg.dtype, POLY_INT32) &&
-       !poly_dtype_eq(u->tag_arg.dtype, POLY_UINT32)) ||
+      (!poly_dtype_eq(u->tag_arg.dtype, POLY_INT32) && !poly_dtype_eq(u->tag_arg.dtype, POLY_UINT32)
+      ) ||
       (u->tag != 0 && u->tag != 1))
     return false;
   if (lane) *lane = u->tag;
@@ -154,39 +154,32 @@ static L2IPair l2i_shift(
   if (op == POLY_OP_SHL) {
     PolyUOp *low = l2i_bitcast(ctx, l2i_binary(ctx, POLY_OP_SHL, POLY_UINT32, a0u, n), dt);
     PolyUOp *carry = l2i_binary(
-        ctx, POLY_OP_SHR, POLY_UINT32,
-        l2i_binary(ctx, POLY_OP_SHR, POLY_UINT32, a0u, one), inv
+        ctx, POLY_OP_SHR, POLY_UINT32, l2i_binary(ctx, POLY_OP_SHR, POLY_UINT32, a0u, one), inv
     );
     PolyUOp *high = l2i_bitcast(
         ctx,
         l2i_binary(
-            ctx, POLY_OP_OR, POLY_UINT32,
-            l2i_binary(ctx, POLY_OP_SHL, POLY_UINT32, a1u, n),
-            carry
+            ctx, POLY_OP_OR, POLY_UINT32, l2i_binary(ctx, POLY_OP_SHL, POLY_UINT32, a1u, n), carry
         ),
         dt
     );
-    return (L2IPair
-    ){l2i_where(ctx, dt, wide, zero, low), l2i_where(ctx, dt, wide, low, high)};
+    return (L2IPair){l2i_where(ctx, dt, wide, zero, low), l2i_where(ctx, dt, wide, low, high)};
   }
 
   PolyUOp *carry = l2i_binary(
-      ctx, POLY_OP_SHL, POLY_UINT32,
-      l2i_binary(ctx, POLY_OP_SHL, POLY_UINT32, a1u, one), inv
+      ctx, POLY_OP_SHL, POLY_UINT32, l2i_binary(ctx, POLY_OP_SHL, POLY_UINT32, a1u, one), inv
   );
   PolyUOp *low = l2i_bitcast(
       ctx,
       l2i_binary(
-          ctx, POLY_OP_OR, POLY_UINT32,
-          l2i_binary(ctx, POLY_OP_SHR, POLY_UINT32, a0u, n), carry
+          ctx, POLY_OP_OR, POLY_UINT32, l2i_binary(ctx, POLY_OP_SHR, POLY_UINT32, a0u, n), carry
       ),
       dt
   );
   PolyUOp *high = l2i_binary(ctx, POLY_OP_SHR, dt, a1, bmod);
   PolyUOp *sign =
       poly_dtype_is_unsigned(dt) ? zero : l2i_binary(ctx, POLY_OP_SHR, dt, a1, thirty_one);
-  return (L2IPair
-  ){l2i_where(ctx, dt, wide, high, low), l2i_where(ctx, dt, wide, sign, high)};
+  return (L2IPair){l2i_where(ctx, dt, wide, high, low), l2i_where(ctx, dt, wide, sign, high)};
 }
 
 static void l2i_unpack16(PolyCtx *ctx, PolyUOp *u, PolyUOp **lo, PolyUOp **hi) {
@@ -237,9 +230,7 @@ static PolyUOp *l2i_compare(
     PolyUOp *b1
 ) {
   if (op == POLY_OP_CMPEQ) {
-    return l2i_binary(
-        ctx, POLY_OP_AND, POLY_BOOL, l2i_eq(ctx, a0, b0), l2i_eq(ctx, a1, b1)
-    );
+    return l2i_binary(ctx, POLY_OP_AND, POLY_BOOL, l2i_eq(ctx, a0, b0), l2i_eq(ctx, a1, b1));
   }
   if (op == POLY_OP_CMPNE) {
     return l2i_binary(
@@ -294,9 +285,8 @@ static L2IPair l2i_divmod(
   L2IPair q = {zero, zero}, r = {zero, zero};
   for (int i = 63; i >= 0; i--) {
     r = l2i_shift(ctx, POLY_OP_SHL, POLY_UINT32, r.lo, r.hi, one);
-    L2IPair shifted = l2i_shift(
-        ctx, POLY_OP_SHR, POLY_UINT32, a0, a1, l2i_const(ctx, POLY_UINT32, (uint32_t)i)
-    );
+    L2IPair shifted =
+        l2i_shift(ctx, POLY_OP_SHR, POLY_UINT32, a0, a1, l2i_const(ctx, POLY_UINT32, (uint32_t)i));
     PolyUOp *incoming = l2i_binary(ctx, POLY_OP_AND, POLY_UINT32, shifted.lo, one);
     r.lo = l2i_binary(ctx, POLY_OP_OR, POLY_UINT32, r.lo, incoming);
     PolyUOp *take = l2i_not(ctx, l2i_compare(ctx, POLY_OP_CMPLT, r.lo, r.hi, b0, b1));
@@ -394,16 +384,11 @@ static PolyUOp *l2i_cast_from_long(PolyCtx *ctx, PolyDType target, PolyUOp *a0, 
   PolyUOp *a0_negative = l2i_cmp(ctx, POLY_OP_CMPLT, a0, zero);
   PolyUOp *small = l2i_binary(
       ctx, POLY_OP_OR, POLY_BOOL,
-      l2i_binary(
-          ctx, POLY_OP_AND, POLY_BOOL, l2i_eq(ctx, a1, zero), a0_nonnegative
-      ),
-      l2i_binary(
-          ctx, POLY_OP_AND, POLY_BOOL, l2i_eq(ctx, a1, minus_one), a0_negative
-      )
+      l2i_binary(ctx, POLY_OP_AND, POLY_BOOL, l2i_eq(ctx, a1, zero), a0_nonnegative),
+      l2i_binary(ctx, POLY_OP_AND, POLY_BOOL, l2i_eq(ctx, a1, minus_one), a0_negative)
   );
   PolyUOp *direct = l2i_cast(ctx, a0, target);
-  PolyUOp *scale =
-      poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKFLOAT, poly_arg_float(4294967296.0));
+  PolyUOp *scale = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKFLOAT, poly_arg_float(4294967296.0));
   PolyUOp *wide = l2i_binary(
       ctx, POLY_OP_ADD, POLY_FLOAT32,
       l2i_binary(ctx, POLY_OP_MUL, POLY_FLOAT32, l2i_cast(ctx, a1, POLY_FLOAT32), scale),
@@ -422,16 +407,14 @@ static PolyUOp *split_l2i_inputs(PolyCtx *ctx, PolyUOp **uops, int n_uops) {
 
 static PolyUOp *long_define(PolyCtx *ctx, PolyUOp *x, const PolyBindings *b) {
   PolyUOp *sz = poly_bind(b, "sz");
-  if (!sz || !l2i_is_long(x->dtype) || x->arg.kind != POLY_ARG_PARAM || !x->arg.param)
-    return NULL;
-  PolyUOp *shape = l2i_binary(ctx, POLY_OP_MUL, sz->dtype, sz, poly_const_like(ctx, sz, poly_arg_int(2)));
+  if (!sz || !l2i_is_long(x->dtype) || x->arg.kind != POLY_ARG_PARAM || !x->arg.param) return NULL;
+  PolyUOp *shape =
+      l2i_binary(ctx, POLY_OP_MUL, sz->dtype, sz, poly_const_like(ctx, sz, poly_arg_int(2)));
   if (!shape) return NULL;
   PolyParamArg arg = *x->arg.param;
   arg.dtype = l2i_dt(x->dtype);
   PolyUOp *src[] = {shape};
-  return l2i_clone(
-      ctx, x->op, arg.dtype, src, 1, poly_arg_param(&arg), x->tag, x->tag_arg
-  );
+  return l2i_clone(ctx, x->op, arg.dtype, src, 1, poly_arg_param(&arg), x->tag, x->tag_arg);
 }
 
 static PolyUOp *long_index(PolyCtx *ctx, PolyUOp *x, const PolyBindings *b) {
@@ -441,8 +424,7 @@ static PolyUOp *long_index(PolyCtx *ctx, PolyUOp *x, const PolyBindings *b) {
   if (!l2i_is_long(x->dtype) || !l2i_lane(x, &lane, &dtype)) return NULL;
   PolyUOp *index = poly_reindex(ctx, x, lane, 2);
   return index ? l2i_clone(
-                     ctx, index->op, dtype, index->src, index->n_src, index->arg, 0,
-                     poly_arg_none()
+                     ctx, index->op, dtype, index->src, index->n_src, index->arg, 0, poly_arg_none()
                  )
                : NULL;
 }
@@ -470,45 +452,42 @@ static PolyUOp *long_comparison(PolyCtx *ctx, PolyUOp *x, const PolyBindings *b)
   if (!a || !l2i_is_long(a->dtype) || x->n_src != 2) return NULL;
   PolyDType dtype = l2i_dt(a->dtype);
   PolyUOp *words[] = {
-      l2i_rtag(ctx, x->src[0], 0, dtype), l2i_rtag(ctx, x->src[0], 1, dtype),
-      l2i_rtag(ctx, x->src[1], 0, dtype), l2i_rtag(ctx, x->src[1], 1, dtype),
+      l2i_rtag(ctx, x->src[0], 0, dtype),
+      l2i_rtag(ctx, x->src[0], 1, dtype),
+      l2i_rtag(ctx, x->src[1], 0, dtype),
+      l2i_rtag(ctx, x->src[1], 1, dtype),
   };
   PolyUOp *split = split_l2i_inputs(ctx, words, 4);
   return split && split->n_src == 4
-             ? l2i_compare(
-                   ctx, x->op, split->src[0], split->src[1], split->src[2], split->src[3]
-               )
+             ? l2i_compare(ctx, x->op, split->src[0], split->src[1], split->src[2], split->src[3])
              : NULL;
 }
 
 static PolyUOp *long_cast_long(PolyCtx *ctx, PolyUOp *x, const PolyBindings *b) {
   PolyUOp *a = poly_bind(b, "a");
   int lane = 0;
-  if (!a || !l2i_is_long(x->dtype) || !l2i_is_long(a->dtype) ||
-      !l2i_lane(x, &lane, NULL))
+  if (!a || !l2i_is_long(x->dtype) || !l2i_is_long(a->dtype) || !l2i_lane(x, &lane, NULL))
     return NULL;
   PolyDType dtype = l2i_dt(x->dtype), source_dtype = l2i_dt(a->dtype);
   PolyUOp *words[] = {
-      l2i_rtag(ctx, a, 0, source_dtype), l2i_rtag(ctx, a, 1, source_dtype),
+      l2i_rtag(ctx, a, 0, source_dtype),
+      l2i_rtag(ctx, a, 1, source_dtype),
   };
   PolyUOp *split = split_l2i_inputs(ctx, words, 2);
-  L2IPair pair = split && split->n_src == 2
-                     ? l2i_alu(ctx, POLY_OP_BITCAST, dtype, split->src, 2)
-                     : (L2IPair){NULL, NULL};
+  L2IPair pair = split && split->n_src == 2 ? l2i_alu(ctx, POLY_OP_BITCAST, dtype, split->src, 2)
+                                            : (L2IPair){NULL, NULL};
   return lane ? pair.hi : pair.lo;
 }
 
 static PolyUOp *long_cast_to(PolyCtx *ctx, PolyUOp *x, const PolyBindings *b) {
   PolyUOp *a = poly_bind(b, "a");
   int lane = 0;
-  if (!a || !l2i_is_long(x->dtype) || l2i_is_long(a->dtype) ||
-      !l2i_lane(x, &lane, NULL))
+  if (!a || !l2i_is_long(x->dtype) || l2i_is_long(a->dtype) || !l2i_lane(x, &lane, NULL))
     return NULL;
   PolyUOp *inputs[] = {a};
   PolyUOp *split = split_l2i_inputs(ctx, inputs, 1);
-  L2IPair pair = split && split->n_src == 1
-                     ? l2i_cast_to_long(ctx, x->dtype, split->src[0])
-                     : (L2IPair){NULL, NULL};
+  L2IPair pair = split && split->n_src == 1 ? l2i_cast_to_long(ctx, x->dtype, split->src[0])
+                                            : (L2IPair){NULL, NULL};
   return lane ? pair.hi : pair.lo;
 }
 
@@ -531,31 +510,32 @@ static PolyUOp *long_shift(PolyCtx *ctx, PolyUOp *x, const PolyBindings *b) {
   if (!a || !amount || !l2i_is_long(x->dtype) || !l2i_lane(x, &lane, NULL)) return NULL;
   PolyDType dtype = l2i_dt(x->dtype);
   PolyUOp *words[] = {
-      l2i_rtag(ctx, a, 0, dtype), l2i_rtag(ctx, a, 1, dtype),
+      l2i_rtag(ctx, a, 0, dtype),
+      l2i_rtag(ctx, a, 1, dtype),
       l2i_rtag(ctx, amount, 0, dtype),
   };
   PolyUOp *split = split_l2i_inputs(ctx, words, 3);
-  L2IPair pair = split && split->n_src == 3
-                     ? l2i_alu(ctx, x->op, dtype, split->src, 3)
-                     : (L2IPair){NULL, NULL};
+  L2IPair pair = split && split->n_src == 3 ? l2i_alu(ctx, x->op, dtype, split->src, 3)
+                                            : (L2IPair){NULL, NULL};
   return lane ? pair.hi : pair.lo;
 }
 
 static PolyUOp *long_where(PolyCtx *ctx, PolyUOp *x, const PolyBindings *b) {
   PolyUOp *condition = poly_bind(b, "c"), *a = poly_bind(b, "a"), *other = poly_bind(b, "b");
   int lane = 0;
-  if (!condition || !a || !other || !l2i_is_long(x->dtype) ||
-      !l2i_lane(x, &lane, NULL))
+  if (!condition || !a || !other || !l2i_is_long(x->dtype) || !l2i_lane(x, &lane, NULL))
     return NULL;
   PolyDType dtype = l2i_dt(x->dtype);
   PolyUOp *words[] = {
-      condition, l2i_rtag(ctx, a, 0, dtype), l2i_rtag(ctx, a, 1, dtype),
-      l2i_rtag(ctx, other, 0, dtype), l2i_rtag(ctx, other, 1, dtype),
+      condition,
+      l2i_rtag(ctx, a, 0, dtype),
+      l2i_rtag(ctx, a, 1, dtype),
+      l2i_rtag(ctx, other, 0, dtype),
+      l2i_rtag(ctx, other, 1, dtype),
   };
   PolyUOp *split = split_l2i_inputs(ctx, words, 5);
-  L2IPair pair = split && split->n_src == 5
-                     ? l2i_alu(ctx, x->op, dtype, split->src, 5)
-                     : (L2IPair){NULL, NULL};
+  L2IPair pair = split && split->n_src == 5 ? l2i_alu(ctx, x->op, dtype, split->src, 5)
+                                            : (L2IPair){NULL, NULL};
   return lane ? pair.hi : pair.lo;
 }
 
@@ -573,9 +553,8 @@ static PolyUOp *long_alu(PolyCtx *ctx, PolyUOp *x, const PolyBindings *b) {
   }
   PolyUOp *split = split_l2i_inputs(ctx, words, count);
   free(words);
-  L2IPair pair = split && split->n_src == count
-                     ? l2i_alu(ctx, x->op, dtype, split->src, count)
-                     : (L2IPair){NULL, NULL};
+  L2IPair pair = split && split->n_src == count ? l2i_alu(ctx, x->op, dtype, split->src, count)
+                                                : (L2IPair){NULL, NULL};
   return lane ? pair.hi : pair.lo;
 }
 
@@ -590,8 +569,8 @@ static PolyUOp *long_load(PolyCtx *ctx, PolyUOp *x, const PolyBindings *b) {
   PolyUOp *reindexed = rewritten ? poly_reindex(ctx, rewritten, lane, 2) : NULL;
   if (!reindexed) return NULL;
   reindexed = l2i_clone(
-      ctx, reindexed->op, reindexed->dtype, reindexed->src, reindexed->n_src,
-      reindexed->arg, 0, poly_arg_none()
+      ctx, reindexed->op, reindexed->dtype, reindexed->src, reindexed->n_src, reindexed->arg, 0,
+      poly_arg_none()
   );
   return reindexed ? poly_uop1(ctx, POLY_OP_LOAD, dtype, reindexed, x->arg) : NULL;
 }
@@ -612,13 +591,11 @@ static _Thread_local PolyPatternMatcher *g_pm_long_decomp = NULL;
 PolyPatternMatcher *poly_pm_long_decomp(void) {
   if (g_pm_long_decomp) return g_pm_long_decomp;
   PolyDType longs[] = {POLY_INT64, POLY_UINT64};
-  PolyOpSet shifts = poly_opset_add(
-      poly_opset_add((PolyOpSet){{0, 0}}, POLY_OP_SHL), POLY_OP_SHR
-  );
+  PolyOpSet shifts = poly_opset_add(poly_opset_add((PolyOpSet){{0, 0}}, POLY_OP_SHL), POLY_OP_SHR);
   PolyOpSet alu = POLY_GROUP_ALU;
   for (PolyOps op = 0; op < POLY_OP_COUNT; op++)
-    if (poly_opset_has(POLY_GROUP_COMPARISON, op) || op == POLY_OP_SHL ||
-        op == POLY_OP_SHR || op == POLY_OP_WHERE)
+    if (poly_opset_has(POLY_GROUP_COMPARISON, op) || op == POLY_OP_SHL || op == POLY_OP_SHR ||
+        op == POLY_OP_WHERE)
       alu.bits[op / 64] &= ~((uint64_t)1 << (op % 64));
   alu = poly_opset_add(alu, POLY_OP_BITCAST);
 
@@ -629,7 +606,9 @@ PolyPatternMatcher *poly_pm_long_decomp(void) {
           ),
           long_define
       ),
-      POLY_RULE(poly_upat_set_dtype(poly_upat_op(POLY_OP_INDEX, NULL, 0, "x"), longs, 2), long_index),
+      POLY_RULE(
+          poly_upat_set_dtype(poly_upat_op(POLY_OP_INDEX, NULL, 0, "x"), longs, 2), long_index
+      ),
       POLY_RULE(
           poly_upat_op2(
               POLY_OP_STORE, poly_upat_dtype("idx", longs, 2), poly_upat_any("val"), "st"
@@ -638,8 +617,7 @@ PolyPatternMatcher *poly_pm_long_decomp(void) {
       ),
       POLY_RULE(
           poly_upat_ops2(
-              POLY_GROUP_COMPARISON, poly_upat_dtype("a", longs, 2),
-              poly_upat_any(NULL), "x"
+              POLY_GROUP_COMPARISON, poly_upat_dtype("a", longs, 2), poly_upat_any(NULL), "x"
           ),
           long_comparison
       ),
@@ -650,48 +628,36 @@ PolyPatternMatcher *poly_pm_long_decomp(void) {
           long_cast_long
       ),
       POLY_RULE(
-          poly_upat_set_dtype(
-              poly_upat_op1(POLY_OP_CAST, poly_upat_any("a"), "x"), longs, 2
-          ),
+          poly_upat_set_dtype(poly_upat_op1(POLY_OP_CAST, poly_upat_any("a"), "x"), longs, 2),
           long_cast_to
       ),
-      POLY_RULE(
-          poly_upat_op1(POLY_OP_CAST, poly_upat_dtype("a", longs, 2), "x"), long_cast_from
-      ),
+      POLY_RULE(poly_upat_op1(POLY_OP_CAST, poly_upat_dtype("a", longs, 2), "x"), long_cast_from),
       POLY_RULE(
           poly_upat_set_dtype(
-              poly_upat_ops2(shifts, poly_upat_any("a"), poly_upat_any("b"), "x"),
-              longs, 2
+              poly_upat_ops2(shifts, poly_upat_any("a"), poly_upat_any("b"), "x"), longs, 2
           ),
           long_shift
       ),
       POLY_RULE(
           poly_upat_set_dtype(
               poly_upat_op3(
-                  POLY_OP_WHERE, poly_upat_any("c"), poly_upat_any("a"),
-                  poly_upat_any("b"), "x"
+                  POLY_OP_WHERE, poly_upat_any("c"), poly_upat_any("a"), poly_upat_any("b"), "x"
               ),
               longs, 2
           ),
           long_where
       ),
+      POLY_RULE(poly_upat_set_dtype(poly_upat_ops(alu, NULL, 0, "x"), longs, 2), long_alu),
       POLY_RULE(
-          poly_upat_set_dtype(poly_upat_ops(alu, NULL, 0, "x"), longs, 2), long_alu
-      ),
-      POLY_RULE(
-          poly_upat_set_dtype(
-              poly_upat_op1(POLY_OP_LOAD, poly_upat_any("idx"), "x"), longs, 2
-          ),
+          poly_upat_set_dtype(poly_upat_op1(POLY_OP_LOAD, poly_upat_any("idx"), "x"), longs, 2),
           long_load
       ),
       POLY_RULE(poly_upat_op(POLY_OP_CONST, NULL, 0, "x"), long_const),
   };
-  g_pm_long_decomp = poly_pm_thread_cache(
-      poly_pm_new_named(rules, (int)(sizeof(rules) / sizeof(rules[0])))
-  );
+  g_pm_long_decomp =
+      poly_pm_thread_cache(poly_pm_new_named(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
   return g_pm_long_decomp;
 }
-
 
 static PolyFloatDecompContext *float_ctx(void) {
   return poly_graph_rewrite_userctx();
@@ -757,20 +723,18 @@ static PolyUOp *weakfloat(PolyCtx *ctx, double value) {
 }
 
 static PolyUOp *cast(PolyCtx *ctx, PolyUOp *x, PolyDType dtype) {
-  return x && dtype_is(x->dtype, dtype)
-             ? x
-             : x ? poly_uop1(ctx, POLY_OP_CAST, dtype, x, poly_arg_dtype(dtype)) : NULL;
+  return x && dtype_is(x->dtype, dtype) ? x
+         : x ? poly_uop1(ctx, POLY_OP_CAST, dtype, x, poly_arg_dtype(dtype))
+             : NULL;
 }
 
 static PolyUOp *bitcast(PolyCtx *ctx, PolyUOp *x, PolyDType dtype) {
-  return x && dtype_is(x->dtype, dtype)
-             ? x
-             : x ? poly_uop1(ctx, POLY_OP_BITCAST, dtype, x, poly_arg_dtype(dtype)) : NULL;
+  return x && dtype_is(x->dtype, dtype) ? x
+         : x ? poly_uop1(ctx, POLY_OP_BITCAST, dtype, x, poly_arg_dtype(dtype))
+             : NULL;
 }
 
-static PolyUOp *binary(
-    PolyCtx *ctx, PolyOps op, PolyDType dtype, PolyUOp *a, PolyUOp *b
-) {
+static PolyUOp *binary(PolyCtx *ctx, PolyOps op, PolyDType dtype, PolyUOp *a, PolyUOp *b) {
   return a && b ? poly_uop2(ctx, op, dtype, a, b, poly_arg_none()) : NULL;
 }
 
@@ -785,15 +749,17 @@ static PolyUOp *ne(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
 /* UOp.eq is expressed as logical_not(CMPNE), not a raw CMPEQ. */
 static PolyUOp *eq(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
   PolyUOp *different = ne(ctx, a, b);
-  return different ? ne(
-                         ctx, different,
-                         poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_bool(true))
-                     )
-                   : NULL;
+  return different
+             ? ne(ctx, different, poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_bool(true)))
+             : NULL;
 }
 
 static PolyUOp *where(
-    PolyCtx *ctx, PolyDType dtype, PolyUOp *condition, PolyUOp *yes, PolyUOp *no
+    PolyCtx *ctx,
+    PolyDType dtype,
+    PolyUOp *condition,
+    PolyUOp *yes,
+    PolyUOp *no
 ) {
   return condition && yes && no
              ? poly_uop3(ctx, POLY_OP_WHERE, dtype, condition, yes, no, poly_arg_none())
@@ -838,12 +804,9 @@ static PolyUOp *clone(
   return clone_n(ctx, u, u->op, dtype, src, u->n_src, arg, tag, tag_arg);
 }
 
-static PolyUOp *replace(
-    PolyCtx *ctx, PolyUOp *u, PolyDType dtype, PolyUOp **src
-) {
-  PolyArg arg = (u->op == POLY_OP_CAST || u->op == POLY_OP_BITCAST)
-                    ? poly_arg_dtype(dtype)
-                    : u->arg;
+static PolyUOp *replace(PolyCtx *ctx, PolyUOp *u, PolyDType dtype, PolyUOp **src) {
+  PolyArg arg =
+      (u->op == POLY_OP_CAST || u->op == POLY_OP_BITCAST) ? poly_arg_dtype(dtype) : u->arg;
   return clone(ctx, u, dtype, src, arg, u->tag, u->tag_arg);
 }
 
@@ -859,17 +822,13 @@ PolyUOp *poly_reindex(PolyCtx *ctx, PolyUOp *idx, int off, int mul) {
   if (!next) return NULL;
   if (idx->op == POLY_OP_SHRINK) {
     PolyUOp *src[] = {idx->src[0], next};
-    return clone_n(
-        ctx, idx, POLY_OP_INDEX, idx->dtype, src, 2, idx->arg, idx->tag, idx->tag_arg
-    );
+    return clone_n(ctx, idx, POLY_OP_INDEX, idx->dtype, src, 2, idx->arg, idx->tag, idx->tag_arg);
   }
   PolyUOp **src = malloc((size_t)idx->n_src * sizeof(*src));
   if (!src) return NULL;
   memcpy(src, idx->src, (size_t)idx->n_src * sizeof(*src));
   src[1] = next;
-  PolyUOp *ret = clone(
-      ctx, idx, idx->dtype, src, idx->arg, idx->tag, idx->tag_arg
-  );
+  PolyUOp *ret = clone(ctx, idx, idx->dtype, src, idx->arg, idx->tag, idx->tag_arg);
   free(src);
   return ret;
 }
@@ -877,22 +836,14 @@ PolyUOp *poly_reindex(PolyCtx *ctx, PolyUOp *idx, int off, int mul) {
 static PolyUOp *rne(PolyCtx *ctx, PolyUOp *v, int shift) {
   PolyUOp *q = shr(ctx, v, shift);
   PolyUOp *round = binary(ctx, POLY_OP_AND, v->dtype, shr(ctx, v, shift - 1), weakint(ctx, 1));
-  PolyUOp *tail = ne(
-      ctx,
-      binary(
-          ctx, POLY_OP_AND, v->dtype, v,
-          weakint(ctx, (INT64_C(1) << (shift - 1)) - 1)
-      ),
-      weakint(ctx, 0)
-  );
+  PolyUOp *tail =
+      ne(ctx, binary(ctx, POLY_OP_AND, v->dtype, v, weakint(ctx, (INT64_C(1) << (shift - 1)) - 1)),
+         weakint(ctx, 0));
   PolyUOp *sticky = binary(
       ctx, POLY_OP_OR, v->dtype, cast(ctx, tail, v->dtype),
       binary(ctx, POLY_OP_AND, v->dtype, q, weakint(ctx, 1))
   );
-  return binary(
-      ctx, POLY_OP_ADD, v->dtype, q,
-      binary(ctx, POLY_OP_AND, v->dtype, round, sticky)
-  );
+  return binary(ctx, POLY_OP_ADD, v->dtype, q, binary(ctx, POLY_OP_AND, v->dtype, round, sticky));
 }
 
 static PolyUOp *f2f_clamp(PolyCtx *ctx, PolyUOp *val, PolyDType dtype) {
@@ -909,8 +860,9 @@ static PolyUOp *f2f_clamp(PolyCtx *ctx, PolyUOp *val, PolyDType dtype) {
     max_exp = (1 << exponent) - 2;
     max_man = (1 << mantissa) - 1;
   }
-  double mxv = ldexp(1.0 + (double)max_man / (double)(INT64_C(1) << mantissa),
-                     max_exp - exponent_bias(dtype));
+  double mxv = ldexp(
+      1.0 + (double)max_man / (double)(INT64_C(1) << mantissa), max_exp - exponent_bias(dtype)
+  );
   PolyUOp *mx = poly_uop0(ctx, POLY_OP_CONST, val->dtype, poly_arg_float(mxv));
   PolyUOp *minus_one = weakfloat(ctx, -1.0);
   PolyUOp *neg_mx = binary(ctx, POLY_OP_MUL, val->dtype, mx, minus_one);
@@ -936,31 +888,22 @@ static PolyUOp *f2f(PolyCtx *ctx, PolyUOp *v, PolyDType from, PolyDType to) {
   PolyDType from_uint = f2f_dt(from), to_uint = f2f_dt(to);
 
   if (fe <= te && fm < tm) {
-    PolyUOp *sign = shl(
-        ctx,
-        cast(
-            ctx,
-            binary(ctx, POLY_OP_AND, from_uint, v, weakint(ctx, INT64_C(1) << (fs - 1))),
-            to_uint
-        ),
-        ts - fs
-    );
+    PolyUOp *sign =
+        shl(ctx,
+            cast(
+                ctx, binary(ctx, POLY_OP_AND, from_uint, v, weakint(ctx, INT64_C(1) << (fs - 1))),
+                to_uint
+            ),
+            ts - fs);
     PolyUOp *nosign = cast(
-        ctx,
-        binary(
-            ctx, POLY_OP_AND, from_uint, v,
-            weakint(ctx, (INT64_C(1) << (fs - 1)) - 1)
-        ),
+        ctx, binary(ctx, POLY_OP_AND, from_uint, v, weakint(ctx, (INT64_C(1) << (fs - 1)) - 1)),
         to_uint
     );
     PolyUOp *exp = shr(ctx, nosign, fm);
     PolyUOp *shifted = shl(ctx, nosign, tm - fm);
-    PolyUOp *norm = binary(
-        ctx, POLY_OP_ADD, to_uint, shifted, shl(ctx, weakint(ctx, tb - fb), tm)
-    );
+    PolyUOp *norm = binary(ctx, POLY_OP_ADD, to_uint, shifted, shl(ctx, weakint(ctx, tb - fb), tm));
     PolyUOp *nan = binary(
-        ctx, POLY_OP_OR, to_uint, shifted,
-        shl(ctx, weakint(ctx, (INT64_C(1) << te) - 1), tm)
+        ctx, POLY_OP_OR, to_uint, shifted, shl(ctx, weakint(ctx, (INT64_C(1) << te) - 1), tm)
     );
     if (poly_dtype_is_fp8_fnuz(from)) {
       PolyUOp *fnuz_nan = binary(
@@ -968,22 +911,17 @@ static PolyUOp *f2f(PolyCtx *ctx, PolyUOp *v, PolyDType from, PolyDType to) {
           eq(ctx, nosign, weakint(ctx, 0))
       );
       PolyUOp *qnan = binary(
-          ctx, POLY_OP_OR, to_uint,
-          shl(ctx, weakint(ctx, (INT64_C(1) << te) - 1), tm),
+          ctx, POLY_OP_OR, to_uint, shl(ctx, weakint(ctx, (INT64_C(1) << te) - 1), tm),
           shl(ctx, weakint(ctx, 1), tm - 1)
       );
       int bias_floor = (fb > tb ? fb - tb : 0) + 1;
       PolyUOp *magnitude = where(
-          ctx, to_uint, cmp(ctx, POLY_OP_CMPLT, exp, weakint(ctx, bias_floor)),
-          weakint(ctx, 0), norm
+          ctx, to_uint, cmp(ctx, POLY_OP_CMPLT, exp, weakint(ctx, bias_floor)), weakint(ctx, 0),
+          norm
       );
       return bitcast(
           ctx,
-          where(
-              ctx, to_uint, fnuz_nan, qnan,
-              binary(ctx, POLY_OP_OR, to_uint, sign, magnitude)
-          ),
-          to
+          where(ctx, to_uint, fnuz_nan, qnan, binary(ctx, POLY_OP_OR, to_uint, sign, magnitude)), to
       );
     }
     PolyUOp *is_nan = dtype_is(from, POLY_FP8E4M3)
@@ -999,13 +937,10 @@ static PolyUOp *f2f(PolyCtx *ctx, PolyUOp *v, PolyDType from, PolyDType to) {
   if (fe >= te && fm > tm) {
     PolyUOp *bits = bitcast(ctx, f2f_clamp(ctx, bitcast(ctx, v, from), to), from_uint);
     PolyUOp *sign = binary(
-        ctx, POLY_OP_AND, from_uint, shr(ctx, bits, fs - ts),
-        weakint(ctx, INT64_C(1) << (ts - 1))
+        ctx, POLY_OP_AND, from_uint, shr(ctx, bits, fs - ts), weakint(ctx, INT64_C(1) << (ts - 1))
     );
-    PolyUOp *nosign = binary(
-        ctx, POLY_OP_AND, from_uint, bits,
-        weakint(ctx, (INT64_C(1) << (fs - 1)) - 1)
-    );
+    PolyUOp *nosign =
+        binary(ctx, POLY_OP_AND, from_uint, bits, weakint(ctx, (INT64_C(1) << (fs - 1)) - 1));
     PolyUOp *norm = cast(
         ctx,
         binary(
@@ -1015,22 +950,19 @@ static PolyUOp *f2f(PolyCtx *ctx, PolyUOp *v, PolyDType from, PolyDType to) {
         to_uint
     );
     PolyUOp *exp = binary(
-        ctx, POLY_OP_AND, from_uint, shr(ctx, bits, fm),
-        weakint(ctx, (INT64_C(1) << fe) - 1)
+        ctx, POLY_OP_AND, from_uint, shr(ctx, bits, fm), weakint(ctx, (INT64_C(1) << fe) - 1)
     );
     PolyUOp *underflow = cmp(ctx, POLY_OP_CMPLT, exp, weakint(ctx, 1 + fb - tb));
     PolyUOp *nan_mantissa = dtype_is(to, POLY_FP8E4M3)
                                 ? weakint(ctx, (INT64_C(1) << tm) - 1)
                                 : binary(
-                                      ctx, POLY_OP_AND, from_uint,
-                                      shr(ctx, nosign, fm - tm),
+                                      ctx, POLY_OP_AND, from_uint, shr(ctx, nosign, fm - tm),
                                       weakint(ctx, (INT64_C(1) << tm) - 1)
                                   );
     PolyUOp *nan = cast(
         ctx,
         binary(
-            ctx, POLY_OP_OR, from_uint,
-            binary(ctx, POLY_OP_OR, from_uint, sign, nan_mantissa),
+            ctx, POLY_OP_OR, from_uint, binary(ctx, POLY_OP_OR, from_uint, sign, nan_mantissa),
             shl(ctx, weakint(ctx, (INT64_C(1) << te) - 1), tm)
         ),
         to_uint
@@ -1041,24 +973,17 @@ static PolyUOp *f2f(PolyCtx *ctx, PolyUOp *v, PolyDType from, PolyDType to) {
     );
     PolyUOp *is_nan = eq(ctx, exp, weakint(ctx, (INT64_C(1) << fe) - 1));
     return poly_dtype_is_fp8_fnuz(to)
-               ? where(
-                     ctx, to_uint, is_nan,
-                     shl(ctx, weakint(ctx, 1), ts - 1), finite
-                 )
+               ? where(ctx, to_uint, is_nan, shl(ctx, weakint(ctx, 1), ts - 1), finite)
                : where(ctx, to_uint, is_nan, nan, finite);
   }
   return NULL;
 }
 
 static PolyUOp *rewrite_index(PolyCtx *ctx, PolyUOp *idx, PolyFloatDecompContext *fctx) {
-  return poly_graph_rewrite_ctx_ex(
-      ctx, idx, poly_pm_float_decomp(), fctx, true
-  );
+  return poly_graph_rewrite_ctx_ex(ctx, idx, poly_pm_float_decomp(), fctx, true);
 }
 
-static PolyUOp *f2f_load(
-    PolyCtx *ctx, PolyUOp *load, PolyDType from, PolyDType to
-) {
+static PolyUOp *f2f_load(PolyCtx *ctx, PolyUOp *load, PolyDType from, PolyDType to) {
   PolyFloatDecompContext fctx = {.from = from, .to = to};
   PolyUOp *idx = rewrite_index(ctx, load->src[0], &fctx);
   int64_t lanes = poly_uop_max_numel(ctx, load);
@@ -1097,8 +1022,12 @@ static PolyUOp *f2f_load(
 }
 
 static PolyUOp *f2f_store(
-    PolyCtx *ctx, PolyUOp *store, PolyUOp *idx, PolyUOp *val,
-    PolyDType from, PolyDType to
+    PolyCtx *ctx,
+    PolyUOp *store,
+    PolyUOp *idx,
+    PolyUOp *val,
+    PolyDType from,
+    PolyDType to
 ) {
   int64_t lanes = poly_uop_max_numel(ctx, val);
   if (lanes < 1 || lanes > INT32_MAX) return NULL;
@@ -1149,28 +1078,22 @@ static PolyUOp *float_define(PolyCtx *ctx, PolyUOp *x, const PolyBindings *b) {
     param.dtype = f2f_dt(fctx->from);
     arg = poly_arg_param(&param);
   }
-  return clone(
-      ctx, x, f2f_dt(fctx->from), NULL, arg, x->tag, poly_arg_dtype(fctx->from)
-  );
+  return clone(ctx, x, f2f_dt(fctx->from), NULL, arg, x->tag, poly_arg_dtype(fctx->from));
 }
 
 static PolyUOp *float_index(PolyCtx *ctx, PolyUOp *x, const PolyBindings *b) {
   (void)b;
   PolyFloatDecompContext *fctx = float_ctx();
   if (!fctx || !dtype_is(x->dtype, fctx->from) || x->n_src < 1 ||
-      (x->op == POLY_OP_INDEX &&
-       (x->src[0]->op == POLY_OP_LOAD || x->src[0]->op == POLY_OP_STACK)))
+      (x->op == POLY_OP_INDEX && (x->src[0]->op == POLY_OP_LOAD || x->src[0]->op == POLY_OP_STACK)))
     return NULL;
   PolyUOp **src = malloc((size_t)x->n_src * sizeof(*src));
   if (!src) return NULL;
   memcpy(src, x->src, (size_t)x->n_src * sizeof(*src));
   src[0] = rewrite_index(ctx, x->src[0], fctx);
-  PolyUOp *ret = src[0]
-                     ? clone(
-                           ctx, x, f2f_dt(fctx->from), src, x->arg, x->tag,
-                           poly_arg_dtype(fctx->from)
-                       )
-                     : NULL;
+  PolyUOp *ret =
+      src[0] ? clone(ctx, x, f2f_dt(fctx->from), src, x->arg, x->tag, poly_arg_dtype(fctx->from))
+             : NULL;
   free(src);
   return ret;
 }
@@ -1241,9 +1164,7 @@ static PolyUOp *float_op(PolyCtx *ctx, PolyUOp *x, const PolyBindings *b) {
   PolyUOp **src = x->n_src ? malloc((size_t)x->n_src * sizeof(*src)) : NULL;
   if (x->n_src && !src) return NULL;
   for (int i = 0; i < x->n_src; i++)
-    src[i] = dtype_is(x->src[i]->dtype, fctx->from)
-                 ? cast(ctx, x->src[i], fctx->to)
-                 : x->src[i];
+    src[i] = dtype_is(x->src[i]->dtype, fctx->from) ? cast(ctx, x->src[i], fctx->to) : x->src[i];
   PolyUOp *ret = replace(ctx, x, fctx->to, src);
   free(src);
   return ret;
@@ -1274,9 +1195,7 @@ static PolyUOp *float_store(PolyCtx *ctx, PolyUOp *st, const PolyBindings *b) {
   PolyUOp *idx = poly_bind(b, "idx"), *val = poly_bind(b, "val");
   if (!fctx || !idx || !val || !dtype_is(val->dtype, fctx->to)) return NULL;
   if (idx->op == POLY_OP_CAST && idx->n_src == 1) idx = idx->src[0];
-  return tagged_float(idx, fctx->from)
-             ? f2f_store(ctx, st, idx, val, fctx->from, fctx->to)
-             : NULL;
+  return tagged_float(idx, fctx->from) ? f2f_store(ctx, st, idx, val, fctx->from, fctx->to) : NULL;
 }
 
 static _Thread_local PolyPatternMatcher *g_pm_float_decomp = NULL;
@@ -1284,8 +1203,8 @@ static _Thread_local PolyPatternMatcher *g_pm_float_decomp = NULL;
 PolyPatternMatcher *poly_pm_float_decomp(void) {
   if (g_pm_float_decomp) return g_pm_float_decomp;
   PolyDType floats[] = {
-      POLY_FP8E4M3, POLY_FP8E5M2, POLY_FP8E4M3FNUZ, POLY_FP8E5M2FNUZ,
-      POLY_FLOAT16, POLY_BFLOAT16, POLY_FLOAT32, POLY_FLOAT64,
+      POLY_FP8E4M3, POLY_FP8E5M2,  POLY_FP8E4M3FNUZ, POLY_FP8E5M2FNUZ,
+      POLY_FLOAT16, POLY_BFLOAT16, POLY_FLOAT32,     POLY_FLOAT64,
   };
   PolyOpSet float_ops = {{0, 0}};
   for (int op = 1; op < POLY_OP_COUNT; op++) {
@@ -1355,24 +1274,24 @@ static PolyUOp *do_dtype_decomps(PolyCtx *ctx, PolyUOp *sink, const PolyBindings
   if (dctx->seen_long && !poly_renderer_supports_dtype(dctx->caps, POLY_INT64))
     ret = poly_graph_rewrite_ctx_ex(ctx, ret, poly_pm_long_decomp(), &long_ctx, true);
   const PolyDType fp8s[] = {
-      POLY_FP8E4M3, POLY_FP8E4M3FNUZ, POLY_FP8E5M2, POLY_FP8E5M2FNUZ,
+      POLY_FP8E4M3,
+      POLY_FP8E4M3FNUZ,
+      POLY_FP8E5M2,
+      POLY_FP8E5M2FNUZ,
   };
   for (int i = 0; ret && i < 4; i++) {
     if (!(dctx->seen_fp8 & (1u << i)) || poly_renderer_supports_dtype(dctx->caps, fp8s[i]))
       continue;
-    PolyDType to = poly_renderer_supports_dtype(dctx->caps, POLY_FLOAT16)
-                       ? POLY_FLOAT16
-                       : POLY_FLOAT32;
+    PolyDType to =
+        poly_renderer_supports_dtype(dctx->caps, POLY_FLOAT16) ? POLY_FLOAT16 : POLY_FLOAT32;
     PolyFloatDecompContext float_ctx = {.from = fp8s[i], .to = to};
     ret = poly_graph_rewrite_ctx_ex(ctx, ret, poly_pm_float_decomp(), &float_ctx, true);
   }
-  if (ret && dctx->seen_float16 &&
-      !poly_renderer_supports_dtype(dctx->caps, POLY_FLOAT16)) {
+  if (ret && dctx->seen_float16 && !poly_renderer_supports_dtype(dctx->caps, POLY_FLOAT16)) {
     PolyFloatDecompContext float_ctx = {.from = POLY_FLOAT16, .to = POLY_FLOAT32};
     ret = poly_graph_rewrite_ctx_ex(ctx, ret, poly_pm_float_decomp(), &float_ctx, true);
   }
-  if (ret && dctx->seen_bfloat16 &&
-      !poly_renderer_supports_dtype(dctx->caps, POLY_BFLOAT16)) {
+  if (ret && dctx->seen_bfloat16 && !poly_renderer_supports_dtype(dctx->caps, POLY_BFLOAT16)) {
     PolyFloatDecompContext float_ctx = {.from = POLY_BFLOAT16, .to = POLY_FLOAT32};
     ret = poly_graph_rewrite_ctx_ex(ctx, ret, poly_pm_float_decomp(), &float_ctx, true);
   }
@@ -1386,18 +1305,16 @@ static _Thread_local PolyPatternMatcher *g_pm_dtype_decomps = NULL;
 PolyPatternMatcher *poly_pm_dtype_decomps(void) {
   if (g_pm_dtype_decomps) return g_pm_dtype_decomps;
   PolyDType emulated[] = {
-      POLY_FP8E4M3, POLY_FP8E5M2, POLY_FP8E4M3FNUZ, POLY_FP8E5M2FNUZ,
-      POLY_FLOAT16, POLY_BFLOAT16, POLY_INT64, POLY_UINT64,
+      POLY_FP8E4M3, POLY_FP8E5M2,  POLY_FP8E4M3FNUZ, POLY_FP8E5M2FNUZ,
+      POLY_FLOAT16, POLY_BFLOAT16, POLY_INT64,       POLY_UINT64,
   };
   PolyNamedRule rules[] = {
       POLY_RULE(poly_upat_dtype("x", emulated, 8), detect_dtype_decomp),
       POLY_RULE(
-          poly_upat_allow_any_len(poly_upat_op(POLY_OP_SINK, NULL, 0, "sink")),
-          do_dtype_decomps
+          poly_upat_allow_any_len(poly_upat_op(POLY_OP_SINK, NULL, 0, "sink")), do_dtype_decomps
       ),
   };
-  g_pm_dtype_decomps = poly_pm_thread_cache(
-      poly_pm_new_named(rules, (int)(sizeof(rules) / sizeof(rules[0])))
-  );
+  g_pm_dtype_decomps =
+      poly_pm_thread_cache(poly_pm_new_named(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
   return g_pm_dtype_decomps;
 }

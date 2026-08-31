@@ -50,14 +50,12 @@ static bool verify_shared_uop(PolyCtx *ctx, PolyUOp *u) {
   case POLY_OP_STACK:
     if (u->n_src == 0) return poly_dtype_eq(u->dtype, POLY_VOID);
     for (int i = 0; i < u->n_src; i++)
-      if (!same_shape(ctx, u->src[0], u->src[i]) ||
-          !dtype_matches_or_weak(u->src[i], u->dtype))
+      if (!same_shape(ctx, u->src[0], u->src[i]) || !dtype_matches_or_weak(u->src[i], u->dtype))
         return false;
     return true;
   case POLY_OP_WHERE:
     return u->n_src == 3 && poly_dtype_eq(u->src[0]->dtype, POLY_BOOL) &&
-           dtype_matches_or_weak(u->src[1], u->dtype) &&
-           dtype_matches_or_weak(u->src[2], u->dtype);
+           dtype_matches_or_weak(u->src[1], u->dtype) && dtype_matches_or_weak(u->src[2], u->dtype);
   case POLY_OP_CAST:
   case POLY_OP_BITCAST:
     return u->n_src == 1 && u->arg.kind == POLY_ARG_DTYPE;
@@ -83,8 +81,7 @@ static bool verify_shared_uop(PolyCtx *ctx, PolyUOp *u) {
     return u->arg.kind == POLY_ARG_PARAM && u->arg.param;
   case POLY_OP_BUFFER:
     return u->arg.kind == POLY_ARG_PARAM && u->arg.param &&
-           (u->arg.param->addrspace == POLY_ADDR_REG ||
-            u->arg.param->addrspace == POLY_ADDR_LOCAL);
+           (u->arg.param->addrspace == POLY_ADDR_REG || u->arg.param->addrspace == POLY_ADDR_LOCAL);
   case POLY_OP_GROUP:
     if (!poly_dtype_eq(u->dtype, POLY_VOID)) return false;
     for (int i = 0; i < u->n_src; i++)
@@ -95,11 +92,11 @@ static bool verify_shared_uop(PolyCtx *ctx, PolyUOp *u) {
     return true;
   case POLY_OP_AFTER:
     if (u->n_src < 1 || !matches_dtype(u->src[0], u->dtype)) return false;
-    return poly_opset_has(POLY_GROUP_MOVEMENT, u->src[0]->op) ||
-           u->src[0]->op == POLY_OP_PARAM || u->src[0]->op == POLY_OP_BUFFER ||
-           u->src[0]->op == POLY_OP_CONTIGUOUS || u->src[0]->op == POLY_OP_INDEX ||
-           u->src[0]->op == POLY_OP_AFTER || u->src[0]->op == POLY_OP_UNSHARD ||
-           u->src[0]->op == POLY_OP_BITCAST || u->src[0]->op == POLY_OP_INS;
+    return poly_opset_has(POLY_GROUP_MOVEMENT, u->src[0]->op) || u->src[0]->op == POLY_OP_PARAM ||
+           u->src[0]->op == POLY_OP_BUFFER || u->src[0]->op == POLY_OP_CONTIGUOUS ||
+           u->src[0]->op == POLY_OP_INDEX || u->src[0]->op == POLY_OP_AFTER ||
+           u->src[0]->op == POLY_OP_UNSHARD || u->src[0]->op == POLY_OP_BITCAST ||
+           u->src[0]->op == POLY_OP_INS;
   case POLY_OP_CUSTOM:
   case POLY_OP_CUSTOMI:
   case POLY_OP_INS:
@@ -111,8 +108,7 @@ static bool verify_shared_uop(PolyCtx *ctx, PolyUOp *u) {
            matches_dtype(u->src[0], POLY_UINT64);
   case POLY_OP_LOAD:
     if (u->n_src == 1) return is_memory_index(u->src[0]);
-    return u->n_src == 3 && is_memory_index(u->src[0]) &&
-           matches_dtype(u->src[1], u->dtype) &&
+    return u->n_src == 3 && is_memory_index(u->src[0]) && matches_dtype(u->src[1], u->dtype) &&
            poly_dtype_eq(u->src[2]->dtype, POLY_BOOL);
   case POLY_OP_STORE:
     if (!poly_dtype_eq(u->dtype, POLY_VOID)) return false;
@@ -128,25 +124,24 @@ static bool verify_shared_uop(PolyCtx *ctx, PolyUOp *u) {
   if (poly_opset_has(POLY_GROUP_COMPARISON, u->op)) {
     return u->n_src == 2 && poly_dtype_eq(u->dtype, POLY_BOOL) &&
            (matches_dtype(u->src[0], u->src[1]->dtype) ||
-            matches_dtype(u->src[1], u->src[0]->dtype) ||
-            poly_dtype_is_weak(u->src[0]->dtype) || poly_dtype_is_weak(u->src[1]->dtype));
+            matches_dtype(u->src[1], u->src[0]->dtype) || poly_dtype_is_weak(u->src[0]->dtype) ||
+            poly_dtype_is_weak(u->src[1]->dtype));
   }
   if (u->op == POLY_OP_SHL || u->op == POLY_OP_SHR) {
     if (u->n_src != 2 || poly_dtype_is_float(u->dtype)) return false;
-    bool value_ok = matches_dtype(u->src[0], u->dtype) ||
-                    poly_dtype_eq(u->src[0]->dtype, POLY_WEAKINT);
+    bool value_ok =
+        matches_dtype(u->src[0], u->dtype) || poly_dtype_eq(u->src[0]->dtype, POLY_WEAKINT);
     bool count_ok = matches_dtype(u->src[1], u->dtype) ||
                     poly_dtype_eq(u->src[1]->dtype, POLY_UINT32) ||
                     poly_dtype_eq(u->src[1]->dtype, POLY_WEAKINT);
     return value_ok && count_ok;
   }
-  if (u->op == POLY_OP_CDIV || u->op == POLY_OP_CMOD ||
-      u->op == POLY_OP_FLOORDIV || u->op == POLY_OP_FLOORMOD) {
+  if (u->op == POLY_OP_CDIV || u->op == POLY_OP_CMOD || u->op == POLY_OP_FLOORDIV ||
+      u->op == POLY_OP_FLOORMOD) {
     bool invalid = false;
     for (int i = 0; i < u->n_src; i++) {
       PolyUOp *base = poly_uop_base(u->src[i]);
-      if (base && base->op == POLY_OP_CONST && base->arg.kind == POLY_ARG_INVALID)
-        invalid = true;
+      if (base && base->op == POLY_OP_CONST && base->arg.kind == POLY_ARG_INVALID) invalid = true;
     }
     if (!poly_dtype_is_int(u->dtype) && !invalid) return false;
   }
@@ -179,8 +174,7 @@ static bool verify_program_uop(PolyCtx *ctx, PolyUOp *u) {
   if (poly_opset_has(POLY_GROUP_MOVEMENT, u->op)) return false;
   if (u->op == POLY_OP_BUFFER)
     return u->arg.kind == POLY_ARG_PARAM && u->arg.param &&
-           (u->arg.param->addrspace == POLY_ADDR_REG ||
-            u->arg.param->addrspace == POLY_ADDR_LOCAL);
+           (u->arg.param->addrspace == POLY_ADDR_REG || u->arg.param->addrspace == POLY_ADDR_LOCAL);
   if (u->op == POLY_OP_CONST && u->arg.kind == POLY_ARG_INVALID) return false;
   if (u->op == POLY_OP_IF)
     return poly_dtype_eq(u->dtype, POLY_VOID) && u->n_src == 2 &&
@@ -188,8 +182,7 @@ static bool verify_program_uop(PolyCtx *ctx, PolyUOp *u) {
            (u->src[1]->op == POLY_OP_CAST || u->src[1]->op == POLY_OP_INDEX ||
             u->src[1]->op == POLY_OP_SHRINK);
   if (u->op == POLY_OP_ENDIF)
-    return poly_dtype_eq(u->dtype, POLY_VOID) && u->n_src == 1 &&
-           u->src[0]->op == POLY_OP_IF;
+    return poly_dtype_eq(u->dtype, POLY_VOID) && u->n_src == 1 && u->src[0]->op == POLY_OP_IF;
   if (u->op == POLY_OP_SPECIAL)
     return poly_dtype_eq(u->dtype, POLY_INT32) && u->n_src == 1 &&
            matches_dtype(u->src[0], u->dtype) && u->arg.kind == POLY_ARG_STRING;
@@ -211,14 +204,11 @@ static bool type_verify(PolyCtx *ctx, PolyUOp *root, bool (*verify)(PolyCtx *, P
     );
     for (int j = 0; j < topo[i]->n_src; j++)
       fprintf(
-          stderr, "  src[%d]=%s %s dtype=(%d,%u)\n", j,
-          poly_op_name(topo[i]->src[j]->op), poly_dtype_name(topo[i]->src[j]->dtype),
-          topo[i]->src[j]->dtype.priority, topo[i]->src[j]->dtype.bitsize
+          stderr, "  src[%d]=%s %s dtype=(%d,%u)\n", j, poly_op_name(topo[i]->src[j]->op),
+          poly_dtype_name(topo[i]->src[j]->dtype), topo[i]->src[j]->dtype.priority,
+          topo[i]->src[j]->dtype.bitsize
       );
-    fprintf(
-        stderr, "  self dtype=(%d,%u)\n", topo[i]->dtype.priority,
-        topo[i]->dtype.bitsize
-    );
+    fprintf(stderr, "  self dtype=(%d,%u)\n", topo[i]->dtype.priority, topo[i]->dtype.bitsize);
     poly_toposort_free(topo);
     return false;
   }
@@ -231,8 +221,8 @@ bool poly_type_verify_program(PolyCtx *ctx, PolyUOp *root) {
 }
 
 static bool stack_source_is_kernel_value(PolyUOp *u) {
-  return u && (u->op == POLY_OP_CONST || u->op == POLY_OP_PARAM ||
-               poly_uop_is_variable(u) || poly_uop_is_bound_var(u));
+  return u && (u->op == POLY_OP_CONST || u->op == POLY_OP_PARAM || poly_uop_is_variable(u) ||
+               poly_uop_is_bound_var(u));
 }
 
 static bool mstack_is_kernel_value(PolyCtx *ctx, PolyUOp *u) {
@@ -290,15 +280,13 @@ static bool verify_tensor_uop(PolyCtx *ctx, PolyUOp *u) {
   case POLY_OP_RECIPROCAL:
     return u->n_src == 1 &&
            (poly_dtype_is_float(u->dtype) ||
-            (poly_uop_base(u->src[0]) &&
-             poly_uop_base(u->src[0])->arg.kind == POLY_ARG_INVALID));
+            (poly_uop_base(u->src[0]) && poly_uop_base(u->src[0])->arg.kind == POLY_ARG_INVALID));
   case POLY_OP_BUFFER:
     if (u->arg.kind != POLY_ARG_PARAM || !u->arg.param) return false;
     if (u->arg.param->addrspace == POLY_ADDR_GLOBAL)
       return u->n_src == 1 && matches_dtype(u->src[0], POLY_WEAKINT) &&
              param_has_device(u->arg.param);
-    if (poly_uop_is_variable(u))
-      return !u->arg.param->device && !u->arg.param->device_is_tuple;
+    if (poly_uop_is_variable(u)) return !u->arg.param->device && !u->arg.param->device_is_tuple;
     return verify_shared_uop(ctx, u);
   case POLY_OP_CUSTOM_FUNCTION:
     return u->arg.kind == POLY_ARG_STRING && u->arg.str;
@@ -311,15 +299,13 @@ static bool verify_tensor_uop(PolyCtx *ctx, PolyUOp *u) {
     }
     return verify_shared_uop(ctx, u);
   case POLY_OP_FUNCTION:
-    return poly_dtype_eq(u->dtype, POLY_VOID) && u->n_src >= 1 &&
-           u->src[0]->op == POLY_OP_TUPLE;
+    return poly_dtype_eq(u->dtype, POLY_VOID) && u->n_src >= 1 && u->src[0]->op == POLY_OP_TUPLE;
   case POLY_OP_TUPLE:
     return poly_dtype_eq(u->dtype, POLY_VOID);
   case POLY_OP_GETTUPLE: {
     if (u->n_src != 1 || u->arg.kind != POLY_ARG_INT) return false;
     PolyUOp *tuple = u->src[0];
-    if (tuple->op == POLY_OP_FUNCTION && tuple->n_src >= 1 &&
-        tuple->src[0]->op == POLY_OP_TUPLE)
+    if (tuple->op == POLY_OP_FUNCTION && tuple->n_src >= 1 && tuple->src[0]->op == POLY_OP_TUPLE)
       tuple = tuple->src[0];
     if (tuple->op != POLY_OP_TUPLE || u->arg.i < 0 || u->arg.i >= tuple->n_src) return false;
     return matches_dtype(tuple->src[u->arg.i], u->dtype);
@@ -337,8 +323,7 @@ static bool verify_tensor_uop(PolyCtx *ctx, PolyUOp *u) {
   case POLY_OP_FLIP:
     return u->n_src == 1 && u->arg.kind == POLY_ARG_INT_TUPLE;
   case POLY_OP_REDUCE:
-    if (u->n_src < 1 || u->arg.kind != POLY_ARG_REDUCE ||
-        !is_reduce_op(u->arg.reduce.op))
+    if (u->n_src < 1 || u->arg.kind != POLY_ARG_REDUCE || !is_reduce_op(u->arg.reduce.op))
       return false;
     for (int i = 1; i < u->n_src; i++)
       if (!poly_dtype_eq(u->src[i]->dtype, POLY_WEAKINT) &&
@@ -349,20 +334,18 @@ static bool verify_tensor_uop(PolyCtx *ctx, PolyUOp *u) {
     return u->n_src == 1 && matches_dtype(u->src[0], u->dtype) && is_device_arg(u->arg);
   case POLY_OP_ALLREDUCE:
     return u->n_src == 1 && matches_dtype(u->src[0], u->dtype) &&
-           u->arg.kind == POLY_ARG_ALLREDUCE &&
-           is_reduce_op(u->arg.allreduce.op) &&
+           u->arg.kind == POLY_ARG_ALLREDUCE && is_reduce_op(u->arg.allreduce.op) &&
            (u->arg.allreduce.device_is_tuple
-                ? is_device_arg(poly_arg_string_tuple(
-                      u->arg.allreduce.devices, u->arg.allreduce.n_devices
-                  ))
+                ? is_device_arg(
+                      poly_arg_string_tuple(u->arg.allreduce.devices, u->arg.allreduce.n_devices)
+                  )
                 : u->arg.allreduce.device && u->arg.allreduce.device[0]);
   case POLY_OP_UNSHARD:
     if (u->arg.kind != POLY_ARG_INT_TUPLE || u->n_src != 1 + u->arg.int_tuple.n ||
         !matches_dtype(u->src[0], u->dtype))
       return false;
     for (int i = 0; i < u->arg.int_tuple.n; i++)
-      if (!poly_dtype_is_weak(u->src[i + 1]->dtype))
-        return false;
+      if (!poly_dtype_is_weak(u->src[i + 1]->dtype)) return false;
     return true;
   case POLY_OP_MSELECT:
     return mselect_is_kernel_value(ctx, u);
@@ -371,8 +354,7 @@ static bool verify_tensor_uop(PolyCtx *ctx, PolyUOp *u) {
   case POLY_OP_DETACH:
   case POLY_OP_CONTIGUOUS:
   case POLY_OP_CONTIGUOUS_BACKWARD:
-    return u->n_src == 1 && u->arg.kind == POLY_ARG_NONE &&
-           matches_dtype(u->src[0], u->dtype);
+    return u->n_src == 1 && u->arg.kind == POLY_ARG_NONE && matches_dtype(u->src[0], u->dtype);
   case POLY_OP_STAGE:
     return u->n_src >= 1;
   case POLY_OP_LINEAR:
@@ -380,8 +362,7 @@ static bool verify_tensor_uop(PolyCtx *ctx, PolyUOp *u) {
   case POLY_OP_SOURCE:
     return poly_dtype_eq(u->dtype, POLY_VOID) && u->n_src == 0;
   case POLY_OP_BINARY:
-    return poly_dtype_eq(u->dtype, POLY_UINT8) && u->n_src == 0 &&
-           u->arg.kind == POLY_ARG_BYTES;
+    return poly_dtype_eq(u->dtype, POLY_UINT8) && u->n_src == 0 && u->arg.kind == POLY_ARG_BYTES;
   case POLY_OP_PROGRAM:
     if (!poly_dtype_eq(u->dtype, POLY_VOID) || u->n_src < 1 || u->n_src > 4 ||
         u->src[0]->op != POLY_OP_SINK)
@@ -405,9 +386,8 @@ static bool verify_kernel_graph_uop(PolyCtx *ctx, PolyUOp *u) {
   case POLY_OP_SINK:
     return poly_dtype_eq(u->dtype, POLY_VOID);
   case POLY_OP_STORE:
-    return poly_dtype_eq(u->dtype, POLY_VOID) && u->n_src == 2 &&
-           u->src[0]->op == POLY_OP_BUFFER && poly_uop_is_variable(u->src[0]) &&
-           u->src[1]->op == POLY_OP_CONST;
+    return poly_dtype_eq(u->dtype, POLY_VOID) && u->n_src == 2 && u->src[0]->op == POLY_OP_BUFFER &&
+           poly_uop_is_variable(u->src[0]) && u->src[1]->op == POLY_OP_CONST;
   case POLY_OP_CONST:
     return u->n_src == 0;
   case POLY_OP_STACK:
@@ -418,8 +398,8 @@ static bool verify_kernel_graph_uop(PolyCtx *ctx, PolyUOp *u) {
     return u->arg.kind == POLY_ARG_PARAM && u->arg.param;
   case POLY_OP_BUFFER:
     return u->arg.kind == POLY_ARG_PARAM && u->arg.param &&
-           (u->arg.param->addrspace == POLY_ADDR_GLOBAL ||
-            u->arg.param->addrspace == POLY_ADDR_ALU);
+           (u->arg.param->addrspace == POLY_ADDR_GLOBAL || u->arg.param->addrspace == POLY_ADDR_ALU
+           );
   case POLY_OP_RESHAPE:
   case POLY_OP_BITCAST:
     return true;
@@ -430,14 +410,13 @@ static bool verify_kernel_graph_uop(PolyCtx *ctx, PolyUOp *u) {
   case POLY_OP_CALL:
     return u->n_src >= 1 &&
            (u->src[0]->op == POLY_OP_SINK || u->src[0]->op == POLY_OP_LINEAR ||
-            u->src[0]->op == POLY_OP_PROGRAM ||
-            u->src[0]->op == POLY_OP_CUSTOM_FUNCTION);
+            u->src[0]->op == POLY_OP_PROGRAM || u->src[0]->op == POLY_OP_CUSTOM_FUNCTION);
   case POLY_OP_AFTER: {
     if (u->n_src < 1 || !matches_dtype(u->src[0], u->dtype)) return false;
     PolyOps op = u->src[0]->op;
-    return poly_opset_has(POLY_GROUP_MOVEMENT, op) || op == POLY_OP_PARAM ||
-           op == POLY_OP_AFTER || op == POLY_OP_BUFFER || op == POLY_OP_MSTACK ||
-           op == POLY_OP_MSELECT || op == POLY_OP_BITCAST || op == POLY_OP_RESHAPE;
+    return poly_opset_has(POLY_GROUP_MOVEMENT, op) || op == POLY_OP_PARAM || op == POLY_OP_AFTER ||
+           op == POLY_OP_BUFFER || op == POLY_OP_MSTACK || op == POLY_OP_MSELECT ||
+           op == POLY_OP_BITCAST || op == POLY_OP_RESHAPE;
   }
   default:
     return false;

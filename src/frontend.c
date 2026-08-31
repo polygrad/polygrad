@@ -32,14 +32,15 @@ static PolyDevice frontend_buffer_device(PolyCtx *ctx) {
 
 /* C argument adaptation for current Tinygrad UOp.new_buffer. */
 static PolyUOp *frontend_new_buffer(
-    PolyCtx *ctx, PolyDType dtype, int64_t size, PolyDevice device
+    PolyCtx *ctx,
+    PolyDType dtype,
+    int64_t size,
+    PolyDevice device
 ) {
   if (device == POLY_DEVICE_AUTO) device = frontend_buffer_device(ctx);
   PolyUOp *device_uop = poly_device_uop(ctx, device);
   return device_uop
-             ? poly_uop_new_buffer(
-                   ctx, device_uop, size, dtype, poly_ctx_next_unique_id(ctx)
-               )
+             ? poly_uop_new_buffer(ctx, device_uop, size, dtype, poly_ctx_next_unique_id(ctx))
              : NULL;
 }
 
@@ -49,12 +50,7 @@ PolyUOp *poly_buffer_by_id(PolyCtx *ctx, int dtype_id, int64_t size) {
   return frontend_new_buffer(ctx, dt, size, POLY_DEVICE_AUTO);
 }
 
-PolyUOp *poly_buffer_on_device_by_id(
-    PolyCtx *ctx,
-    int dtype_id,
-    int64_t size,
-    int device_id
-) {
+PolyUOp *poly_buffer_on_device_by_id(PolyCtx *ctx, int dtype_id, int64_t size, int device_id) {
   PolyDType dt;
   if (!poly_dtype_by_id(dtype_id, &dt)) return NULL;
   PolyDevice device = (PolyDevice)device_id;
@@ -105,9 +101,7 @@ PolyTensor *poly_tensor_empty_uop_by_id(
 ) {
   PolyDType dt;
   if (!poly_dtype_by_id(dtype_id, &dt)) return NULL;
-  return poly_tensor_empty_uop(
-      ctx, dt, dims, ndim, (PolyDevice)device_id
-  );
+  return poly_tensor_empty_uop(ctx, dt, dims, ndim, (PolyDevice)device_id);
 }
 
 PolyTensor *poly_tensor_from_host_by_id(
@@ -123,12 +117,7 @@ PolyTensor *poly_tensor_from_host_by_id(
   return poly_tensor_from_host(ctx, ptr, nbytes, dt, dims, ndim);
 }
 
-PolyTensor *poly_tensor_const_int_by_id(
-    PolyCtx *ctx,
-    int64_t value,
-    int dtype_id,
-    int device_id
-) {
+PolyTensor *poly_tensor_const_int_by_id(PolyCtx *ctx, int64_t value, int dtype_id, int device_id) {
   PolyUOp *value_uop = poly_const_int_by_id(ctx, value, dtype_id);
   if (!value_uop) return NULL;
   return poly_tensor_create_with_roots(
@@ -136,12 +125,7 @@ PolyTensor *poly_tensor_const_int_by_id(
   );
 }
 
-PolyTensor *poly_tensor_const_float_by_id(
-    PolyCtx *ctx,
-    double value,
-    int dtype_id,
-    int device_id
-) {
+PolyTensor *poly_tensor_const_float_by_id(PolyCtx *ctx, double value, int dtype_id, int device_id) {
   PolyUOp *value_uop = poly_const_float_by_id(ctx, value, dtype_id);
   if (!value_uop) return NULL;
   return poly_tensor_create_with_roots(
@@ -163,25 +147,24 @@ static PolyTensor *tensor_full_from_value(
 ) {
   if (!value_uop) return NULL;
   if (!buffer)
-    return poly_tensor_create_with_roots(
-        ctx, value_uop, value_uop, POLY_TENSOR_VALUE, device
-    );
+    return poly_tensor_create_with_roots(ctx, value_uop, value_uop, POLY_TENSOR_VALUE, device);
 
   /* Inferred weak values cross empty_like(None) and commit a width.  An
    * explicitly requested weak dtype crosses UOp.new_buffer and fails instead
    * (tinygrad/mixin/creation.py:61-85, tinygrad/uop/ops.py:814-827). */
-  PolyDType storage_dtype =
-      dtype_explicit ? value_uop->dtype : poly_dtype_strong(value_uop->dtype);
+  PolyDType storage_dtype = dtype_explicit ? value_uop->dtype : poly_dtype_strong(value_uop->dtype);
   PolyTensor *out = poly_tensor_empty(ctx, storage_dtype, dims, ndim, device);
   if (!out) return NULL;
   PolyUOp *logical_store = poly_store_val(ctx, out->uop_logical, value_uop);
   PolyUOp *physical_store = poly_store_val(ctx, out->uop_physical, value_uop);
   PolyUOp *logical_src[2] = {out->uop_logical, logical_store};
   PolyUOp *physical_src[2] = {out->uop_physical, physical_store};
-  PolyUOp *logical = logical_store ? poly_uop(
-      ctx, POLY_OP_AFTER, storage_dtype, logical_src, 2, poly_arg_none()) : NULL;
-  PolyUOp *physical = physical_store ? poly_uop(
-      ctx, POLY_OP_AFTER, storage_dtype, physical_src, 2, poly_arg_none()) : NULL;
+  PolyUOp *logical =
+      logical_store ? poly_uop(ctx, POLY_OP_AFTER, storage_dtype, logical_src, 2, poly_arg_none())
+                    : NULL;
+  PolyUOp *physical =
+      physical_store ? poly_uop(ctx, POLY_OP_AFTER, storage_dtype, physical_src, 2, poly_arg_none())
+                     : NULL;
   if (!logical || !physical ||
       poly_tensor_replace_roots(ctx, out, logical, physical, POLY_TENSOR_VALUE, device) != 0)
     return NULL;
@@ -266,13 +249,7 @@ PolyTensor *poly_tensor_linspace_by_id(
   );
 }
 
-PolyTensor *poly_tensor_eye_by_id(
-    PolyCtx *ctx,
-    int64_t n,
-    int64_t m,
-    int dtype_id,
-    int device_id
-) {
+PolyTensor *poly_tensor_eye_by_id(PolyCtx *ctx, int64_t n, int64_t m, int dtype_id, int device_id) {
   PolyUOp *value_uop = poly_eye_by_id(ctx, n, m, dtype_id);
   if (!value_uop) return NULL;
   return poly_tensor_create_with_roots(
@@ -315,8 +292,7 @@ PolyUOp *poly_uop_placeholder_like(PolyCtx *ctx, PolyUOp *like, int slot) {
   const int64_t *dims = poly_uop_max_shape_dims(ctx, like);
   if (ndim > 0 && !dims) return NULL;
   return poly_uop_placeholder(
-      ctx, dims, ndim, frontend_value_dtype(like->dtype), slot,
-      POLY_ADDR_GLOBAL, NULL, false
+      ctx, dims, ndim, frontend_value_dtype(like->dtype), slot, POLY_ADDR_GLOBAL, NULL, false
   );
 }
 
@@ -376,23 +352,14 @@ PolyUOp *poly_uop_sink(PolyCtx *ctx, PolyUOp **srcs, int n_src) {
   return poly_uop(ctx, POLY_OP_SINK, POLY_VOID, srcs, n_src, poly_arg_none());
 }
 
-PolyUOp *poly_uop_sink_ex(
-    PolyCtx *ctx,
-    PolyUOp **srcs,
-    int n_src,
-    const char *name,
-    int optimize
-) {
+PolyUOp *poly_uop_sink_ex(PolyCtx *ctx, PolyUOp **srcs, int n_src, const char *name, int optimize) {
   if (!ctx || n_src < 0 || (n_src > 0 && !srcs)) return NULL;
   /* Current Tinygrad UOp.sink(KernelInfo): tag=1 disables ordinary codegen
    * optimization while preserving the same compiler-kernel vocabulary. */
   PolyKernelInfo info = {.name = (name && name[0]) ? name : "test"};
   PolyArg arg = poly_arg_kernel_info(&info);
-  if (optimize)
-    return poly_uop(ctx, POLY_OP_SINK, POLY_VOID, srcs, n_src, arg);
-  return poly_uop_tagged_arg(
-      ctx, POLY_OP_SINK, POLY_VOID, srcs, n_src, arg, 1, poly_arg_none()
-  );
+  if (optimize) return poly_uop(ctx, POLY_OP_SINK, POLY_VOID, srcs, n_src, arg);
+  return poly_uop_tagged_arg(ctx, POLY_OP_SINK, POLY_VOID, srcs, n_src, arg, 1, poly_arg_none());
 }
 
 PolyUOp *poly_uop_call(PolyCtx *ctx, PolyUOp *body, PolyUOp **args, int n_args) {
@@ -418,17 +385,23 @@ PolyUOp *poly_uop_after(PolyCtx *ctx, PolyUOp *target, PolyUOp *effect) {
   return poly_uop(ctx, POLY_OP_AFTER, target->dtype, src, 2, poly_arg_none());
 }
 
-PolyUOp *poly_uop_reduce(PolyCtx *ctx, PolyOps reduce_op, PolyUOp *expr, PolyUOp **ranges, int n_ranges) {
+PolyUOp *poly_uop_reduce(
+    PolyCtx *ctx,
+    PolyOps reduce_op,
+    PolyUOp *expr,
+    PolyUOp **ranges,
+    int n_ranges
+) {
   if (!ctx || !expr || n_ranges < 0 || (n_ranges > 0 && !ranges)) return NULL;
   switch (reduce_op) {
-    case POLY_OP_ADD:
-    case POLY_OP_MUL:
-    case POLY_OP_MAX:
-    case POLY_OP_AND:
-    case POLY_OP_OR:
-      break;
-    default:
-      return NULL;
+  case POLY_OP_ADD:
+  case POLY_OP_MUL:
+  case POLY_OP_MAX:
+  case POLY_OP_AND:
+  case POLY_OP_OR:
+    break;
+  default:
+    return NULL;
   }
   if (n_ranges == 0) return expr;
   PolyUOp **src = malloc((size_t)(n_ranges + 1) * sizeof(PolyUOp *));
@@ -453,16 +426,15 @@ PolyUOp *poly_uop_reduce(PolyCtx *ctx, PolyOps reduce_op, PolyUOp *expr, PolyUOp
     PolyAxisType axis_type = poly_range_axis_type(ranges[i]->arg);
     if (axis_type == POLY_AXIS_WEAK) {
       PolyArg range_arg = ranges[i]->arg;
-      PolyArg new_arg = poly_arg_range(
-          poly_range_axis_id(range_arg), POLY_AXIS_REDUCE
-      );
+      PolyArg new_arg = poly_arg_range(poly_range_axis_id(range_arg), POLY_AXIS_REDUCE);
       if (poly_range_n_extra(range_arg) > 0) {
         new_arg = poly_arg_range_ex(
-            poly_range_axis_id(range_arg), POLY_AXIS_REDUCE,
-            poly_range_extra(range_arg), poly_range_n_extra(range_arg)
+            poly_range_axis_id(range_arg), POLY_AXIS_REDUCE, poly_range_extra(range_arg),
+            poly_range_n_extra(range_arg)
         );
       }
-      PolyUOp *rr = poly_uop(ctx, POLY_OP_RANGE, ranges[i]->dtype, ranges[i]->src, ranges[i]->n_src, new_arg);
+      PolyUOp *rr =
+          poly_uop(ctx, POLY_OP_RANGE, ranges[i]->dtype, ranges[i]->src, ranges[i]->n_src, new_arg);
       if (!rr) {
         free(src);
         free(from);
@@ -473,8 +445,7 @@ PolyUOp *poly_uop_reduce(PolyCtx *ctx, PolyOps reduce_op, PolyUOp *expr, PolyUOp
       to[n_subs] = rr;
       n_subs++;
       src[i + 1] = rr;
-    } else if (axis_type == POLY_AXIS_REDUCE || axis_type == POLY_AXIS_GROUP_REDUCE ||
-               axis_type == POLY_AXIS_UNROLL) {
+    } else if (axis_type == POLY_AXIS_REDUCE || axis_type == POLY_AXIS_GROUP_REDUCE || axis_type == POLY_AXIS_UNROLL) {
       src[i + 1] = ranges[i];
     } else {
       free(src);
@@ -531,9 +502,7 @@ static PolyUOp *canrun_buffer(PolyCtx *ctx, PolyDType dt, const int64_t *shape, 
   if (numel < 0) return NULL;
   /* Tinygrad UOp.new_buffer records the selected device in ParamArg
    * (uop/ops.py:814-817); capability probes must schedule the same graph. */
-  PolyUOp *buf = frontend_new_buffer(
-      ctx, dt, numel, POLY_DEVICE_AUTO
-  );
+  PolyUOp *buf = frontend_new_buffer(ctx, dt, numel, POLY_DEVICE_AUTO);
   if (!buf) return NULL;
   return poly_reshape(ctx, buf, (int64_t *)shape, ndim);
 }
@@ -702,9 +671,7 @@ int poly_can_run_op(
   PolyUOp *value = canrun_build_probe_graph(probe, op, dt, shape, n_shape);
   PolyUOp *sink = value ? canrun_store_sink(probe, value) : NULL;
   if (!sink) goto cleanup;
-  PolyUOp *linear = poly_linear_effect_sink(
-      probe, sink, &var_bindings, &n_var_bindings
-  );
+  PolyUOp *linear = poly_linear_effect_sink(probe, sink, &var_bindings, &n_var_bindings);
   if (!linear || !poly_compile_linear(probe, linear, -1)) goto cleanup;
   rc = 1;
 
@@ -775,8 +742,8 @@ static bool collect_input_buffers_postorder(
       /* Tinygrad 2026-08-22/a9069c177a9d tensor.py:replace_input_view treats
        * callify-owned SHRINK/BITCAST views as complete call arguments. Their
        * source BUFFER is alias provenance, not another argument. */
-      bool view = (u->op == POLY_OP_SHRINK || u->op == POLY_OP_BITCAST) &&
-                  poly_buffer_get(ctx, u) != NULL;
+      bool view =
+          (u->op == POLY_OP_SHRINK || u->op == POLY_OP_BITCAST) && poly_buffer_get(ctx, u) != NULL;
       if (u->op != POLY_OP_BUFFER && !view && !poly_uop_is_bound_var(u)) {
         for (int i = u->n_src - 1; i >= 0; i--) {
           PolyUOp *src = u->src[i];
@@ -807,10 +774,10 @@ static bool collect_input_buffers_postorder(
     stack_top--;
     if (poly_map_get(visited, h, u, poly_ptr_eq) != NULL) continue;
     poly_map_set(visited, h, u, (void *)(uintptr_t)1, poly_ptr_eq);
-    bool view = (u->op == POLY_OP_SHRINK || u->op == POLY_OP_BITCAST) &&
-                poly_buffer_get(ctx, u) != NULL;
-    if ((((u->op == POLY_OP_BUFFER || view) && !poly_uop_is_variable(u)) ||
-         poly_uop_is_bound_var(u)) &&
+    bool view =
+        (u->op == POLY_OP_SHRINK || u->op == POLY_OP_BITCAST) && poly_buffer_get(ctx, u) != NULL;
+    if ((((u->op == POLY_OP_BUFFER || view) && !poly_uop_is_variable(u)) || poly_uop_is_bound_var(u)
+        ) &&
         !collect(u, user_data)) {
       free(stack);
       free(state);
@@ -834,8 +801,7 @@ typedef struct {
 static bool collect_dynamic_buffer(PolyUOp *u, void *user_data) {
   DynamicBufferCollect *c = (DynamicBufferCollect *)user_data;
   if (!c || !c->ordered || !c->n || !c->cap) return false;
-  return uop_vec_contains(*c->ordered, *c->n, u) ||
-         uop_vec_append(c->ordered, c->n, c->cap, u);
+  return uop_vec_contains(*c->ordered, *c->n, u) || uop_vec_append(c->ordered, c->n, c->cap, u);
 }
 
 typedef struct {
@@ -874,8 +840,7 @@ bool poly_collect_ordered_buffers_alloc(
   for (int i = 0; i < tensor_sink->n_src; i++) {
     PolyUOp *store = tensor_sink->src[i];
     if (store && store->op == POLY_OP_STORE && store->n_src >= 1 &&
-        store->src[0]->op == POLY_OP_BUFFER &&
-        !poly_uop_is_variable(store->src[0])) {
+        store->src[0]->op == POLY_OP_BUFFER && !poly_uop_is_variable(store->src[0])) {
       PolyUOp *buf = store->src[0];
       if (!uop_vec_contains(ordered, n, buf) && !uop_vec_append(&ordered, &n, &cap, buf)) {
         free(ordered);
@@ -887,9 +852,7 @@ bool poly_collect_ordered_buffers_alloc(
   /* Input buffers in toposort order. This is a local scan, like tinygrad's
    * temporary UOp.toposort() result, so do not grow the persistent ctx arena. */
   DynamicBufferCollect collect = {.ordered = &ordered, .n = &n, .cap = &cap};
-  if (!collect_input_buffers_postorder(
-          ctx, tensor_sink, collect_dynamic_buffer, &collect
-      )) {
+  if (!collect_input_buffers_postorder(ctx, tensor_sink, collect_dynamic_buffer, &collect)) {
     free(ordered);
     return false;
   }
@@ -912,8 +875,7 @@ int poly_collect_ordered_buffers(
   for (int i = 0; i < tensor_sink->n_src; i++) {
     PolyUOp *store = tensor_sink->src[i];
     if (store && store->op == POLY_OP_STORE && store->n_src >= 1 &&
-        store->src[0]->op == POLY_OP_BUFFER &&
-        !poly_uop_is_variable(store->src[0])) {
+        store->src[0]->op == POLY_OP_BUFFER && !poly_uop_is_variable(store->src[0])) {
       PolyUOp *buf = store->src[0];
       if (!uop_vec_contains(ordered, n < max_bufs ? n : max_bufs, buf)) {
         if (n < max_bufs) ordered[n] = buf;
@@ -923,10 +885,7 @@ int poly_collect_ordered_buffers(
   }
 
   FixedBufferCollect collect = {.ordered = ordered, .n = &n, .max_bufs = max_bufs};
-  if (!collect_input_buffers_postorder(
-          ctx, tensor_sink, collect_fixed_buffer, &collect
-      ))
-    return 0;
+  if (!collect_input_buffers_postorder(ctx, tensor_sink, collect_fixed_buffer, &collect)) return 0;
   return n;
 }
 

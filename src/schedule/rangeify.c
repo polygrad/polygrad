@@ -58,10 +58,10 @@ static PolyUOp *flatten_bufferize(PolyCtx *ctx, PolyUOp *stage) {
   flat_shape = poly_graph_rewrite(ctx, flat_shape, poly_symbolic());
   PolyUOp *flat_idx[POLY_MAX_DIMS];
   int n_flat = 0;
-  if (!flat_shape || !poly_apply_reshape(
-                         ctx, &flat_shape, 1, shape, ndim, stage->src + 1, ndim,
-                         flat_idx, &n_flat
-                     ) ||
+  if (!flat_shape ||
+      !poly_apply_reshape(
+          ctx, &flat_shape, 1, shape, ndim, stage->src + 1, ndim, flat_idx, &n_flat
+      ) ||
       n_flat != 1)
     return NULL;
 
@@ -77,8 +77,8 @@ static PolyUOp *flatten_bufferize(PolyCtx *ctx, PolyUOp *stage) {
   for (int i = 0; i < ndim; i++) {
     PolyUOp *r = stage->src[i + 1];
     starts[i] = rangeify_index_const(ctx, 0);
-    sizes[i] = r->op == POLY_OP_CONST ? rangeify_index_const(ctx, 1)
-                                      : (r->n_src > 0 ? r->src[0] : NULL);
+    sizes[i] =
+        r->op == POLY_OP_CONST ? rangeify_index_const(ctx, 1) : (r->n_src > 0 ? r->src[0] : NULL);
     if (!sizes[i]) return NULL;
     symbolic |= r->op == POLY_OP_RANGE && r->n_src > 0 && r->src[0]->op != POLY_OP_CONST;
   }
@@ -97,7 +97,9 @@ static PolyUOp *bufferize_to_store(PolyCtx *ctx, int *slot_counter, PolyUOp *sta
   for (int i = 0; i < n_ranges - 1; i++)
     for (int j = i + 1; j < n_ranges; j++)
       if (poly_range_axis_id(ranges[i]->arg) > poly_range_axis_id(ranges[j]->arg)) {
-        PolyUOp *tmp = ranges[i]; ranges[i] = ranges[j]; ranges[j] = tmp;
+        PolyUOp *tmp = ranges[i];
+        ranges[i] = ranges[j];
+        ranges[j] = tmp;
       }
 
   if (value->op == POLY_OP_AFTER) {
@@ -122,27 +124,35 @@ static PolyUOp *bufferize_to_store(PolyCtx *ctx, int *slot_counter, PolyUOp *sta
       int n_merged = poly_uop_ranges(ctx, target, merged, POLY_MAX_DIMS);
       for (int j = 0; j < n_ranges; j++) {
         bool seen = false;
-        for (int k = 0; k < n_merged; k++) seen |= merged[k] == ranges[j];
+        for (int k = 0; k < n_merged; k++)
+          seen |= merged[k] == ranges[j];
         if (!seen && n_merged < 2 * POLY_MAX_DIMS) merged[n_merged++] = ranges[j];
       }
       for (int j = 0; j < n_merged - 1; j++)
         for (int k = j + 1; k < n_merged; k++)
           if (poly_range_axis_id(merged[j]->arg) > poly_range_axis_id(merged[k]->arg)) {
-            PolyUOp *tmp = merged[j]; merged[j] = merged[k]; merged[k] = tmp;
+            PolyUOp *tmp = merged[j];
+            merged[j] = merged[k];
+            merged[k] = tmp;
           }
       PolyUOp *ended = poly_store_val(ctx, target, store->src[1]);
-      if (!ended) { free(after_src); return NULL; }
+      if (!ended) {
+        free(after_src);
+        return NULL;
+      }
       if (n_merged) {
         PolyUOp *end_src[1 + 2 * POLY_MAX_DIMS];
         end_src[0] = ended;
-        for (int j = 0; j < n_merged; j++) end_src[j + 1] = merged[j];
+        for (int j = 0; j < n_merged; j++)
+          end_src[j + 1] = merged[j];
         ended = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, n_merged + 1, poly_arg_none());
       }
       after_src[n_after++] = ended;
     }
-    PolyUOp *ret = n_after == 1 ? buf : poly_uop(
-        ctx, POLY_OP_AFTER, buf->dtype, after_src, n_after, poly_arg_none()
-    );
+    PolyUOp *ret =
+        n_after == 1
+            ? buf
+            : poly_uop(ctx, POLY_OP_AFTER, buf->dtype, after_src, n_after, poly_arg_none());
     free(after_src);
     return ret;
   }
@@ -155,28 +165,27 @@ static PolyUOp *bufferize_to_store(PolyCtx *ctx, int *slot_counter, PolyUOp *sta
                               ctx, poly_bufferize_arg_devices(stage->arg),
                               poly_bufferize_arg_n_devices(stage->arg)
                           )
-                        : poly_device_uop_from_name(
-                              ctx, poly_bufferize_arg_device(stage->arg)
-                          );
-  PolyUOp *buf = device
-                     ? poly_uop_new_buffer(
-                           ctx, device, size, storage_dtype, (*slot_counter)++
-                       )
-                     : NULL;
-  PolyUOp *idx = buf ? poly_uop2(ctx, POLY_OP_INDEX, storage_dtype, buf, flat_idx, poly_arg_none()) : NULL;
+                        : poly_device_uop_from_name(ctx, poly_bufferize_arg_device(stage->arg));
+  PolyUOp *buf =
+      device ? poly_uop_new_buffer(ctx, device, size, storage_dtype, (*slot_counter)++) : NULL;
+  PolyUOp *idx =
+      buf ? poly_uop2(ctx, POLY_OP_INDEX, storage_dtype, buf, flat_idx, poly_arg_none()) : NULL;
   PolyUOp *stored = poly_dtype_eq(value->dtype, storage_dtype)
-                        ? value : poly_uop1(ctx, POLY_OP_CAST, storage_dtype, value, poly_arg_none());
+                        ? value
+                        : poly_uop1(ctx, POLY_OP_CAST, storage_dtype, value, poly_arg_none());
   PolyUOp *store = idx ? poly_store_val(ctx, idx, stored) : NULL;
   if (!store) return NULL;
   if (n_ranges) {
     PolyUOp *end_src[1 + POLY_MAX_DIMS];
     end_src[0] = store;
-    for (int i = 0; i < n_ranges; i++) end_src[i + 1] = ranges[i];
+    for (int i = 0; i < n_ranges; i++)
+      end_src[i + 1] = ranges[i];
     store = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, n_ranges + 1, poly_arg_none());
   }
   PolyUOp *after = poly_uop2(ctx, POLY_OP_AFTER, storage_dtype, buf, store, poly_arg_none());
   return poly_dtype_eq(storage_dtype, stage->dtype)
-             ? after : poly_uop1(ctx, POLY_OP_CAST, stage->dtype, after, poly_arg_none());
+             ? after
+             : poly_uop1(ctx, POLY_OP_CAST, stage->dtype, after, poly_arg_none());
 }
 
 static PolyUOp *rangeify_clone_preserving_metadata(
@@ -214,11 +223,7 @@ static PolyUOp *bufferize_to_store_match(
   return slot_counter ? bufferize_to_store(ctx, slot_counter, stage) : NULL;
 }
 
-static PolyUOp *index_weak_buffer(
-    PolyCtx *ctx,
-    PolyUOp *index,
-    const PolyBindings *bindings
-) {
+static PolyUOp *index_weak_buffer(PolyCtx *ctx, PolyUOp *index, const PolyBindings *bindings) {
   (void)bindings;
   if (!index || index->op != POLY_OP_INDEX || index->n_src < 1 ||
       index->src[0]->op != POLY_OP_CAST || index->src[0]->n_src != 1 ||
@@ -227,17 +232,18 @@ static PolyUOp *index_weak_buffer(
   PolyUOp **src = malloc((size_t)index->n_src * sizeof(*src));
   if (!src) return NULL;
   src[0] = index->src[0]->src[0];
-  for (int i = 1; i < index->n_src; i++) src[i] = index->src[i];
+  for (int i = 1; i < index->n_src; i++)
+    src[i] = index->src[i];
   /* Tinygrad 2026-08-22/a9069c177a9d rangeify.py:449-451 uses
    * `replace(dtype=None, ...)`: INDEX re-derives the strong storage dtype. */
   PolyDType dtype = index->dtype;
   PolyUOp *unwrapped =
-      poly_dtype_from_uop(
-          index->op, src, index->n_src, index->arg, index->dtype, &dtype)
+      poly_dtype_from_uop(index->op, src, index->n_src, index->arg, index->dtype, &dtype)
           ? (index->tag != 0 || index->tag_arg.kind != POLY_ARG_NONE)
                 ? poly_uop_tagged_arg(
-                      ctx, index->op, dtype, src, index->n_src, index->arg,
-                      index->tag, index->tag_arg)
+                      ctx, index->op, dtype, src, index->n_src, index->arg, index->tag,
+                      index->tag_arg
+                  )
                 : poly_uop(ctx, index->op, dtype, src, index->n_src, index->arg)
           : NULL;
   free(src);
@@ -252,15 +258,13 @@ static PolyUOp *move_reshape_through_multi(
     const PolyBindings *bindings
 ) {
   (void)bindings;
-  if (!multi || (multi->op != POLY_OP_MSELECT && multi->op != POLY_OP_MSTACK) ||
-      multi->n_src < 1)
+  if (!multi || (multi->op != POLY_OP_MSELECT && multi->op != POLY_OP_MSTACK) || multi->n_src < 1)
     return NULL;
   PolyUOp **src = malloc((size_t)multi->n_src * sizeof(*src));
   if (!src) return NULL;
   bool ok = true;
   for (int i = 0; i < multi->n_src; i++) {
-    if (!multi->src[i] || multi->src[i]->op != POLY_OP_RESHAPE ||
-        multi->src[i]->n_src < 1) {
+    if (!multi->src[i] || multi->src[i]->op != POLY_OP_RESHAPE || multi->src[i]->n_src < 1) {
       ok = false;
       break;
     }
@@ -272,11 +276,7 @@ static PolyUOp *move_reshape_through_multi(
   return base && shape.ndim >= 0 ? poly_reshape(ctx, base, shape.dims, shape.ndim) : NULL;
 }
 
-static PolyUOp *remove_call_reshapes(
-    PolyCtx *ctx,
-    PolyUOp *call,
-    const PolyBindings *bindings
-) {
+static PolyUOp *remove_call_reshapes(PolyCtx *ctx, PolyUOp *call, const PolyBindings *bindings) {
   (void)bindings;
   if (!call || call->op != POLY_OP_CALL) return NULL;
   PolyUOp **src = malloc((size_t)call->n_src * sizeof(*src));
@@ -288,33 +288,22 @@ static PolyUOp *remove_call_reshapes(
                  : call->src[i];
     changed |= src[i] != call->src[i];
   }
-  PolyUOp *ret = changed
-                     ? rangeify_clone_preserving_metadata(ctx, call, src, call->n_src)
-                     : NULL;
+  PolyUOp *ret = changed ? rangeify_clone_preserving_metadata(ctx, call, src, call->n_src) : NULL;
   free(src);
   return ret;
 }
 
-static PolyUOp *remove_invalid_store(
-    PolyCtx *ctx,
-    PolyUOp *store,
-    const PolyBindings *bindings
-) {
+static PolyUOp *remove_invalid_store(PolyCtx *ctx, PolyUOp *store, const PolyBindings *bindings) {
   (void)bindings;
   if (!store || store->op != POLY_OP_STORE || store->n_src != 2) return NULL;
   PolyUOp *value = store->src[1];
   bool invalid = value && value->op == POLY_OP_CONST && value->arg.kind == POLY_ARG_INVALID;
   invalid |= value && value->op == POLY_OP_CONTIGUOUS && value->n_src == 1 &&
-             value->src[0]->op == POLY_OP_CONST &&
-             value->src[0]->arg.kind == POLY_ARG_INVALID;
+             value->src[0]->op == POLY_OP_CONST && value->src[0]->arg.kind == POLY_ARG_INVALID;
   return invalid ? poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_none()) : NULL;
 }
 
-static PolyUOp *remove_noop_afters(
-    PolyCtx *ctx,
-    PolyUOp *after,
-    const PolyBindings *bindings
-) {
+static PolyUOp *remove_noop_afters(PolyCtx *ctx, PolyUOp *after, const PolyBindings *bindings) {
   (void)bindings;
   if (!after || after->op != POLY_OP_AFTER || after->n_src < 1) return NULL;
   PolyUOp **src = malloc((size_t)after->n_src * sizeof(*src));
@@ -323,11 +312,9 @@ static PolyUOp *remove_noop_afters(
   src[0] = after->src[0];
   for (int i = 1; i < after->n_src; i++)
     if (!rangeify_is_noop_after_dep(after->src[i])) src[n_src++] = after->src[i];
-  PolyUOp *ret = n_src == after->n_src
-                     ? NULL
-                     : n_src == 1
-                           ? src[0]
-                           : rangeify_clone_preserving_metadata(ctx, after, src, n_src);
+  PolyUOp *ret = n_src == after->n_src ? NULL
+                 : n_src == 1          ? src[0]
+                                       : rangeify_clone_preserving_metadata(ctx, after, src, n_src);
   free(src);
   return ret;
 }
@@ -336,25 +323,20 @@ PolyPatternMatcher *poly_pm_add_buffers(void) {
   static _Thread_local PolyPatternMatcher *pm = NULL;
   if (pm) return pm;
   PolyRule rules[] = {
-      {poly_upat_allow_any_len(poly_upat_op(POLY_OP_STAGE, NULL, 0, "x")),
-       flatten_bufferize_match},
+      {poly_upat_allow_any_len(poly_upat_op(POLY_OP_STAGE, NULL, 0, "x")), flatten_bufferize_match},
       {poly_upat_allow_any_len(poly_upat_op(POLY_OP_STAGE, NULL, 0, "x")),
        bufferize_to_store_match},
-      {poly_upat_allow_any_len(poly_upat_op(POLY_OP_INDEX, NULL, 0, "u")),
-       index_weak_buffer},
+      {poly_upat_allow_any_len(poly_upat_op(POLY_OP_INDEX, NULL, 0, "u")), index_weak_buffer},
       {poly_upat_allow_any_len(poly_upat_ops(
            poly_opset_add(poly_opset_add((PolyOpSet){{0, 0}}, POLY_OP_MSELECT), POLY_OP_MSTACK),
-           NULL, 0, "m")),
+           NULL, 0, "m"
+       )),
        move_reshape_through_multi},
-      {poly_upat_allow_any_len(poly_upat_op(POLY_OP_CALL, NULL, 0, "k")),
-       remove_call_reshapes},
-      {poly_upat_allow_any_len(poly_upat_op(POLY_OP_STORE, NULL, 0, "st")),
-       remove_invalid_store},
-      {poly_upat_allow_any_len(poly_upat_op(POLY_OP_AFTER, NULL, 0, "x")),
-       remove_noop_afters},
+      {poly_upat_allow_any_len(poly_upat_op(POLY_OP_CALL, NULL, 0, "k")), remove_call_reshapes},
+      {poly_upat_allow_any_len(poly_upat_op(POLY_OP_STORE, NULL, 0, "st")), remove_invalid_store},
+      {poly_upat_allow_any_len(poly_upat_op(POLY_OP_AFTER, NULL, 0, "x")), remove_noop_afters},
   };
-  PolyPatternMatcher *rules_pm =
-      poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
+  PolyPatternMatcher *rules_pm = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
   PolyPatternMatcher *with_flatten = poly_pm_concat(poly_pm_mops(), rules_pm);
   pm = poly_pm_thread_cache(with_flatten);
   poly_pm_destroy(rules_pm);
@@ -403,9 +385,7 @@ static PolyUOp *debuf(
 ) {
   if (!lctx || !root) return NULL;
   if (poly_uop_is_variable(root)) {
-    return poly_uop(
-        ctx, POLY_OP_PARAM, root->dtype, root->src, root->n_src, root->arg
-    );
+    return poly_uop(ctx, POLY_OP_PARAM, root->dtype, root->src, root->n_src, root->arg);
   }
   bool shaped_param = poly_uop_is_shaped_value_param(root);
   /* Tinygrad 2026-08-22/a9069c177a9d schedule/rangeify.py:497-503 debufs
@@ -428,18 +408,16 @@ static PolyUOp *debuf(
       .slot = lctx->dg,
       .addrspace = addrspace,
       .device = device && device->arg.kind == POLY_ARG_STRING ? device->arg.str : NULL,
-      .devices = device && device->arg.kind == POLY_ARG_STRING_TUPLE
-                     ? device->arg.string_tuple.vals
-                     : NULL,
-      .n_devices = device && device->arg.kind == POLY_ARG_STRING_TUPLE
-                       ? device->arg.string_tuple.n
-                       : 0,
+      .devices = device && device->arg.kind == POLY_ARG_STRING_TUPLE ? device->arg.string_tuple.vals
+                                                                     : NULL,
+      .n_devices =
+          device && device->arg.kind == POLY_ARG_STRING_TUPLE ? device->arg.string_tuple.n : 0,
       .device_is_tuple = device && device->arg.kind == POLY_ARG_STRING_TUPLE,
   };
   PolyUOp *flat_shape = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(max_numel));
-  PolyUOp *param = flat_shape
-                       ? poly_uop1(ctx, POLY_OP_PARAM, scalar, flat_shape, poly_arg_param(&param_arg))
-                       : NULL;
+  PolyUOp *param =
+      flat_shape ? poly_uop1(ctx, POLY_OP_PARAM, scalar, flat_shape, poly_arg_param(&param_arg))
+                 : NULL;
   if (!param) return NULL;
 
   PolyUOp *ret = poly_reshape(ctx, param, max_shape.dims, max_shape.ndim);
@@ -463,34 +441,25 @@ static PolyUOp *debuf(
   return ret;
 }
 
-static PolyUOp *to_define_global_debuf(
-    PolyCtx *ctx,
-    PolyUOp *root,
-    const PolyBindings *b
-) {
+static PolyUOp *to_define_global_debuf(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   (void)b;
-  PolyLocalAddBufferContext *lctx =
-      (PolyLocalAddBufferContext *)poly_graph_rewrite_userctx();
+  PolyLocalAddBufferContext *lctx = (PolyLocalAddBufferContext *)poly_graph_rewrite_userctx();
   return debuf(ctx, lctx, root, root);
 }
 
 /* Current tinygrad schedule/rangeify.py:to_define_global removes the
  * call-argument slot from named symbolic PARAMs. codegen pm_number_params
  * assigns their final ABI slots after global buffers. */
-static PolyUOp *reset_named_param_slot(
-    PolyCtx *ctx,
-    PolyUOp *root,
-    const PolyBindings *b
-) {
+static PolyUOp *reset_named_param_slot(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   (void)b;
-  if (!poly_uop_is_alu_param(root) || !root->arg.param->name ||
-      !root->arg.param->has_minmax || root->arg.param->slot == -1)
+  if (!poly_uop_is_alu_param(root) || !root->arg.param->name || !root->arg.param->has_minmax ||
+      root->arg.param->slot == -1)
     return NULL;
   PolyParamArg arg = *root->arg.param;
   arg.slot = -1;
   return poly_uop_tagged_arg(
-      ctx, root->op, root->dtype, root->src, root->n_src,
-      poly_arg_param(&arg), root->tag, root->tag_arg
+      ctx, root->op, root->dtype, root->src, root->n_src, poly_arg_param(&arg), root->tag,
+      root->tag_arg
   );
 }
 
@@ -513,8 +482,7 @@ static PolyUOp *strip_bound_variable(PolyCtx *ctx, PolyUOp *root, const PolyBind
 static PolyUOp *handle_after(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   (void)b;
   if (!root || root->op != POLY_OP_AFTER || root->n_src < 1) return NULL;
-  PolyLocalAddBufferContext *lctx =
-      (PolyLocalAddBufferContext *)poly_graph_rewrite_userctx();
+  PolyLocalAddBufferContext *lctx = (PolyLocalAddBufferContext *)poly_graph_rewrite_userctx();
   PolyUOp *buf = poly_uop_buf_uop(ctx, root);
   if (!lctx || !buf) return NULL;
 
@@ -541,8 +509,7 @@ static PolyUOp *remove_bufferize_device(PolyCtx *ctx, PolyUOp *root, const PolyB
 
 static PolyUOp *renumber_range(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   (void)b;
-  PolyLocalAddBufferContext *lctx =
-      (PolyLocalAddBufferContext *)poly_graph_rewrite_userctx();
+  PolyLocalAddBufferContext *lctx = (PolyLocalAddBufferContext *)poly_graph_rewrite_userctx();
   if (!lctx || !root || root->op != POLY_OP_RANGE || root->tag != POLY_RANGEIFY_RANGE_TAG)
     return NULL;
 
@@ -576,8 +543,7 @@ bool poly_find_bufs(PolyCtx *ctx, PolyUOp *store) {
   /* tinygrad@2026-08-22/a9069c177a9d schedule/rangeify.py:501-505 uses
    * UOp.toposort's default enter_calls=False. Each opaque CALL body is a
    * separate kernel and cannot participate in this STORE's index-cycle test. */
-  PolyUOp **topo = poly_toposort_ex_alloc(
-      ctx, store, &n_topo, find_bufs_gate, false);
+  PolyUOp **topo = poly_toposort_ex_alloc(ctx, store, &n_topo, find_bufs_gate, false);
   PolyMap *read_from = poly_map_new(n_topo > 16 ? (uint32_t)n_topo : 16);
   if (!topo || !read_from) {
     poly_toposort_free(topo);
@@ -597,8 +563,7 @@ bool poly_find_bufs(PolyCtx *ctx, PolyUOp *store) {
       fprintf(stderr, "polygrad: cycle detected while indexing %p\n", (void *)buf);
       valid = false;
     } else if (!seen) {
-      poly_map_set(
-          read_from, poly_ptr_hash(buf), buf, (void *)mode, poly_ptr_eq);
+      poly_map_set(read_from, poly_ptr_hash(buf), buf, (void *)mode, poly_ptr_eq);
     }
   }
   poly_map_destroy(read_from);
@@ -606,14 +571,9 @@ bool poly_find_bufs(PolyCtx *ctx, PolyUOp *store) {
   return valid;
 }
 
-static PolyUOp *validate_find_bufs(
-    PolyCtx *ctx,
-    PolyUOp *root,
-    const PolyBindings *b
-) {
+static PolyUOp *validate_find_bufs(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   (void)b;
-  PolyLocalAddBufferContext *lctx =
-      (PolyLocalAddBufferContext *)poly_graph_rewrite_userctx();
+  PolyLocalAddBufferContext *lctx = (PolyLocalAddBufferContext *)poly_graph_rewrite_userctx();
   if (!lctx || !poly_find_bufs(ctx, root)) {
     if (lctx) lctx->failed = true;
   }
@@ -657,8 +617,7 @@ static PolyPatternMatcher *poly_kernel_split(void) {
   if (pm) return pm;
   PolyPatternMatcher *to_define_and_flatten =
       poly_pm_concat(poly_to_define_global(), poly_pm_flatten_range());
-  PolyPatternMatcher *all =
-      poly_pm_concat(to_define_and_flatten, poly_rangeify_codegen());
+  PolyPatternMatcher *all = poly_pm_concat(to_define_and_flatten, poly_rangeify_codegen());
   poly_pm_destroy(to_define_and_flatten);
   pm = poly_pm_thread_cache(all);
   return pm;
@@ -668,9 +627,7 @@ static PolyPatternMatcher *poly_kernel_split(void) {
 static PolyUOp *rewrite_kernel_split(PolyLocalAddBufferContext *lctx, PolyUOp *u) {
   /* tinygrad@2026-08-22/a9069c177a9d schedule/rangeify.py:546-563 keeps
    * opaque CALL/FUNCTION bodies for their recursive scheduling boundary. */
-  return poly_graph_rewrite_ctx_ex2(
-      lctx->ctx, u, poly_kernel_split(), lctx, true, false
-  );
+  return poly_graph_rewrite_ctx_ex2(lctx->ctx, u, poly_kernel_split(), lctx, true, false);
 }
 
 typedef struct {
@@ -682,8 +639,7 @@ typedef struct {
 static PolyUOp *split_store(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   (void)b;
   if (!ctx || !root || (root->op != POLY_OP_STORE && root->op != POLY_OP_END)) return NULL;
-  PolySplitKernelsContext *split_ctx =
-      (PolySplitKernelsContext *)poly_graph_rewrite_userctx();
+  PolySplitKernelsContext *split_ctx = (PolySplitKernelsContext *)poly_graph_rewrite_userctx();
 
   int n_topo = 0;
   PolyUOp **topo = poly_toposort_ex_alloc(ctx, root, &n_topo, NULL, false);
@@ -721,19 +677,18 @@ static PolyUOp *split_store(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) 
     return NULL;
   }
   PolyKernelInfo kernel_info = {.name = "test"};
-  PolyUOp *body = body_root
-                      ? poly_uop(
-                            ctx, POLY_OP_SINK, POLY_VOID, &body_root, 1,
-                            poly_arg_kernel_info(&kernel_info))
-                      : NULL;
+  PolyUOp *body = body_root ? poly_uop(
+                                  ctx, POLY_OP_SINK, POLY_VOID, &body_root, 1,
+                                  poly_arg_kernel_info(&kernel_info)
+                              )
+                            : NULL;
   if (body) {
     PolyUOp **call_src = malloc((size_t)(lctx.map_count + 1) * sizeof(*call_src));
     if (call_src) {
       call_src[0] = body;
-      for (int i = 0; i < lctx.map_count; i++) call_src[i + 1] = lctx.map_values[i];
-      ret = poly_uop(
-          ctx, POLY_OP_CALL, POLY_VOID, call_src, lctx.map_count + 1, poly_arg_none()
-      );
+      for (int i = 0; i < lctx.map_count; i++)
+        call_src[i + 1] = lctx.map_values[i];
+      ret = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, call_src, lctx.map_count + 1, poly_arg_none());
       free(call_src);
     }
   }
@@ -883,8 +838,8 @@ static bool mops_shape_equal(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
     PolyUOp *bd = poly_uop_shape_dim(ctx, b, axis);
     if (ad == bd) continue;
     int64_t av = 0, bv = 0;
-    if (!ad || !bd || poly_uop_const_i64(ad, &av) != 0 ||
-        poly_uop_const_i64(bd, &bv) != 0 || av != bv)
+    if (!ad || !bd || poly_uop_const_i64(ad, &av) != 0 || poly_uop_const_i64(bd, &bv) != 0 ||
+        av != bv)
       return false;
   }
   return true;
@@ -895,8 +850,7 @@ static PolyUOp *mop_index(PolyCtx *ctx, PolyUOp *idx, const PolyBindings *bindin
   (void)bindings;
   if (!ctx || !idx || idx->op != POLY_OP_INDEX || idx->n_src < 2) return NULL;
   PolyUOp *movement = idx->src[0];
-  if (!movement || !poly_opset_has(POLY_GROUP_MOVEMENT, movement->op) ||
-      movement->n_src < 1)
+  if (!movement || !poly_opset_has(POLY_GROUP_MOVEMENT, movement->op) || movement->n_src < 1)
     return NULL;
 
   int n_idx = idx->n_src - 1;
@@ -916,9 +870,7 @@ static PolyUOp *mop_index(PolyCtx *ctx, PolyUOp *idx, const PolyBindings *bindin
       return NULL;
   } else {
     if (movement->op != POLY_OP_RESHAPE ||
-        !poly_reshape_indices(
-            ctx, movement, idx->src + 1, n_idx, transformed, &n_transformed
-        ))
+        !poly_reshape_indices(ctx, movement, idx->src + 1, n_idx, transformed, &n_transformed))
       return NULL;
     if (n_transformed == 0)
       return poly_dtype_eq(movement->src[0]->dtype, idx->dtype) ? movement->src[0] : NULL;
@@ -927,7 +879,8 @@ static PolyUOp *mop_index(PolyCtx *ctx, PolyUOp *idx, const PolyBindings *bindin
 
   PolyUOp *src[POLY_MAX_DIMS + 1];
   src[0] = movement->src[0];
-  for (int i = 0; i < n_transformed; i++) src[i + 1] = transformed[i];
+  for (int i = 0; i < n_transformed; i++)
+    src[i + 1] = transformed[i];
   PolyUOp *ret = poly_uop(ctx, POLY_OP_INDEX, idx->dtype, src, n_transformed + 1, idx->arg);
   if (!ret) return NULL;
   return n_idx == movement_ndim || mops_shape_equal(ctx, ret, idx) ? ret : NULL;
@@ -1004,8 +957,7 @@ PolyPatternMatcher *poly_pm_mops(void) {
        mops_move_after},
       {poly_upat_allow_any_len(poly_upat_op(POLY_OP_END, end_src, 1, "end")), mops_end_movement},
   };
-  g_pm_mops =
-      poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
+  g_pm_mops = poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
   return g_pm_mops;
 }
 
@@ -1110,7 +1062,8 @@ static bool split_reduceop_expanded_axes(
 }
 
 static PolyUOp *split_reduceop(PolyCtx *ctx, PolyUOp *reduce, PolyUOp *x) {
-  if (!ctx || !(reduce->op == POLY_OP_REDUCE && reduce->arg.kind == POLY_ARG_REDUCE) || !x || !poly_getenv_flag_default("SPLIT_REDUCEOP", true))
+  if (!ctx || !(reduce->op == POLY_OP_REDUCE && reduce->arg.kind == POLY_ARG_REDUCE) || !x ||
+      !poly_getenv_flag_default("SPLIT_REDUCEOP", true))
     return NULL;
 
   int64_t x_dims[POLY_MAX_DIMS], out_dims[POLY_MAX_DIMS];
@@ -1171,19 +1124,18 @@ static PolyUOp *split_reduceop(PolyCtx *ctx, PolyUOp *reduce, PolyUOp *x) {
   PolyUOp *reshaped = poly_reshape(ctx, x, split_shape, split_ndim);
   PolyUOp *permuted = reshaped ? poly_permute(ctx, reshaped, permutation, split_ndim) : NULL;
   int64_t first_axes[POLY_MAX_DIMS];
-  for (int i = 0; i < reduce->arg.reduce.num_axes; i++) first_axes[i] = i;
+  for (int i = 0; i < reduce->arg.reduce.num_axes; i++)
+    first_axes[i] = i;
   PolyUOp *first =
       permuted ? poly_reduce_axis(
-                     ctx, reduce->arg.reduce.op, permuted, first_axes,
-                     reduce->arg.reduce.num_axes
+                     ctx, reduce->arg.reduce.op, permuted, first_axes, reduce->arg.reduce.num_axes
                  )
                : NULL;
   PolyUOp *contiguous =
       first ? poly_uop1(ctx, POLY_OP_CONTIGUOUS, first->dtype, first, poly_arg_none()) : NULL;
   int64_t second_axis[] = {out_ndim};
   PolyUOp *second =
-      contiguous ? poly_reduce_axis(ctx, reduce->arg.reduce.op, contiguous, second_axis, 1)
-                 : NULL;
+      contiguous ? poly_reduce_axis(ctx, reduce->arg.reduce.op, contiguous, second_axis, 1) : NULL;
   PolyUOp *result = second ? poly_reshape(ctx, second, out_dims, out_ndim) : NULL;
 
   if (result && poly_debug_at_least(3)) {
@@ -1200,8 +1152,8 @@ static PolyUOp *split_reduceop(PolyCtx *ctx, PolyUOp *reduce, PolyUOp *x) {
  * small collectives on any device count. Keep the unported ring/all-to-all
  * branches fail-closed instead of allowing raw ALLREDUCE to reach codegen. */
 static PolyUOp *rangeify_resolve_function(PolyCtx *ctx, PolyUOp *call) {
-  if (!ctx || !call || call->op != POLY_OP_FUNCTION || call->n_src < 1 ||
-      !call->src[0] || call->src[0]->op != POLY_OP_TUPLE)
+  if (!ctx || !call || call->op != POLY_OP_FUNCTION || call->n_src < 1 || !call->src[0] ||
+      call->src[0]->op != POLY_OP_TUPLE)
     return NULL;
   PolyUOp *body = call->src[0];
   int n_topo = 0;
@@ -1237,8 +1189,7 @@ static PolyUOp *rangeify_resolve_function(PolyCtx *ctx, PolyUOp *call) {
     bool arg_has_axis = poly_uop_axis(ctx, arg, &arg_axis);
     PolyShape param_shape = poly_uop_max_shape_cached(ctx, param);
     PolyShape arg_shape = poly_uop_max_shape_cached(ctx, arg);
-    if (!arg || param_has_axis != arg_has_axis ||
-        (param_has_axis && param_axis != arg_axis) ||
+    if (!arg || param_has_axis != arg_has_axis || (param_has_axis && param_axis != arg_axis) ||
         param_shape.ndim < 0 || arg_shape.ndim != param_shape.ndim ||
         !poly_dtype_eq(param->dtype, arg->dtype)) {
       ok = false;
@@ -1246,46 +1197,36 @@ static PolyUOp *rangeify_resolve_function(PolyCtx *ctx, PolyUOp *call) {
     }
     for (int d = 0; d < param_shape.ndim; d++)
       if (param_shape.dims[d] != arg_shape.dims[d]) ok = false;
-    if (ok)
-      poly_map_set(sub_map, poly_ptr_hash(param), param, arg, poly_ptr_eq);
+    if (ok) poly_map_set(sub_map, poly_ptr_hash(param), param, arg, poly_ptr_eq);
   }
 
   for (int i = 0; ok && i < n_topo; i++) {
     PolyUOp *u = topo[i];
-    PolyUOp *result = poly_map_get(
-        sub_map, poly_ptr_hash(u), u, poly_ptr_eq);
+    PolyUOp *result = poly_map_get(sub_map, poly_ptr_hash(u), u, poly_ptr_eq);
     if (!result) {
       PolyUOp *src_stack[16];
-      PolyUOp **src = u->n_src > 16
-                          ? malloc((size_t)u->n_src * sizeof(*src))
-                          : src_stack;
+      PolyUOp **src = u->n_src > 16 ? malloc((size_t)u->n_src * sizeof(*src)) : src_stack;
       if (!src) {
         ok = false;
         break;
       }
       bool changed = false;
       for (int s = 0; s < u->n_src; s++) {
-        PolyUOp *mapped = poly_map_get(
-            memo, poly_ptr_hash(u->src[s]), u->src[s], poly_ptr_eq);
+        PolyUOp *mapped = poly_map_get(memo, poly_ptr_hash(u->src[s]), u->src[s], poly_ptr_eq);
         src[s] = mapped ? mapped : u->src[s];
         if (src[s] != u->src[s]) changed = true;
       }
-      result = changed
-                   ? rangeify_clone_preserving_metadata(ctx, u, src, u->n_src)
-                   : u;
+      result = changed ? rangeify_clone_preserving_metadata(ctx, u, src, u->n_src) : u;
       if (src != src_stack) free(src);
     }
     if (!result) {
       ok = false;
       break;
     }
-    if (result != u)
-      poly_map_set(memo, poly_ptr_hash(u), u, result, poly_ptr_eq);
+    if (result != u) poly_map_set(memo, poly_ptr_hash(u), u, result, poly_ptr_eq);
   }
 
-  PolyUOp *ret = ok
-                     ? poly_map_get(memo, poly_ptr_hash(body), body, poly_ptr_eq)
-                     : NULL;
+  PolyUOp *ret = ok ? poly_map_get(memo, poly_ptr_hash(body), body, poly_ptr_eq) : NULL;
   if (ok && !ret) ret = body;
   poly_map_destroy(sub_map);
   poly_map_destroy(memo);
@@ -1299,11 +1240,7 @@ static PolyUOp *rangeify_resolve_function(PolyCtx *ctx, PolyUOp *call) {
  * FUNCTION becomes its substituted TUPLE body, it descends into that body.
  * Keep only FUNCTION resolution in this matcher; the existing earliest pass
  * below then applies the remaining ordered rules to the exposed graph. */
-static PolyUOp *resolve_function_match(
-    PolyCtx *ctx,
-    PolyUOp *call,
-    const PolyBindings *bindings
-) {
+static PolyUOp *resolve_function_match(PolyCtx *ctx, PolyUOp *call, const PolyBindings *bindings) {
   (void)bindings;
   if (!ctx || !call || call->op != POLY_OP_FUNCTION) return NULL;
   if (call->arg.kind == POLY_ARG_CALL_INFO && call->arg.call_info &&
@@ -1314,11 +1251,16 @@ static PolyUOp *resolve_function_match(
 
 static PolyDType bitcast_uint_dtype(int itemsize) {
   switch (itemsize) {
-    case 1: return POLY_UINT8;
-    case 2: return POLY_UINT16;
-    case 4: return POLY_UINT32;
-    case 8: return POLY_UINT64;
-    default: return POLY_VOID;
+  case 1:
+    return POLY_UINT8;
+  case 2:
+    return POLY_UINT16;
+  case 4:
+    return POLY_UINT32;
+  case 8:
+    return POLY_UINT64;
+  default:
+    return POLY_VOID;
   }
 }
 
@@ -1332,16 +1274,14 @@ static PolyUOp *expand_bitcast(PolyCtx *ctx, PolyUOp *bc, PolyUOp *x) {
   int os = poly_dtype_itemsize(x->dtype);
   if (ns <= 0 || os <= 0 || ns == os) return NULL;
   const char *device = poly_uop_device_name(ctx, x);
-  if (device &&
-      (strncmp(device, "DISK", 4) == 0 || strncmp(device, "TINYFS", 6) == 0))
-    return NULL;
+  if (device && (strncmp(device, "DISK", 4) == 0 || strncmp(device, "TINYFS", 6) == 0)) return NULL;
 
   PolyDType old_uint = bitcast_uint_dtype(os);
   PolyDType new_uint = bitcast_uint_dtype(ns);
   if (poly_dtype_eq(old_uint, POLY_VOID) || poly_dtype_eq(new_uint, POLY_VOID)) return NULL;
   PolyUOp *tmp = poly_dtype_eq(x->dtype, old_uint)
-                       ? x
-                       : poly_uop1(ctx, POLY_OP_BITCAST, old_uint, x, poly_arg_none());
+                     ? x
+                     : poly_uop1(ctx, POLY_OP_BITCAST, old_uint, x, poly_arg_none());
   int ndim = poly_uop_ndim(ctx, x);
   if (!tmp || ndim <= 0 || ndim > POLY_MAX_DIMS) return NULL;
 
@@ -1353,15 +1293,13 @@ static PolyUOp *expand_bitcast(PolyCtx *ctx, PolyUOp *bc, PolyUOp *x) {
       reshape_shape[axis] = poly_uop_shape_dim(ctx, x, axis);
     PolyUOp *last = poly_uop_shape_dim(ctx, x, ndim - 1);
     PolyUOp *rate_uop = rangeify_index_const(ctx, rate);
-    reshape_shape[ndim - 1] = last && rate_uop
-                                  ? poly_uop2(
-                                        ctx, POLY_OP_FLOORDIV, POLY_WEAKINT, last,
-                                        rate_uop, poly_arg_none())
-                                  : NULL;
-    reshape_shape[ndim - 1] = reshape_shape[ndim - 1]
-                                  ? poly_graph_rewrite(
-                                        ctx, reshape_shape[ndim - 1], poly_symbolic())
-                                  : NULL;
+    reshape_shape[ndim - 1] =
+        last && rate_uop
+            ? poly_uop2(ctx, POLY_OP_FLOORDIV, POLY_WEAKINT, last, rate_uop, poly_arg_none())
+            : NULL;
+    reshape_shape[ndim - 1] =
+        reshape_shape[ndim - 1] ? poly_graph_rewrite(ctx, reshape_shape[ndim - 1], poly_symbolic())
+                                : NULL;
     reshape_shape[ndim] = rate_uop;
     for (int axis = 0; axis <= ndim; axis++)
       if (!reshape_shape[axis]) return NULL;
@@ -1407,95 +1345,78 @@ static PolyUOp *expand_bitcast(PolyCtx *ctx, PolyUOp *bc, PolyUOp *x) {
     flattened_shape[axis] = poly_uop_shape_dim(ctx, stacked, axis);
   PolyUOp *left = poly_uop_shape_dim(ctx, stacked, ndim - 1);
   PolyUOp *right = poly_uop_shape_dim(ctx, stacked, ndim);
-  flattened_shape[ndim - 1] = left && right
-                                  ? poly_uop2(
-                                        ctx, POLY_OP_MUL, POLY_WEAKINT, left, right,
-                                        poly_arg_none())
-                                  : NULL;
-  flattened_shape[ndim - 1] = flattened_shape[ndim - 1]
-                                  ? poly_graph_rewrite(
-                                        ctx, flattened_shape[ndim - 1], poly_symbolic())
-                                  : NULL;
+  flattened_shape[ndim - 1] =
+      left && right ? poly_uop2(ctx, POLY_OP_MUL, POLY_WEAKINT, left, right, poly_arg_none())
+                    : NULL;
+  flattened_shape[ndim - 1] =
+      flattened_shape[ndim - 1]
+          ? poly_graph_rewrite(ctx, flattened_shape[ndim - 1], poly_symbolic())
+          : NULL;
   if (!flattened_shape[ndim - 1]) return NULL;
   PolyUOp *flattened = poly_reshape_uop(ctx, stacked, flattened_shape, ndim);
   flattened = flattened ? poly_cast(ctx, flattened, new_uint) : NULL;
-  return flattened
-             ? poly_uop1(ctx, POLY_OP_BITCAST, bc->dtype, flattened, poly_arg_none())
-             : NULL;
+  return flattened ? poly_uop1(ctx, POLY_OP_BITCAST, bc->dtype, flattened, poly_arg_none()) : NULL;
 }
 
 /* Current Tinygrad schedule/rangeify.py:earliest_rewrites. */
-static PolyUOp *earliest_gettuple(
-    PolyCtx *ctx, PolyUOp *g, const PolyBindings *bindings
-) {
+static PolyUOp *earliest_gettuple(PolyCtx *ctx, PolyUOp *g, const PolyBindings *bindings) {
   (void)ctx;
   (void)bindings;
-  if (!g || g->op != POLY_OP_GETTUPLE || g->n_src != 1 ||
-      g->src[0]->op != POLY_OP_TUPLE || g->arg.kind != POLY_ARG_INT ||
-      g->arg.i < 0 || g->arg.i >= g->src[0]->n_src)
+  if (!g || g->op != POLY_OP_GETTUPLE || g->n_src != 1 || g->src[0]->op != POLY_OP_TUPLE ||
+      g->arg.kind != POLY_ARG_INT || g->arg.i < 0 || g->arg.i >= g->src[0]->n_src)
     return NULL;
   return g->src[0]->src[g->arg.i];
 }
 
-static PolyUOp *earliest_allreduce(
-    PolyCtx *ctx, PolyUOp *red, const PolyBindings *bindings
-) {
+static PolyUOp *earliest_allreduce(PolyCtx *ctx, PolyUOp *red, const PolyBindings *bindings) {
   (void)bindings;
   return poly_create_allreduce_function(ctx, red);
 }
 
 static PolyUOp *earliest_split_reduceop(
-    PolyCtx *ctx, PolyUOp *reduce, const PolyBindings *bindings
+    PolyCtx *ctx,
+    PolyUOp *reduce,
+    const PolyBindings *bindings
 ) {
   (void)bindings;
-  return reduce && reduce->n_src == 1
-             ? split_reduceop(ctx, reduce, reduce->src[0])
-             : NULL;
+  return reduce && reduce->n_src == 1 ? split_reduceop(ctx, reduce, reduce->src[0]) : NULL;
 }
 
 static PolyUOp *earliest_remove_passthrough(
-    PolyCtx *ctx, PolyUOp *x, const PolyBindings *bindings
+    PolyCtx *ctx,
+    PolyUOp *x,
+    const PolyBindings *bindings
 ) {
   (void)ctx;
   (void)bindings;
   return x && x->n_src == 1 ? x->src[0] : NULL;
 }
 
-static PolyUOp *earliest_sink_bases(
-    PolyCtx *ctx, PolyUOp *sink, const PolyBindings *bindings
-) {
+static PolyUOp *earliest_sink_bases(PolyCtx *ctx, PolyUOp *sink, const PolyBindings *bindings) {
   (void)bindings;
   if (!sink || sink->op != POLY_OP_SINK) return NULL;
   PolyUOp *inline_src[16];
-  PolyUOp **src = sink->n_src <= 16
-                      ? inline_src
-                      : malloc((size_t)sink->n_src * sizeof(*src));
+  PolyUOp **src = sink->n_src <= 16 ? inline_src : malloc((size_t)sink->n_src * sizeof(*src));
   if (!src) return NULL;
   bool changed = false;
   for (int i = 0; i < sink->n_src; i++) {
     src[i] = poly_uop_unsharded_base(sink->src[i]);
     changed |= src[i] != sink->src[i];
   }
-  PolyUOp *ret = changed
-                     ? rangeify_clone_preserving_metadata(ctx, sink, src, sink->n_src)
-                     : NULL;
+  PolyUOp *ret = changed ? rangeify_clone_preserving_metadata(ctx, sink, src, sink->n_src) : NULL;
   if (src != inline_src) free(src);
   return ret;
 }
 
 static PolyUOp *copy_target_device(PolyCtx *ctx, PolyUOp *copy) {
   if (!copy || copy->op != POLY_OP_COPY || copy->n_src != 1) return NULL;
-  if (copy->arg.kind == POLY_ARG_STRING)
-    return poly_device_uop_from_name(ctx, copy->arg.str);
+  if (copy->arg.kind == POLY_ARG_STRING) return poly_device_uop_from_name(ctx, copy->arg.str);
   if (copy->arg.kind == POLY_ARG_STRING_TUPLE)
-    return poly_device_uop_from_names(
-        ctx, copy->arg.string_tuple.vals, copy->arg.string_tuple.n);
+    return poly_device_uop_from_names(ctx, copy->arg.string_tuple.vals, copy->arg.string_tuple.n);
   return NULL;
 }
 
-static PolyUOp *earliest_copy_movement(
-    PolyCtx *ctx, PolyUOp *copy, const PolyBindings *bindings
-) {
+static PolyUOp *earliest_copy_movement(PolyCtx *ctx, PolyUOp *copy, const PolyBindings *bindings) {
   (void)bindings;
   if (!copy || copy->op != POLY_OP_COPY || copy->n_src != 1 ||
       !poly_opset_has(POLY_GROUP_MOVEMENT, copy->src[0]->op))
@@ -1511,43 +1432,34 @@ static PolyUOp *earliest_copy_movement(
   if (numel < 0 || base_numel < 0 || (numel == base_numel && contiguous_view)) return NULL;
   PolyUOp *contiguous = poly_contiguous(ctx, movement);
   PolyUOp *src[] = {contiguous};
-  return contiguous
-             ? rangeify_clone_preserving_metadata(ctx, copy, src, 1)
-             : NULL;
+  return contiguous ? rangeify_clone_preserving_metadata(ctx, copy, src, 1) : NULL;
 }
 
 static PolyUOp *earliest_copy_same_device(
-    PolyCtx *ctx, PolyUOp *copy, const PolyBindings *bindings
+    PolyCtx *ctx,
+    PolyUOp *copy,
+    const PolyBindings *bindings
 ) {
   (void)bindings;
   PolyUOp *device = copy_target_device(ctx, copy);
-  PolyUOp *source_device = copy && copy->n_src == 1
-                               ? poly_uop_device_uop_cached(ctx, copy->src[0], NULL)
-                               : NULL;
+  PolyUOp *source_device =
+      copy && copy->n_src == 1 ? poly_uop_device_uop_cached(ctx, copy->src[0], NULL) : NULL;
   return device && source_device == device ? copy->src[0] : NULL;
 }
 
-static PolyUOp *earliest_copy_reshape(
-    PolyCtx *ctx, PolyUOp *copy, const PolyBindings *bindings
-) {
+static PolyUOp *earliest_copy_reshape(PolyCtx *ctx, PolyUOp *copy, const PolyBindings *bindings) {
   (void)bindings;
   if (!copy || copy->op != POLY_OP_COPY || copy->n_src != 1 ||
       copy->src[0]->op != POLY_OP_RESHAPE || copy->src[0]->n_src < 2)
     return NULL;
   PolyUOp *reshape = copy->src[0];
   PolyUOp *device = copy_target_device(ctx, copy);
-  PolyUOp *inner = device
-                       ? poly_copy_to_device_uop(ctx, reshape->src[0], device)
-                       : NULL;
+  PolyUOp *inner = device ? poly_copy_to_device_uop(ctx, reshape->src[0], device) : NULL;
   PolyUOp *src[] = {inner, reshape->src[1]};
-  return inner
-             ? rangeify_clone_preserving_metadata(ctx, reshape, src, 2)
-             : NULL;
+  return inner ? rangeify_clone_preserving_metadata(ctx, reshape, src, 2) : NULL;
 }
 
-static PolyUOp *earliest_store_reshape(
-    PolyCtx *ctx, PolyUOp *store, const PolyBindings *bindings
-) {
+static PolyUOp *earliest_store_reshape(PolyCtx *ctx, PolyUOp *store, const PolyBindings *bindings) {
   (void)bindings;
   if (!store || store->op != POLY_OP_STORE || store->n_src != 2 ||
       store->src[0]->op != POLY_OP_RESHAPE || store->src[1]->op != POLY_OP_RESHAPE ||
@@ -1560,9 +1472,7 @@ static PolyUOp *earliest_store_reshape(
              : NULL;
 }
 
-static PolyUOp *earliest_dedup_store(
-    PolyCtx *ctx, PolyUOp *outer, const PolyBindings *bindings
-) {
+static PolyUOp *earliest_dedup_store(PolyCtx *ctx, PolyUOp *outer, const PolyBindings *bindings) {
   (void)ctx;
   (void)bindings;
   if (!outer || outer->op != POLY_OP_AFTER || outer->n_src != 2 ||
@@ -1572,66 +1482,59 @@ static PolyUOp *earliest_dedup_store(
   PolyUOp *inner = outer->src[0];
   PolyUOp *first = inner->src[1];
   PolyUOp *second = outer->src[1];
-  if (first->op != POLY_OP_STORE || first->n_src != 2 ||
-      inner->src[0] != first->src[0] || inner != second->src[0] ||
-      first->src[1] != second->src[1])
+  if (first->op != POLY_OP_STORE || first->n_src != 2 || inner->src[0] != first->src[0] ||
+      inner != second->src[0] || first->src[1] != second->src[1])
     return NULL;
   return inner;
 }
 
 static PolyUOp *earliest_remove_nested_store(
-    PolyCtx *ctx, PolyUOp *after, const PolyBindings *bindings
+    PolyCtx *ctx,
+    PolyUOp *after,
+    const PolyBindings *bindings
 ) {
   (void)ctx;
   (void)bindings;
   if (!after || after->op != POLY_OP_AFTER || after->n_src != 2 ||
       after->src[1]->op != POLY_OP_STORE || after->src[1]->n_src != 2 ||
-      after->src[1]->src[1]->op != POLY_OP_AFTER ||
-      after->src[1]->src[1]->n_src != 2)
+      after->src[1]->src[1]->op != POLY_OP_AFTER || after->src[1]->src[1]->n_src != 2)
     return NULL;
   PolyUOp *buf = after->src[0];
   PolyUOp *outer_store = after->src[1];
   PolyUOp *inner = outer_store->src[1];
   PolyUOp *inner_store = inner->src[1];
   return inner_store->op == POLY_OP_STORE && inner_store->n_src == 2 &&
-                 outer_store->src[0] == buf && inner->src[0] == buf &&
-                 inner_store->src[0] == buf
+                 outer_store->src[0] == buf && inner->src[0] == buf && inner_store->src[0] == buf
              ? inner
              : NULL;
 }
 
 static PolyUOp *earliest_fix_store_hazard(
-    PolyCtx *ctx, PolyUOp *store, const PolyBindings *bindings
+    PolyCtx *ctx,
+    PolyUOp *store,
+    const PolyBindings *bindings
 ) {
   (void)bindings;
-  return store && store->n_src == 2
-             ? fix_store_hazard(ctx, store->src[0], store->src[1])
-             : NULL;
+  return store && store->n_src == 2 ? fix_store_hazard(ctx, store->src[0], store->src[1]) : NULL;
 }
 
-static PolyUOp *earliest_store_bitcast(
-    PolyCtx *ctx, PolyUOp *store, const PolyBindings *bindings
-) {
+static PolyUOp *earliest_store_bitcast(PolyCtx *ctx, PolyUOp *store, const PolyBindings *bindings) {
   (void)bindings;
   if (!store || store->op != POLY_OP_STORE || store->n_src != 2 ||
       store->src[0]->op != POLY_OP_BITCAST || store->src[0]->n_src != 1)
     return NULL;
   PolyUOp *target = store->src[0]->src[0];
-  PolyUOp *value = poly_uop1(
-      ctx, POLY_OP_BITCAST, target->dtype, store->src[1], poly_arg_dtype(target->dtype));
+  PolyUOp *value =
+      poly_uop1(ctx, POLY_OP_BITCAST, target->dtype, store->src[1], poly_arg_dtype(target->dtype));
   return value ? poly_store_val(ctx, target, value) : NULL;
 }
 
-static PolyUOp *earliest_expand_bitcast(
-    PolyCtx *ctx, PolyUOp *bc, const PolyBindings *bindings
-) {
+static PolyUOp *earliest_expand_bitcast(PolyCtx *ctx, PolyUOp *bc, const PolyBindings *bindings) {
   (void)bindings;
   return bc && bc->n_src == 1 ? expand_bitcast(ctx, bc, bc->src[0]) : NULL;
 }
 
-static PolyUOp *earliest_zero_reduce(
-    PolyCtx *ctx, PolyUOp *reduce, const PolyBindings *bindings
-) {
+static PolyUOp *earliest_zero_reduce(PolyCtx *ctx, PolyUOp *reduce, const PolyBindings *bindings) {
   (void)bindings;
   if (!reduce || reduce->op != POLY_OP_REDUCE || reduce->n_src != 1 ||
       reduce->arg.kind != POLY_ARG_REDUCE)
@@ -1639,21 +1542,22 @@ static PolyUOp *earliest_zero_reduce(
   PolyShape input = poly_uop_max_shape_cached(ctx, reduce->src[0]);
   PolyShape output = poly_uop_max_shape_cached(ctx, reduce);
   bool input_zero = false, output_zero = false;
-  for (int i = 0; i < input.ndim; i++) input_zero |= input.dims[i] == 0;
-  for (int i = 0; i < output.ndim; i++) output_zero |= output.dims[i] == 0;
+  for (int i = 0; i < input.ndim; i++)
+    input_zero |= input.dims[i] == 0;
+  for (int i = 0; i < output.ndim; i++)
+    output_zero |= output.dims[i] == 0;
   if (!input_zero || output_zero) return NULL;
   PolyUOp *identity = poly_identity_element(ctx, reduce->arg.reduce.op, reduce->dtype);
   return identity ? poly_const_like(ctx, reduce, identity->arg) : NULL;
 }
 
-static PolyUOp *earliest_zero_shape(
-    PolyCtx *ctx, PolyUOp *x, const PolyBindings *bindings
-) {
+static PolyUOp *earliest_zero_shape(PolyCtx *ctx, PolyUOp *x, const PolyBindings *bindings) {
   (void)bindings;
   if (!x || x->op == POLY_OP_SINK) return NULL;
   PolyShape shape = poly_uop_max_shape_cached(ctx, x);
   bool has_zero = false;
-  for (int i = 0; i < shape.ndim; i++) has_zero |= shape.dims[i] == 0;
+  for (int i = 0; i < shape.ndim; i++)
+    has_zero |= shape.dims[i] == 0;
   if (!has_zero) return NULL;
   PolyArg zero = poly_dtype_is_float(x->dtype)  ? poly_arg_float(0.0)
                  : poly_dtype_is_bool(x->dtype) ? poly_arg_bool(false)
@@ -1661,8 +1565,8 @@ static PolyUOp *earliest_zero_shape(
   PolyUOp *ret = poly_const_like(ctx, x, zero);
   return ret && (x->tag != 0 || x->tag_arg.kind != POLY_ARG_NONE)
              ? poly_uop_tagged_arg(
-                   ctx, ret->op, ret->dtype, ret->src, ret->n_src, ret->arg,
-                   x->tag, x->tag_arg)
+                   ctx, ret->op, ret->dtype, ret->src, ret->n_src, ret->arg, x->tag, x->tag_arg
+               )
              : ret;
 }
 
@@ -1670,15 +1574,17 @@ static _Thread_local PolyPatternMatcher *g_earliest_rewrites = NULL;
 static PolyPatternMatcher *earliest_rewrites(void) {
   if (g_earliest_rewrites) return g_earliest_rewrites;
   PolyOpSet passthrough = poly_opset_add(
-      poly_opset_add((PolyOpSet){{0, 0}}, POLY_OP_DETACH),
-      POLY_OP_CONTIGUOUS_BACKWARD);
+      poly_opset_add((PolyOpSet){{0, 0}}, POLY_OP_DETACH), POLY_OP_CONTIGUOUS_BACKWARD
+  );
   PolyNamedRule rules[] = {
       POLY_RULE(poly_upat_op(POLY_OP_FUNCTION, NULL, 0, "c"), resolve_function_match),
       POLY_RULE(poly_upat_op(POLY_OP_GETTUPLE, NULL, 0, "g"), earliest_gettuple),
       POLY_RULE(poly_upat_op(POLY_OP_ALLREDUCE, NULL, 0, "red"), earliest_allreduce),
       POLY_RULE(poly_upat_op(POLY_OP_REDUCE, NULL, 0, "reduce"), earliest_split_reduceop),
       POLY_RULE(poly_upat_ops(passthrough, NULL, 0, "x"), earliest_remove_passthrough),
-      POLY_RULE(poly_upat_allow_any_len(poly_upat_op(POLY_OP_SINK, NULL, 0, "x")), earliest_sink_bases),
+      POLY_RULE(
+          poly_upat_allow_any_len(poly_upat_op(POLY_OP_SINK, NULL, 0, "x")), earliest_sink_bases
+      ),
       POLY_RULE(poly_upat_op(POLY_OP_COPY, NULL, 0, "copy"), earliest_copy_movement),
       POLY_RULE(poly_upat_op(POLY_OP_COPY, NULL, 0, "copy"), earliest_copy_same_device),
       POLY_RULE(poly_upat_op(POLY_OP_COPY, NULL, 0, "copy"), earliest_copy_reshape),
@@ -1691,8 +1597,7 @@ static PolyPatternMatcher *earliest_rewrites(void) {
       POLY_RULE(poly_upat_op(POLY_OP_REDUCE, NULL, 0, "reduce"), earliest_zero_reduce),
       POLY_RULE(poly_upat_any("x"), earliest_zero_shape),
   };
-  PolyPatternMatcher *specific = poly_pm_new_named(
-      rules, (int)(sizeof(rules) / sizeof(rules[0])));
+  PolyPatternMatcher *specific = poly_pm_new_named(rules, (int)(sizeof(rules) / sizeof(rules[0])));
   PolyPatternMatcher *mops_cleanup = poly_pm_concat(poly_pm_mops(), poly_mop_cleanup());
   PolyPatternMatcher *combined = poly_pm_concat(mops_cleanup, specific);
   g_earliest_rewrites = poly_pm_thread_cache(combined);
@@ -1703,8 +1608,7 @@ static PolyPatternMatcher *earliest_rewrites(void) {
 
 /* Current tinygrad schedule/rangeify.py:earliest_rewrites. */
 PolyUOp *poly_apply_earliest_rewrites(PolyCtx *ctx, PolyUOp *sink) {
-  return poly_graph_rewrite_ctx_ex2(
-      ctx, sink, earliest_rewrites(), NULL, true, false);
+  return poly_graph_rewrite_ctx_ex2(ctx, sink, earliest_rewrites(), NULL, true, false);
 }
 
 static bool rangeify_always_run(PolyUOp *u) {
@@ -1712,11 +1616,7 @@ static bool rangeify_always_run(PolyUOp *u) {
 }
 
 /* Current Tinygrad schedule/rangeify.py:cleanup_dead_axes. */
-static PolyUOp *cleanup_dead_axes(
-    PolyCtx *ctx,
-    PolyUOp *stage,
-    const PolyBindings *bindings
-) {
+static PolyUOp *cleanup_dead_axes(PolyCtx *ctx, PolyUOp *stage, const PolyBindings *bindings) {
   (void)bindings;
   if (!stage || stage->op != POLY_OP_STAGE || stage->n_src < 1 ||
       !poly_bufferize_arg_removable(stage->arg) || rangeify_always_run(stage->src[0]) ||
@@ -1733,12 +1633,10 @@ static PolyUOp *cleanup_dead_axes(
   src[0] = stage->src[0];
   for (int i = 0; i < n_axes; i++) {
     PolyUOp *range = stage->src[i + 1];
-    if (range->op == POLY_OP_RANGE &&
-        (range->n_src != 1 || range->src[0]->op != POLY_OP_CONST))
+    if (range->op == POLY_OP_RANGE && (range->n_src != 1 || range->src[0]->op != POLY_OP_CONST))
       return NULL;
     bool dead = range->op == POLY_OP_CONST ||
-                (range->op == POLY_OP_RANGE &&
-                 !poly_uop_in_ranges(ctx, stage->src[0], range));
+                (range->op == POLY_OP_RANGE && !poly_uop_in_ranges(ctx, stage->src[0], range));
     reshape[i] = dead ? 1 : shape.dims[i];
     if (dead)
       hit = true;
@@ -1747,19 +1645,14 @@ static PolyUOp *cleanup_dead_axes(
   }
   if (!hit) return NULL;
   PolyUOp *trimmed = poly_uop_tagged_arg(
-      ctx, stage->op, stage->dtype, src, n_live + 1, stage->arg, stage->tag,
-      stage->tag_arg
+      ctx, stage->op, stage->dtype, src, n_live + 1, stage->arg, stage->tag, stage->tag_arg
   );
   PolyUOp *reshaped = trimmed ? poly_reshape(ctx, trimmed, reshape, n_axes) : NULL;
   return reshaped ? poly_expand(ctx, reshaped, shape.dims, shape.ndim) : NULL;
 }
 
 /* Current Tinygrad schedule/rangeify.py:remove_noop_bufferize. */
-static PolyUOp *remove_noop_bufferize(
-    PolyCtx *ctx,
-    PolyUOp *stage,
-    const PolyBindings *bindings
-) {
+static PolyUOp *remove_noop_bufferize(PolyCtx *ctx, PolyUOp *stage, const PolyBindings *bindings) {
   (void)bindings;
   if (!stage || stage->op != POLY_OP_STAGE || stage->n_src < 1) return NULL;
   PolyUOp *index = stage->src[0];
@@ -1778,20 +1671,13 @@ static PolyUOp *remove_noop_bufferize(
   return poly_shrink(ctx, index->src[0], bounds, shape.ndim);
 }
 
-static PolyUOp *fold_const_buffer(
-    PolyCtx *ctx,
-    PolyUOp *root,
-    const PolyBindings *bindings
-) {
+static PolyUOp *fold_const_buffer(PolyCtx *ctx, PolyUOp *root, const PolyBindings *bindings) {
   (void)bindings;
-  if (root->op == POLY_OP_STAGE && root->n_src > 0 &&
-      root->src[0]->op == POLY_OP_CONST)
+  if (root->op == POLY_OP_STAGE && root->n_src > 0 && root->src[0]->op == POLY_OP_CONST)
     return poly_const_like(ctx, root, root->src[0]->arg);
-  if (root->op == POLY_OP_INDEX && root->n_src > 0 &&
-      root->src[0]->op == POLY_OP_CONST)
+  if (root->op == POLY_OP_INDEX && root->n_src > 0 && root->src[0]->op == POLY_OP_CONST)
     return root->src[0];
-  if (root->op == POLY_OP_NOOP && root->n_src == 1 &&
-      root->src[0]->op == POLY_OP_CONST)
+  if (root->op == POLY_OP_NOOP && root->n_src == 1 && root->src[0]->op == POLY_OP_CONST)
     return root->src[0];
   return NULL;
 }
@@ -1809,9 +1695,8 @@ static bool after_all_invalid(PolyCtx *ctx, PolyUOp *after) {
     if (!end || end->op != POLY_OP_END || end->n_src < 1) return false;
     PolyUOp *store = end->src[0];
     PolyUOp *value_base = store && store->n_src == 2 ? poly_uop_base(store->src[1]) : NULL;
-    if (!store || store->op != POLY_OP_STORE || store->n_src != 2 ||
-        !value_base || value_base->op != POLY_OP_CONST ||
-        value_base->arg.kind != POLY_ARG_INVALID ||
+    if (!store || store->op != POLY_OP_STORE || store->n_src != 2 || !value_base ||
+        value_base->op != POLY_OP_CONST || value_base->arg.kind != POLY_ARG_INVALID ||
         poly_uop_buf_uop(ctx, store->src[0]) != buf)
       return false;
 
@@ -1845,9 +1730,8 @@ static PolyUOp *index_after_all_invalid(
     const PolyBindings *bindings
 ) {
   (void)bindings;
-  if (!index || index->op != POLY_OP_INDEX || index->n_src < 1 ||
-      !index->src[0] || index->src[0]->op != POLY_OP_AFTER ||
-      !after_all_invalid(ctx, index->src[0]))
+  if (!index || index->op != POLY_OP_INDEX || index->n_src < 1 || !index->src[0] ||
+      index->src[0]->op != POLY_OP_AFTER || !after_all_invalid(ctx, index->src[0]))
     return NULL;
   return poly_const_like(ctx, index, poly_arg_invalid());
 }
@@ -1860,9 +1744,8 @@ static PolyUOp *index_deviceless_mstack(
     const PolyBindings *bindings
 ) {
   (void)bindings;
-  if (!index || index->op != POLY_OP_INDEX || index->n_src < 1 ||
-      !index->src[0] || index->src[0]->op != POLY_OP_MSTACK ||
-      index->src[0]->n_src < 1)
+  if (!index || index->op != POLY_OP_INDEX || index->n_src < 1 || !index->src[0] ||
+      index->src[0]->op != POLY_OP_MSTACK || index->src[0]->n_src < 1)
     return NULL;
   PolyUOp *stack = index->src[0];
   PolyUOp *value = stack->src[0];
@@ -1872,7 +1755,8 @@ static PolyUOp *index_deviceless_mstack(
   PolyUOp **src = malloc((size_t)index->n_src * sizeof(*src));
   if (!src) return NULL;
   src[0] = value;
-  for (int i = 1; i < index->n_src; i++) src[i] = index->src[i];
+  for (int i = 1; i < index->n_src; i++)
+    src[i] = index->src[i];
   PolyUOp *ret = poly_uop_replace_src(ctx, index, src);
   free(src);
   return ret;
@@ -1882,24 +1766,19 @@ static _Thread_local PolyPatternMatcher *g_pm_const_buffer_folding = NULL;
 PolyPatternMatcher *poly_pm_const_buffer_folding(void) {
   if (g_pm_const_buffer_folding) return g_pm_const_buffer_folding;
   PolyRule rules[] = {
-      {poly_upat_allow_any_len(poly_upat_op(POLY_OP_STAGE, NULL, 0, "stage")),
-       cleanup_dead_axes},
+      {poly_upat_allow_any_len(poly_upat_op(POLY_OP_STAGE, NULL, 0, "stage")), cleanup_dead_axes},
       {poly_upat_allow_any_len(poly_upat_op(POLY_OP_STAGE, NULL, 0, "stage")),
        remove_noop_bufferize},
-      {poly_upat_allow_any_len(poly_upat_op(POLY_OP_STAGE, NULL, 0, "stage")),
-       fold_const_buffer},
-      {poly_upat_allow_any_len(poly_upat_op(POLY_OP_INDEX, NULL, 0, "index")),
-       fold_const_buffer},
+      {poly_upat_allow_any_len(poly_upat_op(POLY_OP_STAGE, NULL, 0, "stage")), fold_const_buffer},
+      {poly_upat_allow_any_len(poly_upat_op(POLY_OP_INDEX, NULL, 0, "index")), fold_const_buffer},
       {poly_upat_allow_any_len(poly_upat_op(POLY_OP_INDEX, NULL, 0, "index")),
        index_after_all_invalid},
-      {poly_upat_allow_any_len(poly_upat_op(POLY_OP_NOOP, NULL, 0, "noop")),
-       fold_const_buffer},
+      {poly_upat_allow_any_len(poly_upat_op(POLY_OP_NOOP, NULL, 0, "noop")), fold_const_buffer},
       {poly_upat_allow_any_len(poly_upat_op(POLY_OP_INDEX, NULL, 0, "index")),
        index_deviceless_mstack},
   };
   PolyPatternMatcher *local = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
-  g_pm_const_buffer_folding =
-      poly_pm_thread_cache(poly_pm_concat(poly_pm_mops(), local));
+  g_pm_const_buffer_folding = poly_pm_thread_cache(poly_pm_concat(poly_pm_mops(), local));
   poly_pm_destroy(local);
   return g_pm_const_buffer_folding;
 }
@@ -2056,20 +1935,15 @@ static int poly_red_gate_collect(
 
 /* Current Tinygrad schedule/rangeify.py:remove_bufferize, default PCONTIG=0
  * path.  Non-default PCONTIG remains registered parity debt. */
-static PolyUOp *remove_bufferize(
-    PolyCtx *ctx,
-    PolyUOp *index,
-    const PolyBindings *bindings
-) {
+static PolyUOp *remove_bufferize(PolyCtx *ctx, PolyUOp *index, const PolyBindings *bindings) {
   (void)bindings;
-  if (!index || index->op != POLY_OP_INDEX || index->n_src < 1 ||
-      !index->src[0] || index->src[0]->op != POLY_OP_STAGE)
+  if (!index || index->op != POLY_OP_INDEX || index->n_src < 1 || !index->src[0] ||
+      index->src[0]->op != POLY_OP_STAGE)
     return NULL;
   PolyUOp *stage = index->src[0];
   if (stage->n_src != index->n_src) return NULL;
   for (int i = 1; i < stage->n_src; i++)
-    if (stage->src[i]->op != POLY_OP_RANGE && stage->src[i]->op != POLY_OP_CONST)
-      return NULL;
+    if (stage->src[i]->op != POLY_OP_RANGE && stage->src[i]->op != POLY_OP_CONST) return NULL;
   PolyUOp *value = stage->src[0];
   if (rangeify_always_run(value) || !poly_bufferize_arg_removable(stage->arg)) return NULL;
 
@@ -2110,8 +1984,7 @@ static PolyUOp *remove_bufferize(
   for (int i = 0; i < n_ranges; i++) {
     PolyUOp *replacement = index->src[i + 1];
     if (stage->src[i + 1]->op == POLY_OP_CONST ||
-        (replacement->op == POLY_OP_CONST &&
-         replacement->arg.kind == POLY_ARG_INVALID))
+        (replacement->op == POLY_OP_CONST && replacement->arg.kind == POLY_ARG_INVALID))
       continue;
     from[n_sub] = stage->src[i + 1];
     to[n_sub++] = replacement;
@@ -2122,16 +1995,11 @@ static PolyUOp *remove_bufferize(
   return ret;
 }
 
-static PolyUOp *store_self_noop(
-    PolyCtx *ctx,
-    PolyUOp *root,
-    const PolyBindings *bindings
-) {
+static PolyUOp *store_self_noop(PolyCtx *ctx, PolyUOp *root, const PolyBindings *bindings) {
   (void)bindings;
   if (root->op == POLY_OP_STORE && root->n_src == 2 && root->src[0] == root->src[1])
     return poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_none());
-  if (root->op == POLY_OP_END && root->n_src >= 1 &&
-      root->src[0]->op == POLY_OP_NOOP)
+  if (root->op == POLY_OP_END && root->n_src >= 1 && root->src[0]->op == POLY_OP_NOOP)
     return root->src[0];
   return NULL;
 }
@@ -2140,29 +2008,22 @@ static _Thread_local PolyPatternMatcher *g_pm_remove_bufferize = NULL;
 static PolyPatternMatcher *poly_pm_remove_bufferize(void) {
   if (g_pm_remove_bufferize) return g_pm_remove_bufferize;
   PolyRule rules[] = {
-      {poly_upat_allow_any_len(poly_upat_op(POLY_OP_INDEX, NULL, 0, "index")),
-       remove_bufferize},
-      {poly_upat_allow_any_len(poly_upat_op(POLY_OP_STORE, NULL, 0, "store")),
-       store_self_noop},
-      {poly_upat_allow_any_len(poly_upat_op(POLY_OP_END, NULL, 0, "end")),
-       store_self_noop},
+      {poly_upat_allow_any_len(poly_upat_op(POLY_OP_INDEX, NULL, 0, "index")), remove_bufferize},
+      {poly_upat_allow_any_len(poly_upat_op(POLY_OP_STORE, NULL, 0, "store")), store_self_noop},
+      {poly_upat_allow_any_len(poly_upat_op(POLY_OP_END, NULL, 0, "end")), store_self_noop},
   };
-  g_pm_remove_bufferize = poly_pm_thread_cache(
-      poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])))
-  );
+  g_pm_remove_bufferize =
+      poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
   return g_pm_remove_bufferize;
 }
 
 static _Thread_local PolyPatternMatcher *g_pm_rangeify_cleanup = NULL;
 static PolyPatternMatcher *poly_pm_rangeify_cleanup(void) {
   if (g_pm_rangeify_cleanup) return g_pm_rangeify_cleanup;
-  PolyPatternMatcher *symbolic_reduce =
-      poly_pm_concat(poly_symbolic(), poly_pm_reduce_simplify());
-  PolyPatternMatcher *with_const =
-      poly_pm_concat(symbolic_reduce, poly_pm_const_buffer_folding());
-  g_pm_rangeify_cleanup = poly_pm_thread_cache(
-      poly_pm_concat(with_const, poly_pm_remove_bufferize())
-  );
+  PolyPatternMatcher *symbolic_reduce = poly_pm_concat(poly_symbolic(), poly_pm_reduce_simplify());
+  PolyPatternMatcher *with_const = poly_pm_concat(symbolic_reduce, poly_pm_const_buffer_folding());
+  g_pm_rangeify_cleanup =
+      poly_pm_thread_cache(poly_pm_concat(with_const, poly_pm_remove_bufferize()));
   poly_pm_destroy(symbolic_reduce);
   poly_pm_destroy(with_const);
   return g_pm_rangeify_cleanup;
@@ -2224,18 +2085,15 @@ static int poly_limit_bufs_max_for_device(PolyUOp *device) {
   int configured = override ? atoi(override) : 0;
   if (configured != 0) return configured;
   if (!device || device->op != POLY_OP_DEVICE) return 0;
-  const char *name = device->arg.kind == POLY_ARG_STRING
-                         ? device->arg.str
-                         : device->arg.kind == POLY_ARG_STRING_TUPLE &&
-                                   device->arg.string_tuple.n > 0
-                               ? device->arg.string_tuple.vals[0]
-                               : NULL;
+  const char *name = device->arg.kind == POLY_ARG_STRING ? device->arg.str
+                     : device->arg.kind == POLY_ARG_STRING_TUPLE && device->arg.string_tuple.n > 0
+                         ? device->arg.string_tuple.vals[0]
+                         : NULL;
   if (!name) return 0;
   /* tinygrad@2026-08-22/a9069c177a9d keeps CPU renderer selections such as
    * CPU:X86 on device CPU. Polygrad exposes those renderers as C devices. */
   if ((strncmp(name, "CPU", 3) == 0 && (name[3] == '\0' || name[3] == ':')) ||
-      strcmp(name, "X86") == 0 || strcmp(name, "INTERP") == 0 ||
-      strcmp(name, "WASM") == 0)
+      strcmp(name, "X86") == 0 || strcmp(name, "INTERP") == 0 || strcmp(name, "WASM") == 0)
     return 31;
   if (strncmp(name, "WEBGPU", 6) == 0 && (name[6] == '\0' || name[6] == ':')) return 8;
   if (strncmp(name, "METAL", 5) == 0 && (name[5] == '\0' || name[5] == ':')) return 31;
@@ -2286,8 +2144,7 @@ static PolyUOp *poly_limit_bufs(PolyCtx *ctx, PolyUOp *sink) {
 
     PolyUOp *result = NULL;
 
-    if (poly_opset_has(POLY_GROUP_BINARY, u->op) ||
-        poly_opset_has(POLY_GROUP_TERNARY, u->op)) {
+    if (poly_opset_has(POLY_GROUP_BINARY, u->op) || poly_opset_has(POLY_GROUP_TERNARY, u->op)) {
       PolyUOp *check_node = src_changed ? poly_uop_replace_src(ctx, u, ns) : u;
       PolyUOp *root_device = poly_bufferize_device_hint(ctx, check_node, device_memo);
       int max_bufs = poly_limit_bufs_max_for_device(root_device);
@@ -2321,9 +2178,7 @@ static PolyUOp *poly_limit_bufs(PolyCtx *ctx, PolyUOp *sink) {
             );
           }
 
-          PolyUOp *sub_s = n_rngs
-                               ? poly_uop_substitute(ctx, s, orig_rngs, end_rngs, n_rngs)
-                               : s;
+          PolyUOp *sub_s = n_rngs ? poly_uop_substitute(ctx, s, orig_rngs, end_rngs, n_rngs) : s;
           PolyUOp *buf_src[POLY_MAX_DIMS + 1];
           buf_src[0] = sub_s;
           for (int d = 0; d < n_rngs; d++)
@@ -2337,10 +2192,7 @@ static PolyUOp *poly_limit_bufs(PolyCtx *ctx, PolyUOp *sink) {
           idx_src[0] = bufferize;
           for (int d = 0; d < n_rngs; d++)
             idx_src[1 + d] = orig_rngs[d];
-          ns[i] = poly_uop(
-              ctx, POLY_OP_INDEX, s->dtype, idx_src, n_rngs + 1,
-              poly_arg_none()
-          );
+          ns[i] = poly_uop(ctx, POLY_OP_INDEX, s->dtype, idx_src, n_rngs + 1, poly_arg_none());
           any_wrapped = true;
         }
 
@@ -2366,8 +2218,8 @@ typedef struct {
 
 static bool copy_has_buffer_identity(PolyUOp *u) {
   while (u) {
-    if (u->op == POLY_OP_RESHAPE || u->op == POLY_OP_UNSHARD ||
-        u->op == POLY_OP_MSELECT || u->op == POLY_OP_AFTER) {
+    if (u->op == POLY_OP_RESHAPE || u->op == POLY_OP_UNSHARD || u->op == POLY_OP_MSELECT ||
+        u->op == POLY_OP_AFTER) {
       if (u->n_src < 1) return false;
       u = u->src[0];
       continue;
@@ -2428,29 +2280,19 @@ static PolyUOp *convert_copy_to_store(
 
   int64_t size = poly_uop_max_numel(ctx, input_src);
   if (size < 0) return NULL;
-  PolyUOp *device = copy->arg.kind == POLY_ARG_STRING
-                        ? poly_device_uop_from_name(ctx, copy->arg.str)
-                        : poly_device_uop_from_names(
-                              ctx, copy->arg.string_tuple.vals,
-                              copy->arg.string_tuple.n
-                          );
-  PolyUOp *buf = device
-                     ? poly_uop_new_buffer(
-                           ctx, device, size, copy->dtype, cctx->next_slot++
-                       )
-                     : NULL;
+  PolyUOp *device =
+      copy->arg.kind == POLY_ARG_STRING
+          ? poly_device_uop_from_name(ctx, copy->arg.str)
+          : poly_device_uop_from_names(ctx, copy->arg.string_tuple.vals, copy->arg.string_tuple.n);
+  PolyUOp *buf =
+      device ? poly_uop_new_buffer(ctx, device, size, copy->dtype, cctx->next_slot++) : NULL;
   PolyUOp *store = buf ? poly_store_val(ctx, buf, input_src) : NULL;
-  PolyUOp *after = store
-                       ? poly_uop2(ctx, POLY_OP_AFTER, copy->dtype, buf, store, poly_arg_none())
-                       : NULL;
+  PolyUOp *after =
+      store ? poly_uop2(ctx, POLY_OP_AFTER, copy->dtype, buf, store, poly_arg_none()) : NULL;
   return after ? copy_reshape_to_source(ctx, after, copy) : NULL;
 }
 
-static PolyUOp *convert_store_copy(
-    PolyCtx *ctx,
-    PolyUOp *root,
-    const PolyBindings *bindings
-) {
+static PolyUOp *convert_store_copy(PolyCtx *ctx, PolyUOp *root, const PolyBindings *bindings) {
   (void)bindings;
   if (!root || root->op != POLY_OP_STORE || root->n_src != 2 || !root->src[1] ||
       root->src[1]->op != POLY_OP_COPY)
@@ -2460,26 +2302,18 @@ static PolyUOp *convert_store_copy(
   );
 }
 
-static PolyUOp *convert_copy(
-    PolyCtx *ctx,
-    PolyUOp *root,
-    const PolyBindings *bindings
-) {
+static PolyUOp *convert_copy(PolyCtx *ctx, PolyUOp *root, const PolyBindings *bindings) {
   (void)bindings;
   if (!root || root->op != POLY_OP_COPY) return NULL;
-  return convert_copy_to_store(
-      ctx, (CopyToStoreContext *)poly_graph_rewrite_userctx(), root, NULL
-  );
+  return convert_copy_to_store(ctx, (CopyToStoreContext *)poly_graph_rewrite_userctx(), root, NULL);
 }
 
 static PolyPatternMatcher *poly_pm_copy_to_store(void) {
   static _Thread_local PolyPatternMatcher *pm = NULL;
   if (pm) return pm;
   PolyRule rules[] = {
-      {poly_upat_allow_any_len(poly_upat_op(POLY_OP_STORE, NULL, 0, "store")),
-       convert_store_copy},
-      {poly_upat_allow_any_len(poly_upat_op(POLY_OP_COPY, NULL, 0, "copy")),
-       convert_copy},
+      {poly_upat_allow_any_len(poly_upat_op(POLY_OP_STORE, NULL, 0, "store")), convert_store_copy},
+      {poly_upat_allow_any_len(poly_upat_op(POLY_OP_COPY, NULL, 0, "copy")), convert_copy},
   };
   pm = poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
   return pm;
@@ -2487,9 +2321,7 @@ static PolyPatternMatcher *poly_pm_copy_to_store(void) {
 
 static PolyUOp *poly_apply_copy_to_store(PolyCtx *ctx, PolyUOp *sink) {
   CopyToStoreContext cctx = {0};
-  return poly_graph_rewrite_ctx_ex2(
-      ctx, sink, poly_pm_copy_to_store(), &cctx, true, false
-  );
+  return poly_graph_rewrite_ctx_ex2(ctx, sink, poly_pm_copy_to_store(), &cctx, true, false);
 }
 
 static PolyUOp *add_param_range_tag(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
@@ -2501,9 +2333,7 @@ static PolyUOp *add_param_range_tag(PolyCtx *ctx, PolyUOp *root, const PolyBindi
    * pre-split PARAM and RANGE with tag=(). The split pass rewrites only those
    * tagged occurrences and creates untagged replacements, preventing a
    * bottom-up fixed point from debuffering or renumbering them again. */
-  return poly_uop_tagged(
-      ctx, root->op, root->dtype, root->src, root->n_src, root->arg, tag
-  );
+  return poly_uop_tagged(ctx, root->op, root->dtype, root->src, root->n_src, root->arg, tag);
 }
 
 static PolyPatternMatcher *poly_pm_add_param_range_tags(void) {
@@ -2569,9 +2399,8 @@ PolyUOp *poly_get_kernel_graph(PolyCtx *ctx, PolyUOp *tensor_sink) {
     fprintf(stderr, "[polygrad:get_kernel_graph] stage symbolic+reduce_collapse+debuf begin\n");
     fflush(stderr);
   }
-  PolyUOp *cleaned = poly_graph_rewrite_ctx_ex2(
-      ctx, rangeified, poly_pm_rangeify_cleanup(), NULL, false, false
-  );
+  PolyUOp *cleaned =
+      poly_graph_rewrite_ctx_ex2(ctx, rangeified, poly_pm_rangeify_cleanup(), NULL, false, false);
   if (!cleaned) return NULL;
   double t_cleanup = timing ? poly_now_ms() : 0.0;
   if (timing) {
@@ -2605,8 +2434,8 @@ PolyUOp *poly_get_kernel_graph(PolyCtx *ctx, PolyUOp *tensor_sink) {
    * BUFFER ParamArg slots (schedule/rangeify.py:603-606). */
   for (int i = 0; i < n_topo; i++) {
     PolyUOp *u = topo[i];
-    if (!u || u->op != POLY_OP_BUFFER || u->arg.kind != POLY_ARG_PARAM ||
-        !u->arg.param || u->arg.param->addrspace != POLY_ADDR_GLOBAL)
+    if (!u || u->op != POLY_OP_BUFFER || u->arg.kind != POLY_ARG_PARAM || !u->arg.param ||
+        u->arg.param->addrspace != POLY_ADDR_GLOBAL)
       continue;
     if (u->arg.param->slot >= slot_counter && u->arg.param->slot < INT_MAX)
       slot_counter = (int)u->arg.param->slot + 1;
@@ -2614,11 +2443,10 @@ PolyUOp *poly_get_kernel_graph(PolyCtx *ctx, PolyUOp *tensor_sink) {
   poly_toposort_free(topo);
   PolyPatternMatcher *stage_to_store =
       poly_pm_concat(poly_pm_add_buffers(), poly_pm_add_param_range_tags());
-  PolyUOp *kernel_graph = stage_to_store
-                              ? poly_graph_rewrite_ctx_ex2(
-                                    ctx, limited, stage_to_store, &slot_counter, true, false
-                                )
-                              : NULL;
+  PolyUOp *kernel_graph =
+      stage_to_store
+          ? poly_graph_rewrite_ctx_ex2(ctx, limited, stage_to_store, &slot_counter, true, false)
+          : NULL;
   poly_pm_destroy(stage_to_store);
   double t_stage_to_store = timing ? poly_now_ms() : 0.0;
   if (timing) {
@@ -2633,9 +2461,8 @@ PolyUOp *poly_get_kernel_graph(PolyCtx *ctx, PolyUOp *tensor_sink) {
     fflush(stderr);
   }
   PolySplitKernelsContext split_ctx = {0};
-  kernel_graph = poly_graph_rewrite_ctx_ex2(
-      ctx, kernel_graph, poly_split_kernels(), &split_ctx, true, false
-  );
+  kernel_graph =
+      poly_graph_rewrite_ctx_ex2(ctx, kernel_graph, poly_split_kernels(), &split_ctx, true, false);
   double t_split = timing ? poly_now_ms() : 0.0;
   if (!kernel_graph || split_ctx.failed) return NULL;
   if (timing) {
@@ -2660,9 +2487,9 @@ PolyUOp *poly_get_kernel_graph(PolyCtx *ctx, PolyUOp *tensor_sink) {
         "symbolic_reduce_debuf=%.3fms limit=%.3fms "
         "stage_to_store=%.3fms split=%.3fms no_index=%.3fms "
         "total=%.3fms topo=%d\n",
-        t_earliest - t0, t_rangeify - t_earliest, t_cleanup - t_rangeify,
-        t_limit - t_cleanup, t_stage_to_store - t_limit,
-        t_split - t_stage_to_store, t_no_index - t_split, t_no_index - t0, n_topo
+        t_earliest - t0, t_rangeify - t_earliest, t_cleanup - t_rangeify, t_limit - t_cleanup,
+        t_stage_to_store - t_limit, t_split - t_stage_to_store, t_no_index - t_split,
+        t_no_index - t0, n_topo
     );
     fflush(stderr);
   }

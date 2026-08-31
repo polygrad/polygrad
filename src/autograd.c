@@ -25,8 +25,6 @@
 
 /* Local helpers */
 
-
-
 /* Current pm_gradient writes ordinary Python literals into ElementwiseMixin
  * expressions. UOp.ufix creates a weak CONST and _broadcasted keeps the
  * promoted literal weak (mixin/gradient.py:49-62,
@@ -63,8 +61,7 @@ static PolyUOp *grad_get(PolyMap *grads, PolyUOp *u) {
 static bool shape_dim_equal(PolyUOp *a, PolyUOp *b) {
   if (a == b) return true;
   int64_t av = 0, bv = 0;
-  return a && b && poly_uop_const_i64(a, &av) == 0 &&
-         poly_uop_const_i64(b, &bv) == 0 && av == bv;
+  return a && b && poly_uop_const_i64(a, &av) == 0 && poly_uop_const_i64(b, &bv) == 0 && av == bv;
 }
 
 static bool shaped_edge_equal(PolyCtx *ctx, PolyUOp *source, PolyUOp *grad) {
@@ -89,7 +86,8 @@ static PolyUOp *shape_gradient_edge(PolyCtx *ctx, PolyUOp *source, PolyUOp *grad
   int n_axes = poly_broadcast_axes(ctx, source, grad, axes, POLY_MAX_DIMS);
   if (n_axes < 0) return NULL;
   int64_t reduce_axes[POLY_MAX_DIMS];
-  for (int i = 0; i < n_axes; i++) reduce_axes[i] = axes[i];
+  for (int i = 0; i < n_axes; i++)
+    reduce_axes[i] = axes[i];
   grad = poly_reduce_axis(ctx, POLY_OP_ADD, grad, reduce_axes, n_axes);
   if (!grad) return NULL;
   if (!shaped_edge_equal(ctx, source, grad)) {
@@ -253,8 +251,7 @@ static bool grad_compact_params(
   }
   for (int i = 0; i < n_topo; i++) {
     PolyUOp *u = topo[i];
-    if (!u || u->op != POLY_OP_PARAM || u->arg.kind != POLY_ARG_PARAM || !u->arg.param)
-      continue;
+    if (!u || u->op != POLY_OP_PARAM || u->arg.kind != POLY_ARG_PARAM || !u->arg.param) continue;
     int64_t slot = u->arg.param->slot;
     if (slot < 0 || slot >= n_all_args) {
       poly_toposort_free(topo);
@@ -302,8 +299,7 @@ static bool grad_compact_params(
    * dense PARAM can be identical to another old PARAM, so direct renaming can
    * chain two intended terminal replacements. Pinned graph_rewrite does not.
    * Rename through disjoint slots, then densify in a second pass. */
-  PolyUOp *staged =
-      n_used > 0 ? poly_uop_substitute(ctx, body, from, temporary, n_used) : body;
+  PolyUOp *staged = n_used > 0 ? poly_uop_substitute(ctx, body, from, temporary, n_used) : body;
   PolyUOp *compacted =
       n_used > 0 ? poly_uop_substitute(ctx, staged, temporary, to, n_used) : staged;
   poly_toposort_free(topo);
@@ -367,17 +363,17 @@ static PolyMap *grad_reverse_pass(
     return NULL;
   }
 
-#define GRAD_REVERSE_FAIL()                \
-  do {                                     \
-    if (walk_owned) free(walk);            \
-    poly_map_destroy(grads);               \
-    poly_ctx_scratch_rewind(ctx, scratch); \
-    return NULL;                           \
+#define GRAD_REVERSE_FAIL()                                                                        \
+  do {                                                                                             \
+    if (walk_owned) free(walk);                                                                    \
+    poly_map_destroy(grads);                                                                       \
+    poly_ctx_scratch_rewind(ctx, scratch);                                                         \
+    return NULL;                                                                                   \
   } while (0)
 
-#define GRAD_ADD(source, value)                                  \
-  do {                                                           \
-    if (!grad_add(ctx, grads, (source), (value))) GRAD_REVERSE_FAIL(); \
+#define GRAD_ADD(source, value)                                                                    \
+  do {                                                                                             \
+    if (!grad_add(ctx, grads, (source), (value))) GRAD_REVERSE_FAIL();                             \
   } while (0)
 
   GRAD_ADD(loss, initial_grad);
@@ -401,8 +397,8 @@ static PolyMap *grad_reverse_pass(
      * (tinygrad/mixin/gradient.py:101-109). */
     case POLY_OP_GETTUPLE: {
       if (u->n_src != 1 || u->arg.kind != POLY_ARG_INT || !u->src[0] ||
-          u->src[0]->op != POLY_OP_FUNCTION || u->src[0]->n_src < 1 ||
-          !u->src[0]->src[0] || u->src[0]->src[0]->op != POLY_OP_TUPLE) {
+          u->src[0]->op != POLY_OP_FUNCTION || u->src[0]->n_src < 1 || !u->src[0]->src[0] ||
+          u->src[0]->src[0]->op != POLY_OP_TUPLE) {
         fprintf(stderr, "polygrad: autograd: malformed GETTUPLE/FUNCTION\n");
         GRAD_REVERSE_FAIL();
       }
@@ -435,8 +431,7 @@ static PolyMap *grad_reverse_pass(
           GRAD_REVERSE_FAIL();
         }
       }
-      PolyUOp *tuple = poly_uop(
-          ctx, POLY_OP_TUPLE, POLY_VOID, parts, n_outputs, poly_arg_none());
+      PolyUOp *tuple = poly_uop(ctx, POLY_OP_TUPLE, POLY_VOID, parts, n_outputs, poly_arg_none());
       free(parts);
       if (!tuple) GRAD_REVERSE_FAIL();
       poly_map_set(grads, poly_ptr_hash(function), function, tuple, poly_ptr_eq);
@@ -458,8 +453,8 @@ static PolyMap *grad_reverse_pass(
      * backward FUNCTION (tinygrad/mixin/gradient.py:23-47). Custom grad_fxn and
      * precompiled execution remain fail-closed until those behaviors land. */
     case POLY_OP_FUNCTION: {
-      if (u->n_src < 1 || !u->src[0] || u->src[0]->op != POLY_OP_TUPLE ||
-          !g || g->op != POLY_OP_TUPLE || g->n_src != u->src[0]->n_src) {
+      if (u->n_src < 1 || !u->src[0] || u->src[0]->op != POLY_OP_TUPLE || !g ||
+          g->op != POLY_OP_TUPLE || g->n_src != u->src[0]->n_src) {
         fprintf(stderr, "polygrad: autograd: malformed FUNCTION gradient\n");
         GRAD_REVERSE_FAIL();
       }
@@ -472,7 +467,8 @@ static PolyMap *grad_reverse_pass(
       }
       int n_args = u->n_src - 1;
       int n_outputs = g->n_src;
-      PolyUOp **params_by_slot = n_args > 0 ? calloc((size_t)n_args, sizeof(*params_by_slot)) : NULL;
+      PolyUOp **params_by_slot =
+          n_args > 0 ? calloc((size_t)n_args, sizeof(*params_by_slot)) : NULL;
       int n_body_topo = 0;
       PolyUOp **body_topo = poly_toposort_ex_alloc(ctx, u->src[0], &n_body_topo, NULL, false);
       if (!body_topo || (n_args > 0 && !params_by_slot)) {
@@ -491,13 +487,13 @@ static PolyMap *grad_reverse_pass(
 
       PolyUOp **needed_params = n_args > 0 ? malloc((size_t)n_args * sizeof(*needed_params)) : NULL;
       int *needed_slots = n_args > 0 ? malloc((size_t)n_args * sizeof(*needed_slots)) : NULL;
-      PolyUOp **root_grad_parts = n_outputs > 0 ? malloc((size_t)n_outputs * sizeof(*root_grad_parts)) : NULL;
+      PolyUOp **root_grad_parts =
+          n_outputs > 0 ? malloc((size_t)n_outputs * sizeof(*root_grad_parts)) : NULL;
       PolyUOp **all_args = (n_args + n_outputs) > 0
                                ? malloc((size_t)(n_args + n_outputs) * sizeof(*all_args))
                                : NULL;
       if ((n_args > 0 && (!needed_params || !needed_slots)) ||
-          (n_outputs > 0 && !root_grad_parts) ||
-          (n_args + n_outputs > 0 && !all_args)) {
+          (n_outputs > 0 && !root_grad_parts) || (n_args + n_outputs > 0 && !all_args)) {
         free(params_by_slot);
         free(needed_params);
         free(needed_slots);
@@ -531,8 +527,8 @@ static PolyMap *grad_reverse_pass(
           GRAD_REVERSE_FAIL();
         }
       }
-      PolyUOp *root_grad = poly_uop(
-          ctx, POLY_OP_TUPLE, POLY_VOID, root_grad_parts, n_outputs, poly_arg_none());
+      PolyUOp *root_grad =
+          poly_uop(ctx, POLY_OP_TUPLE, POLY_VOID, root_grad_parts, n_outputs, poly_arg_none());
       free(root_grad_parts);
       if (!root_grad) {
         free(params_by_slot);
@@ -541,10 +537,9 @@ static PolyMap *grad_reverse_pass(
         free(all_args);
         GRAD_REVERSE_FAIL();
       }
-      PolyMap *body_grads = n_needed > 0
-                                ? grad_reverse_pass(
-                                      ctx, u->src[0], root_grad, needed_params, n_needed)
-                                : poly_map_new(16);
+      PolyMap *body_grads =
+          n_needed > 0 ? grad_reverse_pass(ctx, u->src[0], root_grad, needed_params, n_needed)
+                       : poly_map_new(16);
       free(needed_params);
       if (!body_grads) {
         free(params_by_slot);
@@ -576,14 +571,15 @@ static PolyMap *grad_reverse_pass(
       free(needed_slots);
 
       if (n_grad_bodies > 0) {
-        PolyUOp *backward_body = poly_uop(
-            ctx, POLY_OP_TUPLE, POLY_VOID, grad_bodies, n_grad_bodies, poly_arg_none());
+        PolyUOp *backward_body =
+            poly_uop(ctx, POLY_OP_TUPLE, POLY_VOID, grad_bodies, n_grad_bodies, poly_arg_none());
         PolyUOp *compact_body = NULL;
         PolyUOp **compact_args = NULL;
         int n_compact_args = 0;
         if (!backward_body || !grad_compact_params(
-                                  ctx, backward_body, all_args, n_args + n_outputs,
-                                  &compact_body, &compact_args, &n_compact_args)) {
+                                  ctx, backward_body, all_args, n_args + n_outputs, &compact_body,
+                                  &compact_args, &n_compact_args
+                              )) {
           free(grad_bodies);
           free(grad_slots);
           free(all_args);
@@ -598,7 +594,8 @@ static PolyMap *grad_reverse_pass(
           GRAD_REVERSE_FAIL();
         }
         function_src[0] = compact_body;
-        for (int j = 0; j < n_compact_args; j++) function_src[j + 1] = compact_args[j];
+        for (int j = 0; j < n_compact_args; j++)
+          function_src[j + 1] = compact_args[j];
         const char *forward_name = u->arg.call_info->name ? u->arg.call_info->name : "";
         size_t name_len = strlen(forward_name);
         char *backward_name = malloc(name_len + sizeof("_backward"));
@@ -622,7 +619,8 @@ static PolyMap *grad_reverse_pass(
         };
         PolyUOp *backward_function = poly_uop(
             ctx, POLY_OP_FUNCTION, POLY_VOID, function_src, n_compact_args + 1,
-            poly_arg_call_info(&backward_info));
+            poly_arg_call_info(&backward_info)
+        );
         free(backward_name);
         free(function_src);
         free(compact_args);
@@ -634,8 +632,8 @@ static PolyMap *grad_reverse_pass(
         }
         for (int j = 0; j < n_grad_bodies; j++) {
           PolyUOp *input_grad = poly_uop1(
-              ctx, POLY_OP_GETTUPLE, grad_bodies[j]->dtype, backward_function,
-              poly_arg_int(j));
+              ctx, POLY_OP_GETTUPLE, grad_bodies[j]->dtype, backward_function, poly_arg_int(j)
+          );
           if (!input_grad) {
             free(grad_bodies);
             free(grad_slots);
@@ -807,7 +805,8 @@ static PolyMap *grad_reverse_pass(
       PolyUOp *g0 = cast_to(ctx, g, u->dtype);
       PolyUOp *half_pi = ufix_like(ctx, u->src[0], 1.5707963267948966);
       PolyUOp *shifted = half_pi ? poly_sub(ctx, half_pi, u->src[0]) : NULL;
-      PolyUOp *cos_x = shifted ? poly_uop1(ctx, POLY_OP_SIN, u->dtype, shifted, poly_arg_none()) : NULL;
+      PolyUOp *cos_x =
+          shifted ? poly_uop1(ctx, POLY_OP_SIN, u->dtype, shifted, poly_arg_none()) : NULL;
       PolyUOp *gx = cos_x ? poly_mul(ctx, cos_x, g0) : NULL;
       if (!gx) GRAD_REVERSE_FAIL();
       GRAD_ADD(u->src[0], gx);
@@ -865,8 +864,7 @@ static PolyMap *grad_reverse_pass(
       PolyUOp *em1 = one ? poly_sub(ctx, e, one) : NULL;
       PolyUOp *bpem1 = em1 ? pow_grad(ctx, b, em1) : NULL;
       PolyUOp *normal_db = bpem1 ? poly_mul(ctx, e, bpem1) : NULL;
-      PolyUOp *db =
-          e_eq_0 && normal_db ? poly_where_op(ctx, e_eq_0, e, normal_db) : NULL;
+      PolyUOp *db = e_eq_0 && normal_db ? poly_where_op(ctx, e_eq_0, e, normal_db) : NULL;
       PolyUOp *ga = db ? poly_mul(ctx, g0, db) : NULL;
       if (!ga) GRAD_REVERSE_FAIL();
       GRAD_ADD(b, ga);
@@ -877,19 +875,15 @@ static PolyMap *grad_reverse_pass(
           ret_log2_b ? poly_const_typed(ctx, POLY_WEAKFLOAT, 0.69314718055994530942) : NULL;
       PolyUOp *normal_de = ln2 ? poly_mul(ctx, ret_log2_b, ln2) : NULL;
       PolyUOp *e_cmp = e, *lt_zero = zero;
-      PolyUOp *e_lt_0 =
-          zero && poly_broadcasted_pair(ctx, &e_cmp, &lt_zero)
-              ? poly_alu2(ctx, POLY_OP_CMPLT, e_cmp, lt_zero)
-              : NULL;
+      PolyUOp *e_lt_0 = zero && poly_broadcasted_pair(ctx, &e_cmp, &lt_zero)
+                            ? poly_alu2(ctx, POLY_OP_CMPLT, e_cmp, lt_zero)
+                            : NULL;
       PolyUOp *neg_inf = const_like(ctx, u, -1.0 / 0.0);
       PolyUOp *b_zero_case =
-          e_lt_0 && neg_inf && zero
-              ? poly_where_op(ctx, e_lt_0, neg_inf, zero)
-              : NULL;
-      PolyUOp *de =
-          b_eq_0 && b_zero_case && normal_de
-              ? poly_where_op(ctx, b_eq_0, b_zero_case, normal_de)
-              : NULL;
+          e_lt_0 && neg_inf && zero ? poly_where_op(ctx, e_lt_0, neg_inf, zero) : NULL;
+      PolyUOp *de = b_eq_0 && b_zero_case && normal_de
+                        ? poly_where_op(ctx, b_eq_0, b_zero_case, normal_de)
+                        : NULL;
       PolyUOp *gb = de ? poly_mul(ctx, g0, de) : NULL;
       if (!gb) GRAD_REVERSE_FAIL();
       GRAD_ADD(e, gb);
@@ -1019,7 +1013,8 @@ static PolyMap *grad_reverse_pass(
          * the same prefix reduction (mixin/gradient.py:7-9). */
         int n_axes = u->arg.reduce.num_axes;
         int64_t axes[POLY_MAX_DIMS];
-        for (int i = 0; i < n_axes; i++) axes[i] = i;
+        for (int i = 0; i < n_axes; i++)
+          axes[i] = i;
         PolyUOp *mask = poly_eq(ctx, u->src[0], u);
         PolyUOp *fmask = mask ? cast_to(ctx, mask, g->dtype) : NULL;
         PolyUOp *count = fmask ? poly_reduce_axis(ctx, POLY_OP_ADD, fmask, axes, n_axes) : NULL;
@@ -1027,16 +1022,10 @@ static PolyMap *grad_reverse_pass(
             count ? poly_uop1(ctx, POLY_OP_RECIPROCAL, count->dtype, count, poly_arg_none()) : NULL;
         PolyUOp *scaled_mask =
             fmask && reciprocal
-                ? poly_uop2(
-                      ctx, POLY_OP_MUL, g->dtype, fmask, reciprocal,
-                      poly_arg_none()
-                  )
+                ? poly_uop2(ctx, POLY_OP_MUL, g->dtype, fmask, reciprocal, poly_arg_none())
                 : NULL;
         PolyUOp *gx = scaled_mask
-                          ? poly_uop2(
-                                ctx, POLY_OP_MUL, g->dtype, scaled_mask, g,
-                                poly_arg_none()
-                            )
+                          ? poly_uop2(ctx, POLY_OP_MUL, g->dtype, scaled_mask, g, poly_arg_none())
                           : NULL;
         if (!gx) GRAD_REVERSE_FAIL();
         GRAD_ADD(u->src[0], gx);
@@ -1205,9 +1194,7 @@ static bool substitute_collect_opaque_pins(
         int first_src = 0;
         if (substitute_opaque_body_op(u->op) && u->n_src > 0) {
           PolyUOp *body = u->src[0];
-          if (!body || (poly_map_get(
-                            visiting, poly_ptr_hash(body), body, poly_ptr_eq
-                        ) &&
+          if (!body || (poly_map_get(visiting, poly_ptr_hash(body), body, poly_ptr_eq) &&
                         !poly_map_get(done, poly_ptr_hash(body), body, poly_ptr_eq))) {
             ok = false;
             break;
@@ -1224,9 +1211,7 @@ static bool substitute_collect_opaque_pins(
               pins_cap = new_cap;
             }
             pins[n_pins++] = body;
-            poly_map_set(
-                pin_seen, poly_ptr_hash(body), body, (void *)(uintptr_t)1, poly_ptr_eq
-            );
+            poly_map_set(pin_seen, poly_ptr_hash(body), body, (void *)(uintptr_t)1, poly_ptr_eq);
           }
           /* A later owner overwrites any earlier rewritten result for body. */
           poly_map_set(done, poly_ptr_hash(body), body, (void *)(uintptr_t)1, poly_ptr_eq);
@@ -1436,9 +1421,7 @@ int poly_uop_substitute_many(
   } else {
     PolyUOp **opaque_pins = NULL;
     int n_opaque_pins = 0;
-    if (!substitute_collect_opaque_pins(
-            roots, n_roots, sub_map, &opaque_pins, &n_opaque_pins
-        )) {
+    if (!substitute_collect_opaque_pins(roots, n_roots, sub_map, &opaque_pins, &n_opaque_pins)) {
       rc = -1;
     }
     for (int i = 0; rc == 0 && i < n_opaque_pins; i++) {

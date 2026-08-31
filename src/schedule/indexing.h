@@ -52,11 +52,7 @@ PolyUOp *poly_run_rangeify(PolyCtx *ctx, PolyUOp *sink, bool debug);
 
 /* C encoding of indexing.py:BufferizeOpts(device=s.device, ...). */
 PolyUOp *poly_bufferize_device_hint(PolyCtx *ctx, PolyUOp *value, PolyMap *device_memo);
-PolyArg poly_bufferize_opts_for_device(
-    PolyUOp *device,
-    PolyAddrSpace addrspace,
-    bool removable
-);
+PolyArg poly_bufferize_opts_for_device(PolyUOp *device, PolyAddrSpace addrspace, bool removable);
 
 /* Apply a movement op's index transform to output ranges.
  *

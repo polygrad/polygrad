@@ -49,10 +49,10 @@ static Kernel make_binop(PolyOps op, int n) {
   PolyUOp *ld1 = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx1, poly_arg_none());
   PolyUOp *alu = poly_uop2(ctx, op, POLY_FLOAT32, ld0, ld1, poly_arg_none());
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx2, alu, poly_arg_none());
-  PolyUOp *end_src[2] = { store, range };
+  PolyUOp *end_src[2] = {store, range};
   PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
-  return (Kernel){ ctx, sink };
+  return (Kernel){ctx, sink};
 }
 
 static Kernel make_unop(PolyOps op, int n) {
@@ -67,13 +67,18 @@ static Kernel make_unop(PolyOps op, int n) {
   PolyUOp *ld = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx0, poly_arg_none());
   PolyUOp *alu = poly_uop1(ctx, op, POLY_FLOAT32, ld, poly_arg_none());
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx1, alu, poly_arg_none());
-  PolyUOp *end_src[2] = { store, range };
+  PolyUOp *end_src[2] = {store, range};
   PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
-  return (Kernel){ ctx, sink };
+  return (Kernel){ctx, sink};
 }
 
-static int compile_from_sink(PolyCtx *ctx, PolyUOp *sink, const char *fn_name, PolyProgram **prog_out) {
+static int compile_from_sink(
+    PolyCtx *ctx,
+    PolyUOp *sink,
+    const char *fn_name,
+    PolyProgram **prog_out
+) {
   int n_lin = 0;
   PolyVarBinding *vars = NULL;
   int n_vars = 0;
@@ -83,9 +88,7 @@ static int compile_from_sink(PolyCtx *ctx, PolyUOp *sink, const char *fn_name, P
     return 0;
   }
   PolyUOp *call = linear->src[0];
-  PolyUOp *body = call && call->op == POLY_OP_CALL && call->n_src > 0
-                     ? call->src[0]
-                     : NULL;
+  PolyUOp *body = call && call->op == POLY_OP_CALL && call->n_src > 0 ? call->src[0] : NULL;
   free(vars);
   if (!body || body->op != POLY_OP_SINK) return 0;
   PolyUOp **lin = poly_linearize(ctx, body, &n_lin);
@@ -104,8 +107,7 @@ static int compile_from_sink(PolyCtx *ctx, PolyUOp *sink, const char *fn_name, P
 }
 
 static void print_row(const char *name, int iters, double compile_us, double exec_us, int ok) {
-  printf("%-22s %8d %12.0f %12.1f %10s\n",
-         name, iters, compile_us, exec_us, ok ? "PASS" : "FAIL");
+  printf("%-22s %8d %12.0f %12.1f %10s\n", name, iters, compile_us, exec_us, ok ? "PASS" : "FAIL");
 }
 
 static int run_binop_case(const char *name, PolyOps op, int n, int iters) {
@@ -116,7 +118,9 @@ static int run_binop_case(const char *name, PolyOps op, int n, int iters) {
   float *b = malloc((size_t)n * sizeof(float));
   float *c = malloc((size_t)n * sizeof(float));
   if (!a || !b || !c) {
-    free(a); free(b); free(c);
+    free(a);
+    free(b);
+    free(c);
     printf("%-22s %8d %12s %12s %10s\n", name, iters, "OOM", "-", "FAIL");
     return 0;
   }
@@ -139,13 +143,15 @@ static int run_binop_case(const char *name, PolyOps op, int n, int iters) {
     free(src);
     free(lin);
     poly_ctx_destroy(kern.ctx);
-    free(a); free(b); free(c);
+    free(a);
+    free(b);
+    free(c);
     return 0;
   }
 
   double t1 = now_us();
   for (int it = 0; it < iters; it++) {
-    void *args[3] = { a, b, c };
+    void *args[3] = {a, b, c};
     poly_program_call(prog, args, 3);
   }
   double exec_us = (now_us() - t1) / (double)iters;
@@ -153,10 +159,17 @@ static int run_binop_case(const char *name, PolyOps op, int n, int iters) {
   for (int i = 0; i < n && ok; i++) {
     float expected = 0.0f;
     switch (op) {
-      case POLY_OP_ADD: expected = a[i] + b[i]; break;
-      case POLY_OP_MUL: expected = a[i] * b[i]; break;
-      case POLY_OP_SUB: expected = a[i] - b[i]; break;
-      default: break;
+    case POLY_OP_ADD:
+      expected = a[i] + b[i];
+      break;
+    case POLY_OP_MUL:
+      expected = a[i] * b[i];
+      break;
+    case POLY_OP_SUB:
+      expected = a[i] - b[i];
+      break;
+    default:
+      break;
     }
     if (fabsf(c[i] - expected) > 1e-3f) ok = 0;
   }
@@ -167,7 +180,9 @@ static int run_binop_case(const char *name, PolyOps op, int n, int iters) {
   free(src);
   free(lin);
   poly_ctx_destroy(kern.ctx);
-  free(a); free(b); free(c);
+  free(a);
+  free(b);
+  free(c);
   return ok;
 }
 
@@ -178,13 +193,16 @@ static int run_unop_case(const char *name, PolyOps op, int n, int iters) {
   float *a = malloc((size_t)n * sizeof(float));
   float *c = malloc((size_t)n * sizeof(float));
   if (!a || !c) {
-    free(a); free(c);
+    free(a);
+    free(c);
     printf("%-22s %8d %12s %12s %10s\n", name, iters, "OOM", "-", "FAIL");
     return 0;
   }
   for (int i = 0; i < n; i++) {
-    if (op == POLY_OP_EXP2) a[i] = (float)((i % 9) - 4) * 0.5f;
-    else a[i] = (float)(i + 1);
+    if (op == POLY_OP_EXP2)
+      a[i] = (float)((i % 9) - 4) * 0.5f;
+    else
+      a[i] = (float)(i + 1);
     c[i] = 0.0f;
   }
 
@@ -201,13 +219,14 @@ static int run_unop_case(const char *name, PolyOps op, int n, int iters) {
     free(src);
     free(lin);
     poly_ctx_destroy(kern.ctx);
-    free(a); free(c);
+    free(a);
+    free(c);
     return 0;
   }
 
   double t1 = now_us();
   for (int it = 0; it < iters; it++) {
-    void *args[2] = { a, c };
+    void *args[2] = {a, c};
     poly_program_call(prog, args, 2);
   }
   double exec_us = (now_us() - t1) / (double)iters;
@@ -215,10 +234,17 @@ static int run_unop_case(const char *name, PolyOps op, int n, int iters) {
   for (int i = 0; i < n && ok; i++) {
     float expected = 0.0f;
     switch (op) {
-      case POLY_OP_NEG:  expected = -a[i]; break;
-      case POLY_OP_SQRT: expected = sqrtf(a[i]); break;
-      case POLY_OP_EXP2: expected = exp2f(a[i]); break;
-      default: break;
+    case POLY_OP_NEG:
+      expected = -a[i];
+      break;
+    case POLY_OP_SQRT:
+      expected = sqrtf(a[i]);
+      break;
+    case POLY_OP_EXP2:
+      expected = exp2f(a[i]);
+      break;
+    default:
+      break;
     }
     if (fabsf(c[i] - expected) > 1e-3f) ok = 0;
   }
@@ -229,7 +255,8 @@ static int run_unop_case(const char *name, PolyOps op, int n, int iters) {
   free(src);
   free(lin);
   poly_ctx_destroy(kern.ctx);
-  free(a); free(c);
+  free(a);
+  free(c);
   return ok;
 }
 
@@ -243,12 +270,15 @@ static int run_reduce_sum_axis1_case(int n, int iters) {
   float *a_d = malloc((size_t)total * sizeof(float));
   float *out_d = malloc((size_t)rows * sizeof(float));
   if (!a_d || !out_d) {
-    free(a_d); free(out_d);
+    free(a_d);
+    free(out_d);
     printf("%-22s %8d %12s %12s %10s\n", "reduce_sum_axis1", iters, "OOM", "-", "FAIL");
     return 0;
   }
-  for (int i = 0; i < total; i++) a_d[i] = (float)(i + 1);
-  for (int i = 0; i < rows; i++) out_d[i] = 0.0f;
+  for (int i = 0; i < total; i++)
+    a_d[i] = (float)(i + 1);
+  for (int i = 0; i < rows; i++)
+    out_d[i] = 0.0f;
 
   double t0 = now_us();
   PolyCtx *ctx = poly_ctx_new();
@@ -266,27 +296,30 @@ static int run_reduce_sum_axis1_case(int n, int iters) {
   if (!prog) {
     print_row("reduce_sum_axis1", iters, compile_us, 0.0, 0);
     poly_ctx_destroy(ctx);
-    free(a_d); free(out_d);
+    free(a_d);
+    free(out_d);
     return 0;
   }
 
   double t1 = now_us();
   for (int it = 0; it < iters; it++) {
-    void *args[2] = { out_d, a_d };
+    void *args[2] = {out_d, a_d};
     poly_program_call(prog, args, 2);
   }
   double exec_us = (now_us() - t1) / (double)iters;
 
   for (int r = 0; r < rows && ok; r++) {
     float expected = 0.0f;
-    for (int c = 0; c < cols; c++) expected += a_d[r * cols + c];
+    for (int c = 0; c < cols; c++)
+      expected += a_d[r * cols + c];
     if (fabsf(out_d[r] - expected) > 1e-3f) ok = 0;
   }
 
   print_row("reduce_sum_axis1", iters, compile_us, exec_us, ok);
   poly_program_destroy(prog);
   poly_ctx_destroy(ctx);
-  free(a_d); free(out_d);
+  free(a_d);
+  free(out_d);
   return ok;
 }
 
@@ -296,12 +329,15 @@ static int run_chain_pad_flip_case(int n, int iters) {
   float *a_d = malloc((size_t)n * sizeof(float));
   float *out_d = malloc((size_t)out_n * sizeof(float));
   if (!a_d || !out_d) {
-    free(a_d); free(out_d);
+    free(a_d);
+    free(out_d);
     printf("%-22s %8d %12s %12s %10s\n", "chain_pad_flip", iters, "OOM", "-", "FAIL");
     return 0;
   }
-  for (int i = 0; i < n; i++) a_d[i] = (float)(i + 1);
-  for (int i = 0; i < out_n; i++) out_d[i] = -1.0f;
+  for (int i = 0; i < n; i++)
+    a_d[i] = (float)(i + 1);
+  for (int i = 0; i < out_n; i++)
+    out_d[i] = -1.0f;
 
   double t0 = now_us();
   PolyCtx *ctx = poly_ctx_new();
@@ -319,13 +355,14 @@ static int run_chain_pad_flip_case(int n, int iters) {
   if (!prog) {
     print_row("chain_pad_flip", iters, compile_us, 0.0, 0);
     poly_ctx_destroy(ctx);
-    free(a_d); free(out_d);
+    free(a_d);
+    free(out_d);
     return 0;
   }
 
   double t1 = now_us();
   for (int it = 0; it < iters; it++) {
-    void *args[2] = { out_d, a_d };
+    void *args[2] = {out_d, a_d};
     poly_program_call(prog, args, 2);
   }
   double exec_us = (now_us() - t1) / (double)iters;
@@ -339,7 +376,8 @@ static int run_chain_pad_flip_case(int n, int iters) {
   print_row("chain_pad_flip", iters, compile_us, exec_us, ok);
   poly_program_destroy(prog);
   poly_ctx_destroy(ctx);
-  free(a_d); free(out_d);
+  free(a_d);
+  free(out_d);
   return ok;
 }
 
@@ -348,7 +386,8 @@ static int run_grad_mul_sum_case(int n, int iters) {
   float *x_d = malloc((size_t)n * sizeof(float));
   float *gx_d = malloc((size_t)n * sizeof(float));
   if (!x_d || !gx_d) {
-    free(x_d); free(gx_d);
+    free(x_d);
+    free(gx_d);
     printf("%-22s %8d %12s %12s %10s\n", "grad_mul_sum", iters, "OOM", "-", "FAIL");
     return 0;
   }
@@ -373,13 +412,14 @@ static int run_grad_mul_sum_case(int n, int iters) {
   if (!prog) {
     print_row("grad_mul_sum", iters, compile_us, 0.0, 0);
     poly_ctx_destroy(ctx);
-    free(x_d); free(gx_d);
+    free(x_d);
+    free(gx_d);
     return 0;
   }
 
   double t1 = now_us();
   for (int it = 0; it < iters; it++) {
-    void *args[2] = { gx_d, x_d };
+    void *args[2] = {gx_d, x_d};
     poly_program_call(prog, args, 2);
   }
   double exec_us = (now_us() - t1) / (double)iters;
@@ -392,7 +432,8 @@ static int run_grad_mul_sum_case(int n, int iters) {
   print_row("grad_mul_sum", iters, compile_us, exec_us, ok);
   poly_program_destroy(prog);
   poly_ctx_destroy(ctx);
-  free(x_d); free(gx_d);
+  free(x_d);
+  free(gx_d);
   return ok;
 }
 
@@ -401,7 +442,8 @@ static int run_grad_exp2_sum_case(int n, int iters) {
   float *x_d = malloc((size_t)n * sizeof(float));
   float *gx_d = malloc((size_t)n * sizeof(float));
   if (!x_d || !gx_d) {
-    free(x_d); free(gx_d);
+    free(x_d);
+    free(gx_d);
     printf("%-22s %8d %12s %12s %10s\n", "grad_exp2_sum", iters, "OOM", "-", "FAIL");
     return 0;
   }
@@ -426,13 +468,14 @@ static int run_grad_exp2_sum_case(int n, int iters) {
   if (!prog) {
     print_row("grad_exp2_sum", iters, compile_us, 0.0, 0);
     poly_ctx_destroy(ctx);
-    free(x_d); free(gx_d);
+    free(x_d);
+    free(gx_d);
     return 0;
   }
 
   double t1 = now_us();
   for (int it = 0; it < iters; it++) {
-    void *args[2] = { gx_d, x_d };
+    void *args[2] = {gx_d, x_d};
     poly_program_call(prog, args, 2);
   }
   double exec_us = (now_us() - t1) / (double)iters;
@@ -445,7 +488,8 @@ static int run_grad_exp2_sum_case(int n, int iters) {
   print_row("grad_exp2_sum", iters, compile_us, exec_us, ok);
   poly_program_destroy(prog);
   poly_ctx_destroy(ctx);
-  free(x_d); free(gx_d);
+  free(x_d);
+  free(gx_d);
   return ok;
 }
 
@@ -455,7 +499,9 @@ static int run_grad_fdiv_sum_y_case(int n, int iters) {
   float *y_d = malloc((size_t)n * sizeof(float));
   float *gy_d = malloc((size_t)n * sizeof(float));
   if (!x_d || !y_d || !gy_d) {
-    free(x_d); free(y_d); free(gy_d);
+    free(x_d);
+    free(y_d);
+    free(gy_d);
     printf("%-22s %8d %12s %12s %10s\n", "grad_fdiv_sum_y", iters, "OOM", "-", "FAIL");
     return 0;
   }
@@ -484,13 +530,15 @@ static int run_grad_fdiv_sum_y_case(int n, int iters) {
   if (!prog) {
     print_row("grad_fdiv_sum_y", iters, compile_us, 0.0, 0);
     poly_ctx_destroy(ctx);
-    free(x_d); free(y_d); free(gy_d);
+    free(x_d);
+    free(y_d);
+    free(gy_d);
     return 0;
   }
 
   double t1 = now_us();
   for (int it = 0; it < iters; it++) {
-    void *args[3] = { gy_d, x_d, y_d };
+    void *args[3] = {gy_d, x_d, y_d};
     poly_program_call(prog, args, 3);
   }
   double exec_us = (now_us() - t1) / (double)iters;
@@ -503,7 +551,9 @@ static int run_grad_fdiv_sum_y_case(int n, int iters) {
   print_row("grad_fdiv_sum_y", iters, compile_us, exec_us, ok);
   poly_program_destroy(prog);
   poly_ctx_destroy(ctx);
-  free(x_d); free(y_d); free(gy_d);
+  free(x_d);
+  free(y_d);
+  free(gy_d);
   return ok;
 }
 
@@ -517,7 +567,8 @@ static int run_grad_chain_movement_case(int n, int iters) {
   float *x_d = malloc((size_t)total * sizeof(float));
   float *gx_d = malloc((size_t)total * sizeof(float));
   if (!x_d || !gx_d) {
-    free(x_d); free(gx_d);
+    free(x_d);
+    free(gx_d);
     printf("%-22s %8d %12s %12s %10s\n", "grad_chain_movement", iters, "OOM", "-", "FAIL");
     return 0;
   }
@@ -545,13 +596,14 @@ static int run_grad_chain_movement_case(int n, int iters) {
   if (!prog) {
     print_row("grad_chain_movement", iters, compile_us, 0.0, 0);
     poly_ctx_destroy(ctx);
-    free(x_d); free(gx_d);
+    free(x_d);
+    free(gx_d);
     return 0;
   }
 
   double t1 = now_us();
   for (int it = 0; it < iters; it++) {
-    void *args[2] = { gx_d, x_d };
+    void *args[2] = {gx_d, x_d};
     poly_program_call(prog, args, 2);
   }
   double exec_us = (now_us() - t1) / (double)iters;
@@ -563,7 +615,8 @@ static int run_grad_chain_movement_case(int n, int iters) {
   print_row("grad_chain_movement", iters, compile_us, exec_us, ok);
   poly_program_destroy(prog);
   poly_ctx_destroy(ctx);
-  free(x_d); free(gx_d);
+  free(x_d);
+  free(gx_d);
   return ok;
 }
 
@@ -576,12 +629,15 @@ int main(int argc, char **argv) {
   if (iters_elementwise < 1) iters_elementwise = 1;
   if (iters_graph < 1) iters_graph = 1;
 
-  printf("polygrad benchmark  N=%d  iters_elementwise=%d  iters_graph=%d\n",
-         n, iters_elementwise, iters_graph);
-  printf("%-22s %8s %12s %12s %10s\n",
-         "case", "iters", "compile_us", "exec_us", "correct");
-  printf("%-22s %8s %12s %12s %10s\n",
-         "----------------------", "--------", "------------", "------------", "----------");
+  printf(
+      "polygrad benchmark  N=%d  iters_elementwise=%d  iters_graph=%d\n", n, iters_elementwise,
+      iters_graph
+  );
+  printf("%-22s %8s %12s %12s %10s\n", "case", "iters", "compile_us", "exec_us", "correct");
+  printf(
+      "%-22s %8s %12s %12s %10s\n", "----------------------", "--------", "------------",
+      "------------", "----------"
+  );
 
   printf("\n[forward_elementwise]\n");
   run_binop_case("add", POLY_OP_ADD, n, iters_elementwise);

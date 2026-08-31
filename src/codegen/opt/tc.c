@@ -16,92 +16,123 @@ typedef struct {
 
 /* Current Tinygrad 2026-08-22/a9069c177a9d codegen/opt/tc.py:75-135. */
 static const PolyTensorCoreLayout CUDA_81616 = {
-    .dims = {8, 16, 16}, .threads = 32, .elements_per_thread = {8, 4, 4},
+    .dims = {8, 16, 16},
+    .threads = 32,
+    .elements_per_thread = {8, 4, 4},
     .opts = "u0l0l0l1l1l1u1",
-    .swizzle = {
-        {{"r1", "r2", "l2", "l3", "l4"}, {"u1", "r3"}, {"l0", "l1", "u0", "r0"}},
-        {{"r1", "r2", "u0", "l0", "l1"}, {"r0", "r3"}, {"l2", "l3", "l4", "u1"}},
-    },
+    .swizzle =
+        {
+            {{"r1", "r2", "l2", "l3", "l4"}, {"u1", "r3"}, {"l0", "l1", "u0", "r0"}},
+            {{"r1", "r2", "u0", "l0", "l1"}, {"r0", "r3"}, {"l2", "l3", "l4", "u1"}},
+        },
     .swizzle_len = {{5, 2, 4}, {5, 2, 4}},
 };
 
 static const PolyTensorCoreLayout CUDA_81632_F8 = {
-    .dims = {8, 16, 32}, .threads = 32, .elements_per_thread = {16, 8, 4},
+    .dims = {8, 16, 32},
+    .threads = 32,
+    .elements_per_thread = {16, 8, 4},
     .opts = "u0l0l0l1l1l1u1",
-    .swizzle = {
-        {{"r2", "r3", "l2", "l3", "l4"}, {"u1", "r4"}, {"l0", "l1", "u0", "r0", "r1"}},
-        {{"r2", "r3", "u0", "l0", "l1"}, {"r1", "r4"}, {"l2", "l3", "l4", "u1", "r0"}},
-    },
+    .swizzle =
+        {
+            {{"r2", "r3", "l2", "l3", "l4"}, {"u1", "r4"}, {"l0", "l1", "u0", "r0", "r1"}},
+            {{"r2", "r3", "u0", "l0", "l1"}, {"r1", "r4"}, {"l2", "l3", "l4", "u1", "r0"}},
+        },
     .swizzle_len = {{5, 2, 5}, {5, 2, 5}},
 };
 
 static const PolyTensorCoreLayout CUDA_8168_F16 = {
-    .dims = {8, 16, 8}, .threads = 32, .elements_per_thread = {4, 2, 4},
+    .dims = {8, 16, 8},
+    .threads = 32,
+    .elements_per_thread = {4, 2, 4},
     .opts = "u0l0l0l1l1l1u1",
-    .swizzle = {
-        {{"r1", "r2", "l2", "l3", "l4"}, {"r0", "u1"}, {"l0", "l1", "u0"}},
-        {{"r1", "r2", "u0", "l0", "l1"}, {"u1", "r0"}, {"l2", "l3", "l4"}},
-    },
+    .swizzle =
+        {
+            {{"r1", "r2", "l2", "l3", "l4"}, {"r0", "u1"}, {"l0", "l1", "u0"}},
+            {{"r1", "r2", "u0", "l0", "l1"}, {"u1", "r0"}, {"l2", "l3", "l4"}},
+        },
     .swizzle_len = {{5, 2, 3}, {5, 2, 3}},
 };
 
 static const PolyTensorCoreLayout CUDA_8168_TF32 = {
-    .dims = {8, 16, 8}, .threads = 32, .elements_per_thread = {4, 2, 4},
+    .dims = {8, 16, 8},
+    .threads = 32,
+    .elements_per_thread = {4, 2, 4},
     .opts = "u0l0l0l1l1l1u1",
-    .swizzle = {
-        {{"r0", "r1", "l2", "l3", "l4"}, {"u1", "r2"}, {"l0", "l1", "u0"}},
-        {{"r0", "r1", "u0", "l0", "l1"}, {"u1", "r2"}, {"l2", "l3", "l4"}},
-    },
+    .swizzle =
+        {
+            {{"r0", "r1", "l2", "l3", "l4"}, {"u1", "r2"}, {"l0", "l1", "u0"}},
+            {{"r0", "r1", "u0", "l0", "l1"}, {"u1", "r2"}, {"l2", "l3", "l4"}},
+        },
     .swizzle_len = {{5, 2, 3}, {5, 2, 3}},
 };
 
 static const PolyTensorCoreLayout AMD_RDNA3 = {
-    .dims = {16, 16, 16}, .threads = 32, .elements_per_thread = {16, 16, 8},
+    .dims = {16, 16, 16},
+    .threads = 32,
+    .elements_per_thread = {16, 16, 8},
     .opts = "l0l0l0l0l1u1u1u1",
-    .swizzle = {
-        {{"l4", "u0", "u1", "u2", "l0"}, {"r1", "r2", "r3"}, {"l1", "l2", "l3", "r0"}},
-        {{"l0", "l1", "l2", "l3", "l4"}, {"r1", "r2", "r3"}, {"u0", "u1", "u2", "r0"}},
-    },
+    .swizzle =
+        {
+            {{"l4", "u0", "u1", "u2", "l0"}, {"r1", "r2", "r3"}, {"l1", "l2", "l3", "r0"}},
+            {{"l0", "l1", "l2", "l3", "l4"}, {"r1", "r2", "r3"}, {"u0", "u1", "u2", "r0"}},
+        },
     .swizzle_len = {{5, 3, 4}, {5, 3, 4}},
 };
 
 static const PolyTensorCoreLayout AMD_RDNA4 = {
-    .dims = {16, 16, 16}, .threads = 32, .elements_per_thread = {8, 8, 8},
+    .dims = {16, 16, 16},
+    .threads = 32,
+    .elements_per_thread = {8, 8, 8},
     .opts = "l0l0l0l0u1u1u1l1",
-    .swizzle = {
-        {{"u0", "u1", "u2", "l4", "r2"}, {"r0", "r1", "r3"}, {"l0", "l1", "l2", "l3"}},
-        {{"l0", "l1", "l2", "l3", "r2"}, {"r0", "r1", "r3"}, {"l4", "u0", "u1", "u2"}},
-    },
+    .swizzle =
+        {
+            {{"u0", "u1", "u2", "l4", "r2"}, {"r0", "r1", "r3"}, {"l0", "l1", "l2", "l3"}},
+            {{"l0", "l1", "l2", "l3", "r2"}, {"r0", "r1", "r3"}, {"l4", "u0", "u1", "u2"}},
+        },
     .swizzle_len = {{5, 3, 4}, {5, 3, 4}},
 };
 
 static const PolyTensorCoreLayout AMD_CDNA_161616 = {
-    .dims = {16, 16, 16}, .threads = 64, .elements_per_thread = {4, 4, 4},
+    .dims = {16, 16, 16},
+    .threads = 64,
+    .elements_per_thread = {4, 4, 4},
     .opts = "l0l0l0l0u1u1l1l1",
-    .swizzle = {
-        {{"u0", "u1", "l4", "l5", "r2", "r3"}, {"r0", "r1"}, {"l0", "l1", "l2", "l3"}},
-        {{"l0", "l1", "l2", "l3", "r2", "r3"}, {"r0", "r1"}, {"l4", "l5", "u0", "u1"}},
-    },
+    .swizzle =
+        {
+            {{"u0", "u1", "l4", "l5", "r2", "r3"}, {"r0", "r1"}, {"l0", "l1", "l2", "l3"}},
+            {{"l0", "l1", "l2", "l3", "r2", "r3"}, {"r0", "r1"}, {"l4", "l5", "u0", "u1"}},
+        },
     .swizzle_len = {{6, 2, 4}, {6, 2, 4}},
 };
 
 static const PolyTensorCoreLayout AMD_CDNA_161632 = {
-    .dims = {16, 16, 32}, .threads = 64, .elements_per_thread = {8, 8, 4},
+    .dims = {16, 16, 32},
+    .threads = 64,
+    .elements_per_thread = {8, 8, 4},
     .opts = "l0l0l0l0u1u1l1l1",
-    .swizzle = {
-        {{"u0", "u1", "l4", "l5", "r3", "r4"}, {"r0", "r1"}, {"l0", "l1", "l2", "l3", "r2"}},
-        {{"l0", "l1", "l2", "l3", "r3", "r4"}, {"r0", "r1"}, {"l4", "l5", "u0", "u1", "r2"}},
-    },
+    .swizzle =
+        {
+            {{"u0", "u1", "l4", "l5", "r3", "r4"}, {"r0", "r1"}, {"l0", "l1", "l2", "l3", "r2"}},
+            {{"l0", "l1", "l2", "l3", "r3", "r4"}, {"r0", "r1"}, {"l4", "l5", "u0", "u1", "r2"}},
+        },
     .swizzle_len = {{6, 2, 5}, {6, 2, 5}},
 };
 
 static const PolyTensorCoreLayout AMD_CDNA_1616128 = {
-    .dims = {16, 16, 128}, .threads = 64, .elements_per_thread = {32, 32, 4},
+    .dims = {16, 16, 128},
+    .threads = 64,
+    .elements_per_thread = {32, 32, 4},
     .opts = "l0l0l0l0u1u1l1l1",
-    .swizzle = {
-        {{"u0", "u1", "l4", "l5", "r5", "r6"}, {"r0", "r1"}, {"l0", "l1", "l2", "l3", "r2", "r3", "r4"}},
-        {{"l0", "l1", "l2", "l3", "r5", "r6"}, {"r0", "r1"}, {"l4", "l5", "u0", "u1", "r2", "r3", "r4"}},
-    },
+    .swizzle =
+        {
+            {{"u0", "u1", "l4", "l5", "r5", "r6"},
+             {"r0", "r1"},
+             {"l0", "l1", "l2", "l3", "r2", "r3", "r4"}},
+            {{"l0", "l1", "l2", "l3", "r5", "r6"},
+             {"r0", "r1"},
+             {"l4", "l5", "u0", "u1", "r2", "r3", "r4"}},
+        },
     .swizzle_len = {{6, 2, 7}, {6, 2, 7}},
 };
 
@@ -114,10 +145,7 @@ static void init_tensor_core(
   memset(tc, 0, sizeof(*tc));
   memcpy(tc->dims, layout->dims, sizeof(tc->dims));
   tc->threads = layout->threads;
-  memcpy(
-      tc->elements_per_thread, layout->elements_per_thread,
-      sizeof(tc->elements_per_thread)
-  );
+  memcpy(tc->elements_per_thread, layout->elements_per_thread, sizeof(tc->elements_per_thread));
   tc->dtype_in = dtype_in;
   tc->dtype_out = dtype_out;
   tc->n_opts = (int)strlen(layout->opts) / 2;
@@ -230,13 +258,15 @@ int poly_tc_get_reduce_axes(const PolyTensorCore *tc, int out[][2]) {
 
 int poly_tc_count_local(const PolyTensorCore *tc) {
   int n = 0;
-  for (int i = 0; i < tc->n_opts; i++) n += tc->opts[i].type == 'l';
+  for (int i = 0; i < tc->n_opts; i++)
+    n += tc->opts[i].type == 'l';
   return n;
 }
 
 int poly_tc_count_upcast(const PolyTensorCore *tc) {
   int n = 0;
-  for (int i = 0; i < tc->n_opts; i++) n += tc->opts[i].type == 'u';
+  for (int i = 0; i < tc->n_opts; i++)
+    n += tc->opts[i].type == 'u';
   return n;
 }
 
@@ -249,7 +279,8 @@ int poly_tc_base_shape_str(const PolyTensorCore *tc, const char *out[], int max_
     out[n++] = tc->opts[i].type == 'l' ? l_names[local++] : u_names[upcast++];
   int reduce_axes[16][2];
   int n_reduce = poly_tc_get_reduce_axes(tc, reduce_axes);
-  for (int i = 0; i < n_reduce && n < max_n; i++) out[n++] = r_names[i];
+  for (int i = 0; i < n_reduce && n < max_n; i++)
+    out[n++] = r_names[i];
   return n;
 }
 
@@ -259,10 +290,13 @@ int poly_tc_base_upcast_axes(const PolyTensorCore *tc, const char *out[], int ma
   const char *forward[32];
   int reduce_axes[16][2], n_forward = 0;
   int n_reduce = poly_tc_get_reduce_axes(tc, reduce_axes);
-  for (int i = 0; i < n_reduce; i++) forward[n_forward++] = r_names[i];
-  for (int i = 0; i < poly_tc_count_upcast(tc); i++) forward[n_forward++] = u_names[i];
+  for (int i = 0; i < n_reduce; i++)
+    forward[n_forward++] = r_names[i];
+  for (int i = 0; i < poly_tc_count_upcast(tc); i++)
+    forward[n_forward++] = u_names[i];
   int n = 0;
-  for (int i = n_forward - 1; i >= 0 && n < max_n; i--) out[n++] = forward[i];
+  for (int i = n_forward - 1; i >= 0 && n < max_n; i--)
+    out[n++] = forward[i];
   return n;
 }
 

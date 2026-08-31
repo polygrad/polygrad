@@ -27,9 +27,7 @@ PolyUOp *poly_elementwise_promote(PolyCtx *ctx, PolyUOp *root, PolyDType common)
       base->arg.kind != POLY_ARG_INVALID) {
     return poly_const_like_dtype(ctx, root, base->arg, poly_dtype_weak(common));
   }
-  return poly_dtype_eq(root->dtype, common)
-             ? root
-             : poly_cast(ctx, root, common);
+  return poly_dtype_eq(root->dtype, common) ? root : poly_cast(ctx, root, common);
 }
 
 /* Current ElementwiseMixin._broadcasted applies least_upper_dtype while

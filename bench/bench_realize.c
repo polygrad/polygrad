@@ -23,7 +23,7 @@
 /* Compatibility: branch has PolyBufferBinding with .handle (PolyBufferHandle),
  * main has PolyBufferBinding with .data (void*).  Detect via POLY_BIND_HOST. */
 #ifndef POLY_BIND_HOST
-#define MAKE_BIND(buf, ptr) ((PolyBufferBinding){ (buf), (ptr) })
+#define MAKE_BIND(buf, ptr) ((PolyBufferBinding){(buf), (ptr)})
 #else
 #define MAKE_BIND(buf, ptr) POLY_BIND_HOST(buf, ptr)
 #endif
@@ -48,11 +48,12 @@ static void bench_vecadd(int n, int iters) {
   float *ha = malloc(n * sizeof(float));
   float *hb = malloc(n * sizeof(float));
   float *hc = calloc(n, sizeof(float));
-  for (int i = 0; i < n; i++) { ha[i] = (float)i * 0.001f; hb[i] = 1.0f; }
+  for (int i = 0; i < n; i++) {
+    ha[i] = (float)i * 0.001f;
+    hb[i] = 1.0f;
+  }
 
-  PolyBufferBinding binds[] = {
-    MAKE_BIND(c, hc), MAKE_BIND(a, ha), MAKE_BIND(b, hb)
-  };
+  PolyBufferBinding binds[] = {MAKE_BIND(c, hc), MAKE_BIND(a, ha), MAKE_BIND(b, hb)};
 
   /* Warmup (includes first compile) */
   poly_realize_with_bindings(ctx, sink, binds, 3);
@@ -65,7 +66,9 @@ static void bench_vecadd(int n, int iters) {
 
   printf("  vecadd        N=%-8d  %8.1f us/call  (%d iters)\n", n, us, iters);
 
-  free(ha); free(hb); free(hc);
+  free(ha);
+  free(hb);
+  free(hc);
   poly_ctx_destroy(ctx);
 }
 
@@ -90,11 +93,12 @@ static void bench_reduce_chain(int n, int iters) {
   float *ha = malloc(n * sizeof(float));
   float *hb = malloc(n * sizeof(float));
   float *hout = calloc(n, sizeof(float));
-  for (int i = 0; i < n; i++) { ha[i] = (float)(i + 1); hb[i] = (float)(i * 10); }
+  for (int i = 0; i < n; i++) {
+    ha[i] = (float)(i + 1);
+    hb[i] = (float)(i * 10);
+  }
 
-  PolyBufferBinding binds[] = {
-    MAKE_BIND(out, hout), MAKE_BIND(a, ha), MAKE_BIND(b, hb)
-  };
+  PolyBufferBinding binds[] = {MAKE_BIND(out, hout), MAKE_BIND(a, ha), MAKE_BIND(b, hb)};
 
   poly_realize_with_bindings(ctx, sink, binds, 3);
 
@@ -105,7 +109,9 @@ static void bench_reduce_chain(int n, int iters) {
 
   printf("  reduce_chain  N=%-8d  %8.1f us/call  (%d iters)\n", n, us, iters);
 
-  free(ha); free(hb); free(hout);
+  free(ha);
+  free(hb);
+  free(hout);
   poly_ctx_destroy(ctx);
 }
 
@@ -125,15 +131,15 @@ static void bench_cold_compile(int n) {
   float *hb = calloc(n, sizeof(float));
   float *hc = calloc(n, sizeof(float));
 
-  PolyBufferBinding binds[] = {
-    MAKE_BIND(c, hc), MAKE_BIND(a, ha), MAKE_BIND(b, hb)
-  };
+  PolyBufferBinding binds[] = {MAKE_BIND(c, hc), MAKE_BIND(a, ha), MAKE_BIND(b, hb)};
   poly_realize_with_bindings(ctx, sink, binds, 3);
   double us = now_us() - t0;
 
   printf("  cold_compile  N=%-8d  %8.1f us (graph build + schedule + compile + run)\n", n, us);
 
-  free(ha); free(hb); free(hc);
+  free(ha);
+  free(hb);
+  free(hc);
   poly_ctx_destroy(ctx);
 }
 

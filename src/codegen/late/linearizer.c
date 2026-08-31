@@ -27,7 +27,6 @@ typedef struct {
   int cap;
 } IntMap;
 
-
 static void imap_init(IntMap *m, int n) {
   m->cap = (n < 4) ? 16 : n * 3;
   m->keys = calloc(m->cap, sizeof(PolyUOp *));
@@ -397,8 +396,7 @@ static PolyUOp *cf_rewrite(
 
   /* Append control-flow dep for RANGE nodes */
   if (u->op == POLY_OP_RANGE && extra_dep[ui] >= 0) {
-    PolyUOp *dep =
-        cf_rewrite(ctx, topo[extra_dep[ui]], topo, idx, extra_dep, memo, visit, failed);
+    PolyUOp *dep = cf_rewrite(ctx, topo[extra_dep[ui]], topo, idx, extra_dep, memo, visit, failed);
     if (*failed) {
       if (src != src_stack) free(src);
       return NULL;
@@ -430,9 +428,7 @@ static PolyUOp *cf_rewrite(
     /* Pinned UOp.replace and GraphRewrite preserve metadata when sources are
      * rebuilt (uop/ops.py:156-161,1631-1633). */
     memo[ui] = (u->tag != 0 || u->tag_arg.kind != POLY_ARG_NONE)
-                   ? poly_uop_tagged_arg(
-                         ctx, u->op, u->dtype, src, ns, u->arg, u->tag, u->tag_arg
-                     )
+                   ? poly_uop_tagged_arg(ctx, u->op, u->dtype, src, ns, u->arg, u->tag, u->tag_arg)
                    : poly_uop(ctx, u->op, u->dtype, src, ns, u->arg);
     if (!memo[ui]) *failed = true;
   } else {
@@ -504,9 +500,7 @@ PolyUOp *poly_apply_control_flow(PolyCtx *ctx, PolyUOp *sink) {
     if (memo[i] && memo[i]->op == POLY_OP_RANGE && memo[i]->n_src > 0) {
       PolyUOp *bound = memo[i]->src[0];
       if (!poly_dtype_eq(bound->dtype, memo[i]->dtype)) {
-        fprintf(
-            stderr, "cf_rewrite: RANGE[%d] bound dtype differs from RANGE dtype\n", i
-        );
+        fprintf(stderr, "cf_rewrite: RANGE[%d] bound dtype differs from RANGE dtype\n", i);
       }
     }
   }
@@ -523,8 +517,7 @@ PolyUOp *poly_apply_control_flow(PolyCtx *ctx, PolyUOp *sink) {
 /* Tuplize ranking (matches tinygrad's cached UOp.tuplize for TUPLE_ORDER). */
 
 static bool arg_is_python_int(PolyArg arg) {
-  return arg.kind == POLY_ARG_BOOL || arg.kind == POLY_ARG_INT ||
-         arg.kind == POLY_ARG_BIGINT;
+  return arg.kind == POLY_ARG_BOOL || arg.kind == POLY_ARG_INT || arg.kind == POLY_ARG_BIGINT;
 }
 
 static int dtype_lt_cmp(PolyDType a, PolyDType b);
@@ -627,13 +620,11 @@ static int arg_cmp(PolyArg a, PolyArg b, bool *unordered) {
     return 0;
   case POLY_ARG_REDUCE:
     if (a.reduce.op != b.reduce.op) return a.reduce.op < b.reduce.op ? -1 : 1;
-    return a.reduce.num_axes < b.reduce.num_axes
-               ? -1
-               : (a.reduce.num_axes > b.reduce.num_axes ? 1 : 0);
+    return a.reduce.num_axes < b.reduce.num_axes ? -1
+                                                 : (a.reduce.num_axes > b.reduce.num_axes ? 1 : 0);
   case POLY_ARG_DTYPE:
     if (poly_dtype_eq(a.dtype, b.dtype)) return 0;
-    if (a.dtype.priority != b.dtype.priority)
-      return a.dtype.priority < b.dtype.priority ? -1 : 1;
+    if (a.dtype.priority != b.dtype.priority) return a.dtype.priority < b.dtype.priority ? -1 : 1;
     if (a.dtype.bitsize != b.dtype.bitsize) return a.dtype.bitsize < b.dtype.bitsize ? -1 : 1;
     return strcmp(a.dtype.name ? a.dtype.name : "", b.dtype.name ? b.dtype.name : "");
   default:
@@ -682,7 +673,8 @@ static uint64_t tuplize_pair_hash(uint64_t x) {
 
 static bool tuplize_pair_memo_init(TuplizePairMemo *m, int n) {
   int cap = 1024;
-  while (cap < n * 4) cap <<= 1;
+  while (cap < n * 4)
+    cap <<= 1;
   m->keys = calloc((size_t)cap, sizeof(uint64_t));
   m->vals = calloc((size_t)cap, sizeof(int8_t));
   if (!m->keys || !m->vals) {
@@ -732,7 +724,8 @@ static bool tuplize_pair_memo_grow(TuplizePairMemo *m) {
     if (!m->keys[i]) continue;
     uint64_t mask = (uint64_t)nm.cap - 1;
     uint64_t pos = tuplize_pair_hash(m->keys[i]) & mask;
-    while (nm.keys[pos]) pos = (pos + 1) & mask;
+    while (nm.keys[pos])
+      pos = (pos + 1) & mask;
     nm.keys[pos] = m->keys[i];
     nm.vals[pos] = m->vals[i];
     nm.len++;
@@ -749,7 +742,8 @@ static bool tuplize_pair_memo_set(TuplizePairMemo *m, uint64_t key, int val) {
   uint64_t stored = key + 1;
   uint64_t mask = (uint64_t)m->cap - 1;
   uint64_t pos = tuplize_pair_hash(stored) & mask;
-  while (m->keys[pos] && m->keys[pos] != stored) pos = (pos + 1) & mask;
+  while (m->keys[pos] && m->keys[pos] != stored)
+    pos = (pos + 1) & mask;
   if (!m->keys[pos]) {
     m->keys[pos] = stored;
     m->len++;

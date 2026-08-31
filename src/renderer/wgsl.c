@@ -334,7 +334,6 @@ static int wgsl_next_vector_lane(
   return 0;
 }
 
-
 /* WGSL float constant */
 
 static char *render_float_const_wgsl(double v, char *buf, int cap) {
@@ -381,10 +380,7 @@ static char *wgsl_render_const_literal(PolyUOp *c, PolyDType dtype) {
       snprintf(val, sizeof(val), "bitcast<u32>(%s)", decimal);
       free(decimal);
     } else {
-      snprintf(
-          val, sizeof(val), "%uu",
-          (unsigned)(uint32_t)poly_arg_integer_to_u64_mod(c->arg)
-      );
+      snprintf(val, sizeof(val), "%uu", (unsigned)(uint32_t)poly_arg_integer_to_u64_mod(c->arg));
     }
   } else {
     snprintf(val, sizeof(val), "%d", (int32_t)poly_arg_integer_to_u64_mod(c->arg));
@@ -571,8 +567,7 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
       wsm_set(&names, u, strdup(name));
 
       if (!wgsl_binding_append(
-              &bindings, &n_bindings, &cap_bindings, name, u->dtype,
-              !poly_uop_is_alu_param(u)
+              &bindings, &n_bindings, &cap_bindings, name, u->dtype, !poly_uop_is_alu_param(u)
           ))
         goto fail;
       continue;
@@ -743,8 +738,7 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
       PolyUOp *gate_uop =
           (u->n_src >= 3 && poly_dtype_is_bool(u->src[2]->dtype))
               ? u->src[2]
-              : ((idx_uop && idx_uop->n_src >= 3 &&
-                  poly_dtype_is_bool(idx_uop->src[2]->dtype))
+              : ((idx_uop && idx_uop->n_src >= 3 && poly_dtype_is_bool(idx_uop->src[2]->dtype))
                      ? idx_uop->src[2]
                      : NULL);
       if (gate_uop && u->n_src >= 2) {
@@ -756,9 +750,7 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
           int lane = wgsl_infer_gated_load_lane(ctx, idx_uop->src[1], gate_uop);
           int64_t lanes = gate_lanes > alt_lanes ? gate_lanes : alt_lanes;
           if (lane < 0 && lanes > 1) {
-            PolyUOp *lane_key = gate_lanes > 1
-                                    ? gate_uop
-                                    : (alt_lanes > 1 ? alt_uop : NULL);
+            PolyUOp *lane_key = gate_lanes > 1 ? gate_uop : (alt_lanes > 1 ? alt_uop : NULL);
             lane = wgsl_next_vector_lane(
                 lane_key, (int)lanes, gated_lane_keys, gated_lane_next, &n_gated_lane_keys
             );
@@ -780,8 +772,7 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
           int lane = wgsl_infer_gated_load_lane(ctx, idx_uop->src[1], gate_uop);
           if (lane < 0) {
             lane = wgsl_next_vector_lane(
-                gate_uop, (int)gate_lanes, gated_lane_keys, gated_lane_next,
-                &n_gated_lane_keys
+                gate_uop, (int)gate_lanes, gated_lane_keys, gated_lane_next, &n_gated_lane_keys
             );
           }
           if (lane >= 0) {
@@ -839,8 +830,7 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
 
     /* --- CAST / BITCAST: type conversion ----------------------------- */
     if (u->op == POLY_OP_CAST || u->op == POLY_OP_BITCAST) {
-      if (u->op == POLY_OP_CAST && u->n_src == 1 && u->src[0] &&
-          u->src[0]->op == POLY_OP_CONST &&
+      if (u->op == POLY_OP_CAST && u->n_src == 1 && u->src[0] && u->src[0]->op == POLY_OP_CONST &&
           (poly_dtype_is_weak(u->src[0]->dtype) || poly_dtype_is_bool(u->src[0]->dtype)) &&
           poly_uop_max_numel(ctx, u) == 1) {
         char *literal = wgsl_render_const_literal(u->src[0], u->dtype);
@@ -1026,8 +1016,7 @@ static PolyUOp *rule_wgsl_bool_alu(PolyCtx *ctx, PolyUOp *u, const PolyBindings 
   bool src0_bool = poly_dtype_is_bool(u->src[0]->dtype);
   bool src1_bool = poly_dtype_is_bool(u->src[1]->dtype);
   if (!src0_bool && !src1_bool) return NULL;
-  if ((u->op == POLY_OP_CMPEQ || u->op == POLY_OP_CMPNE) && src0_bool && src1_bool)
-    return NULL;
+  if ((u->op == POLY_OP_CMPEQ || u->op == POLY_OP_CMPNE) && src0_bool && src1_bool) return NULL;
   PolyUOp *a = poly_uop1(ctx, POLY_OP_CAST, POLY_INT32, u->src[0], poly_arg_none());
   PolyUOp *b = poly_uop1(ctx, POLY_OP_CAST, POLY_INT32, u->src[1], poly_arg_none());
   PolyDType result_dt = (u->op == POLY_OP_XOR) ? POLY_INT32 : POLY_BOOL;

@@ -82,7 +82,9 @@ static void realize_or_die(PolyCtx *ctx, PolyTensor *tensor, const char *name) {
 
 /* Tinygrad 2026-08-22/a9069c177a9d Tensor.__del__ retires loop-local wrappers.
  * C callers own handles explicitly, so the benchmark must release each call. */
-static void release_tensor(PolyTensor *tensor) { poly_tensor_release(tensor); }
+static void release_tensor(PolyTensor *tensor) {
+  poly_tensor_release(tensor);
+}
 
 static double bench_sum_1024(int iters, int warmup) {
   const int64_t n = 1024;

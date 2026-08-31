@@ -80,8 +80,7 @@ static int lm_get(LocalMap *m, PolyUOp *key) {
       if (poly_debug_at_least(4) && key) {
         fprintf(
             stderr, "[polygrad:wasm] missing local for %s(%p) dt=%s n_src=%d\n",
-            poly_op_name(key->op), (void *)key, key->dtype.name ? key->dtype.name : "?",
-            key->n_src
+            poly_op_name(key->op), (void *)key, key->dtype.name ? key->dtype.name : "?", key->n_src
         );
       }
       return -1;
@@ -89,8 +88,8 @@ static int lm_get(LocalMap *m, PolyUOp *key) {
   }
   if (poly_debug_at_least(4) && key) {
     fprintf(
-        stderr, "[polygrad:wasm] missing local for %s(%p) dt=%s n_src=%d\n",
-        poly_op_name(key->op), (void *)key, key->dtype.name ? key->dtype.name : "?", key->n_src
+        stderr, "[polygrad:wasm] missing local for %s(%p) dt=%s n_src=%d\n", poly_op_name(key->op),
+        (void *)key, key->dtype.name ? key->dtype.name : "?", key->n_src
     );
   }
   return -1;
@@ -145,8 +144,8 @@ static int rlm_get(RegLocalMap *m, PolyUOp *key, int idx) {
       if (poly_debug_at_least(4)) {
         fprintf(
             stderr,
-            "[polygrad:wasm] register lane %d out of range for %s(%p) size=%d; using lane 0\n",
-            idx, poly_op_name(key->op), (void *)key, m->sizes[i]
+            "[polygrad:wasm] register lane %d out of range for %s(%p) size=%d; using lane 0\n", idx,
+            poly_op_name(key->op), (void *)key, m->sizes[i]
         );
       }
       return m->locals[i][0];
@@ -177,8 +176,7 @@ static void rlm_destroy(RegLocalMap *m) {
 static PolyUOp *wasm_acc_base(PolyUOp *u) {
   if (!u) return NULL;
   if (u->op == POLY_OP_BUFFER &&
-      (poly_program_memory_is(u, POLY_ADDR_REG) ||
-       poly_program_memory_is(u, POLY_ADDR_LOCAL)))
+      (poly_program_memory_is(u, POLY_ADDR_REG) || poly_program_memory_is(u, POLY_ADDR_LOCAL)))
     return u;
   if ((u->op == POLY_OP_AFTER || u->op == POLY_OP_CAST || u->op == POLY_OP_BITCAST ||
        u->op == POLY_OP_INDEX) &&
@@ -191,8 +189,7 @@ static bool wasm_is_i32_address_base(PolyUOp *u) {
   if (!u) return false;
   if (u->op == POLY_OP_PARAM) return !poly_uop_is_alu_param(u);
   if (u->op == POLY_OP_BUFFER) return poly_program_memory_is(u, POLY_ADDR_GLOBAL);
-  if ((u->op == POLY_OP_AFTER || u->op == POLY_OP_CAST || u->op == POLY_OP_BITCAST) &&
-      u->n_src > 0)
+  if ((u->op == POLY_OP_AFTER || u->op == POLY_OP_CAST || u->op == POLY_OP_BITCAST) && u->n_src > 0)
     return wasm_is_i32_address_base(u->src[0]);
   return false;
 }
@@ -242,11 +239,7 @@ static PolyUOp *wasm_load_shrink(PolyUOp *u) {
   return (addr && addr->op == POLY_OP_SHRINK) ? addr : NULL;
 }
 
-static bool wasm_load_shrink_native_vec(
-    PolyUOp *u,
-    PolyDType *dtype_out,
-    int *lanes_out
-) {
+static bool wasm_load_shrink_native_vec(PolyUOp *u, PolyDType *dtype_out, int *lanes_out) {
   PolyUOp *shr = wasm_load_shrink(u);
   if (!shr) return false;
   int width = wasm_shrink_width(shr);
@@ -267,8 +260,7 @@ static int wasm_reg_storage_size(PolyUOp **uops, int n, PolyUOp *reg) {
     if (!u) continue;
     if (u->op == POLY_OP_INDEX && u->n_src >= 2 && wasm_acc_base(u->src[0]) == reg) {
       int idx = 0;
-      if (wasm_const_index_checked(u->src[1], &idx) && idx >= 0 && idx + 1 > size)
-        size = idx + 1;
+      if (wasm_const_index_checked(u->src[1], &idx) && idx >= 0 && idx + 1 > size) size = idx + 1;
     } else if (u->op == POLY_OP_SHRINK && u->n_src >= 3 && wasm_acc_base(u->src[0]) == reg) {
       int end = wasm_shrink_offset(u) + wasm_shrink_width(u);
       if (end > size) size = end;
@@ -324,8 +316,7 @@ static int wasm_param_abi_count(PolyUOp **uops, int n) {
     int64_t slot = poly_program_buffer_slot(uops[i]);
     bool first = true;
     for (int j = 0; j < i; j++)
-      if (uops[j] && uops[j]->op == POLY_OP_PARAM &&
-          poly_program_buffer_slot(uops[j]) == slot) {
+      if (uops[j] && uops[j]->op == POLY_OP_PARAM && poly_program_buffer_slot(uops[j]) == slot) {
         first = false;
         break;
       }
@@ -789,8 +780,7 @@ static bool wasm_simd_loop_can_vectorize_alu(PolyUOp *u) {
   if (wasm_is_compare_op(u->op) && u->n_src >= 2)
     return poly_dtype_is_float(wasm_compare_dtype(u->src[0]->dtype, u->src[1]->dtype));
   if (u->op == POLY_OP_WHERE)
-    return u->n_src >= 3 && poly_dtype_is_float(u->dtype) &&
-           wasm_is_compare_op(u->src[0]->op);
+    return u->n_src >= 3 && poly_dtype_is_float(u->dtype) && wasm_is_compare_op(u->src[0]->op);
   return poly_dtype_is_float(u->dtype);
 }
 
@@ -1215,9 +1205,7 @@ static void emit_vector_alu_lane_fallback(
       for (int k = 0; k < 3; k++) {
         int j = order[k];
         int src = lm_get(locals, u->src[j]);
-        emit_local_get_lane_for_alu_src(
-            body, src, ctx, u->src[j], wasm_alu_src_dtype(u, j), lane
-        );
+        emit_local_get_lane_for_alu_src(body, src, ctx, u->src[j], wasm_alu_src_dtype(u, j), lane);
       }
     } else {
       int n_operands = poly_opset_has(POLY_GROUP_TERNARY, u->op)  ? 3
@@ -1226,9 +1214,7 @@ static void emit_vector_alu_lane_fallback(
       if (n_operands > u->n_src) n_operands = u->n_src;
       for (int j = 0; j < n_operands; j++) {
         int src = lm_get(locals, u->src[j]);
-        emit_local_get_lane_for_alu_src(
-            body, src, ctx, u->src[j], wasm_alu_src_dtype(u, j), lane
-        );
+        emit_local_get_lane_for_alu_src(body, src, ctx, u->src[j], wasm_alu_src_dtype(u, j), lane);
       }
     }
 
@@ -1664,8 +1650,8 @@ static bool wasm_stack_native_vec(PolyUOp *u, PolyDType *dtype_out, int *lanes_o
   if (!u || u->op != POLY_OP_STACK || u->n_src <= 1) return false;
   PolyDType scalar = u->dtype;
   int lanes = u->n_src;
-  if (!((scalar.bitsize == 32 && (lanes == 2 || lanes == 4)) ||
-        (scalar.bitsize == 64 && lanes == 2)))
+  if (!((scalar.bitsize == 32 && (lanes == 2 || lanes == 4)) || (scalar.bitsize == 64 && lanes == 2)
+      ))
     return false;
   if (!dt_is_v128(scalar, lanes)) return false;
   if (dtype_out) *dtype_out = scalar;
@@ -1692,8 +1678,8 @@ static bool wasm_structural_vec_expr(PolyCtx *ctx, PolyUOp **lanes, int n_lanes)
     for (int lane = 0; lane < n_lanes; lane++) {
       int index = -1;
       if (!lanes[lane] || lanes[lane]->op != POLY_OP_INDEX || lanes[lane]->n_src < 2 ||
-          lanes[lane]->src[0] != base ||
-          !wasm_const_index_checked(lanes[lane]->src[1], &index) || index != lane)
+          lanes[lane]->src[0] != base || !wasm_const_index_checked(lanes[lane]->src[1], &index) ||
+          index != lane)
         return false;
     }
     return true;
@@ -1702,13 +1688,13 @@ static bool wasm_structural_vec_expr(PolyCtx *ctx, PolyUOp **lanes, int n_lanes)
   if (!poly_opset_has(POLY_GROUP_ALU, first->op) || !wasm_simd_loop_can_vectorize_alu(first))
     return false;
   for (int lane = 1; lane < n_lanes; lane++)
-    if (!lanes[lane] || lanes[lane]->op != first->op ||
-        lanes[lane]->n_src != first->n_src)
+    if (!lanes[lane] || lanes[lane]->op != first->op || lanes[lane]->n_src != first->n_src)
       return false;
 
   for (int src = 0; src < first->n_src; src++) {
     PolyUOp *src_lanes[4];
-    for (int lane = 0; lane < n_lanes; lane++) src_lanes[lane] = lanes[lane]->src[src];
+    for (int lane = 0; lane < n_lanes; lane++)
+      src_lanes[lane] = lanes[lane]->src[src];
     if (!wasm_structural_vec_expr(ctx, src_lanes, n_lanes)) return false;
   }
   return true;
@@ -1733,7 +1719,8 @@ static void wasm_mark_structural_vec_expr(
   if (lanes[0]->op == POLY_OP_INDEX) return;
   for (int src = 0; src < lanes[0]->n_src; src++) {
     PolyUOp *src_lanes[4];
-    for (int lane = 0; lane < n_lanes; lane++) src_lanes[lane] = lanes[lane]->src[src];
+    for (int lane = 0; lane < n_lanes; lane++)
+      src_lanes[lane] = lanes[lane]->src[src];
     wasm_mark_structural_vec_expr(uops, n, src_lanes, n_lanes, covered);
   }
 }
@@ -1750,8 +1737,7 @@ static void wasm_plan_structural_vecs(
 
   for (int i = 0; i < n; i++) {
     PolyUOp *u = uops[i];
-    if (!wasm_stack_native_vec(u, NULL, NULL) ||
-        !wasm_structural_vec_expr(ctx, u->src, u->n_src))
+    if (!wasm_stack_native_vec(u, NULL, NULL) || !wasm_structural_vec_expr(ctx, u->src, u->n_src))
       continue;
     fused_stack[i] = true;
     covered[i] = true;
@@ -1814,7 +1800,8 @@ static bool wasm_emit_structural_vec_expr(
   for (int pos = 0; pos < n_src; pos++) {
     int src = order[pos];
     PolyUOp *src_lanes[4];
-    for (int lane = 0; lane < n_lanes; lane++) src_lanes[lane] = lanes[lane]->src[src];
+    for (int lane = 0; lane < n_lanes; lane++)
+      src_lanes[lane] = lanes[lane]->src[src];
     if (!wasm_emit_structural_vec_expr(ctx, body, locals, src_lanes, n_lanes)) return false;
   }
 
@@ -1837,8 +1824,7 @@ static bool wasm_uop_value_is_v128(PolyCtx *ctx, PolyUOp *u) {
   int64_t lanes = u ? poly_uop_max_numel(ctx, u) : -1;
   return u && lanes > 1 && lanes <= INT_MAX &&
          (dt_is_v128(u->dtype, (int)lanes) || wasm_vector_alu_has_direct_simd(ctx, u) ||
-          wasm_load_shrink_native_vec(u, &dtype, NULL) ||
-          wasm_stack_native_vec(u, &dtype, NULL));
+          wasm_load_shrink_native_vec(u, &dtype, NULL) || wasm_stack_native_vec(u, &dtype, NULL));
 }
 
 static PolyDType wasm_local_value_dtype(PolyUOp *u) {
@@ -1852,8 +1838,7 @@ static PolyDType wasm_local_value_dtype(PolyUOp *u) {
 static bool kernel_is_f64(PolyUOp **uops, int n) {
   for (int i = 0; i < n; i++) {
     if (uops[i]->op == POLY_OP_LOAD && dt_is_f64(uops[i]->dtype)) return true;
-    if (uops[i]->op == POLY_OP_STORE && uops[i]->n_src > 1 &&
-        dt_is_f64(uops[i]->src[1]->dtype))
+    if (uops[i]->op == POLY_OP_STORE && uops[i]->n_src > 1 && dt_is_f64(uops[i]->src[1]->dtype))
       return true;
   }
   return false;
@@ -1877,8 +1862,7 @@ static PolyUOp *wasm_simd_single_const_range(PolyUOp **uops, int n) {
   for (int i = 0; i < n; i++) {
     if (uops[i]->op != POLY_OP_RANGE) continue;
     if (range) return NULL;
-    if (uops[i]->n_src < 1 || !uops[i]->src[0] || uops[i]->src[0]->op != POLY_OP_CONST)
-      return NULL;
+    if (uops[i]->n_src < 1 || !uops[i]->src[0] || uops[i]->src[0]->op != POLY_OP_CONST) return NULL;
     range = uops[i];
   }
   return range;
@@ -1965,13 +1949,11 @@ static bool kernel_is_simdable(PolyUOp **uops, int n) {
         u->op == POLY_OP_POW)
       return false;
     if (u->op == POLY_OP_RECIPROCAL) return false;
-    if ((u->op == POLY_OP_CAST && !wasm_casted_const_identity(u)) ||
-        u->op == POLY_OP_BITCAST)
+    if ((u->op == POLY_OP_CAST && !wasm_casted_const_identity(u)) || u->op == POLY_OP_BITCAST)
       return false;
     /* Reduce kernels are not SIMD-able (V1) */
     if (u->op == POLY_OP_BUFFER &&
-        (poly_program_memory_is(u, POLY_ADDR_REG) ||
-         poly_program_memory_is(u, POLY_ADDR_LOCAL)))
+        (poly_program_memory_is(u, POLY_ADDR_REG) || poly_program_memory_is(u, POLY_ADDR_LOCAL)))
       return false;
   }
   return true;
@@ -2096,9 +2078,8 @@ static void build_code_scalar(
     PolyUOp *u = uops[i];
     if (u->op == POLY_OP_RANGE) n_locals_i32++; /* loop counter always i32 */
     if (u->op == POLY_OP_LOAD) {
-      bool is_reg_load =
-          u->src[0]->op == POLY_OP_INDEX &&
-          poly_program_memory_is(u->src[0]->src[0], POLY_ADDR_REG);
+      bool is_reg_load = u->src[0]->op == POLY_OP_INDEX &&
+                         poly_program_memory_is(u->src[0]->src[0], POLY_ADDR_REG);
       PolyDType shrink_dtype;
       if (wasm_load_shrink_native_vec(u, &shrink_dtype, NULL)) {
         count_local(
@@ -2107,45 +2088,38 @@ static void build_code_scalar(
         );
       } else if (!is_reg_load) {
         count_local(
-            u->dtype, wasm_uop_value_is_v128(ctx, u), &n_locals_i32, &n_locals_i64,
-            &n_locals_f32, &n_locals_f64,
-            &n_locals_v128
+            u->dtype, wasm_uop_value_is_v128(ctx, u), &n_locals_i32, &n_locals_i64, &n_locals_f32,
+            &n_locals_f64, &n_locals_v128
         );
       }
     }
     if (poly_opset_has(POLY_GROUP_ALU, u->op)) {
       PolyDType local_dt = wasm_local_value_dtype(u);
       count_local(
-          local_dt, wasm_uop_value_is_v128(ctx, u), &n_locals_i32, &n_locals_i64,
-          &n_locals_f32, &n_locals_f64,
-          &n_locals_v128
+          local_dt, wasm_uop_value_is_v128(ctx, u), &n_locals_i32, &n_locals_i64, &n_locals_f32,
+          &n_locals_f64, &n_locals_v128
       );
     }
-    if ((u->op == POLY_OP_CAST && !wasm_casted_const_identity(u)) ||
-        u->op == POLY_OP_BITCAST)
+    if ((u->op == POLY_OP_CAST && !wasm_casted_const_identity(u)) || u->op == POLY_OP_BITCAST)
       count_local(
-          u->dtype, wasm_uop_value_is_v128(ctx, u), &n_locals_i32, &n_locals_i64,
-          &n_locals_f32, &n_locals_f64,
-          &n_locals_v128
+          u->dtype, wasm_uop_value_is_v128(ctx, u), &n_locals_i32, &n_locals_i64, &n_locals_f32,
+          &n_locals_f64, &n_locals_v128
       );
     if (u->op == POLY_OP_BUFFER && poly_program_memory_is(u, POLY_ADDR_REG)) {
       PolyDType base = wasm_reg_base_dtype(poly_program_buffer_dtype(u));
       int reg_size = wasm_reg_storage_size(uops, n, u);
       for (int r = 0; r < reg_size; r++)
         count_local(
-            base, false, &n_locals_i32, &n_locals_i64, &n_locals_f32, &n_locals_f64,
-            &n_locals_v128
+            base, false, &n_locals_i32, &n_locals_i64, &n_locals_f32, &n_locals_f64, &n_locals_v128
         );
     }
     if (u->op == POLY_OP_STACK)
       count_local(
-          wasm_local_value_dtype(u), wasm_uop_value_is_v128(ctx, u), &n_locals_i32,
-          &n_locals_i64, &n_locals_f32, &n_locals_f64,
-          &n_locals_v128
+          wasm_local_value_dtype(u), wasm_uop_value_is_v128(ctx, u), &n_locals_i32, &n_locals_i64,
+          &n_locals_f32, &n_locals_f64, &n_locals_v128
       );
     if (u->op == POLY_OP_SHRINK) {
-      if (wasm_is_i32_address_base(u->src[0]))
-        n_locals_i32++;
+      if (wasm_is_i32_address_base(u->src[0])) n_locals_i32++;
     }
     if (u->op == POLY_OP_INDEX) {
       if (wasm_reg_addr_index(u, NULL, NULL)) {
@@ -2154,9 +2128,8 @@ static void build_code_scalar(
         n_locals_i32++; /* byte offsets always i32 */
       } else {
         count_local(
-            u->dtype, wasm_uop_value_is_v128(ctx, u), &n_locals_i32, &n_locals_i64,
-            &n_locals_f32, &n_locals_f64,
-            &n_locals_v128
+            u->dtype, wasm_uop_value_is_v128(ctx, u), &n_locals_i32, &n_locals_i64, &n_locals_f32,
+            &n_locals_f64, &n_locals_v128
         );
       }
     }
@@ -2318,8 +2291,8 @@ static void build_code_scalar(
 
       PolyDType value_dtype = wasm_local_value_dtype(u);
       int local_idx = alloc_local(
-          value_dtype, wasm_uop_value_is_v128(ctx, u), &next_i32, &next_i64, &next_f32,
-          &next_f64, &next_v128
+          value_dtype, wasm_uop_value_is_v128(ctx, u), &next_i32, &next_i64, &next_f32, &next_f64,
+          &next_v128
       );
       bool emitted_fused = false;
       if (fused_stack && fused_stack[i]) {
@@ -2534,18 +2507,15 @@ static void build_code_scalar(
         }
         lm_set(&locals, u, acc_local);
       } else {
-        int local_idx =
-            alloc_local(
-                u->dtype, wasm_uop_value_is_v128(ctx, u), &next_i32, &next_i64,
-                &next_f32, &next_f64, &next_v128
-            );
+        int local_idx = alloc_local(
+            u->dtype, wasm_uop_value_is_v128(ctx, u), &next_i32, &next_i64, &next_f32, &next_f64,
+            &next_v128
+        );
         int addr = lm_get(&locals, u->src[0]);
 
         /* Pinned tinygrad final IR: LOAD(INDEX(buf, idx), alt, gate). */
         PolyUOp *gate_uop =
-            (u->n_src >= 3 && poly_dtype_is_bool(u->src[2]->dtype))
-                ? u->src[2]
-                : NULL;
+            (u->n_src >= 3 && poly_dtype_is_bool(u->src[2]->dtype)) ? u->src[2] : NULL;
         bool gated = gate_uop != NULL;
 
         if (gated) {
@@ -2569,8 +2539,7 @@ static void build_code_scalar(
         if (wasm_uop_value_is_v128(ctx, u)) {
           int64_t lanes = poly_uop_max_numel(ctx, u);
           emit_v128_load_opcode(&body, u->dtype, (int)lanes);
-        }
-        else
+        } else
           emit_scalar_load_opcode(&body, u->dtype);
 
         if (gated) {
@@ -2648,8 +2617,7 @@ static void build_code_scalar(
         if (val_is_v128) {
           int64_t lanes = poly_uop_max_numel(ctx, u->src[1]);
           emit_v128_store_opcode(&body, val_dt, (int)lanes);
-        }
-        else
+        } else
           emit_scalar_store_opcode(&body, buf_dt);
       }
       continue;
@@ -2683,11 +2651,10 @@ static void build_code_scalar(
         lm_set(&locals, u, local_idx);
         continue;
       }
-      int local_idx =
-          alloc_local(
-              u->dtype, wasm_uop_value_is_v128(ctx, u), &next_i32, &next_i64, &next_f32,
-              &next_f64, &next_v128
-          );
+      int local_idx = alloc_local(
+          u->dtype, wasm_uop_value_is_v128(ctx, u), &next_i32, &next_i64, &next_f32, &next_f64,
+          &next_v128
+      );
       int src = lm_get(&locals, u->src[0]);
       wb_byte(&body, WASM_OP_LOCAL_GET);
       wb_uleb128(&body, src);
@@ -2797,11 +2764,10 @@ static void build_code_scalar(
       bool vector_alu = wasm_vector_alu_has_direct_simd(ctx, u);
       bool vector_lane_fallback = wasm_vector_alu_needs_lane_fallback(ctx, u);
       PolyDType local_dt = wasm_local_value_dtype(u);
-      int local_idx =
-          alloc_local(
-              local_dt, vector_alu || vector_lane_fallback, &next_i32, &next_i64, &next_f32,
-              &next_f64, &next_v128
-          );
+      int local_idx = alloc_local(
+          local_dt, vector_alu || vector_lane_fallback, &next_i32, &next_i64, &next_f32, &next_f64,
+          &next_v128
+      );
 
       /* RECIPROCAL: push 1.0 first, then src, then div */
       if (!vector_alu && !vector_lane_fallback && u->op == POLY_OP_RECIPROCAL) {
@@ -3148,8 +3114,7 @@ static void build_code_simd(
       int local_idx =
           simd_alu ? next_v128++
                    : alloc_local(
-                         u->dtype, false, &next_i32, &next_i64, &next_f32, &next_f64,
-                         &next_v128
+                         u->dtype, false, &next_i32, &next_i64, &next_f32, &next_f64, &next_v128
                      );
 
       /* Push sources in renderer stack order, preserving tinygrad MULACC
@@ -3270,9 +3235,8 @@ static void build_code_simd(
       if (poly_dtype_is_float(u->dtype))
         local_idx = is_f64_kernel ? next_f64++ : next_f32++;
       else
-        local_idx = alloc_local(
-            u->dtype, false, &next_i32, &next_i64, &next_f32, &next_f64, &next_v128
-        );
+        local_idx =
+            alloc_local(u->dtype, false, &next_i32, &next_i64, &next_f32, &next_f64, &next_v128);
 
       if (u->op == POLY_OP_WHERE && u->n_src >= 3)
         emit_scalar_where_sources(&body, &locals, u);
@@ -3348,8 +3312,7 @@ static bool wasm_const_i64(PolyUOp *u, int64_t *out) {
     if (out) *out = u->arg.i;
     return true;
   }
-  if (u->arg.kind == POLY_ARG_BIGINT)
-    return poly_arg_integer_to_i64(u->arg, out);
+  if (u->arg.kind == POLY_ARG_BIGINT) return poly_arg_integer_to_i64(u->arg, out);
   return false;
 }
 
@@ -3441,8 +3404,7 @@ static bool wasm_affine_expr(PolyUOp *u, PolyUOp *r0, PolyUOp *r1, PolyUOp *r2, 
       return false;
     }
     WasmAffine mul, add;
-    if (!wasm_affine_expr(expr, r0, r1, r2, &mul) ||
-        !wasm_affine_expr(u->src[2], r0, r1, r2, &add))
+    if (!wasm_affine_expr(expr, r0, r1, r2, &mul) || !wasm_affine_expr(u->src[2], r0, r1, r2, &add))
       return false;
     for (int i = 0; i < 3; i++)
       out->c[i] = mul.c[i] * scale + add.c[i];
@@ -3497,8 +3459,7 @@ static bool wasm_reduce_expr_supported(PolyUOp *u, const WasmReduceSpec *s);
 static bool wasm_reduce_index_supported(PolyUOp *u, const WasmReduceSpec *s) {
   int param = -1;
   WasmAffine aff;
-  if (!wasm_index_param_affine(u, s->red_range, s->out_range, NULL, &param, &aff))
-    return false;
+  if (!wasm_index_param_affine(u, s->red_range, s->out_range, NULL, &param, &aff)) return false;
   if (param == s->out_param) return false;
   PolyDType scalar = u->dtype;
   if (!poly_dtype_is_float(scalar) || scalar.bitsize != 32) return false;
@@ -3546,8 +3507,7 @@ static int wasm_reduce_expr_max_param(PolyUOp *u) {
     while (base && (base->op == POLY_OP_CAST || base->op == POLY_OP_BITCAST ||
                     base->op == POLY_OP_RESHAPE || base->op == POLY_OP_EXPAND))
       base = base->src[0];
-    if (base && base->op == POLY_OP_PARAM)
-      maxp = (int)poly_program_buffer_slot(base);
+    if (base && base->op == POLY_OP_PARAM) maxp = (int)poly_program_buffer_slot(base);
   }
   for (int i = 0; i < u->n_src; i++) {
     int child = wasm_reduce_expr_max_param(u->src[i]);
@@ -3627,8 +3587,7 @@ static bool wasm_match_matmul_root(PolyUOp *sink, WasmMatmulSpec *spec) {
   if (!mul || mul->op != POLY_OP_MUL || mul->n_src != 2) return false;
   /* wasm_emit_matmul_* is deliberately f32 SIMD. Keep integer and other
    * tinygrad matmul graphs on the general dtype-aware renderer. */
-  if (!poly_dtype_eq(reduce->dtype, POLY_FLOAT32) ||
-      !poly_dtype_eq(mul->dtype, POLY_FLOAT32) ||
+  if (!poly_dtype_eq(reduce->dtype, POLY_FLOAT32) || !poly_dtype_eq(mul->dtype, POLY_FLOAT32) ||
       !poly_dtype_eq(mul->src[0]->dtype, POLY_FLOAT32) ||
       !poly_dtype_eq(mul->src[1]->dtype, POLY_FLOAT32))
     return false;
@@ -3670,8 +3629,7 @@ static bool wasm_match_matmul_root(PolyUOp *sink, WasmMatmulSpec *spec) {
   PolyUOp *r_row = end->src[1];
   PolyUOp *r_col = end->src[2];
   int64_t m = 0, n = 0, k = 0;
-  if (!wasm_range_bound(r_row, &m) || !wasm_range_bound(r_col, &n) ||
-      !wasm_range_bound(r_k, &k))
+  if (!wasm_range_bound(r_row, &m) || !wasm_range_bound(r_col, &n) || !wasm_range_bound(r_k, &k))
     return false;
   if (m <= 0 || n <= 0 || k <= 0) return false;
 
@@ -3700,8 +3658,8 @@ static bool wasm_match_matmul_root(PolyUOp *sink, WasmMatmulSpec *spec) {
     if (!((m == 1 || m % 4 == 0) && n % 4 == 0)) return false;
   }
 
-  if (out_param < 0 || a_param < 0 || b_param < 0 || out_param == a_param ||
-      out_param == b_param || a_param == b_param)
+  if (out_param < 0 || a_param < 0 || b_param < 0 || out_param == a_param || out_param == b_param ||
+      a_param == b_param)
     return false;
 
   *spec = (WasmMatmulSpec){
@@ -3745,9 +3703,15 @@ static void wasm_emit_i32_const(WasmBuf *body, int32_t v) {
   wb_sleb128(body, v);
 }
 
-static void wasm_emit_i32_add(WasmBuf *body) { wb_byte(body, WASM_OP_I32_ADD); }
-static void wasm_emit_i32_mul(WasmBuf *body) { wb_byte(body, WASM_OP_I32_MUL); }
-static void wasm_emit_i32_ge_u(WasmBuf *body) { wb_byte(body, WASM_OP_I32_GE_U); }
+static void wasm_emit_i32_add(WasmBuf *body) {
+  wb_byte(body, WASM_OP_I32_ADD);
+}
+static void wasm_emit_i32_mul(WasmBuf *body) {
+  wb_byte(body, WASM_OP_I32_MUL);
+}
+static void wasm_emit_i32_ge_u(WasmBuf *body) {
+  wb_byte(body, WASM_OP_I32_GE_U);
+}
 
 static void wasm_emit_loop_header(WasmBuf *body) {
   wb_byte(body, WASM_OP_BLOCK);
@@ -3916,11 +3880,7 @@ static void wasm_emit_f32x4_accumulate(
   wasm_emit_local_set(body, acc_local);
 }
 
-static void wasm_emit_f32x4_horizontal_sum(
-    WasmBuf *body,
-    int vec_local,
-    int tmp_local
-) {
+static void wasm_emit_f32x4_horizontal_sum(WasmBuf *body, int vec_local, int tmp_local) {
   static const uint8_t swap_halves[16] = {
       8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7,
   };
@@ -3990,8 +3950,7 @@ static bool wasm_emit_reduce_index_f32(
 ) {
   int param = -1;
   WasmAffine aff;
-  if (!wasm_index_param_affine(idx, s->red_range, s->out_range, NULL, &param, &aff))
-    return false;
+  if (!wasm_index_param_affine(idx, s->red_range, s->out_range, NULL, &param, &aff)) return false;
 
   wasm_emit_param_element_addr(
       body, param, row_local, (int)aff.c[1], kk_local, (int)aff.c[0], -1, 0
@@ -4262,9 +4221,7 @@ static void wasm_emit_matmul_ab_body(
     wasm_emit_local_set(body, avec);
     wasm_emit_inc_const(body, a_addr + r, 4);
     for (int v = 0; v < 4; v++) {
-      wasm_emit_f32x4_accumulate(
-          body, acc0 + r * 4 + v, avec, bvec0 + v, use_relaxed_madd
-      );
+      wasm_emit_f32x4_accumulate(body, acc0 + r * 4 + v, avec, bvec0 + v, use_relaxed_madd);
     }
   }
 
@@ -4505,9 +4462,7 @@ static void wasm_emit_matmul_abt_body(
       wasm_emit_local_set(body, avec);
       wasm_emit_inc_const(body, a_addr + r, 16);
       for (int c = 0; c < 4; c++) {
-        wasm_emit_f32x4_accumulate(
-            body, acc0 + r * 4 + c, avec, bvec0 + c, use_relaxed_madd
-        );
+        wasm_emit_f32x4_accumulate(body, acc0 + r * 4 + c, avec, bvec0 + c, use_relaxed_madd);
       }
     }
   }
@@ -4689,15 +4644,16 @@ uint8_t *poly_render_wasm_matmul(PolyUOp *sink, int *size_out, bool use_relaxed_
     fprintf(
         stderr,
         "[polygrad:wasm] matmul kind=%s m=%d n=%d k=%d params out=%d a=%d b=%d relaxed=%d\n",
-        s.kind == WASM_MATMUL_ABT ? "ABT" : "AB", s.m, s.n, s.k, s.out_param, s.a_param,
-        s.b_param, use_relaxed_madd ? 1 : 0
+        s.kind == WASM_MATMUL_ABT ? "ABT" : "AB", s.m, s.n, s.k, s.out_param, s.a_param, s.b_param,
+        use_relaxed_madd ? 1 : 0
     );
   }
   int slots[3] = {s.out_param, s.a_param, s.b_param};
   int *params[3] = {&s.out_param, &s.a_param, &s.b_param};
   for (int i = 0; i < 3; i++) {
     int rank = 0;
-    for (int j = 0; j < 3; j++) rank += slots[j] < slots[i];
+    for (int j = 0; j < 3; j++)
+      rank += slots[j] < slots[i];
     *params[i] = rank;
   }
   int n_params = 3;
@@ -4715,8 +4671,7 @@ uint8_t *poly_render_wasm_matmul(PolyUOp *sink, int *size_out, bool use_relaxed_
   wb_init(&body);
 
   int n_i32 = s.kind == WASM_MATMUL_ABT ? 14 : 20;
-  int n_f32 =
-      s.kind == WASM_MATMUL_ABT ? 1 : (((s.n % 16) != 0 || (s.m % 4) != 0) ? 4 : 0);
+  int n_f32 = s.kind == WASM_MATMUL_ABT ? 1 : (((s.n % 16) != 0 || (s.m % 4) != 0) ? 4 : 0);
   int n_v128 = s.kind == WASM_MATMUL_AB ? 21 : 21;
   int n_local_types = 2 + (n_f32 > 0 ? 1 : 0);
   wb_uleb128(&body, n_local_types);
@@ -4767,8 +4722,8 @@ uint8_t *poly_render_wasm_matmul(PolyUOp *sink, int *size_out, bool use_relaxed_
 
   if (s.kind == WASM_MATMUL_AB)
     wasm_emit_matmul_ab_body(
-      &body, &s, row, col, kk, row_tile, col_tile, row_off, k_tile, tile_end, b_addr,
-      a_addr, out_addr, acc, acc + 16, acc + 20, sum, use_relaxed_for_kind
+        &body, &s, row, col, kk, row_tile, col_tile, row_off, k_tile, tile_end, b_addr, a_addr,
+        out_addr, acc, acc + 16, acc + 20, sum, use_relaxed_for_kind
     );
   else if (s.m == 1)
     wasm_emit_matmul_abt_row1_body(
@@ -4777,8 +4732,8 @@ uint8_t *poly_render_wasm_matmul(PolyUOp *sink, int *size_out, bool use_relaxed_
     );
   else
     wasm_emit_matmul_abt_body(
-        &body, &s, row, col, kk, row_tile, col_tile, row_off, acc, sum, acc + 16, acc + 20,
-        b_addr, a_addr, use_relaxed_for_kind
+        &body, &s, row, col, kk, row_tile, col_tile, row_off, acc, sum, acc + 16, acc + 20, b_addr,
+        a_addr, use_relaxed_for_kind
     );
 
   wb_byte(&body, WASM_OP_END);
@@ -4801,9 +4756,8 @@ uint8_t *poly_render_wasm_reduce(PolyUOp *sink, int *size_out) {
   if (!wasm_match_row_reduce_root(sink, &s)) return NULL;
   if (poly_debug_at_least(4)) {
     fprintf(
-        stderr,
-        "[polygrad:wasm] row-reduce m=%d k=%d out=%d max_param=%d\n",
-        s.m, s.k, s.out_param, wasm_reduce_expr_max_param(s.expr)
+        stderr, "[polygrad:wasm] row-reduce m=%d k=%d out=%d max_param=%d\n", s.m, s.k, s.out_param,
+        wasm_reduce_expr_max_param(s.expr)
     );
   }
 
@@ -4824,8 +4778,8 @@ uint8_t *poly_render_wasm_reduce(PolyUOp *sink, int *size_out) {
   WasmBuf body;
   wb_init(&body);
 
-  const int n_i32 = 2;  /* row, kk */
-  const int n_f32 = 1;  /* sum */
+  const int n_i32 = 2; /* row, kk */
+  const int n_f32 = 1; /* sum */
   const int n_v128 = 2; /* acc, tmp */
   wb_uleb128(&body, 3);
   wb_uleb128(&body, n_i32);

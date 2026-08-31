@@ -124,7 +124,10 @@ static PolyUOp *poly_transform_to_call_multibase(PolyUOp *u) {
   return base ? base : u;
 }
 
-static PolyUOp *poly_transform_to_call_after_result_root(PolyUOp *u, PolyTransformViewStack *views) {
+static PolyUOp *poly_transform_to_call_after_result_root(
+    PolyUOp *u,
+    PolyTransformViewStack *views
+) {
   PolyUOp *root = u;
   if (views) views->n = 0;
   while (root && root->n_src >= 1 && !poly_uop_has_buffer_identity(root) &&
@@ -136,44 +139,41 @@ static PolyUOp *poly_transform_to_call_after_result_root(PolyUOp *u, PolyTransfo
 }
 
 static PolyUOp *poly_transform_to_call_canonical_shape_dim(
-    PolyCtx *ctx, PolyUOp *u, PolyShape shape, int dim
+    PolyCtx *ctx,
+    PolyUOp *u,
+    PolyShape shape,
+    int dim
 ) {
   if (!ctx || !u || dim < 0 || dim >= shape.ndim) return NULL;
   PolyUOp *value = poly_uop_shape_dim(ctx, u, dim);
-  if (!value)
-    value =
-        poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(shape.dims[dim]));
+  if (!value) value = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(shape.dims[dim]));
   if (value && !poly_dtype_eq(value->dtype, POLY_WEAKINT))
     value = poly_uop1(ctx, POLY_OP_CAST, POLY_WEAKINT, value, poly_arg_none());
   return value ? poly_graph_rewrite(ctx, value, poly_symbolic()) : NULL;
 }
 
 static bool poly_transform_to_call_same_exact_shape(
-    PolyCtx *ctx, PolyUOp *a, PolyShape a_shape, PolyUOp *b, PolyShape b_shape
+    PolyCtx *ctx,
+    PolyUOp *a,
+    PolyShape a_shape,
+    PolyUOp *b,
+    PolyShape b_shape
 ) {
-  if (!ctx || !a || !b || a_shape.ndim != b_shape.ndim || a_shape.ndim < 0)
-    return false;
+  if (!ctx || !a || !b || a_shape.ndim != b_shape.ndim || a_shape.ndim < 0) return false;
   for (int i = 0; i < a_shape.ndim; i++) {
-    PolyUOp *a_dim =
-        poly_transform_to_call_canonical_shape_dim(ctx, a, a_shape, i);
-    PolyUOp *b_dim =
-        poly_transform_to_call_canonical_shape_dim(ctx, b, b_shape, i);
+    PolyUOp *a_dim = poly_transform_to_call_canonical_shape_dim(ctx, a, a_shape, i);
+    PolyUOp *b_dim = poly_transform_to_call_canonical_shape_dim(ctx, b, b_shape, i);
     if (!a_dim || !b_dim || a_dim != b_dim) return false;
   }
   return true;
 }
 
-static bool poly_transform_to_call_is_static_max_shape(
-    PolyCtx *ctx, PolyUOp *u, PolyShape shape
-) {
+static bool poly_transform_to_call_is_static_max_shape(PolyCtx *ctx, PolyUOp *u, PolyShape shape) {
   if (!ctx || !u || shape.ndim < 0) return false;
   for (int i = 0; i < shape.ndim; i++) {
-    PolyUOp *dim =
-        poly_transform_to_call_canonical_shape_dim(ctx, u, shape, i);
+    PolyUOp *dim = poly_transform_to_call_canonical_shape_dim(ctx, u, shape, i);
     int64_t value = 0;
-    if (!dim || poly_uop_const_i64(dim, &value) != 0 ||
-        value != shape.dims[i])
-      return false;
+    if (!dim || poly_uop_const_i64(dim, &value) != 0 || value != shape.dims[i]) return false;
   }
   return true;
 }
@@ -195,31 +195,24 @@ static PolyUOp *poly_transform_to_call_rebuild_view(
   PolyUOp *view = buf;
   PolyShape view_shape = poly_uop_max_shape_cached(ctx, view);
   if (view_shape.ndim < 0) return NULL;
-  if (!poly_transform_to_call_same_exact_shape(
-          ctx, view, view_shape, root, root_shape
-      )) {
-    bool at_static_max =
-        poly_shape_eq(view_shape, root_shape) &&
-        poly_transform_to_call_is_static_max_shape(ctx, view, view_shape);
+  if (!poly_transform_to_call_same_exact_shape(ctx, view, view_shape, root, root_shape)) {
+    bool at_static_max = poly_shape_eq(view_shape, root_shape) &&
+                         poly_transform_to_call_is_static_max_shape(ctx, view, view_shape);
     if (!at_static_max) {
       int64_t root_numel = poly_shape_numel(root_shape);
-      if (view_shape.ndim != 1 || root_numel < 0 ||
-          view_shape.dims[0] != root_numel)
-        return NULL;
+      if (view_shape.ndim != 1 || root_numel < 0 || view_shape.dims[0] != root_numel) return NULL;
       view = poly_reshape(ctx, view, root_shape.dims, root_shape.ndim);
       if (!view) return NULL;
     }
 
     PolyUOp *starts[POLY_MAX_DIMS];
     PolyUOp *sizes[POLY_MAX_DIMS];
-    PolyUOp *zero =
-        poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(0));
+    PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(0));
     for (int i = 0; i < root_shape.ndim; i++) {
       starts[i] = zero;
       sizes[i] = poly_uop_shape_dim(ctx, root, i);
       if (!sizes[i])
-        sizes[i] = poly_uop0(
-            ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(root_shape.dims[i]));
+        sizes[i] = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(root_shape.dims[i]));
       if (!starts[i] || !sizes[i]) return NULL;
     }
     if (!poly_transform_to_call_is_static_max_shape(ctx, root, root_shape)) {
@@ -231,33 +224,27 @@ static PolyUOp *poly_transform_to_call_rebuild_view(
   for (int i = n_views - 1; i >= 0; i--) {
     PolyUOp *step = views->items[i];
     if (step->op == POLY_OP_RESHAPE) {
-      if (step->arg.kind != POLY_ARG_NONE || step->n_src != 2)
-        return NULL;
+      if (step->arg.kind != POLY_ARG_NONE || step->n_src != 2) return NULL;
       /* Pinned callify substitutes only the materialized base in the immutable
        * movement graph (callify.py:204-220, tensor.py:202-206). Preserve the
        * exact symbolic RESHAPE shape source instead of its cached max shape. */
       PolyUOp *reshape_src[2] = {view, step->src[1]};
-      view = poly_uop(
-          ctx, POLY_OP_RESHAPE, step->dtype, reshape_src, 2, poly_arg_none());
-    } else if (step->op == POLY_OP_EXPAND && step->arg.kind == POLY_ARG_NONE &&
-               step->n_src == 2) {
+      view = poly_uop(ctx, POLY_OP_RESHAPE, step->dtype, reshape_src, 2, poly_arg_none());
+    } else if (step->op == POLY_OP_EXPAND && step->arg.kind == POLY_ARG_NONE && step->n_src == 2) {
       /* Same immutable-source substitution as RESHAPE and pinned callify.py:
        * replace only the materialized base, not the shape-value UOp. */
       PolyUOp *expand_src[2] = {view, step->src[1]};
-      view = poly_uop(
-          ctx, POLY_OP_EXPAND, step->dtype, expand_src, 2, poly_arg_none());
+      view = poly_uop(ctx, POLY_OP_EXPAND, step->dtype, expand_src, 2, poly_arg_none());
     } else if (step->op == POLY_OP_PERMUTE && step->arg.kind == POLY_ARG_INT_TUPLE) {
       view = poly_permute(ctx, view, step->arg.int_tuple.vals, step->arg.int_tuple.n);
-    } else if (step->op == POLY_OP_PAD && step->arg.kind == POLY_ARG_NONE &&
-               step->n_src == 3) {
+    } else if (step->op == POLY_OP_PAD && step->arg.kind == POLY_ARG_NONE && step->n_src == 3) {
       PolyUOp *offsets[POLY_MAX_DIMS], *sizes[POLY_MAX_DIMS];
       int n_offsets = poly_uop_as_shape(ctx, step->src[1], offsets, POLY_MAX_DIMS);
       int n_sizes = poly_uop_as_shape(ctx, step->src[2], sizes, POLY_MAX_DIMS);
       view = n_offsets >= 0 && n_offsets == n_sizes
                  ? poly_pad_uop(ctx, view, offsets, sizes, n_offsets)
                  : NULL;
-    } else if (step->op == POLY_OP_SHRINK && step->arg.kind == POLY_ARG_NONE &&
-               step->n_src >= 3) {
+    } else if (step->op == POLY_OP_SHRINK && step->arg.kind == POLY_ARG_NONE && step->n_src >= 3) {
       PolyUOp *starts[POLY_MAX_DIMS], *sizes[POLY_MAX_DIMS];
       int n_starts = poly_uop_as_shape(ctx, step->src[1], starts, POLY_MAX_DIMS);
       int n_sizes = poly_uop_as_shape(ctx, step->src[2], sizes, POLY_MAX_DIMS);
@@ -355,20 +342,18 @@ static PolyUOp *poly_transform_to_call_empty_buffer_like(
   }
 
   int64_t buffer_shape[POLY_MAX_DIMS];
-  for (int i = 0; i < shape.ndim; i++) buffer_shape[i] = shape.dims[i];
+  for (int i = 0; i < shape.ndim; i++)
+    buffer_shape[i] = shape.dims[i];
   if (multi_axis >= 0) {
-    if (buffer_shape[multi_axis] < 0 || buffer_shape[multi_axis] % tuple_count != 0)
-      return NULL;
+    if (buffer_shape[multi_axis] < 0 || buffer_shape[multi_axis] % tuple_count != 0) return NULL;
     buffer_shape[multi_axis] /= tuple_count;
   }
   PolyShape allocation_shape = {.dims = buffer_shape, .ndim = shape.ndim};
   int64_t numel = poly_shape_numel(allocation_shape);
   if (numel < 0) return NULL;
-  PolyDType storage_dtype =
-      poly_dtype_is_weak(dtype) ? poly_dtype_strong(dtype) : dtype;
-  PolyUOp *buffer = poly_uop_new_buffer(
-      ctx, device, numel, storage_dtype, poly_ctx_next_unique_id(ctx)
-  );
+  PolyDType storage_dtype = poly_dtype_is_weak(dtype) ? poly_dtype_strong(dtype) : dtype;
+  PolyUOp *buffer =
+      poly_uop_new_buffer(ctx, device, numel, storage_dtype, poly_ctx_next_unique_id(ctx));
   if (!buffer) return NULL;
   /* Pinned UOp.empty is BUFFER(prod(max_shape)).reshape(max_shape) before
    * symbolic shrink_to (uop/ops.py:742-750), while MovementMixin.reshape
@@ -379,8 +364,7 @@ static PolyUOp *poly_transform_to_call_empty_buffer_like(
                        ? buffer
                        : poly_reshape(ctx, buffer, buffer_shape, shape.ndim);
   if (!local || multi_axis < 0) return local;
-  PolyUOp *device_range = poly_range(
-      ctx, tuple_count, -1, POLY_AXIS_DEVICE);
+  PolyUOp *device_range = poly_range(ctx, tuple_count, -1, POLY_AXIS_DEVICE);
   int64_t axis = multi_axis;
   PolyUOp *ranges[] = {device_range};
   return device_range ? poly_unshard(ctx, local, &axis, ranges, 1) : NULL;
@@ -440,17 +424,10 @@ static void poly_transform_to_call_ctx_free(PolyTransformToCallCtx *tctx) {
 /* Pinned RewriteContext rebuilds a source-changing UOp with the original
  * op/dtype/arg/tag. Polygrad's tag is split into tag/tag_arg, so both fields
  * are part of the same reconstruction identity. */
-static PolyUOp *poly_rebuild_with_sources(
-    PolyCtx *ctx,
-    PolyUOp *u,
-    PolyUOp **src
-) {
+static PolyUOp *poly_rebuild_with_sources(PolyCtx *ctx, PolyUOp *u, PolyUOp **src) {
   if (!ctx || !u || (u->n_src > 0 && !src)) return NULL;
   return (u->tag != 0 || u->tag_arg.kind != POLY_ARG_NONE)
-             ? poly_uop_tagged_arg(
-                   ctx, u->op, u->dtype, src, u->n_src, u->arg, u->tag,
-                   u->tag_arg
-               )
+             ? poly_uop_tagged_arg(ctx, u->op, u->dtype, src, u->n_src, u->arg, u->tag, u->tag_arg)
              : poly_uop(ctx, u->op, u->dtype, src, u->n_src, u->arg);
 }
 
@@ -466,8 +443,7 @@ static PolyUOp *poly_uop_with_metadata_from(
   if (!ctx || !prototype || (n_src > 0 && !src)) return NULL;
   return (prototype->tag != 0 || prototype->tag_arg.kind != POLY_ARG_NONE)
              ? poly_uop_tagged_arg(
-                   ctx, op, dtype, src, n_src, arg, prototype->tag,
-                   prototype->tag_arg
+                   ctx, op, dtype, src, n_src, arg, prototype->tag, prototype->tag_arg
                )
              : poly_uop(ctx, op, dtype, src, n_src, arg);
 }
@@ -478,7 +454,8 @@ static PolyUOp *poly_transform_to_call_fail(
     int n
 ) {
   if (out_uops)
-    for (int i = 0; i < n; i++) out_uops[i] = NULL;
+    for (int i = 0; i < n; i++)
+      out_uops[i] = NULL;
   poly_transform_to_call_ctx_free(tctx);
   return NULL;
 }
@@ -553,12 +530,12 @@ static bool poly_transform_to_call_collect_arg_effects(
   if (poly_map_get(visited, poly_ptr_hash(u), u, poly_ptr_eq)) return true;
   poly_map_set(visited, poly_ptr_hash(u), u, u, poly_ptr_eq);
 
-  if (u->op == POLY_OP_CALL)
-    return poly_transform_to_call_collect_after_stores(tctx, u);
+  if (u->op == POLY_OP_CALL) return poly_transform_to_call_collect_after_stores(tctx, u);
 
   if (u->op == POLY_OP_AFTER && u->n_src >= 2 && poly_uop_has_buffer_identity(u->src[0])) {
     PolyUOp *base = u->src[0];
-    while (base && base->op == POLY_OP_AFTER && base->n_src >= 1) base = base->src[0];
+    while (base && base->op == POLY_OP_AFTER && base->n_src >= 1)
+      base = base->src[0];
     if (!base || !poly_transform_to_call_cache_replacement(tctx, u, base)) return false;
     /* Pinned finalize_after records the canonical AFTER occurrence, not a
      * second raw STORE spelling of that same effect (callify.py:169-181).
@@ -612,7 +589,8 @@ static bool poly_transform_to_call_collect_after_stores_ex(
      * rewrites once. Extracting only STORE loses that sharing and executes the
      * same immutable effect twice when it is also nested in another target. */
     PolyUOp *base = target;
-    while (base && base->op == POLY_OP_AFTER && base->n_src >= 1) base = base->src[0];
+    while (base && base->op == POLY_OP_AFTER && base->n_src >= 1)
+      base = base->src[0];
     if (!base || !poly_transform_to_call_cache_replacement(tctx, effect, base)) return false;
     if (out_found) *out_found = true;
     return poly_transform_to_call_append_store(tctx, effect);
@@ -631,13 +609,13 @@ static bool poly_transform_to_call_collect_after_stores_ex(
    * The outer AFTER returns the storage identity; all nested STORE effects
    * under src[1:] must be scheduled before that identity is considered ready. */
   for (int i = 1; i < effect->n_src; i++) {
-    if (!poly_transform_to_call_collect_after_stores_ex(
-            tctx, effect->src[i], out_found))
+    if (!poly_transform_to_call_collect_after_stores_ex(tctx, effect->src[i], out_found))
       return false;
   }
   if (effect->n_src >= 1) {
     PolyUOp *base = effect->src[0];
-    while (base && base->op == POLY_OP_AFTER && base->n_src >= 1) base = base->src[0];
+    while (base && base->op == POLY_OP_AFTER && base->n_src >= 1)
+      base = base->src[0];
     if (!base || !poly_transform_to_call_cache_replacement(tctx, effect, base)) return false;
   }
   return true;
@@ -663,13 +641,10 @@ static bool poly_transform_to_call_collect_pending_effects(
    * append this whole immutable effect as the canonical assignment unit. */
   PolyUOp *canonical_target = NULL;
   PolyUOp *canonical_store = NULL;
-  if (poly_transform_to_call_after_store_assign(
-          u, &canonical_target, &canonical_store)) {
-    if (!poly_transform_to_call_collect_pending_effects(
-            tctx, canonical_target, visited))
+  if (poly_transform_to_call_after_store_assign(u, &canonical_target, &canonical_store)) {
+    if (!poly_transform_to_call_collect_pending_effects(tctx, canonical_target, visited))
       return false;
-    if (!poly_transform_to_call_collect_pending_effects(
-            tctx, canonical_store->src[1], visited))
+    if (!poly_transform_to_call_collect_pending_effects(tctx, canonical_store->src[1], visited))
       return false;
     return poly_transform_to_call_collect_after_stores(tctx, u);
   }
@@ -680,7 +655,8 @@ static bool poly_transform_to_call_collect_pending_effects(
    * value, otherwise view.realize() reads the old base buffer. */
   if (u->op == POLY_OP_AFTER && u->n_src >= 2 && poly_uop_has_buffer_identity(u->src[0])) {
     PolyUOp *base = u->src[0];
-    while (base && base->op == POLY_OP_AFTER && base->n_src >= 1) base = base->src[0];
+    while (base && base->op == POLY_OP_AFTER && base->n_src >= 1)
+      base = base->src[0];
     if (!base || !poly_transform_to_call_cache_replacement(tctx, u, base)) return false;
     for (int i = 1; i < u->n_src; i++) {
       if (!poly_transform_to_call_collect_after_stores(tctx, u->src[i])) return false;
@@ -713,8 +689,7 @@ static bool poly_transform_to_call_finalize_after_order(
   if (!effect_set) return false;
   for (int i = 0; i < tctx->n_stores; i++)
     poly_map_set(
-        effect_set, poly_ptr_hash(tctx->stores[i]), tctx->stores[i],
-        tctx->stores[i], poly_ptr_eq
+        effect_set, poly_ptr_hash(tctx->stores[i]), tctx->stores[i], tctx->stores[i], poly_ptr_eq
     );
 
   PolyScratchMark scratch = poly_ctx_scratch_mark(ctx);
@@ -723,9 +698,7 @@ static bool poly_transform_to_call_finalize_after_order(
   int n_ordered = 0;
   if (topo) {
     for (int i = 0; i < n_topo; i++) {
-      PolyUOp *effect = poly_map_get(
-          effect_set, poly_ptr_hash(topo[i]), topo[i], poly_ptr_eq
-      );
+      PolyUOp *effect = poly_map_get(effect_set, poly_ptr_hash(topo[i]), topo[i], poly_ptr_eq);
       if (effect) tctx->stores[n_ordered++] = effect;
     }
   }
@@ -761,8 +734,8 @@ static PolyUOp *poly_transform_to_call_wrap_call(PolyCtx *ctx, PolyUOp *sink) {
       return NULL;
     }
   }
-  PolyUOp *function = n_ordered > 0 ?
-      poly_uop_substitute(ctx, sink, ordered, params, n_ordered) : sink;
+  PolyUOp *function =
+      n_ordered > 0 ? poly_uop_substitute(ctx, sink, ordered, params, n_ordered) : sink;
   free(params);
   if (!function) {
     if (ordered != ordered_stack) free(ordered);
@@ -772,9 +745,8 @@ static PolyUOp *poly_transform_to_call_wrap_call(PolyCtx *ctx, PolyUOp *sink) {
   /* Tinygrad tensor.py:224-242 records every callified write as
    * AFTER(target, STORE(target, value)).  Raw C/Instance effect sinks already
    * own storage, so add only that missing state edge before scheduling. */
-  PolyUOp **effects = function->n_src > 0
-                          ? malloc((size_t)function->n_src * sizeof(*effects))
-                          : NULL;
+  PolyUOp **effects =
+      function->n_src > 0 ? malloc((size_t)function->n_src * sizeof(*effects)) : NULL;
   if (function->n_src > 0 && !effects) {
     if (ordered != ordered_stack) free(ordered);
     return NULL;
@@ -791,9 +763,7 @@ static PolyUOp *poly_transform_to_call_wrap_call(PolyCtx *ctx, PolyUOp *sink) {
       return NULL;
     }
     PolyUOp *after_src[] = {target, effect};
-    effects[i] = poly_uop(
-        ctx, POLY_OP_AFTER, target->dtype, after_src, 2, poly_arg_none()
-    );
+    effects[i] = poly_uop(ctx, POLY_OP_AFTER, target->dtype, after_src, 2, poly_arg_none());
     if (!effects[i]) {
       free(effects);
       if (ordered != ordered_stack) free(ordered);
@@ -848,17 +818,12 @@ static bool poly_transform_to_call_publish_replacement(
     return true;
   }
   if (tctx->n_public >= tctx->public_cap) {
-    int new_cap = tctx->public_cap
-                      ? tctx->public_cap * 2
-                      : POLY_TRANSFORM_TO_CALL_INITIAL_REPLACEMENTS;
-    PolyUOp **new_orig = realloc(
-        tctx->public_orig, (size_t)new_cap * sizeof(*new_orig)
-    );
+    int new_cap =
+        tctx->public_cap ? tctx->public_cap * 2 : POLY_TRANSFORM_TO_CALL_INITIAL_REPLACEMENTS;
+    PolyUOp **new_orig = realloc(tctx->public_orig, (size_t)new_cap * sizeof(*new_orig));
     if (!new_orig) return false;
     tctx->public_orig = new_orig;
-    PolyUOp **new_repl = realloc(
-        tctx->public_repl, (size_t)new_cap * sizeof(*new_repl)
-    );
+    PolyUOp **new_repl = realloc(tctx->public_repl, (size_t)new_cap * sizeof(*new_repl));
     if (!new_repl) return false;
     tctx->public_repl = new_repl;
     tctx->public_cap = new_cap;
@@ -878,9 +843,8 @@ static bool poly_transform_to_call_cache_replacement(
   for (int i = 0; i < tctx->n_cached; i++) {
     if (tctx->cached_orig[i] != orig) continue;
     tctx->cached_repl[i] = repl;
-    bool original = tctx->original_uops && poly_map_get(
-        tctx->original_uops, poly_ptr_hash(orig), orig, poly_ptr_eq
-    );
+    bool original = tctx->original_uops &&
+                    poly_map_get(tctx->original_uops, poly_ptr_hash(orig), orig, poly_ptr_eq);
     return !tctx->publication_phase || !original ||
            poly_transform_to_call_publish_replacement(tctx, orig, repl);
   }
@@ -898,22 +862,16 @@ static bool poly_transform_to_call_cache_replacement(
   tctx->cached_orig[tctx->n_cached] = orig;
   tctx->cached_repl[tctx->n_cached] = repl;
   tctx->n_cached++;
-  bool original = tctx->original_uops && poly_map_get(
-      tctx->original_uops, poly_ptr_hash(orig), orig, poly_ptr_eq
-  );
+  bool original = tctx->original_uops &&
+                  poly_map_get(tctx->original_uops, poly_ptr_hash(orig), orig, poly_ptr_eq);
   return !tctx->publication_phase || !original ||
          poly_transform_to_call_publish_replacement(tctx, orig, repl);
 }
 
-static bool poly_callify_tag_ids(
-    PolyUOp *u,
-    const int64_t **out_ids,
-    int *out_n
-) {
+static bool poly_callify_tag_ids(PolyUOp *u, const int64_t **out_ids, int *out_n) {
   if (out_ids) *out_ids = NULL;
   if (out_n) *out_n = 0;
-  if (!u || u->tag != POLY_CALLIFY_TAG_MARKER ||
-      u->tag_arg.kind != POLY_ARG_INT_TUPLE ||
+  if (!u || u->tag != POLY_CALLIFY_TAG_MARKER || u->tag_arg.kind != POLY_ARG_INT_TUPLE ||
       u->tag_arg.int_tuple.n <= 0 || !u->tag_arg.int_tuple.vals)
     return false;
   if (out_ids) *out_ids = u->tag_arg.int_tuple.vals;
@@ -938,21 +896,14 @@ static PolyUOp *poly_callify_rebuild_with_tag_ids(
 ) {
   if (!ctx || !prototype || !ids || n_ids <= 0) return NULL;
   return poly_uop_tagged_arg(
-      ctx, prototype->op, prototype->dtype,
-      src ? src : prototype->src, prototype->n_src, prototype->arg,
-      POLY_CALLIFY_TAG_MARKER, poly_callify_tag_arg(ids, n_ids)
+      ctx, prototype->op, prototype->dtype, src ? src : prototype->src, prototype->n_src,
+      prototype->arg, POLY_CALLIFY_TAG_MARKER, poly_callify_tag_arg(ids, n_ids)
   );
 }
 
-static PolyUOp *poly_callify_rebuild_without_tag(
-    PolyCtx *ctx,
-    PolyUOp *u,
-    PolyUOp **src
-) {
+static PolyUOp *poly_callify_rebuild_without_tag(PolyCtx *ctx, PolyUOp *u, PolyUOp **src) {
   if (!ctx || !u) return NULL;
-  return poly_uop(
-      ctx, u->op, u->dtype, src ? src : u->src, u->n_src, u->arg
-  );
+  return poly_uop(ctx, u->op, u->dtype, src ? src : u->src, u->n_src, u->arg);
 }
 
 static bool poly_callify_append_tag_original(
@@ -963,9 +914,7 @@ static bool poly_callify_append_tag_original(
   if (!tctx || !original || !out_id) return false;
   if (tctx->n_tag_orig >= tctx->tag_orig_cap) {
     int new_cap = tctx->tag_orig_cap ? tctx->tag_orig_cap * 2 : 64;
-    PolyUOp **new_orig = realloc(
-        tctx->tag_orig, (size_t)new_cap * sizeof(*new_orig)
-    );
+    PolyUOp **new_orig = realloc(tctx->tag_orig, (size_t)new_cap * sizeof(*new_orig));
     if (!new_orig) return false;
     tctx->tag_orig = new_orig;
     tctx->tag_orig_cap = new_cap;
@@ -986,9 +935,7 @@ static bool poly_callify_publish_tagged_originals(
   if (!poly_callify_tag_ids(tagged, &ids, &n_ids)) return true;
   for (int i = 0; i < n_ids; i++) {
     if (ids[i] < 0 || ids[i] >= tctx->n_tag_orig ||
-        !poly_transform_to_call_publish_replacement(
-            tctx, tctx->tag_orig[ids[i]], replacement
-        ))
+        !poly_transform_to_call_publish_replacement(tctx, tctx->tag_orig[ids[i]], replacement))
       return false;
   }
   return true;
@@ -1032,9 +979,7 @@ static PolyUOp *poly_callify_merge_tagged_uops(
   }
   memcpy(ids, first_ids, (size_t)n_first * sizeof(*ids));
   memcpy(ids + n_first, second_ids, (size_t)n_second * sizeof(*ids));
-  PolyUOp *ret = poly_callify_rebuild_with_tag_ids(
-      ctx, prototype, src, ids, n_ids
-  );
+  PolyUOp *ret = poly_callify_rebuild_with_tag_ids(ctx, prototype, src, ids, n_ids);
   if (ids != stack_ids) free(ids);
   return ret;
 }
@@ -1042,13 +987,11 @@ static PolyUOp *poly_callify_merge_tagged_uops(
 static bool poly_callify_copy_from_creation(PolyCtx *ctx, PolyUOp *copy) {
   if (!ctx || !copy || copy->op != POLY_OP_COPY || copy->n_src < 1) return false;
   PolyDevice source_device = poly_uop_device(copy->src[0]);
-  if (source_device == POLY_DEVICE_HOST || source_device == POLY_DEVICE_DISK)
-    return true;
+  if (source_device == POLY_DEVICE_HOST || source_device == POLY_DEVICE_DISK) return true;
   if (source_device != POLY_DEVICE_AUTO) return false;
   const PolyUOp *identity = poly_uop_get_buffer_identity(copy->src[0]);
   PolyBuffer *storage = identity ? poly_buffer_get(ctx, (PolyUOp *)identity) : NULL;
-  return storage &&
-         (storage->device == POLY_DEVICE_HOST || storage->device == POLY_DEVICE_DISK);
+  return storage && (storage->device == POLY_DEVICE_HOST || storage->device == POLY_DEVICE_DISK);
 }
 
 static PolyUOp *poly_transform_to_call_add_tags(
@@ -1068,15 +1011,11 @@ static PolyUOp *poly_transform_to_call_add_tags(
     if (!new_src) return NULL;
   }
   bool changed = false;
-  int first_src =
-      ((u->op == POLY_OP_CALL || u->op == POLY_OP_FUNCTION) && u->n_src > 0)
-          ? 1
-          : 0;
-  for (int i = 0; i < first_src; i++) new_src[i] = u->src[i];
+  int first_src = ((u->op == POLY_OP_CALL || u->op == POLY_OP_FUNCTION) && u->n_src > 0) ? 1 : 0;
+  for (int i = 0; i < first_src; i++)
+    new_src[i] = u->src[i];
   for (int i = first_src; i < u->n_src; i++) {
-    new_src[i] = poly_transform_to_call_add_tags(
-        ctx, tctx, u->src[i], memo
-    );
+    new_src[i] = poly_transform_to_call_add_tags(ctx, tctx, u->src[i], memo);
     if (!new_src[i]) {
       if (new_src != src_buf) free(new_src);
       return NULL;
@@ -1095,11 +1034,8 @@ static PolyUOp *poly_transform_to_call_add_tags(
 
   PolyUOp *assign_store = NULL;
   bool has_assignment_effect = !poly_uop_is_bound_var(ret) &&
-                               poly_transform_to_call_after_store_assign(
-                                   ret, NULL, &assign_store
-                               );
-  bool assignment =
-      has_assignment_effect && ret->n_src == 2 && ret->src[1] == assign_store;
+                               poly_transform_to_call_after_store_assign(ret, NULL, &assign_store);
+  bool assignment = has_assignment_effect && ret->n_src == 2 && ret->src[1] == assign_store;
   if (assignment) {
     ret = poly_callify_tag_uop(ctx, tctx, u, ret);
     if (!ret) return NULL;
@@ -1109,21 +1045,14 @@ static PolyUOp *poly_transform_to_call_add_tags(
      * provenance so both originals finalize to the assignment destination. */
     PolyUOp *copy = assign_store->n_src >= 2 ? assign_store->src[1] : NULL;
     if (assign_store->n_src == 2 && copy && copy->op == POLY_OP_COPY &&
-        poly_callify_tag_ids(ret, NULL, NULL) &&
-        poly_callify_tag_ids(copy, NULL, NULL)) {
+        poly_callify_tag_ids(ret, NULL, NULL) && poly_callify_tag_ids(copy, NULL, NULL)) {
       PolyUOp *untagged_copy = poly_callify_rebuild_without_tag(ctx, copy, NULL);
       PolyUOp *store_src[2] = {assign_store->src[0], untagged_copy};
-      PolyUOp *untagged_store = untagged_copy
-                                    ? poly_rebuild_with_sources(
-                                          ctx, assign_store, store_src
-                                      )
-                                    : NULL;
+      PolyUOp *untagged_store =
+          untagged_copy ? poly_rebuild_with_sources(ctx, assign_store, store_src) : NULL;
       PolyUOp *after_src[2] = {ret->src[0], untagged_store};
-      PolyUOp *merged = untagged_store
-                            ? poly_callify_merge_tagged_uops(
-                                  ctx, ret, after_src, ret, copy
-                              )
-                            : NULL;
+      PolyUOp *merged =
+          untagged_store ? poly_callify_merge_tagged_uops(ctx, ret, after_src, ret, copy) : NULL;
       if (!merged) return NULL;
       ret = merged;
     }
@@ -1176,15 +1105,11 @@ static PolyUOp *poly_transform_to_call_finalize_tags(
     if (!new_src) return NULL;
   }
   bool changed = false;
-  int first_src =
-      ((u->op == POLY_OP_CALL || u->op == POLY_OP_FUNCTION) && u->n_src > 0)
-          ? 1
-          : 0;
-  for (int i = 0; i < first_src; i++) new_src[i] = u->src[i];
+  int first_src = ((u->op == POLY_OP_CALL || u->op == POLY_OP_FUNCTION) && u->n_src > 0) ? 1 : 0;
+  for (int i = 0; i < first_src; i++)
+    new_src[i] = u->src[i];
   for (int i = first_src; i < u->n_src; i++) {
-    new_src[i] = poly_transform_to_call_finalize_tags(
-        ctx, tctx, u->src[i], memo
-    );
+    new_src[i] = poly_transform_to_call_finalize_tags(ctx, tctx, u->src[i], memo);
     if (!new_src[i]) {
       if (new_src != src_buf) free(new_src);
       return NULL;
@@ -1200,9 +1125,7 @@ static PolyUOp *poly_transform_to_call_finalize_tags(
   if (ret->op == POLY_OP_AFTER && !poly_uop_is_bound_var(ret) &&
       poly_callify_tag_ids(ret, &ids, &n_ids)) {
     PolyUOp *replacement = poly_transform_to_call_after_result_buffer(ctx, ret);
-    if (!replacement ||
-        !poly_callify_publish_tagged_originals(tctx, ret, replacement))
-      return NULL;
+    if (!replacement || !poly_callify_publish_tagged_originals(tctx, ret, replacement)) return NULL;
     ret = poly_callify_rebuild_without_tag(ctx, ret, NULL);
     if (!ret) return NULL;
   }
@@ -1221,8 +1144,7 @@ static PolyUOp *make_buffer_view(PolyCtx *ctx, PolyUOp *value) {
   PolyBuffer *view_storage = poly_buffer_get(ctx, view_key);
   PolyUOp *base = value;
   while (base && base->n_src > 0 && !poly_uop_has_buffer_identity(base) &&
-         (poly_opset_has(POLY_GROUP_MOVEMENT, base->op) ||
-          base->op == POLY_OP_BITCAST))
+         (poly_opset_has(POLY_GROUP_MOVEMENT, base->op) || base->op == POLY_OP_BITCAST))
     base = base->src[0];
   base = (PolyUOp *)poly_uop_get_buffer_identity(base);
   PolyBuffer *base_storage = base ? poly_buffer_get(ctx, base) : NULL;
@@ -1230,8 +1152,7 @@ static PolyUOp *make_buffer_view(PolyCtx *ctx, PolyUOp *value) {
 
   PolyShape base_shape = poly_uop_max_shape_cached(ctx, base);
   size_t base_itemsize = poly_dtype_itemsize(base->dtype);
-  if (base_shape.ndim != 1 || base_itemsize == 0 ||
-      view_storage->offset % base_itemsize != 0 ||
+  if (base_shape.ndim != 1 || base_itemsize == 0 || view_storage->offset % base_itemsize != 0 ||
       view_storage->nbytes % base_itemsize != 0)
     return NULL;
   uint64_t begin = view_storage->offset / base_itemsize;
@@ -1240,9 +1161,7 @@ static PolyUOp *make_buffer_view(PolyCtx *ctx, PolyUOp *value) {
   int64_t bounds[1][2] = {{(int64_t)begin, (int64_t)(begin + length)}};
   PolyUOp *view = poly_shrink(ctx, base, bounds, 1);
   if (view && !poly_dtype_eq(view->dtype, value->dtype))
-    view = poly_uop1(
-        ctx, POLY_OP_BITCAST, value->dtype, view, poly_arg_none()
-    );
+    view = poly_uop1(ctx, POLY_OP_BITCAST, value->dtype, view, poly_arg_none());
   return view && poly_uop_buffer(ctx, view) == view ? view : NULL;
 }
 
@@ -1251,23 +1170,19 @@ static PolyUOp *poly_transform_to_call_materialize_view_copy(
     PolyUOp *copy,
     PolyTransformToCallCtx *tctx
 ) {
-  if (!ctx || !copy || !tctx || copy->op != POLY_OP_COPY || copy->n_src < 1)
-    return NULL;
+  if (!ctx || !copy || !tctx || copy->op != POLY_OP_COPY || copy->n_src < 1) return NULL;
 
   PolyUOp *view = make_buffer_view(ctx, copy->src[0]);
-  PolyUOp *copy_value = view
-                            ? poly_transform_to_call_rebuild_view(
-                                  ctx, view, copy->src[0], NULL
-                              )
-                            : NULL;
+  PolyUOp *copy_value =
+      view ? poly_transform_to_call_rebuild_view(ctx, view, copy->src[0], NULL) : NULL;
   if (!copy_value) return NULL;
   PolyUOp **copy_src = malloc((size_t)copy->n_src * sizeof(*copy_src));
   if (!copy_src) return NULL;
   memcpy(copy_src, copy->src, (size_t)copy->n_src * sizeof(*copy_src));
   copy_src[0] = copy_value;
   PolyUOp *copy_body = poly_callify_tag_ids(copy, NULL, NULL)
-                            ? poly_callify_rebuild_without_tag(ctx, copy, copy_src)
-                            : poly_rebuild_with_sources(ctx, copy, copy_src);
+                           ? poly_callify_rebuild_without_tag(ctx, copy, copy_src)
+                           : poly_rebuild_with_sources(ctx, copy, copy_src);
   free(copy_src);
   if (!copy_body) return NULL;
 
@@ -1287,16 +1202,15 @@ static PolyUOp *poly_transform_to_call_materialize_view_copy(
   PolyUOp *replacement = poly_transform_to_call_rebuild_view(ctx, buf, copy, NULL);
   PolyUOp *store = replacement ? poly_store_val(ctx, replacement, copy_body) : NULL;
   PolyUOp *after_src[2] = {replacement, store};
-  PolyUOp *after = replacement && store
-                       ? poly_uop_with_metadata_from(
-                             ctx, copy, POLY_OP_AFTER, replacement->dtype,
-                             after_src, 2, poly_arg_none())
-                       : NULL;
+  PolyUOp *after = replacement && store ? poly_uop_with_metadata_from(
+                                              ctx, copy, POLY_OP_AFTER, replacement->dtype,
+                                              after_src, 2, poly_arg_none()
+                                          )
+                                        : NULL;
   /* Current callify keeps COPY in AFTER(buffer, STORE(buffer, COPY));
    * create_linear_with_vars later extracts the COPY CALL
    * (tinygrad/tensor.py:54-62,178-240; schedule/rangeify.py:565-590). */
-  if (!replacement || !store || !after ||
-      !poly_transform_to_call_append_store(tctx, after) ||
+  if (!replacement || !store || !after || !poly_transform_to_call_append_store(tctx, after) ||
       !poly_transform_to_call_cache_replacement(tctx, copy, replacement)) {
     tctx->failed = true;
     return NULL;
@@ -1308,15 +1222,10 @@ static PolyUOp *poly_transform_to_call_materialize_view_copy(
  * (tinygrad/callify.py:117-142).  Read the exact symbolic dimensions from
  * `like`; max-shape allocation and the caller-visible symbolic view are
  * separate, just as UOp.empty(...).shrink_to(shape) is in tinygrad. */
-static PolyUOp *poly_callify_shrink_to_like(
-    PolyCtx *ctx,
-    PolyUOp *value,
-    PolyUOp *like
-) {
+static PolyUOp *poly_callify_shrink_to_like(PolyCtx *ctx, PolyUOp *value, PolyUOp *like) {
   if (!ctx || !value || !like) return NULL;
   int ndim = poly_uop_ndim(ctx, like);
-  if (ndim < 0 || ndim > POLY_MAX_DIMS || poly_uop_ndim(ctx, value) != ndim)
-    return NULL;
+  if (ndim < 0 || ndim > POLY_MAX_DIMS || poly_uop_ndim(ctx, value) != ndim) return NULL;
   PolyUOp *starts[POLY_MAX_DIMS], *sizes[POLY_MAX_DIMS];
   for (int i = 0; i < ndim; i++) {
     starts[i] = poly_const_int(ctx, 0);
@@ -1335,18 +1244,16 @@ static PolyUOp *poly_transform_precompiled_call(
     PolyTransformToCallCtx *tctx,
     PolyUOp *function
 ) {
-  if (!ctx || !tctx || !function || function->op != POLY_OP_FUNCTION ||
-      function->n_src < 1 || function->arg.kind != POLY_ARG_CALL_INFO ||
-      !function->arg.call_info || !function->arg.call_info->precompile)
+  if (!ctx || !tctx || !function || function->op != POLY_OP_FUNCTION || function->n_src < 1 ||
+      function->arg.kind != POLY_ARG_CALL_INFO || !function->arg.call_info ||
+      !function->arg.call_info->precompile)
     return NULL;
   PolyUOp *body = function->src[0];
   if (!body || body->op != POLY_OP_TUPLE || body->n_src <= 0) return NULL;
 
   int n_inputs = function->n_src - 1;
   int n_outputs = body->n_src;
-  PolyUOp **inputs = n_inputs > 0
-                         ? malloc((size_t)n_inputs * sizeof(*inputs))
-                         : NULL;
+  PolyUOp **inputs = n_inputs > 0 ? malloc((size_t)n_inputs * sizeof(*inputs)) : NULL;
   PolyUOp **resolved = malloc((size_t)n_outputs * sizeof(*resolved));
   PolyUOp **outputs = malloc((size_t)n_outputs * sizeof(*outputs));
   PolyUOp **targets = malloc((size_t)n_outputs * sizeof(*targets));
@@ -1354,11 +1261,10 @@ static PolyUOp *poly_transform_precompiled_call(
   PolyUOp **from = malloc((size_t)n_outputs * sizeof(*from));
   PolyUOp **to = malloc((size_t)n_outputs * sizeof(*to));
   PolyUOp **rewritten = malloc((size_t)n_outputs * sizeof(*rewritten));
-  PolyUOp **call_src = malloc(
-      (size_t)(1 + n_inputs + n_outputs) * sizeof(*call_src));
+  PolyUOp **call_src = malloc((size_t)(1 + n_inputs + n_outputs) * sizeof(*call_src));
   PolyUOp **tuple_src = malloc((size_t)n_outputs * sizeof(*tuple_src));
-  if ((n_inputs > 0 && !inputs) || !resolved || !outputs || !targets ||
-      !items || !from || !to || !rewritten || !call_src || !tuple_src) {
+  if ((n_inputs > 0 && !inputs) || !resolved || !outputs || !targets || !items || !from || !to ||
+      !rewritten || !call_src || !tuple_src) {
     free(inputs);
     free(resolved);
     free(outputs);
@@ -1375,32 +1281,20 @@ static PolyUOp *poly_transform_precompiled_call(
   bool ok = true;
   for (int i = 0; ok && i < n_inputs; i++) {
     PolyUOp *input = function->src[i + 1];
-    inputs[i] = input && input->op != POLY_OP_AFTER
-                    ? poly_contiguous(ctx, input)
-                    : input;
+    inputs[i] = input && input->op != POLY_OP_AFTER ? poly_contiguous(ctx, input) : input;
     ok = inputs[i] != NULL;
   }
   for (int i = 0; ok && i < n_outputs; i++) {
-    resolved[i] = poly_uop1(
-        ctx, POLY_OP_GETTUPLE, body->src[i]->dtype, function,
-        poly_arg_int(i));
-    PolyShape shape = resolved[i]
-                          ? poly_uop_max_shape_cached(ctx, resolved[i])
-                          : (PolyShape){.ndim = -1};
-    PolyUOp *allocated = resolved[i]
-                             ? poly_transform_to_call_empty_buffer_like(
-                                   ctx, tctx, resolved[i]->dtype, shape,
-                                   resolved[i])
-                             : NULL;
-    outputs[i] = allocated
-                     ? poly_callify_shrink_to_like(ctx, allocated, resolved[i])
-                     : NULL;
-    PolyUOp *param = outputs[i]
-                         ? poly_uop_param(ctx, n_inputs + i, outputs[i])
-                         : NULL;
-    targets[i] = param
-                     ? poly_callify_shrink_to_like(ctx, param, body->src[i])
-                     : NULL;
+    resolved[i] = poly_uop1(ctx, POLY_OP_GETTUPLE, body->src[i]->dtype, function, poly_arg_int(i));
+    PolyShape shape =
+        resolved[i] ? poly_uop_max_shape_cached(ctx, resolved[i]) : (PolyShape){.ndim = -1};
+    PolyUOp *allocated = resolved[i] ? poly_transform_to_call_empty_buffer_like(
+                                           ctx, tctx, resolved[i]->dtype, shape, resolved[i]
+                                       )
+                                     : NULL;
+    outputs[i] = allocated ? poly_callify_shrink_to_like(ctx, allocated, resolved[i]) : NULL;
+    PolyUOp *param = outputs[i] ? poly_uop_param(ctx, n_inputs + i, outputs[i]) : NULL;
+    targets[i] = param ? poly_callify_shrink_to_like(ctx, param, body->src[i]) : NULL;
     ok = resolved[i] && outputs[i] && targets[i];
   }
 
@@ -1408,20 +1302,18 @@ static PolyUOp *poly_transform_precompiled_call(
   for (int i = 0; ok && i < n_outputs; i++) {
     PolyUOp *source = body->src[i];
     int n_deps = 0;
-    for (PolyUOp *cur = source;
-         cur && cur->op == POLY_OP_AFTER && cur->n_src >= 1;
+    for (PolyUOp *cur = source; cur && cur->op == POLY_OP_AFTER && cur->n_src >= 1;
          cur = cur->src[0])
       n_deps += cur->n_src - 1;
-    PolyUOp **deps = n_deps > 0
-                         ? malloc((size_t)n_deps * sizeof(*deps))
-                         : NULL;
+    PolyUOp **deps = n_deps > 0 ? malloc((size_t)n_deps * sizeof(*deps)) : NULL;
     if (n_deps > 0 && !deps) {
       ok = false;
       break;
     }
     int dep_i = 0;
     while (source && source->op == POLY_OP_AFTER && source->n_src >= 1) {
-      for (int j = 1; j < source->n_src; j++) deps[dep_i++] = source->src[j];
+      for (int j = 1; j < source->n_src; j++)
+        deps[dep_i++] = source->src[j];
       source = source->src[0];
     }
     PolyUOp *placed = NULL;
@@ -1429,13 +1321,9 @@ static PolyUOp *poly_transform_precompiled_call(
       PolyUOp *store = poly_store_val(ctx, targets[i], source->src[0]);
       PolyUOp *after_src[2] = {targets[i], store};
       placed = store
-                   ? poly_uop(
-                         ctx, POLY_OP_AFTER, targets[i]->dtype,
-                         after_src, 2, poly_arg_none())
+                   ? poly_uop(ctx, POLY_OP_AFTER, targets[i]->dtype, after_src, 2, poly_arg_none())
                    : NULL;
-    } else if (source &&
-               (source->op == POLY_OP_BUFFER || source->op == POLY_OP_UNSHARD) &&
-               poly_uop_has_buffer_identity(source)) {
+    } else if (source && (source->op == POLY_OP_BUFFER || source->op == POLY_OP_UNSHARD) && poly_uop_has_buffer_identity(source)) {
       placed = targets[i];
     }
 
@@ -1450,8 +1338,7 @@ static PolyUOp *poly_transform_precompiled_call(
       if (n_deps == 0) {
         items[i] = source;
       } else {
-        PolyUOp **after_src = malloc(
-            (size_t)(1 + n_deps) * sizeof(*after_src));
+        PolyUOp **after_src = malloc((size_t)(1 + n_deps) * sizeof(*after_src));
         if (!after_src) {
           free(deps);
           ok = false;
@@ -1459,15 +1346,13 @@ static PolyUOp *poly_transform_precompiled_call(
         }
         after_src[0] = source;
         memcpy(after_src + 1, deps, (size_t)n_deps * sizeof(*deps));
-        items[i] = poly_uop(
-            ctx, POLY_OP_AFTER, source->dtype, after_src, 1 + n_deps,
-            poly_arg_none());
+        items[i] =
+            poly_uop(ctx, POLY_OP_AFTER, source->dtype, after_src, 1 + n_deps, poly_arg_none());
         free(after_src);
       }
     } else {
       PolyUOp *store = poly_store_val(ctx, targets[i], source);
-      PolyUOp **after_src = malloc(
-          (size_t)(2 + n_deps) * sizeof(*after_src));
+      PolyUOp **after_src = malloc((size_t)(2 + n_deps) * sizeof(*after_src));
       if (!store || !after_src) {
         free(after_src);
         free(deps);
@@ -1476,11 +1361,9 @@ static PolyUOp *poly_transform_precompiled_call(
       }
       after_src[0] = targets[i];
       after_src[1] = store;
-      if (n_deps > 0)
-        memcpy(after_src + 2, deps, (size_t)n_deps * sizeof(*deps));
-      items[i] = poly_uop(
-          ctx, POLY_OP_AFTER, targets[i]->dtype, after_src, 2 + n_deps,
-          poly_arg_none());
+      if (n_deps > 0) memcpy(after_src + 2, deps, (size_t)n_deps * sizeof(*deps));
+      items[i] =
+          poly_uop(ctx, POLY_OP_AFTER, targets[i]->dtype, after_src, 2 + n_deps, poly_arg_none());
       free(after_src);
     }
     free(deps);
@@ -1488,41 +1371,33 @@ static PolyUOp *poly_transform_precompiled_call(
   }
 
   if (ok && n_sub > 0 &&
-      poly_uop_substitute_many(
-          ctx, items, n_outputs, from, to, n_sub, rewritten) != 0)
+      poly_uop_substitute_many(ctx, items, n_outputs, from, to, n_sub, rewritten) != 0)
     ok = false;
-  if (ok && n_sub == 0)
-    memcpy(rewritten, items, (size_t)n_outputs * sizeof(*rewritten));
+  if (ok && n_sub == 0) memcpy(rewritten, items, (size_t)n_outputs * sizeof(*rewritten));
 
   PolyUOp *call = NULL;
   if (ok) {
     PolyUOp *sink = poly_sink_n(ctx, rewritten, n_outputs);
     call_src[0] = sink;
-    for (int i = 0; i < n_inputs; i++) call_src[1 + i] = inputs[i];
+    for (int i = 0; i < n_inputs; i++)
+      call_src[1 + i] = inputs[i];
     for (int i = 0; i < n_outputs; i++)
       call_src[1 + n_inputs + i] = outputs[i];
-    call = sink
-               ? poly_uop(
-                     ctx, POLY_OP_CALL, function->dtype, call_src,
-                     1 + n_inputs + n_outputs, function->arg)
-               : NULL;
+    call = sink ? poly_uop(
+                      ctx, POLY_OP_CALL, function->dtype, call_src, 1 + n_inputs + n_outputs,
+                      function->arg
+                  )
+                : NULL;
     ok = call != NULL;
   }
   for (int i = 0; ok && i < n_outputs; i++) {
     PolyUOp *after_src[2] = {outputs[i], call};
-    PolyUOp *after = poly_uop(
-        ctx, POLY_OP_AFTER, outputs[i]->dtype, after_src, 2,
-        poly_arg_none());
-    tuple_src[i] = after
-                       ? poly_callify_shrink_to_like(ctx, after, resolved[i])
-                       : NULL;
+    PolyUOp *after = poly_uop(ctx, POLY_OP_AFTER, outputs[i]->dtype, after_src, 2, poly_arg_none());
+    tuple_src[i] = after ? poly_callify_shrink_to_like(ctx, after, resolved[i]) : NULL;
     ok = tuple_src[i] != NULL;
   }
-  PolyUOp *ret = ok
-                     ? poly_uop(
-                           ctx, POLY_OP_TUPLE, POLY_VOID, tuple_src,
-                           n_outputs, poly_arg_none())
-                     : NULL;
+  PolyUOp *ret =
+      ok ? poly_uop(ctx, POLY_OP_TUPLE, POLY_VOID, tuple_src, n_outputs, poly_arg_none()) : NULL;
 
   free(inputs);
   free(resolved);
@@ -1570,8 +1445,8 @@ static PolyUOp *poly_transform_to_call_materialize_contiguous(
     PolyUOp *after_src[2] = {cached, store};
     PolyUOp *after = (identity && store)
                          ? poly_uop_with_metadata_from(
-                               ctx, u, POLY_OP_AFTER, cached->dtype,
-                               after_src, 2, poly_arg_none())
+                               ctx, u, POLY_OP_AFTER, cached->dtype, after_src, 2, poly_arg_none()
+                           )
                          : NULL;
     if (!after || !poly_transform_to_call_append_store(tctx, after)) {
       tctx->failed = true;
@@ -1585,11 +1460,11 @@ static PolyUOp *poly_transform_to_call_materialize_contiguous(
   PolyUOp *replacement = poly_transform_to_call_rebuild_view(ctx, buf, u, NULL);
   PolyUOp *store = replacement ? poly_store_val(ctx, replacement, u->src[0]) : NULL;
   PolyUOp *after_src[2] = {replacement, store};
-  PolyUOp *after = (replacement && store)
-                       ? poly_uop_with_metadata_from(
-                             ctx, u, POLY_OP_AFTER, replacement->dtype,
-                             after_src, 2, poly_arg_none())
-                       : NULL;
+  PolyUOp *after = (replacement && store) ? poly_uop_with_metadata_from(
+                                                ctx, u, POLY_OP_AFTER, replacement->dtype,
+                                                after_src, 2, poly_arg_none()
+                                            )
+                                          : NULL;
   if (!buf || !replacement || !store || !after ||
       !poly_transform_to_call_append_store(tctx, after) ||
       !poly_transform_to_call_cache_replacement(tctx, u, replacement)) {
@@ -1600,11 +1475,8 @@ static PolyUOp *poly_transform_to_call_materialize_contiguous(
   return after;
 }
 
-static PolyUOp *poly_transform_to_call_contiguous_mops_to_view(
-    PolyCtx *ctx, PolyUOp *contiguous
-) {
-  if (!ctx || !contiguous || contiguous->op != POLY_OP_CONTIGUOUS ||
-      contiguous->n_src != 1 ||
+static PolyUOp *poly_transform_to_call_contiguous_mops_to_view(PolyCtx *ctx, PolyUOp *contiguous) {
+  if (!ctx || !contiguous || contiguous->op != POLY_OP_CONTIGUOUS || contiguous->n_src != 1 ||
       !poly_opset_has(POLY_GROUP_MOVEMENT, contiguous->src[0]->op))
     return NULL;
 
@@ -1612,16 +1484,12 @@ static PolyUOp *poly_transform_to_call_contiguous_mops_to_view(
   /* Pinned contiguous_mops_to_view accepts only static movement graphs whose
    * flattened index is one contiguous range (callify.py:59-89).  Polygrad's
    * existing proof returns that same base/range for realized storage. */
-  if (shape.ndim < 0 ||
-      !poly_transform_to_call_is_static_max_shape(ctx, contiguous, shape))
+  if (shape.ndim < 0 || !poly_transform_to_call_is_static_max_shape(ctx, contiguous, shape))
     return NULL;
 
   PolyUOp *view = make_buffer_view(ctx, contiguous->src[0]);
-  PolyUOp *shaped = view
-                        ? poly_transform_to_call_rebuild_view(
-                              ctx, view, contiguous->src[0], NULL
-                          )
-                        : NULL;
+  PolyUOp *shaped =
+      view ? poly_transform_to_call_rebuild_view(ctx, view, contiguous->src[0], NULL) : NULL;
   return shaped && poly_uop_buffer(ctx, shaped) ? shaped : NULL;
 }
 
@@ -1641,15 +1509,14 @@ static PolyUOp *poly_transform_to_call_rewrite_nested_contiguous(
   PolyUOp *memoized = poly_map_get(memo, poly_ptr_hash(u), u, poly_ptr_eq);
   if (memoized) return memoized;
 
-  bool opaque_program =
-      u->op == POLY_OP_PROGRAM || u->op == POLY_OP_LINEAR || u->op == POLY_OP_SOURCE ||
-      u->op == POLY_OP_BINARY;
+  bool opaque_program = u->op == POLY_OP_PROGRAM || u->op == POLY_OP_LINEAR ||
+                        u->op == POLY_OP_SOURCE || u->op == POLY_OP_BINARY;
   /* AFTER returns a storage identity, but its STORE values are still part of
    * the shared tensor graph that pinned callify rewrites before collecting
    * effects. Treat concrete buffers/views as leaves; keep walking through the
    * immutable AFTER effect so a shared creation COPY is rewritten everywhere. */
-  if ((poly_uop_has_buffer_identity(u) && u->op != POLY_OP_AFTER) ||
-      u->n_src == 0 || opaque_program) {
+  if ((poly_uop_has_buffer_identity(u) && u->op != POLY_OP_AFTER) || u->n_src == 0 ||
+      opaque_program) {
     poly_map_set(memo, poly_ptr_hash(u), u, u, poly_ptr_eq);
     return u;
   }
@@ -1666,7 +1533,8 @@ static PolyUOp *poly_transform_to_call_rewrite_nested_contiguous(
 
   bool changed = false;
   int first_src = (u->op == POLY_OP_CALL || u->op == POLY_OP_FUNCTION) ? 1 : 0;
-  for (int i = 0; i < first_src; i++) new_src[i] = u->src[i];
+  for (int i = 0; i < first_src; i++)
+    new_src[i] = u->src[i];
   for (int i = first_src; i < u->n_src; i++) {
     new_src[i] =
         poly_transform_to_call_rewrite_nested_contiguous(ctx, u->src[i], outer, tctx, memo);
@@ -1685,8 +1553,8 @@ static PolyUOp *poly_transform_to_call_rewrite_nested_contiguous(
    * before resolving their enclosing GETTUPLE(TUPLE(...)) selectors
    * (tinygrad/callify.py:146-151).  CALL bodies stay opaque to this outer
    * traversal; they are scheduled independently downstream. */
-  if (ret->op == POLY_OP_FUNCTION && ret->arg.kind == POLY_ARG_CALL_INFO &&
-      ret->arg.call_info && ret->arg.call_info->precompile) {
+  if (ret->op == POLY_OP_FUNCTION && ret->arg.kind == POLY_ARG_CALL_INFO && ret->arg.call_info &&
+      ret->arg.call_info->precompile) {
     PolyUOp *precompiled = poly_transform_precompiled_call(ctx, tctx, ret);
     if (!precompiled) {
       tctx->failed = true;
@@ -1696,8 +1564,8 @@ static PolyUOp *poly_transform_to_call_rewrite_nested_contiguous(
     return precompiled;
   }
   if (ret->op == POLY_OP_GETTUPLE && ret->n_src == 1 && ret->src[0] &&
-      ret->src[0]->op == POLY_OP_TUPLE && ret->arg.kind == POLY_ARG_INT &&
-      ret->arg.i >= 0 && ret->arg.i < ret->src[0]->n_src) {
+      ret->src[0]->op == POLY_OP_TUPLE && ret->arg.kind == POLY_ARG_INT && ret->arg.i >= 0 &&
+      ret->arg.i < ret->src[0]->n_src) {
     PolyUOp *selected = ret->src[0]->src[ret->arg.i];
     poly_map_set(memo, poly_ptr_hash(u), u, selected, poly_ptr_eq);
     return selected;
@@ -1707,8 +1575,7 @@ static PolyUOp *poly_transform_to_call_rewrite_nested_contiguous(
    * before replace_contig_with_store_after (callify.py:152-164).  Returning
    * the storage view here removes the CONTIGUOUS through ordinary buffer
    * identity instead of allocating an intermediate materialization. */
-  PolyUOp *movement_view =
-      poly_transform_to_call_contiguous_mops_to_view(ctx, ret);
+  PolyUOp *movement_view = poly_transform_to_call_contiguous_mops_to_view(ctx, ret);
   if (movement_view) {
     poly_map_set(memo, poly_ptr_hash(u), u, movement_view, poly_ptr_eq);
     return movement_view;
@@ -1717,8 +1584,7 @@ static PolyUOp *poly_transform_to_call_rewrite_nested_contiguous(
   /* Tinygrad 2026-08-22/a9069c177a9d callify keeps a contiguous movement view
    * as the COPY argument and attaches Buffer.view storage outside IR. */
   if (ret->op == POLY_OP_COPY) {
-    PolyUOp *view_rewrite =
-        poly_transform_to_call_materialize_view_copy(ctx, ret, tctx);
+    PolyUOp *view_rewrite = poly_transform_to_call_materialize_view_copy(ctx, ret, tctx);
     if (view_rewrite) {
       poly_map_set(memo, poly_ptr_hash(u), u, view_rewrite, poly_ptr_eq);
       return view_rewrite;
@@ -1736,22 +1602,18 @@ static PolyUOp *poly_transform_to_call_rewrite_nested_contiguous(
   if (ret->op == POLY_OP_COPY && ret->n_src >= 1) {
     PolyDevice source_device = poly_uop_device(ret->src[0]);
     PolyDevice copy_device = poly_uop_device(ret);
-    bool from_creation =
-        source_device == POLY_DEVICE_HOST || source_device == POLY_DEVICE_DISK;
+    bool from_creation = source_device == POLY_DEVICE_HOST || source_device == POLY_DEVICE_DISK;
     /* The preserved legacy raw-UOp route can still carry BUFFER(UNIQUE) with
      * device=AUTO and express HOST/DISK only in ctx->buffers. Keep that
      * boundary fallback solely for an incomplete graph. Complete eager physical
      * roots take the pinned graph-device branch above, including movement-
      * wrapped DISK sources that the old identity-only rule missed. */
     if (!from_creation && source_device == POLY_DEVICE_AUTO) {
-      const PolyUOp *legacy_identity =
-          poly_uop_get_buffer_identity(ret->src[0]);
+      const PolyUOp *legacy_identity = poly_uop_get_buffer_identity(ret->src[0]);
       PolyBuffer *legacy_storage =
           legacy_identity ? poly_buffer_get(ctx, (PolyUOp *)legacy_identity) : NULL;
-      from_creation =
-          legacy_storage &&
-          (legacy_storage->device == POLY_DEVICE_HOST ||
-           legacy_storage->device == POLY_DEVICE_DISK);
+      from_creation = legacy_storage && (legacy_storage->device == POLY_DEVICE_HOST ||
+                                         legacy_storage->device == POLY_DEVICE_DISK);
     }
     if (from_creation && copy_device != POLY_DEVICE_AUTO && copy_device != POLY_DEVICE_HOST &&
         copy_device != POLY_DEVICE_DISK) {
@@ -1759,17 +1621,16 @@ static PolyUOp *poly_transform_to_call_rewrite_nested_contiguous(
                                   ? poly_callify_rebuild_without_tag(ctx, ret, NULL)
                                   : ret;
       PolyUOp *contiguous_src[1] = {untagged_ret};
-      PolyUOp *contiguous = untagged_ret
-                                ? poly_uop_with_metadata_from(
-                                      ctx, ret, POLY_OP_CONTIGUOUS, ret->dtype,
-                                      contiguous_src, 1, poly_arg_none()
-                                  )
-                                : NULL;
+      PolyUOp *contiguous = untagged_ret ? poly_uop_with_metadata_from(
+                                               ctx, ret, POLY_OP_CONTIGUOUS, ret->dtype,
+                                               contiguous_src, 1, poly_arg_none()
+                                           )
+                                         : NULL;
       PolyUOp *replacement = NULL;
-      PolyUOp *executable = contiguous ? poly_transform_to_call_materialize_contiguous(
-                                             ctx, contiguous, tctx, &replacement
-                                         )
-                                       : NULL;
+      PolyUOp *executable =
+          contiguous
+              ? poly_transform_to_call_materialize_contiguous(ctx, contiguous, tctx, &replacement)
+              : NULL;
       if (!executable || !replacement ||
           !poly_transform_to_call_cache_replacement(tctx, u, replacement)) {
         tctx->failed = true;
@@ -1798,14 +1659,14 @@ static PolyUOp *poly_transform_to_call_rewrite_nested_contiguous(
      * distinct until finalize consumes the surviving provenance. */
     PolyUOp *contiguous_src[1] = {assign_store->src[1]};
     PolyUOp *contiguous = poly_uop_with_metadata_from(
-        ctx, ret, POLY_OP_CONTIGUOUS, assign_store->src[1]->dtype,
-        contiguous_src, 1, poly_arg_none()
+        ctx, ret, POLY_OP_CONTIGUOUS, assign_store->src[1]->dtype, contiguous_src, 1,
+        poly_arg_none()
     );
     PolyUOp *replacement = NULL;
-    PolyUOp *executable = contiguous ? poly_transform_to_call_materialize_contiguous(
-                                           ctx, contiguous, tctx, &replacement
-                                       )
-                                     : NULL;
+    PolyUOp *executable =
+        contiguous
+            ? poly_transform_to_call_materialize_contiguous(ctx, contiguous, tctx, &replacement)
+            : NULL;
     if (!executable || !replacement ||
         !poly_transform_to_call_cache_replacement(tctx, u, replacement)) {
       tctx->failed = true;
@@ -1840,19 +1701,17 @@ static PolyUOp *poly_transform_to_call_rewrite_nested_contiguous(
    * (callify.py:32-52,155-180). Do the same with AllocCtx.bases' pass-local C
    * representation; the resulting executable UOps are identical. */
   bool tagged_value = poly_callify_tag_ids(ret, NULL, NULL);
-  if (tagged_value && ret->op != POLY_OP_CONTIGUOUS &&
-      ret->op != POLY_OP_AFTER && ret->op != POLY_OP_STORE &&
-      !poly_uop_has_buffer_identity(ret)) {
+  if (tagged_value && ret->op != POLY_OP_CONTIGUOUS && ret->op != POLY_OP_AFTER &&
+      ret->op != POLY_OP_STORE && !poly_uop_has_buffer_identity(ret)) {
     PolyUOp *untagged_ret = poly_callify_tag_ids(ret, NULL, NULL)
                                 ? poly_callify_rebuild_without_tag(ctx, ret, NULL)
                                 : ret;
     PolyUOp *contiguous_src[1] = {untagged_ret};
-    PolyUOp *contiguous = untagged_ret
-                              ? poly_uop_with_metadata_from(
-                                    ctx, ret, POLY_OP_CONTIGUOUS, ret->dtype,
-                                    contiguous_src, 1, poly_arg_none()
-                                )
-                              : NULL;
+    PolyUOp *contiguous = untagged_ret ? poly_uop_with_metadata_from(
+                                             ctx, ret, POLY_OP_CONTIGUOUS, ret->dtype,
+                                             contiguous_src, 1, poly_arg_none()
+                                         )
+                                       : NULL;
     /* Pinned replace_contig_with_store_after leaves DISK/TINYFS CONTIGUOUS
      * unmaterialized (callify.py:44-53). The underlying allocator exposes a
      * zero-copy Buffer.view, so allocating and scalar-bitcasting into a fresh
@@ -1862,10 +1721,10 @@ static PolyUOp *poly_transform_to_call_rewrite_nested_contiguous(
       return contiguous;
     }
     PolyUOp *replacement = NULL;
-    PolyUOp *executable = contiguous ? poly_transform_to_call_materialize_contiguous(
-                                           ctx, contiguous, tctx, &replacement
-                                       )
-                                     : NULL;
+    PolyUOp *executable =
+        contiguous
+            ? poly_transform_to_call_materialize_contiguous(ctx, contiguous, tctx, &replacement)
+            : NULL;
     if (!executable || !replacement ||
         !poly_transform_to_call_cache_replacement(tctx, u, replacement)) {
       tctx->failed = true;
@@ -1904,15 +1763,11 @@ static PolyUOp *poly_transform_to_call_rewrite_nested_contiguous(
     if (after && after->op == POLY_OP_AFTER && after->n_src >= 1 &&
         poly_uop_has_buffer_identity(after->src[0])) {
       PolyUOp *merged_after = NULL;
-      if (poly_callify_tag_ids(after, NULL, NULL) &&
-          poly_callify_tag_ids(ret, NULL, NULL))
-        merged_after = poly_callify_merge_tagged_uops(
-            ctx, after, NULL, after, ret
-        );
+      if (poly_callify_tag_ids(after, NULL, NULL) && poly_callify_tag_ids(ret, NULL, NULL))
+        merged_after = poly_callify_merge_tagged_uops(ctx, after, NULL, after, ret);
       else if (poly_callify_tag_ids(ret, NULL, NULL))
         merged_after = poly_uop_with_metadata_from(
-            ctx, ret, POLY_OP_AFTER, after->dtype, after->src, after->n_src,
-            after->arg
+            ctx, ret, POLY_OP_AFTER, after->dtype, after->src, after->n_src, after->arg
         );
       if (merged_after) after = merged_after;
       PolyUOp *result = poly_transform_to_call_after_result_buffer(ctx, after);
@@ -1930,8 +1785,7 @@ static PolyUOp *poly_transform_to_call_rewrite_nested_contiguous(
       replacement = ret->src[0];
       executable = replacement;
     } else {
-      executable =
-          poly_transform_to_call_materialize_contiguous(ctx, ret, tctx, &replacement);
+      executable = poly_transform_to_call_materialize_contiguous(ctx, ret, tctx, &replacement);
     }
     if (executable && replacement) {
       if (!poly_transform_to_call_cache_replacement(tctx, u, replacement)) {
@@ -1967,11 +1821,11 @@ PolyUOp *poly_transform_to_call_with_map(
   if (out_map_repl) *out_map_repl = NULL;
   if (out_map_n) *out_map_n = 0;
   if (!ctx || !uops || !out_uops || n < 0) return NULL;
-  if ((out_map_orig || out_map_repl || out_map_n) &&
-      (!out_map_orig || !out_map_repl || !out_map_n))
+  if ((out_map_orig || out_map_repl || out_map_n) && (!out_map_orig || !out_map_repl || !out_map_n))
     return NULL;
   if (n == 0) return NULL;
-  for (int i = 0; i < n; i++) out_uops[i] = NULL;
+  for (int i = 0; i < n; i++)
+    out_uops[i] = NULL;
 
   PolyUOp **stores = calloc((size_t)(n * 4), sizeof(PolyUOp *));
   if (!stores) return NULL;
@@ -1985,18 +1839,14 @@ PolyUOp *poly_transform_to_call_with_map(
       .device_memo = poly_map_new(256),
       .axis_memo = poly_map_new(256),
   };
-  if (!tctx.requested_bases || !tctx.original_uops ||
-      !tctx.device_memo || !tctx.axis_memo)
+  if (!tctx.requested_bases || !tctx.original_uops || !tctx.device_memo || !tctx.axis_memo)
     return poly_transform_to_call_fail(&tctx, out_uops, n);
   for (int i = 0; i < n; i++) {
     PolyUOp *base = poly_transform_to_call_multibase(uops[i]);
     if (!base || base->op == POLY_OP_CONST || base->op == POLY_OP_BUFFER ||
-        base->op == POLY_OP_AFTER ||
-        poly_uop_has_buffer_identity(base))
+        base->op == POLY_OP_AFTER || poly_uop_has_buffer_identity(base))
       continue;
-    poly_map_set(
-        tctx.requested_bases, poly_ptr_hash(base), base, base, poly_ptr_eq
-    );
+    poly_map_set(tctx.requested_bases, poly_ptr_hash(base), base, base, poly_ptr_eq);
   }
 
   /* Pinned transform_to_call rewrites one shared big_sink before
@@ -2010,9 +1860,7 @@ PolyUOp *poly_transform_to_call_with_map(
     if (shared_rewrite_memo) poly_map_destroy(shared_rewrite_memo);
     return poly_transform_to_call_fail(&tctx, out_uops, n);
   }
-  big_sink = poly_transform_to_call_add_tags(
-      ctx, &tctx, big_sink, tctx.original_uops
-  );
+  big_sink = poly_transform_to_call_add_tags(ctx, &tctx, big_sink, tctx.original_uops);
   if (!big_sink) {
     poly_map_destroy(shared_rewrite_memo);
     return poly_transform_to_call_fail(&tctx, out_uops, n);
@@ -2027,11 +1875,8 @@ PolyUOp *poly_transform_to_call_with_map(
   poly_map_destroy(shared_rewrite_memo);
 
   PolyMap *finalize_memo = poly_map_new(256);
-  if (!finalize_memo)
-    return poly_transform_to_call_fail(&tctx, out_uops, n);
-  big_sink = poly_transform_to_call_finalize_tags(
-      ctx, &tctx, big_sink, finalize_memo
-  );
+  if (!finalize_memo) return poly_transform_to_call_fail(&tctx, out_uops, n);
+  big_sink = poly_transform_to_call_finalize_tags(ctx, &tctx, big_sink, finalize_memo);
   if (!big_sink || big_sink->op != POLY_OP_SINK || big_sink->n_src != n) {
     poly_map_destroy(finalize_memo);
     return poly_transform_to_call_fail(&tctx, out_uops, n);
@@ -2041,10 +1886,8 @@ PolyUOp *poly_transform_to_call_with_map(
    * SINK (tinygrad/tensor.py:178-240). */
   int write_store = 0;
   for (int i = 0; i < tctx.n_stores; i++) {
-    PolyUOp *mapped = poly_map_get(
-        finalize_memo, poly_ptr_hash(tctx.stores[i]), tctx.stores[i],
-        poly_ptr_eq
-    );
+    PolyUOp *mapped =
+        poly_map_get(finalize_memo, poly_ptr_hash(tctx.stores[i]), tctx.stores[i], poly_ptr_eq);
     if (!mapped) continue;
     tctx.stores[write_store++] = mapped;
   }
@@ -2072,8 +1915,7 @@ PolyUOp *poly_transform_to_call_with_map(
            poly_opset_has(POLY_GROUP_MOVEMENT, disk_contiguous->op))
       disk_contiguous = disk_contiguous->src[0];
     if (disk_contiguous && disk_contiguous->op == POLY_OP_CONTIGUOUS &&
-        disk_contiguous->n_src == 1 &&
-        poly_uop_device(disk_contiguous) == POLY_DEVICE_DISK) {
+        disk_contiguous->n_src == 1 && poly_uop_device(disk_contiguous) == POLY_DEVICE_DISK) {
       out_uops[i] = uops[i];
       continue;
     }
@@ -2131,11 +1973,9 @@ PolyUOp *poly_transform_to_call_with_map(
       return poly_transform_to_call_fail(&tctx, out_uops, n);
     }
 
-    PolyUOp *outer_contiguous =
-        target_root->op == POLY_OP_CONTIGUOUS ? target_root : NULL;
+    PolyUOp *outer_contiguous = target_root->op == POLY_OP_CONTIGUOUS ? target_root : NULL;
     if (outer_contiguous) {
-      PolyUOp *cached =
-          poly_transform_to_call_cached_replacement(&tctx, outer_contiguous);
+      PolyUOp *cached = poly_transform_to_call_cached_replacement(&tctx, outer_contiguous);
       const PolyUOp *cached_identity = poly_uop_get_buffer_identity(cached);
       if (cached_identity) {
         /* Another target already materialized this exact CONTIGUOUS. Rebuild
@@ -2179,8 +2019,7 @@ PolyUOp *poly_transform_to_call_with_map(
      * stripping now would make COPY consumers read storage before its creator. */
 
     PolyShape output_shape = poly_uop_max_shape_cached(ctx, u);
-    int64_t output_numel =
-        (output_shape.ndim >= 0) ? poly_shape_numel(output_shape) : -1;
+    int64_t output_numel = (output_shape.ndim >= 0) ? poly_shape_numel(output_shape) : -1;
     if (output_numel == 0) {
       /* tinygrad callify removes size-zero CONTIGUOUS work and retargets the
        * Tensor to an unallocated BUFFER. Keep the distinct placed identity and
@@ -2189,10 +2028,9 @@ PolyUOp *poly_transform_to_call_with_map(
       PolyUOp *buf =
           poly_transform_to_call_empty_buffer_like(ctx, &tctx, u->dtype, output_shape, u);
       if (!buf) return poly_transform_to_call_fail(&tctx, out_uops, n);
-      PolyUOp *result =
-          (output_shape.ndim == 1 && output_shape.dims[0] == 0)
-              ? buf
-              : poly_reshape(ctx, buf, output_shape.dims, output_shape.ndim);
+      PolyUOp *result = (output_shape.ndim == 1 && output_shape.dims[0] == 0)
+                            ? buf
+                            : poly_reshape(ctx, buf, output_shape.dims, output_shape.ndim);
       if (!result) return poly_transform_to_call_fail(&tctx, out_uops, n);
       out_uops[i] = result;
       if (outer_contiguous &&
@@ -2231,8 +2069,9 @@ PolyUOp *poly_transform_to_call_with_map(
      * result remains the stripped buffer below. */
     PolyUOp *output_store = poly_store_val(ctx, buf, materialized);
     PolyUOp *after_src[2] = {buf, output_store};
-    PolyUOp *output_effect = output_store ?
-        poly_uop(ctx, POLY_OP_AFTER, buf->dtype, after_src, 2, poly_arg_none()) : NULL;
+    PolyUOp *output_effect =
+        output_store ? poly_uop(ctx, POLY_OP_AFTER, buf->dtype, after_src, 2, poly_arg_none())
+                     : NULL;
     if (!output_effect || !poly_transform_to_call_append_store(&tctx, output_effect)) {
       poly_transform_view_stack_free(&views);
       return poly_transform_to_call_fail(&tctx, out_uops, n);
@@ -2269,14 +2108,15 @@ PolyUOp *poly_transform_to_call_with_map(
   PolyUOp **effects = n_effects > 0 ? malloc((size_t)n_effects * sizeof(*effects)) : NULL;
   if (n_effects > 0 && !effects) return poly_transform_to_call_fail(&tctx, out_uops, n);
   int effect = 0;
-  for (int i = 0; i < tctx.n_stores; i++) effects[effect++] = tctx.stores[i];
+  for (int i = 0; i < tctx.n_stores; i++)
+    effects[effect++] = tctx.stores[i];
   if (poly_debug_at_least(7)) {
     fprintf(stderr, "[polygrad:transform_to_call] stores=%d effects=", tctx.n_stores);
     for (int i = 0; i < n_effects; i++)
       fprintf(
           stderr, "%s%s%s", i ? "," : "", poly_op_name(effects[i]->op),
-          effects[i]->op == POLY_OP_CALL && effects[i]->n_src
-              ? poly_op_name(effects[i]->src[0]->op) : ""
+          effects[i]->op == POLY_OP_CALL && effects[i]->n_src ? poly_op_name(effects[i]->src[0]->op)
+                                                              : ""
       );
     fputc('\n', stderr);
   }
@@ -2284,9 +2124,7 @@ PolyUOp *poly_transform_to_call_with_map(
   free(effects);
   PolyUOp *outer_call = sink_body ? poly_transform_to_call_wrap_call(ctx, sink_body) : NULL;
   if (!outer_call) return poly_transform_to_call_fail(&tctx, out_uops, n);
-  poly_transform_to_call_take_replacements(
-      &tctx, out_map_orig, out_map_repl, out_map_n
-  );
+  poly_transform_to_call_take_replacements(&tctx, out_map_orig, out_map_repl, out_map_n);
   poly_transform_to_call_ctx_free(&tctx);
   return outer_call;
 }
@@ -2324,25 +2162,20 @@ PolyUOp *poly_linear_effect_sink(
   bool timing = poly_debug_at_least(2);
   double t0 = timing ? poly_now_ms() : 0.0;
   if (timing) {
-    fprintf(
-        stderr, "[polygrad:linear_effect] begin sink=%p n_src=%d\n", (void *)sink, sink->n_src
-    );
+    fprintf(stderr, "[polygrad:linear_effect] begin sink=%p n_src=%d\n", (void *)sink, sink->n_src);
     fflush(stderr);
   }
   PolyUOp *outer_call = poly_transform_to_call_wrap_call(ctx, sink);
-  PolyUOp *linear = outer_call ? poly_create_linear_with_vars(
-                                    ctx, outer_call, var_bindings_out,
-                                    n_var_bindings_out
-                                )
-                              : NULL;
+  PolyUOp *linear =
+      outer_call
+          ? poly_create_linear_with_vars(ctx, outer_call, var_bindings_out, n_var_bindings_out)
+          : NULL;
   if (!linear) fprintf(stderr, "poly_realize: scheduling failed\n");
   if (timing) {
     double t1 = poly_now_ms();
     fprintf(
-        stderr,
-        "[polygrad:linear_effect] done schedule=%.3fms calls=%d vars=%d\n",
-        t1 - t0, linear ? linear->n_src : -1,
-        linear ? *n_var_bindings_out : -1
+        stderr, "[polygrad:linear_effect] done schedule=%.3fms calls=%d vars=%d\n", t1 - t0,
+        linear ? linear->n_src : -1, linear ? *n_var_bindings_out : -1
     );
     fflush(stderr);
   }
@@ -2360,24 +2193,24 @@ PolyUOp *poly_linear_with_vars(
     PolyVarBinding **var_bindings_out,
     int *n_var_bindings_out
 ) {
-  if (!ctx || !uops || !out_uops || !var_bindings_out || !n_var_bindings_out || n < 0)
-    return NULL;
+  if (!ctx || !uops || !out_uops || !var_bindings_out || !n_var_bindings_out || n < 0) return NULL;
   if (n == 0) return NULL;
   if (!poly_roots_explicit_devices_supported(ctx, uops, n)) {
     fprintf(stderr, "poly_realize: unsupported explicit device identity\n");
-    for (int i = 0; i < n; i++) out_uops[i] = NULL;
+    for (int i = 0; i < n; i++)
+      out_uops[i] = NULL;
     return NULL;
   }
 
   PolyUOp *big_call = poly_transform_to_call(ctx, uops, n, out_uops);
   if (!big_call) goto fail;
-  PolyUOp *linear = poly_create_linear_with_vars(
-      ctx, big_call, var_bindings_out, n_var_bindings_out
-  );
+  PolyUOp *linear =
+      poly_create_linear_with_vars(ctx, big_call, var_bindings_out, n_var_bindings_out);
   if (linear) return linear;
 
 fail:
-  for (int i = 0; i < n; i++) out_uops[i] = NULL;
+  for (int i = 0; i < n; i++)
+    out_uops[i] = NULL;
   return NULL;
 }
 
@@ -2397,18 +2230,14 @@ int poly_realize_sink(PolyCtx *ctx, PolyUOp *sink) {
   }
   PolyVarBinding *var_bindings = NULL;
   int n_var_bindings = 0;
-  PolyUOp *linear = poly_linear_effect_sink(
-      ctx, sink, &var_bindings, &n_var_bindings
-  );
+  PolyUOp *linear = poly_linear_effect_sink(ctx, sink, &var_bindings, &n_var_bindings);
   double t_sched = timing ? poly_now_ms() : 0.0;
   if (!linear) return -1;
   if (timing) {
     fprintf(stderr, "[polygrad:realize_sink] run begin calls=%d\n", linear->n_src);
     fflush(stderr);
   }
-  int ret = poly_run_linear(
-      ctx, linear, var_bindings, n_var_bindings, NULL, 0, true, false, false
-  );
+  int ret = poly_run_linear(ctx, linear, var_bindings, n_var_bindings, NULL, 0, true, false, false);
   double t_run = timing ? poly_now_ms() : 0.0;
   free(var_bindings);
   if (timing) {
@@ -2429,9 +2258,7 @@ static int poly_realize_linear(
     int n_var_bindings
 ) {
   if (!ctx || !linear || linear->op != POLY_OP_LINEAR) return -1;
-  return poly_run_linear(
-      ctx, linear, var_bindings, n_var_bindings, NULL, 0, true, false, false
-  );
+  return poly_run_linear(ctx, linear, var_bindings, n_var_bindings, NULL, 0, true, false, false);
 }
 
 bool poly_tensor_root_has_unplaced_buffer(PolyCtx *ctx, PolyUOp *root) {
@@ -2440,16 +2267,14 @@ bool poly_tensor_root_has_unplaced_buffer(PolyCtx *ctx, PolyUOp *root) {
   int n = 0;
   /* CALL/FUNCTION bodies contain placeholders, not Tensor storage. Their
    * caller-visible arguments remain part of the traversal. */
-  PolyUOp **topo =
-      poly_toposort_ex_user_scratch(ctx, root, &n, NULL, NULL, false);
+  PolyUOp **topo = poly_toposort_ex_user_scratch(ctx, root, &n, NULL, NULL, false);
   if (!topo) {
     poly_ctx_scratch_rewind(ctx, scratch);
     return true;
   }
   bool unplaced = false;
   for (int i = 0; i < n; i++) {
-    if (topo[i] && topo[i]->op == POLY_OP_BUFFER &&
-        !poly_uop_is_variable(topo[i]) &&
+    if (topo[i] && topo[i]->op == POLY_OP_BUFFER && !poly_uop_is_variable(topo[i]) &&
         poly_uop_device(topo[i]) == POLY_DEVICE_AUTO) {
       unplaced = true;
       break;
@@ -2464,9 +2289,7 @@ int poly_realize_uops(PolyCtx *ctx, PolyUOp **uops, int n, PolyUOp **out_uops) {
   if (n == 0) return 0;
   PolyVarBinding *var_bindings = NULL;
   int n_var_bindings = 0;
-  PolyUOp *linear = poly_linear_with_vars(
-      ctx, uops, n, out_uops, &var_bindings, &n_var_bindings
-  );
+  PolyUOp *linear = poly_linear_with_vars(ctx, uops, n, out_uops, &var_bindings, &n_var_bindings);
   int ret = linear ? poly_realize_linear(ctx, linear, var_bindings, n_var_bindings) : -1;
   free(var_bindings);
   return ret;
@@ -2492,8 +2315,7 @@ static int poly_realize_tensors_impl(
   int n_var_bindings = 0;
   int rc = -1;
   int n_pending = 0;
-  if (!pending_tensors || !pending_roots || !pending_out || !pending_indices)
-    goto cleanup;
+  if (!pending_tensors || !pending_roots || !pending_out || !pending_indices) goto cleanup;
 
   for (int i = 0; i < n; i++) {
     outputs[i] = NULL;
@@ -2509,8 +2331,7 @@ static int poly_realize_tensors_impl(
         poly_uop_device_uop_cached(ctx, inputs[i]->uop_physical, NULL)) {
       fprintf(
           stderr,
-          "poly_realize_tensors: tensor %d has weak dtype; cast to a concrete dtype first\n",
-          i
+          "poly_realize_tensors: tensor %d has weak dtype; cast to a concrete dtype first\n", i
       );
       goto cleanup;
     }
@@ -2536,8 +2357,7 @@ static int poly_realize_tensors_impl(
       int64_t view_numel = -1;
       size_t view_byte_offset = 0;
       if (poly_uop_contiguous_view_info(
-              ctx, physical->src[0], &view_identity, &view_shape,
-              &view_numel, &view_byte_offset
+              ctx, physical->src[0], &view_identity, &view_shape, &view_numel, &view_byte_offset
           ) &&
           poly_uop_buffer(ctx, physical)) {
         outputs[i] = inputs[i];
@@ -2555,9 +2375,8 @@ static int poly_realize_tensors_impl(
       if (storage && (storage->valid || (storage->src && storage->src->valid)) &&
           poly_buffer_ensure_device_current(ctx, (PolyUOp *)identity, requested) != 0)
         goto cleanup;
-      if (poly_tensor_set_physical(
-              ctx, inputs[i], physical, inputs[i]->role, inputs[i]->device
-          ) != 0)
+      if (poly_tensor_set_physical(ctx, inputs[i], physical, inputs[i]->role, inputs[i]->device) !=
+          0)
         goto cleanup;
       outputs[i] = inputs[i];
       continue;
@@ -2595,15 +2414,13 @@ static int poly_realize_tensors_impl(
     if (current != out && out != pending_roots[pending]) goto cleanup;
     if (poly_tensor_uop_physical(pending_tensors[pending]) != out &&
         poly_tensor_set_physical(
-            ctx, pending_tensors[pending], out,
-            pending_tensors[pending]->role, pending_tensors[pending]->device
+            ctx, pending_tensors[pending], out, pending_tensors[pending]->role,
+            pending_tensors[pending]->device
         ) != 0)
       goto cleanup;
   }
 
-  linear = poly_create_linear_with_vars(
-      ctx, big_call, &var_bindings, &n_var_bindings
-  );
+  linear = poly_create_linear_with_vars(ctx, big_call, &var_bindings, &n_var_bindings);
   if (!linear) goto cleanup;
   rc = poly_realize_linear(ctx, linear, var_bindings, n_var_bindings);
   if (rc != 0) goto cleanup;

@@ -36,6 +36,8 @@ LOADER_SRC = src/loaders/decoded.c src/loaders/import_error.c src/loaders/bind.c
 CODEC_SRC = vendor/cjson/cJSON.c src/safetensors.c src/wlrn.c src/ir.c src/bundle.c src/instance.c src/tokenizer.c src/models/mlp.c src/models/tabm.c src/models/nam.c src/models/registry.c src/models/gpt2.c src/models/qwen3.c src/models/hf_loader.c $(LOADER_SRC)
 TEST_SRC = test/test_main.c test/test_uop.c test/test_utils.c test/test_dtype.c test/test_bigint.c test/test_pat.c test/test_sym.c test/test_shape.c test/test_schedule_engine.c test/test_autograd.c test/test_codegen.c test/test_wasm.c test/test_rangeify.c test/test_reduce_simplify.c test/test_nn.c test/test_tensor.c test/test_fusion_fuzzer.c test/test_future_passes.c test/test_safetensors.c test/test_wlrn.c test/test_ir.c test/test_instance.c test/test_program.c test/test_mlp.c test/test_tabm.c test/test_nam.c test/test_hf.c test/test_qwen3.c test/test_f16.c test/test_schedule_runtime.c test/test_bundle.c test/test_registry.c test/test_placement.c test/test_realize.c test/test_threading.c
 PROJECT_HEADERS := $(shell find src test bench vendor -type f -name '*.h' -print | sort)
+ANALYZE_SRC = $(filter-out vendor/%,$(sort $(SRC) $(CODEC_SRC)))
+FORMAT_SRC := $(shell find src test bench -type f \( -name '*.c' -o -name '*.h' \) -print | sort)
 
 ifeq ($(HAS_CUDA), 1)
   SRC += src/renderer/cuda.c src/runtime_cuda.c
@@ -97,7 +99,7 @@ QWEN3_GGUF ?= $(if $(POLY_QWEN3_GGUF),$(POLY_QWEN3_GGUF),$(CURDIR)/temp/Qwen3-0.
 BROWSER_MATRIX ?= chromium,firefox,chrome-system=chromium@/usr/bin/google-chrome,chromium-snap=chromium@/snap/bin/chromium
 BROWSER_MATRIX_DEVICES ?= auto
 
-.PHONY: all test test-fast test-common test-common-cpu test-common-cuda test-common-hip test-common-interp test-common-x86 test-specific-cuda test-specific-hip test-specific-x86 test-cuda test-hip test-interp test-x86 test-parity test-parity-opt test-parity-ir test-parity-ir-opt test-parity-graph parity-graph-report reference-migration-report test-parity-op-census parity-op-census-report test-compat-tinygrad-tier1 test-compat-tinygrad-convnext test-parity-cuda test-parity-hip test-symbolic-z3 test-qwen3 test-browser-qwen3 require-qwen3-gguf test-wasm test-wasm-new test-native test-browser test-browser-matrix test-js-browser-matrix test-instance-interchange test-p2p test-p2p-browser bench bench-cuda bench-model-cuda bench-hlb-cuda-semantic bench-hlb-cuda-timing bench-hlb-cuda-manifest bench-hip bench-train-py bench-smoke bench-local-baseline bench-update-local-baseline bench-smoke-regression bench-ci-regression bench-ratios bench-ratio-local-baseline bench-update-local-ratio-baseline bench-parity bench-jax-js-wasm bench-jax-js-matmul-wasm bench-jax-js-model-wasm bench-jax-js-browser-wasm bench-jax-js-browser-matmul-wasm bench-jax-js-browser-model-wasm bench-compare bench-compare-global bench-regression bench-update-baseline fuzz fuzz-smoke fuzz-nightly fuzz-symbolic fuzz-symbolic-div wasm wasm-pkg build-py build-py-sdist build-py-wheel build-python test-py-sdist-install publish-py publish-python build-js publish-js clean analyze cppcheck format format-check test-msan test-tsan verify coverage test-full test-js-native-cpu test-js-native-x86 test-js-native-interp test-js-native-cuda test-js-native-hip test-js-package test-filc-interp-fast sync-source-mirrors verify-source-mirrors test-py-x86
+.PHONY: all test test-fast test-common test-common-cpu test-common-cuda test-common-hip test-common-interp test-common-x86 test-specific-cuda test-specific-hip test-specific-x86 test-cuda test-hip test-interp test-x86 test-harness-skip-accounting test-parity test-parity-opt test-parity-ir test-parity-ir-opt test-parity-graph parity-graph-report reference-migration-report test-parity-op-census parity-op-census-report test-compat-tinygrad-tier1 test-compat-tinygrad-convnext test-parity-cuda test-parity-hip test-symbolic-z3 test-qwen3 test-browser-qwen3 require-qwen3-gguf test-wasm test-wasm-new test-native test-browser test-browser-matrix test-js-browser-matrix test-instance-interchange test-p2p test-p2p-browser bench bench-cuda bench-model-cuda bench-hlb-cuda-semantic bench-hlb-cuda-timing bench-hlb-cuda-manifest bench-hip bench-train-py bench-smoke bench-local-baseline bench-update-local-baseline bench-smoke-regression bench-ci-regression bench-ratios bench-ratio-local-baseline bench-update-local-ratio-baseline bench-parity bench-jax-js-wasm bench-jax-js-matmul-wasm bench-jax-js-model-wasm bench-jax-js-browser-wasm bench-jax-js-browser-matmul-wasm bench-jax-js-browser-model-wasm bench-compare bench-compare-global bench-regression bench-update-baseline fuzz fuzz-smoke fuzz-nightly fuzz-symbolic fuzz-symbolic-div wasm wasm-pkg build-py build-py-sdist build-py-wheel build-python test-py-sdist-install publish-py publish-python build-js publish-js clean analyze cppcheck format format-check test-msan test-tsan verify coverage test-full test-js-native-cpu test-js-native-x86 test-js-native-interp test-js-native-cuda test-js-native-hip test-js-package test-filc-interp-fast sync-source-mirrors verify-source-mirrors test-py-x86
 
 all: build/libpolygrad.a build/libpolygrad.so
 
@@ -166,10 +168,19 @@ test-qwen3: build/polygrad_test require-qwen3-gguf
 # Backend-specific tests only. --specific requires TEST_BACKEND and an exact
 # suite match, so portable tests with backend names remain in test-common-*.
 test-specific-cuda: build/polygrad_test
-	$(SAN_RUN) POLY_DEVICE=cuda ./build/polygrad_test --specific cuda
+	$(SAN_RUN) POLY_DEVICE=cuda ./build/polygrad_test --require-no-skips --specific cuda
 
 test-specific-hip: build/polygrad_test
-	$(SAN_RUN) POLY_DEVICE=hip ./build/polygrad_test --specific hip
+	$(SAN_RUN) POLY_DEVICE=hip ./build/polygrad_test --require-no-skips --specific hip
+
+test-harness-skip-accounting: build/polygrad_test
+	@mkdir -p build
+	@set +e; \
+	  POLY_TEST_FORCE_RUNTIME_SKIP=1 $(SAN_RUN) \
+	    ./build/polygrad_test --require-no-skips --specific harness \
+	    > build/test-harness-skip.log 2>&1; \
+	  rc=$$?; set -e; cat build/test-harness-skip.log; \
+	  test $$rc -eq 2
 
 test-parity: build/polygrad_parity_runner
 	$(SAN_RUN) CACHELEVEL=0 $(PARITY_PY) $(PARITY_SCRIPT) --runner build/polygrad_parity_runner --mode values
@@ -710,8 +721,16 @@ clean:
 # Clang Static Analyzer (requires clang)
 analyze:
 	@mkdir -p build
-	clang --analyze -std=c11 -Wno-unused-parameter $(SRC) 2>&1 | tee build/analyze.log
-	@rm -f *.plist
+	@rm -f build/analyze.log; status=0; \
+	  for src in $(ANALYZE_SRC); do \
+	    echo "==> $$src" >> build/analyze.log; \
+	    clang --analyze $(filter-out -pipe,$(CFLAGS_COMMON)) "$$src" \
+	      >> build/analyze.log 2>&1 || status=1; \
+	  done; \
+	  cat build/analyze.log; \
+	  if grep -Eq '(^|: )(warning|error):' build/analyze.log; then status=1; fi; \
+	  rm -f *.plist; \
+	  exit $$status
 	@echo "Analysis complete. See build/analyze.log"
 
 # Cppcheck (install: apt install cppcheck)
@@ -721,10 +740,10 @@ cppcheck:
 
 # clang-format (install: apt install clang-format)
 format:
-	clang-format -i src/*.c src/*.h test/*.c
+	clang-format -i $(FORMAT_SRC)
 
 format-check:
-	clang-format --dry-run --Werror src/*.c src/*.h test/*.c
+	clang-format --dry-run --Werror $(FORMAT_SRC)
 
 # MemorySanitizer (requires clang, incompatible with ASan)
 test-msan: build/polygrad_test_msan
@@ -747,5 +766,5 @@ build/polygrad_test_tsan: $(SRC) $(CODEC_SRC) $(TEST_SRC)
 
 # ── Full verification ──────────────────────────────────────────────────
 
-verify: test test-parity format-check analyze fuzz-smoke
+verify: test test-harness-skip-accounting test-parity format-check analyze fuzz-smoke
 	@echo "All verification checks passed."

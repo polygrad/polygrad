@@ -243,12 +243,10 @@ PolyTLSFAllocator *poly_tlsf_allocator_new(size_t size, size_t block_size, int l
   allocator->level1_count = bit_length_size(size) + 1;
   if (allocator->level1_count <= 0) allocator->level1_count = 1;
   allocator->buckets = calloc(
-      (size_t)allocator->level1_count * (size_t)allocator->level2_count,
-      sizeof(*allocator->buckets)
+      (size_t)allocator->level1_count * (size_t)allocator->level2_count, sizeof(*allocator->buckets)
   );
-  allocator->level1_entries = calloc(
-      (size_t)allocator->level1_count, sizeof(*allocator->level1_entries)
-  );
+  allocator->level1_entries =
+      calloc((size_t)allocator->level1_count, sizeof(*allocator->level1_entries));
   if (!allocator->buckets || !allocator->level1_entries ||
       (size > 0 && insert_block(allocator, 0, size, 0, false) != 0)) {
     poly_tlsf_allocator_destroy(allocator);

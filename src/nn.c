@@ -46,8 +46,7 @@ static PolyTensor *nn_tensor_result(
   for (int i = 0; i < n_inputs; i++) {
     PolyTensor *input = inputs[i];
     if (!input || !input->uop_logical || !input->uop_physical ||
-        !poly_ctx_owns_ptr(ctx, input->uop_logical) ||
-        !poly_ctx_owns_ptr(ctx, input->uop_physical))
+        !poly_ctx_owns_ptr(ctx, input->uop_logical) || !poly_ctx_owns_ptr(ctx, input->uop_physical))
       return NULL;
     if (input->device != POLY_DEVICE_AUTO) {
       if (device != POLY_DEVICE_AUTO && device != input->device) return NULL;
@@ -76,21 +75,15 @@ PolyUOp *poly_linear_apply(PolyCtx *ctx, PolyUOp *x, PolyUOp *w, PolyUOp *b) {
   return out;
 }
 
-PolyTensor *poly_tensor_linear_apply(
-    PolyCtx *ctx,
-    PolyTensor *x,
-    PolyTensor *w,
-    PolyTensor *b
-) {
+PolyTensor *poly_tensor_linear_apply(PolyCtx *ctx, PolyTensor *x, PolyTensor *w, PolyTensor *b) {
   if (!ctx || !x || !w) return NULL;
   /* Pinned nn.Linear stores (out,in), transposes it, then calls Tensor.linear;
    * Tensor.linear is dot followed by optional add
    * (nn/__init__.py:156-177; mixin/__init__.py:1335-1350). */
   PolyUOp *logical =
       poly_linear_apply(ctx, x->uop_logical, w->uop_logical, b ? b->uop_logical : NULL);
-  PolyUOp *physical = poly_linear_apply(
-      ctx, x->uop_physical, w->uop_physical, b ? b->uop_physical : NULL
-  );
+  PolyUOp *physical =
+      poly_linear_apply(ctx, x->uop_physical, w->uop_physical, b ? b->uop_physical : NULL);
   PolyTensor *inputs[3] = {x, w, b};
   return nn_tensor_result(ctx, logical, physical, inputs, b ? 3 : 2);
 }
@@ -260,20 +253,13 @@ PolyUOp *poly_rmsnorm_apply(PolyCtx *ctx, PolyUOp *x, PolyUOp *w, double eps) {
   return normed;
 }
 
-PolyTensor *poly_tensor_rmsnorm_apply(
-    PolyCtx *ctx,
-    PolyTensor *x,
-    PolyTensor *w,
-    double eps
-) {
+PolyTensor *poly_tensor_rmsnorm_apply(PolyCtx *ctx, PolyTensor *x, PolyTensor *w, double eps) {
   if (!ctx || !x) return NULL;
   /* Pinned RMSNorm normalizes x.float(), casts back, and applies the optional
    * affine weight (nn/__init__.py:281-304). The existing raw program is run
    * over both retained occurrences without correspondence. */
-  PolyUOp *logical =
-      poly_rmsnorm_apply(ctx, x->uop_logical, w ? w->uop_logical : NULL, eps);
-  PolyUOp *physical =
-      poly_rmsnorm_apply(ctx, x->uop_physical, w ? w->uop_physical : NULL, eps);
+  PolyUOp *logical = poly_rmsnorm_apply(ctx, x->uop_logical, w ? w->uop_logical : NULL, eps);
+  PolyUOp *physical = poly_rmsnorm_apply(ctx, x->uop_physical, w ? w->uop_physical : NULL, eps);
   PolyTensor *inputs[2] = {x, w};
   return nn_tensor_result(ctx, logical, physical, inputs, w ? 2 : 1);
 }
@@ -312,18 +298,12 @@ PolyUOp *poly_embedding_apply(PolyCtx *ctx, PolyUOp *tokens, PolyUOp *table) {
   return poly_gather(ctx, table, tokens);
 }
 
-PolyTensor *poly_tensor_embedding_apply(
-    PolyCtx *ctx,
-    PolyTensor *tokens,
-    PolyTensor *table
-) {
+PolyTensor *poly_tensor_embedding_apply(PolyCtx *ctx, PolyTensor *tokens, PolyTensor *table) {
   if (!ctx || !tokens || !table) return NULL;
   /* Pinned Embedding is its one-hot WHERE/SUM program over the ordered weight
    * and index Tensor.uops (nn/__init__.py:368-391). */
-  PolyUOp *logical =
-      poly_embedding_apply(ctx, tokens->uop_logical, table->uop_logical);
-  PolyUOp *physical =
-      poly_embedding_apply(ctx, tokens->uop_physical, table->uop_physical);
+  PolyUOp *logical = poly_embedding_apply(ctx, tokens->uop_logical, table->uop_logical);
+  PolyUOp *physical = poly_embedding_apply(ctx, tokens->uop_physical, table->uop_physical);
   PolyTensor *inputs[2] = {tokens, table};
   return nn_tensor_result(ctx, logical, physical, inputs, 2);
 }
@@ -480,12 +460,12 @@ PolyTensor *poly_tensor_sdpa(
 ) {
   if (!ctx || !q || !k || !v) return NULL;
   PolyUOp *logical = poly_sdpa(
-      ctx, q->uop_logical, k->uop_logical, v->uop_logical,
-      mask ? mask->uop_logical : NULL, is_causal
+      ctx, q->uop_logical, k->uop_logical, v->uop_logical, mask ? mask->uop_logical : NULL,
+      is_causal
   );
   PolyUOp *physical = poly_sdpa(
-      ctx, q->uop_physical, k->uop_physical, v->uop_physical,
-      mask ? mask->uop_physical : NULL, is_causal
+      ctx, q->uop_physical, k->uop_physical, v->uop_physical, mask ? mask->uop_physical : NULL,
+      is_causal
   );
   PolyTensor *inputs[4] = {q, k, v, mask};
   return nn_tensor_result(ctx, logical, physical, inputs, mask ? 4 : 3);

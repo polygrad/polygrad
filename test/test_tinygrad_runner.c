@@ -42,9 +42,10 @@ static void dump_linear_details(PolyCtx *ctx, int kernel, PolyUOp **lin, int n_l
   fprintf(stderr, "K%d N %d\n", kernel, n_lin);
   for (int i = 0; i < n_lin; i++) {
     PolyUOp *u = lin[i];
-    fprintf(stderr, "%03d %-8s dtype_prio=%d bits=%d lanes=%lld src=[",
-            i, poly_op_name(u->op), u->dtype.priority, u->dtype.bitsize,
-            (long long)poly_uop_max_numel(ctx, u));
+    fprintf(
+        stderr, "%03d %-8s dtype_prio=%d bits=%d lanes=%lld src=[", i, poly_op_name(u->op),
+        u->dtype.priority, u->dtype.bitsize, (long long)poly_uop_max_numel(ctx, u)
+    );
     for (int j = 0; j < u->n_src; j++) {
       if (j) fprintf(stderr, ",");
       fprintf(stderr, "%d", lin_index_of(lin, n_lin, u->src[j]));
@@ -310,20 +311,17 @@ static int run_and_report_flags(
      * tagged compiler SINK; production has no second env-selected pipeline. */
     if (!parity_optimize)
       body = poly_uop_tagged_arg(
-          ctx, POLY_OP_SINK, body->dtype, body->src, body->n_src,
-          body->arg, 1, body->tag_arg
+          ctx, POLY_OP_SINK, body->dtype, body->src, body->n_src, body->arg, 1, body->tag_arg
       );
     if (!body) return 0;
 #ifdef POLY_HAS_CUDA
     if (use_cuda) {
-      all_lin[report_kernel] =
-          poly_linearize_cuda(ctx, body, &all_n_lin[report_kernel]);
+      all_lin[report_kernel] = poly_linearize_cuda(ctx, body, &all_n_lin[report_kernel]);
     } else
 #endif
 #ifdef POLY_HAS_HIP
         if (use_hip) {
-      all_lin[report_kernel] =
-          poly_linearize_hip(ctx, body, &all_n_lin[report_kernel]);
+      all_lin[report_kernel] = poly_linearize_hip(ctx, body, &all_n_lin[report_kernel]);
     } else
 #endif
     {
@@ -345,7 +343,8 @@ static int run_and_report_flags(
   }
   if (report_kernel != n_compute) {
     fprintf(stderr, "parity: compute CALL count changed during reporting\n");
-    for (int k = 0; k < report_kernel; k++) free(all_lin[k]);
+    for (int k = 0; k < report_kernel; k++)
+      free(all_lin[k]);
     free(all_lin);
     free(all_n_lin);
     return 0;
@@ -354,11 +353,10 @@ static int run_and_report_flags(
   /* 3. Emit JSON */
   if (ok) {
     int no_sink_report = report_flags & PARITY_REPORT_NO_SINK;
-    int movement_as_copy =
-        env_enabled("POLY_PARITY_MOVEMENT_AS_COPY") &&
-        (linear_is_copy_only(report_linear) ||
-         (!graph_has_compute_ops(ctx, tensor_sink) &&
-          graph_reads_input_binding(ctx, tensor_sink, bindings, n_bindings)));
+    int movement_as_copy = env_enabled("POLY_PARITY_MOVEMENT_AS_COPY") &&
+                           (linear_is_copy_only(report_linear) ||
+                            (!graph_has_compute_ops(ctx, tensor_sink) &&
+                             graph_reads_input_binding(ctx, tensor_sink, bindings, n_bindings)));
     if (no_sink_report || movement_as_copy) {
       printf("{\"n_kernels\":0,\"kernels\":[]");
     } else {
@@ -394,8 +392,9 @@ static int run_and_report(
     float *out_data,
     int out_n
 ) {
-  return run_and_report_flags(ctx, tensor_sink, bindings, n_bindings, out_data, out_n,
-                              PARITY_REPORT_DEFAULT);
+  return run_and_report_flags(
+      ctx, tensor_sink, bindings, n_bindings, out_data, out_n, PARITY_REPORT_DEFAULT
+  );
 }
 
 /* Original 16 test cases */

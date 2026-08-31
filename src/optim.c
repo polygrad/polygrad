@@ -20,8 +20,7 @@ static PolyUOp *optim_lr_uop(PolyCtx *ctx, PolyUOp *lr) {
   PolyDType dtype;
   if (!ctx || !lr || !poly_ctx_owns_ptr(ctx, lr)) return NULL;
   dtype = lr->dtype;
-  if (!poly_dtype_is_float(dtype) || dtype.bitsize < 32)
-    return NULL;
+  if (!poly_dtype_is_float(dtype) || dtype.bitsize < 32) return NULL;
   int ndim = poly_uop_ndim(ctx, lr);
   if (ndim == 0) return lr;
   if (ndim != 1) return NULL;
@@ -53,8 +52,7 @@ static PolyUOp *optim_div(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
 
 static PolyUOp *optim_assign_uop_target(PolyCtx *ctx, PolyUOp *target_uop, PolyUOp *value) {
   if (!ctx || !target_uop || !value) return NULL;
-  if (!poly_dtype_eq(target_uop->dtype, value->dtype))
-    return NULL;
+  if (!poly_dtype_eq(target_uop->dtype, value->dtype)) return NULL;
 
   /* Build the same tinygrad effect shape as Tensor.assign without mutating the
    * target yet: AFTER(target, STORE(target, next_value)). */
@@ -78,8 +76,7 @@ int poly_optim_build_update(
     int64_t numel,
     PolyOptimUpdate *out
 ) {
-  if (!ctx || !cfg || !param || !grad || !out || numel <= 0)
-    return -1;
+  if (!ctx || !cfg || !param || !grad || !out || numel <= 0) return -1;
   memset(out, 0, sizeof(*out));
 
   PolyUOp *param_value = param;
@@ -106,13 +103,11 @@ int poly_optim_build_update(
       PolyUOp *m_value_root = m_buf;
       PolyUOp *mom = optim_float(ctx, cfg->momentum);
       if (!m_value_root || !mom) return -1;
-      PolyUOp *m_value =
-          poly_add(ctx, poly_mul(ctx, mom, m_value_root), g);
+      PolyUOp *m_value = poly_add(ctx, poly_mul(ctx, mom, m_value_root), g);
       out->m_new = optim_assign_uop_target(ctx, m_buf, m_value);
       PolyUOp *m_current = out->m_new;
       if (!m_value || !out->m_new || !m_current) return -1;
-      g = cfg->nesterov ? poly_add(ctx, g, poly_mul(ctx, mom, m_current))
-                        : m_current;
+      g = cfg->nesterov ? poly_add(ctx, g, poly_mul(ctx, mom, m_current)) : m_current;
     }
     if (!cfg->classic) {
       PolyUOp *r = optim_float(ctx, 1.0);
@@ -135,18 +130,13 @@ int poly_optim_build_update(
     PolyUOp *one_minus_b2 = optim_float(ctx, 1.0 - cfg->beta2);
     PolyUOp *bc1_scale = optim_float(ctx, cfg->beta1);
     PolyUOp *bc2_scale = optim_float(ctx, cfg->beta2);
-    if (!b1 || !b2 || !one_minus_b1 || !one_minus_b2 || !bc1_scale || !bc2_scale)
-      return -1;
+    if (!b1 || !b2 || !one_minus_b1 || !one_minus_b2 || !bc1_scale || !bc2_scale) return -1;
 
-    PolyUOp *m_value = poly_add(
-        ctx, poly_mul(ctx, b1, m_value_root),
-        poly_mul(ctx, one_minus_b1, grad_value)
-    );
+    PolyUOp *m_value =
+        poly_add(ctx, poly_mul(ctx, b1, m_value_root), poly_mul(ctx, one_minus_b1, grad_value));
     PolyUOp *g_sq = poly_mul(ctx, grad_value, grad_value);
-    PolyUOp *v_value = poly_add(
-        ctx, poly_mul(ctx, b2, v_value_root),
-        poly_mul(ctx, one_minus_b2, g_sq)
-    );
+    PolyUOp *v_value =
+        poly_add(ctx, poly_mul(ctx, b2, v_value_root), poly_mul(ctx, one_minus_b2, g_sq));
 
     PolyUOp *bc1_value = poly_mul(ctx, bc1_buf, bc1_scale);
     PolyUOp *bc2_value = poly_mul(ctx, bc2_buf, bc2_scale);
@@ -168,13 +158,11 @@ int poly_optim_build_update(
     PolyUOp *v_hat = optim_div(ctx, v_current, bc2_denom);
     PolyUOp *eps = optim_float(ctx, cfg->eps);
     PolyUOp *denom =
-        (v_hat && eps) ? poly_add(ctx, poly_alu1(ctx, POLY_OP_SQRT, v_hat), eps)
-                       : NULL;
+        (v_hat && eps) ? poly_add(ctx, poly_alu1(ctx, POLY_OP_SQRT, v_hat), eps) : NULL;
     PolyUOp *up = denom ? optim_div(ctx, m_hat, denom) : NULL;
     PolyUOp *base = poly_detach(ctx, param_value);
     PolyUOp *wd = optim_float(ctx, cfg->weight_decay);
-    up = (up && wd) ? poly_add(ctx, up, poly_mul(ctx, wd, base))
-                    : NULL;
+    up = (up && wd) ? poly_add(ctx, up, poly_mul(ctx, wd, base)) : NULL;
     /* Current LAMB returns `self.lr * r * up` and leaves `[1]`/parameter
      * broadcasting to UOp shape inference (nn/optim.py:168-178). */
     PolyUOp *r = optim_float(ctx, 1.0);
@@ -209,8 +197,10 @@ int poly_optim_build_step(
   bool adam = (cfg->kind == POLY_OPTIM_ADAM || cfg->kind == POLY_OPTIM_ADAMW);
   bool sgd_momentum = (cfg->kind == POLY_OPTIM_SGD && cfg->momentum > 0.0f);
   int needed = n_params;
-  if (adam) needed += 2 * n_params + 2;
-  else if (sgd_momentum) needed += n_params;
+  if (adam)
+    needed += 2 * n_params + 2;
+  else if (sgd_momentum)
+    needed += n_params;
   if (!out_tensors || out_cap < needed) return needed;
 
   if ((adam || sgd_momentum) && !m_tensors) return -1;
@@ -223,8 +213,7 @@ int poly_optim_build_step(
   if (adam && (!bc1_logical || !bc2_logical || !bc1_physical || !bc2_physical ||
                !poly_ctx_owns_ptr(ctx, bc1_logical) || !poly_ctx_owns_ptr(ctx, bc2_logical) ||
                !poly_ctx_owns_ptr(ctx, bc1_physical) || !poly_ctx_owns_ptr(ctx, bc2_physical) ||
-               optim_uop_numel(ctx, bc1_physical) != 1 ||
-               optim_uop_numel(ctx, bc2_physical) != 1 ||
+               optim_uop_numel(ctx, bc1_physical) != 1 || optim_uop_numel(ctx, bc2_physical) != 1 ||
                poly_tensor_device(bc1_tensor) != poly_tensor_device(lr) ||
                poly_tensor_device(bc2_tensor) != poly_tensor_device(lr)))
     return -1;
@@ -243,8 +232,7 @@ int poly_optim_build_step(
       return -1;
     int64_t numel = optim_uop_numel(ctx, param_physical);
     if (numel <= 0 || optim_uop_numel(ctx, grad_physical) != numel ||
-        optim_uop_numel(ctx, param_logical) != numel ||
-        optim_uop_numel(ctx, grad_logical) != numel)
+        optim_uop_numel(ctx, param_logical) != numel || optim_uop_numel(ctx, grad_logical) != numel)
       return -1;
 
     if (adam || sgd_momentum) {
@@ -303,21 +291,20 @@ int poly_optim_build_step(
     if (poly_optim_build_update(
             ctx, cfg, lr_logical, param_logical, grad_logical,
             (adam || sgd_momentum) ? poly_tensor_uop_logical(m_tensors[i]) : NULL,
-            adam ? poly_tensor_uop_logical(v_tensors[i]) : NULL, bc1_logical, bc2_logical,
-            numel, &logical_update
+            adam ? poly_tensor_uop_logical(v_tensors[i]) : NULL, bc1_logical, bc2_logical, numel,
+            &logical_update
         ) != 0 ||
         poly_optim_build_update(
             ctx, cfg, lr_physical, param_physical, grad_physical,
             (adam || sgd_momentum) ? poly_tensor_uop_physical(m_tensors[i]) : NULL,
-            adam ? poly_tensor_uop_physical(v_tensors[i]) : NULL, bc1_physical, bc2_physical,
-            numel, &physical_update
+            adam ? poly_tensor_uop_physical(v_tensors[i]) : NULL, bc1_physical, bc2_physical, numel,
+            &physical_update
         ) != 0)
       goto done;
 
     PolyUOp *param_new_logical = logical_update.param_new;
     PolyUOp *param_new_physical = physical_update.param_new;
-    PolyUOp *param_effect_logical =
-        optim_assign_uop_target(ctx, param_logical, param_new_logical);
+    PolyUOp *param_effect_logical = optim_assign_uop_target(ctx, param_logical, param_new_logical);
     PolyUOp *param_effect_physical =
         optim_assign_uop_target(ctx, param_physical, param_new_physical);
     if (!param_new_logical || !param_new_physical || !param_effect_logical ||

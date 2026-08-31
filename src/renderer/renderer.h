@@ -43,8 +43,7 @@ static inline bool poly_renderer_supports_dtype(PolyRendererCaps caps, PolyDType
   if (poly_dtype_eq(dtype, POLY_FP8E5M2)) return caps.supports_fp8e5m2;
   if (poly_dtype_eq(dtype, POLY_FP8E4M3FNUZ)) return caps.supports_fp8e4m3fnuz;
   if (poly_dtype_eq(dtype, POLY_FP8E5M2FNUZ)) return caps.supports_fp8e5m2fnuz;
-  if (poly_dtype_eq(dtype, POLY_INT64) || poly_dtype_eq(dtype, POLY_UINT64))
-    return caps.has_int64;
+  if (poly_dtype_eq(dtype, POLY_INT64) || poly_dtype_eq(dtype, POLY_UINT64)) return caps.has_int64;
   return true;
 }
 

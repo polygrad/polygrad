@@ -25,12 +25,7 @@ void poly_nn_seed(uint32_t seed);
 /* Linear: x @ w.T + b */
 
 PolyUOp *poly_linear_apply(PolyCtx *ctx, PolyUOp *x, PolyUOp *w, PolyUOp *b);
-PolyTensor *poly_tensor_linear_apply(
-    PolyCtx *ctx,
-    PolyTensor *x,
-    PolyTensor *w,
-    PolyTensor *b
-);
+PolyTensor *poly_tensor_linear_apply(PolyCtx *ctx, PolyTensor *x, PolyTensor *w, PolyTensor *b);
 PolyUOp *poly_linear(
     PolyCtx *ctx,
     const char *prefix,
@@ -79,12 +74,7 @@ PolyTensor *poly_instance_layernorm(
 /* RMSNorm: x * rsqrt(mean(x^2) + eps) * w */
 
 PolyUOp *poly_rmsnorm_apply(PolyCtx *ctx, PolyUOp *x, PolyUOp *w, double eps);
-PolyTensor *poly_tensor_rmsnorm_apply(
-    PolyCtx *ctx,
-    PolyTensor *x,
-    PolyTensor *w,
-    double eps
-);
+PolyTensor *poly_tensor_rmsnorm_apply(PolyCtx *ctx, PolyTensor *x, PolyTensor *w, double eps);
 PolyUOp *poly_rmsnorm(PolyCtx *ctx, const char *prefix, PolyUOp *x, int dim, double eps)
     POLY_DEPRECATED("use poly_instance_rmsnorm or poly_rmsnorm_apply with explicit params");
 PolyTensor *poly_instance_rmsnorm(
@@ -98,11 +88,7 @@ PolyTensor *poly_instance_rmsnorm(
 /* Embedding: gather(table, tokens) */
 
 PolyUOp *poly_embedding_apply(PolyCtx *ctx, PolyUOp *tokens, PolyUOp *table);
-PolyTensor *poly_tensor_embedding_apply(
-    PolyCtx *ctx,
-    PolyTensor *tokens,
-    PolyTensor *table
-);
+PolyTensor *poly_tensor_embedding_apply(PolyCtx *ctx, PolyTensor *tokens, PolyTensor *table);
 PolyUOp *poly_embedding(
     PolyCtx *ctx,
     const char *prefix,

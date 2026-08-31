@@ -32,19 +32,17 @@
 #include <stdio.h>
 #include <math.h>
 
-
-
 /* GPT-2 Config */
 
 GPT2Config poly_gpt2_config_default(void) {
   return (GPT2Config){
-    .vocab_size  = 50257,
-    .n_embd      = 768,
-    .n_head      = 12,
-    .n_layer     = 12,
-    .max_seq_len = 1024,
-    .batch_size  = 1,
-    .norm_eps    = 1e-5f,
+      .vocab_size = 50257,
+      .n_embd = 768,
+      .n_head = 12,
+      .n_layer = 12,
+      .max_seq_len = 1024,
+      .batch_size = 1,
+      .norm_eps = 1e-5f,
   };
 }
 
@@ -189,8 +187,7 @@ PolyInstance *poly_gpt2(const GPT2Config *cfg, PolyDevice device) {
   PolyTensor *logits = poly_tensor_linear_apply(ctx, h, wte_tensor, NULL);
   if (!logits) goto fail_pre_build;
 
-  if (poly_instance_output(inst, "output", logits) != POLY_STATUS_OK)
-    goto fail_pre_build;
+  if (poly_instance_output(inst, "output", logits) != POLY_STATUS_OK) goto fail_pre_build;
   const char *forward_inputs[] = {"x", "positions"};
   const char *forward_outputs[] = {"output"};
   if (poly_instance_entrypoint(inst, "forward", forward_inputs, 2, forward_outputs, 1, NULL) !=
@@ -232,13 +229,13 @@ PolyInstance *poly_gpt2_from_json(const char *json, int len, PolyDevice device) 
 
   GPT2Config cfg = poly_gpt2_config_default();
   cJSON *v;
-  if ((v = cJSON_GetObjectItem(root, "vocab_size")))          cfg.vocab_size  = v->valueint;
-  if ((v = cJSON_GetObjectItem(root, "n_embd")))              cfg.n_embd      = v->valueint;
-  if ((v = cJSON_GetObjectItem(root, "n_head")))              cfg.n_head      = v->valueint;
-  if ((v = cJSON_GetObjectItem(root, "n_layer")))             cfg.n_layer     = v->valueint;
-  if ((v = cJSON_GetObjectItem(root, "n_positions")))         cfg.max_seq_len = v->valueint;
-  if ((v = cJSON_GetObjectItem(root, "batch_size")))          cfg.batch_size  = v->valueint;
-  if ((v = cJSON_GetObjectItem(root, "layer_norm_epsilon")))  cfg.norm_eps    = (float)v->valuedouble;
+  if ((v = cJSON_GetObjectItem(root, "vocab_size"))) cfg.vocab_size = v->valueint;
+  if ((v = cJSON_GetObjectItem(root, "n_embd"))) cfg.n_embd = v->valueint;
+  if ((v = cJSON_GetObjectItem(root, "n_head"))) cfg.n_head = v->valueint;
+  if ((v = cJSON_GetObjectItem(root, "n_layer"))) cfg.n_layer = v->valueint;
+  if ((v = cJSON_GetObjectItem(root, "n_positions"))) cfg.max_seq_len = v->valueint;
+  if ((v = cJSON_GetObjectItem(root, "batch_size"))) cfg.batch_size = v->valueint;
+  if ((v = cJSON_GetObjectItem(root, "layer_norm_epsilon"))) cfg.norm_eps = (float)v->valuedouble;
 
   PolyInstance *inst = poly_gpt2(&cfg, device);
   cJSON_Delete(root);
@@ -259,21 +256,15 @@ static const char *gpt2_strip_prefix(const char *name, const char *prefix) {
 }
 
 static int gpt2_should_skip(const char *name) {
-  if (strstr(name, "attn.bias") != NULL &&
-      strstr(name, "c_attn") == NULL &&
+  if (strstr(name, "attn.bias") != NULL && strstr(name, "c_attn") == NULL &&
       strstr(name, "c_proj") == NULL)
     return 1;
-  if (strstr(name, "attn.masked_bias") != NULL)
-    return 1;
-  if (strcmp(name, "lm_head.weight") == 0)
-    return 1;
+  if (strstr(name, "attn.masked_bias") != NULL) return 1;
+  if (strcmp(name, "lm_head.weight") == 0) return 1;
   return 0;
 }
 
-static int gpt2_needs_transpose(
-    const char *name,
-    int src_ndim, int dst_ndim)
-{
+static int gpt2_needs_transpose(const char *name, int src_ndim, int dst_ndim) {
   /*
    * HF GPT-2 uses Conv1D layers which store weights as (in, out).
    * Polygrad's linear layer stores (out, in) and computes x @ w.T.
@@ -290,22 +281,19 @@ static int gpt2_needs_transpose(
 
 PolyInstance *poly_gpt2_from_hf_decoded(
     const PolyHfDecoded *hf,
-    int max_batch, int max_seq_len, PolyDevice device)
-{
+    int max_batch,
+    int max_seq_len,
+    PolyDevice device
+) {
   if (!hf || !hf->config) return NULL;
 
   GPT2Config cfg = poly_gpt2_config_default();
   cJSON *v;
-  if ((v = cJSON_GetObjectItem(hf->config, "vocab_size")))
-    cfg.vocab_size = v->valueint;
-  if ((v = cJSON_GetObjectItem(hf->config, "n_embd")))
-    cfg.n_embd = v->valueint;
-  if ((v = cJSON_GetObjectItem(hf->config, "n_head")))
-    cfg.n_head = v->valueint;
-  if ((v = cJSON_GetObjectItem(hf->config, "n_layer")))
-    cfg.n_layer = v->valueint;
-  if ((v = cJSON_GetObjectItem(hf->config, "n_positions")))
-    cfg.max_seq_len = v->valueint;
+  if ((v = cJSON_GetObjectItem(hf->config, "vocab_size"))) cfg.vocab_size = v->valueint;
+  if ((v = cJSON_GetObjectItem(hf->config, "n_embd"))) cfg.n_embd = v->valueint;
+  if ((v = cJSON_GetObjectItem(hf->config, "n_head"))) cfg.n_head = v->valueint;
+  if ((v = cJSON_GetObjectItem(hf->config, "n_layer"))) cfg.n_layer = v->valueint;
+  if ((v = cJSON_GetObjectItem(hf->config, "n_positions"))) cfg.max_seq_len = v->valueint;
   if ((v = cJSON_GetObjectItem(hf->config, "layer_norm_epsilon")))
     cfg.norm_eps = (float)v->valuedouble;
   if (max_batch > 0) cfg.batch_size = max_batch;
@@ -333,13 +321,11 @@ PolyInstance *poly_gpt2_from_hf_decoded(
 
     int64_t dst_shape[8];
     int dst_ndim = poly_bind_index_dst_shape(idx, name, dst_shape, 8);
-    int transpose = (dst_ndim > 0)
-        ? gpt2_needs_transpose(name, t->ndim, dst_ndim)
-        : 0;
+    int transpose = (dst_ndim > 0) ? gpt2_needs_transpose(name, t->ndim, dst_ndim) : 0;
 
-    int rc = poly_import_copy_named_tensor(
-        idx, name, f32, t->shape, t->ndim, transpose);
-    if (rc == 1) loaded++;
+    int rc = poly_import_copy_named_tensor(idx, name, f32, t->shape, t->ndim, transpose);
+    if (rc == 1)
+      loaded++;
     else if (rc == 0)
       fprintf(stderr, "poly_gpt2_from_hf: no buffer for '%s'\n", name);
 
@@ -347,21 +333,24 @@ PolyInstance *poly_gpt2_from_hf_decoded(
   }
 
   poly_bind_index_destroy(idx);
-  fprintf(stderr, "poly_gpt2_from_hf: loaded %d parameters, skipped %d\n",
-          loaded, skipped);
+  fprintf(stderr, "poly_gpt2_from_hf: loaded %d parameters, skipped %d\n", loaded, skipped);
   return inst;
 }
 
 PolyInstance *poly_gpt2_from_hf(
-    const char *config_json, int config_len,
-    const uint8_t **weight_files, const int64_t *weight_lens,
+    const char *config_json,
+    int config_len,
+    const uint8_t **weight_files,
+    const int64_t *weight_lens,
     int n_weight_files,
-    int max_batch, int max_seq_len, PolyDevice device)
-{
+    int max_batch,
+    int max_seq_len,
+    PolyDevice device
+) {
   PolyHfDecoded *hf = NULL;
-  if (poly_hf_decode(config_json, config_len,
-                     weight_files, weight_lens, n_weight_files,
-                     &hf) != 0 || !hf)
+  if (poly_hf_decode(config_json, config_len, weight_files, weight_lens, n_weight_files, &hf) !=
+          0 ||
+      !hf)
     return NULL;
   PolyInstance *inst = poly_gpt2_from_hf_decoded(hf, max_batch, max_seq_len, device);
   poly_hf_decoded_free(hf);
@@ -371,12 +360,12 @@ PolyInstance *poly_gpt2_from_hf(
 /* Registry adapter */
 PolyInstance *poly_gpt2_from_hf_decoded_generic(
     const PolyHfDecoded *hf,
-    const PolyGenericImportOpts *opts)
-{
-  return poly_gpt2_from_hf_decoded(hf,
-      opts ? opts->max_batch : 0,
-      opts ? opts->max_seq_len : 0,
-      opts ? opts->device : POLY_DEVICE_AUTO);
+    const PolyGenericImportOpts *opts
+) {
+  return poly_gpt2_from_hf_decoded(
+      hf, opts ? opts->max_batch : 0, opts ? opts->max_seq_len : 0,
+      opts ? opts->device : POLY_DEVICE_AUTO
+  );
 }
 
 /* GGUF import (model-specific) */
@@ -388,72 +377,72 @@ PolyInstance *poly_gpt2_from_hf_decoded_generic(
  * GGUF uses "blk.N.attn_qkv.weight", polygrad uses "h.N.attn.c_attn.weight".
  */
 static const char *gpt2_gguf_remap[][2] = {
-    { "blk.",                "h." },
-    { ".attn_qkv.bias",     ".attn.c_attn.bias" },
-    { ".attn_qkv.weight",   ".attn.c_attn.weight" },
-    { ".ffn_norm.bias",      ".ln_2.bias" },
-    { ".ffn_norm.weight",    ".ln_2.weight" },
-    { ".attn_norm.bias",     ".ln_1.bias" },
-    { ".attn_norm.weight",   ".ln_1.weight" },
-    { ".attn_output.bias",   ".attn.c_proj.bias" },
-    { ".attn_output.weight", ".attn.c_proj.weight" },
-    { ".ffn_up.bias",        ".mlp.c_fc.bias" },
-    { ".ffn_up.weight",      ".mlp.c_fc.weight" },
-    { ".ffn_down.bias",      ".mlp.c_proj.bias" },
-    { ".ffn_down.weight",    ".mlp.c_proj.weight" },
-    { "token_embd.weight",   "wte.weight" },
-    { "output.weight",       "lm_head.weight" },
-    { "output_norm.bias",    "ln_f.bias" },
-    { "output_norm.weight",  "ln_f.weight" },
-    { "position_embd.weight","wpe.weight" },
-    { NULL, NULL }
-};
+    {"blk.", "h."},
+    {".attn_qkv.bias", ".attn.c_attn.bias"},
+    {".attn_qkv.weight", ".attn.c_attn.weight"},
+    {".ffn_norm.bias", ".ln_2.bias"},
+    {".ffn_norm.weight", ".ln_2.weight"},
+    {".attn_norm.bias", ".ln_1.bias"},
+    {".attn_norm.weight", ".ln_1.weight"},
+    {".attn_output.bias", ".attn.c_proj.bias"},
+    {".attn_output.weight", ".attn.c_proj.weight"},
+    {".ffn_up.bias", ".mlp.c_fc.bias"},
+    {".ffn_up.weight", ".mlp.c_fc.weight"},
+    {".ffn_down.bias", ".mlp.c_proj.bias"},
+    {".ffn_down.weight", ".mlp.c_proj.weight"},
+    {"token_embd.weight", "wte.weight"},
+    {"output.weight", "lm_head.weight"},
+    {"output_norm.bias", "ln_f.bias"},
+    {"output_norm.weight", "ln_f.weight"},
+    {"position_embd.weight", "wpe.weight"},
+    {NULL, NULL}};
 
 static const char *gpt2_gguf_map_name(const char *name, char *buf, int buf_size) {
-    /* Apply all replacements in order */
-    strncpy(buf, name, (size_t)(buf_size - 1));
-    buf[buf_size - 1] = '\0';
+  /* Apply all replacements in order */
+  strncpy(buf, name, (size_t)(buf_size - 1));
+  buf[buf_size - 1] = '\0';
 
-    for (int i = 0; gpt2_gguf_remap[i][0]; i++) {
-        const char *old_s = gpt2_gguf_remap[i][0];
-        const char *new_s = gpt2_gguf_remap[i][1];
-        char *pos = strstr(buf, old_s);
-        if (!pos) continue;
-        size_t old_len = strlen(old_s);
-        size_t new_len = strlen(new_s);
-        size_t tail_len = strlen(pos + old_len);
-        if ((pos - buf) + new_len + tail_len >= (size_t)(buf_size - 1)) continue;
-        memmove(pos + new_len, pos + old_len, tail_len + 1);
-        memcpy(pos, new_s, new_len);
-    }
+  for (int i = 0; gpt2_gguf_remap[i][0]; i++) {
+    const char *old_s = gpt2_gguf_remap[i][0];
+    const char *new_s = gpt2_gguf_remap[i][1];
+    char *pos = strstr(buf, old_s);
+    if (!pos) continue;
+    size_t old_len = strlen(old_s);
+    size_t new_len = strlen(new_s);
+    size_t tail_len = strlen(pos + old_len);
+    if ((pos - buf) + new_len + tail_len >= (size_t)(buf_size - 1)) continue;
+    memmove(pos + new_len, pos + old_len, tail_len + 1);
+    memcpy(pos, new_s, new_len);
+  }
 
-    /* Skip lm_head.weight (weight tying with wte) */
-    if (strcmp(buf, "lm_head.weight") == 0) return NULL;
+  /* Skip lm_head.weight (weight tying with wte) */
+  if (strcmp(buf, "lm_head.weight") == 0) return NULL;
 
-    return buf;
+  return buf;
 }
 
 PolyInstance *poly_gpt2_from_gguf_decoded(
     const PolyGgufDecoded *gguf,
-    int max_batch, int max_seq_len, PolyDevice device)
-{
+    int max_batch,
+    int max_seq_len,
+    PolyDevice device
+) {
   if (!gguf) return NULL;
 
   /* Extract config from GGUF KV metadata */
   GPT2Config cfg = poly_gpt2_config_default();
-  cfg.n_embd     = poly_gguf_kv_int(gguf, "gpt2.embedding_length", cfg.n_embd);
-  cfg.n_head     = poly_gguf_kv_int(gguf, "gpt2.attention.head_count", cfg.n_head);
-  cfg.n_layer    = poly_gguf_kv_int(gguf, "gpt2.block_count", cfg.n_layer);
+  cfg.n_embd = poly_gguf_kv_int(gguf, "gpt2.embedding_length", cfg.n_embd);
+  cfg.n_head = poly_gguf_kv_int(gguf, "gpt2.attention.head_count", cfg.n_head);
+  cfg.n_layer = poly_gguf_kv_int(gguf, "gpt2.block_count", cfg.n_layer);
   cfg.max_seq_len = poly_gguf_kv_int(gguf, "gpt2.context_length", cfg.max_seq_len);
-  cfg.norm_eps   = (float)poly_gguf_kv_float(gguf, "gpt2.attention.layer_norm_epsilon",
-                                              (double)cfg.norm_eps);
+  cfg.norm_eps =
+      (float)poly_gguf_kv_float(gguf, "gpt2.attention.layer_norm_epsilon", (double)cfg.norm_eps);
   /* vocab_size from token_embd.weight shape (not always in KV) */
   for (int i = 0; i < gguf->n_tensors; i++) {
-      if (strcmp(gguf->tensors[i].name, "token_embd.weight") == 0 &&
-          gguf->tensors[i].ndim == 2) {
-          cfg.vocab_size = (int)gguf->tensors[i].shape[0];
-          break;
-      }
+    if (strcmp(gguf->tensors[i].name, "token_embd.weight") == 0 && gguf->tensors[i].ndim == 2) {
+      cfg.vocab_size = (int)gguf->tensors[i].shape[0];
+      break;
+    }
   }
 
   if (max_batch > 0) cfg.batch_size = max_batch;
@@ -471,14 +460,16 @@ PolyInstance *poly_gpt2_from_gguf_decoded(
 
     /* Remap GGUF name to polygrad internal name */
     const char *name = gpt2_gguf_map_name(t->name, name_buf, sizeof(name_buf));
-    if (!name) { skipped++; continue; }
+    if (!name) {
+      skipped++;
+      continue;
+    }
 
     /* Convert to F32 (dequantize if needed) */
     float *f32 = poly_decoded_tensor_to_f32(t);
     if (!f32) {
-        fprintf(stderr, "poly_gpt2_from_gguf: failed to convert '%s' (type=%d)\n",
-                t->name, t->dtype);
-        continue;
+      fprintf(stderr, "poly_gpt2_from_gguf: failed to convert '%s' (type=%d)\n", t->name, t->dtype);
+      continue;
     }
 
     /*
@@ -486,29 +477,29 @@ PolyInstance *poly_gpt2_from_gguf_decoded(
      * (not Conv1D). No transpose needed -- GGUF stores (out, in)
      * which matches polygrad's linear layer convention.
      */
-    int rc = poly_import_copy_named_tensor(
-        idx, name, f32, t->shape, t->ndim, 0);
-    if (rc == 1) loaded++;
+    int rc = poly_import_copy_named_tensor(idx, name, f32, t->shape, t->ndim, 0);
+    if (rc == 1)
+      loaded++;
     else if (rc == 0)
-        fprintf(stderr, "poly_gpt2_from_gguf: no buffer for '%s' (was '%s')\n",
-                name, t->name);
+      fprintf(stderr, "poly_gpt2_from_gguf: no buffer for '%s' (was '%s')\n", name, t->name);
 
     free(f32);
   }
 
   poly_bind_index_destroy(idx);
-  fprintf(stderr, "poly_gpt2_from_gguf: loaded %d parameters, skipped %d\n",
-          loaded, skipped);
+  fprintf(stderr, "poly_gpt2_from_gguf: loaded %d parameters, skipped %d\n", loaded, skipped);
   return inst;
 }
 
 PolyInstance *poly_gpt2_from_gguf(
-    const uint8_t *data, int64_t len,
-    int max_batch, int max_seq_len, PolyDevice device)
-{
+    const uint8_t *data,
+    int64_t len,
+    int max_batch,
+    int max_seq_len,
+    PolyDevice device
+) {
   PolyGgufDecoded *gguf = NULL;
-  if (poly_gguf_decode(data, len, &gguf) != 0 || !gguf)
-    return NULL;
+  if (poly_gguf_decode(data, len, &gguf) != 0 || !gguf) return NULL;
   PolyInstance *inst = poly_gpt2_from_gguf_decoded(gguf, max_batch, max_seq_len, device);
   poly_gguf_decoded_free(gguf);
   return inst;
@@ -517,10 +508,10 @@ PolyInstance *poly_gpt2_from_gguf(
 /* GGUF registry adapter */
 PolyInstance *poly_gpt2_from_gguf_decoded_generic(
     const PolyGgufDecoded *gguf,
-    const PolyGenericImportOpts *opts)
-{
-  return poly_gpt2_from_gguf_decoded(gguf,
-      opts ? opts->max_batch : 0,
-      opts ? opts->max_seq_len : 0,
-      opts ? opts->device : POLY_DEVICE_AUTO);
+    const PolyGenericImportOpts *opts
+) {
+  return poly_gpt2_from_gguf_decoded(
+      gguf, opts ? opts->max_batch : 0, opts ? opts->max_seq_len : 0,
+      opts ? opts->device : POLY_DEVICE_AUTO
+  );
 }

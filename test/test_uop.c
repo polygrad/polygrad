@@ -77,9 +77,8 @@ TEST(uop, placeholder_preserves_current_negative_local_slot) {
    * negative LOCAL slots used by X86 scratch placeholders. */
   PolyCtx *ctx = poly_ctx_new();
   int64_t shape[] = {3};
-  PolyUOp *buf = poly_uop_placeholder(
-      ctx, shape, 1, POLY_FLOAT32, -1, POLY_ADDR_LOCAL, NULL, false
-  );
+  PolyUOp *buf =
+      poly_uop_placeholder(ctx, shape, 1, POLY_FLOAT32, -1, POLY_ADDR_LOCAL, NULL, false);
 
   ASSERT_NOT_NULL(buf);
   ASSERT_INT_EQ(buf->op, POLY_OP_BUFFER);
@@ -146,10 +145,8 @@ TEST(uop, image_index_dtype_is_inferred_from_param_shape) {
   ASSERT_NOT_NULL(ctx);
   PolyUOp *shape_src[3] = {poly_const_int(ctx, 2), poly_const_int(ctx, 3), poly_const_int(ctx, 4)};
   PolyUOp *shape = poly_shape_to_shape_arg(ctx, shape_src, 3);
-  PolyParamArg image_arg = {
-      .slot = 0, .dtype = POLY_FLOAT16, .addrspace = POLY_ADDR_GLOBAL};
-  PolyUOp *image = poly_uop1(
-      ctx, POLY_OP_PARAM, POLY_FLOAT16, shape, poly_arg_param(&image_arg));
+  PolyParamArg image_arg = {.slot = 0, .dtype = POLY_FLOAT16, .addrspace = POLY_ADDR_GLOBAL};
+  PolyUOp *image = poly_uop1(ctx, POLY_OP_PARAM, POLY_FLOAT16, shape, poly_arg_param(&image_arg));
   PolyUOp *coord[2] = {poly_const_int(ctx, 1), poly_const_int(ctx, 2)};
   PolyUOp *index = poly_uop_index(ctx, image, coord, 2);
   PolyUOp *load = poly_uop_load(ctx, index);
@@ -203,21 +200,15 @@ TEST(uop, mop_cleanup_matches_current_tinygrad_topology) {
       poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(3)),
   };
   PolyUOp *shape23 = poly_shape_to_shape_arg(ctx, shape23_src, 2);
-  PolyUOp *base = poly_uop2(
-      ctx, POLY_OP_RESHAPE, POLY_FLOAT32, stack6, shape23, poly_arg_none()
-  );
+  PolyUOp *base = poly_uop2(ctx, POLY_OP_RESHAPE, POLY_FLOAT32, stack6, shape23, poly_arg_none());
   ASSERT_NOT_NULL(base);
 
-  PolyUOp *same_shape = poly_uop2(
-      ctx, POLY_OP_RESHAPE, POLY_FLOAT32, base, shape23, poly_arg_none()
-  );
+  PolyUOp *same_shape =
+      poly_uop2(ctx, POLY_OP_RESHAPE, POLY_FLOAT32, base, shape23, poly_arg_none());
   ASSERT_PTR_EQ(poly_graph_rewrite(ctx, same_shape, poly_mop_cleanup()), base);
 
-  PolyUOp *shape6 =
-      poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(6));
-  PolyUOp *nested = poly_uop2(
-      ctx, POLY_OP_RESHAPE, POLY_FLOAT32, base, shape6, poly_arg_none()
-  );
+  PolyUOp *shape6 = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(6));
+  PolyUOp *nested = poly_uop2(ctx, POLY_OP_RESHAPE, POLY_FLOAT32, base, shape6, poly_arg_none());
   ASSERT_PTR_EQ(poly_graph_rewrite(ctx, nested, poly_mop_cleanup()), stack6);
 
   int64_t identity_vals[] = {0, 1};
@@ -225,8 +216,7 @@ TEST(uop, mop_cleanup_matches_current_tinygrad_topology) {
       .kind = POLY_ARG_INT_TUPLE,
       .int_tuple = {.vals = identity_vals, .n = 2},
   };
-  PolyUOp *noop_permute =
-      poly_uop1(ctx, POLY_OP_PERMUTE, POLY_FLOAT32, base, identity);
+  PolyUOp *noop_permute = poly_uop1(ctx, POLY_OP_PERMUTE, POLY_FLOAT32, base, identity);
   ASSERT_PTR_EQ(poly_graph_rewrite(ctx, noop_permute, poly_mop_cleanup()), base);
 
   int64_t swap_vals[] = {1, 0};
@@ -243,18 +233,14 @@ TEST(uop, mop_cleanup_matches_current_tinygrad_topology) {
   PolyUOp *indexed[3];
   for (int i = 0; i < 3; i++) {
     PolyUOp *lane = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(i));
-    indexed[i] = poly_uop2(
-        ctx, POLY_OP_INDEX, POLY_FLOAT32, stack3, lane, poly_arg_none()
-    );
+    indexed[i] = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, stack3, lane, poly_arg_none());
   }
   PolyUOp *restacked = poly_uop_stack(ctx, indexed, 3);
   ASSERT_PTR_EQ(poly_graph_rewrite(ctx, restacked, poly_mop_cleanup()), stack3);
   ASSERT_PTR_EQ(poly_graph_rewrite(ctx, restacked, poly_symbolic_simple()), stack3);
 
   PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(1));
-  PolyUOp *stack_index = poly_uop2(
-      ctx, POLY_OP_INDEX, POLY_FLOAT32, stack3, one, poly_arg_none()
-  );
+  PolyUOp *stack_index = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, stack3, one, poly_arg_none());
   ASSERT_PTR_EQ(poly_graph_rewrite(ctx, stack_index, poly_mop_cleanup()), lanes[1]);
 
   PolyUOp *ptr = poly_test_uop_param(ctx, POLY_FLOAT32, -1, 0, POLY_ADDR_GLOBAL);
@@ -271,8 +257,7 @@ TEST(uop, mop_cleanup_matches_current_tinygrad_topology) {
 
   PolyUOp *coord_src[] = {zero, one};
   PolyUOp *coord = poly_uop_stack(ctx, coord_src, 2);
-  PolyUOp *shaped_inner =
-      poly_uop2(ctx, POLY_OP_INDEX, ptr->dtype, ptr, coord, poly_arg_none());
+  PolyUOp *shaped_inner = poly_uop2(ctx, POLY_OP_INDEX, ptr->dtype, ptr, coord, poly_arg_none());
   PolyUOp *shaped_outer =
       poly_uop2(ctx, POLY_OP_INDEX, ptr->dtype, shaped_inner, one, poly_arg_none());
   PolyUOp *shaped = poly_graph_rewrite(ctx, shaped_outer, poly_mop_cleanup());
@@ -292,8 +277,8 @@ TEST(uop, contiguous_view_offset_matches_current_tinygrad) {
 
   int64_t square_shape[2] = {4, 4};
   PolyUOp *square = poly_reshape(
-      ctx, poly_test_buffer_on_device(ctx, POLY_FLOAT32, 16, POLY_DEVICE_CPU),
-      square_shape, 2);
+      ctx, poly_test_buffer_on_device(ctx, POLY_FLOAT32, 16, POLY_DEVICE_CPU), square_shape, 2
+  );
   ASSERT_NOT_NULL(square);
 
   int64_t reshape_shape[2] = {2, 8};
@@ -323,12 +308,11 @@ TEST(uop, contiguous_view_offset_matches_current_tinygrad) {
 
   int64_t degenerate_shape[2] = {1, 3};
   PolyUOp *degenerate = poly_reshape(
-      ctx, poly_test_buffer_on_device(ctx, POLY_FLOAT32, 3, POLY_DEVICE_CPU),
-      degenerate_shape, 2);
+      ctx, poly_test_buffer_on_device(ctx, POLY_FLOAT32, 3, POLY_DEVICE_CPU), degenerate_shape, 2
+  );
   PolyUOp *degenerate_permute = poly_permute(ctx, degenerate, transpose, 2);
   ASSERT_NOT_NULL(degenerate_permute);
-  ASSERT_INT_EQ(
-      poly_uop_contiguous_view_offset(ctx, degenerate_permute, &offset), 0);
+  ASSERT_INT_EQ(poly_uop_contiguous_view_offset(ctx, degenerate_permute, &offset), 0);
   ASSERT_INT_EQ(offset, 0);
 
   poly_ctx_destroy(ctx);
@@ -358,9 +342,7 @@ TEST(uop, cast_and_bitcast_store_exact_dtype_arg) {
   ASSERT_INT_EQ(bitcast->arg.kind, POLY_ARG_DTYPE);
   ASSERT_TRUE(poly_dtype_eq(bitcast->arg.dtype, POLY_UINT8));
 
-  ASSERT_TRUE(poly_uop1(
-      ctx, POLY_OP_CAST, POLY_WEAKINT, src, poly_arg_dtype(POLY_INT32)
-  ) == NULL);
+  ASSERT_TRUE(poly_uop1(ctx, POLY_OP_CAST, POLY_WEAKINT, src, poly_arg_dtype(POLY_INT32)) == NULL);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -511,9 +493,8 @@ TEST(uop, device_constructor_preserves_ordered_tuple_identity) {
    * executable and schedule/multi lowers it to supported scalar occurrences. */
   ASSERT_TRUE(poly_uop_explicit_devices_supported(ctx, tuple_a));
 
-  PolyUOp *buffer = poly_uop_new_buffer(
-      ctx, poly_device_uop_from_name(ctx, "CPU"), 8, POLY_INT32, 1
-  );
+  PolyUOp *buffer =
+      poly_uop_new_buffer(ctx, poly_device_uop_from_name(ctx, "CPU"), 8, POLY_INT32, 1);
   PolyUOp *copy = poly_copy_to_device_uop(ctx, buffer, tuple_a);
   ASSERT_PTR_EQ(poly_uop_device_uop_cached(ctx, copy, NULL), tuple_a);
   ASSERT_TRUE(poly_uop_explicit_devices_supported(ctx, copy));
@@ -752,14 +733,10 @@ TEST(uop, call_info_is_value_metadata) {
   PolyCallInfo same = {.name = "forward"};
   PolyCallInfo other = {.name = "other"};
   PolyCallInfo precompiled = {.name = "forward", .precompile = true};
-  PolyUOp *a = poly_uop1(
-      ctx, POLY_OP_FUNCTION, POLY_VOID, body, poly_arg_call_info(&first));
-  PolyUOp *b = poly_uop1(
-      ctx, POLY_OP_FUNCTION, POLY_VOID, body, poly_arg_call_info(&same));
-  PolyUOp *c = poly_uop1(
-      ctx, POLY_OP_FUNCTION, POLY_VOID, body, poly_arg_call_info(&other));
-  PolyUOp *d = poly_uop1(
-      ctx, POLY_OP_FUNCTION, POLY_VOID, body, poly_arg_call_info(&precompiled));
+  PolyUOp *a = poly_uop1(ctx, POLY_OP_FUNCTION, POLY_VOID, body, poly_arg_call_info(&first));
+  PolyUOp *b = poly_uop1(ctx, POLY_OP_FUNCTION, POLY_VOID, body, poly_arg_call_info(&same));
+  PolyUOp *c = poly_uop1(ctx, POLY_OP_FUNCTION, POLY_VOID, body, poly_arg_call_info(&other));
+  PolyUOp *d = poly_uop1(ctx, POLY_OP_FUNCTION, POLY_VOID, body, poly_arg_call_info(&precompiled));
   ASSERT_NOT_NULL(a);
   ASSERT_PTR_EQ(a, b);
   ASSERT_PTR_NEQ(a, c);
@@ -768,8 +745,7 @@ TEST(uop, call_info_is_value_metadata) {
   ASSERT_STR_EQ(a->arg.call_info->name, "forward");
   char *text = poly_uop_str(a);
   ASSERT_NOT_NULL(text);
-  ASSERT_STR_EQ(
-      text, "UOp(FUNCTION, CallInfo(None,(),'forward',False,False), src=1)");
+  ASSERT_STR_EQ(text, "UOp(FUNCTION, CallInfo(None,(),'forward',False,False), src=1)");
   free(text);
   poly_ctx_destroy(ctx);
   PASS();
@@ -945,7 +921,9 @@ TEST(uop, ctx_stats_reports_arena_and_scratch_high_water) {
 
   PolyUOp *owned_buf = poly_test_buffer(ctx, POLY_FLOAT32, 8);
   PolyBuffer *owned_host = NULL;
-  ASSERT_INT_EQ(poly_buffer_alloc_owned_host(ctx, owned_buf, 8 * sizeof(float), true, &owned_host), 0);
+  ASSERT_INT_EQ(
+      poly_buffer_alloc_owned_host(ctx, owned_buf, 8 * sizeof(float), true, &owned_host), 0
+  );
   ASSERT_NOT_NULL(owned_host);
 
   ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
@@ -1037,9 +1015,7 @@ TEST(uop, collect_ordered_buffers_uses_transient_toposort) {
     int n = poly_collect_ordered_buffers(ctx, sink, ordered, 8);
     ASSERT_INT_EQ(n, 3);
     ASSERT_PTR_EQ(ordered[0], out);
-    ASSERT_TRUE(
-        (ordered[1] == a && ordered[2] == b) || (ordered[1] == b && ordered[2] == a)
-    );
+    ASSERT_TRUE((ordered[1] == a && ordered[2] == b) || (ordered[1] == b && ordered[2] == a));
   }
   size_t after = poly_arena_used(poly_ctx_arena(ctx));
   ASSERT_INT_EQ(after, before);
@@ -1096,34 +1072,36 @@ TEST(ops, op_name) {
 
 TEST(ops, op_value_matches_tinygrad_sort_order) {
   /* Current tinygrad uop/__init__.py:Ops. Shared values define toposort order. */
-  const struct { PolyOps op; int value; } expected[] = {
-      {POLY_OP_SPECIAL, 1}, {POLY_OP_BUFFER, 2}, {POLY_OP_NOOP, 3},
-      {POLY_OP_REWRITE_ERROR, 4}, {POLY_OP_PARAM, 5}, {POLY_OP_FUNCTION, 6},
-      {POLY_OP_CALL, 7}, {POLY_OP_PROGRAM, 8}, {POLY_OP_LINEAR, 9},
-      {POLY_OP_SOURCE, 10}, {POLY_OP_BINARY, 11}, {POLY_OP_SINK, 12},
-      {POLY_OP_AFTER, 13}, {POLY_OP_GROUP, 14}, {POLY_OP_STACK, 15},
-      {POLY_OP_TUPLE, 16}, {POLY_OP_GETTUPLE, 17}, {POLY_OP_INDEX, 19},
-      {POLY_OP_SHRINK, 20}, {POLY_OP_LOAD, 21}, {POLY_OP_STORE, 22},
-      {POLY_OP_WMMA, 23}, {POLY_OP_CAST, 24}, {POLY_OP_BITCAST, 25},
-      {POLY_OP_EXP2, 26}, {POLY_OP_LOG2, 27}, {POLY_OP_SIN, 28},
-      {POLY_OP_SQRT, 29}, {POLY_OP_RECIPROCAL, 30}, {POLY_OP_NEG, 31},
-      {POLY_OP_TRUNC, 32}, {POLY_OP_ADD, 33}, {POLY_OP_MUL, 34},
-      {POLY_OP_SHL, 35}, {POLY_OP_SHR, 36}, {POLY_OP_CDIV, 37},
-      {POLY_OP_MAX, 38}, {POLY_OP_CMOD, 39}, {POLY_OP_CMPLT, 40},
-      {POLY_OP_CMPNE, 41}, {POLY_OP_CMPEQ, 42}, {POLY_OP_XOR, 43},
-      {POLY_OP_OR, 44}, {POLY_OP_AND, 45}, {POLY_OP_THREEFRY, 46},
-      {POLY_OP_SUB, 47}, {POLY_OP_FDIV, 48}, {POLY_OP_POW, 49},
-      {POLY_OP_FLOORDIV, 50}, {POLY_OP_FLOORMOD, 51}, {POLY_OP_WHERE, 52},
-      {POLY_OP_MULACC, 53}, {POLY_OP_BARRIER, 54}, {POLY_OP_RANGE, 55},
-      {POLY_OP_IF, 56}, {POLY_OP_END, 57}, {POLY_OP_ENDIF, 58},
-      {POLY_OP_CONST, 60}, {POLY_OP_CUSTOM, 61}, {POLY_OP_CUSTOMI, 62},
-      {POLY_OP_INS, 63}, {POLY_OP_CONTIGUOUS, 64},
-      {POLY_OP_CONTIGUOUS_BACKWARD, 65}, {POLY_OP_DETACH, 66},
-      {POLY_OP_STAGE, 67}, {POLY_OP_COPY, 68}, {POLY_OP_MSELECT, 69},
-      {POLY_OP_MSTACK, 70}, {POLY_OP_CUSTOM_FUNCTION, 71},
-      {POLY_OP_RESHAPE, 72}, {POLY_OP_PERMUTE, 73}, {POLY_OP_EXPAND, 74},
-      {POLY_OP_PAD, 75}, {POLY_OP_FLIP, 76}, {POLY_OP_UNSHARD, 77},
-      {POLY_OP_REDUCE, 78}, {POLY_OP_ALLREDUCE, 79},
+  const struct {
+    PolyOps op;
+    int value;
+  } expected[] = {
+      {POLY_OP_SPECIAL, 1},       {POLY_OP_BUFFER, 2},      {POLY_OP_NOOP, 3},
+      {POLY_OP_REWRITE_ERROR, 4}, {POLY_OP_PARAM, 5},       {POLY_OP_FUNCTION, 6},
+      {POLY_OP_CALL, 7},          {POLY_OP_PROGRAM, 8},     {POLY_OP_LINEAR, 9},
+      {POLY_OP_SOURCE, 10},       {POLY_OP_BINARY, 11},     {POLY_OP_SINK, 12},
+      {POLY_OP_AFTER, 13},        {POLY_OP_GROUP, 14},      {POLY_OP_STACK, 15},
+      {POLY_OP_TUPLE, 16},        {POLY_OP_GETTUPLE, 17},   {POLY_OP_INDEX, 19},
+      {POLY_OP_SHRINK, 20},       {POLY_OP_LOAD, 21},       {POLY_OP_STORE, 22},
+      {POLY_OP_WMMA, 23},         {POLY_OP_CAST, 24},       {POLY_OP_BITCAST, 25},
+      {POLY_OP_EXP2, 26},         {POLY_OP_LOG2, 27},       {POLY_OP_SIN, 28},
+      {POLY_OP_SQRT, 29},         {POLY_OP_RECIPROCAL, 30}, {POLY_OP_NEG, 31},
+      {POLY_OP_TRUNC, 32},        {POLY_OP_ADD, 33},        {POLY_OP_MUL, 34},
+      {POLY_OP_SHL, 35},          {POLY_OP_SHR, 36},        {POLY_OP_CDIV, 37},
+      {POLY_OP_MAX, 38},          {POLY_OP_CMOD, 39},       {POLY_OP_CMPLT, 40},
+      {POLY_OP_CMPNE, 41},        {POLY_OP_CMPEQ, 42},      {POLY_OP_XOR, 43},
+      {POLY_OP_OR, 44},           {POLY_OP_AND, 45},        {POLY_OP_THREEFRY, 46},
+      {POLY_OP_SUB, 47},          {POLY_OP_FDIV, 48},       {POLY_OP_POW, 49},
+      {POLY_OP_FLOORDIV, 50},     {POLY_OP_FLOORMOD, 51},   {POLY_OP_WHERE, 52},
+      {POLY_OP_MULACC, 53},       {POLY_OP_BARRIER, 54},    {POLY_OP_RANGE, 55},
+      {POLY_OP_IF, 56},           {POLY_OP_END, 57},        {POLY_OP_ENDIF, 58},
+      {POLY_OP_CONST, 60},        {POLY_OP_CUSTOM, 61},     {POLY_OP_CUSTOMI, 62},
+      {POLY_OP_INS, 63},          {POLY_OP_CONTIGUOUS, 64}, {POLY_OP_CONTIGUOUS_BACKWARD, 65},
+      {POLY_OP_DETACH, 66},       {POLY_OP_STAGE, 67},      {POLY_OP_COPY, 68},
+      {POLY_OP_MSELECT, 69},      {POLY_OP_MSTACK, 70},     {POLY_OP_CUSTOM_FUNCTION, 71},
+      {POLY_OP_RESHAPE, 72},      {POLY_OP_PERMUTE, 73},    {POLY_OP_EXPAND, 74},
+      {POLY_OP_PAD, 75},          {POLY_OP_FLIP, 76},       {POLY_OP_UNSHARD, 77},
+      {POLY_OP_REDUCE, 78},       {POLY_OP_ALLREDUCE, 79},
   };
   for (size_t i = 0; i < sizeof(expected) / sizeof(expected[0]); i++)
     ASSERT_INT_EQ(poly_op_value(expected[i].op), expected[i].value);
@@ -1145,9 +1123,8 @@ TEST(uop, copy_uses_current_one_source_device_arg) {
    * destination in COPY.arg; DEVICE is placement metadata, not a source. */
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
-  PolyUOp *value = poly_uop_new_buffer(
-      ctx, poly_device_uop_from_name(ctx, "CPU"), 4, POLY_FLOAT32, 0
-  );
+  PolyUOp *value =
+      poly_uop_new_buffer(ctx, poly_device_uop_from_name(ctx, "CPU"), 4, POLY_FLOAT32, 0);
   PolyUOp *cuda = poly_device_uop_from_name(ctx, "CUDA");
   ASSERT_NOT_NULL(value);
   ASSERT_NOT_NULL(cuda);
@@ -1162,14 +1139,12 @@ TEST(uop, copy_uses_current_one_source_device_arg) {
   ASSERT_INT_EQ(poly_uop_device(copy), POLY_DEVICE_CUDA);
 
   PolyUOp *retired_src[2] = {value, cuda};
-  ASSERT_TRUE(poly_uop(
-      ctx, POLY_OP_COPY, POLY_FLOAT32, retired_src, 2, poly_arg_none()
-  ) == NULL);
+  ASSERT_TRUE(poly_uop(ctx, POLY_OP_COPY, POLY_FLOAT32, retired_src, 2, poly_arg_none()) == NULL);
   PolyUOp *unique = poly_uop0(ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(9));
   PolyUOp *retired_buffer_src[2] = {unique, cuda};
-  ASSERT_TRUE(poly_uop(
-      ctx, POLY_OP_BUFFER, POLY_FLOAT32, retired_buffer_src, 2, poly_arg_int(4)
-  ) == NULL);
+  ASSERT_TRUE(
+      poly_uop(ctx, POLY_OP_BUFFER, POLY_FLOAT32, retired_buffer_src, 2, poly_arg_int(4)) == NULL
+  );
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -1242,8 +1217,8 @@ TEST(uop, print_preserves_reduce_arg) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *input = poly_test_buffer(ctx, POLY_FLOAT32, 6);
 
-  PolyUOp *reduce = poly_uop1(
-      ctx, POLY_OP_REDUCE, POLY_FLOAT32, input, poly_arg_reduce(POLY_OP_ADD, 2));
+  PolyUOp *reduce =
+      poly_uop1(ctx, POLY_OP_REDUCE, POLY_FLOAT32, input, poly_arg_reduce(POLY_OP_ADD, 2));
   char *reduce_s = poly_uop_str(reduce);
   ASSERT_NOT_NULL(reduce_s);
   ASSERT_STR_EQ(reduce_s, "UOp(REDUCE, float, (ADD,2), src=1)");
@@ -1396,8 +1371,7 @@ TEST(uop, toposort_enter_calls_false) {
      * callee_body = ADD(c1, c2), arg1 = CONST(42). */
     PolyUOp *c1 = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0));
     PolyUOp *c2 = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(2.0));
-    PolyUOp *callee_body =
-        poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, c1, c2, poly_arg_none());
+    PolyUOp *callee_body = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, c1, c2, poly_arg_none());
     PolyUOp *arg1 = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(42.0));
     PolyUOp *opaque =
         poly_uop2(ctx, opaque_ops[op_idx], POLY_FLOAT32, callee_body, arg1, poly_arg_none());
@@ -1413,8 +1387,7 @@ TEST(uop, toposort_enter_calls_false) {
     ASSERT_INT_EQ(n_no, 2);
     bool found_callee = false;
     for (int i = 0; i < n_no; i++) {
-      if (topo_no[i] == callee_body || topo_no[i] == c1 || topo_no[i] == c2)
-        found_callee = true;
+      if (topo_no[i] == callee_body || topo_no[i] == c1 || topo_no[i] == c2) found_callee = true;
     }
     ASSERT_TRUE(!found_callee);
     ASSERT_TRUE(topo_no[0] == arg1);
@@ -1423,8 +1396,7 @@ TEST(uop, toposort_enter_calls_false) {
     PolyUOp *body_only =
         poly_uop1(ctx, opaque_ops[op_idx], POLY_FLOAT32, callee_body, poly_arg_none());
     int n_body_only = 0;
-    PolyUOp **topo_body_only =
-        poly_toposort_ex(ctx, body_only, &n_body_only, NULL, false);
+    PolyUOp **topo_body_only = poly_toposort_ex(ctx, body_only, &n_body_only, NULL, false);
     ASSERT_NOT_NULL(topo_body_only);
     ASSERT_INT_EQ(n_body_only, 1);
     ASSERT_PTR_EQ(topo_body_only[0], body_only);
@@ -1587,20 +1559,12 @@ TEST(uop, buf_uop_matches_current_tinygrad_storage_states) {
   PolyUOp *a = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_CPU);
   PolyUOp *b = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_CPU);
   PolyUOp *stack_src[] = {a, b};
-  PolyUOp *stack = poly_uop(
-      ctx, POLY_OP_MSTACK, POLY_FLOAT32, stack_src, 2, poly_arg_none()
-  );
-  PolyUOp *select = poly_uop1(
-      ctx, POLY_OP_MSELECT, POLY_FLOAT32, stack, poly_arg_int(1)
-  );
-  PolyUOp *expected_select = poly_uop1(
-      ctx, POLY_OP_MSELECT, POLY_FLOAT32, stack, poly_arg_int(1)
-  );
+  PolyUOp *stack = poly_uop(ctx, POLY_OP_MSTACK, POLY_FLOAT32, stack_src, 2, poly_arg_none());
+  PolyUOp *select = poly_uop1(ctx, POLY_OP_MSELECT, POLY_FLOAT32, stack, poly_arg_int(1));
+  PolyUOp *expected_select = poly_uop1(ctx, POLY_OP_MSELECT, POLY_FLOAT32, stack, poly_arg_int(1));
   PolyUOp *store = poly_store_val(ctx, a, b);
   PolyUOp *after_src[] = {a, store};
-  PolyUOp *after = poly_uop(
-      ctx, POLY_OP_AFTER, POLY_FLOAT32, after_src, 2, poly_arg_none()
-  );
+  PolyUOp *after = poly_uop(ctx, POLY_OP_AFTER, POLY_FLOAT32, after_src, 2, poly_arg_none());
 
   ASSERT_PTR_EQ(poly_uop_buf_uop(ctx, a), a);
   ASSERT_PTR_EQ(poly_uop_buf_uop(ctx, stack), stack);

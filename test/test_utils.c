@@ -1,4 +1,9 @@
 #include "test_harness.h"
+
+TEST_BACKEND(harness, runtime_skip_accounting) {
+  if (getenv("POLY_TEST_FORCE_RUNTIME_SKIP")) SKIP("forced runtime-skip accounting probe");
+  PASS();
+}
 #include "../src/polygrad.h"
 #include "../src/utils.h"
 
@@ -122,8 +127,7 @@ TEST(utils, poly_device_env_does_not_replace_existing_context_or_tensor) {
   PolyCtx *cpu_ctx = poly_ctx_new();
   ASSERT_NOT_NULL(cpu_ctx);
   int64_t shape[] = {2};
-  PolyTensor *cpu_tensor =
-      poly_tensor_empty(cpu_ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+  PolyTensor *cpu_tensor = poly_tensor_empty(cpu_ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(cpu_tensor);
   PolyUOp *cpu_root = poly_tensor_uop_physical(cpu_tensor);
   ASSERT_NOT_NULL(cpu_root);

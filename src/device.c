@@ -102,11 +102,9 @@ typedef struct {
 } PolyDeviceNameEntry;
 
 static const PolyDeviceNameEntry POLY_DEVICE_NAMES[] = {
-    {"auto", POLY_DEVICE_AUTO},   {"host", POLY_DEVICE_HOST},
-    {"cpu", POLY_DEVICE_CPU},     {"interp", POLY_DEVICE_INTERP},
-    {"wasm", POLY_DEVICE_WASM},   {"webgpu", POLY_DEVICE_WEBGPU},
-    {"cuda", POLY_DEVICE_CUDA},   {"hip", POLY_DEVICE_HIP},
-    {"x86", POLY_DEVICE_X86},
+    {"auto", POLY_DEVICE_AUTO},     {"host", POLY_DEVICE_HOST}, {"cpu", POLY_DEVICE_CPU},
+    {"interp", POLY_DEVICE_INTERP}, {"wasm", POLY_DEVICE_WASM}, {"webgpu", POLY_DEVICE_WEBGPU},
+    {"cuda", POLY_DEVICE_CUDA},     {"hip", POLY_DEVICE_HIP},   {"x86", POLY_DEVICE_X86},
     {"disk", POLY_DEVICE_DISK},
 };
 
@@ -117,14 +115,14 @@ PolyDevice poly_device_by_name(const char *name) {
    * normalization buffer. */
   size_t input_n = strlen(name);
   if (input_n >= 5 && tolower((unsigned char)name[0]) == 'd' &&
-      tolower((unsigned char)name[1]) == 'i' &&
-      tolower((unsigned char)name[2]) == 's' &&
+      tolower((unsigned char)name[1]) == 'i' && tolower((unsigned char)name[2]) == 's' &&
       tolower((unsigned char)name[3]) == 'k' && name[4] == ':')
     return POLY_DEVICE_DISK;
   char buf[64];
   size_t n = input_n;
   if (n >= sizeof(buf)) return POLY_DEVICE_AUTO;
-  for (size_t i = 0; i <= n; i++) buf[i] = (char)tolower((unsigned char)name[i]);
+  for (size_t i = 0; i <= n; i++)
+    buf[i] = (char)tolower((unsigned char)name[i]);
   name = buf;
   /* Pinned Device._canonicalize removes only a terminal ordinal zero.  Keep
    * nonzero ordinals unresolved until residency/runtime/cache identity carries
@@ -153,8 +151,7 @@ static char *poly_device_canonical_name(const char *name) {
   for (size_t i = 0; i < prefix_n; i++)
     canonical[i] = (char)toupper((unsigned char)name[i]);
   memcpy(canonical + prefix_n, name + prefix_n, n - prefix_n + 1);
-  if (n >= 2 && canonical[n - 2] == ':' && canonical[n - 1] == '0')
-    canonical[n - 2] = '\0';
+  if (n >= 2 && canonical[n - 2] == ':' && canonical[n - 1] == '0') canonical[n - 2] = '\0';
   return canonical;
 }
 
@@ -218,18 +215,14 @@ static void disk_free_alloc(const PolyBuffer *buffer, void *dev_ctx) {
 #endif
 }
 
-static int disk_copy_in(
-    const PolyBuffer *dst, const PolyBuffer *src, size_t n, void *dev_ctx
-) {
+static int disk_copy_in(const PolyBuffer *dst, const PolyBuffer *src, size_t n, void *dev_ctx) {
   (void)dev_ctx;
   if (!dst || !dst->ptr || !src || !src->ptr) return -1;
   memcpy(dst->ptr, src->ptr, n);
   return 0;
 }
 
-static int disk_copy_out(
-    const PolyBuffer *dst, const PolyBuffer *src, size_t n, void *dev_ctx
-) {
+static int disk_copy_out(const PolyBuffer *dst, const PolyBuffer *src, size_t n, void *dev_ctx) {
   (void)dev_ctx;
   if (!dst || !dst->ptr || !src || !src->ptr) return -1;
   memcpy(dst->ptr, src->ptr, n);
@@ -237,7 +230,10 @@ static int disk_copy_out(
 }
 
 static int disk_copy_between(
-    const PolyBuffer *dst, const PolyBuffer *src, size_t n, void *dev_ctx
+    const PolyBuffer *dst,
+    const PolyBuffer *src,
+    size_t n,
+    void *dev_ctx
 ) {
   return disk_copy_in(dst, src, n, dev_ctx);
 }
@@ -252,7 +248,9 @@ static const PolyAllocator POLY_DISK_ALLOCATOR = {
     .dev_ctx = NULL,
 };
 
-const PolyAllocator *poly_disk_get_allocator(void) { return &POLY_DISK_ALLOCATOR; }
+const PolyAllocator *poly_disk_get_allocator(void) {
+  return &POLY_DISK_ALLOCATOR;
+}
 
 PolyUOp *poly_buffer_from_file(PolyCtx *ctx, const char *path, int dtype_id) {
   if (!ctx || !path || !path[0]) return NULL;
@@ -310,12 +308,9 @@ PolyUOp *poly_buffer_from_file(PolyCtx *ctx, const char *path, int dtype_id) {
   PolyUOp *device_uop = poly_device_uop_from_name(ctx, disk_name);
   /* Current Tensor(Path) uses UOp.new_buffer with the complete DISK:path
    * identity (tensor.py:311-320; uop/ops.py:811-817). */
-  PolyUOp *buf = device_uop
-                     ? poly_uop_new_buffer(
-                           ctx, device_uop, numel, scalar,
-                           poly_ctx_next_unique_id(ctx)
-                       )
-                     : NULL;
+  PolyUOp *buf =
+      device_uop ? poly_uop_new_buffer(ctx, device_uop, numel, scalar, poly_ctx_next_unique_id(ctx))
+                 : NULL;
   free(disk_name);
   if (!buf) {
     if (ptr) munmap(ptr, (size_t)mapped_bytes);
@@ -372,12 +367,10 @@ PolyUOp *poly_buffer_from_host(
    * imported BUFFER on PYTHON before the target-device COPY. */
   PolyDevice source_device = POLY_DEVICE_HOST;
   PolyUOp *source_device_uop = poly_device_uop(ctx, source_device);
-  PolyUOp *buf = source_device_uop
-                     ? poly_uop_new_buffer(
-                           ctx, source_device_uop, numel, scalar,
-                           poly_ctx_next_unique_id(ctx)
-                       )
-                     : NULL;
+  PolyUOp *buf =
+      source_device_uop
+          ? poly_uop_new_buffer(ctx, source_device_uop, numel, scalar, poly_ctx_next_unique_id(ctx))
+          : NULL;
   if (!buf) return NULL;
   /* Register imported source data in ctx->buffers so graph-driven realize can
    * materialize it through the creation COPY. */
@@ -401,9 +394,7 @@ PolyUOp *poly_buffer_from_host_unique(
   PolyDevice source_device = POLY_DEVICE_HOST;
   PolyUOp *device = poly_device_uop(ctx, source_device);
   PolyUOp *buffer = device && unique->arg.kind == POLY_ARG_INT
-                        ? poly_uop_new_buffer(
-                              ctx, device, numel, scalar_dtype, unique->arg.i
-                          )
+                        ? poly_uop_new_buffer(ctx, device, numel, scalar_dtype, unique->arg.i)
                         : NULL;
   if (!buffer) return NULL;
 
@@ -424,8 +415,7 @@ void poly_buffer_free(PolyCtx *ctx, PolyBuffer *b) {
     b->n_bufs = 0;
     b->owns_bufs = false;
   }
-  if (b->owned && b->allocator && b->allocator->free)
-    b->allocator->free(b, b->allocator->dev_ctx);
+  if (b->owned && b->allocator && b->allocator->free) b->allocator->free(b, b->allocator->dev_ctx);
   if (b->memory_accounted)
     poly_ctx_record_memory_free_exact(ctx, b->memory_device_uop, b->memory_device, b->nbytes);
   b->ptr = NULL;
@@ -539,13 +529,10 @@ static PolyBuffer *poly_buffer_metadata(PolyCtx *ctx, PolyUOp *buffer) {
   if (cached || !ctx || !buffer || buffer->op != POLY_OP_BUFFER) return cached;
   PolyUOp *device_uop = poly_uop_device_uop_cached(ctx, buffer, NULL);
   PolyDevice device = poly_device_from_device_uop(device_uop);
-  if (!device_uop || device == POLY_DEVICE_AUTO ||
-      device_uop->arg.kind == POLY_ARG_STRING_TUPLE)
+  if (!device_uop || device == POLY_DEVICE_AUTO || device_uop->arg.kind == POLY_ARG_STRING_TUPLE)
     return NULL;
   const PolyBackendDesc *backend = poly_backend_get(device);
-  PolyBuffer *metadata = poly_arena_alloc(
-      ctx->arena, sizeof(*metadata), _Alignof(PolyBuffer)
-  );
+  PolyBuffer *metadata = poly_arena_alloc(ctx->arena, sizeof(*metadata), _Alignof(PolyBuffer));
   if (!metadata) return NULL;
   *metadata = (PolyBuffer){
       .nbytes = poly_buffer_nbytes_for_uop(buffer),
@@ -571,9 +558,8 @@ static int poly_buffer_refresh_view(PolyCtx *ctx, PolyBuffer *view) {
   if (base->device == POLY_DEVICE_WEBGPU && view->offset != 0) {
 #ifdef __EMSCRIPTEN__
     if (!view->ptr) {
-      uintptr_t handle = poly_webgpu_create_buffer_view(
-          (uintptr_t)base->ptr, view->offset, view->nbytes
-      );
+      uintptr_t handle =
+          poly_webgpu_create_buffer_view((uintptr_t)base->ptr, view->offset, view->nbytes);
       if (!handle) return -1;
       view->ptr = (void *)handle;
       view->owned = true;
@@ -597,8 +583,7 @@ PolyBuffer *poly_buffer_multi_child(PolyBuffer *buffer, int index) {
 }
 
 int poly_buffer_handle_ensure_allocated(PolyCtx *ctx, PolyBuffer *buffer) {
-  if (!ctx || !buffer || poly_buffer_is_multi(buffer) ||
-      buffer->device == POLY_DEVICE_AUTO)
+  if (!ctx || !buffer || poly_buffer_is_multi(buffer) || buffer->device == POLY_DEVICE_AUTO)
     return -1;
 
   if (buffer->base) return poly_buffer_refresh_view(ctx, buffer);
@@ -622,9 +607,8 @@ int poly_buffer_handle_ensure_allocated(PolyCtx *ctx, PolyBuffer *buffer) {
     buffer->owned = true;
     buffer->memory_accounted = true;
     buffer->memory_device = buffer->device;
-    buffer->memory_device_uop = buffer->device_uop
-                                    ? buffer->device_uop
-                                    : poly_device_uop(ctx, buffer->device);
+    buffer->memory_device_uop =
+        buffer->device_uop ? buffer->device_uop : poly_device_uop(ctx, buffer->device);
     poly_ctx_record_memory_alloc_exact(
         ctx, buffer->memory_device_uop, buffer->memory_device, buffer->nbytes
     );
@@ -641,12 +625,7 @@ int poly_buffer_handle_ensure_allocated(PolyCtx *ctx, PolyBuffer *buffer) {
   return 0;
 }
 
-int poly_buffer_handle_get_buf(
-    PolyCtx *ctx,
-    PolyBuffer *buffer,
-    PolyDevice device,
-    void **out
-) {
+int poly_buffer_handle_get_buf(PolyCtx *ctx, PolyBuffer *buffer, PolyDevice device, void **out) {
   if (out) *out = NULL;
   if (!ctx || !buffer || !out || poly_buffer_is_multi(buffer) ||
       !poly_devices_share_storage(buffer->device, device) ||
@@ -662,9 +641,9 @@ int poly_buffer_handle_get_buf(
    * object used by exec_kernel. A browser HOST import instead starts as a
    * JS-owned key, so materialize it only when compiled HOST execution needs a
    * Wasm address; direct HOST-key to WebGPU copies remain unchanged. */
-  if (device == POLY_DEVICE_HOST && buffer->device == POLY_DEVICE_HOST &&
-      buffer->valid && !buffer->base && !buffer->src && buffer->frontend_release &&
-      buffer->allocator && buffer->allocator->alloc && buffer->allocator->free) {
+  if (device == POLY_DEVICE_HOST && buffer->device == POLY_DEVICE_HOST && buffer->valid &&
+      !buffer->base && !buffer->src && buffer->frontend_release && buffer->allocator &&
+      buffer->allocator->alloc && buffer->allocator->free) {
     size_t alloc_nbytes = buffer->nbytes ? buffer->nbytes : 1;
     void *ptr = buffer->allocator->alloc(alloc_nbytes, buffer->allocator->dev_ctx);
     if (!ptr) return -1;
@@ -685,9 +664,8 @@ int poly_buffer_handle_get_buf(
     buffer->owned = true;
     buffer->memory_accounted = true;
     buffer->memory_device = buffer->device;
-    buffer->memory_device_uop = buffer->device_uop
-                                    ? buffer->device_uop
-                                    : poly_device_uop(ctx, buffer->device);
+    buffer->memory_device_uop =
+        buffer->device_uop ? buffer->device_uop : poly_device_uop(ctx, buffer->device);
     poly_ctx_record_memory_alloc_exact(
         ctx, buffer->memory_device_uop, buffer->memory_device, buffer->nbytes
     );
@@ -718,16 +696,14 @@ bool poly_buffer_is_allocated(PolyCtx *ctx, PolyUOp *buf) {
     return true;
   }
   return b != NULL &&
-         (b->ptr != NULL || b->nbytes == 0 ||
-          (b->device == POLY_DEVICE_HOST && b->valid));
+         (b->ptr != NULL || b->nbytes == 0 || (b->device == POLY_DEVICE_HOST && b->valid));
 }
 
 static bool contiguous_view_shape_numel(PolyShape shape, uint64_t *out) {
   if (!out || shape.ndim < 0) return false;
   uint64_t numel = 1;
   for (int d = 0; d < shape.ndim; d++) {
-    if (shape.dims[d] < 0 ||
-        (shape.dims[d] != 0 && numel > UINT64_MAX / (uint64_t)shape.dims[d]))
+    if (shape.dims[d] < 0 || (shape.dims[d] != 0 && numel > UINT64_MAX / (uint64_t)shape.dims[d]))
       return false;
     numel *= (uint64_t)shape.dims[d];
   }
@@ -743,8 +719,7 @@ bool poly_uop_contiguous_view_info(
     int64_t *out_numel,
     size_t *out_byte_offset
 ) {
-  if (!ctx || !u || !out_identity || !out_shape || !out_numel || !out_byte_offset)
-    return false;
+  if (!ctx || !u || !out_identity || !out_shape || !out_numel || !out_byte_offset) return false;
   *out_identity = NULL;
   *out_shape = (PolyShape){.ndim = -1};
   *out_numel = -1;
@@ -753,8 +728,7 @@ bool poly_uop_contiguous_view_info(
   int n_steps = 0;
   bool has_shrink = false;
   PolyUOp *base = u;
-  while (base && base->n_src >= 1 &&
-         (base->op == POLY_OP_RESHAPE || base->op == POLY_OP_SHRINK)) {
+  while (base && base->n_src >= 1 && (base->op == POLY_OP_RESHAPE || base->op == POLY_OP_SHRINK)) {
     if (base->op == POLY_OP_SHRINK) {
       PolyUOp *starts[POLY_MAX_DIMS], *sizes[POLY_MAX_DIMS];
       int n_starts = base->arg.kind == POLY_ARG_NONE && base->n_src >= 3
@@ -780,7 +754,8 @@ bool poly_uop_contiguous_view_info(
   PolyUOp **steps = malloc((size_t)n_steps * sizeof(*steps));
   if (!steps) return false;
   PolyUOp *cur = u;
-  for (int i = 0; i < n_steps; i++, cur = cur->src[0]) steps[i] = cur;
+  for (int i = 0; i < n_steps; i++, cur = cur->src[0])
+    steps[i] = cur;
 
   PolyShape shape = poly_uop_max_shape_cached(ctx, base);
   uint64_t base_numel = 0;
@@ -836,8 +811,7 @@ bool poly_uop_contiguous_view_info(
         break;
       }
       uint64_t selected_length = (uint64_t)(end - begin);
-      if ((uint64_t)begin > UINT64_MAX / stride ||
-          start > UINT64_MAX - (uint64_t)begin * stride) {
+      if ((uint64_t)begin > UINT64_MAX / stride || start > UINT64_MAX - (uint64_t)begin * stride) {
         ok = false;
         break;
       }
@@ -872,12 +846,11 @@ bool poly_uop_contiguous_view_info(
 
   uint64_t numel = 0;
   size_t itemsize = poly_dtype_itemsize(identity->dtype);
-  if (!contiguous_view_shape_numel(shape, &numel) || numel > INT64_MAX ||
-      itemsize == 0 || element_offset > SIZE_MAX / itemsize)
+  if (!contiguous_view_shape_numel(shape, &numel) || numel > INT64_MAX || itemsize == 0 ||
+      element_offset > SIZE_MAX / itemsize)
     return false;
   size_t byte_offset = (size_t)element_offset * itemsize;
-  if (byte_offset > storage->nbytes ||
-      numel > SIZE_MAX / itemsize ||
+  if (byte_offset > storage->nbytes || numel > SIZE_MAX / itemsize ||
       (size_t)numel * itemsize > storage->nbytes - byte_offset)
     return false;
 
@@ -899,8 +872,8 @@ static PolyBuffer *poly_buffer_view_metadata(
 static PolyBuffer *poly_multi_buffer_for_tuple_buffer(PolyCtx *ctx, PolyUOp *buffer) {
   if (!ctx || !buffer || buffer->op != POLY_OP_BUFFER) return NULL;
   PolyUOp *device = poly_uop_device_uop_cached(ctx, buffer, NULL);
-  if (!device || device->arg.kind != POLY_ARG_STRING_TUPLE ||
-      device->arg.string_tuple.n <= 0 || !device->arg.string_tuple.vals)
+  if (!device || device->arg.kind != POLY_ARG_STRING_TUPLE || device->arg.string_tuple.n <= 0 ||
+      !device->arg.string_tuple.vals)
     return NULL;
 
   PolyBuffer *cached = poly_buffer_get(ctx, buffer);
@@ -914,20 +887,17 @@ static PolyBuffer *poly_multi_buffer_for_tuple_buffer(PolyCtx *ctx, PolyUOp *buf
   int n = device->arg.string_tuple.n;
   size_t nbytes = poly_buffer_nbytes_for_uop(buffer);
   PolyBuffer *multi = poly_arena_alloc(ctx->arena, sizeof(*multi), _Alignof(PolyBuffer));
-  PolyBuffer **children = poly_arena_alloc(
-      ctx->arena, (size_t)n * sizeof(*children), _Alignof(PolyBuffer *)
-  );
+  PolyBuffer **children =
+      poly_arena_alloc(ctx->arena, (size_t)n * sizeof(*children), _Alignof(PolyBuffer *));
   if (!multi || !children) return NULL;
   memset(children, 0, (size_t)n * sizeof(*children));
 
   for (int i = 0; i < n; i++) {
-    PolyUOp *child_device =
-        poly_device_uop_from_name(ctx, device->arg.string_tuple.vals[i]);
+    PolyUOp *child_device = poly_device_uop_from_name(ctx, device->arg.string_tuple.vals[i]);
     PolyDevice backend = poly_device_from_device_uop(child_device);
     if (!child_device || backend == POLY_DEVICE_AUTO) return NULL;
     const PolyBackendDesc *be = poly_backend_get(backend);
-    PolyBuffer *child =
-        poly_arena_alloc(ctx->arena, sizeof(*child), _Alignof(PolyBuffer));
+    PolyBuffer *child = poly_arena_alloc(ctx->arena, sizeof(*child), _Alignof(PolyBuffer));
     if (!child) return NULL;
     *child = (PolyBuffer){
         .nbytes = nbytes,
@@ -955,13 +925,15 @@ static PolyBuffer *poly_multi_buffer_for_tuple_buffer(PolyCtx *ctx, PolyUOp *buf
 static PolyBuffer *poly_multi_buffer_for_mstack(PolyCtx *ctx, PolyUOp *mstack) {
   if (!ctx || !mstack || mstack->op != POLY_OP_MSTACK || mstack->n_src == 0) return NULL;
   PolyBuffer *cached = poly_buffer_get(ctx, mstack);
-  if (cached && (!poly_buffer_is_multi(cached) || cached->owns_bufs ||
-                 cached->n_bufs != mstack->n_src))
+  if (cached &&
+      (!poly_buffer_is_multi(cached) || cached->owns_bufs || cached->n_bufs != mstack->n_src))
     return NULL;
 
-  PolyBuffer **children = cached ? cached->bufs : poly_arena_alloc(
-      ctx->arena, (size_t)mstack->n_src * sizeof(*children), _Alignof(PolyBuffer *)
-  );
+  PolyBuffer **children =
+      cached ? cached->bufs
+             : poly_arena_alloc(
+                   ctx->arena, (size_t)mstack->n_src * sizeof(*children), _Alignof(PolyBuffer *)
+               );
   if (!children) return NULL;
   size_t nbytes = 0;
   bool valid = true;
@@ -1014,19 +986,15 @@ static PolyBuffer *poly_buffer_view_metadata(
   if (poly_buffer_is_multi(parent)) {
     if (parent->n_bufs <= 0 || !parent->bufs) return NULL;
     PolyBuffer **children = poly_arena_alloc(
-        ctx->arena, (size_t)parent->n_bufs * sizeof(*children),
-        _Alignof(PolyBuffer *)
+        ctx->arena, (size_t)parent->n_bufs * sizeof(*children), _Alignof(PolyBuffer *)
     );
     if (!children) return NULL;
     bool valid = true;
     for (int i = 0; i < parent->n_bufs; i++) {
       PolyBuffer *source = parent->bufs[i];
-      if (!source || byte_offset > source->nbytes ||
-          nbytes > source->nbytes - byte_offset)
+      if (!source || byte_offset > source->nbytes || nbytes > source->nbytes - byte_offset)
         return NULL;
-      PolyBuffer *child = poly_arena_alloc(
-          ctx->arena, sizeof(*child), _Alignof(PolyBuffer)
-      );
+      PolyBuffer *child = poly_arena_alloc(ctx->arena, sizeof(*child), _Alignof(PolyBuffer));
       if (!child) return NULL;
       PolyBuffer *root = source->base ? source->base : source;
       *child = *source;
@@ -1062,8 +1030,7 @@ static PolyBuffer *poly_buffer_view_metadata(
     return cached;
   }
 
-  if (byte_offset > parent->nbytes || nbytes > parent->nbytes - byte_offset)
-    return NULL;
+  if (byte_offset > parent->nbytes || nbytes > parent->nbytes - byte_offset) return NULL;
   PolyBuffer *root = parent->base ? parent->base : parent;
   PolyBuffer view = *parent;
   view.ptr = NULL;
@@ -1085,8 +1052,8 @@ static PolyBuffer *poly_buffer_view_metadata(
 
 PolyBuffer *poly_uop_buffer_handle(PolyCtx *ctx, PolyUOp *u) {
   if (!ctx || !u) return NULL;
-  if ((u->op == POLY_OP_CONTIGUOUS || u->op == POLY_OP_RESHAPE ||
-       u->op == POLY_OP_DETACH || u->op == POLY_OP_AFTER) &&
+  if ((u->op == POLY_OP_CONTIGUOUS || u->op == POLY_OP_RESHAPE || u->op == POLY_OP_DETACH ||
+       u->op == POLY_OP_AFTER) &&
       u->n_src >= 1)
     return poly_uop_buffer_handle(ctx, u->src[0]);
   if (u->op == POLY_OP_MSTACK) return poly_multi_buffer_for_mstack(ctx, u);
@@ -1109,8 +1076,8 @@ PolyBuffer *poly_uop_buffer_handle(PolyCtx *ctx, PolyUOp *u) {
 
 PolyUOp *poly_uop_buffer(PolyCtx *ctx, PolyUOp *u) {
   if (!ctx || !u) return NULL;
-  if ((u->op == POLY_OP_CONTIGUOUS || u->op == POLY_OP_RESHAPE ||
-       u->op == POLY_OP_DETACH || u->op == POLY_OP_AFTER) &&
+  if ((u->op == POLY_OP_CONTIGUOUS || u->op == POLY_OP_RESHAPE || u->op == POLY_OP_DETACH ||
+       u->op == POLY_OP_AFTER) &&
       u->n_src >= 1)
     return poly_uop_buffer(ctx, u->src[0]);
   /* Pinned UOp.buffer creates a typed Buffer.view for BITCAST after resolving
@@ -1127,14 +1094,9 @@ PolyUOp *poly_uop_buffer(PolyCtx *ctx, PolyUOp *u) {
         numel > SIZE_MAX / itemsize || (size_t)numel * itemsize != source->nbytes)
       return NULL;
 
-    return poly_buffer_view_metadata(
-               ctx, u, source, (size_t)numel * itemsize, 0
-           )
-               ? u
-               : NULL;
+    return poly_buffer_view_metadata(ctx, u, source, (size_t)numel * itemsize, 0) ? u : NULL;
   }
-  if (u->op == POLY_OP_MSTACK)
-    return poly_multi_buffer_for_mstack(ctx, u) ? u : NULL;
+  if (u->op == POLY_OP_MSTACK) return poly_multi_buffer_for_mstack(ctx, u) ? u : NULL;
   if (u->op == POLY_OP_MSELECT && u->n_src == 1 && u->arg.kind == POLY_ARG_INT) {
     if (u->src[0] && u->src[0]->op == POLY_OP_MSTACK && u->arg.i >= 0 &&
         u->arg.i < u->src[0]->n_src)
@@ -1154,14 +1116,11 @@ PolyUOp *poly_uop_buffer(PolyCtx *ctx, PolyUOp *u) {
   PolyShape view_shape = {.ndim = -1};
   int64_t view_numel = -1;
   size_t byte_offset = 0;
-  if (!poly_uop_contiguous_view_info(
-          ctx, u, &view_base, &view_shape, &view_numel, &byte_offset
-      ))
+  if (!poly_uop_contiguous_view_info(ctx, u, &view_base, &view_shape, &view_numel, &byte_offset))
     return NULL;
   PolyBuffer *parent = poly_buffer_get(ctx, view_base);
   size_t itemsize = poly_dtype_itemsize(view_base->dtype);
-  if (!parent || itemsize == 0 || view_numel < 0 ||
-      (uint64_t)view_numel > SIZE_MAX / itemsize)
+  if (!parent || itemsize == 0 || view_numel < 0 || (uint64_t)view_numel > SIZE_MAX / itemsize)
     return NULL;
   size_t nbytes = (size_t)view_numel * itemsize;
 
@@ -1251,7 +1210,8 @@ static int poly_buffer_alloc_residency(
 
   PolyBuffer *h = poly_arena_alloc(ctx->arena, sizeof(PolyBuffer), _Alignof(PolyBuffer));
   if (!h) {
-    PolyBuffer tmp = {.ptr = ptr, .nbytes = nbytes, .device = device, .owned = true, .allocator = alloc};
+    PolyBuffer tmp = {
+        .ptr = ptr, .nbytes = nbytes, .device = device, .owned = true, .allocator = alloc};
     alloc->free(&tmp, alloc->dev_ctx);
     return -1;
   }
@@ -1291,7 +1251,8 @@ static int poly_buffer_alloc_host_root(
   if (!ptr) return -1;
   PolyBuffer *h = poly_arena_alloc(ctx->arena, sizeof(PolyBuffer), _Alignof(PolyBuffer));
   if (!h) {
-    PolyBuffer tmp = {.ptr = ptr, .nbytes = nbytes, .device = device, .owned = true, .allocator = alloc};
+    PolyBuffer tmp = {
+        .ptr = ptr, .nbytes = nbytes, .device = device, .owned = true, .allocator = alloc};
     alloc->free(&tmp, alloc->dev_ctx);
     return -1;
   }
@@ -1424,8 +1385,7 @@ static int poly_buffer_ensure_host_root_for_write(
      * on HOST instead of silently creating a CPU residency. */
     PolyDevice declared = poly_uop_device(buf);
     int alloc_rc = declared == POLY_DEVICE_HOST
-                       ? poly_buffer_alloc_residency(
-                             ctx, buf, declared, nbytes, false, NULL, &root)
+                       ? poly_buffer_alloc_residency(ctx, buf, declared, nbytes, false, NULL, &root)
                        : poly_buffer_alloc_host_root(ctx, buf, nbytes, false, &root);
     if (alloc_rc != 0) return -1;
     poly_map_set(ctx->buffers, poly_ptr_hash(buf), buf, root, poly_ptr_eq);
@@ -1503,8 +1463,7 @@ static const PolyBuffer *poly_buffer_valid_source(PolyBuffer *cur) {
   if (!cur) return NULL;
   /* Browser HOST residencies can be frontend keys with ptr=NULL.  If a concrete
    * valid mirror is attached, generic migration must copy from that mirror. */
-  if (cur->device == POLY_DEVICE_HOST && !cur->ptr && cur->src && cur->src->valid)
-    return cur->src;
+  if (cur->device == POLY_DEVICE_HOST && !cur->ptr && cur->src && cur->src->valid) return cur->src;
   if (cur->valid) return cur;
   if (cur->src && cur->src->valid) return cur->src;
   return NULL;

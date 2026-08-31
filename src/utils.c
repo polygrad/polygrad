@@ -26,7 +26,9 @@ void poly_free(void *ptr) {
   free(ptr);
 }
 
-bool poly_ptr_eq(const void *a, const void *b) { return a == b; }
+bool poly_ptr_eq(const void *a, const void *b) {
+  return a == b;
+}
 
 uint32_t poly_ptr_hash(const void *p) {
   /* UOp/map caches are keyed by pointer identity. Keep the mixer width
@@ -48,7 +50,8 @@ int poly_getenv_int(const char *key, int default_value) {
   char *end = NULL;
   long parsed = strtol(v, &end, 10);
   if (end == v) return default_value;
-  while (*end && isspace((unsigned char)*end)) end++;
+  while (*end && isspace((unsigned char)*end))
+    end++;
   if (*end != '\0') return default_value;
   return (int)parsed;
 }
@@ -80,7 +83,9 @@ int poly_debug_level(void) {
 #endif
 }
 
-bool poly_debug_at_least(int level) { return poly_debug_level() >= level; }
+bool poly_debug_at_least(int level) {
+  return poly_debug_level() >= level;
+}
 
 double poly_now_ms(void) {
 #ifdef __EMSCRIPTEN__

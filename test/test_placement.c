@@ -12,18 +12,13 @@ static PolyUOp *placement_buffer(PolyCtx *ctx, int64_t n, PolyDevice device) {
                                     : poly_test_buffer_on_device(ctx, POLY_FLOAT32, n, device);
 }
 
-static PolyUOp *placement_binding_on_device(
-    PolyCtx *ctx,
-    PolyUOp *logical,
-    PolyDevice device
-) {
-  if (!logical || logical->op != POLY_OP_BUFFER || logical->n_src != 1 ||
-      !logical->src[0] || logical->src[0]->op != POLY_OP_UNIQUE ||
-      logical->arg.kind != POLY_ARG_INT || logical->src[0]->arg.kind != POLY_ARG_INT)
+static PolyUOp *placement_binding_on_device(PolyCtx *ctx, PolyUOp *logical, PolyDevice device) {
+  if (!logical || logical->op != POLY_OP_BUFFER || logical->n_src != 1 || !logical->src[0] ||
+      logical->src[0]->op != POLY_OP_UNIQUE || logical->arg.kind != POLY_ARG_INT ||
+      logical->src[0]->arg.kind != POLY_ARG_INT)
     return NULL;
   return poly_uop_new_buffer(
-      ctx, poly_device_uop(ctx, device), logical->arg.i, logical->dtype,
-      logical->src[0]->arg.i
+      ctx, poly_device_uop(ctx, device), logical->arg.i, logical->dtype, logical->src[0]->arg.i
   );
 }
 
@@ -85,8 +80,7 @@ TEST(placement, logical_placement_does_not_consume_bound_copy_history) {
   PolyUOp *target_bindings[1] = {base_interp};
   PolyUOp *placed[1] = {NULL};
   ASSERT_INT_EQ(
-      poly_place_roots(ctx, logical_roots, 1, logical_bindings, target_bindings, 1, placed),
-      0
+      poly_place_roots(ctx, logical_roots, 1, logical_bindings, target_bindings, 1, placed), 0
   );
 
   ASSERT_EQ(placed[0]->op, POLY_OP_ADD);
@@ -114,9 +108,7 @@ TEST(placement, logical_missing_occurrence_evidence_fails_atomically) {
   ASSERT_INT_EQ(poly_place_roots(ctx, roots, 1, from, to, 1, out), -1);
   ASSERT_EQ(out[0], sentinel);
 
-  roots[0] = poly_copy_to_device_uop(
-      ctx, logical, poly_device_uop(ctx, POLY_DEVICE_CUDA)
-  );
+  roots[0] = poly_copy_to_device_uop(ctx, logical, poly_device_uop(ctx, POLY_DEVICE_CUDA));
   ASSERT_INT_EQ(poly_place_roots(ctx, roots, 1, from, to, 1, out), -1);
   ASSERT_EQ(out[0], sentinel);
 
@@ -163,8 +155,7 @@ TEST(placement, invalid_binding_shape_or_alias_fails_atomically) {
   ASSERT_EQ(out[0], sentinel);
 
   /* COPY is physical transport, never a portable logical binding. */
-  PolyUOp *interp_device =
-      poly_device_uop(ctx, POLY_DEVICE_INTERP);
+  PolyUOp *interp_device = poly_device_uop(ctx, POLY_DEVICE_INTERP);
   PolyUOp *copy = poly_copy_to_device_uop(ctx, target, interp_device);
   PolyUOp *copy_binding[1] = {copy};
   ASSERT_NOT_NULL(copy);
@@ -226,8 +217,7 @@ TEST(placement, explicit_module_map_inserts_exact_cross_device_cut) {
   ASSERT_PTR_EQ(target_bindings[2], pw1);
   ASSERT_PTR_EQ(target_bindings[3], pout);
   PolyUOp *expected_module0 = poly_add(ctx, px, pw0);
-  PolyUOp *expected_cut =
-      poly_copy_to_device_uop(ctx, expected_module0, modules[1].device);
+  PolyUOp *expected_cut = poly_copy_to_device_uop(ctx, expected_module0, modules[1].device);
   PolyUOp *expected_module1 = poly_mul(ctx, expected_cut, pw1);
   PolyUOp *expected_sink = poly_sink1(ctx, poly_store_val(ctx, pout, expected_module1));
   ASSERT_PTR_EQ(placed[0], expected_sink);
@@ -244,8 +234,7 @@ TEST(placement, explicit_module_map_inserts_exact_cross_device_cut) {
   PolyUOp *ordered_placed[3] = {NULL, NULL, NULL};
   ASSERT_INT_EQ(
       poly_place_module_map(
-          ctx, ordered_roots, 3, logical_bindings, 4, modules, 2,
-          target_bindings, ordered_placed
+          ctx, ordered_roots, 3, logical_bindings, 4, modules, 2, target_bindings, ordered_placed
       ),
       0
   );
@@ -261,8 +250,7 @@ TEST(placement, explicit_module_map_inserts_exact_cross_device_cut) {
   PolyUOp *reverse_placed[3] = {NULL, NULL, NULL};
   ASSERT_INT_EQ(
       poly_place_module_map(
-          ctx, roots, 3, logical_bindings, 4, reverse_devices, 2,
-          reverse_targets, reverse_placed
+          ctx, roots, 3, logical_bindings, 4, reverse_devices, 2, reverse_targets, reverse_placed
       ),
       0
   );
@@ -330,8 +318,7 @@ TEST(placement, explicit_module_map_rejects_ambiguous_regions_atomically) {
   PolyUOp *conflict_roots[1] = {conflict1};
   ASSERT_INT_EQ(
       poly_place_module_map(
-          ctx, conflict_roots, 1, logical_bindings, 3, conflicting_owner, 2,
-          target_bindings, out
+          ctx, conflict_roots, 1, logical_bindings, 3, conflicting_owner, 2, target_bindings, out
       ),
       -1
   );
@@ -339,9 +326,7 @@ TEST(placement, explicit_module_map_rejects_ambiguous_regions_atomically) {
 
   PolyPlaceModule reversed[2] = {modules[1], modules[0]};
   ASSERT_INT_EQ(
-      poly_place_module_map(
-          ctx, roots, 1, logical_bindings, 3, reversed, 2, target_bindings, out
-      ),
+      poly_place_module_map(ctx, roots, 1, logical_bindings, 3, reversed, 2, target_bindings, out),
       -1
   );
   ASSERT_PTR_EQ(out[0], sentinel);

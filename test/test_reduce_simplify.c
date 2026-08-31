@@ -88,8 +88,7 @@ TEST(reduce_simplify, simplify_ranges_uses_largest_index_guard) {
   for (int i = 0; i < 2; i++) {
     PolyUOp *bound = poly_const_int(ctx, i == 0 ? 4 : 8);
     PolyUOp *gate = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, r, bound, poly_arg_none());
-    PolyUOp *coord = poly_uop3(
-        ctx, POLY_OP_WHERE, POLY_WEAKINT, gate, r, invalid, poly_arg_none());
+    PolyUOp *coord = poly_uop3(ctx, POLY_OP_WHERE, POLY_WEAKINT, gate, r, invalid, poly_arg_none());
     indices[i] = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, buf, coord, poly_arg_none());
   }
   PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, indices, 2, poly_arg_none());
@@ -116,8 +115,7 @@ TEST(reduce_simplify, split_ranges_excludes_device_axis) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *r = poly_range(ctx, 16, 1, POLY_AXIS_DEVICE);
   PolyUOp *four = poly_const_int(ctx, 4);
-  PolyUOp *mod = poly_uop2(
-      ctx, POLY_OP_FLOORMOD, POLY_WEAKINT, r, four, poly_arg_none());
+  PolyUOp *mod = poly_uop2(ctx, POLY_OP_FLOORMOD, POLY_WEAKINT, r, four, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, mod, poly_arg_none());
   PolyMap *state = poly_map_new(16);
 
@@ -535,7 +533,8 @@ TEST(reduce_simplify, s2_loaded_index_add_lt_is_undone) {
   PolyUOp *r = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_range(0, POLY_AXIS_LOOP));
   PolyUOp *idx = poly_uop2(ctx, POLY_OP_INDEX, POLY_INT32, p, r, poly_arg_none());
   PolyUOp *lhs = poly_alu2(ctx, POLY_OP_ADD, idx, poly_const_int(ctx, 2));
-  PolyUOp *expr = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, lhs, poly_const_int(ctx, 8), poly_arg_none());
+  PolyUOp *expr =
+      poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, lhs, poly_const_int(ctx, 8), poly_arg_none());
 
   PolyUOp *out = poly_graph_rewrite(ctx, expr, poly_pm_load_collapse());
 

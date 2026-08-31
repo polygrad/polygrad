@@ -134,9 +134,7 @@ static PolyUOp *new_arena(PolyCtx *ctx, PolyUOp *device, size_t size) {
     return NULL;
   /* Current Tinygrad memory_plan_rewrite creates the arena with LaneKey's
    * exact device string; a backend enum would collapse CPU:1 into CPU. */
-  return poly_uop_new_buffer(
-      ctx, device, (int64_t)size, POLY_INT8, poly_ctx_next_unique_id(ctx)
-  );
+  return poly_uop_new_buffer(ctx, device, (int64_t)size, POLY_INT8, poly_ctx_next_unique_id(ctx));
 }
 
 static PolyUOp *arena_view(
@@ -150,8 +148,7 @@ static PolyUOp *arena_view(
   PolyUOp *start = poly_const_int(ctx, (int64_t)offset);
   PolyUOp *size = poly_const_int(ctx, (int64_t)nbytes);
   PolyUOp *slice = start && size ? poly_shrink_uop(ctx, arena, &start, &size, 1) : NULL;
-  return slice ? poly_uop1(ctx, POLY_OP_BITCAST, dtype, slice, poly_arg_none())
-               : NULL;
+  return slice ? poly_uop1(ctx, POLY_OP_BITCAST, dtype, slice, poly_arg_none()) : NULL;
 }
 
 PolyUOp *poly_memory_plan_rewrite(
@@ -228,9 +225,8 @@ PolyUOp *poly_memory_plan_rewrite(
   for (int i = 0; i < buffer_count; i++) {
     if (buffers[i].allocation_size > SIZE_MAX - total_memory) goto fail_lanes;
     total_memory += buffers[i].allocation_size;
-    buffers[i].lane = memory_lane_index(
-        &lanes, &lane_count, &lane_capacity, buffers[i].device, buffers[i].copy
-    );
+    buffers[i].lane =
+        memory_lane_index(&lanes, &lane_count, &lane_capacity, buffers[i].device, buffers[i].copy);
     if (buffers[i].lane < 0) goto fail_lanes;
   }
   if (total_memory > SIZE_MAX / 2) goto fail_lanes;
@@ -294,14 +290,16 @@ PolyUOp *poly_memory_plan_rewrite(
   PolyUOp *planned = poly_uop_substitute(ctx, linear, from, to, buffer_count);
   free(from);
   free(to);
-  for (int i = 0; i < lane_count; i++) poly_tlsf_allocator_destroy(lanes[i].allocator);
+  for (int i = 0; i < lane_count; i++)
+    poly_tlsf_allocator_destroy(lanes[i].allocator);
   free(lanes);
   free(buffers);
   return planned;
 
 fail_lanes:
   if (lanes)
-    for (int i = 0; i < lane_count; i++) poly_tlsf_allocator_destroy(lanes[i].allocator);
+    for (int i = 0; i < lane_count; i++)
+      poly_tlsf_allocator_destroy(lanes[i].allocator);
   free(lanes);
 fail:
   free(buffers);

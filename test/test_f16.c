@@ -84,12 +84,8 @@ TEST(f16, host_bfloat16_staging_executes_before_cpu_copy) {
   ASSERT_NOT_NULL(ctx);
   float input[4] = {1.0f, 2.0f, 3.0f, 4.0f};
   int64_t shape[1] = {4};
-  PolyTensor *host = poly_tensor_from_host(
-      ctx, input, sizeof(input), POLY_FLOAT32, shape, 1
-  );
-  PolyTensor *cast = poly_tensor_cast_by_id(
-      ctx, host, poly_dtype_id_by_name("bfloat16")
-  );
+  PolyTensor *host = poly_tensor_from_host(ctx, input, sizeof(input), POLY_FLOAT32, shape, 1);
+  PolyTensor *cast = poly_tensor_cast_by_id(ctx, host, poly_dtype_id_by_name("bfloat16"));
   PolyTensor *cpu = poly_tensor_to_device(ctx, cast, POLY_DEVICE_CPU);
   PolyTensor *sum = poly_tensor_alu2(ctx, POLY_OP_ADD, cpu, cpu);
   ASSERT_NOT_NULL(host);
@@ -107,9 +103,7 @@ TEST(f16, host_bfloat16_staging_executes_before_cpu_copy) {
   PolyTensor *realized = NULL;
   ASSERT_INT_EQ(poly_realize_tensors(ctx, &sum, 1, &realized), 0);
   uint16_t output[4] = {0};
-  ASSERT_INT_EQ(
-      poly_buffer_read(ctx, poly_tensor_uop(realized), output, sizeof(output)), 0
-  );
+  ASSERT_INT_EQ(poly_buffer_read(ctx, poly_tensor_uop(realized), output, sizeof(output)), 0);
   for (int i = 0; i < 4; i++)
     ASSERT_INT_EQ(output[i], f32_to_bf16_bits(input[i] * 2.0f));
 
@@ -137,7 +131,8 @@ TEST(f16, cast_f32_to_f16_e2e) {
   float in_data[] = {1.0f, 2.0f, -0.5f, 0.0f};
   uint16_t out_data[4] = {0};
 
-  PolyTestBufferView binds[] = {POLY_TEST_HOST_VIEW(in, in_data), POLY_TEST_HOST_VIEW(out, out_data)};
+  PolyTestBufferView binds[] = {
+      POLY_TEST_HOST_VIEW(in, in_data), POLY_TEST_HOST_VIEW(out, out_data)};
   int rc = poly_test_realize_buffer_views(ctx, sink, binds, 2);
   ASSERT_INT_EQ(rc, 0);
 
@@ -217,15 +212,8 @@ TEST(f16, cast_f32_to_f16_ieee_edges_e2e) {
   PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, casted));
 
   float in_data[] = {
-      0x1p-24f,
-      -0x1p-24f,
-      0x1.ff8p-15f,
-      0x1p-14f,
-      1.0f + 0x1p-11f,
-      1.0f + 0x3p-11f,
-      INFINITY,
-      -INFINITY,
-      NAN,
+      0x1p-24f,        -0x1p-24f, 0x1.ff8p-15f, 0x1p-14f, 1.0f + 0x1p-11f,
+      1.0f + 0x3p-11f, INFINITY,  -INFINITY,    NAN,
   };
   uint16_t out_data[9] = {0};
   PolyTestBufferView binds[] = {
@@ -266,7 +254,8 @@ TEST(f16, cast_f16_to_f32_e2e) {
   uint16_t in_data[] = {f32_to_f16_bits(1.0f), f32_to_f16_bits(3.5f), f32_to_f16_bits(-2.0f)};
   float out_data[3] = {0};
 
-  PolyTestBufferView binds[] = {POLY_TEST_HOST_VIEW(in, in_data), POLY_TEST_HOST_VIEW(out, out_data)};
+  PolyTestBufferView binds[] = {
+      POLY_TEST_HOST_VIEW(in, in_data), POLY_TEST_HOST_VIEW(out, out_data)};
   int rc = poly_test_realize_buffer_views(ctx, sink, binds, 2);
   ASSERT_INT_EQ(rc, 0);
 
@@ -290,16 +279,15 @@ TEST(f16, add_f16_e2e) {
   PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, sum));
 
   uint16_t a_data[] = {
-      f32_to_f16_bits(1.0f), f32_to_f16_bits(2.0f), f32_to_f16_bits(3.0f), f32_to_f16_bits(-1.0f)
-  };
+      f32_to_f16_bits(1.0f), f32_to_f16_bits(2.0f), f32_to_f16_bits(3.0f), f32_to_f16_bits(-1.0f)};
   uint16_t b_data[] = {
-      f32_to_f16_bits(10.0f), f32_to_f16_bits(20.0f), f32_to_f16_bits(30.0f), f32_to_f16_bits(1.0f)
-  };
+      f32_to_f16_bits(10.0f), f32_to_f16_bits(20.0f), f32_to_f16_bits(30.0f),
+      f32_to_f16_bits(1.0f)};
   uint16_t out_data[4] = {0};
 
   PolyTestBufferView binds[] = {
-      POLY_TEST_HOST_VIEW(a, a_data), POLY_TEST_HOST_VIEW(b, b_data), POLY_TEST_HOST_VIEW(out, out_data)
-  };
+      POLY_TEST_HOST_VIEW(a, a_data), POLY_TEST_HOST_VIEW(b, b_data),
+      POLY_TEST_HOST_VIEW(out, out_data)};
   int rc = poly_test_realize_buffer_views(ctx, sink, binds, 3);
   ASSERT_INT_EQ(rc, 0);
 
@@ -328,8 +316,8 @@ TEST(f16, mul_f16_e2e) {
   uint16_t out_data[3] = {0};
 
   PolyTestBufferView binds[] = {
-      POLY_TEST_HOST_VIEW(a, a_data), POLY_TEST_HOST_VIEW(b, b_data), POLY_TEST_HOST_VIEW(out, out_data)
-  };
+      POLY_TEST_HOST_VIEW(a, a_data), POLY_TEST_HOST_VIEW(b, b_data),
+      POLY_TEST_HOST_VIEW(out, out_data)};
   int rc = poly_test_realize_buffer_views(ctx, sink, binds, 3);
   ASSERT_INT_EQ(rc, 0);
 
@@ -407,7 +395,8 @@ TEST(f16, mixed_f16_to_f32_chain_e2e) {
   uint16_t in_data[] = {f32_to_f16_bits(1.0f), f32_to_f16_bits(2.0f), f32_to_f16_bits(3.0f)};
   float out_data[3] = {0};
 
-  PolyTestBufferView binds[] = {POLY_TEST_HOST_VIEW(in, in_data), POLY_TEST_HOST_VIEW(out, out_data)};
+  PolyTestBufferView binds[] = {
+      POLY_TEST_HOST_VIEW(in, in_data), POLY_TEST_HOST_VIEW(out, out_data)};
   int rc = poly_test_realize_buffer_views(ctx, sink, binds, 2);
   ASSERT_INT_EQ(rc, 0);
 
@@ -432,7 +421,8 @@ TEST(f16, cast_f64_to_f16_e2e) {
   double in_data[] = {1.5, -2.5};
   uint16_t out_data[2] = {0};
 
-  PolyTestBufferView binds[] = {POLY_TEST_HOST_VIEW(in, in_data), POLY_TEST_HOST_VIEW(out, out_data)};
+  PolyTestBufferView binds[] = {
+      POLY_TEST_HOST_VIEW(in, in_data), POLY_TEST_HOST_VIEW(out, out_data)};
   int rc = poly_test_realize_buffer_views(ctx, sink, binds, 2);
   ASSERT_INT_EQ(rc, 0);
 
@@ -456,7 +446,8 @@ TEST(f16, cast_f32_to_bf16_e2e) {
   float in_data[] = {1.0f, -2.0f, 0.5f};
   uint16_t out_data[3] = {0};
 
-  PolyTestBufferView binds[] = {POLY_TEST_HOST_VIEW(in, in_data), POLY_TEST_HOST_VIEW(out, out_data)};
+  PolyTestBufferView binds[] = {
+      POLY_TEST_HOST_VIEW(in, in_data), POLY_TEST_HOST_VIEW(out, out_data)};
   int rc = poly_test_realize_buffer_views(ctx, sink, binds, 2);
   ASSERT_INT_EQ(rc, 0);
 
@@ -481,7 +472,8 @@ TEST(f16, cast_f32_to_bf16_vector4_e2e) {
 
   float in_data[] = {1.0f, -2.0f, 0.5f, 3.25f};
   uint16_t out_data[4] = {0};
-  PolyTestBufferView binds[] = {POLY_TEST_HOST_VIEW(in, in_data), POLY_TEST_HOST_VIEW(out, out_data)};
+  PolyTestBufferView binds[] = {
+      POLY_TEST_HOST_VIEW(in, in_data), POLY_TEST_HOST_VIEW(out, out_data)};
   ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink, binds, 2), 0);
 
   for (int i = 0; i < 4; i++)
@@ -504,7 +496,8 @@ TEST(f16, cast_bf16_to_f32_e2e) {
   uint16_t in_data[] = {f32_to_bf16_bits(1.0f), f32_to_bf16_bits(-3.0f), f32_to_bf16_bits(0.25f)};
   float out_data[3] = {0};
 
-  PolyTestBufferView binds[] = {POLY_TEST_HOST_VIEW(in, in_data), POLY_TEST_HOST_VIEW(out, out_data)};
+  PolyTestBufferView binds[] = {
+      POLY_TEST_HOST_VIEW(in, in_data), POLY_TEST_HOST_VIEW(out, out_data)};
   int rc = poly_test_realize_buffer_views(ctx, sink, binds, 2);
   ASSERT_INT_EQ(rc, 0);
 
@@ -752,11 +745,8 @@ TEST(f16, saturated_gelu_family_backward_matches_pinned_backend) {
    * stabilization is symbolic.py:478-480; renderer-supported ops and dtype
    * legalization then intentionally produce backend-specific stored bits. */
   uint16_t input_data[5] = {
-      f32_to_f16_bits(-10.0f),
-      f32_to_f16_bits(-8.0f),
-      f32_to_f16_bits(-7.0f),
-      f32_to_f16_bits(-6.0f),
-      f32_to_f16_bits(-5.0f),
+      f32_to_f16_bits(-10.0f), f32_to_f16_bits(-8.0f), f32_to_f16_bits(-7.0f),
+      f32_to_f16_bits(-6.0f),  f32_to_f16_bits(-5.0f),
   };
   uint16_t expected_cpu[2][5] = {
       {0x0000u, 0x0000u, 0x0000u, 0x0000u, 0x0000u},
@@ -787,14 +777,11 @@ TEST(f16, saturated_gelu_family_backward_matches_pinned_backend) {
     PolyCtx *ctx = poly_ctx_new();
     ASSERT_NOT_NULL(ctx);
     PolyUOp *input = poly_test_buffer(ctx, POLY_FLOAT16, 5);
-    PolyUOp *activated =
-        quick ? poly_quick_gelu(ctx, input) : poly_gelu(ctx, input);
-    PolyUOp *loss =
-        poly_reduce_axis(ctx, POLY_OP_ADD, activated, (int64_t[]){0}, 1);
+    PolyUOp *activated = quick ? poly_quick_gelu(ctx, input) : poly_gelu(ctx, input);
+    PolyUOp *loss = poly_reduce_axis(ctx, POLY_OP_ADD, activated, (int64_t[]){0}, 1);
     PolyUOp *gradient = poly_grad(ctx, loss, input);
     PolyUOp *output = poly_test_buffer(ctx, POLY_FLOAT16, 5);
-    PolyUOp *sink =
-        gradient ? poly_sink1(ctx, poly_store_val(ctx, output, gradient)) : NULL;
+    PolyUOp *sink = gradient ? poly_sink1(ctx, poly_store_val(ctx, output, gradient)) : NULL;
     ASSERT_NOT_NULL(activated);
     ASSERT_NOT_NULL(loss);
     ASSERT_NOT_NULL(gradient);

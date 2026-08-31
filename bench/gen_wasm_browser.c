@@ -113,12 +113,8 @@ cleanup:
 int main(void) {
   const int sizes[] = {1024, 16384, 262144, 1048576};
   const KernelSpec specs[] = {
-      {"add", POLY_OP_ADD, 0},
-      {"mul", POLY_OP_MUL, 0},
-      {"sub", POLY_OP_SUB, 0},
-      {"neg", POLY_OP_NEG, 1},
-      {"sqrt", POLY_OP_SQRT, 1},
-      {"exp2", POLY_OP_EXP2, 1},
+      {"add", POLY_OP_ADD, 0}, {"mul", POLY_OP_MUL, 0},   {"sub", POLY_OP_SUB, 0},
+      {"neg", POLY_OP_NEG, 1}, {"sqrt", POLY_OP_SQRT, 1}, {"exp2", POLY_OP_EXP2, 1},
   };
 
   if (!ensure_dir("bench/browser")) {

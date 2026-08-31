@@ -100,12 +100,12 @@ typedef struct {
 typedef struct {
   /* Borrowed diagnostic name. */
   const char *name;
-  uint64_t candidates;       /* by-op rule candidates considered */
-  uint64_t attempts;         /* candidates that pass early-reject */
-  uint64_t pattern_matches;  /* pattern matched before callback */
-  uint64_t rewrites;         /* callback produced a different UOp */
-  double total_ms;           /* candidate handling time */
-  double rewrite_ms;         /* callback-produced rewrite time */
+  uint64_t candidates; /* by-op rule candidates considered */
+  uint64_t attempts; /* candidates that pass early-reject */
+  uint64_t pattern_matches; /* pattern matched before callback */
+  uint64_t rewrites; /* callback produced a different UOp */
+  double total_ms; /* candidate handling time */
+  double rewrite_ms; /* callback-produced rewrite time */
 } PolyRuleStats;
 
 /* PatternMatcher */
@@ -181,12 +181,7 @@ PolyArg poly_exec_alu(
 /* Pinned tinygrad symbolic.fold_bitcast: reinterpret one scalar CONST through
  * equal-width storage formats. Returns false for pointer/vector/formatless or
  * unequal-width dtypes. */
-bool poly_exec_bitcast_const(
-    PolyDType from,
-    PolyDType to,
-    PolyArg value,
-    PolyArg *out
-);
+bool poly_exec_bitcast_const(PolyDType from, PolyDType to, PolyArg value, PolyArg *out);
 
 /* Symbolic simplification rules */
 
@@ -195,12 +190,7 @@ PolyPatternMatcher *poly_symbolic(void);
 /* Pinned tinygrad's broader codegen-stage `sym` matcher. */
 PolyPatternMatcher *poly_sym(void);
 /* Pinned tinygrad/uop/symbolic.py validity-aware matcher components. */
-PolyUOp *poly_uop_given_valid(
-    PolyCtx *ctx,
-    PolyUOp *valid,
-    PolyUOp *uop,
-    bool try_simplex
-);
+PolyUOp *poly_uop_given_valid(PolyCtx *ctx, PolyUOp *valid, PolyUOp *uop, bool try_simplex);
 PolyPatternMatcher *poly_pm_simplify_valid(void);
 PolyPatternMatcher *poly_pm_drop_and_clauses(void);
 PolyPatternMatcher *poly_pm_clean_up_group_sink(void);

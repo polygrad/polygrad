@@ -90,8 +90,7 @@ static bool append_states(PolyUOp *u, PolyUOp ***states, int *count, int *cap) {
       if (!append_states(u->src[i], states, count, cap)) return false;
     return true;
   }
-  if (u->op != POLY_OP_AFTER && u->op != POLY_OP_BUFFER && u->op != POLY_OP_PARAM)
-    return false;
+  if (u->op != POLY_OP_AFTER && u->op != POLY_OP_BUFFER && u->op != POLY_OP_PARAM) return false;
   return append_uop(states, count, cap, u);
 }
 
@@ -133,9 +132,7 @@ fail:
 
 /* C index for current Tinygrad create_schedule's UOp-keyed maps. */
 static int kernel_index(ScheduleContext *sctx, PolyUOp *kernel) {
-  void *found = poly_map_get(
-      sctx->kernel_index, poly_ptr_hash(kernel), kernel, poly_ptr_eq
-  );
+  void *found = poly_map_get(sctx->kernel_index, poly_ptr_hash(kernel), kernel, poly_ptr_eq);
   if (found) return (int)((intptr_t)found - 1);
   if (sctx->n_kernels >= sctx->cap_kernels) {
     int next = sctx->cap_kernels ? sctx->cap_kernels * 2 : 8;
@@ -204,24 +201,19 @@ static bool kernel_in_list(PolyUOp *kernel, PolyUOp **items, int count) {
 
 /* Current Tinygrad create_schedule first loop: collect RAW facts for one AFTER. */
 static bool collect_after(ScheduleContext *sctx, PolyUOp *after) {
-  PolyUOp **kernels = NULL, **after_deps = NULL, **prev_kernels = NULL,
-            **prev_deps = NULL;
+  PolyUOp **kernels = NULL, **after_deps = NULL, **prev_kernels = NULL, **prev_deps = NULL;
   int n_kernels = 0, n_after_deps = 0, n_prev_kernels = 0, n_prev_deps = 0;
   if (!split_after(after, &kernels, &n_kernels, &after_deps, &n_after_deps)) return false;
 
   PolyUOp *prev_state = unwrap_src(after->src[0]);
   if (!prev_state) goto fail;
   if (prev_state->op == POLY_OP_AFTER &&
-      !split_after(
-          prev_state, &prev_kernels, &n_prev_kernels, &prev_deps, &n_prev_deps
-      ))
+      !split_after(prev_state, &prev_kernels, &n_prev_kernels, &prev_deps, &n_prev_deps))
     goto fail;
   free(prev_deps);
   prev_deps = NULL;
 
-  PolyUOp **new_kernels = n_kernels > 0
-                              ? malloc((size_t)n_kernels * sizeof(*new_kernels))
-                              : NULL;
+  PolyUOp **new_kernels = n_kernels > 0 ? malloc((size_t)n_kernels * sizeof(*new_kernels)) : NULL;
   int n_new_kernels = 0;
   if (n_kernels > 0 && !new_kernels) goto fail;
   for (int i = 0; i < n_kernels; i++)
@@ -229,10 +221,10 @@ static bool collect_after(ScheduleContext *sctx, PolyUOp *after) {
       new_kernels[n_new_kernels++] = kernels[i];
 
   PolyUOp *write_buf = poly_uop_buf_uop(sctx->ctx, after);
-  if (!write_buf || !append_write(
-                        sctx,
-                        (ScheduleWrite){after, prev_state, write_buf, new_kernels, n_new_kernels}
-                    )) {
+  if (!write_buf ||
+      !append_write(
+          sctx, (ScheduleWrite){after, prev_state, write_buf, new_kernels, n_new_kernels}
+      )) {
     free(new_kernels);
     goto fail;
   }
@@ -267,9 +259,7 @@ static bool collect_after(ScheduleContext *sctx, PolyUOp *after) {
     PolyUOp **ordered_states = read_states;
     int n_ordered_states = n_read_states, cap_ordered_states = cap_read_states;
     for (int j = 0; j < n_after_deps; j++) {
-      if (!append_states(
-              after_deps[j], &ordered_states, &n_ordered_states, &cap_ordered_states
-          )) {
+      if (!append_states(after_deps[j], &ordered_states, &n_ordered_states, &cap_ordered_states)) {
         free(ordered_states);
         goto fail;
       }
@@ -322,8 +312,7 @@ static bool add_war_edges(ScheduleContext *sctx) {
         continue;
       for (int k = 0; k < write->n_kernels; k++) {
         PolyUOp *writer = write->kernels[k];
-        if (writer == read->kernel || poly_uop_reachable(sctx->ctx, read->kernel, writer))
-          continue;
+        if (writer == read->kernel || poly_uop_reachable(sctx->ctx, read->kernel, writer)) continue;
         if (!add_edge(sctx, read->kernel, writer)) return false;
       }
     }
@@ -368,8 +357,10 @@ static bool append_linear_call(
 
 /* Free only create_schedule's temporary C collections. */
 static void schedule_context_destroy(ScheduleContext *sctx) {
-  for (int i = 0; i < sctx->n_kernels; i++) free(sctx->kernels[i].children);
-  for (int i = 0; i < sctx->n_writes; i++) free(sctx->writes[i].kernels);
+  for (int i = 0; i < sctx->n_kernels; i++)
+    free(sctx->kernels[i].children);
+  for (int i = 0; i < sctx->n_writes; i++)
+    free(sctx->writes[i].kernels);
   free(sctx->kernels);
   free(sctx->writes);
   free(sctx->reads);
@@ -419,9 +410,7 @@ PolyUOp *poly_create_schedule(PolyCtx *ctx, PolyUOp *kernel_graph) {
     goto fail;
   }
 
-  PolyUOp *linear = poly_uop(
-      ctx, POLY_OP_LINEAR, POLY_VOID, calls, n_calls, poly_arg_none()
-  );
+  PolyUOp *linear = poly_uop(ctx, POLY_OP_LINEAR, POLY_VOID, calls, n_calls, poly_arg_none());
   free(calls);
   poly_toposort_free(topo);
   schedule_context_destroy(&sctx);
@@ -445,17 +434,14 @@ static PolyUOp *lower_sink_to_linear(
       function->arg.kind == POLY_ARG_KERNEL_INFO)
     return NULL;
   bool use_cache = poly_getenv_flag_default("SCACHE", true);
-  PolyUOp *linear = use_cache
-                        ? poly_map_get(
-                              ctx->schedule_cache, poly_ptr_hash(function), function,
-                              poly_ptr_eq)
-                        : NULL;
+  PolyUOp *linear =
+      use_cache ? poly_map_get(ctx->schedule_cache, poly_ptr_hash(function), function, poly_ptr_eq)
+                : NULL;
   if (linear) return linear;
   PolyUOp *kernel_graph = poly_get_kernel_graph(ctx, function);
   linear = kernel_graph ? poly_create_schedule(ctx, kernel_graph) : NULL;
   if (linear && use_cache)
-    poly_map_set(
-        ctx->schedule_cache, poly_ptr_hash(function), function, linear, poly_ptr_eq);
+    poly_map_set(ctx->schedule_cache, poly_ptr_hash(function), function, linear, poly_ptr_eq);
   return linear;
 }
 
@@ -463,8 +449,7 @@ static PolyUOp *lower_sink_to_linear(
 static PolyPatternMatcher *pm_schedule(void) {
   static _Thread_local PolyPatternMatcher *pm = NULL;
   if (pm) return pm;
-  PolyRule rules[] = {{
-      poly_upat_op(POLY_OP_SINK, NULL, 0, "function"), lower_sink_to_linear}};
+  PolyRule rules[] = {{poly_upat_op(POLY_OP_SINK, NULL, 0, "function"), lower_sink_to_linear}};
   pm = poly_pm_thread_cache(poly_pm_new(rules, 1));
   return pm;
 }
@@ -473,10 +458,9 @@ static PolyPatternMatcher *pm_schedule(void) {
 static PolyUOp *rebuild_uop(PolyCtx *ctx, PolyUOp *u, PolyUOp **src) {
   if (u->tag || u->tag_arg.kind != POLY_ARG_NONE)
     return poly_uop_tagged_arg(
-        ctx, u->op, poly_rebuild_dtype(u, src), src, u->n_src, u->arg,
-        u->tag, u->tag_arg);
-  return poly_uop(
-      ctx, u->op, poly_rebuild_dtype(u, src), src, u->n_src, u->arg);
+        ctx, u->op, poly_rebuild_dtype(u, src), src, u->n_src, u->arg, u->tag, u->tag_arg
+    );
+  return poly_uop(ctx, u->op, poly_rebuild_dtype(u, src), src, u->n_src, u->arg);
 }
 
 /* Current Tinygrad schedule/__init__.py:create_new_buffer. */
@@ -489,17 +473,13 @@ static PolyUOp *create_new_buffer(PolyCtx *ctx, PolyUOp *buffer) {
   if (size < 0) return NULL;
   PolyUOp *device = poly_uop_device_uop_cached(ctx, buffer, NULL);
   return device
-             ? poly_uop_new_buffer(
-                   ctx, device, size, buffer->dtype,
-                   poly_ctx_next_unique_id(ctx)
-               )
+             ? poly_uop_new_buffer(ctx, device, size, buffer->dtype, poly_ctx_next_unique_id(ctx))
              : NULL;
 }
 
 static bool is_buffer_template(PolyUOp *u) {
-  return u && u->op == POLY_OP_BUFFER && u->n_src == 1 &&
-         u->arg.kind == POLY_ARG_PARAM && u->arg.param &&
-         u->arg.param->addrspace == POLY_ADDR_GLOBAL;
+  return u && u->op == POLY_OP_BUFFER && u->n_src == 1 && u->arg.kind == POLY_ARG_PARAM &&
+         u->arg.param && u->arg.param->addrspace == POLY_ADDR_GLOBAL;
 }
 
 static bool param_slot(PolyUOp *u, int *slot) {
@@ -540,9 +520,7 @@ static PolyUOp *resolve_schedule_arg(
     }
   } else if (u->n_src > 0) {
     PolyUOp *src_stack[16];
-    PolyUOp **src = u->n_src > 16
-                        ? malloc((size_t)u->n_src * sizeof(*src))
-                        : src_stack;
+    PolyUOp **src = u->n_src > 16 ? malloc((size_t)u->n_src * sizeof(*src)) : src_stack;
     if (!src) return NULL;
     bool changed = false;
     int first = (u->op == POLY_OP_CALL || u->op == POLY_OP_FUNCTION) ? 1 : 0;
@@ -567,13 +545,7 @@ typedef struct {
   PolyUOp *value;
 } LinearBind;
 
-static bool append_bind(
-    LinearBind **binds,
-    int *count,
-    int *capacity,
-    int slot,
-    PolyUOp *value
-) {
+static bool append_bind(LinearBind **binds, int *count, int *capacity, int slot, PolyUOp *value) {
   for (int i = 0; i < *count; i++) {
     if ((*binds)[i].slot != slot) continue;
     (*binds)[i].value = value;
@@ -594,8 +566,8 @@ static PolyUOp *bind_value(PolyCtx *ctx, PolyUOp *bound) {
   if (!poly_uop_is_bound_var(bound)) return NULL;
   PolyUOp *variable = bound->src[0];
   return poly_uop(
-      ctx, POLY_OP_PARAM, variable->dtype, variable->src, variable->n_src,
-      variable->arg);
+      ctx, POLY_OP_PARAM, variable->dtype, variable->src, variable->n_src, variable->arg
+  );
 }
 
 static int bind_slot(PolyUOp *u, LinearBind *binds, int n_binds) {
@@ -611,12 +583,7 @@ static int bind_slot(PolyUOp *u, LinearBind *binds, int n_binds) {
 
 /* Current resolve_linear_call.apply_binds substitutes scalar PARAMs inside
  * each non-nested CALL source while CALL bodies remain lexical scopes. */
-static PolyUOp *apply_binds(
-    PolyCtx *ctx,
-    PolyUOp *call,
-    LinearBind *binds,
-    int n_binds
-) {
+static PolyUOp *apply_binds(PolyCtx *ctx, PolyUOp *call, LinearBind *binds, int n_binds) {
   if (n_binds == 0) return call;
   PolyUOp **from = NULL, **to = NULL;
   int n_sub = 0, cap = 0;
@@ -628,7 +595,8 @@ static PolyUOp *apply_binds(
       int found = bind_slot(topo[j], binds, n_binds);
       if (found < 0) continue;
       bool present = false;
-      for (int k = 0; k < n_sub; k++) present |= from[k] == topo[j];
+      for (int k = 0; k < n_sub; k++)
+        present |= from[k] == topo[j];
       if (present) continue;
       if (n_sub >= cap) {
         int next = cap ? cap * 2 : 8;
@@ -684,8 +652,8 @@ static PolyUOp *resolve_linear_call(
     LinearBind *outer_binds,
     int n_outer_binds
 ) {
-  if (!ctx || !linear_call || linear_call->op != POLY_OP_CALL ||
-      linear_call->n_src < 1 || linear_call->src[0]->op != POLY_OP_LINEAR)
+  if (!ctx || !linear_call || linear_call->op != POLY_OP_CALL || linear_call->n_src < 1 ||
+      linear_call->src[0]->op != POLY_OP_LINEAR)
     return NULL;
 
   PolyMap *buffers = poly_map_new(32), *memo = poly_map_new(128);
@@ -696,7 +664,8 @@ static PolyUOp *resolve_linear_call(
   }
   PolyUOp *linear = resolve_schedule_arg(
       ctx, linear_call->src[0], linear_call->n_src > 1 ? &linear_call->src[1] : NULL,
-      linear_call->n_src - 1, buffers, memo);
+      linear_call->n_src - 1, buffers, memo
+  );
   poly_map_destroy(buffers);
   poly_map_destroy(memo);
   if (!linear || linear->op != POLY_OP_LINEAR) return NULL;
@@ -704,14 +673,11 @@ static PolyUOp *resolve_linear_call(
   LinearBind *binds = NULL;
   int n_binds = 0, cap_binds = 0;
   for (int i = 0; i < n_outer_binds; i++)
-    if (!append_bind(
-            &binds, &n_binds, &cap_binds, outer_binds[i].slot,
-            outer_binds[i].value))
+    if (!append_bind(&binds, &n_binds, &cap_binds, outer_binds[i].slot, outer_binds[i].value))
       goto fail;
   for (int i = 1; i < linear_call->n_src; i++) {
     PolyUOp *value = bind_value(ctx, linear_call->src[i]);
-    if (value && !append_bind(&binds, &n_binds, &cap_binds, i - 1, value))
-      goto fail;
+    if (value && !append_bind(&binds, &n_binds, &cap_binds, i - 1, value)) goto fail;
   }
 
   PolyUOp **calls = NULL;
@@ -719,20 +685,17 @@ static PolyUOp *resolve_linear_call(
   for (int i = 0; i < linear->n_src; i++) {
     PolyUOp *call = linear->src[i];
     if (!call) goto fail_calls;
-    if (call->op == POLY_OP_CALL && call->n_src > 0 &&
-        call->src[0]->op == POLY_OP_LINEAR) {
+    if (call->op == POLY_OP_CALL && call->n_src > 0 && call->src[0]->op == POLY_OP_LINEAR) {
       PolyUOp *nested = resolve_linear_call(ctx, call, binds, n_binds);
       if (!nested) goto fail_calls;
       for (int j = 0; j < nested->n_src; j++)
         if (!append_uop(&calls, &n_calls, &cap_calls, nested->src[j])) goto fail_calls;
     } else {
       PolyUOp *resolved = apply_binds(ctx, call, binds, n_binds);
-      if (!resolved || !append_uop(&calls, &n_calls, &cap_calls, resolved))
-        goto fail_calls;
+      if (!resolved || !append_uop(&calls, &n_calls, &cap_calls, resolved)) goto fail_calls;
     }
   }
-  PolyUOp *ret = poly_uop(
-      ctx, POLY_OP_LINEAR, POLY_VOID, calls, n_calls, linear->arg);
+  PolyUOp *ret = poly_uop(ctx, POLY_OP_LINEAR, POLY_VOID, calls, n_calls, linear->arg);
   free(calls);
   free(binds);
   return ret;
@@ -763,12 +726,7 @@ static bool append_var(PolyUOp ***vars, int *count, int *capacity, PolyUOp *var)
   return true;
 }
 
-static bool collect_used_vars(
-    PolyCtx *ctx,
-    PolyUOp *linear,
-    PolyUOp ***vars_out,
-    int *count_out
-) {
+static bool collect_used_vars(PolyCtx *ctx, PolyUOp *linear, PolyUOp ***vars_out, int *count_out) {
   PolyUOp **vars = NULL;
   int count = 0, capacity = 0;
   for (int i = 0; i < linear->n_src; i++) {
@@ -779,8 +737,7 @@ static bool collect_used_vars(
     if (!topo) goto fail;
     bool ok = true;
     for (int j = 0; j < n_topo; j++)
-      if (poly_uop_is_alu_param(topo[j]) &&
-          !append_var(&vars, &count, &capacity, topo[j])) {
+      if (poly_uop_is_alu_param(topo[j]) && !append_var(&vars, &count, &capacity, topo[j])) {
         ok = false;
         break;
       }
@@ -802,17 +759,14 @@ static bool collect_bindings(
     PolyVarBinding **bindings_out,
     int *count_out
 ) {
-  PolyVarBinding *bindings = n_used_vars
-                                  ? calloc((size_t)n_used_vars, sizeof(*bindings))
-                                  : NULL;
+  PolyVarBinding *bindings = n_used_vars ? calloc((size_t)n_used_vars, sizeof(*bindings)) : NULL;
   if (n_used_vars && !bindings) return false;
   int count = 0;
   for (int i = 1; i < big_call->n_src; i++) {
     PolyUOp *bound = big_call->src[i];
     if (!poly_uop_is_bound_var(bound)) continue;
     PolyUOp *var = bound->src[0], *value = bound->src[1]->src[1], *used = NULL;
-    if (!value || value->op != POLY_OP_CONST || value->arg.kind != POLY_ARG_INT)
-      goto fail;
+    if (!value || value->op != POLY_OP_CONST || value->arg.kind != POLY_ARG_INT) goto fail;
     for (int j = 0; j < n_used_vars; j++)
       if (linear_var_eq(used_vars[j], var)) {
         used = used_vars[j];
@@ -849,14 +803,13 @@ PolyUOp *poly_create_linear_with_vars(
 
   /* tinygrad@2026-08-22/a9069c177a9d schedule/__init__.py:183-186 keeps
    * linear_call for held-buffer discovery after resolving its LINEAR body. */
-  PolyUOp *linear_call = poly_graph_rewrite_ctx_ex2(
-      ctx, big_call, pm_schedule(), NULL, false, true);
+  PolyUOp *linear_call =
+      poly_graph_rewrite_ctx_ex2(ctx, big_call, pm_schedule(), NULL, false, true);
   if (!linear_call) return NULL;
   PolyUOp *linear = NULL;
   if (linear_call->op == POLY_OP_LINEAR)
     linear = linear_call;
-  else if (linear_call->op == POLY_OP_CALL && linear_call->n_src >= 1 &&
-           linear_call->src[0]->op == POLY_OP_LINEAR)
+  else if (linear_call->op == POLY_OP_CALL && linear_call->n_src >= 1 && linear_call->src[0]->op == POLY_OP_LINEAR)
     linear = resolve_linear_call(ctx, linear_call, NULL, 0);
   if (!linear || linear->op != POLY_OP_LINEAR) return NULL;
   linear = poly_copy_from_store(ctx, linear);
@@ -867,8 +820,7 @@ PolyUOp *poly_create_linear_with_vars(
   if (!collect_used_vars(ctx, linear, &used_vars, &n_used_vars)) return NULL;
   PolyVarBinding *bindings = NULL;
   int n_bindings = 0;
-  if (!collect_bindings(
-          big_call, used_vars, n_used_vars, &bindings, &n_bindings)) {
+  if (!collect_bindings(big_call, used_vars, n_used_vars, &bindings, &n_bindings)) {
     free(used_vars);
     return NULL;
   }
@@ -877,9 +829,7 @@ PolyUOp *poly_create_linear_with_vars(
   /* Current Tinygrad schedule/__init__.py:create_linear_with_vars records the
    * resolved LINEAR and returns LINEAR(), so capture never executes it. */
   if (ctx->active_jit_capture) {
-    if (poly_jit_record_linear(
-            ctx->active_jit_capture, linear, bindings, n_bindings
-        ) != 0) {
+    if (poly_jit_record_linear(ctx->active_jit_capture, linear, bindings, n_bindings) != 0) {
       free(bindings);
       return NULL;
     }
@@ -915,8 +865,8 @@ static bool same_copy_index(PolyUOp *left, PolyUOp *right) {
   if (!left || !right) return false;
   if (left == right) return true;
   return left->op == POLY_OP_CONST && right->op == POLY_OP_CONST &&
-         left->arg.kind == POLY_ARG_INT && right->arg.kind == POLY_ARG_INT &&
-         left->arg.i == 0 && right->arg.i == 0;
+         left->arg.kind == POLY_ARG_INT && right->arg.kind == POLY_ARG_INT && left->arg.i == 0 &&
+         right->arg.i == 0;
 }
 
 /* Current Tinygrad schedule/__init__.py:assert_all_same_devices. */
@@ -930,7 +880,8 @@ static bool assert_all_same_devices(PolyCtx *ctx, PolyUOp *ast) {
     if (topo[i]->op != POLY_OP_PARAM) continue;
     PolyUOp *current = poly_uop_device_uop_cached(ctx, topo[i], NULL);
     if (!current) continue;
-    if (!device) device = current;
+    if (!device)
+      device = current;
     else if (device != current) {
       fprintf(stderr, "polygrad: all buffers must be on the same device\n");
       ok = false;
@@ -960,8 +911,8 @@ static PolyUOp *simplify_copy_kernel(PolyCtx *ctx, PolyUOp *sink) {
 
 /* Current tinygrad schedule/__init__.py:copy_kernel_to_copy_uop. */
 static PolyUOp *copy_kernel_to_copy_uop(PolyCtx *ctx, PolyUOp *call) {
-  if (!ctx || !call || call->op != POLY_OP_CALL || call->n_src < 3 ||
-      !call->src[0] || call->src[0]->op != POLY_OP_SINK)
+  if (!ctx || !call || call->op != POLY_OP_CALL || call->n_src < 3 || !call->src[0] ||
+      call->src[0]->op != POLY_OP_SINK)
     return call;
   PolyUOp *dst_uop = call->src[1], *src_uop = call->src[2];
   PolyUOp *dst_device = poly_uop_device_uop_cached(ctx, dst_uop, NULL);
@@ -969,8 +920,7 @@ static PolyUOp *copy_kernel_to_copy_uop(PolyCtx *ctx, PolyUOp *call) {
   bool same_device = dst_device == src_device;
   bool disk = dst_device && dst_device->arg.kind == POLY_ARG_STRING &&
               strncmp(dst_device->arg.str, "DISK", 4) == 0;
-  if (same_device && !disk)
-    return assert_all_same_devices(ctx, call->src[0]) ? call : NULL;
+  if (same_device && !disk) return assert_all_same_devices(ctx, call->src[0]) ? call : NULL;
 
   PolyUOp *sink = simplify_copy_kernel(ctx, call->src[0]);
   if (!sink || sink->op != POLY_OP_SINK || sink->n_src != 1)
@@ -986,18 +936,15 @@ static PolyUOp *copy_kernel_to_copy_uop(PolyCtx *ctx, PolyUOp *call) {
   if (!effect || effect->op != POLY_OP_STORE || effect->n_src != 2)
     return assert_all_same_devices(ctx, sink) ? call : NULL;
   PolyUOp *dst = effect->src[0], *src = effect->src[1];
-  if (!dst || !src || dst->op != POLY_OP_INDEX || src->op != POLY_OP_INDEX ||
-      dst->n_src != 2 || src->n_src != 2 ||
-      !dst->src[0] || !src->src[0] ||
-      dst->src[0]->op != POLY_OP_PARAM || src->src[0]->op != POLY_OP_PARAM ||
-      !same_copy_index(dst->src[1], src->src[1]) ||
+  if (!dst || !src || dst->op != POLY_OP_INDEX || src->op != POLY_OP_INDEX || dst->n_src != 2 ||
+      src->n_src != 2 || !dst->src[0] || !src->src[0] || dst->src[0]->op != POLY_OP_PARAM ||
+      src->src[0]->op != POLY_OP_PARAM || !same_copy_index(dst->src[1], src->src[1]) ||
       (range && dst->src[1] != range))
     return assert_all_same_devices(ctx, sink) ? call : NULL;
   PolyUOp *dst_param = dst->src[0], *src_param = src->src[0];
   if (dst_param->arg.kind != POLY_ARG_PARAM || !dst_param->arg.param ||
       src_param->arg.kind != POLY_ARG_PARAM || !src_param->arg.param ||
-      dst_param->arg.param->slot != 0 || src_param->arg.param->slot != 1 ||
-      !dst_device)
+      dst_param->arg.param->slot != 0 || src_param->arg.param->slot != 1 || !dst_device)
     return assert_all_same_devices(ctx, sink) ? call : NULL;
 
   PolyUOp *copy = poly_copy_to_device_uop(ctx, src_param, dst_device);
@@ -1006,9 +953,7 @@ static PolyUOp *copy_kernel_to_copy_uop(PolyCtx *ctx, PolyUOp *call) {
   if (!call_src) return NULL;
   memcpy(call_src, call->src, (size_t)call->n_src * sizeof(*call_src));
   call_src[0] = copy;
-  PolyUOp *ret = poly_uop(
-      ctx, POLY_OP_CALL, call->dtype, call_src, call->n_src, call->arg
-  );
+  PolyUOp *ret = poly_uop(ctx, POLY_OP_CALL, call->dtype, call_src, call->n_src, call->arg);
   free(call_src);
   return ret;
 }
@@ -1018,9 +963,7 @@ static PolyUOp *copy_kernel_to_copy_uop(PolyCtx *ctx, PolyUOp *call) {
  * rejected instead of entering shared codegen. */
 PolyUOp *poly_copy_from_store(PolyCtx *ctx, PolyUOp *linear) {
   if (!ctx || !linear || linear->op != POLY_OP_LINEAR) return NULL;
-  PolyUOp **calls = linear->n_src > 0
-                        ? malloc((size_t)linear->n_src * sizeof(*calls))
-                        : NULL;
+  PolyUOp **calls = linear->n_src > 0 ? malloc((size_t)linear->n_src * sizeof(*calls)) : NULL;
   if (linear->n_src > 0 && !calls) return NULL;
   bool changed = false;
   for (int i = 0; i < linear->n_src; i++) {
@@ -1032,10 +975,7 @@ PolyUOp *poly_copy_from_store(PolyCtx *ctx, PolyUOp *linear) {
     changed |= calls[i] != linear->src[i];
   }
   PolyUOp *ret = changed
-                     ? poly_uop(
-                           ctx, POLY_OP_LINEAR, POLY_VOID, calls,
-                           linear->n_src, linear->arg
-                       )
+                     ? poly_uop(ctx, POLY_OP_LINEAR, POLY_VOID, calls, linear->n_src, linear->arg)
                      : linear;
   free(calls);
   return ret;

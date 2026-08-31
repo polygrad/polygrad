@@ -46,7 +46,8 @@ static void mlp_restore_env(MlpEnvSave *s) {
 /* Tests */
 
 TEST(mlp, create_simple) {
-  PolyInstance *inst = poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO);
+  PolyInstance *inst =
+      poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   /* 2 weights + 2 biases = 4 params */
@@ -85,9 +86,8 @@ TEST(mlp, create_simple) {
 }
 
 TEST(mlp, staged_builder_retains_complete_physical_template) {
-  PolyInstance *inst = poly_mlp_from_json(
-      simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_INTERP
-  );
+  PolyInstance *inst =
+      poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_INTERP);
 
   ASSERT_NOT_NULL(inst);
   ASSERT_INT_EQ(poly_ctx_get_preferred_device(poly_instance_ctx(inst)), POLY_DEVICE_INTERP);
@@ -102,8 +102,7 @@ TEST(mlp, staged_builder_retains_complete_physical_template) {
   PolyUOp **topo = poly_toposort_alloc(poly_instance_ctx(inst), sink, &n);
   ASSERT_NOT_NULL(topo);
   for (int i = 0; i < n; i++)
-    if (topo[i]->op == POLY_OP_BUFFER)
-      ASSERT_INT_EQ(poly_uop_device(topo[i]), POLY_DEVICE_INTERP);
+    if (topo[i]->op == POLY_OP_BUFFER) ASSERT_INT_EQ(poly_uop_device(topo[i]), POLY_DEVICE_INTERP);
   free(topo);
 
   poly_instance_free(inst);
@@ -111,7 +110,8 @@ TEST(mlp, staged_builder_retains_complete_physical_template) {
 }
 
 TEST(mlp, staged_builder_does_not_use_ctx_registry) {
-  PolyInstance *inst = poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO);
+  PolyInstance *inst =
+      poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
   ASSERT_INT_EQ(poly_ctx_named_count(poly_instance_ctx(inst)), 0);
   poly_instance_free(inst);
@@ -119,7 +119,8 @@ TEST(mlp, staged_builder_does_not_use_ctx_registry) {
 }
 
 TEST(mlp, create_no_bias) {
-  PolyInstance *inst = poly_mlp_from_json(no_bias_spec, (int)strlen(no_bias_spec), POLY_DEVICE_AUTO);
+  PolyInstance *inst =
+      poly_mlp_from_json(no_bias_spec, (int)strlen(no_bias_spec), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   /* 1 weight, no bias */
@@ -138,8 +139,10 @@ TEST(mlp, create_no_bias) {
 
 TEST(mlp, deterministic_init) {
   /* Same seed should produce identical weights */
-  PolyInstance *inst1 = poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO);
-  PolyInstance *inst2 = poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO);
+  PolyInstance *inst1 =
+      poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO);
+  PolyInstance *inst2 =
+      poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst1);
   ASSERT_NOT_NULL(inst2);
 
@@ -160,7 +163,8 @@ TEST(mlp, cross_seed_divergence) {
   const char *spec_seed99 = "{\"layers\":[2,4,1],\"activation\":\"relu\",\"bias\":true,"
                             "\"loss\":\"mse\",\"batch_size\":1,\"seed\":99}";
 
-  PolyInstance *inst1 = poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO);
+  PolyInstance *inst1 =
+      poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO);
   PolyInstance *inst2 = poly_mlp_from_json(spec_seed99, (int)strlen(spec_seed99), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst1);
   ASSERT_NOT_NULL(inst2);
@@ -186,7 +190,8 @@ TEST(mlp, cross_seed_divergence) {
 
 TEST(mlp, kaiming_bounds) {
   /* Kaiming init: values should be within [-sqrt(6/fan_in), +sqrt(6/fan_in)] */
-  PolyInstance *inst = poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO);
+  PolyInstance *inst =
+      poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   /* Layer 0 weight: fan_in = 2, bound = sqrt(6/2) = sqrt(3) ~ 1.732 */
@@ -208,7 +213,8 @@ TEST(mlp, kaiming_bounds) {
 }
 
 TEST(mlp, forward_produces_output) {
-  PolyInstance *inst = poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO);
+  PolyInstance *inst =
+      poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   float x[] = {1.0f, 2.0f};
@@ -240,7 +246,8 @@ TEST(mlp, forward_produces_output) {
 
 TEST(mlp, forward_deterministic) {
   /* Same instance, same input -> same output */
-  PolyInstance *inst = poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO);
+  PolyInstance *inst =
+      poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   float x[] = {1.0f, 2.0f};
@@ -284,7 +291,8 @@ TEST(mlp, forward_and_train_replay_stats_plateau) {
   setenv("POLY_PCACHE", "1", 1);
   setenv("SCACHE", "1", 1);
 
-  PolyInstance *inst = poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO);
+  PolyInstance *inst =
+      poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
   PolyCtx *ctx = poly_instance_ctx(inst);
   ASSERT_NOT_NULL(ctx);
@@ -292,7 +300,8 @@ TEST(mlp, forward_and_train_replay_stats_plateau) {
   float x[] = {1.0f, 2.0f};
   float y[] = {5.0f};
   PolyIOBinding forward_io[] = {POLY_IO_BINDING_ARRAY("x", x, POLY_FLOAT32)};
-  PolyIOBinding train_io[] = {POLY_IO_BINDING_ARRAY("x", x, POLY_FLOAT32), POLY_IO_BINDING_ARRAY("y", y, POLY_FLOAT32)};
+  PolyIOBinding train_io[] = {
+      POLY_IO_BINDING_ARRAY("x", x, POLY_FLOAT32), POLY_IO_BINDING_ARRAY("y", y, POLY_FLOAT32)};
 
   ASSERT_INT_EQ(poly_instance_forward(inst, forward_io, 1), 0);
   PolyCtxStats forward_first = {0};
@@ -490,7 +499,8 @@ TEST(mlp, train_batch2_mse) {
 
   float x[] = {0.5f, 0.5f, 0.5f, 0.5f};
   float y[] = {0.3f, 0.3f, 0.3f, 0.3f};
-  PolyIOBinding io[] = {POLY_IO_BINDING_ARRAY("x", x, POLY_FLOAT32), POLY_IO_BINDING_ARRAY("y", y, POLY_FLOAT32)};
+  PolyIOBinding io[] = {
+      POLY_IO_BINDING_ARRAY("x", x, POLY_FLOAT32), POLY_IO_BINDING_ARRAY("y", y, POLY_FLOAT32)};
 
   float first_loss = -1.0f, prev_loss = 1e10f;
   for (int step = 0; step < 50; step++) {
@@ -520,7 +530,8 @@ TEST(mlp, train_batch4_cross_entropy) {
   memset(y, 0, sizeof(y));
   for (int i = 0; i < 4; i++)
     y[i * 3 + (i % 3)] = 1.0f;
-  PolyIOBinding io[] = {POLY_IO_BINDING_ARRAY("x", x, POLY_FLOAT32), POLY_IO_BINDING_ARRAY("y", y, POLY_FLOAT32)};
+  PolyIOBinding io[] = {
+      POLY_IO_BINDING_ARRAY("x", x, POLY_FLOAT32), POLY_IO_BINDING_ARRAY("y", y, POLY_FLOAT32)};
 
   float first_loss = -1.0f, prev_loss = 1e10f;
   for (int step = 0; step < 30; step++) {

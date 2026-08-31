@@ -33,18 +33,11 @@ static void pat_restore_env(PatEnvSave *s) {
   s->value = NULL;
 }
 
-static PolyUOp *rewrite_accept_a_equal_two(
-    PolyCtx *ctx,
-    PolyUOp *root,
-    const PolyBindings *binds
-) {
+static PolyUOp *rewrite_accept_a_equal_two(PolyCtx *ctx, PolyUOp *root, const PolyBindings *binds) {
   (void)ctx;
   (void)root;
   PolyUOp *a = poly_bind(binds, "a");
-  return a && a->op == POLY_OP_CONST &&
-                 a->arg.kind == POLY_ARG_INT && a->arg.i == 2
-             ? a
-             : NULL;
+  return a && a->op == POLY_OP_CONST && a->arg.kind == POLY_ARG_INT && a->arg.i == 2 ? a : NULL;
 }
 
 /* Pattern matching tests */
@@ -218,8 +211,7 @@ TEST(pat, nested_commutative_backtracks_across_later_binding) {
    * the repeated outer "x" binding rejects the first locally valid ordering.
    */
   PolyUPat *p = poly_upat_op2c(
-      POLY_OP_ADD,
-      poly_upat_op2c(POLY_OP_ADD, poly_upat_any("a"), poly_upat_any("x"), NULL),
+      POLY_OP_ADD, poly_upat_op2c(POLY_OP_ADD, poly_upat_any("a"), poly_upat_any("x"), NULL),
       poly_upat_any("x"), NULL
   );
   PolyCtx *ctx = poly_ctx_new();
@@ -271,8 +263,7 @@ TEST(pat, or_casted_is_direct_first_and_one_wrapper) {
   ASSERT_PTR_EQ(poly_bind(&binds, "x"), cast1);
   poly_upat_free(wild);
 
-  PolyUPat *constant =
-      poly_upat_or_casted(poly_upat_op(POLY_OP_CONST, NULL, 0, NULL));
+  PolyUPat *constant = poly_upat_or_casted(poly_upat_op(POLY_OP_CONST, NULL, 0, NULL));
   binds.n = 0;
   ASSERT_TRUE(poly_upat_match(constant, cast1, &binds));
   binds.n = 0;
@@ -585,10 +576,7 @@ TEST(pat, const_like_preserves_reference_shape) {
    * EXPANDs it directly to the reference shape (uop/ops.py:581-583). */
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *ref = poly_reshape(
-      ctx,
-      poly_test_buffer_on_device(ctx, POLY_INT32, 0, POLY_DEVICE_CPU),
-      (int64_t[]){2, 0, 3},
-      3
+      ctx, poly_test_buffer_on_device(ctx, POLY_INT32, 0, POLY_DEVICE_CPU), (int64_t[]){2, 0, 3}, 3
   );
   PolyUOp *like = poly_const_like_int(ctx, ref, -7);
   ASSERT_NOT_NULL(like);
@@ -751,21 +739,16 @@ TEST(pat, graph_rewrite_call_args_do_not_inherit_callee_body_gating) {
 
   const PolyOps opaque_ops[] = {POLY_OP_CALL, POLY_OP_FUNCTION};
   for (int op_idx = 0; op_idx < 2; op_idx++) {
-    PolyUOp *opaque = poly_uop2(
-        ctx, opaque_ops[op_idx], POLY_FLOAT32, callee, shared_neg, poly_arg_none()
-    );
-    PolyUOp *result =
-        poly_graph_rewrite_ctx_ex2(ctx, opaque, pm, NULL, false, false);
+    PolyUOp *opaque =
+        poly_uop2(ctx, opaque_ops[op_idx], POLY_FLOAT32, callee, shared_neg, poly_arg_none());
+    PolyUOp *result = poly_graph_rewrite_ctx_ex2(ctx, opaque, pm, NULL, false, false);
     ASSERT_NOT_NULL(result);
     ASSERT_INT_EQ(result->op, opaque_ops[op_idx]);
     ASSERT_PTR_EQ(result->src[0], callee);
     ASSERT_INT_EQ(result->src[1]->op, POLY_OP_CONST);
 
-    PolyUOp *body_only = poly_uop1(
-        ctx, opaque_ops[op_idx], POLY_FLOAT32, callee, poly_arg_none()
-    );
-    PolyUOp *body_only_result =
-        poly_graph_rewrite_ctx_ex2(ctx, body_only, pm, NULL, false, false);
+    PolyUOp *body_only = poly_uop1(ctx, opaque_ops[op_idx], POLY_FLOAT32, callee, poly_arg_none());
+    PolyUOp *body_only_result = poly_graph_rewrite_ctx_ex2(ctx, body_only, pm, NULL, false, false);
     ASSERT_PTR_EQ(body_only_result, body_only);
     ASSERT_PTR_EQ(body_only_result->src[0], callee);
   }
@@ -790,20 +773,16 @@ TEST(pat, walk_rewrite_call_args_do_not_inherit_callee_body_gating) {
 
   const PolyOps opaque_ops[] = {POLY_OP_CALL, POLY_OP_FUNCTION};
   for (int op_idx = 0; op_idx < 2; op_idx++) {
-    PolyUOp *opaque = poly_uop2(
-        ctx, opaque_ops[op_idx], POLY_FLOAT32, callee, shared_neg, poly_arg_none()
-    );
+    PolyUOp *opaque =
+        poly_uop2(ctx, opaque_ops[op_idx], POLY_FLOAT32, callee, shared_neg, poly_arg_none());
     PolyUOp *result = poly_graph_walk_rewrite(ctx, opaque, pm, NULL, NULL, false);
     ASSERT_NOT_NULL(result);
     ASSERT_INT_EQ(result->op, opaque_ops[op_idx]);
     ASSERT_PTR_EQ(result->src[0], callee);
     ASSERT_INT_EQ(result->src[1]->op, POLY_OP_CONST);
 
-    PolyUOp *body_only = poly_uop1(
-        ctx, opaque_ops[op_idx], POLY_FLOAT32, callee, poly_arg_none()
-    );
-    PolyUOp *body_only_result =
-        poly_graph_walk_rewrite(ctx, body_only, pm, NULL, NULL, false);
+    PolyUOp *body_only = poly_uop1(ctx, opaque_ops[op_idx], POLY_FLOAT32, callee, poly_arg_none());
+    PolyUOp *body_only_result = poly_graph_walk_rewrite(ctx, body_only, pm, NULL, NULL, false);
     ASSERT_PTR_EQ(body_only_result, body_only);
     ASSERT_PTR_EQ(body_only_result->src[0], callee);
   }
@@ -864,9 +843,7 @@ TEST(pat, graph_rewrite_rederives_stack_dtype_without_vector_carry) {
   PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(1));
   PolyUOp *two = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(2));
   PolyUOp *src[] = {one, two};
-  PolyUOp *stack = poly_uop(
-      ctx, POLY_OP_STACK, POLY_WEAKINT, src, 2, poly_arg_none()
-  );
+  PolyUOp *stack = poly_uop(ctx, POLY_OP_STACK, POLY_WEAKINT, src, 2, poly_arg_none());
   PolyUPat *pat = poly_upat_cvar("c");
   PolyRule rules[] = {{pat, rewrite_weak_one_to_int}};
   PolyPatternMatcher *pm = poly_pm_new(rules, 1);

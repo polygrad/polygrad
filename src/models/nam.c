@@ -39,9 +39,8 @@ static NamActivation nam_parse_activation(const char *s) {
 static PolyTensor *nam_float_scalar(PolyCtx *ctx, double value) {
   PolyUOp *constant = poly_const_typed(ctx, POLY_FLOAT32, value);
   if (!constant) return NULL;
-  PolyTensor *out = poly_tensor_create_with_roots(
-      ctx, constant, constant, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO
-  );
+  PolyTensor *out =
+      poly_tensor_create_with_roots(ctx, constant, constant, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
   if (out) {
     poly_tensor_set_requires_grad(out, false);
     poly_tensor_set_provenance(out, POLY_TENSOR_PROVENANCE_CONST_INIT);
@@ -203,9 +202,7 @@ PolyInstance *poly_nam_instance(const char *spec_json, int spec_len, PolyDevice 
 
           PolyTensor *centered = xk && eb ? poly_tensor_alu2(ctx, POLY_OP_SUB, xk, eb) : NULL;
           PolyTensor *exp_w = ew ? poly_tensor_exp(ctx, ew) : NULL;
-          xk = centered && exp_w
-                   ? poly_tensor_alu2(ctx, POLY_OP_MUL, exp_w, centered)
-                   : NULL;
+          xk = centered && exp_w ? poly_tensor_alu2(ctx, POLY_OP_MUL, exp_w, centered) : NULL;
           xk = xk ? poly_tensor_relu(ctx, xk) : NULL;
         } else if (activation == NAM_ACT_RELU) {
           xk = poly_tensor_relu(ctx, xk);
@@ -248,20 +245,16 @@ PolyInstance *poly_nam_instance(const char *spec_json, int spec_len, PolyDevice 
       PolyTensor *sum1 = sum0 ? poly_tensor_sum(ctx, sum0, axes_r1, 1, false) : NULL;
       double mse_scale = 1.0 / ((double)batch_size * n_outputs);
       PolyTensor *loss_scale = nam_float_scalar(ctx, mse_scale);
-      loss_tensor = sum1 && loss_scale
-                        ? poly_tensor_alu2(ctx, POLY_OP_MUL, sum1, loss_scale)
-                        : NULL;
+      loss_tensor =
+          sum1 && loss_scale ? poly_tensor_alu2(ctx, POLY_OP_MUL, sum1, loss_scale) : NULL;
     } else {
       PolyTensor *log_probs = poly_tensor_log_softmax(ctx, out_tensor, 1);
-      PolyTensor *prod = log_probs
-                             ? poly_tensor_alu2(ctx, POLY_OP_MUL, y_tensor, log_probs)
-                             : NULL;
+      PolyTensor *prod = log_probs ? poly_tensor_alu2(ctx, POLY_OP_MUL, y_tensor, log_probs) : NULL;
       int64_t axes_class[] = {1};
       PolyTensor *sum_class = prod ? poly_tensor_sum(ctx, prod, axes_class, 1, false) : NULL;
       int64_t axes_batch[] = {0};
-      PolyTensor *sum_batch = sum_class
-                                  ? poly_tensor_sum(ctx, sum_class, axes_batch, 1, false)
-                                  : NULL;
+      PolyTensor *sum_batch =
+          sum_class ? poly_tensor_sum(ctx, sum_class, axes_batch, 1, false) : NULL;
       double ce_scale = -1.0 / (double)batch_size;
       PolyTensor *loss_scale = nam_float_scalar(ctx, ce_scale);
       loss_tensor = sum_batch && loss_scale

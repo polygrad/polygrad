@@ -85,8 +85,8 @@ static int ensure_gguf(void) {
   uint32_t crc = crc32_bytes(g_gguf_data, g_gguf_len);
   if (g_gguf_len != QWEN3_GGUF_EXPECTED_LEN || crc != QWEN3_GGUF_EXPECTED_CRC32) {
     snprintf(
-        g_gguf_error, sizeof(g_gguf_error),
-        "unexpected GGUF fixture len=%lld crc32=0x%08x", (long long)g_gguf_len, crc
+        g_gguf_error, sizeof(g_gguf_error), "unexpected GGUF fixture len=%lld crc32=0x%08x",
+        (long long)g_gguf_len, crc
     );
     free(g_gguf_data);
     g_gguf_data = NULL;
@@ -109,10 +109,7 @@ static int ensure_gguf(void) {
   do {                                                                                             \
     int _gguf_ok = ensure_gguf();                                                                  \
     if (_gguf_ok < 0) FAIL("%s", g_gguf_error);                                                    \
-    if (!_gguf_ok) {                                                                               \
-      fprintf(stderr, "    (skipped: POLY_QWEN3_GGUF not set)\n");                                 \
-      PASS();                                                                                      \
-    }                                                                                              \
+    if (!_gguf_ok) SKIP("POLY_QWEN3_GGUF not set");                                                \
   } while (0)
 
 /* Helper: find I/O buffers */
@@ -203,10 +200,12 @@ TEST(qwen3, forward_cpu) {
   ASSERT_NOT_NULL(rope_sin);
   PolyIOBinding io[] = {
       POLY_IO_BINDING_ARRAY("x", input_ids, POLY_INT32),
-      {.name = "rope_cos", .data = rope_cos,
+      {.name = "rope_cos",
+       .data = rope_cos,
        .nbytes = (size_t)rope_cos_numel * sizeof(float),
        .dtype_id = poly_dtype_id_by_name("float32")},
-      {.name = "rope_sin", .data = rope_sin,
+      {.name = "rope_sin",
+       .data = rope_sin,
        .nbytes = (size_t)rope_sin_numel * sizeof(float),
        .dtype_id = poly_dtype_id_by_name("float32")},
   };
@@ -257,10 +256,12 @@ TEST(qwen3, forward_cuda) {
   ASSERT_NOT_NULL(rope_sin);
   PolyIOBinding io[] = {
       POLY_IO_BINDING_ARRAY("x", input_ids, POLY_INT32),
-      {.name = "rope_cos", .data = rope_cos,
+      {.name = "rope_cos",
+       .data = rope_cos,
        .nbytes = (size_t)rope_cos_numel * sizeof(float),
        .dtype_id = poly_dtype_id_by_name("float32")},
-      {.name = "rope_sin", .data = rope_sin,
+      {.name = "rope_sin",
+       .data = rope_sin,
        .nbytes = (size_t)rope_sin_numel * sizeof(float),
        .dtype_id = poly_dtype_id_by_name("float32")},
   };

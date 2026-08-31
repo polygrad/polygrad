@@ -177,10 +177,18 @@ PolyX86Program *poly_compile_x86(const uint8_t *code, int code_size);
 PolyX86Program *poly_compile_x86_source(const char *source);
 int poly_x86_program_call(PolyX86Program *prog, void **args, int n_args);
 int poly_x86_program_call_core(
-    PolyX86Program *prog, void **args, int n_args, int core_id_slot, int core_id
+    PolyX86Program *prog,
+    void **args,
+    int n_args,
+    int core_id_slot,
+    int core_id
 );
 int poly_x86_program_call_threaded(
-    PolyX86Program *prog, void **args, int n_args, int core_id_slot, int threads
+    PolyX86Program *prog,
+    void **args,
+    int n_args,
+    int core_id_slot,
+    int threads
 );
 void poly_x86_program_destroy(PolyX86Program *prog);
 

@@ -13,18 +13,18 @@ extern "C" {
 #endif
 
 typedef enum {
-    POLY_IMPORT_OK = 0,
-    POLY_IMPORT_ERR_PARSE,
-    POLY_IMPORT_ERR_UNSUPPORTED_MODEL,
-    POLY_IMPORT_ERR_UNSUPPORTED_OP,
-    POLY_IMPORT_ERR_WEIGHT_MISMATCH,
-    POLY_IMPORT_ERR_SHAPE_MISMATCH,
-    POLY_IMPORT_ERR_DTYPE_UNSUPPORTED,
-    POLY_IMPORT_ERR_INTERNAL
+  POLY_IMPORT_OK = 0,
+  POLY_IMPORT_ERR_PARSE,
+  POLY_IMPORT_ERR_UNSUPPORTED_MODEL,
+  POLY_IMPORT_ERR_UNSUPPORTED_OP,
+  POLY_IMPORT_ERR_WEIGHT_MISMATCH,
+  POLY_IMPORT_ERR_SHAPE_MISMATCH,
+  POLY_IMPORT_ERR_DTYPE_UNSUPPORTED,
+  POLY_IMPORT_ERR_INTERNAL
 } PolyImportError;
 
 PolyImportError poly_import_last_error_code(void);
-const char     *poly_import_last_error_message(void);
+const char *poly_import_last_error_message(void);
 
 /* Internal: called by import functions */
 void poly_import_error_clear(void);

@@ -371,8 +371,7 @@ PolyUOp *poly_add_gpudims_ex(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps)
     if (topo[i]->op != POLY_OP_RANGE) continue;
     PolyAxisType t =
         poly_arg_is_range(topo[i]->arg) ? poly_range_axis_type(topo[i]->arg) : POLY_AXIS_WEAK;
-    if ((t == POLY_AXIS_GLOBAL || t == POLY_AXIS_THREAD) &&
-        n_global < POLY_MAX_DIMS) {
+    if ((t == POLY_AXIS_GLOBAL || t == POLY_AXIS_THREAD) && n_global < POLY_MAX_DIMS) {
       int existing = find_range_axis_key(topo[i], global_ranges, n_global);
       if (existing >= 0)
         global_ranges[existing] = topo[i];
@@ -409,10 +408,10 @@ PolyUOp *poly_add_gpudims_ex(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps)
   }
   if (caps.has_threads) {
     if (n_global != 1 || n_local != 0) return NULL;
-    PolyUOp *core_id = poly_uop_variable(
-        ctx, "core_id", 0, global_dims[0].max - 1, POLY_INT32, 1, true
-    );
-    global_idxs[0] = poly_uop1(ctx, POLY_OP_CAST, POLY_WEAKINT, core_id, poly_arg_dtype(POLY_WEAKINT));
+    PolyUOp *core_id =
+        poly_uop_variable(ctx, "core_id", 0, global_dims[0].max - 1, POLY_INT32, 1, true);
+    global_idxs[0] =
+        poly_uop1(ctx, POLY_OP_CAST, POLY_WEAKINT, core_id, poly_arg_dtype(POLY_WEAKINT));
   } else {
     if (n_global > 0 &&
         !get_grouped_dims(ctx, "gidx", global_dims, n_global, caps.global_max, true, global_idxs))

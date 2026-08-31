@@ -35,7 +35,10 @@ typedef struct {
 
 /* Test-only spelling of Tinygrad's full_rewrite_to_sink -> do_linearize boundary. */
 static inline PolyUOp **poly_test_full_rewrite_and_linearize_ex(
-    PolyCtx *ctx, PolyUOp *sink, PolyRewriteOpts opts, int *n_out
+    PolyCtx *ctx,
+    PolyUOp *sink,
+    PolyRewriteOpts opts,
+    int *n_out
 ) {
   PolyUOp *rewritten = poly_full_rewrite_to_sink_ex(ctx, sink, opts);
   if (!rewritten) {
@@ -46,7 +49,9 @@ static inline PolyUOp **poly_test_full_rewrite_and_linearize_ex(
 }
 
 static inline PolyUOp **poly_test_full_rewrite_and_linearize(
-    PolyCtx *ctx, PolyUOp *sink, int *n_out
+    PolyCtx *ctx,
+    PolyUOp *sink,
+    int *n_out
 ) {
   PolyUOp *rewritten = poly_full_rewrite_to_sink(ctx, sink);
   if (!rewritten) {
@@ -58,7 +63,10 @@ static inline PolyUOp **poly_test_full_rewrite_and_linearize(
 
 /* Current Tinygrad UOp.new_buffer(canonicalize_device(device), ...). */
 static inline PolyUOp *poly_test_buffer_on_device(
-    PolyCtx *ctx, PolyDType dtype, int64_t size, PolyDevice device
+    PolyCtx *ctx,
+    PolyDType dtype,
+    int64_t size,
+    PolyDevice device
 ) {
   if (device == POLY_DEVICE_AUTO) {
     device = poly_ctx_get_preferred_device(ctx);
@@ -66,22 +74,16 @@ static inline PolyUOp *poly_test_buffer_on_device(
   }
   PolyUOp *device_uop = poly_device_uop(ctx, device);
   return device_uop
-             ? poly_uop_new_buffer(
-                   ctx, device_uop, size, dtype, poly_ctx_next_unique_id(ctx)
-               )
+             ? poly_uop_new_buffer(ctx, device_uop, size, dtype, poly_ctx_next_unique_id(ctx))
              : NULL;
 }
 
-static inline PolyUOp *poly_test_buffer(
-    PolyCtx *ctx, PolyDType dtype, int64_t size
-) {
+static inline PolyUOp *poly_test_buffer(PolyCtx *ctx, PolyDType dtype, int64_t size) {
   return poly_test_buffer_on_device(ctx, dtype, size, POLY_DEVICE_AUTO);
 }
 
 /* Approved Polygrad portable logical-storage fixture. */
-static inline PolyUOp *poly_test_logical_buffer(
-    PolyCtx *ctx, PolyDType dtype, int64_t size
-) {
+static inline PolyUOp *poly_test_logical_buffer(PolyCtx *ctx, PolyDType dtype, int64_t size) {
   return poly_uop_new_logical_buffer(ctx, dtype, size);
 }
 
@@ -94,8 +96,7 @@ static inline PolyTensor *poly_test_tensor_empty_var_on_device(
     int n_inner,
     PolyDevice device
 ) {
-  if (!ctx || !batch_var || n_inner < 0 || n_inner >= POLY_MAX_DIMS ||
-      (n_inner > 0 && !inner_dims))
+  if (!ctx || !batch_var || n_inner < 0 || n_inner >= POLY_MAX_DIMS || (n_inner > 0 && !inner_dims))
     return NULL;
   if (device == POLY_DEVICE_AUTO) {
     device = poly_ctx_get_preferred_device(ctx);
@@ -104,9 +105,7 @@ static inline PolyTensor *poly_test_tensor_empty_var_on_device(
   PolyUOp *shape[POLY_MAX_DIMS];
   shape[0] = batch_var;
   for (int i = 0; i < n_inner; i++)
-    shape[i + 1] = poly_uop0(
-        ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(inner_dims[i])
-    );
+    shape[i + 1] = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(inner_dims[i]));
   return poly_tensor_empty_uop(ctx, dtype, shape, n_inner + 1, device);
 }
 
@@ -133,9 +132,8 @@ static inline PolyUOp *poly_test_buffer_var_by_id(
 ) {
   PolyDType dtype;
   if (!poly_dtype_by_id(dtype_id, &dtype)) return NULL;
-  PolyTensor *tensor = poly_test_tensor_empty_var_on_device(
-      ctx, dtype, batch_var, inner_dims, n_inner, device
-  );
+  PolyTensor *tensor =
+      poly_test_tensor_empty_var_on_device(ctx, dtype, batch_var, inner_dims, n_inner, device);
   return tensor ? poly_tensor_uop_physical(tensor) : NULL;
 }
 
@@ -151,9 +149,7 @@ static inline PolyUOp *poly_test_create_linear(PolyCtx *ctx, PolyUOp *sink) {
 
 /* tinygrad@2026-08-22/a9069c177a9d schedule/rangeify.py:83-89 stores
  * through a value-shaped view while the allocator owns the flat BUFFER. */
-static inline PolyUOp *poly_test_store_to_buffer(
-    PolyCtx *ctx, PolyUOp *buffer, PolyUOp *value
-) {
+static inline PolyUOp *poly_test_store_to_buffer(PolyCtx *ctx, PolyUOp *buffer, PolyUOp *value) {
   if (!ctx || !buffer || !value) return NULL;
   int ndim = poly_uop_ndim(ctx, value);
   if (ndim < 0 || ndim > POLY_MAX_DIMS) return NULL;
@@ -168,23 +164,25 @@ static inline PolyUOp *poly_test_store_to_buffer(
 
 /* Current Tinygrad compiler kernels require SINK(arg=KernelInfo). */
 static inline PolyUOp *poly_test_kernel_sink(
-    PolyCtx *ctx, PolyUOp **src, int n_src, const char *name
+    PolyCtx *ctx,
+    PolyUOp **src,
+    int n_src,
+    const char *name
 ) {
   PolyKernelInfo info = {.name = name};
-  return poly_uop(
-      ctx, POLY_OP_SINK, POLY_VOID, src, n_src, poly_arg_kernel_info(&info)
-  );
+  return poly_uop(ctx, POLY_OP_SINK, POLY_VOID, src, n_src, poly_arg_kernel_info(&info));
 }
 
 /* tinygrad@2026-08-22/a9069c177a9d UOp.placeholder: final-program storage
  * parameters are scalar value UOps with their flat extent in src[0]. */
 static inline PolyUOp *poly_test_program_param(
-    PolyCtx *ctx, PolyDType dtype, int64_t numel, int slot
+    PolyCtx *ctx,
+    PolyDType dtype,
+    int64_t numel,
+    int slot
 ) {
   int64_t shape[] = {numel};
-  return poly_uop_placeholder(
-      ctx, shape, 1, dtype, slot, POLY_ADDR_GLOBAL, NULL, false
-  );
+  return poly_uop_placeholder(ctx, shape, 1, dtype, slot, POLY_ADDR_GLOBAL, NULL, false);
 }
 
 /* Current Tinygrad UOp.param: scalar dtype plus UOp shape and ParamArg storage metadata. */
@@ -195,17 +193,15 @@ static inline PolyUOp *poly_test_uop_param(
     int slot,
     PolyAddrSpace addrspace
 ) {
-  PolyUOp *shape = numel < 0
-                       ? poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_none())
-                       : poly_const_int(ctx, numel);
+  PolyUOp *shape = numel < 0 ? poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_none())
+                             : poly_const_int(ctx, numel);
   PolyParamArg arg = {.slot = slot, .dtype = dtype, .addrspace = addrspace};
   PolyOps op = addrspace == POLY_ADDR_GLOBAL ? POLY_OP_PARAM : POLY_OP_BUFFER;
   return shape ? poly_uop1(ctx, op, dtype, shape, poly_arg_param(&arg)) : NULL;
 }
 
 static inline PolyUOp *poly_test_linear_call_body(PolyUOp *linear, int index) {
-  if (!linear || linear->op != POLY_OP_LINEAR || index < 0 || index >= linear->n_src)
-    return NULL;
+  if (!linear || linear->op != POLY_OP_LINEAR || index < 0 || index >= linear->n_src) return NULL;
   PolyUOp *call = linear->src[index];
   return call && call->op == POLY_OP_CALL && call->n_src > 0 ? call->src[0] : NULL;
 }
@@ -228,21 +224,24 @@ static inline int poly_test_linear_call_n_buffers(PolyUOp *linear, int index) {
 }
 
 static inline PolyUOp *poly_test_linear_call_buffer(
-    PolyUOp *linear, int call_index, int buffer_index
+    PolyUOp *linear,
+    int call_index,
+    int buffer_index
 ) {
   PolyUOp *call = poly_test_linear_call(linear, call_index);
-  return call && buffer_index >= 0 && buffer_index + 1 < call->n_src
-             ? call->src[buffer_index + 1]
-             : NULL;
+  return call && buffer_index >= 0 && buffer_index + 1 < call->n_src ? call->src[buffer_index + 1]
+                                                                     : NULL;
 }
 
 static inline PolyUOp *poly_test_linear_values(
-    PolyCtx *ctx, PolyUOp **values, int n_values, PolyUOp **realized
+    PolyCtx *ctx,
+    PolyUOp **values,
+    int n_values,
+    PolyUOp **realized
 ) {
   PolyVarBinding *vars = NULL;
   int n_vars = 0;
-  PolyUOp *linear =
-      poly_linear_with_vars(ctx, values, n_values, realized, &vars, &n_vars);
+  PolyUOp *linear = poly_linear_with_vars(ctx, values, n_values, realized, &vars, &n_vars);
   free(vars);
   return linear;
 }
@@ -254,13 +253,13 @@ enum {
 #define MAX_TESTS 2048
 extern TestEntry g_tests[MAX_TESTS];
 extern int g_n_tests;
+extern int g_current_test_skipped;
 
-#define POLY_TEST_REGISTER(suite, name, test_flags) \
-  static void test_##suite##_##name(int *_passed, int *_failed); \
-  __attribute__((constructor)) \
-  static void register_##suite##_##name(void) { \
-    g_tests[g_n_tests++] = (TestEntry){ #suite, #name, test_##suite##_##name, (test_flags) }; \
-  } \
+#define POLY_TEST_REGISTER(suite, name, test_flags)                                                \
+  static void test_##suite##_##name(int *_passed, int *_failed);                                   \
+  __attribute__((constructor)) static void register_##suite##_##name(void) {                       \
+    g_tests[g_n_tests++] = (TestEntry){#suite, #name, test_##suite##_##name, (test_flags)};        \
+  }                                                                                                \
   static void test_##suite##_##name(int *_passed, int *_failed)
 
 /* Backend portability is the default. Only tests that exercise one backend's
@@ -270,62 +269,78 @@ extern int g_n_tests;
 #define TEST_COMMON(suite, name) TEST(suite, name)
 #define TEST_BACKEND(suite, name) POLY_TEST_REGISTER(suite, name, 0)
 
-#define PASS() do { (*_passed)++; return; } while(0)
+#define PASS()                                                                                     \
+  do {                                                                                             \
+    (*_passed)++;                                                                                  \
+    return;                                                                                        \
+  } while (0)
 
-#define FAIL(fmt, ...) do { \
-  fprintf(stderr, "    FAIL %s:%d: " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__); \
-  (*_failed)++; return; \
-} while(0)
+#define FAIL(fmt, ...)                                                                             \
+  do {                                                                                             \
+    fprintf(stderr, "    FAIL %s:%d: " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__);               \
+    (*_failed)++;                                                                                  \
+    return;                                                                                        \
+  } while (0)
 
-/* SKIP: marks a test as intentionally not run yet (e.g. waiting on a
- * dependent feature). Counts as a pass but logs the reason so the
- * skipped test is visible in the runner output. */
-#define SKIP(reason) do { \
-  fprintf(stderr, "    SKIP %s:%d: " reason "\n", __FILE__, __LINE__); \
-  (*_passed)++; return; \
-} while(0)
+/* Runtime skips are neither passes nor failures. Required backend routes
+ * reject them in test_main.c. */
+#define SKIP(reason)                                                                               \
+  do {                                                                                             \
+    fprintf(stderr, "    SKIP %s:%d: " reason "\n", __FILE__, __LINE__);                           \
+    g_current_test_skipped = 1;                                                                    \
+    return;                                                                                        \
+  } while (0)
 
-#define ASSERT_TRUE(expr) do { \
-  if (!(expr)) FAIL("expected true: %s", #expr); \
-} while(0)
+#define ASSERT_TRUE(expr)                                                                          \
+  do {                                                                                             \
+    if (!(expr)) FAIL("expected true: %s", #expr);                                                 \
+  } while (0)
 
-#define ASSERT_FALSE(expr) do { \
-  if (expr) FAIL("expected false: %s", #expr); \
-} while(0)
+#define ASSERT_FALSE(expr)                                                                         \
+  do {                                                                                             \
+    if (expr) FAIL("expected false: %s", #expr);                                                   \
+  } while (0)
 
-#define ASSERT_EQ(a, b) do { \
-  if ((a) != (b)) FAIL("%s != %s", #a, #b); \
-} while(0)
+#define ASSERT_EQ(a, b)                                                                            \
+  do {                                                                                             \
+    if ((a) != (b)) FAIL("%s != %s", #a, #b);                                                      \
+  } while (0)
 
-#define ASSERT_NEQ(a, b) do { \
-  if ((a) == (b)) FAIL("%s == %s (expected different)", #a, #b); \
-} while(0)
+#define ASSERT_NEQ(a, b)                                                                           \
+  do {                                                                                             \
+    if ((a) == (b)) FAIL("%s == %s (expected different)", #a, #b);                                 \
+  } while (0)
 
-#define ASSERT_INT_EQ(a, b) do { \
-  long _a = (long)(a), _b = (long)(b); \
-  if (_a != _b) FAIL("%s = %ld, expected %ld", #a, _a, _b); \
-} while(0)
+#define ASSERT_INT_EQ(a, b)                                                                        \
+  do {                                                                                             \
+    long _a = (long)(a), _b = (long)(b);                                                           \
+    if (_a != _b) FAIL("%s = %ld, expected %ld", #a, _a, _b);                                      \
+  } while (0)
 
-#define ASSERT_STR_EQ(a, b) do { \
-  const char *_a = (a), *_b = (b); \
-  if (strcmp(_a, _b) != 0) FAIL("%s = \"%s\", expected \"%s\"", #a, _a, _b); \
-} while(0)
+#define ASSERT_STR_EQ(a, b)                                                                        \
+  do {                                                                                             \
+    const char *_a = (a), *_b = (b);                                                               \
+    if (strcmp(_a, _b) != 0) FAIL("%s = \"%s\", expected \"%s\"", #a, _a, _b);                     \
+  } while (0)
 
-#define ASSERT_FLOAT_EQ(a, b, tol) do { \
-  double _a = (a), _b = (b); \
-  if (fabs(_a - _b) > (tol)) FAIL("%s = %.8f, expected %.8f (tol=%.1e)", #a, _a, _b, (tol)); \
-} while(0)
+#define ASSERT_FLOAT_EQ(a, b, tol)                                                                 \
+  do {                                                                                             \
+    double _a = (a), _b = (b);                                                                     \
+    if (fabs(_a - _b) > (tol)) FAIL("%s = %.8f, expected %.8f (tol=%.1e)", #a, _a, _b, (tol));     \
+  } while (0)
 
-#define ASSERT_FLOAT_NAN(a) do { \
-  double _a = (double)(a); \
-  if (!isnan(_a)) FAIL("%s = %.8g, expected NaN", #a, _a); \
-} while(0)
+#define ASSERT_FLOAT_NAN(a)                                                                        \
+  do {                                                                                             \
+    double _a = (double)(a);                                                                       \
+    if (!isnan(_a)) FAIL("%s = %.8g, expected NaN", #a, _a);                                       \
+  } while (0)
 
-#define ASSERT_FLOAT_INF(a, sign) do { \
-  double _a = (double)(a); \
-  if (!isinf(_a) || ((sign) > 0 && _a < 0) || ((sign) < 0 && _a > 0)) \
-    FAIL("%s = %.8g, expected %sinf", #a, _a, (sign) < 0 ? "-" : "+"); \
-} while(0)
+#define ASSERT_FLOAT_INF(a, sign)                                                                  \
+  do {                                                                                             \
+    double _a = (double)(a);                                                                       \
+    if (!isinf(_a) || ((sign) > 0 && _a < 0) || ((sign) < 0 && _a > 0))                            \
+      FAIL("%s = %.8g, expected %sinf", #a, _a, (sign) < 0 ? "-" : "+");                           \
+  } while (0)
 
 /* Real ULP distance via bitwise float ordering.  Handles subnormals and
  * near-zero values correctly (unlike relative-error hacks). */
@@ -336,55 +351,64 @@ static inline int32_t poly_float_ulp_index(float f) {
   return i;
 }
 
-#define ASSERT_FLOAT_ULP(a, b, max_ulps) do { \
-  float _fa = (float)(a), _fb = (float)(b); \
-  if (isnan(_fa) && isnan(_fb)) { /* ok */ } \
-  else if (isnan(_fa) || isnan(_fb)) \
-    FAIL("%s=%.8g, expected %.8g (NaN mismatch)", #a, (double)_fa, (double)_fb); \
-  else if (isinf(_fa) || isinf(_fb)) { \
-    if (!(isinf(_fa) && isinf(_fb) && ((_fa > 0) == (_fb > 0)))) \
-      FAIL("%s=%.8g, expected %.8g (inf mismatch)", #a, (double)_fa, (double)_fb); \
-  } else { \
-    int32_t _ia = poly_float_ulp_index(_fa), _ib = poly_float_ulp_index(_fb); \
-    int64_t _d = llabs((int64_t)_ia - (int64_t)_ib); \
-    if (_d > (max_ulps)) \
-      FAIL("%s=%.8g, expected %.8g (%lld ulps, max %d)", \
-        #a, (double)_fa, (double)_fb, (long long)_d, (int)(max_ulps)); \
-  } \
-} while(0)
+#define ASSERT_FLOAT_ULP(a, b, max_ulps)                                                           \
+  do {                                                                                             \
+    float _fa = (float)(a), _fb = (float)(b);                                                      \
+    if (isnan(_fa) && isnan(_fb)) { /* ok */                                                       \
+    } else if (isnan(_fa) || isnan(_fb))                                                           \
+      FAIL("%s=%.8g, expected %.8g (NaN mismatch)", #a, (double)_fa, (double)_fb);                 \
+    else if (isinf(_fa) || isinf(_fb)) {                                                           \
+      if (!(isinf(_fa) && isinf(_fb) && ((_fa > 0) == (_fb > 0))))                                 \
+        FAIL("%s=%.8g, expected %.8g (inf mismatch)", #a, (double)_fa, (double)_fb);               \
+    } else {                                                                                       \
+      int32_t _ia = poly_float_ulp_index(_fa), _ib = poly_float_ulp_index(_fb);                    \
+      int64_t _d = llabs((int64_t)_ia - (int64_t)_ib);                                             \
+      if (_d > (max_ulps))                                                                         \
+        FAIL(                                                                                      \
+            "%s=%.8g, expected %.8g (%lld ulps, max %d)", #a, (double)_fa, (double)_fb,            \
+            (long long)_d, (int)(max_ulps)                                                         \
+        );                                                                                         \
+    }                                                                                              \
+  } while (0)
 
 /* NaN-aware absolute tolerance (use for switchover regions where ULP is noisy). */
-#define ASSERT_FLOAT_ABS(a, b, tol) do { \
-  float _fa = (float)(a), _fb = (float)(b); \
-  if (isnan(_fa) && isnan(_fb)) { /* ok */ } \
-  else if (isnan(_fa) || isnan(_fb)) \
-    FAIL("%s=%.8g, expected %.8g (NaN mismatch)", #a, (double)_fa, (double)_fb); \
-  else if (fabsf(_fa - _fb) > (float)(tol)) \
-    FAIL("%s=%.8g, expected %.8g (abs err %.8g, tol %.8g)", \
-      #a, (double)_fa, (double)_fb, (double)fabsf(_fa - _fb), (double)(tol)); \
-} while(0)
+#define ASSERT_FLOAT_ABS(a, b, tol)                                                                \
+  do {                                                                                             \
+    float _fa = (float)(a), _fb = (float)(b);                                                      \
+    if (isnan(_fa) && isnan(_fb)) { /* ok */                                                       \
+    } else if (isnan(_fa) || isnan(_fb))                                                           \
+      FAIL("%s=%.8g, expected %.8g (NaN mismatch)", #a, (double)_fa, (double)_fb);                 \
+    else if (fabsf(_fa - _fb) > (float)(tol))                                                      \
+      FAIL(                                                                                        \
+          "%s=%.8g, expected %.8g (abs err %.8g, tol %.8g)", #a, (double)_fa, (double)_fb,         \
+          (double)fabsf(_fa - _fb), (double)(tol)                                                  \
+      );                                                                                           \
+  } while (0)
 
 /* Combined ULP + absolute tolerance: passes if EITHER metric is within bounds.
  * Use for sweeps where near-zero values need abs tolerance but normal range
  * needs ULP precision. */
-#define ASSERT_FLOAT_NEAR(a, b, max_ulps, abs_tol) do { \
-  float _fa = (float)(a), _fb = (float)(b); \
-  if (isnan(_fa) && isnan(_fb)) { /* ok */ } \
-  else if (isnan(_fa) || isnan(_fb)) \
-    FAIL("%s=%.8g, expected %.8g (NaN mismatch)", #a, (double)_fa, (double)_fb); \
-  else if (isinf(_fa) && isinf(_fb) && ((_fa > 0) == (_fb > 0))) { /* ok */ } \
-  else if (isinf(_fa) || isinf(_fb)) \
-    FAIL("%s=%.8g, expected %.8g (inf mismatch)", #a, (double)_fa, (double)_fb); \
-  else if (fabsf(_fa - _fb) <= (float)(abs_tol)) { /* within abs tol */ } \
-  else { \
-    int32_t _ia = poly_float_ulp_index(_fa), _ib = poly_float_ulp_index(_fb); \
-    int64_t _d = llabs((int64_t)_ia - (int64_t)_ib); \
-    if (_d > (max_ulps)) \
-      FAIL("%s=%.8g, expected %.8g (%lld ulps, max %d; abs %.8g, tol %.8g)", \
-        #a, (double)_fa, (double)_fb, (long long)_d, (int)(max_ulps), \
-        (double)fabsf(_fa - _fb), (double)(abs_tol)); \
-  } \
-} while(0)
+#define ASSERT_FLOAT_NEAR(a, b, max_ulps, abs_tol)                                                 \
+  do {                                                                                             \
+    float _fa = (float)(a), _fb = (float)(b);                                                      \
+    if (isnan(_fa) && isnan(_fb)) { /* ok */                                                       \
+    } else if (isnan(_fa) || isnan(_fb))                                                           \
+      FAIL("%s=%.8g, expected %.8g (NaN mismatch)", #a, (double)_fa, (double)_fb);                 \
+    else if (isinf(_fa) && isinf(_fb) && ((_fa > 0) == (_fb > 0))) { /* ok */                      \
+    } else if (isinf(_fa) || isinf(_fb))                                                           \
+      FAIL("%s=%.8g, expected %.8g (inf mismatch)", #a, (double)_fa, (double)_fb);                 \
+    else if (fabsf(_fa - _fb) <= (float)(abs_tol)) { /* within abs tol */                          \
+    } else {                                                                                       \
+      int32_t _ia = poly_float_ulp_index(_fa), _ib = poly_float_ulp_index(_fb);                    \
+      int64_t _d = llabs((int64_t)_ia - (int64_t)_ib);                                             \
+      if (_d > (max_ulps))                                                                         \
+        FAIL(                                                                                      \
+            "%s=%.8g, expected %.8g (%lld ulps, max %d; abs %.8g, tol %.8g)", #a, (double)_fa,     \
+            (double)_fb, (long long)_d, (int)(max_ulps), (double)fabsf(_fa - _fb),                 \
+            (double)(abs_tol)                                                                      \
+        );                                                                                         \
+    }                                                                                              \
+  } while (0)
 
 /* Double-precision ULP distance. */
 static inline int64_t poly_double_ulp_index(double f) {
@@ -394,94 +418,108 @@ static inline int64_t poly_double_ulp_index(double f) {
   return i;
 }
 
-#define ASSERT_DOUBLE_NAN(a) do { \
-  double _a = (double)(a); \
-  if (!isnan(_a)) FAIL("%s = %.17g, expected NaN", #a, _a); \
-} while(0)
+#define ASSERT_DOUBLE_NAN(a)                                                                       \
+  do {                                                                                             \
+    double _a = (double)(a);                                                                       \
+    if (!isnan(_a)) FAIL("%s = %.17g, expected NaN", #a, _a);                                      \
+  } while (0)
 
-#define ASSERT_DOUBLE_INF(a, sign) do { \
-  double _a = (double)(a); \
-  if (!isinf(_a) || ((sign) > 0 && _a < 0) || ((sign) < 0 && _a > 0)) \
-    FAIL("%s = %.17g, expected %sinf", #a, _a, (sign) < 0 ? "-" : "+"); \
-} while(0)
+#define ASSERT_DOUBLE_INF(a, sign)                                                                 \
+  do {                                                                                             \
+    double _a = (double)(a);                                                                       \
+    if (!isinf(_a) || ((sign) > 0 && _a < 0) || ((sign) < 0 && _a > 0))                            \
+      FAIL("%s = %.17g, expected %sinf", #a, _a, (sign) < 0 ? "-" : "+");                          \
+  } while (0)
 
-#define ASSERT_DOUBLE_ABS(a, b, tol) do { \
-  double _da = (double)(a), _db = (double)(b); \
-  if (isnan(_da) && isnan(_db)) { /* ok */ } \
-  else if (isnan(_da) || isnan(_db)) \
-    FAIL("%s=%.17g, expected %.17g (NaN mismatch)", #a, _da, _db); \
-  else if (fabs(_da - _db) > (double)(tol)) \
-    FAIL("%s=%.17g, expected %.17g (abs err %.17g, tol %.17g)", \
-      #a, _da, _db, fabs(_da - _db), (double)(tol)); \
-} while(0)
+#define ASSERT_DOUBLE_ABS(a, b, tol)                                                               \
+  do {                                                                                             \
+    double _da = (double)(a), _db = (double)(b);                                                   \
+    if (isnan(_da) && isnan(_db)) { /* ok */                                                       \
+    } else if (isnan(_da) || isnan(_db))                                                           \
+      FAIL("%s=%.17g, expected %.17g (NaN mismatch)", #a, _da, _db);                               \
+    else if (fabs(_da - _db) > (double)(tol))                                                      \
+      FAIL(                                                                                        \
+          "%s=%.17g, expected %.17g (abs err %.17g, tol %.17g)", #a, _da, _db, fabs(_da - _db),    \
+          (double)(tol)                                                                            \
+      );                                                                                           \
+  } while (0)
 
-#define ASSERT_DOUBLE_ULP(a, b, max_ulps) do { \
-  double _da = (double)(a), _db = (double)(b); \
-  if (isnan(_da) && isnan(_db)) { /* ok */ } \
-  else if (isnan(_da) || isnan(_db)) \
-    FAIL("%s=%.17g, expected %.17g (NaN mismatch)", #a, _da, _db); \
-  else if (isinf(_da) || isinf(_db)) { \
-    if (!(isinf(_da) && isinf(_db) && ((_da > 0) == (_db > 0)))) \
-      FAIL("%s=%.17g, expected %.17g (inf mismatch)", #a, _da, _db); \
-  } else { \
-    int64_t _ia = poly_double_ulp_index(_da), _ib = poly_double_ulp_index(_db); \
-    int64_t _d = llabs(_ia - _ib); \
-    if (_d > (int64_t)(max_ulps)) \
-      FAIL("%s=%.17g, expected %.17g (%lld ulps, max %lld)", \
-        #a, _da, _db, (long long)_d, (long long)(max_ulps)); \
-  } \
-} while(0)
+#define ASSERT_DOUBLE_ULP(a, b, max_ulps)                                                          \
+  do {                                                                                             \
+    double _da = (double)(a), _db = (double)(b);                                                   \
+    if (isnan(_da) && isnan(_db)) { /* ok */                                                       \
+    } else if (isnan(_da) || isnan(_db))                                                           \
+      FAIL("%s=%.17g, expected %.17g (NaN mismatch)", #a, _da, _db);                               \
+    else if (isinf(_da) || isinf(_db)) {                                                           \
+      if (!(isinf(_da) && isinf(_db) && ((_da > 0) == (_db > 0))))                                 \
+        FAIL("%s=%.17g, expected %.17g (inf mismatch)", #a, _da, _db);                             \
+    } else {                                                                                       \
+      int64_t _ia = poly_double_ulp_index(_da), _ib = poly_double_ulp_index(_db);                  \
+      int64_t _d = llabs(_ia - _ib);                                                               \
+      if (_d > (int64_t)(max_ulps))                                                                \
+        FAIL(                                                                                      \
+            "%s=%.17g, expected %.17g (%lld ulps, max %lld)", #a, _da, _db, (long long)_d,         \
+            (long long)(max_ulps)                                                                  \
+        );                                                                                         \
+    }                                                                                              \
+  } while (0)
 
-#define ASSERT_DOUBLE_NEAR(a, b, max_ulps, abs_tol) do { \
-  double _da = (double)(a), _db = (double)(b); \
-  if (isnan(_da) && isnan(_db)) { /* ok */ } \
-  else if (isnan(_da) || isnan(_db)) \
-    FAIL("%s=%.17g, expected %.17g (NaN mismatch)", #a, _da, _db); \
-  else if (isinf(_da) && isinf(_db) && ((_da > 0) == (_db > 0))) { /* ok */ } \
-  else if (isinf(_da) || isinf(_db)) \
-    FAIL("%s=%.17g, expected %.17g (inf mismatch)", #a, _da, _db); \
-  else if (fabs(_da - _db) <= (double)(abs_tol)) { /* within abs tol */ } \
-  else { \
-    int64_t _ia = poly_double_ulp_index(_da), _ib = poly_double_ulp_index(_db); \
-    int64_t _d = llabs(_ia - _ib); \
-    if (_d > (int64_t)(max_ulps)) \
-      FAIL("%s=%.17g, expected %.17g (%lld ulps, max %lld; abs %.17g, tol %.17g)", \
-        #a, _da, _db, (long long)_d, (long long)(max_ulps), \
-        fabs(_da - _db), (double)(abs_tol)); \
-  } \
-} while(0)
+#define ASSERT_DOUBLE_NEAR(a, b, max_ulps, abs_tol)                                                \
+  do {                                                                                             \
+    double _da = (double)(a), _db = (double)(b);                                                   \
+    if (isnan(_da) && isnan(_db)) { /* ok */                                                       \
+    } else if (isnan(_da) || isnan(_db))                                                           \
+      FAIL("%s=%.17g, expected %.17g (NaN mismatch)", #a, _da, _db);                               \
+    else if (isinf(_da) && isinf(_db) && ((_da > 0) == (_db > 0))) { /* ok */                      \
+    } else if (isinf(_da) || isinf(_db))                                                           \
+      FAIL("%s=%.17g, expected %.17g (inf mismatch)", #a, _da, _db);                               \
+    else if (fabs(_da - _db) <= (double)(abs_tol)) { /* within abs tol */                          \
+    } else {                                                                                       \
+      int64_t _ia = poly_double_ulp_index(_da), _ib = poly_double_ulp_index(_db);                  \
+      int64_t _d = llabs(_ia - _ib);                                                               \
+      if (_d > (int64_t)(max_ulps))                                                                \
+        FAIL(                                                                                      \
+            "%s=%.17g, expected %.17g (%lld ulps, max %lld; abs %.17g, tol %.17g)", #a, _da, _db,  \
+            (long long)_d, (long long)(max_ulps), fabs(_da - _db), (double)(abs_tol)               \
+        );                                                                                         \
+    }                                                                                              \
+  } while (0)
 
-#define ASSERT_PTR_EQ(a, b) do { \
-  const void *_a = (a), *_b = (b); \
-  if (_a != _b) FAIL("%s = %p, expected %p (same pointer)", #a, _a, _b); \
-} while(0)
+#define ASSERT_PTR_EQ(a, b)                                                                        \
+  do {                                                                                             \
+    const void *_a = (a), *_b = (b);                                                               \
+    if (_a != _b) FAIL("%s = %p, expected %p (same pointer)", #a, _a, _b);                         \
+  } while (0)
 
-#define ASSERT_PTR_NEQ(a, b) do { \
-  const void *_a = (a), *_b = (b); \
-  if (_a == _b) FAIL("%s == %s (expected different pointers)", #a, #b); \
-} while(0)
+#define ASSERT_PTR_NEQ(a, b)                                                                       \
+  do {                                                                                             \
+    const void *_a = (a), *_b = (b);                                                               \
+    if (_a == _b) FAIL("%s == %s (expected different pointers)", #a, #b);                          \
+  } while (0)
 
-#define ASSERT_NOT_NULL(a) do { \
-  if ((a) == NULL) FAIL("%s is NULL", #a); \
-} while(0)
+#define ASSERT_NOT_NULL(a)                                                                         \
+  do {                                                                                             \
+    if ((a) == NULL) FAIL("%s is NULL", #a);                                                       \
+  } while (0)
 
 typedef struct {
   PolyUOp *buffer;
   PolyBuffer handle;
 } PolyTestBufferView;
 
-#define POLY_TEST_HOST_VIEW(buffer_uop, data_ptr) \
-  ((PolyTestBufferView){ \
-      .buffer = (buffer_uop), \
-      .handle = { \
-          .ptr = (void *)(data_ptr), \
-          .nbytes = 0, \
-          .device = POLY_DEVICE_CPU, \
-          .owned = false, \
-          .allocator = NULL, \
-          .src = NULL, \
-          .valid = true, \
-      }, \
+#define POLY_TEST_HOST_VIEW(buffer_uop, data_ptr)                                                  \
+  ((PolyTestBufferView){                                                                           \
+      .buffer = (buffer_uop),                                                                      \
+      .handle =                                                                                    \
+          {                                                                                        \
+              .ptr = (void *)(data_ptr),                                                           \
+              .nbytes = 0,                                                                         \
+              .device = POLY_DEVICE_CPU,                                                           \
+              .owned = false,                                                                      \
+              .allocator = NULL,                                                                   \
+              .src = NULL,                                                                         \
+              .valid = true,                                                                       \
+          },                                                                                       \
   })
 
 static inline size_t poly_test_buffer_nbytes(PolyCtx *ctx, PolyUOp *buf) {
@@ -496,7 +534,9 @@ static inline size_t poly_test_buffer_nbytes(PolyCtx *ctx, PolyUOp *buf) {
 }
 
 static inline void poly_test_attach_buffer_views(
-    PolyCtx *ctx, PolyTestBufferView *views, int n_views
+    PolyCtx *ctx,
+    PolyTestBufferView *views,
+    int n_views
 ) {
   for (int i = 0; i < n_views; i++) {
     PolyBuffer h = views[i].handle;
@@ -507,7 +547,9 @@ static inline void poly_test_attach_buffer_views(
 }
 
 static inline int poly_test_readback_buffer_views(
-    PolyCtx *ctx, PolyTestBufferView *views, int n_views
+    PolyCtx *ctx,
+    PolyTestBufferView *views,
+    int n_views
 ) {
   for (int i = 0; i < n_views; i++) {
     /* Explicit CUDA/HIP test bindings already carry device pointers and
@@ -515,11 +557,9 @@ static inline int poly_test_readback_buffer_views(
     if (!poly_device_is_host_addressable(views[i].handle.device)) continue;
     PolyBuffer *current = poly_buffer_get(ctx, views[i].buffer);
     if (!current || !views[i].handle.ptr) return -1;
-    size_t nbytes =
-        views[i].handle.nbytes ? views[i].handle.nbytes
-                               : poly_test_buffer_nbytes(ctx, views[i].buffer);
-    if (nbytes > 0 &&
-        poly_buffer_read(ctx, views[i].buffer, views[i].handle.ptr, nbytes) != 0)
+    size_t nbytes = views[i].handle.nbytes ? views[i].handle.nbytes
+                                           : poly_test_buffer_nbytes(ctx, views[i].buffer);
+    if (nbytes > 0 && poly_buffer_read(ctx, views[i].buffer, views[i].handle.ptr, nbytes) != 0)
       return -1;
   }
   return 0;
@@ -536,14 +576,16 @@ static inline int poly_test_run_linear_buffer_views(
   poly_test_attach_buffer_views(ctx, views, n_views);
   /* Current Tinygrad executes LINEAR directly through run_linear
    * (tinygrad/engine/realize.py:315-323). */
-  int ret = poly_run_linear(
-      ctx, linear, vars, n_vars, NULL, 0, true, false, false);
+  int ret = poly_run_linear(ctx, linear, vars, n_vars, NULL, 0, true, false, false);
   if (ret != 0) return ret;
   return poly_test_readback_buffer_views(ctx, views, n_views);
 }
 
 static inline int poly_test_realize_buffer_views(
-    PolyCtx *ctx, PolyUOp *sink, PolyTestBufferView *views, int n_views
+    PolyCtx *ctx,
+    PolyUOp *sink,
+    PolyTestBufferView *views,
+    int n_views
 ) {
   poly_test_attach_buffer_views(ctx, views, n_views);
   /* Test helpers pass schedule-ready STORE/ASSIGN sinks. Keep them on the
@@ -567,19 +609,15 @@ static inline int poly_test_realize_buffer_views_vars(
   poly_test_attach_buffer_views(ctx, views, n_views);
   PolyVarBinding *default_vars = NULL;
   int n_default_vars = 0;
-  PolyUOp *linear = poly_linear_effect_sink(
-      ctx, sink, &default_vars, &n_default_vars);
+  PolyUOp *linear = poly_linear_effect_sink(ctx, sink, &default_vars, &n_default_vars);
   if (!linear) return -1;
   int total_vars = n_default_vars + n_vars;
-  PolyVarBinding *merged = total_vars > 0
-                               ? malloc((size_t)total_vars * sizeof(*merged))
-                               : NULL;
+  PolyVarBinding *merged = total_vars > 0 ? malloc((size_t)total_vars * sizeof(*merged)) : NULL;
   if (total_vars > 0 && !merged) {
     free(default_vars);
     return -1;
   }
-  if (n_default_vars > 0)
-    memcpy(merged, default_vars, (size_t)n_default_vars * sizeof(*merged));
+  if (n_default_vars > 0) memcpy(merged, default_vars, (size_t)n_default_vars * sizeof(*merged));
   int n_merged = n_default_vars;
   for (int i = 0; i < n_vars; i++) {
     int found = -1;
@@ -590,15 +628,14 @@ static inline int poly_test_realize_buffer_views_vars(
     else
       merged[n_merged++] = vars[i];
   }
-  int ret = poly_test_run_linear_buffer_views(
-      ctx, linear, views, n_views, merged, n_merged);
+  int ret = poly_test_run_linear_buffer_views(ctx, linear, views, n_views, merged, n_merged);
   free(merged);
   free(default_vars);
   return ret;
 }
 
 static inline int poly_test_run_all(void) {
-  int total_passed = 0, total_failed = 0;
+  int total_passed = 0, total_failed = 0, total_skipped = 0;
   const char *current_suite = "";
 
   for (int i = 0; i < g_n_tests; i++) {
@@ -613,9 +650,13 @@ static inline int poly_test_run_all(void) {
      * ASan sometimes reports only recursive DEADLYSIGNAL lines. */
     printf("    [RUN ] %s\n", g_tests[i].name);
     fflush(stdout);
+    g_current_test_skipped = 0;
     g_tests[i].fn(&passed, &failed);
 
-    if (failed == 0) {
+    if (g_current_test_skipped) {
+      printf("    [SKIP] %s\n", g_tests[i].name);
+      total_skipped++;
+    } else if (failed == 0) {
       printf("    [PASS] %s\n", g_tests[i].name);
       total_passed++;
     } else {
@@ -624,8 +665,10 @@ static inline int poly_test_run_all(void) {
     }
   }
 
-  printf("\n  Results: %d passed, %d failed, %d total\n\n",
-         total_passed, total_failed, total_passed + total_failed);
+  printf(
+      "\n  Results: %d passed, %d failed, %d skipped, %d total\n\n", total_passed, total_failed,
+      total_skipped, total_passed + total_failed + total_skipped
+  );
   return total_failed > 0 ? 1 : 0;
 }
 

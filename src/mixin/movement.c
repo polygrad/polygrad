@@ -210,8 +210,7 @@ PolyUOp *poly_stack(PolyCtx *ctx, PolyUOp **src, int n_src, int dim) {
     if (!src[i] || poly_uop_ndim(ctx, src[i]) != ndim) return NULL;
     for (int axis = 0; axis < ndim; axis++)
       if (!shape_value_equal(
-              poly_uop_shape_dim(ctx, src[0], axis),
-              poly_uop_shape_dim(ctx, src[i], axis)
+              poly_uop_shape_dim(ctx, src[0], axis), poly_uop_shape_dim(ctx, src[i], axis)
           ))
         return NULL;
   }
