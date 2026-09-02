@@ -26,6 +26,47 @@ const hostBuffers = new Map()
 
 const FLOAT64_BITS_BUFFER = new ArrayBuffer(8)
 const FLOAT64_BITS_VIEW = new DataView(FLOAT64_BITS_BUFFER)
+const customKernelGradKeys = new WeakMap()
+let nextCustomKernelGradKey = 1
+
+function customKernelGradKey(gradFxn) {
+  if (!gradFxn) return 0
+  let key = customKernelGradKeys.get(gradFxn)
+  if (key === undefined) {
+    if (nextCustomKernelGradKey > 0xFFFFFFFF) {
+      throw new RangeError('custom kernel gradient key space exhausted')
+    }
+    key = nextCustomKernelGradKey++
+    customKernelGradKeys.set(gradFxn, key)
+  }
+  return key
+}
+
+function normalizeLogicalPolicy(value) {
+  if (value === undefined || value === null) return null
+  if (value === false) return 0
+  if (value === true) return 1
+  if (Number.isInteger(value) && value >= 0 && value <= 2) return value
+  if (typeof value === 'string') {
+    const policies = { never: 0, always: 1, until_realize: 2 }
+    if (Object.prototype.hasOwnProperty.call(policies, value)) return policies[value]
+  }
+  throw new TypeError(
+    'logical policy must be never, always, until_realize, false/0, true/1, 2, or null'
+  )
+}
+
+function logicalPolicyName(value) {
+  const names = ['never', 'always', 'until_realize']
+  if (!Number.isInteger(value) || !names[value]) throw new Error(`unknown logical policy ${value}`)
+  return names[value]
+}
+
+function logicalStateName(value) {
+  const names = ['available', 'never_constructed', 'retired', 'unsupported_resource']
+  if (!Number.isInteger(value) || !names[value]) throw new Error(`unknown logical state ${value}`)
+  return names[value]
+}
 
 function roundShiftRightEven(value, shift) {
   if (shift <= 0) return value << BigInt(-shift)
@@ -345,6 +386,10 @@ function createBoundTensorClass(runtime) {
     ffi.poly_tensor_create_with_roots(
       ctx, rawUop(logical), physical ? rawUop(physical) : null, role, deviceId(device)
     )
+  const tensorCreateResultLike = (ctx, input, logical, physical, role, device) =>
+    ffi.poly_tensor_create_result_like(
+      ctx, input, logical ? rawUop(logical) : null, rawUop(physical), role, deviceId(device)
+    )
   const tensorUop = (tensor) => ffi.poly_tensor_uop(tensor)
   const tensorUopPhysical = (tensor) => ffi.poly_tensor_uop_physical(tensor)
   const tensorUopLogical = (tensor) => ffi.poly_tensor_uop_logical(tensor)
@@ -396,45 +441,62 @@ function createBoundTensorClass(runtime) {
     }
     return out
   }
-  const customKernelGradRecords = []
+  const customKernelGradFxns = new Map()
   const customGradRecordsFor = (ctx, root) => {
     const rootRaw = rawUop(root)
-    if (!rootRaw || !ffi.poly_uop_reachable) return []
-    const out = []
-    for (const rec of customKernelGradRecords) {
-      if (rec.ctx !== ctx) continue
-      const active = []
-      const activeSeen = new Set()
-      for (let i = 0; i < rec.physicalAfters.length; i++) {
-        const physicalAfter = rawUop(rec.physicalAfters[i])
-        const activeAfter = physicalAfter && ffi.poly_uop_reachable(ctx, rootRaw, physicalAfter)
-          ? physicalAfter : null
-        const activeKey = uopKey(activeAfter)
-        // Hash-consed duplicate sources share one AFTER. tinygrad uses the
-        // first matching CALL slot and passes its accumulated gradient once.
-        if (activeAfter && !activeSeen.has(activeKey)) {
-          const afterSrc = new UOp(ctx, ffi, activeAfter, false).src
-          if (afterSrc.length !== 2 || afterSrc[1].op !== ops.CALL) {
-            throw new Error('customKernel active output is not AFTER(data, CALL)')
-          }
-          const activeCall = afterSrc[1].raw
-          const callSrc = afterSrc[1].src
-          if (uopKey(activeCall) !== rec.call) {
-            throw new Error('customKernel active CALL identity changed')
-          }
-          if (callSrc.length !== rec.nArgs + 1) {
-            throw new Error('customKernel active CALL argument count changed')
-          }
-          activeSeen.add(activeKey)
-          // Pinned tinygrad mixin/gradient.py:90-91 and :25-31 passes the
-          // exact reachable CALL and its matching argument slot to
-          // call_gradient. Select both from this active AFTER representation.
-          active.push({ after: activeAfter, arg: callSrc[i + 1].raw, call: activeCall })
+    if (!rootRaw) return []
+    const topo = []
+    const seen = new Set()
+    const stack = [{ node: rootRaw, expanded: false }]
+    while (stack.length) {
+      const { node, expanded } = stack.pop()
+      const key = uopKey(node)
+      if (expanded) {
+        topo.push(node)
+        continue
+      }
+      if (!node || seen.has(key)) continue
+      seen.add(key)
+      stack.push({ node, expanded: true })
+      for (let i = Number(ffi.poly_uop_n_src(node)) - 1; i >= 0; i--) {
+        const src = ffi.poly_uop_src(node, i)
+        if (src) stack.push({ node: src, expanded: false })
+      }
+    }
+
+    const byCall = new Map()
+    for (const after of topo) {
+      if (Number(ffi.poly_uop_op(after)) !== ops.AFTER || Number(ffi.poly_uop_n_src(after)) !== 2) {
+        continue
+      }
+      const data = ffi.poly_uop_src(after, 0)
+      const call = ffi.poly_uop_src(after, 1)
+      if (!call || Number(ffi.poly_uop_op(call)) !== ops.CALL) continue
+      const body = ffi.poly_uop_src(call, 0)
+      if (!body || Number(ffi.poly_uop_op(body)) !== ops.SINK) continue
+      let arg = null
+      for (let i = 1; i < Number(ffi.poly_uop_n_src(call)); i++) {
+        const candidate = ffi.poly_uop_src(call, i)
+        if (uopKey(candidate) === uopKey(data)) {
+          arg = candidate
+          break
         }
       }
-      if (active.length) out.push({ rec, active })
+      if (!arg) continue
+      const callKey = uopKey(call)
+      let entry = byCall.get(callKey)
+      if (!entry) {
+        const gradKey = Number(ffi.poly_uop_call_grad_fxn_key(call)) >>> 0
+        const gradFxn = gradKey ? customKernelGradFxns.get(gradKey) : null
+        if (gradKey && !gradFxn) throw new Error('customKernel gradient callback is unavailable')
+        entry = { rec: { gradFxn }, active: [] }
+        byCall.set(callKey, entry)
+      }
+      if (!entry.active.some(existing => uopKey(existing.after) === uopKey(after))) {
+        entry.active.push({ after, arg, call })
+      }
     }
-    return out
+    return Array.from(byCall.values())
   }
   const gradResultRaw = (grad) => {
     if (!grad) return null
@@ -499,6 +561,33 @@ function createBoundTensorClass(runtime) {
      * @param {object} opts
      */
     constructor(data, opts) {
+      if (!lifetime.alive || !_runtime._core) {
+        throw new Error('polygrad runtime has been disposed')
+      }
+      const options = opts ? { ...opts } : {}
+      const policy = normalizeLogicalPolicy(options.logical)
+      delete options.logical
+      if (policy === null) {
+        this._initialize(data, options)
+        return
+      }
+      if (!ffi.poly_ctx_set_logical_policy || !ffi.poly_ctx_get_logical_policy) {
+        throw new Error('logical policy requires current core support')
+      }
+      const oldPolicy = ffi.poly_ctx_get_logical_policy(options._ctx || _runtime._core.ctx)
+      if (ffi.poly_ctx_set_logical_policy(options._ctx || _runtime._core.ctx, policy) !== 0) {
+        throw new TypeError(`invalid logical policy ${String(opts.logical)}`)
+      }
+      try {
+        this._initialize(data, options)
+      } finally {
+        if (ffi.poly_ctx_set_logical_policy(options._ctx || _runtime._core.ctx, oldPolicy) !== 0) {
+          throw new Error('failed to restore logical policy')
+        }
+      }
+    }
+
+    _initialize(data, opts) {
       if (!lifetime.alive || !_runtime._core) {
         throw new Error('polygrad runtime has been disposed')
       }
@@ -749,6 +838,23 @@ function createBoundTensorClass(runtime) {
     get uopPhysical() {
       const raw = this._physicalUopRaw()
       return raw ? new UOp(this._ctx, this._rt._core.ffi, raw) : null
+    }
+    get logicalPolicy() {
+      return logicalPolicyName(ffi.poly_tensor_logical_policy(this._tensor))
+    }
+    get logicalState() {
+      return logicalStateName(ffi.poly_tensor_logical_state(this._tensor))
+    }
+    setLogicalPolicy(policy) {
+      return ffi.poly_tensor_set_logical_policy(
+        this._ctx, this._tensor, normalizeLogicalPolicy(policy)
+      ) === 0
+    }
+    preserveLogical() {
+      if (!this.setLogicalPolicy('always')) {
+        throw new Error('logical producer is no longer available')
+      }
+      return this
     }
 
     get shape() {
@@ -1104,14 +1210,12 @@ function createBoundTensorClass(runtime) {
 
     clone(device) {
       const dev = normalizeDevice(device == null ? this._device : device)
-      const t = Tensor.empty(this.shape, {
-        _ctx: this._ctx,
-        dtype: this._dtype,
-        device: dev,
+      const cloned = ffi.poly_tensor_clone(this._ctx, this._tensor, deviceId(dev))
+      if (!cloned) throw new Error('poly_tensor_clone failed')
+      const t = new Tensor(undefined, {
+        _ctx: this._ctx, _tensor: cloned, _dtype: this._dtype, _device: dev,
         requiresGrad: this._requiresGrad
       })
-      const cloned = ffi.poly_tensor_clone_into(this._ctx, t._tensor, this._tensor)
-      if (!cloned) throw new Error('poly_tensor_clone_into failed')
       t._isParam = this._isParam
       if (this._grad) t._grad = this._grad.clone(dev)
       return t
@@ -1305,8 +1409,10 @@ function createBoundTensorClass(runtime) {
       )
       const body = fxn(...placeholders)
       if (!(body instanceof UOp)) throw new TypeError('customKernel function must return a UOp SINK body')
+      const gradFxnKey = customKernelGradKey(gradFxn)
+      if (gradFxnKey) customKernelGradFxns.set(gradFxnKey, gradFxn)
       const cores = ffi.poly_tensor_custom_kernel(
-        this._ctx, body.raw, contig.map(t => t._tensor)
+        this._ctx, body.raw, contig.map(t => t._tensor), gradFxnKey
       )
       if (!Array.isArray(cores) || cores.length !== contig.length || cores.some(x => !x)) {
         throw new Error('poly_tensor_custom_kernel failed')
@@ -1327,13 +1433,9 @@ function createBoundTensorClass(runtime) {
       if (!call || Number(ffi.poly_uop_op(call)) !== ops.CALL) {
         throw new Error('customKernel physical output is not AFTER(data, CALL)')
       }
-      customKernelGradRecords.push({
-        ctx: this._ctx,
-        call: uopKey(call),
-        nArgs: Number(ffi.poly_uop_n_src(call)) - 1,
-        physicalAfters,
-        gradFxn
-      })
+      if ((Number(ffi.poly_uop_call_grad_fxn_key(call)) >>> 0) !== gradFxnKey) {
+        throw new Error('customKernel CALL lost its gradient identity')
+      }
       return outs
     }
 
@@ -2921,8 +3023,9 @@ function createBoundTensorClass(runtime) {
         const leaf = gradLeaves[i]
         const gradUop = gradUops[i]
         if (!gradUop) throw new Error('poly_grad_many returned NULL for a leaf tensor')
-        const gradHandle = tensorCreateWithRoots(
-          this._ctx, gradUop, gradUop, POLY_TENSOR_VALUE, leaf._device
+        const gradHandle = tensorCreateResultLike(
+          this._ctx, leaf._tensor, tensorUopLogical(leaf._tensor) ? gradUop : null,
+          gradUop, POLY_TENSOR_VALUE, leaf._device
         )
         if (!gradHandle) throw new Error('failed to store backward gradient roots')
         let gradTensor = new Tensor(null, {
@@ -3364,10 +3467,12 @@ function createBoundTensorClass(runtime) {
       const result = tensor.dispose()
       if (result && typeof result.then === 'function') pending.push(result)
     }
-    customKernelGradRecords.length = 0
+    customKernelGradFxns.clear()
     return pending.length ? Promise.all(pending) : undefined
   }
   return Tensor
 }
 
-module.exports = { createBoundTensorClass, flattenArray, arraysEqual, _buildNested }
+module.exports = {
+  createBoundTensorClass, flattenArray, arraysEqual, _buildNested, normalizeLogicalPolicy
+}

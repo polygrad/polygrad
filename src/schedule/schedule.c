@@ -440,8 +440,14 @@ static PolyUOp *lower_sink_to_linear(
   if (linear) return linear;
   PolyUOp *kernel_graph = poly_get_kernel_graph(ctx, function);
   linear = kernel_graph ? poly_create_schedule(ctx, kernel_graph) : NULL;
-  if (linear && use_cache)
-    poly_map_set(ctx->schedule_cache, poly_ptr_hash(function), function, linear, poly_ptr_eq);
+  if (linear && use_cache && poly_uop_retain(ctx, function) == 0) {
+    /* Tinygrad's functools.cache strongly owns both the SINK key and LINEAR
+     * result. These retains provide the same ownership below the C map. */
+    if (poly_uop_retain(ctx, linear) == 0)
+      poly_map_set(ctx->schedule_cache, poly_ptr_hash(function), function, linear, poly_ptr_eq);
+    else
+      poly_uop_release(ctx, function);
+  }
   return linear;
 }
 

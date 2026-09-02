@@ -155,17 +155,19 @@ static PolyTensor *tensor_full_from_value(
   PolyDType storage_dtype = dtype_explicit ? value_uop->dtype : poly_dtype_strong(value_uop->dtype);
   PolyTensor *out = poly_tensor_empty(ctx, storage_dtype, dims, ndim, device);
   if (!out) return NULL;
-  PolyUOp *logical_store = poly_store_val(ctx, out->uop_logical, value_uop);
+  bool build_logical = poly_ctx_get_logical_policy(ctx) != POLY_LOGICAL_NEVER;
   PolyUOp *physical_store = poly_store_val(ctx, out->uop_physical, value_uop);
-  PolyUOp *logical_src[2] = {out->uop_logical, logical_store};
   PolyUOp *physical_src[2] = {out->uop_physical, physical_store};
-  PolyUOp *logical =
-      logical_store ? poly_uop(ctx, POLY_OP_AFTER, storage_dtype, logical_src, 2, poly_arg_none())
-                    : NULL;
   PolyUOp *physical =
       physical_store ? poly_uop(ctx, POLY_OP_AFTER, storage_dtype, physical_src, 2, poly_arg_none())
                      : NULL;
-  if (!logical || !physical ||
+  PolyUOp *logical_store = build_logical ? poly_store_val(ctx, out->uop_logical, value_uop) : NULL;
+  PolyUOp *logical_src[2] = {out->uop_logical, logical_store};
+  PolyUOp *logical =
+      build_logical && logical_store
+          ? poly_uop(ctx, POLY_OP_AFTER, storage_dtype, logical_src, 2, poly_arg_none())
+          : NULL;
+  if (!physical || (build_logical && !logical) ||
       poly_tensor_replace_roots(ctx, out, logical, physical, POLY_TENSOR_VALUE, device) != 0)
     return NULL;
   out->provenance = POLY_TENSOR_PROVENANCE_CONST_INIT;
@@ -279,6 +281,13 @@ int poly_uop_n_src(PolyUOp *u) {
 PolyUOp *poly_uop_src(PolyUOp *u, int idx) {
   if (!u || idx < 0 || idx >= u->n_src) return NULL;
   return u->src[idx];
+}
+
+uint32_t poly_uop_call_grad_fxn_key(PolyUOp *u) {
+  if (!u || (u->op != POLY_OP_CALL && u->op != POLY_OP_FUNCTION) ||
+      u->arg.kind != POLY_ARG_CALL_INFO || !u->arg.call_info)
+    return 0;
+  return u->arg.call_info->grad_fxn_key;
 }
 
 static PolyDType frontend_value_dtype(PolyDType dt) {

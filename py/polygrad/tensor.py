@@ -17,14 +17,31 @@ from . import _ffi
 from .dtype import INVERSE_DTYPES_DICT, _from_np_dtype, _to_np_dtype, dtypes, least_upper_dtype, least_upper_float, strong_dtype, to_dtype
 from polygrad.uop.ops import UOp
 from polygrad.device import Buffer
-from polygrad.helpers import TRAINING
+from polygrad.helpers import TRAINING, _logical_policy_name, _logical_state_name, _normalize_logical_policy
 
 
 # Global registry of live Tensors. Keys are weakrefs so GC'd tensors vanish
 # automatically. Used for post-realize retargeting and backward graph
 # discovery, matching tinygrad's live-tensor registry.
 all_tensors: dict[weakref.ref, None] = {}
-_custom_kernel_grad_records = []
+_custom_kernel_grad_keys = weakref.WeakKeyDictionary()
+_custom_kernel_grad_fxns = {}
+_next_custom_kernel_grad_key = 1
+
+
+def _custom_kernel_grad_key(ctx, grad_fxn):
+    global _next_custom_kernel_grad_key
+    if grad_fxn is None:
+        return 0
+    key = _custom_kernel_grad_keys.get(grad_fxn)
+    if key is None:
+        if _next_custom_kernel_grad_key > 0xFFFFFFFF:
+            raise OverflowError('custom kernel gradient key space exhausted')
+        key = _next_custom_kernel_grad_key
+        _next_custom_kernel_grad_key += 1
+        _custom_kernel_grad_keys[grad_fxn] = key
+    _custom_kernel_grad_fxns[(_ptr_value(ctx), key)] = grad_fxn
+    return key
 
 
 def _dispose_tensors_for_ctx(ctx):
@@ -36,9 +53,8 @@ def _dispose_tensors_for_ctx(ctx):
         elif _ptr_value(tensor._ctx) == ctx_key:
             tensor.dispose()
             tensor._ctx = None
-    _custom_kernel_grad_records[:] = [
-        rec for rec in _custom_kernel_grad_records if rec.get('ctx') != ctx_key
-    ]
+    for key in [key for key in _custom_kernel_grad_fxns if key[0] == ctx_key]:
+        _custom_kernel_grad_fxns.pop(key, None)
 
 # Strong frontend owner registry keyed by the C-side PolyBuffer* address value.
 # This is intentionally keyed by the retired/imported residency object, not by
@@ -536,8 +552,28 @@ class Tensor:
     .numpy() or .item() is called.
     """
 
-    def __init__(self, data=None, *, dtype=None, device=None, _ctx=None, _uop=None,
+    def __init__(self, data=None, *, dtype=None, device=None, logical=None, _ctx=None, _uop=None,
                  _data=None, _shape=None, _dtype=None, _device=None, _tensor=None):
+        from . import _default_ctx
+        ctx = _ctx or (data.ctx if isinstance(data, UOp) else None) or _default_ctx
+        policy = _normalize_logical_policy(logical)
+        if policy is None:
+            self._init(data, dtype=dtype, device=device, _ctx=_ctx, _uop=_uop, _data=_data,
+                       _shape=_shape, _dtype=_dtype, _device=_device, _tensor=_tensor)
+            return
+        lib = _ffi.get_lib()
+        old_policy = int(lib.poly_ctx_get_logical_policy(ctx))
+        if lib.poly_ctx_set_logical_policy(ctx, policy) != 0:
+            raise ValueError(f"invalid logical policy {logical!r}")
+        try:
+            self._init(data, dtype=dtype, device=device, _ctx=_ctx, _uop=_uop, _data=_data,
+                       _shape=_shape, _dtype=_dtype, _device=_device, _tensor=_tensor)
+        finally:
+            if lib.poly_ctx_set_logical_policy(ctx, old_policy) != 0:
+                raise RuntimeError("failed to restore logical policy")
+
+    def _init(self, data=None, *, dtype=None, device=None, _ctx=None, _uop=None,
+              _data=None, _shape=None, _dtype=None, _device=None, _tensor=None):
         """Create a tensor from a list, numpy array, or scalar."""
         from . import _default_ctx
         from .device import Device
@@ -792,6 +828,16 @@ class Tensor:
             self._ctx, logical, physical, role, self._device if device is None else device
         )
 
+    def _core_create_result_like(self, logical, physical, role=_POLY_TENSOR_VALUE, device=None):
+        logical_raw = _uop_raw(logical) if logical is not None else None
+        physical_raw = _uop_raw(physical)
+        if not physical_raw:
+            return None
+        return _ffi._lib.poly_tensor_create_result_like(
+            self._ctx, self._tensor, logical_raw, physical_raw, int(role),
+            _device_id(self._device if device is None else device),
+        )
+
     @staticmethod
     def _core_uop_raw(tensor):
         return _ffi._lib.poly_tensor_uop(tensor) if tensor else None
@@ -846,6 +892,27 @@ class Tensor:
             raise RuntimeError('polygrad runtime has been disposed')
         raw = self._core_uop_physical_raw(self._tensor)
         return _uop_wrap(self._ctx, raw)
+
+    @property
+    def logical_policy(self):
+        return _logical_policy_name(_ffi._lib.poly_tensor_logical_policy(self._tensor))
+
+    @property
+    def logical_state(self):
+        return _logical_state_name(_ffi._lib.poly_tensor_logical_state(self._tensor))
+
+    def set_logical_policy(self, policy):
+        policy_id = _normalize_logical_policy(policy)
+        if policy_id is None:
+            return True
+        return _ffi._lib.poly_tensor_set_logical_policy(
+            self._ctx, self._tensor, policy_id
+        ) == 0
+
+    def preserve_logical(self):
+        if not self.set_logical_policy("always"):
+            raise RuntimeError("logical producer is no longer available")
+        return self
 
     @property
     def shape(self):
@@ -945,8 +1012,9 @@ class Tensor:
             raise TypeError('custom_kernel fxn must return a UOp SINK body')
         input_arr = (_ffi._ptr * len(contig))(*[t._tensor for t in contig])
         output_arr = (_ffi._ptr * len(contig))()
+        grad_fxn_key = _custom_kernel_grad_key(self._ctx, grad_fxn)
         if _ffi._lib.poly_tensor_custom_kernel(
-            self._ctx, body.raw, input_arr, len(contig), output_arr
+            self._ctx, body.raw, input_arr, len(contig), grad_fxn_key, output_arr
         ) != 0:
             raise RuntimeError('poly_tensor_custom_kernel failed')
         outs = []
@@ -964,13 +1032,8 @@ class Tensor:
         call = _ffi._lib.poly_uop_src(physical_afters[0], 1)
         if not call or _ffi._lib.poly_uop_op(call) != _ffi.OPS.get('CALL'):
             raise RuntimeError('custom_kernel physical output is not AFTER(data, CALL)')
-        _custom_kernel_grad_records.append({
-            'ctx': _ptr_value(self._ctx),
-            'call': _ptr_value(call),
-            'n_args': _ffi._lib.poly_uop_n_src(call) - 1,
-            'physical_afters': tuple(physical_afters),
-            'grad_fxn': grad_fxn,
-        })
+        if _ffi._lib.poly_uop_call_grad_fxn_key(call) != grad_fxn_key:
+            raise RuntimeError('custom_kernel CALL lost its gradient identity')
         return outs
 
     # --- Realization ---
@@ -1028,45 +1091,54 @@ class Tensor:
         if not root_raw:
             return []
         ctx_key = _ptr_value(ctx)
-        out = []
-        for rec in list(_custom_kernel_grad_records):
-            if rec.get('ctx') != ctx_key:
+        lib = _ffi._lib
+        topo, seen, stack = [], set(), [(root_raw, False)]
+        while stack:
+            node, expanded = stack.pop()
+            node_key = _ptr_value(node)
+            if expanded:
+                topo.append(node)
                 continue
-            active = []
-            active_seen = set()
-            physical_afters = rec.get('physical_afters', ())
-            for i, physical_after in enumerate(physical_afters):
-                active_after = (
-                    _uop_raw(physical_after)
-                    if physical_after and _ffi._lib.poly_uop_reachable(
-                        ctx, root_raw, _uop_raw(physical_after)
-                    )
-                    else None
-                )
-                active_key = _ptr_value(active_after) if active_after else 0
-                # UOps are hash-consed. If one source appears more than once,
-                # tinygrad's k.src.index(data) assigns the accumulated AFTER
-                # gradient to its first CALL slot only.
-                if active_key and active_key not in active_seen:
-                    after_src = UOp(ctx, active_after).src
-                    if (len(after_src) != 2 or
-                            after_src[1].op != _ffi.OPS.get('CALL')):
-                        raise RuntimeError('custom_kernel active output is not AFTER(data, CALL)')
-                    call_src = after_src[1].src
-                    if _ptr_value(after_src[1]) != rec['call']:
-                        raise RuntimeError('custom_kernel active CALL identity changed')
-                    if len(call_src) != rec['n_args'] + 1:
-                        raise RuntimeError('custom_kernel active CALL argument count changed')
-                    active_seen.add(active_key)
-                    # tinygrad mixin/gradient.py:90-91 and :25-31 passes the
-                    # exact reachable CALL and its matching argument slot to
-                    # call_gradient. Select at Polygrad's logical/physical
-                    # boundary from that same active AFTER, never from the
-                    # record's other graph representation.
-                    active.append((active_after, call_src[i + 1].raw, after_src[1].raw))
-            if active:
-                out.append((rec, tuple(active)))
-        return out
+            if not node_key or node_key in seen:
+                continue
+            seen.add(node_key)
+            stack.append((node, True))
+            for i in range(lib.poly_uop_n_src(node) - 1, -1, -1):
+                src = lib.poly_uop_src(node, i)
+                if src:
+                    stack.append((src, False))
+
+        by_call = {}
+        for after in topo:
+            if lib.poly_uop_op(after) != _ffi.OPS.get('AFTER') or lib.poly_uop_n_src(after) != 2:
+                continue
+            data, call = lib.poly_uop_src(after, 0), lib.poly_uop_src(after, 1)
+            if not call or lib.poly_uop_op(call) != _ffi.OPS.get('CALL'):
+                continue
+            body = lib.poly_uop_src(call, 0)
+            if not body or lib.poly_uop_op(body) != _ffi.OPS.get('SINK'):
+                continue
+            arg = None
+            for i in range(1, lib.poly_uop_n_src(call)):
+                candidate = lib.poly_uop_src(call, i)
+                if _ptr_value(candidate) == _ptr_value(data):
+                    arg = candidate
+                    break
+            if not arg:
+                continue
+            call_key = _ptr_value(call)
+            rec_active = by_call.get(call_key)
+            if rec_active is None:
+                grad_key = int(lib.poly_uop_call_grad_fxn_key(call))
+                grad_fxn = _custom_kernel_grad_fxns.get((ctx_key, grad_key)) if grad_key else None
+                if grad_key and grad_fxn is None:
+                    raise RuntimeError('custom_kernel gradient callback is unavailable')
+                rec_active = ({'grad_fxn': grad_fxn}, [])
+                by_call[call_key] = rec_active
+            active = rec_active[1]
+            if all(_ptr_value(existing[0]) != _ptr_value(after) for existing in active):
+                active.append((after, arg, call))
+        return [(rec, tuple(active)) for rec, active in by_call.values()]
 
     @staticmethod
     def _grad_result_raw(grad):
@@ -1314,16 +1386,17 @@ class Tensor:
         from .device import Device
 
         dev = self._device if device is None else Device.canonicalize(device)
-        ret = Tensor.empty(
-            self.shape,
-            _ctx=self._ctx,
-            dtype=self._dtype_str,
-            device=dev,
+        cloned = _ffi._lib.poly_tensor_clone(
+            self._ctx, self._tensor, _device_id(dev),
         )
-        cloned = _ffi._lib.poly_tensor_clone_into(self._ctx, ret._tensor, self._tensor)
         if not cloned:
-            raise RuntimeError('poly_tensor_clone_into failed')
-        ret._replace_core_tensor(cloned)
+            raise RuntimeError('poly_tensor_clone failed')
+        ret = Tensor(
+            _ctx=self._ctx,
+            _tensor=cloned,
+            _dtype=self._dtype_str,
+            _device=dev,
+        )
         if self._grad is not None:
             ret._grad = self._grad.clone(device=dev)
         ret._is_param = self._is_param
@@ -3589,8 +3662,9 @@ class Tensor:
                 continue
             if not grad_uop:
                 raise RuntimeError('poly_grad_many returned NULL for a present target')
-            grad_handle = Tensor._core_create_with_roots_for(
-                self._ctx, grad_uop, grad_uop, _POLY_TENSOR_VALUE, target._device
+            grad_handle = target._core_create_result_like(
+                grad_uop if target.uop_logical is not None else None,
+                grad_uop, _POLY_TENSOR_VALUE, target._device,
             )
             if not grad_handle:
                 raise RuntimeError('failed to store backward gradient roots')

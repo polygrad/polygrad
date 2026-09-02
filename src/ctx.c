@@ -3,11 +3,16 @@
 #include "ctx.h"
 #include "device.h"
 #include "engine/schedule.h"
+#include "uop/ops.h"
 #include "utils.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <stddef.h>
 #include <string.h>
+
+/* Tinygrad UOps disappear through Python refcounts, so stable JIT replay has
+ * no global tracing pass. C batches its nonmoving mark/sweep until unreclaimed
+ * UOp storage has grown by this bounded budget. */
 #include <time.h>
 
 /* Defined in ops.c */
@@ -18,20 +23,50 @@ void poly_frontend_ctx_cleanup(PolyCtx *ctx) __attribute__((weak));
 void poly_tensor_ctx_cleanup(PolyCtx *ctx) __attribute__((weak));
 void poly_engine_ctx_cleanup(PolyCtx *ctx) __attribute__((weak));
 
+int poly_shape_cache_evict_unmarked(PolyCtx *ctx, PolyMap *live);
+void poly_shape_cache_destroy_all(PolyCtx *ctx);
+int poly_shape_cache_live_value_roots(
+    PolyCtx *ctx,
+    PolyMap *live,
+    PolyUOp ***roots_out,
+    int *count_out
+);
+
 static void free_buffer_entry(const void *key, void *value, void *userdata) {
   (void)key;
   PolyCtx *ctx = (PolyCtx *)userdata;
-  /* Free current + src chain. PolyBuffer struct itself is arena-allocated. */
+  /* Free current + src chain and its C handle metadata. */
   poly_buffer_free_chain(ctx, (PolyBuffer *)value);
+}
+
+static bool logical_policy_from_env(const char *value, PolyLogicalPolicy *policy) {
+  if (!value || !policy) return false;
+  if (strcmp(value, "0") == 0)
+    *policy = POLY_LOGICAL_NEVER;
+  else if (strcmp(value, "1") == 0)
+    *policy = POLY_LOGICAL_ALWAYS;
+  else if (strcmp(value, "2") == 0)
+    *policy = POLY_LOGICAL_UNTIL_REALIZE;
+  else
+    return false;
+  return true;
 }
 
 PolyCtx *poly_ctx_new(void) {
   poly_init_group_ops();
+  const char *logical_env = getenv("POLY_LOGICAL");
+  /* Polygrad logical-lifetime divergence: retain portable producers until
+   * successful materialization, then keep only the exact resource spine. */
+  PolyLogicalPolicy logical_policy = POLY_LOGICAL_UNTIL_REALIZE;
+  if (logical_env && !logical_policy_from_env(logical_env, &logical_policy)) return NULL;
   PolyCtx *ctx = malloc(sizeof(PolyCtx));
   if (!ctx) return NULL;
   ctx->arena = poly_arena_new(0);
   ctx->scratch = poly_arena_new(0);
   ctx->cse = poly_map_new(256);
+  ctx->uop_storage = poly_map_new(256);
+  ctx->uop_storage_bytes = 0;
+  ctx->uop_storage_high_water = 0;
   ctx->schedule_cache = poly_map_new(16);
   ctx->to_program_cache = poly_map_new(16);
   ctx->runtime_cache = poly_map_new(16);
@@ -59,6 +94,8 @@ PolyCtx *poly_ctx_new(void) {
   ctx->buffers = poly_map_new(64);
   ctx->retained_uops = poly_map_new(16);
   ctx->collection_dirty = false;
+  ctx->ir_collection_dirty = false;
+  ctx->ir_collection_baseline_bytes = 0;
   ctx->collecting = false;
   ctx->execution_depth = 0;
   ctx->rng_states = poly_map_new(8);
@@ -70,12 +107,14 @@ PolyCtx *poly_ctx_new(void) {
   ctx->next_tensor_order = 1;
   ctx->active_jit_capture = NULL;
   ctx->name_map = poly_map_new(16);
-  if (!ctx->arena || !ctx->scratch || !ctx->cse || !ctx->schedule_cache || !ctx->to_program_cache ||
-      !ctx->runtime_cache || !ctx->graph_cache || !ctx->mem_used_by_device || !ctx->shape_cache ||
-      !ctx->buffers || !ctx->retained_uops || !ctx->rng_states || !ctx->name_map) {
+  if (!ctx->arena || !ctx->scratch || !ctx->cse || !ctx->uop_storage || !ctx->schedule_cache ||
+      !ctx->to_program_cache || !ctx->runtime_cache || !ctx->graph_cache ||
+      !ctx->mem_used_by_device || !ctx->shape_cache || !ctx->buffers || !ctx->retained_uops ||
+      !ctx->rng_states || !ctx->name_map) {
     if (ctx->arena) poly_arena_destroy(ctx->arena);
     if (ctx->scratch) poly_arena_destroy(ctx->scratch);
     if (ctx->cse) poly_map_destroy(ctx->cse);
+    if (ctx->uop_storage) poly_map_destroy(ctx->uop_storage);
     if (ctx->schedule_cache) poly_map_destroy(ctx->schedule_cache);
     if (ctx->to_program_cache) poly_map_destroy(ctx->to_program_cache);
     if (ctx->runtime_cache) poly_map_destroy(ctx->runtime_cache);
@@ -98,6 +137,9 @@ PolyCtx *poly_ctx_new(void) {
   ctx->next_buf_tag = 1;
   ctx->next_unique_id = 0;
   ctx->preferred_device = POLY_DEVICE_AUTO;
+  /* Polygrad logical-lifetime divergence: environment initializes one
+   * context; later scoped changes are explicit and affect future Tensors. */
+  ctx->logical_policy = logical_policy;
   const char *dev_env = getenv("POLY_DEVICE");
   if (dev_env && dev_env[0]) {
     PolyDevice env_device = poly_device_by_name(dev_env);
@@ -117,6 +159,7 @@ void poly_ctx_destroy(PolyCtx *ctx) {
   poly_map_destroy(ctx->to_program_cache);
   poly_map_destroy(ctx->runtime_cache);
   poly_map_destroy(ctx->graph_cache);
+  poly_shape_cache_destroy_all(ctx);
   poly_map_destroy(ctx->shape_cache);
   /* Free owned buffer ptrs before destroying the map. */
   poly_map_foreach(ctx->buffers, free_buffer_entry, ctx);
@@ -127,6 +170,8 @@ void poly_ctx_destroy(PolyCtx *ctx) {
   free(ctx->tensors);
   poly_map_destroy(ctx->name_map);
   poly_map_destroy(ctx->cse);
+  poly_uop_storage_destroy_all(ctx);
+  poly_map_destroy(ctx->uop_storage);
   free(ctx->entries);
   free(ctx->ep);
   poly_arena_destroy(ctx->scratch);
@@ -147,11 +192,16 @@ void poly_uop_release(PolyCtx *ctx, PolyUOp *uop) {
   if (!ctx || !uop) return;
   uintptr_t count =
       (uintptr_t)poly_map_get(ctx->retained_uops, poly_ptr_hash(uop), uop, poly_ptr_eq);
-  if (count <= 1)
+  if (count == 0) return;
+  if (count == 1) {
     poly_map_remove(ctx->retained_uops, poly_ptr_hash(uop), uop, poly_ptr_eq);
-  else
+    /* Tinygrad 2026-08-22/a9069c177a9d UOp.__del__ removes the weak CSE row
+     * only after the final strong reference dies (uop/ops.py:241-246). */
+    ctx->collection_dirty = true;
+    ctx->ir_collection_dirty = true;
+  } else {
     poly_map_set(ctx->retained_uops, poly_ptr_hash(uop), uop, (void *)(count - 1), poly_ptr_eq);
-  ctx->collection_dirty = true;
+  }
 }
 
 typedef struct {
@@ -241,7 +291,173 @@ static void mark_retained_uop(const void *key, void *value, void *userdata) {
   marker->failed = !residency_mark_root(marker, (PolyUOp *)key);
 }
 
-static int poly_ctx_collect_with_root(PolyCtx *ctx, PolyUOp *transient_root) {
+typedef struct {
+  PolyMap *live;
+  PolyUOp **stack;
+  int n_stack;
+  int cap_stack;
+  bool failed;
+} IrMarker;
+
+static bool ir_mark_root(IrMarker *marker, PolyUOp *root) {
+  /* Python owns the complete source closure of each live Tinygrad UOp. This
+   * non-moving C trace reproduces that relation without making CSE/cache rows
+   * owners. CALL source zero is included because IR, unlike residency, owns
+   * the executable graph too. */
+  if (!marker || marker->failed) return false;
+  if (!root) return true;
+  if (marker->n_stack >= marker->cap_stack) {
+    int capacity = marker->cap_stack ? marker->cap_stack * 2 : 256;
+    PolyUOp **stack = realloc(marker->stack, (size_t)capacity * sizeof(*stack));
+    if (!stack) return false;
+    marker->stack = stack;
+    marker->cap_stack = capacity;
+  }
+  marker->stack[marker->n_stack++] = root;
+  while (marker->n_stack > 0) {
+    PolyUOp *uop = marker->stack[--marker->n_stack];
+    if (!uop || poly_map_get(marker->live, poly_ptr_hash(uop), uop, poly_ptr_eq)) continue;
+    poly_map_set(marker->live, poly_ptr_hash(uop), uop, uop, poly_ptr_eq);
+    if (uop->n_src > marker->cap_stack - marker->n_stack) {
+      int capacity = marker->cap_stack;
+      while (capacity - marker->n_stack < uop->n_src)
+        capacity *= 2;
+      PolyUOp **stack = realloc(marker->stack, (size_t)capacity * sizeof(*stack));
+      if (!stack) return false;
+      marker->stack = stack;
+      marker->cap_stack = capacity;
+    }
+    for (int i = 0; i < uop->n_src; i++)
+      marker->stack[marker->n_stack++] = uop->src[i];
+    /* Tinygrad UOp args are Python owners. C copies ProgramInfo/KernelInfo
+     * beside the UOp, so trace their symbolic UOp fields explicitly. */
+    if (uop->arg.kind == POLY_ARG_PROGRAM_INFO && uop->arg.program_info) {
+      const PolyProgramInfo *info = uop->arg.program_info;
+      int n_meta = info->n_vars + 6;
+      if (n_meta > marker->cap_stack - marker->n_stack) {
+        int capacity = marker->cap_stack;
+        while (capacity - marker->n_stack < n_meta)
+          capacity *= 2;
+        PolyUOp **stack = realloc(marker->stack, (size_t)capacity * sizeof(*stack));
+        if (!stack) return false;
+        marker->stack = stack;
+        marker->cap_stack = capacity;
+      }
+      for (int i = 0; i < 3; i++) {
+        marker->stack[marker->n_stack++] = info->global_exprs[i];
+        marker->stack[marker->n_stack++] = info->local_exprs[i];
+      }
+      for (int i = 0; i < info->n_vars; i++)
+        marker->stack[marker->n_stack++] = info->vars[i];
+    } else if (uop->arg.kind == POLY_ARG_KERNEL_INFO && uop->arg.kernel_info &&
+               uop->arg.kernel_info->estimates) {
+      if (3 > marker->cap_stack - marker->n_stack) {
+        int capacity = marker->cap_stack;
+        while (capacity - marker->n_stack < 3)
+          capacity *= 2;
+        PolyUOp **stack = realloc(marker->stack, (size_t)capacity * sizeof(*stack));
+        if (!stack) return false;
+        marker->stack = stack;
+        marker->cap_stack = capacity;
+      }
+      marker->stack[marker->n_stack++] = uop->arg.kernel_info->estimates->ops;
+      marker->stack[marker->n_stack++] = uop->arg.kernel_info->estimates->lds;
+      marker->stack[marker->n_stack++] = uop->arg.kernel_info->estimates->mem;
+    }
+  }
+  return true;
+}
+
+static void mark_retained_ir(const void *key, void *value, void *userdata) {
+  (void)value;
+  IrMarker *marker = userdata;
+  if (!marker || marker->failed) return;
+  marker->failed = !ir_mark_root(marker, (PolyUOp *)key);
+}
+
+typedef struct {
+  IrMarker *ir;
+  PolyMap *visited;
+  PolyBuffer **stack;
+  int n_stack;
+  int cap_stack;
+  bool failed;
+} BufferIrMarker;
+
+static bool mark_buffer_ir_root(BufferIrMarker *marker, PolyBuffer *root) {
+  if (!marker || marker->failed) return false;
+  if (!root) return true;
+  if (marker->n_stack >= marker->cap_stack) {
+    int capacity = marker->cap_stack ? marker->cap_stack * 2 : 64;
+    PolyBuffer **stack = realloc(marker->stack, (size_t)capacity * sizeof(*stack));
+    if (!stack) return false;
+    marker->stack = stack;
+    marker->cap_stack = capacity;
+  }
+  marker->stack[marker->n_stack++] = root;
+  while (marker->n_stack > 0) {
+    PolyBuffer *buffer = marker->stack[--marker->n_stack];
+    if (!buffer || poly_map_get(marker->visited, poly_ptr_hash(buffer), buffer, poly_ptr_eq))
+      continue;
+    poly_map_set(marker->visited, poly_ptr_hash(buffer), buffer, buffer, poly_ptr_eq);
+    if (!ir_mark_root(marker->ir, buffer->device_uop) ||
+        !ir_mark_root(marker->ir, buffer->memory_device_uop))
+      return false;
+    int n_owned = buffer->n_bufs + 2;
+    if (n_owned > marker->cap_stack - marker->n_stack) {
+      int capacity = marker->cap_stack;
+      while (capacity - marker->n_stack < n_owned)
+        capacity *= 2;
+      PolyBuffer **stack = realloc(marker->stack, (size_t)capacity * sizeof(*stack));
+      if (!stack) return false;
+      marker->stack = stack;
+      marker->cap_stack = capacity;
+    }
+    marker->stack[marker->n_stack++] = buffer->base;
+    marker->stack[marker->n_stack++] = buffer->src;
+    for (int i = 0; i < buffer->n_bufs; i++)
+      marker->stack[marker->n_stack++] = buffer->bufs[i];
+  }
+  return true;
+}
+
+static void mark_buffer_row_ir(const void *key, void *value, void *userdata) {
+  BufferIrMarker *marker = userdata;
+  if (!marker || marker->failed) return;
+  /* Tinygrad Buffer objects own their exact DEVICE identity. Polygrad keeps
+   * equivalent runtime metadata outside BUFFER.src, so collection must close
+   * that C-only ownership edge before evicting weak CSE rows. */
+  marker->failed = !ir_mark_root(marker->ir, (PolyUOp *)key) ||
+                   !mark_buffer_ir_root(marker, (PolyBuffer *)value);
+}
+
+static int mark_live_ir(PolyCtx *ctx, PolyUOp *transient_root, PolyMap *live) {
+  IrMarker marker = {.live = live};
+  for (int i = 0; !marker.failed && i < ctx->n_tensors; i++) {
+    PolyTensor *tensor = ctx->tensors[i];
+    if (!tensor || tensor->owner_refs == 0) continue;
+    marker.failed =
+        !ir_mark_root(&marker, tensor->uop_logical) || !ir_mark_root(&marker, tensor->uop_physical);
+  }
+  for (int i = 0; !marker.failed && i < ctx->n_entries; i++)
+    if (ctx->entries[i]) marker.failed = !ir_mark_root(&marker, ctx->entries[i]->buffer);
+  for (int i = 0; !marker.failed && i < ctx->n_ep; i++)
+    marker.failed = !ir_mark_root(&marker, ctx->ep[i].sink);
+  if (!marker.failed && transient_root) marker.failed = !ir_mark_root(&marker, transient_root);
+  if (!marker.failed) poly_map_foreach(ctx->retained_uops, mark_retained_ir, &marker);
+  BufferIrMarker buffers = {.ir = &marker, .visited = poly_map_new(64)};
+  if (!marker.failed && !buffers.visited)
+    marker.failed = true;
+  else if (!marker.failed)
+    poly_map_foreach(ctx->buffers, mark_buffer_row_ir, &buffers);
+  marker.failed = marker.failed || buffers.failed;
+  free(buffers.stack);
+  poly_map_destroy(buffers.visited);
+  free(marker.stack);
+  return marker.failed ? -1 : 0;
+}
+
+static int poly_ctx_collect_with_root(PolyCtx *ctx, PolyUOp *transient_root, bool collect_ir) {
   if (!ctx || ctx->collecting) return -1;
   ctx->collecting = true;
   PolyMap *marked = poly_map_new(64);
@@ -319,22 +535,60 @@ static int poly_ctx_collect_with_root(PolyCtx *ctx, PolyUOp *transient_root) {
   free(rows.items);
   free(rows.buffers);
   poly_map_destroy(marked);
+  PolyMap *live_ir = NULL;
+  if (!failed && collect_ir) {
+    live_ir = poly_map_new(256);
+    PolyUOp **shape_roots = NULL;
+    int n_shape_roots = 0;
+    if (!live_ir || mark_live_ir(ctx, transient_root, live_ir) != 0 ||
+        poly_shape_cache_live_value_roots(ctx, live_ir, &shape_roots, &n_shape_roots) != 0)
+      failed = true;
+    IrMarker shape_marker = {.live = live_ir};
+    for (int i = 0; !failed && i < n_shape_roots; i++)
+      failed = !ir_mark_root(&shape_marker, shape_roots[i]);
+    free(shape_marker.stack);
+    free(shape_roots);
+    if (!failed && (poly_shape_cache_evict_unmarked(ctx, live_ir) != 0 ||
+                    poly_uop_cse_evict_unmarked(ctx, live_ir) != 0))
+      failed = true;
+    if (!failed) {
+      ctx->ir_collection_dirty = false;
+      ctx->ir_collection_baseline_bytes = ctx->uop_storage_bytes;
+    }
+  }
+  poly_map_destroy(live_ir);
   ctx->collecting = false;
   return failed ? -1 : 0;
 }
 
 int poly_ctx_collect(PolyCtx *ctx) {
-  return poly_ctx_collect_with_root(ctx, NULL);
+  return poly_ctx_collect_with_root(ctx, NULL, true);
+}
+
+static bool poly_ctx_ir_collection_due(const PolyCtx *ctx) {
+  if (!ctx || !ctx->ir_collection_dirty) return false;
+  if (ctx->uop_storage_bytes < ctx->ir_collection_baseline_bytes) return true;
+  return ctx->uop_storage_bytes - ctx->ir_collection_baseline_bytes >=
+         POLY_IR_COLLECTION_MIN_GROWTH;
+}
+
+int poly_ctx_collect_at_safe_point(PolyCtx *ctx) {
+  if (!ctx) return -1;
+  bool collect_ir = poly_ctx_ir_collection_due(ctx);
+  if (!ctx->collection_dirty && !collect_ir) return 0;
+  return poly_ctx_collect_with_root(ctx, NULL, collect_ir);
 }
 
 int poly_ctx_collect_before_allocation(PolyCtx *ctx, PolyUOp *transient_root) {
   if (!ctx || !ctx->collection_dirty) return ctx ? 0 : -1;
-  if (ctx->execution_depth > 0) return 0;
-  return poly_ctx_collect_with_root(ctx, transient_root);
+  /* poly_run_linear retains its complete LINEAR, so allocation-time
+   * collection preserves every current CALL argument without a pre-run scan. */
+  return poly_ctx_collect_with_root(ctx, transient_root, false);
 }
 
 bool poly_ctx_owns_ptr(PolyCtx *ctx, const void *p) {
   if (!ctx || !p) return false;
+  if (poly_uop_storage_contains(ctx, p)) return true;
   uintptr_t addr = (uintptr_t)p;
   for (PolyArenaBlock *b = ctx->arena->head; b; b = b->next) {
     uintptr_t start = (uintptr_t)b->data;
@@ -351,6 +605,18 @@ void poly_ctx_set_preferred_device(PolyCtx *ctx, PolyDevice device) {
 
 PolyDevice poly_ctx_get_preferred_device(PolyCtx *ctx) {
   return ctx ? ctx->preferred_device : POLY_DEVICE_AUTO;
+}
+
+int poly_ctx_set_logical_policy(PolyCtx *ctx, PolyLogicalPolicy policy) {
+  /* Polygrad logical/placement boundary: this default is copied only by
+   * subsequently constructed Tensor handles. */
+  if (!ctx || policy < POLY_LOGICAL_NEVER || policy > POLY_LOGICAL_UNTIL_REALIZE) return -1;
+  ctx->logical_policy = policy;
+  return 0;
+}
+
+PolyLogicalPolicy poly_ctx_get_logical_policy(const PolyCtx *ctx) {
+  return ctx ? ctx->logical_policy : POLY_LOGICAL_UNTIL_REALIZE;
 }
 
 void poly_ctx_set_frontend_buffer_release(PolyCtx *ctx, PolyFrontendBufferReleaseFn fn) {
@@ -381,10 +647,11 @@ static void accum_buffer_bytes(const void *key, void *value, void *userdata) {
 
 int poly_ctx_stats(PolyCtx *ctx, PolyCtxStats *out) {
   if (!ctx || !out) return -1;
-  if (ctx->collection_dirty && poly_ctx_collect(ctx) != 0) return -1;
+  /* Tinygrad 2026-08-22/a9069c177a9d helpers.py:298-306 exposes plain
+   * GlobalCounters fields. A counter read must not change graph lifetime. */
   memset(out, 0, sizeof(*out));
-  out->arena_bytes = poly_arena_used(ctx->arena);
-  out->arena_high_water = poly_arena_high_water(ctx->arena);
+  out->arena_bytes = poly_arena_used(ctx->arena) + ctx->uop_storage_bytes;
+  out->arena_high_water = poly_arena_high_water(ctx->arena) + ctx->uop_storage_high_water;
   out->scratch_bytes = poly_arena_used(ctx->scratch);
   out->scratch_high_water = poly_arena_high_water(ctx->scratch);
   out->cse_entries = poly_map_len(ctx->cse);

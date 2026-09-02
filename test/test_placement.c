@@ -22,6 +22,24 @@ static PolyUOp *placement_binding_on_device(PolyCtx *ctx, PolyUOp *logical, Poly
   );
 }
 
+TEST(placement, tensor_entrypoint_rejects_missing_logical_source_without_touching_physical) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  ASSERT_INT_EQ(poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_NEVER), 0);
+  PolyTensor *tensor = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){4}, 1, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(tensor);
+  PolyUOp *physical = poly_tensor_uop_physical(tensor);
+  ASSERT_NOT_NULL(physical);
+  ASSERT_PTR_EQ(poly_tensor_uop_logical(tensor), NULL);
+  ASSERT_PTR_EQ(poly_tensor_physicalize(ctx, tensor), NULL);
+  PolyUOp *placed = physical;
+  ASSERT_INT_EQ(poly_tensor_physicalize_many(ctx, &tensor, 1, &placed), -1);
+  ASSERT_PTR_EQ(placed, NULL);
+  ASSERT_PTR_EQ(poly_tensor_uop_physical(tensor), physical);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(placement, logical_bindings_reproduce_eager_value_and_instance_sink) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);

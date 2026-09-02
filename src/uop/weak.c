@@ -6,6 +6,7 @@
  */
 
 #include "uop/weak.h"
+#include "utils.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -215,9 +216,16 @@ PolyPatternMatcher *poly_pm_lower_weak(void) {
 }
 
 static PolyUOp *lower_weak_source(PolyCtx *ctx, PolyUOp *u) {
+  /* Tinygrad 2026-08-22/a9069c177a9d uop/weak.py:60-68 memoizes each
+   * consumer-edge lowering in the final index rewrite's ctx dict. */
+  PolyMap *cache = (PolyMap *)poly_graph_rewrite_userctx();
+  PolyUOp *cached = cache ? poly_map_get(cache, poly_ptr_hash(u), u, poly_ptr_eq) : NULL;
+  if (cached) return cached;
   PolyUOp *lowered = poly_graph_rewrite(ctx, u, poly_pm_lower_weak());
   PolyUOp *inner = weak_cast_src(lowered);
-  return inner ? inner : lowered;
+  PolyUOp *ret = inner ? inner : lowered;
+  if (cache) poly_map_set(cache, poly_ptr_hash(u), u, ret, poly_ptr_eq);
+  return ret;
 }
 
 /* Tinygrad 2026-08-22/a9069c177a9d uop/weak.py:18-20 commit_weak_srcs. */
@@ -319,7 +327,7 @@ PolyUOp *poly_lower_weak_srcs(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
   if (!u || poly_dtype_is_weak(u->dtype) || !has_weak_src(u)) return NULL;
 
   if (poly_opset_has(POLY_GROUP_COMPARISON, u->op)) {
-    PolyUOp *ret = poly_graph_rewrite(ctx, u, poly_pm_lower_weak());
+    PolyUOp *ret = lower_weak_source(ctx, u);
     return ret != u ? ret : NULL;
   }
 

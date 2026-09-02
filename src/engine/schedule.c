@@ -78,6 +78,7 @@ typedef struct {
 
 #ifdef POLY_HAS_CUDA
 typedef struct {
+  PolyUOp *function;
   PolyCudaGraph *graph;
   PolyRunner *runners;
   PolyRuntimeCacheEntry **runtime_entries;
@@ -103,11 +104,10 @@ void poly_program_source_render_count_reset(void) {
   g_program_source_render_count = 0;
 }
 
-static char *poly_program_arena_strdup(PolyCtx *ctx, const char *s) {
-  if (!ctx) return NULL;
+static char *program_info_strdup(const char *s) {
   if (!s) s = "";
   size_t len = strlen(s);
-  char *out = poly_arena_alloc(ctx->arena, len + 1, 1);
+  char *out = malloc(len + 1);
   if (!out) return NULL;
   memcpy(out, s, len + 1);
   return out;
@@ -231,21 +231,15 @@ static void poly_call_mark_access_param(PolyUOp *call, PolyUOp *ptr, bool *mask,
   }
 }
 
-static int poly_call_mask_to_indices(
-    PolyCtx *ctx,
-    const bool *mask,
-    int n,
-    int **out_items,
-    int *out_n
-) {
-  if (!ctx || !mask || !out_items || !out_n || n < 0) return -1;
+static int poly_call_mask_to_indices(const bool *mask, int n, int **out_items, int *out_n) {
+  if (!mask || !out_items || !out_n || n < 0) return -1;
   int count = 0;
   for (int i = 0; i < n; i++)
     if (mask[i]) count++;
 
   int *items = NULL;
   if (count > 0) {
-    items = poly_arena_alloc(ctx->arena, (size_t)count * sizeof(int), _Alignof(int));
+    items = malloc((size_t)count * sizeof(*items));
     if (!items) return -1;
     int w = 0;
     for (int i = 0; i < n; i++)
@@ -785,8 +779,7 @@ static bool poly_program_info_collect_launch(PolyCtx *ctx, PolyUOp *body, PolyPr
   PolyUOp **topo = poly_toposort_alloc(ctx, body, &n_topo);
   if (!topo) return false;
   if (n_topo > 0) {
-    info->vars =
-        poly_arena_alloc(ctx->arena, (size_t)n_topo * sizeof(PolyUOp *), _Alignof(PolyUOp *));
+    info->vars = malloc((size_t)n_topo * sizeof(*info->vars));
     if (!info->vars) {
       poly_toposort_free(topo);
       return false;
@@ -849,6 +842,17 @@ int poly_call_get_outs_ins(PolyCtx *ctx, PolyUOp *call, bool *outs, bool *ins, i
   return poly_call_get_outs_ins_from_body(ctx, call, body, NULL, outs, ins, n_args);
 }
 
+static void poly_program_info_destroy(PolyProgramInfo *info) {
+  if (!info) return;
+  free((char *)info->name);
+  free((char *)info->target);
+  free(info->vars);
+  free(info->globals);
+  free(info->outs);
+  free(info->ins);
+  free(info);
+}
+
 static PolyProgramInfo *poly_program_info_build(
     PolyCtx *ctx,
     PolyUOp *call,
@@ -874,38 +878,39 @@ static PolyProgramInfo *poly_program_info_build(
     return NULL;
   }
 
-  PolyProgramInfo *info =
-      poly_arena_alloc(ctx->arena, sizeof(PolyProgramInfo), _Alignof(PolyProgramInfo));
+  PolyProgramInfo *info = calloc(1, sizeof(*info));
   if (!info) {
     free(globals);
     free(outs);
     free(ins);
     return NULL;
   }
-  memset(info, 0, sizeof(*info));
-  info->name = poly_program_arena_strdup(ctx, program_name);
-  info->target = poly_program_arena_strdup(ctx, poly_device_name(device));
+  info->name = program_info_strdup(program_name);
+  info->target = program_info_strdup(poly_device_name(device));
   if (!info->name || !info->target || !poly_program_info_collect_launch(ctx, body, info)) {
     free(globals);
     free(outs);
     free(ins);
+    poly_program_info_destroy(info);
     return NULL;
   }
 
   if (n_args > 0) {
-    if (poly_call_mask_to_indices(ctx, globals, n_args, &info->globals, &info->n_globals) != 0) {
+    if (poly_call_mask_to_indices(globals, n_args, &info->globals, &info->n_globals) != 0) {
       free(globals);
       free(outs);
       free(ins);
+      poly_program_info_destroy(info);
       return NULL;
     }
   }
 
-  if (poly_call_mask_to_indices(ctx, outs, n_args, &info->outs, &info->n_outs) != 0 ||
-      poly_call_mask_to_indices(ctx, ins, n_args, &info->ins, &info->n_ins) != 0) {
+  if (poly_call_mask_to_indices(outs, n_args, &info->outs, &info->n_outs) != 0 ||
+      poly_call_mask_to_indices(ins, n_args, &info->ins, &info->n_ins) != 0) {
     free(globals);
     free(outs);
     free(ins);
+    poly_program_info_destroy(info);
     return NULL;
   }
   free(globals);
@@ -931,6 +936,7 @@ static PolyUOp *poly_program_from_call_body(
   if (!info) return NULL;
 
   PolyUOp *program = poly_uop1(ctx, POLY_OP_PROGRAM, POLY_VOID, body, poly_arg_program_info(info));
+  poly_program_info_destroy(info);
   if (!program) return NULL;
   return program;
 }
@@ -1317,6 +1323,15 @@ static PolyRuntimeCacheEntry *poly_runtime_cache_entry_new(
   if (!runner) return NULL;
   PolyRuntimeCacheEntry *entry = calloc(1, sizeof(*entry));
   if (!entry) return NULL;
+  if (poly_uop_retain(ctx, program) != 0) {
+    free(entry);
+    return NULL;
+  }
+  if (poly_uop_retain(ctx, device_uop) != 0) {
+    poly_uop_release(ctx, program);
+    free(entry);
+    return NULL;
+  }
   entry->refcount = 1;
   entry->ctx = ctx;
   entry->accounted_bytes = sizeof(*entry);
@@ -1351,6 +1366,8 @@ static void poly_runtime_cache_entry_release(PolyRuntimeCacheEntry *entry) {
       entry->ctx->runtime_artifact_live_bytes = 0;
   }
   poly_runner_cleanup(&entry->runner, entry->device);
+  poly_uop_release(entry->ctx, entry->program);
+  poly_uop_release(entry->ctx, entry->device_uop);
   free(entry);
 }
 
@@ -1383,6 +1400,33 @@ static bool poly_to_program_cache_eq(const void *a, const void *b) {
          ka->env_stamp == kb->env_stamp && ka->program == kb->program;
 }
 
+static bool to_program_cache_store(PolyCtx *ctx, uint32_t hash, PolyToProgramCacheEntry *entry) {
+  if (!ctx || !entry || poly_uop_retain(ctx, entry->program) != 0) return false;
+  if (poly_uop_retain(ctx, entry->device_uop) != 0) goto fail_device;
+  if (poly_uop_retain(ctx, entry->prepared_program) != 0) goto fail_prepared;
+  /* Tinygrad's to_program functools.cache owns the key and prepared PROGRAM.
+   * These retains provide the same lifetime below the C map. */
+  poly_map_set(ctx->to_program_cache, hash, entry, entry, poly_to_program_cache_eq);
+  return true;
+
+fail_prepared:
+  poly_uop_release(ctx, entry->device_uop);
+fail_device:
+  poly_uop_release(ctx, entry->program);
+  return false;
+}
+
+static void to_program_cache_release(const void *key, void *value, void *userdata) {
+  (void)key;
+  PolyCtx *ctx = userdata;
+  PolyToProgramCacheEntry *entry = value;
+  if (!ctx || !entry) return;
+  poly_uop_release(ctx, entry->prepared_program);
+  poly_uop_release(ctx, entry->device_uop);
+  poly_uop_release(ctx, entry->program);
+  free(entry);
+}
+
 static void poly_runtime_cache_entry_free(const void *key, void *value, void *userdata) {
   (void)key;
   (void)userdata;
@@ -1396,7 +1440,7 @@ static void poly_runtime_cache_entry_free(const void *key, void *value, void *us
 #ifdef POLY_HAS_CUDA
 static void poly_graph_cache_entry_free(const void *key, void *value, void *userdata) {
   (void)key;
-  (void)userdata;
+  PolyCtx *ctx = userdata;
   PolyGraphCacheEntry *entry = value;
   if (!entry) return;
   poly_cuda_graph_destroy(entry->graph);
@@ -1410,13 +1454,14 @@ static void poly_graph_cache_entry_free(const void *key, void *value, void *user
   }
   free(entry->runners);
   free(entry->runtime_entries);
+  poly_uop_release(ctx, entry->function);
   free(entry);
 }
 
 /* Current Tinygrad engine/realize.py:graph_cache lifecycle. */
 static void poly_graph_cache_clear(PolyCtx *ctx) {
   if (!ctx || !ctx->graph_cache) return;
-  poly_map_foreach(ctx->graph_cache, poly_graph_cache_entry_free, NULL);
+  poly_map_foreach(ctx->graph_cache, poly_graph_cache_entry_free, ctx);
   poly_map_clear(ctx->graph_cache);
 }
 #endif
@@ -1447,7 +1492,9 @@ size_t poly_runtime_cache_artifact_bytes(PolyCtx *ctx) {
 }
 
 void poly_to_program_cache_clear(PolyCtx *ctx) {
-  if (ctx && ctx->to_program_cache) poly_map_clear(ctx->to_program_cache);
+  if (!ctx || !ctx->to_program_cache) return;
+  poly_map_foreach(ctx->to_program_cache, to_program_cache_release, ctx);
+  poly_map_clear(ctx->to_program_cache);
 }
 
 size_t poly_to_program_cache_len(PolyCtx *ctx) {
@@ -1456,7 +1503,7 @@ size_t poly_to_program_cache_len(PolyCtx *ctx) {
 
 void poly_engine_ctx_cleanup(PolyCtx *ctx) {
   /* PolyCtx owns the C maps corresponding to Tinygrad's to_program_cache and
-   * runtime_cache; LINEAR and PROGRAM UOps remain arena-owned. */
+   * runtime_cache; retained LINEAR/PROGRAM UOps own their weak C records. */
 #ifdef POLY_HAS_CUDA
   /* Graph nodes borrow runtime-cache CUDA program handles. */
   poly_graph_cache_clear(ctx);
@@ -1857,14 +1904,14 @@ static PolyUOp *poly_prepare_program_for_backend(
   }
 
   if (poly_engine_cache_enabled() && ctx->to_program_cache) {
-    entry = poly_arena_alloc(ctx->arena, sizeof(*entry), _Alignof(PolyToProgramCacheEntry));
+    entry = malloc(sizeof(*entry));
     if (entry) {
       entry->program = ast;
       entry->device_uop = device_uop;
       entry->device = device;
       entry->env_stamp = env_stamp;
       entry->prepared_program = prepared;
-      poly_map_set(ctx->to_program_cache, hash, entry, entry, poly_to_program_cache_eq);
+      if (!to_program_cache_store(ctx, hash, entry)) free(entry);
     }
   }
 
@@ -2679,14 +2726,14 @@ static PolyUOp *poly_prepare_x86_program_for_backend(
   if (!prepared) return NULL;
 
   if (poly_engine_cache_enabled() && ctx->to_program_cache) {
-    entry = poly_arena_alloc(ctx->arena, sizeof(*entry), _Alignof(PolyToProgramCacheEntry));
+    entry = malloc(sizeof(*entry));
     if (entry) {
       entry->program = raw;
       entry->device_uop = device_uop;
       entry->device = device;
       entry->env_stamp = env_stamp;
       entry->prepared_program = prepared;
-      poly_map_set(ctx->to_program_cache, hash, entry, entry, poly_to_program_cache_eq);
+      if (!to_program_cache_store(ctx, hash, entry)) free(entry);
     }
   }
 
@@ -3094,7 +3141,7 @@ static int poly_ensure_linear_arg_buffer(PolyCtx *ctx, PolyUOp *uop, bool read) 
     );
     free(graph);
   }
-  if (!identity) return -1;
+  if (!identity || !device_uop) return -1;
   if (device == POLY_DEVICE_AUTO || device_uop->arg.kind == POLY_ARG_STRING_TUPLE) return -1;
 
   int rc = read ? poly_buffer_ensure_device_current(ctx, (PolyUOp *)identity, device)
@@ -3572,24 +3619,30 @@ static void prepared_graph_calls_free(PreparedGraphCall *calls, int n_calls) {
   free(calls);
 }
 
-static PolyGraphCacheEntry *graph_cache_entry_new(int n_nodes) {
+static PolyGraphCacheEntry *graph_cache_entry_new(PolyCtx *ctx, PolyUOp *function, int n_nodes) {
   PolyGraphCacheEntry *entry = calloc(1, sizeof(*entry));
   if (!entry) return NULL;
+  if (poly_uop_retain(ctx, function) != 0) {
+    free(entry);
+    return NULL;
+  }
+  entry->function = function;
   entry->n_nodes = n_nodes;
   entry->runners = calloc((size_t)n_nodes, sizeof(*entry->runners));
   entry->runtime_entries = calloc((size_t)n_nodes, sizeof(*entry->runtime_entries));
   if (!entry->runners || !entry->runtime_entries) {
     free(entry->runners);
     free(entry->runtime_entries);
+    poly_uop_release(ctx, function);
     free(entry);
     return NULL;
   }
   return entry;
 }
 
-static void graph_cache_entry_destroy(PolyGraphCacheEntry *entry) {
+static void graph_cache_entry_destroy(PolyCtx *ctx, PolyGraphCacheEntry *entry) {
   if (!entry) return;
-  poly_graph_cache_entry_free(NULL, entry, NULL);
+  poly_graph_cache_entry_free(NULL, entry, ctx);
 }
 
 /* Current Tinygrad engine/realize.py:get_graph_runtime + exec_graph. */
@@ -3614,7 +3667,7 @@ static int poly_exec_linear_graph(
   PolyGraphCacheEntry *entry =
       poly_map_get(ctx->graph_cache, poly_ptr_hash(function), function, poly_ptr_eq);
   bool new_entry = entry == NULL;
-  if (new_entry && !(entry = graph_cache_entry_new(linear->n_src))) return -1;
+  if (new_entry && !(entry = graph_cache_entry_new(ctx, function, linear->n_src))) return -1;
   if (entry->n_nodes != linear->n_src) goto fail;
 
   PreparedGraphCall *prepared = calloc((size_t)linear->n_src, sizeof(*prepared));
@@ -3767,7 +3820,7 @@ fail_prepared:
   free(specs);
   prepared_graph_calls_free(prepared, linear->n_src);
 fail:
-  if (new_entry) graph_cache_entry_destroy(entry);
+  if (new_entry) graph_cache_entry_destroy(ctx, entry);
   return -1;
 }
 #endif
@@ -3893,13 +3946,15 @@ int poly_run_linear(
   if (!ctx || !linear || linear->op != POLY_OP_LINEAR || n_var_bindings < 0 || n_input_uops < 0 ||
       (n_var_bindings > 0 && !var_bindings) || (n_input_uops > 0 && !input_uops))
     return -1;
-  bool resweep = ctx->collection_dirty;
-  if (poly_ctx_collect_before_allocation(ctx, linear) != 0) return -1;
+  /* Tinygrad 2026-08-22/a9069c177a9d engine/realize.py:315-323 keeps LINEAR
+   * alive as a Python local. Retain the C root; an allocator triggers
+   * residency collection only when execution actually needs memory. */
+  if (poly_uop_retain(ctx, linear) != 0) return -1;
   ctx->execution_depth++;
   int rc = run_linear_impl(
       ctx, linear, var_bindings, n_var_bindings, input_uops, n_input_uops, update_stats, jit, wait
   );
   ctx->execution_depth--;
-  if (resweep) ctx->collection_dirty = true;
+  poly_uop_release(ctx, linear);
   return rc;
 }

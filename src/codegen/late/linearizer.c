@@ -731,9 +731,14 @@ static bool tuplize_pair_memo_grow(TuplizePairMemo *m) {
     nm.len++;
   }
 
-  free(m->keys);
-  free(m->vals);
-  *m = nm;
+  uint64_t *old_keys = m->keys;
+  int8_t *old_vals = m->vals;
+  m->keys = nm.keys;
+  m->vals = nm.vals;
+  m->cap = nm.cap;
+  m->len = nm.len;
+  free(old_keys);
+  free(old_vals);
   return true;
 }
 
@@ -864,7 +869,7 @@ PolyUOp **poly_linearize(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
   if (!ctx || !sink) return NULL;
   /* 1. Standard toposort */
   int n;
-  PolyUOp **topo = poly_toposort(ctx, sink, &n);
+  PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n);
   if (!topo || n <= 0) return NULL;
 
   /* 2. Build UOp* → topo-index lookup */
@@ -1073,6 +1078,7 @@ PolyUOp **poly_linearize(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
   free(tuplize_rank);
   free(ideal);
   free(nkey);
+  poly_toposort_free(topo);
 
   if (n_out) *n_out = rlen;
   return result;

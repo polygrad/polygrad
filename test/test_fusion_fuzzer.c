@@ -261,7 +261,7 @@ TEST(fusion, generated_graphs_cpu_interp_parity) {
   PASS();
 }
 
-TEST(fusion, generated_graphs_cuda_parity_when_available) {
+TEST_BACKEND(cuda, generated_fusion_graphs_match_cpu) {
 #ifndef POLY_HAS_CUDA
   SKIP("CUDA backend not compiled");
 #else

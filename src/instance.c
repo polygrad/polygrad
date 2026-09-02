@@ -214,8 +214,8 @@ struct PolyInstance {
   /* Optimizer state */
   OptimState optim;
 
-  /* C mechanics for Instance-owned physical residency. Logical-only source
-   * remains arena-valid and does not own bytes. */
+  /* C mechanics for Instance-owned UOps. Physical roots also own residency;
+   * portable roots own their producer DAG across IR collection. */
   PolyUOp **residency_roots;
   int n_residency_roots;
 };
@@ -275,8 +275,8 @@ typedef struct {
   int count;
 } InstanceResidencyRoots;
 
-/* PolyInstance-only C ownership mechanics: prepare every root before callers
- * publish the state that refers to it. Tinygrad has no Instance equivalent. */
+/* PolyInstance-only C ownership mechanics: prepare every portable, executable,
+ * and residency root before callers publish the state that refers to it. */
 static int instance_prepare_residency_roots(
     const PolyInstance *state,
     InstanceResidencyRoots *prepared
@@ -289,21 +289,42 @@ static int instance_prepare_residency_roots(
   do {                                                                                             \
     if (!instance_append_residency_root(&roots, &count, &capacity, (root))) goto fail;             \
   } while (0)
+  if (state->build) {
+    for (int i = 0; i < state->build->n_bindings; i++) {
+      const BuildBinding *binding = &state->build->bindings[i];
+      ADD_INSTANCE_ROOT(binding->buffer);
+      ADD_INSTANCE_ROOT(binding->physical_buffer);
+      ADD_INSTANCE_ROOT(binding->initial_data_buffer);
+      ADD_INSTANCE_ROOT(binding->declared_logical_value);
+      ADD_INSTANCE_ROOT(binding->declared_physical_value);
+    }
+  }
   for (int i = 0; i < state->n_bufs; i++) {
     ADD_INSTANCE_ROOT(state->bufs[i].buffer);
-    if (state->has_physical_capture) ADD_INSTANCE_ROOT(state->bufs[i].capture_buffer);
+    ADD_INSTANCE_ROOT(state->bufs[i].logical_value);
+    ADD_INSTANCE_ROOT(state->bufs[i].logical_buffer);
+    ADD_INSTANCE_ROOT(state->bufs[i].capture_buffer);
   }
   for (int i = 0; i < state->n_entrypoints; i++) {
     ADD_INSTANCE_ROOT(state->entrypoints[i].sink);
-    if (state->has_physical_capture) ADD_INSTANCE_ROOT(state->entrypoints[i].capture_sink);
+    ADD_INSTANCE_ROOT(state->entrypoints[i].logical_sink);
+    ADD_INSTANCE_ROOT(state->entrypoints[i].capture_sink);
     if (state->entry_executables) ADD_INSTANCE_ROOT(state->entry_executables[i].linear);
+  }
+  for (int i = 0; i < state->n_modules; i++) {
+    ADD_INSTANCE_ROOT(state->modules[i].logical_output);
+    for (int j = 0; j < state->modules[i].n_inputs; j++)
+      ADD_INSTANCE_ROOT(state->modules[i].logical_inputs[j]);
   }
   if (state->vag) {
     ADD_INSTANCE_ROOT(state->vag->combined_sink);
     ADD_INSTANCE_ROOT(state->vag->executable.linear);
     ADD_INSTANCE_ROOT(state->vag->loss_out_buf);
-    for (int i = 0; i < state->n_params; i++)
+    ADD_INSTANCE_ROOT(state->vag->loss_value);
+    for (int i = 0; i < state->n_params; i++) {
       ADD_INSTANCE_ROOT(state->vag->grad_out_bufs[i]);
+      ADD_INSTANCE_ROOT(state->vag->grad_uops[i]);
+    }
   }
   if (state->train) {
     ADD_INSTANCE_ROOT(state->train->combined_sink);
@@ -638,6 +659,15 @@ static PolyStatus append_build_binding(
   b->declared_physical_value = poly_tensor_uop_physical(tensor);
   b->ndim = ndim;
   if (ndim > 0) memcpy(b->shape, shape, (size_t)ndim * sizeof(int64_t));
+  /* Instance capture owns immutable build-stage roots immediately. The source
+   * Tensor may later realize and retire its wrapper-local logical producer. */
+  if (instance_refresh_residency_roots(inst) != 0) {
+    free(b->name);
+    *b = (BuildBinding){0};
+    inst->build->n_bindings--;
+    poly_instance_set_error(inst, POLY_STATUS_NOMEM, __func__, "failed to retain binding roots");
+    return POLY_STATUS_NOMEM;
+  }
   if (role == POLY_ROLE_OUTPUT) {
     if (poly_tensor_provenance(tensor) == POLY_TENSOR_PROVENANCE_UNKNOWN)
       poly_tensor_set_provenance(tensor, provenance);
@@ -662,6 +692,14 @@ static PolyTensor *make_bound_storage_tensor(
   if (require_stage(inst, POLY_INSTANCE_BUILDING, __func__) != POLY_STATUS_OK) return NULL;
   if (!inst->ctx || (ndim > 0 && !shape) || ndim < 0 || ndim > POLY_IR_MAX_DIMS) {
     poly_instance_set_error(inst, POLY_STATUS_INVALID, __func__, "invalid tensor shape");
+    return NULL;
+  }
+  /* Instance currently builds a portable package. Physical-only tensors can
+   * execute and JIT, but cannot declare portable named storage. */
+  if (poly_ctx_get_logical_policy(inst->ctx) == POLY_LOGICAL_NEVER) {
+    poly_instance_set_error(
+        inst, POLY_STATUS_INVALID, __func__, "portable Instance requires logical construction"
+    );
     return NULL;
   }
   int64_t numel = poly_shape_numel_checked(shape, ndim);
@@ -711,6 +749,13 @@ static PolyStatus append_existing_tensor_binding(
     poly_instance_set_error(inst, POLY_STATUS_INVALID, __func__, "null tensor binding");
     return POLY_STATUS_INVALID;
   }
+  PolyUOp *logical_value = poly_tensor_uop_logical(tensor);
+  if (!logical_value) {
+    poly_instance_set_error(
+        inst, POLY_STATUS_INVALID, __func__, "binding '%s' has no logical source", name
+    );
+    return POLY_STATUS_INVALID;
+  }
   int64_t shape[POLY_IR_MAX_DIMS] = {0};
   int ndim = 0;
   if (copy_tensor_shape(inst->ctx, tensor, shape, &ndim) != 0) {
@@ -718,7 +763,6 @@ static PolyStatus append_existing_tensor_binding(
     return POLY_STATUS_INVALID;
   }
   PolyUOp *buffer = NULL;
-  PolyUOp *logical_value = poly_tensor_uop_logical(tensor);
   PolyUOp *physical_value = poly_tensor_uop_physical(tensor);
   const PolyUOp *identity = poly_uop_get_buffer_identity(logical_value);
   if (identity) buffer = (PolyUOp *)identity;
@@ -1189,7 +1233,7 @@ static bool build_buffer_transaction_rollback(
       while (cursor && cursor != saved_head) {
         PolyBuffer *next = cursor->src;
         cursor->src = NULL;
-        poly_buffer_free(ctx, cursor);
+        poly_buffer_free_chain(ctx, cursor);
         cursor = next;
       }
       poly_map_set(ctx->buffers, poly_ptr_hash(key), key, saved_head, poly_ptr_eq);
@@ -1661,6 +1705,9 @@ PolyStatus poly_instance_build(PolyInstance *inst, PolyInstanceError *err) {
   build_buffer_transaction_discard(inst->ctx, &buffer_transaction);
   buffer_transaction_active = false;
   build_state_free(build);
+  for (int i = 0; i < inst->n_residency_roots; i++)
+    poly_uop_release(inst->ctx, inst->residency_roots[i]);
+  free(inst->residency_roots);
   *inst = *built;
   free(built);
   inst->stage = POLY_INSTANCE_BUILT;

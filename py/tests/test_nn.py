@@ -557,12 +557,21 @@ class TestInstanceExport:
                 inputs={"x": x}, outputs={"output": x + Tensor.rand(2)}
             )
 
-    def test_assigned_realized_input_history_fails_closed(self):
+    def test_assigned_realized_input_exports_as_current_resource(self):
         x = Tensor.empty(2)
         x.assign(Tensor([4.0, 5.0])).realize()
-        output = x * Tensor([2.0, 3.0]) + 1.0
-        with pytest.raises(RuntimeError, match="no buffer identity"):
-            Instance.from_tensors(inputs={"x": x}, outputs={"output": output})
+        source = Instance.from_tensors(
+            inputs={"x": x}, outputs={"output": x * 2.0 + 1.0}
+        )
+        restored = Instance.from_ir(source.export_ir())
+        try:
+            value = np.array([6.0, 7.0], dtype=np.float32)
+            expected = np.array([13.0, 15.0], dtype=np.float32)
+            np.testing.assert_array_equal(source.forward(x=value)["output"], expected)
+            np.testing.assert_array_equal(restored.forward(x=value)["output"], expected)
+        finally:
+            restored.free()
+            source.free()
 
     def test_float16_state_preserves_exact_dtype_and_storage_bits(self):
         w = Tensor([1.5, -2.0], dtype="float16")

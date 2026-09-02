@@ -1094,6 +1094,10 @@ TEST_COMMON(sched, shared_scalar_reduce_two_stores_e2e) {
   ASSERT_NOT_NULL(linear);
   ASSERT_NOT_NULL(realized[0]);
   ASSERT_NOT_NULL(realized[1]);
+  /* Tinygrad Tensor.realize keeps every output Tensor/UOp live through all reads;
+   * raw C callers must retain borrowed output roots across allocation safe points. */
+  ASSERT_INT_EQ(poly_uop_retain(ctx, realized[0]), 0);
+  ASSERT_INT_EQ(poly_uop_retain(ctx, realized[1]), 0);
   ASSERT_INT_EQ(linear->n_src, 2);
 
   for (int i = 0; i < 2; i++) {
@@ -1126,6 +1130,8 @@ TEST_COMMON(sched, shared_scalar_reduce_two_stores_e2e) {
     ASSERT_FLOAT_EQ(e_res[i], e0[i] * sumv, 1e-5);
   }
 
+  poly_uop_release(ctx, realized[1]);
+  poly_uop_release(ctx, realized[0]);
   poly_ctx_destroy(ctx);
   PASS();
 }

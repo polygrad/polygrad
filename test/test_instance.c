@@ -1015,6 +1015,86 @@ TEST(instance, staged_build_forward_e2e) {
   PASS();
 }
 
+TEST(instance, staged_build_after_until_realize_uses_explicit_current_resource) {
+  /* Approved Polygrad lifecycle: late capture cannot recover the retired ADD
+   * producer. It packages the exact current BUFFER as a resource-backed,
+   * zero-input program instead. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  ASSERT_INT_EQ(poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_UNTIL_REALIZE), 0);
+  poly_ctx_set_preferred_device(ctx, POLY_DEVICE_INTERP);
+  int64_t shape[1] = {2};
+  float values[2] = {1.0f, 2.0f};
+  PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_INTERP);
+  PolyTensor *one = poly_tensor_const_like_float(ctx, x, 1.0);
+  PolyTensor *out = poly_tensor_alu2(ctx, POLY_OP_ADD, x, one);
+  ASSERT_NOT_NULL(x);
+  ASSERT_NOT_NULL(one);
+  ASSERT_NOT_NULL(out);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, x->uop_physical, values, sizeof(values)), 0);
+  PolyUOp *producer = out->uop_logical;
+  PolyTensor *realized = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &out, 1, &realized), 0);
+  ASSERT_PTR_EQ(realized, out);
+  ASSERT_INT_EQ(out->logical_state, POLY_LOGICAL_RETIRED);
+  ASSERT_FALSE(poly_uop_reachable(ctx, out->uop_logical, producer));
+
+  PolyInstance *inst = poly_instance_new(ctx, NULL);
+  ASSERT_NOT_NULL(inst);
+  ASSERT_INT_EQ(poly_instance_state(inst, "current", out, 0), POLY_STATUS_OK);
+  ASSERT_INT_EQ(poly_instance_output(inst, "output", out), POLY_STATUS_OK);
+  const char *outputs[] = {"output"};
+  ASSERT_INT_EQ(
+      poly_instance_entrypoint(inst, "forward", NULL, 0, outputs, 1, NULL), POLY_STATUS_OK
+  );
+  ASSERT_INT_EQ(poly_instance_build(inst, NULL), POLY_STATUS_OK);
+  ASSERT_INT_EQ(poly_instance_forward(inst, NULL, 0), 0);
+
+  int64_t numel = 0;
+  float *got = poly_instance_buf_data_named(inst, "output", &numel);
+  ASSERT_NOT_NULL(got);
+  ASSERT_INT_EQ(numel, 2);
+  ASSERT_FLOAT_EQ(got[0], 2.0f, 1e-6f);
+  ASSERT_FLOAT_EQ(got[1], 3.0f, 1e-6f);
+
+  poly_instance_free(inst);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(instance, staged_build_after_until_realize_requires_resource_binding) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  ASSERT_INT_EQ(poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_UNTIL_REALIZE), 0);
+  poly_ctx_set_preferred_device(ctx, POLY_DEVICE_INTERP);
+  int64_t shape[1] = {2};
+  float values[2] = {1.0f, 2.0f};
+  PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_INTERP);
+  PolyTensor *out =
+      poly_tensor_alu2(ctx, POLY_OP_ADD, x, poly_tensor_const_like_float(ctx, x, 1.0));
+  ASSERT_NOT_NULL(x);
+  ASSERT_NOT_NULL(out);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, x->uop_physical, values, sizeof(values)), 0);
+  PolyTensor *realized = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &out, 1, &realized), 0);
+  ASSERT_INT_EQ(out->logical_state, POLY_LOGICAL_RETIRED);
+
+  PolyInstance *inst = poly_instance_new(ctx, NULL);
+  ASSERT_NOT_NULL(inst);
+  ASSERT_INT_EQ(poly_instance_output(inst, "output", out), POLY_STATUS_OK);
+  const char *outputs[] = {"output"};
+  ASSERT_INT_EQ(
+      poly_instance_entrypoint(inst, "forward", NULL, 0, outputs, 1, NULL), POLY_STATUS_OK
+  );
+  PolyInstanceError error = {0};
+  ASSERT_INT_EQ(poly_instance_build(inst, &error), POLY_STATUS_INVALID);
+  ASSERT_TRUE(strstr(error.message, "unbound state storage BUFFER") != NULL);
+
+  poly_instance_free(inst);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(instance, staged_logical_only_output_places_and_runs) {
   PolyCtx *ctx = poly_ctx_new();
   PolyInstance *inst = poly_instance_new(ctx, NULL);
@@ -2152,7 +2232,7 @@ TEST(instance, input_dependent_named_state_effect_fails_closed) {
   PASS();
 }
 
-TEST(instance, assigned_realized_input_history_fails_closed) {
+TEST(instance, assigned_realized_input_exports_as_current_resource) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
   int64_t shape[] = {2};
@@ -2166,7 +2246,8 @@ TEST(instance, assigned_realized_input_history_fails_closed) {
   ASSERT_INT_EQ(poly_realize_tensors(ctx, &x, 1, &realized), 0);
   ASSERT_PTR_EQ(realized, x);
   ASSERT_TRUE(poly_uop_has_buffer_identity(poly_tensor_uop_physical(x)));
-  ASSERT_FALSE(poly_uop_has_buffer_identity(poly_tensor_uop_logical(x)));
+  ASSERT_TRUE(poly_uop_has_buffer_identity(poly_tensor_uop_logical(x)));
+  ASSERT_INT_EQ(poly_tensor_logical_state(x), POLY_LOGICAL_RETIRED);
   PolyTensor *out = poly_tensor_alu2(ctx, POLY_OP_ADD, x, x);
   ASSERT_NOT_NULL(out);
 
@@ -2185,9 +2266,19 @@ TEST(instance, assigned_realized_input_history_fails_closed) {
   }};
   PolyInstanceError error = {0};
   PolyInstance *inst = poly_instance_from_bindings(ctx, bindings, 2, entries, 1, NULL, &error);
-  ASSERT_EQ(inst, NULL);
-  ASSERT_TRUE(strstr(error.message, "has no buffer identity") != NULL);
+  ASSERT_NOT_NULL(inst);
 
+  float runtime_x[] = {6.0f, 7.0f};
+  PolyIOBinding io[] = {POLY_IO_BINDING_ARRAY("x", runtime_x, POLY_FLOAT32)};
+  ASSERT_INT_EQ(poly_instance_forward(inst, io, 1), 0);
+  int64_t n = 0;
+  float *result = poly_instance_buf_data_named(inst, "output", &n);
+  ASSERT_NOT_NULL(result);
+  ASSERT_INT_EQ((int)n, 2);
+  ASSERT_FLOAT_EQ(result[0], 12.0f, 1e-6f);
+  ASSERT_FLOAT_EQ(result[1], 14.0f, 1e-6f);
+
+  poly_instance_free(inst);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -3644,7 +3735,7 @@ TEST(instance, from_sinks_wraps_selected_lazy_tensor_graph) {
   PASS();
 }
 
-TEST(instance, staged_build_places_preserved_logical_after_output_realize) {
+TEST(instance, staged_build_owns_logical_captured_before_output_realize) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
   int64_t shape[] = {2};
@@ -3669,17 +3760,23 @@ TEST(instance, staged_build_places_preserved_logical_after_output_realize) {
   PolyTensor *out = poly_tensor_alu2(ctx, POLY_OP_ADD, x, w);
   ASSERT_NOT_NULL(out);
 
-  PolyTensor *realized = NULL;
-  ASSERT_INT_EQ(poly_realize_tensors(ctx, &out, 1, &realized), 0);
-  ASSERT_PTR_EQ(realized, out);
-  ASSERT_NOT_NULL(poly_tensor_uop_physical(out));
-
+  /* Capture the portable program before execution. Instance owns this root
+   * independently of the source Tensor's later logical retirement. */
   ASSERT_INT_EQ(poly_instance_output(inst, "output", out), POLY_STATUS_OK);
   const char *inputs[] = {"x"};
   const char *outputs[] = {"output"};
   ASSERT_INT_EQ(
       poly_instance_entrypoint(inst, "forward", inputs, 1, outputs, 1, NULL), POLY_STATUS_OK
   );
+
+  PolyTensor *realized = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &out, 1, &realized), 0);
+  ASSERT_PTR_EQ(realized, out);
+  ASSERT_NOT_NULL(poly_tensor_uop_physical(out));
+  ASSERT_NOT_NULL(poly_tensor_uop_logical(out));
+  ASSERT_INT_EQ(poly_tensor_logical_policy(out), POLY_LOGICAL_UNTIL_REALIZE);
+  ASSERT_INT_EQ(poly_tensor_logical_state(out), POLY_LOGICAL_RETIRED);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
   ASSERT_INT_EQ(poly_instance_build(inst, NULL), POLY_STATUS_OK);
   ASSERT_INT_EQ(poly_instance_stage(inst), POLY_INSTANCE_BUILT);
 
@@ -3694,6 +3791,36 @@ TEST(instance, staged_build_places_preserved_logical_after_output_realize) {
   ASSERT_FLOAT_EQ(result[1], 10.0f, 1e-5f);
 
   poly_instance_free(inst);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(instance, portable_staging_rejects_tensors_without_logical_source) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  ASSERT_INT_EQ(poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_NEVER), 0);
+  int64_t shape[] = {2};
+  PolyTensor *tensor = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(tensor);
+  ASSERT_PTR_EQ(poly_tensor_uop_logical(tensor), NULL);
+
+  PolyInstance *from_tensor = poly_instance_new(ctx, NULL);
+  ASSERT_NOT_NULL(from_tensor);
+  ASSERT_INT_EQ(poly_instance_output(from_tensor, "output", tensor), POLY_STATUS_INVALID);
+  const PolyInstanceError *from_tensor_error = poly_instance_last_error(from_tensor);
+  ASSERT_NOT_NULL(from_tensor_error);
+  ASSERT_NOT_NULL(strstr(from_tensor_error->message, "logical"));
+
+  PolyInstance *declared = poly_instance_new(ctx, NULL);
+  ASSERT_NOT_NULL(declared);
+  ASSERT_PTR_EQ(poly_instance_input(declared, "x", POLY_FLOAT32, shape, 1), NULL);
+  const PolyInstanceError *declared_error = poly_instance_last_error(declared);
+  ASSERT_NOT_NULL(declared_error);
+  ASSERT_INT_EQ(declared_error->code, POLY_STATUS_INVALID);
+  ASSERT_NOT_NULL(strstr(declared_error->message, "logical"));
+
+  poly_instance_free(declared);
+  poly_instance_free(from_tensor);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -4635,6 +4762,8 @@ TEST(instance, set_device_roundtrip) {
   ASSERT_NOT_NULL(ctx);
   ASSERT_NOT_NULL(initial_a);
   ASSERT_NOT_NULL(initial_sink);
+  ASSERT_INT_EQ(poly_uop_retain(ctx, initial_a), 0);
+  ASSERT_INT_EQ(poly_uop_retain(ctx, initial_sink), 0);
   PolyDevice initial_device = poly_uop_device(initial_a);
   ASSERT_TRUE(poly_device_can_execute(initial_device));
   ASSERT_FALSE(poly_tensor_root_has_unplaced_buffer(ctx, initial_sink));
@@ -4678,6 +4807,8 @@ TEST(instance, set_device_roundtrip) {
   for (int i = 0; i < 4; i++)
     ASSERT_TRUE(fabsf(out[i] - expected[i]) < 1e-5f);
 
+  poly_uop_release(ctx, initial_sink);
+  poly_uop_release(ctx, initial_a);
   poly_instance_free(inst);
   free(ir);
   PASS();

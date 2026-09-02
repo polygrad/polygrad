@@ -1,7 +1,7 @@
 'use strict'
 
 const polygrad = require('..')
-const { runTensorTests } = require('./test_tensor')
+const { checkLogicalRuntimeOption, runTensorTests } = require('./test_tensor')
 const { runInstanceTests } = require('./test_instance')
 const { runJitTests } = require('./test_jit')
 const { runOptimTests } = require('./test_optim')
@@ -306,6 +306,7 @@ async function runWasmInterpTests() {
 }
 
 async function main() {
+  await checkLogicalRuntimeOption(polygrad, 'wasm')
   const pg = await polygrad.create({ core: 'wasm' })
   try {
     const syncResult = await runSyncContractTests(polygrad, pg, { core: 'wasm' })

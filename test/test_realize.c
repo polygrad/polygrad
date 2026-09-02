@@ -102,6 +102,7 @@ TEST(realize, deviceful_weak_root_requires_concrete_cast) {
    * weak result before callify; an explicit strong cast remains realizable. */
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
+  ASSERT_INT_EQ(poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_UNTIL_REALIZE), 0);
   poly_ctx_set_preferred_device(ctx, POLY_DEVICE_CPU);
   int64_t shape[] = {2};
   PolyTensor *base = poly_tensor_full_int_by_id(
@@ -112,10 +113,14 @@ TEST(realize, deviceful_weak_root_requires_concrete_cast) {
   PolyTensor *weak = poly_tensor_alu2(ctx, POLY_OP_POW, base, exponent);
   ASSERT_NOT_NULL(weak);
   ASSERT_TRUE(poly_dtype_eq(poly_tensor_uop_physical(weak)->dtype, POLY_WEAKFLOAT));
+  PolyUOp *weak_logical = poly_tensor_uop_logical(weak);
+  ASSERT_NOT_NULL(weak_logical);
 
   PolyTensor *realized = NULL;
   ASSERT_INT_EQ(poly_realize_tensors(ctx, &weak, 1, &realized), -1);
   ASSERT_TRUE(realized == NULL);
+  ASSERT_PTR_EQ(poly_tensor_uop_logical(weak), weak_logical);
+  ASSERT_INT_EQ(poly_tensor_logical_state(weak), POLY_LOGICAL_AVAILABLE);
 
   PolyTensor *strong = poly_tensor_cast_by_id(ctx, weak, poly_dtype_id_by_name("float32"));
   ASSERT_NOT_NULL(strong);
@@ -254,7 +259,8 @@ static PolyTensor *custom_add_tensor(
   PolyUOp *sink = poly_uop_sink_ex(ctx, &end, 1, "custom_add_4", 1);
   PolyTensor *inputs[3] = {c, a, b};
   PolyTensor *outputs[3] = {0};
-  return sink && poly_tensor_custom_kernel(ctx, sink, inputs, 3, outputs) == 0 ? outputs[0] : NULL;
+  return sink && poly_tensor_custom_kernel(ctx, sink, inputs, 3, 0, outputs) == 0 ? outputs[0]
+                                                                                  : NULL;
 }
 
 static PolyTensor *custom_summary_tensor(PolyCtx *ctx, PolyTensor *a, PolyUOp **out_buf) {
@@ -279,7 +285,8 @@ static PolyTensor *custom_summary_tensor(PolyCtx *ctx, PolyTensor *a, PolyUOp **
   PolyUOp *sink = poly_uop_sink_ex(ctx, &reduced, 1, "custom_sum_8", 1);
   PolyTensor *inputs[2] = {out, a};
   PolyTensor *outputs[2] = {0};
-  return sink && poly_tensor_custom_kernel(ctx, sink, inputs, 2, outputs) == 0 ? outputs[0] : NULL;
+  return sink && poly_tensor_custom_kernel(ctx, sink, inputs, 2, 0, outputs) == 0 ? outputs[0]
+                                                                                  : NULL;
 }
 
 static void custom_multi_summary_tensors(
@@ -317,7 +324,7 @@ static void custom_multi_summary_tensors(
   PolyUOp *sink = poly_uop_sink_ex(ctx, &end, 1, "custom_addmul_4", 1);
   PolyTensor *inputs[4] = {out0, out1, a, b};
   PolyTensor *outputs[4] = {0};
-  if (!sink || poly_tensor_custom_kernel(ctx, sink, inputs, 4, outputs) != 0) return;
+  if (!sink || poly_tensor_custom_kernel(ctx, sink, inputs, 4, 0, outputs) != 0) return;
   *out0_tensor = outputs[0];
   *out1_tensor = outputs[1];
 }
@@ -1257,6 +1264,7 @@ TEST(realize, retained_place_version_replays_after_live_callify_map) {
    * the live PLACE still owns this version; uop_logical remains provenance. */
   PolyUOp *retained_first_physical = poly_tensor_uop_physical(saved_version);
   ASSERT_NOT_NULL(retained_first_physical);
+  ASSERT_INT_EQ(poly_uop_retain(ctx, retained_first_physical), 0);
 
   PolyUOp *second_value_logical =
       poly_add(ctx, poly_tensor_uop_logical(target), poly_const_float(ctx, 8.0f));
@@ -1330,6 +1338,7 @@ TEST(realize, retained_place_version_replays_after_live_callify_map) {
   ASSERT_NOT_NULL(scheduled_out);
   ASSERT_INT_EQ(schedule->n_src, 3);
 
+  poly_uop_release(ctx, retained_first_physical);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -1368,6 +1377,7 @@ TEST(realize, aggregate_map_preserves_saved_place_version_topology) {
   }
 
   PolyUOp *retained_raw_first = physical_versions[0];
+  ASSERT_INT_EQ(poly_uop_retain(ctx, retained_raw_first), 0);
   PolyUOp *consumer_logical =
       poly_add(ctx, poly_tensor_uop_logical(saved[0]), poly_const_float(ctx, 2.0f));
   PolyUOp *consumer_uop = poly_add(ctx, poly_tensor_uop(saved[0]), poly_const_float(ctx, 2.0f));
@@ -1415,6 +1425,7 @@ TEST(realize, aggregate_map_preserves_saved_place_version_topology) {
   ASSERT_TRUE(poly_uop_reachable(ctx, retained_raw_first, source_physical));
   ASSERT_FALSE(poly_uop_reachable(ctx, retained_raw_first, (PolyUOp *)placed_identity));
 
+  poly_uop_release(ctx, retained_raw_first);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -1544,8 +1555,8 @@ TEST(realize, aggregate_map_keeps_shared_storage_devices_distinct) {
 }
 
 typedef struct {
-  size_t arena_delta;
-  size_t cse_delta;
+  ptrdiff_t arena_delta;
+  ptrdiff_t cse_delta;
 } AggregateMapArenaResult;
 
 static int aggregate_map_unrelated_arena_case(
@@ -1560,6 +1571,7 @@ static int aggregate_map_unrelated_arena_case(
   PolyUOp **place_roots = n_places > 0 ? calloc((size_t)n_places, sizeof(*place_roots)) : NULL;
   PolyTensor **places = n_places > 0 ? calloc((size_t)n_places, sizeof(*places)) : NULL;
   int rc = -1;
+  bool retained_new_leaf = false;
   if (!ctx || (n_values > 0 && (!value_roots || !values)) ||
       (n_places > 0 && (!place_roots || !places)))
     goto cleanup;
@@ -1570,6 +1582,8 @@ static int aggregate_map_unrelated_arena_case(
   PolyTensor *affected =
       placed_tensor_from_logical_uop(ctx, affected_root, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
   if (!old_leaf || !new_leaf || !affected_root || !affected) goto cleanup;
+  if (poly_uop_retain(ctx, new_leaf) != 0) goto cleanup;
+  retained_new_leaf = true;
 
   for (int i = 0; i < n_values; i++) {
     PolyUOp *logical =
@@ -1593,9 +1607,9 @@ static int aggregate_map_unrelated_arena_case(
   PolyCtxStats before = {0}, after = {0};
   PolyUOp *from[1] = {old_leaf};
   PolyUOp *to[1] = {new_leaf};
-  if (poly_ctx_stats(ctx, &before) != 0 ||
+  if (poly_ctx_collect(ctx) != 0 || poly_ctx_stats(ctx, &before) != 0 ||
       poly_tensor_apply_realize_map(ctx, from, to, 1, POLY_DEVICE_AUTO) != 0 ||
-      poly_ctx_stats(ctx, &after) != 0 ||
+      poly_ctx_collect(ctx) != 0 || poly_ctx_stats(ctx, &after) != 0 ||
       !poly_uop_reachable(ctx, poly_tensor_uop(affected), new_leaf) ||
       poly_uop_reachable(ctx, poly_tensor_uop(affected), old_leaf))
     goto cleanup;
@@ -1606,11 +1620,12 @@ static int aggregate_map_unrelated_arena_case(
         poly_tensor_uop_physical(places[i]) != place_roots[i])
       goto cleanup;
 
-  out->arena_delta = after.arena_bytes - before.arena_bytes;
-  out->cse_delta = after.cse_entries - before.cse_entries;
+  out->arena_delta = (ptrdiff_t)after.arena_bytes - (ptrdiff_t)before.arena_bytes;
+  out->cse_delta = (ptrdiff_t)after.cse_entries - (ptrdiff_t)before.cse_entries;
   rc = 0;
 
 cleanup:
+  if (retained_new_leaf) poly_uop_release(ctx, new_leaf);
   free(places);
   free(place_roots);
   free(values);
@@ -1645,6 +1660,7 @@ static int aggregate_map_unrelated_contiguous_arena_case(
   PolyTensor **unrelated_tensors =
       n_unrelated > 0 ? calloc((size_t)n_unrelated, sizeof(*unrelated_tensors)) : NULL;
   int rc = -1;
+  bool retained_replacement = false;
   if (!ctx || (n_unrelated > 0 && (!unrelated_roots || !unrelated_tensors))) goto cleanup;
 
   PolyUOp *input = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_CPU);
@@ -1668,6 +1684,8 @@ static int aggregate_map_unrelated_contiguous_arena_case(
       !replacement || placed_contiguous->op != POLY_OP_CONTIGUOUS ||
       placed_contiguous == logical_contiguous)
     goto cleanup;
+  if (poly_uop_retain(ctx, replacement) != 0) goto cleanup;
+  retained_replacement = true;
 
   for (int i = 0; i < n_unrelated; i++) {
     PolyUOp *other_input =
@@ -1686,9 +1704,10 @@ static int aggregate_map_unrelated_contiguous_arena_case(
   PolyCtxStats before = {0}, after = {0};
   PolyUOp *from[1] = {placed_contiguous};
   PolyUOp *to[1] = {replacement};
-  if (poly_ctx_stats(ctx, &before) != 0 ||
+  if (poly_ctx_collect(ctx) != 0 || poly_ctx_stats(ctx, &before) != 0 ||
       poly_tensor_apply_realize_map(ctx, from, to, 1, POLY_DEVICE_CUDA) != 0 ||
-      poly_ctx_stats(ctx, &after) != 0 || poly_tensor_uop_logical(boundary) != logical_contiguous ||
+      poly_ctx_collect(ctx) != 0 || poly_ctx_stats(ctx, &after) != 0 ||
+      poly_tensor_uop_logical(boundary) != logical_contiguous ||
       poly_tensor_uop_physical(boundary) != replacement ||
       poly_tensor_uop_logical(consumer_tensor) != consumer ||
       !poly_uop_reachable(ctx, poly_tensor_uop_physical(consumer_tensor), replacement))
@@ -1696,11 +1715,12 @@ static int aggregate_map_unrelated_contiguous_arena_case(
   for (int i = 0; i < n_unrelated; i++)
     if (poly_tensor_uop_physical(unrelated_tensors[i]) != unrelated_roots[i]) goto cleanup;
 
-  out->arena_delta = after.arena_bytes - before.arena_bytes;
-  out->cse_delta = after.cse_entries - before.cse_entries;
+  out->arena_delta = (ptrdiff_t)after.arena_bytes - (ptrdiff_t)before.arena_bytes;
+  out->cse_delta = (ptrdiff_t)after.cse_entries - (ptrdiff_t)before.cse_entries;
   rc = 0;
 
 cleanup:
+  if (retained_replacement) poly_uop_release(ctx, replacement);
   free(unrelated_tensors);
   free(unrelated_roots);
   if (ctx) poly_ctx_destroy(ctx);
@@ -1716,8 +1736,10 @@ TEST(realize, aggregate_map_ignores_same_metadata_contiguous_without_retention) 
   ASSERT_INT_EQ(aggregate_map_unrelated_contiguous_arena_case(100, true, &shared_input), 0);
   ASSERT_INT_EQ(distinct_input.arena_delta, baseline.arena_delta);
   ASSERT_INT_EQ(distinct_input.cse_delta, baseline.cse_delta);
-  ASSERT_INT_EQ(shared_input.arena_delta, baseline.arena_delta);
-  ASSERT_INT_EQ(shared_input.cse_delta, baseline.cse_delta);
+  ASSERT_TRUE(shared_input.arena_delta <= 0);
+  /* Shared placed descendants may survive the weak-CSE sweep. Map work must
+   * stay bounded and leave no new cache rows, independent of live sharing. */
+  ASSERT_TRUE(shared_input.cse_delta <= 0);
   PASS();
 }
 
@@ -2757,6 +2779,8 @@ TEST(realize, tensor_assign_shrink_view_realize_view_updates_base_storage) {
 TEST(realize, tensor_assign_realized_contiguous_cache_view_retargets_both_roots) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
+  /* This gate inspects the original producer after realization. */
+  ASSERT_INT_EQ(poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_ALWAYS), 0);
   int f32 = poly_dtype_id_by_name("float32");
   int64_t cache_shape[] = {2, 1, 8, 1, 4};
   int64_t value_shape[] = {2, 1, 3, 1, 4};
@@ -2869,6 +2893,8 @@ TEST(realize, tensor_assign_permute_view_updates_base_storage) {
 
 TEST(realize, tensor_physical_root_tracks_realize_and_assign) {
   PolyCtx *ctx = poly_ctx_new();
+  /* Compare current-buffer updates without retiring producer identity. */
+  ASSERT_INT_EQ(poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_ALWAYS), 0);
 
   float *da = malloc(sizeof(float));
   ASSERT_NOT_NULL(da);
@@ -2914,7 +2940,9 @@ TEST(realize, tensor_physical_root_tracks_realize_and_assign) {
   PolyTensor *fresh_inner = poly_tensor_alu2(ctx, POLY_OP_ADD, a, one);
   ASSERT_NOT_NULL(fresh_inner);
   ASSERT_PTR_EQ(poly_tensor_uop_logical(fresh_inner), x_logical_expr);
-  ASSERT_PTR_EQ(poly_tensor_uop_physical(fresh_inner), x_physical_expr);
+  ASSERT_INT_EQ(poly_tensor_uop_physical(fresh_inner)->op, POLY_OP_ADD);
+  ASSERT_PTR_EQ(poly_tensor_uop_physical(fresh_inner)->src[0], poly_tensor_uop_physical(a));
+  ASSERT_PTR_EQ(poly_tensor_uop_physical(fresh_inner)->src[1], poly_tensor_uop_physical(one));
   PolyTensor *z = poly_tensor_alu2(ctx, POLY_OP_ADD, fresh_inner, one);
   ASSERT_NOT_NULL(z);
   out = NULL;
@@ -3254,6 +3282,9 @@ TEST(realize, contiguous_realized_scalar_passthrough) {
 TEST(realize, requested_plain_root_retargets_live_dependent_to_final_buffer) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
+  /* This becomes-map test inspects producer-complete logical roots after
+   * realization; request that capability explicitly. */
+  ASSERT_INT_EQ(poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_ALWAYS), 0);
   float input_value = 1.0f;
   int f32 = poly_dtype_id_by_name("float32");
   int64_t shape[] = {1};
@@ -3343,6 +3374,7 @@ TEST(realize, aggregate_map_preserves_opaque_bodies_and_places_external_args) {
       ASSERT_NOT_NULL(tensor);
       ASSERT_NOT_NULL(physical_before);
       ASSERT_NOT_NULL(replacement);
+      ASSERT_INT_EQ(poly_uop_retain(ctx, replacement), 0);
 
       PolyUOp *from[1] = {placed_key};
       PolyUOp *to[1] = {replacement};
@@ -3358,8 +3390,10 @@ TEST(realize, aggregate_map_preserves_opaque_bodies_and_places_external_args) {
          * substitution pins that body. With no caller-visible occurrence the
          * stored physical graph remains unchanged. */
         ASSERT_PTR_EQ(physical, physical_before);
-        ASSERT_TRUE(after_stats.arena_bytes == before.arena_bytes);
-        ASSERT_TRUE(after_stats.cse_entries == before.cse_entries);
+        ASSERT_TRUE(after_stats.arena_bytes <= before.arena_bytes);
+        /* Retargeted sibling roots may make weak CSE rows collectible. The
+         * opaque no-op path must allocate nothing and cannot grow the cache. */
+        ASSERT_TRUE(after_stats.cse_entries <= before.cse_entries);
       } else {
         ASSERT_NOT_NULL(physical);
         ASSERT_EQ(physical->op, POLY_OP_AFTER);
@@ -3370,6 +3404,7 @@ TEST(realize, aggregate_map_preserves_opaque_bodies_and_places_external_args) {
         ASSERT_PTR_EQ(physical->src[1]->src[1], replacement);
       }
 
+      poly_uop_release(ctx, replacement);
       poly_ctx_destroy(ctx);
     }
   }
@@ -5015,6 +5050,10 @@ TEST(realize, transform_to_call_requested_parent_feeds_requested_descendant) {
   PolyUOp *schedule = poly_test_linear_values(ctx, targets, 2, resolved);
   ASSERT_NOT_NULL(schedule);
   ASSERT_INT_EQ(schedule->n_src, 2);
+  /* Tinygrad Tensor.realize keeps every output Tensor/UOp live through all reads;
+   * raw C callers must retain borrowed output roots across allocation safe points. */
+  ASSERT_INT_EQ(poly_uop_retain(ctx, resolved[0]), 0);
+  ASSERT_INT_EQ(poly_uop_retain(ctx, resolved[1]), 0);
   const PolyUOp *parent_buffer = poly_uop_get_buffer_identity(resolved[0]);
   ASSERT_NOT_NULL(parent_buffer);
   for (int call_index = 0; call_index < 2; call_index++) {
@@ -5036,6 +5075,8 @@ TEST(realize, transform_to_call_requested_parent_feeds_requested_descendant) {
     ASSERT_FLOAT_EQ(descendant_out[i], parent_out[i] * scale_data[i], 1e-6f);
   }
 
+  poly_uop_release(ctx, resolved[1]);
+  poly_uop_release(ctx, resolved[0]);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -5825,6 +5866,10 @@ TEST(realize, schedule_with_vars_multi_target_batch) {
   ASSERT_NOT_NULL(sched);
   ASSERT_NOT_NULL(realized[0]);
   ASSERT_NOT_NULL(realized[1]);
+  /* Tinygrad Tensor.realize keeps every output Tensor/UOp live through all reads;
+   * raw C callers must retain borrowed output roots across allocation safe points. */
+  ASSERT_INT_EQ(poly_uop_retain(ctx, realized[0]), 0);
+  ASSERT_INT_EQ(poly_uop_retain(ctx, realized[1]), 0);
 
   ASSERT_INT_EQ(poly_run_linear(ctx, sched, NULL, 0, NULL, 0, true, false, false), 0);
 
@@ -5841,6 +5886,8 @@ TEST(realize, schedule_with_vars_multi_target_batch) {
   ASSERT_FLOAT_EQ(mul_out[0], 10.0f, 1e-5f);
   ASSERT_FLOAT_EQ(mul_out[3], 160.0f, 1e-5f);
 
+  poly_uop_release(ctx, realized[1]);
+  poly_uop_release(ctx, realized[0]);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -6268,6 +6315,48 @@ TEST(realize, poly_jit_replays_raw_tensor_realize_with_new_input) {
   PASS();
 }
 
+TEST(realize, poly_jit_capture_and_replay_require_only_physical_tensor_roots) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  ASSERT_INT_EQ(poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_NEVER), 0);
+  int64_t shape[] = {3};
+  int f32 = poly_dtype_id_by_name("float32");
+  float a_data[] = {1.0f, 2.0f, 3.0f};
+  PolyTensor *a = initialized_f32_tensor(ctx, shape, 1, a_data, POLY_DEVICE_CPU, NULL);
+  ASSERT_NOT_NULL(a);
+  ASSERT_PTR_EQ(poly_tensor_uop_logical(a), NULL);
+
+  PolyJit *jit = poly_jit_new(ctx);
+  ASSERT_NOT_NULL(jit);
+  ASSERT_INT_EQ(poly_jit_begin_capture(jit, &a, 1), 0);
+  PolyTensor *one = poly_tensor_const_float_by_id(ctx, 1.0, f32, POLY_DEVICE_CPU);
+  PolyTensor *out = poly_tensor_alu2(ctx, POLY_OP_ADD, a, one);
+  ASSERT_NOT_NULL(out);
+  ASSERT_PTR_EQ(poly_tensor_uop_logical(out), NULL);
+  PolyTensor *realized = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &out, 1, &realized), 0);
+  ASSERT_PTR_EQ(realized, out);
+  ASSERT_INT_EQ(poly_jit_end_capture(jit, ctx->tensors, ctx->n_tensors), 0);
+  ASSERT_TRUE(poly_jit_is_captured(jit));
+
+  float b_data[] = {10.0f, 20.0f, 30.0f};
+  PolyTensor *b = initialized_f32_tensor(ctx, shape, 1, b_data, POLY_DEVICE_CPU, NULL);
+  ASSERT_NOT_NULL(b);
+  ASSERT_PTR_EQ(poly_tensor_uop_logical(b), NULL);
+  ASSERT_INT_EQ(poly_jit_run(jit, &b, 1), 0);
+  float values[3] = {0};
+  const PolyUOp *identity = poly_uop_get_buffer_identity(poly_tensor_uop_physical(out));
+  ASSERT_NOT_NULL(identity);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, (PolyUOp *)identity, values, sizeof(values)), 0);
+  ASSERT_FLOAT_EQ(values[0], 11.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(values[1], 21.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(values[2], 31.0f, 1e-5f);
+
+  poly_jit_free(jit);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(realize, live_jit_owns_captured_residency_after_tensor_release) {
   /* Tinygrad 2026-08-22 engine/jit.py:250-280 retains the final captured
    * LINEAR after dropping the pre-plan graph and frontend Tensor owners. */
@@ -6301,7 +6390,8 @@ TEST(realize, live_jit_owns_captured_residency_after_tensor_release) {
   ASSERT_TRUE(poly_buffer_is_allocated(ctx, out_buffer));
   PolyCtxStats stats = {0};
   ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
-  ASSERT_TRUE(stats.mem_used == 4096);
+  /* CapturedJit owns the 4 KiB input and output after Tensor release. */
+  ASSERT_TRUE(stats.mem_used == 8192);
 
   float next_values[1024];
   for (int i = 0; i < 1024; i++)
@@ -7322,6 +7412,8 @@ TEST(realize, global_counters_track_calls_and_preserve_live_memory_on_reset) {
 TEST(realize, bound_view_materialization_executes_runtime_extent) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
+  /* Keep the original BIND producer for this callify topology assertion. */
+  ASSERT_INT_EQ(poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_ALWAYS), 0);
 
   float x_data[8] = {0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f};
   int64_t shape[] = {8};

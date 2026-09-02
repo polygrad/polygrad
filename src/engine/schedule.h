@@ -33,25 +33,6 @@ typedef struct {
   int n_vars;
 } PolyRunner;
 
-/* tinygrad.uop.ops.ProgramInfo. */
-struct PolyProgramInfo {
-  const char *name;
-  const char *target; /* C string form of tinygrad ProgramInfo.target. */
-  int global_size[3];
-  int local_size[3];
-  PolyUOp *global_exprs[3];
-  PolyUOp *local_exprs[3];
-  bool has_local_size;
-  PolyUOp **vars;
-  int n_vars;
-  int *globals;
-  int n_globals;
-  int *outs;
-  int n_outs;
-  int *ins;
-  int n_ins;
-};
-
 int poly_estimates_from_uops(
     PolyCtx *ctx,
     PolyUOp **uops,

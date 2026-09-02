@@ -4,9 +4,11 @@ import ctypes
 import gc
 import math
 import numpy as np
+import os
 import pytest
 import subprocess
 import sys
+import weakref
 
 from polygrad import Device, Jit, JitError, Runtime, Tensor, Variable, _ffi, can_run, compile as pg_compile, jit, stats as pg_stats
 from polygrad.dtype import dtypes
@@ -15,6 +17,67 @@ from polygrad.uop.ops import AxisType, KernelInfo, UOp, _dispose_uops_for_ctx
 
 
 class TestCreation:
+    def test_invalid_logical_environment_fails_import(self):
+        env = os.environ.copy()
+        env['POLY_LOGICAL'] = 'sometimes'
+        proc = subprocess.run(
+            [sys.executable, '-c', 'import polygrad'],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+        )
+        assert proc.returncode != 0
+        assert 'invalid POLY_LOGICAL' in proc.stderr
+
+    def test_logical_policy_scopes_and_tensor_override(self):
+        baseline = Tensor([1.0])
+        baseline_policy = baseline.logical_policy
+        with Context(LOGICAL='never'):
+            physical_only = Tensor([2.0])
+            assert physical_only.logical_policy == 'never'
+            assert physical_only.logical_state == 'never_constructed'
+            assert physical_only.uop_logical is None
+        assert Tensor([3.0]).logical_policy == baseline_policy
+
+        with Runtime(device='interp', logical='until_realize') as runtime:
+            current = runtime.Tensor([1.0, 2.0]) + 1
+            assert current.logical_policy == 'until_realize'
+            assert current.logical_state == 'available'
+            current.realize()
+            assert current.logical_state == 'retired'
+
+            with runtime.logical('always'):
+                retained = runtime.Tensor([4.0]) + 1
+            retained.realize()
+            assert retained.logical_policy == 'always'
+            assert retained.logical_state == 'available'
+
+            dropped = runtime.Tensor([5.0], logical=False)
+            assert dropped.logical_policy == 'never'
+            assert dropped.uop_logical is None
+            assert dropped.set_logical_policy('always') is False
+            descendant = dropped + 1
+            assert descendant.logical_policy == 'never'
+            assert descendant.logical_state == 'never_constructed'
+            assert descendant.tolist() == [6.0]
+            cloned = dropped.clone()
+            assert cloned.logical_policy == 'never'
+            assert cloned.logical_state == 'never_constructed'
+            assert cloned.uop_logical is None
+            assert cloned.tolist() == [5.0]
+            grad_source = runtime.Tensor([2.0], logical=False)
+            (grad_source * grad_source).sum().backward()
+            assert grad_source.grad.logical_policy == 'never'
+            assert grad_source.grad.logical_state == 'never_constructed'
+            assert grad_source.grad.uop_logical is None
+            assert grad_source.grad.tolist() == [4.0]
+
+            marked = runtime.Tensor([6.0]) + 1
+            assert marked.preserve_logical() is marked
+            marked.realize()
+            assert marked.logical_state == 'available'
+
     def test_runtime_dispose_invalidates_borrowed_instance_and_bound_wrappers(self):
         # Polygrad's C arena is an approved ownership divergence from Tinygrad's
         # live Python UOps; disposal must invalidate every borrowed wrapper.
@@ -87,6 +150,7 @@ print('leaving_live_instance')
             assert runtime.stats()['mem_used'] == 4096
             del tensor
             gc.collect()
+            runtime.collect()
             assert runtime.stats()['tensor_records'] == 0
             assert runtime.stats()['mem_used'] == 0
         finally:
@@ -112,6 +176,7 @@ print('leaving_live_instance')
             assert runtime.stats()['mem_used'] >= before + (2 << 22)
             del result, out, src
             gc.collect()
+            runtime.collect()
             assert runtime.stats()['mem_used'] == before
         finally:
             runtime.dispose()
@@ -398,6 +463,40 @@ print('leaving_live_instance')
         assert callback['call'].src[4] == b_physical
         np.testing.assert_allclose(a.grad.numpy(), a_ref.grad.numpy(), rtol=1e-5, atol=1e-6)
         np.testing.assert_allclose(b.grad.numpy(), b_ref.grad.numpy(), rtol=1e-5, atol=1e-6)
+
+    def test_custom_kernel_keeps_gradient_callback_while_call_graph_is_live(self):
+        runtime = Runtime(device='cpu')
+        Tensor = runtime.Tensor
+
+        def build():
+            def identity_kernel(out, src):
+                out, src = out.flatten(), src.flatten()
+                i = UOp.range(out.ctx, out.numel(), 0)
+                return out[i].store(src[i]).end(i).sink(
+                    arg=KernelInfo(name='callback_lifetime')
+                )
+
+            def backward_identity(grad, call):
+                return (None, grad)
+
+            src = Tensor([1.0, 2.0, 3.0, 4.0])
+            out = Tensor.empty((4,), dtype='float32')
+            result = out.custom_kernel(
+                src, fxn=identity_kernel, grad_fxn=backward_identity
+            )[0]
+            return src, out, result, weakref.ref(backward_identity)
+
+        try:
+            src, out, result, callback_ref = build()
+            gc.collect()
+            assert callback_ref() is not None
+            result.sum().backward()
+            np.testing.assert_allclose(src.grad.numpy(), np.ones(4, dtype=np.float32))
+        finally:
+            runtime.dispose()
+        del src, out, result
+        gc.collect()
+        assert callback_ref() is None
 
     def test_custom_kernel_physical_after_preserves_data_gradient(self):
         def identity_kernel(x):
@@ -3300,7 +3399,7 @@ class TestDevice:
         np.testing.assert_allclose(target.numpy(), [[4.0, 5.0, 6.0]] * 2)
 
     def test_assign_realized_contiguous_cache_view_retargets_both_roots(self):
-        cache = Tensor.zeros(2, 1, 8, 1, 4).contiguous().realize()
+        cache = Tensor.zeros(2, 1, 8, 1, 4).contiguous().preserve_logical().realize()
         logical_materialization = cache.uop_logical
         physical_identity = cache.uop_physical
         assert logical_materialization.op_name == 'CONTIGUOUS'

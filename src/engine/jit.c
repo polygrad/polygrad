@@ -47,6 +47,13 @@ static void poly_jit_clear(PolyJit *jit) {
     poly_uop_release(jit->ctx, jit->captured_linear);
   for (int i = 0; jit->ctx && i < jit->n_linears; i++)
     poly_uop_release(jit->ctx, jit->linears[i]);
+  for (int i = 0; jit->ctx && i < jit->n_inputs; i++) {
+    if (jit->input_buffers[i]) poly_uop_release(jit->ctx, jit->input_buffers[i]);
+    if (jit->input_views[i]) poly_uop_release(jit->ctx, jit->input_views[i]);
+    if (jit->input_devices[i]) poly_uop_release(jit->ctx, jit->input_devices[i]);
+  }
+  for (int i = 0; jit->ctx && i < jit->n_var_bindings; i++)
+    poly_uop_release(jit->ctx, jit->var_bindings[i].var);
   free(jit->linears);
   free(jit->var_bindings);
   free(jit->input_buffers);
@@ -386,15 +393,29 @@ static bool poly_jit_capture_input_spec(PolyJit *jit, int index, PolyTensor *ten
   if (!root) return false;
   PolyVarBinding *bindings = NULL;
   int n_bindings = 0;
-  if (poly_jit_prepare_input_view(
-          jit, tensor, buf, &jit->input_views[index], &bindings, &n_bindings
-      ) != 0)
+  PolyUOp *view = NULL;
+  if (poly_jit_prepare_input_view(jit, tensor, buf, &view, &bindings, &n_bindings) != 0)
     return false;
   free(bindings);
+  PolyUOp *device = poly_uop_device_uop_cached(jit->ctx, buf, NULL);
+  if (!device || poly_uop_retain(jit->ctx, buf) != 0) return false;
+  if (poly_uop_retain(jit->ctx, view) != 0) {
+    poly_uop_release(jit->ctx, buf);
+    return false;
+  }
+  if (poly_uop_retain(jit->ctx, device) != 0) {
+    poly_uop_release(jit->ctx, view);
+    poly_uop_release(jit->ctx, buf);
+    return false;
+  }
+  /* Tinygrad CapturedJit owns input buffers/views/devices and variable UOps
+   * (engine/jit.py:250-281). These retains are the C ownership mechanics for
+   * inputs removed from the captured LINEAR by PARAM substitution. */
   jit->input_buffers[index] = buf;
+  jit->input_views[index] = view;
   jit->input_dtypes[index] = root->dtype;
-  jit->input_devices[index] = poly_uop_device_uop_cached(jit->ctx, buf, NULL);
-  return jit->input_devices[index] != NULL;
+  jit->input_devices[index] = device;
+  return true;
 }
 
 static bool poly_jit_input_matches_spec(
@@ -792,12 +813,18 @@ int poly_jit_record_linear(
     jit->linears = new_linears;
     jit->linears_cap = new_cap;
   }
-  for (int i = 0; i < n_var_bindings; i++)
+  for (int i = 0; i < n_var_bindings; i++) {
+    int before = jit->n_var_bindings;
     if (poly_jit_append_var_binding(
             &jit->var_bindings, &jit->n_var_bindings, &jit->var_bindings_cap, var_bindings[i].var,
             var_bindings[i].value
         ) != 0)
       return -1;
+    if (jit->n_var_bindings != before && poly_uop_retain(jit->ctx, var_bindings[i].var) != 0) {
+      jit->n_var_bindings--;
+      return -1;
+    }
+  }
   /* Current _TinyJit.add_linear keeps every LINEAR live until capture creates
    * CapturedJit (engine/jit.py:193-209,250-281). This retain is C ownership
    * mechanics for the same interval. */

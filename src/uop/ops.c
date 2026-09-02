@@ -2,7 +2,7 @@
  * uop/ops.c — UOp creation with CSE, toposort, pretty-print
  *
  * Mirrors tinygrad's UOp class and UOpMetaClass hash-consing cache.
- * All UOps are allocated from the context's arena.
+ * C owns weak UOp records and their immutable argument payloads.
  */
 
 #include "polygrad.h"
@@ -471,6 +471,7 @@ bool poly_arg_eq(PolyArg a, PolyArg b) {
     if (a.call_info->precompile != b.call_info->precompile ||
         a.call_info->precompile_backward != b.call_info->precompile_backward ||
         a.call_info->has_grad_fxn != b.call_info->has_grad_fxn ||
+        a.call_info->grad_fxn_key != b.call_info->grad_fxn_key ||
         a.call_info->has_aux != b.call_info->has_aux)
       return false;
     return a.call_info->name == b.call_info->name ||
@@ -649,6 +650,7 @@ uint32_t poly_arg_hash(PolyArg a) {
       h = hash_mix(h, a.call_info->precompile ? 1u : 0u);
       h = hash_mix(h, a.call_info->precompile_backward ? 1u : 0u);
       h = hash_mix(h, a.call_info->has_grad_fxn ? 1u : 0u);
+      h = hash_mix(h, a.call_info->grad_fxn_key);
       h = hash_mix(h, a.call_info->has_aux ? 1u : 0u);
     }
     break;
@@ -674,6 +676,125 @@ typedef struct {
   int32_t tag;
   PolyArg tag_arg;
 } CseKey;
+
+typedef struct PolyUOpOwnedAllocation {
+  struct PolyUOpOwnedAllocation *next;
+  size_t bytes;
+  max_align_t alignment;
+  unsigned char data[];
+} PolyUOpOwnedAllocation;
+
+typedef struct {
+  PolyUOp uop;
+  CseKey key;
+  PolyUOpOwnedAllocation *allocations;
+  size_t owned_bytes;
+  PolyUOp *src[];
+} PolyUOpStorage;
+
+static PolyUOpStorage *uop_storage_get(PolyCtx *ctx, const PolyUOp *uop) {
+  return ctx && uop ? poly_map_get(ctx->uop_storage, poly_ptr_hash(uop), uop, poly_ptr_eq) : NULL;
+}
+
+bool poly_uop_storage_contains(PolyCtx *ctx, const void *ptr) {
+  return uop_storage_get(ctx, ptr) != NULL;
+}
+
+static PolyUOpStorage *uop_storage_new(PolyCtx *ctx, int n_src) {
+  if (!ctx || n_src < 0 || (size_t)n_src > (SIZE_MAX - sizeof(PolyUOpStorage)) / sizeof(PolyUOp *))
+    return NULL;
+  size_t size = sizeof(PolyUOpStorage) + (size_t)n_src * sizeof(PolyUOp *);
+  PolyUOpStorage *storage = calloc(1, size);
+  return storage;
+}
+
+static size_t uop_storage_size(const PolyUOpStorage *storage) {
+  return storage ? sizeof(*storage) + (size_t)storage->uop.n_src * sizeof(PolyUOp *) +
+                       storage->owned_bytes
+                 : 0;
+}
+
+static void *uop_storage_alloc(PolyUOpStorage *storage, size_t size, size_t align) {
+  if (!storage || align > _Alignof(max_align_t) || size > SIZE_MAX - sizeof(PolyUOpOwnedAllocation))
+    return NULL;
+  size_t bytes = sizeof(PolyUOpOwnedAllocation) + size;
+  PolyUOpOwnedAllocation *allocation = malloc(bytes);
+  if (!allocation) return NULL;
+  allocation->next = storage->allocations;
+  allocation->bytes = bytes;
+  storage->allocations = allocation;
+  storage->owned_bytes += bytes;
+  return allocation->data;
+}
+
+static void *uop_storage_alloc_live(
+    PolyCtx *ctx,
+    PolyUOpStorage *storage,
+    size_t size,
+    size_t align
+) {
+  if (!storage) return NULL;
+  size_t before = storage->owned_bytes;
+  void *data = uop_storage_alloc(storage, size, align);
+  if (!data || !ctx || uop_storage_get(ctx, &storage->uop) != storage) return data;
+  ctx->uop_storage_bytes += storage->owned_bytes - before;
+  if (ctx->uop_storage_bytes > ctx->uop_storage_high_water)
+    ctx->uop_storage_high_water = ctx->uop_storage_bytes;
+  return data;
+}
+
+static void uop_storage_dispose(PolyUOpStorage *storage) {
+  if (!storage) return;
+  PolyUOpOwnedAllocation *allocation = storage->allocations;
+  while (allocation) {
+    PolyUOpOwnedAllocation *next = allocation->next;
+    free(allocation);
+    allocation = next;
+  }
+  free(storage);
+}
+
+static void uop_storage_register(PolyCtx *ctx, PolyUOpStorage *storage) {
+  PolyUOp *uop = &storage->uop;
+  poly_map_set(ctx->uop_storage, poly_ptr_hash(uop), uop, storage, poly_ptr_eq);
+  ctx->uop_storage_bytes += uop_storage_size(storage);
+  if (ctx->uop_storage_bytes > ctx->uop_storage_high_water)
+    ctx->uop_storage_high_water = ctx->uop_storage_bytes;
+}
+
+static void uop_storage_free(PolyCtx *ctx, PolyUOp *uop) {
+  PolyUOpStorage *storage = uop_storage_get(ctx, uop);
+  if (!storage) return;
+  size_t size = uop_storage_size(storage);
+  poly_map_remove(ctx->uop_storage, poly_ptr_hash(uop), uop, poly_ptr_eq);
+  ctx->uop_storage_bytes -= size;
+  uop_storage_dispose(storage);
+}
+
+typedef struct {
+  PolyUOpStorage **items;
+  size_t count;
+} UOpStorageRows;
+
+static void collect_uop_storage(const void *key, void *value, void *userdata) {
+  (void)key;
+  UOpStorageRows *rows = userdata;
+  rows->items[rows->count++] = value;
+}
+
+void poly_uop_storage_destroy_all(PolyCtx *ctx) {
+  if (!ctx || !ctx->uop_storage) return;
+  size_t count = poly_map_len(ctx->uop_storage);
+  PolyUOpStorage **items = count ? malloc(count * sizeof(*items)) : NULL;
+  if (count && !items) abort();
+  UOpStorageRows rows = {.items = items};
+  poly_map_foreach(ctx->uop_storage, collect_uop_storage, &rows);
+  for (size_t i = 0; i < rows.count; i++)
+    uop_storage_dispose(rows.items[i]);
+  free(items);
+  poly_map_clear(ctx->uop_storage);
+  ctx->uop_storage_bytes = 0;
+}
 
 static uint32_t cse_hash(const CseKey *k) {
   uint32_t h = (uint32_t)k->op;
@@ -706,6 +827,50 @@ static bool cse_eq(const void *a, const void *b) {
   if (ka->tag != kb->tag) return false;
   if (!poly_arg_eq(ka->tag_arg, kb->tag_arg)) return false;
   return true;
+}
+
+typedef struct {
+  PolyMap *live;
+  CseKey **keys;
+  PolyUOp **uops;
+  uint32_t *hashes;
+  size_t count;
+} CseEvictionRows;
+
+static void collect_dead_cse_row(const void *key, void *value, void *userdata) {
+  CseEvictionRows *rows = userdata;
+  if (!rows || !key || !value || poly_map_get(rows->live, poly_ptr_hash(value), value, poly_ptr_eq))
+    return;
+  rows->keys[rows->count] = (CseKey *)key;
+  rows->uops[rows->count] = value;
+  rows->hashes[rows->count++] = cse_hash(key);
+}
+
+int poly_uop_cse_evict_unmarked(PolyCtx *ctx, PolyMap *live) {
+  /* Tinygrad 2026-08-22/a9069c177a9d UOpMetaClass.ucache weakly interns
+   * UOps (uop/ops.py:186-202,238-245). Remove each dead weak row and its
+   * non-moving C record at the same outer safe point. */
+  if (!ctx || !ctx->cse || !live) return -1;
+  size_t capacity = poly_map_len(ctx->cse);
+  CseKey **keys = capacity ? malloc(capacity * sizeof(*keys)) : NULL;
+  PolyUOp **uops = capacity ? malloc(capacity * sizeof(*uops)) : NULL;
+  uint32_t *hashes = capacity ? malloc(capacity * sizeof(*hashes)) : NULL;
+  if (capacity && (!keys || !uops || !hashes)) {
+    free(keys);
+    free(uops);
+    free(hashes);
+    return -1;
+  }
+  CseEvictionRows rows = {.live = live, .keys = keys, .uops = uops, .hashes = hashes};
+  poly_map_foreach(ctx->cse, collect_dead_cse_row, &rows);
+  for (size_t i = 0; i < rows.count; i++) {
+    poly_map_remove(ctx->cse, rows.hashes[i], rows.keys[i], cse_eq);
+    uop_storage_free(ctx, rows.uops[i]);
+  }
+  free(keys);
+  free(uops);
+  free(hashes);
+  return 0;
 }
 
 /* struct PolyCtx and lifecycle are in ctx.h / ctx.c */
@@ -850,111 +1015,134 @@ static bool poly_arg_canonicalize_bigint(PolyArg *arg) {
   return true;
 }
 
-static void poly_arg_copy_to_arena(PolyArena *arena, PolyArg *dst) {
-  if (!arena || !dst) return;
+static bool poly_arg_copy_to_storage(PolyUOpStorage *storage, PolyArg *dst) {
+  if (!storage || !dst) return false;
   if (dst->kind == POLY_ARG_INT_TUPLE && dst->int_tuple.n > 0) {
-    int64_t *vals = poly_arena_alloc(arena, dst->int_tuple.n * sizeof(int64_t), _Alignof(int64_t));
+    int64_t *vals =
+        uop_storage_alloc(storage, dst->int_tuple.n * sizeof(int64_t), _Alignof(int64_t));
+    if (!vals) return false;
     memcpy(vals, dst->int_tuple.vals, dst->int_tuple.n * sizeof(int64_t));
     dst->int_tuple.vals = vals;
   } else if (dst->kind == POLY_ARG_BIGINT && dst->bigint.n_limbs > 0 && dst->bigint.limbs) {
-    uint32_t *limbs =
-        poly_arena_alloc(arena, (size_t)dst->bigint.n_limbs * sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t *limbs = uop_storage_alloc(
+        storage, (size_t)dst->bigint.n_limbs * sizeof(uint32_t), _Alignof(uint32_t)
+    );
+    if (!limbs) return false;
     memcpy(limbs, dst->bigint.limbs, (size_t)dst->bigint.n_limbs * sizeof(uint32_t));
     dst->bigint.limbs = limbs;
   } else if (dst->kind == POLY_ARG_RANGE && dst->range.n_extra > 0) {
     int64_t *extra =
-        poly_arena_alloc(arena, (size_t)dst->range.n_extra * sizeof(int64_t), _Alignof(int64_t));
+        uop_storage_alloc(storage, (size_t)dst->range.n_extra * sizeof(int64_t), _Alignof(int64_t));
+    if (!extra) return false;
     memcpy(extra, dst->range.extra, (size_t)dst->range.n_extra * sizeof(int64_t));
     dst->range.extra = extra;
   } else if (dst->kind == POLY_ARG_STRING && dst->str) {
     size_t len = strlen(dst->str);
-    char *s = poly_arena_alloc(arena, len + 1, 1);
+    char *s = uop_storage_alloc(storage, len + 1, 1);
+    if (!s) return false;
     memcpy(s, dst->str, len + 1);
     dst->str = s;
   } else if (dst->kind == POLY_ARG_STRING_TUPLE && dst->string_tuple.n > 0) {
-    const char **vals = poly_arena_alloc(
-        arena, (size_t)dst->string_tuple.n * sizeof(*vals), _Alignof(const char *)
+    const char **vals = uop_storage_alloc(
+        storage, (size_t)dst->string_tuple.n * sizeof(*vals), _Alignof(const char *)
     );
+    if (!vals) return false;
     for (int i = 0; i < dst->string_tuple.n; i++) {
       size_t len = strlen(dst->string_tuple.vals[i]);
-      char *value = poly_arena_alloc(arena, len + 1, 1);
+      char *value = uop_storage_alloc(storage, len + 1, 1);
+      if (!value) return false;
       memcpy(value, dst->string_tuple.vals[i], len + 1);
       vals[i] = value;
     }
     dst->string_tuple.vals = vals;
   } else if (dst->kind == POLY_ARG_ALLREDUCE && dst->allreduce.device_is_tuple && dst->allreduce.n_devices > 0) {
-    const char **vals = poly_arena_alloc(
-        arena, (size_t)dst->allreduce.n_devices * sizeof(*vals), _Alignof(const char *)
+    const char **vals = uop_storage_alloc(
+        storage, (size_t)dst->allreduce.n_devices * sizeof(*vals), _Alignof(const char *)
     );
+    if (!vals) return false;
     for (int i = 0; i < dst->allreduce.n_devices; i++) {
       size_t len = strlen(dst->allreduce.devices[i]);
-      char *value = poly_arena_alloc(arena, len + 1, 1);
+      char *value = uop_storage_alloc(storage, len + 1, 1);
+      if (!value) return false;
       memcpy(value, dst->allreduce.devices[i], len + 1);
       vals[i] = value;
     }
     dst->allreduce.devices = vals;
   } else if (dst->kind == POLY_ARG_ALLREDUCE && dst->allreduce.device) {
     size_t len = strlen(dst->allreduce.device);
-    char *value = poly_arena_alloc(arena, len + 1, 1);
+    char *value = uop_storage_alloc(storage, len + 1, 1);
+    if (!value) return false;
     memcpy(value, dst->allreduce.device, len + 1);
     dst->allreduce.device = value;
   } else if (dst->kind == POLY_ARG_BUFFERIZE_OPTS &&
              dst->bufferize_opts.device_is_tuple && dst->bufferize_opts.n_devices > 0) {
-    const char **vals = poly_arena_alloc(
-        arena, (size_t)dst->bufferize_opts.n_devices * sizeof(*vals), _Alignof(const char *)
+    const char **vals = uop_storage_alloc(
+        storage, (size_t)dst->bufferize_opts.n_devices * sizeof(*vals), _Alignof(const char *)
     );
+    if (!vals) return false;
     for (int i = 0; i < dst->bufferize_opts.n_devices; i++) {
       size_t len = strlen(dst->bufferize_opts.devices[i]);
-      char *value = poly_arena_alloc(arena, len + 1, 1);
+      char *value = uop_storage_alloc(storage, len + 1, 1);
+      if (!value) return false;
       memcpy(value, dst->bufferize_opts.devices[i], len + 1);
       vals[i] = value;
     }
     dst->bufferize_opts.devices = vals;
   } else if (dst->kind == POLY_ARG_BUFFERIZE_OPTS && dst->bufferize_opts.device) {
     size_t len = strlen(dst->bufferize_opts.device);
-    char *s = poly_arena_alloc(arena, len + 1, 1);
+    char *s = uop_storage_alloc(storage, len + 1, 1);
+    if (!s) return false;
     memcpy(s, dst->bufferize_opts.device, len + 1);
     dst->bufferize_opts.device = s;
   } else if (dst->kind == POLY_ARG_TENSOR_CORE) {
     if (dst->tensor_core.device) {
       size_t len = strlen(dst->tensor_core.device);
-      char *s = poly_arena_alloc(arena, len + 1, 1);
+      char *s = uop_storage_alloc(storage, len + 1, 1);
+      if (!s) return false;
       memcpy(s, dst->tensor_core.device, len + 1);
       dst->tensor_core.device = s;
     }
     for (int d = 0; d < 3; d++) {
       int n = dst->tensor_core.n_upcast_axes[d];
       if (n <= 0) continue;
-      int64_t(*pairs)[2] = poly_arena_alloc(arena, (size_t)n * sizeof(*pairs), _Alignof(int64_t));
+      int64_t(*pairs)[2] =
+          uop_storage_alloc(storage, (size_t)n * sizeof(*pairs), _Alignof(int64_t));
+      if (!pairs) return false;
       memcpy(pairs, dst->tensor_core.upcast_axes[d], (size_t)n * sizeof(*pairs));
       dst->tensor_core.upcast_axes[d] = pairs;
     }
   } else if (dst->kind == POLY_ARG_BYTES && dst->bytes.n > 0 && dst->bytes.data) {
-    uint8_t *data = poly_arena_alloc(arena, (size_t)dst->bytes.n, 1);
+    uint8_t *data = uop_storage_alloc(storage, (size_t)dst->bytes.n, 1);
+    if (!data) return false;
     memcpy(data, dst->bytes.data, (size_t)dst->bytes.n);
     dst->bytes.data = data;
   } else if (dst->kind == POLY_ARG_PARAM && dst->param) {
-    PolyParamArg *param = poly_arena_alloc(arena, sizeof(*param), _Alignof(PolyParamArg));
+    PolyParamArg *param = uop_storage_alloc(storage, sizeof(*param), _Alignof(PolyParamArg));
+    if (!param) return false;
     *param = *dst->param;
     if (param->name) {
       size_t len = strlen(param->name);
-      char *name = poly_arena_alloc(arena, len + 1, 1);
+      char *name = uop_storage_alloc(storage, len + 1, 1);
+      if (!name) return false;
       memcpy(name, param->name, len + 1);
       param->name = name;
     }
     if (param->device) {
       size_t len = strlen(param->device);
-      char *device = poly_arena_alloc(arena, len + 1, 1);
+      char *device = uop_storage_alloc(storage, len + 1, 1);
+      if (!device) return false;
       memcpy(device, param->device, len + 1);
       param->device = device;
     }
     if (param->n_devices > 0) {
-      const char **devices = poly_arena_alloc(
-          arena, (size_t)param->n_devices * sizeof(*devices), _Alignof(const char *)
+      const char **devices = uop_storage_alloc(
+          storage, (size_t)param->n_devices * sizeof(*devices), _Alignof(const char *)
       );
+      if (!devices) return false;
       for (int i = 0; i < param->n_devices; i++) {
         size_t len = strlen(param->devices[i]);
-        char *device = poly_arena_alloc(arena, len + 1, 1);
+        char *device = uop_storage_alloc(storage, len + 1, 1);
+        if (!device) return false;
         memcpy(device, param->devices[i], len + 1);
         devices[i] = device;
       }
@@ -962,29 +1150,75 @@ static void poly_arg_copy_to_arena(PolyArena *arena, PolyArg *dst) {
     }
     dst->param = param;
   } else if (dst->kind == POLY_ARG_CALL_INFO && dst->call_info) {
-    PolyCallInfo *info = poly_arena_alloc(arena, sizeof(*info), _Alignof(PolyCallInfo));
+    PolyCallInfo *info = uop_storage_alloc(storage, sizeof(*info), _Alignof(PolyCallInfo));
+    if (!info) return false;
     *info = *dst->call_info;
     if (info->name) {
       size_t len = strlen(info->name);
-      char *name = poly_arena_alloc(arena, len + 1, 1);
+      char *name = uop_storage_alloc(storage, len + 1, 1);
+      if (!name) return false;
       memcpy(name, info->name, len + 1);
       info->name = name;
     }
     dst->call_info = info;
-  } else if (dst->kind == POLY_ARG_KERNEL_INFO && dst->kernel_info) {
-    const PolyKernelInfo *src = dst->kernel_info;
-    PolyKernelInfo *info = poly_arena_alloc(arena, sizeof(*info), _Alignof(PolyKernelInfo));
+  } else if (dst->kind == POLY_ARG_PROGRAM_INFO && dst->program_info) {
+    const PolyProgramInfo *src = dst->program_info;
+    if (src->n_vars < 0 || src->n_globals < 0 || src->n_outs < 0 || src->n_ins < 0 ||
+        (src->n_vars > 0 && !src->vars) || (src->n_globals > 0 && !src->globals) ||
+        (src->n_outs > 0 && !src->outs) || (src->n_ins > 0 && !src->ins))
+      return false;
+    PolyProgramInfo *info = uop_storage_alloc(storage, sizeof(*info), _Alignof(PolyProgramInfo));
+    if (!info) return false;
     *info = *src;
     if (src->name) {
       size_t len = strlen(src->name);
-      char *name = poly_arena_alloc(arena, len + 1, 1);
+      char *name = uop_storage_alloc(storage, len + 1, 1);
+      if (!name) return false;
+      memcpy(name, src->name, len + 1);
+      info->name = name;
+    }
+    if (src->target) {
+      size_t len = strlen(src->target);
+      char *target = uop_storage_alloc(storage, len + 1, 1);
+      if (!target) return false;
+      memcpy(target, src->target, len + 1);
+      info->target = target;
+    }
+    if (src->n_vars > 0) {
+      info->vars = uop_storage_alloc(
+          storage, (size_t)src->n_vars * sizeof(*info->vars), _Alignof(PolyUOp *)
+      );
+      if (!info->vars) return false;
+      memcpy(info->vars, src->vars, (size_t)src->n_vars * sizeof(*info->vars));
+    }
+    const int *source_arrays[3] = {src->globals, src->outs, src->ins};
+    int counts[3] = {src->n_globals, src->n_outs, src->n_ins};
+    int **target_arrays[3] = {&info->globals, &info->outs, &info->ins};
+    for (int field = 0; field < 3; field++) {
+      if (counts[field] <= 0) continue;
+      *target_arrays[field] =
+          uop_storage_alloc(storage, (size_t)counts[field] * sizeof(int), _Alignof(int));
+      if (!*target_arrays[field]) return false;
+      memcpy(*target_arrays[field], source_arrays[field], (size_t)counts[field] * sizeof(int));
+    }
+    dst->program_info = info;
+  } else if (dst->kind == POLY_ARG_KERNEL_INFO && dst->kernel_info) {
+    const PolyKernelInfo *src = dst->kernel_info;
+    PolyKernelInfo *info = uop_storage_alloc(storage, sizeof(*info), _Alignof(PolyKernelInfo));
+    if (!info) return false;
+    *info = *src;
+    if (src->name) {
+      size_t len = strlen(src->name);
+      char *name = uop_storage_alloc(storage, len + 1, 1);
+      if (!name) return false;
       memcpy(name, src->name, len + 1);
       info->name = name;
     }
     if (src->n_axis_types > 0) {
-      PolyAxisType *axis_types = poly_arena_alloc(
-          arena, (size_t)src->n_axis_types * sizeof(*axis_types), _Alignof(PolyAxisType)
+      PolyAxisType *axis_types = uop_storage_alloc(
+          storage, (size_t)src->n_axis_types * sizeof(*axis_types), _Alignof(PolyAxisType)
       );
+      if (!axis_types) return false;
       memcpy(axis_types, src->axis_types, (size_t)src->n_axis_types * sizeof(*axis_types));
       info->axis_types = axis_types;
     }
@@ -994,13 +1228,15 @@ static void poly_arg_copy_to_arena(PolyArena *arena, PolyArg *dst) {
     for (int set = 0; set < 2; set++) {
       if (option_counts[set] <= 0) continue;
       PolyOpt *opts =
-          poly_arena_alloc(arena, (size_t)option_counts[set] * sizeof(*opts), _Alignof(PolyOpt));
+          uop_storage_alloc(storage, (size_t)option_counts[set] * sizeof(*opts), _Alignof(PolyOpt));
+      if (!opts) return false;
       memcpy(opts, option_sets[set], (size_t)option_counts[set] * sizeof(*opts));
       for (int i = 0; i < option_counts[set]; i++) {
         if (opts[i].arg_kind != POLY_OPT_ARG_INT_TUPLE || opts[i].n_arg_tuple <= 0) continue;
-        int64_t *tuple = poly_arena_alloc(
-            arena, (size_t)opts[i].n_arg_tuple * sizeof(*tuple), _Alignof(int64_t)
+        int64_t *tuple = uop_storage_alloc(
+            storage, (size_t)opts[i].n_arg_tuple * sizeof(*tuple), _Alignof(int64_t)
         );
+        if (!tuple) return false;
         memcpy(tuple, opts[i].arg_tuple, (size_t)opts[i].n_arg_tuple * sizeof(*tuple));
         opts[i].arg_tuple = tuple;
       }
@@ -1008,12 +1244,14 @@ static void poly_arg_copy_to_arena(PolyArena *arena, PolyArg *dst) {
     }
     if (src->estimates) {
       PolyEstimates *estimates =
-          poly_arena_alloc(arena, sizeof(*estimates), _Alignof(PolyEstimates));
+          uop_storage_alloc(storage, sizeof(*estimates), _Alignof(PolyEstimates));
+      if (!estimates) return false;
       *estimates = *src->estimates;
       info->estimates = estimates;
     }
     dst->kernel_info = info;
   }
+  return true;
 }
 
 static PolyUOp *poly_uop_internal(
@@ -1060,8 +1298,11 @@ static PolyUOp *poly_uop_internal(
   PolyUOp *existing = poly_map_get(ctx->cse, h, &key, cse_eq);
   if (existing) return existing;
 
-  /* Allocate new UOp in arena */
-  PolyUOp *u = poly_arena_alloc(ctx->arena, sizeof(PolyUOp), _Alignof(PolyUOp));
+  /* C ownership mechanics for Tinygrad's weak UOp objects: one non-moving
+   * record owns the node, ordered sources, and CSE key. */
+  PolyUOpStorage *storage = uop_storage_new(ctx, n_src);
+  if (!storage) return NULL;
+  PolyUOp *u = &storage->uop;
   u->op = op;
   u->dtype = dtype;
   u->n_src = (uint16_t)n_src;
@@ -1079,21 +1320,26 @@ static PolyUOp *poly_uop_internal(
 
   /* Copy src pointers into arena */
   if (n_src > 0) {
-    u->src = poly_arena_alloc(ctx->arena, n_src * sizeof(PolyUOp *), _Alignof(PolyUOp *));
+    u->src = storage->src;
     memcpy(u->src, src, n_src * sizeof(PolyUOp *));
   } else {
     u->src = NULL;
   }
 
-  /* Copy arg/tag data that needs arena allocation */
-  poly_arg_copy_to_arena(ctx->arena, &u->arg);
-  poly_arg_copy_to_arena(ctx->arena, &u->tag_arg);
+  /* Tinygrad UOps own immutable arg/tag objects. Keep their C payloads in the
+   * same weak record so the mark/sweep lifetime is identical. */
+  if (!poly_arg_copy_to_storage(storage, &u->arg) ||
+      !poly_arg_copy_to_storage(storage, &u->tag_arg)) {
+    uop_storage_dispose(storage);
+    return NULL;
+  }
   cache_uop_addrspace(u);
 
-  /* Also store the CSE key in the arena so it persists for hash map lookups */
-  CseKey *stored_key = poly_arena_alloc(ctx->arena, sizeof(CseKey), _Alignof(CseKey));
+  /* The key has exactly the UOp's weak lifetime. */
+  CseKey *stored_key = &storage->key;
   *stored_key = (CseKey){op, dtype, u->src, (uint16_t)n_src, u->arg, tag, u->tag_arg};
 
+  uop_storage_register(ctx, storage);
   poly_map_set(ctx->cse, h, stored_key, u, cse_eq);
   return u;
 }
@@ -1659,22 +1905,29 @@ int poly_range_start(PolyOps op) {
  * removes every range in that entry's `ranges` set from the result — not
  * just the entry itself. We mirror that exactly.
  *
- * Sets are represented as arena-allocated PolyUOp* arrays with linear-time
+ * Sets are represented as UOp-owned PolyUOp* arrays with linear-time
  * dedup. Typical range set sizes in realistic kernels are 0-8 elements, so
  * linear ops beat a hashmap. Computation is memoized per-UOp in a PolyMap
  * cache so a single pass-wide walk is O(N * avg_set_size). */
 
 typedef struct PolyRangeSet {
+  PolyUOpStorage *storage;
   PolyUOp **items;
   int n;
   int cap;
 } PolyRangeSet;
 
-static PolyRangeSet *range_set_new(PolyCtx *ctx, int cap) {
-  PolyArena *arena = poly_ctx_arena(ctx);
-  PolyRangeSet *s = poly_arena_alloc(arena, sizeof(PolyRangeSet), _Alignof(PolyRangeSet));
+static PolyRangeSet *range_set_new(PolyCtx *ctx, PolyUOp *owner, int cap) {
+  PolyUOpStorage *storage = uop_storage_get(ctx, owner);
+  if (!storage) return NULL;
+  PolyRangeSet *s =
+      uop_storage_alloc_live(ctx, storage, sizeof(PolyRangeSet), _Alignof(PolyRangeSet));
+  if (!s) return NULL;
   if (cap < 4) cap = 4;
-  s->items = poly_arena_alloc(arena, (size_t)cap * sizeof(PolyUOp *), _Alignof(PolyUOp *));
+  s->items =
+      uop_storage_alloc_live(ctx, storage, (size_t)cap * sizeof(PolyUOp *), _Alignof(PolyUOp *));
+  if (!s->items) return NULL;
+  s->storage = storage;
   s->n = 0;
   s->cap = cap;
   return s;
@@ -1685,9 +1938,10 @@ static void range_set_grow(PolyCtx *ctx, PolyRangeSet *s, int need) {
   int new_cap = s->cap * 2;
   while (new_cap < need)
     new_cap *= 2;
-  PolyUOp **new_items = poly_arena_alloc(
-      poly_ctx_arena(ctx), (size_t)new_cap * sizeof(PolyUOp *), _Alignof(PolyUOp *)
+  PolyUOp **new_items = uop_storage_alloc_live(
+      ctx, s->storage, (size_t)new_cap * sizeof(PolyUOp *), _Alignof(PolyUOp *)
   );
+  if (!new_items) return;
   memcpy(new_items, s->items, (size_t)s->n * sizeof(PolyUOp *));
   s->items = new_items;
   s->cap = new_cap;
@@ -1835,7 +2089,11 @@ static PolyRangeSet *compute_ranges_with_ended(
 
     PolyRangeSet *ended = (PolyRangeSet *)ended_memo_get(ended_memo, cur);
     if (!ended) {
-      ended = range_set_new(ctx, 4);
+      ended = range_set_new(ctx, cur, 4);
+      if (!ended) {
+        ok = false;
+        break;
+      }
       ok = compute_ended_ranges_node(ctx, cur, ended, ranges_memo, ended_memo);
       if (!ok) break;
       ended_memo_set(ended_memo, cur, ended);
@@ -1843,7 +2101,11 @@ static PolyRangeSet *compute_ranges_with_ended(
 
     if (ranges_memo_get(ranges_memo, cur)) continue;
 
-    PolyRangeSet *ret = range_set_new(ctx, 4);
+    PolyRangeSet *ret = range_set_new(ctx, cur, 4);
+    if (!ret) {
+      ok = false;
+      break;
+    }
     for (int i = 0; i < cur->n_src; i++) {
       const PolyRangeSet *src_ranges = ranges_memo_get(ranges_memo, cur->src[i]);
       if (!src_ranges) {
@@ -1868,7 +2130,7 @@ static PolyRangeSet *compute_ranges_with_ended(
 /* PolyUOpCache: per-pass query maps for minmax + ranges *
  * Owns PolyMaps keyed by PolyUOp*. The struct is opaque in the public
  * header; callers get it via poly_uop_cache_new and pass it to any `_ex`
- * query. Range-set values are UOp-lifetime cached in the ctx arena. Minmax
+ * query. Range-set values share the weak UOp record lifetime. Minmax
  * values live inline on the UOp. Destroying the cache only tears down the map
  * wrappers. */
 

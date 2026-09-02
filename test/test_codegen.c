@@ -18,7 +18,6 @@
 #include "../src/uop/weak.h"
 
 #include <inttypes.h>
-#include <time.h>
 
 static uint64_t topology_fnv_bytes(uint64_t h, const void *data, size_t n) {
   const uint8_t *bytes = (const uint8_t *)data;
@@ -5034,40 +5033,39 @@ TEST(codegen, lower_index_dtype_preserves_rank10_index_sources) {
   PASS();
 }
 
-TEST(codegen, lower_index_dtype_uses_one_graph_local_traversal) {
-  /* Pinned tinygrad's pm_lower_index_dtype consists of local rewrite rules;
-   * RewriteContext owns descendant traversal and memoization
-   * (tinygrad/uop/ops.py:1655-1686). A callback that recursively lowers every
-   * matched subtree turns this shared chain quadratic. Keep both the exact
-   * concrete result and a generous scaling ceiling as regression evidence. */
-  const int depths[2] = {8192, 16384};
-  double elapsed_s[2] = {0.0, 0.0};
-  for (int run = 0; run < 2; run++) {
-    int depth = depths[run];
-    PolyCtx *ctx = poly_ctx_new();
-    ASSERT_NOT_NULL(ctx);
+TEST(codegen, lower_index_dtype_memoizes_repeated_weak_source) {
+  /* Tinygrad 2026-08-22/a9069c177a9d uop/weak.py:60-68 uses the
+   * lower-index rewrite's ctx dict to lower one repeated weak source once. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
 
-    PolyUOp *value = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(0));
-    for (int i = 0; i < depth; i++) {
-      PolyUOp *term = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(i + 1));
-      value = poly_uop2(ctx, POLY_OP_ADD, POLY_WEAKINT, value, term, poly_arg_none());
-    }
-    PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, value, poly_arg_none());
+  PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(1));
+  PolyUOp *two = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(2));
+  PolyUOp *shared = poly_uop2(ctx, POLY_OP_ADD, POLY_WEAKINT, one, two, poly_arg_none());
+  PolyUOp *src[64];
+  for (int i = 0; i < 64; i++)
+    src[i] = shared;
+  PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, src, 64, poly_arg_none());
 
-    clock_t begin = clock();
-    PolyUOp *lowered = poly_apply_post_index_symbolic_stage(ctx, sink);
-    elapsed_s[run] = (double)(clock() - begin) / (double)CLOCKS_PER_SEC;
-    ASSERT_NOT_NULL(lowered);
-    ASSERT_INT_EQ(lowered->op, POLY_OP_SINK);
-    ASSERT_INT_EQ(lowered->n_src, 1);
-    ASSERT_INT_EQ(lowered->src[0]->op, POLY_OP_CONST);
-    ASSERT_TRUE(poly_dtype_eq(lowered->src[0]->dtype, POLY_INT32));
-    ASSERT_INT_EQ(lowered->src[0]->arg.kind, POLY_ARG_INT);
-    ASSERT_INT_EQ(lowered->src[0]->arg.i, (int64_t)depth * (depth + 1) / 2);
-    poly_ctx_destroy(ctx);
-  }
-  ASSERT_TRUE(elapsed_s[1] < elapsed_s[0] * 2.75 + 0.05);
-  ASSERT_TRUE(elapsed_s[1] < 3.0);
+  PolyPatternMatcher *lower = poly_pm_concat(poly_symbolic_simple(), poly_pm_lower_index_dtype());
+  PolyMap *lower_cache = poly_map_new(16);
+  ASSERT_NOT_NULL(lower);
+  ASSERT_NOT_NULL(lower_cache);
+  PolyUOp *lowered = poly_graph_rewrite_ctx(ctx, sink, lower, lower_cache);
+  ASSERT_NOT_NULL(lowered);
+  ASSERT_INT_EQ(poly_map_len(lower_cache), 1);
+  ASSERT_INT_EQ(lowered->op, POLY_OP_SINK);
+  ASSERT_INT_EQ(lowered->n_src, 64);
+  ASSERT_INT_EQ(lowered->src[0]->op, POLY_OP_CONST);
+  ASSERT_TRUE(poly_dtype_eq(lowered->src[0]->dtype, POLY_INT32));
+  ASSERT_INT_EQ(lowered->src[0]->arg.kind, POLY_ARG_INT);
+  ASSERT_INT_EQ(lowered->src[0]->arg.i, 3);
+  for (int i = 1; i < lowered->n_src; i++)
+    ASSERT_PTR_EQ(lowered->src[i], lowered->src[0]);
+
+  poly_map_destroy(lower_cache);
+  poly_pm_destroy(lower);
+  poly_ctx_destroy(ctx);
   PASS();
 }
 

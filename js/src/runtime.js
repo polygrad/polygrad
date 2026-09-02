@@ -6,7 +6,7 @@ const { createBoundModels } = require('./models')
 const { createBoundModules } = require('./nn/modules')
 const { createBoundOptim } = require('./nn/optim')
 const { getParameters, getStateDict } = require('./nn/state')
-const { createBoundTensorClass } = require('./tensor')
+const { createBoundTensorClass, normalizeLogicalPolicy } = require('./tensor')
 const { createBoundTokenizerClass } = require('./tokenizer')
 const { createBoundUopNamespace } = require('./uop/ops')
 
@@ -84,6 +84,30 @@ class PolyRuntime {
     return { ...this._core.caps }
   }
 
+  withLogical(mode, fn) {
+    if (typeof fn !== 'function') throw new TypeError('withLogical requires a synchronous function')
+    const policy = normalizeLogicalPolicy(mode)
+    const ffi = this._core && this._core.ffi
+    if (!ffi || !ffi.poly_ctx_set_logical_policy || !ffi.poly_ctx_get_logical_policy) {
+      throw new Error('logical policy requires current core support')
+    }
+    const oldPolicy = ffi.poly_ctx_get_logical_policy(this._core.ctx)
+    if (ffi.poly_ctx_set_logical_policy(this._core.ctx, policy) !== 0) {
+      throw new TypeError(`invalid logical policy ${String(mode)}`)
+    }
+    try {
+      const result = fn()
+      if (result && typeof result.then === 'function') {
+        throw new TypeError('withLogical callback must be synchronous')
+      }
+      return result
+    } finally {
+      if (ffi.poly_ctx_set_logical_policy(this._core.ctx, oldPolicy) !== 0) {
+        throw new Error('failed to restore logical policy')
+      }
+    }
+  }
+
   stats() {
     if (this._activeAsync > 0) {
       throw new Error('polygrad runtime has active async work')
@@ -97,6 +121,18 @@ class PolyRuntime {
       caps: this.caps,
       coreStats,
       jit: this.jit && this.jit.stats ? this.jit.stats() : null
+    }
+  }
+
+  collect() {
+    if (this._activeAsync > 0) {
+      throw new Error('polygrad runtime has active async work')
+    }
+    if (!this._core || !this._core.ffi || !this._core.ffi.poly_ctx_collect) {
+      throw new Error('collect requires core collection support')
+    }
+    if (this._core.ffi.poly_ctx_collect(this._core.ctx) !== 0) {
+      throw new Error('poly_ctx_collect failed')
     }
   }
 
@@ -275,6 +311,11 @@ function createRuntime(opts, resolveCore) {
   }
   const options = normalizeOptions(opts)
   const binding = resolveCore(options.core, options)
+  const logical = normalizeLogicalPolicy(options.logical)
+  if (logical !== null && binding.ffi.poly_ctx_set_logical_policy(binding.ctx, logical) !== 0) {
+    binding.destroy()
+    throw new TypeError(`invalid logical policy ${String(options.logical)}`)
+  }
   return new PolyRuntime(binding)
 }
 
@@ -284,6 +325,11 @@ async function createRuntimeAsync(opts, resolveCore) {
   }
   const options = normalizeOptions(opts)
   const binding = await resolveCore(options.core, options)
+  const logical = normalizeLogicalPolicy(options.logical)
+  if (logical !== null && binding.ffi.poly_ctx_set_logical_policy(binding.ctx, logical) !== 0) {
+    binding.destroy()
+    throw new TypeError(`invalid logical policy ${String(options.logical)}`)
+  }
   return new PolyRuntime(binding)
 }
 

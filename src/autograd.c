@@ -613,6 +613,7 @@ static PolyMap *grad_reverse_pass(
             .precompile = false,
             .precompile_backward = false,
             .has_grad_fxn = false,
+            .grad_fxn_key = 0,
             .has_aux = false,
         };
         PolyUOp *backward_function = poly_uop(

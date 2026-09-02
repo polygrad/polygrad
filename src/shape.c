@@ -35,12 +35,12 @@ static PolyShape heap_shape(int64_t *dims, int ndim) {
   return (PolyShape){copy, ndim};
 }
 
-/* Shape cache entry (arena-allocated) */
+/* C storage for Tinygrad's UOp-local recursive_property shape value. */
 
 typedef struct {
   int8_t ndim; /* -1 = no shape, 0 = scalar, >0 = tensor */
-  int64_t *dims; /* arena-allocated, NULL if scalar/none */
-  PolyUOp **dim_uops; /* arena-allocated symbolic dims, NULL if scalar/none */
+  int64_t *dims;
+  PolyUOp **dim_uops;
 } ShapeCacheEntry;
 
 static ShapeCacheEntry *ensure_shape(PolyCtx *ctx, PolyUOp *u);
@@ -432,7 +432,9 @@ PolyShape poly_uop_max_shape(PolyCtx *ctx, PolyUOp *u) {
 /* ═══════════════════════════════════════════════════════════════════════ */
 
 static ShapeCacheEntry *make_entry_none(PolyCtx *ctx) {
-  ShapeCacheEntry *e = poly_arena_alloc(poly_ctx_arena(ctx), sizeof(ShapeCacheEntry), 8);
+  (void)ctx;
+  ShapeCacheEntry *e = malloc(sizeof(*e));
+  if (!e) return NULL;
   e->ndim = -1;
   e->dims = NULL;
   e->dim_uops = NULL;
@@ -440,7 +442,9 @@ static ShapeCacheEntry *make_entry_none(PolyCtx *ctx) {
 }
 
 static ShapeCacheEntry *make_entry_scalar(PolyCtx *ctx) {
-  ShapeCacheEntry *e = poly_arena_alloc(poly_ctx_arena(ctx), sizeof(ShapeCacheEntry), 8);
+  (void)ctx;
+  ShapeCacheEntry *e = malloc(sizeof(*e));
+  if (!e) return NULL;
   e->ndim = 0;
   e->dims = NULL;
   e->dim_uops = NULL;
@@ -460,13 +464,19 @@ static ShapeCacheEntry *make_entry_dims_uops(
     int ndim
 ) {
   if (ndim < 0 || ndim > POLY_MAX_DIMS || (ndim > 0 && !dims)) return make_entry_none(ctx);
-  ShapeCacheEntry *e = poly_arena_alloc(poly_ctx_arena(ctx), sizeof(ShapeCacheEntry), 8);
+  ShapeCacheEntry *e = malloc(sizeof(*e));
+  if (!e) return NULL;
   e->ndim = (int8_t)ndim;
   if (ndim > 0) {
-    e->dims = poly_arena_alloc(poly_ctx_arena(ctx), ndim * sizeof(int64_t), _Alignof(int64_t));
+    e->dims = malloc((size_t)ndim * sizeof(*e->dims));
+    e->dim_uops = malloc((size_t)ndim * sizeof(*e->dim_uops));
+    if (!e->dims || !e->dim_uops) {
+      free(e->dims);
+      free(e->dim_uops);
+      free(e);
+      return NULL;
+    }
     memcpy(e->dims, dims, ndim * sizeof(int64_t));
-    e->dim_uops =
-        poly_arena_alloc(poly_ctx_arena(ctx), ndim * sizeof(PolyUOp *), _Alignof(PolyUOp *));
     for (int i = 0; i < ndim; i++)
       e->dim_uops[i] = dim_uops && dim_uops[i] ? dim_uops[i] : shape_dim_const(ctx, dims[i]);
   } else {
@@ -474,6 +484,13 @@ static ShapeCacheEntry *make_entry_dims_uops(
     e->dim_uops = NULL;
   }
   return e;
+}
+
+static void shape_cache_entry_free(ShapeCacheEntry *entry) {
+  if (!entry) return;
+  free(entry->dims);
+  free(entry->dim_uops);
+  free(entry);
 }
 
 static ShapeCacheEntry *make_entry_1d(PolyCtx *ctx, int64_t dim0) {
@@ -484,6 +501,101 @@ static ShapeCacheEntry *shape_cache_lookup(PolyCtx *ctx, PolyUOp *u) {
   if (!ctx || !u) return NULL;
   PolyMap *cache = poly_ctx_shape_cache(ctx);
   return poly_map_get(cache, poly_ptr_hash(u), u, poly_ptr_eq);
+}
+
+typedef struct {
+  PolyMap *live;
+  PolyUOp **keys;
+  size_t count;
+} ShapeEvictionRows;
+
+typedef struct {
+  PolyMap *live;
+  PolyUOp **roots;
+  int count;
+  int capacity;
+  bool failed;
+} ShapeValueRoots;
+
+static void collect_dead_shape_row(const void *key, void *value, void *userdata) {
+  (void)value;
+  ShapeEvictionRows *rows = userdata;
+  if (!rows || !key || poly_map_get(rows->live, poly_ptr_hash(key), key, poly_ptr_eq)) return;
+  rows->keys[rows->count++] = (PolyUOp *)key;
+}
+
+static void destroy_shape_row(const void *key, void *value, void *userdata) {
+  (void)key;
+  (void)userdata;
+  shape_cache_entry_free(value);
+}
+
+void poly_shape_cache_destroy_all(PolyCtx *ctx) {
+  if (!ctx || !ctx->shape_cache) return;
+  poly_map_foreach(ctx->shape_cache, destroy_shape_row, NULL);
+  poly_map_clear(ctx->shape_cache);
+}
+
+static void collect_live_shape_value_roots(const void *key, void *value, void *userdata) {
+  ShapeValueRoots *rows = userdata;
+  ShapeCacheEntry *entry = value;
+  if (!rows || rows->failed || !key || !entry || entry->ndim <= 0 || !entry->dim_uops ||
+      !poly_map_get(rows->live, poly_ptr_hash(key), key, poly_ptr_eq))
+    return;
+  for (int i = 0; i < entry->ndim; i++) {
+    if (!entry->dim_uops[i]) continue;
+    if (rows->count >= rows->capacity) {
+      int capacity = rows->capacity ? rows->capacity * 2 : 32;
+      PolyUOp **roots = realloc(rows->roots, (size_t)capacity * sizeof(*roots));
+      if (!roots) {
+        rows->failed = true;
+        return;
+      }
+      rows->roots = roots;
+      rows->capacity = capacity;
+    }
+    rows->roots[rows->count++] = entry->dim_uops[i];
+  }
+}
+
+int poly_shape_cache_live_value_roots(
+    PolyCtx *ctx,
+    PolyMap *live,
+    PolyUOp ***roots_out,
+    int *count_out
+) {
+  /* Tinygrad recursive_property values live with their owning UOp. C shape
+   * rows may additionally hold symbolic dimension UOps, so expose those as
+   * mark roots while—and only while—the row key is live. */
+  if (!ctx || !ctx->shape_cache || !live || !roots_out || !count_out) return -1;
+  ShapeValueRoots rows = {.live = live};
+  poly_map_foreach(ctx->shape_cache, collect_live_shape_value_roots, &rows);
+  if (rows.failed) {
+    free(rows.roots);
+    return -1;
+  }
+  *roots_out = rows.roots;
+  *count_out = rows.count;
+  return 0;
+}
+
+int poly_shape_cache_evict_unmarked(PolyCtx *ctx, PolyMap *live) {
+  /* Tinygrad 2026-08-22/a9069c177a9d recursive_property stores shape only on
+   * its live UOp (uop/ops.py:217-228). */
+  if (!ctx || !ctx->shape_cache || !live) return -1;
+  size_t capacity = poly_map_len(ctx->shape_cache);
+  PolyUOp **keys = capacity ? malloc(capacity * sizeof(*keys)) : NULL;
+  if (capacity && !keys) return -1;
+  ShapeEvictionRows rows = {.live = live, .keys = keys};
+  poly_map_foreach(ctx->shape_cache, collect_dead_shape_row, &rows);
+  for (size_t i = 0; i < rows.count; i++) {
+    ShapeCacheEntry *entry =
+        poly_map_get(ctx->shape_cache, poly_ptr_hash(rows.keys[i]), rows.keys[i], poly_ptr_eq);
+    poly_map_remove(ctx->shape_cache, poly_ptr_hash(rows.keys[i]), rows.keys[i], poly_ptr_eq);
+    shape_cache_entry_free(entry);
+  }
+  free(keys);
+  return 0;
 }
 
 static int8_t src_ndim(PolyCtx *ctx, PolyUOp *u, int idx) {
@@ -706,17 +818,18 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
    * tensor-value STACK and the scalar STACK used as a shape argument. */
   if (op == POLY_OP_STACK) {
     if (u->n_src == 0) return make_entry_scalar(ctx);
-    if (SRC_NDIM(0) < 0 || SRC_NDIM(0) >= POLY_MAX_DIMS) return make_entry_none(ctx);
+    int source_ndim = SRC_NDIM(0);
+    if (source_ndim < 0 || source_ndim >= POLY_MAX_DIMS) return make_entry_none(ctx);
     int64_t dims[POLY_MAX_DIMS];
     PolyUOp *dim_uops[POLY_MAX_DIMS];
     dims[0] = u->n_src;
     dim_uops[0] = NULL;
     PolyUOp *const *source_dim_uops = SRC_DIM_UOPS(0);
-    for (int i = 0; i < SRC_NDIM(0); i++) {
+    for (int i = 0; i < source_ndim; i++) {
       dims[i + 1] = SRC_DIMS(0)[i];
       dim_uops[i + 1] = source_dim_uops ? source_dim_uops[i] : NULL;
     }
-    return make_entry_dims_uops(ctx, dims, dim_uops, SRC_NDIM(0) + 1);
+    return make_entry_dims_uops(ctx, dims, dim_uops, source_ndim + 1);
   }
 
   /* Current BUFFER shape is src[0].as_shape. Retain the approved logical

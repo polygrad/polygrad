@@ -16,7 +16,7 @@ import sys
 _lib = None
 OPS = {}
 _has_cuda_ffi = False
-POLYGRAD_ABI_VERSION = 65
+POLYGRAD_ABI_VERSION = 66
 
 # --- Opaque pointer type (always available) ---
 _ptr = ctypes.c_void_p
@@ -232,6 +232,12 @@ def _declare_signatures(lib):
 
     lib.poly_ctx_set_preferred_device.restype = None
     lib.poly_ctx_set_preferred_device.argtypes = [_ptr, ctypes.c_int]
+
+    lib.poly_ctx_set_logical_policy.restype = ctypes.c_int
+    lib.poly_ctx_set_logical_policy.argtypes = [_ptr, ctypes.c_int]
+
+    lib.poly_ctx_get_logical_policy.restype = ctypes.c_int
+    lib.poly_ctx_get_logical_policy.argtypes = [_ptr]
 
     try:
         lib.poly_ctx_set_frontend_buffer_release.restype = None
@@ -732,6 +738,9 @@ def _declare_signatures(lib):
     lib.poly_uop_src.restype = _ptr
     lib.poly_uop_src.argtypes = [_ptr, ctypes.c_int]
 
+    lib.poly_uop_call_grad_fxn_key.restype = ctypes.c_uint32
+    lib.poly_uop_call_grad_fxn_key.argtypes = [_ptr]
+
     # --- Side-table buffer API (device.h) ---
     lib.poly_buffer_set.restype = None
     lib.poly_buffer_set.argtypes = [_ptr, _ptr, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
@@ -774,6 +783,10 @@ def _declare_signatures(lib):
 
     lib.poly_tensor_create_with_roots.restype = _ptr
     lib.poly_tensor_create_with_roots.argtypes = [_ptr, _ptr, _ptr, ctypes.c_int, ctypes.c_int]
+    lib.poly_tensor_create_result_like.restype = _ptr
+    lib.poly_tensor_create_result_like.argtypes = [
+        _ptr, _ptr, _ptr, _ptr, ctypes.c_int, ctypes.c_int,
+    ]
 
     lib.poly_tensor_retain.restype = _ptr
     lib.poly_tensor_retain.argtypes = [_ptr]
@@ -845,7 +858,8 @@ def _declare_signatures(lib):
 
     lib.poly_tensor_custom_kernel.restype = ctypes.c_int
     lib.poly_tensor_custom_kernel.argtypes = [
-        _ptr, _ptr, ctypes.POINTER(_ptr), ctypes.c_int, ctypes.POINTER(_ptr),
+        _ptr, _ptr, ctypes.POINTER(_ptr), ctypes.c_int, ctypes.c_uint32,
+        ctypes.POINTER(_ptr),
     ]
 
     lib.poly_tensor_function.restype = ctypes.c_int
@@ -1018,6 +1032,8 @@ def _declare_signatures(lib):
 
     lib.poly_tensor_clone_into.restype = _ptr
     lib.poly_tensor_clone_into.argtypes = [_ptr, _ptr, _ptr]
+    lib.poly_tensor_clone.restype = _ptr
+    lib.poly_tensor_clone.argtypes = [_ptr, _ptr, ctypes.c_int]
 
     lib.poly_tensor_uop.restype = _ptr
     lib.poly_tensor_uop.argtypes = [_ptr]
@@ -1027,6 +1043,15 @@ def _declare_signatures(lib):
 
     lib.poly_tensor_uop_physical.restype = _ptr
     lib.poly_tensor_uop_physical.argtypes = [_ptr]
+
+    lib.poly_tensor_logical_policy.restype = ctypes.c_int
+    lib.poly_tensor_logical_policy.argtypes = [_ptr]
+
+    lib.poly_tensor_logical_state.restype = ctypes.c_int
+    lib.poly_tensor_logical_state.argtypes = [_ptr]
+
+    lib.poly_tensor_set_logical_policy.restype = ctypes.c_int
+    lib.poly_tensor_set_logical_policy.argtypes = [_ptr, _ptr, ctypes.c_int]
 
     lib.poly_tensor_device.restype = ctypes.c_int
     lib.poly_tensor_device.argtypes = [_ptr]

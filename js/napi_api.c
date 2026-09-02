@@ -1310,6 +1310,16 @@ static napi_value napi_poly_uop_src(napi_env env, napi_callback_info info) {
   return make_external(env, poly_uop_src(u, idx));
 }
 
+static napi_value napi_poly_uop_call_grad_fxn_key(napi_env env, napi_callback_info info) {
+  napi_value argv[1];
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyUOp *u = get_external(env, argv[0]);
+  napi_value out;
+  NAPI_CALL(env, napi_create_uint32(env, poly_uop_call_grad_fxn_key(u), &out));
+  return out;
+}
+
 static napi_value napi_poly_uop_get_buffer_identity(napi_env env, napi_callback_info info) {
   napi_value argv[1];
   size_t argc = 1;
@@ -1461,6 +1471,25 @@ static napi_value napi_poly_tensor_create_with_roots(napi_env env, napi_callback
   return make_external(
       env, poly_tensor_create_with_roots(
                ctx, uop_logical, uop_physical, (PolyTensorRole)role, (PolyDevice)device
+           )
+  );
+}
+
+static napi_value napi_poly_tensor_create_result_like(napi_env env, napi_callback_info info) {
+  napi_value argv[6];
+  size_t argc = 6;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  PolyTensor *input = get_external(env, argv[1]);
+  PolyUOp *uop_logical = get_external_nullable(env, argv[2]);
+  PolyUOp *uop_physical = get_external(env, argv[3]);
+  int32_t role = 0;
+  int32_t device = 0;
+  napi_get_value_int32(env, argv[4], &role);
+  napi_get_value_int32(env, argv[5], &device);
+  return make_external(
+      env, poly_tensor_create_result_like(
+               ctx, input, uop_logical, uop_physical, (PolyTensorRole)role, (PolyDevice)device
            )
   );
 }
@@ -2212,6 +2241,20 @@ static napi_value napi_poly_tensor_clone_into(napi_env env, napi_callback_info i
   return make_external(env, poly_tensor_clone_into(ctx, target, source));
 }
 
+static napi_value napi_poly_tensor_clone(napi_env env, napi_callback_info info) {
+  napi_value argv[3];
+  size_t argc = 3;
+  int32_t device = 0;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  NAPI_CALL(env, napi_get_value_int32(env, argv[2], &device));
+  return make_external(
+      env,
+      poly_tensor_clone(
+          get_external(env, argv[0]), get_external(env, argv[1]), (PolyDevice)device
+      )
+  );
+}
+
 static napi_value napi_poly_tensor_uop(napi_env env, napi_callback_info info) {
   napi_value argv[1];
   size_t argc = 1;
@@ -2254,6 +2297,43 @@ static napi_value napi_poly_tensor_uop_physical(napi_env env, napi_callback_info
   return make_external(env, poly_tensor_uop_physical(tensor));
 }
 
+static napi_value napi_poly_tensor_logical_policy(napi_env env, napi_callback_info info) {
+  napi_value argv[1], out;
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  NAPI_CALL(
+      env,
+      napi_create_int32(
+          env, (int32_t)poly_tensor_logical_policy(get_external(env, argv[0])), &out
+      )
+  );
+  return out;
+}
+
+static napi_value napi_poly_tensor_logical_state(napi_env env, napi_callback_info info) {
+  napi_value argv[1], out;
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  NAPI_CALL(
+      env,
+      napi_create_int32(env, (int32_t)poly_tensor_logical_state(get_external(env, argv[0])), &out)
+  );
+  return out;
+}
+
+static napi_value napi_poly_tensor_set_logical_policy(napi_env env, napi_callback_info info) {
+  napi_value argv[3], out;
+  size_t argc = 3;
+  int32_t policy = 0;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  NAPI_CALL(env, napi_get_value_int32(env, argv[2], &policy));
+  int rc = poly_tensor_set_logical_policy(
+      get_external(env, argv[0]), get_external(env, argv[1]), (PolyLogicalPolicy)policy
+  );
+  NAPI_CALL(env, napi_create_int32(env, rc, &out));
+  return out;
+}
+
 static napi_value napi_poly_tensor_device(napi_env env, napi_callback_info info) {
   napi_value argv[1];
   size_t argc = 1;
@@ -2288,11 +2368,11 @@ static napi_value napi_poly_tensor_set_requires_grad(napi_env env, napi_callback
 }
 
 static napi_value napi_poly_tensor_custom_kernel(napi_env env, napi_callback_info info) {
-  napi_value argv[3];
-  size_t argc = 3;
+  napi_value argv[4];
+  size_t argc = 4;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  if (argc < 3) {
-    napi_throw_type_error(env, NULL, "poly_tensor_custom_kernel expects ctx, body, inputs");
+  if (argc < 4) {
+    napi_throw_type_error(env, NULL, "poly_tensor_custom_kernel expects ctx, body, inputs, grad key");
     return NULL;
   }
   PolyCtx *ctx = get_external(env, argv[0]);
@@ -2322,7 +2402,9 @@ static napi_value napi_poly_tensor_custom_kernel(napi_env env, napi_callback_inf
     NAPI_CALL(env, napi_get_element(env, argv[2], i, &el));
     inputs[i] = get_external(env, el);
   }
-  int rc = poly_tensor_custom_kernel(ctx, body, inputs, (int)n, outputs);
+  uint32_t grad_fxn_key = 0;
+  NAPI_CALL(env, napi_get_value_uint32(env, argv[3], &grad_fxn_key));
+  int rc = poly_tensor_custom_kernel(ctx, body, inputs, (int)n, grad_fxn_key, outputs);
   free(inputs);
   if (rc != 0) {
     free(outputs);
@@ -2831,6 +2913,32 @@ static napi_value napi_poly_ctx_set_preferred_device(napi_env env, napi_callback
   napi_value undef;
   NAPI_CALL(env, napi_get_undefined(env, &undef));
   return undef;
+}
+
+static napi_value napi_poly_ctx_set_logical_policy(napi_env env, napi_callback_info info) {
+  napi_value argv[2], out;
+  size_t argc = 2;
+  int32_t policy = 0;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  NAPI_CALL(env, napi_get_value_int32(env, argv[1], &policy));
+  int rc = poly_ctx_set_logical_policy(
+      get_external(env, argv[0]), (PolyLogicalPolicy)policy
+  );
+  NAPI_CALL(env, napi_create_int32(env, rc, &out));
+  return out;
+}
+
+static napi_value napi_poly_ctx_get_logical_policy(napi_env env, napi_callback_info info) {
+  napi_value argv[1], out;
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  NAPI_CALL(
+      env,
+      napi_create_int32(
+          env, (int32_t)poly_ctx_get_logical_policy(get_external(env, argv[0])), &out
+      )
+  );
+  return out;
 }
 
 static napi_value napi_poly_ctx_stats(napi_env env, napi_callback_info info) {
@@ -5515,6 +5623,7 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_uop_numel", napi_poly_uop_numel),
       DECLARE_NAPI_METHOD("poly_uop_n_src", napi_poly_uop_n_src),
       DECLARE_NAPI_METHOD("poly_uop_src", napi_poly_uop_src),
+      DECLARE_NAPI_METHOD("poly_uop_call_grad_fxn_key", napi_poly_uop_call_grad_fxn_key),
       DECLARE_NAPI_METHOD("poly_register_buffer_by_id", napi_poly_register_buffer_by_id),
       DECLARE_NAPI_METHOD("poly_register_existing_buffer", napi_poly_register_existing_buffer),
 
@@ -5558,6 +5667,7 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_realize_uops", napi_poly_realize_uops),
       DECLARE_NAPI_METHOD("poly_tensor_empty_by_id", napi_poly_tensor_empty_by_id),
       DECLARE_NAPI_METHOD("poly_tensor_create_with_roots", napi_poly_tensor_create_with_roots),
+      DECLARE_NAPI_METHOD("poly_tensor_create_result_like", napi_poly_tensor_create_result_like),
       DECLARE_NAPI_METHOD("poly_tensor_replace_roots", napi_poly_tensor_replace_roots),
       DECLARE_NAPI_METHOD("poly_tensor_to_device", napi_poly_tensor_to_device),
       DECLARE_NAPI_METHOD("poly_tensor_assign", napi_poly_tensor_assign),
@@ -5626,6 +5736,7 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_tensor_gather_dim", napi_poly_tensor_gather_dim),
       DECLARE_NAPI_METHOD("poly_tensor_index_select", napi_poly_tensor_index_select),
       DECLARE_NAPI_METHOD("poly_tensor_clone_into", napi_poly_tensor_clone_into),
+      DECLARE_NAPI_METHOD("poly_tensor_clone", napi_poly_tensor_clone),
       DECLARE_NAPI_METHOD("poly_tensor_retain", napi_poly_tensor_retain),
       DECLARE_NAPI_METHOD("poly_tensor_release", napi_poly_tensor_release),
       DECLARE_NAPI_METHOD("poly_tensor_uop", napi_poly_tensor_uop),
@@ -5633,6 +5744,9 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_uop_release", napi_poly_uop_release),
       DECLARE_NAPI_METHOD("poly_tensor_uop_logical", napi_poly_tensor_uop_logical),
       DECLARE_NAPI_METHOD("poly_tensor_uop_physical", napi_poly_tensor_uop_physical),
+      DECLARE_NAPI_METHOD("poly_tensor_logical_policy", napi_poly_tensor_logical_policy),
+      DECLARE_NAPI_METHOD("poly_tensor_logical_state", napi_poly_tensor_logical_state),
+      DECLARE_NAPI_METHOD("poly_tensor_set_logical_policy", napi_poly_tensor_set_logical_policy),
       DECLARE_NAPI_METHOD("poly_tensor_device", napi_poly_tensor_device),
       DECLARE_NAPI_METHOD("poly_tensor_requires_grad", napi_poly_tensor_requires_grad),
       DECLARE_NAPI_METHOD("poly_tensor_set_requires_grad", napi_poly_tensor_set_requires_grad),
@@ -5645,6 +5759,8 @@ NAPI_MODULE_INIT() {
           "poly_buffer_ensure_device_allocated", napi_poly_buffer_ensure_device_allocated
       ),
       DECLARE_NAPI_METHOD("poly_ctx_set_preferred_device", napi_poly_ctx_set_preferred_device),
+      DECLARE_NAPI_METHOD("poly_ctx_set_logical_policy", napi_poly_ctx_set_logical_policy),
+      DECLARE_NAPI_METHOD("poly_ctx_get_logical_policy", napi_poly_ctx_get_logical_policy),
       DECLARE_NAPI_METHOD("poly_ctx_collect", napi_poly_ctx_collect),
       DECLARE_NAPI_METHOD("poly_ctx_stats", napi_poly_ctx_stats),
       DECLARE_NAPI_METHOD("poly_ctx_reset_counters", napi_poly_ctx_reset_counters),

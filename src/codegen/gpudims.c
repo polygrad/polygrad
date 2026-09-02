@@ -353,9 +353,13 @@ static void uop_src_scratch_free(PolyUOp **buf, PolyUOp **stack) {
 PolyUOp *poly_add_gpudims_ex(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps) {
   if (!ctx || !sink || sink->arg.kind == POLY_ARG_NONE) return sink;
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort(ctx, sink, &n_topo);
-  for (int i = 0; i < n_topo; i++)
-    if (topo[i]->op == POLY_OP_SPECIAL) return sink;
+  PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n_topo);
+  for (int i = 0; i < n_topo; i++) {
+    if (topo[i]->op == POLY_OP_SPECIAL) {
+      poly_toposort_free(topo);
+      return sink;
+    }
+  }
 
   /* Collect the non-reduce ranges that should become GPU SPECIALs.
    * tinygrad gpudims.py substitutes all global-like and local-like dims, not
@@ -389,7 +393,10 @@ PolyUOp *poly_add_gpudims_ex(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps)
     }
   }
 
-  if (n_global == 0 && n_local == 0) return sink; /* nothing to parallelize */
+  if (n_global == 0 && n_local == 0) { /* nothing to parallelize */
+    poly_toposort_free(topo);
+    return sink;
+  }
 
   qsort(global_ranges, (size_t)n_global, sizeof(PolyUOp *), cmp_range_axis_id_ptr);
   qsort(local_ranges, (size_t)n_local, sizeof(PolyUOp *), cmp_range_axis_id_ptr);
@@ -407,18 +414,25 @@ PolyUOp *poly_add_gpudims_ex(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps)
     local_dims[i].max = _dim_max(ctx, local_dims[i].expr);
   }
   if (caps.has_threads) {
-    if (n_global != 1 || n_local != 0) return NULL;
+    if (n_global != 1 || n_local != 0) {
+      poly_toposort_free(topo);
+      return NULL;
+    }
     PolyUOp *core_id =
         poly_uop_variable(ctx, "core_id", 0, global_dims[0].max - 1, POLY_INT32, 1, true);
     global_idxs[0] =
         poly_uop1(ctx, POLY_OP_CAST, POLY_WEAKINT, core_id, poly_arg_dtype(POLY_WEAKINT));
   } else {
     if (n_global > 0 &&
-        !get_grouped_dims(ctx, "gidx", global_dims, n_global, caps.global_max, true, global_idxs))
+        !get_grouped_dims(ctx, "gidx", global_dims, n_global, caps.global_max, true, global_idxs)) {
+      poly_toposort_free(topo);
       return NULL;
+    }
     if (n_local > 0 &&
-        !get_grouped_dims(ctx, "lidx", local_dims, n_local, caps.local_max, false, local_idxs))
+        !get_grouped_dims(ctx, "lidx", local_dims, n_local, caps.local_max, false, local_idxs)) {
+      poly_toposort_free(topo);
       return NULL;
+    }
   }
 
   /* Substitute every global/local RANGE occurrence with its SPECIAL-derived
@@ -430,6 +444,7 @@ PolyUOp *poly_add_gpudims_ex(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps)
   if (!sub_old || !sub_new) {
     free(sub_old);
     free(sub_new);
+    poly_toposort_free(topo);
     return sink;
   }
   int n_subs = 0;
@@ -550,6 +565,7 @@ PolyUOp *poly_add_gpudims_ex(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps)
                 uop_src_scratch_free(new_srcs, stack_new_srcs);
                 free(sub_old);
                 free(sub_new);
+                poly_toposort_free(topo);
                 return NULL;
               }
               PolyUOp *coord_gate = gate;
@@ -559,6 +575,7 @@ PolyUOp *poly_add_gpudims_ex(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps)
                   uop_src_scratch_free(new_srcs, stack_new_srcs);
                   free(sub_old);
                   free(sub_new);
+                  poly_toposort_free(topo);
                   return NULL;
                 }
                 for (int lane = 0; lane < lanes; lane++)
@@ -602,6 +619,7 @@ PolyUOp *poly_add_gpudims_ex(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps)
 
   free(sub_old);
   free(sub_new);
+  poly_toposort_free(topo);
   return new_sink;
 }
 

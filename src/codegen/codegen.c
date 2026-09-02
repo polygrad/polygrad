@@ -366,7 +366,7 @@ static PolyUOp *convert_loop_to_global(PolyCtx *ctx, PolyUOp *ast) {
   if (!ctx || !ast) return ast;
 
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort(ctx, ast, &n_topo);
+  PolyUOp **topo = poly_toposort_alloc(ctx, ast, &n_topo);
   if (!topo || n_topo <= 0) return ast;
 
   PolyUOp *output_rngs[64];
@@ -425,7 +425,9 @@ static PolyUOp *convert_loop_to_global(PolyCtx *ctx, PolyUOp *ast) {
     n_sub++;
   }
 
-  return (n_sub > 0) ? poly_uop_substitute(ctx, ast, from, to, n_sub) : ast;
+  PolyUOp *out = (n_sub > 0) ? poly_uop_substitute(ctx, ast, from, to, n_sub) : ast;
+  poly_toposort_free(topo);
+  return out;
 }
 
 /* Build reachability bitmask for all nodes in a toposort.
@@ -980,7 +982,7 @@ static bool sched_apply_tc_opt(
 
   /* 1. Find REDUCE(ADD) and its MUL (postrange.py:222-227) */
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort(ctx, s->ast, &n_topo);
+  PolyUOp **topo = poly_toposort_alloc(ctx, s->ast, &n_topo);
   PolyUOp *reduceop = NULL;
   for (int i = 0; i < n_topo; i++) {
     if (topo[i]->op == POLY_OP_REDUCE && topo[i]->arg.kind == POLY_ARG_REDUCE &&
@@ -989,6 +991,7 @@ static bool sched_apply_tc_opt(
       break;
     }
   }
+  poly_toposort_free(topo);
   if (!reduceop || !use_tc) return false;
 
   PolyUOp *mul = reduceop->src[0];
@@ -1150,7 +1153,7 @@ static bool sched_apply_tc_opt(
     if (use_tc == 1) {
       /* Re-find the tagged reduceop */
       int n_topo2 = 0;
-      PolyUOp **topo2 = poly_toposort(ctx, s->ast, &n_topo2);
+      PolyUOp **topo2 = poly_toposort_alloc(ctx, s->ast, &n_topo2);
 
       /* Debug: check how many ne[] pointers are present in the current AST */
       PolyUOp *found_red = NULL;
@@ -1160,6 +1163,7 @@ static bool sched_apply_tc_opt(
           break;
         }
       }
+      poly_toposort_free(topo2);
       if (!found_red) return false;
 
       /* Create tagged copies of ne[] (postrange.py:283: tne = [x.replace(tag=1) for x in ne]).
@@ -1340,10 +1344,16 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
   /* tinygrad apply_opts guard (postrange.py:352): skip heuristic for multi-block kernels. */
   {
     int n_topo = 0;
-    PolyUOp **topo = poly_toposort(ctx, sink, &n_topo);
+    PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n_topo);
+    bool has_stage = false;
     for (int i = 0; i < n_topo; i++) {
-      if (topo[i]->op == POLY_OP_STAGE) return sink;
+      if (topo[i]->op == POLY_OP_STAGE) {
+        has_stage = true;
+        break;
+      }
     }
+    poly_toposort_free(topo);
+    if (has_stage) return sink;
   }
 
   OptScheduler s;
@@ -1510,7 +1520,7 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
     int to_upcast[SCHED_MAX_RNGS];
     int n_to_upcast = 0;
     int n_topo = 0;
-    PolyUOp **topo = poly_toposort(ctx, s.ast, &n_topo);
+    PolyUOp **topo = poly_toposort_alloc(ctx, s.ast, &n_topo);
 
     for (int ui = 0; ui < n_up; ui++) {
       int axis = up_dims[ui];
@@ -1529,6 +1539,7 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
         prod *= s.shape[to_upcast[j]];
       if (prod <= 49 && n_to_upcast < SCHED_MAX_RNGS) to_upcast[n_to_upcast++] = axis;
     }
+    poly_toposort_free(topo);
 
     /* Apply in reverse order (matching tinygrad) */
     for (int i = n_to_upcast - 1; i >= 0; i--) {
@@ -1922,7 +1933,7 @@ static double beam_compile_and_time(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOpts
 
   /* Collect PARAM count and buffer sizes from the sink's toposort */
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort(ctx, sink, &n_topo);
+  PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n_topo);
   int n_params = 0;
   int64_t param_sizes[64];
   for (int i = 0; i < n_topo; i++) {
@@ -1933,6 +1944,7 @@ static double beam_compile_and_time(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOpts
       n_params++;
     }
   }
+  poly_toposort_free(topo);
 
   if (n_params == 0) {
     poly_program_destroy(prog);
@@ -1989,7 +2001,7 @@ static double beam_compile_and_time(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOpts
 /* FNV-1a hash over the AST toposort (structural hash for cache key) */
 static uint64_t beam_ast_hash(PolyCtx *ctx, PolyUOp *sink) {
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort(ctx, sink, &n_topo);
+  PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n_topo);
   uint64_t h = 0xcbf29ce484222325ULL;
   for (int i = 0; i < n_topo; i++) {
     h ^= (uint64_t)topo[i]->op;
@@ -2001,6 +2013,7 @@ static uint64_t beam_ast_hash(PolyCtx *ctx, PolyUOp *sink) {
     h ^= (uint64_t)topo[i]->n_src;
     h *= 0x100000001b3ULL;
   }
+  poly_toposort_free(topo);
   return h;
 }
 
@@ -2370,7 +2383,7 @@ static PolyUOp *rule_reduce_to_acc(PolyCtx *ctx, PolyUOp *root, const PolyBindin
 
   /* Find input_ranges (outer loops the value depends on) */
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort(ctx, inp, &n_topo);
+  PolyUOp **topo = poly_toposort_alloc(ctx, inp, &n_topo);
 
   /* tinygrad parity: precompute ended ranges once from END nodes,
    * instead of rescanning all ENDs for every RANGE. */
@@ -2420,7 +2433,7 @@ static PolyUOp *rule_reduce_to_acc(PolyCtx *ctx, PolyUOp *root, const PolyBindin
     }
   }
   if (ended_ranges) poly_map_destroy(ended_ranges);
-  /* topo is arena-allocated, no free needed */
+  poly_toposort_free(topo);
 
   /* Identity element */
   PolyUOp *identity = poly_identity_element(ctx, reduce_op, red->dtype);
@@ -2506,7 +2519,7 @@ static PolyUOp *rule_merge_reduce_ends(PolyCtx *ctx, PolyUOp *root, const PolyBi
   int at = 0;
 
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort(ctx, root, &n_topo);
+  PolyUOp **topo = poly_toposort_alloc(ctx, root, &n_topo);
   int64_t next_axis = 0;
   for (int i = 0; i < n_topo; i++) {
     if (topo[i] && topo[i]->op == POLY_OP_RANGE && topo[i]->arg.kind == POLY_ARG_RANGE) {
@@ -2514,6 +2527,7 @@ static PolyUOp *rule_merge_reduce_ends(PolyCtx *ctx, PolyUOp *root, const PolyBi
       if (axis >= next_axis) next_axis = axis + 1;
     }
   }
+  poly_toposort_free(topo);
 
   for (int i = 0; i < rctx->n_groups; i++) {
     ReduceEndGroup *g = &rctx->groups[i];
@@ -5063,7 +5077,15 @@ PolyUOp *poly_apply_post_index_symbolic_stage(PolyCtx *ctx, PolyUOp *sink) {
       simple_lower ? poly_pm_concat(simple_lower, poly_indexing_simplify()) : NULL;
   poly_pm_destroy(simple_lower);
   if (!lower_index) return NULL;
-  sink = poly_graph_rewrite(ctx, sink, lower_index);
+  /* Tinygrad 2026-08-22/a9069c177a9d codegen/__init__.py:354 supplies
+   * one ctx dict for weak-source lowering across this complete rewrite. */
+  PolyMap *lower_cache = poly_map_new(256);
+  if (!lower_cache) {
+    poly_pm_destroy(lower_index);
+    return NULL;
+  }
+  sink = poly_graph_rewrite_ctx(ctx, sink, lower_index, lower_cache);
+  poly_map_destroy(lower_cache);
   poly_pm_destroy(lower_index);
   return poly_graph_rewrite(ctx, sink, poly_symbolic());
 }
@@ -5093,7 +5115,7 @@ static PolyUOp *poly_fix_group_for_reduce(
   if (n_group == 0) return NULL;
 
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort(ctx, red, &n_topo);
+  PolyUOp **topo = poly_toposort_alloc(ctx, red, &n_topo);
   if (!topo) return NULL;
   PolyUOp *upstream_locals[POLY_MAX_DIMS];
   int n_upstream = 0;
@@ -5104,10 +5126,14 @@ static PolyUOp *poly_fix_group_for_reduce(
     for (int j = 0; j < n_upstream; j++)
       duplicate |= upstream_locals[j] == u;
     if (!duplicate) {
-      if (n_upstream == POLY_MAX_DIMS) return NULL;
+      if (n_upstream == POLY_MAX_DIMS) {
+        poly_toposort_free(topo);
+        return NULL;
+      }
       upstream_locals[n_upstream++] = u;
     }
   }
+  poly_toposort_free(topo);
 
   PolyUOp *partial_src[1 + POLY_MAX_DIMS] = {red->src[0]};
   for (int i = 0; i < n_other; i++)
@@ -5314,10 +5340,11 @@ static PolyUOp *rule_add_raw_barrier(PolyCtx *ctx, PolyUOp *after, const PolyBin
       poly_uop(ctx, POLY_OP_SINK, POLY_VOID, after->src + 1, after->n_src - 1, poly_arg_none());
   if (!deps) return NULL;
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort_ex(ctx, deps, &n_topo, codegen_barrier_gate, true);
+  PolyUOp **topo = poly_toposort_ex_alloc(ctx, deps, &n_topo, codegen_barrier_gate, true);
   bool has_local_store = false;
   for (int i = 0; topo && i < n_topo; i++)
     has_local_store |= codegen_is_local_store(topo[i]);
+  poly_toposort_free(topo);
   if (!has_local_store) return NULL;
   PolyUOp *barrier =
       poly_uop(ctx, POLY_OP_BARRIER, POLY_VOID, after->src + 1, after->n_src - 1, poly_arg_none());
@@ -5356,7 +5383,7 @@ static PolyUOp *rule_add_war_barrier(PolyCtx *ctx, PolyUOp *end, const PolyBindi
   }
 
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort(ctx, end->src[0], &n_topo);
+  PolyUOp **topo = poly_toposort_alloc(ctx, end->src[0], &n_topo);
   if (!topo || n_topo <= 0) {
     free(ranges);
     return NULL;
@@ -5369,6 +5396,7 @@ static PolyUOp *rule_add_war_barrier(PolyCtx *ctx, PolyUOp *end, const PolyBindi
     free(loads);
     free(store_bufs);
     free(ranges);
+    poly_toposort_free(topo);
     return NULL;
   }
   int n_store_bufs = 0, n_loads = 0;
@@ -5388,6 +5416,7 @@ static PolyUOp *rule_add_war_barrier(PolyCtx *ctx, PolyUOp *end, const PolyBindi
     PolyUOp *buf = poly_uop_buf_uop(ctx, u->src[0]);
     if (buf && codegen_ptr_in(store_bufs, n_store_bufs, buf)) loads[n_loads++] = u;
   }
+  poly_toposort_free(topo);
   if (n_loads == 0) {
     free(active);
     free(loads);
@@ -5474,13 +5503,14 @@ static PolyPatternMatcher *poly_pm_number_params(void) {
 
 static PolyUOp *poly_number_params(PolyCtx *ctx, PolyUOp *sink) {
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort(ctx, sink, &n_topo);
+  PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n_topo);
   if (!topo) return NULL;
   NumberParamsContext numbering = {0};
   for (int i = 0; i < n_topo; i++)
     if (topo[i]->op == POLY_OP_PARAM && topo[i]->arg.kind == POLY_ARG_PARAM && topo[i]->arg.param &&
         topo[i]->arg.param->slot != -1)
       numbering.next++;
+  poly_toposort_free(topo);
   return poly_graph_walk_rewrite(ctx, sink, poly_pm_number_params(), NULL, &numbering, true);
 }
 
@@ -5689,7 +5719,15 @@ PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOp
       symbolic_lower ? poly_pm_concat(symbolic_lower, poly_indexing_simplify()) : NULL;
   poly_pm_destroy(symbolic_lower);
   if (!lower_index) return NULL;
-  sink = poly_graph_rewrite(ctx, sink, lower_index);
+  /* Tinygrad 2026-08-22/a9069c177a9d codegen/__init__.py:354 supplies
+   * one ctx dict for weak-source lowering across this complete rewrite. */
+  PolyMap *lower_cache = poly_map_new(256);
+  if (!lower_cache) {
+    poly_pm_destroy(lower_index);
+    return NULL;
+  }
+  sink = poly_graph_rewrite_ctx(ctx, sink, lower_index, lower_cache);
+  poly_map_destroy(lower_cache);
   poly_pm_destroy(lower_index);
   poly_debug_stage_graph(ctx, "lower all index dtypes", sink);
   POLY_REWRITE_CHECK("lower all index dtypes");

@@ -7,6 +7,7 @@ async function collectUntil(pg, predicate) {
   for (let i = 0; i < 100; i++) {
     global.gc()
     await new Promise(resolve => setImmediate(resolve))
+    pg.collect()
     const stats = pg.stats().coreStats
     if (predicate(stats)) return stats
   }

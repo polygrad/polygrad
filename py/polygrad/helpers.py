@@ -184,10 +184,21 @@ class Context(contextlib.ContextDecorator):
 
     def __enter__(self):
         self.old_context = {key: ContextVar._cache[key].value for key in self.kwargs}
+        self.old_logical_policy = None
+        if "LOGICAL" in self.kwargs:
+            from . import _default_ctx, _ffi
+            self.old_logical_policy = int(_ffi.get_lib().poly_ctx_get_logical_policy(_default_ctx))
+            policy = _normalize_logical_policy(self.kwargs["LOGICAL"])
+            if policy is not None and _ffi.get_lib().poly_ctx_set_logical_policy(_default_ctx, policy) != 0:
+                raise ValueError(f"invalid logical policy {self.kwargs['LOGICAL']!r}")
         for key, value in self.kwargs.items():
             ContextVar._cache[key].value = value
 
     def __exit__(self, *args):
+        if self.old_logical_policy is not None:
+            from . import _default_ctx, _ffi
+            if _ffi.get_lib().poly_ctx_set_logical_policy(_default_ctx, self.old_logical_policy) != 0:
+                raise RuntimeError("failed to restore logical policy")
         for key, value in self.old_context.items():
             ContextVar._cache[key].value = value
 
@@ -236,6 +247,39 @@ NO_COLOR = ContextVar("NO_COLOR", 0)
 # Current tinygrad/helpers.py:237. Dropout, BatchNorm, and optimizers share one
 # scoped training-mode owner rather than storing mode on Tensor.
 TRAINING = ContextVar("TRAINING", 0)
+LOGICAL = ContextVar("LOGICAL", "")
+
+
+def _normalize_logical_policy(value):
+    if value is None:
+        return None
+    if value is False:
+        return 0
+    if value is True:
+        return 1
+    if isinstance(value, int) and not isinstance(value, bool) and value in (0, 1, 2):
+        return value
+    if isinstance(value, str):
+        policies = {"never": 0, "always": 1, "until_realize": 2}
+        if value in policies:
+            return policies[value]
+    raise ValueError(
+        "logical policy must be never, always, until_realize, False/0, True/1, 2, or None"
+    )
+
+
+def _logical_policy_name(value):
+    try:
+        return ("never", "always", "until_realize")[int(value)]
+    except (IndexError, TypeError, ValueError):
+        raise RuntimeError(f"unknown core logical policy {value!r}") from None
+
+
+def _logical_state_name(value):
+    try:
+        return ("available", "never_constructed", "retired", "unsupported_resource")[int(value)]
+    except (IndexError, TypeError, ValueError):
+        raise RuntimeError(f"unknown core logical state {value!r}") from None
 
 cache_dir = os.path.join(
     getenv(
@@ -463,6 +507,7 @@ __all__ = [
     "JIT",
     "WINO",
     "NO_COLOR",
+    "LOGICAL",
     "Context",
     "ContextVar",
     "GlobalCounters",

@@ -25,6 +25,9 @@ static PolyUOp *wasm_program_kernel_body(PolyUOp *program) {
   return program->src[0];
 }
 
+/* Embedded JavaScript is not C; clang-format corrupts its operators, regexes,
+ * and template literals. Keep this region out of the C formatting gate. */
+// clang-format off
 EM_JS(int, js_host_copy_out_to_wasm, (uintptr_t src_key, uint8_t *dst, int nbytes), {
   const map = Module.__polygradHostBuffers;
   const src = map && map.get(String(src_key));
@@ -49,9 +52,9 @@ EM_JS(int, js_compile_wasm_kernel, (const uint8_t *bytes, int len), {
     mod = new WebAssembly.Module(HEAPU8.subarray(bytes, bytes + len));
   } catch (e) {
     var dbg = 0;
-    if (typeof globalThis != = 'undefined' && globalThis.__polygradDebugLevel)
+    if (typeof globalThis !== 'undefined' && globalThis.__polygradDebugLevel)
       dbg = Number(globalThis.__polygradDebugLevel) | 0;
-    if (typeof process != = 'undefined' && process.env) {
+    if (typeof process !== 'undefined' && process.env) {
       var envDbg = Number(process.env.POLY_DEBUG || process.env.DEBUG || 0);
       if (Number.isFinite(envDbg) && envDbg > dbg) dbg = envDbg | 0;
     }
@@ -62,7 +65,7 @@ EM_JS(int, js_compile_wasm_kernel, (const uint8_t *bytes, int len), {
       );
     if (dbg >= 4) {
       var msg = e && e.message ? e.message : String(e);
-      var m = / @\\+ (\\d +) /.exec(msg);
+      var m = /@\\+(\\d+)/.exec(msg);
       if (m) {
         var off = Number(m[1]) | 0;
         var start = Math.max(0, off - 32), end = Math.min(len, off + 32);
@@ -178,6 +181,7 @@ EM_JS(void, js_free_wasm_kernel, (int kernel_id), {
     Module._polyKernelCache[kernel_id] = null;
   }
 });
+// clang-format on
 
 int poly_browser_host_copy_out(uintptr_t src_buffer_key, void *dst_ptr, size_t nbytes) {
   return js_host_copy_out_to_wasm(src_buffer_key, (uint8_t *)dst_ptr, (int)nbytes);

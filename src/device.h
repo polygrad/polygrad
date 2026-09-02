@@ -171,8 +171,8 @@ int poly_buffer_handle_get_buf(PolyCtx *ctx, PolyBuffer *buffer, PolyDevice devi
  * migration where the old current is discarded but src is retained). */
 void poly_buffer_free(PolyCtx *ctx, PolyBuffer *b);
 
-/* Free this residency AND its src chain. Use when fully discarding a logical
- * buffer (poly_buffer_remove, ctx destroy, full rebinding via poly_buffer_set). */
+/* Free this residency, its src chain, and their C handle metadata. Use when
+ * fully discarding a buffer (remove, ctx destroy, or full rebinding). */
 void poly_buffer_free_chain(PolyCtx *ctx, PolyBuffer *b);
 
 /* Remove a buffer from the side table (frees current + src chain). */

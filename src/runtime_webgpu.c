@@ -24,10 +24,13 @@ typedef struct {
   int n_bindings;
 } PolyWebGpuRunnerHandle;
 
+/* Embedded JavaScript is not C; keep its operators out of clang-format. */
+// clang-format off
 EM_JS(int, js_webgpu_supports_float16, (), {
   const st = Module.__polygradWebGpuState;
   return st && st.hasShaderF16 ? 1 : 0;
 })
+// clang-format on
 
 bool poly_webgpu_supports_float16(void) {
   return js_webgpu_supports_float16() != 0;
@@ -93,13 +96,19 @@ static bool webgpu_dtype_is_unsupported(PolyDType dt) {
 
 static bool webgpu_graph_has_unsupported_dtype(PolyCtx *ctx, PolyUOp *root) {
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort(ctx, root, &n_topo);
+  PolyUOp **topo = poly_toposort_alloc(ctx, root, &n_topo);
+  bool unsupported = false;
   for (int i = 0; i < n_topo; i++) {
-    if (webgpu_dtype_is_unsupported(topo[i]->dtype)) return true;
+    if (webgpu_dtype_is_unsupported(topo[i]->dtype)) {
+      unsupported = true;
+      break;
+    }
   }
-  return false;
+  poly_toposort_free(topo);
+  return unsupported;
 }
 
+// clang-format off
 EM_JS(uintptr_t, js_webgpu_create_buffer, (size_t nbytes), {
   const st = Module.__polygradWebGpuState;
   if (!st || !st.device) return 0;
@@ -144,7 +153,7 @@ EM_JS(
       const off = Math.max(0, byte_offset | 0);
       const logical = Math.max(0, nbytes | 0);
       const size = Math.max(4, Math.ceil(logical / 4) * 4);
-      if (off % 256 != = 0) return 0;
+      if (off % 256 !== 0) return 0;
       if (logical <= 0 || off > baseSize || size > baseSize - off) return 0;
       if (!st.bufferOffsets) st.bufferOffsets = new Map();
       if (!st.bufferViews) st.bufferViews = new Set();
@@ -162,7 +171,7 @@ EM_JS(int, js_webgpu_write_buffer_from_wasm, (uintptr_t handle, const uint8_t *s
   const buf = st && st.buffers.get(handle);
   if (!buf) return -1;
   const logical = Math.max(0, nbytes | 0);
-  if (logical == = 0) return 0;
+  if (logical === 0) return 0;
   const writeBytes = Math.max(4, Math.ceil(logical / 4) * 4);
   /* WebGPU requires queue.writeBuffer data length to be a multiple of 4.
    * The GPU allocation is rounded up, but typed-array inputs can be uint8. */
@@ -180,7 +189,7 @@ EM_JS(int, js_webgpu_write_buffer_from_hostkey, (uintptr_t handle, uintptr_t src
   const src = map && map.get(String(src_key));
   if (!buf || !src) return -1;
   const logical = Math.max(0, nbytes | 0);
-  if (logical == = 0) return 0;
+  if (logical === 0) return 0;
   const writeBytes = Math.max(4, Math.ceil(logical / 4) * 4);
   /* Browser HOST buffers are JS-owned TypedArrays. Pad the upload bytes, not
    * the logical tensor size, so readback still returns exactly nbytes. */
@@ -197,7 +206,7 @@ EM_ASYNC_JS(int, js_webgpu_read_buffer_to_wasm, (uint8_t * dst, uintptr_t handle
   const src = st.buffers.get(handle);
   if (!src) return -1;
   const logical = Math.max(0, nbytes | 0);
-  if (logical == = 0) return 0;
+  if (logical === 0) return 0;
   const copyBytes = Math.max(4, Math.ceil(logical / 4) * 4);
   const srcOffset = st.bufferOffsets ? (st.bufferOffsets.get(handle) || 0) : 0;
   const staging = st.device.createBuffer(
@@ -225,7 +234,7 @@ EM_ASYNC_JS(
       const dst = map && map.get(String(dst_key));
       if (!src || !dst) return -1;
       const logical = Math.max(0, nbytes | 0);
-      if (logical == = 0) return 0;
+      if (logical === 0) return 0;
       const copyBytes = Math.max(4, Math.ceil(logical / 4) * 4);
       const srcOffset = st.bufferOffsets ? (st.bufferOffsets.get(handle) || 0) : 0;
       const staging = st.device.createBuffer(
@@ -254,7 +263,7 @@ EM_JS(
       const src = st && st.buffers.get(src_handle);
       if (!dst || !src) return -1;
       const logical = Math.max(0, nbytes | 0);
-      if (logical == = 0) return 0;
+      if (logical === 0) return 0;
       const copyBytes = Math.max(4, Math.ceil(logical / 4) * 4);
       const dstSize = st.bufferSizes.get(dst_handle) || copyBytes;
       const srcSize = st.bufferSizes.get(src_handle) || copyBytes;
@@ -272,7 +281,7 @@ EM_JS(int, js_webgpu_memset_zero_impl, (uintptr_t handle, int nbytes), {
   const buf = st && st.buffers.get(handle);
   if (!buf) return -1;
   const logical = Math.max(0, nbytes | 0);
-  if (logical == = 0) return 0;
+  if (logical === 0) return 0;
   const writeBytes = Math.max(4, Math.ceil(logical / 4) * 4);
   const dstOffset = st.bufferOffsets ? (st.bufferOffsets.get(handle) || 0) : 0;
   /* Zero the rounded allocation. Later copy/read calls may use rounded WebGPU
@@ -299,15 +308,14 @@ EM_JS(
       const cached = st.pipelineKeyToId.get(key);
       if (cached) {
         if (debug_level >= 7) {
-          console.log(`[polygrad:webgpu:pipeline] hit entry = ${entry} id = ${cached} wgsl =
-                          $ { wgsl.length }`);
+          console.log(`[polygrad:webgpu:pipeline] hit entry=${entry} id=${cached} wgsl=${wgsl.length}`);
         }
         return cached;
       }
       if (debug_level >= 7) {
         console.log(
-      `[polygrad:webgpu:pipeline] miss entry = ${entry} wgsl = $ { wgsl.length } ` +
-      `n_args = ${n_args} n_params = $ { n_params }`);
+      `[polygrad:webgpu:pipeline] miss entry=${entry} wgsl=${wgsl.length} ` +
+      `n_args=${n_args} n_params=${n_params}`);
       }
 
       let shaderModule;
@@ -347,8 +355,8 @@ EM_JS(
       st.pipelineKeyToId.set(key, id);
       if (debug_level >= 7) {
         console.log(
-      `[polygrad:webgpu:pipeline] ready entry = ${entry} id = $ { id } ` +
-      `ms = $ { (performance.now() - t0).toFixed(3) }`);
+      `[polygrad:webgpu:pipeline] ready entry=${entry} id=${id} ` +
+      `ms=${(performance.now() - t0).toFixed(3)}`);
       }
       return id;
     }
@@ -383,7 +391,7 @@ EM_ASYNC_JS(
         if (!buf) return -1;
         let offset = st.bufferOffsets ? (st.bufferOffsets.get(handle) || 0) : 0;
         let size = st.bufferSizes.get(handle) || 0;
-        if (i > 0 &&handle == = outHandle) {
+        if (i > 0 && handle === outHandle) {
           const copyBuf = st.device.createBuffer({
             size,
             usage : GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
@@ -413,7 +421,7 @@ EM_ASYNC_JS(
         const desc =
             paramHandles
                 .map(
-                    (handle, i) = >
+                    (handle, i) =>
                                   {
                                     const size = st.bufferSizes.get(handle) || 0;
                                     const offset =
@@ -423,12 +431,12 @@ EM_ASYNC_JS(
                 )
                 .join(' ');
         console.log(
-      `[polygrad:webgpu:dispatch] entry = ${rec.entry} pipeline = $ { pipeline_id } ` +
-      `grid = ${gx}, ${gy}, ${gz} n_params = ${n_params} n_args = ${n_args} $ { desc }`);
+      `[polygrad:webgpu:dispatch] entry=${rec.entry} pipeline=${pipeline_id} ` +
+      `grid=${gx},${gy},${gz} n_params=${n_params} n_args=${n_args} ${desc}`);
       }
 
       if (debug_level >= 8) {
-        const dumpBuffer = async(handle, label) = > {
+        const dumpBuffer = async (handle, label) => {
           const src = st.buffers.get(handle);
           const nbytes = st.bufferSizes.get(handle) || 0;
           const offset = st.bufferOffsets ? (st.bufferOffsets.get(handle) || 0) : 0;
@@ -448,8 +456,8 @@ EM_ASYNC_JS(
           const f32 = Array.from(new Float32Array(mapped, 0, wordCount));
           const i32 = Array.from(new Int32Array(mapped, 0, wordCount));
           console.log(
-        `[polygrad:webgpu : buffer] $ { label } handle = ${handle} nbytes = $ { nbytes } ` +
-        `i32 = ${JSON.stringify(i32)} f32 = ${JSON.stringify(f32)} u8 = $ { JSON.stringify(u8) }`);
+        `[polygrad:webgpu:buffer] ${label} handle=${handle} nbytes=${nbytes} ` +
+        `i32=${JSON.stringify(i32)} f32=${JSON.stringify(f32)} u8=${JSON.stringify(u8)}`);
           staging.unmap();
           staging.destroy();
         };
@@ -458,7 +466,7 @@ EM_ASYNC_JS(
           const size = st.bufferSizes.get(handle) || 0;
           if (size <= 64)
             await dumpBuffer(
-                handle, `param$ { i }`
+                handle, `param${i}`
             );
         }
       }
@@ -484,6 +492,7 @@ EM_ASYNC_JS(
       return 0;
     }
 )
+// clang-format on
 
 static void *webgpu_alloc(size_t nbytes, void *dev_ctx) {
   (void)dev_ctx;

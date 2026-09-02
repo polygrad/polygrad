@@ -10,10 +10,18 @@
 #include "polygrad.h"
 #include "arena.h"
 
+/* Maximum new UOp storage retained between automatic IR sweeps. */
+#define POLY_IR_COLLECTION_MIN_GROWTH ((size_t)1 << 20)
+
 struct PolyCtx {
   PolyArena *arena;
   PolyArena *scratch;
   PolyMap *cse;
+  /* C storage mechanics for Tinygrad's weak UOp objects. This registry is not
+   * an owner; the IR mark/sweep decides which records survive. */
+  PolyMap *uop_storage;
+  size_t uop_storage_bytes;
+  size_t uop_storage_high_water;
   /* Current Tinygrad schedule/__init__.py:schedule_cache. */
   PolyMap *schedule_cache;
   PolyMap *to_program_cache;
@@ -42,9 +50,11 @@ struct PolyCtx {
   PolyMap *shape_cache;
   PolyMap *buffers;
   /* C analogue of Tinygrad's weak UOp/Buffer ownership. Values are positive
-   * retain counts encoded as uintptr_t. UOps remain arena-owned. */
+   * retain counts encoded as uintptr_t. */
   PolyMap *retained_uops;
-  bool collection_dirty;
+  bool collection_dirty; /* runtime residency may have lost an owner */
+  bool ir_collection_dirty; /* weak CSE/shape rows may have lost an owner */
+  size_t ir_collection_baseline_bytes; /* UOp bytes after the last full IR sweep */
   bool collecting;
   int execution_depth;
   /* Pinned Tensor._device_seeds/_device_rng_counters, keyed by the exact
@@ -72,6 +82,7 @@ struct PolyCtx {
   int32_t next_buf_tag;
   int64_t next_unique_id;
   PolyDevice preferred_device;
+  PolyLogicalPolicy logical_policy;
   PolyFrontendBufferReleaseFn frontend_buffer_release;
 };
 
@@ -108,6 +119,7 @@ void poly_ctx_record_memory_free_exact(
 );
 uint64_t poly_ctx_mem_used_for_device_uop(PolyCtx *ctx, PolyUOp *device_uop);
 int poly_ctx_collect_before_allocation(PolyCtx *ctx, PolyUOp *transient_root);
+int poly_ctx_collect_at_safe_point(PolyCtx *ctx);
 void poly_ctx_reserve_unique_id(PolyCtx *ctx, int64_t id);
 void poly_ctx_reserve_buf_tag(PolyCtx *ctx, int32_t tag);
 

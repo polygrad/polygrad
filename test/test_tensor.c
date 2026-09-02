@@ -7,6 +7,7 @@
  */
 
 #include <math.h>
+#include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -18,6 +19,7 @@
 #include "../src/engine/schedule.h"
 #include "../src/schedule/rangeify.h"
 #include "../src/nn.h"
+#include "../src/optim.h"
 #include "../src/tensor.h"
 #include "../src/codegen/codegen.h"
 
@@ -77,6 +79,29 @@ static int count_op_in_root(PolyCtx *ctx, PolyUOp *root, int op) {
   return count;
 }
 
+static int uop_topo_index(PolyUOp **topo, int n, PolyUOp *needle) {
+  for (int i = 0; i < n; i++)
+    if (topo[i] == needle) return i;
+  return -1;
+}
+
+static bool uop_graph_isomorphic(PolyCtx *a_ctx, PolyUOp *a, PolyCtx *b_ctx, PolyUOp *b) {
+  int a_n = 0, b_n = 0;
+  PolyUOp **a_topo = poly_toposort_alloc(a_ctx, a, &a_n);
+  PolyUOp **b_topo = poly_toposort_alloc(b_ctx, b, &b_n);
+  bool equal = a_topo && b_topo && a_n == b_n;
+  for (int i = 0; equal && i < a_n; i++) {
+    PolyUOp *x = a_topo[i], *y = b_topo[i];
+    equal = x->op == y->op && poly_dtype_eq(x->dtype, y->dtype) && x->n_src == y->n_src &&
+            poly_arg_eq(x->arg, y->arg) && x->tag == y->tag && poly_arg_eq(x->tag_arg, y->tag_arg);
+    for (int j = 0; equal && j < x->n_src; j++)
+      equal = uop_topo_index(a_topo, a_n, x->src[j]) == uop_topo_index(b_topo, b_n, y->src[j]);
+  }
+  poly_toposort_free(a_topo);
+  poly_toposort_free(b_topo);
+  return equal;
+}
+
 static int read_tensor_bytes(PolyCtx *ctx, PolyTensor *tensor, void *out, size_t nbytes) {
   PolyTensor *realized = NULL;
   if (!ctx || !tensor || !out || poly_realize_tensors(ctx, &tensor, 1, &realized) != 0 || !realized)
@@ -84,6 +109,8 @@ static int read_tensor_bytes(PolyCtx *ctx, PolyTensor *tensor, void *out, size_t
   const PolyUOp *buffer = poly_uop_get_buffer_identity(realized->uop_physical);
   return buffer ? poly_buffer_read(ctx, (PolyUOp *)buffer, out, nbytes) : -1;
 }
+
+static int read_tensor_f32(PolyCtx *ctx, PolyTensor *tensor, float *out, size_t n);
 
 TEST(tensor, released_handles_retire_exact_buffer_residency) {
   /* Tinygrad 2026-08-22 UOp/Buffer destruction drops each allocation when
@@ -245,6 +272,1678 @@ TEST(tensor, downstream_graph_owns_input_residency_after_input_handle_release) {
   ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
   ASSERT_TRUE(stats.mem_used == 0);
   poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tensor, logical_policy_always_preserves_producer) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  ASSERT_INT_EQ(poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_ALWAYS), 0);
+  int64_t shape[] = {4};
+  float x_data[] = {1.0f, 2.0f, 3.0f, 4.0f};
+  float bias_data[] = {0.25f, 0.25f, 0.25f, 0.25f};
+  PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_INTERP);
+  PolyTensor *bias = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_INTERP);
+  ASSERT_NOT_NULL(x);
+  ASSERT_NOT_NULL(bias);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, x->uop_physical, x_data, sizeof(x_data)), 0);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, bias->uop_physical, bias_data, sizeof(bias_data)), 0);
+
+  PolyTensor *out = poly_tensor_alu2(ctx, POLY_OP_ADD, x, bias);
+  ASSERT_NOT_NULL(out);
+  PolyUOp *logical_before = poly_tensor_uop_logical(out);
+  ASSERT_NOT_NULL(logical_before);
+  ASSERT_INT_EQ(poly_tensor_logical_policy(out), POLY_LOGICAL_ALWAYS);
+  ASSERT_INT_EQ(poly_tensor_logical_state(out), POLY_LOGICAL_AVAILABLE);
+  PolyTensor *realized = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &out, 1, &realized), 0);
+  ASSERT_PTR_EQ(realized, out);
+  ASSERT_PTR_EQ(poly_tensor_uop_logical(out), logical_before);
+  ASSERT_NOT_NULL(poly_uop_get_buffer_identity(poly_tensor_uop_physical(out)));
+
+  PolyTensor *next = poly_tensor_alu2(ctx, POLY_OP_ADD, out, bias);
+  ASSERT_NOT_NULL(next);
+  ASSERT_NOT_NULL(poly_tensor_uop_logical(next));
+  ASSERT_INT_EQ(poly_tensor_logical_policy(next), POLY_LOGICAL_ALWAYS);
+  float got[4] = {0};
+  ASSERT_INT_EQ(read_tensor_f32(ctx, next, got, 4), 0);
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(got[i], x_data[i] + 0.5f, 1e-6f);
+
+  poly_tensor_release(next);
+  poly_tensor_release(out);
+  poly_tensor_release(bias);
+  poly_tensor_release(x);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tensor, logical_policy_is_copied_from_context_at_construction) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  ASSERT_INT_EQ(poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_ALWAYS), 0);
+  int64_t shape[] = {4};
+  PolyTensor *before = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_INTERP);
+  ASSERT_NOT_NULL(before);
+  ASSERT_INT_EQ(poly_tensor_logical_policy(before), POLY_LOGICAL_ALWAYS);
+
+  ASSERT_INT_EQ(poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_UNTIL_REALIZE), 0);
+  PolyTensor *after = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_INTERP);
+  ASSERT_NOT_NULL(after);
+  ASSERT_INT_EQ(poly_tensor_logical_policy(before), POLY_LOGICAL_ALWAYS);
+  ASSERT_INT_EQ(poly_tensor_logical_policy(after), POLY_LOGICAL_UNTIL_REALIZE);
+  ASSERT_INT_EQ(poly_tensor_logical_state(after), POLY_LOGICAL_AVAILABLE);
+
+  poly_tensor_release(after);
+  poly_tensor_release(before);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tensor, logical_never_source_keeps_descendants_physical_only_after_scope) {
+  /* Polygrad logical-lifetime divergence: omitting the portable twin must not
+   * make later eager physical composition depend on the current ctx policy. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  ASSERT_INT_EQ(poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_NEVER), 0);
+  int64_t shape[] = {2};
+  float values[] = {1.0f, 2.0f};
+  PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_INTERP);
+  PolyTensor *one = x ? poly_tensor_const_like_float(ctx, x, 1.0) : NULL;
+  ASSERT_NOT_NULL(x);
+  ASSERT_NOT_NULL(one);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, x->uop_physical, values, sizeof(values)), 0);
+
+  ASSERT_INT_EQ(poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_UNTIL_REALIZE), 0);
+  PolyTensor *out = poly_tensor_alu2(ctx, POLY_OP_ADD, x, one);
+  ASSERT_NOT_NULL(out);
+  ASSERT_INT_EQ(poly_tensor_logical_policy(out), POLY_LOGICAL_NEVER);
+  ASSERT_INT_EQ(poly_tensor_logical_state(out), POLY_LOGICAL_NEVER_CONSTRUCTED);
+  ASSERT_PTR_EQ(poly_tensor_uop_logical(out), NULL);
+  float got[2] = {0};
+  ASSERT_INT_EQ(read_tensor_f32(ctx, out, got, 2), 0);
+  ASSERT_FLOAT_EQ(got[0], 2.0f, 1e-6f);
+  ASSERT_FLOAT_EQ(got[1], 3.0f, 1e-6f);
+
+  poly_tensor_release(out);
+  poly_tensor_release(one);
+  poly_tensor_release(x);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tensor, logical_never_clone_after_scope_keeps_exact_physical_clone) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  ASSERT_INT_EQ(poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_NEVER), 0);
+  int64_t shape[] = {2};
+  float values[] = {1.0f, 2.0f};
+  PolyTensor *source = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_INTERP);
+  ASSERT_NOT_NULL(source);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, source->uop_physical, values, sizeof(values)), 0);
+
+  ASSERT_INT_EQ(poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_UNTIL_REALIZE), 0);
+  PolyTensor *cloned = poly_tensor_clone(ctx, source, POLY_DEVICE_INTERP);
+  ASSERT_NOT_NULL(cloned);
+  ASSERT_INT_EQ(cloned->logical_policy, POLY_LOGICAL_NEVER);
+  ASSERT_INT_EQ(cloned->logical_state, POLY_LOGICAL_NEVER_CONSTRUCTED);
+  ASSERT_PTR_EQ(cloned->uop_logical, NULL);
+  ASSERT_INT_EQ(cloned->uop_physical->op, POLY_OP_AFTER);
+  ASSERT_INT_EQ(cloned->uop_physical->n_src, 2);
+  ASSERT_INT_EQ(cloned->uop_physical->src[0]->op, POLY_OP_BUFFER);
+  ASSERT_INT_EQ(cloned->uop_physical->src[1]->op, POLY_OP_STORE);
+  ASSERT_PTR_EQ(cloned->uop_physical->src[1]->src[0], cloned->uop_physical->src[0]);
+  ASSERT_PTR_EQ(cloned->uop_physical->src[1]->src[1], source->uop_physical);
+  float got[2] = {0};
+  ASSERT_INT_EQ(read_tensor_f32(ctx, cloned, got, 2), 0);
+  ASSERT_FLOAT_EQ(got[0], values[0], 1e-6f);
+  ASSERT_FLOAT_EQ(got[1], values[1], 1e-6f);
+
+  poly_tensor_release(cloned);
+  poly_tensor_release(source);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tensor, logical_policy_default_is_until_realize) {
+  const char *prior = getenv("POLY_LOGICAL");
+  char *saved = prior ? strdup(prior) : NULL;
+  ASSERT_INT_EQ(unsetenv("POLY_LOGICAL"), 0);
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  ASSERT_INT_EQ(poly_ctx_get_logical_policy(ctx), POLY_LOGICAL_UNTIL_REALIZE);
+  poly_ctx_destroy(ctx);
+  if (saved) {
+    ASSERT_INT_EQ(setenv("POLY_LOGICAL", saved, 1), 0);
+    free(saved);
+  }
+  PASS();
+}
+
+TEST(tensor, logical_policy_environment_is_strict_and_context_local) {
+  const char *prior = getenv("POLY_LOGICAL");
+  char *saved = prior ? strdup(prior) : NULL;
+  const struct {
+    const char *value;
+    PolyLogicalPolicy policy;
+  } cases[] = {
+      {"0", POLY_LOGICAL_NEVER},
+      {"1", POLY_LOGICAL_ALWAYS},
+      {"2", POLY_LOGICAL_UNTIL_REALIZE},
+  };
+  for (int i = 0; i < 3; i++) {
+    ASSERT_INT_EQ(setenv("POLY_LOGICAL", cases[i].value, 1), 0);
+    PolyCtx *ctx = poly_ctx_new();
+    ASSERT_NOT_NULL(ctx);
+    ASSERT_INT_EQ(poly_ctx_get_logical_policy(ctx), cases[i].policy);
+    poly_ctx_destroy(ctx);
+  }
+  ASSERT_INT_EQ(setenv("POLY_LOGICAL", "always", 1), 0);
+  ASSERT_PTR_EQ(poly_ctx_new(), NULL);
+  if (saved) {
+    ASSERT_INT_EQ(setenv("POLY_LOGICAL", saved, 1), 0);
+    free(saved);
+  } else {
+    ASSERT_INT_EQ(unsetenv("POLY_LOGICAL"), 0);
+  }
+  PASS();
+}
+
+TEST(tensor, logical_policy_explicit_tensor_transitions_are_non_retroactive) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  ASSERT_INT_EQ(poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_ALWAYS), 0);
+  int64_t shape[1] = {2};
+  PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_INTERP);
+  PolyTensor *pending =
+      poly_tensor_alu2(ctx, POLY_OP_ADD, x, poly_tensor_const_like_float(ctx, x, 1.0));
+  ASSERT_NOT_NULL(x);
+  ASSERT_NOT_NULL(pending);
+  ASSERT_INT_EQ(poly_tensor_set_logical_policy(ctx, pending, POLY_LOGICAL_UNTIL_REALIZE), 0);
+  ASSERT_INT_EQ(pending->logical_policy, POLY_LOGICAL_UNTIL_REALIZE);
+  ASSERT_INT_EQ(pending->logical_state, POLY_LOGICAL_AVAILABLE);
+  PolyTensor *realized = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &pending, 1, &realized), 0);
+  ASSERT_INT_EQ(pending->logical_state, POLY_LOGICAL_RETIRED);
+  ASSERT_INT_EQ(poly_tensor_set_logical_policy(ctx, pending, POLY_LOGICAL_ALWAYS), -1);
+
+  PolyTensor *drop =
+      poly_tensor_alu2(ctx, POLY_OP_ADD, x, poly_tensor_const_like_float(ctx, x, 2.0));
+  ASSERT_NOT_NULL(drop);
+  ASSERT_INT_EQ(poly_tensor_set_logical_policy(ctx, drop, POLY_LOGICAL_NEVER), 0);
+  ASSERT_INT_EQ(drop->logical_policy, POLY_LOGICAL_NEVER);
+  ASSERT_INT_EQ(drop->logical_state, POLY_LOGICAL_NEVER_CONSTRUCTED);
+  ASSERT_PTR_EQ(drop->uop_logical, NULL);
+  ASSERT_INT_EQ(poly_tensor_set_logical_policy(ctx, drop, POLY_LOGICAL_ALWAYS), -1);
+
+  PolyTensor *late =
+      poly_tensor_alu2(ctx, POLY_OP_ADD, x, poly_tensor_const_like_float(ctx, x, 3.0));
+  ASSERT_NOT_NULL(late);
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &late, 1, &realized), 0);
+  ASSERT_INT_EQ(late->logical_state, POLY_LOGICAL_AVAILABLE);
+  ASSERT_INT_EQ(poly_tensor_set_logical_policy(ctx, late, POLY_LOGICAL_UNTIL_REALIZE), 0);
+  ASSERT_INT_EQ(late->logical_state, POLY_LOGICAL_RETIRED);
+
+  poly_tensor_release(late);
+  poly_tensor_release(drop);
+  poly_tensor_release(pending);
+  poly_tensor_release(x);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tensor, logical_until_realize_retires_producer_to_exact_current_resource) {
+  /* Tinygrad 2026-08-22 Tensor.realize retargets the current value to its
+   * exact BUFFER. Polygrad additionally preserves a device-free resource leaf
+   * with the same slot after retiring this wrapper's portable producer. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  ASSERT_INT_EQ(poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_UNTIL_REALIZE), 0);
+  int64_t shape[1] = {2};
+  float values[2] = {1.0f, 2.0f};
+  PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_INTERP);
+  PolyTensor *one = poly_tensor_const_like_float(ctx, x, 1.0);
+  PolyTensor *out = poly_tensor_alu2(ctx, POLY_OP_ADD, x, one);
+  ASSERT_NOT_NULL(x);
+  ASSERT_NOT_NULL(one);
+  ASSERT_NOT_NULL(out);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, x->uop_physical, values, sizeof(values)), 0);
+
+  PolyUOp *producer = out->uop_logical;
+  ASSERT_NOT_NULL(producer);
+  ASSERT_INT_EQ(out->logical_state, POLY_LOGICAL_AVAILABLE);
+  PolyTensor *realized = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &out, 1, &realized), 0);
+  ASSERT_PTR_EQ(realized, out);
+
+  PolyUOp *physical = out->uop_physical;
+  PolyUOp *resource = out->uop_logical;
+  ASSERT_NOT_NULL(physical);
+  ASSERT_NOT_NULL(resource);
+  ASSERT_INT_EQ(out->logical_state, POLY_LOGICAL_RETIRED);
+  ASSERT_PTR_NEQ(resource, producer);
+  ASSERT_FALSE(poly_uop_reachable(ctx, resource, producer));
+  ASSERT_INT_EQ(physical->op, POLY_OP_BUFFER);
+  ASSERT_INT_EQ(physical->arg.kind, POLY_ARG_PARAM);
+  ASSERT_INT_EQ(resource->op, POLY_OP_BUFFER);
+  ASSERT_INT_EQ(resource->arg.kind, POLY_ARG_INT);
+  ASSERT_INT_EQ(resource->n_src, 1);
+  ASSERT_INT_EQ(resource->src[0]->op, POLY_OP_UNIQUE);
+  ASSERT_TRUE(resource->src[0]->arg.i == physical->arg.param->slot);
+  ASSERT_TRUE(resource->arg.i == physical->src[0]->arg.i);
+
+  PolyTensor *two = poly_tensor_const_like_float(ctx, out, 2.0);
+  PolyTensor *next = poly_tensor_alu2(ctx, POLY_OP_ADD, out, two);
+  ASSERT_NOT_NULL(next);
+  ASSERT_TRUE(poly_uop_reachable(ctx, next->uop_logical, resource));
+  ASSERT_FALSE(poly_uop_reachable(ctx, next->uop_logical, producer));
+  float got[2] = {0};
+  ASSERT_INT_EQ(read_tensor_f32(ctx, next, got, 2), 0);
+  ASSERT_FLOAT_EQ(got[0], 4.0f, 1e-6f);
+  ASSERT_FLOAT_EQ(got[1], 5.0f, 1e-6f);
+
+  poly_tensor_release(next);
+  poly_tensor_release(two);
+  poly_tensor_release(out);
+  poly_tensor_release(one);
+  poly_tensor_release(x);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tensor, logical_until_realize_does_not_rewrite_always_sibling) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  ASSERT_INT_EQ(poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_UNTIL_REALIZE), 0);
+  int64_t shape[1] = {2};
+  float values[2] = {1.0f, 2.0f};
+  PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_INTERP);
+  PolyTensor *one = poly_tensor_const_like_float(ctx, x, 1.0);
+  PolyTensor *until = poly_tensor_alu2(ctx, POLY_OP_ADD, x, one);
+  ASSERT_NOT_NULL(x);
+  ASSERT_NOT_NULL(one);
+  ASSERT_NOT_NULL(until);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, x->uop_physical, values, sizeof(values)), 0);
+  PolyUOp *producer = until->uop_logical;
+  PolyUOp *physical = until->uop_physical;
+
+  ASSERT_INT_EQ(poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_ALWAYS), 0);
+  PolyTensor *sibling =
+      poly_tensor_create_with_roots(ctx, producer, physical, POLY_TENSOR_VALUE, POLY_DEVICE_INTERP);
+  ASSERT_NOT_NULL(sibling);
+  ASSERT_INT_EQ(sibling->logical_policy, POLY_LOGICAL_ALWAYS);
+
+  PolyTensor *realized = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &until, 1, &realized), 0);
+  ASSERT_PTR_EQ(realized, until);
+  ASSERT_INT_EQ(until->logical_state, POLY_LOGICAL_RETIRED);
+  ASSERT_PTR_EQ(sibling->uop_logical, producer);
+  ASSERT_INT_EQ(sibling->logical_state, POLY_LOGICAL_AVAILABLE);
+  ASSERT_PTR_EQ(sibling->uop_physical, until->uop_physical);
+
+  poly_tensor_release(sibling);
+  poly_tensor_release(until);
+  poly_tensor_release(one);
+  poly_tensor_release(x);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tensor, logical_until_realize_preserves_exact_reshape_resource_spine) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  ASSERT_INT_EQ(poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_UNTIL_REALIZE), 0);
+  int64_t flat_shape[1] = {4}, matrix_shape[2] = {2, 2};
+  float values[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+  PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, flat_shape, 1, POLY_DEVICE_INTERP);
+  PolyTensor *one = poly_tensor_const_like_float(ctx, x, 1.0);
+  PolyTensor *sum = poly_tensor_alu2(ctx, POLY_OP_ADD, x, one);
+  PolyTensor *matrix = poly_tensor_reshape(ctx, sum, matrix_shape, 2);
+  ASSERT_NOT_NULL(x);
+  ASSERT_NOT_NULL(one);
+  ASSERT_NOT_NULL(sum);
+  ASSERT_NOT_NULL(matrix);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, x->uop_physical, values, sizeof(values)), 0);
+  PolyUOp *producer = matrix->uop_logical;
+
+  PolyTensor *realized = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &matrix, 1, &realized), 0);
+  ASSERT_PTR_EQ(realized, matrix);
+  ASSERT_INT_EQ(matrix->uop_physical->op, POLY_OP_RESHAPE);
+  ASSERT_INT_EQ(matrix->uop_physical->src[0]->op, POLY_OP_BUFFER);
+  ASSERT_INT_EQ(matrix->logical_state, POLY_LOGICAL_RETIRED);
+  ASSERT_PTR_NEQ(matrix->uop_logical, producer);
+  ASSERT_INT_EQ(matrix->uop_logical->op, POLY_OP_RESHAPE);
+  ASSERT_INT_EQ(matrix->uop_logical->src[0]->op, POLY_OP_BUFFER);
+  ASSERT_INT_EQ(matrix->uop_logical->src[0]->arg.kind, POLY_ARG_INT);
+  ASSERT_TRUE(
+      matrix->uop_logical->src[0]->src[0]->arg.i == matrix->uop_physical->src[0]->arg.param->slot
+  );
+  ASSERT_FALSE(poly_uop_reachable(ctx, matrix->uop_logical, producer));
+
+  float got[4] = {0};
+  ASSERT_INT_EQ(read_tensor_f32(ctx, matrix, got, 4), 0);
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(got[i], values[i] + 1.0f, 1e-6f);
+
+  poly_tensor_release(matrix);
+  poly_tensor_release(sum);
+  poly_tensor_release(one);
+  poly_tensor_release(x);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tensor, logical_until_realize_preserves_canonical_shrink_resource_spine) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  ASSERT_INT_EQ(poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_UNTIL_REALIZE), 0);
+  int64_t shape[1] = {4}, pairs[1][2] = {{1, 3}};
+  float values[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+  PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_INTERP);
+  PolyTensor *one = poly_tensor_const_like_float(ctx, x, 1.0);
+  PolyTensor *sum = poly_tensor_alu2(ctx, POLY_OP_ADD, x, one);
+  PolyTensor *view = poly_tensor_shrink(ctx, sum, pairs, 1);
+  ASSERT_NOT_NULL(x);
+  ASSERT_NOT_NULL(one);
+  ASSERT_NOT_NULL(sum);
+  ASSERT_NOT_NULL(view);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, x->uop_physical, values, sizeof(values)), 0);
+  PolyUOp *producer = view->uop_logical;
+
+  PolyTensor *realized = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &view, 1, &realized), 0);
+  ASSERT_PTR_EQ(realized, view);
+  ASSERT_INT_EQ(view->uop_physical->op, POLY_OP_SHRINK);
+  ASSERT_INT_EQ(view->uop_physical->src[0]->op, POLY_OP_BUFFER);
+  ASSERT_INT_EQ(view->logical_state, POLY_LOGICAL_RETIRED);
+  ASSERT_PTR_NEQ(view->uop_logical, producer);
+  ASSERT_INT_EQ(view->uop_logical->op, POLY_OP_SHRINK);
+  ASSERT_INT_EQ(view->uop_logical->src[0]->op, POLY_OP_BUFFER);
+  ASSERT_TRUE(
+      view->uop_logical->src[0]->src[0]->arg.i == view->uop_physical->src[0]->arg.param->slot
+  );
+  ASSERT_FALSE(poly_uop_reachable(ctx, view->uop_logical, producer));
+
+  PolyUOp *view_buffer = poly_uop_buffer(ctx, view->uop_physical);
+  float got[2] = {0};
+  ASSERT_NOT_NULL(view_buffer);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, view_buffer, got, sizeof(got)), 0);
+  ASSERT_FLOAT_EQ(got[0], 3.0f, 1e-6f);
+  ASSERT_FLOAT_EQ(got[1], 4.0f, 1e-6f);
+
+  poly_tensor_release(view);
+  poly_tensor_release(sum);
+  poly_tensor_release(one);
+  poly_tensor_release(x);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tensor, logical_until_realize_preserves_exact_movement_resource_spine) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  ASSERT_INT_EQ(poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_UNTIL_REALIZE), 0);
+  int64_t flat_shape[1] = {6}, matrix_shape[2] = {2, 3}, order[2] = {1, 0};
+  PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, flat_shape, 1, POLY_DEVICE_INTERP);
+  ASSERT_NOT_NULL(x);
+  PolyUOp *physical_base = poly_tensor_uop_physical(x);
+  PolyUOp *logical_base = poly_tensor_uop_logical(x);
+  PolyUOp *one = poly_const_like_float(ctx, logical_base, 1.0);
+  PolyUOp *producer = poly_permute(
+      ctx, poly_reshape(ctx, poly_alu2(ctx, POLY_OP_ADD, logical_base, one), matrix_shape, 2),
+      order, 2
+  );
+  PolyUOp *physical_view =
+      poly_permute(ctx, poly_reshape(ctx, physical_base, matrix_shape, 2), order, 2);
+  PolyTensor *view = poly_tensor_create_with_roots(
+      ctx, producer, physical_view, POLY_TENSOR_VALUE, POLY_DEVICE_INTERP
+  );
+  ASSERT_NOT_NULL(view);
+  ASSERT_NOT_NULL(physical_base);
+  ASSERT_NOT_NULL(physical_view);
+  ASSERT_NOT_NULL(producer);
+  ASSERT_INT_EQ(poly_tensor_retire_logical_resources(ctx, &view, 1), 0);
+
+  PolyUOp *resource = poly_tensor_uop_logical(view);
+  ASSERT_NOT_NULL(resource);
+  ASSERT_INT_EQ(poly_tensor_logical_state(view), POLY_LOGICAL_RETIRED);
+  ASSERT_PTR_NEQ(resource, producer);
+  ASSERT_INT_EQ(resource->op, POLY_OP_PERMUTE);
+  ASSERT_INT_EQ(resource->src[0]->op, POLY_OP_RESHAPE);
+  ASSERT_INT_EQ(resource->src[0]->src[0]->op, POLY_OP_BUFFER);
+  ASSERT_INT_EQ(resource->src[0]->src[0]->arg.kind, POLY_ARG_INT);
+  ASSERT_PTR_EQ(poly_tensor_uop_physical(view), physical_view);
+  ASSERT_TRUE(resource->src[0]->src[0]->src[0]->arg.i == physical_base->arg.param->slot);
+  ASSERT_FALSE(poly_uop_reachable(ctx, resource, producer));
+
+  poly_tensor_release(view);
+  poly_tensor_release(x);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tensor, logical_until_realize_copy_roundtrip_adopts_each_destination_resource) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  ASSERT_INT_EQ(poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_UNTIL_REALIZE), 0);
+  int64_t shape[1] = {2};
+  float values[2] = {3.0f, 4.0f};
+  PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(x);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, x->uop_physical, values, sizeof(values)), 0);
+  PolyUOp *x_logical = x->uop_logical;
+  ASSERT_NOT_NULL(x_logical);
+
+  PolyTensor *interp = poly_tensor_to_device(ctx, x, POLY_DEVICE_INTERP);
+  ASSERT_NOT_NULL(interp);
+  ASSERT_PTR_EQ(interp->uop_logical, x_logical);
+  PolyTensor *realized = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &interp, 1, &realized), 0);
+  ASSERT_PTR_EQ(realized, interp);
+  ASSERT_INT_EQ(interp->logical_state, POLY_LOGICAL_RETIRED);
+  PolyUOp *interp_resource = interp->uop_logical;
+  ASSERT_INT_EQ(interp_resource->op, POLY_OP_BUFFER);
+  ASSERT_PTR_NEQ(interp_resource, x_logical);
+  ASSERT_TRUE(interp_resource->src[0]->arg.i != base_buf(x_logical)->src[0]->arg.i);
+
+  PolyTensor *roundtrip = poly_tensor_to_device(ctx, interp, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(roundtrip);
+  ASSERT_PTR_EQ(roundtrip->uop_logical, interp_resource);
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &roundtrip, 1, &realized), 0);
+  ASSERT_PTR_EQ(realized, roundtrip);
+  ASSERT_INT_EQ(roundtrip->logical_state, POLY_LOGICAL_RETIRED);
+  PolyUOp *roundtrip_resource = roundtrip->uop_logical;
+  ASSERT_INT_EQ(roundtrip_resource->op, POLY_OP_BUFFER);
+  ASSERT_TRUE(roundtrip_resource->src[0]->arg.i != interp_resource->src[0]->arg.i);
+  ASSERT_PTR_EQ(x->uop_logical, x_logical);
+  ASSERT_INT_EQ(x->logical_state, POLY_LOGICAL_AVAILABLE);
+
+  const PolyUOp *roundtrip_buffer = poly_uop_get_buffer_identity(roundtrip->uop_physical);
+  float got[2] = {0};
+  ASSERT_NOT_NULL(roundtrip_buffer);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, (PolyUOp *)roundtrip_buffer, got, sizeof(got)), 0);
+  ASSERT_FLOAT_EQ(got[0], values[0], 1e-6f);
+  ASSERT_FLOAT_EQ(got[1], values[1], 1e-6f);
+
+  poly_tensor_release(roundtrip);
+  poly_tensor_release(interp);
+  poly_tensor_release(x);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tensor, logical_until_realize_unsupported_multi_keeps_physical_composition) {
+  /* Tinygrad 2026-08-22 can materialize a sharded Tensor as
+   * UNSHARD(BUFFER(multi-device), RANGE). Polygrad cannot yet encode that
+   * resource portably. Retirement bounds history, while later eager physical
+   * composition remains valid and propagates the portability limitation. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  ASSERT_INT_EQ(poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_UNTIL_REALIZE), 0);
+  int64_t shape[1] = {2};
+  PolyTensor *cpu = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+  PolyTensor *interp = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_INTERP);
+  ASSERT_NOT_NULL(cpu);
+  ASSERT_NOT_NULL(interp);
+  PolyUOp *producer = poly_alu2(ctx, POLY_OP_ADD, cpu->uop_logical, interp->uop_logical);
+  PolyUOp *multi_src[2] = {cpu->uop_physical, interp->uop_physical};
+  PolyUOp *multi = poly_uop(ctx, POLY_OP_MSTACK, POLY_FLOAT32, multi_src, 2, poly_arg_none());
+  PolyTensor *out =
+      poly_tensor_create_with_roots(ctx, producer, multi, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
+  ASSERT_NOT_NULL(producer);
+  ASSERT_NOT_NULL(multi);
+  ASSERT_NOT_NULL(out);
+
+  ASSERT_INT_EQ(poly_tensor_retire_logical_resources(ctx, &out, 1), 0);
+  ASSERT_INT_EQ(out->logical_state, POLY_LOGICAL_UNSUPPORTED_RESOURCE);
+  ASSERT_PTR_EQ(out->uop_logical, NULL);
+  ASSERT_PTR_EQ(out->uop_physical, multi);
+  PolyTensor *composed = poly_tensor_alu2(ctx, POLY_OP_ADD, out, cpu);
+  ASSERT_NOT_NULL(composed);
+  ASSERT_INT_EQ(composed->logical_state, POLY_LOGICAL_UNSUPPORTED_RESOURCE);
+  ASSERT_PTR_EQ(composed->uop_logical, NULL);
+  ASSERT_INT_EQ(composed->uop_physical->op, POLY_OP_ADD);
+  ASSERT_PTR_EQ(composed->uop_physical->src[0], multi);
+
+  poly_tensor_release(composed);
+  poly_tensor_release(out);
+  poly_tensor_release(interp);
+  poly_tensor_release(cpu);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+static PolyTensor *build_logical_policy_oracle(
+    PolyCtx *ctx,
+    PolyLogicalPolicy policy,
+    float values[4]
+) {
+  int64_t shape[1] = {4};
+  int64_t reshaped[2] = {2, 2};
+  if (poly_ctx_set_logical_policy(ctx, policy) != 0) return NULL;
+  PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+  if (!x || poly_buffer_write(ctx, poly_tensor_uop_physical(x), values, sizeof(float) * 4) != 0)
+    return NULL;
+  PolyTensor *two = x ? poly_tensor_const_like_float(ctx, x, 2.0) : NULL;
+  PolyTensor *sum = two ? poly_tensor_alu2(ctx, POLY_OP_ADD, x, two) : NULL;
+  return sum ? poly_tensor_reshape(ctx, sum, reshaped, 2) : NULL;
+}
+
+TEST(tensor, logical_never_keeps_physical_graph_and_values_exact) {
+  float values[4] = {1, 2, 3, 4};
+  PolyCtx *always_ctx = poly_ctx_new(), *never_ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(always_ctx);
+  ASSERT_NOT_NULL(never_ctx);
+  PolyTensor *always = build_logical_policy_oracle(always_ctx, POLY_LOGICAL_ALWAYS, values);
+  PolyTensor *never = build_logical_policy_oracle(never_ctx, POLY_LOGICAL_NEVER, values);
+  ASSERT_NOT_NULL(always);
+  ASSERT_NOT_NULL(never);
+  ASSERT_NOT_NULL(poly_tensor_uop_logical(always));
+  ASSERT_PTR_EQ(poly_tensor_uop_logical(never), NULL);
+  ASSERT_INT_EQ(poly_tensor_logical_state(never), POLY_LOGICAL_NEVER_CONSTRUCTED);
+  ASSERT_TRUE(uop_graph_isomorphic(
+      always_ctx, poly_tensor_uop_physical(always), never_ctx, poly_tensor_uop_physical(never)
+  ));
+
+  float always_values[4] = {0}, never_values[4] = {0};
+  ASSERT_INT_EQ(read_tensor_f32(always_ctx, always, always_values, 4), 0);
+  ASSERT_INT_EQ(read_tensor_f32(never_ctx, never, never_values, 4), 0);
+  for (int i = 0; i < 4; i++) {
+    ASSERT_FLOAT_EQ(always_values[i], values[i] + 2.0f, 1e-6);
+    ASSERT_FLOAT_EQ(never_values[i], always_values[i], 1e-6);
+  }
+  poly_ctx_destroy(always_ctx);
+  poly_ctx_destroy(never_ctx);
+  PASS();
+}
+
+static int run_logical_never_realized_steps(
+    PolyCtx *ctx,
+    PolyTensor **current,
+    PolyTensor *bias,
+    int steps
+) {
+  if (!ctx || !current || !*current || !bias || steps < 0) return -1;
+  for (int i = 0; i < steps; i++) {
+    PolyTensor *next = poly_tensor_alu2(ctx, POLY_OP_ADD, *current, bias);
+    if (!next) return -1;
+    poly_tensor_release(*current);
+    *current = next;
+    PolyTensor *realized = NULL;
+    if (poly_realize_tensors(ctx, current, 1, &realized) != 0 || realized != *current) return -1;
+  }
+  return 0;
+}
+
+TEST(tensor, logical_never_realized_loop_reclaims_transient_ir_storage) {
+  /* Tinygrad 2026-08-22/a9069c177a9d weak UOps, recursive_property shape
+   * rows, and Buffer refcounts release each unreachable iteration. The C
+   * collector may defer weak IR only within its fixed growth budget. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  ASSERT_INT_EQ(poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_NEVER), 0);
+  poly_ctx_set_preferred_device(ctx, POLY_DEVICE_INTERP);
+  int64_t shape[1] = {4};
+  float values[4] = {1, 2, 3, 4};
+  float bias_values[4] = {.25f, .25f, .25f, .25f};
+  PolyTensor *current = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_INTERP);
+  PolyTensor *bias = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_INTERP);
+  ASSERT_NOT_NULL(current);
+  ASSERT_NOT_NULL(bias);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, current->uop_physical, values, sizeof(values)), 0);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, bias->uop_physical, bias_values, sizeof(bias_values)), 0);
+  ASSERT_INT_EQ(run_logical_never_realized_steps(ctx, &current, bias, 32), 0);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+
+  PolyCtxStats baseline = {0}, deferred = {0}, after = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &baseline), 0);
+  ASSERT_INT_EQ(run_logical_never_realized_steps(ctx, &current, bias, 128), 0);
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &deferred), 0);
+  ASSERT_TRUE(deferred.arena_bytes <= baseline.arena_bytes + POLY_IR_COLLECTION_MIN_GROWTH);
+  ASSERT_INT_EQ(deferred.buffer_entries, baseline.buffer_entries);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &after), 0);
+  ASSERT_INT_EQ(after.arena_bytes, baseline.arena_bytes);
+  ASSERT_INT_EQ(after.cse_entries, baseline.cse_entries);
+  ASSERT_INT_EQ(after.shape_cache_entries, baseline.shape_cache_entries);
+  ASSERT_INT_EQ(after.buffer_entries, baseline.buffer_entries);
+
+  poly_tensor_release(current);
+  poly_tensor_release(bias);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tensor, realization_safe_point_bounds_transient_ir_without_stats) {
+  /* Tinygrad 2026-08-22 weak UOps bound unreachable eager iterations. The C
+   * safe point enforces the same bound without requiring a stats query. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  ASSERT_INT_EQ(poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_NEVER), 0);
+  poly_ctx_set_preferred_device(ctx, POLY_DEVICE_INTERP);
+  int64_t shape[1] = {4};
+  float values[4] = {1, 2, 3, 4};
+  float bias_values[4] = {.25f, .25f, .25f, .25f};
+  PolyTensor *current = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_INTERP);
+  PolyTensor *bias = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_INTERP);
+  ASSERT_NOT_NULL(current);
+  ASSERT_NOT_NULL(bias);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, current->uop_physical, values, sizeof(values)), 0);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, bias->uop_physical, bias_values, sizeof(bias_values)), 0);
+  ASSERT_INT_EQ(run_logical_never_realized_steps(ctx, &current, bias, 32), 0);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  size_t steady_uop_bytes = ctx->uop_storage_bytes;
+
+  for (int i = 0; i < 512; i++) {
+    ASSERT_INT_EQ(run_logical_never_realized_steps(ctx, &current, bias, 1), 0);
+    ASSERT_TRUE(ctx->uop_storage_bytes <= steady_uop_bytes + POLY_IR_COLLECTION_MIN_GROWTH);
+  }
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  ASSERT_INT_EQ(ctx->uop_storage_bytes, steady_uop_bytes);
+
+  poly_tensor_release(current);
+  poly_tensor_release(bias);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+static PolyTensor *build_logical_policy_movement_oracle(
+    PolyCtx *ctx,
+    PolyLogicalPolicy policy,
+    float values[4]
+) {
+  int64_t source_shape[1] = {4};
+  int64_t matrix_shape[2] = {2, 2};
+  int64_t flat_shape[2] = {1, 4};
+  int64_t expanded_shape[2] = {2, 4};
+  int64_t perm[2] = {1, 0};
+  int64_t shrink[2][2] = {{1, 3}, {0, 2}};
+  int64_t flip[1] = {0};
+  int64_t pad[2][2] = {{1, 0}, {0, 1}};
+  if (poly_ctx_set_logical_policy(ctx, policy) != 0) return NULL;
+  PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, source_shape, 1, POLY_DEVICE_CPU);
+  if (!x || poly_buffer_write(ctx, poly_tensor_uop_physical(x), values, sizeof(float) * 4) != 0)
+    return NULL;
+  PolyTensor *matrix = poly_tensor_reshape(ctx, x, matrix_shape, 2);
+  PolyTensor *flat = matrix ? poly_tensor_reshape(ctx, matrix, flat_shape, 2) : NULL;
+  PolyTensor *expanded = flat ? poly_tensor_expand(ctx, flat, expanded_shape, 2) : NULL;
+  PolyTensor *permuted = expanded ? poly_tensor_permute(ctx, expanded, perm, 2) : NULL;
+  PolyTensor *shrunk = permuted ? poly_tensor_shrink(ctx, permuted, shrink, 2) : NULL;
+  PolyTensor *flipped = shrunk ? poly_tensor_flip(ctx, shrunk, flip, 1) : NULL;
+  PolyTensor *padded = flipped ? poly_tensor_pad_value_float(ctx, flipped, pad, 2, 0.0) : NULL;
+  PolyTensor *wide =
+      padded ? poly_tensor_cast_by_id(ctx, padded, poly_dtype_id_by_name("float64")) : NULL;
+  PolyTensor *narrow =
+      wide ? poly_tensor_cast_by_id(ctx, wide, poly_dtype_id_by_name("float32")) : NULL;
+  PolyTensor *bits =
+      narrow ? poly_tensor_bitcast_by_id(ctx, narrow, poly_dtype_id_by_name("uint32")) : NULL;
+  PolyTensor *restored =
+      bits ? poly_tensor_bitcast_by_id(ctx, bits, poly_dtype_id_by_name("float32")) : NULL;
+  PolyTensor *contiguous = restored ? poly_tensor_contiguous(ctx, restored) : NULL;
+  return contiguous ? poly_tensor_to_device(ctx, contiguous, POLY_DEVICE_INTERP) : NULL;
+}
+
+TEST(tensor, logical_never_movement_keeps_physical_graph_and_values_exact) {
+  float values[4] = {1, 2, 3, 4};
+  const float expected[9] = {0, 0, 0, 3, 3, 0, 2, 2, 0};
+  PolyCtx *always_ctx = poly_ctx_new(), *never_ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(always_ctx);
+  ASSERT_NOT_NULL(never_ctx);
+  PolyTensor *always =
+      build_logical_policy_movement_oracle(always_ctx, POLY_LOGICAL_ALWAYS, values);
+  PolyTensor *never = build_logical_policy_movement_oracle(never_ctx, POLY_LOGICAL_NEVER, values);
+  ASSERT_NOT_NULL(always);
+  ASSERT_NOT_NULL(never);
+  ASSERT_NOT_NULL(poly_tensor_uop_logical(always));
+  ASSERT_PTR_EQ(poly_tensor_uop_logical(never), NULL);
+  ASSERT_TRUE(uop_graph_isomorphic(
+      always_ctx, poly_tensor_uop_physical(always), never_ctx, poly_tensor_uop_physical(never)
+  ));
+
+  float always_values[9] = {0}, never_values[9] = {0};
+  ASSERT_INT_EQ(read_tensor_f32(always_ctx, always, always_values, 9), 0);
+  ASSERT_INT_EQ(read_tensor_f32(never_ctx, never, never_values, 9), 0);
+  for (int i = 0; i < 9; i++) {
+    ASSERT_FLOAT_EQ(always_values[i], expected[i], 1e-6);
+    ASSERT_FLOAT_EQ(never_values[i], always_values[i], 1e-6);
+  }
+  poly_ctx_destroy(always_ctx);
+  poly_ctx_destroy(never_ctx);
+  PASS();
+}
+
+static PolyTensor *build_logical_policy_effect_oracle(
+    PolyCtx *ctx,
+    PolyLogicalPolicy policy,
+    float source_values[2],
+    float target_values[2]
+) {
+  int64_t shape[1] = {2};
+  if (poly_ctx_set_logical_policy(ctx, policy) != 0) return NULL;
+  PolyTensor *source = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+  PolyTensor *target = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+  if (!source || !target ||
+      poly_buffer_write(ctx, poly_tensor_uop_physical(source), source_values, sizeof(float) * 2) !=
+          0 ||
+      poly_buffer_write(ctx, poly_tensor_uop_physical(target), target_values, sizeof(float) * 2) !=
+          0)
+    return NULL;
+  PolyTensor *moved_source = poly_tensor_to_device(ctx, source, POLY_DEVICE_INTERP);
+  PolyTensor *moved_target = poly_tensor_to_device(ctx, target, POLY_DEVICE_INTERP);
+  if (!moved_source || !moved_target || !poly_tensor_assign(ctx, moved_target, moved_source))
+    return NULL;
+  PolyTensor *clone_target = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+  return clone_target ? poly_tensor_clone_into(ctx, clone_target, moved_target) : NULL;
+}
+
+TEST(tensor, logical_never_effects_keep_physical_graph_and_values_exact) {
+  float source_values[2] = {5, 6}, target_values[2] = {1, 2};
+  PolyCtx *always_ctx = poly_ctx_new(), *never_ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(always_ctx);
+  ASSERT_NOT_NULL(never_ctx);
+  PolyTensor *always = build_logical_policy_effect_oracle(
+      always_ctx, POLY_LOGICAL_ALWAYS, source_values, target_values
+  );
+  PolyTensor *never = build_logical_policy_effect_oracle(
+      never_ctx, POLY_LOGICAL_NEVER, source_values, target_values
+  );
+  ASSERT_NOT_NULL(always);
+  ASSERT_NOT_NULL(never);
+  ASSERT_NOT_NULL(poly_tensor_uop_logical(always));
+  ASSERT_PTR_EQ(poly_tensor_uop_logical(never), NULL);
+  ASSERT_TRUE(uop_graph_isomorphic(
+      always_ctx, poly_tensor_uop_physical(always), never_ctx, poly_tensor_uop_physical(never)
+  ));
+  float always_values[2] = {0}, never_values[2] = {0};
+  ASSERT_INT_EQ(read_tensor_f32(always_ctx, always, always_values, 2), 0);
+  ASSERT_INT_EQ(read_tensor_f32(never_ctx, never, never_values, 2), 0);
+  for (int i = 0; i < 2; i++) {
+    ASSERT_FLOAT_EQ(always_values[i], source_values[i], 1e-6);
+    ASSERT_FLOAT_EQ(never_values[i], always_values[i], 1e-6);
+  }
+  poly_ctx_destroy(always_ctx);
+  poly_ctx_destroy(never_ctx);
+  PASS();
+}
+
+static PolyTensor *build_logical_policy_view_assign_oracle(
+    PolyCtx *ctx,
+    PolyLogicalPolicy policy,
+    float base_values[4],
+    float update_values[2]
+) {
+  int64_t base_shape[1] = {4}, update_shape[1] = {2};
+  int64_t bounds[1][2] = {{1, 3}};
+  if (poly_ctx_set_logical_policy(ctx, policy) != 0) return NULL;
+  PolyTensor *base = poly_tensor_empty(ctx, POLY_FLOAT32, base_shape, 1, POLY_DEVICE_CPU);
+  PolyTensor *update = poly_tensor_empty(ctx, POLY_FLOAT32, update_shape, 1, POLY_DEVICE_CPU);
+  if (!base || !update ||
+      poly_buffer_write(ctx, poly_tensor_uop_physical(base), base_values, sizeof(float) * 4) != 0 ||
+      poly_buffer_write(ctx, poly_tensor_uop_physical(update), update_values, sizeof(float) * 2) !=
+          0)
+    return NULL;
+  PolyTensor *view = poly_tensor_shrink(ctx, base, bounds, 1);
+  return view && poly_tensor_assign(ctx, view, update) ? base : NULL;
+}
+
+TEST(tensor, logical_never_view_assign_retargets_only_physical_graph) {
+  float base_values[4] = {1, 2, 3, 4}, update_values[2] = {8, 9};
+  const float expected[4] = {1, 8, 9, 4};
+  PolyCtx *always_ctx = poly_ctx_new(), *never_ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(always_ctx);
+  ASSERT_NOT_NULL(never_ctx);
+  PolyTensor *always = build_logical_policy_view_assign_oracle(
+      always_ctx, POLY_LOGICAL_ALWAYS, base_values, update_values
+  );
+  PolyTensor *never = build_logical_policy_view_assign_oracle(
+      never_ctx, POLY_LOGICAL_NEVER, base_values, update_values
+  );
+  ASSERT_NOT_NULL(always);
+  ASSERT_NOT_NULL(never);
+  ASSERT_PTR_EQ(poly_tensor_uop_logical(never), NULL);
+  ASSERT_TRUE(uop_graph_isomorphic(
+      always_ctx, poly_tensor_uop_physical(always), never_ctx, poly_tensor_uop_physical(never)
+  ));
+  float always_values[4] = {0}, never_values[4] = {0};
+  ASSERT_INT_EQ(read_tensor_f32(always_ctx, always, always_values, 4), 0);
+  ASSERT_INT_EQ(read_tensor_f32(never_ctx, never, never_values, 4), 0);
+  for (int i = 0; i < 4; i++) {
+    ASSERT_FLOAT_EQ(always_values[i], expected[i], 1e-6);
+    ASSERT_FLOAT_EQ(never_values[i], always_values[i], 1e-6);
+  }
+  poly_ctx_destroy(always_ctx);
+  poly_ctx_destroy(never_ctx);
+  PASS();
+}
+
+static PolyTensor *build_logical_policy_reduction_oracle(
+    PolyCtx *ctx,
+    PolyLogicalPolicy policy,
+    float values[4],
+    float weights[2]
+) {
+  int64_t flat_matrix_shape[1] = {4}, flat_weight_shape[1] = {2};
+  int64_t matrix_shape[2] = {2, 2}, weight_shape[2] = {1, 2}, axis[1] = {1};
+  if (poly_ctx_set_logical_policy(ctx, policy) != 0) return NULL;
+  PolyTensor *x_flat = poly_tensor_empty(ctx, POLY_FLOAT32, flat_matrix_shape, 1, POLY_DEVICE_CPU);
+  PolyTensor *w_flat = poly_tensor_empty(ctx, POLY_FLOAT32, flat_weight_shape, 1, POLY_DEVICE_CPU);
+  if (!x_flat || !w_flat ||
+      poly_buffer_write(ctx, poly_tensor_uop_physical(x_flat), values, sizeof(float) * 4) != 0 ||
+      poly_buffer_write(ctx, poly_tensor_uop_physical(w_flat), weights, sizeof(float) * 2) != 0)
+    return NULL;
+  PolyTensor *x = poly_tensor_reshape(ctx, x_flat, matrix_shape, 2);
+  PolyTensor *w = poly_tensor_reshape(ctx, w_flat, weight_shape, 2);
+  if (!x || !w) return NULL;
+
+  PolyTensor *u = poly_tensor_exp(ctx, x);
+  u = u ? poly_tensor_log(ctx, u) : NULL;
+  u = u ? poly_tensor_cos(ctx, u) : NULL;
+  u = u ? poly_tensor_tan(ctx, u) : NULL;
+  u = u ? poly_tensor_log1p(ctx, u) : NULL;
+  u = u ? poly_tensor_expm1(ctx, u) : NULL;
+  u = u ? poly_tensor_gelu(ctx, u) : NULL;
+  u = u ? poly_tensor_relu(ctx, u) : NULL;
+  u = u ? poly_tensor_sigmoid(ctx, u) : NULL;
+  u = u ? poly_tensor_tanh(ctx, u) : NULL;
+  u = u ? poly_tensor_silu(ctx, u) : NULL;
+  u = u ? poly_tensor_quick_gelu(ctx, u) : NULL;
+  PolyTensor *sum = u ? poly_tensor_sum(ctx, u, axis, 1, true) : NULL;
+  PolyTensor *max = u ? poly_tensor_max(ctx, u, axis, 1, true) : NULL;
+  PolyTensor *minimum = sum && max ? poly_tensor_minimum(ctx, sum, max) : NULL;
+  PolyTensor *dot = minimum ? poly_tensor_dot(ctx, minimum, w) : NULL;
+  PolyTensor *softmax = dot ? poly_tensor_softmax(ctx, dot, 1) : NULL;
+  PolyTensor *log_softmax = softmax ? poly_tensor_log_softmax(ctx, softmax, 1) : NULL;
+  return log_softmax ? poly_tensor_detach(ctx, log_softmax) : NULL;
+}
+
+TEST(tensor, logical_never_reductions_keep_physical_graph_and_values_exact) {
+  float values[4] = {0.1f, 0.2f, 0.3f, 0.4f}, weights[2] = {1.0f, 2.0f};
+  PolyCtx *always_ctx = poly_ctx_new(), *never_ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(always_ctx);
+  ASSERT_NOT_NULL(never_ctx);
+  PolyTensor *always =
+      build_logical_policy_reduction_oracle(always_ctx, POLY_LOGICAL_ALWAYS, values, weights);
+  PolyTensor *never =
+      build_logical_policy_reduction_oracle(never_ctx, POLY_LOGICAL_NEVER, values, weights);
+  ASSERT_NOT_NULL(always);
+  ASSERT_NOT_NULL(never);
+  ASSERT_PTR_EQ(poly_tensor_uop_logical(never), NULL);
+  ASSERT_TRUE(uop_graph_isomorphic(
+      always_ctx, poly_tensor_uop_physical(always), never_ctx, poly_tensor_uop_physical(never)
+  ));
+  float always_values[4] = {0}, never_values[4] = {0};
+  ASSERT_INT_EQ(read_tensor_f32(always_ctx, always, always_values, 4), 0);
+  ASSERT_INT_EQ(read_tensor_f32(never_ctx, never, never_values, 4), 0);
+  for (int i = 0; i < 4; i++) {
+    ASSERT_TRUE(isfinite(always_values[i]));
+    ASSERT_FLOAT_EQ(never_values[i], always_values[i], 1e-6);
+  }
+  poly_ctx_destroy(always_ctx);
+  poly_ctx_destroy(never_ctx);
+  PASS();
+}
+
+static PolyTensor *build_logical_policy_custom_kernel_oracle(
+    PolyCtx *ctx,
+    PolyLogicalPolicy policy,
+    float a_values[4],
+    float b_values[4]
+) {
+  int64_t shape[1] = {4};
+  if (poly_ctx_set_logical_policy(ctx, policy) != 0) return NULL;
+  PolyTensor *c = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+  PolyTensor *a = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+  PolyTensor *b = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+  if (!c || !a || !b ||
+      poly_buffer_write(ctx, poly_tensor_uop_physical(a), a_values, sizeof(float) * 4) != 0 ||
+      poly_buffer_write(ctx, poly_tensor_uop_physical(b), b_values, sizeof(float) * 4) != 0)
+    return NULL;
+  PolyUOp *pc = poly_uop_placeholder_like(ctx, c->uop_physical, 0);
+  PolyUOp *pa = poly_uop_placeholder_like(ctx, a->uop_physical, 1);
+  PolyUOp *pb = poly_uop_placeholder_like(ctx, b->uop_physical, 2);
+  PolyUOp *r = poly_uop_range(ctx, 4, 0, POLY_AXIS_LOOP);
+  PolyUOp *idxs[1] = {r};
+  PolyUOp *ci = poly_uop_index(ctx, pc, idxs, 1);
+  PolyUOp *ai = poly_uop_index(ctx, pa, idxs, 1);
+  PolyUOp *bi = poly_uop_index(ctx, pb, idxs, 1);
+  PolyUOp *sum = poly_alu2(ctx, POLY_OP_ADD, poly_uop_load(ctx, ai), poly_uop_load(ctx, bi));
+  PolyUOp *store = poly_uop_store(ctx, ci, sum);
+  PolyUOp *end = poly_uop_end(ctx, store, &r, 1);
+  PolyUOp *body = poly_uop_sink_ex(ctx, &end, 1, "logical_policy_custom_add", 1);
+  PolyTensor *inputs[3] = {c, a, b}, *outputs[3] = {0};
+  return body && poly_tensor_custom_kernel(ctx, body, inputs, 3, 0, outputs) == 0 ? outputs[0]
+                                                                                  : NULL;
+}
+
+TEST(tensor, logical_never_custom_kernel_keeps_physical_graph_and_values_exact) {
+  float a_values[4] = {1, 2, 3, 4}, b_values[4] = {5, 6, 7, 8};
+  const float expected[4] = {6, 8, 10, 12};
+  PolyCtx *always_ctx = poly_ctx_new(), *never_ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(always_ctx);
+  ASSERT_NOT_NULL(never_ctx);
+  PolyTensor *always = build_logical_policy_custom_kernel_oracle(
+      always_ctx, POLY_LOGICAL_ALWAYS, a_values, b_values
+  );
+  PolyTensor *never =
+      build_logical_policy_custom_kernel_oracle(never_ctx, POLY_LOGICAL_NEVER, a_values, b_values);
+  ASSERT_NOT_NULL(always);
+  ASSERT_NOT_NULL(never);
+  ASSERT_PTR_EQ(poly_tensor_uop_logical(never), NULL);
+  ASSERT_TRUE(uop_graph_isomorphic(
+      always_ctx, poly_tensor_uop_physical(always), never_ctx, poly_tensor_uop_physical(never)
+  ));
+  float always_values[4] = {0}, never_values[4] = {0};
+  ASSERT_INT_EQ(read_tensor_f32(always_ctx, always, always_values, 4), 0);
+  ASSERT_INT_EQ(read_tensor_f32(never_ctx, never, never_values, 4), 0);
+  for (int i = 0; i < 4; i++) {
+    ASSERT_FLOAT_EQ(always_values[i], expected[i], 1e-6);
+    ASSERT_FLOAT_EQ(never_values[i], always_values[i], 1e-6);
+  }
+  poly_ctx_destroy(always_ctx);
+  poly_ctx_destroy(never_ctx);
+  PASS();
+}
+
+static PolyTensor *build_logical_policy_function_oracle(
+    PolyCtx *ctx,
+    PolyLogicalPolicy policy,
+    float a_values[2],
+    float b_values[2]
+) {
+  int64_t shape[1] = {2};
+  if (poly_ctx_set_logical_policy(ctx, policy) != 0) return NULL;
+  PolyTensor *a = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+  PolyTensor *b = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+  if (!a || !b ||
+      poly_buffer_write(ctx, poly_tensor_uop_physical(a), a_values, sizeof(float) * 2) != 0 ||
+      poly_buffer_write(ctx, poly_tensor_uop_physical(b), b_values, sizeof(float) * 2) != 0)
+    return NULL;
+  PolyTensor *sum = poly_tensor_alu2(ctx, POLY_OP_ADD, a, b);
+  if (!sum) return NULL;
+  PolyTensor *results[1] = {sum}, *outputs[1] = {NULL};
+  PolyUOp *logical_inputs[2] = {a->uop_logical, b->uop_logical};
+  PolyUOp *physical_inputs[2] = {a->uop_physical, b->uop_physical};
+  PolyUOp **logical = policy == POLY_LOGICAL_NEVER ? NULL : logical_inputs;
+  return poly_tensor_function(
+             ctx, results, 1, logical, physical_inputs, 2, "logical_policy_add", false, false,
+             false, outputs
+         ) == 0
+             ? outputs[0]
+             : NULL;
+}
+
+TEST(tensor, logical_never_function_keeps_physical_graph_and_values_exact) {
+  float a_values[2] = {1, 2}, b_values[2] = {3, 4};
+  PolyCtx *always_ctx = poly_ctx_new(), *never_ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(always_ctx);
+  ASSERT_NOT_NULL(never_ctx);
+  PolyTensor *always =
+      build_logical_policy_function_oracle(always_ctx, POLY_LOGICAL_ALWAYS, a_values, b_values);
+  PolyTensor *never =
+      build_logical_policy_function_oracle(never_ctx, POLY_LOGICAL_NEVER, a_values, b_values);
+  ASSERT_NOT_NULL(always);
+  ASSERT_NOT_NULL(never);
+  ASSERT_PTR_EQ(poly_tensor_uop_logical(never), NULL);
+  ASSERT_TRUE(uop_graph_isomorphic(
+      always_ctx, poly_tensor_uop_physical(always), never_ctx, poly_tensor_uop_physical(never)
+  ));
+  float always_values[2] = {0}, never_values[2] = {0};
+  ASSERT_INT_EQ(read_tensor_f32(always_ctx, always, always_values, 2), 0);
+  ASSERT_INT_EQ(read_tensor_f32(never_ctx, never, never_values, 2), 0);
+  ASSERT_FLOAT_EQ(always_values[0], 4.0f, 1e-6);
+  ASSERT_FLOAT_EQ(always_values[1], 6.0f, 1e-6);
+  ASSERT_FLOAT_EQ(never_values[0], always_values[0], 1e-6);
+  ASSERT_FLOAT_EQ(never_values[1], always_values[1], 1e-6);
+  poly_ctx_destroy(always_ctx);
+  poly_ctx_destroy(never_ctx);
+  PASS();
+}
+
+static PolyTensor *build_logical_policy_rng_oracle(PolyCtx *ctx, PolyLogicalPolicy policy) {
+  int64_t shape[1] = {4};
+  int f32 = poly_dtype_id_by_name("float32");
+  if (poly_ctx_set_logical_policy(ctx, policy) != 0 || f32 < 0) return NULL;
+  poly_tensor_manual_seed(ctx, 123);
+  PolyTensor *first = poly_tensor_rand_by_id(ctx, shape, 1, f32, POLY_DEVICE_CPU, 1);
+  PolyTensor *second = poly_tensor_rand_by_id(ctx, shape, 1, f32, POLY_DEVICE_CPU, 1);
+  return first && second ? poly_tensor_alu2(ctx, POLY_OP_ADD, first, second) : NULL;
+}
+
+TEST(tensor, logical_never_rng_keeps_physical_graph_state_and_values_exact) {
+  PolyCtx *always_ctx = poly_ctx_new(), *never_ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(always_ctx);
+  ASSERT_NOT_NULL(never_ctx);
+  PolyTensor *always = build_logical_policy_rng_oracle(always_ctx, POLY_LOGICAL_ALWAYS);
+  PolyTensor *never = build_logical_policy_rng_oracle(never_ctx, POLY_LOGICAL_NEVER);
+  ASSERT_NOT_NULL(always);
+  ASSERT_NOT_NULL(never);
+  ASSERT_PTR_EQ(poly_tensor_uop_logical(never), NULL);
+  ASSERT_TRUE(uop_graph_isomorphic(
+      always_ctx, poly_tensor_uop_physical(always), never_ctx, poly_tensor_uop_physical(never)
+  ));
+  float always_values[4] = {0}, never_values[4] = {0};
+  ASSERT_INT_EQ(read_tensor_f32(always_ctx, always, always_values, 4), 0);
+  ASSERT_INT_EQ(read_tensor_f32(never_ctx, never, never_values, 4), 0);
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(never_values[i], always_values[i], 1e-6);
+  poly_ctx_destroy(always_ctx);
+  poly_ctx_destroy(never_ctx);
+  PASS();
+}
+
+TEST(tensor, logical_until_realize_retires_effect_custom_function_and_rng_outputs) {
+  float source_values[2] = {5, 6}, target_values[2] = {1, 2};
+  float a4[4] = {1, 2, 3, 4}, b4[4] = {5, 6, 7, 8};
+  float a2[2] = {1, 2}, b2[2] = {3, 4};
+  PolyCtx *contexts[4] = {poly_ctx_new(), poly_ctx_new(), poly_ctx_new(), poly_ctx_new()};
+  for (int i = 0; i < 4; i++)
+    ASSERT_NOT_NULL(contexts[i]);
+  PolyTensor *outputs[4] = {
+      build_logical_policy_effect_oracle(
+          contexts[0], POLY_LOGICAL_UNTIL_REALIZE, source_values, target_values
+      ),
+      build_logical_policy_custom_kernel_oracle(contexts[1], POLY_LOGICAL_UNTIL_REALIZE, a4, b4),
+      build_logical_policy_function_oracle(contexts[2], POLY_LOGICAL_UNTIL_REALIZE, a2, b2),
+      build_logical_policy_rng_oracle(contexts[3], POLY_LOGICAL_UNTIL_REALIZE),
+  };
+
+  for (int i = 0; i < 4; i++) {
+    ASSERT_NOT_NULL(outputs[i]);
+    PolyUOp *producer = outputs[i]->uop_logical;
+    ASSERT_NOT_NULL(producer);
+    PolyTensor *realized = NULL;
+    ASSERT_INT_EQ(poly_realize_tensors(contexts[i], &outputs[i], 1, &realized), 0);
+    ASSERT_PTR_EQ(realized, outputs[i]);
+    ASSERT_INT_EQ(outputs[i]->logical_state, POLY_LOGICAL_RETIRED);
+    ASSERT_PTR_NEQ(outputs[i]->uop_logical, producer);
+    ASSERT_FALSE(poly_uop_reachable(contexts[i], outputs[i]->uop_logical, producer));
+    ASSERT_NOT_NULL(poly_uop_get_buffer_identity(outputs[i]->uop_physical));
+  }
+
+  for (int i = 0; i < 4; i++)
+    poly_ctx_destroy(contexts[i]);
+  PASS();
+}
+
+static PolyTensor *logical_policy_tensor_from_f32(
+    PolyCtx *ctx,
+    const float *values,
+    int64_t numel,
+    int64_t *shape,
+    int ndim
+) {
+  int64_t flat_shape[1] = {numel};
+  PolyTensor *flat = poly_tensor_empty(ctx, POLY_FLOAT32, flat_shape, 1, POLY_DEVICE_CPU);
+  if (!flat || poly_buffer_write(
+                   ctx, poly_tensor_uop_physical(flat), values, (size_t)numel * sizeof(float)
+               ) != 0)
+    return NULL;
+  return ndim == 1 && shape[0] == numel ? flat : poly_tensor_reshape(ctx, flat, shape, ndim);
+}
+
+static PolyTensor *build_logical_policy_nn_oracle(PolyCtx *ctx, PolyLogicalPolicy policy) {
+  float x_values[4] = {1, 2, 3, 4}, weight_values[4] = {1, 0, 0, 1};
+  float bias_values[2] = {0.5f, -0.5f}, scale_values[2] = {1.25f, 0.75f};
+  int64_t matrix_shape[2] = {2, 2}, vector_shape[1] = {2};
+  if (poly_ctx_set_logical_policy(ctx, policy) != 0) return NULL;
+  PolyTensor *x = logical_policy_tensor_from_f32(ctx, x_values, 4, matrix_shape, 2);
+  PolyTensor *weight = logical_policy_tensor_from_f32(ctx, weight_values, 4, matrix_shape, 2);
+  PolyTensor *bias = logical_policy_tensor_from_f32(ctx, bias_values, 2, vector_shape, 1);
+  PolyTensor *scale = logical_policy_tensor_from_f32(ctx, scale_values, 2, vector_shape, 1);
+  PolyTensor *linear = x && weight && bias ? poly_tensor_linear_apply(ctx, x, weight, bias) : NULL;
+  PolyTensor *layernorm = linear && scale && bias
+                              ? poly_tensor_layernorm_apply(ctx, linear, scale, bias, -1, 1e-5)
+                              : NULL;
+  return layernorm && scale ? poly_tensor_rmsnorm_apply(ctx, layernorm, scale, 1e-5) : NULL;
+}
+
+TEST(tensor, logical_never_nn_layers_keep_physical_graph_and_values_exact) {
+  PolyCtx *always_ctx = poly_ctx_new(), *never_ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(always_ctx);
+  ASSERT_NOT_NULL(never_ctx);
+  PolyTensor *always = build_logical_policy_nn_oracle(always_ctx, POLY_LOGICAL_ALWAYS);
+  PolyTensor *never = build_logical_policy_nn_oracle(never_ctx, POLY_LOGICAL_NEVER);
+  ASSERT_NOT_NULL(always);
+  ASSERT_NOT_NULL(never);
+  ASSERT_PTR_EQ(poly_tensor_uop_logical(never), NULL);
+  ASSERT_TRUE(uop_graph_isomorphic(
+      always_ctx, poly_tensor_uop_physical(always), never_ctx, poly_tensor_uop_physical(never)
+  ));
+  float always_values[4] = {0}, never_values[4] = {0};
+  ASSERT_INT_EQ(read_tensor_f32(always_ctx, always, always_values, 4), 0);
+  ASSERT_INT_EQ(read_tensor_f32(never_ctx, never, never_values, 4), 0);
+  for (int i = 0; i < 4; i++) {
+    ASSERT_TRUE(isfinite(always_values[i]));
+    ASSERT_FLOAT_EQ(never_values[i], always_values[i], 1e-5);
+  }
+  poly_ctx_destroy(always_ctx);
+  poly_ctx_destroy(never_ctx);
+  PASS();
+}
+
+static PolyTensor *build_logical_policy_conv_oracle(PolyCtx *ctx, PolyLogicalPolicy policy) {
+  float x_values[9] = {1, 2, 3, 4, 5, 6, 7, 8, 9};
+  float weight_values[4] = {1, 1, 1, 1};
+  float zero[1] = {0}, one[1] = {1};
+  int64_t x_shape[4] = {1, 1, 3, 3}, weight_shape[4] = {1, 1, 2, 2};
+  int64_t channel_shape[1] = {1}, channel_axis[1] = {1}, pool_kernel[2] = {2, 2};
+  if (poly_ctx_set_logical_policy(ctx, policy) != 0) return NULL;
+  PolyTensor *x = logical_policy_tensor_from_f32(ctx, x_values, 9, x_shape, 4);
+  PolyTensor *weight = logical_policy_tensor_from_f32(ctx, weight_values, 4, weight_shape, 4);
+  PolyTensor *bias = logical_policy_tensor_from_f32(ctx, zero, 1, channel_shape, 1);
+  PolyTensor *mean = logical_policy_tensor_from_f32(ctx, zero, 1, channel_shape, 1);
+  PolyTensor *invstd = logical_policy_tensor_from_f32(ctx, one, 1, channel_shape, 1);
+  PolyTensor *scale = logical_policy_tensor_from_f32(ctx, one, 1, channel_shape, 1);
+  PolyTensor *conv =
+      x && weight && bias ? poly_tensor_conv2d(ctx, x, weight, bias, 1, NULL, NULL, NULL, 0) : NULL;
+  PolyTensor *bn =
+      conv && mean && invstd && scale && bias
+          ? poly_tensor_batchnorm(ctx, conv, scale, bias, mean, invstd, channel_axis, 1)
+          : NULL;
+  return bn ? poly_tensor_max_pool2d(ctx, bn, pool_kernel, 2, NULL, NULL, NULL, 0) : NULL;
+}
+
+TEST(tensor, logical_never_conv_batchnorm_pool_keep_physical_graph_and_values_exact) {
+  PolyCtx *always_ctx = poly_ctx_new(), *never_ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(always_ctx);
+  ASSERT_NOT_NULL(never_ctx);
+  PolyTensor *always = build_logical_policy_conv_oracle(always_ctx, POLY_LOGICAL_ALWAYS);
+  PolyTensor *never = build_logical_policy_conv_oracle(never_ctx, POLY_LOGICAL_NEVER);
+  ASSERT_NOT_NULL(always);
+  ASSERT_NOT_NULL(never);
+  ASSERT_PTR_EQ(poly_tensor_uop_logical(never), NULL);
+  ASSERT_TRUE(uop_graph_isomorphic(
+      always_ctx, poly_tensor_uop_physical(always), never_ctx, poly_tensor_uop_physical(never)
+  ));
+  float always_value[1] = {0}, never_value[1] = {0};
+  ASSERT_INT_EQ(read_tensor_f32(always_ctx, always, always_value, 1), 0);
+  ASSERT_INT_EQ(read_tensor_f32(never_ctx, never, never_value, 1), 0);
+  ASSERT_FLOAT_EQ(always_value[0], 28.0f, 1e-5);
+  ASSERT_FLOAT_EQ(never_value[0], always_value[0], 1e-5);
+  poly_ctx_destroy(always_ctx);
+  poly_ctx_destroy(never_ctx);
+  PASS();
+}
+
+static PolyTensor *build_logical_policy_grad_oracle(PolyCtx *ctx, PolyLogicalPolicy policy) {
+  float values[2] = {1, 2};
+  int64_t shape[1] = {2}, axis[1] = {0};
+  if (poly_ctx_set_logical_policy(ctx, policy) != 0) return NULL;
+  PolyTensor *x = logical_policy_tensor_from_f32(ctx, values, 2, shape, 1);
+  PolyTensor *square = x ? poly_tensor_alu2(ctx, POLY_OP_MUL, x, x) : NULL;
+  PolyTensor *loss = square ? poly_tensor_sum(ctx, square, axis, 1, false) : NULL;
+  if (!x || !loss) return NULL;
+  PolyUOp *physical = poly_grad(ctx, loss->uop_physical, x->uop_physical);
+  PolyUOp *logical =
+      policy == POLY_LOGICAL_NEVER ? NULL : poly_grad(ctx, loss->uop_logical, x->uop_logical);
+  return physical ? poly_tensor_create_with_roots(
+                        ctx, logical, physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
+                    )
+                  : NULL;
+}
+
+TEST(tensor, logical_never_autograd_keeps_physical_graph_and_values_exact) {
+  PolyCtx *always_ctx = poly_ctx_new(), *never_ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(always_ctx);
+  ASSERT_NOT_NULL(never_ctx);
+  PolyTensor *always = build_logical_policy_grad_oracle(always_ctx, POLY_LOGICAL_ALWAYS);
+  PolyTensor *never = build_logical_policy_grad_oracle(never_ctx, POLY_LOGICAL_NEVER);
+  ASSERT_NOT_NULL(always);
+  ASSERT_NOT_NULL(never);
+  ASSERT_PTR_EQ(poly_tensor_uop_logical(never), NULL);
+  ASSERT_TRUE(uop_graph_isomorphic(
+      always_ctx, poly_tensor_uop_physical(always), never_ctx, poly_tensor_uop_physical(never)
+  ));
+  float always_values[2] = {0}, never_values[2] = {0};
+  ASSERT_INT_EQ(read_tensor_f32(always_ctx, always, always_values, 2), 0);
+  ASSERT_INT_EQ(read_tensor_f32(never_ctx, never, never_values, 2), 0);
+  ASSERT_FLOAT_EQ(always_values[0], 2.0f, 1e-6);
+  ASSERT_FLOAT_EQ(always_values[1], 4.0f, 1e-6);
+  ASSERT_FLOAT_EQ(never_values[0], always_values[0], 1e-6);
+  ASSERT_FLOAT_EQ(never_values[1], always_values[1], 1e-6);
+  poly_ctx_destroy(always_ctx);
+  poly_ctx_destroy(never_ctx);
+  PASS();
+}
+
+static PolyTensor *build_logical_policy_optimizer_oracle(PolyCtx *ctx, PolyLogicalPolicy policy) {
+  float param_values[2] = {1, 2}, grad_values[2] = {2, 4}, lr_value[1] = {0.1f};
+  int64_t vector_shape[1] = {2}, scalar_shape[1] = {1};
+  if (poly_ctx_set_logical_policy(ctx, policy) != 0) return NULL;
+  PolyTensor *param = logical_policy_tensor_from_f32(ctx, param_values, 2, vector_shape, 1);
+  PolyTensor *grad = logical_policy_tensor_from_f32(ctx, grad_values, 2, vector_shape, 1);
+  PolyTensor *lr = logical_policy_tensor_from_f32(ctx, lr_value, 1, scalar_shape, 1);
+  PolyOptimConfig cfg = {
+      .kind = POLY_OPTIM_SGD,
+      .weight_decay = 0.0f,
+      .momentum = 0.0f,
+      .nesterov = false,
+      .classic = false,
+  };
+  PolyTensor *outputs[1] = {NULL};
+  if (!param || !grad || !lr ||
+      poly_optim_build_step(ctx, &cfg, lr, &param, &grad, 1, NULL, NULL, NULL, NULL, outputs, 1) !=
+          1)
+    return NULL;
+  return outputs[0];
+}
+
+TEST(tensor, logical_never_optimizer_keeps_physical_graph_and_values_exact) {
+  PolyCtx *always_ctx = poly_ctx_new(), *never_ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(always_ctx);
+  ASSERT_NOT_NULL(never_ctx);
+  PolyTensor *always = build_logical_policy_optimizer_oracle(always_ctx, POLY_LOGICAL_ALWAYS);
+  PolyTensor *never = build_logical_policy_optimizer_oracle(never_ctx, POLY_LOGICAL_NEVER);
+  ASSERT_NOT_NULL(always);
+  ASSERT_NOT_NULL(never);
+  ASSERT_PTR_EQ(poly_tensor_uop_logical(never), NULL);
+  ASSERT_TRUE(uop_graph_isomorphic(
+      always_ctx, poly_tensor_uop_physical(always), never_ctx, poly_tensor_uop_physical(never)
+  ));
+  float always_values[2] = {0}, never_values[2] = {0};
+  ASSERT_INT_EQ(read_tensor_f32(always_ctx, always, always_values, 2), 0);
+  ASSERT_INT_EQ(read_tensor_f32(never_ctx, never, never_values, 2), 0);
+  ASSERT_FLOAT_EQ(always_values[0], 0.8f, 1e-6);
+  ASSERT_FLOAT_EQ(always_values[1], 1.6f, 1e-6);
+  ASSERT_FLOAT_EQ(never_values[0], always_values[0], 1e-6);
+  ASSERT_FLOAT_EQ(never_values[1], always_values[1], 1e-6);
+  poly_ctx_destroy(always_ctx);
+  poly_ctx_destroy(never_ctx);
+  PASS();
+}
+
+TEST(tensor, optimizer_mixed_logical_policies_update_each_physical_target) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  float p0_values[2] = {1, 2}, p1_values[2] = {3, 4};
+  float g0_values[2] = {2, 4}, g1_values[2] = {6, 8}, lr_value[1] = {0.1f};
+  int64_t vector_shape[1] = {2}, scalar_shape[1] = {1};
+
+  ASSERT_INT_EQ(poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_ALWAYS), 0);
+  PolyTensor *p0 = logical_policy_tensor_from_f32(ctx, p0_values, 2, vector_shape, 1);
+  PolyTensor *g0 = logical_policy_tensor_from_f32(ctx, g0_values, 2, vector_shape, 1);
+  PolyTensor *lr = logical_policy_tensor_from_f32(ctx, lr_value, 1, scalar_shape, 1);
+  ASSERT_INT_EQ(poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_NEVER), 0);
+  PolyTensor *p1 = logical_policy_tensor_from_f32(ctx, p1_values, 2, vector_shape, 1);
+  PolyTensor *g1 = logical_policy_tensor_from_f32(ctx, g1_values, 2, vector_shape, 1);
+  ASSERT_NOT_NULL(p0);
+  ASSERT_NOT_NULL(g0);
+  ASSERT_NOT_NULL(lr);
+  ASSERT_NOT_NULL(p1);
+  ASSERT_NOT_NULL(g1);
+
+  PolyOptimConfig cfg = {
+      .kind = POLY_OPTIM_SGD,
+      .weight_decay = 0.0f,
+      .momentum = 0.0f,
+      .nesterov = false,
+      .classic = false,
+  };
+  PolyTensor *params[2] = {p0, p1}, *grads[2] = {g0, g1}, *outputs[2] = {NULL, NULL};
+  ASSERT_INT_EQ(
+      poly_optim_build_step(ctx, &cfg, lr, params, grads, 2, NULL, NULL, NULL, NULL, outputs, 2), 2
+  );
+  ASSERT_PTR_EQ(outputs[0], p0);
+  ASSERT_PTR_EQ(outputs[1], p1);
+  ASSERT_NOT_NULL(p0->uop_logical);
+  ASSERT_INT_EQ(p0->uop_logical->op, POLY_OP_AFTER);
+  ASSERT_PTR_EQ(p1->uop_logical, NULL);
+  ASSERT_INT_EQ(p1->logical_state, POLY_LOGICAL_NEVER_CONSTRUCTED);
+  ASSERT_INT_EQ(p0->uop_physical->op, POLY_OP_AFTER);
+  ASSERT_INT_EQ(p1->uop_physical->op, POLY_OP_AFTER);
+
+  float p0_got[2] = {0}, p1_got[2] = {0};
+  ASSERT_INT_EQ(read_tensor_f32(ctx, p0, p0_got, 2), 0);
+  ASSERT_INT_EQ(read_tensor_f32(ctx, p1, p1_got, 2), 0);
+  ASSERT_FLOAT_EQ(p0_got[0], 0.8f, 1e-6f);
+  ASSERT_FLOAT_EQ(p0_got[1], 1.6f, 1e-6f);
+  ASSERT_FLOAT_EQ(p1_got[0], 2.4f, 1e-6f);
+  ASSERT_FLOAT_EQ(p1_got[1], 3.2f, 1e-6f);
+
+  poly_tensor_release(g1);
+  poly_tensor_release(p1);
+  poly_tensor_release(lr);
+  poly_tensor_release(g0);
+  poly_tensor_release(p0);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tensor, adam_mixed_logical_policies_do_not_depend_on_first_parameter) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  float p0_value[1] = {1}, p1_value[1] = {3};
+  float g0_value[1] = {2}, g1_value[1] = {6};
+  float zero[1] = {0}, one[1] = {1}, lr_value[1] = {0.1f};
+  int64_t shape[1] = {1};
+
+  ASSERT_INT_EQ(poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_ALWAYS), 0);
+  PolyTensor *lr = logical_policy_tensor_from_f32(ctx, lr_value, 1, shape, 1);
+  PolyTensor *bc1 = logical_policy_tensor_from_f32(ctx, one, 1, shape, 1);
+  PolyTensor *bc2 = logical_policy_tensor_from_f32(ctx, one, 1, shape, 1);
+  PolyTensor *p1 = logical_policy_tensor_from_f32(ctx, p1_value, 1, shape, 1);
+  PolyTensor *g1 = logical_policy_tensor_from_f32(ctx, g1_value, 1, shape, 1);
+  PolyTensor *m1 = logical_policy_tensor_from_f32(ctx, zero, 1, shape, 1);
+  PolyTensor *v1 = logical_policy_tensor_from_f32(ctx, zero, 1, shape, 1);
+  ASSERT_INT_EQ(poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_NEVER), 0);
+  PolyTensor *p0 = logical_policy_tensor_from_f32(ctx, p0_value, 1, shape, 1);
+  PolyTensor *g0 = logical_policy_tensor_from_f32(ctx, g0_value, 1, shape, 1);
+  PolyTensor *m0 = logical_policy_tensor_from_f32(ctx, zero, 1, shape, 1);
+  PolyTensor *v0 = logical_policy_tensor_from_f32(ctx, zero, 1, shape, 1);
+  ASSERT_NOT_NULL(lr);
+  ASSERT_NOT_NULL(bc1);
+  ASSERT_NOT_NULL(bc2);
+  ASSERT_NOT_NULL(p0);
+  ASSERT_NOT_NULL(g0);
+  ASSERT_NOT_NULL(m0);
+  ASSERT_NOT_NULL(v0);
+  ASSERT_NOT_NULL(p1);
+  ASSERT_NOT_NULL(g1);
+  ASSERT_NOT_NULL(m1);
+  ASSERT_NOT_NULL(v1);
+
+  PolyOptimConfig cfg = {
+      .kind = POLY_OPTIM_ADAM,
+      .beta1 = 0.9,
+      .beta2 = 0.999,
+      .eps = 1e-8,
+      .weight_decay = 0.0,
+  };
+  PolyTensor *params[2] = {p0, p1}, *grads[2] = {g0, g1};
+  PolyTensor *m[2] = {m0, m1}, *v[2] = {v0, v1}, *outputs[8] = {0};
+  ASSERT_INT_EQ(
+      poly_optim_build_step(ctx, &cfg, lr, params, grads, 2, m, v, bc1, bc2, outputs, 8), 8
+  );
+  ASSERT_PTR_EQ(outputs[0], bc1);
+  ASSERT_PTR_EQ(outputs[1], bc2);
+  ASSERT_PTR_EQ(outputs[6], p0);
+  ASSERT_PTR_EQ(outputs[7], p1);
+  ASSERT_PTR_EQ(p0->uop_logical, NULL);
+  ASSERT_PTR_EQ(m0->uop_logical, NULL);
+  ASSERT_PTR_EQ(v0->uop_logical, NULL);
+  ASSERT_INT_EQ(p0->uop_physical->op, POLY_OP_AFTER);
+  ASSERT_NOT_NULL(p1->uop_logical);
+  ASSERT_NOT_NULL(m1->uop_logical);
+  ASSERT_NOT_NULL(v1->uop_logical);
+  ASSERT_INT_EQ(p1->uop_logical->op, POLY_OP_AFTER);
+  ASSERT_INT_EQ(bc1->uop_logical->op, POLY_OP_AFTER);
+  ASSERT_INT_EQ(bc2->uop_logical->op, POLY_OP_AFTER);
+
+  float p0_got[1] = {0}, p1_got[1] = {0};
+  ASSERT_INT_EQ(read_tensor_f32(ctx, p0, p0_got, 1), 0);
+  ASSERT_INT_EQ(read_tensor_f32(ctx, p1, p1_got, 1), 0);
+  ASSERT_FLOAT_EQ(p0_got[0], 0.9f, 1e-5f);
+  ASSERT_FLOAT_EQ(p1_got[0], 2.9f, 1e-5f);
+
+  PolyTensor *all[] = {v0, m0, g0, p0, v1, m1, g1, p1, bc2, bc1, lr};
+  for (int i = 0; i < (int)(sizeof(all) / sizeof(all[0])); i++)
+    poly_tensor_release(all[i]);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+static PolyTensor *build_logical_policy_host_oracle(
+    PolyCtx *ctx,
+    PolyLogicalPolicy policy,
+    float values[4]
+) {
+  int64_t shape[2] = {2, 2};
+  if (poly_ctx_set_logical_policy(ctx, policy) != 0) return NULL;
+  PolyTensor *host =
+      poly_tensor_from_host(ctx, values, 4 * sizeof(*values), POLY_FLOAT32, shape, 2);
+  PolyTensor *cpu = host ? poly_tensor_to_device(ctx, host, POLY_DEVICE_CPU) : NULL;
+  PolyTensor *one = cpu ? poly_tensor_const_like_int(ctx, cpu, 1) : NULL;
+  return cpu && one ? poly_tensor_alu2(ctx, POLY_OP_ADD, cpu, one) : NULL;
+}
+
+TEST(tensor, logical_never_host_construction_keeps_physical_graph_and_values_exact) {
+  float values[4] = {1, 2, 3, 4};
+  PolyCtx *always_ctx = poly_ctx_new(), *never_ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(always_ctx);
+  ASSERT_NOT_NULL(never_ctx);
+  PolyTensor *always = build_logical_policy_host_oracle(always_ctx, POLY_LOGICAL_ALWAYS, values);
+  PolyTensor *never = build_logical_policy_host_oracle(never_ctx, POLY_LOGICAL_NEVER, values);
+  ASSERT_NOT_NULL(always);
+  ASSERT_NOT_NULL(never);
+  ASSERT_PTR_EQ(poly_tensor_uop_logical(never), NULL);
+  ASSERT_TRUE(uop_graph_isomorphic(
+      always_ctx, poly_tensor_uop_physical(always), never_ctx, poly_tensor_uop_physical(never)
+  ));
+  float always_values[4] = {0}, never_values[4] = {0};
+  ASSERT_INT_EQ(read_tensor_f32(always_ctx, always, always_values, 4), 0);
+  ASSERT_INT_EQ(read_tensor_f32(never_ctx, never, never_values, 4), 0);
+  for (int i = 0; i < 4; i++) {
+    ASSERT_FLOAT_EQ(always_values[i], (float)i + 2.0f, 1e-6);
+    ASSERT_FLOAT_EQ(never_values[i], always_values[i], 1e-6);
+  }
+  poly_ctx_destroy(always_ctx);
+  poly_ctx_destroy(never_ctx);
+  PASS();
+}
+
+TEST(tensor, logical_never_host_construction_skips_portable_nodes) {
+  float values[4] = {1, 2, 3, 4};
+  int64_t shape[2] = {2, 2};
+  PolyCtx *always_ctx = poly_ctx_new(), *never_ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(always_ctx);
+  ASSERT_NOT_NULL(never_ctx);
+  ASSERT_INT_EQ(poly_ctx_set_logical_policy(always_ctx, POLY_LOGICAL_ALWAYS), 0);
+  ASSERT_INT_EQ(poly_ctx_set_logical_policy(never_ctx, POLY_LOGICAL_NEVER), 0);
+  PolyTensor *always =
+      poly_tensor_from_host(always_ctx, values, sizeof(values), POLY_FLOAT32, shape, 2);
+  PolyTensor *never =
+      poly_tensor_from_host(never_ctx, values, sizeof(values), POLY_FLOAT32, shape, 2);
+  ASSERT_NOT_NULL(always);
+  ASSERT_NOT_NULL(never);
+  ASSERT_TRUE(uop_graph_isomorphic(
+      always_ctx, poly_tensor_uop_physical(always), never_ctx, poly_tensor_uop_physical(never)
+  ));
+  PolyCtxStats always_stats = {0}, never_stats = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(always_ctx, &always_stats), 0);
+  ASSERT_INT_EQ(poly_ctx_stats(never_ctx, &never_stats), 0);
+  ASSERT_TRUE(never_stats.cse_entries < always_stats.cse_entries);
+  poly_ctx_destroy(always_ctx);
+  poly_ctx_destroy(never_ctx);
+  PASS();
+}
+
+static bool append_logical_policy_output(
+    PolyTensor **outputs,
+    int *n_outputs,
+    int capacity,
+    PolyTensor *tensor
+) {
+  if (!outputs || !n_outputs || !tensor || *n_outputs >= capacity) return false;
+  outputs[(*n_outputs)++] = tensor;
+  return true;
+}
+
+static int build_logical_policy_remaining_tensor_oracle(
+    PolyCtx *ctx,
+    PolyLogicalPolicy policy,
+    PolyTensor **outputs,
+    int capacity
+) {
+  int n_outputs = 0;
+  int64_t row_shape[2] = {1, 3}, matrix_shape[2] = {2, 2}, vector_shape[1] = {2};
+  int64_t tall_shape[2] = {3, 2}, tall_rhs_shape[1] = {3};
+  int64_t rope_shape[2] = {1, 4}, frequency_shape[2] = {1, 2};
+  if (poly_ctx_set_logical_policy(ctx, policy) != 0) return -1;
+
+  PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, row_shape, 2, POLY_DEVICE_CPU);
+  PolyTensor *index = poly_tensor_empty(ctx, POLY_INT32, row_shape, 2, POLY_DEVICE_CPU);
+  PolyTensor *src = poly_tensor_empty(ctx, POLY_FLOAT32, row_shape, 2, POLY_DEVICE_CPU);
+  PolyTensor *matrix = poly_tensor_empty(ctx, POLY_FLOAT32, matrix_shape, 2, POLY_DEVICE_CPU);
+  PolyTensor *vector = poly_tensor_empty(ctx, POLY_FLOAT32, vector_shape, 1, POLY_DEVICE_CPU);
+  PolyTensor *tall = poly_tensor_empty(ctx, POLY_FLOAT32, tall_shape, 2, POLY_DEVICE_CPU);
+  PolyTensor *tall_rhs = poly_tensor_empty(ctx, POLY_FLOAT32, tall_rhs_shape, 1, POLY_DEVICE_CPU);
+  PolyTensor *rope_x = poly_tensor_empty(ctx, POLY_FLOAT32, rope_shape, 2, POLY_DEVICE_CPU);
+  PolyTensor *freqs_cos = poly_tensor_empty(ctx, POLY_FLOAT32, frequency_shape, 2, POLY_DEVICE_CPU);
+  PolyTensor *freqs_sin = poly_tensor_empty(ctx, POLY_FLOAT32, frequency_shape, 2, POLY_DEVICE_CPU);
+  if (!x || !index || !src || !matrix || !vector || !tall || !tall_rhs || !rope_x || !freqs_cos ||
+      !freqs_sin)
+    return -1;
+
+  if (!append_logical_policy_output(
+          outputs, &n_outputs, capacity, poly_tensor_one_hot(ctx, index, 3)
+      ) ||
+      !append_logical_policy_output(
+          outputs, &n_outputs, capacity, poly_tensor_index_select(ctx, x, 1, index)
+      ) ||
+      !append_logical_policy_output(
+          outputs, &n_outputs, capacity, poly_tensor_gather_dim(ctx, x, 1, index)
+      ) ||
+      !append_logical_policy_output(
+          outputs, &n_outputs, capacity, poly_tensor_scatter(ctx, x, 1, index, src, NULL)
+      ) ||
+      !append_logical_policy_output(
+          outputs, &n_outputs, capacity, poly_tensor_scatter_reduce(ctx, x, 1, index, src, "sum", 1)
+      ))
+    return -1;
+
+  PolyTensor *sort_values = NULL, *sort_indices = NULL;
+  PolyTensor *topk_values = NULL, *topk_indices = NULL;
+  if (poly_tensor_sort(ctx, x, 1, 0, &sort_values, &sort_indices) != 0 ||
+      poly_tensor_topk(ctx, x, 2, 1, 1, 1, &topk_values, &topk_indices) != 0 ||
+      !append_logical_policy_output(outputs, &n_outputs, capacity, sort_values) ||
+      !append_logical_policy_output(outputs, &n_outputs, capacity, sort_indices) ||
+      !append_logical_policy_output(outputs, &n_outputs, capacity, topk_values) ||
+      !append_logical_policy_output(outputs, &n_outputs, capacity, topk_indices))
+    return -1;
+
+  PolyTensor *einsum_inputs[2] = {matrix, matrix};
+  if (!append_logical_policy_output(
+          outputs, &n_outputs, capacity, poly_tensor_einsum(ctx, "ij,jk->ik", einsum_inputs, 2)
+      ) ||
+      !append_logical_policy_output(
+          outputs, &n_outputs, capacity, poly_tensor_rearrange(ctx, "a b->(a b)", x, NULL, NULL, 0)
+      ) ||
+      !append_logical_policy_output(
+          outputs, &n_outputs, capacity, poly_tensor_argmax(ctx, x, 1, true)
+      ) ||
+      !append_logical_policy_output(
+          outputs, &n_outputs, capacity, poly_tensor_contiguous_backward(ctx, x)
+      ) ||
+      !append_logical_policy_output(
+          outputs, &n_outputs, capacity, poly_tensor_rope(ctx, rope_x, freqs_cos, freqs_sin)
+      ))
+    return -1;
+
+  PolyTensor *q = NULL, *r = NULL;
+  if (poly_tensor_qr_ex(ctx, matrix, POLY_QR_COMPLETE, &q, &r) != 0 ||
+      !append_logical_policy_output(outputs, &n_outputs, capacity, q) ||
+      !append_logical_policy_output(outputs, &n_outputs, capacity, r))
+    return -1;
+  PolyTensor *chol = poly_tensor_cholesky(ctx, matrix, 0);
+  if (!append_logical_policy_output(
+          outputs, &n_outputs, capacity, poly_tensor_triangular_solve(ctx, matrix, vector, 0, 0, 0)
+      ) ||
+      !append_logical_policy_output(outputs, &n_outputs, capacity, chol) ||
+      !append_logical_policy_output(
+          outputs, &n_outputs, capacity, poly_tensor_cholesky_solve(ctx, chol, vector, 0)
+      ) ||
+      !append_logical_policy_output(
+          outputs, &n_outputs, capacity, poly_tensor_solve(ctx, matrix, vector)
+      ) ||
+      !append_logical_policy_output(
+          outputs, &n_outputs, capacity, poly_tensor_lstsq(ctx, tall, tall_rhs)
+      ))
+    return -1;
+  return n_outputs;
+}
+
+TEST(tensor, logical_never_remaining_tensor_wrappers_keep_physical_graphs_exact) {
+  enum { MAX_OUTPUTS = 24 };
+  PolyCtx *always_ctx = poly_ctx_new(), *never_ctx = poly_ctx_new();
+  PolyTensor *always[MAX_OUTPUTS] = {0}, *never[MAX_OUTPUTS] = {0};
+  ASSERT_NOT_NULL(always_ctx);
+  ASSERT_NOT_NULL(never_ctx);
+  int n_always = build_logical_policy_remaining_tensor_oracle(
+      always_ctx, POLY_LOGICAL_ALWAYS, always, MAX_OUTPUTS
+  );
+  int n_never = build_logical_policy_remaining_tensor_oracle(
+      never_ctx, POLY_LOGICAL_NEVER, never, MAX_OUTPUTS
+  );
+  ASSERT_TRUE(n_always > 0);
+  ASSERT_INT_EQ(n_never, n_always);
+  for (int i = 0; i < n_always; i++) {
+    ASSERT_PTR_EQ(poly_tensor_uop_logical(never[i]), NULL);
+    ASSERT_TRUE(uop_graph_isomorphic(
+        always_ctx, poly_tensor_uop_physical(always[i]), never_ctx,
+        poly_tensor_uop_physical(never[i])
+    ));
+  }
+  poly_ctx_destroy(always_ctx);
+  poly_ctx_destroy(never_ctx);
+  PASS();
+}
+
+static int build_logical_policy_frontend_creation_oracle(
+    PolyCtx *ctx,
+    PolyLogicalPolicy policy,
+    PolyTensor **outputs,
+    int capacity
+) {
+  int n_outputs = 0;
+  int f32 = poly_dtype_id_by_name("float32"), i32 = poly_dtype_id_by_name("int32");
+  int64_t shape[2] = {2, 2};
+  if (capacity < 5 || poly_ctx_set_logical_policy(ctx, policy) != 0) return -1;
+  if (!append_logical_policy_output(
+          outputs, &n_outputs, capacity,
+          poly_tensor_full_float_by_id(ctx, shape, 2, 2.5, f32, POLY_DEVICE_CPU, true, true)
+      ) ||
+      !append_logical_policy_output(
+          outputs, &n_outputs, capacity,
+          poly_tensor_full_float_by_id(ctx, shape, 2, 2.5, f32, POLY_DEVICE_CPU, true, false)
+      ) ||
+      !append_logical_policy_output(
+          outputs, &n_outputs, capacity,
+          poly_tensor_arange_int_by_id(ctx, 0, 4, 1, i32, POLY_DEVICE_CPU)
+      ) ||
+      !append_logical_policy_output(
+          outputs, &n_outputs, capacity,
+          poly_tensor_linspace_by_id(ctx, 0.0, 1.0, 4, f32, POLY_DEVICE_CPU)
+      ) ||
+      !append_logical_policy_output(
+          outputs, &n_outputs, capacity, poly_tensor_eye_by_id(ctx, 3, 3, f32, POLY_DEVICE_CPU)
+      ))
+    return -1;
+  return n_outputs;
+}
+
+TEST(tensor, logical_never_frontend_creation_keeps_physical_graphs_and_values_exact) {
+  enum { OUTPUTS = 5 };
+  PolyCtx *always_ctx = poly_ctx_new(), *never_ctx = poly_ctx_new();
+  PolyTensor *always[OUTPUTS] = {0}, *never[OUTPUTS] = {0};
+  ASSERT_NOT_NULL(always_ctx);
+  ASSERT_NOT_NULL(never_ctx);
+  ASSERT_INT_EQ(
+      build_logical_policy_frontend_creation_oracle(
+          always_ctx, POLY_LOGICAL_ALWAYS, always, OUTPUTS
+      ),
+      OUTPUTS
+  );
+  ASSERT_INT_EQ(
+      build_logical_policy_frontend_creation_oracle(never_ctx, POLY_LOGICAL_NEVER, never, OUTPUTS),
+      OUTPUTS
+  );
+  for (int i = 0; i < OUTPUTS; i++) {
+    ASSERT_PTR_EQ(poly_tensor_uop_logical(never[i]), NULL);
+    ASSERT_TRUE(uop_graph_isomorphic(
+        always_ctx, poly_tensor_uop_physical(always[i]), never_ctx,
+        poly_tensor_uop_physical(never[i])
+    ));
+  }
+  float always_values[4] = {0}, never_values[4] = {0};
+  ASSERT_INT_EQ(read_tensor_f32(always_ctx, always[0], always_values, 4), 0);
+  ASSERT_INT_EQ(read_tensor_f32(never_ctx, never[0], never_values, 4), 0);
+  for (int i = 0; i < 4; i++) {
+    ASSERT_FLOAT_EQ(always_values[i], 2.5f, 1e-6);
+    ASSERT_FLOAT_EQ(never_values[i], always_values[i], 1e-6);
+  }
+  poly_ctx_destroy(always_ctx);
+  poly_ctx_destroy(never_ctx);
   PASS();
 }
 
@@ -1170,7 +2869,7 @@ TEST(tensor, custom_kernel_uses_ordered_roots_and_one_call_per_graph) {
 
   PolyTensor *inputs[3] = {c, a, b};
   PolyTensor *outputs[3] = {0};
-  ASSERT_INT_EQ(poly_tensor_custom_kernel(ctx, body, inputs, 3, outputs), 0);
+  ASSERT_INT_EQ(poly_tensor_custom_kernel(ctx, body, inputs, 3, 17, outputs), 0);
   for (int i = 0; i < 3; i++) {
     ASSERT_NOT_NULL(outputs[i]);
     ASSERT_INT_EQ(outputs[i]->uop_logical->op, POLY_OP_AFTER);
@@ -1184,6 +2883,12 @@ TEST(tensor, custom_kernel_uses_ordered_roots_and_one_call_per_graph) {
   PolyUOp *physical_call = outputs[0]->uop_physical->src[1];
   ASSERT_INT_EQ(logical_call->op, POLY_OP_CALL);
   ASSERT_INT_EQ(physical_call->op, POLY_OP_CALL);
+  ASSERT_INT_EQ(logical_call->arg.kind, POLY_ARG_CALL_INFO);
+  ASSERT_INT_EQ(physical_call->arg.kind, POLY_ARG_CALL_INFO);
+  ASSERT_TRUE(logical_call->arg.call_info->has_grad_fxn);
+  ASSERT_TRUE(physical_call->arg.call_info->has_grad_fxn);
+  ASSERT_INT_EQ(logical_call->arg.call_info->grad_fxn_key, 17);
+  ASSERT_INT_EQ(physical_call->arg.call_info->grad_fxn_key, 17);
   ASSERT_INT_EQ(logical_call->n_src, 4);
   ASSERT_INT_EQ(physical_call->n_src, 4);
   ASSERT_PTR_EQ(logical_call->src[0], body);

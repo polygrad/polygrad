@@ -8,8 +8,10 @@
 #include "../src/frontend_internal.h"
 #include "../src/ctx.h"
 #include "../src/device.h"
+#include "../src/tensor.h"
 #include "../src/uop/movement.h"
 #include "../src/uop/ops.h"
+#include "../src/utils.h"
 
 /* Basic creation */
 
@@ -724,7 +726,8 @@ TEST(uop, cse_int_tuple) {
 
 TEST(uop, call_info_is_value_metadata) {
   /* Pinned CallInfo is FUNCTION value metadata, so equal field values CSE and
-   * every differing supported field stays distinct (uop/ops.py:1158-1170). */
+   * every differing supported field stays distinct
+   * (tinygrad 2026-08-22/a9069c177a9d uop/ops.py:1261-1272). */
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
   PolyUOp *body = poly_uop0(ctx, POLY_OP_TUPLE, POLY_VOID, poly_arg_none());
@@ -733,14 +736,19 @@ TEST(uop, call_info_is_value_metadata) {
   PolyCallInfo same = {.name = "forward"};
   PolyCallInfo other = {.name = "other"};
   PolyCallInfo precompiled = {.name = "forward", .precompile = true};
+  PolyCallInfo first_grad = {.name = "forward", .has_grad_fxn = true, .grad_fxn_key = 1};
+  PolyCallInfo other_grad = {.name = "forward", .has_grad_fxn = true, .grad_fxn_key = 2};
   PolyUOp *a = poly_uop1(ctx, POLY_OP_FUNCTION, POLY_VOID, body, poly_arg_call_info(&first));
   PolyUOp *b = poly_uop1(ctx, POLY_OP_FUNCTION, POLY_VOID, body, poly_arg_call_info(&same));
   PolyUOp *c = poly_uop1(ctx, POLY_OP_FUNCTION, POLY_VOID, body, poly_arg_call_info(&other));
   PolyUOp *d = poly_uop1(ctx, POLY_OP_FUNCTION, POLY_VOID, body, poly_arg_call_info(&precompiled));
+  PolyUOp *e = poly_uop1(ctx, POLY_OP_FUNCTION, POLY_VOID, body, poly_arg_call_info(&first_grad));
+  PolyUOp *f = poly_uop1(ctx, POLY_OP_FUNCTION, POLY_VOID, body, poly_arg_call_info(&other_grad));
   ASSERT_NOT_NULL(a);
   ASSERT_PTR_EQ(a, b);
   ASSERT_PTR_NEQ(a, c);
   ASSERT_PTR_NEQ(a, d);
+  ASSERT_PTR_NEQ(e, f);
   first.name = "mutated-after-construction";
   ASSERT_STR_EQ(a->arg.call_info->name, "forward");
   char *text = poly_uop_str(a);
@@ -971,6 +979,189 @@ TEST(uop, ctx_stats_reports_arena_and_scratch_high_water) {
   ASSERT_TRUE(after.scratch_high_water >= during.scratch_high_water);
   ASSERT_INT_EQ(after.arena_bytes, during.arena_bytes);
 
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(uop, ir_collection_evicts_weak_rows_and_preserves_declared_roots) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *logical_leaf = poly_buffer_f32(ctx, 4);
+  PolyUOp *logical_one = poly_const_float(ctx, 1.0);
+  PolyUOp *logical = poly_add(ctx, logical_leaf, logical_one);
+  PolyUOp *physical = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_CPU);
+  PolyTensor *tensor =
+      poly_tensor_create_with_roots(ctx, logical, physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(tensor);
+
+  PolyUOp *raw_two = poly_const_float(ctx, 2.0);
+  PolyUOp *raw = poly_mul(ctx, logical, raw_two);
+  ASSERT_NOT_NULL(raw);
+  ASSERT_INT_EQ(poly_uop_retain(ctx, raw), 0);
+
+  PolyUOp *dead = poly_buffer_f32(ctx, 7);
+  for (int i = 0; i < 32; i++)
+    dead = poly_uop1(ctx, POLY_OP_NEG, POLY_FLOAT32, dead, poly_arg_none());
+  ASSERT_NOT_NULL(dead);
+  ASSERT_INT_EQ(poly_uop_max_shape_cached(ctx, logical).ndim, 1);
+  ASSERT_INT_EQ(poly_uop_max_shape_cached(ctx, raw).ndim, 1);
+  ASSERT_INT_EQ(poly_uop_max_shape_cached(ctx, dead).ndim, 1);
+
+  PolyCtxStats before = {0}, after = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &before), 0);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &after), 0);
+  ASSERT_TRUE(after.cse_entries < before.cse_entries);
+  ASSERT_TRUE(after.shape_cache_entries < before.shape_cache_entries);
+
+  ASSERT_PTR_EQ(poly_tensor_uop_logical(tensor), logical);
+  ASSERT_PTR_EQ(poly_tensor_uop_physical(tensor), physical);
+  ASSERT_PTR_EQ(poly_add(ctx, logical_leaf, logical_one), logical);
+  ASSERT_PTR_EQ(poly_mul(ctx, logical, raw_two), raw);
+
+  poly_uop_release(ctx, raw);
+  poly_tensor_release(tensor);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(uop, partial_external_release_keeps_live_ir_clean) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *raw = poly_const_int(ctx, 7);
+  ASSERT_NOT_NULL(raw);
+  ASSERT_INT_EQ(poly_uop_retain(ctx, raw), 0);
+  ASSERT_INT_EQ(poly_uop_retain(ctx, raw), 0);
+  ASSERT_FALSE(ctx->collection_dirty);
+  ASSERT_FALSE(ctx->ir_collection_dirty);
+
+  /* Tinygrad keeps the weak-cache row while either strong reference lives. */
+  poly_uop_release(ctx, raw);
+  ASSERT_FALSE(ctx->collection_dirty);
+  ASSERT_FALSE(ctx->ir_collection_dirty);
+
+  poly_uop_release(ctx, raw);
+  ASSERT_TRUE(ctx->collection_dirty);
+  ASSERT_TRUE(ctx->ir_collection_dirty);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(uop, stats_defers_small_ir_sweep_until_explicit_collect) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *raw = poly_const_int(ctx, 11);
+  ASSERT_NOT_NULL(raw);
+  ASSERT_INT_EQ(poly_uop_retain(ctx, raw), 0);
+  poly_uop_release(ctx, raw);
+  ASSERT_TRUE(ctx->ir_collection_dirty);
+
+  PolyCtxStats stats = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
+  /* Tinygrad counter reads do not run a global UOp trace. */
+  ASSERT_TRUE(ctx->ir_collection_dirty);
+
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  ASSERT_FALSE(ctx->ir_collection_dirty);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(uop, raw_c_100k_churn_is_reclaimed_only_at_explicit_safe_point) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  PolyCtxStats baseline = {0}, before = {0}, observed = {0}, after = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &baseline), 0);
+
+  double start_ms = poly_now_ms();
+  PolyUOp *last = NULL;
+  for (int64_t i = 0; i < 100000; i++)
+    last = poly_uop0(ctx, POLY_OP_CONST, POLY_INT64, poly_arg_int(i));
+  ASSERT_NOT_NULL(last);
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &before), 0);
+  ASSERT_TRUE(before.cse_entries >= 100000);
+  ASSERT_TRUE(before.arena_bytes > baseline.arena_bytes);
+
+  /* Counter reads are observational; raw allocation-only callers choose the
+   * explicit collection boundary documented by the C API. */
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &observed), 0);
+  ASSERT_INT_EQ(observed.arena_bytes, before.arena_bytes);
+  ASSERT_INT_EQ(observed.cse_entries, before.cse_entries);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &after), 0);
+  ASSERT_INT_EQ(after.arena_bytes, baseline.arena_bytes);
+  ASSERT_INT_EQ(after.cse_entries, baseline.cse_entries);
+  ASSERT_TRUE(poly_now_ms() - start_ms < 30000.0);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(uop, safe_point_collects_after_bounded_ir_growth) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+
+  PolyUOp *dead = poly_const_int(ctx, 13);
+  for (int i = 0; i < 4096; i++)
+    dead = poly_uop1(ctx, POLY_OP_NEG, POLY_INT32, dead, poly_arg_none());
+  ASSERT_NOT_NULL(dead);
+  size_t peak = ctx->uop_storage_bytes;
+  ASSERT_TRUE(peak > ctx->ir_collection_baseline_bytes + POLY_IR_COLLECTION_MIN_GROWTH);
+  ASSERT_INT_EQ(poly_uop_retain(ctx, dead), 0);
+  poly_uop_release(ctx, dead);
+
+  ASSERT_INT_EQ(poly_ctx_collect_at_safe_point(ctx), 0);
+  ASSERT_FALSE(ctx->ir_collection_dirty);
+  ASSERT_TRUE(ctx->uop_storage_bytes < peak);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(uop, ir_collection_reclaims_dead_uop_storage_and_preserves_live_address) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *one = poly_const_float(ctx, 1.0);
+  PolyUOp *live = poly_uop1(ctx, POLY_OP_NEG, POLY_FLOAT32, one, poly_arg_none());
+  ASSERT_NOT_NULL(live);
+  ASSERT_INT_EQ(poly_uop_retain(ctx, live), 0);
+
+  PolyCtxStats baseline = {0}, peak = {0}, after = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &baseline), 0);
+  PolyUOp *dead = poly_const_float(ctx, 2.0);
+  for (int i = 0; i < 1024; i++)
+    dead = poly_uop1(ctx, POLY_OP_NEG, POLY_FLOAT32, dead, poly_arg_none());
+  ASSERT_NOT_NULL(dead);
+  ASSERT_INT_EQ(poly_uop_max_shape_cached(ctx, dead).ndim, 0);
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &peak), 0);
+  ASSERT_TRUE(peak.arena_bytes > baseline.arena_bytes);
+
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &after), 0);
+  ASSERT_TRUE(after.arena_bytes < peak.arena_bytes);
+  ASSERT_PTR_EQ(poly_uop1(ctx, POLY_OP_NEG, POLY_FLOAT32, one, poly_arg_none()), live);
+
+  PolyCtxStats stable = after;
+  for (int round = 0; round < 64; round++) {
+    PolyUOp *churn = poly_const_float(ctx, 1000.0 + round);
+    for (int i = 0; i < 32; i++)
+      churn = poly_uop1(ctx, POLY_OP_NEG, POLY_FLOAT32, churn, poly_arg_none());
+    ASSERT_NOT_NULL(churn);
+    ASSERT_INT_EQ(poly_uop_max_shape_cached(ctx, churn).ndim, 0);
+    ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+    ASSERT_PTR_EQ(poly_uop1(ctx, POLY_OP_NEG, POLY_FLOAT32, one, poly_arg_none()), live);
+  }
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &after), 0);
+  ASSERT_INT_EQ(after.arena_bytes, stable.arena_bytes);
+  ASSERT_INT_EQ(after.cse_entries, stable.cse_entries);
+  ASSERT_INT_EQ(after.shape_cache_entries, stable.shape_cache_entries);
+
+  poly_uop_release(ctx, live);
   poly_ctx_destroy(ctx);
   PASS();
 }

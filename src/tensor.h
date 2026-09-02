@@ -20,6 +20,20 @@ extern "C" {
 int64_t poly_shape_numel_checked(const int64_t *shape, int ndim);
 bool poly_shape_equal(const int64_t *a, int a_ndim, const int64_t *b, int b_ndim);
 
+/* Polygrad logical-lifetime boundary for composed Tensor operations. Physical
+ * operands remain mandatory; this controls only the independent portable
+ * result and propagates NEVER/UNSUPPORTED operand state. */
+int poly_tensor_result_builds_logical(PolyCtx *ctx, PolyTensor *const *inputs, int n_inputs);
+PolyTensor *poly_tensor_create_result(
+    PolyCtx *ctx,
+    PolyTensor *const *inputs,
+    int n_inputs,
+    PolyUOp *logical,
+    PolyUOp *physical,
+    PolyTensorRole role,
+    PolyDevice device
+);
+
 /* Publish an exact executable root while preserving the Tensor's retained
  * logical root. Frontend graph construction replaces both roots explicitly
  * through poly_tensor_replace_roots. */
@@ -40,6 +54,11 @@ int poly_tensor_apply_realize_map(
     int n,
     PolyDevice device
 );
+
+/* Approved logical/physical boundary: after successful own materialization,
+ * replace an UNTIL_REALIZE producer with an exact device-free current
+ * resource, or mark unsupported forms unavailable without altering physical. */
+int poly_tensor_retire_logical_resources(PolyCtx *ctx, PolyTensor **tensors, int n_tensors);
 
 /* Full-buffer STORE effect for optimizer/direct core SINKs.
  * Tensor.assign itself still uses tinygrad's current-value shape:

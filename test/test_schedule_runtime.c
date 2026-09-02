@@ -29,6 +29,25 @@ static bool contains_uop(PolyUOp **items, int count, PolyUOp *item) {
   return false;
 }
 
+TEST(schedule_runtime, allocation_free_linear_does_not_collect_residency) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *buffer = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_CPU);
+  float value = 1.0f;
+  poly_buffer_set(ctx, buffer, &value, sizeof(value), POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(poly_buffer_get(ctx, buffer));
+  ctx->collection_dirty = true;
+
+  PolyUOp *linear = poly_uop(ctx, POLY_OP_LINEAR, POLY_VOID, NULL, 0, poly_arg_none());
+  ASSERT_NOT_NULL(linear);
+  ASSERT_INT_EQ(poly_run_linear(ctx, linear, NULL, 0, NULL, 0, true, true, false), 0);
+  ASSERT_NOT_NULL(poly_buffer_get(ctx, buffer));
+  ASSERT_TRUE(ctx->collection_dirty);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(schedule_runtime, create_schedule_returns_ordered_linear_calls) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
@@ -264,6 +283,8 @@ TEST(schedule_runtime, program_and_runtime_caches_reuse_current_keys) {
 
   PolyUOp *compiled0 = poly_compile_linear(ctx, linear, -1);
   ASSERT_NOT_NULL(compiled0);
+  /* The C local is the owner corresponding to Tinygrad's live Python LINEAR. */
+  ASSERT_INT_EQ(poly_uop_retain(ctx, compiled0), 0);
   size_t program_entries = poly_to_program_cache_len(ctx);
   ASSERT_TRUE(program_entries > 0);
   PolyUOp *compiled1 = poly_compile_linear(ctx, linear, -1);
@@ -280,6 +301,24 @@ TEST(schedule_runtime, program_and_runtime_caches_reuse_current_keys) {
   ASSERT_INT_EQ(poly_run_linear(ctx, compiled1, NULL, 0, NULL, 0, true, true, false), 0);
   ASSERT_INT_EQ((int)poly_runtime_cache_len(ctx), (int)runtime_entries);
 
+  PolyUOp *cached_program = compiled0->src[0]->src[0];
+  ASSERT_INT_EQ(cached_program->op, POLY_OP_PROGRAM);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  PolyUOp *rebuilt = cached_program->tag || cached_program->tag_arg.kind != POLY_ARG_NONE
+                         ? poly_uop_tagged_arg(
+                               ctx, cached_program->op, cached_program->dtype, cached_program->src,
+                               cached_program->n_src, cached_program->arg, cached_program->tag,
+                               cached_program->tag_arg
+                           )
+                         : poly_uop(
+                               ctx, cached_program->op, cached_program->dtype, cached_program->src,
+                               cached_program->n_src, cached_program->arg
+                           );
+  ASSERT_PTR_EQ(rebuilt, cached_program);
+  ASSERT_INT_EQ(poly_run_linear(ctx, compiled0, NULL, 0, NULL, 0, true, true, false), 0);
+  ASSERT_INT_EQ((int)poly_runtime_cache_len(ctx), (int)runtime_entries);
+
+  poly_uop_release(ctx, compiled0);
   poly_ctx_destroy(ctx);
   PASS();
 }

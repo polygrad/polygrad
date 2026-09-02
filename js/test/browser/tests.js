@@ -87,6 +87,39 @@
         console.log(`Core: ${pg.core}, device: ${pg.device}
 `);
         console.log("-- Creation --");
+        await test("logical policy scope and tensor override", async () => {
+          const current = new Tensor([0]).add(1);
+          assert(current.logicalPolicy === "until_realize");
+          await current.realizeAsync();
+          assert(current.logicalState === "retired");
+          const scoped = pg.withLogical("never", () => new Tensor([1, 2]));
+          assert(scoped.logicalPolicy === "never");
+          assert(scoped.logicalState === "never_constructed");
+          assert(scoped.uopLogical === null);
+          const retained = pg.withLogical("always", () => new Tensor([3, 4]).add(1));
+          await retained.realizeAsync();
+          assert(retained.logicalPolicy === "always");
+          assert(retained.logicalState === "available");
+          const dropped = new Tensor([5, 6], { logical: false });
+          assert(dropped.logicalPolicy === "never");
+          assert(dropped.uopLogical === null);
+          assert(dropped.setLogicalPolicy("always") === false);
+          const descendant = dropped.add(1);
+          assert(descendant.logicalPolicy === "never");
+          assert(descendant.logicalState === "never_constructed");
+          assertClose(await descendant.toArray(), [6, 7]);
+          const cloned = dropped.clone();
+          assert(cloned.logicalPolicy === "never");
+          assert(cloned.logicalState === "never_constructed");
+          assert(cloned.uopLogical === null);
+          assertClose(await cloned.toArray(), [5, 6]);
+          const gradSource = new Tensor([2], { logical: false, requiresGrad: true });
+          gradSource.mul(gradSource).sum().backward();
+          assert(gradSource.grad.logicalPolicy === "never");
+          assert(gradSource.grad.logicalState === "never_constructed");
+          assert(gradSource.grad.uopLogical === null);
+          assertClose(await gradSource.grad.toArray(), [4]);
+        });
         await test("from vector", async () => {
           const t = new Tensor([1, 2, 3]);
           assertShape(t.shape, [3]);
@@ -123,6 +156,7 @@
             "raw physical UOp should retain its storage"
           );
           await uop.dispose();
+          pg.collect();
           stats = pg.stats().coreStats;
           assert(
             stats.memUsed === before.memUsed,
@@ -149,6 +183,7 @@
             "realized output should replace obsolete input storage"
           );
           await out.dispose();
+          pg.collect();
           stats = pg.stats().coreStats;
           assert(
             stats.memUsed === before.memUsed,
@@ -3038,7 +3073,7 @@
           assertClose(await out.toArray(), [0, 4, 1, 5, 2, 6, 3, 7]);
         });
         await test("realized contiguous and readback reuse current buffer identity", async () => {
-          const source = await new Tensor([0, 1, 2, 3, 4, 5, 6, 7], { dtype: "float32" }).add(1).realize();
+          const source = await new Tensor([0, 1, 2, 3, 4, 5, 6, 7], { dtype: "float32" }).add(1).preserveLogical().realize();
           const sourceCurrent = source.uop.key;
           const sourceLogical = source.uopLogical.key;
           assert(source.uopLogical.op === pg._core.ops.ADD, "source logical root should retain ADD provenance");
@@ -3739,7 +3774,17 @@
 Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + failed + skipped} total`);
         return { passed, failed, skipped };
       }
-      module.exports = { runTensorTests };
+      async function checkLogicalRuntimeOption(polygrad, core) {
+        const runtime = await polygrad.create({ core, logical: "never" });
+        try {
+          const tensor = new runtime.Tensor([1, 2]);
+          assert(tensor.logicalPolicy === "never");
+          assert(tensor.uopLogical === null);
+        } finally {
+          await runtime.dispose();
+        }
+      }
+      module.exports = { checkLogicalRuntimeOption, runTensorTests };
     }
   });
 

@@ -2424,8 +2424,19 @@ static int poly_realize_tensors_impl(
   if (!linear) goto cleanup;
   rc = poly_realize_linear(ctx, linear, var_bindings, n_var_bindings);
   if (rc != 0) goto cleanup;
-  for (int pending = 0; pending < n_pending; pending++)
+  int n_materialized = 0;
+  for (int pending = 0; pending < n_pending; pending++) {
     outputs[pending_indices[pending]] = pending_tensors[pending];
+    /* Tinygrad 2026-08-22 leaves a zero-CALL movement root unchanged. The
+     * approved Polygrad lifetime boundary retires only a result that callify
+     * replaced with a materialized current resource. */
+    if (pending_out[pending] != pending_roots[pending])
+      pending_tensors[n_materialized++] = pending_tensors[pending];
+  }
+  if (poly_tensor_retire_logical_resources(ctx, pending_tensors, n_materialized) != 0) {
+    rc = -1;
+    goto cleanup;
+  }
 
 cleanup:
   free(var_bindings);
@@ -2435,10 +2446,10 @@ cleanup:
   free(pending_out);
   free(pending_roots);
   free(pending_tensors);
-  /* Tensor realization is a context-thread safe point after current roots and
-   * JIT capture owners are published. Retire residency made unreachable by
-   * the same becomes-map update (Tinygrad tensor.py:195-203). */
-  if (rc == 0 && ctx->collection_dirty && poly_ctx_collect(ctx) != 0) rc = -1;
+  /* Tensor realization is a context-thread safe point after current roots,
+   * cache entries and JIT capture owners are published. Tinygrad's weak UOps
+   * release the same unreachable producer/compiler rows without a stats call. */
+  if (rc == 0 && poly_ctx_collect_at_safe_point(ctx) != 0) rc = -1;
   return rc;
 }
 

@@ -283,7 +283,7 @@ def test_pure_view_realize_is_zero_call():
 def test_realized_contiguous_and_readback_reuse_current_buffer_identity():
     # Host-backed input makes the ADD deviceful in pinned tinygrad. A pure
     # arange+1 root is device-free and realize() is intentionally a no-op.
-    source = (Tensor(np.arange(8, dtype=np.float32)) + 1).realize()
+    source = (Tensor(np.arange(8, dtype=np.float32)) + 1).preserve_logical().realize()
     source_current = source.uop.raw
     source_logical = source.uop_logical.raw
     assert source.uop_logical.op_name == 'ADD'
@@ -385,7 +385,7 @@ def test_random_counter_and_tinyjit_replay_match_pinned_tinygrad():
 
         @TinyJit
         def random_jit(value):
-            return (Tensor.rand(*value.shape) + value).contiguous()
+            return (Tensor.rand(*value.shape) + value).contiguous().preserve_logical()
 
         actual = np.stack([random_jit(jit_input).numpy().copy() for _ in range(4)])
         np.testing.assert_array_equal(actual, expected)
@@ -459,7 +459,7 @@ def test_random_crop_indices_remain_consistent_after_readback():
 
 
 def test_python_loader_checks_current_abi_before_use():
-    assert _ffi.get_lib().poly_abi_version() == _ffi.POLYGRAD_ABI_VERSION == 65
+    assert _ffi.get_lib().poly_abi_version() == _ffi.POLYGRAD_ABI_VERSION == 66
 
 
 @pytest.mark.parametrize('relative', [

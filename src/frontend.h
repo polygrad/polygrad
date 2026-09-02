@@ -13,7 +13,7 @@
 
 /* Public C/frontend ABI version. Bump when exported symbols or public struct
  * layouts used by frontends change. */
-#define POLYGRAD_ABI_VERSION 65
+#define POLYGRAD_ABI_VERSION 66
 
 /* Current ElementwiseMixin._binop for language UOp operators. Compiler
  * matchers keep using raw poly_alu2. */
@@ -128,6 +128,7 @@ int poly_uop_op(PolyUOp *u);
 int poly_uop_dtype_id(PolyCtx *ctx, PolyUOp *u);
 int poly_uop_n_src(PolyUOp *u);
 PolyUOp *poly_uop_src(PolyUOp *u, int idx);
+uint32_t poly_uop_call_grad_fxn_key(PolyUOp *u);
 /* Pinned tinygrad uop/ops.py `resolve`: simplify a boolean UOp, return its
  * proven value when constant, otherwise the caller-provided default. */
 int poly_uop_resolve(PolyCtx *ctx, PolyUOp *u, int default_value);

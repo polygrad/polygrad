@@ -270,7 +270,25 @@ typedef enum {
 /* PolyArg — tagged union for UOp arg field */
 
 typedef struct PolyUOp PolyUOp;
-typedef struct PolyProgramInfo PolyProgramInfo;
+
+/* Tinygrad 2026-08-22/a9069c177a9d uop/ops.py:1109-1152 ProgramInfo. */
+typedef struct PolyProgramInfo {
+  const char *name;
+  const char *target;
+  int global_size[3];
+  int local_size[3];
+  PolyUOp *global_exprs[3];
+  PolyUOp *local_exprs[3];
+  bool has_local_size;
+  PolyUOp **vars;
+  int n_vars;
+  int *globals;
+  int n_globals;
+  int *outs;
+  int n_outs;
+  int *ins;
+  int n_ins;
+} PolyProgramInfo;
 
 /* Current Tinygrad codegen/opt/__init__.py:OptOps and Opt. */
 typedef enum {
@@ -357,6 +375,7 @@ typedef struct {
   bool precompile;
   bool precompile_backward;
   bool has_grad_fxn;
+  uint32_t grad_fxn_key;
   bool has_aux;
 } PolyCallInfo;
 
@@ -791,9 +810,26 @@ typedef enum {
   POLY_TENSOR_PROVENANCE_COMPUTED = 5,
 } PolyTensorProvenance;
 
+/* Polygrad portable-graph lifetime policy. The physical parity graph is
+ * mandatory and independent of this approved logical/placement boundary. */
+typedef enum {
+  POLY_LOGICAL_NEVER = 0,
+  POLY_LOGICAL_ALWAYS = 1,
+  POLY_LOGICAL_UNTIL_REALIZE = 2,
+} PolyLogicalPolicy;
+
+typedef enum {
+  POLY_LOGICAL_AVAILABLE = 0,
+  POLY_LOGICAL_NEVER_CONSTRUCTED = 1,
+  POLY_LOGICAL_RETIRED = 2,
+  POLY_LOGICAL_UNSUPPORTED_RESOURCE = 3,
+} PolyLogicalState;
+
 struct PolyTensor {
   PolyUOp *uop_logical;
   PolyUOp *uop_physical;
+  PolyLogicalPolicy logical_policy;
+  PolyLogicalState logical_state;
   PolyTensorRole role;
   PolyDevice device;
   uint64_t order;
@@ -809,6 +845,16 @@ struct PolyTensor {
 
 PolyTensor *poly_tensor_create_with_roots(
     PolyCtx *ctx,
+    PolyUOp *uop_logical,
+    PolyUOp *uop_physical,
+    PolyTensorRole role,
+    PolyDevice device
+);
+/* FFI adaptation for one-operand results whose portable availability follows
+ * the source Tensor independently of the ambient context policy. */
+PolyTensor *poly_tensor_create_result_like(
+    PolyCtx *ctx,
+    PolyTensor *input,
     PolyUOp *uop_logical,
     PolyUOp *uop_physical,
     PolyTensorRole role,
@@ -869,11 +915,13 @@ int poly_tensor_replace_roots(
 PolyTensor *poly_tensor_to_device(PolyCtx *ctx, PolyTensor *tensor, PolyDevice device);
 PolyTensor *poly_tensor_assign(PolyCtx *ctx, PolyTensor *target, PolyTensor *value);
 PolyTensor *poly_tensor_clone_into(PolyCtx *ctx, PolyTensor *target, PolyTensor *source);
+PolyTensor *poly_tensor_clone(PolyCtx *ctx, PolyTensor *source, PolyDevice device);
 int poly_tensor_custom_kernel(
     PolyCtx *ctx,
     PolyUOp *body,
     PolyTensor **inputs,
     int n_inputs,
+    uint32_t grad_fxn_key,
     PolyTensor **outputs
 );
 /* Build value-producing FUNCTION roots from result Tensors and ordered input
@@ -1097,6 +1145,9 @@ PolyTensor *poly_tensor_rearrange(
 PolyUOp *poly_tensor_uop(PolyTensor *tensor);
 PolyUOp *poly_tensor_uop_logical(PolyTensor *tensor);
 PolyUOp *poly_tensor_uop_physical(PolyTensor *tensor);
+PolyLogicalPolicy poly_tensor_logical_policy(const PolyTensor *tensor);
+PolyLogicalState poly_tensor_logical_state(const PolyTensor *tensor);
+int poly_tensor_set_logical_policy(PolyCtx *ctx, PolyTensor *tensor, PolyLogicalPolicy policy);
 PolyDevice poly_tensor_device(PolyTensor *tensor);
 bool poly_tensor_requires_grad(PolyTensor *tensor);
 bool poly_tensor_requires_grad_is_set(PolyTensor *tensor);
@@ -1190,12 +1241,10 @@ struct PolyUOp {
   void *ended_ranges_cache;
 };
 
-/* Every PolyUOp pointer returned by this C API is borrowed from PolyCtx's
- * arena and becomes invalid at poly_ctx_destroy(). A borrowed UOp does not
- * keep ctx->buffers residency alive. Call poly_uop_retain() before storing a
- * raw UOp beyond its owning Tensor/Instance/JIT scope, then pair it with one
- * poly_uop_release(); the next allocation, execution, stats, or explicit
- * poly_ctx_collect() may reclaim residency after the last owner is released. */
+/* Every PolyUOp pointer returned by this C API is borrowed until the next
+ * collection safe point. Call poly_uop_retain() before storing it beyond its
+ * Tensor/Instance/JIT owner, then pair it with poly_uop_release(). Collection
+ * may reclaim both residency and an unretained UOp record. */
 
 /* Context owns the arena, CSE, to_program/runtime caches, and all UOps. */
 PolyCtx *poly_ctx_new(void);
@@ -1204,6 +1253,8 @@ void poly_ctx_destroy(PolyCtx *ctx);
 int poly_ctx_collect(PolyCtx *ctx);
 void poly_ctx_set_preferred_device(PolyCtx *ctx, PolyDevice device);
 PolyDevice poly_ctx_get_preferred_device(PolyCtx *ctx);
+int poly_ctx_set_logical_policy(PolyCtx *ctx, PolyLogicalPolicy policy);
+PolyLogicalPolicy poly_ctx_get_logical_policy(const PolyCtx *ctx);
 bool poly_ctx_owns_ptr(PolyCtx *ctx, const void *p);
 
 typedef struct {
@@ -1250,8 +1301,7 @@ uint64_t poly_buffer_get_key(PolyCtx *ctx, PolyUOp *buf);
 int poly_buffer_read(PolyCtx *ctx, PolyUOp *buf, void *dst, size_t nbytes);
 PolyArena *poly_ctx_arena(PolyCtx *ctx);
 
-/* Upgrade/downgrade a borrowed UOp to an explicit residency owner. These
- * calls do not control UOp arena storage. */
+/* Upgrade/downgrade a borrowed UOp to an explicit residency and IR owner. */
 int poly_uop_retain(PolyCtx *ctx, PolyUOp *uop);
 void poly_uop_release(PolyCtx *ctx, PolyUOp *uop);
 
@@ -1352,7 +1402,7 @@ void poly_toposort_free(PolyUOp **topo);
 /* Per-pass cache for UOp queries (ranges, vmin/vmax) *
  * Tinygrad caches every queryable UOp property as @functools.cached_property
  * on the immutable UOp instance, which gives per-UOp-lifetime memoization
- * for free. Polygrad's UOps are also immutable (arena-allocated, hash-consed),
+ * for free. Polygrad's UOps are also immutable and hash-consed,
  * and the default min/max query caches directly on the UOp. Callers may still
  * pass their own PolyUOpCache to scope batch/rewrite-local range queries and
  * throw those maps away cleanly.
@@ -1474,7 +1524,7 @@ void poly_uop_dump_tree(FILE *fp, PolyUOp *u, int depth, int max_depth);
 /* ndim == -1 means "no tensor shape" (kernel-level ops like RANGE, LOAD) */
 
 typedef struct {
-  int64_t *dims; /* arena-allocated array of dimension sizes */
+  int64_t *dims; /* ownership is defined by the producing shape API */
   int ndim; /* -1 = no shape, 0 = scalar, >0 = tensor */
 } PolyShape;
 
@@ -1488,7 +1538,7 @@ int64_t poly_uop_max_numel(PolyCtx *ctx, const PolyUOp *u);
 bool poly_shape_eq(PolyShape a, PolyShape b);
 
 /* Lazy cached shape accessors -- computes on first access, O(1) thereafter.
- * Returns arena-owned dims, do NOT free. */
+ * Returned dims are borrowed until the next collection safe point. */
 int poly_uop_ndim(PolyCtx *ctx, const PolyUOp *u);
 const int64_t *poly_uop_max_shape_dims(PolyCtx *ctx, const PolyUOp *u);
 PolyUOp *poly_uop_shape_dim(PolyCtx *ctx, const PolyUOp *u, int dim);

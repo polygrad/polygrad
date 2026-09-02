@@ -37,17 +37,16 @@ static PolyTensor *nn_tensor_result(
     PolyTensor **inputs,
     int n_inputs
 ) {
-  if (!ctx || !logical || !physical || !inputs || n_inputs <= 0 ||
-      !poly_ctx_owns_ptr(ctx, logical) || !poly_ctx_owns_ptr(ctx, physical))
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, n_inputs);
+  if (build_logical < 0 || !physical || (build_logical && !logical) ||
+      (logical && !poly_ctx_owns_ptr(ctx, logical)) || !poly_ctx_owns_ptr(ctx, physical))
     return NULL;
   PolyDevice device = POLY_DEVICE_AUTO;
   bool requires_grad = false;
   bool requires_grad_set = false;
   for (int i = 0; i < n_inputs; i++) {
     PolyTensor *input = inputs[i];
-    if (!input || !input->uop_logical || !input->uop_physical ||
-        !poly_ctx_owns_ptr(ctx, input->uop_logical) || !poly_ctx_owns_ptr(ctx, input->uop_physical))
-      return NULL;
+    if (!input) continue;
     if (input->device != POLY_DEVICE_AUTO) {
       if (device != POLY_DEVICE_AUTO && device != input->device) return NULL;
       device = input->device;
@@ -55,8 +54,9 @@ static PolyTensor *nn_tensor_result(
     requires_grad |= input->requires_grad;
     requires_grad_set |= input->requires_grad_set;
   }
-  PolyTensor *out =
-      poly_tensor_create_with_roots(ctx, logical, physical, POLY_TENSOR_VALUE, device);
+  PolyTensor *out = poly_tensor_create_result(
+      ctx, inputs, n_inputs, logical, physical, POLY_TENSOR_VALUE, device
+  );
   if (!out) return NULL;
   out->requires_grad = requires_grad;
   out->requires_grad_set = requires_grad_set;
@@ -77,14 +77,18 @@ PolyUOp *poly_linear_apply(PolyCtx *ctx, PolyUOp *x, PolyUOp *w, PolyUOp *b) {
 
 PolyTensor *poly_tensor_linear_apply(PolyCtx *ctx, PolyTensor *x, PolyTensor *w, PolyTensor *b) {
   if (!ctx || !x || !w) return NULL;
+  PolyTensor *inputs[3] = {x, w, b};
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, b ? 3 : 2);
+  if (build_logical < 0) return NULL;
   /* Pinned nn.Linear stores (out,in), transposes it, then calls Tensor.linear;
    * Tensor.linear is dot followed by optional add
    * (nn/__init__.py:156-177; mixin/__init__.py:1335-1350). */
-  PolyUOp *logical =
-      poly_linear_apply(ctx, x->uop_logical, w->uop_logical, b ? b->uop_logical : NULL);
   PolyUOp *physical =
       poly_linear_apply(ctx, x->uop_physical, w->uop_physical, b ? b->uop_physical : NULL);
-  PolyTensor *inputs[3] = {x, w, b};
+  PolyUOp *logical =
+      build_logical
+          ? poly_linear_apply(ctx, x->uop_logical, w->uop_logical, b ? b->uop_logical : NULL)
+          : NULL;
   return nn_tensor_result(ctx, logical, physical, inputs, b ? 3 : 2);
 }
 
@@ -172,15 +176,19 @@ PolyTensor *poly_tensor_layernorm_apply(
     double eps
 ) {
   if (!ctx || !x || (!!w != !!b)) return NULL;
+  PolyTensor *inputs[3] = {x, w, b};
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, w ? 3 : 1);
+  if (build_logical < 0) return NULL;
   /* Pinned LayerNorm first runs Tensor.layernorm, then applies the affine
    * weight and bias (nn/__init__.py:235-261; mixin/__init__.py:1548-1564). */
-  PolyUOp *logical = poly_layernorm_apply(
-      ctx, x->uop_logical, w ? w->uop_logical : NULL, b ? b->uop_logical : NULL, axis, eps
-  );
   PolyUOp *physical = poly_layernorm_apply(
       ctx, x->uop_physical, w ? w->uop_physical : NULL, b ? b->uop_physical : NULL, axis, eps
   );
-  PolyTensor *inputs[3] = {x, w, b};
+  PolyUOp *logical = build_logical ? poly_layernorm_apply(
+                                         ctx, x->uop_logical, w ? w->uop_logical : NULL,
+                                         b ? b->uop_logical : NULL, axis, eps
+                                     )
+                                   : NULL;
   return nn_tensor_result(ctx, logical, physical, inputs, w ? 3 : 1);
 }
 
@@ -255,12 +263,16 @@ PolyUOp *poly_rmsnorm_apply(PolyCtx *ctx, PolyUOp *x, PolyUOp *w, double eps) {
 
 PolyTensor *poly_tensor_rmsnorm_apply(PolyCtx *ctx, PolyTensor *x, PolyTensor *w, double eps) {
   if (!ctx || !x) return NULL;
+  PolyTensor *inputs[2] = {x, w};
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, w ? 2 : 1);
+  if (build_logical < 0) return NULL;
   /* Pinned RMSNorm normalizes x.float(), casts back, and applies the optional
    * affine weight (nn/__init__.py:281-304). The existing raw program is run
    * over both retained occurrences without correspondence. */
-  PolyUOp *logical = poly_rmsnorm_apply(ctx, x->uop_logical, w ? w->uop_logical : NULL, eps);
   PolyUOp *physical = poly_rmsnorm_apply(ctx, x->uop_physical, w ? w->uop_physical : NULL, eps);
-  PolyTensor *inputs[2] = {x, w};
+  PolyUOp *logical = build_logical
+                         ? poly_rmsnorm_apply(ctx, x->uop_logical, w ? w->uop_logical : NULL, eps)
+                         : NULL;
   return nn_tensor_result(ctx, logical, physical, inputs, w ? 2 : 1);
 }
 
@@ -300,11 +312,14 @@ PolyUOp *poly_embedding_apply(PolyCtx *ctx, PolyUOp *tokens, PolyUOp *table) {
 
 PolyTensor *poly_tensor_embedding_apply(PolyCtx *ctx, PolyTensor *tokens, PolyTensor *table) {
   if (!ctx || !tokens || !table) return NULL;
+  PolyTensor *inputs[2] = {tokens, table};
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, 2);
+  if (build_logical < 0) return NULL;
   /* Pinned Embedding is its one-hot WHERE/SUM program over the ordered weight
    * and index Tensor.uops (nn/__init__.py:368-391). */
-  PolyUOp *logical = poly_embedding_apply(ctx, tokens->uop_logical, table->uop_logical);
   PolyUOp *physical = poly_embedding_apply(ctx, tokens->uop_physical, table->uop_physical);
-  PolyTensor *inputs[2] = {tokens, table};
+  PolyUOp *logical =
+      build_logical ? poly_embedding_apply(ctx, tokens->uop_logical, table->uop_logical) : NULL;
   return nn_tensor_result(ctx, logical, physical, inputs, 2);
 }
 
@@ -361,12 +376,13 @@ PolyUOp *poly_causal_mask(PolyCtx *ctx, int64_t T) {
 
 PolyTensor *poly_tensor_causal_mask(PolyCtx *ctx, int64_t T) {
   if (!ctx || T <= 0) return NULL;
+  bool build_logical = poly_ctx_get_logical_policy(ctx) != POLY_LOGICAL_NEVER;
   /* Pinned GPT-2/LLaMA mask construction is a pure Tensor graph. With no
    * BUFFER occurrence, retained and executable roots may CSE to the same
    * node, but both approved roots are stored explicitly. */
-  PolyUOp *logical = poly_causal_mask(ctx, T);
   PolyUOp *physical = poly_causal_mask(ctx, T);
-  if (!logical || !physical) return NULL;
+  PolyUOp *logical = build_logical ? poly_causal_mask(ctx, T) : NULL;
+  if (!physical || (build_logical && !logical)) return NULL;
   PolyTensor *out = poly_tensor_create_with_roots(
       ctx, logical, physical, POLY_TENSOR_VALUE, poly_ctx_get_preferred_device(ctx)
   );
@@ -459,14 +475,17 @@ PolyTensor *poly_tensor_sdpa(
     int is_causal
 ) {
   if (!ctx || !q || !k || !v) return NULL;
-  PolyUOp *logical = poly_sdpa(
-      ctx, q->uop_logical, k->uop_logical, v->uop_logical, mask ? mask->uop_logical : NULL,
-      is_causal
-  );
+  PolyTensor *inputs[4] = {q, k, v, mask};
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, mask ? 4 : 3);
+  if (build_logical < 0) return NULL;
   PolyUOp *physical = poly_sdpa(
       ctx, q->uop_physical, k->uop_physical, v->uop_physical, mask ? mask->uop_physical : NULL,
       is_causal
   );
-  PolyTensor *inputs[4] = {q, k, v, mask};
+  PolyUOp *logical = build_logical ? poly_sdpa(
+                                         ctx, q->uop_logical, k->uop_logical, v->uop_logical,
+                                         mask ? mask->uop_logical : NULL, is_causal
+                                     )
+                                   : NULL;
   return nn_tensor_result(ctx, logical, physical, inputs, mask ? 4 : 3);
 }

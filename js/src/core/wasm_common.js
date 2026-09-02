@@ -728,6 +728,8 @@ function createWasmCoreFromModule(Module, device) {
     // Simple ops (no int64 arrays)
     poly_ctx_new: Module._poly_ctx_new,
     poly_ctx_destroy: Module._poly_ctx_destroy,
+    poly_ctx_set_logical_policy: Module._poly_ctx_set_logical_policy,
+    poly_ctx_get_logical_policy: Module._poly_ctx_get_logical_policy,
     poly_ctx_named_count: Module._poly_ctx_named_count,
     poly_const_float: Module._poly_const_float,
     poly_const_double: Module._poly_const_double,
@@ -969,6 +971,7 @@ function createWasmCoreFromModule(Module, device) {
     poly_uop_key: (uop) => BigInt(uop || 0),
     poly_uop_n_src: (uop) => Module._poly_uop_n_src(uop || 0),
     poly_uop_src: (uop, idx) => Module._poly_uop_src(uop || 0, idx | 0),
+    poly_uop_call_grad_fxn_key: (uop) => Module._poly_uop_call_grad_fxn_key(uop || 0) >>> 0,
     poly_uop_reachable: (ctx, root, target) =>
       !!Module._poly_uop_reachable(ctx, root || 0, target || 0),
     poly_uop_substitute: (ctx, root, from, to) => {
@@ -997,7 +1000,7 @@ function createWasmCoreFromModule(Module, device) {
     poly_device_name: (device) => coreDeviceName(device),
     poly_device_is_host_addressable: (device) =>
       Boolean(Module._poly_device_is_host_addressable(device)),
-    poly_tensor_custom_kernel: (ctx, body, inputs) => {
+    poly_tensor_custom_kernel: (ctx, body, inputs, gradFxnKey) => {
       const n = inputs.length
       if (n <= 0) return null
       const inputsPtr = Module._malloc(n * 4)
@@ -1005,7 +1008,9 @@ function createWasmCoreFromModule(Module, device) {
       const h32 = heap32()
       try {
         for (let i = 0; i < n; i++) h32[(inputsPtr >> 2) + i] = inputs[i] || 0
-        if (Module._poly_tensor_custom_kernel(ctx, body, inputsPtr, n, outputsPtr) !== 0) {
+        if (Module._poly_tensor_custom_kernel(
+          ctx, body, inputsPtr, n, gradFxnKey >>> 0, outputsPtr
+        ) !== 0) {
           return null
         }
         /* C graph construction may grow Wasm memory. Reacquire HEAP32 before
@@ -1026,6 +1031,8 @@ function createWasmCoreFromModule(Module, device) {
     },
     poly_tensor_create_with_roots: (ctx, logical, physical, role, device) =>
       Module._poly_tensor_create_with_roots(ctx, logical, physical, role, device),
+    poly_tensor_create_result_like: (ctx, input, logical, physical, role, device) =>
+      Module._poly_tensor_create_result_like(ctx, input, logical || 0, physical, role, device),
     poly_tensor_retain: (tensor) => Module._poly_tensor_retain(tensor),
     poly_tensor_release: (tensor) => Module._poly_tensor_release(tensor),
     poly_uop_retain: (ctx, uop) => Module._poly_uop_retain(ctx, uop),
@@ -1250,9 +1257,14 @@ function createWasmCoreFromModule(Module, device) {
       Module._poly_tensor_index_select(ctx, tensor, dim, index),
     poly_tensor_clone_into: (ctx, target, source) =>
       Module._poly_tensor_clone_into(ctx, target, source),
+    poly_tensor_clone: (ctx, source, device) => Module._poly_tensor_clone(ctx, source, device),
     poly_tensor_uop: (tensor) => Module._poly_tensor_uop(tensor),
     poly_tensor_uop_logical: (tensor) => Module._poly_tensor_uop_logical(tensor),
     poly_tensor_uop_physical: (tensor) => Module._poly_tensor_uop_physical(tensor),
+    poly_tensor_logical_policy: (tensor) => Module._poly_tensor_logical_policy(tensor),
+    poly_tensor_logical_state: (tensor) => Module._poly_tensor_logical_state(tensor),
+    poly_tensor_set_logical_policy: (ctx, tensor, policy) =>
+      Module._poly_tensor_set_logical_policy(ctx, tensor, policy),
     poly_tensor_device: (tensor) => Module._poly_tensor_device(tensor),
     poly_tensor_requires_grad: (tensor) => Boolean(Module._poly_tensor_requires_grad(tensor)),
     poly_tensor_set_requires_grad: (tensor, requiresGrad) =>
@@ -1716,7 +1728,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 65
+  const EXPECTED_ABI = 66
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(

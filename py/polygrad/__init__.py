@@ -9,6 +9,8 @@ from . import _ffi
 
 # Module-level default context (triggers lazy library load)
 _default_ctx = _ffi.get_lib().poly_ctx_new()
+if not _default_ctx:
+    raise RuntimeError('invalid POLY_LOGICAL: expected 0, 1, or 2')
 
 from .tensor import Tensor, Variable, BoundVariable, _dispose_tensors_for_ctx
 from .dtype import DType, INVERSE_DTYPES_DICT, dtypes
@@ -17,7 +19,7 @@ from .instance import Instance, _dispose_instances_for_ctx
 from .jit import CompiledCallable, Jit, JitError, TinyJit, _dispose_jits_for_ctx, compile, jit
 from .function import function
 from .uop.ops import UOp, _dispose_uops_for_ctx
-from .helpers import Context, fetch, getenv
+from .helpers import Context, LOGICAL, _normalize_logical_policy, fetch, getenv
 from . import nn as nn
 
 def _dispose_default_ctx():
@@ -99,6 +101,12 @@ def _stats_for_ctx(ctx):
 def stats():
     """Return monotonically accumulated counters for the module default context."""
     return _stats_for_ctx(_default_ctx)
+
+
+def collect():
+    """Collect C graph storage retired by frontend finalizers."""
+    if _ffi.get_lib().poly_ctx_collect(_default_ctx) != 0:
+        raise RuntimeError('poly_ctx_collect failed')
 
 
 def _can_run_dtype(dtype):
@@ -267,10 +275,18 @@ def _bound_tensor_class(ctx, runtime):
 class Runtime:
     """Explicit PolyCtx owner for device/context-scoped Python code."""
 
-    def __init__(self, *, device='auto'):
+    def __init__(self, *, device='auto', logical=None):
       lib = _ffi.get_lib()
       self._ctx = lib.poly_ctx_new()
+      if not self._ctx:
+          raise RuntimeError('poly_ctx_new failed; check POLY_LOGICAL')
       self._disposed = False
+      policy = _normalize_logical_policy(logical)
+      if policy is not None and lib.poly_ctx_set_logical_policy(self._ctx, policy) != 0:
+          lib.poly_ctx_destroy(self._ctx)
+          self._ctx = None
+          self._disposed = True
+          raise ValueError(f'invalid logical policy {logical!r}')
       dev_id = lib.poly_device_by_name(str(device).lower().encode('utf-8'))
       if dev_id >= 0 and hasattr(lib, 'poly_ctx_set_preferred_device'):
           lib.poly_ctx_set_preferred_device(self._ctx, dev_id)
@@ -284,9 +300,37 @@ class Runtime:
       self.jit = jit
       self.compile = compile
 
+    def context(self, **kwargs):
+      if set(kwargs) != {'LOGICAL'}:
+          raise KeyError(next(iter(set(kwargs) - {'LOGICAL'}), 'LOGICAL'))
+      runtime = self
+      policy = _normalize_logical_policy(kwargs['LOGICAL'])
+
+      class RuntimeContext:
+          def __enter__(self):
+              runtime._check_live()
+              lib = _ffi.get_lib()
+              self.old_policy = int(lib.poly_ctx_get_logical_policy(runtime._ctx))
+              if policy is not None and lib.poly_ctx_set_logical_policy(runtime._ctx, policy) != 0:
+                  raise ValueError(f"invalid logical policy {kwargs['LOGICAL']!r}")
+
+          def __exit__(self, *_):
+              if _ffi.get_lib().poly_ctx_set_logical_policy(runtime._ctx, self.old_policy) != 0:
+                  raise RuntimeError('failed to restore logical policy')
+
+      return RuntimeContext()
+
+    def logical(self, mode):
+      return self.context(LOGICAL=mode)
+
     def stats(self):
       self._check_live()
       return _stats_for_ctx(self._ctx)
+
+    def collect(self):
+      self._check_live()
+      if _ffi.get_lib().poly_ctx_collect(self._ctx) != 0:
+          raise RuntimeError('poly_ctx_collect failed')
 
     def can_run(self, op=None, *, dtype='float32', shape=None, shapes=None, device='auto'):
       self._check_live()
@@ -315,16 +359,16 @@ class Runtime:
       return False
 
 
-def create(*, device='auto'):
+def create(*, device='auto', logical=None):
     """Create an explicit Polygrad runtime/context."""
-    return Runtime(device=device)
+    return Runtime(device=device, logical=logical)
 
 
 __all__ = [
     'Tensor', 'Variable', 'BoundVariable', 'UOp', 'dtypes', 'Device', 'Instance', 'nn',
-    'GlobalCounters', 'Context', 'fetch', 'getenv', 'function',
+    'GlobalCounters', 'Context', 'LOGICAL', 'fetch', 'getenv', 'function',
     'CompiledCallable', 'Jit', 'TinyJit', 'JitError', 'Runtime', 'create',
-    'compile', 'jit', 'stats', 'can_run',
+    'compile', 'jit', 'stats', 'collect', 'can_run',
 ]
 
 try:

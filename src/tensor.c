@@ -69,6 +69,52 @@ static PolyUOp *tensor_current_uop(PolyTensor *tensor) {
   return tensor ? tensor->uop_physical : NULL;
 }
 
+static bool tensor_logical_requested(const PolyCtx *ctx) {
+  return ctx && ctx->logical_policy != POLY_LOGICAL_NEVER;
+}
+
+static bool tensor_physical_owned_by_ctx(PolyCtx *ctx, const PolyTensor *tensor) {
+  return ctx && tensor && tensor->uop_physical && poly_ctx_owns_ptr(ctx, tensor->uop_physical);
+}
+
+/* Polygrad logical-lifetime boundary. Tinygrad always composes the current
+ * Tensor.uop (tensor.py:334-342); this decision only controls whether the
+ * independent portable twin can be composed from the same ordered operands. */
+static int tensor_result_logical_state(PolyCtx *ctx, PolyTensor *const *inputs, int n_inputs) {
+  if (!ctx || n_inputs < 0 || (n_inputs > 0 && !inputs)) return -1;
+  bool has_never = ctx->logical_policy == POLY_LOGICAL_NEVER;
+  bool has_unsupported = false;
+  for (int i = 0; i < n_inputs; i++) {
+    PolyTensor *input = inputs[i];
+    if (!input) continue;
+    if (!tensor_physical_owned_by_ctx(ctx, input)) return -1;
+    if (input->uop_logical && !poly_ctx_owns_ptr(ctx, input->uop_logical)) return -1;
+    if (input->logical_state == POLY_LOGICAL_NEVER_CONSTRUCTED ||
+        input->logical_policy == POLY_LOGICAL_NEVER) {
+      if (input->uop_logical) return -1;
+      has_never = true;
+    } else if (input->logical_state == POLY_LOGICAL_UNSUPPORTED_RESOURCE) {
+      if (input->uop_logical) return -1;
+      has_unsupported = true;
+    } else if (!input->uop_logical) {
+      return -1;
+    }
+  }
+  if (has_never) return POLY_LOGICAL_NEVER_CONSTRUCTED;
+  if (has_unsupported) return POLY_LOGICAL_UNSUPPORTED_RESOURCE;
+  return POLY_LOGICAL_AVAILABLE;
+}
+
+int poly_tensor_result_builds_logical(PolyCtx *ctx, PolyTensor *const *inputs, int n_inputs) {
+  int state = tensor_result_logical_state(ctx, inputs, n_inputs);
+  return state < 0 ? -1 : state == POLY_LOGICAL_AVAILABLE;
+}
+
+static int tensor_unary_builds_logical(PolyCtx *ctx, PolyTensor *src) {
+  PolyTensor *inputs[1] = {src};
+  return poly_tensor_result_builds_logical(ctx, inputs, 1);
+}
+
 static PolyUOp *broadcast_to_exact(PolyCtx *ctx, PolyUOp *x, PolyUOp **target_dims, int ndim);
 static PolyUOp *pad_value_arg(
     PolyCtx *ctx,
@@ -79,11 +125,10 @@ static PolyUOp *pad_value_arg(
 );
 
 static bool tensor_roots_owned_by_ctx(PolyCtx *ctx, const PolyTensor *tensor) {
-  /* Polygrad-specific arena boundary: never intern a destination DAG whose
-   * sources point into another context. Dual-root construction requires both exact roots. */
-  return ctx && tensor && tensor->uop_logical && tensor->uop_physical &&
-         poly_ctx_owns_ptr(ctx, tensor->uop_logical) &&
-         poly_ctx_owns_ptr(ctx, tensor->uop_physical);
+  /* Never intern a destination DAG whose sources belong to another context.
+   * Logical availability is operand state, not an ambient-context condition. */
+  return tensor_physical_owned_by_ctx(ctx, tensor) &&
+         (!tensor->uop_logical || poly_ctx_owns_ptr(ctx, tensor->uop_logical));
 }
 
 static void tensor_replace_roots_commit(
@@ -97,8 +142,11 @@ static void tensor_replace_roots_commit(
   /* Tinygrad 2026-08-22 tensor.py:195-203 replaces Tensor.uop through the
    * becomes-map. A changed physical root invalidates the last residency mark
    * set even when no Tensor owner was released. */
-  if (tensor->owner_ctx && tensor->uop_physical != uop_physical)
-    tensor->owner_ctx->collection_dirty = true;
+  if (tensor->owner_ctx) {
+    if (tensor->uop_physical != uop_physical) tensor->owner_ctx->collection_dirty = true;
+    if (tensor->uop_physical != uop_physical || tensor->uop_logical != uop_logical)
+      tensor->owner_ctx->ir_collection_dirty = true;
+  }
   tensor->uop_logical = uop_logical;
   tensor->uop_physical = uop_physical;
   tensor->role = role;
@@ -176,11 +224,11 @@ static int tensor_retarget_view_assign_roots(
     PolyUOp *physical_to,
     PolyDevice device
 ) {
-  if (!ctx || !logical_from || !logical_to || !physical_from || !physical_to) return -1;
+  if (!ctx || !physical_from || !physical_to || (!!logical_from != !!logical_to)) return -1;
 
-  PolyMap *logical_memo = poly_map_new(64);
+  PolyMap *logical_memo = logical_from ? poly_map_new(64) : NULL;
   PolyMap *physical_memo = poly_map_new(64);
-  if (!logical_memo || !physical_memo) {
+  if ((logical_from && !logical_memo) || !physical_memo) {
     poly_map_destroy(physical_memo);
     poly_map_destroy(logical_memo);
     return -1;
@@ -196,15 +244,17 @@ static int tensor_retarget_view_assign_roots(
     /* View-assign replacements are intentionally self-containing
      * (BUFFER -> AFTER(BUFFER, STORE(...))). Do not recurse into the
      * replacement itself, matching tinygrad's `_apply_map_to_tensors`
-     * substitution in Tensor.assign (tensor.py:246-252). Polygrad applies
-     * that same one-graph rule independently to its retained logical graph and
-     * eagerly built physical parity graph. */
-    if (!t->uop_logical || !t->uop_physical) continue;
-    PolyUOp *new_logical =
-        tensor_substitute_once(ctx, t->uop_logical, logical_from, logical_to, logical_memo);
+     * substitution in Tensor.assign (2026-08-22/a9069c177a9d,
+     * tensor.py:456-460). The physical map is mandatory; target-local NEVER
+     * deliberately supplies no logical map. */
+    if (!t->uop_physical) continue;
+    PolyUOp *new_logical = t->uop_logical;
+    if (new_logical && logical_from)
+      new_logical =
+          tensor_substitute_once(ctx, new_logical, logical_from, logical_to, logical_memo);
     PolyUOp *new_physical =
         tensor_substitute_once(ctx, t->uop_physical, physical_from, physical_to, physical_memo);
-    if (!new_logical || !new_physical) {
+    if ((t->uop_logical && !new_logical) || !new_physical) {
       poly_map_destroy(physical_memo);
       poly_map_destroy(logical_memo);
       return -1;
@@ -448,6 +498,7 @@ void poly_tensor_release(PolyTensor *tensor) {
   tensor->owner_slot = -1;
   free(tensor);
   ctx->collection_dirty = true;
+  ctx->ir_collection_dirty = true;
   if (source) poly_tensor_release(source);
 }
 
@@ -457,9 +508,10 @@ static int tensor_order_cmp(const void *a, const void *b) {
   return ta->order < tb->order ? -1 : ta->order > tb->order;
 }
 
-/* C ownership mechanics for Tinygrad call-local Tensor wrappers. UOps remain
- * arena-owned; only handles created by this composite call lose their local
- * owner, in creation order so retained `.to()` source edges stay valid. */
+/* C ownership mechanics for Tinygrad call-local Tensor wrappers. Only handles
+ * created by this composite call lose their local owner, in creation order so
+ * retained `.to()` source edges stay valid. Core reachability separately owns
+ * their stable UOp rows. */
 static void tensor_release_temporaries(
     PolyCtx *ctx,
     uint64_t first_order,
@@ -497,7 +549,12 @@ PolyTensor *poly_tensor_create_with_roots(
     PolyTensorRole role,
     PolyDevice device
 ) {
-  if (!ctx || !uop_logical) return NULL;
+  /* Raw logical import may omit physical until explicit placement. A complete
+   * physical root may also lack a portable twin after NEVER/unsupported input
+   * propagation; default execution remains valid in that state. */
+  if (!ctx || (!uop_logical && !uop_physical) ||
+      (ctx->logical_policy == POLY_LOGICAL_NEVER && !uop_physical))
+    return NULL;
 
   if (ctx->n_tensors >= ctx->tensors_cap) {
     int new_cap = ctx->tensors_cap ? ctx->tensors_cap * 2 : 64;
@@ -509,8 +566,15 @@ PolyTensor *poly_tensor_create_with_roots(
 
   PolyTensor *tensor = calloc(1, sizeof(PolyTensor));
   if (!tensor) return NULL;
-  tensor->uop_logical = uop_logical;
+  tensor->uop_logical = ctx->logical_policy == POLY_LOGICAL_NEVER ? NULL : uop_logical;
   tensor->uop_physical = uop_physical;
+  /* Polygrad logical/placement boundary. The handle snapshots the context
+   * policy; changing the context never mutates an existing Tensor contract. */
+  tensor->logical_policy = ctx->logical_policy;
+  tensor->logical_state = tensor->uop_logical ? POLY_LOGICAL_AVAILABLE
+                          : ctx->logical_policy == POLY_LOGICAL_NEVER
+                              ? POLY_LOGICAL_NEVER_CONSTRUCTED
+                              : POLY_LOGICAL_UNSUPPORTED_RESOURCE;
   tensor->role = role;
   tensor->device = device;
   tensor->order = ctx->next_tensor_order++;
@@ -523,24 +587,61 @@ PolyTensor *poly_tensor_create_with_roots(
   return tensor;
 }
 
+PolyTensor *poly_tensor_create_result(
+    PolyCtx *ctx,
+    PolyTensor *const *inputs,
+    int n_inputs,
+    PolyUOp *logical,
+    PolyUOp *physical,
+    PolyTensorRole role,
+    PolyDevice device
+) {
+  int state = tensor_result_logical_state(ctx, inputs, n_inputs);
+  if (state < 0 || !physical || (state == POLY_LOGICAL_AVAILABLE && !logical) ||
+      (state != POLY_LOGICAL_AVAILABLE && logical))
+    return NULL;
+  PolyTensor *out = poly_tensor_create_with_roots(ctx, logical, physical, role, device);
+  if (!out) return NULL;
+  out->logical_state = (PolyLogicalState)state;
+  out->logical_policy =
+      state == POLY_LOGICAL_NEVER_CONSTRUCTED ? POLY_LOGICAL_NEVER : ctx->logical_policy;
+  return out;
+}
+
+PolyTensor *poly_tensor_create_result_like(
+    PolyCtx *ctx,
+    PolyTensor *input,
+    PolyUOp *uop_logical,
+    PolyUOp *uop_physical,
+    PolyTensorRole role,
+    PolyDevice device
+) {
+  PolyTensor *inputs[1] = {input};
+  return poly_tensor_create_result(ctx, inputs, 1, uop_logical, uop_physical, role, device);
+}
+
 int poly_tensor_custom_kernel(
     PolyCtx *ctx,
     PolyUOp *body,
     PolyTensor **inputs,
     int n_inputs,
+    uint32_t grad_fxn_key,
     PolyTensor **outputs
 ) {
   if (!ctx || !body || !poly_ctx_owns_ptr(ctx, body) || n_inputs <= 0 || !inputs || !outputs)
     return -1;
 
-  PolyUOp **logical_src = malloc((size_t)(n_inputs + 1) * sizeof(*logical_src));
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, n_inputs);
+  if (build_logical < 0) return -1;
+  PolyUOp **logical_src =
+      build_logical ? malloc((size_t)(n_inputs + 1) * sizeof(*logical_src)) : NULL;
   PolyUOp **physical_src = malloc((size_t)(n_inputs + 1) * sizeof(*physical_src));
-  if (!logical_src || !physical_src) {
+  if ((build_logical && !logical_src) || !physical_src) {
     free(logical_src);
     free(physical_src);
     return -1;
   }
-  logical_src[0] = body;
+  if (build_logical) logical_src[0] = body;
   physical_src[0] = body;
   for (int i = 0; i < n_inputs; i++) {
     outputs[i] = NULL;
@@ -549,19 +650,31 @@ int poly_tensor_custom_kernel(
       free(physical_src);
       return -1;
     }
-    logical_src[i + 1] = inputs[i]->uop_logical;
+    if (build_logical) logical_src[i + 1] = inputs[i]->uop_logical;
     physical_src[i + 1] = inputs[i]->uop_physical;
   }
 
-  /* Pinned UOp.custom_kernel creates one opaque CALL over the exact ordered
-   * contiguous Tensor.uop sources, then returns AFTER(source, same_call) for
-   * every source (uop/ops.py:1093-1097). The Tensor boundary performs that construction
-   * independently for retained logical and mandatory physical occurrences. */
-  PolyUOp *logical_call =
-      poly_uop(ctx, POLY_OP_CALL, POLY_VOID, logical_src, n_inputs + 1, poly_arg_none());
-  PolyUOp *physical_call =
-      poly_uop(ctx, POLY_OP_CALL, POLY_VOID, physical_src, n_inputs + 1, poly_arg_none());
-  if (!logical_call || !physical_call) {
+  /* Tinygrad 2026-08-22/a9069c177a9d UOp.custom_kernel creates one opaque
+   * CALL over the exact ordered sources, then returns AFTER(source, same_call)
+   * for every source (uop/ops.py:1178-1192). Build that topology separately
+   * for retained logical and mandatory physical occurrences. */
+  PolyCallInfo call_info = {
+      .name = NULL,
+      .precompile = false,
+      .precompile_backward = false,
+      .has_grad_fxn = grad_fxn_key != 0,
+      .grad_fxn_key = grad_fxn_key,
+      .has_aux = false,
+  };
+  PolyUOp *physical_call = poly_uop(
+      ctx, POLY_OP_CALL, POLY_VOID, physical_src, n_inputs + 1, poly_arg_call_info(&call_info)
+  );
+  PolyUOp *logical_call = build_logical ? poly_uop(
+                                              ctx, POLY_OP_CALL, POLY_VOID, logical_src,
+                                              n_inputs + 1, poly_arg_call_info(&call_info)
+                                          )
+                                        : NULL;
+  if (!physical_call || (build_logical && !logical_call)) {
     free(logical_src);
     free(physical_src);
     return -1;
@@ -569,17 +682,21 @@ int poly_tensor_custom_kernel(
 
   int rc = 0;
   for (int i = 0; i < n_inputs; i++) {
-    PolyUOp *logical_after_src[2] = {logical_src[i + 1], logical_call};
     PolyUOp *physical_after_src[2] = {physical_src[i + 1], physical_call};
-    PolyUOp *logical_after = poly_uop(
-        ctx, POLY_OP_AFTER, logical_src[i + 1]->dtype, logical_after_src, 2, poly_arg_none()
-    );
     PolyUOp *physical_after = poly_uop(
         ctx, POLY_OP_AFTER, physical_src[i + 1]->dtype, physical_after_src, 2, poly_arg_none()
     );
-    if (!logical_after || !physical_after ||
-        !(outputs[i] = poly_tensor_create_with_roots(
-              ctx, logical_after, physical_after, POLY_TENSOR_VALUE, inputs[i]->device
+    PolyUOp *logical_after = NULL;
+    if (build_logical) {
+      PolyUOp *logical_after_src[2] = {logical_src[i + 1], logical_call};
+      logical_after = poly_uop(
+          ctx, POLY_OP_AFTER, logical_src[i + 1]->dtype, logical_after_src, 2, poly_arg_none()
+      );
+    }
+    if (!physical_after || (build_logical && !logical_after) ||
+        !(outputs[i] = poly_tensor_create_result(
+              ctx, inputs, n_inputs, logical_after, physical_after, POLY_TENSOR_VALUE,
+              inputs[i]->device
           ))) {
       rc = -1;
       break;
@@ -902,6 +1019,7 @@ static int tensor_function_build_surface(
       .precompile = precompile,
       .precompile_backward = precompile_backward,
       .has_grad_fxn = false,
+      .grad_fxn_key = 0,
       .has_aux = false,
   };
   PolyUOp *function = poly_uop(
@@ -939,36 +1057,39 @@ int poly_tensor_function(
     bool precompile_backward,
     PolyTensor **outputs
 ) {
-  if (!ctx || !results || n_results <= 0 || !outputs || n_inputs < 0 ||
-      (n_inputs > 0 && (!input_logical_roots || !input_physical_roots)))
+  if (!ctx || !results || n_results <= 0 || !outputs || n_inputs < 0) return -1;
+  int build_logical = poly_tensor_result_builds_logical(ctx, results, n_results);
+  if (build_logical < 0 ||
+      (n_inputs > 0 && (!input_physical_roots || (build_logical && !input_logical_roots))))
     return -1;
-  PolyUOp **logical_roots = calloc((size_t)n_results, sizeof(*logical_roots));
+  PolyUOp **logical_roots =
+      build_logical ? calloc((size_t)n_results, sizeof(*logical_roots)) : NULL;
   PolyUOp **physical_roots = calloc((size_t)n_results, sizeof(*physical_roots));
   PolyUOp **logical_inputs =
-      n_inputs > 0 ? calloc((size_t)n_inputs, sizeof(*logical_inputs)) : NULL;
+      build_logical && n_inputs > 0 ? calloc((size_t)n_inputs, sizeof(*logical_inputs)) : NULL;
   PolyUOp **physical_inputs =
       n_inputs > 0 ? calloc((size_t)n_inputs, sizeof(*physical_inputs)) : NULL;
-  PolyUOp **logical_out = calloc((size_t)n_results, sizeof(*logical_out));
+  PolyUOp **logical_out = build_logical ? calloc((size_t)n_results, sizeof(*logical_out)) : NULL;
   PolyUOp **physical_out = calloc((size_t)n_results, sizeof(*physical_out));
   int rc = -1;
-  if (!logical_roots || !physical_roots || !logical_out || !physical_out ||
-      (n_inputs > 0 && (!logical_inputs || !physical_inputs)))
+  if ((build_logical && (!logical_roots || !logical_out)) || !physical_roots || !physical_out ||
+      (n_inputs > 0 && (!physical_inputs || (build_logical && !logical_inputs))))
     goto done;
   for (int i = 0; i < n_results; i++) {
     outputs[i] = NULL;
     if (!tensor_roots_owned_by_ctx(ctx, results[i])) goto done;
-    logical_roots[i] = results[i]->uop_logical;
+    if (build_logical) logical_roots[i] = results[i]->uop_logical;
     physical_roots[i] = results[i]->uop_physical;
   }
   int selected = 0;
   for (int i = 0; i < n_inputs; i++) {
-    PolyUOp *logical = input_logical_roots[i];
+    PolyUOp *logical = build_logical ? input_logical_roots[i] : NULL;
     PolyUOp *physical = input_physical_roots[i];
-    if (!logical || !physical || !poly_ctx_owns_ptr(ctx, logical) ||
-        !poly_ctx_owns_ptr(ctx, physical))
+    if (!physical || !poly_ctx_owns_ptr(ctx, physical) ||
+        (build_logical && (!logical || !poly_ctx_owns_ptr(ctx, logical))))
       goto done;
     if (!poly_uop_device_uop_cached(ctx, physical, NULL)) continue;
-    logical_inputs[selected] = logical;
+    if (build_logical) logical_inputs[selected] = logical;
     physical_inputs[selected] = physical;
     selected++;
   }
@@ -977,14 +1098,17 @@ int poly_tensor_function(
       precompile_backward, physical_out
   );
   if (rc != 0) goto done;
-  rc = tensor_function_build_surface(
-      ctx, logical_roots, n_results, logical_inputs, selected, name, true, precompile,
-      precompile_backward, logical_out
-  );
-  if (rc != 0) goto done;
+  if (build_logical) {
+    rc = tensor_function_build_surface(
+        ctx, logical_roots, n_results, logical_inputs, selected, name, true, precompile,
+        precompile_backward, logical_out
+    );
+    if (rc != 0) goto done;
+  }
   for (int i = 0; i < n_results; i++) {
-    outputs[i] = poly_tensor_create_with_roots(
-        ctx, logical_out[i], physical_out[i], POLY_TENSOR_VALUE, poly_uop_device(physical_out[i])
+    outputs[i] = poly_tensor_create_result(
+        ctx, results, n_results, build_logical ? logical_out[i] : NULL, physical_out[i],
+        POLY_TENSOR_VALUE, poly_uop_device(physical_out[i])
     );
     if (!outputs[i]) {
       rc = -1;
@@ -1004,20 +1128,24 @@ done:
   return rc;
 }
 
-PolyTensor *poly_tensor_empty_uop(
+static PolyTensor *tensor_empty_uop_result(
     PolyCtx *ctx,
     PolyDType scalar_dtype,
     PolyUOp **dims,
     int ndim,
-    PolyDevice device
+    PolyDevice device,
+    PolyTensor *const *inputs,
+    int n_inputs
 ) {
   /* tinygrad@2026-08-22/a9069c177a9d CreationMixin.empty uses every symbolic
    * dimension's vmax for storage, then RESHAPE(max_shape).shrink_to(shape)
    * (mixin/creation.py:23-40, uop/ops.py:1752). Polygrad constructs that exact
    * physical graph and its approved deviceless logical peer with one slot. */
-  if (!ctx || ndim < 0 || ndim > POLY_MAX_DIMS || (ndim > 0 && !dims) ||
+  int logical_state = tensor_result_logical_state(ctx, inputs, n_inputs);
+  if (logical_state < 0 || ndim < 0 || ndim > POLY_MAX_DIMS || (ndim > 0 && !dims) ||
       !poly_device_can_execute(device) || poly_dtype_is_weak(scalar_dtype))
     return NULL;
+  bool build_logical = logical_state == POLY_LOGICAL_AVAILABLE;
 
   int64_t max_shape[POLY_MAX_DIMS];
   int64_t numel = 1;
@@ -1031,15 +1159,13 @@ PolyTensor *poly_tensor_empty_uop(
   }
 
   int64_t slot = poly_ctx_next_unique_id(ctx);
-  PolyUOp *logical = poly_uop_new_logical_buffer_with_slot(ctx, scalar_dtype, numel, slot);
   PolyUOp *physical =
       poly_uop_new_buffer(ctx, poly_device_uop(ctx, device), numel, scalar_dtype, slot);
-  if (!logical || !physical) return NULL;
+  if (!physical) return NULL;
 
   if (ndim != 1 || max_shape[0] != numel) {
-    logical = poly_reshape(ctx, logical, max_shape, ndim);
     physical = poly_reshape(ctx, physical, max_shape, ndim);
-    if (!logical || !physical) return NULL;
+    if (!physical) return NULL;
   }
 
   PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(0));
@@ -1047,10 +1173,30 @@ PolyTensor *poly_tensor_empty_uop(
   if (!zero) return NULL;
   for (int i = 0; i < ndim; i++)
     starts[i] = zero;
-  logical = poly_shrink_uop(ctx, logical, starts, dims, ndim);
   physical = poly_shrink_uop(ctx, physical, starts, dims, ndim);
-  if (!logical || !physical) return NULL;
-  return poly_tensor_create_with_roots(ctx, logical, physical, POLY_TENSOR_VALUE, device);
+  if (!physical) return NULL;
+
+  PolyUOp *logical = NULL;
+  if (build_logical) {
+    logical = poly_uop_new_logical_buffer_with_slot(ctx, scalar_dtype, numel, slot);
+    if (!logical) return NULL;
+    if (ndim != 1 || max_shape[0] != numel) logical = poly_reshape(ctx, logical, max_shape, ndim);
+    if (logical) logical = poly_shrink_uop(ctx, logical, starts, dims, ndim);
+    if (!logical) return NULL;
+  }
+  return poly_tensor_create_result(
+      ctx, inputs, n_inputs, logical, physical, POLY_TENSOR_VALUE, device
+  );
+}
+
+PolyTensor *poly_tensor_empty_uop(
+    PolyCtx *ctx,
+    PolyDType scalar_dtype,
+    PolyUOp **dims,
+    int ndim,
+    PolyDevice device
+) {
+  return tensor_empty_uop_result(ctx, scalar_dtype, dims, ndim, device, NULL, 0);
 }
 
 PolyTensor *poly_tensor_empty(
@@ -1082,6 +1228,7 @@ PolyTensor *poly_tensor_from_host(
    * (uop/ops.py:828-839). Polygrad keeps a device-free logical twin but
    * attaches bytes only to the physical source. */
   if (!ctx || ndim < 1 || ndim > POLY_MAX_DIMS || !dims) return NULL;
+  bool build_logical = tensor_logical_requested(ctx);
 
   int64_t numel = 1;
   for (int i = 0; i < ndim; i++) {
@@ -1095,19 +1242,20 @@ PolyTensor *poly_tensor_from_host(
 
   PolyUOp *unique =
       poly_uop0(ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(poly_ctx_next_unique_id(ctx)));
-  PolyUOp *logical =
-      unique ? poly_uop1(ctx, POLY_OP_BUFFER, scalar_dtype, unique, poly_arg_int(numel)) : NULL;
   PolyDevice source_device = POLY_DEVICE_AUTO;
   PolyUOp *physical = unique ? poly_buffer_from_host_unique(
                                    ctx, unique, scalar_dtype, numel, ptr, nbytes, &source_device
                                )
                              : NULL;
-  if (!logical || !physical) return NULL;
+  PolyUOp *logical = build_logical && unique
+                         ? poly_uop1(ctx, POLY_OP_BUFFER, scalar_dtype, unique, poly_arg_int(numel))
+                         : NULL;
+  if (!physical || (build_logical && !logical)) return NULL;
 
   if (ndim != 1 || dims[0] != numel) {
-    logical = poly_reshape(ctx, logical, (int64_t *)dims, ndim);
     physical = poly_reshape(ctx, physical, (int64_t *)dims, ndim);
-    if (!logical || !physical) return NULL;
+    if (build_logical) logical = poly_reshape(ctx, logical, (int64_t *)dims, ndim);
+    if (!physical || (build_logical && !logical)) return NULL;
   }
   /* Tinygrad 2026-08-22/a9069c177a9d UOp._frompy creates and shapes the
    * PYTHON source before any dtype cast or requested-device COPY
@@ -1127,7 +1275,9 @@ int poly_tensor_replace_roots(
     PolyTensorRole role,
     PolyDevice device
 ) {
-  if (!ctx || !tensor || !uop_logical || !uop_physical) return -1;
+  bool has_logical = tensor && (tensor->logical_state == POLY_LOGICAL_AVAILABLE ||
+                                tensor->logical_state == POLY_LOGICAL_RETIRED);
+  if (!ctx || !tensor || !uop_physical || has_logical != (uop_logical != NULL)) return -1;
   tensor_replace_roots_commit(tensor, uop_logical, uop_physical, role, device);
   return 0;
 }
@@ -1139,21 +1289,17 @@ int poly_tensor_set_physical(
     PolyTensorRole role,
     PolyDevice device
 ) {
-  if (!ctx || !tensor || !tensor->uop_logical || !uop_physical) return -1;
+  bool has_logical = tensor && (tensor->logical_state == POLY_LOGICAL_AVAILABLE ||
+                                tensor->logical_state == POLY_LOGICAL_RETIRED);
+  if (!ctx || !tensor || !uop_physical || has_logical != (tensor->uop_logical != NULL)) return -1;
   tensor_replace_roots_commit(tensor, tensor->uop_logical, uop_physical, role, device);
   return 0;
 }
 
-static bool tensor_promote_pair(
-    PolyCtx *ctx,
-    PolyUOp **logical,
-    PolyUOp **physical,
-    PolyDType common
-) {
-  if (!ctx || !logical || !physical || !*logical || !*physical) return false;
-  *logical = poly_elementwise_promote(ctx, *logical, common);
-  *physical = poly_elementwise_promote(ctx, *physical, common);
-  return *logical && *physical;
+static bool tensor_promote(PolyCtx *ctx, PolyUOp **value, PolyDType common) {
+  if (!ctx || !value || !*value) return false;
+  *value = poly_elementwise_promote(ctx, *value, common);
+  return *value != NULL;
 }
 
 static PolyUOp *tensor_sub_promoted(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
@@ -1185,13 +1331,16 @@ static PolyTensor *tensor_alu(PolyCtx *ctx, PolyOps op, PolyTensor **inputs, int
   if (!poly_opset_has(expected_group, op)) return NULL;
   PolyUOp *logical_src[3] = {0};
   PolyUOp *physical_src[3] = {0};
+  int logical_state = tensor_result_logical_state(ctx, inputs, n);
+  if (logical_state < 0) return NULL;
+  bool build_logical = logical_state == POLY_LOGICAL_AVAILABLE;
   PolyDevice device = POLY_DEVICE_AUTO;
   bool requires_grad = false;
   bool requires_grad_set = false;
   for (int i = 0; i < n; i++) {
     PolyTensor *input = inputs[i];
-    if (!input || !input->uop_logical) return NULL;
-    logical_src[i] = input->uop_logical;
+    if (!input) return NULL;
+    logical_src[i] = build_logical ? input->uop_logical : NULL;
     physical_src[i] = tensor_current_uop(input);
     if (!physical_src[i]) return NULL;
     if (input->device != POLY_DEVICE_AUTO) {
@@ -1204,42 +1353,47 @@ static PolyTensor *tensor_alu(PolyCtx *ctx, PolyOps op, PolyTensor **inputs, int
 
   int promote_from = 0;
   if (op == POLY_OP_WHERE) {
-    if (!poly_dtype_is_bool(logical_src[0]->dtype) || !poly_dtype_is_bool(physical_src[0]->dtype))
+    if (!poly_dtype_is_bool(physical_src[0]->dtype) ||
+        (build_logical && !poly_dtype_is_bool(logical_src[0]->dtype)))
       return NULL;
     promote_from = 1;
   }
   if (n - promote_from >= 2) {
-    PolyDType common = logical_src[promote_from]->dtype;
+    PolyDType common = physical_src[promote_from]->dtype;
     for (int i = promote_from + 1; i < n; i++)
-      if (!poly_dtype_least_upper(common, logical_src[i]->dtype, &common)) return NULL;
+      if (!poly_dtype_least_upper(common, physical_src[i]->dtype, &common)) return NULL;
     for (int i = promote_from; i < n; i++)
-      if (!tensor_promote_pair(ctx, &logical_src[i], &physical_src[i], common)) return NULL;
+      if (!tensor_promote(ctx, &physical_src[i], common)) return NULL;
+    if (build_logical)
+      for (int i = promote_from; i < n; i++)
+        if (!tensor_promote(ctx, &logical_src[i], common)) return NULL;
   }
 
   PolyUOp *logical = NULL;
   PolyUOp *physical = NULL;
   switch (n) {
   case 1:
-    logical = poly_alu1(ctx, op, logical_src[0]);
     physical = poly_alu1(ctx, op, physical_src[0]);
+    if (build_logical) logical = poly_alu1(ctx, op, logical_src[0]);
     break;
   case 2:
     /* Current Tensor.sub is composed ADD/MUL after one promotion pass
      * (mixin/elementwise.py:108-119). Keep raw SUB for imported IR. */
-    logical = op == POLY_OP_SUB ? tensor_sub_promoted(ctx, logical_src[0], logical_src[1])
-                                : poly_alu2(ctx, op, logical_src[0], logical_src[1]);
     physical = op == POLY_OP_SUB ? tensor_sub_promoted(ctx, physical_src[0], physical_src[1])
                                  : poly_alu2(ctx, op, physical_src[0], physical_src[1]);
+    if (build_logical)
+      logical = op == POLY_OP_SUB ? tensor_sub_promoted(ctx, logical_src[0], logical_src[1])
+                                  : poly_alu2(ctx, op, logical_src[0], logical_src[1]);
     break;
   case 3:
-    logical = poly_alu3(ctx, op, logical_src[0], logical_src[1], logical_src[2]);
     physical = poly_alu3(ctx, op, physical_src[0], physical_src[1], physical_src[2]);
+    if (build_logical) logical = poly_alu3(ctx, op, logical_src[0], logical_src[1], logical_src[2]);
     break;
   }
-  if (!logical || !physical) return NULL;
+  if (!physical || (build_logical && !logical)) return NULL;
 
   PolyTensor *out =
-      poly_tensor_create_with_roots(ctx, logical, physical, POLY_TENSOR_VALUE, device);
+      poly_tensor_create_result(ctx, inputs, n, logical, physical, POLY_TENSOR_VALUE, device);
   if (!out) return NULL;
   out->requires_grad = requires_grad;
   out->requires_grad_set = requires_grad_set;
@@ -1277,20 +1431,27 @@ static int uop_shape(PolyCtx *ctx, PolyUOp *u, int64_t *out_shape);
  * from the exact current physical occurrence and stored even when CSE makes
  * both results pointer-identical. */
 static PolyTensor *tensor_dtype_result(PolyCtx *ctx, PolyTensor *src, int dtype_id, bool bitcast) {
+  PolyTensor *inputs[1] = {src};
+  int logical_state = tensor_result_logical_state(ctx, inputs, 1);
+  if (logical_state < 0) return NULL;
+  bool build_logical = logical_state == POLY_LOGICAL_AVAILABLE;
   PolyUOp *current = tensor_current_uop(src);
-  if (!ctx || !src || !src->uop_logical || !current) return NULL;
-  PolyUOp *logical = bitcast ? poly_bitcast_by_id(ctx, src->uop_logical, dtype_id)
-                             : poly_cast_by_id(ctx, src->uop_logical, dtype_id);
+  if (!current) return NULL;
   PolyUOp *physical = bitcast ? poly_bitcast_by_id(ctx, current, dtype_id)
                               : poly_cast_by_id(ctx, current, dtype_id);
-  if (!logical || !physical) return NULL;
+  PolyUOp *logical = build_logical ? (bitcast ? poly_bitcast_by_id(ctx, src->uop_logical, dtype_id)
+                                              : poly_cast_by_id(ctx, src->uop_logical, dtype_id))
+                                   : NULL;
+  if (!physical || (build_logical && !logical)) return NULL;
   /* Current UOp._shape raises on a statically non-divisible final byte
    * extent while DTypeMixin._wrap_uop constructs the Tensor
    * (uop/ops.py:404-411, mixin/dtype.py:35-50). Keep that validation in the
    * shared C Tensor boundary so Python, JavaScript, and direct C agree. */
-  if (bitcast && (poly_uop_ndim(ctx, logical) < 0 || poly_uop_ndim(ctx, physical) < 0)) return NULL;
+  if (bitcast &&
+      (poly_uop_ndim(ctx, physical) < 0 || (build_logical && poly_uop_ndim(ctx, logical) < 0)))
+    return NULL;
   PolyTensor *out =
-      poly_tensor_create_with_roots(ctx, logical, physical, POLY_TENSOR_VALUE, src->device);
+      poly_tensor_create_result(ctx, inputs, 1, logical, physical, POLY_TENSOR_VALUE, src->device);
   if (!out) return NULL;
   out->requires_grad = src->requires_grad;
   out->requires_grad_set = src->requires_grad_set;
@@ -1306,7 +1467,7 @@ PolyTensor *poly_tensor_bitcast_by_id(PolyCtx *ctx, PolyTensor *src, int dtype_i
   PolyDType target;
   bool have_target = poly_dtype_by_id(dtype_id, &target);
   PolyUOp *current = tensor_current_uop(src);
-  if (!ctx || !src || !src->uop_logical || !current || !have_target) return NULL;
+  if (!ctx || !src || !current || !have_target) return NULL;
   PolyDType source_dtype = current->dtype;
   PolyDType target_dtype = target;
   /* Current DTypeMixin.bitcast is one raw UOp for every concrete non-identity
@@ -1328,9 +1489,10 @@ static PolyTensor *tensor_unary_result(
     PolyUOp *logical,
     PolyUOp *physical
 ) {
-  if (!ctx || !src || !logical || !physical) return NULL;
-  PolyTensor *out =
-      poly_tensor_create_with_roots(ctx, logical, physical, POLY_TENSOR_VALUE, src->device);
+  PolyTensor *inputs[1] = {src};
+  PolyTensor *out = poly_tensor_create_result(
+      ctx, inputs, 1, logical, physical, POLY_TENSOR_VALUE, src ? src->device : POLY_DEVICE_AUTO
+  );
   if (!out) return NULL;
   out->requires_grad = src->requires_grad;
   out->requires_grad_set = src->requires_grad_set;
@@ -1339,16 +1501,19 @@ static PolyTensor *tensor_unary_result(
 }
 
 static PolyTensor *tensor_const_like(PolyCtx *ctx, PolyTensor *ref, PolyArg value) {
-  if (!tensor_roots_owned_by_ctx(ctx, ref)) return NULL;
+  PolyTensor *inputs[1] = {ref};
+  int logical_state = tensor_result_logical_state(ctx, inputs, 1);
+  if (logical_state < 0) return NULL;
+  bool build_logical = logical_state == POLY_LOGICAL_AVAILABLE;
   /* Current UOp.const_like is one typed scalar CONST broadcast to the exact
    * reference shape (uop/ops.py:581-583). Build it independently from the
    * retained logical and mandatory physical occurrences; unlike a unary
    * value op this constant does not inherit gradient metadata. */
-  PolyUOp *logical = poly_const_like(ctx, ref->uop_logical, value);
   PolyUOp *physical = poly_const_like(ctx, ref->uop_physical, value);
-  if (!logical || !physical) return NULL;
+  PolyUOp *logical = build_logical ? poly_const_like(ctx, ref->uop_logical, value) : NULL;
+  if (!physical || (build_logical && !logical)) return NULL;
   PolyTensor *out =
-      poly_tensor_create_with_roots(ctx, logical, physical, POLY_TENSOR_VALUE, ref->device);
+      poly_tensor_create_result(ctx, inputs, 1, logical, physical, POLY_TENSOR_VALUE, ref->device);
   if (out) out->provenance = POLY_TENSOR_PROVENANCE_CONST_INIT;
   return out;
 }
@@ -1362,83 +1527,99 @@ PolyTensor *poly_tensor_const_like_float(PolyCtx *ctx, PolyTensor *ref, double v
 }
 
 PolyTensor *poly_tensor_contiguous(PolyCtx *ctx, PolyTensor *src) {
+  PolyTensor *inputs[1] = {src};
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, 1);
+  if (build_logical < 0) return NULL;
   PolyUOp *current = tensor_current_uop(src);
-  if (!ctx || !src || !src->uop_logical || !current) return NULL;
+  if (!current) return NULL;
   /* Pinned Tensor.contiguous applies UOp.contiguous to its current UOp
    * (tensor.py:742-746, uop/ops.py:587-591). The Tensor boundary applies that exact fold
    * independently to the retained logical root and physical occurrence. */
   /* Retained logical provenance records the explicit materialization request.
    * It is a Polygrad export/re-placement boundary, not the tinygrad execution
    * surface, and remains device-free. */
-  PolyUOp *logical = poly_contiguous(ctx, src->uop_logical);
   PolyUOp *physical = current;
   if (poly_uop_device(physical) != POLY_DEVICE_AUTO) physical = poly_contiguous(ctx, physical);
-  if (!logical || !physical) return NULL;
+  PolyUOp *logical = build_logical ? poly_contiguous(ctx, src->uop_logical) : NULL;
+  if (!physical || (build_logical && !logical)) return NULL;
   return tensor_unary_result(ctx, src, logical, physical);
 }
 
 PolyTensor *poly_tensor_reshape(PolyCtx *ctx, PolyTensor *src, int64_t *dims, int ndim) {
+  PolyTensor *inputs[1] = {src};
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, 1);
+  if (build_logical < 0) return NULL;
   PolyUOp *current = tensor_current_uop(src);
-  if (!ctx || !src || !src->uop_logical || !current) return NULL;
-  return tensor_unary_result(
-      ctx, src, poly_reshape(ctx, src->uop_logical, dims, ndim),
-      poly_reshape(ctx, current, dims, ndim)
-  );
+  if (!current) return NULL;
+  PolyUOp *physical = poly_reshape(ctx, current, dims, ndim);
+  PolyUOp *logical = build_logical ? poly_reshape(ctx, src->uop_logical, dims, ndim) : NULL;
+  return tensor_unary_result(ctx, src, logical, physical);
 }
 
 PolyTensor *poly_tensor_reshape_uop(PolyCtx *ctx, PolyTensor *src, PolyUOp **dims, int ndim) {
+  PolyTensor *inputs[1] = {src};
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, 1);
+  if (build_logical < 0) return NULL;
   PolyUOp *current = tensor_current_uop(src);
-  if (!ctx || !src || !src->uop_logical || !current) return NULL;
+  if (!current) return NULL;
   /* Pinned MovementMixin.reshape constructs
    * RESHAPE(value, shape_to_shape_arg(new_shape)) and lets UOp shape
    * inference prove exact symbolic cardinality (mixin/movement.py:145-164,
    * uop/ops.py:697-722,318-336). Apply that constructor independently to
    * the retained logical root and exact current physical occurrence. */
-  PolyUOp *logical = poly_reshape_uop(ctx, src->uop_logical, dims, ndim);
   PolyUOp *physical = poly_reshape_uop(ctx, current, dims, ndim);
-  if (!logical || !physical || poly_uop_ndim(ctx, logical) != ndim ||
-      poly_uop_ndim(ctx, physical) != ndim)
+  PolyUOp *logical = build_logical ? poly_reshape_uop(ctx, src->uop_logical, dims, ndim) : NULL;
+  if (!physical || poly_uop_ndim(ctx, physical) != ndim ||
+      (build_logical && (!logical || poly_uop_ndim(ctx, logical) != ndim)))
     return NULL;
   return tensor_unary_result(ctx, src, logical, physical);
 }
 
 PolyTensor *poly_tensor_expand(PolyCtx *ctx, PolyTensor *src, int64_t *dims, int ndim) {
+  PolyTensor *inputs[1] = {src};
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, 1);
+  if (build_logical < 0) return NULL;
   PolyUOp *current = tensor_current_uop(src);
-  if (!ctx || !src || !src->uop_logical || !current) return NULL;
-  return tensor_unary_result(
-      ctx, src, poly_expand(ctx, src->uop_logical, dims, ndim),
-      poly_expand(ctx, current, dims, ndim)
-  );
+  if (!current) return NULL;
+  PolyUOp *physical = poly_expand(ctx, current, dims, ndim);
+  PolyUOp *logical = build_logical ? poly_expand(ctx, src->uop_logical, dims, ndim) : NULL;
+  return tensor_unary_result(ctx, src, logical, physical);
 }
 
 PolyTensor *poly_tensor_expand_uop(PolyCtx *ctx, PolyTensor *src, PolyUOp **dims, int ndim) {
+  PolyTensor *inputs[1] = {src};
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, 1);
+  if (build_logical < 0) return NULL;
   PolyUOp *current = tensor_current_uop(src);
-  if (!ctx || !src || !src->uop_logical || !current) return NULL;
+  if (!current) return NULL;
   /* Pinned tinygrad _broadcast_to/_mop constructs
    * EXPAND(value, shape_to_shape_arg(new_shape)) directly from Tensor.uop
    * (mixin/movement.py:116-143, uop/ops.py:710-722). */
-  return tensor_unary_result(
-      ctx, src, poly_expand_uop(ctx, src->uop_logical, dims, ndim),
-      poly_expand_uop(ctx, current, dims, ndim)
-  );
+  PolyUOp *physical = poly_expand_uop(ctx, current, dims, ndim);
+  PolyUOp *logical = build_logical ? poly_expand_uop(ctx, src->uop_logical, dims, ndim) : NULL;
+  return tensor_unary_result(ctx, src, logical, physical);
 }
 
 PolyTensor *poly_tensor_permute(PolyCtx *ctx, PolyTensor *src, int64_t *perm, int ndim) {
+  PolyTensor *inputs[1] = {src};
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, 1);
+  if (build_logical < 0) return NULL;
   PolyUOp *current = tensor_current_uop(src);
-  if (!ctx || !src || !src->uop_logical || !current) return NULL;
-  return tensor_unary_result(
-      ctx, src, poly_permute(ctx, src->uop_logical, perm, ndim),
-      poly_permute(ctx, current, perm, ndim)
-  );
+  if (!current) return NULL;
+  PolyUOp *physical = poly_permute(ctx, current, perm, ndim);
+  PolyUOp *logical = build_logical ? poly_permute(ctx, src->uop_logical, perm, ndim) : NULL;
+  return tensor_unary_result(ctx, src, logical, physical);
 }
 
 PolyTensor *poly_tensor_shrink(PolyCtx *ctx, PolyTensor *src, int64_t (*pairs)[2], int ndim) {
+  PolyTensor *inputs[1] = {src};
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, 1);
+  if (build_logical < 0) return NULL;
   PolyUOp *current = tensor_current_uop(src);
-  if (!ctx || !src || !src->uop_logical || !current) return NULL;
-  return tensor_unary_result(
-      ctx, src, poly_shrink(ctx, src->uop_logical, pairs, ndim),
-      poly_shrink(ctx, current, pairs, ndim)
-  );
+  if (!current) return NULL;
+  PolyUOp *physical = poly_shrink(ctx, current, pairs, ndim);
+  PolyUOp *logical = build_logical ? poly_shrink(ctx, src->uop_logical, pairs, ndim) : NULL;
+  return tensor_unary_result(ctx, src, logical, physical);
 }
 
 PolyTensor *poly_tensor_shrink_uop(
@@ -1448,26 +1629,31 @@ PolyTensor *poly_tensor_shrink_uop(
     PolyUOp **sizes,
     int ndim
 ) {
+  PolyTensor *inputs[1] = {src};
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, 1);
+  if (build_logical < 0) return NULL;
   PolyUOp *current = tensor_current_uop(src);
-  if (!ctx || !src || !src->uop_logical || !current) return NULL;
+  if (!current) return NULL;
   /* Pinned tinygrad movement._mop builds
    * SHRINK(value, shape_to_shape_arg(starts), shape_to_shape_arg(sizes))
    * directly from Tensor.uop (mixin/movement.py:173-193,
    * uop/ops.py:710-722). The Tensor boundary applies that same raw constructor to the
    * exact ordered logical and physical occurrences. */
-  return tensor_unary_result(
-      ctx, src, poly_shrink_uop(ctx, src->uop_logical, starts, sizes, ndim),
-      poly_shrink_uop(ctx, current, starts, sizes, ndim)
-  );
+  PolyUOp *physical = poly_shrink_uop(ctx, current, starts, sizes, ndim);
+  PolyUOp *logical =
+      build_logical ? poly_shrink_uop(ctx, src->uop_logical, starts, sizes, ndim) : NULL;
+  return tensor_unary_result(ctx, src, logical, physical);
 }
 
 PolyTensor *poly_tensor_flip(PolyCtx *ctx, PolyTensor *src, int64_t *axes, int n_axes) {
+  PolyTensor *inputs[1] = {src};
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, 1);
+  if (build_logical < 0) return NULL;
   PolyUOp *current = tensor_current_uop(src);
-  if (!ctx || !src || !src->uop_logical || !current) return NULL;
-  return tensor_unary_result(
-      ctx, src, poly_flip(ctx, src->uop_logical, axes, n_axes),
-      poly_flip(ctx, current, axes, n_axes)
-  );
+  if (!current) return NULL;
+  PolyUOp *physical = poly_flip(ctx, current, axes, n_axes);
+  PolyUOp *logical = build_logical ? poly_flip(ctx, src->uop_logical, axes, n_axes) : NULL;
+  return tensor_unary_result(ctx, src, logical, physical);
 }
 
 static PolyTensor *tensor_pad_value_arg(
@@ -1477,12 +1663,15 @@ static PolyTensor *tensor_pad_value_arg(
     int ndim,
     PolyArg value
 ) {
+  PolyTensor *inputs[1] = {src};
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, 1);
+  if (build_logical < 0) return NULL;
   PolyUOp *current = tensor_current_uop(src);
-  if (!ctx || !src || !src->uop_logical || !current) return NULL;
-  return tensor_unary_result(
-      ctx, src, pad_value_arg(ctx, src->uop_logical, pairs, ndim, value),
-      pad_value_arg(ctx, current, pairs, ndim, value)
-  );
+  if (!current) return NULL;
+  PolyUOp *physical = pad_value_arg(ctx, current, pairs, ndim, value);
+  PolyUOp *logical =
+      build_logical ? pad_value_arg(ctx, src->uop_logical, pairs, ndim, value) : NULL;
+  return tensor_unary_result(ctx, src, logical, physical);
 }
 
 PolyTensor *poly_tensor_pad_value_bool(
@@ -1516,7 +1705,9 @@ PolyTensor *poly_tensor_pad_value_float(
 }
 
 PolyTensor *poly_tensor_to_device(PolyCtx *ctx, PolyTensor *tensor, PolyDevice device) {
-  if (!ctx || !tensor || !tensor->uop_logical || !tensor->uop_physical) return NULL;
+  PolyTensor *inputs[1] = {tensor};
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, 1);
+  if (build_logical < 0) return NULL;
   if (tensor->device == device) return tensor;
   /* Pinned Tensor.to returns self when Tensor.uop has no device
    * (tensor.py:327-335). Pure CONST/arange graphs are device-free values, not
@@ -1529,8 +1720,10 @@ PolyTensor *poly_tensor_to_device(PolyCtx *ctx, PolyTensor *tensor, PolyDevice d
   PolyUOp *target_device = poly_device_uop(ctx, device);
   PolyUOp *physical = poly_copy_to_device_uop(ctx, source_physical, target_device);
   if (!physical) return NULL;
-  PolyTensor *placed =
-      poly_tensor_create_with_roots(ctx, tensor->uop_logical, physical, POLY_TENSOR_PLACE, device);
+  PolyTensor *placed = poly_tensor_create_result(
+      ctx, inputs, 1, build_logical ? tensor->uop_logical : NULL, physical, POLY_TENSOR_PLACE,
+      device
+  );
   if (placed) {
     placed->source = poly_tensor_retain(tensor);
     placed->requires_grad = tensor->requires_grad;
@@ -1542,34 +1735,27 @@ PolyTensor *poly_tensor_to_device(PolyCtx *ctx, PolyTensor *tensor, PolyDevice d
 
 PolyTensor *poly_tensor_assign(PolyCtx *ctx, PolyTensor *target, PolyTensor *value) {
   if (!ctx || !target || !value) return NULL;
+  const bool build_logical = target->logical_policy != POLY_LOGICAL_NEVER;
   PolyUOp *target_logical = target->uop_logical;
   PolyUOp *value_logical = value->uop_logical;
   PolyUOp *target_physical = target->uop_physical;
   PolyUOp *value_physical = value->uop_physical;
-  if (!target_logical || !value_logical || !target_physical || !value_physical) return NULL;
-
-  /* Pinned Tensor.assign broadcasts the RHS to the target shape before
-   * constructing AFTER(target, STORE(target, value)) (tensor.py:230-257).
-   * Apply that rule independently to the retained logical and exact current
-   * physical occurrences; a moved RHS must keep its COPY chain. */
-  int logical_ndim = poly_uop_ndim(ctx, target_logical);
-  int physical_ndim = poly_uop_ndim(ctx, target_physical);
-  if (logical_ndim < 0 || logical_ndim > POLY_MAX_DIMS || physical_ndim < 0 ||
-      physical_ndim > POLY_MAX_DIMS)
+  if (!target_physical || !value_physical || (build_logical && (!target_logical || !value_logical)))
     return NULL;
-  PolyUOp *logical_dims[POLY_MAX_DIMS];
+
+  /* Tinygrad 2026-08-22/a9069c177a9d Tensor.assign broadcasts the RHS before
+   * constructing AFTER(target, STORE(target, value)) (tensor.py:436-463).
+   * Build that mandatory parity graph first; NEVER only omits its portable
+   * twin, so a moved RHS keeps the same COPY chain. */
+  int physical_ndim = poly_uop_ndim(ctx, target_physical);
+  if (physical_ndim < 0 || physical_ndim > POLY_MAX_DIMS) return NULL;
   PolyUOp *physical_dims[POLY_MAX_DIMS];
-  for (int i = 0; i < logical_ndim; i++) {
-    logical_dims[i] = poly_uop_shape_dim(ctx, target_logical, i);
-    if (!logical_dims[i]) return NULL;
-  }
   for (int i = 0; i < physical_ndim; i++) {
     physical_dims[i] = poly_uop_shape_dim(ctx, target_physical, i);
     if (!physical_dims[i]) return NULL;
   }
-  value_logical = broadcast_to_exact(ctx, value_logical, logical_dims, logical_ndim);
   value_physical = broadcast_to_exact(ctx, value_physical, physical_dims, physical_ndim);
-  if (!value_logical || !value_physical) return NULL;
+  if (!value_physical) return NULL;
 
   /* Match tinygrad Tensor.assign: non-DISK assigns require same device and
    * dtype before constructing the AFTER/STORE effect graph. Without this,
@@ -1579,9 +1765,7 @@ PolyTensor *poly_tensor_assign(PolyCtx *ctx, PolyTensor *target, PolyTensor *val
       value->device != POLY_DEVICE_AUTO &&
       !poly_devices_share_storage(target->device, value->device))
     return NULL;
-  if (!poly_dtype_eq(target_logical->dtype, value_logical->dtype) ||
-      !poly_dtype_eq(target_physical->dtype, value_physical->dtype))
-    return NULL;
+  if (!poly_dtype_eq(target_physical->dtype, value_physical->dtype)) return NULL;
 
   PolyUOp *physical_store = poly_store_val(ctx, target_physical, value_physical);
   PolyUOp *physical_src[2] = {target_physical, physical_store};
@@ -1589,28 +1773,45 @@ PolyTensor *poly_tensor_assign(PolyCtx *ctx, PolyTensor *target, PolyTensor *val
       physical_store
           ? poly_uop(ctx, POLY_OP_AFTER, target_physical->dtype, physical_src, 2, poly_arg_none())
           : NULL;
+  if (!physical_after) return NULL;
 
-  PolyUOp *logical_store = poly_store_val(ctx, target_logical, value_logical);
-  PolyUOp *logical_src[2] = {target_logical, logical_store};
-  PolyUOp *logical_after =
-      logical_store
-          ? poly_uop(ctx, POLY_OP_AFTER, target_logical->dtype, logical_src, 2, poly_arg_none())
-          : NULL;
-  if (!logical_after || !physical_after) return NULL;
+  PolyUOp *logical_after = NULL;
+  if (build_logical) {
+    int logical_ndim = poly_uop_ndim(ctx, target_logical);
+    if (logical_ndim < 0 || logical_ndim > POLY_MAX_DIMS) return NULL;
+    PolyUOp *logical_dims[POLY_MAX_DIMS];
+    for (int i = 0; i < logical_ndim; i++) {
+      logical_dims[i] = poly_uop_shape_dim(ctx, target_logical, i);
+      if (!logical_dims[i]) return NULL;
+    }
+    value_logical = broadcast_to_exact(ctx, value_logical, logical_dims, logical_ndim);
+    if (!value_logical || !poly_dtype_eq(target_logical->dtype, value_logical->dtype)) return NULL;
+    PolyUOp *logical_store = poly_store_val(ctx, target_logical, value_logical);
+    PolyUOp *logical_src[2] = {target_logical, logical_store};
+    logical_after =
+        logical_store
+            ? poly_uop(ctx, POLY_OP_AFTER, target_logical->dtype, logical_src, 2, poly_arg_none())
+            : NULL;
+    if (!logical_after) return NULL;
+  }
 
-  PolyUOp *logical_view_anchor = tensor_assign_view_anchor(target_logical);
   PolyUOp *physical_view_anchor = tensor_assign_view_anchor(target_physical);
-  if (logical_view_anchor || physical_view_anchor) {
-    if (!logical_view_anchor || !physical_view_anchor) return NULL;
-    PolyUOp *logical_anchor_src[2] = {logical_view_anchor, logical_after};
+  PolyUOp *logical_view_anchor = build_logical ? tensor_assign_view_anchor(target_logical) : NULL;
+  if ((build_logical && logical_view_anchor) || physical_view_anchor) {
+    if (!physical_view_anchor || (build_logical && !logical_view_anchor)) return NULL;
     PolyUOp *physical_anchor_src[2] = {physical_view_anchor, physical_after};
-    PolyUOp *logical_assigned_anchor = poly_uop(
-        ctx, POLY_OP_AFTER, logical_view_anchor->dtype, logical_anchor_src, 2, poly_arg_none()
-    );
     PolyUOp *physical_assigned_anchor = poly_uop(
         ctx, POLY_OP_AFTER, physical_view_anchor->dtype, physical_anchor_src, 2, poly_arg_none()
     );
-    if (!logical_assigned_anchor || !physical_assigned_anchor) return NULL;
+    if (!physical_assigned_anchor) return NULL;
+    PolyUOp *logical_assigned_anchor = NULL;
+    if (build_logical) {
+      PolyUOp *logical_anchor_src[2] = {logical_view_anchor, logical_after};
+      logical_assigned_anchor = poly_uop(
+          ctx, POLY_OP_AFTER, logical_view_anchor->dtype, logical_anchor_src, 2, poly_arg_none()
+      );
+      if (!logical_assigned_anchor) return NULL;
+    }
     if (tensor_retarget_view_assign_roots(
             ctx, logical_view_anchor, logical_assigned_anchor, physical_view_anchor,
             physical_assigned_anchor, target->device
@@ -1634,23 +1835,21 @@ PolyTensor *poly_tensor_clone_into(PolyCtx *ctx, PolyTensor *target, PolyTensor 
   if (!ctx || !target || !source || target == source) return NULL;
   if (target->device == POLY_DEVICE_AUTO) return NULL;
 
+  const bool build_logical = target->logical_state == POLY_LOGICAL_AVAILABLE ||
+                             target->logical_state == POLY_LOGICAL_RETIRED;
   PolyUOp *target_logical = target->uop_logical;
   PolyUOp *target_physical = target->uop_physical;
   PolyUOp *source_logical = source->uop_logical;
   if (source_logical && source_logical->op == POLY_OP_AFTER && source->uop_physical)
     source_logical = source->uop_physical;
-  /* Pinned UOp.clone (uop/ops.py:765-769) decides from self.device and stores
-   * the current UOp directly. Wrapper metadata must not synthesize placement. */
+  /* Tinygrad 2026-08-22/a9069c177a9d UOp.clone (uop/ops.py:841-845) decides
+   * from self.device and stores the current UOp directly. Wrapper metadata
+   * must not synthesize placement. */
   PolyUOp *source_physical = source->uop_physical;
-  if (!target_logical || !target_physical || !source_logical || !source_physical) return NULL;
-  if (!poly_dtype_eq(target_logical->dtype, source_logical->dtype)) return NULL;
-
-  PolyUOp *logical_store = poly_store_val(ctx, target_logical, source_logical);
-  PolyUOp *logical_src[2] = {target_logical, logical_store};
-  PolyUOp *logical_after =
-      logical_store
-          ? poly_uop(ctx, POLY_OP_AFTER, target_logical->dtype, logical_src, 2, poly_arg_none())
-          : NULL;
+  if (!target_physical || !source_physical ||
+      (build_logical && (!target_logical || !source_logical)))
+    return NULL;
+  if (!poly_dtype_eq(target_physical->dtype, source_physical->dtype)) return NULL;
 
   PolyUOp *placed_source = source_physical;
   PolyDevice source_device = poly_uop_device(source_physical);
@@ -1666,12 +1865,53 @@ PolyTensor *poly_tensor_clone_into(PolyCtx *ctx, PolyTensor *target, PolyTensor 
       physical_store
           ? poly_uop(ctx, POLY_OP_AFTER, target_physical->dtype, physical_src, 2, poly_arg_none())
           : NULL;
-  if (!logical_after || !physical_after) return NULL;
+  if (!physical_after) return NULL;
+
+  PolyUOp *logical_after = NULL;
+  if (build_logical) {
+    if (!poly_dtype_eq(target_logical->dtype, source_logical->dtype)) return NULL;
+    PolyUOp *logical_store = poly_store_val(ctx, target_logical, source_logical);
+    PolyUOp *logical_src[2] = {target_logical, logical_store};
+    logical_after =
+        logical_store
+            ? poly_uop(ctx, POLY_OP_AFTER, target_logical->dtype, logical_src, 2, poly_arg_none())
+            : NULL;
+    if (!logical_after) return NULL;
+  }
 
   if (poly_tensor_replace_roots(
           ctx, target, logical_after, physical_after, POLY_TENSOR_VALUE, target->device
       ) != 0)
     return NULL;
+  return target;
+}
+
+PolyTensor *poly_tensor_clone(PolyCtx *ctx, PolyTensor *source, PolyDevice device) {
+  if (!ctx || !source || !tensor_physical_owned_by_ctx(ctx, source)) return NULL;
+  if (device == POLY_DEVICE_AUTO) device = source->device;
+  if (!poly_device_can_execute(device)) return NULL;
+
+  /* Tinygrad 2026-08-22/a9069c177a9d UOp.clone creates empty_like from the
+   * source shape, then AFTER(new_buffer, STORE(new_buffer, source))
+   * (uop/ops.py:841-845). Polygrad applies that exact operation to the eager
+   * physical root; portable availability propagates from the source. */
+  int ndim = poly_uop_ndim(ctx, source->uop_physical);
+  if (ndim < 0 || ndim > POLY_MAX_DIMS) return NULL;
+  PolyUOp *dims[POLY_MAX_DIMS];
+  for (int i = 0; i < ndim; i++) {
+    dims[i] = poly_uop_shape_dim(ctx, source->uop_physical, i);
+    if (!dims[i]) return NULL;
+  }
+  PolyTensor *inputs[1] = {source};
+  PolyTensor *target =
+      tensor_empty_uop_result(ctx, source->uop_physical->dtype, dims, ndim, device, inputs, 1);
+  if (!target) return NULL;
+  if (!poly_tensor_clone_into(ctx, target, source)) {
+    poly_tensor_release(target);
+    return NULL;
+  }
+  target->requires_grad = source->requires_grad;
+  target->requires_grad_set = source->requires_grad_set;
   return target;
 }
 
@@ -1685,6 +1925,115 @@ PolyUOp *poly_tensor_uop_logical(PolyTensor *tensor) {
 
 PolyUOp *poly_tensor_uop_physical(PolyTensor *tensor) {
   return tensor ? tensor->uop_physical : NULL;
+}
+
+PolyLogicalPolicy poly_tensor_logical_policy(const PolyTensor *tensor) {
+  return tensor ? tensor->logical_policy : POLY_LOGICAL_ALWAYS;
+}
+
+PolyLogicalState poly_tensor_logical_state(const PolyTensor *tensor) {
+  return tensor ? tensor->logical_state : POLY_LOGICAL_NEVER_CONSTRUCTED;
+}
+
+static PolyUOp *tensor_exact_logical_resource_from_physical(PolyCtx *ctx, PolyUOp *physical) {
+  if (!ctx || !physical) return NULL;
+  if (physical->op == POLY_OP_BUFFER && physical->n_src == 1 && physical->src[0] &&
+      physical->arg.kind == POLY_ARG_PARAM && physical->arg.param) {
+    int64_t size = 0;
+    if (poly_uop_const_i64(physical->src[0], &size) != 0 || size < 0) return NULL;
+    return poly_uop_new_logical_buffer_with_slot(
+        ctx, physical->dtype, size, physical->arg.param->slot
+    );
+  }
+  if (!poly_opset_has(POLY_GROUP_MOVEMENT, physical->op) || physical->n_src < 1) return NULL;
+
+  /* Approved logical-lifetime boundary: preserve an exact movement program
+   * over the materialized slot. No physical DEVICE/COPY node is inferred or
+   * stripped, and the mandatory physical graph remains unchanged. */
+  PolyUOp **src = malloc((size_t)physical->n_src * sizeof(*src));
+  if (!src) return NULL;
+  src[0] = tensor_exact_logical_resource_from_physical(ctx, physical->src[0]);
+  for (int i = 1; src[0] && i < physical->n_src; i++) {
+    if (poly_uop_device_uop_cached(ctx, physical->src[i], NULL)) src[0] = NULL;
+    src[i] = physical->src[i];
+  }
+  PolyUOp *resource =
+      src[0] ? poly_uop(ctx, physical->op, physical->dtype, src, physical->n_src, physical->arg)
+             : NULL;
+  free(src);
+  return resource;
+}
+
+static PolyUOp *tensor_exact_logical_resource(PolyCtx *ctx, const PolyTensor *tensor) {
+  return tensor ? tensor_exact_logical_resource_from_physical(ctx, tensor->uop_physical) : NULL;
+}
+
+int poly_tensor_set_logical_policy(PolyCtx *ctx, PolyTensor *tensor, PolyLogicalPolicy policy) {
+  if (!ctx || !tensor || tensor->owner_ctx != ctx || policy < POLY_LOGICAL_NEVER ||
+      policy > POLY_LOGICAL_UNTIL_REALIZE)
+    return -1;
+  if (tensor->logical_policy == policy) return 0;
+
+  /* Polygrad's wrapper-local lifetime boundary. Dropping ownership is
+   * irreversible; physical construction and execution remain unchanged. */
+  if (policy == POLY_LOGICAL_NEVER) {
+    tensor_replace_roots_commit(tensor, NULL, tensor->uop_physical, tensor->role, tensor->device);
+    tensor->logical_policy = policy;
+    tensor->logical_state = POLY_LOGICAL_NEVER_CONSTRUCTED;
+    return 0;
+  }
+  if (tensor->logical_state != POLY_LOGICAL_AVAILABLE || !tensor->uop_logical) return -1;
+
+  tensor->logical_policy = policy;
+  if (policy == POLY_LOGICAL_ALWAYS) return 0;
+
+  /* A computed physical root has no exact resource until realization replaces
+   * it. Existing BUFFER/proven-view roots can adopt that resource immediately. */
+  PolyUOp *resource = tensor_exact_logical_resource(ctx, tensor);
+  if (resource) {
+    tensor_replace_roots_commit(
+        tensor, resource, tensor->uop_physical, tensor->role, tensor->device
+    );
+    tensor->logical_state = POLY_LOGICAL_RETIRED;
+  }
+  return 0;
+}
+
+int poly_tensor_retire_logical_resources(PolyCtx *ctx, PolyTensor **tensors, int n_tensors) {
+  if (!ctx || n_tensors < 0 || (n_tensors > 0 && !tensors)) return -1;
+  PolyUOp **resources = calloc((size_t)n_tensors, sizeof(*resources));
+  PolyLogicalState *states = calloc((size_t)n_tensors, sizeof(*states));
+  if (n_tensors > 0 && (!resources || !states)) {
+    free(resources);
+    free(states);
+    return -1;
+  }
+
+  /* Prepare every result before changing a wrapper. Tinygrad 2026-08-22
+   * Tensor.realize replaces the current root even for UNSHARD(BUFFER, RANGE).
+   * Polygrad retires that wrapper's portable producer too, but marks physical
+   * forms without a proved logical resource as unavailable instead of
+   * inventing a lossy multi-device representation. */
+  for (int i = 0; i < n_tensors; i++) {
+    PolyTensor *tensor = tensors[i];
+    if (!tensor || tensor->logical_policy != POLY_LOGICAL_UNTIL_REALIZE ||
+        tensor->logical_state != POLY_LOGICAL_AVAILABLE || !tensor->uop_logical)
+      continue;
+    resources[i] = tensor_exact_logical_resource(ctx, tensor);
+    states[i] = resources[i] ? POLY_LOGICAL_RETIRED : POLY_LOGICAL_UNSUPPORTED_RESOURCE;
+  }
+
+  for (int i = 0; i < n_tensors; i++) {
+    PolyTensor *tensor = tensors[i];
+    if (!tensor || states[i] == POLY_LOGICAL_AVAILABLE) continue;
+    tensor_replace_roots_commit(
+        tensor, resources[i], tensor->uop_physical, tensor->role, tensor->device
+    );
+    tensor->logical_state = states[i];
+  }
+  free(resources);
+  free(states);
+  return 0;
 }
 
 PolyDevice poly_tensor_device(PolyTensor *tensor) {
@@ -2159,43 +2508,48 @@ bool poly_broadcast_pair(
  * Build that exact graph independently from ordered retained/current roots;
  * tensor-stage FDIV remains available only as raw/imported IR vocabulary. */
 PolyTensor *poly_tensor_div(PolyCtx *ctx, PolyTensor *dividend, PolyTensor *divisor) {
-  if (!ctx || !dividend || !divisor || !dividend->uop_logical || !divisor->uop_logical) return NULL;
-  PolyUOp *logical_a = dividend->uop_logical;
-  PolyUOp *logical_b = divisor->uop_logical;
+  PolyTensor *inputs[2] = {dividend, divisor};
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, 2);
+  if (build_logical < 0) return NULL;
+  PolyUOp *logical_a = build_logical ? dividend->uop_logical : NULL;
+  PolyUOp *logical_b = build_logical ? divisor->uop_logical : NULL;
   PolyUOp *physical_a = tensor_current_uop(dividend);
   PolyUOp *physical_b = tensor_current_uop(divisor);
   if (!physical_a || !physical_b) return NULL;
 
   PolyDType common;
-  if (!poly_dtype_least_upper(logical_a->dtype, logical_b->dtype, &common)) return NULL;
+  if (!poly_dtype_least_upper(physical_a->dtype, physical_b->dtype, &common)) return NULL;
   /* ElementwiseMixin._broadcasted does not insert movement nodes. It rebuilds
    * weak CONST-backed operands with const_like and leaves broadcastable shape
    * inference to UOp._shape (mixin/elementwise.py:19-29,
    * uop/ops.py:456-461). */
-  if (!tensor_promote_pair(ctx, &logical_a, &physical_a, common) ||
-      !tensor_promote_pair(ctx, &logical_b, &physical_b, common))
+  if (!tensor_promote(ctx, &physical_a, common) || !tensor_promote(ctx, &physical_b, common) ||
+      (build_logical &&
+       (!tensor_promote(ctx, &logical_a, common) || !tensor_promote(ctx, &logical_b, common))))
     return NULL;
 
   /* Current div casts only the integer/bool dividend. The divisor remains a
    * weak scalar when promotion produced one, so reciprocal owns its weakfloat
    * result (mixin/elementwise.py:243-246). */
-  if (poly_dtype_is_int(logical_a->dtype) || poly_dtype_is_bool(logical_a->dtype)) {
-    logical_a = poly_cast(ctx, logical_a, POLY_FLOAT32);
+  if (poly_dtype_is_int(physical_a->dtype) || poly_dtype_is_bool(physical_a->dtype)) {
     physical_a = poly_cast(ctx, physical_a, POLY_FLOAT32);
+    if (build_logical) logical_a = poly_cast(ctx, logical_a, POLY_FLOAT32);
   }
-  if (!logical_a || !logical_b || !physical_a || !physical_b) return NULL;
+  if (!physical_a || !physical_b || (build_logical && (!logical_a || !logical_b))) return NULL;
 
-  PolyUOp *logical =
-      poly_alu2(ctx, POLY_OP_MUL, logical_a, poly_alu1(ctx, POLY_OP_RECIPROCAL, logical_b));
   PolyUOp *physical =
       poly_alu2(ctx, POLY_OP_MUL, physical_a, poly_alu1(ctx, POLY_OP_RECIPROCAL, physical_b));
-  if (!logical || !physical) return NULL;
+  PolyUOp *logical =
+      build_logical
+          ? poly_alu2(ctx, POLY_OP_MUL, logical_a, poly_alu1(ctx, POLY_OP_RECIPROCAL, logical_b))
+          : NULL;
+  if (!physical || (build_logical && !logical)) return NULL;
 
   PolyDevice device = dividend->device;
   if (device == POLY_DEVICE_AUTO) device = divisor->device;
   if (divisor->device != POLY_DEVICE_AUTO && device != divisor->device) return NULL;
   PolyTensor *out =
-      poly_tensor_create_with_roots(ctx, logical, physical, POLY_TENSOR_VALUE, device);
+      poly_tensor_create_result(ctx, inputs, 2, logical, physical, POLY_TENSOR_VALUE, device);
   if (!out) return NULL;
   out->requires_grad = dividend->requires_grad || divisor->requires_grad;
   out->requires_grad_set = dividend->requires_grad_set || divisor->requires_grad_set;
@@ -3242,7 +3596,7 @@ static PolyTensor *tensor_composite_result(
     PolyTensor **inputs,
     int n_inputs
 ) {
-  if (!ctx || !logical || !physical || !inputs || n_inputs <= 0) return NULL;
+  if (!ctx || !physical || !inputs || n_inputs <= 0) return NULL;
   PolyDevice device = POLY_DEVICE_AUTO;
   bool requires_grad = false;
   bool requires_grad_set = false;
@@ -3256,8 +3610,9 @@ static PolyTensor *tensor_composite_result(
     requires_grad |= input->requires_grad;
     requires_grad_set |= input->requires_grad_set;
   }
-  PolyTensor *out =
-      poly_tensor_create_with_roots(ctx, logical, physical, POLY_TENSOR_VALUE, device);
+  PolyTensor *out = poly_tensor_create_result(
+      ctx, inputs, n_inputs, logical, physical, POLY_TENSOR_VALUE, device
+  );
   if (!out) return NULL;
   out->requires_grad = requires_grad;
   out->requires_grad_set = requires_grad_set;
@@ -3273,10 +3628,13 @@ PolyTensor *poly_tensor_pool(
     const int64_t *stride,
     const int64_t *dilation
 ) {
+  int build_logical = tensor_unary_builds_logical(ctx, src);
+  if (build_logical < 0) return NULL;
   PolyUOp *current = tensor_current_uop(src);
-  if (!ctx || !src || !src->uop_logical || !current) return NULL;
+  if (!current) return NULL;
   return tensor_unary_result(
-      ctx, src, poly_pool(ctx, src->uop_logical, kernel, n_kernel, stride, dilation),
+      ctx, src,
+      build_logical ? poly_pool(ctx, src->uop_logical, kernel, n_kernel, stride, dilation) : NULL,
       poly_pool(ctx, current, kernel, n_kernel, stride, dilation)
   );
 }
@@ -3291,13 +3649,17 @@ PolyTensor *poly_tensor_max_pool2d(
     const int64_t *padding,
     int n_padding
 ) {
+  int build_logical = tensor_unary_builds_logical(ctx, src);
+  if (build_logical < 0) return NULL;
   PolyUOp *current = tensor_current_uop(src);
-  if (!ctx || !src || !src->uop_logical || !current) return NULL;
+  if (!current) return NULL;
   return tensor_unary_result(
       ctx, src,
-      poly_max_pool2d(
-          ctx, src->uop_logical, kernel, n_kernel, stride, dilation, padding, n_padding
-      ),
+      build_logical
+          ? poly_max_pool2d(
+                ctx, src->uop_logical, kernel, n_kernel, stride, dilation, padding, n_padding
+            )
+          : NULL,
       poly_max_pool2d(ctx, current, kernel, n_kernel, stride, dilation, padding, n_padding)
   );
 }
@@ -3314,22 +3676,25 @@ static PolyTensor *tensor_conv2d_dtype(
     int n_padding,
     const PolyDType *dtype
 ) {
+  PolyTensor *inputs[3] = {src, weight, bias};
+  int n_inputs = bias ? 3 : 2;
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, n_inputs);
+  if (build_logical < 0) return NULL;
   PolyUOp *src_current = tensor_current_uop(src);
   PolyUOp *weight_current = tensor_current_uop(weight);
   PolyUOp *bias_current = tensor_current_uop(bias);
-  if (!ctx || !src || !weight || !src->uop_logical || !weight->uop_logical || !src_current ||
-      !weight_current || (bias && (!bias->uop_logical || !bias_current)))
-    return NULL;
-  PolyUOp *logical = poly_conv2d_dtype_root(
-      ctx, src->uop_logical, weight->uop_logical, bias ? bias->uop_logical : NULL, groups, stride,
-      dilation, padding, n_padding, dtype
-  );
+  if (!src_current || !weight_current || (bias && !bias_current)) return NULL;
   PolyUOp *physical = poly_conv2d_dtype_root(
       ctx, src_current, weight_current, bias_current, groups, stride, dilation, padding, n_padding,
       dtype
   );
-  PolyTensor *inputs[3] = {src, weight, bias};
-  return tensor_composite_result(ctx, logical, physical, inputs, bias ? 3 : 2);
+  PolyUOp *logical = build_logical ? poly_conv2d_dtype_root(
+                                         ctx, src->uop_logical, weight->uop_logical,
+                                         bias ? bias->uop_logical : NULL, groups, stride, dilation,
+                                         padding, n_padding, dtype
+                                     )
+                                   : NULL;
+  return tensor_composite_result(ctx, logical, physical, inputs, n_inputs);
 }
 
 PolyTensor *poly_tensor_conv2d(
@@ -3377,24 +3742,26 @@ PolyTensor *poly_tensor_batchnorm(
     const int64_t *axes,
     int n_axes
 ) {
+  PolyTensor *inputs[5] = {src, mean, invstd, weight, bias};
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, 5);
+  if (build_logical < 0) return NULL;
   PolyUOp *src_current = tensor_current_uop(src);
   PolyUOp *weight_current = tensor_current_uop(weight);
   PolyUOp *bias_current = tensor_current_uop(bias);
   PolyUOp *mean_current = tensor_current_uop(mean);
   PolyUOp *invstd_current = tensor_current_uop(invstd);
-  if (!ctx || !src || !mean || !invstd || !src->uop_logical || !mean->uop_logical ||
-      !invstd->uop_logical || !src_current || !mean_current || !invstd_current ||
-      (weight && (!weight->uop_logical || !weight_current)) ||
-      (bias && (!bias->uop_logical || !bias_current)))
+  if (!src_current || !mean_current || !invstd_current || (weight && !weight_current) ||
+      (bias && !bias_current))
     return NULL;
-  PolyUOp *logical = poly_batchnorm(
-      ctx, src->uop_logical, weight ? weight->uop_logical : NULL, bias ? bias->uop_logical : NULL,
-      mean->uop_logical, invstd->uop_logical, axes, n_axes
-  );
   PolyUOp *physical = poly_batchnorm(
       ctx, src_current, weight_current, bias_current, mean_current, invstd_current, axes, n_axes
   );
-  PolyTensor *inputs[5] = {src, mean, invstd, weight, bias};
+  PolyUOp *logical = build_logical ? poly_batchnorm(
+                                         ctx, src->uop_logical, weight ? weight->uop_logical : NULL,
+                                         bias ? bias->uop_logical : NULL, mean->uop_logical,
+                                         invstd->uop_logical, axes, n_axes
+                                     )
+                                   : NULL;
   return tensor_composite_result(ctx, logical, physical, inputs, 5);
 }
 
@@ -3452,10 +3819,12 @@ PolyUOp *poly_one_hot(PolyCtx *ctx, PolyUOp *x, int64_t num_classes) {
 }
 
 PolyTensor *poly_tensor_one_hot(PolyCtx *ctx, PolyTensor *x, int64_t num_classes) {
+  int build_logical = tensor_unary_builds_logical(ctx, x);
+  if (build_logical < 0) return NULL;
   PolyUOp *current = tensor_current_uop(x);
-  if (!ctx || !x || !x->uop_logical || !current) return NULL;
-  PolyUOp *logical = poly_one_hot(ctx, x->uop_logical, num_classes);
+  if (!current) return NULL;
   PolyUOp *physical = poly_one_hot(ctx, current, num_classes);
+  PolyUOp *logical = build_logical ? poly_one_hot(ctx, x->uop_logical, num_classes) : NULL;
   PolyTensor *inputs[1] = {x};
   return tensor_composite_result(ctx, logical, physical, inputs, 1);
 }
@@ -3523,14 +3892,15 @@ PolyUOp *poly_index_select(PolyCtx *ctx, PolyUOp *x, int dim, PolyUOp *index) {
 }
 
 PolyTensor *poly_tensor_index_select(PolyCtx *ctx, PolyTensor *x, int dim, PolyTensor *index) {
+  PolyTensor *inputs[2] = {x, index};
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, 2);
+  if (build_logical < 0) return NULL;
   PolyUOp *x_current = tensor_current_uop(x);
   PolyUOp *index_current = tensor_current_uop(index);
-  if (!ctx || !x || !index || !x->uop_logical || !index->uop_logical || !x_current ||
-      !index_current)
-    return NULL;
-  PolyUOp *logical = poly_index_select(ctx, x->uop_logical, dim, index->uop_logical);
+  if (!x_current || !index_current) return NULL;
   PolyUOp *physical = poly_index_select(ctx, x_current, dim, index_current);
-  PolyTensor *inputs[2] = {x, index};
+  PolyUOp *logical =
+      build_logical ? poly_index_select(ctx, x->uop_logical, dim, index->uop_logical) : NULL;
   return tensor_composite_result(ctx, logical, physical, inputs, 2);
 }
 
@@ -4322,13 +4692,16 @@ static PolyTensor *rng_reshape_if_needed(
     const int64_t *shape,
     int ndim
 ) {
+  int build_logical = tensor_unary_builds_logical(ctx, src);
+  if (build_logical < 0) return NULL;
   int64_t logical_shape[POLY_MAX_DIMS], physical_shape[POLY_MAX_DIMS];
-  int logical_ndim = uop_shape(ctx, src ? src->uop_logical : NULL, logical_shape);
   int physical_ndim = uop_shape(ctx, src ? src->uop_physical : NULL, physical_shape);
-  if (!src || logical_ndim < 0 || physical_ndim < 0) return NULL;
-  bool same = logical_ndim == ndim && physical_ndim == ndim;
+  int logical_ndim =
+      build_logical ? uop_shape(ctx, src ? src->uop_logical : NULL, logical_shape) : -1;
+  if (!src || physical_ndim < 0 || (build_logical && logical_ndim < 0)) return NULL;
+  bool same = physical_ndim == ndim && (!build_logical || logical_ndim == ndim);
   for (int i = 0; same && i < ndim; i++)
-    same = logical_shape[i] == shape[i] && physical_shape[i] == shape[i];
+    same = physical_shape[i] == shape[i] && (!build_logical || logical_shape[i] == shape[i]);
   return same ? src : poly_tensor_reshape(ctx, src, (int64_t *)shape, ndim);
 }
 
@@ -4350,30 +4723,35 @@ static PolyTensor *rng_getitem_1d(
 
 static PolyTensor *tensor_cat_internal(PolyCtx *ctx, PolyTensor **tensors, int n_tensors, int dim) {
   if (!ctx || !tensors || n_tensors <= 0) return NULL;
-  PolyUOp **logical = malloc((size_t)n_tensors * sizeof(*logical));
+  int build_logical = poly_tensor_result_builds_logical(ctx, tensors, n_tensors);
+  if (build_logical < 0) return NULL;
+  PolyUOp **logical = build_logical ? malloc((size_t)n_tensors * sizeof(*logical)) : NULL;
   PolyUOp **physical = malloc((size_t)n_tensors * sizeof(*physical));
-  if (!logical || !physical) {
+  if ((build_logical && !logical) || !physical) {
     free(logical);
     free(physical);
     return NULL;
   }
   PolyDevice device = POLY_DEVICE_AUTO;
   for (int i = 0; i < n_tensors; i++) {
-    if (!tensors[i] || !tensors[i]->uop_logical || !tensors[i]->uop_physical) {
+    if (!tensors[i] || !tensors[i]->uop_physical) {
       free(logical);
       free(physical);
       return NULL;
     }
-    logical[i] = tensors[i]->uop_logical;
+    if (build_logical) logical[i] = tensors[i]->uop_logical;
     physical[i] = tensors[i]->uop_physical;
     if (tensors[i]->device != POLY_DEVICE_AUTO) device = tensors[i]->device;
   }
-  PolyUOp *logical_out = poly_cat(ctx, logical, n_tensors, dim);
   PolyUOp *physical_out = poly_cat(ctx, physical, n_tensors, dim);
+  PolyUOp *logical_out = build_logical ? poly_cat(ctx, logical, n_tensors, dim) : NULL;
   free(logical);
   free(physical);
-  return logical_out && physical_out ? rng_tensor_result(ctx, logical_out, physical_out, device)
-                                     : NULL;
+  return physical_out && (!build_logical || logical_out)
+             ? poly_tensor_create_result(
+                   ctx, tensors, n_tensors, logical_out, physical_out, POLY_TENSOR_VALUE, device
+               )
+             : NULL;
 }
 
 static PolyTensor *rng_cat2(PolyCtx *ctx, PolyTensor *a, PolyTensor *b) {
@@ -5932,6 +6310,8 @@ int poly_tensor_qr_ex(
   if (out_q) *out_q = NULL;
   *out_r = NULL;
   if (!tensor_roots_owned_by_ctx(ctx, src)) return -1;
+  int build_logical = tensor_unary_builds_logical(ctx, src);
+  if (build_logical < 0) return -1;
 
   /* Pinned Tensor.qr delegates to the exact current Tensor.uop program
    * (mixin/__init__.py:1703-1719; test/null/test_tensor_uop_mixin.py:414-424).
@@ -5939,8 +6319,8 @@ int poly_tensor_qr_ex(
    * logical root and mandatory physical occurrence. */
   PolyUOp *logical_q = NULL, *logical_r = NULL;
   PolyUOp *physical_q = NULL, *physical_r = NULL;
-  if (poly_qr_ex(ctx, src->uop_logical, mode, &logical_q, &logical_r) != 0 ||
-      poly_qr_ex(ctx, src->uop_physical, mode, &physical_q, &physical_r) != 0)
+  if (poly_qr_ex(ctx, src->uop_physical, mode, &physical_q, &physical_r) != 0 ||
+      (build_logical && poly_qr_ex(ctx, src->uop_logical, mode, &logical_q, &logical_r) != 0))
     return -1;
 
   PolyTensor *r = tensor_unary_result(ctx, src, logical_r, physical_r);
@@ -5965,47 +6345,58 @@ PolyTensor *poly_tensor_triangular_solve(
     int unit_diagonal
 ) {
   if (!tensor_roots_owned_by_ctx(ctx, a) || !tensor_roots_owned_by_ctx(ctx, b)) return NULL;
-  PolyUOp *logical =
-      poly_triangular_solve(ctx, a->uop_logical, b->uop_logical, upper, transpose_a, unit_diagonal);
+  PolyTensor *inputs[2] = {a, b};
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, 2);
+  if (build_logical < 0) return NULL;
   PolyUOp *physical = poly_triangular_solve(
       ctx, a->uop_physical, b->uop_physical, upper, transpose_a, unit_diagonal
   );
-  PolyTensor *inputs[2] = {a, b};
+  PolyUOp *logical =
+      build_logical ? poly_triangular_solve(
+                          ctx, a->uop_logical, b->uop_logical, upper, transpose_a, unit_diagonal
+                      )
+                    : NULL;
   return tensor_composite_result(ctx, logical, physical, inputs, 2);
 }
 
 PolyTensor *poly_tensor_cholesky(PolyCtx *ctx, PolyTensor *src, int upper) {
   if (!tensor_roots_owned_by_ctx(ctx, src)) return NULL;
-  return tensor_unary_result(
-      ctx, src, poly_cholesky(ctx, src->uop_logical, upper),
-      poly_cholesky(ctx, src->uop_physical, upper)
-  );
+  int build_logical = tensor_unary_builds_logical(ctx, src);
+  if (build_logical < 0) return NULL;
+  PolyUOp *physical = poly_cholesky(ctx, src->uop_physical, upper);
+  PolyUOp *logical = build_logical ? poly_cholesky(ctx, src->uop_logical, upper) : NULL;
+  return tensor_unary_result(ctx, src, logical, physical);
 }
 
 PolyTensor *poly_tensor_cholesky_solve(PolyCtx *ctx, PolyTensor *chol, PolyTensor *b, int upper) {
   if (!tensor_roots_owned_by_ctx(ctx, chol) || !tensor_roots_owned_by_ctx(ctx, b)) return NULL;
-  PolyUOp *logical = poly_cholesky_solve(ctx, chol->uop_logical, b->uop_logical, upper);
-  PolyUOp *physical = poly_cholesky_solve(ctx, chol->uop_physical, b->uop_physical, upper);
   PolyTensor *inputs[2] = {chol, b};
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, 2);
+  if (build_logical < 0) return NULL;
+  PolyUOp *physical = poly_cholesky_solve(ctx, chol->uop_physical, b->uop_physical, upper);
+  PolyUOp *logical =
+      build_logical ? poly_cholesky_solve(ctx, chol->uop_logical, b->uop_logical, upper) : NULL;
   return tensor_composite_result(ctx, logical, physical, inputs, 2);
 }
 
 PolyTensor *poly_tensor_solve(PolyCtx *ctx, PolyTensor *a, PolyTensor *b) {
   if (!tensor_roots_owned_by_ctx(ctx, a) || !tensor_roots_owned_by_ctx(ctx, b)) return NULL;
   PolyTensor *inputs[2] = {a, b};
-  return tensor_composite_result(
-      ctx, poly_solve(ctx, a->uop_logical, b->uop_logical),
-      poly_solve(ctx, a->uop_physical, b->uop_physical), inputs, 2
-  );
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, 2);
+  if (build_logical < 0) return NULL;
+  PolyUOp *physical = poly_solve(ctx, a->uop_physical, b->uop_physical);
+  PolyUOp *logical = build_logical ? poly_solve(ctx, a->uop_logical, b->uop_logical) : NULL;
+  return tensor_composite_result(ctx, logical, physical, inputs, 2);
 }
 
 PolyTensor *poly_tensor_lstsq(PolyCtx *ctx, PolyTensor *a, PolyTensor *b) {
   if (!tensor_roots_owned_by_ctx(ctx, a) || !tensor_roots_owned_by_ctx(ctx, b)) return NULL;
   PolyTensor *inputs[2] = {a, b};
-  return tensor_composite_result(
-      ctx, poly_lstsq(ctx, a->uop_logical, b->uop_logical),
-      poly_lstsq(ctx, a->uop_physical, b->uop_physical), inputs, 2
-  );
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, 2);
+  if (build_logical < 0) return NULL;
+  PolyUOp *physical = poly_lstsq(ctx, a->uop_physical, b->uop_physical);
+  PolyUOp *logical = build_logical ? poly_lstsq(ctx, a->uop_logical, b->uop_logical) : NULL;
+  return tensor_composite_result(ctx, logical, physical, inputs, 2);
 }
 
 /* Softmax */
@@ -6062,101 +6453,140 @@ PolyUOp *poly_log_softmax(PolyCtx *ctx, PolyUOp *x, int axis) {
  * frontends receive a complete PolyTensor and perform no identity
  * substitution. */
 PolyTensor *poly_tensor_exp(PolyCtx *ctx, PolyTensor *src) {
+  int build_logical = tensor_unary_builds_logical(ctx, src);
+  if (build_logical < 0) return NULL;
   PolyUOp *current = tensor_current_uop(src);
-  if (!ctx || !src || !src->uop_logical || !current) return NULL;
-  PolyUOp *logical = poly_exp(ctx, src->uop_logical);
+  if (!current) return NULL;
+  PolyUOp *logical = build_logical ? poly_exp(ctx, src->uop_logical) : NULL;
   PolyUOp *physical = poly_exp(ctx, current);
   return tensor_unary_result(ctx, src, logical, physical);
 }
 
 PolyTensor *poly_tensor_log(PolyCtx *ctx, PolyTensor *src) {
+  int build_logical = tensor_unary_builds_logical(ctx, src);
+  if (build_logical < 0) return NULL;
   PolyUOp *current = tensor_current_uop(src);
-  if (!ctx || !src || !src->uop_logical || !current) return NULL;
-  PolyUOp *logical = poly_log(ctx, src->uop_logical);
+  if (!current) return NULL;
+  PolyUOp *logical = build_logical ? poly_log(ctx, src->uop_logical) : NULL;
   PolyUOp *physical = poly_log(ctx, current);
   return tensor_unary_result(ctx, src, logical, physical);
 }
 
 PolyTensor *poly_tensor_cos(PolyCtx *ctx, PolyTensor *src) {
+  int build_logical = tensor_unary_builds_logical(ctx, src);
+  if (build_logical < 0) return NULL;
   PolyUOp *current = tensor_current_uop(src);
-  if (!ctx || !src || !src->uop_logical || !current) return NULL;
-  return tensor_unary_result(ctx, src, poly_cos(ctx, src->uop_logical), poly_cos(ctx, current));
+  if (!current) return NULL;
+  return tensor_unary_result(
+      ctx, src, build_logical ? poly_cos(ctx, src->uop_logical) : NULL, poly_cos(ctx, current)
+  );
 }
 
 PolyTensor *poly_tensor_tan(PolyCtx *ctx, PolyTensor *src) {
+  int build_logical = tensor_unary_builds_logical(ctx, src);
+  if (build_logical < 0) return NULL;
   PolyUOp *current = tensor_current_uop(src);
-  if (!ctx || !src || !src->uop_logical || !current) return NULL;
-  return tensor_unary_result(ctx, src, poly_tan(ctx, src->uop_logical), poly_tan(ctx, current));
+  if (!current) return NULL;
+  return tensor_unary_result(
+      ctx, src, build_logical ? poly_tan(ctx, src->uop_logical) : NULL, poly_tan(ctx, current)
+  );
 }
 
 PolyTensor *poly_tensor_log1p(PolyCtx *ctx, PolyTensor *src) {
   if (!tensor_roots_owned_by_ctx(ctx, src)) return NULL;
+  int build_logical = tensor_unary_builds_logical(ctx, src);
+  if (build_logical < 0) return NULL;
   return tensor_unary_result(
-      ctx, src, poly_log1p(ctx, src->uop_logical), poly_log1p(ctx, src->uop_physical)
+      ctx, src, build_logical ? poly_log1p(ctx, src->uop_logical) : NULL,
+      poly_log1p(ctx, src->uop_physical)
   );
 }
 
 PolyTensor *poly_tensor_expm1(PolyCtx *ctx, PolyTensor *src) {
   if (!tensor_roots_owned_by_ctx(ctx, src)) return NULL;
+  int build_logical = tensor_unary_builds_logical(ctx, src);
+  if (build_logical < 0) return NULL;
   return tensor_unary_result(
-      ctx, src, poly_expm1(ctx, src->uop_logical), poly_expm1(ctx, src->uop_physical)
+      ctx, src, build_logical ? poly_expm1(ctx, src->uop_logical) : NULL,
+      poly_expm1(ctx, src->uop_physical)
   );
 }
 
 PolyTensor *poly_tensor_gelu(PolyCtx *ctx, PolyTensor *src) {
   if (!tensor_roots_owned_by_ctx(ctx, src)) return NULL;
+  int build_logical = tensor_unary_builds_logical(ctx, src);
+  if (build_logical < 0) return NULL;
   return tensor_unary_result(
-      ctx, src, poly_gelu(ctx, src->uop_logical), poly_gelu(ctx, src->uop_physical)
+      ctx, src, build_logical ? poly_gelu(ctx, src->uop_logical) : NULL,
+      poly_gelu(ctx, src->uop_physical)
   );
 }
 
 PolyTensor *poly_tensor_relu(PolyCtx *ctx, PolyTensor *src) {
   if (!tensor_roots_owned_by_ctx(ctx, src)) return NULL;
+  int build_logical = tensor_unary_builds_logical(ctx, src);
+  if (build_logical < 0) return NULL;
   /* Pinned relu is `(self > 0).where(self, 0)`
    * (mixin/elementwise.py:656-665). */
   return tensor_unary_result(
-      ctx, src, poly_relu(ctx, src->uop_logical), poly_relu(ctx, src->uop_physical)
+      ctx, src, build_logical ? poly_relu(ctx, src->uop_logical) : NULL,
+      poly_relu(ctx, src->uop_physical)
   );
 }
 
 PolyTensor *poly_tensor_sigmoid(PolyCtx *ctx, PolyTensor *src) {
   if (!tensor_roots_owned_by_ctx(ctx, src)) return NULL;
+  int build_logical = tensor_unary_builds_logical(ctx, src);
+  if (build_logical < 0) return NULL;
   /* Pinned sigmoid uses reciprocal(1 + exp2(x * -1/log(2)))
    * (mixin/elementwise.py:667-677). */
   return tensor_unary_result(
-      ctx, src, poly_sigmoid(ctx, src->uop_logical), poly_sigmoid(ctx, src->uop_physical)
+      ctx, src, build_logical ? poly_sigmoid(ctx, src->uop_logical) : NULL,
+      poly_sigmoid(ctx, src->uop_physical)
   );
 }
 
 PolyTensor *poly_tensor_tanh(PolyCtx *ctx, PolyTensor *src) {
   if (!tensor_roots_owned_by_ctx(ctx, src)) return NULL;
+  int build_logical = tensor_unary_builds_logical(ctx, src);
+  if (build_logical < 0) return NULL;
   /* Pinned tanh is 2*sigmoid(2*x)-1 (mixin/elementwise.py:739-748). */
   return tensor_unary_result(
-      ctx, src, poly_tanh_act(ctx, src->uop_logical), poly_tanh_act(ctx, src->uop_physical)
+      ctx, src, build_logical ? poly_tanh_act(ctx, src->uop_logical) : NULL,
+      poly_tanh_act(ctx, src->uop_physical)
   );
 }
 
 PolyTensor *poly_tensor_silu(PolyCtx *ctx, PolyTensor *src) {
   if (!tensor_roots_owned_by_ctx(ctx, src)) return NULL;
+  int build_logical = tensor_unary_builds_logical(ctx, src);
+  if (build_logical < 0) return NULL;
   /* Pinned silu/swish is self*self.sigmoid()
    * (mixin/elementwise.py:780-800). */
   return tensor_unary_result(
-      ctx, src, poly_silu(ctx, src->uop_logical), poly_silu(ctx, src->uop_physical)
+      ctx, src, build_logical ? poly_silu(ctx, src->uop_logical) : NULL,
+      poly_silu(ctx, src->uop_physical)
   );
 }
 
 PolyTensor *poly_tensor_quick_gelu(PolyCtx *ctx, PolyTensor *src) {
   if (!tensor_roots_owned_by_ctx(ctx, src)) return NULL;
+  int build_logical = tensor_unary_builds_logical(ctx, src);
+  if (build_logical < 0) return NULL;
   return tensor_unary_result(
-      ctx, src, poly_quick_gelu(ctx, src->uop_logical), poly_quick_gelu(ctx, src->uop_physical)
+      ctx, src, build_logical ? poly_quick_gelu(ctx, src->uop_logical) : NULL,
+      poly_quick_gelu(ctx, src->uop_physical)
   );
 }
 
 PolyTensor *poly_tensor_detach(PolyCtx *ctx, PolyTensor *src) {
+  int build_logical = tensor_unary_builds_logical(ctx, src);
+  if (build_logical < 0) return NULL;
   PolyUOp *current = tensor_current_uop(src);
-  if (!ctx || !src || !src->uop_logical || !current) return NULL;
-  PolyTensor *out =
-      tensor_unary_result(ctx, src, poly_detach(ctx, src->uop_logical), poly_detach(ctx, current));
+  if (!current) return NULL;
+  PolyTensor *out = tensor_unary_result(
+      ctx, src, build_logical ? poly_detach(ctx, src->uop_logical) : NULL, poly_detach(ctx, current)
+  );
   if (!out) return NULL;
   out->requires_grad = false;
   out->requires_grad_set = true;
@@ -6164,19 +6594,21 @@ PolyTensor *poly_tensor_detach(PolyCtx *ctx, PolyTensor *src) {
 }
 
 PolyTensor *poly_tensor_contiguous_backward(PolyCtx *ctx, PolyTensor *src) {
+  int build_logical = tensor_unary_builds_logical(ctx, src);
+  if (build_logical < 0) return NULL;
   PolyUOp *current = tensor_current_uop(src);
-  if (!ctx || !src || !src->uop_logical || !current) return NULL;
+  if (!current) return NULL;
   /* Pinned ElementwiseMixin.contiguous_backward is exactly one
-   * alu(Ops.CONTIGUOUS_BACKWARD) (mixin/elementwise.py:51-55). Apply the
+   * alu(Ops.CONTIGUOUS_BACKWARD) (mixin/elementwise.py:64-68). Apply the
    * same unary UOp independently to Polygrad's retained and executable roots. */
-  return tensor_unary_result(
-      ctx, src,
-      poly_uop1(
-          ctx, POLY_OP_CONTIGUOUS_BACKWARD, src->uop_logical->dtype, src->uop_logical,
-          poly_arg_none()
-      ),
-      poly_uop1(ctx, POLY_OP_CONTIGUOUS_BACKWARD, current->dtype, current, poly_arg_none())
-  );
+  PolyUOp *physical =
+      poly_uop1(ctx, POLY_OP_CONTIGUOUS_BACKWARD, current->dtype, current, poly_arg_none());
+  PolyUOp *logical = build_logical ? poly_uop1(
+                                         ctx, POLY_OP_CONTIGUOUS_BACKWARD, src->uop_logical->dtype,
+                                         src->uop_logical, poly_arg_none()
+                                     )
+                                   : NULL;
+  return tensor_unary_result(ctx, src, logical, physical);
 }
 
 static PolyTensor *tensor_sum_dtype(
@@ -6187,9 +6619,13 @@ static PolyTensor *tensor_sum_dtype(
     bool keepdim,
     const PolyDType *dtype
 ) {
+  int build_logical = tensor_unary_builds_logical(ctx, src);
+  if (build_logical < 0) return NULL;
   PolyUOp *current = tensor_current_uop(src);
-  if (!ctx || !src || !src->uop_logical || !current) return NULL;
-  PolyUOp *logical = sum_axes_root_dtype(ctx, src->uop_logical, axes, n_axes, keepdim, dtype);
+  if (!current) return NULL;
+  PolyUOp *logical = build_logical
+                         ? sum_axes_root_dtype(ctx, src->uop_logical, axes, n_axes, keepdim, dtype)
+                         : NULL;
   PolyUOp *physical = sum_axes_root_dtype(ctx, current, axes, n_axes, keepdim, dtype);
   return tensor_unary_result(ctx, src, logical, physical);
 }
@@ -6224,26 +6660,30 @@ PolyTensor *poly_tensor_max(
     int n_axes,
     bool keepdim
 ) {
+  int build_logical = tensor_unary_builds_logical(ctx, src);
+  if (build_logical < 0) return NULL;
   PolyUOp *current = tensor_current_uop(src);
-  if (!ctx || !src || !src->uop_logical || !current) return NULL;
-  PolyUOp *logical = max_axes_root(ctx, src->uop_logical, axes, n_axes, keepdim);
+  if (!current) return NULL;
+  PolyUOp *logical =
+      build_logical ? max_axes_root(ctx, src->uop_logical, axes, n_axes, keepdim) : NULL;
   PolyUOp *physical = max_axes_root(ctx, current, axes, n_axes, keepdim);
   return tensor_unary_result(ctx, src, logical, physical);
 }
 
 PolyTensor *poly_tensor_minimum(PolyCtx *ctx, PolyTensor *a, PolyTensor *b) {
+  PolyTensor *inputs[2] = {a, b};
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, 2);
+  if (build_logical < 0) return NULL;
   PolyUOp *a_current = tensor_current_uop(a);
   PolyUOp *b_current = tensor_current_uop(b);
-  if (!ctx || !a || !b || !a->uop_logical || !b->uop_logical || !a_current || !b_current)
-    return NULL;
+  if (!a_current || !b_current) return NULL;
   /* Pinned Tensor._apply_uop consumes ordered current Tensor.uop operands and
    * minimum is inverse -> maximum -> inverse
    * (tensor.py:128-140; mixin/elementwise.py:366-393). The Tensor boundary builds that
    * program independently for each retained/executable root. */
-  PolyUOp *logical = poly_minimum(ctx, a->uop_logical, b->uop_logical);
+  PolyUOp *logical = build_logical ? poly_minimum(ctx, a->uop_logical, b->uop_logical) : NULL;
   PolyUOp *physical = poly_minimum(ctx, a_current, b_current);
-  if (!logical || !physical) return NULL;
-  PolyTensor *inputs[2] = {a, b};
+  if (!physical || (build_logical && !logical)) return NULL;
   return tensor_composite_result(ctx, logical, physical, inputs, 2);
 }
 
@@ -6253,14 +6693,15 @@ static PolyTensor *tensor_dot_dtype(
     PolyTensor *weight,
     const PolyDType *dtype
 ) {
+  PolyTensor *inputs[2] = {src, weight};
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, 2);
+  if (build_logical < 0) return NULL;
   PolyUOp *current = tensor_current_uop(src);
   PolyUOp *weight_current = tensor_current_uop(weight);
-  if (!ctx || !src || !weight || !src->uop_logical || !weight->uop_logical || !current ||
-      !weight_current)
-    return NULL;
-  PolyUOp *logical = poly_dot_dtype_root(ctx, src->uop_logical, weight->uop_logical, dtype);
+  if (!current || !weight_current) return NULL;
+  PolyUOp *logical =
+      build_logical ? poly_dot_dtype_root(ctx, src->uop_logical, weight->uop_logical, dtype) : NULL;
   PolyUOp *physical = poly_dot_dtype_root(ctx, current, weight_current, dtype);
-  PolyTensor *inputs[2] = {src, weight};
   return tensor_composite_result(ctx, logical, physical, inputs, 2);
 }
 
@@ -6280,17 +6721,21 @@ PolyTensor *poly_tensor_dot_dtype_by_id(
 }
 
 PolyTensor *poly_tensor_softmax(PolyCtx *ctx, PolyTensor *src, int axis) {
+  int build_logical = tensor_unary_builds_logical(ctx, src);
+  if (build_logical < 0) return NULL;
   PolyUOp *current = tensor_current_uop(src);
-  if (!ctx || !src || !src->uop_logical || !current) return NULL;
-  PolyUOp *logical = poly_softmax(ctx, src->uop_logical, axis);
+  if (!current) return NULL;
+  PolyUOp *logical = build_logical ? poly_softmax(ctx, src->uop_logical, axis) : NULL;
   PolyUOp *physical = poly_softmax(ctx, current, axis);
   return tensor_unary_result(ctx, src, logical, physical);
 }
 
 PolyTensor *poly_tensor_log_softmax(PolyCtx *ctx, PolyTensor *src, int axis) {
+  int build_logical = tensor_unary_builds_logical(ctx, src);
+  if (build_logical < 0) return NULL;
   PolyUOp *current = tensor_current_uop(src);
-  if (!ctx || !src || !src->uop_logical || !current) return NULL;
-  PolyUOp *logical = poly_log_softmax(ctx, src->uop_logical, axis);
+  if (!current) return NULL;
+  PolyUOp *logical = build_logical ? poly_log_softmax(ctx, src->uop_logical, axis) : NULL;
   PolyUOp *physical = poly_log_softmax(ctx, current, axis);
   return tensor_unary_result(ctx, src, logical, physical);
 }
@@ -6654,19 +7099,24 @@ int poly_tensor_sort(
   *out_values = NULL;
   *out_indices = NULL;
   if (!tensor_roots_owned_by_ctx(ctx, src)) return -1;
+  int build_logical = tensor_unary_builds_logical(ctx, src);
+  if (build_logical < 0) return -1;
 
   /* tinygrad/mixin/__init__.py:994-1044 constructs both sort results from
    * the exact input Tensor.uop. The Tensor boundary applies that program independently to
    * the retained logical root and mandatory physical occurrence. */
   PolyUOp *logical_values = NULL, *logical_indices = NULL;
   PolyUOp *physical_values = NULL, *physical_indices = NULL;
-  if (poly_sort(ctx, src->uop_logical, dim, descending, &logical_values, &logical_indices) != 0 ||
-      poly_sort(ctx, src->uop_physical, dim, descending, &physical_values, &physical_indices) != 0)
+  if (poly_sort(ctx, src->uop_physical, dim, descending, &physical_values, &physical_indices) !=
+          0 ||
+      (build_logical &&
+       poly_sort(ctx, src->uop_logical, dim, descending, &logical_values, &logical_indices) != 0))
     return -1;
 
   PolyTensor *values = tensor_unary_result(ctx, src, logical_values, physical_values);
-  PolyTensor *indices = poly_tensor_create_with_roots(
-      ctx, logical_indices, physical_indices, POLY_TENSOR_VALUE, src->device
+  PolyTensor *inputs[1] = {src};
+  PolyTensor *indices = poly_tensor_create_result(
+      ctx, inputs, 1, logical_indices, physical_indices, POLY_TENSOR_VALUE, src->device
   );
   if (!values || !indices) return -1;
   indices->requires_grad = false;
@@ -6727,6 +7177,8 @@ int poly_tensor_topk(
   *out_values = NULL;
   *out_indices = NULL;
   if (!tensor_roots_owned_by_ctx(ctx, src)) return -1;
+  int build_logical = tensor_unary_builds_logical(ctx, src);
+  if (build_logical < 0) return -1;
 
   /* Pinned tinygrad/mixin/__init__.py:1057-1077 applies sort+shrink_to to the
    * exact current Tensor.uop. The Tensor boundary applies that unchanged program
@@ -6735,16 +7187,18 @@ int poly_tensor_topk(
   PolyUOp *logical_values = NULL, *logical_indices = NULL;
   PolyUOp *physical_values = NULL, *physical_indices = NULL;
   if (poly_topk(
-          ctx, src->uop_logical, k, dim, largest, sorted, &logical_values, &logical_indices
-      ) != 0 ||
-      poly_topk(
           ctx, src->uop_physical, k, dim, largest, sorted, &physical_values, &physical_indices
-      ) != 0)
+      ) != 0 ||
+      (build_logical &&
+       poly_topk(
+           ctx, src->uop_logical, k, dim, largest, sorted, &logical_values, &logical_indices
+       ) != 0))
     return -1;
 
   PolyTensor *values = tensor_unary_result(ctx, src, logical_values, physical_values);
-  PolyTensor *indices = poly_tensor_create_with_roots(
-      ctx, logical_indices, physical_indices, POLY_TENSOR_VALUE, src->device
+  PolyTensor *inputs[1] = {src};
+  PolyTensor *indices = poly_tensor_create_result(
+      ctx, inputs, 1, logical_indices, physical_indices, POLY_TENSOR_VALUE, src->device
   );
   if (!values || !indices) return -1;
   indices->requires_grad = false;
@@ -7060,11 +7514,13 @@ PolyTensor *poly_tensor_einsum(
 ) {
   if (!ctx || !formula || !tensors || n_tensors <= 0 || n_tensors > MAX_EINSUM_TENSORS) return NULL;
 
+  int build_logical = poly_tensor_result_builds_logical(ctx, tensors, n_tensors);
+  if (build_logical < 0) return NULL;
   PolyUOp *logical[MAX_EINSUM_TENSORS];
   PolyUOp *physical[MAX_EINSUM_TENSORS];
   for (int i = 0; i < n_tensors; i++) {
     if (!tensor_roots_owned_by_ctx(ctx, tensors[i])) return NULL;
-    logical[i] = tensors[i]->uop_logical;
+    if (build_logical) logical[i] = tensors[i]->uop_logical;
     physical[i] = tensors[i]->uop_physical;
   }
 
@@ -7072,8 +7528,8 @@ PolyTensor *poly_tensor_einsum(
    * operands (mixin/__init__.py:496-535). The Tensor boundary applies the unchanged raw
    * program independently to retained logical roots and mandatory physical
    * occurrences; it never recovers physical output by logical substitution. */
-  PolyUOp *logical_result = poly_einsum(ctx, formula, logical, n_tensors);
   PolyUOp *physical_result = poly_einsum(ctx, formula, physical, n_tensors);
+  PolyUOp *logical_result = build_logical ? poly_einsum(ctx, formula, logical, n_tensors) : NULL;
   return tensor_composite_result(ctx, logical_result, physical_result, tensors, n_tensors);
 }
 
@@ -7336,13 +7792,17 @@ PolyTensor *poly_tensor_rearrange(
     int n_axis_sizes
 ) {
   if (!tensor_roots_owned_by_ctx(ctx, tensor)) return NULL;
+  int build_logical = tensor_unary_builds_logical(ctx, tensor);
+  if (build_logical < 0) return NULL;
   /* Pinned rearrange is unflatten -> permute -> flatten on Tensor.uop
    * (mixin/movement.py:340-383). The Tensor boundary runs that unchanged raw program on
    * each exact root; frontends never reconstruct the physical occurrence. */
-  PolyUOp *logical =
-      poly_rearrange(ctx, formula, tensor->uop_logical, axis_names, axis_values, n_axis_sizes);
   PolyUOp *physical =
       poly_rearrange(ctx, formula, tensor->uop_physical, axis_names, axis_values, n_axis_sizes);
+  PolyUOp *logical =
+      build_logical
+          ? poly_rearrange(ctx, formula, tensor->uop_logical, axis_names, axis_values, n_axis_sizes)
+          : NULL;
   return tensor_unary_result(ctx, tensor, logical, physical);
 }
 
@@ -7389,14 +7849,15 @@ PolyUOp *poly_gather_dim(PolyCtx *ctx, PolyUOp *x, int dim, PolyUOp *index) {
 }
 
 PolyTensor *poly_tensor_gather_dim(PolyCtx *ctx, PolyTensor *x, int dim, PolyTensor *index) {
+  PolyTensor *inputs[2] = {x, index};
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, 2);
+  if (build_logical < 0) return NULL;
   PolyUOp *x_current = tensor_current_uop(x);
   PolyUOp *index_current = tensor_current_uop(index);
-  if (!ctx || !x || !index || !x->uop_logical || !index->uop_logical || !x_current ||
-      !index_current)
-    return NULL;
-  PolyUOp *logical = poly_gather_dim(ctx, x->uop_logical, dim, index->uop_logical);
+  if (!x_current || !index_current) return NULL;
   PolyUOp *physical = poly_gather_dim(ctx, x_current, dim, index_current);
-  PolyTensor *inputs[2] = {x, index};
+  PolyUOp *logical =
+      build_logical ? poly_gather_dim(ctx, x->uop_logical, dim, index->uop_logical) : NULL;
   return tensor_composite_result(ctx, logical, physical, inputs, 2);
 }
 
@@ -7691,14 +8152,18 @@ PolyTensor *poly_tensor_scatter(
   if (!tensor_roots_owned_by_ctx(ctx, self) || !tensor_roots_owned_by_ctx(ctx, index) ||
       !tensor_roots_owned_by_ctx(ctx, src))
     return NULL;
+  PolyTensor *inputs[3] = {self, index, src};
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, 3);
+  if (build_logical < 0) return NULL;
   /* Pinned scatter composes _pre_scatter + _masked_merge directly from the
    * ordered Tensor.uop inputs (mixin/__init__.py:1158-1174,1217-1258).
    * The Tensor boundary applies the unchanged raw program independently to both roots. */
-  PolyUOp *logical =
-      poly_scatter(ctx, self->uop_logical, dim, index->uop_logical, src->uop_logical, reduce);
   PolyUOp *physical =
       poly_scatter(ctx, self->uop_physical, dim, index->uop_physical, src->uop_physical, reduce);
-  PolyTensor *inputs[3] = {self, index, src};
+  PolyUOp *logical =
+      build_logical
+          ? poly_scatter(ctx, self->uop_logical, dim, index->uop_logical, src->uop_logical, reduce)
+          : NULL;
   return tensor_composite_result(ctx, logical, physical, inputs, 3);
 }
 
@@ -7714,15 +8179,19 @@ PolyTensor *poly_tensor_scatter_reduce(
   if (!tensor_roots_owned_by_ctx(ctx, self) || !tensor_roots_owned_by_ctx(ctx, index) ||
       !tensor_roots_owned_by_ctx(ctx, src))
     return NULL;
+  PolyTensor *inputs[3] = {self, index, src};
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, 3);
+  if (build_logical < 0) return NULL;
   /* Pinned scatter_reduce runs the same reducer over exact ordered Tensor.uop
    * inputs (mixin/__init__.py:1176-1215). Keep the raw program identical. */
-  PolyUOp *logical = poly_scatter_reduce(
-      ctx, self->uop_logical, dim, index->uop_logical, src->uop_logical, reduce, include_self
-  );
   PolyUOp *physical = poly_scatter_reduce(
       ctx, self->uop_physical, dim, index->uop_physical, src->uop_physical, reduce, include_self
   );
-  PolyTensor *inputs[3] = {self, index, src};
+  PolyUOp *logical = build_logical ? poly_scatter_reduce(
+                                         ctx, self->uop_logical, dim, index->uop_logical,
+                                         src->uop_logical, reduce, include_self
+                                     )
+                                   : NULL;
   return tensor_composite_result(ctx, logical, physical, inputs, 3);
 }
 
@@ -7862,10 +8331,14 @@ PolyTensor *poly_tensor_rope(
       !tensor_roots_owned_by_ctx(ctx, freqs_sin))
     return NULL;
   PolyTensor *inputs[3] = {x, freqs_cos, freqs_sin};
-  return tensor_composite_result(
-      ctx, poly_rope(ctx, x->uop_logical, freqs_cos->uop_logical, freqs_sin->uop_logical),
-      poly_rope(ctx, x->uop_physical, freqs_cos->uop_physical, freqs_sin->uop_physical), inputs, 3
-  );
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, 3);
+  if (build_logical < 0) return NULL;
+  PolyUOp *physical =
+      poly_rope(ctx, x->uop_physical, freqs_cos->uop_physical, freqs_sin->uop_physical);
+  PolyUOp *logical =
+      build_logical ? poly_rope(ctx, x->uop_logical, freqs_cos->uop_logical, freqs_sin->uop_logical)
+                    : NULL;
+  return tensor_composite_result(ctx, logical, physical, inputs, 3);
 }
 
 PolyUOp *poly_repeat_interleave(PolyCtx *ctx, PolyUOp *x, int repeats, int dim) {
@@ -7948,9 +8421,11 @@ PolyUOp *poly_argmax(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim) {
 
 PolyTensor *poly_tensor_argmax(PolyCtx *ctx, PolyTensor *src, int axis, bool keepdim) {
   if (!tensor_roots_owned_by_ctx(ctx, src)) return NULL;
-  PolyUOp *logical = poly_argmax(ctx, src->uop_logical, axis, keepdim);
+  int build_logical = tensor_unary_builds_logical(ctx, src);
+  if (build_logical < 0) return NULL;
   PolyUOp *physical = poly_argmax(ctx, src->uop_physical, axis, keepdim);
-  if (!logical || !physical) return NULL;
+  PolyUOp *logical = build_logical ? poly_argmax(ctx, src->uop_logical, axis, keepdim) : NULL;
+  if (!physical || (build_logical && !logical)) return NULL;
   PolyTensor *out = tensor_unary_result(ctx, src, logical, physical);
   if (!out) return NULL;
   out->requires_grad = false;

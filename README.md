@@ -170,6 +170,11 @@ A Polygrad runtime is not just a namespace. It owns a `PolyCtx`, compiled
 program caches, JIT state, buffer residency, and backend handles such as a WASM
 module, WebGPU device state, CUDA runners, or native CPU runners.
 
+Raw C `PolyUOp *` results are borrowed. Retain a root stored across an execution
+or collection boundary with `poly_uop_retain()`, release it with
+`poly_uop_release()`, and call `poly_ctx_collect()` in allocation-only loops
+that never execute. `poly_ctx_stats()` does not collect.
+
 The application should usually create one runtime and pass it to libraries that
 need tensor work.
 
@@ -249,9 +254,25 @@ portable logical program + named state + explicit policy
   -> replacement complete physical tensor graph
 ```
 
-The key invariant is that exportable logical tensor roots stay independent from
-realized physical roots. That lets the same logical graph be exported, cached, or
-rerun after placement on CUDA, WebGPU, WASM, CPU, or the interpreter.
+The key invariant is that logical roots never drive default execution or alter
+the Tinygrad-shaped physical graph. Logical lifetime is configurable:
+
+- `until_realize` (default) keeps a producer until that Tensor is materialized,
+  then retains only an exact device-free BUFFER/movement resource;
+- `always` keeps the full producer graph for portable export or later placement;
+- `never` builds only the physical graph and cannot provide portable export.
+
+If any operand has no logical root, a new pure result remains physical-only
+even after the ambient context returns to another policy. This never changes
+the eager physical graph.
+
+Set the context default with `POLY_LOGICAL=2|1|0`. Python also supports
+`Context(LOGICAL=...)`, `Runtime(logical=...)`, `runtime.logical(...)`,
+`Tensor(..., logical=...)`, and `tensor.preserve_logical()`. JavaScript supports
+`createRuntime({logical: ...})`, `runtime.withLogical(...)`,
+`new Tensor(data, {logical: ...})`, and `tensor.preserveLogical()`.
+Instance capture owns its logical entrypoints immediately, so later realization
+or retirement of the source Tensor cannot invalidate the portable program.
 
 Default Tensor/JIT execution builds and schedules the physical graph eagerly;
 it does not invoke placement. Retained `Instance` graphs may instead request an
