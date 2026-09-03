@@ -303,49 +303,79 @@
     },
     {
       "id": "PG-PARITY-009",
-      "status": "open_debt",
+      "status": "resolved",
       "stages": ["rangeify"],
       "area": "consumer fanout",
       "tinygrad": "Range propagation collects all consumers",
-      "polygrad": "A fixed 16-consumer collection cap silently forces realization",
-      "rationale": "The cap can change schedule topology and must grow dynamically or fail loudly.",
+      "polygrad": "The consumer map and per-node consumer-range arrays are dynamically sized from the complete topological consumer set.",
+      "rationale": "The historical fixed cap was removed by the current indexing.py port.",
       "approval": null,
       "evidence": [
-        "src/schedule/rangeify.c:poly_range_propagate",
-        "PLAN_CORE_20260720.md:WS3"
+        "references/tinygrad_latest/tinygrad/schedule/indexing.py:run_rangeify",
+        "src/schedule/indexing.c:poly_consumer_map_build",
+        "src/schedule/indexing.c:poly_range_propagate",
+        "test/test_rangeify.c:range_prop_more_than_sixteen_includes_mismatched_last_consumer",
+        "test/test_rangeify.c:range_prop_more_than_sixteen_matching_consumers_stays_fused",
+        "temp/tg_rangeify_high_fanout_current_20260903.log"
       ],
-      "close_when": "More-than-16-consumer realize sets and schedules match pinned tinygrad."
+      "resolution": {
+        "evidence": "Seventeen matching consumers remain fused; a mismatching seventeenth consumer realizes the shared value in both pinned Tinygrad and Polygrad. Both permanent C cases pass.",
+        "closed_on": "2026-09-03"
+      },
+      "close_when": null
     },
     {
       "id": "PG-PARITY-010",
-      "status": "open_debt",
+      "status": "resolved",
       "stages": ["rangeify"],
       "area": "PCONTIG configurable partial realization",
-      "tinygrad": "PCONTIG enables partial-axis realization on multi-consumer disagreement",
-      "polygrad": "Default whole-axis behavior exists, but enabled PCONTIG behavior is absent",
-      "rationale": "Default PCONTIG=0 is aligned; the non-default control remains parity debt.",
+      "tinygrad": "PCONTIG=1 preserves matching multi-consumer axes, PCONTIG=2 preserves eligible ended axes, and PCONTIG=3 enables cost-gated or partial-local buffer removal.",
+      "polygrad": "Range propagation and remove_bufferize implement the same three thresholds, including active-range-gated substitution through effects.",
+      "rationale": "The complete non-default control is covered by exact topology, effect, and runtime-value probes.",
       "approval": null,
       "evidence": [
-        "references/tinygrad_latest/tinygrad/schedule/indexing.py",
-        "PLAN_CORE_20260720.md:WS3"
+        "references/tinygrad_latest/tinygrad/schedule/indexing.py:run_rangeify",
+        "references/tinygrad_latest/tinygrad/schedule/rangeify.py:remove_bufferize",
+        "src/schedule/indexing.c:poly_range_propagate",
+        "src/schedule/rangeify.c:remove_bufferize",
+        "test/test_rangeify.c:range_prop_pcontig_one_realizes_only_disagreeing_axis",
+        "test/test_rangeify.c:pcontig_two_keeps_outer_double_matmul_axis_local",
+        "test/test_rangeify.c:pcontig_three_inlines_more_than_three_accessed_params",
+        "test/test_rangeify.c:pcontig_three_inlines_profitable_reduce_stage",
+        "test/test_rangeify.c:pcontig_three_preserves_partial_local_stage",
+        "test/test_rangeify.c:remove_bufferize_does_not_substitute_ended_effect_range",
+        "temp/tg_pcontig_threshold_probe_20260903.log",
+        "temp/tg_pcontig_remove_bufferize_probe_20260903.log",
+        "temp/tg_remove_bufferize_effect_gate_probe_20260903.log",
+        "temp/tg_pcontig_runtime_probe_20260903.json",
+        "temp/poly_pcontig_runtime_probe_20260903.json"
       ],
-      "close_when": "Default and enabled-PCONTIG axis probes match pinned tinygrad."
+      "resolution": {
+        "evidence": "PCONTIG=1/2/3 topology matches the pinned branches; closed END/effect ranges remain unchanged; PCONTIG=2 double-matmul and multi-gather outputs are byte-identical to Tinygrad.",
+        "closed_on": "2026-09-03"
+      },
+      "close_when": null
     },
     {
       "id": "PG-PARITY-011",
-      "status": "open_debt",
+      "status": "resolved",
       "stages": ["rangeify"],
       "area": "EXPAND ending ranges",
       "tinygrad": "Changed EXPAND ranges add the symbolic guarded ranges closure to ending ranges",
-      "polygrad": "Current path appends raw changed output-range values without the complete symbolic closure",
-      "rationale": "This can alter realization topology on symbolic EXPAND graphs.",
+      "polygrad": "EXPAND passes its injected output-range prefix through poly_uop_ranges and adds every reachable RANGE to ending ranges.",
+      "rationale": "The historical raw-value append was replaced by the current indexing.py reachable-range closure.",
       "approval": null,
       "evidence": [
-        "references/tinygrad_latest/tinygrad/schedule/indexing.py",
-        "src/schedule/rangeify.c:poly_range_propagate",
-        "PLAN_CORE_20260720.md:WS3"
+        "references/tinygrad_latest/tinygrad/schedule/indexing.py:run_rangeify",
+        "src/schedule/indexing.c:poly_range_propagate",
+        "test/test_rangeify.c:range_prop_expand_ending_realizes_elementwise_default_pcontig",
+        "temp/tg_rangeify_partial_axis_current_pcontig0.log"
       ],
-      "close_when": "Symbolic EXPAND ending-range traces match pinned tinygrad."
+      "resolution": {
+        "evidence": "The current source expressions match: Tinygrad uses SINK(prefix).ranges and Polygrad uses poly_uop_ranges over each prefix expression. The permanent default-PCONTIG EXPAND ending-range test passes.",
+        "closed_on": "2026-09-03"
+      },
+      "close_when": null
     },
     {
       "id": "PG-PARITY-012",

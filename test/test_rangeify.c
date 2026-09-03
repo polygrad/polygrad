@@ -833,6 +833,307 @@ TEST(rangeify, range_prop_expand_ending_realizes_elementwise_default_pcontig) {
   PASS();
 }
 
+TEST(rangeify, range_prop_pcontig_one_realizes_only_disagreeing_axis) {
+  /* Tinygrad 2026-08-22/a9069c177a9d schedule/indexing.py:243-267:
+   * PCONTIG=1 preserves axis 0 shared by x and x.flip(1), realizing axis 1. */
+  RangeifyEnvSave pcontig = rangeify_save_env("PCONTIG");
+  setenv("PCONTIG", "1", 1);
+
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_reshape(ctx, poly_test_buffer(ctx, POLY_FLOAT32, 8), (int64_t[]){2, 4}, 2);
+  PolyUOp *b = poly_reshape(ctx, poly_test_buffer(ctx, POLY_FLOAT32, 8), (int64_t[]){2, 4}, 2);
+  PolyUOp *x = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, a, b, poly_arg_none());
+  PolyUOp *flipped = poly_flip(ctx, x, (int64_t[]){1}, 1);
+  PolyUOp *sum = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, x, flipped, poly_arg_none());
+  PolyUOp *out = poly_reshape(ctx, poly_test_buffer(ctx, POLY_FLOAT32, 8), (int64_t[]){2, 4}, 2);
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out, sum, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
+
+  PolyIndexingCtx *ictx = poly_indexing_ctx_new(ctx);
+  poly_realize_map_build(ictx, sink);
+  poly_range_propagate(ictx, sink);
+
+  PolyRealizeInfo *ri = get_realize_info(ictx, x);
+  ASSERT_NOT_NULL(ri);
+  ASSERT_INT_EQ(ri->n_axes, 1);
+  ASSERT_INT_EQ(ri->axes[0], 1);
+  PolyRangeEntry *re_x = poly_range_map_get(ictx, x);
+  ASSERT_NOT_NULL(re_x);
+  ASSERT_INT_EQ(re_x->n_out, 2);
+  ASSERT_PTR_EQ(re_x->out_rngs[0], poly_range_map_get(ictx, sum)->in_rngs[0]);
+
+  poly_indexing_ctx_destroy(ictx);
+  poly_ctx_destroy(ctx);
+  rangeify_restore_env(&pcontig);
+  PASS();
+}
+
+TEST(rangeify, pcontig_two_keeps_outer_double_matmul_axis_local) {
+  /* Tinygrad 2026-08-22/a9069c177a9d schedule/indexing.py:269-278:
+   * PCONTIG=2 realizes only the inner first-matmul axis needed by the second
+   * matmul, producing STAGE(addrspace=LOCAL, shape=(16,)). */
+  RangeifyEnvSave pcontig = rangeify_save_env("PCONTIG");
+  setenv("PCONTIG", "2", 1);
+
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_reshape(ctx, poly_test_buffer(ctx, POLY_FLOAT32, 256), (int64_t[]){16, 16}, 2);
+  PolyUOp *b = poly_reshape(ctx, poly_test_buffer(ctx, POLY_FLOAT32, 256), (int64_t[]){16, 16}, 2);
+  PolyUOp *c = poly_reshape(ctx, poly_test_buffer(ctx, POLY_FLOAT32, 256), (int64_t[]){16, 16}, 2);
+  PolyUOp *out =
+      poly_reshape(ctx, poly_test_buffer(ctx, POLY_FLOAT32, 256), (int64_t[]){16, 16}, 2);
+  PolyUOp *value = poly_dot(ctx, poly_dot(ctx, a, b), c);
+  PolyUOp *rangeified =
+      poly_run_rangeify(ctx, poly_sink1(ctx, poly_store_val(ctx, out, value)), false);
+  ASSERT_NOT_NULL(rangeified);
+
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort_alloc(ctx, rangeified, &n_topo);
+  int stages = 0;
+  for (int i = 0; i < n_topo; i++) {
+    PolyUOp *u = topo[i];
+    if (u->op != POLY_OP_STAGE) continue;
+    stages++;
+    ASSERT_INT_EQ(poly_bufferize_arg_addrspace(u->arg), POLY_ADDR_LOCAL);
+    ASSERT_INT_EQ(poly_uop_ndim(ctx, u), 1);
+    ASSERT_INT_EQ(poly_uop_shape_dim(ctx, u, 0)->arg.i, 16);
+  }
+  ASSERT_INT_EQ(stages, 1);
+
+  poly_toposort_free(topo);
+  poly_ctx_destroy(ctx);
+  rangeify_restore_env(&pcontig);
+  PASS();
+}
+
+TEST(rangeify, pcontig_three_inlines_more_than_three_accessed_params) {
+  /* Tinygrad 2026-08-22/a9069c177a9d rangeify.py:221-289 permits removal
+   * above the three-resource cost cap only when PCONTIG>2. */
+  RangeifyEnvSave pcontig = rangeify_save_env("PCONTIG");
+  setenv("PCONTIG", "3", 1);
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *four = poly_const_int(ctx, 4);
+  PolyUOp *range =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, four, poly_arg_range(0, POLY_AXIS_WEAK));
+  PolyParamArg args[4] = {0};
+  PolyUOp *value = NULL;
+  for (int i = 0; i < 4; i++) {
+    args[i] = (PolyParamArg
+    ){.slot = i, .dtype = POLY_FLOAT32, .addrspace = POLY_ADDR_GLOBAL, .device = "CPU"};
+    PolyUOp *param = poly_uop1(ctx, POLY_OP_PARAM, POLY_FLOAT32, four, poly_arg_param(&args[i]));
+    PolyUOp *indexed = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, param, range, poly_arg_none());
+    value = value ? poly_alu2(ctx, POLY_OP_ADD, value, indexed) : indexed;
+  }
+  PolyUOp *stage_src[] = {value, range};
+  PolyUOp *stage = poly_uop(
+      ctx, POLY_OP_STAGE, POLY_FLOAT32, stage_src, 2,
+      poly_arg_bufferize_opts("CPU", POLY_ADDR_GLOBAL, true)
+  );
+  PolyUOp *index = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, stage, range, poly_arg_none());
+  PolyUOp *ret = poly_pm_rewrite(poly_pm_remove_bufferize(), ctx, index);
+  ASSERT_NOT_NULL(ret);
+  ASSERT_INT_EQ(ret->op, POLY_OP_ADD);
+  ASSERT_INT_EQ(count_ops(ctx, ret, POLY_OP_STAGE), 0);
+  poly_ctx_destroy(ctx);
+  rangeify_restore_env(&pcontig);
+  PASS();
+}
+
+TEST(rangeify, pcontig_three_inlines_profitable_reduce_stage) {
+  /* Tinygrad rangeify.py:258-286 removes a buffer-in-reduce stage only for
+   * PCONTIG>2 when output/input materialization exceeds the 10x threshold. */
+  RangeifyEnvSave pcontig = rangeify_save_env("PCONTIG");
+  setenv("PCONTIG", "3", 1);
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *outer = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_WEAKINT, poly_const_int(ctx, 128), poly_arg_range(10, POLY_AXIS_WEAK)
+  );
+  PolyUOp *reduce_range = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_WEAKINT, poly_const_int(ctx, 4), poly_arg_range(11, POLY_AXIS_REDUCE)
+  );
+  PolyUOp *replacement = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_WEAKINT, poly_const_int(ctx, 128), poly_arg_range(12, POLY_AXIS_WEAK)
+  );
+  PolyParamArg arg = {
+      .slot = 10, .dtype = POLY_FLOAT32, .addrspace = POLY_ADDR_GLOBAL, .device = "CPU"};
+  PolyUOp *param =
+      poly_uop1(ctx, POLY_OP_PARAM, POLY_FLOAT32, poly_const_int(ctx, 4), poly_arg_param(&arg));
+  PolyUOp *param_index = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, param, outer, poly_arg_none());
+  PolyUOp *reduce_src[] = {param_index, reduce_range};
+  PolyUOp *reduce =
+      poly_uop(ctx, POLY_OP_REDUCE, POLY_FLOAT32, reduce_src, 2, poly_arg_reduce(POLY_OP_ADD, 0));
+  PolyUOp *stage_src[] = {reduce, outer};
+  PolyUOp *stage = poly_uop(
+      ctx, POLY_OP_STAGE, POLY_FLOAT32, stage_src, 2,
+      poly_arg_bufferize_opts("CPU", POLY_ADDR_GLOBAL, true)
+  );
+  PolyUOp *index = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, stage, replacement, poly_arg_none());
+  PolyUOp *ret = poly_pm_rewrite(poly_pm_remove_bufferize(), ctx, index);
+  ASSERT_NOT_NULL(ret);
+  ASSERT_INT_EQ(ret->op, POLY_OP_REDUCE);
+  ASSERT_INT_EQ(count_ops(ctx, ret, POLY_OP_STAGE), 0);
+
+  PolyUOp *small_outer = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_WEAKINT, poly_const_int(ctx, 8), poly_arg_range(13, POLY_AXIS_WEAK)
+  );
+  PolyUOp *small_replacement = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_WEAKINT, poly_const_int(ctx, 8), poly_arg_range(14, POLY_AXIS_WEAK)
+  );
+  PolyUOp *small_index =
+      poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, param, small_outer, poly_arg_none());
+  PolyUOp *small_reduce_src[] = {small_index, reduce_range};
+  PolyUOp *small_reduce = poly_uop(
+      ctx, POLY_OP_REDUCE, POLY_FLOAT32, small_reduce_src, 2, poly_arg_reduce(POLY_OP_ADD, 0)
+  );
+  PolyUOp *small_stage_src[] = {small_reduce, small_outer};
+  PolyUOp *small_stage = poly_uop(
+      ctx, POLY_OP_STAGE, POLY_FLOAT32, small_stage_src, 2,
+      poly_arg_bufferize_opts("CPU", POLY_ADDR_GLOBAL, true)
+  );
+  PolyUOp *small_consumer =
+      poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, small_stage, small_replacement, poly_arg_none());
+  ASSERT_TRUE(poly_pm_rewrite(poly_pm_remove_bufferize(), ctx, small_consumer) == NULL);
+  poly_ctx_destroy(ctx);
+  rangeify_restore_env(&pcontig);
+  PASS();
+}
+
+TEST(rangeify, pcontig_three_preserves_partial_local_stage) {
+  /* Tinygrad rangeify.py:269-282 keeps local-index ranges staged while
+   * substituting ordinary ranges through the surrounding reduce graph. */
+  RangeifyEnvSave pcontig = rangeify_save_env("PCONTIG");
+  setenv("PCONTIG", "3", 1);
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *bound128 = poly_const_int(ctx, 128);
+  PolyUOp *bound4 = poly_const_int(ctx, 4);
+  PolyUOp *k0 =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, bound128, poly_arg_range(20, POLY_AXIS_WEAK));
+  PolyUOp *k1 =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, bound128, poly_arg_range(21, POLY_AXIS_WEAK));
+  PolyUOp *v0 =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, bound128, poly_arg_range(22, POLY_AXIS_WEAK));
+  PolyUOp *v1 =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, bound128, poly_arg_range(23, POLY_AXIS_WEAK));
+  PolyUOp *reduce_range =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, bound4, poly_arg_range(24, POLY_AXIS_REDUCE));
+  PolyParamArg args[2] = {
+      {.slot = 20, .dtype = POLY_FLOAT32, .addrspace = POLY_ADDR_GLOBAL, .device = "CPU"},
+      {.slot = 21, .dtype = POLY_FLOAT32, .addrspace = POLY_ADDR_GLOBAL, .device = "CPU"},
+  };
+  PolyUOp *p0 = poly_uop1(ctx, POLY_OP_PARAM, POLY_FLOAT32, bound4, poly_arg_param(&args[0]));
+  PolyUOp *p1 = poly_uop1(ctx, POLY_OP_PARAM, POLY_FLOAT32, bound4, poly_arg_param(&args[1]));
+  PolyUOp *local_value = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, p0, k0, poly_arg_none());
+  PolyUOp *local_src[] = {local_value, k0};
+  PolyUOp *local_stage = poly_uop(
+      ctx, POLY_OP_STAGE, POLY_FLOAT32, local_src, 2,
+      poly_arg_bufferize_opts(NULL, POLY_ADDR_LOCAL, true)
+  );
+  PolyUOp *local_index =
+      poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, local_stage, k0, poly_arg_none());
+  PolyUOp *p1_index = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, p1, k1, poly_arg_none());
+  PolyUOp *reduce_src[] = {p1_index, reduce_range};
+  PolyUOp *reduce =
+      poly_uop(ctx, POLY_OP_REDUCE, POLY_FLOAT32, reduce_src, 2, poly_arg_reduce(POLY_OP_ADD, 0));
+  PolyUOp *value = poly_alu2(ctx, POLY_OP_ADD, local_index, reduce);
+  PolyUOp *stage_src[] = {value, k0, k1};
+  PolyUOp *stage = poly_uop(
+      ctx, POLY_OP_STAGE, POLY_FLOAT32, stage_src, 3,
+      poly_arg_bufferize_opts("CPU", POLY_ADDR_GLOBAL, true)
+  );
+  PolyUOp *index_src[] = {stage, v0, v1};
+  PolyUOp *index = poly_uop(ctx, POLY_OP_INDEX, POLY_FLOAT32, index_src, 3, poly_arg_none());
+  /* Match Tinygrad's direct remove_bufferize probe. Full graph_rewrite removes
+   * the nested LOCAL STAGE first and returns ADD in both implementations. */
+  PolyUOp *ret = poly_pm_rewrite(poly_pm_remove_bufferize(), ctx, index);
+  ASSERT_NOT_NULL(ret);
+  ASSERT_INT_EQ(ret->op, POLY_OP_INDEX);
+  ASSERT_INT_EQ(ret->src[0]->op, POLY_OP_STAGE);
+  ASSERT_INT_EQ(poly_bufferize_arg_addrspace(ret->src[0]->arg), POLY_ADDR_LOCAL);
+  ASSERT_INT_EQ(ret->src[0]->n_src, 2);
+  PolyUOp *full = poly_graph_rewrite(ctx, index, poly_pm_remove_bufferize());
+  ASSERT_NOT_NULL(full);
+  ASSERT_INT_EQ(full->op, POLY_OP_ADD);
+  ASSERT_INT_EQ(count_ops(ctx, full, POLY_OP_STAGE), 0);
+
+  PolyUOp *p1_k0 = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, p1, k0, poly_arg_none());
+  PolyUOp *all_partial_reduce_src[] = {p1_k0, reduce_range};
+  PolyUOp *all_partial_reduce = poly_uop(
+      ctx, POLY_OP_REDUCE, POLY_FLOAT32, all_partial_reduce_src, 2, poly_arg_reduce(POLY_OP_ADD, 0)
+  );
+  PolyUOp *all_partial_value = poly_alu2(ctx, POLY_OP_ADD, local_index, all_partial_reduce);
+  PolyUOp *all_partial_stage_src[] = {all_partial_value, k0};
+  PolyUOp *all_partial_stage = poly_uop(
+      ctx, POLY_OP_STAGE, POLY_FLOAT32, all_partial_stage_src, 2,
+      poly_arg_bufferize_opts("CPU", POLY_ADDR_GLOBAL, true)
+  );
+  PolyUOp *all_partial_index =
+      poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, all_partial_stage, v0, poly_arg_none());
+  ASSERT_TRUE(poly_pm_rewrite(poly_pm_remove_bufferize(), ctx, all_partial_index) == NULL);
+
+  PolyUOp *q0 =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, bound128, poly_arg_range(25, POLY_AXIS_WEAK));
+  PolyUOp *q1 =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, bound128, poly_arg_range(26, POLY_AXIS_WEAK));
+  PolyUOp *q_reduce =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, bound4, poly_arg_range(27, POLY_AXIS_REDUCE));
+  PolyUOp *reduce_replacement = poly_alu2(ctx, POLY_OP_ADD, q0, q_reduce);
+  PolyUOp *p0_index = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, p0, k0, poly_arg_none());
+  PolyUOp *replacement_reduce_src[] = {p0_index, reduce_range};
+  PolyUOp *replacement_reduce = poly_uop(
+      ctx, POLY_OP_REDUCE, POLY_FLOAT32, replacement_reduce_src, 2, poly_arg_reduce(POLY_OP_ADD, 0)
+  );
+  PolyUOp *replacement_value = poly_alu2(ctx, POLY_OP_ADD, replacement_reduce, p1_index);
+  PolyUOp *replacement_stage_src[] = {replacement_value, k0, k1};
+  PolyUOp *replacement_stage = poly_uop(
+      ctx, POLY_OP_STAGE, POLY_FLOAT32, replacement_stage_src, 3,
+      poly_arg_bufferize_opts("CPU", POLY_ADDR_GLOBAL, true)
+  );
+  PolyUOp *replacement_index_src[] = {replacement_stage, reduce_replacement, q1};
+  PolyUOp *replacement_index =
+      poly_uop(ctx, POLY_OP_INDEX, POLY_FLOAT32, replacement_index_src, 3, poly_arg_none());
+  PolyUOp *replacement_ret = poly_pm_rewrite(poly_pm_remove_bufferize(), ctx, replacement_index);
+  ASSERT_NOT_NULL(replacement_ret);
+  ASSERT_INT_EQ(replacement_ret->op, POLY_OP_INDEX);
+  ASSERT_INT_EQ(replacement_ret->src[0]->op, POLY_OP_STAGE);
+  ASSERT_INT_EQ(poly_bufferize_arg_addrspace(replacement_ret->src[0]->arg), POLY_ADDR_LOCAL);
+  poly_ctx_destroy(ctx);
+  rangeify_restore_env(&pcontig);
+  PASS();
+}
+
+TEST(rangeify, remove_bufferize_does_not_substitute_ended_effect_range) {
+  /* Tinygrad rangeify.py:216-218 gates substitution by active ranges. The
+   * range closed by END must not be replaced through AFTER's effect source. */
+  RangeifyEnvSave pcontig = rangeify_save_env("PCONTIG");
+  setenv("PCONTIG", "3", 1);
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *four = poly_const_int(ctx, 4);
+  PolyUOp *k =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, four, poly_arg_range(30, POLY_AXIS_WEAK));
+  PolyUOp *v =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, four, poly_arg_range(31, POLY_AXIS_WEAK));
+  PolyParamArg arg = {
+      .slot = 30, .dtype = POLY_FLOAT32, .addrspace = POLY_ADDR_GLOBAL, .device = "CPU"};
+  PolyUOp *param = poly_uop1(ctx, POLY_OP_PARAM, POLY_FLOAT32, four, poly_arg_param(&arg));
+  PolyUOp *target = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, param, k, poly_arg_none());
+  PolyUOp *store =
+      poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, target, poly_const_float(ctx, 1.0), poly_arg_none());
+  PolyUOp *end_src[] = {store, k};
+  PolyUOp *effect = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
+  PolyUOp *after = poly_uop2(ctx, POLY_OP_AFTER, POLY_FLOAT32, param, effect, poly_arg_none());
+  PolyUOp *stage_src[] = {after, k};
+  PolyUOp *stage = poly_uop(
+      ctx, POLY_OP_STAGE, POLY_FLOAT32, stage_src, 2,
+      poly_arg_bufferize_opts("CPU", POLY_ADDR_GLOBAL, true)
+  );
+  PolyUOp *index = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, stage, v, poly_arg_none());
+  PolyUOp *ret = poly_pm_rewrite(poly_pm_remove_bufferize(), ctx, index);
+  ASSERT_PTR_EQ(ret, after);
+  ASSERT_PTR_EQ(ret->src[1], effect);
+  poly_ctx_destroy(ctx);
+  rangeify_restore_env(&pcontig);
+  PASS();
+}
+
 TEST(rangeify, range_prop_multi_consumer_same_idx_different_valid_fuses) {
   /* tinygrad's multi-consumer merge compares local idx separately from valid.
    * Two consumers that access the same local idx but carry different valid

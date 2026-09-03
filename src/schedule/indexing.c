@@ -1025,13 +1025,53 @@ static bool is_tensor_reduce(PolyUOp *u) {
          u->arg.reduce.num_axes > 0 && u->n_src == 1;
 }
 
+/* C tuple comparison for Tinygrad 2026-08-22/a9069c177a9d
+ * schedule/indexing.py:274 (`rr.arg > e.arg`). Polygrad stores the trailing
+ * AxisType separately from the integer axis-id/split-path tuple. */
+static int range_arg_cmp(PolyArg a, PolyArg b) {
+  int64_t aid = poly_range_axis_id(a), bid = poly_range_axis_id(b);
+  if (aid != bid) return aid < bid ? -1 : 1;
+  int an = poly_range_n_extra(a), bn = poly_range_n_extra(b);
+  int n = an < bn ? an : bn;
+  const int64_t *ae = poly_range_extra(a), *be = poly_range_extra(b);
+  for (int i = 0; i < n; i++) {
+    if (ae[i] != be[i]) return ae[i] < be[i] ? -1 : 1;
+  }
+  if (an != bn) return an < bn ? -1 : 1;
+  PolyAxisType at = poly_range_axis_type(a), bt = poly_range_axis_type(b);
+  return at == bt ? 0 : at < bt ? -1 : 1;
+}
+
+/* Tinygrad schedule/indexing.py:269-278 keeps an axis under PCONTIG>1 unless
+ * one of its active RANGE keys sorts after a propagated ending-range key. */
+static bool pcontig_realizes_ended_axis(
+    PolyCtx *ctx,
+    PolyUOp *range,
+    PolyEndingRanges *ending,
+    PolyUOp **scratch,
+    int scratch_cap
+) {
+  int n_ranges = poly_uop_ranges(ctx, range, scratch, scratch_cap);
+  for (int i = 0; i < n_ranges; i++)
+    for (int j = 0; j < ending->count; j++)
+      if (range_arg_cmp(scratch[i]->arg, ending->items[j]->arg) > 0) return true;
+  return false;
+}
+
 void poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
   PolyCtx *ctx = ictx->ctx;
+  /* Tinygrad 2026-08-22/a9069c177a9d helpers.py:PCONTIG controls partial-axis
+   * realization in schedule/indexing.py. Like other Tinygrad ContextVars in
+   * the C core, the process environment supplies the current scalar value. */
+  int pcontig = poly_getenv_int("PCONTIG", 0);
 
   /* Get toposort (we'll walk in reverse) */
   int n_uops;
   PolyUOp **topo = poly_toposort_ex_alloc(ctx, sink, &n_uops, NULL, false);
   if (!topo) return;
+  PolyUOp **range_scratch =
+      pcontig > 1 && n_uops > 0 ? malloc((size_t)n_uops * sizeof(*range_scratch)) : NULL;
+  if (pcontig > 1 && !range_scratch) pcontig = 1;
 
   /* Build consumer map if not already built */
   if (!ictx->consumer_map) ictx->consumer_map = poly_consumer_map_build(ctx, sink);
@@ -1188,70 +1228,102 @@ void poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
         }
       }
 
+      int realize_axes[POLY_MAX_DIMS];
+      int n_realize_axes = 0;
       if (same_shape) {
+        bool axis_same[POLY_MAX_DIMS];
         bool all_all_same = true;
         for (int d = 0; d < ref_len; d++) {
           PolyUOp *base_idx = poly_uop_get_idx(ctx, consumer_rngs_buf[0][d]);
+          axis_same[d] = true;
           for (int ci = 1; ci < n_consumer_rngs; ci++) {
             if (poly_uop_get_idx(ctx, consumer_rngs_buf[ci][d]) != base_idx) {
+              axis_same[d] = false;
               all_all_same = false;
               break;
             }
           }
-          if (!all_all_same) break;
         }
 
-        if (all_all_same) {
-          for (int d = 0; d < ref_len; d++) {
-            bool all_same_range_ptr = true;
-            for (int ci = 1; ci < n_consumer_rngs; ci++) {
-              if (consumer_rngs_buf[ci][d] != consumer_rngs_buf[0][d]) {
-                all_same_range_ptr = false;
-                break;
-              }
-            }
-            if (all_same_range_ptr) {
-              /* Tinygrad keeps the inherited range object when every consumer
-               * already shares the exact same range. Reuse that pointer instead
-               * of rebuilding an equivalent WHERE wrapper. */
-              out_rngs[d] = consumer_rngs_buf[0][d];
-              continue;
-            }
-
-            PolyUOp **valids = malloc((size_t)n_consumer_rngs * sizeof(*valids));
-            if (!valids) {
+        for (int d = 0; d < ref_len; d++) {
+          /* Tinygrad schedule/indexing.py:257-264 preserves a matching axis
+           * under PCONTIG, even when another axis forces materialization. */
+          if (!all_all_same && !(pcontig && axis_same[d])) {
+            PolyUOp *dim = d < shape.ndim ? poly_uop_shape_dim(ctx, x, d) : NULL;
+            if (!dim) {
               same_shape = false;
               break;
             }
-            for (int ci = 0; ci < n_consumer_rngs; ci++)
-              valids[ci] = poly_uop_get_valid(ctx, consumer_rngs_buf[ci][d]);
-            PolyUOp *merged_valid = merge_range_valids(ctx, valids, n_consumer_rngs);
-            free(valids);
-            PolyUOp *merged_idx = poly_uop_get_idx(ctx, consumer_rngs_buf[0][d]);
-            if (merged_valid->op == POLY_OP_CONST && merged_valid->arg.kind == POLY_ARG_BOOL &&
-                merged_valid->arg.b) {
-              out_rngs[d] = merged_idx;
-              continue;
-            }
-            PolyUOp *invalid = poly_uop_const(ctx, poly_arg_invalid(), merged_idx->dtype);
-            PolyUOp *merged_range = poly_uop3(
-                ctx, POLY_OP_WHERE, merged_idx->dtype, merged_valid, merged_idx, invalid,
-                poly_arg_none()
-            );
-            /* Pinned tinygrad/schedule/indexing.py:214-215 rewrites the full
-             * merged valid.where(local_idx, Invalid) with symbolic. This is
-             * distinct from PAD's local-valid rewrite: it also canonicalizes
-             * the inherited local index (for example RANGE + 0 -> RANGE). */
-            out_rngs[d] =
-                merged_range ? poly_graph_rewrite(ctx, merged_range, poly_symbolic()) : NULL;
+            out_rngs[d] = new_range_uop(ictx, dim, POLY_AXIS_WEAK);
             if (!out_rngs[d]) {
               same_shape = false;
               break;
             }
+            realize_axes[n_realize_axes++] = d;
+            continue;
           }
-          if (same_shape) n_out = ref_len;
-        } else
-          same_shape = false;
+
+          bool all_same_range_ptr = true;
+          for (int ci = 1; ci < n_consumer_rngs; ci++) {
+            if (consumer_rngs_buf[ci][d] != consumer_rngs_buf[0][d]) {
+              all_same_range_ptr = false;
+              break;
+            }
+          }
+          if (all_same_range_ptr) {
+            /* Tinygrad keeps the inherited range object when every consumer
+             * already shares the exact same range. Reuse that pointer instead
+             * of rebuilding an equivalent WHERE wrapper. */
+            out_rngs[d] = consumer_rngs_buf[0][d];
+            continue;
+          }
+
+          PolyUOp **valids = malloc((size_t)n_consumer_rngs * sizeof(*valids));
+          if (!valids) {
+            same_shape = false;
+            break;
+          }
+          for (int ci = 0; ci < n_consumer_rngs; ci++)
+            valids[ci] = poly_uop_get_valid(ctx, consumer_rngs_buf[ci][d]);
+          PolyUOp *merged_valid = merge_range_valids(ctx, valids, n_consumer_rngs);
+          free(valids);
+          PolyUOp *merged_idx = poly_uop_get_idx(ctx, consumer_rngs_buf[0][d]);
+          if (merged_valid->op == POLY_OP_CONST && merged_valid->arg.kind == POLY_ARG_BOOL &&
+              merged_valid->arg.b) {
+            out_rngs[d] = merged_idx;
+            continue;
+          }
+          PolyUOp *invalid = poly_uop_const(ctx, poly_arg_invalid(), merged_idx->dtype);
+          PolyUOp *merged_range = poly_uop3(
+              ctx, POLY_OP_WHERE, merged_idx->dtype, merged_valid, merged_idx, invalid,
+              poly_arg_none()
+          );
+          /* Pinned tinygrad/schedule/indexing.py:214-215 rewrites the full
+           * merged valid.where(local_idx, Invalid) with symbolic. This is
+           * distinct from PAD's local-valid rewrite: it also canonicalizes
+           * the inherited local index (for example RANGE + 0 -> RANGE). */
+          out_rngs[d] =
+              merged_range ? poly_graph_rewrite(ctx, merged_range, poly_symbolic()) : NULL;
+          if (!out_rngs[d]) {
+            same_shape = false;
+            break;
+          }
+        }
+        if (same_shape) {
+          n_out = ref_len;
+          if (n_realize_axes > 0) {
+            realize_mark(ictx, x);
+            PolyRealizeInfo *ri = poly_map_get(ictx->realize_map, poly_ptr_hash(x), x, poly_ptr_eq);
+            if (ri) {
+              free(ri->axes);
+              ri->axes = malloc((size_t)n_realize_axes * sizeof(*ri->axes));
+              if (ri->axes) {
+                ri->n_axes = n_realize_axes;
+                memcpy(ri->axes, realize_axes, (size_t)n_realize_axes * sizeof(*ri->axes));
+              }
+            }
+          }
+        }
       }
 
       if (!same_shape) {
@@ -1312,7 +1384,9 @@ void poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
             break;
           }
         }
-        if (!seen) realize_axes[n_realize_axes++] = i;
+        if (!seen && (pcontig <= 1 ||
+                      pcontig_realizes_ended_axis(ctx, out_rngs[i], ending, range_scratch, n_uops)))
+          realize_axes[n_realize_axes++] = i;
       }
 
       ending_clear(ending);
@@ -1430,6 +1504,7 @@ void poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
 
   poly_map_foreach(ending_map, ending_destroy, NULL);
   poly_map_destroy(ending_map);
+  free(range_scratch);
   poly_toposort_free(topo);
 }
 

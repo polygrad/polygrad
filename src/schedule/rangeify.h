@@ -19,6 +19,7 @@ extern "C" {
 PolyPatternMatcher *poly_pm_mops(void);
 PolyUOp *poly_apply_earliest_rewrites(PolyCtx *ctx, PolyUOp *sink);
 PolyPatternMatcher *poly_pm_const_buffer_folding(void);
+PolyPatternMatcher *poly_pm_remove_bufferize(void);
 PolyPatternMatcher *poly_pm_add_buffers(void);
 bool poly_find_bufs(PolyCtx *ctx, PolyUOp *store);
 
