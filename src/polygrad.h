@@ -858,8 +858,8 @@ PolyTensor *poly_tensor_create_result_like(
     PolyTensorRole role,
     PolyDevice device
 );
-/* Tensor constructors return one owned handle. Internal accessors and
- * same-object mutators are borrowed. */
+/* Tensor constructors return one owned handle, including identity returns.
+ * Internal accessors and same-object mutators are borrowed. */
 PolyTensor *poly_tensor_retain(PolyTensor *tensor);
 void poly_tensor_release(PolyTensor *tensor);
 PolyTensor *poly_tensor_empty(

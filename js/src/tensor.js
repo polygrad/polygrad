@@ -741,6 +741,8 @@ function createBoundTensorClass(runtime) {
 
     _adoptCoreTensor(tensor) {
       if (!tensor) return null
+      // Tensor-producing C APIs return one owned reference, including identity
+      // returns. Releasing the prior owner first transfers that reference here.
       if (this._tensorOwner) {
         const pending = releaseTensorOwner(this._tensorOwner, this)
         if (pending && typeof pending.then === 'function') pending.catch(() => {})

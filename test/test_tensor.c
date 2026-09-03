@@ -2978,6 +2978,47 @@ TEST(tensor, dtype_constructors_use_exact_logical_and_physical_sources) {
   PASS();
 }
 
+TEST(tensor, identity_constructors_return_owned_handles) {
+  /* Tinygrad 2026-08-22/a9069c177a9d returns self for same-device/device-free
+   * Tensor.to and identity DTypeMixin.bitcast. C preserves pointer identity,
+   * but each constructor result must own one explicit reference. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int f32 = poly_dtype_id_by_name("float32");
+  int64_t shape[] = {2};
+  PolyTensor *source = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+  PolyTensor *scalar = poly_tensor_const_float_by_id(ctx, 1.0, f32, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(source);
+  ASSERT_NOT_NULL(scalar);
+
+  PolyTensor *same_device = poly_tensor_to_device(ctx, source, POLY_DEVICE_CPU);
+  bool same_device_pointer = same_device == source;
+  uint32_t same_device_refs = source->owner_refs;
+  if (same_device_pointer && same_device_refs > 1) poly_tensor_release(same_device);
+
+  PolyTensor *device_free = poly_tensor_to_device(ctx, scalar, POLY_DEVICE_INTERP);
+  bool device_free_pointer = device_free == scalar;
+  uint32_t device_free_refs = scalar->owner_refs;
+  if (device_free_pointer && device_free_refs > 1) poly_tensor_release(device_free);
+
+  PolyTensor *same_bitcast = poly_tensor_bitcast_by_id(ctx, source, f32);
+  bool same_bitcast_pointer = same_bitcast == source;
+  uint32_t same_bitcast_refs = source->owner_refs;
+  if (same_bitcast_pointer && same_bitcast_refs > 1) poly_tensor_release(same_bitcast);
+
+  poly_tensor_release(source);
+  poly_tensor_release(scalar);
+  poly_ctx_destroy(ctx);
+
+  ASSERT_TRUE(same_device_pointer);
+  ASSERT_INT_EQ(same_device_refs, 2);
+  ASSERT_TRUE(device_free_pointer);
+  ASSERT_INT_EQ(device_free_refs, 2);
+  ASSERT_TRUE(same_bitcast_pointer);
+  ASSERT_INT_EQ(same_bitcast_refs, 2);
+  PASS();
+}
+
 TEST(tensor, unequal_width_bitcast_matches_pinned_tensor_topology_and_values) {
   /* Current DTypeMixin.bitcast represents non-identity width changes with
    * exactly one BITCAST. These assertions are paired with the direct

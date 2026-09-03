@@ -1466,7 +1466,7 @@ PolyTensor *poly_tensor_bitcast_by_id(PolyCtx *ctx, PolyTensor *src, int dtype_i
    * inference, not Tensor-level lane decomposition (mixin/dtype.py:35-50,
    * uop/ops.py:404-411). */
   if (poly_dtype_is_weak(source_dtype) || poly_dtype_is_weak(target_dtype)) return NULL;
-  if (poly_dtype_eq(source_dtype, target_dtype)) return src;
+  if (poly_dtype_eq(source_dtype, target_dtype)) return poly_tensor_retain(src);
   return tensor_dtype_result(ctx, src, dtype_id, true);
 }
 
@@ -1697,11 +1697,11 @@ PolyTensor *poly_tensor_to_device(PolyCtx *ctx, PolyTensor *tensor, PolyDevice d
   PolyTensor *inputs[1] = {tensor};
   int build_logical = poly_tensor_result_builds_logical(ctx, inputs, 1);
   if (build_logical < 0) return NULL;
-  if (tensor->device == device) return tensor;
+  if (tensor->device == device) return poly_tensor_retain(tensor);
   /* Pinned Tensor.to returns self when Tensor.uop has no device
    * (tensor.py:327-335). Pure CONST/arange graphs are device-free values, not
    * storage that requires a COPY or late placement. */
-  if (poly_uop_device(tensor->uop_physical) == POLY_DEVICE_AUTO) return tensor;
+  if (poly_uop_device(tensor->uop_physical) == POLY_DEVICE_AUTO) return poly_tensor_retain(tensor);
   /* Pinned tinygrad Tensor.to (tensor.py:327-335) stores
    * self.uop.copy_to_device(device) immediately. Consume the exact stored
    * physical occurrence directly; explicit re-placement is a separate API. */
@@ -4629,7 +4629,11 @@ static PolyTensor *rng_tensor_from_words(
   data[1] = word1;
   int64_t shape[1] = {2};
   PolyTensor *source = poly_tensor_from_host(ctx, data, 2 * sizeof(*data), POLY_UINT32, shape, 1);
-  return poly_tensor_to_device(ctx, source, device);
+  PolyTensor *out = source ? poly_tensor_to_device(ctx, source, device) : NULL;
+  /* Identity to_device adds the returned owner to the same wrapper. Transfer
+   * the input owner now; distinct results keep it for call-local cleanup. */
+  if (out == source) poly_tensor_release(source);
+  return out;
 }
 
 /* Current RandMixin literals enter through UOp.ufix as weak Python scalars;
@@ -4844,6 +4848,9 @@ static PolyTensor *rng_bits_to_rand(
   PolyTensor *shift = rng_weakint(ctx, dtype.bitsize - nmant);
   PolyTensor *mantissa =
       uint_bits && shift ? poly_tensor_alu2(ctx, POLY_OP_SHR, uint_bits, shift) : NULL;
+  /* Identity bitcast returns a second owned reference to `bits`; its only
+   * consumer is now built, so balance that C-local alias. */
+  if (uint_bits == bits) poly_tensor_release(uint_bits);
   PolyTensor *one_to_two = mantissa && float_one_bits
                                ? poly_tensor_alu2(ctx, POLY_OP_OR, mantissa, float_one_bits)
                                : NULL;

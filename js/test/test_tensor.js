@@ -1958,9 +1958,16 @@ async function runTensorTests(pg) {
   })
 
   await test('cast no-op same dtype', async () => {
-    const t = new Tensor([1, 2, 3])
+    const t = new Tensor([1, 2, 3], { dtype: 'float32' })
     const r = t.cast('float32')
+    assert(r === t, 'same dtype should return self')
     assertClose(await r.toArray(), [1, 2, 3])
+  })
+
+  await test('owned identity C return survives JS adoption', async () => {
+    const t = new Tensor([1, 2], { dtype: 'float32', device: 'cpu' })
+    t._adoptCoreTensor(t._coreToDevice('cpu'))
+    assertClose(await t.toArray(), [1, 2])
   })
 
   await test('cast and bitcast store exact physical roots', async () => {
