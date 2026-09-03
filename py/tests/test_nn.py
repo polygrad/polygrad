@@ -223,6 +223,15 @@ class TestBatchNorm:
             y = bn(x)
         assert y.shape == (2, 4, 3, 3)
 
+    def test_eval_running_var_is_only_channel_reshape(self):
+        # Tinygrad 2026-08-22/a9069c177a9d nn/__init__.py:43 keeps the
+        # running variance at [1,C,1,1]; batchnorm performs broadcasting.
+        bn = BatchNorm(4)
+        x = Tensor.empty(2, 4, 3, 3, device="CPU")
+        _, running_var = bn.calc_stats(x)
+        assert running_var.shape == (1, 4, 1, 1)
+        assert running_var.uop_physical.op_name == "RESHAPE"
+
     def test_running_stats_update(self):
         bn = BatchNorm(4)
         x = Tensor.rand(2, 4, 3, 3)

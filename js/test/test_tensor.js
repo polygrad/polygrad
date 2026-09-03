@@ -1475,8 +1475,7 @@ async function runTensorTests(pg) {
     assertClose(await rounded32.toArray(), expectedRound)
 
     if (supportsF16) {
-      // Cast after float32 staging: direct float16 host staging is tracked
-      // separately and is not part of this composition parity gate.
+      // Keep this composition gate independent of direct host-bit packing.
       const rounded16 = new Tensor(values).cast('float16').round()
       assert(rounded16.dtype === 'float16', `expected float16, got ${rounded16.dtype}`)
       assertClose(await rounded16.cast('float32').toArray(), expectedRound)
@@ -1561,8 +1560,7 @@ async function runTensorTests(pg) {
     assertClose(await new Tensor(values).gelu().toArray(), expected, 2e-6)
 
     if (supportsF16) {
-      // Numeric float16 host staging is a separate frontend-input parity debt.
-      // Isolate GELU by using the already exact float32 -> graph CAST path.
+      // Isolate GELU from the separately tested direct host-bit packing path.
       const half = new Tensor(values).cast('float16').gelu()
       assert(half.dtype === 'float16', `expected float16, got ${half.dtype}`)
       assertClose(await half.cast('float32').toArray(), expected, 2e-3)

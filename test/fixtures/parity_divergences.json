@@ -489,13 +489,13 @@
     },
     {
       "id": "PG-PARITY-019",
-      "status": "open_debt",
+      "status": "resolved",
       "stages": ["frontend", "tensor"],
       "area": "JavaScript numeric float16 host staging",
       "vocabulary": {"tinygrad_only": [], "polygrad_only": []},
       "tinygrad": "Numeric host values are staged as numeric source values and converted to the requested dtype in the Tensor graph",
-      "polygrad": "JavaScript plain numeric arrays requested as float16 are flattened through Uint16Array, so numeric values are reinterpreted as half storage bits before graph construction",
-      "rationale": "The current route corrupts input before elementwise execution; operations must not compensate for invalid host staging.",
+      "polygrad": "JavaScript numeric arrays are rounded to exact binary16 storage bits before the shared C host Tensor constructor; the physical graph contains no CAST",
+      "rationale": "The former route corrupted input before elementwise execution; operations must not compensate for invalid host staging.",
       "approval": null,
       "evidence": [
         "references/tinygrad_latest/tinygrad/uop/ops.py:UOp._frompy",
@@ -503,7 +503,11 @@
         "js/src/tensor.js:Tensor",
         "js/test/test_tensor.js"
       ],
-      "close_when": "Plain JavaScript numeric float16 arrays encode pinned direct-buffer storage without a frontend CAST across native, Wasm, and browser frontends; backend readback matches the corresponding Tinygrad renderer, including the PythonRenderer non-native-half subnormal boundary."
+      "resolution": {
+        "evidence": "Direct Array, nested Array, Float64Array, Uint16Array-as-numeric, scalar, non-finite, maximum-finite, and minimum-subnormal cases pass with zero CAST nodes across JS native and Wasm. Browser auto/interpreter/WebGPU use the same constructor regression. The source was implemented in 40c52aa9; the open register row was stale.",
+        "closed_on": "2026-09-03"
+      },
+      "close_when": null
     },
     {
       "id": "PG-PARITY-020",

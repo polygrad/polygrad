@@ -180,7 +180,7 @@ class BatchNorm:
     def calc_stats(self, x):
         shape_mask = [1, -1, *([1] * (x.ndim - 2))]
         if self.track_running_stats and not TRAINING:
-            return self.running_mean, self.running_var.reshape(shape=shape_mask).expand(x.shape)
+            return self.running_mean, self.running_var.reshape(shape=shape_mask)
         reduce_axes = tuple(axis for axis in range(x.ndim) if axis != 1)
         batch_mean = x.mean(axis=reduce_axes)
         y = x - batch_mean.detach().reshape(shape=shape_mask)
