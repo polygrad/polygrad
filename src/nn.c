@@ -42,8 +42,6 @@ static PolyTensor *nn_tensor_result(
       (logical && !poly_ctx_owns_ptr(ctx, logical)) || !poly_ctx_owns_ptr(ctx, physical))
     return NULL;
   PolyDevice device = POLY_DEVICE_AUTO;
-  bool requires_grad = false;
-  bool requires_grad_set = false;
   for (int i = 0; i < n_inputs; i++) {
     PolyTensor *input = inputs[i];
     if (!input) continue;
@@ -51,15 +49,11 @@ static PolyTensor *nn_tensor_result(
       if (device != POLY_DEVICE_AUTO && device != input->device) return NULL;
       device = input->device;
     }
-    requires_grad |= input->requires_grad;
-    requires_grad_set |= input->requires_grad_set;
   }
   PolyTensor *out = poly_tensor_create_result(
       ctx, inputs, n_inputs, logical, physical, POLY_TENSOR_VALUE, device
   );
   if (!out) return NULL;
-  out->requires_grad = requires_grad;
-  out->requires_grad_set = requires_grad_set;
   out->provenance = POLY_TENSOR_PROVENANCE_COMPUTED;
   return out;
 }
@@ -387,8 +381,6 @@ PolyTensor *poly_tensor_causal_mask(PolyCtx *ctx, int64_t T) {
       ctx, logical, physical, POLY_TENSOR_VALUE, poly_ctx_get_preferred_device(ctx)
   );
   if (!out) return NULL;
-  out->requires_grad = false;
-  out->requires_grad_set = true;
   out->provenance = POLY_TENSOR_PROVENANCE_COMPUTED;
   return out;
 }

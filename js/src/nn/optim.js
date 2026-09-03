@@ -30,15 +30,15 @@ function createBoundOptim(runtime) {
     constructor(params, lr = 0.001, opts = {}) {
       if (lr < 0) throw new Error(`Invalid learning rate: ${lr}`)
       const allParams = normalizeParams(params)
-      this.params = dedup(allParams.filter(p => p && p.requiresGrad))
+      this.params = dedup(allParams.filter(p => p && p.isParam))
       if (!this.params.length) throw new Error('optimizer must have at least one param')
-      this.buffers = dedup(allParams.filter(p => p && !p.requiresGrad))
+      this.buffers = dedup(allParams.filter(p => p && !p.isParam))
       this.device = opts.device || this.params[0].device
       this._ctx = this.params[0]._ctx
       this._rt = this.params[0]._rt
       this.lr = new Tensor([Number(lr)], {
-        dtype: 'float32', device: this.device, _ctx: this._ctx, requiresGrad: false
-      })
+        dtype: 'float32', device: this.device, _ctx: this._ctx
+      }).is_param_(false)
     }
 
     zeroGrad() {
@@ -163,8 +163,8 @@ function createBoundOptim(runtime) {
       this.classic = Boolean(opts.classic)
       this.b = this.momentum
         ? this.params.map(p => Tensor.zeros(
-          p.shape, { dtype: 'float32', device: this.device, _ctx: this._ctx, requiresGrad: false }
-        ))
+          p.shape, { dtype: 'float32', device: this.device, _ctx: this._ctx }
+        ).is_param_(false))
         : []
       this.velocities = this.b
     }
@@ -217,17 +217,17 @@ function createBoundOptim(runtime) {
       this.eps = Number(opts.eps)
       this.weightDecay = 0
       this.m = this.params.map(p => Tensor.zeros(
-        p.shape, { dtype: 'float32', device: this.device, _ctx: this._ctx, requiresGrad: false }
-      ))
+        p.shape, { dtype: 'float32', device: this.device, _ctx: this._ctx }
+      ).is_param_(false))
       this.v = this.params.map(p => Tensor.zeros(
-        p.shape, { dtype: 'float32', device: this.device, _ctx: this._ctx, requiresGrad: false }
-      ))
+        p.shape, { dtype: 'float32', device: this.device, _ctx: this._ctx }
+      ).is_param_(false))
       this.b1_t = Tensor.ones(
-        1, { dtype: 'float32', device: this.device, _ctx: this._ctx, requiresGrad: false }
-      )
+        1, { dtype: 'float32', device: this.device, _ctx: this._ctx }
+      ).is_param_(false)
       this.b2_t = Tensor.ones(
-        1, { dtype: 'float32', device: this.device, _ctx: this._ctx, requiresGrad: false }
-      )
+        1, { dtype: 'float32', device: this.device, _ctx: this._ctx }
+      ).is_param_(false)
       this._bc1 = this.b1_t
       this._bc2 = this.b2_t
     }

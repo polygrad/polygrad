@@ -120,6 +120,7 @@ typedef struct {
   PolyUOp *declared_logical_value; /* exact source Tensor root named by this binding */
   PolyUOp *declared_physical_value; /* exact current value to snapshot, never rewritten */
   bool needs_snapshot;
+  bool trainable;
   int64_t shape[POLY_IR_MAX_DIMS];
   int ndim;
 } BuildBinding;
@@ -597,6 +598,13 @@ static BuildBinding *find_build_binding(PolyInstanceBuildState *build, const cha
   return NULL;
 }
 
+static bool set_build_binding_trainable(PolyInstance *inst, const char *name, bool trainable) {
+  BuildBinding *binding = inst ? find_build_binding(inst->build, name) : NULL;
+  if (!binding || binding->role != POLY_ROLE_PARAM) return false;
+  binding->trainable = trainable;
+  return true;
+}
+
 static PolyStatus append_build_binding(
     PolyInstance *inst,
     const char *name,
@@ -608,7 +616,7 @@ static PolyStatus append_build_binding(
     PolyUOp *initial_data_buffer,
     const int64_t *shape,
     int ndim,
-    bool default_requires_grad,
+    bool trainable,
     PolyTensorProvenance provenance
 ) {
   if (!inst || !inst->build || !name || !tensor) return POLY_STATUS_INVALID;
@@ -657,6 +665,7 @@ static PolyStatus append_build_binding(
   b->initial_data_buffer = initial_data_buffer;
   b->declared_logical_value = poly_tensor_uop_logical(tensor);
   b->declared_physical_value = poly_tensor_uop_physical(tensor);
+  b->trainable = role == POLY_ROLE_PARAM && trainable;
   b->ndim = ndim;
   if (ndim > 0) memcpy(b->shape, shape, (size_t)ndim * sizeof(int64_t));
   /* Instance capture owns immutable build-stage roots immediately. The source
@@ -672,8 +681,6 @@ static PolyStatus append_build_binding(
     if (poly_tensor_provenance(tensor) == POLY_TENSOR_PROVENANCE_UNKNOWN)
       poly_tensor_set_provenance(tensor, provenance);
   } else {
-    if (!poly_tensor_requires_grad_is_set(tensor))
-      poly_tensor_set_requires_grad(tensor, default_requires_grad);
     poly_tensor_set_provenance(tensor, provenance);
   }
   return POLY_STATUS_OK;
@@ -686,7 +693,7 @@ static PolyTensor *make_bound_storage_tensor(
     PolyDType dt,
     const int64_t *shape,
     int ndim,
-    bool default_requires_grad,
+    bool trainable,
     PolyTensorProvenance provenance
 ) {
   if (require_stage(inst, POLY_INSTANCE_BUILDING, __func__) != POLY_STATUS_OK) return NULL;
@@ -726,8 +733,7 @@ static PolyTensor *make_bound_storage_tensor(
     return NULL;
   }
   if (append_build_binding(
-          inst, name, role, 0, tensor, buf, physical_buf, buf, shape, ndim, default_requires_grad,
-          provenance
+          inst, name, role, 0, tensor, buf, physical_buf, buf, shape, ndim, trainable, provenance
       ) != POLY_STATUS_OK)
     return NULL;
   return tensor;
@@ -740,7 +746,7 @@ static PolyStatus append_existing_tensor_binding(
     PolyTensor *tensor,
     uint32_t flags,
     bool require_buffer,
-    bool default_requires_grad,
+    bool trainable,
     PolyTensorProvenance provenance
 ) {
   if (require_stage(inst, POLY_INSTANCE_BUILDING, __func__) != POLY_STATUS_OK)
@@ -792,7 +798,7 @@ static PolyStatus append_existing_tensor_binding(
   }
   PolyStatus st = append_build_binding(
       inst, name, role, flags, tensor, buffer, physical_buffer, initial_data_buffer, shape, ndim,
-      default_requires_grad, provenance
+      trainable, provenance
   );
   if (st == POLY_STATUS_OK && require_buffer && (!buffer || !initial_data_buffer))
     inst->build->bindings[inst->build->n_bindings - 1].needs_snapshot = true;
@@ -1474,14 +1480,6 @@ static PolyStatus validate_build_reachable_storage(PolyInstance *inst) {
       if (!u || (u->op != POLY_OP_BUFFER && u->op != POLY_OP_PARAM)) continue;
       if (find_build_storage_binding(build, u)) continue;
       PolyTensor *leaf_tensor = poly_tensor_find_storage_identity(inst->ctx, u);
-      if (leaf_tensor && poly_tensor_requires_grad(leaf_tensor)) {
-        poly_toposort_free(topo);
-        poly_instance_set_error(
-            inst, POLY_STATUS_INVALID, __func__,
-            "output '%s' references unbound trainable storage %s", out->name, poly_op_name(u->op)
-        );
-        return POLY_STATUS_INVALID;
-      }
       if (leaf_tensor && poly_tensor_provenance(leaf_tensor) != POLY_TENSOR_PROVENANCE_UNKNOWN &&
           poly_tensor_provenance(leaf_tensor) != POLY_TENSOR_PROVENANCE_CONST_INIT) {
         poly_toposort_free(topo);
@@ -1627,7 +1625,7 @@ PolyStatus poly_instance_build(PolyInstance *inst, PolyInstanceError *err) {
         .role = b->role,
         .buffer = b->role == POLY_ROLE_OUTPUT ? b->buffer : b->declared_logical_value,
         .ndim = b->ndim,
-        .trainable = (b->role == POLY_ROLE_PARAM) && poly_tensor_requires_grad(b->tensor),
+        .trainable = b->trainable,
         .trainable_set = true,
     };
     if (b->ndim > 0) memcpy(bufs[i].shape, b->shape, (size_t)b->ndim * sizeof(int64_t));
@@ -1877,8 +1875,6 @@ PolyInstance *poly_instance_from_bindings(
 
   typedef struct {
     PolyTensor *tensor;
-    bool requires_grad;
-    bool requires_grad_set;
     PolyTensorProvenance provenance;
   } TensorMetadataSnapshot;
   TensorMetadataSnapshot *metadata = calloc((size_t)n_bindings, sizeof(*metadata));
@@ -1903,15 +1899,13 @@ PolyInstance *poly_instance_from_bindings(
     if (seen) continue;
     metadata[n_metadata++] = (TensorMetadataSnapshot){
         .tensor = tensor,
-        .requires_grad = tensor->requires_grad,
-        .requires_grad_set = tensor->requires_grad_set,
         .provenance = tensor->provenance,
     };
   }
   for (int i = 0; i < n_bindings; i++) {
     const PolyBindingSpec *b = &bindings[i];
     bool output = b->role == POLY_ROLE_OUTPUT;
-    bool trainable = b->role == POLY_ROLE_PARAM;
+    bool trainable = b->role == POLY_ROLE_PARAM && !(b->flags & POLY_BIND_F_FROZEN);
     PolyTensorProvenance provenance = POLY_TENSOR_PROVENANCE_UNKNOWN;
     switch (b->role) {
     case POLY_ROLE_INPUT:
@@ -1953,8 +1947,6 @@ PolyInstance *poly_instance_from_bindings(
 
 fail:
   for (int i = 0; i < n_metadata; i++) {
-    metadata[i].tensor->requires_grad = metadata[i].requires_grad;
-    metadata[i].tensor->requires_grad_set = metadata[i].requires_grad_set;
     metadata[i].tensor->provenance = metadata[i].provenance;
   }
   free(metadata);
@@ -4823,8 +4815,10 @@ static PolyTensor *register_inline_tensor(
     PolyTensor *aliased = aliases[i].parent_tensor;
     int rc = b->role == POLY_ROLE_PARAM ? poly_instance_state(parent, full, aliased, b->flags)
                                         : POLY_STATUS_OK;
+    bool ok = rc == POLY_STATUS_OK &&
+              (b->role != POLY_ROLE_PARAM || set_build_binding_trainable(parent, full, trainable));
     free(full);
-    return rc == POLY_STATUS_OK ? aliased : NULL;
+    return ok ? aliased : NULL;
   }
 
   PolyTensor *ret = NULL;
@@ -4833,7 +4827,7 @@ static PolyTensor *register_inline_tensor(
   switch (b->role) {
   case POLY_ROLE_PARAM:
     ret = poly_instance_param(parent, full, b->logical_value->dtype, b->shape, b->ndim);
-    if (ret) poly_tensor_set_requires_grad(ret, trainable);
+    if (ret && !set_build_binding_trainable(parent, full, trainable)) ret = NULL;
     break;
   case POLY_ROLE_INPUT:
   case POLY_ROLE_TARGET:

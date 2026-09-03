@@ -449,7 +449,6 @@ PolyTensor *poly_tensor_find_storage_identity(PolyCtx *ctx, const PolyUOp *stora
     if (t->provenance != POLY_TENSOR_PROVENANCE_UNKNOWN &&
         t->provenance != POLY_TENSOR_PROVENANCE_CONST_INIT)
       score = 1;
-    if (t->requires_grad) score = 2;
     if (score > best_score || (score == best_score && (!best || t->order > best->order))) {
       best = t;
       best_score = score;
@@ -1335,8 +1334,6 @@ static PolyTensor *tensor_alu(PolyCtx *ctx, PolyOps op, PolyTensor **inputs, int
   if (logical_state < 0) return NULL;
   bool build_logical = logical_state == POLY_LOGICAL_AVAILABLE;
   PolyDevice device = POLY_DEVICE_AUTO;
-  bool requires_grad = false;
-  bool requires_grad_set = false;
   for (int i = 0; i < n; i++) {
     PolyTensor *input = inputs[i];
     if (!input) return NULL;
@@ -1347,8 +1344,6 @@ static PolyTensor *tensor_alu(PolyCtx *ctx, PolyOps op, PolyTensor **inputs, int
       if (device != POLY_DEVICE_AUTO && input->device != device) return NULL;
       device = input->device;
     }
-    requires_grad |= input->requires_grad;
-    requires_grad_set |= input->requires_grad_set;
   }
 
   int promote_from = 0;
@@ -1395,8 +1390,6 @@ static PolyTensor *tensor_alu(PolyCtx *ctx, PolyOps op, PolyTensor **inputs, int
   PolyTensor *out =
       poly_tensor_create_result(ctx, inputs, n, logical, physical, POLY_TENSOR_VALUE, device);
   if (!out) return NULL;
-  out->requires_grad = requires_grad;
-  out->requires_grad_set = requires_grad_set;
   out->provenance = POLY_TENSOR_PROVENANCE_COMPUTED;
   return out;
 }
@@ -1453,8 +1446,6 @@ static PolyTensor *tensor_dtype_result(PolyCtx *ctx, PolyTensor *src, int dtype_
   PolyTensor *out =
       poly_tensor_create_result(ctx, inputs, 1, logical, physical, POLY_TENSOR_VALUE, src->device);
   if (!out) return NULL;
-  out->requires_grad = src->requires_grad;
-  out->requires_grad_set = src->requires_grad_set;
   out->provenance = POLY_TENSOR_PROVENANCE_COMPUTED;
   return out;
 }
@@ -1494,8 +1485,6 @@ static PolyTensor *tensor_unary_result(
       ctx, inputs, 1, logical, physical, POLY_TENSOR_VALUE, src ? src->device : POLY_DEVICE_AUTO
   );
   if (!out) return NULL;
-  out->requires_grad = src->requires_grad;
-  out->requires_grad_set = src->requires_grad_set;
   out->provenance = POLY_TENSOR_PROVENANCE_COMPUTED;
   return out;
 }
@@ -1726,8 +1715,6 @@ PolyTensor *poly_tensor_to_device(PolyCtx *ctx, PolyTensor *tensor, PolyDevice d
   );
   if (placed) {
     placed->source = poly_tensor_retain(tensor);
-    placed->requires_grad = tensor->requires_grad;
-    placed->requires_grad_set = tensor->requires_grad_set;
     placed->provenance = tensor->provenance;
   }
   return placed;
@@ -1910,8 +1897,6 @@ PolyTensor *poly_tensor_clone(PolyCtx *ctx, PolyTensor *source, PolyDevice devic
     poly_tensor_release(target);
     return NULL;
   }
-  target->requires_grad = source->requires_grad;
-  target->requires_grad_set = source->requires_grad_set;
   return target;
 }
 
@@ -2038,21 +2023,6 @@ int poly_tensor_retire_logical_resources(PolyCtx *ctx, PolyTensor **tensors, int
 
 PolyDevice poly_tensor_device(PolyTensor *tensor) {
   return tensor ? tensor->device : POLY_DEVICE_AUTO;
-}
-
-bool poly_tensor_requires_grad(PolyTensor *tensor) {
-  return tensor ? tensor->requires_grad : false;
-}
-
-bool poly_tensor_requires_grad_is_set(PolyTensor *tensor) {
-  return tensor ? tensor->requires_grad_set : false;
-}
-
-void poly_tensor_set_requires_grad(PolyTensor *tensor, bool requires_grad) {
-  if (tensor) {
-    tensor->requires_grad = requires_grad;
-    tensor->requires_grad_set = true;
-  }
 }
 
 PolyTensorProvenance poly_tensor_provenance(PolyTensor *tensor) {
@@ -2551,8 +2521,6 @@ PolyTensor *poly_tensor_div(PolyCtx *ctx, PolyTensor *dividend, PolyTensor *divi
   PolyTensor *out =
       poly_tensor_create_result(ctx, inputs, 2, logical, physical, POLY_TENSOR_VALUE, device);
   if (!out) return NULL;
-  out->requires_grad = dividend->requires_grad || divisor->requires_grad;
-  out->requires_grad_set = dividend->requires_grad_set || divisor->requires_grad_set;
   out->provenance = POLY_TENSOR_PROVENANCE_COMPUTED;
   return out;
 }
@@ -3598,8 +3566,6 @@ static PolyTensor *tensor_composite_result(
 ) {
   if (!ctx || !physical || !inputs || n_inputs <= 0) return NULL;
   PolyDevice device = POLY_DEVICE_AUTO;
-  bool requires_grad = false;
-  bool requires_grad_set = false;
   for (int i = 0; i < n_inputs; i++) {
     PolyTensor *input = inputs[i];
     if (!input) continue;
@@ -3607,15 +3573,11 @@ static PolyTensor *tensor_composite_result(
       if (device != POLY_DEVICE_AUTO && input->device != device) return NULL;
       device = input->device;
     }
-    requires_grad |= input->requires_grad;
-    requires_grad_set |= input->requires_grad_set;
   }
   PolyTensor *out = poly_tensor_create_result(
       ctx, inputs, n_inputs, logical, physical, POLY_TENSOR_VALUE, device
   );
   if (!out) return NULL;
-  out->requires_grad = requires_grad;
-  out->requires_grad_set = requires_grad_set;
   out->provenance = POLY_TENSOR_PROVENANCE_COMPUTED;
   return out;
 }
@@ -6588,8 +6550,6 @@ PolyTensor *poly_tensor_detach(PolyCtx *ctx, PolyTensor *src) {
       ctx, src, build_logical ? poly_detach(ctx, src->uop_logical) : NULL, poly_detach(ctx, current)
   );
   if (!out) return NULL;
-  out->requires_grad = false;
-  out->requires_grad_set = true;
   return out;
 }
 
@@ -7119,8 +7079,6 @@ int poly_tensor_sort(
       ctx, inputs, 1, logical_indices, physical_indices, POLY_TENSOR_VALUE, src->device
   );
   if (!values || !indices) return -1;
-  indices->requires_grad = false;
-  indices->requires_grad_set = true;
   indices->provenance = POLY_TENSOR_PROVENANCE_COMPUTED;
   *out_values = values;
   *out_indices = indices;
@@ -7201,8 +7159,6 @@ int poly_tensor_topk(
       ctx, inputs, 1, logical_indices, physical_indices, POLY_TENSOR_VALUE, src->device
   );
   if (!values || !indices) return -1;
-  indices->requires_grad = false;
-  indices->requires_grad_set = true;
   indices->provenance = POLY_TENSOR_PROVENANCE_COMPUTED;
   *out_values = values;
   *out_indices = indices;
@@ -8428,8 +8384,6 @@ PolyTensor *poly_tensor_argmax(PolyCtx *ctx, PolyTensor *src, int axis, bool kee
   if (!physical || (build_logical && !logical)) return NULL;
   PolyTensor *out = tensor_unary_result(ctx, src, logical, physical);
   if (!out) return NULL;
-  out->requires_grad = false;
-  out->requires_grad_set = true;
   return out;
 }
 

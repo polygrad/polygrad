@@ -834,8 +834,6 @@ struct PolyTensor {
   PolyDevice device;
   uint64_t order;
   PolyTensor *source;
-  bool requires_grad;
-  bool requires_grad_set;
   PolyTensorProvenance provenance;
   /* C mechanics for Tinygrad's weak live-Tensor registry. */
   PolyCtx *owner_ctx;
@@ -1149,9 +1147,6 @@ PolyLogicalPolicy poly_tensor_logical_policy(const PolyTensor *tensor);
 PolyLogicalState poly_tensor_logical_state(const PolyTensor *tensor);
 int poly_tensor_set_logical_policy(PolyCtx *ctx, PolyTensor *tensor, PolyLogicalPolicy policy);
 PolyDevice poly_tensor_device(PolyTensor *tensor);
-bool poly_tensor_requires_grad(PolyTensor *tensor);
-bool poly_tensor_requires_grad_is_set(PolyTensor *tensor);
-void poly_tensor_set_requires_grad(PolyTensor *tensor, bool requires_grad);
 PolyTensorProvenance poly_tensor_provenance(PolyTensor *tensor);
 void poly_tensor_set_provenance(PolyTensor *tensor, PolyTensorProvenance provenance);
 PolyUOp *poly_tensor_physicalize(PolyCtx *ctx, PolyTensor *tensor);
@@ -1689,9 +1684,9 @@ const PolyRegEntry *poly_ctx_get_entry(PolyCtx *ctx, const char *name)
 /* Mark a named PARAM trainable/frozen. Non-PARAM buffers ignore optimizer
  * trainability but still carry the bit for import/export round-trips. */
 int poly_ctx_set_trainable(PolyCtx *ctx, const char *name, bool trainable)
-    POLY_DEPRECATED("set PolyTensor requires_grad before staged instance build");
+    POLY_DEPRECATED("use PolyInstance trainability metadata");
 bool poly_ctx_is_trainable(PolyCtx *ctx, const char *name)
-    POLY_DEPRECATED("read trainability from PolyTensor or built PolyInstance");
+    POLY_DEPRECATED("read trainability from the built PolyInstance");
 
 /* Enumeration of all named entries (including aliases). */
 int poly_ctx_named_count(PolyCtx *ctx) POLY_DEPRECATED("ctx-global registry is compatibility-only");

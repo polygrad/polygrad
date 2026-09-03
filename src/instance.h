@@ -105,6 +105,7 @@ typedef struct {
 #define POLY_BIND_F_NONE 0u
 #define POLY_BIND_F_NO_SAVE (1u << 0)
 #define POLY_BIND_F_OPTIM (1u << 1)
+#define POLY_BIND_F_FROZEN (1u << 2)
 
 #define POLY_EXPORT_WEIGHTS_PARAMS (1u << 0)
 #define POLY_EXPORT_WEIGHTS_OPTIMIZER (1u << 1)

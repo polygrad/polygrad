@@ -101,7 +101,6 @@ static PolyTensor *mlp_int_scalar(PolyCtx *ctx, int64_t value) {
   PolyTensor *out =
       poly_tensor_create_with_roots(ctx, constant, constant, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
   if (out) {
-    poly_tensor_set_requires_grad(out, false);
     poly_tensor_set_provenance(out, POLY_TENSOR_PROVENANCE_CONST_INIT);
   }
   return out;

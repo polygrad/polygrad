@@ -1266,9 +1266,6 @@ function createWasmCoreFromModule(Module, device) {
     poly_tensor_set_logical_policy: (ctx, tensor, policy) =>
       Module._poly_tensor_set_logical_policy(ctx, tensor, policy),
     poly_tensor_device: (tensor) => Module._poly_tensor_device(tensor),
-    poly_tensor_requires_grad: (tensor) => Boolean(Module._poly_tensor_requires_grad(tensor)),
-    poly_tensor_set_requires_grad: (tensor, requiresGrad) =>
-      Module._poly_tensor_set_requires_grad(tensor, Boolean(requiresGrad)),
     poly_set_frontend_buffer_release: (fn) => {
       Module.__polygradFrontendBufferRelease = fn
       if (!Module.__polygradFrontendBufferReleasePtr) {
@@ -1728,7 +1725,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 66
+  const EXPECTED_ABI = 67
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(

@@ -50,7 +50,7 @@ Autograd:
 ```js
 const { Tensor } = require('polygrad')
 
-const x = new Tensor([1.0, 2.0, 3.0], { requiresGrad: true })
+const x = new Tensor([1.0, 2.0, 3.0])
 const loss = x.mul(x).sum()
 
 loss.backward()

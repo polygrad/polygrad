@@ -1500,7 +1500,7 @@ TEST(instance, staged_build_rejects_unbound_storage_leaf) {
   PASS();
 }
 
-TEST(instance, staged_bindings_set_tensor_metadata) {
+TEST(instance, staged_bindings_set_tensor_provenance) {
   PolyCtx *ctx = poly_ctx_new();
   PolyInstance *inst = poly_instance_new(ctx, NULL);
   ASSERT_NOT_NULL(inst);
@@ -1513,9 +1513,6 @@ TEST(instance, staged_bindings_set_tensor_metadata) {
   ASSERT_NOT_NULL(y);
   ASSERT_NOT_NULL(w);
 
-  ASSERT_TRUE(!poly_tensor_requires_grad(x));
-  ASSERT_TRUE(!poly_tensor_requires_grad(y));
-  ASSERT_TRUE(poly_tensor_requires_grad(w));
   ASSERT_INT_EQ(poly_tensor_provenance(x), POLY_TENSOR_PROVENANCE_USER_INPUT);
   ASSERT_INT_EQ(poly_tensor_provenance(y), POLY_TENSOR_PROVENANCE_USER_INPUT);
   ASSERT_INT_EQ(poly_tensor_provenance(w), POLY_TENSOR_PROVENANCE_PARAM_INIT);
@@ -1541,19 +1538,16 @@ TEST(instance, staged_bindings_set_tensor_metadata) {
 
   PolyTensor *w_cuda = poly_tensor_to_device(ctx, w, POLY_DEVICE_CUDA);
   ASSERT_NOT_NULL(w_cuda);
-  ASSERT_TRUE(poly_tensor_requires_grad(w_cuda));
   ASSERT_INT_EQ(poly_tensor_provenance(w_cuda), POLY_TENSOR_PROVENANCE_PARAM_INIT);
 
   PolyTensor *state = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(state);
   ASSERT_INT_EQ(poly_instance_state(inst, "loaded", state, 0), POLY_STATUS_OK);
-  ASSERT_TRUE(poly_tensor_requires_grad(state));
   ASSERT_INT_EQ(poly_tensor_provenance(state), POLY_TENSOR_PROVENANCE_STATE_LOADED);
 
   PolyTensor *aux = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(aux);
   ASSERT_INT_EQ(poly_instance_aux(inst, "aux", aux, 0), POLY_STATUS_OK);
-  ASSERT_TRUE(!poly_tensor_requires_grad(aux));
   ASSERT_INT_EQ(poly_tensor_provenance(aux), POLY_TENSOR_PROVENANCE_STATE_LOADED);
 
   ASSERT_INT_EQ(poly_instance_output(inst, "echo", x), POLY_STATUS_OK);
@@ -1570,7 +1564,7 @@ TEST(instance, staged_bindings_set_tensor_metadata) {
   PASS();
 }
 
-TEST(instance, staged_build_rejects_unbound_trainable_storage_leaf) {
+TEST(instance, staged_build_rejects_provenance_only_unbound_alias) {
   PolyCtx *ctx = poly_ctx_new();
   PolyInstance *inst = poly_instance_new(ctx, NULL);
   ASSERT_NOT_NULL(inst);
@@ -1583,7 +1577,6 @@ TEST(instance, staged_build_rejects_unbound_trainable_storage_leaf) {
   PolyDevice device = test_ctx_execution_device(ctx);
   PolyTensor *w = poly_tensor_empty(ctx, POLY_FLOAT32, w_shape, 2, device);
   ASSERT_NOT_NULL(w);
-  poly_tensor_set_requires_grad(w, true);
   poly_tensor_set_provenance(w, POLY_TENSOR_PROVENANCE_PARAM_INIT);
 
   PolyTensor *w_alias = poly_tensor_create_with_roots(
@@ -1603,14 +1596,15 @@ TEST(instance, staged_build_rejects_unbound_trainable_storage_leaf) {
   ASSERT_INT_EQ(poly_instance_build(inst, NULL), POLY_STATUS_INVALID);
   const PolyInstanceError *err = poly_instance_last_error(inst);
   ASSERT_NOT_NULL(err);
-  ASSERT_TRUE(strstr(err->message, "unbound trainable storage") != NULL);
+  ASSERT_TRUE(strstr(err->message, "unbound") != NULL);
+  ASSERT_TRUE(strstr(err->message, "storage") != NULL);
 
   poly_instance_free(inst);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
-TEST(instance, staged_runtime_trainability_uses_tensor_metadata) {
+TEST(instance, staged_runtime_trainability_is_instance_metadata) {
   PolyCtx *ctx = poly_ctx_new();
   PolyInstance *inst = poly_instance_new(ctx, NULL);
   ASSERT_NOT_NULL(inst);
@@ -1620,10 +1614,6 @@ TEST(instance, staged_runtime_trainability_uses_tensor_metadata) {
   PolyTensor *w = poly_instance_param(inst, "w", POLY_FLOAT32, x_shape, 2);
   ASSERT_NOT_NULL(x);
   ASSERT_NOT_NULL(w);
-  ASSERT_TRUE(poly_tensor_requires_grad(w));
-
-  poly_tensor_set_requires_grad(w, false);
-
   PolyTensor *out = poly_tensor_alu2(ctx, POLY_OP_MUL, x, w);
   ASSERT_NOT_NULL(out);
   ASSERT_INT_EQ(poly_instance_output(inst, "output", out), POLY_STATUS_OK);
@@ -1634,6 +1624,40 @@ TEST(instance, staged_runtime_trainability_uses_tensor_metadata) {
       poly_instance_entrypoint(inst, "forward", inputs, 1, outputs, 1, NULL), POLY_STATUS_OK
   );
   ASSERT_INT_EQ(poly_instance_build(inst, NULL), POLY_STATUS_OK);
+  ASSERT_INT_EQ(poly_instance_param_count(inst), 1);
+  ASSERT_TRUE(poly_instance_param_trainable(inst, 0));
+  ASSERT_INT_EQ(poly_instance_set_param_trainable(inst, 0, false), 0);
+  ASSERT_TRUE(!poly_instance_param_trainable(inst, 0));
+
+  poly_instance_free(inst);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(instance, binding_frozen_flag_sets_resource_trainability) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int64_t shape[] = {1};
+  PolyDevice device = test_ctx_execution_device(ctx);
+  PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, device);
+  PolyTensor *w = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, device);
+  PolyTensor *out = poly_tensor_alu2(ctx, POLY_OP_MUL, x, w);
+  ASSERT_NOT_NULL(x);
+  ASSERT_NOT_NULL(w);
+  ASSERT_NOT_NULL(out);
+
+  PolyBindingSpec bindings[] = {
+      {.name = "x", .role = POLY_ROLE_INPUT, .tensor = x},
+      {.name = "w", .role = POLY_ROLE_PARAM, .tensor = w, .flags = POLY_BIND_F_FROZEN},
+      {.name = "out", .role = POLY_ROLE_OUTPUT, .tensor = out},
+  };
+  const char *inputs[] = {"x"};
+  const char *outputs[] = {"out"};
+  PolyEntrypointSpec entrypoints[] = {
+      {.name = "forward", .inputs = inputs, .n_inputs = 1, .outputs = outputs, .n_outputs = 1},
+  };
+  PolyInstance *inst = poly_instance_from_bindings(ctx, bindings, 3, entrypoints, 1, NULL, NULL);
+  ASSERT_NOT_NULL(inst);
   ASSERT_INT_EQ(poly_instance_param_count(inst), 1);
   ASSERT_TRUE(!poly_instance_param_trainable(inst, 0));
 
@@ -1766,7 +1790,6 @@ TEST(instance, named_value_state_preserves_logical_program_and_binds_physical_st
   ASSERT_NOT_NULL(w);
   ASSERT_NOT_NULL(x);
   ASSERT_NOT_NULL(y);
-  poly_tensor_set_requires_grad(w, true);
   PolyUOp *source_logical = poly_tensor_uop_logical(w);
   PolyUOp *source_physical = poly_tensor_uop_physical(w);
   ASSERT_INT_EQ(source_logical->op, POLY_OP_ADD);
@@ -2872,7 +2895,6 @@ TEST(instance, failed_from_bindings_does_not_snapshot_lazy_state) {
   ASSERT_NOT_NULL(w);
   ASSERT_NOT_NULL(x);
   ASSERT_NOT_NULL(unbound);
-  poly_tensor_set_requires_grad(unbound, true);
   PolyTensor *mul = poly_tensor_alu2(ctx, POLY_OP_MUL, x, w);
   PolyTensor *out = poly_tensor_alu2(ctx, POLY_OP_ADD, mul, unbound);
   ASSERT_NOT_NULL(out);
@@ -2891,8 +2913,6 @@ TEST(instance, failed_from_bindings_does_not_snapshot_lazy_state) {
   int tensors_before = ctx->n_tensors;
   size_t writes_before = ctx->buffer_write_count;
   uint64_t memory_before = ctx->mem_used;
-  bool w_requires_grad_before = w->requires_grad;
-  bool w_requires_grad_set_before = w->requires_grad_set;
   PolyTensorProvenance w_provenance_before = w->provenance;
   ASSERT_EQ(poly_instance_from_bindings(ctx, bindings, 3, entrypoints, 1, NULL, NULL), NULL);
   ASSERT_INT_EQ(ctx->n_tensors, tensors_before);
@@ -2900,8 +2920,6 @@ TEST(instance, failed_from_bindings_does_not_snapshot_lazy_state) {
   ASSERT_INT_EQ(ctx->mem_used, memory_before);
   ASSERT_PTR_EQ(poly_tensor_uop_logical(w), logical_before);
   ASSERT_PTR_EQ(poly_tensor_uop_physical(w), physical_before);
-  ASSERT_EQ(w->requires_grad, w_requires_grad_before);
-  ASSERT_EQ(w->requires_grad_set, w_requires_grad_set_before);
   ASSERT_EQ(w->provenance, w_provenance_before);
 
   poly_ctx_destroy(ctx);
@@ -3027,7 +3045,6 @@ TEST(instance, named_value_aliases_share_one_runtime_storage) {
   ASSERT_INT_EQ(poly_buffer_write(ctx, poly_tensor_uop_physical(b), bv, sizeof(bv)), 0);
   PolyTensor *state = poly_tensor_alu2(ctx, POLY_OP_ADD, a, b);
   ASSERT_NOT_NULL(state);
-  poly_tensor_set_requires_grad(state, true);
 
   PolyBindingSpec bindings[] = {
       {.name = "encoder.weight", .role = POLY_ROLE_PARAM, .tensor = state},

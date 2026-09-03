@@ -1097,8 +1097,8 @@ static napi_value napi_poly_tensor_full_int_by_id(napi_env env, napi_callback_in
   }
   return make_external(
       env, poly_tensor_full_int_by_id(
-          ctx, dims, ndim, value, dtype_id, device_id, dtype_explicit, buffer
-      )
+               ctx, dims, ndim, value, dtype_id, device_id, dtype_explicit, buffer
+           )
   );
 }
 
@@ -1123,8 +1123,8 @@ static napi_value napi_poly_tensor_full_float_by_id(napi_env env, napi_callback_
   }
   return make_external(
       env, poly_tensor_full_float_by_id(
-          ctx, dims, ndim, value, dtype_id, device_id, dtype_explicit, buffer
-      )
+               ctx, dims, ndim, value, dtype_id, device_id, dtype_explicit, buffer
+           )
   );
 }
 
@@ -1191,10 +1191,7 @@ static napi_value napi_poly_tensor_rand_by_id(napi_env env, napi_callback_info i
     return NULL;
   }
   return make_external(
-      env,
-      poly_tensor_rand_by_id(
-          ctx, dims, ndim, dtype_id, (PolyDevice)device, contiguous
-      )
+      env, poly_tensor_rand_by_id(ctx, dims, ndim, dtype_id, (PolyDevice)device, contiguous)
   );
 }
 
@@ -1212,10 +1209,7 @@ static napi_value napi_poly_tensor_randn_by_id(napi_env env, napi_callback_info 
     napi_throw_range_error(env, NULL, "polygrad: shape length does not match ndim");
     return NULL;
   }
-  return make_external(
-      env,
-      poly_tensor_randn_by_id(ctx, dims, ndim, dtype_id, (PolyDevice)device)
-  );
+  return make_external(env, poly_tensor_randn_by_id(ctx, dims, ndim, dtype_id, (PolyDevice)device));
 }
 
 static napi_value napi_poly_tensor_linspace_by_id(napi_env env, napi_callback_info info) {
@@ -1684,17 +1678,12 @@ static napi_value napi_poly_tensor_detach(napi_env env, napi_callback_info info)
   );
 }
 
-static napi_value napi_poly_tensor_contiguous_backward(
-    napi_env env, napi_callback_info info
-) {
+static napi_value napi_poly_tensor_contiguous_backward(napi_env env, napi_callback_info info) {
   napi_value argv[2];
   size_t argc = 2;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   return make_external(
-      env,
-      poly_tensor_contiguous_backward(
-          get_external(env, argv[0]), get_external(env, argv[1])
-      )
+      env, poly_tensor_contiguous_backward(get_external(env, argv[0]), get_external(env, argv[1]))
   );
 }
 
@@ -1726,10 +1715,10 @@ static napi_value napi_poly_tensor_sum_dtype_by_id(napi_env env, napi_callback_i
   napi_get_value_bool(env, argv[4], &keepdim);
   napi_get_value_int32(env, argv[5], &dtype_id);
   return make_external(
-      env, poly_tensor_sum_dtype_by_id(
-               get_external(env, argv[0]), get_external(env, argv[1]), axes, n_axes, keepdim,
-               dtype_id
-           )
+      env,
+      poly_tensor_sum_dtype_by_id(
+          get_external(env, argv[0]), get_external(env, argv[1]), axes, n_axes, keepdim, dtype_id
+      )
   );
 }
 
@@ -1758,9 +1747,7 @@ static napi_value napi_poly_tensor_argmax(napi_env env, napi_callback_info info)
   napi_get_value_int32(env, argv[2], &axis);
   napi_get_value_bool(env, argv[3], &keepdim);
   return make_external(
-      env, poly_tensor_argmax(
-               get_external(env, argv[0]), get_external(env, argv[1]), axis, keepdim
-           )
+      env, poly_tensor_argmax(get_external(env, argv[0]), get_external(env, argv[1]), axis, keepdim)
   );
 }
 
@@ -1807,19 +1794,15 @@ static napi_value napi_poly_tensor_qr_ex(napi_env env, napi_callback_info info) 
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   napi_get_value_int32(env, argv[2], &mode);
   PolyTensor *q = NULL, *r = NULL;
-  if (poly_tensor_qr_ex(
-          get_external(env, argv[0]), get_external(env, argv[1]), mode, &q, &r
-      ) != 0) {
+  if (poly_tensor_qr_ex(get_external(env, argv[0]), get_external(env, argv[1]), mode, &q, &r) !=
+      0) {
     napi_throw_error(env, NULL, "polygrad: poly_tensor_qr_ex failed");
     return NULL;
   }
   return make_external_pair(env, q, r);
 }
 
-static napi_value napi_poly_tensor_triangular_solve(
-    napi_env env,
-    napi_callback_info info
-) {
+static napi_value napi_poly_tensor_triangular_solve(napi_env env, napi_callback_info info) {
   napi_value argv[6];
   size_t argc = 6;
   int32_t upper = 0, transpose_a = 0, unit_diagonal = 0;
@@ -1829,8 +1812,8 @@ static napi_value napi_poly_tensor_triangular_solve(
   napi_get_value_int32(env, argv[5], &unit_diagonal);
   return make_external(
       env, poly_tensor_triangular_solve(
-               get_external(env, argv[0]), get_external(env, argv[1]),
-               get_external(env, argv[2]), upper, transpose_a, unit_diagonal
+               get_external(env, argv[0]), get_external(env, argv[1]), get_external(env, argv[2]),
+               upper, transpose_a, unit_diagonal
            )
   );
 }
@@ -1842,26 +1825,21 @@ static napi_value napi_poly_tensor_cholesky(napi_env env, napi_callback_info inf
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   napi_get_value_int32(env, argv[2], &upper);
   return make_external(
-      env, poly_tensor_cholesky(
-               get_external(env, argv[0]), get_external(env, argv[1]), upper
-           )
+      env, poly_tensor_cholesky(get_external(env, argv[0]), get_external(env, argv[1]), upper)
   );
 }
 
-static napi_value napi_poly_tensor_cholesky_solve(
-    napi_env env,
-    napi_callback_info info
-) {
+static napi_value napi_poly_tensor_cholesky_solve(napi_env env, napi_callback_info info) {
   napi_value argv[4];
   size_t argc = 4;
   int32_t upper = 0;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   napi_get_value_int32(env, argv[3], &upper);
   return make_external(
-      env, poly_tensor_cholesky_solve(
-               get_external(env, argv[0]), get_external(env, argv[1]),
-               get_external(env, argv[2]), upper
-           )
+      env,
+      poly_tensor_cholesky_solve(
+          get_external(env, argv[0]), get_external(env, argv[1]), get_external(env, argv[2]), upper
+      )
   );
 }
 
@@ -1871,8 +1849,7 @@ static napi_value napi_poly_tensor_solve(napi_env env, napi_callback_info info) 
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   return make_external(
       env, poly_tensor_solve(
-               get_external(env, argv[0]), get_external(env, argv[1]),
-               get_external(env, argv[2])
+               get_external(env, argv[0]), get_external(env, argv[1]), get_external(env, argv[2])
            )
   );
 }
@@ -1883,8 +1860,7 @@ static napi_value napi_poly_tensor_lstsq(napi_env env, napi_callback_info info) 
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   return make_external(
       env, poly_tensor_lstsq(
-               get_external(env, argv[0]), get_external(env, argv[1]),
-               get_external(env, argv[2])
+               get_external(env, argv[0]), get_external(env, argv[1]), get_external(env, argv[2])
            )
   );
 }
@@ -2249,9 +2225,7 @@ static napi_value napi_poly_tensor_clone(napi_env env, napi_callback_info info) 
   NAPI_CALL(env, napi_get_value_int32(env, argv[2], &device));
   return make_external(
       env,
-      poly_tensor_clone(
-          get_external(env, argv[0]), get_external(env, argv[1]), (PolyDevice)device
-      )
+      poly_tensor_clone(get_external(env, argv[0]), get_external(env, argv[1]), (PolyDevice)device)
   );
 }
 
@@ -2303,9 +2277,7 @@ static napi_value napi_poly_tensor_logical_policy(napi_env env, napi_callback_in
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   NAPI_CALL(
       env,
-      napi_create_int32(
-          env, (int32_t)poly_tensor_logical_policy(get_external(env, argv[0])), &out
-      )
+      napi_create_int32(env, (int32_t)poly_tensor_logical_policy(get_external(env, argv[0])), &out)
   );
   return out;
 }
@@ -2344,35 +2316,14 @@ static napi_value napi_poly_tensor_device(napi_env env, napi_callback_info info)
   return out;
 }
 
-static napi_value napi_poly_tensor_requires_grad(napi_env env, napi_callback_info info) {
-  napi_value argv[1];
-  size_t argc = 1;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyTensor *tensor = get_external(env, argv[0]);
-  napi_value out;
-  NAPI_CALL(env, napi_get_boolean(env, poly_tensor_requires_grad(tensor), &out));
-  return out;
-}
-
-static napi_value napi_poly_tensor_set_requires_grad(napi_env env, napi_callback_info info) {
-  napi_value argv[2];
-  size_t argc = 2;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyTensor *tensor = get_external(env, argv[0]);
-  bool requires_grad = false;
-  napi_get_value_bool(env, argv[1], &requires_grad);
-  poly_tensor_set_requires_grad(tensor, requires_grad);
-  napi_value out;
-  NAPI_CALL(env, napi_get_undefined(env, &out));
-  return out;
-}
-
 static napi_value napi_poly_tensor_custom_kernel(napi_env env, napi_callback_info info) {
   napi_value argv[4];
   size_t argc = 4;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   if (argc < 4) {
-    napi_throw_type_error(env, NULL, "poly_tensor_custom_kernel expects ctx, body, inputs, grad key");
+    napi_throw_type_error(
+        env, NULL, "poly_tensor_custom_kernel expects ctx, body, inputs, grad key"
+    );
     return NULL;
   }
   PolyCtx *ctx = get_external(env, argv[0]);
@@ -2620,10 +2571,7 @@ static napi_value napi_poly_jit_end_capture(napi_env env, napi_callback_info inf
   PolyJit *jit = get_external(env, argv[0]);
   PolyTensor **live_tensors = NULL;
   int n_live_tensors = 0;
-  if (!napi_read_tensor_ptr_array_len(
-          env, argv[1], &live_tensors, &n_live_tensors
-      ))
-    return NULL;
+  if (!napi_read_tensor_ptr_array_len(env, argv[1], &live_tensors, &n_live_tensors)) return NULL;
   int rc = poly_jit_end_capture(jit, live_tensors, n_live_tensors);
   free(live_tensors);
   napi_value out;
@@ -2921,9 +2869,7 @@ static napi_value napi_poly_ctx_set_logical_policy(napi_env env, napi_callback_i
   int32_t policy = 0;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   NAPI_CALL(env, napi_get_value_int32(env, argv[1], &policy));
-  int rc = poly_ctx_set_logical_policy(
-      get_external(env, argv[0]), (PolyLogicalPolicy)policy
-  );
+  int rc = poly_ctx_set_logical_policy(get_external(env, argv[0]), (PolyLogicalPolicy)policy);
   NAPI_CALL(env, napi_create_int32(env, rc, &out));
   return out;
 }
@@ -2934,9 +2880,7 @@ static napi_value napi_poly_ctx_get_logical_policy(napi_env env, napi_callback_i
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   NAPI_CALL(
       env,
-      napi_create_int32(
-          env, (int32_t)poly_ctx_get_logical_policy(get_external(env, argv[0])), &out
-      )
+      napi_create_int32(env, (int32_t)poly_ctx_get_logical_policy(get_external(env, argv[0])), &out)
   );
   return out;
 }
@@ -3830,10 +3774,10 @@ static napi_value napi_poly_instance_from_program(napi_env env, napi_callback_in
   void *program_data = NULL;
   napi_value program_buf;
   NAPI_CALL(
-      env, napi_get_typedarray_info(
-               env, argv[0], &program_type, &program_len, &program_data,
-               &program_buf, &program_offset
-           )
+      env,
+      napi_get_typedarray_info(
+          env, argv[0], &program_type, &program_len, &program_data, &program_buf, &program_offset
+      )
   );
   (void)program_type;
 
@@ -4374,7 +4318,8 @@ static napi_value napi_poly_instance_param_dtype_id(napi_env env, napi_callback_
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   napi_get_value_int32(env, argv[1], &i);
   NAPI_CALL(
-      env, napi_create_int32(env, poly_instance_param_dtype_id(get_external(env, argv[0]), i), &result)
+      env,
+      napi_create_int32(env, poly_instance_param_dtype_id(get_external(env, argv[0]), i), &result)
   );
   return result;
 }
@@ -4514,7 +4459,8 @@ static napi_value napi_poly_instance_buf_dtype_id(napi_env env, napi_callback_in
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   napi_get_value_int32(env, argv[1], &i);
   NAPI_CALL(
-      env, napi_create_int32(env, poly_instance_buf_dtype_id(get_external(env, argv[0]), i), &result)
+      env,
+      napi_create_int32(env, poly_instance_buf_dtype_id(get_external(env, argv[0]), i), &result)
   );
   return result;
 }
@@ -4707,10 +4653,7 @@ static napi_value napi_poly_instance_entrypoint_output_count(
   return result;
 }
 
-static napi_value napi_poly_instance_entrypoint_output_name(
-    napi_env env,
-    napi_callback_info info
-) {
+static napi_value napi_poly_instance_entrypoint_output_name(napi_env env, napi_callback_info info) {
   napi_value argv[3];
   size_t argc = 3;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
@@ -4985,17 +4928,14 @@ static napi_value napi_poly_tensor_scatter(napi_env env, napi_callback_info info
   napi_get_value_int32(env, argv[2], &dim);
   char *reduce = read_utf8_arg(env, argv[5], NULL);
   PolyTensor *out = poly_tensor_scatter(
-      get_external(env, argv[0]), get_external(env, argv[1]), dim,
-      get_external(env, argv[3]), get_external(env, argv[4]), reduce
+      get_external(env, argv[0]), get_external(env, argv[1]), dim, get_external(env, argv[3]),
+      get_external(env, argv[4]), reduce
   );
   free(reduce);
   return make_external(env, out);
 }
 
-static napi_value napi_poly_tensor_scatter_reduce(
-    napi_env env,
-    napi_callback_info info
-) {
+static napi_value napi_poly_tensor_scatter_reduce(napi_env env, napi_callback_info info) {
   napi_value argv[7];
   size_t argc = 7;
   int32_t dim = 0, include_self = 0;
@@ -5004,8 +4944,8 @@ static napi_value napi_poly_tensor_scatter_reduce(
   char *reduce = read_utf8_arg(env, argv[5], NULL);
   napi_get_value_int32(env, argv[6], &include_self);
   PolyTensor *out = poly_tensor_scatter_reduce(
-      get_external(env, argv[0]), get_external(env, argv[1]), dim,
-      get_external(env, argv[3]), get_external(env, argv[4]), reduce, include_self
+      get_external(env, argv[0]), get_external(env, argv[1]), dim, get_external(env, argv[3]),
+      get_external(env, argv[4]), reduce, include_self
   );
   free(reduce);
   return make_external(env, out);
@@ -5239,11 +5179,7 @@ static napi_value napi_poly_tensor_einsum(napi_env env, napi_callback_info info)
   return make_external(env, result);
 }
 
-static napi_value napi_rearrange_impl(
-    napi_env env,
-    napi_callback_info info,
-    bool tensor_result
-) {
+static napi_value napi_rearrange_impl(napi_env env, napi_callback_info info, bool tensor_result) {
   napi_value argv[5];
   size_t argc = 5;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
@@ -5319,15 +5255,10 @@ static napi_value napi_rearrange_impl(
     axis_names[offset] = '\0';
   }
 
-  PolyTensor *tensor_out = tensor_result
-                               ? poly_tensor_rearrange(
-                                     ctx, formula, input, axis_names, values, (int)n
-                                 )
-                               : NULL;
+  PolyTensor *tensor_out =
+      tensor_result ? poly_tensor_rearrange(ctx, formula, input, axis_names, values, (int)n) : NULL;
   PolyUOp *uop_out =
-      tensor_result
-          ? NULL
-          : poly_rearrange(ctx, formula, input, axis_names, values, (int)n);
+      tensor_result ? NULL : poly_rearrange(ctx, formula, input, axis_names, values, (int)n);
   for (uint32_t i = 0; i < n; i++)
     free(names[i]);
   free(names);
@@ -5684,9 +5615,7 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_tensor_gelu", napi_poly_tensor_gelu),
       DECLARE_NAPI_METHOD("poly_tensor_quick_gelu", napi_poly_tensor_quick_gelu),
       DECLARE_NAPI_METHOD("poly_tensor_detach", napi_poly_tensor_detach),
-      DECLARE_NAPI_METHOD(
-          "poly_tensor_contiguous_backward", napi_poly_tensor_contiguous_backward
-      ),
+      DECLARE_NAPI_METHOD("poly_tensor_contiguous_backward", napi_poly_tensor_contiguous_backward),
       DECLARE_NAPI_METHOD("poly_tensor_sum", napi_poly_tensor_sum),
       DECLARE_NAPI_METHOD("poly_tensor_sum_dtype_by_id", napi_poly_tensor_sum_dtype_by_id),
       DECLARE_NAPI_METHOD("poly_tensor_max", napi_poly_tensor_max),
@@ -5695,19 +5624,13 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_tensor_dot", napi_poly_tensor_dot),
       DECLARE_NAPI_METHOD("poly_tensor_dot_dtype_by_id", napi_poly_tensor_dot_dtype_by_id),
       DECLARE_NAPI_METHOD("poly_tensor_qr_ex", napi_poly_tensor_qr_ex),
-      DECLARE_NAPI_METHOD(
-          "poly_tensor_triangular_solve", napi_poly_tensor_triangular_solve
-      ),
+      DECLARE_NAPI_METHOD("poly_tensor_triangular_solve", napi_poly_tensor_triangular_solve),
       DECLARE_NAPI_METHOD("poly_tensor_cholesky", napi_poly_tensor_cholesky),
-      DECLARE_NAPI_METHOD(
-          "poly_tensor_cholesky_solve", napi_poly_tensor_cholesky_solve
-      ),
+      DECLARE_NAPI_METHOD("poly_tensor_cholesky_solve", napi_poly_tensor_cholesky_solve),
       DECLARE_NAPI_METHOD("poly_tensor_solve", napi_poly_tensor_solve),
       DECLARE_NAPI_METHOD("poly_tensor_lstsq", napi_poly_tensor_lstsq),
       DECLARE_NAPI_METHOD("poly_tensor_scatter", napi_poly_tensor_scatter),
-      DECLARE_NAPI_METHOD(
-          "poly_tensor_scatter_reduce", napi_poly_tensor_scatter_reduce
-      ),
+      DECLARE_NAPI_METHOD("poly_tensor_scatter_reduce", napi_poly_tensor_scatter_reduce),
       DECLARE_NAPI_METHOD("poly_tensor_einsum", napi_poly_tensor_einsum),
       DECLARE_NAPI_METHOD("poly_tensor_rearrange", napi_poly_tensor_rearrange),
       DECLARE_NAPI_METHOD("poly_tensor_sort", napi_poly_tensor_sort),
@@ -5728,9 +5651,7 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_tensor_pool", napi_poly_tensor_pool),
       DECLARE_NAPI_METHOD("poly_tensor_max_pool2d", napi_poly_tensor_max_pool2d),
       DECLARE_NAPI_METHOD("poly_tensor_conv2d", napi_poly_tensor_conv2d),
-      DECLARE_NAPI_METHOD(
-          "poly_tensor_conv2d_dtype_by_id", napi_poly_tensor_conv2d_dtype_by_id
-      ),
+      DECLARE_NAPI_METHOD("poly_tensor_conv2d_dtype_by_id", napi_poly_tensor_conv2d_dtype_by_id),
       DECLARE_NAPI_METHOD("poly_tensor_batchnorm", napi_poly_tensor_batchnorm),
       DECLARE_NAPI_METHOD("poly_tensor_one_hot", napi_poly_tensor_one_hot),
       DECLARE_NAPI_METHOD("poly_tensor_gather_dim", napi_poly_tensor_gather_dim),
@@ -5748,8 +5669,6 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_tensor_logical_state", napi_poly_tensor_logical_state),
       DECLARE_NAPI_METHOD("poly_tensor_set_logical_policy", napi_poly_tensor_set_logical_policy),
       DECLARE_NAPI_METHOD("poly_tensor_device", napi_poly_tensor_device),
-      DECLARE_NAPI_METHOD("poly_tensor_requires_grad", napi_poly_tensor_requires_grad),
-      DECLARE_NAPI_METHOD("poly_tensor_set_requires_grad", napi_poly_tensor_set_requires_grad),
       DECLARE_NAPI_METHOD("poly_tensor_custom_kernel", napi_poly_tensor_custom_kernel),
       DECLARE_NAPI_METHOD("poly_realize_tensors", napi_poly_realize_tensors),
       DECLARE_NAPI_METHOD("poly_optim_build_step", napi_poly_optim_build_step),
@@ -5916,12 +5835,10 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_instance_forward", napi_poly_instance_forward),
       DECLARE_NAPI_METHOD("poly_instance_call", napi_poly_instance_call),
       DECLARE_NAPI_METHOD(
-          "poly_instance_entrypoint_output_count",
-          napi_poly_instance_entrypoint_output_count
+          "poly_instance_entrypoint_output_count", napi_poly_instance_entrypoint_output_count
       ),
       DECLARE_NAPI_METHOD(
-          "poly_instance_entrypoint_output_name",
-          napi_poly_instance_entrypoint_output_name
+          "poly_instance_entrypoint_output_name", napi_poly_instance_entrypoint_output_name
       ),
       DECLARE_NAPI_METHOD("poly_instance_train_step", napi_poly_instance_train_step),
       /* Shape-on-UOp accessors */

@@ -3616,7 +3616,6 @@ TEST(pe, tensor_argmax_builds_both_roots_from_exact_occurrences) {
   PolyTensor *src =
       poly_tensor_create_with_roots(ctx, logical, physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(src);
-  poly_tensor_set_requires_grad(src, true);
 
   PolyUOp *expected_logical = poly_argmax(ctx, logical, 1, 1);
   PolyUOp *expected_physical = poly_argmax(ctx, physical, 1, 1);
@@ -3630,8 +3629,6 @@ TEST(pe, tensor_argmax_builds_both_roots_from_exact_occurrences) {
   ASSERT_INT_EQ(poly_uop_ndim(ctx, poly_tensor_uop_physical(out)), 2);
   ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, poly_tensor_uop_physical(out))[0], 2);
   ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, poly_tensor_uop_physical(out))[1], 1);
-  ASSERT_FALSE(poly_tensor_requires_grad(out));
-  ASSERT_TRUE(poly_tensor_requires_grad_is_set(out));
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -3664,7 +3661,6 @@ TEST(pe, tensor_gelu_family_builds_both_roots_from_exact_occurrences) {
   PolyTensor *src =
       poly_tensor_create_with_roots(ctx, logical, physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(src);
-  poly_tensor_set_requires_grad(src, true);
 
   PolyUOp *expected_gelu_logical = poly_gelu(ctx, logical);
   PolyUOp *expected_gelu_physical = poly_gelu(ctx, physical);
@@ -3674,8 +3670,6 @@ TEST(pe, tensor_gelu_family_builds_both_roots_from_exact_occurrences) {
   ASSERT_NOT_NULL(gelu);
   ASSERT_EQ(poly_tensor_uop_logical(gelu), expected_gelu_logical);
   ASSERT_EQ(poly_tensor_uop_physical(gelu), expected_gelu_physical);
-  ASSERT_TRUE(poly_tensor_requires_grad(gelu));
-  ASSERT_TRUE(poly_tensor_requires_grad_is_set(gelu));
 
   PolyUOp *expected_quick_logical = poly_quick_gelu(ctx, logical);
   PolyUOp *expected_quick_physical = poly_quick_gelu(ctx, physical);
@@ -3685,8 +3679,6 @@ TEST(pe, tensor_gelu_family_builds_both_roots_from_exact_occurrences) {
   ASSERT_NOT_NULL(quick);
   ASSERT_EQ(poly_tensor_uop_logical(quick), expected_quick_logical);
   ASSERT_EQ(poly_tensor_uop_physical(quick), expected_quick_physical);
-  ASSERT_TRUE(poly_tensor_requires_grad(quick));
-  ASSERT_TRUE(poly_tensor_requires_grad_is_set(quick));
 
   ASSERT_EQ(poly_tensor_gelu(foreign, src), NULL);
   ASSERT_EQ(poly_tensor_quick_gelu(foreign, src), NULL);
@@ -3710,7 +3702,6 @@ TEST(pe, tensor_log1p_expm1_build_both_roots_from_exact_occurrences) {
   PolyTensor *src =
       poly_tensor_create_with_roots(ctx, logical, physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(src);
-  poly_tensor_set_requires_grad(src, true);
 
   PolyUOp *expected_log1p_logical = poly_log1p(ctx, logical);
   PolyUOp *expected_log1p_physical = poly_log1p(ctx, physical);
@@ -3720,8 +3711,6 @@ TEST(pe, tensor_log1p_expm1_build_both_roots_from_exact_occurrences) {
   ASSERT_NOT_NULL(log1p);
   ASSERT_EQ(poly_tensor_uop_logical(log1p), expected_log1p_logical);
   ASSERT_EQ(poly_tensor_uop_physical(log1p), expected_log1p_physical);
-  ASSERT_TRUE(poly_tensor_requires_grad(log1p));
-  ASSERT_TRUE(poly_tensor_requires_grad_is_set(log1p));
 
   PolyUOp *expected_expm1_logical = poly_expm1(ctx, logical);
   PolyUOp *expected_expm1_physical = poly_expm1(ctx, physical);
@@ -3731,8 +3720,6 @@ TEST(pe, tensor_log1p_expm1_build_both_roots_from_exact_occurrences) {
   ASSERT_NOT_NULL(expm1);
   ASSERT_EQ(poly_tensor_uop_logical(expm1), expected_expm1_logical);
   ASSERT_EQ(poly_tensor_uop_physical(expm1), expected_expm1_physical);
-  ASSERT_TRUE(poly_tensor_requires_grad(expm1));
-  ASSERT_TRUE(poly_tensor_requires_grad_is_set(expm1));
 
   ASSERT_EQ(poly_tensor_log1p(foreign, src), NULL);
   ASSERT_EQ(poly_tensor_expm1(foreign, src), NULL);

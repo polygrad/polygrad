@@ -48,8 +48,16 @@ async function runOptimTests(pg) {
     assert(typeof pg.nn.optim.AdamW === 'function', 'missing AdamW')
   })
 
+  await test('optimizer partitions parameters with isParam', async () => {
+    const frozen = new Tensor([1], { dtype: 'float32' }).is_param_(false)
+    const trainable = new Tensor([2], { dtype: 'float32' })
+    const opt = new pg.nn.optim.SGD([frozen, trainable], { lr: 0.1 })
+    assert(opt.params.length === 1 && opt.params[0] === trainable, 'trainable parameter mismatch')
+    assert(opt.buffers.length === 1 && opt.buffers[0] === frozen, 'frozen buffer mismatch')
+  })
+
   await test('SGD standalone step uses shared optimizer graph builder', async () => {
-    const p = new Tensor([1], { dtype: 'float32', requiresGrad: true })
+    const p = new Tensor([1], { dtype: 'float32' })
     p._grad = new Tensor([2], { dtype: 'float32' })
     const opt = new pg.nn.optim.SGD([p], { lr: 0.1 })
     await opt.step()
@@ -59,7 +67,7 @@ async function runOptimTests(pg) {
   })
 
   await test('SGD momentum state is part of scheduled effects', async () => {
-    const p = new Tensor([1], { dtype: 'float32', requiresGrad: true })
+    const p = new Tensor([1], { dtype: 'float32' })
     p._grad = new Tensor([2], { dtype: 'float32' })
     const opt = new pg.nn.optim.SGD([p], { lr: 0.1, momentum: 0.9 })
     const scheduled = opt.scheduleStep()
@@ -72,7 +80,7 @@ async function runOptimTests(pg) {
   })
 
   await test('SGD momentum commits lazy backward gradient before view state assign', async () => {
-    const p = await new Tensor([1], { dtype: 'float32', requiresGrad: true }).realize()
+    const p = await new Tensor([1], { dtype: 'float32' }).realize()
     const x = await new Tensor([1], { dtype: 'float32' }).realize()
     const opt = new pg.nn.optim.SGD([p], {
       lr: 0.02, momentum: 0.85, nesterov: true, weightDecay: 0, fused: false
@@ -87,7 +95,7 @@ async function runOptimTests(pg) {
   })
 
   await test('SGD vector momentum state is writable and elementwise', async () => {
-    const p = await new Tensor([1, 2], { dtype: 'float32', requiresGrad: true }).realize()
+    const p = await new Tensor([1, 2], { dtype: 'float32' }).realize()
     p._grad = new Tensor([0.25, -0.5])
     const opt = new pg.nn.optim.SGD([p], {
       lr: 0.1, momentum: 0.9, nesterov: true, weightDecay: 0.1, fused: false
@@ -101,7 +109,7 @@ async function runOptimTests(pg) {
   })
 
   await test('Adam updates beta-power and moment state in graph', async () => {
-    const p = new Tensor([1], { dtype: 'float32', requiresGrad: true })
+    const p = new Tensor([1], { dtype: 'float32' })
     p._grad = new Tensor([1], { dtype: 'float32' })
     const opt = new pg.nn.optim.Adam([p], { lr: 0.1 })
     const scheduled = opt.scheduleStep()
@@ -120,7 +128,7 @@ async function runOptimTests(pg) {
   })
 
   await test('AdamW weight decay is handled by shared update builder', async () => {
-    const p = new Tensor([1], { dtype: 'float32', requiresGrad: true })
+    const p = new Tensor([1], { dtype: 'float32' })
     p._grad = new Tensor([0], { dtype: 'float32' })
     const opt = new pg.nn.optim.AdamW([p], { lr: 0.1, weightDecay: 0.01 })
     await opt.step()
@@ -130,17 +138,17 @@ async function runOptimTests(pg) {
   await test('SGD Adam and AdamW graphs read the current LR Tensor', async () => {
     const cases = [
       ['SGD', () => {
-        const p = new Tensor([1], { dtype: 'float32', requiresGrad: true })
+        const p = new Tensor([1], { dtype: 'float32' })
         p._grad = new Tensor([1], { dtype: 'float32' })
         return [p, new pg.nn.optim.SGD([p], { lr: 0.1 }), 0.8]
       }],
       ['Adam', () => {
-        const p = new Tensor([1], { dtype: 'float32', requiresGrad: true })
+        const p = new Tensor([1], { dtype: 'float32' })
         p._grad = new Tensor([1], { dtype: 'float32' })
         return [p, new pg.nn.optim.Adam([p], { lr: 0.1 }), 0.8]
       }],
       ['AdamW', () => {
-        const p = new Tensor([1], { dtype: 'float32', requiresGrad: true })
+        const p = new Tensor([1], { dtype: 'float32' })
         p._grad = new Tensor([0], { dtype: 'float32' })
         return [p, new pg.nn.optim.AdamW([p], { lr: 0.1, weightDecay: 0.01 }), 0.998]
       }]

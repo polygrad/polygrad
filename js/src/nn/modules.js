@@ -11,11 +11,9 @@ function createBoundModules(runtime) {
       this.weight = Tensor.uniform(this.outFeatures, this.inFeatures, {
         low: -bound, high: bound
       })
-      this.weight.requiresGrad = true
       this.bias = opts.bias === false
         ? null
         : Tensor.uniform(this.outFeatures, { low: -bound, high: bound })
-      if (this.bias) this.bias.requiresGrad = true
     }
 
     call(x) {
@@ -35,8 +33,6 @@ function createBoundModules(runtime) {
       const affine = opts.elementwiseAffine !== false
       this.weight = affine ? Tensor.ones(...this.normalizedShape) : null
       this.bias = affine ? Tensor.zeros(...this.normalizedShape) : null
-      if (this.weight) this.weight.requiresGrad = true
-      if (this.bias) this.bias.requiresGrad = true
     }
 
     call(x) {
@@ -94,11 +90,9 @@ function createBoundModules(runtime) {
         this.outChannels, Math.floor(this.inChannels / this.groups), k[0], k[1],
         { low: -bound, high: bound }
       )
-      this.weight.requiresGrad = true
       this.bias = opts.bias === false
         ? null
         : Tensor.uniform(this.outChannels, { low: -bound, high: bound })
-      if (this.bias) this.bias.requiresGrad = true
     }
 
     call(x) {
@@ -122,8 +116,6 @@ function createBoundModules(runtime) {
       const affine = opts.affine !== false
       this.weight = affine ? Tensor.ones(this.numChannels) : null
       this.bias = affine ? Tensor.zeros(this.numChannels) : null
-      if (this.weight) this.weight.requiresGrad = true
-      if (this.bias) this.bias.requiresGrad = true
     }
 
     call(x) {

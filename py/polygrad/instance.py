@@ -91,6 +91,7 @@ OPTIM_ADAMW = 3
 EXPORT_WEIGHTS_PARAMS = 1
 EXPORT_WEIGHTS_OPTIMIZER = 2
 EXPORT_WEIGHTS_DEFAULT = EXPORT_WEIGHTS_PARAMS | EXPORT_WEIGHTS_OPTIMIZER
+_BIND_F_FROZEN = 1 << 2
 
 
 def _optimizer_kind(kind):
@@ -157,12 +158,14 @@ def _binding_fields(binding):
             binding.get('role'),
             binding.get('tensor'),
             binding.get('flags', 0),
+            binding.get('trainable'),
         )
     if len(binding) == 3:
         name, role, tensor = binding
-        return name, role, tensor, 0
+        return name, role, tensor, 0, None
     if len(binding) == 4:
-        return binding
+        name, role, tensor, flags = binding
+        return name, role, tensor, flags, None
     raise TypeError('Instance bindings must be dicts or (name, role, tensor[, flags]) tuples')
 
 
@@ -385,12 +388,16 @@ class Instance:
 
         parsed = []
         for binding in bindings:
-            name, role, tensor, flags = _binding_fields(binding)
+            name, role, tensor, flags, trainable = _binding_fields(binding)
             if name is None:
                 raise ValueError('Instance binding is missing a name')
             if role is None:
                 raise ValueError(f'Instance binding {name!r} is missing a role')
-            parsed.append((name, _role_id(role), _require_tensor(name, tensor), int(flags)))
+            tensor = _require_tensor(name, tensor)
+            role = _role_id(role)
+            if role == ROLE_PARAM and not (tensor.is_param if trainable is None else trainable):
+                flags = int(flags) | _BIND_F_FROZEN
+            parsed.append((name, role, tensor, int(flags)))
 
         ctx = parsed[0][2]._ctx
         ctx_key = _ptr_value(ctx)
@@ -480,6 +487,8 @@ class Instance:
         def add_binding(name, role, tensor, flags=0):
             name_b = _name_bytes(name)
             keepalive.append(name_b)
+            if role == ROLE_PARAM and not tensor.is_param:
+                flags |= _BIND_F_FROZEN
             binding_rows.append(_ffi.PolyBindingSpec(name_b, int(role), tensor._tensor, int(flags)))
 
         for name, tensor in inputs.items():

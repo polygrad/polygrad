@@ -11,8 +11,8 @@ async function main() {
   class Net {
     constructor() {
       this.fc = new pg.nn.Linear(2, 1)
-      this.fc.weight = new pg.Tensor([[1, 1]], { requiresGrad: true })
-      this.fc.bias = new pg.Tensor([0], { requiresGrad: true })
+      this.fc.weight = new pg.Tensor([[1, 1]])
+      this.fc.bias = new pg.Tensor([0])
     }
     call(x) { return this.fc.call(x) }
   }

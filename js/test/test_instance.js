@@ -118,8 +118,8 @@ async function checkModuleDeviceMap(pg, Instance) {
   const Tensor = pg.Tensor
   const x = Tensor.empty([2])
   const webgpu = String(pg.device).toLowerCase() === 'webgpu'
-  const w0 = webgpu ? null : new Tensor([3, 4], { dtype: 'float32', requiresGrad: true })
-  const w1 = webgpu ? null : new Tensor([2, 3], { dtype: 'float32', requiresGrad: true })
+  const w0 = webgpu ? null : new Tensor([3, 4], { dtype: 'float32' })
+  const w1 = webgpu ? null : new Tensor([2, 3], { dtype: 'float32' })
   const hidden = webgpu ? x.add(3) : x.add(w0)
   const output = webgpu ? hidden.mul(2) : hidden.mul(w1)
   const inst = await Instance.fromTensors({
@@ -227,7 +227,7 @@ async function runInstanceTests(pg) {
 
   await test('scalar rank8 and shared multi-output round trip', async () => {
     const scalarX = pg.Tensor.empty([])
-    const scalarW = pg.Tensor.full([], 3, { dtype: 'float32', requiresGrad: true })
+    const scalarW = pg.Tensor.full([], 3, { dtype: 'float32' })
     const scalar = await Instance.fromTensors({
       inputs: { x: scalarX }, outputs: { output: scalarX.mul(scalarW) },
       params: { w: scalarW }
@@ -248,7 +248,7 @@ async function runInstanceTests(pg) {
 
     const shape = [1, 1, 1, 1, 1, 1, 1, 1]
     const x = pg.Tensor.empty(shape)
-    const w = pg.Tensor.ones(shape, { requiresGrad: true })
+    const w = pg.Tensor.ones(shape, {})
     const shared = x.add(w)
     const source = await Instance.fromTensors({
       inputs: { x },
@@ -315,7 +315,7 @@ async function runInstanceTests(pg) {
   })
 
   await test('named partial view state fails closed', async () => {
-    const base = new pg.Tensor([1, 2, 3, 4], { dtype: 'float32', requiresGrad: true })
+    const base = new pg.Tensor([1, 2, 3, 4], { dtype: 'float32' })
     const view = base.shrink([[1, 3]])
     const x = pg.Tensor.empty([2])
     let error = null
@@ -377,7 +377,7 @@ async function runInstanceTests(pg) {
   })
 
   await test('float16 Instance state preserves exact storage bits', async () => {
-    const w = new pg.Tensor([1.5, -2], { dtype: 'float16', requiresGrad: true })
+    const w = new pg.Tensor([1.5, -2], { dtype: 'float16' })
     const x = pg.Tensor.empty([2], { dtype: 'float16' })
     const inst = await Instance.fromTensors({
       inputs: { x },
@@ -647,7 +647,7 @@ async function runInstanceTests(pg) {
 
   await test('stochastic named state requires checkpoint for portable activation', async () => {
     pg.Tensor.manual_seed(11)
-    const w = pg.Tensor.rand(2, { requiresGrad: true })
+    const w = pg.Tensor.rand(2, {})
     const x = pg.Tensor.empty([2])
     const source = await Instance.fromTensors({
       inputs: { x }, outputs: { output: x.mul(w) }, params: { w }

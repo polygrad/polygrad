@@ -25,6 +25,7 @@ const OPTIM_ADAMW = 3
 const EXPORT_WEIGHTS_PARAMS = 1
 const EXPORT_WEIGHTS_OPTIMIZER = 2
 const EXPORT_WEIGHTS_DEFAULT = EXPORT_WEIGHTS_PARAMS | EXPORT_WEIGHTS_OPTIMIZER
+const BIND_F_FROZEN = 1 << 2
 
 function optimizerKind(kind) {
   if (typeof kind === 'string') {
@@ -132,7 +133,8 @@ function bindingFields(binding) {
       name: binding.name,
       role: binding.role,
       tensor: binding.tensor,
-      flags: binding.flags || 0
+      flags: binding.flags || 0,
+      trainable: binding.trainable
     }
   }
   throw new TypeError('polygrad: Instance bindings must be objects or [name, role, tensor, flags] arrays')
@@ -488,7 +490,12 @@ function createBoundInstanceClass(runtime) {
         if (b.name == null) throw new Error('Instance binding is missing a name')
         if (b.role == null) throw new Error(`Instance binding '${b.name}' is missing a role`)
         const tensor = requireTensor(b.name, b.tensor)
-        return { name: String(b.name), role: roleId(b.role), tensor, flags: Number(b.flags || 0) }
+        const role = roleId(b.role)
+        let flags = Number(b.flags || 0)
+        if (role === ROLE_PARAM && !(b.trainable == null ? tensor.isParam : b.trainable)) {
+          flags |= BIND_F_FROZEN
+        }
+        return { name: String(b.name), role, tensor, flags }
       })
 
       const ctx = parsed[0].tensor._ctx
@@ -565,6 +572,7 @@ function createBoundInstanceClass(runtime) {
 
         const bindings = []
         const addBinding = (name, role, tensor, flags = 0) => {
+          if (role === ROLE_PARAM && !tensor.isParam) flags |= BIND_F_FROZEN
           bindings.push({ name: String(name), role, tensor: tensor._tensor, flags })
         }
         for (const [name, tensor] of Object.entries(inps)) addBinding(name, ROLE_INPUT, tensor)

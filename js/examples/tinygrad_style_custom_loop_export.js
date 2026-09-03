@@ -11,7 +11,7 @@ async function main() {
 
   class LinearNet {
     constructor() {
-      this.weight = new Tensor([[1], [1]], { requiresGrad: true })
+      this.weight = new Tensor([[1], [1]])
     }
     call(x) { return x.dot(this.weight) }
   }

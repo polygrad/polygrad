@@ -135,7 +135,7 @@ async function runTensorTests(pg) {
     assert(cloned.logicalState === 'never_constructed')
     assert(cloned.uopLogical === null)
     assertClose(await cloned.toArray(), [5, 6])
-    const gradSource = new Tensor([2], { logical: false, requiresGrad: true })
+    const gradSource = new Tensor([2], { dtype: 'float32', logical: false })
     gradSource.mul(gradSource).sum().backward()
     assert(gradSource.grad.logicalPolicy === 'never')
     assert(gradSource.grad.logicalState === 'never_constructed')
@@ -353,7 +353,7 @@ async function runTensorTests(pg) {
   })
 
   await test('clone is lazy separate and preserves state', async () => {
-    const source = Tensor.empty([4], { dtype: 'float32', requiresGrad: true }).is_param_(false)
+    const source = Tensor.empty([4], { dtype: 'float32' }).is_param_(false)
     source.copyFrom(new Float32Array([1, 2, 3, 4]))
     await source.sum().backward()
 
@@ -361,7 +361,6 @@ async function runTensorTests(pg) {
     assert(cloned.uopLogical && cloned.uopLogical.src.length === 2, 'clone should be AFTER')
     assert(cloned.uopLogical.src[1].src.length === 2, 'clone effect should be STORE')
     assert(cloned.uopLogical.src[0].buffer.key !== source.uop.buffer.key, 'clone needs a separate buffer')
-    assert(cloned.requiresGrad === true, 'clone should preserve requiresGrad')
     assert(cloned.isParam === false, 'clone should preserve isParam')
     assert(cloned.grad && cloned.grad.uopLogical.src.length === 2, 'clone should recursively clone grad')
     assert(
@@ -389,13 +388,13 @@ async function runTensorTests(pg) {
   })
 
   await test('detach is a lazy graph boundary', async () => {
-    const source = new Tensor([[1, 2], [3, 4]], { dtype: 'float32', requiresGrad: true })
+    const source = new Tensor([[1, 2], [3, 4]], { dtype: 'float32' })
     const detached = source.detach()
 
     assertShape(detached.shape, source.shape)
     assert(detached.dtype === source.dtype, 'detach should preserve dtype')
     assert(detached.device === source.device, 'detach should preserve device')
-    assert(detached.requiresGrad === false, 'detach should clear requiresGrad')
+    assert(detached.isParam === true, 'ordinary Tensor operations should default to isParam=true')
     assert(detached.uopLogical.op === pg._core.ops.DETACH, 'detach should create a DETACH UOp')
     assert(detached.uopLogical.src.length === 1, 'detach should retain a unary graph node')
     assert(
@@ -415,7 +414,7 @@ async function runTensorTests(pg) {
   })
 
   await test('contiguousBackward has exact gradient barrier', async () => {
-    const source = new Tensor([1, -2, 3], { dtype: 'float32', requiresGrad: true })
+    const source = new Tensor([1, -2, 3], { dtype: 'float32' })
     const result = source.mul(2).contiguousBackward()
     assert(
       result.uopLogical.op === pg._core.ops.CONTIGUOUS_BACKWARD,
@@ -438,7 +437,7 @@ async function runTensorTests(pg) {
   })
 
   await test('backward clones deviceless grad and accumulates in place', async () => {
-    const x = Tensor.empty([4], { dtype: 'float32', requiresGrad: true })
+    const x = Tensor.empty([4], { dtype: 'float32' })
     const loss = x.sum()
     await loss.backward()
     const firstGrad = x.grad
@@ -455,7 +454,7 @@ async function runTensorTests(pg) {
   })
 
   await test('backward through clone reaches source', async () => {
-    const source = Tensor.empty([4], { dtype: 'float32', requiresGrad: true })
+    const source = Tensor.empty([4], { dtype: 'float32' })
     source.copyFrom(new Float32Array([1, 2, 3, 4]))
     const cloned = source.clone()
     await cloned.sum().backward()
@@ -464,10 +463,10 @@ async function runTensorTests(pg) {
   })
 
   await test('backward retains distinct wrappers sharing one UOp', async () => {
-    const x = new Tensor([1, 2, 3, 4], { dtype: 'float32', requiresGrad: true })
+    const x = new Tensor([1, 2, 3, 4], { dtype: 'float32' })
     // Pinned Tensor.__init__ wraps an existing current Tensor.uop directly
     // (tensor.py:92-121); retained logical provenance is not executable state.
-    const y = new Tensor(x.uop, { requiresGrad: true })
+    const y = new Tensor(x.uop, {})
     assert(x !== y, 'expected distinct Tensor wrappers')
     assert(x.uop.key === y.uop.key, 'expected one shared current UOp')
 
@@ -569,12 +568,12 @@ async function runTensorTests(pg) {
       0.9, 1.5, -2.5, 0.1,
       -1.3, 0.2, 1.7, -0.6,
     ]
-    const aRef = new Tensor(aVals, { requiresGrad: true }).reshape(4, 4)
-    const bRef = new Tensor(bVals, { requiresGrad: true }).reshape(4, 4)
+    const aRef = new Tensor(aVals, {}).reshape(4, 4)
+    const bRef = new Tensor(bVals, {}).reshape(4, 4)
     await aRef.add(bRef).sum().add(aRef.mul(bRef).sum()).backward()
 
-    const a = new Tensor(aVals, { requiresGrad: true }).reshape(4, 4)
-    const b = new Tensor(bVals, { requiresGrad: true }).reshape(4, 4)
+    const a = new Tensor(aVals, {}).reshape(4, 4)
+    const b = new Tensor(bVals, {}).reshape(4, 4)
     await a.realize(b)
     const aPhysical = a.uopPhysical.key
     const bPhysical = b.uopPhysical.key
@@ -598,7 +597,7 @@ async function runTensorTests(pg) {
       assert(call.src.length === 2, 'expected one-argument custom CALL in backward')
       return [null]
     }
-    const x = Tensor.empty([4], { dtype: 'float32', requiresGrad: true })
+    const x = Tensor.empty([4], { dtype: 'float32' })
     x.copyFrom(new Float32Array([1, 2, 3, 4]))
     const y = x.customKernel({ fxn: identityKernel, gradFxn: backwardIdentity })[0]
     assert(y.uopLogical && y.uopLogical.src.length === 2, 'expected logical AFTER')
@@ -619,8 +618,8 @@ async function runTensorTests(pg) {
       assert(call.src.length === 3, 'expected output and input custom CALL arguments')
       return [null, grad]
     }
-    const out = Tensor.empty([4], { dtype: 'float32', requiresGrad: true })
-    const x = new Tensor([1, 2, 3, 4], { dtype: 'float32', requiresGrad: true })
+    const out = Tensor.empty([4], { dtype: 'float32' })
+    const x = new Tensor([1, 2, 3, 4], { dtype: 'float32' })
     const y = out.customKernel(x, { fxn: identityKernel, gradFxn: backwardIdentity })[0]
     await y.sum().backward()
 
@@ -642,7 +641,7 @@ async function runTensorTests(pg) {
       return [null, null, args[0]]
     }
     const out = Tensor.empty([4], { dtype: 'float32' })
-    const x = new Tensor([1, 2, 3, 4], { dtype: 'float32', requiresGrad: true })
+    const x = new Tensor([1, 2, 3, 4], { dtype: 'float32' })
     const [y0, y1] = out.customKernel(out, x, { fxn: identityKernel, gradFxn: backwardIdentity })
     assert(y0.uop.key === y1.uop.key, 'duplicate output aliases should share one AFTER')
     await y0.sum().add(y1.sum()).backward()
@@ -658,7 +657,7 @@ async function runTensorTests(pg) {
       return out.index(i).store(x.index(i)).end(i).sink({ arg: new pg.uop.KernelInfo('missing_grad_fxn') })
     }
     const out = Tensor.empty([4], { dtype: 'float32' })
-    const x = new Tensor([1, 2, 3, 4], { dtype: 'float32', requiresGrad: true })
+    const x = new Tensor([1, 2, 3, 4], { dtype: 'float32' })
     const y = out.customKernel(x, identityKernel)[0]
     let threw = false
     try {
@@ -678,8 +677,8 @@ async function runTensorTests(pg) {
       return out.index(i).store(x.index(i)).end(i).sink({ arg: new pg.uop.KernelInfo('stopped_custom_grad') })
     }
 
-    let out = Tensor.empty([4], { dtype: 'float32', requiresGrad: true })
-    let x = new Tensor([1, 2, 3, 4], { dtype: 'float32', requiresGrad: true })
+    let out = Tensor.empty([4], { dtype: 'float32' })
+    let x = new Tensor([1, 2, 3, 4], { dtype: 'float32' })
     let y = out.customKernel(x, identityKernel)[0]
     await y.detach().sum().backward()
     assertClose(await x.grad.toArray(), [0, 0, 0, 0])
@@ -690,8 +689,8 @@ async function runTensorTests(pg) {
       calls.push(grad.op)
       return [null, new Tensor(grad).add(7).uop]
     }
-    out = Tensor.empty([4], { dtype: 'float32', requiresGrad: true })
-    x = new Tensor([1, 2, 3, 4], { dtype: 'float32', requiresGrad: true })
+    out = Tensor.empty([4], { dtype: 'float32' })
+    x = new Tensor([1, 2, 3, 4], { dtype: 'float32' })
     y = out.customKernel(x, { fxn: identityKernel, gradFxn: backwardIdentity })[0]
     await y.lt(0).cast('float32').sum().backward()
     assert(calls.length === 0, 'stop-gradient ops must not invoke custom callbacks')
@@ -1445,7 +1444,7 @@ async function runTensorTests(pg) {
     assertClose(await constant.toArray(), values.map(() => 1))
 
     for (const method of ['ceil', 'floor']) {
-      const gradInput = new Tensor(values, { requiresGrad: true })
+      const gradInput = new Tensor(values, {})
       await gradInput[method]().sum().backward()
       assertClose(await gradInput.grad.toArray(), values.map(() => 0))
     }
@@ -2952,8 +2951,28 @@ async function runTensorTests(pg) {
   // -- Autograd --
   console.log('\n-- Autograd --')
 
+  await test('current autograd API has no requiresGrad constructor flag', async () => {
+    let rejected = false
+    try {
+      new Tensor([1], { dtype: 'float32', requiresGrad: true })
+    } catch (e) {
+      rejected = e instanceof TypeError && e.message.includes('requiresGrad')
+    }
+    assert(rejected, 'requiresGrad must be rejected like current tinygrad requires_grad')
+  })
+
+  await test('backward targets every live reachable floating Tensor', async () => {
+    const x = new Tensor([2], { dtype: 'float32' })
+    const y = x.square()
+    const loss = y.sum()
+    await loss.backward()
+    assertClose(await x.grad.toArray(), [4])
+    assertClose(await y.grad.toArray(), [1])
+    assertClose(await loss.grad.toArray(), [1])
+  })
+
   await test('grad: mul sum', async () => {
-    const a = new Tensor([1, 2, 3], { dtype: 'float32', requiresGrad: true })
+    const a = new Tensor([1, 2, 3], { dtype: 'float32' })
     const b = new Tensor([4, 5, 6])
     const loss = a.mul(b).sum()
     await loss.backward()
@@ -2962,7 +2981,7 @@ async function runTensorTests(pg) {
   })
 
   await test('grad: neg sum', async () => {
-    const a = new Tensor([1, 2, 3], { dtype: 'float32', requiresGrad: true })
+    const a = new Tensor([1, 2, 3], { dtype: 'float32' })
     const loss = a.neg().sum()
     await loss.backward()
     assert(a.grad, 'grad is null')
@@ -2970,7 +2989,7 @@ async function runTensorTests(pg) {
   })
 
   await test('grad: matmul backward', async () => {
-    const W = new Tensor([[1, 2], [3, 4]], { dtype: 'float32', requiresGrad: true })
+    const W = new Tensor([[1, 2], [3, 4]], { dtype: 'float32' })
     const x = new Tensor([[1, 0]])
     const loss = x.dot(W).sum()
     await loss.backward()
@@ -2980,7 +2999,7 @@ async function runTensorTests(pg) {
   })
 
   await test('grad: relu backward', async () => {
-    const a = new Tensor([-1, 2, -3, 4], { dtype: 'float32', requiresGrad: true })
+    const a = new Tensor([-1, 2, -3, 4], { dtype: 'float32' })
     const loss = a.relu().sum()
     await loss.backward()
     assert(a.grad, 'grad is null')
@@ -2989,7 +3008,7 @@ async function runTensorTests(pg) {
   })
 
   await test('grad: chain backward', async () => {
-    const a = new Tensor([1, 2, 3], { dtype: 'float32', requiresGrad: true })
+    const a = new Tensor([1, 2, 3], { dtype: 'float32' })
     const loss = a.mul(a).sum()  // d/da(a^2) = 2a
     await loss.backward()
     assert(a.grad, 'grad is null')
@@ -3002,7 +3021,6 @@ async function runTensorTests(pg) {
   await test('grad: backward uses current physical value after copyFrom', async () => {
     const weight = new Tensor([1], { dtype: 'float32' }).mul(2)
     await weight.realize()
-    weight.requiresGrad = true
     const physicalBuffer = weight.uopPhysical.buffer.raw
     pg._core.ffi.poly_buffer_ensure_device_allocated(
       weight._ctx, physicalBuffer, pg._core.deviceIds[weight.device.toLowerCase()]
@@ -3428,7 +3446,7 @@ async function runTensorTests(pg) {
   })
 
   await testIf(supportsF64, 'f64: backward', async () => {
-    const a = new Tensor([1, 2, 3], { dtype: 'float64', requiresGrad: true })
+    const a = new Tensor([1, 2, 3], { dtype: 'float64' })
     const b = new Tensor([4, 5, 6], { dtype: 'float64' })
     const loss = a.mul(b).sum()
     await loss.backward()

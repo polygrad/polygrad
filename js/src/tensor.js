@@ -382,6 +382,12 @@ function createBoundTensorClass(runtime) {
   const POLY_TENSOR_VALUE = 0
   const normalizeDevice = (device) => String(device || _runtime.device || 'cpu').toLowerCase()
   const deviceId = (device) => ffi.poly_device_by_name(normalizeDevice(device))
+  const rejectRequiresGrad = (opts) => {
+    if (opts && (Object.prototype.hasOwnProperty.call(opts, 'requiresGrad') ||
+                 Object.prototype.hasOwnProperty.call(opts, 'requires_grad'))) {
+      throw new TypeError('Tensor does not accept requiresGrad; use is_param_ for optimizer selection')
+    }
+  }
   const tensorCreateWithRoots = (ctx, logical, physical, role, device) =>
     ffi.poly_tensor_create_with_roots(
       ctx, rawUop(logical), physical ? rawUop(physical) : null, role, deviceId(device)
@@ -592,6 +598,7 @@ function createBoundTensorClass(runtime) {
         throw new Error('polygrad runtime has been disposed')
       }
       if (!opts) opts = {}
+      rejectRequiresGrad(opts)
       const core = _runtime._core
       if (data instanceof UOp && !opts._uop) {
         if (data.ctx !== core.ctx || data.ffi !== core.ffi) {
@@ -605,9 +612,9 @@ function createBoundTensorClass(runtime) {
       }
       this._rt = _runtime
       this._ctx = opts._ctx || core.ctx
-      this._requiresGrad = Boolean(opts.requiresGrad)
       this._grad = null
-      this._isParam = Boolean(opts.isParam || opts.is_param || opts._isParam)
+      this._isParam = opts.isParam ?? opts.is_param ?? opts._isParam ?? true
+      this._isParam = Boolean(this._isParam)
       this._device = normalizeDevice(opts._device || opts.device || _runtime.device || 'cpu')
       this._tensor = null
       this._tensorOwner = null
@@ -729,7 +736,6 @@ function createBoundTensorClass(runtime) {
           this._coreCreate(currentUop.raw, POLY_TENSOR_VALUE, this._device)
         )
       }
-      this._syncCoreRequiresGrad()
       registerTensor(this)
     }
 
@@ -773,12 +779,6 @@ function createBoundTensorClass(runtime) {
 
     _coreCreateWithRoots(logical, physical, role, device) {
       return tensorCreateWithRoots(this._ctx, logical, physical, role, device || this._device)
-    }
-
-    _syncCoreRequiresGrad() {
-      if (this._tensor && ffi.poly_tensor_set_requires_grad) {
-        ffi.poly_tensor_set_requires_grad(this._tensor, Boolean(this._requiresGrad))
-      }
     }
 
     _requireLive() {
@@ -871,11 +871,6 @@ function createBoundTensorClass(runtime) {
       return this._device.toUpperCase()
     }
     get ndim() { return this._rt._core.ffi.poly_uop_ndim(this._ctx, this._uop) || 0 }
-    get requiresGrad() { return this._requiresGrad }
-    set requiresGrad(v) {
-      this._requiresGrad = Boolean(v)
-      this._syncCoreRequiresGrad()
-    }
     get isParam() { return this._isParam }
     set isParam(v) { this._isParam = Boolean(v) }
     get is_param() { return this._isParam }
@@ -906,9 +901,10 @@ function createBoundTensorClass(runtime) {
       /* Pinned tensor.py:527-543 discovers targets only through the current
        * Tensor.uop. Polygrad's corresponding root is mandatory physical. */
       for (const t of liveTensorSnapshot()) {
-        if (!t || t._ctx !== this._ctx || !t._tensor || !t._requiresGrad) continue
+        if (!t || t._ctx !== this._ctx || !t._tensor || !isFloatDtype(t.dtype)) continue
         const current = t._currentUopRaw()
-        if (current && ffi.poly_uop_reachable(this._ctx, root, current)) {
+        if (current && Number(ffi.poly_uop_device(current)) !== deviceId('auto') &&
+            ffi.poly_uop_reachable(this._ctx, root, current)) {
           targets.push({ tensor: t, root: current })
         }
       }
@@ -1189,9 +1185,7 @@ function createBoundTensorClass(runtime) {
       // Pinned mixin/elementwise.py:33-37 is one DETACH Tensor ALU.
       const { ffi } = this._rt._core
       const core = ffi.poly_tensor_detach(this._ctx, this._tensor)
-      const ret = this._makeResultFromCore(core, [this])
-      ret.requiresGrad = false
-      return ret
+      return this._makeResultFromCore(core, [this])
     }
 
     contiguousBackward() {
@@ -1213,8 +1207,7 @@ function createBoundTensorClass(runtime) {
       const cloned = ffi.poly_tensor_clone(this._ctx, this._tensor, deviceId(dev))
       if (!cloned) throw new Error('poly_tensor_clone failed')
       const t = new Tensor(undefined, {
-        _ctx: this._ctx, _tensor: cloned, _dtype: this._dtype, _device: dev,
-        requiresGrad: this._requiresGrad
+        _ctx: this._ctx, _tensor: cloned, _dtype: this._dtype, _device: dev
       })
       t._isParam = this._isParam
       if (this._grad) t._grad = this._grad.clone(dev)
@@ -1241,7 +1234,6 @@ function createBoundTensorClass(runtime) {
       }
       const assigned = ffi.poly_tensor_assign(this._ctx, this._tensor, x._tensor)
       if (!assigned) throw new Error('poly_tensor_assign failed')
-      this._syncCoreRequiresGrad()
       this._data = null
       return this
     }
@@ -1312,8 +1304,7 @@ function createBoundTensorClass(runtime) {
         _tensor: coreTensor,
         _data: this._data,
         _dtype: this._dtype,
-        _device: dev,
-        requiresGrad: this._requiresGrad
+        _device: dev
       })
       t._grad = this._grad ? this._grad.to(dev) : null
       t._isParam = this._isParam
@@ -1327,10 +1318,8 @@ function createBoundTensorClass(runtime) {
       this._data = moved._data
       this._dtype = moved._dtype
       this._device = moved._device
-      this._requiresGrad = moved._requiresGrad
       this._grad = moved._grad
       this._isParam = moved._isParam
-      this._syncCoreRequiresGrad()
       return this
     }
 
@@ -1365,9 +1354,6 @@ function createBoundTensorClass(runtime) {
         _dtype: dtypeNameForUop(this._ctx, current, forcedDtype || this._dtype),
         _device: device
       })
-      for (let i = 0; i < inputs.length; i++) {
-        if (inputs[i]._requiresGrad) { t.requiresGrad = true; break }
-      }
       return t
     }
 
@@ -1425,8 +1411,7 @@ function createBoundTensorClass(runtime) {
           _ctx: t._ctx,
           _tensor: cores[i],
           _dtype: t._dtype,
-          _device: t._device,
-          requiresGrad: t._requiresGrad
+          _device: t._device
         })
       })
       const call = ffi.poly_uop_src(physicalAfters[0], 1)
@@ -2187,9 +2172,7 @@ function createBoundTensorClass(runtime) {
       const { ffi } = this._rt._core
       if (!ffi.poly_tensor_argmax) throw new Error('poly_tensor_argmax is required for Tensor.argmax')
       const core = ffi.poly_tensor_argmax(this._ctx, this._tensor, axis, Boolean(keepdim))
-      const result = this._makeResultFromCore(core, [this], 'int32')
-      result.requiresGrad = false
-      return result
+      return this._makeResultFromCore(core, [this], 'int32')
     }
 
     sort(dim, descending) {
@@ -2204,7 +2187,6 @@ function createBoundTensorClass(runtime) {
       }
       const values = this._makeResultFromCore(pair[0], [this])
       const indices = this._makeResultFromCore(pair[1], [this], 'int32')
-      indices.requiresGrad = false
       return [values, indices]
     }
 
@@ -2229,7 +2211,6 @@ function createBoundTensorClass(runtime) {
       }
       const values = this._makeResultFromCore(pair[0], [this])
       const indices = this._makeResultFromCore(pair[1], [this], 'int32')
-      indices.requiresGrad = false
       return [values, indices]
     }
 
@@ -3080,6 +3061,7 @@ function createBoundTensorClass(runtime) {
       if (typeof shape === 'number') shape = [shape]
       shape = Array.from(shape, Number)
       opts = opts ? { ...opts } : {}
+      rejectRequiresGrad(opts)
       const ctx = opts._ctx || liveCore().ctx
       const device = normalizeDevice(opts._device || opts.device || _runtime.device || 'cpu')
       const dtypeExplicit = Object.prototype.hasOwnProperty.call(opts, 'dtype')
@@ -3101,10 +3083,7 @@ function createBoundTensorClass(runtime) {
             dtypeExplicit, buffer
           )
       if (!tensor) throw new Error('C-owned Tensor.full construction failed')
-      return new Tensor(null, {
-        _ctx: ctx, _tensor: tensor, _dtype: dtype, _device: device,
-        requiresGrad: Boolean(opts.requiresGrad || opts.requires_grad)
-      })
+      return new Tensor(null, {_ctx: ctx, _tensor: tensor, _dtype: dtype, _device: device})
     }
 
     static arange(start, stop, step, opts) {
@@ -3114,6 +3093,7 @@ function createBoundTensorClass(runtime) {
       if (step === undefined) step = 1
       if (step === 0) throw new Error('Tensor.arange step must not be zero')
       opts = opts ? { ...opts } : {}
+      rejectRequiresGrad(opts)
       const ctx = opts._ctx || liveCore().ctx
       const device = normalizeDevice(opts._device || opts.device || _runtime.device || 'cpu')
       const dtype = opts.dtype || (
@@ -3130,10 +3110,7 @@ function createBoundTensorClass(runtime) {
             ctx, Number(start), Number(stop), Number(step), dtypeId, targetDevice
           )
       if (!tensor) throw new Error('C-owned Tensor.arange construction failed')
-      return new Tensor(null, {
-        _ctx: ctx, _tensor: tensor, _dtype: dtype, _device: device,
-        requiresGrad: Boolean(opts.requiresGrad || opts.requires_grad)
-      })
+      return new Tensor(null, {_ctx: ctx, _tensor: tensor, _dtype: dtype, _device: device})
     }
 
     static manual_seed(seed = 0) {
@@ -3149,6 +3126,7 @@ function createBoundTensorClass(runtime) {
       }
       if (shape.length === 1 && Array.isArray(shape[0])) shape = shape[0]
       opts = opts ? { ...opts } : {}
+      rejectRequiresGrad(opts)
       shape = shape.map(Number)
       if (shape.some(dim => !Number.isInteger(dim) || dim < 0)) {
         throw new Error(`invalid input shape=${JSON.stringify(shape)}`)
@@ -3163,10 +3141,7 @@ function createBoundTensorClass(runtime) {
         opts.contiguous === false ? 0 : 1
       )
       if (!tensor) throw new Error('poly_tensor_rand_by_id failed')
-      return new Tensor(null, {
-        _ctx: ctx, _tensor: tensor, _dtype: dtype, _device: device,
-        requiresGrad: Boolean(opts.requiresGrad || opts.requires_grad)
-      })
+      return new Tensor(null, {_ctx: ctx, _tensor: tensor, _dtype: dtype, _device: device})
     }
 
     static randLike(source, opts = {}) {
@@ -3193,6 +3168,7 @@ function createBoundTensorClass(runtime) {
       }
       if (shape.length === 1 && Array.isArray(shape[0])) shape = shape[0]
       opts = opts ? { ...opts } : {}
+      rejectRequiresGrad(opts)
       const dtype = opts.dtype || 'float32'
       const device = normalizeDevice(opts.device || _runtime.device || 'cpu')
       shape = shape.map(Number)
@@ -3205,10 +3181,7 @@ function createBoundTensorClass(runtime) {
         ctx, shape, shape.length, DTYPE_ID[dtype], deviceId(device)
       )
       if (!tensor) throw new Error('poly_tensor_randn_by_id failed')
-      return new Tensor(null, {
-        _ctx: ctx, _tensor: tensor, _dtype: dtype, _device: device,
-        requiresGrad: Boolean(opts.requiresGrad || opts.requires_grad)
-      })
+      return new Tensor(null, {_ctx: ctx, _tensor: tensor, _dtype: dtype, _device: device})
     }
 
     static uniform(...args) {
@@ -3310,6 +3283,7 @@ function createBoundTensorClass(runtime) {
 
     static linspace(start, stop, steps, opts) {
       opts = opts ? { ...opts } : {}
+      rejectRequiresGrad(opts)
       const ctx = opts._ctx || liveCore().ctx
       const device = normalizeDevice(opts._device || opts.device || _runtime.device || 'cpu')
       const dtype = opts.dtype || 'float32'
@@ -3319,15 +3293,13 @@ function createBoundTensorClass(runtime) {
         ctx, Number(start), Number(stop), Number(steps), dtypeId, deviceId(device)
       )
       if (!tensor) throw new Error('C-owned Tensor.linspace construction failed')
-      return new Tensor(null, {
-        _ctx: ctx, _tensor: tensor, _dtype: dtype, _device: device,
-        requiresGrad: Boolean(opts.requiresGrad || opts.requires_grad)
-      })
+      return new Tensor(null, {_ctx: ctx, _tensor: tensor, _dtype: dtype, _device: device})
     }
 
     static eye(n, m, opts) {
       if (typeof m === 'object' && m !== null) { opts = m; m = undefined }
       opts = opts ? { ...opts } : {}
+      rejectRequiresGrad(opts)
       const ctx = opts._ctx || liveCore().ctx
       const device = normalizeDevice(opts._device || opts.device || _runtime.device || 'cpu')
       const dtype = opts.dtype || 'float32'
@@ -3339,10 +3311,7 @@ function createBoundTensorClass(runtime) {
         ctx, rows, cols, dtypeId, deviceId(device)
       )
       if (!tensor) throw new Error('C-owned Tensor.eye construction failed')
-      return new Tensor(null, {
-        _ctx: ctx, _tensor: tensor, _dtype: dtype, _device: device,
-        requiresGrad: Boolean(opts.requiresGrad || opts.requires_grad)
-      })
+      return new Tensor(null, {_ctx: ctx, _tensor: tensor, _dtype: dtype, _device: device})
     }
 
     static empty(...args) {
@@ -3353,6 +3322,7 @@ function createBoundTensorClass(runtime) {
       }
       if (shape.length === 1 && Array.isArray(shape[0])) shape = shape[0]
       shape = shape.map(x => Number(x))
+      rejectRequiresGrad(opts)
       if (shape.some(x => x < 0)) throw new Error(`negative dimensions are not allowed: ${shape}`)
       if (opts && Object.prototype.hasOwnProperty.call(opts, 'name')) {
         throw new TypeError('Tensor.empty does not accept name; pass names to Instance.fromTensors')
@@ -3371,8 +3341,7 @@ function createBoundTensorClass(runtime) {
         _ctx: ctx,
         _tensor: tensor,
         _dtype: dtype,
-        _device: tensorDevice,
-        requiresGrad: opts && opts.requiresGrad
+        _device: tensorDevice
       })
     }
 
