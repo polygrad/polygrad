@@ -286,16 +286,20 @@
       "stages": ["schedule", "multi-device"],
       "area": "multi-device vocabulary",
       "vocabulary": {"tinygrad_only": ["WAIT", "GETADDR"], "polygrad_only": []},
-      "tinygrad": "WAIT and GETADDR participate in current multi-device scheduling/lowering",
-      "polygrad": "WAIT and GETADDR are absent",
-      "rationale": "Unused-for-HLB vocabulary remains deferred parity debt, not an approved difference.",
+      "tinygrad": "GETADDR is HCQ2-runtime IR: UOp.getaddr constructs it, spec_hcq accepts direct BUFFER/PARAM sources, and runtime/support/hcq2.py resolves addresses and views. WAIT remains an unused enum; current shape inference and every type verifier reject a directly constructed WAIT.",
+      "polygrad": "GETADDR and WAIT are absent; the current CUDA/HIP runtimes execute direct driver calls rather than Tinygrad's HCQ2 command-graph pipeline.",
+      "rationale": "GETADDR requires a dependency-closed HCQ2 runtime port or an explicit backend-scope exclusion. Adding enum-only scaffolding would not close behavioral parity. WAIT has no current Tinygrad behavior to port but remains a vocabulary-census mismatch.",
       "approval": null,
       "evidence": [
         "references/tinygrad_latest/tinygrad/uop/__init__.py:Ops.WAIT",
         "references/tinygrad_latest/tinygrad/uop/__init__.py:Ops.GETADDR",
+        "references/tinygrad_latest/tinygrad/uop/ops.py:UOp.getaddr",
+        "references/tinygrad_latest/tinygrad/uop/spec.py:spec_hcq",
+        "references/tinygrad_latest/tinygrad/runtime/support/hcq2.py:pm_resolve_patches",
+        "temp/tg_getaddr_wait_probe_20260903.py",
         "PLAN_CORE_20260720.md:WS6"
       ],
-      "close_when": "WS6 ports their construction and lowering with pinned multi-device probes."
+      "close_when": "A dependency-closed HCQ2 runtime port constructs, verifies, lowers, and executes GETADDR with pinned address/view probes, or HCQ2 is explicitly excluded from the supported backend architecture and the vocabulary census gains a reviewed scope rule. WAIT must follow its then-current upstream status rather than receive invented behavior."
     },
     {
       "id": "PG-PARITY-009",
