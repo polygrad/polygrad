@@ -136,8 +136,8 @@
       "stages": ["placement", "realize"],
       "area": "placement lifecycle",
       "tinygrad": "Tensor.uop already contains occurrence-specific executable placement when realization begins",
-      "polygrad": "Default realization consumes the eagerly constructed physical graph directly; explicit Instance placement substitutes exact named logical/template BUFFER bindings across aggregate roots without a logical-and-device memo",
-      "rationale": "Path B removed placement and logical fallback from default realization. The explicit place boundary preserves exact COPY/effect occurrences from a captured physical template or fails closed when logical-only evidence is insufficient.",
+      "polygrad": "Default realization consumes the eagerly constructed physical graph directly; explicit placement starts from logical roots plus exact named resource bindings and never consumes a prior physical graph",
+      "rationale": "Path B removed placement and logical fallback from default realization. The legacy Tensor physicalizer, logical-and-device memo, and runtime-residency AUTO inference are deleted; incomplete raw physical roots fail before callify.",
       "approval": null,
       "evidence": [
         "src/placer.c:poly_place_roots",
@@ -148,8 +148,8 @@
         "temp/instance_uniform_place_correspondence_20260811.md"
       ],
       "resolution": {
-        "evidence": "Default physical topology, occurrence, mutation, rebuilt-subexpression, JIT, Instance, and broad frontend/backend gates pass without realization-time placement or logical-key correspondence. Explicit aggregate place preserves exact template COPY/effect occurrences and fails closed when logical-only evidence is insufficient.",
-        "closed_on": "2026-08-11"
+        "evidence": "Default physical topology, occurrence, mutation, rebuilt-subexpression, JIT, Instance, and broad frontend/backend gates pass without realization-time placement or logical-key correspondence. Explicit aggregate place starts from logical roots and exact resource bindings; raw scheduling rejects device-free storage regardless of attached residency.",
+        "closed_on": "2026-09-03"
       }
     },
     {

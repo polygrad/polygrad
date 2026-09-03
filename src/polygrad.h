@@ -1149,7 +1149,6 @@ int poly_tensor_set_logical_policy(PolyCtx *ctx, PolyTensor *tensor, PolyLogical
 PolyDevice poly_tensor_device(PolyTensor *tensor);
 PolyTensorProvenance poly_tensor_provenance(PolyTensor *tensor);
 void poly_tensor_set_provenance(PolyTensor *tensor, PolyTensorProvenance provenance);
-PolyUOp *poly_tensor_physicalize(PolyCtx *ctx, PolyTensor *tensor);
 int poly_realize_tensors(PolyCtx *ctx, PolyTensor **inputs, int n, PolyTensor **outputs);
 int poly_realize_tensors_ex(
     PolyCtx *ctx,

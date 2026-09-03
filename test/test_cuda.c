@@ -1166,13 +1166,13 @@ TEST_BACKEND(cuda, device_less_constant_copy_runs_producer_before_transfer) {
 
   PolyUOp *ones = poly_full(ctx, (int64_t[]){4}, 1, 1.0);
   PolyUOp *contiguous = poly_contiguous(ctx, ones);
-  PolyTensor *gradient =
-      poly_tensor_create_with_roots(ctx, contiguous, NULL, POLY_TENSOR_VALUE, POLY_DEVICE_CUDA);
   ASSERT_NOT_NULL(ones);
   ASSERT_NOT_NULL(contiguous);
-  ASSERT_NOT_NULL(gradient);
 
-  PolyUOp *physical = poly_tensor_physicalize(ctx, gradient);
+  /* Tinygrad Tensor.to builds COPY(current_uop, target) eagerly. This raw-UOp
+   * fixture constructs that exact physical occurrence without placement. */
+  PolyUOp *physical =
+      poly_copy_to_device_uop(ctx, contiguous, poly_device_uop(ctx, POLY_DEVICE_CUDA));
   ASSERT_NOT_NULL(physical);
   ASSERT_INT_EQ(physical->op, POLY_OP_COPY);
 

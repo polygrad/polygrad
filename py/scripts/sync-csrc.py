@@ -27,8 +27,7 @@ SOURCES = [
     'src/selftest.c',
     'src/ctx.c',
     'src/device.c',
-    # poly_realize_tensors calls the tensor physicalizer; sdists need this
-    # source or .to()/placement builds miss COPY/DEVICE lowering.
+    # Explicit logical placement and shared UOp device queries.
     'src/placer.c',
     'src/engine/jit.c',
     'src/engine/realize.c',

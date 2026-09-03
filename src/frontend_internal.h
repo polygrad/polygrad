@@ -130,14 +130,6 @@ int poly_place_module_map(
     PolyUOp **out_roots
 );
 
-/* Resolve the exact execution device used by the physicalizer for a Tensor. */
-PolyDevice poly_tensor_resolved_device(PolyCtx *ctx, PolyTensor *tensor);
-
-/* Physicalize a snapshot of portable Tensor roots with one invocation-local
- * memo. This is an explicit re-placement boundary, never default execution;
- * no logical->physical correspondence escapes the call. */
-int poly_tensor_physicalize_many(PolyCtx *ctx, PolyTensor **tensors, int n, PolyUOp **out);
-
 /* Physical-only counterpart to pinned transform_to_call's `(graph,
  * buffer_map)` return. The caller owns and frees out_map_orig/out_map_repl;
  * no Tensor, placement, Instance, or residency state is mutated here. */

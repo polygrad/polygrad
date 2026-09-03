@@ -28,20 +28,16 @@ static PolyBuffer *realized_buffer(PolyCtx *ctx, PolyUOp *realized) {
   return buf_uop ? poly_buffer_get(ctx, (PolyUOp *)buf_uop) : NULL;
 }
 
-/* Raw-UOp fixtures model import/re-placement explicitly: capture the portable
- * root, compile one physical root for the selected policy, and install it
- * before any Tensor operation or realization. Default execution never
- * performs this transition implicitly. */
-static PolyTensor *placed_tensor_from_logical_uop(
+/* Raw physical-UOp fixture. Device policy must already be encoded in the UOp;
+ * it never infers placement from the Tensor wrapper or buffer residency. */
+static PolyTensor *physical_tensor_from_uop(
     PolyCtx *ctx,
-    PolyUOp *logical,
+    PolyUOp *physical,
     PolyTensorRole role,
     PolyDevice device
 ) {
-  PolyTensor *tensor = poly_tensor_create_with_roots(ctx, logical, NULL, role, device);
-  PolyUOp *physical = tensor ? poly_tensor_physicalize(ctx, tensor) : NULL;
-  if (!physical || poly_tensor_set_physical(ctx, tensor, physical, role, device) != 0) return NULL;
-  return tensor;
+  if (!ctx || !physical || poly_tensor_root_has_unplaced_buffer(ctx, physical)) return NULL;
+  return poly_tensor_create_with_roots(ctx, NULL, physical, role, device);
 }
 
 static PolyTensor *initialized_f32_tensor(
@@ -219,17 +215,6 @@ static int count_shaped_value_params(PolyCtx *ctx, PolyUOp *root) {
   int count = 0;
   for (int i = 0; i < n_topo; i++)
     if (is_shaped_value_param(topo[i])) count++;
-  return count;
-}
-
-static int count_copy_to_device(PolyCtx *ctx, PolyUOp *root, PolyDevice device) {
-  int n_topo = 0;
-  PolyUOp **topo = poly_toposort(ctx, root, &n_topo);
-  int count = 0;
-  for (int i = 0; i < n_topo; i++) {
-    PolyUOp *u = topo[i];
-    if (u && u->op == POLY_OP_COPY && u->n_src == 1 && poly_uop_device(u) == device) count++;
-  }
   return count;
 }
 
@@ -429,13 +414,16 @@ TEST(realize, callification_defers_output_allocation_until_execution) {
 
 TEST(realize, tensor_to_device_stores_tinygrad_copy_device_graph) {
   PolyCtx *ctx = poly_ctx_new();
-
-  PolyUOp *a = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_CPU);
-  PolyUOp *x = poly_alu2(ctx, POLY_OP_ADD, a, poly_const_float(ctx, 1.0));
-
-  PolyTensor *base = placed_tensor_from_logical_uop(ctx, x, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *a_tensor = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){4}, 1, POLY_DEVICE_CPU);
+  PolyTensor *one =
+      poly_tensor_const_float_by_id(ctx, 1.0, poly_dtype_id_by_name("float32"), POLY_DEVICE_CPU);
+  PolyTensor *base = poly_tensor_alu2(ctx, POLY_OP_ADD, a_tensor, one);
   PolyTensor *cuda_tensor = poly_tensor_to_device(ctx, base, POLY_DEVICE_CUDA);
   PolyTensor *cpu_tensor = poly_tensor_to_device(ctx, base, POLY_DEVICE_CPU);
+  PolyUOp *a = a_tensor ? poly_tensor_uop_physical(a_tensor) : NULL;
+  PolyUOp *x = base ? poly_tensor_uop_logical(base) : NULL;
+  ASSERT_NOT_NULL(a_tensor);
+  ASSERT_NOT_NULL(one);
   ASSERT_NOT_NULL(base);
   ASSERT_NOT_NULL(cuda_tensor);
   ASSERT_NOT_NULL(cpu_tensor);
@@ -469,7 +457,7 @@ TEST(realize, tensor_to_device_preserves_distinct_host_execution_target) {
   PolyCtx *ctx = poly_ctx_new();
 
   PolyUOp *buf = poly_buffer_f32(ctx, 4);
-  PolyTensor *cpu = placed_tensor_from_logical_uop(ctx, buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *cpu = physical_tensor_from_uop(ctx, buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
   PolyTensor *interp = poly_tensor_to_device(ctx, cpu, POLY_DEVICE_INTERP);
   ASSERT_NOT_NULL(cpu);
   ASSERT_NOT_NULL(interp);
@@ -1141,11 +1129,8 @@ TEST(realize, shared_allocator_versions_preserve_exact_physical_occurrences) {
     ASSERT_NOT_NULL(ctx);
 
     float source_data[] = {0.0f};
-    PolyUOp *source_buf = poly_buffer_f32(ctx, 1);
-    ASSERT_NOT_NULL(source_buf);
-    poly_buffer_set(ctx, source_buf, source_data, sizeof(source_data), POLY_DEVICE_HOST);
     PolyTensor *source =
-        placed_tensor_from_logical_uop(ctx, source_buf, POLY_TENSOR_VALUE, POLY_DEVICE_HOST);
+        initialized_f32_tensor(ctx, (int64_t[]){1}, 1, source_data, POLY_DEVICE_HOST, NULL);
     ASSERT_NOT_NULL(source);
 
     PolyTensor *cpu = NULL;
@@ -1499,11 +1484,8 @@ TEST(realize, aggregate_map_keeps_shared_storage_devices_distinct) {
   ASSERT_NOT_NULL(ctx);
 
   float source_data[] = {0.0f};
-  PolyUOp *source_buf = poly_buffer_f32(ctx, 1);
-  ASSERT_NOT_NULL(source_buf);
-  poly_buffer_set(ctx, source_buf, source_data, sizeof(source_data), POLY_DEVICE_HOST);
   PolyTensor *source =
-      placed_tensor_from_logical_uop(ctx, source_buf, POLY_TENSOR_VALUE, POLY_DEVICE_HOST);
+      initialized_f32_tensor(ctx, (int64_t[]){1}, 1, source_data, POLY_DEVICE_HOST, NULL);
   PolyTensor *cpu = poly_tensor_to_device(ctx, source, POLY_DEVICE_CPU);
   PolyTensor *interp = poly_tensor_to_device(ctx, source, POLY_DEVICE_INTERP);
   ASSERT_NOT_NULL(source);
@@ -1532,8 +1514,8 @@ TEST(realize, aggregate_map_keeps_shared_storage_devices_distinct) {
     ASSERT_NOT_NULL(saved[i]);
     ASSERT_NOT_NULL(replacement[i]);
   }
-  ASSERT_INT_EQ(poly_tensor_physicalize_many(ctx, targets, 2, placed), 0);
   for (int i = 0; i < 2; i++) {
+    placed[i] = poly_tensor_uop_physical(targets[i]);
     ASSERT_NOT_NULL(placed[i]);
     ASSERT_INT_EQ(poly_uop_device(placed[i]), devices[i]);
   }
@@ -1580,7 +1562,7 @@ static int aggregate_map_unrelated_arena_case(
   PolyUOp *new_leaf = poly_buffer_f32(ctx, 1);
   PolyUOp *affected_root = poly_add(ctx, old_leaf, poly_const_float(ctx, 1.0f));
   PolyTensor *affected =
-      placed_tensor_from_logical_uop(ctx, affected_root, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+      physical_tensor_from_uop(ctx, affected_root, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
   if (!old_leaf || !new_leaf || !affected_root || !affected) goto cleanup;
   if (poly_uop_retain(ctx, new_leaf) != 0) goto cleanup;
   retained_new_leaf = true;
@@ -1588,7 +1570,7 @@ static int aggregate_map_unrelated_arena_case(
   for (int i = 0; i < n_values; i++) {
     PolyUOp *logical =
         poly_add(ctx, poly_buffer_f32(ctx, 1), poly_const_float(ctx, (double)(i + 2)));
-    values[i] = placed_tensor_from_logical_uop(ctx, logical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+    values[i] = physical_tensor_from_uop(ctx, logical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
     value_roots[i] = values[i] ? poly_tensor_uop_physical(values[i]) : NULL;
     if (!logical || !values[i] || !value_roots[i]) goto cleanup;
   }
@@ -1596,7 +1578,7 @@ static int aggregate_map_unrelated_arena_case(
     PolyUOp *source_root =
         poly_add(ctx, poly_buffer_f32(ctx, 1), poly_const_float(ctx, (double)(i + 2)));
     PolyTensor *source =
-        placed_tensor_from_logical_uop(ctx, source_root, POLY_TENSOR_VALUE, POLY_DEVICE_HOST);
+        physical_tensor_from_uop(ctx, source_root, POLY_TENSOR_VALUE, POLY_DEVICE_HOST);
     places[i] = poly_tensor_to_device(ctx, source, POLY_DEVICE_CUDA);
     place_roots[i] = places[i] ? poly_tensor_uop_physical(places[i]) : NULL;
     if (!source_root || !source || !places[i] || !place_roots[i] ||
@@ -1669,16 +1651,17 @@ static int aggregate_map_unrelated_contiguous_arena_case(
   poly_buffer_set(ctx, input, &input_value, sizeof(input_value), POLY_DEVICE_CPU);
   PolyUOp *logical_contiguous =
       poly_contiguous(ctx, poly_add(ctx, input, poly_const_float(ctx, 1.0f)));
-  PolyTensor *boundary =
-      placed_tensor_from_logical_uop(ctx, logical_contiguous, POLY_TENSOR_VALUE, POLY_DEVICE_CUDA);
-  PolyTensor *boundary_roots[1] = {boundary};
-  PolyUOp *placed_roots[1] = {NULL};
-  if (!boundary || poly_tensor_physicalize_many(ctx, boundary_roots, 1, placed_roots) != 0)
-    goto cleanup;
-  PolyUOp *placed_contiguous = placed_roots[0];
+  PolyUOp *cuda_input = poly_copy_to_device_uop(ctx, input, poly_device_uop(ctx, POLY_DEVICE_CUDA));
+  PolyUOp *placed_contiguous =
+      poly_contiguous(ctx, poly_add(ctx, cuda_input, poly_const_float(ctx, 1.0f)));
+  PolyTensor *boundary = poly_tensor_create_with_roots(
+      ctx, logical_contiguous, placed_contiguous, POLY_TENSOR_VALUE, POLY_DEVICE_CUDA
+  );
   PolyUOp *consumer = poly_add(ctx, logical_contiguous, poly_const_float(ctx, 5.0f));
-  PolyTensor *consumer_tensor =
-      placed_tensor_from_logical_uop(ctx, consumer, POLY_TENSOR_VALUE, POLY_DEVICE_CUDA);
+  PolyUOp *physical_consumer = poly_add(ctx, placed_contiguous, poly_const_float(ctx, 5.0f));
+  PolyTensor *consumer_tensor = poly_tensor_create_with_roots(
+      ctx, consumer, physical_consumer, POLY_TENSOR_VALUE, POLY_DEVICE_CUDA
+  );
   PolyUOp *replacement = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_CUDA);
   if (!logical_contiguous || !boundary || !placed_contiguous || !consumer || !consumer_tensor ||
       !replacement || placed_contiguous->op != POLY_OP_CONTIGUOUS ||
@@ -1692,8 +1675,13 @@ static int aggregate_map_unrelated_contiguous_arena_case(
         share_input ? input : poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_CPU);
     PolyUOp *other_source = poly_add(ctx, other_input, poly_const_float(ctx, (double)(i + 11)));
     PolyUOp *logical_unrelated = poly_contiguous(ctx, other_source);
-    unrelated_tensors[i] =
-        placed_tensor_from_logical_uop(ctx, logical_unrelated, POLY_TENSOR_VALUE, POLY_DEVICE_CUDA);
+    PolyUOp *other_cuda =
+        poly_copy_to_device_uop(ctx, other_input, poly_device_uop(ctx, POLY_DEVICE_CUDA));
+    PolyUOp *physical_unrelated =
+        poly_contiguous(ctx, poly_add(ctx, other_cuda, poly_const_float(ctx, (double)(i + 11))));
+    unrelated_tensors[i] = poly_tensor_create_with_roots(
+        ctx, logical_unrelated, physical_unrelated, POLY_TENSOR_VALUE, POLY_DEVICE_CUDA
+    );
     unrelated_roots[i] =
         unrelated_tensors[i] ? poly_tensor_uop_physical(unrelated_tensors[i]) : NULL;
     if (!other_input || !other_source || !logical_unrelated || !unrelated_roots[i] ||
@@ -1747,13 +1735,10 @@ TEST(realize, aggregate_map_updates_only_exact_physical_occurrences) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
 
-  PolyUOp *source_buffer = poly_buffer_f32(ctx, 1);
   float source_value = 1.0f;
-  poly_buffer_set(ctx, source_buffer, &source_value, sizeof(source_value), POLY_DEVICE_HOST);
   PolyTensor *source =
-      placed_tensor_from_logical_uop(ctx, source_buffer, POLY_TENSOR_VALUE, POLY_DEVICE_HOST);
+      initialized_f32_tensor(ctx, (int64_t[]){1}, 1, &source_value, POLY_DEVICE_HOST, NULL);
   PolyTensor *target = poly_tensor_to_device(ctx, source, POLY_DEVICE_CUDA);
-  ASSERT_NOT_NULL(source_buffer);
   ASSERT_NOT_NULL(source);
   ASSERT_NOT_NULL(target);
   ASSERT_NOT_NULL(poly_tensor_uop_physical(target));
@@ -1769,7 +1754,7 @@ TEST(realize, aggregate_map_updates_only_exact_physical_occurrences) {
   PolyUOp *from[1] = {projected};
   PolyUOp *to[1] = {replacement};
   ASSERT_INT_EQ(poly_tensor_apply_realize_map(ctx, from, to, 1, POLY_DEVICE_CUDA), 0);
-  ASSERT_PTR_EQ(poly_tensor_uop_logical(target), source_buffer);
+  ASSERT_PTR_EQ(poly_tensor_uop_logical(target), poly_tensor_uop_logical(source));
   ASSERT_PTR_EQ(poly_tensor_uop_physical(target), replacement);
   ASSERT_PTR_EQ(poly_tensor_uop(target), replacement);
   /* tinygrad tensor.py:202-206 publishes transform_to_call's BUFFER map
@@ -2135,7 +2120,7 @@ TEST(realize, eager_physical_operation_uses_exact_moved_operand) {
 
   PolyUOp *a = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_CPU);
   PolyUOp *x = poly_alu2(ctx, POLY_OP_ADD, a, poly_const_float(ctx, 1.0));
-  PolyTensor *x_cpu = placed_tensor_from_logical_uop(ctx, x, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *x_cpu = physical_tensor_from_uop(ctx, x, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
   PolyTensor *x_cuda = poly_tensor_to_device(ctx, x_cpu, POLY_DEVICE_CUDA);
   ASSERT_NOT_NULL(x_cpu);
   ASSERT_NOT_NULL(x_cuda);
@@ -2217,7 +2202,7 @@ TEST(realize, eager_to_device_preserves_nested_copy_occurrences) {
 
   PolyUOp *a = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_CPU);
   PolyUOp *x = poly_alu2(ctx, POLY_OP_ADD, a, poly_const_float(ctx, 1.0));
-  PolyTensor *x_cpu = placed_tensor_from_logical_uop(ctx, x, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *x_cpu = physical_tensor_from_uop(ctx, x, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
   PolyTensor *x_cuda = poly_tensor_to_device(ctx, x_cpu, POLY_DEVICE_CUDA);
   PolyTensor *x_cpu_again = poly_tensor_to_device(ctx, x_cuda, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(x_cpu);
@@ -2304,18 +2289,14 @@ TEST(realize, eager_operation_preserves_nested_copy_from_realized_source) {
 TEST(realize, tensor_assign_targets_exact_moved_physical_occurrence) {
   PolyCtx *ctx = poly_ctx_new();
 
-  PolyUOp *a = poly_buffer_f32(ctx, 3);
   float da[] = {1.0f, 2.0f, 3.0f};
-  poly_buffer_set(ctx, a, da, sizeof(da), POLY_DEVICE_CPU);
-  PolyTensor *a_cpu = placed_tensor_from_logical_uop(ctx, a, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *a_cpu = initialized_f32_tensor(ctx, (int64_t[]){3}, 1, da, POLY_DEVICE_CPU, NULL);
   PolyTensor *a_cuda = poly_tensor_to_device(ctx, a_cpu, POLY_DEVICE_CUDA);
   ASSERT_NOT_NULL(a_cpu);
   ASSERT_NOT_NULL(a_cuda);
 
-  PolyUOp *v = poly_buffer_f32(ctx, 3);
   float dv[] = {5.0f, 5.0f, 5.0f};
-  poly_buffer_set(ctx, v, dv, sizeof(dv), POLY_DEVICE_CPU);
-  PolyTensor *v_cpu = placed_tensor_from_logical_uop(ctx, v, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *v_cpu = initialized_f32_tensor(ctx, (int64_t[]){3}, 1, dv, POLY_DEVICE_CPU, NULL);
   PolyTensor *v_cuda = poly_tensor_to_device(ctx, v_cpu, POLY_DEVICE_CUDA);
   ASSERT_NOT_NULL(v_cpu);
   ASSERT_NOT_NULL(v_cuda);
@@ -2352,14 +2333,14 @@ TEST(realize, tensor_assign_rejects_device_and_dtype_mismatch) {
   float target_data[] = {1.0f};
   poly_buffer_set(ctx, target_buf, target_data, sizeof(target_data), POLY_DEVICE_CPU);
   PolyTensor *target_cpu =
-      placed_tensor_from_logical_uop(ctx, target_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+      physical_tensor_from_uop(ctx, target_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(target_cpu);
 
   PolyUOp *value_buf = poly_buffer_f32(ctx, 1);
   float value_data[] = {5.0f};
   poly_buffer_set(ctx, value_buf, value_data, sizeof(value_data), POLY_DEVICE_CPU);
   PolyTensor *value_cpu =
-      placed_tensor_from_logical_uop(ctx, value_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+      physical_tensor_from_uop(ctx, value_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
   PolyTensor *value_cuda = poly_tensor_to_device(ctx, value_cpu, POLY_DEVICE_CUDA);
   ASSERT_NOT_NULL(value_cpu);
   ASSERT_NOT_NULL(value_cuda);
@@ -2372,7 +2353,7 @@ TEST(realize, tensor_assign_rejects_device_and_dtype_mismatch) {
   double value64_data[] = {5.0};
   poly_buffer_set(ctx, value64_buf, value64_data, sizeof(value64_data), POLY_DEVICE_CPU);
   PolyTensor *value64_cpu =
-      placed_tensor_from_logical_uop(ctx, value64_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+      physical_tensor_from_uop(ctx, value64_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(value64_cpu);
   ASSERT_TRUE(poly_tensor_assign(ctx, target_cpu, value64_cpu) == NULL);
 
@@ -2520,40 +2501,6 @@ TEST(realize, uop_device_follows_device_and_after_value) {
   ASSERT_INT_EQ(poly_uop_device(after), POLY_DEVICE_CPU);
 
   poly_ctx_destroy(ctx);
-  PASS();
-}
-
-TEST(realize, tensor_physicalize_uses_selected_tensor_device) {
-  PolyCtx *ctx = poly_ctx_new();
-
-  PolyUOp *a = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_CPU);
-  float *da = malloc(4 * sizeof(float));
-  ASSERT_NOT_NULL(da);
-  da[0] = 1.0f;
-  da[1] = 2.0f;
-  da[2] = 3.0f;
-  da[3] = 4.0f;
-  poly_buffer_set(ctx, a, da, 4 * sizeof(float), POLY_DEVICE_HOST);
-  PolyUOp *x = poly_alu2(ctx, POLY_OP_ADD, a, poly_const_float(ctx, 1.0));
-  PolyUOp *y = poly_alu2(ctx, POLY_OP_MUL, x, poly_const_float(ctx, 2.0));
-
-  PolyTensor *cuda_tensor =
-      placed_tensor_from_logical_uop(ctx, y, POLY_TENSOR_VALUE, POLY_DEVICE_CUDA);
-  PolyTensor *cpu_tensor =
-      placed_tensor_from_logical_uop(ctx, y, POLY_TENSOR_PLACE, POLY_DEVICE_CPU);
-  ASSERT_NOT_NULL(cuda_tensor);
-  ASSERT_NOT_NULL(cpu_tensor);
-
-  PolyUOp *physical = poly_tensor_physicalize(ctx, cpu_tensor);
-  ASSERT_NOT_NULL(physical);
-  ASSERT_INT_EQ(physical->op, POLY_OP_MUL);
-  ASSERT_INT_EQ(poly_uop_device(physical), POLY_DEVICE_CPU);
-  ASSERT_INT_EQ(count_root_ops(ctx, physical, POLY_OP_COPY), 0);
-  ASSERT_INT_EQ(count_copy_to_device(ctx, physical, POLY_DEVICE_CPU), 0);
-  ASSERT_INT_EQ(count_copy_to_device(ctx, physical, POLY_DEVICE_CUDA), 0);
-
-  poly_ctx_destroy(ctx);
-  free(da);
   PASS();
 }
 
@@ -3332,7 +3279,7 @@ TEST(realize, requested_plain_root_retargets_live_dependent_to_final_buffer) {
   PASS();
 }
 
-TEST(realize, aggregate_map_preserves_opaque_bodies_and_places_external_args) {
+TEST(realize, aggregate_map_preserves_opaque_bodies_and_updates_external_args) {
   const PolyOps opaque_ops[] = {POLY_OP_CALL, POLY_OP_FUNCTION};
   for (int op_idx = 0; op_idx < 2; op_idx++) {
     for (int key_in_external = 0; key_in_external < 2; key_in_external++) {
@@ -3343,27 +3290,23 @@ TEST(realize, aggregate_map_preserves_opaque_bodies_and_places_external_args) {
       PolyUOp *input = poly_buffer_f32(ctx, 1);
       ASSERT_NOT_NULL(input);
       poly_buffer_set(ctx, input, &input_value, sizeof(input_value), POLY_DEVICE_HOST);
-      PolyUOp *logical_key = poly_contiguous(ctx, poly_add(ctx, input, poly_const_float(ctx, 1.0)));
-      PolyTensor *boundary =
-          placed_tensor_from_logical_uop(ctx, logical_key, POLY_TENSOR_VALUE, POLY_DEVICE_CUDA);
-      PolyTensor *boundary_roots[1] = {boundary};
-      PolyUOp *placed_roots[1] = {NULL};
-      ASSERT_NOT_NULL(logical_key);
+      PolyUOp *key = poly_contiguous(ctx, poly_add(ctx, input, poly_const_float(ctx, 1.0)));
+      PolyTensor *boundary = physical_tensor_from_uop(ctx, key, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+      ASSERT_NOT_NULL(key);
       ASSERT_NOT_NULL(boundary);
-      ASSERT_INT_EQ(poly_tensor_physicalize_many(ctx, boundary_roots, 1, placed_roots), 0);
-      PolyUOp *placed_key = placed_roots[0];
+      PolyUOp *placed_key = poly_tensor_uop_physical(boundary);
       ASSERT_NOT_NULL(placed_key);
 
       PolyUOp *value = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_CUDA);
-      PolyUOp *body = poly_sink1(ctx, key_in_external ? value : logical_key);
-      PolyUOp *external = key_in_external ? logical_key : poly_const_float(ctx, 3.0);
+      PolyUOp *body = poly_sink1(ctx, key_in_external ? value : key);
+      PolyUOp *external = key_in_external ? key : poly_const_float(ctx, 3.0);
       PolyUOp *opaque_src[2] = {body, external};
       PolyUOp *opaque =
           poly_uop(ctx, opaque_ops[op_idx], POLY_VOID, opaque_src, 2, poly_arg_none());
       PolyUOp *after_src[2] = {value, opaque};
       PolyUOp *after = poly_uop(ctx, POLY_OP_AFTER, value->dtype, after_src, 2, poly_arg_none());
       PolyTensor *tensor =
-          placed_tensor_from_logical_uop(ctx, after, POLY_TENSOR_VALUE, POLY_DEVICE_CUDA);
+          physical_tensor_from_uop(ctx, after, POLY_TENSOR_VALUE, POLY_DEVICE_CUDA);
       PolyUOp *physical_before = tensor ? poly_tensor_uop_physical(tensor) : NULL;
       PolyUOp *replacement = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_CUDA);
       ASSERT_NOT_NULL(value);
@@ -3382,7 +3325,6 @@ TEST(realize, aggregate_map_preserves_opaque_bodies_and_places_external_args) {
       ASSERT_INT_EQ(poly_ctx_stats(ctx, &before), 0);
       ASSERT_INT_EQ(poly_tensor_apply_realize_map(ctx, from, to, 1, POLY_DEVICE_CUDA), 0);
       ASSERT_INT_EQ(poly_ctx_stats(ctx, &after_stats), 0);
-      ASSERT_PTR_EQ(poly_tensor_uop_logical(tensor), after);
 
       PolyUOp *physical = poly_tensor_uop_physical(tensor);
       if (!key_in_external) {
@@ -3588,49 +3530,6 @@ TEST(realize, batched_explicit_and_nested_contiguous_materializes_once) {
   PASS();
 }
 
-TEST(realize, placed_contiguous_map_retargets_prebuilt_logical_consumer) {
-  PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *input = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_CPU);
-  float initial = 1.0f;
-  poly_buffer_set(ctx, input, &initial, sizeof(initial), POLY_DEVICE_CPU);
-  PolyUOp *logical_contiguous =
-      poly_contiguous(ctx, poly_add(ctx, input, poly_const_float(ctx, 1.0)));
-  PolyTensor *boundary =
-      placed_tensor_from_logical_uop(ctx, logical_contiguous, POLY_TENSOR_VALUE, POLY_DEVICE_CUDA);
-  ASSERT_NOT_NULL(boundary);
-
-  /* CUDA placement rebuilds the CONTIGUOUS around the input COPY, producing
-   * the exact kind of placed-only becomes-map key seen in the HLB RNG crop. */
-  PolyTensor *boundary_roots[1] = {boundary};
-  PolyUOp *placed_roots[1] = {NULL};
-  ASSERT_INT_EQ(poly_tensor_physicalize_many(ctx, boundary_roots, 1, placed_roots), 0);
-  PolyUOp *placed_contiguous = placed_roots[0];
-  ASSERT_NOT_NULL(placed_contiguous);
-  ASSERT_INT_EQ(placed_contiguous->op, POLY_OP_CONTIGUOUS);
-  ASSERT_PTR_NEQ(placed_contiguous, logical_contiguous);
-
-  PolyUOp *consumer = poly_add(ctx, logical_contiguous, poly_const_float(ctx, 5.0));
-  PolyTensor *consumer_tensor =
-      placed_tensor_from_logical_uop(ctx, consumer, POLY_TENSOR_VALUE, POLY_DEVICE_CUDA);
-  PolyUOp *replacement = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_CUDA);
-  ASSERT_NOT_NULL(consumer_tensor);
-  ASSERT_NOT_NULL(replacement);
-
-  PolyUOp *from[1] = {placed_contiguous};
-  PolyUOp *to[1] = {replacement};
-  ASSERT_INT_EQ(poly_tensor_apply_realize_map(ctx, from, to, 1, POLY_DEVICE_CUDA), 0);
-  ASSERT_PTR_EQ(poly_tensor_uop_logical(boundary), logical_contiguous);
-  ASSERT_PTR_EQ(poly_tensor_uop_logical(consumer_tensor), consumer);
-  ASSERT_PTR_EQ(poly_tensor_uop_physical(boundary), replacement);
-  ASSERT_NOT_NULL(poly_tensor_uop_physical(consumer_tensor));
-  ASSERT_TRUE(poly_uop_reachable(ctx, poly_tensor_uop_physical(consumer_tensor), replacement));
-  ASSERT_FALSE(poly_uop_reachable(ctx, poly_tensor_uop_physical(consumer_tensor), placed_contiguous)
-  );
-
-  poly_ctx_destroy(ctx);
-  PASS();
-}
-
 TEST(realize, placed_after_map_retargets_live_assignment_across_copy) {
   PolyCtx *ctx = poly_ctx_new();
 
@@ -3691,10 +3590,9 @@ TEST(realize, transform_to_call_finalizes_creation_copy_assignment_after) {
   /* Pinned add_tags merges a creation COPY tag into this assignment AFTER.
    * Keep live tensors for both original UOps to prove finalize_after's two
    * becomes-map entries, while the executable consumer reads the new value. */
-  PolyTensor *counter =
-      placed_tensor_from_logical_uop(ctx, after, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *counter = physical_tensor_from_uop(ctx, after, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
   PolyTensor *creation_copy =
-      placed_tensor_from_logical_uop(ctx, copy, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+      physical_tensor_from_uop(ctx, copy, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
   PolyUOp *consumer = poly_add(ctx, after, poly_const_float(ctx, 5.0));
   PolyUOp *realized = NULL;
   PolyUOp **map_orig = NULL;
@@ -3731,9 +3629,7 @@ TEST(realize, transform_to_call_finalizes_creation_copy_assignment_after) {
   const PolyUOp *counter_identity = poly_uop_get_buffer_identity(poly_tensor_uop_physical(counter));
   const PolyUOp *creation_copy_identity =
       poly_uop_get_buffer_identity(poly_tensor_uop_physical(creation_copy));
-  ASSERT_PTR_EQ(poly_tensor_uop_logical(counter), after);
   ASSERT_NOT_NULL(counter_identity);
-  ASSERT_PTR_EQ(poly_tensor_uop_logical(creation_copy), copy);
   ASSERT_PTR_EQ(creation_copy_identity, counter_identity);
   ASSERT_PTR_NEQ(counter_identity, realized_identity);
   ASSERT_TRUE(poly_uop_reachable(ctx, call, (PolyUOp *)counter_identity));
@@ -4791,18 +4687,22 @@ TEST(realize, transform_to_call_materialized_contiguous_keeps_shaped_effect_targ
   ASSERT_TRUE(f32 >= 0);
   PolyUOp *a = poly_buffer_from_host(ctx, a_data, sizeof(a_data), f32, a_shape, 2);
   PolyUOp *b = poly_buffer_from_host(ctx, b_data, sizeof(b_data), f32, b_shape, 2);
-  PolyUOp *materialized = poly_contiguous(ctx, poly_add(ctx, a, poly_const_float(ctx, 0.0f)));
+  PolyUOp *cpu = poly_device_uop(ctx, POLY_DEVICE_CPU);
+  PolyUOp *a_cpu = poly_copy_to_device_uop(ctx, a, cpu);
+  PolyUOp *b_cpu = poly_copy_to_device_uop(ctx, b, cpu);
+  PolyUOp *materialized = poly_contiguous(ctx, poly_add(ctx, a_cpu, poly_const_float(ctx, 0.0f)));
   PolyUOp *selected = poly_shrink(ctx, materialized, selected_bounds, 2);
-  PolyUOp *value = poly_div(ctx, b, selected);
+  PolyUOp *value = poly_div(ctx, b_cpu, selected);
   ASSERT_NOT_NULL(a);
   ASSERT_NOT_NULL(b);
+  ASSERT_NOT_NULL(a_cpu);
+  ASSERT_NOT_NULL(b_cpu);
   ASSERT_NOT_NULL(materialized);
   ASSERT_NOT_NULL(selected);
   ASSERT_NOT_NULL(value);
-  PolyTensor *tensor =
-      placed_tensor_from_logical_uop(ctx, value, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *tensor = physical_tensor_from_uop(ctx, value, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(tensor);
-  PolyUOp *physical = poly_tensor_physicalize(ctx, tensor);
+  PolyUOp *physical = poly_tensor_uop_physical(tensor);
   ASSERT_NOT_NULL(physical);
 
   PolyUOp *callified_out = NULL;
@@ -7624,9 +7524,9 @@ TEST(realize, contiguous_realized_view_is_only_physical_at_tensor_boundary) {
   PolyUOp *value = poly_alu2(ctx, POLY_OP_ADD, nested_view, poly_const_float(ctx, 1.0));
   ASSERT_NOT_NULL(value);
   PolyTensor *value_tensor =
-      placed_tensor_from_logical_uop(ctx, value, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+      physical_tensor_from_uop(ctx, value, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(value_tensor);
-  PolyUOp *value_physical = poly_tensor_physicalize(ctx, value_tensor);
+  PolyUOp *value_physical = poly_tensor_uop_physical(value_tensor);
   ASSERT_NOT_NULL(value_physical);
   ASSERT_INT_EQ(count_root_ops(ctx, value_physical, POLY_OP_SHRINK), 1);
 
@@ -7634,9 +7534,9 @@ TEST(realize, contiguous_realized_view_is_only_physical_at_tensor_boundary) {
   PolyUOp *root_view = poly_shrink(ctx, base, root_bounds, 1);
   ASSERT_NOT_NULL(root_view);
   PolyTensor *root_tensor =
-      placed_tensor_from_logical_uop(ctx, root_view, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+      physical_tensor_from_uop(ctx, root_view, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(root_tensor);
-  PolyUOp *root_physical = poly_tensor_physicalize(ctx, root_tensor);
+  PolyUOp *root_physical = poly_tensor_uop_physical(root_tensor);
   ASSERT_NOT_NULL(root_physical);
   ASSERT_PTR_EQ(root_physical, root_view);
   ASSERT_PTR_EQ(poly_uop_buffer(ctx, root_physical), root_physical);
@@ -7807,6 +7707,27 @@ TEST(realize, raw_explicit_unsupported_device_fails_before_schedule_fallback) {
   ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
   ASSERT_TRUE(stats.kernel_count == 0);
 
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(realize, raw_logical_buffer_requires_explicit_placement) {
+  /* Tinygrad 2026-08-22/a9069c177a9d UOp.new_buffer always records a concrete
+   * device (uop/ops.py:814-818). Polygrad's device-free BUFFER is portable
+   * source IR; attached residency must not let it bypass explicit place. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *logical = poly_uop_new_logical_buffer(ctx, POLY_FLOAT32, 2);
+  float values[2] = {1.0f, 2.0f};
+  PolyBuffer host = poly_buffer_make_host_view(values, sizeof(values));
+  ASSERT_NOT_NULL(logical);
+  poly_buffer_attach(ctx, logical, &host);
+  ASSERT_NOT_NULL(poly_buffer_get(ctx, logical));
+  PolyUOp *root = poly_add(ctx, logical, poly_const_float(ctx, 1.0f));
+  PolyUOp *out = (PolyUOp *)(uintptr_t)1;
+  ASSERT_NOT_NULL(root);
+  ASSERT_INT_EQ(poly_realize_uops(ctx, &root, 1, &out), -1);
+  ASSERT_PTR_EQ(out, NULL);
   poly_ctx_destroy(ctx);
   PASS();
 }

@@ -984,14 +984,10 @@ static PolyUOp *poly_callify_merge_tagged_uops(
   return ret;
 }
 
-static bool poly_callify_copy_from_creation(PolyCtx *ctx, PolyUOp *copy) {
-  if (!ctx || !copy || copy->op != POLY_OP_COPY || copy->n_src < 1) return false;
+static bool poly_callify_copy_from_creation(PolyUOp *copy) {
+  if (!copy || copy->op != POLY_OP_COPY || copy->n_src < 1) return false;
   PolyDevice source_device = poly_uop_device(copy->src[0]);
-  if (source_device == POLY_DEVICE_HOST || source_device == POLY_DEVICE_DISK) return true;
-  if (source_device != POLY_DEVICE_AUTO) return false;
-  const PolyUOp *identity = poly_uop_get_buffer_identity(copy->src[0]);
-  PolyBuffer *storage = identity ? poly_buffer_get(ctx, (PolyUOp *)identity) : NULL;
-  return storage && (storage->device == POLY_DEVICE_HOST || storage->device == POLY_DEVICE_DISK);
+  return source_device == POLY_DEVICE_HOST || source_device == POLY_DEVICE_DISK;
 }
 
 static PolyUOp *poly_transform_to_call_add_tags(
@@ -1027,7 +1023,7 @@ static PolyUOp *poly_transform_to_call_add_tags(
   if (!ret) return NULL;
 
   /* Pinned callify.py:19-25 tags copies from creation devices. */
-  if (ret->op == POLY_OP_COPY && poly_callify_copy_from_creation(ctx, ret)) {
+  if (ret->op == POLY_OP_COPY && poly_callify_copy_from_creation(ret)) {
     ret = poly_callify_tag_uop(ctx, tctx, u, ret);
     if (!ret) return NULL;
   }
@@ -1603,18 +1599,6 @@ static PolyUOp *poly_transform_to_call_rewrite_nested_contiguous(
     PolyDevice source_device = poly_uop_device(ret->src[0]);
     PolyDevice copy_device = poly_uop_device(ret);
     bool from_creation = source_device == POLY_DEVICE_HOST || source_device == POLY_DEVICE_DISK;
-    /* The preserved legacy raw-UOp route can still carry BUFFER(UNIQUE) with
-     * device=AUTO and express HOST/DISK only in ctx->buffers. Keep that
-     * boundary fallback solely for an incomplete graph. Complete eager physical
-     * roots take the pinned graph-device branch above, including movement-
-     * wrapped DISK sources that the old identity-only rule missed. */
-    if (!from_creation && source_device == POLY_DEVICE_AUTO) {
-      const PolyUOp *legacy_identity = poly_uop_get_buffer_identity(ret->src[0]);
-      PolyBuffer *legacy_storage =
-          legacy_identity ? poly_buffer_get(ctx, (PolyUOp *)legacy_identity) : NULL;
-      from_creation = legacy_storage && (legacy_storage->device == POLY_DEVICE_HOST ||
-                                         legacy_storage->device == POLY_DEVICE_DISK);
-    }
     if (from_creation && copy_device != POLY_DEVICE_AUTO && copy_device != POLY_DEVICE_HOST &&
         copy_device != POLY_DEVICE_DISK) {
       PolyUOp *untagged_ret = poly_callify_tag_ids(ret, NULL, NULL)
@@ -2154,6 +2138,10 @@ PolyUOp *poly_linear_effect_sink(
     fprintf(stderr, "poly_realize: unsupported explicit device identity\n");
     return NULL;
   }
+  if (poly_tensor_root_has_unplaced_buffer(ctx, sink)) {
+    fprintf(stderr, "poly_realize: physical effect root contains device-free BUFFER\n");
+    return NULL;
+  }
 
   /* Imported/Instance graphs already own their output/effect storage, so they
    * skip tensor output allocation. They do not skip tinygrad's input-buffer
@@ -2200,6 +2188,14 @@ PolyUOp *poly_linear_with_vars(
     for (int i = 0; i < n; i++)
       out_uops[i] = NULL;
     return NULL;
+  }
+  for (int i = 0; i < n; i++) {
+    if (poly_tensor_root_has_unplaced_buffer(ctx, uops[i])) {
+      fprintf(stderr, "poly_realize: physical root %d contains device-free BUFFER\n", i);
+      for (int j = 0; j < n; j++)
+        out_uops[j] = NULL;
+      return NULL;
+    }
   }
 
   PolyUOp *big_call = poly_transform_to_call(ctx, uops, n, out_uops);

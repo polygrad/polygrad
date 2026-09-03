@@ -69,6 +69,14 @@ static PolyUOp *tensor_current_uop(PolyTensor *tensor) {
   return tensor ? tensor->uop_physical : NULL;
 }
 
+/* C-only Tensor-wrapper filter for Tinygrad's live-Tensor becomes-map update.
+ * Execution device identity remains encoded in the eager physical UOp. */
+static PolyDevice tensor_resolved_device(PolyCtx *ctx, PolyTensor *tensor) {
+  PolyDevice device = tensor ? tensor->device : POLY_DEVICE_AUTO;
+  if (device == POLY_DEVICE_AUTO) device = poly_ctx_get_preferred_device(ctx);
+  return device == POLY_DEVICE_AUTO ? poly_device_default() : device;
+}
+
 static bool tensor_logical_requested(const PolyCtx *ctx) {
   return ctx && ctx->logical_policy != POLY_LOGICAL_NEVER;
 }
@@ -355,7 +363,7 @@ int poly_tensor_apply_realize_map(
     if (!tensor) continue;
     PolyUOp *current = tensor_current_uop(tensor);
     if (!current) continue;
-    PolyDevice resolved_device = poly_tensor_resolved_device(ctx, tensor);
+    PolyDevice resolved_device = tensor_resolved_device(ctx, tensor);
     if (resolved_device <= POLY_DEVICE_AUTO || resolved_device > POLY_DEVICE_DISK) goto cleanup;
     if (device != POLY_DEVICE_AUTO && resolved_device != device) continue;
     snapshot_tensors[n_snapshot] = tensor;
@@ -412,7 +420,7 @@ int poly_tensor_apply_realize_map(
     PolyTensorRole role = tensor->role;
     PolyDevice tensor_device = tensor->device;
     if (role == POLY_TENSOR_PLACE && poly_uop_has_buffer_identity(realized)) {
-      PolyDevice requested = poly_tensor_resolved_device(ctx, tensor);
+      PolyDevice requested = tensor_resolved_device(ctx, tensor);
       if (poly_uop_device(realized) == requested) {
         role = POLY_TENSOR_VALUE;
         tensor_device = requested;
