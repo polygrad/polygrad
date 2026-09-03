@@ -3400,9 +3400,9 @@ class TestDevice:
 
     def test_assign_realized_contiguous_cache_view_retargets_both_roots(self):
         cache = Tensor.zeros(2, 1, 8, 1, 4).contiguous().preserve_logical().realize()
-        logical_materialization = cache.uop_logical
+        logical_value = cache.uop_logical
         physical_identity = cache.uop_physical
-        assert logical_materialization.op_name == 'CONTIGUOUS'
+        assert logical_value.op_name == 'AFTER'
         assert physical_identity.has_buffer_identity()
 
         xk = Tensor.arange(12).float().reshape(1, 3, 1, 4)
@@ -3411,10 +3411,10 @@ class TestDevice:
         view.assign(Tensor.stack(xk, xv))
 
         # Pinned tensor.py:246-252 retargets the nearest current buffer
-        # identity.  Polygrad applies the same physical rewrite and retargets
-        # the retained pre-realize CONTIGUOUS occurrence independently.
+        # identity. Polygrad applies the same physical rewrite while retaining
+        # the independent device-free logical effect graph.
         assert cache.uop_logical.op_name == 'AFTER'
-        assert cache.uop_logical.src[0] == logical_materialization
+        assert cache.uop_logical.src[0] == logical_value
         assert cache.uop_physical.op_name == 'AFTER'
         assert cache.uop_physical.src[0] == physical_identity
         assert view.uop_logical.op_name == 'SHRINK'

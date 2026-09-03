@@ -2732,9 +2732,9 @@ TEST(realize, tensor_assign_realized_contiguous_cache_view_retargets_both_roots)
   int64_t cache_shape[] = {2, 1, 8, 1, 4};
   int64_t value_shape[] = {2, 1, 3, 1, 4};
 
-  /* Tensor.zeros(...).contiguous() is the Llama KV-cache construction.  The
-   * retained graph keeps CONTIGUOUS while the current graph collapses it to
-   * storage on realization. */
+  /* Tensor.zeros(...).contiguous() is the Llama KV-cache construction. The
+   * device-free logical graph keeps its effect value while the deviceful
+   * physical graph materializes CONTIGUOUS. */
   PolyTensor *zero =
       poly_tensor_full_float_by_id(ctx, cache_shape, 5, 0.0, f32, POLY_DEVICE_CPU, true, false);
   PolyTensor *cache = poly_tensor_empty(ctx, POLY_FLOAT32, cache_shape, 5, POLY_DEVICE_CPU);
@@ -2743,7 +2743,7 @@ TEST(realize, tensor_assign_realized_contiguous_cache_view_retargets_both_roots)
   ASSERT_PTR_EQ(poly_tensor_clone_into(ctx, cache, zero), cache);
   cache = poly_tensor_contiguous(ctx, cache);
   ASSERT_NOT_NULL(cache);
-  ASSERT_INT_EQ(cache->uop_logical->op, POLY_OP_CONTIGUOUS);
+  ASSERT_INT_EQ(cache->uop_logical->op, POLY_OP_AFTER);
   ASSERT_INT_EQ(cache->uop_physical->op, POLY_OP_CONTIGUOUS);
   PolyUOp *logical_materialization = cache->uop_logical;
 

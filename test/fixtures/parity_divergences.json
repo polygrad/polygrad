@@ -556,23 +556,30 @@
     },
     {
       "id": "PG-PARITY-022",
-      "status": "open_debt",
+      "status": "resolved",
       "stages": ["raw-uop", "placement", "realize"],
       "area": "device-free raw contiguous folding",
       "vocabulary": {"tinygrad_only": [], "polygrad_only": []},
       "tinygrad": "UOp.contiguous returns the original UOp when device is None",
-      "polygrad": "Tensor.contiguous has the exact device-free fold, but raw poly_contiguous still creates a CONTIGUOUS barrier for device-free graphs consumed by preserved legacy logical builders",
-      "rationale": "Changing the overloaded raw helper before those builders migrate removes deliberate pre-placement materialization barriers. The default Tensor parity surface must remain exact while the legacy raw/import route stays visible as migration debt.",
+      "polygrad": "poly_contiguous and Tensor.contiguous both return the original UOp when device is AUTO; genuine rangeify-created device-free STAGE nodes inherit the physical sink device",
+      "rationale": "The legacy raw CONTIGUOUS barrier is removed. Raw, Tensor, logical, placement, rangeify and CUDA schedule regressions now enforce the pinned fold without restoring implicit realization-time placement.",
       "approval": null,
       "evidence": [
-        "references/tinygrad_latest/tinygrad/uop/ops.py:UOp.contiguous",
-        "references/tinygrad_latest/tinygrad/tensor.py:Tensor.contiguous",
+        "references/tinygrad_latest/tinygrad/mixin/elementwise.py:ElementwiseMixin.contiguous",
+        "references/tinygrad_latest/tinygrad/schedule/indexing.py:pm_fix_deviceless",
         "src/tensor.c:poly_tensor_contiguous",
         "src/tensor.c:poly_contiguous",
         "test/test_tensor.c:contiguous_tensor_matches_pinned_device_rules",
-        "test/tensor_graph_cases.py:case_contiguous_deviceless"
+        "test/test_rangeify.c:deviceless_materialization_uses_sink_device",
+        "test/test_cuda.c:device_less_constant_copy_matches_pinned_single_call_schedule",
+        "test/tensor_graph_cases.py:case_contiguous_deviceless",
+        "temp/deviceless_contiguous_correspondence_20260903.md"
       ],
-      "close_when": "All executable raw/import callers carry complete physical device facts or cross explicit place, the device-free fold moves into poly_contiguous itself, and the native realization matrix remains green."
+      "close_when": null,
+      "resolution": {
+        "evidence": "Raw and Tensor contiguous construction fold device-free values identically. Exact physical graph parity is 278/278; leak-enabled native, Python, JS native/Wasm, rangeify localization, and real CUDA common/specific gates pass.",
+        "closed_on": "2026-09-03"
+      }
     },
     {
       "id": "PG-PARITY-023",

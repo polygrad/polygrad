@@ -6173,8 +6173,7 @@ TEST(tensor, contiguous_tensor_matches_pinned_device_rules) {
   PolyUOp *pure_physical = poly_tensor_uop_physical(pure);
   PolyTensor *pure_contiguous = poly_tensor_contiguous(ctx, pure);
   ASSERT_NOT_NULL(pure_contiguous);
-  ASSERT_INT_EQ(poly_tensor_uop_logical(pure_contiguous)->op, POLY_OP_CONTIGUOUS);
-  ASSERT_PTR_EQ(poly_tensor_uop_logical(pure_contiguous)->src[0], poly_tensor_uop_logical(pure));
+  ASSERT_PTR_EQ(poly_tensor_uop_logical(pure_contiguous), poly_tensor_uop_logical(pure));
   ASSERT_PTR_EQ(poly_tensor_uop_physical(pure_contiguous), pure_physical);
   ASSERT_INT_EQ(poly_tensor_uop_physical(pure_contiguous)->op, POLY_OP_ADD);
 
@@ -6184,8 +6183,7 @@ TEST(tensor, contiguous_tensor_matches_pinned_device_rules) {
   PolyTensor *permuted = poly_tensor_permute(ctx, storage, order, 2);
   PolyTensor *materialized = poly_tensor_contiguous(ctx, permuted);
   ASSERT_NOT_NULL(materialized);
-  ASSERT_INT_EQ(poly_tensor_uop_logical(materialized)->op, POLY_OP_CONTIGUOUS);
-  ASSERT_PTR_EQ(poly_tensor_uop_logical(materialized)->src[0], poly_tensor_uop_logical(permuted));
+  ASSERT_PTR_EQ(poly_tensor_uop_logical(materialized), poly_tensor_uop_logical(permuted));
   ASSERT_INT_EQ(poly_tensor_uop_physical(materialized)->op, POLY_OP_CONTIGUOUS);
   ASSERT_PTR_EQ(poly_tensor_uop_physical(materialized)->src[0], poly_tensor_uop_physical(permuted));
 

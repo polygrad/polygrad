@@ -1307,30 +1307,39 @@ static PolyUOp *run_apply_rangeify(PolyIndexingCtx *ictx, PolyUOp *sink) {
 /* Apply rangeify tests */
 
 TEST(rangeify, deviceless_materialization_uses_sink_device) {
-  /* Current indexing.py:pm_fix_deviceless binds a global STAGE created from a
-   * deviceless value to the enclosing physical sink device. */
+  /* Tinygrad 2026-08-22/a9069c177a9d indexing.py:147-150 binds an existing
+   * global STAGE(device=None) to the enclosing physical sink device. Two
+   * consumers make the device-free intermediate a real materialization. */
   PolyCtx *ctx = poly_ctx_new();
   int64_t shape[] = {4};
-  PolyUOp *value = poly_contiguous(ctx, poly_expand(ctx, poly_const_float(ctx, 1.0), shape, 1));
-  PolyUOp *out = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_CPU);
-  PolyUOp *store = poly_store_val(ctx, out, value);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *value = poly_expand(ctx, poly_const_float(ctx, 1.0), shape, 1);
+  PolyUOp *shared = poly_uop1(ctx, POLY_OP_NEG, POLY_FLOAT32, value, poly_arg_none());
+  PolyUOp *out0 = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_CPU);
+  PolyUOp *out1 = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_CPU);
+  PolyUOp *store0 = poly_store_val(
+      ctx, out0, poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, shared, value, poly_arg_none())
+  );
+  PolyUOp *store1 = poly_store_val(
+      ctx, out1, poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT32, shared, value, poly_arg_none())
+  );
+  PolyUOp *stores[] = {store0, store1};
+  PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, stores, 2, poly_arg_none());
   PolyUOp *rangeified = poly_run_rangeify(ctx, sink, false);
 
   int n_topo = 0;
   PolyUOp **topo = poly_toposort(ctx, rangeified, &n_topo);
   int n_stage = 0;
-  bool stage_is_cpu = false;
+  bool stages_are_cpu = true;
   for (int i = 0; i < n_topo; i++) {
     if (topo[i]->op != POLY_OP_STAGE) continue;
     n_stage++;
     const char *device = poly_bufferize_arg_device(topo[i]->arg);
-    stage_is_cpu = device && strcmp(device, "CPU") == 0;
+    stages_are_cpu = stages_are_cpu && device && strcmp(device, "CPU") == 0;
   }
   poly_ctx_destroy(ctx);
 
-  ASSERT_INT_EQ(n_stage, 1);
-  ASSERT_TRUE(stage_is_cpu);
+  ASSERT_TRUE(n_stage > 0);
+  ASSERT_TRUE(stages_are_cpu);
   PASS();
 }
 

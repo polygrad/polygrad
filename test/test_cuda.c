@@ -1157,7 +1157,7 @@ TEST_BACKEND(cuda, tensor_place_computed_expression_to_cuda_e2e) {
   PASS();
 }
 
-TEST_BACKEND(cuda, device_less_constant_copy_runs_producer_before_transfer) {
+TEST_BACKEND(cuda, device_less_constant_copy_matches_pinned_single_call_schedule) {
   SKIP_IF_NO_CUDA();
 
   PolyCtx *ctx = poly_ctx_new();
@@ -1169,8 +1169,9 @@ TEST_BACKEND(cuda, device_less_constant_copy_runs_producer_before_transfer) {
   ASSERT_NOT_NULL(ones);
   ASSERT_NOT_NULL(contiguous);
 
-  /* Tinygrad Tensor.to builds COPY(current_uop, target) eagerly. This raw-UOp
-   * fixture constructs that exact physical occurrence without placement. */
+  /* Tinygrad 2026-08-22/a9069c177a9d Tensor.to rejects this route by returning
+   * self for device-free values. Direct UOp.copy_to_device still constructs
+   * one scheduled SINK call and does not materialize a separate producer. */
   PolyUOp *physical =
       poly_copy_to_device_uop(ctx, contiguous, poly_device_uop(ctx, POLY_DEVICE_CUDA));
   ASSERT_NOT_NULL(physical);
@@ -1180,17 +1181,8 @@ TEST_BACKEND(cuda, device_less_constant_copy_runs_producer_before_transfer) {
   PolyUOp *schedule = poly_test_linear_values(ctx, &physical, 1, &scheduled_out);
   ASSERT_NOT_NULL(schedule);
   ASSERT_NOT_NULL(scheduled_out);
-  ASSERT_INT_EQ(schedule->n_src, 2);
-  ASSERT_FALSE(poly_test_linear_call_is_copy(schedule, 0));
-  ASSERT_TRUE(poly_test_linear_call_is_copy(schedule, 1));
-  ASSERT_INT_EQ(poly_run_linear(ctx, schedule, NULL, 0, NULL, 0, true, false, false), 0);
-
-  float got[4] = {0};
-  const PolyUOp *buf = poly_uop_get_buffer_identity(scheduled_out);
-  ASSERT_NOT_NULL(buf);
-  ASSERT_INT_EQ(poly_buffer_read(ctx, (PolyUOp *)buf, got, sizeof(got)), 0);
-  for (int i = 0; i < 4; i++)
-    ASSERT_FLOAT_EQ(got[i], 1.0f, 1e-5f);
+  ASSERT_INT_EQ(schedule->n_src, 1);
+  ASSERT_INT_EQ(poly_test_linear_call_body(schedule, 0)->op, POLY_OP_SINK);
 
   poly_ctx_destroy(ctx);
   PASS();

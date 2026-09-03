@@ -69,6 +69,14 @@ def test_uop_literals_and_binary_promotion_match_current_tinygrad():
     assert UOp.const(ctx, 2, dtypes.bool).dtype is dtypes.bool
 
 
+def test_uop_contiguous_folds_device_free_value_like_current_tinygrad():
+    # Tinygrad 2026-08-22/a9069c177a9d mixin/elementwise.py:55-61 returns a
+    # device-free UOp unchanged because it has no storage to materialize.
+    ctx = Variable('contiguous_uop_ctx', 0, 1)._ctx
+    value = UOp.const(ctx, 1.0, dtypes.float32)
+    assert value.contiguous().raw == value.raw
+
+
 def test_tensor_module_cast_is_typing_cast_identity():
     # Pinned tinygrad/tensor.py:5 imports this public name from typing; it is
     # not a Tensor CAST operation.
@@ -291,7 +299,7 @@ def test_realized_contiguous_and_readback_reuse_current_buffer_identity():
 
     out = source.contiguous()
     assert out is not source
-    assert out.uop_logical.op_name == 'CONTIGUOUS'
+    assert out.uop_logical.raw == source_logical
     assert out.uop_physical is not None
     assert out.uop.raw == source_current
     assert out.uop_physical.raw == source_current

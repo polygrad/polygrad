@@ -3188,7 +3188,7 @@ async function runTensorTests(pg) {
 
     const out = source.contiguous()
     assert(out !== source, 'contiguous should return a new Tensor object')
-    assert(out.uopLogical.op === pg._core.ops.CONTIGUOUS, 'logical result should retain CONTIGUOUS')
+    assert(out.uopLogical.key === sourceLogical, 'device-free logical result should fold contiguous')
     assert(out.uopPhysical && out.uopPhysical.key === sourceCurrent,
       'physical result should reuse the exact current buffer')
     assert(out.uop.key === sourceCurrent, 'current result should reuse the exact current buffer')

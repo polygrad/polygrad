@@ -1529,14 +1529,9 @@ PolyTensor *poly_tensor_contiguous(PolyCtx *ctx, PolyTensor *src) {
   if (build_logical < 0) return NULL;
   PolyUOp *current = tensor_current_uop(src);
   if (!current) return NULL;
-  /* Pinned Tensor.contiguous applies UOp.contiguous to its current UOp
-   * (tensor.py:742-746, uop/ops.py:587-591). The Tensor boundary applies that exact fold
-   * independently to the retained logical root and physical occurrence. */
-  /* Retained logical provenance records the explicit materialization request.
-   * It is a Polygrad export/re-placement boundary, not the tinygrad execution
-   * surface, and remains device-free. */
-  PolyUOp *physical = current;
-  if (poly_uop_device(physical) != POLY_DEVICE_AUTO) physical = poly_contiguous(ctx, physical);
+  /* Tinygrad 2026-08-22/a9069c177a9d mixin/elementwise.py:55-61 applies
+   * UOp.contiguous directly; the shared helper below owns every fold. */
+  PolyUOp *physical = poly_contiguous(ctx, current);
   PolyUOp *logical = build_logical ? poly_contiguous(ctx, src->uop_logical) : NULL;
   if (!physical || (build_logical && !logical)) return NULL;
   return tensor_unary_result(ctx, src, logical, physical);
@@ -2606,10 +2601,11 @@ static PolyUOp *poly_scalar_binop(
 
 PolyUOp *poly_contiguous(PolyCtx *ctx, PolyUOp *x) {
   if (!ctx || !x) return NULL;
+  /* Tinygrad 2026-08-22/a9069c177a9d mixin/elementwise.py:55-61: weak and
+   * device-free values have no storage materialization to request. */
+  if (poly_dtype_is_weak(x->dtype)) return x;
   if (x->op == POLY_OP_CONTIGUOUS) return x;
-  /* The device-free fold from pinned UOp.contiguous currently lives at the
-   * Tensor boundary above. This raw helper still serves preserved legacy
-   * logical builders; removing their explicit barrier is PG-PARITY-022. */
+  if (poly_uop_device(x) == POLY_DEVICE_AUTO) return x;
   if (poly_uop_has_buffer_identity(x)) return x;
   return poly_uop1(ctx, POLY_OP_CONTIGUOUS, x->dtype, x, poly_arg_none());
 }
