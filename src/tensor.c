@@ -7856,44 +7856,6 @@ static PolyUOp *poly_pad_to_scatter_self(
   return poly_pad(ctx, x, pads, ndim + 1);
 }
 
-static PolyUOp *poly_scatter_one_hot(
-    PolyCtx *ctx,
-    PolyUOp *index,
-    const int64_t *self_shape,
-    const int64_t *index_shape,
-    int ndim,
-    int dim
-) {
-  if (!ctx || !index || !self_shape || !index_shape || ndim < 0 || ndim + 1 > POLY_MAX_DIMS)
-    return NULL;
-
-  int arange_dtype_id = (self_shape[dim] > (int64_t)INT32_MAX) ? poly_dtype_id_by_name("int64")
-                                                               : poly_dtype_id_by_name("int32");
-  PolyUOp *ar = poly_arange_int_by_id(ctx, 0, self_shape[dim], 1, arange_dtype_id);
-  if (!ar) return NULL;
-
-  PolyUOp *index_u = poly_unsqueeze_axis(ctx, index, -1);
-  if (!index_u) return NULL;
-
-  int64_t ar_shape[POLY_MAX_DIMS];
-  for (int i = 0; i < ndim; i++)
-    ar_shape[i] = 1;
-  ar_shape[ndim] = self_shape[dim];
-  PolyUOp *ar_r = poly_reshape(ctx, ar, ar_shape, ndim + 1);
-  if (!ar_r) return NULL;
-
-  PolyUOp *mask = poly_eq(ctx, index_u, ar_r);
-  if (!mask) return NULL;
-
-  int64_t perm[POLY_MAX_DIMS];
-  for (int i = 0; i < ndim + 1; i++)
-    perm[i] = i;
-  perm[dim] = ndim;
-  perm[ndim] = dim;
-  (void)index_shape;
-  return poly_permute(ctx, mask, perm, ndim + 1);
-}
-
 static bool poly_prepare_scatter(
     PolyCtx *ctx,
     PolyUOp *self,
@@ -7942,7 +7904,11 @@ static bool poly_prepare_scatter(
   src_t = poly_pad_to_scatter_self(ctx, src_t, self_shape, ndim);
   if (!src_t) return false;
 
-  PolyUOp *mask = poly_scatter_one_hot(ctx, index, self_shape, index_shape, ndim, dim);
+  /* Tinygrad 2026-08-22/a9069c177a9d mixin/op.py:1093 constructs
+   * index.unsqueeze(-1)._one_hot_along_dim(...).transpose(-1, dim). */
+  PolyUOp *index_u = poly_unsqueeze_axis(ctx, index, -1);
+  PolyUOp *mask = index_u ? one_hot_along_dim(ctx, index_u, self_shape[dim], -1) : NULL;
+  if (mask) mask = poly_permute(ctx, mask, perm, ndim + 1);
   if (!mask) return false;
   mask = poly_pad_to_scatter_self(ctx, mask, self_shape, ndim);
   if (!mask) return false;
@@ -7971,6 +7937,8 @@ static PolyUOp *poly_scatter_masked_merge(
 
   PolyUOp *acc_val = NULL;
   PolyUOp *acc_mask = NULL;
+  /* Tinygrad 2026-08-22/a9069c177a9d mixin/op.py:1176-1179 reduces the
+   * unsqueezed split values first, then squeezes each accumulated result once. */
   for (int64_t k = 0; k < dup; k++) {
     int64_t pairs[POLY_MAX_DIMS][2];
     for (int i = 0; i < ndim; i++) {
@@ -7983,9 +7951,6 @@ static PolyUOp *poly_scatter_masked_merge(
     PolyUOp *mk = poly_shrink(ctx, mask, pairs, ndim + 1);
     PolyUOp *vk = poly_shrink(ctx, values, pairs, ndim + 1);
     if (!mk || !vk) return NULL;
-    mk = poly_reshape(ctx, mk, (int64_t *)self_shape, ndim);
-    vk = poly_reshape(ctx, vk, (int64_t *)self_shape, ndim);
-    if (!mk || !vk) return NULL;
 
     if (!acc_val) {
       acc_val = vk;
@@ -7996,19 +7961,30 @@ static PolyUOp *poly_scatter_masked_merge(
     }
     if (!acc_val || !acc_mask) return NULL;
   }
+  acc_mask = poly_reshape(ctx, acc_mask, (int64_t *)self_shape, ndim);
+  acc_val = poly_reshape(ctx, acc_val, (int64_t *)self_shape, ndim);
+  if (!acc_mask || !acc_val) return NULL;
   return poly_where_op(ctx, acc_mask, acc_val, self);
 }
 
-static PolyUOp *poly_reduce_last_drop(
-    PolyCtx *ctx,
-    PolyOps op,
-    PolyUOp *x,
-    const int64_t *full_shape,
-    int ndim
-) {
-  if (!ctx || !x || !full_shape || ndim < 0) return NULL;
-  int64_t axes[1] = {ndim};
-  return poly_reduce_axis(ctx, op, x, axes, 1);
+/* C spelling of current Tinygrad 2026-08-22/a9069c177a9d public
+ * `.sum/.max/.prod(-1)` reduction boundary (mixin/reduce.py:13-71). */
+static PolyUOp *reduce_last(PolyCtx *ctx, PolyOps op, PolyUOp *x) {
+  if (!ctx || !x) return NULL;
+  int ndim = poly_uop_ndim(ctx, x);
+  if (ndim <= 0) return NULL;
+  int64_t axes[1] = {ndim - 1};
+  if (op == POLY_OP_ADD) return sum_axes_root(ctx, x, axes, 1, false);
+  PolyDType strong = poly_dtype_strong(x->dtype);
+  PolyUOp *src = poly_dtype_eq(x->dtype, strong) ? x : poly_cast(ctx, x, strong);
+  return src ? poly_reduce_axis(ctx, op, src, axes, 1) : NULL;
+}
+
+/* Tinygrad 2026-08-22/a9069c177a9d mixin/op.py:1129 `_inv_mask`. */
+static PolyUOp *scatter_inv_mask(PolyCtx *ctx, PolyUOp *mask, PolyUOp *a, PolyUOp *b) {
+  PolyUOp *any = reduce_last(ctx, POLY_OP_MAX, mask);
+  PolyUOp *inv = any ? poly_logical_not(ctx, any) : NULL;
+  return inv ? poly_where_op(ctx, inv, a, b) : NULL;
 }
 
 PolyUOp *poly_scatter_reduce(
@@ -8025,64 +8001,62 @@ PolyUOp *poly_scatter_reduce(
   if (!poly_prepare_scatter(ctx, self, dim, index, src, &p)) return NULL;
 
   PolyDType dt = src->dtype;
-  PolyUOp *zero = poly_const_typed(ctx, dt, 0.0);
-  PolyUOp *one = poly_const_typed(ctx, dt, 1.0);
+  /* Tinygrad mixin/op.py:1129-1132 passes Python 0/1 through _broadcasted;
+   * the literals remain weak but adopt the result kind. */
+  PolyDType weak_dt = poly_dtype_weak(dt);
+  PolyUOp *zero = poly_uop_const(ctx, poly_arg_int(0), weak_dt);
+  PolyUOp *one = poly_uop_const(ctx, poly_arg_int(1), weak_dt);
   if (!zero || !one) return NULL;
-
-  PolyUOp *mask_i = poly_where_op(
-      ctx, p.mask, poly_const_exact_int(ctx, POLY_INT32, 1),
-      poly_const_exact_int(ctx, POLY_INT32, 0)
-  );
-  PolyUOp *count = poly_reduce_last_drop(ctx, POLY_OP_ADD, mask_i, p.self_shape, p.ndim);
-  if (!count) return NULL;
-  PolyUOp *no_hit = poly_eq(ctx, count, poly_const_exact_int(ctx, POLY_INT32, 0));
-  if (!no_hit) return NULL;
 
   if (strcmp(reduce, "sum") == 0 || strcmp(reduce, "mean") == 0) {
     PolyUOp *selected = poly_where_op(ctx, p.mask, p.src, zero);
-    PolyUOp *sum = poly_reduce_last_drop(ctx, POLY_OP_ADD, selected, p.self_shape, p.ndim);
+    PolyUOp *sum = reduce_last(ctx, POLY_OP_ADD, selected);
     if (!sum) return NULL;
-    PolyUOp *base = include_self ? self : poly_where_op(ctx, no_hit, self, zero);
+    PolyUOp *base = include_self ? self : scatter_inv_mask(ctx, p.mask, self, zero);
     PolyUOp *total = poly_add(ctx, sum, base);
     if (strcmp(reduce, "sum") == 0) return total;
 
-    PolyUOp *inc = include_self ? poly_const_exact_int(ctx, POLY_INT32, 1)
-                                : poly_where_op(
-                                      ctx, no_hit, poly_const_exact_int(ctx, POLY_INT32, 1),
-                                      poly_const_exact_int(ctx, POLY_INT32, 0)
-                                  );
+    PolyUOp *weak_one = poly_const_exact_int(ctx, POLY_WEAKINT, 1);
+    PolyUOp *weak_zero = poly_const_exact_int(ctx, POLY_WEAKINT, 0);
+    PolyUOp *mask_i = poly_where_op(ctx, p.mask, weak_one, weak_zero);
+    PolyUOp *count = reduce_last(ctx, POLY_OP_ADD, mask_i);
+    PolyUOp *inc = include_self ? weak_one : scatter_inv_mask(ctx, p.mask, weak_one, weak_zero);
+    if (!count || !inc) return NULL;
     PolyUOp *den = poly_add(ctx, count, inc);
-    den = poly_cast(ctx, den, dt);
     return poly_div(ctx, total, den);
   }
 
   if (strcmp(reduce, "prod") == 0) {
     PolyUOp *selected = poly_where_op(ctx, p.mask, p.src, one);
-    PolyUOp *prod = poly_reduce_last_drop(ctx, POLY_OP_MUL, selected, p.self_shape, p.ndim);
+    PolyUOp *prod = reduce_last(ctx, POLY_OP_MUL, selected);
     if (!prod) return NULL;
-    PolyUOp *base = include_self ? self : poly_where_op(ctx, no_hit, self, one);
+    PolyUOp *base = include_self ? self : scatter_inv_mask(ctx, p.mask, self, one);
     return poly_mul(ctx, prod, base);
   }
 
   if (strcmp(reduce, "amax") == 0 || strcmp(reduce, "amin") == 0) {
     bool is_min = strcmp(reduce, "amin") == 0;
-    PolyUOp *fill = NULL;
-    if (!poly_dtype_bound_const(ctx, dt, !is_min, &fill)) return NULL;
+    PolyUOp *typed_fill = NULL;
+    if (!poly_dtype_bound_const(ctx, dt, !is_min, &typed_fill)) return NULL;
+    /* `src.dtype.min/max` is a Python scalar at mixin/op.py:1133-1134.
+     * Preserve bool, weakint, or weakfloat until _broadcasted promotes it. */
+    PolyDType py_dt = poly_dtype_is_bool(dt) ? POLY_BOOL : poly_dtype_weak(dt);
+    PolyUOp *fill = poly_uop_const(ctx, typed_fill->arg, py_dt);
+    if (!fill) return NULL;
     PolyUOp *selected = poly_where_op(ctx, p.mask, p.src, fill);
     PolyUOp *reduced = NULL;
     if (is_min) {
       /* Pinned scatter amin calls Tensor.min, whose integer path is
-       * inverse/MAX/inverse (mixin/__init__.py:1206-1211,
+       * inverse/MAX/inverse (mixin/op.py:1134,
        * mixin/elementwise.py:379-393). */
       PolyUOp *inverse = minimum_inverse(ctx, selected);
-      PolyUOp *max_inverse =
-          inverse ? poly_reduce_last_drop(ctx, POLY_OP_MAX, inverse, p.self_shape, p.ndim) : NULL;
+      PolyUOp *max_inverse = inverse ? reduce_last(ctx, POLY_OP_MAX, inverse) : NULL;
       reduced = max_inverse ? minimum_inverse(ctx, max_inverse) : NULL;
     } else
-      reduced = poly_reduce_last_drop(ctx, POLY_OP_MAX, selected, p.self_shape, p.ndim);
+      reduced = reduce_last(ctx, POLY_OP_MAX, selected);
     if (!reduced) return NULL;
 
-    PolyUOp *base = include_self ? self : poly_where_op(ctx, no_hit, self, fill);
+    PolyUOp *base = include_self ? self : scatter_inv_mask(ctx, p.mask, self, fill);
     return is_min ? poly_minimum(ctx, reduced, base) : poly_maximum(ctx, reduced, base);
   }
 

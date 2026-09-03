@@ -1604,6 +1604,39 @@ def case_nn_batchnorm_initializer():
     return {"physical": norm.weight.uop, "logical": logical(norm.weight)}
 
 
+def scatter_inputs(generalized=False):
+    if generalized:
+        self = Tensor.empty(2, 5, dtype="float32", device="CPU").realize()
+        index = Tensor.empty(1, 3, dtype="int32", device="CPU").realize()
+        src = Tensor.empty(2, 4, dtype="float32", device="CPU").realize()
+    else:
+        self = Tensor.empty(1, 5, dtype="float32", device="CPU").realize()
+        index = Tensor.empty(1, 5, dtype="int32", device="CPU").realize()
+        src = Tensor.empty(1, 5, dtype="float32", device="CPU").realize()
+    return self, index, src
+
+
+def scatter_graph(reduce=None, include_self=True, generalized=False):
+    self, index, src = scatter_inputs(generalized)
+    out = self.scatter(1, index, src) if reduce is None else \
+        self.scatter_reduce(1, index, src, reduce, include_self=include_self)
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_scatter_basic(): return scatter_graph()
+def case_scatter_generalized(): return scatter_graph(generalized=True)
+def case_scatter_sum_self(): return scatter_graph("sum")
+def case_scatter_sum_no_self(): return scatter_graph("sum", False, True)
+def case_scatter_prod_self(): return scatter_graph("prod")
+def case_scatter_prod_no_self(): return scatter_graph("prod", False, True)
+def case_scatter_mean_self(): return scatter_graph("mean")
+def case_scatter_mean_no_self(): return scatter_graph("mean", False, True)
+def case_scatter_amax_self(): return scatter_graph("amax")
+def case_scatter_amax_no_self(): return scatter_graph("amax", False, True)
+def case_scatter_amin_self(): return scatter_graph("amin")
+def case_scatter_amin_no_self(): return scatter_graph("amin", False, True)
+
+
 def case_grad_ceil():
     x = Tensor([-1.25, 0.25, 1.75])
     out = raw_gradient(x.ceil().sum(), x)
@@ -1984,6 +2017,18 @@ CASES = {
     "softplus_beta2_occurrence": ("tensor", case_softplus_beta2_occurrence),
     "softplus_occurrence": ("tensor", case_softplus_occurrence),
     "scalar_where_broadcast": ("tensor", case_scalar_where_broadcast),
+    "scatter_basic": ("tensor", case_scatter_basic),
+    "scatter_generalized": ("tensor", case_scatter_generalized),
+    "scatter_sum_self": ("tensor", case_scatter_sum_self),
+    "scatter_sum_no_self": ("tensor", case_scatter_sum_no_self),
+    "scatter_prod_self": ("tensor", case_scatter_prod_self),
+    "scatter_prod_no_self": ("tensor", case_scatter_prod_no_self),
+    "scatter_mean_self": ("tensor", case_scatter_mean_self),
+    "scatter_mean_no_self": ("tensor", case_scatter_mean_no_self),
+    "scatter_amax_self": ("tensor", case_scatter_amax_self),
+    "scatter_amax_no_self": ("tensor", case_scatter_amax_no_self),
+    "scatter_amin_self": ("tensor", case_scatter_amin_self),
+    "scatter_amin_no_self": ("tensor", case_scatter_amin_no_self),
     "sgd_momentum_step": ("optimizer", case_sgd_momentum_step),
     "sgd_step": ("optimizer", case_sgd_step),
     "sigmoid_float16": ("tensor", case_sigmoid_float16),

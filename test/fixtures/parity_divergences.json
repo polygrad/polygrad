@@ -538,21 +538,28 @@
     },
     {
       "id": "PG-PARITY-021",
-      "status": "open_debt",
+      "status": "resolved",
       "stages": ["tensor"],
       "area": "scatter pre-scatter construction topology",
       "vocabulary": {"tinygrad_only": [], "polygrad_only": []},
       "tinygrad": "_pre_scatter constructs shrink, unsqueeze/expand/transpose, one-hot, and pad_to graphs with three retained PAD nodes in the focused rank-two case",
-      "polygrad": "The same focused amax/amin values pass, but the shared pre-scatter graph has one PAD plus additional EXPAND, RESHAPE, CMPNE, WHERE, and one fewer STACK node",
-      "rationale": "This whole-graph construction mismatch affects amax and amin equally and remains after the unsigned maximum/reducer bug is closed; it is not an approved divergence.",
+      "polygrad": "Scatter uses the shared one-hot helper, retains split dimensions through masked merge, implements no-hit detection as any/logical_not/where, preserves weak Python scalar identities, and crosses the public reduction dtype boundary",
+      "rationale": "The former whole-graph construction mismatch was a stale duplicate implementation, not an approved divergence.",
       "approval": null,
       "evidence": [
-        "references/tinygrad_latest/tinygrad/mixin/__init__.py:_pre_scatter",
+        "references/tinygrad_latest/tinygrad/mixin/op.py:OpMixin._pre_scatter",
+        "references/tinygrad_latest/tinygrad/mixin/op.py:OpMixin.scatter_reduce",
+        "references/tinygrad_latest/tinygrad/mixin/reduce.py:ReduceMixin.sum",
         "src/tensor.c:poly_prepare_scatter",
-        "src/tensor.c:poly_scatter_one_hot",
-        "test/test_tensor.c"
+        "src/tensor.c:poly_scatter_reduce",
+        "test/tensor_graph_cases.py:scatter_graph",
+        "test/test_tensor.c:scatter_reduce_e2e_matches_tinygrad_probe"
       ],
-      "close_when": "Focused rank-two and generalized scatter/scatter-reduce construction graphs match pinned tinygrad for shrink, one-hot, transpose, pad_to, include_self, and all five reducers without suppressions."
+      "resolution": {
+        "evidence": "Basic, generalized, include-self, no-self, and all five reducer construction cases match pinned Tinygrad 12/12 with zero allowed or unregistered findings. The complete physical graph corpus is 290/290 exact; C scatter value and occurrence tests are 4/4.",
+        "closed_on": "2026-09-03"
+      },
+      "close_when": null
     },
     {
       "id": "PG-PARITY-022",
