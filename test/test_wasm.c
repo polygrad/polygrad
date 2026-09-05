@@ -2768,6 +2768,415 @@ TEST(wasm, reg_buffer_constant_indexes_match_c_renderer) {
   PASS();
 }
 
+/* The binary backend implements pinned CStyleLanguage's REG and masked LOAD
+ * semantics. Check guest memory too: returning the right value is insufficient
+ * if a register STORE accidentally writes into the shared linear heap. */
+static int wasm_check_memory_module(
+    PolyCtx *ctx,
+    PolyUOp **ops,
+    int n,
+    bool simd,
+    const char *view,
+    const char *expected,
+    const char *setup,
+    const char *args
+) {
+  const char *node = poly_test_node_cmd();
+  if (!node) return -1;
+  PolyUOp **linear = malloc((size_t)n * sizeof(*linear));
+  if (!linear) return -1;
+  int n_linear = 0;
+  for (int i = 0; i < n; i++) {
+    bool seen = false;
+    for (int j = 0; j < n_linear; j++)
+      if (linear[j] == ops[i]) seen = true;
+    if (!seen) linear[n_linear++] = ops[i];
+  }
+  int size = 0;
+  uint8_t *bytes = poly_render_wasm(ctx, linear, n_linear, &size, simd);
+  free(linear);
+  int rc = bytes ? wasm_write_module("temp/polygrad_test_memory.wasm", bytes, size) : -1;
+  free(bytes);
+  if (rc) return rc;
+  char cmd[4096];
+  snprintf(
+      cmd, sizeof(cmd),
+      "%s -e \"const fs=require('fs'),assert=require('assert/strict');"
+      "const mem=new WebAssembly.Memory({initial:1});"
+      "new Uint8Array(mem.buffer).fill(165,0,32);%s;"
+      "const mod=new WebAssembly.Module(fs.readFileSync('temp/polygrad_test_memory.wasm'));"
+      "const inst=new WebAssembly.Instance(mod,{env:{memory:mem}});"
+      "inst.exports.kernel(%s);const expected=%s;"
+      "assert.deepEqual(Array.from(new %s(mem.buffer,64,expected.length)),expected);"
+      "assert.ok(new Uint8Array(mem.buffer,0,32).every(x=>x===165),'REG corrupted heap');\"",
+      node, setup, args, expected, view
+  );
+  return system(cmd);
+}
+
+static PolyUOp *wasm_test_literal(PolyCtx *ctx, PolyDType dtype, int value) {
+  return poly_uop0(
+      ctx, POLY_OP_CONST, dtype,
+      poly_dtype_is_bool(dtype)    ? poly_arg_bool(value != 0)
+      : poly_dtype_is_float(dtype) ? poly_arg_float(value)
+                                   : poly_arg_int(value)
+  );
+}
+
+TEST(wasm, memory_reg_dtype_and_lane_matrix) {
+  if (!poly_test_node_cmd()) SKIP("Node required for Wasm execution");
+  PolyDType types[] = {POLY_BOOL,   POLY_INT8,  POLY_UINT8,  POLY_INT16,   POLY_UINT16, POLY_INT32,
+                       POLY_UINT32, POLY_INT64, POLY_UINT64, POLY_FLOAT32, POLY_FLOAT64};
+  int indices[] = {0, 3, 4};
+  int failures = 0;
+  for (int d = 0; d < 11; d++)
+    for (int a = 0; a < 2; a++)
+      for (int i = 0; i < 3; i++) {
+        PolyCtx *ctx = poly_ctx_new();
+        PolyDType dt = types[d];
+        PolyUOp *size = poly_const_int(ctx, 5);
+        PolyParamArg oa = {.slot = 0, .dtype = POLY_FLOAT64, .addrspace = POLY_ADDR_GLOBAL};
+        PolyParamArg ra = {.slot = 1, .dtype = dt, .addrspace = POLY_ADDR_REG};
+        PolyUOp *out = poly_uop1(ctx, POLY_OP_PARAM, POLY_FLOAT64, size, poly_arg_param(&oa));
+        PolyUOp *reg = poly_uop1(ctx, POLY_OP_BUFFER, dt, size, poly_arg_param(&ra));
+        PolyUOp *idx0 = wasm_test_literal(ctx, POLY_INT32, indices[i]);
+        PolyUOp *idx1 = wasm_test_literal(ctx, POLY_INT32, (indices[i] + 1) % 5);
+        PolyUOp *zero = wasm_test_literal(ctx, POLY_INT32, 0);
+        PolyUOp *one = wasm_test_literal(ctx, POLY_INT32, 1);
+        PolyUOp *v0 = wasm_test_literal(ctx, dt, d == 0 ? 0 : 3);
+        PolyUOp *v1 = wasm_test_literal(ctx, dt, d == 0 ? 1 : 7);
+        PolyUOp *r0 = poly_uop2(ctx, POLY_OP_INDEX, dt, reg, idx0, poly_arg_none());
+        PolyUOp *r1 = poly_uop2(ctx, POLY_OP_INDEX, dt, reg, idx1, poly_arg_none());
+        PolyUOp *s0 = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, r0, v0, poly_arg_none());
+        PolyUOp *s1 = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, r1, v1, poly_arg_none());
+        PolyUOp *after = poly_uop3(ctx, POLY_OP_AFTER, dt, reg, s0, s1, poly_arg_none());
+        PolyUOp *l0idx = poly_uop2(ctx, POLY_OP_INDEX, dt, a ? after : reg, idx0, poly_arg_none());
+        PolyUOp *l1idx = poly_uop2(ctx, POLY_OP_INDEX, dt, a ? after : reg, idx1, poly_arg_none());
+        PolyUOp *l0 = poly_uop1(ctx, POLY_OP_LOAD, dt, l0idx, poly_arg_none());
+        PolyUOp *l1 = poly_uop1(ctx, POLY_OP_LOAD, dt, l1idx, poly_arg_none());
+        PolyUOp *c0 = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT64, l0, poly_arg_none());
+        PolyUOp *c1 = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT64, l1, poly_arg_none());
+        PolyUOp *o0 = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT64, out, zero, poly_arg_none());
+        PolyUOp *o1 = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT64, out, one, poly_arg_none());
+        PolyUOp *w0 = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, o0, c0, poly_arg_none());
+        PolyUOp *w1 = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, o1, c1, poly_arg_none());
+        PolyUOp *ops[] = {size, out,   reg,   idx0,  idx1, zero, one, v0, v1, r0, r1, s0,
+                          s1,   after, l0idx, l1idx, l0,   l1,   c0,  c1, o0, o1, w0, w1};
+        /* Deduplicate direct INDEX/CONST aliases, as in a real LINEAR list. */
+        int n = 0;
+        for (int j = 0; j < (int)(sizeof(ops) / sizeof(*ops)); j++) {
+          bool seen = false;
+          for (int k = 0; k < n; k++)
+            if (ops[k] == ops[j]) seen = true;
+          if (!seen) ops[n++] = ops[j];
+        }
+        int rc = wasm_check_memory_module(
+            ctx, ops, n, true, "Float64Array", d == 0 ? "[0,1]" : "[3,7]", "", "64"
+        );
+        poly_ctx_destroy(ctx);
+        if (rc) {
+          fprintf(stderr, "REG dtype=%d after=%d lane=%d failed\n", d, a, indices[i]);
+          failures++;
+        }
+      }
+  ASSERT_INT_EQ(failures, 0);
+  PASS();
+}
+
+static int wasm_test_reg_order(int mode) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *size = poly_const_int(ctx, 1);
+  PolyParamArg oa = {.slot = 0, .dtype = POLY_FLOAT32, .addrspace = POLY_ADDR_GLOBAL};
+  PolyParamArg ra = {.slot = 1, .dtype = POLY_FLOAT32, .addrspace = POLY_ADDR_REG};
+  PolyUOp *out = poly_uop1(ctx, POLY_OP_PARAM, POLY_FLOAT32, size, poly_arg_param(&oa));
+  PolyUOp *reg = poly_uop1(ctx, POLY_OP_BUFFER, POLY_FLOAT32, size, poly_arg_param(&ra));
+  PolyUOp *zero = wasm_test_literal(ctx, POLY_INT32, 0);
+  PolyUOp *three = wasm_test_literal(ctx, POLY_FLOAT32, 3);
+  PolyUOp *seven = wasm_test_literal(ctx, POLY_FLOAT32, 7);
+  PolyUOp *idx = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, reg, zero, poly_arg_none());
+  PolyUOp *init = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx, three, poly_arg_none());
+  PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx, poly_arg_none());
+  PolyUOp *overwrite = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx, seven, poly_arg_none());
+  PolyUOp *group = poly_uop1(ctx, POLY_OP_GROUP, POLY_VOID, init, poly_arg_none());
+  PolyUOp *value =
+      mode == 1 ? poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, load, load, poly_arg_none()) : load;
+  PolyUOp *oi = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, out, zero, poly_arg_none());
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, oi, value, poly_arg_none());
+  PolyUOp *ops[16] = {size, out, reg, zero, three, seven, idx, init};
+  int n = 8;
+  if (mode != 2) ops[n++] = load;
+  ops[n++] = overwrite;
+  if (mode == 2) {
+    ops[n++] = group;
+    ops[n++] = load;
+  }
+  if (mode == 1) ops[n++] = value;
+  ops[n++] = oi;
+  ops[n++] = store;
+  int rc = wasm_check_memory_module(
+      ctx, ops, n, false, "Float32Array", mode == 1 ? "[6]" : "[7]", "", "64"
+  );
+  poly_ctx_destroy(ctx);
+  return rc;
+}
+
+TEST(wasm, memory_reg_load_single_use_control) {
+  if (!poly_test_node_cmd()) SKIP("Node required for Wasm execution");
+  ASSERT_INT_EQ(wasm_test_reg_order(0), 0);
+  PASS();
+}
+
+TEST(wasm, memory_reg_load_multi_use_snapshot) {
+  if (!poly_test_node_cmd()) SKIP("Node required for Wasm execution");
+  ASSERT_INT_EQ(wasm_test_reg_order(1), 0);
+  PASS();
+}
+
+TEST(wasm, memory_group_does_not_replay_stores) {
+  if (!poly_test_node_cmd()) SKIP("Node required for Wasm execution");
+  ASSERT_INT_EQ(wasm_test_reg_order(2), 0);
+  PASS();
+}
+
+TEST(wasm, memory_gated_load_dtype_matrix) {
+  if (!poly_test_node_cmd()) SKIP("Node required for Wasm execution");
+  PolyDType types[] = {POLY_BOOL,   POLY_INT8,  POLY_UINT8,  POLY_INT16,   POLY_UINT16, POLY_INT32,
+                       POLY_UINT32, POLY_INT64, POLY_UINT64, POLY_FLOAT32, POLY_FLOAT64};
+  int failures = 0;
+  for (int d = 0; d < 11; d++)
+    for (int reg_space = 0; reg_space < 2; reg_space++)
+      for (int g = 0; g < 2; g++) {
+        PolyCtx *ctx = poly_ctx_new();
+        PolyDType dt = types[d];
+        PolyUOp *size = poly_const_int(ctx, 1);
+        PolyParamArg oa = {.slot = 0, .dtype = POLY_FLOAT64, .addrspace = POLY_ADDR_GLOBAL};
+        PolyParamArg ia = {
+            .slot = 1, .dtype = dt, .addrspace = reg_space ? POLY_ADDR_REG : POLY_ADDR_GLOBAL};
+        PolyUOp *out = poly_uop1(ctx, POLY_OP_PARAM, POLY_FLOAT64, size, poly_arg_param(&oa));
+        PolyUOp *in = poly_uop1(
+            ctx, reg_space ? POLY_OP_BUFFER : POLY_OP_PARAM, dt, size, poly_arg_param(&ia)
+        );
+        PolyUOp *zero = wasm_test_literal(ctx, POLY_INT32, 0);
+        PolyUOp *alt = wasm_test_literal(ctx, dt, 11);
+        PolyUOp *gate = wasm_test_literal(ctx, POLY_BOOL, g);
+        PolyUOp *ii = poly_uop2(ctx, POLY_OP_INDEX, dt, in, zero, poly_arg_none());
+        PolyUOp *load = poly_uop3(ctx, POLY_OP_LOAD, dt, ii, alt, gate, poly_arg_none());
+        PolyUOp *cast = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT64, load, poly_arg_none());
+        PolyUOp *oi = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT64, out, zero, poly_arg_none());
+        PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, oi, cast, poly_arg_none());
+        PolyUOp *ops[13] = {size, out, in, zero, alt, gate, ii};
+        int n = 7;
+        if (reg_space) {
+          PolyUOp *initial = wasm_test_literal(ctx, dt, 0);
+          ops[n++] = initial;
+          ops[n++] = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, ii, initial, poly_arg_none());
+        }
+        ops[n++] = load;
+        ops[n++] = cast;
+        ops[n++] = oi;
+        ops[n++] = store;
+        int rc = wasm_check_memory_module(
+            ctx, ops, n, true, "Float64Array",
+            g        ? "[0]"
+            : d == 0 ? "[1]"
+                     : "[11]",
+            "", g ? "64,128" : "64,65536"
+        );
+        poly_ctx_destroy(ctx);
+        if (rc) {
+          fprintf(stderr, "gated dtype=%d reg=%d gate=%d failed\n", d, reg_space, g);
+          failures++;
+        }
+      }
+  ASSERT_INT_EQ(failures, 0);
+  PASS();
+}
+
+TEST(wasm, memory_gated_loop_simd_and_tail) {
+  if (!poly_test_node_cmd()) SKIP("Node required for Wasm execution");
+  int lengths[] = {0, 1, 3, 4, 5, 8, 9};
+  int failures = 0;
+  for (int f64 = 0; f64 < 2; f64++)
+    for (int l = 0; l < 7; l++)
+      for (int simd = 0; simd < 2; simd++)
+        for (int g = 0; g < 3; g++) {
+          PolyCtx *ctx = poly_ctx_new();
+          PolyDType dt = f64 ? POLY_FLOAT64 : POLY_FLOAT32;
+          PolyUOp *size = poly_const_int(ctx, lengths[l]);
+          PolyParamArg oa = {.slot = 0, .dtype = dt, .addrspace = POLY_ADDR_GLOBAL};
+          PolyParamArg ia = {.slot = 1, .dtype = dt, .addrspace = POLY_ADDR_GLOBAL};
+          PolyUOp *out = poly_uop1(ctx, POLY_OP_PARAM, dt, size, poly_arg_param(&oa));
+          PolyUOp *in = poly_uop1(ctx, POLY_OP_PARAM, dt, size, poly_arg_param(&ia));
+          PolyUOp *bound = wasm_test_literal(ctx, POLY_INT32, lengths[l]);
+          PolyUOp *range = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_int(0));
+          PolyUOp *alt = wasm_test_literal(ctx, dt, 11);
+          PolyUOp *limit = wasm_test_literal(ctx, POLY_INT32, 2);
+          PolyUOp *gate =
+              g == 2 ? poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, range, limit, poly_arg_none())
+                     : wasm_test_literal(ctx, POLY_BOOL, g);
+          PolyUOp *ii = poly_uop2(ctx, POLY_OP_INDEX, dt, in, range, poly_arg_none());
+          PolyUOp *load = poly_uop3(ctx, POLY_OP_LOAD, dt, ii, alt, gate, poly_arg_none());
+          PolyUOp *oi = poly_uop2(ctx, POLY_OP_INDEX, dt, out, range, poly_arg_none());
+          PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, oi, load, poly_arg_none());
+          PolyUOp *end = poly_uop2(ctx, POLY_OP_END, POLY_VOID, store, range, poly_arg_none());
+          PolyUOp *ops[] = {size, out, in,   bound, alt,   limit, range,
+                            gate, ii,  load, oi,    store, end};
+          char expected[128], setup[128];
+          snprintf(
+              expected, sizeof(expected), "Array.from({length:%d},(_,i)=>%s)", lengths[l],
+              g == 0   ? "11"
+              : g == 1 ? "3"
+                       : "i<2?3:11"
+          );
+          snprintf(
+              setup, sizeof(setup), "new %s(mem.buffer,256,9).fill(3)",
+              f64 ? "Float64Array" : "Float32Array"
+          );
+          int rc = wasm_check_memory_module(
+              ctx, ops, 13, simd, f64 ? "Float64Array" : "Float32Array", expected, setup,
+              g == 0 ? "64,65536" : "64,256"
+          );
+          poly_ctx_destroy(ctx);
+          if (rc) {
+            fprintf(stderr, "loop f64=%d n=%d simd=%d gate=%d failed\n", f64, lengths[l], simd, g);
+            failures++;
+          }
+        }
+  ASSERT_INT_EQ(failures, 0);
+  PASS();
+}
+
+TEST(wasm, memory_gated_shrink_vector) {
+  if (!poly_test_node_cmd()) SKIP("Node required for Wasm execution");
+  int failures = 0;
+  for (int f64 = 0; f64 < 2; f64++)
+    for (int reg_space = 0; reg_space < 2; reg_space++)
+      for (int g = 0; g < 2; g++) {
+        PolyCtx *ctx = poly_ctx_new();
+        PolyDType dt = f64 ? POLY_FLOAT64 : POLY_FLOAT32;
+        int lanes = f64 ? 2 : 4;
+        PolyUOp *size = poly_const_int(ctx, lanes);
+        PolyParamArg oa = {.slot = 0, .dtype = dt, .addrspace = POLY_ADDR_GLOBAL};
+        PolyParamArg ia = {
+            .slot = 1, .dtype = dt, .addrspace = reg_space ? POLY_ADDR_REG : POLY_ADDR_GLOBAL};
+        PolyUOp *out = poly_uop1(ctx, POLY_OP_PARAM, dt, size, poly_arg_param(&oa));
+        PolyUOp *in = poly_uop1(
+            ctx, reg_space ? POLY_OP_BUFFER : POLY_OP_PARAM, dt, size, poly_arg_param(&ia)
+        );
+        PolyUOp *zero = wasm_test_literal(ctx, POLY_INT32, 0);
+        PolyUOp *width = wasm_test_literal(ctx, POLY_INT32, lanes);
+        PolyUOp *eleven = wasm_test_literal(ctx, dt, 11);
+        PolyUOp *alts[] = {eleven, eleven, eleven, eleven};
+        PolyUOp *alt = poly_uop(ctx, POLY_OP_STACK, dt, alts, lanes, poly_arg_none());
+        PolyUOp *gate = wasm_test_literal(ctx, POLY_BOOL, g);
+        PolyUOp *ii = poly_uop3(ctx, POLY_OP_SHRINK, dt, in, zero, width, poly_arg_none());
+        PolyUOp *load = poly_uop3(ctx, POLY_OP_LOAD, dt, ii, alt, gate, poly_arg_none());
+        PolyUOp *oi = poly_uop3(ctx, POLY_OP_SHRINK, dt, out, zero, width, poly_arg_none());
+        PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, oi, load, poly_arg_none());
+        PolyUOp *ops[26] = {size, out, in, zero, width, eleven, alt, gate};
+        int n = 8;
+        if (reg_space) {
+          PolyUOp *initial = wasm_test_literal(ctx, dt, 0);
+          ops[n++] = initial;
+          for (int i = 0; i < lanes; i++) {
+            PolyUOp *index = wasm_test_literal(ctx, POLY_INT32, i);
+            PolyUOp *addr = poly_uop2(ctx, POLY_OP_INDEX, dt, in, index, poly_arg_none());
+            ops[n++] = index;
+            ops[n++] = addr;
+            ops[n++] = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, addr, initial, poly_arg_none());
+          }
+        }
+        ops[n++] = ii;
+        ops[n++] = load;
+        ops[n++] = oi;
+        ops[n++] = store;
+        char expected[96], setup[96];
+        snprintf(
+            expected, sizeof(expected), "Array(%d).fill(%d)", lanes, g ? (reg_space ? 0 : 3) : 11
+        );
+        snprintf(
+            setup, sizeof(setup), "new %s(mem.buffer,256,4).fill(3)",
+            f64 ? "Float64Array" : "Float32Array"
+        );
+        int rc = wasm_check_memory_module(
+            ctx, ops, n, true, f64 ? "Float64Array" : "Float32Array", expected, setup,
+            g ? "64,256" : "64,65536"
+        );
+        poly_ctx_destroy(ctx);
+        if (rc) {
+          fprintf(stderr, "SHRINK f64=%d reg=%d gate=%d failed\n", f64, reg_space, g);
+          failures++;
+        }
+      }
+  ASSERT_INT_EQ(failures, 0);
+  PASS();
+}
+
+TEST(wasm, memory_structural_vector_keeps_shared_scalar_dependencies) {
+  if (!poly_test_node_cmd()) SKIP("Node required for Wasm execution");
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *size = poly_const_int(ctx, 5);
+  PolyParamArg oa = {.slot = 0, .dtype = POLY_FLOAT32, .addrspace = POLY_ADDR_GLOBAL};
+  PolyUOp *out = poly_uop1(ctx, POLY_OP_PARAM, POLY_FLOAT32, size, poly_arg_param(&oa));
+  PolyParamArg ia = {.slot = 1, .dtype = POLY_FLOAT32, .addrspace = POLY_ADDR_GLOBAL};
+  PolyUOp *in = poly_uop1(ctx, POLY_OP_PARAM, POLY_FLOAT32, size, poly_arg_param(&ia));
+  PolyUOp *ops[32] = {size, out, in}, *values[4], *indices[5], *sums[4];
+  int n = 3;
+  for (int i = 0; i < 4; i++)
+    ops[n++] = values[i] = wasm_test_literal(ctx, POLY_FLOAT32, i + 1);
+  for (int i = 0; i < 5; i++)
+    ops[n++] = indices[i] = wasm_test_literal(ctx, POLY_INT32, i);
+  PolyUOp *in_slice =
+      poly_uop3(ctx, POLY_OP_SHRINK, POLY_FLOAT32, in, indices[0], indices[4], poly_arg_none());
+  ops[n++] = in_slice;
+  PolyUOp *vec = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, in_slice, poly_arg_none());
+  ops[n++] = vec;
+  for (int i = 0; i < 4; i++) {
+    PolyUOp *lane = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, vec, indices[i], poly_arg_none());
+    ops[n++] = lane;
+    ops[n++] = sums[i] =
+        poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, lane, values[0], poly_arg_none());
+  }
+  PolyUOp *sum = poly_uop(ctx, POLY_OP_STACK, POLY_FLOAT32, sums, 4, poly_arg_none());
+  ops[n++] = sum;
+  PolyUOp *slice =
+      poly_uop3(ctx, POLY_OP_SHRINK, POLY_FLOAT32, out, indices[0], indices[4], poly_arg_none());
+  ops[n++] = slice;
+  ops[n++] = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, slice, sum, poly_arg_none());
+  PolyUOp *last = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, out, indices[4], poly_arg_none());
+  ops[n++] = last;
+  ops[n++] = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, last, sums[0], poly_arg_none());
+  int rc = wasm_check_memory_module(
+      ctx, ops, n, true, "Float32Array", "[2,3,4,5,2]",
+      "new Float32Array(mem.buffer,256,4).set([1,2,3,4])", "64,256"
+  );
+  poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(rc, 0);
+  PASS();
+}
+
+TEST(wasm, memory_dynamic_reg_index_fails_closed) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *size = poly_const_int(ctx, 4);
+  PolyParamArg ra = {.slot = 0, .dtype = POLY_FLOAT32, .addrspace = POLY_ADDR_REG};
+  PolyUOp *reg = poly_uop1(ctx, POLY_OP_BUFFER, POLY_FLOAT32, size, poly_arg_param(&ra));
+  PolyUOp *bound = wasm_test_literal(ctx, POLY_INT32, 4);
+  PolyUOp *range = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_int(0));
+  PolyUOp *idx = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, reg, range, poly_arg_none());
+  PolyUOp *value = wasm_test_literal(ctx, POLY_FLOAT32, 3);
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx, value, poly_arg_none());
+  PolyUOp *end = poly_uop2(ctx, POLY_OP_END, POLY_VOID, store, range, poly_arg_none());
+  PolyUOp *ops[] = {size, reg, bound, value, range, idx, store, end};
+  int bytes = 0;
+  uint8_t *wasm = poly_render_wasm(ctx, ops, 8, &bytes, true);
+  bool rejected = wasm == NULL;
+  free(wasm);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(rejected);
+  ASSERT_INT_EQ(bytes, 0);
+  PASS();
+}
+
 TEST(wasm, render_pow) {
   /* POW kernel: c[i] = a[i] ^ b[i] — lowered through tinygrad-style
    * transcendental decomposition, so a math import call is expected. */

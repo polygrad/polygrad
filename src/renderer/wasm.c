@@ -5,9 +5,9 @@
  * WASM binary module. The generated module imports shared
  * WebAssembly.Memory and exports a single kernel function.
  *
- * Supports two modes:
- *   use_simd=false → scalar f32 ops (one float per iteration)
- *   use_simd=true  → f32x4 SIMD ops (4 floats per iteration) + scalar epilogue
+ * The generic emitter supports typed scalars and shaped v128 values.
+ * use_simd additionally permits eligible f32/f64 loops to use vector bodies
+ * with scalar tails; scheduled matmul/reduce specializers are separate.
  *
  * Reference: WebAssembly Binary Format Specification
  */
@@ -213,10 +213,6 @@ static int64_t wasm_const_integer_bits(PolyUOp *u) {
   if (!u) return 0;
   if (u->arg.kind == POLY_ARG_BOOL) return u->arg.b ? 1 : 0;
   return (int64_t)poly_arg_integer_to_u64_mod(u->arg);
-}
-
-static PolyDType wasm_reg_base_dtype(PolyDType dtype) {
-  return dtype;
 }
 
 static int wasm_shrink_width(PolyUOp *u) {
@@ -1744,16 +1740,16 @@ static void wasm_plan_structural_vecs(
     wasm_mark_structural_vec_expr(uops, n, u->src, u->n_src, covered);
   }
 
-  for (int i = 0; i < n; i++) {
-    if (!covered[i] || fused_stack[i]) continue;
-    bool external_consumer = false;
-    for (int j = 0; j < n && !external_consumer; j++)
-      for (int src = 0; src < uops[j]->n_src; src++)
-        if (uops[j]->src[src] == uops[i] && !covered[j]) {
-          external_consumer = true;
-          break;
-        }
-    skip[i] = !external_consumer;
+  for (int i = 0; i < n; i++)
+    skip[i] = covered[i] && !fused_stack[i];
+  /* A shared scalar consumer needs its whole dependency chain, even when
+   * those nodes also belong to a fused STACK. LINEAR is definition-first. */
+  for (int i = n - 1; i >= 0; i--) {
+    if (skip[i] || fused_stack[i]) continue;
+    for (int j = 0; j < i; j++)
+      if (skip[j])
+        for (int src = 0; src < uops[i]->n_src; src++)
+          if (uops[i]->src[src] == uops[j]) skip[j] = false;
   }
   free(covered);
 }
@@ -1921,7 +1917,9 @@ static bool kernel_is_simdable(PolyUOp **uops, int n) {
       if (!wasm_simd_unit_index(u, range, &bits)) return false;
       break;
     case POLY_OP_LOAD:
-      if (u->n_src < 1 || !wasm_simd_unit_index(u->src[0], range, &bits)) return false;
+      /* This loop emitter has no masked-memory implementation. The generic
+       * emitter preserves gate/alternate without touching masked-off memory. */
+      if (u->n_src != 1 || !wasm_simd_unit_index(u->src[0], range, &bits)) return false;
       if (!wasm_simd_float_bits(u->dtype, &bits)) return false;
       break;
     case POLY_OP_STORE:
@@ -1960,14 +1958,12 @@ static bool kernel_is_simdable(PolyUOp **uops, int n) {
 }
 
 static bool wasm_reg_addr_index(PolyUOp *addr, PolyUOp **reg_base_out, int *idx_out) {
-  PolyUOp *idx = poly_find_index_through_cast(addr);
+  PolyUOp *idx = poly_as_index(addr);
   if (!idx || idx->op != POLY_OP_INDEX || idx->n_src < 2) return false;
   PolyUOp *reg_base = wasm_acc_base(idx->src[0]);
   if (!reg_base || reg_base->op != POLY_OP_BUFFER ||
       !poly_program_memory_is(reg_base, POLY_ADDR_REG))
     return false;
-  PolyDType scalar = wasm_reg_base_dtype(reg_base->dtype);
-  if (!poly_dtype_is_float(scalar)) return false;
   int reg_idx = 0;
   if (!wasm_const_index_checked(idx->src[1], &reg_idx)) return false;
   if (reg_idx < 0) return false;
@@ -1976,16 +1972,11 @@ static bool wasm_reg_addr_index(PolyUOp *addr, PolyUOp **reg_base_out, int *idx_
   return true;
 }
 
-static bool wasm_reg_addr_lane(PolyUOp *addr, PolyUOp **reg_base_out, int *lane_out) {
-  PolyUOp *reg_base = NULL;
-  int lane = -1;
-  if (!wasm_reg_addr_index(addr, &reg_base, &lane)) return false;
-  PolyDType scalar = wasm_reg_base_dtype(reg_base->dtype);
-  int n_lanes = scalar.bitsize == 64 ? 2 : 4;
-  if (lane < 0 || lane >= n_lanes) return false;
-  if (reg_base_out) *reg_base_out = reg_base;
-  if (lane_out) *lane_out = lane;
-  return true;
+static bool wasm_load_aliases_reg(PolyUOp *load, LocalMap *child_count) {
+  /* Tinygrad CStyleLanguage._render materializes multi-use REG LOADs.
+   * Gates need a computed value; only a plain single-use load is a local alias. */
+  return load->n_src == 1 && wasm_reg_addr_index(load->src[0], NULL, NULL) &&
+         lm_get(child_count, load) == 1;
 }
 
 static int alloc_local(
@@ -2069,6 +2060,18 @@ static void build_code_scalar(
   bool *skip = calloc((size_t)n, sizeof(*skip));
   if (fused_stack && skip) wasm_plan_structural_vecs(ctx, uops, n, fused_stack, skip);
 
+  /* Same direct-edge count as pinned CStyleLanguage._render, including
+   * repeated operands. Keep counting and emission on the same alias rule. */
+  LocalMap child_count;
+  lm_init(&child_count, n * 2);
+  for (int i = 0; i < n; i++)
+    if (uops[i]->op == POLY_OP_LOAD) lm_set(&child_count, uops[i], 0);
+  for (int i = 0; i < n; i++)
+    for (int j = 0; j < uops[i]->n_src; j++) {
+      PolyUOp *src = uops[i]->src[j];
+      if (src->op == POLY_OP_LOAD) lm_set(&child_count, src, lm_get(&child_count, src) + 1);
+    }
+
   /* --- Count locals needed (beyond function params) --- */
   int n_locals_i32 = 0, n_locals_i64 = 0, n_locals_f32 = 0, n_locals_f64 = 0, n_locals_v128 = 0;
 
@@ -2078,15 +2081,13 @@ static void build_code_scalar(
     PolyUOp *u = uops[i];
     if (u->op == POLY_OP_RANGE) n_locals_i32++; /* loop counter always i32 */
     if (u->op == POLY_OP_LOAD) {
-      bool is_reg_load = u->src[0]->op == POLY_OP_INDEX &&
-                         poly_program_memory_is(u->src[0]->src[0], POLY_ADDR_REG);
       PolyDType shrink_dtype;
       if (wasm_load_shrink_native_vec(u, &shrink_dtype, NULL)) {
         count_local(
             shrink_dtype, true, &n_locals_i32, &n_locals_i64, &n_locals_f32, &n_locals_f64,
             &n_locals_v128
         );
-      } else if (!is_reg_load) {
+      } else if (!wasm_load_aliases_reg(u, &child_count)) {
         count_local(
             u->dtype, wasm_uop_value_is_v128(ctx, u), &n_locals_i32, &n_locals_i64, &n_locals_f32,
             &n_locals_f64, &n_locals_v128
@@ -2106,7 +2107,7 @@ static void build_code_scalar(
           &n_locals_f64, &n_locals_v128
       );
     if (u->op == POLY_OP_BUFFER && poly_program_memory_is(u, POLY_ADDR_REG)) {
-      PolyDType base = wasm_reg_base_dtype(poly_program_buffer_dtype(u));
+      PolyDType base = poly_program_buffer_dtype(u);
       int reg_size = wasm_reg_storage_size(uops, n, u);
       for (int r = 0; r < reg_size; r++)
         count_local(
@@ -2192,25 +2193,8 @@ static void build_code_scalar(
     if (skip && skip[i]) continue;
     PolyUOp *u = uops[i];
 
-    if (u->op == POLY_OP_SINK || u->op == POLY_OP_NOOP) continue;
-
-    if (u->op == POLY_OP_GROUP) {
-      for (int j = 0; j < u->n_src; j++) {
-        PolyUOp *store = u->src[j];
-        if (!store || store->op != POLY_OP_STORE || store->n_src < 2) continue;
-        PolyUOp *base = NULL;
-        int lane = -1;
-        if (!wasm_reg_addr_lane(store->src[0], &base, &lane)) continue;
-        int acc_local = rlm_get(&reg_locals, base, lane);
-        int val_local = lm_get(&locals, store->src[1]);
-        if (acc_local < 0 || val_local < 0) continue;
-        wb_byte(&body, WASM_OP_LOCAL_GET);
-        wb_uleb128(&body, val_local);
-        wb_byte(&body, WASM_OP_LOCAL_SET);
-        wb_uleb128(&body, acc_local);
-      }
-      continue;
-    }
+    /* GROUP orders effects; its STORE definitions already ran in LINEAR. */
+    if (u->op == POLY_OP_SINK || u->op == POLY_OP_NOOP || u->op == POLY_OP_GROUP) continue;
 
     /* --- PARAM --- */
     if (u->op == POLY_OP_PARAM) {
@@ -2243,7 +2227,7 @@ static void build_code_scalar(
 
     /* --- register buffer --- */
     if (u->op == POLY_OP_BUFFER && poly_program_memory_is(u, POLY_ADDR_REG)) {
-      PolyDType base = wasm_reg_base_dtype(poly_program_buffer_dtype(u));
+      PolyDType base = poly_program_buffer_dtype(u);
       int reg_size = wasm_reg_storage_size(uops, n, u);
       int *reg_slots = malloc((size_t)reg_size * sizeof(int));
       if (!reg_slots) reg_size = 0;
@@ -2281,7 +2265,7 @@ static void build_code_scalar(
       continue;
     }
 
-    /* --- VECTORIZE: construct packed value from scalar lanes --- */
+    /* --- STACK: construct packed value from scalar lanes --- */
     if (u->op == POLY_OP_STACK) {
       if (u->n_src == 1) {
         int src_local = lm_get(&locals, u->src[0]);
@@ -2301,10 +2285,8 @@ static void build_code_scalar(
         if (!emitted_fused) body.len = start;
       }
       if (!emitted_fused && wasm_uop_value_is_v128(ctx, u) && u->n_src > 0) {
-        int lanes = u->n_src;
-        int n_lanes = u->n_src < lanes ? u->n_src : lanes;
         emit_v128_zero(&body);
-        for (int j = 0; j < n_lanes; j++) {
+        for (int j = 0; j < u->n_src; j++) {
           int sj = lm_get(&locals, u->src[j]);
           wb_byte(&body, WASM_OP_LOCAL_GET);
           wb_uleb128(&body, sj);
@@ -2465,111 +2447,72 @@ static void build_code_scalar(
       continue;
     }
 
-    /* --- LOAD --- */
+    /* --- LOAD: one gate/result contract for register, scalar and vector storage. --- */
     if (u->op == POLY_OP_LOAD) {
-      PolyUOp *ld_idx = poly_find_index_through_cast(u->src[0]);
       PolyUOp *reg_base = NULL;
       int reg_lane = -1;
       bool is_reg = wasm_reg_addr_index(u->src[0], &reg_base, &reg_lane);
-      PolyDType shrink_dtype;
-      int shrink_lanes = 1;
-      if (wasm_load_shrink_native_vec(u, &shrink_dtype, &shrink_lanes)) {
-        int local_idx =
-            alloc_local(shrink_dtype, true, &next_i32, &next_i64, &next_f32, &next_f64, &next_v128);
+      PolyDType load_dtype = u->dtype;
+      int lanes = 1;
+      bool shrink_vec = wasm_load_shrink_native_vec(u, &load_dtype, &lanes);
+      bool v128 = shrink_vec || wasm_uop_value_is_v128(ctx, u);
+      if (wasm_load_aliases_reg(u, &child_count)) {
+        lm_set(&locals, u, rlm_get(&reg_locals, reg_base, reg_lane));
+        continue;
+      }
+
+      int local_idx =
+          alloc_local(load_dtype, v128, &next_i32, &next_i64, &next_f32, &next_f64, &next_v128);
+      /* Pinned LOAD(address, alternate, gate) must not evaluate a masked-off
+       * memory access. A select after an unconditional load can still trap. */
+      bool gated = u->n_src == 3;
+      if (gated) {
+        static const uint8_t types[] = {
+            WASM_TYPE_I32, WASM_TYPE_I64, WASM_TYPE_F32, WASM_TYPE_F64, WASM_TYPE_V128};
+        wb_byte(&body, WASM_OP_LOCAL_GET);
+        wb_uleb128(&body, lm_get(&locals, u->src[2]));
+        wb_byte(&body, WASM_OP_IF);
+        wb_byte(&body, types[dt_bucket(load_dtype, v128)]);
+      }
+
+      if (shrink_vec) {
         PolyUOp *shr = wasm_load_shrink(u);
-        PolyUOp *reg_base = wasm_acc_base(shr->src[0]);
-        if (reg_base && reg_base->op == POLY_OP_BUFFER &&
-            poly_program_memory_is(reg_base, POLY_ADDR_REG)) {
+        PolyUOp *base = wasm_acc_base(shr->src[0]);
+        if (base && poly_program_memory_is(base, POLY_ADDR_REG)) {
           int offset = wasm_shrink_offset(shr);
-          int lanes = shrink_lanes;
           emit_v128_zero(&body);
           for (int lane = 0; lane < lanes; lane++) {
-            int src_local = rlm_get(&reg_locals, reg_base, offset + lane);
             wb_byte(&body, WASM_OP_LOCAL_GET);
-            wb_uleb128(&body, src_local);
-            emit_cast_stack_value(&body, wasm_reg_base_dtype(reg_base->dtype), shrink_dtype);
-            emit_v128_replace_lane(&body, shrink_dtype, lane);
+            wb_uleb128(&body, rlm_get(&reg_locals, base, offset + lane));
+            emit_cast_stack_value(&body, base->dtype, load_dtype);
+            emit_v128_replace_lane(&body, load_dtype, lane);
           }
         } else {
-          int addr = lm_get(&locals, u->src[0]);
           wb_byte(&body, WASM_OP_LOCAL_GET);
-          wb_uleb128(&body, addr);
-          emit_v128_load_opcode(&body, shrink_dtype, shrink_lanes);
+          wb_uleb128(&body, lm_get(&locals, u->src[0]));
+          emit_v128_load_opcode(&body, load_dtype, lanes);
         }
-        wb_byte(&body, WASM_OP_LOCAL_SET);
-        wb_uleb128(&body, local_idx);
-        lm_set(&locals, u, local_idx);
       } else if (is_reg) {
-        int acc_local = rlm_get(&reg_locals, reg_base, reg_lane);
-        if (acc_local < 0) {
-          acc_local = lm_get(&locals, u->src[0]);
-          if (acc_local < 0) acc_local = lm_get(&locals, ld_idx);
-        }
-        lm_set(&locals, u, acc_local);
-      } else {
-        int local_idx = alloc_local(
-            u->dtype, wasm_uop_value_is_v128(ctx, u), &next_i32, &next_i64, &next_f32, &next_f64,
-            &next_v128
-        );
-        int addr = lm_get(&locals, u->src[0]);
-
-        /* Pinned tinygrad final IR: LOAD(INDEX(buf, idx), alt, gate). */
-        PolyUOp *gate_uop =
-            (u->n_src >= 3 && poly_dtype_is_bool(u->src[2]->dtype)) ? u->src[2] : NULL;
-        bool gated = gate_uop != NULL;
-
-        if (gated) {
-          /* if (gate) { val = load } else { val = alt/0 } */
-          int gate_local = lm_get(&locals, gate_uop);
-          wb_byte(&body, WASM_OP_LOCAL_GET);
-          wb_uleb128(&body, gate_local);
-          /* blocktype: result type of if-else */
-          bool load_v128 = wasm_uop_value_is_v128(ctx, u);
-          uint8_t bt = load_v128                       ? WASM_TYPE_V128
-                       : dt_is_f64(u->dtype)           ? WASM_TYPE_F64
-                       : poly_dtype_is_float(u->dtype) ? WASM_TYPE_F32
-                                                       : WASM_TYPE_I32;
-          wb_byte(&body, WASM_OP_IF);
-          wb_byte(&body, bt);
-        }
-
         wb_byte(&body, WASM_OP_LOCAL_GET);
-        wb_uleb128(&body, addr);
-
-        if (wasm_uop_value_is_v128(ctx, u)) {
-          int64_t lanes = poly_uop_max_numel(ctx, u);
-          emit_v128_load_opcode(&body, u->dtype, (int)lanes);
-        } else
-          emit_scalar_load_opcode(&body, u->dtype);
-
-        if (gated) {
-          wb_byte(&body, WASM_OP_ELSE);
-          /* Push alt value: use src[1] if 2-source LOAD, else const 0 */
-          if (u->n_src >= 2) {
-            int alt_local = lm_get(&locals, u->src[1]);
-            wb_byte(&body, WASM_OP_LOCAL_GET);
-            wb_uleb128(&body, alt_local);
-          } else {
-            if (wasm_uop_value_is_v128(ctx, u)) {
-              emit_v128_zero(&body);
-            } else if (dt_is_f64(u->dtype)) {
-              wb_byte(&body, WASM_OP_F64_CONST);
-              wb_f64(&body, 0.0);
-            } else if (poly_dtype_is_float(u->dtype)) {
-              wb_byte(&body, WASM_OP_F32_CONST);
-              wb_f32(&body, 0.0f);
-            } else {
-              wb_byte(&body, WASM_OP_I32_CONST);
-              wb_sleb128(&body, 0);
-            }
-          }
-          wb_byte(&body, WASM_OP_END);
-        }
-
-        wb_byte(&body, WASM_OP_LOCAL_SET);
-        wb_uleb128(&body, local_idx);
-        lm_set(&locals, u, local_idx);
+        wb_uleb128(&body, rlm_get(&reg_locals, reg_base, reg_lane));
+      } else {
+        wb_byte(&body, WASM_OP_LOCAL_GET);
+        wb_uleb128(&body, lm_get(&locals, u->src[0]));
+        if (v128)
+          emit_v128_load_opcode(&body, load_dtype, (int)poly_uop_max_numel(ctx, u));
+        else
+          emit_scalar_load_opcode(&body, load_dtype);
       }
+
+      if (gated) {
+        wb_byte(&body, WASM_OP_ELSE);
+        wb_byte(&body, WASM_OP_LOCAL_GET);
+        wb_uleb128(&body, lm_get(&locals, u->src[1]));
+        wb_byte(&body, WASM_OP_END);
+      }
+      wb_byte(&body, WASM_OP_LOCAL_SET);
+      wb_uleb128(&body, local_idx);
+      lm_set(&locals, u, local_idx);
       continue;
     }
 
@@ -2862,6 +2805,7 @@ static void build_code_scalar(
   wb_free(&sec);
   rlm_destroy(&reg_locals);
   lm_destroy(&locals);
+  lm_destroy(&child_count);
   free(skip);
   free(fused_stack);
 }
@@ -4672,7 +4616,7 @@ uint8_t *poly_render_wasm_matmul(PolyUOp *sink, int *size_out, bool use_relaxed_
 
   int n_i32 = s.kind == WASM_MATMUL_ABT ? 14 : 20;
   int n_f32 = s.kind == WASM_MATMUL_ABT ? 1 : (((s.n % 16) != 0 || (s.m % 4) != 0) ? 4 : 0);
-  int n_v128 = s.kind == WASM_MATMUL_AB ? 21 : 21;
+  int n_v128 = 21;
   int n_local_types = 2 + (n_f32 > 0 ? 1 : 0);
   wb_uleb128(&body, n_local_types);
   wb_uleb128(&body, n_i32);
@@ -4865,6 +4809,19 @@ uint8_t *poly_render_wasm_reduce(PolyUOp *sink, int *size_out) {
 /* Public API */
 
 uint8_t *poly_render_wasm(PolyCtx *ctx, PolyUOp **uops, int n, int *size_out, bool use_simd) {
+  if (size_out) *size_out = 0;
+  /* REG arrays are represented by constant-indexed Wasm locals. Reject an
+   * unsupported index before emission; it is never a linear-memory address. */
+  for (int i = 0; i < n; i++) {
+    PolyUOp *u = uops[i];
+    if (u->op != POLY_OP_INDEX || u->n_src < 2) continue;
+    PolyUOp *base = wasm_acc_base(u->src[0]);
+    if (base && poly_program_memory_is(base, POLY_ADDR_REG) &&
+        !wasm_reg_addr_index(u, NULL, NULL)) {
+      fprintf(stderr, "[polygrad:wasm] unsupported nonconstant or negative REG index\n");
+      return NULL;
+    }
+  }
   MathImports math;
   int n_params, n_ranges;
   prescan(uops, n, &math, &n_params, &n_ranges);

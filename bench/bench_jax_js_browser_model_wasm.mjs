@@ -69,8 +69,9 @@ function makePage() {
 <meta charset="utf-8">
 <title>polygrad vs jax-js browser wasm model</title>
 <pre id="log"></pre>
-<script src="/js/dist/polygrad.js"></script>
+<script src="/js/dist/polygrad.sync.js"></script>
 <script type="module">
+import { checkWorkload, modelReference } from "/bench/wasm_checks.mjs";
 import {
   blockUntilReady,
   defaultDevice,
@@ -318,6 +319,7 @@ async function runPolyCase(pg, name, c, inputData) {
   const inputs = await createPolyInputs(pg, c, inputData);
   const pipeline = createPolyPipeline(pg, c);
   await primePipeline(pipeline, inputs);
+  await checkWorkload({ name, call: () => pipeline.call(inputs), ready: y => pipeline.ready(y), dispose: y => pipeline.disposeOutput(y) }, modelReference(c,inputData), {atol:c.kind==='mlp'?1e-7:1e-10,rtol:2e-4});
   const samples = await timeAsync(() => pipeline.call(inputs), (y) => pipeline.ready(y), (y) => pipeline.disposeOutput(y));
   const s = median(samples);
   const schedules = pipeline.scheduleCount;
@@ -333,6 +335,7 @@ async function runJaxCase(name, c, inputData) {
   await blockUntilReady(inputs);
   const pipeline = createJaxPipeline(c);
   await primePipeline(pipeline, inputs);
+  await checkWorkload({ name, call: () => pipeline.call(inputs), ready: y => pipeline.ready(y), dispose: y => pipeline.disposeOutput(y) }, modelReference(c,inputData), {atol:c.kind==='mlp'?1e-7:1e-10,rtol:2e-4});
   const samples = await timeAsync(() => pipeline.call(inputs), (y) => pipeline.ready(y), (y) => pipeline.disposeOutput(y));
   const s = median(samples);
   pipeline.dispose();

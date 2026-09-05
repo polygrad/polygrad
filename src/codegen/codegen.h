@@ -84,13 +84,13 @@ PolyUOp *poly_apply_tc_opt(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps);
 /* TensorCore helpers (internal, exposed for testing) */
 
 /* Current Tinygrad memory addresses are INDEX UOps; dtype carries values. */
-static inline PolyUOp *poly_find_index_through_cast(PolyUOp *u) {
+static inline PolyUOp *poly_as_index(PolyUOp *u) {
   return (u && u->op == POLY_OP_INDEX) ? u : NULL;
 }
 
 /* Memory-addressing form accepted after August memory coalescing. A three-src
  * SHRINK is a coalesced memory slice, not a frontend movement. */
-static inline PolyUOp *poly_find_memory_slice_through_cast(PolyUOp *u) {
+static inline PolyUOp *poly_as_memory_slice(PolyUOp *u) {
   return (u && (u->op == POLY_OP_INDEX || u->op == POLY_OP_SHRINK)) ? u : NULL;
 }
 

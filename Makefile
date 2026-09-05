@@ -408,6 +408,10 @@ bench-ratios: build/libpolygrad.so wasm-pkg
 bench-parity: build/libpolygrad.so
 	POLYGRAD_LIB=$(abspath build/libpolygrad.so) $(PARITY_PY) bench/bench_tinygrad_parity.py
 
+.PHONY: test-bench-wasm
+test-bench-wasm:
+	$(NODE) --test bench/test_wasm_checks.mjs
+
 bench-jax-js-wasm: wasm-pkg
 	$(NODE) bench/bench_jax_js_wasm.mjs --iters $(BENCH_JAX_JS_ITERS) --warmup $(BENCH_JAX_JS_WARMUP) $(BENCH_JAX_JS_EXTRA)
 

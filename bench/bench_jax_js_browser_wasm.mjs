@@ -23,8 +23,9 @@ function makePage() {
 <meta charset="utf-8">
 <title>polygrad vs jax-js browser wasm</title>
 <pre id="log"></pre>
-<script src="/js/dist/polygrad.js"></script>
+<script src="/js/dist/polygrad.sync.js"></script>
 <script type="module">
+import { checkWorkload, genericReference } from "/bench/wasm_checks.mjs";
 import {
   blockUntilReady,
   defaultDevice,
@@ -123,6 +124,7 @@ async function runPolygrad(inputs) {
 
   const results = [];
   for (const [name, fn, args] of workloads) {
+    await checkWorkload({ name, call: () => fn(...args), ready: async () => {} }, genericReference(name, inputs));
     results.push(await bench(name, () => fn(...args), async () => {}, null));
   }
   for (const [, fn] of workloads) fn.dispose?.();
@@ -175,6 +177,7 @@ async function runJax(inputs) {
 
   const results = [];
   for (const [name, fn, args] of workloads) {
+    await checkWorkload({ name, call: () => fn(...args.map(x => x.ref)), ready: y => y.blockUntilReady(), dispose: y => y.dispose() }, genericReference(name, inputs));
     results.push(await bench(name, () => fn(...args.map(x => x.ref)), y => y.blockUntilReady(), y => y.dispose()));
   }
   for (const [, fn] of workloads) fn.dispose?.();

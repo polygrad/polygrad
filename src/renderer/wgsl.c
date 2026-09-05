@@ -120,17 +120,17 @@ static void wsm_destroy(WgslStrMap *m) {
 
 typedef struct {
   char *name;
-  int index;
-  PolyDType dtype;
+  PolyUOp *uop;
   bool is_buffer;
 } WgslBinding;
 
+/* C rows for WGSLRenderer.render_kernel's ordered (name, (UOp, mutable)) bufs. */
 static bool wgsl_binding_append(
     WgslBinding **bindings,
     int *n_bindings,
     int *cap_bindings,
     const char *name,
-    PolyDType dtype,
+    PolyUOp *uop,
     bool is_buffer
 ) {
   if (!bindings || !n_bindings || !cap_bindings || !name) return false;
@@ -145,8 +145,7 @@ static bool wgsl_binding_append(
   if (!dup) return false;
   (*bindings)[*n_bindings] = (WgslBinding){
       .name = dup,
-      .index = *n_bindings,
-      .dtype = dtype,
+      .uop = uop,
       .is_buffer = is_buffer,
   };
   (*n_bindings)++;
@@ -181,8 +180,28 @@ static bool wgsl_dtype_is_packed_storage(PolyDType dt) {
   return itemsize > 0 && itemsize < 4 && (poly_dtype_is_int(s) || poly_dtype_is_bool(s));
 }
 
-static const char *wgsl_buffer_type_name(PolyDType dt) {
-  return wgsl_dtype_is_packed_storage(dt) ? "atomic<u32>" : wgsl_type_name(dt);
+/* Pinned renderer/wgsl.py:is_packed. LOAD's address space is ALU: the
+ * backing buffer owns storage, including behind AFTER/view wrappers. */
+static bool wgsl_is_packed(PolyCtx *ctx, PolyUOp *u) {
+  if (!u) return false;
+  PolyDType dt = u->op == POLY_OP_STORE && u->n_src > 1 ? u->src[1]->dtype : u->dtype;
+  if (!wgsl_dtype_is_packed_storage(dt)) return false;
+  PolyAddrSpace space;
+  return poly_uop_addrspace(poly_uop_buf_uop(ctx, u), &space) && space != POLY_ADDR_REG;
+}
+
+/* Pinned WGSLRenderer.buf_map and _packed_size share is_packed with accesses. */
+static const char *wgsl_buffer_type_name(PolyCtx *ctx, PolyUOp *u) {
+  return wgsl_is_packed(ctx, u) ? "atomic<u32>" : wgsl_type_name(u->dtype);
+}
+
+/* Pinned renderer/wgsl.py:_packed_size. */
+static int64_t wgsl_packed_size(PolyCtx *ctx, PolyUOp *u) {
+  int64_t size = poly_program_buffer_size(u);
+  if (!wgsl_is_packed(ctx, u)) return size;
+  int elems = 4 / poly_dtype_itemsize(u->dtype);
+  /* ceildiv without overflowing a valid maximum storage extent. */
+  return size / elems + (size % elems != 0);
 }
 
 static bool wgsl_packed_params(PolyDType dt, int *itemsize, int *elems, unsigned *mask) {
@@ -195,27 +214,20 @@ static bool wgsl_packed_params(PolyDType dt, int *itemsize, int *elems, unsigned
   return true;
 }
 
-static bool wgsl_index_uses_packed_buffer(PolyUOp *idx_uop, PolyDType *buf_dt_out) {
-  if (!idx_uop || idx_uop->op != POLY_OP_INDEX || idx_uop->n_src < 2) return false;
-  PolyDType buf_dt = idx_uop->src[0]->dtype;
-  if (!wgsl_dtype_is_packed_storage(buf_dt)) return false;
-  if (buf_dt_out) *buf_dt_out = buf_dt;
-  return true;
-}
-
+/* Pinned packed_load: field width and signed extension follow the LOAD dtype. */
 static bool wgsl_make_packed_load_expr(
+    PolyCtx *ctx,
     WgslStrMap *names,
+    PolyUOp *load,
     PolyUOp *idx_uop,
-    PolyDType load_dt,
     char *out,
     size_t out_sz
 ) {
-  PolyDType buf_dt;
-  if (!wgsl_index_uses_packed_buffer(idx_uop, &buf_dt)) return false;
+  if (!idx_uop || !wgsl_is_packed(ctx, load)) return false;
 
   int itemsize = 0, elems = 0;
   unsigned mask = 0;
-  if (!wgsl_packed_params(buf_dt, &itemsize, &elems, &mask)) return false;
+  if (!wgsl_packed_params(load->dtype, &itemsize, &elems, &mask)) return false;
 
   char *buf_s = wsm_get(names, idx_uop->src[0]);
   char *idx_s = wsm_get(names, idx_uop->src[1]);
@@ -227,7 +239,7 @@ static bool wgsl_make_packed_load_expr(
       idx_s, elems, idx_s, elems, 8u * (unsigned)itemsize, mask
   );
 
-  PolyDType scalar = load_dt;
+  PolyDType scalar = load->dtype;
   if (poly_dtype_is_bool(scalar)) {
     snprintf(out, out_sz, "(%s != 0u)", raw);
   } else if (!poly_dtype_is_unsigned(scalar) && poly_dtype_is_int(scalar)) {
@@ -239,26 +251,30 @@ static bool wgsl_make_packed_load_expr(
   return true;
 }
 
+/* Pinned packed_store and string_rewrite: select field width from the value,
+ * and never perform packed read-modify-write on register storage. */
 static bool wgsl_emit_packed_store(
+    PolyCtx *ctx,
     WgslStrBuf *body,
     WgslStrMap *names,
+    PolyUOp *store,
     PolyUOp *idx_uop,
     const char *val,
     int depth
 ) {
-  PolyDType buf_dt;
-  if (!wgsl_index_uses_packed_buffer(idx_uop, &buf_dt)) return false;
+  if (!idx_uop || !wgsl_is_packed(ctx, store)) return false;
+  PolyDType value_dt = store->src[1]->dtype;
 
   int itemsize = 0, elems = 0;
   unsigned mask = 0;
-  if (!wgsl_packed_params(buf_dt, &itemsize, &elems, &mask)) return false;
+  if (!wgsl_packed_params(value_dt, &itemsize, &elems, &mask)) return false;
 
   char *buf_s = wsm_get(names, idx_uop->src[0]);
   char *idx_s = wsm_get(names, idx_uop->src[1]);
   if (!buf_s || !idx_s || !val) return false;
 
   char val_u32[512];
-  if (poly_dtype_is_bool(buf_dt))
+  if (poly_dtype_is_bool(value_dt))
     snprintf(val_u32, sizeof(val_u32), "select(0u, 1u, %s)", val);
   else
     snprintf(val_u32, sizeof(val_u32), "u32(%s)", val);
@@ -494,6 +510,7 @@ static void render_alu_wgsl(
 
 /* WGSL Renderer */
 
+/* Pinned WGSLRenderer.string_rewrite and render_kernel, with C string storage. */
 char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
   WgslStrBuf body;
   wsb_init(&body);
@@ -567,7 +584,7 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
       wsm_set(&names, u, strdup(name));
 
       if (!wgsl_binding_append(
-              &bindings, &n_bindings, &cap_bindings, name, u->dtype, !poly_uop_is_alu_param(u)
+              &bindings, &n_bindings, &cap_bindings, name, u, !poly_uop_is_alu_param(u)
           ))
         goto fail;
       continue;
@@ -677,8 +694,8 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
       snprintf(name, sizeof(name), "smem%lld", (long long)poly_program_buffer_slot(u));
       wsm_set(&names, u, strdup(name));
 
-      int64_t smem_size = poly_program_buffer_size(u);
-      const char *base_tn = wgsl_type_name(poly_program_buffer_dtype(u));
+      int64_t smem_size = wgsl_packed_size(ctx, u);
+      const char *base_tn = wgsl_buffer_type_name(ctx, u);
       if (n_extern_locals < 16) {
         snprintf(
             extern_locals[n_extern_locals], 256, "var<workgroup> %s: array<%s,%lld>;", name,
@@ -696,8 +713,8 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
       wsm_set(&names, u, strdup(name));
 
       /* tinygrad: var rN: array<type, SIZE>; (wgsl.py:75) */
-      int64_t reg_size = poly_program_buffer_size(u);
-      const char *base_tn = wgsl_type_name(poly_program_buffer_dtype(u));
+      int64_t reg_size = wgsl_packed_size(ctx, u);
+      const char *base_tn = wgsl_buffer_type_name(ctx, u);
       wsb_printf(&decls, "  var %s: array<%s,%lld>;\n", name, base_tn, (long long)reg_size);
       continue;
     }
@@ -724,11 +741,11 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
 
       char *bidx = wsm_get(&names, u->src[0]);
       const char *tn = wgsl_type_name(u->dtype);
-      PolyUOp *idx_uop = poly_find_index_through_cast(u->src[0]);
+      PolyUOp *idx_uop = poly_as_index(u->src[0]);
       char packed_load[512];
       const char *load_expr = bidx;
       if (idx_uop &&
-          wgsl_make_packed_load_expr(&names, idx_uop, u->dtype, packed_load, sizeof(packed_load)))
+          wgsl_make_packed_load_expr(ctx, &names, u, idx_uop, packed_load, sizeof(packed_load)))
         load_expr = packed_load;
       for (int d = 0; d < depth; d++)
         wsb_puts(&body, "  ");
@@ -818,8 +835,8 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
       char *target = wsm_get(&names, u->src[0]);
       char *val = wsm_get(&names, u->src[1]);
 
-      PolyUOp *store_idx = poly_find_index_through_cast(u->src[0]);
-      if (!wgsl_emit_packed_store(&body, &names, store_idx, val, depth)) {
+      PolyUOp *store_idx = poly_as_index(u->src[0]);
+      if (!wgsl_emit_packed_store(ctx, &body, &names, u, store_idx, val, depth)) {
         for (int d = 0; d < depth; d++)
           wsb_puts(&body, "  ");
         wsb_printf(&body, "%s = %s;\n", target, val);
@@ -912,17 +929,6 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
     }
   }
 
-  /* Sort bindings by index */
-  for (int i = 1; i < n_bindings; i++) {
-    WgslBinding key = bindings[i];
-    int j = i - 1;
-    while (j >= 0 && bindings[j].index > key.index) {
-      bindings[j + 1] = bindings[j];
-      j--;
-    }
-    bindings[j + 1] = key;
-  }
-
   /* Build complete source */
   WgslStrBuf out;
   wsb_init(&out);
@@ -939,20 +945,19 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
     wsb_printf(&out, "%s\n", extern_locals[i]);
   }
 
-  /* Parameter bindings: sequential indices starting at 1 (binding 0 = INFINITY).
+  /* Pinned render_kernel binds in encounter order (binding 0 = INFINITY).
    * Storage buffers use var<storage,read_write>, scalar vars use var<uniform>. */
   for (int i = 0; i < n_bindings; i++) {
-    const char *tn = bindings[i].is_buffer ? wgsl_buffer_type_name(bindings[i].dtype)
-                                           : wgsl_type_name(bindings[i].dtype);
+    const char *tn = bindings[i].is_buffer ? wgsl_buffer_type_name(ctx, bindings[i].uop)
+                                           : wgsl_type_name(bindings[i].uop->dtype);
     if (bindings[i].is_buffer) {
       wsb_printf(
-          &out, "@group(0) @binding(%d)\nvar<storage,read_write> %s: array<%s>;\n",
-          bindings[i].index + 1, bindings[i].name, tn
+          &out, "@group(0) @binding(%d)\nvar<storage,read_write> %s: array<%s>;\n", i + 1,
+          bindings[i].name, tn
       );
     } else {
       wsb_printf(
-          &out, "@group(0) @binding(%d)\nvar<uniform> %s: %s;\n", bindings[i].index + 1,
-          bindings[i].name, tn
+          &out, "@group(0) @binding(%d)\nvar<uniform> %s: %s;\n", i + 1, bindings[i].name, tn
       );
     }
   }

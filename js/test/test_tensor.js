@@ -1866,6 +1866,72 @@ async function runTensorTests(pg) {
     assert(threw, 'expected invalid scatterReduce reduction to throw')
   })
 
+  await test('scatterReduce preserves missing lanes and duplicate indices on both axes', async () => {
+    // Pinned mixin/op.py:scatter_reduce; the no-hit mask uses bool storage.
+    for (const n of [3, 5, 9]) {
+      const m = 2 * (n - 1)
+      for (const axis of [0, 1]) {
+        const at = (c, i, width) => axis === 0 ? i * 2 + c : c * width + i
+        const baseData = new Array(2 * n)
+        const indexData = new Int32Array(2 * m)
+        const sourceData = new Array(2 * m)
+        for (let c = 0; c < 2; c++) {
+          for (let i = 0; i < n; i++) baseData[at(c, i, n)] = c === 0 ? i + 1 : -i - 1
+          for (let j = 0; j < m; j++) {
+            indexData[at(c, j, m)] = Math.floor(j / 2)
+            sourceData[at(c, j, m)] = (j % 2 === 0 ? -2 : 3) + c
+          }
+        }
+        const base = new Tensor(baseData, { dtype: 'float32' }).reshape(axis === 0 ? [n, 2] : [2, n])
+        const idx = new Tensor(indexData, { dtype: 'int32' }).reshape(axis === 0 ? [m, 2] : [2, m])
+        const src = new Tensor(sourceData, { dtype: 'float32' }).reshape(axis === 0 ? [m, 2] : [2, m])
+        for (const includeSelf of [false, true]) {
+          for (const reduction of ['sum', 'prod', 'mean', 'amax', 'amin']) {
+            const expected = baseData.slice()
+            for (let c = 0; c < 2; c++) {
+              for (let i = 0; i < n - 1; i++) {
+                const values = [-2 + c, 3 + c]
+                if (includeSelf) values.unshift(baseData[at(c, i, n)])
+                expected[at(c, i, n)] = reduction === 'prod' ? values.reduce((a, b) => a * b, 1)
+                  : reduction === 'amax' ? Math.max(...values)
+                    : reduction === 'amin' ? Math.min(...values)
+                      : values.reduce((a, b) => a + b, 0) / (reduction === 'mean' ? values.length : 1)
+              }
+            }
+            const result = base.scatterReduce(axis, idx, src, reduction, includeSelf)
+            try {
+              assertClose(await result.toArray(), expected)
+            } catch (err) {
+              throw new Error(`n=${n} axis=${axis} ${reduction} includeSelf=${includeSelf}: ${err.message}`)
+            } finally {
+              result.dispose()
+            }
+          }
+        }
+        base.dispose()
+        idx.dispose()
+        src.dispose()
+      }
+    }
+  })
+
+  await test('packed storage reductions preserve small integer and bool values', async () => {
+    // Wide reductions cover packed storage and odd-length tails.
+    for (const n of [257, 1024]) {
+      for (const dtype of ['bool', 'int8', 'uint8', 'int16', 'uint16', 'float32']) {
+        const values = Array.from({ length: n }, (_, i) => dtype === 'bool' ? i % 2
+          : dtype === 'int8' ? i % 121 - 60 : dtype === 'uint8' ? i % 251
+            : dtype === 'int16' ? (i * 173) % 60001 - 30000
+              : dtype === 'uint16' ? (i * 173) % 65536 : i % 121 - 60)
+        const input = new Tensor(values, { dtype })
+        const hi = input.max()
+        assertClose(await hi.toArray(), [Math.max(...values)])
+        hi.dispose()
+        input.dispose()
+      }
+    }
+  })
+
   await test('scatter construction bypasses frontend substitution', async () => {
     assert(Tensor.prototype._physicalizeResult === undefined,
       'legacy frontend substitution helper must stay deleted')

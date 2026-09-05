@@ -64,8 +64,9 @@ function makePage() {
 <meta charset="utf-8">
 <title>polygrad vs jax-js browser wasm matmul</title>
 <pre id="log"></pre>
-<script src="/js/dist/polygrad.js"></script>
+<script src="/js/dist/polygrad.sync.js"></script>
 <script type="module">
+import { checkWorkload, matmulReference } from "/bench/wasm_checks.mjs";
 import {
   blockUntilReady,
   defaultDevice,
@@ -144,6 +145,8 @@ async function runPolygrad() {
     const fBT = pg.jit((aa, bb) => aa.matmul(bb.permute(1, 0)));
     await primePolygradJit(fAB, a, b);
     await primePolygradJit(fBT, a, b);
+    await checkWorkload({ name: 'PG AB '+n, call: () => fAB(a,b), ready: y => y.realize() }, matmulReference(n,false), {atol:0,rtol:0});
+    await checkWorkload({ name: 'PG ABT '+n, call: () => fBT(a,b), ready: y => y.realize() }, matmulReference(n,true), {atol:0,rtol:0});
     const tAB = await timeAsync(n, () => fAB(a, b), (y) => y.realize(), null);
     const tBT = await timeAsync(n, () => fBT(a, b), (y) => y.realize(), null);
     out.push({
@@ -170,6 +173,8 @@ async function runJax() {
     const a = np.array(makeMatrixData(n), { shape: [n, n], device: "wasm" });
     const b = np.array(makeMatrixData(n), { shape: [n, n], device: "wasm" });
     await blockUntilReady([a, b]);
+    await checkWorkload({ name: 'JAX AB '+n, call: () => np.matmul(a.ref,b.ref), ready: y => y.blockUntilReady(), dispose: y => y.dispose() }, matmulReference(n,false), {atol:0,rtol:0});
+    await checkWorkload({ name: 'JAX ABT '+n, call: () => np.matmul(a.ref,b.ref.transpose()), ready: y => y.blockUntilReady(), dispose: y => y.dispose() }, matmulReference(n,true), {atol:0,rtol:0});
     const tAB = await timeAsync(n, () => np.matmul(a.ref, b.ref), (y) => y.blockUntilReady(), (y) => y.dispose());
     const tBT = await timeAsync(n, () => np.matmul(a.ref, b.ref.transpose()), (y) => y.blockUntilReady(), (y) => y.dispose());
     out.push({

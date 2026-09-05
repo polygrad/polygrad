@@ -3579,6 +3579,119 @@ TEST(codegen, render_wgsl_bool_storage_is_packed_like_tinygrad) {
   PASS();
 }
 
+/* Pinned renderer/wgsl.py:is_packed,_packed_size,buf_map and render_load.
+ * Exercise declaration and both accesses together, including an AFTER owner:
+ * LOAD.addrspace itself is ALU, not the backing storage's address space. */
+static bool check_wgsl_storage_address_space(PolyAddrSpace space) {
+  PolyDType dtypes[] = {POLY_BOOL,  POLY_UINT8,   POLY_INT8,   POLY_UINT16,
+                        POLY_INT16, POLY_FLOAT16, POLY_FLOAT32};
+  const char *types[] = {"bool", "u32", "i32", "u32", "i32", "f16", "f32"};
+  int64_t sizes[] = {1, 2, 3, 4, 5, 7, 8, 9};
+  for (int d = 0; d < 7; d++) {
+    for (int s = 0; s < 8; s++) {
+      for (int wrapped = 0; wrapped < 2; wrapped++) {
+        PolyCtx *ctx = poly_ctx_new();
+        if (!ctx) return false;
+        PolyDType dt = dtypes[d];
+        int64_t size = sizes[s];
+        PolyParamArg arg = {.slot = 0, .dtype = dt, .addrspace = space};
+        PolyUOp *extent = poly_const_int(ctx, size);
+        PolyUOp *buffer = poly_uop1(
+            ctx, space == POLY_ADDR_GLOBAL ? POLY_OP_PARAM : POLY_OP_BUFFER, dt, extent,
+            poly_arg_param(&arg)
+        );
+        PolyUOp *offset = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(size - 1));
+        PolyUOp *idx = poly_uop2(ctx, POLY_OP_INDEX, dt, buffer, offset, poly_arg_none());
+        PolyArg value_arg = poly_dtype_is_bool(dt)       ? poly_arg_bool(true)
+                            : poly_dtype_is_float(dt)    ? poly_arg_float(1.5)
+                            : poly_dtype_is_unsigned(dt) ? poly_arg_int(42)
+                                                         : poly_arg_int(-7);
+        PolyUOp *value = poly_uop0(ctx, POLY_OP_CONST, dt, value_arg);
+        PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx, value, poly_arg_none());
+        PolyUOp *after = poly_uop2(ctx, POLY_OP_AFTER, dt, buffer, store, poly_arg_none());
+        PolyUOp *read_idx =
+            wrapped ? poly_uop2(ctx, POLY_OP_INDEX, dt, after, offset, poly_arg_none()) : idx;
+        PolyUOp *gate = poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_bool(false));
+        PolyUOp *load_src[] = {read_idx, value, gate};
+        PolyUOp *load = poly_uop(ctx, POLY_OP_LOAD, dt, load_src, 3, poly_arg_none());
+        PolyUOp *write_idx = read_idx;
+        PolyUOp *copy = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, write_idx, load, poly_arg_none());
+        PolyUOp *uops[] = {extent, buffer,   offset, idx,  value, store,
+                           after,  read_idx, gate,   load, copy};
+        /* The direct case shares its INDEX, so list that UOp only once. */
+        if (!wrapped) {
+          memmove(&uops[7], &uops[8], 3 * sizeof(*uops));
+        }
+        char *source = poly_render_wgsl(ctx, uops, wrapped ? 11 : 10, "storage_access");
+        const char *name = space == POLY_ADDR_GLOBAL  ? "data0"
+                           : space == POLY_ADDR_LOCAL ? "smem0"
+                                                      : "r0";
+        bool packed = d < 5 && space != POLY_ADDR_REG;
+        int elems = packed ? 4 / poly_dtype_itemsize(dt) : 1;
+        int64_t count = size / elems + (size % elems != 0);
+        char declaration[128], load_expr[128], store_expr[128];
+        if (space == POLY_ADDR_GLOBAL)
+          snprintf(
+              declaration, sizeof(declaration), "%s: array<%s>;", name,
+              packed ? "atomic<u32>" : types[d]
+          );
+        else
+          snprintf(
+              declaration, sizeof(declaration), "%s: array<%s,%lld>;", name,
+              packed ? "atomic<u32>" : types[d], (long long)count
+          );
+        if (packed) {
+          snprintf(
+              load_expr, sizeof(load_expr), "atomicLoad(&%s[(%lld/%d)]", name,
+              (long long)(size - 1), elems
+          );
+          snprintf(
+              store_expr, sizeof(store_expr), "atomicAnd(&%s[(%lld/%d)]", name,
+              (long long)(size - 1), elems
+          );
+        } else {
+          snprintf(load_expr, sizeof(load_expr), "%s[%lld]", name, (long long)(size - 1));
+          snprintf(store_expr, sizeof(store_expr), "%s[%lld] =", name, (long long)(size - 1));
+        }
+        bool ok = source && strstr(source, declaration) && strstr(source, load_expr) &&
+                  strstr(source, store_expr) && strstr(source, "select(") &&
+                  (packed || !strstr(source, "atomic"));
+        if (packed && (d == 2 || d == 4))
+          ok = ok && strstr(source, d == 2 ? "<<24)>>24" : "<<16)>>16");
+        if (ok && space == POLY_ADDR_LOCAL) {
+          const char *local = strstr(source, "var<workgroup>");
+          const char *compute = strstr(source, "@compute");
+          ok = local && compute && local < compute;
+        }
+        if (!ok)
+          fprintf(
+              stderr, "WGSL storage space=%d dtype=%s size=%lld after=%d\n%s\n", space,
+              poly_dtype_name(dt), (long long)size, wrapped, source ? source : "NULL"
+          );
+        free(source);
+        poly_ctx_destroy(ctx);
+        if (!ok) return false;
+      }
+    }
+  }
+  return true;
+}
+
+TEST(codegen, render_wgsl_reg_storage_stays_unpacked) {
+  ASSERT_TRUE(check_wgsl_storage_address_space(POLY_ADDR_REG));
+  PASS();
+}
+
+TEST(codegen, render_wgsl_local_storage_matches_packed_access) {
+  ASSERT_TRUE(check_wgsl_storage_address_space(POLY_ADDR_LOCAL));
+  PASS();
+}
+
+TEST(codegen, render_wgsl_global_storage_matches_packed_access) {
+  ASSERT_TRUE(check_wgsl_storage_address_space(POLY_ADDR_GLOBAL));
+  PASS();
+}
+
 TEST(codegen, render_wgsl_reduce) {
   /* Current rangeify graph for out[0] = sum(a[0..9]). */
   PolyCtx *ctx = poly_ctx_new();
@@ -4586,7 +4699,7 @@ TEST(codegen, gpu_output_gate_matches_pinned_gpudims_gater_and_linear_cleanup) {
     if (topo[i]->op == POLY_OP_STORE) gpudims_store = topo[i];
   ASSERT_NOT_NULL(gpudims_store);
   ASSERT_INT_EQ(gpudims_store->n_src, 2);
-  PolyUOp *gpudims_idx = poly_find_index_through_cast(gpudims_store->src[0]);
+  PolyUOp *gpudims_idx = poly_as_index(gpudims_store->src[0]);
   ASSERT_NOT_NULL(gpudims_idx);
   ASSERT_INT_EQ(gpudims_idx->n_src, 2);
   ASSERT_INT_EQ(gpudims_idx->src[1]->op, POLY_OP_WHERE);
@@ -4634,7 +4747,7 @@ TEST(codegen, gpu_output_gate_matches_pinned_gpudims_gater_and_linear_cleanup) {
   ASSERT_NOT_NULL(final_store);
   ASSERT_INT_EQ(final_store->n_src, 3);
   ASSERT_TRUE(poly_dtype_eq(final_store->src[2]->dtype, POLY_BOOL));
-  PolyUOp *final_idx = poly_find_index_through_cast(final_store->src[0]);
+  PolyUOp *final_idx = poly_as_index(final_store->src[0]);
   ASSERT_NOT_NULL(final_idx);
   ASSERT_INT_EQ(final_idx->n_src, 2);
   ASSERT_TRUE(poly_type_verify_program(ctx, rewritten));

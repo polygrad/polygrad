@@ -2,6 +2,7 @@
 import { performance } from "node:perf_hooks";
 
 import polygrad from "../js/src/index.js";
+import { checkWorkload, modelReference } from "./wasm_checks.mjs";
 import {
   blockUntilReady,
   defaultDevice,
@@ -365,6 +366,15 @@ async function runCase(args, pg, name, c) {
   const polyPipeline = createPolyPipeline(pg, c);
   await primePipeline(polyPipeline, polyInputs);
 
+  const expected = modelReference(c, inputData);
+  // Small FFN outputs need a tighter absolute floor than bias-dominated MLPs.
+  const tolerance = { atol: c.kind === 'mlp' ? 1e-7 : 1e-10, rtol: 2e-4 };
+  const validate = (pipeline, inputs) => checkWorkload({
+    name, call: () => pipeline.call(inputs), ready: y => pipeline.ready(y),
+    dispose: y => pipeline.disposeOutput(y),
+  }, expected, tolerance);
+  const validation = { jax: await validate(jaxPipeline, jaxInputs), polygrad: await validate(polyPipeline, polyInputs) };
+
   const jaxSamples = [];
   const polySamples = [];
   const rounds = args.paired ? args.rounds : 1;
@@ -420,6 +430,7 @@ async function runCase(args, pg, name, c) {
     poly_gflops: flops / polyS / 1e9,
     ratio_poly_over_jax_time: polyS / jaxS,
     poly_schedules: polySchedules,
+    validation,
     jax_samples_s: jaxSamples,
     poly_samples_s: polySamples,
   };

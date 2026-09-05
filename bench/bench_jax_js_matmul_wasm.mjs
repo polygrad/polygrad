@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { performance } from "node:perf_hooks";
 
 import polygrad from "../js/src/index.js";
+import { checkWorkload, matmulReference } from "./wasm_checks.mjs";
 import {
   blockUntilReady,
   defaultDevice,
@@ -95,6 +96,14 @@ function makeMatrixData(n) {
   const data = new Float32Array(n * n);
   for (let i = 0; i < data.length; i++) data[i] = (i % 7) - 3;
   return data;
+}
+
+async function checkMatmul(n, callAB, callBT, ready, dispose) {
+  // Integer products/sums for these inputs are exactly representable in f32.
+  const tolerance = { atol: 0, rtol: 0 };
+  const ab = await checkWorkload({ name: `matmul AB ${n}`, call: callAB, ready, dispose }, matmulReference(n, false), tolerance);
+  const bt = await checkWorkload({ name: `matmul ABT ${n}`, call: callBT, ready, dispose }, matmulReference(n, true), tolerance);
+  return { ab, bt };
 }
 
 function median(xs) {
@@ -205,6 +214,8 @@ async function runJax(args) {
     const b = np.array(makeMatrixData(n), { shape: [n, n], device: "wasm" });
     await blockUntilReady([a, b]);
 
+    await checkMatmul(n, () => np.matmul(a.ref, b.ref), () => np.matmul(a.ref, b.ref.transpose()), y => y.blockUntilReady(), y => y.dispose());
+
     const tAB = await timeAsync(args, n, () => np.matmul(a.ref, b.ref), (y) => y.blockUntilReady(), (y) => y.dispose());
     const tBT = await timeAsync(args, n, () => np.matmul(a.ref, b.ref.transpose()), (y) => y.blockUntilReady(), (y) => y.dispose());
     out.set(n, { jax_ab: gflops(n, tAB), jax_bt: gflops(n, tBT), jax_ab_s: tAB, jax_bt_s: tBT });
@@ -238,6 +249,7 @@ async function runPolygrad(args) {
     const fBT = pg.jit((aa, bb) => aa.matmul(bb.permute(1, 0)));
     await primePolygradJit(fAB, a, b);
     await primePolygradJit(fBT, a, b);
+    await checkMatmul(n, () => fAB(a, b), () => fBT(a, b), y => y.realize(), null);
     const tAB = await timeAsync(args, n, () => fAB(a, b), (y) => y.realize(), null);
     const tBT = await timeAsync(args, n, () => fBT(a, b), (y) => y.realize(), null);
     out.set(n, {
@@ -304,6 +316,8 @@ async function runPaired(args) {
     }
 
     const jaxAB = [], jaxBT = [], polyAB = [], polyBT = [];
+    if (ja) await checkMatmul(n, () => np.matmul(ja.ref, jb.ref), () => np.matmul(ja.ref, jb.ref.transpose()), y => y.blockUntilReady(), y => y.dispose());
+    if (fAB) await checkMatmul(n, () => fAB(pa, pb), () => fBT(pa, pb), y => y.realize(), null);
     const runJaxRound = async () => {
       if (!args.includeJax) return;
       jaxAB.push(await timeAsync(args, n, () => np.matmul(ja.ref, jb.ref), (y) => y.blockUntilReady(), (y) => y.dispose()));
@@ -412,7 +426,7 @@ const rows = args.sizes.map((n) => ({
 }));
 
 if (args.json) {
-  console.log(JSON.stringify({ args, pr_table: PR_TABLE, rows }, null, 2));
+  console.log(JSON.stringify({ args, correctness_checked: true, pr_table: PR_TABLE, rows }, null, 2));
 } else {
   printMarkdown(rows, args);
 }

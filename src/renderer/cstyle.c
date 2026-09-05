@@ -684,7 +684,7 @@ static int render_uop_lanes(PolyCtx *ctx, const PolyUOp *u) {
 }
 
 static bool render_index_lane_ptr(StrMap *names, PolyUOp *ptr_uop, int lane, char *buf, int cap) {
-  PolyUOp *idx = poly_find_memory_slice_through_cast(ptr_uop);
+  PolyUOp *idx = poly_as_memory_slice(ptr_uop);
   if (!idx || idx->n_src < 2) return false;
   char *base = smap_get(names, idx->src[0]);
   char *idx_s = smap_get(names, idx->src[1]);
@@ -1205,7 +1205,7 @@ char *poly_render_c(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
         sb_puts(&body, "  ");
 
       /* Pinned tinygrad final IR: LOAD(INDEX(buf, idx), alt, gate). */
-      PolyUOp *idx_uop = poly_find_index_through_cast(u->src[0]);
+      PolyUOp *idx_uop = poly_as_index(u->src[0]);
       bool is_lane_load =
           idx_uop && idx_uop->n_src >= 1 && !poly_is_program_memory_base(idx_uop->src[0]);
       PolyUOp *gate_uop =
@@ -1217,7 +1217,7 @@ char *poly_render_c(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
           sb_printf(&body, "%s = (%s?%s:%s);\n", name, gate_s, bidx, alt_s);
         } else if (lanes > 1) {
           sb_printf(&body, "if (%s) %s = ", gate_s, name);
-          if (poly_find_memory_slice_through_cast(u->src[0]))
+          if (poly_as_memory_slice(u->src[0]))
             sb_printf(&body, "(*((%s*)(%s)))", dtype_s, bidx);
           else
             render_vector_load_expr(&body, &names, u->src[0], lanes, dtype_s);
@@ -1231,7 +1231,7 @@ char *poly_render_c(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
           sb_printf(&body, "%s = (%s?%s:(%s)0);\n", name, gate_s, bidx, dtype_s);
         } else if (lanes > 1) {
           sb_printf(&body, "if (%s) %s = ", gate_s, name);
-          if (poly_find_memory_slice_through_cast(u->src[0]))
+          if (poly_as_memory_slice(u->src[0]))
             sb_printf(&body, "(*((%s*)(%s)))", dtype_s, bidx);
           else
             render_vector_load_expr(&body, &names, u->src[0], lanes, dtype_s);
@@ -1242,7 +1242,7 @@ char *poly_render_c(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
       } else {
         if (is_lane_load) {
           sb_printf(&body, "%s = %s;\n", name, bidx);
-        } else if (lanes > 1 && poly_find_memory_slice_through_cast(u->src[0])) {
+        } else if (lanes > 1 && poly_as_memory_slice(u->src[0])) {
           sb_printf(&body, "%s = (*((%s*)(%s)));\n", name, dtype_s, bidx);
         } else {
           sb_printf(&body, "%s = (*%s);\n", name, bidx);
@@ -1262,7 +1262,7 @@ char *poly_render_c(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
        * satisfies the analyzer's path-sensitive null-deref tracking. */
       if (u->src[0] && poly_program_memory_is(u->src[0], POLY_ADDR_LOCAL))
         sb_printf(&body, "%s = %s;\n", target, val);
-      else if (u->src[1] && lanes > 1 && poly_find_memory_slice_through_cast(u->src[0])) {
+      else if (u->src[1] && lanes > 1 && poly_as_memory_slice(u->src[0])) {
         char dtype_s[128];
         render_ctype(u->src[1]->dtype, lanes, dtype_s, sizeof(dtype_s));
         sb_printf(&body, "*((%s*)(%s)) = %s;\n", dtype_s, target, val);

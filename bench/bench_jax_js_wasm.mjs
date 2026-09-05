@@ -1,5 +1,6 @@
 import { performance } from "node:perf_hooks";
 import polygrad from "../js/src/index.js";
+import { checkWorkload, genericReference } from "./wasm_checks.mjs";
 import {
   blockUntilReady,
   defaultDevice,
@@ -98,7 +99,8 @@ async function collectTimes(call, ready, dispose) {
 }
 
 function resultFromTimes(name, times) {
-  return { name, median_us: median(times), min_us: Math.min(...times), iters: args.iters, rounds: args.rounds };
+  const roundSamples = Array.from({ length: args.rounds }, (_, r) => times.slice(r * args.iters, (r + 1) * args.iters));
+  return { name, median_us: median(times), min_us: Math.min(...times), round_samples_us: roundSamples, iters: args.iters, rounds: args.rounds };
 }
 
 async function bench(name, call, ready, dispose) {
@@ -121,6 +123,8 @@ function printSummary(pgResults, jaxResults, pgDirectResults) {
       ratio_pg_over_jax: jx ? pg.median_us / jx.median_us : NaN,
       polygrad_min_us: pg.min_us,
       jax_js_min_us: jx?.min_us ?? NaN,
+      polygrad_round_samples_us: pg.round_samples_us,
+      jax_js_round_samples_us: jx?.round_samples_us,
     };
     if (args.attribution) {
       row.polygrad_public_us = pg.median_us;
@@ -128,6 +132,7 @@ function printSummary(pgResults, jaxResults, pgDirectResults) {
       row.polygrad_js_over_direct_us = direct ? pg.median_us - direct.median_us : null;
       row.polygrad_public_over_direct = direct ? pg.median_us / direct.median_us : null;
       row.polygrad_direct_c_jit_min_us = direct?.min_us ?? null;
+      row.polygrad_direct_c_jit_round_samples_us = direct?.round_samples_us ?? null;
     }
     return row;
   });
@@ -138,6 +143,7 @@ function printSummary(pgResults, jaxResults, pgDirectResults) {
       worker: false,
       compile_timed: false,
       readback_timed: false,
+      correctness_checked: true,
       iters: args.iters,
       warmup: args.warmup,
       rounds: args.rounds,
@@ -265,10 +271,13 @@ async function runPolygrad(inputs) {
   const directResults = [];
   const directCleanups = [];
   for (const w of setup.workloads) {
+    const expected = genericReference(w.name, inputs);
+    await checkWorkload(w, expected);
     results.push(await bench(w.name, w.call, w.ready, w.dispose));
     if (args.attribution) {
       const direct = await setup.directWorkload(w);
       directCleanups.push(direct.cleanup);
+      await checkWorkload(direct, expected);
       directResults.push(await bench(w.name, direct.call, direct.ready, direct.dispose));
     }
   }
@@ -339,6 +348,7 @@ async function runJax(inputs) {
   const setup = await setupJax(inputs);
   const results = [];
   for (const w of setup.workloads) {
+    await checkWorkload(w, genericReference(w.name, inputs));
     results.push(await bench(w.name, w.call, w.ready, w.dispose));
   }
   setup.cleanup();
@@ -356,6 +366,9 @@ async function runPaired(inputs) {
   for (let i = 0; i < pg.workloads.length; i++) {
     const pw = pg.workloads[i];
     const jw = jax.workloads[i];
+    const expected = genericReference(pw.name, inputs);
+    await checkWorkload(pw, expected);
+    await checkWorkload(jw, expected);
     const pgTimes = [];
     const jaxTimes = [];
     for (let r = 0; r < args.rounds; r++) {
@@ -373,6 +386,7 @@ async function runPaired(inputs) {
     if (args.attribution) {
       const direct = await pg.directWorkload(pw);
       directCleanups.push(direct.cleanup);
+      await checkWorkload(direct, expected);
       const directTimes = [];
       for (let r = 0; r < args.rounds; r++) {
         if (args.progress) console.error(`[direct] ${pw.name} round=${r + 1}/${args.rounds}`);
