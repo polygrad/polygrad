@@ -128,6 +128,16 @@ in both frontends. `element_size()` / `elementSize()` report storage bytes and
 reject weak dtypes; `is_floating_point()` / `isFloatingPoint()` classify the
 dtype without materializing the Tensor.
 
+Movement helpers accept `None` (Python) or `null` (JS) for unchanged axes in
+`shrink`, `shrink_to` / `shrinkTo`, and `pad_to` / `padTo`. Target shapes may
+be a sequence or positional dimensions. For nonzero fill, use
+`x.pad_to(3, 5, value=-1)` or `x.padTo(3, 5, {value: -1})`.
+`pad_to` enlarges only; general symbolic padding is not implemented.
+`max_shape` / `maxShape` and `max_numel()` / `maxNumel()` expose allocation
+bounds without changing the graph. Python retains symbolic `shape` values;
+JS `shape` already exposes maximum extents. Full slices and no-op shrink,
+`pad_to`, and empty-axis flip return the original Tensor.
+
 ```text
 Python Tensor API       JavaScript Tensor API       C / native package
        |                        |                         |

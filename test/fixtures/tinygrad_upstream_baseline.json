@@ -162,8 +162,8 @@
     ]
   },
   "evidence": {
-    "report": "temp/dtype-uop-batch-20260906.p95Ig3/upstream/report.json",
-    "sha256": "456541ed4899e41f6e2111edc314a7d94e78ba5cf4d4886a09014137e2b87110"
+    "report": "temp/movement-frontends-20260906.Gjy42s/upstream/report.json",
+    "sha256": "571f4ff5b941f6b1ceb64f411697d67b1edc574845b35a9601a909c190937ddf"
   },
   "schema_version": 1,
   "tests": {
@@ -223,7 +223,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:1297: RuntimeError: poly_realize_tensors failed for device(s): CPU",
+            "detail": "<polygrad>/py/polygrad/tensor.py:1319: RuntimeError: poly_realize_tensors failed for device(s): CPU",
             "outcome": "failed"
           }
         },
@@ -243,7 +243,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:346: TypeError: int() argument must be a string, a bytes-like object or a real number, not 'tuple'",
+            "detail": "<polygrad>/py/polygrad/tensor.py:355: TypeError: int() argument must be a string, a bytes-like object or a real number, not 'tuple'",
             "outcome": "failed"
           }
         },
@@ -277,7 +277,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:1405: RuntimeError: poly_tensor_clone failed",
+            "detail": "<polygrad>/py/polygrad/tensor.py:1427: RuntimeError: poly_tensor_clone failed",
             "outcome": "failed"
           }
         },
@@ -290,7 +290,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:1405: RuntimeError: poly_tensor_clone failed",
+            "detail": "<polygrad>/py/polygrad/tensor.py:1427: RuntimeError: poly_tensor_clone failed",
             "outcome": "failed"
           }
         },
@@ -370,7 +370,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:3330: ValueError: randn only supports float dtypes, got dtypes.bool",
+            "detail": "<polygrad>/py/polygrad/tensor.py:3390: ValueError: randn only supports float dtypes, got dtypes.bool",
             "outcome": "failed"
           }
         },
@@ -530,16 +530,10 @@
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_shrink": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_tensor.py:557: AttributeError: 'Tensor' object has no attribute 'shrink_to'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "The unchanged test encounters a missing Tensor constructor or movement convenience API; subsequent computation remains unexercised.",
-      "category": "frontend-api"
+      "reason": ""
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_size": {
       "expected": {
@@ -559,7 +553,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:1555: RuntimeError: core Tensor operation failed",
+            "detail": "<polygrad>/py/polygrad/tensor.py:1577: RuntimeError: core Tensor operation failed",
             "outcome": "failed"
           }
         },
@@ -572,7 +566,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:189: TypeError: Tuple must have size 2, but has size 1",
+            "detail": "<polygrad>/py/polygrad/tensor.py:198: TypeError: Tuple must have size 2, but has size 1",
             "outcome": "failed"
           }
         },
@@ -727,29 +721,17 @@
     },
     "polygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_clone_with_shrink": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:129: TypeError: cannot unpack non-iterable NoneType object",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "A shrink tuple containing None reaches Python pair unpacking and raises TypeError before constructing the requested zero-shape view. Fix movement argument normalization in its owner.",
-      "category": "frontend-movement-admission"
+      "reason": ""
     },
     "polygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_clone_with_shrink_realized": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:129: TypeError: cannot unpack non-iterable NoneType object",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "A shrink tuple containing None reaches Python pair unpacking and raises TypeError before constructing the requested zero-shape view. Fix movement argument normalization in its owner.",
-      "category": "frontend-movement-admission"
+      "reason": ""
     },
     "polygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_elementwise": {
       "expected": {
@@ -774,16 +756,10 @@
     },
     "polygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_max_shape": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_tensor.py:665: AttributeError: 'Tensor' object has no attribute 'max_shape'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "UOp variable creation now succeeds; Tensor.max_shape is missing. The following max_numel assertion remains unexecuted.",
-      "category": "missing-shape-interface"
+      "reason": ""
     },
     "polygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_numpy_deviceless_const": {
       "expected": {
@@ -794,16 +770,10 @@
     },
     "polygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_pad": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_tensor.py:652: AttributeError: 'Tensor' object has no attribute 'pad_to'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "The unchanged test encounters a missing Tensor constructor or movement convenience API; subsequent computation remains unexercised.",
-      "category": "frontend-api"
+      "reason": ""
     },
     "polygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_rand": {
       "expected": {
@@ -842,16 +812,10 @@
     },
     "polygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_shrink_into_zero": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:129: TypeError: cannot unpack non-iterable NoneType object",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "A shrink tuple containing None reaches Python pair unpacking and raises TypeError before constructing the requested zero-shape view. Fix movement argument normalization in its owner.",
-      "category": "frontend-movement-admission"
+      "reason": ""
     },
     "tinygrad:test/backend/test_tensor.py::TestMoveTensor::test_same_dev": {
       "expected": {
@@ -1989,7 +1953,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:3166: IndexError: Unsupported index type: <class 'list'>",
+            "detail": "<polygrad>/py/polygrad/tensor.py:3226: IndexError: Unsupported index type: <class 'list'>",
             "outcome": "failed"
           }
         },
@@ -2002,7 +1966,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:3166: IndexError: Unsupported index type: <class 'list'>",
+            "detail": "<polygrad>/py/polygrad/tensor.py:3226: IndexError: Unsupported index type: <class 'list'>",
             "outcome": "failed"
           }
         },
@@ -2061,16 +2025,10 @@
     },
     "polygrad:test/null/test_indexing.py::TestNumpy::test_everything_returns_views": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/references/.uv-python/cpython-3.11.12-linux-x86_64-gnu/lib/python3.11/unittest/case.py:703: AssertionError: Tensor(shape=(1,), dtype=dtypes.int) is not Tensor(shape=(1,), dtype=dtypes.int)",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Ellipsis indexing returns a distinct Tensor wrapper; the upstream identity assertion fails.",
-      "category": "frontend-identity"
+      "reason": ""
     },
     "polygrad:test/null/test_indexing.py::TestNumpy::test_index_no_floats": {
       "expected": {

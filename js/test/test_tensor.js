@@ -1822,6 +1822,60 @@ async function runTensorTests(pg) {
   // -- Movement --
   console.log('\n-- Movement --')
 
+  await test('movement helpers maximum shape', async () => {
+    const t = Tensor.empty(2, 3)
+    const before = t.uop.key
+    assertShape(t.maxShape, [2, 3])
+    assert(t.maxNumel() === 6 && t.uop.key === before)
+    assertShape(new Tensor(3).maxShape, [])
+    assert(new Tensor(3).maxNumel() === 1)
+    assert(Tensor.empty(0, 3).maxNumel() === 0)
+  })
+
+  await test('movement helpers optional shrink and exact graph', async () => {
+    const t = new Tensor([[0, 1, 2], [3, 4, 5]])
+    const y = t.shrink([null, [1, 3]])
+    assert(y.uop.key === t.shrink([[0, 2], [1, 3]]).uop.key)
+    assert(y.uop.src.length === 3)
+    assertShape(y.shape, [2, 2])
+    assertClose(await y.toArrayAsync(), [1, 2, 4, 5])
+    const empty = t.shrink([[1, 1], null])
+    assertShape(empty.shape, [0, 3])
+    assertClose(await empty.toArrayAsync(), [])
+  })
+
+  await test('movement helpers noops preserve tensor identity', async () => {
+    const t = new Tensor([[0, 1, 2], [3, 4, 5]])
+    for (const run of [t => t.shrink([[0, 2], [0, 3]]), t => t.shrink([null, null]),
+      t => t.shrinkTo(null, 3), t => t.padTo(null, 3, {value: 5}),
+      t => t.flip([]), t => t.getitem(), t => t.getitem({step: 1})]) assert(run(t) === t)
+    assertClose(await t.toArrayAsync(), [0, 1, 2, 3, 4, 5])
+  })
+
+  await test('movement helpers pad shrink to values and graphs', async () => {
+    const t = new Tensor([[0, 1, 2], [3, 4, 5]])
+    for (const value of [0, -1, true, 1.5]) {
+      const y = t.padTo([3, 5], {value})
+      const expected = t.pad([[0, 1], [0, 2]], 'constant', value)
+      assert(y.uop.key === expected.uop.key)
+      assertClose(await y.toArrayAsync(), await expected.toArrayAsync())
+    }
+    assertClose(await t.shrinkTo(null, 2).toArrayAsync(), [0, 1, 3, 4])
+    assertClose(await t.shrinkTo([1, 2]).toArrayAsync(), [0, 1])
+    assertClose(await Tensor.empty(0, 3).padTo(2, 3, {value: 7}).toArrayAsync(), [7, 7, 7, 7, 7, 7])
+  })
+
+  await test('movement helpers reject invalid dimensions', async () => {
+    const t = Tensor.empty(2, 3)
+    for (const run of [t => t.shrink([null]), t => t.shrink([null, null, null]),
+      t => t.shrinkTo(1), t => t.shrinkTo(1, 2, 3),
+      t => t.padTo(3), t => t.padTo(3, 4, 5), t => t.padTo(1, 3)]) {
+      let error
+      try { run(t) } catch (e) { error = e }
+      assert(error instanceof Error, 'invalid shape must reject')
+    }
+  })
+
   await test('reshape', async () => {
     const t = new Tensor([1, 2, 3, 4, 5, 6]).reshape(2, 3)
     assertShape(t.shape, [2, 3])

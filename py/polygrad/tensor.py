@@ -122,6 +122,15 @@ def _int64_array(vals):
     return arr, n
 
 
+def _argfix(*args):
+    # Pinned helpers.argfix: a sequence and positional dimensions cannot mix.
+    if args and args[0].__class__ in (tuple, list):
+        if len(args) != 1:
+            raise ValueError(f'bad arg {args}')
+        return tuple(args[0])
+    return args
+
+
 def _pair_array(pairs):
     """Convert a sequence of (a, b) pairs to a contiguous int64 array."""
     n = len(pairs)
@@ -940,7 +949,7 @@ class Tensor:
 
     @property
     def shape(self):
-        """Read shape from cached UOp fields (O(1), no allocation)."""
+        """Read concrete and symbolic extents from the current physical UOp."""
         if self._ctx is None:
             raise RuntimeError('polygrad runtime has been disposed')
         if getattr(self, '_shape_override', None) is not None:
@@ -1004,6 +1013,19 @@ class Tensor:
         # the all-static assertion at data/readback boundaries
         # (mixin/movement.py:38-47, tensor.py:278-280,311-313).
         return _prod(self.shape)
+
+    @property
+    def max_shape(self):
+        """Maximum extents without replacing symbolic dimensions in the graph."""
+        if self._ctx is None:
+            raise RuntimeError('polygrad runtime has been disposed')
+        raw = self._core_uop_raw(self._tensor)
+        ndim = _ffi._lib.poly_uop_ndim(self._ctx, raw)
+        dims = _ffi._lib.poly_uop_max_shape_dims(self._ctx, raw)
+        return tuple(int(dims[i]) for i in range(ndim))
+
+    def max_numel(self):
+        return _prod(self.max_shape)
 
     def size(self, dim=None):
         if dim is None:
@@ -2146,11 +2168,7 @@ class Tensor:
     # --- Movement ops ---
 
     def reshape(self, shape, *args):
-        shape = (shape,) + args
-        if shape[0].__class__ in (tuple, list):
-            if len(shape) != 1:
-                raise ValueError(f"bad arg {shape}")
-            shape = tuple(shape[0])
+        shape = _argfix(shape, *args)
         shape = tuple(s if s is not None else self.shape[i] for i, s in enumerate(shape))
         if (inferred := shape.count(-1)) > 1:
             raise RuntimeError(
@@ -2216,11 +2234,51 @@ class Tensor:
         return self._make_result_from_core(core, shape, [self])
 
     def shrink(self, arg):
-        """arg is tuple of (start, end) pairs per dimension."""
-        flat, n = _pair_array(arg)
-        new_shape = tuple(e - s for s, e in arg)
-        core = _ffi._lib.poly_tensor_shrink(self._ctx, self._tensor, flat, n)
+        """Shrink by (start, end) pairs; None leaves that axis unchanged."""
+        shape = self.shape
+        if len(arg) != len(shape):
+            raise ValueError(f'ndim={len(shape)} != len(arg)={len(arg)}')
+        if any(p is None for p in arg):
+            arg = tuple((0, s) if p is None else p for p, s in zip(arg, shape))
+        if all(start == 0 and end == size for (start, end), size in zip(arg, shape)):
+            return self
+        symbolic = any(isinstance(v, (BoundVariable, UOp)) for pair in arg for v in pair)
+        if symbolic:
+            # Keep symbolic source identities; max_shape is only an allocation bound.
+            starts = [_bound_to_uop(self._ctx, start) for start, _ in arg]
+            ends = [_bound_to_uop(self._ctx, end) for _, end in arg]
+            sizes = [_symbolic_slice_size_uop(self._ctx, a, b, start, end)
+                     for (a, b), start, end in zip(arg, starts, ends)]
+            core = _ffi._lib.poly_tensor_shrink_uop(
+                self._ctx, self._tensor, _shape_uop_array(self._ctx, starts),
+                _shape_uop_array(self._ctx, sizes), len(arg)
+            )
+        else:
+            flat, n = _pair_array(arg)
+            core = _ffi._lib.poly_tensor_shrink(self._ctx, self._tensor, flat, n)
+        if not core:
+            raise ValueError(f'invalid shrink {arg} for {shape}')
+        new_shape = (_shape_from_uop(self._ctx, self._core_uop_raw(core)) if symbolic
+                     else tuple(end - start for start, end in arg))
         return self._make_result_from_core(core, new_shape, [self])
+
+    def shrink_to(self, shape, *args):
+        shape = _argfix(shape, *args)
+        return self.shrink(tuple(None if s is None else (0, s) for s in shape))
+
+    def pad_to(self, shape, *args, value=0):
+        shape = _argfix(shape, *args)
+        current = self.shape
+        if len(shape) != len(current):
+            raise ValueError(f'ndim={len(current)} != len(shape)={len(shape)}')
+        shape = tuple(s if ns is None else ns for s, ns in zip(current, shape))
+        if shape == current:
+            return self
+        if not _shape_all_int(current) or not _shape_all_int(shape):
+            raise NotImplementedError('symbolic padding is not supported')
+        if any(ns < s for s, ns in zip(current, shape)):
+            raise ValueError(f'invalid pad_to {shape} for {current}')
+        return self._pad_constant(tuple((0, ns - s) for s, ns in zip(current, shape)), value)
 
     def pad(self, arg, mode="constant", value=0.0):
         """Pad using tinygrad-compatible flat or grouped padding."""
@@ -2253,6 +2311,8 @@ class Tensor:
         axes = tuple(self._resolve_dim(int(a)) for a in axes)
         if len(set(axes)) != len(axes):
             raise RuntimeError(f"dim can appear at most once, getting {axes}")
+        if not axes:
+            return self
         arr, n = _int64_array(axes)
         core = _ffi._lib.poly_tensor_flip(self._ctx, self._tensor, arr, n)
         return self._make_result_from_core(core, self.shape, [self])

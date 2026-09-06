@@ -927,6 +927,10 @@ function createBoundTensorClass(runtime) {
       return this.shape.reduce((a, b) => a * b, 1)
     }
 
+    // JS shape already exposes the core's maximum extents.
+    get maxShape() { return this.shape }
+    maxNumel() { return this.maxShape.reduce((a, b) => a * b, 1) }
+
     size(dim) {
       if (dim === undefined || dim === null) return [...this.shape]
       if (dim < 0) dim += this.shape.length
@@ -2018,6 +2022,10 @@ function createBoundTensorClass(runtime) {
     }
 
     shrink(arg) {
+      const shape = this.shape
+      if (arg.length !== shape.length) throw new Error(`ndim=${shape.length} != arg.length=${arg.length}`)
+      arg = arg.map((pair, i) => pair === null ? [0, shape[i]] : pair)
+      if (arg.every(([start, end], i) => start === 0 && end === shape[i])) return this
       const flat = []
       for (let i = 0; i < arg.length; i++) {
         flat.push(arg[i][0], arg[i][1])
@@ -2026,6 +2034,29 @@ function createBoundTensorClass(runtime) {
         this._ctx, this._tensor, flat, arg.length
       )
       return this._makeResultFromCore(core, [this])
+    }
+
+    shrinkTo(...shape) {
+      if (shape.length === 1 && Array.isArray(shape[0])) shape = shape[0]
+      return this.shrink(shape.map(s => s === null ? null : [0, s]))
+    }
+
+    padTo(...shape) {
+      let value = 0
+      const last = shape[shape.length - 1]
+      if (last && typeof last === 'object' && !Array.isArray(last)) {
+        value = shape.pop().value ?? 0
+      }
+      if (shape.length === 1 && Array.isArray(shape[0])) shape = shape[0]
+      const current = this.shape
+      if (shape.length !== current.length) throw new Error(`ndim=${current.length} != shape.length=${shape.length}`)
+      shape = shape.map((s, i) => s === null ? current[i] : s)
+      if (arraysEqual(shape, current)) return this
+      // Unlike pad(), padTo cannot crop with negative padding.
+      if (shape.some((s, i) => !Number.isSafeInteger(s) || s < current[i])) {
+        throw new Error(`invalid padTo (${shape}) for (${current})`)
+      }
+      return this.pad(shape.map((s, i) => [0, s - current[i]]), 'constant', value)
     }
 
     pad(arg, mode = 'constant', value = 0.0) {
@@ -2058,6 +2089,7 @@ function createBoundTensorClass(runtime) {
       if (new Set(axes).size !== axes.length) {
         throw new Error(`dim can appear at most once, got ${axes}`)
       }
+      if (!axes.length) return this
       const core = this._rt._core.ffi.poly_tensor_flip(
         this._ctx, this._tensor, axes, axes.length
       )

@@ -2160,6 +2160,79 @@ class TestMovement:
         assert indexed.uop.op_name == "RESHAPE"
         np.testing.assert_allclose(indexed.numpy(), 0)
 
+    def test_movement_max_shape_preserves_symbolic_dimensions(self):
+        t = Tensor.empty(2, UOp.variable('max_extent', 1, 8), 3)
+        before = t.uop_physical.raw
+        assert t.max_shape == (2, 8, 3)
+        assert t.max_numel() == 48
+        assert not isinstance(t.shape[1], int)
+        assert t.uop_physical.raw == before
+        assert Tensor(3).max_shape == ()
+        assert Tensor(3).max_numel() == 1
+        assert Tensor.empty(0, 3).max_numel() == 0
+
+    def test_movement_optional_shrink_and_zero_extent(self):
+        t = Tensor([[0, 1, 2], [3, 4, 5]])
+        y = t.shrink((None, (1, 3)))
+        expected = _ffi._lib.poly_shrink(t._ctx, t.uop_physical, (ctypes.c_int64 * 4)(0, 2, 1, 3), 2)
+        assert y.uop_physical.raw == expected
+        assert len(y.uop_physical.src) == 3
+        assert y.tolist() == [[1, 2], [4, 5]]
+        empty = t.shrink(((1, 1), None))
+        assert empty.shape == (0, 3)
+        assert empty.numpy().shape == (0, 3)
+
+    def test_movement_symbolic_shrink_keeps_exact_sources(self):
+        extent = UOp.variable('shrink_extent', 1, 8)
+        t = Tensor.empty(2, extent, 3)
+        y = t.shrink(((0, 1), None, (1, 3)))
+        start_nodes = [UOp.const(v) for v in (0, 0, 1)]
+        size_nodes = [UOp.const(1), extent, UOp.const(2)]
+        starts = (ctypes.c_void_p * 3)(*(v.raw for v in start_nodes))
+        sizes = (ctypes.c_void_p * 3)(*(v.raw for v in size_nodes))
+        expected = _ffi._lib.poly_shrink_uop(t._ctx, t.uop_physical, starts, sizes, 3)
+        assert y.uop_physical.raw == expected
+        assert y.shape[1] == extent
+        assert y.shrink((None, None, None)) is y
+
+    @pytest.mark.parametrize('operation', [
+        lambda t: t.shrink(((0, 2), (0, 3))),
+        lambda t: t.shrink((None, None)),
+        lambda t: t.shrink_to(None, 3),
+        lambda t: t.pad_to(None, 3, value=5),
+        lambda t: t.flip(()),
+        lambda t: t[()], lambda t: t[...], lambda t: t[:],
+    ])
+    def test_movement_noops_preserve_tensor_identity(self, operation):
+        t = Tensor([[0, 1, 2], [3, 4, 5]])
+        assert operation(t) is t
+        assert t.tolist() == [[0, 1, 2], [3, 4, 5]]
+
+    def test_movement_pad_shrink_to_values_and_graphs(self):
+        t = Tensor([[0, 1, 2], [3, 4, 5]])
+        for value in (0, -1, True, 1.5):
+            y = t.pad_to((3, 5), value=value)
+            expected = t.pad(((0, 1), (0, 2)), value=value)
+            assert y.uop_physical.raw == expected.uop_physical.raw
+            np.testing.assert_array_equal(y.numpy(), expected.numpy())
+        y = t.shrink_to(None, 2)
+        assert y.shape == (2, 2)
+        assert y.tolist() == [[0, 1], [3, 4]]
+        assert t.shrink_to((1, 2)).tolist() == [[0, 1]]
+        scalar = Tensor(1)
+        assert scalar.pad_to(()) is scalar
+        assert Tensor.empty(0, 3).pad_to(2, 3, value=7).tolist() == [[7]*3]*2
+
+    @pytest.mark.parametrize('operation', [
+        lambda t: t.shrink((None,)), lambda t: t.shrink((None, None, None)),
+        lambda t: t.shrink_to(1), lambda t: t.shrink_to(1, 2, 3),
+        lambda t: t.pad_to(3), lambda t: t.pad_to(3, 4, 5),
+        lambda t: t.pad_to(1, 3),
+    ])
+    def test_movement_helpers_validate_dimensions(self, operation):
+        with pytest.raises(ValueError):
+            operation(Tensor.empty(2, 3))
+
     def test_basic_indices_apply_one_shrink_before_dimension_collapse(self):
         base = Tensor.zeros(2, 1, 8, 1, 4).contiguous().realize()
         indexed = base[0, :, 0:3, :, :]
