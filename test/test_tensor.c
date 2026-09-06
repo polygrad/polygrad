@@ -1697,6 +1697,41 @@ static PolyTensor *build_logical_policy_host_oracle(
   return cpu && one ? poly_tensor_alu2(ctx, POLY_OP_ADD, cpu, one) : NULL;
 }
 
+TEST(tensor, host_write_after_realize_preserves_current_storage_and_policy) {
+  /* Existing C owner recipe: pinned Tensor._buffer -> Buffer.copy_from.
+   * Frontends must realize pending effects, then write current physical
+   * storage without calling a graph-root setter. */
+  for (int policy = POLY_LOGICAL_NEVER; policy <= POLY_LOGICAL_UNTIL_REALIZE; policy++) {
+    PolyCtx *ctx = poly_ctx_new();
+    ASSERT_NOT_NULL(ctx);
+    ASSERT_INT_EQ(poly_ctx_set_logical_policy(ctx, (PolyLogicalPolicy)policy), 0);
+    float initial[3] = {1, 2, 3}, values[3] = {4, 5, 6}, got[3] = {0};
+    int64_t shape[1] = {3};
+    PolyTensor *host = poly_tensor_from_host(ctx, initial, sizeof(initial), POLY_FLOAT32, shape, 1);
+    PolyTensor *x = poly_tensor_to_device(ctx, host, POLY_DEVICE_CPU);
+    ASSERT_NOT_NULL(x);
+    PolyUOp *logical = x->uop_logical;
+    PolyTensor *out = NULL;
+    ASSERT_INT_EQ(poly_realize_tensors(ctx, &x, 1, &out), 0);
+    ASSERT_PTR_EQ(out, x);
+    PolyUOp *physical = x->uop_physical;
+    ASSERT_INT_EQ(physical->op, POLY_OP_BUFFER);
+    ASSERT_INT_EQ(poly_buffer_write(ctx, physical, values, sizeof(values)), 0);
+    ASSERT_PTR_EQ(x->uop_physical, physical);
+    if (policy == POLY_LOGICAL_NEVER) ASSERT_PTR_EQ(x->uop_logical, NULL);
+    if (policy == POLY_LOGICAL_ALWAYS) ASSERT_PTR_EQ(x->uop_logical, logical);
+    ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+    ASSERT_INT_EQ(read_tensor_f32(ctx, x, got, 3), 0);
+    for (int i = 0; i < 3; i++)
+      ASSERT_FLOAT_EQ(got[i], values[i], 0);
+    ASSERT_PTR_EQ(x->uop_physical, physical);
+    poly_tensor_release(host);
+    poly_tensor_release(x);
+    poly_ctx_destroy(ctx);
+  }
+  PASS();
+}
+
 TEST(tensor, logical_never_host_construction_keeps_physical_graph_and_values_exact) {
   float values[4] = {1, 2, 3, 4};
   PolyCtx *always_ctx = poly_ctx_new(), *never_ctx = poly_ctx_new();

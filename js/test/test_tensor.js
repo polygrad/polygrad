@@ -143,6 +143,67 @@ async function runTensorTests(pg) {
     assertClose(await gradSource.grad.toArray(), [4])
   })
 
+  for (const logical of ['never', 'always', 'until_realize']) {
+    for (const realized of [false, true]) {
+      await test(`copyFrom host input ${logical} realized=${realized}`, async () => {
+        const x = new Tensor(new Float32Array([1, 2, 3]), { logical })
+        const retained = x.uopLogical
+        if (realized) await x.realizeAsync()
+        const before = x.uopPhysical.key
+        if (pg.device === 'webgpu' && !realized) {
+          let error
+          try { x.copyFrom([4, 5, 6]) } catch (e) { error = e }
+          assert(error && String(error.message).includes('copyFromAsync'))
+          assert(x.uopPhysical.key === before)
+          await x.copyFromAsync([4, 5, 6])
+        } else {
+          x.copyFrom([4, 5, 6])
+        }
+        const current = x.uopPhysical
+        assert(current.op === pg._core.ops.BUFFER && current.src.length === 1 &&
+          current.src[0].op === pg._core.ops.CONST)
+        if (realized) assert(current.key === before)
+        if (logical === 'never') assert(x.uopLogical === null)
+        else if (logical === 'always') assert(x.uopLogical.key === retained.key)
+        else assert(x.logicalState === 'retired')
+        x.copyFrom([7, 8, 9])
+        assert(x.uopPhysical.key === current.key)
+        assertClose(await x.toArrayAsync(), [7, 8, 9])
+      })
+    }
+  }
+
+  await test('copyFrom validates before materialization and orders pending assign', async () => {
+    const x = new Tensor(new Float32Array([1, 2, 3]), { logical: 'always' })
+    const before = x.uopPhysical.key
+    for (const bad of [new Float32Array([9]), new Int32Array([9, 9, 9])]) {
+      let error
+      try { x.copyFrom(bad) } catch (e) { error = e }
+      assert(error && /size mismatch|dtype mismatch/.test(error.message))
+      assert(x.uopPhysical.key === before)
+    }
+    assertClose(await x.toArrayAsync(), [1, 2, 3])
+    x.assign(new Tensor([10, 20, 30], { dtype: 'float32' }))
+    if (pg.device === 'webgpu') await x.copyFromAsync([4, 5, 6])
+    else x.copyFrom([4, 5, 6])
+    assertClose(await x.toArrayAsync(), [4, 5, 6])
+  })
+
+  await test('copyFromAsync snapshots caller bytes before materialization', async () => {
+    const x = new Tensor(new Float32Array([1, 2, 3]))
+    const values = new Float32Array([4, 5, 6])
+    const pending = x.copyFromAsync(values)
+    values.fill(99)
+    assert(await pending === x)
+    assertClose(await x.toArrayAsync(), [4, 5, 6])
+    const current = x.uopPhysical.key
+    let error
+    try { await x.copyFromAsync([0]) } catch (e) { error = e }
+    assert(error && String(error.message).includes('size mismatch'))
+    assert(x.uopPhysical.key === current)
+    assertClose(await x.toArrayAsync(), [4, 5, 6])
+  })
+
   await test('from vector', async () => {
     const t = new Tensor([1, 2, 3])
     assertShape(t.shape, [3])

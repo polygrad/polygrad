@@ -193,6 +193,44 @@ print('leaving_live_instance')
         assert Tensor([1, 2.5]).dtype == 'float32'
         assert Tensor([]).dtype == 'float32'
 
+    @pytest.mark.parametrize('payload,dtype,raw_dtype,expected', [
+        (b'\x00\x7f\x80\xff', None, 'uint8', [0, 127, 128, 255]),
+        (b'', None, 'uint8', []),
+        (np.array([1, 65000], dtype=np.uint16).tobytes(), 'uint16', 'uint16', [1, 65000]),
+        (np.array([1.25, -2.5], dtype=np.float32).tobytes(), 'float32', 'uint32', [0x3fa00000, 0xc0200000]),
+        (np.array([0x3f80, 0xc020], dtype=np.uint16).tobytes(), 'bfloat16', 'uint16', [0x3f80, 0xc020]),
+        (b'\x38\xc0', 'fp8e4m3', 'uint8', [0x38, 0xc0]),
+    ])
+    def test_bytes_are_raw_typed_storage_with_exact_upload_graph(self, payload, dtype, raw_dtype, expected):
+        # Pinned Tensor.__init__ -> UOp._frompy(bytes): allocate writable raw
+        # storage, then COPY. BF16/FP8 bytes must not stage through float32 CAST.
+        tensor = Tensor(payload, dtype=dtype)
+        root = tensor.uop_physical
+        assert root.op_name == 'COPY' and len(root.src) == 1
+        source = root.src[0]
+        assert source.op_name == 'BUFFER' and len(source.src) == 1
+        assert source.src[0].op_name == 'CONST' and len(source.src[0].src) == 0
+        assert source.dtype is root.dtype is getattr(dtypes, dtype or 'uint8')
+        assert tensor.shape == (len(expected),)
+        readout = tensor if (dtype or 'uint8') == raw_dtype else tensor.bitcast(raw_dtype)
+        np.testing.assert_array_equal(readout.numpy(), expected)
+
+    def test_bytes_reject_partial_elements_and_weak_storage(self):
+        with pytest.raises(ValueError):
+            Tensor(b'\x01\x00\xff', dtype=dtypes.uint16)
+        for dtype in dtypes.weaks:
+            with pytest.raises(RuntimeError, match='cannot create storage for weak dtype'):
+                Tensor(b'\x01', dtype=dtype)
+
+    def test_bytes_storage_is_owned_and_can_be_updated(self):
+        payload = b'\x01\x02\x03'
+        tensor = Tensor(payload)
+        tensor.assign(Tensor([4, 5, 6], dtype='uint8'))
+        assert payload == b'\x01\x02\x03'
+        del payload
+        gc.collect()
+        np.testing.assert_array_equal(tensor.numpy(), [4, 5, 6])
+
     def test_from_scalar(self):
         cases = [
             (Tensor(True), (), "bool", True),
@@ -1162,6 +1200,42 @@ print('leaving_live_instance')
     def test_item(self):
         t = Tensor([42.0])
         assert t.item() == pytest.approx(42.0)
+
+    @pytest.mark.parametrize('logical', ['never', 'always', 'until_realize'])
+    @pytest.mark.parametrize('realized', [False, True])
+    def test_copy_from_host_input_uses_current_storage_and_logical_policy(self, logical, realized):
+        x = Tensor(np.array([1, 2, 3], dtype=np.float32), logical=logical)
+        retained = x.uop_logical
+        if realized:
+            x.realize()
+        before = x.uop_physical
+        x.copy_from([4, 5, 6])
+        current = x.uop_physical
+        assert current.op_name == 'BUFFER'
+        assert len(current.src) == 1 and current.src[0].op_name == 'CONST'
+        if realized:
+            assert current == before
+        if logical == 'never':
+            assert x.uop_logical is None
+        elif logical == 'always':
+            assert x.uop_logical == retained
+        else:
+            assert x.logical_state == 'retired'
+        x.copy_from([7, 8, 9])
+        assert x.uop_physical == current
+        gc.collect()
+        np.testing.assert_array_equal(x.numpy(), [7, 8, 9])
+
+    def test_copy_from_validates_before_materialization_and_runs_pending_assign(self):
+        x = Tensor(np.array([1, 2, 3], dtype=np.float32), logical='always')
+        before = x.uop_physical
+        with pytest.raises(ValueError, match='size mismatch'):
+            x.copy_from([9])
+        assert x.uop_physical == before
+        np.testing.assert_array_equal(x.numpy(), [1, 2, 3])
+        x.assign(Tensor([10, 20, 30], dtype='float32'))
+        x.copy_from([4, 5, 6])
+        np.testing.assert_array_equal(x.numpy(), [4, 5, 6])
 
     def test_copy_from_preserves_buffer_identity_and_updates_jit_input(self):
         x = Tensor.empty((3,), dtype='float32')

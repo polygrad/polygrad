@@ -316,6 +316,22 @@ DTYPES_DICT = {k: v for k, v in dtypes.__dict__.items()
 INVERSE_DTYPES_DICT = {**{v.name: k for k, v in DTYPES_DICT.items()},
                        "void": "void", "weakint": "weakint", "weakfloat": "weakfloat"}
 
+
+@functools.cache
+def _c_dtype(dtype: DType):
+    from . import _ffi
+    # C's half renderer spelling differs from the Python scalar name. Preserve
+    # all other metadata, including noncanonical DTypes, across the value ABI.
+    name = '__fp16' if dtype.name == 'half' else dtype.name
+    return _ffi.PolyDType(dtype.priority, dtype.bitsize, name.encode(),
+                         dtype.fmt.encode() if dtype.fmt is not None else b'\0')
+
+
+@functools.cache
+def can_lossless_cast(dt0: DType, dt1: DType) -> bool:
+    from . import _ffi
+    return _ffi.get_lib().poly_dtype_can_lossless_cast(_c_dtype(dt0), _c_dtype(dt1))
+
 # String-name sets for backward-compat is_float/is_int on str inputs.
 _FLOAT_NAMES = {d.name for d in dtypes.floats + (dtypes.weakfloat,)} | \
                {'float32', 'float64', 'float16', 'bfloat16', 'weakfloat'}

@@ -675,15 +675,24 @@ class Tensor:
                     # from flattened list contents (tensor.py:96-100).
                     dt = _dtype_name(dtypes.from_py(data), default='float32')
                 else:
-                    dt = _dtype_name(dtype, default='float32')
+                    dt = _dtype_name(dtype, default='uint8' if isinstance(data, bytes) else 'float32')
                 import_dt = dt
                 post_cast_dt = None
-                np_dt = _to_np_dtype(dt)
-                if to_dtype(dt) in {dtypes.bfloat16, *dtypes.fp8s}:
-                    import_dt = 'float32'
-                    post_cast_dt = dt
-                    np_dt = np.float32
-                arr = np.ascontiguousarray(data, dtype=np_dt)
+                if isinstance(data, bytes):
+                    storage_dtype = to_dtype(dt)
+                    if storage_dtype in dtypes.weaks:
+                        raise RuntimeError(f'cannot create storage for weak dtype {storage_dtype}')
+                    # _frompy(bytes) owns writable encoded storage. A void view
+                    # preserves bits (including BF16/FP8), validates whole
+                    # elements, and gives the existing host importer its shape.
+                    arr = np.frombuffer(data, dtype=f'V{storage_dtype.itemsize}').copy()
+                else:
+                    np_dt = _to_np_dtype(dt)
+                    if to_dtype(dt) in {dtypes.bfloat16, *dtypes.fp8s}:
+                        import_dt = 'float32'
+                        post_cast_dt = dt
+                        np_dt = np.float32
+                    arr = np.ascontiguousarray(data, dtype=np_dt)
                 self._data = arr.ravel()
                 self._dtype_str = dt
                 # UOp.from_host creates the BUFFER UOp, registers a PolyBuffer
@@ -1213,13 +1222,9 @@ class Tensor:
         return self
 
     def copy_from(self, data):
-        """Update this tensor's existing buffer from host data without changing
-        its BUFFER identity. This is the explicit Polygrad update API for
-        JIT/replay loops; tinygrad's closest public mutation API is assign()."""
-        logical = self.uop_logical or self.uop
-        buf = logical.buffer if logical is not None else None
-        if buf is None:
-            raise RuntimeError('copy_from requires a tensor backed by a BUFFER UOp')
+        """Materialize pending work, then update current storage from host data.
+        Existing BUFFER identity is preserved for JIT/replay loops. This is
+        Polygrad's host-write API; ordinary graph mutation uses assign()."""
         np_dt = _to_np_dtype(to_dtype(self._dtype_str))
         arr = np.asarray(data, dtype=np_dt)
         if arr.size != self.numel():
@@ -1227,14 +1232,17 @@ class Tensor:
         arr = np.ascontiguousarray(arr.reshape(self.shape))
         ptr = ctypes.c_void_p(arr.ctypes.data)
         physical = self.uop_physical
-        physical_raw = physical.raw if physical is not None else None
-        write_buf = buf
-        if physical is not None:
-            physical_buf = physical.buffer
-            if physical_buf is None:
-                physical_raw = None
-            elif physical_buf.raw != buf.raw:
-                write_buf = physical_buf
+        if physical is None:
+            raise RuntimeError('copy_from requires a physical Tensor root')
+        # Tensor._buffer -> Buffer.copy_from: finish COPY/AFTER effects before
+        # writing, then use current storage only. UOp.buffer alone is not a
+        # materialization test: it can look through an unexecuted AFTER.
+        if not _ffi._lib.poly_uop_has_buffer_identity(physical.raw):
+            self.realize()
+            physical = self.uop_physical
+        write_buf = physical.buffer
+        if write_buf is None:
+            raise RuntimeError('copy_from requires a tensor backed by a BUFFER UOp')
         target_device = _device_id(self._device)
         rc = _ffi._lib.poly_buffer_ensure_device_allocated(
             self._ctx, write_buf.raw, target_device
@@ -1244,17 +1252,6 @@ class Tensor:
         rc = _ffi._lib.poly_buffer_write(self._ctx, write_buf.raw, ptr, arr.nbytes)
         if rc != 0:
             raise RuntimeError('poly_buffer_write failed')
-        if logical is not None:
-            rc = _ffi._lib.poly_tensor_replace_roots(
-                self._ctx,
-                self._tensor,
-                logical.raw,
-                physical_raw,
-                _POLY_TENSOR_VALUE,
-                _device_id(self._device),
-            )
-            if rc != 0:
-                raise RuntimeError('poly_tensor_replace_roots failed during copy_from')
         self._data = None
         return self
 

@@ -34,6 +34,61 @@ def test_top_level_public_exports_are_defining_module_objects():
     assert getenv("POLYGRAD_MISSING_EXPORT_TEST", 17) == 17
 
 
+def test_temp_path_matches_pinned_helper_without_creating_files(tmp_path, monkeypatch):
+    import getpass
+    import tempfile
+    from polygrad.helpers import temp
+
+    monkeypatch.setattr(tempfile, 'tempdir', str(tmp_path))
+    assert temp('nested/artifact.bin') == (tmp_path / 'nested/artifact.bin').as_posix()
+    assert temp('artifact.bin', append_user=True) == (tmp_path / f'artifact.bin.{getpass.getuser()}').as_posix()
+    assert temp('/absolute/artifact.bin') == '/absolute/artifact.bin'
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_mv_address_matches_writable_view_offsets_and_rejections():
+    import ctypes
+    from polygrad.helpers import mv_address, to_mv
+
+    storage = bytearray(range(16))
+    view = memoryview(storage)
+    address = mv_address(view)
+    assert address == ctypes.addressof(ctypes.c_char.from_buffer(storage))
+    assert mv_address(view[4:]) == address + 4
+    assert mv_address(view.cast('I')[1:]) == address + 4
+    to_mv(address + 4, 1)[0] = 99
+    assert storage[4] == 99
+    for invalid in (memoryview(b'abc'), view[::2]):
+        with pytest.raises(TypeError):
+            mv_address(invalid)
+    with pytest.raises(ValueError):
+        mv_address(view[:0])
+
+
+def test_ffi_dtype_layout_is_the_current_scalar_c_abi():
+    # src/polygrad.h:PolyDType has no vector/pointer fields. Passing the old
+    # larger structure by value would use a different libffi calling layout.
+    import ctypes
+    assert _ffi.PolyDType._fields_ == [
+        ('priority', ctypes.c_int8), ('bitsize', ctypes.c_uint16),
+        ('name', ctypes.c_char_p), ('fmt', ctypes.c_char),
+    ]
+
+
+def test_can_lossless_cast_exposes_existing_core_dtype_rules():
+    from polygrad.dtype import can_lossless_cast
+
+    for source, dest, expected in (
+        (dtypes.int8, dtypes.uint64, False), (dtypes.int32, dtypes.uint32, False),
+        (dtypes.uint8, dtypes.int16, True), (dtypes.uint32, dtypes.int64, True),
+        (dtypes.int32, dtypes.float, False), (dtypes.int64, dtypes.double, False),
+        (dtypes.int8, dtypes.half, True), (dtypes.int8, dtypes.bfloat16, False),
+        (dtypes.int64, dtypes.weakint, True), (dtypes.weakfloat, dtypes.float, False),
+        (dtypes.bool, dtypes.int8, True), (dtypes.float, dtypes.float, True),
+    ):
+        assert can_lossless_cast(source, dest) is expected
+
+
 def test_uop_resolve_simplifies_before_using_bounds():
     # Pinned tinygrad/uop/ops.py:50-54 rewrites first, then returns a proven
     # boolean only when simplified vmin/vmax agree.

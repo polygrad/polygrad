@@ -156,6 +156,25 @@ async function runWebGpuLifecycleChecks() {
     if (!coreRejected) throw new Error('destroyed core admitted later Asyncify work')
   })
 
+  await test('webgpu runtime close waits for copyFromAsync and rejects later writes', async () => {
+    const rt = polygrad.create({ core: 'wasm', device: 'webgpu' })
+    try {
+      const tensor = new rt.Tensor(new Float32Array([1, 2, 3]))
+      const pending = tensor.copyFromAsync([4, 5, 6])
+      if (rt._activeAsync !== 1) throw new Error('host write has no runtime lease')
+      const disposed = rt.dispose()
+      if (await pending !== tensor) throw new Error('admitted host write did not complete')
+      await disposed
+      let rejected = false
+      try { await tensor.copyFromAsync([7, 8, 9]) } catch (e) {
+        rejected = /disposed/.test(String(e.message || e))
+      }
+      if (!rejected) throw new Error('closed runtime admitted a host write')
+    } finally {
+      await rt.dispose()
+    }
+  })
+
   await test('webgpu Tensor and UOp releases share the core Asyncify queue', async () => {
     const rt = polygrad.create({ core: 'wasm', device: 'webgpu' })
     let openGate

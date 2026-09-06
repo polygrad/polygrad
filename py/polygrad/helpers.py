@@ -6,6 +6,7 @@ import contextlib
 import ctypes
 import decimal
 import functools
+import getpass
 import gzip
 import hashlib
 import itertools
@@ -176,6 +177,11 @@ def strides_for_shape(shape):
 @functools.cache
 def getenv(key: str, default: Any = 0):
     return type(default)(os.getenv(key, default))
+
+
+def temp(x: str, append_user: bool = False) -> str:
+    return (pathlib.Path(tempfile.gettempdir()) /
+            (f"{x}.{getpass.getuser()}" if append_user else x)).as_posix()
 
 
 class Context(contextlib.ContextDecorator):
@@ -386,6 +392,10 @@ def to_mv(ptr: int, sz: int) -> memoryview:
     return memoryview((ctypes.c_uint8 * sz).from_address(ptr)).cast("B")
 
 
+def mv_address(mv):
+    return ctypes.addressof(ctypes.c_char.from_buffer(mv))
+
+
 # Direct port of pinned tinygrad/helpers.py:538-575. The examples use the
 # returned object's counters and set_description in addition to iteration.
 class tqdm(Generic[T]):
@@ -518,6 +528,8 @@ __all__ = [
     "colored",
     "fetch",
     "getenv",
+    "temp",
+    "mv_address",
     "prod",
     "profile_marker",
     "cpu_events",

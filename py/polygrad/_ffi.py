@@ -59,11 +59,6 @@ class PolyDType(ctypes.Structure):
         ('bitsize', ctypes.c_uint16),
         ('name', ctypes.c_char_p),
         ('fmt', ctypes.c_char),
-        ('count', ctypes.c_uint16),
-        ('is_ptr', ctypes.c_bool),
-        ('addrspace', ctypes.c_int),
-        ('vcount', ctypes.c_uint16),
-        ('ptr_size', ctypes.c_int64),
     ]
 
 class PolyOptimConfig(ctypes.Structure):
@@ -290,6 +285,9 @@ def _declare_signatures(lib):
 
     lib.poly_dtype_id_by_name.restype = ctypes.c_int
     lib.poly_dtype_id_by_name.argtypes = [ctypes.c_char_p]
+
+    lib.poly_dtype_can_lossless_cast.restype = ctypes.c_bool
+    lib.poly_dtype_can_lossless_cast.argtypes = [PolyDType, PolyDType]
 
     # --- Frontend helpers (frontend.h) ---
     lib.poly_const_float.restype = _ptr

@@ -1240,15 +1240,7 @@ function createBoundTensorClass(runtime) {
       return this
     }
 
-    copyFrom(data) {
-      if (!ffi.poly_buffer_write || !ffi.poly_buffer_ensure_device_allocated) {
-        throw new Error(
-          'poly_buffer_write and poly_buffer_ensure_device_allocated are required for Tensor.copyFrom'
-        )
-      }
-      const logicalRaw = this._logicalUopRaw() || this._currentUopRaw()
-      const buf = logicalRaw ? ffi.poly_uop_buffer(this._ctx, logicalRaw) : null
-      if (!buf) throw new Error('copyFrom requires a tensor backed by a BUFFER UOp')
+    _copyFromData(data) {
       const AT = TA_BY_DTYPE[this._dtype] || Float32Array
       const expectedBytes = this.numel() * AT.BYTES_PER_ELEMENT
       let view
@@ -1269,27 +1261,41 @@ function createBoundTensorClass(runtime) {
       if (view.byteLength !== expectedBytes) {
         throw new Error(`copyFrom byte size mismatch ${view.byteLength} != ${expectedBytes}`)
       }
-      let physicalRaw = this._physicalUopRaw()
-      let writeBuf = buf
-      if (physicalRaw) {
-        const physicalBuf = ffi.poly_uop_buffer(this._ctx, physicalRaw)
-        if (physicalBuf && uopKey(physicalBuf) !== uopKey(buf)) {
-          writeBuf = physicalBuf
-        } else if (!physicalBuf) {
-          physicalRaw = null
-        }
-      }
+      return view
+    }
+
+    _writeCurrentBuffer(view) {
+      const physical = this._physicalUopRaw()
+      const writeBuf = physical ? ffi.poly_uop_buffer(this._ctx, physical) : null
+      if (!writeBuf) throw new Error('copyFrom requires a tensor backed by a BUFFER UOp')
       const targetDevice = deviceId(this._device)
       ffi.poly_buffer_ensure_device_allocated(this._ctx, writeBuf, targetDevice)
       ffi.poly_buffer_write(this._ctx, writeBuf, view)
-      if (ffi.poly_tensor_replace_roots && logicalRaw) {
-        const rc = ffi.poly_tensor_replace_roots(
-          this._ctx, this._tensor, logicalRaw, physicalRaw, POLY_TENSOR_VALUE, deviceId(this._device)
-        )
-        if (rc !== 0) throw new Error('poly_tensor_replace_roots failed during copyFrom')
-      }
       this._data = null
       return this
+    }
+
+    copyFrom(data) {
+      const view = this._copyFromData(data)
+      const physical = this._physicalUopRaw()
+      if (!physical) throw new Error('copyFrom requires a physical Tensor root')
+      // Pinned Tensor._buffer -> Buffer.copy_from finishes pending effects.
+      // A recursive buffer lookup also crosses AFTER and is not proof that
+      // those effects ran. Direct writes must never republish Tensor roots.
+      if (!ffi.poly_uop_has_buffer_identity(physical)) {
+        requireSyncHostBridge('copyFrom()', 'copyFromAsync()')
+        this.realize()
+      }
+      return this._writeCurrentBuffer(view)
+    }
+
+    copyFromAsync(data) {
+      return this._rt._withAsync(async () => {
+        // Realization may suspend; do not borrow caller bytes across the await.
+        const view = this._copyFromData(data).slice()
+        await this._realizeAsyncUnleased()
+        return this._writeCurrentBuffer(view)
+      })
     }
 
     updateFrom(data) {
