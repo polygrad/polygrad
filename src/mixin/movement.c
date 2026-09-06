@@ -188,10 +188,24 @@ PolyUOp *poly_expand(PolyCtx *ctx, PolyUOp *src, int64_t *dims, int ndim) {
 }
 
 PolyUOp *poly_permute(PolyCtx *ctx, PolyUOp *src, int64_t *perm, int ndim) {
-  if (!ctx || !src || !rank_tuple_valid(perm, ndim)) return NULL;
+  if (!ctx || !src || !rank_tuple_valid(perm, ndim) || poly_uop_ndim(ctx, src) != ndim) return NULL;
+  /* MovementMixin.permute resolves/validates axes before _mop and preserves
+   * source identity for a no-op, including callers without a Tensor frontend. */
+  int64_t order[POLY_MAX_DIMS];
+  bool seen[POLY_MAX_DIMS] = {0}, identity = true;
+  for (int i = 0; i < ndim; i++) {
+    int64_t axis = perm[i];
+    if (axis < -ndim || axis >= ndim) return NULL;
+    if (axis < 0) axis += ndim;
+    if (seen[axis]) return NULL;
+    seen[axis] = true;
+    order[i] = axis;
+    if (axis != i) identity = false;
+  }
+  if (identity) return src;
   PolyArg arg;
   arg.kind = POLY_ARG_INT_TUPLE;
-  arg.int_tuple.vals = perm;
+  arg.int_tuple.vals = order;
   arg.int_tuple.n = ndim;
   return poly_uop1(ctx, POLY_OP_PERMUTE, src->dtype, src, arg);
 }

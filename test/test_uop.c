@@ -357,6 +357,74 @@ TEST(uop, mop_cleanup_matches_current_tinygrad_topology) {
   PASS();
 }
 
+TEST(uop, mop_cleanup_flattens_empty_index_coordinates) {
+  /* tinygrad/uop/movement.py:index-on-index permits either coordinate
+   * tuple to be empty; INDEX(base) is still a shaped address operation. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *base = poly_uop_placeholder(
+      ctx, (int64_t[]){2, 3}, 2, POLY_FLOAT32, 0, POLY_ADDR_GLOBAL, NULL, false
+  );
+  ASSERT_NOT_NULL(base);
+  PolyUOp *coords[] = {poly_const_int(ctx, 0), poly_const_int(ctx, 1)};
+  for (int inner_n = 0; inner_n <= 1; inner_n++) {
+    for (int outer_n = 0; outer_n <= 1; outer_n++) {
+      PolyUOp *inner = poly_uop_index(ctx, base, coords, inner_n);
+      PolyUOp *outer = poly_uop_index(ctx, inner, coords + inner_n, outer_n);
+      PolyUOp *expected = poly_uop_index(ctx, base, coords, inner_n + outer_n);
+      ASSERT_NOT_NULL(inner);
+      ASSERT_NOT_NULL(outer);
+      ASSERT_NOT_NULL(expected);
+      ASSERT_PTR_EQ(poly_graph_rewrite(ctx, outer, poly_mop_cleanup()), expected);
+    }
+  }
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(uop, permute_mixin_identity_and_negative_axes) {
+  /* MovementMixin.permute resolves axes and returns identity before _mop;
+   * this must hold for C callers without frontend normalization too. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *base = poly_uop_placeholder(
+      ctx, (int64_t[]){2, 3}, 2, POLY_FLOAT32, 0, POLY_ADDR_GLOBAL, NULL, false
+  );
+  ASSERT_NOT_NULL(base);
+  ASSERT_PTR_EQ(poly_permute(ctx, base, (int64_t[]){0, 1}, 2), base);
+  ASSERT_PTR_EQ(poly_permute(ctx, base, (int64_t[]){-2, -1}, 2), base);
+  PolyUOp *swap = poly_permute(ctx, base, (int64_t[]){1, 0}, 2);
+  ASSERT_NOT_NULL(swap);
+  ASSERT_INT_EQ(swap->op, POLY_OP_PERMUTE);
+  ASSERT_INT_EQ(swap->n_src, 1);
+  ASSERT_PTR_EQ(swap->src[0], base);
+  ASSERT_INT_EQ(swap->arg.int_tuple.n, 2);
+  ASSERT_INT_EQ(swap->arg.int_tuple.vals[0], 1);
+  ASSERT_INT_EQ(swap->arg.int_tuple.vals[1], 0);
+  ASSERT_PTR_EQ(poly_permute(ctx, base, (int64_t[]){-1, -2}, 2), swap);
+  PolyUOp *scalar = poly_const_float(ctx, 1.0);
+  ASSERT_PTR_EQ(poly_permute(ctx, scalar, NULL, 0), scalar);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(uop, permute_mixin_rejects_invalid_axes) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *base = poly_uop_placeholder(
+      ctx, (int64_t[]){2, 3}, 2, POLY_FLOAT32, 0, POLY_ADDR_GLOBAL, NULL, false
+  );
+  ASSERT_NOT_NULL(base);
+  ASSERT_PTR_EQ(poly_permute(ctx, base, (int64_t[]){0, 0}, 2), NULL);
+  ASSERT_PTR_EQ(poly_permute(ctx, base, (int64_t[]){0}, 1), NULL);
+  ASSERT_PTR_EQ(poly_permute(ctx, base, (int64_t[]){0, 2}, 2), NULL);
+  ASSERT_PTR_EQ(poly_permute(ctx, base, (int64_t[]){-3, 0}, 2), NULL);
+  ASSERT_PTR_EQ(poly_permute(ctx, base, (int64_t[]){0, 1, 2}, 3), NULL);
+  ASSERT_PTR_EQ(poly_permute(ctx, base, (int64_t[]){INT64_MIN, INT64_MAX}, 2), NULL);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(uop, contiguous_view_offset_matches_current_tinygrad) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);

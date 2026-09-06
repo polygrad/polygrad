@@ -115,9 +115,11 @@ static PolyUOp *const_index_into_stack(PolyCtx *ctx, PolyUOp *index, const PolyB
 
 static PolyUOp *index_on_index(PolyCtx *ctx, PolyUOp *index, const PolyBindings *bindings) {
   (void)bindings;
-  if (!index || index->op != POLY_OP_INDEX || index->n_src < 2) return NULL;
+  /* Pinned mop_cleanup permits empty coordinate tuples on either INDEX;
+   * all-scalar is then vacuously true, but the base source is still required. */
+  if (!index || index->op != POLY_OP_INDEX || index->n_src < 1) return NULL;
   PolyUOp *inner = index->src[0];
-  if (!inner || inner->op != POLY_OP_INDEX || inner->n_src < 2) return NULL;
+  if (!inner || inner->op != POLY_OP_INDEX || inner->n_src < 1) return NULL;
 
   bool all_scalar = true;
   for (int i = 1; i < inner->n_src; i++)

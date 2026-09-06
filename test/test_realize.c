@@ -331,7 +331,9 @@ TEST(realize, custom_call_copy_output_schedules_copy_call) {
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, ai, bi, poly_arg_none());
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, ci, add, poly_arg_none());
   PolyUOp *end = poly_uop_end(ctx, store, &r, 1);
-  PolyUOp *sink = poly_uop_sink(ctx, &end, 1);
+  /* Pinned lower_sink_to_linear leaves KernelInfo SINKs as custom kernels;
+   * a plain SINK is instead recursively scheduled as a tensor function. */
+  PolyUOp *sink = poly_uop_sink_ex(ctx, &end, 1, "custom_copy_source", 1);
   PolyUOp *args[3] = {c, a, b};
   PolyUOp *call = poly_uop_call(ctx, sink, args, 3);
   PolyUOp *after = poly_uop_after(ctx, c, call);
