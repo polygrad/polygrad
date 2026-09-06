@@ -187,11 +187,11 @@ print('leaving_live_instance')
         np.testing.assert_allclose(t.numpy(), [1, 2, 3])
 
     def test_list_dtype_inference_matches_tinygrad(self):
-        assert Tensor([1, 2, 3]).dtype == 'int32'
-        assert Tensor([[1, 2], [3, 4]]).dtype == 'int32'
-        assert Tensor([True, False]).dtype == 'bool'
-        assert Tensor([1, 2.5]).dtype == 'float32'
-        assert Tensor([]).dtype == 'float32'
+        assert Tensor([1, 2, 3]).dtype is dtypes.int32
+        assert Tensor([[1, 2], [3, 4]]).dtype is dtypes.int32
+        assert Tensor([True, False]).dtype is dtypes.bool
+        assert Tensor([1, 2.5]).dtype is dtypes.float32
+        assert Tensor([]).dtype is dtypes.float32
 
     @pytest.mark.parametrize('payload,dtype,raw_dtype,expected', [
         (b'\x00\x7f\x80\xff', None, 'uint8', [0, 127, 128, 255]),
@@ -283,7 +283,7 @@ print('leaving_live_instance')
         ]
         for tensor, shape, dtype, value in cases:
             assert tensor.shape == shape
-            assert tensor.dtype == dtype
+            assert tensor.dtype is getattr(dtypes, dtype)
             assert tensor.uop.op_name == "CONST"
             assert tensor.uop_logical.raw == tensor.uop.raw
             if tensor.device == "CPU":
@@ -297,7 +297,7 @@ print('leaving_live_instance')
         ]
         for source, value, dtype in cases:
             scalar = source._ensure_tensor(value)
-            assert scalar.dtype == dtype
+            assert scalar.dtype is getattr(dtypes, dtype)
             assert scalar.uop_logical.op_name == "CONST"
             assert scalar.uop_physical.op_name == "CONST"
             assert scalar.uop_logical.raw == scalar.uop_physical.raw
@@ -989,9 +989,9 @@ print('leaving_live_instance')
 
     def test_int_tensor_python_float_scalar_promotes_like_tinygrad(self):
         x = Tensor([0, 1, 0], dtype='int32')
-        assert (x * 0.25).dtype == 'weakfloat'
-        assert (0.25 * x).dtype == 'weakfloat'
-        assert (x + 0.25).dtype == 'weakfloat'
+        assert (x * 0.25).dtype is dtypes.weakfloat
+        assert (0.25 * x).dtype is dtypes.weakfloat
+        assert (x + 0.25).dtype is dtypes.weakfloat
         np.testing.assert_allclose((x * 0.25).numpy(), [0.0, 0.25, 0.0])
         np.testing.assert_allclose((x + 0.25).numpy(), [0.25, 1.25, 0.25])
 
@@ -1048,7 +1048,7 @@ print('leaving_live_instance')
 
     def test_full_defaults_to_writable_buffer_and_supports_buffer_false(self):
         t = Tensor.full((2,), 3.0)
-        assert t.dtype == 'float32'
+        assert t.dtype is dtypes.float32
         assert t.uop.op_name == 'AFTER'
         assert t.uop.src[0].op_name == 'BUFFER'
         assert t.uop.src[0].dtype == dtypes.float32
@@ -1064,7 +1064,7 @@ print('leaving_live_instance')
         broadcast = Tensor.full((2,), 3.0, buffer=False)
         assert broadcast.uop_logical.op_name == 'EXPAND'
         assert broadcast.uop_physical == broadcast.uop_logical
-        assert broadcast.dtype == 'weakfloat'
+        assert broadcast.dtype is dtypes.weakfloat
         np.testing.assert_allclose(broadcast.numpy(), [3.0, 3.0])
 
         with pytest.raises(RuntimeError, match='poly_tensor_full'):
@@ -1098,7 +1098,7 @@ print('leaving_live_instance')
         }
         for dtype, wanted in expected.items():
             tensor = Tensor(values, dtype=dtype)
-            assert tensor.dtype == dtype
+            assert tensor.dtype is getattr(dtypes, dtype)
             actual = tensor.cast('float32').numpy()
             np.testing.assert_equal(actual, np.asarray(wanted, dtype=np.float32))
 
@@ -1111,7 +1111,7 @@ print('leaving_live_instance')
         for data, dtype, expected_dtype, expected in cases:
             t = Tensor(data, dtype=dtype)
             assert t.shape == ()
-            assert t.dtype == expected_dtype
+            assert t.dtype is getattr(dtypes, expected_dtype)
             assert t.uop.op_name == 'CONST'
             np.testing.assert_allclose(t.cast('float32').numpy(), expected)
 
@@ -1767,7 +1767,7 @@ class TestJit:
         # UOp.index(bool) constructs, but executing that body is invalid.
         def invalid_index_kernel(out):
             out = out.flatten()
-            zero = UOp.const(out.ctx, 0)
+            zero = UOp.const(0, ctx=out.ctx)
             gate = zero.lt(1)
             bad = out.index(gate)
             assert bad is not None
@@ -1931,31 +1931,31 @@ class TestElementwise:
         x = Tensor([True, False], dtype='bool')
 
         add_int = x.add(2)
-        assert add_int.dtype == 'weakint'
+        assert add_int.dtype is dtypes.weakint
         np.testing.assert_allclose(add_int.numpy(), [3, 2])
 
         sub_bool = x.sub(True)
-        assert sub_bool.dtype == 'bool'
+        assert sub_bool.dtype is dtypes.bool
         assert sub_bool.uop.op_name == 'ADD'
         assert any(src.op_name == 'CMPNE' for src in sub_bool.uop.src)
         np.testing.assert_array_equal(sub_bool.numpy(), [True, False])
 
         mul_int = x.mul(2)
-        assert mul_int.dtype == 'weakint'
+        assert mul_int.dtype is dtypes.weakint
         np.testing.assert_allclose(mul_int.numpy(), [2, 0])
 
         pow_int = x.pow(2)
-        assert pow_int.dtype == 'weakint'
+        assert pow_int.dtype is dtypes.weakint
         np.testing.assert_allclose(pow_int.numpy(), [1, 0])
 
         neg = x.neg()
-        assert neg.dtype == 'bool'
+        assert neg.dtype is dtypes.bool
         assert neg.uop.op_name == 'CMPNE'
         assert [src.op_name for src in neg.uop.src] == ['BUFFER', 'CONST']
         np.testing.assert_array_equal(neg.numpy(), [False, True])
 
         logical_not = x.logical_not()
-        assert logical_not.dtype == 'bool'
+        assert logical_not.dtype is dtypes.bool
         assert logical_not.uop.op_name == 'CMPNE'
         assert [src.op_name for src in logical_not.uop.src] == ['BUFFER', 'CONST']
         np.testing.assert_array_equal(logical_not.numpy(), [False, True])
@@ -2045,38 +2045,38 @@ class TestElementwise:
         x = Tensor([3, 4], dtype='int32')
 
         named = x.div(2)
-        assert named.dtype == 'float32'
+        assert named.dtype is dtypes.float32
         np.testing.assert_allclose(named.numpy(), [1.5, 2.0], rtol=1e-6, atol=1e-6)
 
         operator = x / 2
-        assert operator.dtype == 'float32'
+        assert operator.dtype is dtypes.float32
         np.testing.assert_allclose(operator.numpy(), [1.5, 2.0], rtol=1e-6, atol=1e-6)
 
         reverse = x.div(2, reverse=True)
-        assert reverse.dtype == 'float32'
+        assert reverse.dtype is dtypes.float32
         np.testing.assert_allclose(reverse.numpy(), [0.6666667, 0.5], rtol=1e-6, atol=1e-6)
 
         reverse_operator = 2 / x
-        assert reverse_operator.dtype == 'float32'
+        assert reverse_operator.dtype is dtypes.float32
         np.testing.assert_allclose(reverse_operator.numpy(), [0.6666667, 0.5], rtol=1e-6, atol=1e-6)
 
         tensor_divisor = x.div(Tensor([2, 2], dtype='int32'))
-        assert tensor_divisor.dtype == 'float32'
+        assert tensor_divisor.dtype is dtypes.float32
         np.testing.assert_allclose(tensor_divisor.numpy(), [1.5, 2.0], rtol=1e-6, atol=1e-6)
 
     def test_named_pow_int_base_float_exponent_matches_tinygrad(self):
         x = Tensor([2, 3], dtype='int32')
 
         named = x.pow(2.0)
-        assert named.dtype == 'weakfloat'
+        assert named.dtype is dtypes.weakfloat
         np.testing.assert_allclose(named.numpy(), [4, 9])
 
         operator = x ** 2.0
-        assert operator.dtype == 'weakfloat'
+        assert operator.dtype is dtypes.weakfloat
         np.testing.assert_allclose(operator.numpy(), [4, 9])
 
         reverse = x.pow(2.0, reverse=True)
-        assert reverse.dtype == 'weakfloat'
+        assert reverse.dtype is dtypes.weakfloat
         np.testing.assert_allclose(reverse.numpy(), [4.0, 8.0])
 
     def test_named_pow_negative_scalar_int_validation_matches_tinygrad(self):
@@ -2088,7 +2088,7 @@ class TestElementwise:
             x ** -1
 
         tensor_exponent = x.pow(Tensor([-1, -2], dtype='int32'))
-        assert tensor_exponent.dtype == 'int32'
+        assert tensor_exponent.dtype is dtypes.int32
         assert tensor_exponent.uop_physical.op_name == 'POW'
 
     def test_scalar_add(self):
@@ -2233,10 +2233,10 @@ class TestMovement:
         # Current Tinygrad keeps the Python scalar kind through
         # _pad_constant; a float fill promotes an integer source.
         promoted = Tensor([1, 2], dtype=dtypes.int32).pad(((1, 1),), value=5.5)
-        assert promoted.dtype == 'weakfloat'
+        assert promoted.dtype is dtypes.weakfloat
         np.testing.assert_allclose(promoted.numpy(), [5.5, 1.0, 2.0, 5.5])
         bool_fill = Tensor([1, 2], dtype=dtypes.int32).pad(((1, 1),), value=True)
-        assert bool_fill.dtype == 'int32'
+        assert bool_fill.dtype is dtypes.int32
         np.testing.assert_array_equal(bool_fill.numpy(), [1, 1, 2, 1])
 
     def test_roll_1d(self):
@@ -2278,7 +2278,7 @@ class TestMovement:
     def test_one_hot_matches_tinygrad_probe(self):
         out = Tensor(np.array([0, 2, 1], dtype=np.int32), dtype='int32').one_hot(4)
         assert out.shape == (3, 4)
-        assert out.dtype == 'weakint'
+        assert out.dtype is dtypes.weakint
         np.testing.assert_array_equal(
             out.numpy(),
             [[1, 0, 0, 0], [0, 0, 1, 0], [0, 1, 0, 0]],
@@ -2420,8 +2420,8 @@ class TestReduce:
         x = Tensor(np.asarray([[1.25, -2.0, 0.5], [3.0, 0.25, -1.5]], dtype=np.float16))
         default = x.sum(axis=1)
         explicit = x.sum(axis=1, dtype=dtypes.float32)
-        assert default.dtype == 'float16'
-        assert explicit.dtype == 'float32'
+        assert default.dtype is dtypes.float16
+        assert explicit.dtype is dtypes.float32
         np.testing.assert_array_equal(default.numpy(), [-0.25, 1.75])
         np.testing.assert_array_equal(explicit.numpy(), [-0.25, 1.75])
 
@@ -2629,7 +2629,7 @@ class TestMatmulAndLoss:
         half_explicit = x.conv2d(w_half, b_half, dtype=dtypes.float32)
         half_float_bias = x.conv2d(w_half, b_float)
         assert [mixed.dtype, half_default.dtype, half_explicit.dtype, half_float_bias.dtype] == [
-            'float32', 'float16', 'float32', 'float32',
+            dtypes.float32, dtypes.float16, dtypes.float32, dtypes.float32,
         ]
         expected_float = [[[[0.38385009765625, 0.47314453125],
                             [0.65167236328125, 0.740966796875]]]]
@@ -2796,8 +2796,8 @@ class TestMatmulAndLoss:
         b = Tensor(np.asarray([[0.5, -1.0], [2.0, 0.25], [-0.75, 3.0]], dtype=np.float16))
         default = a.dot(b)
         explicit = a.dot(b, dtype=dtypes.float32)
-        assert default.dtype == 'float16'
-        assert explicit.dtype == 'float32'
+        assert default.dtype is dtypes.float16
+        assert explicit.dtype is dtypes.float32
         np.testing.assert_array_equal(default.numpy(), [[-3.75, -0.25], [3.125, -7.4375]])
         np.testing.assert_array_equal(explicit.numpy(), [[-3.75, -0.25], [3.125, -7.4375]])
         assert Tensor([1.0, 2.0, 3.0]).dot(Tensor([4.0, 5.0, 6.0])).shape == ()
@@ -2805,7 +2805,7 @@ class TestMatmulAndLoss:
         mixed = a.dot(Tensor(np.asarray(
             [[0.5, -1.0], [2.0, 0.25], [-0.75, 3.0]], dtype=np.float32,
         )))
-        assert mixed.dtype == 'float32'
+        assert mixed.dtype is dtypes.float32
         assert mixed.uop.op_name == 'REDUCE'
         assert mixed.uop.src[0].op_name == 'PERMUTE'
         mixed_mul = mixed.uop.src[0].src[0]
@@ -2873,8 +2873,8 @@ class TestMatmulAndLoss:
         assert not np.isnan(r.numpy()).any()
 
         qi, ri = Tensor(np.array([[1, 2], [3, 4]], dtype=np.int32)).qr()
-        assert qi.dtype == 'float32'
-        assert ri.dtype == 'float32'
+        assert qi.dtype is dtypes.float32
+        assert ri.dtype is dtypes.float32
         np.testing.assert_allclose(qi.numpy() @ ri.numpy(), [[1, 2], [3, 4]], rtol=1e-4, atol=1e-4)
 
     def test_qr_reduced_and_r_modes_match_numpy_shapes(self):
@@ -2958,13 +2958,13 @@ class TestMatmulAndLoss:
         a_int = np.array([[2, 0], [4, 2]], dtype=np.int32)
         b_int = np.array([2, 8], dtype=np.int32)
         x_int = Tensor(a_int).triangular_solve(Tensor(b_int))
-        assert x_int.dtype == 'float32'
+        assert x_int.dtype is dtypes.float32
         np.testing.assert_allclose(x_int.numpy(), np.linalg.solve(a_int.astype(np.float32), b_int), rtol=1e-6)
 
         a64 = np.array([[2.0, 0.0], [1.0, 4.0]], dtype=np.float64)
         b64 = np.array([[2.0], [9.0]], dtype=np.float64)
         x64 = Tensor(a64, dtype='float64').triangular_solve(Tensor(b64, dtype='float64'))
-        assert x64.dtype == 'float64'
+        assert x64.dtype is dtypes.float64
         np.testing.assert_allclose(x64.numpy(), np.linalg.solve(a64, b64), rtol=1e-12, atol=1e-12)
 
         with pytest.raises(ValueError, match='cannot triangular_solve'):
@@ -3002,12 +3002,12 @@ class TestMatmulAndLoss:
     def test_cholesky_edge_cases(self):
         a_int = np.array([[4, 2], [2, 5]], dtype=np.int32)
         l_int = Tensor(a_int).cholesky()
-        assert l_int.dtype == 'float32'
+        assert l_int.dtype is dtypes.float32
         np.testing.assert_allclose(l_int.numpy(), np.linalg.cholesky(a_int.astype(np.float32)), rtol=1e-5)
 
         a64 = np.array([[4.0, 2.0], [2.0, 5.0]], dtype=np.float64)
         l64 = Tensor(a64, dtype='float64').cholesky()
-        assert l64.dtype == 'float64'
+        assert l64.dtype is dtypes.float64
         np.testing.assert_allclose(l64.numpy(), np.linalg.cholesky(a64), rtol=1e-12, atol=1e-12)
 
         with pytest.raises(ValueError, match='cannot cholesky'):
@@ -3141,7 +3141,7 @@ class TestMatmulAndLoss:
         a64 = np.array([[3.0, 1.0], [1.0, 2.0]], dtype=np.float64)
         b64 = np.array([[4.0], [5.0]], dtype=np.float64)
         got64 = Tensor(a64).solve(Tensor(b64))
-        assert got64.dtype == 'float64'
+        assert got64.dtype is dtypes.float64
         np.testing.assert_allclose(got64.numpy(), np.linalg.solve(a64, b64), rtol=1e-10, atol=1e-10)
 
         with pytest.raises(ValueError, match='cannot solve'):
@@ -3201,7 +3201,7 @@ class TestMatmulAndLoss:
         a64 = np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 7.0]], dtype=np.float64)
         b64 = np.array([1.0, 2.0, 4.0], dtype=np.float64)
         got64 = Tensor(a64).lstsq(Tensor(b64))
-        assert got64.dtype == 'float64'
+        assert got64.dtype is dtypes.float64
         np.testing.assert_allclose(got64.numpy(), np.linalg.lstsq(a64, b64, rcond=None)[0], rtol=1e-10, atol=1e-10)
 
         wide = np.array([[1.0, 2.0, 0.0], [0.0, 1.0, 1.0]], dtype=np.float32)
@@ -3547,7 +3547,7 @@ class TestDevice:
     def test_assign_rejects_dtype_mismatch_like_tinygrad(self):
         a = Tensor([1.0], dtype='float32')
         v = Tensor([5.0], dtype='float64')
-        with pytest.raises(RuntimeError, match='assign dtype mismatch float32 != float64'):
+        with pytest.raises(RuntimeError, match=r'assign dtype mismatch dtypes\.float != dtypes\.double'):
             a.assign(v)
 
     def test_assign_to_same_device_place_keeps_place_target(self):
@@ -3578,7 +3578,7 @@ class TestRepr:
     def test_repr(self):
         t = Tensor([1, 2, 3])
         assert 'shape=(3,)' in repr(t)
-        assert 'int32' in repr(t)
+        assert 'dtypes.int' in repr(t)
 
     def test_bool_raises_like_tinygrad(self):
         with pytest.raises(TypeError, match="__bool__ on Tensor is not defined"):
@@ -3586,7 +3586,7 @@ class TestRepr:
 
     def test_repr_f64(self):
         t = Tensor([1, 2, 3], dtype='float64')
-        assert 'float64' in repr(t)
+        assert 'dtypes.double' in repr(t)
 
 
 class TestFloat64:
@@ -3594,54 +3594,54 @@ class TestFloat64:
 
     def test_numpy_dtype_is_preserved_like_tinygrad(self):
         f64 = Tensor(np.array([1.0, 2.0], dtype=np.float64))
-        assert f64.dtype == 'float64'
+        assert f64.dtype is dtypes.float64
         assert f64.numpy().dtype == np.float64
 
         i64 = Tensor(np.array([1, 2], dtype=np.int64))
-        assert i64.dtype == 'int64'
+        assert i64.dtype is dtypes.int64
         assert i64.numpy().dtype == np.int64
 
         default_list = Tensor([1.0, 2.0])
-        assert default_list.dtype == 'float32'
+        assert default_list.dtype is dtypes.float32
 
     def test_creation_from_list(self):
         t = Tensor([1.0, 2.0, 3.0], dtype='float64')
-        assert t.dtype == 'float64'
+        assert t.dtype is dtypes.float64
         assert t.shape == (3,)
         assert t.numpy().dtype == np.float64
         np.testing.assert_allclose(t.numpy(), [1, 2, 3])
 
     def test_creation_2d(self):
         t = Tensor([[1, 2], [3, 4]], dtype='float64')
-        assert t.dtype == 'float64'
+        assert t.dtype is dtypes.float64
         assert t.shape == (2, 2)
         assert t.numpy().dtype == np.float64
         np.testing.assert_allclose(t.numpy(), [[1, 2], [3, 4]])
 
     def test_zeros_f64(self):
         t = Tensor.zeros(4, dtype='float64')
-        assert t.dtype == 'float64'
+        assert t.dtype is dtypes.float64
         assert t.numpy().dtype == np.float64
         np.testing.assert_allclose(t.numpy(), [0, 0, 0, 0])
 
     def test_ones_f64(self):
         t = Tensor.ones(3, dtype='float64')
-        assert t.dtype == 'float64'
+        assert t.dtype is dtypes.float64
         np.testing.assert_allclose(t.numpy(), [1, 1, 1])
 
     def test_full_f64(self):
         t = Tensor.full((2, 3), 7.0, dtype='float64')
-        assert t.dtype == 'float64'
+        assert t.dtype is dtypes.float64
         np.testing.assert_allclose(t.numpy(), np.full((2, 3), 7.0))
 
     def test_eye_f64(self):
         t = Tensor.eye(3, dtype='float64')
-        assert t.dtype == 'float64'
+        assert t.dtype is dtypes.float64
         np.testing.assert_allclose(t.numpy(), np.eye(3))
 
     def test_arange_f64(self):
         t = Tensor.arange(5, dtype='float64')
-        assert t.dtype == 'float64'
+        assert t.dtype is dtypes.float64
         np.testing.assert_allclose(t.numpy(), [0, 1, 2, 3, 4])
 
     def test_add_f64(self):
@@ -3712,16 +3712,16 @@ class TestFloat64:
         """Ensure dtype propagates through ops."""
         a = Tensor([1.0, 2.0], dtype='float64')
         b = a + 1.0
-        assert b.dtype == 'float64'
+        assert b.dtype is dtypes.float64
         c = b * 2.0
-        assert c.dtype == 'float64'
+        assert c.dtype is dtypes.float64
         d = c.exp()
-        assert d.dtype == 'float64'
+        assert d.dtype is dtypes.float64
 
     def test_default_is_f32(self):
         """Ensure default dtype is still float32."""
         a = Tensor([1.0, 2.0])
-        assert a.dtype == 'float32'
+        assert a.dtype is dtypes.float32
         assert a.numpy().dtype == np.float32
 
 
@@ -3898,7 +3898,7 @@ class TestMaterializationParity:
             (integer.cos(), np.cos(expected_integer)),
             (integer.tan(), np.tan(expected_integer)),
         ):
-            assert actual.dtype == 'float32'
+            assert actual.dtype is dtypes.float32
             np.testing.assert_allclose(actual.numpy(), expected, rtol=1e-6, atol=1e-6)
         assert integer.sin().uop.src[0].op_name != 'CAST'
         np.testing.assert_allclose(
@@ -3909,7 +3909,7 @@ class TestMaterializationParity:
         )
 
         half = Tensor([0.0, 1.0], dtype='float16')
-        assert half.cos().dtype == 'float16'
+        assert half.cos().dtype is dtypes.float16
         np.testing.assert_allclose(
             half.cos().float().numpy(),
             np.cos(np.array([0.0, 1.0], dtype=np.float32)),
@@ -3924,8 +3924,8 @@ class TestMaterializationParity:
             (angles64, 'float64', np.float64, 1e-12),
         ):
             expected = np.array([0.0, 0.25, 0.5], dtype=numpy_dtype)
-            assert angles.cos().dtype == expected_dtype
-            assert angles.tan().dtype == expected_dtype
+            assert angles.cos().dtype is getattr(dtypes, expected_dtype)
+            assert angles.tan().dtype is getattr(dtypes, expected_dtype)
             np.testing.assert_allclose(
                 angles.cos().numpy(), np.cos(expected),
                 rtol=tolerance, atol=tolerance,
@@ -3994,10 +3994,10 @@ class TestMaterializationParity:
         )
 
         half = Tensor(values, dtype='float16')
-        assert half.sigmoid().dtype == 'float16'
-        assert half.tanh().dtype == 'float16'
-        assert half.gelu().dtype == 'float16'
-        assert half.quick_gelu().dtype == 'float16'
+        assert half.sigmoid().dtype is dtypes.float16
+        assert half.tanh().dtype is dtypes.float16
+        assert half.gelu().dtype is dtypes.float16
+        assert half.quick_gelu().dtype is dtypes.float16
         np.testing.assert_allclose(
             half.tanh().float().numpy(), np.tanh(values), rtol=2e-3, atol=2e-3
         )
@@ -4014,8 +4014,8 @@ class TestMaterializationParity:
         ints = Tensor([-2, 0, 3], dtype='int32')
         np.testing.assert_array_equal(ints.sign().numpy(), [-1, 0, 1])
         np.testing.assert_array_equal(ints.abs().numpy(), [2, 0, 3])
-        assert ints.gelu().dtype == 'weakfloat'
-        assert ints.quick_gelu().dtype == 'weakfloat'
+        assert ints.gelu().dtype is dtypes.weakfloat
+        assert ints.quick_gelu().dtype is dtypes.weakfloat
         int_values = np.array([-2, 0, 3], dtype=np.float32)
         np.testing.assert_allclose(
             ints.quick_gelu().numpy(),
@@ -4026,8 +4026,8 @@ class TestMaterializationParity:
         boolean = Tensor([False, True], dtype='bool')
         np.testing.assert_array_equal(boolean.sign().numpy(), [False, True])
         np.testing.assert_array_equal(boolean.abs().numpy(), [False, True])
-        assert boolean.gelu().dtype == 'weakfloat'
-        assert boolean.quick_gelu().dtype == 'weakfloat'
+        assert boolean.gelu().dtype is dtypes.weakfloat
+        assert boolean.quick_gelu().dtype is dtypes.weakfloat
         bool_values = np.array([0, 1], dtype=np.float32)
         np.testing.assert_allclose(
             boolean.quick_gelu().numpy(),
@@ -4089,15 +4089,15 @@ class TestMaterializationParity:
             ('float64', 'float64'),
         ):
             rounded = Tensor(values, dtype=dtype).round()
-            assert rounded.dtype == expected_dtype
+            assert rounded.dtype is getattr(dtypes, expected_dtype)
             np.testing.assert_array_equal(rounded.numpy(), expected_round)
 
         rounded_int = Tensor([-2, -1, 0, 1, 2], dtype='int32').round()
-        assert rounded_int.dtype == 'weakfloat'
+        assert rounded_int.dtype is dtypes.weakfloat
         np.testing.assert_array_equal(rounded_int.numpy(), [-2, -1, 0, 1, 2])
 
         rounded_bool = Tensor([False, True], dtype='bool').round()
-        assert rounded_bool.dtype == 'weakfloat'
+        assert rounded_bool.dtype is dtypes.weakfloat
         np.testing.assert_array_equal(rounded_bool.numpy(), [0, 1])
 
         # Pinned mixin/elementwise.py:596-604 independently gates each sign.
@@ -4114,12 +4114,12 @@ class TestMaterializationParity:
                 detect_positive=detect_positive,
                 detect_negative=detect_negative,
             )
-            assert result.dtype == 'bool'
+            assert result.dtype is dtypes.bool
             np.testing.assert_array_equal(result.numpy(), expected)
 
         for dtype in ('float16', 'float32', 'float64', 'int32', 'bool'):
             result = Tensor([0, 1], dtype=dtype).isinf()
-            assert result.dtype == 'bool'
+            assert result.dtype is dtypes.bool
             np.testing.assert_array_equal(result.numpy(), [False, False])
 
         def count_op(root, name):

@@ -106,6 +106,34 @@ async function runTensorTests(pg) {
   // -- Creation --
   console.log('-- Creation --')
 
+  await test('dtype API queries match pinned metadata', async () => {
+    const bytes = {bool:1, int8:1, uint8:1, int16:2, uint16:2, int32:4, uint32:4,
+      int64:8, uint64:8, float16:2, bfloat16:2, float32:4, float64:8,
+      fp8e4m3:1, fp8e5m2:1, fp8e4m3fnuz:1, fp8e5m2fnuz:1, weakint:null, weakfloat:null}
+    for (const [dtype, size] of Object.entries(bytes)) {
+      const tensor = new Tensor(0, {dtype})
+      assert(tensor.isFloatingPoint() === /^(float|bfloat|fp8|weakfloat)/.test(dtype))
+      assert(pg.uop.dtype(tensor.uopPhysical) === dtype)
+      if (size === null) {
+        let error
+        try { tensor.elementSize() } catch (e) { error=e }
+        assert(error && /elementSize requires a concrete dtype/.test(error.message))
+      } else assert(tensor.elementSize() === size)
+    }
+  })
+
+  await test('dtype API bound UOp constants retain their owner and type', async () => {
+    for (const [value, dtype] of [[true,'bool'], [1,'int32'], [1.75,'float32']]) {
+      const uop = pg.uop.constant(value, dtype)
+      assert(uop.ctx === pg._core.ctx)
+      assert(uop.op === pg._core.ops.CONST && uop.src.length === 0)
+      assert(pg.uop.dtype(uop) === dtype)
+      const tensor = new Tensor(uop)
+      assert(tensor.dtype === dtype)
+      assertClose(await tensor.toArrayAsync(), [Number(value)])
+    }
+  })
+
   await test('constructor parity null is scalar zero', async () => {
     for (const dtype of [undefined, 'float32', 'int32', 'bool']) {
       const tensor = new Tensor(null, { dtype })

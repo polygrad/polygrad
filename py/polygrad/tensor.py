@@ -376,7 +376,7 @@ def _shape_dim_uop_raw(ctx, value):
     raw = _symbolic_dim_raw(value)
     if raw is not None:
         return raw
-    return UOp.const(ctx, int(value)).raw
+    return UOp.const(int(value), ctx=ctx).raw
 
 
 def _shape_uop_array(ctx, shape):
@@ -393,7 +393,7 @@ def _bound_to_uop(ctx, value):
     if isinstance(value, UOp):
         return value
     if isinstance(value, int):
-        return UOp.const(ctx, int(value))
+        return UOp.const(int(value), ctx=ctx)
     raise TypeError(f'unsupported symbolic slice bound {type(value).__name__}')
 
 
@@ -436,7 +436,7 @@ def _symbolic_slice_size_uop(ctx, start_obj, stop_obj, start_u, stop_u):
         return stop_u
     delta = _uop_add_const_delta(stop_u, start_u)
     if delta is not None:
-        return UOp.const(ctx, delta)
+        return UOp.const(delta, ctx=ctx)
     return stop_u - start_u
 
 
@@ -484,7 +484,7 @@ class Variable:
         self.name = name
         self.min_val = min_val
         self.max_val = max_val
-        self.uop = UOp.variable(self._ctx, name, min_val, max_val)
+        self.uop = UOp.variable(name, min_val, max_val, ctx=self._ctx)
 
     def bind(self, value):
         """Bind a concrete value, returning a BoundVariable."""
@@ -961,7 +961,7 @@ class Tensor:
 
     @property
     def dtype(self):
-        return self._dtype_str
+        return to_dtype(self._dtype_str)
 
     @property
     def device(self):
@@ -1506,6 +1506,15 @@ class Tensor:
         return self._make_result_from_core(
             core, _shape_from_uop(self._ctx, result_raw), [self]
         )
+
+    def element_size(self):
+        """Storage bytes per element; weak dtypes have no storage width."""
+        if self.dtype in dtypes.weaks:
+            raise RuntimeError(f'element_size requires a concrete dtype, got {self.dtype}')
+        return self.dtype.itemsize
+
+    def is_floating_point(self):
+        return dtypes.is_float(self.dtype)
 
     def half(self):
         """Cast to float16."""
@@ -3082,9 +3091,9 @@ class Tensor:
                             starts.append(start_u.raw)
                             sizes.append(size_u.raw)
                         else:
-                            starts.append(UOp.const(result._ctx, 0).raw)
+                            starts.append(UOp.const(0, ctx=result._ctx).raw)
                             size_raw = _symbolic_dim_raw(s)
-                            sizes.append(size_raw if size_raw is not None else UOp.const(result._ctx, int(s)).raw)
+                            sizes.append(size_raw if size_raw is not None else UOp.const(int(s), ctx=result._ctx).raw)
                     result = _apply_uop_shrink(result, starts, sizes)
                     dim += 1
                     continue
@@ -3114,13 +3123,13 @@ class Tensor:
                     sizes = []
                     symbolic_out = False
                     for d, s in enumerate(result.shape):
-                        starts.append(UOp.const(result._ctx, boundary[0] if d == dim else 0).raw)
+                        starts.append(UOp.const(boundary[0] if d == dim else 0, ctx=result._ctx).raw)
                         if d == dim:
-                            sizes.append(UOp.const(result._ctx, boundary[1] - boundary[0]).raw)
+                            sizes.append(UOp.const(boundary[1] - boundary[0], ctx=result._ctx).raw)
                         else:
                             size_raw = _symbolic_dim_raw(s)
                             symbolic_out = symbolic_out or size_raw is not None
-                            sizes.append(size_raw if size_raw is not None else UOp.const(result._ctx, int(s)).raw)
+                            sizes.append(size_raw if size_raw is not None else UOp.const(int(s), ctx=result._ctx).raw)
                     if abs(stride) != 1 and symbolic_out:
                         raise RuntimeError('symbolic shape not supported')
                     result = _apply_uop_shrink(result, starts, sizes)

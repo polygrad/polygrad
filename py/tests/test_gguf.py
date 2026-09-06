@@ -134,7 +134,7 @@ def test_quantized_one_block_matches_pinned_output(ggml_type):
     output = ggml_data_to_tensor(source, nelements, ggml_type)
     value = output.numpy()
     assert output.shape == ((32,) if ggml_type == 39 else (1, nelements))
-    assert output.dtype == ("float16" if ggml_type == 41 else "float32")
+    assert output.dtype is getattr(dtypes, "float16" if ggml_type == 41 else "float32")
     assert np.isfinite(value).all()
     assert _digest(value) == QUANT_DIGESTS[ggml_type]
 
@@ -144,7 +144,7 @@ def test_native_one_block_matches_pinned_output(ggml_type):
     source = Tensor(_native_bytes(ggml_type), dtype=dtypes.uint8, device="INTERP").realize()
     output = ggml_data_to_tensor(source, 8, ggml_type)
     assert output.shape == (8,)
-    assert output.dtype == NATIVE_DTYPE_NAMES[ggml_type]
+    assert output.dtype is getattr(dtypes, NATIVE_DTYPE_NAMES[ggml_type])
     assert _digest(output.numpy()) == NATIVE_DIGESTS[ggml_type]
 
 

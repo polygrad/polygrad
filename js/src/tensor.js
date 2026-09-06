@@ -891,6 +891,19 @@ function createBoundTensorClass(runtime) {
       return ffi.poly_uop_max_shape_dims(this._ctx, this._uop)
     }
     get dtype() { return this._dtype }
+
+    elementSize() {
+      // Pinned DTypeMixin.element_size rejects weak types before reading width.
+      if (this.dtype === 'weakint' || this.dtype === 'weakfloat') {
+        throw new Error(`elementSize requires a concrete dtype, got ${this.dtype}`)
+      }
+      return TA_BY_DTYPE[this.dtype].BYTES_PER_ELEMENT
+    }
+
+    isFloatingPoint() {
+      return this.dtype === 'weakfloat' || this.dtype === 'bfloat16' ||
+        this.dtype.startsWith('float') || isFp8Dtype(this.dtype)
+    }
     get device() {
       if (!this._tensor) throw new Error('Tensor has no core PolyTensor')
       /* Public device is a placement label. The WASM core maps public CPU onto

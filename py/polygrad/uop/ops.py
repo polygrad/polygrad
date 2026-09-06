@@ -209,8 +209,11 @@ class UOp:
         return UOp(ctx, raw) if raw else None
 
     @staticmethod
-    def variable(ctx, name, min_val, max_val, dtype=dtypes.weakint, multiple_of=1, param=False):
+    def variable(name, min_val, max_val, dtype=dtypes.weakint, multiple_of=1, param=False, *, ctx=None):
         """Create Tinygrad's ALU-address-space BUFFER/PARAM variable."""
+        if ctx is None:
+            from .. import _default_ctx
+            ctx = _default_ctx
         dtype = to_dtype(dtype)
         dtype_name = INVERSE_DTYPES_DICT.get(dtype.name, dtype.name)
         dtype_id = _ffi._lib.poly_dtype_id_by_name(dtype_name.encode('utf-8'))
@@ -366,9 +369,15 @@ class UOp:
         return self._coerce(value)
 
     @staticmethod
-    def const(ctx, value, dtype=None):
+    def const(value, dtype=None, *, ctx=None):
+        """Create a scalar in Tensor's default context, or the explicit owner."""
         if isinstance(value, UOp):
+            if ctx is not None and _ptr_value(ctx) != _ptr_value(value.ctx):
+                raise ValueError('UOp.const context mismatch')
             return value if dtype is None else value.cast(dtype)
+        if ctx is None:
+            from .. import _default_ctx
+            ctx = _default_ctx
         if dtype is not None:
             dtype = to_dtype(dtype)
             dtype_name = INVERSE_DTYPES_DICT.get(dtype.name, dtype.name)

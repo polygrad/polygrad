@@ -13,7 +13,7 @@ import shutil
 import numpy as np
 import pytest
 
-from polygrad import Tensor
+from polygrad import Tensor, dtypes
 
 
 def _clear_disk_cache():
@@ -209,7 +209,7 @@ class TestZeroCopy:
         """Zero-copy path preserves dtype."""
         a = np.array([1.0, 2.0], dtype=np.float32)
         t = Tensor(a)
-        assert t.dtype == 'float32'
+        assert t.dtype is dtypes.float32
         np.testing.assert_allclose(t.numpy(), a)
 
     def test_numpy_2d_input(self):
@@ -223,7 +223,7 @@ class TestZeroCopy:
         """Float64 numpy array input works."""
         a = np.array([1.0, 2.0, 3.0], dtype=np.float64)
         t = Tensor(a, dtype='float64')
-        assert t.dtype == 'float64'
+        assert t.dtype is dtypes.float64
         np.testing.assert_allclose(t.numpy(), a)
 
     def test_list_input_still_works(self):

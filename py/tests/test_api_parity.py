@@ -19,6 +19,70 @@ def test_dtype_has_no_pointer_or_image_subclasses():
     assert not hasattr(dtypes, "imagef")
 
 
+@pytest.mark.parametrize('name', ['bool', 'short', 'int', 'long', 'half', 'bfloat16', 'float', 'double'])
+def test_tensor_dtype_object_matches_current_uop(name):
+    tensor = getattr(Tensor([1, 2]), name)()
+    assert tensor.dtype is getattr(dtypes, name)
+    assert tensor.dtype is tensor.uop_physical.dtype
+    assert tensor.dtype.itemsize == getattr(dtypes, name).itemsize
+    assert {tensor.dtype: 'typed'}[getattr(dtypes, name)] == 'typed'
+    tensor.realize()
+    assert tensor.dtype is tensor.uop_physical.dtype
+    np.testing.assert_array_equal(tensor.numpy(), [1, 1] if name == 'bool' else [1, 2])
+
+
+def test_uop_default_context_factories_match_tensor_owner():
+    value = UOp.const(2.0)
+    typed = UOp.const(2.0, dtypes.float32)
+    variable = UOp.variable('api_extent', 1, 8)
+    bound = variable.bind(3)
+    assert value.ctx == Tensor(2.0)._ctx
+    assert value.dtype is dtypes.weakfloat
+    assert typed.dtype is dtypes.float32
+    assert value.op_name == typed.op_name == 'CONST'
+    assert variable.op_name == 'BUFFER' and len(variable.src) == 1
+    assert bound.op_name == 'AFTER'
+    assert tuple(s.op_name for s in bound.src) == ('BUFFER', 'STORE')
+    np.testing.assert_equal(Tensor(typed).numpy(), 2.0)
+
+
+def test_uop_explicit_context_factories_keep_runtime_ownership():
+    from polygrad import Runtime
+    runtime = Runtime(device='cpu')
+    try:
+        value = UOp.const(2.0, dtypes.float32, ctx=runtime._ctx)
+        variable = UOp.variable('api_runtime_extent', 1, 8, ctx=runtime._ctx)
+        tensor = runtime.Tensor(value)
+        assert value.ctx == variable.ctx == tensor._ctx == runtime._ctx
+        np.testing.assert_equal(tensor.numpy(), 2.0)
+    finally:
+        runtime.dispose()
+    assert value.raw is None and variable.raw is None
+
+
+def test_uop_const_rejects_a_foreign_explicit_owner():
+    from polygrad import Runtime
+    runtime = Runtime(device='cpu')
+    try:
+        value = UOp.const(2.0, dtypes.float32)
+        with pytest.raises(ValueError, match='context mismatch'):
+            UOp.const(value, dtypes.float32, ctx=runtime._ctx)
+        assert UOp.const(value, dtypes.float32, ctx=value.ctx) == value
+    finally:
+        runtime.dispose()
+
+
+@pytest.mark.parametrize('dtype', dtypes.all + dtypes.weaks)
+def test_tensor_dtype_queries_match_pinned_metadata(dtype):
+    tensor = Tensor(0, dtype=dtype)
+    assert tensor.is_floating_point() is dtypes.is_float(dtype)
+    if dtype in dtypes.weaks:
+        with pytest.raises(RuntimeError, match='element_size requires a concrete dtype'):
+            tensor.element_size()
+    else:
+        assert tensor.element_size() == dtype.itemsize
+
+
 def test_dtype_is_scalar_only_like_current_tinygrad():
     # Tinygrad 2026-07-12 removed dtype.vec; UOp shape carries lane width.
     assert not hasattr(dtypes.float, "vec")
@@ -109,26 +173,26 @@ def test_uop_resolve_simplifies_before_using_bounds():
 
 def test_uop_literals_and_binary_promotion_match_current_tinygrad():
     ctx = Variable('literal_ctx', 0, 4)._ctx
-    integer = UOp.const(ctx, 1)
-    floating = UOp.const(ctx, 1.0)
-    value = UOp.variable(ctx, 'literal_float', 0, 4, dtype=dtypes.float32, param=True)
+    integer = UOp.const(1, ctx=ctx)
+    floating = UOp.const(1.0, ctx=ctx)
+    value = UOp.variable('literal_float', 0, 4, dtype=dtypes.float32, param=True, ctx=ctx)
     out = value + 1
 
     assert integer.dtype is dtypes.weakint
     assert floating.dtype is dtypes.weakfloat
     assert out.dtype is dtypes.float32
     assert out.src[1].dtype is dtypes.weakfloat
-    assert UOp.const(ctx, True).dtype is dtypes.bool
-    assert UOp.const(ctx, 1, dtypes.float32).dtype is dtypes.float32
-    assert UOp.const(ctx, 1.75, dtypes.int32).dtype is dtypes.int32
-    assert UOp.const(ctx, 2, dtypes.bool).dtype is dtypes.bool
+    assert UOp.const(True, ctx=ctx).dtype is dtypes.bool
+    assert UOp.const(1, dtypes.float32, ctx=ctx).dtype is dtypes.float32
+    assert UOp.const(1.75, dtypes.int32, ctx=ctx).dtype is dtypes.int32
+    assert UOp.const(2, dtypes.bool, ctx=ctx).dtype is dtypes.bool
 
 
 def test_uop_contiguous_folds_device_free_value_like_current_tinygrad():
     # Tinygrad 2026-08-22/a9069c177a9d mixin/elementwise.py:55-61 returns a
     # device-free UOp unchanged because it has no storage to materialize.
     ctx = Variable('contiguous_uop_ctx', 0, 1)._ctx
-    value = UOp.const(ctx, 1.0, dtypes.float32)
+    value = UOp.const(1.0, dtypes.float32, ctx=ctx)
     assert value.contiguous().raw == value.raw
 
 
@@ -534,7 +598,7 @@ def test_python_source_manifest_contains_quoted_dependencies():
     # Match setup.py's include paths as well as each source's local directory.
     # Mirror equality alone cannot detect a dependency omitted from the manifest.
     for source in sorted(shipped):
-        for include in re.findall(r'^\s*#\s*include\s*"([^"]+)"', source.read_text(), re.M):
+        for include in re.findall(r'^\s*#\s*include\s*"([^"]+)"', source.read_text(encoding='utf-8'), re.M):
             candidates = [source.parent / include, root / 'src' / include,
                           root / 'vendor/cjson' / include]
             resolved = next((p.resolve() for p in candidates if p.is_file()), None)

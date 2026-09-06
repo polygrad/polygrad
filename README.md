@@ -122,6 +122,12 @@ JS
 
 ## Runtime Choices
 
+Python `Tensor.dtype` returns a `DType` object, for example `dtypes.float32`;
+JavaScript retains dtype names such as `'float32'`. Constructors accept names
+in both frontends. `element_size()` / `elementSize()` report storage bytes and
+reject weak dtypes; `is_floating_point()` / `isFloatingPoint()` classify the
+dtype without materializing the Tensor.
+
 ```text
 Python Tensor API       JavaScript Tensor API       C / native package
        |                        |                         |
@@ -541,6 +547,12 @@ out = Tensor.empty((4,), dtype="float32")
 y = out.custom_kernel(Tensor([1, 2, 3, 4]), Tensor([10, 20, 30, 40]), fxn=add_kernel)[0]
 print(y.numpy())
 ```
+
+Python `UOp.const(value, dtype=None)` and
+`UOp.variable(name, min_val, max_val, ...)` use the default Tensor context.
+Advanced embedded callers pass their owning context as `ctx=...`; the old
+leading-context signatures are not retained. Other low-level UOp factories
+still use their existing explicit-context APIs.
 
 JavaScript:
 

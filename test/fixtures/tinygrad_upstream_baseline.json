@@ -162,8 +162,8 @@
     ]
   },
   "evidence": {
-    "report": "temp/dtype-construction-20260906.pMBEx7/upstream/report.json",
-    "sha256": "fe256f09d1c0c42fc69c8a71b8a0869922f897ce09b9803dc8f099697c2e8c8a"
+    "report": "temp/dtype-uop-batch-20260906.p95Ig3/upstream/report.json",
+    "sha256": "456541ed4899e41f6e2111edc314a7d94e78ba5cf4d4886a09014137e2b87110"
   },
   "schema_version": 1,
   "tests": {
@@ -314,16 +314,10 @@
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_copy_from_numpy_dtype": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_tensor.py:504: AssertionError: assert 'bfloat16' == dtypes.float\n +  where 'bfloat16' = Tensor(shape=(3,), dtype=bfloat16).dtype\n +  and   dtypes.float = dtypes.float32",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Tensor.dtype returns a string while upstream compares a canonical DType object. BF16 and bytes cases stop at this interface mismatch before their subsequent value assertions.",
-      "category": "frontend-dtype"
+      "reason": ""
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_copy_from_numpy_unaligned": {
       "expected": {
@@ -343,27 +337,27 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_tensor.py:27: TypeError: UOp.const() missing 1 required positional argument: 'value'",
+            "detail": "<reference>/test/backend/test_tensor.py:28: AttributeError: 'UOp' object has no attribute 'device'",
             "outcome": "failed"
           }
         },
         "status": "failed"
       },
-      "reason": "The public UOp.const or UOp.variable signature differs from the pinned call site; the requested graph is not constructed. Do not infer a compiler failure from this result.",
-      "category": "frontend-uop-signature"
+      "reason": "UOp factory now succeeds; the next assertion requires UOp.device. Later Tensor device/representation assertions remain unexecuted.",
+      "category": "missing-uop-interface"
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_deviceless_const_realize_noop": {
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_tensor.py:33: TypeError: UOp.const() missing 1 required positional argument: 'value'",
+            "detail": "<polygrad>/references/.uv-python/cpython-3.11.12-linux-x86_64-gnu/lib/python3.11/unittest/case.py:703: AssertionError: UOp(0xADDR) is not UOp(0xADDR)",
             "outcome": "failed"
           }
         },
         "status": "failed"
       },
-      "reason": "The public UOp.const or UOp.variable signature differs from the pinned call site; the requested graph is not constructed. Do not infer a compiler failure from this result.",
-      "category": "frontend-uop-signature"
+      "reason": "Factory now succeeds; assertIs rejects fresh Python wrappers. The separate unmasked-identity probe verifies unchanged C root identity. Review wrapper lifetime/identity, not codegen.",
+      "category": "wrapper-identity"
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_dropout": {
       "expected": {
@@ -376,7 +370,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:3321: ValueError: randn only supports float dtypes, got dtypes.bool",
+            "detail": "<polygrad>/py/polygrad/tensor.py:3330: ValueError: randn only supports float dtypes, got dtypes.bool",
             "outcome": "failed"
           }
         },
@@ -556,22 +550,16 @@
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_tensor_bytes": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_tensor.py:483: AssertionError: assert 'uint8' == dtypes.uchar\n +  where 'uint8' = Tensor(shape=(6,), dtype=uint8).dtype\n +  and   dtypes.uchar = dtypes.uint8",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Tensor.dtype returns a string while upstream compares a canonical DType object. BF16 and bytes cases stop at this interface mismatch before their subsequent value assertions.",
-      "category": "frontend-dtype"
+      "reason": ""
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_tensor_copy": {
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:1546: RuntimeError: core Tensor operation failed",
+            "detail": "<polygrad>/py/polygrad/tensor.py:1555: RuntimeError: core Tensor operation failed",
             "outcome": "failed"
           }
         },
@@ -608,16 +596,10 @@
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_tensor_list_dtype": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_tensor.py:384: AssertionError: assert 'int32' == dtypes.int\n +  where 'int32' = Tensor(shape=(1,), dtype=int32).dtype\n +    where Tensor(shape=(1,), dtype=int32) = Tensor([1])\n +  and   dtypes.int = dtypes.default_int",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Tensor.dtype returns a string while upstream compares a canonical DType object. BF16 and bytes cases stop at this interface mismatch before their subsequent value assertions.",
-      "category": "frontend-dtype"
+      "reason": ""
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_tensor_list_errors": {
       "expected": {
@@ -669,16 +651,10 @@
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_tensor_ndarray_dtype": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_tensor.py:367: AssertionError: assert 'int64' == dtypes.long\n +  where 'int64' = Tensor(shape=(1,), dtype=int64).dtype\n +    where Tensor(shape=(1,), dtype=int64) = Tensor(array([1]))\n +  and   dtypes.long = dtypes.int64",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Tensor.dtype returns a string while upstream compares a canonical DType object. BF16 and bytes cases stop at this interface mismatch before their subsequent value assertions.",
-      "category": "frontend-dtype"
+      "reason": ""
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_tolist": {
       "expected": {
@@ -730,29 +706,17 @@
     },
     "polygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_clone_deviceless_const": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_tensor.py:741: TypeError: UOp.const() missing 1 required positional argument: 'value'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "The public UOp.const or UOp.variable signature differs from the pinned call site; the requested graph is not constructed. Do not infer a compiler failure from this result.",
-      "category": "frontend-uop-signature"
+      "reason": ""
     },
     "polygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_clone_deviceless_const_to_cpu": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_tensor.py:769: TypeError: UOp.const() missing 1 required positional argument: 'value'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "The public UOp.const or UOp.variable signature differs from the pinned call site; the requested graph is not constructed. Do not infer a compiler failure from this result.",
-      "category": "frontend-uop-signature"
+      "reason": ""
     },
     "polygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_clone_with_grad": {
       "expected": {
@@ -812,27 +776,21 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_tensor.py:664: TypeError: UOp.variable() missing 1 required positional argument: 'max_val'",
+            "detail": "<reference>/test/backend/test_tensor.py:665: AttributeError: 'Tensor' object has no attribute 'max_shape'",
             "outcome": "failed"
           }
         },
         "status": "failed"
       },
-      "reason": "The public UOp.const or UOp.variable signature differs from the pinned call site; the requested graph is not constructed. Do not infer a compiler failure from this result.",
-      "category": "frontend-uop-signature"
+      "reason": "UOp variable creation now succeeds; Tensor.max_shape is missing. The following max_numel assertion remains unexecuted.",
+      "category": "missing-shape-interface"
     },
     "polygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_numpy_deviceless_const": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_tensor.py:746: TypeError: UOp.const() missing 1 required positional argument: 'value'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "The public UOp.const or UOp.variable signature differs from the pinned call site; the requested graph is not constructed. Do not infer a compiler failure from this result.",
-      "category": "frontend-uop-signature"
+      "reason": ""
     },
     "polygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_pad": {
       "expected": {
@@ -1954,16 +1912,10 @@
     },
     "polygrad:test/null/test_dtype.py::TestCastConvenienceMethod::test_method": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/references/.uv-python/cpython-3.11.12-linux-x86_64-gnu/lib/python3.11/unittest/case.py:866: AssertionError: 'float32' != dtypes.float",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Tensor.dtype returns a string where the upstream test expects a DType object.",
-      "category": "frontend-dtype"
+      "reason": ""
     },
     "polygrad:test/null/test_dtype.py::TestDtypeTolist::test_bfloat16": {
       "expected": {
@@ -2037,7 +1989,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:3157: IndexError: Unsupported index type: <class 'list'>",
+            "detail": "<polygrad>/py/polygrad/tensor.py:3166: IndexError: Unsupported index type: <class 'list'>",
             "outcome": "failed"
           }
         },
@@ -2050,7 +2002,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:3157: IndexError: Unsupported index type: <class 'list'>",
+            "detail": "<polygrad>/py/polygrad/tensor.py:3166: IndexError: Unsupported index type: <class 'list'>",
             "outcome": "failed"
           }
         },
@@ -2111,7 +2063,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/references/.uv-python/cpython-3.11.12-linux-x86_64-gnu/lib/python3.11/unittest/case.py:703: AssertionError: Tensor(shape=(1,), dtype=int32) is not Tensor(shape=(1,), dtype=int32)",
+            "detail": "<polygrad>/references/.uv-python/cpython-3.11.12-linux-x86_64-gnu/lib/python3.11/unittest/case.py:703: AssertionError: Tensor(shape=(1,), dtype=dtypes.int) is not Tensor(shape=(1,), dtype=dtypes.int)",
             "outcome": "failed"
           }
         },
