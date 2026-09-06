@@ -199,6 +199,23 @@ GRAPH_PARITY_CASE_ARGS ?=
 OP_PARITY_DIR ?= temp/parity_ops
 COMPAT_TIER1_DIR ?= temp/tinygrad_compat_tier1
 COMPAT_CONVNEXT_DIR ?= temp/tinygrad_compat_convnext
+UPSTREAM_COMPAT_DIR ?= temp/tinygrad_upstream
+UPSTREAM_COMPAT_TESTS ?=
+UPSTREAM_COMPAT_ARGS ?=
+UPSTREAM_COMPAT_BASELINE ?= test/fixtures/tinygrad_upstream_baseline.json
+
+.PHONY: test-upstream-runner test-compat-tinygrad-upstream test-compat-tinygrad-upstream-ratchet
+test-upstream-runner:
+	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=. $(PYTHON) -m pytest -q py/tests/test_tinygrad_upstream.py
+
+# Use a fresh directory for each run; no source edits, import stubs or auto-accept.
+test-compat-tinygrad-upstream: build/libpolygrad.so
+	$(PARITY_PY) scripts/tinygrad_upstream.py --output $(UPSTREAM_COMPAT_DIR) \
+		$(foreach t,$(UPSTREAM_COMPAT_TESTS),--test $(t)) $(UPSTREAM_COMPAT_ARGS)
+
+test-compat-tinygrad-upstream-ratchet: build/libpolygrad.so
+	$(PARITY_PY) scripts/tinygrad_upstream.py --output $(UPSTREAM_COMPAT_DIR) \
+		--baseline $(UPSTREAM_COMPAT_BASELINE) $(UPSTREAM_COMPAT_ARGS)
 
 test-parity-graph parity-graph-report: build/libpolygrad.so
 	@mkdir -p $(GRAPH_PARITY_DIR) temp/cc_tmp

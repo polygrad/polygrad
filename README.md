@@ -563,6 +563,13 @@ console.log(y.toArray())
 This API is a UOp `CALL` extension point. It is not a raw program-launch API,
 and custom backward functions are not implemented yet.
 
+For host-fed replay, `Tensor.copy_from(data)` (JS `copyFrom`) materializes
+pending work and writes current storage without replacing an existing BUFFER
+identity. Use JS `await tensor.copyFromAsync(data)` when WebGPU materialization
+is needed; it snapshots the supplied bytes while awaiting execution. Writes
+to an already-current WebGPU buffer can remain synchronous. Use `assign` for
+mutation expressed in the graph.
+
 ## Tests
 
 Run the main gates:
@@ -579,6 +586,44 @@ make test-browser-matrix
 
 `test-browser-matrix` adds non-WebGPU Playwright coverage across Chromium,
 Firefox, and installed Chrome/Chromium executables where available.
+
+Unchanged upstream Python tests can run in isolated Tinygrad and Polygrad
+processes (CPU). Install pytest, NumPy and each selected file's dependencies in
+`PARITY_PY`'s environment. The default selection is upstream `backend/test_ops.py`:
+
+```bash
+make test-upstream-runner
+make test-compat-tinygrad-upstream UPSTREAM_COMPAT_DIR=temp/upstream-run-001
+# Select other full files or exact pytest nodeids explicitly:
+make test-compat-tinygrad-upstream UPSTREAM_COMPAT_DIR=temp/upstream-run-002 \
+  UPSTREAM_COMPAT_TESTS='test/null/test_dtype.py test/unit/test_conv.py'
+# Reproduce the reviewed frontier (known failures remain visible):
+make test-compat-tinygrad-upstream-ratchet UPSTREAM_COMPAT_DIR=temp/upstream-ratchet-001
+```
+
+Each output directory must be new. `report.json` records source/library hashes,
+provider module identities, per-test outcomes and collection errors; per-file
+logs and flushed progress survive worker crashes. Only module imports are
+redirected: missing APIs/backends are not emulated, assertions and upstream
+skips are unchanged, and no Tinygrad implementation fills a Polygrad gap.
+Upstream test helpers stay on the reference path; loading Polygrad does not
+expose sibling packages such as `py/extra` to the reference process.
+Missing dependencies, collection failures and incomplete execution fail closed.
+Passing these tests does not replace exact `test-parity-graph` checks.
+
+`UPSTREAM_COMPAT_ARGS='--write-baseline temp/candidate.json'` writes a new
+candidate only after complete execution. Review every nonpass's `reason` before
+using `--baseline PATH`; candidates are never accepted or overwritten silently.
+The ratchet rejects lost/new tests, pass-to-skip/fail transitions, changed
+failure signatures and changed pin/suite/environment contracts. Improvements
+also require promotion, so an old expected failure cannot return unnoticed.
+Diagnostic runs return failure for nonpasses even when writing a candidate.
+
+For a future upstream revision, `--reference PATH --compare-with OLD_REPORT`
+attaches added/removed/changed outcomes without changing the accepted checkout
+or baseline. This is migration triage, not source-audit closure. Frontend-private
+and compiler-private import gaps may prevent whole upstream files from collecting;
+the runner reports that boundary rather than counting their tests as skipped.
 
 Local performance checks:
 
