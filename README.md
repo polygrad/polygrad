@@ -621,11 +621,16 @@ make test-compat-tinygrad-upstream UPSTREAM_COMPAT_DIR=temp/upstream-run-002 \
   UPSTREAM_COMPAT_TESTS='test/null/test_dtype.py test/unit/test_conv.py'
 # Reproduce the reviewed frontier (known failures remain visible):
 make test-compat-tinygrad-upstream-ratchet UPSTREAM_COMPAT_DIR=temp/upstream-ratchet-001
+# Separate CPU ops lane with the explicit, source-locked NIR-only adaptation:
+make test-compat-tinygrad-ops UPSTREAM_COMPAT_DIR=temp/upstream-ops-001
+# Ratchet the separately reviewed CPU ops frontier:
+make test-compat-tinygrad-ops UPSTREAM_COMPAT_DIR=temp/upstream-ops-002 \
+  UPSTREAM_COMPAT_ARGS='--baseline test/fixtures/tinygrad_upstream_ops_cpu_baseline.json'
 ```
 
 Each output directory must be new. `report.json` records source/library hashes,
 provider module identities, per-test outcomes and collection errors; per-file
-logs and flushed progress survive worker crashes. Only module imports are
+logs and flushed progress survive worker crashes. In the default lane only module imports are
 redirected: missing APIs/backends are not emulated, assertions and upstream
 skips are unchanged, and no Tinygrad implementation fills a Polygrad gap.
 Upstream test helpers stay on the reference path; loading Polygrad does not
@@ -633,11 +638,21 @@ expose sibling packages such as `py/extra` to the reference process.
 Missing dependencies, collection failures and incomplete execution fail closed.
 Passing these tests does not replace exact `test-parity-graph` checks.
 
+The separate `cpu-ops` adapter removes exactly the pinned NIR import and its
+inactive CPU skip decorator. It rejects changed source, non-CPU execution,
+renderer/interface overrides and image mode; the Tinygrad control also checks
+that its actual renderer is not NIR. All test bodies, tolerances, gradients and
+other skips remain unchanged. Adapted-file hashes are recorded in the report.
+Keep its reviewed baseline separate from the unchanged lane; this adapter is
+test infrastructure, not a Polygrad renderer implementation or source-audit closure.
+
 `UPSTREAM_COMPAT_ARGS='--write-baseline temp/candidate.json'` writes a new
 candidate only after complete execution. Review every nonpass's `reason` before
 using `--baseline PATH`; candidates are never accepted or overwritten silently.
 The ratchet rejects lost/new tests, pass-to-skip/fail transitions, changed
-failure signatures and changed pin/suite/environment contracts. Improvements
+failure signatures and changed pin/suite/environment/adapter contracts. Leading
+exception-location line numbers are excluded; raw diagnostics retain them.
+Exception messages and values remain part of the signature. Improvements
 also require promotion, so an old expected failure cannot return unnoticed.
 Diagnostic runs return failure for nonpasses even when writing a candidate.
 

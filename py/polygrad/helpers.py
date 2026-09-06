@@ -15,11 +15,12 @@ import os
 import pathlib
 import platform
 import math
+import re
 import shutil
 import sys
 import tempfile
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, ClassVar, Generic, Iterable, Iterator, Optional, TypeVar
 
 
@@ -197,8 +198,14 @@ class Context(contextlib.ContextDecorator):
             policy = _normalize_logical_policy(self.kwargs["LOGICAL"])
             if policy is not None and _ffi.get_lib().poly_ctx_set_logical_policy(_default_ctx, policy) != 0:
                 raise ValueError(f"invalid logical policy {self.kwargs['LOGICAL']!r}")
-        for key, value in self.kwargs.items():
-            ContextVar._cache[key].value = value
+        try:
+            for key, value in self.kwargs.items():
+                ContextVar._cache[key].value = value
+        except Exception:
+            # Validating setters can reject a mode before __enter__ returns;
+            # contextlib will not call __exit__ for that failed entry.
+            self.__exit__(None, None, None)
+            raise
 
     def __exit__(self, *args):
         if self.old_logical_policy is not None:
@@ -242,7 +249,78 @@ class ContextVar(Generic[T]):
         ]
 
 
-DEV = ContextVar("DEV", "")
+@dataclass(frozen=True)
+class Target:
+    """Pinned target syntax describes a request, not backend availability."""
+    device: str = ''
+    renderer: str = ''
+    arch: str = ''
+    interface: str = ''
+    indices: str = ''
+
+    @staticmethod
+    def parse(s: str) -> Target:
+        split = s.split('+')
+        if len(split) == 2:
+            interface = split[0].rsplit(':', 1)
+            iface, indices = (interface[0], interface[1]) if len(interface) == 2 else (interface[0], '')
+            s = split[1]
+        elif len(split) > 2:
+            raise RuntimeError(f'too many \'+\' in target string: {s!r}')
+        else:
+            iface, indices = '', ''
+        parts = [value.upper() if i < 2 else value for i, value in enumerate(s.split(':'))]
+        if len(parts) > 3:
+            raise RuntimeError(f'too many \':\' in target string: {s!r}')
+        return Target(*(parts + [''] * (3 - len(parts))), iface, indices)
+
+    def __repr__(self):
+        first = re.sub(':*$', '', ':'.join([self.interface, self.indices]))
+        second = re.sub(':*$', '', ':'.join([self.device, self.renderer, self.arch]))
+        return (first + '+' if first else '') + second
+
+    def replacedefault(self, **kwargs):
+        return replace(self, **{k:v for k,v in kwargs.items() if not getattr(self, k)})
+
+
+class _DEV(ContextVar):
+    @property
+    def value(self):
+        return self._value
+
+    @value.setter
+    def value(self, value):
+        self._value = (value if isinstance(value, list) else [value] if isinstance(value, Target)
+                       else [Target.parse(t) for t in value.split(';')])
+
+    def __repr__(self):
+        return ';'.join(repr(t) for t in self._value)
+
+    def __getattr__(self, key):
+        return getattr(self._value[0], key)
+
+    def target(self, dev, **kwargs):
+        assert getenv(f'{dev}_CC', '') == '', f'{dev}_CC is deprecated, use DEV targets'
+        target = next((t for t in self._value if not t.device or t.device == dev), Target(device=dev))
+        return replace(target.replacedefault(**kwargs), device=dev)
+
+
+class _IMAGE(ContextVar):
+    @property
+    def value(self):
+        return self._value
+
+    @value.setter
+    def value(self, value):
+        # The public frontends have no image-capable execution target. C image
+        # rewrite tests are separate; a Python context must not silently enable it.
+        if value != 0:
+            raise NotImplementedError('IMAGE execution is not supported by the Python frontend')
+        self._value = value
+
+
+DEV = _DEV("DEV", "")
+IMAGE = _IMAGE("IMAGE", 0)
 DEBUG = ContextVar("DEBUG", 0)
 BEAM = ContextVar("BEAM", 0)
 # Pinned tinygrad/helpers.py:241. Keep the public configuration object rather
@@ -512,6 +590,8 @@ __all__ = [
     "OSX",
     "ARCH_X86",
     "DEV",
+    "Target",
+    "IMAGE",
     "DEBUG",
     "BEAM",
     "JIT",

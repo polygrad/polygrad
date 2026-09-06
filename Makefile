@@ -204,7 +204,7 @@ UPSTREAM_COMPAT_TESTS ?=
 UPSTREAM_COMPAT_ARGS ?=
 UPSTREAM_COMPAT_BASELINE ?= test/fixtures/tinygrad_upstream_baseline.json
 
-.PHONY: test-upstream-runner test-compat-tinygrad-upstream test-compat-tinygrad-upstream-ratchet
+.PHONY: test-upstream-runner test-compat-tinygrad-upstream test-compat-tinygrad-upstream-ratchet test-compat-tinygrad-ops
 test-upstream-runner:
 	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=. $(PYTHON) -m pytest -q py/tests/test_tinygrad_upstream.py
 
@@ -212,6 +212,11 @@ test-upstream-runner:
 test-compat-tinygrad-upstream: build/libpolygrad.so
 	$(PARITY_PY) scripts/tinygrad_upstream.py --output $(UPSTREAM_COMPAT_DIR) \
 		$(foreach t,$(UPSTREAM_COMPAT_TESTS),--test $(t)) $(UPSTREAM_COMPAT_ARGS)
+
+# Explicit adapted CPU lane: no numerical/gradient test bodies are changed.
+test-compat-tinygrad-ops: build/libpolygrad.so
+	$(PARITY_PY) scripts/tinygrad_upstream.py --output $(UPSTREAM_COMPAT_DIR) \
+		--adapter cpu-ops --test test/backend/test_ops.py $(UPSTREAM_COMPAT_ARGS)
 
 test-compat-tinygrad-upstream-ratchet: build/libpolygrad.so
 	$(PARITY_PY) scripts/tinygrad_upstream.py --output $(UPSTREAM_COMPAT_DIR) \

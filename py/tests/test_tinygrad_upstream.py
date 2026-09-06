@@ -179,6 +179,48 @@ def test_events_preserve_crash_progress(tmp_path):
     assert upstream.outcome(results.tests["test_ok"]) == "incomplete"
 
 
+def test_signature_ignores_only_source_line_numbers():
+    a = {'status':'failed', 'phases':phases('failed', '<polygrad>/py/tensor.py:12: AssertionError: expected 12')}
+    b = copy.deepcopy(a)
+    b['phases']['call']['detail'] = '<polygrad>/py/tensor.py:24: AssertionError: expected 12'
+    assert upstream.signature(a) == upstream.signature(b)
+    assert ':12:' in a['phases']['call']['detail']  # raw evidence must remain intact
+    b['phases']['call']['detail'] = '<polygrad>/py/tensor.py:24: AssertionError: expected 24'
+    assert upstream.signature(a) != upstream.signature(b)
+
+
+def test_cpu_ops_adapter_preserves_all_test_bodies_and_is_hash_locked():
+    import ast
+    source = (upstream.REFERENCE / 'test/backend/test_ops.py').read_text(encoding='utf-8')
+    adapted = upstream.adapt_cpu_ops(source)
+    before, after = ast.parse(source), ast.parse(adapted)
+    methods = lambda t: [(n.name, ast.dump(ast.Module(body=n.body, type_ignores=[])))
+                         for n in ast.walk(t) if isinstance(n, ast.FunctionDef)]
+    assert methods(before) == methods(after)
+    assert sum(n.name.startswith('test_') for n in ast.walk(before) if isinstance(n, ast.FunctionDef)) == 427
+    changed = [(a, b) for a, b in zip(source.splitlines(), adapted.splitlines()) if a != b]
+    assert len(changed) == 2 and all('NIRRenderer' in a and b == '' for a, b in changed)
+    assert source.count('\n') == adapted.count('\n')
+    assert 'NIRRenderer' not in adapted
+    assert 'NIRRenderer' in source
+    with pytest.raises(ValueError, match='source lock'):
+        upstream.adapt_cpu_ops(source + '\n')
+
+
+def test_cpu_ops_environment_uses_numeric_disabled_modes():
+    # test_ops reads TINY_BACKEND with getenv's integer default, not a string.
+    assert int(upstream.ENVIRONMENT['TINY_BACKEND']) == 0
+    assert int(upstream.ENVIRONMENT['IMAGE']) == 0
+
+
+@pytest.mark.parametrize('device,renderer,interface,image', [
+    ('CUDA', '', '', 0), ('CPU', 'LLVM', '', 0), ('CPU', '', 'MOCK', 0), ('CPU', '', '', 1),
+])
+def test_cpu_ops_adapter_rejects_other_execution_modes(device, renderer, interface, image):
+    with pytest.raises(ValueError, match='CPU ops adapter'):
+        upstream.check_cpu_ops_mode(device, renderer, interface, image)
+
+
 def test_candidate_delta_does_not_require_same_pin_or_hide_missing_tests(report):
     report["contract"]["reference_commit"] = "old"
     after = copy.deepcopy(report)

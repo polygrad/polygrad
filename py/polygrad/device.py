@@ -83,7 +83,10 @@ class _Device:
     @property
     def DEFAULT(self):
         from .helpers import DEV
-        return self.canonicalize(DEV.value) if DEV.value else self._default
+        target = repr(DEV.value[0])
+        # Do not discard an unsupported renderer/interface request and execute
+        # on another backend. The core still validates the complete target.
+        return self.canonicalize(target) if target else self._default
 
     @functools.cache
     def __getitem__(self, key):

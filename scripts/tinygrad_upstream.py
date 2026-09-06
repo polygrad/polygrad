@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Run unchanged upstream tests with isolated, identity-preserving providers.
+"""Run upstream tests with isolated, identity-preserving providers.
 
 This is a compatibility diagnostic/ratchet, not a graph-parity allowance. Each
 file runs in its own process; collection failures and crashes cannot be baselined.
 No upstream implementation may fill a missing Polygrad module or API.
+The default lane is unchanged; cpu-ops is an explicit hash-locked test adaptation.
 """
 
 from __future__ import annotations
@@ -28,9 +29,10 @@ import traceback
 
 ROOT = Path(__file__).resolve().parents[1]
 REFERENCE = ROOT / "references/tinygrad_latest"
+CPU_OPS_SHA256 = 'b0b8f94a538c555d3ecc094cc7d001de157805b340671b5efa845d54e0cefaf1'
 ENVIRONMENT = {
     "DEV": "CPU", "POLY_DEVICE": "cpu", "CACHELEVEL": "0", "DEBUG": "0",
-    "FORWARD_ONLY": "0", "TINY_BACKEND": "", "SKIP_SLOW_TEST": "0",
+    "FORWARD_ONLY": "0", "TINY_BACKEND": "0", "SKIP_SLOW_TEST": "0", "IMAGE": "0",
     "DERANDOMIZE_CI": "1", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1",
     "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1", "PYTHONHASHSEED": "0",
 }
@@ -42,6 +44,23 @@ def digest(path):
 
 def write_json(path, data):
     Path(path).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+
+
+def adapt_cpu_ops(source):
+    """Remove only NIR's import/skip guard, whose predicate is false in this lane."""
+    if hashlib.sha256(source.encode()).hexdigest() != CPU_OPS_SHA256:
+        raise ValueError('CPU ops adapter source lock mismatch; review the upstream change')
+    for line in ('from tinygrad.renderer.nir import NIRRenderer',
+                 '  @unittest.skipIf(isinstance(Device[Device.DEFAULT].renderer, NIRRenderer), "TODO: broken in LVP")'):
+        if source.count(line + '\n') != 1:
+            raise ValueError('CPU ops adapter expected one reviewed import/guard')
+        source = source.replace(line + '\n', '\n')
+    return source
+
+
+def check_cpu_ops_mode(device, renderer, interface, image):
+    if (device, renderer, interface, image) != ('CPU', '', '', 0):
+        raise ValueError('CPU ops adapter requires DEV=CPU, no renderer/interface override, IMAGE=0')
 
 
 class ProviderAliases(importlib.abc.MetaPathFinder, importlib.abc.Loader):
@@ -103,8 +122,9 @@ def outcome(phases):
 
 
 class Results:
-    def __init__(self, events, reference):
+    def __init__(self, events, reference, adapted=None):
         self.events, self.reference = events, reference
+        self.adapted = adapted
         self.tests, self.collection, self.collected = {}, [], []
 
     def emit(self, event, **data):
@@ -131,6 +151,8 @@ class Results:
         if report.outcome != "passed":
             crash = getattr(report.longrepr, "reprcrash", None)
             text = f"{crash.path}:{crash.lineno}: {crash.message}" if crash else str(report.longrepr)
+            if self.adapted:
+                text = text.replace(str(self.adapted), '<adapted>')
             for path, label in ((self.reference, "<reference>"), (ROOT, "<polygrad>")):
                 text = text.replace(str(path), label)
             row["detail"] = re.sub(r"0x[0-9a-fA-F]+", "0xADDR", text)
@@ -178,13 +200,35 @@ def child(request):
             if loaded != Path(request["library"]).resolve():
                 raise RuntimeError(f"wrong Polygrad library: {loaded}")
             result["library"] = {"path": str(loaded), "sha256": digest(loaded)}
+        test, pytest_root, adapted = request['test'], reference, None
+        if request.get('adapter') == 'cpu-ops':
+            from tinygrad.helpers import DEV, IMAGE
+            check_cpu_ops_mode(tinygrad.Device.DEFAULT, DEV.renderer, DEV.interface, IMAGE.value)
+            if request['engine'] == 'tinygrad':
+                from tinygrad.renderer.nir import NIRRenderer
+                if isinstance(tinygrad.Device["CPU"].renderer, NIRRenderer):
+                    raise ValueError('CPU ops adapter cannot remove an active NIR skip')
+            original, *node = test.split('::')
+            if original != 'test/backend/test_ops.py':
+                raise ValueError('CPU ops adapter only supports test/backend/test_ops.py')
+            adapted = Path(request['result']).parent / ('adapted-' + request['engine'])
+            dest = adapted / original
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            source = (reference / original).read_text(encoding='utf-8')
+            dest.write_text(adapt_cpu_ops(source), encoding='utf-8')
+            result['adaptation'] = {'id':'cpu-ops', 'original_sha256':digest(reference / original),
+                                    'path':str(dest), 'sha256':digest(dest),
+                                    'renderer_type':type(tinygrad.Device["CPU"].renderer).__name__}
+            test, pytest_root = str(dest) + ''.join('::' + n for n in node), adapted
         with Path(request["events"]).open("w") as events:
-            plugin = Results(events, reference)
+            plugin = Results(events, reference, adapted)
             code = pytest.main([
-                "-c", os.devnull, "--rootdir", str(reference), "--noconftest",
+                "-c", os.devnull, "--rootdir", str(pytest_root), "--noconftest",
                 "--import-mode=importlib", "-q", "-ra", "--tb=short", "-p", "no:cacheprovider",
-                request["test"],
+                test,
             ], plugins=[plugin])
+        if adapted and digest(dest) != result['adaptation']['sha256']:
+            result['errors'].append('adapted test source changed during execution')
         result.update(exit_code=int(code), collection=plugin.collection, collected=plugin.collected)
         result["tests"] = {node: {"status": outcome(phases), "phases": phases}
                            for node, phases in plugin.tests.items()}
@@ -220,7 +264,9 @@ def execution_errors(run):
 
 def signature(test):
     return {"status": test["status"], "nonpassing_phases": {
-        k: v for k, v in test["phases"].items() if v["outcome"] != "passed" or v.get("xfail")
+        k: {**v, **({'detail':re.sub(r'(?m)^([^\n]+\.py):\d+:', r'\1:LINE:', v['detail'])}
+                    if 'detail' in v else {})}
+        for k, v in test["phases"].items() if v["outcome"] != "passed" or v.get("xfail")
     }}
 
 
@@ -277,11 +323,11 @@ def source_inputs(reference, tests, library):
     return {str(p.resolve()): digest(p) for p in sorted(paths)}
 
 
-def run_one(output, engine, test, reference, library, timeout):
+def run_one(output, engine, test, reference, library, timeout, adapter=None):
     key = hashlib.sha256(test.encode()).hexdigest()[:12]
     stem = output / f"{engine}-{key}"
     request = {"engine": engine, "test": test, "reference": str(reference), "library": str(library),
-               "result": str(stem.with_suffix(".json")), "events": str(stem.with_suffix(".jsonl"))}
+               "result": str(stem.with_suffix(".json")), "events": str(stem.with_suffix(".jsonl")), 'adapter':adapter}
     write_json(stem.with_suffix(".request.json"), request)
     env = {k: os.environ[k] for k in ("PATH", "HOME", "LANG", "LD_LIBRARY_PATH") if k in os.environ}
     env.update(ENVIRONMENT, POLYGRAD_LIB=str(library), POLY_TMPDIR=str(output / "cc_tmp"),
@@ -321,6 +367,7 @@ def main(argv=None):
     parser.add_argument("--baseline", type=Path)
     parser.add_argument("--compare-with", type=Path, help="attach outcome delta against a previous run; not acceptance")
     parser.add_argument("--write-baseline", type=Path, help="write new candidate only; nonpasses require reviewed reasons")
+    parser.add_argument('--adapter', choices=['cpu-ops'], help='explicit CPU-only test adaptation; default tests are unchanged')
     parser.add_argument("--child", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if args.child:
@@ -334,6 +381,8 @@ def main(argv=None):
         path = (reference / test.split("::")[0]).resolve()
         if not path.is_relative_to(reference / "test") or not path.is_file():
             parser.error(f"not an upstream test: {test}")
+        if args.adapter and test.split('::')[0] != 'test/backend/test_ops.py':
+            parser.error('CPU ops adapter only supports test/backend/test_ops.py')
     if args.write_baseline and args.write_baseline.exists():
         parser.error("refusing to overwrite a baseline; write a separate review candidate")
     output.mkdir(parents=True, exist_ok=True)
@@ -347,7 +396,7 @@ def main(argv=None):
     dirty = subprocess.check_output(["git", "-C", str(reference), "status", "--porcelain", "--untracked-files=no"], text=True)
     if dirty:
         parser.error("reference has tracked edits; choose a clean pinned/candidate checkout")
-    runs = [run_one(output, engine, test, reference, library, args.timeout)
+    runs = [run_one(output, engine, test, reference, library, args.timeout, args.adapter)
             for test in tests for engine in (("tinygrad", "polygrad") if args.engine == "both" else (args.engine,))]
     errors = [f"{r['engine']} {r['selection']}: {err}" for r in runs for err in execution_errors(r)]
     if inputs != source_inputs(reference, tests, library):
@@ -357,7 +406,8 @@ def main(argv=None):
                     if Path(p).is_relative_to(reference)}, sort_keys=True).encode()).hexdigest(),
                 "engines": args.engine, "environment": ENVIRONMENT, "python": sys.version,
                 "runner_sha256": digest(__file__), "versions": [r.get("versions") for r in runs],
-                "devices": [r.get("device") for r in runs]}
+                "devices": [r.get("device") for r in runs], 'adapter':args.adapter,
+                'failure_signature':'source-path-and-message-v2'}
     cases = {}
     for run in runs:
         for node, test in run.get("tests", {}).items():

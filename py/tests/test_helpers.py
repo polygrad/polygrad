@@ -195,6 +195,98 @@ def test_context_nests_restores_decorates_and_rejects_unknown_keys():
             pass
 
 
+@pytest.mark.parametrize('text,expected', [
+    ('cpu', ('CPU', '', '', '', '')),
+    ('cpu:x86', ('CPU', 'X86', '', '', '')),
+    ('MOCK:2+NV:PTX:sm_80', ('NV', 'PTX', 'sm_80', 'MOCK', '2')),
+])
+def test_target_metadata_matches_pinned_parser(text, expected):
+    from polygrad.helpers import Target
+    target = Target.parse(text)
+    assert tuple(vars(target).values()) == expected
+    assert Target.parse(repr(target)) == target
+    assert target.replacedefault(arch='fallback').arch == (expected[2] or 'fallback')
+
+
+def test_dev_targets_restore_and_keep_device_selection_truthful():
+    from polygrad import Device
+    from polygrad.helpers import DEV, Target
+    old = DEV.value
+    with Context(DEV='CPU'):
+        assert DEV.value == [Target(device='CPU')]
+        assert (DEV.device, DEV.renderer, DEV.interface) == ('CPU', '', '')
+        assert Device.DEFAULT == 'CPU'
+        with Context(DEV='INTERP'):
+            assert Device.DEFAULT == 'INTERP'
+        assert Device.DEFAULT == 'CPU'
+        with Context(DEV='CPU:LLVM'):
+            assert DEV.renderer == 'LLVM'
+            with pytest.raises(ValueError, match='Unsupported device'):
+                Device.DEFAULT
+    assert DEV.value == old
+
+
+def test_image_mode_rejects_unsupported_requests_without_partial_context():
+    from polygrad.helpers import IMAGE
+    old = BEAM.value
+    try:
+        with Context(IMAGE=0):
+            assert IMAGE.value == 0
+        with pytest.raises(NotImplementedError, match='IMAGE'):
+            with Context(BEAM=44, IMAGE=1):
+                pytest.fail('unsupported image mode entered')
+        assert IMAGE.value == 0 and BEAM.value == old
+        with pytest.raises(NotImplementedError, match='IMAGE'):
+            IMAGE.value = 2
+        assert IMAGE.value == 0
+    finally:
+        BEAM.value = old
+
+
+def test_failed_context_entry_restores_prior_settings():
+    class Rejecting(ContextVar):
+        @property
+        def value(self):
+            return 0
+
+        @value.setter
+        def value(self, v):
+            if v != 0:
+                raise ValueError('unsupported setting')
+
+    Rejecting('PG_HELPER_REJECT', 0)
+    old = BEAM.value
+    try:
+        with pytest.raises(ValueError, match='unsupported setting'):
+            with Context(BEAM=44, PG_HELPER_REJECT=1):
+                pass
+        assert BEAM.value == old
+    finally:
+        BEAM.value = old
+
+
+def test_failed_context_entry_restores_core_logical_policy():
+    from polygrad import Tensor
+    from polygrad.helpers import LOGICAL
+    baseline, setting = Tensor([1.0]).logical_policy, LOGICAL.value
+    replacement = 'always' if baseline != 'always' else 'never'
+    with pytest.raises(NotImplementedError, match='IMAGE'):
+        with Context(LOGICAL=replacement, IMAGE=1):
+            pytest.fail('unsupported context entered')
+    assert LOGICAL.value == setting
+    assert Tensor([2.0]).logical_policy == baseline
+
+
+def test_image_environment_rejects_before_execution():
+    import os
+    import subprocess
+    import sys
+    proc = subprocess.run([sys.executable, '-c', 'import polygrad'], capture_output=True,
+                          text=True, env={**os.environ, 'IMAGE': '1'})
+    assert proc.returncode != 0
+    assert 'IMAGE' in proc.stderr and 'NotImplementedError' in proc.stderr
+
+
 def test_colored_matches_tinygrad_bright_background_and_no_color_behavior():
     old_no_color = NO_COLOR.value
     with Context(NO_COLOR=0):

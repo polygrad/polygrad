@@ -33,11 +33,12 @@
       "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
       "PYTHONHASHSEED": "0",
       "SKIP_SLOW_TEST": "0",
-      "TINY_BACKEND": ""
+      "TINY_BACKEND": "0",
+      "IMAGE": "0"
     },
     "python": "3.11.12 (main, Apr  9 2025, 04:04:00) [Clang 20.1.0 ]",
     "reference_commit": "a9069c177a9da9cca18593edf55acd2e6073cca6",
-    "runner_sha256": "0ae0916b3da57fa98f830abc3532ccf58ba837ef23b83e7958eb5e760c829905",
+    "runner_sha256": "370b948ea67c32827df73e36ab98dc3555a4f01497c5eabe13ce073c39e8de5b",
     "test_sha256": {
       "test/backend/test_setitem.py": "bfa540e93690962ef332f5a5e8c6e6913f6fd6a219111da20dd8d596c5547e74",
       "test/backend/test_tensor.py": "5f98a533f473dd819728e208b5ced15b04acf63a3944fee4f9d957b55954ee59",
@@ -159,11 +160,13 @@
         "pytest": "8.3.5",
         "torch": "2.5.1+cpu"
       }
-    ]
+    ],
+    "adapter": null,
+    "failure_signature": "source-path-and-message-v2"
   },
   "evidence": {
-    "report": "temp/movement-frontends-20260906.Gjy42s/upstream/report.json",
-    "sha256": "571f4ff5b941f6b1ceb64f411697d67b1edc574845b35a9601a909c190937ddf"
+    "report": "temp/ops-admission-20260906.TByPzb/unchanged/report.json",
+    "sha256": "9e111d5962ae67c0daf0a5f42ca6c96366ed8cbff05305a81cc79ff6c2b748bd"
   },
   "schema_version": 1,
   "tests": {
@@ -223,7 +226,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:1319: RuntimeError: poly_realize_tensors failed for device(s): CPU",
+            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: RuntimeError: poly_realize_tensors failed for device(s): CPU",
             "outcome": "failed"
           }
         },
@@ -243,7 +246,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:355: TypeError: int() argument must be a string, a bytes-like object or a real number, not 'tuple'",
+            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: TypeError: int() argument must be a string, a bytes-like object or a real number, not 'tuple'",
             "outcome": "failed"
           }
         },
@@ -277,7 +280,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:1427: RuntimeError: poly_tensor_clone failed",
+            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: RuntimeError: poly_tensor_clone failed",
             "outcome": "failed"
           }
         },
@@ -290,7 +293,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:1427: RuntimeError: poly_tensor_clone failed",
+            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: RuntimeError: poly_tensor_clone failed",
             "outcome": "failed"
           }
         },
@@ -303,7 +306,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/py/polygrad/device.py:39: AttributeError: 'NoneType' object has no attribute 'raw'",
+            "detail": "<polygrad>/py/polygrad/device.py:LINE: AttributeError: 'NoneType' object has no attribute 'raw'",
             "outcome": "failed"
           }
         },
@@ -337,7 +340,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_tensor.py:28: AttributeError: 'UOp' object has no attribute 'device'",
+            "detail": "<reference>/test/backend/test_tensor.py:LINE: AttributeError: 'UOp' object has no attribute 'device'",
             "outcome": "failed"
           }
         },
@@ -350,7 +353,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/references/.uv-python/cpython-3.11.12-linux-x86_64-gnu/lib/python3.11/unittest/case.py:703: AssertionError: UOp(0xADDR) is not UOp(0xADDR)",
+            "detail": "<polygrad>/references/.uv-python/cpython-3.11.12-linux-x86_64-gnu/lib/python3.11/unittest/case.py:LINE: AssertionError: UOp(0xADDR) is not UOp(0xADDR)",
             "outcome": "failed"
           }
         },
@@ -370,7 +373,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:3390: ValueError: randn only supports float dtypes, got dtypes.bool",
+            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: ValueError: randn only supports float dtypes, got dtypes.bool",
             "outcome": "failed"
           }
         },
@@ -383,7 +386,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/extra/gradcheck.py:17: AttributeError: property 'grad' of 'Tensor' object has no setter",
+            "detail": "<reference>/extra/gradcheck.py:LINE: AttributeError: property 'grad' of 'Tensor' object has no setter",
             "outcome": "failed"
           }
         },
@@ -403,7 +406,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/extra/gradcheck.py:17: AttributeError: property 'grad' of 'Tensor' object has no setter",
+            "detail": "<reference>/extra/gradcheck.py:LINE: AttributeError: property 'grad' of 'Tensor' object has no setter",
             "outcome": "failed"
           }
         },
@@ -451,7 +454,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_tensor.py:285: AttributeError: type object 'Tensor' has no attribute 'ones_like'",
+            "detail": "<reference>/test/backend/test_tensor.py:LINE: AttributeError: type object 'Tensor' has no attribute 'ones_like'",
             "outcome": "failed"
           }
         },
@@ -478,7 +481,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/references/.uv-python/cpython-3.11.12-linux-x86_64-gnu/lib/python3.11/unittest/case.py:199: AssertionError: TypeError not raised",
+            "detail": "<polygrad>/references/.uv-python/cpython-3.11.12-linux-x86_64-gnu/lib/python3.11/unittest/case.py:LINE: AssertionError: TypeError not raised",
             "outcome": "failed"
           }
         },
@@ -498,7 +501,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_tensor.py:245: AttributeError: type object 'Tensor' has no attribute 'normal'",
+            "detail": "<reference>/test/backend/test_tensor.py:LINE: AttributeError: type object 'Tensor' has no attribute 'normal'",
             "outcome": "failed"
           }
         },
@@ -553,7 +556,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:1577: RuntimeError: core Tensor operation failed",
+            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: RuntimeError: core Tensor operation failed",
             "outcome": "failed"
           }
         },
@@ -566,7 +569,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:198: TypeError: Tuple must have size 2, but has size 1",
+            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: TypeError: Tuple must have size 2, but has size 1",
             "outcome": "failed"
           }
         },
@@ -579,7 +582,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_tensor.py:374: AttributeError: type object 'Tensor' has no attribute 'from_blob'",
+            "detail": "<reference>/test/backend/test_tensor.py:LINE: AttributeError: type object 'Tensor' has no attribute 'from_blob'",
             "outcome": "failed"
           }
         },
@@ -668,7 +671,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_tensor.py:273: AttributeError: type object 'Tensor' has no attribute 'zeros_like'",
+            "detail": "<reference>/test/backend/test_tensor.py:LINE: AttributeError: type object 'Tensor' has no attribute 'zeros_like'",
             "outcome": "failed"
           }
         },
@@ -1376,7 +1379,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:141: TypeError: 'Tensor' object does not support item assignment",
+            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
             "outcome": "failed"
           }
         },
@@ -1387,13 +1390,13 @@
     },
     "polygrad:test/backend/test_setitem.py::TestSetitem::test_jit_setitem_variable_offset": {
       "expected": {
-        "status": "failed",
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/py/polygrad/helpers.py:192: KeyError: 'CHECK_OOB'",
+            "detail": "<polygrad>/py/polygrad/helpers.py:LINE: KeyError: 'CHECK_OOB'",
             "outcome": "failed"
           }
-        }
+        },
+        "status": "failed"
       },
       "reason": "Context does not register CHECK_OOB; no substitute context variable is installed by the runner.",
       "category": "frontend-context"
@@ -1409,7 +1412,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:31: TypeError: 'Tensor' object does not support item assignment",
+            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
             "outcome": "failed"
           }
         },
@@ -1422,7 +1425,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:227: TypeError: 'Tensor' object does not support item assignment",
+            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
             "outcome": "failed"
           }
         },
@@ -1435,7 +1438,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:204: TypeError: 'Tensor' object does not support item assignment",
+            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
             "outcome": "failed"
           }
         },
@@ -1448,7 +1451,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:195: TypeError: 'Tensor' object does not support item assignment",
+            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
             "outcome": "failed"
           }
         },
@@ -1461,7 +1464,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:64: TypeError: 'Tensor' object does not support item assignment",
+            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
             "outcome": "failed"
           }
         },
@@ -1474,7 +1477,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:115: TypeError: 'Tensor' object does not support item assignment",
+            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
             "outcome": "failed"
           }
         },
@@ -1487,7 +1490,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:72: TypeError: 'Tensor' object does not support item assignment",
+            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
             "outcome": "failed"
           }
         },
@@ -1500,7 +1503,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:54: TypeError: 'Tensor' object does not support item assignment",
+            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
             "outcome": "failed"
           }
         },
@@ -1513,7 +1516,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:59: TypeError: 'Tensor' object does not support item assignment",
+            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
             "outcome": "failed"
           }
         },
@@ -1539,7 +1542,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:84: TypeError: 'Tensor' object does not support item assignment",
+            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
             "outcome": "failed"
           }
         },
@@ -1552,7 +1555,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:36: TypeError: 'Tensor' object does not support item assignment",
+            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
             "outcome": "failed"
           }
         },
@@ -1565,7 +1568,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:89: TypeError: 'Tensor' object does not support item assignment",
+            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
             "outcome": "failed"
           }
         },
@@ -1578,7 +1581,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:297: AttributeError: type object 'Tensor' has no attribute 'invalids'",
+            "detail": "<reference>/test/backend/test_setitem.py:LINE: AttributeError: type object 'Tensor' has no attribute 'invalids'",
             "outcome": "failed"
           }
         },
@@ -1591,7 +1594,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:122: TypeError: 'Tensor' object does not support item assignment",
+            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
             "outcome": "failed"
           }
         },
@@ -1604,7 +1607,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:131: TypeError: 'Tensor' object does not support item assignment",
+            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
             "outcome": "failed"
           }
         },
@@ -1617,7 +1620,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:181: TypeError: 'Tensor' object does not support item assignment",
+            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
             "outcome": "failed"
           }
         },
@@ -1630,7 +1633,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:186: TypeError: 'Tensor' object does not support item assignment",
+            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
             "outcome": "failed"
           }
         },
@@ -1643,7 +1646,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:78: TypeError: 'Tensor' object does not support item assignment",
+            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
             "outcome": "failed"
           }
         },
@@ -1656,7 +1659,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:235: TypeError: 'Tensor' object does not support item assignment",
+            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
             "outcome": "failed"
           }
         },
@@ -1669,7 +1672,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:211: TypeError: 'Tensor' object does not support item assignment",
+            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
             "outcome": "failed"
           }
         },
@@ -1682,7 +1685,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:218: TypeError: 'Tensor' object does not support item assignment",
+            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
             "outcome": "failed"
           }
         },
@@ -1695,7 +1698,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:136: TypeError: 'Tensor' object does not support item assignment",
+            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
             "outcome": "failed"
           }
         },
@@ -1708,7 +1711,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:149: TypeError: 'Tensor' object does not support item assignment",
+            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
             "outcome": "failed"
           }
         },
@@ -1721,7 +1724,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:24: TypeError: 'Tensor' object does not support item assignment",
+            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
             "outcome": "failed"
           }
         },
@@ -1734,7 +1737,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:374: TypeError: 'Tensor' object does not support item assignment",
+            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
             "outcome": "failed"
           }
         },
@@ -1747,7 +1750,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:308: TypeError: 'Tensor' object does not support item assignment",
+            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
             "outcome": "failed"
           }
         },
@@ -1760,7 +1763,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:313: TypeError: 'Tensor' object does not support item assignment",
+            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
             "outcome": "failed"
           }
         },
@@ -1773,7 +1776,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:337: TypeError: 'Tensor' object does not support item assignment",
+            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
             "outcome": "failed"
           }
         },
@@ -1786,7 +1789,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:320: TypeError: 'Tensor' object does not support item assignment",
+            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
             "outcome": "failed"
           }
         },
@@ -1799,7 +1802,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:328: TypeError: 'Tensor' object does not support item assignment",
+            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
             "outcome": "failed"
           }
         },
@@ -1812,7 +1815,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:346: TypeError: 'Tensor' object does not support item assignment",
+            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
             "outcome": "failed"
           }
         },
@@ -1825,7 +1828,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:368: TypeError: 'Tensor' object does not support item assignment",
+            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
             "outcome": "failed"
           }
         },
@@ -1838,7 +1841,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:360: TypeError: 'Tensor' object does not support item assignment",
+            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
             "outcome": "failed"
           }
         },
@@ -1851,7 +1854,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:352: TypeError: 'Tensor' object does not support item assignment",
+            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
             "outcome": "failed"
           }
         },
@@ -1869,8 +1872,8 @@
     },
     "polygrad:test/null/test_dtype.py::TestCanLosslessCast::test_can_lossless_cast": {
       "expected": {
-        "status": "passed",
-        "nonpassing_phases": {}
+        "nonpassing_phases": {},
+        "status": "passed"
       },
       "reason": ""
     },
@@ -1885,7 +1888,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/py/polygrad/device.py:108: ValueError: Unsupported device: 'PYTHON'",
+            "detail": "<polygrad>/py/polygrad/device.py:LINE: ValueError: Unsupported device: 'PYTHON'",
             "outcome": "failed"
           }
         },
@@ -1898,7 +1901,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/py/polygrad/device.py:108: ValueError: Unsupported device: 'PYTHON'",
+            "detail": "<polygrad>/py/polygrad/device.py:LINE: ValueError: Unsupported device: 'PYTHON'",
             "outcome": "failed"
           }
         },
@@ -1953,7 +1956,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:3226: IndexError: Unsupported index type: <class 'list'>",
+            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: IndexError: Unsupported index type: <class 'list'>",
             "outcome": "failed"
           }
         },
@@ -1966,7 +1969,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:3226: IndexError: Unsupported index type: <class 'list'>",
+            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: IndexError: Unsupported index type: <class 'list'>",
             "outcome": "failed"
           }
         },
@@ -2014,7 +2017,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/null/test_indexing.py:97: AttributeError: 'Tensor' object has no attribute '__setitem__'",
+            "detail": "<reference>/test/null/test_indexing.py:LINE: AttributeError: 'Tensor' object has no attribute '__setitem__'",
             "outcome": "failed"
           }
         },
@@ -2053,8 +2056,8 @@
     },
     "polygrad:test/null/test_tensor_io.py::TestTensorIO::test_seek": {
       "expected": {
-        "status": "passed",
-        "nonpassing_phases": {}
+        "nonpassing_phases": {},
+        "status": "passed"
       },
       "reason": ""
     },
@@ -2166,7 +2169,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/unit/test_linalg.py:111: AttributeError: 'Tensor' object has no attribute 'newton_schulz'",
+            "detail": "<reference>/test/unit/test_linalg.py:LINE: AttributeError: 'Tensor' object has no attribute 'newton_schulz'",
             "outcome": "failed"
           }
         },
@@ -2193,7 +2196,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/unit/test_linalg.py:19: AttributeError: 'Tensor' object has no attribute 'svd'",
+            "detail": "<reference>/test/unit/test_linalg.py:LINE: AttributeError: 'Tensor' object has no attribute 'svd'",
             "outcome": "failed"
           }
         },
@@ -2206,7 +2209,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/unit/test_linalg.py:81: AttributeError: 'Tensor' object has no attribute 'svd'",
+            "detail": "<reference>/test/unit/test_linalg.py:LINE: AttributeError: 'Tensor' object has no attribute 'svd'",
             "outcome": "failed"
           }
         },
@@ -2219,7 +2222,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/unit/test_linalg.py:91: AttributeError: 'Tensor' object has no attribute 'svd'",
+            "detail": "<reference>/test/unit/test_linalg.py:LINE: AttributeError: 'Tensor' object has no attribute 'svd'",
             "outcome": "failed"
           }
         },
@@ -2243,52 +2246,52 @@
     },
     "polygrad:test/unit/test_linalg.py::TestLinAlg::test_svd_nonfull_2_2": {
       "expected": {
-        "status": "failed",
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/py/polygrad/helpers.py:192: KeyError: 'CHECK_OOB'",
+            "detail": "<polygrad>/py/polygrad/helpers.py:LINE: KeyError: 'CHECK_OOB'",
             "outcome": "failed"
           }
-        }
+        },
+        "status": "failed"
       },
       "reason": "Context does not register CHECK_OOB; no substitute context variable is installed by the runner.",
       "category": "frontend-context"
     },
     "polygrad:test/unit/test_linalg.py::TestLinAlg::test_svd_nonfull_2_2_2_2_3": {
       "expected": {
-        "status": "failed",
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/py/polygrad/helpers.py:192: KeyError: 'CHECK_OOB'",
+            "detail": "<polygrad>/py/polygrad/helpers.py:LINE: KeyError: 'CHECK_OOB'",
             "outcome": "failed"
           }
-        }
+        },
+        "status": "failed"
       },
       "reason": "Context does not register CHECK_OOB; no substitute context variable is installed by the runner.",
       "category": "frontend-context"
     },
     "polygrad:test/unit/test_linalg.py::TestLinAlg::test_svd_nonfull_3_5": {
       "expected": {
-        "status": "failed",
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/py/polygrad/helpers.py:192: KeyError: 'CHECK_OOB'",
+            "detail": "<polygrad>/py/polygrad/helpers.py:LINE: KeyError: 'CHECK_OOB'",
             "outcome": "failed"
           }
-        }
+        },
+        "status": "failed"
       },
       "reason": "Context does not register CHECK_OOB; no substitute context variable is installed by the runner.",
       "category": "frontend-context"
     },
     "polygrad:test/unit/test_linalg.py::TestLinAlg::test_svd_nonfull_5_3": {
       "expected": {
-        "status": "failed",
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/py/polygrad/helpers.py:192: KeyError: 'CHECK_OOB'",
+            "detail": "<polygrad>/py/polygrad/helpers.py:LINE: KeyError: 'CHECK_OOB'",
             "outcome": "failed"
           }
-        }
+        },
+        "status": "failed"
       },
       "reason": "Context does not register CHECK_OOB; no substitute context variable is installed by the runner.",
       "category": "frontend-context"
@@ -2297,7 +2300,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/unit/test_linalg.py:101: AttributeError: 'Tensor' object has no attribute 'svd'",
+            "detail": "<reference>/test/unit/test_linalg.py:LINE: AttributeError: 'Tensor' object has no attribute 'svd'",
             "outcome": "failed"
           }
         },
@@ -2308,15 +2311,15 @@
     },
     "polygrad:test/unit/test_tensor_io.py::TestTensorIO::test_read": {
       "expected": {
-        "status": "passed",
-        "nonpassing_phases": {}
+        "nonpassing_phases": {},
+        "status": "passed"
       },
       "reason": ""
     },
     "polygrad:test/unit/test_tensor_io.py::TestTensorIO::test_read_nolen": {
       "expected": {
-        "status": "passed",
-        "nonpassing_phases": {}
+        "nonpassing_phases": {},
+        "status": "passed"
       },
       "reason": ""
     },
