@@ -3,6 +3,10 @@
   "baseline_ref": "references/tinygrad_20260621",
   "target_ref": "references/tinygrad_20260822",
   "graph_report": "temp/parity_graph/report.json",
+  "required_checks": [
+    "physical_graph", "values", "native", "python", "js_native", "js_wasm",
+    "interp", "x86", "webgpu", "cuda"
+  ],
   "rule_groups": [
     {
       "id": "uop_data_invalid",
@@ -686,6 +690,7 @@
         "src/dtype.c",
         "src/uop/ops.c",
         "src/uop/weak.c",
+        "src/mixin/elementwise.c",
         "src/tensor.c",
         "py/polygrad/tensor.py",
         "js/src/tensor.js"
@@ -712,6 +717,7 @@
       "symbol_patterns": ["shape", "reshape", "expand", "broadcast", "permute", "shrink", "pad", "flip", "index"],
       "polygrad_owners": [
         "src/mixin/movement.c",
+        "src/uop/movement.c",
         "src/shape.c",
         "src/uop/ops.c",
         "src/schedule/indexing.c"
@@ -787,6 +793,7 @@
     },
     {
       "id": "multi_device",
+      "required_checks": ["multi_gpu"],
       "title": "UNSHARD, device ranges and allreduce",
       "source_status": "open",
       "implementation_status": "focused_closed",

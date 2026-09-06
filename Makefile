@@ -222,6 +222,17 @@ reference-migration-report: parity-graph-report
 		--graph-report $(GRAPH_PARITY_DIR)/report.json \
 		--archbird-map temp/archbird-polygrad.json
 
+MIGRATION_EVIDENCE ?= temp/reference_migration/evidence.json
+.PHONY: test-reference-migration reference-migration-check
+test-reference-migration:
+	PYTHONPATH=. $(PYTHON) -m pytest -q py/tests/test_reference_migration.py
+
+# Validate frozen evidence without silently rebuilding or replacing its inputs.
+reference-migration-check: test-reference-migration
+	$(PYTHON) scripts/reference_migration.py --strict \
+		--graph-report $(GRAPH_PARITY_DIR)/report.json \
+		--archbird-map '' --evidence $(MIGRATION_EVIDENCE)
+
 test-parity-op-census parity-op-census-report: build/libpolygrad.so
 	@mkdir -p $(OP_PARITY_DIR)
 	POLYGRAD_LIB=$(abspath build/libpolygrad.so) \

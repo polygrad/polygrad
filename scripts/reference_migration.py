@@ -34,10 +34,7 @@ def python_symbols(path: Path) -> dict[str, str]:
     if not path.is_file():
         return {}
     source = path.read_text(encoding="utf-8")
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        return {}
+    tree = ast.parse(source)
     ret: dict[str, str] = {}
 
     def add(name: str, node: ast.AST) -> None:
@@ -330,12 +327,232 @@ def symbol_changes(old_root: Path, new_root: Path, paths: list[str], filters: li
     for rel in sorted(set(iter_wave_files(old_root, paths)) | set(iter_wave_files(new_root, paths))):
         old, new = python_symbols(old_root / rel), python_symbols(new_root / rel)
         for name in sorted(set(old) | set(new)):
-            if lowered and not any(token in name.lower() for token in lowered):
-                continue
             state = "added" if name not in old else "removed" if name not in new else "changed" if old[name] != new[name] else None
             if state:
-                ret.append({"path": rel, "symbol": name, "state": state})
+                ret.append({
+                    "path": rel, "symbol": name, "state": state,
+                    "baseline_sha256": old.get(name), "target_sha256": new.get(name),
+                    "routed": not lowered or any(token in name.lower() for token in lowered),
+                })
     return ret
+
+
+def file_hash(path: Path) -> str | None:
+    return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+
+
+def source_inventory(old_root: Path, new_root: Path, paths: list[str]) -> list[dict]:
+    # Whole-file rows require full-diff review, including imports, module-level
+    # control flow and matcher composition which a symbol census cannot certify.
+    rows = []
+    for rel in sorted(set(iter_wave_files(old_root, paths)) | set(iter_wave_files(new_root, paths))):
+        old, new = file_hash(old_root / rel), file_hash(new_root / rel)
+        if old != new:
+            rows.append({"id": f"{rel}:@file", "baseline_sha256": old, "target_sha256": new})
+    rows.extend({"id": f"{r['path']}:{r['symbol']}",
+                 "baseline_sha256": r["baseline_sha256"], "target_sha256": r["target_sha256"]}
+                for r in symbol_changes(old_root, new_root, paths, []))
+    return rows
+
+
+def source_manifest(root: Path) -> dict[str, str]:
+    """Conservative execution-input boundary; excludes generated mirrors/artifacts.
+
+    Each run records its built artifacts separately. Capture this manifest before
+    execution and verify it again afterwards, never backfill it onto an old log.
+    """
+    paths = set()
+    for directory in ("src", "py/polygrad", "js/src", "test", "py/tests", "js/test",
+                      "scripts", "js/scripts", "references/tinygrad_latest/tinygrad"):
+        paths.update(p for p in (root / directory).rglob("*")
+                     if p.suffix in {".c", ".h", ".py", ".js", ".mjs", ".ts", ".sh"} and p.is_file())
+    paths.update(root / p for p in (
+        "Makefile", "CMakeLists.txt", "py/setup.py", "py/pyproject.toml", "js/package.json", "js/binding.gyp",
+        "scripts/reference_migration_waves.json", "test/fixtures/parity_divergences.json",
+    ) if (root / p).is_file())
+    paths.update(p for p in (root / "js").glob("*") if p.suffix in {".c", ".h"} and p.is_file())
+    return {str(p.relative_to(root)): file_hash(p) for p in sorted(paths)}
+
+
+def manifest_hash(inputs: dict) -> str:
+    return hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
+
+
+def graph_corpus(root: Path) -> dict[str, str]:
+    # Read the literal catalogue without importing a frontend or running a case.
+    tree = ast.parse((root / "test/tensor_graph_cases.py").read_text())
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "CASES" for t in node.targets):
+            if isinstance(node.value, ast.Dict):
+                return {ast.literal_eval(k): ast.literal_eval(v.elts[0])
+                        for k, v in zip(node.value.keys, node.value.values)}
+    raise ValueError("missing literal CASES catalogue")
+
+
+def release_errors(ledger: dict, report: dict, evidence: dict, register: dict, root: Path = ROOT) -> list[str]:
+    """Validate reviewed audit rows and source-bound execution records, not labels.
+
+    A wave's source_audit is schema-1 JSON with baseline_commit, target_commit,
+    and rows matching source_inventory exactly. Each row has a disposition and
+    reason; equivalent rows name hashed counterpart sources and executed tests.
+    Approved divergences must name an approved register ID and exact stage.
+
+    Execution evidence is schema-1 JSON: source_inputs and checks keyed by the
+    configured required_checks. Checks carry command, exit_code, passed/failed/
+    skipped counts, passed_cases, source_sha256, hashed log and artifact records.
+    physical_graph additionally binds report_sha256. Human review remains needed
+    for semantic correspondence; hashes attest identity, not truth of a claim.
+    """
+    errors = list(ledger.get("reference_errors", []))
+
+    def check_file(record, label):
+        if not isinstance(record, dict) or not isinstance(record.get("path"), str):
+            errors.append(f"{label}: missing file evidence")
+            return None
+        path = (root / record["path"]).resolve()
+        if not path.is_relative_to(root.resolve()) or not path.is_file():
+            errors.append(f"{label}: missing or outside-root file {record['path']}")
+            return None
+        if not record.get("sha256") or file_hash(path) != record["sha256"]:
+            errors.append(f"{label}: stale file {record['path']}")
+        return path
+
+    def load_audit(name, label):
+        if not isinstance(name, str) or not name:
+            errors.append(f"{label}: missing source audit evidence")
+            return {}
+        path = (root / name).resolve()
+        try:
+            if not path.is_relative_to(root.resolve()):
+                raise ValueError("outside repository")
+            data = json.loads(path.read_text())
+            if not isinstance(data, dict) or data.get("schema_version") != 1:
+                raise ValueError("unsupported audit schema")
+            return data
+        except (OSError, ValueError) as exc:
+            errors.append(f"{label}: invalid source audit {name}: {exc}")
+            return {}
+
+    entries = {r["id"]: r for r in register.get("entries", [])}
+    if len(entries) != len(register.get("entries", [])):
+        errors.append("divergence register: duplicate IDs")
+    if register.get("schema_version") != 1 or register.get("reference", {}).get("commit") != ledger["target"]["commit"]:
+        errors.append("divergence register: stale reference or unsupported schema")
+
+    def approved(row):
+        entry = entries.get(row.get("divergence_id", row.get("id")), {})
+        return entry.get("status") == "approved" and row.get("stage") in entry.get("stages", [])
+
+    for field in ("waves", "required_checks", "rule_groups"):
+        if not ledger.get(field):
+            errors.append(f"{field}: empty required scope")
+    for row in ledger.get("rule_groups", []) + ledger.get("matcher_aggregates", []):
+        if row.get("status") != "pass":
+            errors.append(f"{row['id']}: matcher validation failed")
+
+    summary = {"pass": 0, "fail": 0, "allowed": 0, "unregistered": 0}
+    cases = report.get("cases", {})
+    try:
+        if {name: case.get("stage") for name, case in cases.items()} != graph_corpus(root):
+            errors.append("physical graph corpus: missing/extra cases or changed stages")
+    except (OSError, ValueError, SyntaxError, AttributeError) as exc:
+        errors.append(f"physical graph corpus: cannot read catalogue: {exc}")
+    if report.get("schema_version") != 1 or report.get("reference_commit") != ledger["target"]["commit"] or not cases:
+        errors.append("physical graph: missing cases, stale reference or unsupported schema")
+    for name, case in cases.items():
+        passed = case.get("passed") is True
+        summary["pass" if passed else "fail"] += 1
+        for finding in case.get("findings", []):
+            allowed = approved({**finding, "stage": case.get("stage")})
+            summary["allowed" if allowed else "unregistered"] += 1
+            if not allowed or finding.get("allowed") is not True or finding.get("status") != "approved":
+                errors.append(f"physical graph {name}: unapproved or unregistered mismatch")
+        if not passed:
+            errors.append(f"physical graph {name}: failed")
+    if report.get("summary") != summary:
+        errors.append("physical graph: summary disagrees with cases/register")
+    check_file(ledger.get("graph_report"), "physical graph report")
+
+    inputs = source_manifest(root)
+    if evidence.get("schema_version") != 1 or not inputs or evidence.get("source_inputs") != inputs:
+        errors.append("execution evidence: missing/stale source inputs or unsupported schema")
+    source_sha256 = manifest_hash(inputs)
+    checks = evidence.get("checks", {})
+    required = set(ledger.get("required_checks", []))
+    for wave in ledger.get("waves", []):
+        required.update(wave.get("required_checks", []))
+    for name in sorted(required):
+        result = checks.get(name)
+        if not isinstance(result, dict):
+            errors.append(f"{name}: missing required execution result")
+            continue
+        counts = [result.get(k) for k in ("passed", "failed", "skipped")]
+        passed_cases = result.get("passed_cases", [])
+        valid_cases = (isinstance(passed_cases, list) and all(isinstance(c, str) and c for c in passed_cases)
+                       and len(set(passed_cases)) == len(passed_cases))
+        if (not result.get("command") or type(result.get("exit_code")) is not int or result["exit_code"] != 0
+                or any(type(n) is not int or n < 0 for n in counts) or counts[0] == 0 or counts[1] != 0
+                or not valid_cases or len(passed_cases) != counts[0]):
+            errors.append(f"{name}: failed, empty or inconsistent execution result")
+        if not valid_cases:
+            passed_cases = []
+        if result.get("source_sha256") != source_sha256:
+            errors.append(f"{name}: stale execution source generation")
+        check_file(result.get("log"), name)
+        if not result.get("artifacts"):
+            errors.append(f"{name}: missing built artifacts")
+        for artifact in result.get("artifacts", []):
+            check_file(artifact, name)
+        if name == "physical_graph" and (
+                result.get("report_sha256") != ledger["graph_report"]["sha256"]
+                or set(passed_cases) != {n for n, c in cases.items() if c.get("passed") is True}):
+            errors.append("physical_graph: stale report binding or case set")
+
+    for wave in ledger.get("waves", []):
+        label = wave["id"]
+        if wave.get("source_status") != "closed":
+            errors.append(f"{label}: source audit is not closed")
+        if wave.get("implementation_status") != "closed":
+            errors.append(f"{label}: implementation is not closed")
+        audit = load_audit(wave.get("source_audit"), label)
+        if not audit:
+            continue
+        if (audit.get("baseline_commit") != ledger["baseline"]["commit"]
+                or audit.get("target_commit") != ledger["target"]["commit"]):
+            errors.append(f"{label}: stale audit reference")
+        inventory = {r["id"]: r for r in wave["source_inventory"]}
+        rows = audit.get("rows", [])
+        ids = [r.get("id") for r in rows]
+        if set(ids) != set(inventory) or len(ids) != len(set(ids)):
+            errors.append(f"{label}: missing, extra or duplicate source dispositions")
+        for row in rows:
+            row_label = f"{label}/{row.get('id')}"
+            expected = inventory.get(row.get("id"), {})
+            if any(row.get(k) != expected.get(k) for k in ("baseline_sha256", "target_sha256")):
+                errors.append(f"{row_label}: stale source disposition")
+            if not isinstance(row.get("reason"), str) or not row["reason"].strip():
+                errors.append(f"{row_label}: missing review rationale")
+            disposition = row.get("disposition")
+            if disposition == "approved_divergence":
+                if not approved(row):
+                    errors.append(f"{row_label}: unapproved divergence")
+            elif disposition == "equivalent":
+                if not row.get("counterparts") or not row.get("tests"):
+                    errors.append(f"{row_label}: missing counterpart/test evidence")
+                for counterpart in row.get("counterparts", []):
+                    path = check_file(counterpart, row_label)
+                    symbol = counterpart.get("symbol")
+                    if not symbol or (path and not re.search(rf"\b{re.escape(symbol)}\b", path.read_text())):
+                        errors.append(f"{row_label}: missing counterpart symbol")
+                for test in row.get("tests", []):
+                    check_file(test, row_label)
+                    check_name = test.get("check")
+                    result = checks.get(check_name) or {}
+                    if check_name not in required or test.get("case") not in (result.get("passed_cases") or []):
+                        errors.append(f"{row_label}: acceptance test was not executed")
+            elif disposition != "not_applicable":
+                errors.append(f"{row_label}: unclassified source change")
+    return errors
 
 
 def source_hints(changes: list[dict], owners: list[str]) -> list[dict]:
@@ -538,7 +755,8 @@ def render_markdown(ledger: dict) -> str:
         lines.append("")
         lines.append(
             f"Upstream diff: {wave['diff_stat']['files']} files, +{wave['diff_stat']['added']}/-{wave['diff_stat']['deleted']}; "
-            f"changed routed symbols: {len(wave['changed_symbols'])}; "
+            f"changed symbols: {len(wave['changed_symbols'])} "
+            f"({sum(r['routed'] for r in wave['changed_symbols'])} lexically routed); "
             f"relevant commits: {len(wave['upstream_commits'])}."
         )
         status = wave["graph_status"]
@@ -578,6 +796,10 @@ def render_markdown(ledger: dict) -> str:
             lines.extend(["", "Archbird routed test candidates:"])
             for row in impact["routed_tests"][:12]:
                 lines.append(f"- `{row['path']}` ({row['witnesses']} static witnesses)")
+    release = ledger.get("release_check")
+    if release:
+        lines.extend(["", f"## Strict evidence check: {release['status']}", ""])
+        lines.extend(f"- {error}" for error in release["errors"])
     return "\n".join(lines) + "\n"
 
 
@@ -588,6 +810,8 @@ def main() -> int:
     parser.add_argument("--archbird-map", default="temp/archbird-polygrad.json")
     parser.add_argument("--json-output", default="temp/reference_migration/ledger.json")
     parser.add_argument("--markdown-output", default="temp/reference_migration/ledger.md")
+    parser.add_argument("--strict", action="store_true", help="fail on incomplete source/runtime evidence")
+    parser.add_argument("--evidence", default="temp/reference_migration/evidence.json")
     args = parser.parse_args()
 
     config_path = ROOT / args.config
@@ -616,7 +840,8 @@ def main() -> int:
                 new_root, old_commit, new_commit, wave["tinygrad_paths"]
             ),
             "changed_symbols": changes,
-            "source_hints": source_hints(changes, wave["polygrad_owners"]),
+            "source_inventory": source_inventory(old_root, new_root, wave["tinygrad_paths"]),
+            "source_hints": source_hints([r for r in changes if r["routed"]], wave["polygrad_owners"]),
             "archbird_impact": archbird_impact(archbird, wave["polygrad_owners"]),
             "graph_status": graph_status(report, wave["case_patterns"]),
         })
@@ -628,7 +853,8 @@ def main() -> int:
     ]
 
     ledger = {
-        "schema_version": 2,
+        "schema_version": 3,
+        "required_checks": config.get("required_checks", []),
         "baseline": {"path": config["baseline_ref"], "commit": old_commit},
         "target": {"path": config["target_ref"], "commit": new_commit},
         "graph_report": {
@@ -646,6 +872,18 @@ def main() -> int:
         "matcher_aggregates": matcher_aggregates,
         "waves": waves,
     }
+    evidence_path = ROOT / args.evidence
+    evidence = json.loads(evidence_path.read_text()) if evidence_path.is_file() else {}
+    register = json.loads((ROOT / "test/fixtures/parity_divergences.json").read_text())
+    reference_errors = []
+    for reference_root in {old_root, new_root, ROOT / register["reference"]["root"]}:
+        if run("git", "status", "--porcelain", "--untracked-files=all", cwd=reference_root):
+            reference_errors.append(f"{reference_root.relative_to(ROOT)}: reference checkout is dirty")
+    if commit(ROOT / register["reference"]["root"]) != new_commit:
+        reference_errors.append("graph reference checkout differs from migration target")
+    ledger["reference_errors"] = reference_errors
+    errors = release_errors(ledger, report, evidence, register, ROOT)
+    ledger["release_check"] = {"status": "fail" if errors else "pass", "errors": errors}
     json_path, markdown_path = ROOT / args.json_output, ROOT / args.markdown_output
     json_path.parent.mkdir(parents=True, exist_ok=True)
     markdown_path.parent.mkdir(parents=True, exist_ok=True)
@@ -665,7 +903,11 @@ def main() -> int:
             f"{aggregate['id']}: {aggregate['status']} "
             f"({aggregate['tinygrad_rule_count']}/{aggregate['polygrad_rule_count']} rows)"
         )
-    return 1 if any(
+    print(f"strict evidence: {ledger['release_check']['status']} ({len(errors)} findings)")
+    if args.strict:
+        for error in errors:
+            print(f"  {error}")
+    return 1 if (args.strict and errors) or any(
         row["status"] != "pass" for row in rule_groups + matcher_aggregates
     ) else 0
 
