@@ -2160,7 +2160,8 @@ void poly_uop_cache_destroy(PolyUOpCache *c) {
   free(c);
 }
 
-/* Current Tinygrad 2026-08-22/a9069c177a9d UOp.has_buffer_identity. */
+/* C-only extraction of a single BUFFER/PARAM identity for residency keys.
+ * Unlike has_buffer_identity, this must not erase an MSELECT lane. */
 const PolyUOp *poly_uop_get_buffer_identity(const PolyUOp *u) {
   while (u) {
     if (u->op == POLY_OP_RESHAPE || u->op == POLY_OP_UNSHARD) {
@@ -2186,10 +2187,10 @@ PolyUOp *poly_uop_base(PolyUOp *u) {
 
 /* Current Tinygrad uop/ops.py:UOp.unsharded_base. */
 PolyUOp *poly_uop_unsharded_base(PolyUOp *u) {
-  while (u && u->n_src > 0 &&
-         (poly_opset_has(POLY_GROUP_MOVEMENT, u->op) || u->op == POLY_OP_DETACH ||
-          u->op == POLY_OP_UNSHARD))
-    u = u->src[0];
+  if (u && u->n_src > 0 &&
+      (poly_opset_has(POLY_GROUP_MOVEMENT, u->op) || u->op == POLY_OP_DETACH ||
+       u->op == POLY_OP_UNSHARD))
+    return poly_uop_base(u->src[0]);
   return u;
 }
 
@@ -2242,7 +2243,10 @@ PolyUOp *poly_uop_buf_uop(PolyCtx *ctx, PolyUOp *u) {
 /* Current Tinygrad UOp.has_buffer_identity; aggregate selection uses the
  * existing MSELECT/UNSHARD wrappers rather than a synthetic storage-view op. */
 bool poly_uop_has_buffer_identity(const PolyUOp *u) {
-  return poly_uop_get_buffer_identity(u) != NULL;
+  while (u && u->n_src > 0 &&
+         (u->op == POLY_OP_RESHAPE || u->op == POLY_OP_UNSHARD || u->op == POLY_OP_MSELECT))
+    u = u->src[0];
+  return u && (u->op == POLY_OP_BUFFER || u->op == POLY_OP_PARAM);
 }
 
 bool poly_uop_reachable(PolyCtx *ctx, PolyUOp *root, PolyUOp *target) {

@@ -74,6 +74,90 @@ TEST(uop, default_literal_helpers_match_current_uop_const) {
   PASS();
 }
 
+TEST(uop, elementwise_promotion_preserves_invalid_base) {
+  /* ElementwiseMixin._broadcasted preserves invalid bases before promotion,
+   * including movement/DETACH wrappers. Ordinary bool values still cast. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *invalid = poly_uop_const(ctx, poly_arg_invalid(), POLY_BOOL);
+  int64_t shape[] = {2};
+  PolyUOp *expanded = poly_expand(ctx, invalid, shape, 1);
+  PolyUOp *variants[] = {invalid, expanded, poly_alu1(ctx, POLY_OP_DETACH, expanded)};
+  PolyDType dtypes[] = {POLY_INT32, POLY_FLOAT32};
+  for (int i = 0; i < 3; i++) {
+    for (int j = 0; j < 2; j++) {
+      PolyUOp *value = poly_uop_const(ctx, poly_arg_int(3), dtypes[j]);
+      PolyUOp *sum = poly_binop(ctx, POLY_OP_ADD, variants[i], value);
+      ASSERT_NOT_NULL(sum);
+      ASSERT_INT_EQ(sum->op, POLY_OP_ADD);
+      ASSERT_INT_EQ(sum->n_src, 2);
+      ASSERT_TRUE(poly_dtype_eq(sum->dtype, dtypes[j]));
+      ASSERT_PTR_EQ(sum->src[0], variants[i]);
+      ASSERT_PTR_EQ(sum->src[1], value);
+      ASSERT_TRUE(poly_dtype_eq(sum->src[0]->dtype, POLY_BOOL));
+
+      PolyUOp *valid_bool = poly_uop_const(ctx, poly_arg_bool(false), POLY_BOOL);
+      PolyUOp *control = poly_binop(ctx, POLY_OP_ADD, valid_bool, value);
+      ASSERT_INT_EQ(control->src[0]->op, POLY_OP_CAST);
+      ASSERT_TRUE(poly_dtype_eq(control->src[0]->dtype, dtypes[j]));
+    }
+  }
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(uop, unsharded_base_preserves_nested_shard_boundary) {
+  /* UOp.unsharded_base removes the first wrapper, then calls base; it does
+   * not recursively strip every UNSHARD encountered under movement/DETACH. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *buffer = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 6, POLY_DEVICE_CPU);
+  PolyUOp *range = poly_uop_range(ctx, 2, -1, POLY_AXIS_DEVICE);
+  int64_t axis[] = {0};
+  PolyUOp *unshard = poly_unshard(ctx, buffer, axis, &range, 1);
+  ASSERT_NOT_NULL(unshard);
+  int64_t shape[] = {2, 6};
+  PolyUOp *movement = poly_reshape(ctx, unshard, shape, 2);
+  PolyUOp *detach = poly_alu1(ctx, POLY_OP_DETACH, unshard);
+  ASSERT_PTR_EQ(poly_uop_unsharded_base(unshard), buffer);
+  ASSERT_PTR_EQ(poly_uop_unsharded_base(movement), unshard);
+  ASSERT_PTR_EQ(poly_uop_unsharded_base(detach), unshard);
+  ASSERT_PTR_EQ(poly_uop_base(movement), unshard);
+  ASSERT_PTR_EQ(poly_uop_unsharded_base(buffer), buffer);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(uop, mselect_has_buffer_identity_without_collapsing_lanes) {
+  /* has_buffer_identity is a predicate, not extraction of a single BUFFER.
+   * The buffer resolver must still preserve the selected runtime lane. */
+  PolyCtx *ctx = poly_ctx_new();
+  const char *devices[] = {"CPU", "CPU:1"};
+  PolyUOp *tuple = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_string_tuple(devices, 2));
+  PolyUOp *buffer = poly_uop_new_buffer(ctx, tuple, 6, POLY_FLOAT32, 7302);
+  PolyUOp *select0 = poly_uop1(ctx, POLY_OP_MSELECT, POLY_FLOAT32, buffer, poly_arg_int(0));
+  PolyUOp *select1 = poly_uop1(ctx, POLY_OP_MSELECT, POLY_FLOAT32, buffer, poly_arg_int(1));
+  ASSERT_TRUE(poly_uop_has_buffer_identity(select0));
+  ASSERT_TRUE(poly_uop_has_buffer_identity(select1));
+  PolyUOp *after = poly_uop1(ctx, POLY_OP_AFTER, POLY_FLOAT32, select0, poly_arg_none());
+  ASSERT_TRUE(!poly_uop_has_buffer_identity(after));
+  ASSERT_TRUE(!poly_uop_has_buffer_identity(poly_alu1(ctx, POLY_OP_DETACH, select0)));
+  PolyUOp *stack = poly_uop2(ctx, POLY_OP_MSTACK, POLY_FLOAT32, select0, select1, poly_arg_none());
+  ASSERT_TRUE(!poly_uop_has_buffer_identity(
+      poly_uop1(ctx, POLY_OP_MSELECT, POLY_FLOAT32, stack, poly_arg_int(0))
+  ));
+  ASSERT_PTR_EQ(poly_contiguous(ctx, select0), select0);
+  ASSERT_PTR_EQ(poly_contiguous(ctx, select1), select1);
+  ASSERT_PTR_NEQ(poly_uop_buf_uop(ctx, select0), poly_uop_buf_uop(ctx, select1));
+  ASSERT_TRUE(poly_uop_get_buffer_identity(select0) == NULL);
+  ASSERT_TRUE(poly_uop_get_buffer_identity(select1) == NULL);
+  PolyBuffer *child0 = poly_uop_buffer_handle(ctx, select0);
+  PolyBuffer *child1 = poly_uop_buffer_handle(ctx, select1);
+  ASSERT_NOT_NULL(child0);
+  ASSERT_NOT_NULL(child1);
+  ASSERT_PTR_NEQ(child0, child1);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(uop, placeholder_preserves_current_negative_local_slot) {
   /* tinygrad@2026-08-22/a9069c177a9d uop/ops.py:1138-1149 accepts
    * negative LOCAL slots used by X86 scratch placeholders. */

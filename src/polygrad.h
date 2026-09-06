@@ -1447,7 +1447,8 @@ void poly_uop_cache_destroy(PolyUOpCache *c);
  * caller-owned PolyUOpCache for batch queries. Use the `_ex` form in hot loops
  * that need a pass-local cache distinct from UOp-local cached properties. */
 /* Returns the terminal buffer-identity UOp (BUFFER / PARAM)
- * after unwrapping RESHAPE/MULTI, or NULL if `u` has no buffer identity. */
+ * after unwrapping RESHAPE/UNSHARD, or NULL for other forms. This does not
+ * resolve MSELECT lanes; use the buffer APIs for their runtime storage. */
 const PolyUOp *poly_uop_get_buffer_identity(const PolyUOp *u);
 
 PolyUOp *poly_uop_base(PolyUOp *u);

@@ -25,8 +25,8 @@
 #define POLY_CALLIFY_TAG_MARKER INT32_MIN
 
 static bool poly_transform_to_call_view_op(PolyOps op) {
-  /* Pinned UOp.base/multibase and callify's becomes-map preserve the complete
-   * GroupOp.Movement set (uop/ops.py:675-686). POLY_GROUP_MOVEMENT is the
+  /* Pinned UOp.base and callify's buffer_map preserve the complete
+   * GroupOp.Movement set (uop/ops.py:758-762). POLY_GROUP_MOVEMENT is the
    * exact existing six-op counterpart; using a subset rematerializes requested
    * PERMUTE/SHRINK/FLIP views after their base was already materialized. */
   return poly_opset_has(POLY_GROUP_MOVEMENT, op);
@@ -108,20 +108,13 @@ static PolyUOp *poly_transform_to_call_root(PolyUOp *u, PolyTransformViewStack *
   return root ? root : u;
 }
 
-/* Pinned UOp.multibase strips a leading movement/DETACH and then follows the
- * complete movement/MULTI/DETACH base chain (uop/ops.py:675-686). Callify uses
- * those exact requested bases to prevent a requested descendant from
- * recomputing a requested parent. */
-static PolyUOp *poly_transform_to_call_multibase(PolyUOp *u) {
-  if (!u) return NULL;
-  bool enters_base = poly_opset_has(POLY_GROUP_MOVEMENT, u->op) || u->op == POLY_OP_DETACH;
-  if (!enters_base || u->n_src < 1) return u;
-  PolyUOp *base = u->src[0];
-  while (base && base->n_src >= 1 &&
-         (poly_opset_has(POLY_GROUP_MOVEMENT, base->op) || base->op == POLY_OP_UNSHARD ||
-          base->op == POLY_OP_DETACH))
-    base = base->src[0];
-  return base ? base : u;
+/* Pinned tensor.py:transform_to_call excludes virtual and ALU values from
+ * requested storage. Reuse that predicate before C's fallback allocation too. */
+static bool poly_callify_can_store(PolyCtx *ctx, PolyTransformToCallCtx *tctx, PolyUOp *u) {
+  PolyAddrSpace addrspace;
+  return u && !poly_dtype_is_weak(u->dtype) &&
+         poly_uop_device_uop_cached(ctx, u, tctx->device_memo) &&
+         !(poly_uop_addrspace(u, &addrspace) && addrspace == POLY_ADDR_ALU);
 }
 
 static PolyUOp *poly_transform_to_call_after_result_root(
@@ -1538,6 +1531,10 @@ static PolyUOp *poly_transform_to_call_rewrite_nested_contiguous(
       if (new_src != src_buf) free(new_src);
       return NULL;
     }
+    /* RewriteContext.unified_rewrite retains completed replacement nodes as
+     * well as original-to-result links. Generated parents must not re-enter
+     * an already materialized COPY/AFTER subtree and allocate it again. */
+    poly_map_set(memo, poly_ptr_hash(new_src[i]), new_src[i], new_src[i], poly_ptr_eq);
     if (new_src[i] != u->src[i]) changed = true;
   }
 
@@ -1679,11 +1676,11 @@ static PolyUOp *poly_transform_to_call_rewrite_nested_contiguous(
     }
   }
 
-  /* Pinned add_tags tags every requested multibase during the one shared
+  /* Pinned add_tags tags every requested base during the one shared
    * bottom-up rewrite. Its early transform then inserts CONTIGUOUS and lowers
    * it to AFTER(buffer, STORE(buffer, value)) before rebuilding any descendant
-   * (callify.py:32-52,155-180). Do the same with AllocCtx.bases' pass-local C
-   * representation; the resulting executable UOps are identical. */
+   * (tensor.py:add_tags,pm_early_transform_tensor_graph). Use the same pass-local
+   * AllocCtx.bases representation; the resulting executable UOps are identical. */
   bool tagged_value = poly_callify_tag_ids(ret, NULL, NULL);
   if (tagged_value && ret->op != POLY_OP_CONTIGUOUS && ret->op != POLY_OP_AFTER &&
       ret->op != POLY_OP_STORE && !poly_uop_has_buffer_identity(ret)) {
@@ -1704,11 +1701,15 @@ static PolyUOp *poly_transform_to_call_rewrite_nested_contiguous(
       poly_map_set(memo, poly_ptr_hash(u), u, contiguous, poly_ptr_eq);
       return contiguous;
     }
-    PolyUOp *replacement = NULL;
+    /* Run the generated CONTIGUOUS through the same early rules. In
+     * particular, marker removal can expose an existing AFTER: its tag must
+     * merge there instead of allocating a second output buffer. */
     PolyUOp *executable =
         contiguous
-            ? poly_transform_to_call_materialize_contiguous(ctx, contiguous, tctx, &replacement)
+            ? poly_transform_to_call_rewrite_nested_contiguous(ctx, contiguous, outer, tctx, memo)
             : NULL;
+    PolyUOp *replacement =
+        executable ? poly_transform_to_call_cached_replacement(tctx, contiguous) : NULL;
     if (!executable || !replacement ||
         !poly_transform_to_call_cache_replacement(tctx, u, replacement)) {
       tctx->failed = true;
@@ -1723,6 +1724,11 @@ static PolyUOp *poly_transform_to_call_rewrite_nested_contiguous(
    * preorder replacement leaves those inner buffers allocated but unwritten,
    * so the enclosing kernel can observe an invalid input residency. */
   if (u != outer && ret->op == POLY_OP_CONTIGUOUS && ret->n_src == 1) {
+    /* replace_contig_with_store_after cannot allocate virtual values. */
+    if (!poly_callify_can_store(ctx, tctx, ret)) {
+      poly_map_set(memo, poly_ptr_hash(u), u, ret, poly_ptr_eq);
+      return ret;
+    }
     /* Same pinned DISK/TINYFS exception for an explicit CONTIGUOUS already in
      * the graph. Strip callify's pass-local tag, but keep the operation and do
      * not publish a realized replacement. */
@@ -1782,6 +1788,10 @@ static PolyUOp *poly_transform_to_call_rewrite_nested_contiguous(
     if (tctx->failed) return NULL;
   }
 
+  /* Final pm_early_transform_tensor_graph rule (tensor.py:174): these are
+   * autograd markers, not executable storage or computation boundaries. */
+  if (ret->n_src == 1 && (ret->op == POLY_OP_DETACH || ret->op == POLY_OP_CONTIGUOUS_BACKWARD))
+    ret = ret->src[0];
   poly_map_set(memo, poly_ptr_hash(u), u, ret, poly_ptr_eq);
   return ret;
 }
@@ -1826,9 +1836,9 @@ PolyUOp *poly_transform_to_call_with_map(
   if (!tctx.requested_bases || !tctx.original_uops || !tctx.device_memo || !tctx.axis_memo)
     return poly_transform_to_call_fail(&tctx, out_uops, n);
   for (int i = 0; i < n; i++) {
-    PolyUOp *base = poly_transform_to_call_multibase(uops[i]);
-    if (!base || base->op == POLY_OP_CONST || base->op == POLY_OP_BUFFER ||
-        base->op == POLY_OP_AFTER || poly_uop_has_buffer_identity(base))
+    PolyUOp *base = poly_uop_base(uops[i]);
+    if (!poly_callify_can_store(ctx, &tctx, base) || base->op == POLY_OP_AFTER ||
+        poly_uop_has_buffer_identity(base))
       continue;
     poly_map_set(tctx.requested_bases, poly_ptr_hash(base), base, base, poly_ptr_eq);
   }
@@ -1885,6 +1895,10 @@ PolyUOp *poly_transform_to_call_with_map(
       out_uops[i] = NULL;
       continue;
     }
+    if (!poly_callify_can_store(ctx, &tctx, u)) {
+      out_uops[i] = u;
+      continue;
+    }
     if (poly_uop_has_buffer_identity(u)) {
       out_uops[i] = u;
       continue;
@@ -1904,8 +1918,8 @@ PolyUOp *poly_transform_to_call_with_map(
       continue;
     }
 
-    /* tinygrad callify.transform_to_call does not tag a requested movement
-     * chain whose multibase is already BUFFER/SLICE/PARAM. Tensor.realize is
+    /* tinygrad tensor.transform_to_call does not tag a requested movement
+     * chain whose base already has buffer identity. Tensor.realize is
      * therefore a zero-CALL operation for pure views; a later contiguous/data
      * request performs any required materialization. Keep the placed view as
      * the physical root without changing its logical provenance. */
@@ -2070,7 +2084,7 @@ PolyUOp *poly_transform_to_call_with_map(
     poly_transform_view_stack_free(&views);
   }
 
-  /* Pinned add_tags tags each requested multibase and finalize_after returns a
+  /* Pinned add_tags tags each requested base and finalize_after returns a
    * buffer_map entry for it. Preserve the same complete physical map even when
    * the requested root is an ordinary ADD/MUL rather than an explicitly cached
    * CONTIGUOUS/AFTER. Without this entry a live dependent recomputes the just-

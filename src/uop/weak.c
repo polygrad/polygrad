@@ -100,7 +100,8 @@ static PolyUOp *weak_cast_src(PolyUOp *u) {
 /* Tinygrad 2026-08-22/a9069c177a9d uop/weak.py:52. */
 static PolyUOp *lower_weak_const(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
   (void)b;
-  PolyUOp *concrete = replace_uop(ctx, u, default_dtype(ctx, u), u->src, u->n_src);
+  /* UOp.const creates a fresh literal; the weak occurrence's tag is not copied. */
+  PolyUOp *concrete = poly_uop_const(ctx, u->arg, default_dtype(ctx, u));
   return poly_uop1(ctx, POLY_OP_CAST, u->dtype, concrete, poly_arg_none());
 }
 
@@ -124,7 +125,10 @@ static PolyUOp *lower_weak_alu_resource(PolyCtx *ctx, PolyUOp *u, const PolyBind
   PolyDType dtype = default_dtype(ctx, u);
   PolyParamArg arg = *u->arg.param;
   arg.dtype = dtype;
-  PolyUOp *concrete = poly_uop(ctx, u->op, dtype, u->src, u->n_src, poly_arg_param(&arg));
+  /* UOp.replace(arg=...) preserves the resource's identity tag. */
+  PolyUOp *concrete = poly_uop_tagged_arg(
+      ctx, u->op, dtype, u->src, u->n_src, poly_arg_param(&arg), u->tag, u->tag_arg
+  );
   return concrete ? poly_uop1(ctx, POLY_OP_CAST, u->dtype, concrete, poly_arg_none()) : NULL;
 }
 
@@ -164,7 +168,8 @@ static PolyUOp *lower_weak_node(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b)
   }
   dtype = poly_dtype_strong(dtype);
   for (int i = start; i < u->n_src; i++) {
-    if (src[i]->op == POLY_OP_CONST && src[i]->arg.kind == POLY_ARG_INVALID) continue;
+    PolyUOp *base = poly_uop_base(src[i]);
+    if (base->op == POLY_OP_CONST && base->arg.kind == POLY_ARG_INVALID) continue;
     src[i] = poly_commit_weak(ctx, src[i], dtype);
   }
   PolyUOp *concrete = replace_uop(ctx, u, dtype_from_uop(u, src, u->n_src), src, u->n_src);
@@ -361,7 +366,7 @@ static PolyUOp *narrow_gated_long_index(PolyCtx *ctx, PolyUOp *idx, const PolyBi
   if (!src) return NULL;
   memcpy(src, idx->src, (size_t)idx->n_src * sizeof(*src));
   src[1] = valid;
-  PolyUOp *ret = poly_uop(ctx, idx->op, idx->dtype, src, idx->n_src, idx->arg);
+  PolyUOp *ret = poly_uop_replace_src(ctx, idx, src);
   free(src);
   return ret;
 }

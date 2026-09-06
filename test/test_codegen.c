@@ -5213,6 +5213,107 @@ TEST(codegen, weak_cast_const_survives_symbolic_until_consumer_lowering) {
   PASS();
 }
 
+TEST(codegen, lower_weak_const_creates_untagged_literal) {
+  /* pm_lower_weak creates a fresh UOp.const, not a tagged replacement. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType types[] = {POLY_WEAKINT, POLY_WEAKFLOAT};
+  PolyArg values[] = {poly_arg_int(7), poly_arg_float(0.6931471825)};
+  for (int i = 0; i < 2; i++) {
+    PolyUOp *root = poly_uop_tagged_arg(
+        ctx, POLY_OP_CONST, types[i], NULL, 0, values[i], 91, poly_arg_str("literal")
+    );
+    PolyUOp *out = poly_graph_rewrite(ctx, root, poly_pm_lower_weak());
+    ASSERT_NOT_NULL(out);
+    ASSERT_INT_EQ(out->op, POLY_OP_CAST);
+    ASSERT_INT_EQ(out->tag, 0);
+    ASSERT_INT_EQ(out->tag_arg.kind, POLY_ARG_NONE);
+    ASSERT_INT_EQ(out->src[0]->op, POLY_OP_CONST);
+    ASSERT_INT_EQ(out->src[0]->tag, 0);
+    ASSERT_INT_EQ(out->src[0]->tag_arg.kind, POLY_ARG_NONE);
+    ASSERT_PTR_EQ(out->src[0], poly_uop_const(ctx, values[i], poly_dtype_strong(types[i])));
+  }
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, lower_weak_alu_resource_preserves_tag) {
+  /* The PARAM/BUFFER rule replaces ParamArg.dtype and preserves UOp.tag. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyOps ops[] = {POLY_OP_PARAM, POLY_OP_BUFFER};
+  PolyUOp *shape = poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_none());
+  PolyParamArg arg = {.slot = 0, .dtype = POLY_WEAKINT, .addrspace = POLY_ADDR_ALU};
+  for (int i = 0; i < 2; i++) {
+    PolyUOp *root = poly_uop_tagged_arg(
+        ctx, ops[i], POLY_WEAKINT, &shape, 1, poly_arg_param(&arg), 92, poly_arg_str("resource")
+    );
+    PolyUOp *out = poly_graph_rewrite(ctx, root, poly_pm_lower_weak());
+    ASSERT_NOT_NULL(out);
+    ASSERT_INT_EQ(out->op, POLY_OP_CAST);
+    ASSERT_INT_EQ(out->tag, 0);
+    ASSERT_INT_EQ(out->tag_arg.kind, POLY_ARG_NONE);
+    PolyUOp *resource = out->src[0];
+    ASSERT_INT_EQ(resource->op, ops[i]);
+    ASSERT_INT_EQ(resource->tag, 92);
+    ASSERT_INT_EQ(resource->tag_arg.kind, POLY_ARG_STRING);
+    ASSERT_STR_EQ(resource->tag_arg.str, "resource");
+    ASSERT_INT_EQ(resource->arg.kind, POLY_ARG_PARAM);
+    ASSERT_INT_EQ(resource->arg.param->slot, arg.slot);
+    ASSERT_INT_EQ(resource->arg.param->addrspace, POLY_ADDR_ALU);
+    ASSERT_TRUE(poly_dtype_eq(resource->arg.param->dtype, resource->dtype));
+    ASSERT_TRUE(poly_dtype_eq(resource->dtype, POLY_INT64));
+    ASSERT_INT_EQ(resource->n_src, 1);
+    ASSERT_PTR_EQ(resource->src[0], shape);
+  }
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, lower_gated_index_preserves_tag_and_width_boundary) {
+  /* pm_lower_index_dtype narrows through n-1 <= INT32_MAX and replaces
+   * INDEX/SHRINK without erasing their identity tags or SHRINK extent. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *shape = poly_shape_to_shape_arg(ctx, NULL, 0);
+  PolyParamArg arg = {.slot = 1, .dtype = POLY_INT64, .addrspace = POLY_ADDR_ALU};
+  PolyUOp *coord = poly_uop1(ctx, POLY_OP_PARAM, POLY_INT64, shape, poly_arg_param(&arg));
+  PolyUOp *four = poly_uop_const(ctx, poly_arg_int(4), POLY_INT64);
+  PolyUOp *gate = poly_alu2(ctx, POLY_OP_CMPLT, coord, four);
+  PolyUOp *invalid = poly_uop_const(ctx, poly_arg_invalid(), POLY_BOOL);
+  PolyUOp *valid = poly_uop3(ctx, POLY_OP_WHERE, POLY_INT64, gate, coord, invalid, poly_arg_none());
+  int64_t sizes[] = {8, (int64_t)INT32_MAX + 1, (int64_t)INT32_MAX + 2};
+  PolyOps ops[] = {POLY_OP_INDEX, POLY_OP_SHRINK};
+  for (int i = 0; i < 2; i++) {
+    for (int j = 0; j < 3; j++) {
+      PolyUOp *buffer = program_param(ctx, POLY_FLOAT32, sizes[j], 0);
+      PolyUOp *sources[] = {buffer, valid, four};
+      int n_src = i ? 3 : 2;
+      PolyUOp *root = poly_uop_tagged_arg(
+          ctx, ops[i], POLY_FLOAT32, sources, n_src, poly_arg_none(), 93, poly_arg_str("address")
+      );
+      ASSERT_NOT_NULL(root);
+      PolyUOp *out = poly_graph_rewrite(ctx, root, poly_pm_lower_index_dtype());
+      ASSERT_NOT_NULL(out);
+      ASSERT_INT_EQ(out->op, ops[i]);
+      ASSERT_INT_EQ(out->n_src, n_src);
+      if (i) ASSERT_PTR_EQ(out->src[2], four);
+      ASSERT_INT_EQ(out->tag, 93);
+      ASSERT_INT_EQ(out->tag_arg.kind, POLY_ARG_STRING);
+      ASSERT_STR_EQ(out->tag_arg.str, "address");
+      ASSERT_INT_EQ(out->src[0]->arg.param->slot, 0);
+      ASSERT_INT_EQ(out->src[1]->op, POLY_OP_WHERE);
+      PolyUOp *lowered_coord = out->src[1]->src[1];
+      ASSERT_TRUE(poly_dtype_eq(lowered_coord->dtype, j < 2 ? POLY_INT32 : POLY_INT64));
+      if (j < 2) {
+        ASSERT_INT_EQ(lowered_coord->op, POLY_OP_CAST);
+        ASSERT_PTR_EQ(lowered_coord->src[0], coord);
+      } else {
+        ASSERT_PTR_EQ(lowered_coord, coord);
+      }
+    }
+  }
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(codegen, weak_float_commit_uses_dtype_const_rounding) {
   /* Current tinygrad uop/weak.py:14-16 commits a weak CONST through
    * UOp.const(value, dtype). DType.const rounds float32 before CSE, so two
@@ -5757,6 +5858,42 @@ TEST(codegen, post_index_strong_point_after_matches_current_symbolic) {
   ASSERT_INT_EQ(count_lin_ops(topo, n, POLY_OP_STORE), 0);
   ASSERT_INT_EQ(count_lin_ops(topo, n, POLY_OP_AFTER), 0);
 
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, lower_weak_preserves_invalid_base) {
+  /* uop/weak.py:lower_weak_node commits concrete operands, but leaves
+   * invalid bases untouched even when hidden beneath movement or DETACH. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *invalid = poly_uop_const(ctx, poly_arg_invalid(), POLY_BOOL);
+  int64_t shape[] = {2};
+  PolyUOp *expanded = poly_expand(ctx, invalid, shape, 1);
+  PolyUOp *variants[] = {invalid, expanded, poly_alu1(ctx, POLY_OP_DETACH, expanded)};
+  PolyDType strong_types[] = {POLY_FLOAT32, POLY_INT32};
+  PolyDType weak_types[] = {POLY_WEAKFLOAT, POLY_WEAKINT};
+  for (int i = 0; i < 3; i++) {
+    for (int j = 0; j < 2; j++) {
+      PolyUOp *strong = poly_uop_const(ctx, poly_arg_int(3), strong_types[j]);
+      if (i) strong = poly_expand(ctx, strong, shape, 1);
+      PolyUOp *weak = poly_cast(ctx, strong, weak_types[j]);
+      PolyUOp *root = poly_alu2(ctx, POLY_OP_ADD, weak, variants[i]);
+      PolyUOp *lowered = poly_pm_rewrite(poly_pm_lower_weak(), ctx, root);
+      ASSERT_NOT_NULL(lowered);
+      ASSERT_INT_EQ(lowered->op, POLY_OP_CAST);
+      ASSERT_INT_EQ(lowered->n_src, 1);
+      ASSERT_TRUE(poly_dtype_eq(lowered->dtype, weak_types[j]));
+      PolyUOp *add = lowered->src[0];
+      ASSERT_INT_EQ(add->op, POLY_OP_ADD);
+      ASSERT_INT_EQ(add->n_src, 2);
+      ASSERT_PTR_EQ(add->src[1], variants[i]);
+      ASSERT_TRUE(poly_dtype_eq(add->src[1]->dtype, POLY_BOOL));
+      /* Expanded weakint bounds are unknown, so the pinned rule widens. */
+      PolyDType concrete = i && j ? POLY_INT64 : strong_types[j];
+      ASSERT_TRUE(poly_dtype_eq(add->dtype, concrete));
+      ASSERT_PTR_EQ(add->src[0], poly_cast(ctx, strong, concrete));
+    }
+  }
   poly_ctx_destroy(ctx);
   PASS();
 }

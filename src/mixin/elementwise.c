@@ -7,24 +7,15 @@
 
 #include "polygrad.h"
 
-/* Current UOp.base strips movement and DETACH before _broadcasted decides
- * whether a weak value is a literal CONST (uop/ops.py:758-762,
- * mixin/elementwise.py:19-29). */
-static PolyUOp *uop_base(PolyUOp *u) {
-  while (u && u->n_src > 0 &&
-         (poly_opset_has(POLY_GROUP_MOVEMENT, u->op) || u->op == POLY_OP_DETACH))
-    u = u->src[0];
-  return u;
-}
-
 /* C helper for current ElementwiseMixin._broadcasted.promote. It is public
  * inside the core because Polygrad applies one promotion to each retained
  * logical/physical root (mixin/elementwise.py:21-29). */
 PolyUOp *poly_elementwise_promote(PolyCtx *ctx, PolyUOp *root, PolyDType common) {
   if (!ctx || !root) return NULL;
-  PolyUOp *base = uop_base(root);
-  if (poly_dtype_is_weak(root->dtype) && base && base->op == POLY_OP_CONST &&
-      base->arg.kind != POLY_ARG_INVALID) {
+  PolyUOp *base = poly_uop_base(root);
+  /* Invalid is a sentinel, not a bool value to cast to the common dtype. */
+  if (base->op == POLY_OP_CONST && base->arg.kind == POLY_ARG_INVALID) return root;
+  if (poly_dtype_is_weak(root->dtype) && base->op == POLY_OP_CONST) {
     return poly_const_like_dtype(ctx, root, base->arg, poly_dtype_weak(common));
   }
   return poly_dtype_eq(root->dtype, common) ? root : poly_cast(ctx, root, common);

@@ -4913,6 +4913,197 @@ TEST(realize, transform_to_call_keeps_after_version_in_executable_value_graph) {
   PASS();
 }
 
+TEST(realize, transform_to_call_preserves_virtual_roots_without_storage) {
+  /* Pinned tensor.py:transform_to_call excludes device-free and weak values
+   * from AllocCtx.bases. They have no width/place to materialize. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *buffer = poly_buffer_f32(ctx, 4);
+  PolyUOp *one = poly_uop_const(ctx, poly_arg_float(1.0), POLY_FLOAT32);
+  PolyUOp *roots[] = {
+      poly_alu2(ctx, POLY_OP_ADD, one, one),
+      poly_cast(ctx, buffer, POLY_WEAKFLOAT),
+  };
+  for (int i = 0; i < 2; i++) {
+    PolyUOp *out = NULL, **map_orig = NULL, **map_repl = NULL;
+    int map_n = 0;
+    PolyUOp *call =
+        poly_transform_to_call_with_map(ctx, &roots[i], 1, &out, &map_orig, &map_repl, &map_n);
+    ASSERT_NOT_NULL(call);
+    ASSERT_INT_EQ(call->op, POLY_OP_CALL);
+    ASSERT_INT_EQ(call->n_src, 1);
+    ASSERT_INT_EQ(call->src[0]->op, POLY_OP_SINK);
+    ASSERT_INT_EQ(call->src[0]->n_src, 0);
+    ASSERT_PTR_EQ(out, roots[i]);
+    ASSERT_INT_EQ(map_n, 0);
+    free(map_orig);
+    free(map_repl);
+  }
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(realize, transform_to_call_preserves_alu_roots_without_storage) {
+  /* A deviceful LOAD and its ALU consumers are kernel values, not requested
+   * Tensor storage. The pinned predicate excludes their ALU address space. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *buffer = poly_buffer_f32(ctx, 4);
+  PolyUOp *zero = poly_const_int(ctx, 0);
+  PolyUOp *index = poly_uop_index(ctx, buffer, &zero, 1);
+  PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, index, poly_arg_none());
+  PolyUOp *one = poly_uop_const(ctx, poly_arg_float(1.0), POLY_FLOAT32);
+  PolyUOp *roots[] = {load, poly_alu2(ctx, POLY_OP_ADD, load, one)};
+  for (int i = 0; i < 2; i++) {
+    PolyAddrSpace addrspace;
+    ASSERT_TRUE(poly_uop_addrspace(roots[i], &addrspace));
+    ASSERT_INT_EQ(addrspace, POLY_ADDR_ALU);
+    PolyUOp *out = NULL, **map_orig = NULL, **map_repl = NULL;
+    int map_n = 0;
+    PolyUOp *call =
+        poly_transform_to_call_with_map(ctx, &roots[i], 1, &out, &map_orig, &map_repl, &map_n);
+    ASSERT_NOT_NULL(call);
+    ASSERT_INT_EQ(call->op, POLY_OP_CALL);
+    ASSERT_INT_EQ(call->n_src, 1);
+    ASSERT_INT_EQ(call->src[0]->op, POLY_OP_SINK);
+    ASSERT_INT_EQ(call->src[0]->n_src, 0);
+    ASSERT_PTR_EQ(out, roots[i]);
+    ASSERT_INT_EQ(map_n, 0);
+    free(map_orig);
+    free(map_repl);
+  }
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(realize, transform_to_call_requested_unshard_preserves_capture_boundary) {
+  /* UOp.base stops at UNSHARD. A requested movement/DETACH over it must
+   * materialize that global value, not publish its unrequested local producer. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *buffer = poly_buffer_f32(ctx, 4);
+  float values[] = {1, 2, 3, 4};
+  poly_buffer_set(ctx, buffer, values, sizeof(values), POLY_DEVICE_CPU);
+  PolyUOp *one = poly_uop_const(ctx, poly_arg_float(1.0), POLY_FLOAT32);
+  PolyUOp *parent = poly_alu2(ctx, POLY_OP_ADD, buffer, one);
+  PolyUOp *range = poly_uop_range(ctx, 1, -1, POLY_AXIS_DEVICE);
+  int64_t axis[] = {0};
+  PolyUOp *unshard = poly_unshard(ctx, parent, axis, &range, 1);
+  PolyUOp *roots[] = {
+      poly_reshape(ctx, unshard, (int64_t[]){2, 2}, 2),
+      poly_alu1(ctx, POLY_OP_DETACH, unshard),
+  };
+  for (int i = 0; i < 2; i++)
+    ASSERT_INT_EQ(poly_uop_retain(ctx, roots[i]), 0);
+  for (int i = 0; i < 2; i++) {
+    PolyUOp *out = NULL, **map_orig = NULL, **map_repl = NULL;
+    int map_n = 0;
+    PolyUOp *call =
+        poly_transform_to_call_with_map(ctx, &roots[i], 1, &out, &map_orig, &map_repl, &map_n);
+    ASSERT_NOT_NULL(call);
+    bool mapped_unshard = false;
+    for (int j = 0; j < map_n; j++) {
+      ASSERT_PTR_NEQ(map_orig[j], parent);
+      if (map_orig[j] == unshard) mapped_unshard = true;
+    }
+    ASSERT_TRUE(mapped_unshard);
+    ASSERT_INT_EQ(call->op, POLY_OP_CALL);
+    ASSERT_INT_EQ(call->src[0]->op, POLY_OP_SINK);
+    ASSERT_INT_EQ(call->src[0]->n_src, 1);
+    PolyUOp *effect = call->src[0]->src[0];
+    ASSERT_INT_EQ(effect->op, POLY_OP_AFTER);
+    ASSERT_INT_EQ(effect->src[1]->op, POLY_OP_STORE);
+    ASSERT_INT_EQ(effect->src[1]->src[1]->op, POLY_OP_UNSHARD);
+    ASSERT_INT_EQ(effect->src[1]->src[1]->src[0]->op, POLY_OP_ADD);
+    ASSERT_INT_EQ(count_root_ops(ctx, call, POLY_OP_STORE), 1);
+    ASSERT_NOT_NULL(poly_uop_get_buffer_identity(out));
+    free(map_orig);
+    free(map_repl);
+
+    PolyUOp *resolved = NULL;
+    PolyUOp *linear = poly_test_linear_values(ctx, &roots[i], 1, &resolved);
+    ASSERT_NOT_NULL(linear);
+    ASSERT_INT_EQ(poly_uop_retain(ctx, resolved), 0);
+    ASSERT_INT_EQ(poly_run_linear(ctx, linear, NULL, 0, NULL, 0, true, false, false), 0);
+    float got[4] = {0};
+    READ_REALIZED_F32(ctx, resolved, got, 4);
+    for (int j = 0; j < 4; j++)
+      ASSERT_FLOAT_EQ(got[j], values[j] + 1, 1e-6);
+    poly_uop_release(ctx, resolved);
+  }
+  for (int i = 0; i < 2; i++)
+    poly_uop_release(ctx, roots[i]);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(realize, transform_to_call_removes_training_markers_before_storage) {
+  /* Pinned pm_early_transform_tensor_graph removes both markers. A tagged
+   * CONTIGUOUS_BACKWARD must still publish its requested output provenance. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *buffer = poly_buffer_f32(ctx, 4);
+  PolyUOp *one = poly_uop_const(ctx, poly_arg_float(1.0), POLY_FLOAT32);
+  PolyUOp *value = poly_alu2(ctx, POLY_OP_ADD, buffer, one);
+  PolyOps ops[] = {POLY_OP_DETACH, POLY_OP_CONTIGUOUS_BACKWARD};
+  for (int i = 0; i < 2; i++) {
+    PolyUOp *root = poly_alu1(ctx, ops[i], value);
+    PolyUOp *out = NULL;
+    PolyUOp *call = poly_transform_to_call(ctx, &root, 1, &out);
+    ASSERT_NOT_NULL(call);
+    ASSERT_INT_EQ(count_root_ops(ctx, call, POLY_OP_DETACH), 0);
+    ASSERT_INT_EQ(count_root_ops(ctx, call, POLY_OP_CONTIGUOUS_BACKWARD), 0);
+    ASSERT_INT_EQ(call->src[0]->op, POLY_OP_SINK);
+    ASSERT_INT_EQ(call->src[0]->n_src, 1);
+    PolyUOp *effect = call->src[0]->src[0];
+    ASSERT_INT_EQ(effect->op, POLY_OP_AFTER);
+    ASSERT_INT_EQ(effect->src[1]->op, POLY_OP_STORE);
+    ASSERT_INT_EQ(effect->src[1]->src[1]->op, POLY_OP_ADD);
+    ASSERT_NOT_NULL(poly_uop_get_buffer_identity(out));
+  }
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(realize, transform_to_call_virtual_contiguous_has_no_publication) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *buffer = poly_buffer_f32(ctx, 4);
+  PolyUOp *root = poly_contiguous(ctx, poly_cast(ctx, buffer, POLY_WEAKFLOAT));
+  PolyUOp *out = NULL, **map_orig = NULL, **map_repl = NULL;
+  int map_n = 0;
+  PolyUOp *call =
+      poly_transform_to_call_with_map(ctx, &root, 1, &out, &map_orig, &map_repl, &map_n);
+  ASSERT_NOT_NULL(call);
+  ASSERT_INT_EQ(call->n_src, 1);
+  ASSERT_INT_EQ(call->src[0]->n_src, 0);
+  ASSERT_PTR_EQ(out, root);
+  ASSERT_INT_EQ(map_n, 0);
+  free(map_orig);
+  free(map_repl);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(realize, transform_to_call_training_marker_reuses_requested_parent) {
+  /* CONTIGUOUS_BACKWARD's tag must merge into the parent's AFTER when both
+   * are requested, not allocate a second buffer by bypassing early rewrites. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *buffer = poly_buffer_f32(ctx, 4);
+  PolyUOp *one = poly_uop_const(ctx, poly_arg_float(1.0), POLY_FLOAT32);
+  PolyUOp *parent = poly_alu2(ctx, POLY_OP_ADD, buffer, one);
+  PolyUOp *marker = poly_alu1(ctx, POLY_OP_CONTIGUOUS_BACKWARD, parent);
+  for (int reverse = 0; reverse < 2; reverse++) {
+    PolyUOp *roots[] = {reverse ? marker : parent, reverse ? parent : marker};
+    PolyUOp *out[2] = {NULL, NULL};
+    PolyUOp *call = poly_transform_to_call(ctx, roots, 2, out);
+    ASSERT_NOT_NULL(call);
+    ASSERT_INT_EQ(call->src[0]->op, POLY_OP_SINK);
+    ASSERT_INT_EQ(call->src[0]->n_src, 1);
+    ASSERT_INT_EQ(count_root_ops(ctx, call, POLY_OP_STORE), 1);
+    ASSERT_INT_EQ(count_root_ops(ctx, call, POLY_OP_CONTIGUOUS_BACKWARD), 0);
+    ASSERT_NOT_NULL(poly_uop_get_buffer_identity(out[0]));
+    ASSERT_PTR_EQ(out[0], out[1]);
+  }
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(realize, transform_to_call_requested_parent_feeds_requested_descendant) {
   PolyCtx *ctx = poly_ctx_new();
 

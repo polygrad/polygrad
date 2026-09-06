@@ -2413,18 +2413,18 @@ static bool model_closed_initializer_graph(PolyCtx *ctx, PolyUOp *root) {
 
 /* Fresh import may evaluate a named value exactly once only when the existing
  * aggregate placer proves the entire graph is pure and storage-free.  BUFFER,
- * COPY, STORE/AFTER, CALL/FUNCTION, MULTI and lowered graphs are rejected by
+ * COPY, STORE/AFTER, CALL/FUNCTION, UNSHARD and lowered graphs are rejected by
  * poly_place_roots; this deliberately excludes RNG and external state. */
 static int model_initialize_closed_computed_state(PolyModel *inst) {
   if (!inst || !inst->ctx) return -1;
   size_t cap = (size_t)(unsigned)inst->n_bufs;
-  PolyUOp **logical = calloc(cap, sizeof(*logical));
+  PolyUOp **roots = calloc(cap, sizeof(*roots));
   PolyUOp **placed = calloc(cap, sizeof(*placed));
   PolyUOp **realized = calloc(cap, sizeof(*realized));
   int *binding_indices = calloc(cap, sizeof(*binding_indices));
   int n_init = 0;
   int rc = -1;
-  if (cap > 0 && (!logical || !placed || !realized || !binding_indices)) goto cleanup;
+  if (cap > 0 && (!roots || !placed || !realized || !binding_indices)) goto cleanup;
 
   for (int i = 0; i < inst->n_bufs; i++) {
     NamedBuf *binding = &inst->bufs[i];
@@ -2445,7 +2445,7 @@ static int model_initialize_closed_computed_state(PolyModel *inst) {
             poly_dtype_strong(binding->logical_value->dtype), binding->logical_buffer->dtype
         ))
       goto cleanup;
-    logical[n_init] = binding->logical_value;
+    roots[n_init] = binding->logical_value;
     binding_indices[n_init++] = i;
   }
   if (n_init == 0) {
@@ -2456,14 +2456,32 @@ static int model_initialize_closed_computed_state(PolyModel *inst) {
   /* No binding substitutions are supplied here on purpose: any reachable
    * storage makes the initializer incomplete and poly_place_roots rejects the
    * entire aggregate before execution. */
-  if (poly_place_roots(inst->ctx, logical, n_init, NULL, NULL, 0, placed) != 0 ||
-      poly_realize_uops(inst->ctx, placed, n_init, realized) != 0)
-    goto cleanup;
+  if (poly_place_roots(inst->ctx, roots, n_init, NULL, NULL, 0, placed) != 0) goto cleanup;
+
+  /* Pinned UOp.empty_like + STORE: virtual values do not request storage.
+   * Like build snapshots, import explicitly materializes persistent state;
+   * retain every temporary destination across execution/collection. */
+  int n_stores = 0;
+  for (int i = 0; i < n_init; i++) {
+    NamedBuf *binding = &inst->bufs[binding_indices[i]];
+    if (named_buf_nbytes(binding) == 0) continue;
+    int64_t flat[] = {poly_shape_numel_checked(binding->shape, binding->ndim)};
+    PolyUOp *buffer = model_new_buffer(inst->ctx, binding->logical_buffer->dtype, flat[0]);
+    if (!buffer || poly_uop_retain(inst->ctx, buffer) != 0) goto cleanup;
+    realized[i] = buffer;
+    PolyUOp *value = poly_reshape(inst->ctx, placed[i], flat, 1);
+    PolyUOp *store = value ? poly_store_val(inst->ctx, buffer, value) : NULL;
+    if (!store) goto cleanup;
+    roots[n_stores++] = store;
+  }
+  if (n_stores > 0) {
+    PolyUOp *sink = poly_sink_n(inst->ctx, roots, n_stores);
+    if (!sink || poly_realize_sink(inst->ctx, sink) != 0) goto cleanup;
+  }
 
   for (int i = 0; i < n_init; i++) {
     NamedBuf *binding = &inst->bufs[binding_indices[i]];
     size_t nbytes = named_buf_nbytes(binding);
-    if (!realized[i] || !poly_uop_has_buffer_identity(realized[i])) goto cleanup;
     if (nbytes > 0 &&
         (poly_buffer_read(inst->ctx, realized[i], binding->data, nbytes) != 0 ||
          poly_buffer_write(inst->ctx, binding->logical_buffer, binding->data, nbytes) != 0))
@@ -2474,12 +2492,14 @@ static int model_initialize_closed_computed_state(PolyModel *inst) {
 cleanup:
   if (realized)
     for (int i = 0; i < n_init; i++)
-      if (realized[i] && realized[i] != inst->bufs[binding_indices[i]].logical_buffer)
+      if (realized[i]) {
+        poly_uop_release(inst->ctx, realized[i]);
         poly_buffer_remove(inst->ctx, realized[i]);
+      }
   free(binding_indices);
   free(realized);
   free(placed);
-  free(logical);
+  free(roots);
   return rc;
 }
 

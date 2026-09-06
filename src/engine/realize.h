@@ -4,7 +4,7 @@
  * Tensor.linear_with_vars -> run_linear path. Callers pass the unrealized
  * top-level value UOps they want materialized; poly_realize_uops callifies
  * them into an internal effect SINK, then shares the same sink runner used by
- * already-schedule-ready instance/imported graphs.
+ * already-schedule-ready Model/imported graphs.
  */
 
 #ifndef POLYGRAD_REALIZE_H
@@ -21,9 +21,10 @@ extern "C" {
 /* Explicit tensor-graph to call-graph stage, mirroring tinygrad's
  * transform_to_call(...) boundary. It batches the requested top-level value
  * UOps into one realizable CALL whose src[0] is the SINK body to schedule,
- * and returns the buffer-identity replacements in out_uops. Returns NULL when
- * there is nothing to run or on error. This raw-UOp entrypoint receives an
- * already-physical graph and therefore performs no logical Tensor placement
+ * and returns replacements in out_uops. Nonmaterialized values pass through;
+ * no effects yields CALL(SINK()). Returns NULL for zero inputs or on error.
+ * This raw-UOp entrypoint receives an already-physical graph and therefore
+ * performs no logical Tensor placement
  * inference. Default Tensor realization uses this same physical-only path. */
 PolyUOp *poly_transform_to_call(PolyCtx *ctx, PolyUOp **uops, int n, PolyUOp **out_uops);
 
