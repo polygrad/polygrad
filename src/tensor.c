@@ -3100,8 +3100,11 @@ static PolyUOp *minimum_inverse(PolyCtx *ctx, PolyUOp *x) {
   PolyUOp *mask = NULL;
   if (poly_dtype_is_unsigned(dt)) {
     if (!poly_dtype_bound_const(ctx, dt, false, &mask)) return NULL;
+    /* _inverse uses Python dtype.max / -1 literals, not typed Tensor
+     * constants. Preserve the exact uint64 bound while weakening its dtype. */
+    mask = poly_uop_const(ctx, mask->arg, POLY_WEAKINT);
   } else {
-    mask = poly_const_exact_int(ctx, dt, -1);
+    mask = poly_const_int(ctx, -1);
   }
   return mask ? poly_alu2(ctx, POLY_OP_XOR, x, mask) : NULL;
 }
@@ -6624,6 +6627,34 @@ PolyTensor *poly_tensor_sum_dtype_by_id(
   return tensor_sum_dtype(ctx, src, axes, n_axes, keepdim, &dtype);
 }
 
+static PolyTensor *tensor_extremum(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    int64_t *axes,
+    int n_axes,
+    bool keepdim,
+    bool minimum
+) {
+  int build_logical = tensor_unary_builds_logical(ctx, src);
+  if (build_logical < 0) return NULL;
+  PolyUOp *current = tensor_current_uop(src);
+  if (!current) return NULL;
+  /* Pinned OpMixin.min is _inverse().max(...)._inverse(). Integer inverse
+   * is bitwise, not negation: zero unsigned and signed minima cannot negate. */
+  PolyUOp *logical = build_logical ? src->uop_logical : NULL;
+  if (minimum) {
+    if (build_logical) logical = minimum_inverse(ctx, logical);
+    current = minimum_inverse(ctx, current);
+  }
+  logical = build_logical ? max_axes_root(ctx, logical, axes, n_axes, keepdim) : NULL;
+  PolyUOp *physical = max_axes_root(ctx, current, axes, n_axes, keepdim);
+  if (minimum) {
+    if (build_logical) logical = minimum_inverse(ctx, logical);
+    physical = minimum_inverse(ctx, physical);
+  }
+  return tensor_unary_result(ctx, src, logical, physical);
+}
+
 PolyTensor *poly_tensor_max(
     PolyCtx *ctx,
     PolyTensor *src,
@@ -6631,14 +6662,17 @@ PolyTensor *poly_tensor_max(
     int n_axes,
     bool keepdim
 ) {
-  int build_logical = tensor_unary_builds_logical(ctx, src);
-  if (build_logical < 0) return NULL;
-  PolyUOp *current = tensor_current_uop(src);
-  if (!current) return NULL;
-  PolyUOp *logical =
-      build_logical ? max_axes_root(ctx, src->uop_logical, axes, n_axes, keepdim) : NULL;
-  PolyUOp *physical = max_axes_root(ctx, current, axes, n_axes, keepdim);
-  return tensor_unary_result(ctx, src, logical, physical);
+  return tensor_extremum(ctx, src, axes, n_axes, keepdim, false);
+}
+
+PolyTensor *poly_tensor_min(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    int64_t *axes,
+    int n_axes,
+    bool keepdim
+) {
+  return tensor_extremum(ctx, src, axes, n_axes, keepdim, true);
 }
 
 PolyTensor *poly_tensor_minimum(PolyCtx *ctx, PolyTensor *a, PolyTensor *b) {

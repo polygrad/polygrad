@@ -961,6 +961,7 @@ PolyTensor *poly_tensor_sum_dtype_by_id(
     int dtype_id
 );
 PolyTensor *poly_tensor_max(PolyCtx *ctx, PolyTensor *src, int64_t *axes, int n_axes, bool keepdim);
+PolyTensor *poly_tensor_min(PolyCtx *ctx, PolyTensor *src, int64_t *axes, int n_axes, bool keepdim);
 PolyTensor *poly_tensor_argmax(PolyCtx *ctx, PolyTensor *src, int axis, bool keepdim);
 PolyTensor *poly_tensor_minimum(PolyCtx *ctx, PolyTensor *a, PolyTensor *b);
 PolyTensor *poly_tensor_dot(PolyCtx *ctx, PolyTensor *src, PolyTensor *weight);

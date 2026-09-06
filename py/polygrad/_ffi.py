@@ -878,6 +878,8 @@ def _declare_signatures(lib):
 
     lib.poly_tensor_max.restype = _ptr
     lib.poly_tensor_max.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int, ctypes.c_bool]
+    lib.poly_tensor_min.restype = _ptr
+    lib.poly_tensor_min.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int, ctypes.c_bool]
 
     lib.poly_tensor_argmax.restype = _ptr
     lib.poly_tensor_argmax.argtypes = [_ptr, _ptr, ctypes.c_int, ctypes.c_bool]

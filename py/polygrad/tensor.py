@@ -2473,6 +2473,9 @@ class Tensor:
         return self._make_result_from_core(core, new_shape, [self])
 
     def max(self, axis=None, keepdim=False):
+        return self._extremum(_ffi._lib.poly_tensor_max, axis, keepdim)
+
+    def _extremum(self, operation, axis, keepdim):
         # Pinned ReduceMixin._reduce emits one REDUCE over the complete
         # normalized axis tuple (mixin/reduce.py:12-17, uop/ops.py:567-569).
         axes = tuple(range(self.ndim)) if axis is None else (
@@ -2480,7 +2483,7 @@ class Tensor:
             tuple(self._resolve_dim(int(a)) for a in axis)
         )
         arr, n = _int64_array(axes)
-        core = _ffi._lib.poly_tensor_max(
+        core = operation(
             self._ctx, self._tensor, arr, n, bool(keepdim)
         )
         new_shape = (
@@ -2543,7 +2546,7 @@ class Tensor:
         return vals, idx
 
     def min(self, axis=None, keepdim=False):
-        return (-self).max(axis=axis, keepdim=keepdim).__neg__()
+        return self._extremum(_ffi._lib.poly_tensor_min, axis, keepdim)
 
     def mean(self, axis=None, keepdim=False):
         axes = tuple(range(self.ndim)) if axis is None else (

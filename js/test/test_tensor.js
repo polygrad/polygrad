@@ -3920,6 +3920,59 @@ async function runTensorTests(pg) {
     assertClose(await r.toArray(), [2, 3, 4])
   })
 
+  await test('numeric owners: min inverse matches pinned', async () => {
+    const cases = [
+      ['uint8', [0, 1, 255, 7, 3, 2]], ['int8', [-128, -1, 127, 7, 3, 2]],
+      ['uint16', [0, 1, 65535, 7, 3, 2]], ['int16', [-32768, -1, 32767, 7, 3, 2]],
+      ['uint32', [0, 1, 2**32-1, 7, 3, 2]], ['int32', [-(2**31), -1, 2**31-1, 7, 3, 2]],
+      ['bool', [false, true, true, true, true, true]], ['float32', [-3, -1, 127, 7, 3, 2]],
+    ]
+    for (const [dtype, values] of cases) {
+      const x = new Tensor(values, {dtype}).reshape(2, 3)
+      for (const [axis, keepdim] of [[null, false], [0, false], [-1, true], [[0, 1], true], [[], false]]) {
+        const out = x.min({axis, keepdim})
+        const inverseOp = pg._core.ops[dtype === 'float32' ? 'MUL' : dtype === 'bool' ? 'CMPNE' : 'XOR']
+        assert(out.uopPhysical.op === inverseOp, `${dtype} min inverse`)
+        if (axis === null) {
+          const reduced = out.uopPhysical.src[0]
+          assert(reduced.op === pg._core.ops.REDUCE, `${dtype} min reduction`)
+          assert(reduced.src[0].op === inverseOp, `${dtype} min input inverse`)
+        }
+        assert(out.dtype === dtype, `${dtype} min dtype`)
+        const numbers = values.map(Number)
+        const expected = axis === 0 ? numbers.slice(0, 3).map((v, i) => Math.min(v, numbers[i+3]))
+          : axis === -1 ? [Math.min(...numbers.slice(0, 3)), Math.min(...numbers.slice(3))]
+          : Array.isArray(axis) && !axis.length ? numbers : [Math.min(...numbers)]
+        assertClose(await out.toArray(), expected, 0)
+      }
+      assertClose(await x.min().toArray(), [Number(values[0])], 0)
+      assertShape(x.min(-1, true).shape, [2, 1])
+      assertClose(await x.min(0).toArray(), values.slice(0, 3).map((v, i) => Math.min(Number(v), Number(values[i+3]))), 0)
+    }
+  })
+
+  await test('numeric owners: pow negative fraction constant matches buffer', async () => {
+    for (const power of [0.2, 1.2, -0.2]) {
+      for (const value of [-28.0, [-28.0]]) {
+        const result = new Tensor(value, {dtype: 'float32'}).pow(power)
+        assert(result.uopPhysical.op === pg._core.ops.POW, 'pow must start with raw POW')
+        assertClose(await result.toArray(), [NaN])
+      }
+    }
+  })
+
+  for (const dtype of ['int64', 'uint64']) {
+    await testIf(pg.canRun({dtype}), `numeric owners: min ${dtype} exact storage`, async () => {
+      const values = dtype === 'int64' ? [-(1n << 63n), -1n, (1n << 63n)-1n]
+        : [0n, (1n << 63n)+1n, (1n << 64n)-1n]
+      const x = new Tensor(values, {dtype})
+      const result = x.min()
+      assert(result.dtype === dtype)
+      const actual = await result.toArray()
+      assert(actual.length === 1 && BigInt(actual[0]) === values[0])
+    })
+  }
+
   await test('pow scalar promotion and validation match tinygrad', async () => {
     const t = new Tensor([2, 3], { dtype: 'int32' })
     // JavaScript erases the lexical distinction between 2 and 2.0.

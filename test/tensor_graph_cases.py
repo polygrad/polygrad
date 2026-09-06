@@ -909,6 +909,36 @@ def case_max_axes_float32():
     return {"physical": out.uop, "logical": logical(out)}
 
 
+def min_axes(dtype, keepdim=False):
+    out = Tensor.empty(2, 3, dtype=dtype).realize().min(axis=-1, keepdim=keepdim)
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_min_axes_uint8(): return min_axes("uint8")
+def case_min_axes_int8(): return min_axes("int8")
+def case_min_axes_uint64(): return min_axes("uint64")
+def case_min_axes_bool(): return min_axes("bool")
+def case_min_axes_float32_keepdim(): return min_axes("float32", True)
+
+
+def case_minimum_int8():
+    out = typed_realized_empty("int8").minimum(typed_realized_empty("int8"))
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_minimum_uint64():
+    out = typed_realized_empty("uint64").minimum(typed_realized_empty("uint64"))
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_scatter_amin_uint8():
+    base = Tensor.empty(1, 3, dtype="uint8").realize()
+    indices = Tensor.empty(1, 3, dtype="int32").realize()
+    src = Tensor.empty(1, 3, dtype="uint8").realize()
+    out = base.scatter_reduce(1, indices, src, "amin")
+    return {"physical": out.uop, "logical": logical(out)}
+
+
 def case_dot_float32():
     out = realized_empty(2, 3).dot(realized_empty(3, 4))
     return {"physical": out.uop, "logical": logical(out)}
@@ -1948,6 +1978,14 @@ CASES = {
     "minimum_float32": ("tensor", case_minimum_float32),
     "minimum_occurrence": ("tensor", case_minimum_occurrence),
     "max_axes_float32": ("tensor", case_max_axes_float32),
+    "min_axes_uint8": ("tensor", case_min_axes_uint8),
+    "min_axes_int8": ("tensor", case_min_axes_int8),
+    "min_axes_uint64": ("tensor", case_min_axes_uint64),
+    "min_axes_bool": ("tensor", case_min_axes_bool),
+    "min_axes_float32_keepdim": ("tensor", case_min_axes_float32_keepdim),
+    "minimum_int8": ("tensor", case_minimum_int8),
+    "minimum_uint64": ("tensor", case_minimum_uint64),
+    "scatter_amin_uint8": ("tensor", case_scatter_amin_uint8),
     "max_pool2d_float32": ("tensor", case_max_pool2d_float32),
     "movement_reduce": ("tensor", case_movement_reduce),
     "mish_occurrence": ("tensor", case_mish_occurrence),

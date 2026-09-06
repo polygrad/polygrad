@@ -2479,6 +2479,39 @@ class TestStepSlicing:
 
 
 class TestReduce:
+    @pytest.mark.parametrize('dtype,values', [
+        ('uint8', [[0, 1, 255], [7, 3, 2]]),
+        ('int8', [[-128, -1, 127], [7, 3, 2]]),
+        ('uint16', [[0, 1, 65535], [7, 3, 2]]),
+        ('int16', [[-32768, -1, 32767], [7, 3, 2]]),
+        ('uint32', [[0, 1, 2**32-1], [7, 3, 2]]),
+        ('int32', [[-2**31, -1, 2**31-1], [7, 3, 2]]),
+        ('uint64', [[0, 1, 2**64-1], [7, 3, 2]]),
+        ('int64', [[-2**63, -1, 2**63-1], [7, 3, 2]]),
+        ('bool', [[False, True, True], [True, True, True]]),
+        ('float32', [[-3, -1, 127], [7, 3, 2]]),
+    ])
+    def test_min_inverse_matches_pinned(self, dtype, values):
+        data = np.asarray(values, dtype=dtype)
+        x = Tensor(data)
+        for axis, keepdim in [(None, False), (0, False), (-1, True), ((0, 1), True), ((), False)]:
+            out = x.min(axis, keepdim)
+            inverse_op = 'MUL' if dtype == 'float32' else 'CMPNE' if dtype == 'bool' else 'XOR'
+            assert out.uop_physical.op_name == inverse_op
+            if axis is None:
+                reduced = out.uop_physical.src[0]
+                assert reduced.op_name == 'REDUCE'
+                assert reduced.src[0].op_name == inverse_op
+            assert out.dtype == x.dtype
+            np.testing.assert_array_equal(out.numpy(), data.min(axis=axis, keepdims=keepdim))
+
+    @pytest.mark.parametrize('power', [0.2, 1.2, -0.2])
+    def test_pow_negative_fraction_constant_matches_buffer(self, power):
+        for value in [-28.0, [-28.0]]:
+            result = Tensor(value, dtype='float32').pow(power)
+            assert result.uop_physical.op_name == 'POW'
+            assert np.isnan(result.numpy()).all()
+
     def test_sum_all(self):
         a = Tensor([1, 2, 3, 4])
         s = a.sum()

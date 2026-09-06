@@ -39,9 +39,10 @@ static double safe_sin(double x) {
 }
 
 static double safe_pow(double x, double y) {
-  double r = pow(x, y);
-  if (isnan(r) && !isnan(x) && !isnan(y)) return INFINITY;
-  return r;
+  /* tinygrad uop/ops.py:safe_pow: Python's zero-base negative power raises
+   * ZeroDivisionError, including -0. Otherwise libm's domain NaN already
+   * matches the complex-result -> NaN rule and must not become infinity. */
+  return x == 0.0 && y < 0.0 ? INFINITY : pow(x, y);
 }
 
 /* C-style integer division (truncates toward zero) */

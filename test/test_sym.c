@@ -1826,6 +1826,46 @@ TEST(alu, fdiv_zero_zero_is_nan) {
   PASS();
 }
 
+TEST(alu, pow_domain_values_match_safe_pow) {
+  /* Pinned uop/ops.py:safe_pow maps complex results to NaN and either
+   * signed zero raised to a negative exponent to positive infinity. */
+  const double cases[][3] = {
+      {-28.0, 0.2, NAN},
+      {-28.0, 1.2, NAN},
+      {-28.0, -0.2, NAN},
+      {-2.0, 3.0, -8.0},
+      {-2.0, -3.0, -0.125},
+      {0.0, -3.0, INFINITY},
+      {-0.0, -3.0, INFINITY},
+      {-INFINITY, 0.2, INFINITY},
+      {-INFINITY, 3.0, -INFINITY},
+      {NAN, 2.0, NAN},
+      {2.0, NAN, NAN},
+      {NAN, 0.0, 1.0},
+      {1.0, NAN, 1.0},
+      {0.0, 1.1, 0.0},
+  };
+  for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    PolyArg args[] = {poly_arg_float(cases[i][0]), poly_arg_float(cases[i][1])};
+    for (int truncate = 0; truncate <= 1; truncate++) {
+      PolyArg out = poly_exec_alu(POLY_OP_POW, POLY_FLOAT64, args, 2, truncate);
+      ASSERT_EQ(out.kind, POLY_ARG_FLOAT);
+      ASSERT_TRUE(isnan(cases[i][2]) ? isnan(out.f) : out.f == cases[i][2]);
+    }
+  }
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *base = poly_const_typed(ctx, POLY_FLOAT32, -28.0);
+  PolyUOp *exponent = poly_const_typed(ctx, POLY_FLOAT32, 0.2);
+  PolyUOp *out = simplify(ctx, poly_alu2(ctx, POLY_OP_POW, base, exponent));
+  ASSERT_NOT_NULL(out);
+  ASSERT_EQ(out->op, POLY_OP_CONST);
+  ASSERT_TRUE(poly_dtype_eq(out->dtype, POLY_FLOAT32));
+  ASSERT_TRUE(isnan(out->arg.f));
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(alu, fold_float16_truncates_output) {
   PolyArg ops[2] = {poly_arg_float(1.0), poly_arg_float(0.0001)};
   PolyArg r = poly_exec_alu(POLY_OP_ADD, POLY_FLOAT16, ops, 2, true);

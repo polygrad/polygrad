@@ -2214,7 +2214,11 @@ function createBoundTensorClass(runtime) {
       return this._makeResultFromCore(core, [this])
     }
 
-    max(opts) {
+    max(opts, keepdim = false) {
+      return this._extremum('poly_tensor_max', opts, keepdim)
+    }
+
+    _extremum(operation, opts, positionalKeepdim) {
       if (opts === undefined || opts === null) opts = {}
       let axis, keepdim
       if (typeof opts === 'object' && !Array.isArray(opts)) {
@@ -2222,7 +2226,7 @@ function createBoundTensorClass(runtime) {
         keepdim = opts.keepdim || false
       } else {
         axis = opts
-        keepdim = arguments[1] || false
+        keepdim = positionalKeepdim
       }
 
       const { ffi } = this._rt._core
@@ -2238,7 +2242,7 @@ function createBoundTensorClass(runtime) {
           throw new RangeError(`axis ${a} out of range for ndim ${this.shape.length}`)
         }
       }
-      const core = ffi.poly_tensor_max(
+      const core = ffi[operation](
         this._ctx, this._tensor, axes, axes.length, Boolean(keepdim)
       )
       return this._makeResultFromCore(core, [this])
@@ -2293,9 +2297,8 @@ function createBoundTensorClass(runtime) {
       return [values, indices]
     }
 
-    min(opts) {
-      if (!opts) opts = {}
-      return this.neg().max(opts).neg()
+    min(opts, keepdim = false) {
+      return this._extremum('poly_tensor_min', opts, keepdim)
     }
 
     mean(axis, keepdim) {

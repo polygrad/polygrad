@@ -3682,6 +3682,62 @@ TEST(pe, argmax_2d_e2e) {
   PASS();
 }
 
+TEST(pe, tensor_min_builds_both_roots_from_exact_occurrences) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyDType dtypes[] = {POLY_INT8, POLY_UINT8, POLY_INT64, POLY_UINT64, POLY_BOOL, POLY_FLOAT32};
+  for (size_t i = 0; i < sizeof(dtypes) / sizeof(dtypes[0]); i++) {
+    PolyUOp *logical =
+        poly_uop_new_buffer(ctx, poly_device_uop(ctx, POLY_DEVICE_CPU), 6, dtypes[i], (int)i);
+    logical = poly_reshape(ctx, logical, (int64_t[]){2, 3}, 2);
+    PolyUOp *physical = poly_copy_to_device_uop(
+        ctx, poly_copy_to_device_uop(ctx, logical, poly_device_uop(ctx, POLY_DEVICE_CUDA)),
+        poly_device_uop(ctx, POLY_DEVICE_CPU)
+    );
+    PolyTensor *x =
+        poly_tensor_create_with_roots(ctx, logical, physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+    ASSERT_NOT_NULL(x);
+    PolyTensor *out = poly_tensor_min(ctx, x, (int64_t[]){0, 1}, 2, false);
+    ASSERT_NOT_NULL(out);
+    PolyUOp *roots[] = {logical, physical};
+    PolyUOp *outputs[] = {out->uop_logical, out->uop_physical};
+    for (int domain = 0; domain < 2; domain++) {
+      PolyUOp *mask;
+      PolyOps op;
+      if (poly_dtype_is_bool(dtypes[i])) {
+        mask = poly_const_typed(ctx, POLY_BOOL, 1);
+        op = POLY_OP_CMPNE;
+      } else if (poly_dtype_is_float(dtypes[i])) {
+        mask = poly_const_typed(ctx, POLY_WEAKFLOAT, -1.0);
+        op = POLY_OP_MUL;
+      } else {
+        op = POLY_OP_XOR;
+        if (poly_dtype_is_unsigned(dtypes[i])) {
+          mask = poly_dtype_eq(dtypes[i], POLY_UINT64)
+                     ? poly_uop_const(
+                           ctx, poly_arg_bigint(1, (uint32_t[]){UINT32_MAX, UINT32_MAX}, 2),
+                           POLY_WEAKINT
+                       )
+                     : poly_const_int(ctx, 255);
+        } else
+          mask = poly_const_int(ctx, -1);
+      }
+      PolyUOp *inverse = poly_alu2(ctx, op, roots[domain], mask);
+      PolyUOp *reduced = poly_reduce_axis(ctx, POLY_OP_MAX, inverse, (int64_t[]){0, 1}, 2);
+      ASSERT_PTR_EQ(outputs[domain], poly_alu2(ctx, op, reduced, mask));
+      ASSERT_INT_EQ(poly_uop_ndim(ctx, outputs[domain]), 0);
+    }
+    ASSERT_EQ(poly_tensor_min(ctx, x, (int64_t[]){2}, 1, false), NULL);
+    ASSERT_EQ(poly_tensor_min(ctx, x, NULL, 1, false), NULL);
+  }
+  PolyCtx *foreign = poly_ctx_new();
+  PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){2}, 1, POLY_DEVICE_CPU);
+  ASSERT_EQ(poly_tensor_min(foreign, x, (int64_t[]){0}, 1, false), NULL);
+  poly_ctx_destroy(foreign);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(pe, tensor_argmax_builds_both_roots_from_exact_occurrences) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *logical = make_buf(ctx, (int64_t[]){2, 3}, 2);

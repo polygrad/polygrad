@@ -1736,6 +1736,22 @@ static napi_value napi_poly_tensor_max(napi_env env, napi_callback_info info) {
   );
 }
 
+static napi_value napi_poly_tensor_min(napi_env env, napi_callback_info info) {
+  napi_value argv[5];
+  size_t argc = 5;
+  int64_t axes[POLY_MAX_DIMS];
+  int32_t n_axes = 0;
+  bool keepdim = false;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  read_int64_array(env, argv[2], axes, POLY_MAX_DIMS);
+  napi_get_value_int32(env, argv[3], &n_axes);
+  napi_get_value_bool(env, argv[4], &keepdim);
+  return make_external(
+      env,
+      poly_tensor_min(get_external(env, argv[0]), get_external(env, argv[1]), axes, n_axes, keepdim)
+  );
+}
+
 static napi_value napi_poly_tensor_argmax(napi_env env, napi_callback_info info) {
   napi_value argv[4];
   size_t argc = 4;
@@ -5701,6 +5717,7 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_tensor_sum", napi_poly_tensor_sum),
       DECLARE_NAPI_METHOD("poly_tensor_sum_dtype_by_id", napi_poly_tensor_sum_dtype_by_id),
       DECLARE_NAPI_METHOD("poly_tensor_max", napi_poly_tensor_max),
+      DECLARE_NAPI_METHOD("poly_tensor_min", napi_poly_tensor_min),
       DECLARE_NAPI_METHOD("poly_tensor_argmax", napi_poly_tensor_argmax),
       DECLARE_NAPI_METHOD("poly_tensor_minimum", napi_poly_tensor_minimum),
       DECLARE_NAPI_METHOD("poly_tensor_dot", napi_poly_tensor_dot),

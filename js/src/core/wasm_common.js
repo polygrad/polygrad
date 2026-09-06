@@ -1082,6 +1082,8 @@ function createWasmCoreFromModule(Module, device) {
       ),
     poly_tensor_max: (ctx, src, axes, len, keepdim) =>
       callWithInt64(Module._poly_tensor_max, ctx, src, axes, len, keepdim ? 1 : 0),
+    poly_tensor_min: (ctx, src, axes, len, keepdim) =>
+      callWithInt64(Module._poly_tensor_min, ctx, src, axes, len, keepdim ? 1 : 0),
     poly_tensor_argmax: (ctx, src, axis, keepdim) =>
       Module._poly_tensor_argmax(ctx, src, axis, keepdim ? 1 : 0),
     poly_tensor_minimum: (ctx, a, b) =>

@@ -45,8 +45,8 @@
     ]
   },
   "evidence": {
-    "report": "temp/ops-admission-20260906.TByPzb/full/report.json",
-    "sha256": "489eeffc9e7269ce4749c82f0277a58e1180ca8d93c57eeb4ae1d9d5dfa155cc"
+    "report": "temp/numeric-owners-20260906.NsRFtq/upstream/report.json",
+    "sha256": "eb1d2aa15a5031fcdbe53c16a505040966a22c76c6b34bd186ad8860046f1e66"
   },
   "schema_version": 1,
   "tests": {
@@ -741,7 +741,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "('<adapted>/test/backend/test_ops.py', 2396, 'Skipped: redundant: bs/cout are loop dims, kernel×cin sweep covered by test_conv2d')",
+            "detail": "('<adapted>/test/backend/test_ops.py', 2396, 'Skipped: redundant: bs/cout are loop dims, kernel\u00d7cin sweep covered by test_conv2d')",
             "outcome": "skipped"
           }
         },
@@ -2514,17 +2514,11 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_pow": {
-      "category": "numerical-untriaged",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: Exception: forward pass failed shape (): \nNot equal to tolerance rtol=0.001, atol=1e-06\n\nnan location mismatch:\n ACTUAL: array(inf, dtype=float32)\n DESIRED: array(nan, dtype=float32)",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Observed wrong forward value versus Torch and passing Tinygrad control; owning cause requires a minimized paired probe."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_pow_const": {
       "category": "runtime-untriaged",
@@ -4065,17 +4059,11 @@
       "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
     },
     "polygrad:test/backend/test_ops.py::TestOpsUint8::test_min": {
-      "category": "numerical-untriaged",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: Exception: forward pass failed shape (): \nArrays are not equal\n\nMismatched elements: 1 / 1 (100%)\n ACTUAL: array(1, dtype=uint8)\n DESIRED: array(0, dtype=uint8)",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Observed wrong forward value versus Torch and passing Tinygrad control; owning cause requires a minimized paired probe."
+      "reason": ""
     },
     "tinygrad:test/backend/test_ops.py::TestOps::test_9_gemm": {
       "expected": {
@@ -4564,7 +4552,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "('<adapted>/test/backend/test_ops.py', 2396, 'Skipped: redundant: bs/cout are loop dims, kernel×cin sweep covered by test_conv2d')",
+            "detail": "('<adapted>/test/backend/test_ops.py', 2396, 'Skipped: redundant: bs/cout are loop dims, kernel\u00d7cin sweep covered by test_conv2d')",
             "outcome": "skipped"
           }
         },
