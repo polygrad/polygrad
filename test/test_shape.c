@@ -665,6 +665,111 @@ TEST(shape, rank_cap_rejects_ffi_host_and_dynamic_buffers) {
   PASS();
 }
 
+TEST(shape, movement_construction_canonicalizes_shape_sources) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  /* UOp._mop simplifies shape operands before publishing the movement graph,
+   * not just when as_shape later computes metadata. */
+  PolyUOp *n = poly_uop_variable(ctx, "n", 1, 8, POLY_WEAKINT, 1, false);
+  PolyUOp *twice = poly_uop2(ctx, POLY_OP_ADD, POLY_WEAKINT, n, n, poly_arg_none());
+  PolyUOp *canonical =
+      poly_uop2(ctx, POLY_OP_MUL, POLY_WEAKINT, n, poly_const_int(ctx, 2), poly_arg_none());
+  PolyUOp *base = poly_const_float(ctx, 1.0);
+  PolyUOp *expanded = poly_expand_uop(ctx, base, &twice, 1);
+  ASSERT_NOT_NULL(expanded);
+  ASSERT_INT_EQ(expanded->op, POLY_OP_EXPAND);
+  ASSERT_INT_EQ(expanded->n_src, 2);
+  ASSERT_PTR_EQ(expanded->src[0], base);
+  ASSERT_PTR_EQ(expanded->src[1], canonical);
+  PolyUOp *dims[] = {poly_const_int(ctx, 1), twice};
+  PolyUOp *reshaped = poly_reshape_uop(ctx, expanded, dims, 2);
+  ASSERT_NOT_NULL(reshaped);
+  ASSERT_INT_EQ(reshaped->op, POLY_OP_RESHAPE);
+  ASSERT_INT_EQ(reshaped->n_src, 2);
+  ASSERT_PTR_EQ(reshaped->src[0], expanded);
+  ASSERT_PTR_EQ(
+      reshaped->src[1], poly_shape_to_shape_arg(ctx, (PolyUOp *[]){dims[0], canonical}, 2)
+  );
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(shape, pad_shrink_construction_canonicalizes_both_shape_sources) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *n = poly_uop_variable(ctx, "n", 1, 8, POLY_WEAKINT, 1, false);
+  PolyUOp *twice = poly_uop2(ctx, POLY_OP_ADD, POLY_WEAKINT, n, n, poly_arg_none());
+  PolyUOp *canonical =
+      poly_uop2(ctx, POLY_OP_MUL, POLY_WEAKINT, n, poly_const_int(ctx, 2), poly_arg_none());
+  PolyUOp *zero = poly_const_int(ctx, 0);
+  PolyUOp *offset = poly_uop2(
+      ctx, POLY_OP_ADD, POLY_WEAKINT, n,
+      poly_uop2(ctx, POLY_OP_MUL, POLY_WEAKINT, n, poly_const_int(ctx, -1), poly_arg_none()),
+      poly_arg_none()
+  );
+  PolyUOp *base = poly_const_float(ctx, 1.0);
+  PolyUOp *wide = poly_expand(ctx, base, (int64_t[]){32}, 1);
+  PolyUOp *small = poly_expand(ctx, base, (int64_t[]){1}, 1);
+  PolyUOp *roots[] = {
+      poly_shrink_uop(ctx, wide, &offset, &twice, 1),
+      poly_pad_uop(ctx, small, &offset, &twice, 1),
+  };
+  for (int i = 0; i < 2; i++) {
+    ASSERT_NOT_NULL(roots[i]);
+    ASSERT_INT_EQ(roots[i]->op, i == 0 ? POLY_OP_SHRINK : POLY_OP_PAD);
+    ASSERT_INT_EQ(roots[i]->n_src, 3);
+    ASSERT_PTR_EQ(roots[i]->src[0], i == 0 ? wide : small);
+    ASSERT_PTR_EQ(roots[i]->src[1], zero);
+    ASSERT_PTR_EQ(roots[i]->src[2], canonical);
+  }
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(shape, movement_canonical_shape_identity_returns_source) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *n = poly_uop_variable(ctx, "n", 1, 8, POLY_WEAKINT, 1, false);
+  PolyUOp *twice = poly_uop2(ctx, POLY_OP_ADD, POLY_WEAKINT, n, n, poly_arg_none());
+  PolyUOp *canonical =
+      poly_uop2(ctx, POLY_OP_MUL, POLY_WEAKINT, n, poly_const_int(ctx, 2), poly_arg_none());
+  PolyUOp *offset = poly_uop2(
+      ctx, POLY_OP_ADD, POLY_WEAKINT, n,
+      poly_uop2(ctx, POLY_OP_MUL, POLY_WEAKINT, n, poly_const_int(ctx, -1), poly_arg_none()),
+      poly_arg_none()
+  );
+  PolyUOp *base = poly_expand_uop(ctx, poly_const_float(ctx, 1.0), &canonical, 1);
+  ASSERT_PTR_EQ(poly_reshape_uop(ctx, base, &twice, 1), base);
+  ASSERT_PTR_EQ(poly_shrink_uop(ctx, base, &offset, &twice, 1), base);
+  ASSERT_PTR_EQ(poly_pad_uop(ctx, base, &offset, &twice, 1), base);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(shape, pad_shrink_reject_wrong_rank_before_scalar_noop) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *scalar = poly_const_float(ctx, 1.0);
+  PolyUOp *vector = poly_expand(ctx, scalar, (int64_t[]){3}, 1);
+  ASSERT_PTR_EQ(poly_pad(ctx, scalar, NULL, 0), scalar);
+  ASSERT_PTR_EQ(poly_shrink(ctx, scalar, NULL, 0), scalar);
+  ASSERT_PTR_EQ(poly_pad_uop(ctx, scalar, NULL, NULL, 0), scalar);
+  ASSERT_PTR_EQ(poly_shrink_uop(ctx, scalar, NULL, NULL, 0), scalar);
+  ASSERT_TRUE(poly_pad(ctx, vector, NULL, 0) == NULL);
+  ASSERT_TRUE(poly_shrink(ctx, vector, NULL, 0) == NULL);
+  ASSERT_TRUE(poly_pad_uop(ctx, vector, NULL, NULL, 0) == NULL);
+  ASSERT_TRUE(poly_shrink_uop(ctx, vector, NULL, NULL, 0) == NULL);
+  PolyUOp *offsets[] = {poly_const_int(ctx, 0), poly_const_int(ctx, 0)};
+  PolyUOp *sizes[] = {poly_const_int(ctx, 1), poly_const_int(ctx, 1)};
+  int64_t pairs[2][2] = {{0, 1}, {0, 1}};
+  ASSERT_TRUE(poly_pad(ctx, vector, pairs, 2) == NULL);
+  ASSERT_TRUE(poly_shrink(ctx, vector, pairs, 2) == NULL);
+  ASSERT_TRUE(poly_pad_uop(ctx, vector, offsets, sizes, 2) == NULL);
+  ASSERT_TRUE(poly_shrink_uop(ctx, vector, offsets, sizes, 2) == NULL);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(shape, movement_shape_lanes_use_full_pinned_symbolic_canonicalization) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);

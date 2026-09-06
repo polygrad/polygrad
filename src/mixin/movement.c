@@ -24,6 +24,16 @@ static bool shape_value_equal(PolyUOp *a, PolyUOp *b) {
   return poly_uop_const_i64(a, &av) == 0 && poly_uop_const_i64(b, &bv) == 0 && av == bv;
 }
 
+/* UOp._mop simplifies shape operands, never the tensor source. Constant-only
+ * tuples are already canonical; keep static construction off the rewriter. */
+static PolyUOp *movement_shape_arg(PolyCtx *ctx, PolyUOp **dims, int ndim) {
+  PolyUOp *shape = poly_shape_to_shape_arg(ctx, dims, ndim);
+  if (!shape) return NULL;
+  for (int i = 0; i < ndim; i++)
+    if (dims[i]->op != POLY_OP_CONST) return poly_graph_rewrite(ctx, shape, poly_symbolic());
+  return shape;
+}
+
 static bool movement_shape_is_identity(
     PolyCtx *ctx,
     PolyUOp *src,
@@ -66,14 +76,15 @@ PolyUOp *poly_reshape(PolyCtx *ctx, PolyUOp *src, int64_t *dims, int ndim) {
 
 PolyUOp *poly_reshape_uop(PolyCtx *ctx, PolyUOp *src, PolyUOp **dims, int ndim) {
   if (!ctx || !src || !rank_tuple_valid(dims, ndim)) return NULL;
+  PolyUOp *shape = movement_shape_arg(ctx, dims, ndim);
+  if (!shape) return NULL;
+  dims = ndim == 1 ? &shape : shape->src;
   if (poly_uop_ndim(ctx, src) == ndim) {
     bool same = true;
     for (int i = 0; i < ndim; i++)
       if (!shape_value_equal(poly_uop_shape_dim(ctx, src, i), dims[i])) same = false;
     if (same) return src;
   }
-  PolyUOp *shape = poly_shape_to_shape_arg(ctx, dims, ndim);
-  if (!shape) return NULL;
   PolyUOp *srcs[2] = {src, shape};
   return poly_uop(ctx, POLY_OP_RESHAPE, src->dtype, srcs, 2, poly_arg_none());
 }
@@ -85,7 +96,7 @@ PolyUOp *poly_reshape_uop(PolyCtx *ctx, PolyUOp *src, PolyUOp **dims, int ndim) 
 static PolyUOp *mop_expand(PolyCtx *ctx, PolyUOp *src, PolyUOp **arg, int n_arg) {
   if (!ctx || !src || !rank_tuple_valid(arg, n_arg)) return NULL;
   if (n_arg == 0) return src;
-  PolyUOp *shape = poly_shape_to_shape_arg(ctx, arg, n_arg);
+  PolyUOp *shape = movement_shape_arg(ctx, arg, n_arg);
   if (!shape) return NULL;
   PolyUOp *srcs[2] = {src, shape};
   return poly_uop(ctx, POLY_OP_EXPAND, src->dtype, srcs, 2, poly_arg_none());
@@ -247,35 +258,42 @@ PolyUOp *poly_expand_uop(PolyCtx *ctx, PolyUOp *src, PolyUOp **dims, int ndim) {
 }
 
 PolyUOp *poly_shrink_uop(PolyCtx *ctx, PolyUOp *src, PolyUOp **starts, PolyUOp **sizes, int ndim) {
-  if (!ctx || !src || !rank_tuple_valid(starts, ndim) || !rank_tuple_valid(sizes, ndim))
+  if (!ctx || !src || !rank_tuple_valid(starts, ndim) || !rank_tuple_valid(sizes, ndim) ||
+      poly_uop_ndim(ctx, src) != ndim)
     return NULL;
+  PolyUOp *start_stack = movement_shape_arg(ctx, starts, ndim);
+  PolyUOp *size_stack = movement_shape_arg(ctx, sizes, ndim);
+  if (!start_stack || !size_stack) return NULL;
+  starts = ndim == 1 ? &start_stack : start_stack->src;
+  sizes = ndim == 1 ? &size_stack : size_stack->src;
   /* MovementMixin.shrink returns self when the resulting shape is unchanged
    * (mixin/movement.py:192-193). Elide only on proved shape-value identity. */
   if (movement_shape_is_identity(ctx, src, starts, sizes, ndim)) return src;
-  PolyUOp *start_stack = poly_shape_to_shape_arg(ctx, starts, ndim);
-  PolyUOp *size_stack = poly_shape_to_shape_arg(ctx, sizes, ndim);
-  if (!start_stack || !size_stack) return NULL;
   PolyUOp *srcs[3] = {src, start_stack, size_stack};
   return poly_uop(ctx, POLY_OP_SHRINK, src->dtype, srcs, 3, poly_arg_none());
 }
 
 PolyUOp *poly_pad_uop(PolyCtx *ctx, PolyUOp *src, PolyUOp **offsets, PolyUOp **sizes, int ndim) {
-  if (!ctx || !src || !rank_tuple_valid(offsets, ndim) || !rank_tuple_valid(sizes, ndim))
+  if (!ctx || !src || !rank_tuple_valid(offsets, ndim) || !rank_tuple_valid(sizes, ndim) ||
+      poly_uop_ndim(ctx, src) != ndim)
     return NULL;
+  PolyUOp *offset_stack = movement_shape_arg(ctx, offsets, ndim);
+  PolyUOp *size_stack = movement_shape_arg(ctx, sizes, ndim);
+  if (!offset_stack || !size_stack) return NULL;
+  offsets = ndim == 1 ? &offset_stack : offset_stack->src;
+  sizes = ndim == 1 ? &size_stack : size_stack->src;
   /* MovementMixin.pad has the same shape-identity return rule
    * (mixin/movement.py:170-171). */
   if (movement_shape_is_identity(ctx, src, offsets, sizes, ndim)) return src;
-  PolyUOp *offset_stack = poly_shape_to_shape_arg(ctx, offsets, ndim);
-  PolyUOp *size_stack = poly_shape_to_shape_arg(ctx, sizes, ndim);
-  if (!offset_stack || !size_stack) return NULL;
   PolyUOp *srcs[3] = {src, offset_stack, size_stack};
   return poly_uop(ctx, POLY_OP_PAD, src->dtype, srcs, 3, poly_arg_none());
 }
 
 PolyUOp *poly_shrink(PolyCtx *ctx, PolyUOp *src, int64_t (*pairs)[2], int ndim) {
-  if (!ctx || !src || !rank_tuple_valid(pairs, ndim)) return NULL;
+  if (!ctx || !src || !rank_tuple_valid(pairs, ndim) || poly_uop_ndim(ctx, src) != ndim)
+    return NULL;
   /* Pinned UOp._mop returns scalar PAD/SHRINK unchanged when the movement
-   * argument is empty (uop/ops.py:712-713). */
+   * argument is empty, after validating rank. */
   if (ndim == 0) return src;
   PolyUOp *starts[POLY_MAX_DIMS];
   PolyUOp *sizes[POLY_MAX_DIMS];
@@ -310,9 +328,9 @@ PolyUOp *poly_flip(PolyCtx *ctx, PolyUOp *src, int64_t *axes, int n_axes) {
 
 PolyUOp *poly_pad(PolyCtx *ctx, PolyUOp *src, int64_t (*pairs)[2], int ndim) {
   if (!ctx || !src || !rank_tuple_valid(pairs, ndim)) return NULL;
-  if (ndim == 0) return src;
   PolyShape shape = poly_uop_max_shape_cached(ctx, src);
   if (shape.ndim != ndim) return NULL;
+  if (ndim == 0) return src;
   PolyUOp *offsets[POLY_MAX_DIMS];
   PolyUOp *sizes[POLY_MAX_DIMS];
   for (int i = 0; i < ndim; i++) {

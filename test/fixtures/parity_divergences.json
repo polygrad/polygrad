@@ -658,6 +658,26 @@
         "references/tinygrad_latest/tinygrad/uop/spec.py"
       ],
       "close_when": "The dependency-closed UPat/SPEC migration either ports PYLITERAL with exact compiled-pattern topology or proves the C representation uses the same semantics without exposing a different shared UOp vocabulary."
+    },
+    {
+      "id": "PG-PARITY-025",
+      "status": "open_debt",
+      "stages": ["lowered"],
+      "area": "configured default dtype propagation into core lowering",
+      "vocabulary": {"tinygrad_only": [], "polygrad_only": []},
+      "tinygrad": "With DEFAULT_FLOAT=float64, pm_lower_weak commits a weak float literal to float64 beneath its weak cast",
+      "polygrad": "Python recognizes DEFAULT_FLOAT=float64, but src/uop/weak.c default_dtype still commits the same literal to float32",
+      "rationale": "The non-default control exposes an unapproved core/frontend mismatch. Default-float32 graph and runtime passes do not close it.",
+      "approval": null,
+      "evidence": [
+        "references/tinygrad_latest/tinygrad/dtype.py:DTypes.default_float",
+        "references/tinygrad_latest/tinygrad/uop/weak.py:default_dtype",
+        "src/uop/weak.c:default_dtype",
+        "py/polygrad/dtype.py",
+        "temp/shape-storage-audit-20260906.VUymUD/default_dtype_probe.py",
+        "temp/shape-storage-audit-20260906.VUymUD/default-dtype-probe.log"
+      ],
+      "close_when": "Carry supported default-dtype configuration through the existing dtype/core owners, inventory related strong-dtype and promotion consumers, and verify non-default exact lowering plus frontend execution. Do not add a weak-lowering-only environment override."
     }
   ]
 }

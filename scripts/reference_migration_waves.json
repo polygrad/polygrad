@@ -652,6 +652,7 @@
     },
     {
       "id": "storage_identity",
+      "source_audit": "temp/reference_migration/audits/storage_identity.json",
       "title": "BUFFER, ParamArg, device and COPY identity",
       "source_status": "open",
       "implementation_status": "closed",
@@ -675,9 +676,10 @@
     },
     {
       "id": "weak_scalars",
+      "source_audit": "temp/reference_migration/audits/weak_scalars.json",
       "title": "Weak scalar construction, promotion and lowering",
       "source_status": "open",
-      "implementation_status": "closed",
+      "implementation_status": "open",
       "runtime_status": "broad_green",
       "tinygrad_paths": [
         "tinygrad/dtype.py",
@@ -704,6 +706,7 @@
     },
     {
       "id": "movement_shape",
+      "source_audit": "temp/reference_migration/audits/movement_shape.json",
       "title": "Shape sources and movement composition",
       "source_status": "open",
       "implementation_status": "closed",
