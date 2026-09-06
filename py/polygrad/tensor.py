@@ -630,6 +630,8 @@ class Tensor:
             current_uop = UOp(self._ctx, raw)
         else:
             # User construction from data
+            if data is None:
+                data = 0.0
             numpy_scalar = isinstance(data, np.ndarray) and data.shape == ()
             scalar_value = data.item() if numpy_scalar else data
             python_scalar = numpy_scalar or isinstance(data, (bool, int, float))
@@ -678,10 +680,10 @@ class Tensor:
                     dt = _dtype_name(dtype, default='uint8' if isinstance(data, bytes) else 'float32')
                 import_dt = dt
                 post_cast_dt = None
+                storage_dtype = to_dtype(dt)
+                if storage_dtype in dtypes.weaks:
+                    raise RuntimeError(f'cannot create storage for weak dtype {storage_dtype}')
                 if isinstance(data, bytes):
-                    storage_dtype = to_dtype(dt)
-                    if storage_dtype in dtypes.weaks:
-                        raise RuntimeError(f'cannot create storage for weak dtype {storage_dtype}')
                     # _frompy(bytes) owns writable encoded storage. A void view
                     # preserves bits (including BF16/FP8), validates whole
                     # elements, and gives the existing host importer its shape.
@@ -692,7 +694,20 @@ class Tensor:
                         import_dt = 'float32'
                         post_cast_dt = dt
                         np_dt = np.float32
-                    arr = np.ascontiguousarray(data, dtype=np_dt)
+                    try:
+                        arr = np.ascontiguousarray(data, dtype=np_dt)
+                    except OverflowError:
+                        if not isinstance(data, (list, tuple)) or not dtypes.is_int(storage_dtype):
+                            raise
+                        # UOp._frompy applies dtype.const then truncate before
+                        # packing. NumPy2 rejects overflowing Python integers;
+                        # object storage preserves them until the ctypes cast.
+                        # Keep normal inputs and ragged-shape validation on
+                        # NumPy's fast path, rather than boxing every input.
+                        values = np.asarray(data, dtype=object)
+                        ctype = getattr(ctypes, f'c_{dt}')
+                        arr = np.fromiter((ctype(int(x)).value for x in values.flat),
+                                          dtype=np_dt, count=values.size).reshape(values.shape)
                 self._data = arr.ravel()
                 self._dtype_str = dt
                 # UOp.from_host creates the BUFFER UOp, registers a PolyBuffer

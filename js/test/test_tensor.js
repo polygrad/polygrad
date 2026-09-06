@@ -106,6 +106,60 @@ async function runTensorTests(pg) {
   // -- Creation --
   console.log('-- Creation --')
 
+  await test('constructor parity null is scalar zero', async () => {
+    for (const dtype of [undefined, 'float32', 'int32', 'bool']) {
+      const tensor = new Tensor(null, { dtype })
+      assertShape(tensor.shape, [])
+      assert(tensor.uopPhysical.op === pg._core.ops.CONST)
+      assert(tensor.uopPhysical.src.length === 0)
+      if (!dtype) assert(tensor.dtype === 'weakfloat')
+      assertClose(await tensor.toArrayAsync(), [0])
+    }
+  })
+
+  for (const dtype of ['int8', 'uint8', 'int16', 'uint16', 'int32', 'uint32', 'int64', 'uint64']) {
+    await test(`constructor parity integer storage ${dtype}`, async () => {
+      const bits = Number(dtype.match(/\d+/)[0])
+      const values = [-(1n << 100n) - 3n, -3.5, -1, 0, 129, 256, (1n << 100n) + 5n]
+      const narrow = dtype.startsWith('uint') ? BigInt.asUintN : BigInt.asIntN
+      const expected = values.map(v => narrow(bits, typeof v === 'bigint' ? v : BigInt(Math.trunc(v))))
+      const tensor = new Tensor(values, { dtype })
+      assertShape(tensor.shape, [7])
+      const root = tensor.uopPhysical
+      assert(root.op === pg._core.ops.COPY && root.src.length === 1)
+      assert(root.src[0].op === pg._core.ops.BUFFER && root.src[0].src.length === 1)
+      assert(tensor.dtype === dtype)
+      const got = Array.from(await tensor.toArrayAsync())
+      assert(got.length === expected.length)
+      assert(got.every((v,i) => BigInt(v) === expected[i]), `wrong ${dtype} storage values`)
+    })
+  }
+
+  await test('constructor parity rejects weak storage and ragged shapes before import', async () => {
+    for (const dtype of ['weakint', 'weakfloat']) {
+      for (const values of [[1], new Float32Array([1])]) {
+        let error
+        try { new Tensor(values, { dtype }) } catch (e) { error = e }
+        assert(error && /cannot create storage for weak dtype/.test(error.message))
+      }
+    }
+    for (const data of [[[1], []], [[], [[]]], [[1, 2], [3], [4, 5, 6]]]) {
+      let error
+      try { new Tensor(data, { dtype: 'int32' }) } catch (e) { error = e }
+      assert(error && /inhomogeneous shape/.test(error.message))
+    }
+  })
+
+  await test('constructor parity integer lists reject nonfinite values', async () => {
+    for (const dtype of ['int32', 'uint32', 'int64', 'uint64']) {
+      for (const value of [NaN, Infinity, -Infinity]) {
+        let error
+        try { new Tensor([value], { dtype }) } catch (e) { error = e }
+        assert(error instanceof RangeError, `${dtype} admitted ${value}`)
+      }
+    }
+  })
+
   await test('logical policy scope and tensor override', async () => {
     const current = new Tensor([0]).add(1)
     assert(current.logicalPolicy === 'until_realize')

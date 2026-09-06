@@ -162,8 +162,8 @@
     ]
   },
   "evidence": {
-    "report": "temp/host-write-batch-20260906.osjoNz/expanded/report.json",
-    "sha256": "450249754cea6b7118e0cc0e2595b636ca72909572f8d501e29c23120599c7b3"
+    "report": "temp/dtype-construction-20260906.pMBEx7/upstream/report.json",
+    "sha256": "fe256f09d1c0c42fc69c8a71b8a0869922f897ce09b9803dc8f099697c2e8c8a"
   },
   "schema_version": 1,
   "tests": {
@@ -223,7 +223,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:1282: RuntimeError: poly_realize_tensors failed for device(s): CPU",
+            "detail": "<polygrad>/py/polygrad/tensor.py:1297: RuntimeError: poly_realize_tensors failed for device(s): CPU",
             "outcome": "failed"
           }
         },
@@ -277,7 +277,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:1390: RuntimeError: poly_tensor_clone failed",
+            "detail": "<polygrad>/py/polygrad/tensor.py:1405: RuntimeError: poly_tensor_clone failed",
             "outcome": "failed"
           }
         },
@@ -290,7 +290,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:1390: RuntimeError: poly_tensor_clone failed",
+            "detail": "<polygrad>/py/polygrad/tensor.py:1405: RuntimeError: poly_tensor_clone failed",
             "outcome": "failed"
           }
         },
@@ -376,7 +376,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:3306: ValueError: randn only supports float dtypes, got dtypes.bool",
+            "detail": "<polygrad>/py/polygrad/tensor.py:3321: ValueError: randn only supports float dtypes, got dtypes.bool",
             "outcome": "failed"
           }
         },
@@ -571,7 +571,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:1531: RuntimeError: core Tensor operation failed",
+            "detail": "<polygrad>/py/polygrad/tensor.py:1546: RuntimeError: core Tensor operation failed",
             "outcome": "failed"
           }
         },
@@ -628,16 +628,10 @@
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_tensor_list_implicit_cast": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:695: OverflowError: Python integer -1 out of bounds for uint8",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "NumPy 2 rejects an out-of-range Python integer during list-to-storage conversion; pinned construction truncates storage values. Do not loosen NumPy/test versions to hide the mismatch.",
-      "category": "frontend-scalar-truncation"
+      "reason": ""
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_tensor_list_ndarray": {
       "expected": {
@@ -661,16 +655,10 @@
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_tensor_list_special_values": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:695: OverflowError: Python integer 8589934592 out of bounds for uint32",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "NumPy 2 rejects an out-of-range Python integer during list-to-storage conversion; pinned construction truncates storage values. Do not loosen NumPy/test versions to hide the mismatch.",
-      "category": "frontend-scalar-truncation"
+      "reason": ""
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_tensor_mixed_list_tuple": {
       "expected": {
@@ -721,16 +709,10 @@
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_zerosized_tensors": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_tensor.py:363: AssertionError: \nArrays are not equal\n\n(shapes (1,), (0,) mismatch)\n ACTUAL: array([nan], dtype=float32)\n DESIRED: array([], dtype=float64)",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Tensor(None) becomes a one-element NaN array instead of empty storage; Tensor([]) passed the preceding assertion.",
-      "category": "frontend-empty-input"
+      "reason": ""
     },
     "polygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_cat": {
       "expected": {
@@ -2055,7 +2037,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:3142: IndexError: Unsupported index type: <class 'list'>",
+            "detail": "<polygrad>/py/polygrad/tensor.py:3157: IndexError: Unsupported index type: <class 'list'>",
             "outcome": "failed"
           }
         },
@@ -2068,7 +2050,7 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:3142: IndexError: Unsupported index type: <class 'list'>",
+            "detail": "<polygrad>/py/polygrad/tensor.py:3157: IndexError: Unsupported index type: <class 'list'>",
             "outcome": "failed"
           }
         },

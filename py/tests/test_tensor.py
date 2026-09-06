@@ -231,6 +231,48 @@ print('leaving_live_instance')
         gc.collect()
         np.testing.assert_array_equal(tensor.numpy(), [4, 5, 6])
 
+    @pytest.mark.parametrize('dtype', [None, 'float64', 'int32', 'uint8', 'bool'])
+    def test_none_constructs_scalar_zero_with_exact_const_graph(self, dtype):
+        # Pinned Tensor(None) is UOp.const(0.0), not empty storage. Comparing
+        # scalar values with an empty NumPy array can pass without checking it.
+        tensor = Tensor(None, dtype=dtype)
+        expected = Tensor(0.0, dtype=dtype)
+        assert tensor.shape == expected.shape == ()
+        assert tensor.uop_physical == expected.uop_physical
+        assert tensor.uop_physical.op_name == 'CONST'
+        assert tensor.item() == 0
+
+    @pytest.mark.parametrize('dtype', dtypes.ints)
+    def test_list_storage_truncates_python_integers_before_numpy_admission(self, dtype):
+        bits = dtype.bitsize
+        values = [[-(1 << 100) - 3, -3.5, -1, 0],
+                  [1 << (bits - 1), (1 << bits) - 1, 1 << bits, (1 << 100) + 5]]
+        modulus = 1 << bits
+        def truncate(value):
+            value = int(value) % modulus
+            return value - modulus if not dtypes.is_unsigned(dtype) and value >= modulus // 2 else value
+        expected = [[truncate(value) for value in row] for row in values]
+        tensor = Tensor(values, dtype=dtype)
+        source = tensor.uop_physical
+        assert source.op_name == 'COPY' and len(source.src) == 1
+        assert source.dtype is dtype
+        assert source.src[0].op_name == 'RESHAPE'
+        assert source.src[0].src[0].op_name == 'BUFFER'
+        assert source.src[0].src[0].dtype is dtype
+        assert tensor.shape == (2, 4)
+        np.testing.assert_array_equal(tensor.numpy(), np.asarray(expected, dtype=dtype.fmt))
+
+    @pytest.mark.parametrize('dtype', dtypes.weaks)
+    @pytest.mark.parametrize('data', [[1], (1,), np.array([1])])
+    def test_non_scalar_storage_rejects_weak_dtype(self, data, dtype):
+        with pytest.raises(RuntimeError, match='cannot create storage for weak dtype'):
+            Tensor(data, dtype=dtype)
+
+    @pytest.mark.parametrize('data', [[[1], []], [[], [[]]], [[[1, 1, 1], [1, 1]]]])
+    def test_integer_list_storage_preserves_ragged_rejection(self, data):
+        with pytest.raises(ValueError):
+            Tensor(data, dtype='int32')
+
     def test_from_scalar(self):
         cases = [
             (Tensor(True), (), "bool", True),

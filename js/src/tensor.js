@@ -118,6 +118,16 @@ function encodeFloat16Bits(value) {
 function numericTypedArray(values, dtype) {
   if (dtype !== 'float16') {
     const ArrayType = TA_BY_DTYPE[dtype] || Float32Array
+    // Pinned _frompy converts to integer before wrapping to the storage width.
+    // Keep BigInts exact; Number(BigInt) would lose the low bits before wrapping.
+    if (dtype === 'int64' || dtype === 'uint64') {
+      return ArrayType.from(values, v => typeof v === 'bigint' ? v : BigInt(Math.trunc(Number(v))))
+    }
+    // Lists are narrowed while flattening; TypedArrays are homogeneous.
+    if (isIntegerDtype(dtype) && typeof values[0] === 'bigint') {
+      const bits = ArrayType.BYTES_PER_ELEMENT * 8
+      return ArrayType.from(values, v => typeof v === 'bigint' ? Number(BigInt.asUintN(bits, v)) : v)
+    }
     return new ArrayType(values)
   }
   const out = new Uint16Array(values.length)
@@ -169,14 +179,25 @@ function flattenArray(arr, dtype) {
   }
 
   const flat = []
-  const recurse = (a) => {
-    if (Array.isArray(a)) {
-      for (const el of a) recurse(el)
+  const integerStorage = isIntegerDtype(dtype)
+  const narrowBits = integerStorage && dtype !== 'int64' && dtype !== 'uint64'
+    ? TA_BY_DTYPE[dtype].BYTES_PER_ELEMENT * 8 : 0
+  const recurse = (a, depth) => {
+    if (depth < shape.length) {
+      if (!Array.isArray(a) || a.length !== shape[depth]) throw new TypeError('inhomogeneous shape')
+      for (const el of a) recurse(el, depth + 1)
     } else {
+      if (Array.isArray(a)) throw new TypeError('inhomogeneous shape')
+      // Typed-array casts have their own conversion rules; list construction
+      // follows _frompy's int conversion, which rejects NaN and infinities.
+      if (integerStorage && typeof a === 'number' && !Number.isFinite(a)) {
+        throw new RangeError('cannot convert nonfinite value to integer storage')
+      }
+      if (narrowBits && typeof a === 'bigint') a = Number(BigInt.asUintN(narrowBits, a))
       flat.push(dtype === 'bool' ? (a ? 1 : 0) : a)
     }
   }
-  recurse(arr)
+  recurse(arr, 0)
 
   return { data: numericTypedArray(flat, dtype), shape }
 }
@@ -631,7 +652,12 @@ function createBoundTensorClass(runtime) {
         this._data = opts._data || null
         this._dtype = dtypeNameForUop(this._ctx, raw, opts._dtype)
       } else {
+        const noneData = data === null
+        if (noneData) data = 0
         const scalarData = typeof data === 'number' || typeof data === 'boolean'
+        if (!scalarData && (opts.dtype === 'weakint' || opts.dtype === 'weakfloat')) {
+          throw new Error(`cannot create storage for weak dtype ${opts.dtype}`)
+        }
         // User construction from data. Resolve dtype and flatten to a single
         // TypedArray. Then call UOp.fromHost (one FFI call) which creates
         // the BUFFER UOp, registers a PolyBuffer wrapping the TypedArray's
@@ -641,7 +667,7 @@ function createBoundTensorClass(runtime) {
         let dt, flat, shape
         if (scalarData) {
           dt = opts.dtype || (
-            typeof data === 'boolean' ? 'bool' : Number.isInteger(data) ? 'weakint' : 'weakfloat'
+            noneData ? 'weakfloat' : typeof data === 'boolean' ? 'bool' : Number.isInteger(data) ? 'weakint' : 'weakfloat'
           )
           const dtypeId = DTYPE_ID[dt]
           if (dtypeId === undefined) throw new Error(`unsupported dtype: ${dt}`)
