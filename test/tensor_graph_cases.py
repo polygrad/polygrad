@@ -931,12 +931,36 @@ def case_minimum_uint64():
     return {"physical": out.uop, "logical": logical(out)}
 
 
+def case_minimum_bool():
+    out = typed_realized_empty("bool").minimum(typed_realized_empty("bool"))
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_minimum_bool_scalar():
+    out = typed_realized_empty("bool").minimum(True)
+    return {"physical": out.uop, "logical": logical(out)}
+
+
 def case_scatter_amin_uint8():
     base = Tensor.empty(1, 3, dtype="uint8").realize()
     indices = Tensor.empty(1, 3, dtype="int32").realize()
     src = Tensor.empty(1, 3, dtype="uint8").realize()
     out = base.scatter_reduce(1, indices, src, "amin")
     return {"physical": out.uop, "logical": logical(out)}
+
+
+def scatter_amin_without_self(dtype):
+    base = Tensor.empty(1, 2, dtype=dtype).realize()
+    indices = Tensor.empty(1, 2, dtype="int32").realize()
+    src = Tensor.empty(1, 2, dtype=dtype).realize()
+    out = base.scatter_reduce(1, indices, src, "amin", include_self=False)
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_scatter_amin_uint8_without_self(): return scatter_amin_without_self("uint8")
+def case_scatter_amin_uint16_without_self(): return scatter_amin_without_self("uint16")
+def case_scatter_amin_uint32_without_self(): return scatter_amin_without_self("uint32")
+def case_scatter_amin_uint64_without_self(): return scatter_amin_without_self("uint64")
 
 
 def case_dot_float32():
@@ -1984,6 +2008,12 @@ CASES = {
     "min_axes_bool": ("tensor", case_min_axes_bool),
     "min_axes_float32_keepdim": ("tensor", case_min_axes_float32_keepdim),
     "minimum_int8": ("tensor", case_minimum_int8),
+    "minimum_bool": ("tensor", case_minimum_bool),
+    "minimum_bool_scalar": ("tensor", case_minimum_bool_scalar),
+    "scatter_amin_uint8_without_self": ("tensor", case_scatter_amin_uint8_without_self),
+    "scatter_amin_uint16_without_self": ("tensor", case_scatter_amin_uint16_without_self),
+    "scatter_amin_uint32_without_self": ("tensor", case_scatter_amin_uint32_without_self),
+    "scatter_amin_uint64_without_self": ("tensor", case_scatter_amin_uint64_without_self),
     "minimum_uint64": ("tensor", case_minimum_uint64),
     "scatter_amin_uint8": ("tensor", case_scatter_amin_uint8),
     "max_pool2d_float32": ("tensor", case_max_pool2d_float32),

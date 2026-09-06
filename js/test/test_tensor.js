@@ -3920,6 +3920,33 @@ async function runTensorTests(pg) {
     assertClose(await r.toArray(), [2, 3, 4])
   })
 
+  await test('movement minimum owners: shrink bounds', async () => {
+    const x = new Tensor([1, 2, 3, 4])
+    for (const bounds of [[2, 5], [0, 5], [5, 5], [-1, 3], [2, 1]]) {
+      let rejected = false
+      try { x.shrink([bounds]) } catch (_) { rejected = true }
+      assert(rejected, `shrink must reject ${bounds}`)
+    }
+    assertClose(await x.shrink([[1, 3]]).toArray(), [2, 3], 0)
+    assertShape(x.shrink([[4, 4]]).shape, [0])
+    assertClose(await x.pad([[2, 1]]).toArray(), [0, 0, 1, 2, 3, 4, 0], 0)
+  })
+
+  await test('movement minimum owners: boolean binary XOR and unary CMPNE', async () => {
+    const x = new Tensor([false, false, true, true], {dtype: 'bool'})
+    const y = new Tensor([false, true, false, true], {dtype: 'bool'})
+    const out = x.minimum(y)
+    for (const root of [out.uopLogical, out.uopPhysical]) {
+      assert(root.op === pg._core.ops.XOR, 'minimum inverse must use XOR')
+      const maximum = root.src[0]
+      assert(maximum.op === pg._core.ops.MAX)
+      assert(maximum.src.every(s => s.op === pg._core.ops.XOR))
+    }
+    assertClose(await out.toArray(), [0, 0, 0, 1], 0)
+    assert(x.min().uopPhysical.op === pg._core.ops.CMPNE)
+    assertClose(await x.minimum(true).toArray(), [0, 0, 1, 1], 0)
+  })
+
   await test('numeric owners: min inverse matches pinned', async () => {
     const cases = [
       ['uint8', [0, 1, 255, 7, 3, 2]], ['int8', [-128, -1, 127, 7, 3, 2]],

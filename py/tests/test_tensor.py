@@ -3940,6 +3940,28 @@ class TestMaterializationParity:
         assert mixed.uop_logical.src[0].raw == x.uop_logical.raw
         assert mixed.uop_logical.src[1].raw == x.uop_logical.raw
 
+    def test_movement_bounds_reject_shrink_past_end(self):
+        x = Tensor([1., 2., 3., 4.])
+        for bounds in [(2, 5), (0, 5), (5, 5), (-1, 3), (2, 1)]:
+            with pytest.raises(ValueError, match='invalid shrink'):
+                x.shrink((bounds,))
+        np.testing.assert_array_equal(x.shrink(((1, 3),)).numpy(), [2., 3.])
+        assert x.shrink(((4, 4),)).shape == (0,)
+        np.testing.assert_array_equal(x.pad(((2, 1),)).numpy(), [0., 0., 1., 2., 3., 4., 0.])
+
+    def test_minimum_bool_xor_differs_from_unary_min(self):
+        x = Tensor([False, False, True, True], dtype='bool')
+        y = Tensor([False, True, False, True], dtype='bool')
+        out = x.minimum(y)
+        for root in [out.uop_logical, out.uop_physical]:
+            assert root.op_name == 'XOR'
+            maximum = root.src[0]
+            assert maximum.op_name == 'MAX'
+            assert [s.op_name for s in maximum.src] == ['XOR', 'XOR']
+        np.testing.assert_array_equal(out.numpy(), [False, False, False, True])
+        assert x.min().uop_physical.op_name == 'CMPNE'
+        np.testing.assert_array_equal(x.minimum(True).numpy(), x.numpy())
+
     def test_minimum_keeps_ordered_roundtrip_occurrence(self):
         x = Tensor([1.0], device='cpu').realize()
         x_cuda = x.to('cuda')

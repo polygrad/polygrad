@@ -1513,7 +1513,9 @@ int poly_uop_as_shape(PolyCtx *ctx, PolyUOp *shape_arg, PolyUOp **items, int max
   for (int i = 0; i < n; i++) {
     PolyUOp *item = shape_arg->op == POLY_OP_STACK ? shape_arg->src[i] : shape_arg;
     if (!item || !poly_dtype_is_int(item->dtype)) return -1;
-    items[i] = poly_graph_rewrite(ctx, item, poly_symbolic());
+    /* UOp.as_shape returns CONST.val directly; only symbolic lanes need
+     * ssimplify. Avoid a rewriter traversal for every static shape bound. */
+    items[i] = item->op == POLY_OP_CONST ? item : poly_graph_rewrite(ctx, item, poly_symbolic());
     if (!items[i]) return -1;
   }
   return n;

@@ -3111,6 +3111,16 @@ static PolyUOp *minimum_inverse(PolyCtx *ctx, PolyUOp *x) {
 
 PolyUOp *poly_minimum(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
   if (!poly_broadcasted_pair(ctx, &a, &b)) return NULL;
+  /* ElementwiseMixin.minimum uses XOR with dtype.const(min + max), even
+   * for bool. Unary min's _inverse instead uses logical_not (CMPNE). */
+  if (poly_dtype_is_bool(a->dtype)) {
+    PolyUOp *mask = poly_const_typed(ctx, POLY_BOOL, 1);
+    if (!mask) return NULL;
+    PolyUOp *left = poly_alu2(ctx, POLY_OP_XOR, a, mask);
+    PolyUOp *right = poly_alu2(ctx, POLY_OP_XOR, b, mask);
+    PolyUOp *maximum = left && right ? poly_alu2(ctx, POLY_OP_MAX, left, right) : NULL;
+    return maximum ? poly_alu2(ctx, POLY_OP_XOR, maximum, mask) : NULL;
+  }
   PolyUOp *inverse_a = minimum_inverse(ctx, a);
   PolyUOp *inverse_b = minimum_inverse(ctx, b);
   PolyUOp *maximum =

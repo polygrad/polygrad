@@ -3738,6 +3738,33 @@ TEST(pe, tensor_min_builds_both_roots_from_exact_occurrences) {
   PASS();
 }
 
+TEST(pe, tensor_minimum_bool_uses_xor_in_both_domains) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *logical =
+      poly_uop_new_buffer(ctx, poly_device_uop(ctx, POLY_DEVICE_CPU), 4, POLY_BOOL, 0);
+  PolyUOp *physical = poly_copy_to_device_uop(
+      ctx, poly_copy_to_device_uop(ctx, logical, poly_device_uop(ctx, POLY_DEVICE_CUDA)),
+      poly_device_uop(ctx, POLY_DEVICE_CPU)
+  );
+  PolyTensor *a =
+      poly_tensor_create_with_roots(ctx, logical, logical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *b =
+      poly_tensor_create_with_roots(ctx, logical, physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *out = poly_tensor_minimum(ctx, a, b);
+  ASSERT_NOT_NULL(out);
+  PolyUOp *mask = poly_const_typed(ctx, POLY_BOOL, 1);
+  PolyUOp *left = poly_alu2(ctx, POLY_OP_XOR, logical, mask);
+  PolyUOp *right = poly_alu2(ctx, POLY_OP_XOR, physical, mask);
+  bool logical_ok = out->uop_logical ==
+                    poly_alu2(ctx, POLY_OP_XOR, poly_alu2(ctx, POLY_OP_MAX, left, left), mask);
+  bool physical_ok = out->uop_physical ==
+                     poly_alu2(ctx, POLY_OP_XOR, poly_alu2(ctx, POLY_OP_MAX, left, right), mask);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(logical_ok && physical_ok);
+  PASS();
+}
+
 TEST(pe, tensor_argmax_builds_both_roots_from_exact_occurrences) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *logical = make_buf(ctx, (int64_t[]){2, 3}, 2);
@@ -4116,7 +4143,7 @@ TEST(pe, tensor_einsum_builds_both_roots_from_exact_occurrences) {
 }
 
 TEST(pe, unsigned_scatter_amin_matches_pinned_inverse_max_inverse) {
-  /* Pinned scatter amin fills with the positive dtype.max and reduces through
+  /* Pinned scatter amin fills with the positive weak dtype.max literal and reduces through
    * Tensor.min's inverse/MAX/inverse program
    * (mixin/__init__.py:1206-1211, mixin/elementwise.py:379-393). */
   PolyDType dtypes[] = {POLY_UINT8, POLY_UINT16, POLY_UINT32, POLY_UINT64};
@@ -4142,7 +4169,7 @@ TEST(pe, unsigned_scatter_amin_matches_pinned_inverse_max_inverse) {
     for (int i = 0; i < n_topo; i++) {
       PolyUOp *u = topo[i];
       if (u->op == POLY_OP_NEG) neg_count++;
-      if (u->op != POLY_OP_CONST || !poly_dtype_eq(u->dtype, dtype) ||
+      if (u->op != POLY_OP_CONST || !poly_dtype_eq(u->dtype, POLY_WEAKINT) ||
           (u->arg.kind != POLY_ARG_INT && u->arg.kind != POLY_ARG_BIGINT))
         continue;
       char *decimal = poly_arg_integer_to_decimal(u->arg);

@@ -270,7 +270,9 @@ PolyUOp *poly_shrink_uop(PolyCtx *ctx, PolyUOp *src, PolyUOp **starts, PolyUOp *
    * (mixin/movement.py:192-193). Elide only on proved shape-value identity. */
   if (movement_shape_is_identity(ctx, src, starts, sizes, ndim)) return src;
   PolyUOp *srcs[3] = {src, start_stack, size_stack};
-  return poly_uop(ctx, POLY_OP_SHRINK, src->dtype, srcs, 3, poly_arg_none());
+  PolyUOp *out = poly_uop(ctx, POLY_OP_SHRINK, src->dtype, srcs, 3, poly_arg_none());
+  /* MovementMixin.shrink inspects ret.shape before returning the result. */
+  return out && poly_uop_ndim(ctx, out) == ndim ? out : NULL;
 }
 
 PolyUOp *poly_pad_uop(PolyCtx *ctx, PolyUOp *src, PolyUOp **offsets, PolyUOp **sizes, int ndim) {
@@ -286,7 +288,9 @@ PolyUOp *poly_pad_uop(PolyCtx *ctx, PolyUOp *src, PolyUOp **offsets, PolyUOp **s
    * (mixin/movement.py:170-171). */
   if (movement_shape_is_identity(ctx, src, offsets, sizes, ndim)) return src;
   PolyUOp *srcs[3] = {src, offset_stack, size_stack};
-  return poly_uop(ctx, POLY_OP_PAD, src->dtype, srcs, 3, poly_arg_none());
+  PolyUOp *out = poly_uop(ctx, POLY_OP_PAD, src->dtype, srcs, 3, poly_arg_none());
+  /* MovementMixin.pad likewise validates ret.shape before returning. */
+  return out && poly_uop_ndim(ctx, out) == ndim ? out : NULL;
 }
 
 PolyUOp *poly_shrink(PolyCtx *ctx, PolyUOp *src, int64_t (*pairs)[2], int ndim) {

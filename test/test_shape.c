@@ -770,6 +770,71 @@ TEST(shape, pad_shrink_reject_wrong_rank_before_scalar_noop) {
   PASS();
 }
 
+TEST(shape, pad_shrink_bounds_match_resolve_default_true) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *n = poly_uop_variable(ctx, "n", 1, 8, POLY_WEAKINT, 1, false);
+  PolyUOp *unknown = poly_uop_variable(ctx, "unknown", -1, 6, POLY_WEAKINT, 1, false);
+  PolyUOp *negative = poly_uop_variable(ctx, "negative", -4, -1, POLY_WEAKINT, 1, false);
+  PolyUOp *zero = poly_const_int(ctx, 0), *one = poly_const_int(ctx, 1);
+  PolyUOp *two = poly_const_int(ctx, 2), *three = poly_const_int(ctx, 3);
+  PolyUOp *four = poly_const_int(ctx, 4), *six = poly_const_int(ctx, 6);
+  PolyUOp *minus_one = poly_const_int(ctx, -1);
+  PolyUOp *limit = poly_const_int(ctx, INT64_MAX);
+  struct {
+    PolyOps op;
+    PolyUOp *dim, *offset, *size;
+    bool accepted;
+  } cases[] = {
+      {POLY_OP_SHRINK, four, two, three, false},
+      {POLY_OP_SHRINK, four, minus_one, three, false},
+      {POLY_OP_SHRINK, four, zero, minus_one, false},
+      {POLY_OP_SHRINK, four, four, zero, true},
+      {POLY_OP_SHRINK, four, poly_const_int(ctx, 5), zero, false},
+      {POLY_OP_SHRINK, four, limit, one, false},
+      {POLY_OP_PAD, four, three, six, false},
+      {POLY_OP_PAD, four, minus_one, six, false},
+      {POLY_OP_PAD, four, two, six, true},
+      {POLY_OP_PAD, zero, two, three, true},
+      {POLY_OP_PAD, four, limit, limit, false},
+      {POLY_OP_SHRINK, four, zero, unknown, true},
+      {POLY_OP_SHRINK, four, zero, negative, false},
+      {POLY_OP_SHRINK, four, unknown, one, true},
+      {POLY_OP_PAD, four, unknown, six, true},
+      {POLY_OP_SHRINK, n, poly_alu2(ctx, POLY_OP_ADD, n, minus_one), one, true},
+      {POLY_OP_SHRINK, n, n, one, true},
+      {POLY_OP_PAD, n, one, poly_alu2(ctx, POLY_OP_ADD, n, one), true},
+      {POLY_OP_PAD, n, two, poly_alu2(ctx, POLY_OP_ADD, n, one), true},
+  };
+  /* Pinned _shape uses resolve(..., True), not a proof of validity for
+   * every binding. Inspect admission only: unresolved graphs are not run. */
+  int mismatches = 0;
+  for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    PolyUOp *base = poly_expand_uop(ctx, poly_const_float(ctx, 1), &cases[i].dim, 1);
+    PolyUOp *raw = poly_uop(
+        ctx, cases[i].op, POLY_FLOAT32, (PolyUOp *[]){base, cases[i].offset, cases[i].size}, 3,
+        poly_arg_none()
+    );
+    bool accepted = poly_uop_ndim(ctx, raw) == 1;
+    PolyUOp *built = cases[i].op == POLY_OP_PAD
+                         ? poly_pad_uop(ctx, base, &cases[i].offset, &cases[i].size, 1)
+                         : poly_shrink_uop(ctx, base, &cases[i].offset, &cases[i].size, 1);
+    if (accepted != cases[i].accepted || (built != NULL) != cases[i].accepted) {
+      fprintf(
+          stderr, "movement bounds case %zu: raw=%d built=%d expected=%d\n", i, accepted,
+          built != NULL, cases[i].accepted
+      );
+      mismatches++;
+    }
+    if (accepted &&
+        poly_uop_shape_dim(ctx, raw, 0) != poly_graph_rewrite(ctx, cases[i].size, poly_symbolic()))
+      mismatches++;
+  }
+  poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(mismatches, 0);
+  PASS();
+}
+
 TEST(shape, movement_shape_lanes_use_full_pinned_symbolic_canonicalization) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);

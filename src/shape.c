@@ -623,6 +623,56 @@ static PolyUOp *const *src_dim_uops(PolyCtx *ctx, PolyUOp *u, int idx) {
 #define SRC_DIMS(i) src_dims(ctx, u, (i))
 #define SRC_DIM_UOPS(i) src_dim_uops(ctx, u, (i))
 
+/* Pinned _shape uses resolve(a <= b, True). Unknown symbolic bounds stay
+ * admissible; max_shape is an allocation bound, not a substitute for b. */
+static bool shape_resolve_le(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
+  if (!a || !b) return false;
+  PolyUOp *less = poly_alu2(ctx, POLY_OP_CMPLT, b, a);
+  PolyUOp *condition =
+      less ? poly_alu2(ctx, POLY_OP_CMPNE, less, poly_const_typed(ctx, POLY_BOOL, 1)) : NULL;
+  return condition && poly_uop_resolve(ctx, condition, 1) == 1;
+}
+
+/* UOp._shape PAD/SHRINK and marg (uop/ops.py:429-439,780-784). Shape
+ * admission is shared by raw UOps, Tensor constructors and compiler consumers. */
+static ShapeCacheEntry *movement_shape(PolyCtx *ctx, PolyUOp *u) {
+  int ndim = SRC_NDIM(0);
+  if (ndim < 0) return make_entry_none(ctx);
+  PolyUOp *offsets[POLY_MAX_DIMS], *sizes[POLY_MAX_DIMS];
+  int n_offsets = poly_uop_as_shape(ctx, u->src[1], offsets, POLY_MAX_DIMS);
+  int n_sizes = poly_uop_as_shape(ctx, u->src[2], sizes, POLY_MAX_DIMS);
+  /* marg zips the two shape operands; public constructors separately enforce
+   * equal ranks. Preserve that raw-UOp behavior here. */
+  if (n_offsets < 0 || n_sizes < 0 || (n_offsets < n_sizes ? n_offsets : n_sizes) != ndim)
+    return make_entry_none(ctx);
+  int64_t dims[POLY_MAX_DIMS];
+  PolyUOp *const *source_dims = SRC_DIM_UOPS(0);
+  for (int i = 0; i < ndim; i++) {
+    PolyUOp *inner = u->op == POLY_OP_PAD ? source_dims[i] : sizes[i];
+    PolyUOp *outer = u->op == POLY_OP_PAD ? sizes[i] : source_dims[i];
+    int64_t offset, size, input;
+    if (poly_uop_const_i64(offsets[i], &offset) == 0 && poly_uop_const_i64(sizes[i], &size) == 0 &&
+        poly_uop_const_i64(source_dims[i], &input) == 0) {
+      int64_t inner_size = u->op == POLY_OP_PAD ? input : size;
+      int64_t outer_size = u->op == POLY_OP_PAD ? size : input;
+      /* The Python constant predicate cannot overflow. Subtract only after
+       * proving nonnegative ordered sizes; don't form offset + inner_size. */
+      if (size < 0 || offset < 0 || inner_size < 0 || outer_size < inner_size ||
+          offset > outer_size - inner_size)
+        return make_entry_none(ctx);
+      dims[i] = size;
+    } else {
+      PolyUOp *zero = shape_dim_const(ctx, 0);
+      if (!shape_resolve_le(ctx, zero, offsets[i]) || !shape_resolve_le(ctx, zero, sizes[i]) ||
+          !shape_resolve_le(ctx, poly_alu2(ctx, POLY_OP_ADD, offsets[i], inner), outer))
+        return make_entry_none(ctx);
+      int64_t vmin;
+      poly_uop_minmax(ctx, sizes[i], &vmin, &dims[i]);
+    }
+  }
+  return make_entry_dims_uops(ctx, dims, sizes, ndim);
+}
+
 static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u);
 
 /* Tinygrad 2026-08-22/a9069c177a9d uop/ops.py:70-77 `_broadcast_shape`.
@@ -1092,30 +1142,9 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
     return make_entry_dims_uops(ctx, dims, dim_uops, n);
   }
 
-  /* PAD: pinned tensor form stores offset and output-size shape values as
-   * src[1]/src[2] (uop/ops.py:710-721). */
-  if (op == POLY_OP_PAD && u->arg.kind == POLY_ARG_NONE && u->n_src == 3) {
-    int8_t in_ndim = SRC_NDIM(0);
-    if (in_ndim < 0) return make_entry_none(ctx);
-    int64_t dims[POLY_MAX_DIMS];
-    PolyUOp *dim_uops[POLY_MAX_DIMS];
-    int n = 0;
-    if (!shape_arg_values(ctx, u->src[2], dims, dim_uops, &n) || n != in_ndim)
-      return make_entry_none(ctx);
-    return make_entry_dims_uops(ctx, dims, dim_uops, n);
-  }
-
-  /* Tinygrad SHRINK shape is the size source for movement and memory slices. */
-  if (op == POLY_OP_SHRINK && u->arg.kind == POLY_ARG_NONE && u->n_src >= 3) {
-    int8_t in_ndim = SRC_NDIM(0);
-    if (in_ndim < 0) return make_entry_none(ctx);
-    int64_t dims[POLY_MAX_DIMS];
-    PolyUOp *dim_uops[POLY_MAX_DIMS];
-    int n = 0;
-    if (!shape_arg_values(ctx, u->src[2], dims, dim_uops, &n) || n != in_ndim)
-      return make_entry_none(ctx);
-    return make_entry_dims_uops(ctx, dims, dim_uops, n);
-  }
+  if (u->arg.kind == POLY_ARG_NONE &&
+      ((op == POLY_OP_PAD && u->n_src == 3) || (op == POLY_OP_SHRINK && u->n_src >= 3)))
+    return movement_shape(ctx, u);
 
   /* FLIP: same shape as src[0] */
   if (op == POLY_OP_FLIP) {
