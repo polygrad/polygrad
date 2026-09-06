@@ -1,7 +1,7 @@
 #ifndef POLY_MODEL_HF_LOADER_H
 #define POLY_MODEL_HF_LOADER_H
 
-#include "../instance.h"
+#include "../model.h"
 #include "../loaders/hf_decode.h"
 #include "../loaders/import_error.h"
 #include <stdint.h>
@@ -29,7 +29,7 @@ void poly_model_config_free(PolyModelConfig *config);
 
 /* HuggingFace loader (auto-dispatch by model_type) */
 
-PolyInstance *poly_hf_load(
+PolyModel *poly_hf_load(
     const char *config_json,
     int config_len,
     const uint8_t **weight_files,

@@ -1,5 +1,5 @@
 /*
- * bind.h -- Bind index for copying decoded tensors into PolyInstance
+ * bind.h -- Bind index for copying decoded tensors into PolyModel
  *
  * PolyBindIndex maps buffer names to buffer indices for O(1) lookup.
  * poly_import_copy_named_tensor copies F32 data into the named buffer.
@@ -8,7 +8,7 @@
 #ifndef POLY_BIND_H
 #define POLY_BIND_H
 
-#include "../instance.h"
+#include "../model.h"
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -17,11 +17,11 @@ extern "C" {
 
 typedef struct PolyBindIndex PolyBindIndex;
 
-PolyBindIndex *poly_bind_index_create(PolyInstance *inst);
+PolyBindIndex *poly_bind_index_create(PolyModel *inst);
 void poly_bind_index_destroy(PolyBindIndex *idx);
 
 /*
- * Copy F32 tensor data into the named buffer of the bound PolyInstance.
+ * Copy F32 tensor data into the named buffer of the bound PolyModel.
  *
  * Returns:
  *    1 = success (copied)

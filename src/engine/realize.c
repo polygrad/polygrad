@@ -743,7 +743,7 @@ static PolyUOp *poly_transform_to_call_wrap_call(PolyCtx *ctx, PolyUOp *sink) {
   }
 
   /* Tinygrad tensor.py:224-242 records every callified write as
-   * AFTER(target, STORE(target, value)).  Raw C/Instance effect sinks already
+   * AFTER(target, STORE(target, value)).  Raw C/Model effect sinks already
    * own storage, so add only that missing state edge before scheduling. */
   PolyUOp **effects =
       function->n_src > 0 ? malloc((size_t)function->n_src * sizeof(*effects)) : NULL;
@@ -2143,7 +2143,7 @@ PolyUOp *poly_linear_effect_sink(
     return NULL;
   }
 
-  /* Imported/Instance graphs already own their output/effect storage, so they
+  /* Imported/Model graphs already own their output/effect storage, so they
    * skip tensor output allocation. They do not skip tinygrad's input-buffer
    * normalization: rangeify must see a shaped-PARAM function body, with exact
    * BUFFER/SHRINK/BITCAST storage occurrences as outer CALL arguments. */

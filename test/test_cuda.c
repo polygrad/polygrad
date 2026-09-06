@@ -13,7 +13,7 @@
 #include "../src/ctx.h"
 #include "../src/frontend.h"
 #include "../src/device.h"
-#include "../src/instance.h"
+#include "../src/model.h"
 #include "../src/engine/realize.h"
 #include "../src/engine/jit.h"
 #include "../src/engine/schedule.h"
@@ -1260,13 +1260,13 @@ TEST_BACKEND(cuda, realize_unified_reduce) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════ */
-/*  Instance-level CUDA tests                                            */
+/*  Model-level CUDA tests                                            */
 /* ══════════════════════════════════════════════════════════════════════ */
 
-#include "../src/instance.h"
+#include "../src/model.h"
 #include "../src/models/mlp.h"
 
-static PolyInstance *make_test_mlp(int n_in, int n_out) {
+static PolyModel *make_test_mlp(int n_in, int n_out) {
   char spec[256];
   snprintf(
       spec, sizeof(spec),
@@ -1284,13 +1284,13 @@ TEST_BACKEND(cuda, large_mlp_train_cuda_codegen_no_wide_f32_vectors) {
    * split before rendering. No CUDA device is required for this test. */
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
-  PolyInstance *inst = poly_instance_new(ctx, NULL);
+  PolyModel *inst = poly_model_new(ctx, NULL);
   ASSERT_NOT_NULL(inst);
 
   int64_t x_shape[2] = {32, 128};
   int64_t y_shape[2] = {32, 64};
-  PolyTensor *x_tensor = poly_instance_input(inst, "x", POLY_FLOAT32, x_shape, 2);
-  PolyTensor *y_tensor = poly_instance_target(inst, "y", POLY_FLOAT32, y_shape, 2);
+  PolyTensor *x_tensor = poly_model_input(inst, "x", POLY_FLOAT32, x_shape, 2);
+  PolyTensor *y_tensor = poly_model_target(inst, "y", POLY_FLOAT32, y_shape, 2);
   ASSERT_NOT_NULL(x_tensor);
   ASSERT_NOT_NULL(y_tensor);
 
@@ -1300,17 +1300,17 @@ TEST_BACKEND(cuda, large_mlp_train_cuda_codegen_no_wide_f32_vectors) {
   int64_t w1_shape[2] = {64, 256};
   int64_t b1_shape[1] = {64};
 
-  ASSERT_INT_EQ(poly_instance_scope_push(inst, "layers.0"), POLY_STATUS_OK);
-  w0_tensor = poly_instance_param(inst, "weight", POLY_FLOAT32, w0_shape, 2);
-  b0_tensor = poly_instance_param(inst, "bias", POLY_FLOAT32, b0_shape, 1);
-  ASSERT_INT_EQ(poly_instance_scope_pop(inst), POLY_STATUS_OK);
+  ASSERT_INT_EQ(poly_model_scope_push(inst, "layers.0"), POLY_STATUS_OK);
+  w0_tensor = poly_model_param(inst, "weight", POLY_FLOAT32, w0_shape, 2);
+  b0_tensor = poly_model_param(inst, "bias", POLY_FLOAT32, b0_shape, 1);
+  ASSERT_INT_EQ(poly_model_scope_pop(inst), POLY_STATUS_OK);
   ASSERT_NOT_NULL(w0_tensor);
   ASSERT_NOT_NULL(b0_tensor);
 
-  ASSERT_INT_EQ(poly_instance_scope_push(inst, "layers.1"), POLY_STATUS_OK);
-  w1_tensor = poly_instance_param(inst, "weight", POLY_FLOAT32, w1_shape, 2);
-  b1_tensor = poly_instance_param(inst, "bias", POLY_FLOAT32, b1_shape, 1);
-  ASSERT_INT_EQ(poly_instance_scope_pop(inst), POLY_STATUS_OK);
+  ASSERT_INT_EQ(poly_model_scope_push(inst, "layers.1"), POLY_STATUS_OK);
+  w1_tensor = poly_model_param(inst, "weight", POLY_FLOAT32, w1_shape, 2);
+  b1_tensor = poly_model_param(inst, "bias", POLY_FLOAT32, b1_shape, 1);
+  ASSERT_INT_EQ(poly_model_scope_pop(inst), POLY_STATUS_OK);
   ASSERT_NOT_NULL(w1_tensor);
   ASSERT_NOT_NULL(b1_tensor);
 
@@ -1483,7 +1483,7 @@ TEST_BACKEND(cuda, large_mlp_train_cuda_codegen_no_wide_f32_vectors) {
       }
       free(lin);
       free(src);
-      poly_instance_free(inst);
+      poly_model_free(inst);
       poly_ctx_destroy(ctx);
       FAIL(
           "CUDA renderer emitted illegal wide f32 vector token %s for large MLP train step",
@@ -1496,7 +1496,7 @@ TEST_BACKEND(cuda, large_mlp_train_cuda_codegen_no_wide_f32_vectors) {
   }
   ASSERT_INT_EQ(n_rendered, 12);
 
-  poly_instance_free(inst);
+  poly_model_free(inst);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -1504,29 +1504,29 @@ TEST_BACKEND(cuda, large_mlp_train_cuda_codegen_no_wide_f32_vectors) {
 TEST_BACKEND(cuda, instance_set_device_cuda) {
   SKIP_IF_NO_CUDA();
 
-  PolyInstance *inst = make_test_mlp(2, 3);
+  PolyModel *inst = make_test_mlp(2, 3);
   ASSERT_NOT_NULL(inst);
 
   /* Read initial host data */
   int64_t numel;
-  float *cpu_data = poly_instance_buf_data(inst, 0, &numel);
+  float *cpu_data = poly_model_buf_data(inst, 0, &numel);
   ASSERT_NOT_NULL(cpu_data);
   float saved = cpu_data[0];
 
-  ASSERT_INT_EQ(poly_instance_set_device(inst, POLY_DEVICE_CUDA), 0);
+  ASSERT_INT_EQ(poly_model_set_device(inst, POLY_DEVICE_CUDA), 0);
 
   /* buf_data auto-readbacks from GPU (tinygrad-style) */
-  float *gpu_data = poly_instance_buf_data(inst, 0, &numel);
+  float *gpu_data = poly_model_buf_data(inst, 0, &numel);
   ASSERT_NOT_NULL(gpu_data);
   ASSERT_FLOAT_EQ(gpu_data[0], saved, 1e-6);
 
   /* Switch back to CPU */
-  ASSERT_INT_EQ(poly_instance_set_device(inst, POLY_DEVICE_CPU), 0);
+  ASSERT_INT_EQ(poly_model_set_device(inst, POLY_DEVICE_CPU), 0);
 
   /* buf_data still works on CPU */
-  ASSERT_NOT_NULL(poly_instance_buf_data(inst, 0, &numel));
+  ASSERT_NOT_NULL(poly_model_buf_data(inst, 0, &numel));
 
-  poly_instance_free(inst);
+  poly_model_free(inst);
   PASS();
 }
 
@@ -1534,13 +1534,13 @@ TEST_BACKEND(cuda, instance_cuda_forward_parity) {
   SKIP_IF_NO_CUDA();
 
   int n_in = 2, n_out = 3;
-  PolyInstance *inst = make_test_mlp(n_in, n_out);
+  PolyModel *inst = make_test_mlp(n_in, n_out);
   ASSERT_NOT_NULL(inst);
 
   /* Seed weights deterministically */
-  for (int p = 0; p < poly_instance_param_count(inst); p++) {
+  for (int p = 0; p < poly_model_param_count(inst); p++) {
     int64_t numel;
-    float *data = poly_instance_param_data(inst, p, &numel);
+    float *data = poly_model_param_data(inst, p, &numel);
     for (int64_t j = 0; j < numel; j++)
       data[j] = (float)(j % 7 - 3) * 0.1f;
   }
@@ -1549,51 +1549,51 @@ TEST_BACKEND(cuda, instance_cuda_forward_parity) {
   float input[] = {1.0f, 2.0f};
   float out_cpu[3] = {0};
   PolyIOBinding io[] = {POLY_IO_BINDING_ARRAY("x", input, POLY_FLOAT32)};
-  ASSERT_INT_EQ(poly_instance_forward(inst, io, 1), 0);
+  ASSERT_INT_EQ(poly_model_forward(inst, io, 1), 0);
 
   /* Read CPU output */
   int out_idx = -1;
-  for (int i = 0; i < poly_instance_buf_count(inst); i++)
-    if (poly_instance_buf_role(inst, i) == POLY_ROLE_OUTPUT) {
+  for (int i = 0; i < poly_model_buf_count(inst); i++)
+    if (poly_model_buf_role(inst, i) == POLY_ROLE_OUTPUT) {
       out_idx = i;
       break;
     }
   ASSERT_TRUE(out_idx >= 0);
   {
     int64_t numel;
-    float *cpu_out = poly_instance_buf_data(inst, out_idx, &numel);
+    float *cpu_out = poly_model_buf_data(inst, out_idx, &numel);
     ASSERT_NOT_NULL(cpu_out);
     memcpy(out_cpu, cpu_out, n_out * sizeof(float));
   }
 
   /* Switch to CUDA */
-  ASSERT_INT_EQ(poly_instance_set_device(inst, POLY_DEVICE_CUDA), 0);
+  ASSERT_INT_EQ(poly_model_set_device(inst, POLY_DEVICE_CUDA), 0);
 
   /* Forward on CUDA */
-  ASSERT_INT_EQ(poly_instance_forward(inst, io, 1), 0);
+  ASSERT_INT_EQ(poly_model_forward(inst, io, 1), 0);
 
   /* Readback output */
   float out_gpu[3] = {0};
-  poly_instance_readback_buf(inst, out_idx, out_gpu, n_out * sizeof(float));
+  poly_model_readback_buf(inst, out_idx, out_gpu, n_out * sizeof(float));
 
   /* Compare */
   for (int i = 0; i < n_out; i++)
     ASSERT_FLOAT_EQ(out_gpu[i], out_cpu[i], 1e-4);
 
-  poly_instance_free(inst);
+  poly_model_free(inst);
   PASS();
 }
 
 TEST_BACKEND(cuda, instance_cuda_roundtrip) {
   SKIP_IF_NO_CUDA();
 
-  PolyInstance *inst = make_test_mlp(2, 1);
+  PolyModel *inst = make_test_mlp(2, 1);
   ASSERT_NOT_NULL(inst);
 
   /* Seed weights */
-  for (int p = 0; p < poly_instance_param_count(inst); p++) {
+  for (int p = 0; p < poly_model_param_count(inst); p++) {
     int64_t numel;
-    float *data = poly_instance_param_data(inst, p, &numel);
+    float *data = poly_model_param_data(inst, p, &numel);
     for (int64_t j = 0; j < numel; j++)
       data[j] = (float)(j % 5 - 2) * 0.2f;
   }
@@ -1603,41 +1603,41 @@ TEST_BACKEND(cuda, instance_cuda_roundtrip) {
   float results[4];
 
   /* CPU -> forward */
-  ASSERT_INT_EQ(poly_instance_forward(inst, io, 1), 0);
+  ASSERT_INT_EQ(poly_model_forward(inst, io, 1), 0);
   int out_idx = -1;
-  for (int i = 0; i < poly_instance_buf_count(inst); i++)
-    if (poly_instance_buf_role(inst, i) == POLY_ROLE_OUTPUT) {
+  for (int i = 0; i < poly_model_buf_count(inst); i++)
+    if (poly_model_buf_role(inst, i) == POLY_ROLE_OUTPUT) {
       out_idx = i;
       break;
     }
   {
     int64_t n;
-    results[0] = *poly_instance_buf_data(inst, out_idx, &n);
+    results[0] = *poly_model_buf_data(inst, out_idx, &n);
   }
 
   /* CUDA -> forward */
-  ASSERT_INT_EQ(poly_instance_set_device(inst, POLY_DEVICE_CUDA), 0);
-  ASSERT_INT_EQ(poly_instance_forward(inst, io, 1), 0);
-  poly_instance_readback_buf(inst, out_idx, &results[1], sizeof(float));
+  ASSERT_INT_EQ(poly_model_set_device(inst, POLY_DEVICE_CUDA), 0);
+  ASSERT_INT_EQ(poly_model_forward(inst, io, 1), 0);
+  poly_model_readback_buf(inst, out_idx, &results[1], sizeof(float));
 
   /* CPU -> forward */
-  ASSERT_INT_EQ(poly_instance_set_device(inst, POLY_DEVICE_CPU), 0);
-  ASSERT_INT_EQ(poly_instance_forward(inst, io, 1), 0);
+  ASSERT_INT_EQ(poly_model_set_device(inst, POLY_DEVICE_CPU), 0);
+  ASSERT_INT_EQ(poly_model_forward(inst, io, 1), 0);
   {
     int64_t n;
-    results[2] = *poly_instance_buf_data(inst, out_idx, &n);
+    results[2] = *poly_model_buf_data(inst, out_idx, &n);
   }
 
   /* CUDA -> forward */
-  ASSERT_INT_EQ(poly_instance_set_device(inst, POLY_DEVICE_CUDA), 0);
-  ASSERT_INT_EQ(poly_instance_forward(inst, io, 1), 0);
-  poly_instance_readback_buf(inst, out_idx, &results[3], sizeof(float));
+  ASSERT_INT_EQ(poly_model_set_device(inst, POLY_DEVICE_CUDA), 0);
+  ASSERT_INT_EQ(poly_model_forward(inst, io, 1), 0);
+  poly_model_readback_buf(inst, out_idx, &results[3], sizeof(float));
 
   /* All 4 results should match within tolerance */
   for (int i = 1; i < 4; i++)
     ASSERT_FLOAT_EQ(results[i], results[0], 1e-4);
 
-  poly_instance_free(inst);
+  poly_model_free(inst);
   PASS();
 }
 
@@ -1745,27 +1745,27 @@ TEST_BACKEND(cuda, instance_host_write_after_set_device_reacquire_updates_cuda_i
   const char *entry_objectives[] = {NULL};
   uint32_t entry_flags[] = {0};
 
-  PolyInstanceError err = {0};
-  PolyInstance *inst = poly_instance_from_binding_arrays(
+  PolyModelError err = {0};
+  PolyModel *inst = poly_model_from_binding_arrays(
       ctx, binding_names, binding_roles, binding_tensors, binding_flags, 2, entry_names,
       entry_inputs, entry_input_counts, entry_outputs, entry_output_counts, entry_objectives,
       entry_flags, 1, NULL, &err
   );
   ASSERT_NOT_NULL(inst);
-  ASSERT_INT_EQ(poly_instance_set_device(inst, POLY_DEVICE_CUDA), 0);
+  ASSERT_INT_EQ(poly_model_set_device(inst, POLY_DEVICE_CUDA), 0);
 
   int out_idx = -1;
-  for (int i = 0; i < poly_instance_buf_count(inst); i++)
-    if (strcmp(poly_instance_buf_name(inst, i), "output") == 0) out_idx = i;
+  for (int i = 0; i < poly_model_buf_count(inst); i++)
+    if (strcmp(poly_model_buf_name(inst, i), "output") == 0) out_idx = i;
   ASSERT_TRUE(out_idx >= 0);
 
   float input_a[] = {1.0f, 2.0f, 3.0f, 4.0f};
   PolyIOBinding input_a_io[] = {
       POLY_IO_BINDING_ARRAY("x", input_a, POLY_FLOAT32),
   };
-  ASSERT_INT_EQ(poly_instance_forward(inst, input_a_io, 1), 0);
+  ASSERT_INT_EQ(poly_model_forward(inst, input_a_io, 1), 0);
   float got[4] = {0};
-  ASSERT_INT_EQ(poly_instance_readback_buf(inst, out_idx, got, sizeof(got)), 0);
+  ASSERT_INT_EQ(poly_model_readback_buf(inst, out_idx, got, sizeof(got)), 0);
   for (int i = 0; i < 4; i++)
     ASSERT_FLOAT_EQ(got[i], input_a[i] + 1.0f, 1e-5f);
 
@@ -1773,13 +1773,13 @@ TEST_BACKEND(cuda, instance_host_write_after_set_device_reacquire_updates_cuda_i
   PolyIOBinding input_b_io[] = {
       POLY_IO_BINDING_ARRAY("x", input_b, POLY_FLOAT32),
   };
-  ASSERT_INT_EQ(poly_instance_forward(inst, input_b_io, 1), 0);
+  ASSERT_INT_EQ(poly_model_forward(inst, input_b_io, 1), 0);
   memset(got, 0, sizeof(got));
-  ASSERT_INT_EQ(poly_instance_readback_buf(inst, out_idx, got, sizeof(got)), 0);
+  ASSERT_INT_EQ(poly_model_readback_buf(inst, out_idx, got, sizeof(got)), 0);
   for (int i = 0; i < 4; i++)
     ASSERT_FLOAT_EQ(got[i], input_b[i] + 1.0f, 1e-5f);
 
-  poly_instance_free(inst);
+  poly_model_free(inst);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -1789,12 +1789,10 @@ TEST_BACKEND(cuda, instance_cuda_large_mlp_train_no_wide_vector_types) {
 
   const char *spec = "{\"layers\":[128,256,64],\"activation\":\"relu\",\"bias\":true,"
                      "\"loss\":\"mse\",\"batch_size\":32,\"seed\":42}";
-  PolyInstance *inst = poly_mlp_from_json(spec, (int)strlen(spec), POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_mlp_from_json(spec, (int)strlen(spec), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
-  ASSERT_INT_EQ(poly_instance_set_device(inst, POLY_DEVICE_CUDA), 0);
-  ASSERT_INT_EQ(
-      poly_instance_set_optimizer(inst, POLY_OPTIM_SGD, 0.01f, 0.0f, 0.0f, 0.0f, 0.0f), 0
-  );
+  ASSERT_INT_EQ(poly_model_set_device(inst, POLY_DEVICE_CUDA), 0);
+  ASSERT_INT_EQ(poly_model_set_optimizer(inst, POLY_OPTIM_SGD, 0.01f, 0.0f, 0.0f, 0.0f, 0.0f), 0);
 
   float x[32 * 128];
   float y[32 * 64];
@@ -1808,10 +1806,10 @@ TEST_BACKEND(cuda, instance_cuda_large_mlp_train_no_wide_vector_types) {
       POLY_IO_BINDING_ARRAY("y", y, POLY_FLOAT32),
   };
   float loss = 0.0f;
-  ASSERT_INT_EQ(poly_instance_train_step(inst, io, 2, &loss), 0);
+  ASSERT_INT_EQ(poly_model_train_step(inst, NULL, io, 2, &loss), 0);
   ASSERT_TRUE(isfinite(loss));
 
-  poly_instance_free(inst);
+  poly_model_free(inst);
   PASS();
 }
 
@@ -1820,12 +1818,12 @@ TEST_BACKEND(cuda, instance_cuda_adam_train_lazily_created_state_stays_on_cuda) 
 
   const char *spec = "{\"layers\":[2,4,1],\"activation\":\"relu\",\"bias\":true,"
                      "\"loss\":\"mse\",\"batch_size\":1,\"seed\":42}";
-  PolyInstance *inst = poly_mlp_from_json(spec, (int)strlen(spec), POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_mlp_from_json(spec, (int)strlen(spec), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
-  ASSERT_INT_EQ(poly_instance_set_device(inst, POLY_DEVICE_CUDA), 0);
+  ASSERT_INT_EQ(poly_model_set_device(inst, POLY_DEVICE_CUDA), 0);
   ASSERT_INT_EQ(
-      poly_instance_set_optimizer(inst, POLY_OPTIM_ADAM, 0.01f, 0.9f, 0.999f, 1e-8f, 0.0f), 0
+      poly_model_set_optimizer(inst, POLY_OPTIM_ADAM, 0.01f, 0.9f, 0.999f, 1e-8f, 0.0f), 0
   );
 
   float x[] = {1.0f, 2.0f};
@@ -1836,10 +1834,10 @@ TEST_BACKEND(cuda, instance_cuda_adam_train_lazily_created_state_stays_on_cuda) 
   };
 
   float loss = 0.0f;
-  ASSERT_INT_EQ(poly_instance_train_step(inst, io, 2, &loss), 0);
+  ASSERT_INT_EQ(poly_model_train_step(inst, NULL, io, 2, &loss), 0);
   ASSERT_TRUE(isfinite(loss));
 
-  poly_instance_free(inst);
+  poly_model_free(inst);
   PASS();
 }
 
@@ -2064,30 +2062,30 @@ TEST_BACKEND(cuda, compiled_schedule_preserves_mixed_call_devices) {
       .outputs = output_names,
       .n_outputs = 1,
   }};
-  PolyInstance *inst = poly_instance_from_bindings(ctx, bindings, 4, entrypoints, 1, NULL, NULL);
+  PolyModel *inst = poly_model_from_bindings(ctx, bindings, 4, entrypoints, 1, NULL, NULL);
   ASSERT_NOT_NULL(inst);
 
   PolyTensor *module0_inputs[] = {x};
   PolyTensor *module1_inputs[] = {hidden};
-  PolyInstanceModuleSpec modules[] = {
+  PolyModelModuleSpec modules[] = {
       {.name = "layers.0", .inputs = module0_inputs, .n_inputs = 1, .output = hidden},
       {.name = "layers.1", .inputs = module1_inputs, .n_inputs = 1, .output = output},
   };
-  ASSERT_INT_EQ(poly_instance_define_modules(inst, modules, 2), 0);
-  PolyInstanceDeviceMapEntry map[] = {
+  ASSERT_INT_EQ(poly_model_define_modules(inst, modules, 2), 0);
+  PolyModelDeviceMapEntry map[] = {
       {.module = "layers.0", .device = "CUDA"},
       {.module = "layers.1", .device = "INTERP"},
   };
-  ASSERT_INT_EQ(poly_instance_set_device_map(inst, map, 2), 0);
+  ASSERT_INT_EQ(poly_model_set_device_map(inst, map, 2), 0);
 
   float x_data[] = {1.0f, 2.0f};
   ASSERT_INT_EQ(
-      poly_buffer_write(ctx, poly_instance_get_buffer(inst, "x"), x_data, sizeof(x_data)), 0
+      poly_buffer_write(ctx, poly_model_get_buffer(inst, "x"), x_data, sizeof(x_data)), 0
   );
   PolyVarBinding *vars = NULL;
   int n_vars = 0;
   PolyUOp *schedule =
-      poly_linear_effect_sink(ctx, poly_instance_get_sink(inst, "forward"), &vars, &n_vars);
+      poly_linear_effect_sink(ctx, poly_model_get_sink(inst, "forward"), &vars, &n_vars);
   ASSERT_NOT_NULL(schedule);
   ASSERT_INT_EQ(schedule->n_src, 3);
   ASSERT_EQ(poly_test_linear_call_body(schedule, 0)->op, POLY_OP_SINK);
@@ -2108,25 +2106,23 @@ TEST_BACKEND(cuda, compiled_schedule_preserves_mixed_call_devices) {
 
   ASSERT_INT_EQ(poly_run_linear(ctx, compiled, vars, n_vars, NULL, 0, true, true, false), 0);
   float got[2] = {0.0f, 0.0f};
-  ASSERT_INT_EQ(
-      poly_buffer_read(ctx, poly_instance_get_buffer(inst, "output"), got, sizeof(got)), 0
-  );
+  ASSERT_INT_EQ(poly_buffer_read(ctx, poly_model_get_buffer(inst, "output"), got, sizeof(got)), 0);
   ASSERT_FLOAT_EQ(got[0], 8.0f, 1e-6f);
   ASSERT_FLOAT_EQ(got[1], 18.0f, 1e-6f);
 
   free(vars);
 
-  PolyInstanceDeviceMapEntry reverse_map[] = {
+  PolyModelDeviceMapEntry reverse_map[] = {
       {.module = "layers.0", .device = "INTERP"},
       {.module = "layers.1", .device = "CUDA"},
   };
-  ASSERT_INT_EQ(poly_instance_set_device_map(inst, reverse_map, 2), 0);
+  ASSERT_INT_EQ(poly_model_set_device_map(inst, reverse_map, 2), 0);
   ASSERT_INT_EQ(
-      poly_buffer_write(ctx, poly_instance_get_buffer(inst, "x"), x_data, sizeof(x_data)), 0
+      poly_buffer_write(ctx, poly_model_get_buffer(inst, "x"), x_data, sizeof(x_data)), 0
   );
   vars = NULL;
   n_vars = 0;
-  schedule = poly_linear_effect_sink(ctx, poly_instance_get_sink(inst, "forward"), &vars, &n_vars);
+  schedule = poly_linear_effect_sink(ctx, poly_model_get_sink(inst, "forward"), &vars, &n_vars);
   ASSERT_NOT_NULL(schedule);
   ASSERT_INT_EQ(schedule->n_src, 3);
   compiled = poly_compile_linear(ctx, schedule, -1);
@@ -2143,14 +2139,12 @@ TEST_BACKEND(cuda, compiled_schedule_preserves_mixed_call_devices) {
   ASSERT_INT_EQ(poly_device_by_name(third_info->target), POLY_DEVICE_CUDA);
   ASSERT_INT_EQ(poly_run_linear(ctx, compiled, vars, n_vars, NULL, 0, true, true, false), 0);
   memset(got, 0, sizeof(got));
-  ASSERT_INT_EQ(
-      poly_buffer_read(ctx, poly_instance_get_buffer(inst, "output"), got, sizeof(got)), 0
-  );
+  ASSERT_INT_EQ(poly_buffer_read(ctx, poly_model_get_buffer(inst, "output"), got, sizeof(got)), 0);
   ASSERT_FLOAT_EQ(got[0], 8.0f, 1e-6f);
   ASSERT_FLOAT_EQ(got[1], 18.0f, 1e-6f);
 
   free(vars);
-  poly_instance_free(inst);
+  poly_model_free(inst);
   poly_ctx_destroy(ctx);
   PASS();
 }

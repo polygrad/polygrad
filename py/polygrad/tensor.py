@@ -3410,7 +3410,7 @@ class Tensor:
     @staticmethod
     def empty(*shape, **kwargs):
         if 'name' in kwargs:
-            raise TypeError('Tensor.empty does not accept name; pass names to Instance.from_tensors')
+            raise TypeError('Tensor.empty does not accept name; pass names to Model.from_tensors')
         ctx, dev = _creation_meta(kwargs)
         dtype_name = _dtype_name(kwargs.get('dtype', dtypes.default_float), default='float32')
         if len(shape) == 1 and isinstance(shape[0], (tuple, list)):

@@ -4,7 +4,7 @@ import base64
 import zlib
 import numpy as np
 import pytest
-from polygrad import Context, GlobalCounters, Instance, Tensor, _ffi
+from polygrad import Context, GlobalCounters, Model, Tensor, _ffi
 from polygrad.helpers import TRAINING
 from polygrad.nn import (
     Linear,
@@ -470,19 +470,19 @@ class TestAssign:
         assert approx(a.numpy(), [2.0, 4.0, 6.0, 8.0])
 
 
-# ── Instance export ──
+# ── Model export ──
 
 
-class TestInstanceExport:
+class TestModelExport:
     def test_scalar_rank8_and_shared_multi_output_round_trip(self):
         scalar_x = Tensor.empty(())
         scalar_w = Tensor(3.0)
-        scalar = Instance.from_tensors(
+        scalar = Model.from_tensors(
             inputs={"x": scalar_x},
             outputs={"output": scalar_x * scalar_w},
             params={"w": scalar_w},
         )
-        scalar_restored = Instance.from_ir(scalar.export_ir(), scalar.export_weights())
+        scalar_restored = Model.from_ir(scalar.export_ir(), scalar.export_weights())
         try:
             result = scalar_restored.forward(x=np.array(2.0, dtype=np.float32))["output"]
             assert result.shape == ()
@@ -495,12 +495,12 @@ class TestInstanceExport:
         rank8_x = Tensor.empty(rank8_shape)
         rank8_w = Tensor.ones(*rank8_shape)
         shared = rank8_x + rank8_w
-        rank8 = Instance.from_tensors(
+        rank8 = Model.from_tensors(
             inputs={"x": rank8_x},
             outputs={"plus": shared + 1.0, "minus": shared - 1.0},
             params={"w": rank8_w},
         )
-        rank8_restored = Instance.from_ir(rank8.export_ir(), rank8.export_weights())
+        rank8_restored = Model.from_ir(rank8.export_ir(), rank8.export_weights())
         try:
             result = rank8_restored.forward(
                 x=np.full(rank8_shape, 2.0, dtype=np.float32)
@@ -516,21 +516,21 @@ class TestInstanceExport:
     def test_duplicate_abi_storage_alias_fails_closed_like_tinyjit(self):
         x = Tensor.empty(2)
         with pytest.raises(RuntimeError):
-            Instance.from_tensors(
+            Model.from_tensors(
                 inputs={"a": x, "b": x}, outputs={"output": x + x}
             )
 
     def test_dynamic_input_alias_with_persistent_state_fails_closed(self):
         x = Tensor.empty(2)
         with pytest.raises(RuntimeError):
-            Instance.from_tensors(
+            Model.from_tensors(
                 inputs={"x": x}, outputs={"output": x + x}, params={"w": x}
             )
 
     def test_output_alias_of_dynamic_input_round_trips(self):
         x = Tensor.empty(2)
-        source = Instance.from_tensors(inputs={"x": x}, outputs={"output": x})
-        restored = Instance.from_ir(source.export_ir())
+        source = Model.from_tensors(inputs={"x": x}, outputs={"output": x})
+        restored = Model.from_ir(source.export_ir())
         try:
             value = np.array([3.0, 4.0], dtype=np.float32)
             np.testing.assert_array_equal(source.forward(x=value)["output"], value)
@@ -544,7 +544,7 @@ class TestInstanceExport:
         view = base[1:3]
         x = Tensor.empty(2)
         with pytest.raises(RuntimeError, match="unsupported named view state"):
-            Instance.from_tensors(
+            Model.from_tensors(
                 inputs={"x": x}, outputs={"output": x + view},
                 params={"base": base, "view": view},
             )
@@ -554,7 +554,7 @@ class TestInstanceExport:
         w = Tensor([1.0])
         output = w.assign(w + x)
         with pytest.raises(RuntimeError, match="depends on an input or target"):
-            Instance.from_tensors(
+            Model.from_tensors(
                 inputs={"x": x}, outputs={"output": output}, params={"w": w}
             )
 
@@ -562,17 +562,17 @@ class TestInstanceExport:
         Tensor.manual_seed(123)
         x = Tensor.empty(2)
         with pytest.raises(RuntimeError, match="unbound storage"):
-            Instance.from_tensors(
+            Model.from_tensors(
                 inputs={"x": x}, outputs={"output": x + Tensor.rand(2)}
             )
 
     def test_assigned_realized_input_exports_as_current_resource(self):
         x = Tensor.empty(2)
         x.assign(Tensor([4.0, 5.0])).realize()
-        source = Instance.from_tensors(
+        source = Model.from_tensors(
             inputs={"x": x}, outputs={"output": x * 2.0 + 1.0}
         )
-        restored = Instance.from_ir(source.export_ir())
+        restored = Model.from_ir(source.export_ir())
         try:
             value = np.array([6.0, 7.0], dtype=np.float32)
             expected = np.array([13.0, 15.0], dtype=np.float32)
@@ -585,7 +585,7 @@ class TestInstanceExport:
     def test_float16_state_preserves_exact_dtype_and_storage_bits(self):
         w = Tensor([1.5, -2.0], dtype="float16")
         x = Tensor.empty((2,), dtype="float16")
-        source = Instance.from_tensors(
+        source = Model.from_tensors(
             inputs={"x": x}, outputs={"output": x + w}, params={"w": w}
         )
         try:
@@ -594,7 +594,7 @@ class TestInstanceExport:
             np.testing.assert_array_equal(raw.view(np.uint16), [0x3E00, 0xC000])
             assert source.param_dtype(0) == "float16"
 
-            restored = Instance.from_ir(source.export_ir(), source.export_weights())
+            restored = Model.from_ir(source.export_ir(), source.export_weights())
             try:
                 restored_raw = restored.param_data(0)
                 assert restored_raw.dtype == np.float16
@@ -610,7 +610,7 @@ class TestInstanceExport:
     def test_typed_integer_input_preserves_bytes_and_rejects_float_binding(self):
         x = Tensor.empty((3,), dtype="int32")
         out = x.cast("float32")
-        inst = Instance.from_tensors(inputs={"typed_x": x}, outputs={"typed_out": out})
+        inst = Model.from_tensors(inputs={"typed_x": x}, outputs={"typed_out": out})
 
         result = inst.forward(typed_x=np.array([0, 1, 2], dtype=np.int32))
         np.testing.assert_array_equal(
@@ -635,7 +635,7 @@ class TestInstanceExport:
             assert y.uop_physical is not None
             assert _ffi._lib.poly_uop_reachable(x._ctx, y.uop_physical.raw, w.uop.raw)
 
-        inst = Instance.from_tensors(
+        inst = Model.from_tensors(
             inputs={"py_export_x": x},
             outputs={"py_export_output": y},
             params={"py_export_w": w},
@@ -655,7 +655,7 @@ class TestInstanceExport:
         y = x.dot(w)
         before = _ffi._lib.poly_ctx_named_count(x._ctx)
 
-        inst = Instance.from_tensors(
+        inst = Model.from_tensors(
             inputs={"local_x": x},
             outputs={"local_y": y},
             params={"local_w": w},
@@ -674,7 +674,7 @@ class TestInstanceExport:
         y = x.dot(w)
         before = _ffi._lib.poly_ctx_named_count(x._ctx)
 
-        inst = Instance.from_bindings(
+        inst = Model.from_bindings(
             bindings=[
                 {"name": "bind_x", "role": "input", "tensor": x},
                 {"name": "bind_w", "role": "state", "tensor": w},
@@ -695,7 +695,7 @@ class TestInstanceExport:
         x = Tensor.empty((1, 1))
         y = x.dot(w)
 
-        inst = Instance.from_bindings(
+        inst = Model.from_bindings(
             bindings=[
                 {"name": "x", "role": "input", "tensor": x},
                 {"name": "w", "role": "aux", "tensor": w},
@@ -713,7 +713,7 @@ class TestInstanceExport:
         x = Tensor.empty((1, 1))
         y = x.dot(w)
 
-        inst = Instance.from_bindings(
+        inst = Model.from_bindings(
             bindings=[
                 {"name": "x", "role": "input", "tensor": x},
                 {"name": "w", "role": "state", "tensor": w},
@@ -733,7 +733,7 @@ class TestInstanceExport:
         )
         x = Tensor.empty((2,))
         y = x * w
-        source = Instance.from_bindings(
+        source = Model.from_bindings(
             bindings=[
                 {"name": "x", "role": "input", "tensor": x},
                 {"name": "w", "role": "state", "tensor": w},
@@ -742,7 +742,7 @@ class TestInstanceExport:
             entrypoints=[{"name": "forward", "inputs": ["x"], "outputs": ["output"]}],
         )
         try:
-            fresh = Instance.from_ir(source.export_ir())
+            fresh = Model.from_ir(source.export_ir())
             try:
                 np.testing.assert_array_equal(fresh.param_data(0), [4.0, 4.0])
                 out = fresh.forward(x=np.array([2.0, 3.0], dtype=np.float32))
@@ -756,7 +756,7 @@ class TestInstanceExport:
         Tensor.manual_seed(7)
         w = Tensor.rand(2)
         x = Tensor.empty((2,))
-        source = Instance.from_bindings(
+        source = Model.from_bindings(
             bindings=[
                 {"name": "x", "role": "input", "tensor": x},
                 {"name": "w", "role": "state", "tensor": w},
@@ -766,7 +766,7 @@ class TestInstanceExport:
         )
         try:
             with pytest.raises(RuntimeError, match="NULL pointer"):
-                Instance.from_ir(source.export_ir())
+                Model.from_ir(source.export_ir())
         finally:
             source.free()
 
@@ -781,7 +781,7 @@ class TestInstanceExport:
         net = LinearNet()
         x = Tensor.empty((1, 2))
         out_tensor = net(x)
-        inst = Instance.from_tensors(
+        inst = Model.from_tensors(
             inputs={"py_trace_x": x},
             outputs={"output": out_tensor},
             params={"weight": net.weight},
@@ -797,7 +797,7 @@ class TestInstanceExport:
         hidden = x + w0
         output = hidden * w1
 
-        inst = Instance.from_tensors(
+        inst = Model.from_tensors(
             inputs={"x": x},
             outputs={"output": output},
             params={"layers.0.weight": w0, "layers.1.weight": w1},
@@ -826,7 +826,7 @@ class TestInstanceExport:
         )
         assert inst.export_ir() == ir_before
         assert inst.export_weights() == weights_before
-        restored = Instance.from_ir(inst.export_ir(), inst.export_weights())
+        restored = Model.from_ir(inst.export_ir(), inst.export_weights())
         try:
             restored_result = restored.forward(
                 x=np.array([1.0, 2.0], dtype=np.float32)
@@ -842,7 +842,7 @@ class TestInstanceExport:
         x = Tensor.empty((1, 2))
         logits = x.dot(w)
 
-        inst = Instance(
+        inst = Model(
             inputs={"x": x},
             state={"layers.0.weight": w},
             outputs={"logits": logits},
@@ -855,7 +855,7 @@ class TestInstanceExport:
         out = inst.forward(x=np.array([[10.0, 20.0]], dtype=np.float32))
         assert np.allclose(out["logits"], [80.0], atol=1e-5)
 
-        inst2 = Instance.from_ir(inst.export_ir(), inst.export_weights())
+        inst2 = Model.from_ir(inst.export_ir(), inst.export_weights())
         assert inst2.param_count == 1
         assert inst2.param_name(0) == "layers.0.weight"
         out2 = inst2.forward(x=np.array([[10.0, 20.0]], dtype=np.float32))
@@ -877,7 +877,7 @@ class TestInstanceExport:
         y = Tensor.empty((1, 1))
         pred = x.dot(w)
         loss = (pred - y).square().mean()
-        inst = Instance.from_tensors(
+        inst = Model.from_tensors(
             inputs={"fit_x": x},
             targets={"fit_y": y},
             outputs={"fit_out": pred},

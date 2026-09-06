@@ -21,21 +21,21 @@ int main(void) {
   cfg.batch_size = 1;
   cfg.seed = 42;
 
-  PolyInstance *inst = poly_mlp(&cfg, POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_mlp(&cfg, POLY_DEVICE_AUTO);
   if (!inst) return 1;
 
-  poly_instance_set_optimizer(inst, POLY_OPTIM_SGD, 0.03f, 0.0f, 0.0f, 0.0f, 0.0f);
+  poly_model_set_optimizer(inst, POLY_OPTIM_SGD, 0.03f, 0.0f, 0.0f, 0.0f, 0.0f);
   float x[] = {1.0f, 2.0f};
   float y[] = {4.0f};
   PolyIOBinding io[] = {POLY_IO_BINDING_ARRAY("x", x, POLY_FLOAT32), POLY_IO_BINDING_ARRAY("y", y, POLY_FLOAT32)};
 
   float first = 0.0f, last = 0.0f;
   for (int step = 0; step < 12; step++) {
-    poly_instance_train_step(inst, io, 2, &last);
+    poly_model_train_step(inst, NULL, io, 2, &last);
     if (step == 0) first = last;
   }
   printf("mlp loss %.6f -> %.6f\n", first, last);
 
-  poly_instance_free(inst);
+  poly_model_free(inst);
   return 0;
 }

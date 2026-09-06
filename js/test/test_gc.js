@@ -61,12 +61,12 @@ async function main() {
 
     const x = pg.Tensor.empty([2], { dtype: 'float32' })
     const uop = x.uop
-    const inst = await pg.Instance.fromTensors({
+    const inst = await pg.Model.fromTensors({
       inputs: { x }, outputs: { output: x.add(1) }
     })
     await pg.dispose()
     assert.strictEqual(inst._handle, null,
-      'Runtime disposal left a borrowed Instance handle alive')
+      'Runtime disposal left a borrowed Model handle alive')
     assert.throws(() => uop.op, /disposed/,
       'UOp read through a destroyed runtime arena')
     assert.throws(() => pg.Tensor.empty([1]), /disposed/,

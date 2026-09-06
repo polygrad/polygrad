@@ -1,5 +1,5 @@
 /*
- * model_nam.h -- NAM (Neural Additive Model) builder for PolyInstance
+ * model_nam.h -- NAM (Neural Additive Model) builder for PolyModel
  *
  * NAM: g(E[y]) = beta + f1(x1) + f2(x2) + ... + fK(xK)
  * Each fk is a small MLP on scalar feature xk.
@@ -13,7 +13,7 @@
 #ifndef POLY_MODEL_NAM_H
 #define POLY_MODEL_NAM_H
 
-#include "../instance.h"
+#include "../model.h"
 
 /*
  * Create a NAM instance from a JSON spec.
@@ -40,6 +40,6 @@
  *
  * Returns NULL on error.
  */
-PolyInstance *poly_nam_instance(const char *spec_json, int spec_len, PolyDevice device);
+PolyModel *poly_nam_from_json(const char *spec_json, int spec_len, PolyDevice device);
 
 #endif /* POLY_MODEL_NAM_H */

@@ -467,7 +467,25 @@ def test_random_crop_indices_remain_consistent_after_readback():
 
 
 def test_python_loader_checks_current_abi_before_use():
-    assert _ffi.get_lib().poly_abi_version() == _ffi.POLYGRAD_ABI_VERSION == 67
+    assert _ffi.get_lib().poly_abi_version() == _ffi.POLYGRAD_ABI_VERSION == 68
+
+
+def test_python_source_manifest_contains_quoted_dependencies():
+    import runpy
+    root = Path(__file__).resolve().parents[2]
+    manifest = runpy.run_path(str(root / 'py/scripts/sync-csrc.py'))
+    shipped = {(root / rel).resolve() for rel in manifest['SOURCES'] + manifest['HEADERS']}
+    missing = []
+    # Match setup.py's include paths as well as each source's local directory.
+    # Mirror equality alone cannot detect a dependency omitted from the manifest.
+    for source in sorted(shipped):
+        for include in re.findall(r'^\s*#\s*include\s*"([^"]+)"', source.read_text(), re.M):
+            candidates = [source.parent / include, root / 'src' / include,
+                          root / 'vendor/cjson' / include]
+            resolved = next((p.resolve() for p in candidates if p.is_file()), None)
+            if resolved not in shipped:
+                missing.append(f'{source.relative_to(root)}: {include}')
+    assert not missing, '\n'.join(missing)
 
 
 @pytest.mark.parametrize('relative', [

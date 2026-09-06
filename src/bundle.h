@@ -1,7 +1,7 @@
 /*
  * poly_bundle.h -- Portable model bundle format (poly.bundle@1)
  *
- * A single-file container for a complete PolyInstance:
+ * A single-file container for a complete PolyModel:
  *   - IR section: current tensor-level UOp graph
  *   - WEIGHTS section: parameter data (safetensors format)
  *   - METADATA section: JSON (model family, entrypoint info, etc.)
@@ -81,21 +81,21 @@ typedef struct {
  * Returns 0 on success, -1 on error (bad magic, truncated, etc). */
 int poly_bundle_decode(const uint8_t *data, int len, PolyBundleSections *out);
 
-/* Convenience: Instance round-trip */
+/* Convenience: Model round-trip */
 
 /* Forward declaration */
-typedef struct PolyInstance PolyInstance;
+typedef struct PolyModel PolyModel;
 
-/* Save a PolyInstance as a bundle.
+/* Save a PolyModel as a bundle.
  * Exports IR + weights + metadata into a single byte array.
  * Caller frees returned bytes. Returns NULL on error. */
-uint8_t *poly_instance_save_bundle(PolyInstance *inst, int *out_len);
-uint8_t *poly_instance_save_bundle_ex(PolyInstance *inst, int *out_len, uint32_t weight_flags);
+uint8_t *poly_model_save_bundle(PolyModel *inst, int *out_len);
+uint8_t *poly_model_save_bundle_ex(PolyModel *inst, int *out_len, uint32_t weight_flags);
 
-/* Load a PolyInstance from a bundle.
+/* Load a PolyModel from a bundle.
  * Decodes bundle, imports IR, imports weights.
  * Returns NULL on error. */
-PolyInstance *poly_instance_from_bundle(const uint8_t *data, int len);
+PolyModel *poly_model_from_bundle(const uint8_t *data, int len);
 
 #ifdef __cplusplus
 }

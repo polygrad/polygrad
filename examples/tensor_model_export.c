@@ -1,12 +1,12 @@
 /*
- * Manual tensor graph -> portable Instance.
+ * Manual tensor graph -> portable Model.
  *
  * Build:
- *   cc -Isrc examples/tensor_instance_export.c -Lbuild -lpolygrad -lm -ldl -o temp/tensor_instance_export
- *   LD_LIBRARY_PATH=build ./temp/tensor_instance_export
+ *   cc -Isrc examples/tensor_model_export.c -Lbuild -lpolygrad -lm -ldl -o temp/tensor_model_export
+ *   LD_LIBRARY_PATH=build ./temp/tensor_model_export
  */
 
-#include "instance.h"
+#include "model.h"
 #include "polygrad.h"
 #include <stdio.h>
 
@@ -29,19 +29,19 @@ int main(void) {
   PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, prod));
   const char *names[] = {"forward"};
   PolyUOp *sinks[] = {sink};
-  PolyInstance *inst = poly_instance_from_sinks(ctx, names, sinks, 1);
+  PolyModel *inst = poly_model_from_sinks(ctx, names, sinks, 1);
 
   float x_data[] = {10.0f, 10.0f, 10.0f, 10.0f};
   PolyIOBinding io[] = {POLY_IO_BINDING_ARRAY("x", x_data, POLY_FLOAT32)};
-  if (poly_instance_forward(inst, io, 1) != 0) return 1;
+  if (poly_model_forward(inst, io, 1) != 0) return 1;
 
   int64_t numel = 0;
-  float *y = poly_instance_buf_data_named(inst, "output", &numel);
+  float *y = poly_model_buf_data_named(inst, "output", &numel);
   printf("output:");
   for (int64_t i = 0; i < numel; i++) printf(" %.1f", y[i]);
   printf("\n");
 
-  poly_instance_free(inst);
+  poly_model_free(inst);
   poly_ctx_destroy(ctx);
   return 0;
 }

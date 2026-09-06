@@ -1165,7 +1165,7 @@ typedef struct PolyVarBinding {
 
 /* Tinygrad-style raw Tensor JIT capture/replay.
  *
- * This is deliberately a tensor/schedule-layer object, not an Instance
+ * This is deliberately a tensor/schedule-layer object, not an Model
  * entrypoint plan. Capture records the LINEAR schedules produced by normal
  * poly_realize_tensors calls. The retained physical LINEAR substitutes only
  * JIT input BUFFERs with shaped PARAMs and replays the same compiled plan with
@@ -1237,7 +1237,7 @@ struct PolyUOp {
 
 /* Every PolyUOp pointer returned by this C API is borrowed until the next
  * collection safe point. Call poly_uop_retain() before storing it beyond its
- * Tensor/Instance/JIT owner, then pair it with poly_uop_release(). Collection
+ * Tensor/Model/JIT owner, then pair it with poly_uop_release(). Collection
  * may reclaim both residency and an unretained UOp record. */
 
 /* Context owns the arena, CSE, to_program/runtime caches, and all UOps. */
@@ -1580,8 +1580,8 @@ PolyArena *poly_ctx_arena(PolyCtx *ctx);
 /* Named buffer registry.
  *
  * Compatibility API for old ctx-global instance construction. New C model
- * builders should use staged PolyInstance declarations from instance.h:
- * poly_instance_input/param/state/output/entrypoint/build. */
+ * builders should use staged PolyModel declarations from model.h:
+ * poly_model_input/param/state/output/entrypoint/build. */
 
 typedef enum {
   POLY_ROLE_PARAM = 0,
@@ -1611,7 +1611,7 @@ PolyUOp *poly_param(
     int ndim,
     const char *fmt,
     ...
-) POLY_DEPRECATED("use staged poly_instance_param/poly_instance_state")
+) POLY_DEPRECATED("use staged poly_model_param/poly_model_state")
     __attribute__((format(printf, 5, 6)));
 PolyUOp *poly_input(
     PolyCtx *ctx,
@@ -1620,7 +1620,7 @@ PolyUOp *poly_input(
     int ndim,
     const char *fmt,
     ...
-) POLY_DEPRECATED("use staged poly_instance_input") __attribute__((format(printf, 5, 6)));
+) POLY_DEPRECATED("use staged poly_model_input") __attribute__((format(printf, 5, 6)));
 PolyUOp *poly_output(
     PolyCtx *ctx,
     PolyDType dt,
@@ -1628,7 +1628,7 @@ PolyUOp *poly_output(
     int ndim,
     const char *fmt,
     ...
-) POLY_DEPRECATED("use staged poly_instance_output") __attribute__((format(printf, 5, 6)));
+) POLY_DEPRECATED("use staged poly_model_output") __attribute__((format(printf, 5, 6)));
 PolyUOp *poly_target(
     PolyCtx *ctx,
     PolyDType dt,
@@ -1636,9 +1636,9 @@ PolyUOp *poly_target(
     int ndim,
     const char *fmt,
     ...
-) POLY_DEPRECATED("use staged poly_instance_target") __attribute__((format(printf, 5, 6)));
+) POLY_DEPRECATED("use staged poly_model_target") __attribute__((format(printf, 5, 6)));
 PolyUOp *poly_aux(PolyCtx *ctx, PolyDType dt, const int64_t *shape, int ndim, const char *fmt, ...)
-    POLY_DEPRECATED("use staged poly_instance_aux") __attribute__((format(printf, 5, 6)));
+    POLY_DEPRECATED("use staged poly_model_aux") __attribute__((format(printf, 5, 6)));
 
 /* Non-variadic named-buffer registration for FFI/frontends. These mirror
  * poly_param/poly_input/poly_output/poly_target/poly_aux, but accept an exact
@@ -1650,7 +1650,7 @@ PolyUOp *poly_register_buffer_by_id(
     const int64_t *shape,
     int ndim,
     const char *name
-) POLY_DEPRECATED("use poly_instance_from_binding_arrays");
+) POLY_DEPRECATED("use poly_model_from_binding_arrays");
 
 /* Register an existing BUFFER-like UOp as a named ABI buffer. This is the
  * export path for tinygrad-style lazy model objects whose parameters already
@@ -1663,7 +1663,7 @@ PolyUOp *poly_register_existing_buffer(
     int ndim,
     const char *name,
     bool trainable
-) POLY_DEPRECATED("use poly_instance_from_bindings/poly_instance_from_binding_arrays");
+) POLY_DEPRECATED("use poly_model_from_bindings/poly_model_from_binding_arrays");
 
 /* Create an alias: alias_name resolves to the same buffer as existing_name.
  * Returns 0 on success, -1 on error (existing_name not found, or alias_name
@@ -1683,9 +1683,9 @@ const PolyRegEntry *poly_ctx_get_entry(PolyCtx *ctx, const char *name)
 /* Mark a named PARAM trainable/frozen. Non-PARAM buffers ignore optimizer
  * trainability but still carry the bit for import/export round-trips. */
 int poly_ctx_set_trainable(PolyCtx *ctx, const char *name, bool trainable)
-    POLY_DEPRECATED("use PolyInstance trainability metadata");
+    POLY_DEPRECATED("use PolyModel trainability metadata");
 bool poly_ctx_is_trainable(PolyCtx *ctx, const char *name)
-    POLY_DEPRECATED("read trainability from the built PolyInstance");
+    POLY_DEPRECATED("read trainability from the built PolyModel");
 
 /* Enumeration of all named entries (including aliases). */
 int poly_ctx_named_count(PolyCtx *ctx) POLY_DEPRECATED("ctx-global registry is compatibility-only");
@@ -1694,7 +1694,7 @@ const PolyRegEntry *poly_ctx_named_entry(PolyCtx *ctx, int i)
 
 /* Register a named entrypoint (SINK UOp). Returns 0 on success, -1 on error. */
 int poly_register_entrypoint(PolyCtx *ctx, const char *name, PolyUOp *sink)
-    POLY_DEPRECATED("use staged poly_instance_entrypoint");
+    POLY_DEPRECATED("use staged poly_model_entrypoint");
 
 /* Entrypoint enumeration. */
 int poly_ctx_entrypoint_count(PolyCtx *ctx)

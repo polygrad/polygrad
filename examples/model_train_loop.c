@@ -1,12 +1,12 @@
 /*
- * Manual graph + custom training loop through PolyInstance.
+ * Manual graph + custom training loop through PolyModel.
  *
  * Build:
- *   cc -Isrc examples/instance_train_loop.c -Lbuild -lpolygrad -lm -ldl -o temp/instance_train_loop
- *   LD_LIBRARY_PATH=build ./temp/instance_train_loop
+ *   cc -Isrc examples/model_train_loop.c -Lbuild -lpolygrad -lm -ldl -o temp/model_train_loop
+ *   LD_LIBRARY_PATH=build ./temp/model_train_loop
  */
 
-#include "instance.h"
+#include "model.h"
 #include "polygrad.h"
 #include "tensor.h"
 #include <stdio.h>
@@ -33,20 +33,20 @@ int main(void) {
   PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, loss_buf, loss));
   const char *names[] = {"loss"};
   PolyUOp *sinks[] = {sink};
-  PolyInstance *inst = poly_instance_from_sinks(ctx, names, sinks, 1);
+  PolyModel *inst = poly_model_from_sinks(ctx, names, sinks, 1);
 
-  poly_instance_set_optimizer(inst, POLY_OPTIM_SGD, 0.1f, 0.0f, 0.0f, 0.0f, 0.0f);
+  poly_model_set_optimizer(inst, POLY_OPTIM_SGD, 0.1f, 0.0f, 0.0f, 0.0f, 0.0f);
   float x_data[] = {1.0f};
   float y_data[] = {3.0f};
   PolyIOBinding io[] = {POLY_IO_BINDING_ARRAY("x", x_data, POLY_FLOAT32), POLY_IO_BINDING_ARRAY("y", y_data, POLY_FLOAT32)};
   float first = 0.0f, last = 0.0f;
   for (int step = 0; step < 8; step++) {
-    poly_instance_train_step(inst, io, 2, &last);
+    poly_model_train_step(inst, NULL, io, 2, &last);
     if (step == 0) first = last;
   }
   printf("loss %.6f -> %.6f\n", first, last);
 
-  poly_instance_free(inst);
+  poly_model_free(inst);
   poly_ctx_destroy(ctx);
   return 0;
 }

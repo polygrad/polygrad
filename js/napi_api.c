@@ -16,13 +16,14 @@
 #include "tensor.h"
 #include "nn.h"
 #include "optim.h"
-#include "instance.h"
+#include "model.h"
 #include "tokenizer.h"
 #include "loaders/hf_decode.h"
 #include "loaders/gguf_decode.h"
 #include "loaders/import_error.h"
 #include "bundle.h"
 #include "models/mlp.h"
+#include "models/compose.h"
 #include "models/tabm.h"
 #include "models/nam.h"
 #include "engine/schedule.h"
@@ -288,31 +289,28 @@ static int instance_napi_storage_type(
   return 0;
 }
 
-static napi_value make_instance_storage_array_copy(
-    napi_env env,
-    const void *src,
-    size_t len,
-    int dtype_id
-) {
-  if (!src) {
+static napi_value read_model_storage_array(napi_env env, PolyModel *model, int index) {
+  if (index < 0 || index >= poly_model_buf_count(model)) {
     napi_value result;
     napi_get_null(env, &result);
     return result;
   }
   napi_typedarray_type type;
   size_t itemsize = 0;
+  int dtype_id = poly_model_buf_dtype_id(model, index);
   if (!instance_napi_storage_type(dtype_id, &type, &itemsize)) {
-    napi_throw_error(env, NULL, "polygrad: unsupported Instance storage dtype");
+    napi_throw_error(env, NULL, "polygrad: unsupported Model storage dtype");
     return NULL;
   }
-  if (len > SIZE_MAX / itemsize) {
-    napi_throw_range_error(env, NULL, "polygrad: Instance storage size overflow");
-    return NULL;
-  }
+  size_t nbytes = poly_model_buf_nbytes(model, index);
+  size_t len = nbytes / itemsize;
   void *dst = NULL;
   napi_value arraybuf, typed;
   NAPI_CALL(env, napi_create_arraybuffer(env, len * itemsize, &dst, &arraybuf));
-  if (len > 0) memcpy(dst, src, len * itemsize);
+  if (poly_model_read_buf(model, index, dst, nbytes) != 0) {
+    napi_throw_error(env, NULL, "polygrad: Model buffer read failed");
+    return NULL;
+  }
   NAPI_CALL(env, napi_create_typedarray(env, type, len, arraybuf, 0, &typed));
   return typed;
 }
@@ -443,7 +441,7 @@ static int read_io_bindings(
         free(names[j]);
       free(names);
       free(bindings);
-      napi_throw_error(env, NULL, "polygrad: unsupported Instance binding TypedArray");
+      napi_throw_error(env, NULL, "polygrad: unsupported Model binding TypedArray");
       return 0;
     }
 
@@ -3716,9 +3714,9 @@ static napi_value napi_poly_cpu_cache_flush(napi_env env, napi_callback_info inf
   return undef;
 }
 
-/* ── PolyInstance / model runtime ────────────────────────────────────── */
+/* ── PolyModel / model runtime ────────────────────────────────────── */
 
-static napi_value napi_poly_instance_from_ir(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_model_from_ir(napi_env env, napi_callback_info info) {
   napi_value argv[2];
   size_t argc = 2;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
@@ -3753,8 +3751,8 @@ static napi_value napi_poly_instance_from_ir(napi_env env, napi_callback_info in
     }
   }
 
-  PolyInstance *inst =
-      poly_instance_from_ir((const uint8_t *)ir_data, (int)ir_len, weights_data, (int)weights_len);
+  PolyModel *inst =
+      poly_model_from_ir((const uint8_t *)ir_data, (int)ir_len, weights_data, (int)weights_len);
 
   if (!inst) {
     napi_value result;
@@ -3764,7 +3762,7 @@ static napi_value napi_poly_instance_from_ir(napi_env env, napi_callback_info in
   return make_external(env, inst);
 }
 
-static napi_value napi_poly_instance_from_program(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_model_from_program(napi_env env, napi_callback_info info) {
   napi_value argv[2];
   size_t argc = 2;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
@@ -3800,7 +3798,7 @@ static napi_value napi_poly_instance_from_program(napi_env env, napi_callback_in
       weights_data = (const uint8_t *)wa_data;
     }
   }
-  PolyInstance *inst = poly_instance_from_program(
+  PolyModel *inst = poly_model_from_program(
       (const uint8_t *)program_data, (int)program_len, weights_data, (int)weights_len
   );
   if (!inst) {
@@ -3951,12 +3949,12 @@ static int read_tensor_array_alloc(
   return 1;
 }
 
-static napi_value napi_poly_instance_from_binding_arrays(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_model_from_binding_arrays(napi_env env, napi_callback_info info) {
   napi_value argv[12];
   size_t argc = 12;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   if (argc < 12) {
-    napi_throw_error(env, NULL, "polygrad: poly_instance_from_binding_arrays expects 12 args");
+    napi_throw_error(env, NULL, "polygrad: poly_model_from_binding_arrays expects 12 args");
     return NULL;
   }
 
@@ -3999,8 +3997,8 @@ static napi_value napi_poly_instance_from_binding_arrays(napi_env env, napi_call
     goto fail;
   }
 
-  PolyInstanceError err = {0};
-  PolyInstance *inst = poly_instance_from_binding_arrays(
+  PolyModelError err = {0};
+  PolyModel *inst = poly_model_from_binding_arrays(
       ctx, (const char **)binding_names, binding_roles, binding_tensors, binding_flags,
       (int)n_binding_names, (const char **)entry_names, (const char **)entry_inputs,
       entry_input_counts, (const char **)entry_outputs, entry_output_counts,
@@ -4040,7 +4038,7 @@ fail:
   return NULL;
 }
 
-static napi_value napi_poly_instance_from_sinks(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_model_from_sinks(napi_env env, napi_callback_info info) {
   napi_value argv[3];
   size_t argc = 3;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
@@ -4074,7 +4072,7 @@ static napi_value napi_poly_instance_from_sinks(napi_env env, napi_callback_info
     }
   }
 
-  PolyInstance *inst = poly_instance_from_sinks(ctx, names, sinks, (int)n);
+  PolyModel *inst = poly_model_from_sinks(ctx, names, sinks, (int)n);
   for (uint32_t i = 0; i < n; i++)
     free((void *)names[i]);
   free(names);
@@ -4082,38 +4080,38 @@ static napi_value napi_poly_instance_from_sinks(napi_env env, napi_callback_info
   return make_external(env, inst);
 }
 
-static napi_value napi_poly_instance_free(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_model_free(napi_env env, napi_callback_info info) {
   napi_value argv[1];
   size_t argc = 1;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyInstance *inst = get_external(env, argv[0]);
-  poly_instance_free(inst);
+  PolyModel *inst = get_external(env, argv[0]);
+  poly_model_free(inst);
   napi_value undef;
   napi_get_undefined(env, &undef);
   return undef;
 }
 
-static napi_value napi_poly_instance_set_device(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_model_set_device(napi_env env, napi_callback_info info) {
   napi_value argv[2];
   size_t argc = 2;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyInstance *inst = get_external(env, argv[0]);
+  PolyModel *inst = get_external(env, argv[0]);
   int32_t device;
   napi_get_value_int32(env, argv[1], &device);
   napi_value result;
-  NAPI_CALL(env, napi_create_int32(env, poly_instance_set_device(inst, device), &result));
+  NAPI_CALL(env, napi_create_int32(env, poly_model_set_device(inst, device), &result));
   return result;
 }
 
-static napi_value napi_poly_instance_define_module_arrays(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_model_define_module_arrays(napi_env env, napi_callback_info info) {
   napi_value argv[5];
   size_t argc = 5;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   if (argc < 5) {
-    napi_throw_error(env, NULL, "polygrad: poly_instance_define_module_arrays expects 5 args");
+    napi_throw_error(env, NULL, "polygrad: poly_model_define_module_arrays expects 5 args");
     return NULL;
   }
-  PolyInstance *inst = get_external(env, argv[0]);
+  PolyModel *inst = get_external(env, argv[0]);
   char **names = NULL;
   PolyTensor **inputs = NULL;
   int *input_counts = NULL;
@@ -4141,7 +4139,7 @@ static napi_value napi_poly_instance_define_module_arrays(napi_env env, napi_cal
     goto fail;
   }
 
-  int rc = poly_instance_define_module_arrays(
+  int rc = poly_model_define_module_arrays(
       inst, (const char **)names, inputs, input_counts, outputs, (int)n_names
   );
   free_string_array_items(names, n_names);
@@ -4160,15 +4158,15 @@ fail:
   return NULL;
 }
 
-static napi_value napi_poly_instance_set_device_map_arrays(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_model_set_device_map_arrays(napi_env env, napi_callback_info info) {
   napi_value argv[3];
   size_t argc = 3;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   if (argc < 3) {
-    napi_throw_error(env, NULL, "polygrad: poly_instance_set_device_map_arrays expects 3 args");
+    napi_throw_error(env, NULL, "polygrad: poly_model_set_device_map_arrays expects 3 args");
     return NULL;
   }
-  PolyInstance *inst = get_external(env, argv[0]);
+  PolyModel *inst = get_external(env, argv[0]);
   char **modules = NULL;
   char **devices = NULL;
   uint32_t n_modules = 0, n_devices = 0;
@@ -4179,7 +4177,7 @@ static napi_value napi_poly_instance_set_device_map_arrays(napi_env env, napi_ca
     napi_throw_error(env, NULL, "polygrad: device-map array length mismatch");
     goto fail;
   }
-  int rc = poly_instance_set_device_map_arrays(
+  int rc = poly_model_set_device_map_arrays(
       inst, (const char **)modules, (const char **)devices, (int)n_modules
   );
   free_string_array_items(modules, n_modules);
@@ -4194,6 +4192,38 @@ fail:
   return NULL;
 }
 
+static napi_value napi_poly_compose(napi_env env, napi_callback_info info, bool sequential) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 2) {
+    napi_throw_error(env, NULL, "model factory expects context and JSON");
+    return NULL;
+  }
+  PolyCtx *ctx = get_external(env, argv[0]);
+  size_t len = 0;
+  char *json = read_utf8_arg(env, argv[1], &len);
+  if (!json) return NULL;
+  PolyModelError err = {0};
+  PolyModel *model = len > 1048576 ? NULL : sequential
+      ? poly_sequential_from_json(ctx, json, (int)len, &err)
+      : poly_graph_from_json(ctx, json, (int)len, &err);
+  free(json);
+  if (!model) {
+    napi_throw_error(env, NULL, len > 1048576 ? "definition exceeds 1048576 JSON bytes" : err.message);
+    return NULL;
+  }
+  return make_external(env, model);
+}
+
+static napi_value napi_poly_sequential_from_json(napi_env env, napi_callback_info info) {
+  return napi_poly_compose(env, info, true);
+}
+
+static napi_value napi_poly_graph_from_json(napi_env env, napi_callback_info info) {
+  return napi_poly_compose(env, info, false);
+}
+
 static napi_value napi_poly_mlp_from_json(napi_env env, napi_callback_info info) {
   napi_value argv[2];
   size_t argc = 2;
@@ -4203,7 +4233,7 @@ static napi_value napi_poly_mlp_from_json(napi_env env, napi_callback_info info)
   if (!spec) return NULL;
   int32_t device;
   NAPI_CALL(env, napi_get_value_int32(env, argv[1], &device));
-  PolyInstance *inst = poly_mlp_from_json(spec, (int)spec_len, (PolyDevice)device);
+  PolyModel *inst = poly_mlp_from_json(spec, (int)spec_len, (PolyDevice)device);
   free(spec);
   if (!inst) {
     napi_value result;
@@ -4213,7 +4243,7 @@ static napi_value napi_poly_mlp_from_json(napi_env env, napi_callback_info info)
   return make_external(env, inst);
 }
 
-static napi_value napi_poly_tabm_instance(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_tabm_from_json(napi_env env, napi_callback_info info) {
   napi_value argv[2];
   size_t argc = 2;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
@@ -4222,7 +4252,7 @@ static napi_value napi_poly_tabm_instance(napi_env env, napi_callback_info info)
   if (!spec) return NULL;
   int32_t device;
   NAPI_CALL(env, napi_get_value_int32(env, argv[1], &device));
-  PolyInstance *inst = poly_tabm_instance(spec, (int)spec_len, (PolyDevice)device);
+  PolyModel *inst = poly_tabm_from_json(spec, (int)spec_len, (PolyDevice)device);
   free(spec);
   if (!inst) {
     napi_value result;
@@ -4232,7 +4262,7 @@ static napi_value napi_poly_tabm_instance(napi_env env, napi_callback_info info)
   return make_external(env, inst);
 }
 
-static napi_value napi_poly_nam_instance(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_nam_from_json(napi_env env, napi_callback_info info) {
   napi_value argv[2];
   size_t argc = 2;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
@@ -4241,7 +4271,7 @@ static napi_value napi_poly_nam_instance(napi_env env, napi_callback_info info) 
   if (!spec) return NULL;
   int32_t device;
   NAPI_CALL(env, napi_get_value_int32(env, argv[1], &device));
-  PolyInstance *inst = poly_nam_instance(spec, (int)spec_len, (PolyDevice)device);
+  PolyModel *inst = poly_nam_from_json(spec, (int)spec_len, (PolyDevice)device);
   free(spec);
   if (!inst) {
     napi_value result;
@@ -4251,24 +4281,24 @@ static napi_value napi_poly_nam_instance(napi_env env, napi_callback_info info) 
   return make_external(env, inst);
 }
 
-static napi_value napi_poly_instance_param_count(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_model_param_count(napi_env env, napi_callback_info info) {
   napi_value argv[1];
   size_t argc = 1;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyInstance *inst = get_external(env, argv[0]);
+  PolyModel *inst = get_external(env, argv[0]);
   napi_value result;
-  NAPI_CALL(env, napi_create_int32(env, poly_instance_param_count(inst), &result));
+  NAPI_CALL(env, napi_create_int32(env, poly_model_param_count(inst), &result));
   return result;
 }
 
-static napi_value napi_poly_instance_param_name(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_model_param_name(napi_env env, napi_callback_info info) {
   napi_value argv[2];
   size_t argc = 2;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyInstance *inst = get_external(env, argv[0]);
+  PolyModel *inst = get_external(env, argv[0]);
   int32_t i;
   napi_get_value_int32(env, argv[1], &i);
-  const char *name = poly_instance_param_name(inst, i);
+  const char *name = poly_model_param_name(inst, i);
   napi_value result;
   if (name) {
     NAPI_CALL(env, napi_create_string_utf8(env, name, strlen(name), &result));
@@ -4278,15 +4308,15 @@ static napi_value napi_poly_instance_param_name(napi_env env, napi_callback_info
   return result;
 }
 
-static napi_value napi_poly_instance_param_shape(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_model_param_shape(napi_env env, napi_callback_info info) {
   napi_value argv[2];
   size_t argc = 2;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyInstance *inst = get_external(env, argv[0]);
+  PolyModel *inst = get_external(env, argv[0]);
   int32_t i;
   napi_get_value_int32(env, argv[1], &i);
   int64_t shape[8];
-  int ndim = poly_instance_param_shape(inst, i, shape, 8);
+  int ndim = poly_model_param_shape(inst, i, shape, 8);
   napi_value result;
   NAPI_CALL(env, napi_create_array_with_length(env, (size_t)(ndim > 0 ? ndim : 0), &result));
   for (int j = 0; j < ndim; j++) {
@@ -4297,79 +4327,77 @@ static napi_value napi_poly_instance_param_shape(napi_env env, napi_callback_inf
   return result;
 }
 
-static napi_value napi_poly_instance_param_data(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_model_param_data(napi_env env, napi_callback_info info) {
   napi_value argv[2];
   size_t argc = 2;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyInstance *inst = get_external(env, argv[0]);
+  PolyModel *inst = get_external(env, argv[0]);
   int32_t i;
   napi_get_value_int32(env, argv[1], &i);
-  int64_t numel = 0;
-  void *data = poly_instance_param_data_raw(inst, i, &numel);
-  return make_instance_storage_array_copy(
-      env, data, (size_t)(numel > 0 ? numel : 0), poly_instance_param_dtype_id(inst, i)
-  );
+  const char *name = poly_model_param_name(inst, i);
+  for (int j = 0; name && j < poly_model_buf_count(inst); j++)
+    if (!strcmp(name, poly_model_buf_name(inst, j))) return read_model_storage_array(env, inst, j);
+  return read_model_storage_array(env, inst, -1);
 }
 
-static napi_value napi_poly_instance_param_dtype_id(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_model_param_dtype_id(napi_env env, napi_callback_info info) {
   napi_value argv[2], result;
   size_t argc = 2;
   int32_t i = -1;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   napi_get_value_int32(env, argv[1], &i);
   NAPI_CALL(
-      env,
-      napi_create_int32(env, poly_instance_param_dtype_id(get_external(env, argv[0]), i), &result)
+      env, napi_create_int32(env, poly_model_param_dtype_id(get_external(env, argv[0]), i), &result)
   );
   return result;
 }
 
-static napi_value napi_poly_instance_param_trainable(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_model_param_trainable(napi_env env, napi_callback_info info) {
   napi_value argv[2];
   size_t argc = 2;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyInstance *inst = get_external(env, argv[0]);
+  PolyModel *inst = get_external(env, argv[0]);
   int32_t i;
   napi_get_value_int32(env, argv[1], &i);
   napi_value result;
-  NAPI_CALL(env, napi_get_boolean(env, poly_instance_param_trainable(inst, i), &result));
+  NAPI_CALL(env, napi_get_boolean(env, poly_model_param_trainable(inst, i), &result));
   return result;
 }
 
-static napi_value napi_poly_instance_set_param_trainable(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_model_set_param_trainable(napi_env env, napi_callback_info info) {
   napi_value argv[3];
   size_t argc = 3;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyInstance *inst = get_external(env, argv[0]);
+  PolyModel *inst = get_external(env, argv[0]);
   int32_t i;
   bool trainable;
   napi_get_value_int32(env, argv[1], &i);
   napi_get_value_bool(env, argv[2], &trainable);
   napi_value result;
   NAPI_CALL(
-      env, napi_create_int32(env, poly_instance_set_param_trainable(inst, i, trainable), &result)
+      env, napi_create_int32(env, poly_model_set_param_trainable(inst, i, trainable), &result)
   );
   return result;
 }
 
-static napi_value napi_poly_instance_buf_count(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_model_buf_count(napi_env env, napi_callback_info info) {
   napi_value argv[1];
   size_t argc = 1;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyInstance *inst = get_external(env, argv[0]);
+  PolyModel *inst = get_external(env, argv[0]);
   napi_value result;
-  NAPI_CALL(env, napi_create_int32(env, poly_instance_buf_count(inst), &result));
+  NAPI_CALL(env, napi_create_int32(env, poly_model_buf_count(inst), &result));
   return result;
 }
 
-static napi_value napi_poly_instance_buf_name(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_model_buf_name(napi_env env, napi_callback_info info) {
   napi_value argv[2];
   size_t argc = 2;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyInstance *inst = get_external(env, argv[0]);
+  PolyModel *inst = get_external(env, argv[0]);
   int32_t i;
   napi_get_value_int32(env, argv[1], &i);
-  const char *name = poly_instance_buf_name(inst, i);
+  const char *name = poly_model_buf_name(inst, i);
   napi_value result;
   if (name) {
     NAPI_CALL(env, napi_create_string_utf8(env, name, strlen(name), &result));
@@ -4379,55 +4407,53 @@ static napi_value napi_poly_instance_buf_name(napi_env env, napi_callback_info i
   return result;
 }
 
-static napi_value napi_poly_instance_buf_role(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_model_buf_role(napi_env env, napi_callback_info info) {
   napi_value argv[2];
   size_t argc = 2;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyInstance *inst = get_external(env, argv[0]);
+  PolyModel *inst = get_external(env, argv[0]);
   int32_t i;
   napi_get_value_int32(env, argv[1], &i);
   napi_value result;
-  NAPI_CALL(env, napi_create_int32(env, poly_instance_buf_role(inst, i), &result));
+  NAPI_CALL(env, napi_create_int32(env, poly_model_buf_role(inst, i), &result));
   return result;
 }
 
-static napi_value napi_poly_instance_buf_trainable(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_model_buf_trainable(napi_env env, napi_callback_info info) {
   napi_value argv[2];
   size_t argc = 2;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyInstance *inst = get_external(env, argv[0]);
+  PolyModel *inst = get_external(env, argv[0]);
   int32_t i;
   napi_get_value_int32(env, argv[1], &i);
   napi_value result;
-  NAPI_CALL(env, napi_get_boolean(env, poly_instance_buf_trainable(inst, i), &result));
+  NAPI_CALL(env, napi_get_boolean(env, poly_model_buf_trainable(inst, i), &result));
   return result;
 }
 
-static napi_value napi_poly_instance_set_buf_trainable(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_model_set_buf_trainable(napi_env env, napi_callback_info info) {
   napi_value argv[3];
   size_t argc = 3;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyInstance *inst = get_external(env, argv[0]);
+  PolyModel *inst = get_external(env, argv[0]);
   int32_t i;
   bool trainable;
   napi_get_value_int32(env, argv[1], &i);
   napi_get_value_bool(env, argv[2], &trainable);
   napi_value result;
-  NAPI_CALL(
-      env, napi_create_int32(env, poly_instance_set_buf_trainable(inst, i, trainable), &result)
-  );
+  NAPI_CALL(env, napi_create_int32(env, poly_model_set_buf_trainable(inst, i, trainable), &result));
   return result;
 }
 
-static napi_value napi_poly_instance_buf_shape(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_model_buf_shape(napi_env env, napi_callback_info info) {
   napi_value argv[2];
   size_t argc = 2;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyInstance *inst = get_external(env, argv[0]);
+  PolyModel *inst = get_external(env, argv[0]);
   int32_t i;
   napi_get_value_int32(env, argv[1], &i);
   int64_t shape[8];
-  int ndim = poly_instance_buf_shape(inst, i, shape, 8);
+  int ndim = poly_model_buf_shape(inst, i, shape, 8);
   napi_value result;
   NAPI_CALL(env, napi_create_array_with_length(env, (size_t)(ndim > 0 ? ndim : 0), &result));
   for (int j = 0; j < ndim; j++) {
@@ -4438,52 +4464,70 @@ static napi_value napi_poly_instance_buf_shape(napi_env env, napi_callback_info 
   return result;
 }
 
-static napi_value napi_poly_instance_buf_data(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_model_buf_data(napi_env env, napi_callback_info info) {
   napi_value argv[2];
   size_t argc = 2;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyInstance *inst = get_external(env, argv[0]);
+  PolyModel *inst = get_external(env, argv[0]);
   int32_t i;
   napi_get_value_int32(env, argv[1], &i);
-  int64_t numel = 0;
-  void *data = poly_instance_buf_data_raw(inst, i, &numel);
-  return make_instance_storage_array_copy(
-      env, data, (size_t)(numel > 0 ? numel : 0), poly_instance_buf_dtype_id(inst, i)
-  );
+  return read_model_storage_array(env, inst, i);
 }
 
-static napi_value napi_poly_instance_buf_dtype_id(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_model_write_buf(napi_env env, napi_callback_info info) {
+  napi_value argv[3], arraybuf, result;
+  size_t argc = 3, len = 0, offset = 0, itemsize = 0;
+  void *data = NULL;
+  int32_t index = -1;
+  napi_typedarray_type actual, expected;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyModel *model = get_external(env, argv[0]);
+  NAPI_CALL(env, napi_get_value_int32(env, argv[1], &index));
+  NAPI_CALL(env, napi_get_typedarray_info(env, argv[2], &actual, &len, &data, &arraybuf, &offset));
+  if (!instance_napi_storage_type(poly_model_buf_dtype_id(model, index), &expected, &itemsize) ||
+      actual != expected || len > SIZE_MAX / itemsize ||
+      len * itemsize != poly_model_buf_nbytes(model, index)) {
+    napi_throw_type_error(
+        env, NULL, "polygrad: buffer write requires exact storage dtype and extent"
+    );
+    return NULL;
+  }
+  int rc = poly_model_write_buf(model, index, data, len * itemsize);
+  NAPI_CALL(env, napi_create_int32(env, rc, &result));
+  return result;
+}
+
+static napi_value napi_poly_model_buf_dtype_id(napi_env env, napi_callback_info info) {
   napi_value argv[2], result;
   size_t argc = 2;
   int32_t i = -1;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   napi_get_value_int32(env, argv[1], &i);
   NAPI_CALL(
-      env,
-      napi_create_int32(env, poly_instance_buf_dtype_id(get_external(env, argv[0]), i), &result)
+      env, napi_create_int32(env, poly_model_buf_dtype_id(get_external(env, argv[0]), i), &result)
   );
   return result;
 }
 
-static napi_value napi_poly_instance_export_weights(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_model_export_weights(napi_env env, napi_callback_info info) {
   napi_value argv[2];
   size_t argc = 2;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyInstance *inst = get_external(env, argv[0]);
+  PolyModel *inst = get_external(env, argv[0]);
   uint32_t flags = POLY_EXPORT_WEIGHTS_DEFAULT;
   if (argc > 1) napi_get_value_uint32(env, argv[1], &flags);
   int out_len = 0;
-  uint8_t *bytes = poly_instance_export_weights_ex(inst, &out_len, flags);
+  uint8_t *bytes = poly_model_export_weights_ex(inst, &out_len, flags);
   napi_value result = make_uint8_array_copy(env, bytes, (size_t)(out_len > 0 ? out_len : 0));
   free(bytes);
   return result;
 }
 
-static napi_value napi_poly_instance_import_weights(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_model_import_weights(napi_env env, napi_callback_info info) {
   napi_value argv[2];
   size_t argc = 2;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyInstance *inst = get_external(env, argv[0]);
+  PolyModel *inst = get_external(env, argv[0]);
   napi_typedarray_type type;
   size_t len = 0;
   void *data = NULL;
@@ -4494,51 +4538,51 @@ static napi_value napi_poly_instance_import_weights(napi_env env, napi_callback_
   napi_value result;
   NAPI_CALL(
       env, napi_create_int32(
-               env, poly_instance_import_weights(inst, (const uint8_t *)data, (int)len), &result
+               env, poly_model_import_weights(inst, (const uint8_t *)data, (int)len), &result
            )
   );
   return result;
 }
 
-static napi_value napi_poly_instance_export_ir(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_model_export_ir(napi_env env, napi_callback_info info) {
   napi_value argv[1];
   size_t argc = 1;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyInstance *inst = get_external(env, argv[0]);
+  PolyModel *inst = get_external(env, argv[0]);
   int out_len = 0;
-  uint8_t *bytes = poly_instance_export_ir(inst, &out_len);
+  uint8_t *bytes = poly_model_export_ir(inst, &out_len);
   napi_value result = make_uint8_array_copy(env, bytes, (size_t)(out_len > 0 ? out_len : 0));
   free(bytes);
   return result;
 }
 
-static napi_value napi_poly_instance_export_program(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_model_export_program(napi_env env, napi_callback_info info) {
   napi_value argv[1];
   size_t argc = 1;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyInstance *inst = get_external(env, argv[0]);
+  PolyModel *inst = get_external(env, argv[0]);
   int out_len = 0;
-  uint8_t *bytes = poly_instance_export_program(inst, &out_len);
+  uint8_t *bytes = poly_model_export_program(inst, &out_len);
   napi_value result = make_uint8_array_copy(env, bytes, (size_t)(out_len > 0 ? out_len : 0));
   free(bytes);
   return result;
 }
 
-static napi_value napi_poly_instance_save_bundle(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_model_save_bundle(napi_env env, napi_callback_info info) {
   napi_value argv[2];
   size_t argc = 2;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyInstance *inst = get_external(env, argv[0]);
+  PolyModel *inst = get_external(env, argv[0]);
   uint32_t flags = POLY_EXPORT_WEIGHTS_DEFAULT;
   if (argc > 1) napi_get_value_uint32(env, argv[1], &flags);
   int out_len = 0;
-  uint8_t *bytes = poly_instance_save_bundle_ex(inst, &out_len, flags);
+  uint8_t *bytes = poly_model_save_bundle_ex(inst, &out_len, flags);
   napi_value result = make_uint8_array_copy(env, bytes, (size_t)(out_len > 0 ? out_len : 0));
   free(bytes);
   return result;
 }
 
-static napi_value napi_poly_instance_from_bundle(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_model_from_bundle(napi_env env, napi_callback_info info) {
   napi_value argv[1];
   size_t argc = 1;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
@@ -4550,7 +4594,7 @@ static napi_value napi_poly_instance_from_bundle(napi_env env, napi_callback_inf
   NAPI_CALL(
       env, napi_get_typedarray_info(env, argv[0], &type, &len, (void **)&data, &arraybuf, &offset)
   );
-  PolyInstance *inst = poly_instance_from_bundle(data, (int)len);
+  PolyModel *inst = poly_model_from_bundle(data, (int)len);
   if (!inst) {
     napi_value undef;
     napi_get_undefined(env, &undef);
@@ -4559,11 +4603,11 @@ static napi_value napi_poly_instance_from_bundle(napi_env env, napi_callback_inf
   return make_external(env, inst);
 }
 
-static napi_value napi_poly_instance_set_optimizer(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_model_set_optimizer(napi_env env, napi_callback_info info) {
   napi_value argv[10];
   size_t argc = 10;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyInstance *inst = get_external(env, argv[0]);
+  PolyModel *inst = get_external(env, argv[0]);
   int32_t kind;
   double lr, beta1, beta2, eps, weight_decay, momentum = 0.0;
   bool nesterov = false, classic = false;
@@ -4580,7 +4624,7 @@ static napi_value napi_poly_instance_set_optimizer(napi_env env, napi_callback_i
   NAPI_CALL(
       env, napi_create_int32(
                env,
-               poly_instance_set_optimizer_ex(
+               poly_model_set_optimizer_ex(
                    inst, kind, (float)lr, (float)beta1, (float)beta2, (float)eps,
                    (float)weight_decay, (float)momentum, nesterov, classic
                ),
@@ -4590,11 +4634,11 @@ static napi_value napi_poly_instance_set_optimizer(napi_env env, napi_callback_i
   return result;
 }
 
-static napi_value napi_poly_instance_forward(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_model_forward(napi_env env, napi_callback_info info) {
   napi_value argv[3];
   size_t argc = 3;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyInstance *inst = get_external(env, argv[0]);
+  PolyModel *inst = get_external(env, argv[0]);
 
   PolyIOBinding *bindings = NULL;
   char **names = NULL;
@@ -4603,7 +4647,7 @@ static napi_value napi_poly_instance_forward(napi_env env, napi_callback_info in
     return NULL;
   }
 
-  int rc = poly_instance_forward(inst, bindings, n);
+  int rc = poly_model_forward(inst, bindings, n);
   free_io_bindings(names, bindings, n);
 
   napi_value result;
@@ -4611,11 +4655,11 @@ static napi_value napi_poly_instance_forward(napi_env env, napi_callback_info in
   return result;
 }
 
-static napi_value napi_poly_instance_call(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_model_call(napi_env env, napi_callback_info info) {
   napi_value argv[4];
   size_t argc = 4;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyInstance *inst = get_external(env, argv[0]);
+  PolyModel *inst = get_external(env, argv[0]);
   char *entrypoint = read_utf8_arg(env, argv[1], NULL);
   if (!entrypoint) return NULL;
 
@@ -4627,7 +4671,7 @@ static napi_value napi_poly_instance_call(napi_env env, napi_callback_info info)
     return NULL;
   }
 
-  int rc = poly_instance_call(inst, entrypoint, bindings, n);
+  int rc = poly_model_call(inst, entrypoint, bindings, n);
   free_io_bindings(names, bindings, n);
   free(entrypoint);
 
@@ -4636,33 +4680,68 @@ static napi_value napi_poly_instance_call(napi_env env, napi_callback_info info)
   return result;
 }
 
-static napi_value napi_poly_instance_entrypoint_output_count(
-    napi_env env,
-    napi_callback_info info
-) {
+static napi_value napi_poly_model_entrypoints(napi_env env, napi_callback_info info) {
+  napi_value argv[1], result;
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyModel *model = get_external(env, argv[0]);
+  int count = poly_model_entrypoint_count(model);
+  NAPI_CALL(env, napi_create_array_with_length(env, (size_t)count, &result));
+  for (int i = 0; i < count; i++) {
+    napi_value row, value;
+    const char *name = poly_model_entrypoint_name(model, i);
+    const char *objective = poly_model_entrypoint_objective(model, name);
+    NAPI_CALL(env, napi_create_object(env, &row));
+    NAPI_CALL(env, napi_create_string_utf8(env, name, NAPI_AUTO_LENGTH, &value));
+    NAPI_CALL(env, napi_set_named_property(env, row, "name", value));
+    if (objective) {
+      NAPI_CALL(env, napi_create_string_utf8(env, objective, NAPI_AUTO_LENGTH, &value));
+    } else {
+      NAPI_CALL(env, napi_get_null(env, &value));
+    }
+    NAPI_CALL(env, napi_set_named_property(env, row, "objective", value));
+    for (int outputs = 0; outputs < 2; outputs++) {
+      napi_value names;
+      int n = outputs ? poly_model_entrypoint_output_count(model, name)
+                      : poly_model_entrypoint_input_count(model, name);
+      NAPI_CALL(env, napi_create_array_with_length(env, (size_t)n, &names));
+      for (int j = 0; j < n; j++) {
+        const char *binding = outputs ? poly_model_entrypoint_output_name(model, name, j)
+                                      : poly_model_entrypoint_input_name(model, name, j);
+        NAPI_CALL(env, napi_create_string_utf8(env, binding, NAPI_AUTO_LENGTH, &value));
+        NAPI_CALL(env, napi_set_element(env, names, (uint32_t)j, value));
+      }
+      NAPI_CALL(env, napi_set_named_property(env, row, outputs ? "outputs" : "inputs", names));
+    }
+    NAPI_CALL(env, napi_set_element(env, result, (uint32_t)i, row));
+  }
+  return result;
+}
+
+static napi_value napi_poly_model_entrypoint_output_count(napi_env env, napi_callback_info info) {
   napi_value argv[2];
   size_t argc = 2;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyInstance *inst = get_external(env, argv[0]);
+  PolyModel *inst = get_external(env, argv[0]);
   char *entrypoint = read_utf8_arg(env, argv[1], NULL);
   if (!entrypoint) return NULL;
-  int count = poly_instance_entrypoint_output_count(inst, entrypoint);
+  int count = poly_model_entrypoint_output_count(inst, entrypoint);
   free(entrypoint);
   napi_value result;
   NAPI_CALL(env, napi_create_int32(env, count, &result));
   return result;
 }
 
-static napi_value napi_poly_instance_entrypoint_output_name(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_model_entrypoint_output_name(napi_env env, napi_callback_info info) {
   napi_value argv[3];
   size_t argc = 3;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyInstance *inst = get_external(env, argv[0]);
+  PolyModel *inst = get_external(env, argv[0]);
   char *entrypoint = read_utf8_arg(env, argv[1], NULL);
   int32_t output_index = -1;
   if (!entrypoint) return NULL;
   napi_get_value_int32(env, argv[2], &output_index);
-  const char *name = poly_instance_entrypoint_output_name(inst, entrypoint, output_index);
+  const char *name = poly_model_entrypoint_output_name(inst, entrypoint, output_index);
   free(entrypoint);
   if (!name) {
     napi_value result;
@@ -4674,11 +4753,11 @@ static napi_value napi_poly_instance_entrypoint_output_name(napi_env env, napi_c
   return result;
 }
 
-static napi_value napi_poly_instance_train_step(napi_env env, napi_callback_info info) {
-  napi_value argv[3];
-  size_t argc = 3;
+static napi_value napi_poly_model_train_step(napi_env env, napi_callback_info info) {
+  napi_value argv[4];
+  size_t argc = 4;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyInstance *inst = get_external(env, argv[0]);
+  PolyModel *inst = get_external(env, argv[0]);
 
   PolyIOBinding *bindings = NULL;
   char **names = NULL;
@@ -4688,7 +4767,10 @@ static napi_value napi_poly_instance_train_step(napi_env env, napi_callback_info
   }
 
   float loss = 0.0f;
-  int rc = poly_instance_train_step(inst, bindings, n, &loss);
+  char *entrypoint =
+      argc > 3 && !napi_is_nullish(env, argv[3]) ? read_utf8_arg(env, argv[3], NULL) : NULL;
+  int rc = poly_model_train_step(inst, entrypoint, bindings, n, &loss);
+  free(entrypoint);
   free_io_bindings(names, bindings, n);
   if (rc != 0) {
     napi_value result;
@@ -5386,7 +5468,7 @@ static napi_value napi_poly_tokenizer_eos_id(napi_env env, napi_callback_info in
 
 /* ── HF / GGUF loaders ─────────────────────────────────────────────────── */
 
-extern PolyInstance *poly_hf_load(
+extern PolyModel *poly_hf_load(
     const char *config_json,
     int config_len,
     const uint8_t **weight_files,
@@ -5397,7 +5479,7 @@ extern PolyInstance *poly_hf_load(
     PolyDevice device
 );
 
-extern PolyInstance *poly_gguf_load(
+extern PolyModel *poly_gguf_load(
     const uint8_t *data,
     int64_t len,
     int max_batch,
@@ -5436,7 +5518,7 @@ static napi_value napi_poly_hf_load(napi_env env, napi_callback_info info) {
   NAPI_CALL(env, napi_get_value_int32(env, argv[3], &max_seq_len));
   NAPI_CALL(env, napi_get_value_int32(env, argv[4], &device));
 
-  PolyInstance *inst = poly_hf_load(
+  PolyModel *inst = poly_hf_load(
       (const char *)cfg_data, (int)cfg_len, file_ptrs, file_lens, (int)n_files, max_batch,
       max_seq_len, (PolyDevice)device
   );
@@ -5463,7 +5545,7 @@ static napi_value napi_poly_gguf_load(napi_env env, napi_callback_info info) {
   NAPI_CALL(env, napi_get_value_int32(env, argv[1], &max_batch));
   NAPI_CALL(env, napi_get_value_int32(env, argv[2], &max_seq_len));
   NAPI_CALL(env, napi_get_value_int32(env, argv[3], &device));
-  PolyInstance *inst = poly_gguf_load(
+  PolyModel *inst = poly_gguf_load(
       (const uint8_t *)data, (int64_t)len, max_batch, max_seq_len, (PolyDevice)device
   );
   if (!inst) {
@@ -5790,57 +5872,55 @@ NAPI_MODULE_INIT() {
       /* Cache cleanup */
       DECLARE_NAPI_METHOD("poly_cpu_cache_flush", napi_poly_cpu_cache_flush),
 
-      /* PolyInstance / model runtime */
-      DECLARE_NAPI_METHOD("poly_instance_from_ir", napi_poly_instance_from_ir),
-      DECLARE_NAPI_METHOD("poly_instance_from_program", napi_poly_instance_from_program),
-      DECLARE_NAPI_METHOD("poly_instance_from_sinks", napi_poly_instance_from_sinks),
+      /* PolyModel / model runtime */
+      DECLARE_NAPI_METHOD("poly_model_from_ir", napi_poly_model_from_ir),
+      DECLARE_NAPI_METHOD("poly_model_from_program", napi_poly_model_from_program),
+      DECLARE_NAPI_METHOD("poly_model_from_sinks", napi_poly_model_from_sinks),
+      DECLARE_NAPI_METHOD("poly_model_from_binding_arrays", napi_poly_model_from_binding_arrays),
+      DECLARE_NAPI_METHOD("poly_model_free", napi_poly_model_free),
+      DECLARE_NAPI_METHOD("poly_model_set_device", napi_poly_model_set_device),
+      DECLARE_NAPI_METHOD("poly_model_define_module_arrays", napi_poly_model_define_module_arrays),
       DECLARE_NAPI_METHOD(
-          "poly_instance_from_binding_arrays", napi_poly_instance_from_binding_arrays
+          "poly_model_set_device_map_arrays", napi_poly_model_set_device_map_arrays
       ),
-      DECLARE_NAPI_METHOD("poly_instance_free", napi_poly_instance_free),
-      DECLARE_NAPI_METHOD("poly_instance_set_device", napi_poly_instance_set_device),
-      DECLARE_NAPI_METHOD(
-          "poly_instance_define_module_arrays", napi_poly_instance_define_module_arrays
-      ),
-      DECLARE_NAPI_METHOD(
-          "poly_instance_set_device_map_arrays", napi_poly_instance_set_device_map_arrays
-      ),
+      DECLARE_NAPI_METHOD("poly_sequential_from_json", napi_poly_sequential_from_json),
+      DECLARE_NAPI_METHOD("poly_graph_from_json", napi_poly_graph_from_json),
       DECLARE_NAPI_METHOD("poly_mlp_from_json", napi_poly_mlp_from_json),
-      DECLARE_NAPI_METHOD("poly_tabm_instance", napi_poly_tabm_instance),
-      DECLARE_NAPI_METHOD("poly_nam_instance", napi_poly_nam_instance),
-      DECLARE_NAPI_METHOD("poly_instance_param_count", napi_poly_instance_param_count),
-      DECLARE_NAPI_METHOD("poly_instance_param_name", napi_poly_instance_param_name),
-      DECLARE_NAPI_METHOD("poly_instance_param_shape", napi_poly_instance_param_shape),
-      DECLARE_NAPI_METHOD("poly_instance_param_data", napi_poly_instance_param_data),
-      DECLARE_NAPI_METHOD("poly_instance_param_dtype_id", napi_poly_instance_param_dtype_id),
-      DECLARE_NAPI_METHOD("poly_instance_param_trainable", napi_poly_instance_param_trainable),
+      DECLARE_NAPI_METHOD("poly_tabm_from_json", napi_poly_tabm_from_json),
+      DECLARE_NAPI_METHOD("poly_nam_from_json", napi_poly_nam_from_json),
+      DECLARE_NAPI_METHOD("poly_model_param_count", napi_poly_model_param_count),
+      DECLARE_NAPI_METHOD("poly_model_param_name", napi_poly_model_param_name),
+      DECLARE_NAPI_METHOD("poly_model_param_shape", napi_poly_model_param_shape),
+      DECLARE_NAPI_METHOD("poly_model_param_data", napi_poly_model_param_data),
+      DECLARE_NAPI_METHOD("poly_model_param_dtype_id", napi_poly_model_param_dtype_id),
+      DECLARE_NAPI_METHOD("poly_model_param_trainable", napi_poly_model_param_trainable),
+      DECLARE_NAPI_METHOD("poly_model_set_param_trainable", napi_poly_model_set_param_trainable),
+      DECLARE_NAPI_METHOD("poly_model_buf_count", napi_poly_model_buf_count),
+      DECLARE_NAPI_METHOD("poly_model_entrypoints", napi_poly_model_entrypoints),
+      DECLARE_NAPI_METHOD("poly_model_buf_name", napi_poly_model_buf_name),
+      DECLARE_NAPI_METHOD("poly_model_buf_role", napi_poly_model_buf_role),
+      DECLARE_NAPI_METHOD("poly_model_buf_trainable", napi_poly_model_buf_trainable),
+      DECLARE_NAPI_METHOD("poly_model_set_buf_trainable", napi_poly_model_set_buf_trainable),
+      DECLARE_NAPI_METHOD("poly_model_buf_shape", napi_poly_model_buf_shape),
+      DECLARE_NAPI_METHOD("poly_model_buf_data", napi_poly_model_buf_data),
+      DECLARE_NAPI_METHOD("poly_model_write_buf", napi_poly_model_write_buf),
+      DECLARE_NAPI_METHOD("poly_model_buf_dtype_id", napi_poly_model_buf_dtype_id),
+      DECLARE_NAPI_METHOD("poly_model_export_weights", napi_poly_model_export_weights),
+      DECLARE_NAPI_METHOD("poly_model_import_weights", napi_poly_model_import_weights),
+      DECLARE_NAPI_METHOD("poly_model_export_ir", napi_poly_model_export_ir),
+      DECLARE_NAPI_METHOD("poly_model_export_program", napi_poly_model_export_program),
+      DECLARE_NAPI_METHOD("poly_model_save_bundle", napi_poly_model_save_bundle),
+      DECLARE_NAPI_METHOD("poly_model_from_bundle", napi_poly_model_from_bundle),
+      DECLARE_NAPI_METHOD("poly_model_set_optimizer", napi_poly_model_set_optimizer),
+      DECLARE_NAPI_METHOD("poly_model_forward", napi_poly_model_forward),
+      DECLARE_NAPI_METHOD("poly_model_call", napi_poly_model_call),
       DECLARE_NAPI_METHOD(
-          "poly_instance_set_param_trainable", napi_poly_instance_set_param_trainable
-      ),
-      DECLARE_NAPI_METHOD("poly_instance_buf_count", napi_poly_instance_buf_count),
-      DECLARE_NAPI_METHOD("poly_instance_buf_name", napi_poly_instance_buf_name),
-      DECLARE_NAPI_METHOD("poly_instance_buf_role", napi_poly_instance_buf_role),
-      DECLARE_NAPI_METHOD("poly_instance_buf_trainable", napi_poly_instance_buf_trainable),
-      DECLARE_NAPI_METHOD("poly_instance_set_buf_trainable", napi_poly_instance_set_buf_trainable),
-      DECLARE_NAPI_METHOD("poly_instance_buf_shape", napi_poly_instance_buf_shape),
-      DECLARE_NAPI_METHOD("poly_instance_buf_data", napi_poly_instance_buf_data),
-      DECLARE_NAPI_METHOD("poly_instance_buf_dtype_id", napi_poly_instance_buf_dtype_id),
-      DECLARE_NAPI_METHOD("poly_instance_export_weights", napi_poly_instance_export_weights),
-      DECLARE_NAPI_METHOD("poly_instance_import_weights", napi_poly_instance_import_weights),
-      DECLARE_NAPI_METHOD("poly_instance_export_ir", napi_poly_instance_export_ir),
-      DECLARE_NAPI_METHOD("poly_instance_export_program", napi_poly_instance_export_program),
-      DECLARE_NAPI_METHOD("poly_instance_save_bundle", napi_poly_instance_save_bundle),
-      DECLARE_NAPI_METHOD("poly_instance_from_bundle", napi_poly_instance_from_bundle),
-      DECLARE_NAPI_METHOD("poly_instance_set_optimizer", napi_poly_instance_set_optimizer),
-      DECLARE_NAPI_METHOD("poly_instance_forward", napi_poly_instance_forward),
-      DECLARE_NAPI_METHOD("poly_instance_call", napi_poly_instance_call),
-      DECLARE_NAPI_METHOD(
-          "poly_instance_entrypoint_output_count", napi_poly_instance_entrypoint_output_count
+          "poly_model_entrypoint_output_count", napi_poly_model_entrypoint_output_count
       ),
       DECLARE_NAPI_METHOD(
-          "poly_instance_entrypoint_output_name", napi_poly_instance_entrypoint_output_name
+          "poly_model_entrypoint_output_name", napi_poly_model_entrypoint_output_name
       ),
-      DECLARE_NAPI_METHOD("poly_instance_train_step", napi_poly_instance_train_step),
+      DECLARE_NAPI_METHOD("poly_model_train_step", napi_poly_model_train_step),
       /* Shape-on-UOp accessors */
       DECLARE_NAPI_METHOD("poly_uop_ndim", napi_poly_uop_ndim),
       DECLARE_NAPI_METHOD("poly_uop_max_shape_dims", napi_poly_uop_max_shape_dims),

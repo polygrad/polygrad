@@ -1,0 +1,18 @@
+{
+  "format": "poly.modeldef@1",
+  "type": "graph",
+  "seed": 42,
+  "inputs": {"x": {"shape": [1, 2], "dtype": "float32"}},
+  "modules": {"shared": {"type": "linear", "out_features": 2, "bias": false}},
+  "nodes": [
+    {"name": "a", "call": "shared", "inputs": ["x"]},
+    {"name": "b", "call": "shared", "inputs": ["a"]},
+    {"name": "residual", "type": "add", "inputs": ["x", "b"]},
+    {"name": "total", "type": "sum", "inputs": ["residual"]}
+  ],
+  "outputs": {"prediction": "residual", "cost": "total"},
+  "entrypoints": [
+    {"name": "forward", "inputs": ["x"], "outputs": ["prediction"]},
+    {"name": "loss", "inputs": ["x"], "outputs": ["cost"], "objective": "cost"}
+  ]
+}

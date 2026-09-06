@@ -1,5 +1,5 @@
 /*
- * model_tabm.h -- TabM (BatchEnsemble MLP) builder for PolyInstance
+ * model_tabm.h -- TabM (BatchEnsemble MLP) builder for PolyModel
  *
  * TabM: MLP with per-member rank-1 weight perturbations.
  * For each linear layer with shared weight W, ensemble member i computes:
@@ -12,7 +12,7 @@
 #ifndef POLY_MODEL_TABM_H
 #define POLY_MODEL_TABM_H
 
-#include "../instance.h"
+#include "../model.h"
 
 /*
  * Create a TabM instance from a JSON spec.
@@ -35,6 +35,6 @@
  *
  * Returns NULL on error.
  */
-PolyInstance *poly_tabm_instance(const char *spec_json, int spec_len, PolyDevice device);
+PolyModel *poly_tabm_from_json(const char *spec_json, int spec_len, PolyDevice device);
 
 #endif /* POLY_MODEL_TABM_H */

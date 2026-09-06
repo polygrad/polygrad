@@ -5,7 +5,7 @@
 #include "test_harness.h"
 #include "../src/bundle.h"
 #include "../src/ir.h"
-#include "../src/instance.h"
+#include "../src/model.h"
 #include "../src/frontend.h"
 #include "../src/models/mlp.h"
 #include <limits.h>
@@ -103,19 +103,19 @@ TEST(bundle, encode_rejects_signed_length_overflow_before_allocation) {
   PASS();
 }
 
-/* Instance round-trip via bundle */
+/* Model round-trip via bundle */
 
 TEST(bundle, instance_save_load_roundtrip) {
   /* Create MLP instance */
   const char *spec = "{\"layers\":[2,4,1],\"activation\":\"relu\",\"bias\":true,"
                      "\"loss\":\"mse\",\"batch_size\":1,\"seed\":42}";
-  PolyInstance *inst = poly_mlp_from_json(spec, (int)strlen(spec), POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_mlp_from_json(spec, (int)strlen(spec), POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   /* Set some non-zero weight values */
-  for (int p = 0; p < poly_instance_param_count(inst); p++) {
+  for (int p = 0; p < poly_model_param_count(inst); p++) {
     int64_t numel;
-    float *data = poly_instance_param_data(inst, p, &numel);
+    float *data = poly_model_param_data(inst, p, &numel);
     for (int64_t j = 0; j < numel; j++)
       data[j] = (float)(j + 1) * 0.1f;
   }
@@ -123,23 +123,23 @@ TEST(bundle, instance_save_load_roundtrip) {
   /* Forward on original */
   float input[] = {1.0f, 2.0f};
   PolyIOBinding io[] = {POLY_IO_BINDING_ARRAY("x", input, POLY_FLOAT32)};
-  ASSERT_INT_EQ(poly_instance_forward(inst, io, 1), 0);
+  ASSERT_INT_EQ(poly_model_forward(inst, io, 1), 0);
 
   /* Read original output */
   int out_idx = -1;
-  for (int i = 0; i < poly_instance_buf_count(inst); i++)
-    if (poly_instance_buf_role(inst, i) == POLY_ROLE_OUTPUT) {
+  for (int i = 0; i < poly_model_buf_count(inst); i++)
+    if (poly_model_buf_role(inst, i) == POLY_ROLE_OUTPUT) {
       out_idx = i;
       break;
     }
   ASSERT_TRUE(out_idx >= 0);
   int64_t numel;
-  float *orig_out = poly_instance_buf_data(inst, out_idx, &numel);
+  float *orig_out = poly_model_buf_data(inst, out_idx, &numel);
   float orig_val = orig_out[0];
 
   /* Save to bundle */
   int bundle_len = 0;
-  uint8_t *bundle = poly_instance_save_bundle(inst, &bundle_len);
+  uint8_t *bundle = poly_model_save_bundle(inst, &bundle_len);
   ASSERT_NOT_NULL(bundle);
   ASSERT_TRUE(bundle_len > 0);
 
@@ -147,53 +147,53 @@ TEST(bundle, instance_save_load_roundtrip) {
   ASSERT_TRUE(memcmp(bundle, "POLYBNDL", 8) == 0);
 
   /* Load from bundle */
-  PolyInstance *inst2 = poly_instance_from_bundle(bundle, bundle_len);
+  PolyModel *inst2 = poly_model_from_bundle(bundle, bundle_len);
   ASSERT_NOT_NULL(inst2);
 
   /* Same structure */
-  ASSERT_INT_EQ(poly_instance_buf_count(inst2), poly_instance_buf_count(inst));
-  ASSERT_INT_EQ(poly_instance_param_count(inst2), poly_instance_param_count(inst));
+  ASSERT_INT_EQ(poly_model_buf_count(inst2), poly_model_buf_count(inst));
+  ASSERT_INT_EQ(poly_model_param_count(inst2), poly_model_param_count(inst));
 
   /* Same weights */
-  for (int p = 0; p < poly_instance_param_count(inst2); p++) {
+  for (int p = 0; p < poly_model_param_count(inst2); p++) {
     int64_t n1, n2;
-    float *d1 = poly_instance_param_data(inst, p, &n1);
-    float *d2 = poly_instance_param_data(inst2, p, &n2);
+    float *d1 = poly_model_param_data(inst, p, &n1);
+    float *d2 = poly_model_param_data(inst2, p, &n2);
     ASSERT_INT_EQ(n1, n2);
     for (int64_t j = 0; j < n1; j++)
       ASSERT_FLOAT_EQ(d1[j], d2[j], 0.0f);
   }
 
   /* Forward on loaded instance produces same output */
-  ASSERT_INT_EQ(poly_instance_forward(inst2, io, 1), 0);
-  float *loaded_out = poly_instance_buf_data(inst2, out_idx, &numel);
+  ASSERT_INT_EQ(poly_model_forward(inst2, io, 1), 0);
+  float *loaded_out = poly_model_buf_data(inst2, out_idx, &numel);
   ASSERT_FLOAT_EQ(loaded_out[0], orig_val, 1e-6);
 
   free(bundle);
-  poly_instance_free(inst);
-  poly_instance_free(inst2);
+  poly_model_free(inst);
+  poly_model_free(inst2);
   PASS();
 }
 
 TEST(bundle, instance_save_includes_entrypoint_manifest_metadata) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
-  PolyInstance *inst = poly_instance_new(ctx, NULL);
+  PolyModel *inst = poly_model_new(ctx, NULL);
   ASSERT_NOT_NULL(inst);
 
   int64_t shape[] = {1};
-  PolyTensor *x = poly_instance_input(inst, "x", POLY_FLOAT32, shape, 1);
+  PolyTensor *x = poly_model_input(inst, "x", POLY_FLOAT32, shape, 1);
   ASSERT_NOT_NULL(x);
-  PolyTensor *y = poly_instance_target(inst, "y", POLY_FLOAT32, shape, 1);
+  PolyTensor *y = poly_model_target(inst, "y", POLY_FLOAT32, shape, 1);
   ASSERT_NOT_NULL(y);
 
-  ASSERT_INT_EQ(poly_instance_output(inst, "logits", x), POLY_STATUS_OK);
-  ASSERT_INT_EQ(poly_instance_output(inst, "loss", y), POLY_STATUS_OK);
+  ASSERT_INT_EQ(poly_model_output(inst, "logits", x), POLY_STATUS_OK);
+  ASSERT_INT_EQ(poly_model_output(inst, "loss", y), POLY_STATUS_OK);
 
   const char *forward_inputs[] = {"x"};
   const char *forward_outputs[] = {"logits"};
   ASSERT_INT_EQ(
-      poly_instance_entrypoint(inst, "forward", forward_inputs, 1, forward_outputs, 1, NULL),
+      poly_model_entrypoint(inst, "forward", forward_inputs, 1, forward_outputs, 1, NULL),
       POLY_STATUS_OK
   );
 
@@ -201,12 +201,12 @@ TEST(bundle, instance_save_includes_entrypoint_manifest_metadata) {
   const char *loss_outputs[] = {"loss"};
   PolyEntrypointOptions opts = {.objective = "loss", .flags = 7};
   ASSERT_INT_EQ(
-      poly_instance_entrypoint(inst, "loss", loss_inputs, 2, loss_outputs, 1, &opts), POLY_STATUS_OK
+      poly_model_entrypoint(inst, "loss", loss_inputs, 2, loss_outputs, 1, &opts), POLY_STATUS_OK
   );
-  ASSERT_INT_EQ(poly_instance_build(inst, NULL), POLY_STATUS_OK);
+  ASSERT_INT_EQ(poly_model_build(inst, NULL), POLY_STATUS_OK);
 
   int bundle_len = 0;
-  uint8_t *bundle = poly_instance_save_bundle(inst, &bundle_len);
+  uint8_t *bundle = poly_model_save_bundle(inst, &bundle_len);
   ASSERT_NOT_NULL(bundle);
 
   PolyBundleSections sections;
@@ -235,7 +235,7 @@ TEST(bundle, instance_save_includes_entrypoint_manifest_metadata) {
 
   free(meta);
   free(bundle);
-  poly_instance_free(inst);
+  poly_model_free(inst);
   poly_ctx_destroy(ctx);
   PASS();
 }

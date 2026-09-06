@@ -1,7 +1,7 @@
 """
 HuggingFace model loader for polygrad.
 
-Loads models from config.json + safetensors files into PolyInstance.
+Loads models from config.json + safetensors files into PolyModel.
 No file I/O happens in C -- this module reads files and passes byte buffers.
 
 Usage:
@@ -22,7 +22,7 @@ import pathlib
 import numpy as np
 from . import _ffi
 from .device import _device_id
-from .instance import Instance
+from .model import Model
 
 _get_lib = _ffi.get_lib
 _u8p = ctypes.POINTER(ctypes.c_uint8)
@@ -37,7 +37,7 @@ def load_hf(model_path, max_batch=1, max_seq_len=0, device=None):
         max_seq_len: Maximum sequence length (0 = use config default).
 
     Returns:
-        Instance: A PolyInstance ready for forward pass.
+        Model: A PolyModel ready for forward pass.
     """
     model_path = pathlib.Path(model_path)
 
@@ -70,7 +70,7 @@ def load_hf_bytes(config_json, weight_bytes_list, max_batch=1, max_seq_len=0, de
         max_seq_len: Maximum sequence length (0 = use config default).
 
     Returns:
-        Instance: A PolyInstance ready for forward pass.
+        Model: A PolyModel ready for forward pass.
     """
     if isinstance(config_json, str):
         config_json = config_json.encode('utf-8')
@@ -109,7 +109,7 @@ def generate(instance, tokens, max_new_tokens, temperature=1.0, top_k=None):
     to max_seq_len, and logits are extracted at the actual last token position.
 
     Args:
-        instance: PolyInstance with forward pass.
+        instance: PolyModel with forward pass.
         tokens: Initial token IDs as numpy array of shape (1, seq_len).
         max_new_tokens: Number of tokens to generate.
         temperature: Sampling temperature (1.0 = no change).
@@ -226,7 +226,7 @@ def _load_from_bytes(config_bytes, weight_data_list, max_batch, max_seq_len, dev
     if not ptr:
         raise RuntimeError('poly_hf_load returned NULL')
 
-    return Instance(ptr)
+    return Model(ptr)
 
 
 def _get_vocab_size(instance):

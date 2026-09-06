@@ -12,17 +12,17 @@
 #include <string.h>
 
 /* gpt2.c */
-extern PolyInstance *poly_gpt2_from_hf_decoded_generic(
+extern PolyModel *poly_gpt2_from_hf_decoded_generic(
     const PolyHfDecoded *hf,
     const PolyGenericImportOpts *opts
 );
-extern PolyInstance *poly_gpt2_from_gguf_decoded_generic(
+extern PolyModel *poly_gpt2_from_gguf_decoded_generic(
     const PolyGgufDecoded *gguf,
     const PolyGenericImportOpts *opts
 );
 
 /* qwen3.c */
-extern PolyInstance *poly_qwen3_from_gguf_decoded_generic(
+extern PolyModel *poly_qwen3_from_gguf_decoded_generic(
     const PolyGgufDecoded *gguf,
     const PolyGenericImportOpts *opts
 );

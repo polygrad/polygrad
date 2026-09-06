@@ -1,12 +1,12 @@
 /*
  * test_registry.c -- Tests for the named buffer registry on PolyCtx
- *                    and poly_instance_from_ctx
+ *                    and poly_model_from_ctx
  */
 
 #include "test_harness.h"
 #include "../src/polygrad.h"
 #include "../src/frontend.h"
-#include "../src/instance.h"
+#include "../src/model.h"
 #include "../src/ir.h"
 #include "../src/ctx.h"
 #include "../src/engine/schedule.h"
@@ -357,7 +357,7 @@ TEST(registry, printf_naming) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════ */
-/* Phase 2: poly_instance_from_ctx tests                                */
+/* Phase 2: poly_model_from_ctx tests                                */
 /* ══════════════════════════════════════════════════════════════════════ */
 
 TEST(registry, instance_from_ctx_basic) {
@@ -377,32 +377,32 @@ TEST(registry, instance_from_ctx_basic) {
   poly_register_entrypoint(ctx, "forward", sink);
 
   /* Create instance */
-  PolyInstance *inst = poly_instance_from_ctx(ctx);
+  PolyModel *inst = poly_model_from_ctx(ctx);
   ASSERT_TRUE(inst != NULL);
 
   /* Verify buffer enumeration */
-  ASSERT_INT_EQ(poly_instance_buf_count(inst), 3);
-  ASSERT_STR_EQ(poly_instance_buf_name(inst, 0), "w");
-  ASSERT_INT_EQ(poly_instance_buf_role(inst, 0), POLY_ROLE_PARAM);
-  ASSERT_STR_EQ(poly_instance_buf_name(inst, 1), "x");
-  ASSERT_INT_EQ(poly_instance_buf_role(inst, 1), POLY_ROLE_INPUT);
-  ASSERT_STR_EQ(poly_instance_buf_name(inst, 2), "output");
-  ASSERT_INT_EQ(poly_instance_buf_role(inst, 2), POLY_ROLE_OUTPUT);
+  ASSERT_INT_EQ(poly_model_buf_count(inst), 3);
+  ASSERT_STR_EQ(poly_model_buf_name(inst, 0), "w");
+  ASSERT_INT_EQ(poly_model_buf_role(inst, 0), POLY_ROLE_PARAM);
+  ASSERT_STR_EQ(poly_model_buf_name(inst, 1), "x");
+  ASSERT_INT_EQ(poly_model_buf_role(inst, 1), POLY_ROLE_INPUT);
+  ASSERT_STR_EQ(poly_model_buf_name(inst, 2), "output");
+  ASSERT_INT_EQ(poly_model_buf_role(inst, 2), POLY_ROLE_OUTPUT);
 
   /* Verify param count */
-  ASSERT_INT_EQ(poly_instance_param_count(inst), 1);
-  ASSERT_STR_EQ(poly_instance_param_name(inst, 0), "w");
+  ASSERT_INT_EQ(poly_model_param_count(inst), 1);
+  ASSERT_STR_EQ(poly_model_param_name(inst, 0), "w");
 
   /* Verify named accessors */
-  /* Approved Instance placement boundary: the registry supplies immutable
+  /* Approved Model placement boundary: the registry supplies immutable
    * logical roots; activation publishes a complete physical graph. */
-  ASSERT_TRUE(poly_instance_get_buffer(inst, "w") != w);
-  ASSERT_TRUE(poly_instance_get_sink(inst, "forward") != sink);
-  ASSERT_FALSE(poly_tensor_root_has_unplaced_buffer(ctx, poly_instance_get_sink(inst, "forward")));
-  ASSERT_TRUE(poly_instance_ctx(inst) == ctx);
-  ASSERT_INT_EQ(poly_instance_buf_numel_named(inst, "w"), 4);
+  ASSERT_TRUE(poly_model_get_buffer(inst, "w") != w);
+  ASSERT_TRUE(poly_model_get_sink(inst, "forward") != sink);
+  ASSERT_FALSE(poly_tensor_root_has_unplaced_buffer(ctx, poly_model_get_sink(inst, "forward")));
+  ASSERT_TRUE(poly_model_ctx(inst) == ctx);
+  ASSERT_INT_EQ(poly_model_buf_numel_named(inst, "w"), 4);
 
-  poly_instance_free(inst);
+  poly_model_free(inst);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -421,12 +421,12 @@ TEST(registry, instance_from_ctx_execute) {
   PolyUOp *sink = poly_sink1(ctx, store);
   poly_register_entrypoint(ctx, "forward", sink);
 
-  PolyInstance *inst = poly_instance_from_ctx(ctx);
+  PolyModel *inst = poly_model_from_ctx(ctx);
   ASSERT_TRUE(inst != NULL);
 
   /* Set weights */
   int64_t numel;
-  float *w_data = poly_instance_buf_data_named(inst, "w", &numel);
+  float *w_data = poly_model_buf_data_named(inst, "w", &numel);
   ASSERT_INT_EQ(numel, 4);
   for (int i = 0; i < 4; i++)
     w_data[i] = (float)(i + 1);
@@ -434,17 +434,17 @@ TEST(registry, instance_from_ctx_execute) {
   /* Execute forward */
   float x_data[] = {2.0f, 3.0f, 4.0f, 5.0f};
   PolyIOBinding io[] = {POLY_IO_BINDING_ARRAY("x", x_data, POLY_FLOAT32)};
-  int rc = poly_instance_call(inst, "forward", io, 1);
+  int rc = poly_model_call(inst, "forward", io, 1);
   ASSERT_INT_EQ(rc, 0);
 
   /* Check output */
-  float *out_data = poly_instance_buf_data_named(inst, "output", NULL);
+  float *out_data = poly_model_buf_data_named(inst, "output", NULL);
   ASSERT_FLOAT_EQ(out_data[0], 2.0f, 1e-5); /* 1*2 */
   ASSERT_FLOAT_EQ(out_data[1], 6.0f, 1e-5); /* 2*3 */
   ASSERT_FLOAT_EQ(out_data[2], 12.0f, 1e-5); /* 3*4 */
   ASSERT_FLOAT_EQ(out_data[3], 20.0f, 1e-5); /* 4*5 */
 
-  poly_instance_free(inst);
+  poly_model_free(inst);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -462,15 +462,15 @@ TEST(registry, instance_from_ctx_alias_shares_data) {
   PolyUOp *sink = poly_sink1(ctx, store);
   poly_register_entrypoint(ctx, "init", sink);
 
-  PolyInstance *inst = poly_instance_from_ctx(ctx);
+  PolyModel *inst = poly_model_from_ctx(ctx);
   ASSERT_TRUE(inst != NULL);
 
   /* Both names in instance */
-  ASSERT_INT_EQ(poly_instance_buf_count(inst), 2);
+  ASSERT_INT_EQ(poly_model_buf_count(inst), 2);
 
   /* Both resolve to the same data pointer (shared allocation) */
-  float *emb_data = poly_instance_buf_data_named(inst, "embedding", NULL);
-  float *lm_data = poly_instance_buf_data_named(inst, "lm_head", NULL);
+  float *emb_data = poly_model_buf_data_named(inst, "embedding", NULL);
+  float *lm_data = poly_model_buf_data_named(inst, "lm_head", NULL);
   ASSERT_TRUE(emb_data != NULL);
   ASSERT_EQ(emb_data, lm_data);
 
@@ -478,7 +478,7 @@ TEST(registry, instance_from_ctx_alias_shares_data) {
   emb_data[0] = 42.0f;
   ASSERT_FLOAT_EQ(lm_data[0], 42.0f, 0);
 
-  poly_instance_free(inst);
+  poly_model_free(inst);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -495,16 +495,16 @@ TEST(registry, instance_from_ctx_unreachable_excluded) {
   PolyUOp *sink = poly_sink1(ctx, store);
   poly_register_entrypoint(ctx, "copy", sink);
 
-  PolyInstance *inst = poly_instance_from_ctx(ctx);
+  PolyModel *inst = poly_model_from_ctx(ctx);
   ASSERT_TRUE(inst != NULL);
 
   /* Only w and x are reachable; unused_aux is excluded */
-  ASSERT_INT_EQ(poly_instance_buf_count(inst), 2);
-  ASSERT_TRUE(poly_instance_get_buffer(inst, "w") != NULL);
-  ASSERT_TRUE(poly_instance_get_buffer(inst, "x") != NULL);
-  ASSERT_TRUE(poly_instance_get_buffer(inst, "unused_aux") == NULL);
+  ASSERT_INT_EQ(poly_model_buf_count(inst), 2);
+  ASSERT_TRUE(poly_model_get_buffer(inst, "w") != NULL);
+  ASSERT_TRUE(poly_model_get_buffer(inst, "x") != NULL);
+  ASSERT_TRUE(poly_model_get_buffer(inst, "unused_aux") == NULL);
 
-  poly_instance_free(inst);
+  poly_model_free(inst);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -523,11 +523,11 @@ TEST(registry, instance_from_ctx_reachability_scan_rewinds_scratch) {
   poly_register_entrypoint(ctx, "forward", sink);
 
   size_t scratch_before = poly_arena_used(ctx->scratch);
-  PolyInstance *inst = poly_instance_from_ctx(ctx);
+  PolyModel *inst = poly_model_from_ctx(ctx);
   ASSERT_TRUE(inst != NULL);
   ASSERT_INT_EQ(poly_arena_used(ctx->scratch), scratch_before);
 
-  poly_instance_free(inst);
+  poly_model_free(inst);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -538,7 +538,7 @@ TEST(registry, instance_from_ctx_zero_entrypoints) {
   poly_param(ctx, POLY_FLOAT32, s, 1, "w");
 
   /* No entrypoints registered */
-  PolyInstance *inst = poly_instance_from_ctx(ctx);
+  PolyModel *inst = poly_model_from_ctx(ctx);
   ASSERT_EQ(inst, NULL);
 
   poly_ctx_destroy(ctx);
@@ -560,7 +560,7 @@ TEST(registry, instance_from_ctx_parity_with_ir) {
   PolyUOp *st_a = poly_store_val(ctx_a, oa, prod_a);
   PolyUOp *sink_a = poly_sink1(ctx_a, st_a);
   poly_register_entrypoint(ctx_a, "forward", sink_a);
-  PolyInstance *inst_a = poly_instance_from_ctx(ctx_a);
+  PolyModel *inst_a = poly_model_from_ctx(ctx_a);
   ASSERT_TRUE(inst_a != NULL);
 
   /* Manual PolyIrSpec fixture. */
@@ -580,14 +580,14 @@ TEST(registry, instance_from_ctx_parity_with_ir) {
   PolyIrSpec spec_b = {ctx_b, bufs_b, 3, eps_b, 1, NULL, 0};
   int ir_len;
   uint8_t *ir = poly_ir_export(&spec_b, &ir_len);
-  PolyInstance *inst_b = poly_instance_from_ir(ir, ir_len, NULL, 0);
+  PolyModel *inst_b = poly_model_from_ir(ir, ir_len, NULL, 0);
   free(ir);
   poly_ctx_destroy(ctx_b);
   ASSERT_TRUE(inst_b != NULL);
 
   /* Same weights + input */
-  float *wa_d = poly_instance_buf_data_named(inst_a, "w", NULL);
-  float *wb_d = poly_instance_buf_data_named(inst_b, "w", NULL);
+  float *wa_d = poly_model_buf_data_named(inst_a, "w", NULL);
+  float *wb_d = poly_model_buf_data_named(inst_b, "w", NULL);
   float x_in[] = {2, 3, 4, 5};
   for (int i = 0; i < N; i++) {
     wa_d[i] = (float)(i + 1);
@@ -596,16 +596,16 @@ TEST(registry, instance_from_ctx_parity_with_ir) {
 
   PolyIOBinding io_a[] = {POLY_IO_BINDING_ARRAY("x", x_in, POLY_FLOAT32)};
   PolyIOBinding io_b[] = {POLY_IO_BINDING_ARRAY("x", x_in, POLY_FLOAT32)};
-  ASSERT_INT_EQ(poly_instance_call(inst_a, "forward", io_a, 1), 0);
-  ASSERT_INT_EQ(poly_instance_call(inst_b, "forward", io_b, 1), 0);
+  ASSERT_INT_EQ(poly_model_call(inst_a, "forward", io_a, 1), 0);
+  ASSERT_INT_EQ(poly_model_call(inst_b, "forward", io_b, 1), 0);
 
-  float *oa_d = poly_instance_buf_data_named(inst_a, "output", NULL);
-  float *ob_d = poly_instance_buf_data_named(inst_b, "output", NULL);
+  float *oa_d = poly_model_buf_data_named(inst_a, "output", NULL);
+  float *ob_d = poly_model_buf_data_named(inst_b, "output", NULL);
   for (int i = 0; i < N; i++)
     ASSERT_FLOAT_EQ(oa_d[i], ob_d[i], 1e-6);
 
-  poly_instance_free(inst_a);
-  poly_instance_free(inst_b);
+  poly_model_free(inst_a);
+  poly_model_free(inst_b);
   poly_ctx_destroy(ctx_a);
   PASS();
 }

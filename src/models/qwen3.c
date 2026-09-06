@@ -20,7 +20,7 @@
 #include "qwen3.h"
 #include "../nn.h"
 #include "../tensor.h"
-#include "../instance.h"
+#include "../model.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -47,7 +47,7 @@ Qwen3Config poly_qwen3_config_default(void) {
 
 /* Builder */
 
-PolyInstance *poly_qwen3(const Qwen3Config *cfg, PolyDevice device) {
+PolyModel *poly_qwen3(const Qwen3Config *cfg, PolyDevice device) {
   if (!cfg || cfg->n_layers < 1 || cfg->dim < 1 || cfg->vocab_size < 1) return NULL;
 
   int V = cfg->vocab_size;
@@ -70,11 +70,11 @@ PolyInstance *poly_qwen3(const Qwen3Config *cfg, PolyDevice device) {
   PolyCtx *ctx = poly_ctx_new();
   if (!ctx) return NULL;
   if (device != POLY_DEVICE_AUTO) poly_ctx_set_preferred_device(ctx, device);
-  PolyInstanceOptions opts = {
+  PolyModelOptions opts = {
       .own_ctx_on_success = true,
       .own_ctx_on_failure = true,
   };
-  PolyInstance *inst = poly_instance_new(ctx, &opts);
+  PolyModel *inst = poly_model_new(ctx, &opts);
   if (!inst) {
     poly_ctx_destroy(ctx);
     return NULL;
@@ -83,21 +83,21 @@ PolyInstance *poly_qwen3(const Qwen3Config *cfg, PolyDevice device) {
   int64_t x_shape[] = {B, T};
   /* Pinned tinygrad embedding/gather requires integer token indices
    * (mixin/__init__.py:1088-1093,1106-1124). */
-  PolyTensor *x_tensor = poly_instance_input(inst, "x", POLY_INT32, x_shape, 2);
+  PolyTensor *x_tensor = poly_model_input(inst, "x", POLY_INT32, x_shape, 2);
   if (!x_tensor) goto fail_pre_build;
 
   int half_hd = hd / 2;
   int64_t rope_shape[] = {T, half_hd};
-  PolyTensor *rope_cos_tensor = poly_instance_input(inst, "rope_cos", POLY_FLOAT32, rope_shape, 2);
+  PolyTensor *rope_cos_tensor = poly_model_input(inst, "rope_cos", POLY_FLOAT32, rope_shape, 2);
   if (!rope_cos_tensor) goto fail_pre_build;
-  PolyTensor *rope_sin_tensor = poly_instance_input(inst, "rope_sin", POLY_FLOAT32, rope_shape, 2);
+  PolyTensor *rope_sin_tensor = poly_model_input(inst, "rope_sin", POLY_FLOAT32, rope_shape, 2);
   if (!rope_sin_tensor) goto fail_pre_build;
 
-  if (poly_instance_scope_push(inst, "token_embd") != POLY_STATUS_OK) goto fail_pre_build;
+  if (poly_model_scope_push(inst, "token_embd") != POLY_STATUS_OK) goto fail_pre_build;
   int64_t token_shape[] = {V, D};
-  PolyTensor *token_tensor = poly_instance_param(inst, "weight", POLY_FLOAT32, token_shape, 2);
+  PolyTensor *token_tensor = poly_model_param(inst, "weight", POLY_FLOAT32, token_shape, 2);
   if (!token_tensor) goto fail_pre_build;
-  if (poly_instance_scope_pop(inst) != POLY_STATUS_OK) goto fail_pre_build;
+  if (poly_model_scope_pop(inst) != POLY_STATUS_OK) goto fail_pre_build;
   PolyTensor *h = poly_tensor_embedding_apply(ctx, x_tensor, token_tensor);
   h = poly_tensor_contiguous(ctx, h);
   if (!h) goto fail_pre_build;
@@ -116,18 +116,18 @@ PolyInstance *poly_qwen3(const Qwen3Config *cfg, PolyDevice device) {
     char pf[64];
 
     snprintf(pf, sizeof(pf), "blk.%d.attn_norm", i);
-    PolyTensor *x_norm = poly_instance_rmsnorm(inst, pf, h, D, eps);
+    PolyTensor *x_norm = poly_model_rmsnorm(inst, pf, h, D, eps);
     x_norm = poly_tensor_contiguous(ctx, x_norm);
     if (!x_norm) goto fail_pre_build;
 
     snprintf(pf, sizeof(pf), "blk.%d.attn_q", i);
-    PolyTensor *q = poly_instance_linear(inst, pf, x_norm, D, H * hd, false);
+    PolyTensor *q = poly_model_linear(inst, pf, x_norm, D, H * hd, false);
     q = poly_tensor_contiguous(ctx, q);
     snprintf(pf, sizeof(pf), "blk.%d.attn_k", i);
-    PolyTensor *k = poly_instance_linear(inst, pf, x_norm, D, KvH * hd, false);
+    PolyTensor *k = poly_model_linear(inst, pf, x_norm, D, KvH * hd, false);
     k = poly_tensor_contiguous(ctx, k);
     snprintf(pf, sizeof(pf), "blk.%d.attn_v", i);
-    PolyTensor *v = poly_instance_linear(inst, pf, x_norm, D, KvH * hd, false);
+    PolyTensor *v = poly_model_linear(inst, pf, x_norm, D, KvH * hd, false);
     v = poly_tensor_contiguous(ctx, v);
     if (!q || !k || !v) goto fail_pre_build;
 
@@ -141,10 +141,10 @@ PolyInstance *poly_qwen3(const Qwen3Config *cfg, PolyDevice device) {
 
     if (qk_norm > 0) {
       snprintf(pf, sizeof(pf), "blk.%d.attn_q_norm", i);
-      q = poly_instance_rmsnorm(inst, pf, q, qk_norm, eps);
+      q = poly_model_rmsnorm(inst, pf, q, qk_norm, eps);
       q = poly_tensor_contiguous(ctx, q);
       snprintf(pf, sizeof(pf), "blk.%d.attn_k_norm", i);
-      k = poly_instance_rmsnorm(inst, pf, k, qk_norm, eps);
+      k = poly_model_rmsnorm(inst, pf, k, qk_norm, eps);
       k = poly_tensor_contiguous(ctx, k);
       if (!q || !k) goto fail_pre_build;
     }
@@ -160,24 +160,24 @@ PolyInstance *poly_qwen3(const Qwen3Config *cfg, PolyDevice device) {
     attn = poly_tensor_reshape(ctx, attn, (int64_t[]){B, T, H * hd}, 3);
 
     snprintf(pf, sizeof(pf), "blk.%d.attn_output", i);
-    attn = poly_instance_linear(inst, pf, attn, H * hd, D, false);
+    attn = poly_model_linear(inst, pf, attn, H * hd, D, false);
     attn = poly_tensor_contiguous(ctx, attn);
     h = poly_tensor_alu2(ctx, POLY_OP_ADD, h, attn);
     h = poly_tensor_contiguous(ctx, h);
     if (!h) goto fail_pre_build;
 
     snprintf(pf, sizeof(pf), "blk.%d.ffn_norm", i);
-    PolyTensor *h_norm = poly_instance_rmsnorm(inst, pf, h, D, eps);
+    PolyTensor *h_norm = poly_model_rmsnorm(inst, pf, h, D, eps);
     h_norm = poly_tensor_contiguous(ctx, h_norm);
     if (!h_norm) goto fail_pre_build;
 
     snprintf(pf, sizeof(pf), "blk.%d.ffn_gate", i);
-    PolyTensor *gate = poly_instance_linear(inst, pf, h_norm, D, FF, false);
+    PolyTensor *gate = poly_model_linear(inst, pf, h_norm, D, FF, false);
     gate = poly_tensor_silu(ctx, gate);
     gate = poly_tensor_contiguous(ctx, gate);
 
     snprintf(pf, sizeof(pf), "blk.%d.ffn_up", i);
-    PolyTensor *up = poly_instance_linear(inst, pf, h_norm, D, FF, false);
+    PolyTensor *up = poly_model_linear(inst, pf, h_norm, D, FF, false);
     up = poly_tensor_contiguous(ctx, up);
     if (!gate || !up) goto fail_pre_build;
 
@@ -185,7 +185,7 @@ PolyInstance *poly_qwen3(const Qwen3Config *cfg, PolyDevice device) {
     gated = poly_tensor_contiguous(ctx, gated);
 
     snprintf(pf, sizeof(pf), "blk.%d.ffn_down", i);
-    PolyTensor *ffn_out = poly_instance_linear(inst, pf, gated, FF, D, false);
+    PolyTensor *ffn_out = poly_model_linear(inst, pf, gated, FF, D, false);
     ffn_out = poly_tensor_contiguous(ctx, ffn_out);
 
     h = poly_tensor_alu2(ctx, POLY_OP_ADD, h, ffn_out);
@@ -193,30 +193,30 @@ PolyInstance *poly_qwen3(const Qwen3Config *cfg, PolyDevice device) {
     if (!h) goto fail_pre_build;
   }
 
-  h = poly_instance_rmsnorm(inst, "output_norm", h, D, eps);
+  h = poly_model_rmsnorm(inst, "output_norm", h, D, eps);
   h = poly_tensor_contiguous(ctx, h);
   if (!h) goto fail_pre_build;
 
   PolyTensor *logits = poly_tensor_linear_apply(ctx, h, token_tensor, NULL);
   if (!logits) goto fail_pre_build;
 
-  if (poly_instance_output(inst, "output", logits) != POLY_STATUS_OK) goto fail_pre_build;
+  if (poly_model_output(inst, "output", logits) != POLY_STATUS_OK) goto fail_pre_build;
   const char *forward_inputs[] = {"x", "rope_cos", "rope_sin"};
   const char *forward_outputs[] = {"output"};
-  if (poly_instance_entrypoint(inst, "forward", forward_inputs, 3, forward_outputs, 1, NULL) !=
+  if (poly_model_entrypoint(inst, "forward", forward_inputs, 3, forward_outputs, 1, NULL) !=
       POLY_STATUS_OK)
     goto fail_pre_build;
 
-  PolyInstanceError err = {0};
-  if (poly_instance_build(inst, &err) != POLY_STATUS_OK) {
+  PolyModelError err = {0};
+  if (poly_model_build(inst, &err) != POLY_STATUS_OK) {
     if (err.message[0]) fprintf(stderr, "poly_qwen3: build failed: %s\n", err.message);
-    poly_instance_free(inst);
+    poly_model_free(inst);
     return NULL;
   }
   return inst;
 
 fail_pre_build:
-  poly_instance_free(inst);
+  poly_model_free(inst);
   poly_ctx_destroy(ctx);
   return NULL;
 }
@@ -228,7 +228,7 @@ fail_pre_build:
 #include "../loaders/import_desc.h"
 #include "../loaders/import_error.h"
 
-PolyInstance *poly_qwen3_from_gguf_decoded(
+PolyModel *poly_qwen3_from_gguf_decoded(
     const PolyGgufDecoded *gguf,
     int max_batch,
     int max_seq_len,
@@ -303,7 +303,7 @@ PolyInstance *poly_qwen3_from_gguf_decoded(
       cfg.head_dim, cfg.max_seq_len, cfg.norm_eps, cfg.rope_theta, cfg.qk_norm
   );
 
-  PolyInstance *inst = poly_qwen3(&cfg, device);
+  PolyModel *inst = poly_qwen3(&cfg, device);
   if (!inst) return NULL;
 
   /* Precompute RoPE frequencies and fill the input buffers */
@@ -313,15 +313,15 @@ PolyInstance *poly_qwen3_from_gguf_decoded(
     double theta = (double)cfg.rope_theta;
 
     /* Find rope_cos and rope_sin buffers */
-    int nb = poly_instance_buf_count(inst);
+    int nb = poly_model_buf_count(inst);
     float *cos_data = NULL, *sin_data = NULL;
     int64_t cos_numel = 0, sin_numel = 0;
     for (int b = 0; b < nb; b++) {
-      const char *bname = poly_instance_buf_name(inst, b);
+      const char *bname = poly_model_buf_name(inst, b);
       if (strcmp(bname, "rope_cos") == 0)
-        cos_data = poly_instance_buf_data(inst, b, &cos_numel);
+        cos_data = poly_model_buf_data(inst, b, &cos_numel);
       else if (strcmp(bname, "rope_sin") == 0)
-        sin_data = poly_instance_buf_data(inst, b, &sin_numel);
+        sin_data = poly_model_buf_data(inst, b, &sin_numel);
     }
     if (cos_data && sin_data) {
       int half = hd / 2;
@@ -376,7 +376,7 @@ PolyInstance *poly_qwen3_from_gguf_decoded(
 }
 
 /* Registry adapter */
-PolyInstance *poly_qwen3_from_gguf_decoded_generic(
+PolyModel *poly_qwen3_from_gguf_decoded_generic(
     const PolyGgufDecoded *gguf,
     const PolyGenericImportOpts *opts
 ) {

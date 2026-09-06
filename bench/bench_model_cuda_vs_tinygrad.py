@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Model-level CUDA benchmark: Polygrad Instance MLP vs tinygrad MLP.
+"""Model-level CUDA benchmark: Polygrad Model MLP vs tinygrad MLP.
 
 This is intentionally not a scalar-op microbenchmark. Each timed Polygrad call
-uses the public Instance API with host inputs, CUDA execution, and output/loss
+uses the public Model API with host inputs, CUDA execution, and output/loss
 readback. The tinygrad side mirrors that shape by constructing host inputs in
 the timed loop, moving them to CUDA, realizing, synchronizing, and reading the
 result.
@@ -238,7 +238,7 @@ def main() -> None:
         pg_us = float(polygrad[case["name"]])
         rows.append((case["name"], pg_us, tg_us, tg_us / pg_us if pg_us > 0 else float("inf")))
 
-    print("\n  model-level CUDA benchmark: Polygrad Instance vs tinygrad")
+    print("\n  model-level CUDA benchmark: Polygrad Model vs tinygrad")
     print("  ========================================================")
     print("  Mode: host input -> CUDA execution -> host output/loss readback")
     print()

@@ -1,8 +1,8 @@
 /*
- * model_tabm.c -- TabM (BatchEnsemble MLP) builder for PolyInstance
+ * model_tabm.c -- TabM (BatchEnsemble MLP) builder for PolyModel
  *
  * Builds a tensor-level UOp graph from a JSON spec using staged
- * PolyInstance bindings and entrypoints.
+ * PolyModel bindings and entrypoints.
  *
  * TabM forward pass per layer:
  *   For each ensemble member i: l_i(x) = s_i * (W @ (r_i * x)) + b_i
@@ -12,7 +12,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tabm.h"
 #include "mlp.h" /* poly_init_param_kaiming */
-#include "../instance.h"
+#include "../model.h"
 #include "../tensor.h"
 #include "../../vendor/cjson/cJSON.h"
 #include <stdlib.h>
@@ -59,13 +59,13 @@ static PolyTensor *tabm_float_scalar(PolyCtx *ctx, double value) {
 
 /* TabM Builder */
 
-PolyInstance *poly_tabm_instance(const char *spec_json, int spec_len, PolyDevice device) {
+PolyModel *poly_tabm_from_json(const char *spec_json, int spec_len, PolyDevice device) {
   if (!spec_json || spec_len <= 0) return NULL;
 
   /* Parse JSON */
   cJSON *root = cJSON_ParseWithLength(spec_json, (size_t)spec_len);
   if (!root) {
-    fprintf(stderr, "poly_tabm_instance: JSON parse error\n");
+    fprintf(stderr, "poly_tabm_from_json: JSON parse error\n");
     return NULL;
   }
 
@@ -78,14 +78,14 @@ PolyInstance *poly_tabm_instance(const char *spec_json, int spec_len, PolyDevice
   cJSON *ensemble_item = cJSON_GetObjectItem(root, "n_ensemble");
 
   if (!layers_arr || !cJSON_IsArray(layers_arr)) {
-    fprintf(stderr, "poly_tabm_instance: 'layers' must be an array\n");
+    fprintf(stderr, "poly_tabm_from_json: 'layers' must be an array\n");
     cJSON_Delete(root);
     return NULL;
   }
 
   int n_layers = cJSON_GetArraySize(layers_arr);
   if (n_layers < 2) {
-    fprintf(stderr, "poly_tabm_instance: need at least 2 layers\n");
+    fprintf(stderr, "poly_tabm_from_json: need at least 2 layers\n");
     cJSON_Delete(root);
     return NULL;
   }
@@ -112,11 +112,11 @@ PolyInstance *poly_tabm_instance(const char *spec_json, int spec_len, PolyDevice
   PolyCtx *ctx = poly_ctx_new();
   if (!ctx) goto fail_no_ctx;
   if (device != POLY_DEVICE_AUTO) poly_ctx_set_preferred_device(ctx, device);
-  PolyInstanceOptions opts = {
+  PolyModelOptions opts = {
       .own_ctx_on_success = true,
       .own_ctx_on_failure = true,
   };
-  PolyInstance *inst = poly_instance_new(ctx, &opts);
+  PolyModel *inst = poly_model_new(ctx, &opts);
   if (!inst) {
     poly_ctx_destroy(ctx);
     goto fail_no_ctx;
@@ -129,7 +129,7 @@ PolyInstance *poly_tabm_instance(const char *spec_json, int spec_len, PolyDevice
   int out_dim = layer_sizes[n_layers - 1];
 
   int64_t x_io_shape[] = {batch_size, in_dim};
-  PolyTensor *x_tensor = poly_instance_input(inst, "x", POLY_FLOAT32, x_io_shape, 2);
+  PolyTensor *x_tensor = poly_model_input(inst, "x", POLY_FLOAT32, x_io_shape, 2);
   if (!x_tensor) goto fail_pre_build;
 
   param_bufs = calloc((size_t)n_linear * 4, sizeof(PolyTensor *));
@@ -139,29 +139,29 @@ PolyInstance *poly_tabm_instance(const char *spec_json, int spec_len, PolyDevice
     int l_in = layer_sizes[l];
     int l_out = layer_sizes[l + 1];
 
-    if (poly_instance_scope_push(inst, "layers.%d", l) != POLY_STATUS_OK) goto fail_pre_build;
+    if (poly_model_scope_push(inst, "layers.%d", l) != POLY_STATUS_OK) goto fail_pre_build;
 
     int64_t ws[] = {l_out, l_in};
-    PolyTensor *w_tensor = poly_instance_param(inst, "weight", POLY_FLOAT32, ws, 2);
+    PolyTensor *w_tensor = poly_model_param(inst, "weight", POLY_FLOAT32, ws, 2);
     if (!w_tensor) goto fail_pre_build;
     param_bufs[pi++] = w_tensor;
 
     int64_t rs[] = {k, l_in};
-    PolyTensor *r_tensor = poly_instance_param(inst, "r", POLY_FLOAT32, rs, 2);
+    PolyTensor *r_tensor = poly_model_param(inst, "r", POLY_FLOAT32, rs, 2);
     if (!r_tensor) goto fail_pre_build;
     param_bufs[pi++] = r_tensor;
 
     int64_t ss[] = {k, l_out};
-    PolyTensor *s_tensor = poly_instance_param(inst, "s", POLY_FLOAT32, ss, 2);
+    PolyTensor *s_tensor = poly_model_param(inst, "s", POLY_FLOAT32, ss, 2);
     if (!s_tensor) goto fail_pre_build;
     param_bufs[pi++] = s_tensor;
 
     int64_t bs[] = {k, l_out};
-    PolyTensor *b_tensor = poly_instance_param(inst, "b", POLY_FLOAT32, bs, 2);
+    PolyTensor *b_tensor = poly_model_param(inst, "b", POLY_FLOAT32, bs, 2);
     if (!b_tensor) goto fail_pre_build;
     param_bufs[pi++] = b_tensor;
 
-    if (poly_instance_scope_pop(inst) != POLY_STATUS_OK) goto fail_pre_build;
+    if (poly_model_scope_pop(inst) != POLY_STATUS_OK) goto fail_pre_build;
   }
 
   /* Build forward graph. */
@@ -217,11 +217,11 @@ PolyInstance *poly_tabm_instance(const char *spec_json, int spec_len, PolyDevice
 
   int64_t out_shape[] = {batch_size, out_dim};
   PolyTensor *out_tensor = mean_k ? poly_tensor_reshape(ctx, mean_k, out_shape, 2) : NULL;
-  if (!out_tensor || poly_instance_output(inst, "output", out_tensor) != POLY_STATUS_OK)
+  if (!out_tensor || poly_model_output(inst, "output", out_tensor) != POLY_STATUS_OK)
     goto fail_pre_build;
   const char *forward_inputs[] = {"x"};
   const char *forward_outputs[] = {"output"};
-  if (poly_instance_entrypoint(inst, "forward", forward_inputs, 1, forward_outputs, 1, NULL) !=
+  if (poly_model_entrypoint(inst, "forward", forward_inputs, 1, forward_outputs, 1, NULL) !=
       POLY_STATUS_OK)
     goto fail_pre_build;
 
@@ -229,7 +229,7 @@ PolyInstance *poly_tabm_instance(const char *spec_json, int spec_len, PolyDevice
       (loss_type && (strcmp(loss_type, "mse") == 0 || strcmp(loss_type, "cross_entropy") == 0));
   if (has_loss) {
     int64_t y_shape[] = {batch_size, out_dim};
-    PolyTensor *y_tensor = poly_instance_target(inst, "y", POLY_FLOAT32, y_shape, 2);
+    PolyTensor *y_tensor = poly_model_target(inst, "y", POLY_FLOAT32, y_shape, 2);
     if (!y_tensor) goto fail_pre_build;
     PolyTensor *loss_tensor;
     if (strcmp(loss_type, "mse") == 0) {
@@ -257,20 +257,20 @@ PolyInstance *poly_tabm_instance(const char *spec_json, int spec_len, PolyDevice
                         ? poly_tensor_alu2(ctx, POLY_OP_MUL, sum_batch, loss_scale)
                         : NULL;
     }
-    if (!loss_tensor || poly_instance_output(inst, "loss", loss_tensor) != POLY_STATUS_OK)
+    if (!loss_tensor || poly_model_output(inst, "loss", loss_tensor) != POLY_STATUS_OK)
       goto fail_pre_build;
     const char *loss_inputs[] = {"x", "y"};
     const char *loss_outputs[] = {"loss"};
     PolyEntrypointOptions loss_opts = {.objective = "loss"};
-    if (poly_instance_entrypoint(inst, "loss", loss_inputs, 2, loss_outputs, 1, &loss_opts) !=
+    if (poly_model_entrypoint(inst, "loss", loss_inputs, 2, loss_outputs, 1, &loss_opts) !=
         POLY_STATUS_OK)
       goto fail_pre_build;
   }
 
-  PolyInstanceError err = {0};
-  if (poly_instance_build(inst, &err) != POLY_STATUS_OK) {
-    if (err.message[0]) fprintf(stderr, "poly_tabm_instance: build failed: %s\n", err.message);
-    poly_instance_free(inst);
+  PolyModelError err = {0};
+  if (poly_model_build(inst, &err) != POLY_STATUS_OK) {
+    if (err.message[0]) fprintf(stderr, "poly_tabm_from_json: build failed: %s\n", err.message);
+    poly_model_free(inst);
     free(param_bufs);
     free(layer_sizes);
     cJSON_Delete(root);
@@ -284,7 +284,7 @@ PolyInstance *poly_tabm_instance(const char *spec_json, int spec_len, PolyDevice
     char name[128];
 
     snprintf(name, sizeof(name), "layers.%d.weight", l);
-    float *w_data = poly_instance_buf_data_named(inst, name, NULL);
+    float *w_data = poly_model_buf_data_named(inst, name, NULL);
     if (w_data) {
       int64_t w_numel = (int64_t)l_out * l_in;
       poly_init_param_kaiming(seed, name, w_data, w_numel, (int64_t)l_in);
@@ -292,7 +292,7 @@ PolyInstance *poly_tabm_instance(const char *spec_json, int spec_len, PolyDevice
 
     snprintf(name, sizeof(name), "layers.%d.r", l);
     int64_t r_numel = 0;
-    float *r_data = poly_instance_buf_data_named(inst, name, &r_numel);
+    float *r_data = poly_model_buf_data_named(inst, name, &r_numel);
     if (r_data) {
       for (int64_t i = 0; i < r_numel; i++)
         r_data[i] = 1.0f;
@@ -300,7 +300,7 @@ PolyInstance *poly_tabm_instance(const char *spec_json, int spec_len, PolyDevice
 
     snprintf(name, sizeof(name), "layers.%d.s", l);
     int64_t s_numel = 0;
-    float *s_data = poly_instance_buf_data_named(inst, name, &s_numel);
+    float *s_data = poly_model_buf_data_named(inst, name, &s_numel);
     if (s_data) {
       for (int64_t i = 0; i < s_numel; i++)
         s_data[i] = 1.0f;
@@ -314,7 +314,7 @@ PolyInstance *poly_tabm_instance(const char *spec_json, int spec_len, PolyDevice
 
 fail_pre_build:
   free(param_bufs);
-  poly_instance_free(inst);
+  poly_model_free(inst);
   poly_ctx_destroy(ctx);
 fail_no_ctx:
   free(layer_sizes);

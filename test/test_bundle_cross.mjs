@@ -22,7 +22,7 @@ async function main() {
   console.log('expected output:', sidecar.output)
 
   // Load from bundle
-  const inst = polygrad.Instance.fromBundle(new Uint8Array(bundleBytes))
+  const inst = polygrad.Model.fromBundle(new Uint8Array(bundleBytes))
   const pc = typeof inst.paramCount === 'function' ? inst.paramCount() : inst.paramCount
   const bc = typeof inst.bufCount === 'function' ? inst.bufCount() : inst.bufCount
   console.log('param_count:', pc)

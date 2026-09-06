@@ -3327,7 +3327,7 @@ function createBoundTensorClass(runtime) {
       rejectRequiresGrad(opts)
       if (shape.some(x => x < 0)) throw new Error(`negative dimensions are not allowed: ${shape}`)
       if (opts && Object.prototype.hasOwnProperty.call(opts, 'name')) {
-        throw new TypeError('Tensor.empty does not accept name; pass names to Instance.fromTensors')
+        throw new TypeError('Tensor.empty does not accept name; pass names to Model.fromTensors')
       }
       const ctx = (opts && opts._ctx) || liveCore().ctx
       const dtype = (opts && opts.dtype) || 'float32'

@@ -43,8 +43,13 @@ function nodeModuleEval(code, extraArgs = [], env = {}) {
 function testNodeCjsRoot() {
   const out = nodeEval(`
     const pg = require('polygrad')
+    if (typeof pg.Model !== 'function' || 'Instance' in pg) throw new Error('incorrect Model export')
     const rt = pg.create({core:'wasm'})
     if (rt && typeof rt.then === 'function') throw new Error('create returned Promise')
+    if (pg.Model.fromDefinition || typeof pg.models.Graph !== 'function') throw new Error('incorrect factory namespace')
+    const model = rt.models.Sequential({input:{name:'x',shape:[1],dtype:'float32'},layers:[{name:'copy',type:'identity'}],output:'prediction'})
+    if (model.forward({x:new Float32Array([7])}).prediction[0] !== 7) throw new Error('packaged Sequential failed')
+    model.dispose()
     const y = new pg.Tensor([1,2,3]).mul(2)
     console.log(Array.from(y.toArray()).join(','))
     pg.disposeDefault(); rt.dispose()
@@ -54,7 +59,8 @@ function testNodeCjsRoot() {
 
 function testNodeEsmRoot() {
   const out = nodeModuleEval(`
-    import { Tensor, create, disposeDefault } from 'polygrad'
+    import { Tensor, Model, create, disposeDefault } from 'polygrad'
+    if (typeof Model.trace !== 'function') throw new Error('missing Model.trace export')
     const rt = create({core:'wasm'})
     if (rt && typeof rt.then === 'function') throw new Error('create returned Promise')
     const y = new Tensor([1,2,3]).mul(3)
@@ -66,7 +72,8 @@ function testNodeEsmRoot() {
 
 function testBrowserConditionSync() {
   const out = nodeModuleEval(`
-    import { Tensor, create, disposeDefault } from 'polygrad'
+    import { Tensor, Model, create, disposeDefault } from 'polygrad'
+    if (typeof Model.fromTensors !== 'function') throw new Error('missing browser Model export')
     const rt = create({core:'wasm'})
     if (rt && typeof rt.then === 'function') throw new Error('create returned Promise')
     const y = new Tensor([1,2,3]).mul(4)
@@ -95,6 +102,9 @@ function testBrowserConditionAsync() {
     try { create({core:'wasm'}) } catch (e) { threw = e && e.name === 'PolyWasmSyncUnsupported' }
     if (!threw) throw new Error('async browser create() did not throw PolyWasmSyncUnsupported')
     const rt = await createAsync({core:'wasm'})
+    const model = await rt.models.GraphAsync({inputs:{x:{shape:[1],dtype:'float32'}},nodes:[],outputs:{prediction:'x'}})
+    if (model.forward({x:new Float32Array([7])}).prediction[0] !== 7) throw new Error('packaged Graph failed')
+    model.dispose()
     const y = new rt.Tensor([1,2,3]).mul(6)
     console.log(Array.from(y.toArray()).join(','))
     rt.dispose()

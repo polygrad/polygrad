@@ -2837,7 +2837,7 @@ static PolyUOp *register_named(
   for (int i = 0; i < ndim; i++)
     numel *= shape[i];
 
-  /* PolyInstance names an approved deviceless logical resource. Explicit
+  /* PolyModel names an approved deviceless logical resource. Explicit
    * placement later creates Tinygrad-shaped physical BUFFER metadata. */
   PolyUOp *buf = poly_uop_new_logical_buffer(ctx, dt, numel);
   if (!buf) return NULL;

@@ -16,9 +16,6 @@ JS_EXCLUDE = {
     "wasm.c",
     "wasm_builder.c",
     "wgsl.c",
-    "llama3.c",
-    "resnet.c",
-    "vit.c",
 }
 
 

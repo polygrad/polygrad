@@ -30,7 +30,7 @@ async function main() {
 
   const input = pg.Tensor.empty([1, 2])
   const output = model.call(input)
-  const inst = await pg.Instance.fromTensors({
+  const inst = await pg.Model.fromTensors({
     inputs: { x: input },
     outputs: { output },
     params: { weight: model.weight }

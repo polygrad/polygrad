@@ -106,7 +106,7 @@ Object.defineProperties(api, {
   jitAsync: defaultGetter('jitAsync'),
   compile: defaultGetter('compile'),
   compileAsync: defaultGetter('compileAsync'),
-  Instance: defaultGetter('Instance'),
+  Model: defaultGetter('Model'),
   models: defaultGetter('models'),
   Tokenizer: defaultGetter('Tokenizer'),
   nn: defaultGetter('nn'),

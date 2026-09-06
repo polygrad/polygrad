@@ -9,10 +9,7 @@ const dstDir = path.resolve(__dirname, '..', 'csrc')
 // JS native builds do not consume the browser-only render/WASM sources.
 const EXCLUDE = new Set([
   'wasm.c',
-  'wasm_builder.c',
-  'llama3.c',
-  'resnet.c',
-  'vit.c'
+  'wasm_builder.c'
 ])
 
 if (!fs.existsSync(path.join(repoRoot, 'src'))) {

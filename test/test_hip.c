@@ -523,12 +523,12 @@ TEST_BACKEND(hip, e2e_reduce_sum) {
   PASS();
 }
 
-/* Instance-level HIP tests */
+/* Model-level HIP tests */
 
-#include "../src/instance.h"
+#include "../src/model.h"
 #include "../src/models/mlp.h"
 
-static PolyInstance *hip_make_test_mlp(int n_in, int n_out) {
+static PolyModel *hip_make_test_mlp(int n_in, int n_out) {
   char spec[256];
   snprintf(
       spec, sizeof(spec),
@@ -542,29 +542,29 @@ static PolyInstance *hip_make_test_mlp(int n_in, int n_out) {
 TEST_BACKEND(hip, instance_set_device_hip) {
   SKIP_IF_NO_HIP();
 
-  PolyInstance *inst = hip_make_test_mlp(2, 3);
+  PolyModel *inst = hip_make_test_mlp(2, 3);
   ASSERT_NOT_NULL(inst);
 
   /* Read initial host data */
   int64_t numel;
-  float *cpu_data = poly_instance_buf_data(inst, 0, &numel);
+  float *cpu_data = poly_model_buf_data(inst, 0, &numel);
   ASSERT_NOT_NULL(cpu_data);
   float saved = cpu_data[0];
 
-  ASSERT_INT_EQ(poly_instance_set_device(inst, POLY_DEVICE_HIP), 0);
+  ASSERT_INT_EQ(poly_model_set_device(inst, POLY_DEVICE_HIP), 0);
 
   /* buf_data auto-readbacks from GPU (tinygrad-style) */
-  float *gpu_data = poly_instance_buf_data(inst, 0, &numel);
+  float *gpu_data = poly_model_buf_data(inst, 0, &numel);
   ASSERT_NOT_NULL(gpu_data);
   ASSERT_FLOAT_EQ(gpu_data[0], saved, 1e-6);
 
   /* Switch back to CPU */
-  ASSERT_INT_EQ(poly_instance_set_device(inst, POLY_DEVICE_CPU), 0);
+  ASSERT_INT_EQ(poly_model_set_device(inst, POLY_DEVICE_CPU), 0);
 
   /* buf_data still works on CPU */
-  ASSERT_NOT_NULL(poly_instance_buf_data(inst, 0, &numel));
+  ASSERT_NOT_NULL(poly_model_buf_data(inst, 0, &numel));
 
-  poly_instance_free(inst);
+  poly_model_free(inst);
   PASS();
 }
 
@@ -572,13 +572,13 @@ TEST_BACKEND(hip, instance_hip_forward_parity) {
   SKIP_IF_NO_HIP();
 
   int n_in = 2, n_out = 3;
-  PolyInstance *inst = hip_make_test_mlp(n_in, n_out);
+  PolyModel *inst = hip_make_test_mlp(n_in, n_out);
   ASSERT_NOT_NULL(inst);
 
   /* Seed weights deterministically */
-  for (int p = 0; p < poly_instance_param_count(inst); p++) {
+  for (int p = 0; p < poly_model_param_count(inst); p++) {
     int64_t numel;
-    float *data = poly_instance_param_data(inst, p, &numel);
+    float *data = poly_model_param_data(inst, p, &numel);
     for (int64_t j = 0; j < numel; j++)
       data[j] = (float)(j % 7 - 3) * 0.1f;
   }
@@ -587,51 +587,51 @@ TEST_BACKEND(hip, instance_hip_forward_parity) {
   float input[] = {1.0f, 2.0f};
   float out_cpu[3] = {0};
   PolyIOBinding io[] = {POLY_IO_BINDING_ARRAY("x", input, POLY_FLOAT32)};
-  ASSERT_INT_EQ(poly_instance_forward(inst, io, 1), 0);
+  ASSERT_INT_EQ(poly_model_forward(inst, io, 1), 0);
 
   /* Read CPU output */
   int out_idx = -1;
-  for (int i = 0; i < poly_instance_buf_count(inst); i++)
-    if (poly_instance_buf_role(inst, i) == POLY_ROLE_OUTPUT) {
+  for (int i = 0; i < poly_model_buf_count(inst); i++)
+    if (poly_model_buf_role(inst, i) == POLY_ROLE_OUTPUT) {
       out_idx = i;
       break;
     }
   ASSERT_TRUE(out_idx >= 0);
   {
     int64_t numel;
-    float *cpu_out = poly_instance_buf_data(inst, out_idx, &numel);
+    float *cpu_out = poly_model_buf_data(inst, out_idx, &numel);
     ASSERT_NOT_NULL(cpu_out);
     memcpy(out_cpu, cpu_out, n_out * sizeof(float));
   }
 
   /* Switch to HIP */
-  ASSERT_INT_EQ(poly_instance_set_device(inst, POLY_DEVICE_HIP), 0);
+  ASSERT_INT_EQ(poly_model_set_device(inst, POLY_DEVICE_HIP), 0);
 
   /* Forward on HIP */
-  ASSERT_INT_EQ(poly_instance_forward(inst, io, 1), 0);
+  ASSERT_INT_EQ(poly_model_forward(inst, io, 1), 0);
 
   /* Readback output */
   float out_gpu[3] = {0};
-  poly_instance_readback_buf(inst, out_idx, out_gpu, n_out * sizeof(float));
+  poly_model_readback_buf(inst, out_idx, out_gpu, n_out * sizeof(float));
 
   /* Compare */
   for (int i = 0; i < n_out; i++)
     ASSERT_FLOAT_EQ(out_gpu[i], out_cpu[i], 1e-4);
 
-  poly_instance_free(inst);
+  poly_model_free(inst);
   PASS();
 }
 
 TEST_BACKEND(hip, instance_hip_roundtrip) {
   SKIP_IF_NO_HIP();
 
-  PolyInstance *inst = hip_make_test_mlp(2, 1);
+  PolyModel *inst = hip_make_test_mlp(2, 1);
   ASSERT_NOT_NULL(inst);
 
   /* Seed weights */
-  for (int p = 0; p < poly_instance_param_count(inst); p++) {
+  for (int p = 0; p < poly_model_param_count(inst); p++) {
     int64_t numel;
-    float *data = poly_instance_param_data(inst, p, &numel);
+    float *data = poly_model_param_data(inst, p, &numel);
     for (int64_t j = 0; j < numel; j++)
       data[j] = (float)(j % 5 - 2) * 0.2f;
   }
@@ -641,41 +641,41 @@ TEST_BACKEND(hip, instance_hip_roundtrip) {
   float results[4];
 
   /* CPU -> forward */
-  ASSERT_INT_EQ(poly_instance_forward(inst, io, 1), 0);
+  ASSERT_INT_EQ(poly_model_forward(inst, io, 1), 0);
   int out_idx = -1;
-  for (int i = 0; i < poly_instance_buf_count(inst); i++)
-    if (poly_instance_buf_role(inst, i) == POLY_ROLE_OUTPUT) {
+  for (int i = 0; i < poly_model_buf_count(inst); i++)
+    if (poly_model_buf_role(inst, i) == POLY_ROLE_OUTPUT) {
       out_idx = i;
       break;
     }
   {
     int64_t n;
-    results[0] = *poly_instance_buf_data(inst, out_idx, &n);
+    results[0] = *poly_model_buf_data(inst, out_idx, &n);
   }
 
   /* HIP -> forward */
-  ASSERT_INT_EQ(poly_instance_set_device(inst, POLY_DEVICE_HIP), 0);
-  ASSERT_INT_EQ(poly_instance_forward(inst, io, 1), 0);
-  poly_instance_readback_buf(inst, out_idx, &results[1], sizeof(float));
+  ASSERT_INT_EQ(poly_model_set_device(inst, POLY_DEVICE_HIP), 0);
+  ASSERT_INT_EQ(poly_model_forward(inst, io, 1), 0);
+  poly_model_readback_buf(inst, out_idx, &results[1], sizeof(float));
 
   /* CPU -> forward */
-  ASSERT_INT_EQ(poly_instance_set_device(inst, POLY_DEVICE_CPU), 0);
-  ASSERT_INT_EQ(poly_instance_forward(inst, io, 1), 0);
+  ASSERT_INT_EQ(poly_model_set_device(inst, POLY_DEVICE_CPU), 0);
+  ASSERT_INT_EQ(poly_model_forward(inst, io, 1), 0);
   {
     int64_t n;
-    results[2] = *poly_instance_buf_data(inst, out_idx, &n);
+    results[2] = *poly_model_buf_data(inst, out_idx, &n);
   }
 
   /* HIP -> forward */
-  ASSERT_INT_EQ(poly_instance_set_device(inst, POLY_DEVICE_HIP), 0);
-  ASSERT_INT_EQ(poly_instance_forward(inst, io, 1), 0);
-  poly_instance_readback_buf(inst, out_idx, &results[3], sizeof(float));
+  ASSERT_INT_EQ(poly_model_set_device(inst, POLY_DEVICE_HIP), 0);
+  ASSERT_INT_EQ(poly_model_forward(inst, io, 1), 0);
+  poly_model_readback_buf(inst, out_idx, &results[3], sizeof(float));
 
   /* All 4 results should match within tolerance */
   for (int i = 1; i < 4; i++)
     ASSERT_FLOAT_EQ(results[i], results[0], 1e-4);
 
-  poly_instance_free(inst);
+  poly_model_free(inst);
   PASS();
 }
 

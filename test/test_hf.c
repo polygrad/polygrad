@@ -225,19 +225,19 @@ TEST(hf, gpt2_build_tiny) {
       .batch_size = 1,
       .norm_eps = 1e-5f};
 
-  PolyInstance *inst = poly_gpt2(&cfg, POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_gpt2(&cfg, POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   /* Check param count: wte + wpe + 1 layer (12 params) + ln_f (2) = 16 */
-  int n_params = poly_instance_param_count(inst);
+  int n_params = poly_model_param_count(inst);
   ASSERT_INT_EQ(n_params, 16);
 
   /* Check wte.weight shape */
   int64_t shape[8];
   for (int i = 0; i < n_params; i++) {
-    const char *name = poly_instance_param_name(inst, i);
+    const char *name = poly_model_param_name(inst, i);
     if (strcmp(name, "wte.weight") == 0) {
-      int ndim = poly_instance_param_shape(inst, i, shape, 8);
+      int ndim = poly_model_param_shape(inst, i, shape, 8);
       ASSERT_INT_EQ(ndim, 2);
       ASSERT_INT_EQ(shape[0], 32); /* vocab_size */
       ASSERT_INT_EQ(shape[1], 16); /* n_embd */
@@ -245,21 +245,21 @@ TEST(hf, gpt2_build_tiny) {
   }
 
   /* Check we have the expected buffer names */
-  int n_bufs = poly_instance_buf_count(inst);
+  int n_bufs = poly_model_buf_count(inst);
   ASSERT_TRUE(n_bufs >= 16 + 4); /* params + x + output + positions + arange */
 
   int found_x = 0, found_output = 0;
   for (int i = 0; i < n_bufs; i++) {
-    const char *name = poly_instance_buf_name(inst, i);
+    const char *name = poly_model_buf_name(inst, i);
     if (strcmp(name, "x") == 0) found_x = 1;
     if (strcmp(name, "output") == 0) found_output = 1;
   }
   ASSERT_TRUE(found_x);
   ASSERT_TRUE(found_output);
 
-  ASSERT_INT_EQ(poly_ctx_named_count(poly_instance_ctx(inst)), 0);
+  ASSERT_INT_EQ(poly_ctx_named_count(poly_model_ctx(inst)), 0);
 
-  poly_instance_free(inst);
+  poly_model_free(inst);
   PASS();
 }
 
@@ -273,21 +273,21 @@ TEST(hf, gpt2_build_multi_layer) {
       .batch_size = 2,
       .norm_eps = 1e-5f};
 
-  PolyInstance *inst = poly_gpt2(&cfg, POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_gpt2(&cfg, POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   /* 2 (wte+wpe) + 3*12 (layers) + 2 (ln_f) = 40 params */
-  ASSERT_INT_EQ(poly_instance_param_count(inst), 40);
+  ASSERT_INT_EQ(poly_model_param_count(inst), 40);
 
   /* Verify a deep layer param exists */
   int found = 0;
-  int n_params = poly_instance_param_count(inst);
+  int n_params = poly_model_param_count(inst);
   for (int i = 0; i < n_params; i++) {
-    if (strcmp(poly_instance_param_name(inst, i), "h.2.mlp.c_proj.weight") == 0) found = 1;
+    if (strcmp(poly_model_param_name(inst, i), "h.2.mlp.c_proj.weight") == 0) found = 1;
   }
   ASSERT_TRUE(found);
 
-  poly_instance_free(inst);
+  poly_model_free(inst);
   PASS();
 }
 
@@ -306,31 +306,31 @@ TEST(hf, qwen3_build_tiny_staged) {
   cfg.batch_size = 1;
   cfg.qk_norm = 0;
 
-  PolyInstance *inst = poly_qwen3(&cfg, POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_qwen3(&cfg, POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
-  ASSERT_INT_EQ(poly_ctx_named_count(poly_instance_ctx(inst)), 0);
+  ASSERT_INT_EQ(poly_ctx_named_count(poly_model_ctx(inst)), 0);
 
-  ASSERT_INT_EQ(poly_instance_param_count(inst), 11);
-  ASSERT_STR_EQ(poly_instance_param_name(inst, 0), "token_embd.weight");
-  ASSERT_STR_EQ(poly_instance_param_name(inst, 1), "blk.0.attn_norm.weight");
-  ASSERT_STR_EQ(poly_instance_param_name(inst, 2), "blk.0.attn_q.weight");
+  ASSERT_INT_EQ(poly_model_param_count(inst), 11);
+  ASSERT_STR_EQ(poly_model_param_name(inst, 0), "token_embd.weight");
+  ASSERT_STR_EQ(poly_model_param_name(inst, 1), "blk.0.attn_norm.weight");
+  ASSERT_STR_EQ(poly_model_param_name(inst, 2), "blk.0.attn_q.weight");
 
   int64_t numel = 0;
   int x_idx = -1;
-  for (int i = 0; i < poly_instance_buf_count(inst); i++)
-    if (strcmp(poly_instance_buf_name(inst, i), "x") == 0) x_idx = i;
+  for (int i = 0; i < poly_model_buf_count(inst); i++)
+    if (strcmp(poly_model_buf_name(inst, i), "x") == 0) x_idx = i;
   ASSERT_TRUE(x_idx >= 0);
-  ASSERT_INT_EQ(poly_instance_buf_dtype_id(inst, x_idx), poly_dtype_id_by_name("int32"));
-  ASSERT_NOT_NULL(poly_instance_buf_data_raw(inst, x_idx, &numel));
+  ASSERT_INT_EQ(poly_model_buf_dtype_id(inst, x_idx), poly_dtype_id_by_name("int32"));
+  ASSERT_NOT_NULL(poly_model_buf_data_raw(inst, x_idx, &numel));
   ASSERT_INT_EQ(numel, 4);
-  ASSERT_NOT_NULL(poly_instance_buf_data_named(inst, "rope_cos", &numel));
+  ASSERT_NOT_NULL(poly_model_buf_data_named(inst, "rope_cos", &numel));
   ASSERT_INT_EQ(numel, 16);
-  ASSERT_NOT_NULL(poly_instance_buf_data_named(inst, "rope_sin", &numel));
+  ASSERT_NOT_NULL(poly_model_buf_data_named(inst, "rope_sin", &numel));
   ASSERT_INT_EQ(numel, 16);
-  ASSERT_NOT_NULL(poly_instance_buf_data_named(inst, "output", &numel));
+  ASSERT_NOT_NULL(poly_model_buf_data_named(inst, "output", &numel));
   ASSERT_INT_EQ(numel, 4 * 32);
 
-  poly_instance_free(inst);
+  poly_model_free(inst);
   PASS();
 }
 
@@ -353,16 +353,16 @@ TEST(hf, hf_load_tiny_gpt2) {
   const uint8_t *files[] = {file};
   int64_t lens[] = {file_len};
 
-  PolyInstance *inst =
+  PolyModel *inst =
       poly_hf_load(config, (int)strlen(config), files, lens, 1, 1, 8, POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   /* Verify wte.weight was loaded */
-  int n_params = poly_instance_param_count(inst);
+  int n_params = poly_model_param_count(inst);
   for (int i = 0; i < n_params; i++) {
-    if (strcmp(poly_instance_param_name(inst, i), "wte.weight") == 0) {
+    if (strcmp(poly_model_param_name(inst, i), "wte.weight") == 0) {
       int64_t numel;
-      float *data = poly_instance_param_data(inst, i, &numel);
+      float *data = poly_model_param_data(inst, i, &numel);
       ASSERT_INT_EQ(numel, 32 * 16);
       ASSERT_FLOAT_EQ(data[0], 0.0f, 1e-6f);
       ASSERT_FLOAT_EQ(data[1], 0.001f, 1e-6f);
@@ -370,7 +370,7 @@ TEST(hf, hf_load_tiny_gpt2) {
     }
   }
 
-  poly_instance_free(inst);
+  poly_model_free(inst);
   free(file);
   PASS();
 }
@@ -393,11 +393,11 @@ TEST(hf, hf_load_ignores_attn_bias) {
   int64_t lens[] = {file_len};
 
   /* Should not crash */
-  PolyInstance *inst =
+  PolyModel *inst =
       poly_hf_load(config, (int)strlen(config), files, lens, 1, 1, 8, POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
-  poly_instance_free(inst);
+  poly_model_free(inst);
   free(file);
   PASS();
 }
@@ -537,15 +537,15 @@ TEST(hf, gpt2_forward_e2e) {
       .batch_size = 1,
       .norm_eps = 1e-5f};
 
-  PolyInstance *inst = poly_gpt2(&cfg, POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_gpt2(&cfg, POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   /* Initialize weights with small random values */
-  int np = poly_instance_param_count(inst);
+  int np = poly_model_param_count(inst);
   for (int i = 0; i < np; i++) {
     int64_t numel;
-    float *data = poly_instance_param_data(inst, i, &numel);
-    const char *name = poly_instance_param_name(inst, i);
+    float *data = poly_model_param_data(inst, i, &numel);
+    const char *name = poly_model_param_name(inst, i);
     /* LayerNorm weights init to 1, biases to 0 */
     if (strstr(name, "ln_") && strstr(name, "weight")) {
       for (int64_t j = 0; j < numel; j++)
@@ -572,14 +572,14 @@ TEST(hf, gpt2_forward_e2e) {
   };
 
   /* Run forward pass */
-  int ret = poly_instance_forward(inst, forward_io, 2);
+  int ret = poly_model_forward(inst, forward_io, 2);
   ASSERT_INT_EQ(ret, 0);
 
   /* Check output: (1, 8, 32) logits */
-  int nb = poly_instance_buf_count(inst);
+  int nb = poly_model_buf_count(inst);
   int out_idx = -1;
   for (int i = 0; i < nb; i++) {
-    if (strcmp(poly_instance_buf_name(inst, i), "output") == 0) {
+    if (strcmp(poly_model_buf_name(inst, i), "output") == 0) {
       out_idx = i;
       break;
     }
@@ -587,7 +587,7 @@ TEST(hf, gpt2_forward_e2e) {
   ASSERT_TRUE(out_idx >= 0);
 
   int64_t numel;
-  float *out = poly_instance_buf_data(inst, out_idx, &numel);
+  float *out = poly_model_buf_data(inst, out_idx, &numel);
   ASSERT_INT_EQ(numel, 1 * 8 * 32);
 
   /* Verify output is finite and not all zero */
@@ -603,9 +603,8 @@ TEST(hf, gpt2_forward_e2e) {
   memcpy(baseline, out, (size_t)numel * sizeof(*baseline));
 
   int ir_len = 0, weights_len = 0;
-  uint8_t *ir = poly_instance_export_ir(inst, &ir_len);
-  uint8_t *weights =
-      poly_instance_export_weights_ex(inst, &weights_len, POLY_EXPORT_WEIGHTS_PARAMS);
+  uint8_t *ir = poly_model_export_ir(inst, &ir_len);
+  uint8_t *weights = poly_model_export_weights_ex(inst, &weights_len, POLY_EXPORT_WEIGHTS_PARAMS);
   ASSERT_NOT_NULL(ir);
   ASSERT_NOT_NULL(weights);
 
@@ -615,24 +614,24 @@ TEST(hf, gpt2_forward_e2e) {
   if (poly_cuda_available()) place_devices[n_place_devices++] = POLY_DEVICE_CUDA;
 #endif
   for (int d = 0; d < n_place_devices; d++) {
-    PolyInstance *placed = poly_instance_from_ir(ir, ir_len, weights, weights_len);
+    PolyModel *placed = poly_model_from_ir(ir, ir_len, weights, weights_len);
     ASSERT_NOT_NULL(placed);
-    ASSERT_INT_EQ(poly_instance_set_device(placed, place_devices[d]), 0);
-    ASSERT_INT_EQ(poly_instance_forward(placed, forward_io, 2), 0);
+    ASSERT_INT_EQ(poly_model_set_device(placed, place_devices[d]), 0);
+    ASSERT_INT_EQ(poly_model_forward(placed, forward_io, 2), 0);
     int64_t placed_numel = 0;
-    float *placed_out = poly_instance_buf_data_named(placed, "output", &placed_numel);
+    float *placed_out = poly_model_buf_data_named(placed, "output", &placed_numel);
     ASSERT_NOT_NULL(placed_out);
     ASSERT_INT_EQ(placed_numel, numel);
     for (int64_t i = 0; i < numel; i++)
       ASSERT_FLOAT_EQ(placed_out[i], baseline[i], 2e-5f);
-    poly_instance_free(placed);
+    poly_model_free(placed);
   }
 
   free(weights);
   free(ir);
   free(baseline);
 
-  poly_instance_free(inst);
+  poly_model_free(inst);
   PASS();
 }
 
@@ -648,15 +647,15 @@ TEST(hf, gpt2_training_loss_decreases) {
       .batch_size = 1,
       .norm_eps = 1e-5f};
 
-  PolyInstance *inst = poly_gpt2(&cfg, POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_gpt2(&cfg, POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   /* Initialize weights with small random values */
-  int np = poly_instance_param_count(inst);
+  int np = poly_model_param_count(inst);
   for (int i = 0; i < np; i++) {
     int64_t numel;
-    float *data = poly_instance_param_data(inst, i, &numel);
-    const char *name = poly_instance_param_name(inst, i);
+    float *data = poly_model_param_data(inst, i, &numel);
+    const char *name = poly_model_param_name(inst, i);
     if (strstr(name, "ln_") && strstr(name, "weight")) {
       for (int64_t j = 0; j < numel; j++)
         data[j] = 1.0f;
@@ -680,13 +679,13 @@ TEST(hf, gpt2_training_loss_decreases) {
   };
 
   /* Configure Adam optimizer */
-  int ret = poly_instance_set_optimizer(inst, POLY_OPTIM_ADAM, 0.001f, 0.9f, 0.999f, 1e-8f, 0.0f);
+  int ret = poly_model_set_optimizer(inst, POLY_OPTIM_ADAM, 0.001f, 0.9f, 0.999f, 1e-8f, 0.0f);
   ASSERT_INT_EQ(ret, 0);
 
   /* Train for 5 steps */
   float losses[5];
   for (int step = 0; step < 5; step++) {
-    ret = poly_instance_train_step(inst, train_io, 2, &losses[step]);
+    ret = poly_model_train_step(inst, NULL, train_io, 2, &losses[step]);
     ASSERT_INT_EQ(ret, 0);
     ASSERT_TRUE(isfinite(losses[step]));
   }
@@ -700,7 +699,7 @@ TEST(hf, gpt2_training_loss_decreases) {
     ASSERT_TRUE(isfinite(losses[i]));
   }
 
-  poly_instance_free(inst);
+  poly_model_free(inst);
   PASS();
 }
 
@@ -708,7 +707,7 @@ TEST(hf, gpt2_training_loss_decreases) {
 
 TEST(hf, hf_load_unsupported_type) {
   const char *config = "{\"model_type\":\"llama\",\"vocab_size\":100}";
-  PolyInstance *inst =
+  PolyModel *inst =
       poly_hf_load(config, (int)strlen(config), NULL, NULL, 0, 1, 64, POLY_DEVICE_AUTO);
   ASSERT_TRUE(inst == NULL);
   PASS();

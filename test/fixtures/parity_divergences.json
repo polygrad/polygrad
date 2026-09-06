@@ -24,12 +24,12 @@
     {
       "id": "PG-DIV-001",
       "status": "approved",
-      "stages": ["logical", "placement", "instance", "export"],
+      "stages": ["logical", "placement", "model", "export"],
       "area": "retained logical and explicit placement capability",
       "vocabulary": {"tinygrad_only": [], "polygrad_only": ["DEVICE", "UNIQUE"]},
       "tinygrad": "Tensor owns one mutable, deviceful Tensor.uop",
-      "polygrad": "Default uop_physical is eagerly constructed in C and must match tinygrad Tensor.uop; Polygrad may additionally retain a deviceless logical graph and physical template for Instance, export, and explicit place outside default realization",
-      "rationale": "Portable logical retention, export, explicit placement, and PolyInstance capture are approved Polygrad superset capabilities; default physical construction and execution are parity surfaces.",
+      "polygrad": "Default uop_physical is eagerly constructed in C and must match tinygrad Tensor.uop; Polygrad may additionally retain a deviceless logical graph and physical template for Model, export, and explicit place outside default realization",
+      "rationale": "Portable logical retention, export, explicit placement, and PolyModel capture are approved Polygrad superset capabilities; default physical construction and execution are parity surfaces.",
       "approval": "AGENTS.md Core Invariants and user-approved logical/physical split",
       "evidence": [
         "ARCHITECTURE.md:Core Model",
@@ -40,15 +40,15 @@
     {
       "id": "PG-DIV-002",
       "status": "approved",
-      "stages": ["product", "instance", "export"],
-      "area": "PolyInstance",
+      "stages": ["product", "model", "export"],
+      "area": "PolyModel",
       "tinygrad": "No language-neutral ABI package equivalent",
-      "polygrad": "PolyInstance owns named bindings, entrypoints, objectives, and package metadata",
-      "rationale": "PolyInstance is an intentional Polygrad superset feature.",
+      "polygrad": "PolyModel owns named bindings, entrypoints, objectives, and package metadata",
+      "rationale": "PolyModel is an intentional Polygrad superset feature.",
       "approval": "AGENTS.md Core Invariants",
       "evidence": [
-        "ARCHITECTURE.md:PolyInstance",
-        "src/instance.c"
+        "ARCHITECTURE.md:PolyModel",
+        "src/model.c"
       ],
       "close_when": null
     },
@@ -89,11 +89,11 @@
       "stages": ["export", "bundle"],
       "area": "portable package surface",
       "tinygrad": "No language-neutral Polygrad bundle equivalent",
-      "polygrad": "IR, bundle, safetensors, and named Instance export/import",
+      "polygrad": "IR, bundle, safetensors, and named Model export/import",
       "rationale": "Portable packaging is an intentional Polygrad superset feature.",
       "approval": "project architecture",
       "evidence": [
-        "ARCHITECTURE.md:PolyInstance",
+        "ARCHITECTURE.md:PolyModel",
         "src/ir.c",
         "src/bundle.c"
       ],
@@ -143,12 +143,12 @@
         "src/placer.c:poly_place_roots",
         "src/engine/realize.c:poly_realize_tensors_impl",
         "test/test_placement.c",
-        "test/test_instance.c:instance.set_device_preserves_captured_copy_occurrences",
+        "test/test_model.c:model.set_device_preserves_captured_copy_occurrences",
         "temp/place_binding_substitution_correspondence_20260811.md",
         "temp/instance_uniform_place_correspondence_20260811.md"
       ],
       "resolution": {
-        "evidence": "Default physical topology, occurrence, mutation, rebuilt-subexpression, JIT, Instance, and broad frontend/backend gates pass without realization-time placement or logical-key correspondence. Explicit aggregate place starts from logical roots and exact resource bindings; raw scheduling rejects device-free storage regardless of attached residency.",
+        "evidence": "Default physical topology, occurrence, mutation, rebuilt-subexpression, JIT, Model, and broad frontend/backend gates pass without realization-time placement or logical-key correspondence. Explicit aggregate place starts from logical roots and exact resource bindings; raw scheduling rejects device-free storage regardless of attached residency.",
         "closed_on": "2026-09-03"
       }
     },
@@ -211,7 +211,7 @@
         "temp/reference_upgrade_20260824/tg_current_lane_vocabulary_probe.log"
       ],
       "resolution": {
-        "evidence": "Removed VCONST from the C IR, symbolic passes, placement, Instance validation, codegen, renderers, and tests; current vector constants use STACK(CONST, ...).",
+        "evidence": "Removed VCONST from the C IR, symbolic passes, placement, Model validation, codegen, renderers, and tests; current vector constants use STACK(CONST, ...).",
         "closed_on": "2026-08-24"
       }
     },

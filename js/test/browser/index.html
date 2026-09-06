@@ -106,8 +106,8 @@ function installWebGpuAsyncTestAdapter(pg) {
   }
   if (pg.compileAsync) pg.compile = pg.compileAsync
 
-  const Instance = pg.Instance
-  const iProto = Instance && Instance.prototype
+  const Model = pg.Model
+  const iProto = Model && Model.prototype
   if (iProto && !iProto.__polyWebGpuTestAsyncPatched) {
     iProto.paramData = iProto.paramDataAsync
     iProto.params = iProto.paramsAsync
@@ -234,27 +234,58 @@ async function runWebGpuLifecycleChecks() {
     }
   })
 
-  await test('webgpu Instance dispose waits for admitted forward', async () => {
+  await test('webgpu Model capture publishes ownership before Runtime disposal', async () => {
+    const rt = polygrad.create({ core: 'wasm', device: 'webgpu', logical: 'always' })
+    const x = rt.Tensor.empty([1])
+    const w = new rt.Tensor([1]).add(1)
+    const pending = rt.Model.fromTensors({ inputs: { x }, params: { w }, outputs: { out: x.mul(w) } })
+    const closing = rt.dispose()
+    const model = await pending
+    await closing
+    let rejected = false
+    try { await model.readBufferAsync('w') } catch (e) { rejected = /disposed/.test(String(e.message || e)) }
+    if (!rejected) throw new Error('captured Model outlived its disposed Runtime')
+    await model.dispose()
+  })
+
+  await test('webgpu Model factory publishes ownership before Runtime disposal', async () => {
+    const rt = polygrad.create({ core: 'wasm', device: 'webgpu' })
+    const pending = rt.models.SequentialAsync({
+      input: { name: 'x', shape: [1, 2], dtype: 'float32' },
+      layers: [{ name: 'head', type: 'linear', out_features: 1 }], output: 'prediction'
+    })
+    const closing = rt.dispose()
+    const model = await pending
+    await closing
+    let rejected = false
+    try { await model.readBufferAsync('layers.head.weight') } catch (e) {
+      rejected = /disposed/.test(String(e.message || e))
+    }
+    if (!rejected) throw new Error('factory Model outlived its disposed Runtime')
+    await model.dispose()
+  })
+
+  await test('webgpu Model dispose waits for admitted forward', async () => {
     const rt = polygrad.create({ core: 'wasm', device: 'webgpu' })
     const x = rt.Tensor.empty([2])
-    const inst = await rt.Instance.fromTensors({ inputs: { x }, outputs: { out: x.add(1) } })
+    const inst = await rt.Model.fromTensors({ inputs: { x }, outputs: { out: x.add(1) } })
     try {
       const pending = inst.forwardAsync({ x: new Float32Array([2, 4]) })
       const disposed = inst.dispose()
       const output = await pending
       await disposed
-      if (output.out.join(',') !== '3,5') throw new Error('pending Instance forward changed during dispose')
+      if (output.out.join(',') !== '3,5') throw new Error('pending Model forward changed during dispose')
       let rejected = false
       try { await inst.forwardAsync({ x: new Float32Array([1, 2]) }) } catch (e) {
         rejected = /disposed/.test(String(e.message || e))
       }
-      if (!rejected) throw new Error('disposed Instance admitted later work')
+      if (!rejected) throw new Error('disposed Model admitted later work')
     } finally {
       await rt.dispose()
     }
   })
 
-  await test('webgpu Instance dispose waits for admitted train step', async () => {
+  await test('webgpu Model dispose waits for admitted train step', async () => {
     const rt = polygrad.create({ core: 'wasm', device: 'webgpu' })
     const inst = rt.models.MLP({ layers: [2, 4, 1], activation: 'relu', loss: 'mse', batch_size: 1, seed: 42 })
     try {
@@ -266,7 +297,7 @@ async function runWebGpuLifecycleChecks() {
       const disposed = inst.dispose()
       const loss = await pending
       await disposed
-      if (!Number.isFinite(loss)) throw new Error('pending Instance train step returned non-finite loss')
+      if (!Number.isFinite(loss)) throw new Error('pending Model train step returned non-finite loss')
     } finally {
       await rt.dispose()
     }
@@ -284,11 +315,11 @@ async function runWebGpuLifecycleChecks() {
       const program = await source.exportProgramAsync()
       const weights = await source.exportWeightsAsync()
       let syncRejected = false
-      try { targetRt.Instance.fromProgram(program, weights) } catch (e) {
+      try { targetRt.Model.fromProgram(program, weights) } catch (e) {
         syncRejected = /fromProgramAsync/.test(String(e.message || e))
       }
       if (!syncRejected) throw new Error('synchronous WebGPU program import did not require async API')
-      restored = await targetRt.Instance.fromProgramAsync(program, weights)
+      restored = await targetRt.Model.fromProgramAsync(program, weights)
       const input = new Float32Array([1.25, -0.5])
       const expected = await source.forwardAsync({ x: input })
       const actual = await restored.forwardAsync({ x: input })
@@ -332,9 +363,9 @@ async function main() {
     // WebGPU instances use the same C scheduler/backend path as tensors. Run a
     // small smoke first while the heavier training suite is still being
     // validated for async host-visible calls.
-    instanceResult = await window.__runInstanceSmokeTests(pg)
+    instanceResult = await window.__runModelSmokeTests(pg)
   } else {
-    instanceResult = await window.__runInstanceTests(pg)
+    instanceResult = await window.__runModelRuntimeTests(pg)
   }
 
   let webgpuCapsResult = { passed: 0, failed: 0, skipped: 0 }

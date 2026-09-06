@@ -1,4 +1,4 @@
-"""Plain Python object + nn.Linear exported with Instance.from_tensors.
+"""Plain Python object + nn.Linear exported with Model.from_tensors.
 
 Run from repo root:
   PYTHONPATH=py POLYGRAD_LIB=build/libpolygrad.so python py/examples/nn_linear_model_fit.py
@@ -6,7 +6,7 @@ Run from repo root:
 
 import numpy as np
 
-from polygrad import Instance, Tensor, nn
+from polygrad import Model, Tensor, nn
 
 
 class Net:
@@ -24,7 +24,7 @@ x = Tensor.empty((1, 2))
 y = Tensor.empty((1, 1))
 pred = net(x)
 loss = (pred - y).square().mean()
-inst = Instance.from_tensors(
+inst = Model.from_tensors(
     inputs={"x": x},
     targets={"y": y},
     outputs={"output": pred},

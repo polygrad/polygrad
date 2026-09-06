@@ -78,7 +78,7 @@ The main intentional differences are:
 | Frontends | Python and JavaScript are wrappers over the same C core rather than separate runtimes |
 | WASM/browser | Browser execution uses the unified C/WASM runtime path, with WebGPU orchestrated from the C backend |
 | Logical vs physical roots | Tensors keep exportable logical graph roots separate from realized/placed physical roots |
-| Model tooling | `PolyInstance` stores ABI names, logical buffer bindings, entrypoints, objectives, fit/train helpers, and model bundle metadata |
+| Model tooling | `PolyModel` stores ABI names, logical buffer bindings, entrypoints, objectives, fit/train helpers, and model bundle metadata |
 | Custom kernels | Public custom kernels lower into UOp `CALL` bodies and still run through normal scheduling and runtime caches |
 | WebGPU int64 | WGSL has no native 64-bit integers, so renderer lowering uses two 32-bit lanes while C, CUDA, HIP, WASM, and x86 retain native int64; unlike pinned tinygrad, valid dynamic/uint32 shift counts and signed right shift are handled rather than crashing or changing sign semantics |
 
@@ -223,7 +223,7 @@ function create({ polygrad: pg }) {
 
 Python has the same default-context shape for ordinary use and an explicit
 runtime API for package isolation or device-specific wiring. Python packages
-should accept caller-created `Tensor` or `Instance` objects and keep outputs in
+should accept caller-created `Tensor` or `Model` objects and keep outputs in
 the same context:
 
 ```python
@@ -271,20 +271,20 @@ Set the context default with `POLY_LOGICAL=2|1|0`. Python also supports
 `Tensor(..., logical=...)`, and `tensor.preserve_logical()`. JavaScript supports
 `createRuntime({logical: ...})`, `runtime.withLogical(...)`,
 `new Tensor(data, {logical: ...})`, and `tensor.preserveLogical()`.
-Instance capture owns its logical entrypoints immediately, so later realization
+Model capture owns its logical entrypoints immediately, so later realization
 or retirement of the source Tensor cannot invalidate the portable program.
 
 Default Tensor/JIT execution builds and schedules the physical graph eagerly;
-it does not invoke placement. Retained `Instance` graphs may instead request an
+it does not invoke placement. Retained `Model` graphs may instead request an
 explicit policy. The first non-uniform policy uses exact named module cuts:
 
 ```python
-from polygrad import Instance, Tensor
+from polygrad import Model, Tensor
 
 x = Tensor([1.0, 2.0])
 h = x + 3
 y = h * 2
-model = Instance.from_tensors(
+model = Model.from_tensors(
     inputs={"x": x}, outputs={"y": y},
     modules=[
         {"name": "stem", "inputs": [x], "output": h},
@@ -318,7 +318,7 @@ Python:
 ```python
 program = model.export_program()
 weights = model.export_weights()
-fast_model = Instance.from_program(program, weights)
+fast_model = Model.from_program(program, weights)
 result = fast_model.call("forward", {"x": input_array})
 ```
 
@@ -327,17 +327,142 @@ JavaScript (native/Wasm synchronous runtimes):
 ```js
 const program = model.exportProgram()
 const weights = model.exportWeights()
-const fastModel = Instance.fromProgram(program, weights)
+const fastModel = Model.fromProgram(program, weights)
 const result = fastModel.call('forward', { x: inputArray })
 ```
 
 WebGPU startup is asynchronous, so use `await model.exportProgramAsync()` and
-`await Instance.fromProgramAsync(program, weights)`. A bound-program Instance
+`await Model.fromProgramAsync(program, weights)`. A bound-program Model
 is inference/call-only: it has no portable logical graph and cannot be
 re-placed, trained, differentiated, or exported as PGIR. The existing bundle
 format remains the portable PGIR-plus-weights product.
 
 ## High-Level APIs
+
+`Model` is a C-owned runtime with sealed graph topology and mutable named state.
+Use `Model.from_tensors(...)` / `Model.fromTensors(...)`, or capture an ordinary
+callable once with `Model.trace`. Curated `models.MLP`, `TabM`, and `NAM` use the
+same runtime. Training stays on Model; no separate Trainer is required.
+
+### Configuration-driven model families
+
+`models.Sequential(config)` and `models.Graph(config)` build ordinary Models in
+C, alongside MLP/TabM/NAM. One JSON configuration can be shared by Python, Node,
+and browsers without model-specific source compilation or an authoring callback.
+They are factories, not subclasses or a second execution graph.
+
+For example, save this as `network.json`:
+
+```json
+{
+  "input": {"name": "x", "shape": [1, 4], "dtype": "float32"},
+  "layers": [
+    {"name": "first", "type": "linear", "out_features": 2, "activation": "relu"},
+    {"name": "second", "type": "linear", "out_features": 3, "activation": "relu"},
+    {"name": "head", "type": "linear", "out_features": 4}
+  ],
+  "output": "prediction",
+  "seed": 42
+}
+```
+
+```python
+from pathlib import Path
+from polygrad import models
+model = models.Sequential(Path("network.json").read_text())
+# Optional runtime=rt uses an explicit Runtime instead of the default context.
+```
+
+```javascript
+const model = pg.models.Sequential(config) // Node/native or synchronous Wasm
+// WebGPU: await pg.models.SequentialAsync(config)
+// Graph and GraphAsync accept the connected form described below.
+```
+
+C exposes `poly_sequential_from_json(ctx, json, len, &error)` and
+`poly_graph_from_json(...)` in `models/compose.h`. The context is borrowed and
+must outlive the returned Model; normal Model disposal/training/export apply.
+The context must allow logical construction (`always` or `until_realize`).
+
+The initial component catalogue is deliberately bounded:
+
+| Component | Configuration |
+| --- | --- |
+| `linear` | `out_features`; optional `bias` (default true), `activation` (default `none`) |
+| `relu`, `sigmoid`, `tanh`, `silu`, `gelu` | One input |
+| `identity`, `square`, `exp`, `log` | One input |
+| `add`, `sub`, `mul`, `div` | Two inputs, existing Tensor broadcasting |
+| `sum`, `mean` | Reduce all axes to a scalar |
+| `reshape` | Concrete positive `shape`, unchanged element count |
+| `repeat` | Positive integer `count`; `body` is one unnamed component or a named layer list |
+
+Graph configurations replace `input/layers/output` with:
+
+- `inputs`: name → `{shape, dtype, role?}`; role is `input` or `target`.
+- `nodes`: ordered `{name, type, inputs: [earlier_value_names], ...}` records.
+- `outputs`: output name → input or node name.
+- Optional `entrypoints`: `{name, inputs, outputs, objective?}` records. Without
+  them, `forward` exposes all declared inputs and outputs. An explicit scalar
+  objective enables the existing Model training path.
+
+Both families accept `modules`, a table of named leaf-component configurations.
+Use `{name, call: "shared", inputs: [...]}` instead of `type` in a Graph node
+(omit `inputs` in Sequential). Repeated calls reuse the declared component's
+parameters; ordinary Repeat bodies create fresh parameters. Module declarations
+are construction components, not device-placement cuts or runtime submodels.
+See [the shared-layer Graph configuration](test/fixtures/model_definition.json).
+
+Parameter names are `layers.<name>.weight/bias`, `nodes.<name>.weight/bias`, or
+`modules.<name>.weight/bias`; Repeat inserts zero-based indices. Linear weights
+use the existing seed/name-keyed C-family Kaiming uniform initializer and biases
+are zero. This does not promise Keras/Tinygrad initial-weight equivalence.
+
+Inputs currently require explicit float32, concrete rank ≤8 and positive
+dimensions. Names are ASCII identifiers of 1–63 characters. Configuration limits
+are 1 MiB JSON, nesting 32, 16,384 JSON values, 1,024 expanded component calls,
+construction depth 16, and 64 inputs/outputs/entrypoints. Expanded paths are at
+most 191 bytes. Named storage totals at most 16,777,216 float32 elements; shapes,
+broadcasts and each linear contraction are bounded by that element count too.
+These are construction limits, not a bound on compiler/backend peak memory.
+
+Optional `format: "poly.modeldef@1"` and `type: "sequential"`/`"graph"` tags are
+checked when present. The selected factory already identifies the family.
+Unknown fields, duplicate keys/names, forward/cyclic references, unused shared
+components and incompatible shapes fail. There are no config expressions,
+recursive modules, runtime loops, dynamic shapes or Keras JSON compatibility.
+Configuration describes construction, not checkpoint state: save/load the
+result through existing Model bundle or graph/weights APIs.
+
+### Tensor-authored models
+
+```python
+from polygrad import Model, create
+from polygrad.nn.state import get_state_dict
+
+rt = create(device="cpu", logical="always")
+class Net:
+    def __init__(self):
+        self.weight = rt.Tensor([2.0])
+    def __call__(self, x):
+        return x * self.weight
+
+net = Net()
+model = Model.trace(net, inputs={"x": rt.Tensor.empty(1)},
+                    state=get_state_dict(net))
+blob = model.save_bundle(include_optimizer=False)
+model.free()
+rt.dispose()
+```
+
+Captured state is independent of `net`'s Tensor attributes. Reads return copies;
+use `read_buffer`/`write_buffer` (JS `readBuffer`/`writeBuffer`) for explicit
+state access. `bindings()` and `entrypoints()` describe the sealed interface.
+For training, supply targets and named losses, configure the optimizer, and
+call `train_step`/`trainStep`; select an entrypoint when objectives are ambiguous.
+`fit` repeats the supplied batch, not a Keras-style dataset workflow. WebGPU
+uses explicit `trainStepAsync`, `readBufferAsync`, and `writeBufferAsync`.
+For WebGPU capture, use `Model.traceAsync` or `await Model.fromTensors(...)`;
+authoring still runs once, while C state initialization can suspend.
 
 Polygrad includes the usual tensor building blocks:
 

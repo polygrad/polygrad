@@ -33,8 +33,8 @@ HAS_CUDA := $(shell test -f /usr/include/cuda.h && echo 1 || echo 0)
 SRC = src/ops.c src/dtype.c src/arena.c src/hashmap.c src/utils.c src/bigint.c src/selftest.c src/ctx.c src/device.c src/placer.c src/engine/realize.c src/engine/jit.c src/uop/ops.c src/uop/spec.c src/uop/weak.c src/uop/movement.c src/uop/symbolic.c src/mixin/elementwise.c src/mixin/movement.c src/uop/upat.c src/alu.c src/shape.c src/autograd.c src/codegen/codegen.c src/codegen/opt/tc.c src/codegen/decomp/dtype.c src/codegen/simplify.c src/codegen/gpudims.c src/codegen/late/coalesce.c src/codegen/late/gater.c src/codegen/late/linearizer.c src/renderer/cstyle.c src/renderer/wgsl.c src/runtime/support/memory.c src/runtime_cpu.c src/runtime_wasm.c src/runtime_webgpu.c src/wasm_builder.c src/renderer/wasm.c src/frontend.c src/tensor.c src/optim.c src/schedule/rangeify.c src/schedule/multi.c src/schedule/allreduce.c src/schedule/schedule.c src/schedule/memory.c src/schedule/indexing.c src/nn.c src/engine/schedule.c src/interp.c
 FILC_SRC = src/ops.c src/dtype.c src/arena.c src/hashmap.c src/utils.c src/bigint.c src/selftest.c src/ctx.c src/device.c src/placer.c src/engine/realize.c src/engine/jit.c src/uop/ops.c src/uop/spec.c src/uop/weak.c src/uop/movement.c src/uop/symbolic.c src/mixin/elementwise.c src/mixin/movement.c src/uop/upat.c src/alu.c src/shape.c src/autograd.c src/codegen/codegen.c src/codegen/opt/tc.c src/codegen/decomp/dtype.c src/codegen/simplify.c src/codegen/gpudims.c src/codegen/late/coalesce.c src/codegen/late/gater.c src/codegen/late/linearizer.c src/renderer/cstyle.c src/renderer/wgsl.c src/runtime/support/memory.c src/runtime_wasm.c src/runtime_webgpu.c src/wasm_builder.c src/renderer/wasm.c src/frontend.c src/tensor.c src/optim.c src/schedule/rangeify.c src/schedule/multi.c src/schedule/allreduce.c src/schedule/schedule.c src/schedule/memory.c src/schedule/indexing.c src/nn.c src/engine/schedule.c src/interp.c
 LOADER_SRC = src/loaders/decoded.c src/loaders/import_error.c src/loaders/bind.c src/loaders/hf_decode.c src/loaders/gguf_decode.c src/loaders/gguf_loader.c src/loaders/import_desc.c
-CODEC_SRC = vendor/cjson/cJSON.c src/safetensors.c src/wlrn.c src/ir.c src/bundle.c src/instance.c src/tokenizer.c src/models/mlp.c src/models/tabm.c src/models/nam.c src/models/registry.c src/models/gpt2.c src/models/qwen3.c src/models/hf_loader.c $(LOADER_SRC)
-TEST_SRC = test/test_main.c test/test_uop.c test/test_utils.c test/test_dtype.c test/test_bigint.c test/test_pat.c test/test_sym.c test/test_shape.c test/test_schedule_engine.c test/test_autograd.c test/test_codegen.c test/test_wasm.c test/test_rangeify.c test/test_reduce_simplify.c test/test_nn.c test/test_tensor.c test/test_fusion_fuzzer.c test/test_future_passes.c test/test_safetensors.c test/test_wlrn.c test/test_ir.c test/test_instance.c test/test_program.c test/test_mlp.c test/test_tabm.c test/test_nam.c test/test_hf.c test/test_qwen3.c test/test_f16.c test/test_schedule_runtime.c test/test_bundle.c test/test_registry.c test/test_placement.c test/test_realize.c test/test_threading.c
+CODEC_SRC = vendor/cjson/cJSON.c src/safetensors.c src/wlrn.c src/ir.c src/bundle.c src/model.c src/tokenizer.c src/models/compose.c src/models/mlp.c src/models/tabm.c src/models/nam.c src/models/registry.c src/models/gpt2.c src/models/qwen3.c src/models/hf_loader.c $(LOADER_SRC)
+TEST_SRC = test/test_main.c test/test_uop.c test/test_utils.c test/test_dtype.c test/test_bigint.c test/test_pat.c test/test_sym.c test/test_shape.c test/test_schedule_engine.c test/test_autograd.c test/test_codegen.c test/test_wasm.c test/test_rangeify.c test/test_reduce_simplify.c test/test_nn.c test/test_tensor.c test/test_fusion_fuzzer.c test/test_future_passes.c test/test_safetensors.c test/test_wlrn.c test/test_ir.c test/test_model.c test/test_program.c test/test_mlp.c test/test_tabm.c test/test_nam.c test/test_hf.c test/test_qwen3.c test/test_f16.c test/test_schedule_runtime.c test/test_bundle.c test/test_registry.c test/test_placement.c test/test_realize.c test/test_threading.c
 PROJECT_HEADERS := $(shell find src test bench vendor -type f -name '*.h' -print | sort)
 ANALYZE_SRC = $(filter-out vendor/%,$(sort $(SRC) $(CODEC_SRC)))
 FORMAT_SRC := $(shell find src test bench -type f \( -name '*.c' -o -name '*.h' \) -print | sort)
@@ -75,7 +75,7 @@ WASM_SRC = $(filter-out src/runtime_cpu.c src/renderer/cuda.c src/runtime_cuda.c
 WASM_EXPORTS := $(shell $(PYTHON) scripts/wasm_exports.py js/src)
 
 WASM_ASYNCIFY_IMPORTS = ['js_webgpu_dispatch','js_webgpu_read_buffer_to_wasm','js_webgpu_read_buffer_to_hostkey']
-WASM_ASYNCIFY_ONLY = ['poly_instance_call','poly_instance_train_step','poly_instance_set_device_map_arrays','instance_publish_placement','run_instance_sink','poly_instance_param_data_raw','poly_instance_buf_data','poly_instance_buf_data_raw','poly_instance_export_weights_ex','poly_instance_save_bundle_ex','poly_instance_readback_param','poly_instance_readback_buf','poly_realize_uops','poly_realize_tensors','poly_jit_end_capture','poly_jit_run','poly_jit_run_captured_linear','poly_run_linear','poly_webgpu_execute','poly_buffer_copy','poly_buffer_ensure_device_current','poly_buffer_ensure_host_current','poly_buffer_read','poly_buffer_write','host_copy_in','webgpu_copy_out']
+WASM_ASYNCIFY_ONLY = ['poly_sequential_from_json','poly_graph_from_json','compose_from_json','poly_model_write_buf_named','poly_model_from_binding_arrays','poly_model_from_bindings','poly_model_build','prepare_build_named_value_snapshots','snapshot_build_named_value','copy_initial_buffer_data','poly_realize_sink','poly_model_call','poly_model_train_step','poly_model_set_device_map_arrays','poly_model_set_device','model_place_uniform_device','model_publish_placement','run_model_sink','poly_model_param_data_raw','poly_model_buf_data','poly_model_buf_data_raw','poly_model_export_weights_ex','poly_model_save_bundle_ex','poly_model_read_buf','poly_model_write_buf','sync_buf_to_host','poly_model_readback_param','poly_model_readback_buf','poly_realize_uops','poly_realize_tensors','poly_jit_end_capture','poly_jit_run','poly_jit_run_captured_linear','poly_run_linear','poly_webgpu_execute','poly_buffer_copy','poly_buffer_ensure_device_current','poly_buffer_ensure_host_current','poly_buffer_read','poly_buffer_write','host_copy_in','webgpu_copy_out']
 WASM_ASYNCIFY_FLAGS = -s ASYNCIFY=1 \
 	-s "ASYNCIFY_IMPORTS=$(WASM_ASYNCIFY_IMPORTS)" \
 	-s "ASYNCIFY_ONLY=$(WASM_ASYNCIFY_ONLY)"
@@ -99,7 +99,7 @@ QWEN3_GGUF ?= $(if $(POLY_QWEN3_GGUF),$(POLY_QWEN3_GGUF),$(CURDIR)/temp/Qwen3-0.
 BROWSER_MATRIX ?= chromium,firefox,chrome-system=chromium@/usr/bin/google-chrome,chromium-snap=chromium@/snap/bin/chromium
 BROWSER_MATRIX_DEVICES ?= auto
 
-.PHONY: all test test-fast test-common test-common-cpu test-common-cuda test-common-hip test-common-interp test-common-x86 test-specific-cuda test-specific-hip test-specific-x86 test-cuda test-hip test-interp test-x86 test-harness-skip-accounting test-parity test-parity-opt test-parity-ir test-parity-ir-opt test-parity-graph parity-graph-report reference-migration-report test-parity-op-census parity-op-census-report test-compat-tinygrad-tier1 test-compat-tinygrad-convnext test-parity-cuda test-parity-hip test-symbolic-z3 test-qwen3 test-browser-qwen3 require-qwen3-gguf test-wasm test-wasm-new test-native test-browser test-browser-matrix test-js-browser-matrix test-instance-interchange test-p2p test-p2p-browser bench bench-cuda bench-model-cuda bench-hlb-cuda-semantic bench-hlb-cuda-timing bench-hlb-cuda-manifest bench-hip bench-train-py bench-smoke bench-local-baseline bench-update-local-baseline bench-smoke-regression bench-ci-regression bench-ratios bench-ratio-local-baseline bench-update-local-ratio-baseline bench-parity bench-jax-js-wasm bench-jax-js-matmul-wasm bench-jax-js-model-wasm bench-jax-js-browser-wasm bench-jax-js-browser-matmul-wasm bench-jax-js-browser-model-wasm bench-compare bench-compare-global bench-regression bench-update-baseline fuzz fuzz-smoke fuzz-nightly fuzz-symbolic fuzz-symbolic-div wasm wasm-pkg build-py build-py-sdist build-py-wheel build-python test-py-sdist-install publish-py publish-python build-js publish-js clean analyze cppcheck format format-check test-msan test-tsan verify coverage test-full test-js-native-cpu test-js-native-x86 test-js-native-interp test-js-native-cuda test-js-native-hip test-js-package test-filc-interp-fast sync-source-mirrors verify-source-mirrors test-py-x86
+.PHONY: all test test-fast test-common test-common-cpu test-common-cuda test-common-hip test-common-interp test-common-x86 test-specific-cuda test-specific-hip test-specific-x86 test-cuda test-hip test-interp test-x86 test-harness-skip-accounting test-parity test-parity-opt test-parity-ir test-parity-ir-opt test-parity-graph parity-graph-report reference-migration-report test-parity-op-census parity-op-census-report test-compat-tinygrad-tier1 test-compat-tinygrad-convnext test-parity-cuda test-parity-hip test-symbolic-z3 test-qwen3 test-browser-qwen3 require-qwen3-gguf test-wasm test-wasm-new test-native test-browser test-browser-matrix test-js-browser-matrix test-model-interchange test-p2p test-p2p-browser bench bench-cuda bench-model-cuda bench-hlb-cuda-semantic bench-hlb-cuda-timing bench-hlb-cuda-manifest bench-hip bench-train-py bench-smoke bench-local-baseline bench-update-local-baseline bench-smoke-regression bench-ci-regression bench-ratios bench-ratio-local-baseline bench-update-local-ratio-baseline bench-parity bench-jax-js-wasm bench-jax-js-matmul-wasm bench-jax-js-model-wasm bench-jax-js-browser-wasm bench-jax-js-browser-matmul-wasm bench-jax-js-browser-model-wasm bench-compare bench-compare-global bench-regression bench-update-baseline fuzz fuzz-smoke fuzz-nightly fuzz-symbolic fuzz-symbolic-div wasm wasm-pkg build-py build-py-sdist build-py-wheel build-python test-py-sdist-install publish-py publish-python build-js publish-js clean analyze cppcheck format format-check test-msan test-tsan verify coverage test-full test-js-native-cpu test-js-native-x86 test-js-native-interp test-js-native-cuda test-js-native-hip test-js-package test-filc-interp-fast sync-source-mirrors verify-source-mirrors test-py-x86
 
 all: build/libpolygrad.a build/libpolygrad.so
 
@@ -503,7 +503,7 @@ test-py: verify-source-mirrors build/libpolygrad.so
 	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 POLYGRAD_LIB=build/libpolygrad.so PYTHONPATH=py python -m pytest py/tests/ -v
 
 test-py-x86: verify-source-mirrors build/libpolygrad.so
-	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 POLY_DEVICE=x86 POLYGRAD_LIB=build/libpolygrad.so PYTHONPATH=py python -m pytest py/tests/test_tensor.py py/tests/test_nn.py py/tests/test_instance.py py/tests/test_hf.py py/tests/test_hf_e2e.py -v
+	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 POLY_DEVICE=x86 POLYGRAD_LIB=build/libpolygrad.so PYTHONPATH=py python -m pytest py/tests/test_tensor.py py/tests/test_nn.py py/tests/test_model.py py/tests/test_hf.py py/tests/test_hf_e2e.py -v
 
 test-js: test-js-wasm test-js-native test-js-package
 
@@ -518,9 +518,9 @@ test-js-native: verify-source-mirrors js/build/Release/polygrad_napi.node
 test-js-package: verify-source-mirrors wasm-pkg
 	cd js && bash scripts/build-browser.sh && $(NODE) test/test_package_exports.js
 
-test-instance-interchange: verify-source-mirrors build/libpolygrad.so js/build/Release/polygrad_napi.node wasm-pkg
+test-model-interchange: verify-source-mirrors build/libpolygrad.so js/build/Release/polygrad_napi.node wasm-pkg
 	PYTHONPATH=py POLYGRAD_LIB=$(abspath build/libpolygrad.so) \
-		python test/test_instance_interchange.py --cores native,wasm
+		python test/test_model_interchange.py --cores native,wasm
 
 js/build/Release/polygrad_napi.node: build/libpolygrad.a js/binding.gyp js/napi_api.c
 	cd js && npm run build:native
@@ -584,7 +584,7 @@ test-browser-legacy: wasm-pkg
 #           native core + cpu/x86/interp/cuda*/hip* backends
 #   Python: py/tests/
 #   * only when hardware is available
-TEST_ALL_DEPS = test test-x86 test-interp test-js-wasm test-js-package test-js-native-cpu test-js-native-x86 test-js-native-interp test-py test-instance-interchange
+TEST_ALL_DEPS = test test-x86 test-interp test-js-wasm test-js-package test-js-native-cpu test-js-native-x86 test-js-native-interp test-py test-model-interchange
 ifeq ($(HAS_CUDA), 1)
   TEST_ALL_DEPS += test-cuda test-js-native-cuda
 endif
@@ -701,21 +701,27 @@ test-p2p-browser:
 
 # ── Coverage ──────────────────────────────────────────────────────
 
-coverage: build/polygrad_test_cov
-	./build/polygrad_test_cov --fast
-	@gcov -o build $(SRC) > /dev/null 2>&1
-	@echo ""
-	@echo "Coverage summary:"
-	@for f in $(SRC); do \
-		pct=$$(gcov -n "$$f" 2>/dev/null | grep -oP '\d+\.\d+%' | head -1); \
-		[ -n "$$pct" ] && printf "  %-30s %s\n" "$$(basename $$f)" "$$pct"; \
-	done
-	@rm -f *.gcov
+GCOV ?= gcov
+COVERAGE_FILTER ?= --fast
+COVERAGE_OBJS = $(patsubst %.c,build/obj/coverage/%.o,$(SRC) $(CODEC_SRC) $(TEST_SRC))
 
-build/polygrad_test_cov: $(SRC) $(CODEC_SRC) $(TEST_SRC)
+coverage: build/polygrad_test_cov
+	./build/polygrad_test_cov $(COVERAGE_FILTER)
+	@set -e; for f in $(SRC) $(CODEC_SRC); do \
+		$(GCOV) -n -b -c -o "build/obj/coverage/$${f%.c}.gcno" "$$f"; \
+	done
+
+# Preserve source directories: src/ops.c and src/uop/ops.c must not share
+# profile counters. Use the same feature/include flags as the native tests.
+build/obj/coverage/%.o: %.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS_COMMON) -DPOLY_TESTING -g -O0 --coverage -MMD -MP -c $< -o $@
+
+build/polygrad_test_cov: $(COVERAGE_OBJS)
 	@mkdir -p build
-	$(CC) -std=c11 -g -O0 -fprofile-arcs -ftest-coverage \
-		-o $@ $(filter %.c,$^) -lm -ldl -lgcov
+	$(CC) --coverage -o $@ $(filter %.o,$^) -lm -ldl
+
+-include $(COVERAGE_OBJS:.o=.d)
 
 clean:
 	rm -rf build/ *.o

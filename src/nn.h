@@ -4,7 +4,7 @@
  * Layer boundaries exist at two explicit levels:
  *   poly_X_apply         — low-level raw-UOp program
  *   poly_tensor_X_apply  — the same program over paired Tensor roots
- *   poly_instance_X      — declares paired Instance params, returns a Tensor
+ *   poly_model_X      — declares paired Model params, returns a Tensor
  *   poly_X               — legacy ctx-global raw-UOp registration
  */
 
@@ -14,7 +14,7 @@
 #include "polygrad.h"
 #include <stdbool.h>
 
-typedef struct PolyInstance PolyInstance;
+typedef struct PolyModel PolyModel;
 
 #ifdef __cplusplus
 extern "C" {
@@ -33,9 +33,9 @@ PolyUOp *poly_linear(
     int in_features,
     int out_features,
     bool use_bias
-) POLY_DEPRECATED("use poly_instance_linear or poly_linear_apply with explicit params");
-PolyTensor *poly_instance_linear(
-    PolyInstance *inst,
+) POLY_DEPRECATED("use poly_model_linear or poly_linear_apply with explicit params");
+PolyTensor *poly_model_linear(
+    PolyModel *inst,
     const char *prefix,
     PolyTensor *x,
     int in_features,
@@ -62,9 +62,9 @@ PolyTensor *poly_tensor_layernorm_apply(
     double eps
 );
 PolyUOp *poly_layernorm(PolyCtx *ctx, const char *prefix, PolyUOp *x, int dim, double eps)
-    POLY_DEPRECATED("use poly_instance_layernorm or poly_layernorm_apply with explicit params");
-PolyTensor *poly_instance_layernorm(
-    PolyInstance *inst,
+    POLY_DEPRECATED("use poly_model_layernorm or poly_layernorm_apply with explicit params");
+PolyTensor *poly_model_layernorm(
+    PolyModel *inst,
     const char *prefix,
     PolyTensor *x,
     int dim,
@@ -76,9 +76,9 @@ PolyTensor *poly_instance_layernorm(
 PolyUOp *poly_rmsnorm_apply(PolyCtx *ctx, PolyUOp *x, PolyUOp *w, double eps);
 PolyTensor *poly_tensor_rmsnorm_apply(PolyCtx *ctx, PolyTensor *x, PolyTensor *w, double eps);
 PolyUOp *poly_rmsnorm(PolyCtx *ctx, const char *prefix, PolyUOp *x, int dim, double eps)
-    POLY_DEPRECATED("use poly_instance_rmsnorm or poly_rmsnorm_apply with explicit params");
-PolyTensor *poly_instance_rmsnorm(
-    PolyInstance *inst,
+    POLY_DEPRECATED("use poly_model_rmsnorm or poly_rmsnorm_apply with explicit params");
+PolyTensor *poly_model_rmsnorm(
+    PolyModel *inst,
     const char *prefix,
     PolyTensor *x,
     int dim,
@@ -95,9 +95,9 @@ PolyUOp *poly_embedding(
     PolyUOp *tokens,
     int vocab_size,
     int embed_dim
-) POLY_DEPRECATED("use poly_instance_embedding or poly_embedding_apply with explicit params");
-PolyTensor *poly_instance_embedding(
-    PolyInstance *inst,
+) POLY_DEPRECATED("use poly_model_embedding or poly_embedding_apply with explicit params");
+PolyTensor *poly_model_embedding(
+    PolyModel *inst,
     const char *prefix,
     PolyTensor *tokens,
     int vocab_size,

@@ -1,5 +1,165 @@
 'use strict'
 
+const compositionFixture = require('../../test/fixtures/model_definition.json')
+
+async function checkCompositionFactories(pg) {
+  const { Model, models } = pg
+  const webgpu = String(pg.device).toLowerCase() === 'webgpu'
+  const spec = JSON.parse(JSON.stringify(compositionFixture))
+  delete spec.type
+  delete spec.format
+  assert(!Model.fromDefinition, 'construction families must not be Model methods')
+  if (webgpu) {
+    let rejected = false
+    try { models.Graph(spec) } catch (err) { rejected = err.name === 'PolyAsyncRequired' }
+    assert(rejected, 'WebGPU construction requires explicit async admission')
+  }
+  const model = await models.GraphAsync(spec)
+  let restored = null
+  try {
+    assert(model.paramCount === 1, 'shared calls must have one parameter')
+    await model.writeBufferAsync('modules.shared.weight', new Float32Array([1, 2, 3, 4]))
+    const io = { x: new Float32Array([1, 2]) }
+    assertClose((await model.forward(io)).prediction, [28, 61])
+    model.setOptimizer(pg.OPTIM_SGD, .1)
+    const loss = await model.trainStepAsync(io)
+    assert(Math.abs(loss - 89) < 1e-4, `wrong objective: ${loss}`)
+    assertClose(await model.readBufferAsync('modules.shared.weight'), [.1, .1, 1.9, 1.7])
+    const blob = await model.saveBundleAsync({ includeOptimizer: false })
+    restored = Model.fromBundle(blob)
+    assertClose((await restored.forward(io)).prediction, (await model.forward(io)).prediction)
+  } finally {
+    if (restored) await restored.dispose()
+    await model.dispose()
+  }
+  const sequential = {
+    input: { name: 'x', shape: [1, 2], dtype: 'float32' },
+    layers: [{ name: 'stack', type: 'repeat', count: 2,
+      body: { type: 'linear', out_features: 2, activation: 'relu' } }],
+    output: 'prediction', seed: 42
+  }
+  const a = await models.SequentialAsync(sequential)
+  const b = await models.SequentialAsync(JSON.stringify(sequential))
+  try {
+    assert(a.paramCount === 4, 'Repeat must create fresh weights and biases')
+    for (const binding of a.bindings().filter(v => v.trainable)) {
+      assertClose(await a.readBufferAsync(binding.name), await b.readBufferAsync(binding.name), 0)
+    }
+    await a.writeBufferAsync('layers.stack.0.bias', new Float32Array([7, 8]))
+    assertClose(await a.readBufferAsync('layers.stack.1.bias'), [0, 0], 0)
+    assertClose(await b.readBufferAsync('layers.stack.0.bias'), [0, 0], 0)
+    const io = { x: new Float32Array([1, 2]) }
+    const result = (await a.forward(io)).prediction
+    assert(result.length === 2 && Array.from(result).every(Number.isFinite), 'Repeat output')
+  } finally { await a.dispose(); await b.dispose() }
+
+  for (const [bad, error] of [
+    ['{"type":"graph","type":"sequential"}', /duplicate/],
+    [{ ...spec, type: 'sequential' }, /type must match/],
+    [{ ...spec, format: 'poly.modeldef@99' }, /format/],
+    [{ ...spec, nodes: [{ name: 'bad', type: 'add', inputs: ['later', 'x'] }] }, /forward value/]
+  ]) {
+    let caught = null
+    try { await models.GraphAsync(bad) } catch (err) { caught = err }
+    assert(caught && error.test(caught.message), `missing validation: ${caught && caught.message}`)
+  }
+}
+
+async function checkCompositionCatalogue(pg) {
+  const unary = {
+    relu: x => Math.max(0, x), sigmoid: x => 1 / (1 + Math.exp(-x)),
+    tanh: Math.tanh, silu: x => x / (1 + Math.exp(-x)),
+    gelu: x => .5 * x * (1 + Math.tanh(Math.sqrt(2 / Math.PI) * (x + .044715 * x ** 3))),
+    identity: x => x, square: x => x * x, exp: Math.exp, log: Math.log
+  }
+  for (const type of [...Object.keys(unary), 'sum', 'mean', 'reshape']) {
+    const data = type === 'log' ? [1, 2] : [-1, 2]
+    const layer = { name: 'op', type }
+    if (type === 'reshape') layer.shape = [2, 1]
+    const model = await pg.models.SequentialAsync({
+      input: { name: 'x', shape: [1, 2], dtype: 'float32' },
+      layers: [layer], output: 'prediction'
+    })
+    try {
+      const expected = type === 'sum' ? [1] : type === 'mean' ? [.5]
+        : type === 'reshape' ? data : data.map(unary[type])
+      assertClose((await model.forward({ x: new Float32Array(data) })).prediction, expected, 2e-5)
+    } finally { await model.dispose() }
+  }
+  for (const [type, expected] of [
+    ['add', [2, 4, 4, 6]], ['sub', [0, 0, 2, 2]],
+    ['mul', [1, 4, 3, 8]], ['div', [1, 1, 3, 2]]
+  ]) {
+    const model = await pg.models.GraphAsync({
+      inputs: { x: { shape: [2, 2], dtype: 'float32' }, y: { shape: [2], dtype: 'float32' } },
+      nodes: [{ name: 'op', type, inputs: ['x', 'y'] }], outputs: { prediction: 'op' }
+    })
+    try {
+      assertClose((await model.forward({ x: new Float32Array([1, 2, 3, 4]), y: new Float32Array([1, 2]) })).prediction, expected)
+    } finally { await model.dispose() }
+  }
+  // A target is required by the objective, not by the prediction entrypoint.
+  const model = await pg.models.GraphAsync({
+    inputs: { x: { shape: [2, 1], dtype: 'float32' }, y: { shape: [2, 1], dtype: 'float32', role: 'target' } },
+    nodes: [
+      { name: 'pred', type: 'linear', out_features: 1, bias: false, inputs: ['x'] },
+      { name: 'error', type: 'sub', inputs: ['pred', 'y'] },
+      { name: 'sq', type: 'square', inputs: ['error'] },
+      { name: 'avg', type: 'mean', inputs: ['sq'] }
+    ],
+    outputs: { prediction: 'pred', cost: 'avg' },
+    entrypoints: [
+      { name: 'forward', inputs: ['x'], outputs: ['prediction'] },
+      { name: 'loss', inputs: ['x', 'y'], outputs: ['cost'], objective: 'cost' }
+    ]
+  })
+  try {
+    const x = new Float32Array([1, 2])
+    await model.writeBufferAsync('nodes.pred.weight', new Float32Array([2]))
+    assertClose((await model.forward({ x })).prediction, [2, 4], 0)
+    model.setOptimizer(pg.OPTIM_SGD, .1)
+    assertClose([await model.trainStepAsync({ x, y: x })], [2.5], 1e-6)
+    assertClose(await model.readBufferAsync('nodes.pred.weight'), [1.5], 1e-6)
+  } finally { await model.dispose() }
+}
+
+async function checkTiedAdamCheckpoint(pg) {
+  const w = new pg.Tensor([1], { dtype: 'float32' })
+  const model = await pg.Model.fromTensors({
+    params: { w, tied: w }, losses: { cost: w.add(w).square().sum() }
+  })
+  let restored = null
+  try {
+    await model.placeAsync(pg.device)
+    model.setTrainable('tied', false)
+    assert(!model.bufTrainable(model.findBuf('w')), 'placed alias did not freeze')
+    model.setTrainable('w', true)
+    assert(model.bufTrainable(model.findBuf('tied')), 'placed alias did not unfreeze')
+    model.setOptimizer(pg.OPTIM_ADAM, .1)
+    assertClose([await model.trainStepAsync({})], [4], 0)
+    assertClose(await model.readBufferAsync('w'), [.9], 1e-6)
+    const names = ['optim.adam.b1_t', 'optim.adam.b2_t', 'optim.adam.m.w', 'optim.adam.v.w']
+    const weights = await model.exportWeightsAsync()
+    const optimizerNames = bytes => [...safetensorNames(bytes)].filter(n => n.startsWith('optim.')).sort().join(',')
+    assert(optimizerNames(weights) === [...names].sort().join(','), 'duplicated tied optimizer state')
+    restored = pg.Model.fromIR(model.exportIR(), weights)
+    await restored.placeAsync(pg.device)
+    restored.setTrainable('w', false)
+    assert(!restored.bufTrainable(restored.findBuf('tied')), 'restored alias did not freeze')
+    restored.setTrainable('tied', true)
+    restored.setOptimizer(pg.OPTIM_ADAM, .1)
+    const expectedLoss = await model.trainStepAsync({})
+    assertClose([await restored.trainStepAsync({})], [expectedLoss], 0)
+    for (const name of [...names, 'w', 'tied']) {
+      assertClose(await restored.readBufferAsync(name), await model.readBufferAsync(name), 0)
+    }
+    assert(optimizerNames(await restored.exportWeightsAsync()) === [...names].sort().join(','), 'restored alias state duplicated')
+  } finally {
+    if (restored) await restored.dispose()
+    await model.dispose()
+  }
+}
+
 function assert(cond, msg) {
   if (!cond) throw new Error(msg || 'assertion failed')
 }
@@ -41,10 +201,10 @@ function testFilterFor(pg) {
   return ''
 }
 
-async function checkTypedIntegerInput(pg, Instance) {
+async function checkTypedIntegerInput(pg, Model) {
   const x = pg.Tensor.empty([3], { dtype: 'int32' })
   const outTensor = x.cast('float32')
-  const inst = await Instance.fromTensors({
+  const inst = await Model.fromTensors({
     inputs: { typed_x: x },
     outputs: { typed_out: outTensor }
   })
@@ -58,16 +218,16 @@ async function checkTypedIntegerInput(pg, Instance) {
     } catch (e) {
       rejected = /call\('forward'\) failed/.test(String(e && e.message))
     }
-    assert(rejected, 'float32 bytes must not bind to an int32 Instance input')
+    assert(rejected, 'float32 bytes must not bind to an int32 Model input')
   } finally {
     inst.dispose()
   }
 }
 
-async function checkCallSignatureAndSelectedOutputs(pg, Instance) {
+async function checkCallSignatureAndSelectedOutputs(pg, Model) {
   const x = pg.Tensor.empty([2])
   const y = pg.Tensor.empty([2])
-  const inst = await Instance.fromTensors({
+  const inst = await Model.fromTensors({
     inputs: { x, y },
     outputs: { plus: x.add(y), minus: x.sub(y) },
     entrypoints: [
@@ -96,7 +256,7 @@ async function checkCallSignatureAndSelectedOutputs(pg, Instance) {
     } catch (err) {
       rejected = /call\('plus_ep'\) failed/.test(String(err && err.message))
     }
-    assert(rejected, 'missing required input must not reuse stale Instance bytes')
+    assert(rejected, 'missing required input must not reuse stale Model bytes')
   } finally {
     if (webgpu) await inst.dispose()
     else inst.dispose()
@@ -104,7 +264,7 @@ async function checkCallSignatureAndSelectedOutputs(pg, Instance) {
 
   let invalidParamRejected = false
   try {
-    const unexpected = await Instance.fromTensors({
+    const unexpected = await Model.fromTensors({
       inputs: { x }, outputs: { output: x.add(1) }, params: { bad: {} }
     })
     unexpected.dispose()
@@ -114,7 +274,7 @@ async function checkCallSignatureAndSelectedOutputs(pg, Instance) {
   assert(invalidParamRejected, 'invalid parameter must not be silently filtered')
 }
 
-async function checkModuleDeviceMap(pg, Instance) {
+async function checkModuleDeviceMap(pg, Model) {
   const Tensor = pg.Tensor
   const x = Tensor.empty([2])
   const webgpu = String(pg.device).toLowerCase() === 'webgpu'
@@ -122,7 +282,7 @@ async function checkModuleDeviceMap(pg, Instance) {
   const w1 = webgpu ? null : new Tensor([2, 3], { dtype: 'float32' })
   const hidden = webgpu ? x.add(3) : x.add(w0)
   const output = webgpu ? hidden.mul(2) : hidden.mul(w1)
-  const inst = await Instance.fromTensors({
+  const inst = await Model.fromTensors({
     inputs: { x },
     outputs: { output },
     params: webgpu ? null : { 'layers.0.weight': w0, 'layers.1.weight': w1 },
@@ -178,7 +338,7 @@ async function checkModuleDeviceMap(pg, Instance) {
     assertClose(irAfter, irBefore, 0)
     assertOptionalBytesEqual(weightsAfter, weightsBefore, 'replacement weight export')
 
-    const restored = Instance.fromIR(irAfter, weightsAfter)
+    const restored = Model.fromIR(irAfter, weightsAfter)
     try {
       const restoredResult = webgpu
         ? await restored.forwardAsync({ x: new Float32Array([1, 2]) })
@@ -194,16 +354,79 @@ async function checkModuleDeviceMap(pg, Instance) {
   }
 }
 
-async function runInstanceTests(pg) {
-  const Instance = pg.Instance
+async function checkModelStorageObjectives(pg, Model) {
+  const w = new pg.Tensor([2], { dtype: 'float32' })
+  const a = w.mul(w).sum(), b = w.mul(w).mul(w).sum()
+  const model = await Model.fromTensors({ params: { w, tied: w }, losses: { a, b }, entrypoints: [
+    { name: 'a_ep', outputs: ['a'], objective: 'a' },
+    { name: 'b_ep', outputs: ['a', 'b'], objective: 'b' }
+  ] })
+  try {
+    const copied = await model.readBufferAsync('w')
+    copied[0] = 100
+    assertClose(await model.readBufferAsync('w'), [2], 0)
+    let rejected = false
+    try { await model.writeBufferAsync('w', new Int32Array([3])) } catch (_) { rejected = true }
+    assert(rejected, 'write accepted a different dtype')
+    const written = new Float32Array([2])
+    const pendingWrite = model.writeBufferAsync('w', written)
+    written[0] = 9
+    await pendingWrite
+    assertClose(await model.readBufferAsync('w'), [2], 0)
+    model.setTrainable('tied', false)
+    model.setTrainable('w', true)
+    model.setOptimizer(pg.OPTIM_SGD, .1, 0, 0, 0, 0)
+    rejected = false
+    try { await model.trainStepAsync({}) } catch (_) { rejected = true }
+    assert(rejected, 'ambiguous objective silently selected')
+    assertClose([await model.trainStepAsync({}, 'b_ep')], [8], 1e-6)
+    assertClose(await model.readBufferAsync('w'), [.8], 1e-6)
+    assertClose(await model.readBufferAsync('b'), [8], 0)
+    await model.placeAsync(pg.device)
+    assertClose(await model.readBufferAsync('w'), [.8], 1e-6)
+    await model.dispose()
+    assertClose(copied, [100], 0)
+    rejected = false
+    try { await model.readBufferAsync('w') } catch (_) { rejected = true }
+    assert(rejected, 'disposed Model accepted a state read')
+  } finally { await model.dispose() }
+}
+
+async function checkModelTrace(pg, Model) {
+  const x = pg.Tensor.empty([1]), y = pg.Tensor.empty([1])
+  // Computed state exercises async snapshot execution, not only host copying.
+  const w = new pg.Tensor([1], { dtype: 'float32' }).add(1)
+  const offset = new pg.Tensor([1], { dtype: 'float32' }).is_param_(false)
+  let calls = 0
+  const trace = String(pg.device).toLowerCase() === 'webgpu' ? Model.traceAsync.bind(Model) : Model.trace.bind(Model)
+  const model = await trace(({ x }) => { calls++; return x.mul(w).add(offset) }, {
+    inputs: { x }, targets: { y }, state: { w, offset },
+    loss: (out, { y }) => ({ mse: out.sub(y).square().mean() })
+  })
+  try {
+    model.setOptimizer(pg.OPTIM_SGD, .1, 0, 0, 0, 0)
+    assertClose([await model.trainStepAsync({ x: new Float32Array([1]), y: new Float32Array([0]) })], [9], 1e-6)
+    assertClose(await model.readBufferAsync('w'), [1.4], 1e-6)
+    assertClose(await model.readBufferAsync('offset'), [1], 0)
+    assert(model.bindings().some(row => row.name === 'offset' && row.role === 4), 'AUX role lost')
+    const saved = await model.exportWeightsAsync({ includeOptimizer: false })
+    assert(safetensorNames(saved).has('offset'), 'model-only export lost persistent AUX')
+    assert(calls === 1, 'training re-invoked authoring code')
+    const objective = model.entrypoints().find(row => row.name === 'loss')
+    assert(objective.objective === 'mse' && objective.inputs.join(',') === 'x,y', 'objective signature lost')
+  } finally { await model.dispose() }
+}
+
+async function runModelRuntimeTests(pg) {
+  const Model = pg.Model
   const { MLP, TabM, NAM } = pg.models
   const testFilter = testFilterFor(pg)
   let passed = 0
   let failed = 0
 
-  if (!pg.supportsInstance) {
-    console.log('\n== Instance ==')
-    console.log('  [SKIP] core does not expose PolyInstance runtime yet')
+  if (!pg.supportsModel) {
+    console.log('\n== Model ==')
+    console.log('  [SKIP] core does not expose PolyModel runtime yet')
     return { passed: 0, failed: 0 }
   }
 
@@ -219,22 +442,29 @@ async function runInstanceTests(pg) {
     }
   }
 
-  console.log('\n== Instance ==')
+  console.log('\n== Model ==')
+
+  await test('Model copied storage exact writes and objective selection', () => checkModelStorageObjectives(pg, Model))
+
+  await test('Model composition factories share C construction', () => checkCompositionFactories(pg))
+  await test('Model composition catalogue and named target objective', () => checkCompositionCatalogue(pg))
+  await test('Model tied Adam placement freeze and checkpoint', () => checkTiedAdamCheckpoint(pg))
+  await test('Model trace seals independent state with named loss', () => checkModelTrace(pg, Model))
 
   await test('generic call validates signature and returns selected outputs', async () => {
-    await checkCallSignatureAndSelectedOutputs(pg, Instance)
+    await checkCallSignatureAndSelectedOutputs(pg, Model)
   })
 
   await test('scalar rank8 and shared multi-output round trip', async () => {
     const scalarX = pg.Tensor.empty([])
     const scalarW = pg.Tensor.full([], 3, { dtype: 'float32' })
-    const scalar = await Instance.fromTensors({
+    const scalar = await Model.fromTensors({
       inputs: { x: scalarX }, outputs: { output: scalarX.mul(scalarW) },
       params: { w: scalarW }
     })
     let scalarRestored = null
     try {
-      scalarRestored = Instance.fromIR(scalar.exportIR(), await scalar.exportWeights())
+      scalarRestored = Model.fromIR(scalar.exportIR(), await scalar.exportWeights())
       const result = await scalarRestored.forward({ x: new Float32Array([2]) })
       assertClose(result.output, [6], 0)
       assert(
@@ -250,14 +480,14 @@ async function runInstanceTests(pg) {
     const x = pg.Tensor.empty(shape)
     const w = pg.Tensor.ones(shape, {})
     const shared = x.add(w)
-    const source = await Instance.fromTensors({
+    const source = await Model.fromTensors({
       inputs: { x },
       outputs: { plus: shared.add(1), minus: shared.sub(1) },
       params: { w }
     })
     let restored = null
     try {
-      restored = Instance.fromIR(source.exportIR(), await source.exportWeights())
+      restored = Model.fromIR(source.exportIR(), await source.exportWeights())
       const result = await restored.forward({ x: new Float32Array([2]) })
       assertClose(result.plus, [4], 0)
       assertClose(result.minus, [2], 0)
@@ -275,7 +505,7 @@ async function runInstanceTests(pg) {
     const x = pg.Tensor.empty([2])
     let error = null
     try {
-      const unexpected = await Instance.fromTensors({
+      const unexpected = await Model.fromTensors({
         inputs: { a: x, b: x }, outputs: { output: x.add(x) }
       })
       unexpected.dispose()
@@ -289,7 +519,7 @@ async function runInstanceTests(pg) {
     const x = pg.Tensor.empty([2])
     let error = null
     try {
-      const unexpected = await Instance.fromTensors({
+      const unexpected = await Model.fromTensors({
         inputs: { x }, outputs: { output: x.add(x) }, params: { w: x }
       })
       unexpected.dispose()
@@ -301,10 +531,10 @@ async function runInstanceTests(pg) {
 
   await test('output alias of dynamic input round trips', async () => {
     const x = pg.Tensor.empty([2])
-    const source = await Instance.fromTensors({ inputs: { x }, outputs: { output: x } })
+    const source = await Model.fromTensors({ inputs: { x }, outputs: { output: x } })
     let restored = null
     try {
-      restored = Instance.fromIR(source.exportIR())
+      restored = Model.fromIR(source.exportIR())
       const value = new Float32Array([3, 4])
       assertClose((await source.forward({ x: value })).output, value, 0)
       assertClose((await restored.forward({ x: value })).output, value, 0)
@@ -320,7 +550,7 @@ async function runInstanceTests(pg) {
     const x = pg.Tensor.empty([2])
     let error = null
     try {
-      const unexpected = await Instance.fromTensors({
+      const unexpected = await Model.fromTensors({
         inputs: { x }, outputs: { output: x.add(view) }, params: { base, view }
       })
       unexpected.dispose()
@@ -336,7 +566,7 @@ async function runInstanceTests(pg) {
     const output = w.assign(w.add(x))
     let error = null
     try {
-      const unexpected = await Instance.fromTensors({
+      const unexpected = await Model.fromTensors({
         inputs: { x }, outputs: { output }, params: { w }
       })
       unexpected.dispose()
@@ -351,7 +581,7 @@ async function runInstanceTests(pg) {
     const x = pg.Tensor.empty([2])
     let error = null
     try {
-      const unexpected = await Instance.fromTensors({
+      const unexpected = await Model.fromTensors({
         inputs: { x }, outputs: { output: x.add(pg.Tensor.rand(2)) }
       })
       unexpected.dispose()
@@ -376,10 +606,10 @@ async function runInstanceTests(pg) {
     assert(params[0] === shared && params[1] === shared, 'parameter aliases must match state paths')
   })
 
-  await test('float16 Instance state preserves exact storage bits', async () => {
+  await test('float16 Model state preserves exact storage bits', async () => {
     const w = new pg.Tensor([1.5, -2], { dtype: 'float16' })
     const x = pg.Tensor.empty([2], { dtype: 'float16' })
-    const inst = await Instance.fromTensors({
+    const inst = await Model.fromTensors({
       inputs: { x },
       outputs: { output: x.add(w) },
       params: { w }
@@ -390,7 +620,7 @@ async function runInstanceTests(pg) {
       assert(raw instanceof Uint16Array, `expected Uint16Array, got ${raw.constructor.name}`)
       assert(raw.length === 2 && raw[0] === 0x3e00 && raw[1] === 0xc000,
         `unexpected float16 bits: ${Array.from(raw)}`)
-      const restored = Instance.fromIR(inst.exportIR(), await inst.exportWeights())
+      const restored = Model.fromIR(inst.exportIR(), await inst.exportWeights())
       try {
         assert(restored.paramDtype(0) === 'float16', 'restored dtype must remain float16')
         const restoredRaw = await restored.paramData(0)
@@ -406,7 +636,7 @@ async function runInstanceTests(pg) {
     }
   })
 
-  await test('typed Instance state round trips exact storage bytes', async () => {
+  await test('typed Model state round trips exact storage bytes', async () => {
     const cases = [
       ['float64', [1.25, -2.5], Float64Array],
       ['int32', [1, -2], Int32Array],
@@ -417,11 +647,11 @@ async function runInstanceTests(pg) {
     for (const [dtype, values, ArrayType] of cases) {
       const w = new pg.Tensor(values, { dtype })
       const x = pg.Tensor.empty([2], { dtype })
-      const source = await Instance.fromTensors({
+      const source = await Model.fromTensors({
         inputs: { x }, outputs: { output: x }, params: { w }
       })
       try {
-        const restored = Instance.fromIR(source.exportIR(), await source.exportWeights())
+        const restored = Model.fromIR(source.exportIR(), await source.exportWeights())
         try {
           const before = await source.paramData(0)
           const after = await restored.paramData(0)
@@ -442,15 +672,15 @@ async function runInstanceTests(pg) {
   })
 
   await test('typed integer input preserves bytes and rejects float binding', async () => {
-    await checkTypedIntegerInput(pg, Instance)
+    await checkTypedIntegerInput(pg, Model)
   })
 
   await test('module device map places exact Tensor cuts atomically', async () => {
-    await checkModuleDeviceMap(pg, Instance)
+    await checkModuleDeviceMap(pg, Model)
   })
 
-  await test('model-family constructors are not Instance methods', async () => {
-    assert(typeof Instance.mlp === 'undefined', 'Instance.mlp should not exist')
+  await test('model-family constructors are not Model methods', async () => {
+    assert(typeof Model.mlp === 'undefined', 'Model.mlp should not exist')
     assert(typeof MLP === 'function', 'pg.models.MLP should exist')
   })
 
@@ -520,7 +750,7 @@ async function runInstanceTests(pg) {
     })
     try {
       inst1.setParamTrainable(0, false)
-      const inst2 = Instance.fromIR(inst1.exportIR(), await inst1.exportWeights())
+      const inst2 = Model.fromIR(inst1.exportIR(), await inst1.exportWeights())
       try {
         assert(inst2.paramTrainable(0) === false, 'frozen flag should round trip')
         assert(inst2.paramTrainable(1) === true, 'unfrozen flag should round trip')
@@ -620,7 +850,7 @@ async function runInstanceTests(pg) {
       source.setOptimizer(pg.OPTIM_ADAM, 0.05)
       const io = { x: new Float32Array([1, 2]), y: new Float32Array([3]) }
       for (let i = 0; i < 3; i++) await source.trainStep(io)
-      restored = Instance.fromIR(source.exportIR(), await source.exportWeights())
+      restored = Model.fromIR(source.exportIR(), await source.exportWeights())
       restored.setOptimizer(pg.OPTIM_ADAM, 0.05)
 
       const sourceLoss = await source.trainStep(io)
@@ -649,7 +879,7 @@ async function runInstanceTests(pg) {
     pg.Tensor.manual_seed(11)
     const w = pg.Tensor.rand(2, {})
     const x = pg.Tensor.empty([2])
-    const source = await Instance.fromTensors({
+    const source = await Model.fromTensors({
       inputs: { x }, outputs: { output: x.mul(w) }, params: { w }
     })
     let restored = null
@@ -658,13 +888,13 @@ async function runInstanceTests(pg) {
       const weights = await source.exportWeights()
       let rejected = false
       try {
-        const unexpected = Instance.fromIR(ir)
+        const unexpected = Model.fromIR(ir)
         unexpected.dispose()
       } catch (err) {
         rejected = true
       }
       assert(rejected, 'fresh stochastic activation must fail without checkpoint bytes')
-      restored = Instance.fromIR(ir, weights)
+      restored = Model.fromIR(ir, weights)
       const input = new Float32Array([2, 3])
       const sourceOut = await source.forward({ x: input })
       const restoredOut = await restored.forward({ x: input })
@@ -687,7 +917,7 @@ async function runInstanceTests(pg) {
     try {
       const ir = inst1.exportIR()
       const weights = await inst1.exportWeights()
-      const inst2 = Instance.fromIR(ir, weights)
+      const inst2 = Model.fromIR(ir, weights)
       try {
         const out1 = (await inst1.forward({ x: new Float32Array([1, 2]) })).output
         const out2 = (await inst2.forward({ x: new Float32Array([1, 2]) })).output
@@ -717,19 +947,19 @@ async function runInstanceTests(pg) {
         'compiled program magic mismatch')
       let missingWeightsRejected = false
       try {
-        const unexpected = Instance.fromProgram(program)
+        const unexpected = Model.fromProgram(program)
         await unexpected.dispose()
       } catch (err) {
         missingWeightsRejected = true
       }
       assert(missingWeightsRejected, 'bound state must require separate weights')
-      inst2 = Instance.fromProgram(program, weights)
+      inst2 = Model.fromProgram(program, weights)
       const input = new Float32Array([1.25, -0.5])
       const out1 = (await inst1.forward({ x: input })).output
       const out2 = (await inst2.forward({ x: input })).output
       assertClose(out2, out1, 0)
       const portable = inst2.exportIR()
-      assert(!portable || portable.length === 0, 'program-only Instance exposed portable IR')
+      assert(!portable || portable.length === 0, 'program-only Model exposed portable IR')
       const program2 = await inst2.exportProgramAsync()
       assertClose(program2, program, 0)
     } finally {
@@ -929,20 +1159,20 @@ async function runInstanceTests(pg) {
     }
   })
 
-  console.log(`\nInstance tests: ${passed} passed, ${failed} failed`)
+  console.log(`\nModel tests: ${passed} passed, ${failed} failed`)
   return { passed, failed }
 }
 
-async function runInstanceSmokeTests(pg) {
-  const Instance = pg.Instance
+async function runModelSmokeTests(pg) {
+  const Model = pg.Model
   const { MLP, TabM, NAM } = pg.models
   const testFilter = testFilterFor(pg)
   let passed = 0
   let failed = 0
 
-  if (!pg.supportsInstance) {
-    console.log('\n== Instance ==')
-    console.log('  [SKIP] core does not expose PolyInstance runtime yet')
+  if (!pg.supportsModel) {
+    console.log('\n== Model ==')
+    console.log('  [SKIP] core does not expose PolyModel runtime yet')
     return { passed: 0, failed: 0 }
   }
 
@@ -958,18 +1188,25 @@ async function runInstanceSmokeTests(pg) {
     }
   }
 
-  console.log('\n== Instance ==')
+  console.log('\n== Model ==')
+
+  await test('Model composition factories share C construction', () => checkCompositionFactories(pg))
+  await test('Model composition catalogue and named target objective', () => checkCompositionCatalogue(pg))
+  await test('Model tied Adam placement freeze and checkpoint', () => checkTiedAdamCheckpoint(pg))
+  await test('Model trace seals independent state with named loss', () => checkModelTrace(pg, Model))
+
+  await test('Model copied storage exact writes and objective selection', () => checkModelStorageObjectives(pg, Model))
 
   await test('typed integer input preserves bytes and rejects float binding', async () => {
-    await checkTypedIntegerInput(pg, Instance)
+    await checkTypedIntegerInput(pg, Model)
   })
 
   await test('generic call validates signature and returns selected outputs', async () => {
-    await checkCallSignatureAndSelectedOutputs(pg, Instance)
+    await checkCallSignatureAndSelectedOutputs(pg, Model)
   })
 
   await test('webgpu module device map places exact Tensor cuts atomically', async () => {
-    await checkModuleDeviceMap(pg, Instance)
+    await checkModuleDeviceMap(pg, Model)
   })
 
   await test('webgpu mlp forward smoke', async () => {
@@ -991,8 +1228,8 @@ async function runInstanceSmokeTests(pg) {
     }
   })
 
-  console.log(`\nInstance smoke tests: ${passed} passed, ${failed} failed`)
+  console.log(`\nModel smoke tests: ${passed} passed, ${failed} failed`)
   return { passed, failed }
 }
 
-module.exports = { runInstanceTests, runInstanceSmokeTests }
+module.exports = { runModelRuntimeTests, runModelSmokeTests }

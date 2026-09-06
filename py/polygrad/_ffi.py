@@ -16,7 +16,7 @@ import sys
 _lib = None
 OPS = {}
 _has_cuda_ffi = False
-POLYGRAD_ABI_VERSION = 67
+POLYGRAD_ABI_VERSION = 68
 
 # --- Opaque pointer type (always available) ---
 _ptr = ctypes.c_void_p
@@ -113,13 +113,13 @@ class PolyCtxStats(ctypes.Structure):
         ('mem_used', ctypes.c_uint64),
     ]
 
-class PolyInstanceOptions(ctypes.Structure):
+class PolyModelOptions(ctypes.Structure):
     _fields_ = [
         ('own_ctx_on_success', ctypes.c_bool),
         ('own_ctx_on_failure', ctypes.c_bool),
     ]
 
-class PolyInstanceError(ctypes.Structure):
+class PolyModelError(ctypes.Structure):
     _fields_ = [
         ('code', ctypes.c_int),
         ('func', ctypes.c_char_p),
@@ -1137,28 +1137,32 @@ def _declare_signatures(lib):
         ctypes.POINTER(ctypes.c_int64), ctypes.c_int,
     ]
 
-    # --- PolyInstance (instance.h) ---
-    lib.poly_instance_from_ir.restype = _ptr
-    lib.poly_instance_from_ir.argtypes = [_u8p, ctypes.c_int, _u8p, ctypes.c_int]
-    lib.poly_instance_from_program.restype = _ptr
-    lib.poly_instance_from_program.argtypes = [_u8p, ctypes.c_int, _u8p, ctypes.c_int]
+    # --- PolyModel (model.h) ---
+    for name in ('poly_sequential_from_json', 'poly_graph_from_json'):
+        factory = getattr(lib, name)
+        factory.restype = _ptr
+        factory.argtypes = [_ptr, ctypes.c_char_p, ctypes.c_int, ctypes.POINTER(PolyModelError)]
+    lib.poly_model_from_ir.restype = _ptr
+    lib.poly_model_from_ir.argtypes = [_u8p, ctypes.c_int, _u8p, ctypes.c_int]
+    lib.poly_model_from_program.restype = _ptr
+    lib.poly_model_from_program.argtypes = [_u8p, ctypes.c_int, _u8p, ctypes.c_int]
 
-    lib.poly_instance_from_sinks.restype = _ptr
-    lib.poly_instance_from_sinks.argtypes = [
+    lib.poly_model_from_sinks.restype = _ptr
+    lib.poly_model_from_sinks.argtypes = [
         _ptr, ctypes.POINTER(ctypes.c_char_p), ctypes.POINTER(_ptr), ctypes.c_int
     ]
 
-    lib.poly_instance_from_bindings.restype = _ptr
-    lib.poly_instance_from_bindings.argtypes = [
+    lib.poly_model_from_bindings.restype = _ptr
+    lib.poly_model_from_bindings.argtypes = [
         _ptr,
         ctypes.POINTER(PolyBindingSpec), ctypes.c_int,
         ctypes.POINTER(PolyEntrypointSpec), ctypes.c_int,
-        ctypes.POINTER(PolyInstanceOptions),
-        ctypes.POINTER(PolyInstanceError),
+        ctypes.POINTER(PolyModelOptions),
+        ctypes.POINTER(PolyModelError),
     ]
 
-    lib.poly_instance_define_module_arrays.restype = ctypes.c_int
-    lib.poly_instance_define_module_arrays.argtypes = [
+    lib.poly_model_define_module_arrays.restype = ctypes.c_int
+    lib.poly_model_define_module_arrays.argtypes = [
         _ptr,
         ctypes.POINTER(ctypes.c_char_p),
         ctypes.POINTER(_ptr),
@@ -1167,119 +1171,128 @@ def _declare_signatures(lib):
         ctypes.c_int,
     ]
 
-    lib.poly_instance_set_device_map_arrays.restype = ctypes.c_int
-    lib.poly_instance_set_device_map_arrays.argtypes = [
+    lib.poly_model_set_device_map_arrays.restype = ctypes.c_int
+    lib.poly_model_set_device.restype = ctypes.c_int
+    lib.poly_model_set_device.argtypes = [_ptr, ctypes.c_int]
+    lib.poly_model_set_device_map_arrays.argtypes = [
         _ptr,
         ctypes.POINTER(ctypes.c_char_p),
         ctypes.POINTER(ctypes.c_char_p),
         ctypes.c_int,
     ]
 
-    lib.poly_instance_free.restype = None
-    lib.poly_instance_free.argtypes = [_ptr]
+    lib.poly_model_free.restype = None
+    lib.poly_model_free.argtypes = [_ptr]
 
-    lib.poly_instance_param_count.restype = ctypes.c_int
-    lib.poly_instance_param_count.argtypes = [_ptr]
+    lib.poly_model_param_count.restype = ctypes.c_int
+    lib.poly_model_param_count.argtypes = [_ptr]
 
-    lib.poly_instance_param_name.restype = ctypes.c_char_p
-    lib.poly_instance_param_name.argtypes = [_ptr, ctypes.c_int]
+    lib.poly_model_param_name.restype = ctypes.c_char_p
+    lib.poly_model_param_name.argtypes = [_ptr, ctypes.c_int]
 
-    lib.poly_instance_param_shape.restype = ctypes.c_int
-    lib.poly_instance_param_shape.argtypes = [_ptr, ctypes.c_int, _i64p, ctypes.c_int]
+    lib.poly_model_param_shape.restype = ctypes.c_int
+    lib.poly_model_param_shape.argtypes = [_ptr, ctypes.c_int, _i64p, ctypes.c_int]
 
-    lib.poly_instance_param_data.restype = _fp
-    lib.poly_instance_param_data.argtypes = [_ptr, ctypes.c_int, _i64p]
-    lib.poly_instance_param_data_raw.restype = _ptr
-    lib.poly_instance_param_data_raw.argtypes = [_ptr, ctypes.c_int, _i64p]
-    lib.poly_instance_param_dtype_id.restype = ctypes.c_int
-    lib.poly_instance_param_dtype_id.argtypes = [_ptr, ctypes.c_int]
-    lib.poly_instance_param_nbytes.restype = ctypes.c_size_t
-    lib.poly_instance_param_nbytes.argtypes = [_ptr, ctypes.c_int]
+    lib.poly_model_param_data.restype = _fp
+    lib.poly_model_param_data.argtypes = [_ptr, ctypes.c_int, _i64p]
+    lib.poly_model_param_data_raw.restype = _ptr
+    lib.poly_model_param_data_raw.argtypes = [_ptr, ctypes.c_int, _i64p]
+    lib.poly_model_param_dtype_id.restype = ctypes.c_int
+    lib.poly_model_param_dtype_id.argtypes = [_ptr, ctypes.c_int]
+    lib.poly_model_param_nbytes.restype = ctypes.c_size_t
+    lib.poly_model_param_nbytes.argtypes = [_ptr, ctypes.c_int]
 
-    lib.poly_instance_param_trainable.restype = ctypes.c_bool
-    lib.poly_instance_param_trainable.argtypes = [_ptr, ctypes.c_int]
+    lib.poly_model_param_trainable.restype = ctypes.c_bool
+    lib.poly_model_param_trainable.argtypes = [_ptr, ctypes.c_int]
 
-    lib.poly_instance_set_param_trainable.restype = ctypes.c_int
-    lib.poly_instance_set_param_trainable.argtypes = [_ptr, ctypes.c_int, ctypes.c_bool]
+    lib.poly_model_set_param_trainable.restype = ctypes.c_int
+    lib.poly_model_set_param_trainable.argtypes = [_ptr, ctypes.c_int, ctypes.c_bool]
 
-    lib.poly_instance_buf_count.restype = ctypes.c_int
-    lib.poly_instance_buf_count.argtypes = [_ptr]
+    lib.poly_model_buf_count.restype = ctypes.c_int
+    lib.poly_model_buf_count.argtypes = [_ptr]
 
-    lib.poly_instance_buf_name.restype = ctypes.c_char_p
-    lib.poly_instance_buf_name.argtypes = [_ptr, ctypes.c_int]
+    lib.poly_model_buf_name.restype = ctypes.c_char_p
+    lib.poly_model_buf_name.argtypes = [_ptr, ctypes.c_int]
 
-    lib.poly_instance_buf_role.restype = ctypes.c_int
-    lib.poly_instance_buf_role.argtypes = [_ptr, ctypes.c_int]
+    lib.poly_model_buf_role.restype = ctypes.c_int
+    lib.poly_model_buf_role.argtypes = [_ptr, ctypes.c_int]
 
-    lib.poly_instance_buf_trainable.restype = ctypes.c_bool
-    lib.poly_instance_buf_trainable.argtypes = [_ptr, ctypes.c_int]
+    lib.poly_model_buf_trainable.restype = ctypes.c_bool
+    lib.poly_model_buf_trainable.argtypes = [_ptr, ctypes.c_int]
 
-    lib.poly_instance_set_buf_trainable.restype = ctypes.c_int
-    lib.poly_instance_set_buf_trainable.argtypes = [_ptr, ctypes.c_int, ctypes.c_bool]
+    lib.poly_model_set_buf_trainable.restype = ctypes.c_int
+    lib.poly_model_set_buf_trainable.argtypes = [_ptr, ctypes.c_int, ctypes.c_bool]
 
-    lib.poly_instance_buf_shape.restype = ctypes.c_int
-    lib.poly_instance_buf_shape.argtypes = [_ptr, ctypes.c_int, _i64p, ctypes.c_int]
+    lib.poly_model_buf_shape.restype = ctypes.c_int
+    lib.poly_model_buf_shape.argtypes = [_ptr, ctypes.c_int, _i64p, ctypes.c_int]
 
-    lib.poly_instance_buf_data.restype = _fp
-    lib.poly_instance_buf_data.argtypes = [_ptr, ctypes.c_int, _i64p]
-    lib.poly_instance_buf_data_raw.restype = _ptr
-    lib.poly_instance_buf_data_raw.argtypes = [_ptr, ctypes.c_int, _i64p]
-    lib.poly_instance_buf_dtype_id.restype = ctypes.c_int
-    lib.poly_instance_buf_dtype_id.argtypes = [_ptr, ctypes.c_int]
-    lib.poly_instance_buf_nbytes.restype = ctypes.c_size_t
-    lib.poly_instance_buf_nbytes.argtypes = [_ptr, ctypes.c_int]
+    lib.poly_model_buf_data.restype = _fp
+    lib.poly_model_buf_data.argtypes = [_ptr, ctypes.c_int, _i64p]
+    lib.poly_model_buf_data_raw.restype = _ptr
+    lib.poly_model_buf_data_raw.argtypes = [_ptr, ctypes.c_int, _i64p]
+    lib.poly_model_buf_dtype_id.restype = ctypes.c_int
+    lib.poly_model_buf_dtype_id.argtypes = [_ptr, ctypes.c_int]
+    lib.poly_model_buf_nbytes.restype = ctypes.c_size_t
+    lib.poly_model_buf_nbytes.argtypes = [_ptr, ctypes.c_int]
 
-    lib.poly_instance_export_weights.restype = _u8p
-    lib.poly_instance_export_weights.argtypes = [_ptr, _ip]
-    lib.poly_instance_export_weights_ex.restype = _u8p
-    lib.poly_instance_export_weights_ex.argtypes = [_ptr, _ip, ctypes.c_uint32]
+    lib.poly_model_read_buf.restype = ctypes.c_int
+    lib.poly_model_read_buf.argtypes = [_ptr, ctypes.c_int, _ptr, ctypes.c_size_t]
+    lib.poly_model_write_buf.restype = ctypes.c_int
+    lib.poly_model_write_buf.argtypes = [_ptr, ctypes.c_int, _ptr, ctypes.c_size_t]
 
-    lib.poly_instance_import_weights.restype = ctypes.c_int
-    lib.poly_instance_import_weights.argtypes = [_ptr, _u8p, ctypes.c_int]
+    lib.poly_model_export_weights.restype = _u8p
+    lib.poly_model_export_weights.argtypes = [_ptr, _ip]
+    lib.poly_model_export_weights_ex.restype = _u8p
+    lib.poly_model_export_weights_ex.argtypes = [_ptr, _ip, ctypes.c_uint32]
 
-    lib.poly_instance_export_ir.restype = _u8p
-    lib.poly_instance_export_ir.argtypes = [_ptr, _ip]
-    lib.poly_instance_export_program.restype = _u8p
-    lib.poly_instance_export_program.argtypes = [_ptr, _ip]
+    lib.poly_model_import_weights.restype = ctypes.c_int
+    lib.poly_model_import_weights.argtypes = [_ptr, _u8p, ctypes.c_int]
+
+    lib.poly_model_export_ir.restype = _u8p
+    lib.poly_model_export_ir.argtypes = [_ptr, _ip]
+    lib.poly_model_export_program.restype = _u8p
+    lib.poly_model_export_program.argtypes = [_ptr, _ip]
 
     # Bundle format
-    lib.poly_instance_save_bundle.restype = _u8p
-    lib.poly_instance_save_bundle.argtypes = [_ptr, _ip]
-    lib.poly_instance_save_bundle_ex.restype = _u8p
-    lib.poly_instance_save_bundle_ex.argtypes = [_ptr, _ip, ctypes.c_uint32]
+    lib.poly_model_save_bundle.restype = _u8p
+    lib.poly_model_save_bundle.argtypes = [_ptr, _ip]
+    lib.poly_model_save_bundle_ex.restype = _u8p
+    lib.poly_model_save_bundle_ex.argtypes = [_ptr, _ip, ctypes.c_uint32]
 
-    lib.poly_instance_from_bundle.restype = _ptr
-    lib.poly_instance_from_bundle.argtypes = [_u8p, ctypes.c_int]
+    lib.poly_model_from_bundle.restype = _ptr
+    lib.poly_model_from_bundle.argtypes = [_u8p, ctypes.c_int]
 
-    lib.poly_instance_forward.restype = ctypes.c_int
-    lib.poly_instance_forward.argtypes = [_ptr, ctypes.POINTER(PolyIOBinding), ctypes.c_int]
+    lib.poly_model_forward.restype = ctypes.c_int
+    lib.poly_model_forward.argtypes = [_ptr, ctypes.POINTER(PolyIOBinding), ctypes.c_int]
 
-    lib.poly_instance_call.restype = ctypes.c_int
-    lib.poly_instance_call.argtypes = [
+    lib.poly_model_call.restype = ctypes.c_int
+    lib.poly_model_call.argtypes = [
         _ptr, ctypes.c_char_p, ctypes.POINTER(PolyIOBinding), ctypes.c_int]
 
-    lib.poly_instance_entrypoint_count.restype = ctypes.c_int
-    lib.poly_instance_entrypoint_count.argtypes = [_ptr]
-    lib.poly_instance_entrypoint_name.restype = ctypes.c_char_p
-    lib.poly_instance_entrypoint_name.argtypes = [_ptr, ctypes.c_int]
-    lib.poly_instance_entrypoint_input_count.restype = ctypes.c_int
-    lib.poly_instance_entrypoint_input_count.argtypes = [_ptr, ctypes.c_char_p]
-    lib.poly_instance_entrypoint_input_name.restype = ctypes.c_char_p
-    lib.poly_instance_entrypoint_input_name.argtypes = [_ptr, ctypes.c_char_p, ctypes.c_int]
-    lib.poly_instance_entrypoint_output_count.restype = ctypes.c_int
-    lib.poly_instance_entrypoint_output_count.argtypes = [_ptr, ctypes.c_char_p]
-    lib.poly_instance_entrypoint_output_name.restype = ctypes.c_char_p
-    lib.poly_instance_entrypoint_output_name.argtypes = [_ptr, ctypes.c_char_p, ctypes.c_int]
+    lib.poly_model_entrypoint_count.restype = ctypes.c_int
+    lib.poly_model_entrypoint_count.argtypes = [_ptr]
+    lib.poly_model_entrypoint_name.restype = ctypes.c_char_p
+    lib.poly_model_entrypoint_name.argtypes = [_ptr, ctypes.c_int]
+    lib.poly_model_entrypoint_objective.restype = ctypes.c_char_p
+    lib.poly_model_entrypoint_objective.argtypes = [_ptr, ctypes.c_char_p]
+    lib.poly_model_entrypoint_input_count.restype = ctypes.c_int
+    lib.poly_model_entrypoint_input_count.argtypes = [_ptr, ctypes.c_char_p]
+    lib.poly_model_entrypoint_input_name.restype = ctypes.c_char_p
+    lib.poly_model_entrypoint_input_name.argtypes = [_ptr, ctypes.c_char_p, ctypes.c_int]
+    lib.poly_model_entrypoint_output_count.restype = ctypes.c_int
+    lib.poly_model_entrypoint_output_count.argtypes = [_ptr, ctypes.c_char_p]
+    lib.poly_model_entrypoint_output_name.restype = ctypes.c_char_p
+    lib.poly_model_entrypoint_output_name.argtypes = [_ptr, ctypes.c_char_p, ctypes.c_int]
 
-    lib.poly_instance_train_step.restype = ctypes.c_int
-    lib.poly_instance_train_step.argtypes = [_ptr, ctypes.POINTER(PolyIOBinding), ctypes.c_int, _fp]
+    lib.poly_model_train_step.restype = ctypes.c_int
+    lib.poly_model_train_step.argtypes = [_ptr, ctypes.c_char_p, ctypes.POINTER(PolyIOBinding), ctypes.c_int, _fp]
 
-    lib.poly_instance_set_optimizer.restype = ctypes.c_int
-    lib.poly_instance_set_optimizer.argtypes = [_ptr, ctypes.c_int,
+    lib.poly_model_set_optimizer.restype = ctypes.c_int
+    lib.poly_model_set_optimizer.argtypes = [_ptr, ctypes.c_int,
         ctypes.c_float, ctypes.c_float, ctypes.c_float,
         ctypes.c_float, ctypes.c_float]
-    lib.poly_instance_set_optimizer_ex.restype = ctypes.c_int
-    lib.poly_instance_set_optimizer_ex.argtypes = [_ptr, ctypes.c_int,
+    lib.poly_model_set_optimizer_ex.restype = ctypes.c_int
+    lib.poly_model_set_optimizer_ex.argtypes = [_ptr, ctypes.c_int,
         ctypes.c_float, ctypes.c_float, ctypes.c_float,
         ctypes.c_float, ctypes.c_float, ctypes.c_float,
         ctypes.c_bool, ctypes.c_bool]
@@ -1289,12 +1302,12 @@ def _declare_signatures(lib):
     lib.poly_mlp_from_json.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_int]
 
     # TabM family builder (model_tabm.h)
-    lib.poly_tabm_instance.restype = _ptr
-    lib.poly_tabm_instance.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_int]
+    lib.poly_tabm_from_json.restype = _ptr
+    lib.poly_tabm_from_json.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_int]
 
     # NAM family builder (model_nam.h)
-    lib.poly_nam_instance.restype = _ptr
-    lib.poly_nam_instance.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_int]
+    lib.poly_nam_from_json.restype = _ptr
+    lib.poly_nam_from_json.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_int]
 
     # HF/model loaders (src/models/*.c)
     lib.poly_hf_load.restype = _ptr

@@ -49,11 +49,11 @@ function weightExportFlags(options) {
   return EXPORT_WEIGHTS_PARAMS | (includeOptimizer ? EXPORT_WEIGHTS_OPTIMIZER : 0)
 }
 
-function instanceDtypeName(core, dtypeId) {
+function modelDtypeName(core, dtypeId) {
   for (const [name, id] of Object.entries(core.dtypeIds || {})) {
     if (Number(id) === Number(dtypeId)) return name
   }
-  throw new Error(`polygrad: unsupported Instance storage dtype id ${dtypeId}`)
+  throw new Error(`polygrad: unsupported Model storage dtype id ${dtypeId}`)
 }
 
 
@@ -105,7 +105,7 @@ function roleId(role) {
   if (typeof role === 'string') {
     const key = role.toLowerCase()
     if (!Object.prototype.hasOwnProperty.call(ROLE_IDS, key)) {
-      throw new Error(`polygrad: unknown Instance binding role '${role}'`)
+      throw new Error(`polygrad: unknown Model binding role '${role}'`)
     }
     return ROLE_IDS[key]
   }
@@ -137,7 +137,7 @@ function bindingFields(binding) {
       trainable: binding.trainable
     }
   }
-  throw new TypeError('polygrad: Instance bindings must be objects or [name, role, tensor, flags] arrays')
+  throw new TypeError('polygrad: Model bindings must be objects or [name, role, tensor, flags] arrays')
 }
 
 function entryFields(entry) {
@@ -163,7 +163,7 @@ function entryFields(entry) {
       flags: entry.flags || 0
     }
   }
-  throw new TypeError('polygrad: Instance entrypoints must be objects or [name, inputs, outputs] arrays')
+  throw new TypeError('polygrad: Model entrypoints must be objects or [name, inputs, outputs] arrays')
 }
 
 function moduleFields(module) {
@@ -174,7 +174,7 @@ function moduleFields(module) {
   if (module && typeof module === 'object') {
     return { name: module.name, inputs: module.inputs, output: module.output }
   }
-  throw new TypeError('polygrad: Instance modules must be objects or [name, inputs, output] arrays')
+  throw new TypeError('polygrad: Model modules must be objects or [name, inputs, output] arrays')
 }
 
 function moduleInputs(inputs) {
@@ -204,34 +204,34 @@ function isPromiseLike(v) {
   return v && typeof v.then === 'function'
 }
 
-function isInstanceSpec(v) {
+function isModelSpec(v) {
   return v && typeof v === 'object' && !Array.isArray(v) &&
     (v.inputs || v.targets || v.outputs || v.losses || v.params || v.state || v.entrypoints || v.modules)
 }
 
-function createBoundInstanceClass(runtime) {
+function createBoundModelClass(runtime) {
   const _runtime = runtime
-  const liveInstanceOwners = new Set()
-  const instanceFinalizer = typeof FinalizationRegistry === 'undefined'
+  const liveModelOwners = new Set()
+  const modelFinalizer = typeof FinalizationRegistry === 'undefined'
     ? null
     : new FinalizationRegistry(owner => {
-        const pending = releaseInstanceOwner(owner)
+        const pending = releaseModelOwner(owner)
         if (pending && typeof pending.then === 'function') pending.catch(() => {})
       })
 
-  function releaseInstanceOwner(owner, token = null) {
+  function releaseModelOwner(owner, token = null) {
     if (!owner || !owner.active) return undefined
     owner.active = false
-    liveInstanceOwners.delete(owner)
-    if (instanceFinalizer && token) instanceFinalizer.unregister(token)
-    const instance = owner.ref && owner.ref.deref ? owner.ref.deref() : null
-    if (instance) {
-      instance._owner = null
-      instance._handle = null
-      instance._closing = true
+    liveModelOwners.delete(owner)
+    if (modelFinalizer && token) modelFinalizer.unregister(token)
+    const model = owner.ref && owner.ref.deref ? owner.ref.deref() : null
+    if (model) {
+      model._owner = null
+      model._handle = null
+      model._closing = true
     }
     if (!owner.state.alive || !owner.core || !owner.handle) return undefined
-    const free = () => owner.core.instance.free(owner.handle)
+    const free = () => owner.core.model.free(owner.handle)
     if (owner.asyncHost && owner.core.enqueueAsync) return owner.core.enqueueAsync(free)
     free()
     return undefined
@@ -242,31 +242,25 @@ function createBoundInstanceClass(runtime) {
     return tensor
   }
 
-  async function ensureStorageBinding(name, tensor) {
-    if (!tensor.uop || !tensor.uop.hasBufferIdentity()) {
-      throw new Error(`${name} has no buffer identity`)
-    }
-  }
-
   function requireStorageBinding(name, tensor) {
     if (!tensor.uop || !tensor.uop.hasBufferIdentity()) {
-      throw new Error(`${name} has no buffer identity; use await Instance.fromTensors(...) for lazy params`)
+      throw new Error(`${name} has no buffer identity; inputs and targets require storage-backed Tensors`)
     }
   }
 
   function defineModulesOnHandle(handle, modules, expectedCtx = null) {
     if (modules == null) return
     const rows = Array.from(modules)
-    if (!rows.length) throw new Error('Instance.defineModules requires at least one module')
+    if (!rows.length) throw new Error('Model.defineModules requires at least one module')
     const parsed = rows.map(module => {
       const m = moduleFields(module)
-      if (m.name == null) throw new Error('Instance module is missing a name')
+      if (m.name == null) throw new Error('Model module is missing a name')
       const inputs = moduleInputs(m.inputs).map((tensor, i) =>
         requireTensor(`${m.name}.inputs[${i}]`, tensor))
       const output = requireTensor(`${m.name}.output`, m.output)
       for (const tensor of inputs.concat([output])) {
         if (expectedCtx != null && tensor._ctx !== expectedCtx) {
-          throw new Error(`Instance module '${m.name}' contains a Tensor from another PolyCtx`)
+          throw new Error(`Model module '${m.name}' contains a Tensor from another PolyCtx`)
         }
       }
       return {
@@ -275,17 +269,48 @@ function createBoundInstanceClass(runtime) {
         output: output._tensor
       }
     })
-    const api = _runtime._core.instance
+    const api = _runtime._core.model
     if (!api.defineModules) throw new Error('polygrad: module placement unavailable for this core')
     const rc = api.defineModules(handle, parsed)
-    if (rc !== 0) throw new Error('polygrad: invalid or ambiguous Instance module cuts')
+    if (rc !== 0) throw new Error('polygrad: invalid or ambiguous Model module cuts')
   }
 
-  function lowerTensorSpecSync(spec = {}) {
+  function traceSpec(fn, { inputs, targets = {}, loss = null, state, params, entrypoints } = {}) {
+    if (typeof fn !== 'function') throw new TypeError('Model.trace requires a callable')
+    const result = fn(inputs)
+    if (isPromiseLike(result)) throw new TypeError('Model.trace authoring must be synchronous')
+    const losses = loss == null ? null : loss(result, targets)
+    if (isPromiseLike(losses)) throw new TypeError('Model.trace loss must be synchronous')
+    return { inputs, targets, outputs: result, losses, state, params, entrypoints }
+  }
+
+  function sealBindings(ctx, bindings, entries, modules, async = false) {
+    const api = _runtime._core.model
+    if (!api.fromBindings) throw new Error('polygrad: fromBindings unavailable for this core')
+    const finish = handle => {
+      if (!handle) throw new Error('polygrad: failed to create Model from tensor bindings')
+      try {
+        defineModulesOnHandle(handle, modules, ctx)
+      } catch (err) {
+        api.free(handle)
+        throw err
+      }
+      return async ? new Model(handle) : handle
+    }
+    if (_runtime._usesAsyncHostBridge()) {
+      if (!async) throw new PolyAsyncRequired('Model construction', 'Model.fromTensors()/traceAsync()/fromBindingsAsync()')
+      // Queue construction and its marshalling before later Tensor releases.
+      return _runtime._withAsync(() => _runtime._core.enqueueAsync(async () =>
+        finish(await api.fromBindingsAsync(ctx, bindings, entries))))
+    }
+    return finish(api.fromBindings(ctx, bindings, entries))
+  }
+
+  function lowerTensorSpec(spec = {}, async = false) {
     const { inputs, outputs, targets, losses, entrypoints, modules } = spec
     let { params, state } = spec
     if (params != null && state != null) {
-      throw new Error('Instance accepts params or state, not both')
+      throw new Error('Model accepts params or state, not both')
     }
     if (state != null) params = state
 
@@ -302,9 +327,9 @@ function createBoundInstanceClass(runtime) {
       }
     }
     for (const [name, tensor] of paramItems) namedTensors.push([name, requireTensor(name, tensor)])
-    if (!namedTensors.length) throw new Error('Instance requires at least one tensor binding')
+    if (!namedTensors.length) throw new Error('Model requires at least one tensor binding')
     if (!Object.keys(outs).length && !Object.keys(lossMap).length) {
-      throw new Error('Instance requires outputs or losses')
+      throw new Error('Model requires outputs or losses')
     }
 
     const ctx = namedTensors[0][1]._ctx
@@ -321,7 +346,10 @@ function createBoundInstanceClass(runtime) {
     }
     for (const [name, tensor] of Object.entries(inps)) addBinding(name, ROLE_INPUT, tensor)
     for (const [name, tensor] of Object.entries(tgts)) addBinding(name, ROLE_TARGET, tensor)
-    for (const [name, tensor] of paramItems) addBinding(name, ROLE_PARAM, tensor)
+    for (const [name, tensor] of paramItems) {
+      const role = state != null && !tensor.isParam ? ROLE_AUX : ROLE_PARAM
+      addBinding(name, role, tensor, role === ROLE_PARAM && !tensor.isParam ? BIND_F_FROZEN : 0)
+    }
     for (const [name, tensor] of Object.entries(outs)) addBinding(name, ROLE_OUTPUT, tensor)
     for (const [name, tensor] of Object.entries(lossMap)) addBinding(name, ROLE_OUTPUT, tensor)
 
@@ -329,7 +357,7 @@ function createBoundInstanceClass(runtime) {
     if (entrypoints != null) {
       for (const entry of entrypoints) {
         const e = entryFields(entry)
-        if (e.name == null) throw new Error('Instance entrypoint is missing a name')
+        if (e.name == null) throw new Error('Model entrypoint is missing a name')
         entries.push({
           name: String(e.name),
           inputs: entryNameList(e.inputs),
@@ -345,8 +373,7 @@ function createBoundInstanceClass(runtime) {
       const lossNames = Object.keys(lossMap)
       if (outputNames.length) entries.push({ name: 'forward', inputs: inputNames, outputs: outputNames })
       if (lossNames.length) {
-        const objective = lossNames.length === 1 && Object.prototype.hasOwnProperty.call(lossMap, 'loss')
-          ? 'loss' : null
+        const objective = lossNames.length === 1 ? lossNames[0] : null
         entries.push({
           name: 'loss',
           inputs: inputNames.concat(targetNames),
@@ -356,23 +383,13 @@ function createBoundInstanceClass(runtime) {
       }
     }
 
-    const api = _runtime._core.instance
-    if (!api.fromBindings) throw new Error('polygrad: fromBindings unavailable for this core')
-    const handle = api.fromBindings(ctx, bindings, entries)
-    if (!handle) throw new Error('polygrad: failed to create Instance from tensor bindings')
-    try {
-      defineModulesOnHandle(handle, modules, ctx)
-    } catch (err) {
-      api.free(handle)
-      throw err
-    }
-    return handle
+    return sealBindings(ctx, bindings, entries, modules, async)
   }
 
-  class Instance {
+  class Model {
     constructor(handle) {
-      if (isInstanceSpec(handle)) handle = lowerTensorSpecSync(handle)
-      if (!handle) throw new Error('polygrad: failed to create PolyInstance')
+      if (isModelSpec(handle)) handle = lowerTensorSpec(handle)
+      if (!handle) throw new Error('polygrad: failed to create PolyModel')
       this._rt = _runtime
       this._handle = handle
       const caps = _runtime && _runtime._core && _runtime._core.caps
@@ -390,22 +407,26 @@ function createBoundInstanceClass(runtime) {
         active: true,
         ref: typeof WeakRef === 'undefined' ? null : new WeakRef(this)
       }
-      liveInstanceOwners.add(this._owner)
-      if (instanceFinalizer) instanceFinalizer.register(this, this._owner, this)
+      liveModelOwners.add(this._owner)
+      if (modelFinalizer) modelFinalizer.register(this, this._owner, this)
     }
 
     _usesAsyncHostBridge() {
       return this._asyncHostBridge
     }
 
+    _requireOpen() {
+      if (this._closing || !this._handle) throw new Error('Model has been disposed')
+    }
+
     _requireSync(method, asyncMethod) {
-      if (this._closing || !this._handle) throw new Error('Instance has been disposed')
+      this._requireOpen()
       if (this._usesAsyncHostBridge()) throw new PolyAsyncRequired(method, asyncMethod)
     }
 
     _enqueueAsync(fn) {
       if (this._closing || !this._handle) {
-        return Promise.reject(new Error('Instance has been disposed'))
+        return Promise.reject(new Error('Model has been disposed'))
       }
       this._activeAsync++
       const core = this._rt && this._rt._core
@@ -430,40 +451,40 @@ function createBoundInstanceClass(runtime) {
     }
 
     _paramDataRaw(i) {
-      return this._rt._core.instance.paramData(this._handle, i)
+      return this._rt._core.model.paramData(this._handle, i)
     }
 
     _bufDataRaw(i) {
-      return this._rt._core.instance.bufData(this._handle, i)
+      return this._rt._core.model.bufData(this._handle, i)
     }
 
     static fromIR(irBytes, weightsBytes) {
-      const api = _runtime._core.instance
+      const api = _runtime._core.model
       if (!api) throw new Error('polygrad: model runtime unavailable for this core')
       const inst = api.fromIR(
         normalizeBytes(irBytes, 'irBytes'),
         normalizeBytes(weightsBytes, 'weightsBytes')
       )
-      if (!inst) throw new Error('polygrad: failed to create PolyInstance from IR')
-      return new Instance(inst)
+      if (!inst) throw new Error('polygrad: failed to create PolyModel from IR')
+      return new Model(inst)
     }
 
     static fromProgram(programBytes, weightsBytes) {
-      const api = _runtime._core.instance
+      const api = _runtime._core.model
       if (!api) throw new Error('polygrad: model runtime unavailable for this core')
       if (_runtime._usesAsyncHostBridge()) {
-        throw new PolyAsyncRequired('Instance.fromProgram()', 'Instance.fromProgramAsync()')
+        throw new PolyAsyncRequired('Model.fromProgram()', 'Model.fromProgramAsync()')
       }
       const inst = api.fromProgram(
         normalizeBytes(programBytes, 'programBytes'),
         normalizeBytes(weightsBytes, 'weightsBytes')
       )
-      if (!inst) throw new Error('polygrad: failed to create PolyInstance from program')
-      return new Instance(inst)
+      if (!inst) throw new Error('polygrad: failed to create PolyModel from program')
+      return new Model(inst)
     }
 
     static async fromProgramAsync(programBytes, weightsBytes) {
-      const api = _runtime._core.instance
+      const api = _runtime._core.model
       if (!api) throw new Error('polygrad: model runtime unavailable for this core')
       const release = _runtime._beginAsync()
       try {
@@ -472,23 +493,23 @@ function createBoundInstanceClass(runtime) {
         const inst = api.fromProgramAsync
           ? await api.fromProgramAsync(program, weights)
           : api.fromProgram(program, weights)
-        if (!inst) throw new Error('polygrad: failed to create PolyInstance from program')
-        return new Instance(inst)
+        if (!inst) throw new Error('polygrad: failed to create PolyModel from program')
+        return new Model(inst)
       } finally {
         release()
       }
     }
 
-    static fromBindings(bindings, entrypoints, modules = null) {
+    static _fromBindings(bindings, entrypoints, modules, async) {
       bindings = Array.from(bindings || [])
       entrypoints = Array.from(entrypoints || [])
-      if (!bindings.length) throw new Error('Instance.fromBindings requires at least one binding')
-      if (!entrypoints.length) throw new Error('Instance.fromBindings requires at least one entrypoint')
+      if (!bindings.length) throw new Error('Model.fromBindings requires at least one binding')
+      if (!entrypoints.length) throw new Error('Model.fromBindings requires at least one entrypoint')
 
       const parsed = bindings.map(binding => {
         const b = bindingFields(binding)
-        if (b.name == null) throw new Error('Instance binding is missing a name')
-        if (b.role == null) throw new Error(`Instance binding '${b.name}' is missing a role`)
+        if (b.name == null) throw new Error('Model binding is missing a name')
+        if (b.role == null) throw new Error(`Model binding '${b.name}' is missing a role`)
         const tensor = requireTensor(b.name, b.tensor)
         const role = roleId(b.role)
         let flags = Number(b.flags || 0)
@@ -508,7 +529,7 @@ function createBoundInstanceClass(runtime) {
 
       const entries = entrypoints.map(entry => {
         const e = entryFields(entry)
-        if (e.name == null) throw new Error('Instance entrypoint is missing a name')
+        if (e.name == null) throw new Error('Model entrypoint is missing a name')
         return {
           name: String(e.name),
           inputs: entryNameList(e.inputs),
@@ -518,120 +539,34 @@ function createBoundInstanceClass(runtime) {
         }
       })
 
-      const api = _runtime._core.instance
-      if (!api.fromBindings) throw new Error('polygrad: fromBindings unavailable for this core')
-      const handle = api.fromBindings(ctx, parsed.map(b => ({
+      return sealBindings(ctx, parsed.map(b => ({
         name: b.name, role: b.role, tensor: b.tensor._tensor, flags: b.flags
-      })), entries)
-      if (!handle) throw new Error('polygrad: failed to create Instance from bindings')
-      try {
-        defineModulesOnHandle(handle, modules, ctx)
-      } catch (err) {
-        api.free(handle)
-        throw err
-      }
-      return new Instance(handle)
+      })), entries, modules, async)
     }
 
-    static async fromTensors({
-      inputs, outputs, targets, losses, params, state, entrypoints, modules
-    } = {}) {
-      const release = _runtime._beginAsync()
-      try {
-        if (params != null && state != null) {
-          throw new Error('Instance.fromTensors accepts params or state, not both')
-        }
-        if (state != null) params = state
+    static fromBindings(bindings, entrypoints, modules = null) {
+      return new Model(this._fromBindings(bindings, entrypoints, modules, false))
+    }
 
-        const inps = normalizeNamed(inputs, 'input')
-        const tgts = normalizeNamed(targets, 'target')
-        const outs = normalizeNamed(outputs, 'output')
-        const lossMap = normalizeNamed(losses, 'loss')
-        const paramItems = normalizeParams(params)
+    static async fromBindingsAsync(bindings, entrypoints, modules = null) {
+      return this._fromBindings(bindings, entrypoints, modules, true)
+    }
 
-        const namedTensors = []
-        for (const group of [inps, tgts, outs, lossMap]) {
-          for (const [name, tensor] of Object.entries(group)) {
-            namedTensors.push([name, requireTensor(name, tensor)])
-          }
-        }
-        for (const [name, tensor] of paramItems) namedTensors.push([name, requireTensor(name, tensor)])
-        if (!namedTensors.length) throw new Error('Instance.fromTensors requires at least one tensor')
-        if (!Object.keys(outs).length && !Object.keys(lossMap).length) {
-          throw new Error('Instance.fromTensors requires outputs or losses')
-        }
+    static trace(fn, options) {
+      if (_runtime._usesAsyncHostBridge()) throw new PolyAsyncRequired('Model.trace()', 'Model.traceAsync()')
+      return new Model(traceSpec(fn, options))
+    }
 
-        const ctx = namedTensors[0][1]._ctx
-        for (const [name, tensor] of namedTensors) {
-          if (tensor._ctx !== ctx) throw new Error(`${name} belongs to another PolyCtx`)
-        }
+    static traceAsync(fn, options) {
+      return this.fromTensors(traceSpec(fn, options))
+    }
 
-        for (const [name, tensor] of [...Object.entries(inps), ...Object.entries(tgts)]) {
-          await ensureStorageBinding(name, tensor)
-        }
-
-        const bindings = []
-        const addBinding = (name, role, tensor, flags = 0) => {
-          if (role === ROLE_PARAM && !tensor.isParam) flags |= BIND_F_FROZEN
-          bindings.push({ name: String(name), role, tensor: tensor._tensor, flags })
-        }
-        for (const [name, tensor] of Object.entries(inps)) addBinding(name, ROLE_INPUT, tensor)
-        for (const [name, tensor] of Object.entries(tgts)) addBinding(name, ROLE_TARGET, tensor)
-        for (const [name, tensor] of paramItems) addBinding(name, ROLE_PARAM, tensor)
-        for (const [name, tensor] of Object.entries(outs)) addBinding(name, ROLE_OUTPUT, tensor)
-        for (const [name, tensor] of Object.entries(lossMap)) addBinding(name, ROLE_OUTPUT, tensor)
-
-        const entries = []
-        if (entrypoints != null) {
-          for (const entry of entrypoints) {
-            const e = entryFields(entry)
-            if (e.name == null) throw new Error('Instance entrypoint is missing a name')
-            entries.push({
-              name: String(e.name),
-              inputs: entryNameList(e.inputs),
-              outputs: entryNameList(e.outputs),
-              objective: e.objective == null ? null : String(e.objective),
-              flags: Number(e.flags || 0)
-            })
-          }
-        } else {
-          const inputNames = Object.keys(inps)
-          const targetNames = Object.keys(tgts)
-          const outputNames = Object.keys(outs)
-          const lossNames = Object.keys(lossMap)
-          if (outputNames.length) {
-            entries.push({ name: 'forward', inputs: inputNames, outputs: outputNames })
-          }
-          if (lossNames.length) {
-            const objective = lossNames.length === 1 && Object.prototype.hasOwnProperty.call(lossMap, 'loss')
-              ? 'loss' : null
-            entries.push({
-              name: 'loss',
-              inputs: inputNames.concat(targetNames),
-              outputs: lossNames,
-              objective
-            })
-          }
-        }
-
-        const api = _runtime._core.instance
-        if (!api.fromBindings) throw new Error('polygrad: fromBindings unavailable for this core')
-        const handle = api.fromBindings(ctx, bindings, entries)
-        if (!handle) throw new Error('polygrad: failed to create Instance from tensors')
-        try {
-          defineModulesOnHandle(handle, modules, ctx)
-        } catch (err) {
-          api.free(handle)
-          throw err
-        }
-        return new Instance(handle)
-      } finally {
-        release()
-      }
+    static async fromTensors(spec = {}) {
+      return lowerTensorSpec(spec, true)
     }
 
     static fromHF(configBytes, weightFiles, opts = {}) {
-      const api = _runtime._core.instance
+      const api = _runtime._core.model
       const cfg = normalizeBytes(configBytes, 'config')
       const wf = weightFiles.map((f, i) => normalizeBytes(f, `weight file ${i}`))
       const handle = api.loadHF(cfg, wf, opts.maxBatch, opts.maxSeqLen)
@@ -639,18 +574,18 @@ function createBoundInstanceClass(runtime) {
         const err = api.importLastError && api.importLastError()
         throw new Error('polygrad: fromHF failed' + (err ? ': ' + err.message : ''))
       }
-      return new Instance(handle)
+      return new Model(handle)
     }
 
     static fromGGUF(ggufBytes, opts = {}) {
-      const api = _runtime._core.instance
+      const api = _runtime._core.model
       const bytes = normalizeBytes(ggufBytes, 'gguf')
       const handle = api.loadGGUF(bytes, opts.maxBatch, opts.maxSeqLen)
       if (!handle) {
         const err = api.importLastError && api.importLastError()
         throw new Error('polygrad: fromGGUF failed' + (err ? ': ' + err.message : ''))
       }
-      return new Instance(handle)
+      return new Model(handle)
     }
 
     dispose() {
@@ -660,19 +595,19 @@ function createBoundInstanceClass(runtime) {
       if (!this._rt || !this._rt._core) {
         if (this._owner) {
           this._owner.active = false
-          liveInstanceOwners.delete(this._owner)
-          if (instanceFinalizer) instanceFinalizer.unregister(this)
+          liveModelOwners.delete(this._owner)
+          if (modelFinalizer) modelFinalizer.unregister(this)
           this._owner = null
         }
         this._handle = null
         return undefined
       }
       if (!this._usesAsyncHostBridge()) {
-        return releaseInstanceOwner(this._owner, this)
+        return releaseModelOwner(this._owner, this)
       }
       this._disposePromise = this._rt._withAsync(async () => {
         await this._waitForAsync()
-        await releaseInstanceOwner(this._owner, this)
+        await releaseModelOwner(this._owner, this)
       })
       return this._disposePromise
     }
@@ -689,8 +624,8 @@ function createBoundInstanceClass(runtime) {
     setDeviceMap(deviceMap) {
       this._requireSync('setDeviceMap()', 'setDeviceMapAsync()')
       const entries = deviceMapEntries(deviceMap)
-      if (!entries.length) throw new Error('Instance.setDeviceMap requires at least one mapping')
-      const rc = this._rt._core.instance.setDeviceMap(this._handle, entries)
+      if (!entries.length) throw new Error('Model.setDeviceMap requires at least one mapping')
+      const rc = this._rt._core.model.setDeviceMap(this._handle, entries)
       if (isPromiseLike(rc)) throw new PolyAsyncRequired('setDeviceMap()', 'setDeviceMapAsync()')
       if (rc !== 0) throw new Error(`polygrad: invalid, incomplete, or unsupported device map (rc=${rc})`)
       return this
@@ -699,10 +634,10 @@ function createBoundInstanceClass(runtime) {
     setDeviceMapAsync(deviceMap) {
       const entries = deviceMapEntries(deviceMap)
       if (!entries.length) {
-        return Promise.reject(new Error('Instance.setDeviceMap requires at least one mapping'))
+        return Promise.reject(new Error('Model.setDeviceMap requires at least one mapping'))
       }
       const run = () => Promise.resolve(
-        this._rt._core.instance.setDeviceMap(this._handle, entries)
+        this._rt._core.model.setDeviceMap(this._handle, entries)
       ).then(rc => {
         if (rc !== 0) {
           throw new Error(`polygrad: invalid, incomplete, or unsupported device map (rc=${rc})`)
@@ -713,21 +648,40 @@ function createBoundInstanceClass(runtime) {
       return run()
     }
 
+    place(device) {
+      this._requireSync('place()', 'placeAsync()')
+      if (typeof device !== 'string') return this.setDeviceMap(device)
+      if (this._rt._core.model.setDevice(this._handle, device) !== 0)
+        throw new Error(`polygrad: Model placement failed for '${device}'`)
+      return this
+    }
+
+    placeAsync(device) {
+      this._requireOpen()
+      if (typeof device !== 'string') return this.setDeviceMapAsync(device)
+      const run = async () => {
+        if (await this._rt._core.model.setDevice(this._handle, device) !== 0)
+          throw new Error(`polygrad: Model placement failed for '${device}'`)
+        return this
+      }
+      return this._usesAsyncHostBridge() ? this._enqueueAsync(run) : run()
+    }
+
     get paramCount() {
-      return this._rt._core.instance.paramCount(this._handle)
+      return this._rt._core.model.paramCount(this._handle)
     }
 
     paramName(i) {
-      return this._rt._core.instance.paramName(this._handle, i)
+      return this._rt._core.model.paramName(this._handle, i)
     }
 
     paramShape(i) {
-      return this._rt._core.instance.paramShape(this._handle, i)
+      return this._rt._core.model.paramShape(this._handle, i)
     }
 
     paramDtype(i) {
       const core = this._rt._core
-      return instanceDtypeName(core, core.instance.paramDtypeId(this._handle, i))
+      return modelDtypeName(core, core.model.paramDtypeId(this._handle, i))
     }
 
     paramData(i) {
@@ -741,11 +695,12 @@ function createBoundInstanceClass(runtime) {
     }
 
     paramTrainable(i) {
-      return this._rt._core.instance.paramTrainable(this._handle, i)
+      return this._rt._core.model.paramTrainable(this._handle, i)
     }
 
     setParamTrainable(i, trainable) {
-      const rc = this._rt._core.instance.setParamTrainable(this._handle, i, Boolean(trainable))
+      this._requireOpen()
+      const rc = this._rt._core.model.setParamTrainable(this._handle, i, Boolean(trainable))
       if (rc !== 0) throw new Error(`polygrad: setParamTrainable failed (rc=${rc})`)
       return this
     }
@@ -774,34 +729,35 @@ function createBoundInstanceClass(runtime) {
     }
 
     get bufCount() {
-      return this._rt._core.instance.bufCount(this._handle)
+      return this._rt._core.model.bufCount(this._handle)
     }
 
     bufName(i) {
-      return this._rt._core.instance.bufName(this._handle, i)
+      return this._rt._core.model.bufName(this._handle, i)
     }
 
     bufRole(i) {
-      return this._rt._core.instance.bufRole(this._handle, i)
+      return this._rt._core.model.bufRole(this._handle, i)
     }
 
     bufTrainable(i) {
-      return this._rt._core.instance.bufTrainable(this._handle, i)
+      return this._rt._core.model.bufTrainable(this._handle, i)
     }
 
     setBufTrainable(i, trainable) {
-      const rc = this._rt._core.instance.setBufTrainable(this._handle, i, Boolean(trainable))
+      this._requireOpen()
+      const rc = this._rt._core.model.setBufTrainable(this._handle, i, Boolean(trainable))
       if (rc !== 0) throw new Error(`polygrad: setBufTrainable failed (rc=${rc})`)
       return this
     }
 
     bufShape(i) {
-      return this._rt._core.instance.bufShape(this._handle, i)
+      return this._rt._core.model.bufShape(this._handle, i)
     }
 
     bufDtype(i) {
       const core = this._rt._core
-      return instanceDtypeName(core, core.instance.bufDtypeId(this._handle, i))
+      return modelDtypeName(core, core.model.bufDtypeId(this._handle, i))
     }
 
     bufData(i) {
@@ -821,21 +777,79 @@ function createBoundInstanceClass(runtime) {
       return -1
     }
 
+    _bufferIndex(name) {
+      const index = this.findBuf(name)
+      if (index < 0) throw new Error(`polygrad: no buffer '${name}'`)
+      return index
+    }
+
+    bindings() {
+      this._requireOpen()
+      if (this._rt._activeAsync) throw new Error('Model metadata unavailable during active async work')
+      return Array.from({ length: this.bufCount }, (_, i) => ({
+        name: this.bufName(i), role: this.bufRole(i), dtype: this.bufDtype(i),
+        shape: this.bufShape(i), trainable: this.bufTrainable(i)
+      }))
+    }
+
+    entrypoints() {
+      this._requireOpen()
+      if (this._rt._activeAsync) throw new Error('Model metadata unavailable during active async work')
+      return this._rt._core.model.entrypoints(this._handle)
+    }
+
+    setTrainable(name, trainable) {
+      return this.setBufTrainable(this._bufferIndex(name), trainable)
+    }
+
+    readBuffer(name) {
+      this._requireSync('readBuffer()', 'readBufferAsync()')
+      return this._bufDataRaw(this._bufferIndex(name))
+    }
+
+    readBufferAsync(name) {
+      this._requireOpen()
+      const run = () => this._bufDataRaw(this._bufferIndex(name))
+      if (this._usesAsyncHostBridge()) return this._enqueueAsync(run)
+      return Promise.resolve(run())
+    }
+
+    writeBuffer(name, array) {
+      this._requireSync('writeBuffer()', 'writeBufferAsync()')
+      const rc = this._rt._core.model.writeBuf(this._handle, this._bufferIndex(name), array)
+      if (rc !== 0) throw new Error('polygrad: buffer write failed')
+      return this
+    }
+
+    writeBufferAsync(name, array) {
+      this._requireOpen()
+      if (!ArrayBuffer.isView(array) || array instanceof DataView)
+        return Promise.reject(new TypeError('polygrad: buffer write requires a TypedArray'))
+      // Capture caller bytes before queueing; later mutation cannot change the write.
+      const copy = new array.constructor(array)
+      const run = async () => {
+        const rc = await this._rt._core.model.writeBuf(this._handle, this._bufferIndex(name), copy)
+        if (rc !== 0) throw new Error('polygrad: buffer write failed')
+        return this
+      }
+      return this._usesAsyncHostBridge() ? this._enqueueAsync(run) : run()
+    }
+
     exportWeights(options = null) {
       this._requireSync('exportWeights()', 'exportWeightsAsync()')
       const flags = weightExportFlags(options)
-      return this._rt._core.instance.exportWeights(this._handle, flags)
+      return this._rt._core.model.exportWeights(this._handle, flags)
     }
 
     exportWeightsAsync(options = null) {
       const flags = weightExportFlags(options)
-      const run = () => this._rt._core.instance.exportWeights(this._handle, flags)
+      const run = () => this._rt._core.model.exportWeights(this._handle, flags)
       if (this._usesAsyncHostBridge()) return this._enqueueAsync(run)
       return Promise.resolve(run())
     }
 
     importWeights(bytes) {
-      const rc = this._rt._core.instance.importWeights(
+      const rc = this._rt._core.model.importWeights(
         this._handle,
         normalizeBytes(bytes, 'weights')
       )
@@ -843,16 +857,16 @@ function createBoundInstanceClass(runtime) {
     }
 
     exportIR() {
-      return this._rt._core.instance.exportIR(this._handle)
+      return this._rt._core.model.exportIR(this._handle)
     }
 
     exportProgram() {
       this._requireSync('exportProgram()', 'exportProgramAsync()')
-      return this._rt._core.instance.exportProgram(this._handle)
+      return this._rt._core.model.exportProgram(this._handle)
     }
 
     exportProgramAsync() {
-      const run = () => this._rt._core.instance.exportProgram(this._handle)
+      const run = () => this._rt._core.model.exportProgram(this._handle)
       if (this._usesAsyncHostBridge()) return this._enqueueAsync(run)
       return Promise.resolve(run())
     }
@@ -860,22 +874,22 @@ function createBoundInstanceClass(runtime) {
     saveBundle(options = null) {
       this._requireSync('saveBundle()', 'saveBundleAsync()')
       const flags = weightExportFlags(options)
-      return this._rt._core.instance.saveBundle(this._handle, flags)
+      return this._rt._core.model.saveBundle(this._handle, flags)
     }
 
     saveBundleAsync(options = null) {
       const flags = weightExportFlags(options)
-      const run = () => this._rt._core.instance.saveBundle(this._handle, flags)
+      const run = () => this._rt._core.model.saveBundle(this._handle, flags)
       if (this._usesAsyncHostBridge()) return this._enqueueAsync(run)
       return Promise.resolve(run())
     }
 
     static fromBundle(bytes) {
-      const api = _runtime._core.instance
+      const api = _runtime._core.model
       if (!api) throw new Error('polygrad: model runtime unavailable for this core')
       const handle = api.fromBundle(bytes)
       if (!handle) throw new Error('polygrad: fromBundle failed')
-      return new Instance(handle)
+      return new Model(handle)
     }
 
 
@@ -890,7 +904,8 @@ function createBoundInstanceClass(runtime) {
       nesterov = false,
       classic = false
     ) {
-      const rc = this._rt._core.instance.setOptimizer(
+      this._requireOpen()
+      const rc = this._rt._core.model.setOptimizer(
         this._handle, kind, lr, beta1, beta2, eps, weightDecay, momentum, nesterov, classic
       )
       if (rc !== 0) throw new Error(`polygrad: setOptimizer failed (rc=${rc})`)
@@ -904,7 +919,7 @@ function createBoundInstanceClass(runtime) {
     call(entrypoint, io) {
       this._requireSync('call()', 'callAsync()')
       const { names, arrays } = normalizeBindings(io)
-      const rc = this._rt._core.instance.call(this._handle, String(entrypoint), names, arrays)
+      const rc = this._rt._core.model.call(this._handle, String(entrypoint), names, arrays)
       if (isPromiseLike(rc)) throw new PolyAsyncRequired('call()', 'callAsync()')
       if (rc !== 0) throw new Error(`polygrad: call('${entrypoint}') failed (rc=${rc})`)
       return this._collectOutputsRaw(String(entrypoint))
@@ -918,7 +933,7 @@ function createBoundInstanceClass(runtime) {
       entrypoint = String(entrypoint)
       const { names, arrays } = normalizeBindings(io)
       const run = () => {
-        const rc = this._rt._core.instance.call(this._handle, entrypoint, names, arrays)
+        const rc = this._rt._core.model.call(this._handle, entrypoint, names, arrays)
         if (isPromiseLike(rc)) {
           return rc.then(v => {
             if (v !== 0) throw new Error(`polygrad: call('${entrypoint}') failed (rc=${v})`)
@@ -932,19 +947,19 @@ function createBoundInstanceClass(runtime) {
       return Promise.resolve(run())
     }
 
-    trainStep(io) {
+    trainStep(io, entrypoint = null) {
       this._requireSync('trainStep()', 'trainStepAsync()')
       const { names, arrays } = normalizeBindings(io)
-      const loss = this._rt._core.instance.trainStep(this._handle, names, arrays)
+      const loss = this._rt._core.model.trainStep(this._handle, names, arrays, entrypoint)
       if (isPromiseLike(loss)) throw new PolyAsyncRequired('trainStep()', 'trainStepAsync()')
       if (loss == null || Number.isNaN(loss)) throw new Error('polygrad: trainStep failed')
       return loss
     }
 
-    trainStepAsync(io) {
+    trainStepAsync(io, entrypoint = null) {
       const { names, arrays } = normalizeBindings(io)
       const run = () => {
-        const loss = this._rt._core.instance.trainStep(this._handle, names, arrays)
+        const loss = this._rt._core.model.trainStep(this._handle, names, arrays, entrypoint)
         if (isPromiseLike(loss)) {
           return loss.then(v => {
             if (v == null || Number.isNaN(v)) throw new Error('polygrad: trainStep failed')
@@ -960,9 +975,9 @@ function createBoundInstanceClass(runtime) {
 
     _collectOutputsRaw(entrypoint = 'forward') {
       const outputs = {}
-      const api = this._rt._core.instance
+      const api = this._rt._core.model
       const nOutputs = api.entrypointOutputCount(this._handle, entrypoint)
-      if (nOutputs < 0) throw new Error(`polygrad: unknown Instance entrypoint '${entrypoint}'`)
+      if (nOutputs < 0) throw new Error(`polygrad: unknown Model entrypoint '${entrypoint}'`)
       for (let i = 0; i < nOutputs; i++) {
         const name = api.entrypointOutputName(this._handle, entrypoint, i)
         const bi = this.findBuf(name)
@@ -976,9 +991,9 @@ function createBoundInstanceClass(runtime) {
 
     async _collectOutputsRawAsync(entrypoint = 'forward') {
       const outputs = {}
-      const api = this._rt._core.instance
+      const api = this._rt._core.model
       const nOutputs = api.entrypointOutputCount(this._handle, entrypoint)
-      if (nOutputs < 0) throw new Error(`polygrad: unknown Instance entrypoint '${entrypoint}'`)
+      if (nOutputs < 0) throw new Error(`polygrad: unknown Model entrypoint '${entrypoint}'`)
       for (let i = 0; i < nOutputs; i++) {
         const name = api.entrypointOutputName(this._handle, entrypoint, i)
         const bi = this.findBuf(name)
@@ -1001,8 +1016,8 @@ function createBoundInstanceClass(runtime) {
     }
 
     fit(io, opts = {}) {
-      /* This mirrors the Python convenience wrapper: keep loop ownership in the
-       * frontend while all optimizer math and scheduling stay in the C core. */
+      // Repeat one supplied batch; this is not a dataset/batching framework.
+      this._requireSync('fit()', 'trainStepAsync()')
       const epochs = opts.epochs == null ? 1 : Number(opts.epochs)
       if (opts.optimizer != null) {
         this.setOptimizer(
@@ -1018,55 +1033,39 @@ function createBoundInstanceClass(runtime) {
         )
       }
       const losses = []
-      let asyncChain = null
-      const runStep = (step) => {
-        const loss = this.trainStep(io)
-        if (isPromiseLike(loss)) {
-          return loss.then(v => {
-            losses.push(v)
-            if (opts.onStep) opts.onStep(step, v)
-          })
-        }
+      for (let step = 0; step < epochs; step++) {
+        const loss = this.trainStep(io, opts.entrypoint)
         losses.push(loss)
         if (opts.onStep) opts.onStep(step, loss)
-        return null
       }
-      for (let step = 0; step < epochs; step++) {
-        if (asyncChain) asyncChain = asyncChain.then(() => runStep(step))
-        else {
-          const r = runStep(step)
-          if (isPromiseLike(r)) asyncChain = r
-        }
-      }
-      if (asyncChain) return asyncChain.then(() => losses)
       return losses
     }
 
   }
 
-  Instance._disposeAll = () => {
+  Model._disposeAll = () => {
     const pending = []
-    for (const owner of Array.from(liveInstanceOwners)) {
-      const result = releaseInstanceOwner(owner)
+    for (const owner of Array.from(liveModelOwners)) {
+      const result = releaseModelOwner(owner)
       if (isPromiseLike(result)) pending.push(result)
     }
     return pending.length ? Promise.all(pending) : undefined
   }
 
-  Instance.ROLE_PARAM = ROLE_PARAM
-  Instance.ROLE_INPUT = ROLE_INPUT
-  Instance.ROLE_TARGET = ROLE_TARGET
-  Instance.ROLE_OUTPUT = ROLE_OUTPUT
-  Instance.ROLE_AUX = ROLE_AUX
-  Instance.OPTIM_NONE = OPTIM_NONE
-  Instance.OPTIM_SGD = OPTIM_SGD
-  Instance.OPTIM_ADAM = OPTIM_ADAM
-  Instance.OPTIM_ADAMW = OPTIM_ADAMW
-  Instance.EXPORT_WEIGHTS_PARAMS = EXPORT_WEIGHTS_PARAMS
-  Instance.EXPORT_WEIGHTS_OPTIMIZER = EXPORT_WEIGHTS_OPTIMIZER
-  Instance.EXPORT_WEIGHTS_DEFAULT = EXPORT_WEIGHTS_DEFAULT
+  Model.ROLE_PARAM = ROLE_PARAM
+  Model.ROLE_INPUT = ROLE_INPUT
+  Model.ROLE_TARGET = ROLE_TARGET
+  Model.ROLE_OUTPUT = ROLE_OUTPUT
+  Model.ROLE_AUX = ROLE_AUX
+  Model.OPTIM_NONE = OPTIM_NONE
+  Model.OPTIM_SGD = OPTIM_SGD
+  Model.OPTIM_ADAM = OPTIM_ADAM
+  Model.OPTIM_ADAMW = OPTIM_ADAMW
+  Model.EXPORT_WEIGHTS_PARAMS = EXPORT_WEIGHTS_PARAMS
+  Model.EXPORT_WEIGHTS_OPTIMIZER = EXPORT_WEIGHTS_OPTIMIZER
+  Model.EXPORT_WEIGHTS_DEFAULT = EXPORT_WEIGHTS_DEFAULT
 
-  return Instance
+  return Model
 }
 
-module.exports = { createBoundInstanceClass }
+module.exports = { createBoundModelClass }

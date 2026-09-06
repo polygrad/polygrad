@@ -12,6 +12,7 @@
 #include "../src/schedule/rangeify.h"
 #include "../src/schedule/schedule.h"
 #include "../src/uop/spec.h"
+#include "../src/tensor.h"
 
 static int count_root_ops(PolyCtx *ctx, PolyUOp *root, PolyOps op) {
   int n_topo = 0;
@@ -319,6 +320,73 @@ TEST(schedule_runtime, program_and_runtime_caches_reuse_current_keys) {
   ASSERT_INT_EQ((int)poly_runtime_cache_len(ctx), (int)runtime_entries);
 
   poly_uop_release(ctx, compiled0);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(schedule_runtime, symbolic_template_replays_without_model_owner) {
+  /* symcpg-style candidate x row loss evaluation stays a direct LINEAR client. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *inputs[8], *expanded[8];
+  int64_t shape[] = {2, 3}, rows[] = {1, 3}, candidates[] = {2, 1}, axis[] = {1};
+  for (int i = 0; i < 8; i++) {
+    inputs[i] = poly_test_buffer_on_device(ctx, POLY_FLOAT32, i < 4 ? 3 : 2, POLY_DEVICE_CPU);
+    expanded[i] =
+        poly_expand(ctx, poly_reshape(ctx, inputs[i], i < 4 ? rows : candidates, 2), shape, 2);
+  }
+  PolyUOp *pred = poly_add(
+      ctx,
+      poly_add(
+          ctx, poly_mul(ctx, expanded[0], expanded[4]), poly_mul(ctx, expanded[1], expanded[5])
+      ),
+      poly_add(ctx, poly_mul(ctx, expanded[2], expanded[6]), expanded[7])
+  );
+  PolyUOp *diff = poly_sub(ctx, pred, expanded[3]);
+  PolyUOp *loss = poly_mul(
+      ctx, poly_reduce_axis(ctx, POLY_OP_ADD, poly_mul(ctx, diff, diff), axis, 1),
+      poly_const_float(ctx, 1.0 / 3.0)
+  );
+  PolyUOp *out = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 2, POLY_DEVICE_CPU);
+  PolyUOp *linear = poly_compile_linear(
+      ctx, poly_test_create_linear(ctx, poly_sink1(ctx, poly_store_val(ctx, out, loss))), -1
+  );
+  ASSERT_NOT_NULL(linear);
+  ASSERT_INT_EQ(poly_uop_retain(ctx, linear), 0);
+  size_t programs = poly_to_program_cache_len(ctx), runtimes = 0;
+  uint64_t resident = 0;
+  float data[8][3] = {{1, 2, 3}, {2, -1, 1}, {2, -2, 3}, {0, 1, 2},
+                      {1, 2},    {0, 1},     {1, -1},    {0, 2}};
+  for (int repeat = 0; repeat < 12; repeat++) {
+    data[0][0] = (float)repeat;
+    data[4][1] = (float)repeat / 4;
+    for (int i = 0; i < 8; i++)
+      ASSERT_INT_EQ(poly_buffer_write(ctx, inputs[i], data[i], (i < 4 ? 3 : 2) * sizeof(float)), 0);
+    ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+    ASSERT_INT_EQ(poly_run_linear(ctx, linear, NULL, 0, NULL, 0, true, true, false), 0);
+    float actual[2];
+    ASSERT_INT_EQ(poly_buffer_read(ctx, out, actual, sizeof(actual)), 0);
+    for (int k = 0; k < 2; k++) {
+      float expected = 0;
+      for (int r = 0; r < 3; r++) {
+        float residual = data[4][k] * data[0][r] + data[5][k] * data[1][r] +
+                         data[6][k] * data[2][r] + data[7][k] - data[3][r];
+        expected += residual * residual / 3;
+      }
+      ASSERT_TRUE(isfinite(actual[k]));
+      ASSERT_FLOAT_EQ(actual[k], expected, 1e-4f);
+    }
+    if (repeat == 0) {
+      runtimes = poly_runtime_cache_len(ctx);
+      resident = ctx->mem_used;
+    }
+    ASSERT_TRUE(poly_to_program_cache_len(ctx) == programs);
+    ASSERT_TRUE(poly_runtime_cache_len(ctx) == runtimes);
+    ASSERT_TRUE(ctx->mem_used == resident);
+  }
+  poly_uop_release(ctx, linear);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  ASSERT_TRUE(ctx->mem_used == 0);
   poly_ctx_destroy(ctx);
   PASS();
 }

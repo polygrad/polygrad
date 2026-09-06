@@ -1,12 +1,13 @@
-"""PolyInstance -- Python wrapper for the C PolyInstance runtime.
+"""PolyModel -- Python wrapper for the C PolyModel runtime.
 
 Provides forward pass, training, and weight I/O for runnable/exportable
-instances created from IR bytes, bundles, or frontend tensor graphs. Named
+models created from IR bytes, bundles, or frontend tensor graphs. Named
 architecture factories live in ``polygrad.models``.
 """
 
 import ctypes
 import ctypes.util
+import math
 import pathlib
 import weakref
 import numpy as np
@@ -14,52 +15,35 @@ from . import _ffi
 from .device import _device_id
 
 _get_lib = _ffi.get_lib
-_live_instances = weakref.WeakSet()
+_live_models = weakref.WeakSet()
 
 
-def _dispose_instances_for_ctx(ctx):
-    """Free borrowed-context Instances before their PolyCtx is destroyed."""
+def _dispose_models_for_ctx(ctx):
+    """Free borrowed-context Models before their PolyCtx is destroyed."""
     from .tensor import _ptr_value
 
     ctx_key = _ptr_value(ctx)
-    for inst in list(_live_instances):
+    for inst in list(_live_models):
         if inst._ptr and _ptr_value(inst._ctx) == ctx_key:
             inst.free()
 
-_INSTANCE_DTYPE_NAMES = (
+_MODEL_DTYPE_NAMES = (
     'bool', 'int8', 'uint8', 'int16', 'uint16', 'int32', 'uint32',
     'int64', 'uint64', 'float16', 'bfloat16', 'float32', 'float64',
 )
 
 
-def _instance_dtype_name(dtype_id):
+def _model_dtype_name(dtype_id):
     lib = _get_lib()
-    for name in _INSTANCE_DTYPE_NAMES:
+    for name in _MODEL_DTYPE_NAMES:
         if lib.poly_dtype_id_by_name(name.encode('utf-8')) == dtype_id:
             return name
-    raise RuntimeError(f'unsupported Instance storage dtype id {dtype_id}')
+    raise RuntimeError(f'unsupported Model storage dtype id {dtype_id}')
 
 
-def _instance_data_view(ptr, numel, dtype_name):
-    """Return a mutable view of exact Instance scalar storage.
-
-    NumPy has no built-in bfloat16 dtype, so BF16 is exposed as its mutable
-    uint16 storage bits. All other supported dtypes use their native NumPy
-    scalar type (including float16).
-    """
-    storage = {
-        'bool': (ctypes.c_uint8, np.bool_),
-        'int8': (ctypes.c_int8, np.int8), 'uint8': (ctypes.c_uint8, np.uint8),
-        'int16': (ctypes.c_int16, np.int16), 'uint16': (ctypes.c_uint16, np.uint16),
-        'int32': (ctypes.c_int32, np.int32), 'uint32': (ctypes.c_uint32, np.uint32),
-        'int64': (ctypes.c_int64, np.int64), 'uint64': (ctypes.c_uint64, np.uint64),
-        'float16': (ctypes.c_uint16, np.float16),
-        'bfloat16': (ctypes.c_uint16, np.uint16),
-        'float32': (ctypes.c_float, np.float32), 'float64': (ctypes.c_double, np.float64),
-    }
-    ctype, npdtype = storage[dtype_name]
-    raw = np.ctypeslib.as_array(ctypes.cast(ptr, ctypes.POINTER(ctype)), shape=(numel,))
-    return raw if raw.dtype == np.dtype(npdtype) else raw.view(npdtype)
+def _storage_dtype(dtype_name):
+    # NumPy has no native BF16; preserve the existing raw uint16 contract.
+    return np.dtype('uint16' if dtype_name == 'bfloat16' else dtype_name)
 
 # libc free for caller-frees byte arrays
 _libc = ctypes.CDLL(ctypes.util.find_library('c'))
@@ -126,9 +110,9 @@ def _param_items(params):
 def _name_bytes(name):
     text = str(name)
     if not text:
-        raise ValueError('Instance binding names must be non-empty')
+        raise ValueError('Model binding names must be non-empty')
     if '\x00' in text:
-        raise ValueError(f'Instance binding name contains NUL: {text!r}')
+        raise ValueError(f'Model binding name contains NUL: {text!r}')
     return text.encode('utf-8')
 
 
@@ -146,7 +130,7 @@ def _role_id(role):
     if isinstance(role, str):
         key = role.lower()
         if key not in _ROLE_IDS:
-            raise ValueError(f'unknown Instance binding role: {role!r}')
+            raise ValueError(f'unknown Model binding role: {role!r}')
         return _ROLE_IDS[key]
     return int(role)
 
@@ -166,7 +150,7 @@ def _binding_fields(binding):
     if len(binding) == 4:
         name, role, tensor, flags = binding
         return name, role, tensor, flags, None
-    raise TypeError('Instance bindings must be dicts or (name, role, tensor[, flags]) tuples')
+    raise TypeError('Model bindings must be dicts or (name, role, tensor[, flags]) tuples')
 
 
 def _entry_fields(entry):
@@ -187,7 +171,7 @@ def _entry_fields(entry):
     if len(entry) == 5:
         return entry
     raise TypeError(
-        'Instance entrypoints must be dicts or '
+        'Model entrypoints must be dicts or '
         '(name, inputs, outputs[, objective[, flags]]) tuples'
     )
 
@@ -198,7 +182,7 @@ def _module_fields(module):
     if len(module) == 3:
         return module
     raise TypeError(
-        'Instance modules must be dicts or (name, inputs, output) tuples'
+        'Model modules must be dicts or (name, inputs, output) tuples'
     )
 
 
@@ -267,12 +251,12 @@ def _entrypoint_spec(name, inputs, outputs, objective=None, flags=0, keepalive=N
     )
 
 
-def _instance_from_binding_specs(ctx, binding_rows, entry_rows, keepalive):
+def _model_from_binding_specs(ctx, binding_rows, entry_rows, keepalive):
     bindings = (_ffi.PolyBindingSpec * len(binding_rows))(*binding_rows)
     entries = (_ffi.PolyEntrypointSpec * len(entry_rows))(*entry_rows)
     keepalive.extend([bindings, entries])
-    err = _ffi.PolyInstanceError()
-    ptr = _ffi._lib.poly_instance_from_bindings(
+    err = _ffi.PolyModelError()
+    ptr = _ffi._lib.poly_model_from_bindings(
         ctx,
         bindings,
         len(binding_rows),
@@ -283,14 +267,18 @@ def _instance_from_binding_specs(ctx, binding_rows, entry_rows, keepalive):
     )
     if not ptr:
         msg = bytes(err.message).split(b'\0', 1)[0].decode('utf-8', 'replace')
-        func = err.func.decode('utf-8', 'replace') if err.func else 'poly_instance_from_bindings'
+        func = err.func.decode('utf-8', 'replace') if err.func else 'poly_model_from_bindings'
         detail = f'{func}: {msg}' if msg else func
-        raise RuntimeError(f'poly_instance_from_bindings failed: {detail}')
-    return Instance(ptr, _ctx=ctx)
+        raise RuntimeError(f'poly_model_from_bindings failed: {detail}')
+    return Model(ptr, _ctx=ctx)
 
 
-class Instance:
-    """Opaque model instance with forward, train, and weight I/O."""
+class Model:
+    """C-owned state and callables with sealed topology and optional training.
+
+    Author with ordinary Tensor code or ``trace``; overriding a Python method
+    does not change the captured executable or synchronize authoring attributes.
+    """
 
     def __init__(self, ptr=None, *, inputs=None, targets=None, state=None,
                  outputs=None, entrypoints=None, params=None, losses=None,
@@ -299,8 +287,8 @@ class Instance:
         has_spec = any(v is not None for v in spec_args)
         if has_spec:
             if ptr is not None:
-                raise TypeError('Instance handle cannot be combined with tensor bindings')
-            built = Instance.from_tensors(
+                raise TypeError('Model handle cannot be combined with tensor bindings')
+            built = Model.from_tensors(
                 inputs=inputs,
                 targets=targets,
                 outputs=outputs,
@@ -315,19 +303,19 @@ class Instance:
             built._ptr = None
             built._ctx = None
             if self._ctx:
-                _live_instances.add(self)
+                _live_models.add(self)
             return
 
         if not ptr:
-            raise RuntimeError('Failed to create PolyInstance (NULL pointer)')
+            raise RuntimeError('Failed to create PolyModel (NULL pointer)')
         self._ptr = ptr
         self._ctx = _ctx
         if self._ctx:
-            _live_instances.add(self)
+            _live_models.add(self)
 
     def free(self):
         if self._ptr:
-            _get_lib().poly_instance_free(self._ptr)
+            _get_lib().poly_model_free(self._ptr)
             self._ptr = None
             self._ctx = None
 
@@ -346,8 +334,8 @@ class Instance:
         if weights_bytes:
             w_buf = (ctypes.c_uint8 * len(weights_bytes)).from_buffer_copy(weights_bytes)
             w_len = len(weights_bytes)
-        ptr = _get_lib().poly_instance_from_ir(ir_buf, len(ir_bytes), w_buf, w_len)
-        return Instance(ptr)
+        ptr = _get_lib().poly_model_from_ir(ir_buf, len(ir_bytes), w_buf, w_len)
+        return Model(ptr)
 
     @staticmethod
     def from_program(program_bytes, weights_bytes=None):
@@ -362,13 +350,13 @@ class Instance:
         if weights_bytes:
             w_buf = (ctypes.c_uint8 * len(weights_bytes)).from_buffer_copy(weights_bytes)
             w_len = len(weights_bytes)
-        ptr = _get_lib().poly_instance_from_program(
+        ptr = _get_lib().poly_model_from_program(
             program_buf, len(program_bytes), w_buf, w_len)
-        return Instance(ptr)
+        return Model(ptr)
 
     @staticmethod
     def from_bindings(bindings, entrypoints, *, modules=None):
-        """Create an Instance from explicit binding and entrypoint records.
+        """Create an Model from explicit binding and entrypoint records.
 
         Bindings may be dicts with ``name``, ``role``, ``tensor``, and optional
         ``flags`` fields, or ``(name, role, tensor[, flags])`` tuples. Roles
@@ -382,17 +370,17 @@ class Instance:
         bindings = list(bindings or ())
         entrypoints = list(entrypoints or ())
         if not bindings:
-            raise ValueError('Instance.from_bindings requires at least one binding')
+            raise ValueError('Model.from_bindings requires at least one binding')
         if not entrypoints:
-            raise ValueError('Instance.from_bindings requires at least one entrypoint')
+            raise ValueError('Model.from_bindings requires at least one entrypoint')
 
         parsed = []
         for binding in bindings:
             name, role, tensor, flags, trainable = _binding_fields(binding)
             if name is None:
-                raise ValueError('Instance binding is missing a name')
+                raise ValueError('Model binding is missing a name')
             if role is None:
-                raise ValueError(f'Instance binding {name!r} is missing a role')
+                raise ValueError(f'Model binding {name!r} is missing a role')
             tensor = _require_tensor(name, tensor)
             role = _role_id(role)
             if role == ROLE_PARAM and not (tensor.is_param if trainable is None else trainable):
@@ -417,7 +405,7 @@ class Instance:
         for entry in entrypoints:
             name, inputs, outputs, objective, flags = _entry_fields(entry)
             if name is None:
-                raise ValueError('Instance entrypoint is missing a name')
+                raise ValueError('Model entrypoint is missing a name')
             entry_rows.append(_entrypoint_spec(
                 name,
                 _entry_name_list(inputs),
@@ -427,7 +415,7 @@ class Instance:
                 keepalive=keepalive,
             ))
 
-        inst = _instance_from_binding_specs(ctx, binding_rows, entry_rows, keepalive)
+        inst = _model_from_binding_specs(ctx, binding_rows, entry_rows, keepalive)
         if modules is not None:
             try:
                 inst.define_modules(modules)
@@ -435,6 +423,26 @@ class Instance:
                 inst.free()
                 raise
         return inst
+
+    @staticmethod
+    def trace(fn, *, inputs, targets=None, loss=None, state=None, params=None,
+              entrypoints=None):
+        """Call ``fn(**inputs)`` once and seal its Tensor outputs.
+
+        ``loss(result, **targets)`` returns a Tensor or a named loss dictionary.
+        Supply state explicitly (``nn.get_state_dict(net)`` is a convenience).
+        Preserve logical roots before construction; no host control-flow tracing,
+        automatic train/eval modes, or subsequent calls to the authoring object.
+        """
+        if not callable(fn):
+            raise TypeError('Model.trace requires a callable')
+        inputs = dict(inputs)
+        targets = dict(targets or {})
+        result = fn(**inputs)
+        losses = loss(result, **targets) if loss is not None else None
+        return Model.from_tensors(inputs=inputs, targets=targets, outputs=result,
+                                  losses=losses, state=state, params=params,
+                                  entrypoints=entrypoints)
 
     @staticmethod
     def from_tensors(
@@ -448,11 +456,11 @@ class Instance:
         entrypoints=None,
         modules=None,
     ):
-        """Package named Tensor roots as a runnable/exportable Instance."""
+        """Package named Tensor roots as a runnable/exportable Model."""
         from .tensor import _ptr_value
 
         if params is not None and state is not None:
-            raise ValueError('Instance.from_tensors accepts params or state, not both')
+            raise ValueError('Model.from_tensors accepts params or state, not both')
         if state is not None:
             params = state
 
@@ -469,9 +477,9 @@ class Instance:
         for name, tensor in param_items:
             named_tensors.append((name, _require_tensor(name, tensor)))
         if not named_tensors:
-            raise ValueError('Instance.from_tensors requires at least one tensor')
+            raise ValueError('Model.from_tensors requires at least one tensor')
         if not outputs and not losses:
-            raise ValueError('Instance.from_tensors requires outputs or losses')
+            raise ValueError('Model.from_tensors requires outputs or losses')
 
         ctx = named_tensors[0][1]._ctx
         ctx_key = _ptr_value(ctx)
@@ -496,7 +504,7 @@ class Instance:
         for name, tensor in targets.items():
             add_binding(name, ROLE_TARGET, tensor)
         for name, tensor in param_items:
-            add_binding(name, ROLE_PARAM, tensor)
+            add_binding(name, ROLE_AUX if state is not None and not tensor.is_param else ROLE_PARAM, tensor)
         for name, tensor in outputs.items():
             add_binding(name, ROLE_OUTPUT, tensor)
         for name, tensor in losses.items():
@@ -507,7 +515,7 @@ class Instance:
             for entry in entrypoints:
                 name, entry_inputs, entry_outputs, objective, flags = _entry_fields(entry)
                 if name is None:
-                    raise ValueError('Instance entrypoint is missing a name')
+                    raise ValueError('Model entrypoint is missing a name')
                 entry_rows.append(_entrypoint_spec(
                     name,
                     _entry_name_list(entry_inputs),
@@ -522,13 +530,13 @@ class Instance:
                     'forward', list(inputs.keys()), list(outputs.keys()), keepalive=keepalive
                 ))
             if losses:
-                objective = 'loss' if len(losses) == 1 and 'loss' in losses else None
+                objective = next(iter(losses)) if len(losses) == 1 else None
                 entry_rows.append(_entrypoint_spec(
                     'loss', list(inputs.keys()) + list(targets.keys()), list(losses.keys()),
                     objective=objective, keepalive=keepalive
                 ))
 
-        inst = _instance_from_binding_specs(ctx, binding_rows, entry_rows, keepalive)
+        inst = _model_from_binding_specs(ctx, binding_rows, entry_rows, keepalive)
         if modules is not None:
             try:
                 inst.define_modules(modules)
@@ -542,7 +550,7 @@ class Instance:
 
         Each row is ``{'name', 'inputs', 'output'}`` or
         ``(name, inputs, output)``. Inputs and output are Tensor objects from
-        this Instance's construction context. This records product metadata;
+        this Model's construction context. This records product metadata;
         it does not alter the current physical graph.
         """
         rows = list(modules or ())
@@ -556,7 +564,7 @@ class Instance:
         for row in rows:
             name, inputs, output = _module_fields(row)
             if name is None:
-                raise ValueError('Instance module is missing a name')
+                raise ValueError('Model module is missing a name')
             inputs = [_require_tensor(f'{name}.input', tensor)
                       for tensor in _module_inputs(inputs)]
             output = _require_tensor(f'{name}.output', output)
@@ -570,11 +578,11 @@ class Instance:
         input_arr = ((ctypes.c_void_p * len(flat_inputs))(*flat_inputs)
                      if flat_inputs else None)
         output_arr = (ctypes.c_void_p * len(outputs))(*outputs)
-        rc = _get_lib().poly_instance_define_module_arrays(
+        rc = _get_lib().poly_model_define_module_arrays(
             self._ptr, name_arr, input_arr, count_arr, output_arr, len(rows)
         )
         if rc != 0:
-            raise ValueError('invalid or ambiguous Instance module cuts')
+            raise ValueError('invalid or ambiguous Model module cuts')
         return self
 
     def set_device_map(self, device_map):
@@ -586,17 +594,30 @@ class Instance:
         devices = [_name_bytes(device) for _, device in rows]
         module_arr = (ctypes.c_char_p * len(modules))(*modules)
         device_arr = (ctypes.c_char_p * len(devices))(*devices)
-        rc = _get_lib().poly_instance_set_device_map_arrays(
+        rc = _get_lib().poly_model_set_device_map_arrays(
             self._ptr, module_arr, device_arr, len(rows)
         )
         if rc != 0:
-            raise ValueError('invalid, incomplete, or unsupported Instance device map')
+            raise ValueError('invalid, incomplete, or unsupported Model device map')
+        return self
+
+    def place(self, device):
+        """Explicitly place retained logical roots on a device or module map."""
+        if not self._ptr:
+            raise RuntimeError('Model is disposed')
+        if not isinstance(device, str):
+            return self.set_device_map(device)
+        device_id = _device_id(device)
+        if device_id <= 0:
+            raise ValueError(f'unsupported explicit device: {device!r}')
+        if _get_lib().poly_model_set_device(self._ptr, device_id) != 0:
+            raise RuntimeError(f'Model placement failed for {device!r}')
         return self
 
     @staticmethod
     def from_hf(model_path=None, *, config_json=None, weight_bytes_list=None,
                 max_batch=1, max_seq_len=0, device=None):
-        """Load a HuggingFace-format model as an Instance."""
+        """Load a HuggingFace-format model as an Model."""
         from .hf import load_hf, load_hf_bytes
 
         if config_json is not None or weight_bytes_list is not None:
@@ -613,7 +634,7 @@ class Instance:
 
     @staticmethod
     def from_gguf(data, *, max_batch=1, max_seq_len=0, device=None):
-        """Load a GGUF byte buffer or file path as an Instance."""
+        """Load a GGUF byte buffer or file path as an Model."""
         if isinstance(data, (str, pathlib.Path)):
             data = pathlib.Path(data).read_bytes()
         data = bytes(data)
@@ -623,41 +644,40 @@ class Instance:
         )
         if not ptr:
             raise RuntimeError('poly_gguf_load returned NULL')
-        return Instance(ptr)
+        return Model(ptr)
 
     # ── Param Enumeration ────────────────────────────────────────────
 
     @property
     def param_count(self):
-        return _get_lib().poly_instance_param_count(self._ptr)
+        return _get_lib().poly_model_param_count(self._ptr)
 
     def param_name(self, i):
-        name = _get_lib().poly_instance_param_name(self._ptr, i)
+        name = _get_lib().poly_model_param_name(self._ptr, i)
         return name.decode('utf-8') if name else None
 
     def param_shape(self, i):
         shape_buf = (ctypes.c_int64 * 8)()
-        ndim = _get_lib().poly_instance_param_shape(self._ptr, i, shape_buf, 8)
+        ndim = _get_lib().poly_model_param_shape(self._ptr, i, shape_buf, 8)
         return [shape_buf[d] for d in range(ndim)]
 
     def param_data(self, i):
-        """Return a mutable zero-copy NumPy view in the parameter storage dtype."""
-        numel = ctypes.c_int64(0)
-        ptr = _get_lib().poly_instance_param_data_raw(self._ptr, i, ctypes.byref(numel))
-        if not ptr:
+        """Return an independent, flat copy in the parameter storage dtype."""
+        name = self.param_name(i)
+        if name is None:
             return None
-        return _instance_data_view(ptr, numel.value, self.param_dtype(i))
+        return self.read_buffer(name)
 
     def param_dtype(self, i):
-        return _instance_dtype_name(_get_lib().poly_instance_param_dtype_id(self._ptr, i))
+        return _model_dtype_name(_get_lib().poly_model_param_dtype_id(self._ptr, i))
 
     def param_trainable(self, i):
         """Whether this parameter participates in convenience optimizer steps."""
-        return bool(_get_lib().poly_instance_param_trainable(self._ptr, i))
+        return bool(_get_lib().poly_model_param_trainable(self._ptr, i))
 
     def set_param_trainable(self, i, trainable):
-        """Enable or freeze one parameter for Instance.train_step()."""
-        ret = _get_lib().poly_instance_set_param_trainable(
+        """Enable or freeze one parameter for Model.train_step()."""
+        ret = _get_lib().poly_model_set_param_trainable(
             self._ptr, i, bool(trainable))
         if ret != 0:
             raise RuntimeError(f'set_param_trainable failed (ret={ret})')
@@ -672,22 +692,22 @@ class Instance:
 
     @property
     def buf_count(self):
-        return _get_lib().poly_instance_buf_count(self._ptr)
+        return _get_lib().poly_model_buf_count(self._ptr)
 
     def buf_name(self, i):
-        name = _get_lib().poly_instance_buf_name(self._ptr, i)
+        name = _get_lib().poly_model_buf_name(self._ptr, i)
         return name.decode('utf-8') if name else None
 
     def buf_role(self, i):
-        return _get_lib().poly_instance_buf_role(self._ptr, i)
+        return _get_lib().poly_model_buf_role(self._ptr, i)
 
     def buf_trainable(self, i):
         """Whether this named buffer is marked trainable."""
-        return bool(_get_lib().poly_instance_buf_trainable(self._ptr, i))
+        return bool(_get_lib().poly_model_buf_trainable(self._ptr, i))
 
     def set_buf_trainable(self, i, trainable):
-        """Enable or freeze a named buffer for Instance.train_step()."""
-        ret = _get_lib().poly_instance_set_buf_trainable(
+        """Enable or freeze a named buffer for Model.train_step()."""
+        ret = _get_lib().poly_model_set_buf_trainable(
             self._ptr, i, bool(trainable))
         if ret != 0:
             raise RuntimeError(f'set_buf_trainable failed (ret={ret})')
@@ -695,19 +715,52 @@ class Instance:
 
     def buf_shape(self, i):
         shape_buf = (ctypes.c_int64 * 8)()
-        ndim = _get_lib().poly_instance_buf_shape(self._ptr, i, shape_buf, 8)
+        ndim = _get_lib().poly_model_buf_shape(self._ptr, i, shape_buf, 8)
         return tuple(shape_buf[d] for d in range(ndim))
 
     def buf_data(self, i):
-        """Return a mutable zero-copy NumPy view in the buffer storage dtype."""
-        numel = ctypes.c_int64(0)
-        ptr = _get_lib().poly_instance_buf_data_raw(self._ptr, i, ctypes.byref(numel))
-        if not ptr:
+        """Return an independent, flat copy in the buffer storage dtype."""
+        if not self._ptr:
+            raise RuntimeError('Model is disposed')
+        if i < 0 or i >= self.buf_count:
             return None
-        return _instance_data_view(ptr, numel.value, self.buf_dtype(i))
+        shape = self.buf_shape(i)
+        out = np.empty(math.prod(shape), dtype=_storage_dtype(self.buf_dtype(i)))
+        ret = _get_lib().poly_model_read_buf(self._ptr, i, out.ctypes.data, out.nbytes)
+        if ret != 0:
+            raise RuntimeError(f'buffer read failed (ret={ret})')
+        return out
+
+    def read_buffer(self, name):
+        """Copy named storage to a flat host array; never borrows C memory."""
+        if not self._ptr:
+            raise RuntimeError('Model is disposed')
+        i = self.find_buf(name)
+        if i < 0:
+            raise KeyError(name)
+        return self.buf_data(i)
+
+    def write_buffer(self, name, data):
+        """Write exact storage dtype and extent, flat or in the declared shape."""
+        if not self._ptr:
+            raise RuntimeError('Model is disposed')
+        i = self.find_buf(name)
+        if i < 0:
+            raise KeyError(name)
+        shape = self.buf_shape(i)
+        array = np.asarray(data)
+        if array.dtype != _storage_dtype(self.buf_dtype(i)):
+            raise TypeError(f'{name!r}: expected {self.buf_dtype(i)} storage')
+        if array.shape not in (shape, (math.prod(shape),)):
+            raise ValueError(f'{name!r}: expected shape {shape} or flat storage')
+        array = np.ascontiguousarray(array)
+        ret = _get_lib().poly_model_write_buf(self._ptr, i, array.ctypes.data, array.nbytes)
+        if ret != 0:
+            raise RuntimeError(f'buffer write failed (ret={ret})')
+        return self
 
     def buf_dtype(self, i):
-        return _instance_dtype_name(_get_lib().poly_instance_buf_dtype_id(self._ptr, i))
+        return _model_dtype_name(_get_lib().poly_model_buf_dtype_id(self._ptr, i))
 
     def find_buf(self, name):
         """Find buffer index by name, or -1."""
@@ -716,12 +769,42 @@ class Instance:
                 return i
         return -1
 
+    def bindings(self):
+        """Return value-only interface metadata, never raw UOp/storage pointers."""
+        if not self._ptr:
+            raise RuntimeError('Model has been disposed')
+        return [{'name': self.buf_name(i), 'role': self.buf_role(i),
+                 'dtype': self.buf_dtype(i), 'shape': self.buf_shape(i),
+                 'trainable': self.buf_trainable(i)} for i in range(self.buf_count)]
+
+    def entrypoints(self):
+        """Return the sealed callable signatures and their declared objectives."""
+        if not self._ptr:
+            raise RuntimeError('Model has been disposed')
+        lib = _get_lib()
+        rows = []
+        for i in range(lib.poly_model_entrypoint_count(self._ptr)):
+            name = lib.poly_model_entrypoint_name(self._ptr, i)
+            objective = lib.poly_model_entrypoint_objective(self._ptr, name)
+            rows.append({'name': name.decode(), 'objective': objective.decode() if objective else None,
+                         'inputs': [lib.poly_model_entrypoint_input_name(self._ptr, name, j).decode()
+                                    for j in range(lib.poly_model_entrypoint_input_count(self._ptr, name))],
+                         'outputs': [lib.poly_model_entrypoint_output_name(self._ptr, name, j).decode()
+                                     for j in range(lib.poly_model_entrypoint_output_count(self._ptr, name))]})
+        return rows
+
+    def set_trainable(self, name, trainable):
+        i = self.find_buf(name)
+        if i < 0:
+            raise KeyError(name)
+        return self.set_buf_trainable(i, trainable)
+
     # ── Weight I/O ───────────────────────────────────────────────────
 
     def export_weights(self, *, include_optimizer=True):
         """Export model weights as safetensors bytes.
 
-        Optimizer state is included by default because a PolyInstance packages
+        Optimizer state is included by default because a PolyModel packages
         model and optimizer state together. Pass include_optimizer=False for a
         model-only checkpoint, matching tinygrad's separate model/optimizer
         state_dict calls.
@@ -730,7 +813,7 @@ class Instance:
         if include_optimizer:
             flags |= EXPORT_WEIGHTS_OPTIMIZER
         out_len = ctypes.c_int(0)
-        ptr = _get_lib().poly_instance_export_weights_ex(self._ptr, ctypes.byref(out_len), flags)
+        ptr = _get_lib().poly_model_export_weights_ex(self._ptr, ctypes.byref(out_len), flags)
         if not ptr:
             return None
         data = bytes(ctypes.cast(ptr, ctypes.POINTER(ctypes.c_uint8 * out_len.value)).contents)
@@ -740,14 +823,14 @@ class Instance:
     def import_weights(self, data):
         """Import weights from safetensors bytes."""
         buf = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
-        ret = _get_lib().poly_instance_import_weights(self._ptr, buf, len(data))
+        ret = _get_lib().poly_model_import_weights(self._ptr, buf, len(data))
         if ret != 0:
             raise RuntimeError(f'import_weights failed (ret={ret})')
 
     def export_ir(self):
         """Export IR graph as binary bytes."""
         out_len = ctypes.c_int(0)
-        ptr = _get_lib().poly_instance_export_ir(self._ptr, ctypes.byref(out_len))
+        ptr = _get_lib().poly_model_export_ir(self._ptr, ctypes.byref(out_len))
         if not ptr:
             return None
         data = bytes(ctypes.cast(ptr, ctypes.POINTER(ctypes.c_uint8 * out_len.value)).contents)
@@ -757,7 +840,7 @@ class Instance:
     def export_program(self):
         """Export the current placed compiled entrypoints as bound bytes."""
         out_len = ctypes.c_int(0)
-        ptr = _get_lib().poly_instance_export_program(self._ptr, ctypes.byref(out_len))
+        ptr = _get_lib().poly_model_export_program(self._ptr, ctypes.byref(out_len))
         if not ptr:
             return None
         data = bytes(ctypes.cast(ptr, ctypes.POINTER(ctypes.c_uint8 * out_len.value)).contents)
@@ -772,7 +855,7 @@ class Instance:
         if include_optimizer:
             flags |= EXPORT_WEIGHTS_OPTIMIZER
         out_len = ctypes.c_int(0)
-        ptr = _get_lib().poly_instance_save_bundle_ex(self._ptr, ctypes.byref(out_len), flags)
+        ptr = _get_lib().poly_model_save_bundle_ex(self._ptr, ctypes.byref(out_len), flags)
         if not ptr:
             return None
         data = bytes(ctypes.cast(ptr, ctypes.POINTER(ctypes.c_uint8 * out_len.value)).contents)
@@ -783,8 +866,8 @@ class Instance:
     def from_bundle(data):
         """Load from a poly.bundle@1 byte array."""
         buf = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
-        ptr = _get_lib().poly_instance_from_bundle(buf, len(data))
-        return Instance(ptr)
+        ptr = _get_lib().poly_model_from_bundle(buf, len(data))
+        return Model(ptr)
 
     # ── Execution ────────────────────────────────────────────────────
 
@@ -792,7 +875,7 @@ class Instance:
                       eps=1e-8, weight_decay=0.0, momentum=0.0,
                       nesterov=False, classic=False):
         """Configure optimizer before first train_step."""
-        ret = _get_lib().poly_instance_set_optimizer_ex(
+        ret = _get_lib().poly_model_set_optimizer_ex(
             self._ptr, kind,
             ctypes.c_float(lr), ctypes.c_float(beta1), ctypes.c_float(beta2),
             ctypes.c_float(eps), ctypes.c_float(weight_decay),
@@ -810,24 +893,25 @@ class Instance:
     def call(self, entrypoint, inputs=None, **kwargs):
         """Run one named entrypoint with its exact declared input signature."""
         if inputs is not None and kwargs:
-            raise TypeError('Instance.call accepts either an input mapping or keyword inputs')
+            raise TypeError('Model.call accepts either an input mapping or keyword inputs')
         io = dict(inputs or kwargs)
         bindings, n = self._make_bindings(io)
-        ret = _get_lib().poly_instance_call(
+        ret = _get_lib().poly_model_call(
             self._ptr, str(entrypoint).encode('utf-8'), bindings, n)
         if ret != 0:
             raise RuntimeError(f"call('{entrypoint}') failed (ret={ret})")
         return self._collect_outputs(str(entrypoint))
 
-    def train_step(self, **io):
+    def train_step(self, *, entrypoint=None, **io):
         """Run one training step. Pass input+target arrays as kwargs.
 
         Returns the loss value (float).
         """
         bindings, n = self._make_bindings(io)
         loss = ctypes.c_float(0.0)
-        ret = _get_lib().poly_instance_train_step(
-            self._ptr, bindings, n, ctypes.byref(loss))
+        ret = _get_lib().poly_model_train_step(
+            self._ptr, _name_bytes(entrypoint) if entrypoint is not None else None,
+            bindings, n, ctypes.byref(loss))
         if ret != 0:
             raise RuntimeError(f'train_step failed (ret={ret})')
         return float(loss.value)
@@ -835,8 +919,8 @@ class Instance:
     def fit(self, data=None, *, epochs=1, optimizer=None, lr=0.01,
             beta1=0.9, beta2=0.999, eps=1e-8, weight_decay=0.0,
             momentum=0.0, nesterov=False, classic=False,
-            on_step=None, **io):
-        """Run a small Keras-style training loop over this instance.
+            on_step=None, entrypoint=None, **io):
+        """Repeat one supplied batch for ``epochs`` steps.
 
         This is only orchestration: optimizer update graphs are still built by
         the C core and executed through the same train_step path as custom
@@ -854,7 +938,7 @@ class Instance:
             )
         losses = []
         for step in range(int(epochs)):
-            loss = self.train_step(**bindings)
+            loss = self.train_step(entrypoint=entrypoint, **bindings)
             losses.append(loss)
             if on_step is not None:
                 on_step(step, loss)
@@ -875,7 +959,7 @@ class Instance:
                 data = np.ascontiguousarray(data, dtype=np.float32)
             dtype_id = lib.poly_dtype_id_by_name(data.dtype.name.encode('utf-8'))
             if dtype_id < 0:
-                raise TypeError(f"unsupported Instance input dtype: {data.dtype}")
+                raise TypeError(f"unsupported Model input dtype: {data.dtype}")
             owners.append(data)
             arr[i].name = name.encode('utf-8')
             arr[i].data = ctypes.c_void_p(data.ctypes.data)
@@ -891,11 +975,11 @@ class Instance:
         result = {}
         lib = _get_lib()
         encoded = str(entrypoint).encode('utf-8')
-        n_outputs = lib.poly_instance_entrypoint_output_count(self._ptr, encoded)
+        n_outputs = lib.poly_model_entrypoint_output_count(self._ptr, encoded)
         if n_outputs < 0:
-            raise RuntimeError(f"unknown Instance entrypoint '{entrypoint}'")
+            raise RuntimeError(f"unknown Model entrypoint '{entrypoint}'")
         for output_index in range(n_outputs):
-            raw_name = lib.poly_instance_entrypoint_output_name(
+            raw_name = lib.poly_model_entrypoint_output_name(
                 self._ptr, encoded, output_index)
             if not raw_name:
                 raise RuntimeError(f"invalid output {output_index} for entrypoint '{entrypoint}'")
@@ -906,6 +990,6 @@ class Instance:
             data = self.buf_data(i)
             if data is not None:
                 # Tensor.numpy() preserves scalar and multidimensional shape.
-                # Instance storage views are flat, so restore the declared ABI.
-                result[name] = data.copy().reshape(self.buf_shape(i))
+                # buf_data already owns a copy; reshape without copying again.
+                result[name] = data.reshape(self.buf_shape(i))
         return result

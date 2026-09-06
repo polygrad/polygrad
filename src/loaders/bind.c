@@ -15,7 +15,7 @@ typedef struct {
 } BindEntry;
 
 struct PolyBindIndex {
-  PolyInstance *inst;
+  PolyModel *inst;
   BindEntry *entries;
   int capacity;
 };
@@ -27,8 +27,8 @@ static unsigned int hash_name(const char *s, int cap) {
   return h % (unsigned int)cap;
 }
 
-PolyBindIndex *poly_bind_index_create(PolyInstance *inst) {
-  int n = poly_instance_buf_count(inst);
+PolyBindIndex *poly_bind_index_create(PolyModel *inst) {
+  int n = poly_model_buf_count(inst);
   int cap = n < 8 ? 16 : n * 2;
 
   PolyBindIndex *idx = calloc(1, sizeof(PolyBindIndex));
@@ -37,7 +37,7 @@ PolyBindIndex *poly_bind_index_create(PolyInstance *inst) {
   idx->entries = calloc((size_t)cap, sizeof(BindEntry));
 
   for (int i = 0; i < n; i++) {
-    const char *name = poly_instance_buf_name(inst, i);
+    const char *name = poly_model_buf_name(inst, i);
     if (!name) continue;
     unsigned int h = hash_name(name, cap);
     while (idx->entries[h].name != NULL)
@@ -74,7 +74,7 @@ int poly_bind_index_dst_shape(
 ) {
   int bi = bind_find(idx, name);
   if (bi < 0) return 0;
-  return poly_instance_buf_shape(idx->inst, bi, shape_out, max_dims);
+  return poly_model_buf_shape(idx->inst, bi, shape_out, max_dims);
 }
 
 int poly_import_copy_named_tensor(
@@ -89,7 +89,7 @@ int poly_import_copy_named_tensor(
   if (bi < 0) return 0; /* not found */
 
   int64_t dst_numel;
-  float *dst_data = poly_instance_buf_data(idx->inst, bi, &dst_numel);
+  float *dst_data = poly_model_buf_data(idx->inst, bi, &dst_numel);
   if (!dst_data) {
     /* Check raw data pointer to distinguish alloc failure from sync failure */
     poly_import_error_set(
@@ -104,7 +104,7 @@ int poly_import_copy_named_tensor(
     src_numel *= src_shape[d];
 
   int64_t dst_shape[8];
-  int dst_ndim = poly_instance_buf_shape(idx->inst, bi, dst_shape, 8);
+  int dst_ndim = poly_model_buf_shape(idx->inst, bi, dst_shape, 8);
 
   if (transpose_2d) {
     if (src_ndim != 2 || dst_ndim != 2) {

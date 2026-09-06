@@ -382,7 +382,7 @@
           "sources": [
             "js/test/browser/run.js",
             "js/test/browser/test_browser_entry.js",
-            "js/test/test_instance.js",
+            "js/test/test_model_runtime.js",
             "js/test/test_tensor.js"
           ]
         }
@@ -425,7 +425,7 @@
     {
       "name": "instance-entrypoints",
       "kind": "call_string_arg",
-      "functions": ["poly_instance_entrypoint", "poly_register_entrypoint"],
+      "functions": ["poly_model_entrypoint", "poly_register_entrypoint"],
       "argument": 1,
       "globs": ["src/**/*.c"]
     }

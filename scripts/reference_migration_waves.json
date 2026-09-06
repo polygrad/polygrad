@@ -756,11 +756,11 @@
       "polygrad_owners": [
         "src/tensor.c",
         "src/ir.c",
-        "src/instance.c",
+        "src/model.c",
         "src/placer.c",
         "src/engine/realize.c"
       ],
-      "case_patterns": ["assign", "bind", "view", "rng", "dropout", "instance", "rebuilt_after_realize"]
+      "case_patterns": ["assign", "bind", "view", "rng", "dropout", "model", "rebuilt_after_realize"]
     },
     {
       "id": "scheduler_codegen",
@@ -822,7 +822,7 @@
         "src/engine/jit.c",
         "src/engine/realize.c",
         "src/engine/schedule.c",
-        "src/instance.c",
+        "src/model.c",
         "src/bundle.c"
       ],
       "case_patterns": ["jit", "program", "function", "custom", "rng", "dropout", "optimizer"]

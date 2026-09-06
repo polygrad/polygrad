@@ -24,7 +24,7 @@ function createBoundTokenizerClass(runtime) {
     }
 
     static fromGGUF(ggufBytes) {
-      const api = _runtime._core.instance
+      const api = _runtime._core.model
       if (!(ggufBytes instanceof Uint8Array))
         ggufBytes = new Uint8Array(ggufBytes)
       const handle = api.tokenizerFromGGUF(ggufBytes)
@@ -33,7 +33,7 @@ function createBoundTokenizerClass(runtime) {
     }
 
     static fromJSON(jsonBytes) {
-      const api = _runtime._core.instance
+      const api = _runtime._core.model
       if (typeof jsonBytes === 'string')
         jsonBytes = new TextEncoder().encode(jsonBytes)
       if (!(jsonBytes instanceof Uint8Array))
@@ -44,31 +44,31 @@ function createBoundTokenizerClass(runtime) {
     }
 
     encode(text) {
-      const api = this._rt._core.instance
+      const api = this._rt._core.model
       return api.tokenize(this._handle, text)
     }
 
     decode(ids) {
-      const api = this._rt._core.instance
+      const api = this._rt._core.model
       if (ids instanceof Int32Array) return api.detokenize(this._handle, ids)
       return api.detokenize(this._handle, Int32Array.from(ids))
     }
 
     get vocabSize() {
-      return this._rt._core.instance.tokenizerVocabSize(this._handle)
+      return this._rt._core.model.tokenizerVocabSize(this._handle)
     }
 
     get bosId() {
-      return this._rt._core.instance.tokenizerBosId(this._handle)
+      return this._rt._core.model.tokenizerBosId(this._handle)
     }
 
     get eosId() {
-      return this._rt._core.instance.tokenizerEosId(this._handle)
+      return this._rt._core.model.tokenizerEosId(this._handle)
     }
 
     free() {
       if (this._handle) {
-        this._rt._core.instance.tokenizerFree(this._handle)
+        this._rt._core.model.tokenizerFree(this._handle)
         this._handle = null
       }
     }

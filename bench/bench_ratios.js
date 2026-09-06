@@ -95,7 +95,7 @@ function benchBundleRoundtrip(pg, inputSize, iters) {
   inst.dispose()
   if (!bundle) return null
 
-  const inst2 = pg.Instance.fromBundle(bundle)
+  const inst2 = pg.Model.fromBundle(bundle)
   if (!inst2) return null
 
   const input = new Float32Array(inputSize)

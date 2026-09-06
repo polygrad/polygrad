@@ -1,7 +1,7 @@
 /*
  * optim.h -- Open optimizer graph helpers.
  *
- * Optimizers are normal tensor graph builders. Instance convenience training
+ * Optimizers are normal tensor graph builders. Model convenience training
  * uses these helpers, and custom loops can use the same update expressions
  * before deciding how to realize/apply them.
  */
@@ -61,7 +61,7 @@ int poly_optim_build_update(
     PolyOptimUpdate *out
 );
 
-/* Tensor-level optimizer step builder shared by frontends and Instance-like
+/* Tensor-level optimizer step builder shared by frontends and Model-like
  * callers. This is the C-side graph-construction part of tinygrad's
  * Optimizer.schedule_step(), not the engine scheduler. It owns no state:
  * lr, params, grads, and optional optimizer-state tensors are supplied by the

@@ -46,10 +46,10 @@ function createNativeCore(device) {
   const deviceId = nativeDevice.id
   binding.poly_ctx_set_preferred_device(ctx, deviceId)
 
-  function setInstanceDevice(inst) {
+  function setModelDevice(inst) {
     if (!inst) return inst
-    if (binding.poly_instance_set_device(inst, deviceId) !== 0) {
-      binding.poly_instance_free(inst)
+    if (binding.poly_model_set_device(inst, deviceId) !== 0) {
+      binding.poly_model_free(inst)
       throw new Error(`polygrad: set_device failed for native device '${nativeDevice.name}'`)
     }
     return inst
@@ -62,7 +62,7 @@ function createNativeCore(device) {
     if (name) ops[name] = i
   }
 
-  const EXPECTED_ABI = 67
+  const EXPECTED_ABI = 68
   const abi = binding.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(
@@ -71,96 +71,103 @@ function createNativeCore(device) {
     )
   }
 
-  const instance = {
+  const model = {
+    compose(ctxPtr, json, family) {
+      return family === 'Sequential' ? binding.poly_sequential_from_json(ctxPtr, json)
+        : binding.poly_graph_from_json(ctxPtr, json)
+    },
     fromIR(irBytes, weightsBytes) {
-      const inst = binding.poly_instance_from_ir(irBytes, weightsBytes ?? null)
-      return setInstanceDevice(inst)
+      const inst = binding.poly_model_from_ir(irBytes, weightsBytes ?? null)
+      return setModelDevice(inst)
     },
     fromProgram(programBytes, weightsBytes) {
-      return binding.poly_instance_from_program(programBytes, weightsBytes ?? null)
+      return binding.poly_model_from_program(programBytes, weightsBytes ?? null)
     },
     mlp(specJson) {
       const inst = binding.poly_mlp_from_json(specJson, deviceId)
-      return setInstanceDevice(inst)
+      return setModelDevice(inst)
     },
     tabm(specJson) {
-      const inst = binding.poly_tabm_instance(specJson, deviceId)
-      return setInstanceDevice(inst)
+      const inst = binding.poly_tabm_from_json(specJson, deviceId)
+      return setModelDevice(inst)
     },
     nam(specJson) {
-      const inst = binding.poly_nam_instance(specJson, deviceId)
-      return setInstanceDevice(inst)
+      const inst = binding.poly_nam_from_json(specJson, deviceId)
+      return setModelDevice(inst)
     },
     free(inst) {
-      binding.poly_instance_free(inst)
+      binding.poly_model_free(inst)
     },
     paramCount(inst) {
-      return binding.poly_instance_param_count(inst)
+      return binding.poly_model_param_count(inst)
     },
     paramName(inst, i) {
-      return binding.poly_instance_param_name(inst, i)
+      return binding.poly_model_param_name(inst, i)
     },
     paramShape(inst, i) {
-      return binding.poly_instance_param_shape(inst, i)
+      return binding.poly_model_param_shape(inst, i)
     },
     paramData(inst, i) {
-      return binding.poly_instance_param_data(inst, i)
+      return binding.poly_model_param_data(inst, i)
     },
     paramDtypeId(inst, i) {
-      return binding.poly_instance_param_dtype_id(inst, i)
+      return binding.poly_model_param_dtype_id(inst, i)
     },
     paramTrainable(inst, i) {
-      return binding.poly_instance_param_trainable(inst, i)
+      return binding.poly_model_param_trainable(inst, i)
     },
     setParamTrainable(inst, i, trainable) {
-      return binding.poly_instance_set_param_trainable(inst, i, trainable)
+      return binding.poly_model_set_param_trainable(inst, i, trainable)
     },
     bufCount(inst) {
-      return binding.poly_instance_buf_count(inst)
+      return binding.poly_model_buf_count(inst)
     },
     bufName(inst, i) {
-      return binding.poly_instance_buf_name(inst, i)
+      return binding.poly_model_buf_name(inst, i)
     },
     bufRole(inst, i) {
-      return binding.poly_instance_buf_role(inst, i)
+      return binding.poly_model_buf_role(inst, i)
     },
     bufTrainable(inst, i) {
-      return binding.poly_instance_buf_trainable(inst, i)
+      return binding.poly_model_buf_trainable(inst, i)
     },
     setBufTrainable(inst, i, trainable) {
-      return binding.poly_instance_set_buf_trainable(inst, i, trainable)
+      return binding.poly_model_set_buf_trainable(inst, i, trainable)
     },
     bufShape(inst, i) {
-      return binding.poly_instance_buf_shape(inst, i)
+      return binding.poly_model_buf_shape(inst, i)
     },
     bufData(inst, i) {
-      return binding.poly_instance_buf_data(inst, i)
+      return binding.poly_model_buf_data(inst, i)
+    },
+    writeBuf(inst, i, array) {
+      return binding.poly_model_write_buf(inst, i, array)
     },
     bufDtypeId(inst, i) {
-      return binding.poly_instance_buf_dtype_id(inst, i)
+      return binding.poly_model_buf_dtype_id(inst, i)
     },
     exportWeights(inst, flags) {
-      return binding.poly_instance_export_weights(inst, flags)
+      return binding.poly_model_export_weights(inst, flags)
     },
     importWeights(inst, bytes) {
-      return binding.poly_instance_import_weights(inst, bytes)
+      return binding.poly_model_import_weights(inst, bytes)
     },
     exportIR(inst) {
-      return binding.poly_instance_export_ir(inst)
+      return binding.poly_model_export_ir(inst)
     },
     exportProgram(inst) {
-      return binding.poly_instance_export_program(inst)
+      return binding.poly_model_export_program(inst)
     },
     saveBundle(inst, flags) {
-      return binding.poly_instance_save_bundle(inst, flags)
+      return binding.poly_model_save_bundle(inst, flags)
     },
     fromBundle(bytes) {
-      const inst = binding.poly_instance_from_bundle(bytes)
-      return setInstanceDevice(inst)
+      const inst = binding.poly_model_from_bundle(bytes)
+      return setModelDevice(inst)
     },
     fromSinks(ctxPtr, names, sinks) {
-      const inst = binding.poly_instance_from_sinks(ctxPtr, names, sinks)
-      return setInstanceDevice(inst)
+      const inst = binding.poly_model_from_sinks(ctxPtr, names, sinks)
+      return setModelDevice(inst)
     },
     fromBindings(ctxPtr, bindings, entries) {
       const bindingNames = bindings.map(b => b.name)
@@ -174,16 +181,16 @@ function createNativeCore(device) {
       const entryOutputCounts = entries.map(e => (e.outputs || []).length)
       const entryObjectives = entries.map(e => e.objective || null)
       const entryFlags = entries.map(e => e.flags || 0)
-      const inst = binding.poly_instance_from_binding_arrays(
+      const inst = binding.poly_model_from_binding_arrays(
         ctxPtr,
         bindingNames, bindingRoles, bindingTensors, bindingFlags,
         entryNames, entryInputs, entryInputCounts, entryOutputs, entryOutputCounts,
         entryObjectives, entryFlags
       )
-      return setInstanceDevice(inst)
+      return setModelDevice(inst)
     },
     defineModules(inst, modules) {
-      return binding.poly_instance_define_module_arrays(
+      return binding.poly_model_define_module_arrays(
         inst,
         modules.map(m => m.name),
         modules.flatMap(m => m.inputs || []),
@@ -192,19 +199,24 @@ function createNativeCore(device) {
       )
     },
     setDeviceMap(inst, entries) {
-      return binding.poly_instance_set_device_map_arrays(
+      return binding.poly_model_set_device_map_arrays(
         inst, entries.map(e => e.module), entries.map(e => e.device)
       )
+    },
+    setDevice(inst, device) {
+      const id = binding.poly_device_by_name(String(device).toLowerCase())
+      if (id <= 0) throw new Error(`polygrad: unsupported explicit device '${device}'`)
+      return binding.poly_model_set_device(inst, id)
     },
     loadHF(configBytes, weightFilesBytes, maxBatch, maxSeqLen) {
       const inst = binding.poly_hf_load(configBytes, weightFilesBytes,
         maxBatch || 1, maxSeqLen || 0, deviceId)
-      return setInstanceDevice(inst)
+      return setModelDevice(inst)
     },
     loadGGUF(ggufBytes, maxBatch, maxSeqLen) {
       const inst = binding.poly_gguf_load(
         ggufBytes, maxBatch || 1, maxSeqLen || 0, deviceId)
-      return setInstanceDevice(inst)
+      return setModelDevice(inst)
     },
     importLastError() {
       const code = binding.poly_import_last_error_code()
@@ -226,31 +238,34 @@ function createNativeCore(device) {
     tokenizerBosId(tokPtr) { return binding.poly_tokenizer_bos_id(tokPtr) },
     tokenizerEosId(tokPtr) { return binding.poly_tokenizer_eos_id(tokPtr) },
     setOptimizer(inst, kind, lr, beta1, beta2, eps, weightDecay, momentum, nesterov, classic) {
-      return binding.poly_instance_set_optimizer(
+      return binding.poly_model_set_optimizer(
         inst, kind, lr, beta1, beta2, eps, weightDecay, momentum || 0, !!nesterov, !!classic
       )
     },
     forward(inst, names, arrays) {
-      return binding.poly_instance_forward(inst, names, arrays)
+      return binding.poly_model_forward(inst, names, arrays)
     },
     call(inst, entrypoint, names, arrays) {
-      return binding.poly_instance_call(inst, entrypoint, names, arrays)
+      return binding.poly_model_call(inst, entrypoint, names, arrays)
     },
     entrypointOutputCount(inst, entrypoint) {
-      return binding.poly_instance_entrypoint_output_count(inst, entrypoint)
+      return binding.poly_model_entrypoint_output_count(inst, entrypoint)
+    },
+    entrypoints(inst) {
+      return binding.poly_model_entrypoints(inst)
     },
     entrypointOutputName(inst, entrypoint, i) {
-      return binding.poly_instance_entrypoint_output_name(inst, entrypoint, i)
+      return binding.poly_model_entrypoint_output_name(inst, entrypoint, i)
     },
-    trainStep(inst, names, arrays) {
-      return binding.poly_instance_train_step(inst, names, arrays)
+    trainStep(inst, names, arrays, entrypoint) {
+      return binding.poly_model_train_step(inst, names, arrays, entrypoint)
     }
   }
 
   return {
     ffi: binding,
     dtypeIds,
-    instance,
+    model,
     ctx,
     ops,
     deviceIds: makeDeviceIds(binding),

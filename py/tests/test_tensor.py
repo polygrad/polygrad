@@ -89,7 +89,7 @@ Tensor = rt.Tensor
 Variable = rt.Variable
 x = Tensor([1.0, 2.0]).realize()
 uop = x.uop
-inst = rt.Instance.from_tensors(inputs={'x': x}, outputs={'output': x + 1})
+inst = rt.Model.from_tensors(inputs={'x': x}, outputs={'output': x + 1})
 rt.dispose()
 assert inst._ptr is None
 inst.free()
@@ -112,10 +112,10 @@ print('teardown_ok')
 
     def test_default_context_exit_frees_live_borrowed_instance_first(self):
         code = r'''
-from polygrad import Instance, Tensor
+from polygrad import Model, Tensor
 
 x = Tensor([1.0, 2.0]).realize()
-inst = Instance.from_tensors(inputs={'x': x}, outputs={'output': x + 1})
+inst = Model.from_tensors(inputs={'x': x}, outputs={'output': x + 1})
 assert inst._ptr
 print('leaving_live_instance')
 '''

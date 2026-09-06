@@ -1,8 +1,8 @@
 /*
- * model_nam.c -- NAM (Neural Additive Model) builder for PolyInstance
+ * model_nam.c -- NAM (Neural Additive Model) builder for PolyModel
  *
  * Builds a tensor-level UOp graph from a JSON spec using staged
- * PolyInstance bindings and entrypoints.
+ * PolyModel bindings and entrypoints.
  *
  * NAM forward: g(E[y]) = intercept + sum(fk(xk) for k in 0..K-1)
  * Each fk is a small MLP operating on scalar feature xk.
@@ -16,7 +16,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "nam.h"
 #include "mlp.h" /* poly_init_param_kaiming */
-#include "../instance.h"
+#include "../model.h"
 #include "../tensor.h"
 #include "../../vendor/cjson/cJSON.h"
 #include <stdlib.h>
@@ -49,13 +49,13 @@ static PolyTensor *nam_float_scalar(PolyCtx *ctx, double value) {
 
 /* NAM Builder */
 
-PolyInstance *poly_nam_instance(const char *spec_json, int spec_len, PolyDevice device) {
+PolyModel *poly_nam_from_json(const char *spec_json, int spec_len, PolyDevice device) {
   if (!spec_json || spec_len <= 0) return NULL;
 
   /* Parse JSON */
   cJSON *root = cJSON_ParseWithLength(spec_json, (size_t)spec_len);
   if (!root) {
-    fprintf(stderr, "poly_nam_instance: JSON parse error\n");
+    fprintf(stderr, "poly_nam_from_json: JSON parse error\n");
     return NULL;
   }
 
@@ -69,13 +69,13 @@ PolyInstance *poly_nam_instance(const char *spec_json, int spec_len, PolyDevice 
   cJSON *seed_item = cJSON_GetObjectItem(root, "seed");
 
   if (!nf_item || !cJSON_IsNumber(nf_item)) {
-    fprintf(stderr, "poly_nam_instance: 'n_features' required\n");
+    fprintf(stderr, "poly_nam_from_json: 'n_features' required\n");
     cJSON_Delete(root);
     return NULL;
   }
   int n_features = nf_item->valueint;
   if (n_features < 1) {
-    fprintf(stderr, "poly_nam_instance: n_features must be >= 1\n");
+    fprintf(stderr, "poly_nam_from_json: n_features must be >= 1\n");
     cJSON_Delete(root);
     return NULL;
   }
@@ -116,24 +116,24 @@ PolyInstance *poly_nam_instance(const char *spec_json, int spec_len, PolyDevice 
   PolyCtx *ctx = poly_ctx_new();
   if (!ctx) goto fail_no_instance;
   if (device != POLY_DEVICE_AUTO) poly_ctx_set_preferred_device(ctx, device);
-  PolyInstanceOptions opts = {
+  PolyModelOptions opts = {
       .own_ctx_on_success = true,
       .own_ctx_on_failure = true,
   };
-  PolyInstance *inst = poly_instance_new(ctx, &opts);
+  PolyModel *inst = poly_model_new(ctx, &opts);
   if (!inst) {
     poly_ctx_destroy(ctx);
     goto fail_no_instance;
   }
 
   int64_t x_shape[] = {batch_size, n_features};
-  PolyTensor *x_tensor = poly_instance_input(inst, "x", POLY_FLOAT32, x_shape, 2);
+  PolyTensor *x_tensor = poly_model_input(inst, "x", POLY_FLOAT32, x_shape, 2);
   if (!x_tensor) goto fail_pre_build;
 
   /* Register intercept param: (n_outputs,) */
   int64_t intercept_shape_1d[] = {n_outputs};
   PolyTensor *intercept_tensor =
-      poly_instance_param(inst, "intercept", POLY_FLOAT32, intercept_shape_1d, 1);
+      poly_model_param(inst, "intercept", POLY_FLOAT32, intercept_shape_1d, 1);
   if (!intercept_tensor) goto fail_pre_build;
 
   /* Start with intercept broadcast to (batch_size, n_outputs). */
@@ -155,18 +155,18 @@ PolyInstance *poly_nam_instance(const char *spec_json, int spec_len, PolyDevice 
       int in_dim = subnet_sizes[l];
       int out_dim = subnet_sizes[l + 1];
 
-      if (poly_instance_scope_push(inst, "features.%d.layers.%d", k, l) != POLY_STATUS_OK)
+      if (poly_model_scope_push(inst, "features.%d.layers.%d", k, l) != POLY_STATUS_OK)
         goto fail_pre_build;
 
       int64_t w_shape[] = {out_dim, in_dim};
-      PolyTensor *w_tensor = poly_instance_param(inst, "weight", POLY_FLOAT32, w_shape, 2);
+      PolyTensor *w_tensor = poly_model_param(inst, "weight", POLY_FLOAT32, w_shape, 2);
       if (!w_tensor) goto fail_pre_build;
 
       int64_t b_shape[] = {out_dim};
-      PolyTensor *bias_tensor = poly_instance_param(inst, "bias", POLY_FLOAT32, b_shape, 1);
+      PolyTensor *bias_tensor = poly_model_param(inst, "bias", POLY_FLOAT32, b_shape, 1);
       if (!bias_tensor) goto fail_pre_build;
 
-      if (poly_instance_scope_pop(inst) != POLY_STATUS_OK) goto fail_pre_build;
+      if (poly_model_scope_pop(inst) != POLY_STATUS_OK) goto fail_pre_build;
 
       int64_t perm[] = {1, 0};
       PolyTensor *wt = poly_tensor_permute(ctx, w_tensor, perm, 2);
@@ -183,13 +183,13 @@ PolyInstance *poly_nam_instance(const char *spec_json, int spec_len, PolyDevice 
       if (l < n_linear - 1) {
         if (activation == NAM_ACT_EXU) {
           int64_t eu_shape[] = {out_dim};
-          if (poly_instance_scope_push(inst, "features.%d.exu.%d", k, l) != POLY_STATUS_OK)
+          if (poly_model_scope_push(inst, "features.%d.exu.%d", k, l) != POLY_STATUS_OK)
             goto fail_pre_build;
-          PolyTensor *exu_w_tensor = poly_instance_param(inst, "weight", POLY_FLOAT32, eu_shape, 1);
+          PolyTensor *exu_w_tensor = poly_model_param(inst, "weight", POLY_FLOAT32, eu_shape, 1);
           if (!exu_w_tensor) goto fail_pre_build;
-          PolyTensor *exu_b_tensor = poly_instance_param(inst, "bias", POLY_FLOAT32, eu_shape, 1);
+          PolyTensor *exu_b_tensor = poly_model_param(inst, "bias", POLY_FLOAT32, eu_shape, 1);
           if (!exu_b_tensor) goto fail_pre_build;
-          if (poly_instance_scope_pop(inst) != POLY_STATUS_OK) goto fail_pre_build;
+          if (poly_model_scope_pop(inst) != POLY_STATUS_OK) goto fail_pre_build;
 
           int64_t eu_1d[] = {1, out_dim};
           int64_t eu_exp[] = {batch_size, out_dim};
@@ -220,11 +220,11 @@ PolyInstance *poly_nam_instance(const char *spec_json, int spec_len, PolyDevice 
 
   int64_t out_shape[] = {batch_size, n_outputs};
   PolyTensor *out_tensor = poly_tensor_reshape(ctx, accum, out_shape, 2);
-  if (!out_tensor || poly_instance_output(inst, "output", out_tensor) != POLY_STATUS_OK)
+  if (!out_tensor || poly_model_output(inst, "output", out_tensor) != POLY_STATUS_OK)
     goto fail_pre_build;
   const char *forward_inputs[] = {"x"};
   const char *forward_outputs[] = {"output"};
-  if (poly_instance_entrypoint(inst, "forward", forward_inputs, 1, forward_outputs, 1, NULL) !=
+  if (poly_model_entrypoint(inst, "forward", forward_inputs, 1, forward_outputs, 1, NULL) !=
       POLY_STATUS_OK)
     goto fail_pre_build;
 
@@ -232,7 +232,7 @@ PolyInstance *poly_nam_instance(const char *spec_json, int spec_len, PolyDevice 
       (loss_type && (strcmp(loss_type, "mse") == 0 || strcmp(loss_type, "cross_entropy") == 0));
   if (has_loss) {
     int64_t y_shape[] = {batch_size, n_outputs};
-    PolyTensor *y_tensor = poly_instance_target(inst, "y", POLY_FLOAT32, y_shape, 2);
+    PolyTensor *y_tensor = poly_model_target(inst, "y", POLY_FLOAT32, y_shape, 2);
     if (!y_tensor) goto fail_pre_build;
     PolyTensor *loss_tensor;
     if (strcmp(loss_type, "mse") == 0) {
@@ -260,20 +260,20 @@ PolyInstance *poly_nam_instance(const char *spec_json, int spec_len, PolyDevice 
                         ? poly_tensor_alu2(ctx, POLY_OP_MUL, sum_batch, loss_scale)
                         : NULL;
     }
-    if (!loss_tensor || poly_instance_output(inst, "loss", loss_tensor) != POLY_STATUS_OK)
+    if (!loss_tensor || poly_model_output(inst, "loss", loss_tensor) != POLY_STATUS_OK)
       goto fail_pre_build;
     const char *loss_inputs[] = {"x", "y"};
     const char *loss_outputs[] = {"loss"};
     PolyEntrypointOptions loss_opts = {.objective = "loss"};
-    if (poly_instance_entrypoint(inst, "loss", loss_inputs, 2, loss_outputs, 1, &loss_opts) !=
+    if (poly_model_entrypoint(inst, "loss", loss_inputs, 2, loss_outputs, 1, &loss_opts) !=
         POLY_STATUS_OK)
       goto fail_pre_build;
   }
 
-  PolyInstanceError err = {0};
-  if (poly_instance_build(inst, &err) != POLY_STATUS_OK) {
-    if (err.message[0]) fprintf(stderr, "poly_nam_instance: build failed: %s\n", err.message);
-    poly_instance_free(inst);
+  PolyModelError err = {0};
+  if (poly_model_build(inst, &err) != POLY_STATUS_OK) {
+    if (err.message[0]) fprintf(stderr, "poly_nam_from_json: build failed: %s\n", err.message);
+    poly_model_free(inst);
     free(subnet_sizes);
     cJSON_Delete(root);
     return NULL;
@@ -287,7 +287,7 @@ PolyInstance *poly_nam_instance(const char *spec_json, int spec_len, PolyDevice 
       int64_t w_numel = (int64_t)out_dim * in_dim;
       char name[128];
       snprintf(name, sizeof(name), "features.%d.layers.%d.weight", k, l);
-      float *w_data = poly_instance_buf_data_named(inst, name, NULL);
+      float *w_data = poly_model_buf_data_named(inst, name, NULL);
       if (w_data) poly_init_param_kaiming(seed, name, w_data, w_numel, (int64_t)in_dim);
     }
   }
@@ -297,7 +297,7 @@ PolyInstance *poly_nam_instance(const char *spec_json, int spec_len, PolyDevice 
   return inst;
 
 fail_pre_build:
-  poly_instance_free(inst);
+  poly_model_free(inst);
   poly_ctx_destroy(ctx);
 fail_no_instance:
   free(subnet_sizes);

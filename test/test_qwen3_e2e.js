@@ -75,7 +75,7 @@ async function main() {
   // Load model
   console.log('Loading model...')
   const t0 = Date.now()
-  const inst = pg.Instance.fromGGUF(ggufBytes, { maxBatch: 1, maxSeqLen: 64 })
+  const inst = pg.Model.fromGGUF(ggufBytes, { maxBatch: 1, maxSeqLen: 64 })
   console.log(`Load: ${((Date.now() - t0) / 1000).toFixed(1)}s, params: ${inst.paramCount}`)
 
   // Load tokenizer

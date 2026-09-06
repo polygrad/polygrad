@@ -12,7 +12,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'py'))
-from polygrad.instance import Instance
+from polygrad.model import Model
 from polygrad.models import MLP
 
 FIXTURE_DIR = os.path.join(os.path.dirname(__file__), 'fixtures')
@@ -62,7 +62,7 @@ def generate_fixture():
     print(f'output: {sidecar["output"]}')
 
     # Self-test: reload in Python
-    inst2 = Instance.from_bundle(bundle_bytes)
+    inst2 = Model.from_bundle(bundle_bytes)
     out2 = inst2.forward(x=x)
     for k in out:
         assert np.allclose(out[k], out2[k], atol=1e-6), f'round-trip mismatch: {k}'

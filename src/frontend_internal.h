@@ -90,7 +90,7 @@ int poly_uop_substitute_many(
 /* Compile aggregate portable roots into complete physical roots using exact
  * logical storage-binding rows. This is a pure placement kernel: caller output
  * slots change only when every candidate validates, and no prior/captured
- * physical graph or Tensor/Instance/cache state is consumed or mutated. */
+ * physical graph or Tensor/Model/cache state is consumed or mutated. */
 int poly_place_roots(
     PolyCtx *ctx,
     PolyUOp **logical_roots,
@@ -102,7 +102,7 @@ int poly_place_roots(
 );
 
 /* One explicit module region for the non-uniform scalar-device placement
- * policy.  The descriptor is pass input, not graph or Instance state: output
+ * policy.  The descriptor is pass input, not graph or Model state: output
  * is the exact portable value root produced by the module, and inputs are the
  * exact portable roots at which its backward slice must stop. */
 typedef struct {
@@ -132,7 +132,7 @@ int poly_place_module_map(
 
 /* Physical-only counterpart to pinned transform_to_call's `(graph,
  * buffer_map)` return. The caller owns and frees out_map_orig/out_map_repl;
- * no Tensor, placement, Instance, or residency state is mutated here. */
+ * no Tensor, placement, Model, or residency state is mutated here. */
 PolyUOp *poly_transform_to_call_with_map(
     PolyCtx *ctx,
     PolyUOp **uops,

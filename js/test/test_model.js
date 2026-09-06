@@ -38,7 +38,7 @@ async function runModelTests(pg) {
     }
   }
 
-  console.log('\n== Instance.fromTensors export ==')
+  console.log('\n== Model.fromTensors export ==')
 
   await test('functional model exports selected forward entrypoint', async () => {
     const w = new Tensor([[2], [3]], { dtype: 'float32' })
@@ -55,7 +55,7 @@ async function runModelTests(pg) {
       assert(y.uopPhysical, 'physical output should exist for placed param root')
       assert(reach(y.uopPhysical, w.uop), 'physical output should reach placed param root')
     }
-    const inst = await pg.Instance.fromTensors({
+    const inst = await pg.Model.fromTensors({
       inputs: { js_export_x: x },
       outputs: { js_export_output: y },
       params: { js_export_w: w }
@@ -66,7 +66,7 @@ async function runModelTests(pg) {
     assertClose(out.js_export_output, [80])
   })
 
-  await test('fromTensors uses instance-local bindings', async () => {
+  await test('fromTensors uses model-local bindings', async () => {
     const count = pg._core && pg._core.ffi && pg._core.ffi.poly_ctx_named_count
     assert(typeof count === 'function', 'poly_ctx_named_count unavailable')
     const w = new Tensor([[2]], { dtype: 'float32' })
@@ -74,7 +74,7 @@ async function runModelTests(pg) {
     const x = pg.Tensor.empty([1, 1])
     const y = x.dot(w)
     const before = count(pg._core.ctx)
-    const inst = await pg.Instance.fromTensors({
+    const inst = await pg.Model.fromTensors({
       inputs: { local_x: x },
       outputs: { local_y: y },
       params: { local_w: w }
@@ -85,7 +85,7 @@ async function runModelTests(pg) {
     assertClose(out.local_y, [6])
   })
 
-  await test('fromBindings primitive uses instance-local bindings', async () => {
+  await test('fromBindings primitive uses model-local bindings', async () => {
     const count = pg._core && pg._core.ffi && pg._core.ffi.poly_ctx_named_count
     assert(typeof count === 'function', 'poly_ctx_named_count unavailable')
     const w = new Tensor([[7]], { dtype: 'float32' })
@@ -93,7 +93,7 @@ async function runModelTests(pg) {
     const x = pg.Tensor.empty([1, 1])
     const y = x.dot(w)
     const before = count(pg._core.ctx)
-    const inst = pg.Instance.fromBindings([
+    const inst = pg.Model.fromBindings([
       { name: 'bind_x', role: 'input', tensor: x },
       { name: 'bind_w', role: 'state', tensor: w },
       { name: 'bind_y', role: 'output', tensor: y }
@@ -111,7 +111,7 @@ async function runModelTests(pg) {
     await w.realize()
     const x = pg.Tensor.empty([1, 1])
     const y = x.dot(w)
-    const inst = pg.Instance.fromBindings([
+    const inst = pg.Model.fromBindings([
       { name: 'x', role: 'input', tensor: x },
       { name: 'w', role: 'state', tensor: w, trainable: false },
       { name: 'y', role: 'output', tensor: y }
@@ -133,7 +133,7 @@ async function runModelTests(pg) {
     const entries = [
       { name: 'forward', inputs: ['x'], outputs: ['y'] }
     ]
-    const inst = pg.Instance.fromBindings(bindings, entries)
+    const inst = pg.Model.fromBindings(bindings, entries)
     const out = await inst.forward({ x: new Float32Array([3]) })
     assertClose(out.y, [21])
   })
@@ -143,7 +143,7 @@ async function runModelTests(pg) {
       .add(Tensor.full([2], 1, { buffer: false, dtype: 'float32' }))
     const x = Tensor.empty([2])
     const y = x.mul(w)
-    const source = pg.Instance.fromBindings(
+    const source = pg.Model.fromBindings(
       [
         { name: 'x', role: 'input', tensor: x },
         { name: 'w', role: 'state', tensor: w },
@@ -151,7 +151,7 @@ async function runModelTests(pg) {
       ],
       [{ name: 'forward', inputs: ['x'], outputs: ['output'] }]
     )
-    const fresh = pg.Instance.fromIR(source.exportIR())
+    const fresh = pg.Model.fromIR(source.exportIR())
     try {
       assertClose(await fresh.paramData(0), [4, 4])
       const out = await fresh.forward({ x: new Float32Array([2, 3]) })
@@ -166,7 +166,7 @@ async function runModelTests(pg) {
     Tensor.manual_seed(7)
     const w = Tensor.rand(2)
     const x = Tensor.empty([2])
-    const source = pg.Instance.fromBindings(
+    const source = pg.Model.fromBindings(
       [
         { name: 'x', role: 'input', tensor: x },
         { name: 'w', role: 'state', tensor: w },
@@ -176,8 +176,8 @@ async function runModelTests(pg) {
     )
     try {
       let error = null
-      try { pg.Instance.fromIR(source.exportIR()) } catch (err) { error = err }
-      assert(error && /failed to create PolyInstance/.test(error.message), 'expected closed-state rejection')
+      try { pg.Model.fromIR(source.exportIR()) } catch (err) { error = err }
+      assert(error && /failed to create PolyModel/.test(error.message), 'expected closed-state rejection')
     } finally {
       source.dispose()
     }
@@ -194,7 +194,7 @@ async function runModelTests(pg) {
     await net.weight.realize()
     const x = pg.Tensor.empty([1, 2])
     const outTensor = net.call(x)
-    const inst = await pg.Instance.fromTensors({
+    const inst = await pg.Model.fromTensors({
       inputs: { js_trace_x: x },
       outputs: { output: outTensor },
       params: { weight: net.weight }
@@ -208,7 +208,7 @@ async function runModelTests(pg) {
     await w.realize()
     const x = pg.Tensor.empty([1, 2])
     const logits = x.dot(w)
-    const inst = new pg.Instance({
+    const inst = new pg.Model({
       inputs: { x },
       state: { 'layers.0.weight': w },
       outputs: { logits },
@@ -221,21 +221,21 @@ async function runModelTests(pg) {
     const out = await inst.forward({ x: new Float32Array([10, 20]) })
     assertClose(out.logits, [80])
 
-    const inst2 = pg.Instance.fromIR(inst.exportIR(), await inst.exportWeights())
+    const inst2 = pg.Model.fromIR(inst.exportIR(), await inst.exportWeights())
     assert(inst2.paramCount === 1, 'expected one reloaded param')
     assert(inst2.paramName(0) === 'layers.0.weight', 'reloaded param name mismatch')
     const out2 = await inst2.forward({ x: new Float32Array([10, 20]) })
     assertClose(out2.logits, [80])
   })
 
-  await test('Instance.fit uses instance training path', async () => {
+  await test('Model.fit uses model training path', async () => {
     const w = new Tensor([[1]], { dtype: 'float32' })
     await w.realize()
     const x = pg.Tensor.empty([1, 1])
     const y = pg.Tensor.empty([1, 1])
     const pred = x.dot(w)
     const loss = pred.sub(y).square().mean()
-    const inst = await pg.Instance.fromTensors({
+    const inst = await pg.Model.fromTensors({
       inputs: { js_fit_x: x },
       targets: { js_fit_y: y },
       outputs: { js_fit_out: pred },
@@ -250,7 +250,7 @@ async function runModelTests(pg) {
     assert(losses[losses.length - 1] < losses[0], 'expected loss to decrease')
   })
 
-  console.log(`\nInstance graph tests: ${passed} passed, ${failed} failed`)
+  console.log(`\nModel graph tests: ${passed} passed, ${failed} failed`)
   return { passed, failed }
 }
 

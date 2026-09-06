@@ -9,10 +9,10 @@
 #include "gguf_decode.h"
 #include "import_desc.h"
 #include "import_error.h"
-#include "../instance.h"
+#include "../model.h"
 #include <stdio.h>
 
-PolyInstance *poly_gguf_load(
+PolyModel *poly_gguf_load(
     const uint8_t *data,
     int64_t len,
     int max_batch,
@@ -39,7 +39,7 @@ PolyInstance *poly_gguf_load(
       .max_seq_len = max_seq_len,
       .device = device,
   };
-  PolyInstance *inst = desc->from_gguf_decoded(gguf, &opts);
+  PolyModel *inst = desc->from_gguf_decoded(gguf, &opts);
 
   poly_gguf_decoded_free(gguf);
   return inst;

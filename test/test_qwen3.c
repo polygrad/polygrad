@@ -10,7 +10,7 @@
 #include "../src/models/qwen3.h"
 #include "../src/codegen/codegen.h"
 #include "../src/loaders/gguf_decode.h"
-#include "../src/instance.h"
+#include "../src/model.h"
 #include "../src/engine/schedule.h"
 #include "../src/tokenizer.h"
 #include <string.h>
@@ -114,19 +114,18 @@ static int ensure_gguf(void) {
 
 /* Helper: find I/O buffers */
 
-static float *find_buf(PolyInstance *inst, const char *name, int64_t *numel) {
-  int nb = poly_instance_buf_count(inst);
+static float *find_buf(PolyModel *inst, const char *name, int64_t *numel) {
+  int nb = poly_model_buf_count(inst);
   for (int b = 0; b < nb; b++) {
-    if (strcmp(poly_instance_buf_name(inst, b), name) == 0)
-      return poly_instance_buf_data(inst, b, numel);
+    if (strcmp(poly_model_buf_name(inst, b), name) == 0) return poly_model_buf_data(inst, b, numel);
   }
   return NULL;
 }
 
-static int find_buf_index(PolyInstance *inst, const char *name) {
-  int nb = poly_instance_buf_count(inst);
+static int find_buf_index(PolyModel *inst, const char *name) {
+  int nb = poly_model_buf_count(inst);
   for (int b = 0; b < nb; b++)
-    if (strcmp(poly_instance_buf_name(inst, b), name) == 0) return b;
+    if (strcmp(poly_model_buf_name(inst, b), name) == 0) return b;
   return -1;
 }
 
@@ -165,11 +164,11 @@ TEST(qwen3, config_from_gguf) {
 
 TEST(qwen3, model_build_and_load) {
   SKIP_IF_NO_GGUF();
-  PolyInstance *inst = poly_qwen3_from_gguf_decoded(g_gguf, 1, 25, POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_qwen3_from_gguf_decoded(g_gguf, 1, 25, POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   /* Check buffer count: 4 I/O (x, output, rope_cos, rope_sin) + 310 params */
-  int nb = poly_instance_buf_count(inst);
+  int nb = poly_model_buf_count(inst);
   ASSERT_TRUE(nb >= 310);
 
   /* Check I/O buffers exist */
@@ -177,18 +176,18 @@ TEST(qwen3, model_build_and_load) {
   int x_idx = find_buf_index(inst, "x");
   ASSERT_TRUE(x_idx >= 0);
   int64_t x_shape[2] = {0};
-  ASSERT_INT_EQ(poly_instance_buf_shape(inst, x_idx, x_shape, 2), 2);
+  ASSERT_INT_EQ(poly_model_buf_shape(inst, x_idx, x_shape, 2), 2);
   ASSERT_INT_EQ(x_shape[0] * x_shape[1], 25); /* batch=1 * seq_len=25 */
   ASSERT_NOT_NULL(find_buf(inst, "output", &numel));
   ASSERT_INT_EQ(numel, 25 * 151936); /* batch * seq_len * vocab */
 
-  poly_instance_free(inst);
+  poly_model_free(inst);
   PASS();
 }
 
 TEST(qwen3, forward_cpu) {
   SKIP_IF_NO_GGUF();
-  PolyInstance *inst = poly_qwen3_from_gguf_decoded(g_gguf, 1, 25, POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_qwen3_from_gguf_decoded(g_gguf, 1, 25, POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   /* Fill input with prompt "The capital of France is" */
@@ -210,7 +209,7 @@ TEST(qwen3, forward_cpu) {
        .dtype_id = poly_dtype_id_by_name("float32")},
   };
 
-  int rc = poly_instance_forward(inst, io, 3);
+  int rc = poly_model_forward(inst, io, 3);
   ASSERT_INT_EQ(rc, 0);
 
   int64_t numel;
@@ -232,7 +231,7 @@ TEST(qwen3, forward_cpu) {
   int next_id = argmax_f32(logits, V);
   ASSERT_INT_EQ(next_id, 12095);
 
-  poly_instance_free(inst);
+  poly_model_free(inst);
   PASS();
 }
 
@@ -244,9 +243,9 @@ TEST(qwen3, forward_cuda) {
     PASS();
   }
 
-  PolyInstance *inst = poly_qwen3_from_gguf_decoded(g_gguf, 1, 25, POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_qwen3_from_gguf_decoded(g_gguf, 1, 25, POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
-  poly_instance_set_device(inst, POLY_DEVICE_CUDA);
+  poly_model_set_device(inst, POLY_DEVICE_CUDA);
 
   int32_t input_ids[25] = {785, 6722, 315, 9625, 374};
   int64_t rope_cos_numel = 0, rope_sin_numel = 0;
@@ -266,7 +265,7 @@ TEST(qwen3, forward_cuda) {
        .dtype_id = poly_dtype_id_by_name("float32")},
   };
 
-  int rc = poly_instance_forward(inst, io, 3);
+  int rc = poly_model_forward(inst, io, 3);
   ASSERT_INT_EQ(rc, 0);
 
   int64_t numel;
@@ -285,7 +284,7 @@ TEST(qwen3, forward_cuda) {
   int next_id = argmax_f32(logits, V);
   ASSERT_INT_EQ(next_id, 12095);
 
-  poly_instance_free(inst);
+  poly_model_free(inst);
   PASS();
 }
 #endif /* POLY_HAS_CUDA */

@@ -38,7 +38,7 @@ class Optimizer:
     """Base optimizer class.
 
     Python owns the parameter/state Tensor handles. The update math is built by
-    src/optim.c so Instance training and standalone frontend optimizers share
+    src/optim.c so Model training and standalone frontend optimizers share
     one optimizer implementation.
     """
 

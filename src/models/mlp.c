@@ -1,5 +1,5 @@
 /*
- * poly_model_mlp.c -- MLP family builder for PolyInstance
+ * poly_model_mlp.c -- MLP family builder for PolyModel
  *
  * Two entry points:
  *   poly_mlp(cfg, device) -- builds from MLPConfig struct on the requested device
@@ -12,7 +12,7 @@
 #include "mlp.h"
 #include "../nn.h"
 #include "../tensor.h"
-#include "../instance.h"
+#include "../model.h"
 #include "../../vendor/cjson/cJSON.h"
 #include <stdlib.h>
 #include <string.h>
@@ -155,7 +155,7 @@ MLPConfig poly_mlp_config_default(void) {
 
 /* MLP Builder (config struct) */
 
-PolyInstance *poly_mlp(const MLPConfig *cfg, PolyDevice device) {
+PolyModel *poly_mlp(const MLPConfig *cfg, PolyDevice device) {
   if (!cfg || cfg->n_layers < 2 || cfg->n_layers > POLY_MLP_MAX_LAYERS) return NULL;
 
   int n_linear = cfg->n_layers - 1;
@@ -168,38 +168,38 @@ PolyInstance *poly_mlp(const MLPConfig *cfg, PolyDevice device) {
   PolyCtx *ctx = poly_ctx_new();
   if (!ctx) return NULL;
   if (device != POLY_DEVICE_AUTO) poly_ctx_set_preferred_device(ctx, device);
-  PolyInstanceOptions opts = {
+  PolyModelOptions opts = {
       .own_ctx_on_success = true,
       .own_ctx_on_failure = true,
   };
-  PolyInstance *inst = poly_instance_new(ctx, &opts);
+  PolyModel *inst = poly_model_new(ctx, &opts);
   if (!inst) {
     poly_ctx_destroy(ctx);
     return NULL;
   }
 
-  /* Declare I/O buffers on the staged instance. */
+  /* Declare I/O buffers on the staged model. */
   int64_t x_shape[] = {batch_size, in_dim};
-  PolyTensor *x_tensor = poly_instance_input(inst, "x", POLY_FLOAT32, x_shape, 2);
+  PolyTensor *x_tensor = poly_model_input(inst, "x", POLY_FLOAT32, x_shape, 2);
   if (!x_tensor) goto fail_pre_build;
 
   /* Forward: chain of linear + activation. */
   PolyTensor *x = x_tensor;
   for (int l = 0; l < n_linear; l++) {
-    if (poly_instance_scope_push(inst, "layers.%d", l) != POLY_STATUS_OK) goto fail_pre_build;
+    if (poly_model_scope_push(inst, "layers.%d", l) != POLY_STATUS_OK) goto fail_pre_build;
 
     int64_t ws[] = {cfg->layers[l + 1], cfg->layers[l]};
-    PolyTensor *w_tensor = poly_instance_param(inst, "weight", POLY_FLOAT32, ws, 2);
+    PolyTensor *w_tensor = poly_model_param(inst, "weight", POLY_FLOAT32, ws, 2);
     if (!w_tensor) goto fail_pre_build;
 
     PolyTensor *b_tensor = NULL;
     if (cfg->use_bias) {
       int64_t bs[] = {cfg->layers[l + 1]};
-      b_tensor = poly_instance_param(inst, "bias", POLY_FLOAT32, bs, 1);
+      b_tensor = poly_model_param(inst, "bias", POLY_FLOAT32, bs, 1);
       if (!b_tensor) goto fail_pre_build;
     }
 
-    if (poly_instance_scope_pop(inst) != POLY_STATUS_OK) goto fail_pre_build;
+    if (poly_model_scope_pop(inst) != POLY_STATUS_OK) goto fail_pre_build;
 
     x = mlp_linear(ctx, x, w_tensor, b_tensor);
     if (!x) goto fail_pre_build;
@@ -207,10 +207,10 @@ PolyInstance *poly_mlp(const MLPConfig *cfg, PolyDevice device) {
     if (!x) goto fail_pre_build;
   }
 
-  if (poly_instance_output(inst, "output", x) != POLY_STATUS_OK) goto fail_pre_build;
+  if (poly_model_output(inst, "output", x) != POLY_STATUS_OK) goto fail_pre_build;
   const char *forward_inputs[] = {"x"};
   const char *forward_outputs[] = {"output"};
-  if (poly_instance_entrypoint(inst, "forward", forward_inputs, 1, forward_outputs, 1, NULL) !=
+  if (poly_model_entrypoint(inst, "forward", forward_inputs, 1, forward_outputs, 1, NULL) !=
       POLY_STATUS_OK)
     goto fail_pre_build;
 
@@ -219,26 +219,26 @@ PolyInstance *poly_mlp(const MLPConfig *cfg, PolyDevice device) {
       loss_type && (strcmp(loss_type, "mse") == 0 || strcmp(loss_type, "cross_entropy") == 0);
   if (has_loss) {
     int64_t y_shape[] = {batch_size, out_dim};
-    PolyTensor *y_tensor = poly_instance_target(inst, "y", POLY_FLOAT32, y_shape, 2);
+    PolyTensor *y_tensor = poly_model_target(inst, "y", POLY_FLOAT32, y_shape, 2);
     if (!y_tensor) goto fail_pre_build;
 
     PolyTensor *loss_tensor = strcmp(loss_type, "mse") == 0
                                   ? mlp_mse(ctx, x, y_tensor)
                                   : mlp_dense_cross_entropy(ctx, x, y_tensor);
-    if (!loss_tensor || poly_instance_output(inst, "loss", loss_tensor) != POLY_STATUS_OK)
+    if (!loss_tensor || poly_model_output(inst, "loss", loss_tensor) != POLY_STATUS_OK)
       goto fail_pre_build;
     const char *loss_inputs[] = {"x", "y"};
     const char *loss_outputs[] = {"loss"};
     PolyEntrypointOptions loss_opts = {.objective = "loss"};
-    if (poly_instance_entrypoint(inst, "loss", loss_inputs, 2, loss_outputs, 1, &loss_opts) !=
+    if (poly_model_entrypoint(inst, "loss", loss_inputs, 2, loss_outputs, 1, &loss_opts) !=
         POLY_STATUS_OK)
       goto fail_pre_build;
   }
 
-  PolyInstanceError err = {0};
-  if (poly_instance_build(inst, &err) != POLY_STATUS_OK) {
+  PolyModelError err = {0};
+  if (poly_model_build(inst, &err) != POLY_STATUS_OK) {
     if (err.message[0]) fprintf(stderr, "poly_mlp: build failed: %s\n", err.message);
-    poly_instance_free(inst);
+    poly_model_free(inst);
     return NULL;
   }
 
@@ -246,7 +246,7 @@ PolyInstance *poly_mlp(const MLPConfig *cfg, PolyDevice device) {
   for (int l = 0; l < n_linear; l++) {
     char name[128];
     snprintf(name, sizeof(name), "layers.%d.weight", l);
-    float *w = poly_instance_buf_data_named(inst, name, NULL);
+    float *w = poly_model_buf_data_named(inst, name, NULL);
     if (w)
       poly_init_param_kaiming(
           cfg->seed, name, w, (int64_t)cfg->layers[l + 1] * cfg->layers[l], (int64_t)cfg->layers[l]
@@ -256,14 +256,14 @@ PolyInstance *poly_mlp(const MLPConfig *cfg, PolyDevice device) {
   return inst;
 
 fail_pre_build:
-  poly_instance_free(inst);
+  poly_model_free(inst);
   poly_ctx_destroy(ctx);
   return NULL;
 }
 
 /* FFI wrapper (JSON -> config -> build) */
 
-PolyInstance *poly_mlp_from_json(const char *json, int len, PolyDevice device) {
+PolyModel *poly_mlp_from_json(const char *json, int len, PolyDevice device) {
   if (!json || len <= 0) return NULL;
 
   cJSON *root = cJSON_ParseWithLength(json, (size_t)len);
@@ -289,7 +289,7 @@ PolyInstance *poly_mlp_from_json(const char *json, int len, PolyDevice device) {
   for (int i = 0; i < cfg.n_layers; i++)
     cfg.layers[i] = cJSON_GetArrayItem(layers, i)->valueint;
 
-  PolyInstance *inst = poly_mlp(&cfg, device);
+  PolyModel *inst = poly_mlp(&cfg, device);
   cJSON_Delete(root);
   return inst;
 }

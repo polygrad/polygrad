@@ -3,7 +3,7 @@
 #include "test_harness.h"
 #include "../src/frontend.h"
 #include "../src/frontend_internal.h"
-#include "../src/instance.h"
+#include "../src/model.h"
 #include "../src/ir.h"
 
 #include <string.h>
@@ -47,7 +47,7 @@ static uint8_t *program_test_ir(bool with_param, int *out_len) {
   return ir;
 }
 
-static int program_call_mul(PolyInstance *inst, const float x[2], const float *rhs, float out[2]) {
+static int program_call_mul(PolyModel *inst, const float x[2], const float *rhs, float out[2]) {
   PolyIOBinding io[2] = {
       {.name = "x",
        .data = x,
@@ -59,19 +59,19 @@ static int program_call_mul(PolyInstance *inst, const float x[2], const float *r
        .dtype_id = poly_dtype_id_by_name("float32")},
   };
   int n_io = rhs ? 2 : 1;
-  if (poly_instance_call(inst, "forward", io, n_io) != 0) return -1;
-  return poly_instance_read_buf_named(inst, "output", out, 2 * sizeof(float));
+  if (poly_model_call(inst, "forward", io, n_io) != 0) return -1;
+  return poly_model_read_buf_named(inst, "output", out, 2 * sizeof(float));
 }
 
 TEST(program, compiled_roundtrip_exact_bytes_and_values) {
   int ir_len = 0;
   uint8_t *ir = program_test_ir(false, &ir_len);
   ASSERT_NOT_NULL(ir);
-  PolyInstance *source = poly_instance_from_ir(ir, ir_len, NULL, 0);
+  PolyModel *source = poly_model_from_ir(ir, ir_len, NULL, 0);
   ASSERT_NOT_NULL(source);
 
   int program_len = 0;
-  uint8_t *program = poly_instance_export_program(source, &program_len);
+  uint8_t *program = poly_model_export_program(source, &program_len);
   ASSERT_NOT_NULL(program);
   ASSERT_TRUE(program_len > 32);
   ASSERT_TRUE(memcmp(program, "PGPM", 4) == 0);
@@ -79,10 +79,10 @@ TEST(program, compiled_roundtrip_exact_bytes_and_values) {
   ASSERT_INT_EQ(program[8], POLYGRAD_ABI_VERSION);
 
   poly_program_source_render_count_reset();
-  PolyInstance *loaded = poly_instance_from_program(program, program_len, NULL, 0);
+  PolyModel *loaded = poly_model_from_program(program, program_len, NULL, 0);
   ASSERT_NOT_NULL(loaded);
   ASSERT_INT_EQ(poly_program_source_render_count(), 0);
-  PolyUOp *linear = poly_instance_get_sink(loaded, "forward");
+  PolyUOp *linear = poly_model_get_sink(loaded, "forward");
   ASSERT_NOT_NULL(linear);
   ASSERT_INT_EQ(linear->op, POLY_OP_LINEAR);
   ASSERT_INT_EQ(linear->n_src, 1);
@@ -105,7 +105,7 @@ TEST(program, compiled_roundtrip_exact_bytes_and_values) {
   bool saw_value_param = false;
   int n_tag_bool = 0, n_tag_int_tuple = 0, n_tag_string = 0;
   int n_body = 0;
-  PolyUOp **body_topo = poly_toposort_alloc(poly_instance_ctx(loaded), body, &n_body);
+  PolyUOp **body_topo = poly_toposort_alloc(poly_model_ctx(loaded), body, &n_body);
   ASSERT_NOT_NULL(body_topo);
   for (int i = 0; i < n_body; i++) {
     saw_value_param |= body_topo[i]->op == POLY_OP_PARAM && body_topo[i]->n_src == 1 &&
@@ -132,23 +132,23 @@ TEST(program, compiled_roundtrip_exact_bytes_and_values) {
   ASSERT_FLOAT_EQ(got[1], 15.0f, 0.0f);
 
   int program2_len = 0;
-  uint8_t *program2 = poly_instance_export_program(loaded, &program2_len);
+  uint8_t *program2 = poly_model_export_program(loaded, &program2_len);
   ASSERT_NOT_NULL(program2);
   ASSERT_INT_EQ(program2_len, program_len);
   ASSERT_TRUE(memcmp(program2, program, (size_t)program_len) == 0);
 
   int portable_len = 17;
-  ASSERT_TRUE(poly_instance_export_ir(loaded, &portable_len) == NULL);
+  ASSERT_TRUE(poly_model_export_ir(loaded, &portable_len) == NULL);
   ASSERT_INT_EQ(portable_len, 0);
-  ASSERT_INT_EQ(poly_instance_set_device(loaded, POLY_DEVICE_INTERP), -1);
+  ASSERT_INT_EQ(poly_model_set_device(loaded, POLY_DEVICE_INTERP), -1);
   ASSERT_INT_EQ(
-      poly_instance_set_optimizer(loaded, POLY_OPTIM_SGD, 0.1f, 0.9f, 0.999f, 1e-8f, 0.0f), -1
+      poly_model_set_optimizer(loaded, POLY_OPTIM_SGD, 0.1f, 0.9f, 0.999f, 1e-8f, 0.0f), -1
   );
 
   free(program2);
-  poly_instance_free(loaded);
+  poly_model_free(loaded);
   free(program);
-  poly_instance_free(source);
+  poly_model_free(source);
   free(ir);
   PASS();
 }
@@ -157,19 +157,19 @@ TEST(program, weights_are_separate_and_required) {
   int ir_len = 0;
   uint8_t *ir = program_test_ir(true, &ir_len);
   ASSERT_NOT_NULL(ir);
-  PolyInstance *source = poly_instance_from_ir(ir, ir_len, NULL, 0);
+  PolyModel *source = poly_model_from_ir(ir, ir_len, NULL, 0);
   ASSERT_NOT_NULL(source);
   float weight[2] = {4, 5};
-  ASSERT_INT_EQ(poly_instance_write_buf_named(source, "weight", weight, sizeof(weight)), 0);
+  ASSERT_INT_EQ(poly_model_write_buf_named(source, "weight", weight, sizeof(weight)), 0);
 
   int program_len = 0, weights_len = 0;
-  uint8_t *program = poly_instance_export_program(source, &program_len);
-  uint8_t *weights = poly_instance_export_weights(source, &weights_len);
+  uint8_t *program = poly_model_export_program(source, &program_len);
+  uint8_t *weights = poly_model_export_weights(source, &weights_len);
   ASSERT_NOT_NULL(program);
   ASSERT_NOT_NULL(weights);
-  ASSERT_TRUE(poly_instance_from_program(program, program_len, NULL, 0) == NULL);
+  ASSERT_TRUE(poly_model_from_program(program, program_len, NULL, 0) == NULL);
 
-  PolyInstance *loaded = poly_instance_from_program(program, program_len, weights, weights_len);
+  PolyModel *loaded = poly_model_from_program(program, program_len, weights, weights_len);
   ASSERT_NOT_NULL(loaded);
   const float x[2] = {2, 3};
   float got[2] = {0};
@@ -177,10 +177,10 @@ TEST(program, weights_are_separate_and_required) {
   ASSERT_FLOAT_EQ(got[0], 8.0f, 0.0f);
   ASSERT_FLOAT_EQ(got[1], 15.0f, 0.0f);
 
-  poly_instance_free(loaded);
+  poly_model_free(loaded);
   free(weights);
   free(program);
-  poly_instance_free(source);
+  poly_model_free(source);
   free(ir);
   PASS();
 }
@@ -189,34 +189,34 @@ TEST(program, rejects_wrong_format_abi_and_truncation) {
   int ir_len = 0;
   uint8_t *ir = program_test_ir(false, &ir_len);
   ASSERT_NOT_NULL(ir);
-  ASSERT_TRUE(poly_instance_from_program(ir, ir_len, NULL, 0) == NULL);
+  ASSERT_TRUE(poly_model_from_program(ir, ir_len, NULL, 0) == NULL);
 
-  PolyInstance *source = poly_instance_from_ir(ir, ir_len, NULL, 0);
+  PolyModel *source = poly_model_from_ir(ir, ir_len, NULL, 0);
   ASSERT_NOT_NULL(source);
   int program_len = 0;
-  uint8_t *program = poly_instance_export_program(source, &program_len);
+  uint8_t *program = poly_model_export_program(source, &program_len);
   ASSERT_NOT_NULL(program);
 
   PolyIrSpec wrong_decoder = {0};
   ASSERT_INT_EQ(poly_ir_import(program, program_len, &wrong_decoder), -1);
-  ASSERT_TRUE(poly_instance_from_program(program, program_len - 1, NULL, 0) == NULL);
+  ASSERT_TRUE(poly_model_from_program(program, program_len - 1, NULL, 0) == NULL);
 
   uint8_t *bad_abi = malloc((size_t)program_len);
   ASSERT_NOT_NULL(bad_abi);
   memcpy(bad_abi, program, (size_t)program_len);
   bad_abi[8] ^= 1;
-  ASSERT_TRUE(poly_instance_from_program(bad_abi, program_len, NULL, 0) == NULL);
+  ASSERT_TRUE(poly_model_from_program(bad_abi, program_len, NULL, 0) == NULL);
 
   uint8_t *trailing = malloc((size_t)program_len + 1);
   ASSERT_NOT_NULL(trailing);
   memcpy(trailing, program, (size_t)program_len);
   trailing[program_len] = 0;
-  ASSERT_TRUE(poly_instance_from_program(trailing, program_len + 1, NULL, 0) == NULL);
+  ASSERT_TRUE(poly_model_from_program(trailing, program_len + 1, NULL, 0) == NULL);
 
   free(trailing);
   free(bad_abi);
   free(program);
-  poly_instance_free(source);
+  poly_model_free(source);
   free(ir);
   PASS();
 }

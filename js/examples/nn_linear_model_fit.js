@@ -22,7 +22,7 @@ async function main() {
   const y = pg.Tensor.empty([1, 1])
   const pred = net.call(x)
   const loss = pred.sub(y).square().mean()
-  const inst = await pg.Instance.fromTensors({
+  const inst = await pg.Model.fromTensors({
     inputs: { x },
     targets: { y },
     outputs: { output: pred },

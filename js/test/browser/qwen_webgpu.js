@@ -73,7 +73,7 @@ async function main() {
 
   console.log('loading qwen3')
   const loadStart = performance.now()
-  const inst = pg.Instance.fromGGUF(gguf, { maxBatch: 1, maxSeqLen: 25 })
+  const inst = pg.Model.fromGGUF(gguf, { maxBatch: 1, maxSeqLen: 25 })
   console.log('loaded params', inst.paramCount, 'seconds', ((performance.now() - loadStart) / 1000).toFixed(2))
 
   const tok = pg.Tokenizer.fromGGUF(gguf)

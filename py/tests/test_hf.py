@@ -6,7 +6,7 @@ import struct
 import numpy as np
 import pytest
 from polygrad.hf import generate, load_hf_bytes, _find_safetensors, _get_vocab_size
-from polygrad.instance import Instance
+from polygrad.model import Model
 
 
 def make_safetensors(tensors):
@@ -226,7 +226,7 @@ class TestGetVocabSize:
 
 
 class TestGenerateTokenDtype:
-    class FakeInstance:
+    class FakeModel:
         param_count = 1
         buf_count = 1
 
@@ -256,7 +256,7 @@ class TestGenerateTokenDtype:
 
     def test_integer_tokens_are_normalized_to_int32(self):
         result = generate(
-            self.FakeInstance(), np.array([[0, 1]], dtype=np.int64),
+            self.FakeModel(), np.array([[0, 1]], dtype=np.int64),
             max_new_tokens=1, top_k=1,
         )
         assert result.dtype == np.int32
@@ -265,6 +265,6 @@ class TestGenerateTokenDtype:
     def test_float_tokens_are_rejected(self):
         with pytest.raises(TypeError, match='tokens must have an integer dtype'):
             generate(
-                self.FakeInstance(), np.array([[0.0, 1.0]], dtype=np.float32),
+                self.FakeModel(), np.array([[0.0, 1.0]], dtype=np.float32),
                 max_new_tokens=1,
             )

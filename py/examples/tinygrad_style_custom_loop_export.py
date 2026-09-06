@@ -6,7 +6,7 @@ Run from repo root:
 
 import numpy as np
 
-from polygrad import Context, Instance, Tensor, nn
+from polygrad import Context, Model, Tensor, nn
 
 
 class LinearNet:
@@ -33,7 +33,7 @@ with Context(TRAINING=1):
 
 inp = Tensor.empty((1, 2))
 out_tensor = model(inp)
-inst = Instance.from_tensors(
+inst = Model.from_tensors(
     inputs={"x": inp},
     outputs={"output": out_tensor},
     params={"weight": model.weight},

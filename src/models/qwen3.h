@@ -5,7 +5,7 @@
 #ifndef POLY_MODEL_QWEN3_H
 #define POLY_MODEL_QWEN3_H
 
-#include "../instance.h"
+#include "../model.h"
 #include "../loaders/gguf_decode.h"
 
 #ifdef __cplusplus
@@ -28,8 +28,8 @@ typedef struct {
 } Qwen3Config;
 
 Qwen3Config poly_qwen3_config_default(void);
-PolyInstance *poly_qwen3(const Qwen3Config *cfg, PolyDevice device);
-PolyInstance *poly_qwen3_from_gguf_decoded(
+PolyModel *poly_qwen3(const Qwen3Config *cfg, PolyDevice device);
+PolyModel *poly_qwen3_from_gguf_decoded(
     const PolyGgufDecoded *gguf,
     int batch_size,
     int max_seq_len,

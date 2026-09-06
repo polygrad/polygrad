@@ -10,17 +10,17 @@
 
 #include "test_harness.h"
 #include "../src/nn.h"
-#include "../src/instance.h"
+#include "../src/model.h"
 #include "../src/schedule/rangeify.h"
 #include "../src/schedule/rangeify.h"
 #include "../src/frontend.h"
 #include "../src/codegen/codegen.h"
 #include "../src/engine/schedule.h"
 
-static int nn_param_index(PolyInstance *inst, const char *name) {
-  int n = poly_instance_param_count(inst);
+static int nn_param_index(PolyModel *inst, const char *name) {
+  int n = poly_model_param_count(inst);
   for (int i = 0; i < n; i++) {
-    const char *got = poly_instance_param_name(inst, i);
+    const char *got = poly_model_param_name(inst, i);
     if (got && strcmp(got, name) == 0) return i;
   }
   return -1;
@@ -30,210 +30,210 @@ static int nn_param_index(PolyInstance *inst, const char *name) {
 
 TEST(nn, instance_linear_declares_params) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyInstance *inst = poly_instance_new(ctx, NULL);
+  PolyModel *inst = poly_model_new(ctx, NULL);
   int64_t xs[] = {2, 4};
-  PolyTensor *x_tensor = poly_instance_input(inst, "x", POLY_FLOAT32, xs, 2);
+  PolyTensor *x_tensor = poly_model_input(inst, "x", POLY_FLOAT32, xs, 2);
   ASSERT_NOT_NULL(x_tensor);
 
-  PolyTensor *out_tensor = poly_instance_linear(inst, "fc1", x_tensor, 4, 8, true);
+  PolyTensor *out_tensor = poly_model_linear(inst, "fc1", x_tensor, 4, 8, true);
   ASSERT_NOT_NULL(out_tensor);
   ASSERT_NOT_NULL(poly_tensor_uop_logical(out_tensor));
   ASSERT_NOT_NULL(poly_tensor_uop_physical(out_tensor));
   ASSERT_INT_EQ(poly_tensor_uop_logical(out_tensor)->op, POLY_OP_ADD);
   ASSERT_INT_EQ(poly_tensor_uop_physical(out_tensor)->op, POLY_OP_ADD);
-  ASSERT_INT_EQ(poly_instance_output(inst, "output", out_tensor), POLY_STATUS_OK);
+  ASSERT_INT_EQ(poly_model_output(inst, "output", out_tensor), POLY_STATUS_OK);
   const char *inputs[] = {"x"};
   const char *outputs[] = {"output"};
   ASSERT_INT_EQ(
-      poly_instance_entrypoint(inst, "forward", inputs, 1, outputs, 1, NULL), POLY_STATUS_OK
+      poly_model_entrypoint(inst, "forward", inputs, 1, outputs, 1, NULL), POLY_STATUS_OK
   );
   ASSERT_NOT_NULL(poly_tensor_uop_physical(out_tensor));
-  ASSERT_INT_EQ(poly_instance_build(inst, NULL), POLY_STATUS_OK);
+  ASSERT_INT_EQ(poly_model_build(inst, NULL), POLY_STATUS_OK);
 
   int wi = nn_param_index(inst, "fc1.weight");
   int bi = nn_param_index(inst, "fc1.bias");
   ASSERT_TRUE(wi >= 0);
   ASSERT_TRUE(bi >= 0);
   int64_t shape[8];
-  ASSERT_INT_EQ(poly_instance_param_shape(inst, wi, shape, 8), 2);
+  ASSERT_INT_EQ(poly_model_param_shape(inst, wi, shape, 8), 2);
   ASSERT_INT_EQ(shape[0], 8);
   ASSERT_INT_EQ(shape[1], 4);
-  ASSERT_TRUE(poly_instance_param_trainable(inst, wi));
-  ASSERT_INT_EQ(poly_instance_param_shape(inst, bi, shape, 8), 1);
+  ASSERT_TRUE(poly_model_param_trainable(inst, wi));
+  ASSERT_INT_EQ(poly_model_param_shape(inst, bi, shape, 8), 1);
   ASSERT_INT_EQ(shape[0], 8);
 
-  poly_instance_free(inst);
+  poly_model_free(inst);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
 TEST(nn, instance_linear_no_bias) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyInstance *inst = poly_instance_new(ctx, NULL);
+  PolyModel *inst = poly_model_new(ctx, NULL);
   int64_t xs[] = {1, 4};
-  PolyTensor *x_tensor = poly_instance_input(inst, "x", POLY_FLOAT32, xs, 2);
+  PolyTensor *x_tensor = poly_model_input(inst, "x", POLY_FLOAT32, xs, 2);
   ASSERT_NOT_NULL(x_tensor);
 
-  PolyTensor *out_tensor = poly_instance_linear(inst, "fc", x_tensor, 4, 2, false);
+  PolyTensor *out_tensor = poly_model_linear(inst, "fc", x_tensor, 4, 2, false);
   ASSERT_NOT_NULL(out_tensor);
   ASSERT_NOT_NULL(poly_tensor_uop_physical(out_tensor));
   ASSERT_INT_EQ(poly_tensor_uop_physical(out_tensor)->op, POLY_OP_REDUCE);
-  ASSERT_INT_EQ(poly_instance_output(inst, "output", out_tensor), POLY_STATUS_OK);
+  ASSERT_INT_EQ(poly_model_output(inst, "output", out_tensor), POLY_STATUS_OK);
   const char *inputs[] = {"x"};
   const char *outputs[] = {"output"};
   ASSERT_INT_EQ(
-      poly_instance_entrypoint(inst, "forward", inputs, 1, outputs, 1, NULL), POLY_STATUS_OK
+      poly_model_entrypoint(inst, "forward", inputs, 1, outputs, 1, NULL), POLY_STATUS_OK
   );
-  ASSERT_INT_EQ(poly_instance_build(inst, NULL), POLY_STATUS_OK);
+  ASSERT_INT_EQ(poly_model_build(inst, NULL), POLY_STATUS_OK);
   ASSERT_TRUE(nn_param_index(inst, "fc.weight") >= 0);
   ASSERT_INT_EQ(nn_param_index(inst, "fc.bias"), -1);
 
-  poly_instance_free(inst);
+  poly_model_free(inst);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
 TEST(nn, instance_linear_duplicate_prefix_rejected) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyInstance *inst = poly_instance_new(ctx, NULL);
+  PolyModel *inst = poly_model_new(ctx, NULL);
   int64_t xs[] = {1, 4};
-  PolyTensor *x_tensor = poly_instance_input(inst, "x", POLY_FLOAT32, xs, 2);
+  PolyTensor *x_tensor = poly_model_input(inst, "x", POLY_FLOAT32, xs, 2);
   ASSERT_NOT_NULL(x_tensor);
-  ASSERT_NOT_NULL(poly_instance_linear(inst, "shared", x_tensor, 4, 8, true));
-  ASSERT_TRUE(poly_instance_linear(inst, "shared", x_tensor, 4, 8, true) == NULL);
-  const PolyInstanceError *err = poly_instance_last_error(inst);
+  ASSERT_NOT_NULL(poly_model_linear(inst, "shared", x_tensor, 4, 8, true));
+  ASSERT_TRUE(poly_model_linear(inst, "shared", x_tensor, 4, 8, true) == NULL);
+  const PolyModelError *err = poly_model_last_error(inst);
   ASSERT_TRUE(err && strstr(err->message, "duplicate binding") != NULL);
 
-  poly_instance_free(inst);
+  poly_model_free(inst);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
 TEST(nn, nn_linear_e2e) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyInstance *inst = poly_instance_new(ctx, NULL);
+  PolyModel *inst = poly_model_new(ctx, NULL);
   int64_t xs[] = {1, 2};
-  PolyTensor *x_tensor = poly_instance_input(inst, "x", POLY_FLOAT32, xs, 2);
+  PolyTensor *x_tensor = poly_model_input(inst, "x", POLY_FLOAT32, xs, 2);
   ASSERT_NOT_NULL(x_tensor);
 
-  PolyTensor *out_tensor = poly_instance_linear(inst, "fc", x_tensor, 2, 3, true);
+  PolyTensor *out_tensor = poly_model_linear(inst, "fc", x_tensor, 2, 3, true);
   ASSERT_NOT_NULL(out_tensor);
   ASSERT_NOT_NULL(poly_tensor_uop_physical(out_tensor));
-  ASSERT_INT_EQ(poly_instance_output(inst, "output", out_tensor), POLY_STATUS_OK);
+  ASSERT_INT_EQ(poly_model_output(inst, "output", out_tensor), POLY_STATUS_OK);
   const char *inputs[] = {"x"};
   const char *outputs[] = {"output"};
   ASSERT_INT_EQ(
-      poly_instance_entrypoint(inst, "forward", inputs, 1, outputs, 1, NULL), POLY_STATUS_OK
+      poly_model_entrypoint(inst, "forward", inputs, 1, outputs, 1, NULL), POLY_STATUS_OK
   );
-  ASSERT_INT_EQ(poly_instance_build(inst, NULL), POLY_STATUS_OK);
+  ASSERT_INT_EQ(poly_model_build(inst, NULL), POLY_STATUS_OK);
 
   /* Set weights: W = [[1,0],[0,1],[1,1]], b = [0,0,0] */
-  float *wd = poly_instance_buf_data_named(inst, "fc.weight", NULL);
+  float *wd = poly_model_buf_data_named(inst, "fc.weight", NULL);
   float w_init[] = {1, 0, 0, 1, 1, 1};
   memcpy(wd, w_init, sizeof(w_init));
 
-  float *bd = poly_instance_buf_data_named(inst, "fc.bias", NULL);
+  float *bd = poly_model_buf_data_named(inst, "fc.bias", NULL);
   memset(bd, 0, 3 * sizeof(float));
 
   /* Execute: x = [2, 3], expect [2, 3, 5] */
   float x_data[] = {2.0f, 3.0f};
   PolyIOBinding io[] = {POLY_IO_BINDING_ARRAY("x", x_data, POLY_FLOAT32)};
-  ASSERT_INT_EQ(poly_instance_call(inst, "forward", io, 1), 0);
+  ASSERT_INT_EQ(poly_model_call(inst, "forward", io, 1), 0);
 
-  float *od = poly_instance_buf_data_named(inst, "output", NULL);
+  float *od = poly_model_buf_data_named(inst, "output", NULL);
   ASSERT_FLOAT_EQ(od[0], 2.0f, 1e-5);
   ASSERT_FLOAT_EQ(od[1], 3.0f, 1e-5);
   ASSERT_FLOAT_EQ(od[2], 5.0f, 1e-5);
 
-  poly_instance_free(inst);
+  poly_model_free(inst);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
 TEST(nn, instance_layernorm_declares_params) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyInstance *inst = poly_instance_new(ctx, NULL);
+  PolyModel *inst = poly_model_new(ctx, NULL);
   int64_t xs[] = {2, 4};
-  PolyTensor *x_tensor = poly_instance_input(inst, "x", POLY_FLOAT32, xs, 2);
+  PolyTensor *x_tensor = poly_model_input(inst, "x", POLY_FLOAT32, xs, 2);
   ASSERT_NOT_NULL(x_tensor);
 
-  PolyTensor *out_tensor = poly_instance_layernorm(inst, "ln", x_tensor, 4, 1e-5);
+  PolyTensor *out_tensor = poly_model_layernorm(inst, "ln", x_tensor, 4, 1e-5);
   ASSERT_NOT_NULL(out_tensor);
   ASSERT_NOT_NULL(poly_tensor_uop_logical(out_tensor));
   ASSERT_NOT_NULL(poly_tensor_uop_physical(out_tensor));
   ASSERT_INT_EQ(poly_tensor_uop_logical(out_tensor)->op, POLY_OP_ADD);
   ASSERT_INT_EQ(poly_tensor_uop_physical(out_tensor)->op, POLY_OP_ADD);
-  ASSERT_INT_EQ(poly_instance_output(inst, "output", out_tensor), POLY_STATUS_OK);
+  ASSERT_INT_EQ(poly_model_output(inst, "output", out_tensor), POLY_STATUS_OK);
   const char *inputs[] = {"x"};
   const char *outputs[] = {"output"};
   ASSERT_INT_EQ(
-      poly_instance_entrypoint(inst, "forward", inputs, 1, outputs, 1, NULL), POLY_STATUS_OK
+      poly_model_entrypoint(inst, "forward", inputs, 1, outputs, 1, NULL), POLY_STATUS_OK
   );
-  ASSERT_INT_EQ(poly_instance_build(inst, NULL), POLY_STATUS_OK);
+  ASSERT_INT_EQ(poly_model_build(inst, NULL), POLY_STATUS_OK);
   ASSERT_TRUE(nn_param_index(inst, "ln.weight") >= 0);
   ASSERT_TRUE(nn_param_index(inst, "ln.bias") >= 0);
 
-  poly_instance_free(inst);
+  poly_model_free(inst);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
 TEST(nn, instance_rmsnorm_declares_params) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyInstance *inst = poly_instance_new(ctx, NULL);
+  PolyModel *inst = poly_model_new(ctx, NULL);
   int64_t xs[] = {2, 4};
-  PolyTensor *x_tensor = poly_instance_input(inst, "x", POLY_FLOAT32, xs, 2);
+  PolyTensor *x_tensor = poly_model_input(inst, "x", POLY_FLOAT32, xs, 2);
   ASSERT_NOT_NULL(x_tensor);
 
-  PolyTensor *out_tensor = poly_instance_rmsnorm(inst, "rms", x_tensor, 4, 1e-6);
+  PolyTensor *out_tensor = poly_model_rmsnorm(inst, "rms", x_tensor, 4, 1e-6);
   ASSERT_NOT_NULL(out_tensor);
   ASSERT_NOT_NULL(poly_tensor_uop_logical(out_tensor));
   ASSERT_NOT_NULL(poly_tensor_uop_physical(out_tensor));
   ASSERT_INT_EQ(poly_tensor_uop_logical(out_tensor)->op, POLY_OP_MUL);
   ASSERT_INT_EQ(poly_tensor_uop_physical(out_tensor)->op, POLY_OP_MUL);
-  ASSERT_INT_EQ(poly_instance_output(inst, "output", out_tensor), POLY_STATUS_OK);
+  ASSERT_INT_EQ(poly_model_output(inst, "output", out_tensor), POLY_STATUS_OK);
   const char *inputs[] = {"x"};
   const char *outputs[] = {"output"};
   ASSERT_INT_EQ(
-      poly_instance_entrypoint(inst, "forward", inputs, 1, outputs, 1, NULL), POLY_STATUS_OK
+      poly_model_entrypoint(inst, "forward", inputs, 1, outputs, 1, NULL), POLY_STATUS_OK
   );
-  ASSERT_INT_EQ(poly_instance_build(inst, NULL), POLY_STATUS_OK);
+  ASSERT_INT_EQ(poly_model_build(inst, NULL), POLY_STATUS_OK);
   ASSERT_TRUE(nn_param_index(inst, "rms.weight") >= 0);
 
-  poly_instance_free(inst);
+  poly_model_free(inst);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
 TEST(nn, instance_embedding_declares_params) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyInstance *inst = poly_instance_new(ctx, NULL);
+  PolyModel *inst = poly_model_new(ctx, NULL);
   int64_t ts[] = {3};
-  PolyTensor *tok_tensor = poly_instance_input(inst, "tokens", POLY_INT32, ts, 1);
+  PolyTensor *tok_tensor = poly_model_input(inst, "tokens", POLY_INT32, ts, 1);
   ASSERT_NOT_NULL(tok_tensor);
 
-  PolyTensor *out_tensor = poly_instance_embedding(inst, "emb", tok_tensor, 100, 64);
+  PolyTensor *out_tensor = poly_model_embedding(inst, "emb", tok_tensor, 100, 64);
   ASSERT_NOT_NULL(out_tensor);
   ASSERT_NOT_NULL(poly_tensor_uop_logical(out_tensor));
   ASSERT_NOT_NULL(poly_tensor_uop_physical(out_tensor));
   ASSERT_INT_EQ(poly_tensor_uop_logical(out_tensor)->op, POLY_OP_REDUCE);
   ASSERT_INT_EQ(poly_tensor_uop_physical(out_tensor)->op, POLY_OP_REDUCE);
-  ASSERT_INT_EQ(poly_instance_output(inst, "output", out_tensor), POLY_STATUS_OK);
+  ASSERT_INT_EQ(poly_model_output(inst, "output", out_tensor), POLY_STATUS_OK);
   const char *inputs[] = {"tokens"};
   const char *outputs[] = {"output"};
   ASSERT_INT_EQ(
-      poly_instance_entrypoint(inst, "forward", inputs, 1, outputs, 1, NULL), POLY_STATUS_OK
+      poly_model_entrypoint(inst, "forward", inputs, 1, outputs, 1, NULL), POLY_STATUS_OK
   );
-  ASSERT_INT_EQ(poly_instance_build(inst, NULL), POLY_STATUS_OK);
+  ASSERT_INT_EQ(poly_model_build(inst, NULL), POLY_STATUS_OK);
 
   int wi = nn_param_index(inst, "emb.weight");
   ASSERT_TRUE(wi >= 0);
   int64_t shape[8];
-  ASSERT_INT_EQ(poly_instance_param_shape(inst, wi, shape, 8), 2);
+  ASSERT_INT_EQ(poly_model_param_shape(inst, wi, shape, 8), 2);
   ASSERT_INT_EQ(shape[0], 100);
   ASSERT_INT_EQ(shape[1], 64);
 
-  poly_instance_free(inst);
+  poly_model_free(inst);
   poly_ctx_destroy(ctx);
   PASS();
 }

@@ -5,7 +5,7 @@
 #include "bundle.h"
 #include "ir.h"
 #include "safetensors.h"
-#include "instance.h"
+#include "model.h"
 #include <stdbool.h>
 #include <limits.h>
 #include <stdint.h>
@@ -327,9 +327,9 @@ int poly_bundle_decode(const uint8_t *data, int len, PolyBundleSections *out) {
   return 0;
 }
 
-/* Instance convenience */
+/* Model convenience */
 
-uint8_t *poly_instance_save_bundle_ex(PolyInstance *inst, int *out_len, uint32_t weight_flags) {
+uint8_t *poly_model_save_bundle_ex(PolyModel *inst, int *out_len, uint32_t weight_flags) {
   if (!inst) {
     if (out_len) *out_len = 0;
     return NULL;
@@ -337,7 +337,7 @@ uint8_t *poly_instance_save_bundle_ex(PolyInstance *inst, int *out_len, uint32_t
 
   /* Export IR */
   int ir_len = 0;
-  uint8_t *ir_data = poly_instance_export_ir(inst, &ir_len);
+  uint8_t *ir_data = poly_model_export_ir(inst, &ir_len);
   if (!ir_data) {
     if (out_len) *out_len = 0;
     return NULL;
@@ -345,7 +345,7 @@ uint8_t *poly_instance_save_bundle_ex(PolyInstance *inst, int *out_len, uint32_t
 
   /* Export weights (safetensors) */
   int weights_len = 0;
-  uint8_t *weights_data = poly_instance_export_weights_ex(inst, &weights_len, weight_flags);
+  uint8_t *weights_data = poly_model_export_weights_ex(inst, &weights_len, weight_flags);
   /* weights_data may be NULL if no params -- that's ok */
 
   char *metadata_json = bundle_metadata_from_ir(ir_data, ir_len);
@@ -365,15 +365,15 @@ uint8_t *poly_instance_save_bundle_ex(PolyInstance *inst, int *out_len, uint32_t
   return bundle;
 }
 
-uint8_t *poly_instance_save_bundle(PolyInstance *inst, int *out_len) {
-  return poly_instance_save_bundle_ex(inst, out_len, POLY_EXPORT_WEIGHTS_DEFAULT);
+uint8_t *poly_model_save_bundle(PolyModel *inst, int *out_len) {
+  return poly_model_save_bundle_ex(inst, out_len, POLY_EXPORT_WEIGHTS_DEFAULT);
 }
 
-PolyInstance *poly_instance_from_bundle(const uint8_t *data, int len) {
+PolyModel *poly_model_from_bundle(const uint8_t *data, int len) {
   PolyBundleSections sections;
   if (poly_bundle_decode(data, len, &sections) != 0) return NULL;
 
-  return poly_instance_from_ir(
+  return poly_model_from_ir(
       sections.ir_data, sections.ir_len, sections.weights_data, sections.weights_len
   );
 }

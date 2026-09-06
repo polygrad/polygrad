@@ -10,7 +10,7 @@
 
 #include "hf_decode.h"
 #include "gguf_decode.h"
-#include "../instance.h"
+#include "../model.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -25,10 +25,9 @@ typedef struct {
 typedef struct {
   const char *model_type;
 
-  PolyInstance *(*from_hf_decoded)(const PolyHfDecoded *hf, const PolyGenericImportOpts *opts);
+  PolyModel *(*from_hf_decoded)(const PolyHfDecoded *hf, const PolyGenericImportOpts *opts);
 
-  PolyInstance *(*from_gguf_decoded
-  )(const PolyGgufDecoded *gguf, const PolyGenericImportOpts *opts);
+  PolyModel *(*from_gguf_decoded)(const PolyGgufDecoded *gguf, const PolyGenericImportOpts *opts);
 } PolyImportDesc;
 
 const PolyImportDesc *poly_import_desc_find(const char *model_type);

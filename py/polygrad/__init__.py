@@ -15,7 +15,7 @@ if not _default_ctx:
 from .tensor import Tensor, Variable, BoundVariable, _dispose_tensors_for_ctx
 from .dtype import DType, INVERSE_DTYPES_DICT, dtypes
 from .device import Device
-from .instance import Instance, _dispose_instances_for_ctx
+from .model import Model, _dispose_models_for_ctx
 from .jit import CompiledCallable, Jit, JitError, TinyJit, _dispose_jits_for_ctx, compile, jit
 from .function import function
 from .uop.ops import UOp, _dispose_uops_for_ctx
@@ -25,7 +25,7 @@ from . import nn as nn
 def _dispose_default_ctx():
     global _default_ctx
     if _default_ctx:
-        _dispose_instances_for_ctx(_default_ctx)
+        _dispose_models_for_ctx(_default_ctx)
         _dispose_jits_for_ctx(_default_ctx)
         _dispose_tensors_for_ctx(_default_ctx)
         _dispose_uops_for_ctx(_default_ctx)
@@ -295,7 +295,7 @@ class Runtime:
           self._check_live()
           return Variable(name, min_val, max_val, _ctx=self._ctx)
       self.Variable = runtime_variable
-      self.Instance = Instance
+      self.Model = Model
       self.GlobalCounters = _global_counters_class(self._ctx)
       self.jit = jit
       self.compile = compile
@@ -338,7 +338,7 @@ class Runtime:
 
     def dispose(self):
       if not self._disposed:
-          _dispose_instances_for_ctx(self._ctx)
+          _dispose_models_for_ctx(self._ctx)
           _dispose_jits_for_ctx(self._ctx)
           _dispose_tensors_for_ctx(self._ctx)
           _dispose_uops_for_ctx(self._ctx)
@@ -365,7 +365,7 @@ def create(*, device='auto', logical=None):
 
 
 __all__ = [
-    'Tensor', 'Variable', 'BoundVariable', 'UOp', 'dtypes', 'Device', 'Instance', 'nn',
+    'Tensor', 'Variable', 'BoundVariable', 'UOp', 'dtypes', 'Device', 'Model', 'nn',
     'GlobalCounters', 'Context', 'LOGICAL', 'fetch', 'getenv', 'function',
     'CompiledCallable', 'Jit', 'TinyJit', 'JitError', 'Runtime', 'create',
     'compile', 'jit', 'stats', 'collect', 'can_run',

@@ -50,7 +50,7 @@ PolyUOp *poly_linear_effect_sink(
 );
 
 /* Admission predicate shared by default Tensor realization and retained
- * physical Instance templates. It follows caller-visible graph inputs while
+ * physical Model templates. It follows caller-visible graph inputs while
  * treating CALL/FUNCTION bodies as opaque, and rejects any BUFFER whose device
  * remains AUTO. */
 bool poly_tensor_root_has_unplaced_buffer(PolyCtx *ctx, PolyUOp *root);
@@ -70,7 +70,7 @@ int poly_run_linear(
 );
 
 /* Run an already-effectful concrete SINK using ctx->buffers runtime state. This
- * is the execution layer for imported/Instance STORE/ASSIGN/AFTER graphs. */
+ * is the execution layer for imported/Model STORE/ASSIGN/AFTER graphs. */
 int poly_realize_sink(PolyCtx *ctx, PolyUOp *sink);
 
 /* Materialize the requested top-level value UOps using ctx->buffers runtime

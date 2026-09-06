@@ -2,13 +2,13 @@
 
 const polygrad = require('..')
 const { checkLogicalRuntimeOption, runTensorTests } = require('./test_tensor')
-const { runInstanceTests } = require('./test_instance')
+const { runModelRuntimeTests } = require('./test_model_runtime')
 const { runJitTests } = require('./test_jit')
 const { runOptimTests } = require('./test_optim')
 const { runModelTests } = require('./test_model')
 const { runSyncContractTests } = require('./test_sync_contract')
 const { PolyRuntime } = require('../src/runtime')
-const { createBoundInstanceClass } = require('../src/instance')
+const { createBoundModelClass } = require('../src/model')
 
 function assertClose(actual, expected, tol = 1e-4) {
   if (actual.length !== expected.length) throw new Error(`length mismatch: ${actual.length} vs ${expected.length}`)
@@ -98,7 +98,7 @@ async function runWasmOwnershipTests() {
     if (!rejected) throw new Error('stats collected residency during active async work')
   })
 
-  await test('async Instance disposal follows its admitted forward on the core queue', async () => {
+  await test('async Model disposal follows its admitted forward on the core queue', async () => {
     const events = []
     let tail = Promise.resolve()
     const core = {
@@ -108,7 +108,7 @@ async function runWasmOwnershipTests() {
         tail = run.catch(() => {})
         return run
       },
-      instance: {
+      model: {
         call(handle, entrypoint) {
           if (entrypoint !== 'forward') throw new Error(`unexpected entrypoint ${entrypoint}`)
           events.push(`forward:${handle}`)
@@ -121,20 +121,20 @@ async function runWasmOwnershipTests() {
       }
     }
     const rt = lifecycleRuntime(core)
-    const Instance = createBoundInstanceClass(rt)
-    const inst = new Instance(123)
+    const Model = createBoundModelClass(rt)
+    const inst = new Model(123)
     const forward = inst.forwardAsync({})
     const disposed = inst.dispose()
     await Promise.all([forward, disposed])
     if (events.join(',') !== 'forward:123,free:123') {
-      throw new Error(`unexpected Instance teardown order: ${events}`)
+      throw new Error(`unexpected Model teardown order: ${events}`)
     }
     let rejected = false
     try { await inst.forwardAsync({}) } catch (err) {
       rejected = /disposed/.test(String(err && err.message))
     }
-    if (!rejected) throw new Error('disposed Instance admitted later work')
-    if (inst.dispose() !== disposed) throw new Error('Instance disposal is not idempotent')
+    if (!rejected) throw new Error('disposed Model admitted later work')
+    if (inst.dispose() !== disposed) throw new Error('Model disposal is not idempotent')
   })
 
   await test('explicit runtimes keep host buffers independent across dispose cycles', async () => {
@@ -311,7 +311,7 @@ async function main() {
   try {
     const syncResult = await runSyncContractTests(polygrad, pg, { core: 'wasm' })
     const tensorResult = await runTensorTests(pg)
-    const instanceResult = await runInstanceTests(pg)
+    const instanceResult = await runModelRuntimeTests(pg)
     const jitResult = await runJitTests(pg)
     const optimResult = await runOptimTests(pg)
     const modelResult = await runModelTests(pg)

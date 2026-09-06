@@ -1,6 +1,6 @@
 'use strict'
 
-const { createBoundInstanceClass } = require('./instance')
+const { createBoundModelClass } = require('./model')
 const { createBoundJit } = require('./jit')
 const { createBoundModels } = require('./models')
 const { createBoundModules } = require('./nn/modules')
@@ -36,25 +36,25 @@ class PolyRuntime {
     this._disposePromise = null
     this._activeAsync = 0
     this._asyncDrain = []
-    this.supportsInstance = Boolean(binding.instance)
+    this.supportsModel = Boolean(binding.model)
     this.uop = createBoundUopNamespace(this)
     this.Tensor = createBoundTensorClass(this)
     this.jit = createBoundJit(this)
     this.compile = this.jit.compile
     this.jitAsync = this.jit.async
     this.compileAsync = this.jit.compileAsync
-    this.Instance = createBoundInstanceClass(this)
+    this.Model = createBoundModelClass(this)
     this.models = createBoundModels(this)
     this.Tokenizer = createBoundTokenizerClass(this)
-    this.ROLE_PARAM = this.Instance.ROLE_PARAM
-    this.ROLE_INPUT = this.Instance.ROLE_INPUT
-    this.ROLE_TARGET = this.Instance.ROLE_TARGET
-    this.ROLE_OUTPUT = this.Instance.ROLE_OUTPUT
-    this.ROLE_AUX = this.Instance.ROLE_AUX
-    this.OPTIM_NONE = this.Instance.OPTIM_NONE
-    this.OPTIM_SGD = this.Instance.OPTIM_SGD
-    this.OPTIM_ADAM = this.Instance.OPTIM_ADAM
-    this.OPTIM_ADAMW = this.Instance.OPTIM_ADAMW
+    this.ROLE_PARAM = this.Model.ROLE_PARAM
+    this.ROLE_INPUT = this.Model.ROLE_INPUT
+    this.ROLE_TARGET = this.Model.ROLE_TARGET
+    this.ROLE_OUTPUT = this.Model.ROLE_OUTPUT
+    this.ROLE_AUX = this.Model.ROLE_AUX
+    this.OPTIM_NONE = this.Model.OPTIM_NONE
+    this.OPTIM_SGD = this.Model.OPTIM_SGD
+    this.OPTIM_ADAM = this.Model.OPTIM_ADAM
+    this.OPTIM_ADAMW = this.Model.OPTIM_ADAMW
     const modules = createBoundModules(this)
     const optim = createBoundOptim(this)
     this.nn = {
@@ -216,7 +216,7 @@ class PolyRuntime {
     this._closing = true
 
     if (!asyncHost) {
-      if (this.Instance && this.Instance._disposeAll) this.Instance._disposeAll()
+      if (this.Model && this.Model._disposeAll) this.Model._disposeAll()
       if (this.jit && this.jit.disposeAll) this.jit.disposeAll(true)
       if (this.Tensor && this.Tensor._disposeAll) this.Tensor._disposeAll()
       if (this.uop && this.uop._disposeAll) this.uop._disposeAll()
@@ -227,7 +227,7 @@ class PolyRuntime {
     }
 
     this._disposePromise = this._waitForAsync().then(async () => {
-      if (this.Instance && this.Instance._disposeAll) await this.Instance._disposeAll()
+      if (this.Model && this.Model._disposeAll) await this.Model._disposeAll()
       if (this.jit && this.jit.disposeAll) this.jit.disposeAll(true)
       if (this.Tensor && this.Tensor._disposeAll) await this.Tensor._disposeAll()
       if (this.uop && this.uop._disposeAll) this.uop._disposeAll()

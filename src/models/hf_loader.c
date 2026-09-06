@@ -11,7 +11,7 @@
 #include "../loaders/import_error.h"
 #include <stdio.h>
 
-PolyInstance *poly_hf_load(
+PolyModel *poly_hf_load(
     const char *config_json,
     int config_len,
     const uint8_t **weight_files,
@@ -46,7 +46,7 @@ PolyInstance *poly_hf_load(
       .max_seq_len = max_seq_len,
       .device = device,
   };
-  PolyInstance *inst = desc->from_hf_decoded(hf, &opts);
+  PolyModel *inst = desc->from_hf_decoded(hf, &opts);
 
   /* 4. Cleanup */
   poly_hf_decoded_free(hf);

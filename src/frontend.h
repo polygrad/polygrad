@@ -13,7 +13,7 @@
 
 /* Public C/frontend ABI version. Bump when exported symbols or public struct
  * layouts used by frontends change. */
-#define POLYGRAD_ABI_VERSION 67
+#define POLYGRAD_ABI_VERSION 68
 
 /* Current ElementwiseMixin._binop for language UOp operators. Compiler
  * matchers keep using raw poly_alu2. */
