@@ -81,6 +81,7 @@ The main intentional differences are:
 | Model tooling | `PolyModel` stores ABI names, logical buffer bindings, entrypoints, objectives, fit/train helpers, and model bundle metadata |
 | Custom kernels | Public custom kernels lower into UOp `CALL` bodies and still run through normal scheduling and runtime caches |
 | WebGPU int64 | WGSL has no native 64-bit integers, so renderer lowering uses two 32-bit lanes while C, CUDA, HIP, WASM, and x86 retain native int64; unlike pinned tinygrad, valid dynamic/uint32 shift counts and signed right shift are handled rather than crashing or changing sign semantics |
+| WebGPU narrow integers | `PG-DIV-008`: truncate 8/16-bit integer casts and arithmetic results before widening, correcting the pinned WGSL renderer's lost narrowing; Tensor graphs remain unchanged |
 
 These differences exist to make Polygrad useful as an embeddable runtime for
 tools and model packages, while preserving tinygrad-style compiler semantics
@@ -145,6 +146,15 @@ scans currently require concrete shapes. Cumulative extrema return
 selecting the first equal extremum. Use floating-point tensors for gradients.
 WebGPU floating comparisons do not guarantee NaN truthiness under WGSL's
 finite-math rules; this also affects the pinned Tinygrad renderer.
+
+Shared C pointwise operations include inverse trig/hyperbolic functions,
+`erf`, `celu`/`selu`, `isfinite`, `isclose`, `copysign`, and `lerp`.
+Logits BCE and NLL accept `none`, `sum`, or `mean` reduction and optional
+weights: Python `binary_crossentropy_logits`/`nll_loss`, JS
+`binaryCrossEntropyLogits`/`nllLoss` with an options object. NLL also accepts
+`ignore_index` / `ignoreIndex`; its gather path currently requires concrete
+shapes. Both frontends use the same C construction and autograd, not host
+array implementations.
 
 ```text
 Python Tensor API       JavaScript Tensor API       C / native package

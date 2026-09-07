@@ -947,6 +947,55 @@ PolyTensor *poly_tensor_cos(PolyCtx *ctx, PolyTensor *src);
 PolyTensor *poly_tensor_tan(PolyCtx *ctx, PolyTensor *src);
 PolyTensor *poly_tensor_log1p(PolyCtx *ctx, PolyTensor *src);
 PolyTensor *poly_tensor_expm1(PolyCtx *ctx, PolyTensor *src);
+/* Composed pointwise/loss methods; reduction: 0=none, 1=sum, 2=mean.
+ * Optional weights/ignore_index may be NULL. Scalar arguments are Tensor
+ * handles to preserve their original weak dtype through promotion. */
+PolyTensor *poly_tensor_log10(PolyCtx *ctx, PolyTensor *x);
+PolyTensor *poly_tensor_atanh(PolyCtx *ctx, PolyTensor *x);
+PolyTensor *poly_tensor_asinh(PolyCtx *ctx, PolyTensor *x);
+PolyTensor *poly_tensor_acosh(PolyCtx *ctx, PolyTensor *x);
+PolyTensor *poly_tensor_asin(PolyCtx *ctx, PolyTensor *x);
+PolyTensor *poly_tensor_acos(PolyCtx *ctx, PolyTensor *x);
+PolyTensor *poly_tensor_atan(PolyCtx *ctx, PolyTensor *x);
+PolyTensor *poly_tensor_logsigmoid(PolyCtx *ctx, PolyTensor *x);
+PolyTensor *poly_tensor_sinh(PolyCtx *ctx, PolyTensor *x);
+PolyTensor *poly_tensor_cosh(PolyCtx *ctx, PolyTensor *x);
+PolyTensor *poly_tensor_erf(PolyCtx *ctx, PolyTensor *x);
+PolyTensor *poly_tensor_softsign(PolyCtx *ctx, PolyTensor *x);
+PolyTensor *poly_tensor_isfinite(PolyCtx *ctx, PolyTensor *x);
+PolyTensor *poly_tensor_celu(PolyCtx *ctx, PolyTensor *x, PolyTensor *alpha);
+PolyTensor *poly_tensor_selu(PolyCtx *ctx, PolyTensor *x, PolyTensor *alpha, PolyTensor *gamma);
+PolyTensor *poly_tensor_copysign(PolyCtx *ctx, PolyTensor *x, PolyTensor *other);
+PolyTensor *poly_tensor_lerp(
+    PolyCtx *ctx,
+    PolyTensor *x,
+    PolyTensor *end,
+    PolyTensor *weight,
+    bool scalar_weight
+);
+PolyTensor *poly_tensor_isclose(
+    PolyCtx *ctx,
+    PolyTensor *x,
+    PolyTensor *other,
+    PolyTensor *rtol,
+    PolyTensor *atol,
+    bool equal_nan
+);
+PolyTensor *poly_tensor_binary_crossentropy_logits(
+    PolyCtx *ctx,
+    PolyTensor *x,
+    PolyTensor *target,
+    PolyTensor *weight,
+    int reduction
+);
+PolyTensor *poly_tensor_nll_loss(
+    PolyCtx *ctx,
+    PolyTensor *x,
+    PolyTensor *target,
+    PolyTensor *weight,
+    PolyTensor *ignore_index,
+    int reduction
+);
 PolyTensor *poly_tensor_gelu(PolyCtx *ctx, PolyTensor *src);
 PolyTensor *poly_tensor_quick_gelu(PolyCtx *ctx, PolyTensor *src);
 PolyTensor *poly_tensor_detach(PolyCtx *ctx, PolyTensor *src);

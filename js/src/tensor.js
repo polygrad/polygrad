@@ -1765,6 +1765,134 @@ function createBoundTensorClass(runtime) {
       return this._makeResultFromCore(core, [this])
     }
 
+    log10() {
+      const core = this._rt._core.ffi.poly_tensor_log10(this._ctx, this._tensor)
+      return this._makeResultFromCore(core, [this])
+    }
+
+    atanh() {
+      const core = this._rt._core.ffi.poly_tensor_atanh(this._ctx, this._tensor)
+      return this._makeResultFromCore(core, [this])
+    }
+
+    asinh() {
+      const core = this._rt._core.ffi.poly_tensor_asinh(this._ctx, this._tensor)
+      return this._makeResultFromCore(core, [this])
+    }
+
+    acosh() {
+      const core = this._rt._core.ffi.poly_tensor_acosh(this._ctx, this._tensor)
+      return this._makeResultFromCore(core, [this])
+    }
+
+    asin() {
+      const core = this._rt._core.ffi.poly_tensor_asin(this._ctx, this._tensor)
+      return this._makeResultFromCore(core, [this])
+    }
+
+    acos() {
+      const core = this._rt._core.ffi.poly_tensor_acos(this._ctx, this._tensor)
+      return this._makeResultFromCore(core, [this])
+    }
+
+    atan() {
+      const core = this._rt._core.ffi.poly_tensor_atan(this._ctx, this._tensor)
+      return this._makeResultFromCore(core, [this])
+    }
+
+    logsigmoid() {
+      const core = this._rt._core.ffi.poly_tensor_logsigmoid(this._ctx, this._tensor)
+      return this._makeResultFromCore(core, [this])
+    }
+
+    sinh() {
+      const core = this._rt._core.ffi.poly_tensor_sinh(this._ctx, this._tensor)
+      return this._makeResultFromCore(core, [this])
+    }
+
+    cosh() {
+      const core = this._rt._core.ffi.poly_tensor_cosh(this._ctx, this._tensor)
+      return this._makeResultFromCore(core, [this])
+    }
+
+    erf() {
+      const core = this._rt._core.ffi.poly_tensor_erf(this._ctx, this._tensor)
+      return this._makeResultFromCore(core, [this])
+    }
+
+    softsign() {
+      const core = this._rt._core.ffi.poly_tensor_softsign(this._ctx, this._tensor)
+      return this._makeResultFromCore(core, [this])
+    }
+
+    isfinite() {
+      const core = this._rt._core.ffi.poly_tensor_isfinite(this._ctx, this._tensor)
+      return this._makeResultFromCore(core, [this])
+    }
+
+    celu(alpha) {
+      // The pin's default is floating 1.0; JS Number alone loses that distinction.
+      alpha = alpha === undefined
+        ? new Tensor(1, {dtype: 'weakfloat', _ctx: this._ctx, device: this._device})
+        : this._ensureTensor(alpha)
+      const core = this._rt._core.ffi.poly_tensor_celu(this._ctx, this._tensor, alpha._tensor)
+      return this._makeResultFromCore(core, [this, alpha])
+    }
+
+    selu(alpha = 1.67326, gamma = 1.0507) {
+      alpha = this._ensureTensor(alpha)
+      gamma = this._ensureTensor(gamma)
+      const core = this._rt._core.ffi.poly_tensor_selu(this._ctx, this._tensor, alpha._tensor, gamma._tensor)
+      return this._makeResultFromCore(core, [this, alpha, gamma])
+    }
+
+    isclose(other, {rtol = 1e-5, atol = 1e-8, equalNan = false} = {}) {
+      other = this._ensureTensor(other)
+      rtol = this._ensureTensor(rtol)
+      atol = this._ensureTensor(atol)
+      const core = this._rt._core.ffi.poly_tensor_isclose(this._ctx, this._tensor, other._tensor, rtol._tensor, atol._tensor, !!equalNan)
+      return this._makeResultFromCore(core, [this, other, rtol, atol])
+    }
+
+    copysign(other) {
+      other = this._ensureTensor(other)
+      const core = this._rt._core.ffi.poly_tensor_copysign(this._ctx, this._tensor, other._tensor)
+      return this._makeResultFromCore(core, [this, other])
+    }
+
+    lerp(end, weight) {
+      const scalarWeight = !(weight instanceof Tensor)
+      end = this._ensureTensor(end)
+      weight = this._ensureTensor(weight)
+      const core = this._rt._core.ffi.poly_tensor_lerp(this._ctx, this._tensor, end._tensor, weight._tensor, scalarWeight)
+      return this._makeResultFromCore(core, [this, end, weight])
+    }
+
+    _lossReductionId(reduction) {
+      const id = ['none', 'sum', 'mean'].indexOf(reduction)
+      if (id < 0) throw new RangeError("reduction must be 'none', 'sum', or 'mean'")
+      return id
+    }
+
+    binaryCrossEntropyLogits(target, {reduction = 'mean', posWeight = null} = {}) {
+      const id = this._lossReductionId(reduction)
+      target = this._ensureTensor(target)
+      const weight = posWeight === null ? null : this._ensureTensor(posWeight)
+      const core = this._rt._core.ffi.poly_tensor_binary_crossentropy_logits(
+        this._ctx, this._tensor, target._tensor, weight ? weight._tensor : null, id)
+      return this._makeResultFromCore(core, [this, target, ...(weight ? [weight] : [])])
+    }
+
+    nllLoss(target, {weight = null, ignoreIndex = null, reduction = 'mean'} = {}) {
+      const id = this._lossReductionId(reduction)
+      target = this._ensureTensor(target)
+      weight = weight === null ? null : this._ensureTensor(weight)
+      const ignore = ignoreIndex === null ? null : this._ensureTensor(ignoreIndex)
+      const core = this._rt._core.ffi.poly_tensor_nll_loss(
+        this._ctx, this._tensor, target._tensor, weight ? weight._tensor : null, ignore ? ignore._tensor : null, id)
+      return this._makeResultFromCore(core, [this, target, ...[weight, ignore].filter(Boolean)])
+    }
+
     log1p() {
       const core = this._rt._core.ffi.poly_tensor_log1p(this._ctx, this._tensor)
       return this._makeResultFromCore(core, [this])

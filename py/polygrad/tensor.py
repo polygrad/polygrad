@@ -1971,6 +1971,109 @@ class Tensor:
         core = _ffi._lib.poly_tensor_log(self._ctx, self._tensor)
         return self._make_result_from_core(core, self.shape, [self])
 
+    def log10(self):
+        core = _ffi._lib.poly_tensor_log10(self._ctx, self._tensor)
+        return self._make_result_from_core(core, self.shape, [self])
+
+    def atanh(self):
+        core = _ffi._lib.poly_tensor_atanh(self._ctx, self._tensor)
+        return self._make_result_from_core(core, self.shape, [self])
+
+    def asinh(self):
+        core = _ffi._lib.poly_tensor_asinh(self._ctx, self._tensor)
+        return self._make_result_from_core(core, self.shape, [self])
+
+    def acosh(self):
+        core = _ffi._lib.poly_tensor_acosh(self._ctx, self._tensor)
+        return self._make_result_from_core(core, self.shape, [self])
+
+    def asin(self):
+        core = _ffi._lib.poly_tensor_asin(self._ctx, self._tensor)
+        return self._make_result_from_core(core, self.shape, [self])
+
+    def acos(self):
+        core = _ffi._lib.poly_tensor_acos(self._ctx, self._tensor)
+        return self._make_result_from_core(core, self.shape, [self])
+
+    def atan(self):
+        core = _ffi._lib.poly_tensor_atan(self._ctx, self._tensor)
+        return self._make_result_from_core(core, self.shape, [self])
+
+    def logsigmoid(self):
+        core = _ffi._lib.poly_tensor_logsigmoid(self._ctx, self._tensor)
+        return self._make_result_from_core(core, self.shape, [self])
+
+    def sinh(self):
+        core = _ffi._lib.poly_tensor_sinh(self._ctx, self._tensor)
+        return self._make_result_from_core(core, self.shape, [self])
+
+    def cosh(self):
+        core = _ffi._lib.poly_tensor_cosh(self._ctx, self._tensor)
+        return self._make_result_from_core(core, self.shape, [self])
+
+    def erf(self):
+        core = _ffi._lib.poly_tensor_erf(self._ctx, self._tensor)
+        return self._make_result_from_core(core, self.shape, [self])
+
+    def softsign(self):
+        core = _ffi._lib.poly_tensor_softsign(self._ctx, self._tensor)
+        return self._make_result_from_core(core, self.shape, [self])
+
+    def isfinite(self):
+        core = _ffi._lib.poly_tensor_isfinite(self._ctx, self._tensor)
+        return self._make_result_from_core(core, self.shape, [self])
+
+    def celu(self, alpha=1.0):
+        alpha = self._ensure_tensor(alpha)
+        core = _ffi._lib.poly_tensor_celu(self._ctx, self._tensor, alpha._tensor)
+        return self._make_result_from_core(core, None, [self, alpha])
+
+    def selu(self, alpha=1.67326, gamma=1.0507):
+        alpha, gamma = self._ensure_tensor(alpha), self._ensure_tensor(gamma)
+        core = _ffi._lib.poly_tensor_selu(self._ctx, self._tensor, alpha._tensor, gamma._tensor)
+        return self._make_result_from_core(core, None, [self, alpha, gamma])
+
+    def isclose(self, other, rtol=1e-5, atol=1e-8, equal_nan=False):
+        other, rtol, atol = (self._ensure_tensor(v) for v in (other, rtol, atol))
+        core = _ffi._lib.poly_tensor_isclose(self._ctx, self._tensor, other._tensor, rtol._tensor, atol._tensor, bool(equal_nan))
+        return self._make_result_from_core(core, None, [self, other, rtol, atol])
+
+    def copysign(self, other):
+        other = self._ensure_tensor(other)
+        core = _ffi._lib.poly_tensor_copysign(self._ctx, self._tensor, other._tensor)
+        return self._make_result_from_core(core, None, [self, other])
+
+    def lerp(self, end, weight):
+        scalar_weight = not isinstance(weight, Tensor)
+        end, weight = self._ensure_tensor(end), self._ensure_tensor(weight)
+        core = _ffi._lib.poly_tensor_lerp(self._ctx, self._tensor, end._tensor, weight._tensor, scalar_weight)
+        return self._make_result_from_core(core, None, [self, end, weight])
+
+    @staticmethod
+    def _loss_reduction_id(reduction):
+        try:
+            return ('none', 'sum', 'mean').index(reduction)
+        except ValueError:
+            raise ValueError("reduction must be 'none', 'sum', or 'mean'") from None
+
+    def binary_crossentropy_logits(self, Y, reduction='mean', pos_weight=None):
+        reduction_id = self._loss_reduction_id(reduction)
+        Y = self._ensure_tensor(Y)
+        weight = self._ensure_tensor(pos_weight) if pos_weight is not None else None
+        core = _ffi._lib.poly_tensor_binary_crossentropy_logits(
+            self._ctx, self._tensor, Y._tensor, weight._tensor if weight is not None else None, reduction_id)
+        return self._make_result_from_core(core, None, [self, Y] + ([weight] if weight is not None else []))
+
+    def nll_loss(self, Y, weight=None, ignore_index=None, reduction='mean'):
+        reduction_id = self._loss_reduction_id(reduction)
+        Y = self._ensure_tensor(Y)
+        weight = self._ensure_tensor(weight) if weight is not None else None
+        ignore = self._ensure_tensor(ignore_index) if ignore_index is not None else None
+        core = _ffi._lib.poly_tensor_nll_loss(
+            self._ctx, self._tensor, Y._tensor, weight._tensor if weight is not None else None,
+            ignore._tensor if ignore is not None else None, reduction_id)
+        return self._make_result_from_core(core, None, [self, Y] + [v for v in (weight, ignore) if v is not None])
+
     def log1p(self):
         core = _ffi._lib.poly_tensor_log1p(self._ctx, self._tensor)
         return self._make_result_from_core(core, self.shape, [self])

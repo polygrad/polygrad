@@ -2691,6 +2691,101 @@ class TestReduce:
             Tensor([[0.1, 0.2]]).topk(1, dim=1, sorted_=False)
 
 
+
+class TestPointwiseOwners:
+    @pytest.mark.parametrize('op', [
+        'log10', 'atanh', 'asinh', 'acosh', 'asin', 'acos', 'atan',
+        'celu', 'selu', 'logsigmoid', 'sinh', 'cosh', 'erf', 'softsign',
+    ])
+    def test_pointwise_owners_values_and_gradients(self, op):
+        data = np.array([1.2, 1.5, 2.0] if op == 'acosh' else [0.15, 0.4, 0.7], dtype=np.float32)
+        reference = {
+            'log10': (np.log10, lambda x: 1 / (x * np.log(10))),
+            'atanh': (np.arctanh, lambda x: 1 / (1-x*x)),
+            'asinh': (np.arcsinh, lambda x: 1 / np.sqrt(1+x*x)),
+            'acosh': (np.arccosh, lambda x: 1 / np.sqrt(x*x-1)),
+            'asin': (np.arcsin, lambda x: 1 / np.sqrt(1-x*x)),
+            'acos': (np.arccos, lambda x: -1 / np.sqrt(1-x*x)),
+            'atan': (np.arctan, lambda x: 1 / (1+x*x)),
+            'celu': (lambda x: x, lambda x: np.ones_like(x)),
+            'selu': (lambda x: 1.0507*x, lambda x: np.full_like(x, 1.0507)),
+            'logsigmoid': (lambda x: -np.logaddexp(0, -x), lambda x: 1 / (1+np.exp(x))),
+            'sinh': (np.sinh, np.cosh), 'cosh': (np.cosh, np.sinh),
+            'erf': (np.vectorize(math.erf), lambda x: 2/np.sqrt(np.pi)*np.exp(-x*x)),
+            'softsign': (lambda x: x/(1+abs(x)), lambda x: 1/(1+abs(x))**2),
+        }
+        x = Tensor(data)
+        out = getattr(x, op)()
+        assert out.shape == x.shape and out.dtype is dtypes.float32
+        expected, derivative = reference[op]
+        np.testing.assert_allclose(out.numpy(), expected(data), atol=3e-6, rtol=3e-6)
+        # Compare away from cusps; asin/erf use the pinned polynomial approximations.
+        out.sum().backward()
+        np.testing.assert_allclose(x.grad.numpy(), derivative(data), atol=3e-5, rtol=3e-5)
+
+    def test_pointwise_owners_parameterized_activations(self):
+        x = Tensor([-2., -0.5, 0., 2.])
+        data = x.numpy()
+        np.testing.assert_allclose(x.celu(2).numpy(), np.maximum(data, 0)+np.minimum(2*np.expm1(data/2), 0), atol=2e-6)
+        np.testing.assert_allclose(x.selu(2, 3).numpy(), 3*np.where(data >= 0, data, 2*np.expm1(data)), atol=2e-6)
+
+    def test_pointwise_owners_finite_and_close(self):
+        a = Tensor([1., 2., float('inf'), -float('inf'), float('nan')])
+        b = Tensor([1.000005, 2.1, float('inf'), float('inf'), float('nan')])
+        np.testing.assert_array_equal(a.isfinite().numpy(), [1, 1, 0, 0, 0])
+        for equal_nan in (False, True):
+            np.testing.assert_array_equal(a.isclose(b, equal_nan=equal_nan).numpy(), [1, 0, 1, 0, equal_nan])
+        np.testing.assert_array_equal(Tensor([[1., 2.], [3., 4.]]).isclose(2, atol=1, rtol=0).numpy(), [[1, 1], [1, 0]])
+
+    def test_pointwise_owners_copysign_and_lerp(self):
+        x = Tensor([2., -3., 4., -5.])
+        y = Tensor([-0., 0., -1., 1.])
+        np.testing.assert_array_equal(x.copysign(y).numpy(), [-2., 3., -4., 5.])
+        np.testing.assert_allclose(x.lerp(y, 0.25).numpy(), [1.5, -2.25, 2.75, -3.5])
+        start = Tensor([250, 10], dtype='uint8')
+        end = Tensor([10, 250], dtype='uint8')
+        # Tensor weight takes the pin's int8-difference fixed-point path.
+        np.testing.assert_array_equal(start.lerp(end, Tensor([0.5, 0.5])).numpy(), [2, 2])
+        np.testing.assert_array_equal(start.lerp(end, 0.5).numpy(), [130, 130])
+
+    @pytest.mark.parametrize('reduction', ['none', 'sum', 'mean'])
+    def test_pointwise_owners_losses(self, reduction):
+        data = np.array([[-2., 0., 2.], [1., -1., 0.5]], dtype=np.float32)
+        labels = np.array([[0., 1., 1.], [1., 0., 1.]], dtype=np.float32)
+        pw = np.array([2., 3., 4.], dtype=np.float32)
+        x, y, w = Tensor(data), Tensor(labels), Tensor(pw)
+        element = pw*labels*np.logaddexp(0, -data)+(1-labels)*np.logaddexp(0, data)
+        wanted = element if reduction == 'none' else getattr(element, reduction)()
+        out = x.binary_crossentropy_logits(y, reduction=reduction, pos_weight=w)
+        np.testing.assert_allclose(out.numpy(), wanted, atol=2e-6, rtol=2e-6)
+        out.sum().backward()
+        grad = (1-labels)/(1+np.exp(-data))-pw*labels/(1+np.exp(data))
+        np.testing.assert_allclose(x.grad.numpy(), grad/(data.size if reduction == 'mean' else 1), atol=3e-6)
+        scores, target, weights = Tensor(data), Tensor([2, 1], dtype='int32'), Tensor([1., 2., 3.])
+        loss = scores.nll_loss(target, weight=weights, ignore_index=1, reduction=reduction)
+        np.testing.assert_allclose(loss.numpy(), [-6, 0] if reduction == 'none' else -2 if reduction == 'mean' else -6, atol=2e-6)
+        loss.sum().backward()
+        np.testing.assert_allclose(scores.grad.numpy(), [[0, 0, -1 if reduction == 'mean' else -3], [0, 0, 0]], atol=2e-6)
+
+    def test_pointwise_owners_loss_admission(self):
+        x, y = Tensor([[1., 2.]]), Tensor([0], dtype='int32')
+        for op, target in [('nll_loss', y), ('binary_crossentropy_logits', x)]:
+            with pytest.raises(ValueError, match='reduction'):
+                getattr(x, op)(target, reduction='typo')
+        np.testing.assert_allclose(x.nll_loss(y).numpy(), -1)
+        with pytest.raises((ValueError, RuntimeError)):
+            x.nll_loss(Tensor([[0]], dtype='int32'))
+
+    def test_pointwise_owners_nll_spatial_and_empty(self):
+        data = np.arange(24, dtype=np.float32).reshape(2, 3, 2, 2)
+        target = np.array([[[0, 1], [2, 0]], [[2, 1], [0, 2]]], dtype=np.int32)
+        expected = -np.take_along_axis(data, target[:, None], axis=1).squeeze(1)
+        x, y = Tensor(data), Tensor(target)
+        np.testing.assert_array_equal(x.nll_loss(y, reduction='none').numpy(), expected)
+        np.testing.assert_allclose(x.nll_loss(y).numpy(), expected.mean())
+        empty = Tensor.empty(0, 3).nll_loss(Tensor.empty(0, dtype='int32'), reduction='none')
+        assert empty.shape == (0,)
+
 class TestMatmulAndLoss:
     def test_linear_vector_and_matrix_match_pinned_semantics(self):
         x = Tensor(np.arange(16, dtype=np.float32).reshape(2, 2, 4) / 7)

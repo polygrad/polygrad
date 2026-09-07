@@ -1061,6 +1061,46 @@ function createWasmCoreFromModule(Module, device) {
       Module._poly_tensor_cos(ctx, src),
     poly_tensor_tan: (ctx, src) =>
       Module._poly_tensor_tan(ctx, src),
+    poly_tensor_log10: (ctx, x) =>
+      Module._poly_tensor_log10(ctx, x),
+    poly_tensor_atanh: (ctx, x) =>
+      Module._poly_tensor_atanh(ctx, x),
+    poly_tensor_asinh: (ctx, x) =>
+      Module._poly_tensor_asinh(ctx, x),
+    poly_tensor_acosh: (ctx, x) =>
+      Module._poly_tensor_acosh(ctx, x),
+    poly_tensor_asin: (ctx, x) =>
+      Module._poly_tensor_asin(ctx, x),
+    poly_tensor_acos: (ctx, x) =>
+      Module._poly_tensor_acos(ctx, x),
+    poly_tensor_atan: (ctx, x) =>
+      Module._poly_tensor_atan(ctx, x),
+    poly_tensor_logsigmoid: (ctx, x) =>
+      Module._poly_tensor_logsigmoid(ctx, x),
+    poly_tensor_sinh: (ctx, x) =>
+      Module._poly_tensor_sinh(ctx, x),
+    poly_tensor_cosh: (ctx, x) =>
+      Module._poly_tensor_cosh(ctx, x),
+    poly_tensor_erf: (ctx, x) =>
+      Module._poly_tensor_erf(ctx, x),
+    poly_tensor_softsign: (ctx, x) =>
+      Module._poly_tensor_softsign(ctx, x),
+    poly_tensor_isfinite: (ctx, x) =>
+      Module._poly_tensor_isfinite(ctx, x),
+    poly_tensor_celu: (ctx, x, alpha) =>
+      Module._poly_tensor_celu(ctx, x, alpha),
+    poly_tensor_selu: (ctx, x, alpha, gamma) =>
+      Module._poly_tensor_selu(ctx, x, alpha, gamma),
+    poly_tensor_copysign: (ctx, x, other) =>
+      Module._poly_tensor_copysign(ctx, x, other),
+    poly_tensor_lerp: (ctx, x, end, weight, scalar_weight) =>
+      Module._poly_tensor_lerp(ctx, x, end, weight, scalar_weight ? 1 : 0),
+    poly_tensor_isclose: (ctx, x, other, rtol, atol, equal_nan) =>
+      Module._poly_tensor_isclose(ctx, x, other, rtol, atol, equal_nan ? 1 : 0),
+    poly_tensor_binary_crossentropy_logits: (ctx, x, target, weight, reduction) =>
+      Module._poly_tensor_binary_crossentropy_logits(ctx, x, target, weight || 0, reduction),
+    poly_tensor_nll_loss: (ctx, x, target, weight, ignore_index, reduction) =>
+      Module._poly_tensor_nll_loss(ctx, x, target, weight || 0, ignore_index || 0, reduction),
     poly_tensor_log1p: (ctx, src) =>
       Module._poly_tensor_log1p(ctx, src),
     poly_tensor_expm1: (ctx, src) =>

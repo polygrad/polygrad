@@ -4142,6 +4142,52 @@ TEST(pe, tensor_einsum_builds_both_roots_from_exact_occurrences) {
   PASS();
 }
 
+TEST(pe, pointwise_owners_sign_dtype_and_graph) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_test_buffer(ctx, POLY_INT32, 4);
+  PolyUOp *out = poly_sign(ctx, x);
+  bool correct = out && out->op == POLY_OP_WHERE && poly_dtype_eq(out->dtype, POLY_INT32);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
+TEST(tensor, pointwise_owners_lifetime_and_admission) {
+  PolyTensor *(*unary[])(PolyCtx *, PolyTensor *) = {
+      poly_tensor_log10, poly_tensor_atanh, poly_tensor_asinh, poly_tensor_acosh,
+      poly_tensor_asin,  poly_tensor_acos,  poly_tensor_atan,  poly_tensor_logsigmoid,
+      poly_tensor_sinh,  poly_tensor_cosh,  poly_tensor_erf,   poly_tensor_softsign};
+  for (int logical = 0; logical < 2; logical++) {
+    PolyCtx *ctx = poly_ctx_new(), *other = poly_ctx_new();
+    poly_ctx_set_logical_policy(ctx, logical ? POLY_LOGICAL_ALWAYS : POLY_LOGICAL_NEVER);
+    PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){3}, 1, POLY_DEVICE_INTERP);
+    float data[] = {0.15f, 0.4f, 0.7f};
+    ASSERT_INT_EQ(poly_buffer_write(ctx, x->uop_physical, data, sizeof(data)), 0);
+    for (size_t i = 0; i < sizeof(unary) / sizeof(unary[0]); i++) {
+      ASSERT_PTR_EQ(unary[i](other, x), NULL);
+      PolyTensor *out = unary[i](ctx, x);
+      ASSERT_NOT_NULL(out);
+      ASSERT_INT_EQ(out->uop_logical != NULL, logical);
+      ASSERT_NOT_NULL(out->uop_physical);
+      poly_tensor_release(out);
+    }
+    PolyTensor *out = poly_tensor_softsign(ctx, x);
+    ASSERT_PTR_EQ(poly_tensor_binary_crossentropy_logits(ctx, x, x, NULL, 3), NULL);
+    ASSERT_PTR_EQ(poly_tensor_binary_crossentropy_logits(other, x, x, NULL, 2), NULL);
+    ASSERT_PTR_EQ(poly_tensor_nll_loss(ctx, x, x, NULL, NULL, 2), NULL);
+    poly_tensor_release(x);
+    poly_ctx_collect(ctx);
+    float got[3];
+    ASSERT_INT_EQ(read_tensor_f32(ctx, out, got, 3), 0);
+    for (int i = 0; i < 3; i++)
+      ASSERT_FLOAT_EQ(got[i], data[i] / (1 + data[i]), 1e-6);
+    poly_tensor_release(out);
+    poly_ctx_destroy(other);
+    poly_ctx_destroy(ctx);
+  }
+  PASS();
+}
+
 TEST(pe, scan_owners_dtype_contract) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *u8 = poly_test_buffer(ctx, POLY_UINT8, 4);

@@ -1171,6 +1171,30 @@ TEST(codegen, interp_if_masks_nested_stores_not_values) {
   PASS();
 }
 
+TEST(codegen, interp_float_to_narrow_integer_wraps) {
+  /* PythonProgram CAST truncates after converting to int, including negatives. */
+  PolyDType types[] = {POLY_INT8, POLY_UINT8, POLY_INT16, POLY_UINT16};
+  const int expected[] = {16, 16, -240, 65296};
+  for (int i = 0; i < 4; i++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyUOp *out = poly_test_uop_param(ctx, POLY_INT32, 1, 0, POLY_ADDR_GLOBAL);
+    PolyUOp *zero = poly_const_int(ctx, 0);
+    PolyUOp *index = poly_uop2(ctx, POLY_OP_INDEX, POLY_INT32, out, zero, poly_arg_none());
+    PolyUOp *value = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(-240.5));
+    PolyUOp *narrow = poly_uop1(ctx, POLY_OP_CAST, types[i], value, poly_arg_none());
+    PolyUOp *wide = poly_uop1(ctx, POLY_OP_CAST, POLY_INT32, narrow, poly_arg_none());
+    PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, index, wide, poly_arg_none());
+    PolyUOp *linear[] = {out, zero, index, value, narrow, wide, store};
+    int32_t result = 0;
+    void *args[] = {&result};
+    int rc = poly_interp_eval(ctx, linear, 7, args, 1);
+    poly_ctx_destroy(ctx);
+    ASSERT_INT_EQ(rc, 0);
+    ASSERT_INT_EQ(result, expected[i]);
+  }
+  PASS();
+}
+
 TEST(codegen, interp_bitcast_uint8_to_int8_reinterprets_sign_bit) {
   /* Pinned PythonProgram delegates BITCAST to uop/ops.py:1199-1207, which
    * packs with the uint8 format and unpacks the same byte as int8. */
@@ -3076,6 +3100,37 @@ TEST(codegen, partial_reshape_index_matches_tinygrad_mop) {
   free(source);
   free(linear);
   poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, wgsl_narrow_cast_and_alu_results) {
+  /* PG-DIV-008: WGSL's i32/u32 registers must preserve the UOp's 8/16-bit
+   * value before a later widening. Pinned PythonProgram truncates here;
+   * pinned WGSLRenderer currently does not. */
+  PolyDType types[] = {POLY_INT8, POLY_UINT8, POLY_INT16, POLY_UINT16};
+  for (int i = 0; i < 4; i++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyUOp *weak = poly_const_int(ctx, 65537);
+    PolyUOp *strong = poly_uop1(ctx, POLY_OP_CAST, POLY_INT32, weak, poly_arg_none());
+    PolyUOp *cast = poly_uop1(ctx, POLY_OP_CAST, types[i], strong, poly_arg_none());
+    PolyUOp *literal = poly_uop1(ctx, POLY_OP_CAST, types[i], weak, poly_arg_none());
+    PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, types[i], cast, literal, poly_arg_none());
+    PolyUOp *wide = poly_uop1(ctx, POLY_OP_CAST, POLY_INT32, add, poly_arg_none());
+    PolyUOp *ops[] = {weak, strong, cast, literal, add, wide};
+    char *src = poly_render_wgsl(ctx, ops, 6, "narrow_results");
+    ASSERT_NOT_NULL(src);
+    const char *suffix = i == 0   ? " << 24u) >> 24u)"
+                         : i == 1 ? " & 255u)"
+                         : i == 2 ? " << 16u) >> 16u)"
+                                  : " & 65535u)";
+    int count = 0;
+    for (const char *p = src; (p = strstr(p, suffix)); p += strlen(suffix))
+      count++;
+    /* Normal cast, inlined weak cast, and ALU result each normalize. */
+    free(src);
+    poly_ctx_destroy(ctx);
+    ASSERT_INT_EQ(count, 3);
+  }
   PASS();
 }
 

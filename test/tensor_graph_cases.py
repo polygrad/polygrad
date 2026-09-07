@@ -2177,6 +2177,54 @@ for _op in ("all", "any", "cumsum", "cumprod", "cummax", "cummin"):
                            scan_owner_graph(op, dt, sh, ax, r))
 
 
+
+def pointwise_owner_graph(op, dtype="float32", raw=False):
+    x = Tensor.empty(2, 3, dtype=dtype).realize()
+    if raw and ENGINE == "polygrad":
+        from polygrad.tensor import _uop_wrap
+        fn = getattr(_ffi._lib, "poly_" + op)
+        fn.restype = ctypes.c_void_p
+        fn.argtypes = [ctypes.c_void_p, ctypes.c_void_p] + ([ctypes.c_double] if op == "softplus" else [])
+        out = fn(x._ctx, x.uop.raw, *([1.0] if op == "softplus" else []))
+        return {"physical": _uop_wrap(x._ctx, out)}
+    out = getattr(x, op)(*([1.0] if raw and op == "softplus" else []))
+    return {"physical": out.uop} if raw else {"physical": out.uop, "logical": logical(out)}
+
+
+for _op in ("log10", "atanh", "asinh", "acosh", "asin", "acos", "atan", "celu", "selu",
+            "logsigmoid", "sinh", "cosh", "erf", "softsign", "isfinite"):
+    for _dtype in ("float32", "float16", "int32"):
+        CASES[f"pointwise_owner_{_op}_{_dtype}"] = ("tensor", lambda op=_op, dt=_dtype: pointwise_owner_graph(op, dt))
+for _op in ("sign", "erf", "softplus", "isinf"):
+    for _dtype in ("float32", "int32"):
+        CASES[f"pointwise_raw_{_op}_{_dtype}"] = ("tensor", lambda op=_op, dt=_dtype: pointwise_owner_graph(op, dt, True))
+
+
+def pointwise_pair_graph(op, scalar=False):
+    x = Tensor.empty(2, 3, dtype="uint8" if op == "lerp" else "float32").realize()
+    y = Tensor.empty(3, dtype=x.dtype).realize()
+    out = x.lerp(y, 0.25 if scalar else Tensor.empty(3).realize()) if op == "lerp" else getattr(x, op)(2 if scalar else y)
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+for _op in ("isclose", "copysign", "lerp"):
+    for _scalar in (False, True):
+        CASES[f"pointwise_pair_{_op}_{_scalar}"] = ("tensor", lambda op=_op, s=_scalar: pointwise_pair_graph(op, s))
+
+
+def pointwise_loss_graph(op, reduction, weighted):
+    x = Tensor.empty(2, 3, dtype="float32").realize()
+    y = Tensor.empty(*( (2,) if op == "nll_loss" else (2, 3)), dtype="int32" if op == "nll_loss" else "float32").realize()
+    w = Tensor.empty(3, dtype="float32").realize() if weighted else None
+    out = x.nll_loss(y, weight=w, ignore_index=1 if weighted else None, reduction=reduction) if op == "nll_loss" else x.binary_crossentropy_logits(y, reduction=reduction, pos_weight=w)
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+for _op in ("nll_loss", "binary_crossentropy_logits"):
+    for _reduction in ("none", "sum", "mean"):
+        for _weighted in (False, True):
+            CASES[f"pointwise_loss_{_op}_{_reduction}_{_weighted}"] = ("tensor", lambda op=_op, r=_reduction, w=_weighted: pointwise_loss_graph(op, r, w))
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--case", action="append", choices=sorted(CASES))

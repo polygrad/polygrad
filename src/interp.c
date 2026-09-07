@@ -673,6 +673,14 @@ static InterpLane bitcast_lane(InterpLane src, PolyDType src_dt, PolyDType dst_d
 
 /* CAST one lane: value conversion with truncation. */
 static InterpLane cast_lane(InterpLane src, PolyDType src_dt, PolyDType dst_dt) {
+  /* PythonProgram CAST applies dtype.const then dtype.truncate. A direct
+   * negative float -> uint64 C cast is undefined (and saturates to zero in
+   * Wasm). Reduce finite narrow results before integer conversion instead. */
+  if (poly_dtype_is_float(src_dt) && poly_dtype_is_int(dst_dt) && dst_dt.bitsize < 32 &&
+      isfinite(src.f)) {
+    int64_t value = (int64_t)fmod(trunc(src.f), ldexp(1.0, dst_dt.bitsize));
+    return interp_truncate_lane(il_int(value), dst_dt);
+  }
   if (poly_dtype_is_float(dst_dt)) {
     InterpLane out = il_flt(as_float(src, src_dt));
     return poly_dtype_is_fp8(dst_dt) ? interp_truncate_lane(out, dst_dt) : out;

@@ -842,6 +842,66 @@ def _declare_signatures(lib):
     lib.poly_tensor_expm1.restype = _ptr
     lib.poly_tensor_expm1.argtypes = [_ptr, _ptr]
 
+    lib.poly_tensor_log10.restype = _ptr
+    lib.poly_tensor_log10.argtypes = [_ptr, _ptr]
+
+    lib.poly_tensor_atanh.restype = _ptr
+    lib.poly_tensor_atanh.argtypes = [_ptr, _ptr]
+
+    lib.poly_tensor_asinh.restype = _ptr
+    lib.poly_tensor_asinh.argtypes = [_ptr, _ptr]
+
+    lib.poly_tensor_acosh.restype = _ptr
+    lib.poly_tensor_acosh.argtypes = [_ptr, _ptr]
+
+    lib.poly_tensor_asin.restype = _ptr
+    lib.poly_tensor_asin.argtypes = [_ptr, _ptr]
+
+    lib.poly_tensor_acos.restype = _ptr
+    lib.poly_tensor_acos.argtypes = [_ptr, _ptr]
+
+    lib.poly_tensor_atan.restype = _ptr
+    lib.poly_tensor_atan.argtypes = [_ptr, _ptr]
+
+    lib.poly_tensor_logsigmoid.restype = _ptr
+    lib.poly_tensor_logsigmoid.argtypes = [_ptr, _ptr]
+
+    lib.poly_tensor_sinh.restype = _ptr
+    lib.poly_tensor_sinh.argtypes = [_ptr, _ptr]
+
+    lib.poly_tensor_cosh.restype = _ptr
+    lib.poly_tensor_cosh.argtypes = [_ptr, _ptr]
+
+    lib.poly_tensor_erf.restype = _ptr
+    lib.poly_tensor_erf.argtypes = [_ptr, _ptr]
+
+    lib.poly_tensor_softsign.restype = _ptr
+    lib.poly_tensor_softsign.argtypes = [_ptr, _ptr]
+
+    lib.poly_tensor_isfinite.restype = _ptr
+    lib.poly_tensor_isfinite.argtypes = [_ptr, _ptr]
+
+    lib.poly_tensor_celu.restype = _ptr
+    lib.poly_tensor_celu.argtypes = [_ptr, _ptr, _ptr]
+
+    lib.poly_tensor_selu.restype = _ptr
+    lib.poly_tensor_selu.argtypes = [_ptr, _ptr, _ptr, _ptr]
+
+    lib.poly_tensor_copysign.restype = _ptr
+    lib.poly_tensor_copysign.argtypes = [_ptr, _ptr, _ptr]
+
+    lib.poly_tensor_lerp.restype = _ptr
+    lib.poly_tensor_lerp.argtypes = [_ptr, _ptr, _ptr, _ptr, ctypes.c_bool]
+
+    lib.poly_tensor_isclose.restype = _ptr
+    lib.poly_tensor_isclose.argtypes = [_ptr, _ptr, _ptr, _ptr, _ptr, ctypes.c_bool]
+
+    lib.poly_tensor_binary_crossentropy_logits.restype = _ptr
+    lib.poly_tensor_binary_crossentropy_logits.argtypes = [_ptr, _ptr, _ptr, _ptr, ctypes.c_int]
+
+    lib.poly_tensor_nll_loss.restype = _ptr
+    lib.poly_tensor_nll_loss.argtypes = [_ptr, _ptr, _ptr, _ptr, _ptr, ctypes.c_int]
+
     lib.poly_tensor_gelu.restype = _ptr
     lib.poly_tensor_gelu.argtypes = [_ptr, _ptr]
 

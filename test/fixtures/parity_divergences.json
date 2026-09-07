@@ -131,6 +131,24 @@
       "close_when": null
     },
     {
+      "id": "PG-DIV-008",
+      "status": "approved",
+      "stages": ["wgsl", "runtime"],
+      "area": "WGSL narrow integer value semantics",
+      "tinygrad": "Pinned WGSLRenderer maps int8/uint8/int16/uint16 CAST and ALU results to untruncated i32/u32 registers; widening can expose overflow bits.",
+      "polygrad": "WGSL masks unsigned and sign-extends signed 8/16-bit CAST and ALU results before widening, following dtype.truncate and PythonProgram. Float-to-narrow conversion stages through signed i32 so negatives can wrap. Ordinary float conversion range rules, Tensor graphs and packed storage layout are unchanged.",
+      "rationale": "A paired shader execution reproduces lost int8 narrowing in both renderers. Correct typed values fix uint8 Tensor-weight lerp without a Tensor-level workaround. Wasm uses the same typed-value contract; native C integer expression promotion remains a separately observed pinned backend behavior.",
+      "approval": "User 2026-09-07: fix the identified bug and document divergences, including source comments.",
+      "evidence": [
+        "src/renderer/wgsl.c:wgsl_emit_typed_expr",
+        "test/test_codegen.c:wgsl_narrow_cast_and_alu_results",
+        "js/test/test_tensor.js:pointwise owners: narrow integer casts survive widening",
+        "temp/pointwise-loss-20260907.zFrl6R/webgpu-cast-paired.log",
+        "temp/pointwise-loss-20260907.zFrl6R/correspondence.md"
+      ],
+      "close_when": "Re-evaluate against the same typed cast/ALU probes when the Tinygrad pin changes. This row grants no Tensor or physical graph allowance."
+    },
+    {
       "id": "PG-PARITY-001",
       "status": "resolved",
       "stages": ["placement", "realize"],

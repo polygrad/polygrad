@@ -217,6 +217,45 @@ PolyUOp *poly_quick_gelu(PolyCtx *ctx, PolyUOp *x);
 PolyUOp *poly_silu(PolyCtx *ctx, PolyUOp *x);
 PolyUOp *poly_elu(PolyCtx *ctx, PolyUOp *x, double alpha);
 PolyUOp *poly_softplus(PolyCtx *ctx, PolyUOp *x, double beta);
+PolyUOp *poly_log10(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_atanh(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_asinh(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_acosh(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_asin(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_acos(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_atan(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_logsigmoid(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_sinh(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_cosh(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_softsign(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_isfinite(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_celu(PolyCtx *ctx, PolyUOp *x, PolyUOp *alpha);
+PolyUOp *poly_selu(PolyCtx *ctx, PolyUOp *x, PolyUOp *alpha, PolyUOp *gamma);
+PolyUOp *poly_copysign(PolyCtx *ctx, PolyUOp *x, PolyUOp *other);
+PolyUOp *poly_lerp(PolyCtx *ctx, PolyUOp *x, PolyUOp *end, PolyUOp *weight, bool scalar_weight);
+PolyUOp *poly_isclose(
+    PolyCtx *ctx,
+    PolyUOp *x,
+    PolyUOp *other,
+    PolyUOp *rtol,
+    PolyUOp *atol,
+    bool equal_nan
+);
+PolyUOp *poly_binary_crossentropy_logits(
+    PolyCtx *ctx,
+    PolyUOp *x,
+    PolyUOp *target,
+    PolyUOp *weight,
+    int reduction
+);
+PolyUOp *poly_nll_loss(
+    PolyCtx *ctx,
+    PolyUOp *x,
+    PolyUOp *target,
+    PolyUOp *weight,
+    PolyUOp *ignore_index,
+    int reduction
+);
 PolyUOp *poly_mish(PolyCtx *ctx, PolyUOp *x);
 PolyUOp *poly_hardtanh(PolyCtx *ctx, PolyUOp *x, double min_val, double max_val);
 PolyUOp *poly_hardswish(PolyCtx *ctx, PolyUOp *x);

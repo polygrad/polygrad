@@ -645,6 +645,23 @@ static void emit_local_get_as_i32(WasmBuf *body, int local, PolyDType dt) {
   if (!poly_dtype_is_float(dt) && dt.bitsize == 64) wb_byte(body, WASM_OP_I32_WRAP_I64);
 }
 
+static void emit_narrow_integer(WasmBuf *body, PolyDType dst) {
+  if (!poly_dtype_is_int(dst) || (dst.bitsize != 8 && dst.bitsize != 16)) return;
+  /* PythonProgram CAST truncates to dtype width; CStyle expresses this through
+   * a typed cast. Wasm stores every narrow scalar in i32, so do it explicitly. */
+  wb_byte(body, WASM_OP_I32_CONST);
+  if (poly_dtype_is_unsigned(dst)) {
+    wb_sleb128(body, (1 << dst.bitsize) - 1);
+    wb_byte(body, WASM_OP_I32_AND);
+  } else {
+    wb_sleb128(body, 32 - dst.bitsize);
+    wb_byte(body, WASM_OP_I32_SHL);
+    wb_byte(body, WASM_OP_I32_CONST);
+    wb_sleb128(body, 32 - dst.bitsize);
+    wb_byte(body, WASM_OP_I32_SHR_S);
+  }
+}
+
 static void emit_cast_stack_value(WasmBuf *body, PolyDType src_dt, PolyDType dst_dt) {
   bool src_float = poly_dtype_is_float(src_dt);
   bool dst_float = poly_dtype_is_float(dst_dt);
@@ -708,7 +725,10 @@ static void emit_cast_stack_value(WasmBuf *body, PolyDType src_dt, PolyDType dst
     return;
   }
 
-  bool dst_u = poly_dtype_is_unsigned(dst_dt);
+  /* A narrow unsigned result wraps after truncation; converting a negative
+   * float directly to u32 traps before the 8/16-bit mask can run. Use signed
+   * i32 staging for narrow destinations, then emit_narrow_integer. */
+  bool dst_u = poly_dtype_is_unsigned(dst_dt) && dst_dt.bitsize >= 32;
   if (src_64 && dst_64)
     wb_byte(body, dst_u ? WASM_OP_I64_TRUNC_F64_U : WASM_OP_I64_TRUNC_F64_S);
   else if (src_64 && !dst_64)
@@ -1059,6 +1079,7 @@ static void emit_v128_cast_lanes(
     wb_uleb128(body, src_local);
     emit_v128_extract_lane(body, src_dt, j);
     emit_cast_stack_value(body, src_scalar, dst_scalar);
+    emit_narrow_integer(body, dst_scalar);
     emit_v128_replace_lane(body, dst_dt, j);
   }
 }
@@ -1487,6 +1508,9 @@ static void emit_alu_scalar(
     wb_byte(code, WASM_OP_NOP);
     break;
   }
+  /* Match PythonProgram.exec_alu: a narrow result is truncated before any
+   * later widening/conversion. Otherwise uint8 subtraction becomes uint32. */
+  emit_narrow_integer(code, dtype);
   (void)n_imported_funcs;
 }
 
@@ -1894,6 +1918,7 @@ static bool wasm_casted_const_identity(PolyUOp *u) {
   if (!wasm_is_casted_const(u)) return false;
   PolyDType src = u->src[0]->dtype;
   PolyDType dst = u->dtype;
+  if (poly_dtype_is_int(dst) && dst.bitsize < 32) return false;
   bool src_float = poly_dtype_is_float(src), dst_float = poly_dtype_is_float(dst);
   if (src_float != dst_float) return false;
   return src_float ? dt_is_f64(src) == dt_is_f64(dst) : dt_is_64(src) == dt_is_64(dst);
@@ -2589,6 +2614,7 @@ static void build_code_scalar(
           wb_byte(&body, WASM_OP_I32_CONST);
           wb_sleb128(&body, (int32_t)wasm_const_integer_bits(u->src[0]));
         }
+        emit_narrow_integer(&body, u->dtype);
         wb_byte(&body, WASM_OP_LOCAL_SET);
         wb_uleb128(&body, local_idx);
         lm_set(&locals, u, local_idx);
@@ -2623,8 +2649,10 @@ static void build_code_scalar(
         } else if (src_v128) {
           emit_v128_extract_lane(&body, src_dt, 0);
           emit_cast_stack_value(&body, src_dt, dst_dt);
+          if (u->op == POLY_OP_CAST) emit_narrow_integer(&body, dst_dt);
         } else {
           emit_cast_stack_value(&body, src_dt, dst_dt);
+          if (u->op == POLY_OP_CAST) emit_narrow_integer(&body, dst_dt);
           emit_v128_splat(&body, dst_dt);
         }
 
@@ -2654,46 +2682,8 @@ static void build_code_scalar(
         }
         /* same category: no-op (i32→i32, f32→f32) */
       } else {
-        /* Value-converting CAST */
-        if (src_float && dst_float) {
-          /* f32→f64 or f64→f32 */
-          if (!src_64 && dst_64)
-            wb_byte(&body, WASM_OP_F64_PROMOTE_F32);
-          else if (src_64 && !dst_64)
-            wb_byte(&body, WASM_OP_F32_DEMOTE_F64);
-        } else if (src_float && !dst_float) {
-          /* float→int */
-          bool dst_u = poly_dtype_is_unsigned(dst_dt);
-          if (src_64 && dst_64)
-            wb_byte(&body, dst_u ? WASM_OP_I64_TRUNC_F64_U : WASM_OP_I64_TRUNC_F64_S);
-          else if (src_64 && !dst_64)
-            wb_byte(&body, dst_u ? WASM_OP_I32_TRUNC_F64_U : WASM_OP_I32_TRUNC_F64_S);
-          else if (!src_64 && dst_64) {
-            wb_byte(&body, dst_u ? WASM_OP_I64_TRUNC_F32_U : WASM_OP_I64_TRUNC_F32_S);
-          } else {
-            wb_byte(&body, dst_u ? WASM_OP_I32_TRUNC_F32_U : WASM_OP_I32_TRUNC_F32_S);
-          }
-        } else if (!src_float && dst_float) {
-          /* int→float */
-          bool src_u = poly_dtype_is_unsigned(src_dt);
-          if (src_64 && dst_64)
-            wb_byte(&body, src_u ? WASM_OP_F64_CONVERT_I64_U : WASM_OP_F64_CONVERT_I64_S);
-          else if (src_64 && !dst_64) {
-            wb_byte(&body, src_u ? WASM_OP_F32_CONVERT_I64_U : WASM_OP_F32_CONVERT_I64_S);
-          } else if (!src_64 && dst_64) {
-            wb_byte(&body, src_u ? WASM_OP_F64_CONVERT_I32_U : WASM_OP_F64_CONVERT_I32_S);
-          } else {
-            wb_byte(&body, src_u ? WASM_OP_F32_CONVERT_I32_U : WASM_OP_F32_CONVERT_I32_S);
-          }
-        } else {
-          /* int→int */
-          if (!src_64 && dst_64) {
-            bool src_u = poly_dtype_is_unsigned(src_dt);
-            wb_byte(&body, src_u ? WASM_OP_I64_EXTEND_I32_U : WASM_OP_I64_EXTEND_I32_S);
-          } else if (src_64 && !dst_64)
-            wb_byte(&body, WASM_OP_I32_WRAP_I64);
-          /* same size: no-op */
-        }
+        emit_cast_stack_value(&body, src_dt, dst_dt);
+        emit_narrow_integer(&body, dst_dt);
       }
 
       wb_byte(&body, WASM_OP_LOCAL_SET);

@@ -4342,6 +4342,120 @@ async function runTensorTests(pg) {
     assert(Math.abs(mean0) < 1e-4, `Row 0 mean should be ~0, got ${mean0}`)
   })
 
+
+  const pointwiseReferences = {
+    log10: Math.log10, atanh: Math.atanh, asinh: Math.asinh, acosh: Math.acosh,
+    asin: Math.asin, acos: Math.acos, atan: Math.atan,
+    celu: x => x, selu: x => 1.0507*x,
+    logsigmoid: x => -Math.log1p(Math.exp(-x)),
+    sinh: Math.sinh, cosh: Math.cosh,
+    erf: null, softsign: x => x/(1+Math.abs(x))
+  }
+  for (const [op, fn] of Object.entries(pointwiseReferences)) {
+    await test(`pointwise owners: ${op} values and gradient`, async () => {
+      const data = op === 'acosh' ? [1.2, 1.5, 2] : [0.15, 0.4, 0.7]
+      const x = new Tensor(data)
+      const out = x[op]()
+      assert(out.dtype === 'float32')
+      assertClose(await out.toArray(), fn ? data.map(fn) : [0.1679959, 0.42839235, 0.67780113], 5e-6)
+      await out.sum().backward()
+      const expected = data.map(v => {
+        if (op === 'erf') return 2/Math.sqrt(Math.PI)*Math.exp(-v*v)
+        const h = 1e-5
+        return (fn(v+h)-fn(v-h))/(2*h)
+      })
+      assertClose(await x.grad.toArray(), expected, 4e-5)
+    })
+  }
+
+  await test('pointwise owners: parameterized activations and finite comparisons', async () => {
+    const x = new Tensor([-2, -0.5, 0, 2])
+    assertClose(await x.celu(2).toArray(), [-1.2642411, -0.4423984, 0, 2], 3e-6)
+    assertClose(await x.selu(2, 3).toArray(), [-5.1879883, -2.360816, 0, 6], 3e-6)
+    assertClose(await x.isfinite().toArray(), [1, 1, 1, 1])
+    assertClose(await x.isclose(0, {atol: 0.5, rtol: 0}).toArray(), [0, 1, 1, 0])
+  })
+
+  await testIf(pg.device !== 'webgpu', 'pointwise owners: IEEE NaN infinity and signed zero', async () => {
+    // WGSL finite-math limitations are separately established by the pinned shader control.
+    const a = new Tensor([1, 2, Infinity, -Infinity, NaN])
+    const b = new Tensor([1.000005, 2.1, Infinity, Infinity, NaN])
+    assertClose(await a.isfinite().toArray(), [1, 1, 0, 0, 0])
+    assertClose(await a.isclose(b, {equalNan: true}).toArray(), [1, 0, 1, 0, 1])
+    assertClose(await new Tensor([2, -3]).copysign(new Tensor(new Float32Array([-0, 0]))).toArray(), [-2, 3])
+  })
+
+  await test('pointwise owners: copysign lerp and uint8 weight provenance', async () => {
+    assertClose(await new Tensor([2, -3]).copysign(new Tensor([-1, 1])).toArray(), [-2, 3])
+    assertClose(await new Tensor([2, -3]).lerp(new Tensor([0, 1]), 0.25).toArray(), [1.5, -2])
+    const a = new Tensor([250, 10], {dtype: 'uint8'}), b = new Tensor([10, 250], {dtype: 'uint8'})
+    assertClose(await a.lerp(b, new Tensor([0.5, 0.5])).toArray(), [2, 2])
+    // PythonProgram truncates the uint8 subtraction before widening; native
+    // C instead promotes the subtraction. WGSL follows typed UOps (PG-DIV-008).
+    assertClose(await a.lerp(b, 0.5).toArray(), ['interp', 'wasm', 'webgpu', 'x86'].includes(pg.device) ? [258, 130] : [130, 130])
+  })
+
+  await test('pointwise owners: narrow integer casts survive widening', async () => {
+    const input = new Tensor(new Int32Array([128, -240, 65535, -65537]))
+    for (const [dtype, expected] of [
+      ['int8', [-128, 16, -1, -1]], ['uint8', [128, 16, 255, 255]],
+      ['int16', [128, -240, -1, -1]], ['uint16', [128, 65296, 65535, 65535]],
+    ]) {
+      assertClose(await input.cast(dtype).cast('int32').toArray(), expected)
+      if (['interp', 'wasm', 'webgpu'].includes(pg.device)) {
+        // PythonProgram's wrap contract, also used by these register backends.
+        // Native out-of-range float casts instead follow their C compiler:
+        // pinned CPU clamps signed narrow casts and wraps unsigned ones.
+        const floats = new Tensor(new Float32Array([128.75, -240.5, 65535, -65537]))
+        assertClose(await floats.cast(dtype).cast('int32').toArray(), expected)
+      }
+    }
+    if (['interp', 'wasm', 'webgpu'].includes(pg.device)) {
+      // These register backends implement dtype.truncate at each ALU result;
+      // unlike C integer promotion, widening cannot expose overflow bits.
+      for (const [dtype, input, expected] of [
+        ['int8', 127, -128], ['uint8', 255, 0],
+        ['int16', 32767, -32768], ['uint16', 65535, 0],
+      ]) assertClose(await new Tensor([input], {dtype}).add(1).cast('int32').toArray(), [expected])
+    }
+  })
+
+  for (const reduction of ['none', 'sum', 'mean']) {
+    await test(`pointwise owners: weighted losses ${reduction}`, async () => {
+      const x = new Tensor([[-2, 0, 2], [1, -1, 0.5]])
+      const y = new Tensor([[0, 1, 1], [1, 0, 1]]), w = new Tensor([2, 3, 4])
+      const loss = x.binaryCrossEntropyLogits(y, {reduction, posWeight: w})
+      const values = [Math.log1p(Math.exp(-2)), 3*Math.log(2), 4*Math.log1p(Math.exp(-2)),
+        2*Math.log1p(Math.exp(-1)), Math.log1p(Math.exp(-1)), 4*Math.log1p(Math.exp(-0.5))]
+      const sum = values.reduce((a,b) => a+b, 0)
+      assertClose(await loss.toArray(), reduction === 'none' ? values : [sum/(reduction === 'mean' ? 6 : 1)], 4e-6)
+      await loss.sum().backward()
+      assertClose(await x.grad.toArray(), [
+        1/(1+Math.exp(2)), -1.5, -4/(1+Math.exp(2)),
+        -2/(1+Math.exp(1)), 1/(1+Math.exp(1)), -4/(1+Math.exp(0.5))
+      ].map(v => v/(reduction === 'mean' ? 6 : 1)), 4e-6)
+      const scores = new Tensor([[-2, 0, 2], [1, -1, 0.5]])
+      const nll = scores.nllLoss(new Tensor([2, 1], {dtype: 'int32'}), {
+        weight: new Tensor([1, 2, 3]), ignoreIndex: 1, reduction
+      })
+      assertClose(await nll.toArray(), reduction === 'none' ? [-6, 0] : [reduction === 'mean' ? -2 : -6])
+      await nll.sum().backward()
+      assertClose(await scores.grad.toArray(), [0, 0, reduction === 'mean' ? -1 : -3, 0, 0, 0])
+    })
+  }
+
+  await test('pointwise owners: loss admission and spatial targets', async () => {
+    const x = new Tensor([[[1, 2], [3, 4], [5, 6]]])
+    const y = new Tensor([[0, 2]], {dtype: 'int32'})
+    assertClose(await x.nllLoss(y, {reduction: 'none'}).toArray(), [-1, -6])
+    assertClose(await x.nllLoss(y).toArray(), [-3.5])
+    for (const method of ['nllLoss', 'binaryCrossEntropyLogits']) {
+      let rejected = false
+      try { x[method](y, {reduction: 'typo'}) } catch (e) { rejected = /reduction/.test(e.message) }
+      assert(rejected, 'invalid reduction must fail before graph publication')
+    }
+  })
+
   await test('binaryCrossEntropy', async () => {
     const pred = new Tensor([0.9, 0.1, 0.8])
     const target = new Tensor([1, 0, 1])

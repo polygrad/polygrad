@@ -368,6 +368,19 @@ static char *render_float_const_wgsl(double v, char *buf, int cap) {
   return buf;
 }
 
+/* PG-DIV-008: pinned WGSLRenderer maps 8/16-bit integers to i32/u32 without
+ * truncating CAST or ALU results. Preserve dtype.truncate/PythonProgram's
+ * typed value before any later widening, not only at packed STORE. */
+static void wgsl_emit_typed_expr(WgslStrBuf *out, PolyDType dtype, const char *expr) {
+  if (poly_dtype_is_int(dtype) && (dtype.bitsize == 8 || dtype.bitsize == 16)) {
+    if (poly_dtype_is_unsigned(dtype))
+      wsb_printf(out, "(u32(%s) & %uu)", expr, (1u << dtype.bitsize) - 1);
+    else
+      wsb_printf(out, "((i32(%s) << %uu) >> %uu)", expr, 32 - dtype.bitsize, 32 - dtype.bitsize);
+  } else
+    wsb_puts(out, expr);
+}
+
 /* Current renderer/cstyle.py base_rewrite and renderer/wgsl.py render
  * CAST(strong, CONST(weak/bool)) directly as a destination-typed literal. */
 static char *wgsl_render_const_literal(PolyUOp *c, PolyDType dtype) {
@@ -401,7 +414,10 @@ static char *wgsl_render_const_literal(PolyUOp *c, PolyDType dtype) {
   } else {
     snprintf(val, sizeof(val), "%d", (int32_t)poly_arg_integer_to_u64_mod(c->arg));
   }
-  return strdup(val);
+  WgslStrBuf out;
+  wsb_init(&out);
+  wgsl_emit_typed_expr(&out, dtype, val);
+  return out.buf;
 }
 
 /* WGSL ALU expression */
@@ -887,14 +903,22 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
           snprintf(expr, sizeof(expr), "bitcast<%s>(%s)", tn, src_s);
         }
       } else {
-        /* CAST: type conversion */
-        snprintf(expr, sizeof(expr), "%s(%s)", tn, src_s);
+        /* PG-DIV-008: u32(float) clamps negatives before masking. Narrow
+         * integer conversions stage through i32 so signed values can wrap. */
+        bool narrow_float =
+            poly_dtype_is_float(src_dt) && poly_dtype_is_int(dst_s) && dst_s.bitsize < 32;
+        snprintf(expr, sizeof(expr), "%s(%s)", narrow_float ? "i32" : tn, src_s);
       }
 
       wsb_printf(&decls, "  var %s: %s;\n", name, tn);
       for (int d = 0; d < depth; d++)
         wsb_puts(&body, "  ");
-      wsb_printf(&body, "%s = %s;\n", name, expr);
+      wsb_printf(&body, "%s = ", name);
+      if (u->op == POLY_OP_CAST)
+        wgsl_emit_typed_expr(&body, u->dtype, expr);
+      else
+        wsb_puts(&body, expr);
+      wsb_puts(&body, ";\n");
       continue;
     }
 
@@ -924,7 +948,9 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
       wsb_printf(&decls, "  var %s: %s;\n", name, tn);
       for (int d = 0; d < depth; d++)
         wsb_puts(&body, "  ");
-      wsb_printf(&body, "%s = %s;\n", name, expr);
+      wsb_printf(&body, "%s = ", name);
+      wgsl_emit_typed_expr(&body, u->dtype, expr);
+      wsb_puts(&body, ";\n");
       continue;
     }
   }

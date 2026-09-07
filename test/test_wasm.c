@@ -975,6 +975,56 @@ TEST(wasm, render_vecadd) {
   PASS();
 }
 
+TEST(wasm, narrow_integer_casts_execute) {
+  /* PythonProgram CAST truncates to dtype width, and CStyle emits a typed
+   * cast. Wasm i32 locals must not erase int8/int16 conversion semantics. */
+  const PolyDType destinations[] = {POLY_INT8, POLY_UINT8, POLY_INT16, POLY_UINT16};
+  const int32_t values[] = {128, -240, 65535, -65537};
+  const int32_t expected[] = {-128, 16, -1, 65535};
+  const int32_t alu_values[] = {127, 0, 32767, 0};
+  const int32_t alu_expected[] = {-128, 255, -32768, 65535};
+  bool correct = true;
+  for (int literal = 0; literal < 4; literal++) {
+    for (int i = 0; i < 4; i++) {
+      PolyCtx *ctx = poly_ctx_new();
+      PolyUOp *shape = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(1));
+      PolyParamArg arg = {.slot = 0, .addrspace = POLY_ADDR_GLOBAL};
+      PolyUOp *out = poly_uop1(ctx, POLY_OP_PARAM, POLY_INT32, shape, poly_arg_param(&arg));
+      PolyUOp *index = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
+      PolyUOp *address = poly_uop2(ctx, POLY_OP_INDEX, POLY_INT32, out, index, poly_arg_none());
+      PolyUOp *value = poly_uop0(
+          ctx, POLY_OP_CONST,
+          literal == 3 ? POLY_FLOAT32
+          : literal    ? POLY_WEAKINT
+                       : POLY_INT32,
+          literal == 3 ? poly_arg_float(values[i]) : poly_arg_int(values[i])
+      );
+      PolyUOp *narrow = poly_uop1(ctx, POLY_OP_CAST, destinations[i], value, poly_arg_none());
+      if (literal == 2) {
+        PolyUOp *a = poly_uop0(ctx, POLY_OP_CONST, destinations[i], poly_arg_int(alu_values[i]));
+        PolyUOp *b = poly_uop0(ctx, POLY_OP_CONST, destinations[i], poly_arg_int(1));
+        narrow = poly_uop2(
+            ctx, i % 2 ? POLY_OP_SUB : POLY_OP_ADD, destinations[i], a, b, poly_arg_none()
+        );
+      }
+      PolyUOp *wide = poly_uop1(ctx, POLY_OP_CAST, POLY_INT32, narrow, poly_arg_none());
+      PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, address, wide, poly_arg_none());
+      PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
+      int n = 0, size = 0;
+      PolyUOp **uops = poly_toposort(ctx, sink, &n);
+      uint8_t *wasm = poly_render_wasm(ctx, uops, n, &size, false);
+      const char *path = "temp/polygrad_test_narrow_integer_cast.wasm";
+      int rc = wasm ? wasm_write_module(path, wasm, size) : -1;
+      if (rc == 0) rc = node_run_wasm_i32(path, literal == 2 ? alu_expected[i] : expected[i]);
+      correct &= rc == 0;
+      free(wasm);
+      poly_ctx_destroy(ctx);
+    }
+  }
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
 TEST(wasm, current_casted_literal_executes_without_extra_conversion) {
   /* Current tinygrad pm_casted_consts leaves CAST(int, CONST(weakint)) for
    * the renderer. Wasm aliases the identical i32 value class. */

@@ -2706,12 +2706,118 @@ PolyUOp *poly_tan(PolyCtx *ctx, PolyUOp *x) {
   return poly_div(ctx, poly_sin(ctx, x), poly_cos(ctx, x));
 }
 
-PolyUOp *poly_erf(PolyCtx *ctx, PolyUOp *x) {
-  PolyDType dt = x->dtype;
-  PolyUOp *sign = poly_sign(ctx, x);
+/* Pinned ElementwiseMixin compositions. Keep scalar weakness and source order:
+ * these are Tensor-level graphs, not algebraically equivalent backend rewrites. */
+static PolyUOp *pointwise_neg(PolyCtx *ctx, PolyUOp *x) {
+  if (!ctx || !x) return NULL;
+  return poly_dtype_is_bool(x->dtype)
+             ? poly_logical_not(ctx, x)
+             : poly_scalar_binop(ctx, POLY_OP_MUL, x, POLY_INT32, -1, false);
+}
+
+PolyUOp *poly_log10(PolyCtx *ctx, PolyUOp *x) {
+  return poly_scalar_binop(
+      ctx, POLY_OP_MUL, poly_alu1(ctx, POLY_OP_LOG2, x), POLY_FLOAT32, log10(2.0), false
+  );
+}
+
+PolyUOp *poly_atanh(PolyCtx *ctx, PolyUOp *x) {
+  PolyUOp *a = poly_scalar_binop(ctx, POLY_OP_ADD, x, POLY_INT32, 1, true);
+  PolyUOp *b = poly_scalar_binop(ctx, POLY_OP_SUB, x, POLY_INT32, 1, true);
+  return poly_scalar_binop(
+      ctx, POLY_OP_FDIV, poly_log(ctx, poly_div(ctx, a, b)), POLY_INT32, 2, false
+  );
+}
+
+PolyUOp *poly_asinh(PolyCtx *ctx, PolyUOp *x) {
+  PolyUOp *a = poly_scalar_binop(ctx, POLY_OP_ADD, poly_square(ctx, x), POLY_INT32, 1, false);
+  return poly_log(ctx, poly_add(ctx, x, poly_alu1(ctx, POLY_OP_SQRT, a)));
+}
+
+PolyUOp *poly_acosh(PolyCtx *ctx, PolyUOp *x) {
+  PolyUOp *a = poly_scalar_binop(ctx, POLY_OP_SUB, poly_square(ctx, x), POLY_INT32, 1, false);
+  return poly_log(ctx, poly_add(ctx, x, poly_alu1(ctx, POLY_OP_SQRT, a)));
+}
+
+/* helpers.polyN starts at 0.0, including the first multiply/add in the graph. */
+static PolyUOp *pointwise_polyn(PolyCtx *ctx, PolyUOp *x, const double *coefficients, int n) {
+  PolyUOp *p = poly_const_exact_float(ctx, POLY_WEAKFLOAT, 0.0);
+  for (int i = 0; p && i < n; i++)
+    p = poly_scalar_binop(
+        ctx, POLY_OP_ADD, poly_mul(ctx, p, x), POLY_FLOAT32, coefficients[i], false
+    );
+  return p;
+}
+
+PolyUOp *poly_asin(PolyCtx *ctx, PolyUOp *x) {
+  const double coefficients[] = {-0.0012624911, 0.0066700901, -0.0170881256, 0.0308918810,
+                                 -0.0501743046, 0.0889789874, -0.2145988016, 1.5707963050};
   PolyUOp *ax = poly_abs(ctx, x);
-  PolyUOp *tau = erf_tau(ctx, ax, dt);
-  return poly_alu2(ctx, POLY_OP_MUL, sign, poly_alu2(ctx, POLY_OP_SUB, cdt(ctx, dt, 1.0), tau));
+  PolyUOp *root = poly_alu1(
+      ctx, POLY_OP_SQRT, poly_scalar_binop(ctx, POLY_OP_SUB, ax, POLY_FLOAT32, 1.0, true)
+  );
+  PolyUOp *p = poly_mul(ctx, root, pointwise_polyn(ctx, ax, coefficients, 8));
+  return poly_mul(
+      ctx, poly_sign(ctx, x), poly_scalar_binop(ctx, POLY_OP_SUB, p, POLY_FLOAT32, M_PI / 2, true)
+  );
+}
+
+PolyUOp *poly_acos(PolyCtx *ctx, PolyUOp *x) {
+  return poly_scalar_binop(ctx, POLY_OP_SUB, poly_asin(ctx, x), POLY_FLOAT32, M_PI / 2, true);
+}
+
+PolyUOp *poly_atan(PolyCtx *ctx, PolyUOp *x) {
+  PolyUOp *a = poly_scalar_binop(ctx, POLY_OP_ADD, poly_mul(ctx, x, x), POLY_INT32, 1, true);
+  return poly_asin(ctx, poly_div(ctx, x, poly_alu1(ctx, POLY_OP_SQRT, a)));
+}
+
+PolyUOp *poly_celu(PolyCtx *ctx, PolyUOp *x, PolyUOp *alpha) {
+  PolyUOp *negative = poly_mul(
+      ctx, alpha,
+      poly_scalar_binop(
+          ctx, POLY_OP_SUB, poly_exp(ctx, poly_div(ctx, x, alpha)), POLY_INT32, 1, false
+      )
+  );
+  PolyUOp *zero = poly_const_exact_int(ctx, POLY_WEAKINT, 0);
+  return poly_add(ctx, poly_maximum(ctx, x, zero), poly_minimum(ctx, negative, zero));
+}
+
+PolyUOp *poly_selu(PolyCtx *ctx, PolyUOp *x, PolyUOp *alpha, PolyUOp *gamma) {
+  PolyUOp *zero = poly_const_exact_int(ctx, POLY_WEAKINT, 0);
+  PolyUOp *negative = poly_mul(
+      ctx, alpha, poly_scalar_binop(ctx, POLY_OP_SUB, poly_exp(ctx, x), POLY_INT32, 1, false)
+  );
+  return poly_mul(ctx, gamma, poly_where_op(ctx, poly_ge(ctx, x, zero), x, negative));
+}
+
+PolyUOp *poly_sinh(PolyCtx *ctx, PolyUOp *x) {
+  PolyUOp *a = poly_sub(ctx, poly_exp(ctx, x), poly_exp(ctx, pointwise_neg(ctx, x)));
+  return poly_scalar_binop(ctx, POLY_OP_FDIV, a, POLY_INT32, 2, false);
+}
+
+PolyUOp *poly_cosh(PolyCtx *ctx, PolyUOp *x) {
+  PolyUOp *a = poly_add(ctx, poly_exp(ctx, x), poly_exp(ctx, pointwise_neg(ctx, x)));
+  return poly_scalar_binop(ctx, POLY_OP_FDIV, a, POLY_INT32, 2, false);
+}
+
+PolyUOp *poly_softsign(PolyCtx *ctx, PolyUOp *x) {
+  return poly_div(
+      ctx, x, poly_scalar_binop(ctx, POLY_OP_ADD, poly_abs(ctx, x), POLY_INT32, 1, true)
+  );
+}
+
+PolyUOp *poly_erf(PolyCtx *ctx, PolyUOp *x) {
+  const double coefficients[] = {1.061405429, -1.453152027, 1.421413741, -0.284496736, 0.254829592};
+  PolyUOp *a = poly_scalar_binop(ctx, POLY_OP_MUL, poly_abs(ctx, x), POLY_FLOAT32, 0.3275911, true);
+  PolyUOp *t = poly_scalar_binop(
+      ctx, POLY_OP_FDIV, poly_scalar_binop(ctx, POLY_OP_ADD, a, POLY_FLOAT32, 1.0, true),
+      POLY_FLOAT32, 1.0, true
+  );
+  PolyUOp *p = poly_mul(ctx, t, pointwise_polyn(ctx, t, coefficients, 5));
+  PolyUOp *tail = poly_mul(ctx, p, poly_exp(ctx, pointwise_neg(ctx, poly_square(ctx, x))));
+  return poly_mul(
+      ctx, poly_sign(ctx, x), poly_scalar_binop(ctx, POLY_OP_SUB, tail, POLY_FLOAT32, 1.0, true)
+  );
 }
 
 PolyUOp *poly_erfc(PolyCtx *ctx, PolyUOp *x) {
@@ -2826,15 +2932,14 @@ PolyUOp *poly_abs(PolyCtx *ctx, PolyUOp *x) {
 }
 
 PolyUOp *poly_sign(PolyCtx *ctx, PolyUOp *x) {
-  /* sign(x) = ne(x,0).where(lt(x,0).where(-1, 1), 0) + x*0
-   * The +x*0 preserves NaN (NaN*0=NaN, NaN+0=NaN) */
-  PolyUOp *zero = cf(ctx, x, 0.0);
-  PolyUOp *is_nonzero = poly_alu2(ctx, POLY_OP_CMPNE, x, zero);
-  PolyUOp *is_neg = poly_alu2(ctx, POLY_OP_CMPLT, x, zero);
-  PolyUOp *neg_or_pos = poly_alu3(ctx, POLY_OP_WHERE, is_neg, cf(ctx, x, -1.0), cf(ctx, x, 1.0));
-  PolyUOp *result = poly_alu3(ctx, POLY_OP_WHERE, is_nonzero, neg_or_pos, zero);
-  /* +x*0 to propagate NaN */
-  return poly_alu2(ctx, POLY_OP_ADD, result, poly_alu2(ctx, POLY_OP_MUL, x, zero));
+  /* Pinned sign uses typed, shaped const_like branches; NaN selects +1. */
+  PolyUOp *nonzero = poly_scalar_binop(ctx, POLY_OP_CMPNE, x, POLY_INT32, 0, false);
+  PolyUOp *negative = poly_scalar_binop(ctx, POLY_OP_CMPLT, x, POLY_INT32, 0, false);
+  PolyUOp *signed_one = poly_where_op(
+      ctx, negative, poly_const_like(ctx, x, poly_arg_int(-1)),
+      poly_const_like(ctx, x, poly_arg_int(1))
+  );
+  return poly_where_op(ctx, nonzero, signed_one, poly_const_like(ctx, x, poly_arg_int(0)));
 }
 
 PolyUOp *poly_square(PolyCtx *ctx, PolyUOp *x) {
@@ -2879,19 +2984,73 @@ PolyUOp *poly_round_f(PolyCtx *ctx, PolyUOp *x) {
 }
 
 PolyUOp *poly_isinf(PolyCtx *ctx, PolyUOp *x) {
-  PolyUOp *zero = cf(ctx, x, 0.0);
-  PolyUOp *x_minus_x = poly_alu2(ctx, POLY_OP_SUB, x, x);
-  PolyUOp *not_nan = poly_eq(ctx, x, x); /* true if not NaN */
-  PolyUOp *sub_nan = poly_ne(ctx, x_minus_x, x_minus_x); /* true if x-x is NaN (inf case) */
-  PolyUOp *not_zero = poly_ne(ctx, x, zero);
-  /* all three must be true: use AND via MUL on bool-like values */
-  PolyUOp *t1 = poly_alu2(ctx, POLY_OP_MUL, not_nan, sub_nan);
-  return poly_alu2(ctx, POLY_OP_MUL, t1, not_zero);
+  /* ElementwiseMixin.isinf with both detection flags enabled. */
+  PolyUOp *positive = poly_eq(ctx, x, poly_const_exact_float(ctx, POLY_WEAKFLOAT, INFINITY));
+  PolyUOp *negative = poly_eq(ctx, x, poly_const_exact_float(ctx, POLY_WEAKFLOAT, -INFINITY));
+  positive = poly_scalar_binop(ctx, POLY_OP_MUL, positive, POLY_BOOL, 1, false);
+  negative = poly_scalar_binop(ctx, POLY_OP_MUL, negative, POLY_BOOL, 1, false);
+  return poly_add(ctx, positive, negative);
 }
 
 PolyUOp *poly_isnan(PolyCtx *ctx, PolyUOp *x) {
   /* isnan(x) = (x != x) -- IEEE 754 */
   return poly_alu2(ctx, POLY_OP_CMPNE, x, x);
+}
+
+PolyUOp *poly_isfinite(PolyCtx *ctx, PolyUOp *x) {
+  return poly_logical_not(ctx, poly_binop(ctx, POLY_OP_OR, poly_isinf(ctx, x), poly_isnan(ctx, x)));
+}
+
+PolyUOp *poly_isclose(
+    PolyCtx *ctx,
+    PolyUOp *a,
+    PolyUOp *b,
+    PolyUOp *rtol,
+    PolyUOp *atol,
+    bool equal_nan
+) {
+  PolyUOp *tolerance = poly_add(ctx, atol, poly_mul(ctx, rtol, poly_abs(ctx, b)));
+  PolyUOp *finite = poly_binop(ctx, POLY_OP_AND, poly_isfinite(ctx, a), poly_isfinite(ctx, b));
+  finite = poly_binop(
+      ctx, POLY_OP_AND, finite, poly_le(ctx, poly_abs(ctx, poly_sub(ctx, a, b)), tolerance)
+  );
+  PolyUOp *infinite = poly_binop(ctx, POLY_OP_OR, poly_isinf(ctx, a), poly_isinf(ctx, b));
+  infinite = poly_binop(ctx, POLY_OP_AND, infinite, poly_eq(ctx, a, b));
+  PolyUOp *nan = poly_binop(ctx, POLY_OP_AND, poly_isnan(ctx, a), poly_isnan(ctx, b));
+  nan = poly_scalar_binop(ctx, POLY_OP_AND, nan, POLY_BOOL, equal_nan, false);
+  return poly_binop(ctx, POLY_OP_OR, poly_binop(ctx, POLY_OP_OR, finite, infinite), nan);
+}
+
+PolyUOp *poly_copysign(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
+  if (!poly_broadcasted_pair(ctx, &a, &b)) return NULL;
+  PolyUOp *negative = poly_scalar_binop(ctx, POLY_OP_CMPLT, b, POLY_INT32, 0, false);
+  PolyUOp *signbit = poly_scalar_binop(
+      ctx, POLY_OP_CMPLT, poly_alu1(ctx, POLY_OP_RECIPROCAL, b), POLY_INT32, 0, false
+  );
+  PolyUOp *magnitude = poly_abs(ctx, a);
+  return poly_where_op(
+      ctx, poly_binop(ctx, POLY_OP_OR, negative, signbit), pointwise_neg(ctx, magnitude), magnitude
+  );
+}
+
+PolyUOp *poly_lerp(PolyCtx *ctx, PolyUOp *x, PolyUOp *end, PolyUOp *weight, bool scalar_weight) {
+  if (!ctx || !x || !end || !weight) return NULL;
+  PolyUOp *difference = poly_sub(ctx, end, x);
+  /* The pinned uint8 path is selected by host-scalar versus Tensor provenance,
+   * not by weight dtype: a weak Tensor is still a Tensor. */
+  if (poly_dtype_eq(x->dtype, POLY_UINT8) && !scalar_weight) {
+    PolyUOp *scaled = poly_scalar_binop(ctx, POLY_OP_MUL, weight, POLY_INT32, 128, false);
+    PolyUOp *wi = poly_cast(
+        ctx, poly_scalar_binop(ctx, POLY_OP_ADD, scaled, POLY_FLOAT32, 0.5, false), POLY_INT16
+    );
+    PolyUOp *offset = poly_mul(ctx, poly_cast(ctx, difference, POLY_INT8), wi);
+    offset = poly_cast(
+        ctx, poly_scalar_binop(ctx, POLY_OP_ADD, offset, POLY_INT32, 64, false), POLY_UINT16
+    );
+    offset = poly_scalar_binop(ctx, POLY_OP_SHR, offset, POLY_INT32, 7, false);
+    return poly_cast(ctx, poly_add(ctx, x, offset), POLY_UINT8);
+  }
+  return poly_add(ctx, x, poly_mul(ctx, difference, weight));
 }
 
 /* Activations */
@@ -2963,14 +3122,22 @@ PolyUOp *poly_elu(PolyCtx *ctx, PolyUOp *x, double alpha) {
   );
 }
 
+/* ElementwiseMixin.softplus/logaddexp, with the pinned floating beta. */
 PolyUOp *poly_softplus(PolyCtx *ctx, PolyUOp *x, double beta) {
-  PolyUOp *bx = poly_alu2(ctx, POLY_OP_MUL, cf(ctx, x, beta), x);
-  PolyUOp *zero = cf(ctx, x, 0.0);
-  PolyUOp *m = poly_alu2(ctx, POLY_OP_MAX, bx, zero);
-  PolyUOp *ea = poly_exp(ctx, poly_alu2(ctx, POLY_OP_SUB, bx, m));
-  PolyUOp *eb = poly_exp(ctx, poly_alu2(ctx, POLY_OP_SUB, zero, m));
-  PolyUOp *lae = poly_alu2(ctx, POLY_OP_ADD, m, poly_log(ctx, poly_alu2(ctx, POLY_OP_ADD, ea, eb)));
-  return poly_alu2(ctx, POLY_OP_MUL, cf(ctx, x, 1.0 / beta), lae);
+  if (!ctx || !x || beta == 0) return NULL;
+  PolyUOp *a = poly_scalar_binop(ctx, POLY_OP_MUL, x, POLY_FLOAT32, beta, false);
+  PolyUOp *b = poly_const_exact_float(ctx, POLY_WEAKFLOAT, 0.0);
+  if (!poly_broadcasted_pair(ctx, &a, &b)) return NULL;
+  PolyUOp *m = poly_maximum(ctx, a, b);
+  PolyUOp *sum =
+      poly_add(ctx, poly_exp(ctx, poly_sub(ctx, a, m)), poly_exp(ctx, poly_sub(ctx, b, m)));
+  PolyUOp *lae = poly_add(ctx, poly_log(ctx, sum), m);
+  return poly_scalar_binop(ctx, POLY_OP_MUL, lae, POLY_FLOAT32, 1.0 / beta, true);
+}
+
+PolyUOp *poly_logsigmoid(PolyCtx *ctx, PolyUOp *x) {
+  PolyUOp *out = poly_softplus(ctx, pointwise_neg(ctx, x), 1.0);
+  return out ? pointwise_neg(ctx, out) : NULL;
 }
 
 PolyUOp *poly_mish(PolyCtx *ctx, PolyUOp *x) {
@@ -6515,6 +6682,278 @@ PolyTensor *poly_tensor_tan(PolyCtx *ctx, PolyTensor *src) {
   );
 }
 
+PolyTensor *poly_tensor_log10(PolyCtx *ctx, PolyTensor *x) {
+  PolyTensor *inputs[1] = {x};
+  int n_inputs = 1;
+
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, n_inputs);
+  if (build_logical < 0) return NULL;
+  PolyUOp *physical = poly_log10(ctx, x->uop_physical);
+  PolyUOp *logical = build_logical ? poly_log10(ctx, x->uop_logical) : NULL;
+  return tensor_composite_result(ctx, logical, physical, inputs, n_inputs);
+}
+
+PolyTensor *poly_tensor_atanh(PolyCtx *ctx, PolyTensor *x) {
+  PolyTensor *inputs[1] = {x};
+  int n_inputs = 1;
+
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, n_inputs);
+  if (build_logical < 0) return NULL;
+  PolyUOp *physical = poly_atanh(ctx, x->uop_physical);
+  PolyUOp *logical = build_logical ? poly_atanh(ctx, x->uop_logical) : NULL;
+  return tensor_composite_result(ctx, logical, physical, inputs, n_inputs);
+}
+
+PolyTensor *poly_tensor_asinh(PolyCtx *ctx, PolyTensor *x) {
+  PolyTensor *inputs[1] = {x};
+  int n_inputs = 1;
+
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, n_inputs);
+  if (build_logical < 0) return NULL;
+  PolyUOp *physical = poly_asinh(ctx, x->uop_physical);
+  PolyUOp *logical = build_logical ? poly_asinh(ctx, x->uop_logical) : NULL;
+  return tensor_composite_result(ctx, logical, physical, inputs, n_inputs);
+}
+
+PolyTensor *poly_tensor_acosh(PolyCtx *ctx, PolyTensor *x) {
+  PolyTensor *inputs[1] = {x};
+  int n_inputs = 1;
+
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, n_inputs);
+  if (build_logical < 0) return NULL;
+  PolyUOp *physical = poly_acosh(ctx, x->uop_physical);
+  PolyUOp *logical = build_logical ? poly_acosh(ctx, x->uop_logical) : NULL;
+  return tensor_composite_result(ctx, logical, physical, inputs, n_inputs);
+}
+
+PolyTensor *poly_tensor_asin(PolyCtx *ctx, PolyTensor *x) {
+  PolyTensor *inputs[1] = {x};
+  int n_inputs = 1;
+
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, n_inputs);
+  if (build_logical < 0) return NULL;
+  PolyUOp *physical = poly_asin(ctx, x->uop_physical);
+  PolyUOp *logical = build_logical ? poly_asin(ctx, x->uop_logical) : NULL;
+  return tensor_composite_result(ctx, logical, physical, inputs, n_inputs);
+}
+
+PolyTensor *poly_tensor_acos(PolyCtx *ctx, PolyTensor *x) {
+  PolyTensor *inputs[1] = {x};
+  int n_inputs = 1;
+
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, n_inputs);
+  if (build_logical < 0) return NULL;
+  PolyUOp *physical = poly_acos(ctx, x->uop_physical);
+  PolyUOp *logical = build_logical ? poly_acos(ctx, x->uop_logical) : NULL;
+  return tensor_composite_result(ctx, logical, physical, inputs, n_inputs);
+}
+
+PolyTensor *poly_tensor_atan(PolyCtx *ctx, PolyTensor *x) {
+  PolyTensor *inputs[1] = {x};
+  int n_inputs = 1;
+
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, n_inputs);
+  if (build_logical < 0) return NULL;
+  PolyUOp *physical = poly_atan(ctx, x->uop_physical);
+  PolyUOp *logical = build_logical ? poly_atan(ctx, x->uop_logical) : NULL;
+  return tensor_composite_result(ctx, logical, physical, inputs, n_inputs);
+}
+
+PolyTensor *poly_tensor_logsigmoid(PolyCtx *ctx, PolyTensor *x) {
+  PolyTensor *inputs[1] = {x};
+  int n_inputs = 1;
+
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, n_inputs);
+  if (build_logical < 0) return NULL;
+  PolyUOp *physical = poly_logsigmoid(ctx, x->uop_physical);
+  PolyUOp *logical = build_logical ? poly_logsigmoid(ctx, x->uop_logical) : NULL;
+  return tensor_composite_result(ctx, logical, physical, inputs, n_inputs);
+}
+
+PolyTensor *poly_tensor_sinh(PolyCtx *ctx, PolyTensor *x) {
+  PolyTensor *inputs[1] = {x};
+  int n_inputs = 1;
+
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, n_inputs);
+  if (build_logical < 0) return NULL;
+  PolyUOp *physical = poly_sinh(ctx, x->uop_physical);
+  PolyUOp *logical = build_logical ? poly_sinh(ctx, x->uop_logical) : NULL;
+  return tensor_composite_result(ctx, logical, physical, inputs, n_inputs);
+}
+
+PolyTensor *poly_tensor_cosh(PolyCtx *ctx, PolyTensor *x) {
+  PolyTensor *inputs[1] = {x};
+  int n_inputs = 1;
+
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, n_inputs);
+  if (build_logical < 0) return NULL;
+  PolyUOp *physical = poly_cosh(ctx, x->uop_physical);
+  PolyUOp *logical = build_logical ? poly_cosh(ctx, x->uop_logical) : NULL;
+  return tensor_composite_result(ctx, logical, physical, inputs, n_inputs);
+}
+
+PolyTensor *poly_tensor_erf(PolyCtx *ctx, PolyTensor *x) {
+  PolyTensor *inputs[1] = {x};
+  int n_inputs = 1;
+
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, n_inputs);
+  if (build_logical < 0) return NULL;
+  PolyUOp *physical = poly_erf(ctx, x->uop_physical);
+  PolyUOp *logical = build_logical ? poly_erf(ctx, x->uop_logical) : NULL;
+  return tensor_composite_result(ctx, logical, physical, inputs, n_inputs);
+}
+
+PolyTensor *poly_tensor_softsign(PolyCtx *ctx, PolyTensor *x) {
+  PolyTensor *inputs[1] = {x};
+  int n_inputs = 1;
+
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, n_inputs);
+  if (build_logical < 0) return NULL;
+  PolyUOp *physical = poly_softsign(ctx, x->uop_physical);
+  PolyUOp *logical = build_logical ? poly_softsign(ctx, x->uop_logical) : NULL;
+  return tensor_composite_result(ctx, logical, physical, inputs, n_inputs);
+}
+
+PolyTensor *poly_tensor_isfinite(PolyCtx *ctx, PolyTensor *x) {
+  PolyTensor *inputs[1] = {x};
+  int n_inputs = 1;
+
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, n_inputs);
+  if (build_logical < 0) return NULL;
+  PolyUOp *physical = poly_isfinite(ctx, x->uop_physical);
+  PolyUOp *logical = build_logical ? poly_isfinite(ctx, x->uop_logical) : NULL;
+  return tensor_composite_result(ctx, logical, physical, inputs, n_inputs);
+}
+
+PolyTensor *poly_tensor_celu(PolyCtx *ctx, PolyTensor *x, PolyTensor *alpha) {
+  PolyTensor *inputs[2] = {x, alpha};
+  int n_inputs = 2;
+
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, n_inputs);
+  if (build_logical < 0) return NULL;
+  PolyUOp *physical = poly_celu(ctx, x->uop_physical, alpha->uop_physical);
+  PolyUOp *logical = build_logical ? poly_celu(ctx, x->uop_logical, alpha->uop_logical) : NULL;
+  return tensor_composite_result(ctx, logical, physical, inputs, n_inputs);
+}
+
+PolyTensor *poly_tensor_selu(PolyCtx *ctx, PolyTensor *x, PolyTensor *alpha, PolyTensor *gamma) {
+  PolyTensor *inputs[3] = {x, alpha, gamma};
+  int n_inputs = 3;
+
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, n_inputs);
+  if (build_logical < 0) return NULL;
+  PolyUOp *physical = poly_selu(ctx, x->uop_physical, alpha->uop_physical, gamma->uop_physical);
+  PolyUOp *logical =
+      build_logical ? poly_selu(ctx, x->uop_logical, alpha->uop_logical, gamma->uop_logical) : NULL;
+  return tensor_composite_result(ctx, logical, physical, inputs, n_inputs);
+}
+
+PolyTensor *poly_tensor_copysign(PolyCtx *ctx, PolyTensor *x, PolyTensor *other) {
+  PolyTensor *inputs[2] = {x, other};
+  int n_inputs = 2;
+
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, n_inputs);
+  if (build_logical < 0) return NULL;
+  PolyUOp *physical = poly_copysign(ctx, x->uop_physical, other->uop_physical);
+  PolyUOp *logical = build_logical ? poly_copysign(ctx, x->uop_logical, other->uop_logical) : NULL;
+  return tensor_composite_result(ctx, logical, physical, inputs, n_inputs);
+}
+
+PolyTensor *poly_tensor_lerp(
+    PolyCtx *ctx,
+    PolyTensor *x,
+    PolyTensor *end,
+    PolyTensor *weight,
+    bool scalar_weight
+) {
+  PolyTensor *inputs[3] = {x, end, weight};
+  int n_inputs = 3;
+
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, n_inputs);
+  if (build_logical < 0) return NULL;
+  PolyUOp *physical =
+      poly_lerp(ctx, x->uop_physical, end->uop_physical, weight->uop_physical, scalar_weight);
+  PolyUOp *logical =
+      build_logical
+          ? poly_lerp(ctx, x->uop_logical, end->uop_logical, weight->uop_logical, scalar_weight)
+          : NULL;
+  return tensor_composite_result(ctx, logical, physical, inputs, n_inputs);
+}
+
+PolyTensor *poly_tensor_isclose(
+    PolyCtx *ctx,
+    PolyTensor *x,
+    PolyTensor *other,
+    PolyTensor *rtol,
+    PolyTensor *atol,
+    bool equal_nan
+) {
+  PolyTensor *inputs[4] = {x, other, rtol, atol};
+  int n_inputs = 4;
+
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, n_inputs);
+  if (build_logical < 0) return NULL;
+  PolyUOp *physical = poly_isclose(
+      ctx, x->uop_physical, other->uop_physical, rtol->uop_physical, atol->uop_physical, equal_nan
+  );
+  PolyUOp *logical = build_logical ? poly_isclose(
+                                         ctx, x->uop_logical, other->uop_logical, rtol->uop_logical,
+                                         atol->uop_logical, equal_nan
+                                     )
+                                   : NULL;
+  return tensor_composite_result(ctx, logical, physical, inputs, n_inputs);
+}
+
+PolyTensor *poly_tensor_binary_crossentropy_logits(
+    PolyCtx *ctx,
+    PolyTensor *x,
+    PolyTensor *target,
+    PolyTensor *weight,
+    int reduction
+) {
+  PolyTensor *inputs[3] = {x, target};
+  int n_inputs = 2;
+  if (weight) inputs[n_inputs++] = weight;
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, n_inputs);
+  if (build_logical < 0) return NULL;
+  PolyUOp *physical = poly_binary_crossentropy_logits(
+      ctx, x->uop_physical, target->uop_physical, weight ? weight->uop_physical : NULL, reduction
+  );
+  PolyUOp *logical = build_logical ? poly_binary_crossentropy_logits(
+                                         ctx, x->uop_logical, target->uop_logical,
+                                         weight ? weight->uop_logical : NULL, reduction
+                                     )
+                                   : NULL;
+  return tensor_composite_result(ctx, logical, physical, inputs, n_inputs);
+}
+
+PolyTensor *poly_tensor_nll_loss(
+    PolyCtx *ctx,
+    PolyTensor *x,
+    PolyTensor *target,
+    PolyTensor *weight,
+    PolyTensor *ignore_index,
+    int reduction
+) {
+  PolyTensor *inputs[4] = {x, target};
+  int n_inputs = 2;
+  if (weight) inputs[n_inputs++] = weight;
+  if (ignore_index) inputs[n_inputs++] = ignore_index;
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, n_inputs);
+  if (build_logical < 0) return NULL;
+  PolyUOp *physical = poly_nll_loss(
+      ctx, x->uop_physical, target->uop_physical, weight ? weight->uop_physical : NULL,
+      ignore_index ? ignore_index->uop_physical : NULL, reduction
+  );
+  PolyUOp *logical = build_logical ? poly_nll_loss(
+                                         ctx, x->uop_logical, target->uop_logical,
+                                         weight ? weight->uop_logical : NULL,
+                                         ignore_index ? ignore_index->uop_logical : NULL, reduction
+                                     )
+                                   : NULL;
+  return tensor_composite_result(ctx, logical, physical, inputs, n_inputs);
+}
+
 PolyTensor *poly_tensor_log1p(PolyCtx *ctx, PolyTensor *src) {
   if (!tensor_roots_owned_by_ctx(ctx, src)) return NULL;
   int build_logical = tensor_unary_builds_logical(ctx, src);
@@ -8053,6 +8492,112 @@ PolyUOp *poly_gather_dim(PolyCtx *ctx, PolyUOp *x, int dim, PolyUOp *index) {
   PolyUOp *selected = poly_where_op(ctx, mask, xg, poly_const_exact_int(ctx, POLY_WEAKINT, 0));
   if (!selected) return NULL;
   return sum_axis_keep_dtype(ctx, selected, -1);
+}
+
+/* _do_reduction and mean from mixin/op.py. Shapes remain exact: never use
+ * allocation maxima as a loss denominator or gather dimension. */
+static PolyUOp *pointwise_numel(PolyCtx *ctx, PolyUOp *x) {
+  int ndim = poly_uop_ndim(ctx, x);
+  if (ndim < 0) return NULL;
+  PolyUOp *count = poly_const_exact_int(ctx, POLY_WEAKINT, 1);
+  for (int i = 0; count && i < ndim; i++) {
+    PolyUOp *dim = poly_uop_shape_dim(ctx, x, i);
+    int64_t n, d;
+    if (poly_uop_const_i64(count, &n) == 0 && poly_uop_const_i64(dim, &d) == 0) {
+      if (n < 0 || d < 0 || (d != 0 && n > INT64_MAX / d)) return NULL;
+      count = poly_const_exact_int(ctx, POLY_WEAKINT, n * d);
+    } else
+      count = dim ? poly_mul(ctx, count, dim) : NULL;
+  }
+  return count;
+}
+
+static PolyUOp *pointwise_sum(PolyCtx *ctx, PolyUOp *x) {
+  int ndim = poly_uop_ndim(ctx, x);
+  if (ndim < 0 || ndim > POLY_MAX_DIMS) return NULL;
+  int64_t axes[POLY_MAX_DIMS];
+  for (int i = 0; i < ndim; i++)
+    axes[i] = i;
+  return sum_axes_root(ctx, x, axes, ndim, false);
+}
+
+static PolyUOp *pointwise_loss_reduce(PolyCtx *ctx, PolyUOp *x, int reduction) {
+  if (!ctx || !x) return NULL;
+  if (reduction == 0) return x;
+  if (reduction == 1) return pointwise_sum(ctx, x);
+  if (reduction != 2) return NULL;
+  PolyDType acc;
+  if (!poly_sum_acc_dtype(x->dtype, &acc)) return NULL;
+  PolyUOp *numerator = pointwise_sum(ctx, poly_cast(ctx, x, acc));
+  PolyUOp *out = poly_div(ctx, numerator, pointwise_numel(ctx, x));
+  return out ? poly_cast(ctx, out, poly_dtype_is_float(x->dtype) ? x->dtype : POLY_FLOAT32) : NULL;
+}
+
+PolyUOp *poly_binary_crossentropy_logits(
+    PolyCtx *ctx,
+    PolyUOp *x,
+    PolyUOp *target,
+    PolyUOp *weight,
+    int reduction
+) {
+  if (!ctx || !x || !target || reduction < 0 || reduction > 2) return NULL;
+  PolyUOp *weighted_target = weight
+                                 ? poly_mul(ctx, weight, target)
+                                 : poly_scalar_binop(ctx, POLY_OP_MUL, target, POLY_INT32, 1, true);
+  PolyUOp *positive = poly_mul(ctx, weighted_target, poly_logsigmoid(ctx, x));
+  PolyUOp *negative = poly_mul(
+      ctx, poly_scalar_binop(ctx, POLY_OP_SUB, target, POLY_INT32, 1, true),
+      poly_logsigmoid(ctx, pointwise_neg(ctx, x))
+  );
+  return pointwise_loss_reduce(
+      ctx, pointwise_neg(ctx, poly_add(ctx, positive, negative)), reduction
+  );
+}
+
+PolyUOp *poly_nll_loss(
+    PolyCtx *ctx,
+    PolyUOp *x,
+    PolyUOp *target,
+    PolyUOp *weight,
+    PolyUOp *ignore_index,
+    int reduction
+) {
+  if (!ctx || !x || !target || reduction < 0 || reduction > 2) return NULL;
+  int ndim = poly_uop_ndim(ctx, target);
+  if (ndim < 1 || ndim + 1 >= POLY_MAX_DIMS || poly_uop_ndim(ctx, x) != ndim + 1) return NULL;
+  PolyUOp *shape[POLY_MAX_DIMS], *index_shape[POLY_MAX_DIMS];
+  /* The existing gather owner is concrete-shape only. Reject symbolic shapes
+   * here instead of silently capturing its allocation maxima. */
+  for (int i = 0; i <= ndim; i++) {
+    int64_t dim;
+    if (poly_uop_const_i64(poly_uop_shape_dim(ctx, x, i), &dim) != 0) return NULL;
+  }
+  for (int i = 0; i < ndim; i++) {
+    int64_t dim;
+    shape[i] = poly_uop_shape_dim(ctx, target, i);
+    if (poly_uop_const_i64(shape[i], &dim) != 0) return NULL;
+  }
+  index_shape[0] = shape[0];
+  index_shape[1] = poly_const_exact_int(ctx, POLY_WEAKINT, 1);
+  for (int i = 1; i < ndim; i++)
+    index_shape[i + 1] = shape[i];
+  if (weight) {
+    PolyUOp *count = pointwise_numel(ctx, target);
+    PolyUOp *flat = count ? poly_reshape_uop(ctx, target, &count, 1) : NULL;
+    weight = flat ? poly_gather_dim(ctx, weight, 0, flat) : NULL;
+    weight = weight ? poly_reshape_uop(ctx, weight, shape, ndim) : NULL;
+  } else
+    weight = poly_const_like(ctx, target, poly_arg_int(1));
+  if (!weight) return NULL;
+  PolyUOp *masked =
+      ignore_index ? poly_mul(ctx, weight, poly_ne(ctx, target, ignore_index)) : weight;
+  PolyUOp *index = poly_reshape_uop(ctx, target, index_shape, ndim + 1);
+  PolyUOp *selected = index ? poly_gather_dim(ctx, x, 1, index) : NULL;
+  selected = selected ? poly_reshape_uop(ctx, selected, shape, ndim) : NULL;
+  PolyUOp *nll = selected ? poly_mul(ctx, pointwise_neg(ctx, selected), masked) : NULL;
+  if (!nll) return NULL;
+  return reduction == 2 ? poly_div(ctx, pointwise_sum(ctx, nll), pointwise_sum(ctx, masked))
+                        : pointwise_loss_reduce(ctx, nll, reduction);
 }
 
 PolyTensor *poly_tensor_gather_dim(PolyCtx *ctx, PolyTensor *x, int dim, PolyTensor *index) {

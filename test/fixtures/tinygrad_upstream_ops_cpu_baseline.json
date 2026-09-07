@@ -45,8 +45,8 @@
     ]
   },
   "evidence": {
-    "report": "temp/numeric-owners-20260906.NsRFtq/upstream/report.json",
-    "sha256": "eb1d2aa15a5031fcdbe53c16a505040966a22c76c6b34bd186ad8860046f1e66"
+    "report": "temp/pointwise-loss-20260907.zFrl6R/upstream/report.json",
+    "sha256": "d29e5c9a1a2ee2c25d69e93123f34f5455ab26e4a0555626c921564aabefbda9"
   },
   "schema_version": 1,
   "tests": {
@@ -72,30 +72,18 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_acos": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'acos'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_acosh": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'acosh'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_add": {
       "expected": {
@@ -234,30 +222,18 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_asin": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'asin'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_asinh": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'asinh'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_asymmetric_padding_conv1d": {
       "expected": {
@@ -274,30 +250,18 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_atan": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'atan'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_atanh": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'atanh'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_avg_pool2d": {
       "category": "frontend-api",
@@ -444,30 +408,18 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_binary_crossentropy": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'binary_crossentropy_logits'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_binary_crossentropy_logits_pos_weights": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'binary_crossentropy_logits'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_binary_crossentropy_reductions": {
       "category": "frontend-api",
@@ -572,17 +524,11 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_celu": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'celu'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_chunk": {
       "expected": {
@@ -715,30 +661,18 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_copysign": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'copysign'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_copysign_exact": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'copysign'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_cos": {
       "expected": {
@@ -748,17 +682,11 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_cosh": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'cosh'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_cross_entropy_class_indices": {
       "expected": {
@@ -1068,17 +996,11 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_erf": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'erf'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_exp": {
       "expected": {
@@ -1438,56 +1360,32 @@
       "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_isclose": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'isclose'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_isclose_edge_cases": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'isclose'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_isclose_scalar": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'isclose'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_isfinite": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'isfinite'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_isinf": {
       "expected": {
@@ -1544,17 +1442,11 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_lerp": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'lerp'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_linspace": {
       "expected": {
@@ -1571,17 +1463,11 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_log10": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'log10'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_log2": {
       "expected": {
@@ -1651,17 +1537,11 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_logsigmoid": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'logsigmoid'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_logsumexp": {
       "category": "frontend-api",
@@ -2136,82 +2016,46 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_nll_loss": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'nll_loss'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_nll_loss_3d": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'nll_loss'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_nll_loss_3d_weight": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'nll_loss'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_nll_loss_ignore_index": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'nll_loss'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_nll_loss_reductions": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'nll_loss'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_nll_loss_weight": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'nll_loss'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_nonzero": {
       "category": "frontend-api",
@@ -2784,17 +2628,11 @@
       "reason": "Unchanged pinned CPU skip; not a pass."
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_selu": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'selu'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_sigmoid": {
       "expected": {
@@ -2984,17 +2822,11 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_sinh": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'sinh'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_slice_both_endpoints_out_of_bounds": {
       "expected": {
@@ -3321,30 +3153,18 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_softsign": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'softsign'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_softsign_exact": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'softsign'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_sort": {
       "expected": {
