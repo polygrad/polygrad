@@ -204,7 +204,7 @@ function flattenArray(arr, dtype) {
 
 // Pinned Tensor.__init__ infers list/tuple inputs as bool, default_int, or
 // default_float from their flattened values (tensor.py:96-100).
-function inferArrayDtype(arr) {
+function inferArrayDtype(arr, defaultFloat, defaultInt) {
   let sawValue = false
   let allBool = true
   let allInt = true
@@ -221,9 +221,9 @@ function inferArrayDtype(arr) {
     allInt = allInt && (typeof value === 'boolean' || Number.isInteger(value))
   }
   visit(arr)
-  if (!sawValue) return 'float32'
+  if (!sawValue) return defaultFloat
   if (allBool) return 'bool'
-  return allInt ? 'int32' : 'float32'
+  return allInt ? defaultInt : defaultFloat
 }
 
 function typedArrayDtype(data) {
@@ -698,7 +698,7 @@ function createBoundTensorClass(runtime) {
           flat = numericTypedArray(data, dt === 'bfloat16' || isFp8Dtype(dt) ? 'float32' : dt)
           shape = [data.length]
         } else {
-          dt = (opts && opts.dtype) || inferArrayDtype(data)
+          dt = (opts && opts.dtype) || inferArrayDtype(data, _runtime.defaultFloat, _runtime.defaultInt)
           const r = flattenArray(data, dt === 'bfloat16' || isFp8Dtype(dt) ? 'float32' : dt)
           flat = r.data; shape = r.shape
         }
@@ -1988,11 +1988,11 @@ function createBoundTensorClass(runtime) {
       // through ordinary Tensor primitives and their scalar broadcast rules.
       // JavaScript Number erases the source spelling distinction between 2
       // and 2.0. Pinned UOp.ufix keeps it in the receiver dtype for floating
-      // inputs and uses from_py(float)==float32 for integer/bool inputs
+      // inputs and uses from_py(float)==default_float for integer/bool inputs
       // (uop/ops.py:504-508).
       const two = new Tensor(2.0, {
         _ctx: this._ctx,
-        dtype: isFloatDtype(this._dtype) ? this._dtype : 'float32',
+        dtype: isFloatDtype(this._dtype) ? this._dtype : _runtime.defaultFloat,
         device: this._device
       })
       const b = this.trunc().div(two)
@@ -2568,7 +2568,7 @@ function createBoundTensorClass(runtime) {
       if (!(p >= 0 && p <= 1)) throw new RangeError(`p=${p} is out of range [0, 1]`)
       if (!Tensor.training || p === 0) return this
       if (p === 1) return this.constLike(0)
-      return Tensor.randLike(this, { dtype: 'float32', contiguous: false })
+      return Tensor.randLike(this, { dtype: _runtime.defaultFloat, contiguous: false })
         .ge(p).contiguous().where(this, 0).div(1.0 - p)
     }
 
@@ -3426,9 +3426,19 @@ function createBoundTensorClass(runtime) {
       rejectRequiresGrad(opts)
       const ctx = opts._ctx || liveCore().ctx
       const device = normalizeDevice(opts._device || opts.device || _runtime.device || 'cpu')
-      const dtype = opts.dtype || (
-        [start, stop, step].every(Number.isInteger) ? 'int32' : 'float32'
+      let dtype = opts.dtype || (
+        [start, stop, step].every(Number.isInteger) ? _runtime.defaultInt : _runtime.defaultFloat
       )
+      const lo = step > 0 ? start : stop-step, hi = step > 0 ? stop-step : start
+      const rangeFits = dt => {
+        if (dt === 'bool') return lo >= 0 && hi <= 1
+        const integer = /^(u?)int(8|16|32|64)$/.exec(dt)
+        if (!integer) return true
+        const bits = Number(integer[2]), unsigned = integer[1] === 'u'
+        return lo >= (unsigned ? 0 : -(2**(bits-1))) && hi < 2**(bits-(unsigned ? 0 : 1))
+      }
+      if (!opts.dtype && dtype === _runtime.defaultInt && !rangeFits(dtype)) dtype = 'int64'
+      if (!rangeFits(dtype)) throw new RangeError(`arange is not representable in dtype ${dtype}`)
       const dtypeId = DTYPE_ID[dtype]
       if (dtypeId === undefined) throw new Error(`unsupported dtype: ${dtype}`)
       const targetDevice = deviceId(device)
@@ -3457,11 +3467,13 @@ function createBoundTensorClass(runtime) {
       if (shape.length === 1 && Array.isArray(shape[0])) shape = shape[0]
       opts = opts ? { ...opts } : {}
       rejectRequiresGrad(opts)
+      const unknown = Object.keys(opts).filter(key => !['dtype', 'device', 'contiguous'].includes(key))
+      if (unknown.length) throw new TypeError(`Tensor.rand got unexpected options: ${unknown.join(', ')}`)
       shape = shape.map(Number)
       if (shape.some(dim => !Number.isInteger(dim) || dim < 0)) {
         throw new Error(`invalid input shape=${JSON.stringify(shape)}`)
       }
-      const dtype = opts.dtype || 'float32'
+      const dtype = opts.dtype || _runtime.defaultFloat
       if (!isFloatDtype(dtype)) throw new Error(`rand only supports float dtypes, got ${dtype}`)
       const device = normalizeDevice(opts.device || _runtime.device || 'cpu')
       const dtypeId = DTYPE_ID[dtype]
@@ -3499,13 +3511,12 @@ function createBoundTensorClass(runtime) {
       if (shape.length === 1 && Array.isArray(shape[0])) shape = shape[0]
       opts = opts ? { ...opts } : {}
       rejectRequiresGrad(opts)
-      const dtype = opts.dtype || 'float32'
+      const dtype = opts.dtype || _runtime.defaultFloat
       const device = normalizeDevice(opts.device || _runtime.device || 'cpu')
       shape = shape.map(Number)
       if (shape.some(dim => !Number.isInteger(dim) || dim < 0)) {
         throw new Error(`invalid input shape=${JSON.stringify(shape)}`)
       }
-      if (!isFloatDtype(dtype)) throw new Error(`randn only supports float dtypes, got ${dtype}`)
       const ctx = liveCore().ctx
       const tensor = ffi.poly_tensor_randn_by_id(
         ctx, shape, shape.length, DTYPE_ID[dtype], deviceId(device)
@@ -3549,7 +3560,7 @@ function createBoundTensorClass(runtime) {
       if (!(low < high)) {
         throw new Error(`Tensor.uniform requires low < high, got low=${low}, high=${high}`)
       }
-      const dtype = opts.dtype || 'float32'
+      const dtype = opts.dtype || _runtime.defaultFloat
       const randOpts = { ...opts, dtype }
       delete randOpts.low
       delete randOpts.high
@@ -3635,7 +3646,7 @@ function createBoundTensorClass(runtime) {
       rejectRequiresGrad(opts)
       const ctx = opts._ctx || liveCore().ctx
       const device = normalizeDevice(opts._device || opts.device || _runtime.device || 'cpu')
-      const dtype = opts.dtype || 'float32'
+      const dtype = opts.dtype || _runtime.defaultFloat
       const dtypeId = DTYPE_ID[dtype]
       if (dtypeId === undefined) throw new Error(`unsupported dtype: ${dtype}`)
       const tensor = ffi.poly_tensor_linspace_by_id(
@@ -3651,7 +3662,7 @@ function createBoundTensorClass(runtime) {
       rejectRequiresGrad(opts)
       const ctx = opts._ctx || liveCore().ctx
       const device = normalizeDevice(opts._device || opts.device || _runtime.device || 'cpu')
-      const dtype = opts.dtype || 'float32'
+      const dtype = opts.dtype || _runtime.defaultFloat
       const dtypeId = DTYPE_ID[dtype]
       if (dtypeId === undefined) throw new Error(`unsupported dtype: ${dtype}`)
       const rows = Number(n)
@@ -3693,8 +3704,9 @@ function createBoundTensorClass(runtime) {
         throw new TypeError('Tensor.empty does not accept name; pass names to Model.fromTensors')
       }
       const ctx = (opts && opts._ctx) || liveCore().ctx
-      const dtype = (opts && opts.dtype) || 'float32'
-      const dtypeId = DTYPE_ID[dtype] || DTYPE_ID.float32
+      const dtype = (opts && opts.dtype) || _runtime.defaultFloat
+      const dtypeId = DTYPE_ID[dtype]
+      if (dtypeId === undefined) throw new TypeError(`unsupported dtype: ${dtype}`)
       const tensorDevice = normalizeDevice(
         (opts && (opts._device || opts.device)) || _runtime.device || 'cpu'
       )

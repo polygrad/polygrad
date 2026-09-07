@@ -41,7 +41,7 @@ function createNativeCore(device) {
   }
 
   const ctx = binding.poly_ctx_new()
-  if (!ctx) throw new Error('polygrad: poly_ctx_new failed; check POLY_LOGICAL')
+  if (!ctx) throw new Error('polygrad: poly_ctx_new failed; check POLY_LOGICAL, DEFAULT_FLOAT/INT and allocations')
   const nativeDevice = resolveNativeDevice(binding, device)
   const deviceId = nativeDevice.id
   binding.poly_ctx_set_preferred_device(ctx, deviceId)
@@ -62,7 +62,7 @@ function createNativeCore(device) {
     if (name) ops[name] = i
   }
 
-  const EXPECTED_ABI = 71
+  const EXPECTED_ABI = 72
   const abi = binding.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(

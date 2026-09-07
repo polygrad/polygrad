@@ -26,6 +26,7 @@ function normalizeOptions(opts) {
 class PolyRuntime {
   constructor(binding) {
     this._core = binding
+    this._dtypeNames = Object.fromEntries(Object.entries(binding.dtypeIds).map(([name, id]) => [id, name]))
     const caps = binding && binding.caps
     this._lifetime = {
       alive: true,
@@ -97,6 +98,26 @@ class PolyRuntime {
     // unsupported dtype/backend combinations, mirroring tinygrad's checks.
     return { ...this._core.caps }
   }
+
+  _getDefaultDtype(kind) {
+    const id = this._core.ffi[`poly_get_default_${kind}`]()
+    return this._dtypeNames[id]
+  }
+
+  _setDefaultDtype(kind, name) {
+    if (!this._lifetime.alive || this._closing || this._activeAsync > 0) {
+      throw new Error('Default dtype changes require a live idle runtime')
+    }
+    const id = this._core.dtypeIds[name]
+    if (id === undefined || this._core.ffi[`poly_set_default_${kind}`](id) !== 0) {
+      throw new TypeError(`unknown dtype: ${name}`)
+    }
+  }
+
+  get defaultFloat() { return this._getDefaultDtype('float') }
+  set defaultFloat(name) { this._setDefaultDtype('float', name) }
+  get defaultInt() { return this._getDefaultDtype('int') }
+  set defaultInt(name) { this._setDefaultDtype('int', name) }
 
   withLogical(mode, fn) {
     if (typeof fn !== 'function') throw new TypeError('withLogical requires a synchronous function')

@@ -3650,6 +3650,40 @@ static napi_value napi_poly_get_noopt(napi_env env, napi_callback_info info) {
   return out;
 }
 
+static napi_value napi_poly_get_default_float(napi_env env, napi_callback_info info) {
+  (void)info;
+  napi_value out;
+  NAPI_CALL(env, napi_create_int32(env, poly_get_default_float(), &out));
+  return out;
+}
+
+static napi_value napi_poly_get_default_int(napi_env env, napi_callback_info info) {
+  (void)info;
+  napi_value out;
+  NAPI_CALL(env, napi_create_int32(env, poly_get_default_int(), &out));
+  return out;
+}
+
+static napi_value napi_poly_set_default_float(napi_env env, napi_callback_info info) {
+  napi_value argv[1], out;
+  size_t argc = 1;
+  int32_t id;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  NAPI_CALL(env, napi_get_value_int32(env, argv[0], &id));
+  NAPI_CALL(env, napi_create_int32(env, poly_set_default_float(id), &out));
+  return out;
+}
+
+static napi_value napi_poly_set_default_int(napi_env env, napi_callback_info info) {
+  napi_value argv[1], out;
+  size_t argc = 1;
+  int32_t id;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  NAPI_CALL(env, napi_get_value_int32(env, argv[0], &id));
+  NAPI_CALL(env, napi_create_int32(env, poly_set_default_int(id), &out));
+  return out;
+}
+
 static napi_value napi_poly_set_noopt(napi_env env, napi_callback_info info) {
   napi_value argv[1], out;
   size_t argc = 1;
@@ -6620,6 +6654,10 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_ctx_set_logical_policy", napi_poly_ctx_set_logical_policy),
       DECLARE_NAPI_METHOD("poly_ctx_get_logical_policy", napi_poly_ctx_get_logical_policy),
       DECLARE_NAPI_METHOD("poly_get_noopt", napi_poly_get_noopt),
+      DECLARE_NAPI_METHOD("poly_get_default_float", napi_poly_get_default_float),
+      DECLARE_NAPI_METHOD("poly_get_default_int", napi_poly_get_default_int),
+      DECLARE_NAPI_METHOD("poly_set_default_float", napi_poly_set_default_float),
+      DECLARE_NAPI_METHOD("poly_set_default_int", napi_poly_set_default_int),
       DECLARE_NAPI_METHOD("poly_set_noopt", napi_poly_set_noopt),
       DECLARE_NAPI_METHOD("poly_ctx_collect", napi_poly_ctx_collect),
       DECLARE_NAPI_METHOD("poly_ctx_stats", napi_poly_ctx_stats),

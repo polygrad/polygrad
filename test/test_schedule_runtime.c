@@ -306,6 +306,40 @@ TEST(schedule_runtime, noopt_separates_program_cache) {
   PASS();
 }
 
+TEST(schedule_runtime, default_dtypes_separate_program_cache) {
+  int old_f = poly_get_default_float(), old_i = poly_get_default_int();
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_CPU);
+  PolyUOp *out = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_CPU);
+  PolyUOp *linear =
+      poly_test_create_linear(ctx, poly_sink1(ctx, poly_store_val(ctx, out, poly_add(ctx, a, a))));
+  poly_set_default_float(12);
+  poly_set_default_int(6);
+  PolyUOp *first = poly_compile_linear(ctx, linear, 0);
+  if (first) poly_uop_retain(ctx, first);
+  size_t n_first = poly_to_program_cache_len(ctx);
+  poly_set_default_float(13);
+  PolyUOp *second = poly_compile_linear(ctx, linear, 0);
+  if (second) poly_uop_retain(ctx, second);
+  size_t n_second = poly_to_program_cache_len(ctx);
+  poly_set_default_int(8);
+  PolyUOp *third = poly_compile_linear(ctx, linear, 0);
+  if (third) poly_uop_retain(ctx, third);
+  size_t n_third = poly_to_program_cache_len(ctx);
+  poly_set_default_float(12);
+  poly_set_default_int(6);
+  PolyUOp *restored = poly_compile_linear(ctx, linear, 0);
+  /* Identical emitted instructions may CSE to the same PROGRAM; distinct
+   * policy cache entries, not pointer inequality, prove the configuration key. */
+  bool ok =
+      first && second && third && restored == first && n_second > n_first && n_third > n_second;
+  poly_set_default_float(old_f);
+  poly_set_default_int(old_i);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
 TEST(schedule_runtime, program_and_runtime_caches_reuse_current_keys) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);

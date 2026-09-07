@@ -5317,6 +5317,23 @@ TEST(codegen, weak_cast_const_survives_symbolic_until_consumer_lowering) {
   PASS();
 }
 
+TEST(codegen, default_dtype_lowering_keeps_integer_bound_policy) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *f = poly_graph_rewrite(ctx, poly_const_float(ctx, 1.25), poly_pm_lower_weak());
+  PolyUOp *i = poly_graph_rewrite(ctx, poly_const_int(ctx, 1), poly_pm_lower_weak());
+  ASSERT_NOT_NULL(f);
+  ASSERT_INT_EQ(f->op, POLY_OP_CAST);
+  ASSERT_INT_EQ(f->n_src, 1);
+  ASSERT_PTR_EQ(
+      f->src[0], poly_uop_const(ctx, poly_arg_float(1.25), poly_dtype_strong(POLY_WEAKFLOAT))
+  );
+  ASSERT_NOT_NULL(i);
+  ASSERT_INT_EQ(i->op, POLY_OP_CAST);
+  ASSERT_PTR_EQ(i->src[0], poly_uop_const(ctx, poly_arg_int(1), POLY_INT32));
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(codegen, lower_weak_const_creates_untagged_literal) {
   /* pm_lower_weak creates a fresh UOp.const, not a tagged replacement. */
   PolyCtx *ctx = poly_ctx_new();

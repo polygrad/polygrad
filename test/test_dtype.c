@@ -5,6 +5,21 @@
 #include "test_harness.h"
 #include "../src/polygrad.h"
 
+TEST(dtype, default_storage_types_follow_environment) {
+  /* Run this filter in a fresh process with DEFAULT_FLOAT/DEFAULT_INT too. */
+  PolyDType f = POLY_FLOAT32, i = POLY_INT32, promoted;
+  const char *fn = getenv("DEFAULT_FLOAT"), *in = getenv("DEFAULT_INT");
+  if (fn) ASSERT_TRUE(poly_dtype_by_id(poly_dtype_id_by_name(fn), &f));
+  if (in) ASSERT_TRUE(poly_dtype_by_id(poly_dtype_id_by_name(in), &i));
+  ASSERT_TRUE(poly_dtype_eq(poly_dtype_strong(POLY_WEAKFLOAT), f));
+  ASSERT_TRUE(poly_dtype_eq(poly_dtype_strong(POLY_WEAKINT), i));
+  ASSERT_TRUE(poly_dtype_least_upper_float(POLY_INT32, &promoted));
+  ASSERT_TRUE(poly_dtype_eq(promoted, f));
+  ASSERT_TRUE(poly_sum_acc_dtype(POLY_FLOAT16, &promoted));
+  ASSERT_TRUE(poly_dtype_eq(promoted, POLY_FLOAT32));
+  PASS();
+}
+
 TEST(dtype, predefined_types_exist) {
   ASSERT_INT_EQ(POLY_FLOAT32.bitsize, 32);
   ASSERT_INT_EQ(POLY_FLOAT64.bitsize, 64);
@@ -12,6 +27,19 @@ TEST(dtype, predefined_types_exist) {
   ASSERT_INT_EQ(POLY_INT64.bitsize, 64);
   ASSERT_INT_EQ(POLY_BOOL.bitsize, 1);
   ASSERT_INT_EQ(POLY_VOID.bitsize, 0);
+  PASS();
+}
+
+TEST(dtype, default_policy_updates_are_shared_and_reject_unknown_ids) {
+  int old_f = poly_get_default_float(), old_i = poly_get_default_int();
+  bool ok = poly_set_default_float(13) == 0 && poly_set_default_int(8) == 0;
+  ok &= poly_dtype_eq(poly_dtype_strong(POLY_WEAKFLOAT), POLY_FLOAT64);
+  ok &= poly_dtype_eq(poly_dtype_strong(POLY_WEAKINT), POLY_INT64);
+  ok &= poly_set_default_float(-1) == -1 && poly_set_default_int(poly_dtype_count()) == -1;
+  ok &= poly_get_default_float() == 13 && poly_get_default_int() == 8;
+  poly_set_default_float(old_f);
+  poly_set_default_int(old_i);
+  ASSERT_TRUE(ok);
   PASS();
 }
 

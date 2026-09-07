@@ -2902,6 +2902,9 @@ static uint32_t poly_runtime_cache_env_stamp(void) {
       (uint8_t)(noopt >> 8),
       (uint8_t)(noopt >> 16),
       (uint8_t)(noopt >> 24),
+      /* Pinned to_program_config includes both default dtype policies. */
+      (uint8_t)poly_get_default_float(),
+      (uint8_t)poly_get_default_int(),
       (uint8_t)(poly_getenv_int("TC_OPT", 0) & 0xFF),
       (uint8_t)(poly_getenv_int("TC", 1) & 0xFF),
       (uint8_t)poly_getenv_flag("EXPAND_SSA"),

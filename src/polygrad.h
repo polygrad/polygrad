@@ -237,6 +237,12 @@ bool poly_dtype_is_weak(PolyDType dt);
 bool poly_dtype_is_unsigned(PolyDType dt);
 bool poly_dtype_is_bool(PolyDType dt);
 PolyDType poly_dtype_strong(PolyDType dt);
+/* Library-wide Tinygrad DEFAULT_FLOAT/INT dtype IDs. A setter returns -1 for
+ * an unknown ID without changing the prior value. Configure while idle. */
+int poly_get_default_float(void);
+int poly_get_default_int(void);
+int poly_set_default_float(int dtype_id);
+int poly_set_default_int(int dtype_id);
 PolyDType poly_dtype_weak(PolyDType dt);
 bool poly_dtype_least_upper(PolyDType a, PolyDType b, PolyDType *out);
 bool poly_dtype_least_upper_float(PolyDType dt, PolyDType *out);

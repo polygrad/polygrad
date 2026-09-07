@@ -145,6 +145,52 @@ async function runTensorTests(pg) {
 
   console.log('-- Creation --')
 
+  await test('default dtype policy reaches C and restores', async () => {
+    const before = [pg.defaultFloat, pg.defaultInt]
+    try {
+      pg.defaultFloat = 'float16'; pg.defaultInt = 'int16'
+      assert(new Tensor([1.25]).dtype === 'float16', 'floating list ignored default')
+      assert(new Tensor([1]).dtype === 'int16', 'integer list ignored default')
+      assert(new Tensor(new Float32Array([1.25])).dtype === 'float32')
+      assert(Tensor.arange(3).dtype === 'int16')
+      for (const x of [Tensor.ones(2), Tensor.empty(2), Tensor.rand(2), Tensor.randn(2),
+        Tensor.eye(2), Tensor.linspace(0, 1, 3)]) assert(x.dtype === 'float16', `factory dtype ${x.dtype}`)
+      const x = new Tensor([1], { dtype: 'int32' }).exp()
+      assert(x.dtype === 'float16', `C transcendental dtype ${x.dtype}`)
+      if (pg.canRun({dtype:'float16'})) assertClose(await x.toArray(), [Math.E], 0.01)
+      const data = new Tensor([3, 1, 2], {dtype:'float32'})
+      assertClose(await data.argmax().toArray(), [0])
+      assertClose(await data.sort()[1].toArray(), [1, 2, 0])
+      let error
+      try { pg.defaultFloat = 'not_a_dtype' } catch (e) { error = e }
+      assert(error && pg.defaultFloat === 'float16', 'failed dtype update changed policy')
+    } finally { pg.defaultFloat = before[0]; pg.defaultInt = before[1] }
+  })
+
+  await test('dtype admission rejects floating shifts and overflowing arange', async () => {
+    for (const fn of [() => new Tensor([1.5]).lshift(1), () => new Tensor([1.5]).rshift(1),
+      () => Tensor.arange(129, {dtype:'int8'})]) {
+      let error
+      try { fn() } catch (e) { error = e }
+      assert(error, 'invalid operation accepted')
+    }
+    assert(Tensor.arange(2**31, 2**31+3).dtype === 'int64')
+  })
+
+  await test('dtype admission random output casting and unknown options', async () => {
+    let error
+    try { Tensor.rand(2, {generator:'x'}) } catch (e) { error = e }
+    assert(error instanceof TypeError, 'rand silently ignored an unknown option')
+    for (const dtype of ['bool', 'int8', 'int32']) {
+      Tensor.manual_seed(42)
+      const expected = await Tensor.randn(3).cast(dtype).toArray()
+      Tensor.manual_seed(42)
+      const out = Tensor.randn(3, {dtype})
+      assert(out.dtype === dtype)
+      assertClose(await out.toArray(), expected)
+    }
+  })
+
   await test('dtype API queries match pinned metadata', async () => {
     const bytes = {bool:1, int8:1, uint8:1, int16:2, uint16:2, int32:4, uint32:4,
       int64:8, uint64:8, float16:2, bfloat16:2, float32:4, float64:8,

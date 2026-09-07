@@ -684,8 +684,8 @@
       "area": "configured default dtype propagation into core lowering",
       "vocabulary": {"tinygrad_only": [], "polygrad_only": []},
       "tinygrad": "With DEFAULT_FLOAT=float64, pm_lower_weak commits a weak float literal to float64 beneath its weak cast",
-      "polygrad": "Python recognizes DEFAULT_FLOAT=float64, but src/uop/weak.c default_dtype still commits the same literal to float32",
-      "rationale": "The non-default control exposes an unapproved core/frontend mismatch. Default-float32 graph and runtime passes do not close it.",
+      "polygrad": "The C-owned default policy now reaches weak lowering, storage commitment, promotion, compiler keys and Python/JS. The original float64 lowering control matches; remaining indexed-write, embedding, loss/linalg and raw seeded-factory consumers still need dependency-complete review.",
+      "rationale": "The original lowering defect is fixed, but the close_when consumer inventory remains incomplete. Non-default graph/runtime passes do not certify unreviewed composite owners.",
       "approval": null,
       "evidence": [
         "references/tinygrad_latest/tinygrad/dtype.py:DTypes.default_float",
@@ -693,7 +693,10 @@
         "src/uop/weak.c:default_dtype",
         "py/polygrad/dtype.py",
         "temp/shape-storage-audit-20260906.VUymUD/default_dtype_probe.py",
-        "temp/shape-storage-audit-20260906.VUymUD/default-dtype-probe.log"
+        "temp/shape-storage-audit-20260906.VUymUD/default-dtype-probe.log",
+        "temp/dtype-admission-20260907.bEASBx/correspondence.md",
+        "temp/dtype-admission-20260907.bEASBx/graphs-final/report.json",
+        "test/test_codegen.c:default_dtype_lowering_keeps_integer_bound_policy"
       ],
       "close_when": "Carry supported default-dtype configuration through the existing dtype/core owners, inventory related strong-dtype and promotion consumers, and verify non-default exact lowering plus frontend execution. Do not add a weak-lowering-only environment override."
     },

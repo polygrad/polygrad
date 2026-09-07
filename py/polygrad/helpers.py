@@ -347,6 +347,40 @@ class _NOOPT(ContextVar):
         _ffi.get_lib().poly_set_noopt(value)
 
 
+@functools.cache
+def _default_dtype_name(dtype_id):
+    from . import _ffi
+    from .dtype import DTYPES_DICT
+    dt = _ffi.PolyDType()
+    if not _ffi.get_lib().poly_dtype_by_id(dtype_id, ctypes.byref(dt)):
+        raise ValueError('invalid default dtype ID')
+    name = dt.name.decode()
+    # Canonical scalar names, independent of repr's short aliases.
+    if name == '__fp16': return 'float16'
+    return next((key for key, dtype in DTYPES_DICT.items() if dtype.name == name), name)
+
+
+class _DEFAULT_DTYPE(ContextVar):
+    def __init__(self, kind, default):
+        self.kind = kind
+        super().__init__(f'DEFAULT_{kind.upper()}', default)
+
+    @property
+    def value(self):
+        from . import _ffi
+        return _default_dtype_name(getattr(_ffi.get_lib(), f'poly_get_default_{self.kind}')())
+
+    @value.setter
+    def value(self, value):
+        from . import _ffi
+        lib = _ffi.get_lib()
+        dtype_id = lib.poly_dtype_id_by_name(value.lower().encode())
+        if getattr(lib, f'poly_set_default_{self.kind}')(dtype_id) != 0:
+            raise AttributeError(f'unknown dtype {value!r}')
+
+
+DEFAULT_FLOAT = _DEFAULT_DTYPE('float', 'float32')
+DEFAULT_INT = _DEFAULT_DTYPE('int', 'int32')
 NOOPT = _NOOPT("NOOPT", 0)
 DEV = _DEV("DEV", "")
 CHECK_OOB = _CHECK_OOB("CHECK_OOB", 0)

@@ -54,6 +54,7 @@ static bool logical_policy_from_env(const char *value, PolyLogicalPolicy *policy
 
 PolyCtx *poly_ctx_new(void) {
   poly_init_group_ops();
+  if (poly_get_default_float() < 0 || poly_get_default_int() < 0) return NULL;
   const char *logical_env = getenv("POLY_LOGICAL");
   /* Polygrad logical-lifetime divergence: retain portable producers until
    * successful materialization, then keep only the exact resource spine. */

@@ -3295,6 +3295,9 @@ bool poly_dtype_from_uop(
   case POLY_OP_SHL:
   case POLY_OP_SHR:
     if (n_src <= 0) return false;
+    for (int i = 0; i < n_src; i++)
+      if (!src[i] || (!poly_dtype_is_int(src[i]->dtype) && !uop_base_is_invalid(src[i])))
+        return false;
     *out = src[0]->dtype;
     return true;
   case POLY_OP_BINARY:
@@ -3561,8 +3564,12 @@ PolyUOp *poly_alu1(PolyCtx *ctx, PolyOps op, PolyUOp *src) {
 }
 
 PolyUOp *poly_alu2(PolyCtx *ctx, PolyOps op, PolyUOp *a, PolyUOp *b) {
+  if (!ctx || !a || !b) return NULL;
   PolyDType dt;
-  if (op == POLY_OP_CMPLT || op == POLY_OP_CMPNE || op == POLY_OP_CMPEQ) {
+  if (op == POLY_OP_SHL || op == POLY_OP_SHR) {
+    PolyUOp *src[] = {a, b};
+    if (!poly_dtype_from_uop(op, src, 2, poly_arg_none(), POLY_VOID, &dt)) return NULL;
+  } else if (op == POLY_OP_CMPLT || op == POLY_OP_CMPNE || op == POLY_OP_CMPEQ) {
     dt = POLY_BOOL;
   } else {
     dt = a->dtype;

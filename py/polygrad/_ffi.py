@@ -16,7 +16,7 @@ import sys
 _lib = None
 OPS = {}
 _has_cuda_ffi = False
-POLYGRAD_ABI_VERSION = 71
+POLYGRAD_ABI_VERSION = 72
 
 # --- Opaque pointer type (always available) ---
 _ptr = ctypes.c_void_p
@@ -223,6 +223,11 @@ def _declare_signatures(lib):
     lib.poly_get_noopt.argtypes = []
     lib.poly_set_noopt.restype = None
     lib.poly_set_noopt.argtypes = [ctypes.c_int]
+    for kind in ('float', 'int'):
+        getter = getattr(lib, f'poly_get_default_{kind}')
+        getter.restype, getter.argtypes = ctypes.c_int, []
+        setter = getattr(lib, f'poly_set_default_{kind}')
+        setter.restype, setter.argtypes = ctypes.c_int, [ctypes.c_int]
     lib.poly_ctx_new.restype = _ptr
     lib.poly_ctx_new.argtypes = []
 
@@ -286,6 +291,8 @@ def _declare_signatures(lib):
 
     lib.poly_dtype_count.restype = ctypes.c_int
     lib.poly_dtype_count.argtypes = []
+    lib.poly_dtype_by_id.restype = ctypes.c_bool
+    lib.poly_dtype_by_id.argtypes = [ctypes.c_int, ctypes.POINTER(PolyDType)]
 
     lib.poly_dtype_id_by_name.restype = ctypes.c_int
     lib.poly_dtype_id_by_name.argtypes = [ctypes.c_char_p]

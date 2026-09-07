@@ -45,8 +45,8 @@
     ]
   },
   "evidence": {
-    "report": "temp/execution-config-20260907.FhQowS/ops-verified/report.json",
-    "sha256": "24b4e929b63dba00219d26c179405cfffd036013370a0d565917f83c63a68cfd"
+    "report": "temp/dtype-admission-20260907.bEASBx/ops-final/report.json",
+    "sha256": "1e55dbaeaf2c30e347a92de4e806e7a6e4a51fa9a16d9cd23c9cfcbc0d7d8567"
   },
   "schema_version": 1,
   "tests": {
@@ -156,17 +156,11 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_arange": {
-      "category": "frontend-dtype",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/references/.uv-python/cpython-3.11.12-linux-x86_64-gnu/lib/python3.11/unittest/case.py:LINE: AssertionError: dtypes.int != dtypes.long",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Observed scalar/creator dtype contract mismatch; no NumPy or core workaround."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_arange_4096": {
       "expected": {
@@ -1281,17 +1275,11 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_lshift": {
-      "category": "frontend-admission",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/references/.uv-python/cpython-3.11.12-linux-x86_64-gnu/lib/python3.11/unittest/case.py:LINE: AssertionError: RuntimeError not raised",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Observed exception-admission/type/message mismatch; no test expectation changed."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_lshift_signed": {
       "expected": {
@@ -1627,17 +1615,11 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_negative_dims_eye": {
-      "category": "frontend-admission",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: RuntimeError: poly_tensor_eye_by_id failed",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Observed exception-admission/type/message mismatch; no test expectation changed."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_negative_dims_full": {
       "expected": {
@@ -1744,16 +1726,10 @@
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_one_hot": {
       "expected": {
-        "status": "failed",
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: RuntimeError: poly_tensor_one_hot failed",
-            "outcome": "failed"
-          }
-        }
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "category": "frontend-admission",
-      "reason": "Weak one-hot realization now passes the initial values. The negative num_classes control then receives RuntimeError from a correct C rejection, instead of the pinned ValueError. Later multidimensional assertions remain unexecuted in this upstream case; fix frontend exception translation in the admission batch."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_ones": {
       "expected": {
@@ -2056,17 +2032,11 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_rshift": {
-      "category": "frontend-admission",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/references/.uv-python/cpython-3.11.12-linux-x86_64-gnu/lib/python3.11/unittest/case.py:LINE: AssertionError: RuntimeError not raised",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Observed exception-admission/type/message mismatch; no test expectation changed."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_rshift_signed": {
       "expected": {

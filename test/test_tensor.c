@@ -2032,6 +2032,32 @@ TEST(tensor, rng_state_owns_only_seed_and_counter_handles) {
   PASS();
 }
 
+TEST(tensor, dtype_admission_rejects_float_shifts_and_range_overflow) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *src[] = {poly_uop_const(ctx, poly_arg_float(1.5), POLY_FLOAT32), poly_const_int(ctx, 1)};
+  PolyDType dtype;
+  ASSERT_FALSE(poly_dtype_from_uop(POLY_OP_SHL, src, 2, poly_arg_none(), POLY_VOID, &dtype));
+  ASSERT_FALSE(poly_dtype_from_uop(POLY_OP_SHR, src, 2, poly_arg_none(), POLY_VOID, &dtype));
+  ASSERT_TRUE(poly_arange_int_by_id(ctx, 0, 129, 1, poly_dtype_id_by_name("int8")) == NULL);
+  /* Nonzero endpoints allocate both bounds; LSan covers their independent
+   * scratch lifetimes even when the resulting graph is never executed. */
+  ASSERT_NOT_NULL(poly_arange_int_by_id(ctx, 2, 5, 1, poly_dtype_id_by_name("int8")));
+  ASSERT_NOT_NULL(poly_arange_int_by_id(ctx, -5, -2, 1, poly_dtype_id_by_name("int8")));
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tensor, dtype_admission_randn_casts_integer_output) {
+  PolyCtx *ctx = poly_ctx_new();
+  int64_t shape[] = {3};
+  PolyTensor *out =
+      poly_tensor_randn_by_id(ctx, shape, 1, poly_dtype_id_by_name("int32"), POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(out);
+  ASSERT_TRUE(poly_dtype_eq(poly_tensor_uop_physical(out)->dtype, POLY_INT32));
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(tensor, randn_reset_keeps_rng_source_owners_valid) {
   /* Tinygrad 2026-08-22 Tensor.manual_seed replaces the seed/counter maps;
    * nested randn construction must leave their source ownership valid until

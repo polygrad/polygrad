@@ -165,8 +165,8 @@
     "failure_signature": "source-path-and-message-v2"
   },
   "evidence": {
-    "report": "temp/execution-config-20260907.FhQowS/upstream-verified/report.json",
-    "sha256": "c54f39aa7b66d611c943ec995176a45c76031a7f504de684383f573a3fe5ac76"
+    "report": "temp/dtype-admission-20260907.bEASBx/upstream-final/report.json",
+    "sha256": "886b58bfdd305e52bd2c47c360878b6b37446032c46ae36be26bd54fd02ebf02"
   },
   "schema_version": 1,
   "tests": {
@@ -238,16 +238,10 @@
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_argfix": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: TypeError: int() argument must be a string, a bytes-like object or a real number, not 'tuple'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Constructor shape/dtype/keyword admission differs from the unchanged upstream assertion; later statements are not covered by this first failure.",
-      "category": "frontend-admission"
+      "reason": ""
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_backward_pass": {
       "expected": {
@@ -353,16 +347,10 @@
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_element_size": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: ValueError: randn only supports float dtypes, got dtypes.bool",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "The upstream element_size loop admits randn with bool dtype; Polygrad rejects it before element_size is inspected. Review pinned random/dtype admission rather than assuming element_size is the failure.",
-      "category": "frontend-random-dtype"
+      "reason": ""
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_gradcheck": {
       "expected": {
@@ -443,16 +431,10 @@
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_rand_rejects_unknown_kwargs": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/references/.uv-python/cpython-3.11.12-linux-x86_64-gnu/lib/python3.11/unittest/case.py:LINE: AssertionError: TypeError not raised",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Constructor shape/dtype/keyword admission differs from the unchanged upstream assertion; later statements are not covered by this first failure.",
-      "category": "frontend-admission"
+      "reason": ""
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_randn_isnt_inf_on_zero": {
       "expected": {
@@ -519,16 +501,10 @@
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_tensor_dtype_errors": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: TypeError: Tuple must have size 2, but has size 1",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Constructor shape/dtype/keyword admission differs from the unchanged upstream assertion; later statements are not covered by this first failure.",
-      "category": "frontend-admission"
+      "reason": ""
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_tensor_from_blob": {
       "expected": {

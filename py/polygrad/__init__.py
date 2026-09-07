@@ -10,7 +10,10 @@ from . import _ffi
 # Module-level default context (triggers lazy library load)
 _default_ctx = _ffi.get_lib().poly_ctx_new()
 if not _default_ctx:
-    raise RuntimeError('invalid POLY_LOGICAL: expected 0, 1, or 2')
+    import os
+    if os.environ.get('POLY_LOGICAL', '2') not in ('0', '1', '2'):
+        raise RuntimeError('invalid POLY_LOGICAL: expected 0, 1, or 2')
+    raise RuntimeError('poly_ctx_new failed: check POLY_LOGICAL (0, 1, or 2), DEFAULT_FLOAT/INT, and allocation failures')
 
 from .tensor import Tensor, Variable, BoundVariable, _dispose_tensors_for_ctx
 from .dtype import DType, INVERSE_DTYPES_DICT, dtypes

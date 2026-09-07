@@ -33,7 +33,7 @@ static bool has_weak_src(PolyUOp *u) {
 static PolyDType default_dtype(PolyCtx *ctx, PolyUOp *u) {
   PolyDType dtype;
   if (dtype_is_weakfloat(u->dtype)) {
-    dtype = POLY_FLOAT32;
+    dtype = poly_dtype_strong(POLY_WEAKFLOAT);
   } else {
     int64_t vmin = 0, vmax = 0;
     poly_uop_minmax(ctx, u, &vmin, &vmax);

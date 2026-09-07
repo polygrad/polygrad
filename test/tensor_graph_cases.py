@@ -2382,6 +2382,39 @@ for _name, _formula, _shapes in (
 CASES['execution_einsum_accumulation'] = ('tensor', lambda: execution_einsum_graph('ij->i', [(2,3)], 'int8'))
 
 
+def configured_dtype_graph(kind, float_dtype, int_dtype):
+    with Context(DEFAULT_FLOAT=float_dtype, DEFAULT_INT=int_dtype):
+        x = Tensor.empty(3, dtype='int32', device='CPU').realize()
+        if kind == 'exp': out = x.exp()
+        elif kind == 'log2': out = x.log2()
+        elif kind == 'div': out = x / 2
+        elif kind == 'cos': out = x.cos()
+        elif kind == 'range': out = Tensor.arange(3)
+        elif kind == 'linspace': out = Tensor.linspace(0, 1, 3, dtype='float32')
+        elif kind == 'eye': out = Tensor.eye(2)
+        elif kind == 'one_hot': out = x.one_hot(3)
+        elif kind == 'mean': out = x.mean()
+        elif kind == 'full': out = Tensor.ones(3)
+        elif kind == 'clone': out = Tensor(1.25).clone()
+        elif kind == 'sort': out = x.sort()[1]
+        elif kind == 'sort_one': out = x[:1].sort()[1]
+        elif kind == 'argmax': out = x.argmax()
+        elif kind == 'cummax': out = x.cummax(0)[1]
+        elif kind == 'tri': out = x.reshape(1, 3).tril()
+        elif kind == 'pool': out = x.cast('float32').reshape(1, 1, 1, 3).max_pool2d((1, 2), return_indices=True)[1]
+        elif kind == 'interpolate': out = x.cast('float32').reshape(1, 1, 3).interpolate((5,), mode='nearest')
+        elif kind == 'interpolate_linear': out = x.cast('float32').reshape(1, 1, 3).interpolate((5,), mode='linear')
+        elif kind == 'linspace_one': out = Tensor.linspace(0.1, 1, 1, dtype='float64')
+        else: raise ValueError(kind)
+        return {'physical': out.uop, 'logical': logical(out)}
+
+
+for _float, _int in [('float16', 'int16'), ('float64', 'int64')]:
+    for _kind in ('exp', 'log2', 'div', 'cos', 'range', 'linspace', 'eye', 'one_hot', 'mean', 'full', 'clone',
+                  'sort', 'sort_one', 'argmax', 'cummax', 'tri', 'pool', 'interpolate', 'interpolate_linear', 'linspace_one'):
+        CASES[f'default_dtype_{_float}_{_kind}'] = ('tensor', lambda k=_kind, f=_float, i=_int: configured_dtype_graph(k, f, i))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--case", action="append", choices=sorted(CASES))

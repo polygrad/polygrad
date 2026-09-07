@@ -16,6 +16,86 @@ from polygrad.helpers import Context
 from polygrad.uop.ops import AxisType, KernelInfo, UOp, _dispose_uops_for_ctx
 
 
+@pytest.mark.parametrize('float_dtype,int_dtype', [('float16', 'int16'), ('float64', 'int64')])
+def test_default_dtype_context_reaches_core_and_restores(float_dtype, int_dtype):
+    from polygrad.dtype import strong_dtype, least_upper_float
+    from polygrad.tensor import _sum_acc_dtype
+    before = dtypes.default_float, dtypes.default_int
+    f, i = getattr(dtypes, float_dtype), getattr(dtypes, int_dtype)
+    with Context(DEFAULT_FLOAT=float_dtype, DEFAULT_INT=int_dtype):
+        assert strong_dtype(dtypes.weakfloat) == f
+        assert strong_dtype(dtypes.weakint) == i
+        assert least_upper_float(dtypes.int32) == f
+        assert _sum_acc_dtype(dtypes.float16) == dtypes.float32
+        assert Tensor([1.25]).dtype == f
+        assert Tensor([1]).dtype == i
+        for x in [Tensor.ones(2), Tensor.empty(2), Tensor.rand(2), Tensor.randn(2),
+                  Tensor.eye(2), Tensor.linspace(0, 1, 3)]:
+            assert x.dtype == f
+        assert Tensor.arange(3).dtype == i
+        x = Tensor([1], dtype=dtypes.int32).exp()
+        assert x.dtype == f
+        np.testing.assert_allclose(x.numpy(), [math.e], rtol=0.002)
+        np.testing.assert_equal(Tensor([1.25]).clone().numpy(), [1.25])
+    assert (dtypes.default_float, dtypes.default_int) == before
+
+
+@pytest.mark.parametrize('fn,error', [
+    (lambda: Tensor.arange(129, dtype=dtypes.int8), OverflowError),
+    (lambda: Tensor([1.5]).lshift(1), RuntimeError),
+    (lambda: Tensor([1.5]).rshift(1), RuntimeError),
+    (lambda: Tensor.eye(-1), ValueError),
+    (lambda: Tensor([1]).one_hot(-1), ValueError),
+    (lambda: Tensor.empty((2, 2), 2), ValueError),
+    (lambda: Tensor.rand(2, generator='x'), TypeError),
+    (lambda: Tensor([1], dtype=(dtypes.int32,)), AttributeError),
+])
+def test_dtype_admission_errors(fn, error):
+    with pytest.raises(error): fn()
+
+
+def test_dtype_admission_large_arange():
+    x = Tensor.arange(2**31, 2**31 + 3)
+    assert x.dtype == dtypes.int64
+    np.testing.assert_equal(x.numpy(), [2**31, 2**31+1, 2**31+2])
+
+
+@pytest.mark.parametrize('start,stop,step', [(129, 0, 1), (-129, 0, -1), (-128, 128, 1), (127, -129, -1)])
+def test_dtype_admission_range_direction(start, stop, step):
+    np.testing.assert_equal(Tensor.arange(start, stop, step, dtype=dtypes.int8).numpy(),
+                            np.arange(start, stop, step).astype(np.int8))
+
+
+def test_default_dtype_context_rolls_back_invalid_names():
+    before = dtypes.default_float, dtypes.default_int
+    with pytest.raises(AttributeError):
+        with Context(DEFAULT_FLOAT='float64', DEFAULT_INT='not_a_dtype'): pass
+    assert (dtypes.default_float, dtypes.default_int) == before
+
+
+@pytest.mark.parametrize('float_name,int_name', [('half', 'short'), ('double', 'ulong'), ('float32', 'uint8')])
+def test_default_dtype_context_aliases_restore(float_name, int_name):
+    from polygrad.dtype import to_dtype
+    before = dtypes.default_float, dtypes.default_int
+    with Context(DEFAULT_FLOAT=float_name, DEFAULT_INT=int_name):
+        assert dtypes.default_float == to_dtype(float_name)
+        assert dtypes.default_int == to_dtype(int_name)
+        with Context(DEFAULT_FLOAT='float32', DEFAULT_INT='int32'): pass
+        assert dtypes.default_float == to_dtype(float_name)
+        assert dtypes.default_int == to_dtype(int_name)
+    assert (dtypes.default_float, dtypes.default_int) == before
+
+
+@pytest.mark.parametrize('dtype', [dtypes.bool, dtypes.int8, dtypes.int64])
+def test_dtype_admission_randn_converts_result(dtype):
+    Tensor.manual_seed(42)
+    expected = Tensor.randn(3).cast(dtype).numpy()
+    Tensor.manual_seed(42)
+    x = Tensor.randn(3, dtype=dtype)
+    assert x.dtype == dtype
+    np.testing.assert_equal(x.numpy(), expected)
+
+
 @pytest.mark.parametrize('method,expected', [('sum', 2.0), ('softmax', 1.0), ('log_softmax', 0.0)])
 @pytest.mark.parametrize('axis', [0, -1])
 def test_execution_scalar_reduction_axes(method, expected, axis):

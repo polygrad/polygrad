@@ -10,7 +10,7 @@ from dataclasses import dataclass, fields
 from enum import Enum, auto
 
 
-from .helpers import getenv
+from .helpers import DEFAULT_FLOAT, DEFAULT_INT
 
 
 class ConstFloat(float):
@@ -146,7 +146,7 @@ class DType(metaclass=DTypeMetaClass):
             else int(val)
 
 
-class dtypes:
+class DTypes:
     @staticmethod
     @functools.cache
     def is_float(x) -> bool:
@@ -230,8 +230,11 @@ class dtypes:
     int = int32
     long = int64
 
-    default_float: ClassVar[DType] = float32
-    default_int: ClassVar[DType] = int32
+    @property
+    def default_float(self): return to_dtype(DEFAULT_FLOAT.value)
+
+    @property
+    def default_int(self): return to_dtype(DEFAULT_INT.value)
 
     fp8_ocp = (fp8e4m3, fp8e5m2)
     fp8_fnuz = (fp8e4m3fnuz, fp8e5m2fnuz)
@@ -248,10 +251,7 @@ class dtypes:
     all = floats + ints + (bool,)
 
 
-if (env_default_float := getenv("DEFAULT_FLOAT", "")):
-    dtypes.default_float = getattr(dtypes, env_default_float.lower())
-    assert dtypes.is_float(dtypes.default_float), \
-        f"{env_default_float} is not a float dtype"
+dtypes = DTypes()
 
 DTypeLike = Union[str, DType]
 
@@ -311,10 +311,13 @@ def least_upper_float(dt):
            dt if dtypes.is_float(dt) else least_upper_dtype(dt, dtypes.default_float)
 
 
-DTYPES_DICT = {k: v for k, v in dtypes.__dict__.items()
+DTYPES_DICT = {k: v for k, v in DTypes.__dict__.items()
                if isinstance(v, DType) and not k.startswith(("default", "void", "weak", "_"))}
 INVERSE_DTYPES_DICT = {**{v.name: k for k, v in DTYPES_DICT.items()},
                        "void": "void", "weakint": "weakint", "weakfloat": "weakfloat"}
+
+assert dtypes.is_float(dtypes.default_float), f'{DEFAULT_FLOAT.value} is not a float dtype'
+assert dtypes.is_int(dtypes.default_int), f'{DEFAULT_INT.value} is not an int dtype'
 
 
 @functools.cache

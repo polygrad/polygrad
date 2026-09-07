@@ -283,6 +283,22 @@ class TestModelDefinition:
 
 
 class TestStorageCopies:
+    @pytest.mark.parametrize('dtype', ['float16', 'float64'])
+    def test_default_dtype_capture_owns_concrete_state(self, dtype):
+        from polygrad.helpers import Context
+        with Context(DEFAULT_FLOAT=dtype, LOGICAL=1):
+            weight = Tensor(1.25)
+            before = weight.uop.raw
+            model = Model.from_tensors(params={'weight': weight}, outputs={'value': weight + 1})
+            try:
+                assert weight.uop.raw == before
+                data = model.read_buffer('weight')
+                assert data.dtype == np.dtype(dtype)
+                np.testing.assert_equal(data, [1.25])
+            finally:
+                model.free()
+        np.testing.assert_equal(data, [1.25])
+
     @pytest.mark.parametrize('dtype', ['bool', 'int8', 'uint8', 'int16', 'uint16',
                                      'int32', 'uint32', 'int64', 'uint64',
                                      'float16', 'bfloat16', 'float32', 'float64'])

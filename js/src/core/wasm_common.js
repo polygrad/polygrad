@@ -725,6 +725,10 @@ function createWasmCoreFromModule(Module, device) {
     poly_ctx_set_logical_policy: Module._poly_ctx_set_logical_policy,
     poly_ctx_get_logical_policy: Module._poly_ctx_get_logical_policy,
     poly_get_noopt: Module._poly_get_noopt,
+    poly_get_default_float: Module._poly_get_default_float,
+    poly_get_default_int: Module._poly_get_default_int,
+    poly_set_default_float: Module._poly_set_default_float,
+    poly_set_default_int: Module._poly_set_default_int,
     poly_set_noopt: Module._poly_set_noopt,
     poly_ctx_named_count: Module._poly_ctx_named_count,
     poly_const_float: Module._poly_const_float,
@@ -1857,7 +1861,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 71
+  const EXPECTED_ABI = 72
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(

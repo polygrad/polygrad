@@ -178,6 +178,14 @@ explicit BEAM search. The setting participates in program-cache keys and does
 not change already compiled JIT captures. It is shared by native contexts;
 each Wasm module has its own setting. Restore it after a scoped experiment.
 
+Default storage dtypes use the same C-owned policy: Python
+`Context(DEFAULT_FLOAT='float64', DEFAULT_INT='int64')`, or JS
+`runtime.defaultFloat` / `runtime.defaultInt`. Change JS settings while idle
+and restore them after use. Explicit dtypes and typed-array inputs are preserved;
+backend dtype capabilities still apply. These settings participate in compiler
+cache keys. They do not change fixed accumulation/RNG compute widths or the
+bounds-based int32/int64 lowering of weak integer indices.
+
 Scalar reductions accept axes `0` and `-1`. `realize()` leaves virtual weak
 tensors unchanged; cast before requesting storage or a schedule. Einsum supports
 scalar operands, ellipses, uppercase labels and shared C accumulation rules.

@@ -9,6 +9,7 @@
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 
 /* Predefined scalar dtypes */
 /* priority, bitsize, name, fmt */
@@ -35,7 +36,7 @@ const PolyDType POLY_FLOAT32 = {14, 32, "float", 'f'};
 const PolyDType POLY_FLOAT64 = {15, 64, "double", 'd'};
 
 /* FFI-friendly dtype lookup: id -> PolyDType. The id ordering matches the
- * _DTYPE_IDS dict in py/polygrad/_ffi.py and js/src/ffi.js. */
+ * frontend dtype lookup tables; callers should query by name. */
 static const PolyDType *_dtype_table[] = {
     &POLY_VOID,      &POLY_BOOL,     &POLY_INT8,    &POLY_UINT8,       &POLY_INT16,
     &POLY_UINT16,    &POLY_INT32,    &POLY_UINT32,  &POLY_INT64,       &POLY_UINT64,
@@ -58,15 +59,24 @@ int poly_dtype_id_by_name(const char *name) {
   if (!name || !name[0]) return -1;
   if (strcmp(name, "void") == 0) return 0;
   if (strcmp(name, "bool") == 0) return 1;
-  if (strcmp(name, "int8") == 0 || strcmp(name, "signed char") == 0) return 2;
-  if (strcmp(name, "uint8") == 0 || strcmp(name, "unsigned char") == 0) return 3;
+  if (strcmp(name, "int8") == 0 || strcmp(name, "char") == 0 || strcmp(name, "signed char") == 0)
+    return 2;
+  if (strcmp(name, "uint8") == 0 || strcmp(name, "uchar") == 0 ||
+      strcmp(name, "unsigned char") == 0)
+    return 3;
   if (strcmp(name, "int16") == 0 || strcmp(name, "short") == 0) return 4;
-  if (strcmp(name, "uint16") == 0 || strcmp(name, "unsigned short") == 0) return 5;
+  if (strcmp(name, "uint16") == 0 || strcmp(name, "ushort") == 0 ||
+      strcmp(name, "unsigned short") == 0)
+    return 5;
   if (strcmp(name, "int32") == 0 || strcmp(name, "int") == 0) return 6;
-  if (strcmp(name, "uint32") == 0 || strcmp(name, "unsigned int") == 0) return 7;
+  if (strcmp(name, "uint32") == 0 || strcmp(name, "uint") == 0 || strcmp(name, "unsigned int") == 0)
+    return 7;
   if (strcmp(name, "int64") == 0 || strcmp(name, "long") == 0) return 8;
-  if (strcmp(name, "uint64") == 0 || strcmp(name, "unsigned long") == 0) return 9;
-  if (strcmp(name, "float16") == 0 || strcmp(name, "__fp16") == 0) return 10;
+  if (strcmp(name, "uint64") == 0 || strcmp(name, "ulong") == 0 ||
+      strcmp(name, "unsigned long") == 0)
+    return 9;
+  if (strcmp(name, "float16") == 0 || strcmp(name, "half") == 0 || strcmp(name, "__fp16") == 0)
+    return 10;
   if (strcmp(name, "bfloat16") == 0 || strcmp(name, "__bf16") == 0) return 11;
   if (strcmp(name, "float32") == 0 || strcmp(name, "float") == 0) return 12;
   if (strcmp(name, "float64") == 0 || strcmp(name, "double") == 0) return 13;
@@ -77,6 +87,43 @@ int poly_dtype_id_by_name(const char *name) {
   if (strcmp(name, "fp8e4m3fnuz") == 0 || strcmp(name, "float8_e4m3fnuz") == 0) return 18;
   if (strcmp(name, "fp8e5m2fnuz") == 0 || strcmp(name, "float8_e5m2fnuz") == 0) return 19;
   return -1;
+}
+
+/* Tinygrad helpers.DEFAULT_FLOAT/INT and DTypes properties. Like ContextVars,
+ * this policy belongs to the loaded library (one copy per Wasm module), not
+ * a Tensor/Model. Invalid names stay invalid instead of silently selecting f32.
+ * Setters resolve names at the frontend and publish an existing dtype identity. */
+static int default_float_id = -2, default_int_id = -2;
+
+static int default_dtype_id(int *slot, const char *key, int fallback) {
+  if (*slot != -2) return *slot;
+  const char *value = getenv(key);
+  if (!value) return *slot = fallback;
+  char name[32];
+  size_t n = strlen(value);
+  if (n >= sizeof(name)) return *slot = -1;
+  for (size_t i = 0; i <= n; i++)
+    name[i] = (char)tolower((unsigned char)value[i]);
+  return *slot = poly_dtype_id_by_name(name);
+}
+
+int poly_get_default_float(void) {
+  return default_dtype_id(&default_float_id, "DEFAULT_FLOAT", 12);
+}
+int poly_get_default_int(void) {
+  return default_dtype_id(&default_int_id, "DEFAULT_INT", 6);
+}
+
+int poly_set_default_float(int id) {
+  if (id < 0 || id >= N_DTYPE_TABLE) return -1;
+  default_float_id = id;
+  return 0;
+}
+
+int poly_set_default_int(int id) {
+  if (id < 0 || id >= N_DTYPE_TABLE) return -1;
+  default_int_id = id;
+  return 0;
 }
 
 bool poly_dtype_eq(PolyDType a, PolyDType b) {
@@ -136,8 +183,10 @@ bool poly_dtype_is_bool(PolyDType dt) {
  * width; these helpers commit them only at an explicit storage/consumer
  * boundary and derive the weak kind used by scalar promotion. */
 PolyDType poly_dtype_strong(PolyDType dt) {
-  if (dtype_is_weakint_like(dt)) return POLY_INT32;
-  if (dtype_is_weakfloat_like(dt)) return POLY_FLOAT32;
+  int id = dtype_is_weakint_like(dt)     ? poly_get_default_int()
+           : dtype_is_weakfloat_like(dt) ? poly_get_default_float()
+                                         : -2;
+  if (id != -2) return id >= 0 ? *_dtype_table[id] : POLY_VOID;
   return dt;
 }
 
@@ -236,9 +285,7 @@ bool poly_dtype_least_upper(PolyDType a, PolyDType b, PolyDType *out) {
 
 /* Current tinygrad dtype.py:187-188. Transcendental ALU ops preserve an
  * existing floating dtype, promote weakint to weakfloat, and otherwise meet
- * the input with default_float. Tensor-stage dtypes are scalar in current
- * tinygrad; keep Polygrad's still-live late vector form lane-preserving while
- * that separate compiler representation is migrated. */
+ * the input with default_float. Shape/lane metadata belongs to UOps. */
 bool poly_dtype_least_upper_float(PolyDType dt, PolyDType *out) {
   if (!out) return false;
   PolyDType scalar = dt;
@@ -247,7 +294,7 @@ bool poly_dtype_least_upper_float(PolyDType dt, PolyDType *out) {
   } else if (poly_dtype_is_float(scalar)) {
     *out = dt;
     return true;
-  } else if (!poly_dtype_least_upper(scalar, POLY_FLOAT32, &scalar)) {
+  } else if (!poly_dtype_least_upper(scalar, poly_dtype_strong(POLY_WEAKFLOAT), &scalar)) {
     return false;
   }
   *out = scalar;

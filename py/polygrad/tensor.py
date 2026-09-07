@@ -191,11 +191,10 @@ def _dtype_name(dtype, default='float32'):
     target = default if dtype is None else dtype
     if isinstance(target, str):
         dt = to_dtype(target)
+    elif isinstance(target, np.dtype) or (isinstance(target, type) and issubclass(target, np.generic)):
+        dt = _from_np_dtype(np.dtype(target))
     else:
-        try:
-            dt = to_dtype(target)
-        except AttributeError:
-            dt = _from_np_dtype(np.dtype(target))
+        dt = to_dtype(target)
     sdt = dt
     if sdt == dtypes.bool:
         return 'bool'
@@ -251,6 +250,8 @@ def _dtype_name_from_id(dtype_id, default='float32'):
 
 
 def _shape_tuple(*shape):
+    if shape and isinstance(shape[0], (tuple, list)) and len(shape) != 1:
+        raise ValueError(f'bad arg {shape}')
     if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
         shape = tuple(shape[0])
     return tuple(shape)
@@ -2868,6 +2869,8 @@ class Tensor:
         return self.gather(axis, index)
 
     def one_hot(self, num_classes):
+        if dtypes.is_int(self.dtype) and num_classes < 0:
+            raise ValueError(f'num_classes must be non-negative, got {num_classes}')
         core = _ffi._lib.poly_tensor_one_hot(
             self._ctx, self._tensor, int(num_classes)
         )
@@ -2887,9 +2890,8 @@ class Tensor:
             )
         dim = self._resolve_dim(int(dim))
         offset = self.ndim - dim - 1
-        dtype = dtypes.int64 if int(num_classes) > np.iinfo(np.int32).max else dtypes.int32
         classes = Tensor.arange(
-            int(num_classes), dtype=dtype, _ctx=self._ctx
+            int(num_classes), _ctx=self._ctx
         ).reshape((int(num_classes),) + (1,) * offset)
         return self.eq(classes)
 
@@ -3527,14 +3529,17 @@ class Tensor:
         if stop is None:
             stop, start = start, 0
 
-        inferred = kwargs.get(
-            'dtype',
-            dtypes.default_float if any(isinstance(x, float) for x in (start, stop, step)) else dtypes.default_int,
-        )
+        lo, hi = (start, stop-step) if step > 0 else (stop-step, start)
+        inferred = kwargs.get('dtype')
+        if inferred is None:
+            inferred = dtypes.default_float if any(isinstance(x, float) for x in (start, stop, step)) else dtypes.default_int
+            if inferred is dtypes.default_int and (lo < inferred.min or inferred.max < hi):
+                inferred = dtypes.int64
         dtype_name = _dtype_name(inferred, default='float32')
         dtype_id = _dtype_id(dtype_name)
         dt = to_dtype(dtype_name)
-
+        if lo < dt.min or dt.max < hi:
+            raise OverflowError(f'arange [{start}, {stop}) is not representable in dtype {dt}')
         if dtypes.is_float(dt):
             tensor = _ffi._lib.poly_tensor_arange_float_by_id(
                 ctx, float(start), float(stop), float(step), dtype_id, _device_id(dev)
@@ -3554,11 +3559,14 @@ class Tensor:
 
     @staticmethod
     def rand(*shape, **kwargs):
+        unknown = kwargs.keys() - {'dtype', 'device', 'contiguous', '_ctx'}
+        if unknown:
+            raise TypeError(f'Tensor.rand got unexpected keyword arguments: {sorted(unknown)}')
         ctx, dev = _creation_meta(kwargs)
         shape = _shape_tuple(*shape)
         dtype_name = _dtype_name(kwargs.get('dtype', dtypes.default_float), default='float32')
         dt = to_dtype(dtype_name)
-        if not dtypes.is_float(dt):
+        if not dtypes.is_float(dt) or dt in dtypes.weaks:
             raise ValueError(f'rand only supports float dtypes, got {dt}')
         if any(not isinstance(s, int) or s < 0 for s in shape):
             raise ValueError(f'invalid input shape={shape}')
@@ -3587,8 +3595,6 @@ class Tensor:
         shape = _shape_tuple(*shape)
         dtype_name = _dtype_name(kwargs.get('dtype', dtypes.default_float), default='float32')
         dt = to_dtype(dtype_name)
-        if not dtypes.is_float(dt):
-            raise ValueError(f'randn only supports float dtypes, got {dt}')
         if any(not isinstance(s, int) or s < 0 for s in shape):
             raise ValueError(f'invalid input shape={shape}')
         dims, ndim, _ = _shape_arg(shape)
@@ -3696,6 +3702,8 @@ class Tensor:
         dtype_name = _dtype_name(kwargs.get('dtype', dtypes.default_float), default='float32')
         rows = _require_i64(_py_scalar(n), 'n')
         cols = rows if m is None else _require_i64(_py_scalar(m), 'm')
+        if rows < 0 or cols < 0:
+            raise ValueError(f'cannot have negative rows={rows}, cols={cols}')
         tensor = _ffi._lib.poly_tensor_eye_by_id(
             ctx, rows, cols, _dtype_id(dtype_name), _device_id(dev)
         )
@@ -3713,8 +3721,7 @@ class Tensor:
             raise TypeError('Tensor.empty does not accept name; pass names to Model.from_tensors')
         ctx, dev = _creation_meta(kwargs)
         dtype_name = _dtype_name(kwargs.get('dtype', dtypes.default_float), default='float32')
-        if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
-            shape = tuple(shape[0])
+        shape = _shape_tuple(*shape)
         shape = tuple(_py_scalar(x) for x in shape)
         if any(_is_symbolic_dim(x) for x in shape):
             dims = _shape_uop_array(ctx, shape)
