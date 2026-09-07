@@ -78,6 +78,20 @@ class PolyRuntime {
 
   get device() { return this._core.caps.device }
 
+  // Compilation policy is shared by native contexts, or local to a Wasm module.
+  // Set before compilation; changing it does not rewrite existing JIT captures.
+  get noopt() { return this._core.ffi.poly_get_noopt() }
+
+  set noopt(value) {
+    if (!Number.isInteger(value) || value < -2147483648 || value > 2147483647) {
+      throw new TypeError('NOOPT must be an int32')
+    }
+    if (!this._lifetime.alive || this._closing || this._activeAsync > 0) {
+      throw new Error('NOOPT requires a live idle runtime')
+    }
+    this._core.ffi.poly_set_noopt(value)
+  }
+
   get caps() {
     // Public capability surface for tests and callers to avoid dispatching
     // unsupported dtype/backend combinations, mirroring tinygrad's checks.

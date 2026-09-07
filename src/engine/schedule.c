@@ -2894,7 +2894,14 @@ static uint32_t poly_runtime_cache_env_stamp(void) {
 #else
   uint32_t x86_features = 0;
 #endif
+  uint32_t noopt = (uint32_t)poly_get_noopt();
   uint8_t bytes[] = {
+      /* Tinygrad to_program_config: NOOPT changes heuristic scheduling, not
+       * the input AST. Restoring the value must reuse its original PROGRAM. */
+      (uint8_t)noopt,
+      (uint8_t)(noopt >> 8),
+      (uint8_t)(noopt >> 16),
+      (uint8_t)(noopt >> 24),
       (uint8_t)(poly_getenv_int("TC_OPT", 0) & 0xFF),
       (uint8_t)(poly_getenv_int("TC", 1) & 0xFF),
       (uint8_t)poly_getenv_flag("EXPAND_SSA"),

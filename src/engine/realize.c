@@ -2204,6 +2204,15 @@ PolyUOp *poly_linear_with_vars(
     return NULL;
   }
   for (int i = 0; i < n; i++) {
+    /* Tensor.linear_with_vars rejects weak storage requests. Tensor.realize
+     * filters virtual roots before reaching this scheduling boundary. */
+    if (!uops[i] ||
+        (poly_dtype_is_weak(uops[i]->dtype) && poly_uop_device_uop_cached(ctx, uops[i], NULL))) {
+      fprintf(stderr, "poly_linear_with_vars: cannot schedule a deviceful weak dtype\n");
+      for (int j = 0; j < n; j++)
+        out_uops[j] = NULL;
+      return NULL;
+    }
     if (poly_tensor_root_has_unplaced_buffer(ctx, uops[i])) {
       fprintf(stderr, "poly_realize: physical root %d contains device-free BUFFER\n", i);
       for (int j = 0; j < n; j++)
@@ -2335,25 +2344,15 @@ static int poly_realize_tensors_impl(
       fprintf(stderr, "poly_realize_tensors: tensor %d has no complete physical root\n", i);
       goto cleanup;
     }
-    /* Tinygrad 2026-08-22/a9069c177a9d Tensor.linear_with_vars rejects a
-     * deviceful weak root before transform_to_call (tensor.py:405-409). */
-    if (poly_dtype_is_weak(inputs[i]->uop_physical->dtype) &&
-        poly_uop_device_uop_cached(ctx, inputs[i]->uop_physical, NULL)) {
-      fprintf(
-          stderr,
-          "poly_realize_tensors: tensor %d has weak dtype; cast to a concrete dtype first\n", i
-      );
-      goto cleanup;
-    }
   }
 
   for (int i = 0; i < n; i++) {
     PolyUOp *physical = inputs[i]->uop_physical;
-    /* Pinned Tensor.realize skips only roots whose UOp.device is None
-     * (tensor.py:211-219). Ask for the canonical DEVICE UOp rather than a
+    /* Pinned Tensor.realize skips virtual roots: no device OR weak dtype
+     * (tensor.py:419-424; UOp.is_virtual). Ask for the DEVICE UOp rather than a
      * scalar backend enum: tuple devices are deviceful graphs even though
      * they deliberately have no single PolyDevice execution value. */
-    if (!poly_uop_device_uop_cached(ctx, physical, NULL)) {
+    if (poly_dtype_is_weak(physical->dtype) || !poly_uop_device_uop_cached(ctx, physical, NULL)) {
       outputs[i] = inputs[i];
       continue;
     }

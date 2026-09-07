@@ -2106,12 +2106,14 @@ function createBoundTensorClass(runtime) {
 
     softmax(axis) {
       if (axis === undefined) axis = -1
+      this._resolveDim(axis)
       const core = this._rt._core.ffi.poly_tensor_softmax(this._ctx, this._tensor, axis)
       return this._makeResultFromCore(core, [this])
     }
 
     logSoftmax(axis) {
       if (axis === undefined) axis = -1
+      this._resolveDim(axis)
       const core = this._rt._core.ffi.poly_tensor_log_softmax(this._ctx, this._tensor, axis)
       return this._makeResultFromCore(core, [this])
     }
@@ -2344,11 +2346,7 @@ function createBoundTensorClass(runtime) {
       } else if (typeof axis === 'number') {
         axis = [axis]
       }
-      const nd = this.shape.length
-      axis = axis.map(a => a < 0 ? a + nd : a)
-      for (const a of axis) {
-        if (a < 0 || a >= nd) throw new RangeError(`axis ${a} out of range for ndim ${nd}`)
-      }
+      axis = axis.map(a => this._resolveDim(a))
       const { ffi } = this._rt._core
       let core
       if (dtype === undefined || dtype === null) {

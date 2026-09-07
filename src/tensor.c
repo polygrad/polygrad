@@ -6936,6 +6936,15 @@ PolyUOp *poly_cholesky_solve(PolyCtx *ctx, PolyUOp *chol, PolyUOp *b, int upper)
 
 /* Reductions */
 
+static PolyUOp *reduce_axes_root(
+    PolyCtx *ctx,
+    PolyUOp *x,
+    PolyOps op,
+    int64_t *axes,
+    int n_axes,
+    bool keepdim
+);
+
 /* Current ReduceMixin.sum casts to sum_acc_dtype, lets UOp._rop remove the
  * reduced prefix, reshapes to singleton dimensions only for keepdim, then
  * casts half/bfloat results back (mixin/reduce.py:13-23,
@@ -6950,15 +6959,6 @@ static PolyUOp *sum_axes_root_dtype(
     const PolyDType *dtype
 ) {
   if (!ctx || !x || n_axes < 0 || n_axes > POLY_MAX_DIMS || (n_axes > 0 && !axes)) return NULL;
-  int64_t normalized[POLY_MAX_DIMS];
-  int ndim = poly_uop_ndim(ctx, x);
-  if (ndim < 0) return NULL;
-  for (int i = 0; i < n_axes; i++) {
-    int64_t axis = axes[i] < 0 ? axes[i] + ndim : axes[i];
-    if (axis < 0 || axis >= ndim) return NULL;
-    normalized[i] = axis;
-  }
-
   PolyDType input_dt = x->dtype;
   PolyDType acc_dt;
   if (dtype) {
@@ -6968,23 +6968,7 @@ static PolyUOp *sum_axes_root_dtype(
   PolyUOp *acc_x = poly_dtype_eq(input_dt, acc_dt) ? x : poly_cast(ctx, x, acc_dt);
   if (!acc_x) return NULL;
 
-  PolyUOp *reduced = poly_reduce_axis(ctx, POLY_OP_ADD, acc_x, normalized, n_axes);
-  if (!reduced) return NULL;
-  if (keepdim && n_axes > 0) {
-    PolyUOp *out_shape[POLY_MAX_DIMS];
-    for (int i = 0; i < ndim; i++) {
-      bool reduced_axis = false;
-      for (int j = 0; j < n_axes; j++)
-        if (normalized[j] == i) {
-          reduced_axis = true;
-          break;
-        }
-      out_shape[i] = reduced_axis ? poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(1))
-                                  : poly_uop_shape_dim(ctx, x, i);
-      if (!out_shape[i]) return NULL;
-    }
-    reduced = poly_reshape_uop(ctx, reduced, out_shape, ndim);
-  }
+  PolyUOp *reduced = reduce_axes_root(ctx, acc_x, POLY_OP_ADD, axes, n_axes, keepdim);
   if (!dtype && reduced && poly_dtype_is_float(input_dt) && !poly_dtype_eq(input_dt, acc_dt))
     reduced = poly_cast(ctx, reduced, input_dt);
   return reduced;
@@ -7586,11 +7570,6 @@ PolyTensor *poly_tensor_lstsq(PolyCtx *ctx, PolyTensor *a, PolyTensor *b) {
 
 PolyUOp *poly_softmax(PolyCtx *ctx, PolyUOp *x, int axis) {
   if (!ctx || !x) return NULL;
-  int ndim = poly_uop_ndim(ctx, x);
-  if (ndim < 0) return NULL;
-  if (axis < 0) axis += ndim;
-  if (axis < 0 || axis >= ndim) return NULL;
-
   int64_t axis64 = axis;
   /* Literal pinned _softmax: ordinary keepdim MAX/subtract broadcasting must
    * preserve exact symbolic shape entries (mixin/__init__.py:743-747). */
@@ -7609,11 +7588,6 @@ PolyUOp *poly_softmax(PolyCtx *ctx, PolyUOp *x, int axis) {
 
 PolyUOp *poly_log_softmax(PolyCtx *ctx, PolyUOp *x, int axis) {
   if (!ctx || !x) return NULL;
-  int ndim = poly_uop_ndim(ctx, x);
-  if (ndim < 0) return NULL;
-  if (axis < 0) axis += ndim;
-  if (axis < 0 || axis >= ndim) return NULL;
-
   int64_t axis64 = axis;
   /* Pinned log_softmax consumes the same exact _softmax prefix before
    * subtracting log(sum) (mixin/__init__.py:743-747,772-793). */
@@ -8868,6 +8842,92 @@ int poly_tensor_topk(
 
 #define MAX_EINSUM_TENSORS 8
 
+static const char einsum_letters[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+static int einsum_letter(char c) {
+  const char *p = c ? strchr(einsum_letters, c) : NULL;
+  return p ? (int)(p - einsum_letters) : -1;
+}
+
+/* OpMixin.einsum expands ellipses with unused ascii_letters, right-aligned
+ * across operands. This is formula normalization only; all math stays in UOps. */
+static bool einsum_expand_ellipsis(char *formula, size_t capacity, const int *ranks, int count) {
+  if (!strstr(formula, "...")) return true;
+  char unused[53], input[256], expanded[256];
+  int nu = 0;
+  const char *ascii_letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  for (const char *p = ascii_letters; *p; p++)
+    if (!strchr(formula, *p)) unused[nu++] = *p;
+  unused[nu] = 0;
+  memcpy(input, formula, strlen(formula) + 1);
+  char *arrow = strstr(input, "->"), *rhs = arrow ? arrow + 2 : NULL;
+  if (arrow) *arrow = 0;
+  char *specs[MAX_EINSUM_TENSORS];
+  int widths[MAX_EINSUM_TENSORS], n = 0, max_width = 0;
+  char *part = input;
+  for (;;) {
+    if (n >= count) return false;
+    char *comma = strchr(part, ',');
+    if (comma) *comma = 0;
+    specs[n] = part;
+    char *ell = strstr(part, "...");
+    if (ell && strstr(ell + 3, "...")) return false;
+    int width = ell ? ranks[n] - (int)strlen(part) + 3 : 0;
+    if (width < 0 || width > nu) return false;
+    widths[n++] = width;
+    if (width > max_width) max_width = width;
+    if (!comma) break;
+    part = comma + 1;
+  }
+  if (n != count) return false;
+  int used[52] = {0};
+  size_t pos = 0;
+#define EINSUM_CHAR(c)                                                                             \
+  do {                                                                                             \
+    if (pos + 1 >= sizeof(expanded)) return false;                                                 \
+    expanded[pos++] = (c);                                                                         \
+  } while (0)
+  for (int i = 0; i < count; i++) {
+    if (i) EINSUM_CHAR(',');
+    for (char *p = specs[i]; *p;) {
+      if (strncmp(p, "...", 3) == 0) {
+        for (int j = max_width - widths[i]; j < max_width; j++)
+          EINSUM_CHAR(unused[j]);
+        p += 3;
+      } else {
+        int letter = einsum_letter(*p);
+        if (letter < 0) return false;
+        used[letter]++;
+        EINSUM_CHAR(*p++);
+      }
+    }
+  }
+  EINSUM_CHAR('-');
+  EINSUM_CHAR('>');
+  if (rhs) {
+    for (char *p = rhs; *p;) {
+      if (strncmp(p, "...", 3) == 0) {
+        for (int j = 0; j < max_width; j++)
+          EINSUM_CHAR(unused[j]);
+        p += 3;
+      } else {
+        EINSUM_CHAR(*p++);
+      }
+    }
+  } else {
+    for (int j = 0; j < max_width; j++)
+      EINSUM_CHAR(unused[j]);
+    for (int j = 0; j < 52; j++)
+      if (used[j] == 1) EINSUM_CHAR(einsum_letters[j]);
+  }
+#undef EINSUM_CHAR
+  if (pos >= capacity) return false;
+  expanded[pos] = 0;
+  memcpy(formula, expanded, pos + 1);
+  return true;
+}
+
+static PolyUOp *diagonal_root(PolyCtx *ctx, PolyUOp *x, int64_t offset, int dim1, int dim2);
+
 PolyUOp *poly_einsum(PolyCtx *ctx, const char *formula, PolyUOp **tensors, int n_tensors) {
   if (!ctx || !formula || !tensors || n_tensors <= 0 || n_tensors > MAX_EINSUM_TENSORS) return NULL;
 
@@ -8890,49 +8950,54 @@ PolyUOp *poly_einsum(PolyCtx *ctx, const char *formula, PolyUOp **tensors, int n
     clean[ci++] = *p;
   }
   clean[ci] = '\0';
+  if (!einsum_expand_ellipsis(clean, sizeof(clean), ndims, n_tensors)) return NULL;
 
   char lhs_buf[256], rhs_buf[64];
   char *arrow = strstr(clean, "->");
   if (arrow) {
     int lhs_len = (int)(arrow - clean);
     size_t rhs_len = strlen(arrow + 2);
-    if (lhs_len <= 0 || lhs_len >= (int)sizeof(lhs_buf) || rhs_len >= sizeof(rhs_buf)) return NULL;
+    if (lhs_len >= (int)sizeof(lhs_buf) || rhs_len >= sizeof(rhs_buf)) return NULL;
     memcpy(lhs_buf, clean, lhs_len);
     lhs_buf[lhs_len] = '\0';
     memcpy(rhs_buf, arrow + 2, rhs_len + 1);
   } else {
     if (strlen(clean) >= sizeof(lhs_buf)) return NULL;
     memcpy(lhs_buf, clean, strlen(clean) + 1);
-    int count[26] = {0};
-    for (char *p2 = lhs_buf; *p2; p2++)
-      if (*p2 >= 'a' && *p2 <= 'z') count[*p2 - 'a']++;
+    int count[52] = {0};
+    for (char *p2 = lhs_buf; *p2; p2++) {
+      int letter = einsum_letter(*p2);
+      if (letter >= 0) count[letter]++;
+    }
     int ri = 0;
-    for (int i = 0; i < 26; i++)
-      if (count[i] == 1) rhs_buf[ri++] = (char)('a' + i);
+    for (int i = 0; i < 52; i++)
+      if (count[i] == 1) rhs_buf[ri++] = einsum_letters[i];
     rhs_buf[ri] = '\0';
   }
 
   char *input_specs[MAX_EINSUM_TENSORS];
   int n_inputs = 0;
   char *pp = lhs_buf;
-  while (*pp && n_inputs < MAX_EINSUM_TENSORS) {
+  for (;;) {
+    if (n_inputs >= MAX_EINSUM_TENSORS) return NULL;
     input_specs[n_inputs++] = pp;
     while (*pp && *pp != ',')
       pp++;
-    if (*pp == ',') *pp++ = '\0';
+    if (!*pp) break;
+    *pp++ = '\0';
   }
   if (n_inputs != n_tensors) return NULL;
 
-  int64_t sz[26];
-  bool has_letter[26];
+  int64_t sz[52];
+  bool has_letter[52];
   memset(has_letter, 0, sizeof(has_letter));
   for (int t = 0; t < n_tensors; t++) {
     const char *spec = input_specs[t];
     int spec_len = (int)strlen(spec);
     if (spec_len != ndims[t]) return NULL;
     for (int d = 0; d < spec_len; d++) {
-      int li = spec[d] - 'a';
-      if (li < 0 || li >= 26) return NULL;
+      int li = einsum_letter(spec[d]);
+      if (li < 0) return NULL;
       if (has_letter[li]) {
         if (sz[li] != shapes[t][d]) return NULL;
       } else {
@@ -8974,6 +9039,18 @@ PolyUOp *poly_einsum(PolyCtx *ctx, const char *formula, PolyUOp **tensors, int n
       if (ki < 0) continue;
 
       int64_t n = x_shape[ci2];
+      if (n == INT64_MAX || (n > 0 && n > INT64_MAX / (n + 1))) return NULL;
+
+      if (x_ndim == 2) {
+        x = diagonal_root(ctx, x, 0, 0, 1);
+        if (!x) return NULL;
+        memmove(s + ki, s + ki + 1, (size_t)(slen - ki));
+        slen--;
+        x_ndim = 1;
+        x_shape[0] = n;
+        ci2--;
+        continue;
+      }
 
       int64_t perm[POLY_MAX_DIMS];
       int pi = 0;
@@ -9048,7 +9125,7 @@ PolyUOp *poly_einsum(PolyCtx *ctx, const char *formula, PolyUOp **tensors, int n
     const char *spec = input_specs[t];
     int spec_len = (int)strlen(spec);
     for (int d = 0; d < spec_len; d++) {
-      int li = spec[d] - 'a';
+      int li = einsum_letter(spec[d]);
       if (!has_letter[li]) {
         sz[li] = trace_shapes[t][d];
         has_letter[li] = true;
@@ -9056,10 +9133,11 @@ PolyUOp *poly_einsum(PolyCtx *ctx, const char *formula, PolyUOp **tensors, int n
     }
   }
 
-  char alpha[26];
+  char alpha[52];
   int n_alpha = 0;
-  for (int i = 0; i < 26; i++)
-    if (has_letter[i]) alpha[n_alpha++] = (char)('a' + i);
+  for (int i = 0; i < 52; i++)
+    if (has_letter[i]) alpha[n_alpha++] = einsum_letters[i];
+  if (n_alpha > POLY_MAX_DIMS) return NULL;
 
   PolyUOp *aligned[MAX_EINSUM_TENSORS];
   for (int t = 0; t < n_tensors; t++) {
@@ -9071,7 +9149,7 @@ PolyUOp *poly_einsum(PolyCtx *ctx, const char *formula, PolyUOp **tensors, int n
       continue;
     }
 
-    char sorted_spec[27];
+    char sorted_spec[POLY_MAX_DIMS + 1];
     memcpy(sorted_spec, spec, spec_len);
     sorted_spec[spec_len] = '\0';
     for (int i = 0; i < spec_len - 1; i++)
@@ -9102,21 +9180,16 @@ PolyUOp *poly_einsum(PolyCtx *ctx, const char *formula, PolyUOp **tensors, int n
           found = true;
           break;
         }
-      rshape[i] = found ? sz[(int)(alpha[i] - 'a')] : 1;
+      rshape[i] = found ? sz[einsum_letter(alpha[i])] : 1;
     }
     x = poly_reshape(ctx, x, rshape, n_alpha);
-
-    int64_t full[POLY_MAX_DIMS];
-    for (int i = 0; i < n_alpha; i++)
-      full[i] = sz[(int)(alpha[i] - 'a')];
-    x = poly_expand(ctx, x, full, n_alpha);
 
     aligned[t] = x;
   }
 
   PolyUOp *result = aligned[0];
   for (int t = 1; t < n_tensors; t++)
-    result = poly_alu2(ctx, POLY_OP_MUL, result, aligned[t]);
+    result = poly_mul(ctx, result, aligned[t]);
 
   int64_t sum_axes[POLY_MAX_DIMS];
   int n_sum = 0;
@@ -9129,9 +9202,11 @@ PolyUOp *poly_einsum(PolyCtx *ctx, const char *formula, PolyUOp **tensors, int n
       }
     if (!in_rhs) sum_axes[n_sum++] = i;
   }
-  if (n_sum > 0) result = poly_reduce_axis(ctx, POLY_OP_ADD, result, sum_axes, n_sum);
+  /* OpMixin.einsum always calls Tensor.sum, including a scalar or no axes:
+   * accumulation dtype and weak commitment still apply in those cases. */
+  result = sum_axes_root(ctx, result, sum_axes, n_sum, false);
 
-  char remaining[26];
+  char remaining[52];
   int n_remaining = 0;
   for (int i = 0; i < n_alpha; i++) {
     bool summed = false;
@@ -9148,7 +9223,11 @@ PolyUOp *poly_einsum(PolyCtx *ctx, const char *formula, PolyUOp **tensors, int n
 
   int64_t out_perm[POLY_MAX_DIMS];
   bool needs_final_perm = false;
+  bool output_seen[52] = {0};
   for (int i = 0; i < rhs_len; i++) {
+    int letter = einsum_letter(rhs_buf[i]);
+    if (letter < 0 || !has_letter[letter] || output_seen[letter]) return NULL;
+    output_seen[letter] = true;
     for (int j = 0; j < n_remaining; j++)
       if (remaining[j] == rhs_buf[i]) {
         out_perm[i] = j;

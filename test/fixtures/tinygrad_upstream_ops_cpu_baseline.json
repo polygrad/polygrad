@@ -45,8 +45,8 @@
     ]
   },
   "evidence": {
-    "report": "temp/tensor-surface-20260907.QGfCGv/ops-final/report.json",
-    "sha256": "3f776ba0466573483abbe9535f85348ffe7dddfc28d5521ffd6ab4aea0ca62bb"
+    "report": "temp/execution-config-20260907.FhQowS/ops-verified/report.json",
+    "sha256": "24b4e929b63dba00219d26c179405cfffd036013370a0d565917f83c63a68cfd"
   },
   "schema_version": 1,
   "tests": {
@@ -386,17 +386,11 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_broadcastdot": {
-      "category": "frontend-admission",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: ValueError: cannot dot () and (3, 3)",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Observed exception-admission/type/message mismatch; no test expectation changed."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_broadcasted_add": {
       "expected": {
@@ -757,30 +751,18 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_dot": {
-      "category": "frontend-admission",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: ValueError: cannot dot (2, 4) and (1, 3)",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Observed exception-admission/type/message mismatch; no test expectation changed."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_dot_1d": {
-      "category": "frontend-admission",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: ValueError: cannot dot (4,) and (1, 2)",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Observed exception-admission/type/message mismatch; no test expectation changed."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_double_slice": {
       "expected": {
@@ -790,17 +772,11 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_einsum": {
-      "category": "runtime-untriaged",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: ValueError: poly_einsum failed for formula: ->",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Observed C-path failure; frontend construction versus core ownership is not yet diagnosed."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_einsum_arity_check1": {
       "expected": {
@@ -817,43 +793,25 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_einsum_ellipsis": {
-      "category": "runtime-untriaged",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: ValueError: poly_einsum failed for formula: ...id, ...jd -> ...ij",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Observed C-path failure; frontend construction versus core ownership is not yet diagnosed."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_einsum_shape_check": {
-      "category": "runtime-untriaged",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: ValueError: poly_einsum failed for formula: pqrs,tuqvr->pstuv",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Observed C-path failure; frontend construction versus core ownership is not yet diagnosed."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_einsum_trace": {
-      "category": "runtime-untriaged",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: ValueError: poly_einsum failed for formula: ...ii->...i",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Observed C-path failure; frontend construction versus core ownership is not yet diagnosed."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_elu": {
       "expected": {
@@ -1267,17 +1225,11 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_log_softmax": {
-      "category": "runtime-untriaged",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: RuntimeError: core Tensor operation failed",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Observed C-path failure; frontend construction versus core ownership is not yet diagnosed."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_log_softmax_other_axis": {
       "expected": {
@@ -1791,17 +1743,17 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_one_hot": {
-      "category": "runtime-untriaged",
       "expected": {
+        "status": "failed",
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: RuntimeError: poly_realize_tensors failed for device(s): CPU",
+            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: RuntimeError: poly_tensor_one_hot failed",
             "outcome": "failed"
           }
-        },
-        "status": "failed"
+        }
       },
-      "reason": "Observed C-path failure; frontend construction versus core ownership is not yet diagnosed."
+      "category": "frontend-admission",
+      "reason": "Weak one-hot realization now passes the initial values. The negative num_classes control then receives RuntimeError from a correct C rejection, instead of the pinned ValueError. Later multidimensional assertions remain unexecuted in this upstream case; fix frontend exception translation in the admission batch."
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_ones": {
       "expected": {
@@ -2007,16 +1959,10 @@
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_prod": {
       "expected": {
-        "status": "failed",
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/helpers.py:LINE: KeyError: 'NOOPT'",
-            "outcome": "failed"
-          }
-        }
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "category": "frontend-context",
-      "reason": "Tensor.prod now executes the initial numerical/gradient body, then fails at unsupported Context(NOOPT=1). Optimization admission and cache-key configuration are not implemented; later assertions remain unexecuted."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_prod_dtype_arg": {
       "expected": {
@@ -2668,17 +2614,11 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_softmax": {
-      "category": "runtime-untriaged",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: RuntimeError: core Tensor operation failed",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Observed C-path failure; frontend construction versus core ownership is not yet diagnosed."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_softmax_argmax": {
       "expected": {
@@ -2897,17 +2837,11 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_sum": {
-      "category": "runtime-untriaged",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: RuntimeError: core Tensor operation failed",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Observed C-path failure; frontend construction versus core ownership is not yet diagnosed."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_sum_cat_collapse": {
       "expected": {

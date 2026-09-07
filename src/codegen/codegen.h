@@ -33,6 +33,10 @@ typedef struct {
   PolyPatternMatcher *extra_matcher; /* renderer-specific final rewrite (NULL = none) */
 } PolyRewriteOpts;
 
+/* Tinygrad's library-wide NOOPT compilation ContextVar. */
+int poly_get_noopt(void);
+void poly_set_noopt(int value);
+
 static inline bool poly_kernel_optimize_enabled(PolyUOp *sink) {
   return !(sink && sink->op == POLY_OP_SINK && sink->tag != 0);
 }

@@ -16,6 +16,94 @@ from polygrad.helpers import Context
 from polygrad.uop.ops import AxisType, KernelInfo, UOp, _dispose_uops_for_ctx
 
 
+@pytest.mark.parametrize('method,expected', [('sum', 2.0), ('softmax', 1.0), ('log_softmax', 0.0)])
+@pytest.mark.parametrize('axis', [0, -1])
+def test_execution_scalar_reduction_axes(method, expected, axis):
+    x = Tensor(2.0)
+    out = getattr(x, method)(axis)
+    assert out.shape == ()
+    assert out.item() == pytest.approx(expected)
+    with pytest.raises(IndexError):
+        getattr(x, method)(1)
+
+
+def test_execution_noopt_context_restores_after_error():
+    from polygrad.helpers import NOOPT
+    before = NOOPT.value
+    with pytest.raises(RuntimeError, match='scope sentinel'):
+        with Context(NOOPT=1):
+            assert _ffi._lib.poly_get_noopt() == 1
+            assert Tensor([1., 2., 3.]).prod().item() == 6
+            with Context(NOOPT=0):
+                assert _ffi._lib.poly_get_noopt() == 0
+            assert _ffi._lib.poly_get_noopt() == 1
+            raise RuntimeError('scope sentinel')
+    assert NOOPT.value == before
+    assert _ffi._lib.poly_get_noopt() == before
+
+
+def test_execution_virtual_one_hot_realize_preserves_roots():
+    x = Tensor([1, 2, 4]).one_hot(6)
+    before = x.uop.raw
+    assert x.realize() is x
+    assert x.uop.raw == before
+    np.testing.assert_equal(x.numpy(), [[0, 1, 0, 0, 0, 0],
+                                      [0, 0, 1, 0, 0, 0],
+                                      [0, 0, 0, 0, 1, 0]])
+
+
+@pytest.mark.parametrize('formula,shapes', [
+    ('->', [()]), (',i->i', [(), (3,)]), ('i,->i', [(3,), ()]),
+    ('...ij,...jk->...ik', [(2, 3, 4), (2, 4, 5)]),
+    ('...ij,...jk', [(2, 3, 4), (2, 4, 5)]),
+    ('i...j,ji...->...', [(2, 3, 4, 5), (5, 2, 4)]),
+    ('...ii->...i', [(2, 3, 3)]), ('...ii->...', [(2, 3, 3)]),
+    ('IJ,JK->IK', [(2, 3), (3, 4)]),
+])
+def test_execution_einsum_shapes_and_gradients(formula, shapes):
+    arrays = [(np.arange(math.prod(s), dtype=np.float32) + 1).reshape(s) for s in shapes]
+    # Use stored leaves for gradient checks, including rank-zero operands.
+    xs = [Tensor(a.reshape(-1)).reshape(a.shape) for a in arrays]
+    out = Tensor.einsum(formula, *xs)
+    out.sum().backward()
+    np.testing.assert_allclose(out.numpy(), np.einsum(formula, *arrays), rtol=1e-5)
+    for i, x in enumerate(xs):
+        expected = np.zeros_like(arrays[i])
+        for index in np.ndindex(expected.shape):
+            basis = np.zeros_like(expected)
+            basis[index] = 1
+            operands = arrays[:i] + [basis] + arrays[i + 1:]
+            expected[index] = np.einsum(formula, *operands).sum()
+        np.testing.assert_allclose(x.grad.numpy(), expected, rtol=1e-5)
+
+
+@pytest.mark.parametrize('shapes', [[(), (3, 3)], [(2, 4), (1, 3)], [(4,), (1, 2)]])
+def test_execution_dot_shape_errors(shapes):
+    with pytest.raises(RuntimeError):
+        Tensor.ones(shapes[0]).dot(Tensor.ones(shapes[1]))
+
+
+def test_execution_python_copy_has_independent_handle():
+    # Isolate the incoming destructor double-release: a copied ctypes address
+    # is not another C handle owner, even if the immutable UOp can be shared.
+    code = '''
+import copy, gc
+from polygrad import Tensor
+x = Tensor.ones(3, 3)
+for copier in (copy.copy, copy.deepcopy):
+    y = copier(x)
+    assert y._tensor != x._tensor, 'copy aliased a mutable C Tensor handle'
+    assert y.uop.raw == x.uop.raw
+    x.dispose()
+    gc.collect()
+    assert y.tolist() == [[1., 1., 1.]] * 3
+    x = y
+print('copy ownership passed')
+'''
+    result = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 class TestCreation:
     def test_invalid_logical_environment_fails_import(self):
         env = os.environ.copy()
@@ -3405,7 +3493,7 @@ class TestMatmulAndLoss:
         assert out.uop.raw == expected_physical
         np.testing.assert_allclose(out.numpy(), np.array([[19.0, 22.0], [43.0, 50.0]], dtype=np.float32))
 
-        with pytest.raises(ValueError, match='poly_einsum failed'):
+        with pytest.raises(RuntimeError, match='poly_einsum failed'):
             Tensor.einsum('a->' + ('a' * 80), Tensor([1.0]))
 
         with Runtime(device='cpu') as runtime_a, Runtime(device='cpu') as runtime_b:
@@ -3461,7 +3549,7 @@ class TestMatmulAndLoss:
     def test_matmul_shape_mismatch_raises(self):
         a = Tensor([[1.0, 2.0], [3.0, 4.0]])
         b = Tensor([[1.0, 2.0, 3.0]])
-        with pytest.raises(ValueError, match='cannot dot'):
+        with pytest.raises(RuntimeError, match='cannot dot'):
             a @ b
 
     def test_matmul_broadcast_batch_values(self):
@@ -3504,7 +3592,7 @@ class TestMatmulAndLoss:
     def test_matmul_broadcast_mismatch_raises(self):
         a = Tensor(np.zeros((2, 3, 4), dtype=np.float32))
         b = Tensor(np.zeros((5, 4, 6), dtype=np.float32))
-        with pytest.raises(ValueError, match='cannot dot'):
+        with pytest.raises(IndexError, match='broadcast'):
             a @ b
 
     def test_linalg_construction_bypasses_frontend_substitution(self):

@@ -13,7 +13,7 @@
 
 /* Public C/frontend ABI version. Bump when exported symbols or public struct
  * layouts used by frontends change. */
-#define POLYGRAD_ABI_VERSION 70
+#define POLYGRAD_ABI_VERSION 71
 
 /* Current ElementwiseMixin._binop for language UOp operators. Compiler
  * matchers keep using raw poly_alu2. */
@@ -22,6 +22,11 @@ PolyUOp *poly_binop(PolyCtx *ctx, PolyOps op, PolyUOp *a, PolyUOp *b);
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* Tinygrad helpers.NOOPT: library-wide compilation policy, initialized from
+ * the environment once, not graph state. Existing PROGRAMs are unchanged. */
+int poly_get_noopt(void);
+void poly_set_noopt(int value);
 
 /* FFI buffer constructors for bindings that cannot pass PolyDType by value. */
 PolyUOp *poly_buffer_by_id(PolyCtx *ctx, int dtype_id, int64_t size);

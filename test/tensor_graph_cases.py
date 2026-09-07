@@ -2355,6 +2355,33 @@ for _kind in ('grad_stack', 'uint_scalar', 'uint_full', 'div_floor', 'div_trunc'
     CASES[f'surface_owner_{_kind}'] = ('tensor', lambda k=_kind: surface_owner_graph(k))
 
 
+def execution_scalar_graph(method):
+    x = Tensor.empty((), dtype='float32', device='CPU').realize()
+    out = getattr(x, method)(0)
+    return {'physical': out.uop, 'logical': logical(out)}
+
+
+for _method in ('sum', 'softmax', 'log_softmax'):
+    CASES[f'execution_scalar_{_method}'] = ('tensor', lambda m=_method: execution_scalar_graph(m))
+
+
+def execution_einsum_graph(formula, shapes, dtype='float32'):
+    xs = [Tensor.empty(shape, dtype=dtype, device='CPU').realize() for shape in shapes]
+    out = Tensor.einsum(formula, *xs)
+    return {'physical': out.uop, 'logical': logical(out)}
+
+
+for _name, _formula, _shapes in (
+    ('scalar', '->', [()]), ('scalar_mul', ',i->i', [(), (3,)]),
+    ('ellipsis', '...ij,...jk->...ik', [(2,3,4), (2,4,5)]),
+    ('implicit_ellipsis', '...ij,...jk', [(2,3,4), (2,4,5)]),
+    ('trace', 'ii->', [(3,3)]), ('batch_trace', '...ii->...', [(2,3,3)]),
+    ('uppercase', 'IJ,JK->IK', [(2,3), (3,4)]),
+):
+    CASES[f'execution_einsum_{_name}'] = ('tensor', lambda f=_formula, s=_shapes: execution_einsum_graph(f, s))
+CASES['execution_einsum_accumulation'] = ('tensor', lambda: execution_einsum_graph('ij->i', [(2,3)], 'int8'))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--case", action="append", choices=sorted(CASES))

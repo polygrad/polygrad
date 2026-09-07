@@ -270,6 +270,42 @@ TEST(schedule_runtime, run_linear_executes_current_call_graph) {
   PASS();
 }
 
+TEST(schedule_runtime, noopt_separates_program_cache) {
+  int old = poly_get_noopt();
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 128, POLY_DEVICE_CPU);
+  PolyUOp *out = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 128, POLY_DEVICE_CPU);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, poly_alu2(ctx, POLY_OP_ADD, a, a)));
+  PolyUOp *linear = poly_test_create_linear(ctx, sink);
+  poly_set_noopt(0);
+  PolyUOp *optimized = poly_compile_linear(ctx, linear, 0);
+  if (optimized) poly_uop_retain(ctx, optimized);
+  size_t first = poly_to_program_cache_len(ctx);
+  poly_set_noopt(1);
+  PolyUOp *unoptimized = poly_compile_linear(ctx, linear, 0);
+  if (unoptimized) poly_uop_retain(ctx, unoptimized);
+  size_t second = poly_to_program_cache_len(ctx);
+  poly_set_noopt(0);
+  PolyUOp *restored = poly_compile_linear(ctx, linear, 0);
+  bool valid = optimized && unoptimized && optimized != unoptimized && restored == optimized &&
+               second > first;
+  float values[128], got[128];
+  for (int i = 0; i < 128; i++)
+    values[i] = (float)i;
+  valid &= poly_buffer_write(ctx, a, values, sizeof(values)) == 0;
+  PolyUOp *programs[] = {optimized, unoptimized};
+  for (int p = 0; valid && p < 2; p++) {
+    valid &= poly_run_linear(ctx, programs[p], NULL, 0, NULL, 0, true, true, false) == 0;
+    valid &= poly_buffer_read(ctx, out, got, sizeof(got)) == 0;
+    for (int i = 0; valid && i < 128; i++)
+      valid &= got[i] == 2 * values[i];
+  }
+  poly_set_noopt(old);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(valid);
+  PASS();
+}
+
 TEST(schedule_runtime, program_and_runtime_caches_reuse_current_keys) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);

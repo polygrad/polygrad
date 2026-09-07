@@ -333,6 +333,21 @@ class _CHECK_OOB(ContextVar):
         self._value = value
 
 
+class _NOOPT(ContextVar):
+    @property
+    def value(self):
+        from . import _ffi
+        return _ffi.get_lib().poly_get_noopt()
+
+    @value.setter
+    def value(self, value):
+        from . import _ffi
+        if not isinstance(value, int) or not -(2**31) <= value <= 2**31 - 1:
+            raise ValueError('NOOPT must be an int32')
+        _ffi.get_lib().poly_set_noopt(value)
+
+
+NOOPT = _NOOPT("NOOPT", 0)
 DEV = _DEV("DEV", "")
 CHECK_OOB = _CHECK_OOB("CHECK_OOB", 0)
 IMAGE = _IMAGE("IMAGE", 0)

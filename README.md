@@ -172,7 +172,17 @@ only regions that have been written. This is not zero initialization.
 Python accepts `Context(CHECK_OOB=0)`. Nonzero values raise: the optional
 Tinygrad compiler bounds verifier is not implemented (`PG-PARITY-026`).
 This is separate from Tensor index and shape validation.
-The `NOOPT` context option is not implemented yet.
+Python `Context(NOOPT=1)` and JS `runtime.noopt = 1` disable automatic
+kernel scheduling heuristics, not the compiler's required lowering passes or
+explicit BEAM search. The setting participates in program-cache keys and does
+not change already compiled JIT captures. It is shared by native contexts;
+each Wasm module has its own setting. Restore it after a scoped experiment.
+
+Scalar reductions accept axes `0` and `-1`. `realize()` leaves virtual weak
+tensors unchanged; cast before requesting storage or a schedule. Einsum supports
+scalar operands, ellipses, uppercase labels and shared C accumulation rules.
+Python shallow/deep copies own distinct Tensor handles over shared graph roots;
+use `clone()` when requesting a separate storage allocation.
 
 Both frontends expose `all`, `any`, `cumsum`, `cumprod`, `cummax`, and `cummin`
 through shared C Tensor operations. `all`/`any` accept axes and `keepdim`;

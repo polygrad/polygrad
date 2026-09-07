@@ -104,6 +104,45 @@ async function runTensorTests(pg) {
   console.log(`Core: ${pg.core}, device: ${pg.device}\n`)
 
   // -- Creation --
+  await test('execution scalar reductions and virtual oneHot', async () => {
+    for (const axis of [0, -1]) {
+      const x = new Tensor(2.0, { dtype: 'float32' })
+      assertClose(await x.sum(axis).toArray(), [2])
+      assertClose(await x.softmax(axis).toArray(), [1])
+      assertClose(await x.logSoftmax(axis).toArray(), [0])
+    }
+    const x = new Tensor([1, 2, 4]).oneHot(6)
+    const before = x.uop.key
+    await x.realizeAsync()
+    assert(x.uop.key === before, 'virtual realization changed its graph')
+    assertClose(await x.toArray(), [0,1,0,0,0,0, 0,0,1,0,0,0, 0,0,0,0,1,0])
+  })
+
+  await test('execution NOOPT policy restores and computes product', async () => {
+    const before = pg.noopt
+    try {
+      for (const mode of [0, 1, 0]) {
+        pg.noopt = mode
+        assert(pg.noopt === mode, 'NOOPT core value disagrees')
+        assertClose(await new Tensor([1, 2, 3], { dtype: 'float32' }).prod().toArray(), [6])
+      }
+    } finally { pg.noopt = before }
+  })
+
+  await test('execution einsum scalar ellipsis trace and accumulation', async () => {
+    const scalar = new Tensor(2, { dtype: 'float32' })
+    assertClose(await Tensor.einsum('->', scalar).toArray(), [2])
+    const a = Tensor.arange(12).cast('float32').reshape(2, 2, 3)
+    const b = Tensor.ones([2, 3, 2])
+    assertClose(await Tensor.einsum('...ij,...jk->...ik', a, b).toArray(), [3,3,12,12,21,21,30,30])
+    const x = Tensor.arange(18).cast('float32').reshape(2, 3, 3)
+    assertClose(await Tensor.einsum('...ii->...', x).toArray(), [12,39])
+    const small = new Tensor(new Int8Array([100,100,100])).reshape(1,3)
+    const sum = Tensor.einsum('ij->i', small)
+    assert(sum.dtype === 'int32', `einsum accumulation dtype ${sum.dtype}`)
+    assertClose(await sum.toArray(), [300])
+  })
+
   console.log('-- Creation --')
 
   await test('dtype API queries match pinned metadata', async () => {

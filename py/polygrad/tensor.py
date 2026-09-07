@@ -847,6 +847,24 @@ class Tensor:
         except Exception:
             pass
 
+    def __copy__(self):
+        # Tinygrad copies a Tensor wrapper over interned immutable UOps. A
+        # ctypes address cannot be copied as an owning, mutable PolyTensor:
+        # each wrapper needs its own registered C handle and balanced release.
+        core = self._core_create_result_like(
+            self._core_uop_logical_raw(self._tensor), self._core_uop_physical_raw(self._tensor)
+        )
+        ret = self._make_result_from_core(core, self._shape_override, [self])
+        ret._grad, ret._is_param = self._grad, self._is_param
+        return ret
+
+    def __deepcopy__(self, memo):
+        import copy
+        ret = self.__copy__()
+        memo[id(self)] = ret
+        ret._grad = copy.deepcopy(self._grad, memo)
+        return ret
+
     # --- Core PolyTensor bridge ---
 
     def _core_create(self, uop, role=_POLY_TENSOR_VALUE, device=None):
@@ -2269,10 +2287,12 @@ class Tensor:
     # --- Softmax ---
 
     def softmax(self, axis=-1):
+        self._resolve_dim(axis)
         core = _ffi._lib.poly_tensor_softmax(self._ctx, self._tensor, int(axis))
         return self._make_result_from_core(core, self.shape, [self])
 
     def log_softmax(self, axis=-1):
+        self._resolve_dim(axis)
         core = _ffi._lib.poly_tensor_log_softmax(self._ctx, self._tensor, int(axis))
         return self._make_result_from_core(core, self.shape, [self])
 
@@ -2953,7 +2973,15 @@ class Tensor:
             )
         )
         if not core:
-            raise ValueError(f'cannot dot {self.shape} and {w.shape}')
+            # C rejects both contraction and batch-shape errors. Tinygrad's
+            # dot raises RuntimeError for the former; its multiply raises
+            # IndexError for the latter. Translate only after core rejection.
+            if self.ndim and w.ndim and self.shape[-1] == w.shape[-min(w.ndim, 2)]:
+                try:
+                    _broadcast_shapes(self.shape[:-2], w.shape[:-2])
+                except ValueError as error:
+                    raise IndexError(str(error)) from None
+            raise RuntimeError(f'cannot dot {self.shape} and {w.shape}')
         current = self._core_uop_raw(core)
         return self._make_result_from_core(
             core, _shape_from_uop(self._ctx, current), [self, w]
@@ -3405,7 +3433,7 @@ class Tensor:
             ctx, formula.encode('utf-8'),
             tensor_arr, n)
         if not core:
-            raise ValueError(f'poly_einsum failed for formula: {formula}')
+            raise RuntimeError(f'poly_einsum failed for formula: {formula}')
         current = operands[0]._core_uop_raw(core)
         return operands[0]._make_result_from_core(
             core, _shape_from_uop(ctx, current), list(operands)

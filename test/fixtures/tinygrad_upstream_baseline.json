@@ -165,8 +165,8 @@
     "failure_signature": "source-path-and-message-v2"
   },
   "evidence": {
-    "report": "temp/tensor-surface-20260907.QGfCGv/upstream-verified/report.json",
-    "sha256": "91607942ad7ecbad3acec87ec0d3ad8ec5cc0e8e58f46bd671f2aca76c44c76d"
+    "report": "temp/execution-config-20260907.FhQowS/upstream-verified/report.json",
+    "sha256": "c54f39aa7b66d611c943ec995176a45c76031a7f504de684383f573a3fe5ac76"
   },
   "schema_version": 1,
   "tests": {
@@ -224,16 +224,10 @@
     },
     "polygrad:test/backend/test_tensor.py::TestTensorCreationDevice::test_one_hot": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: RuntimeError: poly_realize_tensors failed for device(s): CPU",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Execution reaches the existing C Tensor path and fails; raw traceback is retained. The core cause requires a separate pinned graph/value reproduction, not a frontend workaround.",
-      "category": "runtime-untriaged"
+      "reason": ""
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_accumulate_gradients": {
       "expected": {
@@ -518,16 +512,10 @@
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_tensor_copy": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: RuntimeError: core Tensor operation failed",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Execution reaches the existing C Tensor path and fails; raw traceback is retained. The core cause requires a separate pinned graph/value reproduction, not a frontend workaround.",
-      "category": "runtime-untriaged"
+      "reason": ""
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_tensor_dtype_errors": {
       "expected": {

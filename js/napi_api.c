@@ -3643,6 +3643,24 @@ static napi_value napi_poly_ctx_set_preferred_device(napi_env env, napi_callback
   return undef;
 }
 
+static napi_value napi_poly_get_noopt(napi_env env, napi_callback_info info) {
+  (void)info;
+  napi_value out;
+  NAPI_CALL(env, napi_create_int32(env, poly_get_noopt(), &out));
+  return out;
+}
+
+static napi_value napi_poly_set_noopt(napi_env env, napi_callback_info info) {
+  napi_value argv[1], out;
+  size_t argc = 1;
+  int32_t value = 0;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  NAPI_CALL(env, napi_get_value_int32(env, argv[0], &value));
+  poly_set_noopt(value);
+  NAPI_CALL(env, napi_get_undefined(env, &out));
+  return out;
+}
+
 static napi_value napi_poly_ctx_set_logical_policy(napi_env env, napi_callback_info info) {
   napi_value argv[2], out;
   size_t argc = 2;
@@ -6601,6 +6619,8 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_ctx_set_preferred_device", napi_poly_ctx_set_preferred_device),
       DECLARE_NAPI_METHOD("poly_ctx_set_logical_policy", napi_poly_ctx_set_logical_policy),
       DECLARE_NAPI_METHOD("poly_ctx_get_logical_policy", napi_poly_ctx_get_logical_policy),
+      DECLARE_NAPI_METHOD("poly_get_noopt", napi_poly_get_noopt),
+      DECLARE_NAPI_METHOD("poly_set_noopt", napi_poly_set_noopt),
       DECLARE_NAPI_METHOD("poly_ctx_collect", napi_poly_ctx_collect),
       DECLARE_NAPI_METHOD("poly_ctx_stats", napi_poly_ctx_stats),
       DECLARE_NAPI_METHOD("poly_ctx_reset_counters", napi_poly_ctx_reset_counters),

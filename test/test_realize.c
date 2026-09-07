@@ -93,9 +93,9 @@ static PolyTensor *initialized_i32_tensor8(PolyCtx *ctx, int start, PolyUOp **ou
   return tensor;
 }
 
-TEST(realize, deviceful_weak_root_requires_concrete_cast) {
-  /* Tinygrad 2026-08-22/a9069c177a9d tensor.py:405-409 rejects a deviceful
-   * weak result before callify; an explicit strong cast remains realizable. */
+TEST(realize, virtual_weak_realize_noop_but_scheduling_requires_concrete_cast) {
+  /* Tensor.realize filters UOp.is_virtual; linear_with_vars rejects a direct
+   * weak storage request. Do not conflate the two public boundaries. */
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
   ASSERT_INT_EQ(poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_UNTIL_REALIZE), 0);
@@ -113,8 +113,13 @@ TEST(realize, deviceful_weak_root_requires_concrete_cast) {
   ASSERT_NOT_NULL(weak_logical);
 
   PolyTensor *realized = NULL;
-  ASSERT_INT_EQ(poly_realize_tensors(ctx, &weak, 1, &realized), -1);
-  ASSERT_TRUE(realized == NULL);
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &weak, 1, &realized), 0);
+  ASSERT_PTR_EQ(realized, weak);
+  PolyUOp *weak_root = poly_tensor_uop_physical(weak), *output = NULL;
+  PolyVarBinding *bindings = NULL;
+  int n_bindings = 0;
+  ASSERT_TRUE(poly_linear_with_vars(ctx, &weak_root, 1, &output, &bindings, &n_bindings) == NULL);
+  ASSERT_TRUE(output == NULL);
   ASSERT_PTR_EQ(poly_tensor_uop_logical(weak), weak_logical);
   ASSERT_INT_EQ(poly_tensor_logical_state(weak), POLY_LOGICAL_AVAILABLE);
 

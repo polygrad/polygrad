@@ -38,6 +38,23 @@
 #include <errno.h>
 #include "utils.h"
 
+/* C storage for Tinygrad's NOOPT ContextVar. A Wasm module has its own copy;
+ * native contexts share it, just as Tinygrad contexts share compiler policy. */
+static int noopt_value;
+static bool noopt_initialized;
+
+int poly_get_noopt(void) {
+  if (!noopt_initialized) {
+    noopt_value = poly_getenv_int("NOOPT", 0);
+    noopt_initialized = true;
+  }
+  return noopt_value;
+}
+
+void poly_set_noopt(int value) {
+  noopt_value = value;
+  noopt_initialized = true;
+}
 /* Max hardware vector fold width for load/store splitting.
  * Set by the pipeline before running correct_load_store pass.
  * Default 4 (SSE). Set to 8 for AVX2.
@@ -5609,9 +5626,9 @@ PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOp
      * and later expander passes drop the ended RANGE structure entirely. */
     if (opts.beam_width > 0) {
       sink = poly_beam_search(ctx, sink, opts.beam_width, opts);
-    } else if (opts.opt_policy == POLY_OPT_TC_ONLY) {
+    } else if (!poly_get_noopt() && opts.opt_policy == POLY_OPT_TC_ONLY) {
       sink = poly_apply_tc_opt(ctx, sink, opts.caps);
-    } else {
+    } else if (!poly_get_noopt()) {
       sink = poly_apply_opts_heuristic(ctx, sink, opts.caps);
     }
     sink = poly_graph_rewrite(ctx, sink, poly_pm_flatten_range());

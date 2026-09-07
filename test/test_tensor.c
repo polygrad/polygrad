@@ -23,6 +23,26 @@
 #include "../src/tensor.h"
 #include "../src/codegen/codegen.h"
 
+TEST(tensor, execution_scalar_reduction_axes) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_const_typed(ctx, POLY_FLOAT32, 2.0);
+  bool valid = true;
+  for (int axis = -1; axis <= 0; axis++) {
+    PolyUOp *sum = poly_sum_reduce(ctx, x, axis, 1);
+    PolyUOp *soft = poly_softmax(ctx, x, axis);
+    PolyUOp *logsoft = poly_log_softmax(ctx, x, axis);
+    valid &= sum && soft && logsoft;
+    if (sum && soft && logsoft)
+      valid &= poly_uop_ndim(ctx, sum) == 0 && poly_uop_ndim(ctx, soft) == 0 &&
+               poly_uop_ndim(ctx, logsoft) == 0;
+  }
+  valid &=
+      !poly_sum_reduce(ctx, x, 1, 0) && !poly_softmax(ctx, x, 1) && !poly_log_softmax(ctx, x, 1);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(valid);
+  PASS();
+}
+
 /* Helper: realize a UOp into a host array */
 
 static int realize_uop(
