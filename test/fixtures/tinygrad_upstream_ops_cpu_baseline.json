@@ -112,56 +112,32 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_all": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'all'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_all_axis": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'all'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_all_large": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'all'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_all_zero_axis": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'all'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_and": {
       "category": "frontend-dtype",
@@ -177,43 +153,25 @@
       "reason": "Observed scalar/creator dtype contract mismatch; no NumPy or core workaround."
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_any": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'any'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_any_axis": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'any'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_any_zero_axis": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'any'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_arange": {
       "category": "frontend-dtype",
@@ -831,108 +789,70 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_cummax": {
-      "category": "frontend-api",
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'cummax'",
+            "detail": "<polygrad>/references/.uv-python/cpython-3.11.12-linux-x86_64-gnu/lib/python3.11/unittest/case.py:LINE: AssertionError: IndexError not raised",
             "outcome": "failed"
           }
         },
         "status": "failed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": "reference-failure: the Torch control fails IndexError not raised for scalar dim=1 under both providers, before invoking either implementation; supported scan values and graphs have dedicated cross-frontend regressions."
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_cummax_zero_axis": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'cummax'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_cummin": {
-      "category": "frontend-api",
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'cummin'",
+            "detail": "<polygrad>/references/.uv-python/cpython-3.11.12-linux-x86_64-gnu/lib/python3.11/unittest/case.py:LINE: AssertionError: IndexError not raised",
             "outcome": "failed"
           }
         },
         "status": "failed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": "reference-failure: the Torch control fails IndexError not raised for scalar dim=1 under both providers, before invoking either implementation; supported scan values and graphs have dedicated cross-frontend regressions."
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_cummin_zero_axis": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'cummin'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_cumprod": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'cumprod'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_cumprod_zero_axis": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'cumprod'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_cumsum": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'cumsum'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_cumsum_zero_axis": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'cumsum'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_depthwise_conv2d": {
       "expected": {
@@ -3001,56 +2921,32 @@
       "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_simple_cummax": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'cummax'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_simple_cummin": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'cummin'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_simple_cumprod": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'cumprod'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_simple_cumsum": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'cumsum'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_simple_grouped_conv2d": {
       "expected": {
@@ -3322,56 +3218,32 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_small_cummax": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'cummax'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_small_cummin": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'cummin'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_small_cumprod": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'cumprod'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_small_cumsum": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'cumsum'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_small_gemm": {
       "expected": {

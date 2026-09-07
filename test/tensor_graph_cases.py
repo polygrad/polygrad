@@ -2149,6 +2149,34 @@ CASES = {
 }
 
 
+def scan_owner_gradient(op="cumsum", n=513):
+    x = Tensor.empty(n, 2, dtype="float32").realize()
+    return {"physical": raw_gradient(getattr(x, op)(0).sum(), x)}
+
+
+CASES["scan_owner_gradient_split"] = ("tensor", scan_owner_gradient)
+CASES["scan_owner_gradient_product"] = ("tensor", lambda: scan_owner_gradient("cumprod", 4))
+
+
+def scan_owner_graph(op, dtype, shape, axis, result=0):
+    x = Tensor.empty(*shape, dtype=dtype).realize()
+    out = getattr(x, op)(axis)
+    if isinstance(out, tuple): out = out[result]
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+# Check both returned graphs; value-only cummax tests miss index construction.
+for _op in ("all", "any", "cumsum", "cumprod", "cummax", "cummin"):
+    for _dtype, _shape, _axis in (
+        ("int8", (2, 4), 0), ("bool", (4,), -1), ("float16", (4,), 0),
+        ("uint8", (513,), 0), ("int8", (), -1), ("int8", (2, 0), -1),
+    ):
+        for _result in range(2 if _op in ("cummax", "cummin") else 1):
+            _name = f"scan_owner_{_op}_{_dtype}_{'x'.join(map(str, _shape)) or 'scalar'}_{_result}"
+            CASES[_name] = ("tensor", lambda op=_op, dt=_dtype, sh=_shape, ax=_axis, r=_result:
+                           scan_owner_graph(op, dt, sh, ax, r))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--case", action="append", choices=sorted(CASES))

@@ -880,6 +880,18 @@ def _declare_signatures(lib):
     lib.poly_tensor_max.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int, ctypes.c_bool]
     lib.poly_tensor_min.restype = _ptr
     lib.poly_tensor_min.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int, ctypes.c_bool]
+    for name in ('all', 'any'):
+        fn = getattr(lib, 'poly_tensor_' + name)
+        fn.restype = _ptr
+        fn.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int, ctypes.c_bool]
+    for name in ('cumsum', 'cumprod'):
+        fn = getattr(lib, 'poly_tensor_' + name)
+        fn.restype = _ptr
+        fn.argtypes = [_ptr, _ptr, ctypes.c_int]
+    for name in ('cummax', 'cummin'):
+        fn = getattr(lib, 'poly_tensor_' + name)
+        fn.restype = ctypes.c_int
+        fn.argtypes = [_ptr, _ptr, ctypes.c_int, _ptrp, _ptrp]
 
     lib.poly_tensor_argmax.restype = _ptr
     lib.poly_tensor_argmax.argtypes = [_ptr, _ptr, ctypes.c_int, ctypes.c_bool]

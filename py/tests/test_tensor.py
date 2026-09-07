@@ -2479,6 +2479,98 @@ class TestStepSlicing:
 
 
 class TestReduce:
+    @pytest.mark.parametrize('op', ['all', 'any', 'cumsum', 'cumprod', 'cummax', 'cummin'])
+    def test_scan_owners_surface_and_values(self, op):
+        x = Tensor([-3, -1, -2, -1], dtype='int8')
+        out = getattr(x, op)(0)
+        expected = {'all': True, 'any': True, 'cumsum': [-3,-4,-6,-7],
+                    'cumprod': [-3,3,-6,6], 'cummax': [-3,-1,-1,-1], 'cummin': [-3,-3,-3,-3]}
+        if op in ('cummax', 'cummin'):
+            values, indices = out
+            np.testing.assert_array_equal(indices.numpy(), [0,1,1,1] if op == 'cummax' else [0,0,0,0])
+            assert indices.dtype == dtypes.int32
+        else:
+            values = out
+        np.testing.assert_array_equal(values.numpy(), expected[op])
+        assert values.dtype == (dtypes.bool if op in ('all','any') else dtypes.int32 if op == 'cumsum' else dtypes.int8)
+
+    @pytest.mark.parametrize('op', ['all', 'any'])
+    def test_scan_owners_boolean_axes(self, op):
+        data = np.array([[0, np.nan, -2], [1, 0, 3]], dtype=np.float32)
+        x = Tensor(data)
+        for axis in (None, 0, -1, (0, 1), ()):
+            for keepdim in (False, True):
+                out = getattr(x, op)(axis, keepdim)
+                expected = getattr(np, op)(data, axis=axis, keepdims=keepdim)
+                assert out.shape == expected.shape
+                np.testing.assert_array_equal(out.numpy(), expected)
+        for shape in ((), (0,), (2, 0), (0, 2)):
+            data = np.ones(shape, dtype=np.int8)
+            x = Tensor(data)
+            for axis in (0, -1):
+                expected = getattr(np, op)(data, axis=axis)
+                np.testing.assert_array_equal(getattr(x, op)(axis).numpy(), expected)
+
+    @pytest.mark.parametrize('op', ['cumsum', 'cumprod', 'cummax', 'cummin'])
+    def test_scan_owners_empty_scalar_and_axes(self, op):
+        for shape in ((), (0,), (2, 0), (0, 2)):
+            x = Tensor(np.ones(shape, dtype=np.int8))
+            for axis in (0, -1):
+                result = getattr(x, op)(axis)
+                pair = isinstance(result, tuple)
+                values = result[0] if pair else result
+                assert values.shape == shape
+                assert values.dtype == (dtypes.int32 if op == 'cumsum' else dtypes.int8)
+                np.testing.assert_array_equal(values.numpy(), np.ones(shape))
+                if pair:
+                    assert result[1].shape == shape
+                    np.testing.assert_array_equal(result[1].numpy(), np.zeros(shape))
+            for axis in (max(1, len(shape)), -max(1, len(shape))-1):
+                with pytest.raises(IndexError): getattr(x, op)(axis)
+
+    @pytest.mark.parametrize('dtype', ['bool', 'uint8', 'int8', 'uint64', 'int64', 'float16', 'float32'])
+    def test_scan_owners_dtypes_and_prefix_indices(self, dtype):
+        raw = [[1, 0, 1, 1], [0, 1, 0, 1]] if dtype == 'bool' else [[3, 1, 2, 1], [0, 3, 0, 3]]
+        if dtype == 'uint64': raw = [[2**64-1, 0, 2**64-2, 0], [5, 7, 5, 7]]
+        if dtype == 'int64': raw = [[-2**63, 0, -2**63+1, 0], [5, 7, 5, 7]]
+        data = np.array(raw, dtype=dtype)
+        x = Tensor(data)
+        for axis in (0, -1):
+            for op in ('cummax', 'cummin'):
+                values, indices = getattr(x, op)(axis)
+                expected = (np.maximum if op == 'cummax' else np.minimum).accumulate(data, axis=axis)
+                moved = np.moveaxis(data, axis, -1)
+                arg = np.argmax if op == 'cummax' else np.argmin
+                expected_idx = np.stack([arg(moved[..., :i+1], axis=-1) for i in range(moved.shape[-1])], axis=-1)
+                np.testing.assert_array_equal(values.numpy(), expected)
+                np.testing.assert_array_equal(indices.numpy(), np.moveaxis(expected_idx, -1, axis))
+            # Pinned sum promotes small integers; prod retains storage dtype.
+            for op in ('cumsum', 'cumprod'):
+                out = getattr(x, op)(axis)
+                result_dtype = 'int32' if op == 'cumsum' and dtype in ('bool', 'int8') else 'uint32' if op == 'cumsum' and dtype == 'uint8' else dtype
+                assert out.dtype == getattr(dtypes, result_dtype)
+                expected = getattr(np, op)(data, axis=axis, dtype=result_dtype)
+                np.testing.assert_array_equal(out.numpy(), expected)
+
+    @pytest.mark.parametrize('length', [512, 513, 1025])
+    def test_scan_owners_split_boundary_and_gradients(self, length):
+        data = np.ones((length, 2), dtype=np.float32)
+        data[0] = [2, 3]
+        x = Tensor(data)
+        for op in ('cumsum', 'cumprod'):
+            np.testing.assert_array_equal(getattr(x, op)(0).numpy(), getattr(np, op)(data, axis=0))
+        x.cumsum(0).sum().backward()
+        np.testing.assert_array_equal(x.grad.numpy(), np.broadcast_to(np.arange(length, 0, -1)[:, None], data.shape))
+
+    @pytest.mark.parametrize('data,expected', [
+        ([2.,3.,4.], [16.,10.,6.]), ([2.,0.,4.], [1.,10.,0.]),
+        ([0.,3.,0.], [4.,0.,0.]),
+    ])
+    def test_scan_owners_product_gradients(self, data, expected):
+        x = Tensor(data)
+        x.cumprod(0).sum().backward()
+        np.testing.assert_array_equal(x.grad.numpy(), expected)
+
     @pytest.mark.parametrize('dtype,values', [
         ('uint8', [[0, 1, 255], [7, 3, 2]]),
         ('int8', [[-128, -1, 127], [7, 3, 2]]),

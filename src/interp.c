@@ -828,7 +828,8 @@ static int interp_region(
     int n_args,
     const int *param_arg_indices,
     const UOpIndexMap *idx_map,
-    InterpLane *arena
+    InterpLane *arena,
+    bool exec_mask
 ) {
   for (int i = start; i < end; i++) {
     PolyUOp *u = lin[i];
@@ -906,7 +907,8 @@ static int interp_region(
         vals[i] = iv_scalar(il_int(ridx));
         iv_fixup(&vals[i]);
         int rc = interp_region(
-            ctx, lin, n_lin, i + 1, end_pos, vals, args, n_args, param_arg_indices, idx_map, arena
+            ctx, lin, n_lin, i + 1, end_pos, vals, args, n_args, param_arg_indices, idx_map, arena,
+            exec_mask
         );
         if (rc < 0) return rc;
       }
@@ -916,6 +918,34 @@ static int interp_region(
 
     case POLY_OP_END:
       break;
+
+    case POLY_OP_IF: {
+      int gate_i = u->n_src ? uop_index_map_get(idx_map, u->src[0]) : -1;
+      int end_pos = i + 1;
+      for (; end_pos < end; end_pos++)
+        if (lin[end_pos]->op == POLY_OP_ENDIF && lin[end_pos]->n_src == 1 &&
+            lin[end_pos]->src[0] == u)
+          break;
+      if (gate_i < 0 || !poly_dtype_is_bool(u->src[0]->dtype) || vals[gate_i].count != 1 ||
+          end_pos == end) {
+        fprintf(stderr, "polygrad: interp: malformed IF region\n");
+        return -1;
+      }
+      /* PythonProgram masks effects, not value evaluation. Reuse the region
+       * stack so nested IFs and RANGE iterations inherit the enclosing mask. */
+      bool active = exec_mask && as_int(iv_get(&vals[gate_i], 0), u->src[0]->dtype);
+      int rc = interp_region(
+          ctx, lin, n_lin, i + 1, end_pos, vals, args, n_args, param_arg_indices, idx_map, arena,
+          active
+      );
+      if (rc < 0) return rc;
+      i = end_pos;
+      break;
+    }
+
+    case POLY_OP_ENDIF:
+      fprintf(stderr, "polygrad: interp: unmatched ENDIF\n");
+      return -1;
 
     case POLY_OP_AFTER: {
       int src0 = uop_index_map_get(idx_map, u->src[0]);
@@ -1043,6 +1073,7 @@ static int interp_region(
     }
 
     case POLY_OP_STORE: {
+      if (!exec_mask) break;
       int src0 = uop_index_map_get(idx_map, u->src[0]);
       int src1 = uop_index_map_get(idx_map, u->src[1]);
       if (src0 < 0 || src1 < 0) {
@@ -1235,7 +1266,7 @@ int poly_interp_eval(PolyCtx *ctx, PolyUOp **lin, int n_lin, void **args, int n_
     uop_index_map_set(&idx_map, lin[i], i);
 
   int ret = interp_region(
-      ctx, lin, n_lin, 0, n_lin, vals, args, n_args, param_arg_indices, &idx_map, arena
+      ctx, lin, n_lin, 0, n_lin, vals, args, n_args, param_arg_indices, &idx_map, arena, true
   );
 
   uop_index_map_free(&idx_map);

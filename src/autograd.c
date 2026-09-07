@@ -8,7 +8,7 @@
  * - Core ALU: ADD, SUB, MUL, FDIV, NEG, EXP2, LOG2, SQRT, RECIPROCAL, SIN, POW
  * - Binary: MAX (elementwise)
  * - Movement: RESHAPE, EXPAND, PERMUTE, PAD, SHRINK, FLIP
- * - Reductions: tensor REDUCE with ADD and MAX
+ * - Reductions: tensor REDUCE with ADD, MAX and MUL
  * - Utility: CAST pass-through, CONTIGUOUS/COPY/BUFFERIZE pass-through
  * - Stop gradient: DETACH, CMPLT, CMPNE, BITCAST
  * - Target-pruned reverse pass (port of tinygrad's _deepwalk)
@@ -1028,6 +1028,31 @@ static PolyMap *grad_reverse_pass(
                           : NULL;
         if (!gx) GRAD_REVERSE_FAIL();
         GRAD_ADD(u->src[0], gx);
+      } else if (reduce_op == POLY_OP_MUL) {
+        /* Pinned reduce_gradient (mixin/gradient.py:10-14): divide by a
+         * nonzero replacement, and use the product of other inputs only
+         * when this is the sole zero. This also keeps zero gradients finite. */
+        int n_axes = u->arg.reduce.num_axes;
+        int64_t axes[POLY_MAX_DIMS];
+        for (int i = 0; i < n_axes; i++)
+          axes[i] = i;
+        PolyUOp *x = u->src[0];
+        PolyUOp *is_zero = poly_eq(ctx, x, ufix_like(ctx, x, 0));
+        PolyUOp *safe_x = is_zero ? poly_where_op(ctx, is_zero, ufix_like(ctx, x, 1), x) : NULL;
+        PolyDType count_dtype;
+        if (!safe_x || !poly_sum_acc_dtype(POLY_BOOL, &count_dtype)) GRAD_REVERSE_FAIL();
+        PolyUOp *count = cast_to(ctx, is_zero, count_dtype);
+        count = count ? poly_reduce_axis(ctx, POLY_OP_ADD, count, axes, n_axes) : NULL;
+        PolyUOp *single_zero = count ? poly_eq(ctx, count, ufix_like(ctx, count, 1)) : NULL;
+        PolyUOp *others = poly_reduce_axis(ctx, POLY_OP_MUL, safe_x, axes, n_axes);
+        PolyUOp *at_zero = single_zero && others
+                               ? poly_where_op(ctx, single_zero, others, ufix_like(ctx, others, 0))
+                               : NULL;
+        PolyUOp *nonzero = poly_div(ctx, u, safe_x);
+        PolyUOp *local = at_zero && nonzero ? poly_where_op(ctx, is_zero, at_zero, nonzero) : NULL;
+        PolyUOp *gx = local ? poly_mul(ctx, g, local) : NULL;
+        if (!gx) GRAD_REVERSE_FAIL();
+        GRAD_ADD(x, gx);
       } else {
         fprintf(
             stderr, "polygrad: autograd: unsupported tensor REDUCE op: %s\n",

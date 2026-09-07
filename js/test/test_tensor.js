@@ -3947,6 +3947,130 @@ async function runTensorTests(pg) {
     assertClose(await x.minimum(true).toArray(), [0, 0, 1, 1], 0)
   })
 
+  for (const op of ['all', 'any', 'cumsum', 'cumprod', 'cummax', 'cummin']) {
+    await test(`scan owners: ${op} values and dtype`, async () => {
+      const x = new Tensor([-3, -1, -2, -1], {dtype: 'int8'})
+      const result = x[op](0)
+      const expected = {all: [1], any: [1], cumsum: [-3,-4,-6,-7],
+        cumprod: [-3,3,-6,6], cummax: [-3,-1,-1,-1], cummin: [-3,-3,-3,-3]}
+      const pair = op === 'cummax' || op === 'cummin'
+      const values = pair ? result[0] : result
+      if (pair) {
+        assertClose(await result[1].toArray(), op === 'cummax' ? [0,1,1,1] : [0,0,0,0], 0)
+        assert(result[1].dtype === 'int32')
+      }
+      assertClose(await values.toArray(), expected[op], 0)
+      assert(values.dtype === (op === 'all' || op === 'any' ? 'bool' : op === 'cumsum' ? 'int32' : 'int8'))
+    })
+  }
+
+  await test('scan owners: boolean axes and empty identities', async () => {
+    const x = new Tensor([0, 2.5, -2, 1, 0, 3]).reshape(2, 3)
+    for (const op of ['all', 'any']) {
+      assertClose(await x[op](0).toArray(), op === 'all' ? [0,0,1] : [1,1,1], 0)
+      assertClose(await x[op](-1, true).toArray(), op === 'all' ? [0,0] : [1,1], 0)
+      assertShape(x[op]({axis: [0,1], keepdim: true}).shape, [1,1])
+      assertClose(await x[op]([]).toArray(), [0,1,1,1,0,1], 0)
+      for (const shape of [[], [0], [2,0], [0,2]]) {
+        const t = Tensor.ones(shape, {dtype: 'int8'})
+        for (const axis of [0, -1]) {
+          const out = t[op](axis)
+          const expected = new Array(out.shape.reduce((a,b) => a*b, 1)).fill(shape.length && shape[axis < 0 ? shape.length-1 : axis] === 0 ? Number(op === 'all') : 1)
+          assertClose(await out.toArray(), expected, 0)
+        }
+      }
+    }
+  })
+
+  // WGSL permits finite-math assumptions. Pinned WGSLRenderer's float != 0
+  // shader also maps NaN to false on the tested WebGPU adapter; CPU/Wasm do not.
+  await testIf(pg.device !== 'webgpu', 'scan owners: NaN truthiness (outside WGSL finite math)', async () => {
+    const x = new Tensor([0, NaN, -2, 1, 0, 3], {dtype: 'float32'}).reshape(2, 3)
+    assertClose(await x.any(0).toArray(), [1, 1, 1], 0)
+    assertClose(await x.all([]).toArray(), [0, 1, 1, 1, 0, 1], 0)
+  })
+
+  await test('scan owners: empty scalar and invalid axes', async () => {
+    for (const op of ['cumsum', 'cumprod', 'cummax', 'cummin']) {
+      for (const shape of [[], [0], [2,0], [0,2]]) {
+        const x = Tensor.ones(shape, {dtype: 'int8'})
+        for (const axis of [0, -1]) {
+          const result = x[op](axis)
+          const pair = Array.isArray(result)
+          const values = pair ? result[0] : result
+          assertShape(values.shape, shape)
+          assert(values.dtype === (op === 'cumsum' ? 'int32' : 'int8'))
+          assertClose(await values.toArray(), shape.length ? [] : [1], 0)
+          if (pair) {
+            assertShape(result[1].shape, shape)
+            assertClose(await result[1].toArray(), shape.length ? [] : [0], 0)
+          }
+        }
+        for (const axis of [Math.max(1, shape.length), -Math.max(1, shape.length)-1]) {
+          let threw = false
+          try { x[op](axis) } catch { threw = true }
+          assert(threw, `${op} admitted axis ${axis}`)
+        }
+      }
+    }
+  })
+
+  await test('scan owners: uint8 promotion and boolean indices', async () => {
+    const x = new Tensor([250,10,3,2], {dtype: 'uint8'})
+    assert(x.cumsum().dtype === 'uint32')
+    assertClose(await x.cumsum().toArray(), [250,260,263,265], 0)
+    assert(x.cumprod(0).dtype === 'uint8')
+    assertClose(await x.cumprod(0).toArray(), [250,196,76,152], 0)
+    const y = new Tensor([true,false,true,true], {dtype: 'bool'})
+    const [max, maxidx] = y.cummax(), [min, minidx] = y.cummin()
+    assertClose(await max.toArray(), [1,1,1,1], 0)
+    assertClose(await maxidx.toArray(), [0,0,0,0], 0)
+    assertClose(await min.toArray(), [1,0,0,0], 0)
+    assertClose(await minidx.toArray(), [0,1,1,1], 0)
+  })
+
+  for (const dtype of ['uint64', 'int64', 'float16']) {
+    await testIf(pg.canRun({dtype}), `scan owners: ${dtype} exact extrema`, async () => {
+      const data = dtype === 'uint64' ? [18446744073709551615n,0n,18446744073709551614n,0n]
+        : dtype === 'int64' ? [-9223372036854775808n,0n,-9223372036854775807n,0n] : [3,1,2,1]
+      const x = new Tensor(data, {dtype})
+      for (const op of ['cummax', 'cummin']) {
+        const [values, indices] = x[op]()
+        const expected = [], positions = []
+        let at = 0
+        for (let i = 0; i < data.length; i++) {
+          if (op === 'cummax' ? data[i] > data[at] : data[i] < data[at]) at = i
+          expected.push(data[at]); positions.push(at)
+        }
+        const actual = await values.toArray()
+        assert(Array.from(actual).every((v,i) => v === expected[i]), `${dtype} ${op} lost exact values`)
+        assertClose(await indices.toArray(), positions, 0)
+      }
+    })
+  }
+
+  await test('scan owners: split boundary values and gradient', async () => {
+    for (const n of [512,513,1025]) {
+      const data = new Float32Array(n*2).fill(1)
+      data[0] = 2; data[1] = 3
+      const x = new Tensor(data).reshape(n,2)
+      const sum = x.cumsum(0), prod = x.cumprod(0)
+      const expected = Array.from({length: n*2}, (_, i) => Math.floor(i/2) + 2 + i%2)
+      assertClose(await sum.toArray(), expected, 0)
+      assertClose(await prod.toArray(), Array.from({length: n*2}, (_, i) => 2+i%2), 0)
+      await x.cumsum(0).sum().backward()
+      assertClose(await x.grad.toArray(), Array.from({length: n*2}, (_, i) => n-Math.floor(i/2)), 0)
+    }
+  })
+
+  await test('scan owners: product gradients with zeros', async () => {
+    for (const [data, expected] of [[[2,3,4],[16,10,6]], [[2,0,4],[1,10,0]], [[0,3,0],[4,0,0]]]) {
+      const x = new Tensor(data, {dtype: 'float32'})
+      await x.cumprod(0).sum().backward()
+      assertClose(await x.grad.toArray(), expected, 0)
+    }
+  })
+
   await test('numeric owners: min inverse matches pinned', async () => {
     const cases = [
       ['uint8', [0, 1, 255, 7, 3, 2]], ['int8', [-128, -1, 127, 7, 3, 2]],

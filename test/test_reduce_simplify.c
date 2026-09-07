@@ -455,7 +455,7 @@ TEST(reduce_simplify, d9_cumalu_mul_noregress) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *base = poly_full(ctx, (int64_t[]){4}, 1, 2.0);
   ASSERT_NOT_NULL(base);
-  PolyUOp *cum = poly_cumalu(ctx, base, 0, POLY_OP_MUL, false);
+  PolyUOp *cum = poly_cumalu(ctx, base, 0, POLY_OP_MUL);
   ASSERT_NOT_NULL(cum); /* must not crash and must produce a UOp */
   poly_ctx_destroy(ctx);
   PASS();

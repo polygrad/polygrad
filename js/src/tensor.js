@@ -2218,6 +2218,23 @@ function createBoundTensorClass(runtime) {
       return this._extremum('poly_tensor_max', opts, keepdim)
     }
 
+    all(opts, keepdim = false) { return this._extremum('poly_tensor_all', opts, keepdim) }
+    any(opts, keepdim = false) { return this._extremum('poly_tensor_any', opts, keepdim) }
+
+    _scan(operation, axis, pair = false) {
+      const rank = Math.max(1, this.shape.length)
+      if (!Number.isInteger(axis) || axis < -rank || axis >= rank) throw new RangeError('invalid scan axis')
+      const result = this._rt._core.ffi[operation](this._ctx, this._tensor, axis)
+      if (!pair) return this._makeResultFromCore(result, [this])
+      if (!result || result.length !== 2 || !result[0] || !result[1]) throw new Error('core cumulative extremum failed')
+      return result.map(core => this._makeResultFromCore(core, [this]))
+    }
+
+    cumsum(axis = 0) { return this._scan('poly_tensor_cumsum', axis) }
+    cumprod(axis) { return this._scan('poly_tensor_cumprod', axis) }
+    cummax(axis = 0) { return this._scan('poly_tensor_cummax', axis, true) }
+    cummin(axis = 0) { return this._scan('poly_tensor_cummin', axis, true) }
+
     _extremum(operation, opts, positionalKeepdim) {
       if (opts === undefined || opts === null) opts = {}
       let axis, keepdim
@@ -2235,10 +2252,10 @@ function createBoundTensorClass(runtime) {
         : (Array.isArray(axis) ? axis : [axis])
       const axes = rawAxes.map(a => {
         a = Number(a)
-        return a < 0 ? a + this.shape.length : a
+        return a < 0 ? a + Math.max(1, this.shape.length) : a
       })
       for (const a of axes) {
-        if (a < 0 || a >= this.shape.length) {
+        if (!Number.isInteger(a) || a < 0 || a >= Math.max(1, this.shape.length)) {
           throw new RangeError(`axis ${a} out of range for ndim ${this.shape.length}`)
         }
       }

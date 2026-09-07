@@ -4142,6 +4142,81 @@ TEST(pe, tensor_einsum_builds_both_roots_from_exact_occurrences) {
   PASS();
 }
 
+TEST(pe, scan_owners_dtype_contract) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *u8 = poly_test_buffer(ctx, POLY_UINT8, 4);
+  PolyUOp *i8 = poly_test_buffer(ctx, POLY_INT8, 4);
+  PolyUOp *sum = poly_cumalu(ctx, u8, 0, POLY_OP_ADD);
+  PolyUOp *max = poly_cumalu(ctx, i8, 0, POLY_OP_MAX);
+  bool sum_ok = sum && poly_dtype_eq(sum->dtype, POLY_UINT32);
+  bool max_ok = max && poly_dtype_eq(max->dtype, POLY_INT8);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(sum_ok);
+  ASSERT_TRUE(max_ok);
+  PASS();
+}
+
+TEST(pe, scan_owners_nested_gradient_executes) {
+  /* The pinned two-stage scan has nested reductions in its gradient.
+   * Gated STORE must not end predicate ranges during linearization. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_reshape(ctx, poly_test_buffer(ctx, POLY_FLOAT32, 1026), (int64_t[]){513, 2}, 2);
+  PolyUOp *scan = poly_split_cumalu(ctx, x, 0, POLY_OP_ADD);
+  PolyUOp *loss = poly_reduce_axis(ctx, POLY_OP_ADD, scan, (int64_t[]){0, 1}, 2);
+  PolyUOp *grad = poly_grad(ctx, loss, x);
+  ASSERT_NOT_NULL(grad);
+  float values[1026];
+  int rc = realize_uop(ctx, grad, poly_test_buffer(ctx, POLY_FLOAT32, 1026), values, NULL, NULL, 0);
+  bool correct = rc == 0;
+  for (int i = 0; correct && i < 1026; i++)
+    correct = values[i] == 513 - i / 2;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
+TEST(tensor, scan_owners_pair_lifetime_and_admission) {
+  for (int keep_logical = 0; keep_logical < 2; keep_logical++) {
+    PolyCtx *ctx = poly_ctx_new(), *other = poly_ctx_new();
+    ASSERT_INT_EQ(
+        poly_ctx_set_logical_policy(ctx, keep_logical ? POLY_LOGICAL_ALWAYS : POLY_LOGICAL_NEVER), 0
+    );
+    PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){4}, 1, POLY_DEVICE_INTERP);
+    float input[] = {-3, -1, -2, -1};
+    ASSERT_INT_EQ(poly_buffer_write(ctx, x->uop_physical, input, sizeof(input)), 0);
+    PolyTensor *values = NULL, *indices = NULL;
+    ASSERT_INT_EQ(poly_tensor_cummax(other, x, 0, &values, &indices), -1);
+    ASSERT_PTR_EQ(values, NULL);
+    ASSERT_PTR_EQ(indices, NULL);
+    ASSERT_INT_EQ(poly_tensor_cummax(ctx, x, 1, &values, &indices), -1);
+    ASSERT_PTR_EQ(values, NULL);
+    ASSERT_PTR_EQ(indices, NULL);
+    ASSERT_INT_EQ(poly_tensor_cummax(ctx, x, 0, &values, &values), -1);
+    ASSERT_INT_EQ(poly_tensor_cummax(ctx, x, -1, &values, &indices), 0);
+    ASSERT_NOT_NULL(values->uop_physical);
+    ASSERT_NOT_NULL(indices->uop_physical);
+    ASSERT_INT_EQ(values->uop_logical != NULL, keep_logical);
+    ASSERT_INT_EQ(indices->uop_logical != NULL, keep_logical);
+    poly_tensor_release(x);
+    float got[4];
+    ASSERT_INT_EQ(read_tensor_f32(ctx, values, got, 4), 0);
+    const float expected[] = {-3, -1, -1, -1};
+    for (int i = 0; i < 4; i++)
+      ASSERT_FLOAT_EQ(got[i], expected[i], 0);
+    poly_tensor_release(values);
+    PolyTensor *index_float =
+        poly_tensor_cast_by_id(ctx, indices, poly_dtype_id_by_name("float32"));
+    poly_tensor_release(indices);
+    ASSERT_INT_EQ(read_tensor_f32(ctx, index_float, got, 4), 0);
+    for (int i = 0; i < 4; i++)
+      ASSERT_FLOAT_EQ(got[i], i ? 1 : 0, 0);
+    poly_tensor_release(index_float);
+    poly_ctx_destroy(other);
+    poly_ctx_destroy(ctx);
+  }
+  PASS();
+}
+
 TEST(pe, unsigned_scatter_amin_matches_pinned_inverse_max_inverse) {
   /* Pinned scatter amin fills with the positive weak dtype.max literal and reduces through
    * Tensor.min's inverse/MAX/inverse program
@@ -6801,7 +6876,7 @@ TEST(pe, cumalu_add_1d) {
 
   /* tinygrad: Tensor([1..5])._cumalu(0, ADD) -> [1, 3, 6, 10, 15] */
   PolyUOp *in = poly_buffer_f32(ctx, 5);
-  PolyUOp *out_val = poly_cumalu(ctx, in, 0, POLY_OP_ADD, false);
+  PolyUOp *out_val = poly_cumalu(ctx, in, 0, POLY_OP_ADD);
   ASSERT_NOT_NULL(out_val);
 
   PolyUOp *out_buf = poly_buffer_f32(ctx, 5);
@@ -6825,7 +6900,7 @@ TEST(pe, cumalu_add_1d_const) {
   /* tinygrad: Tensor([3,3,3,3,3])._cumalu(0, ADD) -> [3, 6, 9, 12, 15]
    * This is the exact shape arange(0, 15, 3) builds internally. */
   PolyUOp *in = poly_buffer_f32(ctx, 5);
-  PolyUOp *out_val = poly_cumalu(ctx, in, 0, POLY_OP_ADD, false);
+  PolyUOp *out_val = poly_cumalu(ctx, in, 0, POLY_OP_ADD);
   ASSERT_NOT_NULL(out_val);
 
   PolyUOp *out_buf = poly_buffer_f32(ctx, 5);
@@ -6843,13 +6918,14 @@ TEST(pe, cumalu_add_1d_const) {
   PASS();
 }
 
-TEST(pe, cumalu_add_1d_include_initial) {
+TEST(pe, cumalu_add_1d_explicit_prefix_shift) {
   PolyCtx *ctx = poly_ctx_new();
 
-  /* tinygrad: Tensor([1..5])._cumalu(0, ADD, _include_initial=True)
+  /* tinygrad: Tensor([1..5]).pad(((1, -1),)).cumsum(0)
    *   -> [0, 1, 3, 6, 10] */
   PolyUOp *in = poly_buffer_f32(ctx, 5);
-  PolyUOp *out_val = poly_cumalu(ctx, in, 0, POLY_OP_ADD, true);
+  PolyUOp *out_val =
+      poly_cumalu(ctx, poly_pad_value(ctx, in, (int64_t[1][2]){{1, -1}}, 1, 0), 0, POLY_OP_ADD);
   ASSERT_NOT_NULL(out_val);
 
   PolyUOp *out_buf = poly_buffer_f32(ctx, 5);
@@ -6874,7 +6950,7 @@ TEST(pe, cumalu_add_2d_axis1) {
    *   -> [[0,1,3,6],[4,9,15,22],[8,17,27,38]] */
   int64_t shape[2] = {3, 4};
   PolyUOp *in = make_buf(ctx, shape, 2);
-  PolyUOp *out_val = poly_cumalu(ctx, in, 1, POLY_OP_ADD, false);
+  PolyUOp *out_val = poly_cumalu(ctx, in, 1, POLY_OP_ADD);
   ASSERT_NOT_NULL(out_val);
 
   PolyUOp *out_buf = poly_buffer_f32(ctx, 12);
@@ -6899,7 +6975,7 @@ TEST(pe, cumalu_add_2d_axis0) {
    *   -> [[0,1,2,3],[4,6,8,10],[12,15,18,21]] */
   int64_t shape[2] = {3, 4};
   PolyUOp *in = make_buf(ctx, shape, 2);
-  PolyUOp *out_val = poly_cumalu(ctx, in, 0, POLY_OP_ADD, false);
+  PolyUOp *out_val = poly_cumalu(ctx, in, 0, POLY_OP_ADD);
   ASSERT_NOT_NULL(out_val);
 
   PolyUOp *out_buf = poly_buffer_f32(ctx, 12);
@@ -7319,7 +7395,7 @@ TEST(pe, cumalu_max_1d) {
 
   /* tinygrad: cummax([1,3,2,5,4]) -> [1, 3, 3, 5, 5] */
   PolyUOp *in = poly_buffer_f32(ctx, 5);
-  PolyUOp *out_val = poly_cumalu(ctx, in, 0, POLY_OP_MAX, false);
+  PolyUOp *out_val = poly_cumalu(ctx, in, 0, POLY_OP_MAX);
   ASSERT_NOT_NULL(out_val);
 
   PolyUOp *out_buf = poly_buffer_f32(ctx, 5);
@@ -7341,7 +7417,7 @@ TEST(pe, cumalu_max_1d_decreasing) {
 
   /* tinygrad: cummax([5,3,4,1,2]) -> [5, 5, 5, 5, 5] */
   PolyUOp *in = poly_buffer_f32(ctx, 5);
-  PolyUOp *out_val = poly_cumalu(ctx, in, 0, POLY_OP_MAX, false);
+  PolyUOp *out_val = poly_cumalu(ctx, in, 0, POLY_OP_MAX);
   ASSERT_NOT_NULL(out_val);
 
   PolyUOp *out_buf = poly_buffer_f32(ctx, 5);
@@ -7365,7 +7441,7 @@ TEST(pe, cumalu_max_negative) {
    * the cummax would incorrectly be 0 for the first element.
    * tinygrad: cummax([-3,-1,-2]) -> [-3, -1, -1] */
   PolyUOp *in = poly_buffer_f32(ctx, 3);
-  PolyUOp *out_val = poly_cumalu(ctx, in, 0, POLY_OP_MAX, false);
+  PolyUOp *out_val = poly_cumalu(ctx, in, 0, POLY_OP_MAX);
   ASSERT_NOT_NULL(out_val);
 
   PolyUOp *out_buf = poly_buffer_f32(ctx, 3);
@@ -7382,12 +7458,14 @@ TEST(pe, cumalu_max_negative) {
   PASS();
 }
 
-TEST(pe, cumalu_max_include_initial) {
+TEST(pe, cumalu_max_explicit_prefix_shift) {
   PolyCtx *ctx = poly_ctx_new();
 
-  /* tinygrad: cummax([1,3,2], include_initial=True) -> [-inf, 1, 3] */
+  /* tinygrad: Tensor([1,3,2]).pad(((1,-1),), value=-inf).cummax(0)[0] -> [-inf, 1, 3] */
   PolyUOp *in = poly_buffer_f32(ctx, 3);
-  PolyUOp *out_val = poly_cumalu(ctx, in, 0, POLY_OP_MAX, true);
+  PolyUOp *out_val = poly_cumalu(
+      ctx, poly_pad_value(ctx, in, (int64_t[1][2]){{1, -1}}, 1, -INFINITY), 0, POLY_OP_MAX
+  );
   ASSERT_NOT_NULL(out_val);
 
   PolyUOp *out_buf = poly_buffer_f32(ctx, 3);
@@ -7409,7 +7487,7 @@ TEST(pe, cumalu_mul_1d) {
 
   /* tinygrad: cumprod([1,2,3,4]) -> [1, 2, 6, 24] */
   PolyUOp *in = poly_buffer_f32(ctx, 4);
-  PolyUOp *out_val = poly_cumalu(ctx, in, 0, POLY_OP_MUL, false);
+  PolyUOp *out_val = poly_cumalu(ctx, in, 0, POLY_OP_MUL);
   ASSERT_NOT_NULL(out_val);
 
   PolyUOp *out_buf = poly_buffer_f32(ctx, 4);
@@ -7433,7 +7511,7 @@ TEST(pe, cumalu_mul_1d_const) {
    * product would be 0 everywhere.
    * tinygrad: cumprod([2,2,2]) -> [2, 4, 8] */
   PolyUOp *in = poly_buffer_f32(ctx, 3);
-  PolyUOp *out_val = poly_cumalu(ctx, in, 0, POLY_OP_MUL, false);
+  PolyUOp *out_val = poly_cumalu(ctx, in, 0, POLY_OP_MUL);
   ASSERT_NOT_NULL(out_val);
 
   PolyUOp *out_buf = poly_buffer_f32(ctx, 3);
@@ -7450,12 +7528,13 @@ TEST(pe, cumalu_mul_1d_const) {
   PASS();
 }
 
-TEST(pe, cumalu_mul_include_initial) {
+TEST(pe, cumalu_mul_explicit_prefix_shift) {
   PolyCtx *ctx = poly_ctx_new();
 
-  /* tinygrad: cumprod([2,3,4], include_initial=True) -> [1, 2, 6] */
+  /* tinygrad: Tensor([2,3,4]).pad(((1,-1),), value=1).cumprod(0) -> [1, 2, 6] */
   PolyUOp *in = poly_buffer_f32(ctx, 3);
-  PolyUOp *out_val = poly_cumalu(ctx, in, 0, POLY_OP_MUL, true);
+  PolyUOp *out_val =
+      poly_cumalu(ctx, poly_pad_value(ctx, in, (int64_t[1][2]){{1, -1}}, 1, 1), 0, POLY_OP_MUL);
   ASSERT_NOT_NULL(out_val);
 
   PolyUOp *out_buf = poly_buffer_f32(ctx, 3);

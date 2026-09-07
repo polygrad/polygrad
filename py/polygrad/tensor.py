@@ -2475,6 +2475,35 @@ class Tensor:
     def max(self, axis=None, keepdim=False):
         return self._extremum(_ffi._lib.poly_tensor_max, axis, keepdim)
 
+    def all(self, axis=None, keepdim=False):
+        return self._extremum(_ffi._lib.poly_tensor_all, axis, keepdim)
+
+    def any(self, axis=None, keepdim=False):
+        return self._extremum(_ffi._lib.poly_tensor_any, axis, keepdim)
+
+    def cumsum(self, axis=0):
+        core = _ffi._lib.poly_tensor_cumsum(self._ctx, self._tensor, self._resolve_dim(axis))
+        return self._make_result_from_core(core, None, [self])
+
+    def cumprod(self, axis):
+        core = _ffi._lib.poly_tensor_cumprod(self._ctx, self._tensor, self._resolve_dim(axis))
+        return self._make_result_from_core(core, None, [self])
+
+    def _cum_extremum(self, operation, axis):
+        values, indices = _ffi._ptr(), _ffi._ptr()
+        rc = operation(self._ctx, self._tensor, self._resolve_dim(axis),
+                       ctypes.byref(values), ctypes.byref(indices))
+        if rc != 0 or not values or not indices:
+            raise RuntimeError('core cumulative extremum failed')
+        return (self._make_result_from_core(values, None, [self]),
+                self._make_result_from_core(indices, None, [self]))
+
+    def cummax(self, axis=0):
+        return self._cum_extremum(_ffi._lib.poly_tensor_cummax, axis)
+
+    def cummin(self, axis=0):
+        return self._cum_extremum(_ffi._lib.poly_tensor_cummin, axis)
+
     def _extremum(self, operation, axis, keepdim):
         # Pinned ReduceMixin._reduce emits one REDUCE over the complete
         # normalized axis tuple (mixin/reduce.py:12-17, uop/ops.py:567-569).

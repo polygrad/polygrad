@@ -1122,6 +1122,55 @@ TEST(codegen, exact_uint64_bigint_const_executes_like_tinygrad) {
   PASS();
 }
 
+TEST(codegen, interp_if_masks_nested_stores_not_values) {
+  /* PythonProgram keeps evaluating values under IF, but combines execution
+   * masks for STORE. ENDIF restores the enclosing mask, not unconditional true. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *out = poly_test_uop_param(ctx, POLY_INT32, 3, 0, POLY_ADDR_GLOBAL);
+  PolyUOp *flags = poly_test_uop_param(ctx, POLY_BOOL, 2, 1, POLY_ADDR_GLOBAL);
+  PolyUOp *data = poly_test_uop_param(ctx, POLY_INT32, 1, 2, POLY_ADDR_GLOBAL);
+  PolyUOp *offsets[3], *oi[3], *fi[2];
+  for (int i = 0; i < 3; i++) {
+    offsets[i] = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(i));
+    oi[i] = poly_uop2(ctx, POLY_OP_INDEX, POLY_INT32, out, offsets[i], poly_arg_none());
+    if (i < 2) fi[i] = poly_uop2(ctx, POLY_OP_INDEX, POLY_BOOL, flags, offsets[i], poly_arg_none());
+  }
+  PolyUOp *di = poly_uop2(ctx, POLY_OP_INDEX, POLY_INT32, data, offsets[0], poly_arg_none());
+  PolyUOp *a = poly_uop1(ctx, POLY_OP_LOAD, POLY_BOOL, fi[0], poly_arg_none());
+  PolyUOp *b = poly_uop1(ctx, POLY_OP_LOAD, POLY_BOOL, fi[1], poly_arg_none());
+  PolyUOp *outer = poly_uop1(ctx, POLY_OP_IF, POLY_VOID, a, poly_arg_none());
+  PolyUOp *value = poly_uop1(ctx, POLY_OP_LOAD, POLY_INT32, di, poly_arg_none());
+  PolyUOp *inner = poly_uop1(ctx, POLY_OP_IF, POLY_VOID, b, poly_arg_none());
+  PolyUOp *stores[3];
+  for (int i = 0; i < 3; i++)
+    stores[i] = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, oi[i], value, poly_arg_none());
+  PolyUOp *inner_end = poly_uop1(ctx, POLY_OP_ENDIF, POLY_VOID, inner, poly_arg_none());
+  PolyUOp *outer_end = poly_uop1(ctx, POLY_OP_ENDIF, POLY_VOID, outer, poly_arg_none());
+  PolyUOp *linear[] = {
+      out,   flags,     data,      offsets[0], offsets[1], offsets[2], oi[0], oi[1],
+      oi[2], fi[0],     fi[1],     di,         a,          b,          outer, value,
+      inner, stores[0], inner_end, stores[1],  outer_end,  stores[2],
+  };
+  int n = (int)(sizeof(linear) / sizeof(linear[0]));
+  for (int av = 0; av < 2; av++) {
+    for (int bv = 0; bv < 2; bv++) {
+      int32_t output[] = {-1, -1, -1}, input = 17;
+      bool conditions[] = {av != 0, bv != 0};
+      void *args[] = {output, conditions, &input};
+      int rc = poly_interp_eval(ctx, linear, n, args, 3);
+      if (rc != 0) {
+        poly_ctx_destroy(ctx);
+        FAIL("INTERP rejected nested IF/ENDIF");
+      }
+      ASSERT_INT_EQ(output[0], av && bv ? 17 : -1);
+      ASSERT_INT_EQ(output[1], av ? 17 : -1);
+      ASSERT_INT_EQ(output[2], 17);
+    }
+  }
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(codegen, interp_bitcast_uint8_to_int8_reinterprets_sign_bit) {
   /* Pinned PythonProgram delegates BITCAST to uop/ops.py:1199-1207, which
    * packs with the uint8 format and unpacks the same byte as int8. */

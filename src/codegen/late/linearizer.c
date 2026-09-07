@@ -161,10 +161,9 @@ static inline void bitset_clear(uint64_t *bs, int bit) {
   bs[(unsigned)bit >> 6] &= ~((uint64_t)1 << (bit & 63));
 }
 
-/* Apply ended_ranges of a UOp to a ranges bitset (remove ended ranges).
- * Mirrors tinygrad's ended_ranges property + _ranges subtraction logic.
- * range_start = {BUFFERIZE:1, REDUCE:1, STORE:2, END:1}
- * AFTER: flatten([x.ended_ranges for x in src[1:]]) */
+/* UOp.ended_ranges / _ranges, using the shared current range_start table.
+ * STORE predicates do not end their ranges; treating them as END operands
+ * changes run-count priorities and can reset an accumulator inside its loop. */
 static void apply_uop_ended_ranges(
     uint64_t *r,
     PolyUOp *u,
@@ -173,24 +172,13 @@ static void apply_uop_ended_ranges(
     uint64_t *all_ranges,
     int words
 ) {
-  int rs = -1;
-  switch (u->op) {
-  case POLY_OP_STORE:
-    rs = 2;
-    break;
-  case POLY_OP_END:
-    rs = 1;
-    break;
-  case POLY_OP_REDUCE:
-    rs = 1;
-    break;
-  case POLY_OP_AFTER:
+  int rs = poly_range_start(u->op);
+  if (u->op == POLY_OP_AFTER) {
     for (int j = 1; j < u->n_src; j++)
       apply_uop_ended_ranges(r, u->src[j], topo, idx, all_ranges, words);
     return;
-  default:
-    return;
   }
+  if (rs < 0) return;
   for (int j = rs; j < u->n_src; j++) {
     int si = imap_try_get(idx, u->src[j]);
     if (si < 0) continue;

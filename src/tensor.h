@@ -148,7 +148,8 @@ PolyUOp *poly_pad_replicate(PolyCtx *ctx, PolyUOp *x, int64_t (*pads)[2], int nd
  * Supports POLY_OP_ADD, POLY_OP_MAX, POLY_OP_MUL (uses poly_pad_value with
  * the operator's identity element). include_initial=true uses negative pad
  * on the right (tinygrad parity). */
-PolyUOp *poly_cumalu(PolyCtx *ctx, PolyUOp *x, int axis, PolyOps op, bool include_initial);
+PolyUOp *poly_cumalu(PolyCtx *ctx, PolyUOp *x, int axis, PolyOps op);
+PolyUOp *poly_split_cumalu(PolyCtx *ctx, PolyUOp *x, int axis, PolyOps op);
 
 /* Broadcasting (matches tinygrad's _broadcasted) */
 

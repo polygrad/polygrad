@@ -1435,7 +1435,7 @@ static int case_cumsum_1d(void) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *in = parity_buffer(ctx, POLY_FLOAT32, 5);
   PolyUOp *out = parity_buffer(ctx, POLY_FLOAT32, 5);
-  PolyUOp *val = poly_cumalu(ctx, in, 0, POLY_OP_ADD, false);
+  PolyUOp *val = poly_cumalu(ctx, in, 0, POLY_OP_ADD);
   PolyUOp *store = parity_store(ctx, out, val);
   PolyUOp *sink = poly_sink1(ctx, store);
   ParityBinding b[] = {{out, out_d}, {in, in_d}};
@@ -1450,7 +1450,7 @@ static int case_cumprod_1d(void) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *in = parity_buffer(ctx, POLY_FLOAT32, 4);
   PolyUOp *out = parity_buffer(ctx, POLY_FLOAT32, 4);
-  PolyUOp *val = poly_cumalu(ctx, in, 0, POLY_OP_MUL, false);
+  PolyUOp *val = poly_cumalu(ctx, in, 0, POLY_OP_MUL);
   PolyUOp *store = parity_store(ctx, out, val);
   PolyUOp *sink = poly_sink1(ctx, store);
   ParityBinding b[] = {{out, out_d}, {in, in_d}};
@@ -1465,7 +1465,7 @@ static int case_cummax_1d(void) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *in = parity_buffer(ctx, POLY_FLOAT32, 5);
   PolyUOp *out = parity_buffer(ctx, POLY_FLOAT32, 5);
-  PolyUOp *val = poly_cumalu(ctx, in, 0, POLY_OP_MAX, false);
+  PolyUOp *val = poly_cumalu(ctx, in, 0, POLY_OP_MAX);
   PolyUOp *store = parity_store(ctx, out, val);
   PolyUOp *sink = poly_sink1(ctx, store);
   ParityBinding b[] = {{out, out_d}, {in, in_d}};

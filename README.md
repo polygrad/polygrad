@@ -138,6 +138,14 @@ bounds without changing the graph. Python retains symbolic `shape` values;
 JS `shape` already exposes maximum extents. Full slices and no-op shrink,
 `pad_to`, and empty-axis flip return the original Tensor.
 
+Both frontends expose `all`, `any`, `cumsum`, `cumprod`, `cummax`, and `cummin`
+through shared C Tensor operations. `all`/`any` accept axes and `keepdim`;
+scans currently require concrete shapes. Cumulative extrema return
+`(values, indices)` in Python and `[values, indices]` in JS, with int32 indices
+selecting the first equal extremum. Use floating-point tensors for gradients.
+WebGPU floating comparisons do not guarantee NaN truthiness under WGSL's
+finite-math rules; this also affects the pinned Tinygrad renderer.
+
 ```text
 Python Tensor API       JavaScript Tensor API       C / native package
        |                        |                         |
