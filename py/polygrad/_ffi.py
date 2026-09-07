@@ -896,6 +896,9 @@ def _declare_signatures(lib):
     lib.poly_tensor_isclose.restype = _ptr
     lib.poly_tensor_isclose.argtypes = [_ptr, _ptr, _ptr, _ptr, _ptr, ctypes.c_bool]
 
+    lib.poly_tensor_binary_crossentropy.restype = _ptr
+    lib.poly_tensor_binary_crossentropy.argtypes = [_ptr, _ptr, _ptr, ctypes.c_int]
+
     lib.poly_tensor_binary_crossentropy_logits.restype = _ptr
     lib.poly_tensor_binary_crossentropy_logits.argtypes = [_ptr, _ptr, _ptr, _ptr, ctypes.c_int]
 
@@ -1101,6 +1104,13 @@ def _declare_signatures(lib):
 
     lib.poly_tensor_index_select.restype = _ptr
     lib.poly_tensor_index_select.argtypes = [_ptr, _ptr, ctypes.c_int, _ptr]
+
+    _index_args = [_ptr, _ptr, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(_ptr),
+                   ctypes.POINTER(_ptr), ctypes.POINTER(ctypes.c_int64), ctypes.POINTER(_ptr), ctypes.c_int]
+    lib.poly_tensor_getitem.restype = _ptr
+    lib.poly_tensor_getitem.argtypes = _index_args
+    lib.poly_tensor_setitem.restype = ctypes.c_int
+    lib.poly_tensor_setitem.argtypes = _index_args + [_ptr]
 
     lib.poly_tensor_clone_into.restype = _ptr
     lib.poly_tensor_clone_into.argtypes = [_ptr, _ptr, _ptr]

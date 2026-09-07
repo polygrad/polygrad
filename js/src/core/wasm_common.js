@@ -81,7 +81,8 @@ function createWasmCoreFromModule(Module, device) {
       const base = (ptr >> 2) + i * 2
       const val = arr[i]
       heap32()[base] = val & 0xFFFFFFFF
-      heap32()[base + 1] = val < 0 ? -1 : 0
+      // Preserve the high word; floor also gives two's-complement negatives.
+      heap32()[base + 1] = Math.floor(val / 0x100000000)
     }
     return ptr
   }
@@ -91,7 +92,7 @@ function createWasmCoreFromModule(Module, device) {
       const base = (_scratchAxisPtr >> 2) + i * 2
       const val = arr[i]
       heap32()[base] = val & 0xFFFFFFFF
-      heap32()[base + 1] = val < 0 ? -1 : 0
+      heap32()[base + 1] = Math.floor(val / 0x100000000)
     }
     return _scratchAxisPtr
   }
@@ -107,14 +108,7 @@ function createWasmCoreFromModule(Module, device) {
     if (ndim <= 0) return []
     const dimsPtr = Module._poly_uop_max_shape_dims(ctx, uop)
     if (!dimsPtr) return []
-    const result = []
-    const h32 = heap32()
-    for (let i = 0; i < ndim; i++) {
-      const lo = h32[(dimsPtr >> 2) + i * 2]
-      const hi = h32[(dimsPtr >> 2) + i * 2 + 1]
-      result.push(lo + hi * 0x100000000)
-    }
-    return result
+    return readShapeFromPtr(dimsPtr, ndim)
   }
 
   function readInt64At(ptr) {
@@ -1097,6 +1091,8 @@ function createWasmCoreFromModule(Module, device) {
       Module._poly_tensor_lerp(ctx, x, end, weight, scalar_weight ? 1 : 0),
     poly_tensor_isclose: (ctx, x, other, rtol, atol, equal_nan) =>
       Module._poly_tensor_isclose(ctx, x, other, rtol, atol, equal_nan ? 1 : 0),
+    poly_tensor_binary_crossentropy: (ctx, x, target, reduction) =>
+      Module._poly_tensor_binary_crossentropy(ctx, x, target, reduction),
     poly_tensor_binary_crossentropy_logits: (ctx, x, target, weight, reduction) =>
       Module._poly_tensor_binary_crossentropy_logits(ctx, x, target, weight || 0, reduction),
     poly_tensor_nll_loss: (ctx, x, target, weight, ignore_index, reduction) =>
@@ -1307,6 +1303,28 @@ function createWasmCoreFromModule(Module, device) {
       Module._poly_tensor_gather_dim(ctx, tensor, dim, index),
     poly_tensor_index_select: (ctx, tensor, dim, index) =>
       Module._poly_tensor_index_select(ctx, tensor, dim, index),
+    poly_tensor_getitem: (ctx, tensor, kinds, starts, sizes, steps, indices, n) => {
+      const ptrs = []
+      try {
+        ptrs.push(writeI32Array(kinds))
+        ptrs.push(writePtrArray(starts))
+        ptrs.push(writePtrArray(sizes))
+        ptrs.push(writeInt64Array(steps))
+        ptrs.push(writePtrArray(indices))
+        return Module._poly_tensor_getitem(ctx, tensor, ...ptrs, n)
+      } finally { for (const ptr of ptrs) if (ptr) Module._free(ptr) }
+    },
+    poly_tensor_setitem: (ctx, tensor, kinds, starts, sizes, steps, indices, n, value) => {
+      const ptrs = []
+      try {
+        ptrs.push(writeI32Array(kinds))
+        ptrs.push(writePtrArray(starts))
+        ptrs.push(writePtrArray(sizes))
+        ptrs.push(writeInt64Array(steps))
+        ptrs.push(writePtrArray(indices))
+        return Module._poly_tensor_setitem(ctx, tensor, ...ptrs, n, value)
+      } finally { for (const ptr of ptrs) if (ptr) Module._free(ptr) }
+    },
     poly_tensor_clone_into: (ctx, target, source) =>
       Module._poly_tensor_clone_into(ctx, target, source),
     poly_tensor_clone: (ctx, source, device) => Module._poly_tensor_clone(ctx, source, device),
@@ -1487,20 +1505,7 @@ function createWasmCoreFromModule(Module, device) {
 
     // Shape-on-UOp accessors
     poly_uop_ndim: (ctx, uop) => Module._poly_uop_ndim(ctx, uop),
-    poly_uop_max_shape_dims: (ctx, uop) => {
-      const ndim = Module._poly_uop_ndim(ctx, uop)
-      if (ndim <= 0) return []
-      const dimsPtr = Module._poly_uop_max_shape_dims(ctx, uop)
-      if (!dimsPtr) return []
-      const result = []
-      const h32 = heap32()
-      for (let i = 0; i < ndim; i++) {
-        const lo = h32[(dimsPtr >> 2) + i * 2]
-        const hi = h32[(dimsPtr >> 2) + i * 2 + 1]
-        result.push(lo + hi * 0x100000000)
-      }
-      return result
-    },
+    poly_uop_max_shape_dims: readUopShape,
 
     // Shape-taking ops
     poly_reshape: (ctx, uop, shape, len) => callWithInt64(cwrapReshape, ctx, uop, shape, len),

@@ -981,6 +981,12 @@ PolyTensor *poly_tensor_isclose(
     PolyTensor *atol,
     bool equal_nan
 );
+PolyTensor *poly_tensor_binary_crossentropy(
+    PolyCtx *ctx,
+    PolyTensor *x,
+    PolyTensor *target,
+    int reduction
+);
 PolyTensor *poly_tensor_binary_crossentropy_logits(
     PolyCtx *ctx,
     PolyTensor *x,
@@ -1177,6 +1183,41 @@ PolyTensor *poly_tensor_batchnorm(
 PolyTensor *poly_tensor_one_hot(PolyCtx *ctx, PolyTensor *x, int64_t num_classes);
 PolyTensor *poly_tensor_gather_dim(PolyCtx *ctx, PolyTensor *x, int dim, PolyTensor *index);
 PolyTensor *poly_tensor_index_select(PolyCtx *ctx, PolyTensor *x, int dim, PolyTensor *index);
+/* OpMixin._getitem's normalized syntax: one row per index, including new
+ * axes; starts/sizes are scalar shape UOps before striding. NORMALIZED means
+ * a host-list index whose negative entries were adjusted before _frompy.
+ * These borrowed call arguments are not retained as another graph format. */
+typedef enum {
+  POLY_INDEX_NONE = 0,
+  POLY_INDEX_INT = 1,
+  POLY_INDEX_SLICE = 2,
+  POLY_INDEX_TENSOR = 3,
+  POLY_INDEX_NORMALIZED = 4
+} PolyIndexKind;
+PolyTensor *poly_tensor_getitem(
+    PolyCtx *ctx,
+    PolyTensor *self,
+    const int *kinds,
+    PolyUOp **starts,
+    PolyUOp **sizes,
+    const int64_t *steps,
+    PolyTensor **indices,
+    int n
+);
+/* Same normalized arguments; success0, invalid-1, conflicting live uses-2,
+ * dtype mismatch-3, weak target-4, unsupported advanced DISK write-5,
+ * incompatible index broadcast-6. */
+int poly_tensor_setitem(
+    PolyCtx *ctx,
+    PolyTensor *self,
+    const int *kinds,
+    PolyUOp **starts,
+    PolyUOp **sizes,
+    const int64_t *steps,
+    PolyTensor **indices,
+    int n,
+    PolyTensor *value
+);
 PolyTensor *poly_tensor_scatter(
     PolyCtx *ctx,
     PolyTensor *self,

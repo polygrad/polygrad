@@ -921,6 +921,8 @@ function createBoundTensorClass(runtime) {
       return this
     }
     get grad() { return this._grad }
+    // Tensor.grad owns another Tensor, whose C handle owns its graph roots.
+    set grad(value) { this._grad = value }
     get T() { return this.transpose() }
 
     numel() {
@@ -2903,10 +2905,11 @@ function createBoundTensorClass(runtime) {
       )
     }
 
-    binaryCrossEntropy(target) {
-      const t1 = target.mul(this.log())
-      const t2 = this._ensureTensor(1.0).sub(target).mul(this._ensureTensor(1.0).sub(this).log())
-      return t1.add(t2).neg().mean()
+    binaryCrossEntropy(target, reduction = 'mean') {
+      const id = this._lossReductionId(reduction)
+      target = this._ensureTensor(target)
+      const core = this._rt._core.ffi.poly_tensor_binary_crossentropy(this._ctx, this._tensor, target._tensor, id)
+      return this._makeResultFromCore(core, [this, target])
     }
 
     layernorm(axis, eps) {
@@ -2920,175 +2923,92 @@ function createBoundTensorClass(runtime) {
 
     // --- Indexing ---
 
+    _indexArgs(idx) {
+      const ell = idx.map((i, j) => i === '...' ? j : -1).filter(j => j >= 0)
+      if (ell.length > 1) throw new RangeError('indices can only have a single ellipsis')
+      const real = idx.length - ell.length - idx.filter(i => i == null).length
+      if (real > this.ndim) throw new RangeError('too many indices for tensor')
+      idx = [...idx]
+      idx.splice(ell.length ? ell[0] : idx.length, ell.length ? 1 : 0,
+        ...Array.from({length: this.ndim - real}, () => ({step: 1})))
+      const kinds = [], starts = [], sizes = [], steps = [], tensors = [], owners = []
+      const integer = (v, what) => {
+        if (!Number.isSafeInteger(v)) throw new TypeError(what + ' must be a safe integer')
+        return v
+      }
+      let dim = 0
+      for (const index of idx) {
+        if (index == null) {
+          kinds.push(0); starts.push(null); sizes.push(null); steps.push(1); tensors.push(null)
+          continue
+        }
+        const size = this.shape[dim++]
+        let start = 0, stop = size, step = 1, kind = 2, tensor = null
+        if (typeof index === 'number') {
+          integer(index, 'index')
+          start = index < 0 ? index + size : index
+          if (start < 0 || start >= size) throw new RangeError('index=' + index + ' is out of bounds with size=' + size)
+          stop = start + 1
+          kind = 1
+        } else if (index instanceof Tensor) {
+          if (!isIntegerDtype(index.dtype)) throw new TypeError('index dtype ' + index.dtype + ' is not supported')
+          if (index._ctx !== this._ctx || index._device !== this._device) {
+            throw new Error('expected index and self on the same device and context')
+          }
+          kind = 3
+          tensor = index
+          owners.push(index)
+        } else {
+          // Preserve the existing JS [start, stop] slice syntax. Tensor
+          // objects express advanced indices; arrays at the call boundary
+          // remain lists of axis specifications, not Python-style index lists.
+          const slice = Array.isArray(index) && index.length === 2
+            ? {start: index[0], stop: index[1], step: 1} : index
+          if (!slice || typeof slice !== 'object' ||
+              !['start', 'stop', 'step'].some(k => k in slice)) throw new TypeError('unsupported index type')
+          step = slice.step == null ? 1 : integer(slice.step, 'slice step')
+          if (step === 0) throw new RangeError('slice step cannot be zero')
+          const lo = step < 0 ? -1 : 0, hi = step < 0 ? size-1 : size
+          const clamp = v => Math.min(hi, Math.max(lo, v < 0 ? v+size : v))
+          start = slice.start == null ? (step < 0 ? size-1 : 0) : clamp(integer(slice.start, 'slice start'))
+          stop = slice.stop == null ? (step < 0 ? -1 : size) : clamp(integer(slice.stop, 'slice stop'))
+          if ((step < 0 && stop > start) || (step > 0 && stop < start)) start = stop = 0
+          else if (step < 0) [start, stop] = [stop+1, start+1]
+        }
+        kinds.push(kind)
+        starts.push(ffi.poly_const_int_by_id(this._ctx, start, DTYPE_ID.weakint))
+        sizes.push(ffi.poly_const_int_by_id(this._ctx, stop-start, DTYPE_ID.weakint))
+        steps.push(step)
+        tensors.push(tensor ? tensor._tensor : null)
+      }
+      return {args: [kinds, starts, sizes, steps, tensors, kinds.length], owners}
+    }
+
     getitem(...idx) {
       if (idx.length === 1 && Array.isArray(idx[0])) idx = idx[0]
-
-      // Pinned mixin/movement.py:63-113 and mixin/__init__.py:121-146
-      // parse every basic view index, apply one aggregate movement, then one
-      // final reshape for injected/collapsed dimensions.
-      const isSliceObject = i => typeof i === 'object' && i !== null && 'step' in i
-      const isBasic = i => i === null || i === undefined || typeof i === 'number' ||
-        (Array.isArray(i) && i.length === 2) || isSliceObject(i)
-      if (idx.every(isBasic)) {
-        const parsed = []
-        let sourceDim = 0
-        for (const i of idx) {
-          if (i === null || i === undefined) {
-            parsed.push({ index: null, boundary: [0, 1], stride: 1, collapse: false })
-            continue
-          }
-          if (sourceDim >= this.shape.length) {
-            throw new Error(`too many indices for ${this.shape.length}D tensor`)
-          }
-          const size = this.shape[sourceDim++]
-          if (typeof i === 'number') {
-            let value = i
-            if (value < 0) value += size
-            if (value < 0 || value >= size) throw new Error(`index=${i} is out of bounds with size=${size}`)
-            parsed.push({ index: i, boundary: [value, value + 1], stride: 1, collapse: true })
-            continue
-          }
-
-          let start, stop, step
-          if (Array.isArray(i)) {
-            [start, stop] = i
-            step = 1
-          } else {
-            step = i.step != null ? i.step : 1
-            if (step === 0) throw new Error('slice step cannot be zero')
-            if (step > 0) {
-              start = i.start != null ? (i.start < 0 ? Math.max(i.start + size, 0) : Math.min(i.start, size)) : 0
-              stop = i.stop != null ? (i.stop < 0 ? Math.max(i.stop + size, 0) : Math.min(i.stop, size)) : size
-            } else {
-              start = i.start != null ? (i.start < 0 ? Math.max(i.start + size, -1) : Math.min(i.start, size - 1)) : size - 1
-              stop = i.stop != null ? (i.stop < 0 ? Math.max(i.stop + size, -1) : Math.min(i.stop, size - 1)) : -1
-            }
-          }
-          let boundary = [start, stop]
-          if (step * (boundary[1] - boundary[0]) < 0) boundary = [0, 0]
-          else if (step < 0) boundary = [boundary[1] + 1, boundary[0] + 1]
-          parsed.push({ index: i, boundary, stride: step, collapse: false })
-        }
-        while (sourceDim < this.shape.length) {
-          const size = this.shape[sourceDim++]
-          parsed.push({ index: [0, size], boundary: [0, size], stride: 1, collapse: false })
-        }
-
-        const movements = parsed.filter(p => p.index !== null)
-        let result = this.shrink(movements.map(p => p.boundary))
-        const negativeAxes = movements.map((p, d) => p.stride < 0 ? d : -1).filter(d => d >= 0)
-        if (negativeAxes.length) result = result.flip(negativeAxes)
-        const strides = movements.map(p => Math.abs(p.stride))
-        if (strides.some(stride => stride !== 1)) {
-          let shape = [...result.shape]
-          const padding = shape.map((size, d) => {
-            const rounded = Math.ceil(size / strides[d]) * strides[d]
-            return [0, rounded - size]
-          })
-          if (padding.some(pair => pair[1])) {
-            result = result.pad(padding)
-            shape = shape.map((size, d) => size + padding[d][1])
-          }
-          result = result.reshape(shape.flatMap((size, d) => [size / strides[d], strides[d]]))
-          result = result.shrink(result.shape.map((size, d) => d % 2 ? [0, 1] : [0, size]))
-          result = result.reshape(result.shape.filter((_, d) => d % 2 === 0))
-        }
-
-        const finalShape = []
-        let movementDim = 0
-        for (const p of parsed) {
-          if (p.index === null) finalShape.push(1)
-          else {
-            if (!p.collapse) finalShape.push(result.shape[movementDim])
-            movementDim += 1
-          }
-        }
-        return result.reshape(finalShape)
+      const {args, owners} = this._indexArgs(idx)
+      const core = ffi.poly_tensor_getitem(this._ctx, this._tensor, ...args)
+      if (!core) throw new RangeError('cannot broadcast indices or unsupported indexing shape')
+      if (uopKey(tensorUop(core)) === uopKey(this._currentUopRaw())) {
+        ffi.poly_tensor_release(core)
+        return this
       }
+      return this._makeResultFromCore(core, [this, ...owners])
+    }
 
-      let result = this
-      let dim = 0
-      for (const i of idx) {
-        if (i === null || i === undefined) {
-          result = result.unsqueeze(dim)
-          dim += 1
-        } else if (typeof i === 'number') {
-          let ii = i
-          if (ii < 0) ii += result.shape[dim]
-          const arg = result.shape.map((s, d) => d === dim ? [ii, ii + 1] : [0, s])
-          result = result.shrink(arg)
-          result = result.squeeze(dim)
-        } else if (Array.isArray(i) && i.length === 2) {
-          const [start, stop] = i
-          const arg = result.shape.map((s, d) => d === dim ? [start, stop] : [0, s])
-          result = result.shrink(arg)
-          dim += 1
-        } else if (i instanceof Tensor) {
-          if (!isIntegerDtype(i.dtype)) throw new Error(`index dtype ${i.dtype} is not supported`)
-          if (i._device !== result._device) {
-            throw new Error(`expected index and self on the same device, index.device=${i.device}, self.device=${result.device}`)
-          }
-          const core = this._rt._core.ffi.poly_tensor_index_select(
-            result._ctx, result._tensor, dim, i._tensor
-          )
-          if (!core) throw new Error('poly_tensor_index_select failed')
-          result = result._makeResultFromCore(core, [result, i])
-          dim += i.shape.length
-        } else if (typeof i === 'object' && i !== null && 'step' in i) {
-          // Slice with step: {start, stop, step}
-          // Reimplements Python's slice.indices(size)
-          const size = result.shape[dim]
-          let step = i.step != null ? i.step : 1
-          if (step === 0) throw new Error('slice step cannot be zero')
-          let start, stop
-          if (step > 0) {
-            start = i.start != null ? (i.start < 0 ? Math.max(i.start + size, 0) : Math.min(i.start, size)) : 0
-            stop = i.stop != null ? (i.stop < 0 ? Math.max(i.stop + size, 0) : Math.min(i.stop, size)) : size
-          } else {
-            start = i.start != null ? (i.start < 0 ? Math.max(i.start + size, -1) : Math.min(i.start, size - 1)) : size - 1
-            stop = i.stop != null ? (i.stop < 0 ? Math.max(i.stop + size, -1) : Math.min(i.stop, size - 1)) : -1
-          }
-          // Compute boundary and stride (matching tinygrad _getitem)
-          let boundary = [start, stop]
-          const stride = step
-          if (stride * (boundary[1] - boundary[0]) < 0) {
-            boundary = [0, 0]
-          } else if (stride < 0) {
-            boundary = [boundary[1] + 1, boundary[0] + 1]
-          }
-          // shrink to boundary
-          const shrinkArg = result.shape.map((s, d) => d === dim ? boundary : [0, s])
-          result = result.shrink(shrinkArg)
-          // flip if negative stride
-          if (stride < 0) result = result.flip(dim)
-          const absStride = Math.abs(stride)
-          // apply stride via pad+reshape+shrink+reshape
-          if (absStride !== 1) {
-            const sh = [...result.shape]
-            // pad to multiple of stride
-            const rem = sh[dim] % absStride
-            if (rem !== 0) {
-              const padAmt = absStride - rem
-              const padding = sh.map((_, d) => d === dim ? [0, padAmt] : [0, 0])
-              result = result.pad(padding)
-              sh[dim] += padAmt
-            }
-            // reshape: split dim into (n_groups, stride)
-            const newSh = [...sh.slice(0, dim), sh[dim] / absStride, absStride, ...sh.slice(dim + 1)]
-            result = result.reshape(...newSh)
-            // shrink to first element of each stride group
-            const shrinkArg2 = result.shape.map((s, d) => d === dim + 1 ? [0, 1] : [0, s])
-            result = result.shrink(shrinkArg2)
-            // reshape back, collapsing the stride dim
-            const finalSh = [...result.shape.slice(0, dim), result.shape[dim], ...result.shape.slice(dim + 2)]
-            result = result.reshape(...finalSh)
-          }
-          dim += 1
-        } else {
-          throw new Error(`Unsupported index type: ${typeof i}`)
-        }
-      }
-      return result
+    setitem(indices, value) {
+      if (!(value instanceof Tensor)) value = new Tensor(value, {dtype: this.dtype, device: this._device})
+      const {args, owners} = this._indexArgs(Array.isArray(indices) ? indices : [indices])
+      const rc = ffi.poly_tensor_setitem(this._ctx, this._tensor, ...args, value._tensor)
+      if (rc === -6) throw new RangeError('cannot broadcast indices')
+      if (rc) throw new Error({
+        '-2': "can't setitem on a tensor with other uses",
+        '-3': 'setitem dtype mismatch',
+        '-4': 'cannot setitem into a weak tensor; it has no storage',
+        '-5': 'advanced setitem is not supported for DISK tensors'
+      }[rc] || 'cannot broadcast assigned value or unsupported indexing shape')
+      this._data = null
+      return this
     }
 
     // --- Einsum (C core) ---

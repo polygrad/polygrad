@@ -4456,6 +4456,93 @@ async function runTensorTests(pg) {
     }
   })
 
+  await test('indexed owners: paired and separated advanced reads', async () => {
+    const x = Tensor.arange(12).reshape(3, 4)
+    assertClose(await x.getitem(new Tensor([0, 2]), new Tensor([1, 3])).toArray(), [1, 11])
+    const out = Tensor.arange(24).reshape(2, 3, 4).getitem(
+      new Tensor([[0], [1]]), {step: 1}, new Tensor([[0, 2]])
+    )
+    assertShape(out.shape, [2, 2, 3])
+    assertClose(await out.toArray(), [0, 4, 8, 2, 6, 10, 12, 16, 20, 14, 18, 22])
+  })
+
+  await test('indexed owners: scalar Tensor index', async () => {
+    assertClose(await Tensor.arange(6).reshape(2, 3).getitem(new Tensor(1)).toArray(), [3, 4, 5])
+  })
+
+  await test('indexed owners: detached write and identity read', async () => {
+    const x = Tensor.zeros(4)
+    await x.realize()
+    x.detach().setitem(1, 5.)
+    assertClose(await x.toArray(), [0, 5, 0, 0])
+    assert(x.getitem() === x && x.getitem({step: 1}) === x, 'no-op reads retain object identity')
+  })
+
+  await test('indexed owners: weak RHS admission', async () => {
+    const x = Tensor.zeros(4)
+    x.setitem(1, new Tensor(5))
+    assertClose(await x.toArray(), [0, 5, 0, 0])
+    const y = Tensor.zeros(4, {dtype: 'int32'})
+    let rejected = false
+    try { y.setitem(1, new Tensor(1.5)) } catch (e) { rejected = /dtype mismatch/.test(e.message) }
+    assert(rejected, 'weak float must not silently truncate to integer storage')
+  })
+
+  await test('indexed owners: int64 dimensions retain high word', async () => {
+    // Zero elements tests marshalling without allocating the large dimension.
+    for (const dim of [2147483649, 4294967297, 6442450945]) {
+      assertShape(Tensor.empty(0, dim).shape, [0, dim])
+    }
+  })
+
+  await test('indexed owners: int64 positive and negative strides', async () => {
+    const x = Tensor.arange(3)
+    assertClose(await x.getitem({step: 4294967297}).toArray(), [0])
+    assertClose(await x.getitem({step: -4294967297}).toArray(), [2])
+  })
+
+  for (const realized of [false, true]) {
+    await test(`indexed owners: strided write realized=${realized}`, async () => {
+      const x = Tensor.arange(8).cast('float32')
+      if (realized) await x.realize()
+      x.setitem({start: 1, stop: 7, step: 2}, new Tensor([10, 20, 30], {dtype: 'float32'}))
+      assertClose(await x.toArray(), [0, 10, 2, 20, 4, 30, 6, 7])
+    })
+  }
+
+  await test('indexed owners: last duplicate write and live use rejection', async () => {
+    const x = new Tensor([0., 1., 2., 3.])
+    x.setitem(new Tensor([1, 1, 3]), new Tensor([7., 8., 9.]))
+    assertClose(await x.toArray(), [0, 8, 2, 9])
+    const y = new Tensor([1., 2.]), other = y.add(1)
+    let rejected = false
+    try { y.setitem(0, 4.) } catch (e) { rejected = /other uses/.test(e.message) }
+    assert(rejected, 'setitem must reject a live dependent computation')
+    assertClose(await other.toArray(), [2, 3])
+  })
+
+  await test('indexed owners: gradient assignment and reset', async () => {
+    const x = new Tensor([1, 2], {dtype: 'float32'}), g = new Tensor([10, 20], {dtype: 'float32'})
+    x.grad = g
+    assert(x.grad === g, 'grad assignment must retain the same Tensor object')
+    await x.mul(x).sum().backward()
+    assertClose(await x.grad.toArray(), [12, 24])
+    x.grad = null
+    await x.mul(3).sum().backward()
+    assertClose(await x.grad.toArray(), [3, 3])
+  })
+
+  for (const reduction of ['none', 'sum', 'mean']) {
+    await test(`indexed owners: ordinary BCE ${reduction}`, async () => {
+      const x = new Tensor([.2, .7]), y = new Tensor([0., 1.])
+      const out = x.binaryCrossEntropy(y, reduction)
+      const terms = [-Math.log(.8), -Math.log(.7)]
+      assertClose(await out.toArray(), reduction === 'none' ? terms : [terms.reduce((a,b) => a+b)/(reduction === 'mean' ? 2 : 1)])
+      await out.sum().backward()
+      assertClose(await x.grad.toArray(), [1/.8, -1/.7].map(v => v/(reduction === 'mean' ? 2 : 1)))
+    })
+  }
+
   await test('binaryCrossEntropy', async () => {
     const pred = new Tensor([0.9, 0.1, 0.8])
     const target = new Tensor([1, 0, 1])

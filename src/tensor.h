@@ -241,6 +241,7 @@ PolyUOp *poly_isclose(
     PolyUOp *atol,
     bool equal_nan
 );
+PolyUOp *poly_binary_crossentropy(PolyCtx *ctx, PolyUOp *x, PolyUOp *target, int reduction);
 PolyUOp *poly_binary_crossentropy_logits(
     PolyCtx *ctx,
     PolyUOp *x,

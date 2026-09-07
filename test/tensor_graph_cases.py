@@ -2225,6 +2225,50 @@ for _op in ("nll_loss", "binary_crossentropy_logits"):
         for _weighted in (False, True):
             CASES[f"pointwise_loss_{_op}_{_reduction}_{_weighted}"] = ("tensor", lambda op=_op, r=_reduction, w=_weighted: pointwise_loss_graph(op, r, w))
 
+def indexed_owner_graph(kind):
+    x = Tensor.empty(2, 3, 4, dtype='float32').realize()
+    if kind == 'scalar':
+        out = x[Tensor.empty(dtype='int32').realize()]
+    elif kind == 'paired':
+        a, b = Tensor.empty(2, dtype='int32').realize(), Tensor.empty(2, dtype='int32').realize()
+        out = x[:, a, b]
+    elif kind == 'separated':
+        a, b = Tensor.empty(2, 1, dtype='int32').realize(), Tensor.empty(1, 2, dtype='int32').realize()
+        out = x[a, :, b]
+    elif kind == 'write_strided':
+        x[:, ::-1, 1::2] = Tensor.empty(2, 3, 2, dtype='float32').realize()
+        out = x
+    elif kind == 'write_advanced':
+        x[Tensor.empty(2, dtype='int32').realize(), :, Tensor.empty(2, dtype='int32').realize()] = Tensor.empty(2, 3, dtype='float32').realize()
+        out = x
+    elif kind == 'write_lazy':
+        x = x * 2
+        x[:, ::-1, 1::2] = Tensor.empty(2, 3, 2, dtype='float32').realize()
+        out = x
+    elif kind == 'mixed_list':
+        out = Tensor.empty(3, 2).realize()[[True, False, 2]]
+    elif kind == 'symbolic_tail':
+        n = UOp.variable('n', 1, 4).bind(3) if ENGINE == 'tinygrad' else Variable('n', 1, 4).bind(3)
+        out = Tensor.empty(10, 8)[:n][-2:]
+    elif kind == 'write_detached':
+        x.detach()[:, 1, :] = Tensor.empty(2, 4, dtype='float32').realize()
+        out = x
+    elif kind in ('permuted', 'write_permuted'):
+        x = Tensor.empty(2, 3, 4, 5, dtype='float32').realize()
+        a, b = Tensor.empty(2, dtype='int32').realize(), Tensor.empty(2, dtype='int32').realize()
+        if kind == 'permuted': out = x[:, a, :, b]
+        else:
+            x[:, a, :, b] = Tensor.empty(2, 2, 4, dtype='float32').realize()
+            out = x
+    else:
+        out = x.binary_crossentropy(Tensor.empty(3, 4, dtype='float32').realize(), reduction=kind)
+    return {'physical': out.uop, 'logical': logical(out)}
+
+
+for _kind in ('scalar', 'paired', 'separated', 'permuted', 'mixed_list', 'symbolic_tail', 'write_strided', 'write_advanced', 'write_lazy', 'write_detached', 'write_permuted', 'none', 'sum', 'mean'):
+    CASES[f'indexed_owner_{_kind}'] = ('tensor', lambda k=_kind: indexed_owner_graph(k))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--case", action="append", choices=sorted(CASES))

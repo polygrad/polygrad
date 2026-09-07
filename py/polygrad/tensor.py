@@ -446,6 +446,11 @@ def _symbolic_slice_size_uop(ctx, start_obj, stop_obj, start_u, stop_u):
     delta = _uop_add_const_delta(stop_u, start_u)
     if delta is not None:
         return UOp.const(delta, ctx=ctx)
+    # Negative symbolic slice starts use base + offset. Preserve the constant
+    # extent exposed by Tinygrad's ssimplify(base - (base + offset)).
+    delta = _uop_add_const_delta(start_u, stop_u)
+    if delta is not None:
+        return UOp.const(-delta, ctx=ctx)
     return stop_u - start_u
 
 
@@ -1003,6 +1008,12 @@ class Tensor:
     @property
     def grad(self):
         return self._grad
+
+    @grad.setter
+    def grad(self, value):
+        # Like Tensor.grad in the pin, this owns a Tensor reference. Its C
+        # handle already retains the gradient graph; resetting releases ours.
+        self._grad = value
 
     @property
     def T(self):
@@ -3087,8 +3098,11 @@ class Tensor:
         """tinygrad name for class-index cross entropy."""
         return self.cross_entropy(target, axis=axis)
 
-    def binary_crossentropy(self, target):
-        return -(target * self.log() + (1.0 - target) * (1.0 - self).log()).mean()
+    def binary_crossentropy(self, target, reduction='mean'):
+        reduction_id = self._loss_reduction_id(reduction)
+        target = self._ensure_tensor(target)
+        core = _ffi._lib.poly_tensor_binary_crossentropy(self._ctx, self._tensor, target._tensor, reduction_id)
+        return self._make_result_from_core(core, None, [self, target])
 
     def layernorm(self, axis=-1, eps=1e-5):
         # Pinned mixin/__init__.py:1548-1564. Keep the centered value shared
@@ -3099,267 +3113,121 @@ class Tensor:
 
     # --- Indexing ---
 
-    def __getitem__(self, idx):
-        if not isinstance(idx, tuple):
-            idx = (idx,)
-
-        def _apply_uop_shrink(tensor, starts, sizes):
-            start_arr = (_ffi._ptr * len(starts))(*starts)
-            size_arr = (_ffi._ptr * len(sizes))(*sizes)
-            core = _ffi._lib.poly_tensor_shrink_uop(
-                tensor._ctx, tensor._tensor, start_arr, size_arr, len(starts)
-            )
-            if not core:
-                raise RuntimeError('poly_tensor_shrink_uop failed')
-            current = tensor._core_uop_raw(core)
-            return tensor._make_result_from_core(
-                core, _shape_from_uop(tensor._ctx, current), [tensor]
-            )
-
-        # Pinned mixin/movement.py:63-69 and mixin/__init__.py:121-146 parse
-        # every basic view index before applying one aggregate movement, then
-        # inject/collapse dimensions with one final reshape.
-        n_ellipsis = sum(1 for i in idx if i is Ellipsis)
-        if n_ellipsis > 1:
-            raise IndexError('Only one Ellipsis allowed')
-        n_none = sum(1 for i in idx if i is None)
-        n_real = len(idx) - n_ellipsis - n_none
-        if n_real > len(self.shape):
-            raise IndexError(f'too many indices ({n_real}) for {len(self.shape)}D')
-        fill_idx = idx.index(Ellipsis) if n_ellipsis else len(idx)
-        normalized = list(idx)
-        normalized[fill_idx:fill_idx + n_ellipsis] = [slice(None)] * (len(self.shape) - n_real)
-        idx = tuple(normalized)
-
-        if all(i is None or isinstance(i, (int, slice)) for i in idx):
-            parsed = []
-            source_dim = 0
-            for i in idx:
-                if i is None:
-                    parsed.append({'index': None, 'boundary': (0, 1), 'stride': 1, 'collapse': False})
-                    continue
-                size = self.shape[source_dim]
-                source_dim += 1
-                if isinstance(i, int):
-                    if isinstance(size, int) and not -size <= i < size:
-                        raise IndexError(f'index={i} is out of bounds with size={size}')
-                    boundary_start = i if i >= 0 else size + i
-                    parsed.append({
-                        'index': i, 'boundary': (boundary_start, boundary_start + 1),
-                        'stride': 1, 'collapse': True,
-                    })
-                    continue
-
-                start_obj = 0 if i.start is None else i.start
-                stop_obj = size if i.stop is None else i.stop
-                step = 1 if i.step is None else i.step
-                symbolic = any(_is_symbolic_bound(v) for v in (start_obj, stop_obj, step))
-                if symbolic:
-                    if step == 0:
-                        raise ValueError('slice step cannot be zero')
-                    if step != 1:
-                        raise TypeError(f'slice {i!r} is not supported for symbolic shape')
-                    start_val = _bound_to_int(self._ctx, start_obj)
-                    stop_val = _bound_to_int(self._ctx, stop_obj)
-                    try:
-                        size_val = _bound_to_int(self._ctx, size)
-                    except TypeError:
-                        size_val = None
-                    if start_val < 0 or stop_val < start_val or (size_val is not None and stop_val > size_val):
-                        raise IndexError(f'symbolic slice {i!r} is out of bounds for size {size}')
-                    boundary = (start_obj, stop_obj)
-                else:
-                    start, stop, step = i.indices(
-                        _slice_indices_size(self._ctx, self.uop, source_dim - 1, size)
-                    )
-                    boundary = (start, stop)
-                    if step * (boundary[1] - boundary[0]) < 0:
-                        boundary = (0, 0)
-                    elif step < 0:
-                        boundary = (boundary[1] + 1, boundary[0] + 1)
-                parsed.append({'index': i, 'boundary': boundary, 'stride': step, 'collapse': False})
-
-            movements = [p for p in parsed if p['index'] is not None]
-            boundaries = [p['boundary'] for p in movements]
-            if all(isinstance(v, int) for boundary in boundaries for v in boundary):
-                result = self.shrink(tuple(boundaries))
-            else:
-                starts, sizes = [], []
-                for start_obj, stop_obj in boundaries:
-                    start_u = _bound_to_uop(self._ctx, start_obj)
-                    stop_u = _bound_to_uop(self._ctx, stop_obj)
-                    starts.append(start_u.raw)
-                    sizes.append(_symbolic_slice_size_uop(
-                        self._ctx, start_obj, stop_obj, start_u, stop_u
-                    ).raw)
-                result = _apply_uop_shrink(self, starts, sizes)
-
-            negative_axes = tuple(d for d, p in enumerate(movements) if p['stride'] < 0)
-            if negative_axes:
-                result = result.flip(negative_axes)
-            strides = [abs(p['stride']) for p in movements]
-            if any(stride != 1 for stride in strides):
-                if not _shape_all_int(result.shape):
-                    raise RuntimeError('symbolic shape not supported')
-                shape = list(result.shape)
-                padding = []
-                for size, stride in zip(shape, strides):
-                    rounded = ((size + stride - 1) // stride) * stride
-                    padding.append((0, rounded - size))
-                if any(after for _, after in padding):
-                    result = result.pad(tuple(padding))
-                    shape = [size + after for size, (_, after) in zip(shape, padding)]
-                split_shape = [dim for size, stride in zip(shape, strides) for dim in (size // stride, stride)]
-                result = result.reshape(tuple(split_shape))
-                result = result.shrink(tuple(
-                    (0, 1) if d % 2 else (0, size)
-                    for d, size in enumerate(result.shape)
-                ))
-                result = result.reshape(tuple(result.shape[::2]))
-
-            final_shape = []
-            movement_dim = 0
-            for p in parsed:
-                if p['index'] is None:
-                    final_shape.append(1)
-                else:
-                    if not p['collapse']:
-                        final_shape.append(result.shape[movement_dim])
-                    movement_dim += 1
-            return result.reshape(tuple(final_shape))
-
-        result = self
+    def _index_args(self, indices):
+        # Normalize host syntax only. OpMixin._getitem's view, mask, reduction
+        # and write graphs are built once in C for both frontends.
+        if (isinstance(indices, list) and all(isinstance(i, int) for i in indices)) or not isinstance(indices, (tuple, list)):
+            indices = [indices]
+        indices = list(indices)
+        ell = [j for j, i in enumerate(indices) if i is Ellipsis]
+        if len(ell) > 1:
+            raise IndexError('indices can only have a single ellipsis')
+        real = len(indices) - len(ell) - sum(i is None for i in indices)
+        if real > self.ndim:
+            raise IndexError(f'too many indices ({real}) for {self.ndim}D')
+        at = ell[0] if ell else len(indices)
+        indices[at:at + 1] = [slice(None)] * (self.ndim - real)
+        kinds, starts, sizes, steps, tensors, owners, view_shape = [], [], [], [], [], [], []
         dim = 0
-        for i in idx:
-            if i is None:
-                result = result.unsqueeze(dim)
-                dim += 1
-            elif isinstance(i, int):
-                if i < 0:
-                    i += result.shape[dim]
-                result = result.shrink(
-                    tuple((i, i + 1) if d == dim else (0, s)
-                          for d, s in enumerate(result.shape)))
-                result = result.squeeze(dim)
-            elif isinstance(i, Tensor):
-                if not dtypes.is_int(to_dtype(i.dtype)):
-                    raise IndexError(f"index dtype {i.dtype} is not supported")
-                if i.device != result.device:
-                    raise RuntimeError(
-                        f"expected index and self on the same device, index.device={i.device}, self.device={result.device}"
-                    )
-                core = _ffi._lib.poly_tensor_index_select(
-                    result._ctx, result._tensor, dim, i._tensor
-                )
-                if not core:
-                    raise RuntimeError('poly_tensor_index_select failed')
-                current = result._core_uop_raw(core)
-                result = result._make_result_from_core(
-                    core, _shape_from_uop(result._ctx, current), [result, i]
-                )
-                dim += len(i.shape)
-            elif isinstance(i, slice):
-                size = result.shape[dim]
-                start_obj = 0 if i.start is None else i.start
-                stop_obj = size if i.stop is None else i.stop
-                step = 1 if i.step is None else i.step
-                if _is_symbolic_bound(start_obj) or _is_symbolic_bound(stop_obj) or _is_symbolic_bound(step):
-                    if step == 0:
-                        raise ValueError('slice step cannot be zero')
-                    if step != 1:
-                        raise TypeError(f'slice {i!r} is not supported for symbolic shape')
-                    start_u = _bound_to_uop(result._ctx, start_obj)
-                    stop_u = _bound_to_uop(result._ctx, stop_obj)
-                    size_u = _symbolic_slice_size_uop(result._ctx, start_obj, stop_obj, start_u, stop_u)
-                    start_val = _bound_to_int(result._ctx, start_obj)
-                    stop_val = _bound_to_int(result._ctx, stop_obj)
-                    try:
-                        size_val = _bound_to_int(result._ctx, size)
-                    except TypeError:
-                        size_val = None
-                    if start_val < 0 or stop_val < start_val or (size_val is not None and stop_val > size_val):
-                        raise IndexError(f'symbolic slice {i!r} is out of bounds for size {size}')
-                    starts = []
-                    sizes = []
-                    for d, s in enumerate(result.shape):
-                        if d == dim:
-                            starts.append(start_u.raw)
-                            sizes.append(size_u.raw)
-                        else:
-                            starts.append(UOp.const(0, ctx=result._ctx).raw)
-                            size_raw = _symbolic_dim_raw(s)
-                            sizes.append(size_raw if size_raw is not None else UOp.const(int(s), ctx=result._ctx).raw)
-                    result = _apply_uop_shrink(result, starts, sizes)
-                    dim += 1
-                    continue
-                if i.start is None and i.stop is None and (i.step is None or i.step == 1):
-                    dim += 1
-                    continue
-                start, stop, step = i.indices(
-                    _slice_indices_size(result._ctx, result.uop, dim, size)
-                )
+        for index in indices:
+            kind, tensor, step = 2, None, 1
+            if index is None:
+                kinds.append(0); starts.append(None); sizes.append(None); steps.append(1); tensors.append(None)
+                continue
+            size = self.shape[dim]
+            dim += 1
+            start, extent = 0, size
+            if isinstance(index, (list, tuple)):
+                def flatten(v):
+                    return [z for a in v for z in flatten(a)] if isinstance(v, (list, tuple)) else [v]
+                flat = flatten(index)
+                # OpMixin._getitem infers bool only when every entry is bool;
+                # a mixed bool/int list is an integer index list (all_int).
+                if not flat or any(not isinstance(v, int) for v in flat) or all(isinstance(v, bool) for v in flat):
+                    raise IndexError(f'index={index!r} contains non-int element')
+                if not isinstance(size, int):
+                    raise AssertionError('size must be an int')
+                # The pin adjusts list entries before _frompy; doing this as
+                # a Tensor WHERE would produce a different physical graph.
+                def normalize(v):
+                    return [normalize(a) for a in v] if isinstance(v, (tuple, list)) else v + size if v < 0 else v
+                tensor = Tensor(normalize(index), dtype=dtypes.default_int, device=self.device, _ctx=self._ctx)
+                kind = 4
+            elif isinstance(index, Tensor):
+                if not dtypes.is_int(index.dtype):
+                    raise IndexError(f'index dtype {index.dtype} is not supported')
+                if index._ctx != self._ctx or index.device != self.device:
+                    raise RuntimeError('expected index and self on the same device and context')
+                tensor, kind = index, 3
+            elif isinstance(index, int) or _is_symbolic_bound(index):
+                if isinstance(size, int) and isinstance(index, int) and not -size <= index < size:
+                    raise IndexError(f'index={index} is out of bounds with size={size}')
+                start = index if index >= 0 else size + index
+                extent, kind = 1, 1
+            elif isinstance(index, slice):
+                if not all(v is None or isinstance(v, int) or _is_symbolic_bound(v) for v in (index.start, index.stop, index.step)):
+                    raise TypeError(f'slice index={index!r} is not supported')
+                step = 1 if index.step is None else index.step
                 if step == 0:
-                    raise ValueError('slice step cannot be zero')
-                # Normalize boundary and stride (matching tinygrad _getitem)
-                boundary = [start, stop]
-                stride = step
-                if stride * (boundary[1] - boundary[0]) < 0:
-                    boundary = [0, 0]
-                elif stride < 0:
-                    boundary = [boundary[1] + 1, boundary[0] + 1]
-                new_size = -(-abs(boundary[1] - boundary[0]) // abs(stride))  # ceildiv
-                # shrink to boundary
-                if _shape_all_int(result.shape):
-                    result = result.shrink(
-                        tuple(tuple(boundary) if d == dim else (0, s)
-                              for d, s in enumerate(result.shape)))
+                    raise ValueError(f'index={index!r} cannot have 0 as step')
+                begin = 0 if index.start is None else index.start
+                end = size if index.stop is None else index.stop
+                if isinstance(begin, int) and begin < 0: begin += size
+                if isinstance(end, int) and end < 0: end += size
+                if all(isinstance(v, int) for v in (begin, end, step)):
+                    lo, hi, step = index.indices(_slice_indices_size(self._ctx, self.uop, dim-1, size))
+                    if step * (hi - lo) < 0: lo, hi = 0, 0
+                    elif step < 0: lo, hi = hi + 1, lo + 1
+                    start, extent = lo, hi - lo
+                elif step == 1:
+                    start_u, end_u = _bound_to_uop(self._ctx, begin), _bound_to_uop(self._ctx, end)
+                    start = begin
+                    extent = _symbolic_slice_size_uop(self._ctx, begin, end, start_u, end_u)
                 else:
-                    starts = []
-                    sizes = []
-                    symbolic_out = False
-                    for d, s in enumerate(result.shape):
-                        starts.append(UOp.const(boundary[0] if d == dim else 0, ctx=result._ctx).raw)
-                        if d == dim:
-                            sizes.append(UOp.const(boundary[1] - boundary[0], ctx=result._ctx).raw)
-                        else:
-                            size_raw = _symbolic_dim_raw(s)
-                            symbolic_out = symbolic_out or size_raw is not None
-                            sizes.append(size_raw if size_raw is not None else UOp.const(int(s), ctx=result._ctx).raw)
-                    if abs(stride) != 1 and symbolic_out:
-                        raise RuntimeError('symbolic shape not supported')
-                    result = _apply_uop_shrink(result, starts, sizes)
-                # flip if negative stride
-                if stride < 0:
-                    result = result.flip(dim)
-                abs_stride = abs(stride)
-                # apply stride via pad+reshape+shrink+reshape
-                if abs_stride != 1:
-                    if not _shape_all_int(result.shape):
-                        raise RuntimeError('symbolic shape not supported')
-                    sh = list(result.shape)
-                    # pad to multiple of stride
-                    rem = sh[dim] % abs_stride
-                    if rem != 0:
-                        pad_amt = abs_stride - rem
-                        padding = tuple((0, pad_amt) if d == dim else (0, 0)
-                                        for d in range(len(sh)))
-                        result = result.pad(padding)
-                        sh[dim] += pad_amt
-                    # reshape: split dim into (n_groups, stride)
-                    new_sh = sh[:dim] + [sh[dim] // abs_stride, abs_stride] + sh[dim+1:]
-                    result = result.reshape(*new_sh)
-                    # shrink to first element of each stride group
-                    result = result.shrink(
-                        tuple((0, 1) if d == dim + 1 else (0, s)
-                              for d, s in enumerate(result.shape)))
-                    # reshape back, collapsing the stride dim
-                    final_sh = list(result.shape)
-                    final_sh = final_sh[:dim] + [final_sh[dim]] + final_sh[dim+2:]
-                    result = result.reshape(*final_sh)
-                dim += 1
+                    raise TypeError(f'slice index={index!r} is not supported for symbolic shape')
             else:
-                raise IndexError(f'Unsupported index type: {type(i)}')
-        return result
+                raise IndexError(f'{type(index).__name__} indexing is not supported')
+            start_u, size_u = _bound_to_uop(self._ctx, start), _bound_to_uop(self._ctx, extent)
+            view_shape.append(extent)
+            owners.extend((start_u, size_u))
+            if tensor is not None: owners.append(tensor)
+            kinds.append(kind); starts.append(start_u.raw); sizes.append(size_u.raw); steps.append(step)
+            tensors.append(tensor._tensor if tensor is not None else None)
+        if any(step != 1 and step != -1 for step in steps) and _shape_has_symbolic(view_shape):
+            raise RuntimeError('symbolic shape not supported for strided indexing')
+        n = len(kinds)
+        args = ((ctypes.c_int * n)(*kinds), (_ffi._ptr * n)(*starts), (_ffi._ptr * n)(*sizes),
+                (ctypes.c_int64 * n)(*steps), (_ffi._ptr * n)(*tensors), n)
+        return args, owners
+
+    def __getitem__(self, indices):
+        args, owners = self._index_args(indices)
+        core = _ffi._lib.poly_tensor_getitem(self._ctx, self._tensor, *args)
+        if not core:
+            raise IndexError('cannot broadcast indices or unsupported indexing shape')
+        if core == self._tensor:
+            _ffi._lib.poly_tensor_release(core)
+            return self
+        return self._make_result_from_core(core, None, [self] + [x for x in owners if isinstance(x, Tensor)])
+
+    def __setitem__(self, indices, value):
+        if self.dtype in dtypes.weaks:
+            raise RuntimeError('cannot setitem into a weak tensor; it has no storage')
+        if not isinstance(value, Tensor):
+            value = Tensor(value, dtype=self.dtype, device=self.device, _ctx=self._ctx)
+        args, owners = self._index_args(indices)
+        rc = _ffi._lib.poly_tensor_setitem(self._ctx, self._tensor, *args, value._tensor)
+        if rc == -6:
+            raise IndexError('cannot broadcast indices')
+        if rc:
+            raise RuntimeError({-2: "can't setitem on a tensor with other uses",
+                                -3: 'setitem dtype mismatch',
+                                -4: 'cannot setitem into a weak tensor; it has no storage',
+                                -5: 'advanced setitem is not supported for DISK tensors'}.get(rc, 'cannot broadcast assigned value or unsupported indexing shape'))
+        self._data = None
+
+    def __delitem__(self, indices):
+        raise TypeError('Tensor does not support deleting items')
 
     # --- Einsum (C core) ---
 

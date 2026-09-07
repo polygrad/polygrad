@@ -4142,6 +4142,63 @@ TEST(pe, tensor_einsum_builds_both_roots_from_exact_occurrences) {
   PASS();
 }
 
+TEST(tensor, indexed_owners_scalar_tensor_index) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){2, 3}, 2, POLY_DEVICE_INTERP);
+  PolyTensor *index = poly_tensor_empty(ctx, POLY_INT32, NULL, 0, POLY_DEVICE_INTERP);
+  float data[] = {0, 1, 2, 3, 4, 5};
+  int32_t idx = 1;
+  /* Empty's shape view is not a storage identity (including scalar reshape). */
+  ASSERT_INT_EQ(poly_buffer_write(ctx, poly_uop_base(x->uop_physical), data, sizeof(data)), 0);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, poly_uop_base(index->uop_physical), &idx, sizeof(idx)), 0);
+  PolyTensor *out = poly_tensor_index_select(ctx, x, 0, index);
+  float got[3];
+  bool ok =
+      out && read_tensor_f32(ctx, out, got, 3) == 0 && got[0] == 3 && got[1] == 4 && got[2] == 5;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
+TEST(tensor, indexed_owners_lifetime_and_admission) {
+  for (int logical = 0; logical < 2; logical++) {
+    PolyCtx *ctx = poly_ctx_new(), *other = poly_ctx_new();
+    poly_ctx_set_logical_policy(ctx, logical ? POLY_LOGICAL_ALWAYS : POLY_LOGICAL_NEVER);
+    PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){4}, 1, POLY_DEVICE_INTERP);
+    PolyTensor *index = poly_tensor_empty(ctx, POLY_INT32, (int64_t[]){3}, 1, POLY_DEVICE_INTERP);
+    PolyTensor *v = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){3}, 1, POLY_DEVICE_INTERP);
+    ASSERT_INT_EQ(poly_buffer_write(ctx, x->uop_physical, (float[]){0, 1, 2, 3}, 16), 0);
+    ASSERT_INT_EQ(poly_buffer_write(ctx, index->uop_physical, (int32_t[]){1, 1, 3}, 12), 0);
+    ASSERT_INT_EQ(poly_buffer_write(ctx, v->uop_physical, (float[]){7, 8, 9}, 12), 0);
+    int kinds[] = {POLY_INDEX_TENSOR};
+    PolyUOp *starts[] = {poly_const_int(ctx, 0)}, *sizes[] = {poly_const_int(ctx, 4)};
+    int64_t steps[] = {1};
+    PolyTensor *indices[] = {index};
+    ASSERT_INT_EQ(poly_tensor_setitem(other, x, kinds, starts, sizes, steps, indices, 1, v), -1);
+    ASSERT_INT_EQ(poly_tensor_setitem(ctx, x, kinds, starts, sizes, steps, indices, 1, v), 0);
+    ASSERT_INT_EQ(x->uop_logical != NULL, logical);
+    PolyTensor *out = poly_tensor_getitem(ctx, x, kinds, starts, sizes, steps, indices, 1);
+    ASSERT_NOT_NULL(out);
+    ASSERT_INT_EQ(out->uop_logical != NULL, logical);
+    ASSERT_PTR_EQ(poly_tensor_binary_crossentropy(other, x, x, 2), NULL);
+    ASSERT_PTR_EQ(poly_tensor_binary_crossentropy(ctx, x, x, 3), NULL);
+    poly_tensor_release(x);
+    poly_tensor_release(index);
+    poly_tensor_release(v);
+    poly_ctx_collect(ctx);
+    float got[3];
+    ASSERT_INT_EQ(read_tensor_f32(ctx, out, got, 3), 0);
+    ASSERT_FLOAT_EQ(got[0], 8, 0);
+    ASSERT_FLOAT_EQ(got[1], 8, 0);
+    ASSERT_FLOAT_EQ(got[2], 9, 0);
+    poly_tensor_release(out);
+    poly_ctx_collect(ctx);
+    poly_ctx_destroy(other);
+    poly_ctx_destroy(ctx);
+  }
+  PASS();
+}
+
 TEST(pe, pointwise_owners_sign_dtype_and_graph) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *x = poly_test_buffer(ctx, POLY_INT32, 4);

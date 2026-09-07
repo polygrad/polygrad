@@ -45,8 +45,15 @@
     ]
   },
   "evidence": {
-    "report": "temp/pointwise-loss-20260907.zFrl6R/upstream/report.json",
-    "sha256": "d29e5c9a1a2ee2c25d69e93123f34f5455ab26e4a0555626c921564aabefbda9"
+    "report": "temp/indexed-grad-20260907.mlUtk8/ops-closed/report.json",
+    "sha256": "dff6dc087ba83d3bb7e2dc8b3103390601e24763f55592662d56b9cb863cb336",
+    "followup": {
+      "report": "temp/indexed-grad-20260907.mlUtk8/context-compat/report.json",
+      "sha256": "86e4de8214252d488ce708d789ff2856ae83280a00b6af78c499aa5e1b3083a7",
+      "source_snapshot": "temp/indexed-grad-20260907.mlUtk8/tensor-pre-context.py",
+      "source_diff": "temp/indexed-grad-20260907.mlUtk8/context-ownership.patch",
+      "scope": "Full reports precede only explicit Runtime ownership arguments on Python index/RHS constructors. Final default-context indexing outcomes are unchanged; explicit Runtime regressions and the Tensor suite pass. See results.md for source boundaries."
+    }
   },
   "schema_version": 1,
   "tests": {
@@ -422,17 +429,11 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_binary_crossentropy_reductions": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: TypeError: Tensor.binary_crossentropy() got an unexpected keyword argument 'reduction'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Unsupported Tensor argument/operator surface; later checks remain unproven."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_bitcast": {
       "expected": {
@@ -2843,134 +2844,74 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_slice_errors": {
-      "category": "frontend-admission",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/references/.uv-python/cpython-3.11.12-linux-x86_64-gnu/lib/python3.11/unittest/case.py:LINE: AssertionError: \"single ellipsis\" does not match \"Only one Ellipsis allowed\"",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Observed exception-admission/type/message mismatch; no test expectation changed."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_slice_fancy_indexing_dim_collapse_int": {
-      "category": "runtime-untriaged",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: RuntimeError: poly_tensor_index_select failed",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Observed C-path failure; frontend construction versus core ownership is not yet diagnosed."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_slice_fancy_indexing_dim_inject_and_collapse": {
-      "category": "runtime-untriaged",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: RuntimeError: poly_tensor_index_select failed",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Observed C-path failure; frontend construction versus core ownership is not yet diagnosed."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_slice_fancy_indexing_dim_inject_none": {
-      "category": "runtime-untriaged",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: RuntimeError: poly_tensor_index_select failed",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Observed C-path failure; frontend construction versus core ownership is not yet diagnosed."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_slice_fancy_indexing_errors": {
-      "category": "frontend-admission",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/references/.uv-python/cpython-3.11.12-linux-x86_64-gnu/lib/python3.11/unittest/case.py:LINE: AssertionError: (<class 'IndexError'>, <class 'ValueError'>) not raised",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Observed exception-admission/type/message mismatch; no test expectation changed."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_slice_fancy_indexing_list_indices": {
-      "category": "frontend-admission",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: IndexError: Unsupported index type: <class 'tuple'>",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Observed exception-admission/type/message mismatch; no test expectation changed."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_slice_fancy_indexing_list_with_tensors": {
-      "category": "frontend-admission",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: IndexError: Unsupported index type: <class 'tuple'>",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Observed exception-admission/type/message mismatch; no test expectation changed."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_slice_fancy_indexing_no_dim_collapse": {
-      "category": "runtime-untriaged",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: RuntimeError: poly_tensor_index_select failed",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Observed C-path failure; frontend construction versus core ownership is not yet diagnosed."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_slice_fancy_indexing_tuple_indices": {
-      "category": "frontend-admission",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: IndexError: Unsupported index type: <class 'tuple'>",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Observed exception-admission/type/message mismatch; no test expectation changed."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_slice_fancy_indexing_with_tensors": {
-      "category": "runtime-untriaged",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: RuntimeError: poly_tensor_index_select failed",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Observed C-path failure; frontend construction versus core ownership is not yet diagnosed."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_slice_in_bounds_1dim": {
       "expected": {

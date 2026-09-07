@@ -941,8 +941,9 @@ print('leaving_live_instance')
             prefix[::2]
         with pytest.raises(TypeError, match='not supported for symbolic shape'):
             prefix[::-1]
-        with pytest.raises(IndexError, match='out of bounds'):
-            prefix[-2:]
+        # Pinned MovementMixin._parse_view_index resolves negative integers
+        # against symbolic size before constructing the shrink.
+        assert prefix[-2:].shape == (2, 8)
 
         assert prefix[0:4:2].shape == (2, 8)
         assert prefix[3:0:-1].shape == (3, 8)
@@ -2690,6 +2691,95 @@ class TestReduce:
         with pytest.raises(NotImplementedError, match='sorted_=False'):
             Tensor([[0.1, 0.2]]).topk(1, dim=1, sorted_=False)
 
+
+
+class TestIndexedOwners:
+    @pytest.mark.parametrize('logical', ['never', 'always'])
+    def test_index_temporaries_use_explicit_runtime(self, logical):
+        with Runtime(device='interp', logical=logical) as runtime:
+            x = runtime.Tensor([0., 1., 2.])
+            np.testing.assert_array_equal(x[[2, 0]].numpy(), [2, 0])
+            x[1] = 5.
+            x[[0, 2]] = [7., 9.]
+            np.testing.assert_array_equal(x.numpy(), [7, 5, 9])
+
+    def test_mixed_boolean_integer_list_indices(self):
+        x = Tensor.arange(6).reshape(3, 2)
+        np.testing.assert_array_equal(x[[True, False, 2]].numpy(), [[2, 3], [0, 1], [4, 5]])
+        with pytest.raises(IndexError, match='non-int'):
+            x[[True, False]]
+
+    def test_detached_write_updates_base(self):
+        x = Tensor.zeros(4).realize()
+        x.detach()[1] = 5.
+        np.testing.assert_array_equal(x.numpy(), [0, 5, 0, 0])
+
+    def test_noop_index_preserves_object(self):
+        x = Tensor.arange(4)
+        assert x[()] is x
+        assert x[:] is x
+
+    def test_index_broadcast_error_is_not_value_error(self):
+        x = Tensor.zeros(3, 4)
+        with pytest.raises(IndexError):
+            x[[0, 1], [0, 1, 2]] = 1.
+        np.testing.assert_array_equal(x.numpy(), np.zeros((3, 4)))
+
+    def test_paired_advanced_indices(self):
+        x = Tensor.arange(12).reshape(3, 4)
+        np.testing.assert_array_equal(x[Tensor([0, 2]), Tensor([1, 3])].numpy(), [1, 11])
+
+    def test_separated_broadcast_indices(self):
+        x = Tensor.arange(24).reshape(2, 3, 4)
+        a, b = Tensor([[0], [1]]), Tensor([[0, 2]])
+        out = x[a, :, b]
+        assert out.shape == (2, 2, 3)
+        np.testing.assert_array_equal(out.numpy(), [[[0, 4, 8], [2, 6, 10]], [[12, 16, 20], [14, 18, 22]]])
+
+    def test_scalar_tensor_and_list_indices(self):
+        x = Tensor.arange(6).reshape(2, 3)
+        np.testing.assert_array_equal(x[Tensor(1)].numpy(), [3, 4, 5])
+        np.testing.assert_array_equal(x[[1, -2]].numpy(), [[3, 4, 5], [0, 1, 2]])
+
+    @pytest.mark.parametrize('realized', [False, True])
+    def test_strided_setitem(self, realized):
+        x = Tensor.arange(8).cast('float32')
+        if realized:
+            x.realize()
+        x[1:7:2] = Tensor([10., 20., 30.])
+        np.testing.assert_array_equal(x.numpy(), [0, 10, 2, 20, 4, 30, 6, 7])
+
+    def test_advanced_setitem_last_duplicate_wins(self):
+        x = Tensor([0., 1., 2., 3.])
+        x[Tensor([1, 1, 3])] = Tensor([7., 8., 9.])
+        np.testing.assert_array_equal(x.numpy(), [0, 8, 2, 9])
+
+    def test_setitem_rejects_other_live_uses(self):
+        x = Tensor([1., 2.])
+        other = x + 1
+        with pytest.raises(RuntimeError, match='other uses'):
+            x[0] = 4.
+        np.testing.assert_array_equal(other.numpy(), [2, 3])
+
+    def test_grad_assignment_accumulation_and_reset(self):
+        x = Tensor([1., 2.])
+        g = Tensor([10., 20.])
+        x.grad = g
+        assert x.grad is g
+        (x * x).sum().backward()
+        np.testing.assert_array_equal(x.grad.numpy(), [12, 24])
+        x.grad = None
+        (x * 3).sum().backward()
+        np.testing.assert_array_equal(x.grad.numpy(), [3, 3])
+
+    @pytest.mark.parametrize('reduction', ['none', 'sum', 'mean'])
+    def test_binary_crossentropy_reduction(self, reduction):
+        x, y = Tensor([.2, .7]), Tensor([0., 1.])
+        out = x.binary_crossentropy(y, reduction=reduction)
+        expected = -np.log(np.array([.8, .7], dtype=np.float32))
+        np.testing.assert_allclose(out.numpy(), expected if reduction == 'none' else getattr(expected, reduction)(), rtol=1e-6)
+        out.sum().backward()
+        np.testing.assert_allclose(x.grad.numpy(), np.array([1/.8, -1/.7])/(2 if reduction == 'mean' else 1), rtol=1e-6)
 
 
 class TestPointwiseOwners:

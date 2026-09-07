@@ -165,8 +165,15 @@
     "failure_signature": "source-path-and-message-v2"
   },
   "evidence": {
-    "report": "temp/ops-admission-20260906.TByPzb/unchanged/report.json",
-    "sha256": "9e111d5962ae67c0daf0a5f42ca6c96366ed8cbff05305a81cc79ff6c2b748bd"
+    "report": "temp/indexed-grad-20260907.mlUtk8/upstream-closed/report.json",
+    "sha256": "6e6253e2b795fbd59496610b8617f47c4426255d7db5c8e501d3ec577bdd2690",
+    "followup": {
+      "report": "temp/indexed-grad-20260907.mlUtk8/context-compat/report.json",
+      "sha256": "86e4de8214252d488ce708d789ff2856ae83280a00b6af78c499aa5e1b3083a7",
+      "source_snapshot": "temp/indexed-grad-20260907.mlUtk8/tensor-pre-context.py",
+      "source_diff": "temp/indexed-grad-20260907.mlUtk8/context-ownership.patch",
+      "scope": "Full reports precede only explicit Runtime ownership arguments on Python index/RHS constructors. Final default-context indexing outcomes are unchanged; explicit Runtime regressions and the Tensor suite pass. See results.md for source boundaries."
+    }
   },
   "schema_version": 1,
   "tests": {
@@ -384,16 +391,10 @@
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_gradcheck": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/extra/gradcheck.py:LINE: AttributeError: property 'grad' of 'Tensor' object has no setter",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "The upstream numerical-gradient helper assigns input.grad = None; Polygrad exposes a read-only grad property. The gradient comparison itself has not executed.",
-      "category": "frontend-grad-state"
+      "reason": ""
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_item_to_tensor_to_item": {
       "expected": {
@@ -404,16 +405,10 @@
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_jacobian": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/extra/gradcheck.py:LINE: AttributeError: property 'grad' of 'Tensor' object has no setter",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "The upstream numerical-gradient helper assigns input.grad = None; Polygrad exposes a read-only grad property. The gradient comparison itself has not executed.",
-      "category": "frontend-grad-state"
+      "reason": ""
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_len": {
       "expected": {
@@ -1377,16 +1372,10 @@
     },
     "polygrad:test/backend/test_setitem.py::TestSetitem::test_fancy_setitem": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Tensor.__setitem__ is absent; this case stops before testing assignment semantics.",
-      "category": "frontend-api"
+      "reason": ""
     },
     "polygrad:test/backend/test_setitem.py::TestSetitem::test_jit_setitem_variable_offset": {
       "expected": {
@@ -1410,120 +1399,66 @@
     },
     "polygrad:test/backend/test_setitem.py::TestSetitem::test_padded_setitem": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Tensor.__setitem__ is absent; this case stops before testing assignment semantics.",
-      "category": "frontend-api"
+      "reason": ""
     },
     "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_2d_tensor_indexing": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Tensor.__setitem__ is absent; this case stops before testing assignment semantics.",
-      "category": "frontend-api"
+      "reason": ""
     },
     "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_advanced_indexing": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Tensor.__setitem__ is absent; this case stops before testing assignment semantics.",
-      "category": "frontend-api"
+      "reason": ""
     },
     "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_big": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Tensor.__setitem__ is absent; this case stops before testing assignment semantics.",
-      "category": "frontend-api"
+      "reason": ""
     },
     "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_chained_indexing": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Tensor.__setitem__ is absent; this case stops before testing assignment semantics.",
-      "category": "frontend-api"
+      "reason": ""
     },
     "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_consecutive_inplace_operator": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Tensor.__setitem__ is absent; this case stops before testing assignment semantics.",
-      "category": "frontend-api"
+      "reason": ""
     },
     "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_detach": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Tensor.__setitem__ is absent; this case stops before testing assignment semantics.",
-      "category": "frontend-api"
+      "reason": ""
     },
     "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_dtype": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Tensor.__setitem__ is absent; this case stops before testing assignment semantics.",
-      "category": "frontend-api"
+      "reason": ""
     },
     "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_dtype_mismatch": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Tensor.__setitem__ is absent; this case stops before testing assignment semantics.",
-      "category": "frontend-api"
+      "reason": ""
     },
     "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_fancy_on_unrealized_view": {
       "expected": {
@@ -1540,42 +1475,24 @@
     },
     "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_flip": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Tensor.__setitem__ is absent; this case stops before testing assignment semantics.",
-      "category": "frontend-api"
+      "reason": ""
     },
     "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_inplace_mul": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Tensor.__setitem__ is absent; this case stops before testing assignment semantics.",
-      "category": "frontend-api"
+      "reason": ""
     },
     "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_inplace_operator": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Tensor.__setitem__ is absent; this case stops before testing assignment semantics.",
-      "category": "frontend-api"
+      "reason": ""
     },
     "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_multiple_disjoint_on_invalid": {
       "expected": {
@@ -1592,276 +1509,150 @@
     },
     "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_overlapping_indices": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Tensor.__setitem__ is absent; this case stops before testing assignment semantics.",
-      "category": "frontend-api"
+      "reason": ""
     },
     "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_overlapping_indices_with_0": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Tensor.__setitem__ is absent; this case stops before testing assignment semantics.",
-      "category": "frontend-api"
+      "reason": ""
     },
     "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_overlapping_inplace1": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Tensor.__setitem__ is absent; this case stops before testing assignment semantics.",
-      "category": "frontend-api"
+      "reason": ""
     },
     "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_overlapping_inplace2": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Tensor.__setitem__ is absent; this case stops before testing assignment semantics.",
-      "category": "frontend-api"
+      "reason": ""
     },
     "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_permute": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Tensor.__setitem__ is absent; this case stops before testing assignment semantics.",
-      "category": "frontend-api"
+      "reason": ""
     },
     "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_swap_rows": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Tensor.__setitem__ is absent; this case stops before testing assignment semantics.",
-      "category": "frontend-api"
+      "reason": ""
     },
     "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_tensor_int_indexing": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Tensor.__setitem__ is absent; this case stops before testing assignment semantics.",
-      "category": "frontend-api"
+      "reason": ""
     },
     "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_tensor_slice_indexing": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Tensor.__setitem__ is absent; this case stops before testing assignment semantics.",
-      "category": "frontend-api"
+      "reason": ""
     },
     "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_with_1_in_shape": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Tensor.__setitem__ is absent; this case stops before testing assignment semantics.",
-      "category": "frontend-api"
+      "reason": ""
     },
     "polygrad:test/backend/test_setitem.py::TestSetitem::test_simple_jit_setitem": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Tensor.__setitem__ is absent; this case stops before testing assignment semantics.",
-      "category": "frontend-api"
+      "reason": ""
     },
     "polygrad:test/backend/test_setitem.py::TestSetitem::test_simple_setitem": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Tensor.__setitem__ is absent; this case stops before testing assignment semantics.",
-      "category": "frontend-api"
+      "reason": ""
     },
     "polygrad:test/backend/test_setitem.py::TestSetitemLoop::test_arange": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Tensor.__setitem__ is absent; this case stops before testing assignment semantics.",
-      "category": "frontend-api"
+      "reason": ""
     },
     "polygrad:test/backend/test_setitem.py::TestWithGrad::test_basic_setitem_works": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Tensor.__setitem__ is absent; this case stops before testing assignment semantics.",
-      "category": "frontend-api"
+      "reason": ""
     },
     "polygrad:test/backend/test_setitem.py::TestWithGrad::test_set_backward": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Tensor.__setitem__ is absent; this case stops before testing assignment semantics.",
-      "category": "frontend-api"
+      "reason": ""
     },
     "polygrad:test/backend/test_setitem.py::TestWithGrad::test_set_iadd_backward": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Tensor.__setitem__ is absent; this case stops before testing assignment semantics.",
-      "category": "frontend-api"
+      "reason": ""
     },
     "polygrad:test/backend/test_setitem.py::TestWithGrad::test_set_nonleaf_backward": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Tensor.__setitem__ is absent; this case stops before testing assignment semantics.",
-      "category": "frontend-api"
+      "reason": ""
     },
     "polygrad:test/backend/test_setitem.py::TestWithGrad::test_set_overlapping_backward": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Tensor.__setitem__ is absent; this case stops before testing assignment semantics.",
-      "category": "frontend-api"
+      "reason": ""
     },
     "polygrad:test/backend/test_setitem.py::TestWithGrad::test_set_used_before_setitem": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Tensor.__setitem__ is absent; this case stops before testing assignment semantics.",
-      "category": "frontend-api"
+      "reason": ""
     },
     "polygrad:test/backend/test_setitem.py::TestWithGrad::test_setitem_raises_on_aliased_uop": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Tensor.__setitem__ is absent; this case stops before testing assignment semantics.",
-      "category": "frontend-api"
+      "reason": ""
     },
     "polygrad:test/backend/test_setitem.py::TestWithGrad::test_setitem_raises_on_unrealized_compute_base": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Tensor.__setitem__ is absent; this case stops before testing assignment semantics.",
-      "category": "frontend-api"
+      "reason": ""
     },
     "polygrad:test/backend/test_setitem.py::TestWithGrad::test_setitem_raises_with_unrealized_downstream": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:LINE: TypeError: 'Tensor' object does not support item assignment",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Tensor.__setitem__ is absent; this case stops before testing assignment semantics.",
-      "category": "frontend-api"
+      "reason": ""
     },
     "polygrad:test/backend/test_to_numpy.py::TestToNumpy::test_numpy_is_numpy": {
       "expected": {
@@ -1954,29 +1745,17 @@
     },
     "polygrad:test/null/test_indexing.py::TestIndexing::test_index_src_datatype": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: IndexError: Unsupported index type: <class 'list'>",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "List-based advanced indices are rejected by the frontend; the runner does not rewrite indices.",
-      "category": "frontend-indexing"
+      "reason": ""
     },
     "polygrad:test/null/test_indexing.py::TestIndexing::test_int_indices": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: IndexError: Unsupported index type: <class 'list'>",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "List-based advanced indices are rejected by the frontend; the runner does not rewrite indices.",
-      "category": "frontend-indexing"
+      "reason": ""
     },
     "polygrad:test/null/test_indexing.py::TestIndexing::test_invalid_index": {
       "expected": {
@@ -2015,16 +1794,10 @@
     },
     "polygrad:test/null/test_indexing.py::TestNumpy::test_broaderrors_indexing": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/null/test_indexing.py:LINE: AttributeError: 'Tensor' object has no attribute '__setitem__'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Tensor.__setitem__ is absent; this negative indexing test stops at attribute lookup.",
-      "category": "frontend-api"
+      "reason": ""
     },
     "polygrad:test/null/test_indexing.py::TestNumpy::test_everything_returns_views": {
       "expected": {

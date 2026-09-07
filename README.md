@@ -139,6 +139,16 @@ bounds without changing the graph. Python retains symbolic `shape` values;
 JS `shape` already exposes maximum extents. Full slices and no-op shrink,
 `pad_to`, and empty-axis flip return the original Tensor.
 
+Index reads and writes share the C indexing implementation. Python uses
+`x[indices]` and `x[indices] = value`; JS uses `x.getitem(...indices)` and
+`x.setitem(indices, value)`, with slice objects such as `{start: 1, stop: 7,
+step: 2}`. Use Tensor indices for advanced indexing in JS. Multiple Tensor
+indices broadcast together; duplicate writes keep the last value, including
+zero. Conflicting live computations reject mutation. Advanced indexing and
+strided writes currently require concrete shapes; no host index readback is
+used. `.grad` can be assigned another Tensor or cleared (`None` / `null`).
+Integral-valued float arrays need an explicit float dtype in JS.
+
 Both frontends expose `all`, `any`, `cumsum`, `cumprod`, `cummax`, and `cummin`
 through shared C Tensor operations. `all`/`any` accept axes and `keepdim`;
 scans currently require concrete shapes. Cumulative extrema return
@@ -155,6 +165,8 @@ weights: Python `binary_crossentropy_logits`/`nll_loss`, JS
 `ignore_index` / `ignoreIndex`; its gather path currently requires concrete
 shapes. Both frontends use the same C construction and autograd, not host
 array implementations.
+Ordinary BCE also accepts `none`, `sum`, or `mean`: Python
+`x.binary_crossentropy(y, reduction='sum')`, JS `x.binaryCrossEntropy(y, 'sum')`.
 
 ```text
 Python Tensor API       JavaScript Tensor API       C / native package

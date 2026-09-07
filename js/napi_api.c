@@ -1826,6 +1826,20 @@ static napi_value napi_poly_tensor_isclose(napi_env env, napi_callback_info info
   );
 }
 
+static napi_value napi_poly_tensor_binary_crossentropy(napi_env env, napi_callback_info info) {
+  napi_value argv[4];
+  size_t argc = 4;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  int32_t reduction;
+  NAPI_CALL(env, napi_get_value_int32(env, argv[3], &reduction));
+  return make_external(
+      env, poly_tensor_binary_crossentropy(
+               get_external(env, argv[0]), get_external(env, argv[1]), get_external(env, argv[2]),
+               reduction
+           )
+  );
+}
+
 static napi_value napi_poly_tensor_binary_crossentropy_logits(
     napi_env env,
     napi_callback_info info
@@ -2517,6 +2531,67 @@ static napi_value napi_poly_tensor_gather_dim(napi_env env, napi_callback_info i
           get_external(env, argv[0]), get_external(env, argv[1]), dim, get_external(env, argv[3])
       )
   );
+}
+
+static napi_value napi_tensor_index(napi_env env, napi_callback_info info, bool write) {
+  napi_value argv[9];
+  size_t argc = 9;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != (write ? 9u : 8u)) {
+    napi_throw_type_error(env, NULL, "invalid indexing arguments");
+    return NULL;
+  }
+  int32_t n;
+  NAPI_CALL(env, napi_get_value_int32(env, argv[7], &n));
+  if (n < 0 || n > POLY_MAX_DIMS) {
+    napi_throw_range_error(env, NULL, "too many tensor indices");
+    return NULL;
+  }
+  for (int a = 2; a <= 6; a++) {
+    uint32_t length;
+    NAPI_CALL(env, napi_get_array_length(env, argv[a], &length));
+    if (length != (uint32_t)n) {
+      napi_throw_range_error(env, NULL, "index argument lengths disagree");
+      return NULL;
+    }
+  }
+  int kinds[POLY_MAX_DIMS];
+  int64_t steps[POLY_MAX_DIMS];
+  PolyUOp *starts[POLY_MAX_DIMS], *sizes[POLY_MAX_DIMS];
+  PolyTensor *indices[POLY_MAX_DIMS];
+  for (int i = 0; i < n; i++) {
+    napi_value row[5];
+    for (int a = 0; a < 5; a++)
+      NAPI_CALL(env, napi_get_element(env, argv[a + 2], i, &row[a]));
+    int32_t kind;
+    NAPI_CALL(env, napi_get_value_int32(env, row[0], &kind));
+    kinds[i] = kind;
+    starts[i] = get_external_nullable(env, row[1]);
+    sizes[i] = get_external_nullable(env, row[2]);
+    NAPI_CALL(env, napi_get_value_int64(env, row[3], &steps[i]));
+    indices[i] = get_external_nullable(env, row[4]);
+  }
+  PolyCtx *ctx = get_external(env, argv[0]);
+  PolyTensor *self = get_external(env, argv[1]);
+  if (write) {
+    int rc = poly_tensor_setitem(
+        ctx, self, kinds, starts, sizes, steps, indices, n, get_external(env, argv[8])
+    );
+    napi_value result;
+    NAPI_CALL(env, napi_create_int32(env, rc, &result));
+    return result;
+  }
+  return make_external(
+      env, poly_tensor_getitem(ctx, self, kinds, starts, sizes, steps, indices, n)
+  );
+}
+
+static napi_value napi_poly_tensor_getitem(napi_env env, napi_callback_info info) {
+  return napi_tensor_index(env, info, false);
+}
+
+static napi_value napi_poly_tensor_setitem(napi_env env, napi_callback_info info) {
+  return napi_tensor_index(env, info, true);
 }
 
 static napi_value napi_poly_tensor_index_select(napi_env env, napi_callback_info info) {
@@ -4533,12 +4608,14 @@ static napi_value napi_poly_compose(napi_env env, napi_callback_info info, bool 
   char *json = read_utf8_arg(env, argv[1], &len);
   if (!json) return NULL;
   PolyModelError err = {0};
-  PolyModel *model = len > 1048576 ? NULL : sequential
-      ? poly_sequential_from_json(ctx, json, (int)len, &err)
-      : poly_graph_from_json(ctx, json, (int)len, &err);
+  PolyModel *model = len > 1048576 ? NULL
+                     : sequential  ? poly_sequential_from_json(ctx, json, (int)len, &err)
+                                   : poly_graph_from_json(ctx, json, (int)len, &err);
   free(json);
   if (!model) {
-    napi_throw_error(env, NULL, len > 1048576 ? "definition exceeds 1048576 JSON bytes" : err.message);
+    napi_throw_error(
+        env, NULL, len > 1048576 ? "definition exceeds 1048576 JSON bytes" : err.message
+    );
     return NULL;
   }
   return make_external(env, model);
@@ -6094,7 +6171,10 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_tensor_batchnorm", napi_poly_tensor_batchnorm),
       DECLARE_NAPI_METHOD("poly_tensor_one_hot", napi_poly_tensor_one_hot),
       DECLARE_NAPI_METHOD("poly_tensor_gather_dim", napi_poly_tensor_gather_dim),
+      DECLARE_NAPI_METHOD("poly_tensor_binary_crossentropy", napi_poly_tensor_binary_crossentropy),
       DECLARE_NAPI_METHOD("poly_tensor_index_select", napi_poly_tensor_index_select),
+      DECLARE_NAPI_METHOD("poly_tensor_getitem", napi_poly_tensor_getitem),
+      DECLARE_NAPI_METHOD("poly_tensor_setitem", napi_poly_tensor_setitem),
       DECLARE_NAPI_METHOD("poly_tensor_clone_into", napi_poly_tensor_clone_into),
       DECLARE_NAPI_METHOD("poly_tensor_clone", napi_poly_tensor_clone),
       DECLARE_NAPI_METHOD("poly_tensor_retain", napi_poly_tensor_retain),
