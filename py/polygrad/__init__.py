@@ -219,6 +219,11 @@ def _bound_tensor_class(ctx, runtime):
             return Tensor.full(shape, fill_value, **kwargs)
 
         @staticmethod
+        def invalids(*shape, **kwargs):
+            kwargs.setdefault('_ctx', live_ctx())
+            return Tensor.invalids(*shape, **kwargs)
+
+        @staticmethod
         def arange(start, stop=None, step=1, **kwargs):
             kwargs.setdefault('_ctx', live_ctx())
             return Tensor.arange(start, stop, step, **kwargs)

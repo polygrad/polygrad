@@ -319,7 +319,22 @@ class _IMAGE(ContextVar):
         self._value = value
 
 
+class _CHECK_OOB(ContextVar):
+    @property
+    def value(self):
+        return self._value
+
+    @value.setter
+    def value(self, value):
+        # PG-PARITY-026: uop/spec.py's optional bounds verifier has no C port.
+        # Zero is truthful; a configuration flag must not pretend to verify.
+        if value != 0:
+            raise NotImplementedError('CHECK_OOB bounds verifier is not implemented')
+        self._value = value
+
+
 DEV = _DEV("DEV", "")
+CHECK_OOB = _CHECK_OOB("CHECK_OOB", 0)
 IMAGE = _IMAGE("IMAGE", 0)
 DEBUG = ContextVar("DEBUG", 0)
 BEAM = ContextVar("BEAM", 0)

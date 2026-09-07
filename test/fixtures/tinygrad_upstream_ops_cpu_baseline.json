@@ -45,15 +45,8 @@
     ]
   },
   "evidence": {
-    "report": "temp/indexed-grad-20260907.mlUtk8/ops-closed/report.json",
-    "sha256": "dff6dc087ba83d3bb7e2dc8b3103390601e24763f55592662d56b9cb863cb336",
-    "followup": {
-      "report": "temp/indexed-grad-20260907.mlUtk8/context-compat/report.json",
-      "sha256": "86e4de8214252d488ce708d789ff2856ae83280a00b6af78c499aa5e1b3083a7",
-      "source_snapshot": "temp/indexed-grad-20260907.mlUtk8/tensor-pre-context.py",
-      "source_diff": "temp/indexed-grad-20260907.mlUtk8/context-ownership.patch",
-      "scope": "Full reports precede only explicit Runtime ownership arguments on Python index/RHS constructors. Final default-context indexing outcomes are unchanged; explicit Runtime regressions and the Tensor suite pass. See results.md for source boundaries."
-    }
+    "report": "temp/pooling-resize-20260907.P0xgA4/ops-verified/report.json",
+    "sha256": "fd6aec96ccd52f16ec410b328462826dbd536de7bef4bb9a01d294478fac4190"
   },
   "schema_version": 1,
   "tests": {
@@ -271,134 +264,74 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_avg_pool2d": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'avg_pool2d'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_avg_pool2d_asymmetric_padding": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'avg_pool2d'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_avg_pool2d_ceil_mode": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'avg_pool2d'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_avg_pool2d_ceil_mode_include_pad_output_size_reduce_by_one": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'avg_pool2d'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_avg_pool2d_ceil_mode_output_size_reduce_by_one": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'avg_pool2d'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_avg_pool2d_ceil_mode_padding_not_counted": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'avg_pool2d'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_avg_pool2d_padding": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'avg_pool2d'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_avg_pool2d_padding_not_counted": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'avg_pool2d'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_avg_pool3d": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'avg_pool2d'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_bias_conv_transpose2d": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'conv_transpose2d'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_biased_conv2d": {
       "expected": {
@@ -831,17 +764,11 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_dilated_conv_transpose2d": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'conv_transpose2d'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_div": {
       "expected": {
@@ -1168,17 +1095,11 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_global_avg_pool2d": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'avg_pool2d'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_grouped_conv2d": {
       "expected": {
@@ -1188,17 +1109,11 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_grouped_conv_transpose2d": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'conv_transpose2d'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_hardsigmoid": {
       "expected": {
@@ -1257,108 +1172,60 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_interpolate_bilinear": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'interpolate'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_interpolate_bilinear_corners_aligned": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'interpolate'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_interpolate_linear": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'interpolate'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_interpolate_linear_corners_aligned": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'interpolate'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_interpolate_nearest": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'interpolate'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_interpolate_nearest_exact": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'interpolate'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_interpolate_trilinear": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'interpolate'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_interpolate_trilinear_corners_aligned": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'interpolate'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_isclose": {
       "expected": {
@@ -1714,30 +1581,18 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_max_pool2d_ceil_mode": {
-      "category": "frontend-capability",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: NotImplementedError: max_pool2d ceil_mode is not implemented in Polygrad yet",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Explicitly unsupported padding/pooling mode; not emulated by the runner."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_max_pool2d_ceil_mode_output_size_reduce_by_one": {
-      "category": "frontend-capability",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: NotImplementedError: max_pool2d ceil_mode is not implemented in Polygrad yet",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Explicitly unsupported padding/pooling mode; not emulated by the runner."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_max_pool2d_dilation": {
       "expected": {
@@ -1754,30 +1609,18 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_max_pool2d_padding_int": {
-      "category": "runtime-untriaged",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: RuntimeError: poly_realize_tensors failed for device(s): CPU",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Observed C-path failure; frontend construction versus core ownership is not yet diagnosed."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_max_pool2d_return_indices": {
-      "category": "frontend-capability",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: NotImplementedError: max_pool2d return_indices is not implemented in Polygrad yet",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Explicitly unsupported padding/pooling mode; not emulated by the runner."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_max_pool2d_simple": {
       "expected": {
@@ -1801,30 +1644,18 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_max_unpool2d": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'max_unpool2d'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_max_unpool2d_inf": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'max_unpool2d'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_maximum": {
       "expected": {
@@ -2138,17 +1969,11 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_output_padded_conv_transpose2d": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'conv_transpose2d'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_pad": {
       "category": "frontend-api",
@@ -2252,17 +2077,11 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_padded_conv_transpose2d": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'conv_transpose2d'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_padding_add": {
       "expected": {
@@ -2734,30 +2553,18 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_simple_conv_transpose2d": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'conv_transpose2d'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_simple_conv_transpose3d": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'conv_transpose2d'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_simple_cummax": {
       "expected": {
@@ -3316,17 +3123,11 @@
       "reason": "Unchanged pinned CPU skip; not a pass."
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_strided_conv_transpose2d": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'conv_transpose2d'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_sub": {
       "expected": {
@@ -3653,43 +3454,25 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOpsUint8::test_interpolate_bilinear": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'interpolate'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOpsUint8::test_interpolate_nearest": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'interpolate'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOpsUint8::test_interpolate_nearest_exact": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'interpolate'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOpsUint8::test_min": {
       "expected": {

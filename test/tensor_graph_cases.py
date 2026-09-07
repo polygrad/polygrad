@@ -2269,6 +2269,50 @@ for _kind in ('scalar', 'paired', 'separated', 'permuted', 'mixed_list', 'symbol
     CASES[f'indexed_owner_{_kind}'] = ('tensor', lambda k=_kind: indexed_owner_graph(k))
 
 
+def spatial_owner_graph(kind, dtype='float32'):
+    if kind == 'unpool':
+        x = Tensor.empty(1, 2, 2, 3, dtype=dtype, device='CPU').realize()
+        indices = Tensor.empty(1, 2, 2, 3, dtype='int32', device='CPU').realize()
+        out = x.max_unpool2d(indices, stride=(3, 2), padding=(1, 0), output_size=(8, 7))
+    elif kind in ('resize_empty', 'resize_singleton'):
+        out = Tensor.empty(3, dtype=dtype, device='CPU').realize().interpolate(
+            (0 if kind == 'resize_empty' else 1,), align_corners=True)
+    elif kind.startswith('avg') or kind.startswith('max'):
+        x = Tensor.empty(1, 2, 3, 5, dtype=dtype, device='CPU').realize()
+        args = dict(kernel_size=(2, 2), stride=(2, 3), padding=(1, 0, 0, 1), ceil_mode='ceil' in kind)
+        if kind.startswith('avg'):
+            out = x.avg_pool2d(**args, count_include_pad='exclude' not in kind)
+        else:
+            out, index = x.max_pool2d(**args, return_indices=True)
+            if 'index' in kind: out = index
+    elif kind.startswith('resize'):
+        x = Tensor.empty(1, 1, 3, 4, dtype=dtype, device='CPU').realize()
+        mode = 'linear' if 'linear' in kind else 'nearest-exact' if 'exact' in kind else 'nearest'
+        out = x.interpolate((5, 2), mode=mode, align_corners='align' in kind)
+    elif kind.startswith('transpose'):
+        x = Tensor.empty(1, 2, 3, 4, dtype=dtype, device='CPU').realize()
+        w = Tensor.empty(2, 1, 2, 3, dtype=dtype, device='CPU').realize()
+        bias = Tensor.empty(2, dtype=dtype, device='CPU').realize()
+        args = dict(groups=2, stride=(2, 1), dilation=(1, 2), padding=(1, 0, 0, 1), output_padding=(1, 0))
+        if kind == 'transpose_short': args['output_padding'] = (1,)
+        if kind == 'transpose_extra': args['output_padding'] = (1, 0, 3)
+        if kind == 'transpose_unused_stride': args['stride'] = ()
+        out = x.conv_transpose2d(w, bias, **args)
+    else:
+        out = Tensor.invalids(2, 3, dtype=dtype, device='CPU')
+    return {'physical': out.uop, 'logical': logical(out)}
+
+
+for _kind in ('unpool', 'resize_empty', 'resize_singleton', 'avg', 'avg_exclude', 'avg_ceil', 'avg_ceil_exclude', 'max', 'max_index', 'max_ceil', 'max_ceil_index',
+              'resize_linear', 'resize_linear_align', 'resize_nearest', 'resize_exact', 'transpose', 'transpose_short',
+              'transpose_extra', 'transpose_unused_stride', 'invalids'):
+    CASES[f'spatial_owner_{_kind}'] = ('tensor', lambda k=_kind: spatial_owner_graph(k))
+for _kind in ('avg', 'avg_ceil_exclude', 'max_index', 'resize_linear', 'transpose', 'invalids'):
+    for _dtype in ('float16', 'int32'):
+        CASES[f'spatial_owner_{_kind}_{_dtype}'] = ('tensor', lambda k=_kind, d=_dtype: spatial_owner_graph(k, d))
+CASES['spatial_owner_resize_uint8'] = ('tensor', lambda: spatial_owner_graph('resize_linear', 'uint8'))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--case", action="append", choices=sorted(CASES))

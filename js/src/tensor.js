@@ -2794,23 +2794,88 @@ function createBoundTensorClass(runtime) {
       return this._makeResultFromCore(core, [this])
     }
 
-    maxPool2d(kernelSize = [2, 2], opts = {}) {
-      if (typeof opts !== 'object' || Array.isArray(opts)) opts = { stride: opts }
-      if (opts.ceilMode || opts.ceil_mode) {
-        throw new Error('maxPool2d ceil_mode is not implemented in Polygrad yet')
-      }
-      if (opts.returnIndices || opts.return_indices) {
-        throw new Error('maxPool2d return_indices is not implemented in Polygrad yet')
-      }
+    _pool2dArgs(kernelSize, opts) {
       const k = makeTuple(kernelSize, 2)
       const stride = opts.stride == null ? k : makeTuple(opts.stride, k.length)
       const dilation = opts.dilation == null ? makeTuple(1, k.length) : makeTuple(opts.dilation, k.length)
+      if (stride.length !== k.length || dilation.length !== k.length) throw new Error('stride/dilation mismatch')
       const padding = resolvePoolPads(opts.padding == null ? 0 : opts.padding, k.length)
+      return [this._ctx, this._tensor, k, k.length, stride, dilation, padding, padding.length]
+    }
+
+    maxPool2d(kernelSize = [2, 2], opts = {}) {
+      if (typeof opts !== 'object' || Array.isArray(opts)) opts = { stride: opts }
+      const indices = Boolean(opts.returnIndices || opts.return_indices)
       const core = this._rt._core.ffi.poly_tensor_max_pool2d(
-        this._ctx, this._tensor, k, k.length, stride, dilation, padding, padding.length
-      )
+        ...this._pool2dArgs(kernelSize, opts), Boolean(opts.ceilMode || opts.ceil_mode), indices)
       if (!core) throw new Error('poly_max_pool2d failed')
+      if (indices) return core.map(ptr => this._makeResultFromCore(ptr, [this]))
       return this._makeResultFromCore(core, [this])
+    }
+
+    avgPool2d(kernelSize = [2, 2], opts = {}) {
+      if (typeof opts !== 'object' || Array.isArray(opts)) opts = { stride: opts }
+      const core = this._rt._core.ffi.poly_tensor_avg_pool2d(
+        ...this._pool2dArgs(kernelSize, opts), Boolean(opts.ceilMode || opts.ceil_mode),
+        Boolean(opts.countIncludePad ?? opts.count_include_pad ?? true))
+      if (!core) throw new Error('poly_avg_pool2d failed')
+      return this._makeResultFromCore(core, [this])
+    }
+
+    avg_pool2d(kernelSize = [2, 2], stride = null, dilation = 1, padding = 0, ceilMode = false, countIncludePad = true) {
+      return this.avgPool2d(kernelSize, { stride, dilation, padding, ceilMode, countIncludePad })
+    }
+
+    maxUnpool2d(indices, kernelSize = [2, 2], opts = {}) {
+      const [ctx, tensor, k, nk, s, d, p, np] = this._pool2dArgs(kernelSize, opts)
+      const output = opts.outputSize ?? opts.output_size ?? []
+      const core = this._rt._core.ffi.poly_tensor_max_unpool2d(ctx, tensor, indices._tensor, k, nk, s, d, p, np, output, output.length)
+      if (!core) throw new Error('poly_max_unpool2d failed')
+      return this._makeResultFromCore(core, [this, indices])
+    }
+
+    max_unpool2d(indices, kernelSize = [2, 2], stride = null, dilation = 1, padding = 0, outputSize = null) {
+      return this.maxUnpool2d(indices, kernelSize, { stride, dilation, padding, outputSize })
+    }
+
+    interpolate(size, opts = {}) {
+      if (typeof opts === 'string') opts = { mode: opts }
+      const mode = opts.mode ?? 'linear', align = Boolean(opts.alignCorners ?? opts.align_corners)
+      if (!Array.isArray(size) || size.length < 1 || size.length > this.ndim || !size.every(Number.isSafeInteger)) {
+        throw new Error('invalid interpolate size')
+      }
+      if (!['linear', 'nearest', 'nearest-exact'].includes(mode) || (align && mode !== 'linear')) {
+        throw new Error('interpolate supports linear, nearest, nearest-exact; alignCorners requires linear')
+      }
+      const core = this._rt._core.ffi.poly_tensor_interpolate(this._ctx, this._tensor, size, size.length, mode, align)
+      if (!core) throw new Error('poly_interpolate failed')
+      return this._makeResultFromCore(core, [this])
+    }
+
+    convTranspose2d(weight, bias = null, opts = {}) {
+      if (!(weight instanceof Tensor)) weight = this._ensureTensor(weight)
+      if (bias !== null && !(bias instanceof Tensor)) bias = this._ensureTensor(bias)
+      const n = weight.ndim - 2
+      let stride = makeTuple(opts.stride ?? 1, n)
+      const dilation = makeTuple(opts.dilation ?? 1, n)
+      if (dilation.length !== n) throw new Error('stride/dilation mismatch')
+      // Only inserting strides are consumed by the pin; normalize unused
+      // short/extra tuples before passing fixed-length C arrays.
+      if (stride.some(s => s > 1)) {
+        if (stride.length !== n) throw new Error('stride length mismatch')
+      } else stride = makeTuple(1, n)
+      const padding = resolvePoolPads(opts.padding ?? 0, n)
+      const op = makeTuple(opts.outputPadding ?? opts.output_padding ?? 0, n).slice(0, n)
+      if (!op.length) throw new Error('output_padding must not be empty')
+      const core = this._rt._core.ffi.poly_tensor_conv_transpose2d(
+        this._ctx, this._tensor, weight._tensor, bias ? bias._tensor : null, opts.groups ?? 1,
+        stride, dilation, padding, padding.length, op, op.length)
+      if (!core) throw new Error('poly_conv_transpose2d failed')
+      return this._makeResultFromCore(core, bias ? [this, weight, bias] : [this, weight])
+    }
+
+    conv_transpose2d(weight, bias = null, groups = 1, stride = 1, dilation = 1, padding = 0, outputPadding = 0) {
+      return this.convTranspose2d(weight, bias, { groups, stride, dilation, padding, outputPadding })
     }
 
     max_pool2d(kernelSize, stride, dilation, padding, ceilMode, returnIndices) {
@@ -3459,6 +3524,22 @@ function createBoundTensorClass(runtime) {
       )
       if (!tensor) throw new Error('C-owned Tensor.eye construction failed')
       return new Tensor(null, {_ctx: ctx, _tensor: tensor, _dtype: dtype, _device: device})
+    }
+
+    static invalids(...args) {
+      let opts = {}, shape = args
+      if (args.length && typeof args[args.length - 1] === 'object' && !Array.isArray(args[args.length - 1])) {
+        opts = args[args.length - 1]; shape = args.slice(0, -1)
+      }
+      if (shape.length === 1 && Array.isArray(shape[0])) shape = shape[0]
+      rejectRequiresGrad(opts)
+      const ctx = opts._ctx || liveCore().ctx
+      const dtype = opts.dtype || 'bool', dtypeId = DTYPE_ID[dtype]
+      if (dtypeId === undefined) throw new Error(`unsupported dtype: ${dtype}`)
+      const device = normalizeDevice(opts._device || opts.device || _runtime.device || 'cpu')
+      const tensor = ffi.poly_tensor_full_invalid_by_id(ctx, shape, shape.length, dtypeId, deviceId(device), true)
+      if (!tensor) throw new Error('C-owned Tensor.invalids construction failed')
+      return new Tensor(null, { _ctx: ctx, _tensor: tensor, _dtype: dtype, _device: device })
     }
 
     static empty(...args) {

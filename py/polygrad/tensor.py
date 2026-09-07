@@ -14,7 +14,7 @@ from typing import cast as cast
 import numpy as np
 
 from . import _ffi
-from .dtype import INVERSE_DTYPES_DICT, _from_np_dtype, _to_np_dtype, dtypes, least_upper_dtype, least_upper_float, strong_dtype, to_dtype
+from .dtype import INVERSE_DTYPES_DICT, Invalid, _from_np_dtype, _to_np_dtype, dtypes, least_upper_dtype, least_upper_float, strong_dtype, to_dtype
 from polygrad.uop.ops import UOp
 from polygrad.device import Buffer
 from polygrad.helpers import TRAINING, _logical_policy_name, _logical_state_name, _normalize_logical_policy
@@ -2978,29 +2978,78 @@ class Tensor:
     def sequential(self, ll):
         return functools.reduce(lambda x, f: f(x), ll, self)
 
-    def max_pool2d(self, kernel_size=(2, 2), stride=None, dilation=1, padding=0,
-                   ceil_mode=False, return_indices=False):
-        if ceil_mode:
-            raise NotImplementedError('max_pool2d ceil_mode is not implemented in Polygrad yet')
-        if return_indices:
-            raise NotImplementedError('max_pool2d return_indices is not implemented in Polygrad yet')
+    def _pool2d_args(self, kernel_size, stride, dilation, padding):
         k = _make_tuple(kernel_size, 2)
         s = k if stride is None else _make_tuple(stride, len(k))
         d = _make_tuple(dilation, len(k))
+        assert len(k) == len(s) == len(d), f'stride/dilation mismatch kernel:{k} stride:{s} dilation:{d}'
         pads = _resolve_pool_pads(padding, len(k))
         k_arr, nk = _int64_array(k)
         s_arr, _ = _int64_array(s)
         d_arr, _ = _int64_array(d)
         p_arr, npad = _int64_array(pads)
+        return self._ctx, self._tensor, k_arr, nk, s_arr, d_arr, p_arr, npad
+
+    def max_pool2d(self, kernel_size=(2, 2), stride=None, dilation=1, padding=0,
+                   ceil_mode=False, return_indices=False):
+        indices = ctypes.c_void_p()
         core = _ffi._lib.poly_tensor_max_pool2d(
-            self._ctx, self._tensor, k_arr, nk, s_arr, d_arr, p_arr, npad
-        )
+            *self._pool2d_args(kernel_size, stride, dilation, padding),
+            bool(ceil_mode), ctypes.byref(indices) if return_indices else None)
         if not core:
             raise RuntimeError('poly_max_pool2d failed')
         current = self._core_uop_raw(core)
-        return self._make_result_from_core(
-            core, _shape_from_uop(self._ctx, current), [self]
-        )
+        shape = _shape_from_uop(self._ctx, current)
+        out = self._make_result_from_core(core, shape, [self])
+        return (out, self._make_result_from_core(indices.value, shape, [self])) if return_indices else out
+
+    def avg_pool2d(self, kernel_size=(2, 2), stride=None, dilation=1, padding=0,
+                   ceil_mode=False, count_include_pad=True):
+        core = _ffi._lib.poly_tensor_avg_pool2d(
+            *self._pool2d_args(kernel_size, stride, dilation, padding), bool(ceil_mode), bool(count_include_pad))
+        if not core:
+            raise RuntimeError('poly_avg_pool2d failed')
+        return self._make_result_from_core(core, _shape_from_uop(self._ctx, self._core_uop_raw(core)), [self])
+
+    def interpolate(self, size, mode='linear', align_corners=False):
+        assert isinstance(size, (tuple, list)) and all(isinstance(x, int) for x in size) and 0 < len(size) <= self.ndim, f'invalid size={size}'
+        assert mode in ('linear', 'nearest', 'nearest-exact'), 'only supports linear, nearest or nearest-exact interpolate'
+        assert not (align_corners and mode != 'linear'), 'align_corners option can only be set with the interpolating mode linear'
+        sizes, n = _int64_array(size)
+        core = _ffi._lib.poly_tensor_interpolate(self._ctx, self._tensor, sizes, n, mode.encode(), bool(align_corners))
+        if not core:
+            raise RuntimeError('poly_interpolate failed')
+        return self._make_result_from_core(core, _shape_from_uop(self._ctx, self._core_uop_raw(core)), [self])
+
+    def max_unpool2d(self, indices, kernel_size=(2, 2), stride=None, dilation=1, padding=0, output_size=None):
+        ctx, tensor, k, nk, s, d, p, npad = self._pool2d_args(kernel_size, stride, dilation, padding)
+        output, n = _int64_array(()) if output_size is None else _int64_array(output_size)
+        core = _ffi._lib.poly_tensor_max_unpool2d(ctx, tensor, indices._tensor, k, nk, s, d, p, npad, output, n)
+        if not core: raise RuntimeError('poly_max_unpool2d failed')
+        return self._make_result_from_core(core, _shape_from_uop(self._ctx, self._core_uop_raw(core)), [self, indices])
+
+    def conv_transpose2d(self, weight, bias=None, groups=1, stride=1, dilation=1, padding=0, output_padding=0):
+        if not isinstance(weight, Tensor): weight = self._ensure_tensor(weight)
+        if bias is not None and not isinstance(bias, Tensor): bias = self._ensure_tensor(bias)
+        nk = len(weight.shape) - 2
+        strides, dilations = _make_tuple(stride, nk), _make_tuple(dilation, nk)
+        assert len(dilations) == nk, 'stride/dilation mismatch'
+        # The pin only consumes stride when inserting spaces. C always needs
+        # nk readable entries; unused short/extra tuples normalize to ones.
+        if any(s > 1 for s in strides):
+            if len(strides) != nk: raise ValueError('stride length mismatch')
+        else: strides = (1,) * nk
+        output = _make_tuple(output_padding, nk)[:nk]
+        if not output: raise ValueError('output_padding must not be empty')
+        s, _ = _int64_array(strides)
+        d, _ = _int64_array(dilations)
+        p, npad = _int64_array(_resolve_pool_pads(padding, nk))
+        op, nop = _int64_array(output)
+        core = _ffi._lib.poly_tensor_conv_transpose2d(self._ctx, self._tensor, weight._tensor,
+                bias._tensor if bias is not None else None, int(groups), s, d, p, npad, op, nop)
+        if not core: raise RuntimeError('poly_conv_transpose2d failed')
+        return self._make_result_from_core(core, _shape_from_uop(self._ctx, self._core_uop_raw(core)),
+                                          [self, weight] + ([] if bias is None else [bias]))
 
     def conv2d(self, weight, bias=None, groups=1, stride=1, dilation=1, padding=0, dtype=None):
         if not isinstance(weight, Tensor):
@@ -3306,7 +3355,10 @@ class Tensor:
         dims, ndim, _ = _shape_arg(shape)
 
         dt = to_dtype(dtype_name)
-        if dtypes.is_float(dt):
+        if fill_value is Invalid:
+            tensor = _ffi._lib.poly_tensor_full_invalid_by_id(
+                ctx, dims, ndim, dtype_id, _device_id(dev), buffer)
+        elif dtypes.is_float(dt):
             tensor = _ffi._lib.poly_tensor_full_float_by_id(
                 ctx, dims, ndim, float(fill_value), dtype_id, _device_id(dev),
                 dtype_explicit, buffer,
@@ -3490,6 +3542,10 @@ class Tensor:
         return _created_tensor(
             ctx, tensor, dtype_name, dev, 'poly_tensor_eye_by_id'
         )
+
+    @staticmethod
+    def invalids(*shape, **kwargs):
+        return Tensor.full(_shape_tuple(*shape), Invalid, **kwargs)
 
     @staticmethod
     def empty(*shape, **kwargs):

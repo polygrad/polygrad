@@ -1441,7 +1441,8 @@ static PolyTensor *build_logical_policy_conv_oracle(PolyCtx *ctx, PolyLogicalPol
       conv && mean && invstd && scale && bias
           ? poly_tensor_batchnorm(ctx, conv, scale, bias, mean, invstd, channel_axis, 1)
           : NULL;
-  return bn ? poly_tensor_max_pool2d(ctx, bn, pool_kernel, 2, NULL, NULL, NULL, 0) : NULL;
+  return bn ? poly_tensor_max_pool2d(ctx, bn, pool_kernel, 2, NULL, NULL, NULL, 0, false, NULL)
+            : NULL;
 }
 
 TEST(tensor, logical_never_conv_batchnorm_pool_keep_physical_graph_and_values_exact) {
@@ -4138,6 +4139,88 @@ TEST(pe, tensor_einsum_builds_both_roots_from_exact_occurrences) {
   for (int i = 0; i < 4; i++)
     ASSERT_FLOAT_EQ(values[i], expected[i], 1e-5f);
 
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tensor, spatial_owners_pooling_lifetime_and_arguments) {
+  for (int logical = 0; logical < 2; logical++) {
+    PolyCtx *ctx = poly_ctx_new(), *other = poly_ctx_new();
+    poly_ctx_set_logical_policy(ctx, logical ? POLY_LOGICAL_ALWAYS : POLY_LOGICAL_NEVER);
+    PolyTensor *x =
+        poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){1, 1, 3, 3}, 4, POLY_DEVICE_INTERP);
+    float data[] = {1, 2, 3, 4, 5, 6, 7, 8, 9};
+    ASSERT_INT_EQ(poly_buffer_write(ctx, poly_uop_base(x->uop_physical), data, sizeof(data)), 0);
+    int64_t k[] = {2, 2};
+    PolyTensor *indices = NULL;
+    PolyTensor *max = poly_tensor_max_pool2d(ctx, x, k, 2, NULL, NULL, NULL, 0, true, &indices);
+    PolyTensor *avg = poly_tensor_avg_pool2d(ctx, x, k, 2, NULL, NULL, NULL, 0, true, true);
+    ASSERT_NOT_NULL(max);
+    ASSERT_NOT_NULL(indices);
+    ASSERT_NOT_NULL(avg);
+    ASSERT_INT_EQ(max->uop_logical != NULL, logical);
+    ASSERT_INT_EQ(indices->uop_logical != NULL, logical);
+    ASSERT_PTR_EQ(poly_tensor_avg_pool2d(other, x, k, 2, NULL, NULL, NULL, 0, false, true), NULL);
+    ASSERT_PTR_EQ(
+        poly_tensor_avg_pool2d(ctx, x, (int64_t[]){0, 2}, 2, NULL, NULL, NULL, 0, false, true), NULL
+    );
+    poly_tensor_release(x);
+    poly_ctx_collect(ctx);
+    float got[4];
+    ASSERT_INT_EQ(read_tensor_f32(ctx, max, got, 4), 0);
+    ASSERT_FLOAT_EQ(got[0], 5, 0);
+    ASSERT_FLOAT_EQ(got[3], 9, 0);
+    ASSERT_INT_EQ(read_tensor_f32(ctx, avg, got, 4), 0);
+    ASSERT_FLOAT_EQ(got[0], 3, 0);
+    ASSERT_FLOAT_EQ(got[1], 4.5, 0);
+    PolyTensor *idx_float = poly_tensor_cast_by_id(ctx, indices, 12);
+    ASSERT_INT_EQ(read_tensor_f32(ctx, idx_float, got, 4), 0);
+    ASSERT_FLOAT_EQ(got[0], 4, 0);
+    ASSERT_FLOAT_EQ(got[3], 8, 0);
+    poly_tensor_release(idx_float);
+    poly_tensor_release(indices);
+    poly_tensor_release(max);
+    poly_tensor_release(avg);
+    poly_ctx_collect(ctx);
+    poly_ctx_destroy(other);
+    poly_ctx_destroy(ctx);
+  }
+  PASS();
+}
+
+TEST(tensor, spatial_owners_invalid_const_and_storage_dtype) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyTensor *x =
+      poly_tensor_full_invalid_by_id(ctx, (int64_t[]){2, 3}, 2, 12, POLY_DEVICE_INTERP, true);
+  ASSERT_NOT_NULL(x);
+  ASSERT_TRUE(poly_dtype_eq(x->uop_physical->dtype, POLY_FLOAT32));
+  ASSERT_INT_EQ(x->uop_physical->op, POLY_OP_AFTER);
+  PolyUOp *value = poly_uop_base(x->uop_physical->src[1]->src[1]);
+  ASSERT_INT_EQ(value->op, POLY_OP_CONST);
+  ASSERT_INT_EQ(value->arg.kind, POLY_ARG_INVALID);
+  ASSERT_TRUE(poly_dtype_eq(value->dtype, POLY_BOOL));
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tensor, spatial_owners_transpose_short_output_padding) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyTensor *x =
+      poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){1, 1, 3, 3}, 4, POLY_DEVICE_INTERP);
+  PolyTensor *w =
+      poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){1, 1, 2, 2}, 4, POLY_DEVICE_INTERP);
+  int64_t output_padding[] = {1};
+  /* Only one readable element: ASan detects accidental spatial-rank reads. */
+  PolyTensor *out =
+      poly_tensor_conv_transpose2d(ctx, x, w, NULL, 1, NULL, NULL, NULL, 0, output_padding, 1);
+  ASSERT_NOT_NULL(out);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, out->uop_physical), 4);
+  const int64_t *shape = poly_uop_max_shape_dims(ctx, out->uop_physical);
+  ASSERT_INT_EQ(shape[2], 4);
+  ASSERT_INT_EQ(shape[3], 6);
+  ASSERT_PTR_EQ(
+      poly_tensor_conv_transpose2d(ctx, x, w, NULL, 1, NULL, NULL, NULL, 0, output_padding, 0), NULL
+  );
   poly_ctx_destroy(ctx);
   PASS();
 }

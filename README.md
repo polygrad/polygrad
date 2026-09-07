@@ -149,6 +149,20 @@ strided writes currently require concrete shapes; no host index readback is
 used. `.grad` can be assigned another Tensor or cleared (`None` / `null`).
 Integral-valued float arrays need an explicit float dtype in JS.
 
+Spatial operations also share C construction: Python `avg_pool2d`,
+`max_pool2d`, `max_unpool2d`, `interpolate`, and `conv_transpose2d`; JS
+`avgPool2d`, `maxPool2d`, `maxUnpool2d`, `interpolate`, and `convTranspose2d`.
+Pooling supports ceil mode, excluded padding for averages, and optional max
+indices. Interpolation supports `linear`, `nearest`, and `nearest-exact`.
+These spatial builders currently require concrete input shapes.
+`Tensor.invalids(..., dtype=...)` (JS: `Tensor.invalids(shape, {dtype})`)
+creates anonymous storage through the existing Invalid graph sentinel; read
+only regions that have been written. This is not zero initialization.
+
+Python accepts `Context(CHECK_OOB=0)`. Nonzero values raise: the optional
+Tinygrad compiler bounds verifier is not implemented (`PG-PARITY-026`).
+This is separate from Tensor index and shape validation.
+
 Both frontends expose `all`, `any`, `cumsum`, `cumprod`, `cummax`, and `cummin`
 through shared C Tensor operations. `all`/`any` accept axes and `keepdim`;
 scans currently require concrete shapes. Cumulative extrema return

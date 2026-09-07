@@ -142,6 +142,7 @@ static PolyTensor *tensor_full_from_value(
     const int64_t *dims,
     int ndim,
     PolyDevice device,
+    PolyDType dtype,
     bool dtype_explicit,
     bool buffer
 ) {
@@ -149,10 +150,11 @@ static PolyTensor *tensor_full_from_value(
   if (!buffer)
     return poly_tensor_create_with_roots(ctx, value_uop, value_uop, POLY_TENSOR_VALUE, device);
 
-  /* Inferred weak values cross empty_like(None) and commit a width.  An
+  /* Storage dtype is distinct from the value's dtype (Invalid is always bool).
+   * Inferred weak values cross empty_like(None) and commit a width. An
    * explicitly requested weak dtype crosses UOp.new_buffer and fails instead
    * (tinygrad/mixin/creation.py:61-85, tinygrad/uop/ops.py:814-827). */
-  PolyDType storage_dtype = dtype_explicit ? value_uop->dtype : poly_dtype_strong(value_uop->dtype);
+  PolyDType storage_dtype = dtype_explicit ? dtype : poly_dtype_strong(dtype);
   PolyTensor *out = poly_tensor_empty(ctx, storage_dtype, dims, ndim, device);
   if (!out) return NULL;
   bool build_logical = poly_ctx_get_logical_policy(ctx) != POLY_LOGICAL_NEVER;
@@ -186,8 +188,23 @@ PolyTensor *poly_tensor_full_int_by_id(
 ) {
   PolyUOp *value_uop = poly_full_int_by_id(ctx, dims, ndim, value, dtype_id);
   return tensor_full_from_value(
-      ctx, value_uop, dims, ndim, (PolyDevice)device_id, dtype_explicit, buffer
+      ctx, value_uop, dims, ndim, (PolyDevice)device_id, value_uop ? value_uop->dtype : POLY_VOID,
+      dtype_explicit, buffer
   );
+}
+
+PolyTensor *poly_tensor_full_invalid_by_id(
+    PolyCtx *ctx,
+    const int64_t *dims,
+    int ndim,
+    int dtype_id,
+    int device_id,
+    bool buffer
+) {
+  PolyDType dtype;
+  if (!poly_dtype_by_id(dtype_id, &dtype)) return NULL;
+  PolyUOp *value = poly_full_invalid_by_id(ctx, dims, ndim, dtype_id);
+  return tensor_full_from_value(ctx, value, dims, ndim, (PolyDevice)device_id, dtype, true, buffer);
 }
 
 PolyTensor *poly_tensor_full_float_by_id(
@@ -202,7 +219,8 @@ PolyTensor *poly_tensor_full_float_by_id(
 ) {
   PolyUOp *value_uop = poly_full_float_by_id(ctx, dims, ndim, value, dtype_id);
   return tensor_full_from_value(
-      ctx, value_uop, dims, ndim, (PolyDevice)device_id, dtype_explicit, buffer
+      ctx, value_uop, dims, ndim, (PolyDevice)device_id, value_uop ? value_uop->dtype : POLY_VOID,
+      dtype_explicit, buffer
   );
 }
 

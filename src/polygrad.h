@@ -1137,6 +1137,8 @@ PolyTensor *poly_tensor_pool(
     const int64_t *stride,
     const int64_t *dilation
 );
+/* Optional indices receives a separately owned Tensor handle. Failure leaves
+ * it NULL; values and indices follow the input's logical-retention policy. */
 PolyTensor *poly_tensor_max_pool2d(
     PolyCtx *ctx,
     PolyTensor *src,
@@ -1145,7 +1147,55 @@ PolyTensor *poly_tensor_max_pool2d(
     const int64_t *stride,
     const int64_t *dilation,
     const int64_t *padding,
-    int n_padding
+    int n_padding,
+    bool ceil_mode,
+    PolyTensor **indices
+);
+PolyTensor *poly_tensor_avg_pool2d(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    const int64_t *kernel,
+    int n_kernel,
+    const int64_t *stride,
+    const int64_t *dilation,
+    const int64_t *padding,
+    int n_padding,
+    bool ceil_mode,
+    bool count_include_pad
+);
+PolyTensor *poly_tensor_interpolate(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    const int64_t *size,
+    int n_size,
+    const char *mode,
+    bool align_corners
+);
+PolyTensor *poly_tensor_max_unpool2d(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    PolyTensor *indices,
+    const int64_t *kernel,
+    int n_kernel,
+    const int64_t *stride,
+    const int64_t *dilation,
+    const int64_t *padding,
+    int n_padding,
+    const int64_t *output_size,
+    int n_output
+);
+PolyTensor *poly_tensor_conv_transpose2d(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    PolyTensor *weight,
+    PolyTensor *bias,
+    int groups,
+    const int64_t *stride,
+    const int64_t *dilation,
+    const int64_t *padding,
+    int n_padding,
+    const int64_t *output_padding,
+    int n_output_padding
 );
 PolyTensor *poly_tensor_conv2d(
     PolyCtx *ctx,

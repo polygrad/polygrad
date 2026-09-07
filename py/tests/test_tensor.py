@@ -2693,6 +2693,131 @@ class TestReduce:
 
 
 
+class TestSpatialOwners:
+    @pytest.mark.parametrize('logical', ['never', 'always'])
+    def test_spatial_explicit_runtime_ownership(self, logical):
+        runtime = Runtime(logical=logical)
+        try:
+            T = runtime.Tensor
+            x = T([[[[1., 2.], [3., 4.]]]])
+            state = T.invalids(4, dtype='float32')
+            assert state._ctx == x._ctx == runtime._ctx
+            results = [x.avg_pool2d(), x.interpolate((3, 3)),
+                       x.conv_transpose2d(T([[[[1.]]]]))]
+            maximum, index = x.max_pool2d(return_indices=True)
+            results.extend([maximum, index, maximum.max_unpool2d(index)])
+            for result in results:
+                assert result._ctx == runtime._ctx
+                assert (result.uop_logical is not None) == (logical == 'always')
+            state[:] = 2
+            np.testing.assert_array_equal(state.numpy(), [2] * 4)
+        finally:
+            runtime.dispose()
+
+    def test_interpolate_empty_and_aligned_singleton(self):
+        # Pinned linear align_corners divides by size-1: a singleton is NaN,
+        # not a silently substituted nearest sample; zero output stays empty.
+        x = Tensor([1., 3., 7.])
+        assert np.isnan(x.interpolate((1,), align_corners=True).item())
+        for align in (False, True):
+            out = x.interpolate((0,), align_corners=align)
+            assert out.shape == (0,)
+            assert out.tolist() == []
+
+    def test_pool_zero_stride_rejects_without_process_signal(self):
+        probe = 'from polygrad import Tensor\ntry: Tensor.empty(3)._pool((2,), stride=0)\nexcept (RuntimeError, ZeroDivisionError): pass\nelse: raise AssertionError("zero stride accepted")'
+        result = subprocess.run([sys.executable, '-c', probe], capture_output=True, text=True)
+        assert result.returncode == 0, (result.returncode, result.stderr)
+
+    @pytest.mark.parametrize('ceil', [False, True])
+    @pytest.mark.parametrize('include', [False, True])
+    def test_average_pool_padding_and_gradient(self, ceil, include):
+        x = Tensor(np.arange(1, 10, dtype=np.float32).reshape(1, 1, 3, 3))
+        y = x.avg_pool2d((2, 2), stride=2, padding=(1, 0, 0, 1),
+                         ceil_mode=ceil, count_include_pad=include)
+        y.sum().backward()
+        expected = [1.25, 4, 1.75, 4.25] if include else [2.5, 4, 7, 8.5]
+        grad = [0.25] * 9 if include else [0.5, 0.25, 0.25, 0.5, 0.25, 0.25, 1, 0.5, 0.5]
+        np.testing.assert_allclose(y.numpy().ravel(), expected)
+        np.testing.assert_allclose(x.grad.numpy().ravel(), grad)
+
+    def test_pool_ceil_window_and_indices(self):
+        x = Tensor(np.arange(1, 10, dtype=np.float32).reshape(1, 1, 3, 3))
+        np.testing.assert_allclose(x.avg_pool2d(ceil_mode=True).numpy().ravel(), [3, 4.5, 7.5, 9])
+        values, indices = x.max_pool2d(ceil_mode=True, return_indices=True)
+        np.testing.assert_array_equal(values.numpy().ravel(), [5, 6, 8, 9])
+        np.testing.assert_array_equal(indices.numpy().ravel(), [4, 5, 7, 8])
+        tied = Tensor([[[[2., 2.], [2., 2.]]]])
+        values, indices = tied.max_pool2d(return_indices=True)
+        assert indices.item() == 0
+        values.sum().backward()
+        np.testing.assert_array_equal(tied.grad.numpy().ravel(), [0.25] * 4)
+
+    @pytest.mark.parametrize('mode,align,expected,grad', [
+        ('linear', False, [1, 1.8, 3, 5.4, 7], [1.6, 1.8, 1.6]),
+        ('linear', True, [1, 2, 3, 5, 7], [1.5, 2, 1.5]),
+        ('nearest', False, [1, 1, 3, 3, 7], [2, 2, 1]),
+        ('nearest-exact', False, [1, 1, 3, 7, 7], [2, 1, 2]),
+    ])
+    def test_interpolation_values_and_gradients(self, mode, align, expected, grad):
+        x = Tensor([[[1., 3., 7.]]])
+        y = x.interpolate((5,), mode=mode, align_corners=align)
+        y.sum().backward()
+        np.testing.assert_allclose(y.numpy().ravel(), expected, rtol=1e-6)
+        np.testing.assert_allclose(x.grad.numpy().ravel(), grad, rtol=1e-6)
+
+    def test_transpose_convolution_groups_stride_dilation_and_gradient(self):
+        x = Tensor([[[1., 2., 3.], [4., 5., 6.]]])
+        w = Tensor([[[1., 2.]], [[3., 4.]]])
+        y = x.conv_transpose2d(w, groups=2, stride=2, dilation=2, padding=1, output_padding=1)
+        y.sum().backward()
+        np.testing.assert_allclose(y.numpy(), [[[0, 4, 0, 7, 0, 6], [0, 31, 0, 38, 0, 24]]])
+        np.testing.assert_allclose(x.grad.numpy(), [[[2, 3, 3], [4, 7, 7]]])
+
+    def test_invalid_storage_disjoint_writes(self):
+        x = Tensor.invalids(6, dtype='int32').realize()
+        x[1:3], x[4:5] = 7, 9
+        np.testing.assert_array_equal(x[1:3].numpy(), [7, 7])
+        np.testing.assert_array_equal(x[4:5].numpy(), [9])
+        # Unwritten anonymous bytes have no defined value and must not be read.
+
+    def test_max_unpool_preserves_negative_infinity(self):
+        x = Tensor([[[[-float('inf'), 2.], [3., 4.]]]])
+        indices = Tensor([[[[0, 1], [2, 3]]]], dtype='int32')
+        y = x.max_unpool2d(indices, kernel_size=(1, 1))
+        np.testing.assert_array_equal(y.numpy(), x.numpy())
+        pooled, idx = Tensor([[[[1., 2.], [3., 4.]]]]).max_pool2d(return_indices=True)
+        np.testing.assert_array_equal(pooled.max_unpool2d(idx).numpy().ravel(), [0, 0, 0, 4])
+        assert pooled.max_unpool2d(idx, output_size=(1, 1, 3, 3)).shape == (1, 1, 3, 3)
+
+    def test_spatial_argument_admission(self):
+        x = Tensor.ones(1, 1, 3, 3)
+        with pytest.raises((ValueError, RuntimeError)):
+            x.avg_pool2d(padding=(1, 1, 1))
+        with pytest.raises(AssertionError):
+            x.interpolate((2, 2), mode='cubic')
+        with pytest.raises(AssertionError):
+            x.interpolate((2, 2), mode='nearest', align_corners=True)
+        with pytest.raises(AssertionError, match='stride/dilation mismatch'):
+            x.avg_pool2d(stride=(1,))
+        with pytest.raises(AssertionError, match='stride/dilation mismatch'):
+            x.max_pool2d(dilation=(1,))
+
+    def test_transpose_convolution_dimension_array_admission(self):
+        x, w = Tensor.ones(1, 1, 3, 3), Tensor.ones(1, 1, 2, 2)
+        with pytest.raises(AssertionError, match='stride/dilation mismatch'):
+            x.conv_transpose2d(w, dilation=(1,))
+        with pytest.raises(ValueError, match='stride'):
+            x.conv_transpose2d(w, stride=(2,))
+        with pytest.raises(ValueError, match='output_padding'):
+            x.conv_transpose2d(w, output_padding=())
+        # The pin ignores non-inserting stride lengths and extra output padding;
+        # a short output-padding tuple still follows resolve_pool_pads.
+        assert x.conv_transpose2d(w, stride=()).shape == (1, 1, 4, 4)
+        assert x.conv_transpose2d(w, output_padding=(1,)).shape == (1, 1, 4, 6)
+        assert x.conv_transpose2d(w, output_padding=(1, 1, 1)).shape == (1, 1, 5, 5)
+
+
 class TestIndexedOwners:
     @pytest.mark.parametrize('logical', ['never', 'always'])
     def test_index_temporaries_use_explicit_runtime(self, logical):

@@ -2430,9 +2430,9 @@ static napi_value napi_poly_tensor_pool(napi_env env, napi_callback_info info) {
   );
 }
 
-static napi_value napi_poly_tensor_max_pool2d(napi_env env, napi_callback_info info) {
-  napi_value argv[8];
-  size_t argc = 8;
+static napi_value napi_tensor_pool2d(napi_env env, napi_callback_info info, bool average) {
+  napi_value argv[10];
+  size_t argc = 10;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   int64_t kernel[POLY_MAX_DIMS], stride[POLY_MAX_DIMS], dilation[POLY_MAX_DIMS];
   int64_t padding[2 * POLY_MAX_DIMS];
@@ -2443,11 +2443,117 @@ static napi_value napi_poly_tensor_max_pool2d(napi_env env, napi_callback_info i
   read_int64_array(env, argv[5], dilation, POLY_MAX_DIMS);
   read_int64_array(env, argv[6], padding, 2 * POLY_MAX_DIMS);
   napi_get_value_int32(env, argv[7], &n_padding);
+  bool ceil_mode = false, option = false;
+  NAPI_CALL(env, napi_get_value_bool(env, argv[8], &ceil_mode));
+  NAPI_CALL(env, napi_get_value_bool(env, argv[9], &option));
+  PolyTensor *indices = NULL;
+  PolyTensor *values =
+      average ? poly_tensor_avg_pool2d(
+                    get_external(env, argv[0]), get_external(env, argv[1]), kernel, n_kernel,
+                    stride, dilation, padding, n_padding, ceil_mode, option
+                )
+              : poly_tensor_max_pool2d(
+                    get_external(env, argv[0]), get_external(env, argv[1]), kernel, n_kernel,
+                    stride, dilation, padding, n_padding, ceil_mode, option ? &indices : NULL
+                );
+  return !average && option && values ? make_external_pair(env, values, indices)
+                                      : make_external(env, values);
+}
+
+static napi_value napi_poly_tensor_max_pool2d(napi_env env, napi_callback_info info) {
+  return napi_tensor_pool2d(env, info, false);
+}
+
+static napi_value napi_poly_tensor_avg_pool2d(napi_env env, napi_callback_info info) {
+  return napi_tensor_pool2d(env, info, true);
+}
+
+static napi_value napi_poly_tensor_max_unpool2d(napi_env env, napi_callback_info info) {
+  napi_value argv[11];
+  size_t argc = 11;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  int64_t kernel[POLY_MAX_DIMS], stride[POLY_MAX_DIMS], dilation[POLY_MAX_DIMS];
+  int64_t padding[2 * POLY_MAX_DIMS], output[POLY_MAX_DIMS];
+  int32_t nk = 0, np = 0, no = 0;
+  NAPI_CALL(env, napi_get_value_int32(env, argv[4], &nk));
+  NAPI_CALL(env, napi_get_value_int32(env, argv[8], &np));
+  NAPI_CALL(env, napi_get_value_int32(env, argv[10], &no));
+  read_int64_array(env, argv[3], kernel, POLY_MAX_DIMS);
+  read_int64_array(env, argv[5], stride, POLY_MAX_DIMS);
+  read_int64_array(env, argv[6], dilation, POLY_MAX_DIMS);
+  read_int64_array(env, argv[7], padding, 2 * POLY_MAX_DIMS);
+  read_int64_array(env, argv[9], output, POLY_MAX_DIMS);
   return make_external(
-      env, poly_tensor_max_pool2d(
-               get_external(env, argv[0]), get_external(env, argv[1]), kernel, n_kernel, stride,
-               dilation, padding, n_padding
+      env, poly_tensor_max_unpool2d(
+               get_external(env, argv[0]), get_external(env, argv[1]), get_external(env, argv[2]),
+               kernel, nk, stride, dilation, padding, np, output, no
            )
+  );
+}
+
+static napi_value napi_poly_tensor_interpolate(napi_env env, napi_callback_info info) {
+  napi_value argv[6];
+  size_t argc = 6;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  int64_t size[POLY_MAX_DIMS];
+  int32_t n = 0;
+  bool align = false;
+  char mode[32];
+  NAPI_CALL(env, napi_get_value_int32(env, argv[3], &n));
+  if (read_int64_array(env, argv[2], size, POLY_MAX_DIMS) != n) {
+    napi_throw_range_error(env, NULL, "polygrad: interpolate size length mismatch");
+    return NULL;
+  }
+  NAPI_CALL(env, napi_get_value_string_utf8(env, argv[4], mode, sizeof(mode), NULL));
+  NAPI_CALL(env, napi_get_value_bool(env, argv[5], &align));
+  return make_external(
+      env, poly_tensor_interpolate(
+               get_external(env, argv[0]), get_external(env, argv[1]), size, n, mode, align
+           )
+  );
+}
+
+static napi_value napi_poly_tensor_conv_transpose2d(napi_env env, napi_callback_info info) {
+  napi_value argv[11];
+  size_t argc = 11;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  int64_t stride[POLY_MAX_DIMS], dilation[POLY_MAX_DIMS], padding[2 * POLY_MAX_DIMS],
+      output_padding[POLY_MAX_DIMS];
+  int32_t groups = 0, n_padding = 0, n_output_padding = 0;
+  NAPI_CALL(env, napi_get_value_int32(env, argv[4], &groups));
+  NAPI_CALL(env, napi_get_value_int32(env, argv[8], &n_padding));
+  NAPI_CALL(env, napi_get_value_int32(env, argv[10], &n_output_padding));
+  read_int64_array(env, argv[5], stride, POLY_MAX_DIMS);
+  read_int64_array(env, argv[6], dilation, POLY_MAX_DIMS);
+  read_int64_array(env, argv[7], padding, 2 * POLY_MAX_DIMS);
+  read_int64_array(env, argv[9], output_padding, POLY_MAX_DIMS);
+  return make_external(
+      env, poly_tensor_conv_transpose2d(
+               get_external(env, argv[0]), get_external(env, argv[1]), get_external(env, argv[2]),
+               get_external_nullable(env, argv[3]), groups, stride, dilation, padding, n_padding,
+               output_padding, n_output_padding
+           )
+  );
+}
+
+static napi_value napi_poly_tensor_full_invalid_by_id(napi_env env, napi_callback_info info) {
+  napi_value argv[6];
+  size_t argc = 6;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  int64_t dims[POLY_MAX_DIMS];
+  int32_t n = 0, dtype = 0, device = 0;
+  bool buffer = true;
+  NAPI_CALL(env, napi_get_value_int32(env, argv[2], &n));
+  NAPI_CALL(env, napi_get_value_int32(env, argv[3], &dtype));
+  NAPI_CALL(env, napi_get_value_int32(env, argv[4], &device));
+  NAPI_CALL(env, napi_get_value_bool(env, argv[5], &buffer));
+  if (read_int64_array(env, argv[1], dims, POLY_MAX_DIMS) != n) {
+    napi_throw_range_error(env, NULL, "polygrad: invalids shape length mismatch");
+    return NULL;
+  }
+  return make_external(
+      env,
+      poly_tensor_full_invalid_by_id(get_external(env, argv[0]), dims, n, dtype, device, buffer)
   );
 }
 
@@ -6166,6 +6272,11 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_tensor_pad_value_float", napi_poly_tensor_pad_value_float),
       DECLARE_NAPI_METHOD("poly_tensor_pool", napi_poly_tensor_pool),
       DECLARE_NAPI_METHOD("poly_tensor_max_pool2d", napi_poly_tensor_max_pool2d),
+      DECLARE_NAPI_METHOD("poly_tensor_avg_pool2d", napi_poly_tensor_avg_pool2d),
+      DECLARE_NAPI_METHOD("poly_tensor_max_unpool2d", napi_poly_tensor_max_unpool2d),
+      DECLARE_NAPI_METHOD("poly_tensor_interpolate", napi_poly_tensor_interpolate),
+      DECLARE_NAPI_METHOD("poly_tensor_conv_transpose2d", napi_poly_tensor_conv_transpose2d),
+      DECLARE_NAPI_METHOD("poly_tensor_full_invalid_by_id", napi_poly_tensor_full_invalid_by_id),
       DECLARE_NAPI_METHOD("poly_tensor_conv2d", napi_poly_tensor_conv2d),
       DECLARE_NAPI_METHOD("poly_tensor_conv2d_dtype_by_id", napi_poly_tensor_conv2d_dtype_by_id),
       DECLARE_NAPI_METHOD("poly_tensor_batchnorm", napi_poly_tensor_batchnorm),

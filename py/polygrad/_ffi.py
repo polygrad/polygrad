@@ -16,7 +16,7 @@ import sys
 _lib = None
 OPS = {}
 _has_cuda_ffi = False
-POLYGRAD_ABI_VERSION = 68
+POLYGRAD_ABI_VERSION = 69
 
 # --- Opaque pointer type (always available) ---
 _ptr = ctypes.c_void_p
@@ -1078,8 +1078,24 @@ def _declare_signatures(lib):
 
     lib.poly_tensor_max_pool2d.restype = _ptr
     lib.poly_tensor_max_pool2d.argtypes = [
-        _ptr, _ptr, _i64p, ctypes.c_int, _i64p, _i64p, _i64p, ctypes.c_int,
+        _ptr, _ptr, _i64p, ctypes.c_int, _i64p, _i64p, _i64p, ctypes.c_int, ctypes.c_bool, ctypes.POINTER(_ptr),
     ]
+    lib.poly_tensor_avg_pool2d.restype = _ptr
+    lib.poly_tensor_avg_pool2d.argtypes = [
+        _ptr, _ptr, _i64p, ctypes.c_int, _i64p, _i64p, _i64p, ctypes.c_int, ctypes.c_bool, ctypes.c_bool,
+    ]
+    lib.poly_tensor_interpolate.restype = _ptr
+    lib.poly_tensor_max_unpool2d.restype = _ptr
+    lib.poly_tensor_max_unpool2d.argtypes = [
+        _ptr, _ptr, _ptr, _i64p, ctypes.c_int, _i64p, _i64p, _i64p, ctypes.c_int, _i64p, ctypes.c_int,
+    ]
+    lib.poly_tensor_interpolate.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int, ctypes.c_char_p, ctypes.c_bool]
+    lib.poly_tensor_conv_transpose2d.restype = _ptr
+    lib.poly_tensor_conv_transpose2d.argtypes = [
+        _ptr, _ptr, _ptr, _ptr, ctypes.c_int, _i64p, _i64p, _i64p, ctypes.c_int, _i64p, ctypes.c_int,
+    ]
+    lib.poly_tensor_full_invalid_by_id.restype = _ptr
+    lib.poly_tensor_full_invalid_by_id.argtypes = [_ptr, _i64p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_bool]
 
     lib.poly_tensor_conv2d.restype = _ptr
     lib.poly_tensor_conv2d.argtypes = [

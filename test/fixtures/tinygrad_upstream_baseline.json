@@ -165,15 +165,8 @@
     "failure_signature": "source-path-and-message-v2"
   },
   "evidence": {
-    "report": "temp/indexed-grad-20260907.mlUtk8/upstream-closed/report.json",
-    "sha256": "6e6253e2b795fbd59496610b8617f47c4426255d7db5c8e501d3ec577bdd2690",
-    "followup": {
-      "report": "temp/indexed-grad-20260907.mlUtk8/context-compat/report.json",
-      "sha256": "86e4de8214252d488ce708d789ff2856ae83280a00b6af78c499aa5e1b3083a7",
-      "source_snapshot": "temp/indexed-grad-20260907.mlUtk8/tensor-pre-context.py",
-      "source_diff": "temp/indexed-grad-20260907.mlUtk8/context-ownership.patch",
-      "scope": "Full reports precede only explicit Runtime ownership arguments on Python index/RHS constructors. Final default-context indexing outcomes are unchanged; explicit Runtime regressions and the Tensor suite pass. See results.md for source boundaries."
-    }
+    "report": "temp/pooling-resize-20260907.P0xgA4/upstream-verified/report.json",
+    "sha256": "4f98f25be35dc33be4de58320e724351576c5943bb77da54a6c425a6f8096a8c"
   },
   "schema_version": 1,
   "tests": {
@@ -1379,16 +1372,10 @@
     },
     "polygrad:test/backend/test_setitem.py::TestSetitem::test_jit_setitem_variable_offset": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/helpers.py:LINE: KeyError: 'CHECK_OOB'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Context does not register CHECK_OOB; no substitute context variable is installed by the runner.",
-      "category": "frontend-context"
+      "reason": ""
     },
     "polygrad:test/backend/test_setitem.py::TestSetitem::test_lazy_sum_between_writes": {
       "expected": {
@@ -1496,16 +1483,10 @@
     },
     "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_multiple_disjoint_on_invalid": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_setitem.py:LINE: AttributeError: type object 'Tensor' has no attribute 'invalids'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Tensor.invalids is absent; this case stops before exercising invalid-storage assignment.",
-      "category": "frontend-api"
+      "reason": ""
     },
     "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_overlapping_indices": {
       "expected": {
@@ -2019,55 +2000,55 @@
     },
     "polygrad:test/unit/test_linalg.py::TestLinAlg::test_svd_nonfull_2_2": {
       "expected": {
+        "status": "failed",
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/py/polygrad/helpers.py:LINE: KeyError: 'CHECK_OOB'",
+            "detail": "<reference>/test/unit/test_linalg.py:LINE: AttributeError: 'Tensor' object has no attribute 'svd'",
             "outcome": "failed"
           }
-        },
-        "status": "failed"
+        }
       },
-      "reason": "Context does not register CHECK_OOB; no substitute context variable is installed by the runner.",
-      "category": "frontend-context"
+      "category": "frontend-api",
+      "reason": "CHECK_OOB=0 now admits the body, which stops at missing Tensor.svd. SVD numerical assertions remain unexecuted."
     },
     "polygrad:test/unit/test_linalg.py::TestLinAlg::test_svd_nonfull_2_2_2_2_3": {
       "expected": {
+        "status": "failed",
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/py/polygrad/helpers.py:LINE: KeyError: 'CHECK_OOB'",
+            "detail": "<reference>/test/unit/test_linalg.py:LINE: AttributeError: 'Tensor' object has no attribute 'svd'",
             "outcome": "failed"
           }
-        },
-        "status": "failed"
+        }
       },
-      "reason": "Context does not register CHECK_OOB; no substitute context variable is installed by the runner.",
-      "category": "frontend-context"
+      "category": "frontend-api",
+      "reason": "CHECK_OOB=0 now admits the body, which stops at missing Tensor.svd. SVD numerical assertions remain unexecuted."
     },
     "polygrad:test/unit/test_linalg.py::TestLinAlg::test_svd_nonfull_3_5": {
       "expected": {
+        "status": "failed",
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/py/polygrad/helpers.py:LINE: KeyError: 'CHECK_OOB'",
+            "detail": "<reference>/test/unit/test_linalg.py:LINE: AttributeError: 'Tensor' object has no attribute 'svd'",
             "outcome": "failed"
           }
-        },
-        "status": "failed"
+        }
       },
-      "reason": "Context does not register CHECK_OOB; no substitute context variable is installed by the runner.",
-      "category": "frontend-context"
+      "category": "frontend-api",
+      "reason": "CHECK_OOB=0 now admits the body, which stops at missing Tensor.svd. SVD numerical assertions remain unexecuted."
     },
     "polygrad:test/unit/test_linalg.py::TestLinAlg::test_svd_nonfull_5_3": {
       "expected": {
+        "status": "failed",
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/py/polygrad/helpers.py:LINE: KeyError: 'CHECK_OOB'",
+            "detail": "<reference>/test/unit/test_linalg.py:LINE: AttributeError: 'Tensor' object has no attribute 'svd'",
             "outcome": "failed"
           }
-        },
-        "status": "failed"
+        }
       },
-      "reason": "Context does not register CHECK_OOB; no substitute context variable is installed by the runner.",
-      "category": "frontend-context"
+      "category": "frontend-api",
+      "reason": "CHECK_OOB=0 now admits the body, which stops at missing Tensor.svd. SVD numerical assertions remain unexecuted."
     },
     "polygrad:test/unit/test_linalg.py::TestLinAlg::test_svd_rank1": {
       "expected": {

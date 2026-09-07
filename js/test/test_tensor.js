@@ -4625,6 +4625,96 @@ async function runTensorTests(pg) {
     ])
   })
 
+  await test('spatial owners average pooling padding and gradient', async () => {
+    for (const ceilMode of [false, true]) for (const countIncludePad of [false, true]) {
+      const x = new Tensor([[[[1, 2, 3], [4, 5, 6], [7, 8, 9]]]], { dtype: 'float32' })
+      const y = x.avgPool2d([2, 2], { stride: 2, padding: [1, 0, 0, 1], ceilMode, countIncludePad })
+      y.sum().backward()
+      assertClose(await y.toArray(), countIncludePad ? [1.25, 4, 1.75, 4.25] : [2.5, 4, 7, 8.5])
+      assertClose(await x.grad.toArray(), countIncludePad ? Array(9).fill(0.25) : [0.5, 0.25, 0.25, 0.5, 0.25, 0.25, 1, 0.5, 0.5])
+    }
+  })
+  await test('spatial owners max pooling ceil and indices', async () => {
+    const x = new Tensor([[[[1, 2, 3], [4, 5, 6], [7, 8, 9]]]], { dtype: 'float32' })
+    const [values, indices] = x.maxPool2d([2, 2], { ceilMode: true, returnIndices: true })
+    assertClose(await values.toArray(), [5, 6, 8, 9])
+    assertClose(await indices.toArray(), [4, 5, 7, 8])
+    assertClose(await x.avgPool2d([2, 2], { ceilMode: true }).toArray(), [3, 4.5, 7.5, 9])
+  })
+  await test('spatial owners interpolation values and gradients', async () => {
+    for (const [mode, alignCorners, expected, grad] of [
+      ['linear', false, [1, 1.8, 3, 5.4, 7], [1.6, 1.8, 1.6]],
+      ['linear', true, [1, 2, 3, 5, 7], [1.5, 2, 1.5]],
+      ['nearest', false, [1, 1, 3, 3, 7], [2, 2, 1]],
+      ['nearest-exact', false, [1, 1, 3, 7, 7], [2, 1, 2]],
+    ]) {
+      const x = new Tensor([[[1, 3, 7]]], { dtype: 'float32' })
+      const y = x.interpolate([5], { mode, alignCorners })
+      y.sum().backward()
+      assertClose(await y.toArray(), expected)
+      assertClose(await x.grad.toArray(), grad)
+    }
+  })
+  await test('spatial owners transpose convolution groups and gradient', async () => {
+    const x = new Tensor([[[1, 2, 3], [4, 5, 6]]], { dtype: 'float32' })
+    const w = new Tensor([[[1, 2]], [[3, 4]]], { dtype: 'float32' })
+    const y = x.convTranspose2d(w, null, { groups: 2, stride: 2, dilation: 2, padding: 1, outputPadding: 1 })
+    y.sum().backward()
+    assertClose(await y.toArray(), [0, 4, 0, 7, 0, 6, 0, 31, 0, 38, 0, 24])
+    assertClose(await x.grad.toArray(), [2, 3, 3, 4, 7, 7])
+  })
+  await test('spatial owners invalid storage disjoint writes', async () => {
+    const x = Tensor.invalids([6], { dtype: 'int32' })
+    await x.realize()
+    x.setitem([{ start: 1, stop: 3 }], 7)
+    x.setitem([{ start: 4, stop: 5 }], 9)
+    assertClose(await x.getitem({ start: 1, stop: 3 }).toArray(), [7, 7])
+    assertClose(await x.getitem({ start: 4, stop: 5 }).toArray(), [9])
+  })
+  await test('spatial owners interpolation empty and singleton', async () => {
+    const x = new Tensor([1, 3, 7], { dtype: 'float32' })
+    const singleton = await x.interpolate([1], { alignCorners: true }).toArray()
+    assert(Number.isNaN(singleton[0]))
+    for (const alignCorners of [false, true]) {
+      const out = x.interpolate([0], { alignCorners })
+      assertShape(out.shape, [0])
+      assert((await out.toArray()).length === 0)
+    }
+  })
+  await test('spatial owners unpool negative infinity and output size', async () => {
+    const x = new Tensor([[[[-Infinity, 2], [3, 4]]]], { dtype: 'float32' })
+    const idx = new Tensor([[[[0, 1], [2, 3]]]], { dtype: 'int32' })
+    const got = await x.maxUnpool2d(idx, [1, 1]).toArray()
+    assert(got[0] === -Infinity)
+    assertClose(got.slice(1), [2, 3, 4])
+    const y = new Tensor([[[[1, 2], [3, 4]]]], { dtype: 'float32' })
+    const [value, index] = y.maxPool2d([2, 2], { returnIndices: true })
+    assertClose(await value.maxUnpool2d(index).toArray(), [0, 0, 0, 4])
+    assertShape(value.maxUnpool2d(index, [2, 2], { outputSize: [1, 1, 3, 3] }).shape, [1, 1, 3, 3])
+  })
+  await test('spatial owners reject malformed dimension arrays', async () => {
+    const x = Tensor.ones([1, 1, 3, 3])
+    for (const make of [() => x.avgPool2d([2, 2], { stride: [1] }),
+                        () => x.maxPool2d([2, 2], { dilation: [1] })]) {
+      let error
+      try { make() } catch (e) { error = e }
+      assert(error && /stride\/dilation mismatch/.test(error.message))
+    }
+  })
+
+  await test('spatial owners transpose dimension array admission', async () => {
+    const x = Tensor.ones([1, 1, 3, 3]), w = Tensor.ones([1, 1, 2, 2])
+    for (const [opts, pattern] of [[{ dilation: [1] }, /stride\/dilation mismatch/],
+                                 [{ stride: [2] }, /stride/], [{ outputPadding: [] }, /output_padding/]]) {
+      let error
+      try { x.convTranspose2d(w, null, opts) } catch (e) { error = e }
+      assert(error && pattern.test(error.message))
+    }
+    assertShape(x.convTranspose2d(w, null, { stride: [] }).shape, [1, 1, 4, 4])
+    assertShape(x.convTranspose2d(w, null, { outputPadding: [1] }).shape, [1, 1, 4, 6])
+    assertShape(x.convTranspose2d(w, null, { outputPadding: [1, 1, 1] }).shape, [1, 1, 5, 5])
+  })
+
   console.log(`\nResults: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + failed + skipped} total`)
   return { passed, failed, skipped }
 }

@@ -37,6 +37,17 @@ from polygrad.helpers import (
 )
 
 
+def test_check_oob_zero_and_unsupported_enable_restore_context():
+    with Context(CHECK_OOB=0):
+        assert helpers.CHECK_OOB.value == 0
+    old = helpers.DEBUG.value
+    with pytest.raises(NotImplementedError, match='bounds verifier'):
+        with Context(DEBUG=old + 1, CHECK_OOB=1):
+            pytest.fail('unsupported verification must not be silently enabled')
+    assert helpers.DEBUG.value == old
+    assert helpers.CHECK_OOB.value == 0
+
+
 def test_prod_matches_tinygrad_empty_generator_and_mixed_numeric_semantics():
     assert prod(()) == 1
     assert prod(value for value in (2, 3, 4)) == 24

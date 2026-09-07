@@ -13,7 +13,7 @@
 
 /* Public C/frontend ABI version. Bump when exported symbols or public struct
  * layouts used by frontends change. */
-#define POLYGRAD_ABI_VERSION 68
+#define POLYGRAD_ABI_VERSION 69
 
 /* Current ElementwiseMixin._binop for language UOp operators. Compiler
  * matchers keep using raw poly_alu2. */
@@ -61,6 +61,15 @@ PolyTensor *poly_tensor_from_host_by_id(
 );
 PolyTensor *poly_tensor_const_int_by_id(PolyCtx *ctx, int64_t value, int dtype_id, int device_id);
 PolyTensor *poly_tensor_const_float_by_id(PolyCtx *ctx, double value, int dtype_id, int device_id);
+PolyUOp *poly_full_invalid_by_id(PolyCtx *ctx, const int64_t *dims, int ndim, int dtype_id);
+PolyTensor *poly_tensor_full_invalid_by_id(
+    PolyCtx *ctx,
+    const int64_t *dims,
+    int ndim,
+    int dtype_id,
+    int device_id,
+    bool buffer
+);
 PolyTensor *poly_tensor_const_like_int(PolyCtx *ctx, PolyTensor *ref, int64_t value);
 PolyTensor *poly_tensor_const_like_float(PolyCtx *ctx, PolyTensor *ref, double value);
 PolyTensor *poly_tensor_full_int_by_id(

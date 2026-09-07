@@ -696,6 +696,26 @@
         "temp/shape-storage-audit-20260906.VUymUD/default-dtype-probe.log"
       ],
       "close_when": "Carry supported default-dtype configuration through the existing dtype/core owners, inventory related strong-dtype and promotion consumers, and verify non-default exact lowering plus frontend execution. Do not add a weak-lowering-only environment override."
+    },
+    {
+      "id": "PG-PARITY-026",
+      "status": "open_debt",
+      "stages": ["lowered"],
+      "area": "optional compiler index bounds verification",
+      "vocabulary": {"tinygrad_only": [], "polygrad_only": []},
+      "tinygrad": "CHECK_OOB enables uop/spec.py validate_index, using interval bounds and optional Z3 validation for final memory indices",
+      "polygrad": "C validates index types/shapes but has no equivalent bounds verifier; Python accepts CHECK_OOB=0 and rejects nonzero values explicitly",
+      "rationale": "A disabled configuration must remain usable without falsely advertising enabled compiler verification. Tensor indexing admission is a separate contract.",
+      "approval": null,
+      "evidence": [
+        "references/tinygrad_latest/tinygrad/uop/spec.py:validate_index",
+        "references/tinygrad_latest/tinygrad/uop/validate.py",
+        "src/uop/spec.c:verify_shared_uop",
+        "py/polygrad/helpers.py:_CHECK_OOB",
+        "py/tests/test_helpers.py:test_check_oob_zero_and_unsupported_enable_restore_context",
+        "temp/pooling-resize-20260907.P0xgA4/correspondence.md"
+      ],
+      "close_when": "Port optional final-index bounds validation in its core spec owner, compare valid/masked/OOB cases with pinned Tinygrad, and expose only supported configuration. Do not treat the disabled flag or Tensor bounds checks as verifier closure."
     }
   ]
 }

@@ -923,6 +923,11 @@ function createWasmCoreFromModule(Module, device) {
         if (dimsPtr) Module._free(dimsPtr)
       }
     },
+    poly_tensor_full_invalid_by_id: (ctx, shape, ndim, dtype, device, buffer) => {
+      const ptr = writeInt64Array(shape)
+      try { return Module._poly_tensor_full_invalid_by_id(ctx, ptr, ndim, dtype, device, buffer ? 1 : 0) }
+      finally { if (ptr) Module._free(ptr) }
+    },
     poly_tensor_arange_int_by_id: (ctx, start, stop, step, dtypeId, targetDevice) =>
       Module._poly_tensor_arange_int_by_id(
         ctx, BigInt(start), BigInt(stop), BigInt(step), dtypeId, targetDevice
@@ -1235,22 +1240,53 @@ function createWasmCoreFromModule(Module, device) {
       }
     },
     poly_tensor_max_pool2d: (
-      ctx, tensor, kernel, nKernel, stride, dilation, padding, nPadding
+      ctx, tensor, kernel, nKernel, stride, dilation, padding, nPadding, ceilMode, returnIndices
     ) => {
       const kernelPtr = writeInt64Array(kernel)
       const stridePtr = writeInt64Array(stride)
       const dilationPtr = writeInt64Array(dilation)
       const paddingPtr = writeInt64Array(padding)
+      const indexPtr = returnIndices ? Module._malloc(4) : 0
       try {
-        return Module._poly_tensor_max_pool2d(
-          ctx, tensor, kernelPtr, nKernel, stridePtr, dilationPtr, paddingPtr, nPadding
+        if (indexPtr) heap32()[indexPtr >> 2] = 0
+        const values = Module._poly_tensor_max_pool2d(
+          ctx, tensor, kernelPtr, nKernel, stridePtr, dilationPtr, paddingPtr, nPadding,
+          ceilMode ? 1 : 0, indexPtr
         )
+        return values && returnIndices ? [values, heap32()[indexPtr >> 2] >>> 0] : values
       } finally {
+        if (indexPtr) Module._free(indexPtr)
         if (kernelPtr) Module._free(kernelPtr)
         if (stridePtr) Module._free(stridePtr)
         if (dilationPtr) Module._free(dilationPtr)
         if (paddingPtr) Module._free(paddingPtr)
       }
+    },
+    poly_tensor_avg_pool2d: (ctx, tensor, kernel, nKernel, stride, dilation, padding, nPadding, ceilMode, countIncludePad) => {
+      const kp = writeInt64Array(kernel), sp = writeInt64Array(stride)
+      const dp = writeInt64Array(dilation), pp = writeInt64Array(padding)
+      try {
+        return Module._poly_tensor_avg_pool2d(ctx, tensor, kp, nKernel, sp, dp, pp, nPadding, ceilMode ? 1 : 0, countIncludePad ? 1 : 0)
+      } finally {
+        for (const ptr of [kp, sp, dp, pp]) if (ptr) Module._free(ptr)
+      }
+    },
+    poly_tensor_interpolate: (ctx, tensor, size, nSize, mode, align) => {
+      const sp = writeInt64Array(size), mp = allocString(mode)
+      try { return Module._poly_tensor_interpolate(ctx, tensor, sp, nSize, mp, align ? 1 : 0) }
+      finally { if (sp) Module._free(sp); if (mp) Module._free(mp) }
+    },
+    poly_tensor_max_unpool2d: (ctx, tensor, indices, kernel, nk, stride, dilation, padding, np, output, no) => {
+      const kp = writeInt64Array(kernel), sp = writeInt64Array(stride), dp = writeInt64Array(dilation)
+      const pp = writeInt64Array(padding), op = writeInt64Array(output)
+      try { return Module._poly_tensor_max_unpool2d(ctx, tensor, indices, kp, nk, sp, dp, pp, np, op, no) }
+      finally { for (const ptr of [kp, sp, dp, pp, op]) if (ptr) Module._free(ptr) }
+    },
+    poly_tensor_conv_transpose2d: (ctx, tensor, weight, bias, groups, stride, dilation, padding, nPadding, outputPadding, nOutputPadding) => {
+      const sp = writeInt64Array(stride), dp = writeInt64Array(dilation)
+      const pp = writeInt64Array(padding), op = writeInt64Array(outputPadding)
+      try { return Module._poly_tensor_conv_transpose2d(ctx, tensor, weight, bias || 0, groups, sp, dp, pp, nPadding, op, nOutputPadding) }
+      finally { for (const ptr of [sp, dp, pp, op]) if (ptr) Module._free(ptr) }
     },
     poly_tensor_conv2d: (
       ctx, tensor, weight, bias, groups, stride, dilation, padding, nPadding
@@ -1782,7 +1818,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 68
+  const EXPECTED_ABI = 69
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(
