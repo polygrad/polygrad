@@ -165,8 +165,8 @@
     "failure_signature": "source-path-and-message-v2"
   },
   "evidence": {
-    "report": "temp/pooling-resize-20260907.P0xgA4/upstream-verified/report.json",
-    "sha256": "4f98f25be35dc33be4de58320e724351576c5943bb77da54a6c425a6f8096a8c"
+    "report": "temp/tensor-surface-20260907.QGfCGv/upstream-verified/report.json",
+    "sha256": "91607942ad7ecbad3acec87ec0d3ad8ec5cc0e8e58f46bd671f2aca76c44c76d"
   },
   "schema_version": 1,
   "tests": {
@@ -278,29 +278,17 @@
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_const_backward_pass": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: RuntimeError: poly_tensor_clone failed",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Execution reaches the existing C Tensor path and fails; raw traceback is retained. The core cause requires a separate pinned graph/value reproduction, not a frontend workaround.",
-      "category": "runtime-untriaged"
+      "reason": ""
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_const_backward_pass_optimizer": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: RuntimeError: poly_tensor_clone failed",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Execution reaches the existing C Tensor path and fails; raw traceback is retained. The core cause requires a separate pinned graph/value reproduction, not a frontend workaround.",
-      "category": "runtime-untriaged"
+      "reason": ""
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_copy_from_disk": {
       "expected": {
@@ -440,16 +428,10 @@
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_ones_like_has_same_dtype_and_shape": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_tensor.py:LINE: AttributeError: type object 'Tensor' has no attribute 'ones_like'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "The unchanged test encounters a missing Tensor constructor or movement convenience API; subsequent computation remains unexercised.",
-      "category": "frontend-api"
+      "reason": ""
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_plus_equals": {
       "expected": {
@@ -487,16 +469,10 @@
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_random_fns_are_deterministic_with_seed": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_tensor.py:LINE: AttributeError: type object 'Tensor' has no attribute 'normal'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "The unchanged test encounters a missing Tensor constructor or movement convenience API; subsequent computation remains unexercised.",
-      "category": "frontend-api"
+      "reason": ""
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_randperm": {
       "expected": {
@@ -657,16 +633,10 @@
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_zeros_like_has_same_dtype_and_shape": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_tensor.py:LINE: AttributeError: type object 'Tensor' has no attribute 'zeros_like'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "The unchanged test encounters a missing Tensor constructor or movement convenience API; subsequent computation remains unexercised.",
-      "category": "frontend-api"
+      "reason": ""
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_zerosized_tensors": {
       "expected": {

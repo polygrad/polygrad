@@ -45,8 +45,8 @@
     ]
   },
   "evidence": {
-    "report": "temp/pooling-resize-20260907.P0xgA4/ops-verified/report.json",
-    "sha256": "fd6aec96ccd52f16ec410b328462826dbd536de7bef4bb9a01d294478fac4190"
+    "report": "temp/tensor-surface-20260907.QGfCGv/ops-final/report.json",
+    "sha256": "3f776ba0466573483abbe9535f85348ffe7dddfc28d5521ffd6ab4aea0ca62bb"
   },
   "schema_version": 1,
   "tests": {
@@ -128,17 +128,11 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_and": {
-      "category": "frontend-dtype",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: ValueError: scalar 18446744073709551615 is out of int64 range",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Observed scalar/creator dtype contract mismatch; no NumPy or core workaround."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_any": {
       "expected": {
@@ -189,30 +183,18 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_argmax": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: TypeError: bad operand type for unary ~: 'Tensor'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Unsupported Tensor argument/operator surface; later checks remain unproven."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_argmin": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'argmin'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_argsort": {
       "expected": {
@@ -376,17 +358,11 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_bitwise_not": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'bitwise_not'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_broadcast_full": {
       "expected": {
@@ -528,17 +504,11 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_const_reduce": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'full_like'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_conv1d": {
       "expected": {
@@ -731,30 +701,18 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_diag": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'diag'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_diagonal": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'diagonal'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_dilated_conv2d": {
       "expected": {
@@ -778,17 +736,11 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_div_int": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: TypeError: unsupported operand type(s) for //: 'Tensor' and 'Tensor'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Unsupported Tensor argument/operator surface; later checks remain unproven."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_div_naninf": {
       "expected": {
@@ -798,17 +750,11 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_div_rounding_mode": {
-      "category": "runtime-untriaged",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: RuntimeError: poly_realize_tensors failed for device(s): CPU",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Observed C-path failure; frontend construction versus core ownership is not yet diagnosed."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_dot": {
       "category": "frontend-admission",
@@ -1008,17 +954,11 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_fmod": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'fmod'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_full": {
       "expected": {
@@ -1028,17 +968,11 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_full_like": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'full_like'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_gather": {
       "expected": {
@@ -1048,30 +982,18 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_gelu": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: TypeError: Tensor.gelu() got an unexpected keyword argument 'approximate'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Unsupported Tensor argument/operator surface; later checks remain unproven."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_gelu_extreme": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: TypeError: Tensor.gelu() got an unexpected keyword argument 'approximate'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Unsupported Tensor argument/operator surface; later checks remain unproven."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_gemm": {
       "expected": {
@@ -1372,30 +1294,18 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_logcumsumexp": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'logcumsumexp'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_logcumsumexp_numerical": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'logcumsumexp'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_logical_not": {
       "expected": {
@@ -1412,17 +1322,11 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_logsumexp": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'logsumexp'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_lshift": {
       "category": "frontend-admission",
@@ -1445,17 +1349,11 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_masked_fill": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'masked_fill'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_masked_select": {
       "category": "frontend-api",
@@ -1693,17 +1591,11 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_meshgrid": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'meshgrid'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_min": {
       "expected": {
@@ -1727,17 +1619,11 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_mod": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'mod'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_mul": {
       "expected": {
@@ -1782,17 +1668,11 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_negative_dims": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'normal'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_negative_dims_eye": {
       "category": "frontend-admission",
@@ -1808,30 +1688,18 @@
       "reason": "Observed exception-admission/type/message mismatch; no test expectation changed."
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_negative_dims_full": {
-      "category": "frontend-admission",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: RuntimeError: poly_tensor_full_*_by_id failed",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Observed exception-admission/type/message mismatch; no test expectation changed."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_negative_dims_kaiming": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'kaiming_normal'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_negative_padding_conv2d": {
       "expected": {
@@ -1916,17 +1784,11 @@
       "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_normalize": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'normalize'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_one_hot": {
       "category": "runtime-untriaged",
@@ -1949,17 +1811,11 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_ones_like": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'ones_like'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_or": {
       "expected": {
@@ -1976,56 +1832,32 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_pad": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: TypeError: Tensor.pad() got an unexpected keyword argument 'padding'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Unsupported Tensor argument/operator surface; later checks remain unproven."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_pad_circular_mode": {
-      "category": "frontend-capability",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: NotImplementedError: mode='circular' is not supported",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Explicitly unsupported padding/pooling mode; not emulated by the runner."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_pad_reflect_mode": {
-      "category": "frontend-capability",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: NotImplementedError: mode='reflect' is not supported",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Explicitly unsupported padding/pooling mode; not emulated by the runner."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_pad_replicate_mode": {
-      "category": "frontend-capability",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: NotImplementedError: mode='replicate' is not supported",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Explicitly unsupported padding/pooling mode; not emulated by the runner."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_pad_reshape": {
       "expected": {
@@ -2105,17 +1937,11 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_pow_const": {
-      "category": "runtime-untriaged",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: RuntimeError: poly_tensor_clone failed",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Observed C-path failure; frontend construction versus core ownership is not yet diagnosed."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_pow_const_direct": {
       "expected": {
@@ -2145,17 +1971,11 @@
       "reason": "Unchanged pinned CPU skip; not a pass."
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_pow_int_base_float_exponent": {
-      "category": "runtime-untriaged",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: RuntimeError: poly_tensor_clone failed",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Observed C-path failure; frontend construction versus core ownership is not yet diagnosed."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_pow_neg_inf_frac_exponent": {
       "expected": {
@@ -2186,17 +2006,17 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_prod": {
-      "category": "frontend-api",
       "expected": {
+        "status": "failed",
         "nonpassing_phases": {
           "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'prod'",
+            "detail": "<polygrad>/py/polygrad/helpers.py:LINE: KeyError: 'NOOPT'",
             "outcome": "failed"
           }
-        },
-        "status": "failed"
+        }
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "category": "frontend-context",
+      "reason": "Tensor.prod now executes the initial numerical/gradient body, then fails at unsupported Context(NOOPT=1). Optimization admission and cache-key configuration are not implemented; later assertions remain unexecuted."
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_prod_dtype_arg": {
       "expected": {
@@ -2269,17 +2089,11 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_roll": {
-      "category": "frontend-movement",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: ZeroDivisionError: integer modulo by zero",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Observed roll/squeeze/stack argument or zero-shape handling failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_round": {
       "expected": {
@@ -2881,17 +2695,11 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_softmin": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'softmin'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_softplus": {
       "expected": {
@@ -2922,56 +2730,32 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_sparse_categorical_crossentropy": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: TypeError: Tensor.sparse_categorical_crossentropy() got an unexpected keyword argument 'reduction'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Unsupported Tensor argument/operator surface; later checks remain unproven."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_sparse_categorical_crossentropy_ignore_index": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: TypeError: Tensor.sparse_categorical_crossentropy() got an unexpected keyword argument 'ignore_index'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Unsupported Tensor argument/operator surface; later checks remain unproven."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_sparse_categorical_crossentropy_label_smoothing": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: TypeError: Tensor.sparse_categorical_crossentropy() got an unexpected keyword argument 'label_smoothing'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Unsupported Tensor argument/operator surface; later checks remain unproven."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_sparse_categorical_crossentropy_reductions": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: TypeError: Tensor.sparse_categorical_crossentropy() got an unexpected keyword argument 'reduction'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Unsupported Tensor argument/operator surface; later checks remain unproven."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_split": {
       "expected": {
@@ -2988,30 +2772,18 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_squeeze": {
-      "category": "frontend-movement",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: IndexError: tuple index out of range",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Observed roll/squeeze/stack argument or zero-shape handling failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_stack": {
-      "category": "frontend-movement",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: AttributeError: 'tuple' object has no attribute 'unsqueeze'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Observed roll/squeeze/stack argument or zero-shape handling failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_stack_max": {
       "expected": {
@@ -3049,30 +2821,18 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_std_mean": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'std_mean'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_std_mean_loaded_nan": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'std_mean'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_std_one_in_axis": {
       "expected": {
@@ -3325,17 +3085,11 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_unfold": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'unfold'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_unsqueeze": {
       "expected": {
@@ -3387,30 +3141,18 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_where": {
-      "category": "runtime-untriaged",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: RuntimeError: poly_tensor_clone failed",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Observed C-path failure; frontend construction versus core ownership is not yet diagnosed."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_where_permute": {
-      "category": "runtime-untriaged",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/tensor.py:LINE: RuntimeError: poly_tensor_clone failed",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Observed C-path failure; frontend construction versus core ownership is not yet diagnosed."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_xor": {
       "expected": {
@@ -3427,17 +3169,11 @@
       "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_zeros_like": {
-      "category": "frontend-api",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: type object 'Tensor' has no attribute 'zeros_like'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOpsUint8::test_cast": {
       "expected": {

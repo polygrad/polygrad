@@ -155,11 +155,13 @@ async function runForDevice(browser, port, device, spec) {
   console.log(`=== browser: ${spec.label}, engine: ${spec.launcherName}, device: ${device} ===`)
   console.log(`[${spec.label}] version: ${browser.version()}`)
 
-  await page.goto(url)
+  // Test microtasks can defer load; wait for completion through __testResults.
+  await page.goto(url, { waitUntil: 'commit' })
 
   const timeout = device === 'webgpu' ? 120000 : 60000
   const results = await page.waitForFunction(
     () => window.__testResults,
+    null,
     { timeout }
   ).then(h => h.jsonValue())
 
@@ -246,7 +248,9 @@ async function main() {
   process.exit(totalFailed > 0 ? 1 : 0)
 }
 
-main().catch(e => {
+module.exports = { runForDevice }
+
+if (require.main === module) main().catch(e => {
   console.error(e)
   server.close()
   process.exit(1)

@@ -155,6 +155,16 @@ Spatial operations also share C construction: Python `avg_pool2d`,
 Pooling supports ceil mode, excluded padding for averages, and optional max
 indices. Interpolation supports `linear`, `nearest`, and `nearest-exact`.
 These spatial builders currently require concrete input shapes.
+
+Both frontends also expose like/normal factories, product and stable log
+reductions, normalization, exact GELU, diagonal/unfold/meshgrid helpers,
+nonconstant padding, and sparse cross-entropy options. Shared C owners build
+the graphs; Python uses snake_case and JS uses camelCase where applicable
+(for example, `full_like` / `fullLike`, `std_mean` / `stdMean`). JS `BigInt`
+scalar/full literals preserve all uint64 bits. Rounded division selects its
+integer or floating path after promotion. Cloning a weak-typed computation
+creates strong-typed storage; it does not allocate weak storage.
+
 `Tensor.invalids(..., dtype=...)` (JS: `Tensor.invalids(shape, {dtype})`)
 creates anonymous storage through the existing Invalid graph sentinel; read
 only regions that have been written. This is not zero initialization.
@@ -162,6 +172,7 @@ only regions that have been written. This is not zero initialization.
 Python accepts `Context(CHECK_OOB=0)`. Nonzero values raise: the optional
 Tinygrad compiler bounds verifier is not implemented (`PG-PARITY-026`).
 This is separate from Tensor index and shape validation.
+The `NOOPT` context option is not implemented yet.
 
 Both frontends expose `all`, `any`, `cumsum`, `cumprod`, `cummax`, and `cummin`
 through shared C Tensor operations. `all`/`any` accept axes and `keepdim`;

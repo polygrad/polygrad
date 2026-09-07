@@ -4143,6 +4143,53 @@ TEST(pe, tensor_einsum_builds_both_roots_from_exact_occurrences) {
   PASS();
 }
 
+TEST(tensor, surface_owners_lifetime_and_domains) {
+  for (int logical = 0; logical < 2; logical++) {
+    PolyCtx *ctx = poly_ctx_new(), *other = poly_ctx_new();
+    poly_ctx_set_logical_policy(ctx, logical ? POLY_LOGICAL_ALWAYS : POLY_LOGICAL_NEVER);
+    PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){2, 3}, 2, POLY_DEVICE_INTERP);
+    ASSERT_NOT_NULL(x);
+    float data[] = {1, 2, 3, 4, 5, 6};
+    ASSERT_INT_EQ(poly_buffer_write(ctx, poly_uop_base(x->uop_physical), data, sizeof(data)), 0);
+    int64_t axis = 1;
+    PolyTensor *product = poly_tensor_prod(ctx, x, &axis, 1, false);
+    PolyTensor *scan = poly_tensor_logcumsumexp(ctx, x, 1);
+    PolyTensor *stack = poly_tensor_stack(ctx, (PolyTensor *[]){x, x}, 2, 1);
+    ASSERT_NOT_NULL(product);
+    ASSERT_NOT_NULL(scan);
+    ASSERT_NOT_NULL(stack);
+    ASSERT_INT_EQ(scan->uop_logical != NULL, logical);
+    ASSERT_PTR_EQ(poly_tensor_prod(other, x, &axis, 1, false), NULL);
+    ASSERT_PTR_EQ(poly_tensor_unfold(ctx, x, 1, 2, 0), NULL);
+    ASSERT_PTR_EQ(poly_tensor_diagonal(ctx, x, 0, 1, 1), NULL);
+    ASSERT_PTR_EQ(poly_tensor_diagonal(ctx, x, INT64_MIN, 0, 1), NULL);
+    ASSERT_PTR_EQ(poly_tensor_pad_mode(ctx, x, (int64_t[]){0, 0, INT64_MIN, 0}, 2, 1), NULL);
+    poly_tensor_release(x);
+    poly_ctx_collect(ctx);
+    float got[12];
+    ASSERT_INT_EQ(read_tensor_f32(ctx, product, got, 2), 0);
+    ASSERT_FLOAT_EQ(got[0], 6, 1e-5);
+    ASSERT_FLOAT_EQ(got[1], 120, 1e-5);
+    ASSERT_INT_EQ(read_tensor_f32(ctx, scan, got, 6), 0);
+    ASSERT_FLOAT_EQ(got[2], 3.407606, 1e-5);
+    ASSERT_FLOAT_EQ(got[5], 6.407606, 1e-5);
+    /* Like Tensor.numpy, pack the repeated view before reading storage bytes. */
+    PolyTensor *packed = poly_tensor_contiguous(ctx, stack);
+    ASSERT_NOT_NULL(packed);
+    ASSERT_INT_EQ(read_tensor_f32(ctx, packed, got, 12), 0);
+    ASSERT_FLOAT_EQ(got[3], 1, 0.0);
+    ASSERT_FLOAT_EQ(got[11], 6, 0.0);
+    poly_tensor_release(packed);
+    poly_tensor_release(stack);
+    poly_tensor_release(scan);
+    poly_tensor_release(product);
+    poly_ctx_collect(ctx);
+    poly_ctx_destroy(other);
+    poly_ctx_destroy(ctx);
+  }
+  PASS();
+}
+
 TEST(tensor, spatial_owners_pooling_lifetime_and_arguments) {
   for (int logical = 0; logical < 2; logical++) {
     PolyCtx *ctx = poly_ctx_new(), *other = poly_ctx_new();

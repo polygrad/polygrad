@@ -16,7 +16,7 @@ import sys
 _lib = None
 OPS = {}
 _has_cuda_ffi = False
-POLYGRAD_ABI_VERSION = 69
+POLYGRAD_ABI_VERSION = 70
 
 # --- Opaque pointer type (always available) ---
 _ptr = ctypes.c_void_p
@@ -424,6 +424,10 @@ def _declare_signatures(lib):
     lib.poly_tensor_const_like_float.argtypes = [_ptr, _ptr, ctypes.c_double]
 
     lib.poly_tensor_full_int_by_id.restype = _ptr
+    lib.poly_tensor_const_uint_by_id.restype = _ptr
+    lib.poly_tensor_const_uint_by_id.argtypes = [_ptr, ctypes.c_uint64, ctypes.c_int, ctypes.c_int]
+    lib.poly_tensor_full_uint_by_id.restype = _ptr
+    lib.poly_tensor_full_uint_by_id.argtypes = [_ptr, _i64p, ctypes.c_int, ctypes.c_uint64, ctypes.c_int, ctypes.c_int, ctypes.c_bool, ctypes.c_bool]
     lib.poly_tensor_full_int_by_id.argtypes = [
         _ptr, _i64p, ctypes.c_int, ctypes.c_int64, ctypes.c_int, ctypes.c_int,
         ctypes.c_bool, ctypes.c_bool,
@@ -822,7 +826,7 @@ def _declare_signatures(lib):
     lib.poly_tensor_alu3.argtypes = [_ptr, ctypes.c_int, _ptr, _ptr, _ptr]
 
     lib.poly_tensor_div.restype = _ptr
-    lib.poly_tensor_div.argtypes = [_ptr, _ptr, _ptr]
+    lib.poly_tensor_div.argtypes = [_ptr, _ptr, _ptr, ctypes.c_int]
 
     lib.poly_tensor_exp.restype = _ptr
     lib.poly_tensor_exp.argtypes = [_ptr, _ptr]
@@ -905,7 +909,33 @@ def _declare_signatures(lib):
     lib.poly_tensor_nll_loss.restype = _ptr
     lib.poly_tensor_nll_loss.argtypes = [_ptr, _ptr, _ptr, _ptr, _ptr, ctypes.c_int]
 
+    lib.poly_tensor_prod.restype = _ptr
+    lib.poly_tensor_prod.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int, ctypes.c_bool]
+    lib.poly_tensor_logsumexp.restype = _ptr
+    lib.poly_tensor_logsumexp.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int, ctypes.c_bool]
+    lib.poly_tensor_normalize.restype = _ptr
+    lib.poly_tensor_normalize.argtypes = [_ptr, _ptr, ctypes.c_double, ctypes.c_int, ctypes.c_double]
+    lib.poly_tensor_logcumsumexp.restype = _ptr
+    lib.poly_tensor_logcumsumexp.argtypes = [_ptr, _ptr, ctypes.c_int]
+    lib.poly_tensor_gelu_exact.restype = _ptr
+    lib.poly_tensor_gelu_exact.argtypes = [_ptr, _ptr]
+    lib.poly_tensor_diag.restype = _ptr
+    lib.poly_tensor_diag.argtypes = [_ptr, _ptr]
+    lib.poly_tensor_diagonal.restype = _ptr
+    lib.poly_tensor_diagonal.argtypes = [_ptr, _ptr, ctypes.c_int64, ctypes.c_int, ctypes.c_int]
+    lib.poly_tensor_unfold.restype = _ptr
+    lib.poly_tensor_unfold.argtypes = [_ptr, _ptr, ctypes.c_int, ctypes.c_int64, ctypes.c_int64]
+    lib.poly_tensor_argmin.restype = _ptr
+    lib.poly_tensor_argmin.argtypes = [_ptr, _ptr, ctypes.c_int, ctypes.c_bool]
+    lib.poly_tensor_pad_mode.restype = _ptr
+    lib.poly_tensor_pad_mode.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int, ctypes.c_int]
     lib.poly_tensor_gelu.restype = _ptr
+    lib.poly_tensor_stack.restype = _ptr
+    lib.poly_tensor_stack.argtypes = [_ptr, ctypes.POINTER(_ptr), ctypes.c_int, ctypes.c_int]
+    lib.poly_tensor_bitwise_not.restype = _ptr
+    lib.poly_tensor_bitwise_not.argtypes = [_ptr, _ptr]
+    lib.poly_tensor_sparse_categorical_crossentropy.restype = _ptr
+    lib.poly_tensor_sparse_categorical_crossentropy.argtypes = [_ptr, _ptr, _ptr, ctypes.c_int64, ctypes.c_double, ctypes.c_int]
     lib.poly_tensor_gelu.argtypes = [_ptr, _ptr]
 
     lib.poly_tensor_quick_gelu.restype = _ptr

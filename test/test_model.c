@@ -3717,7 +3717,7 @@ TEST(model, from_binding_arrays_train_after_set_device_auto_updates_param) {
   loss = poly_tensor_sum(ctx, loss, loss_axes, 2, false);
   PolyTensor *count =
       poly_tensor_const_float_by_id(ctx, 1.0, poly_dtype_id_by_name("float32"), POLY_DEVICE_CPU);
-  loss = poly_tensor_div(ctx, loss, count);
+  loss = poly_tensor_div(ctx, loss, count, 0);
   ASSERT_NOT_NULL(loss);
 
   const char *binding_names[] = {"fit_x", "fit_y", "fit_w", "fit_out", "loss"};

@@ -308,6 +308,14 @@ PolyUOp *poly_eye(PolyCtx *ctx, int64_t n);
 PolyUOp *poly_linspace(PolyCtx *ctx, double start, double stop, int64_t steps);
 PolyUOp *poly_full(PolyCtx *ctx, const int64_t *shape, int ndim, double fill_value);
 PolyUOp *poly_const_int_by_id(PolyCtx *ctx, int64_t value, int dtype_id);
+PolyUOp *poly_const_uint_by_id(PolyCtx *ctx, uint64_t value, int dtype_id);
+PolyUOp *poly_full_uint_by_id(
+    PolyCtx *ctx,
+    const int64_t *shape,
+    int ndim,
+    uint64_t value,
+    int dtype_id
+);
 PolyUOp *poly_const_float_by_id(PolyCtx *ctx, double value, int dtype_id);
 PolyUOp *poly_full_int_by_id(
     PolyCtx *ctx,

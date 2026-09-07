@@ -2313,6 +2313,48 @@ for _kind in ('avg', 'avg_ceil_exclude', 'max_index', 'resize_linear', 'transpos
 CASES['spatial_owner_resize_uint8'] = ('tensor', lambda: spatial_owner_graph('resize_linear', 'uint8'))
 
 
+def surface_owner_graph(kind, dtype='float32'):
+    x = Tensor.empty(2, 3, dtype=dtype, device='CPU').realize()
+    if kind == 'grad_stack':
+        y = Tensor.empty(2, 3, dtype=dtype, device='CPU').realize()
+        Tensor.stack((x, y, x), dim=1).square().sum().backward()
+        out = x.grad
+    elif kind == 'uint_scalar': out = Tensor(2**64-1, dtype='uint64')
+    elif kind == 'uint_full': out = Tensor.full((2, 3), 2**64-1, dtype='uint64')
+    elif kind == 'weak_clone': out = (Tensor(3.5) + 3.5).clone(device='CPU')
+    elif kind in ('mod', 'fmod'):
+        a = Tensor.empty(2, 3, dtype='int32', device='CPU').realize()
+        out = getattr(a, kind)(3.5)
+    elif kind.startswith('div_'):
+        a = Tensor.empty(2, 3, dtype='int32', device='CPU').realize()
+        out = a.div(x, rounding_mode=kind[4:])
+    elif kind == 'logsumexp_scalar': out = Tensor.empty((), dtype=dtype, device='CPU').realize().logsumexp(0)
+    elif kind == 'prod': out = x.prod(1, keepdim=True)
+    elif kind == 'logsumexp': out = x.logsumexp(1)
+    elif kind == 'logcumsumexp': out = x.logcumsumexp(1)
+    elif kind == 'normalize': out = x.normalize(dim=1)
+    elif kind == 'normalize_zero': out = x.normalize(p=0, dim=1)
+    elif kind == 'gelu_exact': out = x.gelu(approximate='none')
+    elif kind == 'argmin': out = x.argmin(1)
+    elif kind == 'diag': out = x.flatten().diag()
+    elif kind == 'diagonal': out = x.diagonal(offset=1)
+    elif kind == 'unfold': out = x.unfold(1, 2, 1)
+    elif kind == 'stack': out = Tensor.stack((x, x), dim=1)
+    elif kind.startswith('pad_'): out = x.pad(((1, 0), (-1, 1)), mode=kind[4:])
+    elif kind == 'sparse_loss':
+        y = Tensor.empty(2, dtype='int32', device='CPU').realize()
+        out = x.sparse_categorical_crossentropy(y, ignore_index=99, label_smoothing=0.2, reduction='none')
+    else: raise ValueError(kind)
+    return {'physical': out.uop, 'logical': logical(out)}
+
+
+for _kind in ('prod', 'logsumexp', 'logcumsumexp', 'normalize', 'normalize_zero', 'gelu_exact', 'argmin', 'diag', 'diagonal', 'unfold', 'stack', 'pad_circular', 'pad_reflect', 'pad_replicate', 'sparse_loss'):
+    CASES[f'surface_owner_{_kind}'] = ('tensor', lambda k=_kind: surface_owner_graph(k))
+
+for _kind in ('grad_stack', 'uint_scalar', 'uint_full', 'div_floor', 'div_trunc', 'logsumexp_scalar', 'weak_clone', 'mod', 'fmod'):
+    CASES[f'surface_owner_{_kind}'] = ('tensor', lambda k=_kind: surface_owner_graph(k))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--case", action="append", choices=sorted(CASES))

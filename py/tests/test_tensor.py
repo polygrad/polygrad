@@ -2693,6 +2693,183 @@ class TestReduce:
 
 
 
+class TestSurfaceOwners:
+    @pytest.mark.parametrize('value', [3, 3.5])
+    def test_weak_computation_clone_storage(self, value):
+        result = (Tensor(value) + value).clone()
+        assert result.dtype == (dtypes.int32 if isinstance(value, int) else dtypes.float32)
+        assert result.item() == 2 * value
+
+    def test_stack_gradient_order_and_alias_accumulation(self):
+        x, y = Tensor([1., 2.]), Tensor([3., 4.])
+        stacked = Tensor.stack(x, y, x)
+        loss = (stacked * Tensor([[1., 1.], [2., 2.], [3., 3.]])).sum()
+        loss.backward()
+        np.testing.assert_array_equal(x.grad.numpy(), [4, 4])
+        np.testing.assert_array_equal(y.grad.numpy(), [2, 2])
+
+    def test_mixed_division_and_remainders(self):
+        x, y = Tensor([-4, 7, 5]), Tensor([2., -3., 8.])
+        np.testing.assert_array_equal(x.div(y, rounding_mode='trunc').numpy(), [-2, -2, 0])
+        np.testing.assert_array_equal(x.fmod(y).numpy(), [0, 1, 5])
+        np.testing.assert_array_equal(x.mod(y).numpy(), [0, -2, 5])
+
+    def test_scalar_logsumexp_axis(self):
+        x = Tensor([3.]).reshape(())
+        y = x.logsumexp(0)
+        y.backward()
+        assert y.item() == 3. and x.grad.item() == 1.
+
+    @pytest.mark.parametrize('factory', ['zeros', 'ones', 'full', 'normal', 'kaiming_normal'])
+    def test_negative_factory_shape(self, factory):
+        with pytest.raises(ValueError):
+            if factory == 'full': Tensor.full((-3, 2), 4)
+            else: getattr(Tensor, factory)(-3, 2)
+
+    def test_nested_factory_shape_rejects(self):
+        with pytest.raises(ValueError):
+            Tensor.kaiming_normal((-3, 3), 3)
+
+    def test_uint64_scalar_preserves_all_bits(self):
+        x = Tensor(2**64-1, dtype='uint64').div(1, rounding_mode='trunc')
+        assert x.item() == 2**64-1
+        assert x.full_like(2**64-1).item() == 2**64-1
+
+    @pytest.mark.parametrize('logical', ['never', 'always', 'until_realize'])
+    def test_explicit_runtime_and_gradients(self, logical):
+        import polygrad as pg
+        with pg.Runtime(logical=logical) as rt:
+            x = rt.Tensor([[1., 2., 3.], [4., 5., 6.]])
+            for result in (x.full_like(2), x.prod(1), x.logsumexp(1), x.logcumsumexp(1),
+                           x.normalize(), x.diagonal(), x.unfold(1, 2, 1), x.gelu('none')):
+                assert result._ctx == x._ctx
+                assert np.isfinite(result.numpy()).all()
+            y = x.logsumexp(1).sum()
+            y.backward()
+            np.testing.assert_allclose(x.grad.numpy(), x.softmax(1).numpy(), rtol=1e-5)
+
+    @pytest.mark.parametrize('dtype', ['int16', 'uint8', 'float16', 'float32'])
+    def test_product_empty_and_dtype(self, dtype):
+        x = Tensor([[1, 2, 3], [4, 5, 6]], dtype=dtype)
+        assert x.prod(1).dtype == x.dtype
+        np.testing.assert_allclose(x.prod(1).numpy(), [6, 120])
+        np.testing.assert_array_equal(Tensor.empty(2, 0, dtype=dtype).prod(1).numpy(), [1, 1])
+
+    def test_shape_and_scan_edges(self):
+        np.testing.assert_allclose(Tensor([1000., 1001., 1002.]).logcumsumexp().numpy(), [1000, 1001.313262, 1002.407606], atol=1e-3)
+        assert Tensor(7.).logcumsumexp().item() == 7
+        assert Tensor.empty(0).diag().shape == (0, 0)
+        assert Tensor.empty(2, 0).diagonal().shape == (0,)
+        assert Tensor([1., 2.]).unfold(0, 0, 1).shape == (3, 0)
+        np.testing.assert_array_equal(Tensor([1., 2., 3., 4.]).pad((-1, 2), mode='circular').numpy(), [2, 3, 4, 2, 3])
+        for mode in ('reflect', 'circular'):
+            with pytest.raises(ValueError):
+                Tensor([1., 2.]).pad((3, 0), mode=mode)
+
+    @pytest.mark.parametrize('name,value', [('zeros_like', 0), ('ones_like', 1), ('full_like', 7)])
+    def test_like_factories(self, name, value):
+        x = Tensor([[1, 2], [3, 4]], dtype='int16')
+        y = getattr(x, name)(value) if name == 'full_like' else getattr(x, name)()
+        assert y.dtype == x.dtype and y.shape == x.shape
+        np.testing.assert_array_equal(y.numpy(), np.full((2, 2), value))
+        assert x.full_like(2, dtype='float32', buffer=False).dtype == dtypes.float32
+
+    def test_normal_factories(self):
+        for factory in (lambda: Tensor.normal(4, 3, mean=2, std=0.5),
+                        lambda: Tensor.kaiming_normal(4, 3, a=0.2)):
+            Tensor.manual_seed(17)
+            first = factory().numpy()
+            Tensor.manual_seed(17)
+            np.testing.assert_array_equal(first, factory().numpy())
+        with pytest.raises(ValueError):
+            Tensor.normal(2, std=-1)
+        assert Tensor.normal(0, 3).shape == (0, 3)
+
+    def test_integer_operations(self):
+        x = Tensor([-7, -1, 1, 7])
+        np.testing.assert_array_equal((~x).numpy(), [6, 0, -2, -8])
+        np.testing.assert_array_equal((x // 3).numpy(), [-3, -1, 0, 2])
+        np.testing.assert_array_equal(x.mod(3).numpy(), [2, 2, 1, 1])
+        np.testing.assert_array_equal(x.fmod(3).numpy(), [-1, -1, 1, 1])
+        np.testing.assert_array_equal(Tensor([0, 255], dtype='uint8').bitwise_not().numpy(), [255, 0])
+        np.testing.assert_array_equal(Tensor([True, False]).bitwise_not().numpy(), [False, True])
+
+    def test_reductions(self):
+        x = Tensor([[1., 2., 3.], [4., 5., 6.]])
+        np.testing.assert_allclose(x.prod(1).numpy(), [6, 120])
+        np.testing.assert_array_equal(x.argmin(1).numpy(), [0, 0])
+        np.testing.assert_allclose(x.logsumexp(1).numpy(), np.log(np.exp([[1, 2, 3], [4, 5, 6]]).sum(1)), rtol=1e-5)
+        np.testing.assert_allclose(x.logcumsumexp(1).numpy(), np.log(np.exp([[1, 2, 3], [4, 5, 6]]).cumsum(1)), rtol=1e-5)
+        np.testing.assert_allclose(x.normalize(dim=1).numpy(), np.array([[1, 2, 3], [4, 5, 6]]) / np.sqrt([[14], [77]]), rtol=1e-5)
+        np.testing.assert_allclose(x.softmin(1).numpy(), (-x).softmax(1).numpy(), rtol=1e-5)
+        std, mean = x.std_mean(1, correction=0)
+        np.testing.assert_allclose(std.numpy(), [np.sqrt(2/3)]*2, rtol=1e-5)
+        np.testing.assert_allclose(mean.numpy(), [2, 5])
+        assert Tensor([], dtype='int16').prod().item() == 1
+
+    @pytest.mark.parametrize('approximate', ['none', 'tanh'])
+    def test_gelu_options(self, approximate):
+        x = Tensor([-1., 0., 1.])
+        y = x.gelu(approximate=approximate)
+        y.sum().backward()
+        np.testing.assert_allclose(y.numpy(), [-0.158655, 0, 0.841345] if approximate == 'none' else [-0.158808, 0, 0.841192], atol=1e-5)
+        assert np.isfinite(x.grad.numpy()).all()
+        with pytest.raises(RuntimeError):
+            x.gelu(approximate='invalid')
+
+    def test_sparse_loss_options(self):
+        x = Tensor([[1., 2., 3.], [3., 2., 1.]])
+        y = Tensor([2, 99])
+        loss = x.sparse_categorical_crossentropy(y, ignore_index=99, label_smoothing=0.2, reduction='none')
+        np.testing.assert_allclose(loss.numpy(), [0.60760596, 0], rtol=1e-5)
+        assert abs(x.sparse_categorical_crossentropy(y, ignore_index=99, label_smoothing=0.2).item() - 0.60760596) < 1e-5
+        with pytest.raises(AssertionError):
+            x.sparse_categorical_crossentropy(y, label_smoothing=2)
+
+    def test_shape_helpers(self):
+        x = Tensor([1., 2., 3.])
+        np.testing.assert_array_equal(x.diag().numpy(), np.diag([1, 2, 3]))
+        np.testing.assert_array_equal(Tensor([[1, 2, 3], [4, 5, 6]]).diagonal(offset=1).numpy(), [2, 6])
+        np.testing.assert_array_equal(x.unfold(0, 2, 1).numpy(), [[1, 2], [2, 3]])
+        np.testing.assert_array_equal(x.masked_fill(x > 1, -4).numpy(), [1, -4, -4])
+        a, b = Tensor.meshgrid(Tensor([1, 2]), Tensor([3, 4, 5]), indexing='xy')
+        np.testing.assert_array_equal(a.numpy(), [[1, 2]]*3)
+        np.testing.assert_array_equal(b.numpy(), [[3, 3], [4, 4], [5, 5]])
+        with pytest.raises(RuntimeError):
+            x.unfold(0, 2, 0)
+
+    def test_movement_admission(self):
+        x = Tensor.empty(0, 3)
+        assert x.roll(1, 0) is x
+        assert Tensor(1).squeeze(0).shape == ()
+        a = Tensor([1, 2])
+        np.testing.assert_array_equal(Tensor.stack((a, a), dim=1).numpy(), [[1, 1], [2, 2]])
+
+    def test_wide_movement_arguments(self):
+        x = Tensor([1., 2., 3.])
+        np.testing.assert_array_equal(x.unfold(0, 2, 2**32).numpy(), [[1, 2]])
+        for offset in (2**32, -2**32):
+            with pytest.raises((ValueError, RuntimeError)):
+                x.reshape(1, 3).diagonal(offset=offset)
+
+    @pytest.mark.parametrize('mode,expected', [('circular', [3, 1, 2, 3, 1]), ('reflect', [2, 1, 2, 3, 2]), ('replicate', [1, 1, 2, 3, 3])])
+    def test_pad_modes(self, mode, expected):
+        x = Tensor([1., 2., 3.])
+        np.testing.assert_array_equal(x.pad(padding=(1, 1), mode=mode).numpy(), expected)
+        x.pad((1, 1), mode=mode).sum().backward()
+        assert x.grad.sum().item() == 5
+
+    def test_circular_crop_before_wrap_core(self):
+        from polygrad import _ffi
+        import ctypes
+        lib = _ffi._lib
+        lib.poly_pad_circular.restype = ctypes.c_void_p
+        lib.poly_pad_circular.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int]
+        x = Tensor([1., 2., 3., 4.])
+        pairs = (ctypes.c_int64 * 2)(-1, 2)
+        assert lib.poly_pad_circular(x._ctx, x.uop.raw, pairs, 1)
+
+
 class TestSpatialOwners:
     @pytest.mark.parametrize('logical', ['never', 'always'])
     def test_spatial_explicit_runtime_ownership(self, logical):

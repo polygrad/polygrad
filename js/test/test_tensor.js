@@ -4715,6 +4715,83 @@ async function runTensorTests(pg) {
     assertShape(x.convTranspose2d(w, null, { outputPadding: [1, 1, 1] }).shape, [1, 1, 5, 5])
   })
 
+  await test('surface owners factories and integer operations', async () => {
+    const x = new Tensor([-7, -1, 1, 7], { dtype: 'int16' })
+    assertClose(await x.fullLike(7).toArray(), [7, 7, 7, 7])
+    assert(x.onesLike().dtype === x.dtype)
+    assertClose(await x.zerosLike().toArray(), [0, 0, 0, 0])
+    assertClose(await x.bitwiseNot().toArray(), [6, 0, -2, -8])
+    assertClose(await x.mod(3).toArray(), [2, 2, 1, 1])
+    assertClose(await x.fmod(3).toArray(), [-1, -1, 1, 1])
+    assertClose(await x.floorDiv(3).toArray(), [-3, -1, 0, 2])
+    assertClose(await Tensor.normal([2, 3], { mean: 2, std: 0 }).toArray(), Array(6).fill(2))
+    assertShape(Tensor.kaimingNormal([2, 3], { a: 0.2 }).shape, [2, 3])
+  })
+  await test('surface owners reductions and stable scans', async () => {
+    const x = new Tensor([[1, 2, 3], [4, 5, 6]], { dtype: 'float32' })
+    assertClose(await x.prod(1).toArray(), [6, 120])
+    assertClose(await x.argmin(1).toArray(), [0, 0])
+    assertClose(await x.logsumexp(1).toArray(), [3.407606, 6.407606])
+    assertClose(await x.logcumsumexp(1).toArray(), [1, 2.313262, 3.407606, 4, 5.313262, 6.407606])
+    assertClose(await x.normalize({ dim: 1 }).toArray(), [1/Math.sqrt(14), 2/Math.sqrt(14), 3/Math.sqrt(14), 4/Math.sqrt(77), 5/Math.sqrt(77), 6/Math.sqrt(77)])
+    assertClose(await x.softmin(1).toArray(), await x.neg().softmax(1).toArray())
+    const [std, mean] = x.stdMean(1, false, 0)
+    assertClose(await std.toArray(), [Math.sqrt(2/3), Math.sqrt(2/3)])
+    assertClose(await mean.toArray(), [2, 5])
+    assertClose(await new Tensor([1000, 1001, 1002], { dtype: 'float32' }).logcumsumexp().toArray(), [1000, 1001.313262, 1002.407606], 1e-3)
+  })
+  await test('surface owners promoted division and stack gradients', async () => {
+    for (const value of [3, 3.5]) {
+      const copy = new Tensor(value).add(value).clone()
+      assert(copy.dtype === (Number.isInteger(value) ? 'int32' : 'float32'))
+      assertClose(await copy.toArray(), [2 * value])
+    }
+    const x = new Tensor([-4, 7, 5], { dtype: 'int32' }), y = new Tensor([2, -3, 8], { dtype: 'float32' })
+    assertClose(await x.div(y, 'trunc').toArray(), [-2, -2, 0])
+    assertClose(await x.fmod(y).toArray(), [0, 1, 5])
+    assertClose(await x.mod(y).toArray(), [0, -2, 5])
+    const a = new Tensor([1, 2], { dtype: 'float32' }), b = new Tensor([3, 4], { dtype: 'float32' })
+    Tensor.stack(a, b, a).mul(new Tensor([[1, 1], [2, 2], [3, 3]], { dtype: 'float32' })).sum().backward()
+    assertClose(await a.grad.toArray(), [4, 4])
+    assertClose(await b.grad.toArray(), [2, 2])
+  })
+  await test('surface owners uint64 scalar and full literals', async () => {
+    const value = (1n << 64n) - 1n
+    const x = new Tensor(value, { dtype: 'uint64' })
+    const got = await x.div(1n, 'trunc').toArray()
+    assert(BigInt(got[0]) === value)
+    const full = await x.fullLike(value).toArray()
+    assert(BigInt(full[0]) === value)
+  })
+  await test('surface owners shape helpers and padding', async () => {
+    const x = new Tensor([1, 2, 3], { dtype: 'float32' })
+    assertClose(await x.diag().toArray(), [1, 0, 0, 0, 2, 0, 0, 0, 3])
+    assertClose(await x.unfold(0, 2, 1).toArray(), [1, 2, 2, 3])
+    assertClose(await x.unfold(0, 2, 2**32).toArray(), [1, 2])
+    for (const offset of [2**32, -(2**32)]) {
+      let error
+      try { x.reshape([1, 3]).diagonal(offset) } catch (e) { error = e }
+      assert(error, 'wide offset must be rejected, not truncated to zero')
+    }
+    assertClose(await x.maskedFill(x.gt(1), -4).toArray(), [1, -4, -4])
+    assertClose(await new Tensor([[1, 2, 3], [4, 5, 6]]).diagonal(1).toArray(), [2, 6])
+    const [a, b] = Tensor.meshgrid(new Tensor([1, 2]), new Tensor([3, 4, 5]), { indexing: 'xy' })
+    assertClose(await a.toArray(), [1, 2, 1, 2, 1, 2])
+    assertClose(await b.toArray(), [3, 3, 4, 4, 5, 5])
+    for (const [mode, expected] of [['circular', [3, 1, 2, 3, 1]], ['reflect', [2, 1, 2, 3, 2]], ['replicate', [1, 1, 2, 3, 3]]]) {
+      assertClose(await x.pad([1, 1], mode).toArray(), expected)
+    }
+    const empty = Tensor.empty([0, 3])
+    assert(empty.roll(1, 0) === empty)
+  })
+  await test('surface owners GELU and sparse loss options', async () => {
+    const x = new Tensor([-1, 0, 1], { dtype: 'float32' })
+    assertClose(await x.gelu('none').toArray(), [-0.158655, 0, 0.841345], 1e-5)
+    const logits = new Tensor([[1, 2, 3], [3, 2, 1]], { dtype: 'float32' })
+    const labels = new Tensor([2, 99], { dtype: 'int32' })
+    assertClose(await logits.sparseCategoricalCrossentropy(labels, { ignoreIndex: 99, labelSmoothing: 0.2, reduction: 'none' }).toArray(), [0.60760596, 0])
+  })
+
   console.log(`\nResults: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + failed + skipped} total`)
   return { passed, failed, skipped }
 }

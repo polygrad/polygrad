@@ -581,7 +581,11 @@ endif
 # package and browser bundle are rebuilt in the right order.
 test-browser: test-js-browser
 
-test-js-browser: verify-source-mirrors wasm-pkg
+.PHONY: test-browser-runner
+test-browser-runner:
+	$(NODE) js/test/test_browser_runner.js
+
+test-js-browser: test-browser-runner verify-source-mirrors wasm-pkg
 	cd js && bash scripts/build-browser.sh && $(NODE) test/browser/run.js
 
 test-browser-matrix: test-js-browser-matrix

@@ -901,6 +901,27 @@ static PolyMap *grad_reverse_pass(
 
     } break;
 
+    case POLY_OP_STACK: {
+      /* Pinned mixin/gradient.py:76 takes ctx[i] for each ordered source.
+       * A value index is SHRINK followed by dropping its singleton axis. */
+      int ndim = poly_uop_ndim(ctx, g);
+      if (ndim < 1 || ndim > POLY_MAX_DIMS) GRAD_REVERSE_FAIL();
+      PolyUOp *starts[POLY_MAX_DIMS], *sizes[POLY_MAX_DIMS];
+      PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(0));
+      for (int d = 0; d < ndim; d++) {
+        starts[d] = zero;
+        sizes[d] = poly_uop_shape_dim(ctx, g, d);
+        if (!sizes[d]) GRAD_REVERSE_FAIL();
+      }
+      sizes[0] = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(1));
+      for (int i = 0; i < u->n_src; i++) {
+        starts[0] = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(i));
+        PolyUOp *slice = poly_shrink_uop(ctx, g, starts, sizes, ndim);
+        PolyUOp *gx = slice ? poly_reshape_uop(ctx, slice, sizes + 1, ndim - 1) : NULL;
+        GRAD_ADD(u->src[i], gx);
+      }
+    } break;
+
     case POLY_OP_RESHAPE: {
       PolyShape s0 = poly_uop_max_shape_cached(ctx, u->src[0]);
       PolyUOp *gx = poly_reshape(ctx, g, s0.dims, s0.ndim);

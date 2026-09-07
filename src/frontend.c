@@ -125,6 +125,19 @@ PolyTensor *poly_tensor_const_int_by_id(PolyCtx *ctx, int64_t value, int dtype_i
   );
 }
 
+PolyTensor *poly_tensor_const_uint_by_id(
+    PolyCtx *ctx,
+    uint64_t value,
+    int dtype_id,
+    int device_id
+) {
+  PolyUOp *uop = poly_const_uint_by_id(ctx, value, dtype_id);
+  return uop ? poly_tensor_create_with_roots(
+                   ctx, uop, uop, POLY_TENSOR_VALUE, (PolyDevice)device_id
+               )
+             : NULL;
+}
+
 PolyTensor *poly_tensor_const_float_by_id(PolyCtx *ctx, double value, int dtype_id, int device_id) {
   PolyUOp *value_uop = poly_const_float_by_id(ctx, value, dtype_id);
   if (!value_uop) return NULL;
@@ -190,6 +203,23 @@ PolyTensor *poly_tensor_full_int_by_id(
   return tensor_full_from_value(
       ctx, value_uop, dims, ndim, (PolyDevice)device_id, value_uop ? value_uop->dtype : POLY_VOID,
       dtype_explicit, buffer
+  );
+}
+
+PolyTensor *poly_tensor_full_uint_by_id(
+    PolyCtx *ctx,
+    const int64_t *dims,
+    int ndim,
+    uint64_t value,
+    int dtype_id,
+    int device_id,
+    bool dtype_explicit,
+    bool buffer
+) {
+  PolyUOp *uop = poly_full_uint_by_id(ctx, dims, ndim, value, dtype_id);
+  return tensor_full_from_value(
+      ctx, uop, dims, ndim, (PolyDevice)device_id, uop ? uop->dtype : POLY_VOID, dtype_explicit,
+      buffer
   );
 }
 

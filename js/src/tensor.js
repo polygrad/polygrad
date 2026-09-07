@@ -654,7 +654,7 @@ function createBoundTensorClass(runtime) {
       } else {
         const noneData = data === null
         if (noneData) data = 0
-        const scalarData = typeof data === 'number' || typeof data === 'boolean'
+        const scalarData = typeof data === 'number' || typeof data === 'boolean' || typeof data === 'bigint'
         if (!scalarData && (opts.dtype === 'weakint' || opts.dtype === 'weakfloat')) {
           throw new Error(`cannot create storage for weak dtype ${opts.dtype}`)
         }
@@ -667,14 +667,16 @@ function createBoundTensorClass(runtime) {
         let dt, flat, shape
         if (scalarData) {
           dt = opts.dtype || (
-            noneData ? 'weakfloat' : typeof data === 'boolean' ? 'bool' : Number.isInteger(data) ? 'weakint' : 'weakfloat'
+            noneData ? 'weakfloat' : typeof data === 'boolean' ? 'bool' : (typeof data === 'bigint' || Number.isInteger(data)) ? 'weakint' : 'weakfloat'
           )
           const dtypeId = DTYPE_ID[dt]
           if (dtypeId === undefined) throw new Error(`unsupported dtype: ${dt}`)
           const targetDeviceId = deviceId(this._device)
           if (dt === 'bool' || isIntegerDtype(dt)) {
-            const value = dt === 'bool' ? (data ? 1 : 0) : Math.trunc(Number(data))
-            this._adoptCoreTensor(ffi.poly_tensor_const_int_by_id(
+            const value = dt === 'bool' ? (data ? 1 : 0) : typeof data === 'bigint' ? data : Math.trunc(Number(data))
+            if (typeof value === 'bigint' && (value < -(1n << 63n) || value >= (1n << 64n))) throw new RangeError('integer literal out of 64-bit range')
+            const factory = typeof value === 'bigint' && value >= (1n << 63n) ? ffi.poly_tensor_const_uint_by_id : ffi.poly_tensor_const_int_by_id
+            this._adoptCoreTensor(factory(
               this._ctx, value, dtypeId, targetDeviceId
             ))
           } else {
@@ -1481,6 +1483,7 @@ function createBoundTensorClass(runtime) {
 
     _ensureTensor(other) {
       if (other instanceof Tensor) return other
+      if (typeof other === 'bigint') return new Tensor(other, { _ctx: this._ctx, _device: this._device })
       if (typeof other === 'number' || typeof other === 'boolean') {
         const dtype = typeof other === 'boolean' ? 'bool'
           : Number.isInteger(other) ? 'weakint' : 'weakfloat'
@@ -1562,22 +1565,32 @@ function createBoundTensorClass(runtime) {
       return this._binop(other, 'SUB')
     }
     mul(other, reverse = false) { return this._binop(other, 'MUL', reverse) }
+    floorDiv(other) { return this.div(other, 'floor') }
+    bitwiseNot() {
+      const core = this._rt._core.ffi.poly_tensor_bitwise_not(this._ctx, this._tensor)
+      return this._makeResultFromCore(core, [this])
+    }
+    mod(other) {
+      const b = this._ensureTensor(other)
+      if (isIntegerDtype(this._dtype) && isIntegerDtype(b._dtype)) return this._binop(b, 'FLOORMOD')
+      return this.sub(this.div(b, 'floor').mul(b))
+    }
+    fmod(other) {
+      const b = this._ensureTensor(other)
+      if (isIntegerDtype(this._dtype) && isIntegerDtype(b._dtype)) return this._binop(b, 'CMOD')
+      return this.sub(this.div(b, 'trunc').mul(b))
+    }
+    maskedFill(mask, value) { return this._ensureTensor(mask).where(value, this) }
     div(other, roundingMode = null) {
       // Pinned mixin/elementwise.py:219-247 selects integer CDIV/FLOORDIV
       // after promotion; floating rounding composes over true division.
       const rhs = this._ensureTensor(other)
-      if (isIntegerDtype(this._dtype) && isIntegerDtype(rhs._dtype)) {
-        if (roundingMode === 'trunc') return this._binop(rhs, 'CDIV')
-        if (roundingMode === 'floor') return this._binop(rhs, 'FLOORDIV')
-      }
+      const rounding = [null, 'trunc', 'floor'].indexOf(roundingMode)
+      if (rounding < 0) throw new Error(`rounding_mode='${roundingMode}' is not supported`)
       const core = this._rt._core.ffi.poly_tensor_div(
-        this._ctx, this._tensor, rhs._tensor
+        this._ctx, this._tensor, rhs._tensor, rounding
       )
-      const result = this._makeResultFromCore(core, [this, rhs])
-      if (roundingMode == null) return result
-      if (roundingMode === 'trunc') return result.trunc()
-      if (roundingMode === 'floor') return result.floor()
-      throw new Error(`rounding_mode='${roundingMode}' is not supported`)
+      return this._makeResultFromCore(core, [this, rhs])
     }
     pow(other, reverse = false) {
       // Tinygrad 2026-08-22/a9069c177a9d mixin/elementwise.py:545-564
@@ -2019,9 +2032,11 @@ function createBoundTensorClass(runtime) {
       return this.lt(0).where(this.mul(negSlope, true), this)
     }
 
-    gelu() {
+    gelu(approximate = 'tanh') {
       // Pinned mixin/elementwise.py:761-776. C owns retained/current roots.
-      const core = this._rt._core.ffi.poly_tensor_gelu(this._ctx, this._tensor)
+      if (!['tanh', 'none'].includes(approximate)) throw new Error(`unknown GELU approximation: ${approximate}`)
+      const fn = approximate === 'tanh' ? this._rt._core.ffi.poly_tensor_gelu : this._rt._core.ffi.poly_tensor_gelu_exact
+      const core = fn(this._ctx, this._tensor)
       return this._makeResultFromCore(core, [this])
     }
 
@@ -2190,11 +2205,17 @@ function createBoundTensorClass(runtime) {
     }
 
     pad(arg, mode = 'constant', value = 0.0) {
-      if (mode !== 'constant') throw new Error(`mode=${mode} is not supported`)
       arg = normalizePadArg(arg, this.shape.length)
       const flat = []
       for (let i = 0; i < arg.length; i++) {
         flat.push(arg[i][0], arg[i][1])
+      }
+      if (mode !== 'constant') {
+        const tag = { circular: 1, reflect: 2, replicate: 3 }[mode]
+        if (!tag) throw new Error(`mode=${mode} is not supported`)
+        const core = this._rt._core.ffi.poly_tensor_pad_mode(this._ctx, this._tensor, flat, arg.length, tag)
+        if (!core) throw new RangeError(`invalid ${mode} padding`)
+        return this._makeResultFromCore(core, [this])
       }
       // Pinned _pad_constant shrinks negative pads before emitting a
       // non-negative PAD (mixin/__init__.py:359-368). The shared C boundary
@@ -2242,8 +2263,8 @@ function createBoundTensorClass(runtime) {
 
     squeeze(dim) {
       if (dim !== undefined && dim !== null) {
-        if (dim < 0) dim += this.shape.length
-        if (this.shape[dim] !== 1) return this
+        dim = this._resolveDim(dim)
+        if (!this.ndim || this.shape[dim] !== 1) return this
         const newShape = this.shape.filter((_, i) => i !== dim)
         return this.reshape(newShape)
       }
@@ -2253,7 +2274,7 @@ function createBoundTensorClass(runtime) {
     }
 
     unsqueeze(dim) {
-      if (dim < 0) dim += this.shape.length + 1
+      dim = this._resolveDim(dim, true)
       const newShape = [...this.shape]
       newShape.splice(dim, 0, 1)
       return this.reshape(newShape)
@@ -2393,6 +2414,84 @@ function createBoundTensorClass(runtime) {
         this._ctx, this._tensor, axes, axes.length, Boolean(keepdim)
       )
       return this._makeResultFromCore(core, [this])
+    }
+
+    _resolveDim(dim, extra = false) {
+      const total = this.ndim + Number(extra), bound = Math.max(1, total)
+      if (!Number.isInteger(dim) || dim < -bound || dim >= bound) throw new RangeError(`dim=${dim} out of range`)
+      return dim < 0 ? dim + total : dim
+    }
+
+    prod(axis = null, keepdim = false, dtype = null) {
+      if (axis && typeof axis === 'object' && !Array.isArray(axis)) {
+        const opts = axis; axis = opts.axis; keepdim = opts.keepdim || false; dtype = opts.dtype
+      }
+      const x = dtype == null ? this : this.cast(dtype)
+      return x._extremum('poly_tensor_prod', axis, keepdim)
+    }
+
+    logsumexp(axis = null, keepdim = false) { return this._extremum('poly_tensor_logsumexp', axis, keepdim) }
+    logcumsumexp(axis = 0) { return this._scan('poly_tensor_logcumsumexp', axis) }
+
+    normalize({ p = 2, dim = 1, eps = 1e-12 } = {}) {
+      const core = this._rt._core.ffi.poly_tensor_normalize(this._ctx, this._tensor, p, this._resolveDim(dim), eps)
+      return this._makeResultFromCore(core, [this])
+    }
+
+    softmin(axis = -1, dtype = null) {
+      const x = this.neg()
+      return (dtype == null ? x : x.cast(dtype)).softmax(axis)
+    }
+
+    stdMean(axis, keepdim = false, correction = 1) { return [this.std(axis, keepdim, correction), this.mean(axis, keepdim)] }
+
+    argmin(axis = null, keepdim = false) {
+      if (axis == null) return this.flatten().argmin(0)
+      const core = this._rt._core.ffi.poly_tensor_argmin(this._ctx, this._tensor, this._resolveDim(axis), Boolean(keepdim))
+      return this._makeResultFromCore(core, [this])
+    }
+
+    diag() {
+      if (this.ndim !== 1) throw new Error('diag requires a vector')
+      return this._makeResultFromCore(this._rt._core.ffi.poly_tensor_diag(this._ctx, this._tensor), [this])
+    }
+
+    diagonal(offset = 0, dim1 = 0, dim2 = 1) {
+      dim1 = this._resolveDim(dim1); dim2 = this._resolveDim(dim2)
+      if (dim1 === dim2) throw new Error('diagonal dimensions must differ')
+      const core = this._rt._core.ffi.poly_tensor_diagonal(this._ctx, this._tensor, offset, dim1, dim2)
+      return this._makeResultFromCore(core, [this])
+    }
+
+    unfold(dim, size, step) {
+      dim = this._resolveDim(dim)
+      if (!Number.isInteger(size) || !Number.isInteger(step) || size < 0 || step <= 0 || size > this.shape[dim]) throw new Error('invalid unfold size or step')
+      const core = this._rt._core.ffi.poly_tensor_unfold(this._ctx, this._tensor, dim, size, step)
+      return this._makeResultFromCore(core, [this])
+    }
+
+    meshgrid(...args) { return Tensor.meshgrid(this, ...args) }
+    static meshgrid(...tensors) {
+      let indexing = 'ij'
+      if (tensors.length && !(tensors.at(-1) instanceof Tensor)) indexing = tensors.pop().indexing || 'ij'
+      if (!['ij', 'xy'].includes(indexing)) throw new Error('indexing must be ij or xy')
+      if (tensors.length === 1) return tensors
+      const basis = tensors.map((_, i) => i)
+      if (indexing === 'xy') [basis[0], basis[1]] = [1, 0]
+      const reshaped = tensors.map((t, i) => t.reshape([-1, ...Array(tensors.length - 1 - basis[i]).fill(1)]))
+      const shape = reshaped.reduce((s, t) => _broadcastShapes(s, t.shape), [])
+      return reshaped.map(t => t.expand(shape))
+    }
+
+    roll(shifts, dims = null) {
+      if (dims == null) return this.flatten().roll(shifts, 0).reshape(this.shape)
+      dims = (Array.isArray(dims) ? dims : [dims]).map(d => this._resolveDim(d))
+      shifts = Array.isArray(shifts) ? shifts : [shifts]
+      if (dims.length !== shifts.length) throw new Error('shifts and dims length mismatch')
+      if (this.shape.includes(0)) return this
+      const crop = this.shape.map(s => [0, s])
+      dims.forEach((d, i) => { const n = this.shape[d], delta = n - ((shifts[i] % n) + n) % n; crop[d] = [delta, delta+n] })
+      return this.repeat(this.shape.map((_, i) => dims.includes(i) ? 2 : 1)).shrink(crop)
     }
 
     argmax(axis, keepdim) {
@@ -2970,6 +3069,15 @@ function createBoundTensorClass(runtime) {
       )
     }
 
+    sparseCategoricalCrossentropy(target, { ignoreIndex = -1, labelSmoothing = 0, reduction = 'mean' } = {}) {
+      if (!(labelSmoothing >= 0 && labelSmoothing <= 1)) throw new RangeError('labelSmoothing must be in [0, 1]')
+      target = this._ensureTensor(target)
+      if (target.device !== this.device) throw new Error('loss inputs must be on the same device')
+      if (!Number.isSafeInteger(ignoreIndex)) throw new RangeError('ignoreIndex must be a safe integer')
+      const core = this._rt._core.ffi.poly_tensor_sparse_categorical_crossentropy(this._ctx, this._tensor, target._tensor, ignoreIndex, labelSmoothing, this._lossReductionId(reduction))
+      return this._makeResultFromCore(core, [this, target])
+    }
+
     binaryCrossEntropy(target, reduction = 'mean') {
       const id = this._lossReductionId(reduction)
       target = this._ensureTensor(target)
@@ -3269,6 +3377,15 @@ function createBoundTensorClass(runtime) {
       return Tensor.full(shape, 1, { ...(opts || {}), _inferredDtype: 'weakfloat' })
     }
 
+    fullLike(value, opts = {}) {
+      return Tensor.full(this.shape, value, { ...opts, dtype: opts.dtype || this._dtype, device: opts.device || this.device, _ctx: this._ctx })
+    }
+    zerosLike(opts = {}) { return this.fullLike(0, opts) }
+    onesLike(opts = {}) { return this.fullLike(1, opts) }
+    static fullLike(x, value, opts = {}) { return x.fullLike(value, opts) }
+    static zerosLike(x, opts = {}) { return x.zerosLike(opts) }
+    static onesLike(x, opts = {}) { return x.onesLike(opts) }
+
     static full(shape, fillValue, opts) {
       if (typeof shape === 'number') shape = [shape]
       shape = Array.from(shape, Number)
@@ -3279,15 +3396,18 @@ function createBoundTensorClass(runtime) {
       const dtypeExplicit = Object.prototype.hasOwnProperty.call(opts, 'dtype')
       const buffer = opts.buffer !== false
       const dtype = opts.dtype || opts._inferredDtype || (
-        typeof fillValue === 'boolean' ? 'bool' : Number.isInteger(fillValue) ? 'weakint' : 'weakfloat'
+        typeof fillValue === 'boolean' ? 'bool' : (typeof fillValue === 'bigint' || Number.isInteger(fillValue)) ? 'weakint' : 'weakfloat'
       )
       const dtypeId = DTYPE_ID[dtype]
       if (dtypeId === undefined) throw new Error(`unsupported dtype: ${dtype}`)
       const targetDevice = deviceId(device)
+      const integer = typeof fillValue === 'boolean' ? Number(fillValue) : typeof fillValue === 'bigint' ? fillValue : Math.trunc(Number(fillValue))
+      if (typeof integer === 'bigint' && (integer < -(1n << 63n) || integer >= (1n << 64n))) throw new RangeError('integer literal out of 64-bit range')
+      const factory = typeof integer === 'bigint' && integer >= 0 ? ffi.poly_tensor_full_uint_by_id : ffi.poly_tensor_full_int_by_id
       const tensor = (dtype === 'bool' || isIntegerDtype(dtype))
-        ? ffi.poly_tensor_full_int_by_id(
+        ? factory(
             ctx, shape, shape.length,
-            typeof fillValue === 'boolean' ? (fillValue ? 1 : 0) : Math.trunc(Number(fillValue)),
+            integer,
             dtypeId, targetDevice, dtypeExplicit, buffer
           )
         : ffi.poly_tensor_full_float_by_id(
@@ -3394,6 +3514,25 @@ function createBoundTensorClass(runtime) {
       )
       if (!tensor) throw new Error('poly_tensor_randn_by_id failed')
       return new Tensor(null, {_ctx: ctx, _tensor: tensor, _dtype: dtype, _device: device})
+    }
+
+    static normal(...args) {
+      let opts = {}
+      if (args.length && typeof args.at(-1) === 'object' && !Array.isArray(args.at(-1))) opts = { ...args.pop() }
+      const { mean = 0, std = 1 } = opts
+      if (std < 0) throw new RangeError('std must be nonnegative')
+      delete opts.mean; delete opts.std
+      return Tensor.randn(...args, opts).mul(std, true).add(mean)
+    }
+
+    static kaimingNormal(...args) {
+      let opts = {}
+      if (args.length && typeof args.at(-1) === 'object' && !Array.isArray(args.at(-1))) opts = { ...args.pop() }
+      const shape = args.length === 1 && Array.isArray(args[0]) ? args[0] : args
+      const a = opts.a == null ? 0.01 : opts.a
+      delete opts.a
+      const fanIn = shape.slice(1).reduce((a, b) => a*b, 1)
+      return Tensor.normal(shape, { ...opts, mean: 0, std: Math.sqrt(2 / (1+a*a) / fanIn) })
     }
 
     static uniform(...args) {
@@ -3619,7 +3758,11 @@ function createBoundTensorClass(runtime) {
         dim = tensors.pop().dim || 0
       }
       if (tensors.length === 1 && Array.isArray(tensors[0])) tensors = tensors[0]
-      return Tensor.cat(tensors.map(t => t.unsqueeze(dim)), { dim })
+      if (!tensors.length || tensors.some(t => !(t instanceof Tensor))) throw new TypeError('stack expects tensors')
+      dim = tensors[0]._resolveDim(dim, true)
+      if (tensors.some(t => !arraysEqual(t.shape, tensors[0].shape))) throw new Error('stack shape mismatch')
+      const core = tensors[0]._rt._core.ffi.poly_tensor_stack(tensors[0]._ctx, tensors.map(t => t._tensor), dim)
+      return tensors[0]._makeResultFromCore(core, tensors)
     }
 
     split(sizes, dim) {

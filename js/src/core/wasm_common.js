@@ -891,6 +891,8 @@ function createWasmCoreFromModule(Module, device) {
     },
     poly_tensor_const_int_by_id: (ctx, value, dtypeId, targetDevice) =>
       Module._poly_tensor_const_int_by_id(ctx, BigInt(value), dtypeId, targetDevice),
+    poly_tensor_const_uint_by_id: (ctx, value, dtypeId, targetDevice) =>
+      Module._poly_tensor_const_uint_by_id(ctx, BigInt(value), dtypeId, targetDevice),
     poly_tensor_const_float_by_id: (ctx, value, dtypeId, targetDevice) =>
       Module._poly_tensor_const_float_by_id(ctx, value, dtypeId, targetDevice),
     poly_tensor_const_like_int: (ctx, ref, value) =>
@@ -913,10 +915,17 @@ function createWasmCoreFromModule(Module, device) {
     poly_tensor_full_float_by_id: (
       ctx, shape, ndim, value, dtypeId, targetDevice, dtypeExplicit, buffer
     ) => {
+      const ptr = writeInt64Array(shape || [])
+      try { return Module._poly_tensor_full_float_by_id(ctx, ptr, ndim, value, dtypeId, targetDevice, dtypeExplicit ? 1 : 0, buffer ? 1 : 0) }
+      finally { Module._free(ptr) }
+    },
+    poly_tensor_full_uint_by_id: (
+      ctx, shape, ndim, value, dtypeId, targetDevice, dtypeExplicit, buffer
+    ) => {
       const dimsPtr = writeInt64Array(shape || [])
       try {
-        return Module._poly_tensor_full_float_by_id(
-          ctx, dimsPtr, ndim, value, dtypeId, targetDevice,
+        return Module._poly_tensor_full_uint_by_id(
+          ctx, dimsPtr, ndim, BigInt(value), dtypeId, targetDevice,
           dtypeExplicit ? 1 : 0, buffer ? 1 : 0
         )
       } finally {
@@ -1050,8 +1059,8 @@ function createWasmCoreFromModule(Module, device) {
       Module._poly_tensor_alu2(ctx, op, a, b),
     poly_tensor_alu3: (ctx, op, a, b, c) =>
       Module._poly_tensor_alu3(ctx, op, a, b, c),
-    poly_tensor_div: (ctx, dividend, divisor) =>
-      Module._poly_tensor_div(ctx, dividend, divisor),
+    poly_tensor_div: (ctx, dividend, divisor, rounding) =>
+      Module._poly_tensor_div(ctx, dividend, divisor, rounding),
     poly_tensor_exp: (ctx, src) =>
       Module._poly_tensor_exp(ctx, src),
     poly_tensor_log: (ctx, src) =>
@@ -1106,8 +1115,36 @@ function createWasmCoreFromModule(Module, device) {
       Module._poly_tensor_log1p(ctx, src),
     poly_tensor_expm1: (ctx, src) =>
       Module._poly_tensor_expm1(ctx, src),
+    poly_tensor_prod: (ctx, src, axes, n_axes, keepdim) =>
+      callWithInt64(Module._poly_tensor_prod, ctx, src, axes, n_axes, (keepdim ? 1 : 0)),
+    poly_tensor_logsumexp: (ctx, src, axes, n_axes, keepdim) =>
+      callWithInt64(Module._poly_tensor_logsumexp, ctx, src, axes, n_axes, (keepdim ? 1 : 0)),
+    poly_tensor_normalize: (ctx, src, p, axis, eps) =>
+      Module._poly_tensor_normalize(ctx, src, p, axis, eps),
+    poly_tensor_logcumsumexp: (ctx, src, axis) =>
+      Module._poly_tensor_logcumsumexp(ctx, src, axis),
+    poly_tensor_gelu_exact: (ctx, src) =>
+      Module._poly_tensor_gelu_exact(ctx, src),
+    poly_tensor_diag: (ctx, src) =>
+      Module._poly_tensor_diag(ctx, src),
+    poly_tensor_diagonal: (ctx, src, offset, dim1, dim2) =>
+      Module._poly_tensor_diagonal(ctx, src, BigInt(offset), dim1, dim2),
+    poly_tensor_unfold: (ctx, src, dim, size, step) =>
+      Module._poly_tensor_unfold(ctx, src, dim, BigInt(size), BigInt(step)),
+    poly_tensor_argmin: (ctx, src, axis, keepdim) =>
+      Module._poly_tensor_argmin(ctx, src, axis, (keepdim ? 1 : 0)),
+    poly_tensor_pad_mode: (ctx, src, pairs, ndim, mode) =>
+      callWithInt64(Module._poly_tensor_pad_mode, ctx, src, pairs, ndim, mode),
     poly_tensor_gelu: (ctx, src) =>
       Module._poly_tensor_gelu(ctx, src),
+    poly_tensor_stack: (ctx, inputs, dim) => {
+      const ptr = writePtrArray(inputs)
+      try { return Module._poly_tensor_stack(ctx, ptr, inputs.length, dim) }
+      finally { Module._free(ptr) }
+    },
+    poly_tensor_bitwise_not: (ctx, src) => Module._poly_tensor_bitwise_not(ctx, src),
+    poly_tensor_sparse_categorical_crossentropy: (ctx, x, target, ignoreIndex, smoothing, reduction) =>
+      Module._poly_tensor_sparse_categorical_crossentropy(ctx, x, target, BigInt(ignoreIndex), smoothing, reduction),
     poly_tensor_quick_gelu: (ctx, src) =>
       Module._poly_tensor_quick_gelu(ctx, src),
     poly_tensor_detach: (ctx, src) =>
@@ -1818,7 +1855,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 69
+  const EXPECTED_ABI = 70
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(

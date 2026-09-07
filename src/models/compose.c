@@ -470,7 +470,7 @@ static PolyTensor *apply(
       elements *= size;
     }
     if (!strcmp(kind, "div"))
-      out = poly_tensor_div(d->ctx, x, inputs[1]);
+      out = poly_tensor_div(d->ctx, x, inputs[1], 0);
     else if (!strcmp(kind, "sub")) {
       PolyTensor *neg = own(d, poly_tensor_alu1(d->ctx, POLY_OP_NEG, inputs[1]), path);
       out = neg ? poly_tensor_alu2(d->ctx, POLY_OP_ADD, x, neg) : NULL;

@@ -940,7 +940,8 @@ int poly_tensor_function(
 PolyTensor *poly_tensor_alu1(PolyCtx *ctx, PolyOps op, PolyTensor *src);
 PolyTensor *poly_tensor_alu2(PolyCtx *ctx, PolyOps op, PolyTensor *a, PolyTensor *b);
 PolyTensor *poly_tensor_alu3(PolyCtx *ctx, PolyOps op, PolyTensor *a, PolyTensor *b, PolyTensor *c);
-PolyTensor *poly_tensor_div(PolyCtx *ctx, PolyTensor *dividend, PolyTensor *divisor);
+/* rounding: 0 true division, 1 truncate, 2 floor; selected after promotion. */
+PolyTensor *poly_tensor_div(PolyCtx *ctx, PolyTensor *dividend, PolyTensor *divisor, int rounding);
 PolyTensor *poly_tensor_exp(PolyCtx *ctx, PolyTensor *src);
 PolyTensor *poly_tensor_log(PolyCtx *ctx, PolyTensor *src);
 PolyTensor *poly_tensor_cos(PolyCtx *ctx, PolyTensor *src);
@@ -1002,7 +1003,40 @@ PolyTensor *poly_tensor_nll_loss(
     PolyTensor *ignore_index,
     int reduction
 );
+PolyTensor *poly_tensor_prod(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    int64_t *axes,
+    int n_axes,
+    bool keepdim
+);
+PolyTensor *poly_tensor_logsumexp(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    int64_t *axes,
+    int n_axes,
+    bool keepdim
+);
+PolyTensor *poly_tensor_normalize(PolyCtx *ctx, PolyTensor *src, double p, int axis, double eps);
+PolyTensor *poly_tensor_logcumsumexp(PolyCtx *ctx, PolyTensor *src, int axis);
+PolyTensor *poly_tensor_gelu_exact(PolyCtx *ctx, PolyTensor *src);
+PolyTensor *poly_tensor_diag(PolyCtx *ctx, PolyTensor *src);
+PolyTensor *poly_tensor_diagonal(PolyCtx *ctx, PolyTensor *src, int64_t offset, int dim1, int dim2);
+PolyTensor *poly_tensor_unfold(PolyCtx *ctx, PolyTensor *src, int dim, int64_t size, int64_t step);
+PolyTensor *poly_tensor_argmin(PolyCtx *ctx, PolyTensor *src, int axis, bool keepdim);
+PolyTensor *poly_tensor_pad_mode(PolyCtx *ctx, PolyTensor *src, int64_t *pairs, int ndim, int mode);
 PolyTensor *poly_tensor_gelu(PolyCtx *ctx, PolyTensor *src);
+PolyTensor *poly_tensor_stack(PolyCtx *ctx, PolyTensor **inputs, int n_inputs, int dim);
+PolyTensor *poly_tensor_bitwise_not(PolyCtx *ctx, PolyTensor *src);
+/* reduction: 0 none, 1 sum, 2 mean, shared with the other loss boundaries. */
+PolyTensor *poly_tensor_sparse_categorical_crossentropy(
+    PolyCtx *ctx,
+    PolyTensor *x,
+    PolyTensor *target,
+    int64_t ignore_index,
+    double smoothing,
+    int reduction
+);
 PolyTensor *poly_tensor_quick_gelu(PolyCtx *ctx, PolyTensor *src);
 PolyTensor *poly_tensor_detach(PolyCtx *ctx, PolyTensor *src);
 PolyTensor *poly_tensor_contiguous_backward(PolyCtx *ctx, PolyTensor *src);

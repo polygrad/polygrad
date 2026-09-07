@@ -118,7 +118,7 @@ static PolyTensor *mlp_mean_all(PolyCtx *ctx, PolyTensor *src) {
     axes[i] = i;
   PolyTensor *sum = poly_tensor_sum(ctx, src, axes, ndim, false);
   PolyTensor *denominator = mlp_int_scalar(ctx, numel);
-  return sum && denominator ? poly_tensor_div(ctx, sum, denominator) : NULL;
+  return sum && denominator ? poly_tensor_div(ctx, sum, denominator, 0) : NULL;
 }
 
 static PolyTensor *mlp_mse(PolyCtx *ctx, PolyTensor *pred, PolyTensor *target) {

@@ -353,6 +353,8 @@ def _shape_arg(shape):
     if any(_is_symbolic_dim(s) for s in shape):
         raise TypeError('this constructor does not yet accept symbolic dimensions')
     shape = tuple(int(s) for s in shape)
+    if any(s < 0 for s in shape):
+        raise ValueError(f'invalid input shape={shape}')
     if not shape:
         return None, 0, shape
     dims, ndim = _int64_array(shape)
@@ -665,9 +667,13 @@ class Tensor:
                 target_device_id = _device_id(self._device)
                 if dtypes.is_bool(scalar_dt) or dtypes.is_int(scalar_dt):
                     value = int(bool(normalized)) if dtypes.is_bool(scalar_dt) else int(normalized)
-                    if value < I64_MIN or value > I64_MAX:
+                    if 0 <= value < 2**64 and value > I64_MAX:
+                        factory = _ffi._lib.poly_tensor_const_uint_by_id
+                    elif value < I64_MIN or value > I64_MAX:
                         raise ValueError(f'scalar {value} is out of int64 range')
-                    self._tensor = _ffi._lib.poly_tensor_const_int_by_id(
+                    else:
+                        factory = _ffi._lib.poly_tensor_const_int_by_id
+                    self._tensor = factory(
                         self._ctx, value, dtype_id, target_device_id
                     )
                 else:
@@ -1439,7 +1445,6 @@ class Tensor:
         ret = Tensor(
             _ctx=self._ctx,
             _tensor=cloned,
-            _dtype=self._dtype_str,
             _device=dev,
         )
         if self._grad is not None:
@@ -1810,6 +1815,42 @@ class Tensor:
     def __truediv__(self, other):
         return self.div(other)
 
+    def __floordiv__(self, other):
+        return self.div(other, rounding_mode='floor')
+
+    def __rfloordiv__(self, other):
+        return self.div(other, reverse=True, rounding_mode='floor')
+
+    def bitwise_not(self):
+        core = _ffi._lib.poly_tensor_bitwise_not(self._ctx, self._tensor)
+        return self._make_result_from_core(core, None, [self])
+
+    def __invert__(self):
+        return self.bitwise_not()
+
+    def mod(self, other, reverse=False):
+        a, b, shape = self._broadcasted(other, reverse)
+        if dtypes.is_int(a.dtype) and dtypes.is_int(b.dtype):
+            core = _ffi._lib.poly_tensor_alu2(self._ctx, _ffi.OPS['FLOORMOD'], a._tensor, b._tensor)
+            return self._make_result_from_core(core, shape, [a, b])
+        return a - a.div(b, rounding_mode='floor') * b
+
+    def __mod__(self, other):
+        return self.mod(other)
+
+    def __rmod__(self, other):
+        return self.mod(other, reverse=True)
+
+    def fmod(self, other):
+        a, b, shape = self._broadcasted(other)
+        if dtypes.is_int(a.dtype) and dtypes.is_int(b.dtype):
+            core = _ffi._lib.poly_tensor_alu2(self._ctx, _ffi.OPS['CMOD'], a._tensor, b._tensor)
+            return self._make_result_from_core(core, shape, [a, b])
+        return a - a.div(b, rounding_mode='trunc') * b
+
+    def masked_fill(self, mask, value):
+        return self._ensure_tensor(mask).where(value, self)
+
     def __rtruediv__(self, other):
         return self.div(other, reverse=True)
 
@@ -1818,26 +1859,12 @@ class Tensor:
         # broadcasting and promotion, otherwise rounds true division
         # (mixin/elementwise.py:219-247).
         dividend, divisor, out_shape = self._broadcasted(other, reverse)
-        if dtypes.is_int(to_dtype(dividend.dtype)):
-            op_name = {'trunc': 'CDIV', 'floor': 'FLOORDIV'}.get(rounding_mode)
-            if op_name is not None:
-                core = _ffi._lib.poly_tensor_alu2(
-                    self._ctx, _ffi.OPS[op_name], dividend._tensor, divisor._tensor
-                )
-                return self._make_result_from_core(
-                    core, out_shape, [dividend, divisor]
-                )
+        if rounding_mode not in (None, 'trunc', 'floor'):
+            raise RuntimeError(f"rounding_mode={rounding_mode!r} is not supported")
         core = _ffi._lib.poly_tensor_div(
-            self._ctx, dividend._tensor, divisor._tensor
+            self._ctx, dividend._tensor, divisor._tensor, (None, 'trunc', 'floor').index(rounding_mode)
         )
-        result = self._make_result_from_core(core, out_shape, [dividend, divisor])
-        if rounding_mode is None:
-            return result
-        if rounding_mode == 'trunc':
-            return result.trunc()
-        if rounding_mode == 'floor':
-            return result.floor()
-        raise RuntimeError(f"rounding_mode={rounding_mode!r} is not supported")
+        return self._make_result_from_core(core, out_shape, [dividend, divisor])
 
     def __neg__(self):
         if dtypes.is_bool(to_dtype(self.dtype)):
@@ -2185,10 +2212,13 @@ class Tensor:
         # Pinned mixin/elementwise.py:726-737.
         return (self < 0).where(neg_slope * self, self)
 
-    def gelu(self):
+    def gelu(self, approximate='tanh'):
         # Pinned mixin/elementwise.py:761-776. C applies the exact formula
         # independently to retained/current roots.
-        core = _ffi._lib.poly_tensor_gelu(self._ctx, self._tensor)
+        if approximate not in ('tanh', 'none'):
+            raise RuntimeError(f'unknown GELU approximation: {approximate}')
+        fn = _ffi._lib.poly_tensor_gelu if approximate == 'tanh' else _ffi._lib.poly_tensor_gelu_exact
+        core = fn(self._ctx, self._tensor)
         return self._make_result_from_core(core, self.shape, [self])
 
     def quick_gelu(self):
@@ -2394,12 +2424,19 @@ class Tensor:
             raise ValueError(f'invalid pad_to {shape} for {current}')
         return self._pad_constant(tuple((0, ns - s) for s, ns in zip(current, shape)), value)
 
-    def pad(self, arg, mode="constant", value=0.0):
+    def pad(self, padding, mode="constant", value=0.0):
         """Pad using tinygrad-compatible flat or grouped padding."""
-        if mode != "constant":
+        arg = _normalize_pad_arg(padding, self.ndim)
+        if mode == 'constant':
+            return self._pad_constant(arg, value)
+        if mode not in ('circular', 'reflect', 'replicate'):
             raise NotImplementedError(f"mode={mode!r} is not supported")
-        arg = _normalize_pad_arg(arg, self.ndim)
-        return self._pad_constant(arg, value)
+        pairs = tuple((0, 0) if p is None else p for p in arg)
+        flat, n = _pair_array(pairs)
+        core = _ffi._lib.poly_tensor_pad_mode(self._ctx, self._tensor, flat, n, {'circular': 1, 'reflect': 2, 'replicate': 3}[mode])
+        if not core:
+            raise ValueError(f'invalid {mode} padding {pairs} for {self.shape}')
+        return self._make_result_from_core(core, None, [self])
 
     def _pad_constant(self, arg, value):
         arg = tuple((0, 0) if p is None else tuple(p) for p in arg)
@@ -2483,9 +2520,8 @@ class Tensor:
 
     def squeeze(self, dim=None):
         if dim is not None:
-            if dim < 0:
-                dim += len(self.shape)
-            if self.shape[dim] != 1:
+            dim = self._resolve_dim(dim)
+            if not self.ndim or self.shape[dim] != 1:
                 return self
             new_shape = tuple(s for i, s in enumerate(self.shape) if i != dim)
             return self.reshape(new_shape)
@@ -2495,8 +2531,7 @@ class Tensor:
         return self.reshape(new_shape)
 
     def unsqueeze(self, dim):
-        if dim < 0:
-            dim += len(self.shape) + 1
+        dim = self._resolve_dim(dim, extra=True)
         new_shape = list(self.shape)
         new_shape.insert(dim, 1)
         return self.reshape(tuple(new_shape))
@@ -2555,6 +2590,9 @@ class Tensor:
         if len(dims) != len(shifts):
             raise RuntimeError(f"len(dims)={len(dims)} != len(shifts)={len(shifts)}")
 
+        if 0 in self.shape:
+            return self
+
         shrink_arg = [(0, s) for s in self.shape]
         for d, s in zip(dims, shifts):
             size = self.shape[d]
@@ -2585,6 +2623,67 @@ class Tensor:
             tuple(s for i, s in enumerate(self.shape) if i not in axis)
         )
         return self._make_result_from_core(core, new_shape, [self])
+
+    def prod(self, axis=None, keepdim=False, dtype=None):
+        x = self if dtype is None else self.cast(dtype)
+        return x._extremum(_ffi._lib.poly_tensor_prod, axis, keepdim)
+
+    def logsumexp(self, axis=None, keepdim=False):
+        return self._extremum(_ffi._lib.poly_tensor_logsumexp, axis, keepdim)
+
+    def logcumsumexp(self, axis=0):
+        core = _ffi._lib.poly_tensor_logcumsumexp(self._ctx, self._tensor, self._resolve_dim(axis))
+        return self._make_result_from_core(core, None, [self])
+
+    def normalize(self, p=2.0, dim=1, eps=1e-12):
+        core = _ffi._lib.poly_tensor_normalize(self._ctx, self._tensor, float(p), self._resolve_dim(dim), float(eps))
+        return self._make_result_from_core(core, None, [self])
+
+    def softmin(self, axis=-1, dtype=None):
+        x = -self
+        return (x if dtype is None else x.cast(dtype)).softmax(axis)
+
+    def std_mean(self, axis=None, keepdim=False, correction=1):
+        return self.std(axis, keepdim, correction), self.mean(axis, keepdim)
+
+    def argmin(self, axis=None, keepdim=False):
+        if axis is None:
+            return self.flatten().argmin(0)
+        core = _ffi._lib.poly_tensor_argmin(self._ctx, self._tensor, self._resolve_dim(axis), bool(keepdim))
+        return self._make_result_from_core(core, None, [self])
+
+    def diag(self):
+        if self.ndim != 1:
+            raise ValueError('diag requires a vector')
+        core = _ffi._lib.poly_tensor_diag(self._ctx, self._tensor)
+        return self._make_result_from_core(core, None, [self])
+
+    def diagonal(self, offset=0, dim1=0, dim2=1):
+        dim1, dim2 = self._resolve_dim(dim1), self._resolve_dim(dim2)
+        if dim1 == dim2:
+            raise RuntimeError('diagonal dimensions must differ')
+        core = _ffi._lib.poly_tensor_diagonal(self._ctx, self._tensor, int(offset), dim1, dim2)
+        return self._make_result_from_core(core, None, [self])
+
+    def unfold(self, dim, size, step):
+        dim = self._resolve_dim(dim)
+        if size < 0 or step <= 0 or size > self.shape[dim]:
+            raise RuntimeError('invalid unfold size or step')
+        core = _ffi._lib.poly_tensor_unfold(self._ctx, self._tensor, dim, int(size), int(step))
+        return self._make_result_from_core(core, None, [self])
+
+    def meshgrid(self, *args, indexing='ij'):
+        if indexing not in ('ij', 'xy'):
+            raise RuntimeError('indexing must be ij or xy')
+        tensors = (self,) + args
+        if len(tensors) == 1:
+            return tensors
+        basis = tuple(range(len(tensors))) if indexing == 'ij' else (1, 0) + tuple(range(2, len(tensors)))
+        tensors = tuple(t.reshape((-1,) + (1,) * (len(args)-i)) for i, t in zip(basis, tensors))
+        shape = ()
+        for t in tensors:
+            shape = _broadcast_shapes(shape, t.shape)
+        return tuple(t.expand(shape) for t in tensors)
 
     def max(self, axis=None, keepdim=False):
         return self._extremum(_ffi._lib.poly_tensor_max, axis, keepdim)
@@ -3143,9 +3242,16 @@ class Tensor:
             f"reduction={reduction!r} must be one of ('none', 'sum', 'mean')"
         )
 
-    def sparse_categorical_crossentropy(self, target, axis=None):
-        """tinygrad name for class-index cross entropy."""
-        return self.cross_entropy(target, axis=axis)
+    def sparse_categorical_crossentropy(self, target, ignore_index=-1, label_smoothing=0.0, reduction='mean'):
+        """Pinned sparse loss uses the last class axis, unlike cross_entropy."""
+        assert 0 <= label_smoothing <= 1, 'label_smoothing must be in [0, 1]'
+        target = self._ensure_tensor(target)
+        if target.device != self.device:
+            raise RuntimeError('loss inputs must be on the same device')
+        core = _ffi._lib.poly_tensor_sparse_categorical_crossentropy(
+            self._ctx, self._tensor, target._tensor, _require_i64(ignore_index, 'ignore_index'),
+            float(label_smoothing), self._loss_reduction_id(reduction))
+        return self._make_result_from_core(core, None, [self, target])
 
     def binary_crossentropy(self, target, reduction='mean'):
         reduction_id = self._loss_reduction_id(reduction)
@@ -3329,6 +3435,16 @@ class Tensor:
 
     # --- Static constructors ---
 
+    def full_like(self, fill_value, dtype=None, device=None, buffer=True):
+        return Tensor.full(self.shape, fill_value, dtype=dtype or self.dtype,
+                           device=self.device if device is None else device, buffer=buffer, _ctx=self._ctx)
+
+    def zeros_like(self, **kwargs):
+        return self.full_like(0, **kwargs)
+
+    def ones_like(self, **kwargs):
+        return self.full_like(1, **kwargs)
+
     @staticmethod
     def _resolve_np_dtype(kwargs):
         dt = kwargs.get('dtype', 'float32')
@@ -3364,8 +3480,10 @@ class Tensor:
                 dtype_explicit, buffer,
             )
         else:
-            tensor = _ffi._lib.poly_tensor_full_int_by_id(
-                ctx, dims, ndim, _require_i64(fill_value, 'fill_value'), dtype_id,
+            factory = _ffi._lib.poly_tensor_full_uint_by_id if I64_MAX < fill_value < 2**64 else _ffi._lib.poly_tensor_full_int_by_id
+            integer = fill_value if I64_MAX < fill_value < 2**64 else _require_i64(fill_value, 'fill_value')
+            tensor = factory(
+                ctx, dims, ndim, integer, dtype_id,
                 _device_id(dev), dtype_explicit, buffer,
             )
         return _created_tensor(
@@ -3443,6 +3561,8 @@ class Tensor:
         dt = to_dtype(dtype_name)
         if not dtypes.is_float(dt):
             raise ValueError(f'randn only supports float dtypes, got {dt}')
+        if any(not isinstance(s, int) or s < 0 for s in shape):
+            raise ValueError(f'invalid input shape={shape}')
         dims, ndim, _ = _shape_arg(shape)
         tensor = _ffi._lib.poly_tensor_randn_by_id(
             ctx, dims, ndim, _dtype_id(dtype_name), _device_id(dev)
@@ -3450,6 +3570,18 @@ class Tensor:
         return _created_tensor(
             ctx, tensor, dtype_name, dev, 'poly_tensor_randn_by_id'
         )
+
+    @classmethod
+    def normal(cls, *shape, mean=0.0, std=1.0, **kwargs):
+        if std < 0:
+            raise ValueError('std must be nonnegative')
+        return std * cls.randn(*shape, **kwargs) + mean
+
+    @classmethod
+    def kaiming_normal(cls, *shape, a=0.01, **kwargs):
+        shape = _shape_tuple(*shape)
+        std = (2 / (1 + a**2) / _prod(shape[1:]))**0.5
+        return cls.normal(*shape, mean=0.0, std=std, **kwargs)
 
     @classmethod
     def uniform(cls, *shape, low=0.0, high=1.0, **kwargs):
@@ -3624,13 +3756,19 @@ class Tensor:
         return result
 
     def stack(self, *tensors, dim=0):
+        if isinstance(self, (list, tuple)) and tensors:
+            raise ValueError('pass either a sequence or individual tensors')
         if isinstance(self, (list, tuple)) and not tensors:
             tensors = tuple(self)
         elif isinstance(self, Tensor):
             tensors = (self,) + tensors
         else:
             tensors = (self,) + tensors
-        return Tensor.cat(*[t.unsqueeze(dim) for t in tensors], dim=dim)
+        dim = tensors[0]._resolve_dim(dim, extra=True)
+        assert all(t.shape == tensors[0].shape for t in tensors), 'stack shape mismatch'
+        cores = (_ffi._ptr * len(tensors))(*(t._tensor for t in tensors))
+        core = _ffi._lib.poly_tensor_stack(tensors[0]._ctx, cores, len(tensors), dim)
+        return tensors[0]._make_result_from_core(core, None, tensors)
 
     def split(self, sizes, dim=0):
         if dim < 0:

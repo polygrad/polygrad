@@ -2585,7 +2585,7 @@ TEST(realize, tensor_host_to_cpu_copy_feeds_reduce_broadcast_e2e) {
   PolyTensor *x = poly_tensor_reshape(ctx, a, dims, 2);
   PolyTensor *sum = poly_tensor_sum(ctx, x, axes, 1, true);
   PolyTensor *four = poly_tensor_const_float_by_id(ctx, 4.0, f32, POLY_DEVICE_CPU);
-  PolyTensor *mean = poly_tensor_div(ctx, sum, four);
+  PolyTensor *mean = poly_tensor_div(ctx, sum, four, 0);
   PolyTensor *tensor = poly_tensor_alu2(ctx, POLY_OP_SUB, x, mean);
   ASSERT_NOT_NULL(tensor);
   PolyTensor *out_tensor = NULL;
