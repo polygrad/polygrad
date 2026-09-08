@@ -573,6 +573,13 @@ Polygrad includes the usual tensor building blocks:
   compiled-program export for compatible runtimes;
 - model loading paths for supported safetensors/GGUF workflows.
 
+C Model imports reject malformed HF shards as a whole; they do not publish a
+partially loaded model. The C GGUF loader supports F32/F16/BF16, I8/I16/I32
+(GGML IDs24/25/26), and Q4_0/Q4_1/Q8_0/Q4_K/Q5_K/Q6_K with complete blocks.
+Other types are rejected, not interpreted as integers. This is narrower than
+the Python Tensor-level GGUF helper; decoding a file does not imply that its
+model architecture is supported.
+
 Structured linalg is implemented as portable tensor-composed fallback code. It
 does not add LAPACK or vendor-runtime dependencies. Backend-specific blocked
 kernels are planned for larger matrices.

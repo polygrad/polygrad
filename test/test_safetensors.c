@@ -9,6 +9,58 @@
 
 /* Round-trip: single tensor */
 
+TEST(safetensors, f32_byte_count_cannot_wrap_to_empty_payload) {
+  const char *header =
+      "{\"x\":{\"dtype\":\"F32\",\"shape\":[4503599627370496,1024],\"data_offsets\":[0,0]}}";
+  uint8_t bytes[256] = {0};
+  bytes[0] = (uint8_t)strlen(header);
+  memcpy(bytes + 8, header, strlen(header));
+  int n = 0;
+  PolySafetensorView *v = poly_safetensors_decode(bytes, 8 + (int)strlen(header), &n, NULL);
+  bool rejected = v == NULL && n == 0;
+  for (int i = 0; i < n; i++)
+    free(v[i].name);
+  free(v);
+  ASSERT_TRUE(rejected);
+  PASS();
+}
+
+TEST(safetensors, metadata_failure_does_not_publish_partial_output) {
+  const char *header = "{\"__metadata__\":{\"a\":\"b\"},\"x\":{}}";
+  uint8_t bytes[128] = {0};
+  bytes[0] = (uint8_t)strlen(header);
+  memcpy(bytes + 8, header, strlen(header));
+  for (int extended = 0; extended < 2; extended++) {
+    int n = -1;
+    char *meta = NULL;
+    void *v = extended ? (void *)poly_safetensors_decode_ex(bytes, 8 + strlen(header), &n, &meta)
+                       : (void *)poly_safetensors_decode(bytes, 8 + (int)strlen(header), &n, &meta);
+    bool rejected = !v && n == 0 && !meta;
+    free(meta);
+    free(v);
+    ASSERT_TRUE(rejected);
+  }
+  PASS();
+}
+
+TEST(safetensors, repeated_metadata_reclaims_replaced_value) {
+  const char *header = "{\"__metadata__\":{\"a\":\"old\"},\"__metadata__\":{\"a\":\"new\"}}";
+  uint8_t bytes[128] = {0};
+  bytes[0] = (uint8_t)strlen(header);
+  memcpy(bytes + 8, header, strlen(header));
+  for (int extended = 0; extended < 2; extended++) {
+    int n = -1;
+    char *meta = NULL;
+    void *v = extended ? (void *)poly_safetensors_decode_ex(bytes, 8 + strlen(header), &n, &meta)
+                       : (void *)poly_safetensors_decode(bytes, 8 + (int)strlen(header), &n, &meta);
+    ASSERT_INT_EQ(n, 0);
+    ASSERT_STR_EQ(meta, "{\"a\":\"new\"}");
+    free(meta);
+    free(v);
+  }
+  PASS();
+}
+
 TEST(safetensors, round_trip_single) {
   float data[] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
   int64_t shape[] = {2, 3};

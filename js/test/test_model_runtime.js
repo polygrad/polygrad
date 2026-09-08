@@ -2,6 +2,43 @@
 
 const compositionFixture = require('../../test/fixtures/model_definition.json')
 
+function checkModelCodecRejection(pg) {
+  const config = new TextEncoder().encode(JSON.stringify({ model_type: 'gpt2',
+    n_embd: 8, n_head: 2, n_layer: 1, vocab_size: 4, n_positions: 4 }))
+  const badShard = new Uint8Array([1, 0, 0, 0, 0, 0, 0, 0, 123])
+  let error
+  try { pg.Model.fromHF(config, [badShard]).dispose() } catch (e) { error = e }
+  assert(error && /failed to decode weight file/.test(error.message),
+    'Model import must reject a malformed shard before construction')
+  const badGguf = new Uint8Array(64)
+  badGguf.set([71, 71, 85, 70, 3])
+  badGguf[16] = 1
+  badGguf.fill(255, 24, 32)
+  error = null
+  try { pg.Model.fromGGUF(badGguf).dispose() } catch (e) { error = e }
+  assert(error && /GGUF/.test(error.message), 'Model import must reject an invalid GGUF length')
+  // Missing architecture is deliberate: distinguish successful byte decoding
+  // followed by family rejection from rejecting malformed tensor metadata.
+  for (const [type, numel, nbytes, valid] of [
+    [24, 1, 1, true], [25, 1, 2, true], [26, 1, 4, true],
+    [18, 1, 4, false], [8, 1, 34, false], [8, 32, 34, true]
+  ]) {
+    const bytes = new Uint8Array(64 + nbytes)
+    bytes.set([71, 71, 85, 70, 3])
+    const view = new DataView(bytes.buffer)
+    view.setUint32(8, 1, true) // one tensor, no KV metadata
+    view.setUint32(24, 1, true)
+    bytes[32] = 120 // name x
+    view.setUint32(33, 1, true)
+    view.setUint32(37, numel, true)
+    view.setUint32(45, type, true)
+    error = null
+    try { pg.Model.fromGGUF(bytes).dispose() } catch (e) { error = e }
+    assert(error && (valid ? /unsupported GGUF architecture/ : /invalid or unallocatable GGUF/).test(error.message),
+      `GGUF type ${type}, numel ${numel}: wrong decoder admission`)
+  }
+}
+
 async function checkCompositionFactories(pg) {
   const { Model, models } = pg
   const webgpu = String(pg.device).toLowerCase() === 'webgpu'
@@ -445,6 +482,7 @@ async function runModelRuntimeTests(pg) {
   console.log('\n== Model ==')
 
   await test('Model copied storage exact writes and objective selection', () => checkModelStorageObjectives(pg, Model))
+  await test('Model codecs reject malformed bytes before publication', () => checkModelCodecRejection(pg))
 
   await test('Model composition factories share C construction', () => checkCompositionFactories(pg))
   await test('Model composition catalogue and named target objective', () => checkCompositionCatalogue(pg))
@@ -1196,6 +1234,7 @@ async function runModelSmokeTests(pg) {
   await test('Model trace seals independent state with named loss', () => checkModelTrace(pg, Model))
 
   await test('Model copied storage exact writes and objective selection', () => checkModelStorageObjectives(pg, Model))
+  await test('Model codecs reject malformed bytes before publication', () => checkModelCodecRejection(pg))
 
   await test('typed integer input preserves bytes and rejects float binding', async () => {
     await checkTypedIntegerInput(pg, Model)

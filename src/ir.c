@@ -1254,6 +1254,8 @@ static int poly_graph_import(const uint8_t *data, int len, PolyIrSpec *out, bool
 
     /* Read arg */
     PolyArg arg;
+    PolyArg tag_arg = poly_arg_none();
+    PolyUOp *u = NULL;
     memset(&arg, 0, sizeof(arg));
     arg.kind = (PolyArgKind)arg_kind;
     PolyParamArg param_arg_tmp;
@@ -1468,16 +1470,15 @@ static int poly_graph_import(const uint8_t *data, int len, PolyIrSpec *out, bool
       arg.tensor_core.threads = (int)br_i64(&r);
       arg.tensor_core.has_upcast_axes = br_u8(&r) != 0;
       for (int d = 0; d < 3; d++) {
+        if (br_remaining(&r) < 2) goto cleanup_node_arg;
         uint16_t count = br_u16(&r);
         if (br_remaining(&r) < (int64_t)count * 16) {
-          if (srcs) free(srcs);
-          goto fail_nodes;
+          goto cleanup_node_arg;
         }
         if (count > 0) {
           wmma_upcast_axes_tmp[d] = malloc((size_t)count * sizeof(*wmma_upcast_axes_tmp[d]));
           if (!wmma_upcast_axes_tmp[d]) {
-            if (srcs) free(srcs);
-            goto fail_nodes;
+            goto cleanup_node_arg;
           }
           for (int i = 0; i < count; i++) {
             wmma_upcast_axes_tmp[d][i][0] = br_i64(&r);
@@ -1790,22 +1791,21 @@ static int poly_graph_import(const uint8_t *data, int len, PolyIrSpec *out, bool
       goto fail_nodes;
     }
 
-    PolyArg tag_arg = poly_arg_none();
     if (executable && !br_program_tag_arg(&r, tag_arg_kind, strings, n_strings, &tag_arg)) {
       fprintf(stderr, "poly_program_import: invalid tag metadata at node %u\n", i);
-      if (srcs) free(srcs);
-      goto fail_nodes;
+      goto cleanup_node_arg;
     }
 
     /* Create UOp -- restore tag to preserve BUFFER CSE-distinctness */
     PolyDType dtype = *dtype_table[dtype_idx];
     if (arg.kind == POLY_ARG_DTYPE) arg.dtype = dtype;
-    PolyUOp *u =
-        (tag != 0 || tag_arg.kind != POLY_ARG_NONE)
+    u = (tag != 0 || tag_arg.kind != POLY_ARG_NONE)
             ? poly_uop_tagged_arg(ctx, (PolyOps)op_val, dtype, srcs, n_src, arg, tag, tag_arg)
             : poly_uop(ctx, (PolyOps)op_val, dtype, srcs, n_src, arg);
 
-    /* Free temporary malloc'd arg buffers (arena has its own copy now) */
+  cleanup_node_arg:
+    /* UOp construction copies metadata; failed partial reads have no arena
+     * owner. Both paths must release every temporary axis/table allocation. */
     if (arg.kind == POLY_ARG_INT_TUPLE && arg.int_tuple.vals)
       free(arg.int_tuple.vals);
     else if (arg.kind == POLY_ARG_BIGINT && arg.bigint.limbs)
@@ -1826,6 +1826,11 @@ static int poly_graph_import(const uint8_t *data, int len, PolyIrSpec *out, bool
     if (bufferize_devices_tmp) free(bufferize_devices_tmp);
     if (allreduce_devices_tmp) free(allreduce_devices_tmp);
     if (param_devices_tmp) free(param_devices_tmp);
+
+    if (!u) {
+      free(srcs);
+      goto fail_nodes;
+    }
 
     if (tag > 0) poly_ctx_reserve_buf_tag(ctx, tag);
     if (op_val == POLY_OP_UNIQUE && arg.kind == POLY_ARG_INT)

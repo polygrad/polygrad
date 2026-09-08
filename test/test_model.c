@@ -4173,6 +4173,23 @@ TEST(model, tied_parameter_aliases_receive_one_sgd_update) {
   PASS();
 }
 
+#ifdef POLY_TESTING
+extern void poly_test_model_fail_named_logical(void);
+TEST(model, optimizer_named_buffer_failure_reclaims_candidate_name) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyModel *inst = make_tied_scalar_train_model(ctx);
+  ASSERT_NOT_NULL(inst);
+  ASSERT_INT_EQ(poly_model_set_optimizer(inst, POLY_OPTIM_ADAM, 0.1f, 0.9f, 0.999f, 1e-8f, 0), 0);
+  poly_test_model_fail_named_logical();
+  float loss;
+  int rc = poly_model_train_step(inst, NULL, NULL, 0, &loss);
+  poly_model_free(inst);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(rc != 0);
+  PASS();
+}
+#endif
+
 TEST(model, tied_parameter_aliases_share_one_adam_state_family) {
   PolyCtx *ctx = poly_ctx_new();
   PolyModel *inst = make_tied_scalar_train_model(ctx);

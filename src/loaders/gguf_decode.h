@@ -2,7 +2,6 @@
  * gguf_decode.h -- GGUF binary format decoder
  *
  * Parses GGUF files into PolyGgufDecoded. Contains zero model-specific logic.
- * Implementation deferred to Phase 3.
  */
 
 #ifndef POLY_GGUF_DECODE_H

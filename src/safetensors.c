@@ -326,8 +326,9 @@ PolySafetensorView *poly_safetensors_decode(
     if (strcmp(item->string, "__metadata__") != 0) count++;
   }
 
-  PolySafetensorView *views = calloc(count, sizeof(PolySafetensorView));
-  if (!views && count > 0) {
+  /* A valid empty archive still needs a non-NULL success result. */
+  PolySafetensorView *views = calloc(count ? (size_t)count : 1, sizeof(PolySafetensorView));
+  if (!views) {
     cJSON_Delete(root);
     return NULL;
   }
@@ -335,12 +336,15 @@ PolySafetensorView *poly_safetensors_decode(
   const uint8_t *data_region = data + 8 + (size_t)header_size;
   uint64_t data_region_len = (uint64_t)len - 8 - header_size;
 
+  char *metadata = NULL;
   int vi = 0;
   cJSON_ArrayForEach(item, root) {
     if (strcmp(item->string, "__metadata__") == 0) {
       if (metadata_out) {
         char *meta_str = cJSON_PrintUnformatted(item);
-        if (meta_str) *metadata_out = meta_str;
+        if (!meta_str) goto fail;
+        free(metadata);
+        metadata = meta_str;
       }
       continue;
     }
@@ -394,18 +398,21 @@ PolySafetensorView *poly_safetensors_decode(
       );
       goto fail;
     }
-    if ((end - start) != (uint64_t)numel * sizeof(float)) {
+    if ((uint64_t)numel > UINT64_MAX / sizeof(float) ||
+        (end - start) != (uint64_t)numel * sizeof(float)) {
       fprintf(stderr, "poly_safetensors_decode: data size mismatch for '%s'\n", item->string);
       goto fail;
     }
 
     views[vi].name = strdup(item->string);
+    if (!views[vi].name) goto fail;
     views[vi].data = (const float *)(data_region + start);
     vi++;
   }
 
   cJSON_Delete(root);
   *n_out = count;
+  if (metadata_out) *metadata_out = metadata;
   return views;
 
 fail_root:
@@ -413,6 +420,7 @@ fail_root:
   return NULL;
 
 fail:
+  free(metadata);
   for (int i = 0; i < vi; i++)
     free(views[i].name);
   free(views);
@@ -520,7 +528,7 @@ PolySafetensorViewEx *poly_safetensors_decode_ex(
   }
 
   uint64_t header_size = read_le64(data);
-  if (header_size > (uint64_t)len - 8) {
+  if (header_size > (uint64_t)len - 8 || header_size >= SIZE_MAX) {
     fprintf(
         stderr,
         "poly_safetensors_decode_ex: header_size %" PRIu64 " exceeds data length %" PRId64 "\n",
@@ -556,8 +564,8 @@ PolySafetensorViewEx *poly_safetensors_decode_ex(
     if (strcmp(item->string, "__metadata__") != 0) count++;
   }
 
-  PolySafetensorViewEx *views = calloc(count, sizeof(PolySafetensorViewEx));
-  if (!views && count > 0) {
+  PolySafetensorViewEx *views = calloc(count ? (size_t)count : 1, sizeof(PolySafetensorViewEx));
+  if (!views) {
     cJSON_Delete(root);
     return NULL;
   }
@@ -565,12 +573,15 @@ PolySafetensorViewEx *poly_safetensors_decode_ex(
   const uint8_t *data_region = data + 8 + (size_t)header_size;
   uint64_t data_region_len = (uint64_t)len - 8 - header_size;
 
+  char *metadata = NULL;
   int vi = 0;
   cJSON_ArrayForEach(item, root) {
     if (strcmp(item->string, "__metadata__") == 0) {
       if (metadata_out) {
         char *meta_str = cJSON_PrintUnformatted(item);
-        if (meta_str) *metadata_out = meta_str;
+        if (!meta_str) goto fail_ex;
+        free(metadata);
+        metadata = meta_str;
       }
       continue;
     }
@@ -635,12 +646,14 @@ PolySafetensorViewEx *poly_safetensors_decode_ex(
     }
 
     views[vi].name = strdup(item->string);
+    if (!views[vi].name) goto fail_ex;
     views[vi].raw_data = data_region + start;
     vi++;
   }
 
   cJSON_Delete(root);
   *n_out = count;
+  if (metadata_out) *metadata_out = metadata;
   return views;
 
 fail_root_ex:
@@ -648,6 +661,7 @@ fail_root_ex:
   return NULL;
 
 fail_ex:
+  free(metadata);
   for (int i = 0; i < vi; i++)
     free(views[i].name);
   free(views);

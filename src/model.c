@@ -1727,7 +1727,6 @@ PolyStatus poly_model_build(PolyModel *inst, PolyModelError *err) {
   }
   PolyModelOptions opts = build->opts;
   build_buffer_transaction_discard(inst->ctx, &buffer_transaction);
-  buffer_transaction_active = false;
   build_state_free(build);
   for (int i = 0; i < inst->n_residency_roots; i++)
     poly_uop_release(inst->ctx, inst->residency_roots[i]);
@@ -2830,6 +2829,13 @@ static int sync_buf_to_host(PolyModel *inst, int bi) {
   return 0;
 }
 
+#ifdef POLY_TESTING
+static bool test_named_logical_failure = false;
+void poly_test_model_fail_named_logical(void) {
+  test_named_logical_failure = true;
+}
+#endif
+
 static int append_runtime_named_buffer(
     PolyModel *inst,
     const char *name,
@@ -2864,7 +2870,16 @@ static int append_runtime_named_buffer(
   PolyUOp *logical = poly_uop_new_logical_buffer_with_slot(
       inst->ctx, buffer->dtype, numel, buffer->arg.param->slot
   );
-  if (!logical) return -1;
+#ifdef POLY_TESTING
+  if (test_named_logical_failure) {
+    test_named_logical_failure = false;
+    logical = NULL;
+  }
+#endif
+  if (!logical) {
+    free(nb.name);
+    return -1;
+  }
   nb.buffer = buffer;
   nb.logical_value = logical;
   nb.logical_buffer = logical;

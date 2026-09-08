@@ -21,6 +21,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
+#include <limits.h>
 
 /* GGML type codes */
 
@@ -32,9 +33,10 @@
 #define GGML_TYPE_Q4_K 12
 #define GGML_TYPE_Q5_K 13
 #define GGML_TYPE_Q6_K 14
-#define GGML_TYPE_I8 16
-#define GGML_TYPE_I16 17
-#define GGML_TYPE_I32 18
+/* Pinned llm/gguf.py _GGML_NATIVE;16–18 are quantized types, not integers. */
+#define GGML_TYPE_I8 24
+#define GGML_TYPE_I16 25
+#define GGML_TYPE_I32 26
 #define GGML_TYPE_BF16 30
 
 /* GGUF KV value type codes */
@@ -58,10 +60,17 @@ typedef struct {
   const uint8_t *data;
   int64_t len;
   int64_t pos;
+  int failed;
 } GgufReader;
 
-static int reader_ok(const GgufReader *r, int64_t need) {
-  return r->pos + need <= r->len;
+static int reader_ok(GgufReader *r, int64_t need) {
+  /* Python struct.unpack raises on short reads. Sticky failure prevents a
+   * truncated scalar's zero return from becoming valid metadata. */
+  if (r->failed || need < 0 || need > r->len - r->pos) {
+    r->failed = 1;
+    return 0;
+  }
+  return 1;
 }
 
 static uint8_t read_u8(GgufReader *r) {
@@ -128,19 +137,35 @@ static double read_f64(GgufReader *r) {
 /* Read GGUF string: u64 length + bytes (NOT null-terminated) */
 static char *read_string(GgufReader *r) {
   uint64_t slen = read_u64(r);
+  if (slen > INT_MAX || slen >= SIZE_MAX) {
+    r->failed = 1;
+    return NULL;
+  }
   if (!reader_ok(r, (int64_t)slen)) return NULL;
-  char *s = malloc(slen + 1);
+  char *s = malloc((size_t)slen + 1);
+  if (!s) {
+    r->failed = 1;
+    return NULL;
+  }
   memcpy(s, r->data + r->pos, slen);
   s[slen] = '\0';
   r->pos += (int64_t)slen;
   return s;
 }
 
-static int64_t align_up(int64_t pos, int64_t alignment) {
-  return (pos + alignment - 1) / alignment * alignment;
-}
-
 /* KV value reader */
+
+static void free_kv_value(PolyGgufKV *kv) {
+  if (kv->type == GGUF_TYPE_STRING) free(kv->val.s.str);
+  if (kv->type == GGUF_TYPE_ARRAY && kv->arr_data) {
+    if (kv->arr_type == GGUF_TYPE_STRING) {
+      char **strings = kv->arr_data;
+      for (int i = 0; i < kv->arr_count; i++)
+        free(strings[i]);
+    }
+    free(kv->arr_data);
+  }
+}
 
 static int read_kv_value(GgufReader *r, PolyGgufKV *kv) {
   switch (kv->type) {
@@ -184,26 +209,33 @@ static int read_kv_value(GgufReader *r, PolyGgufKV *kv) {
   case GGUF_TYPE_ARRAY: {
     int32_t elem_type = read_i32(r);
     uint64_t count = read_u64(r);
+    static const int min_bytes[] = {1, 1, 2, 2, 4, 4, 4, 1, 8, 12, 8, 8, 8};
+    if (r->failed || elem_type < 0 || elem_type > GGUF_TYPE_FLOAT64 || count > INT_MAX ||
+        count > (uint64_t)(r->len - r->pos) / min_bytes[elem_type])
+      return -1;
     kv->arr_type = elem_type;
     kv->arr_count = (int)count;
     if (elem_type == GGUF_TYPE_STRING) {
       /* Store string array */
       char **strs = calloc(count, sizeof(char *));
-      for (uint64_t i = 0; i < count; i++)
-        strs[i] = read_string(r);
+      if (count && !strs) return -1;
       kv->arr_data = strs;
+      for (uint64_t i = 0; i < count && !r->failed; i++)
+        strs[i] = read_string(r);
     } else if (elem_type == GGUF_TYPE_INT32 || elem_type == GGUF_TYPE_UINT32) {
       /* Store int32 array */
       int32_t *ints = calloc(count, sizeof(int32_t));
+      if (count && !ints) return -1;
+      kv->arr_data = ints;
       for (uint64_t i = 0; i < count; i++)
         ints[i] = read_i32(r);
-      kv->arr_data = ints;
     } else {
       /* Skip other array types */
       for (uint64_t i = 0; i < count; i++) {
         PolyGgufKV tmp = {.type = elem_type};
-        read_kv_value(r, &tmp);
-        if (elem_type == GGUF_TYPE_STRING) free(tmp.val.s.str);
+        int rc = read_kv_value(r, &tmp);
+        free_kv_value(&tmp);
+        if (rc != 0) return -1;
       }
       kv->val.u64 = count;
     }
@@ -213,7 +245,7 @@ static int read_kv_value(GgufReader *r, PolyGgufKV *kv) {
     poly_import_error_set(POLY_IMPORT_ERR_PARSE, "unknown GGUF KV type %d", kv->type);
     return -1;
   }
-  return 0;
+  return r->failed ? -1 : 0;
 }
 
 /* Bytes per element for GGML types */
@@ -296,11 +328,11 @@ static int ggml_to_decoded_dtype(int ggml_type) {
     return POLY_DECODED_Q5_K;
   case 14:
     return POLY_DECODED_Q6_K;
-  case 16:
+  case GGML_TYPE_I8:
     return POLY_DECODED_I8;
-  case 17:
+  case GGML_TYPE_I16:
     return POLY_DECODED_I16;
-  case 18:
+  case GGML_TYPE_I32:
     return POLY_DECODED_I32;
   case 30:
     return POLY_DECODED_BF16;
@@ -312,6 +344,7 @@ static int ggml_to_decoded_dtype(int ggml_type) {
 /* Main decode */
 
 int poly_gguf_decode(const uint8_t *data, int64_t len, PolyGgufDecoded **out) {
+  if (!out) return -1;
   *out = NULL;
 
   if (!data || len < 24) {
@@ -336,52 +369,62 @@ int poly_gguf_decode(const uint8_t *data, int64_t len, PolyGgufDecoded **out) {
 
   uint64_t n_tensors = read_u64(&r);
   uint64_t n_kv = read_u64(&r);
+  /* Bound wire counts before narrowing or allocating. Even an empty-name
+   * scalar tensor consumes24 bytes; a scalar KV consumes at least13. */
+  if (n_tensors > INT_MAX || n_kv > INT_MAX || n_tensors > (uint64_t)(len - 24) / 24 ||
+      n_kv > (uint64_t)(len - 24) / 13) {
+    poly_import_error_set(POLY_IMPORT_ERR_PARSE, "invalid GGUF table counts");
+    return -1;
+  }
+
+  typedef struct {
+    uint64_t offset;
+    int type;
+  } TensorInfo;
+  TensorInfo *tinfos = NULL;
+  PolyGgufDecoded *gguf = calloc(1, sizeof(*gguf));
+  if (!gguf) return -1;
+  gguf->arch = "";
 
   /* Parse KV metadata */
-  PolyGgufKV *kv = calloc(n_kv, sizeof(PolyGgufKV));
-  const char *arch = "";
+  PolyGgufKV *kv = n_kv ? calloc((size_t)n_kv, sizeof(*kv)) : NULL;
+  if (n_kv && !kv) goto fail;
+  gguf->kv = kv;
+  gguf->n_kv = (int)n_kv;
 
   for (uint64_t i = 0; i < n_kv; i++) {
     kv[i].key = read_string(&r);
     kv[i].type = read_i32(&r);
-    if (read_kv_value(&r, &kv[i]) != 0) {
-      /* Cleanup on error */
-      for (uint64_t j = 0; j <= i; j++) {
-        free(kv[j].key);
-        if (kv[j].type == GGUF_TYPE_STRING) free(kv[j].val.s.str);
-      }
-      free(kv);
-      return -1;
-    }
+    if (r.failed || read_kv_value(&r, &kv[i]) != 0) goto fail;
     if (kv[i].key && strcmp(kv[i].key, "general.architecture") == 0 &&
         kv[i].type == GGUF_TYPE_STRING && kv[i].val.s.str)
-      arch = kv[i].val.s.str;
+      gguf->arch = kv[i].val.s.str;
   }
 
   /* Parse tensor info entries */
-  typedef struct {
-    char *name;
-    uint64_t dims[8];
-    int n_dims;
-    int type;
-    uint64_t offset;
-    int64_t numel;
-  } TensorInfo;
-
-  TensorInfo *tinfos = calloc(n_tensors, sizeof(TensorInfo));
+  tinfos = n_tensors ? calloc((size_t)n_tensors, sizeof(*tinfos)) : NULL;
+  PolyDecodedTensor *tensors = n_tensors ? calloc((size_t)n_tensors, sizeof(*tensors)) : NULL;
+  gguf->tensors = tensors;
+  if (tensors) gguf->n_tensors = (int)n_tensors;
+  if (n_tensors && (!tinfos || !tensors)) goto fail;
   for (uint64_t i = 0; i < n_tensors; i++) {
-    tinfos[i].name = read_string(&r);
+    tensors[i].name = read_string(&r);
     uint32_t nd = read_u32(&r);
-    tinfos[i].n_dims = (int)nd;
+    if (r.failed || nd > 8) goto fail;
+    tensors[i].ndim = (int)nd;
     int64_t numel = 1;
     /* GGUF stores dims in reverse order (innermost first) */
-    for (uint32_t d = 0; d < nd && d < 8; d++) {
-      tinfos[i].dims[d] = read_u64(&r);
-      numel *= (int64_t)tinfos[i].dims[d];
+    for (uint32_t d = 0; d < nd; d++) {
+      uint64_t dim = read_u64(&r);
+      if (r.failed || dim > INT64_MAX || (dim && numel > INT64_MAX / (int64_t)dim)) goto fail;
+      tensors[i].shape[nd - 1 - d] = (int64_t)dim;
+      numel *= (int64_t)dim;
     }
-    tinfos[i].numel = numel;
+    tensors[i].numel = numel;
     tinfos[i].type = (int)read_u32(&r);
     tinfos[i].offset = read_u64(&r);
+    tensors[i].dtype = ggml_to_decoded_dtype(tinfos[i].type);
+    if (r.failed || tensors[i].dtype < 0) goto fail;
   }
 
   /* Compute data section start (aligned) */
@@ -395,56 +438,46 @@ int poly_gguf_decode(const uint8_t *data, int64_t len, PolyGgufDecoded **out) {
       break;
     }
   }
-  int64_t data_start = align_up(r.pos, alignment);
+  if (alignment <= 0) goto fail;
+  int64_t padding = r.pos % alignment ? alignment - r.pos % alignment : 0;
+  if (n_tensors && !reader_ok(&r, padding)) goto fail;
+  int64_t data_start = n_tensors ? r.pos + padding : r.pos;
 
   /* Build decoded tensors */
-  PolyDecodedTensor *tensors = calloc(n_tensors, sizeof(PolyDecodedTensor));
   for (uint64_t i = 0; i < n_tensors; i++) {
-    tensors[i].name = tinfos[i].name; /* transfer ownership */
-    tensors[i].numel = tinfos[i].numel;
-    tensors[i].dtype = ggml_to_decoded_dtype(tinfos[i].type);
-
-    /* GGUF dims are reversed (innermost first). Reverse to row-major. */
-    tensors[i].ndim = tinfos[i].n_dims;
-    for (int d = 0; d < tinfos[i].n_dims; d++)
-      tensors[i].shape[d] = (int64_t)tinfos[i].dims[tinfos[i].n_dims - 1 - d];
-
-    /* Zero-copy pointer into caller's buffer */
-    int64_t tensor_offset = data_start + (int64_t)tinfos[i].offset;
-    if (tensor_offset < len)
-      tensors[i].data = data + tensor_offset;
-    else
-      tensors[i].data = NULL;
+    uint64_t available = (uint64_t)(len - data_start);
+    if (tinfos[i].offset > available) goto fail;
+    available -= tinfos[i].offset;
+    int block_bytes, block_elems;
+    ggml_type_info(tinfos[i].type, &block_bytes, &block_elems);
+    if (!block_bytes || !block_elems) goto fail;
+    uint64_t numel = (uint64_t)tensors[i].numel;
+    /* The supported quantizers consume whole blocks. Pinned GGUF reshape
+     * rejects a remainder too; accepting one would leave uninitialized values. */
+    if (numel % block_elems) goto fail;
+    uint64_t blocks = numel / block_elems;
+    if (blocks > available / block_bytes) goto fail;
+    /* Publish borrowed bytes only after the complete typed/block span fits. */
+    tensors[i].data = data + data_start + tinfos[i].offset;
   }
 
   free(tinfos);
 
-  /* Build result */
-  PolyGgufDecoded *gguf = calloc(1, sizeof(PolyGgufDecoded));
-  gguf->kv = kv;
-  gguf->n_kv = (int)n_kv;
-  gguf->arch = arch;
-  gguf->tensors = tensors;
-  gguf->n_tensors = (int)n_tensors;
-
   *out = gguf;
   return 0;
+
+fail:
+  free(tinfos);
+  poly_gguf_decoded_free(gguf);
+  poly_import_error_set(POLY_IMPORT_ERR_PARSE, "invalid or unallocatable GGUF data");
+  return -1;
 }
 
 void poly_gguf_decoded_free(PolyGgufDecoded *gguf) {
   if (!gguf) return;
   for (int i = 0; i < gguf->n_kv; i++) {
     free(gguf->kv[i].key);
-    if (gguf->kv[i].type == GGUF_TYPE_STRING)
-      free(gguf->kv[i].val.s.str);
-    else if (gguf->kv[i].type == GGUF_TYPE_ARRAY && gguf->kv[i].arr_data) {
-      if (gguf->kv[i].arr_type == GGUF_TYPE_STRING) {
-        char **strs = (char **)gguf->kv[i].arr_data;
-        for (int j = 0; j < gguf->kv[i].arr_count; j++)
-          free(strs[j]);
-      }
-      free(gguf->kv[i].arr_data);
-    }
+    free_kv_value(&gguf->kv[i]);
   }
   free(gguf->kv);
   for (int i = 0; i < gguf->n_tensors; i++)

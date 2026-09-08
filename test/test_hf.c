@@ -13,11 +13,250 @@
 #include "../src/frontend.h"
 #include "../src/codegen/codegen.h"
 #include "../src/engine/schedule.h"
+#include "../src/loaders/hf_decode.h"
+#include "../src/loaders/gguf_decode.h"
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
 
 /* Safetensors multi-dtype */
+
+TEST(hf, decode_rejects_partial_shards_and_invalid_tables) {
+  const uint8_t invalid[] = {1, 0, 0, 0, 0, 0, 0, 0, '{'};
+  const uint8_t *files[] = {invalid};
+  int64_t lengths[] = {sizeof(invalid)};
+  PolyHfDecoded *hf = NULL;
+  int rc = poly_hf_decode("{}", 2, files, lengths, 1, &hf);
+  bool rejected = rc != 0 && !hf;
+  poly_hf_decoded_free(hf);
+  ASSERT_TRUE(rejected);
+  ASSERT_TRUE(poly_hf_decode("{}", 2, files, NULL, 1, &hf) != 0);
+  ASSERT_TRUE(poly_hf_decode("{}", 2, NULL, lengths, 1, &hf) != 0);
+  ASSERT_TRUE(poly_hf_decode("[]", 2, NULL, NULL, 0, &hf) != 0);
+  ASSERT_TRUE(poly_hf_decode("{}", 2, NULL, NULL, -1, &hf) != 0);
+  ASSERT_TRUE(poly_hf_decode("{}", 2, NULL, NULL, 0, NULL) != 0);
+  PASS();
+}
+
+static void gguf_test_u64(uint8_t *data, int *pos, uint64_t value, int bytes) {
+  for (int i = 0; i < bytes; i++)
+    data[(*pos)++] = (uint8_t)(value >> (8 * i));
+}
+
+#ifdef POLY_TESTING
+extern void poly_test_hf_alloc_fail_after(int count);
+TEST(hf, decode_allocation_failure_keeps_output_unpublished) {
+  float value = 1;
+  int64_t shape = 1;
+  PolySafetensorEntry entry = {
+      .name = "w", .data = &value, .shape = &shape, .ndim = 1, .dtype = POLY_ST_F32};
+  int len;
+  uint8_t *bytes = poly_safetensors_encode(&entry, 1, NULL, &len);
+  ASSERT_NOT_NULL(bytes);
+  const uint8_t *files[] = {bytes};
+  int64_t lengths[] = {len};
+  for (int fail = 0; fail < 2; fail++) {
+    PolyHfDecoded *hf = NULL;
+    poly_test_hf_alloc_fail_after(fail);
+    int rc = poly_hf_decode("{}", 2, files, lengths, 1, &hf);
+    poly_test_hf_alloc_fail_after(-1);
+    bool rejected = rc != 0 && !hf;
+    poly_hf_decoded_free(hf);
+    ASSERT_TRUE(rejected);
+  }
+  free(bytes);
+  PASS();
+}
+#endif
+
+static int gguf_test_header(uint8_t *data, int tensors, int kv) {
+  memcpy(data, "GGUF", 4);
+  int pos = 4;
+  gguf_test_u64(data, &pos, 3, 4);
+  gguf_test_u64(data, &pos, tensors, 8);
+  gguf_test_u64(data, &pos, kv, 8);
+  return pos;
+}
+
+TEST(hf, gguf_nested_array_skip_reclaims_storage) {
+  uint8_t data[128] = {0};
+  int pos = gguf_test_header(data, 0, 1);
+  gguf_test_u64(data, &pos, 1, 8);
+  data[pos++] = 'x';
+  gguf_test_u64(data, &pos, 9, 4); /* ARRAY of one ARRAY of one INT32 */
+  gguf_test_u64(data, &pos, 9, 4);
+  gguf_test_u64(data, &pos, 1, 8);
+  gguf_test_u64(data, &pos, 5, 4);
+  gguf_test_u64(data, &pos, 1, 8);
+  gguf_test_u64(data, &pos, 7, 4);
+  PolyGgufDecoded *g = NULL;
+  int rc = poly_gguf_decode(data, (pos + 31) / 32 * 32, &g);
+  poly_gguf_decoded_free(g);
+  ASSERT_INT_EQ(rc, 0);
+  PASS();
+}
+
+TEST(hf, gguf_rejects_truncated_metadata) {
+  uint8_t data[64] = {0};
+  int pos = gguf_test_header(data, 0, 1);
+  gguf_test_u64(data, &pos, 1, 8);
+  data[pos++] = 'x';
+  gguf_test_u64(data, &pos, 9, 4);
+  gguf_test_u64(data, &pos, 5, 4);
+  gguf_test_u64(data, &pos, 1, 8); /* missing INT32 */
+  PolyGgufDecoded *g = NULL;
+  int rc = poly_gguf_decode(data, pos, &g);
+  bool rejected = rc != 0 && !g;
+  poly_gguf_decoded_free(g);
+  ASSERT_TRUE(rejected);
+  PASS();
+}
+
+TEST(hf, gguf_rejects_overflowing_string_length) {
+  uint8_t data[32] = {0};
+  int pos = gguf_test_header(data, 0, 1);
+  gguf_test_u64(data, &pos, UINT64_MAX, 8);
+  PolyGgufDecoded *g = NULL;
+  int rc = poly_gguf_decode(data, pos, &g);
+  poly_gguf_decoded_free(g);
+  ASSERT_TRUE(rc != 0);
+  PASS();
+}
+
+TEST(hf, gguf_rejects_truncated_tensor_payload) {
+  uint8_t data[128] = {0};
+  int pos = gguf_test_header(data, 1, 0);
+  gguf_test_u64(data, &pos, 1, 8);
+  data[pos++] = 'x';
+  gguf_test_u64(data, &pos, 1, 4);
+  gguf_test_u64(data, &pos, 2, 8); /* two float32 elements */
+  gguf_test_u64(data, &pos, 0, 4);
+  gguf_test_u64(data, &pos, 0, 8);
+  PolyGgufDecoded *g = NULL;
+  int rc = poly_gguf_decode(data, (pos + 31) / 32 * 32 + 4, &g);
+  bool rejected = rc != 0 && !g;
+  poly_gguf_decoded_free(g);
+  ASSERT_TRUE(rejected);
+  PASS();
+}
+
+TEST(hf, gguf_layout_bounds_and_truncation) {
+  uint8_t data[128] = {0};
+  int pos = gguf_test_header(data, 1, 0);
+  gguf_test_u64(data, &pos, 1, 8);
+  data[pos++] = 'x';
+  int rank_pos = pos;
+  gguf_test_u64(data, &pos, 1, 4);
+  int dim_pos = pos;
+  gguf_test_u64(data, &pos, 2, 8);
+  gguf_test_u64(data, &pos, 0, 4);
+  int offset_pos = pos;
+  gguf_test_u64(data, &pos, 0, 8);
+  int start = (pos + 31) / 32 * 32;
+  float values[] = {1, 2};
+  memcpy(data + start, values, sizeof(values));
+  int len = start + sizeof(values);
+  PolyGgufDecoded *g = NULL;
+  ASSERT_INT_EQ(poly_gguf_decode(data, len, &g), 0);
+  ASSERT_INT_EQ(g->n_tensors, 1);
+  ASSERT_INT_EQ(g->tensors[0].numel, 2);
+  ASSERT_PTR_EQ(g->tensors[0].data, data + start);
+  ASSERT_INT_EQ(g->tensors[0].shape[0], 2);
+  poly_gguf_decoded_free(g);
+  for (int size = 0; size < len; size++) {
+    g = NULL;
+    ASSERT_TRUE(poly_gguf_decode(data, size, &g) != 0);
+    ASSERT_TRUE(g == NULL);
+  }
+  int positions[] = {8, 16, rank_pos, dim_pos, offset_pos};
+  for (int i = 0; i < 5; i++) {
+    uint8_t malformed[128];
+    memcpy(malformed, data, sizeof(data));
+    int at = positions[i];
+    gguf_test_u64(malformed, &at, UINT64_MAX, i == 2 ? 4 : 8);
+    ASSERT_TRUE(poly_gguf_decode(malformed, len, &g) != 0);
+    ASSERT_TRUE(g == NULL);
+  }
+  ASSERT_TRUE(poly_gguf_decode(data, len, NULL) != 0);
+  PASS();
+}
+
+static int gguf_test_tensor(uint8_t *data, int type, int numel, int nbytes) {
+  int pos = gguf_test_header(data, 1, 0);
+  gguf_test_u64(data, &pos, 1, 8);
+  data[pos++] = 'x';
+  gguf_test_u64(data, &pos, 1, 4);
+  gguf_test_u64(data, &pos, numel, 8);
+  gguf_test_u64(data, &pos, type, 4);
+  gguf_test_u64(data, &pos, 0, 8);
+  return (pos + 31) / 32 * 32 + nbytes;
+}
+
+TEST(hf, gguf_native_type_ids_match_pinned_metadata) {
+  int types[] = {24, 25, 26};
+  int dtypes[] = {POLY_DECODED_I8, POLY_DECODED_I16, POLY_DECODED_I32};
+  for (int i = 0; i < 3; i++) {
+    uint8_t data[128] = {0};
+    int len = gguf_test_tensor(data, types[i], 1, 1 << i);
+    memset(data + len - (1 << i), 255, 1 << i);
+    data[len - (1 << i)] = 254;
+    PolyGgufDecoded *g = NULL;
+    ASSERT_INT_EQ(poly_gguf_decode(data, len, &g), 0);
+    ASSERT_INT_EQ(g->tensors[0].dtype, dtypes[i]);
+    float *values = poly_decoded_tensor_to_f32(&g->tensors[0]);
+    ASSERT_NOT_NULL(values);
+    ASSERT_FLOAT_EQ(values[0], -2, 0);
+    free(values);
+    poly_gguf_decoded_free(g);
+    len = gguf_test_tensor(data, 16 + i, 1, 1 << i);
+    ASSERT_TRUE(poly_gguf_decode(data, len, &g) != 0);
+    ASSERT_TRUE(g == NULL);
+  }
+  PASS();
+}
+
+TEST(hf, gguf_quantization_requires_complete_blocks) {
+  uint8_t data[128] = {0};
+  PolyGgufDecoded *g = NULL;
+  int len = gguf_test_tensor(data, 8, 1, 34);
+  int rc = poly_gguf_decode(data, len, &g);
+  bool rejected = rc != 0 && !g;
+  poly_gguf_decoded_free(g);
+  ASSERT_TRUE(rejected);
+  len = gguf_test_tensor(data, 8, 32, 34);
+  ASSERT_INT_EQ(poly_gguf_decode(data, len, &g), 0);
+  ASSERT_INT_EQ(g->tensors[0].dtype, POLY_DECODED_Q8_0);
+  float *values = poly_decoded_tensor_to_f32(&g->tensors[0]);
+  ASSERT_NOT_NULL(values);
+  for (int i = 0; i < 32; i++)
+    ASSERT_FLOAT_EQ(values[i], 0, 0);
+  free(values);
+  poly_gguf_decoded_free(g);
+  PASS();
+}
+
+TEST(hf, decode_shards_publish_together_and_borrow_bytes) {
+  float value = 3;
+  int64_t shape = 1;
+  PolySafetensorEntry entry = {
+      .name = "w", .data = &value, .shape = &shape, .ndim = 1, .dtype = POLY_ST_F32};
+  int len, empty_len;
+  uint8_t *bytes = poly_safetensors_encode(&entry, 1, NULL, &len);
+  uint8_t *empty = poly_safetensors_encode(NULL, 0, NULL, &empty_len);
+  const uint8_t invalid[] = {1, 0, 0, 0, 0, 0, 0, 0, '{'};
+  const uint8_t *files[] = {empty, bytes, invalid};
+  int64_t lengths[] = {empty_len, len, sizeof(invalid)};
+  PolyHfDecoded *hf = NULL;
+  ASSERT_INT_EQ(poly_hf_decode("{}", 2, files, lengths, 2, &hf), 0);
+  ASSERT_INT_EQ(hf->n_tensors, 1);
+  ASSERT_PTR_EQ(hf->tensors[0].data, bytes + len - sizeof(float));
+  poly_hf_decoded_free(hf);
+  ASSERT_TRUE(poly_hf_decode("{}", 2, files, lengths, 3, &hf) != 0);
+  ASSERT_TRUE(hf == NULL);
+  free(bytes);
+  free(empty);
+  PASS();
+}
 
 /* Helper: create a minimal safetensors file with given dtype string */
 static uint8_t *make_st_file(

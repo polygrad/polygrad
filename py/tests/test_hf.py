@@ -116,6 +116,16 @@ class TestHFLoadBasic:
 
 
 class TestHFLoadEdgeCases:
+    @pytest.mark.parametrize('shards', [[struct.pack('<Q', 1) + b'{'], [b'']])
+    def test_malformed_shard_fails_before_model_publication(self, shards):
+        with pytest.raises(RuntimeError, match='NULL'):
+            load_hf_bytes(GPT2_TINY_CONFIG, shards)
+
+    def test_gguf_invalid_length_fails_before_model_publication(self):
+        data = b'GGUF' + struct.pack('<IQQQ', 3, 0, 1, 2**64 - 1) + bytes(32)
+        with pytest.raises(RuntimeError, match='NULL'):
+            Model.from_gguf(data)
+
     def test_unsupported_model_type(self):
         """Unsupported model types should raise."""
         config = json.dumps({'model_type': 'llama', 'vocab_size': 100})

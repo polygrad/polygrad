@@ -14,6 +14,42 @@
 #include <stdlib.h>
 #include <limits.h>
 
+TEST(ir, truncated_tensor_core_axes_release_partial_metadata) {
+  PolyCtx *ctx = poly_ctx_new();
+  int64_t axes[][2] = {{7, 11}};
+  int dims[] = {8, 8, 8};
+  PolyArg arg = poly_arg_tensor_core(dims, POLY_FLOAT16, "CUDA", 32, NULL, NULL, false);
+  arg.tensor_core.has_upcast_axes = true;
+  for (int d = 0; d < 3; d++) {
+    arg.tensor_core.upcast_axes[d] = axes;
+    arg.tensor_core.n_upcast_axes[d] = 1;
+  }
+  PolyUOp *value = poly_uop0(ctx, POLY_OP_WMMA, POLY_FLOAT32, arg);
+  PolyIrEntrypoint ep = {.name = "forward", .sink = poly_sink1(ctx, value)};
+  PolyIrSpec spec = {.ctx = ctx, .entrypoints = &ep, .n_entrypoints = 1};
+  int len = 0;
+  uint8_t *bytes = poly_ir_export(&spec, &len);
+  ASSERT_NOT_NULL(bytes);
+  uint8_t pattern[16] = {7, 0, 0, 0, 0, 0, 0, 0, 11, 0, 0, 0, 0, 0, 0, 0};
+  int cut = -1;
+  for (int i = 32; i + 18 < len; i++)
+    if (!memcmp(bytes + i, pattern, 16)) {
+      cut = i + 18;
+      break;
+    }
+  ASSERT_TRUE(cut > 0);
+  PolyIrSpec imported = {0};
+  int rc = poly_ir_import(bytes, cut, &imported);
+  if (rc == 0) {
+    poly_ir_spec_free(&imported);
+    poly_ctx_destroy(imported.ctx);
+  }
+  free(bytes);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(rc != 0);
+  PASS();
+}
+
 TEST(ir, ffi_buffer_uses_current_tinygrad_storage_topology) {
   PolyCtx *ctx = poly_ctx_new();
   poly_ctx_set_preferred_device(ctx, POLY_DEVICE_X86);
