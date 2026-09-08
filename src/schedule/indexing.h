@@ -43,7 +43,8 @@ PolyIndexingCtx *poly_indexing_ctx_new(PolyCtx *ctx);
 void poly_indexing_ctx_destroy(PolyIndexingCtx *ictx);
 PolyMap *poly_consumer_map_build(PolyCtx *ctx, PolyUOp *sink);
 PolyConsumerList *poly_consumer_map_get(PolyMap *cmap, PolyUOp *u);
-void poly_realize_map_build(PolyIndexingCtx *ictx, PolyUOp *sink);
+/* False leaves private metadata suitable only for destruction. */
+bool poly_realize_map_build(PolyIndexingCtx *ictx, PolyUOp *sink);
 bool poly_is_realized(PolyIndexingCtx *ictx, PolyUOp *u);
 /* False leaves a partial private range map: discard the indexing context,
  * never pass it to poly_apply_rangeify. */

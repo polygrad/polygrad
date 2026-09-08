@@ -29,6 +29,39 @@ static bool range_scratch_alloc_fails(void) {
   return false;
 }
 
+#ifdef POLY_TESTING
+static _Thread_local const char *indexing_fail_site;
+static _Thread_local int indexing_fail_after = -1;
+static _Thread_local bool indexing_alloc_failed;
+void poly_test_indexing_alloc_fail_after(const char *site, int count) {
+  indexing_fail_site = site;
+  indexing_fail_after = count;
+  indexing_alloc_failed = false;
+}
+bool poly_test_indexing_alloc_failed(void) {
+  return indexing_alloc_failed;
+}
+#endif
+
+static bool indexing_alloc_fails(const char *site) {
+#ifdef POLY_TESTING
+  if (indexing_fail_after >= 0 && indexing_fail_site && !strcmp(site, indexing_fail_site)) {
+    if (indexing_fail_after-- == 0) return indexing_alloc_failed = true;
+  }
+#else
+  (void)site;
+#endif
+  return false;
+}
+
+static void *indexing_alloc(size_t size, const char *site) {
+  return indexing_alloc_fails(site) ? NULL : malloc(size);
+}
+
+static void *indexing_realloc(void *ptr, size_t size, const char *site) {
+  return indexing_alloc_fails(site) ? NULL : realloc(ptr, size);
+}
+
 static PolyUOp *index_const(PolyCtx *ctx, int64_t value) {
   return poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(value));
 }
@@ -545,24 +578,32 @@ static bool rangeify_is_indexable_source(PolyUOp *u) {
          u->op == POLY_OP_MSELECT || u->op == POLY_OP_AFTER;
 }
 
-/* Pointer hashing/equality (shared with the retired single-kernel scheduler) */
-
-/* Consumer list helpers */
+/* C storage for run_rangeify's Python dictionaries/lists. Grow before
+ * publishing: failed realloc must leave the old owner available for cleanup. */
+static bool indexing_list_grow(PolyUOp ***items, int *cap, const char *site) {
+  if (*cap > INT_MAX / 2) return false;
+  int next = *cap ? *cap * 2 : 4;
+  if ((size_t)next > SIZE_MAX / sizeof(**items)) return false;
+  PolyUOp **grown = indexing_realloc(*items, (size_t)next * sizeof(*grown), site);
+  if (!grown) return false;
+  *items = grown;
+  *cap = next;
+  return true;
+}
 
 static PolyConsumerList *consumer_list_new(void) {
-  PolyConsumerList *cl = malloc(sizeof(PolyConsumerList));
+  PolyConsumerList *cl = indexing_alloc(sizeof(PolyConsumerList), "consumer");
+  if (!cl) return NULL;
   cl->items = NULL;
   cl->count = 0;
   cl->cap = 0;
   return cl;
 }
 
-static void consumer_list_add(PolyConsumerList *cl, PolyUOp *consumer) {
-  if (cl->count >= cl->cap) {
-    cl->cap = cl->cap ? cl->cap * 2 : 4;
-    cl->items = realloc(cl->items, cl->cap * sizeof(PolyUOp *));
-  }
+static bool consumer_list_add(PolyConsumerList *cl, PolyUOp *consumer) {
+  if (cl->count >= cl->cap && !indexing_list_grow(&cl->items, &cl->cap, "consumer")) return false;
   cl->items[cl->count++] = consumer;
+  return true;
 }
 
 static void consumer_list_free(PolyConsumerList *cl) {
@@ -602,19 +643,23 @@ static int rangeify_data_src_count(PolyUOp *u) {
   }
 }
 
+static void free_consumer_list_entry(const void *key, void *value, void *ud);
+
 PolyMap *poly_consumer_map_build(PolyCtx *ctx, PolyUOp *sink) {
   PolyMap *cmap = poly_map_new(64);
 
   /* Toposort to get all UOps in dependency order */
   int n_uops;
   PolyUOp **topo = poly_toposort_ex_alloc(ctx, sink, &n_uops, NULL, false);
-  if (!topo) return cmap;
+  if (!topo) goto fail;
 
   /* Ensure every UOp has an entry (even if 0 consumers) */
   for (int i = 0; i < n_uops; i++) {
     uint32_t h = poly_ptr_hash(topo[i]);
     if (!poly_map_get(cmap, h, topo[i], poly_ptr_eq)) {
-      poly_map_set(cmap, h, topo[i], consumer_list_new(), poly_ptr_eq);
+      PolyConsumerList *cl = consumer_list_new();
+      if (!cl) goto fail;
+      poly_map_set(cmap, h, topo[i], cl, poly_ptr_eq);
     }
   }
 
@@ -628,12 +673,17 @@ PolyMap *poly_consumer_map_build(PolyCtx *ctx, PolyUOp *sink) {
       PolyUOp *src = u->src[j];
       uint32_t h = poly_ptr_hash(src);
       PolyConsumerList *cl = poly_map_get(cmap, h, src, poly_ptr_eq);
-      if (cl) consumer_list_add(cl, u);
+      if (cl && !consumer_list_add(cl, u)) goto fail;
     }
   }
 
   poly_toposort_free(topo);
   return cmap;
+fail:
+  poly_toposort_free(topo);
+  poly_map_foreach(cmap, free_consumer_list_entry, NULL);
+  poly_map_destroy(cmap);
+  return NULL;
 }
 
 PolyConsumerList *poly_consumer_map_get(PolyMap *cmap, PolyUOp *u) {
@@ -693,10 +743,15 @@ typedef struct {
 } PolyEndingRanges;
 
 static PolyEndingRanges *ending_new(void) {
-  PolyEndingRanges *er = malloc(sizeof(PolyEndingRanges));
+  PolyEndingRanges *er = indexing_alloc(sizeof(PolyEndingRanges), "ending");
+  if (!er) return NULL;
   er->count = 0;
   er->cap = 4;
-  er->items = malloc(er->cap * sizeof(PolyUOp *));
+  er->items = indexing_alloc(er->cap * sizeof(PolyUOp *), "ending");
+  if (!er->items) {
+    free(er);
+    return NULL;
+  }
   return er;
 }
 
@@ -704,6 +759,7 @@ static void ending_destroy(const void *key, void *value, void *ud) {
   (void)key;
   (void)ud;
   PolyEndingRanges *er = value;
+  if (!er) return;
   free(er->items);
   free(er);
 }
@@ -718,19 +774,18 @@ static bool ending_contains(PolyEndingRanges *er, PolyUOp *r) {
   return false;
 }
 
-static void ending_add(PolyEndingRanges *er, PolyUOp *r) {
-  if (!r || ending_contains(er, r)) return;
-  if (er->count >= er->cap) {
-    er->cap *= 2;
-    er->items = realloc(er->items, er->cap * sizeof(PolyUOp *));
-  }
+static bool ending_add(PolyEndingRanges *er, PolyUOp *r) {
+  if (!r || ending_contains(er, r)) return true;
+  if (er->count >= er->cap && !indexing_list_grow(&er->items, &er->cap, "ending")) return false;
   er->items[er->count++] = r;
+  return true;
 }
 
 static PolyEndingRanges *ending_get_or_create(PolyMap *m, PolyUOp *key) {
   PolyEndingRanges *er = poly_map_get(m, poly_ptr_hash(key), key, poly_ptr_eq);
   if (er) return er;
   er = ending_new();
+  if (!er) return NULL;
   poly_map_set(m, poly_ptr_hash(key), key, er, poly_ptr_eq);
   return er;
 }
@@ -738,7 +793,8 @@ static PolyEndingRanges *ending_get_or_create(PolyMap *m, PolyUOp *key) {
 /* Indexing context */
 
 PolyIndexingCtx *poly_indexing_ctx_new(PolyCtx *ctx) {
-  PolyIndexingCtx *ictx = malloc(sizeof(PolyIndexingCtx));
+  PolyIndexingCtx *ictx = indexing_alloc(sizeof(PolyIndexingCtx), "context");
+  if (!ictx) return NULL;
   ictx->ctx = ctx;
   ictx->consumer_map = NULL;
   ictx->realize_map = poly_map_new(32);
@@ -750,6 +806,7 @@ PolyIndexingCtx *poly_indexing_ctx_new(PolyCtx *ctx) {
 }
 
 void poly_indexing_ctx_destroy(PolyIndexingCtx *ictx) {
+  if (!ictx) return;
   if (ictx->consumer_map) {
     poly_map_foreach(ictx->consumer_map, free_consumer_list_entry, NULL);
     poly_map_destroy(ictx->consumer_map);
@@ -772,11 +829,8 @@ void poly_indexing_ctx_destroy(PolyIndexingCtx *ictx) {
  * An op is "realized" if it must become a kernel boundary — its output
  * goes to a buffer rather than being fused into a consumer's kernel.
  *
- * Rules (simplified for CPU-only, no OUTER ranges yet):
- *  1. CONTIGUOUS, COPY, STORE, ASSIGN are always realized
- *  2. Sources of COPY/MSELECT/MSTACK are realized when required
- *  3. A STORE source that reads its destination base is realized for WAR safety
- *  4. Everything else is potentially fusable
+ * The pm_generate_realize_map rules below establish explicit boundaries;
+ * consumer range propagation can introduce additional boundaries.
  */
 
 /* Ops that are always contiguous / never need realization */
@@ -798,45 +852,49 @@ static bool is_always_contiguous(PolyOps op) {
   }
 }
 
-static void realize_mark(PolyIndexingCtx *ictx, PolyUOp *u) {
+static bool realize_mark(PolyIndexingCtx *ictx, PolyUOp *u) {
   uint32_t h = poly_ptr_hash(u);
-  if (poly_map_get(ictx->realize_map, h, u, poly_ptr_eq)) return;
-  PolyRealizeInfo *ri = malloc(sizeof(PolyRealizeInfo));
+  if (poly_map_get(ictx->realize_map, h, u, poly_ptr_eq)) return true;
+  PolyRealizeInfo *ri = indexing_alloc(sizeof(PolyRealizeInfo), "realize");
+  if (!ri) return false;
   ri->axes = NULL;
   ri->n_axes = -1; /* -1 = all axes (not yet populated with specific list) */
   poly_map_set(ictx->realize_map, h, u, ri, poly_ptr_eq);
+  return true;
 }
 
 /* Tinygrad 2026-08-22/a9069c177a9d schedule/indexing.py:realize. */
-static void poly_rangeify_realize(PolyIndexingCtx *ictx, PolyUOp *u) {
-  realize_mark(ictx, u);
+static bool poly_rangeify_realize(PolyIndexingCtx *ictx, PolyUOp *u) {
+  return realize_mark(ictx, u);
 }
 
 /* Tinygrad 2026-08-22/a9069c177a9d schedule/indexing.py:realize_srcs. */
-static void poly_rangeify_realize_srcs(PolyIndexingCtx *ictx, PolyUOp *u) {
+static bool poly_rangeify_realize_srcs(PolyIndexingCtx *ictx, PolyUOp *u) {
   for (int i = 0; i < u->n_src; i++) {
     PolyUOp *base = poly_uop_unsharded_base(u->src[i]);
-    if (base && !is_always_contiguous(base->op)) realize_mark(ictx, u->src[i]);
+    if (base && !is_always_contiguous(base->op) && !realize_mark(ictx, u->src[i])) return false;
   }
+  return true;
 }
 
 /* Tinygrad 2026-08-22/a9069c177a9d
  * schedule/indexing.py:realize_custom_kernel_srcs. */
-static void poly_rangeify_realize_custom_kernel_srcs(PolyIndexingCtx *ictx, PolyUOp *call) {
+static bool poly_rangeify_realize_custom_kernel_srcs(PolyIndexingCtx *ictx, PolyUOp *call) {
   for (int i = 1; i < call->n_src; i++) {
     PolyUOp *src = call->src[i];
     while (src && src->op == POLY_OP_RESHAPE && src->n_src > 0)
       src = src->src[0];
     if (src && !is_always_contiguous(src->op)) {
-      realize_mark(ictx, src);
+      if (!realize_mark(ictx, src)) return false;
       poly_map_set(ictx->non_removable, poly_ptr_hash(src), src, src, poly_ptr_eq);
     }
   }
+  return true;
 }
 
 /* Tinygrad 2026-08-22/a9069c177a9d
  * schedule/indexing.py:realize_store_after_src. */
-static void poly_rangeify_realize_store_after_src(
+static bool poly_rangeify_realize_store_after_src(
     PolyIndexingCtx *ictx,
     PolyUOp *dest,
     PolyUOp *src
@@ -844,18 +902,20 @@ static void poly_rangeify_realize_store_after_src(
   PolyUOp *dest_base = poly_uop_base(dest);
   int n_topo = 0;
   PolyUOp **topo = poly_toposort_ex_alloc(ictx->ctx, src, &n_topo, NULL, false);
-  if (!topo) return;
+  if (!topo) return false;
+  bool ok = true;
   for (int i = 0; i < n_topo; i++) {
     if (topo[i] == dest_base) {
-      realize_mark(ictx, src);
+      ok = realize_mark(ictx, src);
       break;
     }
   }
   poly_toposort_free(topo);
+  return ok;
 }
 
-void poly_realize_map_build(PolyIndexingCtx *ictx, PolyUOp *sink) {
-  if (sink->op != POLY_OP_SINK) return;
+bool poly_realize_map_build(PolyIndexingCtx *ictx, PolyUOp *sink) {
+  if (sink->op != POLY_OP_SINK) return true;
 
   /* Walk graph for the exact pm_generate_realize_map rules. Pinned tinygrad
    * does not blanket-realize SINK sources: earliest_rewrites has already made
@@ -863,28 +923,28 @@ void poly_realize_map_build(PolyIndexingCtx *ictx, PolyUOp *sink) {
    * below define materialization boundaries. */
   int n_uops;
   PolyUOp **topo = poly_toposort_ex_alloc(ictx->ctx, sink, &n_uops, NULL, false);
-  if (!topo) return;
+  if (!topo) return false;
 
   for (int i = 0; i < n_uops; i++) {
     PolyUOp *u = topo[i];
     switch (u->op) {
     case POLY_OP_CONTIGUOUS:
     case POLY_OP_STORE:
-      poly_rangeify_realize(ictx, u);
+      if (!poly_rangeify_realize(ictx, u)) goto fail;
       break;
     default:
       break;
     }
 
     if (u->op == POLY_OP_MSELECT || u->op == POLY_OP_MSTACK) {
-      poly_rangeify_realize_srcs(ictx, u);
+      if (!poly_rangeify_realize_srcs(ictx, u)) goto fail;
     }
 
     /* Current realize_custom_kernel_srcs marks non-storage CALL inputs as
      * non-removable materializations after stripping leading RESHAPEs. */
     if (u->op == POLY_OP_CALL && u->n_src > 0 &&
         (u->src[0]->op == POLY_OP_SINK || u->src[0]->op == POLY_OP_PROGRAM)) {
-      poly_rangeify_realize_custom_kernel_srcs(ictx, u);
+      if (!poly_rangeify_realize_custom_kernel_srcs(ictx, u)) goto fail;
     }
   }
 
@@ -892,9 +952,13 @@ void poly_realize_map_build(PolyIndexingCtx *ictx, PolyUOp *sink) {
   for (int i = 0; i < n_uops; i++) {
     PolyUOp *u = topo[i];
     if (u->op != POLY_OP_STORE || u->n_src < 2) continue;
-    poly_rangeify_realize_store_after_src(ictx, u->src[0], u->src[1]);
+    if (!poly_rangeify_realize_store_after_src(ictx, u->src[0], u->src[1])) goto fail;
   }
   poly_toposort_free(topo);
+  return true;
+fail:
+  poly_toposort_free(topo);
+  return false;
 }
 
 bool poly_is_realized(PolyIndexingCtx *ictx, PolyUOp *u) {
@@ -904,18 +968,31 @@ bool poly_is_realized(PolyIndexingCtx *ictx, PolyUOp *u) {
 /* Range map helpers */
 
 /* Get cached shape, or compute and cache it */
-static PolyShape ictx_shape(PolyIndexingCtx *ictx, PolyUOp *u) {
+static bool ictx_shape(PolyIndexingCtx *ictx, PolyUOp *u, PolyShape *out) {
   PolyShape *cached = poly_map_get(ictx->shape_cache, poly_ptr_hash(u), u, poly_ptr_eq);
-  if (cached) return *cached;
-  PolyShape s = poly_uop_max_shape(ictx->ctx, u);
-  PolyShape *stored = malloc(sizeof(PolyShape));
-  *stored = s;
+  if (cached) {
+    *out = *cached;
+    return true;
+  }
+  PolyShape s = poly_uop_max_shape_cached(ictx->ctx, u);
+  PolyShape *stored = indexing_alloc(sizeof(PolyShape), "shape");
+  if (!stored) return false;
+  *stored = (PolyShape){.ndim = s.ndim};
+  if (s.ndim > 0) {
+    stored->dims = indexing_alloc((size_t)s.ndim * sizeof(*stored->dims), "shape");
+    if (!stored->dims) {
+      free(stored);
+      return false;
+    }
+    memcpy(stored->dims, s.dims, (size_t)s.ndim * sizeof(*stored->dims));
+  }
   poly_map_set(ictx->shape_cache, poly_ptr_hash(u), u, stored, poly_ptr_eq);
-  return s;
+  *out = *stored;
+  return true;
 }
 
 /* Store a range entry in the range map */
-static void range_map_set_valid(
+static bool range_map_set_valid(
     PolyIndexingCtx *ictx,
     PolyUOp *u,
     PolyUOp **in_rngs,
@@ -924,21 +1001,43 @@ static void range_map_set_valid(
     int n_out,
     PolyUOp *valid
 ) {
-  /* poly_range_propagate may update the same UOp while refining consumer
-   * ranges. PolyMap replacement is raw pointer assignment, so release the old
-   * entry before installing the new one. */
-  PolyRangeEntry *old = poly_map_get(ictx->range_map, poly_ptr_hash(u), u, poly_ptr_eq);
-  if (old) free_range_entry(u, old, NULL);
-
-  PolyRangeEntry *re = malloc(sizeof(PolyRangeEntry));
-  re->in_rngs = malloc(n_in * sizeof(PolyUOp *));
-  memcpy(re->in_rngs, in_rngs, n_in * sizeof(PolyUOp *));
+  /* Python builds the replacement tuple before assigning the dictionary
+   * entry. Keep that ordering: even a failed refinement must be destructible. */
+  PolyRangeEntry *re = indexing_alloc(sizeof(PolyRangeEntry), "range");
+  if (!re) return false;
+  re->in_rngs = n_in ? indexing_alloc((size_t)n_in * sizeof(PolyUOp *), "range") : NULL;
+  re->out_rngs = n_out ? indexing_alloc((size_t)n_out * sizeof(PolyUOp *), "range") : NULL;
+  if ((n_in && !re->in_rngs) || (n_out && !re->out_rngs)) {
+    free_range_entry(u, re, NULL);
+    return false;
+  }
+  if (n_in) memcpy(re->in_rngs, in_rngs, (size_t)n_in * sizeof(PolyUOp *));
   re->n_in = n_in;
-  re->out_rngs = malloc(n_out * sizeof(PolyUOp *));
-  memcpy(re->out_rngs, out_rngs, n_out * sizeof(PolyUOp *));
+  if (n_out) memcpy(re->out_rngs, out_rngs, (size_t)n_out * sizeof(PolyUOp *));
   re->n_out = n_out;
   re->valid = valid;
+  PolyRangeEntry *old = poly_map_get(ictx->range_map, poly_ptr_hash(u), u, poly_ptr_eq);
   poly_map_set(ictx->range_map, poly_ptr_hash(u), u, re, poly_ptr_eq);
+  if (old) free_range_entry(u, old, NULL);
+  return true;
+}
+
+/* run_rangeify's realize_map[x] = axes: publish list and length together.
+ * NULL axes denotes the complete [0, count) sequence, not missing storage. */
+static bool realize_set_axes(PolyIndexingCtx *ictx, PolyUOp *u, const int *axes, int count) {
+  int *next = count ? indexing_alloc((size_t)count * sizeof(*next), "axes") : NULL;
+  if (count && !next) return false;
+  for (int i = 0; i < count; i++)
+    next[i] = axes ? axes[i] : i;
+  if (!realize_mark(ictx, u)) {
+    free(next);
+    return false;
+  }
+  PolyRealizeInfo *ri = poly_map_get(ictx->realize_map, poly_ptr_hash(u), u, poly_ptr_eq);
+  free(ri->axes);
+  ri->axes = next;
+  ri->n_axes = count;
+  return true;
 }
 
 PolyRangeEntry *poly_range_map_get(PolyIndexingCtx *ictx, PolyUOp *u) {
@@ -1099,6 +1198,11 @@ bool poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
 
   /* Build consumer map if not already built */
   if (!ictx->consumer_map) ictx->consumer_map = poly_consumer_map_build(ctx, sink);
+  if (!ictx->consumer_map) {
+    free(range_scratch);
+    poly_toposort_free(topo);
+    return false;
+  }
 
   /* tinygrad parity: per-node propagated ending ranges */
   PolyMap *ending_map = poly_map_new(n_uops * 2);
@@ -1122,7 +1226,11 @@ bool poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
     if (x->op == POLY_OP_AFTER) continue;
 
     /* Get shape of this UOp */
-    PolyShape shape = ictx_shape(ictx, x);
+    PolyShape shape;
+    if (!ictx_shape(ictx, x, &shape)) {
+      ok = false;
+      break;
+    }
 
     /* Collect consumer ranges: for each consumer that has ranges,
      * get the input ranges that consumer assigned to this UOp */
@@ -1143,7 +1251,9 @@ bool poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
     }
     int n_consumer_rngs = 0;
 
+    PolyEndingRanges *broadcast_ending = NULL;
     PolyEndingRanges *ending = ending_get_or_create(ending_map, x);
+    if (!ending) goto node_fail;
     ending_clear(ending);
     if (consumers) {
       for (int ci = 0; ci < consumers->count; ci++) {
@@ -1155,7 +1265,7 @@ bool poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
                 ictx, consumer, x, cre->in_rngs, cre->n_in, consumer_rngs_buf[n_consumer_rngs],
                 &n_broadcast
             )) {
-          realize_mark(ictx, x);
+          if (!realize_mark(ictx, x)) goto node_fail;
           continue;
         }
         consumer_rngs_lens[n_consumer_rngs] = n_broadcast;
@@ -1168,14 +1278,15 @@ bool poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
             poly_map_get(ending_map, poly_ptr_hash(consumer), consumer, poly_ptr_eq);
         if (!ec) continue;
         for (int ei = 0; ei < ec->count; ei++)
-          ending_add(ending, ec->items[ei]);
+          if (!ending_add(ending, ec->items[ei])) goto node_fail;
       }
     }
 
     /* Current broadcast_ending_ranges records consumer axes that x broadcasts
      * over. REDUCE sees them before fusion; every op propagates them after its
      * own ended-range decision. */
-    PolyEndingRanges *broadcast_ending = ending_new();
+    broadcast_ending = ending_new();
+    if (!broadcast_ending) goto node_fail;
     if (consumers) {
       for (int ci = 0; ci < consumers->count; ci++) {
         PolyUOp *consumer = consumers->items[ci];
@@ -1190,13 +1301,13 @@ bool poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
           PolyUOp *ranges[POLY_MAX_DIMS];
           int n_ranges = poly_uop_ranges(ctx, cre->in_rngs[axis], ranges, POLY_MAX_DIMS);
           for (int ri = 0; ri < n_ranges; ri++)
-            ending_add(broadcast_ending, ranges[ri]);
+            if (!ending_add(broadcast_ending, ranges[ri])) goto node_fail;
         }
       }
     }
     if (is_tensor_reduce(x))
       for (int i = 0; i < broadcast_ending->count; i++)
-        ending_add(ending, broadcast_ending->items[i]);
+        if (!ending_add(ending, broadcast_ending->items[i])) goto node_fail;
     /* Determine output ranges for x */
     PolyUOp *out_rngs[POLY_MAX_DIMS];
     memset(out_rngs, 0, sizeof(out_rngs));
@@ -1221,14 +1332,7 @@ bool poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
       }
 
       /* Update realize map with specific axes */
-      PolyRealizeInfo *ri = poly_map_get(ictx->realize_map, poly_ptr_hash(x), x, poly_ptr_eq);
-      if (ri && n_out > 0) {
-        free(ri->axes);
-        ri->axes = malloc(n_out * sizeof(int));
-        ri->n_axes = n_out;
-        for (int i = 0; i < n_out; i++)
-          ri->axes[i] = i;
-      }
+      if (n_out > 0 && !realize_set_axes(ictx, x, NULL, n_out)) goto node_fail;
       ending_clear(ending);
     } else if (n_consumer_rngs == 0) {
       /* Case 2: No consumers with ranges — skip */
@@ -1304,11 +1408,8 @@ bool poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
             continue;
           }
 
-          PolyUOp **valids = malloc((size_t)n_consumer_rngs * sizeof(*valids));
-          if (!valids) {
-            same_shape = false;
-            break;
-          }
+          PolyUOp **valids = indexing_alloc((size_t)n_consumer_rngs * sizeof(*valids), "valids");
+          if (!valids) goto node_fail;
           for (int ci = 0; ci < n_consumer_rngs; ci++)
             valids[ci] = poly_uop_get_valid(ctx, consumer_rngs_buf[ci][d]);
           PolyUOp *merged_valid = merge_range_valids(ctx, valids, n_consumer_rngs);
@@ -1337,18 +1438,8 @@ bool poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
         }
         if (same_shape) {
           n_out = ref_len;
-          if (n_realize_axes > 0) {
-            realize_mark(ictx, x);
-            PolyRealizeInfo *ri = poly_map_get(ictx->realize_map, poly_ptr_hash(x), x, poly_ptr_eq);
-            if (ri) {
-              free(ri->axes);
-              ri->axes = malloc((size_t)n_realize_axes * sizeof(*ri->axes));
-              if (ri->axes) {
-                ri->n_axes = n_realize_axes;
-                memcpy(ri->axes, realize_axes, (size_t)n_realize_axes * sizeof(*ri->axes));
-              }
-            }
-          }
+          if (n_realize_axes > 0 && !realize_set_axes(ictx, x, realize_axes, n_realize_axes))
+            goto node_fail;
         }
       }
 
@@ -1359,7 +1450,7 @@ bool poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
            * so sources (e.g. tensor REDUCE below) still get range entries */
           n_out = 0;
         } else {
-          realize_mark(ictx, x);
+          if (!realize_mark(ictx, x)) goto node_fail;
           for (int i = 0; i < shape.ndim; i++) {
             PolyUOp *dim = poly_uop_shape_dim(ctx, x, i);
             out_rngs[i] =
@@ -1367,20 +1458,15 @@ bool poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
           }
           n_out = shape.ndim;
 
-          PolyRealizeInfo *ri = poly_map_get(ictx->realize_map, poly_ptr_hash(x), x, poly_ptr_eq);
-          if (ri && n_out > 0) {
-            free(ri->axes);
-            ri->axes = malloc(n_out * sizeof(int));
-            ri->n_axes = n_out;
-            for (int i = 0; i < n_out; i++)
-              ri->axes[i] = i;
-          }
+          if (n_out > 0 && !realize_set_axes(ictx, x, NULL, n_out)) goto node_fail;
         }
       }
     }
 
     free(consumer_rngs_buf);
     free(consumer_rngs_lens);
+    consumer_rngs_buf = NULL;
+    consumer_rngs_lens = NULL;
 
     /* tinygrad parity: if ended ranges flow into elementwise/reduce, realize axes */
     if (ending->count > 0 &&
@@ -1417,15 +1503,7 @@ bool poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
 
       ending_clear(ending);
       if (n_realize_axes > 0) {
-        realize_mark(ictx, x);
-        ri = poly_map_get(ictx->realize_map, poly_ptr_hash(x), x, poly_ptr_eq);
-        if (ri) {
-          free(ri->axes);
-          ri->axes = malloc(n_realize_axes * sizeof(int));
-          ri->n_axes = n_realize_axes;
-          for (int i = 0; i < n_realize_axes; i++)
-            ri->axes[i] = realize_axes[i];
-        }
+        if (!realize_set_axes(ictx, x, realize_axes, n_realize_axes)) goto node_fail;
         for (int i = 0; i < n_realize_axes; i++) {
           int ax = realize_axes[i];
           if (ax >= 0 && ax < n_out && ax < shape.ndim) {
@@ -1438,8 +1516,9 @@ bool poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
     }
 
     for (int i = 0; i < broadcast_ending->count; i++)
-      ending_add(ending, broadcast_ending->items[i]);
+      if (!ending_add(ending, broadcast_ending->items[i])) goto node_fail;
     ending_destroy(NULL, broadcast_ending, NULL);
+    broadcast_ending = NULL;
 
     if (n_out == 0 && !poly_is_realized(ictx, x) && x->n_src == 0) continue;
 
@@ -1452,7 +1531,8 @@ bool poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
     /* Apply movement op transforms */
     PolyUOp *valid_mask = NULL;
     if (poly_opset_has(POLY_GROUP_MOVEMENT, x->op) && x->n_src > 0) {
-      PolyShape src_shape = ictx_shape(ictx, x->src[0]);
+      PolyShape src_shape;
+      if (!ictx_shape(ictx, x->src[0], &src_shape)) goto node_fail;
       if (src_shape.ndim >= 0) {
         PolyUOp *transformed[POLY_MAX_DIMS];
         int n_transformed = 0;
@@ -1498,7 +1578,7 @@ bool poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
           PolyUOp *ranges[POLY_MAX_DIMS];
           int n_ranges = poly_uop_ranges(ctx, out_rngs[i], ranges, POLY_MAX_DIMS);
           for (int j = 0; j < n_ranges; j++)
-            ending_add(ending, ranges[j]);
+            if (!ending_add(ending, ranges[j])) goto node_fail;
         }
       }
     }
@@ -1506,7 +1586,8 @@ bool poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
     /* Current tensor REDUCE creates new ranges for its reduced source prefix
      * (tinygrad/schedule/indexing.py:303-304). */
     if (is_tensor_reduce(x)) {
-      PolyShape src_shape = ictx_shape(ictx, x->src[0]);
+      PolyShape src_shape;
+      if (!ictx_shape(ictx, x->src[0], &src_shape)) goto node_fail;
       if (src_shape.ndim > 0) {
         int n_axes = x->arg.reduce.num_axes;
         PolyUOp *new_in[POLY_MAX_DIMS];
@@ -1525,7 +1606,15 @@ bool poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
     }
 
     /* Store in range map (with valid mask for PAD ops) */
-    range_map_set_valid(ictx, x, in_rngs, n_in, out_rngs, n_out, valid_mask);
+    if (!range_map_set_valid(ictx, x, in_rngs, n_in, out_rngs, n_out, valid_mask)) goto node_fail;
+    continue;
+
+  node_fail:
+    free(consumer_rngs_buf);
+    free(consumer_rngs_lens);
+    ending_destroy(NULL, broadcast_ending, NULL);
+    ok = false;
+    break;
   }
 
   poly_map_foreach(ending_map, ending_destroy, NULL);
@@ -1726,19 +1815,24 @@ PolyUOp *poly_apply_rangeify(PolyIndexingCtx *ictx, PolyUOp *sink) {
   PolyCtx *ctx = ictx->ctx;
   int n_uops = 0;
   PolyUOp **topo = poly_toposort_ex_alloc(ctx, sink, &n_uops, NULL, false);
-  if (!topo) return sink;
+  if (!topo) return NULL;
 
   PolyMap *rmap = poly_map_new(n_uops * 2);
   PolyMap *device_memo = poly_map_new(n_uops * 2);
+  bool ok = true;
 
   for (int i = 0; i < n_uops; i++) {
     PolyUOp *u = topo[i];
     bool src_changed = false;
     PolyUOp *new_src_buf[16] = {0};
-    PolyUOp **new_src = u->n_src > (int)(sizeof(new_src_buf) / sizeof(new_src_buf[0]))
-                            ? calloc((size_t)u->n_src, sizeof(*new_src))
-                            : new_src_buf;
-    if (!new_src) break;
+    PolyUOp **new_src =
+        u->n_src > (int)(sizeof(new_src_buf) / sizeof(new_src_buf[0]))
+            ? (indexing_alloc_fails("rewrite") ? NULL : calloc((size_t)u->n_src, sizeof(*new_src)))
+            : new_src_buf;
+    if (!new_src) {
+      ok = false;
+      break;
+    }
 
     poly_create_bufferize_and_index_srcs(ictx, u, rmap, device_memo, new_src, &src_changed);
 
@@ -1771,7 +1865,7 @@ PolyUOp *poly_apply_rangeify(PolyIndexingCtx *ictx, PolyUOp *sink) {
   poly_map_destroy(device_memo);
   poly_map_destroy(rmap);
   poly_toposort_free(topo);
-  return new_sink ? new_sink : sink;
+  return ok ? (new_sink ? new_sink : sink) : NULL;
 }
 
 static PolyUOp *rule_fix_deviceless(PolyCtx *ctx, PolyUOp *root, const PolyBindings *bindings) {
@@ -1833,8 +1927,7 @@ PolyUOp *poly_run_rangeify(PolyCtx *ctx, PolyUOp *sink, bool debug) {
   if (!ctx || !sink) return NULL;
   PolyIndexingCtx *ictx = poly_indexing_ctx_new(ctx);
   if (!ictx) return NULL;
-  poly_realize_map_build(ictx, sink);
-  if (!poly_range_propagate(ictx, sink)) {
+  if (!poly_realize_map_build(ictx, sink) || !poly_range_propagate(ictx, sink)) {
     poly_indexing_ctx_destroy(ictx);
     return NULL;
   }

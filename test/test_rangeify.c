@@ -114,6 +114,177 @@ TEST(rangeify, range_scratch_failure_reclaims_consumer_lengths) {
   ASSERT_TRUE(range_scratch_failure_is_rejected(2));
   PASS();
 }
+
+extern void poly_test_indexing_alloc_fail_after(const char *site, int count);
+extern bool poly_test_indexing_alloc_failed(void);
+
+static PolyUOp *metadata_test_sink(PolyCtx *ctx, int kind) {
+  if (kind == 4) {
+    PolyUOp *a = poly_reshape(ctx, poly_test_buffer(ctx, POLY_FLOAT32, 8), (int64_t[]){2, 4}, 2);
+    PolyUOp *b = poly_reshape(ctx, poly_test_buffer(ctx, POLY_FLOAT32, 8), (int64_t[]){2, 4}, 2);
+    PolyUOp *x = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, a, b, poly_arg_none());
+    PolyUOp *y = poly_uop2(
+        ctx, POLY_OP_ADD, POLY_FLOAT32, x, poly_flip(ctx, x, (int64_t[]){1}, 1), poly_arg_none()
+    );
+    PolyUOp *out = poly_reshape(ctx, poly_test_buffer(ctx, POLY_FLOAT32, 8), (int64_t[]){2, 4}, 2);
+    return poly_sink1(ctx, poly_store_val(ctx, out, y));
+  }
+  if (kind == 3) {
+    PolyUOp *stores[17];
+    for (int i = 0; i < 17; i++)
+      stores[i] = poly_store_val(
+          ctx, poly_test_buffer(ctx, POLY_FLOAT32, 4),
+          poly_expand(ctx, poly_const_float(ctx, i), (int64_t[]){4}, 1)
+      );
+    return poly_uop(ctx, POLY_OP_SINK, POLY_VOID, stores, 17, poly_arg_none());
+  }
+  if (kind == 1) {
+    PolyUOp *x = poly_expand(ctx, poly_const_float(ctx, 1.0), (int64_t[]){2, 2, 2, 2, 2}, 5);
+    PolyUOp *y = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, x, x, poly_arg_none());
+    PolyUOp *out =
+        poly_reshape(ctx, poly_test_buffer(ctx, POLY_FLOAT32, 32), (int64_t[]){2, 2, 2, 2, 2}, 5);
+    return poly_sink1(ctx, poly_store_val(ctx, out, y));
+  }
+  PolyUOp *a = poly_test_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *b = poly_test_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *x = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, a, b, poly_arg_none());
+  PolyUOp *y;
+  int size = 4;
+  if (kind == 0) {
+    PolyUOp *c1 =
+        poly_pad(ctx, poly_shrink(ctx, x, (int64_t[][2]){{0, 3}}, 1), (int64_t[][2]){{0, 2}}, 1);
+    PolyUOp *c2 = poly_pad(ctx, x, (int64_t[][2]){{0, 1}}, 1);
+    y = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, c1, c2, poly_arg_none());
+    size = 5;
+  } else {
+    /* Force consumer-list growth beyond its first allocation. */
+    y = x;
+    for (int i = 1; i <= 6; i++) {
+      PolyUOp *term =
+          poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT32, x, poly_const_float(ctx, i), poly_arg_none());
+      y = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, y, term, poly_arg_none());
+    }
+  }
+  return poly_sink1(ctx, poly_store_val(ctx, poly_test_buffer(ctx, POLY_FLOAT32, size), y));
+}
+
+static bool metadata_failures_are_rejected(const char *site) {
+  RangeifyEnvSave pcontig = rangeify_save_env("PCONTIG");
+  setenv("PCONTIG", "2", 1);
+  bool ok = true;
+  int failures = 0;
+  for (int kind = 0; kind < 5 && ok; kind++) {
+    bool exhausted = false;
+    for (int nth = 0; nth < 4096 && !exhausted && ok; nth++) {
+      PolyCtx *ctx = poly_ctx_new();
+      PolyUOp *sink = metadata_test_sink(ctx, kind);
+      poly_test_indexing_alloc_fail_after(site, nth);
+      PolyUOp *result = poly_run_rangeify(ctx, sink, false);
+      bool failed = poly_test_indexing_alloc_failed();
+      poly_test_indexing_alloc_fail_after(NULL, -1);
+      ok = failed ? result == NULL : result != NULL;
+      failures += failed;
+      exhausted = !failed;
+      /* A discarded private map must not poison a retry in the same context. */
+      if (failed && ok) result = poly_run_rangeify(ctx, sink, false);
+      if (ok) {
+        int stores = kind == 3 ? 17 : 1;
+        ok = result && count_ops(ctx, result, POLY_OP_STORE) == stores &&
+             count_ops(ctx, result, POLY_OP_END) == stores;
+        if (ok && kind == 0)
+          ok = count_ops(ctx, result, POLY_OP_STAGE) == 0 &&
+               count_ops(ctx, result, POLY_OP_WHERE) == 3;
+      }
+      poly_ctx_destroy(ctx);
+    }
+    ok = ok && exhausted;
+  }
+  rangeify_restore_env(&pcontig);
+  printf("indexing %s: %d injected failures\n", site, failures);
+  return ok && failures > 0;
+}
+
+TEST(rangeify, metadata_context_failure) {
+  ASSERT_TRUE(metadata_failures_are_rejected("context"));
+  PASS();
+}
+TEST(rangeify, metadata_consumer_failure) {
+  ASSERT_TRUE(metadata_failures_are_rejected("consumer"));
+  PASS();
+}
+TEST(rangeify, metadata_ending_failure) {
+  ASSERT_TRUE(metadata_failures_are_rejected("ending"));
+  PASS();
+}
+TEST(rangeify, metadata_realize_failure) {
+  ASSERT_TRUE(metadata_failures_are_rejected("realize"));
+  PASS();
+}
+TEST(rangeify, metadata_shape_failure) {
+  ASSERT_TRUE(metadata_failures_are_rejected("shape"));
+  PASS();
+}
+TEST(rangeify, metadata_range_failure) {
+  ASSERT_TRUE(metadata_failures_are_rejected("range"));
+  PASS();
+}
+TEST(rangeify, metadata_axes_failure) {
+  ASSERT_TRUE(metadata_failures_are_rejected("axes"));
+  PASS();
+}
+TEST(rangeify, metadata_valids_failure) {
+  ASSERT_TRUE(metadata_failures_are_rejected("valids"));
+  PASS();
+}
+TEST(rangeify, metadata_rewrite_failure) {
+  ASSERT_TRUE(metadata_failures_are_rejected("rewrite"));
+  PASS();
+}
+
+static bool metadata_replacement_preserves_owner(const char *site, int count) {
+  bool ok = true;
+  for (int nth = 0; nth < count; nth++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyUOp *sink = poly_sink1(
+        ctx, poly_store_val(
+                 ctx, poly_test_buffer(ctx, POLY_FLOAT32, 4),
+                 poly_expand(ctx, poly_const_float(ctx, 1.0), (int64_t[]){4}, 1)
+             )
+    );
+    PolyUOp *store = sink->src[0];
+    PolyIndexingCtx *ictx = poly_indexing_ctx_new(ctx);
+    bool built = poly_realize_map_build(ictx, sink) && poly_range_propagate(ictx, sink);
+    PolyRangeEntry *entry = poly_range_map_get(ictx, store);
+    PolyRealizeInfo *ri = get_realize_info(ictx, store);
+    PolyUOp **in = entry ? entry->in_rngs : NULL;
+    PolyUOp **out = entry ? entry->out_rngs : NULL;
+    int *axes = ri ? ri->axes : NULL;
+    poly_test_indexing_alloc_fail_after(site, nth);
+    bool propagated = poly_range_propagate(ictx, sink);
+    bool injected = poly_test_indexing_alloc_failed();
+    poly_test_indexing_alloc_fail_after(NULL, -1);
+    ok = ok && built && injected && !propagated;
+    if (!strcmp(site, "range"))
+      ok = ok && entry == poly_range_map_get(ictx, store) && entry->in_rngs == in &&
+           entry->out_rngs == out && entry->n_in == 1 && entry->n_out == 1;
+    else
+      ok = ok && ri == get_realize_info(ictx, store) && ri->axes == axes && ri->n_axes == 1 &&
+           axes[0] == 0;
+    poly_indexing_ctx_destroy(ictx);
+    poly_ctx_destroy(ctx);
+  }
+  return ok;
+}
+
+TEST(rangeify, metadata_range_replacement_keeps_previous_entry) {
+  ASSERT_TRUE(metadata_replacement_preserves_owner("range", 3));
+  PASS();
+}
+
+TEST(rangeify, metadata_axes_replacement_keeps_previous_entry) {
+  ASSERT_TRUE(metadata_replacement_preserves_owner("axes", 1));
+  PASS();
+}
 #endif
 
 /* Consumer map tests */
