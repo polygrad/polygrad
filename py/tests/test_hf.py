@@ -3,6 +3,7 @@
 import ctypes
 import json
 import struct
+from pathlib import Path
 import numpy as np
 import pytest
 from polygrad.hf import generate, load_hf_bytes, _find_safetensors, _get_vocab_size
@@ -116,6 +117,32 @@ class TestHFLoadBasic:
 
 
 class TestHFLoadEdgeCases:
+    @pytest.mark.parametrize('dtype,shape,npdtype', [('F32', (1,), np.float32), ('F64', (32, 16), np.float64)])
+    def test_weight_conversion_or_copy_failure_rejects_model(self, dtype, shape, npdtype):
+        shard = make_safetensors({'transformer.wte.weight': (dtype, shape, np.ones(shape, dtype=npdtype))})
+        with pytest.raises(RuntimeError, match='NULL'):
+            load_hf_bytes(GPT2_TINY_CONFIG, [shard])
+
+    def test_quantized_gguf_weights_match_pinned_bit_planes(self):
+        fixture = json.loads((Path(__file__).resolve().parents[2] / 'test/fixtures/gguf_quantized_blocks.json').read_text())
+        def string(s):
+            b = s.encode()
+            return struct.pack('<Q', len(b)) + b
+        for case in fixture['cases']:
+            data = b'GGUF' + struct.pack('<IQQ', 3, 1, 5)
+            data += string('general.architecture') + struct.pack('<I', 8) + string('gpt2')
+            for key, value in [('embedding_length', 32), ('attention.head_count', 2), ('block_count', 1), ('context_length', 2)]:
+                data += string('gpt2.' + key) + struct.pack('<II', 4, value)
+            data += string('token_embd.weight') + struct.pack('<IQQIQ', 2, 32, 8, case['type'], 0)
+            data += bytes((-len(data)) % 32)
+            repeats = 256 // len(case['values'])
+            data += bytes(case['bytes']) * repeats
+            model = Model.from_gguf(data, max_batch=1, max_seq_len=2)
+            try:
+                np.testing.assert_array_equal(model.read_buffer('wte.weight').reshape(-1), case['values'] * repeats)
+            finally:
+                model.free()
+
     @pytest.mark.parametrize('shards', [[struct.pack('<Q', 1) + b'{'], [b'']])
     def test_malformed_shard_fails_before_model_publication(self, shards):
         with pytest.raises(RuntimeError, match='NULL'):

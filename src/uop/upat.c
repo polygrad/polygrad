@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <limits.h>
 #include "utils.h"
 #ifndef __EMSCRIPTEN__
 #include <pthread.h>
@@ -624,13 +625,39 @@ static void pm_trace_emit_rewrite(
   fflush(fp);
 }
 
-static void pm_add_op(PolyPatternMatcher *pm, int op, int rule_idx) {
-  if (op < 0 || op >= POLY_OP_COUNT) return;
+#ifdef POLY_TESTING
+static int pm_index_fail_after = -1;
+void poly_test_pm_index_fail_after(int count) {
+  pm_index_fail_after = count;
+}
+#endif
+
+static void *pm_index_realloc(void *ptr, size_t bytes) {
+#ifdef POLY_TESTING
+  if (pm_index_fail_after == 0) {
+    pm_index_fail_after = -1;
+    return NULL;
+  }
+  if (pm_index_fail_after > 0) pm_index_fail_after--;
+#endif
+  return realloc(ptr, bytes);
+}
+
+/* PatternMatcher.pdict construction: publish an index only after allocation.
+ * On failure the constructor owns and destroys every earlier op list. */
+static bool pm_add_op(PolyPatternMatcher *pm, int op, int rule_idx) {
+  if (op < 0 || op >= POLY_OP_COUNT) return false;
   if (pm->by_op[op].n >= pm->by_op[op].cap) {
-    pm->by_op[op].cap = pm->by_op[op].cap ? pm->by_op[op].cap * 2 : 8;
-    pm->by_op[op].indices = realloc(pm->by_op[op].indices, pm->by_op[op].cap * sizeof(int));
+    if (pm->by_op[op].cap > INT_MAX / 2) return false;
+    int cap = pm->by_op[op].cap ? pm->by_op[op].cap * 2 : 8;
+    if ((size_t)cap > SIZE_MAX / sizeof(int)) return false;
+    int *indices = pm_index_realloc(pm->by_op[op].indices, (size_t)cap * sizeof(int));
+    if (!indices) return false;
+    pm->by_op[op].indices = indices;
+    pm->by_op[op].cap = cap;
   }
   pm->by_op[op].indices[pm->by_op[op].n++] = rule_idx;
+  return true;
 }
 
 static PolyPatternMatcher *poly_pm_new_impl(
@@ -662,11 +689,18 @@ static PolyPatternMatcher *poly_pm_new_impl(
     PolyUPat *p = rules[i].pat;
     if (!p->has_ops) {
       /* Pattern matches any op — add to all op lists */
-      for (int j = 0; j < POLY_OP_COUNT; j++)
-        pm_add_op(pm, j, i);
+      for (int j = 0; j < POLY_OP_COUNT; j++) {
+        if (!pm_add_op(pm, j, i)) {
+          poly_pm_destroy(pm);
+          return NULL;
+        }
+      }
     } else {
       for (int j = 0; j < POLY_OP_COUNT; j++) {
-        if (poly_opset_has(p->ops, (PolyOps)j)) pm_add_op(pm, j, i);
+        if (poly_opset_has(p->ops, (PolyOps)j) && !pm_add_op(pm, j, i)) {
+          poly_pm_destroy(pm);
+          return NULL;
+        }
       }
     }
   }
@@ -818,7 +852,11 @@ void poly_pm_reset_rule_stats(PolyPatternMatcher *pm) {
 
 PolyPatternMatcher *poly_pm_concat(PolyPatternMatcher *a, PolyPatternMatcher *b) {
   if (!a || !b) return NULL;
+  if (a->n_rules > INT_MAX - b->n_rules) return NULL;
   int total = a->n_rules + b->n_rules;
+  if ((size_t)total > SIZE_MAX / sizeof(PolyRule) ||
+      (size_t)total > SIZE_MAX / sizeof(const char *))
+    return NULL;
   PolyRule *combined = total > 0 ? malloc((size_t)total * sizeof(PolyRule)) : NULL;
   const char **names = total > 0 ? malloc((size_t)total * sizeof(const char *)) : NULL;
   if (total > 0 && (!combined || !names)) {

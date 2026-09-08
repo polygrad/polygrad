@@ -338,6 +338,10 @@ PolyModel *poly_qwen3_from_gguf_decoded(
 
   /* Bind GGUF weights -- names already match internal names */
   PolyBindIndex *idx = poly_bind_index_create(inst);
+  if (!idx) {
+    poly_model_free(inst);
+    return NULL;
+  }
   int loaded = 0, skipped = 0;
 
   for (int i = 0; i < gguf->n_tensors; i++) {
@@ -351,10 +355,11 @@ PolyModel *poly_qwen3_from_gguf_decoded(
 
     float *f32 = poly_decoded_tensor_to_f32(t);
     if (!f32) {
-      fprintf(
-          stderr, "poly_qwen3_from_gguf: failed to convert '%s' (dtype=%d)\n", t->name, t->dtype
+      poly_import_error_set(
+          POLY_IMPORT_ERR_WEIGHT_MISMATCH, "failed to convert weight '%s' (dtype=%d)", t->name,
+          t->dtype
       );
-      continue;
+      goto fail;
     }
 
     /*
@@ -368,11 +373,17 @@ PolyModel *poly_qwen3_from_gguf_decoded(
       fprintf(stderr, "poly_qwen3_from_gguf: no buffer for '%s'\n", t->name);
 
     free(f32);
+    if (rc < 0) goto fail;
   }
 
   poly_bind_index_destroy(idx);
   fprintf(stderr, "poly_qwen3_from_gguf: loaded %d, skipped %d\n", loaded, skipped);
   return inst;
+
+fail:
+  poly_bind_index_destroy(idx);
+  poly_model_free(inst);
+  return NULL;
 }
 
 /* Registry adapter */

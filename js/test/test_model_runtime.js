@@ -1,6 +1,27 @@
 'use strict'
 
 const compositionFixture = require('../../test/fixtures/model_definition.json')
+const quantizedFixture = require('../../test/fixtures/gguf_quantized_blocks.json')
+
+async function checkQuantizedModelWeights(pg) {
+  for (const c of quantizedFixture.cases) {
+    const bytes = []
+    const u32 = n => { for (let i = 0; i < 4; i++) bytes.push((n >>> (8 * i)) & 255) }
+    const u64 = n => { u32(n); u32(0) }
+    const str = s => { const b = new TextEncoder().encode(s); u64(b.length); bytes.push(...b) }
+    bytes.push(71, 71, 85, 70); u32(3); u64(1); u64(5)
+    str('general.architecture'); u32(8); str('gpt2')
+    for (const [key, value] of [['embedding_length', 32], ['attention.head_count', 2], ['block_count', 1], ['context_length', 2]]) {
+      str(`gpt2.${key}`); u32(4); u32(value)
+    }
+    str('token_embd.weight'); u32(2); u64(32); u64(8); u32(c.type); u64(0)
+    while (bytes.length % 32) bytes.push(0)
+    const expected = []
+    for (let i = 0; i < 256 / c.values.length; i++) { bytes.push(...c.bytes); expected.push(...c.values) }
+    const model = pg.Model.fromGGUF(new Uint8Array(bytes), { maxBatch: 1, maxSeqLen: 2 })
+    try { assertClose(await model.readBufferAsync('wte.weight'), expected, 0) } finally { await model.dispose() }
+  }
+}
 
 function checkModelCodecRejection(pg) {
   const config = new TextEncoder().encode(JSON.stringify({ model_type: 'gpt2',
@@ -10,6 +31,15 @@ function checkModelCodecRejection(pg) {
   try { pg.Model.fromHF(config, [badShard]).dispose() } catch (e) { error = e }
   assert(error && /failed to decode weight file/.test(error.message),
     'Model import must reject a malformed shard before construction')
+  const header = new TextEncoder().encode(JSON.stringify({ 'transformer.wte.weight': {
+    dtype: 'F32', shape: [1], data_offsets: [0, 4]
+  } }))
+  const wrongShape = new Uint8Array(8 + header.length + 4)
+  new DataView(wrongShape.buffer).setUint32(0, header.length, true)
+  wrongShape.set(header, 8)
+  error = null
+  try { pg.Model.fromHF(config, [wrongShape]).dispose() } catch (e) { error = e }
+  assert(error && /numel mismatch/.test(error.message), 'Model import must propagate weight-copy failure')
   const badGguf = new Uint8Array(64)
   badGguf.set([71, 71, 85, 70, 3])
   badGguf[16] = 1
@@ -483,6 +513,7 @@ async function runModelRuntimeTests(pg) {
 
   await test('Model copied storage exact writes and objective selection', () => checkModelStorageObjectives(pg, Model))
   await test('Model codecs reject malformed bytes before publication', () => checkModelCodecRejection(pg))
+  await test('Model quantized weights match pinned GGUF bit planes', () => checkQuantizedModelWeights(pg))
 
   await test('Model composition factories share C construction', () => checkCompositionFactories(pg))
   await test('Model composition catalogue and named target objective', () => checkCompositionCatalogue(pg))
@@ -1235,6 +1266,7 @@ async function runModelSmokeTests(pg) {
 
   await test('Model copied storage exact writes and objective selection', () => checkModelStorageObjectives(pg, Model))
   await test('Model codecs reject malformed bytes before publication', () => checkModelCodecRejection(pg))
+  await test('Model quantized weights match pinned GGUF bit planes', () => checkQuantizedModelWeights(pg))
 
   await test('typed integer input preserves bytes and rejects float binding', async () => {
     await checkTypedIntegerInput(pg, Model)

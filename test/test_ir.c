@@ -14,6 +14,29 @@
 #include <stdlib.h>
 #include <limits.h>
 
+extern void poly_test_ir_topo_fail_after(int count);
+
+TEST(ir, export_rejects_failed_shared_root_traversal) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = poly_sink1(ctx, poly_const_int(ctx, 3));
+  PolyIrEntrypoint eps[] = {{.name = "first", .sink = sink}, {.name = "second", .sink = sink}};
+  PolyIrSpec spec = {.ctx = ctx, .entrypoints = eps, .n_entrypoints = 2};
+  int len = -1;
+  poly_test_ir_topo_fail_after(1);
+  uint8_t *bytes = poly_ir_export(&spec, &len);
+  poly_test_ir_topo_fail_after(-1);
+  bool rejected = bytes == NULL && len == 0;
+  free(bytes);
+  int retry_len = 0;
+  bytes = poly_ir_export(&spec, &retry_len);
+  bool retried = bytes && retry_len > 0;
+  free(bytes);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(rejected);
+  ASSERT_TRUE(retried);
+  PASS();
+}
+
 TEST(ir, truncated_tensor_core_axes_release_partial_metadata) {
   PolyCtx *ctx = poly_ctx_new();
   int64_t axes[][2] = {{7, 11}};

@@ -634,6 +634,46 @@ TEST(pat, const_like_preserves_vector_and_symbolic_shape) {
 
 /* pm_concat test */
 
+extern void poly_test_pm_index_fail_after(int count);
+
+TEST(pat, matcher_index_allocation_failure_reclaims_partial_lists) {
+  PolyUPat *pat = poly_upat_any("x");
+  PolyRule rule = {.pat = pat, .fn = test_rewrite_identity};
+  poly_test_pm_index_fail_after(1);
+  PolyPatternMatcher *failed = poly_pm_new(&rule, 1);
+  poly_test_pm_index_fail_after(-1);
+  bool rejected = failed == NULL;
+  poly_pm_destroy(failed);
+  PolyPatternMatcher *retry = poly_pm_new(&rule, 1);
+  bool retried = retry != NULL;
+  poly_pm_destroy(retry);
+  poly_upat_free(pat);
+  ASSERT_TRUE(rejected);
+  ASSERT_TRUE(retried);
+  PASS();
+}
+
+TEST(pat, matcher_concat_empty_preserves_rules) {
+  PolyUPat *pat = poly_upat_op(POLY_OP_CONST, NULL, 0, "x");
+  PolyRule rule = {.pat = pat, .fn = test_rewrite_identity};
+  PolyPatternMatcher *empty = poly_pm_new(NULL, 0), *one = poly_pm_new(&rule, 1);
+  PolyPatternMatcher *left = poly_pm_concat(empty, one), *right = poly_pm_concat(one, empty);
+  PolyPatternMatcher *both = poly_pm_concat(empty, empty);
+  ASSERT_NOT_NULL(left);
+  ASSERT_NOT_NULL(right);
+  ASSERT_NOT_NULL(both);
+  ASSERT_INT_EQ(poly_pm_rule_count(left), 1);
+  ASSERT_INT_EQ(poly_pm_rule_count(right), 1);
+  ASSERT_INT_EQ(poly_pm_rule_count(both), 0);
+  poly_pm_destroy(left);
+  poly_pm_destroy(right);
+  poly_pm_destroy(both);
+  poly_pm_destroy(empty);
+  poly_pm_destroy(one);
+  poly_upat_free(pat);
+  PASS();
+}
+
 static PolyUOp *test_rewrite_div_self(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   return poly_const_like_int(ctx, poly_bind(b, "x"), 1);
 }

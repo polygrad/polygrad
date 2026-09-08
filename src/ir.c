@@ -22,6 +22,25 @@
 
 /* Byte helpers */
 
+#ifdef POLY_TESTING
+static int ir_topo_fail_after = -1;
+void poly_test_ir_topo_fail_after(int count) {
+  ir_topo_fail_after = count;
+}
+#endif
+
+static PolyUOp **ir_toposort(PolyCtx *ctx, PolyUOp *root, int *count, bool scratch) {
+#ifdef POLY_TESTING
+  if (ir_topo_fail_after == 0) {
+    ir_topo_fail_after = -1;
+    *count = 0;
+    return NULL;
+  }
+  if (ir_topo_fail_after > 0) ir_topo_fail_after--;
+#endif
+  return scratch ? poly_toposort_scratch(ctx, root, count) : poly_toposort_alloc(ctx, root, count);
+}
+
 typedef struct {
   uint8_t *data;
   int len;
@@ -405,7 +424,9 @@ static bool node_list_append_unique(
 ) {
   if (!value || node_list_contains(*nodes, *n_nodes, value)) return value != NULL;
   if (*n_nodes >= *cap_nodes) {
+    if (*cap_nodes > INT_MAX / 2) return false;
     int next = *cap_nodes > 0 ? *cap_nodes * 2 : 64;
+    if ((size_t)next > SIZE_MAX / sizeof(PolyUOp *)) return false;
     PolyUOp **grown = realloc(*nodes, (size_t)next * sizeof(*grown));
     if (!grown) return false;
     *nodes = grown;
@@ -448,8 +469,9 @@ static bool program_topo_with_metadata(PolyCtx *ctx, PolyUOp ***topo_io, int *n_
         goto fail;
       }
       int n_dep = 0;
-      PolyUOp **dep = poly_toposort_alloc(ctx, refs[r], &n_dep);
-      if (!dep && n_dep != 0) {
+      PolyUOp **dep = ir_toposort(ctx, refs[r], &n_dep, false);
+      if (!dep || n_dep <= 0) {
+        poly_toposort_free(dep);
         free(refs);
         goto fail;
       }
@@ -478,8 +500,11 @@ static bool program_topo_with_metadata(PolyCtx *ctx, PolyUOp ***topo_io, int *n_
       if (!refs[r]) continue;
       if (!poly_ctx_owns_ptr(ctx, refs[r])) goto fail;
       int n_dep = 0;
-      PolyUOp **dep = poly_toposort_alloc(ctx, refs[r], &n_dep);
-      if (!dep && n_dep != 0) goto fail;
+      PolyUOp **dep = ir_toposort(ctx, refs[r], &n_dep, false);
+      if (!dep || n_dep <= 0) {
+        poly_toposort_free(dep);
+        goto fail;
+      }
       for (int j = 0; j < n_dep; j++) {
         if (!node_list_append_unique(&ordered, &n_ordered, &cap_ordered, dep[j])) {
           poly_toposort_free(dep);
@@ -571,64 +596,27 @@ static uint8_t *poly_graph_export(const PolyIrSpec *spec, int *out_len, bool exe
   PolyUOp **topo = NULL;
   int topo_is_heap = 1;
 
-  int n_roots = spec->n_entrypoints + spec->n_bufs;
-  int total_cap = 0;
-  int *counts = calloc((size_t)n_roots, sizeof(int));
-  PolyUOp ***per_root = calloc((size_t)n_roots, sizeof(PolyUOp **));
-  if (!counts || !per_root) {
-    free(counts);
-    free(per_root);
-    return NULL;
-  }
-
-  PolyScratchMark scratch = poly_ctx_scratch_mark(spec->ctx);
-  int ri = 0;
-  for (int i = 0; i < spec->n_entrypoints; i++, ri++) {
-    per_root[ri] = poly_toposort_scratch(spec->ctx, spec->entrypoints[i].sink, &counts[ri]);
-    if (!per_root[ri] && counts[ri] != 0) {
+  int cap_nodes = 0;
+  /* PGIR owns one unique node list, not the sum of overlapping traversals.
+   * Root order remains entrypoints then named state. A non-NULL root always
+   * has at least one node: NULL/zero means allocation failure, not an empty graph. */
+  for (int group = 0; group < 2; group++) {
+    int n_roots = group == 0 ? spec->n_entrypoints : spec->n_bufs;
+    for (int i = 0; i < n_roots; i++) {
+      PolyUOp *root = group == 0 ? spec->entrypoints[i].sink : spec->bufs[i].buffer;
+      PolyScratchMark scratch = poly_ctx_scratch_mark(spec->ctx);
+      int count = 0;
+      PolyUOp **nodes = ir_toposort(spec->ctx, root, &count, true);
+      bool ok = nodes && count > 0;
+      for (int j = 0; ok && j < count; j++)
+        ok = node_list_append_unique(&topo, &n_nodes, &cap_nodes, nodes[j]);
       poly_ctx_scratch_rewind(spec->ctx, scratch);
-      free(counts);
-      free(per_root);
-      return NULL;
-    }
-    total_cap += counts[ri];
-  }
-  for (int i = 0; i < spec->n_bufs; i++, ri++) {
-    per_root[ri] = poly_toposort_scratch(spec->ctx, spec->bufs[i].buffer, &counts[ri]);
-    if (!per_root[ri] && counts[ri] != 0) {
-      poly_ctx_scratch_rewind(spec->ctx, scratch);
-      free(counts);
-      free(per_root);
-      return NULL;
-    }
-    total_cap += counts[ri];
-  }
-
-  PolyUOp **merged = total_cap > 0 ? malloc((size_t)total_cap * sizeof(PolyUOp *)) : NULL;
-  if (total_cap > 0 && !merged) {
-    poly_ctx_scratch_rewind(spec->ctx, scratch);
-    free(counts);
-    free(per_root);
-    return NULL;
-  }
-  int merged_n = 0;
-  for (int i = 0; i < n_roots; i++) {
-    for (int j = 0; j < counts[i]; j++) {
-      PolyUOp *u = per_root[i][j];
-      int dup = 0;
-      for (int k = 0; k < merged_n; k++)
-        if (merged[k] == u) {
-          dup = 1;
-          break;
-        }
-      if (!dup) merged[merged_n++] = u;
+      if (!ok) {
+        free(topo);
+        return NULL;
+      }
     }
   }
-  poly_ctx_scratch_rewind(spec->ctx, scratch);
-  topo = merged;
-  n_nodes = merged_n;
-  free(counts);
-  free(per_root);
 
   if (!topo || n_nodes == 0) {
     fprintf(stderr, "poly_ir_export: toposort failed\n");

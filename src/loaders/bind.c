@@ -8,6 +8,25 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <limits.h>
+
+#ifdef POLY_TESTING
+static int bind_alloc_fail_after = -1;
+void poly_test_bind_alloc_fail_after(int count) {
+  bind_alloc_fail_after = count;
+}
+#endif
+
+static void *bind_calloc(size_t count, size_t size) {
+#ifdef POLY_TESTING
+  if (bind_alloc_fail_after == 0) {
+    bind_alloc_fail_after = -1;
+    return NULL;
+  }
+  if (bind_alloc_fail_after > 0) bind_alloc_fail_after--;
+#endif
+  return calloc(count, size);
+}
 
 typedef struct {
   const char *name;
@@ -28,13 +47,25 @@ static unsigned int hash_name(const char *s, int cap) {
 }
 
 PolyBindIndex *poly_bind_index_create(PolyModel *inst) {
+  if (!inst) return NULL;
   int n = poly_model_buf_count(inst);
+  if (n < 0 || n > INT_MAX / 2) return NULL;
   int cap = n < 8 ? 16 : n * 2;
+  if ((size_t)cap > SIZE_MAX / sizeof(BindEntry)) return NULL;
 
-  PolyBindIndex *idx = calloc(1, sizeof(PolyBindIndex));
+  PolyBindIndex *idx = bind_calloc(1, sizeof(PolyBindIndex));
+  if (!idx) {
+    poly_import_error_set(POLY_IMPORT_ERR_INTERNAL, "binding index allocation failed");
+    return NULL;
+  }
   idx->inst = inst;
   idx->capacity = cap;
-  idx->entries = calloc((size_t)cap, sizeof(BindEntry));
+  idx->entries = bind_calloc((size_t)cap, sizeof(BindEntry));
+  if (!idx->entries) {
+    poly_bind_index_destroy(idx);
+    poly_import_error_set(POLY_IMPORT_ERR_INTERNAL, "binding table allocation failed");
+    return NULL;
+  }
 
   for (int i = 0; i < n; i++) {
     const char *name = poly_model_buf_name(inst, i);

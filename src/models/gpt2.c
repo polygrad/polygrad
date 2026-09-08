@@ -303,6 +303,10 @@ PolyModel *poly_gpt2_from_hf_decoded(
   if (!inst) return NULL;
 
   PolyBindIndex *idx = poly_bind_index_create(inst);
+  if (!idx) {
+    poly_model_free(inst);
+    return NULL;
+  }
   int loaded = 0, skipped = 0;
 
   for (int i = 0; i < hf->n_tensors; i++) {
@@ -317,7 +321,13 @@ PolyModel *poly_gpt2_from_hf_decoded(
     }
 
     float *f32 = poly_decoded_tensor_to_f32(t);
-    if (!f32) continue;
+    if (!f32) {
+      poly_import_error_set(
+          POLY_IMPORT_ERR_WEIGHT_MISMATCH, "failed to convert weight '%s' (dtype=%d)", t->name,
+          t->dtype
+      );
+      goto fail;
+    }
 
     int64_t dst_shape[8];
     int dst_ndim = poly_bind_index_dst_shape(idx, name, dst_shape, 8);
@@ -330,11 +340,18 @@ PolyModel *poly_gpt2_from_hf_decoded(
       fprintf(stderr, "poly_gpt2_from_hf: no buffer for '%s'\n", name);
 
     free(f32);
+    /* An ignored source key is distinct from a failed write to named state. */
+    if (rc < 0) goto fail;
   }
 
   poly_bind_index_destroy(idx);
   fprintf(stderr, "poly_gpt2_from_hf: loaded %d parameters, skipped %d\n", loaded, skipped);
   return inst;
+
+fail:
+  poly_bind_index_destroy(idx);
+  poly_model_free(inst);
+  return NULL;
 }
 
 PolyModel *poly_gpt2_from_hf(
@@ -452,6 +469,10 @@ PolyModel *poly_gpt2_from_gguf_decoded(
   if (!inst) return NULL;
 
   PolyBindIndex *idx = poly_bind_index_create(inst);
+  if (!idx) {
+    poly_model_free(inst);
+    return NULL;
+  }
   int loaded = 0, skipped = 0;
   char name_buf[256];
 
@@ -468,8 +489,11 @@ PolyModel *poly_gpt2_from_gguf_decoded(
     /* Convert to F32 (dequantize if needed) */
     float *f32 = poly_decoded_tensor_to_f32(t);
     if (!f32) {
-      fprintf(stderr, "poly_gpt2_from_gguf: failed to convert '%s' (type=%d)\n", t->name, t->dtype);
-      continue;
+      poly_import_error_set(
+          POLY_IMPORT_ERR_WEIGHT_MISMATCH, "failed to convert weight '%s' (dtype=%d)", t->name,
+          t->dtype
+      );
+      goto fail;
     }
 
     /*
@@ -484,11 +508,17 @@ PolyModel *poly_gpt2_from_gguf_decoded(
       fprintf(stderr, "poly_gpt2_from_gguf: no buffer for '%s' (was '%s')\n", name, t->name);
 
     free(f32);
+    if (rc < 0) goto fail;
   }
 
   poly_bind_index_destroy(idx);
   fprintf(stderr, "poly_gpt2_from_gguf: loaded %d parameters, skipped %d\n", loaded, skipped);
   return inst;
+
+fail:
+  poly_bind_index_destroy(idx);
+  poly_model_free(inst);
+  return NULL;
 }
 
 PolyModel *poly_gpt2_from_gguf(

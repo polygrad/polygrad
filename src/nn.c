@@ -425,7 +425,6 @@ PolyUOp *poly_sdpa(PolyCtx *ctx, PolyUOp *q, PolyUOp *k, PolyUOp *v, PolyUOp *ma
     int n_rep = (int)(q_dims[1] / k_dims[1]);
     k = repeat_kv(ctx, k, n_rep);
     v = repeat_kv(ctx, v, n_rep);
-    k_dims = poly_uop_max_shape_dims(ctx, k);
   }
 
   int64_t d_k = q_dims[q_ndim - 1];

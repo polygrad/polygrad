@@ -15,11 +15,95 @@
 #include "../src/engine/schedule.h"
 #include "../src/loaders/hf_decode.h"
 #include "../src/loaders/gguf_decode.h"
+#include "../src/loaders/bind.h"
+#include "../src/loaders/import_desc.h"
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
 
 /* Safetensors multi-dtype */
+
+TEST(hf, decoded_output_byte_count_cannot_wrap) {
+  float input = 1.0f;
+  PolyDecodedTensor t = {.data = &input, .numel = INT64_MAX / 2 + 1, .dtype = POLY_DECODED_F32};
+  float *out = poly_decoded_tensor_to_f32(&t);
+  bool rejected = out == NULL;
+  free(out);
+  ASSERT_TRUE(rejected);
+  PASS();
+}
+
+TEST(hf, decoded_quantization_rejects_partial_blocks) {
+  uint8_t bytes[210] = {0};
+  int types[] = {POLY_DECODED_Q4_0, POLY_DECODED_Q4_1, POLY_DECODED_Q8_0, POLY_DECODED_Q6_K};
+  bool rejected = true;
+  for (int i = 0; i < 4; i++) {
+    PolyDecodedTensor t = {.data = bytes, .numel = 1, .dtype = types[i]};
+    float *out = poly_decoded_tensor_to_f32(&t);
+    rejected = rejected && out == NULL;
+    free(out);
+  }
+  ASSERT_TRUE(rejected);
+  PASS();
+}
+
+TEST(hf, decoded_native_accepts_unaligned_bytes) {
+  uint8_t bytes[5] = {0, 0, 60, 0, 0};
+  PolyDecodedTensor t = {.data = bytes + 1, .numel = 1, .dtype = POLY_DECODED_F16};
+  float *out = poly_decoded_tensor_to_f32(&t);
+  ASSERT_NOT_NULL(out);
+  ASSERT_FLOAT_EQ(out[0], 1.0f, 0.0f);
+  free(out);
+  PASS();
+}
+
+TEST(hf, decoded_q4_nibbles_match_pinned_halves) {
+  uint8_t bytes[20] = {0, 60, 0, 64};
+  for (int kind = 0; kind < 2; kind++) {
+    int offset = kind ? 4 : 2;
+    for (int j = 0; j < 16; j++)
+      bytes[offset + j] = (uint8_t)(j | ((15 - j) << 4));
+    PolyDecodedTensor t = {
+        .data = bytes, .numel = 32, .dtype = kind ? POLY_DECODED_Q4_1 : POLY_DECODED_Q4_0};
+    float *out = poly_decoded_tensor_to_f32(&t);
+    ASSERT_NOT_NULL(out);
+    bool matches = true;
+    for (int j = 0; j < 16; j++) {
+      matches = matches && out[j] == (float)(j + (kind ? 2 : -8));
+      matches = matches && out[16 + j] == (float)(15 - j + (kind ? 2 : -8));
+    }
+    free(out);
+    ASSERT_TRUE(matches);
+    bytes[2] = 0;
+    bytes[3] = 64;
+  }
+  PASS();
+}
+
+TEST(hf, decoded_q6_bit_planes_match_pinned_groups) {
+  uint8_t bytes[210];
+  for (int i = 0; i < 128; i++)
+    bytes[i] = (uint8_t)(i * 13 + 7);
+  for (int i = 0; i < 64; i++)
+    bytes[128 + i] = (uint8_t)(i * 7 + 3);
+  for (int i = 0; i < 16; i++)
+    bytes[192 + i] = (uint8_t)(i + 1);
+  bytes[208] = 0;
+  bytes[209] = 60;
+  PolyDecodedTensor t = {.data = bytes, .numel = 256, .dtype = POLY_DECODED_Q6_K};
+  float *out = poly_decoded_tensor_to_f32(&t);
+  ASSERT_NOT_NULL(out);
+  bool matches = true;
+  for (int i = 0; i < 256; i++) {
+    int half = i / 128, pos = i % 128;
+    int lo = (bytes[half * 64 + pos % 64] >> (4 * (pos / 64))) & 15;
+    int hi = (bytes[128 + half * 32 + pos % 32] >> (2 * (pos / 32))) & 3;
+    matches = matches && out[i] == (float)(((lo | (hi << 4)) - 32) * (i / 16 + 1));
+  }
+  free(out);
+  ASSERT_TRUE(matches);
+  PASS();
+}
 
 TEST(hf, decode_rejects_partial_shards_and_invalid_tables) {
   const uint8_t invalid[] = {1, 0, 0, 0, 0, 0, 0, 0, '{'};
@@ -570,6 +654,97 @@ TEST(hf, qwen3_build_tiny_staged) {
   ASSERT_INT_EQ(numel, 4 * 32);
 
   poly_model_free(inst);
+  PASS();
+}
+
+extern void poly_test_bind_alloc_fail_after(int count);
+
+static bool bind_allocation_rejected(int after) {
+  GPT2Config cfg = poly_gpt2_config_default();
+  cfg.n_embd = 8;
+  cfg.n_head = 2;
+  cfg.n_layer = 1;
+  cfg.vocab_size = 4;
+  cfg.max_seq_len = 2;
+  cfg.batch_size = 1;
+  PolyModel *model = poly_gpt2(&cfg, POLY_DEVICE_CPU);
+  if (!model) return false;
+  poly_test_bind_alloc_fail_after(after);
+  PolyBindIndex *idx = poly_bind_index_create(model);
+  poly_test_bind_alloc_fail_after(-1);
+  bool rejected = idx == NULL;
+  poly_bind_index_destroy(idx);
+  idx = poly_bind_index_create(model);
+  bool retried = idx != NULL;
+  poly_bind_index_destroy(idx);
+  poly_model_free(model);
+  return rejected && retried;
+}
+
+TEST(hf, bind_index_candidate_allocation_failure) {
+  ASSERT_TRUE(bind_allocation_rejected(0));
+  PASS();
+}
+
+TEST(hf, bind_index_table_allocation_failure) {
+  ASSERT_TRUE(bind_allocation_rejected(1));
+  PASS();
+}
+
+TEST(hf, gguf_families_reject_failed_weights_and_bindings) {
+  const char *suffix[] = {"embedding_length",        "attention.head_count", "block_count",
+                          "attention.head_count_kv", "feed_forward_length",  "context_length"};
+  int config[] = {8, 2, 1, 2, 16, 2};
+  for (int family = 0; family < 2; family++) {
+    char keys[6][64];
+    PolyGgufKV kv[6] = {0};
+    for (int i = 0; i < 6; i++) {
+      snprintf(keys[i], sizeof(keys[i]), "%s.%s", family ? "qwen3" : "gpt2", suffix[i]);
+      kv[i] = (PolyGgufKV){.key = keys[i], .type = 4, .val.u64 = (uint64_t)config[i]};
+    }
+    float data[16] = {0};
+    for (int mode = 0; mode < 4; mode++) {
+      PolyDecodedTensor t = {
+          .name = "token_embd.weight",
+          .data = data,
+          .shape = {2, mode == 1 ? 4 : 8},
+          .ndim = 2,
+          .numel = mode == 1 ? 8 : 16,
+          .dtype = mode == 0 ? POLY_DECODED_Q4_K : POLY_DECODED_F32};
+      PolyGgufDecoded g = {
+          .kv = kv, .n_kv = 6, .arch = family ? "qwen3" : "gpt2", .tensors = &t, .n_tensors = 1};
+      if (mode == 2) poly_test_bind_alloc_fail_after(1);
+      const PolyImportDesc *desc = poly_import_desc_find(g.arch);
+      PolyGenericImportOpts opts = {.max_batch = 1, .max_seq_len = 2, .device = POLY_DEVICE_CPU};
+      PolyModel *model = desc->from_gguf_decoded(&g, &opts);
+      poly_test_bind_alloc_fail_after(-1);
+      bool correct = (model != NULL) == (mode == 3);
+      poly_model_free(model);
+      ASSERT_TRUE(correct);
+    }
+  }
+  PASS();
+}
+
+TEST(hf, model_import_rejects_failed_weight_conversion_or_copy) {
+  const char *config = "{\"model_type\":\"gpt2\",\"vocab_size\":32,\"n_embd\":16,"
+                       "\"n_head\":2,\"n_layer\":1,\"n_positions\":8}";
+  double payload[512] = {0};
+  bool rejected = true;
+  for (int kind = 0; kind < 2; kind++) {
+    int64_t shape[] = {kind ? 32 : 1, kind ? 16 : 1}, len = 0;
+    uint8_t *file = make_st_file(
+        "transformer.wte.weight", kind ? "F64" : "F32", payload, kind ? sizeof(payload) : 4, shape,
+        2, &len
+    );
+    const uint8_t *files[] = {file};
+    PolyModel *model =
+        poly_hf_load(config, (int)strlen(config), files, &len, 1, 1, 2, POLY_DEVICE_CPU);
+    rejected = rejected && model == NULL;
+    poly_model_free(model);
+    free(file);
+  }
+  ASSERT_TRUE(rejected);
   PASS();
 }
 

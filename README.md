@@ -575,7 +575,10 @@ Polygrad includes the usual tensor building blocks:
 
 C Model imports reject malformed HF shards as a whole; they do not publish a
 partially loaded model. The C GGUF loader supports F32/F16/BF16, I8/I16/I32
-(GGML IDs24/25/26), and Q4_0/Q4_1/Q8_0/Q4_K/Q5_K/Q6_K with complete blocks.
+(GGML IDs24/25/26), and Q4_0/Q4_1/Q8_0/Q6_K with complete blocks.
+Q4_K/Q5_K metadata can be decoded, but their C weight conversion is not
+implemented; Model import rejects conversion failures rather than leaving
+initialized weights in their place.
 Other types are rejected, not interpreted as integers. This is narrower than
 the Python Tensor-level GGUF helper; decoding a file does not imply that its
 model architecture is supported.
