@@ -45,7 +45,9 @@ PolyMap *poly_consumer_map_build(PolyCtx *ctx, PolyUOp *sink);
 PolyConsumerList *poly_consumer_map_get(PolyMap *cmap, PolyUOp *u);
 void poly_realize_map_build(PolyIndexingCtx *ictx, PolyUOp *sink);
 bool poly_is_realized(PolyIndexingCtx *ictx, PolyUOp *u);
-void poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink);
+/* False leaves a partial private range map: discard the indexing context,
+ * never pass it to poly_apply_rangeify. */
+bool poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink);
 PolyRangeEntry *poly_range_map_get(PolyIndexingCtx *ictx, PolyUOp *u);
 PolyUOp *poly_apply_rangeify(PolyIndexingCtx *ictx, PolyUOp *sink);
 PolyUOp *poly_run_rangeify(PolyCtx *ctx, PolyUOp *sink, bool debug);

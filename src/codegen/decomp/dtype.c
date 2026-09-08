@@ -896,7 +896,10 @@ static PolyUOp *f2f(PolyCtx *ctx, PolyUOp *v, PolyDType from, PolyDType to) {
             ),
             ts - fs);
     PolyUOp *nosign = cast(
-        ctx, binary(ctx, POLY_OP_AND, from_uint, v, weakint(ctx, (INT64_C(1) << (fs - 1)) - 1)),
+        ctx,
+        binary(
+            ctx, POLY_OP_AND, from_uint, v, weakint(ctx, (int64_t)((UINT64_C(1) << (fs - 1)) - 1))
+        ),
         to_uint
     );
     PolyUOp *exp = shr(ctx, nosign, fm);
@@ -939,13 +942,19 @@ static PolyUOp *f2f(PolyCtx *ctx, PolyUOp *v, PolyDType from, PolyDType to) {
     PolyUOp *sign = binary(
         ctx, POLY_OP_AND, from_uint, shr(ctx, bits, fs - ts), weakint(ctx, INT64_C(1) << (ts - 1))
     );
-    PolyUOp *nosign =
-        binary(ctx, POLY_OP_AND, from_uint, bits, weakint(ctx, (INT64_C(1) << (fs - 1)) - 1));
+    /* Python's signless mask is representable even for f64; construct it
+     * unsigned so the intermediate 1<<63 never overflows signed C arithmetic. */
+    PolyUOp *nosign = binary(
+        ctx, POLY_OP_AND, from_uint, bits, weakint(ctx, (int64_t)((UINT64_C(1) << (fs - 1)) - 1))
+    );
     PolyUOp *norm = cast(
         ctx,
         binary(
             ctx, POLY_OP_SUB, from_uint, rne(ctx, nosign, fm - tm),
-            weakint(ctx, (int64_t)(fb - tb) << tm)
+            /* FNUZ can have the larger bias (f16 -> e5m2fnuz: -1 * 4).
+             * finfo bounds keep this product representable; negative shifts
+             * of signed values are undefined in C, unlike Python integers. */
+            weakint(ctx, (int64_t)(fb - tb) * (INT64_C(1) << tm))
         ),
         to_uint
     );

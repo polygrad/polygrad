@@ -1960,6 +1960,48 @@ TEST(codegen, float_dtype_decomposition_uses_shaped_load_store_lanes) {
   PASS();
 }
 
+static bool float_store_decomp_has_pinned_constants(
+    PolyDType storage,
+    PolyDType compute,
+    int64_t expected,
+    int expected_and
+) {
+  PolyCtx *ctx = poly_ctx_new();
+  if (!ctx) return false;
+  PolyUOp *buf = poly_test_uop_param(ctx, storage, 1, 0, POLY_ADDR_GLOBAL);
+  PolyUOp *idx =
+      poly_uop2(ctx, POLY_OP_INDEX, storage, buf, poly_const_int(ctx, 0), poly_arg_none());
+  PolyUOp *value = poly_uop0(ctx, POLY_OP_CONST, compute, poly_arg_float(1.0));
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx, value, poly_arg_none());
+  PolyFloatDecompContext fctx = {.from = storage, .to = compute};
+  PolyUOp *result = poly_graph_rewrite_ctx_ex(ctx, store, poly_pm_float_decomp(), &fctx, true);
+  int n = 0;
+  PolyUOp **topo = result ? poly_toposort_alloc(ctx, result, &n) : NULL;
+  bool found = false;
+  for (int i = 0; topo && i < n; i++)
+    if (topo[i]->op == POLY_OP_CONST && poly_dtype_eq(topo[i]->dtype, POLY_WEAKINT) &&
+        topo[i]->arg.kind == POLY_ARG_INT && topo[i]->arg.i == expected)
+      found = true;
+  bool ok = found && count_lin_ops(topo, n, POLY_OP_STORE) == 1 &&
+            count_lin_ops(topo, n, POLY_OP_FLOORDIV) == 4 &&
+            count_lin_ops(topo, n, POLY_OP_AND) == expected_and;
+  poly_toposort_free(topo);
+  poly_ctx_destroy(ctx);
+  return ok;
+}
+
+TEST(codegen, float_store_decomp_double_sign_mask) {
+  /* Pinned dtype.py:f2f uses Python (1 << 63) - 1, not signed C shifting. */
+  ASSERT_TRUE(float_store_decomp_has_pinned_constants(POLY_FLOAT32, POLY_FLOAT64, INT64_MAX, 8));
+  PASS();
+}
+
+TEST(codegen, float_store_decomp_negative_fnuz_bias) {
+  /* f16 bias15 minus e5m2fnuz bias16, shifted by two mantissa bits, is -4. */
+  ASSERT_TRUE(float_store_decomp_has_pinned_constants(POLY_FP8E5M2FNUZ, POLY_FLOAT16, -4, 7));
+  PASS();
+}
+
 TEST(codegen, dtype_decomposition_matchers_match_current_row_counts) {
   /* Tinygrad 2026-08-22/a9069c177a9d codegen/decomp/dtype.py has 12 long,
    * 11 float, and 2 outer dtype-decomposition rows. */

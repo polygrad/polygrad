@@ -11,6 +11,24 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef POLY_TESTING
+static _Thread_local int range_scratch_fail_after = -1;
+void poly_test_range_scratch_fail_after(int count) {
+  range_scratch_fail_after = count;
+}
+#endif
+
+static bool range_scratch_alloc_fails(void) {
+#ifdef POLY_TESTING
+  if (range_scratch_fail_after == 0) {
+    range_scratch_fail_after = -1;
+    return true;
+  }
+  if (range_scratch_fail_after > 0) range_scratch_fail_after--;
+#endif
+  return false;
+}
+
 static PolyUOp *index_const(PolyCtx *ctx, int64_t value) {
   return poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(value));
 }
@@ -1058,7 +1076,7 @@ static bool pcontig_realizes_ended_axis(
   return false;
 }
 
-void poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
+bool poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
   PolyCtx *ctx = ictx->ctx;
   /* Tinygrad 2026-08-22/a9069c177a9d helpers.py:PCONTIG controls partial-axis
    * realization in schedule/indexing.py. Like other Tinygrad ContextVars in
@@ -1068,16 +1086,23 @@ void poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
   /* Get toposort (we'll walk in reverse) */
   int n_uops;
   PolyUOp **topo = poly_toposort_ex_alloc(ctx, sink, &n_uops, NULL, false);
-  if (!topo) return;
-  PolyUOp **range_scratch =
-      pcontig > 1 && n_uops > 0 ? malloc((size_t)n_uops * sizeof(*range_scratch)) : NULL;
-  if (pcontig > 1 && !range_scratch) pcontig = 1;
+  if (!topo) return false;
+  PolyUOp **range_scratch = pcontig > 1 && n_uops > 0 && !range_scratch_alloc_fails()
+                                ? malloc((size_t)n_uops * sizeof(*range_scratch))
+                                : NULL;
+  /* Python run_rangeify raises on allocation failure. Do not silently select
+   * a different PCONTIG policy or publish a partially propagated range map. */
+  if (pcontig > 1 && n_uops > 0 && !range_scratch) {
+    poly_toposort_free(topo);
+    return false;
+  }
 
   /* Build consumer map if not already built */
   if (!ictx->consumer_map) ictx->consumer_map = poly_consumer_map_build(ctx, sink);
 
   /* tinygrad parity: per-node propagated ending ranges */
   PolyMap *ending_map = poly_map_new(n_uops * 2);
+  bool ok = true;
 
   /* Reverse topological traversal */
   for (int ti = n_uops - 1; ti >= 0; ti--) {
@@ -1104,16 +1129,17 @@ void poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
     PolyConsumerList *consumers = poly_consumer_map_get(ictx->consumer_map, x);
     int consumer_cap = consumers ? consumers->count : 0;
     PolyUOp *(*consumer_rngs_buf)[POLY_MAX_DIMS] =
-        consumer_cap > 0 ? calloc((size_t)consumer_cap, sizeof(*consumer_rngs_buf)) : NULL;
-    int *consumer_rngs_lens =
-        consumer_cap > 0 ? calloc((size_t)consumer_cap, sizeof(*consumer_rngs_lens)) : NULL;
+        consumer_cap > 0 && !range_scratch_alloc_fails()
+            ? calloc((size_t)consumer_cap, sizeof(*consumer_rngs_buf))
+            : NULL;
+    int *consumer_rngs_lens = consumer_cap > 0 && !range_scratch_alloc_fails()
+                                  ? calloc((size_t)consumer_cap, sizeof(*consumer_rngs_lens))
+                                  : NULL;
     if (consumer_cap > 0 && (!consumer_rngs_buf || !consumer_rngs_lens)) {
       free(consumer_rngs_buf);
       free(consumer_rngs_lens);
-      poly_map_foreach(ending_map, ending_destroy, NULL);
-      poly_map_destroy(ending_map);
-      poly_toposort_free(topo);
-      return;
+      ok = false;
+      break;
     }
     int n_consumer_rngs = 0;
 
@@ -1506,6 +1532,7 @@ void poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
   poly_map_destroy(ending_map);
   free(range_scratch);
   poly_toposort_free(topo);
+  return ok;
 }
 
 /* Apply rangeify graph rewrite */
@@ -1807,7 +1834,10 @@ PolyUOp *poly_run_rangeify(PolyCtx *ctx, PolyUOp *sink, bool debug) {
   PolyIndexingCtx *ictx = poly_indexing_ctx_new(ctx);
   if (!ictx) return NULL;
   poly_realize_map_build(ictx, sink);
-  poly_range_propagate(ictx, sink);
+  if (!poly_range_propagate(ictx, sink)) {
+    poly_indexing_ctx_destroy(ictx);
+    return NULL;
+  }
   PolyUOp *rangeified = poly_apply_rangeify(ictx, sink);
   if (debug) {
     int n_topo = 0;

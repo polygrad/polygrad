@@ -726,7 +726,6 @@ static void poly_uop_minmax_compute(PolyCtx *ctx, PolyUOp *u, int64_t *vmin, int
             memcpy(new_stack, stack_buf, (size_t)stack_top * sizeof(MinMaxFrame));
           stack = new_stack;
           stack_cap = new_cap;
-          frame = &stack[stack_top - 1];
         }
         stack[stack_top++] = (MinMaxFrame){src, 0};
       }

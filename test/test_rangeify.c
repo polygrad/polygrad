@@ -70,6 +70,52 @@ static void rangeify_restore_env(RangeifyEnvSave *saved) {
   saved->value = NULL;
 }
 
+#ifdef POLY_TESTING
+extern void poly_test_range_scratch_fail_after(int count);
+
+static bool range_scratch_failure_is_rejected(int fail_after) {
+  RangeifyEnvSave pcontig = rangeify_save_env("PCONTIG");
+  setenv("PCONTIG", "2", 1);
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *buf = poly_test_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *ones = poly_expand(ctx, poly_const_float(ctx, 1.0), (int64_t[]){4}, 1);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, buf, ones));
+  poly_test_range_scratch_fail_after(fail_after);
+  bool rejected = poly_run_rangeify(ctx, sink, false) == NULL;
+  poly_test_range_scratch_fail_after(-1);
+  PolyUOp *retried = poly_run_rangeify(ctx, sink, false);
+  int n = 0;
+  PolyUOp **topo = retried ? poly_toposort_alloc(ctx, retried, &n) : NULL;
+  int ranges = 0, stores = 0, ends = 0;
+  for (int i = 0; topo && i < n; i++) {
+    ranges += topo[i]->op == POLY_OP_RANGE;
+    stores += topo[i]->op == POLY_OP_STORE;
+    ends += topo[i]->op == POLY_OP_END;
+  }
+  bool ok = rejected && ranges == 1 && stores == 1 && ends == 1;
+  poly_toposort_free(topo);
+  poly_ctx_destroy(ctx);
+  rangeify_restore_env(&pcontig);
+  return ok;
+}
+
+TEST(rangeify, range_scratch_failure_does_not_downgrade_pcontig) {
+  /* Python run_rangeify raises on list allocation failure; PCONTIG stays2. */
+  ASSERT_TRUE(range_scratch_failure_is_rejected(0));
+  PASS();
+}
+
+TEST(rangeify, range_scratch_failure_reclaims_consumer_ranges) {
+  ASSERT_TRUE(range_scratch_failure_is_rejected(1));
+  PASS();
+}
+
+TEST(rangeify, range_scratch_failure_reclaims_consumer_lengths) {
+  ASSERT_TRUE(range_scratch_failure_is_rejected(2));
+  PASS();
+}
+#endif
+
 /* Consumer map tests */
 
 TEST(rangeify, consumer_map_chain) {
