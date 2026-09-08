@@ -4,7 +4,13 @@
 #include "polygrad.h"
 
 /* Heap-owned arithmetic value used while folding. PolyArg stores the same
- * canonical signed-magnitude limbs as an immutable arena-owned view. */
+ * canonical signed-magnitude limbs as an immutable arena-owned view.
+ *
+ * Constructors/arithmetic require zero-initialized, empty output owners,
+ * distinct from inputs (and from each other for quotient/remainder). They do
+ * not replace populated outputs or support in-place aliasing. Free outputs
+ * after either success or failure. To update a value, build a fresh candidate,
+ * then free/move only on success, as for Python's immutable integer results. */
 typedef struct {
   int sign;
   size_t n_limbs;

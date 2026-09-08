@@ -81,6 +81,49 @@ TEST(bigint, zero_results_release_discarded_limb_storage) {
   PASS();
 }
 
+TEST(bigint, right_shift_count_does_not_narrow_to_host_size) {
+  /* python_alu[SHR] uses Python rshift even when the count exceeds size_t.
+   * 2**37 bits wraps to zero limb words on wasm32 before the owning fix. */
+  const uint64_t shifts[] = {31,        32, 33, 64, UINT64_C(1) << 37, (UINT64_C(1) << 37) + 1,
+                             UINT64_MAX};
+  const int64_t values[] = {0, 1, -1, 7, -7, INT64_MAX, INT64_MIN};
+  for (size_t i = 0; i < sizeof(values) / sizeof(values[0]); i++) {
+    for (size_t j = 0; j < sizeof(shifts) / sizeof(shifts[0]); j++) {
+      PolyInt a = {0}, result = {0};
+      ASSERT_TRUE(poly_int_from_i64(&a, values[i]));
+      ASSERT_TRUE(poly_int_shr(&result, &a, shifts[j]));
+      int64_t got = 0;
+      bool converted = poly_int_to_i64(&result, &got);
+      int64_t expected = shifts[j] >= 64 ? (values[i] < 0 ? -1 : 0) : values[i] >> shifts[j];
+      poly_int_free(&a);
+      poly_int_free(&result);
+      ASSERT_TRUE(converted);
+      ASSERT_EQ(got, expected);
+    }
+  }
+  PASS();
+}
+
+TEST(bigint, decimal_capacity_does_not_overflow_wasm32) {
+  /* 150001 * 30103 overflows size_t on wasm32. The integer itself needs
+   * only ~19KB of limbs; conversion must not underallocate its decimal text. */
+  PolyInt one = {0}, value = {0}, restored = {0};
+  ASSERT_TRUE(poly_int_from_i64(&one, 1));
+  ASSERT_TRUE(poly_int_shl(&value, &one, 150000));
+  char *decimal = poly_int_to_decimal(&value);
+  ASSERT_NOT_NULL(decimal);
+  size_t length = strlen(decimal);
+  bool restored_ok = poly_int_from_decimal(&restored, decimal);
+  bool equal = restored_ok && poly_int_cmp(&value, &restored) == 0;
+  free(decimal);
+  poly_int_free(&one);
+  poly_int_free(&value);
+  poly_int_free(&restored);
+  ASSERT_EQ(length, 45155);
+  ASSERT_TRUE(equal);
+  PASS();
+}
+
 TEST(bigint, fixed_width_truncation_matches_pinned_exec_alu) {
   PolyInt value = {0}, truncated = {0};
   ASSERT_TRUE(bigint_from(&value, "-1267650600228229401496703205382"));
@@ -110,6 +153,28 @@ static PolyUOp *bigint_const(PolyCtx *ctx, PolyDType dtype, const char *decimal)
   PolyUOp *out = poly_uop0(ctx, POLY_OP_CONST, dtype, poly_int_as_arg(&value));
   poly_int_free(&value);
   return out;
+}
+
+TEST(bigint, oversized_right_shift_folds_to_signed_constant) {
+  PolyCtx *ctx = poly_ctx_new();
+  const char *values[] = {"1267650600228229401496703205376", "-1267650600228229401496703205376"};
+  for (int i = 0; i < 2; i++) {
+    PolyUOp *a = bigint_const(ctx, POLY_WEAKINT, values[i]);
+    PolyUOp *amount = poly_uop_const(ctx, poly_arg_int(INT64_C(1) << 37), POLY_WEAKINT);
+    PolyUOp *folded = poly_graph_rewrite(
+        ctx, poly_uop2(ctx, POLY_OP_SHR, POLY_WEAKINT, a, amount, poly_arg_none()),
+        poly_symbolic_simple()
+    );
+    ASSERT_NOT_NULL(folded);
+    ASSERT_EQ(folded->op, POLY_OP_CONST);
+    ASSERT_EQ(folded->n_src, 0);
+    ASSERT_TRUE(poly_dtype_eq(folded->dtype, POLY_WEAKINT));
+    int64_t result = 42;
+    ASSERT_TRUE(poly_arg_integer_to_i64(folded->arg, &result));
+    ASSERT_EQ(result, i ? -1 : 0);
+  }
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 static PolyUOp *stack2(PolyCtx *ctx, PolyDType dtype, int64_t value) {

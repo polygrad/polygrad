@@ -92,6 +92,19 @@ DIRECT_C_BUILDS = build/libpolygrad.so build/polygrad_test build/polygrad_test_f
 	build/polygrad.wasm build/core.async.js build/core.sync.js
 $(DIRECT_C_BUILDS): $(PROJECT_HEADERS) Makefile
 
+# Run the same integer/constant-fold tests with wasm32 size_t and sanitizers.
+# Native-only execution cannot detect host-width narrowing in the C core.
+.PHONY: test-bigint-wasm
+test-bigint-wasm: build/test_bigint.js
+	$(SAN_RUN) $(NODE) build/test_bigint.js --require-no-skips bigint
+
+build/test_bigint.js: $(WASM_SRC) test/test_main.c test/test_bigint.c test/test_harness.h $(PROJECT_HEADERS) Makefile
+	@mkdir -p build
+	EMSDK_PYTHON=$(EMSDK_PYTHON) $(EMCC) $(EMCC_CFLAGS_COMMON) -O1 -g \
+		-fsanitize=address,undefined -s ASSERTIONS=1 -s ALLOW_MEMORY_GROWTH=1 \
+		-s WASM_ASYNC_COMPILATION=0 -s ENVIRONMENT=node -s EXIT_RUNTIME=1 \
+		-o $@ $(filter %.c,$^)
+
 QWEN3_GGUF ?= $(if $(POLY_QWEN3_GGUF),$(POLY_QWEN3_GGUF),$(CURDIR)/temp/Qwen3-0.6B-Q8_0.gguf)
 # Broader Playwright browser matrix. The default target stays Chromium-only;
 # test-browser-matrix uses this optional smoke matrix and skips unavailable

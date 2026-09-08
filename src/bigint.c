@@ -228,11 +228,13 @@ bool poly_int_shl(PolyInt *out, const PolyInt *a, uint64_t shift) {
 
 static bool shr_abs(PolyInt *out, const PolyInt *a, uint64_t shift, bool *discarded) {
   if (discarded) *discarded = false;
-  size_t words = (size_t)(shift / 32), bits = (size_t)(shift % 32);
-  if (words >= a->n_limbs) {
+  /* Python rshift consumes the whole count. Compare before narrowing: on
+   * wasm32, 2**37 bits otherwise wraps to zero size_t limb words. */
+  if (shift / 32 >= a->n_limbs) {
     if (discarded) *discarded = !poly_int_is_zero(a);
     return alloc_limbs(out, 0);
   }
+  size_t words = (size_t)(shift / 32), bits = (size_t)(shift % 32);
   if (!alloc_limbs(out, a->n_limbs - words)) return false;
   if (discarded) {
     for (size_t i = 0; i < words; i++)
@@ -515,10 +517,14 @@ char *poly_int_to_decimal(const PolyInt *value) {
     if (zero) memcpy(zero, "0", 2);
     return zero;
   }
+  /* Each 32-bit limb needs at most ten decimal digits, plus sign and NUL.
+   * Unlike bit_length * log10(2)'s integer approximation, this checked bound
+   * cannot wrap on wasm32 for modest (~19KB) integer values. */
+  if (value->n_limbs > (SIZE_MAX - 2) / 10) return NULL;
+  size_t cap = value->n_limbs * 10 + 2;
   PolyInt tmp = {0};
   if (!poly_int_copy(&tmp, value)) return NULL;
   tmp.sign = 1;
-  size_t cap = (bit_length(value) * 30103) / 100000 + 4;
   char *digits = malloc(cap);
   uint32_t *chunks = malloc((cap / 9 + 2) * sizeof(uint32_t));
   if (!digits || !chunks) {
