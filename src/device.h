@@ -82,19 +82,22 @@ struct PolyBuffer {
 };
 
 /* Attach buffer data to a BUFFER UOp.
- * FFI-friendly: takes flat scalars, constructs PolyBuffer internally. */
-void poly_buffer_set(PolyCtx *ctx, PolyUOp *buf, void *ptr, size_t nbytes, int domain);
+ * FFI-friendly: takes flat scalars, constructs PolyBuffer internally.
+ * set/attach/adopt return 0 on publication, -1 on invalid arguments, metadata
+ * allocation failure or a replacement that would invalidate existing aliases.
+ * Failure preserves the previous binding and caller ownership. Raw metadata
+ * pointers are invalid after successful replacement. Map OOM remains fatal. */
+int poly_buffer_set(PolyCtx *ctx, PolyUOp *buf, void *ptr, size_t nbytes, int domain);
 
 /* Attach an existing runtime buffer view to a BUFFER UOp without taking
- * ownership of the underlying allocation. This is used when instance/call
- * storage should be visible through ctx->buffers, which keeps execution on
- * the same schedule/realize path as normal tensors. */
-void poly_buffer_attach(PolyCtx *ctx, PolyUOp *buf, const PolyBuffer *handle);
+ * ownership of the underlying allocation. Runtime call storage is visible
+ * through ctx->buffers on the ordinary LINEAR/realize path. */
+int poly_buffer_attach(PolyCtx *ctx, PolyUOp *buf, const PolyBuffer *handle);
 
 /* Adopt an existing runtime buffer as the authoritative ctx residency.
  * Unlike poly_buffer_attach(), this preserves handle->owned and is intended
  * for runtime-owned storage that ctx must release when the binding is retired. */
-void poly_buffer_adopt(PolyCtx *ctx, PolyUOp *buf, const PolyBuffer *handle);
+int poly_buffer_adopt(PolyCtx *ctx, PolyUOp *buf, const PolyBuffer *handle);
 
 PolyUOp *poly_buffer_from_host(
     PolyCtx *ctx,

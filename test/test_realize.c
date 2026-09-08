@@ -7065,6 +7065,34 @@ TEST(realize, poly_jit_replays_assign_against_current_input) {
   PASS();
 }
 
+TEST(realize, poly_jit_replay_uses_replaced_buffer_binding) {
+  PolyCtx *ctx = poly_ctx_new();
+  int64_t shape[] = {3};
+  float original[3] = {1, 2, 3}, replacement[3] = {10, 20, 30};
+  PolyTensor *input = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+  PolyUOp *buffer = poly_uop_buffer(ctx, poly_tensor_uop_physical(input));
+  ASSERT_NOT_NULL(buffer);
+  ASSERT_INT_EQ(poly_buffer_set(ctx, buffer, original, sizeof(original), POLY_DEVICE_CPU), 0);
+  PolyJit *jit = poly_jit_new(ctx);
+  ASSERT_INT_EQ(poly_jit_begin_capture(jit, &input, 1), 0);
+  PolyTensor *one =
+      poly_tensor_const_float_by_id(ctx, 1.0, poly_dtype_id_by_name("float32"), POLY_DEVICE_CPU);
+  PolyTensor *sum = poly_tensor_alu2(ctx, POLY_OP_ADD, input, one);
+  ASSERT_PTR_EQ(poly_tensor_assign(ctx, input, sum), input);
+  PolyTensor *realized = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &input, 1, &realized), 0);
+  ASSERT_INT_EQ(poly_jit_end_capture(jit, ctx->tensors, ctx->n_tensors), 0);
+  ASSERT_INT_EQ(poly_buffer_set(ctx, buffer, replacement, sizeof(replacement), POLY_DEVICE_CPU), 0);
+  ASSERT_INT_EQ(poly_jit_run(jit, &input, 1), 0);
+  for (int i = 0; i < 3; i++) {
+    ASSERT_FLOAT_EQ(original[i], i + 2, 1e-6);
+    ASSERT_FLOAT_EQ(replacement[i], (i + 1) * 10 + 1, 1e-6);
+  }
+  poly_jit_free(jit);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(realize, poly_jit_combines_multiple_captured_realizes) {
   PolyCtx *ctx = poly_ctx_new();
 

@@ -349,7 +349,7 @@ function createWasmCoreFromModule(Module, device) {
     weakfloat: coreDTypeId('weakfloat')
   }
 
-  function modelStorageInfo(dtypeId) {
+  function storageInfo(dtypeId) {
     if (dtypeId === DTYPE_IDS.bool || dtypeId === DTYPE_IDS.uint8 ||
         dtypeId === DTYPE_IDS.fp8e4m3 || dtypeId === DTYPE_IDS.fp8e5m2 ||
         dtypeId === DTYPE_IDS.fp8e4m3fnuz || dtypeId === DTYPE_IDS.fp8e5m2fnuz)
@@ -364,12 +364,12 @@ function createWasmCoreFromModule(Module, device) {
     if (dtypeId === DTYPE_IDS.uint64) return [BigUint64Array, 8]
     if (dtypeId === DTYPE_IDS.float32) return [Float32Array, 4]
     if (dtypeId === DTYPE_IDS.float64) return [Float64Array, 8]
-    throw new Error(`polygrad: unsupported Model storage dtype id ${dtypeId}`)
+    throw new Error(`polygrad: unsupported storage dtype id ${dtypeId}`)
   }
 
   function copyModelStorage(dataPtr, numel, dtypeId) {
     if (!dataPtr) return null
-    const [AT, itemsize] = modelStorageInfo(dtypeId)
+    const [AT, itemsize] = storageInfo(dtypeId)
     const bytes = heapU8().buffer.slice(dataPtr, dataPtr + numel * itemsize)
     return new AT(bytes)
   }
@@ -1543,18 +1543,28 @@ function createWasmCoreFromModule(Module, device) {
       const nbytes = bytes.byteLength
       const useFrontendHostKey = deviceName === 'webgpu' &&
         !(Module.__polygradWebGpuState && Module.__polygradWebGpuState.device)
-      const frontendBytes = useFrontendHostKey ? bytes.slice() : null
+      if (useFrontendHostKey) {
+        // This is a complete HOST snapshot, not a write into Wasm storage
+        // followed by its replacement. Prepare bytes before C publication;
+        // failed attachment must leave the previous C/JS binding untouched.
+        const [, itemsize] = storageInfo(Module._poly_uop_dtype_id(ctx, buf))
+        const expected = Number(Module._poly_uop_numel(ctx, buf)) * itemsize
+        if (!nbytes || !Number.isSafeInteger(expected) || nbytes !== expected)
+          throw new Error('poly_buffer_write requires a complete host snapshot')
+        const frontendBytes = bytes.slice()
+        const rc = Module._poly_buffer_set(ctx, buf, 0, nbytes, HOST_DEVICE_ID)
+        if (rc !== 0) throw new Error('poly_buffer_set failed (rc=' + rc + ')')
+        const bufferKey = Module._poly_buffer_get_key(ctx, buf)
+        if (!bufferKey) throw new Error('poly_buffer_set did not create a frontend host key')
+        Module.__polygradHostBuffers.set(String(bufferKey), frontendBytes)
+        return
+      }
       const ptr = nbytes ? Module._malloc(nbytes) : 0
+      if (nbytes && !ptr) throw new Error('poly_buffer_write allocation failed')
       try {
         if (nbytes) heapU8().set(bytes, ptr)
         const rc = Module._poly_buffer_write(ctx, buf, ptr, nbytes)
         if (rc !== 0) throw new Error('poly_buffer_write failed (rc=' + rc + ')')
-        if (frontendBytes) {
-          Module._poly_buffer_set(ctx, buf, 0, nbytes, HOST_DEVICE_ID)
-          const bufferKey = Module._poly_buffer_get_key(ctx, buf)
-          if (!bufferKey) throw new Error('poly_buffer_set did not create a frontend host key')
-          Module.__polygradHostBuffers.set(String(bufferKey), frontendBytes)
-        }
       } finally {
         if (ptr) Module._free(ptr)
       }
@@ -1883,7 +1893,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 74
+  const EXPECTED_ABI = 75
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(
@@ -2060,7 +2070,7 @@ function createWasmCoreFromModule(Module, device) {
     bufData(instPtr, i) {
       const run = () => {
         const dtypeId = this.bufDtypeId(instPtr, i)
-        const [AT, itemsize] = modelStorageInfo(dtypeId)
+        const [AT, itemsize] = storageInfo(dtypeId)
         const numel = shapeNumel(this.bufShape(instPtr, i))
         const nbytes = numel * itemsize
         if (!nbytes) return new AT(0)
@@ -2080,7 +2090,7 @@ function createWasmCoreFromModule(Module, device) {
       return deviceName === 'webgpu' ? ensureModelDevice(instPtr).then(run) : run()
     },
     writeBuf(instPtr, i, array) {
-      const [AT, itemsize] = modelStorageInfo(this.bufDtypeId(instPtr, i))
+      const [AT, itemsize] = storageInfo(this.bufDtypeId(instPtr, i))
       const nbytes = shapeNumel(this.bufShape(instPtr, i)) * itemsize
       if (!(array instanceof AT) || array.byteLength !== nbytes)
         throw new TypeError('polygrad: buffer write requires exact storage dtype and extent')

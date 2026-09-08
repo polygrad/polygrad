@@ -266,6 +266,71 @@ async function runWasmOwnershipTests() {
     }
   })
 
+  await test('host write allocation failure does not write through address zero', async () => {
+    const pg = await polygrad.create({ core: 'wasm' })
+    const core = pg._core
+    const Module = core.Module
+    const originalMalloc = Module._malloc
+    const originalWrite = Module._poly_buffer_write
+    const prefix = core.heapU8().slice(0, 16)
+    try {
+      const buf = core.ffi.poly_buffer_by_id(core.ctx, core.dtypeIds.float32, 4)
+      let writes = 0
+      Module._malloc = () => 0
+      Module._poly_buffer_write = () => { writes++; return -1 }
+      let rejected = false
+      try { core.ffi.poly_buffer_write(core.ctx, buf, new Float32Array([1, 2, 3, 4])) }
+      catch (error) { rejected = /allocation/.test(error.message) }
+      const unchanged = prefix.every((byte, i) => core.heapU8()[i] === byte)
+      if (!rejected || writes || !unchanged)
+        throw new Error('allocation failure reached address zero or the C writer')
+    } finally {
+      core.heapU8().set(prefix, 0)
+      Module._malloc = originalMalloc
+      Module._poly_buffer_write = originalWrite
+      await pg.dispose()
+    }
+  })
+
+  await test('cold WebGPU host registration failure preserves the previous binding', async () => {
+    const pg = await polygrad.create({ core: 'wasm' })
+    const { createWasmCoreFromModule } = require('../src/core/wasm_common')
+    const Module = pg._core.Module
+    const cold = createWasmCoreFromModule(Module, 'webgpu')
+    const originalSet = Module._poly_buffer_set
+    const originalWrite = Module._poly_buffer_write
+    try {
+      const buf = cold.ffi.poly_buffer_on_device_by_id(cold.ctx, cold.dtypeIds.float32, 4, cold.deviceIds.webgpu)
+      cold.ffi.poly_uop_retain(cold.ctx, buf)
+      cold.ffi.poly_buffer_write(cold.ctx, buf, new Float32Array([1, 2, 3, 4]))
+      const key = String(Module._poly_buffer_get_key(cold.ctx, buf))
+      const originalBytes = Module.__polygradHostBuffers.get(key)
+      let writes = 0
+      Module._poly_buffer_write = (...args) => { writes++; return originalWrite(...args) }
+      Module._poly_buffer_set = () => -1
+      let rejected = false
+      try { cold.ffi.poly_buffer_write(cold.ctx, buf, new Float32Array([9, 8, 7, 6])) }
+      catch (error) { rejected = /poly_buffer_set/.test(error.message) }
+      if (!rejected) throw new Error('failed C attachment was reported as success')
+      if (writes !== 0) throw new Error('old storage was written before attachment succeeded')
+      if (String(Module._poly_buffer_get_key(cold.ctx, buf)) !== key ||
+          Module.__polygradHostBuffers.get(key) !== originalBytes)
+        throw new Error('failed attachment changed the old C/JS binding')
+      assertClose(new Float32Array(originalBytes.buffer, originalBytes.byteOffset, 4), [1, 2, 3, 4])
+      Module._poly_buffer_set = originalSet
+      Module._poly_buffer_write = originalWrite
+      cold.ffi.poly_buffer_write(cold.ctx, buf, new Float32Array([9, 8, 7, 6]))
+      const nextKey = String(Module._poly_buffer_get_key(cold.ctx, buf))
+      const nextBytes = Module.__polygradHostBuffers.get(nextKey)
+      assertClose(new Float32Array(nextBytes.buffer, nextBytes.byteOffset, 4), [9, 8, 7, 6])
+    } finally {
+      Module._poly_buffer_set = originalSet
+      Module._poly_buffer_write = originalWrite
+      await cold.destroy()
+      await pg.dispose()
+    }
+  })
+
   return { passed, failed }
 }
 

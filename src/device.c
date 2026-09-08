@@ -21,9 +21,23 @@
 
 static _Thread_local PolyFrontendBufferReleaseFn g_frontend_buffer_release = NULL;
 
+#ifdef POLY_TESTING
+static _Thread_local int buffer_handle_fail_after = -1;
+void poly_test_buffer_handle_fail_after(int count) {
+  buffer_handle_fail_after = count;
+}
+#endif
+
 /* C allocation below Tinygrad 2026-08-22/a9069c177a9d Buffer refcounts.
  * MultiBuffer pointer arrays trail the handle; child handles remain explicit. */
 static PolyBuffer *poly_buffer_handle_new(int n_bufs) {
+#ifdef POLY_TESTING
+  if (buffer_handle_fail_after == 0) {
+    buffer_handle_fail_after = -1;
+    return NULL;
+  }
+  if (buffer_handle_fail_after > 0) buffer_handle_fail_after--;
+#endif
   if (n_bufs < 0 || (size_t)n_bufs > (SIZE_MAX - sizeof(PolyBuffer)) / sizeof(PolyBuffer *))
     return NULL;
   PolyBuffer *buffer = calloc(1, sizeof(*buffer) + (size_t)n_bufs * sizeof(PolyBuffer *));
@@ -370,7 +384,10 @@ PolyUOp *poly_buffer_from_file(PolyCtx *ctx, const char *path, int dtype_id) {
       .device_uop = device_uop,
       .memory_device_uop = device_uop,
   };
-  poly_buffer_adopt(ctx, buf, &mapped);
+  if (poly_buffer_adopt(ctx, buf, &mapped) != 0) {
+    if (ptr) munmap(ptr, (size_t)mapped_bytes);
+    return NULL;
+  }
   return buf;
 #endif
 }
@@ -414,7 +431,7 @@ PolyUOp *poly_buffer_from_host(
   if (!buf) return NULL;
   /* Register imported source data in ctx->buffers so graph-driven realize can
    * materialize it through the creation COPY. */
-  poly_buffer_set(ctx, buf, ptr, nbytes, (int)POLY_DEVICE_HOST);
+  if (poly_buffer_set(ctx, buf, ptr, nbytes, (int)POLY_DEVICE_HOST) != 0) return NULL;
   /* BUFFER is 1D; a multi-dim tensor needs RESHAPE on top so the scheduler
    * sees the intended shape. */
   if (ndim > 1) return poly_reshape(ctx, buf, dims, ndim);
@@ -438,8 +455,7 @@ PolyUOp *poly_buffer_from_host_unique(
                         : NULL;
   if (!buffer) return NULL;
 
-  poly_buffer_set(ctx, buffer, ptr, nbytes, (int)POLY_DEVICE_HOST);
-  if (!poly_buffer_get(ctx, buffer)) return NULL;
+  if (poly_buffer_set(ctx, buffer, ptr, nbytes, (int)POLY_DEVICE_HOST) != 0) return NULL;
   if (out_source_device) *out_source_device = source_device;
   return buffer;
 }
@@ -482,15 +498,84 @@ void poly_buffer_free_chain(PolyCtx *ctx, PolyBuffer *b) {
   if (src) poly_buffer_free_chain(ctx, src);
 }
 
-void poly_buffer_set(PolyCtx *ctx, PolyUOp *buf, void *ptr, size_t nbytes, int device) {
-  if (!ctx || !buf) return;
-  /* Replacing the whole binding for this UOp: free the entire old chain. */
+/* C residency replacement below Tinygrad Buffer.allocate/deallocate and
+ * Buffer.view. Existing cached aliases borrow metadata, so they cannot survive
+ * retirement of their owner. Reject that operation instead of adding a second
+ * retention/lifetime mechanism. base is borrowed; src/owned children retire. */
+static bool buffer_retirement_contains(const PolyBuffer *retired, const PolyBuffer *needle) {
+  if (!retired || !needle) return false;
+  if (retired == needle || buffer_retirement_contains(retired->src, needle)) return true;
+  if (retired->owns_bufs)
+    for (int i = 0; i < retired->n_bufs; i++)
+      if (buffer_retirement_contains(retired->bufs[i], needle)) return true;
+  return false;
+}
+
+static bool buffer_storage_overlaps(const PolyBuffer *retired, const PolyBuffer *value) {
+  if (!retired) return false;
+  if (retired->owned && retired->ptr && value->ptr) {
+    if (retired->device == value->device && retired->ptr == value->ptr) return true;
+    if (retired->allocator && retired->allocator->host_addressable && value->allocator &&
+        value->allocator->host_addressable) {
+      uintptr_t a = (uintptr_t)retired->ptr, b = (uintptr_t)value->ptr;
+      if (b >= a ? b - a < retired->nbytes : a - b < value->nbytes) return true;
+    }
+  }
+  if (buffer_storage_overlaps(retired->src, value)) return true;
+  if (retired->owns_bufs)
+    for (int i = 0; i < retired->n_bufs; i++)
+      if (buffer_storage_overlaps(retired->bufs[i], value)) return true;
+  return false;
+}
+
+static bool buffer_depends_on_retirement(const PolyBuffer *value, const PolyBuffer *retired) {
+  if (!value) return false;
+  if (buffer_retirement_contains(retired, value) || buffer_storage_overlaps(retired, value) ||
+      buffer_depends_on_retirement(value->base, retired) ||
+      buffer_depends_on_retirement(value->src, retired))
+    return true;
+  for (int i = 0; i < value->n_bufs; i++)
+    if (buffer_depends_on_retirement(value->bufs[i], retired)) return true;
+  return false;
+}
+
+typedef struct {
+  const PolyUOp *key;
+  const PolyBuffer *retired;
+  bool aliased;
+} BufferReplacementCheck;
+
+static void buffer_replacement_check(const void *key, void *value, void *arg) {
+  BufferReplacementCheck *check = arg;
+  if (key != check->key && !check->aliased)
+    check->aliased = buffer_depends_on_retirement(value, check->retired);
+}
+
+static int buffer_publish_replacement(PolyCtx *ctx, PolyUOp *buf, PolyBuffer *candidate) {
   PolyBuffer *old = poly_buffer_get(ctx, buf);
+  if (old) {
+    BufferReplacementCheck check = {buf, old, buffer_depends_on_retirement(candidate, old)};
+    if (!check.aliased) poly_map_foreach(ctx->buffers, buffer_replacement_check, &check);
+    if (check.aliased) {
+      /* Ownership transfers only on success; never release candidate bytes. */
+      free(candidate);
+      return -1;
+    }
+  }
+  /* The map retains its existing fatal-OOM policy. Publish before invoking
+   * old allocator/frontend callbacks, which may inspect the current binding. */
+  poly_map_set(ctx->buffers, poly_ptr_hash(buf), buf, candidate, poly_ptr_eq);
   if (old) poly_buffer_free_chain(ctx, old);
+  return 0;
+}
+
+int poly_buffer_set(PolyCtx *ctx, PolyUOp *buf, void *ptr, size_t nbytes, int device) {
+  if (!ctx || !buf) return -1;
 
   const PolyBackendDesc *be = poly_backend_get((PolyDevice)device);
+  if (!be) return -1;
   PolyBuffer *h = poly_buffer_handle_new(0);
-  if (!h) return;
+  if (!h) return -1;
   *h = (PolyBuffer){
       .ptr = ptr,
       .nbytes = nbytes,
@@ -506,15 +591,13 @@ void poly_buffer_set(PolyCtx *ctx, PolyUOp *buf, void *ptr, size_t nbytes, int d
       .device_uop = poly_buffer_device_uop(ctx, buf, (PolyDevice)device),
       .memory_device_uop = NULL,
   };
-  poly_map_set(ctx->buffers, poly_ptr_hash(buf), buf, h, poly_ptr_eq);
+  return buffer_publish_replacement(ctx, buf, h);
 }
 
-void poly_buffer_attach(PolyCtx *ctx, PolyUOp *buf, const PolyBuffer *handle) {
-  if (!ctx || !buf || !handle) return;
-  PolyBuffer *old = poly_buffer_get(ctx, buf);
-  if (old) poly_buffer_free_chain(ctx, old);
-
+int poly_buffer_attach(PolyCtx *ctx, PolyUOp *buf, const PolyBuffer *handle) {
+  if (!ctx || !buf || !handle) return -1;
   PolyBuffer *h = poly_buffer_handle_new(0);
+  if (!h) return -1;
   *h = *handle;
   h->owned = false;
   /* Borrowed MultiBuffer attachments share the child array; only adopt owns it. */
@@ -530,15 +613,13 @@ void poly_buffer_attach(PolyCtx *ctx, PolyUOp *buf, const PolyBuffer *handle) {
     const PolyBackendDesc *be = poly_backend_get(h->device);
     h->allocator = be ? be->get_allocator() : NULL;
   }
-  poly_map_set(ctx->buffers, poly_ptr_hash(buf), buf, h, poly_ptr_eq);
+  return buffer_publish_replacement(ctx, buf, h);
 }
 
-void poly_buffer_adopt(PolyCtx *ctx, PolyUOp *buf, const PolyBuffer *handle) {
-  if (!ctx || !buf || !handle) return;
-  PolyBuffer *old = poly_buffer_get(ctx, buf);
-  if (old) poly_buffer_free_chain(ctx, old);
-
+int poly_buffer_adopt(PolyCtx *ctx, PolyUOp *buf, const PolyBuffer *handle) {
+  if (!ctx || !buf || !handle) return -1;
   PolyBuffer *h = poly_buffer_handle_new(0);
+  if (!h) return -1;
   *h = *handle;
   h->frontend_release = NULL;
   h->device_uop = poly_buffer_device_uop(ctx, buf, h->device);
@@ -548,7 +629,7 @@ void poly_buffer_adopt(PolyCtx *ctx, PolyUOp *buf, const PolyBuffer *handle) {
     const PolyBackendDesc *be = poly_backend_get(h->device);
     h->allocator = be ? be->get_allocator() : NULL;
   }
-  poly_map_set(ctx->buffers, poly_ptr_hash(buf), buf, h, poly_ptr_eq);
+  return buffer_publish_replacement(ctx, buf, h);
 }
 
 void *poly_buffer_get_ptr(PolyCtx *ctx, PolyUOp *buf) {

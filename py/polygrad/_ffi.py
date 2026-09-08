@@ -16,7 +16,7 @@ import sys
 _lib = None
 OPS = {}
 _has_cuda_ffi = False
-POLYGRAD_ABI_VERSION = 74
+POLYGRAD_ABI_VERSION = 75
 
 # --- Opaque pointer type (always available) ---
 _ptr = ctypes.c_void_p
@@ -759,7 +759,7 @@ def _declare_signatures(lib):
     lib.poly_uop_call_grad_fxn_key.argtypes = [_ptr]
 
     # --- Side-table buffer API (device.h) ---
-    lib.poly_buffer_set.restype = None
+    lib.poly_buffer_set.restype = ctypes.c_int
     lib.poly_buffer_set.argtypes = [_ptr, _ptr, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
 
     lib.poly_buffer_get_ptr.restype = ctypes.c_void_p

@@ -542,7 +542,10 @@ static inline void poly_test_attach_buffer_views(
     PolyBuffer h = views[i].handle;
     if (h.nbytes == 0) h.nbytes = poly_test_buffer_nbytes(ctx, views[i].buffer);
     h.valid = true;
-    poly_buffer_attach(ctx, views[i].buffer, &h);
+    if (poly_buffer_attach(ctx, views[i].buffer, &h) != 0) {
+      fprintf(stderr, "test buffer attachment failed\n");
+      abort();
+    }
   }
 }
 

@@ -12,8 +12,299 @@
 #include "../src/uop/movement.h"
 #include "../src/uop/ops.h"
 #include "../src/utils.h"
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
+#include <unistd.h>
+#endif
 
 /* Basic creation */
+
+#ifdef POLY_TESTING
+extern void poly_test_buffer_handle_fail_after(int count);
+
+static void replacement_count_free(const PolyBuffer *buffer, void *arg) {
+  (void)buffer;
+  (*(int *)arg)++;
+}
+
+static void *replacement_no_alloc(size_t nbytes, void *arg) {
+  (void)nbytes;
+  (void)arg;
+  /* Reading already attached storage must not allocate it again. */
+  return NULL;
+}
+
+static bool replacement_preserves_old(int operation, bool with_view) {
+  PolyCtx *ctx = poly_ctx_new();
+  int frees = 0;
+  PolyAllocator allocator = {
+      .alloc = replacement_no_alloc,
+      .free = replacement_count_free,
+      .dev_ctx = &frees,
+      .host_addressable = true};
+  float old_data[4] = {1, 2, 3, 4}, new_data[4] = {5, 6, 7, 8};
+  PolyUOp *buf = poly_test_buffer(ctx, POLY_FLOAT32, 4);
+  poly_uop_retain(ctx, buf);
+  PolyBuffer old = {
+      .ptr = old_data,
+      .nbytes = sizeof(old_data),
+      .device = POLY_DEVICE_CPU,
+      .owned = true,
+      .valid = true,
+      .allocator = &allocator};
+  poly_buffer_adopt(ctx, buf, &old);
+  PolyBuffer *before = poly_buffer_get(ctx, buf);
+  PolyBuffer *view = NULL;
+  PolyUOp *cast = NULL;
+  if (with_view) {
+    cast = poly_uop1(ctx, POLY_OP_BITCAST, POLY_UINT32, buf, poly_arg_none());
+    view = poly_uop_buffer_handle(ctx, cast);
+  }
+  PolyBuffer candidate = old;
+  candidate.ptr = new_data;
+  if (!with_view) poly_test_buffer_handle_fail_after(0);
+  int rc = operation == 0   ? poly_buffer_set(ctx, buf, new_data, sizeof(new_data), POLY_DEVICE_CPU)
+           : operation == 1 ? poly_buffer_attach(ctx, buf, &candidate)
+                            : poly_buffer_adopt(ctx, buf, &candidate);
+  poly_test_buffer_handle_fail_after(-1);
+  bool preserved = rc == -1 && frees == 0 && poly_buffer_get(ctx, buf) == before;
+  if (preserved)
+    preserved = before->ptr == old_data && old_data[2] == 3 &&
+                (!with_view || (view && view->base == before));
+  if (preserved) {
+    float readback[4] = {0};
+    preserved = poly_buffer_read(ctx, with_view ? cast : buf, readback, sizeof(readback)) == 0 &&
+                memcmp(readback, old_data, sizeof(readback)) == 0;
+  }
+  /* The red set case leaves a freed map value. Remove only that dangling
+   * entry so teardown does not hide the original replacement failure. */
+  if (frees && !with_view && operation == 0)
+    poly_map_remove(ctx->buffers, poly_ptr_hash(buf), buf, poly_ptr_eq);
+  if (preserved) {
+    /* Unretained view metadata is collectible; the retained BUFFER keeps
+     * the old binding alive. Retrying must transfer ownership only now. */
+    if (with_view) preserved = poly_ctx_collect(ctx) == 0;
+    rc = operation == 0   ? poly_buffer_set(ctx, buf, new_data, sizeof(new_data), POLY_DEVICE_CPU)
+         : operation == 1 ? poly_buffer_attach(ctx, buf, &candidate)
+                          : poly_buffer_adopt(ctx, buf, &candidate);
+    PolyBuffer *after = poly_buffer_get(ctx, buf);
+    preserved = preserved && rc == 0 && frees == 1 && after && after->ptr == new_data;
+  }
+  poly_ctx_destroy(ctx);
+  return preserved && frees == (operation == 2 ? 2 : 1);
+}
+
+TEST(uop, buffer_set_allocation_failure_preserves_storage) {
+  ASSERT_TRUE(replacement_preserves_old(0, false));
+  PASS();
+}
+
+TEST(uop, buffer_attach_allocation_failure_preserves_storage) {
+  ASSERT_TRUE(replacement_preserves_old(1, false));
+  PASS();
+}
+
+TEST(uop, buffer_adopt_allocation_failure_preserves_storage) {
+  ASSERT_TRUE(replacement_preserves_old(2, false));
+  PASS();
+}
+
+TEST(uop, buffer_replacement_preserves_live_views) {
+  for (int operation = 0; operation < 3; operation++)
+    ASSERT_TRUE(replacement_preserves_old(operation, true));
+  PASS();
+}
+
+TEST(uop, buffer_host_constructor_rejects_attachment_failure) {
+  PolyCtx *ctx = poly_ctx_new();
+  float data[4] = {0};
+  int64_t dims[] = {4};
+  poly_test_buffer_handle_fail_after(0);
+  PolyUOp *buf =
+      poly_buffer_from_host(ctx, data, sizeof(data), poly_dtype_id_by_name("float32"), dims, 1);
+  poly_test_buffer_handle_fail_after(-1);
+  bool rejected = buf == NULL;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(rejected);
+  PASS();
+}
+
+TEST(uop, buffer_initial_attachment_failure_keeps_caller_ownership) {
+  for (int operation = 0; operation < 3; operation++) {
+    PolyCtx *ctx = poly_ctx_new();
+    int frees = 0;
+    PolyAllocator allocator = {.free = replacement_count_free, .dev_ctx = &frees};
+    float data[4] = {0};
+    PolyUOp *buf = poly_test_buffer(ctx, POLY_FLOAT32, 4);
+    PolyBuffer candidate = {
+        .ptr = data,
+        .nbytes = sizeof(data),
+        .device = POLY_DEVICE_CPU,
+        .owned = true,
+        .valid = true,
+        .allocator = &allocator};
+    poly_test_buffer_handle_fail_after(0);
+    int rc = operation == 0   ? poly_buffer_set(ctx, buf, data, sizeof(data), POLY_DEVICE_CPU)
+             : operation == 1 ? poly_buffer_attach(ctx, buf, &candidate)
+                              : poly_buffer_adopt(ctx, buf, &candidate);
+    poly_test_buffer_handle_fail_after(-1);
+    bool unpublished = rc == -1 && !poly_buffer_get(ctx, buf);
+    poly_ctx_destroy(ctx);
+    ASSERT_TRUE(unpublished);
+    ASSERT_INT_EQ(frees, 0);
+  }
+  PASS();
+}
+
+TEST(uop, buffer_replacement_rejects_storage_and_multibuffer_aliases) {
+  for (int alias = 0; alias < 3; alias++) {
+    PolyCtx *ctx = poly_ctx_new();
+    int frees = 0;
+    float data[4] = {1, 2, 3, 4}, next[4] = {5, 6, 7, 8};
+    PolyAllocator allocator = {
+        .alloc = replacement_no_alloc,
+        .free = replacement_count_free,
+        .dev_ctx = &frees,
+        .host_addressable = true};
+    PolyBuffer owned = {
+        .ptr = data,
+        .nbytes = sizeof(data),
+        .device = POLY_DEVICE_CPU,
+        .owned = true,
+        .valid = true,
+        .allocator = &allocator};
+    PolyUOp *buf = poly_test_buffer(ctx, POLY_FLOAT32, 4);
+    ASSERT_INT_EQ(poly_buffer_adopt(ctx, buf, &owned), 0);
+    PolyBuffer *before = poly_buffer_get(ctx, buf);
+    if (alias == 1) {
+      PolyUOp *stack = poly_uop1(ctx, POLY_OP_MSTACK, POLY_FLOAT32, buf, poly_arg_none());
+      ASSERT_NOT_NULL(poly_uop_buffer_handle(ctx, stack));
+    } else if (alias == 2) {
+      PolyUOp *other = poly_test_buffer(ctx, POLY_FLOAT32, 3);
+      PolyBuffer view = owned;
+      view.ptr = data + 1;
+      view.nbytes = 3 * sizeof(float);
+      ASSERT_INT_EQ(poly_buffer_attach(ctx, other, &view), 0);
+    }
+    int rc = poly_buffer_set(ctx, buf, alias == 0 ? data : next, sizeof(data), POLY_DEVICE_CPU);
+    bool preserved = rc == -1 && frees == 0 && poly_buffer_get(ctx, buf) == before;
+    poly_ctx_destroy(ctx);
+    ASSERT_TRUE(preserved);
+    ASSERT_INT_EQ(frees, 1);
+  }
+  PASS();
+}
+
+TEST(uop, buffer_replacement_retires_the_complete_owned_chain) {
+  PolyCtx *ctx = poly_ctx_new();
+  int frees = 0;
+  float data[2] = {1, 2}, source[2] = {3, 4}, next[2] = {5, 6};
+  PolyAllocator allocator = {
+      .free = replacement_count_free, .dev_ctx = &frees, .host_addressable = true};
+  PolyBuffer owned = {
+      .ptr = data,
+      .nbytes = sizeof(data),
+      .device = POLY_DEVICE_CPU,
+      .owned = true,
+      .valid = true,
+      .allocator = &allocator};
+  PolyUOp *buf = poly_test_buffer(ctx, POLY_FLOAT32, 2);
+  ASSERT_INT_EQ(poly_buffer_adopt(ctx, buf, &owned), 0);
+  PolyBuffer *before = poly_buffer_get(ctx, buf);
+  before->src = calloc(1, sizeof(PolyBuffer));
+  ASSERT_NOT_NULL(before->src);
+  *before->src = owned;
+  before->src->ptr = source;
+  poly_test_buffer_handle_fail_after(0);
+  int rc = poly_buffer_set(ctx, buf, next, sizeof(next), POLY_DEVICE_CPU);
+  poly_test_buffer_handle_fail_after(-1);
+  bool preserved = rc == -1 && frees == 0 && poly_buffer_get(ctx, buf) == before;
+  rc = poly_buffer_set(ctx, buf, next, sizeof(next), POLY_DEVICE_CPU);
+  bool retired = rc == 0 && frees == 2;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(preserved && retired);
+  ASSERT_INT_EQ(frees, 2);
+  PASS();
+}
+
+static PolyCtx *replacement_callback_ctx;
+static PolyUOp *replacement_callback_buf;
+static int replacement_callback_count;
+static bool replacement_callback_saw_publication;
+
+static void replacement_frontend_release(uintptr_t key) {
+  if (++replacement_callback_count == 1)
+    replacement_callback_saw_publication =
+        poly_buffer_get_key(replacement_callback_ctx, replacement_callback_buf) != key;
+}
+
+TEST(uop, buffer_host_replacement_publishes_before_release_callback) {
+  for (int empty = 0; empty < 2; empty++) {
+    PolyCtx *ctx = poly_ctx_new();
+    ctx->frontend_buffer_release = replacement_frontend_release;
+    replacement_callback_ctx = ctx;
+    replacement_callback_buf = poly_test_buffer(ctx, POLY_UINT8, empty ? 0 : 4);
+    replacement_callback_count = 0;
+    replacement_callback_saw_publication = false;
+    uint8_t data[4] = {0};
+    PolyUOp *buf = replacement_callback_buf;
+    ASSERT_INT_EQ(
+        poly_buffer_set(ctx, buf, empty ? NULL : data, empty ? 0 : sizeof(data), POLY_DEVICE_HOST),
+        0
+    );
+    uint64_t old_key = poly_buffer_get_key(ctx, buf);
+    poly_test_buffer_handle_fail_after(0);
+    int rc = poly_buffer_set(ctx, buf, NULL, 0, POLY_DEVICE_HOST);
+    poly_test_buffer_handle_fail_after(-1);
+    bool unchanged =
+        rc == -1 && poly_buffer_get_key(ctx, buf) == old_key && replacement_callback_count == 0;
+    rc = poly_buffer_set(ctx, buf, NULL, 0, POLY_DEVICE_HOST);
+    bool published =
+        rc == 0 && replacement_callback_count == 1 && replacement_callback_saw_publication;
+    poly_ctx_destroy(ctx);
+    ASSERT_TRUE(unchanged && published);
+    ASSERT_INT_EQ(replacement_callback_count, 2);
+  }
+  replacement_callback_ctx = NULL;
+  replacement_callback_buf = NULL;
+  PASS();
+}
+
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
+static bool replacement_file_is_mapped(const char *path) {
+  FILE *maps = fopen("/proc/self/maps", "r");
+  if (!maps) return true;
+  char line[1024];
+  bool found = false;
+  while (fgets(line, sizeof(line), maps))
+    if (strstr(line, path)) found = true;
+  fclose(maps);
+  return found;
+}
+
+TEST(uop, buffer_file_adoption_failure_releases_mapping) {
+  char path[] = "/tmp/polygrad_buffer_XXXXXX";
+  int fd = mkstemp(path);
+  ASSERT_TRUE(fd >= 0);
+  uint8_t data[4] = {1, 2, 3, 4};
+  bool written = write(fd, data, sizeof(data)) == sizeof(data);
+  close(fd);
+  PolyCtx *ctx = poly_ctx_new();
+  poly_test_buffer_handle_fail_after(0);
+  PolyUOp *failed = poly_buffer_from_file(ctx, path, poly_dtype_id_by_name("uint8"));
+  poly_test_buffer_handle_fail_after(-1);
+  bool rejected = !failed && !replacement_file_is_mapped(path);
+  PolyUOp *retry = poly_buffer_from_file(ctx, path, poly_dtype_id_by_name("uint8"));
+  uint8_t output[4] = {0};
+  bool readable = retry && poly_buffer_read(ctx, retry, output, sizeof(output)) == 0 &&
+                  memcmp(data, output, sizeof(data)) == 0;
+  poly_ctx_destroy(ctx);
+  bool released = !replacement_file_is_mapped(path);
+  unlink(path);
+  ASSERT_TRUE(written && rejected && readable && released);
+  PASS();
+}
+#endif
+#endif
 
 TEST(uop, create_const) {
   PolyCtx *ctx = poly_ctx_new();
