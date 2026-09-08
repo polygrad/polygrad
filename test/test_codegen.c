@@ -7,6 +7,7 @@
 #include "../src/codegen/decomp/dtype.h"
 #include "../src/codegen/late/coalesce.h"
 #include "../src/codegen/late/gater.h"
+#include "../src/codegen/simplify.h"
 #include "../src/renderer/cstyle.h"
 #include "../src/bigint.h"
 #include "../src/frontend.h"
@@ -20,6 +21,197 @@
 #include <inttypes.h>
 
 #ifndef __EMSCRIPTEN__
+TEST(codegen, beam_candidate_normalizes_ended_range_expressions) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *out = poly_test_program_param(ctx, POLY_FLOAT32, 4, 0);
+  PolyUOp *two = poly_const_int(ctx, 2);
+  PolyUOp *r0 = poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, two, poly_arg_range(0, POLY_AXIS_LOOP));
+  PolyUOp *r1 = poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, two, poly_arg_range(1, POLY_AXIS_LOOP));
+  PolyUOp *idx = poly_alu2(ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, r0, two), r1);
+  PolyUOp *ptr = poly_uop_index(ctx, out, &idx, 1);
+  PolyUOp *store =
+      poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, ptr, poly_const_float(ctx, 1), poly_arg_none());
+  PolyUOp *end = poly_uop2(ctx, POLY_OP_END, POLY_VOID, store, idx, poly_arg_none());
+  PolyUOp *sink = poly_test_kernel_sink(ctx, &end, 1, "beam_shifted_range");
+  int n_args = 0;
+  double elapsed = poly_test_beam_compile_and_time(
+      ctx, sink, (PolyRewriteOpts){.caps = poly_c_renderer_caps()}, 1, &n_args
+  );
+  ASSERT_TRUE(isfinite(elapsed));
+  ASSERT_INT_EQ(n_args, 1);
+  PolyUOp *normalized = poly_graph_rewrite(ctx, sink, poly_pm_flatten_range());
+  ASSERT_NOT_NULL(normalized);
+  ASSERT_INT_EQ(normalized->src[0]->n_src, 3);
+  ASSERT_TRUE(normalized->src[0]->src[0] == store);
+  ASSERT_TRUE(normalized->src[0]->src[1] == r0);
+  ASSERT_TRUE(normalized->src[0]->src[2] == r1);
+  PolyUOp *lowered = poly_full_rewrite_to_sink_ex(
+      ctx, normalized, (PolyRewriteOpts){.caps = poly_c_renderer_caps()}
+  );
+  int n = 0;
+  PolyUOp **lin = poly_do_linearize(ctx, lowered, &n);
+  ASSERT_NOT_NULL(lin);
+  char *source = poly_render_c(ctx, lin, n, "beam_shifted_values");
+  ASSERT_NOT_NULL(source);
+  PolyProgram *program = poly_compile_c(source, "beam_shifted_values");
+  ASSERT_NOT_NULL(program);
+  float values[4] = {0};
+  void *args[] = {values};
+  poly_program_call(program, args, 1);
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(values[i], 1.0, 0.0);
+  poly_program_destroy(program);
+  free(source);
+  free(lin);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, beam_scratch_uses_storage_dtype) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *param = poly_test_program_param(ctx, POLY_FLOAT64, 8, 0);
+  int n_args = 0;
+  void **args = poly_test_beam_args_from_ast(ctx, param, &n_args);
+  ASSERT_NOT_NULL(args);
+  ASSERT_INT_EQ(n_args, 1);
+  /* A float32-sized allocation for this f64 parameter overruns here. */
+  ((double *)args[0])[7] = 3.0;
+  ASSERT_TRUE(((double *)args[0])[7] == 3.0);
+  free(args[0]);
+  free(args);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, beam_scratch_uses_argument_slot_order) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *params[] = {
+      poly_test_program_param(ctx, POLY_FLOAT32, 1, 9),
+      poly_test_program_param(ctx, POLY_FLOAT32, 32, 4)};
+  PolyUOp *sink = poly_test_kernel_sink(ctx, params, 2, "beam_order");
+  int n_args = 0;
+  void **args = poly_test_beam_args_from_ast(ctx, sink, &n_args);
+  ASSERT_NOT_NULL(args);
+  ASSERT_INT_EQ(n_args, 2);
+  ((float *)args[0])[31] = 4.0;
+  ASSERT_FLOAT_EQ(((float *)args[0])[31], 4.0, 0.0);
+  for (int i = 0; i < n_args; i++)
+    free(args[i]);
+  free(args);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, beam_scratch_samples_scalar_midpoint) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyParamArg arg = {
+      .slot = 2,
+      .addrspace = POLY_ADDR_ALU,
+      .name = "n",
+      .min_val = -9,
+      .max_val = -4,
+      .has_minmax = true};
+  PolyUOp *variable = poly_uop0(ctx, POLY_OP_PARAM, POLY_INT32, poly_arg_param(&arg));
+  int n_args = 0;
+  void **args = poly_test_beam_args_from_ast(ctx, variable, &n_args);
+  ASSERT_NOT_NULL(args);
+  ASSERT_INT_EQ(n_args, 1);
+  int value = *(int32_t *)args[0];
+  free(args[0]);
+  free(args);
+  poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(value, -7);
+  PASS();
+}
+
+TEST(codegen, beam_scratch_uses_c_wrapper_scalar_abi) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyParamArg arg = {
+      .slot = 0,
+      .addrspace = POLY_ADDR_ALU,
+      .name = "n",
+      .min_val = 4,
+      .max_val = 9,
+      .has_minmax = true};
+  PolyUOp *variable = poly_uop0(ctx, POLY_OP_PARAM, POLY_UINT8, poly_arg_param(&arg));
+  int n_args = 0;
+  void **args = poly_test_beam_args_from_ast(ctx, variable, &n_args);
+  ASSERT_NOT_NULL(args);
+  ASSERT_INT_EQ(n_args, 1);
+  /* The native C wrapper reads an int, then converts to the declared dtype. */
+  int value = *(int *)args[0];
+  free(args[0]);
+  free(args);
+  poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(value, 6);
+  PASS();
+}
+
+TEST(codegen, beam_scratch_mixed_arguments_and_symbolic_extent) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyParamArg var_arg = {
+      .slot = 0,
+      .addrspace = POLY_ADDR_ALU,
+      .name = "n",
+      .min_val = 4,
+      .max_val = 9,
+      .has_minmax = true};
+  PolyUOp *variable = poly_uop0(ctx, POLY_OP_PARAM, POLY_INT32, poly_arg_param(&var_arg));
+  PolyParamArg buf_arg = {.slot = 7, .addrspace = POLY_ADDR_GLOBAL};
+  PolyUOp *buffer = poly_uop1(ctx, POLY_OP_PARAM, POLY_FLOAT64, variable, poly_arg_param(&buf_arg));
+  var_arg.slot = 8;
+  var_arg.name = "core_id";
+  PolyUOp *core_id = poly_uop0(ctx, POLY_OP_PARAM, POLY_INT32, poly_arg_param(&var_arg));
+  PolyUOp *src[] = {variable, buffer, core_id};
+  PolyUOp *sink = poly_test_kernel_sink(ctx, src, 3, "beam_mixed");
+  int n_args = 0;
+  void **args = poly_test_beam_args_from_ast(ctx, sink, &n_args);
+  ASSERT_NOT_NULL(args);
+  ASSERT_INT_EQ(n_args, 2);
+  /* Buffer capacity uses the maximum, not the sampled scalar or topo order. */
+  ((double *)args[0])[8] = 7.0;
+  ASSERT_TRUE(((double *)args[0])[8] == 7.0);
+  ASSERT_INT_EQ(*(int *)args[1], 6);
+  free(args[0]);
+  free(args[1]);
+  free(args);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, beam_scratch_scalar_bounds_and_failed_candidate_cleanup) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyParamArg arg = {
+      .slot = 1,
+      .addrspace = POLY_ADDR_ALU,
+      .name = "n",
+      .min_val = INT64_MIN,
+      .max_val = INT64_MAX,
+      .has_minmax = true};
+  PolyUOp *variable = poly_uop0(ctx, POLY_OP_PARAM, POLY_INT64, poly_arg_param(&arg));
+  int n_args = 0;
+  void **args = poly_test_beam_args_from_ast(ctx, variable, &n_args);
+  ASSERT_NOT_NULL(args);
+  ASSERT_INT_EQ(*(int *)args[0], -1);
+  free(args[0]);
+  free(args);
+  PolyUOp *buffer = poly_test_program_param(ctx, POLY_FLOAT64, 8, 0);
+  arg.min_val = arg.max_val = INT64_MAX;
+  variable = poly_uop0(ctx, POLY_OP_PARAM, POLY_INT64, poly_arg_param(&arg));
+  PolyUOp *src[] = {buffer, variable};
+  PolyUOp *sink = poly_test_kernel_sink(ctx, src, 2, "beam_unrepresentable_scalar");
+  args = poly_test_beam_args_from_ast(ctx, sink, &n_args);
+  ASSERT_TRUE(args == NULL);
+  ASSERT_INT_EQ(n_args, 0);
+  /* Failure releases the already allocated buffer; a later candidate works. */
+  args = poly_test_beam_args_from_ast(ctx, buffer, &n_args);
+  ASSERT_NOT_NULL(args);
+  free(args[0]);
+  free(args);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(codegen, beam_parameter_inventory_is_not_fixed_at_64) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(0));

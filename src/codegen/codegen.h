@@ -140,6 +140,7 @@ PolyUOp *poly_full_rewrite_to_sink(PolyCtx *ctx, PolyUOp *sink);
 PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOpts opts);
 
 #if defined(POLY_TESTING) && !defined(__EMSCRIPTEN__)
+void **poly_test_beam_args_from_ast(PolyCtx *ctx, PolyUOp *sink, int *n_args);
 double poly_test_beam_compile_and_time(
     PolyCtx *ctx,
     PolyUOp *sink,

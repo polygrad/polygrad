@@ -1912,6 +1912,85 @@ static double time_us_now(void) {
   return ts.tv_sec * 1e6 + ts.tv_nsec / 1e3;
 }
 
+static void beam_free_args(void **bufs, int n_params) {
+  if (bufs)
+    for (int i = 0; i < n_params; i++)
+      free(bufs[i]);
+  free(bufs);
+}
+
+static void **beam_args_from_ast(PolyCtx *ctx, PolyUOp *sink, int *n_args) {
+  *n_args = 0;
+  /* opt/postrange.py:args_from_ast, adapted to the existing C wrapper's
+   * compact buffer-then-scalar arguments and implicit core_id. */
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n_topo);
+  int n_params = 0;
+  void **bufs = NULL;
+  if (!topo) goto cleanup;
+  for (int i = 0; i < n_topo; i++) {
+    PolyUOp *u = topo[i];
+    if (u->op != POLY_OP_PARAM) continue;
+    if (u->arg.kind != POLY_ARG_PARAM || !u->arg.param) goto cleanup;
+    const char *name = poly_uop_expr(u);
+    if (poly_uop_is_alu_param(u) && name && strcmp(name, "core_id") == 0) continue;
+    topo[n_params++] = u;
+  }
+  for (int i = 1; i < n_params; i++) {
+    PolyUOp *param = topo[i];
+    bool scalar = poly_uop_is_alu_param(param);
+    int j = i;
+    while (j > 0) {
+      bool prior_scalar = poly_uop_is_alu_param(topo[j - 1]);
+      if (prior_scalar < scalar || (prior_scalar == scalar && poly_program_buffer_slot(topo[j - 1]
+                                                              ) <= poly_program_buffer_slot(param)))
+        break;
+      topo[j] = topo[j - 1];
+      j--;
+    }
+    topo[j] = param;
+  }
+  /* search._time_program passes the complete rawbufs list. The rendered
+   * wrapper reads every argument; silently truncating it corrupts memory. */
+  bufs = calloc((size_t)(n_params ? n_params : 1), sizeof(*bufs));
+  if (!bufs) goto cleanup;
+  for (int i = 0; i < n_params; i++) {
+    PolyUOp *param = topo[i];
+    bool scalar = poly_uop_is_alu_param(param);
+    /* The existing native wrapper takes all ALU values through int*, even
+     * when its typed function subsequently converts to another dtype. */
+    int itemsize = scalar ? (int)sizeof(int) : poly_dtype_itemsize(param->dtype);
+    int64_t sz = scalar ? 1 : poly_uop_max_numel(ctx, param);
+    if (sz < 0 || itemsize <= 0 || (uint64_t)sz > SIZE_MAX / (size_t)itemsize) goto cleanup;
+    bufs[i] = calloc((size_t)(sz ? sz : 1), (size_t)itemsize);
+    if (!bufs[i]) goto cleanup;
+    if (scalar) {
+      const PolyParamArg *arg = param->arg.param;
+      if (!arg->has_minmax || arg->min_val > arg->max_val ||
+          (!poly_dtype_is_int(param->dtype) && !poly_dtype_eq(param->dtype, POLY_BOOL)))
+        goto cleanup;
+      /* Python's (lo+hi)//2, without overflowing the C sum. */
+      int64_t value =
+          arg->min_val + (int64_t)(((uint64_t)arg->max_val - (uint64_t)arg->min_val) / 2);
+      if (value < INT_MIN || value > INT_MAX) goto cleanup;
+      *(int *)bufs[i] = (int)value;
+    } else if (poly_dtype_eq(param->dtype, POLY_FLOAT32)) {
+      /* Preserve existing finite f32 timing inputs; other storage is zeroed. */
+      float *fp = bufs[i];
+      for (int64_t j = 0; j < sz; j++)
+        fp[j] = 0.1f + (float)(j % 100) * 0.01f;
+    }
+  }
+  poly_toposort_free(topo);
+
+  *n_args = n_params;
+  return bufs;
+cleanup:
+  poly_toposort_free(topo);
+  beam_free_args(bufs, n_params);
+  return NULL;
+}
+
 /* Compile a kernel AST through the full post-optimization pipeline,
  * render to C, compile with clang, allocate test buffers, and time execution.
  * Returns median time in microseconds. Returns INFINITY on failure. */
@@ -1919,6 +1998,11 @@ static double time_us_now(void) {
 static int beam_test_parameter_count;
 #endif
 static double beam_compile_and_time(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOpts opts, int reps) {
+  /* search._try_compile calls Scheduler.get_optimized_ast: shift_to can
+   * leave END operands as expressions, which must become ranges before
+   * the post-optimization pipeline verifies its input. */
+  sink = poly_graph_rewrite(ctx, sink, poly_pm_flatten_range());
+  if (!sink) return INFINITY;
   /* Run through the rest of the codegen pipeline (post-optimization stages).
    * Setting optimize=false skips the preprocessing+apply_opts pass since
    * opts have already been applied by the BEAM search. */
@@ -1951,36 +2035,13 @@ static double beam_compile_and_time(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOpts
   free(source);
   if (!prog) return INFINITY;
 
-  /* Collect PARAM count and buffer sizes from the sink's toposort */
-  int n_topo = 0;
-  PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n_topo);
   int n_params = 0;
-  void **bufs = NULL;
-  double median = INFINITY;
-  if (!topo) goto cleanup;
-  for (int i = 0; i < n_topo; i++)
-    if (topo[i]->op == POLY_OP_PARAM) n_params++;
-  if (!n_params) goto cleanup;
-  /* search._time_program passes the complete rawbufs list. The rendered
-   * wrapper reads every argument; silently truncating it corrupts memory. */
-  bufs = calloc((size_t)n_params, sizeof(*bufs));
-  if (!bufs) goto cleanup;
-  int param_index = 0;
-  for (int i = 0; i < n_topo; i++) {
-    if (topo[i]->op == POLY_OP_PARAM) {
-      int64_t sz = poly_program_buffer_size(topo[i]);
-      if (sz <= 0) sz = 1024; /* default */
-      if ((uint64_t)sz > SIZE_MAX / sizeof(float)) goto cleanup;
-      bufs[param_index] = calloc((size_t)sz, sizeof(float));
-      if (!bufs[param_index]) goto cleanup;
-      /* Preserve the existing finite float32 timing inputs. */
-      float *fp = bufs[param_index++];
-      for (int64_t j = 0; j < sz; j++)
-        fp[j] = 0.1f + (float)(j % 100) * 0.01f;
-    }
+  void **bufs = beam_args_from_ast(ctx, sink, &n_params);
+  if (!bufs) {
+    poly_program_destroy(prog);
+    return INFINITY;
   }
-  poly_toposort_free(topo);
-  topo = NULL;
+  double median;
 
   /* Warm up */
 #ifdef POLY_TESTING
@@ -2009,12 +2070,7 @@ static double beam_compile_and_time(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOpts
       }
   median = times[reps / 2];
 
-cleanup:
-  poly_toposort_free(topo);
-  if (bufs)
-    for (int i = 0; i < n_params; i++)
-      free(bufs[i]);
-  free(bufs);
+  beam_free_args(bufs, n_params);
   poly_program_destroy(prog);
 
   return median;
@@ -2022,6 +2078,10 @@ cleanup:
 
 /* Disk cache for BEAM results */
 #ifdef POLY_TESTING
+void **poly_test_beam_args_from_ast(PolyCtx *ctx, PolyUOp *sink, int *n_args) {
+  return beam_args_from_ast(ctx, sink, n_args);
+}
+
 double poly_test_beam_compile_and_time(
     PolyCtx *ctx,
     PolyUOp *sink,
