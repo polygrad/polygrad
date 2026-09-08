@@ -227,6 +227,31 @@ async function runTensorTests(pg, createRuntime) {
     }
   })
 
+  await test('device metadata preserves deviceless and placed roots', async () => {
+    const t = new Tensor(pg.uop.constant(2, 'float32'))
+    assert(t.uop.device === null && t.device === null, 'constant has no storage device')
+    const x = Tensor.empty([4])
+    assert(typeof x.uop.device === 'string', 'BUFFER carries its exact device')
+    assert(x.add(1).uop.device === x.uop.device, 'ALU inherits the physical source device')
+    const moved = x.to('interp')
+    assert(moved.uop.device === 'INTERP' && moved.device === 'INTERP')
+  })
+
+  await test('device metadata admits deviceless assign and indexing', async () => {
+    const value = new Tensor(pg.uop.constant(1.25, 'float32'), { device: 'interp' })
+    const target = Tensor.empty([4])
+    assert(value.device === null)
+    target.assign(value)
+    assertClose(await target.toArrayAsync(), [1.25, 1.25, 1.25, 1.25])
+    const index = new Tensor([1, 0], { dtype: 'int32' })
+    const source = Tensor.arange(2, { device: 'interp' })
+    assert(source.device === null)
+    assertClose(await source.add(index).toArrayAsync(), [1, 1])
+    assertClose(await source.gather(0, index).toArrayAsync(), [1, 0])
+    assertClose(await source.getitem(index).toArrayAsync(), [1, 0])
+    assertClose(await Tensor.zeros([2]).scatter(0, index, source.cast('float32')).toArrayAsync(), [1, 0])
+  })
+
   await test('UOp accessors preserve live wrapper identity', async () => {
     const source = pg.uop.constant(2, 'float32')
     const t = new Tensor(source)

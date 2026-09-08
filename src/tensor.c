@@ -71,6 +71,40 @@ static PolyUOp *tensor_current_uop(PolyTensor *tensor) {
   return tensor ? tensor->uop_physical : NULL;
 }
 
+/* C backend-preference transport for Tensor._apply_uop/UOp.device. Mixed
+ * wrapper defaults are not a device conflict when an operand is deviceless.
+ * Keep the common equal-label path free of graph walks; only a prospective
+ * rejection needs exact physical metadata. Never inspect the logical twin. */
+static bool tensor_operand_device(PolyCtx *ctx, PolyTensor **inputs, int n, PolyDevice *out) {
+  PolyDevice hint = POLY_DEVICE_AUTO;
+  bool mixed = false;
+  for (int i = 0; i < n; i++) {
+    if (!inputs[i] || inputs[i]->device == POLY_DEVICE_AUTO) continue;
+    if (hint == POLY_DEVICE_AUTO)
+      hint = inputs[i]->device;
+    else if (hint != inputs[i]->device)
+      mixed = true;
+  }
+  *out = hint;
+  if (!mixed) return true;
+  PolyMap *cache = poly_map_new(64);
+  if (!cache) return false;
+  PolyUOp *selected = NULL;
+  bool compatible = true;
+  for (int i = 0; i < n; i++) {
+    if (!inputs[i]) continue;
+    PolyUOp *device = poly_uop_device_uop_cached(ctx, inputs[i]->uop_physical, cache);
+    if (device && selected && device != selected) {
+      compatible = false;
+      break;
+    }
+    if (device) selected = device;
+  }
+  if (selected) *out = poly_device_from_device_uop(selected);
+  poly_map_destroy(cache);
+  return compatible;
+}
+
 /* C-only Tensor-wrapper filter for Tinygrad's live-Tensor becomes-map update.
  * Execution device identity remains encoded in the eager physical UOp. */
 static PolyDevice tensor_resolved_device(PolyCtx *ctx, PolyTensor *tensor) {
@@ -1363,16 +1397,13 @@ static PolyTensor *tensor_alu(PolyCtx *ctx, PolyOps op, PolyTensor **inputs, int
   if (logical_state < 0) return NULL;
   bool build_logical = logical_state == POLY_LOGICAL_AVAILABLE;
   PolyDevice device = POLY_DEVICE_AUTO;
+  if (!tensor_operand_device(ctx, inputs, n, &device)) return NULL;
   for (int i = 0; i < n; i++) {
     PolyTensor *input = inputs[i];
     if (!input) return NULL;
     logical_src[i] = build_logical ? input->uop_logical : NULL;
     physical_src[i] = tensor_current_uop(input);
     if (!physical_src[i]) return NULL;
-    if (input->device != POLY_DEVICE_AUTO) {
-      if (device != POLY_DEVICE_AUTO && input->device != device) return NULL;
-      device = input->device;
-    }
   }
 
   int promote_from = 0;
@@ -1780,14 +1811,18 @@ PolyTensor *poly_tensor_assign(PolyCtx *ctx, PolyTensor *target, PolyTensor *val
   value_physical = broadcast_to_exact(ctx, value_physical, physical_dims, physical_ndim);
   if (!value_physical) return NULL;
 
-  /* Match tinygrad Tensor.assign: non-DISK assigns require same device and
-   * dtype before constructing the AFTER/STORE effect graph. Without this,
-   * a CPU target could silently physicalize a CUDA value back to CPU, which
-   * changes user-visible placement semantics. */
-  if (target->device != POLY_DEVICE_DISK && target->device != POLY_DEVICE_AUTO &&
-      value->device != POLY_DEVICE_AUTO &&
-      !poly_devices_share_storage(target->device, value->device))
-    return NULL;
+  /* Tensor.assign (tinygrad/tensor.py:445-446) compares concrete graph devices,
+   * not wrapper backend defaults. A deviceless value needs no COPY, even when
+   * its wrapper was constructed with another backend preference. */
+  if (target->device != POLY_DEVICE_DISK) {
+    PolyMap *devices = poly_map_new(64);
+    if (!devices) return NULL;
+    PolyUOp *target_device = poly_uop_device_uop_cached(ctx, target_physical, devices);
+    PolyUOp *value_device = poly_uop_device_uop_cached(ctx, value_physical, devices);
+    bool mismatch = target_device && value_device && target_device != value_device;
+    poly_map_destroy(devices);
+    if (mismatch) return NULL;
+  }
   if (!poly_dtype_eq(target_physical->dtype, value_physical->dtype)) return NULL;
 
   PolyUOp *physical_store = poly_store_val(ctx, target_physical, value_physical);
@@ -4025,14 +4060,7 @@ static PolyTensor *tensor_composite_result(
 ) {
   if (!ctx || !physical || !inputs || n_inputs <= 0) return NULL;
   PolyDevice device = POLY_DEVICE_AUTO;
-  for (int i = 0; i < n_inputs; i++) {
-    PolyTensor *input = inputs[i];
-    if (!input) continue;
-    if (input->device != POLY_DEVICE_AUTO) {
-      if (device != POLY_DEVICE_AUTO && input->device != device) return NULL;
-      device = input->device;
-    }
-  }
+  if (!tensor_operand_device(ctx, inputs, n_inputs, &device)) return NULL;
   PolyTensor *out = poly_tensor_create_result(
       ctx, inputs, n_inputs, logical, physical, POLY_TENSOR_VALUE, device
   );

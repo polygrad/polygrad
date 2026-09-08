@@ -198,6 +198,19 @@ class UOp:
     def is_bound_var(self):
         return bool(self.raw and _ffi._lib.poly_uop_is_bound_var(self.raw))
 
+    @property
+    def device(self):
+        if self.ctx is None or not self.raw:
+            raise RuntimeError('polygrad UOp has been disposed')
+        names = ctypes.POINTER(ctypes.c_char_p)()
+        is_tuple = ctypes.c_bool()
+        count = _ffi._lib.poly_uop_device_names(self.ctx, self.raw, ctypes.byref(names), ctypes.byref(is_tuple))
+        if count < 0:
+            raise RuntimeError('poly_uop_device_names failed')
+        # Copy borrowed metadata before any collection safe point.
+        values = tuple(names[i].decode('utf-8') for i in range(count))
+        return values if is_tuple.value else values[0] if count else None
+
     # --- Factories ---
 
     @staticmethod

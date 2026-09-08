@@ -981,6 +981,20 @@ function createWasmCoreFromModule(Module, device) {
     poly_uop_buffer: (ctx, uop) => Module._poly_uop_buffer(ctx, uop),
     poly_uop_op: (uop) => Module._poly_uop_op(uop),
     poly_uop_device: (uop) => Module._poly_uop_device(uop),
+    poly_uop_device_names: (ctx, uop) => {
+      const out = Module._malloc(8)
+      if (!out) throw new Error('device metadata allocation failed')
+      try {
+        const count = Module._poly_uop_device_names(ctx, uop, out, out + 4)
+        if (count < 0) throw new Error('poly_uop_device_names failed')
+        // The query can grow memory. Reacquire views, then copy borrowed names.
+        const names = heap32()[out >> 2] >>> 0
+        const isTuple = heapU8()[out + 4] !== 0
+        const values = Array.from({ length: count }, (_, i) =>
+          Module.UTF8ToString(heap32()[(names >> 2) + i] >>> 0))
+        return isTuple ? values : count ? values[0] : null
+      } finally { Module._free(out) }
+    },
     poly_uop_dtype_id: (ctx, uop) => Module._poly_uop_dtype_id(ctx, uop),
     poly_uop_key: (uop) => BigInt(uop || 0),
     poly_uop_n_src: (uop) => Module._poly_uop_n_src(uop || 0),
@@ -1869,7 +1883,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 73
+  const EXPECTED_ABI = 74
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(

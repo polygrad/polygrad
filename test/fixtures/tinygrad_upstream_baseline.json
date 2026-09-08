@@ -308,29 +308,17 @@
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_deviceless_const_construct_device_repr": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_tensor.py:LINE: AttributeError: 'UOp' object has no attribute 'device'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "UOp factory now succeeds; the next assertion requires UOp.device. Later Tensor device/representation assertions remain unexecuted.",
-      "category": "missing-uop-interface"
+      "reason": ""
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_deviceless_const_realize_noop": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/backend/test_tensor.py:LINE: AttributeError: 'UOp' object has no attribute 'device'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "Live Tensor root wrapper identity now passes, including no-op realization; the next assertion requires the missing UOp.device interface. This is still a failing upstream test, not a passing promotion.",
-      "category": "missing-uop-interface"
+      "reason": ""
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_dropout": {
       "expected": {

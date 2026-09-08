@@ -62,7 +62,7 @@ function createNativeCore(device) {
     if (name) ops[name] = i
   }
 
-  const EXPECTED_ABI = 73
+  const EXPECTED_ABI = 74
   const abi = binding.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(

@@ -114,6 +114,11 @@ class UOp {
     return out
   }
 
+  get device() {
+    if (!this.raw) throw new Error('polygrad UOp has been disposed')
+    return this.ffi.poly_uop_device_names(this.ctx, this.raw)
+  }
+
   get base() {
     const ops = this.ffi.__polygradOps || {}
     const op = this.op

@@ -248,6 +248,13 @@ function arraysEqual(a, b) {
   return true
 }
 
+function deviceMismatch(left, right) {
+  // OpMixin admits deviceless expressions without inserting a COPY. Device
+  // tuples compare by value, not JS array identity.
+  return left !== null && right !== null &&
+    !(Array.isArray(left) && Array.isArray(right) ? arraysEqual(left, right) : left === right)
+}
+
 function normalizeExpandShape(currentShape, requestedShape) {
   const ndim = Math.max(currentShape.length, requestedShape.length)
   const cur = new Array(ndim - currentShape.length).fill(1).concat(currentShape)
@@ -935,7 +942,8 @@ function createBoundTensorClass(runtime) {
       /* Public device is a placement label. The WASM core maps public CPU onto
        * the WASM execution backend internally, but user-facing Tensor.device
        * should stay CPU for parity with Python/tinygrad-style APIs. */
-      return this._device.startsWith('disk:') ? 'DISK:' + this._device.slice(5) : this._device.toUpperCase()
+      const device = this.uop.device
+      return device === 'WASM' && this._device === 'cpu' ? 'CPU' : device
     }
     get ndim() { return this._rt._core.ffi.poly_uop_ndim(this._ctx, this._uop) || 0 }
     get isParam() { return this._isParam }
@@ -1258,7 +1266,7 @@ function createBoundTensorClass(runtime) {
       // Pinned mixin/elementwise.py:33-37 is one DETACH Tensor ALU.
       const { ffi } = this._rt._core
       const core = ffi.poly_tensor_detach(this._ctx, this._tensor)
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     contiguousBackward() {
@@ -1266,7 +1274,7 @@ function createBoundTensorClass(runtime) {
       // C owns both retained and executable Tensor roots.
       const { ffi } = this._rt._core
       const core = ffi.poly_tensor_contiguous_backward(this._ctx, this._tensor)
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     contiguous_backward() { return this.contiguousBackward() }
@@ -1299,7 +1307,7 @@ function createBoundTensorClass(runtime) {
           throw new Error(`assign shape mismatch [${this.shape}] != [${x.shape}]`)
         }
       }
-      if (this._device !== x._device) {
+      if (deviceMismatch(this.device, x.device) && !String(this.device).startsWith('DISK:')) {
         throw new Error(`assign device mismatch ${this.device} != ${x.device}`)
       }
       if (this._dtype !== x._dtype) {
@@ -1417,16 +1425,21 @@ function createBoundTensorClass(runtime) {
       /* Pinned Tensor.contiguous -> UOp.contiguous (tensor.py:742-746,
        * uop/ops.py:587-591). C owns both retained/current roots. */
       const core = ffi.poly_tensor_contiguous(this._ctx, this._tensor)
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     // --- Internal helpers ---
 
-    _makeResultFromCore(coreTensor, inputs, forcedDtype) {
+    _makeResultFromCore(coreTensor, forcedDtype) {
       if (!coreTensor) throw new Error('core Tensor operation failed')
       const current = tensorUop(coreTensor)
       if (!current) throw new Error('core Tensor operation returned no current UOp')
-      const device = this._inferDevice(inputs)
+      // C selects the backend; frontend input hints are not a second device
+      // admission rule. Preserve path spelling and the public CPU/Wasm alias.
+      let device = ffi.poly_device_name(tensorDevice(coreTensor))
+      if (device === 'auto' || device === 'disk' || (device === 'wasm' && this._device === 'cpu')) {
+        device = this._device
+      }
       const t = new Tensor(null, {
         _ctx: this._ctx,
         _tensor: coreTensor,
@@ -1434,18 +1447,6 @@ function createBoundTensorClass(runtime) {
         _device: device
       })
       return t
-    }
-
-    _inferDevice(inputs) {
-      const devices = new Set()
-      for (const input of inputs) {
-        if (input && input._device) devices.add(input._device)
-      }
-      if (devices.size === 0) return this._device
-      if (devices.size > 1) {
-        throw new Error(`Mixed devices are not supported: ${Array.from(devices).sort().join(', ')}`)
-      }
-      return Array.from(devices)[0]
     }
 
     customKernel(...args) {
@@ -1542,7 +1543,7 @@ function createBoundTensorClass(runtime) {
         : this._rt._core.ffi.poly_tensor_const_like_float(
             this._ctx, this._tensor, Number(value)
           )
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     const_like(value) { return this.constLike(value) }
@@ -1575,7 +1576,7 @@ function createBoundTensorClass(runtime) {
       let x = reverse ? other : this
       let y = reverse ? this : other
       const core = ffi.poly_tensor_alu2(this._ctx, ops[opName], x._tensor, y._tensor)
-      return this._makeResultFromCore(core, [x, y])
+      return this._makeResultFromCore(core)
     }
 
     // --- Element-wise arithmetic ---
@@ -1592,7 +1593,7 @@ function createBoundTensorClass(runtime) {
     floorDiv(other) { return this.div(other, 'floor') }
     bitwiseNot() {
       const core = this._rt._core.ffi.poly_tensor_bitwise_not(this._ctx, this._tensor)
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
     mod(other) {
       const b = this._ensureTensor(other)
@@ -1614,7 +1615,7 @@ function createBoundTensorClass(runtime) {
       const core = this._rt._core.ffi.poly_tensor_div(
         this._ctx, this._tensor, rhs._tensor, rounding
       )
-      return this._makeResultFromCore(core, [this, rhs])
+      return this._makeResultFromCore(core)
     }
     pow(other, reverse = false) {
       // Tinygrad 2026-08-22/a9069c177a9d mixin/elementwise.py:545-564
@@ -1667,7 +1668,7 @@ function createBoundTensorClass(runtime) {
       if (!(x instanceof Tensor)) x = ref._ensureTensor(x)
       if (!(y instanceof Tensor)) y = ref._ensureTensor(y)
       const core = ffi.poly_tensor_alu3(this._ctx, ops.WHERE, this._tensor, x._tensor, y._tensor)
-      return this._makeResultFromCore(core, [this, x, y])
+      return this._makeResultFromCore(core)
     }
 
     maximum(other) {
@@ -1681,7 +1682,7 @@ function createBoundTensorClass(runtime) {
       const x = this._broadcastTensor(outShape)
       const y = other._broadcastTensor(outShape)
       const core = ffi.poly_tensor_minimum(this._ctx, x._tensor, y._tensor)
-      return this._makeResultFromCore(core, [x, y])
+      return this._makeResultFromCore(core)
     }
 
     clamp(lo, hi) {
@@ -1714,7 +1715,7 @@ function createBoundTensorClass(runtime) {
       const { ffi } = this._rt._core
       const core = ffi.poly_tensor_cast_by_id(this._ctx, this._tensor, id)
       if (!core) throw new Error(`poly_tensor_cast_by_id failed for dtype ${dtype}`)
-      return this._makeResultFromCore(core, [this], dtype)
+      return this._makeResultFromCore(core, dtype)
     }
 
     bitcast(dtype) {
@@ -1732,7 +1733,7 @@ function createBoundTensorClass(runtime) {
         this._ctx, this._tensor, id
       )
       if (!core) throw new Error('unsupported size in bitcast')
-      return this._makeResultFromCore(core, [this], dtype)
+      return this._makeResultFromCore(core, dtype)
     }
 
     half() { return this.cast('float16') }
@@ -1765,108 +1766,108 @@ function createBoundTensorClass(runtime) {
       const { ffi, ops } = this._rt._core
       // Current Tinygrad emits the raw ALU op; C owns least_upper_float.
       const core = ffi.poly_tensor_alu1(this._ctx, ops.EXP2, this._tensor)
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     log2() {
       const { ffi, ops } = this._rt._core
       // Current Tinygrad emits the raw ALU op; C owns the result dtype.
       const core = ffi.poly_tensor_alu1(this._ctx, ops.LOG2, this._tensor)
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     sqrt() {
       const { ffi, ops } = this._rt._core
       // Current Tinygrad emits the raw ALU op; C owns the result dtype.
       const core = ffi.poly_tensor_alu1(this._ctx, ops.SQRT, this._tensor)
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     reciprocal() {
       const { ffi, ops } = this._rt._core
       const core = ffi.poly_tensor_alu1(this._ctx, ops.RECIPROCAL, this._tensor)
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     trunc() {
       const { ffi, ops } = this._rt._core
       const core = ffi.poly_tensor_alu1(this._ctx, ops.TRUNC, this._tensor)
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     exp() {
       const core = this._rt._core.ffi.poly_tensor_exp(this._ctx, this._tensor)
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     log() {
       const core = this._rt._core.ffi.poly_tensor_log(this._ctx, this._tensor)
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     log10() {
       const core = this._rt._core.ffi.poly_tensor_log10(this._ctx, this._tensor)
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     atanh() {
       const core = this._rt._core.ffi.poly_tensor_atanh(this._ctx, this._tensor)
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     asinh() {
       const core = this._rt._core.ffi.poly_tensor_asinh(this._ctx, this._tensor)
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     acosh() {
       const core = this._rt._core.ffi.poly_tensor_acosh(this._ctx, this._tensor)
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     asin() {
       const core = this._rt._core.ffi.poly_tensor_asin(this._ctx, this._tensor)
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     acos() {
       const core = this._rt._core.ffi.poly_tensor_acos(this._ctx, this._tensor)
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     atan() {
       const core = this._rt._core.ffi.poly_tensor_atan(this._ctx, this._tensor)
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     logsigmoid() {
       const core = this._rt._core.ffi.poly_tensor_logsigmoid(this._ctx, this._tensor)
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     sinh() {
       const core = this._rt._core.ffi.poly_tensor_sinh(this._ctx, this._tensor)
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     cosh() {
       const core = this._rt._core.ffi.poly_tensor_cosh(this._ctx, this._tensor)
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     erf() {
       const core = this._rt._core.ffi.poly_tensor_erf(this._ctx, this._tensor)
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     softsign() {
       const core = this._rt._core.ffi.poly_tensor_softsign(this._ctx, this._tensor)
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     isfinite() {
       const core = this._rt._core.ffi.poly_tensor_isfinite(this._ctx, this._tensor)
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     celu(alpha) {
@@ -1875,14 +1876,14 @@ function createBoundTensorClass(runtime) {
         ? new Tensor(1, {dtype: 'weakfloat', _ctx: this._ctx, device: this._device})
         : this._ensureTensor(alpha)
       const core = this._rt._core.ffi.poly_tensor_celu(this._ctx, this._tensor, alpha._tensor)
-      return this._makeResultFromCore(core, [this, alpha])
+      return this._makeResultFromCore(core)
     }
 
     selu(alpha = 1.67326, gamma = 1.0507) {
       alpha = this._ensureTensor(alpha)
       gamma = this._ensureTensor(gamma)
       const core = this._rt._core.ffi.poly_tensor_selu(this._ctx, this._tensor, alpha._tensor, gamma._tensor)
-      return this._makeResultFromCore(core, [this, alpha, gamma])
+      return this._makeResultFromCore(core)
     }
 
     isclose(other, {rtol = 1e-5, atol = 1e-8, equalNan = false} = {}) {
@@ -1890,13 +1891,13 @@ function createBoundTensorClass(runtime) {
       rtol = this._ensureTensor(rtol)
       atol = this._ensureTensor(atol)
       const core = this._rt._core.ffi.poly_tensor_isclose(this._ctx, this._tensor, other._tensor, rtol._tensor, atol._tensor, !!equalNan)
-      return this._makeResultFromCore(core, [this, other, rtol, atol])
+      return this._makeResultFromCore(core)
     }
 
     copysign(other) {
       other = this._ensureTensor(other)
       const core = this._rt._core.ffi.poly_tensor_copysign(this._ctx, this._tensor, other._tensor)
-      return this._makeResultFromCore(core, [this, other])
+      return this._makeResultFromCore(core)
     }
 
     lerp(end, weight) {
@@ -1904,7 +1905,7 @@ function createBoundTensorClass(runtime) {
       end = this._ensureTensor(end)
       weight = this._ensureTensor(weight)
       const core = this._rt._core.ffi.poly_tensor_lerp(this._ctx, this._tensor, end._tensor, weight._tensor, scalarWeight)
-      return this._makeResultFromCore(core, [this, end, weight])
+      return this._makeResultFromCore(core)
     }
 
     _lossReductionId(reduction) {
@@ -1919,7 +1920,7 @@ function createBoundTensorClass(runtime) {
       const weight = posWeight === null ? null : this._ensureTensor(posWeight)
       const core = this._rt._core.ffi.poly_tensor_binary_crossentropy_logits(
         this._ctx, this._tensor, target._tensor, weight ? weight._tensor : null, id)
-      return this._makeResultFromCore(core, [this, target, ...(weight ? [weight] : [])])
+      return this._makeResultFromCore(core)
     }
 
     nllLoss(target, {weight = null, ignoreIndex = null, reduction = 'mean'} = {}) {
@@ -1929,17 +1930,17 @@ function createBoundTensorClass(runtime) {
       const ignore = ignoreIndex === null ? null : this._ensureTensor(ignoreIndex)
       const core = this._rt._core.ffi.poly_tensor_nll_loss(
         this._ctx, this._tensor, target._tensor, weight ? weight._tensor : null, ignore ? ignore._tensor : null, id)
-      return this._makeResultFromCore(core, [this, target, ...[weight, ignore].filter(Boolean)])
+      return this._makeResultFromCore(core)
     }
 
     log1p() {
       const core = this._rt._core.ffi.poly_tensor_log1p(this._ctx, this._tensor)
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     expm1() {
       const core = this._rt._core.ffi.poly_tensor_expm1(this._ctx, this._tensor)
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     sin() {
@@ -1947,19 +1948,19 @@ function createBoundTensorClass(runtime) {
       // Current Tinygrad emits SIN over the exact Tensor occurrence; C owns
       // its least_upper_float result (mixin/elementwise.py:468-478).
       const core = ffi.poly_tensor_alu1(this._ctx, ops.SIN, this._tensor)
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     cos() {
       // Current least_upper_float/float32 composition is shared in C.
       const core = this._rt._core.ffi.poly_tensor_cos(this._ctx, this._tensor)
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     tan() {
       // Current self.sin()/self.cos() composition is shared in C.
       const core = this._rt._core.ffi.poly_tensor_tan(this._ctx, this._tensor)
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     sigmoid() {
@@ -2061,14 +2062,14 @@ function createBoundTensorClass(runtime) {
       if (!['tanh', 'none'].includes(approximate)) throw new Error(`unknown GELU approximation: ${approximate}`)
       const fn = approximate === 'tanh' ? this._rt._core.ffi.poly_tensor_gelu : this._rt._core.ffi.poly_tensor_gelu_exact
       const core = fn(this._ctx, this._tensor)
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     quickGelu() {
       // Pinned mixin/elementwise.py:751-759 builds the broadcasted scalar
       // formula from the one current Tensor.uop. C owns both retained/current roots.
       const core = this._rt._core.ffi.poly_tensor_quick_gelu(this._ctx, this._tensor)
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     silu() {
@@ -2132,14 +2133,14 @@ function createBoundTensorClass(runtime) {
       if (axis === undefined) axis = -1
       this._resolveDim(axis)
       const core = this._rt._core.ffi.poly_tensor_softmax(this._ctx, this._tensor, axis)
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     logSoftmax(axis) {
       if (axis === undefined) axis = -1
       this._resolveDim(axis)
       const core = this._rt._core.ffi.poly_tensor_log_softmax(this._ctx, this._tensor, axis)
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     // --- Movement ops ---
@@ -2165,7 +2166,7 @@ function createBoundTensorClass(runtime) {
       const core = this._rt._core.ffi.poly_tensor_reshape(
         this._ctx, this._tensor, shape, shape.length
       )
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     permute(...order) {
@@ -2179,7 +2180,7 @@ function createBoundTensorClass(runtime) {
       const core = this._rt._core.ffi.poly_tensor_permute(
         this._ctx, this._tensor, order, order.length
       )
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     expand(...shape) {
@@ -2189,7 +2190,7 @@ function createBoundTensorClass(runtime) {
       const core = this._rt._core.ffi.poly_tensor_expand(
         this._ctx, this._tensor, shape, shape.length
       )
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     shrink(arg) {
@@ -2204,7 +2205,7 @@ function createBoundTensorClass(runtime) {
       const core = this._rt._core.ffi.poly_tensor_shrink(
         this._ctx, this._tensor, flat, arg.length
       )
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     shrinkTo(...shape) {
@@ -2241,7 +2242,7 @@ function createBoundTensorClass(runtime) {
         if (!tag) throw new Error(`mode=${mode} is not supported`)
         const core = this._rt._core.ffi.poly_tensor_pad_mode(this._ctx, this._tensor, flat, arg.length, tag)
         if (!core) throw new RangeError(`invalid ${mode} padding`)
-        return this._makeResultFromCore(core, [this])
+        return this._makeResultFromCore(core)
       }
       // Pinned _pad_constant shrinks negative pads before emitting a
       // non-negative PAD (mixin/__init__.py:359-368). The shared C boundary
@@ -2253,7 +2254,7 @@ function createBoundTensorClass(runtime) {
       } else if (typeof value === 'number') fn = this._rt._core.ffi.poly_tensor_pad_value_float
       else throw new TypeError(`pad value must be boolean or number, got ${typeof value}`)
       const core = fn(this._ctx, this._tensor, flat, arg.length, value)
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     flip(axis, ...args) {
@@ -2270,7 +2271,7 @@ function createBoundTensorClass(runtime) {
       const core = this._rt._core.ffi.poly_tensor_flip(
         this._ctx, this._tensor, axes, axes.length
       )
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     transpose(dim0, dim1) {
@@ -2384,7 +2385,7 @@ function createBoundTensorClass(runtime) {
           this._ctx, this._tensor, axis, axis.length, Boolean(keepdim), dtypeId
         )
       }
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     max(opts, keepdim = false) {
@@ -2398,9 +2399,9 @@ function createBoundTensorClass(runtime) {
       const rank = Math.max(1, this.shape.length)
       if (!Number.isInteger(axis) || axis < -rank || axis >= rank) throw new RangeError('invalid scan axis')
       const result = this._rt._core.ffi[operation](this._ctx, this._tensor, axis)
-      if (!pair) return this._makeResultFromCore(result, [this])
+      if (!pair) return this._makeResultFromCore(result)
       if (!result || result.length !== 2 || !result[0] || !result[1]) throw new Error('core cumulative extremum failed')
-      return result.map(core => this._makeResultFromCore(core, [this]))
+      return result.map(core => this._makeResultFromCore(core))
     }
 
     cumsum(axis = 0) { return this._scan('poly_tensor_cumsum', axis) }
@@ -2435,7 +2436,7 @@ function createBoundTensorClass(runtime) {
       const core = ffi[operation](
         this._ctx, this._tensor, axes, axes.length, Boolean(keepdim)
       )
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     _resolveDim(dim, extra = false) {
@@ -2457,7 +2458,7 @@ function createBoundTensorClass(runtime) {
 
     normalize({ p = 2, dim = 1, eps = 1e-12 } = {}) {
       const core = this._rt._core.ffi.poly_tensor_normalize(this._ctx, this._tensor, p, this._resolveDim(dim), eps)
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     softmin(axis = -1, dtype = null) {
@@ -2470,26 +2471,26 @@ function createBoundTensorClass(runtime) {
     argmin(axis = null, keepdim = false) {
       if (axis == null) return this.flatten().argmin(0)
       const core = this._rt._core.ffi.poly_tensor_argmin(this._ctx, this._tensor, this._resolveDim(axis), Boolean(keepdim))
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     diag() {
       if (this.ndim !== 1) throw new Error('diag requires a vector')
-      return this._makeResultFromCore(this._rt._core.ffi.poly_tensor_diag(this._ctx, this._tensor), [this])
+      return this._makeResultFromCore(this._rt._core.ffi.poly_tensor_diag(this._ctx, this._tensor))
     }
 
     diagonal(offset = 0, dim1 = 0, dim2 = 1) {
       dim1 = this._resolveDim(dim1); dim2 = this._resolveDim(dim2)
       if (dim1 === dim2) throw new Error('diagonal dimensions must differ')
       const core = this._rt._core.ffi.poly_tensor_diagonal(this._ctx, this._tensor, offset, dim1, dim2)
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     unfold(dim, size, step) {
       dim = this._resolveDim(dim)
       if (!Number.isInteger(size) || !Number.isInteger(step) || size < 0 || step <= 0 || size > this.shape[dim]) throw new Error('invalid unfold size or step')
       const core = this._rt._core.ffi.poly_tensor_unfold(this._ctx, this._tensor, dim, size, step)
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     meshgrid(...args) { return Tensor.meshgrid(this, ...args) }
@@ -2523,7 +2524,7 @@ function createBoundTensorClass(runtime) {
       const { ffi } = this._rt._core
       if (!ffi.poly_tensor_argmax) throw new Error('poly_tensor_argmax is required for Tensor.argmax')
       const core = ffi.poly_tensor_argmax(this._ctx, this._tensor, axis, Boolean(keepdim))
-      return this._makeResultFromCore(core, [this], 'int32')
+      return this._makeResultFromCore(core, 'int32')
     }
 
     sort(dim, descending) {
@@ -2536,8 +2537,8 @@ function createBoundTensorClass(runtime) {
       if (!pair || pair.length !== 2 || !pair[0] || !pair[1]) {
         throw new Error('poly_tensor_sort failed')
       }
-      const values = this._makeResultFromCore(pair[0], [this])
-      const indices = this._makeResultFromCore(pair[1], [this], 'int32')
+      const values = this._makeResultFromCore(pair[0])
+      const indices = this._makeResultFromCore(pair[1], 'int32')
       return [values, indices]
     }
 
@@ -2560,8 +2561,8 @@ function createBoundTensorClass(runtime) {
       if (!pair || pair.length !== 2 || !pair[0] || !pair[1]) {
         throw new Error('poly_tensor_topk failed')
       }
-      const values = this._makeResultFromCore(pair[0], [this])
-      const indices = this._makeResultFromCore(pair[1], [this], 'int32')
+      const values = this._makeResultFromCore(pair[0])
+      const indices = this._makeResultFromCore(pair[1], 'int32')
       return [values, indices]
     }
 
@@ -2651,7 +2652,7 @@ function createBoundTensorClass(runtime) {
 
     gather(dim, index) {
       if (!(index instanceof Tensor)) index = new Tensor(index, { dtype: 'int32', device: this._device })
-      if (index._device !== this._device) {
+      if (deviceMismatch(index.device, this.device)) {
         throw new Error(`expected index and self on the same device, index.device=${index.device}, self.device=${this.device}`)
       }
       if (index.ndim !== this.ndim) {
@@ -2669,7 +2670,7 @@ function createBoundTensorClass(runtime) {
         this._ctx, this._tensor, dim, index._tensor
       )
       if (!core) throw new Error('poly_tensor_gather_dim failed')
-      return this._makeResultFromCore(core, [this, index])
+      return this._makeResultFromCore(core)
     }
 
     takeAlongAxis(index, axis) {
@@ -2681,7 +2682,7 @@ function createBoundTensorClass(runtime) {
         this._ctx, this._tensor, Number(numClasses)
       )
       if (!core) throw new Error('poly_tensor_one_hot failed')
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     one_hot(numClasses) { return this.oneHot(numClasses) }
@@ -2706,10 +2707,10 @@ function createBoundTensorClass(runtime) {
     _preScatterValidate(dim, index, src) {
       if (!(index instanceof Tensor)) index = new Tensor(index, { dtype: 'int32', device: this._device })
       if (!(src instanceof Tensor)) src = Tensor.full(index.shape, src, { dtype: this._dtype, device: this._device })
-      if (index._device !== this._device) {
+      if (deviceMismatch(index.device, this.device)) {
         throw new Error(`expected index and self on the same device, index.device=${index.device}, self.device=${this.device}`)
       }
-      if (src._device !== this._device) {
+      if (deviceMismatch(src.device, this.device)) {
         throw new Error(`expected src and self on the same device, src.device=${src.device}, self.device=${this.device}`)
       }
       if (dim < 0) dim += this.ndim
@@ -2741,7 +2742,7 @@ function createBoundTensorClass(runtime) {
         reduce, includeSelf ? 1 : 0
       )
       if (!core) throw new Error('poly_tensor_scatter_reduce failed')
-      return this._makeResultFromCore(core, [this, p.index, p.src])
+      return this._makeResultFromCore(core)
     }
 
     scatter_reduce(dim, index, src, reduce, includeSelf) {
@@ -2766,7 +2767,7 @@ function createBoundTensorClass(runtime) {
         this._ctx, this._tensor, p.dim, p.index._tensor, p.src._tensor, reduce || ''
       )
       if (!core) throw new Error('poly_tensor_scatter failed')
-      return this._makeResultFromCore(core, [this, p.index, p.src])
+      return this._makeResultFromCore(core)
     }
 
     // --- Matmul (C core dot) ---
@@ -2787,7 +2788,7 @@ function createBoundTensorClass(runtime) {
       if (!core) {
         throw new Error(`cannot dot ${JSON.stringify(this.shape)} and ${JSON.stringify(w.shape)}`)
       }
-      return this._makeResultFromCore(core, [this, w])
+      return this._makeResultFromCore(core)
     }
 
     matmul(other, reverse = false, dtype) {
@@ -2804,10 +2805,10 @@ function createBoundTensorClass(runtime) {
       if (!ffi.poly_tensor_qr_ex) throw new Error('poly_tensor_qr_ex is required for Tensor.qr')
       const pair = ffi.poly_tensor_qr_ex(this._ctx, this._tensor, modeId)
       if (!pair || pair.length !== 2 || !pair[1] || (modeId !== 2 && !pair[0])) throw new Error('poly_tensor_qr_ex failed')
-      if (modeId === 2) return this._makeResultFromCore(pair[1], [this])
+      if (modeId === 2) return this._makeResultFromCore(pair[1])
       return [
-        this._makeResultFromCore(pair[0], [this]),
-        this._makeResultFromCore(pair[1], [this])
+        this._makeResultFromCore(pair[0]),
+        this._makeResultFromCore(pair[1])
       ]
     }
 
@@ -2827,7 +2828,7 @@ function createBoundTensorClass(runtime) {
       if (!core) {
         throw new Error(`cannot triangularSolve A.shape=${JSON.stringify(this.shape)} and b.shape=${JSON.stringify(b.shape)}`)
       }
-      return this._makeResultFromCore(core, [this, b])
+      return this._makeResultFromCore(core)
     }
 
     triangular_solve(b, upper, transpose_a, unit_diagonal) {
@@ -2842,7 +2843,7 @@ function createBoundTensorClass(runtime) {
       if (!ffi.poly_tensor_cholesky) throw new Error('poly_tensor_cholesky is required for Tensor.cholesky')
       const core = ffi.poly_tensor_cholesky(this._ctx, this._tensor, opts.upper ? 1 : 0)
       if (!core) throw new Error(`cannot cholesky shape=${JSON.stringify(this.shape)}`)
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     choleskySolve(b, opts) {
@@ -2858,7 +2859,7 @@ function createBoundTensorClass(runtime) {
       if (!core) {
         throw new Error(`cannot choleskySolve factor.shape=${JSON.stringify(this.shape)} and b.shape=${JSON.stringify(b.shape)}`)
       }
-      return this._makeResultFromCore(core, [this, b])
+      return this._makeResultFromCore(core)
     }
 
     cholesky_solve(b, upper) { return this.choleskySolve(b, { upper }) }
@@ -2869,7 +2870,7 @@ function createBoundTensorClass(runtime) {
       if (!ffi.poly_tensor_solve) throw new Error('poly_tensor_solve is required for Tensor.solve')
       const core = ffi.poly_tensor_solve(this._ctx, this._tensor, b._tensor)
       if (!core) throw new Error(`cannot solve A.shape=${JSON.stringify(this.shape)} and b.shape=${JSON.stringify(b.shape)}`)
-      return this._makeResultFromCore(core, [this, b])
+      return this._makeResultFromCore(core)
     }
 
     lstsq(b) {
@@ -2878,7 +2879,7 @@ function createBoundTensorClass(runtime) {
       if (!ffi.poly_tensor_lstsq) throw new Error('poly_tensor_lstsq is required for Tensor.lstsq')
       const core = ffi.poly_tensor_lstsq(this._ctx, this._tensor, b._tensor)
       if (!core) throw new Error(`cannot lstsq A.shape=${JSON.stringify(this.shape)} and b.shape=${JSON.stringify(b.shape)}`)
-      return this._makeResultFromCore(core, [this, b])
+      return this._makeResultFromCore(core)
     }
 
     linear(weight, bias = null, dtype = null) {
@@ -2912,7 +2913,7 @@ function createBoundTensorClass(runtime) {
           `dilation=${JSON.stringify(dilationTuple)}`
         )
       }
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     _pool2dArgs(kernelSize, opts) {
@@ -2930,8 +2931,8 @@ function createBoundTensorClass(runtime) {
       const core = this._rt._core.ffi.poly_tensor_max_pool2d(
         ...this._pool2dArgs(kernelSize, opts), Boolean(opts.ceilMode || opts.ceil_mode), indices)
       if (!core) throw new Error('poly_max_pool2d failed')
-      if (indices) return core.map(ptr => this._makeResultFromCore(ptr, [this]))
-      return this._makeResultFromCore(core, [this])
+      if (indices) return core.map(ptr => this._makeResultFromCore(ptr))
+      return this._makeResultFromCore(core)
     }
 
     avgPool2d(kernelSize = [2, 2], opts = {}) {
@@ -2940,7 +2941,7 @@ function createBoundTensorClass(runtime) {
         ...this._pool2dArgs(kernelSize, opts), Boolean(opts.ceilMode || opts.ceil_mode),
         Boolean(opts.countIncludePad ?? opts.count_include_pad ?? true))
       if (!core) throw new Error('poly_avg_pool2d failed')
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     avg_pool2d(kernelSize = [2, 2], stride = null, dilation = 1, padding = 0, ceilMode = false, countIncludePad = true) {
@@ -2952,7 +2953,7 @@ function createBoundTensorClass(runtime) {
       const output = opts.outputSize ?? opts.output_size ?? []
       const core = this._rt._core.ffi.poly_tensor_max_unpool2d(ctx, tensor, indices._tensor, k, nk, s, d, p, np, output, output.length)
       if (!core) throw new Error('poly_max_unpool2d failed')
-      return this._makeResultFromCore(core, [this, indices])
+      return this._makeResultFromCore(core)
     }
 
     max_unpool2d(indices, kernelSize = [2, 2], stride = null, dilation = 1, padding = 0, outputSize = null) {
@@ -2970,7 +2971,7 @@ function createBoundTensorClass(runtime) {
       }
       const core = this._rt._core.ffi.poly_tensor_interpolate(this._ctx, this._tensor, size, size.length, mode, align)
       if (!core) throw new Error('poly_interpolate failed')
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     convTranspose2d(weight, bias = null, opts = {}) {
@@ -2992,7 +2993,7 @@ function createBoundTensorClass(runtime) {
         this._ctx, this._tensor, weight._tensor, bias ? bias._tensor : null, opts.groups ?? 1,
         stride, dilation, padding, padding.length, op, op.length)
       if (!core) throw new Error('poly_conv_transpose2d failed')
-      return this._makeResultFromCore(core, bias ? [this, weight, bias] : [this, weight])
+      return this._makeResultFromCore(core)
     }
 
     conv_transpose2d(weight, bias = null, groups = 1, stride = 1, dilation = 1, padding = 0, outputPadding = 0) {
@@ -3035,7 +3036,7 @@ function createBoundTensorClass(runtime) {
       }
       if (!core) throw new Error('poly_conv2d failed')
       const inputs = bias ? [this, weight, bias] : [this, weight]
-      return this._makeResultFromCore(core, inputs)
+      return this._makeResultFromCore(core)
     }
 
     batchnorm(weight, bias, mean, invstd, axis = 1) {
@@ -3053,7 +3054,7 @@ function createBoundTensorClass(runtime) {
       const inputs = [this, mean, invstd]
       if (weight) inputs.push(weight)
       if (bias) inputs.push(bias)
-      return this._makeResultFromCore(core, inputs)
+      return this._makeResultFromCore(core)
     }
 
     // --- Loss functions ---
@@ -3094,17 +3095,17 @@ function createBoundTensorClass(runtime) {
     sparseCategoricalCrossentropy(target, { ignoreIndex = -1, labelSmoothing = 0, reduction = 'mean' } = {}) {
       if (!(labelSmoothing >= 0 && labelSmoothing <= 1)) throw new RangeError('labelSmoothing must be in [0, 1]')
       target = this._ensureTensor(target)
-      if (target.device !== this.device) throw new Error('loss inputs must be on the same device')
+      if (deviceMismatch(target.device, this.device)) throw new Error('loss inputs must be on the same device')
       if (!Number.isSafeInteger(ignoreIndex)) throw new RangeError('ignoreIndex must be a safe integer')
       const core = this._rt._core.ffi.poly_tensor_sparse_categorical_crossentropy(this._ctx, this._tensor, target._tensor, ignoreIndex, labelSmoothing, this._lossReductionId(reduction))
-      return this._makeResultFromCore(core, [this, target])
+      return this._makeResultFromCore(core)
     }
 
     binaryCrossEntropy(target, reduction = 'mean') {
       const id = this._lossReductionId(reduction)
       target = this._ensureTensor(target)
       const core = this._rt._core.ffi.poly_tensor_binary_crossentropy(this._ctx, this._tensor, target._tensor, id)
-      return this._makeResultFromCore(core, [this, target])
+      return this._makeResultFromCore(core)
     }
 
     layernorm(axis, eps) {
@@ -3147,7 +3148,7 @@ function createBoundTensorClass(runtime) {
           kind = 1
         } else if (index instanceof Tensor) {
           if (!isIntegerDtype(index.dtype)) throw new TypeError('index dtype ' + index.dtype + ' is not supported')
-          if (index._ctx !== this._ctx || index._device !== this._device) {
+          if (index._ctx !== this._ctx || deviceMismatch(index.device, this.device)) {
             throw new Error('expected index and self on the same device and context')
           }
           kind = 3
@@ -3188,7 +3189,7 @@ function createBoundTensorClass(runtime) {
         ffi.poly_tensor_release(core)
         return this
       }
-      return this._makeResultFromCore(core, [this, ...owners])
+      return this._makeResultFromCore(core)
     }
 
     setitem(indices, value) {
@@ -3224,7 +3225,7 @@ function createBoundTensorClass(runtime) {
         ctx, formula, operands.map(t => t._tensor)
       )
       if (!core) throw new Error(`poly_einsum failed for formula: ${formula}`)
-      return t0._makeResultFromCore(core, operands)
+      return t0._makeResultFromCore(core)
     }
 
     // --- Rearrange (C core, einops-style) ---
@@ -3234,7 +3235,7 @@ function createBoundTensorClass(runtime) {
       const { ffi } = this._rt._core
       const core = ffi.poly_tensor_rearrange(this._ctx, formula, this._tensor, kwargs)
       if (!core) throw new Error(`poly_rearrange failed for formula: ${formula}`)
-      return this._makeResultFromCore(core, [this])
+      return this._makeResultFromCore(core)
     }
 
     // --- Autograd ---
@@ -3796,7 +3797,7 @@ function createBoundTensorClass(runtime) {
       dim = tensors[0]._resolveDim(dim, true)
       if (tensors.some(t => !arraysEqual(t.shape, tensors[0].shape))) throw new Error('stack shape mismatch')
       const core = tensors[0]._rt._core.ffi.poly_tensor_stack(tensors[0]._ctx, tensors.map(t => t._tensor), dim)
-      return tensors[0]._makeResultFromCore(core, tensors)
+      return tensors[0]._makeResultFromCore(core)
     }
 
     split(sizes, dim) {

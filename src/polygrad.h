@@ -1404,6 +1404,12 @@ PolyDevice poly_uop_device(PolyUOp *u);
  * graph has no concrete DEVICE identity.  Backend dispatch remains the
  * separate PolyDevice-valued poly_uop_device() compatibility query. */
 const char *poly_uop_device_name(PolyCtx *ctx, PolyUOp *u);
+/* Complete Tinygrad UOp.device metadata, not backend dispatch. Returns the
+ * number of names, or -1 on invalid arguments/query failure. No device is
+ * (0,false); an empty tuple is (0,true); a scalar is (1,false). Names and their
+ * array are borrowed until context collection/destruction. Copy before a
+ * collection safe point; this query does not retain a graph or storage. */
+int poly_uop_device_names(PolyCtx *ctx, PolyUOp *u, const char ***names, bool *is_tuple);
 
 /* Frontend host-buffer lifetime hook.
  * Frontends keep strong maps keyed by the C-side PolyBuffer* address value.

@@ -683,6 +683,61 @@ TEST(uop, device_constructor_preserves_ordered_tuple_identity) {
   PASS();
 }
 
+TEST(uop, device_query_preserves_tuple_metadata) {
+  PolyCtx *ctx = poly_ctx_new();
+  const char *names[] = {"CPU", "CPU:1"};
+  PolyUOp *shape = poly_const_int(ctx, 1);
+  PolyUOp *source =
+      poly_uop_new_buffer(ctx, poly_device_uop(ctx, POLY_DEVICE_CPU), 1, POLY_FLOAT32, 0);
+  unsigned wrong = 0;
+  for (int n = 0; n <= 2; n++) {
+    PolyParamArg param = {
+        .slot = 0,
+        .addrspace = POLY_ADDR_GLOBAL,
+        .device_is_tuple = true,
+        .devices = names,
+        .n_devices = n};
+    PolyUOp *nodes[] = {
+        poly_uop1(ctx, POLY_OP_PARAM, POLY_FLOAT32, shape, poly_arg_param(&param)),
+        poly_uop1(ctx, POLY_OP_BUFFER, POLY_FLOAT32, shape, poly_arg_param(&param)),
+        poly_uop2(
+            ctx, POLY_OP_STAGE, POLY_FLOAT32, source, shape,
+            poly_arg_bufferize_opts_tuple(names, n, POLY_ADDR_GLOBAL, false)
+        ),
+        poly_uop1(ctx, POLY_OP_COPY, POLY_FLOAT32, source, poly_arg_string_tuple(names, n)),
+        poly_uop1(
+            ctx, POLY_OP_ALLREDUCE, POLY_FLOAT32, source,
+            poly_arg_allreduce(POLY_OP_ADD, NULL, names, n)
+        ),
+    };
+    for (int i = 0; i < 5; i++) {
+      PolyUOp *device = poly_uop_device_uop_cached(ctx, nodes[i], NULL);
+      bool correct = device && device->op == POLY_OP_DEVICE &&
+                     device->arg.kind == POLY_ARG_STRING_TUPLE && device->arg.string_tuple.n == n;
+      for (int j = 0; j < n && correct; j++)
+        correct = strcmp(device->arg.string_tuple.vals[j], names[j]) == 0;
+      const char **queried = NULL;
+      bool is_tuple = false;
+      int count = poly_uop_device_names(ctx, nodes[i], &queried, &is_tuple);
+      correct = correct && is_tuple && count == n;
+      for (int j = 0; j < n && correct; j++)
+        correct = queried && strcmp(queried[j], names[j]) == 0;
+      if (n > 0) {
+        PolyUOp *select = poly_uop1(ctx, POLY_OP_MSELECT, POLY_FLOAT32, nodes[i], poly_arg_int(0));
+        const char *selected = poly_uop_device_name(ctx, select);
+        correct = correct && selected && strcmp(selected, "CPU") == 0;
+      }
+      if (!correct) {
+        fprintf(stderr, "device tuple mismatch: %s count=%d\n", poly_op_name(nodes[i]->op), n);
+        wrong |= 1u << (n * 5 + i);
+      }
+    }
+  }
+  poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(wrong, 0);
+  PASS();
+}
+
 TEST(uop, device_query_preserves_exact_physical_identity) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
@@ -750,6 +805,18 @@ TEST(uop, device_query_preserves_exact_physical_identity) {
   ASSERT_PTR_EQ(tuple_stage, tuple_stage_same);
   ASSERT_PTR_NEQ(tuple_stage, tuple_stage_reversed);
   ASSERT_STR_EQ(poly_uop_device_name(ctx, mixed), "CPU:1");
+  const char **queried = NULL;
+  bool is_tuple = true;
+  ASSERT_INT_EQ(poly_uop_device_names(ctx, mixed, &queried, &is_tuple), 1);
+  ASSERT_FALSE(is_tuple);
+  ASSERT_STR_EQ(queried[0], "CPU:1");
+  ASSERT_INT_EQ(poly_uop_device_names(ctx, constant, &queried, &is_tuple), 0);
+  ASSERT_FALSE(is_tuple);
+  ASSERT_TRUE(queried == NULL);
+  ASSERT_INT_EQ(poly_uop_device_names(ctx, NULL, &queried, &is_tuple), -1);
+  ASSERT_INT_EQ(poly_uop_device_names(NULL, mixed, &queried, &is_tuple), -1);
+  ASSERT_INT_EQ(poly_uop_device_names(ctx, mixed, NULL, &is_tuple), -1);
+  ASSERT_INT_EQ(poly_uop_device_names(ctx, mixed, &queried, NULL), -1);
   ASSERT_TRUE(poly_uop_device_uop_cached(ctx, constant, NULL) == NULL);
   ASSERT_TRUE(poly_uop_device_name(ctx, constant) == NULL);
   ASSERT_TRUE(poly_uop_explicit_devices_supported(ctx, param));

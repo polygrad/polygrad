@@ -2464,6 +2464,21 @@ TEST(tensor, stateful_rand_zero_extent_constructs_current_empty_graph) {
   PASS();
 }
 
+TEST(tensor, assign_accepts_deviceless_value_with_different_backend_label) {
+  PolyCtx *ctx = poly_ctx_new();
+  int64_t dims[] = {4};
+  PolyTensor *target = poly_tensor_empty(ctx, POLY_FLOAT32, dims, 1, POLY_DEVICE_CPU);
+  PolyTensor *value =
+      poly_tensor_const_float_by_id(ctx, 1.25, poly_dtype_id_by_name("float32"), POLY_DEVICE_CUDA);
+  PolyTensor *assigned = poly_tensor_assign(ctx, target, value);
+  bool correct = assigned && assigned->uop_physical->op == POLY_OP_AFTER &&
+                 assigned->uop_physical->n_src == 2 &&
+                 assigned->uop_physical->src[1]->op == POLY_OP_STORE;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
 TEST(tensor, scalar_constructors_store_exact_const_as_both_roots) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);

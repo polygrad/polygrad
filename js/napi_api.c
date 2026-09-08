@@ -1353,6 +1353,35 @@ static napi_value napi_poly_uop_device(napi_env env, napi_callback_info info) {
   return out;
 }
 
+static napi_value napi_poly_uop_device_names(napi_env env, napi_callback_info info) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  const char **names;
+  bool is_tuple;
+  int count = poly_uop_device_names(
+      get_external(env, argv[0]), get_external(env, argv[1]), &names, &is_tuple
+  );
+  if (count < 0) {
+    napi_throw_error(env, NULL, "poly_uop_device_names failed");
+    return NULL;
+  }
+  napi_value out;
+  if (is_tuple) {
+    NAPI_CALL(env, napi_create_array_with_length(env, count, &out));
+    for (int i = 0; i < count; i++) {
+      napi_value name;
+      NAPI_CALL(env, napi_create_string_utf8(env, names[i], NAPI_AUTO_LENGTH, &name));
+      NAPI_CALL(env, napi_set_element(env, out, i, name));
+    }
+  } else if (count) {
+    NAPI_CALL(env, napi_create_string_utf8(env, names[0], NAPI_AUTO_LENGTH, &out));
+  } else {
+    NAPI_CALL(env, napi_get_null(env, &out));
+  }
+  return out;
+}
+
 static napi_value napi_poly_uop_n_src(napi_env env, napi_callback_info info) {
   napi_value argv[1];
   size_t argc = 1;
@@ -6523,6 +6552,7 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_uop_key", napi_poly_uop_key),
       DECLARE_NAPI_METHOD("poly_uop_op", napi_poly_uop_op),
       DECLARE_NAPI_METHOD("poly_uop_device", napi_poly_uop_device),
+      DECLARE_NAPI_METHOD("poly_uop_device_names", napi_poly_uop_device_names),
       DECLARE_NAPI_METHOD("poly_uop_substitute", napi_poly_uop_substitute),
       DECLARE_NAPI_METHOD("poly_uop_has_buffer_identity", napi_poly_uop_has_buffer_identity),
       DECLARE_NAPI_METHOD("poly_uop_get_buffer_identity", napi_poly_uop_get_buffer_identity),

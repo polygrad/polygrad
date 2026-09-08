@@ -16,6 +16,52 @@ from polygrad.helpers import Context
 from polygrad.uop.ops import AxisType, KernelInfo, UOp, _dispose_uops_for_ctx
 
 
+def test_uop_device_metadata_and_tensor_repr():
+    t = Tensor(UOp.const(2.0).cast(dtypes.float32))
+    assert t.uop.device is None
+    assert t.device is None
+    assert '<UOp None' in repr(t)
+    x = Tensor.empty(4, device='CPU')
+    assert x.uop.device == 'CPU'
+    assert x.device == 'CPU'
+    assert (x + 1).uop.device == 'CPU'
+    assert x.to('INTERP').uop.device == 'INTERP'
+
+
+def test_device_metadata_admits_deviceless_index_and_assign_operands():
+    target = Tensor.empty(4)
+    value = Tensor(1.25, dtype=dtypes.float32, device='INTERP')
+    assert value.device is None
+    target.assign(value)
+    np.testing.assert_equal(target.numpy(), [1.25] * 4)
+
+
+@pytest.mark.parametrize('operation', ['add', 'gather', 'index', 'scatter'])
+def test_device_metadata_composes_different_backend_preferences(operation):
+    index = Tensor([1, 0], dtype=dtypes.int32)
+    source = Tensor.arange(2, device='INTERP')
+    assert source.device is None
+    result = {'add': lambda: source + index, 'gather': lambda: source.gather(0, index),
+              'index': lambda: source[index],
+              'scatter': lambda: Tensor.zeros(2).scatter(0, index, source.float())}[operation]()
+    assert result.device == 'CPU'
+    np.testing.assert_equal(result.numpy(), [1, 1] if operation == 'add' else [1, 0])
+
+
+def test_uop_device_metadata_c_tuple_query():
+    from polygrad import _default_ctx
+    factory = _ffi._lib.poly_device_uop_from_names
+    factory.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_char_p), ctypes.c_int]
+    factory.restype = ctypes.c_void_p
+    for names in [(), ('CPU', 'CPU:1')]:
+        values = (ctypes.c_char_p * len(names))(*(name.encode() for name in names))
+        node = UOp(_default_ctx, factory(_default_ctx, values, len(names)))
+        assert node.device == names
+        node._dispose()
+        with pytest.raises(RuntimeError, match='disposed'):
+            _ = node.device
+
+
 def test_uop_accessors_preserve_live_wrapper_identity():
     source = UOp.const(2.0).cast(dtypes.float32)
     t = Tensor(source)

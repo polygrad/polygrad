@@ -90,7 +90,8 @@ static char no_device_uop_cache_value;
 /* Exact-device counterpart of tinygrad@2026-08-22/a9069c177a9d
  * uop/ops.py:847-861. DEVICE transports explicit placement policy in C;
  * PARAM/STAGE/BUFFER use ParamArg, COPY uses arg, AFTER follows its value,
- * and generic UOps take the first concrete source. */
+ * and generic UOps take the first concrete source. Metadata tuples, including
+ * singleton/empty tuples, must not pass through constructor canonicalization. */
 PolyUOp *poly_uop_device_uop_cached(PolyCtx *ctx, PolyUOp *u, PolyMap *cache) {
   if (!ctx || !u) return NULL;
   if (cache) {
@@ -104,25 +105,31 @@ PolyUOp *poly_uop_device_uop_cached(PolyCtx *ctx, PolyUOp *u, PolyMap *cache) {
   } else if ((u->op == POLY_OP_PARAM || u->op == POLY_OP_BUFFER) &&
              u->arg.kind == POLY_ARG_PARAM && u->arg.param) {
     if (u->arg.param->device_is_tuple)
-      result = poly_device_uop_from_names(ctx, u->arg.param->devices, u->arg.param->n_devices);
+      result = poly_uop0(
+          ctx, POLY_OP_DEVICE, POLY_VOID,
+          poly_arg_string_tuple(u->arg.param->devices, u->arg.param->n_devices)
+      );
     else if (u->arg.param->device)
       result = poly_device_uop_from_name(ctx, u->arg.param->device);
   } else if (u->op == POLY_OP_STAGE && u->arg.kind == POLY_ARG_BUFFERIZE_OPTS) {
     if (u->arg.bufferize_opts.device_is_tuple)
-      result = poly_device_uop_from_names(
-          ctx, u->arg.bufferize_opts.devices, u->arg.bufferize_opts.n_devices
+      result = poly_uop0(
+          ctx, POLY_OP_DEVICE, POLY_VOID,
+          poly_arg_string_tuple(u->arg.bufferize_opts.devices, u->arg.bufferize_opts.n_devices)
       );
     else if (u->arg.bufferize_opts.device)
       result = poly_device_uop_from_name(ctx, u->arg.bufferize_opts.device);
   } else if (u->op == POLY_OP_COPY && u->arg.kind == POLY_ARG_STRING) {
     result = poly_device_uop_from_name(ctx, u->arg.str);
   } else if (u->op == POLY_OP_COPY && u->arg.kind == POLY_ARG_STRING_TUPLE) {
-    result = poly_device_uop_from_names(ctx, u->arg.string_tuple.vals, u->arg.string_tuple.n);
+    result = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, u->arg);
   } else if (u->op == POLY_OP_ALLREDUCE && u->arg.kind == POLY_ARG_ALLREDUCE) {
-    result =
-        u->arg.allreduce.device_is_tuple
-            ? poly_device_uop_from_names(ctx, u->arg.allreduce.devices, u->arg.allreduce.n_devices)
-            : poly_device_uop_from_name(ctx, u->arg.allreduce.device);
+    result = u->arg.allreduce.device_is_tuple
+                 ? poly_uop0(
+                       ctx, POLY_OP_DEVICE, POLY_VOID,
+                       poly_arg_string_tuple(u->arg.allreduce.devices, u->arg.allreduce.n_devices)
+                   )
+                 : poly_device_uop_from_name(ctx, u->arg.allreduce.device);
   } else if (u->op == POLY_OP_AFTER && u->n_src >= 1) {
     result = poly_uop_device_uop_cached(ctx, u->src[0], cache);
   } else if (u->op == POLY_OP_MSELECT && u->n_src >= 1 && u->arg.kind == POLY_ARG_INT) {
@@ -157,14 +164,29 @@ PolyUOp *poly_uop_device_uop_cached(PolyCtx *ctx, PolyUOp *u, PolyMap *cache) {
   return result;
 }
 
-const char *poly_uop_device_name(PolyCtx *ctx, PolyUOp *u) {
-  if (!ctx || !u) return NULL;
+int poly_uop_device_names(PolyCtx *ctx, PolyUOp *u, const char ***names, bool *is_tuple) {
+  if (names) *names = NULL;
+  if (is_tuple) *is_tuple = false;
+  if (!ctx || !u || !names || !is_tuple) return -1;
   PolyMap *cache = poly_map_new(64);
-  if (!cache) return NULL;
+  if (!cache) return -1;
   PolyUOp *device = poly_uop_device_uop_cached(ctx, u, cache);
-  const char *name = device && device->arg.kind == POLY_ARG_STRING ? device->arg.str : NULL;
   poly_map_destroy(cache);
-  return name;
+  if (!device) return 0;
+  if (device->arg.kind == POLY_ARG_STRING) {
+    *names = &device->arg.str;
+    return 1;
+  }
+  if (device->arg.kind != POLY_ARG_STRING_TUPLE) return -1;
+  *names = device->arg.string_tuple.vals;
+  *is_tuple = true;
+  return device->arg.string_tuple.n;
+}
+
+const char *poly_uop_device_name(PolyCtx *ctx, PolyUOp *u) {
+  const char **names;
+  bool is_tuple;
+  return poly_uop_device_names(ctx, u, &names, &is_tuple) == 1 && !is_tuple ? names[0] : NULL;
 }
 
 PolyDevice poly_device_from_device_uop(PolyUOp *device) {
