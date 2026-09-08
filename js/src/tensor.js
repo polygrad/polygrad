@@ -768,6 +768,9 @@ function createBoundTensorClass(runtime) {
           this._coreCreate(currentUop.raw, POLY_TENSOR_VALUE, this._device)
         )
       }
+      if (optUop instanceof UOp && optUop._owner && optUop._owner.active) {
+        this._rootWrappers = { current: new WeakRef(optUop) }
+      }
       registerTensor(this)
     }
 
@@ -861,17 +864,34 @@ function createBoundTensorClass(runtime) {
       const raw = this._currentUopRaw()
       return raw ? ffi.poly_uop_buffer(this._ctx, raw) : null
     }
+    _wrapRoot(slot, raw) {
+      if (!raw) return null
+      // Match Tinygrad's stable Tensor.uop without retaining old graphs or
+      // interning independently disposable UOp owners. Only three slots live.
+      const cache = this._rootWrappers || (this._rootWrappers = {})
+      const key = uopKey(raw)
+      for (const ref of Object.values(cache)) {
+        const wrapper = ref.deref()
+        if (wrapper && wrapper.raw && wrapper.key === key) {
+          cache[slot] = ref
+          return wrapper
+        }
+      }
+      const wrapper = new UOp(this._ctx, this._rt._core.ffi, raw)
+      cache[slot] = new WeakRef(wrapper)
+      return wrapper
+    }
     get uop() {
       const raw = this._currentUopRaw()
-      return raw ? new UOp(this._ctx, this._rt._core.ffi, raw) : null
+      return this._wrapRoot('current', raw)
     }
     get uopLogical() {
       const raw = this._logicalUopRaw()
-      return raw ? new UOp(this._ctx, this._rt._core.ffi, raw) : null
+      return this._wrapRoot('logical', raw)
     }
     get uopPhysical() {
       const raw = this._physicalUopRaw()
-      return raw ? new UOp(this._ctx, this._rt._core.ffi, raw) : null
+      return this._wrapRoot('physical', raw)
     }
     get logicalPolicy() {
       return logicalPolicyName(ffi.poly_tensor_logical_policy(this._tensor))

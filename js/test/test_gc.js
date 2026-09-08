@@ -37,6 +37,18 @@ async function main() {
     assert.strictEqual(stats.memUsed, before.memUsed,
       'raw UOp finalizer left physical residency')
 
+    const liveTensor = pg.Tensor.empty([4])
+    const weakRoot = new WeakRef(liveTensor.uop)
+    // Do not dereference between GC turns: WeakRef.deref keeps its target
+    // alive until the end of that job. The Tensor must not own this wrapper.
+    await new Promise(resolve => setImmediate(resolve))
+    global.gc()
+    await new Promise(resolve => setImmediate(resolve))
+    assert.strictEqual(weakRoot.deref(), undefined,
+      'live Tensor accessor cache retained a UOp wrapper')
+    assert(liveTensor.uop.raw, 'Tensor lost its independently owned C root')
+    await liveTensor.dispose()
+
     await (async () => {
       const copyKernel = (out, src) => {
         out = out.flatten(); src = src.flatten()

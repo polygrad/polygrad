@@ -16,6 +16,46 @@ from polygrad.helpers import Context
 from polygrad.uop.ops import AxisType, KernelInfo, UOp, _dispose_uops_for_ctx
 
 
+def test_uop_accessors_preserve_live_wrapper_identity():
+    source = UOp.const(2.0).cast(dtypes.float32)
+    t = Tensor(source)
+    root = t.uop
+    assert root is source
+    assert t.uop is root
+    t.realize()
+    assert t.uop is root
+    assert t.uop_physical is root
+
+
+def test_uop_accessors_refresh_disposed_and_replaced_roots():
+    t = Tensor.empty(4, logical='always')
+    root = t.uop
+    root._dispose()
+    replacement = t.uop
+    assert replacement is not root and replacement.raw
+    t.copy_from(np.ones(4, dtype=np.float32))
+    t = (t + 1).contiguous()
+    t.preserve_logical()
+    before = t.uop
+    logical = t.uop_logical
+    t.realize()
+    after = t.uop
+    assert after is not before and after.raw != before.raw
+    assert t.uop is after
+    assert t.uop_logical is logical
+    assert before.raw  # The caller still owns the old graph.
+
+
+def test_uop_accessors_do_not_retain_wrappers():
+    t = Tensor.empty(4)
+    root = t.uop
+    ref = weakref.ref(root)
+    del root
+    gc.collect()
+    assert ref() is None
+    assert t.uop.raw
+
+
 def test_raw_seed_factory_configured_defaults():
     from polygrad import _default_ctx
 
@@ -319,7 +359,10 @@ print('leaving_live_instance')
     def test_runtime_dispose_retires_every_wrapper_for_the_same_uop(self):
         runtime = Runtime(device='cpu')
         tensor = runtime.Tensor.empty(4)
-        first, second = tensor.uop, tensor.uop
+        first = tensor.uop
+        # Explicit low-level owners remain independent even when Tensor
+        # accessors reuse a live wrapper for an unchanged root.
+        second = UOp(runtime._ctx, first.raw)
         assert first is not second and first.raw == second.raw
         try:
             _dispose_uops_for_ctx(runtime._ctx)

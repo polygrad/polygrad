@@ -819,6 +819,8 @@ class Tensor:
                 self._tensor = self._core_create(current_uop, _POLY_TENSOR_VALUE, self._device)
         self._grad = None
         self._is_param = True
+        if isinstance(_uop, UOp) and _uop._owned:
+            self._root_wrappers = {'current': weakref.ref(_uop)}
         all_tensors[weakref.ref(self)] = None
 
     def _replace_core_tensor(self, tensor):
@@ -934,26 +936,44 @@ class Tensor:
 
     # --- Properties ---
 
+    def _wrap_root(self, slot, raw):
+        if not raw:
+            return None
+        # Tinygrad keeps the same UOp object until a Tensor root changes.
+        # Cache only weak references in three fixed slots: accessor identity
+        # must not retain retired graphs or merge independent UOp owners.
+        cache = getattr(self, '_root_wrappers', None)
+        if cache is None:
+            self._root_wrappers = cache = {}
+        for ref in cache.values():
+            wrapper = ref()
+            if wrapper is not None and wrapper.ctx == self._ctx and _ptr_value(wrapper.raw) == _ptr_value(raw):
+                cache[slot] = ref
+                return wrapper
+        wrapper = _uop_wrap(self._ctx, raw)
+        cache[slot] = weakref.ref(wrapper)
+        return wrapper
+
     @property
     def uop(self):
         if self._ctx is None:
             raise RuntimeError('polygrad runtime has been disposed')
         raw = self._core_uop_raw(self._tensor)
-        return _uop_wrap(self._ctx, raw)
+        return self._wrap_root('current', raw)
 
     @property
     def uop_logical(self):
         if self._ctx is None:
             raise RuntimeError('polygrad runtime has been disposed')
         raw = self._core_uop_logical_raw(self._tensor)
-        return _uop_wrap(self._ctx, raw)
+        return self._wrap_root('logical', raw)
 
     @property
     def uop_physical(self):
         if self._ctx is None:
             raise RuntimeError('polygrad runtime has been disposed')
         raw = self._core_uop_physical_raw(self._tensor)
-        return _uop_wrap(self._ctx, raw)
+        return self._wrap_root('physical', raw)
 
     @property
     def logical_policy(self):

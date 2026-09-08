@@ -227,6 +227,34 @@ async function runTensorTests(pg, createRuntime) {
     }
   })
 
+  await test('UOp accessors preserve live wrapper identity', async () => {
+    const source = pg.uop.constant(2, 'float32')
+    const t = new Tensor(source)
+    const root = t.uop
+    assert(root === source, 'constructor must preserve its supplied live UOp')
+    assert(t.uop === root, 'unchanged root must reuse its live wrapper')
+    await t.realizeAsync()
+    assert(t.uop === root && t.uopPhysical === root)
+  })
+
+  await test('UOp accessors refresh disposed and replaced roots', async () => {
+    const t = Tensor.empty([4], { logical: 'always' })
+    const root = t.uop
+    await root.dispose()
+    const replacement = t.uop
+    assert(replacement !== root && replacement.raw)
+    t.copyFrom(new Float32Array([1, 1, 1, 1]))
+    const result = t.add(1).contiguous()
+    result.preserveLogical()
+    const before = result.uop
+    const logical = result.uopLogical
+    await result.realizeAsync()
+    const after = result.uop
+    assert(after !== before && after.key !== before.key)
+    assert(result.uop === after && result.uopLogical === logical)
+    assert(before.raw, 'caller still owns the old graph')
+  })
+
   await test('dtype API bound UOp constants retain their owner and type', async () => {
     for (const [value, dtype] of [[true,'bool'], [1,'int32'], [1.75,'float32']]) {
       const uop = pg.uop.constant(value, dtype)

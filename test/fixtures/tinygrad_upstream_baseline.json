@@ -323,14 +323,14 @@
       "expected": {
         "nonpassing_phases": {
           "call": {
-            "detail": "<polygrad>/references/.uv-python/cpython-3.11.12-linux-x86_64-gnu/lib/python3.11/unittest/case.py:LINE: AssertionError: UOp(0xADDR) is not UOp(0xADDR)",
+            "detail": "<reference>/test/backend/test_tensor.py:LINE: AttributeError: 'UOp' object has no attribute 'device'",
             "outcome": "failed"
           }
         },
         "status": "failed"
       },
-      "reason": "Factory now succeeds; assertIs rejects fresh Python wrappers. The separate unmasked-identity probe verifies unchanged C root identity. Review wrapper lifetime/identity, not codegen.",
-      "category": "wrapper-identity"
+      "reason": "Live Tensor root wrapper identity now passes, including no-op realization; the next assertion requires the missing UOp.device interface. This is still a failing upstream test, not a passing promotion.",
+      "category": "missing-uop-interface"
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_dropout": {
       "expected": {
