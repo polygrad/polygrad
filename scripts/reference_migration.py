@@ -15,6 +15,7 @@ import hashlib
 import json
 import re
 import subprocess
+import sys
 from collections import Counter
 from pathlib import Path
 
@@ -379,14 +380,15 @@ def manifest_hash(inputs: dict) -> str:
 
 
 def graph_corpus(root: Path) -> dict[str, str]:
-    # Read the literal catalogue without importing a frontend or running a case.
-    tree = ast.parse((root / "test/tensor_graph_cases.py").read_text())
-    for node in tree.body:
-        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "CASES" for t in node.targets):
-            if isinstance(node.value, ast.Dict):
-                return {ast.literal_eval(k): ast.literal_eval(v.elts[0])
-                        for k, v in zip(node.value.keys, node.value.values)}
-    raise ValueError("missing literal CASES catalogue")
+    # Share the runner's generated registrations. Isolated, site-free listing
+    # imports no frontend and constructs no graphs; a second AST evaluator would
+    # otherwise silently miss new registration forms.
+    root = root.resolve()
+    cases = json.loads(run(sys.executable, "-I", "-S", str(root / "test/tensor_graph_cases.py"), "--list", cwd=root))
+    if (not isinstance(cases, dict) or not cases or
+            any(not isinstance(k, str) or not k or not isinstance(v, str) or not v for k, v in cases.items())):
+        raise ValueError("invalid graph case catalogue")
+    return cases
 
 
 def release_errors(ledger: dict, report: dict, evidence: dict, register: dict, root: Path = ROOT) -> list[str]:
@@ -455,7 +457,7 @@ def release_errors(ledger: dict, report: dict, evidence: dict, register: dict, r
     try:
         if {name: case.get("stage") for name, case in cases.items()} != graph_corpus(root):
             errors.append("physical graph corpus: missing/extra cases or changed stages")
-    except (OSError, ValueError, SyntaxError, AttributeError) as exc:
+    except (OSError, ValueError, SyntaxError, AttributeError, subprocess.CalledProcessError) as exc:
         errors.append(f"physical graph corpus: cannot read catalogue: {exc}")
     if report.get("schema_version") != 1 or report.get("reference_commit") != ledger["target"]["commit"] or not cases:
         errors.append("physical graph: missing cases, stale reference or unsupported schema")

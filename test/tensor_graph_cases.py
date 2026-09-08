@@ -14,10 +14,15 @@ import json
 import math
 import os
 import re
+import sys
 
 
 ENGINE = os.environ.get("ENGINE", "tinygrad")
-if ENGINE == "tinygrad":
+if "--list" in sys.argv[1:]:
+    # Catalogue expansion uses ordinary Python registrations, not Tensor execution.
+    # Keep the strict audit usable without either frontend or a built C library.
+    pass
+elif ENGINE == "tinygrad":
     from tinygrad import Context, Tensor, dtypes, nn
     from tinygrad.nn.optim import Adam, AdamW, SGD
     from tinygrad.uop.ops import UOp
@@ -2467,8 +2472,12 @@ for _result in (False, True):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--case", action="append", choices=sorted(CASES))
+    parser.add_argument("--list", action="store_true", help="list case names/stages without loading an engine")
     args = parser.parse_args()
     selected = args.case or list(CASES)
+    if args.list:
+        print(json.dumps({name: CASES[name][0] for name in selected}, sort_keys=True))
+        return 0
 
     result = {"schema_version": 1, "engine": ENGINE, "cases": {}}
     for name in selected:
