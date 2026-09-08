@@ -604,10 +604,9 @@ TEST(codegen, linearize_deps) {
   PASS();
 }
 
-TEST(codegen, split_ends_excludes_ranges_already_closed_by_nested_end) {
-  /* Pinned tinygrad codegen/late/linearizer.py:88-90 queries
-   * SINK(*end.src[1:]).ranges. An inner END removes its RANGE from that
-   * active set, so the outer END disappears instead of closing it twice. */
+TEST(codegen, split_ends_preserves_nested_end_backedge) {
+  /* Pinned do_split_ends excludes void backedges from range collection,
+   * then reattaches them. An inner END is an effect, not a removable range. */
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(8));
   PolyUOp *range =
@@ -620,15 +619,14 @@ TEST(codegen, split_ends_excludes_ranges_already_closed_by_nested_end) {
   PolyUOp *outer = poly_uop(ctx, POLY_OP_END, POLY_VOID, outer_srcs, 2, poly_arg_none());
 
   PolyUOp *rewritten = poly_graph_rewrite(ctx, outer, poly_pm_split_ends());
-  ASSERT_TRUE(rewritten == outer_body);
+  ASSERT_PTR_EQ(rewritten, outer);
 
   poly_ctx_destroy(ctx);
   PASS();
 }
 
 TEST(codegen, split_ends_retains_ranges_still_active_in_dependency) {
-  /* The exclusion above is not a blanket END-subtree skip: an arithmetic
-   * dependency on RANGE keeps it active and rebuilds exactly END(body, r). */
+  /* An arithmetic dependency on RANGE rebuilds exactly END(body, r). */
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(8));
   PolyUOp *range =
@@ -647,6 +645,53 @@ TEST(codegen, split_ends_retains_ranges_still_active_in_dependency) {
   ASSERT_TRUE(rewritten->src[1] == range);
 
   poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, split_ends_preserves_predicate_and_effect_order) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *r0 = poly_range(ctx, 2, 0, POLY_AXIS_LOOP);
+  PolyUOp *r1 = poly_range(ctx, 3, 1, POLY_AXIS_LOOP);
+  PolyUOp *body = poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_none());
+  PolyUOp *predicate = poly_alu2(ctx, POLY_OP_CMPLT, r0, poly_const_int(ctx, 1));
+  PolyUOp *effect =
+      poly_uop1(ctx, POLY_OP_NOOP, POLY_VOID, poly_const_int(ctx, 7), poly_arg_none());
+  PolyUOp *pred_end = poly_uop2(ctx, POLY_OP_END, POLY_VOID, body, predicate, poly_arg_none());
+  ASSERT_PTR_EQ(poly_graph_rewrite(ctx, pred_end, poly_pm_split_ends()), pred_end);
+  PolyUOp *effect_end = poly_uop2(ctx, POLY_OP_END, POLY_VOID, body, effect, poly_arg_none());
+  ASSERT_PTR_EQ(poly_graph_rewrite(ctx, effect_end, poly_pm_split_ends()), effect_end);
+  PolyUOp *src[] = {body, r1, predicate, r0, effect};
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, src, 5, poly_arg_none());
+  PolyUOp *inner = poly_uop2(ctx, POLY_OP_END, POLY_VOID, body, r1, poly_arg_none());
+  inner = poly_uop2(ctx, POLY_OP_END, POLY_VOID, inner, r0, poly_arg_none());
+  PolyUOp *expected_src[] = {inner, predicate, effect};
+  PolyUOp *expected = poly_uop(ctx, POLY_OP_END, POLY_VOID, expected_src, 3, poly_arg_none());
+  ASSERT_PTR_EQ(poly_graph_rewrite(ctx, end, poly_pm_split_ends()), expected);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, split_ends_orders_full_range_arguments) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *bound = poly_const_int(ctx, 3);
+  int64_t high[] = {9}, low[] = {1, 0};
+  PolyUOp *rhigh = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_WEAKINT, bound, poly_arg_range_ex(7, POLY_AXIS_LOOP, high, 1)
+  );
+  PolyUOp *rlow = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_WEAKINT, bound, poly_arg_range_ex(7, POLY_AXIS_LOOP, low, 2)
+  );
+  PolyUOp *rshort = poly_range(ctx, 3, 7, POLY_AXIS_LOOP);
+  PolyUOp *body = poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_none());
+  PolyUOp *src[] = {body, rhigh, rlow, rshort};
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, src, 4, poly_arg_none());
+  PolyUOp *expected = poly_uop2(ctx, POLY_OP_END, POLY_VOID, body, rhigh, poly_arg_none());
+  expected = poly_uop2(ctx, POLY_OP_END, POLY_VOID, expected, rlow, poly_arg_none());
+  expected = poly_uop2(ctx, POLY_OP_END, POLY_VOID, expected, rshort, poly_arg_none());
+  PolyUOp *actual = poly_graph_rewrite(ctx, end, poly_pm_split_ends());
+  bool same = actual == expected;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(same);
   PASS();
 }
 
@@ -5081,6 +5126,60 @@ TEST(codegen, reduce_local_preserves_group_range_replacement_metadata) {
   }
   ASSERT_TRUE(direct_index_coordinate);
 
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, grouped_reduce_consumes_horizontal_axes_only_once) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *group = poly_range(ctx, 4, 7, POLY_AXIS_GROUP_REDUCE);
+  PolyUOp *x = poly_cast(ctx, group, POLY_FLOAT32);
+  PolyUOp *lanes[] = {
+      poly_alu2(ctx, POLY_OP_ADD, x, poly_const_float(ctx, 1)),
+      poly_alu2(ctx, POLY_OP_ADD, x, poly_const_float(ctx, 2))};
+  PolyUOp *stack = poly_uop_stack(ctx, lanes, 2);
+  PolyUOp *reduce_src[] = {stack, group};
+  PolyUOp *reduce =
+      poly_uop(ctx, POLY_OP_REDUCE, POLY_FLOAT32, reduce_src, 2, poly_arg_reduce(POLY_OP_ADD, 1));
+  PolyUOp *out = poly_test_program_param(ctx, POLY_FLOAT32, 1, 0);
+  PolyUOp *zero = poly_const_int(ctx, 0);
+  PolyUOp *idx = poly_uop_index(ctx, out, &zero, 1);
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx, reduce, poly_arg_none());
+  PolyUOp *sink = poly_test_kernel_sink(ctx, &store, 1, "horizontal_group");
+  PolyUOp *lowered = poly_apply_pm_reduce(ctx, sink);
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort_alloc(ctx, lowered, &n_topo);
+  ASSERT_NOT_NULL(topo);
+  int reductions = count_lin_ops(topo, n_topo, POLY_OP_REDUCE);
+  poly_toposort_free(topo);
+  ASSERT_INT_EQ(reductions, 0);
+  int n = 0;
+  PolyUOp **lin = poly_linearize_webgpu(ctx, sink, &n);
+  ASSERT_NOT_NULL(lin);
+  char *source = poly_render_wgsl(ctx, lin, n, "horizontal_group");
+  ASSERT_NOT_NULL(source);
+  ASSERT_NOT_NULL(strstr(source, "workgroupBarrier"));
+  free(source);
+#ifdef POLY_HAS_CUDA
+  if (poly_cuda_available()) {
+    source = poly_render_cuda(ctx, lin, n, "horizontal_group", 4);
+    ASSERT_NOT_NULL(source);
+    PolyCudaProgram *program = poly_compile_cuda(source, "horizontal_group");
+    ASSERT_NOT_NULL(program);
+    unsigned long long device = poly_cuda_alloc(sizeof(float));
+    ASSERT_TRUE(device != 0);
+    void *args[] = {&device};
+    ASSERT_INT_EQ(poly_cuda_launch(program, args, 1, 1, 1, 1, 4, 1, 1), 0);
+    ASSERT_INT_EQ(poly_cuda_sync(), 0);
+    float result = 0;
+    ASSERT_INT_EQ(poly_cuda_copy_dtoh(&result, device, sizeof(result)), 0);
+    poly_cuda_free(device);
+    poly_cuda_program_destroy(program);
+    free(source);
+    ASSERT_FLOAT_EQ(result, 24.0, 0.0);
+  }
+#endif
+  free(lin);
   poly_ctx_destroy(ctx);
   PASS();
 }

@@ -97,6 +97,22 @@ TEST(schedule_runtime, effect_sink_parameterizes_concrete_buffers) {
   PASS();
 }
 
+TEST(schedule_runtime, call_rejects_unused_out_of_range_program_globals) {
+  /* exec_kernel indexes resolved arguments for every global, including unused
+   * parameters absent from outs/ins. C rejects before indexing runtime arrays. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *buffer = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_CPU);
+  int slot = 1;
+  PolyProgramInfo info = {.name = "invalid_global", .globals = &slot, .n_globals = 1};
+  PolyUOp *program = poly_uop0(ctx, POLY_OP_PROGRAM, POLY_VOID, poly_arg_program_info(&info));
+  PolyUOp *call = poly_uop2(ctx, POLY_OP_CALL, POLY_VOID, program, buffer, poly_arg_none());
+  bool outs[1], ins[1];
+  int result = poly_call_get_outs_ins(ctx, call, outs, ins, 1);
+  poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(result, -1);
+  PASS();
+}
+
 TEST(schedule_runtime, compiler_sink_uses_kernel_info) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);

@@ -750,6 +750,10 @@ static int poly_call_apply_program_info(
     int n_args
 ) {
   if (!info || !outs || !ins || n_args < 0) return -1;
+  /* exec_kernel indexes all ProgramInfo.globals, not just read/write sets.
+   * Validate here before either direct execution or graph preparation. */
+  for (int i = 0; i < info->n_globals; i++)
+    if (info->globals[i] < 0 || info->globals[i] >= n_args) return -1;
   memset(outs, 0, (size_t)n_args * sizeof(bool));
   memset(ins, 0, (size_t)n_args * sizeof(bool));
   for (int i = 0; i < info->n_outs; i++) {

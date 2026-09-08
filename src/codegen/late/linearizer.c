@@ -601,11 +601,10 @@ static int arg_cmp(PolyArg a, PolyArg b, bool *unordered) {
     if (a.range.axis_id != b.range.axis_id) return a.range.axis_id < b.range.axis_id ? -1 : 1;
     if (a.range.axis_type != b.range.axis_type)
       return a.range.axis_type < b.range.axis_type ? -1 : 1;
-    if (a.range.n_extra != b.range.n_extra) return a.range.n_extra < b.range.n_extra ? -1 : 1;
-    for (int i = 0; i < a.range.n_extra; i++) {
+    for (int i = 0; i < a.range.n_extra && i < b.range.n_extra; i++) {
       if (a.range.extra[i] != b.range.extra[i]) return a.range.extra[i] < b.range.extra[i] ? -1 : 1;
     }
-    return 0;
+    return (a.range.n_extra > b.range.n_extra) - (a.range.n_extra < b.range.n_extra);
   case POLY_ARG_REDUCE:
     if (a.reduce.op != b.reduce.op) return a.reduce.op < b.reduce.op ? -1 : 1;
     return a.reduce.num_axes < b.reduce.num_axes ? -1
@@ -1071,12 +1070,11 @@ PolyUOp **poly_linearize(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
   if (n_out) *n_out = rlen;
   return result;
 }
-static int cmp_range_axis_id(const void *a, const void *b) {
+static int cmp_range_arg(const void *a, const void *b) {
   const PolyUOp *ra = *(const PolyUOp *const *)a;
   const PolyUOp *rb = *(const PolyUOp *const *)b;
-  int64_t ia = poly_range_axis_id(ra->arg);
-  int64_t ib = poly_range_axis_id(rb->arg);
-  return (ia > ib) - (ia < ib);
+  bool unordered = false;
+  return arg_cmp(ra->arg, rb->arg, &unordered);
 }
 
 /* Current Tinygrad 2026-08-22/a9069c177a9d
@@ -1095,33 +1093,46 @@ static PolyUOp *do_split_ends(PolyCtx *ctx, PolyUOp *end, const PolyBindings *b)
   }
   if (!needs_split && end->n_src <= 2) return NULL;
 
-  PolyUOp *range_sink =
-      poly_uop(ctx, POLY_OP_SINK, POLY_VOID, end->src + 1, end->n_src - 1, poly_arg_none());
+  /* do_split_ends keeps bool/void backedges outside the ended range set.
+   * A predicate may depend on a live range without ending that range. */
+  PolyUOp **srcs = malloc((size_t)end->n_src * sizeof(*srcs));
+  if (!srcs) return NULL;
+  int n_range_srcs = 0;
+  for (int i = 1; i < end->n_src; i++)
+    if (!poly_dtype_eq(end->src[i]->dtype, POLY_VOID) &&
+        !poly_dtype_eq(end->src[i]->dtype, POLY_BOOL))
+      srcs[n_range_srcs++] = end->src[i];
+  PolyUOp *range_sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, srcs, n_range_srcs, poly_arg_none());
   int n_topo = 0;
   PolyUOp **range_topo = poly_toposort_alloc(ctx, range_sink, &n_topo);
   if (!range_topo || n_topo <= 0) {
     free(range_topo);
+    free(srcs);
     return NULL;
   }
   PolyUOp **ranges = malloc((size_t)n_topo * sizeof(*ranges));
   if (!ranges) {
     free(range_topo);
+    free(srcs);
     return NULL;
   }
   int n_ranges = poly_uop_ranges(ctx, range_sink, ranges, n_topo);
   free(range_topo);
-  if (n_ranges == 0) {
-    free(ranges);
-    return end->src[0];
-  }
-
-  qsort(ranges, (size_t)n_ranges, sizeof(*ranges), cmp_range_axis_id);
+  qsort(ranges, (size_t)n_ranges, sizeof(*ranges), cmp_range_arg);
   PolyUOp *ret = end->src[0];
   for (int i = n_ranges - 1; i >= 0; i--) {
     PolyUOp *src[2] = {ret, ranges[i]};
     ret = poly_uop(ctx, POLY_OP_END, POLY_VOID, src, 2, poly_arg_none());
   }
   free(ranges);
+  int n_srcs = 1;
+  srcs[0] = ret;
+  for (int i = 1; i < end->n_src; i++)
+    if (poly_dtype_eq(end->src[i]->dtype, POLY_VOID) ||
+        poly_dtype_eq(end->src[i]->dtype, POLY_BOOL))
+      srcs[n_srcs++] = end->src[i];
+  if (ret && n_srcs > 1) ret = poly_uop(ctx, POLY_OP_END, POLY_VOID, srcs, n_srcs, poly_arg_none());
+  free(srcs);
   return ret;
 }
 

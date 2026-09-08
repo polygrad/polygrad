@@ -5273,7 +5273,9 @@ static PolyUOp *poly_fix_group_for_reduce(
   for (int i = 0; i < n_group; i++)
     final_src[i + 1] = reduce_loop[i];
   return poly_uop_tagged_arg(
-      ctx, red->op, red->dtype, final_src, n_group + 1, red->arg, red->tag, red->tag_arg
+      /* fix_group_for_reduce consumes horizontal axes in the partial reduction. */
+      ctx, red->op, red->dtype, final_src, n_group + 1, poly_arg_reduce(red->arg.reduce.op, 0),
+      red->tag, red->tag_arg
   );
 }
 
