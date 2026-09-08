@@ -2,7 +2,7 @@
  * Shared test suite for the polygrad Tensor class.
  * Target-agnostic: runs against WASM or native bindings.
  *
- * Usage: require this module and call runTensorTests(pg).
+ * Usage: require this module and call runTensorTests(pg, createRuntime).
  */
 
 'use strict'
@@ -62,7 +62,7 @@ function countGraphNodes(root) {
   return seen.size
 }
 
-async function runTensorTests(pg) {
+async function runTensorTests(pg, createRuntime) {
   const Tensor = pg.Tensor
   const caps = pg.caps || {}
   const testFilter = (() => {
@@ -78,6 +78,13 @@ async function runTensorTests(pg) {
   const supportsF16 = caps.f16 !== false
   const supportsF64 = caps.f64 !== false
   let passed = 0, failed = 0, skipped = 0
+
+  // Exact residency/owner counts must not include earlier tests' finalizers,
+  // which can run while an asynchronous disposal yields to the event loop.
+  const isolatedRuntime = fn => async () => {
+    const runtime = await createRuntime()
+    try { await fn(runtime) } finally { await runtime.dispose() }
+  }
 
   async function test(name, fn) {
     if (testFilter && !name.includes(testFilter)) return
@@ -391,18 +398,20 @@ async function runTensorTests(pg) {
     assertClose(await t.toArray(), [1, 2, 3])
   })
 
-  await test('Tensor dispose retires its exact core owner', async () => {
+  await test('Tensor dispose retires its exact core owner', isolatedRuntime(async pg => {
+    const Tensor = pg.Tensor
     const before = pg.stats().coreStats.tensorRecords
     const t = Tensor.empty([8], { dtype: 'float32' })
     assert(pg.stats().coreStats.tensorRecords === before + 1,
       'Tensor construction should add one core owner')
     await t.dispose()
     assert(pg.stats().coreStats.tensorRecords === before,
-      'Tensor dispose should retire its exact core owner')
+      `Tensor dispose should retire its exact core owner: before=${before}, after=${pg.stats().coreStats.tensorRecords}`)
     await t.dispose()
-  })
+  }))
 
-  await test('raw UOp owns residency after Tensor dispose', async () => {
+  await test('raw UOp owns residency after Tensor dispose', isolatedRuntime(async pg => {
+    const Tensor = pg.Tensor
     const before = pg.stats().coreStats
     const t = Tensor.empty([1024], { dtype: 'float32' })
     t.copyFrom(new Float32Array(1024))
@@ -412,15 +421,16 @@ async function runTensorTests(pg) {
     assert(stats.tensorRecords === before.tensorRecords,
       'raw UOp ownership should not retain the Tensor record')
     assert(stats.memUsed === before.memUsed + 4096,
-      'raw physical UOp should retain its storage')
+      `raw physical UOp should retain its storage: before=${before.memUsed}, after=${stats.memUsed}`)
     await uop.dispose()
     pg.collect()
     stats = pg.stats().coreStats
     assert(stats.memUsed === before.memUsed,
       'raw UOp dispose should retire its storage')
-  })
+  }))
 
-  await test('downstream core graph owns disposed input residency', async () => {
+  await test('downstream core graph owns disposed input residency', isolatedRuntime(async pg => {
+    const Tensor = pg.Tensor
     const before = pg.stats().coreStats
     const input = Tensor.empty([1024], { dtype: 'float32' })
     input.copyFrom(new Float32Array(1024))
@@ -440,7 +450,7 @@ async function runTensorTests(pg) {
     stats = pg.stats().coreStats
     assert(stats.memUsed === before.memUsed,
       'last downstream owner should retire output storage')
-  })
+  }))
 
   await test('array and TypedArray dtype inference matches tinygrad', async () => {
     assert(new Tensor([[1, 2], [3, 4]]).dtype === 'int32', 'nested integers should infer int32')

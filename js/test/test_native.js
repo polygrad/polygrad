@@ -85,7 +85,7 @@ async function main() {
   const pg = await polygrad.create({ core: 'native' })
   await runDiskCopy(pg)
   const syncResult = await runSyncContractTests(polygrad, pg, { core: 'native' })
-  const tensorResult = await runTensorTests(pg)
+  const tensorResult = await runTensorTests(pg, () => polygrad.create({ core: 'native', device: pg.device }))
   const instanceResult = await runModelRuntimeTests(pg)
   const jitResult = await runJitTests(pg)
   const optimResult = await runOptimTests(pg)

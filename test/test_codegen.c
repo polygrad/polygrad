@@ -1122,6 +1122,155 @@ TEST(codegen, exact_uint64_bigint_const_executes_like_tinygrad) {
   PASS();
 }
 
+#ifdef POLY_TESTING
+extern void poly_test_interp_alloc_fail_after(int count);
+
+TEST(codegen, interp_local_allocation_failure_is_not_success) {
+  PolyAddrSpace spaces[] = {POLY_ADDR_REG, POLY_ADDR_LOCAL};
+  for (int i = 0; i < 2; i++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyUOp *reg = poly_test_uop_param(ctx, POLY_INT32, 1, 0, spaces[i]);
+    PolyUOp *linear[] = {reg->src[0], reg};
+    /* Value table, two index-map arrays, then PythonProgram's bytearray. */
+    poly_test_interp_alloc_fail_after(3);
+    int rc = poly_interp_eval(ctx, linear, 2, NULL, 0);
+    poly_test_interp_alloc_fail_after(-1);
+    poly_ctx_destroy(ctx);
+    ASSERT_TRUE(rc < 0);
+  }
+  PASS();
+}
+
+TEST(codegen, interp_index_map_allocation_failure_is_clean) {
+  for (int fail = 1; fail <= 2; fail++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyUOp *one = poly_const_int(ctx, 1);
+    PolyUOp *linear[] = {one};
+    poly_test_interp_alloc_fail_after(fail);
+    int rc = poly_interp_eval(ctx, linear, 1, NULL, 0);
+    poly_test_interp_alloc_fail_after(-1);
+    poly_ctx_destroy(ctx);
+    ASSERT_TRUE(rc < 0);
+  }
+  PASS();
+}
+
+TEST(codegen, interp_local_allocation_byte_product_does_not_overflow_int) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *reg = poly_test_uop_param(ctx, POLY_FLOAT64, INT32_MAX, 0, POLY_ADDR_REG);
+  PolyUOp *linear[] = {reg->src[0], reg};
+  /* Reject the allocation without requesting gigabytes; byte sizing must
+   * reach the allocator without a signed intermediate multiplication. */
+  poly_test_interp_alloc_fail_after(3);
+  int rc = poly_interp_eval(ctx, linear, 2, NULL, 0);
+  poly_test_interp_alloc_fail_after(-1);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(rc < 0);
+  PASS();
+}
+
+TEST(codegen, interp_lane_arena_count_does_not_overflow_int) {
+  PolyCtx *ctx = poly_ctx_new();
+  int count = INT32_MAX / UINT16_MAX + 1;
+  PolyUOp **linear = malloc((size_t)(count + 1) * sizeof(*linear));
+  ASSERT_NOT_NULL(linear);
+  linear[0] = poly_const_int(ctx, UINT16_MAX);
+  for (int i = 0; i < count; i++)
+    linear[i + 1] = poly_test_uop_param(ctx, POLY_INT32, UINT16_MAX, i, POLY_ADDR_REG);
+  /* The value table fits; fail the oversized arena before requesting its
+   * storage. Each UOp and its lane count fit the current representation. */
+  poly_test_interp_alloc_fail_after(1);
+  int rc = poly_interp_eval(ctx, linear, count + 1, NULL, 0);
+  poly_test_interp_alloc_fail_after(-1);
+  free(linear);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(rc < 0);
+  PASS();
+}
+#endif
+
+TEST(codegen, interp_null_argument_table_is_rejected) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *out = poly_test_uop_param(ctx, POLY_INT32, 1, 0, POLY_ADDR_GLOBAL);
+  PolyUOp *linear[] = {out->src[0], out};
+  int rc = poly_interp_eval(ctx, linear, 2, NULL, 1);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(rc < 0);
+  PASS();
+}
+
+TEST(codegen, interp_image_store_rejects_active_invalid_coordinates) {
+  /* PythonProgram only masks STORE through IF. An invalid image address
+   * is a zero-valued LOAD, but is not a successful active STORE. */
+  for (int x = 0; x < 2; x++) {
+    for (int active = 0; active < 2; active++) {
+      PolyCtx *ctx = poly_ctx_new();
+      PolyUOp *one = poly_const_int(ctx, 1), *four = poly_const_int(ctx, 4);
+      PolyUOp *dims[] = {one, one, four};
+      PolyUOp *shape = poly_uop(ctx, POLY_OP_STACK, POLY_WEAKINT, dims, 3, poly_arg_none());
+      PolyParamArg arg = {.slot = 0, .dtype = POLY_FLOAT32, .addrspace = POLY_ADDR_GLOBAL};
+      PolyUOp *out = poly_uop1(ctx, POLY_OP_PARAM, POLY_FLOAT32, shape, poly_arg_param(&arg));
+      PolyUOp *y = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
+      PolyUOp *xx = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(x));
+      PolyUOp *index = poly_uop3(ctx, POLY_OP_INDEX, POLY_FLOAT32, out, y, xx, poly_arg_none());
+      PolyUOp *scalar = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(7));
+      PolyUOp *lanes[] = {scalar, scalar, scalar, scalar};
+      PolyUOp *value = poly_uop(ctx, POLY_OP_STACK, POLY_FLOAT32, lanes, 4, poly_arg_none());
+      PolyUOp *flag = poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_bool(active != 0));
+      PolyUOp *gate = poly_uop1(ctx, POLY_OP_IF, POLY_VOID, flag, poly_arg_none());
+      PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, index, value, poly_arg_none());
+      PolyUOp *end = poly_uop1(ctx, POLY_OP_ENDIF, POLY_VOID, gate, poly_arg_none());
+      PolyUOp *linear[] = {one,    four,  shape, out,  y,     xx, index,
+                           scalar, value, flag,  gate, store, end};
+      float data[] = {11, 11, 11, 11};
+      void *args[] = {data};
+      int rc = poly_interp_eval(ctx, linear, (int)(sizeof(linear) / sizeof(linear[0])), args, 1);
+      poly_ctx_destroy(ctx);
+      ASSERT_TRUE(x && active ? rc < 0 : rc == 0);
+      for (int i = 0; i < 4; i++)
+        ASSERT_FLOAT_EQ(data[i], !x && active ? 7 : 11, 0);
+    }
+  }
+  PASS();
+}
+
+TEST(codegen, interp_loop_local_storage_is_reclaimed) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *out = poly_test_uop_param(ctx, POLY_INT32, 1, 0, POLY_ADDR_GLOBAL);
+  PolyUOp *reg = poly_test_uop_param(ctx, POLY_INT32, 1, 0, POLY_ADDR_REG);
+  PolyUOp *three = poly_const_int(ctx, 3);
+  PolyUOp *loop =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, three, poly_arg_range(0, POLY_AXIS_LOOP));
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
+  PolyUOp *ri = poly_uop2(ctx, POLY_OP_INDEX, POLY_INT32, reg, zero, poly_arg_none());
+  PolyUOp *oi = poly_uop2(ctx, POLY_OP_INDEX, POLY_INT32, out, zero, poly_arg_none());
+  PolyUOp *value = poly_uop1(ctx, POLY_OP_CAST, POLY_INT32, loop, poly_arg_none());
+  PolyUOp *rs = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, ri, value, poly_arg_none());
+  PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_INT32, ri, poly_arg_none());
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, oi, load, poly_arg_none());
+  PolyUOp *end = poly_uop2(ctx, POLY_OP_END, POLY_VOID, store, loop, poly_arg_none());
+  PolyUOp *linear[] = {out->src[0], out,   three, loop, reg,   zero, ri,
+                       oi,          value, rs,    load, store, end};
+  int32_t result = -1;
+  void *args[] = {&result};
+  int rc = poly_interp_eval(ctx, linear, (int)(sizeof(linear) / sizeof(linear[0])), args, 1);
+  ASSERT_INT_EQ(rc, 0);
+  ASSERT_INT_EQ(result, 2);
+#ifdef POLY_TESTING
+  for (int fail = 4; fail <= 5; fail++) {
+    result = -1;
+    poly_test_interp_alloc_fail_after(fail);
+    rc = poly_interp_eval(ctx, linear, (int)(sizeof(linear) / sizeof(linear[0])), args, 1);
+    poly_test_interp_alloc_fail_after(-1);
+    ASSERT_TRUE(rc < 0);
+    ASSERT_INT_EQ(result, fail - 4);
+  }
+#endif
+  poly_ctx_destroy(ctx);
+  /* LSan must reclaim all three bytearrays, not just the last value-table row. */
+  PASS();
+}
+
 TEST(codegen, interp_if_masks_nested_stores_not_values) {
   /* PythonProgram keeps evaluating values under IF, but combines execution
    * masks for STORE. ENDIF restores the enclosing mask, not unconditional true. */

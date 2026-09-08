@@ -463,7 +463,9 @@ TEST(realize, tensor_to_device_stores_tinygrad_copy_device_graph) {
 TEST(realize, tensor_to_device_preserves_distinct_host_execution_target) {
   PolyCtx *ctx = poly_ctx_new();
 
-  PolyUOp *buf = poly_buffer_f32(ctx, 4);
+  /* The source DEVICE, not wrapper metadata or the test runner's default,
+   * determines whether Tensor.to needs a COPY. */
+  PolyUOp *buf = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_CPU);
   PolyTensor *cpu = physical_tensor_from_uop(ctx, buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
   PolyTensor *interp = poly_tensor_to_device(ctx, cpu, POLY_DEVICE_INTERP);
   ASSERT_NOT_NULL(cpu);

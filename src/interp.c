@@ -43,6 +43,24 @@
 #include <math.h>
 #include <limits.h>
 
+#ifdef POLY_TESTING
+static int test_interp_alloc_fail_after = -1;
+void poly_test_interp_alloc_fail_after(int count) {
+  test_interp_alloc_fail_after = count;
+}
+#endif
+
+static void *interp_calloc(size_t count, size_t size) {
+#ifdef POLY_TESTING
+  if (test_interp_alloc_fail_after == 0) {
+    test_interp_alloc_fail_after = -1;
+    return NULL;
+  }
+  if (test_interp_alloc_fail_after > 0) test_interp_alloc_fail_after--;
+#endif
+  return calloc(count, size);
+}
+
 static int64_t interp_floor_div_i64(int64_t a, int64_t b) {
   if (b == 0) return 0;
   if (a == INT64_MIN && b == -1) return INT64_MIN;
@@ -695,22 +713,28 @@ static InterpLane cast_lane(InterpLane src, PolyDType src_dt, PolyDType dst_dt) 
 typedef struct {
   PolyUOp **keys;
   int *vals;
-  int cap;
+  size_t cap;
 } UOpIndexMap;
 
 static UOpIndexMap uop_index_map_new(int n) {
-  int cap = n < 16 ? 16 : n * 2;
+  size_t cap = n < 16 ? 16 : (size_t)n * 2;
   UOpIndexMap m;
   m.cap = cap;
-  m.keys = calloc((size_t)cap, sizeof(PolyUOp *));
-  m.vals = calloc((size_t)cap, sizeof(int));
+  m.keys = interp_calloc((size_t)cap, sizeof(PolyUOp *));
+  m.vals = interp_calloc((size_t)cap, sizeof(int));
+  /* PythonProgram.uop_to_index either owns a complete dict or raises. */
+  if (!m.keys || !m.vals) {
+    free(m.keys);
+    free(m.vals);
+    return (UOpIndexMap){0};
+  }
   return m;
 }
 
 static void uop_index_map_set(UOpIndexMap *m, PolyUOp *key, int val) {
   uint64_t h = ((uint64_t)(uintptr_t)key * 0x9E3779B97F4A7C15ULL) >> 32;
-  for (int i = 0; i < m->cap; i++) {
-    int idx = (int)((h + (uint64_t)i) % (uint64_t)m->cap);
+  for (size_t i = 0; i < m->cap; i++) {
+    size_t idx = (h + i) % m->cap;
     if (!m->keys[idx]) {
       m->keys[idx] = key;
       m->vals[idx] = val;
@@ -725,8 +749,8 @@ static void uop_index_map_set(UOpIndexMap *m, PolyUOp *key, int val) {
 
 static int uop_index_map_get(const UOpIndexMap *m, PolyUOp *key) {
   uint64_t h = ((uint64_t)(uintptr_t)key * 0x9E3779B97F4A7C15ULL) >> 32;
-  for (int i = 0; i < m->cap; i++) {
-    int idx = (int)((h + (uint64_t)i) % (uint64_t)m->cap);
+  for (size_t i = 0; i < m->cap; i++) {
+    size_t idx = (h + i) % m->cap;
     if (!m->keys[idx]) return -1;
     if (m->keys[idx] == key) return m->vals[idx];
   }
@@ -825,6 +849,15 @@ static int interp_storage_lanes_for_def(PolyCtx *ctx, PolyUOp **lin, int n_lin, 
 
 /* Region interpreter */
 
+/* PythonProgram owns bytearrays through its value/memoryview references.
+ * Raw pointer lanes can still name an earlier loop-local BUFFER occurrence;
+ * C retains those allocations until this invocation ends, including errors.
+ * The header preserves calloc alignment without another allocation. */
+typedef union InterpStorage {
+  union InterpStorage *next;
+  max_align_t alignment;
+} InterpStorage;
+
 static int interp_region(
     PolyCtx *ctx,
     PolyUOp **lin,
@@ -837,7 +870,8 @@ static int interp_region(
     const int *param_arg_indices,
     const UOpIndexMap *idx_map,
     InterpLane *arena,
-    bool exec_mask
+    bool exec_mask,
+    InterpStorage **storage
 ) {
   for (int i = start; i < end; i++) {
     PolyUOp *u = lin[i];
@@ -897,7 +931,12 @@ static int interp_region(
         int sz = poly_dtype_itemsize(base);
         if (sz < 1) sz = 1;
         int cnt = interp_storage_lanes_for_def(ctx, lin, n_lin, u);
-        vals[i] = iv_scalar(il_ptr(calloc(1, (size_t)(sz * cnt))));
+        if ((size_t)cnt > (SIZE_MAX - sizeof(InterpStorage)) / (size_t)sz) return -1;
+        InterpStorage *block = interp_calloc(1, sizeof(*block) + (size_t)sz * (size_t)cnt);
+        if (!block) return -1;
+        block->next = *storage;
+        *storage = block;
+        vals[i] = iv_scalar(il_ptr(block + 1));
         iv_fixup(&vals[i]);
         break;
       }
@@ -916,7 +955,7 @@ static int interp_region(
         iv_fixup(&vals[i]);
         int rc = interp_region(
             ctx, lin, n_lin, i + 1, end_pos, vals, args, n_args, param_arg_indices, idx_map, arena,
-            exec_mask
+            exec_mask, storage
         );
         if (rc < 0) return rc;
       }
@@ -944,7 +983,7 @@ static int interp_region(
       bool active = exec_mask && as_int(iv_get(&vals[gate_i], 0), u->src[0]->dtype);
       int rc = interp_region(
           ctx, lin, n_lin, i + 1, end_pos, vals, args, n_args, param_arg_indices, idx_map, arena,
-          active
+          active, storage
       );
       if (rc < 0) return rc;
       i = end_pos;
@@ -1092,8 +1131,9 @@ static int interp_region(
       int scalar_size = poly_dtype_itemsize(store_dt);
       if (scalar_size < 1) scalar_size = 1;
       char *ptr = (char *)iv_get(&vals[src0], 0).p;
-      if (!ptr && u->src[0]->op == POLY_OP_INDEX && poly_uop_is_image_shape(ctx, u->src[0]->src[0]))
-        break;
+      /* PythonProgram rejects an active invalid image STORE; only IF masks
+       * effects. Do not turn missing storage into a successful no-op. */
+      if (!ptr) return -1;
       int cnt = vals[src1].count;
       for (int k = 0; k < cnt; k++)
         mem_store_scalar(ptr + k * scalar_size, iv_get(&vals[src1], k), store_dt);
@@ -1194,7 +1234,7 @@ static int interp_region(
 /* Public API */
 
 int poly_interp_eval(PolyCtx *ctx, PolyUOp **lin, int n_lin, void **args, int n_args) {
-  if (!ctx || !lin || n_lin <= 0) return -1;
+  if (!ctx || !lin || n_lin <= 0 || n_args < 0 || (n_args && !args)) return -1;
 
   if (poly_dump_kernels_enabled()) {
     fprintf(stderr, "=== INTERP KERNEL (%d ops) ===\n", n_lin);
@@ -1216,19 +1256,24 @@ int poly_interp_eval(PolyCtx *ctx, PolyUOp **lin, int n_lin, void **args, int n_
   }
 
   /* Pre-scan: count total vector lanes needed for arena allocation */
-  int total_vec_lanes = 0;
+  size_t total_vec_lanes = 0;
   for (int i = 0; i < n_lin; i++) {
     int cnt = interp_uop_lane_count(ctx, lin[i]);
-    if (cnt > 1) total_vec_lanes += cnt;
+    if (cnt > 1) {
+      if ((size_t)cnt > SIZE_MAX - total_vec_lanes) return -1;
+      total_vec_lanes += (size_t)cnt;
+    }
   }
 
-  InterpVal *vals = calloc((size_t)n_lin, sizeof(InterpVal));
+  InterpVal *vals = interp_calloc((size_t)n_lin, sizeof(InterpVal));
   if (!vals) return -1;
 
   /* Tinygrad 2026-08-22/a9069c177a9d PythonProgram consumes separate compact
    * PARAM queues (`pbufs`/`pvals`) in linear occurrence order; ProgramInfo
    * retains sparse slots only to select the caller's arguments. */
-  int *param_arg_indices = malloc((size_t)n_lin * sizeof(*param_arg_indices));
+  int *param_arg_indices = (size_t)n_lin <= SIZE_MAX / sizeof(int)
+                               ? malloc((size_t)n_lin * sizeof(*param_arg_indices))
+                               : NULL;
   if (!param_arg_indices) {
     free(vals);
     return -1;
@@ -1247,7 +1292,7 @@ int poly_interp_eval(PolyCtx *ctx, PolyUOp **lin, int n_lin, void **args, int n_
   /* Allocate lane arena: one contiguous block for all vector UOps */
   InterpLane *arena = NULL;
   if (total_vec_lanes > 0) {
-    arena = calloc((size_t)total_vec_lanes, sizeof(InterpLane));
+    arena = interp_calloc((size_t)total_vec_lanes, sizeof(InterpLane));
     if (!arena) {
       free(param_arg_indices);
       free(vals);
@@ -1256,7 +1301,7 @@ int poly_interp_eval(PolyCtx *ctx, PolyUOp **lin, int n_lin, void **args, int n_
   }
 
   /* Assign arena slices to vector UOps */
-  int arena_offset = 0;
+  size_t arena_offset = 0;
   for (int i = 0; i < n_lin; i++) {
     int cnt = interp_uop_lane_count(ctx, lin[i]);
     if (cnt > 1) {
@@ -1270,22 +1315,23 @@ int poly_interp_eval(PolyCtx *ctx, PolyUOp **lin, int n_lin, void **args, int n_
   }
 
   UOpIndexMap idx_map = uop_index_map_new(n_lin);
-  for (int i = 0; i < n_lin; i++)
-    uop_index_map_set(&idx_map, lin[i], i);
-
-  int ret = interp_region(
-      ctx, lin, n_lin, 0, n_lin, vals, args, n_args, param_arg_indices, &idx_map, arena, true
-  );
+  InterpStorage *storage = NULL;
+  int ret = -1;
+  if (idx_map.keys) {
+    for (int i = 0; i < n_lin; i++)
+      uop_index_map_set(&idx_map, lin[i], i);
+    ret = interp_region(
+        ctx, lin, n_lin, 0, n_lin, vals, args, n_args, param_arg_indices, &idx_map, arena, true,
+        &storage
+    );
+  }
 
   uop_index_map_free(&idx_map);
 
-  /* Free register/local accumulator allocations */
-  for (int i = 0; i < n_lin; i++) {
-    if (lin[i]->op == POLY_OP_BUFFER &&
-        (poly_program_memory_is(lin[i], POLY_ADDR_REG) ||
-         poly_program_memory_is(lin[i], POLY_ADDR_LOCAL)) &&
-        vals[i].lanes[0].p)
-      free(vals[i].lanes[0].p);
+  while (storage) {
+    InterpStorage *next = storage->next;
+    free(storage);
+    storage = next;
   }
 
   free(arena);

@@ -90,6 +90,48 @@ TEST(model, composition_invalid_cleanup) {
   PASS();
 }
 
+TEST(model, composition_shape_validation_returns_before_using_dimensions) {
+  /* Analyzer paths through def_error cannot continue as successful shape
+   * validation. Exercise the public contract, including omitted error output. */
+  const char *shapes[] = {
+      "null", "{}", "[0]", "[-1]", "[1.5]", "[\"2\"]", "[1,1,1,1,1,1,1,1,1]", "[16777216,2]"};
+  PolyCtx *ctx = poly_ctx_new();
+  for (int graph = 0; graph < 2; graph++) {
+    for (int i = 0; i < (int)(sizeof(shapes) / sizeof(shapes[0])); i++) {
+      char json[512];
+      if (graph)
+        snprintf(
+            json, sizeof(json),
+            "{\"inputs\":{\"x\":{\"shape\":%s,\"dtype\":\"float32\"}},"
+            "\"nodes\":[],\"outputs\":{\"y\":\"x\"}}",
+            shapes[i]
+        );
+      else
+        snprintf(
+            json, sizeof(json),
+            "{\"input\":{\"name\":\"x\",\"shape\":%s,\"dtype\":\"float32\"},"
+            "\"layers\":[{\"name\":\"id\",\"type\":\"identity\"}],\"output\":\"y\"}",
+            shapes[i]
+        );
+      PolyModelError err = {0};
+      PolyModel *model = graph ? poly_graph_from_json(ctx, json, (int)strlen(json), &err)
+                               : poly_sequential_from_json(ctx, json, (int)strlen(json), &err);
+      ASSERT_TRUE(model == NULL);
+      ASSERT_TRUE(err.code != 0 && err.message[0]);
+      model = graph ? poly_graph_from_json(ctx, json, (int)strlen(json), NULL)
+                    : poly_sequential_from_json(ctx, json, (int)strlen(json), NULL);
+      ASSERT_TRUE(model == NULL);
+      ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+      PolyCtxStats stats = {0};
+      ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
+      ASSERT_INT_EQ(stats.tensor_records, 0);
+      ASSERT_INT_EQ(stats.mem_used, 0);
+    }
+  }
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(model, definition_shared_graph) {
   const char *json =
       "{\"format\":\"poly.modeldef@1\",\"type\":\"graph\","
