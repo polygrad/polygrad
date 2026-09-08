@@ -26,11 +26,30 @@ static bool rank_tuple_valid(const void *data, int n) {
 
 static bool axis_expr_equal(PolyUOp *a, PolyUOp *b);
 
+#ifdef POLY_TESTING
+static int test_shape_alloc_fail_after = -1;
+void poly_test_shape_alloc_fail_after(int count) {
+  test_shape_alloc_fail_after = count;
+}
+#endif
+
+static void *shape_alloc(size_t size) {
+#ifdef POLY_TESTING
+  if (test_shape_alloc_fail_after == 0) {
+    test_shape_alloc_fail_after = -1;
+    return NULL;
+  }
+  if (test_shape_alloc_fail_after > 0) test_shape_alloc_fail_after--;
+#endif
+  return malloc(size);
+}
+
 /* Heap-allocate a shape with copied dims */
 static PolyShape heap_shape(int64_t *dims, int ndim) {
   if (ndim < 0) return POLY_SHAPE_NONE;
   if (ndim == 0) return (PolyShape){NULL, 0};
-  int64_t *copy = malloc(ndim * sizeof(int64_t));
+  int64_t *copy = shape_alloc(ndim * sizeof(int64_t));
+  if (!copy) return POLY_SHAPE_NONE;
   memcpy(copy, dims, ndim * sizeof(int64_t));
   return (PolyShape){copy, ndim};
 }
@@ -50,13 +69,11 @@ PolyMap *poly_ctx_shape_cache(PolyCtx *ctx); /* defined in uop/ops.c */
 /* Public lazy accessors */
 
 int poly_uop_ndim(PolyCtx *ctx, const PolyUOp *u) {
-  if (!u) return -1;
-  return ensure_shape(ctx, (PolyUOp *)u)->ndim;
+  return poly_uop_max_shape_cached(ctx, u).ndim;
 }
 
 const int64_t *poly_uop_max_shape_dims(PolyCtx *ctx, const PolyUOp *u) {
-  if (!u) return NULL;
-  return ensure_shape(ctx, (PolyUOp *)u)->dims;
+  return poly_uop_max_shape_cached(ctx, u).dims;
 }
 
 PolyUOp *poly_uop_shape_dim(PolyCtx *ctx, const PolyUOp *u, int dim) {
@@ -379,9 +396,9 @@ static PolyUOp *exact_shape_product(
 }
 
 PolyShape poly_uop_max_shape_cached(PolyCtx *ctx, const PolyUOp *u) {
-  if (!u) return POLY_SHAPE_NONE;
+  if (!ctx || !u) return POLY_SHAPE_NONE;
   ShapeCacheEntry *e = ensure_shape(ctx, (PolyUOp *)u);
-  return (PolyShape){e->dims, e->ndim};
+  return e ? (PolyShape){e->dims, e->ndim} : POLY_SHAPE_NONE;
 }
 
 /* Public API */
@@ -433,7 +450,7 @@ PolyShape poly_uop_max_shape(PolyCtx *ctx, PolyUOp *u) {
 
 static ShapeCacheEntry *make_entry_none(PolyCtx *ctx) {
   (void)ctx;
-  ShapeCacheEntry *e = malloc(sizeof(*e));
+  ShapeCacheEntry *e = shape_alloc(sizeof(*e));
   if (!e) return NULL;
   e->ndim = -1;
   e->dims = NULL;
@@ -443,7 +460,7 @@ static ShapeCacheEntry *make_entry_none(PolyCtx *ctx) {
 
 static ShapeCacheEntry *make_entry_scalar(PolyCtx *ctx) {
   (void)ctx;
-  ShapeCacheEntry *e = malloc(sizeof(*e));
+  ShapeCacheEntry *e = shape_alloc(sizeof(*e));
   if (!e) return NULL;
   e->ndim = 0;
   e->dims = NULL;
@@ -464,12 +481,12 @@ static ShapeCacheEntry *make_entry_dims_uops(
     int ndim
 ) {
   if (ndim < 0 || ndim > POLY_MAX_DIMS || (ndim > 0 && !dims)) return make_entry_none(ctx);
-  ShapeCacheEntry *e = malloc(sizeof(*e));
+  ShapeCacheEntry *e = shape_alloc(sizeof(*e));
   if (!e) return NULL;
   e->ndim = (int8_t)ndim;
   if (ndim > 0) {
-    e->dims = malloc((size_t)ndim * sizeof(*e->dims));
-    e->dim_uops = malloc((size_t)ndim * sizeof(*e->dim_uops));
+    e->dims = shape_alloc((size_t)ndim * sizeof(*e->dims));
+    e->dim_uops = shape_alloc((size_t)ndim * sizeof(*e->dim_uops));
     if (!e->dims || !e->dim_uops) {
       free(e->dims);
       free(e->dim_uops);
@@ -477,8 +494,15 @@ static ShapeCacheEntry *make_entry_dims_uops(
       return NULL;
     }
     memcpy(e->dims, dims, ndim * sizeof(int64_t));
-    for (int i = 0; i < ndim; i++)
+    for (int i = 0; i < ndim; i++) {
       e->dim_uops[i] = dim_uops && dim_uops[i] ? dim_uops[i] : shape_dim_const(ctx, dims[i]);
+      if (!e->dim_uops[i]) {
+        free(e->dims);
+        free(e->dim_uops);
+        free(e);
+        return NULL;
+      }
+    }
   } else {
     e->dims = NULL;
     e->dim_uops = NULL;
@@ -780,24 +804,24 @@ static ShapeCacheEntry *ensure_shape(PolyCtx *ctx, PolyUOp *u) {
   PolyMap *cache = poly_ctx_shape_cache(ctx);
   if (!topo) {
     poly_ctx_scratch_rewind(ctx, scratch);
-    ShapeCacheEntry *entry = make_entry_none(ctx);
-    poly_map_set(cache, poly_ptr_hash(u), u, entry, poly_ptr_eq);
-    return entry;
+    return NULL;
   }
 
   for (int i = 0; i < n_topo; i++) {
     PolyUOp *cur = topo[i];
     if (shape_cache_lookup(ctx, cur)) continue;
     ShapeCacheEntry *entry = compute_and_cache(ctx, cur);
+    /* Like UOp._shape, cache a computed value, not a failed computation.
+     * Completed dependencies remain reusable; never let a parent consume a
+     * missing child row as proof that the child has no shape. */
+    if (!entry) {
+      poly_ctx_scratch_rewind(ctx, scratch);
+      return NULL;
+    }
     poly_map_set(cache, poly_ptr_hash(cur), cur, entry, poly_ptr_eq);
   }
 
   cached = shape_cache_lookup(ctx, u);
-  if (!cached) {
-    ShapeCacheEntry *entry = make_entry_none(ctx);
-    poly_map_set(cache, poly_ptr_hash(u), u, entry, poly_ptr_eq);
-    cached = entry;
-  }
   poly_ctx_scratch_rewind(ctx, scratch);
   return cached;
 }

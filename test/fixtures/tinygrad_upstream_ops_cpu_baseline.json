@@ -24,7 +24,7 @@
     "failure_signature": "source-path-and-message-v2",
     "python": "3.11.12 (main, Apr  9 2025, 04:04:00) [Clang 20.1.0 ]",
     "reference_commit": "a9069c177a9da9cca18593edf55acd2e6073cca6",
-    "runner_sha256": "370b948ea67c32827df73e36ab98dc3555a4f01497c5eabe13ce073c39e8de5b",
+    "runner_sha256": "335b5b4879ca1f9e1828002826e1a810d1ea3429d23937a799bcec43a484c4d8",
     "test_sha256": {
       "test/backend/test_ops.py": "b0b8f94a538c555d3ecc094cc7d001de157805b340671b5efa845d54e0cefaf1"
     },
@@ -45,8 +45,8 @@
     ]
   },
   "evidence": {
-    "report": "temp/dtype-admission-20260907.bEASBx/ops-final/report.json",
-    "sha256": "1e55dbaeaf2c30e347a92de4e806e7a6e4a51fa9a16d9cd23c9cfcbc0d7d8567"
+    "report": "temp/dtype-storage-20260907.yV8xhK/ops-resumed/report.json",
+    "sha256": "bb86d29cf618823737d5c52e3d637f7a9daf54a74adf8d8347e0dc8f5317b3de"
   },
   "schema_version": 1,
   "tests": {

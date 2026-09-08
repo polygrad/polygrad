@@ -1619,6 +1619,19 @@ static napi_value napi_poly_tensor_assign(napi_env env, napi_callback_info info)
   return make_external(env, poly_tensor_assign(ctx, target, value));
 }
 
+static napi_value napi_poly_tensor_to_device_name(napi_env env, napi_callback_info info) {
+  napi_value argv[3];
+  size_t argc = 3;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  PolyTensor *tensor = get_external(env, argv[1]);
+  char *device = read_utf8_arg(env, argv[2], NULL);
+  if (!device) return NULL;
+  PolyTensor *out = poly_tensor_to_device_name(ctx, tensor, device);
+  free(device);
+  return make_external(env, out);
+}
+
 static napi_value napi_poly_tensor_alu1(napi_env env, napi_callback_info info) {
   napi_value argv[3];
   size_t argc = 3;
@@ -6521,6 +6534,7 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_tensor_create_result_like", napi_poly_tensor_create_result_like),
       DECLARE_NAPI_METHOD("poly_tensor_replace_roots", napi_poly_tensor_replace_roots),
       DECLARE_NAPI_METHOD("poly_tensor_to_device", napi_poly_tensor_to_device),
+      DECLARE_NAPI_METHOD("poly_tensor_to_device_name", napi_poly_tensor_to_device_name),
       DECLARE_NAPI_METHOD("poly_tensor_assign", napi_poly_tensor_assign),
       DECLARE_NAPI_METHOD("poly_tensor_alu1", napi_poly_tensor_alu1),
       DECLARE_NAPI_METHOD("poly_tensor_alu2", napi_poly_tensor_alu2),

@@ -917,6 +917,7 @@ int poly_tensor_replace_roots(
     PolyDevice device
 );
 PolyTensor *poly_tensor_to_device(PolyCtx *ctx, PolyTensor *tensor, PolyDevice device);
+PolyTensor *poly_tensor_to_device_name(PolyCtx *ctx, PolyTensor *tensor, const char *device);
 PolyTensor *poly_tensor_assign(PolyCtx *ctx, PolyTensor *target, PolyTensor *value);
 PolyTensor *poly_tensor_clone_into(PolyCtx *ctx, PolyTensor *target, PolyTensor *source);
 PolyTensor *poly_tensor_clone(PolyCtx *ctx, PolyTensor *source, PolyDevice device);

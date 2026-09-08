@@ -2405,14 +2405,63 @@ def configured_dtype_graph(kind, float_dtype, int_dtype):
         elif kind == 'interpolate': out = x.cast('float32').reshape(1, 1, 3).interpolate((5,), mode='nearest')
         elif kind == 'interpolate_linear': out = x.cast('float32').reshape(1, 1, 3).interpolate((5,), mode='linear')
         elif kind == 'linspace_one': out = Tensor.linspace(0.1, 1, 1, dtype='float64')
+        elif kind == 'indexed_write':
+            return indexed_owner_graph('write_strided')
+        elif kind.startswith('qr_'):
+            matrix = Tensor.empty(2, 2, dtype='int32' if '_int_' in kind else
+                                  'float16' if '_half_' in kind else 'float32', device='CPU').realize()
+            q, r = matrix.qr()
+            return {'physical': (q if kind.endswith('_q') else r).uop}
+        elif kind in ('gather_raw', 'cross_entropy_raw', 'mean_raw'):
+            table = Tensor.empty(3, 2, dtype='float16', device='CPU').realize()
+            idx = Tensor.empty(3, dtype='int32', device='CPU').realize()
+            if ENGINE == 'polygrad':
+                from polygrad.uop.ops import UOp
+                raw = (_ffi._lib.poly_mean_reduce(table._ctx, table.uop.raw, 1, 0) if kind == 'mean_raw' else
+                       _ffi._lib.poly_gather(table._ctx, table.uop.raw, idx.uop.raw)
+                       if kind == 'gather_raw' else
+                       _ffi._lib.poly_cross_entropy(table._ctx, table.uop.raw, idx.uop.raw, 1))
+                if not raw: raise RuntimeError(f'{kind} returned NULL')
+                return {'physical': UOp(table._ctx, raw)}
+            if kind == 'mean_raw': out = table.mean(1)
+            elif kind == 'gather_raw':
+                from tinygrad.nn import _embedding_fwd
+                out = _embedding_fwd(table, idx)
+            else: out = table.cross_entropy(idx)
+            return {'physical': out.uop}
         else: raise ValueError(kind)
         return {'physical': out.uop, 'logical': logical(out)}
 
 
 for _float, _int in [('float16', 'int16'), ('float64', 'int64')]:
     for _kind in ('exp', 'log2', 'div', 'cos', 'range', 'linspace', 'eye', 'one_hot', 'mean', 'full', 'clone',
-                  'sort', 'sort_one', 'argmax', 'cummax', 'tri', 'pool', 'interpolate', 'interpolate_linear', 'linspace_one'):
+                  'sort', 'sort_one', 'argmax', 'cummax', 'tri', 'pool', 'interpolate', 'interpolate_linear', 'linspace_one',
+                  'indexed_write', 'gather_raw', 'cross_entropy_raw', 'mean_raw', 'qr_float_q', 'qr_float_r',
+                  'qr_half_q', 'qr_half_r', 'qr_int_q', 'qr_int_r'):
         CASES[f'default_dtype_{_float}_{_kind}'] = ('tensor', lambda k=_kind, f=_float, i=_int: configured_dtype_graph(k, f, i))
+
+
+def disk_copy_callify_graph(result):
+    source = Tensor.empty(3, dtype='float32', device='CPU').realize()
+    copied = source.to('DISK:temp/polygrad-callify-graph-only.bin')
+    if ENGINE == 'tinygrad':
+        from tinygrad.tensor import transform_to_call
+        call, replacements = transform_to_call(UOp.sink(copied.uop))
+        output = replacements[copied.uop]
+    else:
+        from polygrad.uop.ops import UOp as PGUOp
+        fn = _ffi._lib.poly_transform_to_call
+        fn.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p), ctypes.c_int, ctypes.POINTER(ctypes.c_void_p)]
+        fn.restype = ctypes.c_void_p
+        outputs = (ctypes.c_void_p * 1)()
+        raw = fn(source._ctx, (ctypes.c_void_p * 1)(copied.uop.raw), 1, outputs)
+        if not raw or not outputs[0]: raise RuntimeError('DISK callify returned NULL')
+        call, output = PGUOp(source._ctx, raw), PGUOp(source._ctx, outputs[0])
+    return {'physical': output if result else call}
+
+
+for _result in (False, True):
+    CASES[f'disk_copy_callify_{"output" if _result else "effect"}'] = ('callify', lambda r=_result: disk_copy_callify_graph(r))
 
 
 def main():

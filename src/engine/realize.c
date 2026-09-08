@@ -782,7 +782,8 @@ static PolyUOp *poly_transform_to_call_wrap_call(PolyCtx *ctx, PolyUOp *sink) {
   for (int i = 0; i < n_ordered; i++)
     src[1 + i] = ordered[i];
 
-  PolyUOp *call = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, src, n_src, poly_arg_none());
+  PolyCallInfo info = {0};
+  PolyUOp *call = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, src, n_src, poly_arg_call_info(&info));
   if (ordered != ordered_stack) free(ordered);
   free(src);
   return call;
@@ -887,7 +888,7 @@ static PolyUOp *poly_callify_rebuild_with_tag_ids(
     int64_t *ids,
     int n_ids
 ) {
-  if (!ctx || !prototype || !ids || n_ids <= 0) return NULL;
+  if (!ctx || !prototype || n_ids < 0 || (n_ids > 0 && !ids)) return NULL;
   return poly_uop_tagged_arg(
       ctx, prototype->op, prototype->dtype, src ? src : prototype->src, prototype->n_src,
       prototype->arg, POLY_CALLIFY_TAG_MARKER, poly_callify_tag_arg(ids, n_ids)
@@ -1015,8 +1016,17 @@ static PolyUOp *poly_transform_to_call_add_tags(
   if (new_src != src_buf) free(new_src);
   if (!ret) return NULL;
 
-  /* Pinned callify.py:19-25 tags copies from creation devices. */
-  if (ret->op == POLY_OP_COPY && poly_callify_copy_from_creation(ret)) {
+  /* tensor.py:disk_copy_is_buffer publishes an independent file BUFFER;
+   * the COPY remains an effect, with an empty tag to prevent materialization
+   * as a compute kernel. The allocator makes both identities see the file. */
+  if (ret->op == POLY_OP_COPY && poly_uop_device(ret) == POLY_DEVICE_DISK && ret->tag == 0) {
+    PolyUOp *buffer = poly_transform_to_call_empty_buffer_like(
+        ctx, tctx, ret->dtype, poly_uop_max_shape_cached(ctx, ret), ret
+    );
+    if (!buffer || !poly_transform_to_call_cache_replacement(tctx, u, buffer)) return NULL;
+    ret = poly_callify_rebuild_with_tag_ids(ctx, ret, NULL, NULL, 0);
+    if (!ret) return NULL;
+  } else if (ret->op == POLY_OP_COPY && poly_callify_copy_from_creation(ret)) {
     ret = poly_callify_tag_uop(ctx, tctx, u, ret);
     if (!ret) return NULL;
   }
@@ -1118,6 +1128,12 @@ static PolyUOp *poly_transform_to_call_finalize_tags(
     ret = poly_callify_rebuild_without_tag(ctx, ret, NULL);
     if (!ret) return NULL;
   }
+
+  /* pm_finalize_call retains COPY-to-DISK even without STORE/AFTER. Store
+   * the input occurrence until the shared finalize map is applied below. */
+  if (ret->op == POLY_OP_COPY && poly_uop_device(ret) == POLY_DEVICE_DISK &&
+      !poly_transform_to_call_append_store(tctx, u))
+    return NULL;
 
   poly_map_set(memo, poly_ptr_hash(u), u, ret, poly_ptr_eq);
   return ret;
@@ -1901,6 +1917,12 @@ PolyUOp *poly_transform_to_call_with_map(
     }
     if (poly_uop_has_buffer_identity(u)) {
       out_uops[i] = u;
+      continue;
+    }
+
+    if (uops[i]->op == POLY_OP_COPY && poly_uop_device(uops[i]) == POLY_DEVICE_DISK) {
+      out_uops[i] = poly_transform_to_call_cached_replacement(&tctx, uops[i]);
+      if (!out_uops[i]) return poly_transform_to_call_fail(&tctx, out_uops, n);
       continue;
     }
 

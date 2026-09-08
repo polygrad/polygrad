@@ -211,9 +211,39 @@ static PolyUOp *poly_buffer_device_uop(PolyCtx *ctx, PolyUOp *buf, PolyDevice ba
 }
 
 static void *disk_alloc(size_t nbytes, void *dev_ctx) {
+  /* DiskAllocator._alloc/_might_open: the full DEVICE identity supplies the
+   * path. Shared mappings preserve aliases across independently owned buffers;
+   * growing a file never truncates existing trailing data. */
+#ifndef __EMSCRIPTEN__
+  const PolyUOp *device = dev_ctx;
+  if (!device || device->arg.kind != POLY_ARG_STRING || !device->arg.str ||
+      strlen(device->arg.str) <= 5 || nbytes == 0 || nbytes > INT64_MAX)
+    return NULL;
+  int fd = open(device->arg.str + 5, O_RDWR | O_CREAT, 0600);
+  if (fd < 0) return NULL;
+  struct stat st;
+  if (fstat(fd, &st) != 0 || st.st_size < 0 ||
+      (S_ISREG(st.st_mode) && (uint64_t)st.st_size < nbytes && ftruncate(fd, (off_t)nbytes) != 0)) {
+    close(fd);
+    return NULL;
+  }
+  void *ptr = mmap(NULL, nbytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  close(fd);
+  return ptr == MAP_FAILED ? NULL : ptr;
+#else
   (void)nbytes;
   (void)dev_ctx;
   return NULL;
+#endif
+}
+
+static void *buffer_allocate_storage(
+    const PolyAllocator *allocator,
+    PolyUOp *device,
+    size_t nbytes
+) {
+  if (!allocator || !allocator->alloc) return NULL;
+  return allocator->alloc(nbytes, allocator->alloc == disk_alloc ? device : allocator->dev_ctx);
 }
 
 static void disk_free_alloc(const PolyBuffer *buffer, void *dev_ctx) {
@@ -613,8 +643,11 @@ int poly_buffer_handle_ensure_allocated(PolyCtx *ctx, PolyBuffer *buffer) {
 
   if (!buffer->ptr) {
     if (buffer->nbytes == 0) return -1;
-    buffer->ptr = buffer->allocator->alloc(buffer->nbytes, buffer->allocator->dev_ctx);
+    buffer->ptr = buffer_allocate_storage(buffer->allocator, buffer->device_uop, buffer->nbytes);
     if (!buffer->ptr) return -1;
+    /* DISK storage is the mapped file itself, including writes performed
+     * through another BUFFER identity for this same path. */
+    if (buffer->device == POLY_DEVICE_DISK) buffer->valid = true;
     buffer->owned = true;
     buffer->memory_accounted = true;
     buffer->memory_device = buffer->device;
@@ -718,6 +751,9 @@ static bool contiguous_view_shape_numel(PolyShape shape, uint64_t *out) {
       return false;
     numel *= (uint64_t)shape.dims[d];
   }
+  /* UOp.contiguous_view does not match an empty movement graph. In
+   * particular, its zero strides cannot define a storage-view offset. */
+  if (numel == 0) return false;
   *out = numel;
   return true;
 }
@@ -822,28 +858,27 @@ bool poly_uop_contiguous_view_info(
         break;
       }
       uint64_t selected_length = (uint64_t)(end - begin);
-      if ((uint64_t)begin > UINT64_MAX / stride || start > UINT64_MAX - (uint64_t)begin * stride) {
+      uint64_t offset;
+      if (__builtin_mul_overflow((uint64_t)begin, stride, &offset) ||
+          __builtin_add_overflow(start, offset, &start)) {
         ok = false;
         break;
       }
-      start += (uint64_t)begin * stride;
       if (selected_length == 0) {
         empty = true;
       } else {
         uint64_t tail = (uint64_t)(end - 1);
-        if (tail > UINT64_MAX / stride || last > UINT64_MAX - tail * stride ||
-            selected > UINT64_MAX / selected_length) {
+        if (__builtin_mul_overflow(tail, stride, &offset) ||
+            __builtin_add_overflow(last, offset, &last) ||
+            __builtin_mul_overflow(selected, selected_length, &selected)) {
           ok = false;
           break;
         }
-        last += tail * stride;
-        selected *= selected_length;
       }
-      if ((uint64_t)dim != 0 && stride > UINT64_MAX / (uint64_t)dim) {
+      if (__builtin_mul_overflow(stride, (uint64_t)dim, &stride)) {
         ok = false;
         break;
       }
-      stride *= (uint64_t)dim;
     }
     if (!ok || (!empty && (last < start || last - start + 1 != selected)) ||
         element_offset > UINT64_MAX - start) {
@@ -1177,6 +1212,9 @@ int poly_buffer_copy(PolyBuffer *dst, const PolyBuffer *src) {
   } else if (src_host_addressable && dst_alloc->copy_in) {
     rc = dst_alloc->copy_in(dst, src, nbytes, dst_alloc->dev_ctx);
   } else {
+    /* Allocator's missing transfer operations fail before staging or writes
+     * (tinygrad device.py:_copyin/_copyout raise NotImplementedError). */
+    if (!src_alloc->copy_out || !dst_alloc->copy_in) return -1;
     void *tmp = malloc(nbytes);
     if (!tmp) return -1;
     PolyBuffer tmp_view = poly_buffer_make_host_view(tmp, nbytes);
@@ -1225,7 +1263,7 @@ static int poly_buffer_alloc_residency(
   const PolyAllocator *alloc = be->get_allocator();
   if (!alloc) return -1;
   if (poly_ctx_collect_before_allocation(ctx, buf) != 0) return -1;
-  void *ptr = alloc->alloc(nbytes, alloc->dev_ctx);
+  void *ptr = buffer_allocate_storage(alloc, poly_buffer_device_uop(ctx, buf, device), nbytes);
   if (!ptr) {
     fprintf(stderr, "poly_buffer_allocate: alloc(%zu) failed\n", nbytes);
     return -1;
@@ -1245,7 +1283,9 @@ static int poly_buffer_alloc_residency(
       .owned = true,
       .allocator = alloc,
       .src = src,
-      .valid = valid,
+      /* DiskAllocator._alloc maps authoritative file bytes, not anonymous
+       * uninitialized storage. This path must agree with handle allocation. */
+      .valid = valid || device == POLY_DEVICE_DISK,
       .frontend_release = NULL,
       .memory_accounted = true,
       .memory_device = device,
@@ -1328,11 +1368,14 @@ static void poly_buffer_free_except_root(PolyCtx *ctx, PolyBuffer *b, PolyBuffer
 int poly_buffer_ensure_host_current(PolyCtx *ctx, PolyUOp *buf, PolyBuffer **host_out) {
   if (host_out) *host_out = NULL;
   if (!ctx || !buf) return -1;
-  PolyBuffer *cur = poly_buffer_get(ctx, buf);
+  PolyBuffer *cur = poly_uop_buffer_handle(ctx, buf);
   if (!cur) return -1;
   /* Tinygrad Buffer.view derives its device handle from base+offset before
    * readback (device.py:120-155,193-205). */
   if (cur->base && poly_buffer_refresh_view(ctx, cur) != 0) return -1;
+  if (cur->device == POLY_DEVICE_DISK && !cur->ptr &&
+      poly_buffer_handle_ensure_allocated(ctx, cur) != 0)
+    return -1;
 
   if (poly_buffer_is_host_root(cur)) {
     if (host_out) *host_out = cur;
@@ -1497,6 +1540,12 @@ int poly_buffer_ensure_device_current(PolyCtx *ctx, PolyUOp *buf, PolyDevice dev
   if (device == POLY_DEVICE_AUTO) device = poly_device_default();
 
   PolyBuffer *cur = poly_buffer_get(ctx, buf);
+  /* A callify-published DISK BUFFER may not have mapped the file yet. Its
+   * producer wrote through another mapping; resolve storage before testing
+   * the host/device validity bookkeeping. */
+  if (cur && cur->device == POLY_DEVICE_DISK && !cur->ptr &&
+      poly_buffer_handle_ensure_allocated(ctx, cur) != 0)
+    return -1;
   if (cur && cur->base) {
     if (poly_buffer_refresh_view(ctx, cur) != 0) return -1;
     return cur->valid ? 0 : -1;

@@ -16,7 +16,7 @@ import sys
 _lib = None
 OPS = {}
 _has_cuda_ffi = False
-POLYGRAD_ABI_VERSION = 72
+POLYGRAD_ABI_VERSION = 73
 
 # --- Opaque pointer type (always available) ---
 _ptr = ctypes.c_void_p
@@ -823,6 +823,8 @@ def _declare_signatures(lib):
 
     lib.poly_tensor_to_device.restype = _ptr
     lib.poly_tensor_to_device.argtypes = [_ptr, _ptr, ctypes.c_int]
+    lib.poly_tensor_to_device_name.restype = _ptr
+    lib.poly_tensor_to_device_name.argtypes = [_ptr, _ptr, ctypes.c_char_p]
 
     lib.poly_tensor_assign.restype = _ptr
     lib.poly_tensor_assign.argtypes = [_ptr, _ptr, _ptr]

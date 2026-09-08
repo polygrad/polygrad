@@ -38,7 +38,7 @@
     },
     "python": "3.11.12 (main, Apr  9 2025, 04:04:00) [Clang 20.1.0 ]",
     "reference_commit": "a9069c177a9da9cca18593edf55acd2e6073cca6",
-    "runner_sha256": "370b948ea67c32827df73e36ab98dc3555a4f01497c5eabe13ce073c39e8de5b",
+    "runner_sha256": "335b5b4879ca1f9e1828002826e1a810d1ea3429d23937a799bcec43a484c4d8",
     "test_sha256": {
       "test/backend/test_setitem.py": "bfa540e93690962ef332f5a5e8c6e6913f6fd6a219111da20dd8d596c5547e74",
       "test/backend/test_tensor.py": "5f98a533f473dd819728e208b5ced15b04acf63a3944fee4f9d957b55954ee59",
@@ -165,8 +165,8 @@
     "failure_signature": "source-path-and-message-v2"
   },
   "evidence": {
-    "report": "temp/dtype-admission-20260907.bEASBx/upstream-final/report.json",
-    "sha256": "886b58bfdd305e52bd2c47c360878b6b37446032c46ae36be26bd54fd02ebf02"
+    "report": "temp/dtype-storage-20260907.yV8xhK/upstream-resumed/report.json",
+    "sha256": "664368fd873d9983bb6195651e18d7b6fcdc93fbe56b8afbdbdd1b8316c3dd88"
   },
   "schema_version": 1,
   "tests": {
@@ -280,16 +280,10 @@
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_copy_from_disk": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/py/polygrad/device.py:LINE: AttributeError: 'NoneType' object has no attribute 'raw'",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "nonpassing_phases": {},
+        "status": "passed"
       },
-      "reason": "DISK readback reaches Buffer.as_memoryview with no resolved buffer identity. This is a runtime storage-path failure, not missing test dependencies.",
-      "category": "backend-storage"
+      "reason": ""
     },
     "polygrad:test/backend/test_tensor.py::TestTinygrad::test_copy_from_numpy_dtype": {
       "expected": {
@@ -2667,12 +2661,6 @@
       "reason": ""
     }
   },
-  "scope_note": "Compatibility frontier only, not parity allowances or source-audit closure. No failures or skips are omitted from execution.",
-  "collection_blockers": [
-    {
-      "test": "test/backend/test_ops.py",
-      "observed": "ImportError: cannot import name 'IMAGE' from 'polygrad.helpers'",
-      "followup": "After IMAGE, inspect DEV.renderer/interface and the unavailable tinygrad.renderer.nir import; do not fabricate renderer stubs."
-    }
-  ]
+  "scope_note": "Compatibility frontier only, not parity allowances or source-audit closure. No failures or skips are omitted from execution. test_ops.py executes in the separately reviewed CPU-adapted tinygrad_upstream_ops_cpu_baseline.json lane.",
+  "collection_blockers": []
 }

@@ -83,6 +83,7 @@ async function main() {
   await runNativeCrossContextEinsumReject()
   await runNativeTensorUOpContextOwnership()
   const pg = await polygrad.create({ core: 'native' })
+  await runDiskCopy(pg)
   const syncResult = await runSyncContractTests(polygrad, pg, { core: 'native' })
   const tensorResult = await runTensorTests(pg)
   const instanceResult = await runModelRuntimeTests(pg)
@@ -93,6 +94,27 @@ async function main() {
   const failed = syncResult.failed + tensorResult.failed + instanceResult.failed + jitResult.failed +
     optimResult.failed + modelResult.failed
   if (failed > 0) process.exit(1)
+}
+
+async function runDiskCopy(pg) {
+  const fs = require('fs'), os = require('os'), path = require('path')
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'polygrad-Disk-'))
+  const firstPath = path.join(directory, 'First.bin'), secondPath = path.join(directory, 'Second.bin')
+  try {
+    const source = new pg.Tensor([1, 2, 3, 4], {dtype:'float32'})
+    const first = await source.to(`DISK:${firstPath}`).realize()
+    const second = await first.to(`DISK:${secondPath}`).realize()
+    assert.deepStrictEqual(Array.from(await first.toArray()), [1, 2, 3, 4])
+    assert.deepStrictEqual(Array.from(await second.toArray()), [1, 2, 3, 4])
+    const bytes = fs.readFileSync(secondPath)
+    assert.deepStrictEqual([0, 4, 8, 12].map(offset => bytes.readFloatLE(offset)), [1, 2, 3, 4])
+    source.dispose()
+    first.dispose()
+    second.dispose()
+    console.log('  [PASS] native DISK copy preserves named files and values')
+  } finally {
+    fs.rmSync(directory, {recursive:true, force:true})
+  }
 }
 
 main().catch(e => { console.error(e); process.exit(1) })

@@ -103,6 +103,19 @@ async function runTensorTests(pg) {
 
   console.log(`Core: ${pg.core}, device: ${pg.device}\n`)
 
+  await test('device identity preserves DISK path case without executing it', async () => {
+    const source = new Tensor([1, 2, 3], {dtype:'float32'})
+    const first = source.to('DISK:temp/CaseSensitive.bin')
+    const second = first.to('DISK:temp/Different.bin')
+    assert(first.device === 'DISK:temp/CaseSensitive.bin', `lost path: ${first.device}`)
+    assert(second.device === 'DISK:temp/Different.bin', `lost path: ${second.device}`)
+    assert(first !== second, 'distinct paths collapsed to one backend identity')
+    assert(first.to(first.device) === first, 'same exact device should return self')
+    first.dispose()
+    second.dispose()
+    source.dispose()
+  })
+
   // -- Creation --
   await test('execution scalar reductions and virtual oneHot', async () => {
     for (const axis of [0, -1]) {

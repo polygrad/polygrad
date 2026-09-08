@@ -401,7 +401,11 @@ function createBoundTensorClass(runtime) {
     return _runtime._core
   }
   const POLY_TENSOR_VALUE = 0
-  const normalizeDevice = (device) => String(device || _runtime.device || 'cpu').toLowerCase()
+  const normalizeDevice = (device) => {
+    const name = String(device || _runtime.device || 'cpu')
+    // The backend prefix is case-insensitive; a filesystem path is not.
+    return /^disk:/i.test(name) ? 'disk:' + name.slice(5) : name.toLowerCase()
+  }
   const deviceId = (device) => ffi.poly_device_by_name(normalizeDevice(device))
   const rejectRequiresGrad = (opts) => {
     if (opts && (Object.prototype.hasOwnProperty.call(opts, 'requiresGrad') ||
@@ -755,7 +759,7 @@ function createBoundTensorClass(runtime) {
         const targetDeviceId = deviceId(this._device)
         const sourceDeviceId = tensorDevice(this._tensor)
         if (targetDeviceId !== sourceDeviceId) {
-          const movedTensor = ffi.poly_tensor_to_device(this._ctx, this._tensor, targetDeviceId)
+          const movedTensor = ffi.poly_tensor_to_device_name(this._ctx, this._tensor, this._device)
           if (!movedTensor) throw new Error(`poly_tensor_to_device failed for ${this._device}`)
           this._adoptCoreTensor(movedTensor)
         }
@@ -833,7 +837,7 @@ function createBoundTensorClass(runtime) {
     }
     _coreToDevice(device) {
       if (!this._tensor) throw new Error('Tensor has no core PolyTensor')
-      return ffi.poly_tensor_to_device(this._ctx, this._tensor, deviceId(device))
+      return ffi.poly_tensor_to_device_name(this._ctx, this._tensor, String(device))
     }
     static _coreRealizeBatch(ctx, targets) {
       const realized = ffi.poly_realize_tensors(ctx, targets.map(t => t._tensor))
@@ -911,7 +915,7 @@ function createBoundTensorClass(runtime) {
       /* Public device is a placement label. The WASM core maps public CPU onto
        * the WASM execution backend internally, but user-facing Tensor.device
        * should stay CPU for parity with Python/tinygrad-style APIs. */
-      return this._device.toUpperCase()
+      return this._device.startsWith('disk:') ? 'DISK:' + this._device.slice(5) : this._device.toUpperCase()
     }
     get ndim() { return this._rt._core.ffi.poly_uop_ndim(this._ctx, this._uop) || 0 }
     get isParam() { return this._isParam }

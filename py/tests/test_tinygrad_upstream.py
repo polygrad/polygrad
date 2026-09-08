@@ -118,6 +118,78 @@ def test_candidate_requires_manual_nonpass_review(report):
     assert upstream.ratchet_errors(report, baseline) == []
 
 
+def test_reference_reuse_is_hash_locked_and_never_reuses_polygrad(tmp_path):
+    log = tmp_path / 'control.log'
+    log.write_text('synthetic control, not acceptance')
+    lock = {'reference': 'pin', 'dependencies': 'content hashes', 'environment': 'CPU'}
+    run = {'engine': 'tinygrad', 'selection': 'test/a.py', 'exit_code': 0,
+           'errors': [], 'collection': [], 'collected': ['test/a.py::test_ok'],
+           'tests': {'test/a.py::test_ok': {'status': 'passed', 'phases': phases()}},
+           'artifacts': {str(log): upstream.digest(log)}}
+    data = {'reference_lock': lock, 'errors': [], 'runs': [run, dict(run, engine='polygrad')]}
+    path = tmp_path / 'report.json'
+    upstream.write_json(path, data)
+    sha = upstream.digest(path)
+    reused = upstream.reuse_reference_runs(path, sha, lock, ['test/a.py'])
+    assert list(reused) == ['test/a.py']
+    assert reused['test/a.py']['engine'] == 'tinygrad'
+    assert reused['test/a.py']['reused_from']['sha256'] == sha
+    with pytest.raises(ValueError, match='lock'):
+        upstream.reuse_reference_runs(path, sha, dict(lock, reference='other'), ['test/a.py'])
+    with pytest.raises(ValueError, match='selection'):
+        upstream.reuse_reference_runs(path, sha, lock, ['test/missing.py'])
+    log.write_text('changed')
+    with pytest.raises(ValueError, match='artifact'):
+        upstream.reuse_reference_runs(path, sha, lock, ['test/a.py'])
+    path.write_text('{}')
+    with pytest.raises(ValueError, match='report hash'):
+        upstream.reuse_reference_runs(path, sha, lock, ['test/a.py'])
+
+
+def test_reference_lock_tracks_dependency_tool_and_environment_inputs(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    dependency = tmp_path / 'dependency.py'
+    dependency.write_text('original')
+    executable = tmp_path / 'python'
+    executable.write_text('interpreter')
+    compiler = tmp_path / 'clang'
+    compiler.write_text('compiler')
+    monkeypatch.setattr(upstream.sysconfig, 'get_path', lambda key: str(tmp_path))
+    monkeypatch.setattr(upstream.sys, 'executable', str(executable))
+    monkeypatch.setattr(upstream.shutil, 'which', lambda name: str(compiler))
+    monkeypatch.setattr(upstream.subprocess, 'run', lambda *a, **kw: SimpleNamespace(stdout=''))
+    reference = tmp_path / 'reference'
+    inputs = {str(reference / 'test.py'): 'upstream', str(tmp_path / 'polygrad.c'): 'pg'}
+    get_lock = lambda: upstream.reference_lock(reference, ['test.py'], None, inputs)
+    original = get_lock()
+    inputs[str(tmp_path / 'polygrad.c')] = 'changed'
+    assert get_lock() == original  # only the reference may be reused
+    for path in (dependency, compiler):
+        content = path.read_text()
+        path.write_text('changed')
+        assert get_lock() != original
+        path.write_text(content)
+    monkeypatch.setenv('LD_LIBRARY_PATH', '/changed')
+    assert get_lock() != original
+
+
+@pytest.mark.parametrize('error', ['crash', 'collection', 'missing_lock', 'transitive'])
+def test_reference_reuse_rejects_incomplete_or_transitive_evidence(tmp_path, error):
+    run = {'engine': 'tinygrad', 'selection': 'test/a.py', 'exit_code': 0,
+           'errors': [], 'collection': [], 'collected': ['test/a.py::test_ok'],
+           'tests': {'test/a.py::test_ok': {'status': 'passed', 'phases': phases()}},
+           'artifacts': {str(tmp_path / 'log'): 'hash'}}
+    data = {'reference_lock': {'pin': 'pinned'}, 'errors': [], 'runs': [run]}
+    if error == 'crash': run['exit_code'] = 124
+    elif error == 'collection': run['collection'] = [{'outcome': 'failed'}]
+    elif error == 'missing_lock': del data['reference_lock']
+    else: run['reused_from'] = {'report': 'other'}
+    path = tmp_path / 'report.json'
+    upstream.write_json(path, data)
+    with pytest.raises(ValueError):
+        upstream.reuse_reference_runs(path, upstream.digest(path), {'pin': 'pinned'}, ['test/a.py'])
+
+
 @pytest.mark.parametrize("change", ["pin", "missing", "new", "regression", "skip", "failure_change", "improvement", "collection"])
 def test_ratchet_detects_contract_and_outcome_changes(report, change):
     baseline = upstream.baseline_candidate(report)

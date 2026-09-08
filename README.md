@@ -186,6 +186,13 @@ backend dtype capabilities still apply. These settings participate in compiler
 cache keys. They do not change fixed accumulation/RNG compute widths or the
 bounds-based int32/int64 lowering of weak integer indices.
 
+Native file-backed tensors use C-owned `DISK:<path>` storage. Python
+`Tensor(pathlib.Path(...))` passes the path to C for memory mapping;
+`.to('DISK:<path>')` copies to that exact file, preserving filename case.
+DISK is not a compute backend. Wasm does not implement native file mapping:
+load bytes in JavaScript and pass typed arrays through the host-buffer API.
+JS does not currently provide Python's Tensor path constructor.
+
 Scalar reductions accept axes `0` and `-1`. `realize()` leaves virtual weak
 tensors unchanged; cast before requesting storage or a schedule. Einsum supports
 scalar operands, ellipses, uppercase labels and shared C accumulation rules.

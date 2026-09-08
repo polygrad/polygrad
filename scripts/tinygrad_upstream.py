@@ -18,11 +18,14 @@ import importlib.metadata
 import importlib.util
 import json
 import os
+import platform
 from pathlib import Path
 import re
+import shutil
 import signal
 import subprocess
 import sys
+import sysconfig
 import time
 import traceback
 
@@ -39,7 +42,68 @@ ENVIRONMENT = {
 
 
 def digest(path):
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    checksum = hashlib.sha256()
+    with Path(path).open('rb') as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            checksum.update(chunk)
+    return checksum.hexdigest()
+
+
+def reference_lock(reference, tests, adapter, inputs):
+    """Opt-in Linux CPU control reuse: lock code, dependencies and toolchain.
+
+    Polygrad source/library changes deliberately do not invalidate the oracle.
+    This does not cache Polygrad execution or replace a final fresh matrix.
+    """
+    if sys.platform != 'linux' or not shutil.which('ldd'):
+        raise ValueError('reference reuse requires Linux and ldd dependency inspection')
+    paths = {Path(__file__).resolve(), Path(sys.executable).resolve()}
+    for key in ('stdlib', 'platstdlib', 'purelib', 'platlib'):
+        directory = Path(sysconfig.get_path(key))
+        paths.update(p.resolve() for p in directory.rglob('*') if p.is_file()
+                     and '__pycache__' not in p.parts and '.git' not in p.parts)
+    tools = {}
+    for name in ('clang', 'clang++', 'cc', 'ld', 'ld.lld', 'ar'):
+        executable = shutil.which(name)
+        tools[name] = str(Path(executable).resolve()) if executable else None
+        if executable: paths.add(Path(executable).resolve())
+    # Native libraries outside the venv can change while wheel metadata stays
+    # unchanged. Include the interpreter/compiler's resolved ELF dependencies.
+    for executable in [sys.executable, *filter(None, tools.values())]:
+        result = subprocess.run(['ldd', executable], capture_output=True, text=True)
+        for match in re.findall(r'(/[^\s()]+)', result.stdout):
+            if Path(match).is_file(): paths.add(Path(match).resolve())
+    cpu = Path('/proc/cpuinfo').read_text().split('\n\n')[0]
+    cpu = '\n'.join(line for line in cpu.splitlines() if line.split(':')[0].strip()
+                    in {'vendor_id', 'cpu family', 'model', 'model name', 'stepping', 'microcode', 'flags'})
+    return {'schema_version': 1, 'reference': str(reference), 'tests': tests, 'adapter': adapter,
+            'upstream_inputs': {p: h for p, h in inputs.items() if Path(p).is_relative_to(reference)},
+            'files': {str(p): digest(p) for p in sorted(paths)}, 'tools': tools,
+            'environment': {k: os.environ.get(k) for k in ('PATH', 'HOME', 'LANG', 'LD_LIBRARY_PATH')},
+            'worker_environment': ENVIRONMENT, 'python': sys.version,
+            'platform': platform.platform(), 'cpu': cpu}
+
+
+def reuse_reference_runs(path, sha256, lock, selections):
+    """Accept only original complete reference runs and unchanged raw artifacts."""
+    path = Path(path).resolve()
+    if digest(path) != sha256: raise ValueError('reference report hash mismatch')
+    report = json.loads(path.read_text())
+    if report.get('reference_lock') != lock: raise ValueError('reference lock mismatch')
+    if report.get('errors'): raise ValueError('reference report has execution errors')
+    reused = {}
+    for run in report.get('runs', []):
+        if run['engine'] != 'tinygrad': continue
+        if run.get('reused_from'): raise ValueError('reference reuse must name the original execution')
+        if execution_errors(run): raise ValueError('reference execution is incomplete')
+        if not run.get('artifacts'): raise ValueError('reference has no locked artifacts')
+        for artifact, expected in run['artifacts'].items():
+            if not Path(artifact).is_file() or digest(artifact) != expected:
+                raise ValueError(f'reference artifact changed: {artifact}')
+        if run['selection'] in reused: raise ValueError('duplicate reference selection')
+        reused[run['selection']] = dict(run, reused_from={'report': str(path), 'sha256': sha256})
+    if set(reused) != set(selections): raise ValueError('reference selection mismatch')
+    return reused
 
 
 def write_json(path, data):
@@ -351,6 +415,9 @@ def run_one(output, engine, test, reference, library, timeout, adapter=None):
     result.update(engine=engine, selection=test, exit_code=code, command=command,
                   duration_seconds=time.monotonic() - started, log=str(stem.with_suffix(".log")),
                   events=request["events"])
+    artifacts = [path, Path(request['events']), stem.with_suffix('.log'), stem.with_suffix('.request.json')]
+    if result.get('adaptation'): artifacts.append(Path(result['adaptation']['path']))
+    result['artifacts'] = {str(p): digest(p) for p in artifacts if p.is_file()}
     print(f"{engine} {test}: {dict(Counter(t['status'] for t in result.get('tests', {}).values()))} "
           f"exit={code} collection={len(result.get('collection', []))}", flush=True)
     return result
@@ -368,10 +435,17 @@ def main(argv=None):
     parser.add_argument("--compare-with", type=Path, help="attach outcome delta against a previous run; not acceptance")
     parser.add_argument("--write-baseline", type=Path, help="write new candidate only; nonpasses require reviewed reasons")
     parser.add_argument('--adapter', choices=['cpu-ops'], help='explicit CPU-only test adaptation; default tests are unchanged')
+    parser.add_argument('--record-reference-lock', action='store_true', help='content-lock this CPU reference execution for later reuse')
+    parser.add_argument('--reuse-reference', type=Path, help='reuse only the original locked Tinygrad report; Polygrad always executes')
+    parser.add_argument('--reference-sha256', help='required digest of --reuse-reference')
     parser.add_argument("--child", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if args.child:
         return child(json.loads(args.child.read_text()))
+    if bool(args.reuse_reference) != bool(args.reference_sha256):
+        parser.error('--reuse-reference and --reference-sha256 must be provided together')
+    if args.reuse_reference and args.engine != 'both':
+        parser.error('reference reuse requires --engine both; Polygrad must execute')
     reference, library, output = args.reference.resolve(), args.library.resolve(), args.output.resolve()
     baseline = json.loads(args.baseline.read_text()) if args.baseline else None
     tests = args.test or (list(baseline["contract"]["test_sha256"]) if baseline else ["test/backend/test_ops.py"])
@@ -396,11 +470,24 @@ def main(argv=None):
     dirty = subprocess.check_output(["git", "-C", str(reference), "status", "--porcelain", "--untracked-files=no"], text=True)
     if dirty:
         parser.error("reference has tracked edits; choose a clean pinned/candidate checkout")
-    runs = [run_one(output, engine, test, reference, library, args.timeout, args.adapter)
-            for test in tests for engine in (("tinygrad", "polygrad") if args.engine == "both" else (args.engine,))]
+    try:
+        lock = reference_lock(reference, tests, args.adapter, inputs) if args.record_reference_lock or args.reuse_reference else None
+        reused = reuse_reference_runs(args.reuse_reference, args.reference_sha256, lock, tests) if args.reuse_reference else {}
+    except (ValueError, OSError, KeyError) as error:
+        parser.error(str(error))
+    runs = []
+    for test in tests:
+        for engine in (("tinygrad", "polygrad") if args.engine == "both" else (args.engine,)):
+            if engine == 'tinygrad' and test in reused:
+                print(f'tinygrad {test}: reused original control {args.reuse_reference}', flush=True)
+                runs.append(reused[test])
+            else:
+                runs.append(run_one(output, engine, test, reference, library, args.timeout, args.adapter))
     errors = [f"{r['engine']} {r['selection']}: {err}" for r in runs for err in execution_errors(r)]
     if inputs != source_inputs(reference, tests, library):
         errors.append("source/artifact inputs changed during execution")
+    if lock is not None and lock != reference_lock(reference, tests, args.adapter, inputs):
+        errors.append('reference environment changed during execution')
     contract = {"reference_commit": commit, "test_sha256": {t: digest(reference / t.split('::')[0]) for t in tests},
                 "upstream_sha256": hashlib.sha256(json.dumps({p.replace(str(reference), '<reference>'): h for p, h in inputs.items()
                     if Path(p).is_relative_to(reference)}, sort_keys=True).encode()).hexdigest(),
@@ -421,6 +508,7 @@ def main(argv=None):
                 errors.append(f"provider collection mismatch: {tg['selection']}")
     report = {"schema_version": 1, "contract": contract, "source_inputs": inputs, "runs": runs,
               "tests": cases, "errors": errors, "summary": dict(Counter(t['status'] for t in cases.values()))}
+    if lock is not None: report['reference_lock'] = lock
     report["summary_by_engine"] = {engine: dict(Counter(t["status"] for key, t in cases.items() if key.startswith(engine + ":")))
                                    for engine in sorted({r["engine"] for r in runs})}
     if args.compare_with:

@@ -409,10 +409,13 @@ TEST(nn, matmul_invalid_broadcast_returns_null) {
 TEST(nn, cross_entropy_sparse_targets) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *logits_buf = poly_buffer_f32(ctx, 6);
-  PolyUOp *target_buf = poly_buffer_f32(ctx, 2);
+  PolyUOp *target_buf = poly_test_buffer(ctx, POLY_INT32, 2);
   PolyUOp *logits = poly_reshape(ctx, logits_buf, (int64_t[]){2, 3}, 2);
   PolyUOp *target = poly_reshape(ctx, target_buf, (int64_t[]){2}, 1);
 
+  /* Pinned _one_hot_along_dim rejects floating class indices; do not restore
+   * the old silent float-to-int conversion in the C loss helper. */
+  ASSERT_TRUE(poly_cross_entropy(ctx, logits, poly_cast(ctx, target, POLY_FLOAT32), 1) == NULL);
   PolyUOp *loss = poly_cross_entropy(ctx, logits, target, 1);
   ASSERT_NOT_NULL(loss);
 
@@ -421,7 +424,7 @@ TEST(nn, cross_entropy_sparse_targets) {
   PolyUOp *sink = poly_sink1(ctx, store);
 
   float logits_data[] = {0, 0, 0, 0, 0, 0};
-  float target_data[] = {0, 2};
+  int32_t target_data[] = {0, 2};
   float out_data[] = {0};
   PolyTestBufferView bindings[] = {
       POLY_TEST_HOST_VIEW(logits_buf, logits_data),
@@ -471,7 +474,7 @@ TEST(nn, cross_entropy_dense_targets) {
 TEST(nn, cross_entropy_sparse_targets_non_last_axis) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *logits_buf = poly_buffer_f32(ctx, 12);
-  PolyUOp *target_buf = poly_buffer_f32(ctx, 4);
+  PolyUOp *target_buf = poly_test_buffer(ctx, POLY_INT32, 4);
   PolyUOp *logits = poly_reshape(ctx, logits_buf, (int64_t[]){2, 3, 2}, 3);
   PolyUOp *target = poly_reshape(ctx, target_buf, (int64_t[]){2, 2}, 2);
 
@@ -483,7 +486,7 @@ TEST(nn, cross_entropy_sparse_targets_non_last_axis) {
   PolyUOp *sink = poly_sink1(ctx, store);
 
   float logits_data[] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-  float target_data[] = {0, 2, 1, 0};
+  int32_t target_data[] = {0, 2, 1, 0};
   float out_data[] = {0};
   PolyTestBufferView bindings[] = {
       POLY_TEST_HOST_VIEW(logits_buf, logits_data),

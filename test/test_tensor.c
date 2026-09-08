@@ -2058,6 +2058,28 @@ TEST(tensor, dtype_admission_randn_casts_integer_output) {
   PASS();
 }
 
+TEST(tensor, configured_seed_factory_defaults_and_integer_randn) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int old = poly_get_default_float();
+  poly_set_default_float(poly_dtype_id_by_name("float64"));
+  int64_t shape[] = {3};
+  PolyUOp *uniform = poly_rand(ctx, shape, 1, 42);
+  PolyUOp *normal = poly_randn(ctx, shape, 1, 42);
+  PolyUOp *integer = poly_randn_by_id(ctx, shape, 1, 42, poly_dtype_id_by_name("int32"));
+  poly_set_default_float(old);
+  ASSERT_NOT_NULL(uniform);
+  ASSERT_NOT_NULL(normal);
+  ASSERT_TRUE(poly_dtype_eq(uniform->dtype, POLY_FLOAT64));
+  ASSERT_TRUE(poly_dtype_eq(normal->dtype, POLY_FLOAT64));
+  ASSERT_NOT_NULL(integer);
+  ASSERT_TRUE(poly_dtype_eq(integer->dtype, POLY_INT32));
+  ASSERT_INT_EQ(integer->op, POLY_OP_CAST);
+  ASSERT_TRUE(poly_dtype_eq(integer->src[0]->dtype, POLY_FLOAT32));
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(tensor, randn_reset_keeps_rng_source_owners_valid) {
   /* Tinygrad 2026-08-22 Tensor.manual_seed replaces the seed/counter maps;
    * nested randn construction must leave their source ownership valid until

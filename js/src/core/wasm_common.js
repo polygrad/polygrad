@@ -1057,6 +1057,14 @@ function createWasmCoreFromModule(Module, device) {
       ),
     poly_tensor_to_device: (ctx, tensor, device) =>
       Module._poly_tensor_to_device(ctx, tensor, device),
+    poly_tensor_to_device_name: (ctx, tensor, device) => {
+      // Preserve the established public CPU -> Wasm execution alias, without
+      // reducing named storage devices (DISK paths) to backend-only enums.
+      const key = String(device).toLowerCase()
+      const ptr = allocString(DEVICE_IDS[key] !== undefined ? coreDeviceName(DEVICE_IDS[key]) : device)
+      try { return Module._poly_tensor_to_device_name(ctx, tensor, ptr) }
+      finally { Module._free(ptr) }
+    },
     poly_tensor_assign: (ctx, target, value) =>
       Module._poly_tensor_assign(ctx, target, value),
     poly_tensor_alu1: (ctx, op, src) =>
@@ -1861,7 +1869,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 72
+  const EXPECTED_ABI = 73
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(

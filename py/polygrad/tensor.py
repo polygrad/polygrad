@@ -795,21 +795,20 @@ class Tensor:
             source_device_id = int(_ffi._lib.poly_tensor_device(self._tensor))
             target_device_id = _device_id(self._device)
             if target_device_id != source_device_id:
-                moved_tensor = _ffi._lib.poly_tensor_to_device(
-                    self._ctx, self._tensor, target_device_id
+                moved_tensor = _ffi._lib.poly_tensor_to_device_name(
+                    self._ctx, self._tensor, self._device.encode()
                 )
                 if not moved_tensor:
                     raise RuntimeError(f'poly_tensor_to_device failed for {self._device}')
                 self._replace_core_tensor(moved_tensor)
         elif self._tensor is None and current_uop is not None:
             source_device = disk_device if imported_from_disk else 'CPU'
-            target_device_id = _device_id(self._device)
-            source_device_id = _device_id(source_device)
-            if imported_from_disk and target_device_id != source_device_id:
+            # Two DISK paths share a backend, not storage identity.
+            if imported_from_disk and self._device != source_device:
                 source = self._core_create(current_uop, _POLY_TENSOR_VALUE, source_device)
                 try:
-                    self._tensor = _ffi._lib.poly_tensor_to_device(
-                        self._ctx, source, target_device_id
+                    self._tensor = _ffi._lib.poly_tensor_to_device_name(
+                        self._ctx, source, self._device.encode()
                     )
                     if not self._tensor:
                         raise RuntimeError(f'poly_tensor_to_device failed for {self._device}')
@@ -916,7 +915,7 @@ class Tensor:
     def _core_to_device(self, device):
         if self._tensor is None:
             raise RuntimeError("Tensor has no core PolyTensor")
-        return _ffi._lib.poly_tensor_to_device(self._ctx, self._tensor, _device_id(device))
+        return _ffi._lib.poly_tensor_to_device_name(self._ctx, self._tensor, str(device).encode())
 
     def _core_assign(self, value):
         if self._tensor is None or value._tensor is None:

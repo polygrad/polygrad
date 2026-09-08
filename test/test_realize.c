@@ -7706,6 +7706,104 @@ TEST(realize, disk_contiguous_shrink_is_lazy_and_copies_only_selected_range) {
   PASS();
 }
 
+TEST(realize, contiguous_empty_view_has_no_storage_shortcut) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *buffer = poly_test_buffer(ctx, POLY_FLOAT32, 0);
+  PolyUOp *matrix = poly_reshape(ctx, buffer, (int64_t[]){2, 0}, 2);
+  PolyUOp *slice = poly_shrink(ctx, matrix, (int64_t[2][2]){{0, 1}, {0, 0}}, 2);
+  ASSERT_NOT_NULL(slice);
+  PolyUOp *identity = NULL;
+  PolyShape shape;
+  int64_t numel = -1;
+  size_t offset = 99;
+  ASSERT_TRUE(!poly_uop_contiguous_view_info(ctx, slice, &identity, &shape, &numel, &offset));
+  ASSERT_TRUE(identity == NULL);
+  ASSERT_INT_EQ(numel, -1);
+  ASSERT_INT_EQ(offset, 0);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+static int test_copy_callback(
+    const PolyBuffer *dst,
+    const PolyBuffer *src,
+    size_t nbytes,
+    void *user
+) {
+  (void)dst;
+  (void)src;
+  (void)nbytes;
+  (*(int *)user)++;
+  return 0;
+}
+
+TEST(realize, buffer_copy_rejects_missing_transfer_callbacks) {
+  int calls = 0;
+  for (int missing = 0; missing < 2; missing++) {
+    PolyAllocator source = {
+        .copy_out = missing == 0 ? NULL : test_copy_callback, .dev_ctx = &calls};
+    PolyAllocator target = {.copy_in = missing == 1 ? NULL : test_copy_callback, .dev_ctx = &calls};
+    float a = 3, b = 7;
+    PolyBuffer src = {.ptr = &a, .nbytes = sizeof(a), .allocator = &source, .valid = true};
+    PolyBuffer dst = {.ptr = &b, .nbytes = sizeof(b), .allocator = &target};
+    ASSERT_INT_EQ(poly_buffer_copy(&dst, &src), -1);
+    ASSERT_INT_EQ(calls, 0);
+    ASSERT_FLOAT_EQ(b, 7, 0);
+    ASSERT_TRUE(!dst.valid);
+  }
+  PASS();
+}
+
+TEST(realize, disk_copy_publishes_named_storage_and_preserves_distinct_paths) {
+  char paths[2][64] = {"temp/polygrad_Disk_First_XXXXXX", "temp/polygrad_Disk_Second_XXXXXX"};
+  for (int i = 0; i < 2; i++) {
+    int fd = mkstemp(paths[i]);
+    ASSERT_TRUE(fd >= 0);
+    ASSERT_INT_EQ(close(fd), 0);
+  }
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  float values[] = {1, 2, 3, 4}, got[4];
+  PolyUOp *buffer = poly_test_buffer(ctx, POLY_FLOAT32, 4);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, buffer, values, sizeof(values)), 0);
+  PolyTensor *current =
+      poly_tensor_create_with_roots(ctx, buffer, buffer, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(current);
+  for (int i = 0; i < 2; i++) {
+    char device[80];
+    snprintf(device, sizeof(device), "DISK:%s", paths[i]);
+    PolyTensor *next = poly_tensor_to_device_name(ctx, current, device), *out = NULL;
+    ASSERT_NOT_NULL(next);
+    ASSERT_TRUE(next != current);
+    ASSERT_INT_EQ(poly_tensor_uop_physical(next)->op, POLY_OP_COPY);
+    ASSERT_INT_EQ(poly_realize_tensors(ctx, &next, 1, &out), 0);
+    ASSERT_PTR_EQ(next, out);
+    PolyUOp *root = poly_tensor_uop_physical(out);
+    ASSERT_INT_EQ(root->op, POLY_OP_BUFFER);
+    ASSERT_STR_EQ(poly_uop_device_name(ctx, root), device);
+    PolyUOp *identity = poly_uop_buffer(ctx, root);
+    ASSERT_PTR_EQ(identity, root);
+    /* No intervening read may initialize the first file's runtime metadata. */
+    if (i == 1) {
+      ASSERT_INT_EQ(poly_buffer_read(ctx, identity, got, sizeof(got)), 0);
+      ASSERT_TRUE(memcmp(got, values, sizeof(got)) == 0);
+    }
+    poly_tensor_release(current);
+    current = next;
+  }
+  poly_tensor_release(current);
+  poly_ctx_destroy(ctx);
+  for (int i = 0; i < 2; i++) {
+    FILE *file = fopen(paths[i], "rb");
+    ASSERT_NOT_NULL(file);
+    ASSERT_TRUE(fread(got, 1, sizeof(got), file) == sizeof(got));
+    ASSERT_INT_EQ(fclose(file), 0);
+    ASSERT_TRUE(memcmp(got, values, sizeof(got)) == 0);
+    ASSERT_INT_EQ(unlink(paths[i]), 0);
+  }
+  PASS();
+}
+
 TEST(realize, contiguous_realized_view_is_only_physical_at_tensor_boundary) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);

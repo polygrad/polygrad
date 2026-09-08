@@ -9,6 +9,58 @@
 #include "../src/frontend.h"
 #include "../src/tensor.h"
 
+#ifdef POLY_TESTING
+extern void poly_test_shape_alloc_fail_after(int count);
+
+TEST(shape, allocation_failure_does_not_publish_or_poison_shape) {
+  /* C storage for UOp._shape: a failed allocation is not a cached shapeless
+   * result. Retry must recover the original dimensions, not partial metadata. */
+  for (int accessor = 0; accessor < 3; accessor++) {
+    for (int fail = 0; fail < 3; fail++) {
+      PolyCtx *ctx = poly_ctx_new();
+      ASSERT_NOT_NULL(ctx);
+      PolyUOp *u =
+          poly_uop0(ctx, POLY_OP_BINARY, POLY_UINT8, poly_arg_bytes((const uint8_t *)"abc", 3));
+      ASSERT_NOT_NULL(u);
+      poly_test_shape_alloc_fail_after(fail);
+      int failed;
+      if (accessor == 0)
+        failed = poly_uop_ndim(ctx, u) == -1;
+      else if (accessor == 1)
+        failed = poly_uop_max_shape_dims(ctx, u) == NULL;
+      else
+        failed = poly_uop_max_shape_cached(ctx, u).ndim == -1;
+      poly_test_shape_alloc_fail_after(-1);
+      ASSERT_TRUE(failed);
+      ASSERT_INT_EQ(poly_uop_ndim(ctx, u), 1);
+      ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, u)[0], 3);
+      poly_ctx_destroy(ctx);
+    }
+  }
+  PASS();
+}
+
+TEST(shape, copied_shape_allocation_failure_preserves_cached_shape) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *u =
+      poly_uop0(ctx, POLY_OP_BINARY, POLY_UINT8, poly_arg_bytes((const uint8_t *)"abc", 3));
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, u), 1);
+  poly_test_shape_alloc_fail_after(0);
+  PolyShape failed = poly_uop_max_shape(ctx, u);
+  poly_test_shape_alloc_fail_after(-1);
+  ASSERT_INT_EQ(failed.ndim, -1);
+  ASSERT_TRUE(failed.dims == NULL);
+  PolyShape copy = poly_uop_max_shape(ctx, u);
+  ASSERT_INT_EQ(copy.ndim, 1);
+  ASSERT_INT_EQ(copy.dims[0], 3);
+  ASSERT_TRUE(copy.dims != poly_uop_max_shape_dims(ctx, u));
+  free(copy.dims);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+#endif
+
 /* Helper: create int tuple arg */
 static PolyArg int_tuple(int64_t *vals, int n) {
   PolyArg a;

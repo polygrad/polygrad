@@ -95,6 +95,31 @@ def test_tensorio_read_seek_and_validation():
         stream.write(b"x")
 
 
+@pytest.mark.parametrize("dtype", ["uint8", "float32"])
+def test_disk_slice_readback_preserves_offset_and_independent_copy(tmp_path, dtype):
+    import numpy as np
+
+    values = np.arange(30, dtype=dtype)
+    disk = Tensor(values).to(f"DISK:{tmp_path / 'First.bin'}").realize()
+    # Chaining must work before any read has created the source's metadata.
+    second = disk.to(f"DISK:{tmp_path / 'Second.bin'}").realize()
+    np.testing.assert_array_equal(second.numpy(), values)
+    view = disk[10:20]
+    copied = view.numpy()
+    np.testing.assert_array_equal(copied, values[10:20])
+    np.testing.assert_array_equal(view.to("CPU").numpy(), copied)
+    copied[0] = 99
+    np.testing.assert_array_equal(view.numpy(), values[10:20])
+
+
+def test_disk_path_constructor_copies_between_distinct_files(tmp_path):
+    first, second = tmp_path / 'Source.bin', tmp_path / 'Destination.bin'
+    first.write_bytes(bytes(range(16)))
+    tensor = Tensor(first, device=f'DISK:{second}').realize()
+    assert tensor.tolist() == list(range(16))
+    assert second.read_bytes() == first.read_bytes()
+
+
 def test_tar_extract_returns_only_regular_lazy_member_views(tmp_path):
     entries = [("first.bin", b"abc"), ("nested/second.bin", bytes((1, 2, 3, 4)))]
     path = _write_tar(tmp_path, entries)

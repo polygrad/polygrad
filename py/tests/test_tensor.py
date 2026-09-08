@@ -16,6 +16,29 @@ from polygrad.helpers import Context
 from polygrad.uop.ops import AxisType, KernelInfo, UOp, _dispose_uops_for_ctx
 
 
+def test_raw_seed_factory_configured_defaults():
+    from polygrad import _default_ctx
+
+    shape = (ctypes.c_int64 * 1)(3)
+    with Context(DEFAULT_FLOAT='float64'):
+        for name in ('poly_rand', 'poly_randn'):
+            factory = getattr(_ffi._lib, name)
+            factory.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64), ctypes.c_int, ctypes.c_uint64]
+            factory.restype = ctypes.c_void_p
+            raw = factory(_default_ctx, shape, 1, 42)
+            assert raw
+            assert UOp(_default_ctx, raw).dtype == dtypes.float64
+
+
+def test_raw_seed_randn_integer_output():
+    from polygrad import _default_ctx
+
+    shape = (ctypes.c_int64 * 1)(3)
+    raw = _ffi._lib.poly_randn_by_id(_default_ctx, shape, 1, 42, _ffi._lib.poly_dtype_id_by_name(b'int32'))
+    assert raw
+    assert UOp(_default_ctx, raw).dtype == dtypes.int32
+
+
 @pytest.mark.parametrize('float_dtype,int_dtype', [('float16', 'int16'), ('float64', 'int64')])
 def test_default_dtype_context_reaches_core_and_restores(float_dtype, int_dtype):
     from polygrad.dtype import strong_dtype, least_upper_float
