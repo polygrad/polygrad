@@ -139,6 +139,16 @@ static inline PolyDType poly_program_buffer_dtype(const PolyUOp *u) {
 PolyUOp *poly_full_rewrite_to_sink(PolyCtx *ctx, PolyUOp *sink);
 PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOpts opts);
 
+#if defined(POLY_TESTING) && !defined(__EMSCRIPTEN__)
+double poly_test_beam_compile_and_time(
+    PolyCtx *ctx,
+    PolyUOp *sink,
+    PolyRewriteOpts opts,
+    int reps,
+    int *n_args
+);
+#endif
+
 /* Individual codegen pass getters (for GPU linearizer to insert passes between them).
  * poly_symbolic_simple()/poly_symbolic() are declared in upat.h. */
 /* Current tinygrad/codegen/decomp/op.py matcher boundaries. */

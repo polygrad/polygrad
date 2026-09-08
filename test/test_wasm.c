@@ -1025,6 +1025,20 @@ TEST(wasm, narrow_integer_casts_execute) {
   PASS();
 }
 
+TEST(wasm, render_optional_size_output) {
+  /* All binary Wasm renderers permit callers to omit the size result. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = poly_uop0(ctx, POLY_OP_SINK, POLY_VOID, poly_arg_none());
+  for (int simd = 0; simd < 2; simd++) {
+    uint8_t *module = poly_render_wasm(ctx, &sink, 1, NULL, simd);
+    ASSERT_NOT_NULL(module);
+    ASSERT_TRUE(memcmp(module, "\0asm", 4) == 0);
+    free(module);
+  }
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(wasm, current_casted_literal_executes_without_extra_conversion) {
   /* Current tinygrad pm_casted_consts leaves CAST(int, CONST(weakint)) for
    * the renderer. Wasm aliases the identical i32 value class. */

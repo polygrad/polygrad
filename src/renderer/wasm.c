@@ -4841,7 +4841,7 @@ uint8_t *poly_render_wasm(PolyCtx *ctx, PolyUOp **uops, int n, int *size_out, bo
     build_code_scalar(ctx, &mod, uops, n, n_params, &math, n_imported_funcs);
   }
 
-  *size_out = mod.len;
+  if (size_out) *size_out = mod.len;
   return mod.data; /* caller must free() */
 }
 

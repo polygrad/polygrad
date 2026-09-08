@@ -883,7 +883,6 @@ static int range_slot(PolyUOp **ranges, int *n_ranges, PolyUOp *r, bool create) 
 
 /* C Renderer */
 
-#define POLY_RENDER_MAX_PARAMS 64
 typedef struct {
   char type[256];
   char name[256];
@@ -894,7 +893,7 @@ typedef struct {
 } RenderParam;
 
 char *poly_render_c(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
-  if (!ctx) return NULL;
+  if (!ctx || n < 0 || (n && !uops)) return NULL;
   StrBuf decls; /* variable declarations at function scope */
   StrBuf body; /* function body with assignments */
   sb_init(&decls);
@@ -909,11 +908,17 @@ char *poly_render_c(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
   PolyMap *uop_indices = poly_map_new((size_t)(n > 0 ? n * 2 : 16));
   int *indices = malloc((size_t)n * sizeof(*indices));
   int *child_count = calloc((size_t)n, sizeof(*child_count));
+  RenderParam *params = NULL;
+  int param_capacity = 0;
   if (!indices || !child_count) goto fail;
   for (int i = 0; i < n; i++) {
+    if (uops[i]->op == POLY_OP_PARAM) param_capacity++;
     indices[i] = i;
     poly_map_set(uop_indices, poly_ptr_hash(uops[i]), uops[i], &indices[i], poly_ptr_eq);
   }
+  /* Match CStyleLanguage's parameter dict without allocating by kernel size. */
+  params = calloc((size_t)param_capacity, sizeof(*params));
+  if (param_capacity && !params) goto fail;
   for (int i = 0; i < n; i++) {
     for (int j = 0; j < uops[i]->n_src; j++) {
       int *source_index =
@@ -924,7 +929,6 @@ char *poly_render_c(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
   bool expand_ssa = poly_getenv_flag("EXPAND_SSA") || poly_getenv_flag("POLY_EXPAND_SSA");
 
   /* function parameter entries: (type_str, name_str, sort_key) */
-  RenderParam params[POLY_RENDER_MAX_PARAMS];
   int n_params = 0;
   int n_buffer_params = 0;
 
@@ -973,7 +977,6 @@ char *poly_render_c(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
     /* ParamArg.addrspace selects pointer storage or an ALU scalar, as in
      * current tinygrad cstyle.py:151-155,207-211. */
     if (u->op == POLY_OP_PARAM) {
-      if (n_params >= POLY_RENDER_MAX_PARAMS) goto fail;
       int64_t slot = poly_program_buffer_slot(u);
       if (slot < 0) goto fail;
       char name[32];
@@ -1542,6 +1545,7 @@ char *poly_render_c(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
   sb_puts(&out, ");\n}\n");
 
   /* cleanup */
+  free(params);
   free(decls.buf);
   free(body.buf);
   free(child_count);
@@ -1552,6 +1556,7 @@ char *poly_render_c(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
   return out.buf;
 
 fail:
+  free(params);
   free(decls.buf);
   free(body.buf);
   free(child_count);

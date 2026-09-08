@@ -37,6 +37,7 @@ CODEC_SRC = vendor/cjson/cJSON.c src/safetensors.c src/wlrn.c src/ir.c src/bundl
 TEST_SRC = test/test_main.c test/test_uop.c test/test_utils.c test/test_dtype.c test/test_bigint.c test/test_pat.c test/test_sym.c test/test_shape.c test/test_schedule_engine.c test/test_autograd.c test/test_codegen.c test/test_wasm.c test/test_rangeify.c test/test_reduce_simplify.c test/test_nn.c test/test_tensor.c test/test_fusion_fuzzer.c test/test_future_passes.c test/test_safetensors.c test/test_wlrn.c test/test_ir.c test/test_model.c test/test_program.c test/test_mlp.c test/test_tabm.c test/test_nam.c test/test_hf.c test/test_qwen3.c test/test_f16.c test/test_schedule_runtime.c test/test_bundle.c test/test_registry.c test/test_placement.c test/test_realize.c test/test_threading.c
 PROJECT_HEADERS := $(shell find src test bench vendor -type f -name '*.h' -print | sort)
 ANALYZE_SRC = $(filter-out vendor/%,$(sort $(SRC) $(CODEC_SRC)))
+ANALYZE_FLAGS ?=
 FORMAT_SRC := $(shell find src test bench -type f \( -name '*.c' -o -name '*.h' \) -print | sort)
 
 ifeq ($(HAS_CUDA), 1)
@@ -784,7 +785,7 @@ analyze:
 	@rm -f build/analyze.log; status=0; \
 	  for src in $(ANALYZE_SRC); do \
 	    echo "==> $$src" >> build/analyze.log; \
-	    clang --analyze $(filter-out -pipe,$(CFLAGS_COMMON)) "$$src" \
+	    clang --analyze $(filter-out -pipe,$(CFLAGS_COMMON)) $(ANALYZE_FLAGS) "$$src" \
 	      >> build/analyze.log 2>&1 || status=1; \
 	  done; \
 	  cat build/analyze.log; \

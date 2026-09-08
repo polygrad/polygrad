@@ -348,7 +348,7 @@ PolyDevice poly_uop_device_cached(PolyUOp *u, PolyMap *cache) {
 
 PolyUOp *poly_copy_to_device_uop(PolyCtx *ctx, PolyUOp *value, PolyUOp *device) {
   if (!ctx || !value || !device || device->op != POLY_OP_DEVICE) return NULL;
-  PolyArg arg = poly_arg_none();
+  PolyArg arg;
   if (device->arg.kind == POLY_ARG_STRING)
     arg = poly_arg_str(device->arg.str);
   else if (device->arg.kind == POLY_ARG_STRING_TUPLE)

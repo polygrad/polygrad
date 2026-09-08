@@ -652,18 +652,18 @@ char *poly_render_cuda(
     const char *fn_name,
     int launch_bounds
 ) {
-  if (!ctx) return NULL;
-  CudaStrBuf decls, body;
+  if (!ctx || n < 0 || (n && !uops)) return NULL;
+  CudaStrBuf decls, body, out = {0};
+  char *result = NULL;
   csb_init(&decls);
   csb_init(&body);
 
   CudaStrMap names;
   csmap_init(&names, n);
 
-  char *param_types[64];
-  char *param_names[64];
-  int param_order[64];
-  int n_params = 0;
+  char **param_types = NULL, **param_names = NULL;
+  int *param_order = NULL;
+  int n_params = 0, param_capacity = 0;
 
   int c_val = 0, c_alu = 0, c_cast = 0, c_acc = 0;
   int depth = 1;
@@ -682,6 +682,7 @@ char *poly_render_cuda(
   /* Pre-scan: count range references for liveness */
   for (int i = 0; i < n; i++) {
     PolyUOp *u = uops[i];
+    if (u->op == POLY_OP_PARAM) param_capacity++;
     if (u->op == POLY_OP_RANGE) (void)cuda_range_slot(live_ranges, &n_live_ranges, u, true);
     if (u->op == POLY_OP_END) continue;
     for (int j = 0; j < u->n_src; j++) {
@@ -691,6 +692,12 @@ char *poly_render_cuda(
       }
     }
   }
+
+  /* CStyleLanguage collects one entry per PARAM, without a fixed ceiling. */
+  param_types = calloc((size_t)param_capacity, sizeof(*param_types));
+  param_names = calloc((size_t)param_capacity, sizeof(*param_names));
+  param_order = calloc((size_t)param_capacity, sizeof(*param_order));
+  if (param_capacity && (!param_types || !param_names || !param_order)) goto cleanup;
 
   for (int i = 0; i < n; i++) {
     PolyUOp *u = uops[i];
@@ -710,16 +717,7 @@ char *poly_render_cuda(
      * scalar kernel arguments from the same numbered ParamArg sequence. */
     if (u->op == POLY_OP_PARAM) {
       int64_t slot = poly_program_buffer_slot(u);
-      if (slot < 0) {
-        for (int j = 0; j < n_params; j++) {
-          free(param_types[j]);
-          free(param_names[j]);
-        }
-        free(decls.buf);
-        free(body.buf);
-        csmap_destroy(&names);
-        return NULL;
-      }
+      if (slot < 0) goto cleanup;
       char name[32];
       snprintf(name, sizeof(name), "data%lld", (long long)slot);
       csmap_set(&names, u, strdup(name));
@@ -738,13 +736,14 @@ char *poly_render_cuda(
       param_names[n_params] = strdup(name);
       param_order[n_params] = (int)slot;
       n_params++;
+      if (!param_types[n_params - 1] || !param_names[n_params - 1]) goto cleanup;
       continue;
     }
 
     /* --- CONST -------------------------------------------------------- */
     if (u->op == POLY_OP_CONST) {
       char *literal = cuda_render_const_literal(u, u->dtype);
-      if (!literal) return NULL;
+      if (!literal) goto cleanup;
       csmap_set(&names, u, literal);
       continue;
     }
@@ -992,14 +991,14 @@ char *poly_render_cuda(
         char *literal = cuda_render_const_literal(
             u->src[0], poly_dtype_is_fp8(u->dtype) ? POLY_FLOAT32 : u->dtype
         );
-        if (!literal) return NULL;
+        if (!literal) goto cleanup;
         if (poly_dtype_is_fp8(u->dtype)) {
           const char *ctype = cuda_ctype(u->dtype);
           size_t len = strlen(ctype) + strlen(literal) + 7;
           char *typed = malloc(len);
           if (!typed) {
             free(literal);
-            return NULL;
+            goto cleanup;
           }
           snprintf(typed, len, "((%s)(%s))", ctype, literal);
           free(literal);
@@ -1042,7 +1041,7 @@ char *poly_render_cuda(
     /* --- WMMA -------------------------------------------------------- */
     if (u->op == POLY_OP_WMMA) {
       char helper[128];
-      if (!poly_wmma_name(u, helper, sizeof(helper))) return NULL;
+      if (!poly_wmma_name(u, helper, sizeof(helper))) goto cleanup;
       char name[32], ctype[128];
       snprintf(name, sizeof(name), "wmma%d", c_alu++);
       csmap_set(&names, u, strdup(name));
@@ -1076,12 +1075,7 @@ char *poly_render_cuda(
       char *expr = cuda_render_alu(u->op, u->dtype, rendered[0], rendered[1], rendered[2]);
       for (int j = 0; j < 3; j++)
         free(stripped[j]);
-      if (!expr) {
-        free(decls.buf);
-        free(body.buf);
-        csmap_destroy(&names);
-        return NULL;
-      }
+      if (!expr) goto cleanup;
 
       /* Pinned CStyleLanguage._render: one-consumer non-WHERE ALU remains an
        * expression unless EXPAND_SSA requests explicit statements. */
@@ -1161,7 +1155,6 @@ char *poly_render_cuda(
   }
 
   /* Build complete CUDA source */
-  CudaStrBuf out;
   csb_init(&out);
 
   /* Prefix: CUDA-specific defines and helpers */
@@ -1214,7 +1207,7 @@ char *poly_render_cuda(
       for (int j = 0; j < n_wmma_names; j++)
         if (strcmp(wmma_names[j], name) == 0) seen = true;
       if (seen) continue;
-      if (!cuda_render_wmma_helper(&out, ctx, uops[i])) return NULL;
+      if (!cuda_render_wmma_helper(&out, ctx, uops[i])) goto cleanup;
       if (n_wmma_names < 32)
         snprintf(wmma_names[n_wmma_names++], sizeof(wmma_names[0]), "%s", name);
     }
@@ -1235,16 +1228,25 @@ char *poly_render_cuda(
   csb_puts(&out, "}\n");
 
   /* No _call wrapper needed — CUDA uses cuLaunchKernel */
+  result = out.buf;
+  out.buf = NULL;
 
+cleanup:
+  /* C ownership of CStyleLanguage._render's local strings. Rejected kernels
+   * transfer no output and must release parameter names as well as scratch. */
+  free(out.buf);
   for (int i = 0; i < n_params; i++) {
     free(param_types[i]);
     free(param_names[i]);
   }
+  free(param_types);
+  free(param_names);
+  free(param_order);
   free(decls.buf);
   free(body.buf);
   csmap_destroy(&names);
 
-  return out.buf;
+  return result;
 }
 
 #endif /* POLY_HAS_CUDA */

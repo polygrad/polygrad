@@ -1915,6 +1915,9 @@ static double time_us_now(void) {
 /* Compile a kernel AST through the full post-optimization pipeline,
  * render to C, compile with clang, allocate test buffers, and time execution.
  * Returns median time in microseconds. Returns INFINITY on failure. */
+#ifdef POLY_TESTING
+static int beam_test_parameter_count;
+#endif
 static double beam_compile_and_time(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOpts opts, int reps) {
   /* Run through the rest of the codegen pipeline (post-optimization stages).
    * Setting optimize=false skips the preprocessing+apply_opts pass since
@@ -1952,36 +1955,37 @@ static double beam_compile_and_time(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOpts
   int n_topo = 0;
   PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n_topo);
   int n_params = 0;
-  int64_t param_sizes[64];
+  void **bufs = NULL;
+  double median = INFINITY;
+  if (!topo) goto cleanup;
+  for (int i = 0; i < n_topo; i++)
+    if (topo[i]->op == POLY_OP_PARAM) n_params++;
+  if (!n_params) goto cleanup;
+  /* search._time_program passes the complete rawbufs list. The rendered
+   * wrapper reads every argument; silently truncating it corrupts memory. */
+  bufs = calloc((size_t)n_params, sizeof(*bufs));
+  if (!bufs) goto cleanup;
+  int param_index = 0;
   for (int i = 0; i < n_topo; i++) {
-    if (topo[i]->op == POLY_OP_PARAM && n_params < 64) {
+    if (topo[i]->op == POLY_OP_PARAM) {
       int64_t sz = poly_program_buffer_size(topo[i]);
       if (sz <= 0) sz = 1024; /* default */
-      param_sizes[n_params] = sz;
-      n_params++;
+      if ((uint64_t)sz > SIZE_MAX / sizeof(float)) goto cleanup;
+      bufs[param_index] = calloc((size_t)sz, sizeof(float));
+      if (!bufs[param_index]) goto cleanup;
+      /* Preserve the existing finite float32 timing inputs. */
+      float *fp = bufs[param_index++];
+      for (int64_t j = 0; j < sz; j++)
+        fp[j] = 0.1f + (float)(j % 100) * 0.01f;
     }
   }
   poly_toposort_free(topo);
-
-  if (n_params == 0) {
-    poly_program_destroy(prog);
-    return INFINITY;
-  }
-
-  /* Allocate test buffers (random float32 data) */
-  void *bufs[64];
-  for (int i = 0; i < n_params; i++) {
-    int64_t nbytes = param_sizes[i] * 4; /* float32 */
-    if (nbytes <= 0) nbytes = 4096;
-    bufs[i] = calloc(1, (size_t)nbytes);
-    /* Fill with small random values to avoid NaN/inf in transcendentals */
-    float *fp = (float *)bufs[i];
-    int n_elems = (int)(nbytes / 4);
-    for (int j = 0; j < n_elems; j++)
-      fp[j] = 0.1f + (float)(j % 100) * 0.01f;
-  }
+  topo = NULL;
 
   /* Warm up */
+#ifdef POLY_TESTING
+  beam_test_parameter_count = n_params;
+#endif
   poly_program_call(prog, bufs, n_params);
 
   /* Time execution */
@@ -2003,17 +2007,34 @@ static double beam_compile_and_time(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOpts
         times[i] = times[j];
         times[j] = t;
       }
-  double median = times[reps / 2];
+  median = times[reps / 2];
 
-  /* Cleanup */
-  for (int i = 0; i < n_params; i++)
-    free(bufs[i]);
+cleanup:
+  poly_toposort_free(topo);
+  if (bufs)
+    for (int i = 0; i < n_params; i++)
+      free(bufs[i]);
+  free(bufs);
   poly_program_destroy(prog);
 
   return median;
 }
 
 /* Disk cache for BEAM results */
+#ifdef POLY_TESTING
+double poly_test_beam_compile_and_time(
+    PolyCtx *ctx,
+    PolyUOp *sink,
+    PolyRewriteOpts opts,
+    int reps,
+    int *n_args
+) {
+  beam_test_parameter_count = 0;
+  double elapsed = beam_compile_and_time(ctx, sink, opts, reps);
+  *n_args = beam_test_parameter_count;
+  return elapsed;
+}
+#endif
 
 /* FNV-1a hash over the AST toposort (structural hash for cache key) */
 static uint64_t beam_ast_hash(PolyCtx *ctx, PolyUOp *sink) {

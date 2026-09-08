@@ -19,6 +19,82 @@
 
 #include <inttypes.h>
 
+#ifndef __EMSCRIPTEN__
+TEST(codegen, beam_parameter_inventory_is_not_fixed_at_64) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(0));
+  PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0));
+  PolyUOp *stores[65];
+  for (int i = 0; i < 65; i++) {
+    PolyUOp *param = poly_test_program_param(ctx, POLY_FLOAT32, 1, i);
+    PolyUOp *index = poly_uop_index(ctx, param, &zero, 1);
+    stores[i] = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, index, one, poly_arg_none());
+  }
+  PolyUOp *sink = poly_test_kernel_sink(ctx, stores, 65, "beam_many_params");
+  PolyRewriteOpts opts = {.caps = poly_c_renderer_caps()};
+  int n_args = 0;
+  double elapsed = poly_test_beam_compile_and_time(ctx, sink, opts, 1, &n_args);
+  poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(n_args, 65);
+  ASSERT_TRUE(isfinite(elapsed) && elapsed >= 0);
+  PASS();
+}
+#endif
+
+TEST(codegen, c_render_parameter_inventory_is_not_fixed_at_64) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *shape = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(1));
+  PolyUOp *params[65];
+  for (int i = 0; i < 65; i++) {
+    PolyParamArg arg = {.slot = i, .addrspace = POLY_ADDR_GLOBAL};
+    params[i] = poly_uop1(ctx, POLY_OP_PARAM, POLY_FLOAT32, shape, poly_arg_param(&arg));
+  }
+  char *source = poly_render_c(ctx, params, 65, "many_params");
+  bool accepted = source && strstr(source, "data64");
+  free(source);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(accepted);
+  PASS();
+}
+
+#ifdef POLY_HAS_CUDA
+TEST(codegen, cuda_render_parameter_inventory_is_not_fixed_at_64) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *shape = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(1));
+  PolyUOp *params[65];
+  for (int i = 0; i < 65; i++) {
+    PolyParamArg arg = {.slot = i, .addrspace = POLY_ADDR_GLOBAL};
+    params[i] = poly_uop1(ctx, POLY_OP_PARAM, POLY_FLOAT32, shape, poly_arg_param(&arg));
+  }
+  char *source = poly_render_cuda(ctx, params, 65, "many_params", 1);
+  ASSERT_NOT_NULL(source);
+  ASSERT_NOT_NULL(strstr(source, "data64"));
+  free(source);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, cuda_render_failure_releases_owned_scratch) {
+  /* C cleanup for CStyleLanguage._render's rejected WMMA. Include a named
+   * parameter so failure must release both parameter strings and scratch. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *shape = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(1));
+  PolyParamArg arg = {.slot = 0, .addrspace = POLY_ADDR_GLOBAL};
+  PolyUOp *param = poly_uop1(ctx, POLY_OP_PARAM, POLY_FLOAT32, shape, poly_arg_param(&arg));
+  PolyUOp *invalid = poly_uop0(ctx, POLY_OP_WMMA, POLY_FLOAT32, poly_arg_none());
+  PolyUOp *ops[] = {param, invalid};
+  char *failed = poly_render_cuda(ctx, ops, 2, "rejected", 1);
+  bool rejected = !failed;
+  free(failed);
+  char *retry = poly_render_cuda(ctx, ops, 1, "retry", 1);
+  bool recovered = retry && strstr(retry, "__launch_bounds__(1) retry(");
+  free(retry);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(rejected && recovered);
+  PASS();
+}
+#endif
+
 static uint64_t topology_fnv_bytes(uint64_t h, const void *data, size_t n) {
   const uint8_t *bytes = (const uint8_t *)data;
   for (size_t i = 0; i < n; i++) {

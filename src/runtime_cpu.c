@@ -283,7 +283,8 @@ PolyProgram *poly_compile_c(const char *source, const char *fn_name) {
    * bytes, not dlopen'ed shared libraries, so this is a Polygrad C-backend
    * loader constraint. Keep release disk caching enabled, but make sanitizer
    * runs compile temporary kernels instead of reusing cached .so files. */
-  int use_cache = (!getenv("POLY_CACHE") || getenv("POLY_CACHE")[0] != '0') && !jit_asan_enabled();
+  const char *cache_env = getenv("POLY_CACHE");
+  int use_cache = (!cache_env || cache_env[0] != '0') && !jit_asan_enabled();
   char cache_dir[512] = {0};
   char cache_path[512] = {0};
   uint64_t h = 0;
