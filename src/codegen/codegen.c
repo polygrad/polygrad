@@ -824,12 +824,13 @@ static int64_t sched_upcast_size(const OptScheduler *s) {
   return prod;
 }
 
-static int64_t sched_full_shape_prod(const OptScheduler *s) {
-  int64_t prod = 1;
+static PolyUOp *sched_full_shape_prod(const OptScheduler *s) {
+  /* heuristic.py resolves the complete symbolic product. Unknown dimensions
+   * must not become factors of one; weak arithmetic avoids host overflow. */
+  PolyUOp *prod = poly_uop0(s->ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(1));
   for (int i = 0; i < s->n_rngs; i++) {
-    if (s->shape[i] <= 0) continue;
-    if (prod > INT64_MAX / s->shape[i]) return INT64_MAX;
-    prod *= s->shape[i];
+    prod =
+        poly_alu2(s->ctx, POLY_OP_MUL, prod, poly_cast(s->ctx, s->rngs[i]->src[0], POLY_WEAKINT));
   }
   return prod;
 }
@@ -861,6 +862,46 @@ static int64_t sched_output_prod_upcastable(const OptScheduler *s) {
     prod *= s->shape[i];
   }
   return prod;
+}
+
+/* heuristic.py sum_strides is a Python integer even when index terms are
+ * large and cancel. Use the shared integer owner, not int64 or float scores. */
+static bool sched_stride_score(const OptScheduler *s, int axis, int *num_strides, PolyInt *sum) {
+  PolyUOp *rng = s->rngs[axis];
+  *num_strides = 0;
+  for (int bi = 0; bi < s->n_bufs; bi++) {
+    if (s->bufs[bi]->n_src < 2) continue;
+    PolyUOp *idx = poly_uop_get_idx(s->ctx, s->bufs[bi]->src[1]);
+    if (!idx) return false;
+    if (sched_buf_reaches(s, bi, axis)) ++*num_strides;
+    int n_add = 0;
+    PolyUOp **addends = poly_uop_split(idx, POLY_OP_ADD, &n_add);
+    if (!addends) return false;
+    for (int j = 0; j < n_add; j++) {
+      PolyUOp *c = addends[j], *coefficient = NULL;
+      if (c->op == POLY_OP_MUL && c->n_src == 2) {
+        if (c->src[0] == rng && c->src[1]->op == POLY_OP_CONST)
+          coefficient = c->src[1];
+        else if (c->src[1] == rng && c->src[0]->op == POLY_OP_CONST)
+          coefficient = c->src[0];
+      }
+      if (c != rng && !coefficient) continue;
+      PolyInt term = {0}, next = {0};
+      bool ok =
+          coefficient ? poly_int_from_arg(&term, coefficient->arg) : poly_int_from_i64(&term, 1);
+      ok = ok && poly_int_add(&next, sum, &term);
+      poly_int_free(&term);
+      if (!ok) {
+        poly_int_free(&next);
+        free(addends);
+        return false;
+      }
+      poly_int_free(sum);
+      *sum = next;
+    }
+    free(addends);
+  }
+  return true;
 }
 
 typedef struct {
@@ -1642,7 +1683,7 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
     for (int i = n_to_upcast - 1; i >= 0; i--) {
       int axis = to_upcast[i];
       if (axis < s.n_rngs && s.shape[axis] > 1)
-        sched_apply_int_opt(&s, caps, POLY_OPT_UPCAST, axis, s.shape[axis]);
+        sched_apply_int_opt(&s, caps, POLY_OPT_UPCAST, axis, 0);
     }
     free(up_dims);
     free(to_upcast);
@@ -1659,7 +1700,7 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
       /* Score each candidate (num_strides, sum_strides, axis, amount) */
       typedef struct {
         int num_strides;
-        int64_t sum_strides;
+        PolyInt sum_strides;
         int axis;
         int amount;
       } UpChoice;
@@ -1677,8 +1718,6 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
         for (int ai = 0; ai < 2; ai++) {
           int amount = amounts[ai];
           if (s.shape[axis] % amount != 0) continue;
-
-          PolyUOp *rng = s.rngs[axis];
 
           /* Expanded axis check (heuristic.py:117-118):
            * Must have a buffer where rng is NOT in index but all UPCAST/UNROLL rngs ARE */
@@ -1701,43 +1740,21 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
 
           /* Count strides (heuristic.py:119-127) */
           int num_strides = 0;
-          int64_t sum_strides = 0;
-          for (int bi = 0; bi < s.n_bufs; bi++) {
-            PolyUOp *idx_uop = s.bufs[bi];
-            if (idx_uop->n_src < 2) continue;
-            /* Pinned heuristic.py:118-128 scores the address projection, not
-             * the validity predicate carried by an Invalid-bearing WHERE. */
-            PolyUOp *idx_expr = poly_uop_get_idx(ctx, idx_uop->src[1]);
-            if (!idx_expr) continue;
-
-            /* Check if rng is in backward slice */
-            if (sched_buf_reaches(&s, bi, axis)) num_strides++;
-
-            /* Split on ADD and extract stride for this rng */
-            int n_add = 0;
-            PolyUOp **addends = poly_uop_split(idx_expr, POLY_OP_ADD, &n_add);
-            if (!addends) {
-              free(upcasted_axis);
-              goto done;
-            }
-            for (int j = 0; j < n_add; j++) {
-              PolyUOp *c = addends[j];
-              if (c == rng) {
-                sum_strides += 1;
-              } else if (c->op == POLY_OP_MUL && c->n_src == 2) {
-                if (c->src[0] == rng && c->src[1]->op == POLY_OP_CONST &&
-                    c->src[1]->arg.kind == POLY_ARG_INT)
-                  sum_strides += c->src[1]->arg.i;
-                else if (c->src[1] == rng && c->src[0]->op == POLY_OP_CONST && c->src[0]->arg.kind == POLY_ARG_INT)
-                  sum_strides += c->src[0]->arg.i;
-              }
-            }
-            free(addends);
+          PolyInt sum_strides = {0};
+          if (!sched_stride_score(&s, axis, &num_strides, &sum_strides)) {
+            poly_int_free(&sum_strides);
+            poly_int_free(&best.sum_strides);
+            free(upcasted_axis);
+            goto done;
           }
 
           if (!n_choices || num_strides < best.num_strides ||
-              (num_strides == best.num_strides && sum_strides < best.sum_strides))
+              (num_strides == best.num_strides && poly_int_cmp(&sum_strides, &best.sum_strides) < 0
+              )) {
+            poly_int_free(&best.sum_strides);
             best = (UpChoice){num_strides, sum_strides, axis, amount};
+          } else
+            poly_int_free(&sum_strides);
           n_choices++;
         }
       }
@@ -1747,6 +1764,7 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
       /* Enumeration already supplies the axis/amount tie-break order. */
       int best_axis = best.axis;
       int best_amount = best.amount;
+      poly_int_free(&best.sum_strides);
       if (best_axis < s.n_rngs && s.shape[best_axis] > 1)
         sched_apply_int_opt(&s, caps, POLY_OPT_UPCAST, best_axis, best_amount);
       /* Pinned heuristic tracks the selected index, not UOp identity. */
@@ -1788,21 +1806,14 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
     free(unroll_dims);
   }
 
-  /* == Default upcast fallback (heuristic.py:151-154) ==
-   * If nothing upcasted and last upcastable dim % upcast_amount == 0,
-   * upcast by that amount. Use max_vec_width from caps (4 for SSE, 8 for AVX2). */
+  /* heuristic.py's fallback is four lanes, independent of renderer width. */
   if (!sched_upcasted(&s)) {
-    int upcast_amount = (caps.max_vec_width >= 8) ? 8 : 4;
     int *up_dims = calloc((size_t)s.n_rngs, sizeof(*up_dims));
     if (!up_dims) goto done;
     int n_up = sched_upcastable_dims(&s, up_dims, s.n_rngs);
     if (n_up > 0) {
       int last = up_dims[n_up - 1];
-      /* Try preferred width first, fall back to 4 if not divisible */
-      if (s.shape[last] % upcast_amount == 0 && last < s.n_rngs)
-        sched_apply_int_opt(&s, caps, POLY_OPT_UPCAST, last, upcast_amount);
-      else if (upcast_amount > 4 && s.shape[last] % 4 == 0 && last < s.n_rngs)
-        sched_apply_int_opt(&s, caps, POLY_OPT_UPCAST, last, 4);
+      if (s.shape[last] % 4 == 0) sched_apply_int_opt(&s, caps, POLY_OPT_UPCAST, last, 4);
     }
     free(up_dims);
   }
@@ -1889,13 +1900,20 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
    * ClangRenderer has has_threads=true, then gpudims.py replaces the THREAD
    * axis with the runtime ALU PARAM "core_id". Keep this after local grouping
    * just like tinygrad's final heuristic block. */
-  if (caps.has_threads && caps.max_threads > 1 && !sched_has_axis_type(&s, POLY_AXIS_THREAD)) {
+  if (caps.has_threads && caps.global_max[0] > 1 && !sched_has_axis_type(&s, POLY_AXIS_THREAD)) {
     int candidates[] = {32, 16, 12, 8, 6, 5, 4, 3, 2};
-    int64_t full_prod = sched_full_shape_prod(&s);
+    PolyUOp *work = poly_alu2(
+        ctx, POLY_OP_IDIV, sched_full_shape_prod(&s),
+        poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(128LL << 10))
+    );
     for (int ci = 0; ci < (int)(sizeof(candidates) / sizeof(candidates[0])); ci++) {
       int threads = candidates[ci];
-      if (threads > caps.max_threads) continue;
-      if (full_prod / (128LL << 10) < threads) continue;
+      if (threads > caps.global_max[0]) continue;
+      PolyUOp *too_small = poly_alu2(
+          ctx, POLY_OP_CMPLT, work,
+          poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(threads))
+      );
+      if (poly_uop_resolve(ctx, too_small, 1) != 0) continue;
       for (int axis = 0; axis < s.n_rngs; axis++) {
         if (s.types[axis] != POLY_AXIS_WEAK) continue;
         if (s.shape[axis] <= 1 || (s.shape[axis] % threads) != 0) continue;

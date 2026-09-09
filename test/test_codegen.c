@@ -115,6 +115,41 @@ TEST(codegen, beam_compile_deadline_cancels_rewrites_without_poisoning_context) 
   PASS();
 }
 
+TEST(codegen, beam_strict_compile_failure_differs_from_budget_rejection) {
+  const char *names[] = {"CC", "BEAM_STRICT_MODE", "BEAM_UOPS_MAX", "CACHELEVEL"};
+  char *old[4];
+  for (int i = 0; i < 4; i++)
+    old[i] = getenv(names[i]) ? strdup(getenv(names[i])) : NULL;
+  setenv("CC", "false", 1);
+  setenv("CACHELEVEL", "0", 1);
+  setenv("BEAM_UOPS_MAX", "3000", 1);
+  setenv("BEAM_STRICT_MODE", "0", 1);
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = beam_action_sink(ctx, POLY_AXIS_WEAK, 8);
+  PolyRewriteOpts opts = {
+      .optimize = true, .beam_width = 1, .device = POLY_DEVICE_CPU, .caps = poly_c_renderer_caps()};
+  bool ordinary = poly_full_rewrite_to_sink_ex(ctx, sink, opts) != NULL;
+  setenv("BEAM_STRICT_MODE", "1", 1);
+  bool strict = poly_full_rewrite_to_sink_ex(ctx, sink, opts) == NULL;
+  setenv("BEAM_UOPS_MAX", "1", 1);
+  bool strict_before_budget = poly_full_rewrite_to_sink_ex(ctx, sink, opts) == NULL;
+  if (old[0])
+    setenv("CC", old[0], 1);
+  else
+    unsetenv("CC");
+  bool budget = poly_full_rewrite_to_sink_ex(ctx, sink, opts) != NULL;
+  poly_ctx_destroy(ctx);
+  for (int i = 0; i < 4; i++) {
+    if (old[i])
+      setenv(names[i], old[i], 1);
+    else
+      unsetenv(names[i]);
+    free(old[i]);
+  }
+  ASSERT_TRUE(ordinary && strict && strict_before_budget && budget);
+  PASS();
+}
+
 TEST(codegen, beam_actions_match_pinned_catalogue) {
   PolyOpt actions[256];
   int count = poly_test_beam_actions(actions, 256);
@@ -239,6 +274,155 @@ TEST(codegen, scheduler_heuristic_records_applied_options) {
             info->applied_opts[0].arg == 4;
   poly_ctx_destroy(ctx);
   ASSERT_TRUE(ok);
+  PASS();
+}
+
+static PolyUOp *policy_const(PolyCtx *ctx, int64_t value) {
+  return poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(value));
+}
+
+static PolyUOp *policy_range(PolyCtx *ctx, int size, int axis, PolyAxisType type) {
+  return poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_WEAKINT, policy_const(ctx, size), poly_arg_range(axis, type)
+  );
+}
+
+static bool policy_matches(
+    PolyCtx *ctx,
+    PolyUOp *sink,
+    PolyRendererCaps caps,
+    const PolyOpt *opts,
+    int n
+) {
+  PolyUOp *expected = sink;
+  for (int i = 0; expected && i < n; i++)
+    expected = poly_test_apply_opt(ctx, expected, caps, opts[i]);
+  return expected && poly_apply_opts_heuristic_ex(ctx, sink, caps) == expected;
+}
+
+TEST(codegen, scheduler_policy_masked_upcast_history) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *r = policy_range(ctx, 3, 0, POLY_AXIS_GLOBAL);
+  PolyUOp *out = poly_test_program_param(ctx, POLY_FLOAT32, 3, 0);
+  PolyUOp *cond =
+      poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, r, policy_const(ctx, 2), poly_arg_none());
+  PolyUOp *value =
+      poly_uop3(ctx, POLY_OP_WHERE, POLY_WEAKINT, cond, r, policy_const(ctx, 0), poly_arg_none());
+  PolyUOp *store = poly_uop2(
+      ctx, POLY_OP_STORE, POLY_VOID, poly_uop_index(ctx, out, &r, 1),
+      poly_cast(ctx, value, POLY_FLOAT32), poly_arg_none()
+  );
+  PolyUOp *end = poly_uop2(ctx, POLY_OP_END, POLY_VOID, store, r, poly_arg_none());
+  PolyUOp *sink = poly_test_kernel_sink(ctx, &end, 1, "test");
+  PolyOpt opt = {
+      .op = POLY_OPT_UPCAST, .has_axis = true, .axis = 0, .arg_kind = POLY_OPT_ARG_INT, .arg = 0};
+  bool ok = policy_matches(ctx, sink, (PolyRendererCaps){.device = "CPU"}, &opt, 1);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
+TEST(codegen, scheduler_policy_fallback_ignores_vector_cap) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = beam_action_sink(ctx, POLY_AXIS_GLOBAL, 64);
+  PolyOpt opt = {
+      .op = POLY_OPT_UPCAST, .has_axis = true, .axis = 0, .arg_kind = POLY_OPT_ARG_INT, .arg = 4};
+  bool ok =
+      policy_matches(ctx, sink, (PolyRendererCaps){.device = "CPU", .max_vec_width = 8}, &opt, 1);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
+static bool policy_thread_case(int lower, bool symbolic, bool legacy_cap) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *g = policy_range(ctx, 1 << 18, 0, POLY_AXIS_WEAK);
+  PolyUOp *value = poly_cast(ctx, g, POLY_FLOAT32);
+  if (symbolic) {
+    PolyUOp *n = poly_uop_variable(ctx, "n", lower, 4, POLY_WEAKINT, 1, false);
+    PolyUOp *r =
+        poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, n, poly_arg_range(1, POLY_AXIS_REDUCE));
+    value = poly_uop2(
+        ctx, POLY_OP_REDUCE, POLY_FLOAT32, poly_cast(ctx, r, POLY_FLOAT32), r,
+        poly_arg_reduce(POLY_OP_ADD, 0)
+    );
+  }
+  PolyUOp *out = poly_test_program_param(ctx, POLY_FLOAT32, 1 << 18, 0);
+  PolyUOp *store = poly_uop2(
+      ctx, POLY_OP_STORE, POLY_VOID, poly_uop_index(ctx, out, &g, 1), value, poly_arg_none()
+  );
+  PolyUOp *end = poly_uop2(ctx, POLY_OP_END, POLY_VOID, store, g, poly_arg_none());
+  PolyUOp *sink = poly_test_kernel_sink(ctx, &end, 1, "test");
+  PolyOpt opts[] = {
+      {.op = POLY_OPT_UPCAST, .has_axis = true, .axis = 0, .arg_kind = POLY_OPT_ARG_INT, .arg = 4},
+      {.op = POLY_OPT_THREAD, .has_axis = true, .axis = 0, .arg_kind = POLY_OPT_ARG_INT, .arg = 2}};
+  PolyRendererCaps caps = {
+      .device = "CPU",
+      .has_threads = true,
+      .global_max = {2, 0, 0},
+      .max_threads = legacy_cap ? 2 : 0};
+  bool ok = policy_matches(ctx, sink, caps, opts, symbolic && !lower ? 1 : 2);
+  poly_ctx_destroy(ctx);
+  return ok;
+}
+
+TEST(codegen, scheduler_policy_threads_use_global_max) {
+  ASSERT_TRUE(policy_thread_case(0, false, false));
+  PASS();
+}
+
+TEST(codegen, scheduler_policy_threads_prove_symbolic_work) {
+  ASSERT_TRUE(policy_thread_case(2, true, true));
+  ASSERT_TRUE(policy_thread_case(0, true, true));
+  PASS();
+}
+
+static bool policy_stride_case(bool big) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = policy_range(ctx, 32, 0, POLY_AXIS_WEAK);
+  PolyUOp *y = policy_range(ctx, 32, 1, POLY_AXIS_WEAK);
+  PolyUOp *idx = NULL;
+  const char *coeffs[] = {"1180591620717411303424", "-1180591620717411303421"};
+  for (int i = 0; i < (big ? 2 : 4); i++) {
+    PolyUOp *coefficient;
+    if (big) {
+      PolyInt v = {0};
+      if (!poly_int_from_decimal(&v, coeffs[i])) {
+        poly_ctx_destroy(ctx);
+        return false;
+      }
+      coefficient = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_int_as_arg(&v));
+      poly_int_free(&v);
+    } else
+      coefficient = policy_const(ctx, i < 2 ? INT64_MAX : -INT64_MAX);
+    PolyUOp *term = poly_uop2(ctx, POLY_OP_MUL, POLY_WEAKINT, x, coefficient, poly_arg_none());
+    idx = idx ? poly_uop2(ctx, POLY_OP_ADD, POLY_WEAKINT, idx, term, poly_arg_none()) : term;
+  }
+  /* Large intermediates cancel: the actual index is y or 3*x+y (<128). */
+  idx = poly_uop2(ctx, POLY_OP_ADD, POLY_WEAKINT, idx, y, poly_arg_none());
+  PolyUOp *buf = poly_test_program_param(ctx, POLY_FLOAT32, 128, 0);
+  PolyUOp *scalar = poly_test_program_param(ctx, POLY_FLOAT32, 1, 1);
+  PolyUOp *zero = policy_const(ctx, 0);
+  PolyUOp *src[] = {poly_uop_index(ctx, buf, &idx, 1), poly_uop_index(ctx, scalar, &zero, 1)};
+  PolyUOp *sink = poly_test_kernel_sink(ctx, src, 2, "test");
+  PolyOpt opt = {
+      .op = POLY_OPT_UPCAST,
+      .has_axis = true,
+      .axis = big ? 1 : 0,
+      .arg_kind = POLY_OPT_ARG_INT,
+      .arg = 4};
+  bool ok = policy_matches(ctx, sink, (PolyRendererCaps){.device = "CPU"}, &opt, 1);
+  poly_ctx_destroy(ctx);
+  return ok;
+}
+
+TEST(codegen, scheduler_policy_stride_score_overflow) {
+  ASSERT_TRUE(policy_stride_case(false));
+  PASS();
+}
+
+TEST(codegen, scheduler_policy_stride_score_bigint) {
+  ASSERT_TRUE(policy_stride_case(true));
   PASS();
 }
 

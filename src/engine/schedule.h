@@ -65,7 +65,9 @@ PolyUOp *poly_program_linear(PolyUOp *program);
 PolyUOp *poly_compile_linear(PolyCtx *ctx, PolyUOp *linear, int beam);
 
 /* Uncached, waited time_call execution used by codegen/opt/search. The caller
- * owns scratch buffers; prepare/finish balance the compiled runner and roots. */
+ * owns scratch buffers; prepare/finish balance the compiled runner and roots.
+ * prepare returns -1 for ordinary candidate rejection, -2 for an unexpected
+ * backend failure that search._try_compile propagates under strict mode. */
 int poly_time_call_prepare(PolyCtx *ctx, PolyUOp *call, PolyDevice device, PolyRunner *runner);
 double poly_time_call(
     PolyRunner *runner,

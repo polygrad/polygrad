@@ -189,6 +189,9 @@ Python `Context(IGNORE_BEAM_CACHE=1)` or JS `runtime.ignoreBeamCache = 1`
 bypasses saved search results. `BEAM_TIMEOUT_SEC` bounds candidate compilation
 (default 10 seconds; 0 disables the budget). Native compiler subprocesses are
 stopped on expiry; in-process driver calls are checked when they return.
+`BEAM_STRICT_MODE=1` also propagates native compiler process failures instead
+of rejecting those candidates. Ordinary candidate-limit and device compiler
+rejections remain recoverable, matching the pinned search policy.
 
 Default storage dtypes use the same C-owned policy: Python
 `Context(DEFAULT_FLOAT='float64', DEFAULT_INT='int64')`, or JS

@@ -2057,9 +2057,16 @@ int poly_time_call_prepare(PolyCtx *ctx, PolyUOp *call, PolyDevice device, PolyR
   );
   PolyUOp *linear = poly_program_linear(program);
   int limit = poly_getenv_int("BEAM_UOPS_MAX", 3000);
-  if (!program || !linear || (limit > 0 && linear->n_src >= limit)) return -1;
+  if (!program || !linear) return -1;
   out->capture_binary = true;
-  if (backend->lower_item(ctx, program, "test", out) != 0) {
+  int status = backend->lower_item(ctx, program, "test", out);
+  if (status != 0) {
+    poly_runner_cleanup(out, device);
+    return status;
+  }
+  /* search._try_compile tests the UOp budget after to_program compiles.
+   * Rejecting earlier would hide unexpected compiler failures in strict mode. */
+  if (limit > 0 && linear->n_src >= limit) {
     poly_runner_cleanup(out, device);
     return -1;
   }
@@ -2238,7 +2245,9 @@ static int cpu_lower_item_impl(
     fprintf(stderr, "=== FAILED LOWER KERNEL %s ===\n%s\n=== END ===\n", fn_name, src);
     free(src_owned);
     if (lin_owned) free(lin);
-    return -1;
+    /* compiler_cpu.ClangCompiler.compile raises CalledProcessError/OSError,
+     * unlike the recoverable RuntimeError/CompileError of device compilers. */
+    return -2;
   }
   free(src_owned);
   if (lin_owned) free(lin);
