@@ -237,11 +237,8 @@ TEST(qwen3, forward_cpu) {
 
 #ifdef POLY_HAS_CUDA
 TEST(qwen3, forward_cuda) {
+  if (!poly_cuda_available()) SKIP("no CUDA GPU");
   SKIP_IF_NO_GGUF();
-  if (!poly_cuda_available()) {
-    fprintf(stderr, "    (skipped: no CUDA GPU)\n");
-    PASS();
-  }
 
   PolyModel *inst = poly_qwen3_from_gguf_decoded(g_gguf, 1, 25, POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);

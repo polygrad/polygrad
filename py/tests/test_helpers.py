@@ -48,6 +48,17 @@ def test_check_oob_zero_and_unsupported_enable_restore_context():
     assert helpers.CHECK_OOB.value == 0
 
 
+def test_wino_rejects_unimplemented_mode_and_restores_context():
+    old = helpers.DEBUG.value
+    with Context(WINO=0):
+        assert WINO.value == 0
+    with pytest.raises(NotImplementedError, match='Winograd'):
+        with Context(DEBUG=old + 1, WINO=1):
+            pass
+    assert helpers.DEBUG.value == old
+    assert WINO.value == 0
+
+
 def test_prod_matches_tinygrad_empty_generator_and_mixed_numeric_semantics():
     assert prod(()) == 1
     assert prod(value for value in (2, 3, 4)) == 24
@@ -181,14 +192,14 @@ def test_contextvar_comparison_duplicate_and_tolist_semantics(monkeypatch):
 
 
 def test_context_nests_restores_decorates_and_rejects_unknown_keys():
-    old_beam, old_wino = BEAM.value, WINO.value
-    with Context(BEAM=5, WINO=1) as entered:
+    old_beam, old_no_color = BEAM.value, NO_COLOR.value
+    with Context(BEAM=5, NO_COLOR=1) as entered:
         assert entered is None
-        assert (BEAM.value, WINO.value) == (5, 1)
+        assert (BEAM.value, NO_COLOR.value) == (5, 1)
         with Context(BEAM=7):
-            assert (BEAM.value, WINO.value) == (7, 1)
-        assert (BEAM.value, WINO.value) == (5, 1)
-    assert (BEAM.value, WINO.value) == (old_beam, old_wino)
+            assert (BEAM.value, NO_COLOR.value) == (7, 1)
+        assert (BEAM.value, NO_COLOR.value) == (5, 1)
+    assert (BEAM.value, NO_COLOR.value) == (old_beam, old_no_color)
 
     with pytest.raises(RuntimeError, match="probe"):
         with Context(BEAM=9):

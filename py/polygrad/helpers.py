@@ -333,6 +333,20 @@ class _CHECK_OOB(ContextVar):
         self._value = value
 
 
+class _WINO(ContextVar):
+    @property
+    def value(self):
+        return self._value
+
+    @value.setter
+    def value(self, value):
+        # PG-PARITY-012: Tinygrad selects _conv2d_winograd for WINO=1.
+        # No corresponding C path exists; reject rather than silently ignore.
+        if value != 0:
+            raise NotImplementedError('Winograd convolution is not implemented')
+        self._value = value
+
+
 class _BEAM(ContextVar):
     @property
     def value(self):
@@ -419,7 +433,7 @@ IGNORE_BEAM_CACHE = _IGNORE_BEAM_CACHE("IGNORE_BEAM_CACHE", 0)
 # Pinned tinygrad/helpers.py:241. Keep the public configuration object rather
 # than exposing a frozen boolean so Context(JIT=...) and environment overrides work.
 JIT = ContextVar("JIT", 2 if OSX and ARCH_X86 else 1)
-WINO = ContextVar("WINO", 0)
+WINO = _WINO("WINO", 0)
 NO_COLOR = ContextVar("NO_COLOR", 0)
 # Current tinygrad/helpers.py:237. Dropout, BatchNorm, and optimizers share one
 # scoped training-mode owner rather than storing mode on Tensor.

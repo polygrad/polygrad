@@ -191,7 +191,22 @@ require-qwen3-gguf:
 	fi
 
 test-qwen3: build/polygrad_test require-qwen3-gguf
-	$(SAN_RUN) POLY_QWEN3_GGUF="$(QWEN3_GGUF)" ./build/polygrad_test qwen3
+	$(SAN_RUN) POLY_QWEN3_GGUF="$(QWEN3_GGUF)" ./build/polygrad_test --require-no-skips qwen3
+
+.PHONY: test-qwen3-cuda test-hf-e2e test-release-gates test-js-package-install test-release-packages
+test-qwen3-cuda: build/polygrad_test require-qwen3-gguf
+	$(SAN_RUN) POLY_QWEN3_GGUF="$(QWEN3_GGUF)" ./build/polygrad_test --require-no-skips qwen3.forward_cuda
+
+# Set HF_PYTHON to an environment containing the HF/Torch reference stack.
+# Missing dependencies and offline fixture misses are failures, not passes.
+HF_PYTHON ?= $(PARITY_PY)
+test-hf-e2e: build/libpolygrad.so
+	PYTEST_ADDOPTS= POLY_REQUIRE_HF=1 POLYGRAD_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py \
+		$(HF_PYTHON) -m pytest py/tests/test_hf_e2e.py -o addopts= -v
+
+test-release-gates: build/polygrad_test build/libpolygrad.so
+	PYTEST_ADDOPTS= POLYGRAD_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py \
+		$(HF_PYTHON) -m pytest py/tests/test_release_gates.py -o addopts= -v
 
 # Backend-specific tests only. --specific requires TEST_BACKEND and an exact
 # suite match, so portable tests with backend names remain in test-common-*.
@@ -734,12 +749,16 @@ build-py-wheel: verify-source-mirrors
 build-python: build-py
 
 test-py-sdist-install: build-py-sdist
-	rm -rf temp/py-sdist-smoke && mkdir -p temp/py-sdist-smoke/run temp/py-sdist-smoke/tmp && \
-		$(PYTHON) -m venv --system-site-packages temp/py-sdist-smoke/venv && \
-		. temp/py-sdist-smoke/venv/bin/activate && \
-		TMPDIR=$(abspath temp/py-sdist-smoke/tmp) python -m pip install --no-cache-dir --no-deps py/dist/polygrad-*.tar.gz && \
-		cd temp/py-sdist-smoke/run && \
-		PYTHONPATH= TMPDIR=$(abspath temp/py-sdist-smoke/tmp) python -c "from extra.bench_log import BenchEvent; from polygrad import Tensor; print(BenchEvent.STEP.value, ((Tensor([1,2,3])*2+1).numpy()).tolist())"
+	$(PYTHON) test/test_package_install.py python
+
+test-js-package-install: verify-source-mirrors wasm-pkg
+	$(PYTHON) test/test_package_install.py node --npm $(NPM) --node $(NODE)
+
+# Native JIT compilation uses shared temporary names. Keep these lanes serial
+# even when the parent make was invoked with -j.
+test-release-packages:
+	$(MAKE) test-py-sdist-install
+	$(MAKE) test-js-package-install
 
 publish-py: build-py-sdist
 	cd py && $(TWINE) upload dist/*.tar.gz

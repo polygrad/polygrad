@@ -401,13 +401,14 @@
       "stages": ["python-api", "tensor"],
       "area": "WINO behavior",
       "tinygrad": "WINO=1 selects the implemented Winograd 3x3 convolution path",
-      "polygrad": "The Python ContextVar exists but has no corresponding core implementation",
-      "rationale": "Frontend name parity without behavior is not complete API parity.",
+      "polygrad": "WINO=0 is accepted; nonzero Python Context or environment requests raise NotImplementedError because no core Winograd implementation exists.",
+      "rationale": "Explicit rejection removes silent no-op configuration, not the missing Winograd capability. This remains open debt, not a parity allowance.",
       "approval": null,
       "evidence": [
-        "references/tinygrad_latest/tinygrad/tensor.py:Tensor.conv2d",
+        "references/tinygrad_latest/tinygrad/mixin/op.py:OpMixin.conv2d",
         "py/polygrad/helpers.py:WINO",
-        "MEMORY_CIFAR.md:Python frontend and package surface"
+        "py/tests/test_helpers.py:test_wino_rejects_unimplemented_mode_and_restores_context",
+        "temp/release-gates-20260909/wino-tinygrad.log"
       ],
       "close_when": "WINO=0 and WINO=1 source/probe behavior is parity-aligned across required frontends/backends."
     },

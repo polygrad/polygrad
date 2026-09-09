@@ -5,22 +5,33 @@ Downloads openai-community/gpt2 (124M), loads via poly_hf_load,
 runs forward pass, validates logits against HF Transformers reference,
 and generates text.
 
-Requires: huggingface_hub, transformers, numpy
+Requires: huggingface_hub, transformers, torch, numpy
 """
 
 import numpy as np
 import pytest
 import os
-
-# Skip if no network or missing deps
-pytest.importorskip('huggingface_hub')
-pytest.importorskip('transformers')
+import importlib
 
 from polygrad.hf import download_hf, load_hf, generate, _get_vocab_size
 
 
 MODEL_ID = 'openai-community/gpt2'
 PROMPT = 'The meaning of life is'
+
+
+@pytest.fixture(scope='module', autouse=True)
+def required_dependencies():
+    # Fixture-time admission preserves all eight test identities. Release
+    # gates require the reference implementation, not a collection skip.
+    for name in ('huggingface_hub', 'transformers', 'torch'):
+        try:
+            importlib.import_module(name)
+        except ImportError as exc:
+            message = f'HF E2E requires {name}: {exc}'
+            if os.environ.get('POLY_REQUIRE_HF') == '1':
+                pytest.fail(message, pytrace=False)
+            pytest.skip(message)
 
 
 @pytest.fixture(scope='module')

@@ -718,6 +718,27 @@ make test-browser-matrix
 `test-browser-matrix` adds non-WebGPU Playwright coverage across Chromium,
 Firefox, and installed Chrome/Chromium executables where available.
 
+Strict release checks require actual fixtures and execution:
+
+```bash
+make test-release-gates                    # negative controls: missing HF dependencies / CUDA
+make test-qwen3                            # requires POLY_QWEN3_GGUF or the default temp/ fixture
+make HAS_CUDA=1 test-qwen3-cuda              # requires a working CUDA GPU, not a skipped test
+make test-hf-e2e HF_PYTHON=/path/to/python  # requires huggingface_hub, transformers and torch
+make test-release-packages                  # fresh sdist and npm native/fallback installations
+```
+
+HF tests retain individual skip records in ordinary developer runs; the strict
+target fails on missing dependencies. Set `HF_HUB_CACHE`, `HF_HUB_OFFLINE=1` and
+`TRANSFORMERS_OFFLINE=1` to verify pre-fetched fixtures without network access.
+Package checks retain logs under `temp/package-*`, verify installed library
+origins, and exercise a real native-build failure with Wasm fallback. Browser
+exports tested in Node do not replace real-browser/WebGPU execution.
+
+`WINO=0` remains accepted. Nonzero Python WINO requests raise
+`NotImplementedError`: the C core does not implement Winograd convolution
+(`PG-PARITY-012`), so the option cannot silently select ordinary convolution.
+
 Unchanged upstream Python tests can run in isolated Tinygrad and Polygrad
 processes (CPU). Install pytest, NumPy and each selected file's dependencies in
 `PARITY_PY`'s environment. The default selection is upstream `backend/test_ops.py`:
