@@ -9,6 +9,7 @@
 #include "../src/uop/upat.h"
 #include "../src/tensor.h"
 #include "../src/uop/weak.h"
+#include "../src/uop/ops.h"
 #include <limits.h>
 #include <math.h>
 #include <stdlib.h>
@@ -31,6 +32,16 @@ static PolyUOp *Variable(
 }
 
 static bool integer_const_eq(PolyUOp *u, const char *expected);
+
+TEST(sym, scheduler_divides_parameter_multiple) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *n = poly_uop_variable(ctx, "n", 8, 32, POLY_WEAKINT, 8, true);
+  PolyUOp *expected = poly_alu2(ctx, POLY_OP_IDIV, n, poly_const_int(ctx, 4));
+  bool correct = poly_uop_divides(ctx, n, 4) == expected && poly_uop_divides(ctx, n, 3) == NULL;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(correct);
+  PASS();
+}
 
 TEST(sym, current_symbolic_simple_identity_batch) {
   /* tinygrad@2026-08-22/a9069c177a9d uop/symbolic.py:111-186. */

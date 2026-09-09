@@ -393,6 +393,29 @@ static bool contains_uop(PolyUOp **arr, int n, PolyUOp *u) {
   return false;
 }
 
+/* Scheduler._globalizable_rngs: only immediate SINK END operands define
+ * outputs. A nested END closes a loop inside an output, not a launch axis. */
+static bool sched_is_globalizable(
+    PolyCtx *ctx,
+    PolyUOp *ast,
+    PolyUOp *rng,
+    PolyUOp **topo,
+    int n_topo
+) {
+  if (poly_range_axis_type(rng->arg) != POLY_AXIS_WEAK) return false;
+  bool output = false;
+  for (int i = 0; i < ast->n_src; i++) {
+    PolyUOp *end = ast->src[i];
+    if (end->op != POLY_OP_END) continue;
+    for (int j = 1; j < end->n_src; j++)
+      output |= poly_uop_in_ranges(ctx, end->src[j], rng);
+  }
+  if (!output) return false;
+  for (int i = 0; i < n_topo; i++)
+    if (topo[i]->op == POLY_OP_STAGE && !poly_uop_in_ranges(ctx, topo[i], rng)) return false;
+  return true;
+}
+
 /* tinygrad apply_opts starts by converting eligible LOOP output ranges into
  * GLOBAL ranges (postrange.py:340). WebGPU/CUDA scheduling depends on that
  * boundary before the later upcast heuristics run. */
@@ -401,65 +424,37 @@ static PolyUOp *convert_loop_to_global(PolyCtx *ctx, PolyUOp *ast) {
 
   int n_topo = 0;
   PolyUOp **topo = poly_toposort_alloc(ctx, ast, &n_topo);
-  if (!topo || n_topo <= 0) return ast;
-
-  PolyUOp *output_rngs[64];
-  int n_output_rngs = 0;
-  for (int i = 0; i < n_topo; i++) {
-    PolyUOp *u = topo[i];
-    if (!u || u->op != POLY_OP_END) continue;
-    for (int j = 1; j < u->n_src; j++) {
-      PolyUOp *ranges[64];
-      int n_ranges = poly_uop_ranges(ctx, u->src[j], ranges, 64);
-      for (int k = 0; k < n_ranges; k++) {
-        PolyUOp *r = ranges[k];
-        if (!r || r->op != POLY_OP_RANGE) continue;
-        if (poly_range_axis_type(r->arg) == POLY_AXIS_REDUCE) continue;
-        if (!contains_uop(output_rngs, n_output_rngs, r) && n_output_rngs < 64)
-          output_rngs[n_output_rngs++] = r;
-      }
-    }
+  if (!topo) return NULL;
+  PolyUOp **from = calloc((size_t)n_topo, sizeof(*from));
+  PolyUOp **to = calloc((size_t)n_topo, sizeof(*to));
+  if (!from || !to) {
+    free(from);
+    free(to);
+    poly_toposort_free(topo);
+    return NULL;
   }
-
-  PolyUOp *from[64];
-  PolyUOp *to[64];
   int n_sub = 0;
-  for (int i = 0; i < n_output_rngs; i++) {
-    PolyUOp *r = output_rngs[i];
-    if (poly_range_axis_type(r->arg) != POLY_AXIS_WEAK) continue;
-
-    bool globalizable = true;
-    for (int ti = 0; ti < n_topo; ti++) {
-      PolyUOp *u = topo[ti];
-      if (!u || u->op != POLY_OP_STAGE) continue;
-      if (!poly_uop_in_ranges(ctx, u, r)) {
-        globalizable = false;
-        break;
-      }
-    }
-    if (!globalizable) continue;
-
-    int64_t extra_local[16];
-    int n_extra = poly_range_n_extra(r->arg);
-    if (n_extra > 16) n_extra = 16;
-    int64_t *src_extra = poly_range_extra(r->arg);
-    for (int k = 0; k < n_extra; k++)
-      extra_local[k] = src_extra[k];
-
-    PolyArg g_arg =
-        (n_extra > 0)
-            ? poly_arg_range_ex(poly_range_axis_id(r->arg), POLY_AXIS_GLOBAL, extra_local, n_extra)
-            : poly_arg_range(poly_range_axis_id(r->arg), POLY_AXIS_GLOBAL);
+  for (int i = 0; i < n_topo; i++) {
+    PolyUOp *r = topo[i];
+    if (r->op != POLY_OP_RANGE || !poly_arg_is_range(r->arg) || poly_dtype_eq(r->dtype, POLY_VOID))
+      continue;
+    int64_t lo, hi;
+    poly_uop_minmax(ctx, r, &lo, &hi);
+    if (hi <= 0 || !sched_is_globalizable(ctx, ast, r, topo, n_topo)) continue;
+    PolyArg g_arg = poly_arg_range_ex(
+        poly_range_axis_id(r->arg), POLY_AXIS_GLOBAL, poly_range_extra(r->arg),
+        poly_range_n_extra(r->arg)
+    );
     PolyUOp *g_rng =
-        (r->tag != 0)
-            ? poly_uop_tagged(ctx, POLY_OP_RANGE, r->dtype, r->src, r->n_src, g_arg, r->tag)
-            : poly_uop(ctx, POLY_OP_RANGE, r->dtype, r->src, r->n_src, g_arg);
+        poly_uop_tagged_arg(ctx, r->op, r->dtype, r->src, r->n_src, g_arg, r->tag, r->tag_arg);
     from[n_sub] = r;
     to[n_sub] = g_rng;
     n_sub++;
   }
 
   PolyUOp *out = (n_sub > 0) ? poly_uop_substitute(ctx, ast, from, to, n_sub) : ast;
+  free(from);
+  free(to);
   poly_toposort_free(topo);
   return out;
 }
@@ -1847,20 +1842,10 @@ static int sched_real_axis(const OptScheduler *s, PolyOpt opt) {
 }
 
 static bool sched_globalizable(OptScheduler *s, PolyUOp *rng) {
-  if (poly_range_axis_type(rng->arg) != POLY_AXIS_WEAK) return false;
-  bool output = false;
-  for (int i = 0; i < s->ast->n_src; i++) {
-    PolyUOp *u = s->ast->src[i];
-    if (u->op != POLY_OP_END) continue;
-    for (int j = 1; j < u->n_src; j++)
-      if (poly_uop_in_ranges(s->ctx, u->src[j], rng)) output = true;
-  }
-  if (!output) return false;
   int n = 0;
   PolyUOp **topo = poly_toposort_alloc(s->ctx, s->ast, &n);
   if (!topo) return false;
-  for (int i = 0; i < n; i++)
-    if (topo[i]->op == POLY_OP_STAGE && !poly_uop_in_ranges(s->ctx, topo[i], rng)) output = false;
+  bool output = sched_is_globalizable(s->ctx, s->ast, rng, topo, n);
   poly_toposort_free(topo);
   return output;
 }
@@ -2688,6 +2673,10 @@ static void beam_cache_save(const BeamCacheKey *key, PolyUOp *sink) {
 }
 
 #ifdef POLY_TESTING
+PolyUOp *poly_test_convert_loop_to_global(PolyCtx *ctx, PolyUOp *sink) {
+  return convert_loop_to_global(ctx, sink);
+}
+
 uint64_t poly_test_beam_cache_key(PolyCtx *ctx, PolyUOp *sink, int width, PolyDevice device) {
   BeamCacheKey key;
   PolyRewriteOpts opts = {.device = device, .caps = {.device = poly_device_name(device)}};

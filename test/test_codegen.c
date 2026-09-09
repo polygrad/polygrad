@@ -55,6 +55,118 @@ TEST(codegen, beam_actions_match_pinned_catalogue) {
   PASS();
 }
 
+TEST(codegen, scheduler_globalizes_only_top_level_outputs) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *r = poly_range(ctx, 8, 0, POLY_AXIS_WEAK);
+  PolyUOp *noop = poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_none());
+  PolyUOp *inner = poly_uop2(ctx, POLY_OP_END, POLY_VOID, noop, r, poly_arg_none());
+  PolyUOp *outer = poly_uop1(ctx, POLY_OP_END, POLY_VOID, inner, poly_arg_none());
+  PolyUOp *sink = poly_test_kernel_sink(ctx, &outer, 1, "test");
+  bool correct = poly_test_convert_loop_to_global(ctx, sink) == sink;
+  PolyUOp *direct = poly_test_kernel_sink(ctx, &inner, 1, "test");
+  PolyUOp *global = poly_range(ctx, 8, 0, POLY_AXIS_GLOBAL);
+  correct &= poly_test_convert_loop_to_global(ctx, direct) ==
+             poly_uop_substitute(ctx, direct, &r, &global, 1);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
+TEST(codegen, scheduler_globalizes_all_output_ranges) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *ranges[65], *globals[65], *ends[65];
+  PolyUOp *noop = poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_none());
+  for (int i = 0; i < 65; i++) {
+    ranges[i] = poly_range(ctx, 8, i, POLY_AXIS_WEAK);
+    globals[i] = poly_range(ctx, 8, i, POLY_AXIS_GLOBAL);
+    ends[i] = poly_uop2(ctx, POLY_OP_END, POLY_VOID, noop, ranges[i], poly_arg_none());
+  }
+  PolyUOp *sink = poly_test_kernel_sink(ctx, ends, 65, "test");
+  bool correct = poly_test_convert_loop_to_global(ctx, sink) ==
+                 poly_uop_substitute(ctx, sink, ranges, globals, 65);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
+TEST(codegen, scheduler_globalizes_complete_range_metadata) {
+  PolyCtx *ctx = poly_ctx_new();
+  int64_t path[20];
+  for (int i = 0; i < 20; i++)
+    path[i] = i;
+  PolyUOp *bound = poly_const_int(ctx, 8);
+  PolyUOp *r = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_WEAKINT, bound, poly_arg_range_ex(0, POLY_AXIS_WEAK, path, 20)
+  );
+  PolyUOp *g = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_WEAKINT, bound, poly_arg_range_ex(0, POLY_AXIS_GLOBAL, path, 20)
+  );
+  PolyUOp *end = poly_uop2(
+      ctx, POLY_OP_END, POLY_VOID, poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_none()), r,
+      poly_arg_none()
+  );
+  PolyUOp *sink = poly_test_kernel_sink(ctx, &end, 1, "test");
+  bool correct =
+      poly_test_convert_loop_to_global(ctx, sink) == poly_uop_substitute(ctx, sink, &r, &g, 1);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
+TEST(codegen, scheduler_control_flow_rejects_cyclic_siblings) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *r0 = poly_range(ctx, 8, 0, POLY_AXIS_WEAK);
+  PolyUOp *r1 = poly_range(ctx, 8, 1, POLY_AXIS_WEAK);
+  PolyUOp *n0 = poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_int(0));
+  PolyUOp *n1 = poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_int(1));
+  PolyUOp *e0 = poly_uop2(ctx, POLY_OP_END, POLY_VOID, n0, r0, poly_arg_none());
+  PolyUOp *e1 = poly_uop2(ctx, POLY_OP_END, POLY_VOID, n1, r1, poly_arg_none());
+  PolyUOp *ends[] = {e0, e1};
+  PolyUOp *sink = poly_test_kernel_sink(ctx, ends, 2, "test");
+  PolyUOp *ordered = poly_uop2(ctx, POLY_OP_RANGE, r1->dtype, r1->src[0], e0, r1->arg);
+  bool correct =
+      poly_apply_control_flow(ctx, sink) == poly_uop_substitute(ctx, sink, &r1, &ordered, 1);
+  ends[1] = poly_uop2(ctx, POLY_OP_END, POLY_VOID, n1, r0, poly_arg_none());
+  sink = poly_test_kernel_sink(ctx, ends, 2, "test");
+  correct &= poly_apply_control_flow(ctx, sink) == NULL;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
+TEST(codegen, scheduler_range_tuple_orders_split_before_type) {
+  PolyCtx *ctx = poly_ctx_new();
+  int64_t apath = 5, bpath = 0;
+  PolyUOp *bound = poly_const_int(ctx, 8);
+  PolyUOp *a = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_WEAKINT, bound, poly_arg_range_ex(0, POLY_AXIS_GLOBAL, &apath, 1)
+  );
+  PolyUOp *b = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_WEAKINT, bound, poly_arg_range_ex(0, POLY_AXIS_WEAK, &bpath, 1)
+  );
+  PolyUOp *src[] = {a, b};
+  PolyUOp *sink = poly_test_kernel_sink(ctx, src, 2, "test");
+  int n = 0, ai = -1, bi = -1;
+  PolyUOp **linear = poly_linearize(ctx, sink, &n);
+  for (int i = 0; linear && i < n; i++) {
+    if (linear[i] == a) ai = i;
+    if (linear[i] == b) bi = i;
+  }
+  bool correct = bi >= 0 && ai > bi;
+  free(linear);
+  PolyUOp *body = poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_none());
+  PolyUOp *end_src[] = {body, a, b};
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 3, poly_arg_none());
+  PolyUOp *expected = poly_uop2(
+      ctx, POLY_OP_END, POLY_VOID, poly_uop2(ctx, POLY_OP_END, POLY_VOID, body, a, poly_arg_none()),
+      b, poly_arg_none()
+  );
+  correct &= poly_graph_rewrite(ctx, end, poly_pm_split_ends()) == expected;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
 TEST(codegen, beam_scheduler_local_and_group_actions) {
   PolyOptOps ops[] = {POLY_OPT_LOCAL, POLY_OPT_GROUP, POLY_OPT_GROUPTOP, POLY_OPT_THREAD};
   PolyAxisType inputs[] = {POLY_AXIS_GLOBAL, POLY_AXIS_REDUCE, POLY_AXIS_REDUCE, POLY_AXIS_WEAK};

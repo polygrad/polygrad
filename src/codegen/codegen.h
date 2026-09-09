@@ -153,6 +153,7 @@ int poly_test_beam_cache_write(
 );
 PolyUOp *poly_test_beam_cache_read(PolyCtx *ctx, PolyUOp *sink, int width);
 PolyUOp *poly_test_apply_opt(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps, PolyOpt opt);
+PolyUOp *poly_test_convert_loop_to_global(PolyCtx *ctx, PolyUOp *sink);
 void **poly_test_beam_args_from_ast(PolyCtx *ctx, PolyUOp *sink, int *n_args);
 double poly_test_beam_compile_and_time(
     PolyCtx *ctx,

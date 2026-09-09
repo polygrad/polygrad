@@ -4131,6 +4131,24 @@ static bool lt_uop_const_factor(PolyUOp *u, PolyInt *out) {
 static PolyUOp *lt_uop_divides(PolyCtx *ctx, PolyUOp *u, const PolyInt *factor) {
   if (!ctx || !u || !factor || poly_int_is_zero(factor)) return NULL;
   if (lt_poly_int_is_one(factor)) return u;
+  /* UOp.divides uses declared ParamArg multiplicity as a proof, never
+   * a sampled value or maximum bound. Keep the quotient structural. */
+  if ((u->op == POLY_OP_PARAM || u->op == POLY_OP_BUFFER) && u->arg.kind == POLY_ARG_PARAM &&
+      u->arg.param->has_multiple_of) {
+    PolyInt multiple = {0}, quotient = {0}, remainder = {0};
+    bool exact = poly_int_from_i64(&multiple, u->arg.param->multiple_of) &&
+                 poly_int_divmod(&quotient, &remainder, &multiple, factor, false) &&
+                 poly_int_is_zero(&remainder);
+    PolyUOp *ret = exact ? poly_uop2(
+                               ctx, POLY_OP_IDIV, u->dtype, u,
+                               poly_const_like(ctx, u, poly_int_as_arg(factor)), poly_arg_none()
+                           )
+                         : NULL;
+    poly_int_free(&multiple);
+    poly_int_free(&quotient);
+    poly_int_free(&remainder);
+    return ret;
+  }
   if (u->op == POLY_OP_CONST && (u->arg.kind == POLY_ARG_INT || u->arg.kind == POLY_ARG_BIGINT)) {
     PolyInt value = {0}, quotient = {0}, remainder = {0};
     bool ok = poly_int_from_arg(&value, u->arg) &&

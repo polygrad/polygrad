@@ -299,7 +299,7 @@ static int *build_control_edges(PolyUOp **topo, int n, IntMap *idx) {
         int y_range = imap_try_get(idx, y->src[1]);
         if (y_range < 0 || topo[y_range]->op != POLY_OP_RANGE) continue;
         const uint64_t *dx = deps + (size_t)x_idx * (size_t)words;
-        if (x_idx == y_range || bitset_has(dx, y_range)) continue;
+        if (x_idx == y_range || bitset_has(dx, y_range)) goto cyclic;
         if (extra_dep[y_range] < 0) extra_dep[y_range] = x_idx;
       }
     } else if (topo[parent]->op == POLY_OP_END && topo[parent]->n_src > 1) {
@@ -312,12 +312,20 @@ static int *build_control_edges(PolyUOp **topo, int n, IntMap *idx) {
         int y_range = imap_try_get(idx, y->src[1]);
         if (y_range < 0 || topo[y_range]->op != POLY_OP_RANGE) continue;
         const uint64_t *dx = deps + (size_t)x_idx * (size_t)words;
-        if (x_idx == y_range || bitset_has(dx, y_range)) continue;
+        if (x_idx == y_range || bitset_has(dx, y_range)) goto cyclic;
         if (extra_dep[y_range] < 0) extra_dep[y_range] = x_idx;
       }
     }
   }
 
+  goto done;
+cyclic:
+  /* CFGContext asserts before publishing an edge that closes a cycle.
+   * Omitting that edge silently changes the required execution order. */
+  fprintf(stderr, "polygrad: cyclic sibling control-flow ordering\n");
+  free(extra_dep);
+  extra_dep = NULL;
+done:
   free(deps);
   free(nest_parent);
   free(siblings);
@@ -354,9 +362,8 @@ static PolyUOp *cf_rewrite(
    * rather than infinite-recursing. */
   if (visit[ui] == CF_VISITING) {
     fprintf(stderr, "cf_rewrite: cycle detected at topo[%d] op=%s\n", ui, poly_op_name(u->op));
-    memo[ui] = u;
-    visit[ui] = CF_DONE;
-    return u;
+    *failed = true;
+    return NULL;
   }
   visit[ui] = CF_VISITING;
 
@@ -598,13 +605,15 @@ static int arg_cmp(PolyArg a, PolyArg b, bool *unordered) {
   case POLY_ARG_PARAM:
     return param_arg_cmp(a.param, b.param);
   case POLY_ARG_RANGE:
+    /* UOp.tuplize and do_split_ends compare (axis_id, *split_path, type),
+     * unlike Scheduler.rngs, which deliberately sorts by axis type first. */
     if (a.range.axis_id != b.range.axis_id) return a.range.axis_id < b.range.axis_id ? -1 : 1;
-    if (a.range.axis_type != b.range.axis_type)
-      return a.range.axis_type < b.range.axis_type ? -1 : 1;
     for (int i = 0; i < a.range.n_extra && i < b.range.n_extra; i++) {
       if (a.range.extra[i] != b.range.extra[i]) return a.range.extra[i] < b.range.extra[i] ? -1 : 1;
     }
-    return (a.range.n_extra > b.range.n_extra) - (a.range.n_extra < b.range.n_extra);
+    if (a.range.n_extra != b.range.n_extra)
+      return (a.range.n_extra > b.range.n_extra) - (a.range.n_extra < b.range.n_extra);
+    return (a.range.axis_type > b.range.axis_type) - (a.range.axis_type < b.range.axis_type);
   case POLY_ARG_REDUCE:
     if (a.reduce.op != b.reduce.op) return a.reduce.op < b.reduce.op ? -1 : 1;
     return a.reduce.num_axes < b.reduce.num_axes ? -1
