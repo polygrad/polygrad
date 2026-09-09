@@ -5300,6 +5300,7 @@ static PolyRendererCaps poly_x86_caps(void) {
       .has_simd_float = true,
       .max_vec_width = 4,
       .max_threads = has_threads ? x86_thread_count() : 0,
+      .global_max = {has_threads ? x86_thread_count() : 0, 0, 0},
   };
 }
 

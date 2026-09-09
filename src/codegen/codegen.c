@@ -71,6 +71,18 @@ void poly_set_beam(int value) {
   beam_value = value;
   beam_initialized = true;
 }
+
+/* helpers.IGNORE_BEAM_CACHE shares BEAM's frontend-independent scope. */
+static int ignore_beam_cache_value;
+static bool ignore_beam_cache_initialized;
+int poly_get_ignore_beam_cache(void) {
+  return ignore_beam_cache_initialized ? ignore_beam_cache_value
+                                       : poly_getenv_int("IGNORE_BEAM_CACHE", 0);
+}
+void poly_set_ignore_beam_cache(int value) {
+  ignore_beam_cache_value = value;
+  ignore_beam_cache_initialized = true;
+}
 /* Max hardware vector fold width for load/store splitting.
  * Set by the pipeline before running correct_load_store pass.
  * Default 4 (SSE). Set to 8 for AVX2.
@@ -325,45 +337,76 @@ static int axis_to_pos(PolyAxisType t) {
 
 /* Scheduler state for heuristic optimizer.
  * Matches tinygrad's Scheduler class (postrange.py:17-331). */
-#define SCHED_MAX_RNGS 64
-#define SCHED_MAX_BUFS 32
-
 typedef struct {
   PolyCtx *ctx;
   PolyUOp *ast; /* current kernel SINK */
   int64_t opt_range_next; /* counter for new axis IDs */
 
   /* Sorted RANGE list (by axis_to_pos then axis_id) */
-  PolyUOp *rngs[SCHED_MAX_RNGS];
+  PolyUOp **rngs;
   int n_rngs;
 
   /* Shape (bound of each range) */
-  int64_t shape[SCHED_MAX_RNGS];
+  int64_t *shape;
 
   /* Axis types */
-  PolyAxisType types[SCHED_MAX_RNGS];
+  PolyAxisType *types;
 
   /* INDEX ops (tinygrad k.bufs) - reversed toposort order */
-  PolyUOp *bufs[SCHED_MAX_BUFS];
+  PolyUOp **bufs;
   int n_bufs;
 
-  /* Reachability bitmask per buffer: buf_reach[bi] has bit j set if rngs[j]
-   * is reachable from bufs[bi]'s source tree. n_rngs must be <= 64. */
-  uint64_t buf_reach[SCHED_MAX_BUFS];
+  /* Immutable metadata shared by Scheduler.copy; refresh publishes a new
+   * snapshot. This owns C scratch, not UOps or residency. */
+  size_t *references;
+  size_t reach_words;
+  uint64_t *buf_reach;
   bool has_reach;
 
   /* Has reduce op */
   bool has_reduce;
 
-  /* The real tinygrad Scheduler uses dynamic Python lists for rngs/bufs.
-   * If the C scratch caps would truncate those lists, skip optional
-   * optimization rather than optimizing a partial scheduler view. */
-  bool overflow;
+  /* Failed metadata construction must never expose a partial scheduler view. */
+  bool failed;
   const PolyTensorCore *tensor_core;
 } OptScheduler;
 
+static void sched_destroy(OptScheduler *s) {
+  if (s->references && --*s->references == 0) {
+    free(s->rngs);
+    free(s->shape);
+    free(s->types);
+    free(s->bufs);
+    free(s->buf_reach);
+    free(s->references);
+  }
+  s->references = NULL;
+}
+
+static void sched_copy(OptScheduler *dst, const OptScheduler *src) {
+  *dst = *src;
+  if (dst->references) ++*dst->references;
+}
+
+#ifdef POLY_TESTING
+static _Thread_local int sched_alloc_fail_after = -1;
+#endif
+
+static void *sched_calloc(size_t count, size_t size) {
+#ifdef POLY_TESTING
+  if (sched_alloc_fail_after == 0) return NULL;
+  if (sched_alloc_fail_after > 0) --sched_alloc_fail_after;
+#endif
+  return calloc(count ? count : 1, size);
+}
+
+static bool sched_buf_reaches(const OptScheduler *s, int bi, int ri) {
+  return s->has_reach &&
+         (s->buf_reach[(size_t)bi * s->reach_words + (size_t)ri / 64] & (UINT64_C(1) << (ri % 64)));
+}
+
 static bool sched_can_optimize(const OptScheduler *s) {
-  return s && !s->overflow && s->n_rngs > 0;
+  return s && !s->failed && s->n_rngs > 0;
 }
 
 static int sched_rng_cmp(const void *ap, const void *bp) {
@@ -464,8 +507,7 @@ static PolyUOp *convert_loop_to_global(PolyCtx *ctx, PolyUOp *ast) {
  * RANGE nodes set their own bit. Result: reachable[i] has bit j set iff rngs[j]
  * is reachable from topo[i]'s source tree.
  *
- * n_rngs must be <= 64 (SCHED_MAX_RNGS). Returns malloc'd array (caller frees).
- * topo_map is used to look up topo index for a UOp pointer. */
+ * Each row contains ceildiv(n_rngs,64) words. Caller owns the result. */
 static uint64_t *build_reachability_bitmask(
     PolyUOp **topo,
     int n_topo,
@@ -476,19 +518,23 @@ static uint64_t *build_reachability_bitmask(
   PolyMap *idx_map = poly_map_new((size_t)(n_topo < 64 ? 64 : (size_t)n_topo * 2));
   /* Store topo index + 1 (so 0 means "not found") */
   int *indices = (int *)malloc((size_t)n_topo * sizeof(int));
+  size_t words = ((size_t)n_rngs + 63) / 64;
+  uint64_t *reach = NULL;
+  if (!idx_map || !indices || !words || (size_t)n_topo > SIZE_MAX / sizeof(*reach) / words)
+    goto done;
+  reach = calloc((size_t)n_topo * words, sizeof(*reach));
+  if (!reach) goto done;
   for (int i = 0; i < n_topo; i++) {
     indices[i] = i + 1; /* 1-based so NULL means "not in map" */
     poly_map_set(idx_map, poly_ptr_hash(topo[i]), topo[i], &indices[i], poly_ptr_eq);
   }
 
-  /* Build range_index: for each range UOp, which bit index */
-  uint64_t *reach = (uint64_t *)calloc((size_t)n_topo, sizeof(uint64_t));
-
   /* Set bits for RANGE nodes */
   for (int i = 0; i < n_topo; i++) {
     if (topo[i]->op == POLY_OP_RANGE) {
       for (int ri = 0; ri < n_rngs; ri++) {
-        if (rngs[ri] == topo[i]) reach[i] |= (1ULL << ri);
+        if (rngs[ri] == topo[i])
+          reach[(size_t)i * words + (size_t)ri / 64] |= UINT64_C(1) << (ri % 64);
       }
     }
   }
@@ -499,43 +545,54 @@ static uint64_t *build_reachability_bitmask(
       int *pidx = (int *)poly_map_get(
           idx_map, poly_ptr_hash(topo[i]->src[j]), topo[i]->src[j], poly_ptr_eq
       );
-      if (pidx) reach[i] |= reach[*pidx - 1];
+      if (pidx)
+        for (size_t w = 0; w < words; w++)
+          reach[(size_t)i * words + w] |= reach[(size_t)(*pidx - 1) * words + w];
     }
   }
 
+done:
   poly_map_destroy(idx_map);
   free(indices);
   return reach;
 }
 
-static uint64_t projected_node_reachability(PolyUOp *u, PolyMap *idx_map, uint64_t *reach) {
-  if (!u) return 0;
+static void projected_node_reachability(
+    PolyUOp *u,
+    PolyMap *idx_map,
+    uint64_t *reach,
+    size_t words,
+    uint64_t *out
+) {
+  if (!u) return;
   int *pidx = (int *)poly_map_get(idx_map, poly_ptr_hash(u), u, poly_ptr_eq);
-  if (pidx) return reach[*pidx];
-  if (u->op != POLY_OP_STACK) return 0;
-  uint64_t mask = 0;
+  if (pidx) {
+    for (size_t w = 0; w < words; w++)
+      out[w] |= reach[(size_t)*pidx * words + w];
+    return;
+  }
+  if (u->op != POLY_OP_STACK) return;
   for (int i = 0; i < u->n_src; i++)
-    mask |= projected_node_reachability(u->src[i], idx_map, reach);
-  return mask;
+    projected_node_reachability(u->src[i], idx_map, reach, words, out);
 }
 
-static uint64_t projected_index_reachability(
+static void projected_index_reachability(
     PolyCtx *ctx,
     PolyUOp *coord,
     PolyMap *idx_map,
-    uint64_t *reach
+    uint64_t *reach,
+    size_t words,
+    uint64_t *out
 ) {
   PolyUOp *idx = poly_uop_get_idx(ctx, coord);
-  if (!idx) return 0;
+  if (!idx) return;
   /* Pinned heuristic.py:118-128,160-175 asks membership in
    * `get_idx().backward_slice`; UOp.backward_slice explicitly excludes the
    * projected coordinate root (uop/ops.py:177-183). Union the source closures
    * rather than returning the root's own RANGE bit. This matters for direct
    * coordinates such as INDEX(mean, r_channel). */
-  uint64_t mask = 0;
   for (int i = 0; i < idx->n_src; i++)
-    mask |= projected_node_reachability(idx->src[i], idx_map, reach);
-  return mask;
+    projected_node_reachability(idx->src[i], idx_map, reach, words, out);
 }
 
 static void sched_refresh(OptScheduler *s);
@@ -546,15 +603,30 @@ static void sched_init(OptScheduler *s, PolyCtx *ctx, PolyUOp *sink) {
 }
 
 /* Refresh rngs, shapes, types after a shift_to modifies the AST */
-static void sched_refresh(OptScheduler *s) {
-  s->n_rngs = 0;
-  s->n_bufs = 0;
-  s->has_reduce = false;
-  s->has_reach = false;
-  s->overflow = false;
-
+static void sched_refresh(OptScheduler *owner) {
+  OptScheduler next = {
+      .ctx = owner->ctx,
+      .ast = owner->ast,
+      .opt_range_next = owner->opt_range_next,
+      .tensor_core = owner->tensor_core};
+  OptScheduler *s = &next;
   int n_topo = 0;
   PolyUOp **topo = poly_toposort_alloc(s->ctx, s->ast, &n_topo);
+  if (!topo) goto failed;
+  /* Size metadata from the graph; toposort already deduplicates identities. */
+  s->references = sched_calloc(1, sizeof(*s->references));
+  if (!s->references) goto failed;
+  *s->references = 1;
+  int range_capacity = 0, buffer_capacity = 0;
+  for (int i = 0; i < n_topo; i++) {
+    range_capacity += topo[i]->op == POLY_OP_RANGE;
+    buffer_capacity += topo[i]->op == POLY_OP_INDEX;
+  }
+  s->rngs = sched_calloc((size_t)range_capacity, sizeof(*s->rngs));
+  s->shape = sched_calloc((size_t)range_capacity, sizeof(*s->shape));
+  s->types = sched_calloc((size_t)range_capacity, sizeof(*s->types));
+  s->bufs = sched_calloc((size_t)buffer_capacity, sizeof(*s->bufs));
+  if (!s->rngs || !s->shape || !s->types || !s->bufs) goto failed;
   int64_t max_id = -1;
 
   for (int i = 0; i < n_topo; i++) {
@@ -565,29 +637,15 @@ static void sched_refresh(OptScheduler *s) {
       int64_t lo, hi;
       poly_uop_minmax(s->ctx, u, &lo, &hi);
       if (hi <= 0) continue;
-      bool dup = false;
-      for (int j = 0; j < s->n_rngs; j++) {
-        if (s->rngs[j] == u) {
-          dup = true;
-          break;
-        }
-      }
-      if (!dup) {
-        if (s->n_rngs < SCHED_MAX_RNGS)
-          s->rngs[s->n_rngs++] = u;
-        else
-          s->overflow = true;
-      }
+      s->rngs[s->n_rngs++] = u;
       int64_t aid = poly_range_axis_id(u->arg);
       if (aid > max_id) max_id = aid;
     }
-    if (u->op == POLY_OP_INDEX && u->n_src > 0 && u->src[0]->op == POLY_OP_PARAM) {
-      if (s->n_bufs < SCHED_MAX_BUFS)
-        s->bufs[s->n_bufs++] = u;
-      else
-        s->overflow = true;
+    if (u->op == POLY_OP_INDEX) {
+      s->bufs[s->n_bufs++] = u;
     }
   }
+  if (max_id == INT64_MAX) goto failed;
   if (max_id + 1 > s->opt_range_next) s->opt_range_next = max_id + 1;
 
   qsort(s->rngs, (size_t)s->n_rngs, sizeof(PolyUOp *), sched_rng_cmp);
@@ -608,20 +666,29 @@ static void sched_refresh(OptScheduler *s) {
   }
 
   /* Rebuild reachability bitmask */
-  for (int i = 0; i < SCHED_MAX_BUFS; i++)
-    s->buf_reach[i] = 0;
-  if (!s->overflow && s->n_bufs > 0 && s->n_rngs > 0 && s->n_rngs <= 64) {
+  s->reach_words = ((size_t)s->n_rngs + 63) / 64;
+  if (s->n_bufs > 0 && s->n_rngs > 0) {
+    if ((size_t)s->n_bufs > SIZE_MAX / sizeof(*s->buf_reach) / s->reach_words) goto failed;
+    s->buf_reach = sched_calloc((size_t)s->n_bufs * s->reach_words, sizeof(*s->buf_reach));
     uint64_t *reach = build_reachability_bitmask(topo, n_topo, s->rngs, s->n_rngs);
     PolyMap *idx_map = poly_map_new((size_t)(n_topo < 64 ? 64 : (size_t)n_topo * 2));
     int *indices = (int *)malloc((size_t)n_topo * sizeof(int));
+    if (!s->buf_reach || !reach || !idx_map || !indices) {
+      free(reach);
+      free(indices);
+      poly_map_destroy(idx_map);
+      goto failed;
+    }
     for (int i = 0; i < n_topo; i++) {
       indices[i] = i;
       poly_map_set(idx_map, poly_ptr_hash(topo[i]), topo[i], &indices[i], poly_ptr_eq);
     }
     for (int bi = 0; bi < s->n_bufs; bi++) {
       if (s->bufs[bi]->n_src >= 2)
-        s->buf_reach[bi] =
-            projected_index_reachability(s->ctx, s->bufs[bi]->src[1], idx_map, reach);
+        projected_index_reachability(
+            s->ctx, s->bufs[bi]->src[1], idx_map, reach, s->reach_words,
+            s->buf_reach + (size_t)bi * s->reach_words
+        );
     }
     s->has_reach = true;
     poly_map_destroy(idx_map);
@@ -629,6 +696,13 @@ static void sched_refresh(OptScheduler *s) {
     free(reach);
   }
   poly_toposort_free(topo);
+  sched_destroy(owner);
+  *owner = next;
+  return;
+failed:
+  poly_toposort_free(topo);
+  sched_destroy(&next);
+  owner->failed = true;
 }
 
 /* shift_to_ex: split a RANGE into two. Port of tinygrad Scheduler.shift_to.
@@ -649,8 +723,8 @@ static PolyUOp *sched_shift_to_core(
     PolyUOp *input_new_rng,
     PolyUOp **out_new_rng
 ) {
-  if (!s || s->overflow) return NULL;
-  if (!input_new_rng && s->n_rngs >= SCHED_MAX_RNGS) return NULL;
+  if (!s || s->failed) return NULL;
+  if (!input_new_rng && s->opt_range_next == INT64_MAX) return NULL;
 
   if (amount <= 0 || rng->n_src != 1) return NULL;
   PolyUOp *old_sz = poly_uop_divides(s->ctx, rng->src[0], amount);
@@ -689,29 +763,35 @@ static PolyUOp *sched_shift_to_core(
 
   PolyUOp *from[1] = {rng};
   PolyUOp *to[1] = {sub_axis};
-  OptScheduler old = *s;
+  OptScheduler old;
+  sched_copy(&old, s);
   s->ast = poly_uop_substitute(ctx, s->ast, from, to, 1);
   sched_refresh(s);
-  if (s->overflow) {
+  if (s->failed) {
+    sched_destroy(s);
     *s = old;
     return NULL;
   }
+  sched_destroy(&old);
   if (out_new_rng) *out_new_rng = new_rng;
   return replaced;
 }
 
-static PolyUOp *sched_shift_to(
+static bool sched_apply_opt(OptScheduler *s, PolyRendererCaps caps, PolyOpt opt, PolyUOp **result);
+
+/* Integer Opt construction and tuple result unpacking for the C heuristic.
+ * All legality, history and transactional publication stay in apply_opt. */
+static PolyUOp *sched_apply_int_opt(
     OptScheduler *s,
-    PolyUOp *rng,
-    int64_t amount,
-    PolyAxisType new_type,
-    bool top
+    PolyRendererCaps caps,
+    PolyOptOps op,
+    int axis,
+    int64_t amount
 ) {
-  /* Tinygrad Scheduler.apply_opt leaves shift_to substitutions structural.
-   * In particular, full-size UPCAST keeps the complementary size-1 GLOBAL
-   * range alive until later passes. Running symbolic cleanup here deletes
-   * those ranges too early and changes downstream move_where/expander shape. */
-  return sched_shift_to_core(s, rng, amount, new_type, top, NULL, NULL);
+  PolyUOp *result[3] = {0};
+  PolyOpt opt = {
+      .op = op, .has_axis = true, .axis = axis, .arg_kind = POLY_OPT_ARG_INT, .arg = amount};
+  return sched_apply_opt(s, caps, opt, result) ? result[0] : NULL;
 }
 
 /* Helper: get indices of upcastable dims (GLOBAL/LOCAL/WEAK with size > 1) */
@@ -772,11 +852,14 @@ static bool sched_has_axis_type(const OptScheduler *s, PolyAxisType t) {
 
 /* Helper: product of output shape (non-reduce dims) at upcastable indices */
 static int64_t sched_output_prod_upcastable(const OptScheduler *s) {
-  int up_dims[SCHED_MAX_RNGS];
-  int n_up = sched_upcastable_dims(s, up_dims, SCHED_MAX_RNGS);
   int64_t prod = 1;
-  for (int i = 0; i < n_up; i++)
-    prod *= s->shape[up_dims[i]];
+  for (int i = 0; i < s->n_rngs; i++) {
+    PolyAxisType t = s->types[i];
+    if ((t != POLY_AXIS_GLOBAL && t != POLY_AXIS_LOCAL && t != POLY_AXIS_WEAK) || s->shape[i] <= 1)
+      continue;
+    if (prod > INT64_MAX / s->shape[i]) return INT64_MAX;
+    prod *= s->shape[i];
+  }
   return prod;
 }
 
@@ -801,21 +884,6 @@ static int cmp_local_choice_axis(const void *ap, const void *bp) {
   const LocalChoice *a = (const LocalChoice *)ap;
   const LocalChoice *b = (const LocalChoice *)bp;
   return a->axis - b->axis;
-}
-
-/* Flatten ADD tree into leaf addends (port of tinygrad split_uop(ADD)) */
-static int split_uop_add(PolyUOp *u, PolyUOp **out, int max_n) {
-  if (u->op == POLY_OP_ADD) {
-    int n = 0;
-    for (int i = 0; i < u->n_src && n < max_n; i++)
-      n += split_uop_add(u->src[i], out + n, max_n - n);
-    return n;
-  }
-  if (max_n > 0) {
-    out[0] = u;
-    return 1;
-  }
-  return 0;
 }
 
 /* Axis letter mapping (ops.py:20-21) */
@@ -844,53 +912,16 @@ static const char *axis_letter(PolyAxisType t) {
 }
 
 /* postrange.py:36-42 -- shape_str: build axis name array from scheduler state */
-static int sched_shape_str(const OptScheduler *s, const char *out[], int max_n) {
-  int n = 0;
+static int sched_shape_str_to_axis(const OptScheduler *s, const char *name) {
   int cnt[16] = {0}; /* count per axis type */
-  static char buf[64][8]; /* static buffer for generated strings */
-  for (int i = 0; i < s->n_rngs && n < max_n && n < 64; i++) {
+  for (int i = 0; i < s->n_rngs; i++) {
+    char buf[32];
     int t = (int)s->types[i];
-    snprintf(buf[n], 8, "%s%d", axis_letter(s->types[i]), cnt[t]++);
-    out[n] = buf[n];
-    n++;
+    snprintf(buf, sizeof(buf), "%s%d", axis_letter(s->types[i]), cnt[t]++);
+    if (!strcmp(buf, name)) return i;
   }
-  return n;
+  return -1;
 }
-
-/* Collect RANGE ops reachable from a UOp via backward walk.
- * Returns bitmask: bit j set if s->rngs[j] is reachable from u. */
-static uint64_t collect_ranges_from(const OptScheduler *s, PolyUOp *u) {
-  /* Simple DFS -- limited depth for scheduler-level graphs */
-  uint64_t mask = 0;
-  PolyUOp *stack[512];
-  int sp = 0;
-  stack[sp++] = u;
-  /* Visited set using a simple pointer set (arena-allocated UOps have unique addresses) */
-  PolyMap *visited = poly_map_new(256);
-  while (sp > 0) {
-    PolyUOp *cur = stack[--sp];
-    if (poly_map_get(visited, poly_ptr_hash(cur), cur, poly_ptr_eq)) continue;
-    poly_map_set(visited, poly_ptr_hash(cur), cur, cur, poly_ptr_eq);
-    if (cur->op == POLY_OP_RANGE) {
-      for (int j = 0; j < s->n_rngs; j++) {
-        if (s->rngs[j] == cur) {
-          mask |= (1ULL << j);
-          break;
-        }
-      }
-    }
-    /* Don't recurse past RANGE (tinygrad: ended_ranges) */
-    int rs = poly_range_start(cur->op);
-    int end = (rs >= 0) ? rs : cur->n_src;
-    for (int i = 0; i < end && sp < 510; i++)
-      stack[sp++] = cur->src[i];
-  }
-  poly_map_destroy(visited);
-  return mask;
-}
-
-/* Forward declarations */
-static void sched_copy(OptScheduler *dst, const OptScheduler *src);
 
 /* sched_apply_tc_opt (port of postrange.py:221-314) */
 #define TC_TAG 0x5443 /* 'TC' */
@@ -975,7 +1006,7 @@ static PolyUOp *sched_padto(OptScheduler *s, PolyUOp *rng, int64_t amount) {
   free(to);
   poly_toposort_free(topo);
   sched_refresh(s);
-  return s->overflow ? NULL : replacement;
+  return s->failed ? NULL : replacement;
 failed:
   free(from);
   free(to);
@@ -996,19 +1027,20 @@ static bool sched_apply_tc_opt(
 ) {
   PolyCtx *ctx = s->ctx;
 
-  /* 1. Find REDUCE(ADD) and its MUL (postrange.py:222-227) */
+  /* Scheduler._apply_tc_opt selects reduceops[0], not the first ADD. */
   int n_topo = 0;
   PolyUOp **topo = poly_toposort_alloc(ctx, s->ast, &n_topo);
   PolyUOp *reduceop = NULL;
   for (int i = 0; i < n_topo; i++) {
-    if (topo[i]->op == POLY_OP_REDUCE && topo[i]->arg.kind == POLY_ARG_REDUCE &&
-        topo[i]->arg.reduce.op == POLY_OP_ADD) {
+    if (topo[i]->op == POLY_OP_REDUCE) {
       reduceop = topo[i];
       break;
     }
   }
   poly_toposort_free(topo);
-  if (!reduceop || !use_tc) return false;
+  if (!reduceop || !use_tc || reduceop->arg.kind != POLY_ARG_REDUCE ||
+      reduceop->arg.reduce.op != POLY_OP_ADD)
+    return false;
 
   PolyUOp *mul = reduceop->src[0];
   /* Tinygrad 2026-08-22/a9069c177a9d postrange.py:217-220 unwraps the
@@ -1047,24 +1079,27 @@ static bool sched_apply_tc_opt(
     if (!poly_dtype_eq(tc->dtype_out, red_scalar)) continue;
 
     /* 3. Classify ranges (postrange.py:236-238) */
-    uint64_t in0_reach = collect_ranges_from(s, in0);
-    uint64_t in1_reach = collect_ranges_from(s, in1);
-
-    PolyUOp *in0_ranges[SCHED_MAX_RNGS], *in1_ranges[SCHED_MAX_RNGS];
+    PolyUOp **in0_ranges = calloc((size_t)s->n_rngs, sizeof(*in0_ranges));
+    PolyUOp **in1_ranges = calloc((size_t)s->n_rngs, sizeof(*in1_ranges));
+    PolyUOp **red_ranges = calloc((size_t)reduceop->n_src, sizeof(*red_ranges));
+    if (!in0_ranges || !in1_ranges || !red_ranges) {
+      free(in0_ranges);
+      free(in1_ranges);
+      free(red_ranges);
+      return false;
+    }
     int n_in0 = 0, n_in1 = 0;
     for (int i = 0; i < s->n_rngs; i++) {
-      uint64_t bit = 1ULL << i;
-      if ((in0_reach & bit) && !(in1_reach & bit) && n_in0 < SCHED_MAX_RNGS)
-        in0_ranges[n_in0++] = s->rngs[i];
-      if ((in1_reach & bit) && !(in0_reach & bit) && n_in1 < SCHED_MAX_RNGS)
-        in1_ranges[n_in1++] = s->rngs[i];
+      bool r0 = poly_uop_in_ranges(ctx, in0, s->rngs[i]);
+      bool r1 = poly_uop_in_ranges(ctx, in1, s->rngs[i]);
+      if (r0 && !r1) in0_ranges[n_in0++] = s->rngs[i];
+      if (r1 && !r0) in1_ranges[n_in1++] = s->rngs[i];
     }
 
     /* red_ranges from REDUCE's trailing RANGE sources */
-    PolyUOp *red_ranges[SCHED_MAX_RNGS];
     int n_red = 0;
     int rs = poly_range_start(POLY_OP_REDUCE);
-    for (int i = rs; i < reduceop->n_src && n_red < SCHED_MAX_RNGS; i++) {
+    for (int i = rs; i < reduceop->n_src; i++) {
       if (reduceop->src[i]->op == POLY_OP_RANGE) red_ranges[n_red++] = reduceop->src[i];
     }
 
@@ -1073,16 +1108,26 @@ static bool sched_apply_tc_opt(
     if (n_in1 > 1) qsort(in1_ranges, (size_t)n_in1, sizeof(PolyUOp *), cmp_axis_id_desc);
     if (n_red > 1) qsort(red_ranges, (size_t)n_red, sizeof(PolyUOp *), cmp_axis_id_desc);
 
-    if (n_in0 == 0 || n_in1 == 0 || n_red == 0) continue;
-
     /* 4. Axis choices: product(in1_ranges, in0_ranges, red_ranges) -- note swap */
-    int n_choices = n_in1 * n_in0 * n_red;
-    if (axis >= n_choices) continue;
+    if (n_in0 == 0 || n_in1 == 0 || n_red == 0 || axis < 0 || axis / n_red / n_in0 >= n_in1) {
+      free(in0_ranges);
+      free(in1_ranges);
+      free(red_ranges);
+      continue;
+    }
     int red_idx = axis % n_red;
     int in0_idx = (axis / n_red) % n_in0;
     int in1_idx = (axis / n_red / n_in0) % n_in1;
 
     PolyUOp *axes[3] = {in1_ranges[in1_idx], in0_ranges[in0_idx], red_ranges[red_idx]};
+    free(in0_ranges);
+    free(in1_ranges);
+    free(red_ranges);
+
+    /* Tensor-core X/Y axes are output dimensions, not reductions. */
+    if (poly_range_axis_type(axes[0]->arg) == POLY_AXIS_REDUCE ||
+        poly_range_axis_type(axes[1]->arg) == POLY_AXIS_REDUCE)
+      return false;
 
     /* 5. Tag reduceop via tagged clone + substitute (matches tinygrad's
      * self.ast.substitute({reduceop: reduceop.replace(tag="TC")})).
@@ -1229,8 +1274,6 @@ static bool sched_apply_tc_opt(
       srcs[1] = poly_uop_substitute(ctx, srcs[1], tne, ne_reordered1, n_ne);
 
       /* Compute tc_reduce_axes and tc_upcast_axes (postrange.py:289-295) */
-      const char *shape_str[64];
-      int n_ss = sched_shape_str(s, shape_str, 64);
 
       const char *bua[32];
       int n_bua = poly_tc_base_upcast_axes(tc, bua, 32);
@@ -1242,12 +1285,8 @@ static bool sched_apply_tc_opt(
         char rname[32];
         int rname_len = snprintf(rname, sizeof(rname), "r%d", ri);
         if (rname_len < 0 || rname_len >= (int)sizeof(rname)) continue;
-        for (int si = 0; si < n_ss; si++) {
-          if (strcmp(shape_str[si], rname) == 0) {
-            tc_reduce_axis_ids[n_tc_ra++] = (int)poly_range_axis_id(s->rngs[si]->arg);
-            break;
-          }
-        }
+        int si = sched_shape_str_to_axis(s, rname);
+        if (si >= 0) tc_reduce_axis_ids[n_tc_ra++] = (int)poly_range_axis_id(s->rngs[si]->arg);
       }
 
       /* tc_upcast_axes[dim]: first log2(ept[dim]) entries of base_upcast_axes, mapped to axis ids
@@ -1264,13 +1303,11 @@ static bool sched_apply_tc_opt(
           }
         }
         for (int ui = 0; ui < need && ui < n_bua; ui++) {
-          for (int si = 0; si < n_ss; si++) {
-            if (strcmp(shape_str[si], bua[ui]) == 0) {
-              upcast_pairs[dim][n_upcast[dim]][0] = poly_range_axis_id(s->rngs[si]->arg);
-              upcast_pairs[dim][n_upcast[dim]][1] = 2;
-              n_upcast[dim]++;
-              break;
-            }
+          int si = sched_shape_str_to_axis(s, bua[ui]);
+          if (si >= 0) {
+            upcast_pairs[dim][n_upcast[dim]][0] = poly_range_axis_id(s->rngs[si]->arg);
+            upcast_pairs[dim][n_upcast[dim]][1] = 2;
+            n_upcast[dim]++;
           }
         }
       }
@@ -1312,29 +1349,44 @@ static bool sched_apply_tc_opt(
           )
       );
 
-      /* Preserve extra reduce ranges not consumed by TC (postrange.py:309-310) */
+      /* postrange._apply_tc_opt traverses the complete trailing expressions:
+       * shift_to leaves ADD/MUL expressions here, not only direct RANGEs. */
       int rs2 = poly_range_start(POLY_OP_REDUCE);
-      PolyUOp *extra_rngs[16];
+      PolyUOp *range_sink = poly_uop(
+          ctx, POLY_OP_SINK, POLY_VOID, found_red->src + rs2, found_red->n_src - rs2,
+          poly_arg_none()
+      );
+      int n_ranges_topo = 0;
+      PolyUOp **ranges_topo = poly_toposort_alloc(ctx, range_sink, &n_ranges_topo);
+      PolyUOp **red_srcs =
+          ranges_topo ? calloc((size_t)n_ranges_topo + 1, sizeof(*red_srcs)) : NULL;
+      if (!red_srcs) {
+        poly_toposort_free(ranges_topo);
+        return false;
+      }
+      red_srcs[0] = tc_uop;
       int n_extra = 0;
-      for (int i = rs2; i < found_red->n_src && n_extra < 16; i++) {
-        if (found_red->src[i]->op != POLY_OP_RANGE) continue;
-        int64_t aid = poly_range_axis_id(found_red->src[i]->arg);
+      for (int i = 0; i < n_ranges_topo; i++) {
+        if (ranges_topo[i]->op != POLY_OP_RANGE) continue;
+        int64_t aid = poly_range_axis_id(ranges_topo[i]->arg);
         bool in_tc = false;
         for (int r = 0; r < n_tc_ra; r++)
           if (tc_reduce_axis_ids[r] == (int)aid) {
             in_tc = true;
             break;
           }
-        if (!in_tc) extra_rngs[n_extra++] = found_red->src[i];
+        if (!in_tc) red_srcs[++n_extra] = ranges_topo[i];
+      }
+      poly_toposort_free(ranges_topo);
+      if (n_extra >= UINT16_MAX) {
+        free(red_srcs);
+        return false;
       }
       if (n_extra > 0) {
-        PolyUOp *red_srcs[18];
-        red_srcs[0] = tc_uop;
-        for (int i = 0; i < n_extra; i++)
-          red_srcs[i + 1] = extra_rngs[i];
         PolyArg red_arg = poly_arg_reduce(POLY_OP_ADD, 0);
         tc_uop = poly_uop(ctx, POLY_OP_REDUCE, tc_uop->dtype, red_srcs, n_extra + 1, red_arg);
       }
+      free(red_srcs);
 
       /* Substitute found_red -> tc_uop in AST */
       PolyUOp *from_r[1] = {found_red};
@@ -1355,7 +1407,67 @@ static bool sched_apply_tc_opt(
   return false;
 }
 
-/* hand_coded_optimizations (heuristic.py:8-190, CPU-relevant subset) */
+static int sched_range_index(const OptScheduler *s, PolyUOp *range) {
+  for (int i = 0; i < s->n_rngs; i++)
+    if (s->rngs[i] == range) return i;
+  return -1;
+}
+
+/* heuristic.hand_coded_optimizations: TC selection and post-TC M/N choices.
+ * The heuristic and TC-only policy share this sequence and its Opt history. */
+static bool sched_hand_coded_tensor_cores(OptScheduler *s, PolyRendererCaps caps) {
+  if (caps.n_tensor_cores <= 0) return false;
+  int n_reduce = 0;
+  for (int i = 0; i < s->n_rngs; i++)
+    n_reduce += s->types[i] == POLY_AXIS_GROUP_REDUCE || s->types[i] == POLY_AXIS_REDUCE;
+  int64_t args[] = {
+      poly_getenv_int("TC_SELECT", -1), poly_getenv_int("TC_OPT", 0), poly_getenv_int("TC", 1)};
+  if (args[2] <= 0 || (n_reduce != 1 && args[1] < 1)) return false;
+  for (int axis = 0; axis < 3; axis++) {
+    OptScheduler candidate;
+    sched_copy(&candidate, s);
+    PolyUOp *ranges[3] = {0};
+    bool ok = sched_apply_opt(
+        &candidate, caps,
+        (PolyOpt
+        ){.op = POLY_OPT_TC,
+          .has_axis = true,
+          .axis = axis,
+          .arg_kind = POLY_OPT_ARG_INT_TUPLE,
+          .arg_tuple = args,
+          .n_arg_tuple = 3},
+        ranges
+    );
+    for (int dim = 1; ok && dim >= 0; dim--) {
+      for (int amount = 5; amount >= 2; amount--) {
+        if (!poly_uop_divides(s->ctx, ranges[dim]->src[0], amount)) continue;
+        ranges[dim] = sched_apply_int_opt(
+            &candidate, caps, POLY_OPT_UPCAST, sched_range_index(&candidate, ranges[dim]), amount
+        );
+        ok = ranges[dim] != NULL;
+        break;
+      }
+    }
+    if (ok) {
+      for (int amount = 4; amount >= 2; amount -= 2) {
+        if (!poly_uop_divides(s->ctx, ranges[0]->src[0], amount)) continue;
+        ok = sched_apply_int_opt(
+                 &candidate, caps, POLY_OPT_LOCAL, sched_range_index(&candidate, ranges[0]), amount
+             ) != NULL;
+        break;
+      }
+    }
+    if (ok) {
+      sched_destroy(s);
+      *s = candidate;
+      return true;
+    }
+    sched_destroy(&candidate);
+  }
+  return false;
+}
+
+/* hand_coded_optimizations (heuristic.py:8-190) */
 static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps) {
   /* tinygrad apply_opts guard (postrange.py:352): skip heuristic for multi-block kernels. */
   {
@@ -1374,56 +1486,12 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
 
   OptScheduler s;
   sched_init(&s, ctx, sink);
-  if (!sched_can_optimize(&s)) return sink;
-
-  /* == Tensor core optimization (heuristic.py:28-46) ==
-   * Try TC before other heuristics. On success, return immediately. */
-  if (caps.n_tensor_cores > 0) {
-    /* Count reduce axes */
-    int n_reduce = 0;
-    for (int i = 0; i < s.n_rngs; i++) {
-      if (s.types[i] == POLY_AXIS_GROUP_REDUCE || s.types[i] == POLY_AXIS_REDUCE) n_reduce++;
-    }
-    int tc_opt_env = poly_getenv_int("TC_OPT", 0);
-    int use_tc_env = poly_getenv_int("TC", 1);
-
-    if (use_tc_env > 0 && (n_reduce == 1 || tc_opt_env >= 1)) {
-      OptScheduler tk;
-      sched_copy(&tk, &s);
-      PolyUOp *tc_axes[3];
-      bool tc_ok = sched_apply_tc_opt(
-          &tk, 0, -1, tc_opt_env, use_tc_env, caps.device, caps.tensor_cores, caps.n_tensor_cores,
-          tc_axes
-      );
-      if (tc_ok) {
-        /* Post-TC upcasts on M and N (heuristic.py:39-45) */
-        for (int tc_dim = 1; tc_dim >= 0; tc_dim--) {
-          int64_t bound = 0;
-          if (tc_axes[tc_dim] && tc_axes[tc_dim]->n_src > 0 &&
-              tc_axes[tc_dim]->src[0]->op == POLY_OP_CONST)
-            bound = tc_axes[tc_dim]->src[0]->arg.i;
-          if (bound <= 1) continue;
-          int szs[] = {5, 4, 3, 2};
-          for (int si = 0; si < 4; si++) {
-            if (bound % szs[si] == 0) {
-              int idx = -1;
-              for (int ri = 0; ri < tk.n_rngs; ri++) {
-                if (tk.rngs[ri] == tc_axes[tc_dim]) {
-                  idx = ri;
-                  break;
-                }
-              }
-              if (idx >= 0)
-                tc_axes[tc_dim] =
-                    sched_shift_to(&tk, tk.rngs[idx], szs[si], POLY_AXIS_UPCAST, false);
-              break;
-            }
-          }
-        }
-        return tk.ast;
-      }
-    }
+  if (!sched_can_optimize(&s)) {
+    sched_destroy(&s);
+    return sink;
   }
+
+  if (sched_hand_coded_tensor_cores(&s, caps)) goto done;
 
   /* == Matvec reduction (pinned tinygrad heuristic.py:60-80) ==
    * Polygrad's has_local capability covers both workgroup axes and the local
@@ -1439,15 +1507,16 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
     PolyUOp *reduceop = NULL;
     for (int i = 0; i < n_topo; i++) {
       PolyUOp *u = topo[i];
-      if (u && u->op == POLY_OP_REDUCE && u->arg.kind == POLY_ARG_REDUCE &&
-          u->arg.reduce.op == POLY_OP_ADD) {
+      /* Scheduler.reduceop selects the first reduction, not the first ADD. */
+      if (u->op == POLY_OP_REDUCE) {
         reduceop = u;
         break;
       }
     }
 
-    PolyUOp *mul = reduceop && reduceop->n_src > 0 && reduceop->src[0]->op == POLY_OP_MUL &&
-                           reduceop->src[0]->n_src == 2
+    PolyUOp *mul = reduceop && reduceop->arg.kind == POLY_ARG_REDUCE &&
+                           reduceop->arg.reduce.op == POLY_OP_ADD && reduceop->n_src > 0 &&
+                           reduceop->src[0]->op == POLY_OP_MUL && reduceop->src[0]->n_src == 2
                        ? reduceop->src[0]
                        : NULL;
     PolyUOp *idx0 = mul && mul->src[0]->op == POLY_OP_INDEX && mul->src[0]->n_src >= 2
@@ -1466,14 +1535,19 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
 
     bool reduce_is_addend = false;
     if (idx0 && first_reduce >= 0) {
-      PolyUOp *terms[256];
-      int n_terms = split_uop_add(idx0, terms, 256);
+      int n_terms = 0;
+      PolyUOp **terms = poly_uop_split(idx0, POLY_OP_ADD, &n_terms);
+      if (!terms) {
+        poly_toposort_free(topo);
+        goto done;
+      }
       for (int i = 0; i < n_terms; i++) {
         if (terms[i] == s.rngs[first_reduce]) {
           reduce_is_addend = true;
           break;
         }
       }
+      free(terms);
     }
     bool second_covers_first = idx0 && idx1;
     for (int i = 0; second_covers_first && i < s.n_rngs; i++) {
@@ -1492,15 +1566,15 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
           continue;
 
         if (mv_threads_per_row > 1)
-          sched_shift_to(
-              &s, s.rngs[first_reduce], mv_threads_per_row, POLY_AXIS_GROUP_REDUCE, false
-          );
+          sched_apply_int_opt(&s, caps, POLY_OPT_GROUP, 0, mv_threads_per_row);
         if (mv_blocksize > 1)
-          sched_shift_to(&s, s.rngs[global_idx], mv_blocksize, POLY_AXIS_LOCAL, false);
+          sched_apply_int_opt(&s, caps, POLY_OPT_LOCAL, global_idx, mv_blocksize);
         if (mv_rows_per_thread > 1)
-          sched_shift_to(&s, s.rngs[global_idx], mv_rows_per_thread, POLY_AXIS_UPCAST, false);
+          sched_apply_int_opt(&s, caps, POLY_OPT_UPCAST, global_idx, mv_rows_per_thread);
         poly_toposort_free(topo);
-        return s.ast;
+        PolyUOp *out = s.ast;
+        sched_destroy(&s);
+        return out;
       }
     }
     poly_toposort_free(topo);
@@ -1510,30 +1584,37 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
    * Try GROUPTOP(16) on the first few REDUCE axes when the output footprint
    * is small enough. If grouping succeeds, stop here like tinygrad and do not
    * fall through into the later reduce-unroll heuristic. */
-  if (caps.has_local && sched_output_prod_upcastable(&s) <= 2048) {
+  if (caps.has_local &&
+      sched_output_prod_upcastable(&s) <= (poly_getenv_flag("NOLOCALS") ? 240 : 2048)) {
     for (int axis = 0; axis < 3; axis++) {
-      int reduce_axes[SCHED_MAX_RNGS];
-      int n_reduce_axes = 0;
-      for (int i = 0; i < s.n_rngs && n_reduce_axes < SCHED_MAX_RNGS; i++) {
-        if (s.types[i] == POLY_AXIS_REDUCE) reduce_axes[n_reduce_axes++] = i;
+      int ridx = -1, remaining = axis;
+      for (int i = 0; i < s.n_rngs; i++) {
+        if (s.types[i] == POLY_AXIS_REDUCE && remaining-- == 0) {
+          ridx = i;
+          break;
+        }
       }
-      if (axis >= n_reduce_axes) break;
-      int ridx = reduce_axes[axis];
+      if (ridx < 0) break;
       if (ridx < s.n_rngs && s.shape[ridx] > 1 &&
-          sched_shift_to(&s, s.rngs[ridx], 16, POLY_AXIS_GROUP_REDUCE, true)) {
+          sched_apply_int_opt(&s, caps, POLY_OPT_GROUPTOP, axis, 16)) {
         break;
       }
     }
   }
 
-  if (sched_has_axis_type(&s, POLY_AXIS_GROUP_REDUCE)) return s.ast;
+  if (sched_has_axis_type(&s, POLY_AXIS_GROUP_REDUCE)) goto done;
 
   /* == Masked upcast (heuristic.py:96-105) ==
    * Upcast small dims (<=7) that appear in WHERE gates */
   {
-    int up_dims[SCHED_MAX_RNGS];
-    int n_up = sched_upcastable_dims(&s, up_dims, SCHED_MAX_RNGS);
-    int to_upcast[SCHED_MAX_RNGS];
+    int *up_dims = calloc((size_t)s.n_rngs, sizeof(*up_dims));
+    int *to_upcast = calloc((size_t)s.n_rngs, sizeof(*to_upcast));
+    if (!up_dims || !to_upcast) {
+      free(up_dims);
+      free(to_upcast);
+      goto done;
+    }
+    int n_up = sched_upcastable_dims(&s, up_dims, s.n_rngs);
     int n_to_upcast = 0;
     int n_topo = 0;
     PolyUOp **topo = poly_toposort_alloc(ctx, s.ast, &n_topo);
@@ -1553,7 +1634,7 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
       int64_t prod = s.shape[axis];
       for (int j = 0; j < n_to_upcast; j++)
         prod *= s.shape[to_upcast[j]];
-      if (prod <= 49 && n_to_upcast < SCHED_MAX_RNGS) to_upcast[n_to_upcast++] = axis;
+      if (prod <= 49) to_upcast[n_to_upcast++] = axis;
     }
     poly_toposort_free(topo);
 
@@ -1561,17 +1642,19 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
     for (int i = n_to_upcast - 1; i >= 0; i--) {
       int axis = to_upcast[i];
       if (axis < s.n_rngs && s.shape[axis] > 1)
-        sched_shift_to(&s, s.rngs[axis], s.shape[axis], POLY_AXIS_UPCAST, false);
+        sched_apply_int_opt(&s, caps, POLY_OPT_UPCAST, axis, s.shape[axis]);
     }
+    free(up_dims);
+    free(to_upcast);
   }
 
   /* == Multi-axis UPCAST with stride scoring (heuristic.py:107-133) == */
   {
-    bool upcasted_axis[SCHED_MAX_RNGS] = {false};
+    int n_axis_flags = s.n_rngs;
+    bool *upcasted_axis = calloc((size_t)n_axis_flags, sizeof(*upcasted_axis));
+    if (!upcasted_axis) goto done;
 
     while (sched_output_prod_upcastable(&s) >= 1024 && sched_upcast_size(&s) < 32) {
-      int up_dims[SCHED_MAX_RNGS];
-      int n_up = sched_upcastable_dims(&s, up_dims, SCHED_MAX_RNGS);
 
       /* Score each candidate (num_strides, sum_strides, axis, amount) */
       typedef struct {
@@ -1580,13 +1663,16 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
         int axis;
         int amount;
       } UpChoice;
-      UpChoice choices[SCHED_MAX_RNGS * 2];
+      UpChoice best = {0};
       int n_choices = 0;
 
       int amounts[] = {3, 4};
-      for (int ui = 0; ui < n_up; ui++) {
-        int axis = up_dims[ui];
-        if (upcasted_axis[axis]) continue;
+      for (int axis = 0; axis < s.n_rngs; axis++) {
+        PolyAxisType t = s.types[axis];
+        if ((t != POLY_AXIS_GLOBAL && t != POLY_AXIS_LOCAL && t != POLY_AXIS_WEAK) ||
+            s.shape[axis] <= 1)
+          continue;
+        if (axis < n_axis_flags && upcasted_axis[axis]) continue;
 
         for (int ai = 0; ai < 2; ai++) {
           int amount = amounts[ai];
@@ -1598,16 +1684,17 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
            * Must have a buffer where rng is NOT in index but all UPCAST/UNROLL rngs ARE */
           bool has_expanded_buf = false;
           if (s.has_reach) {
-            /* Build mask of all current UPCAST/UNROLL ranges */
-            uint64_t upcast_mask = 0;
-            for (int ri = 0; ri < s.n_rngs; ri++) {
-              if (s.types[ri] == POLY_AXIS_UPCAST || s.types[ri] == POLY_AXIS_UNROLL)
-                upcast_mask |= (1ULL << ri);
-            }
             for (int bi = 0; bi < s.n_bufs && !has_expanded_buf; bi++) {
-              if (s.buf_reach[bi] & (1ULL << axis)) continue; /* rng IS in this buf's index */
+              if (sched_buf_reaches(&s, bi, axis)) continue;
               /* Check all existing UPCAST/UNROLL ranges are in this buf's index */
-              if ((s.buf_reach[bi] & upcast_mask) == upcast_mask) has_expanded_buf = true;
+              bool all = true;
+              for (int ri = 0; ri < s.n_rngs; ri++)
+                if ((s.types[ri] == POLY_AXIS_UPCAST || s.types[ri] == POLY_AXIS_UNROLL) &&
+                    !sched_buf_reaches(&s, bi, ri)) {
+                  all = false;
+                  break;
+                }
+              if (all) has_expanded_buf = true;
             }
           }
           if (!has_expanded_buf) continue;
@@ -1624,11 +1711,15 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
             if (!idx_expr) continue;
 
             /* Check if rng is in backward slice */
-            if (s.has_reach && (s.buf_reach[bi] & (1ULL << axis))) num_strides++;
+            if (sched_buf_reaches(&s, bi, axis)) num_strides++;
 
             /* Split on ADD and extract stride for this rng */
-            PolyUOp *addends[256];
-            int n_add = split_uop_add(idx_expr, addends, 256);
+            int n_add = 0;
+            PolyUOp **addends = poly_uop_split(idx_expr, POLY_OP_ADD, &n_add);
+            if (!addends) {
+              free(upcasted_axis);
+              goto done;
+            }
             for (int j = 0; j < n_add; j++) {
               PolyUOp *c = addends[j];
               if (c == rng) {
@@ -1641,52 +1732,35 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
                   sum_strides += c->src[0]->arg.i;
               }
             }
+            free(addends);
           }
 
-          if (n_choices < (int)(sizeof(choices) / sizeof(choices[0])))
-            choices[n_choices++] = (UpChoice){num_strides, sum_strides, axis, amount};
+          if (!n_choices || num_strides < best.num_strides ||
+              (num_strides == best.num_strides && sum_strides < best.sum_strides))
+            best = (UpChoice){num_strides, sum_strides, axis, amount};
+          n_choices++;
         }
       }
 
       if (n_choices == 0) break;
 
-      /* Sort: lowest (num_strides, sum_strides) first */
-      for (int i = 0; i < n_choices - 1; i++) {
-        for (int j = i + 1; j < n_choices; j++) {
-          bool swap = false;
-          if (choices[j].num_strides < choices[i].num_strides)
-            swap = true;
-          else if (choices[j].num_strides == choices[i].num_strides &&
-                   choices[j].sum_strides < choices[i].sum_strides)
-            swap = true;
-          if (swap) {
-            UpChoice tmp = choices[i];
-            choices[i] = choices[j];
-            choices[j] = tmp;
-          }
-        }
-      }
-
-      int best_axis = choices[0].axis;
-      int best_amount = choices[0].amount;
+      /* Enumeration already supplies the axis/amount tie-break order. */
+      int best_axis = best.axis;
+      int best_amount = best.amount;
       if (best_axis < s.n_rngs && s.shape[best_axis] > 1)
-        sched_shift_to(&s, s.rngs[best_axis], best_amount, POLY_AXIS_UPCAST, false);
-      /* Mark the original axis as upcasted -- after refresh, find the axis by matching the rng */
-      /* Since indices shift after refresh, we track by setting the flag before refresh */
-      /* Actually, upcasted_axis tracks by index which changes after shift_to+refresh.
-       * Use a simple counter limit instead (tinygrad limits upcast_size < 32) */
-      (void)upcasted_axis; /* The while-loop condition handles termination */
-      /* Prevent infinite loop: break if nothing changed */
-      if (sched_upcast_size(&s) < 32 && n_choices > 0) {
-        upcasted_axis[best_axis] = true;
-      }
+        sched_apply_int_opt(&s, caps, POLY_OPT_UPCAST, best_axis, best_amount);
+      /* Pinned heuristic tracks the selected index, not UOp identity. */
+      if (best_axis < n_axis_flags) upcasted_axis[best_axis] = true;
     }
+    free(upcasted_axis);
   }
 
   /* == Reduce UNROLL (heuristic.py:135-149) == */
   if (s.has_reduce) {
-    int unroll_dims[SCHED_MAX_RNGS];
-    int n_unroll = sched_unrollable_dims(&s, unroll_dims, SCHED_MAX_RNGS);
+    int capacity = s.n_rngs;
+    int *unroll_dims = calloc((size_t)capacity, sizeof(*unroll_dims));
+    if (!unroll_dims) goto done;
+    int n_unroll = sched_unrollable_dims(&s, unroll_dims, capacity);
 
     if (n_unroll > 0 &&
         (sched_upcast_size(&s) <= 4 || !sched_has_axis_type(&s, POLY_AXIS_UNROLL)) &&
@@ -1697,20 +1771,21 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
       if (last_sz <= 32) {
         /* Unroll fully (amount = full size) */
         if (last < s.n_rngs && last_sz > 1)
-          sched_shift_to(&s, s.rngs[last], last_sz, POLY_AXIS_UNROLL, false);
+          sched_apply_int_opt(&s, caps, POLY_OPT_UNROLL, n_unroll - 1, 0);
         /* If small, try unrolling a second reduce dim */
-        n_unroll = sched_unrollable_dims(&s, unroll_dims, SCHED_MAX_RNGS);
+        n_unroll = sched_unrollable_dims(&s, unroll_dims, capacity);
         if (n_unroll > 0 && last_sz <= 3 && s.shape[unroll_dims[n_unroll - 1]] <= 3) {
           int last2 = unroll_dims[n_unroll - 1];
           if (last2 < s.n_rngs && s.shape[last2] > 1)
-            sched_shift_to(&s, s.rngs[last2], s.shape[last2], POLY_AXIS_UNROLL, false);
+            sched_apply_int_opt(&s, caps, POLY_OPT_UNROLL, n_unroll - 1, 0);
         }
       } else {
         /* Partial unroll by 4 if divisible */
         if (last_sz % 4 == 0 && last < s.n_rngs)
-          sched_shift_to(&s, s.rngs[last], 4, POLY_AXIS_UNROLL, false);
+          sched_apply_int_opt(&s, caps, POLY_OPT_UNROLL, n_unroll - 1, 4);
       }
     }
+    free(unroll_dims);
   }
 
   /* == Default upcast fallback (heuristic.py:151-154) ==
@@ -1718,32 +1793,42 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
    * upcast by that amount. Use max_vec_width from caps (4 for SSE, 8 for AVX2). */
   if (!sched_upcasted(&s)) {
     int upcast_amount = (caps.max_vec_width >= 8) ? 8 : 4;
-    int up_dims[SCHED_MAX_RNGS];
-    int n_up = sched_upcastable_dims(&s, up_dims, SCHED_MAX_RNGS);
+    int *up_dims = calloc((size_t)s.n_rngs, sizeof(*up_dims));
+    if (!up_dims) goto done;
+    int n_up = sched_upcastable_dims(&s, up_dims, s.n_rngs);
     if (n_up > 0) {
       int last = up_dims[n_up - 1];
       /* Try preferred width first, fall back to 4 if not divisible */
       if (s.shape[last] % upcast_amount == 0 && last < s.n_rngs)
-        sched_shift_to(&s, s.rngs[last], upcast_amount, POLY_AXIS_UPCAST, false);
+        sched_apply_int_opt(&s, caps, POLY_OPT_UPCAST, last, upcast_amount);
       else if (upcast_amount > 4 && s.shape[last] % 4 == 0 && last < s.n_rngs)
-        sched_shift_to(&s, s.rngs[last], 4, POLY_AXIS_UPCAST, false);
+        sched_apply_int_opt(&s, caps, POLY_OPT_UPCAST, last, 4);
     }
+    free(up_dims);
   }
 
   /* == Local groups (heuristic.py:160-175 subset) ==
    * Port the tinygrad local scheduling block for backends with workgroup
    * locals. This is what splits large LOOP/GLOBAL axes into LOOP x LOCAL for
    * WebGPU masked kernels like triu(9,9). */
-  if (caps.has_local) {
-    LocalAxisRank ranked[SCHED_MAX_RNGS];
+  if (caps.has_local && poly_getenv_flag("NOLOCALS")) {
+    if (!sched_apply_opt(&s, caps, (PolyOpt){.op = POLY_OPT_NOLOCALS}, NULL)) goto done;
+  } else if (caps.has_local) {
+    LocalAxisRank *ranked = calloc((size_t)s.n_rngs, sizeof(*ranked));
+    LocalChoice *to_local = calloc((size_t)s.n_rngs, sizeof(*to_local));
+    if (!ranked || !to_local) {
+      free(ranked);
+      free(to_local);
+      goto done;
+    }
     int n_ranked = 0;
-    for (int axis = 0; axis < s.n_rngs && n_ranked < SCHED_MAX_RNGS; axis++) {
+    for (int axis = 0; axis < s.n_rngs; axis++) {
       if (!(s.types[axis] == POLY_AXIS_GLOBAL || s.types[axis] == POLY_AXIS_WEAK)) continue;
       if (s.shape[axis] <= 1) continue;
       bool expanded = false;
       if (s.has_reach) {
         for (int bi = 0; bi < s.n_bufs; bi++) {
-          if ((s.buf_reach[bi] & (1ULL << axis)) == 0) {
+          if (!sched_buf_reaches(&s, bi, axis)) {
             expanded = true;
             break;
           }
@@ -1753,9 +1838,8 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
     }
     qsort(ranked, (size_t)n_ranked, sizeof(LocalAxisRank), cmp_local_axis_rank);
 
-    LocalChoice to_local[SCHED_MAX_RNGS];
     int n_to_local = 0;
-    for (int ri = 0; ri < n_ranked && n_to_local < SCHED_MAX_RNGS; ri++) {
+    for (int ri = 0; ri < n_ranked; ri++) {
       int axis = ranked[ri].axis;
       int64_t local_size = 1;
       for (int i = 0; i < n_to_local; i++)
@@ -1793,10 +1877,12 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
         bool will_delete_shape = to_local[i].size == s.shape[axis];
         if ((s.types[axis] == POLY_AXIS_GLOBAL || s.types[axis] == POLY_AXIS_WEAK) &&
             s.shape[axis] > 1)
-          sched_shift_to(&s, s.rngs[axis], to_local[i].size, POLY_AXIS_LOCAL, false);
+          sched_apply_int_opt(&s, caps, POLY_OPT_LOCAL, axis, to_local[i].size);
         if (will_delete_shape) deleted_shape++;
       }
     }
+    free(ranked);
+    free(to_local);
   }
 
   /* == CPU THREAD axis (tinygrad heuristic.py:180-190) ==
@@ -1813,7 +1899,7 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
       for (int axis = 0; axis < s.n_rngs; axis++) {
         if (s.types[axis] != POLY_AXIS_WEAK) continue;
         if (s.shape[axis] <= 1 || (s.shape[axis] % threads) != 0) continue;
-        if (sched_shift_to(&s, s.rngs[axis], threads, POLY_AXIS_THREAD, true)) {
+        if (sched_apply_int_opt(&s, caps, POLY_OPT_THREAD, axis, threads)) {
           ci = (int)(sizeof(candidates) / sizeof(candidates[0]));
           break;
         }
@@ -1821,7 +1907,10 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
     }
   }
 
-  return s.ast;
+done:;
+  PolyUOp *out = s.ast;
+  sched_destroy(&s);
+  return out;
 }
 
 /* Scheduler.apply_opt (pinned codegen/opt/postrange.py). Action history is
@@ -1850,9 +1939,13 @@ static bool sched_globalizable(OptScheduler *s, PolyUOp *rng) {
   return output;
 }
 
-static bool sched_apply_opt(OptScheduler *s, PolyRendererCaps caps, PolyOpt opt) {
-  if (!s || s->overflow) return false;
-  OptScheduler previous = *s;
+static bool sched_apply_opt_impl(
+    OptScheduler *s,
+    PolyRendererCaps caps,
+    PolyOpt opt,
+    PolyUOp **result
+) {
+  if (!s || s->failed) return false;
   PolyKernelInfo info = s->ast->arg.kind == POLY_ARG_KERNEL_INFO && s->ast->arg.kernel_info
                             ? *s->ast->arg.kernel_info
                             : (PolyKernelInfo){0};
@@ -1877,7 +1970,7 @@ static bool sched_apply_opt(OptScheduler *s, PolyRendererCaps caps, PolyOpt opt)
       return false;
     if (!sched_apply_tc_opt(
             s, opt.axis, (int)opt.arg_tuple[0], (int)opt.arg_tuple[1], (int)opt.arg_tuple[2],
-            caps.device, caps.tensor_cores, caps.n_tensor_cores, NULL
+            caps.device, caps.tensor_cores, caps.n_tensor_cores, result
         ))
       goto failed;
   } else if (opt.op == POLY_OPT_PADTO) {
@@ -1987,10 +2080,12 @@ static bool sched_apply_opt(OptScheduler *s, PolyRendererCaps caps, PolyOpt opt)
         size *= s->shape[i];
       }
     }
-    if (!sched_shift_to(
-            s, rng, amount, to_type, opt.op == POLY_OPT_GROUPTOP || opt.op == POLY_OPT_THREAD
-        ))
-      goto failed;
+    PolyUOp *replaced = sched_shift_to_core(
+        s, rng, amount, to_type, opt.op == POLY_OPT_GROUPTOP || opt.op == POLY_OPT_THREAD, NULL,
+        result ? &result[1] : NULL
+    );
+    if (!replaced) goto failed;
+    if (result) result[0] = replaced;
   }
   if (info.n_applied_opts == INT_MAX) goto failed;
   PolyOpt *history = malloc(((size_t)info.n_applied_opts + 1) * sizeof(*history));
@@ -2007,14 +2102,22 @@ static bool sched_apply_opt(OptScheduler *s, PolyRendererCaps caps, PolyOpt opt)
   if (!s->ast) goto failed;
   return true;
 failed:
-  *s = previous;
   return false;
 }
 
-/* Shallow-copy an OptScheduler. Used by TC optimization and BEAM search.
- * Safe because sched_shift_to creates new UOps via poly_uop_substitute. */
-static void sched_copy(OptScheduler *dst, const OptScheduler *src) {
-  *dst = *src;
+static bool sched_apply_opt(OptScheduler *s, PolyRendererCaps caps, PolyOpt opt, PolyUOp **result) {
+  if (!s || s->failed) return false;
+  OptScheduler candidate;
+  sched_copy(&candidate, s);
+  /* An unchanged candidate owns a second reference; refresh instead gives it
+   * a new snapshot. Releasing either owner cannot invalidate the other. */
+  if (!sched_apply_opt_impl(&candidate, caps, opt, result) || candidate.failed) {
+    sched_destroy(&candidate);
+    return false;
+  }
+  sched_destroy(s);
+  *s = candidate;
+  return true;
 }
 
 /* search.py:actions. Tuple storage belongs to the catalogue; KernelInfo copies
@@ -2100,7 +2203,7 @@ static bool beam_get_kernel_action(
       }
     }
   }
-  if (!sched_apply_opt(s, caps, opt)) return false;
+  if (!sched_apply_opt(s, caps, opt, NULL)) return false;
   long double up = 1, local = 1, tc_up = 1;
   if (s->tensor_core)
     tc_up = (long double)s->tensor_core->dims[0] * s->tensor_core->dims[1] *
@@ -2129,7 +2232,77 @@ int poly_test_beam_actions(PolyOpt *out, int capacity) {
 PolyUOp *poly_test_apply_opt(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps, PolyOpt opt) {
   OptScheduler s;
   sched_init(&s, ctx, sink);
-  return sched_apply_opt(&s, caps, opt) ? s.ast : NULL;
+  PolyUOp *out = sched_apply_opt(&s, caps, opt, NULL) ? s.ast : NULL;
+  sched_destroy(&s);
+  return out;
+}
+
+bool poly_test_scheduler_copy_rollback(PolyCtx *ctx, PolyUOp *sink, PolyOpt opt) {
+  OptScheduler parent;
+  sched_init(&parent, ctx, sink);
+  bool ok = !parent.failed;
+  for (int fail = 0; ok && fail < 6; fail++) {
+    OptScheduler copy;
+    sched_copy(&copy, &parent);
+    sched_alloc_fail_after = fail;
+    bool applied = sched_apply_opt(&copy, (PolyRendererCaps){.device = "CPU"}, opt, NULL);
+    sched_alloc_fail_after = -1;
+    ok &= !applied && copy.ast == parent.ast && copy.rngs == parent.rngs &&
+          copy.opt_range_next == parent.opt_range_next && !copy.failed;
+    ok &= sched_apply_opt(&copy, (PolyRendererCaps){.device = "CPU"}, opt, NULL) &&
+          copy.ast != parent.ast && copy.rngs != parent.rngs && parent.ast == sink;
+    sched_destroy(&copy);
+  }
+  sched_destroy(&parent);
+  return ok;
+}
+
+bool poly_test_scheduler_copy_lifetime(PolyCtx *ctx, PolyUOp *sink) {
+  OptScheduler parent, copies[4];
+  sched_init(&parent, ctx, sink);
+  if (!sched_can_optimize(&parent)) {
+    sched_destroy(&parent);
+    return false;
+  }
+  for (int i = 0; i < 4; i++)
+    sched_copy(&copies[i], &parent);
+  bool ok = *parent.references == 5;
+  PolyRendererCaps caps = {.device = "CPU"};
+  PolyOpt split = {
+      .op = POLY_OPT_UPCAST, .has_axis = true, .axis = 0, .arg_kind = POLY_OPT_ARG_INT, .arg = 4};
+  /* Metadata-preserving success, rejected mutation, then detached success. */
+  ok &= sched_apply_opt(&copies[0], caps, (PolyOpt){.op = POLY_OPT_NOLOCALS}, NULL);
+  PolyOpt invalid = split;
+  invalid.arg = 3;
+  ok &= !sched_apply_opt(&copies[1], caps, invalid, NULL);
+  ok &= sched_apply_opt(&copies[2], caps, split, NULL);
+  ok &= copies[0].references == parent.references && copies[1].references == parent.references &&
+        copies[2].references != parent.references && *parent.references == 4;
+  sched_destroy(&parent);
+  ok &= *copies[0].references == 3;
+  sched_destroy(&copies[1]);
+  sched_destroy(&copies[3]);
+  ok &= *copies[0].references == 1 && copies[0].shape[0] == 8 &&
+        copies[0].types[0] == POLY_AXIS_GLOBAL;
+  OptScheduler last;
+  sched_copy(&last, &copies[0]);
+  sched_destroy(&copies[0]);
+  ok &= sched_apply_opt(&last, caps, split, NULL) && last.shape[0] == 2 &&
+        copies[2].shape[0] == 2 && last.references != copies[2].references;
+  sched_destroy(&last);
+  sched_destroy(&copies[2]);
+  return ok;
+}
+
+bool poly_test_scheduler_reaches(PolyCtx *ctx, PolyUOp *sink, PolyUOp *index, PolyUOp *range) {
+  OptScheduler s;
+  sched_init(&s, ctx, sink);
+  bool found = false;
+  for (int b = 0; !s.failed && b < s.n_bufs; b++)
+    for (int r = 0; r < s.n_rngs; r++)
+      if (s.bufs[b] == index && s.rngs[r] == range) found = sched_buf_reaches(&s, b, r);
+  sched_destroy(&s);
+  return found;
 }
 #endif
 
@@ -2229,7 +2402,7 @@ static PolyDevice beam_device(PolyRewriteOpts opts) {
 
 /* search._try_compile: use the same PROGRAM builder as normal execution.
  * A tagged optimized SINK suppresses recursive apply_opts, not required lowering. */
-static int beam_prepare_candidate(
+static int beam_prepare_candidate_impl(
     PolyCtx *ctx,
     PolyUOp *sink,
     PolyRewriteOpts opts,
@@ -2272,6 +2445,29 @@ failed:
   free(params);
   poly_toposort_free(topo);
   return -1;
+}
+
+static int beam_prepare_candidate(
+    PolyCtx *ctx,
+    PolyUOp *sink,
+    PolyRewriteOpts opts,
+    PolyRunner *runner
+) {
+  double previous = poly_compile_deadline_ms;
+  int seconds = poly_getenv_int("BEAM_TIMEOUT_SEC", 10);
+  if (seconds > 0) {
+    double deadline = poly_now_ms() + (double)seconds * 1000;
+    poly_compile_deadline_ms = previous > 0 && previous < deadline ? previous : deadline;
+  }
+  int rc = beam_prepare_candidate_impl(ctx, sink, opts, runner);
+  bool timed_out = poly_compile_timed_out();
+  poly_compile_deadline_ms = previous;
+  if (timed_out) {
+    if (rc == 0) poly_time_call_finish(ctx, runner, beam_device(opts));
+    if (poly_debug_at_least(2)) fprintf(stderr, "polygrad: BEAM compile timeout\n");
+    return -2;
+  }
+  return rc;
 }
 
 /* args_from_ast/_ensure_buffer_alloc: one raw-buffer set for the whole search.
@@ -2586,6 +2782,7 @@ static bool beam_cache_load(const BeamCacheKey *key, OptScheduler *s, PolyRender
   uint32_t header[5];
   BeamCachedOpt *cached = NULL;
   uint8_t *stored_key = NULL;
+  OptScheduler candidate = {0};
   bool ok = false;
   if (fread(header, sizeof(header), 1, f) != 1 || header[0] != UINT32_C(0x50474232) ||
       header[1] != POLYGRAD_ABI_VERSION || header[2] != UINT32_C(0x01020304) ||
@@ -2619,16 +2816,18 @@ static bool beam_cache_load(const BeamCacheKey *key, OptScheduler *s, PolyRender
       cached[i].opt.n_arg_tuple = 3;
     }
   }
-  OptScheduler candidate = *s;
+  sched_copy(&candidate, s);
   int prefix = s->ast->arg.kind == POLY_ARG_KERNEL_INFO && s->ast->arg.kernel_info
                    ? s->ast->arg.kernel_info->n_applied_opts
                    : 0;
   if ((uint32_t)prefix > header[4]) goto done;
   for (uint32_t i = (uint32_t)prefix; i < header[4]; i++)
-    if (!sched_apply_opt(&candidate, caps, cached[i].opt)) goto done;
-  *s = candidate;
+    if (!sched_apply_opt(&candidate, caps, cached[i].opt, NULL)) goto done;
+  sched_destroy(s);
+  sched_copy(s, &candidate);
   ok = true;
 done:
+  sched_destroy(&candidate);
   free(cached);
   free(stored_key);
   fclose(f);
@@ -2711,7 +2910,9 @@ PolyUOp *poly_test_beam_cache_read(PolyCtx *ctx, PolyUOp *sink, int width) {
   sched_init(&s, ctx, sink);
   bool ok = beam_cache_load(&key, &s, opts.caps);
   free(key.data);
-  return ok ? s.ast : NULL;
+  PolyUOp *out = ok ? s.ast : NULL;
+  sched_destroy(&s);
+  return out;
 }
 #endif
 
@@ -2762,7 +2963,8 @@ static PolyUOp *poly_beam_search(PolyCtx *ctx, PolyUOp *sink, int width, PolyRew
   PolyUOp **seen = NULL;
   PolyUOp **candidate_roots =
       calloc((size_t)width * (size_t)actions.count, sizeof(*candidate_roots));
-  int n_candidate_roots = 0, size = 1;
+  int n_candidate_roots = 0, size = 1, count = 0;
+  bool fatal = false;
   BeamBuffers raw = {0};
   size_t n_seen = 0, seen_capacity = 0;
   if (!beam || !candidates || !candidate_roots) {
@@ -2773,6 +2975,7 @@ static PolyUOp *poly_beam_search(PolyCtx *ctx, PolyUOp *sink, int width, PolyRew
   }
   sched_init(&beam[0].sched, ctx, sink);
   if (poly_uop_retain(ctx, sink) != 0) {
+    sched_destroy(&beam[0].sched);
     free(beam);
     free(candidates);
     free(candidate_roots);
@@ -2781,7 +2984,7 @@ static PolyUOp *poly_beam_search(PolyCtx *ctx, PolyUOp *sink, int width, PolyRew
   beam[0].time_us = INFINITY;
   BeamCacheKey key;
   beam_cache_key(ctx, sink, width, opts, &key);
-  if (!poly_getenv_flag("IGNORE_BEAM_CACHE") && poly_getenv_int("CACHELEVEL", 2) >= 1 &&
+  if (!poly_get_ignore_beam_cache() && poly_getenv_int("CACHELEVEL", 2) >= 1 &&
       beam_cache_load(&key, &beam[0].sched, opts.caps)) {
     if (poly_uop_retain(ctx, beam[0].sched.ast) != 0)
       beam[0].sched.ast = sink;
@@ -2800,16 +3003,24 @@ static PolyUOp *poly_beam_search(PolyCtx *ctx, PolyUOp *sink, int width, PolyRew
     if (end != progress && !*end && isfinite(parsed) && parsed >= 0) min_progress = parsed;
   }
   for (;;) {
+    for (int i = 0; i < count; i++)
+      sched_destroy(&candidates[i].sched);
     for (int i = 0; i < n_candidate_roots; i++)
       poly_uop_release(ctx, candidate_roots[i]);
     n_candidate_roots = 0;
-    int count = 0;
+    count = 0;
     for (int b = 0; b < size; b++)
       for (int a = 0; a < actions.count; a++) {
         OptScheduler copy;
         sched_copy(&copy, &beam[b].sched);
-        if (!beam_get_kernel_action(&copy, opts.caps, actions.opts[a], &actions)) continue;
-        if (poly_uop_retain(ctx, copy.ast) != 0) goto done;
+        if (!beam_get_kernel_action(&copy, opts.caps, actions.opts[a], &actions)) {
+          sched_destroy(&copy);
+          continue;
+        }
+        if (poly_uop_retain(ctx, copy.ast) != 0) {
+          sched_destroy(&copy);
+          goto done;
+        }
         candidate_roots[n_candidate_roots++] = copy.ast;
         candidates[count] = (BeamEntry){.sched = copy, .time_us = INFINITY, .order = count};
         count++;
@@ -2819,7 +3030,12 @@ static PolyUOp *poly_beam_search(PolyCtx *ctx, PolyUOp *sink, int width, PolyRew
     int timed = 0;
     for (int i = 0; i < count; i++) {
       PolyRunner runner;
-      if (beam_prepare_candidate(ctx, candidates[i].sched.ast, opts, &runner) != 0) continue;
+      int prepared = beam_prepare_candidate(ctx, candidates[i].sched.ast, opts, &runner);
+      if (prepared == -2 && poly_getenv_flag("BEAM_STRICT_MODE")) {
+        fatal = true;
+        goto done;
+      }
+      if (prepared != 0) continue;
       PolyUOp *program = runner.program;
       PolyUOp *lib = runner.compiled_binary ? runner.compiled_binary
                      : program->n_src >= 4  ? program->src[3]
@@ -2861,11 +3077,11 @@ static PolyUOp *poly_beam_search(PolyCtx *ctx, PolyUOp *sink, int width, PolyRew
       );
       poly_time_call_finish(ctx, &runner, device);
       if (!isfinite(time)) continue;
-      candidates[timed] = candidates[i];
-      candidates[timed++].time_us = time;
+      candidates[i].time_us = time;
+      timed++;
     }
     if (!timed) break;
-    qsort(candidates, (size_t)timed, sizeof(*candidates), beam_candidate_cmp);
+    qsort(candidates, (size_t)count, sizeof(*candidates), beam_candidate_cmp);
     bool exiting = candidates[0].time_us < min_progress ||
                    beam[0].time_us - candidates[0].time_us < min_progress;
     if (!exiting || candidates[0].time_us < beam[0].time_us) {
@@ -2878,15 +3094,22 @@ static PolyUOp *poly_beam_search(PolyCtx *ctx, PolyUOp *sink, int width, PolyRew
           poly_uop_release(ctx, candidates[i].sched.ast);
         goto done;
       }
-      for (int i = 0; i < size; i++)
+      for (int i = 0; i < size; i++) {
         poly_uop_release(ctx, beam[i].sched.ast);
+        sched_destroy(&beam[i].sched);
+      }
       size = next_size;
-      memcpy(beam, candidates, (size_t)size * sizeof(*beam));
+      for (int i = 0; i < size; i++) {
+        beam[i] = candidates[i];
+        sched_copy(&beam[i].sched, &candidates[i].sched);
+      }
     }
     if (exiting) break;
   }
   if (poly_getenv_int("CACHELEVEL", 2) >= 1) beam_cache_save(&key, beam[0].sched.ast);
 done:
+  for (int i = 0; i < count; i++)
+    sched_destroy(&candidates[i].sched);
   beam_buffers_free(&raw);
   for (int i = 0; i < n_candidate_roots; i++)
     poly_uop_release(ctx, candidate_roots[i]);
@@ -2895,9 +3118,11 @@ done:
     poly_uop_release(ctx, seen[i]);
   free(seen);
   free(key.data);
-  PolyUOp *result = beam[0].sched.ast;
-  for (int i = 0; i < size; i++)
+  PolyUOp *result = fatal ? NULL : beam[0].sched.ast;
+  for (int i = 0; i < size; i++) {
     poly_uop_release(ctx, beam[i].sched.ast);
+    sched_destroy(&beam[i].sched);
+  }
   free(beam);
   free(candidates);
   return result;
@@ -5838,49 +6063,9 @@ PolyUOp *poly_apply_tc_opt(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps) {
   if (caps.n_tensor_cores <= 0) return sink;
   OptScheduler s;
   sched_init(&s, ctx, sink);
-  if (!sched_can_optimize(&s)) return sink;
-
-  int n_reduce = 0;
-  for (int i = 0; i < s.n_rngs; i++)
-    if (s.types[i] == POLY_AXIS_GROUP_REDUCE || s.types[i] == POLY_AXIS_REDUCE) n_reduce++;
-
-  int tc_opt_env = poly_getenv_int("TC_OPT", 0);
-  int use_tc_env = poly_getenv_int("TC", 1);
-
-  if (use_tc_env > 0 && (n_reduce == 1 || tc_opt_env >= 1)) {
-    OptScheduler tk;
-    sched_copy(&tk, &s);
-    PolyUOp *tc_axes[3];
-    bool tc_ok = sched_apply_tc_opt(
-        &tk, 0, -1, tc_opt_env, use_tc_env, caps.device, caps.tensor_cores, caps.n_tensor_cores,
-        tc_axes
-    );
-    if (tc_ok) {
-      for (int tc_dim = 1; tc_dim >= 0; tc_dim--) {
-        int64_t bound = 0;
-        if (tc_axes[tc_dim] && tc_axes[tc_dim]->n_src > 0 &&
-            tc_axes[tc_dim]->src[0]->op == POLY_OP_CONST)
-          bound = tc_axes[tc_dim]->src[0]->arg.i;
-        if (bound <= 1) continue;
-        int szs[] = {5, 4, 3, 2};
-        for (int si = 0; si < 4; si++) {
-          if (bound % szs[si] == 0) {
-            int idx = -1;
-            for (int ri = 0; ri < tk.n_rngs; ri++)
-              if (tk.rngs[ri] == tc_axes[tc_dim]) {
-                idx = ri;
-                break;
-              }
-            if (idx >= 0)
-              tc_axes[tc_dim] = sched_shift_to(&tk, tk.rngs[idx], szs[si], POLY_AXIS_UPCAST, false);
-            break;
-          }
-        }
-      }
-      return tk.ast;
-    }
-  }
-  return sink;
+  PolyUOp *out = sched_can_optimize(&s) && sched_hand_coded_tensor_cores(&s, caps) ? s.ast : sink;
+  sched_destroy(&s);
+  return out;
 }
 
 static PolyPatternMatcher *poly_pm_reduce_local(void) {
@@ -6255,12 +6440,14 @@ PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOp
         OptScheduler scheduler;
         sched_init(&scheduler, ctx, sink);
         for (int i = 0; i < info->n_opts_to_apply; i++) {
-          if (!sched_apply_opt(&scheduler, opts.caps, info->opts_to_apply[i])) {
+          if (!sched_apply_opt(&scheduler, opts.caps, info->opts_to_apply[i], NULL)) {
             fprintf(stderr, "polygrad: explicit kernel option %d is invalid\n", i);
+            sched_destroy(&scheduler);
             return NULL;
           }
         }
         sink = scheduler.ast;
+        sched_destroy(&scheduler);
       } else if (opts.beam_width > 0) {
         sink = poly_beam_search(ctx, sink, opts.beam_width, opts);
       } else if (!poly_get_noopt() && (!info || !info->n_applied_opts)) {

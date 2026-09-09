@@ -153,6 +153,9 @@ int poly_test_beam_cache_write(
 );
 PolyUOp *poly_test_beam_cache_read(PolyCtx *ctx, PolyUOp *sink, int width);
 PolyUOp *poly_test_apply_opt(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps, PolyOpt opt);
+bool poly_test_scheduler_copy_rollback(PolyCtx *ctx, PolyUOp *sink, PolyOpt opt);
+bool poly_test_scheduler_copy_lifetime(PolyCtx *ctx, PolyUOp *sink);
+bool poly_test_scheduler_reaches(PolyCtx *ctx, PolyUOp *sink, PolyUOp *index, PolyUOp *range);
 PolyUOp *poly_test_convert_loop_to_global(PolyCtx *ctx, PolyUOp *sink);
 void **poly_test_beam_args_from_ast(PolyCtx *ctx, PolyUOp *sink, int *n_args);
 double poly_test_beam_compile_and_time(

@@ -16,7 +16,7 @@ import sys
 _lib = None
 OPS = {}
 _has_cuda_ffi = False
-POLYGRAD_ABI_VERSION = 76
+POLYGRAD_ABI_VERSION = 77
 
 # --- Opaque pointer type (always available) ---
 _ptr = ctypes.c_void_p
@@ -227,6 +227,10 @@ def _declare_signatures(lib):
     lib.poly_get_beam.argtypes = []
     lib.poly_set_beam.restype = None
     lib.poly_set_beam.argtypes = [ctypes.c_int]
+    lib.poly_get_ignore_beam_cache.restype = ctypes.c_int
+    lib.poly_get_ignore_beam_cache.argtypes = []
+    lib.poly_set_ignore_beam_cache.restype = None
+    lib.poly_set_ignore_beam_cache.argtypes = [ctypes.c_int]
     for kind in ('float', 'int'):
         getter = getattr(lib, f'poly_get_default_{kind}')
         getter.restype, getter.argtypes = ctypes.c_int, []

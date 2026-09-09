@@ -30,6 +30,13 @@ int poly_debug_level(void);
 bool poly_debug_at_least(int level);
 double poly_now_ms(void);
 
+/* C equivalent of search._try_compile's scoped alarm. Zero disables it;
+ * native driver calls are checked on return, never signal-longjmp'd. */
+extern _Thread_local double poly_compile_deadline_ms;
+static inline bool poly_compile_timed_out(void) {
+  return poly_compile_deadline_ms > 0 && poly_now_ms() >= poly_compile_deadline_ms;
+}
+
 /* Tinygrad-like debug thresholds:
  *   DEBUG >= 4 : rendered kernels
  *   DEBUG >= 5 : rewritten sink / graph

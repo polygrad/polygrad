@@ -2038,16 +2038,24 @@ TEST(optimizer_caps, heuristic_upcasts_when_scheduler_view_is_complete) {
   PASS();
 }
 
-TEST(optimizer_caps, heuristic_skips_when_index_buffer_cap_would_truncate) {
+TEST(optimizer_caps, heuristic_upcasts_complete_large_buffer_view) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *sink = make_many_index_kernel(ctx, 17, 16);
   PolyRendererCaps caps = {.max_vec_width = 4};
 
   PolyUOp *optimized = poly_apply_opts_heuristic_ex(ctx, sink, caps);
-  ASSERT_PTR_EQ(optimized, sink);
-  ASSERT_INT_EQ(count_range_axis_type(ctx, optimized, POLY_AXIS_UPCAST), 0);
-
+  PolyUOp *expected = poly_test_apply_opt(
+      ctx, sink, caps,
+      (PolyOpt
+      ){.op = POLY_OPT_UPCAST, .has_axis = true, .axis = 0, .arg_kind = POLY_OPT_ARG_INT, .arg = 4}
+  );
+  bool correct = optimized && expected && optimized->n_src == 17 &&
+                 count_range_axis_type(ctx, optimized, POLY_AXIS_UPCAST) == 1 &&
+                 count_ops_in(ctx, optimized, POLY_OP_INDEX) == 34;
+  for (int i = 0; correct && i < 17; i++)
+    correct &= optimized->src[i] == expected->src[i];
   poly_ctx_destroy(ctx);
+  ASSERT_TRUE(correct);
   PASS();
 }
 
@@ -2632,6 +2640,155 @@ TEST(tc, rejects_nondivisible) {
 }
 
 #if defined(POLY_TESTING) && !defined(__EMSCRIPTEN__)
+TEST(tc, admission_uses_first_reduction) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = build_matmul_NxNxN_ast(ctx, 64);
+  PolyUOp *q = poly_range(ctx, 8, 3, POLY_AXIS_REDUCE);
+  PolyUOp *sources[] = {poly_cast(ctx, q, POLY_FLOAT32), q};
+  PolyUOp *maximum =
+      poly_uop(ctx, POLY_OP_REDUCE, POLY_FLOAT32, sources, 2, poly_arg_reduce(POLY_OP_MAX, 0));
+  PolyUOp *aux = poly_test_program_param(ctx, POLY_FLOAT32, 1, 3);
+  PolyUOp *zero = poly_const_int(ctx, 0);
+  PolyUOp *store = poly_uop2(
+      ctx, POLY_OP_STORE, POLY_VOID, poly_uop_index(ctx, aux, &zero, 1), maximum, poly_arg_none()
+  );
+  PolyUOp *outputs[] = {store, sink->src[0]};
+  PolyUOp *mixed = poly_test_kernel_sink(ctx, outputs, 2, "test");
+  int n = 0;
+  const PolyTensorCore *tcs = poly_tc_get_cuda(80, &n);
+  int64_t args[] = {-1, 1, 1};
+  PolyOpt opt = {
+      .op = POLY_OPT_TC,
+      .has_axis = true,
+      .axis = 0,
+      .arg_kind = POLY_OPT_ARG_INT_TUPLE,
+      .arg_tuple = args,
+      .n_arg_tuple = 3};
+  PolyUOp *out = poly_test_apply_opt(
+      ctx, mixed,
+      (PolyRendererCaps
+      ){.device = "CUDA", .has_local = true, .tensor_cores = tcs, .n_tensor_cores = n},
+      opt
+  );
+  bool rejected = out == NULL;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(rejected);
+  PASS();
+}
+
+TEST(tc, admission_rejects_reduce_xy_axis) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = build_matmul_NxNxN_ast(ctx, 64);
+  PolyUOp *m = sink->src[0]->src[1];
+  PolyUOp *reduction_m =
+      poly_uop1(ctx, POLY_OP_RANGE, m->dtype, m->src[0], poly_arg_range(0, POLY_AXIS_REDUCE));
+  sink = poly_uop_substitute(ctx, sink, &m, &reduction_m, 1);
+  int n = 0;
+  const PolyTensorCore *tcs = poly_tc_get_cuda(80, &n);
+  int64_t args[] = {-1, 1, 1};
+  PolyOpt opt = {
+      .op = POLY_OPT_TC,
+      .has_axis = true,
+      .axis = 0,
+      .arg_kind = POLY_OPT_ARG_INT_TUPLE,
+      .arg_tuple = args,
+      .n_arg_tuple = 3};
+  PolyUOp *out = poly_test_apply_opt(
+      ctx, sink,
+      (PolyRendererCaps
+      ){.device = "CUDA", .has_local = true, .tensor_cores = tcs, .n_tensor_cores = n},
+      opt
+  );
+  bool rejected = out == NULL;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(rejected);
+  PASS();
+}
+
+TEST(tc, heuristic_records_tc_and_post_local_options) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = build_matmul_NxNxN_ast(ctx, 64);
+  int n = 0;
+  const PolyTensorCore *tcs = poly_tc_get_cuda(80, &n);
+  PolyUOp *out = poly_apply_opts_heuristic_ex(
+      ctx, sink,
+      (PolyRendererCaps
+      ){.device = "CUDA", .has_local = true, .tensor_cores = tcs, .n_tensor_cores = n}
+  );
+  const PolyKernelInfo *info =
+      out && out->arg.kind == POLY_ARG_KERNEL_INFO ? out->arg.kernel_info : NULL;
+  bool ok = info && info->n_applied_opts >= 2 && info->applied_opts[0].op == POLY_OPT_TC &&
+            info->applied_opts[info->n_applied_opts - 1].op == POLY_OPT_LOCAL;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
+TEST(tc, preserves_all_residual_reduce_ranges) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = build_matmul_NxNxN_ast(ctx, 32);
+  int n = 0;
+  PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n);
+  PolyUOp *red = NULL;
+  for (int i = 0; i < n; i++)
+    if (topo[i]->op == POLY_OP_REDUCE) red = topo[i];
+  poly_toposort_free(topo);
+  PolyUOp *old_k = red->src[1];
+  PolyUOp *k = poly_uop1(
+      ctx, POLY_OP_RANGE, old_k->dtype, old_k->src[0], poly_arg_range(100, POLY_AXIS_REDUCE)
+  );
+  PolyUOp *sources[19] = {poly_uop_substitute(ctx, red->src[0], &old_k, &k, 1), k};
+  for (int i = 0; i < 17; i++)
+    sources[i + 2] = poly_uop1(
+        ctx, POLY_OP_RANGE, POLY_INT32, poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(2)),
+        poly_arg_range(i + 3, POLY_AXIS_REDUCE)
+    );
+  PolyUOp *replacement = poly_uop(ctx, POLY_OP_REDUCE, red->dtype, sources, 19, red->arg);
+  sink = poly_uop_substitute(ctx, sink, &red, &replacement, 1);
+  int count = 0;
+  const PolyTensorCore *tcs = poly_tc_get_cuda(80, &count);
+  int64_t args[] = {-1, 1, 1};
+  PolyUOp *out = poly_test_apply_opt(
+      ctx, sink,
+      (PolyRendererCaps
+      ){.device = "CUDA", .has_local = true, .tensor_cores = tcs, .n_tensor_cores = count},
+      (PolyOpt
+      ){.op = POLY_OPT_TC,
+        .has_axis = true,
+        .axis = 0,
+        .arg_kind = POLY_OPT_ARG_INT_TUPLE,
+        .arg_tuple = args,
+        .n_arg_tuple = 3}
+  );
+  bool ok = out != NULL;
+  topo = out ? poly_toposort_alloc(ctx, out, &n) : NULL;
+  red = NULL;
+  int n_red = 0, n_wmma = 0;
+  for (int i = 0; topo && i < n; i++) {
+    if (topo[i]->op == POLY_OP_REDUCE) {
+      red = topo[i];
+      n_red++;
+    }
+    n_wmma += topo[i]->op == POLY_OP_WMMA;
+  }
+  ok &= n_wmma == 1 && n_red == 1 && red && red->n_src == 19;
+  for (int j = 0; ok && j < 18; j++) {
+    int64_t id = j == 0 ? 100 : j + 2;
+    PolyUOp *expected = poly_uop1(
+        ctx, POLY_OP_RANGE, POLY_INT32, poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(2)),
+        poly_arg_range(id, POLY_AXIS_REDUCE)
+    );
+    bool found = false;
+    for (int i = 1; i < red->n_src; i++)
+      found |= red->src[i] == expected;
+    ok &= found;
+  }
+  poly_toposort_free(topo);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
 TEST(tc, beam_pads_nondivisible_matmul) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *sink = build_matmul_NxNxN_ast(ctx, 15);

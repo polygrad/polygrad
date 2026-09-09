@@ -728,6 +728,8 @@ function createWasmCoreFromModule(Module, device) {
     poly_get_noopt: Module._poly_get_noopt,
     poly_get_beam: Module._poly_get_beam,
     poly_set_beam: Module._poly_set_beam,
+    poly_get_ignore_beam_cache: Module._poly_get_ignore_beam_cache,
+    poly_set_ignore_beam_cache: Module._poly_set_ignore_beam_cache,
     poly_get_default_float: Module._poly_get_default_float,
     poly_get_default_int: Module._poly_get_default_int,
     poly_set_default_float: Module._poly_set_default_float,
@@ -1896,7 +1898,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 76
+  const EXPECTED_ABI = 77
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(

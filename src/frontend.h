@@ -13,7 +13,7 @@
 
 /* Public C/frontend ABI version. Bump when exported symbols or public struct
  * layouts used by frontends change. */
-#define POLYGRAD_ABI_VERSION 76
+#define POLYGRAD_ABI_VERSION 77
 
 /* Current ElementwiseMixin._binop for language UOp operators. Compiler
  * matchers keep using raw poly_alu2. */
@@ -31,6 +31,8 @@ void poly_set_noopt(int value);
 /* Tinygrad helpers.BEAM; the same library/module ownership as NOOPT. */
 int poly_get_beam(void);
 void poly_set_beam(int value);
+int poly_get_ignore_beam_cache(void);
+void poly_set_ignore_beam_cache(int value);
 
 /* FFI buffer constructors for bindings that cannot pass PolyDType by value. */
 PolyUOp *poly_buffer_by_id(PolyCtx *ctx, int dtype_id, int64_t size);

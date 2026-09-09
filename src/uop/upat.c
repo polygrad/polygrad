@@ -1018,6 +1018,10 @@ PolyUOp *poly_graph_rewrite_ctx_ex2(
   }
 
   while (ws.top > 0) {
+    if (poly_compile_timed_out()) {
+      failed = true;
+      goto cleanup;
+    }
     if (ws.top > stack_limit) {
       fprintf(stderr, "polygrad: graph_rewrite stack overflow\n");
       failed = true;
@@ -1040,6 +1044,11 @@ PolyUOp *poly_graph_rewrite_ctx_ex2(
         int n_seen_inline = 0;
         PolyMap *seen = NULL;
         while (cur) {
+          if (poly_compile_timed_out()) {
+            poly_map_destroy(seen);
+            failed = true;
+            goto cleanup;
+          }
           bool already_seen = false;
           for (int si = 0; si < n_seen_inline; si++) {
             if (seen_inline[si] == cur) {
@@ -1194,6 +1203,7 @@ PolyUOp *poly_graph_rewrite_ctx_ex2(
     }
   }
 
+  if (poly_compile_timed_out()) failed = true;
   if (!failed && waitlist && poly_map_len(waitlist) > 0) {
     fprintf(stderr, "polygrad: graph_rewrite unresolved waitlist\n");
     failed = true;
@@ -1232,6 +1242,7 @@ PolyUOp *poly_graph_walk_rewrite(
 
   PolyMap *replace = poly_map_new(256);
   WorkStack ws = {NULL, 0, 0};
+  PolyUOp *result = NULL;
 
   if (!ws_push(&ws, sink, 0, sink)) {
     g_graph_rewrite_userctx = prev_userctx;
@@ -1241,6 +1252,7 @@ PolyUOp *poly_graph_walk_rewrite(
   }
 
   while (ws.top > 0) {
+    if (poly_compile_timed_out()) goto cleanup;
     WorkItem wi = ws.items[--ws.top];
     PolyUOp *n = wi.n;
 
@@ -1321,12 +1333,14 @@ PolyUOp *poly_graph_walk_rewrite(
     }
   }
 
-  PolyUOp *result = replace_get(replace, sink);
+  result = replace_get(replace, sink);
+  if (!result) result = sink;
 
+cleanup:
   free(ws.items);
   poly_map_destroy(replace);
   g_graph_rewrite_userctx = prev_userctx;
-  return result ? result : sink;
+  return poly_compile_timed_out() ? NULL : result;
 }
 
 PolyUOp *poly_graph_rewrite_ctx_ex(

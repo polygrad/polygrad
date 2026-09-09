@@ -2,6 +2,8 @@
 
 #include "utils.h"
 
+_Thread_local double poly_compile_deadline_ms;
+
 #include <ctype.h>
 #include <stdlib.h>
 #include <string.h>

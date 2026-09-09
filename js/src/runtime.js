@@ -85,6 +85,18 @@ class PolyRuntime {
 
   get beam() { return this._core.ffi.poly_get_beam() }
 
+  get ignoreBeamCache() { return this._core.ffi.poly_get_ignore_beam_cache() }
+
+  set ignoreBeamCache(value) {
+    if (!Number.isInteger(value) || value < -2147483648 || value > 2147483647) {
+      throw new TypeError('IGNORE_BEAM_CACHE must be an int32')
+    }
+    if (!this._lifetime.alive || this._closing || this._activeAsync > 0) {
+      throw new Error('IGNORE_BEAM_CACHE requires a live idle runtime')
+    }
+    this._core.ffi.poly_set_ignore_beam_cache(value)
+  }
+
   set beam(value) {
     if (!Number.isInteger(value) || value < -2147483648 || value > 2147483647) {
       throw new TypeError('BEAM must be an int32')

@@ -185,6 +185,11 @@ optional `timestamp-query` feature. Without it, candidates are not timed and
 the original kernel is kept. Change JS settings while idle and restore them
 after use; existing compiled JIT captures are unchanged.
 
+Python `Context(IGNORE_BEAM_CACHE=1)` or JS `runtime.ignoreBeamCache = 1`
+bypasses saved search results. `BEAM_TIMEOUT_SEC` bounds candidate compilation
+(default 10 seconds; 0 disables the budget). Native compiler subprocesses are
+stopped on expiry; in-process driver calls are checked when they return.
+
 Default storage dtypes use the same C-owned policy: Python
 `Context(DEFAULT_FLOAT='float64', DEFAULT_INT='int64')`, or JS
 `runtime.defaultFloat` / `runtime.defaultInt`. Change JS settings while idle

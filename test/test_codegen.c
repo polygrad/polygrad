@@ -22,6 +22,7 @@
 
 #include <inttypes.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 #ifndef __EMSCRIPTEN__
 static PolyUOp *beam_action_sink(PolyCtx *ctx, PolyAxisType type, int n) {
@@ -41,6 +42,79 @@ static PolyUOp *beam_action_sink(PolyCtx *ctx, PolyAxisType type, int n) {
   return poly_test_kernel_sink(ctx, &store, 1, "test");
 }
 
+TEST(codegen, beam_compile_timeout_reaps_compiler) {
+  char path[] = "temp/beam-timeout-compiler.XXXXXX";
+  int fd = mkstemp(path);
+  ASSERT_TRUE(fd >= 0);
+  FILE *script = fdopen(fd, "w");
+  ASSERT_NOT_NULL(script);
+  fputs("#!/bin/sh\nsleep 2\nexit 1\n", script);
+  fclose(script);
+  chmod(path, 0700);
+  const char *cc = getenv("CC"), *timeout = getenv("BEAM_TIMEOUT_SEC"),
+             *strict = getenv("BEAM_STRICT_MODE");
+  char *old_cc = cc ? strdup(cc) : NULL, *old_timeout = timeout ? strdup(timeout) : NULL;
+  char *old_strict = strict ? strdup(strict) : NULL;
+  setenv("CC", path, 1);
+  setenv("BEAM_TIMEOUT_SEC", "1", 1);
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = beam_action_sink(ctx, POLY_AXIS_GLOBAL, 8);
+  int n_args = 0;
+  double start = poly_now_ms();
+  double result = poly_test_beam_compile_and_time(
+      ctx, sink, (PolyRewriteOpts){.caps = poly_c_renderer_caps(), .device = POLY_DEVICE_CPU}, 1,
+      &n_args
+  );
+  double elapsed = poly_now_ms() - start;
+  setenv("BEAM_STRICT_MODE", "1", 1);
+  start = poly_now_ms();
+  PolyUOp *strict_result = poly_full_rewrite_to_sink_ex(
+      ctx, sink,
+      (PolyRewriteOpts
+      ){.optimize = true,
+        .beam_width = 1,
+        .caps = poly_c_renderer_caps(),
+        .device = POLY_DEVICE_CPU}
+  );
+  double strict_elapsed = poly_now_ms() - start;
+  bool restored = poly_compile_deadline_ms == 0;
+  poly_ctx_destroy(ctx);
+  if (old_cc)
+    setenv("CC", old_cc, 1);
+  else
+    unsetenv("CC");
+  if (old_timeout)
+    setenv("BEAM_TIMEOUT_SEC", old_timeout, 1);
+  else
+    unsetenv("BEAM_TIMEOUT_SEC");
+  free(old_cc);
+  free(old_timeout);
+  if (old_strict)
+    setenv("BEAM_STRICT_MODE", old_strict, 1);
+  else
+    unsetenv("BEAM_STRICT_MODE");
+  free(old_strict);
+  remove(path);
+  ASSERT_TRUE(!isfinite(result));
+  ASSERT_TRUE(elapsed < 1800);
+  ASSERT_TRUE(!strict_result && strict_elapsed < 1800 && restored);
+  PASS();
+}
+
+TEST(codegen, beam_compile_deadline_cancels_rewrites_without_poisoning_context) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *value = poly_const_int(ctx, 7);
+  poly_compile_deadline_ms = poly_now_ms() - 1;
+  bool rejected = !poly_graph_rewrite(ctx, value, poly_symbolic()) &&
+                  !poly_graph_walk_rewrite(ctx, value, poly_symbolic(), NULL, NULL, true);
+  poly_compile_deadline_ms = 0;
+  bool recovered = poly_graph_rewrite(ctx, value, poly_symbolic()) == value &&
+                   poly_graph_walk_rewrite(ctx, value, poly_symbolic(), NULL, NULL, true) == value;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(rejected && recovered);
+  PASS();
+}
+
 TEST(codegen, beam_actions_match_pinned_catalogue) {
   PolyOpt actions[256];
   int count = poly_test_beam_actions(actions, 256);
@@ -52,6 +126,251 @@ TEST(codegen, beam_actions_match_pinned_catalogue) {
   ASSERT_INT_EQ(actions[8].arg, 2);
   ASSERT_INT_EQ(actions[48].op, POLY_OPT_UNROLL);
   ASSERT_INT_EQ(actions[63].op, POLY_OPT_LOCAL);
+  PASS();
+}
+
+static bool scheduler_large_opt(int n_ranges, int n_buffers) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *ranges[65], *ends[65];
+  for (int i = 0; i < n_ranges; i++)
+    ranges[i] = poly_range(ctx, 8, i, POLY_AXIS_GLOBAL);
+  int n_ends = n_ranges > n_buffers ? n_ranges : n_buffers;
+  for (int i = 0; i < n_ends; i++) {
+    PolyUOp *r = ranges[i % n_ranges];
+    PolyUOp *buf = poly_test_program_param(ctx, POLY_FLOAT32, 8, i % n_buffers);
+    PolyUOp *ptr = poly_uop_index(ctx, buf, &r, 1);
+    PolyUOp *store = poly_uop2(
+        ctx, POLY_OP_STORE, POLY_VOID, ptr, poly_cast(ctx, r, POLY_FLOAT32), poly_arg_none()
+    );
+    ends[i] = poly_uop2(ctx, POLY_OP_END, POLY_VOID, store, r, poly_arg_none());
+  }
+  PolyUOp *sink = poly_test_kernel_sink(ctx, ends, n_ends, "test");
+  PolyOpt opt = {
+      .op = POLY_OPT_UPCAST,
+      .has_axis = true,
+      .axis = n_ranges - 1,
+      .arg_kind = POLY_OPT_ARG_INT,
+      .arg = 4};
+  PolyUOp *out = poly_test_apply_opt(ctx, sink, (PolyRendererCaps){.device = "CPU"}, opt);
+  PolyUOp *r = ranges[n_ranges - 1];
+  PolyUOp *remaining = poly_uop1(ctx, POLY_OP_RANGE, r->dtype, poly_const_int(ctx, 2), r->arg);
+  PolyUOp *up = poly_range(ctx, 4, n_ranges, POLY_AXIS_UPCAST);
+  PolyUOp *replacement = poly_uop2(
+      ctx, POLY_OP_ADD, r->dtype,
+      poly_uop2(ctx, POLY_OP_MUL, r->dtype, remaining, poly_const_int(ctx, 4), poly_arg_none()), up,
+      poly_arg_none()
+  );
+  PolyUOp *expected = poly_uop_substitute(ctx, sink, &r, &replacement, 1);
+  bool ok = out && out->n_src == expected->n_src;
+  for (int i = 0; ok && i < out->n_src; i++)
+    ok &= out->src[i] == expected->src[i];
+  poly_ctx_destroy(ctx);
+  return ok;
+}
+
+TEST(codegen, scheduler_splits_beyond_64_ranges) {
+  ASSERT_TRUE(scheduler_large_opt(65, 1));
+  PASS();
+}
+
+TEST(codegen, scheduler_splits_with_33_buffers) {
+  ASSERT_TRUE(scheduler_large_opt(1, 33));
+  PASS();
+}
+
+TEST(codegen, scheduler_snapshot_allocation_failure_preserves_parent) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = beam_action_sink(ctx, POLY_AXIS_GLOBAL, 8);
+  PolyOpt opt = {
+      .op = POLY_OPT_UPCAST, .has_axis = true, .axis = 0, .arg_kind = POLY_OPT_ARG_INT, .arg = 4};
+  bool ok = poly_test_scheduler_copy_rollback(ctx, sink, opt);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
+TEST(codegen, scheduler_reachability_crosses_word_boundary) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *ranges[65];
+  for (int i = 0; i < 65; i++)
+    ranges[i] = poly_range(ctx, 8, i, POLY_AXIS_GLOBAL);
+  PolyUOp *coord = poly_alu2(ctx, POLY_OP_ADD, ranges[0], ranges[64]);
+  PolyUOp *buffer = poly_test_program_param(ctx, POLY_FLOAT32, 16, 0);
+  PolyUOp *index = poly_uop_index(ctx, buffer, &coord, 1);
+  PolyUOp *src[66];
+  memcpy(src, ranges, sizeof(ranges));
+  src[65] = index;
+  PolyUOp *sink = poly_test_kernel_sink(ctx, src, 66, "test");
+  bool ok = poly_test_scheduler_reaches(ctx, sink, index, ranges[0]) &&
+            poly_test_scheduler_reaches(ctx, sink, index, ranges[64]) &&
+            !poly_test_scheduler_reaches(ctx, sink, index, ranges[1]);
+  /* backward_slice excludes the root itself, even when that root is RANGE. */
+  PolyUOp *direct = poly_uop_index(ctx, buffer, &ranges[64], 1);
+  src[65] = direct;
+  sink = poly_test_kernel_sink(ctx, src, 66, "test");
+  ok &= !poly_test_scheduler_reaches(ctx, sink, direct, ranges[64]);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
+TEST(codegen, scheduler_includes_buffer_backed_indexes) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *r = poly_range(ctx, 8, 0, POLY_AXIS_GLOBAL);
+  PolyUOp *coord = poly_alu2(ctx, POLY_OP_MUL, r, poly_const_int(ctx, 2));
+  PolyUOp *buffer = poly_buffer_f32(ctx, 16);
+  PolyUOp *index = poly_uop_index(ctx, buffer, &coord, 1);
+  PolyUOp *sink = poly_test_kernel_sink(ctx, &index, 1, "test");
+  bool ok = poly_test_scheduler_reaches(ctx, sink, index, r);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
+TEST(codegen, scheduler_heuristic_records_applied_options) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = beam_action_sink(ctx, POLY_AXIS_GLOBAL, 64);
+  PolyUOp *out = poly_apply_opts_heuristic_ex(
+      ctx, sink, (PolyRendererCaps){.device = "CPU", .max_vec_width = 4}
+  );
+  const PolyKernelInfo *info =
+      out && out->arg.kind == POLY_ARG_KERNEL_INFO ? out->arg.kernel_info : NULL;
+  bool ok = info && info->n_applied_opts == 1 && info->applied_opts[0].op == POLY_OPT_UPCAST &&
+            info->applied_opts[0].arg == 4;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
+static bool matvec_heuristic_matches_options(bool first_max, int prefix) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *g = poly_range(ctx, 16, 0, POLY_AXIS_GLOBAL);
+  PolyUOp *r = poly_range(ctx, 8, 1, POLY_AXIS_REDUCE);
+  PolyUOp *idx = r;
+  if (prefix) {
+    idx = poly_const_int(ctx, 1);
+    for (int i = 1; i < prefix; i++)
+      idx = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, idx, poly_const_int(ctx, 1), poly_arg_none());
+    idx = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, idx, r, poly_arg_none());
+  }
+  PolyUOp *a = poly_test_program_param(ctx, POLY_FLOAT32, 512, 0);
+  PolyUOp *b = poly_test_program_param(ctx, POLY_FLOAT32, 512, 1);
+  PolyUOp *out = poly_test_program_param(ctx, POLY_FLOAT32, 512, 2);
+  PolyUOp *av = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, a, idx, poly_arg_none());
+  PolyUOp *bi = poly_uop2(
+      ctx, POLY_OP_ADD, POLY_INT32, idx,
+      poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, g, poly_const_int(ctx, 8), poly_arg_none()),
+      poly_arg_none()
+  );
+  PolyUOp *bv = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, b, bi, poly_arg_none());
+  PolyUOp *mul = poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT32, av, bv, poly_arg_none());
+  PolyUOp *value =
+      poly_uop2(ctx, POLY_OP_REDUCE, POLY_FLOAT32, mul, r, poly_arg_reduce(POLY_OP_ADD, 0));
+  PolyUOp *store = poly_uop2(
+      ctx, POLY_OP_STORE, POLY_VOID, poly_uop_index(ctx, out, &g, 1), value, poly_arg_none()
+  );
+  PolyUOp *ends[2];
+  int n = 0;
+  if (first_max) {
+    PolyUOp *aux = poly_test_program_param(ctx, POLY_FLOAT32, 512, 3);
+    PolyUOp *zero = poly_const_int(ctx, 0);
+    PolyUOp *mx = poly_uop2(
+        ctx, POLY_OP_REDUCE, POLY_FLOAT32, poly_cast(ctx, r, POLY_FLOAT32), r,
+        poly_arg_reduce(POLY_OP_MAX, 0)
+    );
+    ends[n++] = poly_uop2(
+        ctx, POLY_OP_STORE, POLY_VOID, poly_uop_index(ctx, aux, &zero, 1), mx, poly_arg_none()
+    );
+  }
+  ends[n++] = poly_uop2(ctx, POLY_OP_END, POLY_VOID, store, g, poly_arg_none());
+  PolyUOp *sink = poly_test_kernel_sink(ctx, ends, n, "matvec");
+  PolyRendererCaps caps = {.device = "CUDA", .has_local = true, .shared_max = 49152};
+  PolyOpt opts[] = {
+      {.op = first_max ? POLY_OPT_UNROLL : POLY_OPT_GROUP,
+       .has_axis = true,
+       .axis = 0,
+       .arg_kind = POLY_OPT_ARG_INT,
+       .arg = first_max ? 0 : 8},
+      {.op = POLY_OPT_LOCAL,
+       .has_axis = true,
+       .axis = 0,
+       .arg_kind = POLY_OPT_ARG_INT,
+       .arg = first_max ? 16 : 4},
+      {.op = POLY_OPT_UPCAST, .has_axis = true, .axis = 0, .arg_kind = POLY_OPT_ARG_INT, .arg = 4}};
+  PolyUOp *expected = sink;
+  for (int i = 0; expected && i < (first_max ? 2 : 3); i++)
+    expected = poly_test_apply_opt(ctx, expected, caps, opts[i]);
+  PolyUOp *actual = poly_apply_opts_heuristic_ex(ctx, sink, caps);
+  bool ok = expected && actual == expected;
+  poly_ctx_destroy(ctx);
+  return ok;
+}
+
+TEST(codegen, scheduler_matvec_uses_first_reduction) {
+  ASSERT_TRUE(matvec_heuristic_matches_options(false, 0));
+  ASSERT_TRUE(matvec_heuristic_matches_options(true, 0));
+  PASS();
+}
+
+TEST(codegen, scheduler_matvec_visits_all_addends) {
+  ASSERT_TRUE(matvec_heuristic_matches_options(false, 256));
+  PASS();
+}
+
+TEST(codegen, scheduler_copy_survives_parent_and_sibling_disposal) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = beam_action_sink(ctx, POLY_AXIS_GLOBAL, 8);
+  bool ok = poly_test_scheduler_copy_lifetime(ctx, sink);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
+TEST(codegen, scheduler_heuristic_honors_nolocals) {
+  const char *env = getenv("NOLOCALS");
+  char *old = env ? strdup(env) : NULL;
+  setenv("NOLOCALS", "1", 1);
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = beam_action_sink(ctx, POLY_AXIS_GLOBAL, 64);
+  PolyUOp *out = poly_apply_opts_heuristic_ex(
+      ctx, sink, (PolyRendererCaps){.device = "CUDA", .max_vec_width = 4, .has_local = true}
+  );
+  const PolyKernelInfo *info =
+      out && out->arg.kind == POLY_ARG_KERNEL_INFO ? out->arg.kernel_info : NULL;
+  bool ok = info && info->dont_use_locals;
+  int n = 0;
+  PolyUOp **topo = out ? poly_toposort_alloc(ctx, out, &n) : NULL;
+  for (int i = 0; topo && i < n; i++)
+    if (topo[i]->op == POLY_OP_RANGE && poly_range_axis_type(topo[i]->arg) == POLY_AXIS_LOCAL)
+      ok = false;
+  poly_toposort_free(topo);
+  poly_ctx_destroy(ctx);
+  if (old)
+    setenv("NOLOCALS", old, 1);
+  else
+    unsetenv("NOLOCALS");
+  free(old);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
+TEST(codegen, scheduler_heuristic_does_not_thread_nested_output) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *r = poly_range(ctx, 1 << 20, 0, POLY_AXIS_WEAK);
+  PolyUOp *noop = poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_none());
+  PolyUOp *inner = poly_uop2(ctx, POLY_OP_END, POLY_VOID, noop, r, poly_arg_none());
+  PolyUOp *outer = poly_uop1(ctx, POLY_OP_END, POLY_VOID, inner, poly_arg_none());
+  PolyUOp *sink = poly_test_kernel_sink(ctx, &outer, 1, "test");
+  PolyUOp *out = poly_apply_opts_heuristic_ex(ctx, sink, poly_c_renderer_caps());
+  bool ok = out != NULL;
+  int n = 0;
+  PolyUOp **topo = out ? poly_toposort_alloc(ctx, out, &n) : NULL;
+  for (int i = 0; topo && i < n; i++)
+    if (topo[i]->op == POLY_OP_RANGE && poly_range_axis_type(topo[i]->arg) == POLY_AXIS_THREAD)
+      ok = false;
+  poly_toposort_free(topo);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
   PASS();
 }
 

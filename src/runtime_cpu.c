@@ -29,6 +29,8 @@
 #include <limits.h>
 #include <stdbool.h>
 #include <pthread.h>
+#include <signal.h>
+#include <time.h>
 
 struct PolyProgram {
   void *handle; /* dlopen handle */
@@ -216,6 +218,8 @@ static int compile_to_so_with_flag(
     const char *so_path,
     const char *cpu_flag
 ) {
+  if (poly_compile_timed_out()) return -1;
+  bool timed = poly_compile_deadline_ms > 0;
   FILE *f = fopen(c_path, "w");
   if (!f) {
     fprintf(stderr, "polygrad: cannot write %s\n", c_path);
@@ -231,6 +235,8 @@ static int compile_to_so_with_flag(
     return -1;
   }
   if (pid == 0) {
+    /* Own the compiler and any subprocesses it starts, not the caller's job. */
+    if (timed && setpgid(0, 0) != 0) _exit(127);
     /* Tinygrad's Compiler receives source on stdin. A temporary input filename
      * otherwise leaks into ELF bytes and defeats BEAM's compiled-lib dedup. */
     if (!freopen(c_path, "r", stdin)) _exit(127);
@@ -272,10 +278,29 @@ static int compile_to_so_with_flag(
     }
     _exit(127);
   }
-  int status;
-  while (waitpid(pid, &status, 0) == -1) { /* retry on EINTR */
+  if (timed) (void)setpgid(pid, pid);
+  int status = 0;
+  bool failed = false;
+  for (;;) {
+    pid_t done = waitpid(pid, &status, timed ? WNOHANG : 0);
+    if (done == pid) break;
+    if (done < 0) {
+      if (errno == EINTR) continue;
+      failed = true;
+      break;
+    }
+    if (poly_compile_timed_out()) {
+      (void)kill(-pid, SIGKILL);
+      (void)kill(pid, SIGKILL);
+      while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+      }
+      failed = true;
+      break;
+    }
+    struct timespec pause = {.tv_nsec = 1000000};
+    (void)nanosleep(&pause, NULL);
   }
-  int ret = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+  int ret = !failed && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
   remove(c_path);
   return ret;
 }

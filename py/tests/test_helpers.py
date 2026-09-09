@@ -206,6 +206,17 @@ def test_context_nests_restores_decorates_and_rejects_unknown_keys():
             pass
 
 
+def test_ignore_beam_cache_context_reaches_core_and_restores():
+    from polygrad import _ffi
+    with Context(IGNORE_BEAM_CACHE=1):
+        from polygrad.helpers import IGNORE_BEAM_CACHE
+        assert IGNORE_BEAM_CACHE.value == 1
+        assert _ffi.get_lib().poly_get_ignore_beam_cache() == 1
+        with Context(IGNORE_BEAM_CACHE=0):
+            assert _ffi.get_lib().poly_get_ignore_beam_cache() == 0
+        assert _ffi.get_lib().poly_get_ignore_beam_cache() == 1
+
+
 @pytest.mark.parametrize('text,expected', [
     ('cpu', ('CPU', '', '', '', '')),
     ('cpu:x86', ('CPU', 'X86', '', '', '')),

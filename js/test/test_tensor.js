@@ -149,8 +149,23 @@ async function runTensorTests(pg, createRuntime) {
     } finally { pg.noopt = before }
   })
 
+  await test('execution IGNORE_BEAM_CACHE policy reaches core', async () => {
+    const old = pg.ignoreBeamCache
+    try {
+      for (const mode of [1, 0, 1]) {
+        pg.ignoreBeamCache = mode
+        assert(pg.ignoreBeamCache === mode, 'IGNORE_BEAM_CACHE core value disagrees')
+        assert(pg._core.ffi.poly_get_ignore_beam_cache() === mode, 'policy did not reach C')
+      }
+      let rejected = false
+      try { pg.ignoreBeamCache = 0.5 } catch (e) { rejected = /int32/.test(e.message) }
+      assert(rejected && pg.ignoreBeamCache === 1, 'invalid policy mutated C state')
+    } finally { pg.ignoreBeamCache = old }
+  })
+
   await test('execution BEAM policy reaches core and computes values', async () => {
     const before = pg.beam
+    const beforeCache = pg.ignoreBeamCache
     const module = pg._core.Module
     const state = module && module.__polygradWebGpuState
     const device = state && state.device
@@ -164,6 +179,7 @@ async function runTensorTests(pg, createRuntime) {
     }
     const x = new Tensor(new Float32Array([1, 2, 3, 4, 5, 6, 7, 8]))
     try {
+      pg.ignoreBeamCache = 1
       for (const width of [1, 2, 0]) {
         pg.beam = width
         assert(pg.beam === width, 'BEAM core value disagrees')
@@ -179,6 +195,7 @@ async function runTensorTests(pg, createRuntime) {
     } finally {
       if (device) device.createQuerySet = createQuerySet
       pg.beam = before
+      pg.ignoreBeamCache = beforeCache
       x.dispose()
     }
   })
