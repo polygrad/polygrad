@@ -794,6 +794,20 @@ static PolyUOp *sched_apply_int_opt(
   return sched_apply_opt(s, caps, opt, result) ? result[0] : NULL;
 }
 
+/* Outside heuristic.py's explicit KernelOptError catches, a selected option
+ * must succeed. A failed mandatory choice cannot publish a partial policy. */
+static PolyUOp *sched_require_int_opt(
+    OptScheduler *s,
+    PolyRendererCaps caps,
+    PolyOptOps op,
+    int axis,
+    int64_t amount
+) {
+  PolyUOp *result = sched_apply_int_opt(s, caps, op, axis, amount);
+  if (!result) s->failed = true;
+  return result;
+}
+
 /* Helper: get indices of upcastable dims (GLOBAL/LOCAL/WEAK with size > 1) */
 static int sched_upcastable_dims(const OptScheduler *s, int *out, int max_n) {
   int n = 0;
@@ -1519,10 +1533,14 @@ static bool sched_hand_coded_tensor_cores(OptScheduler *s, PolyRendererCaps caps
           .n_arg_tuple = 3},
         ranges
     );
+    if (!ok) {
+      sched_destroy(&candidate);
+      continue;
+    }
     for (int dim = 1; ok && dim >= 0; dim--) {
       for (int amount = 5; amount >= 2; amount--) {
         if (!poly_uop_divides(s->ctx, ranges[dim]->src[0], amount)) continue;
-        ranges[dim] = sched_apply_int_opt(
+        ranges[dim] = sched_require_int_opt(
             &candidate, caps, POLY_OPT_UPCAST, sched_range_index(&candidate, ranges[dim]), amount
         );
         ok = ranges[dim] != NULL;
@@ -1532,7 +1550,7 @@ static bool sched_hand_coded_tensor_cores(OptScheduler *s, PolyRendererCaps caps
     if (ok) {
       for (int amount = 4; amount >= 2; amount -= 2) {
         if (!poly_uop_divides(s->ctx, ranges[0]->src[0], amount)) continue;
-        ok = sched_apply_int_opt(
+        ok = sched_require_int_opt(
                  &candidate, caps, POLY_OPT_LOCAL, sched_range_index(&candidate, ranges[0]), amount
              ) != NULL;
         break;
@@ -1544,6 +1562,8 @@ static bool sched_hand_coded_tensor_cores(OptScheduler *s, PolyRendererCaps caps
       return true;
     }
     sched_destroy(&candidate);
+    s->failed = true;
+    return false;
   }
   return false;
 }
@@ -1572,7 +1592,7 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
     return sink;
   }
 
-  if (sched_hand_coded_tensor_cores(&s, caps)) goto done;
+  if (sched_hand_coded_tensor_cores(&s, caps) || s.failed) goto done;
 
   /* heuristic.py: image lanes precede local/group and masked-axis decisions. */
   if (poly_getenv_flag("IMAGE")) {
@@ -1612,14 +1632,15 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
       if (axis < 0) continue;
       PolyAxisType type = s.types[axis];
       if (type == POLY_AXIS_GLOBAL || type == POLY_AXIS_LOCAL || type == POLY_AXIS_WEAK)
-        sched_apply_int_opt(&s, caps, POLY_OPT_UPCAST, axis, 4);
+        sched_require_int_opt(&s, caps, POLY_OPT_UPCAST, axis, 4);
       else if (type == POLY_AXIS_REDUCE || type == POLY_AXIS_GROUP_REDUCE) {
         int ordinal = 0;
         for (int j = 0; j < axis; j++)
           ordinal += (s.types[j] == POLY_AXIS_REDUCE || s.types[j] == POLY_AXIS_GROUP_REDUCE) &&
                      s.shape[j] > 1;
-        sched_apply_int_opt(&s, caps, POLY_OPT_UNROLL, ordinal, 4);
+        sched_require_int_opt(&s, caps, POLY_OPT_UNROLL, ordinal, 4);
       }
+      if (s.failed) goto done;
     }
   }
 
@@ -1700,11 +1721,11 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
         if (mv_threads_per_row > 1)
           sched_apply_int_opt(&s, caps, POLY_OPT_GROUP, 0, mv_threads_per_row);
         if (mv_blocksize > 1)
-          sched_apply_int_opt(&s, caps, POLY_OPT_LOCAL, global_idx, mv_blocksize);
+          sched_require_int_opt(&s, caps, POLY_OPT_LOCAL, global_idx, mv_blocksize);
         if (mv_rows_per_thread > 1)
-          sched_apply_int_opt(&s, caps, POLY_OPT_UPCAST, global_idx, mv_rows_per_thread);
+          sched_require_int_opt(&s, caps, POLY_OPT_UPCAST, global_idx, mv_rows_per_thread);
         poly_toposort_free(topo);
-        PolyUOp *out = s.ast;
+        PolyUOp *out = s.failed ? NULL : s.ast;
         sched_destroy(&s);
         return out;
       }
@@ -1797,11 +1818,13 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
     for (int i = n_to_upcast - 1; i >= 0; i--) {
       int axis = to_upcast[i];
       if (axis < s.n_rngs && s.shape[axis] > 1)
-        sched_apply_int_opt(&s, caps, POLY_OPT_UPCAST, axis, 0);
+        sched_require_int_opt(&s, caps, POLY_OPT_UPCAST, axis, 0);
+      if (s.failed) break;
     }
     free(up_dims);
     free(to_upcast);
   }
+  if (s.failed) goto done;
 
   /* == Multi-axis UPCAST with stride scoring (heuristic.py:107-133) == */
   {
@@ -1893,12 +1916,14 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
       int best_amount = best.amount;
       poly_int_free(&best.sum_strides);
       if (best_axis < s.n_rngs && s.shape[best_axis] > 1)
-        sched_apply_int_opt(&s, caps, POLY_OPT_UPCAST, best_axis, best_amount);
+        sched_require_int_opt(&s, caps, POLY_OPT_UPCAST, best_axis, best_amount);
+      if (s.failed) break;
       /* Pinned heuristic tracks the selected index, not UOp identity. */
       if (best_axis < n_axis_flags) upcasted_axis[best_axis] = true;
     }
     free(upcasted_axis);
   }
+  if (s.failed) goto done;
 
   /* == Reduce UNROLL (heuristic.py:135-149) == */
   if (s.has_reduce) {
@@ -1949,17 +1974,21 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
     int n_up = sched_upcastable_dims(&s, up_dims, s.n_rngs);
     if (n_up > 0) {
       int last = up_dims[n_up - 1];
-      if (s.shape[last] % 4 == 0) sched_apply_int_opt(&s, caps, POLY_OPT_UPCAST, last, 4);
+      if (s.shape[last] % 4 == 0) sched_require_int_opt(&s, caps, POLY_OPT_UPCAST, last, 4);
     }
     free(up_dims);
   }
+  if (s.failed) goto done;
 
   /* == Local groups (heuristic.py:160-175 subset) ==
    * Port the tinygrad local scheduling block for backends with workgroup
    * locals. This is what splits large LOOP/GLOBAL axes into LOOP x LOCAL for
    * WebGPU masked kernels like triu(9,9). */
   if (caps.has_local && poly_getenv_flag("NOLOCALS")) {
-    if (!sched_apply_opt(&s, caps, (PolyOpt){.op = POLY_OPT_NOLOCALS}, NULL)) goto done;
+    if (!sched_apply_opt(&s, caps, (PolyOpt){.op = POLY_OPT_NOLOCALS}, NULL)) {
+      s.failed = true;
+      goto done;
+    }
   } else if (caps.has_local) {
     LocalAxisRank *ranked = calloc((size_t)s.n_rngs, sizeof(*ranked));
     LocalChoice *to_local = calloc((size_t)s.n_rngs, sizeof(*to_local));
@@ -1971,6 +2000,8 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
     int n_ranked = 0;
     for (int axis = 0; axis < s.n_rngs; axis++) {
       if (!(s.types[axis] == POLY_AXIS_GLOBAL || s.types[axis] == POLY_AXIS_WEAK)) continue;
+      /* heuristic.py selects LOCAL only for an original literal extent. */
+      if (s.rngs[axis]->src[0]->op != POLY_OP_CONST) continue;
       if (s.shape[axis] <= 1) continue;
       bool expanded = false;
       if (s.has_reach) {
@@ -2024,13 +2055,15 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
         bool will_delete_shape = to_local[i].size == s.shape[axis];
         if ((s.types[axis] == POLY_AXIS_GLOBAL || s.types[axis] == POLY_AXIS_WEAK) &&
             s.shape[axis] > 1)
-          sched_apply_int_opt(&s, caps, POLY_OPT_LOCAL, axis, to_local[i].size);
+          sched_require_int_opt(&s, caps, POLY_OPT_LOCAL, axis, to_local[i].size);
+        if (s.failed) break;
         if (will_delete_shape) deleted_shape++;
       }
     }
     free(ranked);
     free(to_local);
   }
+  if (s.failed) goto done;
 
   /* == CPU THREAD axis (tinygrad heuristic.py:180-190) ==
    * ClangRenderer has has_threads=true, then gpudims.py replaces the THREAD
@@ -6361,6 +6394,7 @@ PolyUOp *poly_apply_tc_opt(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps) {
   OptScheduler s;
   sched_init(&s, ctx, sink);
   PolyUOp *out = sched_can_optimize(&s) && sched_hand_coded_tensor_cores(&s, caps) ? s.ast : sink;
+  if (s.failed) out = NULL;
   sched_destroy(&s);
   return out;
 }

@@ -174,7 +174,8 @@ uint32_t poly_x86_feature_stamp(void);
 typedef struct PolyX86Program PolyX86Program;
 
 PolyX86Program *poly_compile_x86(const uint8_t *code, int code_size);
-PolyX86Program *poly_compile_x86_source(const char *source);
+/* X86Compiler.fromhex failure=-2, runtime/allocation failure=-1, success=0. */
+PolyX86Program *poly_compile_x86_source(const char *source, int *size_out, int *status);
 int poly_x86_program_call(PolyX86Program *prog, void **args, int n_args);
 int poly_x86_program_call_core(
     PolyX86Program *prog,

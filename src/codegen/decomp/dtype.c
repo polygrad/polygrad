@@ -817,7 +817,10 @@ PolyUOp *poly_reindex(PolyCtx *ctx, PolyUOp *idx, int off, int mul) {
   PolyUOp *offset = idx->src[1];
   PolyUOp *next = binary(
       ctx, POLY_OP_ADD, offset->dtype,
-      binary(ctx, POLY_OP_MUL, offset->dtype, offset, weakint(ctx, mul)), weakint(ctx, off)
+      idx->op == POLY_OP_SHRINK
+          ? offset
+          : binary(ctx, POLY_OP_MUL, offset->dtype, offset, weakint(ctx, mul)),
+      weakint(ctx, off)
   );
   if (!next) return NULL;
   if (idx->op == POLY_OP_SHRINK) {

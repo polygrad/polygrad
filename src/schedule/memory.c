@@ -160,7 +160,7 @@ PolyUOp *poly_memory_plan_rewrite(
   if (!ctx || !linear || linear->op != POLY_OP_LINEAR || held_count < 0 ||
       (held_count > 0 && !held_buffers))
     return NULL;
-  if (poly_getenv_flag("POLY_NO_MEMORY_PLANNER")) return linear;
+  if (poly_getenv_flag("NO_MEMORY_PLANNER")) return linear;
 
   MemoryBuffer *buffers = NULL;
   int buffer_count = 0, buffer_capacity = 0;

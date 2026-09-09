@@ -22,6 +22,36 @@
 #include <stdlib.h>
 #include <string.h>
 
+TEST_BACKEND(x86, compiler_hex_source_error_contract) {
+  /* X86Compiler.compile delegates to bytes.fromhex: whitespace separates bytes,
+   * malformed input raises ValueError rather than a recoverable RuntimeError. */
+  PolyCtx *ctx = poly_ctx_new();
+  const PolyBackendDesc *backend = poly_backend_get(POLY_DEVICE_X86);
+  PolyUOp *sink = poly_test_kernel_sink(ctx, NULL, 0, "test");
+  PolyUOp *linear = poly_uop(ctx, POLY_OP_LINEAR, POLY_VOID, NULL, 0, poly_arg_none());
+  const char *sources[] = {"c3", " \tc3\n\r\v\f", "c 3", "c", "zz", ""};
+  int status[6], sizes[6];
+  for (int i = 0; i < 6; i++) {
+    PolyUOp *source = poly_uop0(ctx, POLY_OP_SOURCE, POLY_VOID, poly_arg_str(sources[i]));
+    PolyUOp *parts[] = {sink, linear, source};
+    PolyUOp *program = poly_uop(ctx, POLY_OP_PROGRAM, POLY_VOID, parts, 3, poly_arg_none());
+    PolyRunner runner = {0};
+    status[i] = backend->lower_item(ctx, program, "test", &runner);
+    sizes[i] = runner.handle_size;
+    if (!status[i]) backend->free_runner(&runner);
+  }
+  poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(status[0], 0);
+  ASSERT_INT_EQ(status[1], 0);
+  ASSERT_INT_EQ(sizes[0], 1);
+  ASSERT_INT_EQ(sizes[1], 1);
+  for (int i = 2; i < 5; i++)
+    ASSERT_INT_EQ(status[i], -2);
+  /* Empty bytes parse successfully but cannot back an executable mapping. */
+  ASSERT_INT_EQ(status[5], -1);
+  PASS();
+}
+
 static int x86_hex_nibble(char c) {
   if (c >= '0' && c <= '9') return c - '0';
   if (c >= 'a' && c <= 'f') return c - 'a' + 10;

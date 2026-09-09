@@ -526,6 +526,30 @@ TEST(schedule_runtime, symbolic_template_replays_without_model_owner) {
   PASS();
 }
 
+TEST(schedule_runtime, memory_plan_honors_no_memory_planner) {
+  const char *value = getenv("NO_MEMORY_PLANNER");
+  char *saved = value ? strdup(value) : NULL;
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *buffer = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 16, POLY_DEVICE_CPU);
+  PolyUOp *body = poly_uop_sink_ex(ctx, NULL, 0, "test", 1);
+  PolyUOp *call = poly_uop2(ctx, POLY_OP_CALL, POLY_VOID, body, buffer, poly_arg_none());
+  PolyUOp *linear = poly_uop1(ctx, POLY_OP_LINEAR, POLY_VOID, call, poly_arg_none());
+  setenv("NO_MEMORY_PLANNER", "1", 1);
+  bool disabled = poly_memory_plan_rewrite(ctx, linear, NULL, 0) == linear;
+  setenv("NO_MEMORY_PLANNER", "0", 1);
+  PolyUOp *planned = poly_memory_plan_rewrite(ctx, linear, NULL, 0);
+  bool enabled = planned && planned != linear && planned->src[0]->src[1]->op == POLY_OP_BITCAST;
+  if (saved)
+    setenv("NO_MEMORY_PLANNER", saved, 1);
+  else
+    unsetenv("NO_MEMORY_PLANNER");
+  free(saved);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(disabled);
+  ASSERT_TRUE(enabled);
+  PASS();
+}
+
 TEST(schedule_runtime, memory_plan_rewrite_uses_one_arena_for_disjoint_temporaries) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);

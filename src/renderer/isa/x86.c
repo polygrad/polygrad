@@ -5448,24 +5448,39 @@ static int hex_nibble(char c) {
   return -1;
 }
 
-PolyX86Program *poly_compile_x86_source(const char *source) {
+PolyX86Program *poly_compile_x86_source(const char *source, int *size_out, int *status) {
+  if (size_out) *size_out = 0;
+  if (status) *status = -1;
   if (!source) return NULL;
-  size_t len = strlen(source);
-  if (len == 0 || (len & 1)) return NULL;
-  int code_size = (int)(len / 2);
-  uint8_t *code = malloc((size_t)code_size);
+  /* compiler_cpu.py:X86Compiler.compile uses bytes.fromhex. Only ASCII
+   * whitespace between complete bytes is accepted, not between nibbles. */
+  size_t capacity = strlen(source) / 2;
+  if (capacity > INT_MAX) return NULL;
+  uint8_t *code = malloc(capacity ? capacity : 1);
   if (!code) return NULL;
-  for (int i = 0; i < code_size; i++) {
-    int hi = hex_nibble(source[2 * i]);
-    int lo = hex_nibble(source[2 * i + 1]);
+  int code_size = 0;
+  const char *p = source;
+  while (*p) {
+    if (strchr(" \t\n\r\v\f", *p)) {
+      ++p;
+      continue;
+    }
+    int hi = hex_nibble(p[0]);
+    int lo = p[1] ? hex_nibble(p[1]) : -1;
     if (hi < 0 || lo < 0) {
+      if (status) *status = -2;
       free(code);
       return NULL;
     }
-    code[i] = (uint8_t)((hi << 4) | lo);
+    code[code_size++] = (uint8_t)((hi << 4) | lo);
+    p += 2;
   }
   PolyX86Program *prog = poly_compile_x86(code, code_size);
   free(code);
+  if (prog) {
+    if (size_out) *size_out = code_size;
+    if (status) *status = 0;
+  }
   return prog;
 }
 

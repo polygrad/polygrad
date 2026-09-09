@@ -2911,8 +2911,9 @@ static int x86_lower_item(PolyCtx *ctx, PolyUOp *program, const char *fn_name, P
   } else {
     const char *source = poly_program_source_text(program);
     if (source) {
-      code_size = (int)(strlen(source) / 2);
-      prog = poly_compile_x86_source(source);
+      int status = -1;
+      prog = poly_compile_x86_source(source, &code_size, &status);
+      if (!prog) return status;
     }
   }
   if (!prog) return -1;

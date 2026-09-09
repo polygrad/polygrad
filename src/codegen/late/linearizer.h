@@ -14,4 +14,8 @@ PolyPatternMatcher *poly_pm_split_ends(void);
 /* Current Tinygrad 2026-08-22/a9069c177a9d codegen/late/linearizer.py:linearize. */
 PolyUOp **poly_linearize(PolyCtx *ctx, PolyUOp *sink, int *n_out);
 
+#ifdef POLY_TESTING
+void poly_test_linearizer_alloc_fail_after(int count);
+#endif
+
 #endif

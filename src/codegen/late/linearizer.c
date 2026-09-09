@@ -19,6 +19,29 @@
 #include <assert.h>
 #include <limits.h>
 
+#ifdef POLY_TESTING
+static _Thread_local int linearizer_alloc_fail_after = -1;
+void poly_test_linearizer_alloc_fail_after(int count) {
+  linearizer_alloc_fail_after = count;
+}
+#endif
+
+static bool linearizer_alloc_allowed(void) {
+#ifdef POLY_TESTING
+  if (linearizer_alloc_fail_after == 0) return false;
+  if (linearizer_alloc_fail_after > 0) --linearizer_alloc_fail_after;
+#endif
+  return true;
+}
+
+static void *linearizer_malloc(size_t size) {
+  return linearizer_alloc_allowed() ? malloc(size) : NULL;
+}
+
+static void *linearizer_calloc(size_t count, size_t size) {
+  return linearizer_alloc_allowed() ? calloc(count, size) : NULL;
+}
+
 /* Pointer → int hash map (for linearizer) */
 
 typedef struct {
@@ -27,10 +50,12 @@ typedef struct {
   int cap;
 } IntMap;
 
-static void imap_init(IntMap *m, int n) {
+static bool imap_init(IntMap *m, int n) {
+  if (n < 0 || n > INT_MAX / 3) return false;
   m->cap = (n < 4) ? 16 : n * 3;
-  m->keys = calloc(m->cap, sizeof(PolyUOp *));
-  m->vals = calloc(m->cap, sizeof(int));
+  m->keys = linearizer_calloc(m->cap, sizeof(PolyUOp *));
+  m->vals = linearizer_calloc(m->cap, sizeof(int));
+  return m->keys && m->vals;
 }
 
 static void imap_set(IntMap *m, PolyUOp *key, int val) {
@@ -71,11 +96,12 @@ typedef struct {
   int cap;
 } Heap;
 
-static void heap_init(Heap *h, int cap) {
-  h->keys = malloc(cap * sizeof(int));
-  h->vals = malloc(cap * sizeof(PolyUOp *));
+static bool heap_init(Heap *h, int cap) {
+  h->keys = linearizer_malloc(cap * sizeof(int));
+  h->vals = linearizer_malloc(cap * sizeof(PolyUOp *));
   h->len = 0;
   h->cap = cap;
+  return h->keys && h->vals;
 }
 
 static void heap_push(Heap *h, int key, PolyUOp *val) {
@@ -210,17 +236,21 @@ static int dep_count_in_siblings(
  * when a RANGE has to be ordered after a sibling END, record extra_dep[idx].
  * The returned array is indexed by topo index; -1 means no extra dep. */
 static int *build_control_edges(PolyUOp **topo, int n, IntMap *idx) {
-  int *extra_dep = malloc((size_t)n * sizeof(int));
+  int *extra_dep = linearizer_malloc((size_t)n * sizeof(int));
   if (!extra_dep) return NULL;
   for (int i = 0; i < n; i++)
     extra_dep[i] = -1;
   if (n == 0) return extra_dep;
 
-  int words = (n + 63) / 64;
-  uint64_t *deps = calloc((size_t)n * (size_t)words, sizeof(uint64_t));
-  int *nest_parent = malloc((size_t)n * sizeof(int));
-  int *siblings = malloc((size_t)n * sizeof(int));
-  int *scores = malloc((size_t)n * sizeof(int));
+  int words = n / 64 + (n % 64 != 0);
+  if ((size_t)n > SIZE_MAX / sizeof(uint64_t) / (size_t)words) {
+    free(extra_dep);
+    return NULL;
+  }
+  uint64_t *deps = linearizer_calloc((size_t)n * (size_t)words, sizeof(uint64_t));
+  int *nest_parent = linearizer_malloc((size_t)n * sizeof(int));
+  int *siblings = linearizer_malloc((size_t)n * sizeof(int));
+  int *scores = linearizer_malloc((size_t)n * sizeof(int));
   if (!deps || !nest_parent || !siblings || !scores) {
     free(deps);
     free(nest_parent);
@@ -373,7 +403,7 @@ static PolyUOp *cf_rewrite(
    * inherit a renderer-local 64-source cap. */
   PolyUOp *src_stack[64];
   size_t src_cap = (size_t)u->n_src + 1;
-  PolyUOp **src = src_cap <= 64 ? src_stack : malloc(src_cap * sizeof(PolyUOp *));
+  PolyUOp **src = src_cap <= 64 ? src_stack : linearizer_malloc(src_cap * sizeof(PolyUOp *));
   if (!src) {
     *failed = true;
     return NULL;
@@ -438,16 +468,21 @@ static PolyUOp *cf_rewrite(
 }
 
 PolyUOp *poly_apply_control_flow(PolyCtx *ctx, PolyUOp *sink) {
+  if (!ctx || !sink) return NULL;
   int n;
   PolyScratchMark scratch = poly_ctx_scratch_mark(ctx);
   PolyUOp **topo = poly_toposort_scratch(ctx, sink, &n);
-  if (!topo && n != 0) {
+  if (!topo || n <= 0) {
     poly_ctx_scratch_rewind(ctx, scratch);
-    return sink;
+    return NULL;
   }
 
-  IntMap idx;
-  imap_init(&idx, n);
+  IntMap idx = {0};
+  if (!imap_init(&idx, n)) {
+    imap_destroy(&idx);
+    poly_ctx_scratch_rewind(ctx, scratch);
+    return NULL;
+  }
   for (int i = 0; i < n; i++)
     imap_set(&idx, topo[i], i);
 
@@ -474,8 +509,8 @@ PolyUOp *poly_apply_control_flow(PolyCtx *ctx, PolyUOp *sink) {
   }
 
   /* DFS rewrite from sink with 3-state cycle detection */
-  PolyUOp **memo = calloc(n, sizeof(PolyUOp *));
-  uint8_t *visit = calloc(n, sizeof(uint8_t));
+  PolyUOp **memo = linearizer_calloc(n, sizeof(PolyUOp *));
+  uint8_t *visit = linearizer_calloc(n, sizeof(uint8_t));
   if (!memo || !visit) {
     free(visit);
     free(memo);
@@ -669,10 +704,13 @@ static uint64_t tuplize_pair_hash(uint64_t x) {
 
 static bool tuplize_pair_memo_init(TuplizePairMemo *m, int n) {
   int cap = 1024;
-  while (cap < n * 4)
+  if (n < 0 || n > INT_MAX / 4) return false;
+  while (cap < n * 4) {
+    if (cap > INT_MAX / 2) return false;
     cap <<= 1;
-  m->keys = calloc((size_t)cap, sizeof(uint64_t));
-  m->vals = calloc((size_t)cap, sizeof(int8_t));
+  }
+  m->keys = linearizer_calloc((size_t)cap, sizeof(uint64_t));
+  m->vals = linearizer_calloc((size_t)cap, sizeof(int8_t));
   if (!m->keys || !m->vals) {
     free(m->keys);
     free(m->vals);
@@ -707,9 +745,10 @@ static bool tuplize_pair_memo_get(TuplizePairMemo *m, uint64_t key, int *out) {
 
 static bool tuplize_pair_memo_grow(TuplizePairMemo *m) {
   TuplizePairMemo nm = {0};
+  if (m->cap > INT_MAX / 2) return false;
   nm.cap = m->cap ? m->cap << 1 : 1024;
-  nm.keys = calloc((size_t)nm.cap, sizeof(uint64_t));
-  nm.vals = calloc((size_t)nm.cap, sizeof(int8_t));
+  nm.keys = linearizer_calloc((size_t)nm.cap, sizeof(uint64_t));
+  nm.vals = linearizer_calloc((size_t)nm.cap, sizeof(int8_t));
   if (!nm.keys || !nm.vals) {
     free(nm.keys);
     free(nm.vals);
@@ -739,7 +778,7 @@ static bool tuplize_pair_memo_grow(TuplizePairMemo *m) {
 }
 
 static bool tuplize_pair_memo_set(TuplizePairMemo *m, uint64_t key, int val) {
-  if ((m->len + 1) * 2 >= m->cap && !tuplize_pair_memo_grow(m)) return false;
+  if (m->len >= m->cap / 2 - 1 && !tuplize_pair_memo_grow(m)) return false;
   uint64_t stored = key + 1;
   uint64_t mask = (uint64_t)m->cap - 1;
   uint64_t pos = tuplize_pair_hash(stored) & mask;
@@ -830,9 +869,9 @@ static void tuplize_merge_sort_rec(TuplizeCmpCtx *tc, int *arr, int *tmp, int lo
 }
 
 static int *compute_tuplize_ranks(PolyUOp **topo, int n, IntMap *idx) {
-  int *rank = malloc((size_t)n * sizeof(int));
-  int *order = malloc((size_t)n * sizeof(int));
-  int *tmp = malloc((size_t)n * sizeof(int));
+  int *rank = linearizer_malloc((size_t)n * sizeof(int));
+  int *order = linearizer_malloc((size_t)n * sizeof(int));
+  int *tmp = linearizer_malloc((size_t)n * sizeof(int));
   TuplizePairMemo memo = {0};
   if (!rank || !order || !tmp || !tuplize_pair_memo_init(&memo, n)) {
     free(rank);
@@ -860,25 +899,79 @@ static int *compute_tuplize_ranks(PolyUOp **topo, int n, IntMap *idx) {
   return rank;
 }
 
+/* Python's run_count is exact. Keep ordinary products allocation-free, promoting
+ * only overflow to the existing integer owner rather than saturating sort keys. */
+typedef struct {
+  int64_t small;
+  PolyInt large;
+} RunCount;
+
+static bool run_count_mul(RunCount *count, uint64_t extent) {
+  int64_t product;
+  if (!count->large.limbs && extent <= INT64_MAX &&
+      !__builtin_mul_overflow(count->small, (int64_t)extent, &product)) {
+    count->small = product;
+    return true;
+  }
+  uint32_t base_limbs[] = {(uint32_t)count->small, (uint32_t)((uint64_t)count->small >> 32)};
+  uint32_t factor_limbs[] = {(uint32_t)extent, (uint32_t)(extent >> 32)};
+  PolyInt base = {
+      .sign = count->small != 0,
+      .n_limbs = base_limbs[1] ? 2 : count->small != 0,
+      .limbs = base_limbs};
+  PolyInt factor = {
+      .sign = extent != 0, .n_limbs = factor_limbs[1] ? 2 : extent != 0, .limbs = factor_limbs};
+  PolyInt candidate = {0};
+  if (!poly_int_mul(&candidate, count->large.limbs ? &count->large : &base, &factor)) {
+    poly_int_free(&candidate);
+    return false;
+  }
+  poly_int_free(&count->large);
+  if (poly_int_to_i64(&candidate, &count->small))
+    poly_int_free(&candidate);
+  else
+    count->large = candidate;
+  return true;
+}
+
+static int run_count_cmp(const RunCount *a, const RunCount *b) {
+  if (a->large.limbs && b->large.limbs) return poly_int_cmp(&a->large, &b->large);
+  if (a->large.limbs || b->large.limbs) return a->large.limbs ? 1 : -1;
+  return (a->small > b->small) - (a->small < b->small);
+}
+
 PolyUOp **poly_linearize(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
   if (n_out) *n_out = 0;
   if (!ctx || !sink) return NULL;
   /* 1. Standard toposort */
   int n;
   PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n);
-  if (!topo || n <= 0) return NULL;
+  if (!topo || n <= 0) {
+    poly_toposort_free(topo);
+    return NULL;
+  }
+
+  IntMap idx = {0};
+  Heap heap = {0};
+  uint64_t *ranges = NULL;
+  int *out_deg = NULL, *prio = NULL, *tuplize_rank = NULL, *ideal = NULL, *nkey = NULL;
+  RunCount *run_count = NULL;
+  int64_t *extra = NULL;
+  PolyUOp **result = NULL;
+  int rlen = 0;
 
   /* 2. Build UOp* → topo-index lookup */
-  IntMap idx;
-  imap_init(&idx, n);
+  if (!imap_init(&idx, n)) goto fail;
   for (int i = 0; i < n; i++)
     imap_set(&idx, topo[i], i);
 
   /* 3. Compute ranges bitset per UOp (forward pass).
    * Mirrors tinygrad's UOp.ranges property: the set of RANGE ops
    * each UOp is "inside". Used to compute run_count. */
-  int words = (n + 63) / 64;
-  uint64_t *ranges = calloc((size_t)n * (size_t)words, sizeof(uint64_t));
+  int words = n / 64 + (n % 64 != 0);
+  if ((size_t)n > SIZE_MAX / sizeof(uint64_t) / (size_t)words) goto fail;
+  ranges = linearizer_calloc((size_t)n * (size_t)words, sizeof(uint64_t));
+  if (!ranges) goto fail;
   for (int i = 0; i < n; i++) {
     PolyUOp *u = topo[i];
     uint64_t *r = ranges + (size_t)i * (size_t)words;
@@ -903,18 +996,22 @@ PolyUOp **poly_linearize(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
 
   /* 4. Compute out_degree, run_count, priority, extra (reverse pass).
    * Sort key mirrors tinygrad: (run_count, priority, extra). */
-  int *out_deg = calloc(n, sizeof(int));
-  int64_t *run_count = malloc(n * sizeof(int64_t));
-  int *prio = malloc(n * sizeof(int));
-  int64_t *extra = malloc(n * sizeof(int64_t));
+  out_deg = linearizer_calloc(n, sizeof(int));
+  run_count = linearizer_calloc(n, sizeof(*run_count));
+  prio = linearizer_malloc((size_t)n * sizeof(int));
+  extra = linearizer_malloc((size_t)n * sizeof(int64_t));
+  if (!out_deg || !run_count || !prio || !extra) goto fail;
 
   for (int i = n - 1; i >= 0; i--) {
     PolyUOp *u = topo[i];
-    for (int j = 0; j < u->n_src; j++)
-      out_deg[imap_get(&idx, u->src[j])]++;
+    for (int j = 0; j < u->n_src; j++) {
+      int si = imap_get(&idx, u->src[j]);
+      if (out_deg[si] == INT_MAX) goto fail;
+      out_deg[si]++;
+    }
 
     /* run_count = prod([int(r.vmax)+1 for r in u.ranges]) */
-    run_count[i] = 1;
+    run_count[i].small = 1;
     const uint64_t *r = ranges + (size_t)i * (size_t)words;
     for (int w = 0; w < words; w++) {
       uint64_t bits = r[w];
@@ -926,12 +1023,7 @@ PolyUOp **poly_linearize(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
            * CONST bound (codegen/late/linearizer.py:19-20). */
           int64_t rmin = 0, rmax = 0;
           poly_uop_minmax(ctx, topo[b], &rmin, &rmax);
-          int64_t extent = rmax == INT64_MAX ? INT64_MAX : rmax + 1;
-          int64_t product = 0;
-          if (__builtin_mul_overflow(run_count[i], extent, &product))
-            run_count[i] = INT64_MAX;
-          else
-            run_count[i] = product;
+          if (rmax < -1 || !run_count_mul(&run_count[i], (uint64_t)rmax + 1)) goto fail;
         }
         bits &= bits - 1;
       }
@@ -942,21 +1034,15 @@ PolyUOp **poly_linearize(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
     if (u->op == POLY_OP_PARAM) extra[i] = poly_program_buffer_slot(u);
   }
 
-  int *tuplize_rank = compute_tuplize_ranks(topo, n, &idx);
-  if (!tuplize_rank) {
-    imap_destroy(&idx);
-    free(ranges);
-    free(out_deg);
-    free(run_count);
-    free(prio);
-    free(extra);
-    *n_out = n;
-    return topo;
+  if (poly_getenv_int("TUPLE_ORDER", 1)) {
+    tuplize_rank = compute_tuplize_ranks(topo, n, &idx);
+    if (!tuplize_rank) goto fail;
   }
 
   /* 6. Build ideal order: sort by (run_count, priority, extra, tuplize, topo_idx).
    * Matches tinygrad's sorted(lst, key=lambda x: priorities[x]+x.tuplize). */
-  int *ideal = malloc(n * sizeof(int));
+  ideal = linearizer_malloc((size_t)n * sizeof(int));
+  if (!ideal) goto fail;
   for (int i = 0; i < n; i++)
     ideal[i] = i;
 
@@ -965,18 +1051,18 @@ PolyUOp **poly_linearize(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
    * Matches tinygrad's sorted(lst, key=lambda x: priorities[x]+x.tuplize). */
   for (int i = 1; i < n; i++) {
     int ki = ideal[i];
-    int64_t kr = run_count[ki];
     int kp = prio[ki];
     int64_t ke = extra[ki];
     int j = i - 1;
     while (j >= 0) {
       int ji = ideal[j];
-      if (run_count[ji] > kr) {
+      int rc = run_count_cmp(&run_count[ji], &run_count[ki]);
+      if (rc > 0) {
         ideal[j + 1] = ideal[j];
         j--;
         continue;
       }
-      if (run_count[ji] < kr) break;
+      if (rc < 0) break;
       if (prio[ji] > kp) {
         ideal[j + 1] = ideal[j];
         j--;
@@ -989,12 +1075,12 @@ PolyUOp **poly_linearize(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
         continue;
       }
       if (extra[ji] < ke) break;
-      if (tuplize_rank[ji] > tuplize_rank[ki]) {
+      if (tuplize_rank && tuplize_rank[ji] > tuplize_rank[ki]) {
         ideal[j + 1] = ideal[j];
         j--;
         continue;
       }
-      if (tuplize_rank[ji] < tuplize_rank[ki]) break;
+      if (tuplize_rank && tuplize_rank[ji] < tuplize_rank[ki]) break;
       /* Final tiebreak: topo index */
       if (ji > ki) {
         ideal[j + 1] = ideal[j];
@@ -1006,7 +1092,8 @@ PolyUOp **poly_linearize(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
   }
 
   /* nkey[i] = position of topo[i] in ideal order */
-  int *nkey = malloc(n * sizeof(int));
+  nkey = linearizer_malloc((size_t)n * sizeof(int));
+  if (!nkey) goto fail;
   for (int i = 0; i < n; i++)
     nkey[ideal[i]] = i;
 
@@ -1014,14 +1101,19 @@ PolyUOp **poly_linearize(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
     for (int i = 0; i < n; i++) {
       PolyUOp *u = topo[i];
       PolyDType ldt = linearizer_tuplize_dtype(u);
+      char small_count[32];
+      snprintf(small_count, sizeof(small_count), "%lld", (long long)run_count[i].small);
+      char *large_count =
+          run_count[i].large.limbs ? poly_int_to_decimal(&run_count[i].large) : NULL;
       fprintf(
           stderr,
-          "[lin] topo[%d] %s run_count=%lld prio=%d nkey=%d out_deg=%d arg=%d:%lld "
+          "[lin] topo[%d] %s run_count=%s prio=%d nkey=%d out_deg=%d arg=%d:%lld "
           "ldt=%s/%d/%d src=[",
-          i, poly_op_name(u->op), (long long)run_count[i], prio[i], nkey[i], out_deg[i],
-          u->arg.kind, (long long)(u->arg.kind == POLY_ARG_INT ? u->arg.i : 0),
+          i, poly_op_name(u->op), large_count ? large_count : small_count, prio[i], nkey[i],
+          out_deg[i], u->arg.kind, (long long)(u->arg.kind == POLY_ARG_INT ? u->arg.i : 0),
           ldt.name ? ldt.name : "?", ldt.priority, ldt.bitsize
       );
+      free(large_count);
       for (int j = 0; j < u->n_src; j++) {
         int si = imap_try_get(&idx, u->src[j]);
         fprintf(stderr, "%s%d", j ? "," : "", si);
@@ -1032,14 +1124,13 @@ PolyUOp **poly_linearize(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
 
   /* 6. Reverse Kahn's with min-heap (using -nkey for max priority).
    * Starts from SINK, pops highest-nkey node, releases sources. */
-  Heap heap;
-  heap_init(&heap, n);
+  if (!heap_init(&heap, n)) goto fail;
 
   int sink_idx = imap_get(&idx, sink);
   heap_push(&heap, -nkey[sink_idx], sink);
 
-  PolyUOp **result = malloc(n * sizeof(PolyUOp *));
-  int rlen = 0;
+  result = linearizer_malloc((size_t)n * sizeof(PolyUOp *));
+  if (!result) goto fail;
 
   while (heap.len > 0) {
     PolyUOp *u = heap_pop(&heap);
@@ -1057,17 +1148,23 @@ PolyUOp **poly_linearize(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
     result[rlen - 1 - i] = tmp;
   }
 
-  if (rlen != n) {
-    free(result);
-    result = malloc((size_t)n * sizeof(PolyUOp *));
-    memcpy(result, topo, (size_t)n * sizeof(PolyUOp *));
-    rlen = n;
-  }
+  if (rlen != n) goto fail;
+  if (n_out) *n_out = rlen;
+  goto cleanup;
+
+fail:
+  /* Allocation failure cannot substitute a different, merely topological order. */
+  free(result);
+  result = NULL;
+cleanup:
 
   imap_destroy(&idx);
   heap_destroy(&heap);
   free(ranges);
   free(out_deg);
+  if (run_count)
+    for (int i = 0; i < n; i++)
+      poly_int_free(&run_count[i].large);
   free(run_count);
   free(prio);
   free(extra);
@@ -1076,7 +1173,6 @@ PolyUOp **poly_linearize(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
   free(nkey);
   poly_toposort_free(topo);
 
-  if (n_out) *n_out = rlen;
   return result;
 }
 static int cmp_range_arg(const void *a, const void *b) {
@@ -1104,7 +1200,7 @@ static PolyUOp *do_split_ends(PolyCtx *ctx, PolyUOp *end, const PolyBindings *b)
 
   /* do_split_ends keeps bool/void backedges outside the ended range set.
    * A predicate may depend on a live range without ending that range. */
-  PolyUOp **srcs = malloc((size_t)end->n_src * sizeof(*srcs));
+  PolyUOp **srcs = linearizer_malloc((size_t)end->n_src * sizeof(*srcs));
   if (!srcs) return NULL;
   int n_range_srcs = 0;
   for (int i = 1; i < end->n_src; i++)
@@ -1119,7 +1215,7 @@ static PolyUOp *do_split_ends(PolyCtx *ctx, PolyUOp *end, const PolyBindings *b)
     free(srcs);
     return NULL;
   }
-  PolyUOp **ranges = malloc((size_t)n_topo * sizeof(*ranges));
+  PolyUOp **ranges = linearizer_malloc((size_t)n_topo * sizeof(*ranges));
   if (!ranges) {
     free(range_topo);
     free(srcs);

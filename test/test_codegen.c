@@ -708,27 +708,70 @@ TEST(codegen, scheduler_symbolic_group_reduction) {
 }
 
 TEST(codegen, scheduler_local_requires_literal_bound) {
+  const int factors[][2] = {{2, 2}, {3, 16}};
+  for (int i = 0; i < 2; i++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyUOp *g = poly_uop1(
+        ctx, POLY_OP_RANGE, POLY_WEAKINT,
+        poly_alu2(
+            ctx, POLY_OP_MUL, policy_const(ctx, factors[i][0]), policy_const(ctx, factors[i][1])
+        ),
+        poly_arg_range(0, POLY_AXIS_GLOBAL)
+    );
+    PolyUOp *u = policy_range(ctx, 4, 1, POLY_AXIS_UPCAST);
+    PolyUOp *p = poly_test_program_param(ctx, POLY_FLOAT32, factors[i][0] * factors[i][1] * 4, 0);
+    PolyUOp *idx =
+        poly_alu2(ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, g, policy_const(ctx, 4)), u);
+    PolyUOp *store = poly_uop2(
+        ctx, POLY_OP_STORE, POLY_VOID, poly_uop_index(ctx, p, &idx, 1),
+        poly_cast(ctx, g, POLY_FLOAT32), poly_arg_none()
+    );
+    PolyUOp *sources[] = {store, g, u};
+    PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, sources, 3, poly_arg_none());
+    PolyUOp *sink = poly_test_kernel_sink(ctx, &end, 1, "test");
+    bool same =
+        policy_matches(ctx, sink, (PolyRendererCaps){.device = "CUDA", .has_local = true}, NULL, 0);
+    poly_ctx_destroy(ctx);
+    ASSERT_TRUE(same);
+  }
+  PASS();
+}
+
+TEST(codegen, scheduler_propagates_mandatory_heuristic_failure) {
+  const char *value = getenv("NOLOCALS");
+  char *saved = value ? strdup(value) : NULL;
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *two = policy_const(ctx, 2);
-  PolyUOp *g = poly_uop1(
-      ctx, POLY_OP_RANGE, POLY_WEAKINT, poly_alu2(ctx, POLY_OP_MUL, two, two),
-      poly_arg_range(0, POLY_AXIS_GLOBAL)
+  PolyUOp *g = policy_range(ctx, 64, 0, POLY_AXIS_GLOBAL);
+  PolyUOp *l = policy_range(ctx, 4, 1, POLY_AXIS_LOCAL);
+  PolyUOp *u = policy_range(ctx, 4, 2, POLY_AXIS_UPCAST);
+  PolyUOp *p = poly_test_program_param(ctx, POLY_FLOAT32, 1024, 0);
+  PolyUOp *idx = poly_alu2(
+      ctx, POLY_OP_ADD,
+      poly_alu2(
+          ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, g, policy_const(ctx, 16)),
+          poly_alu2(ctx, POLY_OP_MUL, l, policy_const(ctx, 4))
+      ),
+      u
   );
-  PolyUOp *u = policy_range(ctx, 4, 1, POLY_AXIS_UPCAST);
-  PolyUOp *p = poly_test_program_param(ctx, POLY_FLOAT32, 16, 0);
-  PolyUOp *idx =
-      poly_alu2(ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, g, policy_const(ctx, 4)), u);
   PolyUOp *store = poly_uop2(
       ctx, POLY_OP_STORE, POLY_VOID, poly_uop_index(ctx, p, &idx, 1),
       poly_cast(ctx, g, POLY_FLOAT32), poly_arg_none()
   );
-  PolyUOp *sources[] = {store, g, u};
-  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, sources, 3, poly_arg_none());
+  PolyUOp *sources[] = {store, g, l, u};
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, sources, 4, poly_arg_none());
   PolyUOp *sink = poly_test_kernel_sink(ctx, &end, 1, "test");
-  bool same =
-      policy_matches(ctx, sink, (PolyRendererCaps){.device = "CUDA", .has_local = true}, NULL, 0);
+  setenv("NOLOCALS", "1", 1);
+  PolyUOp *result = poly_apply_opts_heuristic_ex(
+      ctx, sink, (PolyRendererCaps){.device = "CUDA", .has_local = true}
+  );
+  if (saved)
+    setenv("NOLOCALS", saved, 1);
+  else
+    unsetenv("NOLOCALS");
+  free(saved);
+  bool rejected = result == NULL;
   poly_ctx_destroy(ctx);
-  ASSERT_TRUE(same);
+  ASSERT_TRUE(rejected);
   PASS();
 }
 
@@ -1051,8 +1094,19 @@ TEST(codegen, scheduler_control_flow_rejects_cyclic_siblings) {
   PolyUOp *ends[] = {e0, e1};
   PolyUOp *sink = poly_test_kernel_sink(ctx, ends, 2, "test");
   PolyUOp *ordered = poly_uop2(ctx, POLY_OP_RANGE, r1->dtype, r1->src[0], e0, r1->arg);
-  bool correct =
-      poly_apply_control_flow(ctx, sink) == poly_uop_substitute(ctx, sink, &r1, &ordered, 1);
+  PolyUOp *expected = poly_uop_substitute(ctx, sink, &r1, &ordered, 1);
+  bool correct = poly_apply_control_flow(ctx, sink) == expected;
+  bool complete = false;
+  for (int budget = 0; budget < 64; budget++) {
+    poly_test_linearizer_alloc_fail_after(budget);
+    PolyUOp *result = poly_apply_control_flow(ctx, sink);
+    poly_test_linearizer_alloc_fail_after(-1);
+    if (result) {
+      complete = result == expected;
+      break;
+    }
+  }
+  correct &= complete;
   ends[1] = poly_uop2(ctx, POLY_OP_END, POLY_VOID, n1, r0, poly_arg_none());
   sink = poly_test_kernel_sink(ctx, ends, 2, "test");
   correct &= poly_apply_control_flow(ctx, sink) == NULL;
@@ -3868,6 +3922,8 @@ TEST(codegen, dtype_reindex_changes_shrink_to_two_source_index) {
   ASSERT_INT_EQ(reindexed->op, POLY_OP_INDEX);
   ASSERT_INT_EQ(reindexed->n_src, 2);
   ASSERT_TRUE(reindexed->src[0] == shrink->src[0]);
+  ASSERT_INT_EQ(reindexed->src[1]->op, POLY_OP_ADD);
+  ASSERT_PTR_EQ(reindexed->src[1]->src[0], shrink->src[1]);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -7459,6 +7515,78 @@ TEST(codegen, weak_float_commit_uses_dtype_const_rounding) {
   ASSERT_PTR_EQ(lowered->src[1], rounded);
 
   poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, linearizer_allocation_failure_rejects_partial_order) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = policy_const(ctx, 9), *b = policy_const(ctx, 2);
+  PolyUOp *sources[] = {a, b};
+  PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, sources, 2, poly_arg_none());
+  bool complete = false;
+  for (int budget = 0; budget < 64; budget++) {
+    poly_test_linearizer_alloc_fail_after(budget);
+    int count = -1;
+    PolyUOp **linear = poly_linearize(ctx, sink, &count);
+    poly_test_linearizer_alloc_fail_after(-1);
+    if (linear) {
+      complete = count == 3 && linear[0] == b && linear[1] == a && linear[2] == sink;
+      free(linear);
+      break;
+    }
+    ASSERT_INT_EQ(count, 0);
+  }
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(complete);
+  PASS();
+}
+
+TEST(codegen, linearize_preserves_exact_large_run_counts) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_range(ctx, INT64_C(1) << 40, 0, POLY_AXIS_LOOP);
+  PolyUOp *b = poly_range(ctx, INT64_C(1) << 30, 1, POLY_AXIS_LOOP);
+  PolyUOp *c = poly_range(ctx, INT64_C(1) << 41, 2, POLY_AXIS_LOOP);
+  PolyUOp *d = poly_range(ctx, INT64_C(1) << 30, 3, POLY_AXIS_LOOP);
+  PolyUOp *small = poly_alu2(ctx, POLY_OP_MUL, a, b);
+  PolyUOp *large = poly_alu2(ctx, POLY_OP_ADD, c, d);
+  PolyUOp *sources[] = {large, small};
+  PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, sources, 2, poly_arg_none());
+  int count = 0, small_index = -1, large_index = -1;
+  PolyUOp **linear = poly_linearize(ctx, sink, &count);
+  for (int i = 0; linear && i < count; i++) {
+    if (linear[i] == small) small_index = i;
+    if (linear[i] == large) large_index = i;
+  }
+  free(linear);
+  poly_ctx_destroy(ctx);
+  /* 2^70 precedes 2^71 even though the opcode tie-break prefers ADD. */
+  ASSERT_TRUE(small_index >= 0 && small_index < large_index);
+  PASS();
+}
+
+TEST(codegen, linearize_honors_tuple_order) {
+  const char *value = getenv("TUPLE_ORDER");
+  char *saved = value ? strdup(value) : NULL;
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *first = policy_const(ctx, 9), *second = policy_const(ctx, 2);
+  PolyUOp *sources[] = {first, second};
+  PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, sources, 2, poly_arg_none());
+  bool matches = true;
+  for (int enabled = 0; enabled <= 1; enabled++) {
+    setenv("TUPLE_ORDER", enabled ? "1" : "0", 1);
+    int count = 0;
+    PolyUOp **linear = poly_linearize(ctx, sink, &count);
+    matches &= linear && count == 3 && linear[0] == (enabled ? second : first) &&
+               linear[1] == (enabled ? first : second) && linear[2] == sink;
+    free(linear);
+  }
+  if (saved)
+    setenv("TUPLE_ORDER", saved, 1);
+  else
+    unsetenv("TUPLE_ORDER");
+  free(saved);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(matches);
   PASS();
 }
 
