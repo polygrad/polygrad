@@ -14,6 +14,7 @@
 #include <stdbool.h>
 #include <unistd.h>
 #include <dlfcn.h>
+#include <limits.h>
 
 /* CUDA driver API types */
 
@@ -27,6 +28,7 @@ typedef void *CUgraph;
 typedef void *CUgraphNode;
 typedef void *CUgraphExec;
 typedef void *CUstream;
+typedef void *CUevent;
 
 /* Legacy CUDA driver graph ABI used by pinned tinygrad's generated bindings.
  * Keep this local so HAS_CUDA remains a dlopen-only build with no CUDA-header
@@ -114,6 +116,11 @@ typedef CUresult (*cuLaunchKernel_fn
 typedef CUresult (*cuCtxSynchronize_fn)(void);
 typedef CUresult (*cuMemsetD8_v2_fn)(CUdeviceptr, unsigned char, size_t);
 typedef CUresult (*cuModuleUnload_fn)(CUmodule);
+typedef CUresult (*cuEventCreate_fn)(CUevent *, unsigned int);
+typedef CUresult (*cuEventRecord_fn)(CUevent, CUstream);
+typedef CUresult (*cuEventSynchronize_fn)(CUevent);
+typedef CUresult (*cuEventElapsedTime_fn)(float *, CUevent, CUevent);
+typedef CUresult (*cuEventDestroy_v2_fn)(CUevent);
 typedef CUresult (*cuGraphCreate_fn)(CUgraph *, unsigned int);
 typedef CUresult (*cuGraphAddKernelNode_fn
 )(CUgraphNode *, CUgraph, const CUgraphNode *, size_t, const PolyCudaKernelNodeParams *);
@@ -160,6 +167,11 @@ static struct {
   cuCtxSynchronize_fn cuCtxSynchronize;
   cuMemsetD8_v2_fn cuMemsetD8_v2;
   cuModuleUnload_fn cuModuleUnload;
+  cuEventCreate_fn cuEventCreate;
+  cuEventRecord_fn cuEventRecord;
+  cuEventSynchronize_fn cuEventSynchronize;
+  cuEventElapsedTime_fn cuEventElapsedTime;
+  cuEventDestroy_v2_fn cuEventDestroy_v2;
   cuGraphCreate_fn cuGraphCreate;
   cuGraphAddKernelNode_fn cuGraphAddKernelNode;
   cuGraphAddMemcpyNode_fn cuGraphAddMemcpyNode;
@@ -239,6 +251,11 @@ static bool load_cuda_libs(void) {
   LOAD_CUDA(cuCtxSynchronize);
   LOAD_CUDA(cuMemsetD8_v2);
   LOAD_CUDA(cuModuleUnload);
+  LOAD_CUDA(cuEventCreate);
+  LOAD_CUDA(cuEventRecord);
+  LOAD_CUDA(cuEventSynchronize);
+  LOAD_CUDA(cuEventElapsedTime);
+  LOAD_CUDA(cuEventDestroy_v2);
 
 #undef LOAD_CUDA
 
@@ -401,7 +418,15 @@ int poly_cuda_copy_dtod(unsigned long long dst, unsigned long long src, size_t b
   return 0;
 }
 
-PolyCudaProgram *poly_compile_cuda(const char *source, const char *fn_name) {
+PolyCudaProgram *poly_compile_cuda_with_binary(
+    const char *source,
+    const char *fn_name,
+    uint8_t **binary,
+    int *binary_size
+) {
+  if (binary) *binary = NULL;
+  if (binary_size) *binary_size = 0;
+  if ((binary == NULL) != (binary_size == NULL)) return NULL;
   if (cuda_state != CUDA_INIT_OK) {
     fprintf(stderr, "polygrad: cuda: compile called but CUDA not initialized\n");
     return NULL;
@@ -460,7 +485,7 @@ PolyCudaProgram *poly_compile_cuda(const char *source, const char *fn_name) {
   /* Extract PTX */
   size_t ptx_size = 0;
   nv_err = cuda_api.nvrtcGetPTXSize(prog, &ptx_size);
-  if (nv_err != NVRTC_SUCCESS || ptx_size == 0) {
+  if (nv_err != NVRTC_SUCCESS || ptx_size == 0 || ptx_size > INT_MAX) {
     fprintf(stderr, "polygrad: cuda: nvrtcGetPTXSize failed (nvrtcResult=%d)\n", nv_err);
     cuda_api.nvrtcDestroyProgram(&prog);
     return NULL;
@@ -485,9 +510,9 @@ PolyCudaProgram *poly_compile_cuda(const char *source, const char *fn_name) {
 
   CUmodule module = NULL;
   cu_err = cuda_api.cuModuleLoadData(&module, ptx);
-  free(ptx);
   if (cu_err != CUDA_SUCCESS) {
     fprintf(stderr, "polygrad: cuda: cuModuleLoadData failed (CUresult=%d)\n", cu_err);
+    free(ptx);
     return NULL;
   }
 
@@ -498,6 +523,7 @@ PolyCudaProgram *poly_compile_cuda(const char *source, const char *fn_name) {
         stderr, "polygrad: cuda: cuModuleGetFunction(%s) failed (CUresult=%d)\n", fn_name, cu_err
     );
     cuda_api.cuModuleUnload(module);
+    free(ptx);
     return NULL;
   }
 
@@ -506,11 +532,60 @@ PolyCudaProgram *poly_compile_cuda(const char *source, const char *fn_name) {
   PolyCudaProgram *result = malloc(sizeof(PolyCudaProgram));
   if (!result) {
     cuda_api.cuModuleUnload(module);
+    free(ptx);
     return NULL;
   }
   result->module = module;
   result->function = function;
+  /* search.beam_search compares compiler output, not source or module handles.
+   * Transfer the PTX only after the complete runnable candidate exists. */
+  if (binary) {
+    *binary = (uint8_t *)ptx;
+    *binary_size = (int)ptx_size;
+  } else {
+    free(ptx);
+  }
   return result;
+}
+
+PolyCudaProgram *poly_compile_cuda(const char *source, const char *fn_name) {
+  return poly_compile_cuda_with_binary(source, fn_name, NULL, NULL);
+}
+
+int poly_cuda_launch_timed(
+    PolyCudaProgram *prog,
+    void **args,
+    int n_args,
+    int gx,
+    int gy,
+    int gz,
+    int bx,
+    int by,
+    int bz,
+    double *elapsed_us
+) {
+  if (!elapsed_us || cuda_state != CUDA_INIT_OK) return -1;
+  *elapsed_us = 0;
+  CUevent start = NULL, end = NULL;
+  int rc = -1;
+  /* ops_cuda.cu_time_execution: record around the launch on the same stream.
+   * Host compilation, argument packing and synchronization are not GPU time. */
+  if (cuda_api.cuEventCreate(&start, 0) != CUDA_SUCCESS ||
+      cuda_api.cuEventCreate(&end, 0) != CUDA_SUCCESS ||
+      cuda_api.cuEventRecord(start, NULL) != CUDA_SUCCESS)
+    goto done;
+  if (poly_cuda_launch(prog, args, n_args, gx, gy, gz, bx, by, bz) != 0 ||
+      cuda_api.cuEventRecord(end, NULL) != CUDA_SUCCESS ||
+      cuda_api.cuEventSynchronize(end) != CUDA_SUCCESS)
+    goto done;
+  float ms = 0;
+  if (cuda_api.cuEventElapsedTime(&ms, start, end) != CUDA_SUCCESS) goto done;
+  *elapsed_us = (double)ms * 1000;
+  rc = 0;
+done:
+  if (end && cuda_api.cuEventDestroy_v2(end) != CUDA_SUCCESS) rc = -1;
+  if (start && cuda_api.cuEventDestroy_v2(start) != CUDA_SUCCESS) rc = -1;
+  return rc;
 }
 
 int poly_cuda_launch(

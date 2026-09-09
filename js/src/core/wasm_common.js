@@ -413,6 +413,7 @@ function createWasmCoreFromModule(Module, device) {
       const features = []
       const hasShaderF16 = adapter.features.has('shader-f16')
       if (hasShaderF16) features.push('shader-f16')
+      if (adapter.features.has('timestamp-query')) features.push('timestamp-query')
 
       const device = await adapter.requestDevice({
         requiredFeatures: features,
@@ -725,6 +726,8 @@ function createWasmCoreFromModule(Module, device) {
     poly_ctx_set_logical_policy: Module._poly_ctx_set_logical_policy,
     poly_ctx_get_logical_policy: Module._poly_ctx_get_logical_policy,
     poly_get_noopt: Module._poly_get_noopt,
+    poly_get_beam: Module._poly_get_beam,
+    poly_set_beam: Module._poly_set_beam,
     poly_get_default_float: Module._poly_get_default_float,
     poly_get_default_int: Module._poly_get_default_int,
     poly_set_default_float: Module._poly_set_default_float,
@@ -1893,7 +1896,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 75
+  const EXPECTED_ABI = 76
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(

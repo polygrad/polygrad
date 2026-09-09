@@ -10,6 +10,9 @@ char *poly_range_str(PolyArg arg);
 /* Heap-backed result of current Tinygrad UOp.split_uop. Caller frees it. */
 PolyUOp **poly_uop_split(PolyUOp *u, PolyOps sep, int *n_out);
 
+/* UOp.divides: prove exact divisibility structurally, not by sampled bounds. */
+PolyUOp *poly_uop_divides(PolyCtx *ctx, PolyUOp *u, int64_t factor);
+
 /* Tinygrad helpers.py:is_image_shape on the UOp's encoded shape. */
 bool poly_uop_is_image_shape(PolyCtx *ctx, const PolyUOp *u);
 

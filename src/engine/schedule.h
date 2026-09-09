@@ -24,6 +24,12 @@ typedef struct {
   int (*execute)(void *self, void **args, int n_args);
   void (*free_handle)(void *self);
   bool borrowed_handle;
+  /* Uncached search compilation may retain compiler output for binary dedup.
+   * Ordinary runtime-cache runners do not request or retain this extra root. */
+  bool capture_binary;
+  PolyUOp *compiled_binary;
+  bool wait;
+  double elapsed_us; /* Device timestamps when wait is requested; otherwise unused. */
   int grid[3];
   int block[3];
   PolyUOp *grid_exprs[3];
@@ -57,6 +63,22 @@ PolyUOp *poly_program_from_call(PolyCtx *ctx, PolyUOp *call, const char *name);
 const PolyProgramInfo *poly_program_info(PolyCtx *ctx, PolyUOp *program);
 PolyUOp *poly_program_linear(PolyUOp *program);
 PolyUOp *poly_compile_linear(PolyCtx *ctx, PolyUOp *linear, int beam);
+
+/* Uncached, waited time_call execution used by codegen/opt/search. The caller
+ * owns scratch buffers; prepare/finish balance the compiled runner and roots. */
+int poly_time_call_prepare(PolyCtx *ctx, PolyUOp *call, PolyDevice device, PolyRunner *runner);
+double poly_time_call(
+    PolyRunner *runner,
+    PolyDevice device,
+    void **args,
+    int n_args,
+    const PolyVarBinding *bindings,
+    int n_bindings,
+    int count,
+    double early_stop_us,
+    int max_global_size
+);
+void poly_time_call_finish(PolyCtx *ctx, PolyRunner *runner, PolyDevice device);
 
 /* tinygrad@2026-08-22/a9069c177a9d to_program_cache and runtime_cache. */
 size_t poly_runtime_cache_len(PolyCtx *ctx);

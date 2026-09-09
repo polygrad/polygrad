@@ -17,13 +17,16 @@
 #include "codegen/late/gater.h"
 #include "renderer/cstyle.h"
 #include "bigint.h"
+#include "ir.h"
 #include "engine/schedule.h"
 #include "frontend_internal.h"
+#include "frontend.h"
 #include "schedule/indexing.h"
 #include "schedule/multi.h"
 #include "schedule/rangeify.h"
 #include "codegen/simplify.h"
 #include "uop/movement.h"
+#include "uop/ops.h"
 #include "uop/spec.h"
 #include "uop/symbolic.h"
 #include "uop/weak.h"
@@ -36,6 +39,7 @@
 #include <time.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <unistd.h>
 #include "utils.h"
 
 /* C storage for Tinygrad's NOOPT ContextVar. A Wasm module has its own copy;
@@ -54,6 +58,18 @@ int poly_get_noopt(void) {
 void poly_set_noopt(int value) {
   noopt_value = value;
   noopt_initialized = true;
+}
+
+/* helpers.BEAM: explicit frontend scopes override the environment. Native
+ * contexts share this policy; each Wasm module has independent C storage. */
+static int beam_value;
+static bool beam_initialized;
+int poly_get_beam(void) {
+  return beam_initialized ? beam_value : poly_getenv_int("BEAM", 0);
+}
+void poly_set_beam(int value) {
+  beam_value = value;
+  beam_initialized = true;
 }
 /* Max hardware vector fold width for load/store splitting.
  * Set by the pipeline before running correct_load_store pass.
@@ -343,6 +359,7 @@ typedef struct {
    * If the C scratch caps would truncate those lists, skip optional
    * optimization rather than optimizing a partial scheduler view. */
   bool overflow;
+  const PolyTensorCore *tensor_core;
 } OptScheduler;
 
 static bool sched_can_optimize(const OptScheduler *s) {
@@ -526,98 +543,11 @@ static uint64_t projected_index_reachability(
   return mask;
 }
 
+static void sched_refresh(OptScheduler *s);
+
 static void sched_init(OptScheduler *s, PolyCtx *ctx, PolyUOp *sink) {
-  s->ctx = ctx;
-  s->ast = sink;
-  s->n_rngs = 0;
-  s->n_bufs = 0;
-  s->has_reduce = false;
-  s->has_reach = false;
-  s->overflow = false;
-  for (int i = 0; i < SCHED_MAX_BUFS; i++)
-    s->buf_reach[i] = 0;
-
-  int n_topo = 0;
-  PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n_topo);
-
-  /* Collect unique RANGE ops with vmax > 0 and INDEX ops */
-  int64_t max_id = -1;
-  for (int i = 0; i < n_topo; i++) {
-    PolyUOp *u = topo[i];
-    if (u->op == POLY_OP_REDUCE) s->has_reduce = true;
-    if (u->op == POLY_OP_RANGE && poly_arg_is_range(u->arg)) {
-      /* Check vmax > 0 (i.e., bound > 1 or bound > 0) */
-      int64_t bound = 0;
-      if (u->n_src > 0 && u->src[0]->op == POLY_OP_CONST && u->src[0]->arg.kind == POLY_ARG_INT)
-        bound = u->src[0]->arg.i;
-      if (bound <= 1) continue; /* vmax = bound - 1, so vmax > 0 means bound > 1 */
-      bool dup = false;
-      for (int j = 0; j < s->n_rngs; j++) {
-        if (s->rngs[j] == u) {
-          dup = true;
-          break;
-        }
-      }
-      if (!dup) {
-        if (s->n_rngs < SCHED_MAX_RNGS) {
-          s->rngs[s->n_rngs] = u;
-          s->n_rngs++;
-        } else {
-          s->overflow = true;
-        }
-      }
-      int64_t aid = poly_range_axis_id(u->arg);
-      if (aid > max_id) max_id = aid;
-    }
-    if (u->op == POLY_OP_INDEX && u->n_src > 0 && u->src[0]->op == POLY_OP_PARAM) {
-      if (s->n_bufs < SCHED_MAX_BUFS)
-        s->bufs[s->n_bufs++] = u;
-      else
-        s->overflow = true;
-    }
-  }
-  s->opt_range_next = max_id + 1;
-
-  /* Sort ranges by axis_to_pos ordering */
-  qsort(s->rngs, (size_t)s->n_rngs, sizeof(PolyUOp *), sched_rng_cmp);
-
-  /* Reverse bufs order to match tinygrad ([::-1]) */
-  for (int i = 0; i < s->n_bufs / 2; i++) {
-    PolyUOp *tmp = s->bufs[i];
-    s->bufs[i] = s->bufs[s->n_bufs - 1 - i];
-    s->bufs[s->n_bufs - 1 - i] = tmp;
-  }
-
-  /* Extract shapes and types */
-  for (int i = 0; i < s->n_rngs; i++) {
-    PolyUOp *r = s->rngs[i];
-    s->types[i] = poly_range_axis_type(r->arg);
-    s->shape[i] =
-        (r->n_src > 0 && r->src[0]->op == POLY_OP_CONST && r->src[0]->arg.kind == POLY_ARG_INT)
-            ? r->src[0]->arg.i
-            : 0;
-  }
-
-  /* Build reachability bitmask: single forward pass over toposort */
-  if (!s->overflow && s->n_bufs > 0 && s->n_rngs > 0 && s->n_rngs <= 64) {
-    uint64_t *reach = build_reachability_bitmask(topo, n_topo, s->rngs, s->n_rngs);
-    /* Extract per-buffer bitmasks */
-    PolyMap *idx_map = poly_map_new((size_t)(n_topo < 64 ? 64 : (size_t)n_topo * 2));
-    int *indices = (int *)malloc((size_t)n_topo * sizeof(int));
-    for (int i = 0; i < n_topo; i++) {
-      indices[i] = i;
-      poly_map_set(idx_map, poly_ptr_hash(topo[i]), topo[i], &indices[i], poly_ptr_eq);
-    }
-    for (int bi = 0; bi < s->n_bufs; bi++) {
-      if (s->bufs[bi]->n_src >= 2)
-        s->buf_reach[bi] = projected_index_reachability(ctx, s->bufs[bi]->src[1], idx_map, reach);
-    }
-    s->has_reach = true;
-    poly_map_destroy(idx_map);
-    free(indices);
-    free(reach);
-  }
-  poly_toposort_free(topo);
+  *s = (OptScheduler){.ctx = ctx, .ast = sink, .opt_range_next = 1};
+  sched_refresh(s);
 }
 
 /* Refresh rngs, shapes, types after a shift_to modifies the AST */
@@ -635,11 +565,11 @@ static void sched_refresh(OptScheduler *s) {
   for (int i = 0; i < n_topo; i++) {
     PolyUOp *u = topo[i];
     if (u->op == POLY_OP_REDUCE) s->has_reduce = true;
-    if (u->op == POLY_OP_RANGE && poly_arg_is_range(u->arg)) {
-      int64_t bound = 0;
-      if (u->n_src > 0 && u->src[0]->op == POLY_OP_CONST && u->src[0]->arg.kind == POLY_ARG_INT)
-        bound = u->src[0]->arg.i;
-      if (bound <= 1) continue;
+    if (u->op == POLY_OP_RANGE && poly_arg_is_range(u->arg) &&
+        !poly_dtype_eq(u->dtype, POLY_VOID) && poly_range_axis_type(u->arg) != POLY_AXIS_DEVICE) {
+      int64_t lo, hi;
+      poly_uop_minmax(s->ctx, u, &lo, &hi);
+      if (hi <= 0) continue;
       bool dup = false;
       for (int j = 0; j < s->n_rngs; j++) {
         if (s->rngs[j] == u) {
@@ -674,10 +604,12 @@ static void sched_refresh(OptScheduler *s) {
   for (int i = 0; i < s->n_rngs; i++) {
     PolyUOp *r = s->rngs[i];
     s->types[i] = poly_range_axis_type(r->arg);
+    PolyUOp *bound =
+        r->n_src ? poly_graph_rewrite(s->ctx, r->src[0], poly_symbolic_simple()) : NULL;
+    /* full_shape may be symbolic; zero is only the static-size sentinel, not
+     * an execution bound. Static-only heuristics must not specialize it. */
     s->shape[i] =
-        (r->n_src > 0 && r->src[0]->op == POLY_OP_CONST && r->src[0]->arg.kind == POLY_ARG_INT)
-            ? r->src[0]->arg.i
-            : 0;
+        bound && bound->op == POLY_OP_CONST && bound->arg.kind == POLY_ARG_INT ? bound->arg.i : 0;
   }
 
   /* Rebuild reachability bitmask */
@@ -725,11 +657,9 @@ static PolyUOp *sched_shift_to_core(
   if (!s || s->overflow) return NULL;
   if (!input_new_rng && s->n_rngs >= SCHED_MAX_RNGS) return NULL;
 
-  int64_t bound = 0;
-  if (rng->n_src > 0 && rng->src[0]->op == POLY_OP_CONST && rng->src[0]->arg.kind == POLY_ARG_INT)
-    bound = rng->src[0]->arg.i;
-  if (bound <= 0 || bound % amount != 0) return NULL;
-  int64_t old_sz = bound / amount;
+  if (amount <= 0 || rng->n_src != 1) return NULL;
+  PolyUOp *old_sz = poly_uop_divides(s->ctx, rng->src[0], amount);
+  if (!old_sz) return NULL;
 
   PolyCtx *ctx = s->ctx;
   PolyDType dt = rng->dtype;
@@ -745,15 +675,13 @@ static PolyUOp *sched_shift_to_core(
   }
 
   /* Create complementary range with reduced bound */
-  PolyUOp *rep_sz = poly_uop0(ctx, POLY_OP_CONST, dt, poly_arg_int(old_sz));
-  PolyUOp *replaced = poly_uop1(ctx, POLY_OP_RANGE, dt, rep_sz, rng->arg);
+  PolyUOp *replaced = poly_uop1(ctx, POLY_OP_RANGE, dt, old_sz, rng->arg);
 
   /* Compute substitution expression */
   PolyUOp *sub_axis;
   if (top) {
-    PolyUOp *c = poly_uop0(ctx, POLY_OP_CONST, dt, poly_arg_int(old_sz));
     sub_axis = poly_uop2(
-        ctx, POLY_OP_ADD, dt, poly_uop2(ctx, POLY_OP_MUL, dt, new_rng, c, poly_arg_none()),
+        ctx, POLY_OP_ADD, dt, poly_uop2(ctx, POLY_OP_MUL, dt, new_rng, old_sz, poly_arg_none()),
         replaced, poly_arg_none()
     );
   } else {
@@ -984,6 +912,82 @@ static int cmp_axis_id_desc(const void *a, const void *b) {
  * tc_select: -1 = try all, >=0 = specific TC index.
  * tc_opt: 0 = one reduce axis, 1 = multiple reduce axes,
  *         2 = allow PADTO (not yet implemented). */
+/* Scheduler.apply_opt(PADTO): pad addresses, never the underlying allocation.
+ * Load pointers need a second validity guard; a store's invalid index already
+ * controls its effect. Keep both gates until normal symbolic lowering. */
+static PolyUOp *sched_padto(OptScheduler *s, PolyUOp *rng, int64_t amount) {
+  if (!rng || amount <= 0 || rng->n_src != 1 || rng->src[0]->op != POLY_OP_CONST ||
+      rng->src[0]->arg.kind != POLY_ARG_INT)
+    return NULL;
+  PolyAxisType type = poly_range_axis_type(rng->arg);
+  if (type == POLY_AXIS_UPCAST || type == POLY_AXIS_UNROLL || type == POLY_AXIS_THREAD) return NULL;
+  int64_t size = rng->src[0]->arg.i;
+  if (size <= 0 || size > INT64_MAX - (amount - 1)) return NULL;
+  int64_t padded = ((size + amount - 1) / amount) * amount;
+  if (size <= padded / 4) return NULL;
+  PolyCtx *ctx = s->ctx;
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, rng->dtype, poly_arg_int(padded));
+  PolyUOp *replacement = poly_uop1(ctx, POLY_OP_RANGE, rng->dtype, bound, rng->arg);
+  PolyUOp *valid =
+      poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, replacement, rng->src[0], poly_arg_none());
+  int n = 0;
+  PolyUOp **topo = poly_toposort_alloc(ctx, s->ast, &n);
+  if (!topo) return NULL;
+  PolyUOp **from = malloc(((size_t)n + 1) * sizeof(*from));
+  PolyUOp **to = malloc(((size_t)n + 1) * sizeof(*to));
+  if (!from || !to) {
+    free(from);
+    free(to);
+    poly_toposort_free(topo);
+    return NULL;
+  }
+  int count = 1;
+  from[0] = rng;
+  to[0] = replacement;
+  for (int i = n - 1; i >= 0; i--) {
+    PolyUOp *b = topo[i];
+    if (b->op != POLY_OP_INDEX || b->n_src != 2) continue;
+    PolyUOp *index = poly_uop_get_idx(ctx, b->src[1]);
+    PolyUOp *old_valid = poly_uop_get_valid(ctx, b->src[1]);
+    if (!index || !old_valid) goto failed;
+    int ni = 0;
+    PolyUOp **indices = poly_toposort_alloc(ctx, index, &ni);
+    if (!indices) goto failed;
+    bool depends = contains_uop(indices, ni, rng);
+    poly_toposort_free(indices);
+    if (!depends) continue;
+    PolyUOp *mask = poly_uop2(ctx, POLY_OP_AND, POLY_BOOL, valid, old_valid, poly_arg_none());
+    PolyUOp *invalid = poly_uop_const(ctx, poly_arg_invalid(), b->dtype);
+    PolyUOp *gated =
+        poly_uop3(ctx, POLY_OP_WHERE, index->dtype, mask, index, invalid, poly_arg_none());
+    PolyUOp *src[] = {b->src[0], gated};
+    PolyUOp *nb = poly_uop_replace_src(ctx, b, src);
+    bool store_target = false;
+    for (int j = 0; j < n; j++)
+      if (topo[j]->op == POLY_OP_STORE && topo[j]->n_src && topo[j]->src[0] == b)
+        store_target = true;
+    from[count] = b;
+    to[count++] =
+        store_target ? nb
+                     : poly_uop3(ctx, POLY_OP_WHERE, b->dtype, valid, nb, invalid, poly_arg_none());
+  }
+  /* Replacement values contain the old range. Substitute it explicitly:
+   * UOp.substitute does not recursively apply its map to replacement values. */
+  for (int i = 1; i < count; i++)
+    to[i] = poly_uop_substitute(ctx, to[i], &rng, &replacement, 1);
+  s->ast = poly_uop_substitute(ctx, s->ast, from, to, count);
+  free(from);
+  free(to);
+  poly_toposort_free(topo);
+  sched_refresh(s);
+  return s->overflow ? NULL : replacement;
+failed:
+  free(from);
+  free(to);
+  poly_toposort_free(topo);
+  return NULL;
+}
+
 static bool sched_apply_tc_opt(
     OptScheduler *s,
     int axis,
@@ -1076,9 +1080,6 @@ static bool sched_apply_tc_opt(
 
     if (n_in0 == 0 || n_in1 == 0 || n_red == 0) continue;
 
-    /* tc_opt == 0: strict mode requires exactly one reduce axis (heuristic.py:28) */
-    if (tc_opt == 0 && n_red > 1) continue;
-
     /* 4. Axis choices: product(in1_ranges, in0_ranges, red_ranges) -- note swap */
     int n_choices = n_in1 * n_in0 * n_red;
     if (axis >= n_choices) continue;
@@ -1115,9 +1116,11 @@ static bool sched_apply_tc_opt(
           pad_ok = false;
           break;
         }
-        /* TODO: PADTO support */
-        pad_ok = false;
-        break;
+        axes[i] = sched_padto(s, axes[i], tc->dims[i]);
+        if (!axes[i]) {
+          pad_ok = false;
+          break;
+        }
       }
     }
     if (!pad_ok) {
@@ -1349,6 +1352,7 @@ static bool sched_apply_tc_opt(
       tc_axes_out[1] = axes[1];
       tc_axes_out[2] = axes[2];
     }
+    s->tensor_core = tc;
     sched_refresh(s);
     return true;
   }
@@ -1825,92 +1829,324 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
   return s.ast;
 }
 
-/* BEAM search optimizer *
- * Explores the optimization space by trying many candidate optimizations,
- * compiling and timing each, and keeping the top-k. Finds better
- * optimizations than the heuristic for non-trivial kernels.
- *
- * Action space: UPCAST and UNROLL with various axis/amount combos.
- * For each beam member, enumerate all valid actions, compile candidates,
- * time them on actual hardware, sort by execution time, keep top beam_width.
- *
- * Requires native runtime (fork+clang for compilation, clock_gettime for
- * timing). Disabled in WASM builds. Future: use WASM JIT backend for
- * compile+time, IndexedDB for cache.
- */
+/* Scheduler.apply_opt (pinned codegen/opt/postrange.py). Action history is
+ * immutable KernelInfo data, so failed candidates cannot mutate a parent. */
+static int sched_real_axis(const OptScheduler *s, PolyOpt opt) {
+  if (!opt.has_axis || opt.op == POLY_OPT_TC) return -1;
+  if (opt.axis < 0) return -1;
+  if (opt.op == POLY_OPT_UNROLL || opt.op == POLY_OPT_GROUP || opt.op == POLY_OPT_GROUPTOP) {
+    int remaining = opt.axis;
+    for (int i = 0; i < s->n_rngs; i++) {
+      bool match = s->types[i] == POLY_AXIS_REDUCE ||
+                   (opt.op == POLY_OPT_UNROLL && s->types[i] == POLY_AXIS_GROUP_REDUCE);
+      if (match && (opt.op != POLY_OPT_UNROLL || s->shape[i] > 1) && remaining-- == 0) return i;
+    }
+    return -1;
+  }
+  return opt.axis < s->n_rngs ? opt.axis : -1;
+}
+
+static bool sched_globalizable(OptScheduler *s, PolyUOp *rng) {
+  if (poly_range_axis_type(rng->arg) != POLY_AXIS_WEAK) return false;
+  bool output = false;
+  for (int i = 0; i < s->ast->n_src; i++) {
+    PolyUOp *u = s->ast->src[i];
+    if (u->op != POLY_OP_END) continue;
+    for (int j = 1; j < u->n_src; j++)
+      if (poly_uop_in_ranges(s->ctx, u->src[j], rng)) output = true;
+  }
+  if (!output) return false;
+  int n = 0;
+  PolyUOp **topo = poly_toposort_alloc(s->ctx, s->ast, &n);
+  if (!topo) return false;
+  for (int i = 0; i < n; i++)
+    if (topo[i]->op == POLY_OP_STAGE && !poly_uop_in_ranges(s->ctx, topo[i], rng)) output = false;
+  poly_toposort_free(topo);
+  return output;
+}
+
+static bool sched_apply_opt(OptScheduler *s, PolyRendererCaps caps, PolyOpt opt) {
+  if (!s || s->overflow) return false;
+  OptScheduler previous = *s;
+  PolyKernelInfo info = s->ast->arg.kind == POLY_ARG_KERNEL_INFO && s->ast->arg.kernel_info
+                            ? *s->ast->arg.kernel_info
+                            : (PolyKernelInfo){0};
+  if (!info.name) info.name = "test";
+  int axis = sched_real_axis(s, opt);
+  PolyUOp *rng = axis >= 0 ? s->rngs[axis] : NULL;
+  bool local = false, grouped = false, threaded = false;
+  for (int i = 0; i < s->n_rngs; i++) {
+    local |= s->types[i] == POLY_AXIS_WARP || s->types[i] == POLY_AXIS_LOCAL ||
+             s->types[i] == POLY_AXIS_GROUP_REDUCE;
+    grouped |= s->types[i] == POLY_AXIS_GROUP_REDUCE;
+    threaded |= s->types[i] == POLY_AXIS_THREAD;
+  }
+  if (opt.op == POLY_OPT_NOLOCALS) {
+    if (local) return false;
+    info.dont_use_locals = true;
+  } else if (opt.op == POLY_OPT_TC) {
+    if (info.n_applied_opts || !opt.has_axis || opt.axis < 0 ||
+        opt.arg_kind != POLY_OPT_ARG_INT_TUPLE || opt.n_arg_tuple != 3 || !opt.arg_tuple ||
+        opt.arg_tuple[0] < -1 || opt.arg_tuple[0] >= caps.n_tensor_cores || opt.arg_tuple[1] < 0 ||
+        opt.arg_tuple[1] > 2 || opt.arg_tuple[2] <= 0 || opt.arg_tuple[2] > 2)
+      return false;
+    if (!sched_apply_tc_opt(
+            s, opt.axis, (int)opt.arg_tuple[0], (int)opt.arg_tuple[1], (int)opt.arg_tuple[2],
+            caps.device, caps.tensor_cores, caps.n_tensor_cores, NULL
+        ))
+      goto failed;
+  } else if (opt.op == POLY_OPT_PADTO) {
+    if (opt.arg_kind != POLY_OPT_ARG_INT || !sched_padto(s, rng, opt.arg)) goto failed;
+  } else if (opt.op == POLY_OPT_SWAP) {
+    if (!rng || opt.arg_kind != POLY_OPT_ARG_INT || opt.arg < 0 || opt.arg >= s->n_rngs)
+      return false;
+    PolyUOp *other = s->rngs[opt.arg];
+    if (poly_range_axis_type(rng->arg) != POLY_AXIS_GLOBAL ||
+        poly_range_axis_type(other->arg) != POLY_AXIS_GLOBAL)
+      return false;
+    PolyUOp *from[] = {rng, other};
+    PolyUOp *to[] = {
+        poly_uop_tagged(s->ctx, rng->op, rng->dtype, rng->src, rng->n_src, other->arg, 1),
+        poly_uop_tagged(s->ctx, other->op, other->dtype, other->src, other->n_src, rng->arg, 1)};
+    s->ast = poly_uop_substitute(s->ctx, s->ast, from, to, 2);
+    int n = 0;
+    PolyUOp **topo = poly_toposort_alloc(s->ctx, s->ast, &n);
+    PolyUOp **untagged = topo ? malloc((size_t)n * sizeof(*untagged)) : NULL;
+    if (!topo || !untagged) {
+      poly_toposort_free(topo);
+      free(untagged);
+      goto failed;
+    }
+    int count = 0;
+    for (int i = 0; i < n; i++) {
+      PolyUOp *u = topo[i];
+      if (!u->tag && u->tag_arg.kind == POLY_ARG_NONE) continue;
+      topo[count] = u;
+      untagged[count++] = poly_uop(s->ctx, u->op, u->dtype, u->src, u->n_src, u->arg);
+    }
+    s->ast = poly_uop_substitute(s->ctx, s->ast, topo, untagged, count);
+    poly_toposort_free(topo);
+    free(untagged);
+    sched_refresh(s);
+  } else {
+    if (!rng || opt.arg_kind != POLY_OPT_ARG_INT || opt.arg < 0) return false;
+    PolyAxisType type = s->types[axis], to_type;
+    int64_t amount = opt.arg ? opt.arg : s->shape[axis];
+    if (amount <= 0) return false;
+    switch (opt.op) {
+    case POLY_OPT_UPCAST:
+      if ((amount > 16 && (!caps.device || strcmp(caps.device, "DSP"))) ||
+          (type != POLY_AXIS_GLOBAL && type != POLY_AXIS_LOCAL && type != POLY_AXIS_WEAK))
+        return false;
+      to_type = POLY_AXIS_UPCAST;
+      break;
+    case POLY_OPT_UNROLL:
+      if (amount > 32 || (type != POLY_AXIS_REDUCE && type != POLY_AXIS_GROUP_REDUCE)) return false;
+      to_type = POLY_AXIS_UNROLL;
+      break;
+    case POLY_OPT_LOCAL:
+      if (!caps.has_local || info.dont_use_locals ||
+          (type != POLY_AXIS_GLOBAL && type != POLY_AXIS_WEAK))
+        return false;
+      to_type = POLY_AXIS_LOCAL;
+      break;
+    case POLY_OPT_THREAD:
+      if (!caps.has_threads || amount > caps.global_max[0] || threaded ||
+          !sched_globalizable(s, rng))
+        return false;
+      to_type = POLY_AXIS_THREAD;
+      break;
+    case POLY_OPT_GROUP:
+    case POLY_OPT_GROUPTOP:
+      if (!caps.has_local || info.dont_use_locals || type != POLY_AXIS_REDUCE) return false;
+      for (int i = 0; i < info.n_applied_opts; i++)
+        if (info.applied_opts[i].op == POLY_OPT_TC) return false;
+      to_type = POLY_AXIS_GROUP_REDUCE;
+      break;
+    default:
+      return false;
+    }
+    if (s->has_reduce && (grouped || to_type == POLY_AXIS_GROUP_REDUCE)) {
+      int n = 0;
+      PolyUOp **topo = poly_toposort_alloc(s->ctx, s->ast, &n);
+      if (!topo) return false;
+      int itemsize = 0;
+      bool nested = false;
+      for (int i = 0; i < n; i++) {
+        PolyUOp *u = topo[i];
+        if (u->op != POLY_OP_REDUCE) continue;
+        if (!itemsize) itemsize = poly_dtype_itemsize(u->dtype);
+        if (to_type != POLY_AXIS_GROUP_REDUCE) continue;
+        bool ends = false;
+        for (int j = 1; j < u->n_src; j++)
+          ends |= poly_uop_in_ranges(s->ctx, u->src[j], rng);
+        if (ends)
+          for (int j = 0; j < s->n_rngs; j++)
+            if ((s->types[j] == POLY_AXIS_REDUCE || s->types[j] == POLY_AXIS_UNROLL ||
+                 s->types[j] == POLY_AXIS_GROUP_REDUCE) &&
+                poly_uop_in_ranges(s->ctx, u, s->rngs[j]))
+              nested = true;
+      }
+      poly_toposort_free(topo);
+      if (nested) return false;
+      int64_t limit = caps.shared_max > 0 ? caps.shared_max : 32768;
+      int64_t size = itemsize;
+      if (size <= 0 || amount > limit / size) return false;
+      size *= amount;
+      for (int i = 0; i < s->n_rngs; i++) {
+        PolyAxisType t = s->types[i];
+        if (t != POLY_AXIS_UPCAST && t != POLY_AXIS_WARP && t != POLY_AXIS_LOCAL &&
+            t != POLY_AXIS_GROUP_REDUCE)
+          continue;
+        if (s->shape[i] <= 0 || s->shape[i] > limit / size) return false;
+        size *= s->shape[i];
+      }
+    }
+    if (!sched_shift_to(
+            s, rng, amount, to_type, opt.op == POLY_OPT_GROUPTOP || opt.op == POLY_OPT_THREAD
+        ))
+      goto failed;
+  }
+  if (info.n_applied_opts == INT_MAX) goto failed;
+  PolyOpt *history = malloc(((size_t)info.n_applied_opts + 1) * sizeof(*history));
+  if (!history) goto failed;
+  if (info.n_applied_opts)
+    memcpy(history, info.applied_opts, (size_t)info.n_applied_opts * sizeof(*history));
+  history[info.n_applied_opts++] = opt;
+  info.applied_opts = history;
+  s->ast = poly_uop_tagged_arg(
+      s->ctx, s->ast->op, s->ast->dtype, s->ast->src, s->ast->n_src, poly_arg_kernel_info(&info),
+      s->ast->tag, s->ast->tag_arg
+  );
+  free(history);
+  if (!s->ast) goto failed;
+  return true;
+failed:
+  *s = previous;
+  return false;
+}
+
 /* Shallow-copy an OptScheduler. Used by TC optimization and BEAM search.
  * Safe because sched_shift_to creates new UOps via poly_uop_substitute. */
 static void sched_copy(OptScheduler *dst, const OptScheduler *src) {
   *dst = *src;
 }
 
-#ifndef __EMSCRIPTEN__
-
+/* search.py:actions. Tuple storage belongs to the catalogue; KernelInfo copies
+ * each applied Opt, including its tuple, when publishing scheduler history. */
 typedef struct {
-  PolyOptOps op;
-  int axis;
-  int64_t amount;
-} PolyBeamAction;
+  PolyOpt opts[201];
+  int64_t tc_args[10][3];
+  int count;
+} BeamActions;
 
-/* Static action table */
-static const int64_t beam_upcast_amounts[] = {2, 3, 4, 5, 7, 8};
-static const int beam_n_upcast_amounts = 6;
-static const int64_t beam_unroll_amounts[] = {2, 3, 4, 7};
-static const int beam_n_unroll_amounts = 4;
-#define BEAM_MAX_AXIS 8
-#define BEAM_MAX_ACTIONS ((6 * BEAM_MAX_AXIS) + (4 * 5)) /* 68 */
-#define BEAM_MAX_BEAM 16
-#define BEAM_MAX_ITERS 5
-#define BEAM_MAX_CANDIDATES (BEAM_MAX_BEAM * BEAM_MAX_ACTIONS)
+static void beam_add_action(BeamActions *a, PolyOptOps op, int axis, int64_t amount) {
+  a->opts[a->count++] = (PolyOpt
+  ){.op = op, .has_axis = true, .axis = axis, .arg_kind = POLY_OPT_ARG_INT, .arg = amount};
+}
+
+static void beam_actions(BeamActions *a) {
+  *a = (BeamActions){0};
+  static const struct {
+    PolyOptOps op;
+    int axes, count;
+    int amounts[10];
+  } groups[] = {
+      {POLY_OPT_UPCAST, 8, 6, {0, 2, 3, 4, 5, 7}},
+      {POLY_OPT_UNROLL, 5, 3, {0, 4, 7}},
+      {POLY_OPT_LOCAL, 6, 7, {2, 3, 4, 8, 13, 16, 29}},
+      {POLY_OPT_GROUPTOP, 3, 8, {13, 16, 28, 29, 32, 49, 64, 256}},
+      {POLY_OPT_GROUP, 3, 4, {0, 4, 8, 16}},
+  };
+  for (size_t g = 0; g < sizeof(groups) / sizeof(groups[0]); g++)
+    for (int i = 0; i < groups[g].count; i++)
+      for (int axis = 0; axis < groups[g].axes; axis++)
+        beam_add_action(a, groups[g].op, axis, groups[g].amounts[i]);
+  if (poly_getenv_flag("BEAM_PADTO"))
+    for (int axis = 0; axis < 7; axis++)
+      beam_add_action(a, POLY_OPT_PADTO, axis, 32);
+  beam_add_action(a, POLY_OPT_LOCAL, 0, 32);
+  beam_add_action(a, POLY_OPT_LOCAL, 6, 2);
+  for (int i = 0; i < 10; i++) {
+    a->tc_args[i][0] = -1;
+    a->tc_args[i][1] = i == 0 ? 0 : poly_getenv_int("TC_OPT", 2);
+    a->tc_args[i][2] = poly_getenv_int("TC", 1);
+    a->opts[a->count++] = (PolyOpt
+    ){.op = POLY_OPT_TC,
+      .has_axis = true,
+      .axis = i ? i - 1 : 0,
+      .arg_kind = POLY_OPT_ARG_INT_TUPLE,
+      .arg_tuple = a->tc_args[i],
+      .n_arg_tuple = 3};
+  }
+  for (int i = 0; i < 5; i++)
+    for (int j = i + 1; j < 5; j++)
+      beam_add_action(a, POLY_OPT_SWAP, i, j);
+  static const int threads[] = {2, 3, 4, 5, 8, 12, 16, 24, 32, 64};
+  for (int i = 0; i < 10; i++)
+    for (int axis = 0; axis < 3; axis++)
+      beam_add_action(a, POLY_OPT_THREAD, axis, threads[i]);
+  if (poly_getenv_flag("NOLOCALS")) a->opts[a->count++] = (PolyOpt){.op = POLY_OPT_NOLOCALS};
+}
 
 typedef struct {
   OptScheduler sched;
   double time_us;
-  PolyBeamAction actions[BEAM_MAX_ITERS];
-  int n_actions;
+  int order; /* Python's sorted preserves enumeration order for equal times. */
 } BeamEntry;
 
-typedef struct {
-  OptScheduler sched;
-  double time_us;
-  PolyBeamAction actions[BEAM_MAX_ITERS];
-  int n_actions;
-} BeamCandidate;
-
-/* Try to apply a single BEAM action to a scheduler. Returns true on success. */
-static bool sched_apply_action(OptScheduler *s, PolyBeamAction act) {
-  if (!sched_can_optimize(s)) return false;
-  int dims[SCHED_MAX_RNGS];
-  int n_dims;
-
-  if (act.op == POLY_OPT_UPCAST) {
-    n_dims = sched_upcastable_dims(s, dims, SCHED_MAX_RNGS);
-  } else {
-    n_dims = sched_unrollable_dims(s, dims, SCHED_MAX_RNGS);
+/* search.get_kernel_actions: apply_opt owns legality; these are search budgets
+ * and duplicate whole-axis spellings, not alternate scheduling semantics. */
+static bool beam_get_kernel_action(
+    OptScheduler *s,
+    PolyRendererCaps caps,
+    PolyOpt opt,
+    const BeamActions *actions
+) {
+  if (opt.has_axis && opt.op != POLY_OPT_TC) {
+    int axis = sched_real_axis(s, opt);
+    if (axis < 0) return false;
+    if (opt.arg_kind == POLY_OPT_ARG_INT && s->shape[axis] == opt.arg) {
+      for (int i = 0; i < actions->count; i++) {
+        PolyOpt zero = actions->opts[i];
+        if (zero.op == opt.op && zero.has_axis && zero.axis == opt.axis &&
+            zero.arg_kind == POLY_OPT_ARG_INT && zero.arg == 0)
+          return false;
+      }
+    }
   }
-
-  if (act.axis >= n_dims) return false;
-  int idx = dims[act.axis];
-  if (idx >= s->n_rngs) return false;
-  if (s->shape[idx] <= 1) return false;
-  if (s->shape[idx] % act.amount != 0) return false;
-
-  /* Limit total upcast+unroll product to prevent code explosion.
-   * 64 is reasonable: e.g. UPCAST 4 on two axes = 16, or UPCAST 8 + UNROLL 4 = 32. */
-  int64_t cur_prod = sched_upcast_size(s);
-  if (cur_prod * act.amount > 64) return false;
-
-  PolyAxisType new_type = (act.op == POLY_OPT_UPCAST) ? POLY_AXIS_UPCAST : POLY_AXIS_UNROLL;
-  PolyUOp *result = sched_shift_to(s, s->rngs[idx], act.amount, new_type, false);
-  return result != NULL;
+  if (!sched_apply_opt(s, caps, opt)) return false;
+  long double up = 1, local = 1, tc_up = 1;
+  if (s->tensor_core)
+    tc_up = (long double)s->tensor_core->dims[0] * s->tensor_core->dims[1] *
+            s->tensor_core->dims[2] / s->tensor_core->threads;
+  for (int i = 0; i < s->n_rngs; i++) {
+    PolyAxisType t = s->types[i];
+    if (t == POLY_AXIS_UPCAST || t == POLY_AXIS_UNROLL)
+      up *= s->shape[i];
+    else if (t == POLY_AXIS_WARP || t == POLY_AXIS_LOCAL || t == POLY_AXIS_GROUP_REDUCE)
+      local *= s->shape[i];
+  }
+  return floorl(up / tc_up) <= poly_getenv_int("BEAM_UPCAST_MAX", 256) &&
+         local <= poly_getenv_int("BEAM_LOCAL_MAX", 1024);
 }
 
 /* Time a single kernel execution using clock_gettime (CLOCK_MONOTONIC). */
-static double time_us_now(void) {
-  struct timespec ts;
-  clock_gettime(CLOCK_MONOTONIC, &ts);
-  return ts.tv_sec * 1e6 + ts.tv_nsec / 1e3;
+#ifdef POLY_TESTING
+int poly_test_beam_actions(PolyOpt *out, int capacity) {
+  static _Thread_local BeamActions actions;
+  beam_actions(&actions);
+  int count = capacity < actions.count ? capacity : actions.count;
+  if (count > 0) memcpy(out, actions.opts, (size_t)count * sizeof(*out));
+  return actions.count;
 }
+
+PolyUOp *poly_test_apply_opt(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps, PolyOpt opt) {
+  OptScheduler s;
+  sched_init(&s, ctx, sink);
+  return sched_apply_opt(&s, caps, opt) ? s.ast : NULL;
+}
+#endif
 
 static void beam_free_args(void **bufs, int n_params) {
   if (bufs)
@@ -1991,89 +2227,208 @@ cleanup:
   return NULL;
 }
 
-/* Compile a kernel AST through the full post-optimization pipeline,
- * render to C, compile with clang, allocate test buffers, and time execution.
- * Returns median time in microseconds. Returns INFINITY on failure. */
+/* Uncached selected-backend compilation and minimum waited time, in us. */
 #ifdef POLY_TESTING
 static int beam_test_parameter_count;
+static int beam_test_device;
+int poly_test_beam_last_device(void) {
+  return beam_test_device;
+}
 #endif
-static double beam_compile_and_time(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOpts opts, int reps) {
-  /* search._try_compile calls Scheduler.get_optimized_ast: shift_to can
-   * leave END operands as expressions, which must become ranges before
-   * the post-optimization pipeline verifies its input. */
+static PolyDevice beam_device(PolyRewriteOpts opts) {
+  if (opts.device > POLY_DEVICE_AUTO) return (PolyDevice)opts.device;
+  if (opts.caps.device && !strcmp(opts.caps.device, "PYTHON")) return POLY_DEVICE_INTERP;
+  PolyDevice device = opts.caps.device ? poly_device_by_name(opts.caps.device) : POLY_DEVICE_CPU;
+  return device;
+}
+
+/* search._try_compile: use the same PROGRAM builder as normal execution.
+ * A tagged optimized SINK suppresses recursive apply_opts, not required lowering. */
+static int beam_prepare_candidate(
+    PolyCtx *ctx,
+    PolyUOp *sink,
+    PolyRewriteOpts opts,
+    PolyRunner *runner
+) {
   sink = poly_graph_rewrite(ctx, sink, poly_pm_flatten_range());
-  if (!sink) return INFINITY;
-  /* Run through the rest of the codegen pipeline (post-optimization stages).
-   * Setting optimize=false skips the preprocessing+apply_opts pass since
-   * opts have already been applied by the BEAM search. */
-  PolyRewriteOpts post_opts = opts;
-  post_opts.optimize = false;
-  post_opts.beam_width = 0;
-  sink = poly_full_rewrite_to_sink_ex(ctx, sink, post_opts);
-  /* Control flow now runs inside poly_full_rewrite_to_sink_ex (tinygrad parity). */
-
-  /* Linearize */
-  int n_uops = 0;
-  PolyUOp **uops = poly_do_linearize(ctx, sink, &n_uops);
-  if (!uops || n_uops == 0) return INFINITY;
-
-  /* UOp count filter: skip huge kernels */
-  if (n_uops > 3000) {
-    free(uops);
-    return INFINITY;
+  if (!sink) return -1;
+  PolyKernelInfo info = sink->arg.kind == POLY_ARG_KERNEL_INFO && sink->arg.kernel_info
+                            ? *sink->arg.kernel_info
+                            : (PolyKernelInfo){0};
+  info.name = "test";
+  info.beam = 0;
+  sink = poly_uop_tagged(
+      ctx, sink->op, sink->dtype, sink->src, sink->n_src, poly_arg_kernel_info(&info), 1
+  );
+  int n = 0;
+  PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n);
+  PolyUOp **params = topo ? calloc((size_t)n + 1, sizeof(*params)) : NULL;
+  if (!params) {
+    poly_toposort_free(topo);
+    return -1;
   }
-
-  /* Render C */
-  char fn_name[64];
-  snprintf(fn_name, sizeof(fn_name), "beam_%d", (int)(uintptr_t)sink & 0xFFFF);
-  char *source = poly_render_c(ctx, uops, n_uops, fn_name);
-  free(uops);
-  if (!source) return INFINITY;
-
-  /* Compile */
-  PolyProgram *prog = poly_compile_c(source, fn_name);
-  free(source);
-  if (!prog) return INFINITY;
-
   int n_params = 0;
-  void **bufs = beam_args_from_ast(ctx, sink, &n_params);
-  if (!bufs) {
-    poly_program_destroy(prog);
-    return INFINITY;
+  for (int i = 0; i < n; i++) {
+    PolyUOp *u = topo[i];
+    if (u->op != POLY_OP_PARAM || poly_uop_is_alu_param(u)) continue;
+    int slot = poly_program_buffer_slot(u);
+    if (slot < 0 || slot >= n || (params[slot + 1] && params[slot + 1] != u)) goto failed;
+    params[slot + 1] = u;
+    if (slot >= n_params) n_params = slot + 1;
   }
-  double median;
+  for (int i = 1; i <= n_params; i++)
+    if (!params[i]) goto failed;
+  params[0] = sink;
+  PolyUOp *call = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, params, n_params + 1, poly_arg_none());
+  free(params);
+  poly_toposort_free(topo);
+  return poly_time_call_prepare(ctx, call, beam_device(opts), runner);
+failed:
+  free(params);
+  poly_toposort_free(topo);
+  return -1;
+}
 
-  /* Warm up */
-#ifdef POLY_TESTING
-  beam_test_parameter_count = n_params;
-#endif
-  poly_program_call(prog, bufs, n_params);
+/* args_from_ast/_ensure_buffer_alloc: one raw-buffer set for the whole search.
+ * Candidate ProgramInfo may eliminate or reorder globals; bind by original slot. */
+typedef struct {
+  void **host;
+  int n_host;
+  PolyBuffer *buffers;
+  int *slots;
+  int count;
+  const PolyAllocator *allocator;
+} BeamBuffers;
 
-  /* Time execution */
-  double times[16];
-  if (reps > 16) reps = 16;
-  if (reps < 1) reps = 1;
-  for (int r = 0; r < reps; r++) {
-    double t0 = time_us_now();
-    poly_program_call(prog, bufs, n_params);
-    double t1 = time_us_now();
-    times[r] = t1 - t0;
+static void beam_buffers_free(BeamBuffers *raw) {
+  if (raw->buffers && raw->allocator && !raw->allocator->host_addressable)
+    for (int i = 0; i < raw->count; i++)
+      if (raw->buffers[i].ptr) raw->allocator->free(&raw->buffers[i], raw->allocator->dev_ctx);
+  free(raw->buffers);
+  free(raw->slots);
+  beam_free_args(raw->host, raw->n_host);
+  *raw = (BeamBuffers){0};
+}
+
+static bool beam_buffers_init(PolyCtx *ctx, PolyUOp *sink, PolyDevice device, BeamBuffers *raw) {
+  *raw = (BeamBuffers){0};
+  const PolyBackendDesc *backend = poly_backend_get(device);
+  if (!backend || poly_backend_ensure_open(device) != 0 || !backend->get_allocator) return false;
+  raw->allocator = backend->get_allocator();
+  raw->host = beam_args_from_ast(ctx, sink, &raw->n_host);
+  int n = 0;
+  PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n);
+  if (!raw->host || !raw->allocator || !topo) goto failed;
+  for (int i = 0; i < n; i++)
+    if (topo[i]->op == POLY_OP_PARAM && !poly_uop_is_alu_param(topo[i]))
+      topo[raw->count++] = topo[i];
+  for (int i = 1; i < raw->count; i++) {
+    PolyUOp *param = topo[i];
+    int j = i;
+    while (j && poly_program_buffer_slot(topo[j - 1]) > poly_program_buffer_slot(param)) {
+      topo[j] = topo[j - 1];
+      j--;
+    }
+    topo[j] = param;
   }
+  if (raw->count > raw->n_host) goto failed;
+  raw->buffers = calloc((size_t)(raw->count ? raw->count : 1), sizeof(*raw->buffers));
+  raw->slots = calloc((size_t)(raw->count ? raw->count : 1), sizeof(*raw->slots));
+  if (!raw->buffers || !raw->slots) goto failed;
+  for (int i = 0; i < raw->count; i++) {
+    int itemsize = poly_dtype_itemsize(topo[i]->dtype);
+    int64_t count = poly_uop_max_numel(ctx, topo[i]);
+    raw->slots[i] = poly_program_buffer_slot(topo[i]);
+    if (raw->slots[i] < 0 || (i && raw->slots[i] == raw->slots[i - 1]) || count < 0 ||
+        itemsize <= 0 || (uint64_t)(count ? count : 1) > SIZE_MAX / (size_t)itemsize)
+      goto failed;
+    size_t nbytes = (size_t)(count ? count : 1) * (size_t)itemsize;
+    raw->buffers[i] = (PolyBuffer
+    ){.ptr = raw->host[i],
+      .nbytes = nbytes,
+      .device = device,
+      .allocator = raw->allocator,
+      .valid = true};
+    if (raw->allocator->host_addressable) continue;
+    raw->buffers[i].ptr = raw->allocator->alloc(nbytes, raw->allocator->dev_ctx);
+    if (!raw->buffers[i].ptr) goto failed;
+    raw->buffers[i].owned = true;
+    PolyBuffer host = {
+        .ptr = raw->host[i], .nbytes = nbytes, .device = POLY_DEVICE_CPU, .valid = true};
+    if (!raw->allocator->copy_in ||
+        raw->allocator->copy_in(&raw->buffers[i], &host, nbytes, raw->allocator->dev_ctx) != 0)
+      goto failed;
+  }
+  poly_toposort_free(topo);
+  return true;
+failed:
+  poly_toposort_free(topo);
+  beam_buffers_free(raw);
+  return false;
+}
 
-  /* Sort times, take median */
-  for (int i = 0; i < reps - 1; i++)
-    for (int j = i + 1; j < reps; j++)
-      if (times[j] < times[i]) {
-        double t = times[i];
-        times[i] = times[j];
-        times[j] = t;
+static double beam_time_candidate(
+    PolyCtx *ctx,
+    PolyRunner *runner,
+    PolyDevice device,
+    const BeamBuffers *raw,
+    int reps,
+    double early_stop_us,
+    int max_global_size
+) {
+  int n_args = runner->n_params + runner->n_vars;
+  void **args = calloc((size_t)(n_args ? n_args : 1), sizeof(*args));
+  PolyVarBinding *bindings =
+      calloc((size_t)(runner->n_vars ? runner->n_vars : 1), sizeof(*bindings));
+  int *values = calloc((size_t)(runner->n_vars ? runner->n_vars : 1), sizeof(*values));
+  const PolyProgramInfo *info = poly_program_info(ctx, runner->program);
+  double elapsed = INFINITY;
+  if (!args || !bindings || !values || !info) goto cleanup;
+  for (int i = 0; i < runner->n_params; i++) {
+    for (int j = 0; j < raw->count; j++)
+      if (raw->slots[j] == info->globals[i]) {
+        args[i] = raw->buffers[j].ptr;
+        break;
       }
-  median = times[reps / 2];
+    if (!args[i]) goto cleanup;
+  }
+  for (int i = 0; i < runner->n_vars; i++) {
+    PolyUOp *var = info->vars[runner->var_indices[i]];
+    int64_t lo, hi;
+    poly_uop_minmax(ctx, var, &lo, &hi);
+    if (lo > hi) goto cleanup;
+    int64_t value = lo + (int64_t)(((uint64_t)hi - (uint64_t)lo) / 2);
+    if (value < INT_MIN || value > INT_MAX) goto cleanup;
+    values[i] = (int)value;
+    bindings[i] = (PolyVarBinding){.var = var, .value = value};
+    args[runner->n_params + i] = &values[i];
+  }
+#ifdef POLY_TESTING
+  beam_test_parameter_count = n_args;
+  beam_test_device = device;
+#endif
+  elapsed = poly_time_call(
+      runner, device, args, n_args, bindings, runner->n_vars, reps, early_stop_us, max_global_size
+  );
+cleanup:
+  free(bindings);
+  free(values);
+  free(args);
+  return elapsed;
+}
 
-  beam_free_args(bufs, n_params);
-  poly_program_destroy(prog);
-
-  return median;
+static double beam_compile_and_time(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOpts opts, int reps) {
+  PolyRunner runner;
+  if (beam_prepare_candidate(ctx, sink, opts, &runner) != 0) return INFINITY;
+  PolyDevice device = beam_device(opts);
+  BeamBuffers raw;
+  double elapsed = INFINITY;
+  if (beam_buffers_init(ctx, runner.program, device, &raw)) {
+    elapsed = beam_time_candidate(ctx, &runner, device, &raw, reps, INFINITY, 65536);
+    beam_buffers_free(&raw);
+  }
+  poly_time_call_finish(ctx, &runner, device);
+  return elapsed;
 }
 
 /* Disk cache for BEAM results */
@@ -2097,263 +2452,467 @@ double poly_test_beam_compile_and_time(
 #endif
 
 /* FNV-1a hash over the AST toposort (structural hash for cache key) */
-static uint64_t beam_ast_hash(PolyCtx *ctx, PolyUOp *sink) {
-  int n_topo = 0;
-  PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n_topo);
-  uint64_t h = 0xcbf29ce484222325ULL;
-  for (int i = 0; i < n_topo; i++) {
-    h ^= (uint64_t)topo[i]->op;
-    h *= 0x100000001b3ULL;
-    h ^= (uint64_t)topo[i]->dtype.bitsize;
-    h *= 0x100000001b3ULL;
-    h ^= poly_arg_hash(topo[i]->arg);
-    h *= 0x100000001b3ULL;
-    h ^= (uint64_t)topo[i]->n_src;
-    h *= 0x100000001b3ULL;
-  }
-  poly_toposort_free(topo);
-  return h;
-}
+/* Cache identity reuses the existing UOp encoder on the pre-lowering SINK. These bytes are
+ * compared, never imported or executed: cache values are only Opt sequences. */
+typedef struct {
+  uint8_t *data;
+  size_t size;
+  uint64_t hash;
+} BeamCacheKey;
 
-static int beam_cache_dir(char *dir, int cap) {
-  const char *xdg = getenv("XDG_CACHE_HOME");
-  const char *home = getenv("HOME");
-  if (xdg && xdg[0])
-    snprintf(dir, cap, "%s/polygrad/beam", xdg);
-  else if (home && home[0])
-    snprintf(dir, cap, "%s/.cache/polygrad/beam", home);
-  else
-    return -1;
-
-  /* mkdir -p: create parent dirs */
-  char parent[512];
-  snprintf(parent, sizeof(parent), "%s", dir);
-  char *s = parent + 1;
-  while (*s) {
-    if (*s == '/') {
-      *s = '\0';
-      mkdir(parent, 0755);
-      *s = '/';
-    }
-    s++;
-  }
-  if (mkdir(dir, 0755) == -1 && errno != EEXIST) return -1;
-  return 0;
-}
-
-/* Cache entry: [n_actions:uint8][actions: n * (op:uint8, axis:uint8, amount:int64)] */
-static bool beam_cache_load(uint64_t key, PolyBeamAction *actions, int *n_actions) {
-  char dir[512], path[576];
-  if (beam_cache_dir(dir, sizeof(dir)) != 0) return false;
-  snprintf(path, sizeof(path), "%s/%016llx.bin", dir, (unsigned long long)key);
-
-  FILE *f = fopen(path, "rb");
-  if (!f) return false;
-
-  uint8_t n;
-  if (fread(&n, 1, 1, f) != 1 || n > BEAM_MAX_ITERS) {
-    fclose(f);
-    return false;
-  }
-  *n_actions = n;
-  for (int i = 0; i < n; i++) {
-    uint8_t op_byte, axis_byte;
-    int64_t amount;
-    if (fread(&op_byte, 1, 1, f) != 1) {
-      fclose(f);
-      return false;
-    }
-    if (fread(&axis_byte, 1, 1, f) != 1) {
-      fclose(f);
-      return false;
-    }
-    if (fread(&amount, sizeof(amount), 1, f) != 1) {
-      fclose(f);
-      return false;
-    }
-    if (op_byte != POLY_OPT_UPCAST && op_byte != POLY_OPT_UNROLL) {
-      fclose(f);
-      return false;
-    }
-    actions[i] = (PolyBeamAction){.op = (PolyOptOps)op_byte, .axis = axis_byte, .amount = amount};
-  }
-  fclose(f);
+static bool beam_key_append(BeamCacheKey *key, const void *data, size_t size) {
+  if (size > SIZE_MAX - key->size) return false;
+  uint8_t *next = realloc(key->data, key->size + size);
+  if (!next && size) return false;
+  key->data = next;
+  if (size) memcpy(next + key->size, data, size);
+  key->size += size;
   return true;
 }
 
-static void beam_cache_save(uint64_t key, const PolyBeamAction *actions, int n_actions) {
-  char dir[512], path[576];
-  if (beam_cache_dir(dir, sizeof(dir)) != 0) return;
-  snprintf(path, sizeof(path), "%s/%016llx.bin", dir, (unsigned long long)key);
-
-  FILE *f = fopen(path, "wb");
-  if (!f) return;
-  uint8_t n = (uint8_t)n_actions;
-  fwrite(&n, 1, 1, f);
-  for (int i = 0; i < n_actions; i++) {
-    uint8_t op_byte = (uint8_t)actions[i].op;
-    uint8_t axis_byte = (uint8_t)actions[i].axis;
-    fwrite(&op_byte, 1, 1, f);
-    fwrite(&axis_byte, 1, 1, f);
-    fwrite(&actions[i].amount, sizeof(actions[i].amount), 1, f);
-  }
-  fclose(f);
+static bool beam_key_string(BeamCacheKey *key, const char *text) {
+  return beam_key_append(key, text ? text : "", strlen(text ? text : "") + 1);
 }
 
-/* Main BEAM search loop */
-
-static int beam_candidate_cmp(const void *a, const void *b) {
-  const BeamCandidate *ca = (const BeamCandidate *)a;
-  const BeamCandidate *cb = (const BeamCandidate *)b;
-  if (ca->time_us < cb->time_us) return -1;
-  if (ca->time_us > cb->time_us) return 1;
-  return 0;
-}
-
-static PolyUOp *poly_beam_search(
+static bool beam_cache_key(
     PolyCtx *ctx,
     PolyUOp *sink,
-    int beam_width,
-    PolyRewriteOpts opts
+    int width,
+    PolyRewriteOpts opts,
+    BeamCacheKey *key
 ) {
-  if (beam_width <= 0) return sink;
-  if (beam_width > BEAM_MAX_BEAM) beam_width = BEAM_MAX_BEAM;
-
-  /* Check disk cache */
-  uint64_t cache_key = beam_ast_hash(ctx, sink);
-  PolyBeamAction cached_actions[BEAM_MAX_ITERS];
-  int cached_n = 0;
-  if (beam_cache_load(cache_key, cached_actions, &cached_n) && cached_n > 0) {
-    /* Replay cached actions */
-    OptScheduler s;
-    sched_init(&s, ctx, sink);
-    if (!sched_can_optimize(&s)) return sink;
-    for (int i = 0; i < cached_n; i++) {
-      OptScheduler copy;
-      sched_copy(&copy, &s);
-      if (!sched_apply_action(&copy, cached_actions[i])) break;
-      s = copy;
+  *key = (BeamCacheKey){0};
+  PolyIrEntrypoint entry = {.name = "beam", .sink = sink};
+  PolyIrSpec spec = {.ctx = ctx, .entrypoints = &entry, .n_entrypoints = 1};
+  int length = 0;
+  key->data = poly_ir_export(&spec, &length);
+  if (!key->data || length <= 0) goto failed;
+  key->size = (size_t)length;
+  PolyRendererCaps c = opts.caps;
+  int fields[] = {
+      POLYGRAD_ABI_VERSION,
+      width,
+      poly_getenv_flag_default("BEAM_ESTIMATE", true),
+      beam_device(opts),
+      c.has_mulacc,
+      c.has_max,
+      c.has_threefry,
+      c.has_exp2,
+      c.has_log2,
+      c.has_sin,
+      c.has_fdiv,
+      c.supports_float16,
+      c.supports_bfloat16,
+      c.supports_fp8e4m3,
+      c.supports_fp8e5m2,
+      c.supports_fp8e4m3fnuz,
+      c.supports_fp8e5m2fnuz,
+      c.has_int64,
+      c.has_local,
+      c.has_threads,
+      c.has_simd_int,
+      c.has_simd_float,
+      c.max_vec_width,
+      c.max_threads,
+      c.global_max[0],
+      c.global_max[1],
+      c.global_max[2],
+      c.local_max[0],
+      c.local_max[1],
+      c.local_max[2],
+      c.shared_max,
+      c.n_tensor_cores};
+  if (!beam_key_append(key, fields, sizeof(fields)) || !beam_key_string(key, c.device) ||
+      !beam_key_string(key, c.arch))
+    goto failed;
+  const char *envs[] = {"CC", "POLY_OPT", "POLY_CPU_ARCH"};
+  for (size_t i = 0; i < sizeof(envs) / sizeof(envs[0]); i++)
+    if (!beam_key_string(key, getenv(envs[i]))) goto failed;
+  for (int i = 0; i < c.n_tensor_cores; i++) {
+    const PolyTensorCore *tc = &c.tensor_cores[i];
+    int tc_fields[] = {
+        tc->dims[0],
+        tc->dims[1],
+        tc->dims[2],
+        tc->threads,
+        tc->elements_per_thread[0],
+        tc->elements_per_thread[1],
+        tc->elements_per_thread[2],
+        tc->dtype_in.priority,
+        tc->dtype_in.bitsize,
+        tc->dtype_out.priority,
+        tc->dtype_out.bitsize,
+        tc->n_opts};
+    if (!beam_key_append(key, tc_fields, sizeof(tc_fields))) goto failed;
+    for (int j = 0; j < tc->n_opts; j++) {
+      int pair[] = {tc->opts[j].type, tc->opts[j].dim};
+      if (!beam_key_append(key, pair, sizeof(pair))) goto failed;
     }
-    return s.ast;
+    for (int a = 0; a < 2; a++)
+      for (int b = 0; b < 3; b++) {
+        if (!beam_key_append(key, &tc->swizzle_len[a][b], sizeof(int))) goto failed;
+        for (int j = 0; j < tc->swizzle_len[a][b]; j++)
+          if (!beam_key_string(key, tc->swizzle[a][b][j])) goto failed;
+      }
   }
+  key->hash = UINT64_C(0xcbf29ce484222325);
+  for (size_t i = 0; i < key->size; i++) {
+    key->hash ^= key->data[i];
+    key->hash *= UINT64_C(0x100000001b3);
+  }
+  return true;
+failed:
+  free(key->data);
+  *key = (BeamCacheKey){0};
+  return false;
+}
 
-  /* Initialize beam with unoptimized baseline */
-  BeamEntry *beam = (BeamEntry *)calloc(BEAM_MAX_BEAM, sizeof(BeamEntry));
-  sched_init(&beam[0].sched, ctx, sink);
-  if (!sched_can_optimize(&beam[0].sched)) {
+static int beam_cache_path(const BeamCacheKey *key, char *path, size_t capacity) {
+  const char *xdg = getenv("XDG_CACHE_HOME"), *home = getenv("HOME");
+  char dir[512];
+  int n = xdg && *xdg     ? snprintf(dir, sizeof(dir), "%s/polygrad/beam", xdg)
+          : home && *home ? snprintf(dir, sizeof(dir), "%s/.cache/polygrad/beam", home)
+                          : -1;
+  if (n < 0 || (size_t)n >= sizeof(dir)) return -1;
+  for (char *p = dir + 1; *p; p++)
+    if (*p == '/') {
+      *p = '\0';
+      int rc = mkdir(dir, 0755);
+      *p = '/';
+      if (rc != 0 && errno != EEXIST) return -1;
+    }
+  if (mkdir(dir, 0755) != 0 && errno != EEXIST) return -1;
+  n = snprintf(path, capacity, "%s/v2-%016llx.bin", dir, (unsigned long long)key->hash);
+  return n < 0 || (size_t)n >= capacity ? -1 : 0;
+}
+
+typedef struct {
+  PolyOpt opt;
+  int64_t tuple[3];
+} BeamCachedOpt;
+
+/* Local cache format, not an artifact ABI. Endianness/version and exact key
+ * bytes are checked before any Opt is applied. Replays publish all or nothing. */
+static bool beam_cache_load(const BeamCacheKey *key, OptScheduler *s, PolyRendererCaps caps) {
+  char path[600];
+  if (!key->data || beam_cache_path(key, path, sizeof(path)) != 0) return false;
+  FILE *f = fopen(path, "rb");
+  if (!f) return false;
+  uint32_t header[5];
+  BeamCachedOpt *cached = NULL;
+  uint8_t *stored_key = NULL;
+  bool ok = false;
+  if (fread(header, sizeof(header), 1, f) != 1 || header[0] != UINT32_C(0x50474232) ||
+      header[1] != POLYGRAD_ABI_VERSION || header[2] != UINT32_C(0x01020304) ||
+      header[3] != key->size || header[4] > INT_MAX)
+    goto done;
+  long payload = ftell(f);
+  if (payload < 0 || fseek(f, 0, SEEK_END) != 0) goto done;
+  long end = ftell(f);
+  uint64_t expected = (uint64_t)payload + key->size + (uint64_t)header[4] * 8 * sizeof(int64_t);
+  if (end < 0 || (uint64_t)end != expected || fseek(f, payload, SEEK_SET) != 0) goto done;
+  stored_key = malloc(key->size);
+  cached = calloc(header[4] ? header[4] : 1, sizeof(*cached));
+  if (!stored_key || !cached || fread(stored_key, key->size, 1, f) != 1 ||
+      memcmp(stored_key, key->data, key->size))
+    goto done;
+  for (uint32_t i = 0; i < header[4]; i++) {
+    int64_t v[8];
+    if (fread(v, sizeof(v), 1, f) != 1 || v[0] < POLY_OPT_TC || v[0] > POLY_OPT_SWAP ||
+        (v[1] != 0 && v[1] != 1) || v[2] < 0 || v[2] > INT_MAX || v[3] < POLY_OPT_ARG_NONE ||
+        v[3] > POLY_OPT_ARG_INT_TUPLE)
+      goto done;
+    cached[i].opt = (PolyOpt
+    ){.op = (PolyOptOps)v[0],
+      .has_axis = v[1],
+      .axis = (int)v[2],
+      .arg_kind = (int)v[3],
+      .arg = v[4]};
+    if (v[3] == POLY_OPT_ARG_INT_TUPLE) {
+      memcpy(cached[i].tuple, &v[5], sizeof(cached[i].tuple));
+      cached[i].opt.arg_tuple = cached[i].tuple;
+      cached[i].opt.n_arg_tuple = 3;
+    }
+  }
+  OptScheduler candidate = *s;
+  int prefix = s->ast->arg.kind == POLY_ARG_KERNEL_INFO && s->ast->arg.kernel_info
+                   ? s->ast->arg.kernel_info->n_applied_opts
+                   : 0;
+  if ((uint32_t)prefix > header[4]) goto done;
+  for (uint32_t i = (uint32_t)prefix; i < header[4]; i++)
+    if (!sched_apply_opt(&candidate, caps, cached[i].opt)) goto done;
+  *s = candidate;
+  ok = true;
+done:
+  free(cached);
+  free(stored_key);
+  fclose(f);
+  return ok;
+}
+
+static void beam_cache_save(const BeamCacheKey *key, PolyUOp *sink) {
+  if (!key->data || key->size > UINT32_MAX) return;
+  const PolyKernelInfo *info =
+      sink->arg.kind == POLY_ARG_KERNEL_INFO ? sink->arg.kernel_info : NULL;
+  int count = info ? info->n_applied_opts : 0;
+  char path[600], temporary[620];
+  if (beam_cache_path(key, path, sizeof(path)) != 0) return;
+  int n = snprintf(temporary, sizeof(temporary), "%s.XXXXXX", path);
+  if (n < 0 || (size_t)n >= sizeof(temporary)) return;
+  int fd = mkstemp(temporary);
+  if (fd < 0) return;
+  FILE *f = fdopen(fd, "wb");
+  if (!f) {
+    close(fd);
+    remove(temporary);
+    return;
+  }
+  uint32_t header[] = {
+      UINT32_C(0x50474232), POLYGRAD_ABI_VERSION, UINT32_C(0x01020304), (uint32_t)key->size,
+      (uint32_t)count};
+  bool ok = fwrite(header, sizeof(header), 1, f) == 1 && fwrite(key->data, key->size, 1, f) == 1;
+  for (int i = 0; ok && i < count; i++) {
+    PolyOpt a = info->applied_opts[i];
+    int64_t v[] = {a.op, a.has_axis, a.axis, a.arg_kind, a.arg, 0, 0, 0};
+    if (a.arg_kind == POLY_OPT_ARG_INT_TUPLE) {
+      if (a.n_arg_tuple != 3 || !a.arg_tuple) {
+        ok = false;
+        break;
+      }
+      memcpy(&v[5], a.arg_tuple, 3 * sizeof(int64_t));
+    }
+    ok = fwrite(v, sizeof(v), 1, f) == 1;
+  }
+  if (fclose(f) != 0) ok = false;
+  if (!ok || rename(temporary, path) != 0) remove(temporary);
+}
+
+#ifdef POLY_TESTING
+uint64_t poly_test_beam_cache_key(PolyCtx *ctx, PolyUOp *sink, int width, PolyDevice device) {
+  BeamCacheKey key;
+  PolyRewriteOpts opts = {.device = device, .caps = {.device = poly_device_name(device)}};
+  if (!beam_cache_key(ctx, sink, width, opts, &key)) return 0;
+  uint64_t hash = key.hash;
+  free(key.data);
+  return hash;
+}
+
+int poly_test_beam_cache_write(
+    PolyCtx *ctx,
+    PolyUOp *sink,
+    PolyUOp *result,
+    int width,
+    char *path,
+    size_t capacity
+) {
+  BeamCacheKey key;
+  PolyRewriteOpts opts = {.device = POLY_DEVICE_CPU, .caps = {.device = "CPU"}};
+  if (!beam_cache_key(ctx, sink, width, opts, &key)) return -1;
+  beam_cache_save(&key, result);
+  int rc = beam_cache_path(&key, path, capacity);
+  free(key.data);
+  return rc;
+}
+
+PolyUOp *poly_test_beam_cache_read(PolyCtx *ctx, PolyUOp *sink, int width) {
+  BeamCacheKey key;
+  PolyRewriteOpts opts = {.device = POLY_DEVICE_CPU, .caps = {.device = "CPU"}};
+  if (!beam_cache_key(ctx, sink, width, opts, &key)) return NULL;
+  OptScheduler s;
+  sched_init(&s, ctx, sink);
+  bool ok = beam_cache_load(&key, &s, opts.caps);
+  free(key.data);
+  return ok ? s.ast : NULL;
+}
+#endif
+
+static int beam_candidate_cmp(const void *a, const void *b) {
+  const BeamEntry *x = a, *y = b;
+  return x->time_us < y->time_us   ? -1
+         : x->time_us > y->time_us ? 1
+         : x->order < y->order     ? -1
+                                   : x->order > y->order;
+}
+
+static bool beam_compute_ops(PolyCtx *ctx, PolyUOp *program, uint64_t *ops) {
+  *ops = 0;
+  PolyUOp *sink = program->src[0];
+  if (sink->arg.kind != POLY_ARG_KERNEL_INFO || !sink->arg.kernel_info ||
+      !sink->arg.kernel_info->estimates)
+    return true;
+  const PolyProgramInfo *info = poly_program_info(ctx, program);
+  PolyVarBinding *vars = calloc((size_t)(info->n_vars ? info->n_vars : 1), sizeof(*vars));
+  if (!vars) return false;
+  for (int i = 0; i < info->n_vars; i++) {
+    int64_t lo, hi;
+    poly_uop_minmax(ctx, info->vars[i], &lo, &hi);
+    if (lo > hi) {
+      free(vars);
+      return false;
+    }
+    vars[i] = (PolyVarBinding
+    ){.var = info->vars[i], .value = lo + (int64_t)(((uint64_t)hi - (uint64_t)lo) / 2)};
+  }
+  uint64_t lds, mem;
+  bool ok =
+      poly_estimates_infer(sink->arg.kernel_info->estimates, vars, info->n_vars, ops, &lds, &mem) ==
+      0;
+  free(vars);
+  return ok;
+}
+
+static PolyUOp *poly_beam_search(PolyCtx *ctx, PolyUOp *sink, int width, PolyRewriteOpts opts) {
+  if (width <= 0) return sink;
+  BeamActions actions;
+  beam_actions(&actions);
+  if ((size_t)width > SIZE_MAX / sizeof(BeamEntry) / (size_t)actions.count ||
+      width > INT_MAX / actions.count)
+    return NULL;
+  BeamEntry *beam = calloc((size_t)width, sizeof(*beam));
+  BeamEntry *candidates = calloc((size_t)width * (size_t)actions.count, sizeof(*candidates));
+  PolyUOp **seen = NULL;
+  PolyUOp **candidate_roots =
+      calloc((size_t)width * (size_t)actions.count, sizeof(*candidate_roots));
+  int n_candidate_roots = 0, size = 1;
+  BeamBuffers raw = {0};
+  size_t n_seen = 0, seen_capacity = 0;
+  if (!beam || !candidates || !candidate_roots) {
     free(beam);
-    return sink;
+    free(candidates);
+    free(candidate_roots);
+    return NULL;
+  }
+  sched_init(&beam[0].sched, ctx, sink);
+  if (poly_uop_retain(ctx, sink) != 0) {
+    free(beam);
+    free(candidates);
+    free(candidate_roots);
+    return NULL;
   }
   beam[0].time_us = INFINITY;
-  beam[0].n_actions = 0;
-  int beam_size = 1;
-
-  /* Time the baseline */
-  beam[0].time_us = beam_compile_and_time(ctx, beam[0].sched.ast, opts, 3);
-
-  /* Build action list */
-  PolyBeamAction all_actions[BEAM_MAX_ACTIONS];
-  int n_actions = 0;
-  for (int axis = 0; axis < BEAM_MAX_AXIS; axis++) {
-    for (int ai = 0; ai < beam_n_upcast_amounts; ai++) {
-      all_actions[n_actions++] =
-          (PolyBeamAction){.op = POLY_OPT_UPCAST, .axis = axis, .amount = beam_upcast_amounts[ai]};
-    }
+  BeamCacheKey key;
+  beam_cache_key(ctx, sink, width, opts, &key);
+  if (!poly_getenv_flag("IGNORE_BEAM_CACHE") && poly_getenv_int("CACHELEVEL", 2) >= 1 &&
+      beam_cache_load(&key, &beam[0].sched, opts.caps)) {
+    if (poly_uop_retain(ctx, beam[0].sched.ast) != 0)
+      beam[0].sched.ast = sink;
+    else
+      poly_uop_release(ctx, sink);
+    goto done;
   }
-  for (int axis = 0; axis < 5; axis++) {
-    for (int ai = 0; ai < beam_n_unroll_amounts; ai++) {
-      all_actions[n_actions++] =
-          (PolyBeamAction){.op = POLY_OPT_UNROLL, .axis = axis, .amount = beam_unroll_amounts[ai]};
-    }
+  if (!sched_can_optimize(&beam[0].sched)) goto done;
+  PolyDevice device = beam_device(opts);
+  if (!beam_buffers_init(ctx, sink, device, &raw)) goto done;
+  double min_progress = 0.01;
+  const char *progress = getenv("BEAM_MIN_PROGRESS");
+  if (progress) {
+    char *end;
+    double parsed = strtod(progress, &end);
+    if (end != progress && !*end && isfinite(parsed) && parsed >= 0) min_progress = parsed;
   }
-
-  BeamCandidate *candidates = (BeamCandidate *)calloc(BEAM_MAX_CANDIDATES, sizeof(BeamCandidate));
-
-  for (int iter = 0; iter < BEAM_MAX_ITERS; iter++) {
-    int n_cand = 0;
-
-    /* Generate candidates from all beam members */
-    for (int b = 0; b < beam_size; b++) {
-      if (beam[b].n_actions >= BEAM_MAX_ITERS) continue;
-      for (int a = 0; a < n_actions && n_cand < BEAM_MAX_CANDIDATES; a++) {
+  for (;;) {
+    for (int i = 0; i < n_candidate_roots; i++)
+      poly_uop_release(ctx, candidate_roots[i]);
+    n_candidate_roots = 0;
+    int count = 0;
+    for (int b = 0; b < size; b++)
+      for (int a = 0; a < actions.count; a++) {
         OptScheduler copy;
         sched_copy(&copy, &beam[b].sched);
-        if (!sched_apply_action(&copy, all_actions[a])) continue;
-
-        candidates[n_cand].sched = copy;
-        candidates[n_cand].n_actions = beam[b].n_actions + 1;
-        memcpy(
-            candidates[n_cand].actions, beam[b].actions,
-            (size_t)beam[b].n_actions * sizeof(PolyBeamAction)
-        );
-        candidates[n_cand].actions[beam[b].n_actions] = all_actions[a];
-        candidates[n_cand].time_us = INFINITY;
-        n_cand++;
+        if (!beam_get_kernel_action(&copy, opts.caps, actions.opts[a], &actions)) continue;
+        if (poly_uop_retain(ctx, copy.ast) != 0) goto done;
+        candidate_roots[n_candidate_roots++] = copy.ast;
+        candidates[count] = (BeamEntry){.sched = copy, .time_us = INFINITY, .order = count};
+        count++;
       }
-    }
-
-    if (n_cand == 0) break;
-
-    /* Compile and time each candidate */
-    for (int i = 0; i < n_cand; i++) {
-      candidates[i].time_us = beam_compile_and_time(ctx, candidates[i].sched.ast, opts, 3);
-
-      /* Early stop: if > 3x slower than current best after timing, skip remaining reps */
-      if (candidates[i].time_us > beam[0].time_us * 3.0 && beam[0].time_us < INFINITY)
-        candidates[i].time_us = INFINITY;
-    }
-
-    /* Sort by time */
-    qsort(candidates, (size_t)n_cand, sizeof(BeamCandidate), beam_candidate_cmp);
-
-    /* Check convergence: best candidate not better than current best */
-    if (n_cand > 0 && candidates[0].time_us >= beam[0].time_us - 0.01) break;
-
-    /* Keep top beam_width */
-    int new_size = n_cand < beam_width ? n_cand : beam_width;
-    /* Filter out INF candidates */
-    while (new_size > 0 && candidates[new_size - 1].time_us >= INFINITY)
-      new_size--;
-    if (new_size == 0) break;
-
-    for (int i = 0; i < new_size; i++) {
-      beam[i].sched = candidates[i].sched;
-      beam[i].time_us = candidates[i].time_us;
-      beam[i].n_actions = candidates[i].n_actions;
-      memcpy(
-          beam[i].actions, candidates[i].actions,
-          (size_t)candidates[i].n_actions * sizeof(PolyBeamAction)
+    if (!count) break;
+    uint64_t least = UINT64_MAX;
+    int timed = 0;
+    for (int i = 0; i < count; i++) {
+      PolyRunner runner;
+      if (beam_prepare_candidate(ctx, candidates[i].sched.ast, opts, &runner) != 0) continue;
+      PolyUOp *program = runner.program;
+      PolyUOp *lib = runner.compiled_binary ? runner.compiled_binary
+                     : program->n_src >= 4  ? program->src[3]
+                     : program->n_src >= 3  ? program->src[2]
+                                            : poly_program_linear(program);
+      bool duplicate = false;
+      for (size_t j = 0; j < n_seen; j++)
+        if (seen[j] == lib) {
+          duplicate = true;
+          break;
+        }
+      uint64_t compute;
+      if (!lib || duplicate || !beam_compute_ops(ctx, program, &compute)) {
+        poly_time_call_finish(ctx, &runner, device);
+        continue;
+      }
+      if (compute < least) least = compute;
+      if ((long double)compute > (long double)least * 1000) {
+        poly_time_call_finish(ctx, &runner, device);
+        continue;
+      }
+      if (n_seen == seen_capacity) {
+        size_t next = seen_capacity ? seen_capacity * 2 : 64;
+        PolyUOp **grown = next > seen_capacity && next <= SIZE_MAX / sizeof(*seen)
+                              ? realloc(seen, next * sizeof(*seen))
+                              : NULL;
+        if (!grown) {
+          poly_time_call_finish(ctx, &runner, device);
+          goto done;
+        }
+        seen = grown;
+        seen_capacity = next;
+      }
+      seen[n_seen++] = lib;
+      poly_uop_retain(ctx, lib);
+      double time = beam_time_candidate(
+          ctx, &runner, device, &raw, 3, beam[0].time_us * 3,
+          poly_getenv_flag_default("BEAM_ESTIMATE", true) ? 65536 : 0
       );
+      poly_time_call_finish(ctx, &runner, device);
+      if (!isfinite(time)) continue;
+      candidates[timed] = candidates[i];
+      candidates[timed++].time_us = time;
     }
-    beam_size = new_size;
+    if (!timed) break;
+    qsort(candidates, (size_t)timed, sizeof(*candidates), beam_candidate_cmp);
+    bool exiting = candidates[0].time_us < min_progress ||
+                   beam[0].time_us - candidates[0].time_us < min_progress;
+    if (!exiting || candidates[0].time_us < beam[0].time_us) {
+      int next_size = exiting ? 1 : timed < width ? timed : width;
+      int retained = 0;
+      for (; retained < next_size; retained++)
+        if (poly_uop_retain(ctx, candidates[retained].sched.ast) != 0) break;
+      if (retained != next_size) {
+        for (int i = 0; i < retained; i++)
+          poly_uop_release(ctx, candidates[i].sched.ast);
+        goto done;
+      }
+      for (int i = 0; i < size; i++)
+        poly_uop_release(ctx, beam[i].sched.ast);
+      size = next_size;
+      memcpy(beam, candidates, (size_t)size * sizeof(*beam));
+    }
+    if (exiting) break;
   }
-
-  /* Save best result to disk cache */
-  if (beam[0].n_actions > 0 && beam[0].time_us < INFINITY) {
-    beam_cache_save(cache_key, beam[0].actions, beam[0].n_actions);
-  }
-
+  if (poly_getenv_int("CACHELEVEL", 2) >= 1) beam_cache_save(&key, beam[0].sched.ast);
+done:
+  beam_buffers_free(&raw);
+  for (int i = 0; i < n_candidate_roots; i++)
+    poly_uop_release(ctx, candidate_roots[i]);
+  free(candidate_roots);
+  for (size_t i = 0; i < n_seen; i++)
+    poly_uop_release(ctx, seen[i]);
+  free(seen);
+  free(key.data);
   PolyUOp *result = beam[0].sched.ast;
+  for (int i = 0; i < size; i++)
+    poly_uop_release(ctx, beam[i].sched.ast);
   free(beam);
   free(candidates);
   return result;
 }
-
-#else /* __EMSCRIPTEN__ */
-
-/* WASM stub: BEAM search requires native compilation (fork+clang).
- * Falls back to heuristic. Future: use WASM JIT backend for timing. */
-static PolyUOp *poly_beam_search(
-    PolyCtx *ctx,
-    PolyUOp *sink,
-    int beam_width,
-    PolyRewriteOpts opts
-) {
-  (void)beam_width;
-  return poly_apply_opts_heuristic(ctx, sink, opts.caps);
-}
-
-#endif /* __EMSCRIPTEN__ */
 
 typedef struct {
   PolyUOp **ranges;
@@ -5694,27 +6253,55 @@ PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOp
     poly_debug_stage_graph(ctx, "simplify ranges", sink);
     POLY_REWRITE_CHECK("simplify ranges");
 
-    /* tinygrad apply_opts prelude: convert eligible WEAK output ranges to
-     * GLOBAL before running heuristic/beam/tensor-core scheduling. */
-    if (opts.caps.has_local) {
-      sink = convert_loop_to_global(ctx, sink);
-      POLY_REWRITE_CHECK("convert loop output ranges");
+    /* postrange.apply_opts: an explicit list (even empty) takes precedence
+     * over BEAM and NOOPT. Tagged kernels have already been scheduled. */
+    if (!sink->tag && sink->tag_arg.kind == POLY_ARG_NONE) {
+      if (opts.caps.has_local) {
+        sink = convert_loop_to_global(ctx, sink);
+        POLY_REWRITE_CHECK("convert loop output ranges");
+      }
+      const PolyKernelInfo *info =
+          sink->arg.kind == POLY_ARG_KERNEL_INFO ? sink->arg.kernel_info : NULL;
+      if (info && info->has_opts_to_apply) {
+        OptScheduler scheduler;
+        sched_init(&scheduler, ctx, sink);
+        for (int i = 0; i < info->n_opts_to_apply; i++) {
+          if (!sched_apply_opt(&scheduler, opts.caps, info->opts_to_apply[i])) {
+            fprintf(stderr, "polygrad: explicit kernel option %d is invalid\n", i);
+            return NULL;
+          }
+        }
+        sink = scheduler.ast;
+      } else if (opts.beam_width > 0) {
+        sink = poly_beam_search(ctx, sink, opts.beam_width, opts);
+      } else if (!poly_get_noopt() && (!info || !info->n_applied_opts)) {
+        int n = 0;
+        PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n);
+        if (!topo) return NULL;
+        bool staged = false;
+        for (int i = 0; i < n; i++)
+          staged |= topo[i]->op == POLY_OP_STAGE;
+        poly_toposort_free(topo);
+        if (!staged)
+          sink = opts.opt_policy == POLY_OPT_TC_ONLY
+                     ? poly_apply_tc_opt(ctx, sink, opts.caps)
+                     : poly_apply_opts_heuristic(ctx, sink, opts.caps);
+      }
+      POLY_REWRITE_CHECK("schedule options");
+      /* get_optimized_ast consumes construction options and seals scheduling;
+       * flatten END range expressions before expander consumes them. */
+      sink = poly_graph_rewrite(ctx, sink, poly_pm_flatten_range());
+      POLY_REWRITE_CHECK("flatten scheduled ranges");
+      PolyKernelInfo scheduled = sink->arg.kind == POLY_ARG_KERNEL_INFO
+                                     ? *sink->arg.kernel_info
+                                     : (PolyKernelInfo){.name = "test"};
+      scheduled.has_opts_to_apply = false;
+      scheduled.opts_to_apply = NULL;
+      scheduled.n_opts_to_apply = 0;
+      sink = poly_uop_tagged(
+          ctx, sink->op, sink->dtype, sink->src, sink->n_src, poly_arg_kernel_info(&scheduled), 1
+      );
     }
-
-    /* tinygrad: apply_opts
-     *
-     * tinygrad apply_opts(...) returns Scheduler.get_optimized_ast(), which
-     * runs pm_flatten_range before the pipeline moves on. Without that cleanup
-     * END sources can remain as arithmetic expressions after shift_to/upcast,
-     * and later expander passes drop the ended RANGE structure entirely. */
-    if (opts.beam_width > 0) {
-      sink = poly_beam_search(ctx, sink, opts.beam_width, opts);
-    } else if (!poly_get_noopt() && opts.opt_policy == POLY_OPT_TC_ONLY) {
-      sink = poly_apply_tc_opt(ctx, sink, opts.caps);
-    } else if (!poly_get_noopt()) {
-      sink = poly_apply_opts_heuristic(ctx, sink, opts.caps);
-    }
-    sink = poly_graph_rewrite(ctx, sink, poly_pm_flatten_range());
     poly_debug_stage_graph(ctx, "apply opts", sink);
     POLY_REWRITE_CHECK("apply opts");
   }

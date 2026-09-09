@@ -333,6 +333,20 @@ class _CHECK_OOB(ContextVar):
         self._value = value
 
 
+class _BEAM(ContextVar):
+    @property
+    def value(self):
+        from . import _ffi
+        return _ffi.get_lib().poly_get_beam()
+
+    @value.setter
+    def value(self, value):
+        from . import _ffi
+        if not isinstance(value, int) or not -(2**31) <= value <= 2**31 - 1:
+            raise ValueError('BEAM must be an int32')
+        _ffi.get_lib().poly_set_beam(value)
+
+
 class _NOOPT(ContextVar):
     @property
     def value(self):
@@ -386,7 +400,7 @@ DEV = _DEV("DEV", "")
 CHECK_OOB = _CHECK_OOB("CHECK_OOB", 0)
 IMAGE = _IMAGE("IMAGE", 0)
 DEBUG = ContextVar("DEBUG", 0)
-BEAM = ContextVar("BEAM", 0)
+BEAM = _BEAM("BEAM", 0)
 # Pinned tinygrad/helpers.py:241. Keep the public configuration object rather
 # than exposing a frozen boolean so Context(JIT=...) and environment overrides work.
 JIT = ContextVar("JIT", 2 if OSX and ARCH_X86 else 1)

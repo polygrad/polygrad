@@ -31,6 +31,7 @@ typedef struct {
   int max_threads;
   int global_max[3];
   int local_max[3];
+  int shared_max; /* Renderer.shared_max; zero uses the pinned 32768-byte default. */
   const PolyTensorCore *tensor_cores;
   int n_tensor_cores;
 } PolyRendererCaps;

@@ -4172,6 +4172,16 @@ static PolyUOp *lt_uop_divides(PolyCtx *ctx, PolyUOp *u, const PolyInt *factor) 
   return NULL;
 }
 
+/* Share the existing arbitrary-precision UOp.divides implementation with
+ * Scheduler.shift_to. Its result remains structural until symbolic cleanup. */
+PolyUOp *poly_uop_divides(PolyCtx *ctx, PolyUOp *u, int64_t factor) {
+  PolyInt value = {0};
+  if (!poly_int_from_i64(&value, factor)) return NULL;
+  PolyUOp *result = lt_uop_divides(ctx, u, &value);
+  poly_int_free(&value);
+  return result;
+}
+
 /* Pinned tinygrad/uop/symbolic.py:174-178 lt_folding. For
  *   sum(non-unit-factor terms) + remainder < c
  * divide the non-unit terms and c by their GCD d when the exact remainder

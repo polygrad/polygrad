@@ -601,6 +601,8 @@ PolyUOp *poly_rewrite_cuda(PolyCtx *ctx, PolyUOp *sink) {
    * that heuristic. Keep CUDA on the shared heuristic policy so LOCAL/UNROLL
    * scheduling still happens on ordinary kernels such as broadcast matmul. */
   int arch = poly_cuda_arch_major() * 10 + poly_cuda_arch_minor();
+  char arch_name[24];
+  snprintf(arch_name, sizeof(arch_name), "sm_%d", arch);
   int n_tensor_cores = 0;
   const PolyTensorCore *tensor_cores = poly_tc_get_cuda(arch, &n_tensor_cores);
   PolyRewriteOpts opts = {
@@ -610,6 +612,7 @@ PolyUOp *poly_rewrite_cuda(PolyCtx *ctx, PolyUOp *sink) {
       .caps =
           {
               .device = "CUDA",
+              .arch = arch_name,
               /* Pinned CUDARenderer inherits RECIPROCAL from CStyleLanguage
                * but does not advertise MULACC in code_for_op. */
               .has_mulacc = false,
@@ -628,6 +631,7 @@ PolyUOp *poly_rewrite_cuda(PolyCtx *ctx, PolyUOp *sink) {
               .max_vec_width = 4,
               .global_max = {2147483647, 65535, 65535},
               .local_max = {1024, 1024, 64},
+              .shared_max = 49152,
               .tensor_cores = tensor_cores,
               .n_tensor_cores = n_tensor_cores,
           },

@@ -5,6 +5,7 @@
 #include "ctx.h"
 #include "device.h"
 #include "frontend_internal.h"
+#include "frontend.h"
 #include "uop/upat.h"
 #include "schedule/memory.h"
 #include "tensor.h"
@@ -624,7 +625,7 @@ PolyUOp *poly_jit_lower(
                                : linear;
   free(params);
   PolyUOp *planned = poly_memory_plan_rewrite(ctx, parameterized, held_bufs, n_held_bufs);
-  int beam = poly_getenv_int("JITBEAM", poly_getenv_int("BEAM", 0));
+  int beam = poly_getenv_int("JITBEAM", poly_get_beam());
   PolyUOp *compiled = planned ? poly_compile_linear(ctx, planned, beam) : NULL;
   if (!compiled || poly_getenv_int("JIT", 1) >= 2) return compiled;
   return poly_graph_split_rewrite(ctx, compiled, poly_getenv_int("JIT_BATCH_SIZE", 32));

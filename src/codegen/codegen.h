@@ -140,6 +140,19 @@ PolyUOp *poly_full_rewrite_to_sink(PolyCtx *ctx, PolyUOp *sink);
 PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOpts opts);
 
 #if defined(POLY_TESTING) && !defined(__EMSCRIPTEN__)
+int poly_test_beam_actions(PolyOpt *out, int capacity);
+int poly_test_beam_last_device(void);
+uint64_t poly_test_beam_cache_key(PolyCtx *ctx, PolyUOp *sink, int width, PolyDevice device);
+int poly_test_beam_cache_write(
+    PolyCtx *ctx,
+    PolyUOp *sink,
+    PolyUOp *result,
+    int width,
+    char *path,
+    size_t capacity
+);
+PolyUOp *poly_test_beam_cache_read(PolyCtx *ctx, PolyUOp *sink, int width);
+PolyUOp *poly_test_apply_opt(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps, PolyOpt opt);
 void **poly_test_beam_args_from_ast(PolyCtx *ctx, PolyUOp *sink, int *n_args);
 double poly_test_beam_compile_and_time(
     PolyCtx *ctx,
@@ -210,6 +223,8 @@ void poly_program_call_threaded(PolyProgram *prog, void **args, int n_args, int 
 /* Approximate C runtime artifact bytes retained by a compiled program.
  * Includes the PolyProgram wrapper and backing shared object when available. */
 size_t poly_program_estimated_size(const PolyProgram *prog);
+/* Compiler output copy for search.seen_libs; caller frees the returned bytes. */
+uint8_t *poly_program_read_binary(const PolyProgram *prog, int *size);
 
 /* Free a compiled program (dlclose + cleanup). */
 void poly_program_destroy(PolyProgram *prog);
@@ -241,6 +256,24 @@ int poly_cuda_copy_htod(unsigned long long dst, const void *src, size_t bytes);
 int poly_cuda_copy_dtoh(void *dst, unsigned long long src, size_t bytes);
 int poly_cuda_copy_dtod(unsigned long long dst, unsigned long long src, size_t bytes);
 PolyCudaProgram *poly_compile_cuda(const char *source, const char *fn_name);
+PolyCudaProgram *poly_compile_cuda_with_binary(
+    const char *source,
+    const char *fn_name,
+    uint8_t **binary,
+    int *size
+);
+int poly_cuda_launch_timed(
+    PolyCudaProgram *prog,
+    void **args,
+    int n_args,
+    int gx,
+    int gy,
+    int gz,
+    int bx,
+    int by,
+    int bz,
+    double *elapsed_us
+);
 int poly_cuda_launch(
     PolyCudaProgram *prog,
     void **args,

@@ -2631,6 +2631,32 @@ TEST(tc, rejects_nondivisible) {
   PASS();
 }
 
+#if defined(POLY_TESTING) && !defined(__EMSCRIPTEN__)
+TEST(tc, beam_pads_nondivisible_matmul) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = build_matmul_NxNxN_ast(ctx, 15);
+  int n_tcs = 0;
+  const PolyTensorCore *tcs = poly_tc_get_cuda(80, &n_tcs);
+  int64_t args[] = {-1, 2, 1};
+  PolyUOp *actual = poly_test_apply_opt(
+      ctx, sink,
+      (PolyRendererCaps
+      ){.device = "CUDA", .has_local = true, .tensor_cores = tcs, .n_tensor_cores = n_tcs},
+      (PolyOpt
+      ){.op = POLY_OPT_TC,
+        .has_axis = true,
+        .axis = 0,
+        .arg_kind = POLY_OPT_ARG_INT_TUPLE,
+        .arg_tuple = args,
+        .n_arg_tuple = 3}
+  );
+  int wmma = actual ? count_ops(ctx, actual, POLY_OP_WMMA) : 0;
+  poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(wmma, 1);
+  PASS();
+}
+#endif
+
 TEST(tc, pre_expander_wmma_structure) {
   /* Current postrange emits one shaped WMMA. */
   PolyCtx *ctx = poly_ctx_new();

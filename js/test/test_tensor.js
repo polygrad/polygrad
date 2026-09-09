@@ -149,6 +149,40 @@ async function runTensorTests(pg, createRuntime) {
     } finally { pg.noopt = before }
   })
 
+  await test('execution BEAM policy reaches core and computes values', async () => {
+    const before = pg.beam
+    const module = pg._core.Module
+    const state = module && module.__polygradWebGpuState
+    const device = state && state.device
+    const createQuerySet = device && device.createQuerySet
+    let timestamps = 0
+    if (device && device.features.has('timestamp-query')) {
+      device.createQuerySet = function (descriptor) {
+        if (descriptor.type === 'timestamp') timestamps++
+        return createQuerySet.call(this, descriptor)
+      }
+    }
+    const x = new Tensor(new Float32Array([1, 2, 3, 4, 5, 6, 7, 8]))
+    try {
+      for (const width of [1, 2, 0]) {
+        pg.beam = width
+        assert(pg.beam === width, 'BEAM core value disagrees')
+        assertClose(await x.mul(2).add(width).toArray(),
+          [2, 4, 6, 8, 10, 12, 14, 16].map(v => v + width))
+      }
+      let rejected = false
+      try { pg.beam = 0.5 } catch (e) { rejected = /int32/.test(e.message) }
+      assert(rejected, 'fractional BEAM width accepted')
+      if (device && device.features.has('timestamp-query')) {
+        assert(timestamps > 0, 'BEAM returned values without timing a WebGPU candidate')
+      }
+    } finally {
+      if (device) device.createQuerySet = createQuerySet
+      pg.beam = before
+      x.dispose()
+    }
+  })
+
   await test('execution einsum scalar ellipsis trace and accumulation', async () => {
     const scalar = new Tensor(2, { dtype: 'float32' })
     assertClose(await Tensor.einsum('->', scalar).toArray(), [2])

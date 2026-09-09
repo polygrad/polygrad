@@ -26,6 +26,7 @@
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <pthread.h>
 
@@ -230,6 +231,9 @@ static int compile_to_so_with_flag(
     return -1;
   }
   if (pid == 0) {
+    /* Tinygrad's Compiler receives source on stdin. A temporary input filename
+     * otherwise leaks into ELF bytes and defeats BEAM's compiled-lib dedup. */
+    if (!freopen(c_path, "r", stdin)) _exit(127);
     const char *cc = getenv("CC");
     if (!cc) cc = "clang";
     char *args[16];
@@ -242,7 +246,9 @@ static int compile_to_so_with_flag(
     args[n++] = "-fno-math-errno";
     args[n++] = "-o";
     args[n++] = (char *)so_path;
-    args[n++] = (char *)c_path;
+    args[n++] = "-x";
+    args[n++] = "c";
+    args[n++] = "-";
     args[n++] = "-lm";
     args[n] = NULL;
     execvp(cc, args);
@@ -257,7 +263,9 @@ static int compile_to_so_with_flag(
       args[n++] = "-fno-math-errno";
       args[n++] = "-o";
       args[n++] = (char *)so_path;
-      args[n++] = (char *)c_path;
+      args[n++] = "-x";
+      args[n++] = "c";
+      args[n++] = "-";
       args[n++] = "-lm";
       args[n] = NULL;
       execvp("gcc", args);
@@ -534,6 +542,29 @@ size_t poly_program_estimated_size(const PolyProgram *prog) {
   if (prog->so_path[0] && stat(prog->so_path, &st) == 0 && st.st_size > 0)
     nbytes += (size_t)st.st_size;
   return nbytes;
+}
+
+uint8_t *poly_program_read_binary(const PolyProgram *prog, int *size) {
+  if (!size) return NULL;
+  *size = 0;
+  if (!prog) return NULL;
+  FILE *f = fopen(prog->so_path, "rb");
+  if (!f) return NULL;
+  uint8_t *bytes = NULL;
+  if (fseek(f, 0, SEEK_END) != 0) goto done;
+  long length = ftell(f);
+  if (length <= 0 || length > INT_MAX || fseek(f, 0, SEEK_SET) != 0) goto done;
+  bytes = malloc((size_t)length);
+  if (!bytes) goto done;
+  if (fread(bytes, (size_t)length, 1, f) != 1) {
+    free(bytes);
+    bytes = NULL;
+    goto done;
+  }
+  *size = (int)length;
+done:
+  fclose(f);
+  return bytes;
 }
 
 void poly_program_destroy(PolyProgram *prog) {

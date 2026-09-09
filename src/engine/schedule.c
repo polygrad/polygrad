@@ -12,6 +12,7 @@
 #include "ctx.h"
 #include "utils.h"
 #include "frontend_internal.h"
+#include "frontend.h"
 #include "codegen/codegen.h"
 #include "renderer/cstyle.h"
 #include "renderer/isa/x86.h"
@@ -24,6 +25,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <limits.h>
+#include <math.h>
 
 static PolyUOp *poly_program_source_identity(PolyUOp *program) {
   if (!program || program->op != POLY_OP_PROGRAM) return program;
@@ -92,7 +94,8 @@ static PolyUOp *poly_program_ensure_source(
     PolyCtx *ctx,
     const PolyBackendDesc *backend,
     PolyUOp *program,
-    PolyDevice device
+    PolyDevice device,
+    const char *name_override
 );
 static int g_program_source_render_count = 0;
 
@@ -1850,7 +1853,8 @@ static PolyUOp *poly_prepare_x86_program_for_backend(
     PolyUOp *call,
     PolyUOp *device_uop,
     PolyDevice device,
-    uint32_t env_stamp
+    uint32_t env_stamp,
+    bool cache
 );
 #endif
 
@@ -1859,7 +1863,8 @@ static PolyUOp *poly_prepare_program_for_backend(
     PolyUOp *call,
     PolyUOp *device_uop,
     PolyDevice device,
-    uint32_t env_stamp
+    uint32_t env_stamp,
+    bool cache
 ) {
   if (!ctx || !call || call->op != POLY_OP_CALL) return NULL;
   PolyUOp *ast = poly_call_raw_body(call);
@@ -1869,7 +1874,7 @@ static PolyUOp *poly_prepare_program_for_backend(
   if (poly_program_is_complete_for_backend(ast, backend, device)) return ast;
 #ifdef POLY_HAS_X86
   if (device == POLY_DEVICE_X86)
-    return poly_prepare_x86_program_for_backend(ctx, call, device_uop, device, env_stamp);
+    return poly_prepare_x86_program_for_backend(ctx, call, device_uop, device, env_stamp, cache);
 #endif
 
   /* Pinned to_program caches the raw SINK ast.key before do_to_program builds
@@ -1885,7 +1890,7 @@ static PolyUOp *poly_prepare_program_for_backend(
   };
   uint32_t hash = poly_program_device_cache_hash(ast, device_uop, device, env_stamp);
   PolyToProgramCacheEntry *entry =
-      (poly_engine_cache_enabled() && ctx->to_program_cache)
+      (cache && poly_engine_cache_enabled() && ctx->to_program_cache)
           ? poly_map_get(ctx->to_program_cache, hash, &key, poly_to_program_cache_eq)
           : NULL;
   if (entry) return entry->prepared_program;
@@ -1903,11 +1908,11 @@ static PolyUOp *poly_prepare_program_for_backend(
   if (backend->rewrite_program) {
     prepared = poly_program_attach_linear(ctx, prepared);
     if (!prepared) return NULL;
-    prepared = poly_program_ensure_source(ctx, backend, prepared, device);
+    prepared = poly_program_ensure_source(ctx, backend, prepared, device, cache ? NULL : "test");
     if (!prepared) return NULL;
   }
 
-  if (poly_engine_cache_enabled() && ctx->to_program_cache) {
+  if (cache && poly_engine_cache_enabled() && ctx->to_program_cache) {
     entry = malloc(sizeof(*entry));
     if (entry) {
       entry->program = ast;
@@ -1926,14 +1931,15 @@ static PolyUOp *poly_program_ensure_source(
     PolyCtx *ctx,
     const PolyBackendDesc *backend,
     PolyUOp *program,
-    PolyDevice device
+    PolyDevice device,
+    const char *name_override
 ) {
   if (!ctx || !backend || !program || program->op != POLY_OP_PROGRAM) return NULL;
   if (!backend->render_source || poly_program_source(program)) return program;
 
   char fn_name[64];
   stable_kernel_fn_name(ctx, fn_name, sizeof(fn_name), device, program);
-  char *source = backend->render_source(ctx, program, fn_name);
+  char *source = backend->render_source(ctx, program, name_override ? name_override : fn_name);
   if (!source) return NULL;
   g_program_source_render_count++;
   PolyUOp *with_source = poly_program_attach_source(ctx, program, source);
@@ -1955,7 +1961,8 @@ static int poly_lower_compute_call_cached(
   if (!backend || !backend->lower_item) return -1;
   if (poly_backend_ensure_open(device) != 0) return -1;
 
-  PolyUOp *program = poly_prepare_program_for_backend(ctx, call, device_uop, device, env_stamp);
+  PolyUOp *program =
+      poly_prepare_program_for_backend(ctx, call, device_uop, device, env_stamp, true);
   PolyUOp *body = poly_program_kernel_body(program);
   /* Tinygrad 2026-08-22/a9069c177a9d codegen/__init__.py:289-396 owns
    * representation validation; engine/realize.py:263-319 executes PROGRAMs
@@ -2039,6 +2046,106 @@ static int poly_lower_compute_call_cached(
 /* ══════════════════════════════════════════════════════════════════════ */
 /*  Backend implementations (lower_item / execute / free_runner)         */
 /* ══════════════════════════════════════════════════════════════════════ */
+
+int poly_time_call_prepare(PolyCtx *ctx, PolyUOp *call, PolyDevice device, PolyRunner *out) {
+  if (!ctx || !call || !out) return -1;
+  *out = (PolyRunner){0};
+  const PolyBackendDesc *backend = poly_backend_get(device);
+  if (!backend || !backend->lower_item || poly_backend_ensure_open(device) != 0) return -1;
+  PolyUOp *program = poly_prepare_program_for_backend(
+      ctx, call, poly_device_uop(ctx, device), device, poly_runtime_cache_env_stamp(), false
+  );
+  PolyUOp *linear = poly_program_linear(program);
+  int limit = poly_getenv_int("BEAM_UOPS_MAX", 3000);
+  if (!program || !linear || (limit > 0 && linear->n_src >= limit)) return -1;
+  out->capture_binary = true;
+  if (backend->lower_item(ctx, program, "test", out) != 0) {
+    poly_runner_cleanup(out, device);
+    return -1;
+  }
+  poly_runner_apply_program_launch_info(ctx, program, out);
+  const PolyProgramInfo *info = poly_program_info(ctx, program);
+  out->n_params = info->n_globals;
+  if (poly_bind_runner_vars(ctx, out) != 0) {
+    poly_runner_cleanup(out, device);
+    return -1;
+  }
+  poly_uop_retain(ctx, out->program);
+  if (out->compiled_binary) poly_uop_retain(ctx, out->compiled_binary);
+  return 0;
+}
+
+double poly_time_call(
+    PolyRunner *runner,
+    PolyDevice device,
+    void **args,
+    int n_args,
+    const PolyVarBinding *bindings,
+    int n_bindings,
+    int count,
+    double early_stop_us,
+    int max_global_size
+) {
+  const PolyBackendDesc *backend = poly_backend_get(device);
+  if (!runner || !backend || count <= 0 || n_args != runner->n_params + runner->n_vars ||
+      poly_resolve_runner_launch_dims(runner, bindings, n_bindings) != 0)
+    return INFINITY;
+  int grid[3];
+  double original = 1, size = 1;
+  for (int i = 0; i < 3; i++) {
+    grid[i] = runner->grid[i] > 0 ? runner->grid[i] : 1;
+    original *= grid[i];
+  }
+  size = original;
+  while (max_global_size > 0 && size > max_global_size) {
+    bool changed = false;
+    for (int i = 2; i >= 0; i--) {
+      if (grid[i] <= 16) continue;
+      grid[i] /= 2;
+      size = (double)grid[0] * grid[1] * grid[2];
+      changed = true;
+      break;
+    }
+    if (!changed) return INFINITY; /* Invalid test-grid budget must not hang the caller. */
+  }
+  int saved_grid[3];
+  memcpy(saved_grid, runner->grid, sizeof(saved_grid));
+  memcpy(runner->grid, grid, sizeof(grid));
+  double best = INFINITY;
+  bool saved_wait = runner->wait;
+  runner->wait = true;
+  for (int i = 0; i < count; i++) {
+    runner->elapsed_us = NAN;
+    double start = poly_now_ms();
+    int rc = runner->execute    ? runner->execute(runner, args, n_args)
+             : backend->execute ? backend->execute(runner, args, n_args)
+                                : -1;
+#ifdef POLY_HAS_HIP
+    if (rc == 0 && device == POLY_DEVICE_HIP) rc = poly_hip_sync();
+#endif
+    double measured =
+        isfinite(runner->elapsed_us) ? runner->elapsed_us : (poly_now_ms() - start) * 1000.0;
+    double elapsed = measured * original / size;
+    if (rc != 0) {
+      best = INFINITY;
+      break;
+    }
+    if (elapsed < best) best = elapsed;
+    if (best > early_stop_us) break;
+  }
+  memcpy(runner->grid, saved_grid, sizeof(saved_grid));
+  runner->wait = saved_wait;
+  return best;
+}
+
+void poly_time_call_finish(PolyCtx *ctx, PolyRunner *runner, PolyDevice device) {
+  if (!runner) return;
+  PolyUOp *program = runner->program;
+  PolyUOp *binary = runner->compiled_binary;
+  poly_runner_cleanup(runner, device);
+  if (program) poly_uop_release(ctx, program);
+  if (binary) poly_uop_release(ctx, binary);
+}
 
 /* CPU backend */
 
@@ -2136,6 +2243,20 @@ static int cpu_lower_item_impl(
   free(src_owned);
   if (lin_owned) free(lin);
 
+  if (out->capture_binary) {
+    int size = 0;
+    uint8_t *bytes = poly_program_read_binary(prog, &size);
+    if (!bytes) {
+      poly_program_destroy(prog);
+      return -1;
+    }
+    out->compiled_binary = poly_uop0(ctx, POLY_OP_BINARY, POLY_UINT8, poly_arg_bytes(bytes, size));
+    free(bytes);
+    if (!out->compiled_binary) {
+      poly_program_destroy(prog);
+      return -1;
+    }
+  }
   out->kind = POLY_RUNNER_COMPILED;
   out->handle = prog;
   size_t prog_size = poly_program_estimated_size(prog);
@@ -2245,6 +2366,9 @@ static int interp_lower_item(PolyCtx *ctx, PolyUOp *program, const char *fn_name
   ih->n_lin = n_lin;
 
   out->kind = POLY_RUNNER_INTERP;
+  /* INTERP executes LINEAR directly; its instruction graph is its library.
+   * Do not introduce a bytecode dialect merely to obtain a search key. */
+  if (out->capture_binary) out->compiled_binary = poly_program_linear(program);
   out->handle = ih;
   out->handle_size = (int)(sizeof(*ih) + (size_t)n_lin * sizeof(PolyUOp *));
   out->program = program;
@@ -2362,7 +2486,11 @@ static int cuda_lower_item(PolyCtx *ctx, PolyUOp *program, const char *fn_name, 
   if (poly_dump_kernels_enabled())
     fprintf(stderr, "=== CUDA KERNEL %s ===\n%s\n=== END ===\n", fn_name, src);
 
-  PolyCudaProgram *prog = poly_compile_cuda(src, fn_name);
+  uint8_t *binary = NULL;
+  int binary_size = 0;
+  PolyCudaProgram *prog = out->capture_binary
+                              ? poly_compile_cuda_with_binary(src, fn_name, &binary, &binary_size)
+                              : poly_compile_cuda(src, fn_name);
   if (!prog) {
     fprintf(stderr, "=== FAILED CUDA KERNEL %s ===\n%s\n=== END ===\n", fn_name, src);
     free(src_owned);
@@ -2370,6 +2498,15 @@ static int cuda_lower_item(PolyCtx *ctx, PolyUOp *program, const char *fn_name, 
   }
   free(src_owned);
 
+  if (out->capture_binary) {
+    out->compiled_binary =
+        poly_uop0(ctx, POLY_OP_BINARY, POLY_UINT8, poly_arg_bytes(binary, binary_size));
+    free(binary);
+    if (!out->compiled_binary) {
+      poly_cuda_program_destroy(prog);
+      return -1;
+    }
+  }
   CudaRunnerHandle *ch = malloc(sizeof(CudaRunnerHandle));
   if (!ch) {
     poly_cuda_program_destroy(prog);
@@ -2414,10 +2551,15 @@ static int cuda_execute(PolyRunner *runner, void **args, int n_args) {
     cuda_args[i] = args[i];
   }
 
-  int ret = poly_cuda_launch(
-      ch->prog, cuda_args, n_args, runner->grid[0], runner->grid[1], runner->grid[2],
-      runner->block[0], runner->block[1], runner->block[2]
-  );
+  int ret = runner->wait ? poly_cuda_launch_timed(
+                               ch->prog, cuda_args, n_args, runner->grid[0], runner->grid[1],
+                               runner->grid[2], runner->block[0], runner->block[1],
+                               runner->block[2], &runner->elapsed_us
+                           )
+                         : poly_cuda_launch(
+                               ch->prog, cuda_args, n_args, runner->grid[0], runner->grid[1],
+                               runner->grid[2], runner->block[0], runner->block[1], runner->block[2]
+                           );
   /* Pinned tinygrad's run_linear passes wait=(DEBUG >= 2) to CUDA programs.
    * Normal eager/JIT execution only enqueues work; explicit synchronization
    * and host readback are the completion boundaries. Preserve synchronous
@@ -2661,7 +2803,8 @@ static PolyUOp *poly_prepare_x86_program_for_backend(
     PolyUOp *call,
     PolyUOp *device_uop,
     PolyDevice device,
-    uint32_t env_stamp
+    uint32_t env_stamp,
+    bool cache
 ) {
   if (!ctx || !call || call->op != POLY_OP_CALL) return NULL;
   PolyUOp *raw = poly_call_raw_body(call);
@@ -2676,7 +2819,7 @@ static PolyUOp *poly_prepare_x86_program_for_backend(
   };
   uint32_t hash = poly_program_device_cache_hash(raw, device_uop, device, env_stamp);
   PolyToProgramCacheEntry *entry =
-      (poly_engine_cache_enabled() && ctx->to_program_cache)
+      (cache && poly_engine_cache_enabled() && ctx->to_program_cache)
           ? poly_map_get(ctx->to_program_cache, hash, &key, poly_to_program_cache_eq)
           : NULL;
   if (entry) return entry->prepared_program;
@@ -2729,7 +2872,7 @@ static PolyUOp *poly_prepare_x86_program_for_backend(
   free(code);
   if (!prepared) return NULL;
 
-  if (poly_engine_cache_enabled() && ctx->to_program_cache) {
+  if (cache && poly_engine_cache_enabled() && ctx->to_program_cache) {
     entry = malloc(sizeof(*entry));
     if (entry) {
       entry->program = raw;
@@ -2975,7 +3118,7 @@ static PolyUOp *poly_apply_call_beam(PolyCtx *ctx, PolyUOp *call, int beam) {
 /* Current Tinygrad engine/realize.py:compile_linear. beam=-1 selects BEAM. */
 PolyUOp *poly_compile_linear(PolyCtx *ctx, PolyUOp *linear, int beam) {
   if (!ctx || !linear || linear->op != POLY_OP_LINEAR) return NULL;
-  int beam_value = beam < 0 ? poly_getenv_int("BEAM", 0) : beam;
+  int beam_value = beam < 0 ? poly_get_beam() : beam;
   PolyUOp **calls = linear->n_src > 0 ? calloc((size_t)linear->n_src, sizeof(*calls)) : NULL;
   if (linear->n_src > 0 && !calls) return NULL;
   uint32_t env_stamp = poly_runtime_cache_env_stamp();
@@ -3002,7 +3145,7 @@ PolyUOp *poly_compile_linear(PolyCtx *ctx, PolyUOp *linear, int beam) {
       break;
     }
     PolyUOp *program =
-        poly_prepare_program_for_backend(ctx, call, device_uop, item_device, env_stamp);
+        poly_prepare_program_for_backend(ctx, call, device_uop, item_device, env_stamp, true);
     if (!program) {
       ok = false;
       break;

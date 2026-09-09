@@ -83,6 +83,18 @@ class PolyRuntime {
   // Set before compilation; changing it does not rewrite existing JIT captures.
   get noopt() { return this._core.ffi.poly_get_noopt() }
 
+  get beam() { return this._core.ffi.poly_get_beam() }
+
+  set beam(value) {
+    if (!Number.isInteger(value) || value < -2147483648 || value > 2147483647) {
+      throw new TypeError('BEAM must be an int32')
+    }
+    if (!this._lifetime.alive || this._closing || this._activeAsync > 0) {
+      throw new Error('BEAM requires a live idle runtime')
+    }
+    this._core.ffi.poly_set_beam(value)
+  }
+
   set noopt(value) {
     if (!Number.isInteger(value) || value < -2147483648 || value > 2147483647) {
       throw new TypeError('NOOPT must be an int32')

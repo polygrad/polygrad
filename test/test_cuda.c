@@ -31,6 +31,32 @@
 
 /* Helper: build vecadd kernel IR (tensor-level) */
 
+TEST(cuda, beam_compiler_bytes_and_device_timing) {
+  SKIP_IF_NO_CUDA();
+  const char *source = "extern \"C\" __global__ void test(float *out) { out[0] = 7; }";
+  uint8_t *ba = NULL, *bb = NULL;
+  int na = 0, nb = 0;
+  PolyCudaProgram *a = poly_compile_cuda_with_binary(source, "test", &ba, &na);
+  PolyCudaProgram *b = poly_compile_cuda_with_binary(source, "test", &bb, &nb);
+  unsigned long long ptr = poly_cuda_alloc(sizeof(float));
+  void *args[] = {&ptr};
+  double elapsed = NAN;
+  int rc = a && ptr ? poly_cuda_launch_timed(a, args, 1, 1, 1, 1, 1, 1, 1, &elapsed) : -1;
+  float value = 0;
+  if (!rc) rc = poly_cuda_copy_dtoh(&value, ptr, sizeof(value));
+  bool equal = a && b && ba && bb && na > 0 && na == nb && !memcmp(ba, bb, (size_t)na);
+  free(ba);
+  free(bb);
+  poly_cuda_program_destroy(a);
+  poly_cuda_program_destroy(b);
+  if (ptr) poly_cuda_free(ptr);
+  ASSERT_TRUE(equal);
+  ASSERT_INT_EQ(rc, 0);
+  ASSERT_TRUE(isfinite(elapsed) && elapsed >= 0);
+  ASSERT_FLOAT_EQ(value, 7, 0);
+  PASS();
+}
+
 typedef struct {
   PolyCtx *ctx;
   PolyUOp *sink;

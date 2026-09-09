@@ -293,7 +293,7 @@ EM_JS(int, js_webgpu_memset_zero_impl, (uintptr_t handle, int nbytes), {
 EM_JS(
     uintptr_t,
     js_webgpu_get_or_create_pipeline,
-    (const char *wgsl_ptr, const char *entry_ptr, int n_args, int n_params, int debug_level),
+    (const char *wgsl_ptr, const char *entry_ptr, int n_args, int n_params, int debug_level, int cache),
     {
       const t0 = performance.now();
       const st = Module.__polygradWebGpuState;
@@ -305,7 +305,7 @@ EM_JS(
       const wgsl = UTF8ToString(wgsl_ptr);
       const entry = UTF8ToString(entry_ptr);
       const key = wgsl + '::' + entry + '::' + n_args + '::' + n_params;
-      const cached = st.pipelineKeyToId.get(key);
+      const cached = cache ? st.pipelineKeyToId.get(key) : 0;
       if (cached) {
         if (debug_level >= 7) {
           console.log(`[polygrad:webgpu:pipeline] hit entry=${entry} id=${cached} wgsl=${wgsl.length}`);
@@ -352,7 +352,7 @@ EM_JS(
 
       const id = st.nextPipelineId++;
       st.pipelines.set(id, {pipeline, bindGroupLayout, entry, wgsl});
-      st.pipelineKeyToId.set(key, id);
+      if (cache) st.pipelineKeyToId.set(key, id);
       if (debug_level >= 7) {
         console.log(
       `[polygrad:webgpu:pipeline] ready entry=${entry} id=${id} ` +
@@ -361,6 +361,11 @@ EM_JS(
       return id;
     }
 )
+
+EM_JS(void, js_webgpu_free_search_pipeline, (uintptr_t id), {
+  const st = Module.__polygradWebGpuState;
+  if (st) st.pipelines.delete(id);
+});
 
 EM_ASYNC_JS(
     int,
@@ -372,15 +377,20 @@ EM_ASYNC_JS(
      int gx,
      int gy,
      int gz,
-     int debug_level),
+     int debug_level,
+     double *elapsed_us),
     {
       const st = await Module.__polygradEnsureWebGPU();
       const rec = st.pipelines.get(pipeline_id);
       if (!rec) return -1;
+      // Pinned WebGPU wait uses device timestamps, not queue wall time.
+      if (elapsed_us && !st.device.features.has('timestamp-query')) return -1;
 
       const bgEntries = [ {binding : 0, resource : {buffer : st.infinityBuf}} ];
       const tempUniforms = [];
       const tempCopies = [];
+      let querySet = null, queryBuffer = null, queryReadback = null;
+      try {
       const outHandle = n_params > 0 ? HEAPU32[args >> 2] : 0;
 
       const paramHandles = [];
@@ -475,21 +485,47 @@ EM_ASYNC_JS(
           st.device.createBindGroup({layout : rec.bindGroupLayout, entries : bgEntries});
 
       const encoder = st.device.createCommandEncoder();
-      const pass = encoder.beginComputePass();
+      const passDescriptor = {};
+      if (elapsed_us) {
+        querySet = st.device.createQuerySet({type: 'timestamp', count: 2});
+        queryBuffer = st.device.createBuffer({size: 16,
+          usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC});
+        queryReadback = st.device.createBuffer({size: 16,
+          usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ});
+        passDescriptor.timestampWrites = {querySet, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1};
+      }
+      const pass = encoder.beginComputePass(passDescriptor);
       pass.setPipeline(rec.pipeline);
       pass.setBindGroup(0, bindGroup);
       pass.dispatchWorkgroups(gx, gy, gz);
       pass.end();
+      if (elapsed_us) {
+        encoder.resolveQuerySet(querySet, 0, 2, queryBuffer, 0);
+        encoder.copyBufferToBuffer(queryBuffer, 0, queryReadback, 0, 16);
+      }
       st.device.queue.submit([encoder.finish()]);
 
-      if (tempUniforms.length || tempCopies.length) {
+      if (elapsed_us) {
+        await queryReadback.mapAsync(GPUMapMode.READ);
+        const times = new BigUint64Array(queryReadback.getMappedRange());
+        HEAPF64[elapsed_us >> 3] = Number(times[1] - times[0]) / 1000;
+        queryReadback.unmap();
+      } else if (tempUniforms.length || tempCopies.length) {
         await st.device.queue.onSubmittedWorkDone();
       }
+      return 0;
+      } catch (error) {
+        console.error('polygrad: WebGPU dispatch failed:', error);
+        return -1;
+      } finally {
+      if (queryReadback) queryReadback.destroy();
+      if (queryBuffer) queryBuffer.destroy();
+      if (querySet) querySet.destroy();
       for (const ubuf of tempUniforms)
         ubuf.destroy();
       for (const buf of tempCopies)
         buf.destroy();
-      return 0;
+      }
     }
 )
 // clang-format on
@@ -695,7 +731,7 @@ int poly_webgpu_execute(PolyRunner *runner, void **args, int n_args) {
       fflush(stderr);
     }
     wh->pipeline_id = js_webgpu_get_or_create_pipeline(
-        wh->wgsl, wh->entry, n_args, runner->n_params, poly_debug_level()
+        wh->wgsl, wh->entry, n_args, runner->n_params, poly_debug_level(), !runner->capture_binary
     );
     wh->n_bindings = n_args;
     if (!wh->pipeline_id) return -1;
@@ -717,7 +753,8 @@ int poly_webgpu_execute(PolyRunner *runner, void **args, int n_args) {
   }
   int ret = js_webgpu_dispatch(
       wh->pipeline_id, (const uintptr_t *)args, n_args, runner->n_params, runner->grid[0],
-      runner->grid[1], runner->grid[2], poly_debug_level()
+      runner->grid[1], runner->grid[2], poly_debug_level(),
+      runner->wait ? &runner->elapsed_us : NULL
   );
   if (timing) {
     double t_done = poly_now_ms();
@@ -733,6 +770,7 @@ int poly_webgpu_execute(PolyRunner *runner, void **args, int n_args) {
 void poly_webgpu_free_runner(PolyRunner *runner) {
   if (!runner || !runner->handle) return;
   PolyWebGpuRunnerHandle *wh = (PolyWebGpuRunnerHandle *)runner->handle;
+  if (runner->capture_binary && wh->pipeline_id) js_webgpu_free_search_pipeline(wh->pipeline_id);
   free(wh->wgsl);
   free(wh->entry);
   free(wh);

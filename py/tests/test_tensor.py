@@ -231,6 +231,21 @@ def test_execution_noopt_context_restores_after_error():
     assert _ffi._lib.poly_get_noopt() == before
 
 
+def test_execution_beam_context_reaches_core_and_restores():
+    from polygrad.helpers import BEAM
+    before = BEAM.value
+    with pytest.raises(RuntimeError, match='beam scope sentinel'):
+        with Context(BEAM=2):
+            assert _ffi._lib.poly_get_beam() == 2
+            assert (Tensor([1., 2., 3.]) * 2 + 1).tolist() == [3., 5., 7.]
+            with Context(BEAM=0):
+                assert _ffi._lib.poly_get_beam() == 0
+            assert _ffi._lib.poly_get_beam() == 2
+            raise RuntimeError('beam scope sentinel')
+    assert BEAM.value == before
+    assert _ffi._lib.poly_get_beam() == before
+
+
 def test_execution_virtual_one_hot_realize_preserves_roots():
     x = Tensor([1, 2, 4]).one_hot(6)
     before = x.uop.raw

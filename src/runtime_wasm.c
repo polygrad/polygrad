@@ -267,6 +267,9 @@ int poly_wasm_lower_item(PolyCtx *ctx, PolyUOp *program, const char *fn_name, Po
   uint8_t *wasm_bytes = poly_render_wasm_matmul(scheduled_root, &wasm_len, true);
   if (wasm_bytes && wasm_len > 0) {
     kernel_id = js_compile_wasm_kernel(wasm_bytes, wasm_len);
+    if (kernel_id >= 0 && out->capture_binary)
+      out->compiled_binary =
+          poly_uop0(ctx, POLY_OP_BINARY, POLY_UINT8, poly_arg_bytes(wasm_bytes, wasm_len));
     free(wasm_bytes);
     wasm_bytes = NULL;
     wasm_len = 0;
@@ -289,9 +292,18 @@ int poly_wasm_lower_item(PolyCtx *ctx, PolyUOp *program, const char *fn_name, Po
   }
   if (kernel_id < 0 && (!wasm_bytes || wasm_len <= 0)) return -1;
 
-  if (kernel_id < 0) kernel_id = js_compile_wasm_kernel(wasm_bytes, wasm_len);
+  if (kernel_id < 0) {
+    kernel_id = js_compile_wasm_kernel(wasm_bytes, wasm_len);
+    if (kernel_id >= 0 && out->capture_binary)
+      out->compiled_binary =
+          poly_uop0(ctx, POLY_OP_BINARY, POLY_UINT8, poly_arg_bytes(wasm_bytes, wasm_len));
+  }
   free(wasm_bytes);
   if (kernel_id < 0) return -1;
+  if (out->capture_binary && !out->compiled_binary) {
+    js_free_wasm_kernel(kernel_id);
+    return -1;
+  }
 
   PolyWasmJitRunnerHandle *wh = malloc(sizeof(PolyWasmJitRunnerHandle));
   if (!wh) {

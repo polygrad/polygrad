@@ -12,15 +12,263 @@
 #include "../src/bigint.h"
 #include "../src/frontend.h"
 #include "../src/frontend_internal.h"
+#include "../src/engine/schedule.h"
 #include "../src/interp.h"
 #include "../src/tensor.h" /* poly_sum_reduce */
 #include "../src/uop/spec.h"
 #include "../src/uop/symbolic.h"
 #include "../src/uop/weak.h"
+#include "../src/utils.h"
 
 #include <inttypes.h>
+#include <unistd.h>
 
 #ifndef __EMSCRIPTEN__
+static PolyUOp *beam_action_sink(PolyCtx *ctx, PolyAxisType type, int n) {
+  PolyUOp *r = poly_range(ctx, n, 0, type);
+  PolyUOp *out = poly_test_program_param(ctx, POLY_FLOAT32, n, 0);
+  PolyUOp *value = poly_cast(ctx, r, POLY_FLOAT32);
+  PolyUOp *index = r;
+  if (type == POLY_AXIS_REDUCE) {
+    PolyUOp *src[] = {value, r};
+    value = poly_uop(ctx, POLY_OP_REDUCE, POLY_FLOAT32, src, 2, poly_arg_reduce(POLY_OP_ADD, 0));
+    index = poly_const_int(ctx, 0);
+  }
+  PolyUOp *ptr = poly_uop_index(ctx, out, &index, 1);
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, ptr, value, poly_arg_none());
+  if (type != POLY_AXIS_REDUCE)
+    store = poly_uop2(ctx, POLY_OP_END, POLY_VOID, store, r, poly_arg_none());
+  return poly_test_kernel_sink(ctx, &store, 1, "test");
+}
+
+TEST(codegen, beam_actions_match_pinned_catalogue) {
+  PolyOpt actions[256];
+  int count = poly_test_beam_actions(actions, 256);
+  int expected =
+      193 + (poly_getenv_flag("BEAM_PADTO") ? 7 : 0) + (poly_getenv_flag("NOLOCALS") ? 1 : 0);
+  ASSERT_INT_EQ(count, expected);
+  ASSERT_INT_EQ(actions[0].op, POLY_OPT_UPCAST);
+  ASSERT_INT_EQ(actions[0].arg, 0);
+  ASSERT_INT_EQ(actions[8].arg, 2);
+  ASSERT_INT_EQ(actions[48].op, POLY_OPT_UNROLL);
+  ASSERT_INT_EQ(actions[63].op, POLY_OPT_LOCAL);
+  PASS();
+}
+
+TEST(codegen, beam_scheduler_local_and_group_actions) {
+  PolyOptOps ops[] = {POLY_OPT_LOCAL, POLY_OPT_GROUP, POLY_OPT_GROUPTOP, POLY_OPT_THREAD};
+  PolyAxisType inputs[] = {POLY_AXIS_GLOBAL, POLY_AXIS_REDUCE, POLY_AXIS_REDUCE, POLY_AXIS_WEAK};
+  PolyAxisType outputs[] = {
+      POLY_AXIS_LOCAL, POLY_AXIS_GROUP_REDUCE, POLY_AXIS_GROUP_REDUCE, POLY_AXIS_THREAD};
+  for (int i = 0; i < 4; i++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyRendererCaps caps = {
+        .device = "CUDA",
+        .has_local = true,
+        .has_threads = true,
+        .max_threads = 32,
+        .global_max = {32, 1, 1}};
+    PolyUOp *sink = beam_action_sink(ctx, inputs[i], 8);
+    PolyOpt opt = {
+        .op = ops[i], .has_axis = true, .axis = 0, .arg_kind = POLY_OPT_ARG_INT, .arg = 4};
+    PolyUOp *actual = poly_test_apply_opt(ctx, sink, caps, opt);
+    PolyUOp *r = poly_range(ctx, 8, 0, inputs[i]);
+    PolyUOp *part = poly_range(ctx, 2, 0, inputs[i]);
+    PolyUOp *split = poly_range(ctx, 4, 1, outputs[i]);
+    bool top = ops[i] == POLY_OPT_GROUPTOP || ops[i] == POLY_OPT_THREAD;
+    PolyUOp *replacement = poly_alu2(
+        ctx, POLY_OP_ADD,
+        poly_alu2(ctx, POLY_OP_MUL, top ? split : part, poly_const_int(ctx, top ? 2 : 4)),
+        top ? part : split
+    );
+    PolyUOp *expected = poly_uop_substitute(ctx, sink, &r, &replacement, 1);
+    bool same = actual && actual->n_src == expected->n_src && actual->src[0] == expected->src[0] &&
+                actual->arg.kind == POLY_ARG_KERNEL_INFO &&
+                actual->arg.kernel_info->n_applied_opts == 1 &&
+                poly_kernel_info_eq(
+                    actual->arg.kernel_info,
+                    &(PolyKernelInfo){.name = "test", .applied_opts = &opt, .n_applied_opts = 1}
+                );
+    poly_ctx_destroy(ctx);
+    ASSERT_TRUE(same);
+  }
+  PASS();
+}
+
+TEST(codegen, beam_scheduler_full_axis_and_nolocals) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = beam_action_sink(ctx, POLY_AXIS_GLOBAL, 8);
+  PolyRendererCaps caps = {.device = "CUDA", .has_local = true};
+  PolyOpt opt = {
+      .op = POLY_OPT_UPCAST, .has_axis = true, .axis = 0, .arg_kind = POLY_OPT_ARG_INT, .arg = 0};
+  PolyUOp *up = poly_test_apply_opt(ctx, sink, caps, opt);
+  PolyUOp *no = poly_test_apply_opt(ctx, sink, caps, (PolyOpt){.op = POLY_OPT_NOLOCALS});
+  bool success =
+      up && no && no->arg.kind == POLY_ARG_KERNEL_INFO && no->arg.kernel_info->dont_use_locals;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(success);
+  PASS();
+}
+
+TEST(codegen, beam_scheduler_excludes_void_and_device_ranges) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *bound = poly_const_int(ctx, 8);
+  PolyUOp *loop =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_VOID, bound, poly_arg_range(0, POLY_AXIS_WEAK));
+  PolyUOp *device = poly_range(ctx, 8, 1, POLY_AXIS_DEVICE);
+  PolyUOp *range = poly_range(ctx, 8, 2, POLY_AXIS_WEAK);
+  PolyUOp *src[] = {loop, device, range};
+  PolyUOp *sink = poly_test_kernel_sink(ctx, src, 3, "test");
+  PolyOpt opt = {
+      .op = POLY_OPT_UPCAST, .has_axis = true, .axis = 0, .arg_kind = POLY_OPT_ARG_INT, .arg = 4};
+  PolyUOp *result = poly_test_apply_opt(ctx, sink, (PolyRendererCaps){.device = "CPU"}, opt);
+  bool correct = result && result->src[0] == loop && result->src[1] == device &&
+                 result->src[2] != range && result->src[2]->op == POLY_OP_ADD;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
+TEST(codegen, beam_scheduler_padto_guards_loads_and_stores) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *r = poly_range(ctx, 12, 0, POLY_AXIS_GLOBAL);
+  PolyUOp *out = poly_test_program_param(ctx, POLY_FLOAT32, 12, 0);
+  PolyUOp *in = poly_test_program_param(ctx, POLY_FLOAT32, 12, 1);
+  PolyUOp *load = poly_uop_index(ctx, in, &r, 1);
+  PolyUOp *store = poly_uop2(
+      ctx, POLY_OP_STORE, POLY_VOID, poly_uop_index(ctx, out, &r, 1), load, poly_arg_none()
+  );
+  PolyUOp *end = poly_uop2(ctx, POLY_OP_END, POLY_VOID, store, r, poly_arg_none());
+  PolyUOp *sink = poly_test_kernel_sink(ctx, &end, 1, "test");
+  PolyUOp *actual = poly_test_apply_opt(
+      ctx, sink, (PolyRendererCaps){.device = "CUDA", .has_local = true},
+      (PolyOpt
+      ){.op = POLY_OPT_PADTO, .has_axis = true, .axis = 0, .arg_kind = POLY_OPT_ARG_INT, .arg = 32}
+  );
+  PolyUOp *padded = poly_range(ctx, 32, 0, POLY_AXIS_GLOBAL);
+  PolyUOp *valid = poly_alu2(ctx, POLY_OP_CMPLT, padded, poly_const_int(ctx, 12));
+  PolyUOp *mask = poly_alu2(
+      ctx, POLY_OP_AND, valid, poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_bool(true))
+  );
+  PolyUOp *invalid = poly_uop_const(ctx, poly_arg_invalid(), POLY_BOOL);
+  PolyUOp *index =
+      poly_uop3(ctx, POLY_OP_WHERE, padded->dtype, mask, padded, invalid, poly_arg_none());
+  PolyUOp *gated_load = poly_uop3(
+      ctx, POLY_OP_WHERE, load->dtype, valid, poly_uop_index(ctx, in, &index, 1), invalid,
+      poly_arg_none()
+  );
+  PolyUOp *expected_store = poly_uop2(
+      ctx, POLY_OP_STORE, POLY_VOID, poly_uop_index(ctx, out, &index, 1), gated_load,
+      poly_arg_none()
+  );
+  PolyUOp *expected_end =
+      poly_uop2(ctx, POLY_OP_END, POLY_VOID, expected_store, padded, poly_arg_none());
+  bool same = actual && actual->src[0] == expected_end;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(same);
+  PASS();
+}
+
+TEST(codegen, beam_scheduler_splits_symbolic_divisible_bound) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *n = poly_uop_variable(ctx, "n", 2, 8, POLY_WEAKINT, 1, false);
+  PolyUOp *four = poly_const_int(ctx, 4);
+  PolyUOp *bound = poly_alu2(ctx, POLY_OP_MUL, n, four);
+  PolyUOp *r =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, bound, poly_arg_range(0, POLY_AXIS_WEAK));
+  PolyUOp *sink = poly_test_kernel_sink(ctx, &r, 1, "test");
+  PolyOpt opt = {
+      .op = POLY_OPT_UPCAST, .has_axis = true, .axis = 0, .arg_kind = POLY_OPT_ARG_INT, .arg = 4};
+  PolyUOp *actual = poly_test_apply_opt(ctx, sink, (PolyRendererCaps){.device = "CPU"}, opt);
+  /* UOp.divides keeps n*1 structural until the normal symbolic pass. */
+  PolyUOp *remaining = poly_alu2(ctx, POLY_OP_MUL, n, poly_const_int(ctx, 1));
+  PolyUOp *part = poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, remaining, r->arg);
+  PolyUOp *split = poly_range(ctx, 4, 1, POLY_AXIS_UPCAST);
+  PolyUOp *expected = poly_alu2(ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, part, four), split);
+  bool correct = actual && actual->src[0] == expected;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
+TEST(codegen, beam_explicit_invalid_option_fails_closed) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *base = beam_action_sink(ctx, POLY_AXIS_WEAK, 8);
+  PolyOpt opt = {
+      .op = POLY_OPT_UPCAST, .has_axis = true, .axis = 0, .arg_kind = POLY_OPT_ARG_INT, .arg = 3};
+  PolyKernelInfo info = {
+      .name = "test", .has_opts_to_apply = true, .opts_to_apply = &opt, .n_opts_to_apply = 1};
+  PolyUOp *sink =
+      poly_uop(ctx, POLY_OP_SINK, POLY_VOID, base->src, base->n_src, poly_arg_kernel_info(&info));
+  PolyUOp *result = poly_full_rewrite_to_sink_ex(
+      ctx, sink, (PolyRewriteOpts){.optimize = true, .caps = poly_c_renderer_caps()}
+  );
+  bool rejected = result == NULL;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(rejected);
+  PASS();
+}
+
+TEST(codegen, beam_explicit_options_override_search_and_noopt) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *base = beam_action_sink(ctx, POLY_AXIS_WEAK, 8);
+  PolyOpt opt = {
+      .op = POLY_OPT_UPCAST, .has_axis = true, .axis = 0, .arg_kind = POLY_OPT_ARG_INT, .arg = 4};
+  int previous = poly_get_noopt();
+  poly_set_noopt(1);
+  bool correct = true;
+  for (int count = 0; count <= 1; count++) {
+    PolyKernelInfo info = {
+        .name = "test", .has_opts_to_apply = true, .opts_to_apply = &opt, .n_opts_to_apply = count};
+    PolyUOp *sink =
+        poly_uop(ctx, POLY_OP_SINK, POLY_VOID, base->src, base->n_src, poly_arg_kernel_info(&info));
+    PolyUOp *result = poly_full_rewrite_to_sink_ex(
+        ctx, sink,
+        (PolyRewriteOpts){.optimize = true, .beam_width = 2, .caps = poly_c_renderer_caps()}
+    );
+    correct &= result && result->tag == 1 && result->arg.kind == POLY_ARG_KERNEL_INFO;
+    if (result && result->arg.kind == POLY_ARG_KERNEL_INFO) {
+      const PolyKernelInfo *scheduled = result->arg.kernel_info;
+      correct &= !scheduled->has_opts_to_apply && scheduled->n_applied_opts == count;
+      if (count && scheduled->n_applied_opts == 1)
+        correct &= scheduled->applied_opts[0].op == opt.op && scheduled->applied_opts[0].arg == 4;
+    }
+  }
+  poly_set_noopt(previous);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
+TEST(codegen, beam_scheduler_swap_preserves_connections) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *r0 = poly_range(ctx, 2, 0, POLY_AXIS_GLOBAL);
+  PolyUOp *r1 = poly_range(ctx, 3, 1, POLY_AXIS_GLOBAL);
+  PolyUOp *out = poly_test_program_param(ctx, POLY_FLOAT32, 6, 0);
+  PolyUOp *index =
+      poly_alu2(ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, r0, poly_const_int(ctx, 3)), r1);
+  PolyUOp *store = poly_uop2(
+      ctx, POLY_OP_STORE, POLY_VOID, poly_uop_index(ctx, out, &index, 1),
+      poly_cast(ctx, r0, POLY_FLOAT32), poly_arg_none()
+  );
+  PolyUOp *src[] = {store, r0, r1};
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, src, 3, poly_arg_none());
+  PolyUOp *sink = poly_test_kernel_sink(ctx, &end, 1, "test");
+  PolyUOp *actual = poly_test_apply_opt(
+      ctx, sink, (PolyRendererCaps){.device = "CUDA", .has_local = true},
+      (PolyOpt
+      ){.op = POLY_OPT_SWAP, .has_axis = true, .axis = 0, .arg_kind = POLY_OPT_ARG_INT, .arg = 1}
+  );
+  PolyUOp *from[] = {r0, r1};
+  PolyUOp *to[] = {
+      poly_range(ctx, 2, 1, POLY_AXIS_GLOBAL), poly_range(ctx, 3, 0, POLY_AXIS_GLOBAL)};
+  PolyUOp *expected = poly_uop_substitute(ctx, end, from, to, 2);
+  bool same = actual && actual->src[0] == expected;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(same);
+  PASS();
+}
+
 TEST(codegen, beam_candidate_normalizes_ended_range_expressions) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *out = poly_test_program_param(ctx, POLY_FLOAT32, 4, 0);
@@ -229,6 +477,132 @@ TEST(codegen, beam_parameter_inventory_is_not_fixed_at_64) {
   poly_ctx_destroy(ctx);
   ASSERT_INT_EQ(n_args, 65);
   ASSERT_TRUE(isfinite(elapsed) && elapsed >= 0);
+  PASS();
+}
+
+TEST(codegen, beam_candidate_uses_selected_backend) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = beam_action_sink(ctx, POLY_AXIS_WEAK, 8);
+  int n_args = 0;
+  double elapsed = poly_test_beam_compile_and_time(
+      ctx, sink,
+      (PolyRewriteOpts
+      ){.device = POLY_DEVICE_INTERP, .caps = {.device = "PYTHON", .has_int64 = true}},
+      1, &n_args
+  );
+  int device = poly_test_beam_last_device();
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(isfinite(elapsed));
+  ASSERT_INT_EQ(n_args, 1);
+  ASSERT_INT_EQ(device, POLY_DEVICE_INTERP);
+  PASS();
+}
+
+TEST(codegen, beam_cache_key_covers_width_and_device) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = beam_action_sink(ctx, POLY_AXIS_WEAK, 8);
+  uint64_t base = poly_test_beam_cache_key(ctx, sink, 1, POLY_DEVICE_CPU);
+  uint64_t width = poly_test_beam_cache_key(ctx, sink, 2, POLY_DEVICE_CPU);
+  uint64_t device = poly_test_beam_cache_key(ctx, sink, 1, POLY_DEVICE_INTERP);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(base != width && base != device);
+  PASS();
+}
+
+TEST(codegen, beam_cache_key_covers_graph_edges) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_const_int(ctx, 2), *b = poly_const_int(ctx, 3);
+  PolyUOp *sum = poly_alu2(ctx, POLY_OP_ADD, a, b);
+  PolyUOp *left = poly_alu2(ctx, POLY_OP_MUL, sum, a);
+  PolyUOp *right = poly_alu2(ctx, POLY_OP_MUL, sum, b);
+  PolyUOp *x = poly_test_kernel_sink(ctx, &left, 1, "test");
+  PolyUOp *y = poly_test_kernel_sink(ctx, &right, 1, "test");
+  uint64_t xkey = poly_test_beam_cache_key(ctx, x, 1, POLY_DEVICE_CPU);
+  uint64_t ykey = poly_test_beam_cache_key(ctx, y, 1, POLY_DEVICE_CPU);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(xkey != ykey);
+  PASS();
+}
+
+TEST(codegen, beam_binary_identity_is_independent_of_temporary_path) {
+  const char *source = "void test_call(void **args) { *(float *)args[0] = 7; }";
+  PolyProgram *a = poly_compile_c(source, "test");
+  PolyProgram *b = poly_compile_c(source, "test");
+  int na = 0, nb = 0;
+  uint8_t *ba = a ? poly_program_read_binary(a, &na) : NULL;
+  uint8_t *bb = b ? poly_program_read_binary(b, &nb) : NULL;
+  bool equal = ba && bb && na > 0 && na == nb && !memcmp(ba, bb, (size_t)na);
+  free(ba);
+  free(bb);
+  poly_program_destroy(a);
+  poly_program_destroy(b);
+  ASSERT_TRUE(equal);
+  PASS();
+}
+
+TEST(codegen, beam_cache_replays_long_history_and_rejects_truncation) {
+  char directory[] = "temp/beam-cache-test.XXXXXX";
+  ASSERT_NOT_NULL(mkdtemp(directory));
+  const char *previous = getenv("XDG_CACHE_HOME");
+  char *saved = previous ? strdup(previous) : NULL;
+  ASSERT_TRUE(!previous || saved);
+  setenv("XDG_CACHE_HOME", directory, 1);
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = beam_action_sink(ctx, POLY_AXIS_GLOBAL, 128), *result = sink;
+  PolyOpt opt = {
+      .op = POLY_OPT_UPCAST, .has_axis = true, .axis = 0, .arg_kind = POLY_OPT_ARG_INT, .arg = 2};
+  for (int i = 0; result && i < 7; i++)
+    result = poly_test_apply_opt(ctx, result, (PolyRendererCaps){.device = "CPU"}, opt);
+  char path[600] = {0};
+  bool correct = result && result->arg.kernel_info->n_applied_opts == 7 &&
+                 poly_test_beam_cache_write(ctx, sink, result, 17, path, sizeof(path)) == 0;
+  correct &= poly_test_beam_cache_read(ctx, sink, 17) == result;
+  FILE *file = path[0] ? fopen(path, "wb") : NULL;
+  if (file) {
+    fputc(0, file);
+    fclose(file);
+  }
+  correct &= file != NULL && poly_test_beam_cache_read(ctx, sink, 17) == NULL;
+  correct &= sink->arg.kernel_info->n_applied_opts == 0;
+  poly_ctx_destroy(ctx);
+  if (path[0]) remove(path);
+  char subdir[600];
+  snprintf(subdir, sizeof(subdir), "%s/polygrad/beam", directory);
+  rmdir(subdir);
+  snprintf(subdir, sizeof(subdir), "%s/polygrad", directory);
+  rmdir(subdir);
+  rmdir(directory);
+  if (saved)
+    setenv("XDG_CACHE_HOME", saved, 1);
+  else
+    unsetenv("XDG_CACHE_HOME");
+  free(saved);
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
+TEST(codegen, beam_time_call_owns_binary_and_program_without_runtime_cache) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = beam_action_sink(ctx, POLY_AXIS_WEAK, 8);
+  PolyUOp *out = poly_test_program_param(ctx, POLY_FLOAT32, 8, 0);
+  PolyUOp *call = poly_uop2(ctx, POLY_OP_CALL, POLY_VOID, sink, out, poly_arg_none());
+  PolyRunner runner;
+  ASSERT_INT_EQ(poly_time_call_prepare(ctx, call, POLY_DEVICE_CPU, &runner), 0);
+  ASSERT_NOT_NULL(runner.compiled_binary);
+  ASSERT_INT_EQ(runner.compiled_binary->op, POLY_OP_BINARY);
+  ASSERT_INT_EQ(poly_runtime_cache_len(ctx), 0);
+  ASSERT_INT_EQ(poly_to_program_cache_len(ctx), 0);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  float values[8] = {0};
+  void *args[] = {values};
+  double time = poly_time_call(&runner, POLY_DEVICE_CPU, args, 1, NULL, 0, 3, INFINITY, 65536);
+  bool correct = isfinite(time) && !runner.wait;
+  for (int i = 0; i < 8; i++)
+    correct &= values[i] == (float)i;
+  poly_time_call_finish(ctx, &runner, POLY_DEVICE_CPU);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(correct);
   PASS();
 }
 #endif

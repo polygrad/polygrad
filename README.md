@@ -178,6 +178,13 @@ explicit BEAM search. The setting participates in program-cache keys and does
 not change already compiled JIT captures. It is shared by native contexts;
 each Wasm module has its own setting. Restore it after a scoped experiment.
 
+Python `Context(BEAM=2)` and JS `runtime.beam = 2` select kernel beam-search
+width through the same C policy. Zero disables search. Search compiles and
+times candidates on the selected backend; WebGPU timing requires the adapter's
+optional `timestamp-query` feature. Without it, candidates are not timed and
+the original kernel is kept. Change JS settings while idle and restore them
+after use; existing compiled JIT captures are unchanged.
+
 Default storage dtypes use the same C-owned policy: Python
 `Context(DEFAULT_FLOAT='float64', DEFAULT_INT='int64')`, or JS
 `runtime.defaultFloat` / `runtime.defaultInt`. Change JS settings while idle
@@ -257,7 +264,7 @@ Environment variables:
 POLY_DEVICE=cpu|cuda|hip|x86|interp
 POLY_CORE=native|wasm
 POLY_DUMP_KERNELS=1
-POLY_BEAM=4
+BEAM=4
 ```
 
 ## Runtime Ownership

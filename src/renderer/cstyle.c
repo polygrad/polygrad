@@ -152,6 +152,7 @@ PolyRendererCaps poly_c_renderer_caps(void) {
       .has_simd_int = false,
       .max_vec_width = 4,
       .max_threads = has_threads ? cpu_thread_count() : 0,
+      .global_max = {has_threads ? cpu_thread_count() : 0, 0, 0},
   };
 }
 
