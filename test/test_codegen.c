@@ -2238,7 +2238,7 @@ TEST(codegen, reduce_merge_shared_end) {
 }
 
 TEST(codegen, reduce_merge_applies_independent_groups_atomically) {
-  /* Pinned tinygrad/codegen/late/devectorizer.py:330-348 collects every
+  /* Pinned tinygrad/codegen/__init__.py:190-208 collects every
    * mergeable END replacement and applies the complete substitution map once.
    * Two independent reduce-range groups catch the order-dependent failure
    * where rewriting the first group invalidates pointer keys in the second. */
@@ -2285,7 +2285,7 @@ TEST(codegen, reduce_merge_applies_independent_groups_atomically) {
 }
 
 TEST(codegen, reduce_merge_cloned_context_preserves_wide_metadata) {
-  /* Pinned devectorizer.py:330-348 clones a shared reduction RANGE for a
+  /* Pinned codegen/__init__.py:190-208 clones a shared reduction RANGE for a
    * second active-range context with one unrestricted
    * e.substitute(dict(zip(r, tr))).  The cloned path must retain every STACK
    * lane and the ancestor tag. */
@@ -2341,6 +2341,219 @@ TEST(codegen, reduce_merge_cloned_context_preserves_wide_metadata) {
   ASSERT_TRUE(max_axis >= 3);
 
   poly_ctx_destroy(ctx);
+  PASS();
+}
+
+/* Scalar IR loop count is independent of Tensor's maximum shape rank. */
+static PolyUOp *reduce_test_ranges(PolyCtx *ctx, int n_reduce, int n_outer) {
+  PolyUOp *src[1 + 80];
+  PolyUOp *value = NULL;
+  for (int i = 0; i < n_reduce + n_outer; i++) {
+    PolyUOp *r = poly_range(ctx, 2, i, i < n_reduce ? POLY_AXIS_REDUCE : POLY_AXIS_LOOP);
+    if (i < n_reduce) src[i + 1] = r;
+    PolyUOp *v = poly_cast(ctx, r, POLY_INT32);
+    value = value ? poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, value, v, poly_arg_none()) : v;
+  }
+  src[0] = value;
+  PolyUOp *red =
+      poly_uop(ctx, POLY_OP_REDUCE, POLY_INT32, src, n_reduce + 1, poly_arg_reduce(POLY_OP_ADD, 0));
+  return poly_apply_pm_reduce(ctx, poly_uop_sink(ctx, &red, 1));
+}
+
+TEST(codegen, reduce_ranges_have_one_tagged_end) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *out = reduce_test_ranges(ctx, 2, 0);
+  ASSERT_NOT_NULL(out);
+  int n = 0, ends = 0;
+  PolyUOp **topo = poly_toposort(ctx, out, &n);
+  for (int i = 0; i < n; i++) {
+    PolyUOp *u = topo[i];
+    if (u->op != POLY_OP_END) continue;
+    ends++;
+    ASSERT_INT_EQ(u->n_src, 3);
+    ASSERT_INT_EQ(u->src[0]->op, POLY_OP_STORE);
+    ASSERT_INT_EQ(u->tag_arg.kind, POLY_ARG_STRING);
+    ASSERT_STR_EQ(u->tag_arg.str, "mergeable");
+    for (int j = 1; j < 3; j++)
+      ASSERT_INT_EQ(poly_range_axis_id(u->src[j]->arg), j - 1);
+  }
+  ASSERT_INT_EQ(ends, 1);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, reduce_weak_input_accumulates_in_strong_storage_dtype) {
+  PolyDType dtypes[] = {POLY_WEAKINT, POLY_WEAKFLOAT};
+  PolyOps ops[] = {POLY_OP_ADD, POLY_OP_MUL, POLY_OP_MAX};
+  for (int d = 0; d < 2; d++)
+    for (int op = 0; op < 3; op++) {
+      PolyCtx *ctx = poly_ctx_new();
+      PolyUOp *r = poly_range(ctx, 2, 0, POLY_AXIS_REDUCE);
+      PolyUOp *src[] = {poly_cast(ctx, r, dtypes[d]), r};
+      PolyUOp *red = poly_uop(ctx, POLY_OP_REDUCE, dtypes[d], src, 2, poly_arg_reduce(ops[op], 0));
+      PolyUOp *out = poly_apply_pm_reduce(ctx, poly_uop_sink(ctx, &red, 1));
+      ASSERT_NOT_NULL(out);
+      int n = 0, updates = 0;
+      PolyUOp **topo = poly_toposort(ctx, out, &n);
+      for (int i = 0; i < n; i++) {
+        PolyUOp *u = topo[i];
+        if (u->op != POLY_OP_STORE || u->src[1]->op != ops[op]) continue;
+        updates++;
+        ASSERT_TRUE(poly_dtype_eq(u->src[1]->dtype, poly_dtype_strong(dtypes[d])));
+        ASSERT_TRUE(poly_dtype_eq(u->src[0]->dtype, u->src[1]->dtype));
+      }
+      ASSERT_INT_EQ(updates, 1);
+      poly_ctx_destroy(ctx);
+    }
+  PASS();
+}
+
+TEST(codegen, reduce_loop_count_exceeds_tensor_rank) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *out = reduce_test_ranges(ctx, POLY_MAX_DIMS + 1, 0);
+  ASSERT_NOT_NULL(out);
+  int n = 0, ends = 0;
+  PolyUOp **topo = poly_toposort(ctx, out, &n);
+  for (int i = 0; i < n; i++) {
+    if (topo[i]->op != POLY_OP_END) continue;
+    ends++;
+    ASSERT_INT_EQ(topo[i]->n_src, POLY_MAX_DIMS + 2);
+  }
+  ASSERT_INT_EQ(ends, 1);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, reduce_initialization_preserves_all_outer_ranges) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *out = reduce_test_ranges(ctx, 1, 65);
+  ASSERT_NOT_NULL(out);
+  int n = 0, initializers = 0;
+  PolyUOp **topo = poly_toposort(ctx, out, &n);
+  for (int i = 0; i < n; i++) {
+    PolyUOp *u = topo[i];
+    if (u->op != POLY_OP_STORE || u->src[1]->op != POLY_OP_CONST) continue;
+    initializers++;
+    ASSERT_INT_EQ(u->src[0]->op, POLY_OP_AFTER);
+    ASSERT_INT_EQ(u->src[0]->n_src, 66);
+    for (int j = 1; j < 66; j++)
+      ASSERT_INT_EQ(poly_range_axis_id(u->src[0]->src[j]->arg), j);
+  }
+  ASSERT_INT_EQ(initializers, 1);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, reduce_merge_discovers_tagged_ends_without_registration) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *r = poly_range(ctx, 2, 0, POLY_AXIS_REDUCE);
+  PolyUOp *v = poly_cast(ctx, r, POLY_INT32);
+  PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(1));
+  PolyUOp *roots[2];
+  for (int i = 0; i < 2; i++) {
+    PolyUOp *body =
+        poly_uop2(ctx, i ? POLY_OP_MUL : POLY_OP_ADD, POLY_INT32, v, one, poly_arg_none());
+    PolyUOp *src[] = {body, r};
+    roots[i] = poly_uop_tagged_arg(
+        ctx, POLY_OP_END, POLY_VOID, src, 2, poly_arg_none(), 0, poly_arg_str("mergeable")
+    );
+  }
+  PolyUOp *out = poly_apply_pm_reduce(ctx, poly_uop_sink(ctx, roots, 2));
+  ASSERT_NOT_NULL(out);
+  int n = 0, ends = 0;
+  PolyUOp **topo = poly_toposort(ctx, out, &n);
+  for (int i = 0; i < n; i++) {
+    if (topo[i]->op != POLY_OP_END) continue;
+    ends++;
+    ASSERT_INT_EQ(topo[i]->src[0]->op, POLY_OP_GROUP);
+    ASSERT_INT_EQ(topo[i]->src[0]->n_src, 2);
+    ASSERT_TRUE(topo[i]->src[1] == r);
+  }
+  ASSERT_INT_EQ(ends, 1);
+  ASSERT_TRUE(poly_apply_pm_reduce(ctx, out) == out);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+/* The two active-range sets agree through64 entries and differ at65. */
+static PolyUOp *reduce_test_context_ends(PolyCtx *ctx) {
+  int64_t extra[] = {91, 92};
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(2));
+  PolyUOp *r = poly_uop_tagged_arg(
+      ctx, POLY_OP_RANGE, POLY_WEAKINT, &bound, 1, poly_arg_range_ex(0, POLY_AXIS_REDUCE, extra, 2),
+      17, poly_arg_str("range-metadata")
+  );
+  PolyUOp *shared = poly_cast(ctx, r, POLY_INT32);
+  for (int i = 1; i <= 64; i++) {
+    PolyUOp *v = poly_cast(ctx, poly_range(ctx, 2, i, POLY_AXIS_LOOP), POLY_INT32);
+    shared = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, shared, v, poly_arg_none());
+  }
+  PolyUOp *ends[2];
+  for (int i = 0; i < 2; i++) {
+    PolyUOp *v = poly_cast(ctx, poly_range(ctx, 2, 65 + i, POLY_AXIS_LOOP), POLY_INT32);
+    PolyUOp *body = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, shared, v, poly_arg_none());
+    PolyUOp *src[] = {body, r};
+    ends[i] = poly_uop_tagged_arg(
+        ctx, POLY_OP_END, POLY_VOID, src, 2, poly_arg_none(), 0, poly_arg_str("mergeable")
+    );
+  }
+  return poly_uop_sink(ctx, ends, 2);
+}
+
+TEST(codegen, reduce_merge_preserves_large_contexts_and_range_metadata) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *out = poly_apply_pm_reduce(ctx, reduce_test_context_ends(ctx));
+  ASSERT_NOT_NULL(out);
+  int n = 0, ends = 0, cloned = 0;
+  PolyUOp **topo = poly_toposort(ctx, out, &n);
+  for (int i = 0; i < n; i++) {
+    PolyUOp *u = topo[i];
+    if (u->op != POLY_OP_END) continue;
+    ends++;
+    ASSERT_INT_EQ(u->src[0]->op, POLY_OP_ADD);
+    PolyUOp *r = u->src[1];
+    ASSERT_INT_EQ(r->tag, 17);
+    ASSERT_STR_EQ(r->tag_arg.str, "range-metadata");
+    ASSERT_INT_EQ(poly_range_n_extra(r->arg), 2);
+    ASSERT_INT_EQ(poly_range_extra(r->arg)[0], 91);
+    ASSERT_INT_EQ(poly_range_extra(r->arg)[1], 92);
+    int64_t axis = poly_range_axis_id(r->arg);
+    ASSERT_TRUE(axis == 0 || axis == 67);
+    cloned += axis == 67;
+    PolyUOp *active[66];
+    ASSERT_INT_EQ(poly_uop_ranges(ctx, u, active, 66), 65);
+  }
+  ASSERT_INT_EQ(ends, 2);
+  ASSERT_INT_EQ(cloned, 1);
+  ASSERT_TRUE(poly_apply_pm_reduce(ctx, out) == out);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, reduce_scratch_failure_does_not_publish_partial_graph) {
+  for (int kind = 0; kind < 2; kind++) {
+    int failures = 0;
+    bool completed = false;
+    for (int allocation = 0; allocation < 32; allocation++) {
+      PolyCtx *ctx = poly_ctx_new();
+      PolyUOp *sink = kind ? reduce_test_context_ends(ctx) : NULL;
+      poly_test_reduce_alloc_fail_after(allocation);
+      PolyUOp *out = kind ? poly_apply_pm_reduce(ctx, sink) : reduce_test_ranges(ctx, 2, 0);
+      poly_test_reduce_alloc_fail_after(-1);
+      if (out)
+        completed = true;
+      else
+        failures++;
+      if (sink)
+        ASSERT_NOT_NULL(poly_apply_pm_reduce(ctx, sink));
+      else
+        ASSERT_NOT_NULL(reduce_test_ranges(ctx, 2, 0));
+      poly_ctx_destroy(ctx);
+      if (completed) break;
+    }
+    ASSERT_TRUE(completed);
+    ASSERT_TRUE(failures > 0);
+  }
   PASS();
 }
 
@@ -6631,6 +6844,40 @@ TEST(codegen, reduce_local_preserves_group_range_replacement_metadata) {
   }
   ASSERT_TRUE(direct_index_coordinate);
 
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, grouped_reduce_keeps_non_group_loops_beyond_tensor_rank) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *src[POLY_MAX_DIMS + 3];
+  src[1] = poly_range(ctx, 2, 0, POLY_AXIS_GROUP_REDUCE);
+  PolyUOp *value = poly_cast(ctx, src[1], POLY_INT32);
+  for (int i = 2; i < POLY_MAX_DIMS + 3; i++) {
+    src[i] = poly_range(ctx, 2, i - 1, POLY_AXIS_REDUCE);
+    value = poly_uop2(
+        ctx, POLY_OP_ADD, POLY_INT32, value, poly_cast(ctx, src[i], POLY_INT32), poly_arg_none()
+    );
+  }
+  src[0] = value;
+  PolyUOp *red = poly_uop(
+      ctx, POLY_OP_REDUCE, POLY_INT32, src, POLY_MAX_DIMS + 3, poly_arg_reduce(POLY_OP_ADD, 0)
+  );
+  PolyUOp *out = poly_apply_pm_reduce(ctx, poly_uop_sink(ctx, &red, 1));
+  ASSERT_NOT_NULL(out);
+  int n = 0, stages = 0, partial_ends = 0;
+  PolyUOp **topo = poly_toposort(ctx, out, &n);
+  for (int i = 0; i < n; i++) {
+    PolyUOp *u = topo[i];
+    if (u->op == POLY_OP_STAGE) {
+      stages++;
+      ASSERT_INT_EQ(u->n_src, 2);
+      ASSERT_PTR_EQ(u->src[1], src[1]);
+    }
+    if (u->op == POLY_OP_END && u->n_src == POLY_MAX_DIMS + 2) partial_ends++;
+  }
+  ASSERT_INT_EQ(stages, 1);
+  ASSERT_INT_EQ(partial_ends, 1);
   poly_ctx_destroy(ctx);
   PASS();
 }

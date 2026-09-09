@@ -3458,23 +3458,31 @@ done:
   return result;
 }
 
-typedef struct {
-  PolyUOp **ranges;
-  int n_ranges;
-  PolyUOp **ends;
-  int n_ends;
-  int cap_ends;
-} ReduceEndGroup;
-
+/* tinygrad/codegen/__init__.py:ReduceContext. Failure is C-only: matcher
+ * callbacks use NULL for no rewrite, so allocation failure needs a separate
+ * pass result rather than publishing a partially lowered graph. */
 typedef struct {
   int acc_num;
-  ReduceEndGroup *groups;
-  int n_groups;
-  int cap_groups;
+  bool failed;
 } ReduceContext;
 
 static ReduceContext *current_reduce_ctx(void) {
   return (ReduceContext *)poly_graph_rewrite_userctx();
+}
+
+#ifdef POLY_TESTING
+static _Thread_local int reduce_alloc_fail_after = -1;
+void poly_test_reduce_alloc_fail_after(int count) {
+  reduce_alloc_fail_after = count;
+}
+#endif
+
+static void *reduce_alloc(size_t count, size_t size) {
+#ifdef POLY_TESTING
+  if (reduce_alloc_fail_after == 0) return NULL;
+  if (reduce_alloc_fail_after > 0) --reduce_alloc_fail_after;
+#endif
+  return calloc(count, size);
 }
 
 static bool same_range_tuple(PolyUOp **a, int na, PolyUOp **b, int nb) {
@@ -3488,378 +3496,220 @@ static bool same_range_set(PolyUOp **a, int na, PolyUOp **b, int nb) {
   if (na != nb) return false;
   for (int i = 0; i < na; i++) {
     bool found = false;
-    for (int j = 0; j < nb; j++) {
+    for (int j = 0; j < nb; j++)
       if (a[i] == b[j]) {
         found = true;
         break;
       }
-    }
     if (!found) return false;
   }
   return true;
 }
 
+/* UOp.replace(arg=(axis_id, *r.arg[1:])) preserves dtype, sources and tags. */
 static PolyUOp *clone_range_axis(PolyCtx *ctx, PolyUOp *r, int64_t axis_id) {
-  if (!ctx || !r || r->op != POLY_OP_RANGE || r->arg.kind != POLY_ARG_RANGE) return NULL;
-  PolyArg a = r->arg;
-  PolyArg new_arg;
-  if (poly_range_n_extra(a) > 0)
-    new_arg = poly_arg_range_ex(
-        axis_id, poly_range_axis_type(a), poly_range_extra(a), poly_range_n_extra(a)
-    );
-  else
-    new_arg = poly_arg_range(axis_id, poly_range_axis_type(a));
-  return poly_uop(ctx, POLY_OP_RANGE, r->dtype, r->src, r->n_src, new_arg);
+  if (!r || r->op != POLY_OP_RANGE || r->arg.kind != POLY_ARG_RANGE) return NULL;
+  PolyArg arg = poly_arg_range_ex(
+      axis_id, poly_range_axis_type(r->arg), poly_range_extra(r->arg), poly_range_n_extra(r->arg)
+  );
+  return poly_uop_tagged_arg(ctx, r->op, r->dtype, r->src, r->n_src, arg, r->tag, r->tag_arg);
 }
 
-static void reduce_ctx_clear(ReduceContext *rctx) {
-  if (!rctx) return;
-  for (int i = 0; i < rctx->n_groups; i++) {
-    free(rctx->groups[i].ranges);
-    free(rctx->groups[i].ends);
-  }
-  free(rctx->groups);
-  rctx->groups = NULL;
-  rctx->n_groups = 0;
-  rctx->cap_groups = 0;
-  rctx->acc_num = 0;
-}
-
-static void reduce_ctx_add_end(ReduceContext *rctx, PolyUOp **ranges, int n_ranges, PolyUOp *end) {
-  if (!rctx || !ranges || n_ranges <= 0 || !end) return;
-
-  int gi = -1;
-  for (int i = 0; i < rctx->n_groups; i++) {
-    if (same_range_tuple(rctx->groups[i].ranges, rctx->groups[i].n_ranges, ranges, n_ranges)) {
-      gi = i;
-      break;
-    }
-  }
-
-  if (gi < 0) {
-    if (rctx->n_groups >= rctx->cap_groups) {
-      rctx->cap_groups = rctx->cap_groups ? rctx->cap_groups * 2 : 8;
-      rctx->groups = realloc(rctx->groups, (size_t)rctx->cap_groups * sizeof(ReduceEndGroup));
-    }
-    gi = rctx->n_groups++;
-    rctx->groups[gi] = (ReduceEndGroup){0};
-    rctx->groups[gi].ranges = malloc((size_t)n_ranges * sizeof(PolyUOp *));
-    memcpy(rctx->groups[gi].ranges, ranges, (size_t)n_ranges * sizeof(PolyUOp *));
-    rctx->groups[gi].n_ranges = n_ranges;
-  }
-
-  ReduceEndGroup *g = &rctx->groups[gi];
-  if (g->n_ends >= g->cap_ends) {
-    g->cap_ends = g->cap_ends ? g->cap_ends * 2 : 4;
-    g->ends = realloc(g->ends, (size_t)g->cap_ends * sizeof(PolyUOp *));
-  }
-  g->ends[g->n_ends++] = end;
-}
-
-/* Current tinygrad codegen/__init__.py::reduce_ranges_to_acc. */
-static PolyUOp *rule_reduce_to_acc(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+/* tinygrad/codegen/__init__.py:reduce_ranges_to_acc. Loop arity is not Tensor
+ * rank. Keep the complete range tuple until pm_add_control_flow splits ENDs. */
+static PolyUOp *reduce_ranges_to_acc(PolyCtx *ctx, PolyUOp *red, const PolyBindings *b) {
   (void)b;
-  PolyUOp *red = root;
-  if (!red || red->arg.kind != POLY_ARG_REDUCE || red->n_src < 1) return NULL;
-  PolyUOp *inp = red->src[0];
-  PolyOps reduce_op = red->arg.reduce.op;
-
-  /* Filter reduce ranges to actual RANGE nodes only.
-   * Singleton dims may produce CONST(0) pseudo-ranges from rangeify;
-   * these must not enter the AFTER/END chains (tinygrad invariant). */
-  PolyUOp *reduce_ranges[POLY_MAX_DIMS];
-  int n_reduce_range = 0;
-  for (int j = 1; j < red->n_src; j++) {
-    if (red->src[j]->op == POLY_OP_RANGE) reduce_ranges[n_reduce_range++] = red->src[j];
-  }
-
-  /* Horizontal-only reduce (no loop ranges). */
-  if (n_reduce_range == 0) return NULL;
-
-  /* A range reduction can also retain a leading shaped prefix after
-   * expander2. Tinygrad reduces that prefix before the loop accumulator. */
-  PolyUOp *reduced_inp =
-      red->arg.reduce.num_axes ? poly_expand_horizontal_reduce(ctx, red, NULL) : inp;
-  if (!reduced_inp) return NULL;
-
-  /* Find input_ranges (outer loops the value depends on) */
+  ReduceContext *rctx = current_reduce_ctx();
+  if (!rctx || rctx->failed || red->arg.kind != POLY_ARG_REDUCE || red->n_src < 2) return NULL;
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort_alloc(ctx, inp, &n_topo);
-
-  /* tinygrad parity: precompute ended ranges once from END nodes,
-   * instead of rescanning all ENDs for every RANGE. */
-  PolyMap *ended_ranges = poly_map_new((size_t)(n_topo > 0 ? n_topo * 2 : 16));
-  if (ended_ranges) {
-    for (int i = 0; i < n_topo; i++) {
-      PolyUOp *u = topo[i];
-      if (u->op != POLY_OP_END) continue;
-      for (int s = 1; s < u->n_src; s++) {
-        PolyUOp *r = u->src[s];
-        if (!r || r->op != POLY_OP_RANGE) continue;
-        poly_map_set(ended_ranges, poly_ptr_hash(r), r, r, poly_ptr_eq);
-      }
-    }
-  }
-
-  PolyUOp *input_ranges[POLY_MAX_DIMS];
-  int n_input_ranges = 0;
+  PolyUOp **topo = poly_toposort_alloc(ctx, red->src[0], &n_topo);
+  PolyUOp **src = NULL, *out = NULL;
+  PolyMap *excluded = NULL;
+  if (!topo || rctx->acc_num == INT_MAX || red->n_src == UINT16_MAX) goto fail;
+  size_t capacity = (size_t)n_topo + 1;
+  if (capacity < (size_t)red->n_src + 1) capacity = (size_t)red->n_src + 1;
+  src = reduce_alloc(capacity, sizeof(*src));
+  excluded = poly_map_new(((size_t)n_topo + red->n_src) * 2);
+  if (!src || !excluded) goto fail;
+  for (int i = 1; i < red->n_src; i++)
+    poly_map_set(excluded, poly_ptr_hash(red->src[i]), red->src[i], red->src[i], poly_ptr_eq);
   for (int i = 0; i < n_topo; i++) {
-    if (topo[i]->op != POLY_OP_RANGE) continue;
-    /* Skip reduce ranges */
-    bool is_reduce = false;
-    for (int j = 0; j < n_reduce_range; j++) {
-      if (topo[i] == reduce_ranges[j]) {
-        is_reduce = true;
-        break;
-      }
-    }
-    /* Skip already-ended ranges */
-    if (!is_reduce) {
-      bool is_ended = false;
-      if (ended_ranges) {
-        is_ended = poly_map_get(ended_ranges, poly_ptr_hash(topo[i]), topo[i], poly_ptr_eq) != NULL;
-      } else {
-        for (int k = 0; k < n_topo; k++) {
-          if (topo[k]->op != POLY_OP_END) continue;
-          for (int s = 1; s < topo[k]->n_src; s++) {
-            if (topo[k]->src[s] == topo[i]) {
-              is_ended = true;
-              break;
-            }
-          }
-          if (is_ended) break;
-        }
-      }
-      if (!is_ended && n_input_ranges < POLY_MAX_DIMS) input_ranges[n_input_ranges++] = topo[i];
+    if (topo[i]->op != POLY_OP_END) continue;
+    /* END.ended_ranges is exactly src[1:], not its active-range closure. */
+    for (int j = 1; j < topo[i]->n_src; j++) {
+      PolyUOp *r = topo[i]->src[j];
+      poly_map_set(excluded, poly_ptr_hash(r), r, r, poly_ptr_eq);
     }
   }
-  if (ended_ranges) poly_map_destroy(ended_ranges);
+  int n_input = 0;
+  for (int i = 0; i < n_topo; i++)
+    if (topo[i]->op == POLY_OP_RANGE &&
+        !poly_map_get(excluded, poly_ptr_hash(topo[i]), topo[i], poly_ptr_eq))
+      src[++n_input] = topo[i];
+  if (n_input >= UINT16_MAX) goto fail;
+
+  /* placeholder_like flattens storage, then restores a multidimensional
+   * result shape. The accumulator value keeps the strong storage dtype. */
+  PolyShape shape = poly_uop_max_shape_cached(ctx, red);
+  int64_t size = poly_shape_numel(shape);
+  if (size < 0) goto fail;
+  PolyDType dtype = poly_dtype_strong(red->dtype);
+  PolyUOp *dim = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(size));
+  PolyParamArg param = {.slot = rctx->acc_num++, .addrspace = POLY_ADDR_REG};
+  PolyUOp *acc = poly_uop1(ctx, POLY_OP_BUFFER, dtype, dim, poly_arg_param(&param));
+  if (acc && shape.ndim > 1) acc = poly_reshape(ctx, acc, shape.dims, shape.ndim);
+  if (!acc) goto fail;
+  src[0] = acc;
+  PolyUOp *base =
+      n_input ? poly_uop(ctx, POLY_OP_AFTER, dtype, src, n_input + 1, poly_arg_none()) : acc;
+  PolyUOp *identity = poly_identity_element(ctx, red->arg.reduce.op, red->dtype);
+  PolyUOp *init = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, base, identity, poly_arg_none());
+  src[1] = init;
+  memcpy(src + 2, red->src + 1, (size_t)(red->n_src - 1) * sizeof(*src));
+  PolyUOp *initted = poly_uop(ctx, POLY_OP_AFTER, dtype, src, red->n_src + 1, poly_arg_none());
+  PolyUOp *inp =
+      red->arg.reduce.num_axes ? poly_expand_horizontal_reduce(ctx, red, NULL) : red->src[0];
+  /* UOp.alu promotes the weak input against the strong REG-backed value. */
+  PolyUOp *value = poly_uop2(ctx, red->arg.reduce.op, dtype, initted, inp, poly_arg_none());
+  src[0] = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, initted, value, poly_arg_none());
+  memcpy(src + 1, red->src + 1, (size_t)(red->n_src - 1) * sizeof(*src));
+  PolyUOp *end = poly_uop_tagged_arg(
+      ctx, POLY_OP_END, POLY_VOID, src, red->n_src, poly_arg_none(), 0, poly_arg_str("mergeable")
+  );
+  out = poly_uop2(ctx, POLY_OP_AFTER, dtype, acc, end, poly_arg_none());
+  if (!out) goto fail;
+  goto done;
+fail:
+  rctx->failed = true;
+done:
+  if (excluded) poly_map_destroy(excluded);
+  free(src);
   poly_toposort_free(topo);
-
-  /* Identity element */
-  PolyUOp *identity = poly_identity_element(ctx, reduce_op, red->dtype);
-  if (!identity) return NULL;
-
-  ReduceContext *rctx = current_reduce_ctx();
-  if (!rctx) return NULL;
-
-  /* placeholder_like flattens the REDUCE result shape into one strong-dtype
-   * REG buffer. Scalar results therefore own one element. */
-  int acc_id = rctx->acc_num++;
-  PolyShape red_shape = poly_uop_max_shape_cached(ctx, red);
-  int64_t acc_size = poly_shape_numel(red_shape);
-  if (acc_size < 0) return NULL;
-  PolyDType acc_dtype = poly_dtype_strong(red->dtype);
-  PolyUOp *shape = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(acc_size));
-  PolyParamArg acc_param = {.slot = acc_id, .addrspace = POLY_ADDR_REG};
-  PolyUOp *acc = poly_uop1(ctx, POLY_OP_BUFFER, acc_dtype, shape, poly_arg_param(&acc_param));
-  if (acc && red_shape.ndim > 1) acc = poly_reshape(ctx, acc, red_shape.dims, red_shape.ndim);
-  if (!acc) return NULL;
-
-  /* Init: acc.after(input_ranges...).store(identity) */
-  PolyUOp *acc_base;
-  if (n_input_ranges > 0) {
-    PolyUOp *after_srcs[POLY_MAX_DIMS + 1];
-    after_srcs[0] = acc;
-    for (int i = 0; i < n_input_ranges; i++)
-      after_srcs[i + 1] = input_ranges[i];
-    acc_base =
-        poly_uop(ctx, POLY_OP_AFTER, acc_dtype, after_srcs, n_input_ranges + 1, poly_arg_none());
-  } else {
-    acc_base = acc;
-  }
-  PolyUOp *acc_init = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, acc_base, identity, poly_arg_none());
-
-  /* pm_add_loads turns this REG-backed value into LOAD after dimensions exist. */
-  PolyUOp *loop_srcs[POLY_MAX_DIMS + 2];
-  loop_srcs[0] = acc;
-  loop_srcs[1] = acc_init;
-  for (int i = 0; i < n_reduce_range; i++)
-    loop_srcs[i + 2] = reduce_ranges[i];
-  PolyUOp *loop_after =
-      poly_uop(ctx, POLY_OP_AFTER, acc_dtype, loop_srcs, n_reduce_range + 2, poly_arg_none());
-
-  /* Accumulate one shaped/horizontal-reduced value per loop iteration. */
-  PolyUOp *alu = poly_uop2(ctx, reduce_op, red->dtype, loop_after, reduced_inp, poly_arg_none());
-
-  PolyUOp *acc_store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, loop_after, alu, poly_arg_none());
-
-  /* Build END chain (innermost first to match tinygrad) */
-  PolyUOp *chain = acc_store;
-  for (int i = n_reduce_range - 1; i >= 0; i--) {
-    PolyUOp *end_srcs[2] = {chain, reduce_ranges[i]};
-    chain = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_srcs, 2, poly_arg_none());
-  }
-  reduce_ctx_add_end(rctx, reduce_ranges, n_reduce_range, chain);
-
-  /* Final read: acc.after(end); LOAD is added by pm_add_loads. */
-  PolyUOp *final_srcs[2] = {acc, chain};
-  PolyUOp *final_after = poly_uop(ctx, POLY_OP_AFTER, acc_dtype, final_srcs, 2, poly_arg_none());
-
-  return final_after;
+  return out;
 }
 
-static PolyUOp *rule_merge_reduce_ends(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+/* Scratch rows for merge_reduce_ends' range_to_ends/by_ctx dictionaries.
+ * They never own graph roots or survive this single callback. */
+typedef struct {
+  PolyUOp *end;
+  PolyUOp **ranges;
+  int n_ranges;
+  bool used;
+} ReduceEnd;
+
+/* tinygrad/codegen/__init__.py:merge_reduce_ends. Discover the tagged ENDs
+ * from sink.backward_slice, including graphs lowered in an earlier pass. */
+static PolyUOp *merge_reduce_ends(PolyCtx *ctx, PolyUOp *sink, const PolyBindings *b) {
   (void)b;
-  if (!root || root->op != POLY_OP_SINK) return NULL;
   ReduceContext *rctx = current_reduce_ctx();
-  if (!rctx) return NULL;
-
-  int n_subs_cap = 0;
-  for (int i = 0; i < rctx->n_groups; i++)
-    if (rctx->groups[i].n_ends > 1) n_subs_cap += rctx->groups[i].n_ends;
-  if (n_subs_cap == 0) return NULL;
-
-  PolyUOp **sub_old = malloc((size_t)n_subs_cap * sizeof(PolyUOp *));
-  PolyUOp **sub_new = malloc((size_t)n_subs_cap * sizeof(PolyUOp *));
-  if (!sub_old || !sub_new) {
-    free(sub_old);
-    free(sub_new);
-    return NULL;
+  if (!rctx || rctx->failed) return NULL;
+  int n_topo = 0, n_ends = 0, n_ranges = 0, max_src = 1;
+  PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n_topo);
+  ReduceEnd *ends = NULL;
+  PolyUOp **old = NULL, **replacement = NULL, **tr = NULL, **body = NULL, **src = NULL;
+  PolyUOp *out = NULL;
+  int64_t max_axis = -1;
+  if (!topo) goto fail;
+  for (int i = 0; i < n_topo; i++) {
+    PolyUOp *u = topo[i];
+    if (u->op == POLY_OP_RANGE) {
+      n_ranges++;
+      if (poly_range_axis_id(u->arg) > max_axis) max_axis = poly_range_axis_id(u->arg);
+    }
+    if (u->op != POLY_OP_END || u->tag_arg.kind != POLY_ARG_STRING ||
+        strcmp(u->tag_arg.str, "mergeable"))
+      continue;
+    n_ends++;
+    if (u->n_src > max_src) max_src = u->n_src;
   }
+  if (n_ends < 2) goto done;
+  ends = reduce_alloc((size_t)n_ends, sizeof(*ends));
+  old = reduce_alloc((size_t)n_ends, sizeof(*old));
+  replacement = reduce_alloc((size_t)n_ends, sizeof(*replacement));
+  tr = reduce_alloc((size_t)max_src, sizeof(*tr));
+  body = reduce_alloc((size_t)n_ends, sizeof(*body));
+  src = reduce_alloc((size_t)max_src, sizeof(*src));
+  if (!ends || !old || !replacement || !tr || !body || !src) goto fail;
   int at = 0;
-
-  int n_topo = 0;
-  PolyUOp **topo = poly_toposort_alloc(ctx, root, &n_topo);
-  int64_t next_axis = 0;
   for (int i = 0; i < n_topo; i++) {
-    if (topo[i] && topo[i]->op == POLY_OP_RANGE && topo[i]->arg.kind == POLY_ARG_RANGE) {
-      int64_t axis = poly_range_axis_id(topo[i]->arg);
-      if (axis >= next_axis) next_axis = axis + 1;
+    PolyUOp *u = topo[i];
+    if (u->op != POLY_OP_END || u->tag_arg.kind != POLY_ARG_STRING ||
+        strcmp(u->tag_arg.str, "mergeable"))
+      continue;
+    ReduceEnd *e = &ends[at++];
+    e->end = u;
+    if (n_ranges) {
+      e->ranges = reduce_alloc((size_t)n_ranges, sizeof(*e->ranges));
+      if (!e->ranges) goto fail;
+      e->n_ranges = poly_uop_ranges(ctx, u, e->ranges, n_ranges);
     }
   }
-  poly_toposort_free(topo);
-
-  for (int i = 0; i < rctx->n_groups; i++) {
-    ReduceEndGroup *g = &rctx->groups[i];
-    if (g->n_ends <= 1) continue;
-
-    PolyUOp **ctx_ranges = calloc((size_t)g->n_ends * 64, sizeof(PolyUOp *));
-    int *ctx_n = calloc((size_t)g->n_ends, sizeof(int));
-    int *ctx_group = calloc((size_t)g->n_ends, sizeof(int));
-    int n_ctx_groups = 0;
-    if (!ctx_ranges || !ctx_n || !ctx_group) {
-      free(ctx_ranges);
-      free(ctx_n);
-      free(ctx_group);
+  int n_subs = 0;
+  for (int i = 0; i < n_ends; i++) {
+    if (ends[i].used) continue;
+    PolyUOp *first = ends[i].end;
+    PolyUOp **r = first->src + 1;
+    int nr = first->n_src - 1, count = 0;
+    for (int j = i; j < n_ends; j++)
+      if (same_range_tuple(r, nr, ends[j].end->src + 1, ends[j].end->n_src - 1)) count++;
+    if (count < 2) {
+      ends[i].used = true;
       continue;
     }
-
-    for (int j = 0; j < g->n_ends; j++) {
-      PolyUOp **jranges = &ctx_ranges[(size_t)j * 64];
-      int n_j = poly_uop_ranges(ctx, g->ends[j], jranges, 64);
-      if (n_j < 0) n_j = 0;
-      ctx_n[j] = n_j;
-      int cg = -1;
-      for (int k = 0; k < n_ctx_groups; k++) {
-        PolyUOp **kranges = &ctx_ranges[(size_t)k * 64];
-        if (same_range_set(jranges, n_j, kranges, ctx_n[k])) {
-          cg = k;
-          break;
-        }
+    int context = 0;
+    for (int j = i; j < n_ends; j++) {
+      if (ends[j].used || !same_range_tuple(r, nr, ends[j].end->src + 1, ends[j].end->n_src - 1))
+        continue;
+      if (context && max_axis > INT64_MAX - nr) goto fail;
+      for (int k = 0; k < nr; k++) {
+        tr[k] = context ? clone_range_axis(ctx, r[k], max_axis + 1 + k) : r[k];
+        if (!tr[k]) goto fail;
       }
-      if (cg < 0) {
-        cg = n_ctx_groups++;
-        if (cg != j) {
-          memcpy(&ctx_ranges[(size_t)cg * 64], jranges, (size_t)n_j * sizeof(PolyUOp *));
-          ctx_n[cg] = n_j;
-        }
+      if (context) max_axis += nr;
+      int start = n_subs, n_body = 0;
+      PolyUOp *mapped = NULL;
+      for (int k = j; k < n_ends; k++) {
+        ReduceEnd *e = &ends[k];
+        if (e->used || !same_range_tuple(r, nr, e->end->src + 1, e->end->n_src - 1) ||
+            !same_range_set(ends[j].ranges, ends[j].n_ranges, e->ranges, e->n_ranges))
+          continue;
+        mapped = context ? poly_uop_substitute(ctx, e->end, r, tr, nr) : e->end;
+        if (!mapped) goto fail;
+        body[n_body++] = mapped->src[0];
+        old[n_subs++] = e->end;
+        e->used = true;
       }
-      ctx_group[j] = cg;
+      if (n_body > 1) {
+        src[0] = poly_uop(ctx, POLY_OP_GROUP, POLY_VOID, body, n_body, poly_arg_none());
+        memcpy(src + 1, tr, (size_t)nr * sizeof(*src));
+        mapped = nr ? poly_uop(ctx, POLY_OP_END, POLY_VOID, src, nr + 1, poly_arg_none()) : src[0];
+      }
+      if (!mapped) goto fail;
+      for (int k = start; k < n_subs; k++)
+        replacement[k] = mapped;
+      context++;
     }
-
-    for (int cg = 0; cg < n_ctx_groups; cg++) {
-      int count = 0;
-      for (int j = 0; j < g->n_ends; j++)
-        if (ctx_group[j] == cg) count++;
-      if (count <= 0) continue;
-
-      PolyUOp *mapped_ranges[POLY_MAX_DIMS];
-      if (cg == 0) {
-        for (int r = 0; r < g->n_ranges; r++)
-          mapped_ranges[r] = g->ranges[r];
-      } else {
-        for (int r = 0; r < g->n_ranges; r++) {
-          mapped_ranges[r] = clone_range_axis(ctx, g->ranges[r], next_axis + r);
-          if (!mapped_ranges[r]) mapped_ranges[r] = g->ranges[r];
-        }
-        next_axis += g->n_ranges;
-      }
-
-      PolyUOp **mapped_ends = malloc((size_t)count * sizeof(PolyUOp *));
-      int m = 0;
-      for (int j = 0; j < g->n_ends; j++) {
-        if (ctx_group[j] != cg) continue;
-        PolyUOp *mapped = g->ends[j];
-        if (cg != 0) {
-          /* Pinned devectorizer.py:338 applies the complete r -> tr map in
-           * one e.substitute(dict(zip(r, tr))) traversal.  The shared
-           * substitution API is likewise unbounded and preserves metadata. */
-          PolyUOp *mapped_out = NULL;
-          if (poly_uop_substitute_many(
-                  ctx, &mapped, 1, g->ranges, mapped_ranges, g->n_ranges, &mapped_out
-              ) != 0 ||
-              !mapped_out) {
-            free(mapped_ends);
-            free(ctx_ranges);
-            free(ctx_n);
-            free(ctx_group);
-            free(sub_new);
-            free(sub_old);
-            return NULL;
-          }
-          mapped = mapped_out;
-        }
-        mapped_ends[m++] = mapped;
-      }
-
-      PolyUOp *chain = mapped_ends[0];
-      if (count > 1) {
-        PolyUOp **group_srcs = malloc((size_t)count * sizeof(PolyUOp *));
-        for (int j = 0; j < count; j++)
-          group_srcs[j] = mapped_ends[j]->src[0];
-        chain = poly_uop(ctx, POLY_OP_GROUP, POLY_VOID, group_srcs, count, poly_arg_none());
-        free(group_srcs);
-
-        for (int r = g->n_ranges - 1; r >= 0; r--) {
-          PolyUOp *esrc[2] = {chain, mapped_ranges[r]};
-          chain = poly_uop(ctx, POLY_OP_END, POLY_VOID, esrc, 2, poly_arg_none());
-        }
-      }
-
-      m = 0;
-      for (int j = 0; j < g->n_ends; j++) {
-        if (ctx_group[j] != cg) continue;
-        if (chain != g->ends[j]) {
-          sub_old[at] = g->ends[j];
-          sub_new[at] = count > 1 ? chain : mapped_ends[m];
-          at++;
-        }
-        m++;
-      }
-      free(mapped_ends);
-    }
-
-    free(ctx_ranges);
-    free(ctx_n);
-    free(ctx_group);
   }
-
-  if (at == 0) {
-    free(sub_new);
-    free(sub_old);
-    return NULL;
+  /* One complete map: sequential substitutions invalidate sibling keys. */
+  if (n_subs) {
+    out = poly_uop_substitute(ctx, sink, old, replacement, n_subs);
+    if (!out) goto fail;
   }
-
-  /* Tinygrad 2026-08-22/a9069c177a9d codegen/__init__.py:190-208 builds one complete
-   * replacement dictionary and calls sink.substitute(subs) once. Sequential
-   * substitution is not equivalent: the first traversal rebuilds sibling END
-   * nodes, invalidating the original pointer keys of later rows. */
-  PolyUOp *out = poly_uop_substitute(ctx, root, sub_old, sub_new, at);
-
-  free(sub_new);
-  free(sub_old);
-  return out != root ? out : NULL;
+  goto done;
+fail:
+  rctx->failed = true;
+done:
+  if (ends)
+    for (int i = 0; i < n_ends; i++)
+      free(ends[i].ranges);
+  free(ends);
+  free(old);
+  free(replacement);
+  free(tr);
+  free(body);
+  free(src);
+  poly_toposort_free(topo);
+  return out != sink ? out : NULL;
 }
 
 /* Current Tinygrad codegen/decomp/op.py decomposition callbacks. */
@@ -6299,25 +6149,34 @@ static PolyUOp *poly_fix_group_for_reduce(
 ) {
   (void)bindings;
   if (!red || red->op != POLY_OP_REDUCE || red->n_src < 2) return NULL;
-
-  PolyUOp *group_ranges[POLY_MAX_DIMS], *other_ranges[POLY_MAX_DIMS];
+  ReduceContext *rctx = current_reduce_ctx();
+  if (!rctx || rctx->failed) return NULL;
+  /* GROUP/LOCAL ranges become STAGE dimensions and retain the existing shape
+   * rank limit. Other reduction loops do not become dimensions. */
+  PolyUOp *group_ranges[POLY_MAX_DIMS];
+  PolyUOp **partial_src = NULL, **topo = NULL, *out = NULL;
   int n_group = 0, n_other = 0;
   for (int i = 1; i < red->n_src; i++) {
     PolyUOp *range = red->src[i];
-    if (!range || range->op != POLY_OP_RANGE) continue;
-    if (poly_range_axis_type(range->arg) == POLY_AXIS_GROUP_REDUCE) {
-      if (n_group == POLY_MAX_DIMS) return NULL;
+    if (range->op == POLY_OP_RANGE && poly_range_axis_type(range->arg) == POLY_AXIS_GROUP_REDUCE) {
+      if (n_group == POLY_MAX_DIMS) goto fail;
       group_ranges[n_group++] = range;
-    } else {
-      if (n_other == POLY_MAX_DIMS) return NULL;
-      other_ranges[n_other++] = range;
     }
   }
   if (n_group == 0) return NULL;
 
+  partial_src = reduce_alloc((size_t)red->n_src, sizeof(*partial_src));
+  if (!partial_src) goto fail;
+  partial_src[0] = red->src[0];
+  for (int i = 1; i < red->n_src; i++) {
+    PolyUOp *range = red->src[i];
+    if (range->op != POLY_OP_RANGE || poly_range_axis_type(range->arg) != POLY_AXIS_GROUP_REDUCE)
+      partial_src[++n_other] = range;
+  }
+
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort_alloc(ctx, red, &n_topo);
-  if (!topo) return NULL;
+  topo = poly_toposort_alloc(ctx, red, &n_topo);
+  if (!topo) goto fail;
   PolyUOp *upstream_locals[POLY_MAX_DIMS];
   int n_upstream = 0;
   for (int i = 0; i < n_topo; i++) {
@@ -6327,18 +6186,10 @@ static PolyUOp *poly_fix_group_for_reduce(
     for (int j = 0; j < n_upstream; j++)
       duplicate |= upstream_locals[j] == u;
     if (!duplicate) {
-      if (n_upstream == POLY_MAX_DIMS) {
-        poly_toposort_free(topo);
-        return NULL;
-      }
+      if (n_upstream + n_group == POLY_MAX_DIMS) goto fail;
       upstream_locals[n_upstream++] = u;
     }
   }
-  poly_toposort_free(topo);
-
-  PolyUOp *partial_src[1 + POLY_MAX_DIMS] = {red->src[0]};
-  for (int i = 0; i < n_other; i++)
-    partial_src[i + 1] = other_ranges[i];
   PolyUOp *partial = poly_uop_tagged_arg(
       ctx, red->op, red->dtype, partial_src, n_other + 1, red->arg, red->tag, red->tag_arg
   );
@@ -6349,6 +6200,9 @@ static PolyUOp *poly_fix_group_for_reduce(
     stage_src[n_stage++] = upstream_locals[i];
   for (int i = 0; i < n_group; i++)
     stage_src[n_stage++] = group_ranges[i];
+  /* PG-PARITY-027: LOCAL BufferizeOpts.device is an integer identity in
+   * Tinygrad. The C metadata carrier still omits it; do not claim exact
+   * STAGE-argument parity from the matching range/storage topology. */
   PolyUOp *stage = poly_uop(
       ctx, POLY_OP_STAGE, red->dtype, stage_src, n_stage,
       poly_arg_bufferize_opts(NULL, POLY_ADDR_LOCAL, true)
@@ -6357,6 +6211,7 @@ static PolyUOp *poly_fix_group_for_reduce(
   PolyUOp *reduce_loop[POLY_MAX_DIMS];
   for (int i = 0; i < n_group; i++) {
     PolyUOp *range = group_ranges[i];
+    if (poly_range_axis_id(range->arg) > INT64_MAX - 100) goto fail;
     reduce_loop[i] = poly_uop_tagged_arg(
         ctx, range->op, range->dtype, range->src, range->n_src,
         poly_arg_range(poly_range_axis_id(range->arg) + 100, POLY_AXIS_REDUCE), range->tag,
@@ -6375,11 +6230,19 @@ static PolyUOp *poly_fix_group_for_reduce(
   PolyUOp *final_src[1 + POLY_MAX_DIMS] = {index};
   for (int i = 0; i < n_group; i++)
     final_src[i + 1] = reduce_loop[i];
-  return poly_uop_tagged_arg(
+  out = poly_uop_tagged_arg(
       /* fix_group_for_reduce consumes horizontal axes in the partial reduction. */
       ctx, red->op, red->dtype, final_src, n_group + 1, poly_arg_reduce(red->arg.reduce.op, 0),
       red->tag, red->tag_arg
   );
+  if (!out) goto fail;
+  goto done;
+fail:
+  rctx->failed = true;
+done:
+  free(partial_src);
+  poly_toposort_free(topo);
+  return out;
 }
 
 /* Public wrapper for heuristic (used by tests) */
@@ -6408,10 +6271,9 @@ static PolyPatternMatcher *poly_pm_reduce_local(void) {
       {poly_upat_allow_any_len(
            poly_upat_op2c(POLY_OP_REDUCE, poly_upat_any(NULL), poly_upat_any(NULL), "r")
        ),
-       rule_reduce_to_acc},
+       reduce_ranges_to_acc},
       {poly_upat_op1(POLY_OP_REDUCE, poly_upat_any(NULL), "r"), poly_expand_horizontal_reduce},
-      {poly_upat_allow_any_len(poly_upat_op(POLY_OP_SINK, NULL, 0, "sink")),
-       rule_merge_reduce_ends},
+      {poly_upat_allow_any_len(poly_upat_op(POLY_OP_SINK, NULL, 0, "sink")), merge_reduce_ends},
   };
   PolyPatternMatcher *local = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
   PolyPatternMatcher *with_wmma = poly_pm_concat(poly_pm_wmma_add(), local);
@@ -6428,8 +6290,7 @@ PolyUOp *poly_apply_pm_reduce(PolyCtx *ctx, PolyUOp *sink) {
         poly_pm_thread_cache(poly_pm_concat(poly_mop_cleanup(), poly_pm_reduce_local()));
   ReduceContext local_ctx = {0};
   PolyUOp *out = poly_graph_rewrite_ctx(ctx, sink, remove_reduce, &local_ctx);
-  reduce_ctx_clear(&local_ctx);
-  return out;
+  return local_ctx.failed ? NULL : out;
 }
 
 /* Current tinygrad codegen/__init__.py:252-257 makes the operand conversion

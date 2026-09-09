@@ -139,6 +139,11 @@ static inline PolyDType poly_program_buffer_dtype(const PolyUOp *u) {
 PolyUOp *poly_full_rewrite_to_sink(PolyCtx *ctx, PolyUOp *sink);
 PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOpts opts);
 
+#ifdef POLY_TESTING
+/* Owner-local reduction scratch allocation only; -1 disables injection. */
+void poly_test_reduce_alloc_fail_after(int count);
+#endif
+
 #if defined(POLY_TESTING) && !defined(__EMSCRIPTEN__)
 int poly_test_beam_actions(PolyOpt *out, int capacity);
 int poly_test_beam_kernel_action(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps, PolyOpt opt);

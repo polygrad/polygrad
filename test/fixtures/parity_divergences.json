@@ -726,6 +726,25 @@
         "temp/pooling-resize-20260907.P0xgA4/correspondence.md"
       ],
       "close_when": "Port optional final-index bounds validation in its core spec owner, compare valid/masked/OOB cases with pinned Tinygrad, and expose only supported configuration. Do not treat the disabled flag or Tensor bounds checks as verifier closure."
+    },
+    {
+      "id": "PG-PARITY-027",
+      "status": "open_debt",
+      "stages": ["codegen"],
+      "area": "LOCAL STAGE integer identity metadata",
+      "vocabulary": {"tinygrad_only": [], "polygrad_only": []},
+      "tinygrad": "fix_group_for_reduce puts the first grouped RANGE axis ID in BufferizeOpts.device; LOCAL device metadata admits an integer identity.",
+      "polygrad": "PolyArg.bufferize_opts represents string, tuple or absent device metadata, not the integer LOCAL identity. Grouped reduction emits NULL device metadata with the grouped ranges preserved in STAGE sources.",
+      "rationale": "Matching executable values and range/storage topology do not establish exact STAGE argument parity. The metadata carrier, CSE and codec consumers require one coordinated owning fix, not a synthetic device string or tag workaround.",
+      "approval": null,
+      "evidence": [
+        "references/tinygrad_latest/tinygrad/codegen/__init__.py:fix_group_for_reduce",
+        "references/tinygrad_latest/tinygrad/schedule/indexing.py:BufferizeOpts",
+        "src/codegen/codegen.c:poly_fix_group_for_reduce",
+        "src/polygrad.h:poly_arg_bufferize_opts",
+        "temp/reduce-owner-20260909.1DdMgI/correspondence.md"
+      ],
+      "close_when": "Represent the integer LOCAL identity through the existing argument, CSE and serialization contracts and test exact STAGE metadata; or obtain an explicit stage-scoped divergence approval supported by consumer analysis."
     }
   ]
 }
