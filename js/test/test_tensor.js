@@ -502,6 +502,24 @@ async function runTensorTests(pg, createRuntime) {
     assertClose(await t.toArray(), [1, 2, 3])
   })
 
+  await test('readback copy has no retained host shadow', isolatedRuntime(async pg => {
+    const value = pg.Tensor.arange(4).cast('float32').add(1).contiguous()
+    await value.realize()
+    const before = pg.stats().coreStats.bufferOwnedSourceBytes
+    for (let i = 0; i < 3; i++) {
+      const output = await value.toArrayAsync()
+      assertClose(output, [1, 2, 3, 4])
+      output[0] = 99
+      assert(pg.stats().coreStats.bufferOwnedSourceBytes === before,
+        'readback attached a persistent host mirror')
+    }
+    const output = await value.toArrayAsync()
+    await value.dispose()
+    pg.collect()
+    await pg.dispose()
+    assertClose(output, [1, 2, 3, 4])
+  }))
+
   await test('Tensor dispose retires its exact core owner', isolatedRuntime(async pg => {
     const Tensor = pg.Tensor
     const before = pg.stats().coreStats.tensorRecords

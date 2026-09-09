@@ -1648,6 +1648,8 @@ void poly_uop_cache_destroy(PolyUOpCache *c);
  *
  * where ended_ranges() matches ops.py:351-358 (trailing srcs past range_start,
  * AFTER recursively flattens effect dependencies. See src/uop/ops.c.
+ * Range-set allocation failure follows PolyMap's fatal-OOM policy: these
+ * count/bool APIs must not report a successful empty set after failure.
  *
  * Every helper has a public entry point and an `_ex` variant that takes a
  * caller-owned PolyUOpCache for batch queries. Use the `_ex` form in hot loops

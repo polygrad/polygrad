@@ -1698,7 +1698,8 @@ int poly_buffer_ensure_allocated(PolyCtx *ctx, PolyUOp *buf, PolyDevice device) 
 int poly_buffer_copyin(PolyCtx *ctx, PolyUOp *buf, const void *src, size_t nbytes) {
   if (!ctx || !buf || !src) return -1;
   PolyBuffer *b = poly_buffer_get(ctx, buf);
-  if (!b || !b->ptr || !b->allocator || nbytes == 0 || b->nbytes < nbytes) return -1;
+  if (!b || !b->ptr || !b->allocator || !b->allocator->copy_in || nbytes == 0 || b->nbytes < nbytes)
+    return -1;
   PolyBuffer src_view = poly_buffer_make_host_view((void *)src, nbytes);
   int rc = b->allocator->copy_in(b, &src_view, nbytes, b->allocator->dev_ctx);
   if (rc == 0) {
@@ -1711,7 +1712,9 @@ int poly_buffer_copyin(PolyCtx *ctx, PolyUOp *buf, const void *src, size_t nbyte
 int poly_buffer_copyout(PolyCtx *ctx, PolyUOp *buf, void *dst, size_t nbytes) {
   if (!ctx || !buf || !dst) return -1;
   PolyBuffer *b = poly_buffer_get(ctx, buf);
-  if (!b || !b->ptr || !b->allocator) return -1;
+  if (!b || !b->ptr || !b->allocator || !b->allocator->copy_out || nbytes == 0 ||
+      b->nbytes < nbytes)
+    return -1;
   PolyBuffer dst_view = poly_buffer_make_host_view(dst, nbytes);
   int rc = b->allocator->copy_out(&dst_view, b, nbytes, b->allocator->dev_ctx);
   if (rc == 0 && b->src && dst == b->src->ptr) b->src->valid = true;
@@ -1719,11 +1722,25 @@ int poly_buffer_copyout(PolyCtx *ctx, PolyUOp *buf, void *dst, size_t nbytes) {
 }
 
 int poly_buffer_read(PolyCtx *ctx, PolyUOp *buf, void *dst, size_t nbytes) {
-  if (!ctx || !buf || !dst) return -1;
-  PolyBuffer *host = NULL;
-  if (poly_buffer_ensure_host_current(ctx, buf, &host) != 0 || !host || !host->ptr) return -1;
-  if (nbytes == 0 || host->nbytes < nbytes) return -1;
-  memcpy(dst, host->ptr, nbytes);
+  if (!ctx || !buf || !dst || nbytes == 0) return -1;
+  PolyBuffer *cur = poly_uop_buffer_handle(ctx, buf);
+  if (!cur || cur->nbytes < nbytes) return -1;
+  if (cur->base && poly_buffer_refresh_view(ctx, cur) != 0) return -1;
+  if (cur->device == POLY_DEVICE_DISK && !cur->ptr &&
+      poly_buffer_handle_ensure_allocated(ctx, cur) != 0)
+    return -1;
+  const PolyBuffer *source = poly_buffer_valid_source(cur);
+  if (!source || source->nbytes < nbytes) return -1;
+  /* Buffer.as_memoryview copies into caller-owned storage. A read must not
+   * publish a persistent CPU mirror; explicit host-pointer access still uses
+   * ensure_host_current. Browser HOST keys go through their allocator. */
+  if (source->ptr && poly_device_is_host_addressable(source->device)) {
+    memmove(dst, source->ptr, nbytes);
+  } else {
+    PolyBuffer output = poly_buffer_make_host_view(dst, nbytes);
+    if (poly_buffer_copy(&output, source) != 0) return -1;
+    poly_ctx_record_buffer_copy(ctx, nbytes);
+  }
   ctx->buffer_read_count++;
   ctx->buffer_read_bytes += nbytes;
   return 0;

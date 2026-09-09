@@ -14,12 +14,251 @@
 #include "../src/utils.h"
 #if defined(__linux__) && !defined(__EMSCRIPTEN__)
 #include <unistd.h>
+#include <signal.h>
+#include <sys/resource.h>
+#include <sys/wait.h>
 #endif
 
 /* Basic creation */
 
+typedef struct {
+  int reads;
+  bool fail;
+} ReadbackProbe;
+
+static int readback_probe_copyout(
+    const PolyBuffer *dst,
+    const PolyBuffer *src,
+    size_t nbytes,
+    void *userdata
+) {
+  ReadbackProbe *probe = userdata;
+  probe->reads++;
+  if (probe->fail) return -1;
+  memcpy(dst->ptr, src->ptr, nbytes);
+  return 0;
+}
+
+/* device.py:Buffer.as_memoryview copies to caller-owned temporary storage;
+ * reading does not attach a permanent CPU allocation to the source Buffer. */
+TEST(uop, buffer_read_is_copyout_without_retained_host_shadow) {
+  PolyCtx *ctx = poly_ctx_new();
+  ReadbackProbe probe = {0};
+  PolyAllocator allocator = {.copy_out = readback_probe_copyout, .dev_ctx = &probe};
+  float data[4] = {1, 2, 3, 4}, output[4] = {0};
+  PolyUOp *buf = poly_test_buffer(ctx, POLY_FLOAT32, 4);
+  PolyBuffer handle = {
+      .ptr = data,
+      .nbytes = sizeof(data),
+      .device = POLY_DEVICE_CUDA,
+      .allocator = &allocator,
+      .valid = true};
+  ASSERT_INT_EQ(poly_buffer_attach(ctx, buf, &handle), 0);
+  PolyBuffer *before = poly_buffer_get(ctx, buf);
+  bool ok = true;
+  for (int i = 0; i < 3; i++) {
+    ok = ok && poly_buffer_read(ctx, buf, output, sizeof(output)) == 0 &&
+         memcmp(data, output, sizeof(data)) == 0 && before == poly_buffer_get(ctx, buf) &&
+         before->src == NULL;
+  }
+  PolyCtxStats stats;
+  poly_ctx_stats(ctx, &stats);
+  ok = ok && probe.reads == 3 && stats.buffer_read_count == 3 &&
+       stats.buffer_owned_source_bytes == 0;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
+TEST(uop, buffer_read_validates_extent_before_transfer_or_allocation) {
+  PolyCtx *ctx = poly_ctx_new();
+  ReadbackProbe probe = {0};
+  PolyAllocator allocator = {.copy_out = readback_probe_copyout, .dev_ctx = &probe};
+  float data[4] = {1, 2, 3, 4}, output[5] = {9, 9, 9, 9, 9};
+  PolyUOp *buf = poly_test_buffer(ctx, POLY_FLOAT32, 4);
+  PolyBuffer handle = {
+      .ptr = data,
+      .nbytes = sizeof(data),
+      .device = POLY_DEVICE_CUDA,
+      .allocator = &allocator,
+      .valid = true};
+  ASSERT_INT_EQ(poly_buffer_attach(ctx, buf, &handle), 0);
+  bool ok = poly_buffer_read(ctx, buf, output, 0) == -1 &&
+            poly_buffer_read(ctx, buf, output, sizeof(output)) == -1 && probe.reads == 0 &&
+            poly_buffer_get(ctx, buf)->src == NULL && output[0] == 9;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
+TEST(uop, buffer_read_failure_and_partial_read_preserve_residency) {
+  PolyCtx *ctx = poly_ctx_new();
+  ReadbackProbe probe = {.fail = true};
+  PolyAllocator allocator = {.copy_out = readback_probe_copyout, .dev_ctx = &probe};
+  float data[4] = {1, 2, 3, 4}, output[2] = {9, 9};
+  PolyUOp *buf = poly_test_buffer(ctx, POLY_FLOAT32, 4);
+  PolyBuffer handle = {
+      .ptr = data,
+      .nbytes = sizeof(data),
+      .device = POLY_DEVICE_CUDA,
+      .allocator = &allocator,
+      .valid = true};
+  ASSERT_INT_EQ(poly_buffer_attach(ctx, buf, &handle), 0);
+  bool ok = poly_buffer_read(ctx, buf, output, sizeof(output)) == -1 && output[0] == 9 &&
+            poly_buffer_get(ctx, buf)->src == NULL;
+  probe.fail = false;
+  ok = ok && poly_buffer_read(ctx, buf, output, sizeof(output)) == 0 && output[0] == 1 &&
+       output[1] == 2 && poly_buffer_get(ctx, buf)->src == NULL;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
+TEST(uop, buffer_read_preserves_explicit_mirror_and_uses_authoritative_storage) {
+  PolyCtx *ctx = poly_ctx_new();
+  ReadbackProbe probe = {0};
+  PolyAllocator allocator = {.copy_out = readback_probe_copyout, .dev_ctx = &probe};
+  float data[4] = {1, 2, 3, 4}, output[4] = {0};
+  PolyUOp *buf = poly_test_buffer(ctx, POLY_FLOAT32, 4);
+  PolyBuffer handle = {
+      .ptr = data,
+      .nbytes = sizeof(data),
+      .device = POLY_DEVICE_CUDA,
+      .allocator = &allocator,
+      .valid = true};
+  ASSERT_INT_EQ(poly_buffer_attach(ctx, buf, &handle), 0);
+  PolyBuffer *mirror = NULL;
+  ASSERT_INT_EQ(poly_buffer_ensure_host_current(ctx, buf, &mirror), 0);
+  ASSERT_NOT_NULL(mirror);
+  PolyBuffer *cur = poly_buffer_get(ctx, buf);
+  data[0] = 5;
+  ASSERT_INT_EQ(poly_buffer_mark_residency_written(ctx, buf, POLY_DEVICE_CUDA), 0);
+  bool ok = poly_buffer_read(ctx, buf, output, sizeof(output)) == 0 && output[0] == 5 &&
+            cur->src == mirror && !mirror->valid && ((float *)mirror->ptr)[0] == 1;
+  ((float *)mirror->ptr)[0] = 7;
+  ASSERT_INT_EQ(poly_buffer_mark_host_written(ctx, buf), 0);
+  ok = ok && poly_buffer_read(ctx, buf, output, sizeof(output)) == 0 && output[0] == 7 &&
+       !cur->valid && cur->src == mirror && probe.reads == 2;
+  mirror->valid = false;
+  ok = ok && poly_buffer_read(ctx, buf, output, sizeof(output)) == -1 && probe.reads == 2;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
+TEST(uop, buffer_copyout_rejects_invalid_extent_before_transfer) {
+  PolyCtx *ctx = poly_ctx_new();
+  ReadbackProbe probe = {0};
+  PolyAllocator allocator = {.copy_out = readback_probe_copyout, .dev_ctx = &probe};
+  float data[5] = {1, 2, 3, 4, 5}, output[5] = {0};
+  PolyUOp *buf = poly_test_buffer(ctx, POLY_FLOAT32, 4);
+  PolyBuffer handle = {
+      .ptr = data,
+      .nbytes = 4 * sizeof(float),
+      .device = POLY_DEVICE_CUDA,
+      .allocator = &allocator,
+      .valid = true};
+  ASSERT_INT_EQ(poly_buffer_attach(ctx, buf, &handle), 0);
+  bool ok = poly_buffer_copyout(ctx, buf, output, sizeof(output)) == -1 &&
+            poly_buffer_copyout(ctx, buf, output, 0) == -1 && probe.reads == 0;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
+TEST(uop, buffer_copyin_rejects_missing_transfer_operation) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyAllocator allocator = {0};
+  float data[4] = {1, 2, 3, 4}, input[4] = {5, 6, 7, 8};
+  PolyUOp *buf = poly_test_buffer(ctx, POLY_FLOAT32, 4);
+  PolyBuffer handle = {
+      .ptr = data,
+      .nbytes = sizeof(data),
+      .device = POLY_DEVICE_CUDA,
+      .allocator = &allocator,
+      .valid = true};
+  ASSERT_INT_EQ(poly_buffer_attach(ctx, buf, &handle), 0);
+  int rc = poly_buffer_copyin(ctx, buf, input, sizeof(input));
+  bool ok = rc == -1 && data[0] == 1 && poly_buffer_get(ctx, buf)->valid;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
+TEST(uop, buffer_copyout_rejects_missing_transfer_operation) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyAllocator allocator = {0};
+  float data[4] = {1, 2, 3, 4}, output[4] = {0};
+  PolyUOp *buf = poly_test_buffer(ctx, POLY_FLOAT32, 4);
+  PolyBuffer handle = {
+      .ptr = data,
+      .nbytes = sizeof(data),
+      .device = POLY_DEVICE_CUDA,
+      .allocator = &allocator,
+      .valid = true};
+  ASSERT_INT_EQ(poly_buffer_attach(ctx, buf, &handle), 0);
+  int rc = poly_buffer_copyout(ctx, buf, output, sizeof(output));
+  bool ok = rc == -1 && output[0] == 0;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
 #ifdef POLY_TESTING
 extern void poly_test_buffer_handle_fail_after(int count);
+extern void poly_test_range_alloc_fail_after(int count);
+
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
+TEST(uop, range_cache_allocation_failure_never_returns_empty_or_writes_past_capacity) {
+  bool ok = true;
+  for (int ended = 0; ended < 2; ended++) {
+    for (int membership = 0; membership < 2; membership++) {
+      for (int fail_after = 0; fail_after < 5; fail_after++) {
+        pid_t child = fork();
+        ASSERT_TRUE(child >= 0);
+        if (child == 0) {
+          struct rlimit no_core = {0, 0};
+          (void)setrlimit(RLIMIT_CORE, &no_core);
+          PolyCtx *ctx = poly_ctx_new();
+          PolyUOp *ranges[5], *out[5];
+          for (int i = 0; i < 5; i++) {
+            ranges[i] = poly_uop1(
+                ctx, POLY_OP_RANGE, POLY_INT32, poly_const_int(ctx, 8),
+                poly_arg_range(i, POLY_AXIS_REDUCE)
+            );
+            if (poly_uop_ranges(ctx, ranges[i], out, 5) != 1) _exit(2);
+          }
+          PolyUOp *root;
+          if (ended) {
+            PolyUOp *src[6] = {poly_const_int(ctx, 8)};
+            for (int i = 0; i < 5; i++)
+              src[i + 1] = ranges[i];
+            root = poly_uop(ctx, POLY_OP_END, POLY_INT32, src, 6, poly_arg_none());
+          } else {
+            root = poly_sink_n(ctx, ranges, 5);
+          }
+          /* Sources are cached: inject each owner allocation, including the
+           * fifth RANGE's growth. Failure must not return a valid-looking
+           * empty set/membership answer (hashmap's existing fatal-OOM policy). */
+          poly_test_range_alloc_fail_after(fail_after);
+          if (membership)
+            (void)poly_uop_in_ranges(ctx, root, ranges[0]);
+          else
+            (void)poly_uop_ranges(ctx, root, out, 5);
+          poly_test_range_alloc_fail_after(-1);
+          poly_ctx_destroy(ctx);
+          _exit(3);
+        }
+        int status = 0;
+        bool waited = waitpid(child, &status, 0) == child;
+        ok = waited && WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT && ok;
+      }
+    }
+  }
+  ASSERT_TRUE(ok);
+  PASS();
+}
+#endif
 
 static void replacement_count_free(const PolyBuffer *buffer, void *arg) {
   (void)buffer;

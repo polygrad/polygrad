@@ -16,6 +16,24 @@ from polygrad.helpers import Context
 from polygrad.uop.ops import AxisType, KernelInfo, UOp, _dispose_uops_for_ctx
 
 
+@pytest.mark.parametrize('device', ['cpu', 'interp', 'cuda'])
+def test_readback_copy_has_no_retained_host_shadow(device):
+    if device == 'cuda' and not Device.cuda_available():
+        pytest.skip('CUDA device unavailable')
+    with Runtime(device=device) as runtime:
+        value = runtime.Tensor.arange(4).float().add(1).contiguous().realize()
+        before = runtime.stats()['buffer_owned_source_bytes']
+        for _ in range(3):
+            output = value.numpy()
+            np.testing.assert_array_equal(output, [1, 2, 3, 4])
+            output[0] = 99
+            assert runtime.stats()['buffer_owned_source_bytes'] == before
+        output = value.numpy()
+        value.dispose()
+        runtime.collect()
+    np.testing.assert_array_equal(output, [1, 2, 3, 4])
+
+
 @pytest.mark.parametrize('beam', [0, 1])
 def test_cuda_tensor_core_matmul_lane_mapping(beam, monkeypatch):
     if not Device.cuda_available():

@@ -222,8 +222,8 @@ int poly_buffer_copyin(PolyCtx *ctx, PolyUOp *buf, const void *src, size_t nbyte
 /* Device -> host data transfer. Buffer must be allocated. */
 int poly_buffer_copyout(PolyCtx *ctx, PolyUOp *buf, void *dst, size_t nbytes);
 
-/* Read bytes from a realized buffer into dst. Alias for copyout, but used by
- * frontends that need a backend-aware readback path rather than raw ptr access. */
+/* Copy current realized bytes into caller-owned dst without retaining a host
+ * mirror. Resolves views and authoritative storage through the backend. */
 int poly_buffer_read(PolyCtx *ctx, PolyUOp *buf, void *dst, size_t nbytes);
 
 /* Replace logical contents from host bytes, preserving cached device residency. */

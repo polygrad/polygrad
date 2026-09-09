@@ -727,12 +727,23 @@ static void *uop_storage_alloc(PolyUOpStorage *storage, size_t size, size_t alig
   return allocation->data;
 }
 
+#ifdef POLY_TESTING
+static _Thread_local int range_alloc_fail_after = -1;
+void poly_test_range_alloc_fail_after(int count) {
+  range_alloc_fail_after = count;
+}
+#endif
+
 static void *uop_storage_alloc_live(
     PolyCtx *ctx,
     PolyUOpStorage *storage,
     size_t size,
     size_t align
 ) {
+#ifdef POLY_TESTING
+  if (range_alloc_fail_after == 0) return NULL;
+  if (range_alloc_fail_after > 0) range_alloc_fail_after--;
+#endif
   if (!storage) return NULL;
   size_t before = storage->owned_bytes;
   void *data = uop_storage_alloc(storage, size, align);
@@ -1919,6 +1930,14 @@ typedef struct PolyRangeSet {
   int cap;
 } PolyRangeSet;
 
+/* These count/bool queries have no recoverable error channel. Match their
+ * PolyMap's fatal allocation policy instead of returning a false empty set
+ * that can silently remove reduction loops from the compiled graph. */
+static _Noreturn void range_cache_failed(void) {
+  fprintf(stderr, "polygrad: range cache computation failed\n");
+  abort();
+}
+
 static PolyRangeSet *range_set_new(PolyCtx *ctx, PolyUOp *owner, int cap) {
   PolyUOpStorage *storage = uop_storage_get(ctx, owner);
   if (!storage) return NULL;
@@ -1937,13 +1956,14 @@ static PolyRangeSet *range_set_new(PolyCtx *ctx, PolyUOp *owner, int cap) {
 
 static void range_set_grow(PolyCtx *ctx, PolyRangeSet *s, int need) {
   if (need <= s->cap) return;
-  int new_cap = s->cap * 2;
+  int new_cap = s->cap;
   while (new_cap < need)
-    new_cap *= 2;
+    new_cap = new_cap > INT_MAX / 2 ? INT_MAX : new_cap * 2;
+  if ((size_t)new_cap > SIZE_MAX / sizeof(PolyUOp *)) range_cache_failed();
   PolyUOp **new_items = uop_storage_alloc_live(
       ctx, s->storage, (size_t)new_cap * sizeof(PolyUOp *), _Alignof(PolyUOp *)
   );
-  if (!new_items) return;
+  if (!new_items) range_cache_failed();
   memcpy(new_items, s->items, (size_t)s->n * sizeof(PolyUOp *));
   s->items = new_items;
   s->cap = new_cap;
@@ -1957,6 +1977,7 @@ static bool range_set_contains(const PolyRangeSet *s, PolyUOp *r) {
 
 static void range_set_add(PolyCtx *ctx, PolyRangeSet *s, PolyUOp *r) {
   if (range_set_contains(s, r)) return;
+  if (s->n == INT_MAX) range_cache_failed();
   range_set_grow(ctx, s, s->n + 1);
   s->items[s->n++] = r;
 }
@@ -2308,7 +2329,8 @@ bool poly_uop_in_ranges_ex(PolyCtx *ctx, PolyUOp *u, PolyUOp *r, PolyUOpCache *c
     return false;
   }
   const PolyRangeSet *s = compute_ranges_with_ended(ctx, u, memo, ended);
-  bool found = s && range_set_contains(s, r);
+  if (!s) range_cache_failed();
+  bool found = range_set_contains(s, r);
   if (!cache) {
     poly_map_destroy(memo);
     poly_map_destroy(ended);
@@ -2336,13 +2358,7 @@ int poly_uop_ranges_ex(PolyCtx *ctx, PolyUOp *u, PolyUOp **out, int max_out, Pol
     return 0;
   }
   const PolyRangeSet *s = compute_ranges_with_ended(ctx, u, memo, ended);
-  if (!s) {
-    if (!cache) {
-      poly_map_destroy(memo);
-      poly_map_destroy(ended);
-    }
-    return 0;
-  }
+  if (!s) range_cache_failed();
   int n_out = s->n < max_out ? s->n : max_out;
   memcpy(out, s->items, (size_t)n_out * sizeof(PolyUOp *));
   if (!cache) {
