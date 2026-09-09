@@ -2191,12 +2191,23 @@ static PolyPatternMatcher *poly_pm_rangeify_cleanup(void) {
   return g_pm_rangeify_cleanup;
 }
 
+#ifdef POLY_TESTING
+static _Thread_local int limit_bufs_fail_after = -1;
+#endif
+
+static void *limit_bufs_realloc(void *ptr, size_t size) {
+#ifdef POLY_TESTING
+  if (limit_bufs_fail_after >= 0 && limit_bufs_fail_after-- == 0) return NULL;
+#endif
+  return realloc(ptr, size);
+}
+
 /* Current Tinygrad schedule/rangeify.py:_limit_bufs visitor.  STAGE, AFTER,
  * PARAM, MSELECT, and MSTACK are distinct kernel arguments; their sources are
  * intentionally not traversed. */
 static int poly_limit_bufs_count(PolyUOp *root) {
   int cap = 32;
-  PolyUOp **stack = malloc((size_t)cap * sizeof(*stack));
+  PolyUOp **stack = limit_bufs_realloc(NULL, (size_t)cap * sizeof(*stack));
   PolyMap *visited = poly_map_new(64);
   if (!stack || !visited) {
     free(stack);
@@ -2221,8 +2232,13 @@ static int poly_limit_bufs_count(PolyUOp *root) {
     for (int i = u->n_src - 1; i >= 0; i--) {
       if (!rmap_get(visited, u->src[i])) {
         if (top >= cap) {
+          if (cap > INT_MAX / 2 || (size_t)cap > SIZE_MAX / sizeof(*stack) / 2) {
+            free(stack);
+            poly_map_destroy(visited);
+            return -1;
+          }
           cap *= 2;
-          PolyUOp **grown = realloc(stack, (size_t)cap * sizeof(*stack));
+          PolyUOp **grown = limit_bufs_realloc(stack, (size_t)cap * sizeof(*stack));
           if (!grown) {
             free(stack);
             poly_map_destroy(visited);
@@ -2266,14 +2282,14 @@ static int poly_limit_bufs_max_for_device(PolyUOp *device) {
 static PolyUOp *poly_limit_bufs(PolyCtx *ctx, PolyUOp *sink) {
   int n_topo;
   PolyUOp **topo = poly_toposort_ex_alloc(ctx, sink, &n_topo, NULL, false);
-  if (!topo) return sink;
+  if (!topo) return NULL;
   PolyMap *rmap = poly_map_new(n_topo < 16 ? 16 : (uint32_t)n_topo);
   PolyMap *device_memo = poly_map_new(n_topo < 16 ? 16 : (uint32_t)n_topo);
   if (!rmap || !device_memo) {
     if (rmap) poly_map_destroy(rmap);
     if (device_memo) poly_map_destroy(device_memo);
     poly_toposort_free(topo);
-    return sink;
+    return NULL;
   }
   int64_t next_range = 0;
   for (int i = 0; i < n_topo; i++) {
@@ -2284,7 +2300,7 @@ static PolyUOp *poly_limit_bufs(PolyCtx *ctx, PolyUOp *sink) {
         poly_map_destroy(device_memo);
         poly_map_destroy(rmap);
         poly_toposort_free(topo);
-        return sink;
+        return NULL;
       }
       next_range = poly_range_axis_id(u->arg) + 1;
     }
@@ -2296,8 +2312,9 @@ static PolyUOp *poly_limit_bufs(PolyCtx *ctx, PolyUOp *sink) {
     bool src_changed = false;
     PolyUOp *ns_buf[POLY_MAX_DIMS + 4];
     PolyUOp **ns = ((uint32_t)u->n_src > (uint32_t)(sizeof ns_buf / sizeof *ns_buf))
-                       ? malloc(u->n_src * sizeof(PolyUOp *))
+                       ? limit_bufs_realloc(NULL, u->n_src * sizeof(PolyUOp *))
                        : ns_buf;
+    if (!ns) goto fail;
     for (int i = 0; i < u->n_src; i++) {
       PolyUOp *m = rmap_get(rmap, u->src[i]);
       ns[i] = m ? m : u->src[i];
@@ -2308,6 +2325,7 @@ static PolyUOp *poly_limit_bufs(PolyCtx *ctx, PolyUOp *sink) {
 
     if (poly_opset_has(POLY_GROUP_BINARY, u->op) || poly_opset_has(POLY_GROUP_TERNARY, u->op)) {
       PolyUOp *check_node = src_changed ? poly_uop_replace_src(ctx, u, ns) : u;
+      if (!check_node) goto fail_node;
       PolyUOp *root_device = poly_bufferize_device_hint(ctx, check_node, device_memo);
       int max_bufs = poly_limit_bufs_max_for_device(root_device);
       if (!max_bufs) {
@@ -2316,6 +2334,9 @@ static PolyUOp *poly_limit_bufs(PolyCtx *ctx, PolyUOp *sink) {
         continue;
       }
       int buf_count = max_bufs ? poly_limit_bufs_count(check_node) : 0;
+      /* Python raises on failed traversal/allocation. An unknown count is
+       * not evidence that this kernel satisfies the device argument limit. */
+      if (buf_count < 0) goto fail_node;
 
       if (buf_count > max_bufs - 1) {
         bool any_wrapped = false;
@@ -2334,13 +2355,18 @@ static PolyUOp *poly_limit_bufs(PolyCtx *ctx, PolyUOp *sink) {
               end_rngs[d] = r;
               continue;
             }
+            /* Python's itertools.count is unbounded; C range IDs are int64.
+             * Do not wrap the counter or publish a partial replacement. */
+            if (next_range == INT64_MAX) goto fail_node;
             end_rngs[d] = poly_uop_tagged_arg(
                 ctx, r->op, r->dtype, r->src, r->n_src,
                 poly_arg_range(next_range++, POLY_AXIS_WEAK), r->tag, r->tag_arg
             );
+            if (!end_rngs[d]) goto fail_node;
           }
 
           PolyUOp *sub_s = n_rngs ? poly_uop_substitute(ctx, s, orig_rngs, end_rngs, n_rngs) : s;
+          if (!sub_s) goto fail_node;
           PolyUOp *buf_src[POLY_MAX_DIMS + 1];
           buf_src[0] = sub_s;
           for (int d = 0; d < n_rngs; d++)
@@ -2349,22 +2375,35 @@ static PolyUOp *poly_limit_bufs(PolyCtx *ctx, PolyUOp *sink) {
               ctx, POLY_OP_STAGE, s->dtype, buf_src, n_rngs + 1,
               poly_bufferize_opts_for_device(source_device, POLY_ADDR_GLOBAL, false)
           );
+          if (!bufferize) goto fail_node;
 
           PolyUOp *idx_src[POLY_MAX_DIMS + 1];
           idx_src[0] = bufferize;
           for (int d = 0; d < n_rngs; d++)
             idx_src[1 + d] = orig_rngs[d];
           ns[i] = poly_uop(ctx, POLY_OP_INDEX, s->dtype, idx_src, n_rngs + 1, poly_arg_none());
+          if (!ns[i]) goto fail_node;
           any_wrapped = true;
         }
 
-        if (any_wrapped) result = poly_uop_replace_src(ctx, u, ns);
+        if (any_wrapped) {
+          result = poly_uop_replace_src(ctx, u, ns);
+          if (!result) goto fail_node;
+        }
       }
     }
 
-    if (!result && src_changed) result = poly_uop_replace_src(ctx, u, ns);
+    if (!result && src_changed) {
+      result = poly_uop_replace_src(ctx, u, ns);
+      if (!result) goto fail_node;
+    }
     if (result && result != u) rmap_set(rmap, u, result);
     if (ns != ns_buf) free(ns);
+    continue;
+
+  fail_node:
+    if (ns != ns_buf) free(ns);
+    goto fail;
   }
 
   PolyUOp *new_sink = rmap_get(rmap, sink);
@@ -2372,7 +2411,22 @@ static PolyUOp *poly_limit_bufs(PolyCtx *ctx, PolyUOp *sink) {
   poly_map_destroy(rmap);
   poly_toposort_free(topo);
   return new_sink ? new_sink : sink;
+
+fail:
+  poly_map_destroy(device_memo);
+  poly_map_destroy(rmap);
+  poly_toposort_free(topo);
+  return NULL;
 }
+
+#ifdef POLY_TESTING
+PolyUOp *poly_test_limit_bufs(PolyCtx *ctx, PolyUOp *sink, int fail_after) {
+  limit_bufs_fail_after = fail_after;
+  PolyUOp *ret = poly_limit_bufs(ctx, sink);
+  limit_bufs_fail_after = -1;
+  return ret;
+}
+#endif
 
 typedef struct {
   int64_t next_slot;
@@ -2577,6 +2631,7 @@ PolyUOp *poly_get_kernel_graph(PolyCtx *ctx, PolyUOp *tensor_sink) {
     fflush(stderr);
   }
   PolyUOp *limited = poly_limit_bufs(ctx, cleaned);
+  if (!limited) return NULL;
   double t_limit = timing ? poly_now_ms() : 0.0;
   if (timing) {
     fprintf(

@@ -1286,6 +1286,29 @@ TEST(sym, codegen_sym_flattens_group_under_sink) {
   PASS();
 }
 
+TEST(sym, group_sink_flatten_respects_source_count_limit) {
+  /* Python tuples have no uint16 arity ceiling (PG-PARITY-023). A compact
+   * shared DAG must not overflow C's count before declining the rewrite. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *leaf = poly_uop0(ctx, POLY_OP_CUSTOM, POLY_VOID, poly_arg_str("leaf"));
+  PolyUOp **src = malloc(UINT16_MAX * sizeof(*src));
+  ASSERT_NOT_NULL(src);
+  for (int i = 0; i < UINT16_MAX; i++)
+    src[i] = leaf;
+  PolyUOp *child = poly_uop(ctx, POLY_OP_GROUP, POLY_VOID, src, UINT16_MAX, poly_arg_none());
+  for (int i = 0; i < UINT16_MAX; i++)
+    src[i] = child;
+  PolyUOp *root = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, src, UINT16_MAX, poly_arg_none());
+  free(src);
+  ASSERT_NOT_NULL(root);
+  PolyUOp *result = poly_pm_rewrite(poly_pm_clean_up_group_sink(), ctx, root);
+  bool unchanged = result == NULL && root->src[0] == child && child->src[0] == leaf;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(unchanged);
+  PASS();
+}
+
 TEST(sym, singleton_end_is_its_value) {
   /* tinygrad@2026-08-22/a9069c177a9d uop/symbolic.py:306-308. */
   PolyCtx *ctx = poly_ctx_new();

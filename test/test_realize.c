@@ -4534,6 +4534,46 @@ TEST(realize, transform_to_call_wraps_sink_body_in_call) {
   PASS();
 }
 
+TEST(realize, precompiled_copied_output_keeps_dependency_on_store_value) {
+  /* tensor.py:transform_precompiled_call places effects on the STORE value,
+   * not as unordered siblings of the STORE in its destination AFTER. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  poly_ctx_set_preferred_device(ctx, POLY_DEVICE_INTERP);
+  PolyUOp *buffer = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 2, POLY_DEVICE_INTERP);
+  PolyUOp *param = poly_uop_param(ctx, 0, buffer);
+  PolyUOp *dep = poly_uop2(
+      ctx, POLY_OP_CALL, POLY_VOID, poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_none()), param,
+      poly_arg_none()
+  );
+  PolyUOp *value = poly_add(ctx, param, param);
+  PolyUOp *after = poly_uop2(ctx, POLY_OP_AFTER, value->dtype, value, dep, poly_arg_none());
+  PolyUOp *tuple = poly_uop1(ctx, POLY_OP_TUPLE, POLY_VOID, after, poly_arg_none());
+  PolyCallInfo info = {.precompile = true};
+  PolyUOp *function =
+      poly_uop2(ctx, POLY_OP_FUNCTION, POLY_VOID, tuple, buffer, poly_arg_call_info(&info));
+  PolyUOp *requested = poly_uop1(ctx, POLY_OP_GETTUPLE, POLY_FLOAT32, function, poly_arg_int(0));
+  PolyUOp *realized = NULL;
+  PolyUOp *callified = poly_transform_to_call(ctx, &requested, 1, &realized);
+  ASSERT_NOT_NULL(callified);
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort_alloc(ctx, callified, &n_topo);
+  PolyUOp *call = NULL;
+  for (int i = 0; i < n_topo; i++)
+    if (topo[i]->op == POLY_OP_CALL && topo[i]->arg.kind == POLY_ARG_CALL_INFO &&
+        topo[i]->arg.call_info->precompile)
+      call = topo[i];
+  ASSERT_NOT_NULL(call);
+  PolyUOp *item = call->src[0]->src[0];
+  bool correct = item->op == POLY_OP_AFTER && item->n_src == 2 &&
+                 item->src[1]->op == POLY_OP_STORE && item->src[1]->src[1]->op == POLY_OP_AFTER &&
+                 item->src[1]->src[1]->src[1] == dep;
+  poly_toposort_free(topo);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
 TEST(realize, precompiled_function_becomes_opaque_output_call) {
   /* Pinned callify.py:101-142 replaces a precompiled value FUNCTION with an
    * opaque CALL whose SINK stores into explicit output PARAMs, then exposes

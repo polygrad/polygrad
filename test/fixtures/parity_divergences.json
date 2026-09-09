@@ -648,7 +648,7 @@
       "area": "UOp source-arity representation ceiling",
       "vocabulary": {"tinygrad_only": [], "polygrad_only": []},
       "tinygrad": "Python source tuples have no uint16 ceiling; pm_add_control_flow can append a predecessor to a 65,535-source RANGE and produce 65,536 sources",
-      "polygrad": "PolyUOp.n_src is uint16_t; poly_apply_control_flow now fails the whole pass cleanly at that exact boundary instead of returning a partial graph",
+      "polygrad": "PolyUOp.n_src is uint16_t; poly_apply_control_flow and precompiled AFTER accumulation fail cleanly at the ceiling. Optional GROUP/SINK flattening declines an unrepresentable result before count overflow, preserving the original graph.",
       "rationale": "The existing C representation cannot encode the pinned result. Clean failure is required for correctness but is not approval of the parity debt or permission to widen the UOp representation implicitly.",
       "approval": null,
       "evidence": [
@@ -657,6 +657,8 @@
         "src/polygrad.h:PolyUOp",
         "src/codegen/late/linearizer.c:poly_apply_control_flow",
         "test/test_future_passes.c:control_flow_fails_cleanly_at_uop_arity_ceiling",
+        "test/test_sym.c:group_sink_flatten_respects_source_count_limit",
+        "src/engine/realize.c:poly_transform_precompiled_call",
         "temp/tg_control_flow_max_range_probe_20260809.py"
       ],
       "close_when": "A separately approved arity representation migration carries every UOp/CSE/IR/ABI consumer beyond uint16 and the 65,536-source result matches pinned tinygrad, or the accepted public graph contract explicitly rejects the input before construction."

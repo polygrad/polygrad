@@ -488,14 +488,14 @@ static bool is_buffer_template(PolyUOp *u) {
          u->arg.param && u->arg.param->addrspace == POLY_ADDR_GLOBAL;
 }
 
-static bool param_slot(PolyUOp *u, int *slot) {
+static bool param_slot(PolyUOp *u, int64_t *slot) {
   if (!u || u->op != POLY_OP_PARAM) return false;
   if (u->arg.kind == POLY_ARG_PARAM && u->arg.param && u->arg.param->slot >= 0) {
-    *slot = (int)u->arg.param->slot;
+    *slot = u->arg.param->slot;
     return true;
   }
   if (u->arg.kind == POLY_ARG_INT && u->arg.i >= 0) {
-    *slot = (int)u->arg.i;
+    *slot = u->arg.i;
     return true;
   }
   return false;
@@ -515,7 +515,9 @@ static PolyUOp *resolve_schedule_arg(
   if (cached) return cached;
 
   PolyUOp *ret = u;
-  int slot = -1;
+  /* Keep Python's full slot value until bounds checking; narrowing first
+   * can turn an invalid slot into a valid argument or a negative index. */
+  int64_t slot = -1;
   if (param_slot(u, &slot)) {
     ret = slot < n_args ? args[slot] : NULL;
   } else if (is_buffer_template(u)) {

@@ -53,6 +53,14 @@ static bool multi_pm_collect_device_ranges(
     poly_toposort_free(size_topo);
     return false;
   }
+  /* Python concatenates both topological key sets without signed overflow.
+   * The C result count and its pointer array must both be representable. */
+  if (n_starts > INT_MAX - n_sizes ||
+      (size_t)n_starts + (size_t)n_sizes > SIZE_MAX / sizeof(PolyUOp *)) {
+    poly_toposort_free(start_topo);
+    poly_toposort_free(size_topo);
+    return false;
+  }
   int cap = n_starts + n_sizes;
   PolyUOp **vars = cap > 0 ? malloc((size_t)cap * sizeof(*vars)) : NULL;
   if (cap > 0 && !vars) {

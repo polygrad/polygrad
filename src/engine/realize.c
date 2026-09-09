@@ -1240,8 +1240,8 @@ static PolyUOp *poly_callify_shrink_to_like(PolyCtx *ctx, PolyUOp *value, PolyUO
   return poly_shrink_uop(ctx, value, starts, sizes, ndim);
 }
 
-/* Exact C port of pinned callify.transform_precompiled_call
- * (tinygrad/callify.py:101-142): allocate explicit outputs, redirect the
+/* Pinned Tensor.transform_precompiled_call (tinygrad/tensor.py:109-141):
+ * allocate explicit outputs, redirect the
  * TUPLE body into output PARAMs, turn FUNCTION into opaque CALL, and expose
  * each result as AFTER(output, CALL). */
 static PolyUOp *poly_transform_precompiled_call(
@@ -1308,8 +1308,16 @@ static PolyUOp *poly_transform_precompiled_call(
     PolyUOp *source = body->src[i];
     int n_deps = 0;
     for (PolyUOp *cur = source; cur && cur->op == POLY_OP_AFTER && cur->n_src >= 1;
-         cur = cur->src[0])
+         cur = cur->src[0]) {
+      /* AFTER needs one value source in addition to the flattened effects.
+       * Respect the existing C arity ceiling before summing or allocating. */
+      if (cur->n_src - 1 > UINT16_MAX - 1 - n_deps) {
+        ok = false;
+        break;
+      }
       n_deps += cur->n_src - 1;
+    }
+    if (!ok) break;
     PolyUOp **deps = n_deps > 0 ? malloc((size_t)n_deps * sizeof(*deps)) : NULL;
     if (n_deps > 0 && !deps) {
       ok = false;
@@ -1356,20 +1364,26 @@ static PolyUOp *poly_transform_precompiled_call(
         free(after_src);
       }
     } else {
-      PolyUOp *store = poly_store_val(ctx, targets[i], source);
-      PolyUOp **after_src = malloc((size_t)(2 + n_deps) * sizeof(*after_src));
-      if (!store || !after_src) {
-        free(after_src);
-        free(deps);
-        ok = false;
-        break;
+      /* Pinned s.after(*after_deps) is the STORE value: sibling effects on
+       * AFTER(target, STORE, ...) do not establish that dependency. */
+      PolyUOp *value = source;
+      if (n_deps > 0) {
+        PolyUOp **value_src = malloc((size_t)(1 + n_deps) * sizeof(*value_src));
+        if (!value_src) {
+          free(deps);
+          ok = false;
+          break;
+        }
+        value_src[0] = source;
+        memcpy(value_src + 1, deps, (size_t)n_deps * sizeof(*deps));
+        value = poly_uop(ctx, POLY_OP_AFTER, source->dtype, value_src, 1 + n_deps, poly_arg_none());
+        free(value_src);
       }
-      after_src[0] = targets[i];
-      after_src[1] = store;
-      if (n_deps > 0) memcpy(after_src + 2, deps, (size_t)n_deps * sizeof(*deps));
+      PolyUOp *store = value ? poly_store_val(ctx, targets[i], value) : NULL;
       items[i] =
-          poly_uop(ctx, POLY_OP_AFTER, targets[i]->dtype, after_src, 2 + n_deps, poly_arg_none());
-      free(after_src);
+          store
+              ? poly_uop2(ctx, POLY_OP_AFTER, targets[i]->dtype, targets[i], store, poly_arg_none())
+              : NULL;
     }
     free(deps);
     ok = items[i] != NULL;

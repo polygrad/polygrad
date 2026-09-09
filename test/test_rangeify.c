@@ -5718,6 +5718,94 @@ TEST(rangeify, earliest_detach_removal) {
   PASS();
 }
 
+TEST(rangeify, schedule_param_slot_does_not_truncate) {
+  /* Pinned pm_post_sched_cache indexes with the full Python integer and
+   * raises IndexError for every nonnegative slot outside the call args. */
+  const int64_t slots[] = {INT64_C(4294967296), INT64_C(2147483648), INT64_MAX, 1, 0};
+  for (int kind = 0; kind < 2; kind++) {
+    for (size_t i = 0; i < sizeof(slots) / sizeof(*slots); i++) {
+      PolyCtx *ctx = poly_ctx_new();
+      ASSERT_NOT_NULL(ctx);
+      PolyParamArg arg = {.slot = slots[i], .dtype = POLY_FLOAT32};
+      PolyUOp *param = poly_uop0(
+          ctx, POLY_OP_PARAM, POLY_FLOAT32, kind ? poly_arg_param(&arg) : poly_arg_int(slots[i])
+      );
+      PolyUOp *body = poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_none());
+      PolyUOp *inner = poly_uop2(ctx, POLY_OP_CALL, POLY_VOID, body, param, poly_arg_none());
+      PolyUOp *linear = poly_uop1(ctx, POLY_OP_LINEAR, POLY_VOID, inner, poly_arg_none());
+      PolyUOp *value = poly_const_float(ctx, 7.0f);
+      PolyUOp *call = poly_uop2(ctx, POLY_OP_CALL, POLY_VOID, linear, value, poly_arg_none());
+      PolyVarBinding *bindings = NULL;
+      int n_bindings = 0;
+      PolyUOp *ret = poly_create_linear_with_vars(ctx, call, &bindings, &n_bindings);
+      bool correct =
+          slots[i] == 0 ? ret && ret->n_src == 1 && ret->src[0]->src[1] == value : ret == NULL;
+      free(bindings);
+      poly_ctx_destroy(ctx);
+      ASSERT_TRUE(correct);
+    }
+  }
+  PASS();
+}
+
+extern PolyUOp *poly_test_limit_bufs(PolyCtx *ctx, PolyUOp *sink, int fail_after);
+
+TEST(rangeify, limit_bufs_scratch_failure_is_not_success) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *leaf = poly_uop0(ctx, POLY_OP_CUSTOM, POLY_VOID, poly_arg_none());
+  PolyUOp *src[40];
+  for (int i = 0; i < 40; i++)
+    src[i] = leaf;
+  PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, src, 40, poly_arg_none());
+  ASSERT_NOT_NULL(sink);
+  PolyUOp *failed = poly_test_limit_bufs(ctx, sink, 0);
+  PolyUOp *retry = poly_test_limit_bufs(ctx, sink, -1);
+  bool correct = failed == NULL && retry == sink && sink->n_src == 40;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
+TEST(rangeify, limit_bufs_count_failure_is_not_below_limit) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *a = multi_pm_test_source(ctx, 8001, POLY_FLOAT32, "CPU", 2, 4);
+  PolyUOp *b = multi_pm_test_source(ctx, 8002, POLY_FLOAT32, "CPU", 2, 4);
+  PolyUOp *sum = poly_add(ctx, a, b);
+  ASSERT_NOT_NULL(sum);
+  PolyUOp *failed = poly_test_limit_bufs(ctx, sum, 0);
+  PolyUOp *retry = poly_test_limit_bufs(ctx, sum, -1);
+  bool correct = failed == NULL && retry == sum;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
+TEST(rangeify, limit_bufs_range_id_exhaustion_fails_cleanly) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  RangeifyEnvSave limit = rangeify_save_env("POLY_MAX_KERNEL_BUFFERS");
+  setenv("POLY_MAX_KERNEL_BUFFERS", "2", 1);
+  PolyUOp *range = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_WEAKINT, poly_const_int(ctx, 2),
+      poly_arg_range(INT64_MAX - 1, POLY_AXIS_REDUCE)
+  );
+  PolyUOp *values[3];
+  for (int i = 0; i < 3; i++) {
+    PolyUOp *buffer = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 2, POLY_DEVICE_CPU);
+    PolyUOp *param = poly_uop_param(ctx, i, buffer);
+    values[i] = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, param, range, poly_arg_none());
+  }
+  PolyUOp *sum = poly_add(ctx, poly_add(ctx, values[0], values[1]), values[2]);
+  ASSERT_NOT_NULL(sum);
+  PolyUOp *ret = poly_test_limit_bufs(ctx, sum, -1);
+  rangeify_restore_env(&limit);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ret == NULL);
+  PASS();
+}
+
 /* Stage 3.25: pm_limit_bufs */
 
 TEST(rangeify, limit_bufs_ir) {

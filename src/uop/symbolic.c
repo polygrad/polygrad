@@ -5223,11 +5223,13 @@ static PolyUOp *rule_clean_up_group_sink(PolyCtx *ctx, PolyUOp *root, const Poly
   bool changed = false;
   for (int i = 0; i < root->n_src; i++) {
     PolyUOp *src = root->src[i];
+    int count = sink_like_child(src) ? src->n_src : 1;
+    /* Python tuples have no C source ceiling (PG-PARITY-023). Decline this
+     * optional flattening before accumulation/allocation can overflow. */
+    if (count > UINT16_MAX - n_src) return NULL;
+    n_src += count;
     if (sink_like_child(src)) {
-      n_src += src->n_src;
       changed = true;
-    } else {
-      n_src++;
     }
   }
   if (!changed) return NULL;
