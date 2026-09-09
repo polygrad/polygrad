@@ -8,6 +8,7 @@
 #include "../src/engine/realize.h"
 #include "../src/engine/schedule.h"
 #include "../src/frontend.h"
+#include "../src/codegen/codegen.h"
 #include "../src/schedule/memory.h"
 #include "../src/schedule/rangeify.h"
 #include "../src/schedule/schedule.h"
@@ -28,6 +29,54 @@ static bool contains_uop(PolyUOp **items, int count, PolyUOp *item) {
   for (int i = 0; i < count; i++)
     if (items[i] == item) return true;
   return false;
+}
+
+TEST(schedule_runtime, beam_time_call_reads_scalar_values) {
+#ifdef __EMSCRIPTEN__
+  PolyDevice devices[] = {POLY_DEVICE_WASM, POLY_DEVICE_INTERP};
+#else
+  PolyDevice devices[] = {POLY_DEVICE_CPU, POLY_DEVICE_INTERP};
+#endif
+  for (size_t d = 0; d < sizeof(devices) / sizeof(devices[0]); d++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyUOp *buffer = poly_test_program_param(ctx, POLY_FLOAT32, 1, 0);
+    PolyParamArg arg = {
+        .slot = 1,
+        .addrspace = POLY_ADDR_ALU,
+        .name = "scalar",
+        .has_minmax = true,
+        .min_val = -8,
+        .max_val = 8};
+    PolyUOp *scalar = poly_uop0(ctx, POLY_OP_PARAM, POLY_INT32, poly_arg_param(&arg));
+    PolyUOp *zero = poly_const_int(ctx, 0);
+    PolyUOp *ptr = poly_uop_index(ctx, buffer, &zero, 1);
+    PolyUOp *store = poly_uop2(
+        ctx, POLY_OP_STORE, POLY_VOID, ptr, poly_cast(ctx, scalar, POLY_FLOAT32), poly_arg_none()
+    );
+    PolyKernelInfo info = {.name = "test"};
+    PolyUOp *sink =
+        poly_uop_tagged(ctx, POLY_OP_SINK, POLY_VOID, &store, 1, poly_arg_kernel_info(&info), 1);
+    PolyUOp *call = poly_uop2(ctx, POLY_OP_CALL, POLY_VOID, sink, buffer, poly_arg_none());
+    PolyRunner runner = {0};
+    int rc = poly_time_call_prepare(ctx, call, devices[d], &runner);
+    bool correct = rc == 0 && runner.n_params == 1 && runner.n_vars == 1;
+    if (rc == 0) {
+      int values[] = {7, -3};
+      for (int i = 0; i < 2; i++) {
+        float output = NAN;
+        void *args[] = {&output, &values[i]};
+        PolyVarBinding binding = {.var = scalar, .value = values[i]};
+        double elapsed = poly_time_call(&runner, devices[d], args, 2, &binding, 1, 1, INFINITY, 0);
+        correct &= isfinite(elapsed) && output == values[i];
+        if (output != values[i])
+          fprintf(stderr, "scalar backend%d: expected%d, got%g\n", devices[d], values[i], output);
+      }
+      poly_time_call_finish(ctx, &runner, devices[d]);
+    }
+    poly_ctx_destroy(ctx);
+    ASSERT_TRUE(correct);
+  }
+  PASS();
 }
 
 TEST(schedule_runtime, allocation_free_linear_does_not_collect_residency) {

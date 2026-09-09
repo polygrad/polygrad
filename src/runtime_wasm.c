@@ -336,8 +336,11 @@ int poly_wasm_execute(PolyRunner *runner, void **args, int n_args) {
     wh->iargs = new_iargs;
     wh->iargs_cap = new_cap;
   }
+  /* The shared runner ABI passes buffers as addresses, then scalar values
+   * by address. Wasm parameters are i32 values in both cases, like the
+   * buffer/vals split in Tinygrad Program.__call__, not all pointer casts. */
   for (int i = 0; i < n_args; i++)
-    wh->iargs[i] = (int)(intptr_t)args[i];
+    wh->iargs[i] = i < runner->n_params ? (int)(intptr_t)args[i] : *(const int *)args[i];
   double t_args = timing ? poly_now_ms() : 0.0;
   int ret = js_exec_wasm_kernel(wh->kernel_id, wh->iargs, n_args);
   double t_exec = timing ? poly_now_ms() : 0.0;
