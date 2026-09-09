@@ -314,10 +314,17 @@ static int build_remap(
       flat[n_flat++] = tc->swizzle[swizzle][group][i];
   int n = n_shape < n_flat ? n_shape : n_flat;
   if (n > max_n) n = max_n;
-  for (int i = 0; i < n; i++) {
-    from[i] = shape[i];
-    to[i] = flat[i];
-  }
+  /* TensorCore._remaps keys are grouped l/u/r, not base_shape_str's
+   * interleaved opt order. Confusing them permutes hardware lane operands. */
+  int key = 0;
+  const char groups[] = {'l', 'u', 'r'};
+  for (int group = 0; group < 3; group++)
+    for (int i = 0; i < n_shape && key < n; i++)
+      if (shape[i][0] == groups[group]) {
+        from[key] = shape[i];
+        to[key] = flat[key];
+        key++;
+      }
   return n;
 }
 

@@ -815,17 +815,42 @@ static int sched_unrollable_dims(const OptScheduler *s, int *out, int max_n) {
   return n;
 }
 
-/* Every consumer compares this product against at most64. Saturation keeps
- * Python-integer branch decisions without overflowing C; axis sizes stay exact. */
-static int64_t sched_upcast_size(const OptScheduler *s) {
+/* UOp.__bool__/_eval requires a proven truth value, unlike resolve(default).
+ * Indeterminate predicates reject the candidate instead of specializing bounds. */
+static int sched_eval_lt(PolyCtx *ctx, PolyUOp *value, int64_t limit) {
+  PolyUOp *pred = poly_alu2(
+      ctx, POLY_OP_CMPLT, value, poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(limit))
+  );
+  pred = poly_graph_rewrite(ctx, pred, poly_symbolic());
+  if (!pred) return -1;
+  int64_t lo, hi;
+  poly_uop_minmax(ctx, pred, &lo, &hi);
+  return lo == hi ? lo != 0 : -1;
+}
+
+/* Scheduler.upcast_size plus the caller's comparison. Keep constant tiles on
+ * the integer fast path; symbolic extents are values, not the shape-cache0. */
+static int sched_upcast_size_lt(const OptScheduler *s, int64_t limit) {
   int64_t prod = 1;
+  bool symbolic = false;
   for (int i = 0; i < s->n_rngs; i++) {
     if (s->types[i] == POLY_AXIS_UPCAST || s->types[i] == POLY_AXIS_UNROLL) {
-      if (s->shape[i] > 0 && prod > INT64_MAX / s->shape[i]) return INT64_MAX;
-      prod *= s->shape[i];
+      if (s->shape[i] <= 0)
+        symbolic = true;
+      else if (prod > INT64_MAX / s->shape[i])
+        prod = INT64_MAX;
+      else
+        prod *= s->shape[i];
     }
   }
-  return prod;
+  if (!symbolic) return prod < limit;
+  PolyUOp *value = poly_uop0(s->ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(1));
+  for (int i = 0; i < s->n_rngs; i++)
+    if (s->types[i] == POLY_AXIS_UPCAST || s->types[i] == POLY_AXIS_UNROLL)
+      value = poly_alu2(
+          s->ctx, POLY_OP_MUL, value, poly_cast(s->ctx, s->rngs[i]->src[0], POLY_WEAKINT)
+      );
+  return sched_eval_lt(s->ctx, value, limit);
 }
 
 static PolyUOp *sched_full_shape_prod(const OptScheduler *s) {
@@ -1187,15 +1212,16 @@ static bool sched_apply_tc_opt(
       sched_refresh(s);
     }
 
-    /* 6. Check divisibility -- reject non-const bounds (postrange.py:254-262) */
+    /* postrange._apply_tc_opt tests vmax+1 before shift_to proves division.
+     * Only PADTO requires a literal bound; divisible expressions need no pad. */
     bool pad_ok = true;
     for (int i = 0; i < 3; i++) {
-      if (axes[i]->n_src == 0 || axes[i]->src[0]->op != POLY_OP_CONST ||
-          axes[i]->src[0]->arg.kind != POLY_ARG_INT) {
+      int64_t lo, sz;
+      if (axes[i]->n_src == 0) {
         pad_ok = false;
-        break; /* non-const bound: hard reject */
+        break;
       }
-      int64_t sz = axes[i]->src[0]->arg.i;
+      poly_uop_minmax(ctx, axes[i]->src[0], &lo, &sz);
       if (sz <= 0 || sz % tc->dims[i] != 0) {
         if (tc_opt < 2) {
           pad_ok = false;
@@ -1214,9 +1240,11 @@ static bool sched_apply_tc_opt(
     /* Verify tag survived the substitute+refresh */
 
     /* 7. Create WARP range and apply opts (postrange.py:264-274) */
-    PolyUOp *warp_sz = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(tc->threads));
+    /* UOp.range and its warp-bit arithmetic remain weak until index lowering;
+     * an int32 fragment creates mixed-dtype ADDs in candidate verification. */
+    PolyUOp *warp_sz = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(tc->threads));
     PolyUOp *warp =
-        poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, warp_sz, poly_arg_range(-1, POLY_AXIS_WARP));
+        poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, warp_sz, poly_arg_range(-1, POLY_AXIS_WARP));
 
     PolyUOp *ne[32];
     int n_ne = 0;
@@ -1227,12 +1255,12 @@ static bool sched_apply_tc_opt(
       PolyUOp *new_rng = NULL;
 
       if (otype == 'l') {
-        PolyUOp *two = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(2));
+        PolyUOp *two = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(2));
         PolyUOp *warp_mod2 =
-            poly_uop2(ctx, POLY_OP_FLOORMOD, POLY_INT32, warp, two, poly_arg_none());
+            poly_uop2(ctx, POLY_OP_FLOORMOD, POLY_WEAKINT, warp, two, poly_arg_none());
         axes[odim] =
             sched_shift_to_core(s, axes[odim], 2, POLY_AXIS_LOCAL, false, warp_mod2, &new_rng);
-        warp = poly_uop2(ctx, POLY_OP_FLOORDIV, POLY_INT32, warp, two, poly_arg_none());
+        warp = poly_uop2(ctx, POLY_OP_FLOORDIV, POLY_WEAKINT, warp, two, poly_arg_none());
       } else if (otype == 'u') {
         axes[odim] = sched_shift_to_core(s, axes[odim], 2, POLY_AXIS_UPCAST, false, NULL, &new_rng);
       }
@@ -1652,12 +1680,29 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
     if (reduce_is_addend && second_covers_first) {
       for (int global_idx = 0; global_idx < s.n_rngs; global_idx++) {
         if (s.types[global_idx] != POLY_AXIS_GLOBAL) continue;
-        int64_t reduce_size = s.shape[first_reduce];
         int64_t global_size = s.shape[global_idx];
         if (mv_threads_per_row <= 0 || mv_blocksize <= 0 || mv_rows_per_thread <= 0 ||
-            reduce_size % mv_threads_per_row != 0 ||
-            global_size % ((int64_t)mv_blocksize * mv_rows_per_thread) != 0)
+            !poly_uop_divides(ctx, s.rngs[first_reduce]->src[0], mv_threads_per_row))
           continue;
+        int64_t block = (int64_t)mv_blocksize * mv_rows_per_thread;
+        int divisible =
+            global_size > 0
+                ? global_size % block == 0
+                : sched_eval_lt(
+                      ctx,
+                      poly_alu2(
+                          ctx, POLY_OP_FLOORMOD,
+                          poly_cast(ctx, s.rngs[global_idx]->src[0], POLY_WEAKINT),
+                          poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(block))
+                      ),
+                      1
+                  );
+        if (divisible < 0) {
+          poly_toposort_free(topo);
+          s.failed = true;
+          goto done;
+        }
+        if (!divisible) continue;
 
         if (mv_threads_per_row > 1)
           sched_apply_int_opt(&s, caps, POLY_OPT_GROUP, 0, mv_threads_per_row);
@@ -1689,8 +1734,8 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
         }
       }
       if (ridx < 0) break;
-      if (ridx < s.n_rngs && s.shape[ridx] > 1 &&
-          sched_apply_int_opt(&s, caps, POLY_OPT_GROUPTOP, axis, 16)) {
+      /* apply_opt/shift_to proves symbolic divisibility; no static-size guard. */
+      if (sched_apply_int_opt(&s, caps, POLY_OPT_GROUPTOP, axis, 16)) {
         break;
       }
     }
@@ -1771,7 +1816,14 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
     bool *upcasted_axis = calloc((size_t)n_axis_flags, sizeof(*upcasted_axis));
     if (!upcasted_axis) goto done;
 
-    while (sched_output_prod_upcastable(&s) >= 1024 && sched_upcast_size(&s) < 32) {
+    while (sched_output_prod_upcastable(&s) >= 1024) {
+      int below = sched_upcast_size_lt(&s, 32);
+      if (below < 0) {
+        free(upcasted_axis);
+        s.failed = true;
+        goto done;
+      }
+      if (!below) break;
 
       /* Score each candidate (num_strides, sum_strides, axis, amount) */
       typedef struct {
@@ -1862,9 +1914,18 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
     if (!unroll_dims) goto done;
     int n_unroll = sched_unrollable_dims(&s, unroll_dims, capacity);
 
-    if (n_unroll > 0 &&
-        (sched_upcast_size(&s) <= 4 || !sched_has_axis_type(&s, POLY_AXIS_UNROLL)) &&
-        sched_upcast_size(&s) < 64) {
+    int can_unroll = 0;
+    if (n_unroll > 0) {
+      can_unroll = sched_upcast_size_lt(&s, 5);
+      if (can_unroll >= 0 && (can_unroll || !sched_has_axis_type(&s, POLY_AXIS_UNROLL)))
+        can_unroll = sched_upcast_size_lt(&s, 64);
+      if (can_unroll < 0) {
+        free(unroll_dims);
+        s.failed = true;
+        goto done;
+      }
+    }
+    if (can_unroll) {
       int last = unroll_dims[n_unroll - 1];
       int64_t last_sz = s.shape[last];
 
@@ -2008,7 +2069,7 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
   }
 
 done:;
-  PolyUOp *out = s.ast;
+  PolyUOp *out = s.failed ? NULL : s.ast;
   sched_destroy(&s);
   return out;
 }
@@ -2168,17 +2229,22 @@ static bool sched_apply_opt_impl(
       poly_toposort_free(topo);
       if (nested) return false;
       int64_t limit = caps.shared_max > 0 ? caps.shared_max : 32768;
-      int64_t size = itemsize;
-      if (size <= 0 || amount > limit / size) return false;
-      size *= amount;
+      if (itemsize <= 0) return false;
+      PolyUOp *size = poly_alu2(
+          s->ctx, POLY_OP_MUL,
+          poly_uop0(s->ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(itemsize)),
+          poly_uop0(s->ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(amount))
+      );
       for (int i = 0; i < s->n_rngs; i++) {
         PolyAxisType t = s->types[i];
         if (t != POLY_AXIS_UPCAST && t != POLY_AXIS_WARP && t != POLY_AXIS_LOCAL &&
             t != POLY_AXIS_GROUP_REDUCE)
           continue;
-        if (s->shape[i] <= 0 || s->shape[i] > limit / size) return false;
-        size *= s->shape[i];
+        size = poly_alu2(
+            s->ctx, POLY_OP_MUL, size, poly_cast(s->ctx, s->rngs[i]->src[0], POLY_WEAKINT)
+        );
       }
+      if (sched_eval_lt(s->ctx, size, limit + 1) != 1) return false;
     }
     PolyUOp *replaced = sched_shift_to_core(
         s, rng, amount, to_type, opt.op == POLY_OPT_GROUPTOP || opt.op == POLY_OPT_THREAD, NULL,

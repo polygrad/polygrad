@@ -2258,61 +2258,27 @@ TEST(tc, base_upcast_axes) {
 }
 
 TEST(tc, permute_for_shape_str) {
-  /* Use base_shape_str as input (identity-like case) */
-  const char *shape_str[32];
-  int n = poly_tc_base_shape_str(get_test_cdna_tc(), shape_str, 32);
-  ASSERT_INT_EQ(n, 12);
-
-  int perm0[32], perm1[32];
-  poly_tc_permute_for_shape_str(get_test_cdna_tc(), 0, shape_str, n, perm0, 32);
-  poly_tc_permute_for_shape_str(get_test_cdna_tc(), 1, shape_str, n, perm1, 32);
-
-  /* swizzle[0] flattened: u0,u1,l4,l5,r2,r3, r0,r1, l0,l1,l2,l3
-   * fwd (base_shape_str): l0,l1,l2,l3,u0,u1,l4,l5,r0,r1,r2,r3
-   * remap[0]: l0->u0, l1->u1, l2->l4, l3->l5, u0->r2, u1->r3, l4->r0, l5->r1, r0->l0, r1->l1,
-   * r2->l2, r3->l3
-   *
-   * For shape_str = base_shape_str:
-   *   perm0[0] = shape_str.index(remap["l0"]) = index("u0") = 4
-   *   perm0[1] = index("u1") = 5
-   *   perm0[2] = index("l4") = 6
-   *   perm0[3] = index("l5") = 7
-   *   perm0[4] = index("r2") = 10
-   *   perm0[5] = index("r3") = 11
-   *   perm0[6] = index("r0") = 8
-   *   perm0[7] = index("r1") = 9
-   *   perm0[8] = index("l0") = 0
-   *   perm0[9] = index("l1") = 1
-   *   perm0[10] = index("l2") = 2
-   *   perm0[11] = index("l3") = 3
-   */
-  int expected0[] = {4, 5, 6, 7, 10, 11, 8, 9, 0, 1, 2, 3};
-  for (int i = 0; i < 12; i++) {
-    if (perm0[i] != expected0[i]) {
-      FAIL("perm0[%d]: got %d, expected %d", i, perm0[i], expected0[i]);
+  /* TensorCore._remaps groups locals/upcasts/reductions, independently of
+   * interleaved construction order. Exact pinned permutations, not merely
+   * bijectivity, are required for the hardware lane layout. */
+  int count = 0;
+  const PolyTensorCore *cores[] = {get_test_cdna_tc(), poly_tc_get_cuda(80, &count)};
+  const int expected[2][2][12] = {
+      {{4, 5, 6, 7, 8, 9, 10, 11, 0, 1, 2, 3}, {0, 1, 2, 3, 8, 9, 10, 11, 6, 7, 4, 5}},
+      {{6, 8, 9, 3, 4, 5, 10, 1, 2, 0, 7}, {7, 8, 9, 0, 1, 2, 10, 3, 4, 5, 6}},
+  };
+  ASSERT_TRUE(count > 0);
+  for (int c = 0; c < 2; c++) {
+    const char *shape[32];
+    int n = poly_tc_base_shape_str(cores[c], shape, 32);
+    ASSERT_INT_EQ(n, c == 0 ? 12 : 11);
+    for (int operand = 0; operand < 2; operand++) {
+      int permutation[32];
+      poly_tc_permute_for_shape_str(cores[c], operand, shape, n, permutation, 32);
+      for (int i = 0; i < n; i++)
+        ASSERT_INT_EQ(permutation[i], expected[c][operand][i]);
     }
   }
-
-  /* swizzle[1] flattened: l0,l1,l2,l3,r2,r3, r0,r1, l4,l5,u0,u1
-   * remap[1]: l0->l0, l1->l1, l2->l2, l3->l3, u0->r2, u1->r3, l4->r0, l5->r1, r0->l4, r1->l5,
-   * r2->u0, r3->u1 perm1[0] = index("l0") = 0 perm1[1] = index("l1") = 1 perm1[2] = index("l2") = 2
-   *   perm1[3] = index("l3") = 3
-   *   perm1[4] = index("r2") = 10
-   *   perm1[5] = index("r3") = 11
-   *   perm1[6] = index("r0") = 8
-   *   perm1[7] = index("r1") = 9
-   *   perm1[8] = index("l4") = 6
-   *   perm1[9] = index("l5") = 7
-   *   perm1[10] = index("u0") = 4
-   *   perm1[11] = index("u1") = 5
-   */
-  int expected1[] = {0, 1, 2, 3, 10, 11, 8, 9, 6, 7, 4, 5};
-  for (int i = 0; i < 12; i++) {
-    if (perm1[i] != expected1[i]) {
-      FAIL("perm1[%d]: got %d, expected %d", i, perm1[i], expected1[i]);
-    }
-  }
-
   PASS();
 }
 
@@ -2441,6 +2407,94 @@ TEST(tc, structural_matmul_ast_shape) {
   ASSERT_TRUE(found);
 
   poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tc, warp_arithmetic_stays_weak) {
+  PolyCtx *ctx = poly_ctx_new();
+  int count = 0;
+  const PolyTensorCore *tcs = poly_tc_get_cuda(80, &count);
+  int64_t args[] = {-1, 1, 1};
+  PolyUOp *actual = poly_test_apply_opt(
+      ctx, build_matmul_16x16x16_ast(ctx),
+      (PolyRendererCaps
+      ){.device = "CUDA", .has_local = true, .tensor_cores = tcs, .n_tensor_cores = count},
+      (PolyOpt
+      ){.op = POLY_OPT_TC,
+        .has_axis = true,
+        .axis = 0,
+        .arg_kind = POLY_OPT_ARG_INT_TUPLE,
+        .arg_tuple = args,
+        .n_arg_tuple = 3}
+  );
+  int n = 0, warps = 0;
+  bool weak = actual != NULL;
+  PolyUOp **topo = actual ? poly_toposort_alloc(ctx, actual, &n) : NULL;
+  for (int i = 0; i < n; i++) {
+    PolyUOp *u = topo[i];
+    if (u->op == POLY_OP_RANGE && poly_range_axis_type(u->arg) == POLY_AXIS_WARP) warps++;
+    if (u->op == POLY_OP_RANGE || u->op == POLY_OP_FLOORDIV || u->op == POLY_OP_FLOORMOD)
+      weak &= poly_dtype_eq(u->dtype, POLY_WEAKINT);
+  }
+  poly_toposort_free(topo);
+  poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(warps, 1);
+  ASSERT_TRUE(weak);
+  PASS();
+}
+
+TEST(tc, admission_accepts_folded_axis_bound) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = build_matmul_16x16x16_ast(ctx);
+  PolyUOp *m = sink->src[0]->src[1];
+  PolyUOp *eight = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(8));
+  PolyUOp *folded = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_WEAKINT,
+      poly_alu2(
+          ctx, POLY_OP_MUL, poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(2)), eight
+      ),
+      m->arg
+  );
+  sink = poly_uop_substitute(ctx, sink, &m, &folded, 1);
+  int count = 0;
+  const PolyTensorCore *tcs = poly_tc_get_cuda(80, &count);
+  int64_t args[] = {-1, 1, 1};
+  PolyUOp *actual = poly_test_apply_opt(
+      ctx, sink,
+      (PolyRendererCaps
+      ){.device = "CUDA", .has_local = true, .tensor_cores = tcs, .n_tensor_cores = count},
+      (PolyOpt
+      ){.op = POLY_OPT_TC,
+        .has_axis = true,
+        .axis = 0,
+        .arg_kind = POLY_OPT_ARG_INT_TUPLE,
+        .arg_tuple = args,
+        .n_arg_tuple = 3}
+  );
+  bool accepted = actual && count_ops(ctx, actual, POLY_OP_WMMA) == 1;
+  if (accepted) {
+    PolyUOp *constant = poly_uop1(
+        ctx, POLY_OP_RANGE, POLY_WEAKINT,
+        poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(16)), m->arg
+    );
+    PolyUOp *control = poly_uop_substitute(ctx, sink, &folded, &constant, 1);
+    PolyUOp *expected = poly_test_apply_opt(
+        ctx, control,
+        (PolyRendererCaps
+        ){.device = "CUDA", .has_local = true, .tensor_cores = tcs, .n_tensor_cores = count},
+        (PolyOpt
+        ){.op = POLY_OPT_TC,
+          .has_axis = true,
+          .axis = 0,
+          .arg_kind = POLY_OPT_ARG_INT_TUPLE,
+          .arg_tuple = args,
+          .n_arg_tuple = 3}
+    );
+    accepted = expected && poly_graph_rewrite(ctx, actual, poly_symbolic()) ==
+                               poly_graph_rewrite(ctx, expected, poly_symbolic());
+  }
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(accepted);
   PASS();
 }
 

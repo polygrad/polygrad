@@ -656,12 +656,11 @@ TEST_BACKEND(cuda, linearize_reduce_merge_shared_end) {
   PolyUOp *out1_idx = poly_uop_index(ctx, pout1, &zero, 1);
   PolyUOp *st0 = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out0_idx, sum, poly_arg_none());
   PolyUOp *st1 = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out1_idx, mx, poly_arg_none());
-  PolyUOp *end0_srcs[2] = {st0, r0};
-  PolyUOp *end1_srcs[2] = {st1, r0};
-  PolyUOp *end0 = poly_uop(ctx, POLY_OP_END, POLY_VOID, end0_srcs, 2, poly_arg_none());
-  PolyUOp *end1 = poly_uop(ctx, POLY_OP_END, POLY_VOID, end1_srcs, 2, poly_arg_none());
-  PolyUOp *ends[2] = {end0, end1};
-  PolyUOp *sink = poly_test_kernel_sink(ctx, ends, 2, "shared_reduce");
+  /* REDUCE already ends r0. An outer END(r0) invents another lifetime and
+   * pinned CFGContext rejects its cyclic ordering. Lowering generates the
+   * shared reduction END chains tested below from these two stores. */
+  PolyUOp *stores[2] = {st0, st1};
+  PolyUOp *sink = poly_test_kernel_sink(ctx, stores, 2, "shared_reduce");
 
   int n = 0;
   PolyUOp **lin = poly_linearize_cuda(ctx, sink, &n);

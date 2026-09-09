@@ -16,6 +16,26 @@ from polygrad.helpers import Context
 from polygrad.uop.ops import AxisType, KernelInfo, UOp, _dispose_uops_for_ctx
 
 
+@pytest.mark.parametrize('beam', [0, 1])
+def test_cuda_tensor_core_matmul_lane_mapping(beam, monkeypatch):
+    if not Device.cuda_available():
+        pytest.skip('CUDA device unavailable')
+    # Nonuniform exact integers expose lane/fragment permutations that uniform
+    # inputs conceal; FP16 products and FP32 accumulation are exact here.
+    a = [[float((i * 3 + j) % 5 - 2) for j in range(32)] for i in range(32)]
+    b = [[float((i + j * 2) % 7 - 3) for j in range(32)] for i in range(32)]
+    expected = [[sum(a[i][k] * b[k][j] for k in range(32)) for j in range(32)] for i in range(32)]
+    monkeypatch.setenv('TC', '1')
+    with Context(BEAM=beam, IGNORE_BEAM_CACHE=1):
+        x = Tensor(a, dtype=dtypes.float16, device='CUDA').realize()
+        y = Tensor(b, dtype=dtypes.float16, device='CUDA').realize()
+        assert x.tolist() == a
+        assert y.tolist() == b
+        result = x.matmul(y, dtype=dtypes.float32).realize()
+        assert str(result.device).upper() == 'CUDA'
+        assert result.tolist() == expected
+
+
 def test_uop_device_metadata_and_tensor_repr():
     t = Tensor(UOp.const(2.0).cast(dtypes.float32))
     assert t.uop.device is None
