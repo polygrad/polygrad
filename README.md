@@ -193,6 +193,10 @@ stopped on expiry; in-process driver calls are checked when they return.
 of rejecting those candidates. Ordinary candidate-limit and device compiler
 rejections remain recoverable, matching the pinned search policy.
 
+For native search diagnostics, `BEAM_DEBUG=1` prints the input graph and final
+options; `BEAM_DEBUG=2` also prints candidate compilation and execution times.
+These diagnostics are disabled by default and use the existing C graph printer.
+
 Default storage dtypes use the same C-owned policy: Python
 `Context(DEFAULT_FLOAT='float64', DEFAULT_INT='int64')`, or JS
 `runtime.defaultFloat` / `runtime.defaultInt`. Change JS settings while idle

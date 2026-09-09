@@ -426,6 +426,126 @@ TEST(codegen, scheduler_policy_stride_score_bigint) {
   PASS();
 }
 
+TEST(codegen, scheduler_policy_upcast_product_exceeds_host_integer) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *src[17];
+  for (int i = 0; i < 16; i++)
+    src[i] = policy_range(ctx, 16, i, POLY_AXIS_UPCAST);
+  PolyUOp *r = policy_range(ctx, 2, 16, POLY_AXIS_REDUCE);
+  src[16] = poly_uop2(
+      ctx, POLY_OP_REDUCE, POLY_FLOAT32, poly_cast(ctx, r, POLY_FLOAT32), r,
+      poly_arg_reduce(POLY_OP_ADD, 0)
+  );
+  PolyUOp *sink = poly_test_kernel_sink(ctx, src, 17, "test");
+  bool unchanged = policy_matches(ctx, sink, (PolyRendererCaps){.device = "CPU"}, NULL, 0);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(unchanged);
+  PASS();
+}
+
+TEST(codegen, scheduler_policy_dsp_uses_single_wide_upcast) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = policy_range(ctx, 128, 0, POLY_AXIS_WEAK);
+  PolyUOp *y = policy_range(ctx, 32, 1, POLY_AXIS_WEAK);
+  PolyUOp *idx =
+      poly_alu2(ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, x, policy_const(ctx, 32)), y);
+  PolyUOp *zero = policy_const(ctx, 0);
+  PolyUOp *a = poly_test_program_param(ctx, POLY_FLOAT32, 4096, 0);
+  PolyUOp *b = poly_test_program_param(ctx, POLY_FLOAT32, 1, 1);
+  PolyUOp *src[] = {poly_uop_index(ctx, a, &idx, 1), poly_uop_index(ctx, b, &zero, 1)};
+  PolyUOp *sink = poly_test_kernel_sink(ctx, src, 2, "test");
+  PolyOpt opt = {
+      .op = POLY_OPT_UPCAST, .has_axis = true, .axis = 0, .arg_kind = POLY_OPT_ARG_INT, .arg = 128};
+  bool ok = policy_matches(ctx, sink, (PolyRendererCaps){.device = "DSP"}, &opt, 1);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
+TEST(codegen, beam_debug_reports_search_and_candidates) {
+  const char *names[] = {"BEAM_DEBUG", "CACHELEVEL", "DEBUG"};
+  char *old[3];
+  for (int i = 0; i < 3; i++)
+    old[i] = getenv(names[i]) ? strdup(getenv(names[i])) : NULL;
+  FILE *log = tmpfile();
+  ASSERT_NOT_NULL(log);
+  fflush(stderr);
+  int saved = dup(STDERR_FILENO);
+  ASSERT_TRUE(saved >= 0);
+  ASSERT_TRUE(dup2(fileno(log), STDERR_FILENO) >= 0);
+  setenv("BEAM_DEBUG", "2", 1);
+  setenv("CACHELEVEL", "0", 1);
+  setenv("DEBUG", "0", 1);
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = beam_action_sink(ctx, POLY_AXIS_WEAK, 8);
+  PolyUOp *out = poly_full_rewrite_to_sink_ex(
+      ctx, sink,
+      (PolyRewriteOpts
+      ){.optimize = true,
+        .beam_width = 1,
+        .device = POLY_DEVICE_INTERP,
+        .caps = {.device = "PYTHON", .has_int64 = true}}
+  );
+  bool ok = out != NULL;
+  poly_ctx_destroy(ctx);
+  fflush(stderr);
+  dup2(saved, STDERR_FILENO);
+  close(saved);
+  rewind(log);
+  char line[4096];
+  bool start = false, final = false, candidate = false;
+  while (fgets(line, sizeof(line), log)) {
+    start |= strstr(line, "BEAM_SEARCH:") != NULL;
+    final |= strstr(line, "applied_opts=") != NULL;
+    candidate |= strstr(line, "compile/") != NULL && strstr(line, "run") != NULL;
+  }
+  fclose(log);
+  for (int i = 0; i < 3; i++) {
+    if (old[i])
+      setenv(names[i], old[i], 1);
+    else
+      unsetenv(names[i]);
+    free(old[i]);
+  }
+  ASSERT_TRUE(ok && start && final && candidate);
+  PASS();
+}
+
+TEST(codegen, scheduler_policy_image_upcasts_before_masked_occupancy) {
+  char *old = getenv("IMAGE") ? strdup(getenv("IMAGE")) : NULL;
+  setenv("IMAGE", "1", 1);
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *g = policy_range(ctx, 3, 0, POLY_AXIS_GLOBAL);
+  PolyUOp *r = policy_range(ctx, 8, 1, POLY_AXIS_GLOBAL);
+  PolyUOp *idx =
+      poly_alu2(ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, g, policy_const(ctx, 8)), r);
+  PolyUOp *p = poly_test_program_param(ctx, POLY_FLOAT32, 24, 0);
+  PolyUOp *value = poly_uop3(
+      ctx, POLY_OP_WHERE, POLY_WEAKINT, poly_alu2(ctx, POLY_OP_CMPLT, g, policy_const(ctx, 2)), r,
+      policy_const(ctx, 0), poly_arg_none()
+  );
+  PolyUOp *store = poly_uop2(
+      ctx, POLY_OP_STORE, POLY_VOID, poly_uop_index(ctx, p, &idx, 1),
+      poly_cast(ctx, value, POLY_FLOAT32), poly_arg_none()
+  );
+  PolyUOp *end =
+      poly_uop(ctx, POLY_OP_END, POLY_VOID, (PolyUOp *[]){store, g, r}, 3, poly_arg_none());
+  PolyUOp *sink = poly_test_kernel_sink(ctx, &end, 1, "test");
+  PolyOpt opt = {
+      .op = POLY_OPT_UPCAST, .has_axis = true, .axis = 1, .arg_kind = POLY_OPT_ARG_INT, .arg = 4};
+  bool ok = policy_matches(
+      ctx, sink, (PolyRendererCaps){.device = "NULL", .arch = "IMAGE_PITCH_ALIGNMENT=1"}, &opt, 1
+  );
+  poly_ctx_destroy(ctx);
+  if (old)
+    setenv("IMAGE", old, 1);
+  else
+    unsetenv("IMAGE");
+  free(old);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
 static bool matvec_heuristic_matches_options(bool first_max, int prefix) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *g = poly_range(ctx, 16, 0, POLY_AXIS_GLOBAL);
@@ -3659,6 +3779,42 @@ TEST(codegen, tensor_core_arch_tables_match_current_tinygrad) {
   ASSERT_INT_EQ(tcs[0].threads, 32);
   ASSERT_TRUE(poly_dtype_eq(tcs[3].dtype_in, POLY_BFLOAT16));
   ASSERT_TRUE(poly_dtype_eq(tcs[3].dtype_out, POLY_BFLOAT16));
+  PASS();
+}
+
+TEST(codegen, rdna3_tensor_core_catalogue_matches_all_pinned_fields) {
+  const PolyDType inputs[] = {POLY_FLOAT16, POLY_FLOAT16, POLY_BFLOAT16, POLY_INT8};
+  const PolyDType outputs[] = {POLY_FLOAT32, POLY_FLOAT16, POLY_FLOAT32, POLY_INT32};
+  const char *opts = "l0l0l0l0l1u1u1u1";
+  const char *swizzles[2][3][5] = {
+      {{"l4", "u0", "u1", "u2", "l0"}, {"r1", "r2", "r3"}, {"l1", "l2", "l3", "r0"}},
+      {{"l0", "l1", "l2", "l3", "l4"}, {"r1", "r2", "r3"}, {"u0", "u1", "u2", "r0"}}};
+  const int lengths[] = {5, 3, 4};
+  int count = 0;
+  const PolyTensorCore *tcs = poly_tc_get_amd("gfx1100", &count);
+  ASSERT_INT_EQ(count, 4);
+  ASSERT_NOT_NULL(tcs);
+  for (int i = 0; i < count; i++) {
+    const PolyTensorCore *tc = &tcs[i];
+    ASSERT_TRUE(poly_dtype_eq(tc->dtype_in, inputs[i]));
+    ASSERT_TRUE(poly_dtype_eq(tc->dtype_out, outputs[i]));
+    ASSERT_INT_EQ(tc->threads, 32);
+    ASSERT_INT_EQ(tc->n_opts, 8);
+    for (int j = 0; j < 3; j++) {
+      ASSERT_INT_EQ(tc->dims[j], 16);
+      ASSERT_INT_EQ(tc->elements_per_thread[j], j < 2 ? 16 : 8);
+    }
+    for (int j = 0; j < 8; j++) {
+      ASSERT_INT_EQ(tc->opts[j].type, opts[2 * j]);
+      ASSERT_INT_EQ(tc->opts[j].dim, opts[2 * j + 1] - '0');
+    }
+    for (int side = 0; side < 2; side++)
+      for (int part = 0; part < 3; part++) {
+        ASSERT_INT_EQ(tc->swizzle_len[side][part], lengths[part]);
+        for (int j = 0; j < lengths[part]; j++)
+          ASSERT_STR_EQ(tc->swizzle[side][part][j], swizzles[side][part][j]);
+      }
+  }
   PASS();
 }
 

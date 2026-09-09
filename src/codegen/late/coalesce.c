@@ -670,14 +670,14 @@ static PolyUOp *poly_simplify_valid_image_load(
   return ret;
 }
 
-typedef struct {
-  int64_t height;
-  int64_t width;
-} ImageDim;
-
 /* Tinygrad 2026-08-22/a9069c177a9d
  * codegen/late/coalesce.py:image_valid_dims. */
-static ImageDim *image_valid_dims(PolyDType base, int64_t size, const char *arch, int *count_out) {
+PolyImageDim *poly_image_valid_dims(
+    PolyDType base,
+    int64_t size,
+    const char *arch,
+    int *count_out
+) {
   if (count_out) *count_out = 0;
   const char *key = arch ? strstr(arch, "IMAGE_PITCH_ALIGNMENT=") : NULL;
   if (!key || size < 0) return NULL;
@@ -690,13 +690,13 @@ static ImageDim *image_valid_dims(PolyDType base, int64_t size, const char *arch
       size > 4 * max_width * max_width)
     return NULL;
 
-  ImageDim *dims = NULL;
+  PolyImageDim *dims = NULL;
   int count = 0, capacity = 0;
 #define APPEND_IMAGE_DIM(h_, w_)                                                                   \
   do {                                                                                             \
     if (count == capacity) {                                                                       \
       int next = capacity ? capacity * 2 : 8;                                                      \
-      ImageDim *grown = realloc(dims, (size_t)next * sizeof(*grown));                              \
+      PolyImageDim *grown = realloc(dims, (size_t)next * sizeof(*grown));                          \
       if (!grown) {                                                                                \
         free(dims);                                                                                \
         return NULL;                                                                               \
@@ -704,7 +704,7 @@ static ImageDim *image_valid_dims(PolyDType base, int64_t size, const char *arch
       dims = grown;                                                                                \
       capacity = next;                                                                             \
     }                                                                                              \
-    dims[count++] = (ImageDim){(h_), (w_)};                                                        \
+    dims[count++] = (PolyImageDim){(h_), (w_)};                                                    \
   } while (0)
 
   if (size % ((int64_t)alignment * 4) != 0) {
@@ -780,17 +780,18 @@ static PolyUOp *poly_transform_to_image(
   PolyUOp *x = poly_uop_get_idx(ctx, shrink->src[1]);
   if (!valid || !x) return NULL;
 
-  ImageDim *dims = NULL;
+  PolyImageDim *dims = NULL;
   int n_dims = 0;
   int64_t known_height = 0, known_width = 0;
   if (image_ctx_lookup(image_ctx, slot, &known_height, &known_width)) {
     dims = malloc(sizeof(*dims));
     if (!dims) return NULL;
-    dims[0] = (ImageDim){known_height, known_width};
+    dims[0] = (PolyImageDim){known_height, known_width};
     n_dims = 1;
   } else {
-    dims =
-        image_valid_dims(buf->dtype, poly_uop_max_numel(ctx, buf), image_ctx->caps.arch, &n_dims);
+    dims = poly_image_valid_dims(
+        buf->dtype, poly_uop_max_numel(ctx, buf), image_ctx->caps.arch, &n_dims
+    );
   }
   if (!dims || n_dims == 0) {
     free(dims);

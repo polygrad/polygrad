@@ -815,11 +815,15 @@ static int sched_unrollable_dims(const OptScheduler *s, int *out, int max_n) {
   return n;
 }
 
-/* Helper: product of UPCAST/UNROLL dim sizes */
+/* Every consumer compares this product against at most64. Saturation keeps
+ * Python-integer branch decisions without overflowing C; axis sizes stay exact. */
 static int64_t sched_upcast_size(const OptScheduler *s) {
   int64_t prod = 1;
   for (int i = 0; i < s->n_rngs; i++) {
-    if (s->types[i] == POLY_AXIS_UPCAST || s->types[i] == POLY_AXIS_UNROLL) prod *= s->shape[i];
+    if (s->types[i] == POLY_AXIS_UPCAST || s->types[i] == POLY_AXIS_UNROLL) {
+      if (s->shape[i] > 0 && prod > INT64_MAX / s->shape[i]) return INT64_MAX;
+      prod *= s->shape[i];
+    }
   }
   return prod;
 }
@@ -1534,6 +1538,55 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
 
   if (sched_hand_coded_tensor_cores(&s, caps)) goto done;
 
+  /* heuristic.py: image lanes precede local/group and masked-axis decisions. */
+  if (poly_getenv_flag("IMAGE")) {
+    for (int bi = 0; bi < s.n_bufs; bi++) {
+      PolyUOp *buf = s.bufs[bi];
+      if (buf->n_src < 2) continue;
+      int n_dims = 0;
+      PolyImageDim *dims = poly_image_valid_dims(
+          buf->src[0]->dtype, poly_uop_max_numel(ctx, buf->src[0]), caps.arch, &n_dims
+      );
+      free(dims);
+      if (!n_dims) continue;
+      PolyUOp *idx = poly_uop_get_idx(ctx, buf->src[1]);
+      PolyUOp *valid = poly_uop_get_valid(ctx, buf->src[1]);
+      int n_add = 0, n_valid = 0;
+      PolyUOp **add = idx ? poly_uop_split(idx, POLY_OP_ADD, &n_add) : NULL;
+      PolyUOp **valid_topo = valid ? poly_toposort_alloc(ctx, valid, &n_valid) : NULL;
+      if (!add || !valid_topo) {
+        free(add);
+        poly_toposort_free(valid_topo);
+        goto done;
+      }
+      int axis = -1;
+      for (int i = 0; i < n_add; i++) {
+        PolyUOp *r = add[i];
+        if (r->op != POLY_OP_RANGE) continue;
+        bool gated = false;
+        for (int j = 0; j < n_valid; j++)
+          gated |= valid_topo[j] == r;
+        if (gated) continue;
+        for (int j = 0; j < s.n_rngs; j++)
+          if (s.rngs[j] == r && s.shape[j] > 1 && s.shape[j] % 4 == 0) axis = j;
+        if (axis >= 0) break;
+      }
+      free(add);
+      poly_toposort_free(valid_topo);
+      if (axis < 0) continue;
+      PolyAxisType type = s.types[axis];
+      if (type == POLY_AXIS_GLOBAL || type == POLY_AXIS_LOCAL || type == POLY_AXIS_WEAK)
+        sched_apply_int_opt(&s, caps, POLY_OPT_UPCAST, axis, 4);
+      else if (type == POLY_AXIS_REDUCE || type == POLY_AXIS_GROUP_REDUCE) {
+        int ordinal = 0;
+        for (int j = 0; j < axis; j++)
+          ordinal += (s.types[j] == POLY_AXIS_REDUCE || s.types[j] == POLY_AXIS_GROUP_REDUCE) &&
+                     s.shape[j] > 1;
+        sched_apply_int_opt(&s, caps, POLY_OPT_UNROLL, ordinal, 4);
+      }
+    }
+  }
+
   /* == Matvec reduction (pinned tinygrad heuristic.py:60-80) ==
    * Polygrad's has_local capability covers both workgroup axes and the local
    * storage used by GROUP_REDUCE; current renderers do not expose those
@@ -1675,7 +1728,30 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
       int64_t prod = s.shape[axis];
       for (int j = 0; j < n_to_upcast; j++)
         prod *= s.shape[to_upcast[j]];
-      if (prod <= 49) to_upcast[n_to_upcast++] = axis;
+      if (prod > 49) continue;
+      if (poly_getenv_flag("IMAGE") && s.types[axis] == POLY_AXIS_GLOBAL) {
+        int64_t global_upcast = s.shape[axis];
+        for (int j = 0; j < n_to_upcast; j++)
+          if (s.types[to_upcast[j]] == POLY_AXIS_GLOBAL) global_upcast *= s.shape[to_upcast[j]];
+        PolyUOp *items = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(1));
+        for (int j = 0; j < s.n_rngs; j++)
+          if (s.types[j] == POLY_AXIS_GLOBAL)
+            items =
+                poly_alu2(ctx, POLY_OP_MUL, items, poly_cast(ctx, s.rngs[j]->src[0], POLY_WEAKINT));
+        items = poly_alu2(
+            ctx, POLY_OP_IDIV, items,
+            poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(global_upcast))
+        );
+        PolyUOp *too_small = poly_alu2(
+            ctx, POLY_OP_CMPLT, items,
+            poly_uop0(
+                ctx, POLY_OP_CONST, POLY_WEAKINT,
+                poly_arg_int(poly_getenv_int("OCCUPANCY_FLOOR", 4096))
+            )
+        );
+        if (poly_uop_resolve(ctx, too_small, 0) == 1) continue;
+      }
+      to_upcast[n_to_upcast++] = axis;
     }
     poly_toposort_free(topo);
 
@@ -1707,7 +1783,13 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
       UpChoice best = {0};
       int n_choices = 0;
 
-      int amounts[] = {3, 4};
+      bool is_dsp = caps.device && !strcmp(caps.device, "DSP");
+      int amounts[] = {is_dsp ? 128 : 3, 4};
+      int n_amounts = is_dsp ? 1 : 2;
+      if (is_dsp) {
+        for (int i = 0; i < n_axis_flags; i++)
+          if (upcasted_axis[i]) n_amounts = 0;
+      }
       for (int axis = 0; axis < s.n_rngs; axis++) {
         PolyAxisType t = s.types[axis];
         if ((t != POLY_AXIS_GLOBAL && t != POLY_AXIS_LOCAL && t != POLY_AXIS_WEAK) ||
@@ -1715,7 +1797,7 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
           continue;
         if (axis < n_axis_flags && upcasted_axis[axis]) continue;
 
-        for (int ai = 0; ai < 2; ai++) {
+        for (int ai = 0; ai < n_amounts; ai++) {
           int amount = amounts[ai];
           if (s.shape[axis] % amount != 0) continue;
 
@@ -2969,8 +3051,51 @@ static bool beam_compute_ops(PolyCtx *ctx, PolyUOp *program, uint64_t *ops) {
   return ok;
 }
 
+/* search.py diagnostics use the existing C UOp printer, once per DAG node.
+ * No graph traversal, formatting allocation or diagnostic timing when disabled. */
+static void beam_debug_graph(PolyCtx *ctx, PolyUOp *sink) {
+  int n = 0;
+  PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n);
+  for (int i = 0; i < n; i++) {
+    fprintf(stderr, "%p <-", (void *)topo[i]);
+    for (int j = 0; j < topo[i]->n_src; j++)
+      fprintf(stderr, " %p", (void *)topo[i]->src[j]);
+    fputc(' ', stderr);
+    poly_uop_dump_tree(stderr, topo[i], 0, 0);
+  }
+  poly_toposort_free(topo);
+}
+
+static void beam_debug_opts(const OptScheduler *s) {
+  static const char *names[] = {"?",     "TC",       "UPCAST",   "UNROLL", "LOCAL", "THREAD",
+                                "GROUP", "GROUPTOP", "NOLOCALS", "PADTO",  "SWAP"};
+  const PolyKernelInfo *info =
+      s->ast->arg.kind == POLY_ARG_KERNEL_INFO ? s->ast->arg.kernel_info : NULL;
+  fputc('[', stderr);
+  for (int i = 0; info && i < info->n_applied_opts; i++) {
+    PolyOpt o = info->applied_opts[i];
+    fprintf(
+        stderr, "%sOpt(%s", i ? ", " : "",
+        o.op >= POLY_OPT_TC && o.op <= POLY_OPT_SWAP ? names[o.op] : "?"
+    );
+    if (o.has_axis) fprintf(stderr, ",axis=%d", o.axis);
+    if (o.arg_kind == POLY_OPT_ARG_INT)
+      fprintf(stderr, ",arg=%lld", (long long)o.arg);
+    else if (o.arg_kind == POLY_OPT_ARG_INT_TUPLE) {
+      fputs(",arg=(", stderr);
+      for (int j = 0; j < o.n_arg_tuple; j++)
+        fprintf(stderr, "%s%lld", j ? "," : "", (long long)o.arg_tuple[j]);
+      fputc(')', stderr);
+    }
+    fputc(')', stderr);
+  }
+  fputc(']', stderr);
+}
+
 static PolyUOp *poly_beam_search(PolyCtx *ctx, PolyUOp *sink, int width, PolyRewriteOpts opts) {
   if (width <= 0) return sink;
+  int beam_debug = poly_getenv_int("BEAM_DEBUG", 0);
+  bool search_started = false;
   BeamActions actions;
   beam_actions(&actions);
   if ((size_t)width > SIZE_MAX / sizeof(BeamEntry) / (size_t)actions.count ||
@@ -3011,6 +3136,11 @@ static PolyUOp *poly_beam_search(PolyCtx *ctx, PolyUOp *sink, int width, PolyRew
     goto done;
   }
   if (!sched_can_optimize(&beam[0].sched)) goto done;
+  search_started = true;
+  if (beam_debug) {
+    fputs("BEAM_SEARCH:\n", stderr);
+    beam_debug_graph(ctx, sink);
+  }
   PolyDevice device = beam_device(opts);
   if (!beam_buffers_init(ctx, sink, device, &raw)) goto done;
   double min_progress = 0.01;
@@ -3048,12 +3178,21 @@ static PolyUOp *poly_beam_search(PolyCtx *ctx, PolyUOp *sink, int width, PolyRew
     int timed = 0;
     for (int i = 0; i < count; i++) {
       PolyRunner runner;
+      double compile_start = beam_debug > 1 ? poly_now_ms() : 0;
       int prepared = beam_prepare_candidate(ctx, candidates[i].sched.ast, opts, &runner);
+      double compile_ms = beam_debug > 1 ? poly_now_ms() - compile_start : 0;
       if (prepared == -2 && poly_getenv_flag("BEAM_STRICT_MODE")) {
         fatal = true;
         goto done;
       }
-      if (prepared != 0) continue;
+      if (prepared != 0) {
+        if (beam_debug) {
+          fprintf(stderr, "BEAM rejected compile status=%d opts=", prepared);
+          beam_debug_opts(&candidates[i].sched);
+          fputc('\n', stderr);
+        }
+        continue;
+      }
       PolyUOp *program = runner.program;
       PolyUOp *lib = runner.compiled_binary ? runner.compiled_binary
                      : program->n_src >= 4  ? program->src[3]
@@ -3093,6 +3232,19 @@ static PolyUOp *poly_beam_search(PolyCtx *ctx, PolyUOp *sink, int width, PolyRew
           ctx, &runner, device, &raw, 3, beam[0].time_us * 3,
           poly_getenv_flag_default("BEAM_ESTIMATE", true) ? 65536 : 0
       );
+      if (beam_debug > 1) {
+        PolyUOp *linear = poly_program_linear(runner.program);
+        fprintf(
+            stderr, "%d %u uops %.3fms compile/%.3fus run opts=", i,
+            linear ? (unsigned)linear->n_src : 0, compile_ms, time
+        );
+        beam_debug_opts(&candidates[i].sched);
+        fputc('\n', stderr);
+      } else if (beam_debug && !isfinite(time)) {
+        fputs("BEAM failed timing opts=", stderr);
+        beam_debug_opts(&candidates[i].sched);
+        fputc('\n', stderr);
+      }
       poly_time_call_finish(ctx, &runner, device);
       if (!isfinite(time)) continue;
       candidates[i].time_us = time;
@@ -3126,6 +3278,12 @@ static PolyUOp *poly_beam_search(PolyCtx *ctx, PolyUOp *sink, int width, PolyRew
   }
   if (poly_getenv_int("CACHELEVEL", 2) >= 1) beam_cache_save(&key, beam[0].sched.ast);
 done:
+  if (beam_debug && search_started) {
+    fprintf(stderr, "BEAM_SEARCH: final tm=%.3fus, applied_opts=", beam[0].time_us);
+    beam_debug_opts(&beam[0].sched);
+    if (fatal) fputs(" (failed)", stderr);
+    fputc('\n', stderr);
+  }
   for (int i = 0; i < count; i++)
     sched_destroy(&candidates[i].sched);
   beam_buffers_free(&raw);
