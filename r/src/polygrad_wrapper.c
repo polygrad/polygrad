@@ -11,7 +11,7 @@
 #include <string.h>
 
 /* Include polygrad headers */
-#include "../../../src/frontend.h"
+#include "../../src/frontend.h"
 
 /* ── Helpers ─────────────────────────────────────────────────────────── */
 

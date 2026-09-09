@@ -14,6 +14,7 @@
       "role": "core",
       "language": "c",
       "globs": ["src/**/*.c", "src/**/*.h"],
+      "import_roots": ["src"],
       "public_headers": ["src/polygrad.h", "src/frontend.h"]
     },
     {
@@ -47,13 +48,15 @@
       "name": "native_bridges",
       "role": "bridge",
       "language": "c",
-      "globs": ["js/napi_api.c", "r/src/polygrad_wrapper.c"]
+      "globs": ["js/napi_api.c", "r/src/polygrad_wrapper.c"],
+      "import_roots": ["src"]
     },
     {
       "name": "native_examples",
       "role": "examples",
       "language": "c",
       "globs": ["examples/**/*.c"],
+      "import_roots": ["src"],
       "required": false
     },
     {
@@ -61,6 +64,7 @@
       "role": "benchmarks",
       "language": "c",
       "globs": ["bench/**/*.c"],
+      "import_roots": ["src"],
       "required": false
     },
     {
@@ -83,6 +87,7 @@
       "role": "tests",
       "language": "c",
       "globs": ["test/**/*.c"],
+      "import_roots": ["src"],
       "required": false
     },
     {
