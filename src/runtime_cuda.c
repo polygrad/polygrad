@@ -422,8 +422,10 @@ PolyCudaProgram *poly_compile_cuda_with_binary(
     const char *source,
     const char *fn_name,
     uint8_t **binary,
-    int *binary_size
+    int *binary_size,
+    int *status
 ) {
+  if (status) *status = -1;
   if (binary) *binary = NULL;
   if (binary_size) *binary_size = 0;
   if ((binary == NULL) != (binary_size == NULL)) return NULL;
@@ -436,6 +438,10 @@ PolyCudaProgram *poly_compile_cuda_with_binary(
   CUresult cu_err;
 
   /* NVRTC: source → PTX */
+
+  /* compiler_cuda.nvrtc_check raises CompileError, not RuntimeError. Keep
+   * that distinction across the C boundary for BEAM_STRICT_MODE. */
+  if (status) *status = -2;
 
   nvrtcProgram prog = NULL;
   nv_err = cuda_api.nvrtcCreateProgram(&prog, source, fn_name, 0, NULL, NULL);
@@ -493,6 +499,7 @@ PolyCudaProgram *poly_compile_cuda_with_binary(
 
   char *ptx = malloc(ptx_size);
   if (!ptx) {
+    if (status) *status = -1;
     fprintf(stderr, "polygrad: cuda: malloc(%zu) for PTX failed\n", ptx_size);
     cuda_api.nvrtcDestroyProgram(&prog);
     return NULL;
@@ -507,6 +514,8 @@ PolyCudaProgram *poly_compile_cuda_with_binary(
   }
 
   /* CUDA driver: PTX → module → function */
+
+  if (status) *status = -1;
 
   CUmodule module = NULL;
   cu_err = cuda_api.cuModuleLoadData(&module, ptx);
@@ -545,11 +554,12 @@ PolyCudaProgram *poly_compile_cuda_with_binary(
   } else {
     free(ptx);
   }
+  if (status) *status = 0;
   return result;
 }
 
 PolyCudaProgram *poly_compile_cuda(const char *source, const char *fn_name) {
-  return poly_compile_cuda_with_binary(source, fn_name, NULL, NULL);
+  return poly_compile_cuda_with_binary(source, fn_name, NULL, NULL, NULL);
 }
 
 int poly_cuda_launch_timed(

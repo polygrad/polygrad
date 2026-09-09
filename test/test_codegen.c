@@ -496,6 +496,150 @@ TEST(codegen, scheduler_symbolic_upcast_thresholds) {
   PASS();
 }
 
+TEST(codegen, scheduler_matvec_requires_integer_output_shape) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *bound = poly_alu2(
+      ctx, POLY_OP_MUL, policy_const(ctx, 16),
+      poly_uop_variable(ctx, "matvec", 2, 4, POLY_WEAKINT, 1, false)
+  );
+  PolyUOp *g =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, bound, poly_arg_range(0, POLY_AXIS_GLOBAL));
+  PolyUOp *r = policy_range(ctx, 8, 1, POLY_AXIS_REDUCE);
+  PolyUOp *index =
+      poly_alu2(ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, g, policy_const(ctx, 8)), r);
+  PolyUOp *a = poly_test_program_param(ctx, POLY_FLOAT32, 8, 0);
+  PolyUOp *b = poly_test_program_param(ctx, POLY_FLOAT32, 512, 1);
+  PolyUOp *p = poly_test_program_param(ctx, POLY_FLOAT32, 64, 2);
+  PolyUOp *mul =
+      poly_alu2(ctx, POLY_OP_MUL, poly_uop_index(ctx, a, &r, 1), poly_uop_index(ctx, b, &index, 1));
+  PolyUOp *red =
+      poly_uop2(ctx, POLY_OP_REDUCE, POLY_FLOAT32, mul, r, poly_arg_reduce(POLY_OP_ADD, 0));
+  PolyUOp *store =
+      poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, poly_uop_index(ctx, p, &g, 1), red, poly_arg_none());
+  PolyUOp *end = poly_uop2(ctx, POLY_OP_END, POLY_VOID, store, g, poly_arg_none());
+  PolyUOp *sink = poly_test_kernel_sink(ctx, &end, 1, "test");
+  PolyOpt opt = {
+      .op = POLY_OPT_UNROLL, .has_axis = true, .axis = 0, .arg_kind = POLY_OPT_ARG_INT, .arg = 0};
+  bool same = policy_matches(
+      ctx, sink, (PolyRendererCaps){.device = "CUDA", .has_local = true, .shared_max = 32768}, &opt,
+      1
+  );
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(same);
+  PASS();
+}
+
+TEST(codegen, scheduler_beam_proves_symbolic_budgets) {
+  PolyAxisType types[] = {POLY_AXIS_UPCAST, POLY_AXIS_LOCAL};
+  int bounds[][3][2] = {{{2, 4}, {128, 256}, {1, 128}}, {{2, 4}, {2048, 4096}, {1, 2048}}};
+  for (int type = 0; type < 2; type++) {
+    for (int span = 0; span < 3; span++) {
+      PolyCtx *ctx = poly_ctx_new();
+      PolyUOp *g = policy_range(ctx, 8, 0, POLY_AXIS_GLOBAL);
+      PolyUOp *n = poly_uop_variable(
+          ctx, "budget", bounds[type][span][0], bounds[type][span][1], POLY_WEAKINT, 1, false
+      );
+      PolyUOp *u = poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, n, poly_arg_range(1, types[type]));
+      PolyUOp *sources[] = {g, u};
+      PolyUOp *sink = poly_test_kernel_sink(ctx, sources, 2, "test");
+      PolyOpt opt = {
+          .op = POLY_OPT_UPCAST,
+          .has_axis = true,
+          .axis = 0,
+          .arg_kind = POLY_OPT_ARG_INT,
+          .arg = 4};
+      int result = poly_test_beam_kernel_action(
+          ctx, sink, (PolyRendererCaps){.device = "CUDA", .has_local = true}, opt
+      );
+      poly_ctx_destroy(ctx);
+      ASSERT_INT_EQ(result, span == 0 ? 1 : span == 1 ? 0 : -1);
+    }
+  }
+  PASS();
+}
+
+TEST(codegen, scheduler_full_axis_uses_proved_symbolic_maximum) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *n = poly_uop_variable(ctx, "whole", 0, 16, POLY_WEAKINT, 16, false);
+  PolyUOp *r = poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, n, poly_arg_range(0, POLY_AXIS_GLOBAL));
+  PolyUOp *sink = poly_test_kernel_sink(ctx, &r, 1, "test");
+  PolyRendererCaps caps = {.device = "CPU"};
+  PolyOpt opt = {
+      .op = POLY_OPT_UPCAST, .has_axis = true, .axis = 0, .arg_kind = POLY_OPT_ARG_INT, .arg = 16};
+  PolyUOp *expected = poly_test_apply_opt(ctx, sink, caps, opt);
+  opt.arg = 0;
+  PolyUOp *actual = poly_test_apply_opt(ctx, sink, caps, opt);
+  bool same = actual && expected && actual->src[0] == expected->src[0] &&
+              actual->arg.kernel_info->applied_opts[0].arg == 0;
+  /* Nonconstant full_shape is not equal to integer0: do not remove this
+   * action as a duplicate before apply_opt proves the full-axis split. */
+  same &= poly_test_beam_kernel_action(ctx, sink, caps, opt) == 1;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(same);
+  PASS();
+}
+
+TEST(codegen, scheduler_negative_relative_axes) {
+  PolyOptOps ops[] = {POLY_OPT_UNROLL, POLY_OPT_GROUP, POLY_OPT_GROUPTOP};
+  for (int i = 0; i < 3; i++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyUOp *r0 = policy_range(ctx, 8, 0, POLY_AXIS_REDUCE),
+            *r1 = policy_range(ctx, 12, 1, POLY_AXIS_REDUCE);
+    PolyUOp *sources[] = {
+        poly_cast(ctx, poly_alu2(ctx, POLY_OP_ADD, r0, r1), POLY_FLOAT32), r0, r1};
+    PolyUOp *red =
+        poly_uop(ctx, POLY_OP_REDUCE, POLY_FLOAT32, sources, 3, poly_arg_reduce(POLY_OP_ADD, 0));
+    PolyUOp *sink = poly_test_kernel_sink(ctx, &red, 1, "test");
+    PolyRendererCaps caps = {.device = "CUDA", .has_local = true, .shared_max = 32768};
+    PolyOpt opt = {
+        .op = ops[i], .has_axis = true, .axis = 1, .arg_kind = POLY_OPT_ARG_INT, .arg = 4};
+    PolyUOp *expected = poly_test_apply_opt(ctx, sink, caps, opt);
+    opt.axis = -1;
+    PolyUOp *actual = poly_test_apply_opt(ctx, sink, caps, opt);
+    bool same = actual && expected && actual->src[0] == expected->src[0] &&
+                actual->arg.kernel_info->applied_opts[0].axis == -1;
+    opt.axis = -3;
+    same &= !poly_test_apply_opt(ctx, sink, caps, opt);
+    poly_ctx_destroy(ctx);
+    ASSERT_TRUE(same);
+  }
+  PASS();
+}
+
+TEST(codegen, scheduler_swap_negative_target) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sources[] = {
+      policy_range(ctx, 8, 0, POLY_AXIS_GLOBAL), policy_range(ctx, 12, 1, POLY_AXIS_GLOBAL)};
+  PolyUOp *sink = poly_test_kernel_sink(ctx, sources, 2, "test");
+  PolyOpt opt = {
+      .op = POLY_OPT_SWAP, .has_axis = true, .axis = 0, .arg_kind = POLY_OPT_ARG_INT, .arg = -1};
+  PolyUOp *actual = poly_test_apply_opt(ctx, sink, (PolyRendererCaps){.device = "CUDA"}, opt);
+  bool same = actual && actual->src[0] == policy_range(ctx, 8, 1, POLY_AXIS_GLOBAL) &&
+              actual->src[1] == policy_range(ctx, 12, 0, POLY_AXIS_GLOBAL);
+  opt.arg = -3;
+  same &= !poly_test_apply_opt(ctx, sink, (PolyRendererCaps){.device = "CUDA"}, opt);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(same);
+  PASS();
+}
+
+TEST(codegen, scheduler_zero_shared_budget_uses_renderer_default) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = beam_action_sink(ctx, POLY_AXIS_REDUCE, 8);
+  PolyOpt opt = {
+      .op = POLY_OPT_GROUP, .has_axis = true, .axis = 0, .arg_kind = POLY_OPT_ARG_INT, .arg = 4};
+  PolyUOp *actual = poly_test_apply_opt(
+      ctx, sink, (PolyRendererCaps){.device = "CUDA", .has_local = true, .shared_max = 0}, opt
+  );
+  PolyUOp *expected = poly_test_apply_opt(
+      ctx, sink, (PolyRendererCaps){.device = "CUDA", .has_local = true, .shared_max = 32768}, opt
+  );
+  bool same = actual && actual == expected;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(same);
+  PASS();
+}
+
 TEST(codegen, scheduler_symbolic_shared_memory_admission) {
   int limits[] = {128, 16, 48};
   for (int i = 0; i < 3; i++) {

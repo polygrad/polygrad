@@ -141,6 +141,7 @@ PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOp
 
 #if defined(POLY_TESTING) && !defined(__EMSCRIPTEN__)
 int poly_test_beam_actions(PolyOpt *out, int capacity);
+int poly_test_beam_kernel_action(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps, PolyOpt opt);
 int poly_test_beam_last_device(void);
 uint64_t poly_test_beam_cache_key(PolyCtx *ctx, PolyUOp *sink, int width, PolyDevice device);
 int poly_test_beam_cache_write(
@@ -260,11 +261,14 @@ int poly_cuda_copy_htod(unsigned long long dst, const void *src, size_t bytes);
 int poly_cuda_copy_dtoh(void *dst, unsigned long long src, size_t bytes);
 int poly_cuda_copy_dtod(unsigned long long dst, unsigned long long src, size_t bytes);
 PolyCudaProgram *poly_compile_cuda(const char *source, const char *fn_name);
+/* Optional status distinguishes CompileError (-2) from driver/runtime
+ * rejection (-1), matching strict BEAM's exception boundary; success is0. */
 PolyCudaProgram *poly_compile_cuda_with_binary(
     const char *source,
     const char *fn_name,
     uint8_t **binary,
-    int *size
+    int *size,
+    int *status
 );
 int poly_cuda_launch_timed(
     PolyCudaProgram *prog,

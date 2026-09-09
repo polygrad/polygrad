@@ -2443,6 +2443,34 @@ TEST(tc, warp_arithmetic_stays_weak) {
   PASS();
 }
 
+TEST(tc, admission_accepts_negative_axis_choice) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = build_matmul_16x16x16_ast(ctx);
+  int count = 0;
+  const PolyTensorCore *tcs = poly_tc_get_cuda(80, &count);
+  PolyRendererCaps caps = {
+      .device = "CUDA", .has_local = true, .tensor_cores = tcs, .n_tensor_cores = count};
+  int64_t args[] = {-1, 1, 1};
+  PolyOpt opt = {
+      .op = POLY_OPT_TC,
+      .has_axis = true,
+      .axis = 0,
+      .arg_kind = POLY_OPT_ARG_INT_TUPLE,
+      .arg_tuple = args,
+      .n_arg_tuple = 3};
+  PolyUOp *expected = poly_test_apply_opt(ctx, sink, caps, opt);
+  opt.axis = -1;
+  PolyUOp *actual = poly_test_apply_opt(ctx, sink, caps, opt);
+  bool same = actual && expected && actual->src[0] == expected->src[0] &&
+              actual->arg.kernel_info->applied_opts[0].axis == -1 &&
+              count_ops(ctx, actual, POLY_OP_WMMA) == 1;
+  opt.axis = -2;
+  same &= !poly_test_apply_opt(ctx, sink, caps, opt);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(same);
+  PASS();
+}
+
 TEST(tc, admission_accepts_folded_axis_bound) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *sink = build_matmul_16x16x16_ast(ctx);

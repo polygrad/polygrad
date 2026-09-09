@@ -2245,8 +2245,8 @@ static int cpu_lower_item_impl(
     fprintf(stderr, "=== FAILED LOWER KERNEL %s ===\n%s\n=== END ===\n", fn_name, src);
     free(src_owned);
     if (lin_owned) free(lin);
-    /* compiler_cpu.ClangCompiler.compile raises CalledProcessError/OSError,
-     * unlike the recoverable RuntimeError/CompileError of device compilers. */
+    /* compiler_cpu.ClangCompiler.compile raises CalledProcessError/OSError;
+     * strict BEAM propagates these rather than treating them as RuntimeError. */
     return -2;
   }
   free(src_owned);
@@ -2497,13 +2497,15 @@ static int cuda_lower_item(PolyCtx *ctx, PolyUOp *program, const char *fn_name, 
 
   uint8_t *binary = NULL;
   int binary_size = 0;
-  PolyCudaProgram *prog = out->capture_binary
-                              ? poly_compile_cuda_with_binary(src, fn_name, &binary, &binary_size)
-                              : poly_compile_cuda(src, fn_name);
+  int status = -1;
+  PolyCudaProgram *prog = poly_compile_cuda_with_binary(
+      src, fn_name, out->capture_binary ? &binary : NULL, out->capture_binary ? &binary_size : NULL,
+      &status
+  );
   if (!prog) {
     fprintf(stderr, "=== FAILED CUDA KERNEL %s ===\n%s\n=== END ===\n", fn_name, src);
     free(src_owned);
-    return -1;
+    return status;
   }
   free(src_owned);
 

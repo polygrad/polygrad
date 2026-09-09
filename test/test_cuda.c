@@ -31,13 +31,40 @@
 
 /* Helper: build vecadd kernel IR (tensor-level) */
 
+TEST(cuda, beam_nvrtc_failure_is_compile_error) {
+  SKIP_IF_NO_CUDA();
+  PolyCtx *ctx = poly_ctx_new();
+  const PolyBackendDesc *backend = poly_backend_get(POLY_DEVICE_CUDA);
+  PolyUOp *sink = poly_test_kernel_sink(ctx, NULL, 0, "test");
+  PolyUOp *linear = poly_uop(ctx, POLY_OP_LINEAR, POLY_VOID, NULL, 0, poly_arg_none());
+  const char *sources[] = {
+      "extern \"C\" __global__ void test() { invalid_symbol; }",
+      "extern \"C\" __global__ void other() {}", "extern \"C\" __global__ void test() {}"};
+  int status[3];
+  for (int i = 0; i < 3; i++) {
+    PolyUOp *source = poly_uop0(ctx, POLY_OP_SOURCE, POLY_VOID, poly_arg_str(sources[i]));
+    PolyUOp *parts[] = {sink, linear, source};
+    PolyUOp *program = poly_uop(ctx, POLY_OP_PROGRAM, POLY_VOID, parts, 3, poly_arg_none());
+    PolyRunner runner = {.capture_binary = true};
+    status[i] = backend->lower_item(ctx, program, "test", &runner);
+    if (!status[i]) backend->free_runner(&runner);
+  }
+  poly_ctx_destroy(ctx);
+  /* NVRTC raises CompileError (strict BEAM propagates); missing driver
+   * function raises RuntimeError (ordinary rejected candidate). */
+  ASSERT_INT_EQ(status[0], -2);
+  ASSERT_INT_EQ(status[1], -1);
+  ASSERT_INT_EQ(status[2], 0);
+  PASS();
+}
+
 TEST(cuda, beam_compiler_bytes_and_device_timing) {
   SKIP_IF_NO_CUDA();
   const char *source = "extern \"C\" __global__ void test(float *out) { out[0] = 7; }";
   uint8_t *ba = NULL, *bb = NULL;
   int na = 0, nb = 0;
-  PolyCudaProgram *a = poly_compile_cuda_with_binary(source, "test", &ba, &na);
-  PolyCudaProgram *b = poly_compile_cuda_with_binary(source, "test", &bb, &nb);
+  PolyCudaProgram *a = poly_compile_cuda_with_binary(source, "test", &ba, &na, NULL);
+  PolyCudaProgram *b = poly_compile_cuda_with_binary(source, "test", &bb, &nb, NULL);
   unsigned long long ptr = poly_cuda_alloc(sizeof(float));
   void *args[] = {&ptr};
   double elapsed = NAN;

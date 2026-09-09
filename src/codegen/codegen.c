@@ -1179,15 +1179,23 @@ static bool sched_apply_tc_opt(
     if (n_red > 1) qsort(red_ranges, (size_t)n_red, sizeof(PolyUOp *), cmp_axis_id_desc);
 
     /* 4. Axis choices: product(in1_ranges, in0_ranges, red_ranges) -- note swap */
-    if (n_in0 == 0 || n_in1 == 0 || n_red == 0 || axis < 0 || axis / n_red / n_in0 >= n_in1) {
+    /* Index the Cartesian product from either end without materializing it
+     * or overflowing the product of its three axis counts. */
+    int64_t choice = axis < 0 ? -(int64_t)axis - 1 : axis;
+    if (!n_in0 || !n_in1 || !n_red || choice / n_red / n_in0 >= n_in1) {
       free(in0_ranges);
       free(in1_ranges);
       free(red_ranges);
       continue;
     }
-    int red_idx = axis % n_red;
-    int in0_idx = (axis / n_red) % n_in0;
-    int in1_idx = (axis / n_red / n_in0) % n_in1;
+    int red_idx = (int)(choice % n_red);
+    int in0_idx = (int)((choice / n_red) % n_in0);
+    int in1_idx = (int)(choice / n_red / n_in0);
+    if (axis < 0) {
+      red_idx = n_red - 1 - red_idx;
+      in0_idx = n_in0 - 1 - in0_idx;
+      in1_idx = n_in1 - 1 - in1_idx;
+    }
 
     PolyUOp *axes[3] = {in1_ranges[in1_idx], in0_ranges[in0_idx], red_ranges[red_idx]};
     free(in0_ranges);
@@ -1685,24 +1693,9 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
             !poly_uop_divides(ctx, s.rngs[first_reduce]->src[0], mv_threads_per_row))
           continue;
         int64_t block = (int64_t)mv_blocksize * mv_rows_per_thread;
-        int divisible =
-            global_size > 0
-                ? global_size % block == 0
-                : sched_eval_lt(
-                      ctx,
-                      poly_alu2(
-                          ctx, POLY_OP_FLOORMOD,
-                          poly_cast(ctx, s.rngs[global_idx]->src[0], POLY_WEAKINT),
-                          poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(block))
-                      ),
-                      1
-                  );
-        if (divisible < 0) {
-          poly_toposort_free(topo);
-          s.failed = true;
-          goto done;
-        }
-        if (!divisible) continue;
+        /* heuristic.py compares full_shape % block to the Python integer0.
+         * UOp equality is identity, not a symbolic divisibility predicate. */
+        if (global_size <= 0 || global_size % block != 0) continue;
 
         if (mv_threads_per_row > 1)
           sched_apply_int_opt(&s, caps, POLY_OPT_GROUP, 0, mv_threads_per_row);
@@ -2078,9 +2071,17 @@ done:;
  * immutable KernelInfo data, so failed candidates cannot mutate a parent. */
 static int sched_real_axis(const OptScheduler *s, PolyOpt opt) {
   if (!opt.has_axis || opt.op == POLY_OPT_TC) return -1;
-  if (opt.axis < 0) return -1;
   if (opt.op == POLY_OPT_UNROLL || opt.op == POLY_OPT_GROUP || opt.op == POLY_OPT_GROUPTOP) {
     int remaining = opt.axis;
+    /* These options index a filtered Python list, unlike absolute axes. */
+    if (remaining < 0) {
+      for (int i = 0; i < s->n_rngs; i++) {
+        bool match = s->types[i] == POLY_AXIS_REDUCE ||
+                     (opt.op == POLY_OPT_UNROLL && s->types[i] == POLY_AXIS_GROUP_REDUCE);
+        remaining += match && (opt.op != POLY_OPT_UNROLL || s->shape[i] > 1);
+      }
+      if (remaining < 0) return -1;
+    }
     for (int i = 0; i < s->n_rngs; i++) {
       bool match = s->types[i] == POLY_AXIS_REDUCE ||
                    (opt.op == POLY_OPT_UNROLL && s->types[i] == POLY_AXIS_GROUP_REDUCE);
@@ -2124,10 +2125,10 @@ static bool sched_apply_opt_impl(
     if (local) return false;
     info.dont_use_locals = true;
   } else if (opt.op == POLY_OPT_TC) {
-    if (info.n_applied_opts || !opt.has_axis || opt.axis < 0 ||
-        opt.arg_kind != POLY_OPT_ARG_INT_TUPLE || opt.n_arg_tuple != 3 || !opt.arg_tuple ||
-        opt.arg_tuple[0] < -1 || opt.arg_tuple[0] >= caps.n_tensor_cores || opt.arg_tuple[1] < 0 ||
-        opt.arg_tuple[1] > 2 || opt.arg_tuple[2] <= 0 || opt.arg_tuple[2] > 2)
+    if (info.n_applied_opts || !opt.has_axis || opt.arg_kind != POLY_OPT_ARG_INT_TUPLE ||
+        opt.n_arg_tuple != 3 || !opt.arg_tuple || opt.arg_tuple[0] < -1 ||
+        opt.arg_tuple[0] >= caps.n_tensor_cores || opt.arg_tuple[1] < 0 || opt.arg_tuple[1] > 2 ||
+        opt.arg_tuple[2] <= 0 || opt.arg_tuple[2] > 2)
       return false;
     if (!sched_apply_tc_opt(
             s, opt.axis, (int)opt.arg_tuple[0], (int)opt.arg_tuple[1], (int)opt.arg_tuple[2],
@@ -2137,9 +2138,9 @@ static bool sched_apply_opt_impl(
   } else if (opt.op == POLY_OPT_PADTO) {
     if (opt.arg_kind != POLY_OPT_ARG_INT || !sched_padto(s, rng, opt.arg)) goto failed;
   } else if (opt.op == POLY_OPT_SWAP) {
-    if (!rng || opt.arg_kind != POLY_OPT_ARG_INT || opt.arg < 0 || opt.arg >= s->n_rngs)
+    if (!rng || opt.arg_kind != POLY_OPT_ARG_INT || opt.arg < -s->n_rngs || opt.arg >= s->n_rngs)
       return false;
-    PolyUOp *other = s->rngs[opt.arg];
+    PolyUOp *other = s->rngs[opt.arg < 0 ? s->n_rngs + opt.arg : opt.arg];
     if (poly_range_axis_type(rng->arg) != POLY_AXIS_GLOBAL ||
         poly_range_axis_type(other->arg) != POLY_AXIS_GLOBAL)
       return false;
@@ -2170,7 +2171,14 @@ static bool sched_apply_opt_impl(
   } else {
     if (!rng || opt.arg_kind != POLY_OPT_ARG_INT || opt.arg < 0) return false;
     PolyAxisType type = s->types[axis], to_type;
-    int64_t amount = opt.arg ? opt.arg : s->shape[axis];
+    int64_t amount = opt.arg;
+    if (!amount) {
+      /* Scheduler.apply_opt uses rng.vmax+1; shift_to still proves divisibility. */
+      int64_t lo, hi;
+      poly_uop_minmax(s->ctx, rng, &lo, &hi);
+      if (hi == INT64_MAX) return false;
+      amount = hi + 1;
+    }
     if (amount <= 0) return false;
     switch (opt.op) {
     case POLY_OPT_UPCAST:
@@ -2360,7 +2368,7 @@ static bool beam_get_kernel_action(
   if (opt.has_axis && opt.op != POLY_OPT_TC) {
     int axis = sched_real_axis(s, opt);
     if (axis < 0) return false;
-    if (opt.arg_kind == POLY_OPT_ARG_INT && s->shape[axis] == opt.arg) {
+    if (opt.arg_kind == POLY_OPT_ARG_INT && s->shape[axis] > 0 && s->shape[axis] == opt.arg) {
       for (int i = 0; i < actions->count; i++) {
         PolyOpt zero = actions->opts[i];
         if (zero.op == opt.op && zero.has_axis && zero.axis == opt.axis &&
@@ -2371,15 +2379,47 @@ static bool beam_get_kernel_action(
   }
   if (!sched_apply_opt(s, caps, opt, NULL)) return false;
   long double up = 1, local = 1, tc_up = 1;
+  bool symbolic = false;
   if (s->tensor_core)
     tc_up = (long double)s->tensor_core->dims[0] * s->tensor_core->dims[1] *
             s->tensor_core->dims[2] / s->tensor_core->threads;
   for (int i = 0; i < s->n_rngs; i++) {
     PolyAxisType t = s->types[i];
+    if (t == POLY_AXIS_UPCAST || t == POLY_AXIS_UNROLL || t == POLY_AXIS_WARP ||
+        t == POLY_AXIS_LOCAL || t == POLY_AXIS_GROUP_REDUCE)
+      symbolic |= s->shape[i] <= 0;
     if (t == POLY_AXIS_UPCAST || t == POLY_AXIS_UNROLL)
       up *= s->shape[i];
     else if (t == POLY_AXIS_WARP || t == POLY_AXIS_LOCAL || t == POLY_AXIS_GROUP_REDUCE)
       local *= s->shape[i];
+  }
+  if (symbolic) {
+    /* search.get_kernel_actions uses Python integer products and strict UOp
+     * truth. Unknown resource bounds are not zero-sized candidates. */
+    PolyUOp *up_size = poly_uop0(s->ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(1));
+    PolyUOp *local_size = up_size;
+    for (int i = 0; i < s->n_rngs; i++) {
+      PolyAxisType t = s->types[i];
+      PolyUOp **size = t == POLY_AXIS_UPCAST || t == POLY_AXIS_UNROLL ? &up_size
+                       : t == POLY_AXIS_WARP || t == POLY_AXIS_LOCAL || t == POLY_AXIS_GROUP_REDUCE
+                           ? &local_size
+                           : NULL;
+      if (size)
+        *size = poly_alu2(
+            s->ctx, POLY_OP_MUL, *size, poly_cast(s->ctx, s->rngs[i]->src[0], POLY_WEAKINT)
+        );
+    }
+    up_size = poly_alu2(
+        s->ctx, POLY_OP_FLOORDIV, up_size,
+        poly_uop0(s->ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int((int64_t)tc_up))
+    );
+    int admitted =
+        sched_eval_lt(s->ctx, up_size, (int64_t)poly_getenv_int("BEAM_UPCAST_MAX", 256) + 1);
+    if (admitted == 1)
+      admitted =
+          sched_eval_lt(s->ctx, local_size, (int64_t)poly_getenv_int("BEAM_LOCAL_MAX", 1024) + 1);
+    if (admitted < 0) s->failed = true;
+    return admitted == 1;
   }
   return floorl(up / tc_up) <= poly_getenv_int("BEAM_UPCAST_MAX", 256) &&
          local <= poly_getenv_int("BEAM_LOCAL_MAX", 1024);
@@ -2401,6 +2441,16 @@ PolyUOp *poly_test_apply_opt(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps,
   PolyUOp *out = sched_apply_opt(&s, caps, opt, NULL) ? s.ast : NULL;
   sched_destroy(&s);
   return out;
+}
+
+int poly_test_beam_kernel_action(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps, PolyOpt opt) {
+  OptScheduler s;
+  sched_init(&s, ctx, sink);
+  BeamActions actions = {.opts = {opt}, .count = 1};
+  bool admitted = beam_get_kernel_action(&s, caps, opt, &actions);
+  int result = s.failed ? -1 : admitted;
+  sched_destroy(&s);
+  return result;
 }
 
 bool poly_test_scheduler_copy_rollback(PolyCtx *ctx, PolyUOp *sink, PolyOpt opt) {
@@ -3228,7 +3278,12 @@ static PolyUOp *poly_beam_search(PolyCtx *ctx, PolyUOp *sink, int width, PolyRew
         OptScheduler copy;
         sched_copy(&copy, &beam[b].sched);
         if (!beam_get_kernel_action(&copy, opts.caps, actions.opts[a], &actions)) {
+          bool failed = copy.failed;
           sched_destroy(&copy);
+          if (failed) {
+            fatal = true;
+            goto done;
+          }
           continue;
         }
         if (poly_uop_retain(ctx, copy.ast) != 0) {
