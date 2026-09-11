@@ -142,6 +142,9 @@ PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOp
 #ifdef POLY_TESTING
 /* Owner-local reduction scratch allocation only; -1 disables injection. */
 void poly_test_reduce_alloc_fail_after(int count);
+/* Single-node matcher controls; production uses the same stage matchers. */
+PolyUOp *poly_test_add_loads(PolyCtx *ctx, PolyUOp *u);
+PolyUOp *poly_test_implicit_barriers(PolyCtx *ctx, PolyUOp *u);
 #endif
 
 #if defined(POLY_TESTING) && !defined(__EMSCRIPTEN__)

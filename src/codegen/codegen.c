@@ -5208,6 +5208,7 @@ static PolyUOp *poly_expand_reduce(PolyCtx *ctx, PolyUOp *r, const PolyBindings 
   if (ndim < 0 || ndim > POLY_MAX_DIMS) return NULL;
 
   bool new_axis[POLY_MAX_DIMS] = {0};
+  int64_t perm[POLY_MAX_DIMS];
   int n_new_axes = 0, n_ranges = 0;
   for (int i = 1; i < r->n_src; i++) {
     PolyUOp *src = r->src[i];
@@ -5221,19 +5222,19 @@ static PolyUOp *poly_expand_reduce(PolyCtx *ctx, PolyUOp *r, const PolyBindings 
       PolyUOp *dim = poly_uop_shape_dim(ctx, src, axis);
       int64_t size = 0;
       if (!dim || poly_uop_const_i64(dim, &size) != 0) return NULL;
-      if (size > 1 && !new_axis[axis]) {
+      if (size > 1) {
+        /* expand_reduce preserves source/axis encounter order. Sorting here
+         * changes the horizontal reduction order (and floating-point sums). */
+        if (new_axis[axis]) return NULL;
         new_axis[axis] = true;
-        n_new_axes++;
+        perm[n_new_axes++] = axis;
       }
     }
   }
   if (n_new_axes == 0) return NULL;
 
-  int64_t perm[POLY_MAX_DIMS];
   PolyUOp *out_shape[POLY_MAX_DIMS];
-  int at = 0;
-  for (int axis = 0; axis < ndim; axis++)
-    if (new_axis[axis]) perm[at++] = axis;
+  int at = n_new_axes;
   for (int axis = 0; axis < ndim; axis++)
     if (!new_axis[axis]) perm[at++] = axis;
   for (int axis = 0; axis < ndim; axis++) {
@@ -5445,10 +5446,15 @@ static bool codegen_value_addrspace(PolyUOp *u, PolyAddrSpace *out) {
     if (out) *out = poly_program_memory_addrspace(u);
     return true;
   }
-  if (u->op == POLY_OP_LOAD || u->op == POLY_OP_RANGE || u->op == POLY_OP_SPECIAL) return false;
+  if (u->op == POLY_OP_LOAD || u->op == POLY_OP_RANGE || u->op == POLY_OP_SPECIAL) {
+    /* UOp.addrspace: ALU is a real space, not the absent-space sentinel.
+     * It must participate in the common-space check below. */
+    if (out) *out = POLY_ADDR_ALU;
+    return true;
+  }
   if ((u->op == POLY_OP_INDEX || u->op == POLY_OP_CAST || u->op == POLY_OP_AFTER ||
        u->op == POLY_OP_REDUCE || u->op == POLY_OP_STORE || u->op == POLY_OP_MSTACK ||
-       u->op == POLY_OP_MSELECT || u->op == POLY_OP_END ||
+       u->op == POLY_OP_MSELECT || u->op == POLY_OP_END || u->op == POLY_OP_UNSHARD ||
        poly_opset_has(POLY_GROUP_MOVEMENT, u->op)) &&
       u->n_src > 0)
     return codegen_value_addrspace(u->src[0], out);
@@ -6434,7 +6440,9 @@ static PolyUOp *rule_add_war_barrier(PolyCtx *ctx, PolyUOp *end, const PolyBindi
     if (buf && !codegen_ptr_in(store_bufs, n_store_bufs, buf)) store_bufs[n_store_bufs++] = buf;
   }
   for (int i = 0; i < n_topo; i++) {
-    PolyUOp *u = topo[i];
+    /* backward_slice_with_self is root first, then the remaining toposort.
+     * A body-root LOAD is also an explicit barrier dependency in Tinygrad. */
+    PolyUOp *u = i == 0 ? topo[n_topo - 1] : topo[i - 1];
     if (!u || u->op != POLY_OP_LOAD || u->n_src < 1) continue;
     PolyUOp *buf = poly_uop_buf_uop(ctx, u->src[0]);
     if (buf && codegen_ptr_in(store_bufs, n_store_bufs, buf)) loads[n_loads++] = u;
@@ -6494,6 +6502,16 @@ static PolyPatternMatcher *poly_pm_implicit_barriers(void) {
   return g_pm_implicit_barriers;
 }
 
+#ifdef POLY_TESTING
+PolyUOp *poly_test_add_loads(PolyCtx *ctx, PolyUOp *u) {
+  return poly_pm_rewrite(poly_pm_add_loads(), ctx, u);
+}
+
+PolyUOp *poly_test_implicit_barriers(PolyCtx *ctx, PolyUOp *u) {
+  return poly_pm_rewrite(poly_pm_implicit_barriers(), ctx, u);
+}
+#endif
+
 typedef struct {
   int64_t next;
 } NumberParamsContext;
@@ -6549,10 +6567,8 @@ PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOp
    * Backend-specific behavior is controlled by renderer config fields in opts,
    * not by if-device branches.
    *
-   * New Phase 4 fields used here:
-   *   opt_policy      — POLY_OPT_HEURISTIC (CPU) or POLY_OPT_TC_ONLY (GPU)
-   *   device          — PolyDevice, gates gpudims/control_flow
-   *   extra_matcher   — renderer-specific final rewrite patterns (NULL = none)
+   * opt_policy selects scheduling policy; extra_matcher supplies the
+   * renderer's final rewrite rules. CUDA uses the shared heuristic policy.
    */
 
   /* tinygrad@2026-08-22/a9069c177a9d codegen/__init__.py:292-296 verifies
@@ -6953,8 +6969,15 @@ static bool line_is_gated_store(PolyUOp *u) {
  * line-rewrites gated STORE into IF, STORE, ENDIF and redirects later uses. */
 static PolyUOp **line_rewrite_cleanups(PolyCtx *ctx, PolyUOp **linear, int n, int *n_out) {
   int n_gated = 0;
-  for (int i = 0; i < n; i++)
+  for (int i = 0; i < n; i++) {
+    /* pm_linearize_cleanups rejects graph IF/ENDIF before introducing its
+     * own balanced conditional around a gated STORE. */
+    if (linear[i]->op == POLY_OP_IF || linear[i]->op == POLY_OP_ENDIF) {
+      fprintf(stderr, "polygrad: if not allowed in graph\n");
+      return NULL;
+    }
     if (line_is_gated_store(linear[i])) n_gated++;
+  }
   if (n_gated == 0) {
     if (n_out) *n_out = n;
     return linear;
@@ -7014,6 +7037,7 @@ static PolyUOp **line_rewrite_cleanups(PolyCtx *ctx, PolyUOp **linear, int n, in
 }
 
 PolyUOp **poly_do_linearize(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
+  if (n_out) *n_out = 0;
   int n = 0;
   PolyUOp **linear = poly_linearize(ctx, sink, &n);
   if (!linear) {

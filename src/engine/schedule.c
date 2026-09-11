@@ -3053,30 +3053,30 @@ static uint32_t poly_runtime_cache_env_stamp(void) {
 #else
   uint32_t x86_features = 0;
 #endif
-  uint32_t noopt = (uint32_t)poly_get_noopt();
-  uint8_t bytes[] = {
-      /* Tinygrad to_program_config: NOOPT changes heuristic scheduling, not
-       * the input AST. Restoring the value must reuse its original PROGRAM. */
-      (uint8_t)noopt,
-      (uint8_t)(noopt >> 8),
-      (uint8_t)(noopt >> 16),
-      (uint8_t)(noopt >> 24),
-      /* Pinned to_program_config includes both default dtype policies. */
-      (uint8_t)poly_get_default_float(),
-      (uint8_t)poly_get_default_int(),
-      (uint8_t)(poly_getenv_int("TC_OPT", 0) & 0xFF),
-      (uint8_t)(poly_getenv_int("TC", 1) & 0xFF),
-      (uint8_t)poly_getenv_flag("EXPAND_SSA"),
+  /* to_program_config keys code-generating policy, not just the input AST.
+   * Keep full integer values: TC_OPT=0 and256 must not alias by truncation.
+   * THREADS/SSA and compiled target features are C renderer configuration. */
+  uint32_t values[] = {
+      (uint32_t)poly_get_noopt(),
+      (uint32_t)poly_get_default_float(),
+      (uint32_t)poly_get_default_int(),
+      (uint32_t)poly_getenv_int("TC_OPT", 0),
+      (uint32_t)poly_getenv_int("TC", 1),
+      (uint32_t)poly_getenv_int("TC_SELECT", -1),
+      (uint32_t)poly_getenv_flag("NOLOCALS"),
+      (uint32_t)poly_getenv_flag("IMAGE"),
+      (uint32_t)poly_getenv_flag("ALLOW_TF32"),
+      (uint32_t)poly_getenv_int("NUM_CPU_THREADS", 0),
+      (uint32_t)poly_getenv_flag_default("THREADS", true),
+      (uint32_t)(poly_getenv_flag("EXPAND_SSA") || poly_getenv_flag("POLY_EXPAND_SSA")),
       wasm_features,
-      (uint8_t)(x86_features & 0xFF),
-      (uint8_t)((x86_features >> 8) & 0xFF),
-      (uint8_t)((x86_features >> 16) & 0xFF),
-      (uint8_t)((x86_features >> 24) & 0xFF),
+      x86_features,
   };
-  for (size_t i = 0; i < sizeof(bytes); i++) {
-    stamp ^= bytes[i];
-    stamp *= 16777619u;
-  }
+  for (size_t i = 0; i < sizeof(values) / sizeof(values[0]); i++)
+    for (int shift = 0; shift < 32; shift += 8) {
+      stamp ^= (values[i] >> shift) & 0xFF;
+      stamp *= 16777619u;
+    }
   return stamp;
 }
 

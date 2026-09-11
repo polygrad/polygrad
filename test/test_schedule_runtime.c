@@ -406,6 +406,47 @@ TEST(schedule_runtime, default_dtypes_separate_program_cache) {
   PASS();
 }
 
+TEST(schedule_runtime, owner_compiler_options_separate_program_cache) {
+  /* to_program_key includes compiler policy even when this particular graph
+   * emits identical code. Restoring policy must reuse its original entry. */
+  const char *names[] = {"NUM_CPU_THREADS", "NOLOCALS", "TC_SELECT", "TC_OPT"};
+  const char *first_values[] = {"1", "0", "-1", "0"};
+  const char *second_values[] = {"2", "1", "0", "256"};
+  bool ok = true;
+  for (int i = 0; i < 4; i++) {
+    const char *prior = getenv(names[i]);
+    char *saved = prior ? strdup(prior) : NULL;
+    PolyCtx *ctx = poly_ctx_new();
+    PolyUOp *a = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_CPU);
+    PolyUOp *out = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_CPU);
+    PolyUOp *linear = poly_test_create_linear(
+        ctx, poly_sink1(ctx, poly_store_val(ctx, out, poly_add(ctx, a, a)))
+    );
+    setenv(names[i], first_values[i], 1);
+    PolyUOp *first = poly_compile_linear(ctx, linear, 0);
+    if (first) poly_uop_retain(ctx, first);
+    size_t n_first = poly_to_program_cache_len(ctx);
+    setenv(names[i], second_values[i], 1);
+    PolyUOp *second = poly_compile_linear(ctx, linear, 0);
+    size_t n_second = poly_to_program_cache_len(ctx);
+    setenv(names[i], first_values[i], 1);
+    PolyUOp *restored = poly_compile_linear(ctx, linear, 0);
+    bool matched = first && second && restored == first && n_second > n_first &&
+                   poly_to_program_cache_len(ctx) == n_second;
+    if (!matched)
+      fprintf(stderr, "cache policy %s: entries %zu -> %zu\n", names[i], n_first, n_second);
+    ok &= matched;
+    if (saved)
+      setenv(names[i], saved, 1);
+    else
+      unsetenv(names[i]);
+    free(saved);
+    poly_ctx_destroy(ctx);
+  }
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
 TEST(schedule_runtime, program_and_runtime_caches_reuse_current_keys) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);

@@ -6662,6 +6662,98 @@ TEST(codegen, wmma_outer_broadcast_builds_indexed_fragments_like_tinygrad) {
   PASS();
 }
 
+TEST(codegen, owner_barriers_preserve_loop_load_order_and_existing_fences) {
+  /* add_war_barrier walks backward_slice_with_self: body first, then its
+   * dependencies. Keep that ordered source tuple even when body is a LOAD. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *r = poly_range(ctx, 4, 0, POLY_AXIS_LOOP);
+  PolyUOp *buf =
+      poly_uop_placeholder(ctx, (int64_t[]){4}, 1, POLY_FLOAT32, 0, POLY_ADDR_LOCAL, NULL, false);
+  PolyUOp *ptr = poly_uop_index(ctx, buf, &r, 1);
+  PolyUOp *old = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, ptr, poly_arg_none());
+  PolyUOp *store =
+      poly_store_val(ctx, ptr, poly_alu2(ctx, POLY_OP_ADD, old, poly_cast(ctx, r, POLY_FLOAT32)));
+  PolyUOp *after = poly_uop2(ctx, POLY_OP_AFTER, POLY_FLOAT32, buf, store, poly_arg_none());
+  PolyUOp *current = poly_uop1(
+      ctx, POLY_OP_LOAD, POLY_FLOAT32, poly_uop_index(ctx, after, &r, 1), poly_arg_none()
+  );
+  PolyUOp *end = poly_uop2(ctx, POLY_OP_END, POLY_VOID, current, r, poly_arg_none());
+  PolyUOp *out = poly_test_implicit_barriers(ctx, end);
+  PolyUOp *expected_barrier = poly_uop(
+      ctx, POLY_OP_BARRIER, POLY_VOID, (PolyUOp *[]){current, current, old}, 3, poly_arg_none()
+  );
+  bool matches =
+      out == poly_uop2(ctx, POLY_OP_END, POLY_VOID, expected_barrier, r, poly_arg_none());
+  matches &= out && poly_test_implicit_barriers(ctx, out) == NULL;
+  PolyUOp *single = poly_range(ctx, 1, 1, POLY_AXIS_LOOP);
+  matches &= poly_test_implicit_barriers(
+                 ctx, poly_uop2(ctx, POLY_OP_END, POLY_VOID, current, single, poly_arg_none())
+             ) == NULL;
+  PolyUOp *raw = poly_test_implicit_barriers(ctx, after);
+  PolyUOp *fence = poly_uop1(ctx, POLY_OP_BARRIER, POLY_VOID, store, poly_arg_none());
+  matches &= raw == poly_uop2(ctx, POLY_OP_AFTER, POLY_FLOAT32, buf, fence, poly_arg_none());
+  matches &= raw && poly_test_implicit_barriers(ctx, raw) == NULL;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(matches);
+  PASS();
+}
+
+TEST(codegen, owner_load_insertion_distinguishes_alu_from_no_address_space) {
+  /* UOp.addrspace includes ALU in its equality check. Ignoring it wrongly
+   * turns mixed pointer/value arithmetic into a loadable memory expression. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *r = poly_range(ctx, 4, 0, POLY_AXIS_LOOP);
+  PolyUOp *buf = program_param(ctx, POLY_FLOAT32, 4, 0);
+  PolyUOp *ptr = poly_uop_index(ctx, buf, &r, 1);
+  PolyUOp *mixed = poly_alu2(ctx, POLY_OP_ADD, ptr, poly_cast(ctx, r, POLY_FLOAT32));
+  PolyUOp *outer = poly_uop_stack(ctx, &mixed, 1);
+  bool matches = poly_test_add_loads(ctx, outer) == NULL;
+  PolyUOp *memory = poly_uop_stack(ctx, &ptr, 1);
+  PolyUOp *loaded = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, ptr, poly_arg_none());
+  matches &= poly_test_add_loads(ctx, memory) == poly_uop_stack(ctx, &loaded, 1);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(matches);
+  PASS();
+}
+
+TEST(codegen, owner_expand_reduce_preserves_declared_axis_order) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *value = poly_uop_placeholder(
+      ctx, (int64_t[]){2, 3}, 2, POLY_FLOAT32, 0, POLY_ADDR_GLOBAL, NULL, false
+  );
+  PolyUOp *ints[] = {poly_const_int(ctx, 0), poly_const_int(ctx, 1), poly_const_int(ctx, 2)};
+  PolyUOp *axis0 = poly_reshape(ctx, poly_uop_stack(ctx, ints, 2), (int64_t[]){2, 1}, 2);
+  PolyUOp *axis1 = poly_reshape(ctx, poly_uop_stack(ctx, ints, 3), (int64_t[]){1, 3}, 2);
+  PolyUOp *red = poly_uop(
+      ctx, POLY_OP_REDUCE, POLY_FLOAT32, (PolyUOp *[]){value, axis1, axis0}, 3,
+      poly_arg_reduce(POLY_OP_ADD, 0)
+  );
+  PolyUOp *permuted = poly_permute(ctx, value, (int64_t[]){1, 0}, 2);
+  PolyUOp *expected =
+      poly_uop1(ctx, POLY_OP_REDUCE, POLY_FLOAT32, permuted, poly_arg_reduce(POLY_OP_ADD, 2));
+  expected = poly_reshape(ctx, expected, (int64_t[]){1, 1}, 2);
+  bool matches = poly_apply_expander2(ctx, red) == poly_apply_expander2(ctx, expected);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(matches);
+  PASS();
+}
+
+TEST(codegen, owner_linear_cleanup_rejects_graph_conditionals) {
+  /* pm_linearize_cleanups admits IF/ENDIF only when it creates them from
+   * a gated STORE, never as user-supplied graph nodes. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *gate = poly_uop_const(ctx, poly_arg_bool(true), POLY_BOOL);
+  PolyUOp *ifu = poly_uop1(ctx, POLY_OP_IF, POLY_VOID, gate, poly_arg_none());
+  PolyUOp *endif = poly_uop1(ctx, POLY_OP_ENDIF, POLY_VOID, ifu, poly_arg_none());
+  int n = 0;
+  PolyUOp **lines = poly_do_linearize(ctx, poly_sink1(ctx, endif), &n);
+  bool rejected = lines == NULL && n == 0;
+  free(lines);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(rejected);
+  PASS();
+}
+
 TEST(codegen, devectorizer2_mops_removes_index_of_expanded_scalar) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
