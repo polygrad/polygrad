@@ -145,6 +145,8 @@ void poly_test_reduce_alloc_fail_after(int count);
 /* Single-node matcher controls; production uses the same stage matchers. */
 PolyUOp *poly_test_add_loads(PolyCtx *ctx, PolyUOp *u);
 PolyUOp *poly_test_implicit_barriers(PolyCtx *ctx, PolyUOp *u);
+PolyUOp *poly_test_devectorizer2(PolyCtx *ctx, PolyUOp *u);
+PolyUOp *poly_test_add_local_buffers(PolyCtx *ctx, PolyUOp *u, int *next_slot);
 #endif
 
 #if defined(POLY_TESTING) && !defined(__EMSCRIPTEN__)

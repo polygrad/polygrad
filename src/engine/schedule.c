@@ -1829,6 +1829,32 @@ static const char *poly_program_arg_name(PolyUOp *program) {
  * tinygrad/engine/realize.py:243-253). Imported executable artifacts cross
  * this same boundary: reconstruct runtime handles, but never run their kernel
  * body through backend rewrites a second time. */
+/* do_to_program restores ProgramInfo without replacing supplied stages;
+ * pm_to_program computes estimates only at the SINK+LINEAR boundary. */
+static PolyUOp *poly_program_complete_metadata(
+    PolyCtx *ctx,
+    PolyUOp *call,
+    PolyUOp *program,
+    PolyDevice device
+) {
+  PolyUOp *sink = poly_program_kernel_body(program);
+  if (!sink || sink->op != POLY_OP_SINK) return NULL;
+  if (!poly_program_info(ctx, program)) {
+    PolyProgramInfo *info =
+        poly_program_info_build(ctx, call, sink, poly_kernel_name(sink, "test"), device);
+    if (!info) return NULL;
+    program = poly_uop_tagged_arg(
+        ctx, program->op, program->dtype, program->src, program->n_src, poly_arg_program_info(info),
+        program->tag, program->tag_arg
+    );
+    poly_program_info_destroy(info);
+    if (!program) return NULL;
+  }
+  if (program->n_src == 2 && poly_program_linear(program) && !poly_program_estimates(program))
+    return poly_program_with_linear(ctx, program, program->src[1]);
+  return program;
+}
+
 static bool poly_program_is_complete_for_backend(
     PolyUOp *program,
     const PolyBackendDesc *backend,
@@ -1851,6 +1877,7 @@ static bool poly_program_is_complete_for_backend(
 static PolyUOp *poly_prepare_x86_program_for_backend(
     PolyCtx *ctx,
     PolyUOp *call,
+    PolyUOp *base,
     PolyUOp *device_uop,
     PolyDevice device,
     uint32_t env_stamp,
@@ -1871,10 +1898,15 @@ static PolyUOp *poly_prepare_program_for_backend(
   if (!ast) return NULL;
   const PolyBackendDesc *backend = poly_backend_get(device);
   if (!backend) return NULL;
-  if (poly_program_is_complete_for_backend(ast, backend, device)) return ast;
+  PolyUOp *prepared_input =
+      ast->op == POLY_OP_PROGRAM ? poly_program_complete_metadata(ctx, call, ast, device) : ast;
+  if (!prepared_input) return NULL;
+  if (poly_program_is_complete_for_backend(prepared_input, backend, device)) return prepared_input;
 #ifdef POLY_HAS_X86
   if (device == POLY_DEVICE_X86)
-    return poly_prepare_x86_program_for_backend(ctx, call, device_uop, device, env_stamp, cache);
+    return poly_prepare_x86_program_for_backend(
+        ctx, call, prepared_input, device_uop, device, env_stamp, cache
+    );
 #endif
 
   /* Pinned to_program caches the raw SINK ast.key before do_to_program builds
@@ -1898,12 +1930,14 @@ static PolyUOp *poly_prepare_program_for_backend(
   PolyUOp *body = poly_program_body(ast);
   if (!body) return NULL;
 
-  PolyUOp *rewritten = backend->rewrite_program ? backend->rewrite_program(ctx, body) : body;
-  if (!rewritten) return NULL;
-  PolyUOp *prepared =
-      !backend->rewrite_program && ast->op == POLY_OP_PROGRAM
-          ? ast
-          : poly_program_from_call_body(ctx, call, rewritten, poly_program_arg_name(ast), device);
+  /* do_to_program resumes PROGRAM stages; only a raw SINK needs full lowering. */
+  PolyUOp *prepared = prepared_input;
+  if (ast->op != POLY_OP_PROGRAM) {
+    PolyUOp *rewritten = backend->rewrite_program ? backend->rewrite_program(ctx, body) : body;
+    if (!rewritten) return NULL;
+    prepared =
+        poly_program_from_call_body(ctx, call, rewritten, poly_program_arg_name(ast), device);
+  }
   if (!prepared) return NULL;
   if (backend->rewrite_program) {
     prepared = poly_program_attach_linear(ctx, prepared);
@@ -2812,6 +2846,7 @@ static char *poly_hex_from_bytes(const uint8_t *bytes, int n_bytes) {
 static PolyUOp *poly_prepare_x86_program_for_backend(
     PolyCtx *ctx,
     PolyUOp *call,
+    PolyUOp *base,
     PolyUOp *device_uop,
     PolyDevice device,
     uint32_t env_stamp,
@@ -2835,33 +2870,30 @@ static PolyUOp *poly_prepare_x86_program_for_backend(
           : NULL;
   if (entry) return entry->prepared_program;
 
-  PolyUOp *body = poly_program_body(raw);
+  PolyUOp *body = poly_program_body(base);
   if (!body) return NULL;
-  PolyUOp *rewritten = poly_rewrite_x86(ctx, body);
-  if (!rewritten) return NULL;
-
-  PolyUOp *base =
-      poly_program_from_call_body(ctx, call, rewritten, poly_program_arg_name(raw), device);
+  if (raw->op != POLY_OP_PROGRAM) {
+    body = poly_rewrite_x86(ctx, body);
+    if (!body) return NULL;
+    base = poly_program_from_call_body(ctx, call, body, poly_program_arg_name(raw), device);
+  }
   if (!base) return NULL;
 
-  int n_lin = 0;
-  PolyUOp **lin = poly_linearize_x86_rewritten(ctx, rewritten, &n_lin);
-  if (!lin) return NULL;
-
-  PolyUOp *linear = poly_uop(ctx, POLY_OP_LINEAR, POLY_VOID, lin, n_lin, poly_arg_none());
+  /* Existing LINEAR already owns instruction selection and register allocation. */
+  PolyUOp *linear = poly_program_linear(base);
   if (!linear) {
+    int n_lin = 0;
+    PolyUOp **lin = poly_linearize_x86_rewritten(ctx, body, &n_lin);
+    if (!lin) return NULL;
+    linear = poly_uop(ctx, POLY_OP_LINEAR, POLY_VOID, lin, n_lin, poly_arg_none());
     free(lin);
-    return NULL;
+    if (!linear) return NULL;
   }
   PolyUOp *prepared = poly_program_with_linear(ctx, base, linear);
-  if (!prepared) {
-    free(lin);
-    return NULL;
-  }
+  if (!prepared) return NULL;
 
   int n_code = 0;
-  uint8_t *code = poly_render_x86(lin, n_lin, &n_code);
-  free(lin);
+  uint8_t *code = poly_render_x86(linear->src, linear->n_src, &n_code);
   if (!code || n_code <= 0) {
     free(code);
     return NULL;

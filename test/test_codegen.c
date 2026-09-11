@@ -5035,6 +5035,71 @@ TEST(codegen, simplifying_pow2_floor_ops_precede_generic_floor_decomposition) {
   PASS();
 }
 
+TEST(codegen, op_owner_default_rule_graphs) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x =
+      poly_cast(ctx, poly_uop_variable(ctx, "x", -10, 10, POLY_WEAKINT, 1, false), POLY_INT32);
+  PolyUOp *y =
+      poly_cast(ctx, poly_uop_variable(ctx, "y", -10, 10, POLY_WEAKINT, 1, false), POLY_INT32);
+  PolyUOp *p =
+      poly_cast(ctx, poly_uop_variable(ctx, "p", 0, 10, POLY_WEAKINT, 1, false), POLY_INT32);
+  PolyUOp *one = poly_const_int(ctx, 1), *neg = poly_const_int(ctx, -1);
+  PolyUOp *zero = poly_const_int(ctx, 0), *three = poly_const_int(ctx, 3);
+  PolyUOp *four = poly_const_int(ctx, 4), *five = poly_const_int(ctx, 5),
+          *eight = poly_const_int(ctx, 8);
+  PolyUOp *rem = poly_alu2(ctx, POLY_OP_CMOD, x, three);
+  PolyUOp *signs = poly_binop(
+      ctx, POLY_OP_CMPNE, poly_binop(ctx, POLY_OP_CMPLT, x, zero),
+      poly_binop(ctx, POLY_OP_CMPLT, three, zero)
+  );
+  PolyUOp *adjust = poly_binop(ctx, POLY_OP_AND, poly_binop(ctx, POLY_OP_CMPNE, rem, zero), signs);
+  PolyUOp *bias = poly_where_op(
+      ctx, poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_bool(false)),
+      poly_sub(ctx, eight, one), zero
+  );
+  struct {
+    const char *name;
+    bool early;
+    PolyUOp *raw, *expected;
+  } cases[] = {
+      {"mul_one", false, poly_mul(ctx, x, one), NULL},
+      {"cdiv_one", false, poly_alu2(ctx, POLY_OP_CDIV, x, one), NULL},
+      {"cdiv_positive", false, poly_alu2(ctx, POLY_OP_CDIV, p, eight),
+       poly_binop(ctx, POLY_OP_SHR, poly_add(ctx, p, bias), three)},
+      {"not_lt", false, poly_logical_not(ctx, poly_binop(ctx, POLY_OP_CMPLT, x, four)),
+       poly_binop(ctx, POLY_OP_CMPLT, poly_sub(ctx, four, one), x)},
+      {"negative_compare", false,
+       poly_binop(ctx, POLY_OP_CMPLT, poly_mul(ctx, x, neg), poly_mul(ctx, y, three)),
+       poly_binop(ctx, POLY_OP_CMPLT, poly_mul(ctx, y, poly_mul(ctx, three, neg)), x)},
+      {"negative_constant", false, poly_binop(ctx, POLY_OP_CMPLT, poly_mul(ctx, x, neg), three),
+       poly_binop(ctx, POLY_OP_CMPLT, poly_mul(ctx, three, neg), x)},
+      {"singleton_interval", false,
+       poly_binop(
+           ctx, POLY_OP_AND, poly_binop(ctx, POLY_OP_CMPLT, three, x),
+           poly_binop(ctx, POLY_OP_CMPLT, x, five)
+       ),
+       poly_eq(ctx, x, poly_add(ctx, three, one))},
+      {"floor_general", true, poly_alu2(ctx, POLY_OP_FLOORDIV, x, three),
+       poly_sub(ctx, poly_alu2(ctx, POLY_OP_CDIV, x, three), adjust)},
+      {"mod_general", true, poly_alu2(ctx, POLY_OP_FLOORMOD, x, three),
+       poly_add(ctx, rem, poly_where_op(ctx, adjust, three, zero))},
+  };
+  bool ok = true;
+  for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    PolyPatternMatcher *pm = cases[i].early
+                                 ? poly_get_simplifying_rewrite_patterns(poly_c_renderer_caps())
+                                 : poly_get_late_rewrite_patterns(poly_c_renderer_caps());
+    PolyUOp *actual = poly_pm_rewrite(pm, ctx, cases[i].raw);
+    if (actual != cases[i].expected) {
+      fprintf(stderr, "op owner mismatch: %s\n", cases[i].name);
+      ok = false;
+    }
+  }
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
 TEST(codegen, late_demorgan_uses_renderer_or) {
   /* Current tinygrad codegen/decomp/op.py:get_late_rewrite_patterns rewrites
    * logical_not(x) & logical_not(y) to logical_not(x | y). */
@@ -6751,6 +6816,73 @@ TEST(codegen, owner_linear_cleanup_rejects_graph_conditionals) {
   free(lines);
   poly_ctx_destroy(ctx);
   ASSERT_TRUE(rejected);
+  PASS();
+}
+
+TEST(codegen, boundary_index_stack_preserves_metadata) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *buf =
+      poly_uop_placeholder(ctx, (int64_t[]){4}, 1, POLY_FLOAT32, 0, POLY_ADDR_GLOBAL, NULL, false);
+  PolyUOp *coords[4];
+  for (int i = 0; i < 4; i++)
+    coords[i] = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(i));
+  PolyUOp *src[] = {buf, poly_uop_stack(ctx, coords, 4)};
+  PolyUOp *idx = poly_uop_tagged_arg(
+      ctx, POLY_OP_INDEX, POLY_FLOAT32, src, 2, poly_arg_none(), 17, poly_arg_int(23)
+  );
+  PolyUOp *out = poly_test_devectorizer2(ctx, idx);
+  bool ok = out && out->op == POLY_OP_STACK && out->n_src == 4;
+  for (int i = 0; ok && i < 4; i++) {
+    PolyUOp *lane_src[] = {buf, coords[i]};
+    ok = out->src[i] == poly_uop_replace_src(ctx, idx, lane_src);
+  }
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
+TEST(codegen, boundary_index_reshape_preserves_shape) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *buf =
+      poly_uop_placeholder(ctx, (int64_t[]){4}, 1, POLY_FLOAT32, 0, POLY_ADDR_GLOBAL, NULL, false);
+  PolyUOp *coords[4];
+  for (int i = 0; i < 4; i++)
+    coords[i] = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(i));
+  PolyUOp *stack = poly_uop_stack(ctx, coords, 4);
+  PolyUOp *shape = poly_reshape(ctx, stack, (int64_t[]){2, 2}, 2);
+  PolyUOp *out = poly_test_devectorizer2(ctx, poly_uop_index(ctx, buf, &shape, 1));
+  PolyUOp *expected = poly_reshape(ctx, poly_uop_index(ctx, buf, &stack, 1), (int64_t[]){2, 2}, 2);
+  bool ok = out == expected && poly_uop_ndim(ctx, out) == 2;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
+TEST(codegen, boundary_scalar_local_uses_storage_dtype_and_distinct_slots) {
+  PolyCtx *ctx = poly_ctx_new();
+  int next_slot = 0;
+  bool ok = true;
+  for (int i = 0; i < 2; i++) {
+    PolyUOp *value = poly_uop0(
+        ctx, POLY_OP_CONST, i ? POLY_FLOAT32 : POLY_WEAKINT,
+        i ? poly_arg_float(2.0) : poly_arg_int(7)
+    );
+    PolyUOp *stage = poly_uop1(
+        ctx, POLY_OP_STAGE, value->dtype, value,
+        poly_arg_bufferize_opts(NULL, POLY_ADDR_LOCAL, false)
+    );
+    PolyUOp *out = poly_test_add_local_buffers(ctx, stage, &next_slot);
+    ok = ok && out && out->op == POLY_OP_AFTER && out->n_src == 2;
+    if (!ok) break;
+    PolyUOp *buf = out->src[0], *store = out->src[1];
+    ok = poly_dtype_eq(out->dtype, buf->dtype) && poly_uop_ndim(ctx, out) == 1 &&
+         buf->arg.kind == POLY_ARG_PARAM && buf->arg.param->slot == i &&
+         store->op == POLY_OP_STORE && store->src[0]->op == POLY_OP_INDEX &&
+         poly_dtype_eq(store->src[0]->dtype, buf->dtype);
+  }
+  ok = ok && next_slot == 2;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
   PASS();
 }
 

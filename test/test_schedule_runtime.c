@@ -213,6 +213,90 @@ TEST(schedule_runtime, compile_linear_replaces_compute_body_with_program) {
   PASS();
 }
 
+static bool boundary_program_resume(PolyDevice device, int missing_metadata) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, device);
+  PolyUOp *out = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, device);
+  float input[] = {1, -2, 3.5f, 0}, got[4];
+  bool written = poly_buffer_write(ctx, a, input, sizeof(input)) == 0;
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, poly_alu2(ctx, POLY_OP_ADD, a, a)));
+  PolyUOp *compiled = poly_compile_linear(ctx, poly_test_create_linear(ctx, sink), -1);
+  PolyUOp *full = compiled ? poly_test_linear_call_body(compiled, 0) : NULL;
+  bool ok = written && full && full->op == POLY_OP_PROGRAM && full->n_src >= 2;
+  for (int n = 1; ok && n <= full->n_src; n++) {
+    if (missing_metadata == 2 && n != 2) continue;
+    PolyUOp *prefix[4];
+    memcpy(prefix, full->src, (size_t)n * sizeof(*prefix));
+    if (missing_metadata == 2) {
+      PolyKernelInfo info = *prefix[0]->arg.kernel_info;
+      info.estimates = NULL;
+      prefix[0] = poly_uop_tagged_arg(
+          ctx, POLY_OP_SINK, prefix[0]->dtype, prefix[0]->src, prefix[0]->n_src,
+          poly_arg_kernel_info(&info), prefix[0]->tag, prefix[0]->tag_arg
+      );
+    }
+    PolyUOp *partial = poly_uop(
+        ctx, full->op, full->dtype, prefix, n, missing_metadata == 1 ? poly_arg_none() : full->arg
+    );
+    PolyUOp *call = compiled->src[0];
+    PolyUOp **src = malloc((size_t)call->n_src * sizeof(*src));
+    if (!src) {
+      ok = false;
+      break;
+    }
+    memcpy(src, call->src, (size_t)call->n_src * sizeof(*src));
+    src[0] = partial;
+    PolyUOp *partial_call = poly_uop_replace_src(ctx, call, src);
+    free(src);
+    PolyUOp *linear = poly_uop1(ctx, POLY_OP_LINEAR, POLY_VOID, partial_call, poly_arg_none());
+    PolyUOp *resumed = poly_compile_linear(ctx, linear, -1);
+    PolyUOp *program = resumed ? poly_test_linear_call_body(resumed, 0) : NULL;
+    /* X86 also loads its hex SOURCE directly when BINARY is absent. */
+    int expected_sources = device == POLY_DEVICE_X86 && n == 3 ? 3 : full->n_src;
+    ok = program && program->n_src == expected_sources && poly_program_info(ctx, program) &&
+         program->src[0]->arg.kernel_info->estimates;
+    for (int i = 0; ok && i < n; i++)
+      ok = program->src[i] == full->src[i];
+    if (ok)
+      ok = poly_run_linear(ctx, resumed, NULL, 0, NULL, 0, true, true, false) == 0 &&
+           poly_buffer_read(ctx, out, got, sizeof(got)) == 0;
+    for (int i = 0; ok && i < 4; i++)
+      ok = got[i] == 2 * input[i];
+    if (!ok) fprintf(stderr, "PROGRAM resume device=%d prefix=%d failed\n", device, n);
+  }
+  poly_ctx_destroy(ctx);
+  return ok;
+}
+
+TEST(schedule_runtime, boundary_program_resume_cpu) {
+  ASSERT_TRUE(boundary_program_resume(POLY_DEVICE_CPU, 0));
+  PASS();
+}
+
+TEST(schedule_runtime, boundary_program_resume_interp) {
+  ASSERT_TRUE(boundary_program_resume(POLY_DEVICE_INTERP, 0));
+  PASS();
+}
+
+#ifdef POLY_HAS_X86
+TEST(schedule_runtime, boundary_program_resume_x86) {
+  ASSERT_TRUE(boundary_program_resume(POLY_DEVICE_X86, 0));
+  ASSERT_TRUE(boundary_program_resume(POLY_DEVICE_X86, 1));
+  ASSERT_TRUE(boundary_program_resume(POLY_DEVICE_X86, 2));
+  PASS();
+}
+#endif
+
+TEST(schedule_runtime, boundary_program_resume_missing_info) {
+  ASSERT_TRUE(boundary_program_resume(POLY_DEVICE_CPU, 1));
+  PASS();
+}
+
+TEST(schedule_runtime, boundary_program_resume_missing_estimates) {
+  ASSERT_TRUE(boundary_program_resume(POLY_DEVICE_CPU, 2));
+  PASS();
+}
+
 TEST(schedule_runtime, compile_linear_rewrites_interp_before_program_verification) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);

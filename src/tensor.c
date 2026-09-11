@@ -2625,34 +2625,6 @@ PolyTensor *poly_tensor_div(PolyCtx *ctx, PolyTensor *dividend, PolyTensor *divi
   return out;
 }
 
-/* Broadcasting binary ops */
-
-PolyUOp *poly_add(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
-  if (!poly_broadcasted_pair(ctx, &a, &b)) return NULL;
-  return poly_alu2(ctx, POLY_OP_ADD, a, b);
-}
-
-PolyUOp *poly_sub(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
-  if (!poly_broadcasted_pair(ctx, &a, &b)) return NULL;
-
-  /* Current ElementwiseMixin.sub is a.alu(ADD, -b) after the one
-   * _broadcasted promotion pass. Negation keeps its scalar -1 weak and UOp
-   * shape inference owns any shape broadcast (mixin/elementwise.py:104-119). */
-  PolyUOp *neg_b = NULL;
-  if (poly_dtype_is_bool(b->dtype)) {
-    neg_b = poly_logical_not(ctx, b);
-  } else {
-    PolyUOp *minus_one = poly_const_typed(ctx, poly_dtype_weak(b->dtype), -1.0);
-    neg_b = minus_one ? poly_alu2(ctx, POLY_OP_MUL, b, minus_one) : NULL;
-  }
-  return neg_b ? poly_alu2(ctx, POLY_OP_ADD, a, neg_b) : NULL;
-}
-
-PolyUOp *poly_mul(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
-  if (!poly_broadcasted_pair(ctx, &a, &b)) return NULL;
-  return poly_alu2(ctx, POLY_OP_MUL, a, b);
-}
-
 PolyUOp *poly_div(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
   if (!poly_broadcasted_pair(ctx, &a, &b)) return NULL;
   /* Current ElementwiseMixin.div keeps true division at tensor/UOp stage as
@@ -3267,38 +3239,6 @@ PolyUOp *poly_hardsigmoid(PolyCtx *ctx, PolyUOp *x) {
   );
 }
 
-/* Comparisons (broadcasting) */
-
-/* Logical NOT — `CMPNE(x, CONST(true))` for
- * bool inputs, matching tinygrad's `logical_not()` after CAST elision
- * (mixin/elementwise.py:39-47 + symbolic.py:93-131). Raw `NEG(bool)` retains
- * arithmetic NEG semantics and is not a second logical-NOT spelling. */
-PolyUOp *poly_logical_not(PolyCtx *ctx, PolyUOp *x) {
-  PolyUOp *t = poly_const_typed(ctx, POLY_BOOL, 1);
-  return poly_alu2(ctx, POLY_OP_CMPNE, x, t);
-}
-
-/* All comparison helpers return BOOL, mirroring tinygrad's
- * mixin/elementwise.py:218-247:
- *   eq(a,b) = (a != b).logical_not()
- *   ne(a,b) = CMPNE(a,b)
- *   gt(a,b) = CMPLT(b,a)         (operand swap)
- *   lt(a,b) = CMPLT(a,b)
- *   ge(a,b) = (a < b).logical_not()
- *   le(a,b) = (a > b).logical_not() = (b < a).logical_not()
- *
- * Polygrad previously had ge/le returning float WHERE(0,1); fixed in P5
- * for tinygrad parity and to let Phase D's reduce_collapse Rule 4 match
- * polygrad's tril/triu masks. */
-PolyUOp *poly_eq(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
-  /* Pinned Tensor.eq reaches _binop/_broadcasted, which broadcasts and then
-   * promotes both operands with least_upper_dtype before CMPNE
-   * (mixin/elementwise.py:324-325, mixin/__init__.py:439-449). */
-  if (!poly_broadcasted_pair(ctx, &a, &b)) return NULL;
-  PolyUOp *ne = poly_alu2(ctx, POLY_OP_CMPNE, a, b);
-  return poly_logical_not(ctx, ne);
-}
-
 PolyUOp *poly_ne(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
   if (!poly_broadcasted_pair(ctx, &a, &b)) return NULL;
   return poly_alu2(ctx, POLY_OP_CMPNE, a, b);
@@ -3336,15 +3276,6 @@ PolyUOp *poly_bitcast_by_id(PolyCtx *ctx, PolyUOp *x, int dtype_id) {
   PolyDType target_scalar = target;
   if (poly_dtype_eq(x->dtype, target_scalar)) return x;
   return poly_uop1(ctx, POLY_OP_BITCAST, target_scalar, x, poly_arg_none());
-}
-
-PolyUOp *poly_where_op(PolyCtx *ctx, PolyUOp *cond, PolyUOp *x, PolyUOp *y) {
-  if (!cond || !poly_broadcasted_pair(ctx, &x, &y)) return NULL;
-  /* tinygrad Tensor.where casts non-bool conditions to bool before building
-   * Ops.WHERE. Keeping that in the core constructor preserves the expected
-   * CMPNE(cond, 0) node in helper graphs such as nonzero-value padding. */
-  if (!poly_dtype_is_bool(cond->dtype)) cond = poly_cast(ctx, cond, POLY_BOOL);
-  return poly_alu3(ctx, POLY_OP_WHERE, cond, x, y);
 }
 
 PolyUOp *poly_maximum(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {

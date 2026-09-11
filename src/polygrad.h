@@ -1988,6 +1988,12 @@ PolyUOp *poly_cast(PolyCtx *ctx, PolyUOp *x, PolyDType target);
 PolyUOp *poly_elementwise_promote(PolyCtx *ctx, PolyUOp *root, PolyDType common);
 bool poly_broadcasted_pair(PolyCtx *ctx, PolyUOp **a, PolyUOp **b);
 PolyUOp *poly_binop(PolyCtx *ctx, PolyOps op, PolyUOp *a, PolyUOp *b);
+PolyUOp *poly_add(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
+PolyUOp *poly_sub(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
+PolyUOp *poly_mul(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
+PolyUOp *poly_eq(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
+PolyUOp *poly_logical_not(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_where_op(PolyCtx *ctx, PolyUOp *cond, PolyUOp *x, PolyUOp *y);
 PolyUOp *poly_uop_variable(
     PolyCtx *ctx,
     const char *name,
