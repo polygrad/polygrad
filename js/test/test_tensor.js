@@ -110,6 +110,35 @@ async function runTensorTests(pg, createRuntime) {
 
   console.log(`Core: ${pg.core}, device: ${pg.device}\n`)
 
+  await test('device identity rejects unknown targets without AUTO fallback', async () => {
+    const source = new Tensor([1, 2, 3])
+    const scalar = new Tensor(1)
+    try {
+      for (const device of ['bogus', 'CUDA:1', 'HIP:1']) {
+        const requests = [
+          ['array', () => new Tensor([1, 2], {device})],
+          ['scalar', () => new Tensor(1, {device})],
+          ['empty', () => Tensor.empty([2], {device})],
+          ['clone', () => source.clone(device)],
+          ['to', () => source.to(device)],
+          ['scalar to', () => scalar.to(device)],
+        ]
+        for (const [name, request] of requests) {
+          let rejected = false
+          let result
+          try { result = request() } catch (e) { rejected = /unsupported device/i.test(e.message) }
+          if (result && result !== source && result !== scalar) result.dispose()
+          assert(rejected, `${name} accepted unsupported device ${device}`)
+        }
+      }
+      assertShape(source.shape, [3])
+      assert(source.uop.device === pg.device.toUpperCase(), 'failed request changed source placement')
+    } finally {
+      scalar.dispose()
+      source.dispose()
+    }
+  })
+
   await test('device identity preserves DISK path case without executing it', async () => {
     const source = new Tensor([1, 2, 3], {dtype:'float32'})
     const first = source.to('DISK:temp/CaseSensitive.bin')

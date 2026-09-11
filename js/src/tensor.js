@@ -413,7 +413,14 @@ function createBoundTensorClass(runtime) {
     // The backend prefix is case-insensitive; a filesystem path is not.
     return /^disk:/i.test(name) ? 'disk:' + name.slice(5) : name.toLowerCase()
   }
-  const deviceId = (device) => ffi.poly_device_by_name(normalizeDevice(device))
+  const deviceId = (device) => {
+    const name = normalizeDevice(device)
+    const id = ffi.poly_device_by_name(name)
+    // The C lookup also returns AUTO for unknown names. Only an explicit
+    // AUTO request may select the default; never discard a requested ordinal.
+    if (Number(id) === 0 && name !== 'auto') throw new Error(`Unsupported device: ${name}`)
+    return id
+  }
   const rejectRequiresGrad = (opts) => {
     if (opts && (Object.prototype.hasOwnProperty.call(opts, 'requiresGrad') ||
                  Object.prototype.hasOwnProperty.call(opts, 'requires_grad'))) {
@@ -648,6 +655,7 @@ function createBoundTensorClass(runtime) {
       this._isParam = opts.isParam ?? opts.is_param ?? opts._isParam ?? true
       this._isParam = Boolean(this._isParam)
       this._device = normalizeDevice(opts._device || opts.device || _runtime.device || 'cpu')
+      if (opts.device != null) deviceId(this._device)
       this._tensor = null
       this._tensorOwner = null
       if (opts._tensor) this._adoptCoreTensor(opts._tensor)
@@ -1383,6 +1391,7 @@ function createBoundTensorClass(runtime) {
 
     to(device) {
       const dev = normalizeDevice(device)
+      deviceId(dev)
       if (dev === this._device) return this
       if (Number(ffi.poly_uop_device(this._currentUopRaw())) === deviceId('auto')) return this
       const coreTensor = this._coreToDevice(dev)
