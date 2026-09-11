@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "baseline_ref": "references/tinygrad_20260621",
-  "target_ref": "references/tinygrad_20260822",
+  "target_ref": "references/tinygrad_014",
   "graph_report": "temp/parity_graph/report.json",
   "required_checks": [
     "physical_graph", "values", "native", "python", "js_native", "js_wasm",

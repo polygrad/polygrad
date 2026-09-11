@@ -709,6 +709,37 @@ TEST(uop, placeholder_preserves_current_negative_local_slot) {
   PASS();
 }
 
+TEST(uop, release014_placeholder_defaults_use_existing_identity_and_tag) {
+  /* UOp.placeholder(slot=None, tag=...) is construction sugar: allocate
+   * from the existing context counter, then tag storage before reshaping.
+   * C keeps explicit arguments; no sentinel may consume valid negative slots. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *values[2];
+  for (int i = 0; i < 2; i++) {
+    int64_t flat[] = {6};
+    PolyUOp *storage = poly_uop_placeholder(
+        ctx, flat, 1, POLY_WEAKFLOAT, poly_ctx_next_unique_id(ctx), POLY_ADDR_LOCAL, NULL, false
+    );
+    ASSERT_NOT_NULL(storage);
+    storage = poly_uop_tagged_arg(
+        ctx, storage->op, storage->dtype, storage->src, storage->n_src, storage->arg, 0,
+        poly_arg_str("scratch")
+    );
+    values[i] = poly_reshape(ctx, storage, (int64_t[]){2, 3}, 2);
+    ASSERT_NOT_NULL(values[i]);
+    ASSERT_INT_EQ(values[i]->op, POLY_OP_RESHAPE);
+    ASSERT_INT_EQ(values[i]->tag_arg.kind, POLY_ARG_NONE);
+    ASSERT_INT_EQ(storage->op, POLY_OP_BUFFER);
+    ASSERT_INT_EQ(storage->src[0]->arg.i, 6);
+    ASSERT_TRUE(poly_dtype_eq(storage->dtype, POLY_FLOAT32));
+    ASSERT_STR_EQ(storage->tag_arg.str, "scratch");
+  }
+  ASSERT_PTR_NEQ(values[0], values[1]);
+  ASSERT_TRUE(values[0]->src[0]->arg.param->slot != values[1]->src[0]->arg.param->slot);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(uop, create_with_sources) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0));
@@ -2077,13 +2108,13 @@ TEST(ops, op_value_matches_tinygrad_sort_order) {
       {POLY_OP_FLOORDIV, 50},     {POLY_OP_FLOORMOD, 51},   {POLY_OP_WHERE, 52},
       {POLY_OP_MULACC, 53},       {POLY_OP_BARRIER, 54},    {POLY_OP_RANGE, 55},
       {POLY_OP_IF, 56},           {POLY_OP_END, 57},        {POLY_OP_ENDIF, 58},
-      {POLY_OP_CONST, 60},        {POLY_OP_CUSTOM, 61},     {POLY_OP_CUSTOMI, 62},
-      {POLY_OP_INS, 63},          {POLY_OP_CONTIGUOUS, 64}, {POLY_OP_CONTIGUOUS_BACKWARD, 65},
-      {POLY_OP_DETACH, 66},       {POLY_OP_STAGE, 67},      {POLY_OP_COPY, 68},
-      {POLY_OP_MSELECT, 69},      {POLY_OP_MSTACK, 70},     {POLY_OP_CUSTOM_FUNCTION, 71},
-      {POLY_OP_RESHAPE, 72},      {POLY_OP_PERMUTE, 73},    {POLY_OP_EXPAND, 74},
-      {POLY_OP_PAD, 75},          {POLY_OP_FLIP, 76},       {POLY_OP_UNSHARD, 77},
-      {POLY_OP_REDUCE, 78},       {POLY_OP_ALLREDUCE, 79},
+      {POLY_OP_CONST, 59},        {POLY_OP_CUSTOM, 60},     {POLY_OP_CUSTOMI, 61},
+      {POLY_OP_INS, 62},          {POLY_OP_CONTIGUOUS, 63}, {POLY_OP_CONTIGUOUS_BACKWARD, 64},
+      {POLY_OP_DETACH, 65},       {POLY_OP_STAGE, 66},      {POLY_OP_COPY, 67},
+      {POLY_OP_MSELECT, 68},      {POLY_OP_MSTACK, 69},     {POLY_OP_CUSTOM_FUNCTION, 70},
+      {POLY_OP_RESHAPE, 71},      {POLY_OP_PERMUTE, 72},    {POLY_OP_EXPAND, 73},
+      {POLY_OP_PAD, 74},          {POLY_OP_FLIP, 75},       {POLY_OP_UNSHARD, 76},
+      {POLY_OP_REDUCE, 77},       {POLY_OP_ALLREDUCE, 78},
   };
   for (size_t i = 0; i < sizeof(expected) / sizeof(expected[0]); i++)
     ASSERT_INT_EQ(poly_op_value(expected[i].op), expected[i].value);

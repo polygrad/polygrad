@@ -3902,6 +3902,23 @@ TEST(rangeify, multi_pm_movement_param_and_nested_call_match_pinned) {
   PASS();
 }
 
+TEST(rangeify, release014_gettuple_does_not_cross_unshard) {
+  /* v0.14.0 removes the GETTUPLE-on-UNSHARD rule; an ordinary TUPLE
+   * selector still folds, but must not move through a shard boundary. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *local = multi_pm_test_param(ctx, 42, "CPU", NULL, 0, false);
+  PolyUOp *tuple = poly_uop1(ctx, POLY_OP_TUPLE, POLY_VOID, local, poly_arg_none());
+  PolyUOp *multi = multi_pm_test_unshard(ctx, tuple, 0, 2);
+  PolyUOp *get = poly_uop1(ctx, POLY_OP_GETTUPLE, POLY_FLOAT32, multi, poly_arg_int(0));
+  bool unchanged = poly_apply_multi_pm(ctx, get) == get;
+  PolyUOp *plain = poly_uop1(ctx, POLY_OP_GETTUPLE, POLY_FLOAT32, tuple, poly_arg_int(0));
+  bool folds = poly_apply_multi_pm(ctx, plain) == local;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(unchanged);
+  ASSERT_TRUE(folds);
+  PASS();
+}
+
 TEST(rangeify, multi_pm_function_gettuple_passthrough_matches_pinned) {
   /* Pinned schedule/multi.py:32-34,124-125,127-136,158-174 and
    * schedule/rangeify.py:138-155. This closes the value FUNCTION selector,
@@ -3938,11 +3955,8 @@ TEST(rangeify, multi_pm_function_gettuple_passthrough_matches_pinned) {
   PolyUOp *tuple_get = poly_uop1(ctx, POLY_OP_GETTUPLE, POLY_FLOAT32, tuple_multi, poly_arg_int(0));
   PolyUOp *tuple_get_result = poly_apply_multi_pm(ctx, tuple_get);
   ASSERT_NOT_NULL(tuple_get_result);
-  ASSERT_INT_EQ(tuple_get_result->op, POLY_OP_UNSHARD);
-  ASSERT_INT_EQ(tuple_get_result->arg.kind, POLY_ARG_INT_TUPLE);
-  ASSERT_INT_EQ(tuple_get_result->arg.int_tuple.n, 1);
-  ASSERT_INT_EQ(tuple_get_result->arg.int_tuple.vals[0], 0);
-  ASSERT_PTR_EQ(tuple_get_result->src[0], stack);
+  /* v0.14.0: the deleted selector rule leaves this boundary intact. */
+  ASSERT_PTR_EQ(tuple_get_result, tuple_get);
 
   PolyUOp *axis_param = multi_pm_test_param(ctx, 0, NULL, devices, 2, true);
   PolyUOp *body_values[2] = {

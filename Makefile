@@ -245,7 +245,7 @@ COMPAT_CONVNEXT_DIR ?= temp/tinygrad_compat_convnext
 UPSTREAM_COMPAT_DIR ?= temp/tinygrad_upstream
 UPSTREAM_COMPAT_TESTS ?=
 UPSTREAM_COMPAT_ARGS ?=
-UPSTREAM_COMPAT_BASELINE ?= test/fixtures/tinygrad_upstream_baseline.json
+UPSTREAM_COMPAT_BASELINE ?= test/fixtures/tinygrad_upstream_014_baseline.json
 
 .PHONY: test-upstream-runner test-compat-tinygrad-upstream test-compat-tinygrad-upstream-ratchet test-compat-tinygrad-ops
 test-upstream-runner:

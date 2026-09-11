@@ -23,6 +23,35 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
+TEST(codegen, release014_float_value_slices_are_not_storage_views) {
+  /* v0.14.0 pm_float_decomp excludes both LOAD and STACK parents for
+   * INDEX/SHRINK. Value slices must not acquire a storage dtype tag. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *values[] = {poly_const_float(ctx, 1.0f), poly_const_float(ctx, 2.0f)};
+  for (int i = 0; i < 2; i++)
+    values[i] = poly_cast(ctx, values[i], POLY_FLOAT16);
+  PolyUOp *stack = poly_uop_stack(ctx, values, 2);
+  PolyUOp *buf = poly_test_uop_param(ctx, POLY_FLOAT16, 4, 0, POLY_ADDR_GLOBAL);
+  PolyUOp *address = poly_shrink(ctx, buf, (int64_t[][2]){{0, 2}}, 1);
+  PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT16, address, poly_arg_none());
+  PolyUOp *sources[] = {stack, load};
+  bool correct = true;
+  for (int i = 0; i < 2; i++) {
+    PolyUOp *slice = poly_shrink(ctx, sources[i], (int64_t[][2]){{0, 1}}, 1);
+    PolyFloatDecompContext fctx = {.from = POLY_FLOAT16, .to = POLY_FLOAT32};
+    /* The bottom-up walk short-circuits on replacement: one matcher result,
+     * matching the paired upstream pm.rewrite probe before further passes. */
+    PolyUOp *out = poly_graph_walk_rewrite(ctx, slice, NULL, poly_pm_float_decomp(), &fctx, true);
+    correct &= out && out->op == POLY_OP_SHRINK && out->tag_arg.kind == POLY_ARG_NONE &&
+               poly_dtype_eq(out->dtype, POLY_FLOAT32) && out->src[0]->op == POLY_OP_CAST &&
+               out->src[0]->src[0] == sources[i] && out->src[1] == slice->src[1] &&
+               out->src[2] == slice->src[2];
+  }
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
 TEST(codegen, tail_gpudims_unit_cap) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *r = poly_range(ctx, 2, 0, POLY_AXIS_GLOBAL);
@@ -7678,6 +7707,60 @@ TEST(codegen, move_where_on_load_preserves_cast_and_existing_valid) {
   ASSERT_INT_EQ(new_coord->src[2]->arg.kind, POLY_ARG_INVALID);
 
   poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, late_gater_vector_alternatives_have_no_movement_ops) {
+  /* v0.14.0 gater.py uses vconst_like after movement lowering: a vector
+   * alternative is STACK(zero, ...), never EXPAND(zero, shape). */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *buf = program_param(ctx, POLY_FLOAT32, 8, 0);
+  PolyUOp *range = poly_range(ctx, 2, 0, POLY_AXIS_LOOP);
+  PolyUOp *gate =
+      poly_uop2(ctx, POLY_OP_CMPNE, POLY_BOOL, range, poly_const_int(ctx, 0), poly_arg_none());
+  PolyUOp *idx = poly_uop3(
+      ctx, POLY_OP_WHERE, POLY_WEAKINT, gate, poly_const_int(ctx, 0),
+      poly_uop_const(ctx, poly_arg_invalid(), POLY_BOOL), poly_arg_none()
+  );
+  bool correct = true;
+  for (int width = 1; width <= 4; width += 3) {
+    PolyUOp *address = width == 1 ? poly_uop_index(ctx, buf, &idx, 1)
+                                  : poly_uop3(
+                                        ctx, POLY_OP_SHRINK, POLY_FLOAT32, buf, idx,
+                                        poly_const_int(ctx, width), poly_arg_none()
+                                    );
+    PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, address, poly_arg_none());
+    PolyUOp *out = poly_graph_rewrite(ctx, load, poly_pm_move_gates_from_index());
+    for (int invalid_alt = 0; invalid_alt < 2; invalid_alt++) {
+      if (invalid_alt) {
+        PolyUOp *where = poly_uop3(
+            ctx, POLY_OP_WHERE, POLY_FLOAT32, gate, out,
+            poly_uop_const(ctx, poly_arg_invalid(), POLY_BOOL), poly_arg_none()
+        );
+        out = poly_graph_rewrite(ctx, where, poly_pm_move_gates_from_index());
+      }
+      if (!out || out->op != POLY_OP_LOAD || out->n_src != 3) {
+        correct = false;
+        break;
+      }
+      correct &= out->src[2] == gate && out->src[0]->src[1] == poly_const_int(ctx, 0);
+      PolyUOp *alt = out->src[1];
+      if (width == 4) {
+        if (alt->op != POLY_OP_STACK || alt->n_src != 4) {
+          correct = false;
+          break;
+        }
+        for (int i = 1; i < 4; i++)
+          correct &= alt->src[i] == alt->src[0];
+        alt = alt->src[0];
+      }
+      correct &= alt->op == POLY_OP_CONST && poly_dtype_eq(alt->dtype, POLY_FLOAT32) &&
+                 alt->arg.kind == POLY_ARG_FLOAT && alt->arg.f == 0.0;
+    }
+  }
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(correct);
   PASS();
 }
 

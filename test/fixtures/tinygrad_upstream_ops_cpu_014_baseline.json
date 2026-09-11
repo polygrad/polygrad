@@ -1,0 +1,6174 @@
+{
+  "contract": {
+    "adapter": "cpu-ops",
+    "devices": [
+      "CPU",
+      "CPU"
+    ],
+    "engines": "both",
+    "environment": {
+      "CACHELEVEL": "0",
+      "DEBUG": "0",
+      "DERANDOMIZE_CI": "1",
+      "DEV": "CPU",
+      "FORWARD_ONLY": "0",
+      "IMAGE": "0",
+      "MKL_NUM_THREADS": "1",
+      "OMP_NUM_THREADS": "1",
+      "POLY_DEVICE": "cpu",
+      "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+      "PYTHONHASHSEED": "0",
+      "SKIP_SLOW_TEST": "0",
+      "TINY_BACKEND": "0"
+    },
+    "failure_signature": "source-path-and-message-v2",
+    "python": "3.11.12 (main, Apr  9 2025, 04:04:00) [Clang 20.1.0 ]",
+    "reference_commit": "6f87158d77f66a36d5f8bbe915170b24e2acabe8",
+    "runner_sha256": "335b5b4879ca1f9e1828002826e1a810d1ea3429d23937a799bcec43a484c4d8",
+    "test_sha256": {
+      "test/backend/test_ops.py": "b0b8f94a538c555d3ecc094cc7d001de157805b340671b5efa845d54e0cefaf1"
+    },
+    "upstream_sha256": "f5f1b2736d521383cc28fa55a71a194d87484b84ce72a8013bb9e5915fe3809d",
+    "versions": [
+      {
+        "hypothesis": "6.131.9",
+        "numpy": "2.4.6",
+        "pytest": "8.3.5",
+        "torch": "2.5.1+cpu"
+      },
+      {
+        "hypothesis": "6.131.9",
+        "numpy": "2.4.6",
+        "pytest": "8.3.5",
+        "torch": "2.5.1+cpu"
+      }
+    ]
+  },
+  "evidence": {
+    "report": "/home/anton/projects/polygrad/polygrad/temp/retarget-014-20260911.MPsDqT/new-ops/report.json",
+    "sha256": "785081f813912fbf85c48dc18414637200c12b063668f590bbbbc4b440843987"
+  },
+  "schema_version": 1,
+  "tests": {
+    "polygrad:test/backend/test_ops.py::TestOps::test_9_gemm": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_abs": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_abs_exact": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_acos": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_acosh": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_add": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_add3": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_all": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_all_axis": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_all_large": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_all_zero_axis": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_and": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_any": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_any_axis": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_any_zero_axis": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_arange": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_arange_4096": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_arange_big": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_argmax": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_argmin": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_argsort": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_asin": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_asinh": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_asymmetric_padding_conv1d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_asymmetric_padding_conv2d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_atan": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_atanh": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_avg_pool2d": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_avg_pool2d_asymmetric_padding": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_avg_pool2d_ceil_mode": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_avg_pool2d_ceil_mode_include_pad_output_size_reduce_by_one": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_avg_pool2d_ceil_mode_output_size_reduce_by_one": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_avg_pool2d_ceil_mode_padding_not_counted": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_avg_pool2d_padding": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_avg_pool2d_padding_not_counted": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_avg_pool3d": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_bias_conv_transpose2d": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_biased_conv2d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_big_gemm": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_binary_crossentropy": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_binary_crossentropy_logits_pos_weights": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_binary_crossentropy_reductions": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_bitcast": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_bitwise_not": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_broadcast_full": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_broadcast_partial": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_broadcast_simple": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_broadcastdot": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_broadcasted_add": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_broadcasted_add_2": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_cast": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_cat": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_ceil": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_celu": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_chunk": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_clip": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_cmp_eq": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_cmp_ge": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_cmp_gt": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_cmp_le": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_cmp_lt": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_cmp_lt_backwards": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_cmp_ne_backwards": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_const_reduce": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_conv1d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_conv2d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_conv2d_bs_1_cin_1": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_conv2d_bs_4_cin_1": {
+      "category": "upstream-skip",
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "('<adapted>/test/backend/test_ops.py', 2400, 'Skipped: redundant: cin=1 covered by test_conv2d_bs_1_cin_1')",
+            "outcome": "skipped"
+          }
+        },
+        "status": "skipped"
+      },
+      "reason": "Unchanged pinned CPU skip; not a pass."
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_conv2d_bs_4_cin_3": {
+      "category": "upstream-skip",
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "('<adapted>/test/backend/test_ops.py', 2396, 'Skipped: redundant: bs/cout are loop dims, kernel\u00d7cin sweep covered by test_conv2d')",
+            "outcome": "skipped"
+          }
+        },
+        "status": "skipped"
+      },
+      "reason": "Unchanged pinned CPU skip; not a pass."
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_conv2d_errors": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_copysign": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_copysign_exact": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_cos": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_cosh": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_cross_entropy_class_indices": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_cross_entropy_class_probabilities": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_cross_entropy_reductions": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_cross_entropy_smoothing": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_cummax": {
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "<polygrad>/references/.uv-python/cpython-3.11.12-linux-x86_64-gnu/lib/python3.11/unittest/case.py:LINE: AssertionError: IndexError not raised",
+            "outcome": "failed"
+          }
+        },
+        "status": "failed"
+      },
+      "reason": "reference-failure: the Torch control fails IndexError not raised for scalar dim=1 under both providers, before invoking either implementation; supported scan values and graphs have dedicated cross-frontend regressions."
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_cummax_zero_axis": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_cummin": {
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "<polygrad>/references/.uv-python/cpython-3.11.12-linux-x86_64-gnu/lib/python3.11/unittest/case.py:LINE: AssertionError: IndexError not raised",
+            "outcome": "failed"
+          }
+        },
+        "status": "failed"
+      },
+      "reason": "reference-failure: the Torch control fails IndexError not raised for scalar dim=1 under both providers, before invoking either implementation; supported scan values and graphs have dedicated cross-frontend regressions."
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_cummin_zero_axis": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_cumprod": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_cumprod_zero_axis": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_cumsum": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_cumsum_zero_axis": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_depthwise_conv2d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_detach": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_diag": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_diagonal": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_dilated_conv2d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_dilated_conv_transpose2d": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_div": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_div_int": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_div_naninf": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_div_rounding_mode": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_dot": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_dot_1d": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_double_slice": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_einsum": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_einsum_arity_check1": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_einsum_arity_check2": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_einsum_ellipsis": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_einsum_shape_check": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_einsum_trace": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_elu": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_empty_0": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_erf": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_exp": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_exp2": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_exp2_log2_zero_times_negative": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_expand": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_eye": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_fancy_conv2d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_fancy_indexing_inf": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_flatten": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_flip": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_flip_eye_crash": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_floor": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_fmod": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_full": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_full_like": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_gather": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_gelu": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_gelu_extreme": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_gemm": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_gemm_fp16": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_gemm_with_zeros_shape": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_global_avg_pool2d": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_grouped_conv2d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_grouped_conv_transpose2d": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_hardsigmoid": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_hardsigmoid_extreme": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_hardswish": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_hardtanh": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_idiv_shift_rewrite_negative": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_inf_where": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_int_or": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_int_pow_const_int": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_interpolate_bilinear": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_interpolate_bilinear_corners_aligned": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_interpolate_linear": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_interpolate_linear_corners_aligned": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_interpolate_nearest": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_interpolate_nearest_exact": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_interpolate_trilinear": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_interpolate_trilinear_corners_aligned": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_isclose": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_isclose_edge_cases": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_isclose_scalar": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_isfinite": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_isinf": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_isnan": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_large_bs_conv": {
+      "category": "upstream-skip",
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "('<adapted>/test/backend/test_ops.py', 2217, 'Skipped: slow')",
+            "outcome": "skipped"
+          }
+        },
+        "status": "skipped"
+      },
+      "reason": "Unchanged pinned CPU skip; not a pass."
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_large_ic_conv": {
+      "category": "upstream-skip",
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "('<adapted>/test/backend/test_ops.py', 2225, 'Skipped: slow')",
+            "outcome": "skipped"
+          }
+        },
+        "status": "skipped"
+      },
+      "reason": "Unchanged pinned CPU skip; not a pass."
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_large_input_conv2d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_leaky_relu": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_lerp": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_linspace": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_log": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_log10": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_log2": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_log_softmax": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_log_softmax_other_axis": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_logaddexp": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_logcumsumexp": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_logcumsumexp_numerical": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_logical_not": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_logsigmoid": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_logsumexp": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_lshift": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_lshift_signed": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_masked_fill": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_masked_select": {
+      "category": "frontend-api",
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'masked_select'",
+            "outcome": "failed"
+          }
+        },
+        "status": "failed"
+      },
+      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_masked_select_size": {
+      "category": "frontend-api",
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'masked_select'",
+            "outcome": "failed"
+          }
+        },
+        "status": "failed"
+      },
+      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_matmul": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_matmul_batched": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_matmul_batched_vector": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_matmul_simple": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_matvec": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_matvecmat": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_max": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_max_dont_collapse": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_max_nan": {
+      "category": "upstream-skip",
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "('<adapted>/test/backend/test_ops.py', 2937, 'Skipped: this test is broken #862')",
+            "outcome": "skipped"
+          }
+        },
+        "status": "skipped"
+      },
+      "reason": "Unchanged pinned CPU skip; not a pass."
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_max_pool2d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_max_pool2d_asymmetric_padding": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_max_pool2d_bigger_stride": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_max_pool2d_bigger_stride_dilation": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_max_pool2d_ceil_mode": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_max_pool2d_ceil_mode_output_size_reduce_by_one": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_max_pool2d_dilation": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_max_pool2d_padding": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_max_pool2d_padding_int": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_max_pool2d_return_indices": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_max_pool2d_simple": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_max_pool2d_smaller_stride": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_max_pool2d_unit_stride": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_max_unpool2d": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_max_unpool2d_inf": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_maximum": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_mean": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_mean_axis": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_mean_zero_axis": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_medium_grouped_conv2d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_meshgrid": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_min": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_minimum": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_mish": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_mod": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_mul": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_mul_naninf": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_mulacc_with_zero_strides": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_multicat": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_multidot": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_neg": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_negative_dims": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_negative_dims_eye": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_negative_dims_full": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_negative_dims_kaiming": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_negative_padding_conv2d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_nested_conv2d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_nll_loss": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_nll_loss_3d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_nll_loss_3d_weight": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_nll_loss_ignore_index": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_nll_loss_reductions": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_nll_loss_weight": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_nonzero": {
+      "category": "frontend-api",
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'nonzero'",
+            "outcome": "failed"
+          }
+        },
+        "status": "failed"
+      },
+      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_nonzero_size": {
+      "category": "frontend-api",
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "<adapted>/test/backend/test_ops.py:LINE: AttributeError: 'Tensor' object has no attribute 'nonzero'",
+            "outcome": "failed"
+          }
+        },
+        "status": "failed"
+      },
+      "reason": "Missing Tensor API; numerical/gradient body remains unexecuted beyond this first failure."
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_normalize": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_one_hot": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_ones": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_ones_like": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_or": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_output_padded_conv_transpose2d": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_pad": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_pad_circular_mode": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_pad_reflect_mode": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_pad_replicate_mode": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_pad_reshape": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_pad_slice": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_padded_conv2d_1x1": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_padded_conv2d_bs1": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_padded_conv2d_p21": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_padded_conv2d_p22": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_padded_conv3d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_padded_conv_transpose2d": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_padding_add": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_permute": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_pow": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_pow_const": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_pow_const_direct": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_pow_full": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_pow_int": {
+      "category": "upstream-skip",
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "('<adapted>/test/backend/test_ops.py', 768, 'Skipped: not supported')",
+            "outcome": "skipped"
+          }
+        },
+        "status": "skipped"
+      },
+      "reason": "Unchanged pinned CPU skip; not a pass."
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_pow_int_base_float_exponent": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_pow_neg_inf_frac_exponent": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_pow_zero_const": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_pow_zero_exponent": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_pow_zero_tensor": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_prod": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_prod_dtype_arg": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_quick_gelu": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_quick_gelu_extreme": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_relu": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_relu6": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_relu_exact": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_relu_maximum_exact": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_repeat": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_repeat_interleave": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_reshape": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_roll": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_round": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_round_quantization_gradient": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_rshift": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_rshift_signed": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_rsqrt": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_scalar_div": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_scalar_mul": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_scalar_rsub": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_scalar_sub": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_scaled_dot_product_attention": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_scaled_dot_product_attention_causal": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_scaled_dot_product_attention_gqa": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_scaled_dot_product_attention_gqa_errors": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_scaled_dot_product_attention_mismatch_ls": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_scatter": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_scatter_add": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_scatter_mul": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_scatter_no_reduce_tensor_src": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_scatter_reduce": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_scatter_reduce_errors": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_scatter_reduce_prod_zeros": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_sd_big_conv": {
+      "category": "upstream-skip",
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "('<adapted>/test/backend/test_ops.py', 2210, 'Skipped: very slow')",
+            "outcome": "skipped"
+          }
+        },
+        "status": "skipped"
+      },
+      "reason": "Unchanged pinned CPU skip; not a pass."
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_selu": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_sigmoid": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_sigmoid_alt_extreme": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_sigmoid_extreme": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_sign": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_sign_exact": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_silu": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_simple_conv2d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_simple_conv2d_1x1": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_simple_conv2d_1x1_m4": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_simple_conv2d_batched": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_simple_conv2d_bias": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_simple_conv2d_m4": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_simple_conv2d_nhwc": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_simple_conv3d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_simple_conv_transpose2d": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_simple_conv_transpose3d": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_simple_cummax": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_simple_cummin": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_simple_cumprod": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_simple_cumsum": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_simple_grouped_conv2d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_simple_padding_conv1d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_simple_padding_conv2d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_simple_repeat": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_sin": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_sinh": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_slice_both_endpoints_out_of_bounds": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_slice_ellipsis": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_slice_errors": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_slice_fancy_indexing_dim_collapse_int": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_slice_fancy_indexing_dim_inject_and_collapse": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_slice_fancy_indexing_dim_inject_none": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_slice_fancy_indexing_errors": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_slice_fancy_indexing_list_indices": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_slice_fancy_indexing_list_with_tensors": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_slice_fancy_indexing_no_dim_collapse": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_slice_fancy_indexing_tuple_indices": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_slice_fancy_indexing_with_tensors": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_slice_in_bounds_1dim": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_slice_in_bounds_multidim": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_slice_int_indexing": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_slice_negative_strides": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_slice_on_0dim_tensor": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_slice_one_endpoint_out_of_bounds": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_slice_start_gt_end": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_slice_stride_gt_one": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_slice_with_const_tensor": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_slice_with_none": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_slice_zero_in_shape": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_small_cummax": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_small_cummin": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_small_cumprod": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_small_cumsum": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_small_gemm": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_small_gemm_eye": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_small_gemm_padded": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_small_gemm_range": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_softmax": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_softmax_argmax": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_softmax_other_axis": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_softmin": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_softplus": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_softsign": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_softsign_exact": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_sort": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_sparse_categorical_crossentropy": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_sparse_categorical_crossentropy_ignore_index": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_sparse_categorical_crossentropy_label_smoothing": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_sparse_categorical_crossentropy_reductions": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_split": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_sqrt": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_squeeze": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_stack": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_stack_max": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_stack_slice": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_std": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_std_axis": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_std_keepdim": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_std_mean": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_std_mean_loaded_nan": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_std_one_in_axis": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_std_zero_in_axis": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_strided_conv1d_simple": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_strided_conv2d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_strided_conv2d_simple": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_strided_conv2d_simple_vec": {
+      "category": "upstream-skip",
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "('<adapted>/test/backend/test_ops.py', 2479, 'Skipped: DEVECTORIZE=0 only for LLVM')",
+            "outcome": "skipped"
+          }
+        },
+        "status": "skipped"
+      },
+      "reason": "Unchanged pinned CPU skip; not a pass."
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_strided_conv_transpose2d": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_sub": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_sum": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_sum_cat_collapse": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_sum_collapse": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_sum_collapse_neg": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_sum_dtype_arg": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_sum_fake": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_sum_full": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_sum_pad_collapse": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_sum_relu": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_sum_simple": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_sum_tiny": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_sum_twice": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_sum_with_zeros_shape": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_swish": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_tan": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_tanh": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_tanh_extreme": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_tiny_add": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_tiny_mul": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_topk": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_topo_sort": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_transpose": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_tril": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_triu": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_trunc": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_unflatten": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_unfold": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_unsqueeze": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_var": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_var_axis": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_var_keepdim": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_var_one_in_axis": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_var_zero_in_axis": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_view": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_where": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_where_permute": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_xor": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_zeros": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOps::test_zeros_like": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOpsUint8::test_cast": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOpsUint8::test_cast_relu": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOpsUint8::test_interpolate_bilinear": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOpsUint8::test_interpolate_nearest": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOpsUint8::test_interpolate_nearest_exact": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_ops.py::TestOpsUint8::test_min": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_9_gemm": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_abs": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_abs_exact": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_acos": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_acosh": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_add": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_add3": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_all": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_all_axis": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_all_large": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_all_zero_axis": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_and": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_any": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_any_axis": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_any_zero_axis": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_arange": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_arange_4096": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_arange_big": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_argmax": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_argmin": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_argsort": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_asin": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_asinh": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_asymmetric_padding_conv1d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_asymmetric_padding_conv2d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_atan": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_atanh": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_avg_pool2d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_avg_pool2d_asymmetric_padding": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_avg_pool2d_ceil_mode": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_avg_pool2d_ceil_mode_include_pad_output_size_reduce_by_one": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_avg_pool2d_ceil_mode_output_size_reduce_by_one": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_avg_pool2d_ceil_mode_padding_not_counted": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_avg_pool2d_padding": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_avg_pool2d_padding_not_counted": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_avg_pool3d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_bias_conv_transpose2d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_biased_conv2d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_big_gemm": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_binary_crossentropy": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_binary_crossentropy_logits_pos_weights": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_binary_crossentropy_reductions": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_bitcast": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_bitwise_not": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_broadcast_full": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_broadcast_partial": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_broadcast_simple": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_broadcastdot": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_broadcasted_add": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_broadcasted_add_2": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_cast": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_cat": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_ceil": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_celu": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_chunk": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_clip": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_cmp_eq": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_cmp_ge": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_cmp_gt": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_cmp_le": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_cmp_lt": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_cmp_lt_backwards": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_cmp_ne_backwards": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_const_reduce": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_conv1d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_conv2d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_conv2d_bs_1_cin_1": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_conv2d_bs_4_cin_1": {
+      "category": "upstream-skip",
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "('<adapted>/test/backend/test_ops.py', 2400, 'Skipped: redundant: cin=1 covered by test_conv2d_bs_1_cin_1')",
+            "outcome": "skipped"
+          }
+        },
+        "status": "skipped"
+      },
+      "reason": "Unchanged pinned CPU skip; not a pass."
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_conv2d_bs_4_cin_3": {
+      "category": "upstream-skip",
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "('<adapted>/test/backend/test_ops.py', 2396, 'Skipped: redundant: bs/cout are loop dims, kernel\u00d7cin sweep covered by test_conv2d')",
+            "outcome": "skipped"
+          }
+        },
+        "status": "skipped"
+      },
+      "reason": "Unchanged pinned CPU skip; not a pass."
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_conv2d_errors": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_copysign": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_copysign_exact": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_cos": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_cosh": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_cross_entropy_class_indices": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_cross_entropy_class_probabilities": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_cross_entropy_reductions": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_cross_entropy_smoothing": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_cummax": {
+      "category": "reference-failure",
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "<polygrad>/references/.uv-python/cpython-3.11.12-linux-x86_64-gnu/lib/python3.11/unittest/case.py:LINE: AssertionError: IndexError not raised",
+            "outcome": "failed"
+          }
+        },
+        "status": "failed"
+      },
+      "reason": "Pinned reference does not raise the expected IndexError; do not reproduce this failure as parity."
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_cummax_zero_axis": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_cummin": {
+      "category": "reference-failure",
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "<polygrad>/references/.uv-python/cpython-3.11.12-linux-x86_64-gnu/lib/python3.11/unittest/case.py:LINE: AssertionError: IndexError not raised",
+            "outcome": "failed"
+          }
+        },
+        "status": "failed"
+      },
+      "reason": "Pinned reference does not raise the expected IndexError; do not reproduce this failure as parity."
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_cummin_zero_axis": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_cumprod": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_cumprod_zero_axis": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_cumsum": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_cumsum_zero_axis": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_depthwise_conv2d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_detach": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_diag": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_diagonal": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_dilated_conv2d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_dilated_conv_transpose2d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_div": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_div_int": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_div_naninf": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_div_rounding_mode": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_dot": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_dot_1d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_double_slice": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_einsum": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_einsum_arity_check1": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_einsum_arity_check2": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_einsum_ellipsis": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_einsum_shape_check": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_einsum_trace": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_elu": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_empty_0": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_erf": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_exp": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_exp2": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_exp2_log2_zero_times_negative": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_expand": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_eye": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_fancy_conv2d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_fancy_indexing_inf": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_flatten": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_flip": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_flip_eye_crash": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_floor": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_fmod": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_full": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_full_like": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_gather": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_gelu": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_gelu_extreme": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_gemm": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_gemm_fp16": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_gemm_with_zeros_shape": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_global_avg_pool2d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_grouped_conv2d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_grouped_conv_transpose2d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_hardsigmoid": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_hardsigmoid_extreme": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_hardswish": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_hardtanh": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_idiv_shift_rewrite_negative": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_inf_where": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_int_or": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_int_pow_const_int": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_interpolate_bilinear": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_interpolate_bilinear_corners_aligned": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_interpolate_linear": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_interpolate_linear_corners_aligned": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_interpolate_nearest": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_interpolate_nearest_exact": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_interpolate_trilinear": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_interpolate_trilinear_corners_aligned": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_isclose": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_isclose_edge_cases": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_isclose_scalar": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_isfinite": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_isinf": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_isnan": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_large_bs_conv": {
+      "category": "upstream-skip",
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "('<adapted>/test/backend/test_ops.py', 2217, 'Skipped: slow')",
+            "outcome": "skipped"
+          }
+        },
+        "status": "skipped"
+      },
+      "reason": "Unchanged pinned CPU skip; not a pass."
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_large_ic_conv": {
+      "category": "upstream-skip",
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "('<adapted>/test/backend/test_ops.py', 2225, 'Skipped: slow')",
+            "outcome": "skipped"
+          }
+        },
+        "status": "skipped"
+      },
+      "reason": "Unchanged pinned CPU skip; not a pass."
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_large_input_conv2d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_leaky_relu": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_lerp": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_linspace": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_log": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_log10": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_log2": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_log_softmax": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_log_softmax_other_axis": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_logaddexp": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_logcumsumexp": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_logcumsumexp_numerical": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_logical_not": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_logsigmoid": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_logsumexp": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_lshift": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_lshift_signed": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_masked_fill": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_masked_select": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_masked_select_size": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_matmul": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_matmul_batched": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_matmul_batched_vector": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_matmul_simple": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_matvec": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_matvecmat": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_max": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_max_dont_collapse": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_max_nan": {
+      "category": "upstream-skip",
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "('<adapted>/test/backend/test_ops.py', 2937, 'Skipped: this test is broken #862')",
+            "outcome": "skipped"
+          }
+        },
+        "status": "skipped"
+      },
+      "reason": "Unchanged pinned CPU skip; not a pass."
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_max_pool2d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_max_pool2d_asymmetric_padding": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_max_pool2d_bigger_stride": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_max_pool2d_bigger_stride_dilation": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_max_pool2d_ceil_mode": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_max_pool2d_ceil_mode_output_size_reduce_by_one": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_max_pool2d_dilation": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_max_pool2d_padding": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_max_pool2d_padding_int": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_max_pool2d_return_indices": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_max_pool2d_simple": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_max_pool2d_smaller_stride": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_max_pool2d_unit_stride": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_max_unpool2d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_max_unpool2d_inf": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_maximum": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_mean": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_mean_axis": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_mean_zero_axis": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_medium_grouped_conv2d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_meshgrid": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_min": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_minimum": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_mish": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_mod": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_mul": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_mul_naninf": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_mulacc_with_zero_strides": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_multicat": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_multidot": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_neg": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_negative_dims": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_negative_dims_eye": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_negative_dims_full": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_negative_dims_kaiming": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_negative_padding_conv2d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_nested_conv2d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_nll_loss": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_nll_loss_3d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_nll_loss_3d_weight": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_nll_loss_ignore_index": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_nll_loss_reductions": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_nll_loss_weight": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_nonzero": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_nonzero_size": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_normalize": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_one_hot": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_ones": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_ones_like": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_or": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_output_padded_conv_transpose2d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_pad": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_pad_circular_mode": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_pad_reflect_mode": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_pad_replicate_mode": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_pad_reshape": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_pad_slice": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_padded_conv2d_1x1": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_padded_conv2d_bs1": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_padded_conv2d_p21": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_padded_conv2d_p22": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_padded_conv3d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_padded_conv_transpose2d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_padding_add": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_permute": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_pow": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_pow_const": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_pow_const_direct": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_pow_full": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_pow_int": {
+      "category": "upstream-skip",
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "('<adapted>/test/backend/test_ops.py', 768, 'Skipped: not supported')",
+            "outcome": "skipped"
+          }
+        },
+        "status": "skipped"
+      },
+      "reason": "Unchanged pinned CPU skip; not a pass."
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_pow_int_base_float_exponent": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_pow_neg_inf_frac_exponent": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_pow_zero_const": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_pow_zero_exponent": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_pow_zero_tensor": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_prod": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_prod_dtype_arg": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_quick_gelu": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_quick_gelu_extreme": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_relu": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_relu6": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_relu_exact": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_relu_maximum_exact": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_repeat": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_repeat_interleave": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_reshape": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_roll": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_round": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_round_quantization_gradient": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_rshift": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_rshift_signed": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_rsqrt": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_scalar_div": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_scalar_mul": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_scalar_rsub": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_scalar_sub": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_scaled_dot_product_attention": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_scaled_dot_product_attention_causal": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_scaled_dot_product_attention_gqa": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_scaled_dot_product_attention_gqa_errors": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_scaled_dot_product_attention_mismatch_ls": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_scatter": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_scatter_add": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_scatter_mul": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_scatter_no_reduce_tensor_src": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_scatter_reduce": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_scatter_reduce_errors": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_scatter_reduce_prod_zeros": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_sd_big_conv": {
+      "category": "upstream-skip",
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "('<adapted>/test/backend/test_ops.py', 2210, 'Skipped: very slow')",
+            "outcome": "skipped"
+          }
+        },
+        "status": "skipped"
+      },
+      "reason": "Unchanged pinned CPU skip; not a pass."
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_selu": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_sigmoid": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_sigmoid_alt_extreme": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_sigmoid_extreme": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_sign": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_sign_exact": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_silu": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_simple_conv2d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_simple_conv2d_1x1": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_simple_conv2d_1x1_m4": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_simple_conv2d_batched": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_simple_conv2d_bias": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_simple_conv2d_m4": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_simple_conv2d_nhwc": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_simple_conv3d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_simple_conv_transpose2d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_simple_conv_transpose3d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_simple_cummax": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_simple_cummin": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_simple_cumprod": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_simple_cumsum": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_simple_grouped_conv2d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_simple_padding_conv1d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_simple_padding_conv2d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_simple_repeat": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_sin": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_sinh": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_slice_both_endpoints_out_of_bounds": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_slice_ellipsis": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_slice_errors": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_slice_fancy_indexing_dim_collapse_int": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_slice_fancy_indexing_dim_inject_and_collapse": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_slice_fancy_indexing_dim_inject_none": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_slice_fancy_indexing_errors": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_slice_fancy_indexing_list_indices": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_slice_fancy_indexing_list_with_tensors": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_slice_fancy_indexing_no_dim_collapse": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_slice_fancy_indexing_tuple_indices": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_slice_fancy_indexing_with_tensors": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_slice_in_bounds_1dim": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_slice_in_bounds_multidim": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_slice_int_indexing": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_slice_negative_strides": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_slice_on_0dim_tensor": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_slice_one_endpoint_out_of_bounds": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_slice_start_gt_end": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_slice_stride_gt_one": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_slice_with_const_tensor": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_slice_with_none": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_slice_zero_in_shape": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_small_cummax": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_small_cummin": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_small_cumprod": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_small_cumsum": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_small_gemm": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_small_gemm_eye": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_small_gemm_padded": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_small_gemm_range": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_softmax": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_softmax_argmax": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_softmax_other_axis": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_softmin": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_softplus": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_softsign": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_softsign_exact": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_sort": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_sparse_categorical_crossentropy": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_sparse_categorical_crossentropy_ignore_index": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_sparse_categorical_crossentropy_label_smoothing": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_sparse_categorical_crossentropy_reductions": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_split": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_sqrt": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_squeeze": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_stack": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_stack_max": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_stack_slice": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_std": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_std_axis": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_std_keepdim": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_std_mean": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_std_mean_loaded_nan": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_std_one_in_axis": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_std_zero_in_axis": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_strided_conv1d_simple": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_strided_conv2d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_strided_conv2d_simple": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_strided_conv2d_simple_vec": {
+      "category": "upstream-skip",
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "('<adapted>/test/backend/test_ops.py', 2479, 'Skipped: DEVECTORIZE=0 only for LLVM')",
+            "outcome": "skipped"
+          }
+        },
+        "status": "skipped"
+      },
+      "reason": "Unchanged pinned CPU skip; not a pass."
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_strided_conv_transpose2d": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_sub": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_sum": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_sum_cat_collapse": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_sum_collapse": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_sum_collapse_neg": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_sum_dtype_arg": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_sum_fake": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_sum_full": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_sum_pad_collapse": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_sum_relu": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_sum_simple": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_sum_tiny": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_sum_twice": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_sum_with_zeros_shape": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_swish": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_tan": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_tanh": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_tanh_extreme": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_tiny_add": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_tiny_mul": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_topk": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_topo_sort": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_transpose": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_tril": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_triu": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_trunc": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_unflatten": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_unfold": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_unsqueeze": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_var": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_var_axis": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_var_keepdim": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_var_one_in_axis": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_var_zero_in_axis": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_view": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_where": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_where_permute": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_xor": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_zeros": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOps::test_zeros_like": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOpsUint8::test_cast": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOpsUint8::test_cast_relu": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOpsUint8::test_interpolate_bilinear": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOpsUint8::test_interpolate_nearest": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOpsUint8::test_interpolate_nearest_exact": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_ops.py::TestOpsUint8::test_min": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    }
+  }
+}

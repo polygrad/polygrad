@@ -59,7 +59,8 @@ static PolyUOp *move_gated_image_index_to_load(PolyCtx *ctx, PolyUOp *load, cons
   PolyUOp *gate = NULL;
   PolyUOp *ungated = ungated_image_index(ctx, load->src[0], &gate);
   if (!ungated || !gate) return NULL;
-  PolyUOp *alt = load->n_src >= 2 ? load->src[1] : poly_const_like_int(ctx, load, 0);
+  PolyUOp *alt = load->n_src >= 2 ? load->src[1] : poly_vconst_like(ctx, load, poly_arg_int(0));
+  if (!alt) return NULL;
   PolyUOp *src[3] = {ungated, alt, gate};
   return gater_rebuild(ctx, load, src, 3);
 }
@@ -85,7 +86,8 @@ static PolyUOp *move_gated_index_to_load(PolyCtx *ctx, PolyUOp *load, const Poly
   PolyUOp *gate = NULL;
   PolyUOp *ungated = ungated_first_index(ctx, load->src[0], &gate);
   if (!ungated || !gate) return NULL;
-  PolyUOp *alt = load->n_src >= 2 ? load->src[1] : poly_const_like_int(ctx, load, 0);
+  PolyUOp *alt = load->n_src >= 2 ? load->src[1] : poly_vconst_like(ctx, load, poly_arg_int(0));
+  if (!alt) return NULL;
   PolyUOp *src[3] = {ungated, alt, gate};
   return gater_rebuild(ctx, load, src, 3);
 }
@@ -117,7 +119,7 @@ static bool is_logical_not(PolyUOp *u, PolyUOp *gate) {
 static PolyUOp *move_where_load(PolyCtx *ctx, PolyUOp *where, PolyUOp *load, PolyUOp *alt) {
   PolyUOp *load_alt = NULL;
   if (alt->op == POLY_OP_CONST && alt->arg.kind == POLY_ARG_INVALID)
-    load_alt = poly_const_like_int(ctx, load, 0);
+    load_alt = poly_vconst_like(ctx, load, poly_arg_int(0));
   else if (alt->op == POLY_OP_CONST)
     load_alt = poly_const_like(ctx, load, alt->arg);
   else if (alt->op == POLY_OP_CAST && alt->n_src == 1 && poly_dtype_eq(alt->src[0]->dtype, load->dtype))

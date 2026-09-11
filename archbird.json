@@ -499,13 +499,13 @@
         "projection": "tinygrad-ops",
         "map": "tinygrad",
         "source_lock": {
-          "tinygrad/uop/__init__.py": "6218635e6939c5d40fe33b40de51275447edd7390b9311b1066fc4831758621e"
+          "tinygrad/uop/__init__.py": "432be6ea02bb0873b186fe13709de9d78825ca147b4545caa3c07a10f48e71aa"
         }
       },
       "actual": {"projection": "polygrad-ops"},
       "severity": "error",
       "owner": "compiler-core",
-      "requirement": "https://github.com/tinygrad/tinygrad/blob/40de90ab19ff623ef6fcb8e375a5e6ee209ad812/tinygrad/uop/__init__.py#L11-L105",
+      "requirement": "https://github.com/tinygrad/tinygrad/blob/6f87158d77f66a36d5f8bbe915170b24e2acabe8/tinygrad/uop/__init__.py",
       "rationale": "The port must implement every pinned reference operation; reviewed subject aliases, sentinels, and private extensions remain valid superset members."
     },
     "TG-UOP-VALUE-001": {
@@ -514,7 +514,7 @@
         "projection": "tinygrad-ops",
         "map": "tinygrad",
         "source_lock": {
-          "tinygrad/uop/__init__.py": "6218635e6939c5d40fe33b40de51275447edd7390b9311b1066fc4831758621e"
+          "tinygrad/uop/__init__.py": "432be6ea02bb0873b186fe13709de9d78825ca147b4545caa3c07a10f48e71aa"
         }
       },
       "actual": {"projection": "polygrad-op-values"},
@@ -529,7 +529,7 @@
         "projection": "tinygrad-binary",
         "map": "tinygrad",
         "source_lock": {
-          "tinygrad/uop/__init__.py": "6218635e6939c5d40fe33b40de51275447edd7390b9311b1066fc4831758621e"
+          "tinygrad/uop/__init__.py": "432be6ea02bb0873b186fe13709de9d78825ca147b4545caa3c07a10f48e71aa"
         }
       },
       "actual": {"projection": "polygrad-binary"},
@@ -545,7 +545,7 @@
         "projection": "tinygrad-irreducible",
         "map": "tinygrad",
         "source_lock": {
-          "tinygrad/uop/__init__.py": "6218635e6939c5d40fe33b40de51275447edd7390b9311b1066fc4831758621e"
+          "tinygrad/uop/__init__.py": "432be6ea02bb0873b186fe13709de9d78825ca147b4545caa3c07a10f48e71aa"
         }
       },
       "actual": {"projection": "polygrad-irreducible"},
@@ -561,7 +561,7 @@
         "projection": "tinygrad-movement",
         "map": "tinygrad",
         "source_lock": {
-          "tinygrad/uop/__init__.py": "6218635e6939c5d40fe33b40de51275447edd7390b9311b1066fc4831758621e"
+          "tinygrad/uop/__init__.py": "432be6ea02bb0873b186fe13709de9d78825ca147b4545caa3c07a10f48e71aa"
         }
       },
       "actual": {"projection": "polygrad-movement"},

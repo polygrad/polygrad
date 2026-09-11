@@ -3176,6 +3176,74 @@ TEST(wasm, memory_gated_shrink_vector) {
   PASS();
 }
 
+TEST(wasm, memory_vector_where_broadcasts_full_boolean_masks) {
+  /* Tinygrad WHERE selects whole values. Wasm bitselect needs all-one
+   * mask lanes for a shared scalar predicate, not numeric 1/1.0 splats. */
+  if (!poly_test_node_cmd()) SKIP("Node required for Wasm execution");
+  int failures = 0;
+  for (int f64 = 0; f64 < 2; f64++)
+    for (int structural = 0; structural < 2; structural++)
+      for (int g = 0; g < 2; g++) {
+        PolyCtx *ctx = poly_ctx_new();
+        PolyDType dt = f64 ? POLY_FLOAT64 : POLY_FLOAT32;
+        int lanes = f64 ? 2 : 4;
+        PolyUOp *size = poly_const_int(ctx, lanes);
+        PolyParamArg oa = {.slot = 0, .dtype = dt, .addrspace = POLY_ADDR_GLOBAL};
+        PolyParamArg ia = {.slot = 1, .dtype = dt, .addrspace = POLY_ADDR_GLOBAL};
+        PolyUOp *out = poly_uop1(ctx, POLY_OP_PARAM, dt, size, poly_arg_param(&oa));
+        PolyUOp *in = poly_uop1(ctx, POLY_OP_PARAM, dt, size, poly_arg_param(&ia));
+        PolyUOp *zero = wasm_test_literal(ctx, POLY_INT32, 0);
+        PolyUOp *bound = wasm_test_literal(ctx, POLY_INT32, g);
+        PolyUOp *width = wasm_test_literal(ctx, POLY_INT32, lanes);
+        PolyUOp *gate = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, zero, bound, poly_arg_none());
+        PolyUOp *eleven = wasm_test_literal(ctx, dt, 11);
+        PolyUOp *address = poly_uop3(ctx, POLY_OP_SHRINK, dt, in, zero, width, poly_arg_none());
+        PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, dt, address, poly_arg_none());
+        PolyUOp *ops[40] = {size, out, in, zero, bound, width, gate, eleven, address, load};
+        int n = 10;
+        PolyUOp *value;
+        if (structural) {
+          PolyUOp *values[4];
+          for (int i = 0; i < lanes; i++) {
+            PolyUOp *idx = wasm_test_literal(ctx, POLY_INT32, i);
+            PolyUOp *lane = poly_uop2(ctx, POLY_OP_INDEX, dt, load, idx, poly_arg_none());
+            ops[n++] = idx;
+            ops[n++] = lane;
+            ops[n++] = values[i] =
+                poly_uop3(ctx, POLY_OP_WHERE, dt, gate, lane, eleven, poly_arg_none());
+          }
+          value = poly_uop(ctx, POLY_OP_STACK, dt, values, lanes, poly_arg_none());
+        } else {
+          PolyUOp *alts[] = {eleven, eleven, eleven, eleven};
+          PolyUOp *alt = poly_uop(ctx, POLY_OP_STACK, dt, alts, lanes, poly_arg_none());
+          ops[n++] = alt;
+          value = poly_uop3(ctx, POLY_OP_WHERE, dt, gate, load, alt, poly_arg_none());
+        }
+        ops[n++] = value;
+        PolyUOp *oi = poly_uop3(ctx, POLY_OP_SHRINK, dt, out, zero, width, poly_arg_none());
+        ops[n++] = oi;
+        ops[n++] = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, oi, value, poly_arg_none());
+        char expected[96], setup[128];
+        snprintf(
+            expected, sizeof(expected), "Array.from({length:%d},(_,i)=>%s)", lanes, g ? "i+1" : "11"
+        );
+        snprintf(
+            setup, sizeof(setup), "new %s(mem.buffer,256,%d).set([1,2,3,4].slice(0,%d))",
+            f64 ? "Float64Array" : "Float32Array", lanes, lanes
+        );
+        int rc = wasm_check_memory_module(
+            ctx, ops, n, true, f64 ? "Float64Array" : "Float32Array", expected, setup, "64,256"
+        );
+        poly_ctx_destroy(ctx);
+        if (rc) {
+          fprintf(stderr, "WHERE f64=%d structural=%d gate=%d failed\n", f64, structural, g);
+          failures++;
+        }
+      }
+  ASSERT_INT_EQ(failures, 0);
+  PASS();
+}
+
 TEST(wasm, memory_structural_vector_keeps_shared_scalar_dependencies) {
   if (!poly_test_node_cmd()) SKIP("Node required for Wasm execution");
   PolyCtx *ctx = poly_ctx_new();

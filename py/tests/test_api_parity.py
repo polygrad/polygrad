@@ -12,6 +12,25 @@ from polygrad.nn.optim import SGD
 from polygrad.uop.ops import UOp as OpsUOp, resolve
 
 
+def test_release014_op_values_after_removed_wait():
+    # Ops.value is reference sort order, not Polygrad's stable C/codec enum.
+    import ctypes
+    op_value = _ffi._lib.poly_op_value
+    op_value.argtypes = [ctypes.c_int]
+    op_value.restype = ctypes.c_int
+    names = (
+        "CONST CUSTOM CUSTOMI INS CONTIGUOUS CONTIGUOUS_BACKWARD DETACH STAGE "
+        "COPY MSELECT MSTACK CUSTOM_FUNCTION RESHAPE PERMUTE EXPAND PAD FLIP "
+        "UNSHARD REDUCE ALLREDUCE"
+    ).split()
+    actual = {
+        _ffi._lib.poly_op_name(i).decode(): op_value(i)
+        for i in range(1, _ffi._lib.poly_op_count())
+    }
+    assert {name: actual[name] for name in names} == dict(zip(names, range(59, 79)))
+    assert actual["UNIQUE"] == 80 and actual["DEVICE"] == 81
+
+
 def test_dtype_has_no_pointer_or_image_subclasses():
     # Tinygrad 2026-07-07 removed PtrDType and 2026-07-08 removed ImageDType;
     # ParamArg and UOp shape carry storage metadata.

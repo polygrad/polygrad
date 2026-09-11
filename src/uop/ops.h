@@ -11,6 +11,9 @@ extern "C" {
 char poly_axis_letter(PolyArg arg);
 char *poly_range_str(PolyArg arg);
 
+/* UOp.vconst_like: a scalar or flat STACK after movement lowering. */
+PolyUOp *poly_vconst_like(PolyCtx *ctx, PolyUOp *ref, PolyArg val);
+
 /* Heap-backed result of current Tinygrad UOp.split_uop. Caller frees it. */
 PolyUOp **poly_uop_split(PolyUOp *u, PolyOps sep, int *n_out);
 

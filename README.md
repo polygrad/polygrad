@@ -70,6 +70,13 @@ tinygrad's Python runtime. Shared concepts keep tinygrad naming where possible:
 UOps, rewrites, `LINEAR`, `CALL`, `PROGRAM`, JIT capture/replay, renderer
 capabilities, and backend-specific lowering.
 
+The migration target is [tinygrad v0.14.0](https://github.com/tinygrad/tinygrad/tree/v0.14.0),
+commit `6f87158d77f66a36d5f8bbe915170b24e2acabe8`. Keep its clean checkout at
+`references/tinygrad_014`, with `references/tinygrad_latest` pointing there.
+The previous `references/tinygrad_20260822` checkout and its compatibility
+baselines remain historical controls. Target selection is not a claim that
+every upstream feature or source audit is complete.
+
 The main intentional differences are:
 
 | Area | Polygrad difference |
@@ -763,7 +770,7 @@ make test-compat-tinygrad-upstream-ratchet UPSTREAM_COMPAT_DIR=temp/upstream-rat
 make test-compat-tinygrad-ops UPSTREAM_COMPAT_DIR=temp/upstream-ops-001
 # Ratchet the separately reviewed CPU ops frontier:
 make test-compat-tinygrad-ops UPSTREAM_COMPAT_DIR=temp/upstream-ops-002 \
-  UPSTREAM_COMPAT_ARGS='--baseline test/fixtures/tinygrad_upstream_ops_cpu_baseline.json'
+  UPSTREAM_COMPAT_ARGS='--baseline test/fixtures/tinygrad_upstream_ops_cpu_014_baseline.json'
 ```
 
 Each output directory must be new. `report.json` records source/library hashes,

@@ -976,6 +976,19 @@ static void emit_v128_splat(WasmBuf *body, PolyDType dt) {
     wb_uleb128(body, elem_bits == 64 ? WASM_SIMD_I64X2_SPLAT : WASM_SIMD_I32X4_SPLAT);
 }
 
+static void emit_local_get_boolean_mask(WasmBuf *body, int local) {
+  /* WHERE selects whole values (Tinygrad CStyleLanguage.code_for_op).
+   * bitselect instead consumes bits: normalize scalar truth to 0/-1,
+   * then splat all 128 bits, equally valid for f32 and f64 lanes. */
+  wb_byte(body, WASM_OP_LOCAL_GET);
+  wb_uleb128(body, local);
+  wb_byte(body, WASM_OP_I32_EQZ);
+  wb_byte(body, WASM_OP_I32_CONST);
+  wb_sleb128(body, 1);
+  wb_byte(body, WASM_OP_I32_SUB);
+  emit_v128_splat(body, POLY_INT32);
+}
+
 static void emit_v128_extract_lane(WasmBuf *body, PolyDType vec_dt, int lane) {
   PolyDType scalar = vec_dt;
   int elem_bits = dt_v128_elem_bits(vec_dt);
@@ -1117,7 +1130,10 @@ static void emit_vector_sources(PolyCtx *ctx, WasmBuf *body, LocalMap *locals, P
     for (int k = 0; k < 3; k++) {
       int j = order[k];
       int src = lm_get(locals, u->src[j]);
-      emit_local_get_for_vector_src(body, src, ctx, u->src[j], vec_dt);
+      if (j == 0 && !wasm_uop_value_is_v128(ctx, u->src[j]))
+        emit_local_get_boolean_mask(body, src);
+      else
+        emit_local_get_for_vector_src(body, src, ctx, u->src[j], vec_dt);
     }
     return;
   }
@@ -1792,9 +1808,13 @@ static bool wasm_emit_structural_vec_expr(
   if (same) {
     int local = lm_get(locals, first);
     if (local < 0) return false;
-    wb_byte(body, WASM_OP_LOCAL_GET);
-    wb_uleb128(body, local);
-    emit_v128_splat(body, first->dtype);
+    if (poly_dtype_is_bool(first->dtype)) {
+      emit_local_get_boolean_mask(body, local);
+    } else {
+      wb_byte(body, WASM_OP_LOCAL_GET);
+      wb_uleb128(body, local);
+      emit_v128_splat(body, first->dtype);
+    }
     return true;
   }
 

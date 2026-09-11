@@ -3929,6 +3929,14 @@ async function runTensorTests(pg, createRuntime) {
     }
   })
 
+  await test('rand concatenation keeps vector gated-load alternatives executable', async () => {
+    Tensor.manual_seed(201)
+    const first = Tensor.rand(8), second = Tensor.rand(8)
+    const joined = await first.cat(second).toArrayAsync()
+    const expected = [...await first.toArrayAsync(), ...await second.toArrayAsync()]
+    assertClose(joined, expected, 0)
+  })
+
   // -- Float64 --
   console.log('\n-- Float64 --')
 

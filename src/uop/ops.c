@@ -3454,6 +3454,25 @@ PolyUOp *poly_const_like_int(PolyCtx *ctx, PolyUOp *ref, int64_t val) {
   return poly_const_like(ctx, ref, poly_arg_int(val));
 }
 
+PolyUOp *poly_vconst_like(PolyCtx *ctx, PolyUOp *ref, PolyArg val) {
+  if (!ctx || !ref) return NULL;
+  int64_t count = poly_uop_max_numel(ctx, ref);
+  /* v0.14 UOp.vconst_like/broadcast uses flat repeated values, not EXPAND.
+   * Reject widths exceeding the existing C UOp source-count limit. */
+  if (count < 0 || count > UINT16_MAX) return NULL;
+  PolyUOp *scalar = poly_uop_const(ctx, val, ref->dtype);
+  if (!scalar || count == 1) return scalar;
+  if (count == 0) return poly_uop_stack(ctx, NULL, 0);
+  PolyUOp *inline_src[16];
+  PolyUOp **src = count > 16 ? malloc((size_t)count * sizeof(*src)) : inline_src;
+  if (!src) return NULL;
+  for (int64_t i = 0; i < count; i++)
+    src[i] = scalar;
+  PolyUOp *ret = poly_uop_stack(ctx, src, (int)count);
+  if (src != inline_src) free(src);
+  return ret;
+}
+
 PolyUOp *poly_const_like_float(PolyCtx *ctx, PolyUOp *ref, double val) {
   return poly_const_like(ctx, ref, poly_arg_float(val));
 }

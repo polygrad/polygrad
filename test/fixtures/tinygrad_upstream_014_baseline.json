@@ -1,0 +1,2654 @@
+{
+  "contract": {
+    "devices": [
+      "CPU",
+      "CPU",
+      "CPU",
+      "CPU",
+      "CPU",
+      "CPU",
+      "CPU",
+      "CPU",
+      "CPU",
+      "CPU",
+      "CPU",
+      "CPU",
+      "CPU",
+      "CPU",
+      "CPU",
+      "CPU",
+      "CPU",
+      "CPU"
+    ],
+    "engines": "both",
+    "environment": {
+      "CACHELEVEL": "0",
+      "DEBUG": "0",
+      "DERANDOMIZE_CI": "1",
+      "DEV": "CPU",
+      "FORWARD_ONLY": "0",
+      "MKL_NUM_THREADS": "1",
+      "OMP_NUM_THREADS": "1",
+      "POLY_DEVICE": "cpu",
+      "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+      "PYTHONHASHSEED": "0",
+      "SKIP_SLOW_TEST": "0",
+      "TINY_BACKEND": "0",
+      "IMAGE": "0"
+    },
+    "python": "3.11.12 (main, Apr  9 2025, 04:04:00) [Clang 20.1.0 ]",
+    "reference_commit": "6f87158d77f66a36d5f8bbe915170b24e2acabe8",
+    "runner_sha256": "335b5b4879ca1f9e1828002826e1a810d1ea3429d23937a799bcec43a484c4d8",
+    "test_sha256": {
+      "test/backend/test_setitem.py": "bfa540e93690962ef332f5a5e8c6e6913f6fd6a219111da20dd8d596c5547e74",
+      "test/backend/test_tensor.py": "5f98a533f473dd819728e208b5ced15b04acf63a3944fee4f9d957b55954ee59",
+      "test/backend/test_to_numpy.py": "4ecb4a92c73841e39d729fe8330499d6e74fa08e383c6c5813a1f2e80635a407",
+      "test/null/test_dtype.py": "ec03ef838d61b7c13ca3dc73e8a5447aa97dc7ddc2b551a66fbac9ec9923f40f",
+      "test/null/test_indexing.py": "8383cdb25c1bc3f3139902b9efd58c07e96fb91a3b003d72c2576fb987ad99fc",
+      "test/null/test_tensor_io.py": "6878994400b6844a06b4f53d10bc4bc2eb7f0c013ab2f03e36c0a815baa1a53c",
+      "test/unit/test_conv.py": "bcafea0c0caa9970149145759aeb80cfa2a919af7787f3b7270708dd921a09ad",
+      "test/unit/test_linalg.py": "8067592623defc472d1728958e10f12b1a60604f18e8b43300e29720c8664a9a",
+      "test/unit/test_tensor_io.py": "a7a6a58d0d81148823ababcfafbbbebf948aa0194d0637fa14558d3590b4fc27"
+    },
+    "upstream_sha256": "f5f1b2736d521383cc28fa55a71a194d87484b84ce72a8013bb9e5915fe3809d",
+    "versions": [
+      {
+        "hypothesis": "6.131.9",
+        "numpy": "2.4.6",
+        "pytest": "8.3.5",
+        "torch": "2.5.1+cpu"
+      },
+      {
+        "hypothesis": "6.131.9",
+        "numpy": "2.4.6",
+        "pytest": "8.3.5",
+        "torch": "2.5.1+cpu"
+      },
+      {
+        "hypothesis": "6.131.9",
+        "numpy": "2.4.6",
+        "pytest": "8.3.5",
+        "torch": "2.5.1+cpu"
+      },
+      {
+        "hypothesis": "6.131.9",
+        "numpy": "2.4.6",
+        "pytest": "8.3.5",
+        "torch": "2.5.1+cpu"
+      },
+      {
+        "hypothesis": "6.131.9",
+        "numpy": "2.4.6",
+        "pytest": "8.3.5",
+        "torch": "2.5.1+cpu"
+      },
+      {
+        "hypothesis": "6.131.9",
+        "numpy": "2.4.6",
+        "pytest": "8.3.5",
+        "torch": "2.5.1+cpu"
+      },
+      {
+        "hypothesis": "6.131.9",
+        "numpy": "2.4.6",
+        "pytest": "8.3.5",
+        "torch": "2.5.1+cpu"
+      },
+      {
+        "hypothesis": "6.131.9",
+        "numpy": "2.4.6",
+        "pytest": "8.3.5",
+        "torch": "2.5.1+cpu"
+      },
+      {
+        "hypothesis": "6.131.9",
+        "numpy": "2.4.6",
+        "pytest": "8.3.5",
+        "torch": "2.5.1+cpu"
+      },
+      {
+        "hypothesis": "6.131.9",
+        "numpy": "2.4.6",
+        "pytest": "8.3.5",
+        "torch": "2.5.1+cpu"
+      },
+      {
+        "hypothesis": "6.131.9",
+        "numpy": "2.4.6",
+        "pytest": "8.3.5",
+        "torch": "2.5.1+cpu"
+      },
+      {
+        "hypothesis": "6.131.9",
+        "numpy": "2.4.6",
+        "pytest": "8.3.5",
+        "torch": "2.5.1+cpu"
+      },
+      {
+        "hypothesis": "6.131.9",
+        "numpy": "2.4.6",
+        "pytest": "8.3.5",
+        "torch": "2.5.1+cpu"
+      },
+      {
+        "hypothesis": "6.131.9",
+        "numpy": "2.4.6",
+        "pytest": "8.3.5",
+        "torch": "2.5.1+cpu"
+      },
+      {
+        "hypothesis": "6.131.9",
+        "numpy": "2.4.6",
+        "pytest": "8.3.5",
+        "torch": "2.5.1+cpu"
+      },
+      {
+        "hypothesis": "6.131.9",
+        "numpy": "2.4.6",
+        "pytest": "8.3.5",
+        "torch": "2.5.1+cpu"
+      },
+      {
+        "hypothesis": "6.131.9",
+        "numpy": "2.4.6",
+        "pytest": "8.3.5",
+        "torch": "2.5.1+cpu"
+      },
+      {
+        "hypothesis": "6.131.9",
+        "numpy": "2.4.6",
+        "pytest": "8.3.5",
+        "torch": "2.5.1+cpu"
+      }
+    ],
+    "adapter": null,
+    "failure_signature": "source-path-and-message-v2"
+  },
+  "evidence": {
+    "report": "/home/anton/projects/polygrad/polygrad/temp/retarget-014-20260911.MPsDqT/new-nine/report.json",
+    "sha256": "2f1f6ab936eb7108bf983ee22fb4946d8e85fa070ecb2eb5faeb65eb5b3e231a"
+  },
+  "schema_version": 1,
+  "tests": {
+    "polygrad:test/backend/test_tensor.py::TestMoveTensor::test_same_dev": {
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "('<reference>/test/backend/test_tensor.py', 589, 'Skipped: this test is just flaky, sync issue')",
+            "outcome": "skipped"
+          }
+        },
+        "status": "skipped"
+      },
+      "reason": "Unchanged upstream skip, also observed in the Tinygrad control; exact reason remains in nonpassing_phases.",
+      "category": "upstream-skip"
+    },
+    "polygrad:test/backend/test_tensor.py::TestMoveTensor::test_shard_preserves": {
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "('<reference>/test/backend/test_tensor.py', 581, 'Skipped: this test is just flaky, sync issue')",
+            "outcome": "skipped"
+          }
+        },
+        "status": "skipped"
+      },
+      "reason": "Unchanged upstream skip, also observed in the Tinygrad control; exact reason remains in nonpassing_phases.",
+      "category": "upstream-skip"
+    },
+    "polygrad:test/backend/test_tensor.py::TestMoveTensor::test_to_grad": {
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "('<reference>/test/backend/test_tensor.py', 595, 'Skipped: this test is just flaky, sync issue')",
+            "outcome": "skipped"
+          }
+        },
+        "status": "skipped"
+      },
+      "reason": "Unchanged upstream skip, also observed in the Tinygrad control; exact reason remains in nonpassing_phases.",
+      "category": "upstream-skip"
+    },
+    "polygrad:test/backend/test_tensor.py::TestMoveTensor::test_to_preserves": {
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "('<reference>/test/backend/test_tensor.py', 567, 'Skipped: this test is just flaky, sync issue')",
+            "outcome": "skipped"
+          }
+        },
+        "status": "skipped"
+      },
+      "reason": "Unchanged upstream skip, also observed in the Tinygrad control; exact reason remains in nonpassing_phases.",
+      "category": "upstream-skip"
+    },
+    "polygrad:test/backend/test_tensor.py::TestTensorCreationDevice::test_one_hot": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_accumulate_gradients": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_argfix": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_backward_pass": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_backward_pass_diamond_model": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_backward_pass_vjp": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_const_backward_pass": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_const_backward_pass_optimizer": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_copy_from_disk": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_copy_from_numpy_dtype": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_copy_from_numpy_unaligned": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_deepwalk_ctx_check": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_deviceless_const_construct_device_repr": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_deviceless_const_realize_noop": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_dropout": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_element_size": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_gradcheck": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_item_to_tensor_to_item": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_jacobian": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_len": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_ndim": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_no_attributeerror_after_apply_uop_exception": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_no_bool": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_numel": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_ones_like_has_same_dtype_and_shape": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_plus_equals": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_rand_like_device": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_rand_rejects_unknown_kwargs": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_randn_isnt_inf_on_zero": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_random_fns_are_deterministic_with_seed": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_randperm": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_repr_with_grad": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_second_order_backward_pass": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_shrink": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_size": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_tensor_bytes": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_tensor_copy": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_tensor_dtype_errors": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_tensor_from_blob": {
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "<reference>/test/backend/test_tensor.py:LINE: AttributeError: type object 'Tensor' has no attribute 'from_blob'",
+            "outcome": "failed"
+          }
+        },
+        "status": "failed"
+      },
+      "reason": "The unchanged test encounters a missing Tensor constructor or movement convenience API; subsequent computation remains unexercised.",
+      "category": "frontend-api"
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_tensor_list_dtype": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_tensor_list_errors": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_tensor_list_implicit_cast": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_tensor_list_ndarray": {
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "('<reference>/test/backend/test_tensor.py', 467, 'Skipped: list elements are python scalars: numpy values in a list have no inferred dtype, use Tensor(np.array(data))')",
+            "outcome": "skipped"
+          }
+        },
+        "status": "skipped"
+      },
+      "reason": "Unchanged upstream skip, also observed in the Tinygrad control; exact reason remains in nonpassing_phases.",
+      "category": "upstream-skip"
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_tensor_list_shapes": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_tensor_list_special_values": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_tensor_mixed_list_tuple": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_tensor_ndarray_dtype": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_tolist": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_zerodim_initialization": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_zeros_like_has_same_dtype_and_shape": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestTinygrad::test_zerosized_tensors": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_cat": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_clone": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_clone_deviceless_const": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_clone_deviceless_const_to_cpu": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_clone_with_grad": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_clone_with_shrink": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_clone_with_shrink_realized": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_elementwise": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_expand": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_full": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_max_shape": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_numpy_deviceless_const": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_pad": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_rand": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_reduce_default": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_reduce_over_non_zero": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_reduce_over_zero": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_reshape": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_shrink_into_zero": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestMoveTensor::test_same_dev": {
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "('<reference>/test/backend/test_tensor.py', 589, 'Skipped: this test is just flaky, sync issue')",
+            "outcome": "skipped"
+          }
+        },
+        "status": "skipped"
+      },
+      "reason": "Unchanged upstream skip, also observed in the Tinygrad control; exact reason remains in nonpassing_phases.",
+      "category": "upstream-skip"
+    },
+    "tinygrad:test/backend/test_tensor.py::TestMoveTensor::test_shard_preserves": {
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "('<reference>/test/backend/test_tensor.py', 581, 'Skipped: this test is just flaky, sync issue')",
+            "outcome": "skipped"
+          }
+        },
+        "status": "skipped"
+      },
+      "reason": "Unchanged upstream skip, also observed in the Tinygrad control; exact reason remains in nonpassing_phases.",
+      "category": "upstream-skip"
+    },
+    "tinygrad:test/backend/test_tensor.py::TestMoveTensor::test_to_grad": {
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "('<reference>/test/backend/test_tensor.py', 595, 'Skipped: this test is just flaky, sync issue')",
+            "outcome": "skipped"
+          }
+        },
+        "status": "skipped"
+      },
+      "reason": "Unchanged upstream skip, also observed in the Tinygrad control; exact reason remains in nonpassing_phases.",
+      "category": "upstream-skip"
+    },
+    "tinygrad:test/backend/test_tensor.py::TestMoveTensor::test_to_preserves": {
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "('<reference>/test/backend/test_tensor.py', 567, 'Skipped: this test is just flaky, sync issue')",
+            "outcome": "skipped"
+          }
+        },
+        "status": "skipped"
+      },
+      "reason": "Unchanged upstream skip, also observed in the Tinygrad control; exact reason remains in nonpassing_phases.",
+      "category": "upstream-skip"
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTensorCreationDevice::test_one_hot": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_accumulate_gradients": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_argfix": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_backward_pass": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_backward_pass_diamond_model": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_backward_pass_vjp": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_const_backward_pass": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_const_backward_pass_optimizer": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_copy_from_disk": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_copy_from_numpy_dtype": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_copy_from_numpy_unaligned": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_deepwalk_ctx_check": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_deviceless_const_construct_device_repr": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_deviceless_const_realize_noop": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_dropout": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_element_size": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_gradcheck": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_item_to_tensor_to_item": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_jacobian": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_len": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_ndim": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_no_attributeerror_after_apply_uop_exception": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_no_bool": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_numel": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_ones_like_has_same_dtype_and_shape": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_plus_equals": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_rand_like_device": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_rand_rejects_unknown_kwargs": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_randn_isnt_inf_on_zero": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_random_fns_are_deterministic_with_seed": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_randperm": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_repr_with_grad": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_second_order_backward_pass": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_shrink": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_size": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_tensor_bytes": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_tensor_copy": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_tensor_dtype_errors": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_tensor_from_blob": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_tensor_list_dtype": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_tensor_list_errors": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_tensor_list_implicit_cast": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_tensor_list_ndarray": {
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "('<reference>/test/backend/test_tensor.py', 467, 'Skipped: list elements are python scalars: numpy values in a list have no inferred dtype, use Tensor(np.array(data))')",
+            "outcome": "skipped"
+          }
+        },
+        "status": "skipped"
+      },
+      "reason": "Unchanged upstream skip, also observed in the Tinygrad control; exact reason remains in nonpassing_phases.",
+      "category": "upstream-skip"
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_tensor_list_shapes": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_tensor_list_special_values": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_tensor_mixed_list_tuple": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_tensor_ndarray_dtype": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_tolist": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_zerodim_initialization": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_zeros_like_has_same_dtype_and_shape": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestTinygrad::test_zerosized_tensors": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_cat": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_clone": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_clone_deviceless_const": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_clone_deviceless_const_to_cpu": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_clone_with_grad": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_clone_with_shrink": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_clone_with_shrink_realized": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_elementwise": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_expand": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_full": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_max_shape": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_numpy_deviceless_const": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_pad": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_rand": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_reduce_default": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_reduce_over_non_zero": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_reduce_over_zero": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_reshape": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_tensor.py::TestZeroShapeTensor::test_shrink_into_zero": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_setitem.py::TestSetitem::test_cross_assign_independence": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_setitem.py::TestSetitem::test_fancy_setitem": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_setitem.py::TestSetitem::test_jit_setitem_variable_offset": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_setitem.py::TestSetitem::test_lazy_sum_between_writes": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_setitem.py::TestSetitem::test_padded_setitem": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_2d_tensor_indexing": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_advanced_indexing": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_big": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_chained_indexing": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_consecutive_inplace_operator": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_detach": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_dtype": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_dtype_mismatch": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_fancy_on_unrealized_view": {
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "('<reference>/test/backend/test_setitem.py', 39, 'Skipped: crashed in LLVM CI')",
+            "outcome": "skipped"
+          }
+        },
+        "status": "skipped"
+      },
+      "reason": "Unchanged explicit upstream unittest skip; observed on both providers and not counted as a pass.",
+      "category": "upstream-skip"
+    },
+    "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_flip": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_inplace_mul": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_inplace_operator": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_multiple_disjoint_on_invalid": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_overlapping_indices": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_overlapping_indices_with_0": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_overlapping_inplace1": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_overlapping_inplace2": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_permute": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_swap_rows": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_tensor_int_indexing": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_tensor_slice_indexing": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_with_1_in_shape": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_setitem.py::TestSetitem::test_simple_jit_setitem": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_setitem.py::TestSetitem::test_simple_setitem": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_setitem.py::TestSetitemLoop::test_arange": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_setitem.py::TestWithGrad::test_basic_setitem_works": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_setitem.py::TestWithGrad::test_set_backward": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_setitem.py::TestWithGrad::test_set_iadd_backward": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_setitem.py::TestWithGrad::test_set_nonleaf_backward": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_setitem.py::TestWithGrad::test_set_overlapping_backward": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_setitem.py::TestWithGrad::test_set_used_before_setitem": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_setitem.py::TestWithGrad::test_setitem_raises_on_aliased_uop": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_setitem.py::TestWithGrad::test_setitem_raises_on_unrealized_compute_base": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_setitem.py::TestWithGrad::test_setitem_raises_with_unrealized_downstream": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_to_numpy.py::TestToNumpy::test_numpy_is_numpy": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/null/test_dtype.py::TestCanLosslessCast::test_can_lossless_cast": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/null/test_dtype.py::TestCastConvenienceMethod::test_method": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/null/test_dtype.py::TestDtypeTolist::test_bfloat16": {
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "<polygrad>/py/polygrad/device.py:LINE: ValueError: Unsupported device: 'PYTHON'",
+            "outcome": "failed"
+          }
+        },
+        "status": "failed"
+      },
+      "reason": "Polygrad does not expose Tinygrad's PYTHON backend spelling; this is not remapped to INTERP.",
+      "category": "backend-surface"
+    },
+    "polygrad:test/null/test_dtype.py::TestDtypeTolist::test_fp8": {
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "<polygrad>/py/polygrad/device.py:LINE: ValueError: Unsupported device: 'PYTHON'",
+            "outcome": "failed"
+          }
+        },
+        "status": "failed"
+      },
+      "reason": "Polygrad does not expose Tinygrad's PYTHON backend spelling; this is not remapped to INTERP.",
+      "category": "backend-surface"
+    },
+    "polygrad:test/null/test_dtype.py::TestEqStrDType::test_strs": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/null/test_dtype.py::TestInvalidSingleton::test_pickle": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/null/test_dtype.py::TestInvalidSingleton::test_singleton": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/null/test_dtype.py::TestToDtype::test_dtype_to_dtype": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/null/test_dtype.py::TestToDtype::test_str_to_dtype": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/null/test_indexing.py::TestIndexing::test_empty_slice": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/null/test_indexing.py::TestIndexing::test_index_src_datatype": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/null/test_indexing.py::TestIndexing::test_int_indices": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/null/test_indexing.py::TestIndexing::test_invalid_index": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/null/test_indexing.py::TestIndexing::test_multiple_int": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/null/test_indexing.py::TestIndexing::test_none": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/null/test_indexing.py::TestIndexing::test_out_of_bound_index": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/null/test_indexing.py::TestIndexing::test_single_int": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/null/test_indexing.py::TestNumpy::test_broaderrors_indexing": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/null/test_indexing.py::TestNumpy::test_everything_returns_views": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/null/test_indexing.py::TestNumpy::test_index_no_floats": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/null/test_indexing.py::TestNumpy::test_none_index": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/null/test_tensor_io.py::TestTensorIO::test_create": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/null/test_tensor_io.py::TestTensorIO::test_seek": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/unit/test_conv.py::TestConv::test_bias": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/unit/test_conv.py::TestConv::test_elu": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/unit/test_conv.py::TestConv::test_first_three": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/unit/test_conv.py::TestConv::test_lazycache": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/unit/test_conv.py::TestConv::test_many_simple": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/unit/test_conv.py::TestConv::test_multiadd": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/unit/test_conv.py::TestConv::test_reduce_relu": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/unit/test_conv.py::TestConv::test_reorder": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/unit/test_conv.py::TestConv::test_simple": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/unit/test_conv.py::TestConv::test_simple_biased": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/unit/test_conv.py::TestConv::test_simple_rand": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/unit/test_conv.py::TestConv::test_two_binops_no_rerun_small": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/unit/test_conv.py::TestConv::test_two_overlapping_binops_no_rerun": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/unit/test_conv.py::TestConv::test_two_overlapping_binops_no_rerun_wino": {
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "('<reference>/test/unit/test_conv.py', 57, 'Skipped: this test is flaky')",
+            "outcome": "skipped"
+          }
+        },
+        "status": "skipped"
+      },
+      "reason": "Unchanged explicit upstream unittest skip; observed on both providers and not counted as a pass.",
+      "category": "upstream-skip"
+    },
+    "polygrad:test/unit/test_linalg.py::TestLinAlg::test_newton_schulz": {
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "<reference>/test/unit/test_linalg.py:LINE: AttributeError: 'Tensor' object has no attribute 'newton_schulz'",
+            "outcome": "failed"
+          }
+        },
+        "status": "failed"
+      },
+      "reason": "Tensor.newton_schulz is not exposed; no host numerical implementation is substituted.",
+      "category": "frontend-api"
+    },
+    "polygrad:test/unit/test_linalg.py::TestLinAlg::test_qr_general": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/unit/test_linalg.py::TestLinAlg::test_qr_zero_column": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/unit/test_linalg.py::TestLinAlg::test_svd_general": {
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "<reference>/test/unit/test_linalg.py:LINE: AttributeError: 'Tensor' object has no attribute 'svd'",
+            "outcome": "failed"
+          }
+        },
+        "status": "failed"
+      },
+      "reason": "Tensor.svd is not exposed; no host numerical implementation is substituted.",
+      "category": "frontend-api"
+    },
+    "polygrad:test/unit/test_linalg.py::TestLinAlg::test_svd_identity": {
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "<reference>/test/unit/test_linalg.py:LINE: AttributeError: 'Tensor' object has no attribute 'svd'",
+            "outcome": "failed"
+          }
+        },
+        "status": "failed"
+      },
+      "reason": "Tensor.svd is not exposed; no host numerical implementation is substituted.",
+      "category": "frontend-api"
+    },
+    "polygrad:test/unit/test_linalg.py::TestLinAlg::test_svd_identity_4x4": {
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "<reference>/test/unit/test_linalg.py:LINE: AttributeError: 'Tensor' object has no attribute 'svd'",
+            "outcome": "failed"
+          }
+        },
+        "status": "failed"
+      },
+      "reason": "Tensor.svd is not exposed; no host numerical implementation is substituted.",
+      "category": "frontend-api"
+    },
+    "polygrad:test/unit/test_linalg.py::TestLinAlg::test_svd_large": {
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "('<reference>/test/unit/test_linalg.py', 48, 'Skipped: very big. recommend wrapping with TinyJit around inner function')",
+            "outcome": "skipped"
+          }
+        },
+        "status": "skipped"
+      },
+      "reason": "Unchanged explicit upstream unittest skip; observed on both providers and not counted as a pass.",
+      "category": "upstream-skip"
+    },
+    "polygrad:test/unit/test_linalg.py::TestLinAlg::test_svd_nonfull_2_2": {
+      "expected": {
+        "status": "failed",
+        "nonpassing_phases": {
+          "call": {
+            "detail": "<reference>/test/unit/test_linalg.py:LINE: AttributeError: 'Tensor' object has no attribute 'svd'",
+            "outcome": "failed"
+          }
+        }
+      },
+      "category": "frontend-api",
+      "reason": "CHECK_OOB=0 now admits the body, which stops at missing Tensor.svd. SVD numerical assertions remain unexecuted."
+    },
+    "polygrad:test/unit/test_linalg.py::TestLinAlg::test_svd_nonfull_2_2_2_2_3": {
+      "expected": {
+        "status": "failed",
+        "nonpassing_phases": {
+          "call": {
+            "detail": "<reference>/test/unit/test_linalg.py:LINE: AttributeError: 'Tensor' object has no attribute 'svd'",
+            "outcome": "failed"
+          }
+        }
+      },
+      "category": "frontend-api",
+      "reason": "CHECK_OOB=0 now admits the body, which stops at missing Tensor.svd. SVD numerical assertions remain unexecuted."
+    },
+    "polygrad:test/unit/test_linalg.py::TestLinAlg::test_svd_nonfull_3_5": {
+      "expected": {
+        "status": "failed",
+        "nonpassing_phases": {
+          "call": {
+            "detail": "<reference>/test/unit/test_linalg.py:LINE: AttributeError: 'Tensor' object has no attribute 'svd'",
+            "outcome": "failed"
+          }
+        }
+      },
+      "category": "frontend-api",
+      "reason": "CHECK_OOB=0 now admits the body, which stops at missing Tensor.svd. SVD numerical assertions remain unexecuted."
+    },
+    "polygrad:test/unit/test_linalg.py::TestLinAlg::test_svd_nonfull_5_3": {
+      "expected": {
+        "status": "failed",
+        "nonpassing_phases": {
+          "call": {
+            "detail": "<reference>/test/unit/test_linalg.py:LINE: AttributeError: 'Tensor' object has no attribute 'svd'",
+            "outcome": "failed"
+          }
+        }
+      },
+      "category": "frontend-api",
+      "reason": "CHECK_OOB=0 now admits the body, which stops at missing Tensor.svd. SVD numerical assertions remain unexecuted."
+    },
+    "polygrad:test/unit/test_linalg.py::TestLinAlg::test_svd_rank1": {
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "<reference>/test/unit/test_linalg.py:LINE: AttributeError: 'Tensor' object has no attribute 'svd'",
+            "outcome": "failed"
+          }
+        },
+        "status": "failed"
+      },
+      "reason": "Tensor.svd is not exposed; no host numerical implementation is substituted.",
+      "category": "frontend-api"
+    },
+    "polygrad:test/unit/test_tensor_io.py::TestTensorIO::test_read": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "polygrad:test/unit/test_tensor_io.py::TestTensorIO::test_read_nolen": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_setitem.py::TestSetitem::test_cross_assign_independence": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_setitem.py::TestSetitem::test_fancy_setitem": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_setitem.py::TestSetitem::test_jit_setitem_variable_offset": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_setitem.py::TestSetitem::test_lazy_sum_between_writes": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_setitem.py::TestSetitem::test_padded_setitem": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_2d_tensor_indexing": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_advanced_indexing": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_big": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_chained_indexing": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_consecutive_inplace_operator": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_detach": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_dtype": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_dtype_mismatch": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_fancy_on_unrealized_view": {
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "('<reference>/test/backend/test_setitem.py', 39, 'Skipped: crashed in LLVM CI')",
+            "outcome": "skipped"
+          }
+        },
+        "status": "skipped"
+      },
+      "reason": "Unchanged explicit upstream unittest skip; observed on both providers and not counted as a pass.",
+      "category": "upstream-skip"
+    },
+    "tinygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_flip": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_inplace_mul": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_inplace_operator": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_multiple_disjoint_on_invalid": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_overlapping_indices": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_overlapping_indices_with_0": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_overlapping_inplace1": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_overlapping_inplace2": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_permute": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_swap_rows": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_tensor_int_indexing": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_tensor_slice_indexing": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_setitem.py::TestSetitem::test_setitem_with_1_in_shape": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_setitem.py::TestSetitem::test_simple_jit_setitem": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_setitem.py::TestSetitem::test_simple_setitem": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_setitem.py::TestSetitemLoop::test_arange": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_setitem.py::TestWithGrad::test_basic_setitem_works": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_setitem.py::TestWithGrad::test_set_backward": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_setitem.py::TestWithGrad::test_set_iadd_backward": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_setitem.py::TestWithGrad::test_set_nonleaf_backward": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_setitem.py::TestWithGrad::test_set_overlapping_backward": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_setitem.py::TestWithGrad::test_set_used_before_setitem": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_setitem.py::TestWithGrad::test_setitem_raises_on_aliased_uop": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_setitem.py::TestWithGrad::test_setitem_raises_on_unrealized_compute_base": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_setitem.py::TestWithGrad::test_setitem_raises_with_unrealized_downstream": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_to_numpy.py::TestToNumpy::test_numpy_is_numpy": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/null/test_dtype.py::TestCanLosslessCast::test_can_lossless_cast": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/null/test_dtype.py::TestCastConvenienceMethod::test_method": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/null/test_dtype.py::TestDtypeTolist::test_bfloat16": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/null/test_dtype.py::TestDtypeTolist::test_fp8": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/null/test_dtype.py::TestEqStrDType::test_strs": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/null/test_dtype.py::TestInvalidSingleton::test_pickle": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/null/test_dtype.py::TestInvalidSingleton::test_singleton": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/null/test_dtype.py::TestToDtype::test_dtype_to_dtype": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/null/test_dtype.py::TestToDtype::test_str_to_dtype": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/null/test_indexing.py::TestIndexing::test_empty_slice": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/null/test_indexing.py::TestIndexing::test_index_src_datatype": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/null/test_indexing.py::TestIndexing::test_int_indices": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/null/test_indexing.py::TestIndexing::test_invalid_index": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/null/test_indexing.py::TestIndexing::test_multiple_int": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/null/test_indexing.py::TestIndexing::test_none": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/null/test_indexing.py::TestIndexing::test_out_of_bound_index": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/null/test_indexing.py::TestIndexing::test_single_int": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/null/test_indexing.py::TestNumpy::test_broaderrors_indexing": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/null/test_indexing.py::TestNumpy::test_everything_returns_views": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/null/test_indexing.py::TestNumpy::test_index_no_floats": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/null/test_indexing.py::TestNumpy::test_none_index": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/null/test_tensor_io.py::TestTensorIO::test_create": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/null/test_tensor_io.py::TestTensorIO::test_seek": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/unit/test_conv.py::TestConv::test_bias": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/unit/test_conv.py::TestConv::test_elu": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/unit/test_conv.py::TestConv::test_first_three": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/unit/test_conv.py::TestConv::test_lazycache": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/unit/test_conv.py::TestConv::test_many_simple": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/unit/test_conv.py::TestConv::test_multiadd": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/unit/test_conv.py::TestConv::test_reduce_relu": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/unit/test_conv.py::TestConv::test_reorder": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/unit/test_conv.py::TestConv::test_simple": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/unit/test_conv.py::TestConv::test_simple_biased": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/unit/test_conv.py::TestConv::test_simple_rand": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/unit/test_conv.py::TestConv::test_two_binops_no_rerun_small": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/unit/test_conv.py::TestConv::test_two_overlapping_binops_no_rerun": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/unit/test_conv.py::TestConv::test_two_overlapping_binops_no_rerun_wino": {
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "('<reference>/test/unit/test_conv.py', 57, 'Skipped: this test is flaky')",
+            "outcome": "skipped"
+          }
+        },
+        "status": "skipped"
+      },
+      "reason": "Unchanged explicit upstream unittest skip; observed on both providers and not counted as a pass.",
+      "category": "upstream-skip"
+    },
+    "tinygrad:test/unit/test_linalg.py::TestLinAlg::test_newton_schulz": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/unit/test_linalg.py::TestLinAlg::test_qr_general": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/unit/test_linalg.py::TestLinAlg::test_qr_zero_column": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/unit/test_linalg.py::TestLinAlg::test_svd_general": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/unit/test_linalg.py::TestLinAlg::test_svd_identity": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/unit/test_linalg.py::TestLinAlg::test_svd_identity_4x4": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/unit/test_linalg.py::TestLinAlg::test_svd_large": {
+      "expected": {
+        "nonpassing_phases": {
+          "call": {
+            "detail": "('<reference>/test/unit/test_linalg.py', 48, 'Skipped: very big. recommend wrapping with TinyJit around inner function')",
+            "outcome": "skipped"
+          }
+        },
+        "status": "skipped"
+      },
+      "reason": "Unchanged explicit upstream unittest skip; observed on both providers and not counted as a pass.",
+      "category": "upstream-skip"
+    },
+    "tinygrad:test/unit/test_linalg.py::TestLinAlg::test_svd_nonfull_2_2": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/unit/test_linalg.py::TestLinAlg::test_svd_nonfull_2_2_2_2_3": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/unit/test_linalg.py::TestLinAlg::test_svd_nonfull_3_5": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/unit/test_linalg.py::TestLinAlg::test_svd_nonfull_5_3": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/unit/test_linalg.py::TestLinAlg::test_svd_rank1": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/unit/test_tensor_io.py::TestTensorIO::test_read": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    },
+    "tinygrad:test/unit/test_tensor_io.py::TestTensorIO::test_read_nolen": {
+      "expected": {
+        "nonpassing_phases": {},
+        "status": "passed"
+      },
+      "reason": ""
+    }
+  },
+  "scope_note": "Compatibility frontier only, not parity allowances or source-audit closure. No failures or skips are omitted from execution. test_ops.py executes in the separately reviewed CPU-adapted tinygrad_upstream_ops_cpu_baseline.json lane.",
+  "collection_blockers": []
+}

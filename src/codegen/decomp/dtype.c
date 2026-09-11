@@ -1096,8 +1096,10 @@ static PolyUOp *float_define(PolyCtx *ctx, PolyUOp *x, const PolyBindings *b) {
 static PolyUOp *float_index(PolyCtx *ctx, PolyUOp *x, const PolyBindings *b) {
   (void)b;
   PolyFloatDecompContext *fctx = float_ctx();
-  if (!fctx || !dtype_is(x->dtype, fctx->from) || x->n_src < 1 ||
-      (x->op == POLY_OP_INDEX && (x->src[0]->op == POLY_OP_LOAD || x->src[0]->op == POLY_OP_STACK)))
+  /* v0.14.0 pm_float_decomp: slices of LOAD/STACK are value selection,
+   * not storage views. The value-conversion rules own both operations. */
+  if (!fctx || !dtype_is(x->dtype, fctx->from) || x->n_src < 1 || x->src[0]->op == POLY_OP_LOAD ||
+      x->src[0]->op == POLY_OP_STACK)
     return NULL;
   PolyUOp **src = malloc((size_t)x->n_src * sizeof(*src));
   if (!src) return NULL;

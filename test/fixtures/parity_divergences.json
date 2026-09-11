@@ -3,7 +3,7 @@
   "reference": {
     "project": "tinygrad",
     "root": "references/tinygrad_latest",
-    "commit": "a9069c177a9da9cca18593edf55acd2e6073cca6"
+    "commit": "6f87158d77f66a36d5f8bbe915170b24e2acabe8"
   },
   "policy": {
     "accepted_status": "approved",
@@ -303,13 +303,12 @@
       "status": "open_debt",
       "stages": ["schedule", "multi-device"],
       "area": "multi-device vocabulary",
-      "vocabulary": {"tinygrad_only": ["WAIT", "GETADDR"], "polygrad_only": []},
-      "tinygrad": "GETADDR is HCQ2-runtime IR: UOp.getaddr constructs it, spec_hcq accepts direct BUFFER/PARAM sources, and runtime/support/hcq2.py resolves addresses and views. WAIT remains an unused enum; current shape inference and every type verifier reject a directly constructed WAIT.",
-      "polygrad": "GETADDR and WAIT are absent; the current CUDA/HIP runtimes execute direct driver calls rather than Tinygrad's HCQ2 command-graph pipeline.",
-      "rationale": "GETADDR requires a dependency-closed HCQ2 runtime port or an explicit backend-scope exclusion. Adding enum-only scaffolding would not close behavioral parity. WAIT has no current Tinygrad behavior to port but remains a vocabulary-census mismatch.",
+      "vocabulary": {"tinygrad_only": ["GETADDR"], "polygrad_only": []},
+      "tinygrad": "GETADDR is HCQ2-runtime IR: UOp.getaddr constructs it, spec_hcq accepts direct BUFFER/PARAM sources, and runtime/support/hcq2.py resolves addresses and views. v0.14.0 removed the unused WAIT opcode.",
+      "polygrad": "GETADDR is absent; the current CUDA/HIP runtimes execute direct driver calls rather than Tinygrad's HCQ2 command-graph pipeline. WAIT is absent in both projects at v0.14.0.",
+      "rationale": "GETADDR requires a dependency-closed HCQ2 runtime port or an explicit backend-scope exclusion. Adding enum-only scaffolding would not close behavioral parity. WAIT ceased to be a vocabulary gap when upstream removed it; no runtime behavior was invented.",
       "approval": null,
       "evidence": [
-        "references/tinygrad_latest/tinygrad/uop/__init__.py:Ops.WAIT",
         "references/tinygrad_latest/tinygrad/uop/__init__.py:Ops.GETADDR",
         "references/tinygrad_latest/tinygrad/uop/ops.py:UOp.getaddr",
         "references/tinygrad_latest/tinygrad/uop/spec.py:spec_hcq",
@@ -317,7 +316,7 @@
         "temp/tg_getaddr_wait_probe_20260903.py",
         "PLAN_CORE_20260720.md:WS6"
       ],
-      "close_when": "A dependency-closed HCQ2 runtime port constructs, verifies, lowers, and executes GETADDR with pinned address/view probes, or HCQ2 is explicitly excluded from the supported backend architecture and the vocabulary census gains a reviewed scope rule. WAIT must follow its then-current upstream status rather than receive invented behavior."
+      "close_when": "A dependency-closed HCQ2 runtime port constructs, verifies, lowers, and executes GETADDR with pinned address/view probes, or HCQ2 is explicitly excluded from the supported backend architecture and the vocabulary census gains a reviewed scope rule."
     },
     {
       "id": "PG-PARITY-009",
@@ -669,7 +668,7 @@
       "stages": ["pattern", "spec"],
       "area": "pattern literal vocabulary",
       "vocabulary": {"tinygrad_only": ["PYLITERAL"], "polygrad_only": []},
-      "tinygrad": "PYLITERAL carries immutable Python literals used by compiled UPat CUSTOM predicates",
+      "tinygrad": "PYLITERAL carries immutable Python literals used by compiled UPat CUSTOM predicates; v0.14.0 classifies its inferred dtype as void",
       "polygrad": "The C pattern compiler has no PYLITERAL UOp or equivalent current compiled-UPat topology",
       "rationale": "This is August pattern/compiler vocabulary debt, not an approved semantic divergence.",
       "approval": null,

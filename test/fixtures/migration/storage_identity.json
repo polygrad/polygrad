@@ -1,9 +1,10 @@
 {
   "schema_version": 1,
+  "target_transition": {"from_commit": "a9069c177a9da9cca18593edf55acd2e6073cca6", "to_commit": "6f87158d77f66a36d5f8bbe915170b24e2acabe8", "changed_rows": [{"id": "tinygrad/uop/ops.py:UOp._mop", "before": "b6056a9c4a6bc05681683a17a9d7f581255b442d4c2049f477ba4de7a3b3945b", "after": "e518523c9dafc6988c81934748e5849bed286f27192ccfee04eab09178c0cae8"}], "review": "August22-to-v0.14 source delta reviewed. UOp._mop only removes redundant inferred STACK dtype; C explicit dtype construction remains equivalent. Decomposition and multi matcher rows remain pending beyond the repaired delta. All other recorded block hashes unchanged; pre-existing weak-scalar hash mismatches and incomplete inventories remain unresolved. Historical counterpart/test hashes and execution evidence are not refreshed. Prior audit versions remain at Polygrad60dd005."},
   "hash_scheme": "cpython-3.11-ast-dump-v1",
   "provenance": "Copied from temp/reference_migration/audits/storage_identity.json; all 5 upstream row hashes verified unchanged with CPython 3.11. Counterpart and execution freshness is not renewed.",
   "baseline_commit": "ba1d3baae81c96b3ed72900cde87bb307933c61f",
-  "target_commit": "a9069c177a9da9cca18593edf55acd2e6073cca6",
+  "target_commit": "6f87158d77f66a36d5f8bbe915170b24e2acabe8",
   "review": {
     "origin": "temp/shape-storage-audit-20260906.VUymUD/owner-review.md",
     "sha256": "61bec69a9333da0aa7ad66476ee11696dbabed626176afa79586132381870b82",
@@ -63,7 +64,7 @@
     {
       "baseline_sha256": "e1f48172408cfb44fb2257f1686e52283d27f8635392e8fa8fa94369c1d08663",
       "id": "tinygrad/uop/ops.py:UOp._mop",
-      "target_sha256": "b6056a9c4a6bc05681683a17a9d7f581255b442d4c2049f477ba4de7a3b3945b",
+      "target_sha256": "e518523c9dafc6988c81934748e5849bed286f27192ccfee04eab09178c0cae8",
       "disposition": "equivalent",
       "reason": "Raw movement construction stage: canonical shape operands, two sources for RESHAPE/EXPAND and three for PAD/SHRINK, scalar no-ops, tuple PERMUTE/FLIP and promoted STACK. C helpers also implement the surrounding MovementMixin identity checks; raw poly_uop remains raw.",
       "counterparts": [

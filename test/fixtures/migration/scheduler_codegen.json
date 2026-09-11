@@ -1,10 +1,28 @@
 {
   "schema_version": 1,
+  "retarget_review": {
+    "reference": "6f87158d77f66a36d5f8bbe915170b24e2acabe8",
+    "scope": "August22-to-v0.14 shared-contract delta; not full wave closure",
+    "repairs": [
+      "decomp/dtype.py:pm_float_decomp excludes both LOAD and STACK parents for INDEX and SHRINK; value slices do not acquire storage dtype tags",
+      "schedule/multi.py:multi_pm removes GETTUPLE-on-UNSHARD passthrough; ordinary TUPLE selection remains",
+      "late/gater.py uses UOp.vconst_like for zero alternatives after movement lowering; port the missing flat STACK helper instead of reintroducing EXPAND",
+      "Wasm binary emission implements CStyleLanguage WHERE value selection with full-bit scalar predicate masks in direct and structurally fused SIMD paths; numeric 1/1.0 splats are not bitselect masks"
+    ],
+    "unchanged_contracts": [
+      "long decomposition matcher admission remains equivalent to C callback dtype guards",
+      "STORE.or_casted matching remains equivalent to the existing single-CAST unwrap",
+      "mandatory explicit C dtype arguments remain despite redundant inferred Python dtype removal"
+    ],
+    "evidence": "temp/retarget-014-20260911.MPsDqT/correspondence.md",
+    "limitations": "The gated-load defect also reproduces at unmodified Polygrad60dd005; it is not caused by retargeting. Pending rows, historical counterpart/test hashes and execution records retain their prior status."
+  },
+  "target_transition": {"from_commit": "a9069c177a9da9cca18593edf55acd2e6073cca6", "to_commit": "6f87158d77f66a36d5f8bbe915170b24e2acabe8", "changed_rows": [{"id": "tinygrad/codegen/decomp/dtype.py:@file", "before": "e190063150426ccdecb9f4e5510f82a5cb7fbc0c923bbd94798c1a561d1e414c", "after": "50e0e8f643bd1297e8b0af95478663ac6f65f322ba23c364b3099f29fb7a70d0"}, {"id": "tinygrad/schedule/multi.py:@file", "before": "5d1490ea4d5a6e7493cf14708874abf605cb10a9c9e41c29e2aea29b1098e98a", "after": "71427da1c28b395d9de38aef5daaccad985ab27065a85d2e60948c96560c1061"}, {"id": "tinygrad/codegen/decomp/dtype.py:pm_float_decomp", "before": "0cb8d9b34b10513db4fd82e87cc823ad3fccb04a2f41f1474a9bf596dfb500a4", "after": "d79035ecf40a45d3878c947e1e2bf4d8b454bd0426b7d5164bec1bdc704674ab"}, {"id": "tinygrad/codegen/decomp/dtype.py:pm_long_decomp", "before": "069d7f6591b0b30bca4accd74bbb16e9d3cd5808d338c636f56094ca1d9e2df0", "after": "bf6aa37ddf508b2f41c12dc2b6e1c15d977c779ef21f059b9a559ff3c61fa7f4"}, {"id": "tinygrad/schedule/multi.py:multi_pm", "before": "4ff8f8598bdbc73ea26db811a9fb388fd604c29b77b42e7f13482a0b432cfb11", "after": "1e21df3ea6293b5646cc53911721953f9f9467d4a65b45b1258f267da118ac6b"}], "review": "August22-to-v0.14 source delta reviewed. UOp._mop only removes redundant inferred STACK dtype; C explicit dtype construction remains equivalent. Decomposition and multi matcher rows remain pending beyond the repaired delta. All other recorded block hashes unchanged; pre-existing weak-scalar hash mismatches and incomplete inventories remain unresolved. Historical counterpart/test hashes and execution evidence are not refreshed. Prior audit versions remain at Polygrad60dd005."},
   "compiler_tail_review": {"origin": "temp/compiler-tail-20260911.6j2tqN/source-reviewed.md", "sha256": "88833912c647b0181c47b17de42a3cabe8153cf055cb19386ab53cfd7a776549", "text": "# Compiler owner tail \u2014 September 11\n\nStarting ca73ca0; pinned Tinygrad a9069c177a9da9cca18593edf55acd2e6073cca6.\nRead complete pinned codegen/gpudims.py and codegen/simplify.py against the C\nowners. This is a repair checkpoint, not complete owner certification.\n\n- gpudims._split_dims: include divisor2 for input2, matching the pinned\n  inclusive ceil(sqrt) bound without floating-point arithmetic.\n- gpudims.add_gpudims: resolve last RANGE-key occurrence across all axis\n  types before classifying global/local keys. Preserve the pinned ordinary\n  (axis, REDUCE) substitution exclusion, which tests arg[1], not arg[-1].\n- simplify.pm_reduce_collapse: add the independent Invalid-guard rule in\n  pinned order; use shared arithmetic for positive-factor comparison lifting.\n- simplify.reduce_collapse: size temporary replacement arrays from included\n  source edges, removing the256-entry optimization limit. Infer intermediate\n  REDUCE dtype from its value. Check cache creation and substitution/rewrite\n  failure before publishing a result. Failed inverse substitution must not\n  expose temporary PARAMs; use the existing status-returning substitution API.\n- simplify.no_load: preserve unknown on failed traversal. pm_load_collapse\n  requires proven absence/presence, never inferred from a failed query.\n- New POLY_TESTING-only controls exercise operation failure, not every heap\n  allocation. Existing fatal hashmap/range-cache OOM policy is unchanged.\n  Cleanup uses existing context ownership; no new lifetime or runtime concept.\n\nSeven grouped regressions were observed failing before repair, then passing.\ncorrespondence.md and executed probe.py/tinygrad.json bind the exact graphs.\n\n## Pending source obligations\n\nKeep the existing rows pending. Dynamic dimension cap/split behavior, complete\nreduction matcher domains (including axes metadata and boolean zero matches),\ntemporary parameter bound domains, and range-gate inspection failure behavior\nstill need explicit dispositions. These are review questions, not asserted\ndefects. Worker-context/assembly diagnostics, DSP/image paths, global_prod_max\nand multi-device capability certification remain separate. No source hashes\nor historical equivalent rows are silently refreshed by these passing tests.\n\n## Analyzer disposition\n\nThe two-file analyzer exits2 with one report at the from_arr write. Its trace\nassumes capacity==0, then enters an included source-edge loop. Capacity is the\nsum of those same immutable nodes' n_src values; zero implies no loop body can\nexecute. Positive capacity requires both allocations to succeed before filling.\nThis is an infeasible relational path, not an analyzer-clean result or a\nremoved warning. No project-wide warning count was measured here.\n"},
   "hash_scheme": "cpython-3.11-ast-dump-v1",
   "provenance": "Base: temp/reduce-owner-20260909.1DdMgI/source-audit.json. Overlay: temp/codegen-boundaries-20260911.U78et7/source-audit.json (45 codegen entrypoint rows). Upstream hashes checked against CPython 3.11 without changing them. Historical C/test hashes are preserved and still require current-source verification. Multi-device rows remain in scope, with review assigned to multi_device in the wave manifest; open debt is not an allowance.",
   "baseline_commit": "ba1d3baae81c96b3ed72900cde87bb307933c61f",
-  "target_commit": "a9069c177a9da9cca18593edf55acd2e6073cca6",
+  "target_commit": "6f87158d77f66a36d5f8bbe915170b24e2acabe8",
   "review": {
     "origin": "temp/reduce-owner-20260909.1DdMgI/source-reviewed.md",
     "sha256": "a307b29aa94dbb5aa060b5ffea08e4d87535cb76209cdef5cc3d1e40ce5d3980",
@@ -30,7 +48,7 @@
     {
       "baseline_sha256": null,
       "id": "tinygrad/codegen/decomp/dtype.py:@file",
-      "target_sha256": "e190063150426ccdecb9f4e5510f82a5cb7fbc0c923bbd94798c1a561d1e414c",
+      "target_sha256": "50e0e8f643bd1297e8b0af95478663ac6f65f322ba23c364b3099f29fb7a70d0",
       "disposition": "pending",
       "reason": "Pending complete correspondence; remaining owner contracts are recorded in temp/scheduler-supported-20260909.NUkfBK/source-reviewed.md and its prior review links. Partial branch tests do not establish whole-function closure."
     },
@@ -170,7 +188,7 @@
     {
       "baseline_sha256": "fa4a20fc2f129a4d6eb6f489502b4beec6f0f07862824f6fb8678a682124a1aa",
       "id": "tinygrad/schedule/multi.py:@file",
-      "target_sha256": "5d1490ea4d5a6e7493cf14708874abf605cb10a9c9e41c29e2aea29b1098e98a",
+      "target_sha256": "71427da1c28b395d9de38aef5daaccad985ab27065a85d2e60948c96560c1061",
       "disposition": "pending",
       "reason": "Pending complete correspondence; remaining owner contracts are recorded in temp/scheduler-supported-20260909.NUkfBK/source-reviewed.md and its prior review links. Partial branch tests do not establish whole-function closure."
     },
@@ -1243,14 +1261,14 @@
     {
       "baseline_sha256": null,
       "id": "tinygrad/codegen/decomp/dtype.py:pm_float_decomp",
-      "target_sha256": "0cb8d9b34b10513db4fd82e87cc823ad3fccb04a2f41f1474a9bf596dfb500a4",
+      "target_sha256": "d79035ecf40a45d3878c947e1e2bf4d8b454bd0426b7d5164bec1bdc704674ab",
       "disposition": "pending",
       "reason": "Pending complete correspondence; remaining owner contracts are recorded in temp/scheduler-supported-20260909.NUkfBK/source-reviewed.md and its prior review links. Partial branch tests do not establish whole-function closure."
     },
     {
       "baseline_sha256": null,
       "id": "tinygrad/codegen/decomp/dtype.py:pm_long_decomp",
-      "target_sha256": "069d7f6591b0b30bca4accd74bbb16e9d3cd5808d338c636f56094ca1d9e2df0",
+      "target_sha256": "bf6aa37ddf508b2f41c12dc2b6e1c15d977c779ef21f059b9a559ff3c61fa7f4",
       "disposition": "pending",
       "reason": "Pending complete correspondence; remaining owner contracts are recorded in temp/scheduler-supported-20260909.NUkfBK/source-reviewed.md and its prior review links. Partial branch tests do not establish whole-function closure."
     },
@@ -3183,7 +3201,7 @@
     {
       "baseline_sha256": "66f4ead35d065647caacd64145c250b9c01098910d694a83955ffa10e6bfe1cc",
       "id": "tinygrad/schedule/multi.py:multi_pm",
-      "target_sha256": "4ff8f8598bdbc73ea26db811a9fb388fd604c29b77b42e7f13482a0b432cfb11",
+      "target_sha256": "1e21df3ea6293b5646cc53911721953f9f9467d4a65b45b1258f267da118ac6b",
       "disposition": "pending",
       "reason": "Pending complete correspondence; remaining owner contracts are recorded in temp/scheduler-supported-20260909.NUkfBK/source-reviewed.md and its prior review links. Partial branch tests do not establish whole-function closure."
     },

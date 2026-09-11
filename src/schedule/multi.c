@@ -1630,26 +1630,6 @@ PolyUOp *poly_apply_multi_pm(PolyCtx *ctx, PolyUOp *sink) {
                  u->arg.i >= 0 && u->arg.i < ns[0]->n_src) {
         /* Pinned schedule/multi.py:158-159. */
         result = ns[0]->src[u->arg.i];
-      } else if (u->op == POLY_OP_GETTUPLE && u->n_src == 1 && ns[0] &&
-                 ns[0]->op == POLY_OP_UNSHARD &&
-                 ns[0]->arg.kind == POLY_ARG_INT_TUPLE &&
-                 ns[0]->n_src == ns[0]->arg.int_tuple.n + 1 &&
-                 u->arg.kind == POLY_ARG_INT &&
-                 u->arg.i >= 0 &&
-                 (ns[0]->src[0]->op == POLY_OP_FUNCTION ||
-                  ns[0]->src[0]->op == POLY_OP_TUPLE)) {
-        PolyUOp *aggregate = ns[0]->src[0];
-        PolyUOp *tuple = aggregate->op == POLY_OP_FUNCTION && aggregate->n_src > 0
-                             ? aggregate->src[0]
-                             : aggregate;
-        if (!tuple || tuple->op != POLY_OP_TUPLE || u->arg.i >= tuple->n_src) {
-          rule_failed = true;
-        } else {
-          PolyUOp *selected =
-              poly_uop1(ctx, POLY_OP_GETTUPLE, tuple->src[u->arg.i]->dtype, aggregate, u->arg);
-          result = multi_pm_restore_sharding(ctx, selected, ns[0]);
-          if (!result) rule_failed = true;
-        }
       } else if (u->op == POLY_OP_FUNCTION) {
         result = multi_pm_function(ctx, u, ns, &rule_failed);
       } else if ((u->op == POLY_OP_CALL || u->op == POLY_OP_FUNCTION || u->op == POLY_OP_AFTER) && u->n_src >= 1 && ns[0] && ns[0]->op == POLY_OP_UNSHARD) {
