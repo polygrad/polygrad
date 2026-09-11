@@ -6819,6 +6819,13 @@ TEST(codegen, reduce_local_preserves_group_range_replacement_metadata) {
     PolyUOp *u = topo[i];
     n_reduce += u->op == POLY_OP_REDUCE;
     n_stage += u->op == POLY_OP_STAGE;
+    if (u->op == POLY_OP_STAGE) {
+      char *text = poly_uop_str(u);
+      ASSERT_NOT_NULL(text);
+      bool has_local_id = strstr(text, "BufferizeOpts(device=7,") != NULL;
+      free(text);
+      ASSERT_TRUE(has_local_id);
+    }
     if (u->op == POLY_OP_RANGE && poly_range_axis_type(u->arg) == POLY_AXIS_REDUCE &&
         poly_range_axis_id(u->arg) == 107) {
       final_range = u;

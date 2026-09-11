@@ -1111,6 +1111,47 @@ TEST(uop, create_string_arg) {
   PASS();
 }
 
+TEST(uop, bufferize_integer_identity_cse) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *value =
+      poly_uop_new_buffer(ctx, poly_device_uop_from_name(ctx, "CPU"), 1, POLY_FLOAT32, 0);
+  const int64_t ids[] = {0, 7, INT64_C(1) << 40, -1};
+  PolyUOp *stages[4];
+  for (int i = 0; i < 4; i++) {
+    PolyArg arg = poly_arg_bufferize_opts_int(ids[i], POLY_ADDR_LOCAL, true);
+    ASSERT_FALSE(poly_arg_eq(arg, poly_arg_bufferize_opts(NULL, POLY_ADDR_LOCAL, true)));
+    ASSERT_FALSE(poly_arg_eq(arg, poly_arg_bufferize_opts("7", POLY_ADDR_LOCAL, true)));
+    stages[i] = poly_uop1(ctx, POLY_OP_STAGE, POLY_FLOAT32, value, arg);
+    ASSERT_NOT_NULL(stages[i]);
+    ASSERT_PTR_EQ(stages[i], poly_uop1(ctx, POLY_OP_STAGE, POLY_FLOAT32, value, arg));
+    for (int j = 0; j < i; j++)
+      ASSERT_TRUE(stages[i] != stages[j]);
+    ASSERT_TRUE(poly_uop_device_uop_cached(ctx, stages[i], NULL) == NULL);
+    ASSERT_EQ(poly_uop_device(stages[i]), POLY_DEVICE_AUTO);
+    ASSERT_TRUE(poly_bufferize_arg_device(arg) == NULL);
+    char expected[80];
+    snprintf(expected, sizeof(expected), "BufferizeOpts(device=%lld,", (long long)ids[i]);
+    char *text = poly_uop_str(stages[i]);
+    ASSERT_NOT_NULL(text);
+    bool exact = strstr(text, expected) != NULL;
+    free(text);
+    ASSERT_TRUE(exact);
+    PolyUOp *replacement = poly_const_float(ctx, 2.0f);
+    PolyUOp *changed = poly_uop_substitute(ctx, stages[i], &value, &replacement, 1);
+    ASSERT_NOT_NULL(changed);
+    ASSERT_TRUE(poly_arg_eq(changed->arg, arg));
+    ASSERT_EQ(poly_arg_hash(changed->arg), poly_arg_hash(arg));
+  }
+  PolyArg invalid = poly_arg_bufferize_opts_int(7, POLY_ADDR_LOCAL, true);
+  invalid.bufferize_opts.device = "CPU";
+  ASSERT_TRUE(poly_uop1(ctx, POLY_OP_STAGE, POLY_FLOAT32, value, invalid) == NULL);
+  invalid.bufferize_opts.device = NULL;
+  invalid.bufferize_opts.device_is_tuple = true;
+  ASSERT_TRUE(poly_uop1(ctx, POLY_OP_STAGE, POLY_FLOAT32, value, invalid) == NULL);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(uop, device_constructor_uses_canonical_string_identity) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);

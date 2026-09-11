@@ -334,6 +334,72 @@ TEST(ir, round_trip_exact_bigint_arg_current_format) {
   PASS();
 }
 
+TEST(ir, round_trip_bufferize_opts_integer_identity) {
+  const int64_t ids[] = {0, 7, INT64_C(1) << 40, -1};
+  /* PGIR and the bound-program graph codec share argument encoding, not
+   * artifact contracts. Exercise both readers, including every truncation. */
+  for (int k = 0; k < 8; k++) {
+    bool program = k >= 4;
+    int64_t id = ids[k % 4];
+    PolyCtx *ctx = poly_ctx_new();
+    PolyUOp *input = poly_buffer_f32(ctx, 8);
+    PolyUOp *stage = poly_uop1(
+        ctx, POLY_OP_STAGE, POLY_FLOAT32, input,
+        poly_arg_bufferize_opts_int(id, POLY_ADDR_LOCAL, false)
+    );
+    PolyUOp *output = poly_buffer_f32(ctx, 8);
+    PolyIrBufEntry bufs[] = {
+        {.name = "input", .role = POLY_IR_ROLE_INPUT, .buffer = input, .shape = {8}, .ndim = 1},
+        {.name = "output", .role = POLY_IR_ROLE_OUTPUT, .buffer = output, .shape = {8}, .ndim = 1},
+    };
+    PolyIrEntrypoint eps[] = {
+        {.name = "forward", .sink = poly_sink1(ctx, poly_store_val(ctx, output, stage))}};
+    /* This is graph-codec coverage, not an executable PROGRAM fixture. */
+    if (program)
+      eps[0].sink = poly_uop1(ctx, POLY_OP_LINEAR, POLY_VOID, eps[0].sink, poly_arg_none());
+    PolyIrSpec spec = {ctx, bufs, 2, eps, 1, NULL, 0};
+    int len = 0;
+    uint8_t *bytes = program ? poly_program_graph_export(&spec, &len) : poly_ir_export(&spec, &len);
+    ASSERT_NOT_NULL(bytes);
+    PolyIrSpec imported;
+    ASSERT_INT_EQ(
+        program ? poly_program_graph_import(bytes, len, &imported)
+                : poly_ir_import(bytes, len, &imported),
+        0
+    );
+    int n_topo = 0;
+    PolyUOp **topo = poly_toposort(imported.ctx, imported.entrypoints[0].sink, &n_topo);
+    int n_stage = 0;
+    for (int i = 0; i < n_topo; i++) {
+      if (topo[i]->op != POLY_OP_STAGE) continue;
+      n_stage++;
+      ASSERT_TRUE(topo[i]->arg.bufferize_opts.device_is_int);
+      ASSERT_TRUE(topo[i]->arg.bufferize_opts.device_int == id);
+      ASSERT_TRUE(poly_arg_eq(stage->arg, topo[i]->arg));
+    }
+    ASSERT_INT_EQ(n_stage, 1);
+    poly_ir_spec_free(&imported);
+    poly_ctx_destroy(imported.ctx);
+    for (int cut = 0; cut < len; cut++) {
+      PolyIrSpec rejected = {0};
+      ASSERT_TRUE(
+          (program ? poly_program_graph_import(bytes, cut, &rejected)
+                   : poly_ir_import(bytes, cut, &rejected)) != 0
+      );
+    }
+    /* Version is little-endian u32 after the four-byte magic. */
+    bytes[4]--;
+    PolyIrSpec rejected = {0};
+    ASSERT_TRUE(
+        (program ? poly_program_graph_import(bytes, len, &rejected)
+                 : poly_ir_import(bytes, len, &rejected)) != 0
+    );
+    poly_ctx_destroy(ctx);
+    free(bytes);
+  }
+  PASS();
+}
+
 TEST(ir, round_trip_bufferize_opts_arg) {
   PolyCtx *ctx = poly_ctx_new();
 

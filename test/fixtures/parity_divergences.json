@@ -732,21 +732,28 @@
     },
     {
       "id": "PG-PARITY-027",
-      "status": "open_debt",
+      "status": "resolved",
       "stages": ["codegen"],
       "area": "LOCAL STAGE integer identity metadata",
       "vocabulary": {"tinygrad_only": [], "polygrad_only": []},
       "tinygrad": "fix_group_for_reduce puts the first grouped RANGE axis ID in BufferizeOpts.device; LOCAL device metadata admits an integer identity.",
-      "polygrad": "PolyArg.bufferize_opts represents string, tuple or absent device metadata, not the integer LOCAL identity. Grouped reduction emits NULL device metadata with the grouped ranges preserved in STAGE sources.",
-      "rationale": "Matching executable values and range/storage topology do not establish exact STAGE argument parity. The metadata carrier, CSE and codec consumers require one coordinated owning fix, not a synthetic device string or tag workaround.",
+      "polygrad": "PolyArg.bufferize_opts retains the int64 LOCAL identity. Grouped reduction emits the first grouped RANGE ID; argument equality/hash, ordering, diagnostics and PGIR/PGPM preserve it distinctly from absent/string/tuple device metadata.",
+      "rationale": "The existing BufferizeOpts identity is carried directly, without synthetic device strings or tags. C physical-backend queries do not interpret LOCAL IDs as backend ordinals. Exact construction/CSE and both codec regressions cover the identity; this row grants no allowance.",
       "approval": null,
       "evidence": [
         "references/tinygrad_latest/tinygrad/codegen/__init__.py:fix_group_for_reduce",
         "references/tinygrad_latest/tinygrad/schedule/indexing.py:BufferizeOpts",
         "src/codegen/codegen.c:poly_fix_group_for_reduce",
-        "src/polygrad.h:poly_arg_bufferize_opts",
-        "temp/reduce-owner-20260909.1DdMgI/correspondence.md"
+        "src/polygrad.h:poly_arg_bufferize_opts_int",
+        "test/test_codegen.c:reduce_local_preserves_group_range_replacement_metadata",
+        "test/test_uop.c:bufferize_integer_identity_cse",
+        "test/test_ir.c:round_trip_bufferize_opts_integer_identity",
+        "temp/local-metadata-20260911.Bdxj7a/correspondence.md"
       ],
+      "resolution": {
+        "closed_on": "2026-09-11",
+        "evidence": "Three observed red regressions now pass: exact grouped STAGE metadata, immutable argument/CSE identity, and integer graph serialization. Both PGIR17/PGPM9 preserve 0, 7, 2^40 and -1; every truncated artifact and old format version is rejected. Owning native suites, CUDA, numerical/physical parity and affected frontends pass. No stage allowance added."
+      },
       "close_when": "Represent the integer LOCAL identity through the existing argument, CSE and serialization contracts and test exact STAGE metadata; or obtain an explicit stage-scoped divergence approval supported by consumer analysis."
     }
   ]

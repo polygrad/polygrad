@@ -6200,12 +6200,10 @@ static PolyUOp *poly_fix_group_for_reduce(
     stage_src[n_stage++] = upstream_locals[i];
   for (int i = 0; i < n_group; i++)
     stage_src[n_stage++] = group_ranges[i];
-  /* PG-PARITY-027: LOCAL BufferizeOpts.device is an integer identity in
-   * Tinygrad. The C metadata carrier still omits it; do not claim exact
-   * STAGE-argument parity from the matching range/storage topology. */
+  /* The first grouped range identifies LOCAL storage in BufferizeOpts.device. */
   PolyUOp *stage = poly_uop(
       ctx, POLY_OP_STAGE, red->dtype, stage_src, n_stage,
-      poly_arg_bufferize_opts(NULL, POLY_ADDR_LOCAL, true)
+      poly_arg_bufferize_opts_int(poly_range_axis_id(group_ranges[0]->arg), POLY_ADDR_LOCAL, true)
   );
 
   PolyUOp *reduce_loop[POLY_MAX_DIMS];

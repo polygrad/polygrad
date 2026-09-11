@@ -1872,7 +1872,8 @@ static PolyUOp *rule_fix_deviceless(PolyCtx *ctx, PolyUOp *root, const PolyBindi
   (void)bindings;
   if (!root || root->op != POLY_OP_STAGE || root->arg.kind != POLY_ARG_BUFFERIZE_OPTS ||
       poly_bufferize_arg_addrspace(root->arg) != POLY_ADDR_GLOBAL ||
-      poly_bufferize_arg_device(root->arg) || poly_bufferize_arg_device_is_tuple(root->arg))
+      root->arg.bufferize_opts.device_is_int || poly_bufferize_arg_device(root->arg) ||
+      poly_bufferize_arg_device_is_tuple(root->arg))
     return NULL;
   PolyUOp *device = poly_graph_rewrite_userctx();
   if (!device || device->op != POLY_OP_DEVICE) return NULL;

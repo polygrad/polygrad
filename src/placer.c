@@ -315,6 +315,16 @@ PolyDevice poly_uop_device_cached(PolyUOp *u, PolyMap *cache) {
       poly_map_set(cache, poly_ptr_hash(u), u, (void *)(intptr_t)(result + 1), poly_ptr_eq);
     return result;
   }
+  /* BufferizeOpts.device may be a LOCAL identity, never a backend ordinal.
+   * Do not inherit the producer's physical device across that boundary. */
+  if (u->op == POLY_OP_STAGE && u->arg.kind == POLY_ARG_BUFFERIZE_OPTS &&
+      u->arg.bufferize_opts.device_is_int) {
+    if (cache)
+      poly_map_set(
+          cache, poly_ptr_hash(u), u, (void *)(intptr_t)(POLY_DEVICE_AUTO + 1), poly_ptr_eq
+      );
+    return POLY_DEVICE_AUTO;
+  }
   if (u->op == POLY_OP_STAGE && u->arg.kind == POLY_ARG_BUFFERIZE_OPTS &&
       !u->arg.bufferize_opts.device_is_tuple && u->arg.bufferize_opts.device) {
     result = device_from_string_arg(u->arg.bufferize_opts.device);

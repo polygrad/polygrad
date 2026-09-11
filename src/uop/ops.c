@@ -397,9 +397,12 @@ bool poly_arg_eq(PolyArg a, PolyArg b) {
     return memcmp(a.range.extra, b.range.extra, (size_t)a.range.n_extra * sizeof(int64_t)) == 0;
   case POLY_ARG_BUFFERIZE_OPTS:
     if (a.bufferize_opts.device_is_tuple != b.bufferize_opts.device_is_tuple ||
+        a.bufferize_opts.device_is_int != b.bufferize_opts.device_is_int ||
         a.bufferize_opts.addrspace != b.bufferize_opts.addrspace ||
         a.bufferize_opts.removable != b.bufferize_opts.removable)
       return false;
+    if (a.bufferize_opts.device_is_int)
+      return a.bufferize_opts.device_int == b.bufferize_opts.device_int;
     if (a.bufferize_opts.device_is_tuple) {
       if (a.bufferize_opts.n_devices != b.bufferize_opts.n_devices) return false;
       for (int i = 0; i < a.bufferize_opts.n_devices; i++) {
@@ -564,8 +567,16 @@ uint32_t poly_arg_hash(PolyArg a) {
       h = hash_mix(h, (uint32_t)(a.range.extra[i] ^ (a.range.extra[i] >> 32)));
     break;
   case POLY_ARG_BUFFERIZE_OPTS:
-    h = hash_mix(h, a.bufferize_opts.device_is_tuple ? 2u : 1u);
-    if (a.bufferize_opts.device_is_tuple) {
+    h = hash_mix(
+        h, a.bufferize_opts.device_is_int     ? 3u
+           : a.bufferize_opts.device_is_tuple ? 2u
+                                              : 1u
+    );
+    if (a.bufferize_opts.device_is_int) {
+      uint64_t id = (uint64_t)a.bufferize_opts.device_int;
+      h = hash_mix(h, (uint32_t)id);
+      h = hash_mix(h, (uint32_t)(id >> 32));
+    } else if (a.bufferize_opts.device_is_tuple) {
       h = hash_mix(h, (uint32_t)a.bufferize_opts.n_devices);
       for (int i = 0; i < a.bufferize_opts.n_devices; i++) {
         const char *value = a.bufferize_opts.devices ? a.bufferize_opts.devices[i] : NULL;
@@ -1282,6 +1293,12 @@ static PolyUOp *poly_uop_internal(
    * Canonicalize the C carrier before hashing so signed-64 values cannot
    * acquire a second BIGINT CSE identity. */
   if (!poly_arg_canonicalize_bigint(&arg) || !poly_arg_canonicalize_bigint(&tag_arg)) return NULL;
+  /* The integer arm owns no string/tuple storage. Reject ambiguous C carriers
+   * before hashing or copying; Python's union value cannot represent them. */
+  if (arg.kind == POLY_ARG_BUFFERIZE_OPTS && arg.bufferize_opts.device_is_int &&
+      (arg.bufferize_opts.device_is_tuple || arg.bufferize_opts.device ||
+       arg.bufferize_opts.devices || arg.bufferize_opts.n_devices))
+    return NULL;
   /* Current tinygrad stores the target DType as CAST/BITCAST.arg and derives
    * the node dtype from it (uop/ops.py:169-172, mixin/dtype.py:16-50).
    * Keep accepting the old internal NONE spelling only at this constructor
@@ -2507,7 +2524,10 @@ static void uop_print_one(PolyUOp *u, char *buf, int *pos, int cap) {
   case POLY_ARG_BUFFERIZE_OPTS:
     written = snprintf(buf + *pos, cap - *pos, ", BufferizeOpts(device=");
     if (written > 0) *pos += written;
-    if (u->arg.bufferize_opts.device_is_tuple) {
+    if (u->arg.bufferize_opts.device_is_int) {
+      written =
+          snprintf(buf + *pos, cap - *pos, "%lld", (long long)u->arg.bufferize_opts.device_int);
+    } else if (u->arg.bufferize_opts.device_is_tuple) {
       written = snprintf(buf + *pos, cap - *pos, "(");
       if (written > 0) *pos += written;
       for (int i = 0; i < u->arg.bufferize_opts.n_devices; i++) {
@@ -2712,7 +2732,9 @@ void poly_uop_dump_tree(FILE *fp, PolyUOp *u, int depth, int max_depth) {
     break;
   case POLY_ARG_BUFFERIZE_OPTS:
     fprintf(fp, " bufferize_opts=(device=");
-    if (u->arg.bufferize_opts.device_is_tuple) {
+    if (u->arg.bufferize_opts.device_is_int) {
+      fprintf(fp, "%lld", (long long)u->arg.bufferize_opts.device_int);
+    } else if (u->arg.bufferize_opts.device_is_tuple) {
       fprintf(fp, "(");
       for (int i = 0; i < u->arg.bufferize_opts.n_devices; i++)
         fprintf(fp, "%s\"%s\"", i ? "," : "", u->arg.bufferize_opts.devices[i]);

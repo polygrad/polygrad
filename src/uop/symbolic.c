@@ -3690,9 +3690,13 @@ static int arg_tuplize_cmp(PolyArg a, PolyArg b) {
     return arg_int_tuple_cmp(a.range.extra, a.range.n_extra, b.range.extra, b.range.n_extra);
   }
   case POLY_ARG_BUFFERIZE_OPTS: {
-    int ret = cmp_bool(a.bufferize_opts.device_is_tuple, b.bufferize_opts.device_is_tuple);
+    int ret = cmp_bool(a.bufferize_opts.device_is_int, b.bufferize_opts.device_is_int);
     if (ret) return ret;
-    if (a.bufferize_opts.device_is_tuple)
+    ret = cmp_bool(a.bufferize_opts.device_is_tuple, b.bufferize_opts.device_is_tuple);
+    if (ret) return ret;
+    if (a.bufferize_opts.device_is_int)
+      ret = cmp_i64(a.bufferize_opts.device_int, b.bufferize_opts.device_int);
+    else if (a.bufferize_opts.device_is_tuple)
       ret = arg_string_tuple_cmp(
           a.bufferize_opts.devices, a.bufferize_opts.n_devices, b.bufferize_opts.devices,
           b.bufferize_opts.n_devices

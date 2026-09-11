@@ -1,7 +1,7 @@
 /*
- * poly_ir.c -- Binary IR codec for tensor-level UOp graphs
+ * ir.c -- Binary IR codec for tensor-level UOp graphs
  *
- * poly.ir.uops@16 format:
+ * Portable graph layout (version constants in ir.h):
  *   Header (32 bytes)
  *   String table (variable)
  *   Node table (variable, strict toposort order; scalar dtype ID and UOp shape)
@@ -907,7 +907,10 @@ static uint8_t *poly_graph_export(const PolyIrSpec *spec, int *out_len, bool exe
         bb_i64(&buf, u->arg.range.extra[t]);
       break;
     case POLY_ARG_BUFFERIZE_OPTS:
-      if (u->arg.bufferize_opts.device_is_tuple) {
+      if (u->arg.bufferize_opts.device_is_int) {
+        bb_u8(&buf, 3);
+        bb_i64(&buf, u->arg.bufferize_opts.device_int);
+      } else if (u->arg.bufferize_opts.device_is_tuple) {
         bb_u8(&buf, 2);
         bb_u16(&buf, (uint16_t)u->arg.bufferize_opts.n_devices);
         for (int d = 0; d < u->arg.bufferize_opts.n_devices; d++)
@@ -1436,6 +1439,9 @@ static int poly_graph_import(const uint8_t *data, int len, PolyIrSpec *out, bool
         arg.bufferize_opts.devices = bufferize_devices_tmp;
         arg.bufferize_opts.n_devices = count;
         arg.bufferize_opts.device_is_tuple = true;
+      } else if (device_kind == 3) {
+        arg.bufferize_opts.device_is_int = true;
+        arg.bufferize_opts.device_int = br_i64(&r);
       } else if (device_kind != 0) {
         if (srcs) free(srcs);
         goto fail_nodes;

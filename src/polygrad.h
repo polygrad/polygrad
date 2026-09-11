@@ -454,7 +454,7 @@ typedef struct {
     } range;
     struct {
       /* Pinned BufferizeOpts.device is str | tuple[str, ...] | int | None
-       * (tinygrad/schedule/indexing.py:38-43). Global physical scheduling uses
+       * (tinygrad/schedule/indexing.py:57-62). Global physical scheduling uses
        * the scalar/tuple string arms; local integer ids remain addrspace-local. */
       const char *device;
       const char **devices;
@@ -462,6 +462,8 @@ typedef struct {
       bool device_is_tuple;
       PolyAddrSpace addrspace;
       bool removable;
+      bool device_is_int;
+      int64_t device_int;
     } bufferize_opts;
     struct {
       int dims[3];
@@ -565,7 +567,7 @@ static inline PolyArg poly_arg_range_ex(
 /* tinygrad BufferizeOpts equivalent.
  *
  * device is the exact canonical physical identity for the intermediate buffer
- * (or NULL when unknown/local), addrspace selects global/local storage, and
+ * (or NULL when unknown), addrspace selects global/local storage, and
  * removable preserves the rangeify optimization contract for eliminating
  * redundant temporary buffers. This matches pinned BufferizeOpts.device.
  */
@@ -601,6 +603,20 @@ static inline PolyArg poly_arg_bufferize_opts_tuple(
         .addrspace = addrspace,
         .removable = removable,
     }};
+}
+/* BufferizeOpts.device on LOCAL stages names a reduction, not a backend. */
+static inline PolyArg poly_arg_bufferize_opts_int(
+    int64_t device,
+    PolyAddrSpace addrspace,
+    bool removable
+) {
+  return (PolyArg
+  ){.kind = POLY_ARG_BUFFERIZE_OPTS,
+    .bufferize_opts = {
+        .addrspace = addrspace,
+        .removable = removable,
+        .device_is_int = true,
+        .device_int = device}};
 }
 static inline PolyArg poly_arg_tensor_core(
     const int dims[3],
@@ -682,7 +698,8 @@ static inline PolyAddrSpace poly_bufferize_arg_addrspace(PolyArg a) {
   return POLY_ADDR_GLOBAL;
 }
 static inline const char *poly_bufferize_arg_device(PolyArg a) {
-  if (a.kind == POLY_ARG_BUFFERIZE_OPTS && !a.bufferize_opts.device_is_tuple)
+  if (a.kind == POLY_ARG_BUFFERIZE_OPTS && !a.bufferize_opts.device_is_tuple &&
+      !a.bufferize_opts.device_is_int)
     return a.bufferize_opts.device;
   return NULL;
 }
