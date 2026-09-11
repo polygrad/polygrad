@@ -23,6 +23,42 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
+TEST(codegen, tail_gpudims_unit_cap) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *r = poly_range(ctx, 2, 0, POLY_AXIS_GLOBAL);
+  PolyUOp *sink = poly_test_kernel_sink(ctx, &r, 1, "unit_cap");
+  PolyUOp *out = poly_add_gpudims_ex(ctx, sink, (PolyRendererCaps){.global_max = {1, 2, 2}});
+  bool correct =
+      out && out->src[0]->op == POLY_OP_SPECIAL && strcmp(out->src[0]->arg.str, "gidx1") == 0;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
+TEST(codegen, tail_gpudims_range_key_precedence) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *global = poly_range(ctx, 4, 0, POLY_AXIS_GLOBAL);
+  PolyUOp *local = poly_range(ctx, 4, 0, POLY_AXIS_LOCAL);
+  PolyUOp *reduce = poly_range(ctx, 4, 0, POLY_AXIS_REDUCE);
+  PolyUOp *src[] = {global, local};
+  PolyUOp *out = poly_add_gpudims(ctx, poly_test_kernel_sink(ctx, src, 2, "local_last"));
+  bool local_last = out && out->src[0] == out->src[1] && out->src[0]->op == POLY_OP_SPECIAL &&
+                    strcmp(out->src[0]->arg.str, "lidx0") == 0;
+  src[0] = reduce;
+  src[1] = global;
+  out = poly_add_gpudims(ctx, poly_test_kernel_sink(ctx, src, 2, "reduce_first"));
+  bool preserve_reduce = out && out->src[0] == reduce && out->src[1]->op == POLY_OP_SPECIAL;
+  src[0] = global;
+  src[1] = reduce;
+  PolyUOp *sink = poly_test_kernel_sink(ctx, src, 2, "reduce_last");
+  bool reduce_last = poly_add_gpudims(ctx, sink) == sink;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(local_last);
+  ASSERT_TRUE(preserve_reduce);
+  ASSERT_TRUE(reduce_last);
+  PASS();
+}
+
 /* Pinned coalesce.py chooses width on the ungated coordinate using UOp.divides,
  * including ParamArg.multiple_of, then reapplies the predicate to SHRINK. */
 static int bundle_coalesced_loads(PolyDType dtype, bool masked, bool aligned) {

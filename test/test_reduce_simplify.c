@@ -20,6 +20,112 @@
 /* helpers */
 
 #ifdef POLY_TESTING
+TEST(reduce_simplify, tail_invalid_guard_moves_outside_reduce) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *r = poly_range(ctx, 8, 0, POLY_AXIS_REDUCE);
+  PolyUOp *gate = poly_uop_variable(ctx, "gate", 0, 1, POLY_BOOL, 1, true);
+  PolyUOp *invalid = poly_uop_const(ctx, poly_arg_invalid(), POLY_WEAKINT);
+  PolyUOp *v = poly_uop3(ctx, POLY_OP_WHERE, POLY_WEAKINT, gate, r, invalid, poly_arg_none());
+  PolyUOp *src[] = {v, r};
+  PolyUOp *red =
+      poly_uop(ctx, POLY_OP_REDUCE, POLY_WEAKINT, src, 2, poly_arg_reduce(POLY_OP_ADD, 0));
+  PolyUOp *out = poly_test_reduce_collapse_rewrite(ctx, red);
+  bool correct = out && out->op == POLY_OP_WHERE && out->src[0] == gate && out->src[2] == invalid &&
+                 out->src[1]->op == POLY_OP_REDUCE && out->src[1]->src[0] == r &&
+                 out->src[1]->src[1] == r;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
+TEST(reduce_simplify, tail_positive_factor_uses_core_subtraction) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *r = poly_range(ctx, 8, 0, POLY_AXIS_REDUCE);
+  PolyUOp *y = poly_uop_variable(ctx, "factor", 1, 3, POLY_WEAKINT, 1, true);
+  PolyUOp *c = poly_const_like_int(ctx, r, 10);
+  PolyUOp *expr = poly_alu2(ctx, POLY_OP_CMPLT, poly_mul(ctx, r, y), c);
+  PolyUOp *out = poly_test_reduce_collapse_rewrite(ctx, expr);
+  PolyUOp *cy = poly_add(ctx, c, y);
+  PolyUOp *rhs =
+      poly_binop(ctx, POLY_OP_FLOORDIV, poly_sub(ctx, cy, poly_const_like_int(ctx, cy, 1)), y);
+  bool exact = out && out->op == POLY_OP_CMPLT && out->src[0] == r && out->src[1] == rhs;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(exact);
+  PASS();
+}
+
+static PolyUOp *tail_external_reduction(PolyCtx *ctx, int width, PolyUOp **external) {
+  PolyUOp *r = poly_range(ctx, 8, 0, POLY_AXIS_REDUCE);
+  PolyUOp *cond = poly_alu2(ctx, POLY_OP_CMPLT, r, poly_const_like_int(ctx, r, 1));
+  PolyUOp *zero = poly_uop_const(ctx, poly_arg_int(0), POLY_INT64);
+  PolyUOp *value = zero;
+  for (int i = 0; i < width; i++) {
+    char name[24];
+    snprintf(name, sizeof(name), "v%d", i);
+    external[i] =
+        poly_cast(ctx, poly_uop_variable(ctx, name, 0, 9, POLY_INT32, 1, true), POLY_INT64);
+    PolyUOp *v =
+        poly_uop3(ctx, POLY_OP_WHERE, POLY_INT64, cond, external[i], zero, poly_arg_none());
+    value = poly_add(ctx, value, v);
+  }
+  PolyUOp *src[] = {value, r};
+  return poly_uop(ctx, POLY_OP_REDUCE, POLY_INT64, src, 2, poly_arg_reduce(POLY_OP_ADD, 0));
+}
+
+TEST(reduce_simplify, tail_more_than_256_external_values) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *external[270];
+  PolyUOp *out = poly_test_reduce_collapse(ctx, tail_external_reduction(ctx, 270, external));
+  bool correct = out && poly_no_range(ctx, out);
+  int n = 0;
+  PolyUOp **topo = out ? poly_toposort(ctx, out, &n) : NULL;
+  for (int i = 0; correct && i < 270; i++) {
+    bool found = false;
+    for (int j = 0; j < n; j++)
+      found |= topo[j] == external[i];
+    correct &= found;
+  }
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
+TEST(reduce_simplify, tail_failed_restore_does_not_publish_parameters) {
+  bool correct = true;
+  for (int fail = 0; fail < 2; fail++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyUOp *external[1];
+    PolyUOp *red = tail_external_reduction(ctx, 1, external);
+    poly_test_simplify_fail_after(fail);
+    PolyUOp *out = poly_test_reduce_collapse(ctx, red);
+    poly_test_simplify_fail_after(-1);
+    correct &= out == NULL;
+    out = poly_test_reduce_collapse(ctx, red);
+    correct &= out == external[0];
+    poly_ctx_destroy(ctx);
+  }
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
+TEST(reduce_simplify, tail_failed_load_query_is_not_absence) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *buf = poly_test_program_param(ctx, POLY_INT32, 1, 0);
+  PolyUOp *idx = poly_const_int(ctx, 0);
+  PolyUOp *x = poly_cast(ctx, poly_uop_index(ctx, buf, &idx, 1), POLY_WEAKINT);
+  PolyUOp *sum = poly_add(ctx, x, poly_const_like_int(ctx, x, 1));
+  PolyUOp *expr = poly_alu2(ctx, POLY_OP_CMPLT, sum, poly_const_like_int(ctx, x, 8));
+  poly_test_simplify_fail_after(0);
+  PolyUOp *out = poly_pm_rewrite(poly_pm_load_collapse(), ctx, expr);
+  poly_test_simplify_fail_after(-1);
+  bool rejected = out == NULL;
+  bool recovers = poly_pm_rewrite(poly_pm_load_collapse(), ctx, expr) != NULL;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(rejected);
+  ASSERT_TRUE(recovers);
+  PASS();
+}
+
 TEST(reduce_simplify, bundle_interval_exact_count) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *n = poly_uop_const(ctx, poly_arg_int(INT64_C(9007199254740995)), POLY_WEAKINT);

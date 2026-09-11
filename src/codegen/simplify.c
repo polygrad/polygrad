@@ -6,6 +6,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <limits.h>
 
 #include "uop/upat.h"
 #include "polygrad.h"
@@ -14,6 +15,33 @@
 #include "schedule/indexing.h"
 #include "tensor.h"
 #include "utils.h"
+
+#ifdef POLY_TESTING
+static _Thread_local int simplify_fail_after = -1;
+void poly_test_simplify_fail_after(int count) {
+  simplify_fail_after = count;
+}
+#endif
+
+static bool simplify_operation_allowed(void) {
+#ifdef POLY_TESTING
+  if (simplify_fail_after == 0) {
+    simplify_fail_after = -1;
+    return false;
+  }
+  if (simplify_fail_after > 0) --simplify_fail_after;
+#endif
+  return true;
+}
+
+/* A failed inverse substitution must not publish the temporary PARAM graph.
+ * Use the shared status-returning owner, not input-on-failure convenience. */
+static PolyUOp *collapse_substitute(PolyCtx *ctx, PolyUOp *u, PolyUOp **from, PolyUOp **to, int n) {
+  PolyUOp *out = NULL;
+  if (!simplify_operation_allowed() || poly_uop_substitute_many(ctx, &u, 1, from, to, n, &out) != 0)
+    return NULL;
+  return out;
+}
 
 /* tinygrad@2026-08-22/a9069c177a9d codegen/simplify.py:flatten_range. */
 static PolyUOp *flatten_range(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
@@ -610,10 +638,9 @@ static PolyUOp *rule_collapse_lift_mul_from_cmplt(
     poly_uop_minmax(ctx, y, &y_vmin, &y_vmax);
     if (y_vmin <= 0) continue;
     /* x < ((c + y - 1) // y) */
-    PolyUOp *one = typed_const(ctx, c->dtype, 1);
-    PolyUOp *cy1 = poly_alu2(ctx, POLY_OP_ADD, c, y);
-    PolyUOp *cy1m1 = poly_alu2(ctx, POLY_OP_SUB, cy1, one);
-    PolyUOp *div = poly_alu2(ctx, POLY_OP_FLOORDIV, cy1m1, y);
+    PolyUOp *cy1 = poly_add(ctx, c, y);
+    PolyUOp *cy1m1 = poly_sub(ctx, cy1, poly_const_like_int(ctx, cy1, 1));
+    PolyUOp *div = poly_binop(ctx, POLY_OP_FLOORDIV, cy1m1, y);
     return poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, x, div, poly_arg_none());
   }
   return NULL;
@@ -767,6 +794,24 @@ static PolyUOp *collapse_reduce_value(PolyCtx *ctx, PolyUOp *red, PolyUOp *value
   return out;
 }
 
+/* simplify.py: an independent invalid guard remains outside the reduction;
+ * Invalid is not a numeric zero or an accumulated value. */
+static PolyUOp *rule_collapse_invalid_guard(PolyCtx *ctx, PolyUOp *red, const PolyBindings *b) {
+  (void)b;
+  if (red->arg.kind != POLY_ARG_REDUCE || red->arg.reduce.op != POLY_OP_ADD || red->n_src < 2)
+    return NULL;
+  PolyUOp *value = red->src[0];
+  if (value->op != POLY_OP_WHERE || value->n_src != 3 || value->src[2]->op != POLY_OP_CONST ||
+      value->src[2]->arg.kind != POLY_ARG_INVALID || !poly_no_range(ctx, value->src[0]))
+    return NULL;
+  PolyUOp *reduced = collapse_reduce_value(ctx, red, value->src[1]);
+  return reduced ? poly_uop3(
+                       ctx, POLY_OP_WHERE, reduced->dtype, value->src[0], reduced, value->src[2],
+                       poly_arg_none()
+                   )
+                 : NULL;
+}
+
 /* Rule 6: reduce_add_distribute
  *   (x+y).reduce_add(*ranges) -> x.reduce_add(*ranges) + y.reduce_add(*ranges)
  * tinygrad simplify.py:113 */
@@ -885,8 +930,10 @@ static bool collapse_gate(PolyUOp *x, void *user_data) {
 
 static PolyUOp *reduce_collapse(PolyCtx *ctx, PolyUOp *red, PolyUOp *u, PolyPatternMatcher *pm) {
   PolyUOpCache *cache = poly_uop_cache_new();
+  if (!cache) return NULL;
   PolyMap *included_map = NULL;
   PolyMap *replaces_map = NULL;
+  PolyUOp **from_arr = NULL, **to_arr = NULL;
   bool dbg = getenv("POLY_DEBUG_REDUCE_SIMPLIFY") != NULL;
   PolyScratchMark scratch = poly_ctx_scratch_mark(ctx);
 
@@ -929,10 +976,21 @@ static PolyUOp *reduce_collapse(PolyCtx *ctx, PolyUOp *red, PolyUOp *u, PolyPatt
      * mint a fresh bounded ALU PARAM carrying its current vmin/vmax. */
     if (replaces_map) poly_map_destroy(replaces_map);
     replaces_map = poly_map_new(16);
-    PolyUOp *from_arr[256];
-    PolyUOp *to_arr[256];
+    /* Each external dependency occurs on an included source edge. This is
+     * an upper bound on Tinygrad's replaces dictionary, not a rank limit. */
+    size_t capacity = 0;
+    for (int i = 0; i < n_inc; i++) {
+      if (capacity > INT_MAX - (size_t)included[i]->n_src) goto fail;
+      capacity += included[i]->n_src;
+    }
+    if (capacity > SIZE_MAX / sizeof(*from_arr)) goto fail;
+    free(from_arr);
+    free(to_arr);
+    from_arr = capacity ? malloc(capacity * sizeof(*from_arr)) : NULL;
+    to_arr = capacity ? malloc(capacity * sizeof(*to_arr)) : NULL;
+    if (capacity && (!from_arr || !to_arr)) goto fail;
     int n_repl = 0;
-    char namebuf[16];
+    char namebuf[32];
     for (int i = 0; i < n_inc; i++) {
       PolyUOp *node = included[i];
       for (uint16_t k = 0; k < node->n_src; k++) {
@@ -944,7 +1002,7 @@ static PolyUOp *reduce_collapse(PolyCtx *ctx, PolyUOp *red, PolyUOp *u, PolyPatt
         poly_uop_minmax_ex(ctx, s, cache, &vmin, &vmax);
         snprintf(namebuf, sizeof(namebuf), "in%d", n_repl);
         PolyUOp *dv = make_reduce_param(ctx, namebuf, s->dtype, vmin, vmax);
-        if (n_repl >= 256) goto fail;
+        if (!dv) goto fail;
         from_arr[n_repl] = s;
         to_arr[n_repl] = dv;
         poly_map_set(replaces_map, poly_ptr_hash(s), s, dv, poly_ptr_eq);
@@ -954,12 +1012,15 @@ static PolyUOp *reduce_collapse(PolyCtx *ctx, PolyUOp *red, PolyUOp *u, PolyPatt
 
     /* Substitute, build collapse form, run pm_reduce_collapse, check
      * no_range, substitute back. */
-    PolyUOp *substituted = poly_uop_substitute(ctx, u, from_arr, to_arr, n_repl);
+    PolyUOp *substituted = collapse_substitute(ctx, u, from_arr, to_arr, n_repl);
+    if (!substituted) goto fail;
     PolyUOp *one_range_srcs[2] = {substituted, r};
     PolyUOp *collapse_form = poly_uop(
-        ctx, POLY_OP_REDUCE, red->dtype, one_range_srcs, 2, poly_arg_reduce(POLY_OP_ADD, 0)
+        ctx, POLY_OP_REDUCE, substituted->dtype, one_range_srcs, 2, poly_arg_reduce(POLY_OP_ADD, 0)
     );
+    if (!collapse_form) goto fail;
     PolyUOp *sink = poly_graph_rewrite(ctx, collapse_form, pm);
+    if (!sink) goto fail;
     if (dbg)
       fprintf(
           stderr, "  [reduce_collapse] n_repl=%d sink_op=%s no_range=%d\n", n_repl,
@@ -967,11 +1028,14 @@ static PolyUOp *reduce_collapse(PolyCtx *ctx, PolyUOp *red, PolyUOp *u, PolyPatt
       );
     if (!poly_no_range_ex(ctx, sink, cache)) goto fail;
     /* Substitute the original external expressions back after collapse. */
-    u = poly_uop_substitute(ctx, sink, to_arr, from_arr, n_repl);
+    u = collapse_substitute(ctx, sink, to_arr, from_arr, n_repl);
+    if (!u) goto fail;
   }
 
   if (included_map) poly_map_destroy(included_map);
   if (replaces_map) poly_map_destroy(replaces_map);
+  free(from_arr);
+  free(to_arr);
   poly_ctx_scratch_rewind(ctx, scratch);
   poly_uop_cache_destroy(cache);
   return u;
@@ -979,6 +1043,8 @@ static PolyUOp *reduce_collapse(PolyCtx *ctx, PolyUOp *red, PolyUOp *u, PolyPatt
 fail:
   if (included_map) poly_map_destroy(included_map);
   if (replaces_map) poly_map_destroy(replaces_map);
+  free(from_arr);
+  free(to_arr);
   poly_ctx_scratch_rewind(ctx, scratch);
   poly_uop_cache_destroy(cache);
   return NULL;
@@ -1033,6 +1099,7 @@ static PolyPatternMatcher *pm_reduce_collapse_base_get(void) {
       {poly_upat_op(POLY_OP_REDUCE, NULL, 0, "red"), rule_collapse_fold_range_below},
       {poly_upat_op(POLY_OP_REDUCE, NULL, 0, "red"), rule_collapse_fold_range_two_sided},
       {poly_upat_op(POLY_OP_REDUCE, NULL, 0, "red"), rule_collapse_fold_range_above},
+      {poly_upat_op(POLY_OP_REDUCE, NULL, 0, "red"), rule_collapse_invalid_guard},
       {poly_upat_op(POLY_OP_REDUCE, NULL, 0, "red"), rule_collapse_reduce_add_distribute},
       {poly_upat_op(POLY_OP_REDUCE, NULL, 0, "red"), rule_collapse_and_on_where},
       {poly_upat_op(POLY_OP_MUL, NULL, 0, "mul"), rule_collapse_mul_casted_bool},
@@ -1052,6 +1119,9 @@ static PolyPatternMatcher *pm_reduce_collapse_get(void) {
 #ifdef POLY_TESTING
 PolyUOp *poly_test_reduce_collapse_rewrite(PolyCtx *ctx, PolyUOp *u) {
   return poly_pm_rewrite(pm_reduce_collapse_base_get(), ctx, u);
+}
+PolyUOp *poly_test_reduce_collapse(PolyCtx *ctx, PolyUOp *u) {
+  return reduce_collapse(ctx, u, u->src[0], pm_reduce_collapse_get());
 }
 #endif
 
@@ -1180,10 +1250,11 @@ static PolyPatternMatcher *pm_symbolic_reduce_simplify_get(void) {
 
 /* simplify.py: no_load / pm_load_collapse */
 
-static bool no_load(PolyCtx *ctx, PolyUOp *u) {
+/* C traversal can fail: neither absence nor presence is then established. */
+static int no_load(PolyCtx *ctx, PolyUOp *u) {
   int n = 0;
-  PolyUOp **topo = poly_toposort_alloc(ctx, u, &n);
-  if (!topo) return true;
+  PolyUOp **topo = simplify_operation_allowed() ? poly_toposort_alloc(ctx, u, &n) : NULL;
+  if (!topo) return -1;
   bool ret = true;
   for (int i = 0; i < n; i++)
     if (topo[i] && topo[i]->op == POLY_OP_INDEX) {
@@ -1200,12 +1271,13 @@ static PolyUOp *undo_loaded_index_math(PolyCtx *ctx, PolyUOp *cmplt, const PolyB
   PolyUOp *lhs = cmplt->src[0];
   PolyUOp *c = cmplt->src[1];
   if (lhs->op != POLY_OP_ADD || lhs->n_src != 2) return NULL;
-  if (!no_load(ctx, c)) return NULL;
+  if (no_load(ctx, c) != 1) return NULL;
   for (int swap = 0; swap < 2; swap++) {
     PolyUOp *x = lhs->src[swap], *y = lhs->src[swap ^ 1];
     /* Pinned pm_load_collapse restricts x to weakint: moving arithmetic
      * across a fixed-width comparison would change overflow semantics. */
-    if (!poly_dtype_eq(x->dtype, POLY_WEAKINT) || no_load(ctx, x) || !no_load(ctx, y)) continue;
+    if (!poly_dtype_eq(x->dtype, POLY_WEAKINT) || no_load(ctx, x) != 0 || no_load(ctx, y) != 1)
+      continue;
     return poly_alu2(ctx, POLY_OP_CMPLT, x, poly_sub(ctx, c, y));
   }
   return NULL;

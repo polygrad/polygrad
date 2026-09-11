@@ -134,6 +134,9 @@ static bool gpudim_safe_mul_i64(int64_t a, int64_t b, int64_t *out) {
 
 static int64_t gpudim_smallest_divisor(int64_t x) {
   if (x <= 1) return 1;
+  /* Pinned _split_dims includes ceil(sqrt(x)); only x=2 has a divisor
+   * above floor(sqrt(x)) in that interval. Avoid floating-point bounds. */
+  if (x == 2) return 2;
   for (int64_t d = 2; d <= x / d; d++)
     if ((x % d) == 0) return d;
   return 1;
@@ -324,32 +327,33 @@ PolyUOp *poly_add_gpudims_ex(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps)
     }
   }
   size_t n = (size_t)n_topo;
-  if (n > SIZE_MAX / (4 * sizeof(*storage)) || n > SIZE_MAX / (2 * sizeof(*dims))) goto done;
-  storage = calloc(4 * n, sizeof(*storage));
+  if (n > SIZE_MAX / (5 * sizeof(*storage)) || n > SIZE_MAX / (2 * sizeof(*dims))) goto done;
+  storage = calloc(5 * n, sizeof(*storage));
   subs = malloc(2 * n * sizeof(*subs));
   dims = malloc(2 * n * sizeof(*dims));
   if (!storage || !subs || !dims) goto done;
   PolyUOp **global_ranges = storage, **local_ranges = storage + n;
   PolyUOp **global_idxs = storage + 2 * n, **local_idxs = storage + 3 * n;
+  PolyUOp **all_ranges = storage + 4 * n;
   GpuDimExpr *global_dims = dims, *local_dims = dims + n;
   PolyUOp **from = subs, **to = subs + n;
-  int n_global = 0, n_local = 0, n_sub = 0;
+  int n_global = 0, n_local = 0, n_sub = 0, n_ranges = 0;
+  /* Tinygrad's all_ranges dictionary resolves the last occurrence of a key
+   * before deciding whether that key denotes global, local or serial work. */
   for (int i = 0; i < n_topo; i++) {
     PolyUOp *r = topo[i];
     if (r->op != POLY_OP_RANGE || r->n_src != 1 || !poly_arg_is_range(r->arg)) continue;
+    int existing = find_range_axis_key(r, all_ranges, n_ranges);
+    all_ranges[existing >= 0 ? existing : n_ranges++] = r;
+  }
+  for (int i = 0; i < n_ranges; i++) {
+    PolyUOp *r = all_ranges[i];
     PolyAxisType type = poly_range_axis_type(r->arg);
-    PolyUOp **ranges;
-    int *count;
     if (type == POLY_AXIS_GLOBAL || type == POLY_AXIS_THREAD) {
-      ranges = global_ranges;
-      count = &n_global;
+      global_ranges[n_global++] = r;
     } else if (type == POLY_AXIS_WARP || type == POLY_AXIS_LOCAL || type == POLY_AXIS_GROUP_REDUCE) {
-      ranges = local_ranges;
-      count = &n_local;
-    } else
-      continue;
-    int existing = find_range_axis_key(r, ranges, *count);
-    ranges[existing >= 0 ? existing : (*count)++] = r;
+      local_ranges[n_local++] = r;
+    }
   }
   if (n_global == 0 && n_local == 0) {
     ret = sink;
@@ -387,6 +391,10 @@ PolyUOp *poly_add_gpudims_ex(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps)
   for (int i = 0; i < n_topo; i++) {
     PolyUOp *u = topo[i];
     if (u->op == POLY_OP_RANGE) {
+      /* Pinned add_gpudims checks r.arg[1], not the trailing type field:
+       * the guard applies to ordinary (axis, REDUCE) tuples. */
+      if (poly_range_n_extra(u->arg) == 0 && poly_range_axis_type(u->arg) == POLY_AXIS_REDUCE)
+        continue;
       int axis = find_range_axis_key(u, global_ranges, n_global);
       PolyUOp *replacement = axis >= 0 ? global_idxs[axis] : NULL;
       if (!replacement && (axis = find_range_axis_key(u, local_ranges, n_local)) >= 0)

@@ -38,6 +38,8 @@ PolyUOp *poly_apply_reduce_unparented_only(PolyCtx *ctx, PolyUOp *sink);
 #ifdef POLY_TESTING
 /* One pinned pm_reduce_collapse callback, before symbolic cleanup. */
 PolyUOp *poly_test_reduce_collapse_rewrite(PolyCtx *ctx, PolyUOp *u);
+PolyUOp *poly_test_reduce_collapse(PolyCtx *ctx, PolyUOp *u);
+void poly_test_simplify_fail_after(int count);
 #endif
 
 #ifdef __cplusplus
