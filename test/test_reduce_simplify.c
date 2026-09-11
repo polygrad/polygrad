@@ -19,6 +19,137 @@
 
 /* helpers */
 
+#ifdef POLY_TESTING
+TEST(reduce_simplify, bundle_interval_exact_count) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *n = poly_uop_const(ctx, poly_arg_int(INT64_C(9007199254740995)), POLY_WEAKINT);
+  PolyUOp *r = poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, n, poly_arg_range(0, POLY_AXIS_REDUCE));
+  PolyUOp *cut = poly_uop_const(ctx, poly_arg_int(INT64_C(9007199254740993)), POLY_INT64);
+  PolyUOp *zero = poly_uop_const(ctx, poly_arg_int(0), POLY_INT64);
+  PolyUOp *one = poly_uop_const(ctx, poly_arg_int(1), POLY_INT64);
+  PolyUOp *v = poly_uop3(
+      ctx, POLY_OP_WHERE, POLY_INT64, poly_alu2(ctx, POLY_OP_CMPLT, r, cut), zero, one,
+      poly_arg_none()
+  );
+  PolyUOp *src[] = {v, r};
+  PolyUOp *red = poly_uop(ctx, POLY_OP_REDUCE, POLY_INT64, src, 2, poly_arg_reduce(POLY_OP_ADD, 0));
+  PolyUOp *out =
+      poly_graph_rewrite(ctx, poly_test_reduce_collapse_rewrite(ctx, red), poly_symbolic());
+  bool exact = out && out->op == POLY_OP_CONST && out->arg.kind == POLY_ARG_INT && out->arg.i == 2;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(exact);
+  PASS();
+}
+
+static bool bundle_wide_collapse(bool parameter_gate) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *src[41], *value = poly_uop_const(ctx, poly_arg_int(0), POLY_WEAKINT);
+  for (int i = 1; i <= 40; i++) {
+    src[i] = poly_range(ctx, 2, i - 1, POLY_AXIS_REDUCE);
+    value = poly_add(ctx, value, src[i]);
+  }
+  if (parameter_gate) {
+    PolyUOp *p = poly_uop_variable(ctx, "gate", 0, 1, POLY_BOOL, 1, true);
+    PolyUOp *gate = poly_alu2(
+        ctx, POLY_OP_AND, p, poly_alu2(ctx, POLY_OP_CMPLT, value, poly_const_int(ctx, 20))
+    );
+    value = poly_uop3(
+        ctx, POLY_OP_WHERE, POLY_WEAKINT, gate, value,
+        poly_uop_const(ctx, poly_arg_int(0), POLY_WEAKINT), poly_arg_none()
+    );
+  }
+  src[0] = value;
+  PolyUOp *red =
+      poly_uop(ctx, POLY_OP_REDUCE, value->dtype, src, 41, poly_arg_reduce(POLY_OP_ADD, 0));
+  PolyUOp *out = poly_test_reduce_collapse_rewrite(ctx, red);
+  bool correct = out && out->op == (parameter_gate ? POLY_OP_MUL : POLY_OP_ADD);
+  if (correct) {
+    int count = parameter_gate ? 1 : 2;
+    for (int i = 0; i < count; i++) {
+      PolyUOp *child = out->src[i];
+      correct &= child->op == POLY_OP_REDUCE && child->n_src == 41;
+      for (int j = 1; correct && j <= 40; j++)
+        correct &= child->src[j] == src[j];
+    }
+  }
+  poly_ctx_destroy(ctx);
+  return correct;
+}
+
+TEST(reduce_simplify, bundle_distribute_many_ranges) {
+  ASSERT_TRUE(bundle_wide_collapse(false));
+  PASS();
+}
+
+TEST(reduce_simplify, bundle_parameter_gate_many_ranges) {
+  ASSERT_TRUE(bundle_wide_collapse(true));
+  PASS();
+}
+#endif
+
+/* pm_load_collapse may move loaded-index arithmetic only in the unbounded
+ * weakint domain. Moving fixed-width addition changes overflow semantics. */
+TEST(reduce_simplify, bundle_loaded_index_preserves_strong_overflow) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *buf = poly_test_program_param(ctx, POLY_INT32, 1, 0);
+  PolyUOp *zero = poly_const_int(ctx, 0);
+  PolyUOp *x = poly_uop_index(ctx, buf, &zero, 1);
+  PolyUOp *y = poly_uop_variable(ctx, "offset", 1, 3, POLY_INT32, 1, true);
+  PolyUOp *sum = poly_alu2(ctx, POLY_OP_ADD, x, y);
+  PolyUOp *before = poly_alu2(ctx, POLY_OP_CMPLT, sum, poly_const_like_int(ctx, x, 0));
+  PolyUOp *after = poly_graph_rewrite(ctx, before, poly_pm_load_collapse());
+  bool unchanged = before == after;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(unchanged);
+  PASS();
+}
+
+TEST(reduce_simplify, bundle_loaded_index_accepts_commuted_weak_add) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *buf = poly_test_program_param(ctx, POLY_INT32, 1, 0);
+  PolyUOp *zero = poly_const_int(ctx, 0);
+  PolyUOp *x = poly_cast(ctx, poly_uop_index(ctx, buf, &zero, 1), POLY_WEAKINT);
+  PolyUOp *y = poly_uop_variable(ctx, "offset", 1, 3, POLY_WEAKINT, 1, true);
+  PolyUOp *sum = poly_alu2(ctx, POLY_OP_ADD, y, x);
+  PolyUOp *before = poly_alu2(ctx, POLY_OP_CMPLT, sum, poly_const_like_int(ctx, x, 0));
+  PolyUOp *after = poly_graph_rewrite(ctx, before, poly_pm_load_collapse());
+  bool corrected = after != before && after->op == POLY_OP_CMPLT && after->src[0] == x &&
+                   after->src[1]->op == POLY_OP_ADD;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(corrected);
+  PASS();
+}
+
+TEST(reduce_simplify, bundle_unparented_many_ranges) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *src[41];
+  src[0] = poly_uop_const(ctx, poly_arg_int(7), POLY_INT64);
+  for (int i = 1; i <= 40; i++)
+    src[i] = poly_range(ctx, 2, i - 1, POLY_AXIS_REDUCE);
+  PolyUOp *red =
+      poly_uop(ctx, POLY_OP_REDUCE, POLY_INT64, src, 41, poly_arg_reduce(POLY_OP_MAX, 0));
+  PolyUOp *out = poly_graph_rewrite(ctx, red, poly_pm_reduce_unparented());
+  bool correct = out == src[0];
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
+TEST(reduce_simplify, bundle_unparented_exact_count) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *value = poly_uop_const(ctx, poly_arg_int(1), POLY_INT64);
+  PolyUOp *count = poly_uop_const(ctx, poly_arg_int(INT64_C(9007199254740993)), POLY_WEAKINT);
+  PolyUOp *range =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, count, poly_arg_range(0, POLY_AXIS_REDUCE));
+  PolyUOp *src[] = {value, range};
+  PolyUOp *red = poly_uop(ctx, POLY_OP_REDUCE, POLY_INT64, src, 2, poly_arg_reduce(POLY_OP_ADD, 0));
+  PolyUOp *out = poly_graph_rewrite(ctx, red, poly_pm_reduce_unparented());
+  bool exact = out->op == POLY_OP_MUL && out->src[0] == value && out->src[1] == count;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(exact);
+  PASS();
+}
+
 /* These regression checks inspect scheduled kernels after rangeify and
  * reduce_simplify, so they need the executable scheduled root instead of the
  * earlier public kernel-graph boundary. */
@@ -532,16 +663,18 @@ TEST(reduce_simplify, s2_loaded_index_add_lt_is_undone) {
   PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(8));
   PolyUOp *r = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_range(0, POLY_AXIS_LOOP));
   PolyUOp *idx = poly_uop2(ctx, POLY_OP_INDEX, POLY_INT32, p, r, poly_arg_none());
-  PolyUOp *lhs = poly_alu2(ctx, POLY_OP_ADD, idx, poly_const_int(ctx, 2));
-  PolyUOp *expr =
-      poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, lhs, poly_const_int(ctx, 8), poly_arg_none());
+  /* Pinned pm_load_collapse only undoes arithmetic in the weakint domain. */
+  PolyUOp *weak_idx = poly_cast(ctx, idx, POLY_WEAKINT);
+  PolyUOp *lhs = poly_alu2(ctx, POLY_OP_ADD, weak_idx, poly_const_like_int(ctx, weak_idx, 2));
+  PolyUOp *expr = poly_uop2(
+      ctx, POLY_OP_CMPLT, POLY_BOOL, lhs, poly_const_like_int(ctx, weak_idx, 8), poly_arg_none()
+  );
 
   PolyUOp *out = poly_graph_rewrite(ctx, expr, poly_pm_load_collapse());
 
   ASSERT_TRUE(out != expr);
   ASSERT_EQ(out->op, POLY_OP_CMPLT);
-  ASSERT_EQ(out->src[0]->op, POLY_OP_INDEX);
-  ASSERT_TRUE(out->src[0] == idx);
+  ASSERT_PTR_EQ(out->src[0], weak_idx);
 
   poly_ctx_destroy(ctx);
   PASS();

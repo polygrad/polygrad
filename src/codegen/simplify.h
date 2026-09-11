@@ -35,6 +35,11 @@ PolyUOp *poly_apply_symbolic_reduce_simplify(PolyCtx *ctx, PolyUOp *sink);
  * poly_apply_reduce_simplify instead. */
 PolyUOp *poly_apply_reduce_unparented_only(PolyCtx *ctx, PolyUOp *sink);
 
+#ifdef POLY_TESTING
+/* One pinned pm_reduce_collapse callback, before symbolic cleanup. */
+PolyUOp *poly_test_reduce_collapse_rewrite(PolyCtx *ctx, PolyUOp *u);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

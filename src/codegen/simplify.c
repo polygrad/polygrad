@@ -494,35 +494,8 @@ static PolyUOp *typed_const(PolyCtx *ctx, PolyDType dt, double v) {
   return poly_uop0(ctx, POLY_OP_CONST, dt, poly_arg_int((int64_t)v));
 }
 
-/* Cast that const-folds when src is a CONST in any kind, otherwise emits
- * a CAST UOp. Mirrors tinygrad's UOp.cast collapsing through symbolic. */
-static PolyUOp *cast_to(PolyCtx *ctx, PolyUOp *x, PolyDType dt) {
-  if (poly_dtype_eq(x->dtype, dt)) return x;
-  if (x->op == POLY_OP_CONST) {
-    double v = (x->arg.kind == POLY_ARG_INT)     ? (double)x->arg.i
-               : (x->arg.kind == POLY_ARG_FLOAT) ? x->arg.f
-               : (x->arg.kind == POLY_ARG_BOOL)  ? (x->arg.b ? 1.0 : 0.0)
-                                                 : 0.0;
-    return typed_const(ctx, dt, v);
-  }
-  return poly_cast(ctx, x, dt);
-}
-
-/* D2: reduce_unparented *
- * Tinygrad source (codegen/simplify.py:77-92):
- *
- *   def reduce_unparented(red):
- *     if red.arg not in {ADD, MAX, MUL}: return None
- *     parented, unparented = partition(red.src[1:], lambda x: x in red.src[0].ranges)
- *     if not unparented: return None
- *     ret = red.replace(src=(red.src[0],)+tuple(parented)) if parented or
- *           red.dtype != red.src[0].dtype else red.src[0]
- *     if red.arg is ADD: ret *= product(r.src[0].cast(...) for r in unparented)
- *     if red.arg is MUL: ret **= product(r.src[0].cast(...) for r in unparented)
- *     return ret
- *
- * Verified against tg_reduce_unparented_gt.py cases A-F.
- */
+/* simplify.py:reduce_unparented preserves each original count and applies
+ * ordinary UOp arithmetic, including weak/strong promotion. */
 static PolyUOp *reduce_unparented(PolyCtx *ctx, PolyUOp *red, const PolyBindings *b) {
   (void)b;
   if (red->arg.kind != POLY_ARG_REDUCE) return NULL;
@@ -534,47 +507,60 @@ static PolyUOp *reduce_unparented(PolyCtx *ctx, PolyUOp *red, const PolyBindings
 
   PolyUOp *value = red->src[0];
   PolyUOpCache *cache = poly_uop_cache_new();
-  PolyUOp *parented[POLY_MAX_DIMS + 1];
-  PolyUOp *unparented[POLY_MAX_DIMS + 1];
+  /* REDUCE arity is independent of Tensor rank. These are the two lists
+   * returned by Tinygrad's partition, not fixed-rank shape storage. */
+  PolyUOp **parented = malloc((size_t)red->n_src * sizeof(*parented));
+  PolyUOp **unparented = malloc((size_t)red->n_src * sizeof(*unparented));
+  if (!cache || !parented || !unparented) {
+    poly_uop_cache_destroy(cache);
+    free(parented);
+    free(unparented);
+    return NULL;
+  }
   int n_parented = 0, n_unparented = 0;
   for (uint16_t i = 1; i < red->n_src; i++) {
     PolyUOp *r = red->src[i];
     if (poly_uop_in_ranges_ex(ctx, value, r, cache))
-      parented[n_parented++] = r;
+      parented[++n_parented] = r;
     else
       unparented[n_unparented++] = r;
   }
   poly_uop_cache_destroy(cache);
 
-  if (n_unparented == 0) return NULL;
+  if (n_unparented == 0) {
+    free(parented);
+    free(unparented);
+    return NULL;
+  }
 
   PolyUOp *ret;
   if (n_parented > 0 || !poly_dtype_eq(red->dtype, value->dtype)) {
-    PolyUOp *new_srcs[POLY_MAX_DIMS + 2];
-    new_srcs[0] = value;
-    for (int i = 0; i < n_parented; i++)
-      new_srcs[i + 1] = parented[i];
-    ret = poly_uop(ctx, POLY_OP_REDUCE, red->dtype, new_srcs, 1 + n_parented, red->arg);
+    parented[0] = value;
+    ret = poly_uop_tagged_arg(
+        ctx, POLY_OP_REDUCE, red->dtype, parented, 1 + n_parented, red->arg, red->tag, red->tag_arg
+    );
   } else {
     ret = value;
   }
 
   if (rop == POLY_OP_ADD || rop == POLY_OP_MUL) {
     PolyOps comb = (rop == POLY_OP_ADD) ? POLY_OP_MUL : POLY_OP_POW;
-    for (int i = 0; i < n_unparented; i++) {
+    for (int i = 0; ret && i < n_unparented; i++) {
       PolyUOp *count = unparented[i]->src[0];
-      ret = poly_alu2(ctx, comb, ret, cast_to(ctx, count, ret->dtype));
+      /* Pinned reduce_unparented multiplies by the original weak count.
+       * Converting it through double loses integers above 2^53. */
+      ret = poly_binop(ctx, comb, ret, count);
     }
   }
   /* MAX: drop unparented ranges with no multiplier */
+  free(parented);
+  free(unparented);
   return ret;
 }
 
 /* D3: pm_reduce_collapse rules */
 
-static PolyUOp *mul_neg_one(PolyCtx *ctx, PolyUOp *x);
-
-/* Rule 1: ((x+y).or_casted() < c) -> x < (c.cast(y.dtype)-y)  if no_range(y,c)
+/* Rule 1: ((x+y).or_casted() < c) -> x < (c-y)  if no_range(y,c)
  * tinygrad simplify.py:96 */
 static PolyUOp *rule_collapse_lift_add_from_cmplt(
     PolyCtx *ctx,
@@ -595,9 +581,7 @@ static PolyUOp *rule_collapse_lift_add_from_cmplt(
     /* UPat builds ADD as commutative and tries both source permutations.
      * Mirror that here so the range-bearing term can be either side. */
     if (!poly_no_range(ctx, y)) continue;
-    /* tinygrad sub() lowers to add(-y), not a dedicated SUB op. */
-    PolyUOp *c_cast = cast_to(ctx, c, y->dtype);
-    PolyUOp *rhs_new = poly_alu2(ctx, POLY_OP_ADD, c_cast, mul_neg_one(ctx, y));
+    PolyUOp *rhs_new = poly_sub(ctx, c, y);
     return poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, x, rhs_new, poly_arg_none());
   }
   return NULL;
@@ -661,33 +645,17 @@ static bool match_where_cmplt_reduce(
   return true;
 }
 
-/* tinygrad builds minimum via _inverse().maximum(...)._inverse().
- * For signed ints/floats, _inverse is x * (-1), not a unary NEG op. */
-static PolyUOp *mul_neg_one(PolyCtx *ctx, PolyUOp *x) {
-  return poly_alu2(ctx, POLY_OP_MUL, x, typed_const(ctx, x->dtype, -1));
-}
-
-/* Helper: build N.max(0).min(r.src[0]).cast(val.dtype) * val
- * where N is the integer expression "remaining count" the rule produces. */
+/* Pinned interval count: clamp in the count domain, then use ordinary
+ * multiplication. Forcing counts through a value dtype can lose integers. */
 static PolyUOp *build_count_mul_val(PolyCtx *ctx, PolyUOp *N, PolyUOp *r, PolyUOp *val) {
-  /* N.maximum(0) -> MAX(N, 0) in N's dtype */
-  PolyUOp *zero_n = typed_const(ctx, N->dtype, 0);
-  PolyUOp *clamped_lo = poly_alu2(ctx, POLY_OP_MAX, N, zero_n);
-  /* .minimum(r.src[0]) -> (-x).maximum(-count) * (-1). */
-  PolyUOp *count_in_n = cast_to(ctx, r->src[0], N->dtype);
-  PolyUOp *neg_a = mul_neg_one(ctx, clamped_lo);
-  PolyUOp *neg_b = mul_neg_one(ctx, count_in_n);
-  PolyUOp *max_neg = poly_alu2(ctx, POLY_OP_MAX, neg_a, neg_b);
-  PolyUOp *clamped_hi = mul_neg_one(ctx, max_neg);
-  /* .cast(val.dtype) */
-  PolyUOp *cast_n = cast_to(ctx, clamped_hi, val->dtype);
-  /* * val */
-  return poly_alu2(ctx, POLY_OP_MUL, cast_n, val);
+  PolyUOp *clamped =
+      poly_minimum(ctx, poly_maximum(ctx, N, poly_const_like_int(ctx, N, 0)), r->src[0]);
+  return poly_mul(ctx, clamped, val);
 }
 
 /* Rule 3: fold_range_below
  *   ((r<cut).where(0, val)).reduce_add(r)
- *     -> (r.src[0]-cut).maximum(0).minimum(r.src[0]).cast(val.dtype) * val
+ *     -> (r.src[0]-cut.maximum(0)).maximum(0).minimum(r.src[0]) * val
  *  iff no_range(val).
  * tinygrad simplify.py:103 */
 static PolyUOp *rule_collapse_fold_range_below(PolyCtx *ctx, PolyUOp *red, const PolyBindings *b) {
@@ -702,15 +670,13 @@ static PolyUOp *rule_collapse_fold_range_below(PolyCtx *ctx, PolyUOp *red, const
   if (!tval_is_zero) return NULL;
   PolyUOp *val = fval;
   if (!poly_no_range(ctx, val)) return NULL;
-  /* N = r.src[0] + (-cut) for tinygrad algebra parity. */
-  PolyUOp *cut_in_r = cast_to(ctx, cut, r->src[0]->dtype);
-  PolyUOp *N = poly_alu2(ctx, POLY_OP_ADD, r->src[0], mul_neg_one(ctx, cut_in_r));
+  PolyUOp *N = poly_sub(ctx, r->src[0], poly_maximum(ctx, cut, poly_const_like_int(ctx, cut, 0)));
   return build_count_mul_val(ctx, N, r, val);
 }
 
 /* Rule 5: fold_range_above
  *   ((r<cut).where(val, 0)).reduce_add(r)
- *     -> cut.maximum(0).minimum(r.src[0]).cast(val.dtype) * val
+ *     -> (cut.minimum(r.src[0])-r.const_like(0)).maximum(0).minimum(r.src[0]) * val
  *  iff no_range(val).
  * tinygrad simplify.py:109 */
 static PolyUOp *rule_collapse_fold_range_above(PolyCtx *ctx, PolyUOp *red, const PolyBindings *b) {
@@ -725,14 +691,13 @@ static PolyUOp *rule_collapse_fold_range_above(PolyCtx *ctx, PolyUOp *red, const
   if (!fval_is_zero) return NULL;
   PolyUOp *val = tval;
   if (!poly_no_range(ctx, val)) return NULL;
-  /* N = cut */
-  PolyUOp *N = cast_to(ctx, cut, r->src[0]->dtype);
+  PolyUOp *N = poly_sub(ctx, poly_minimum(ctx, cut, r->src[0]), poly_const_like_int(ctx, r, 0));
   return build_count_mul_val(ctx, N, r, val);
 }
 
 /* Rule 4: fold_range_two_sided
  *   (((r<lower).logical_not()) & (r<upper)).where(val,0).reduce_add(r)
- *     -> (upper.minimum(n) - lower.maximum(0)).maximum(0).minimum(n).cast(val.dtype) * val
+ *     -> (upper.minimum(n) - lower.maximum(0)).maximum(0).minimum(n) * val
  *  where n = r.src[0]. Polygrad's logical_not is CMPNE(x, true) (P5). The
  *  AND of two bool comparisons is POLY_OP_AND.
  * tinygrad simplify.py:105-107 */
@@ -781,20 +746,25 @@ static PolyUOp *rule_collapse_fold_range_two_sided(
   }
   if (!lower || !upper) return NULL;
   if (!poly_no_range(ctx, val)) return NULL;
-  /* n = r.src[0] */
-  PolyUOp *n = r->src[0];
-  /* upper.minimum(n) = (-upper).maximum(-n) * (-1) in n's dtype */
-  PolyUOp *upper_in_n = cast_to(ctx, upper, n->dtype);
-  PolyUOp *lower_in_n = cast_to(ctx, lower, n->dtype);
-  PolyUOp *neg_u = mul_neg_one(ctx, upper_in_n);
-  PolyUOp *neg_n = mul_neg_one(ctx, n);
-  PolyUOp *upper_min_n = mul_neg_one(ctx, poly_alu2(ctx, POLY_OP_MAX, neg_u, neg_n));
-  /* lower.maximum(0) = MAX(lower, 0) */
-  PolyUOp *zero = typed_const(ctx, n->dtype, 0);
-  PolyUOp *lower_max_0 = poly_alu2(ctx, POLY_OP_MAX, lower_in_n, zero);
-  /* N = upper.min(n) + (-lower.max(0)) for tinygrad algebra parity. */
-  PolyUOp *N = poly_alu2(ctx, POLY_OP_ADD, upper_min_n, mul_neg_one(ctx, lower_max_0));
+  PolyUOp *N = poly_sub(
+      ctx, poly_minimum(ctx, upper, r->src[0]),
+      poly_maximum(ctx, lower, poly_const_like_int(ctx, lower, 0))
+  );
   return build_count_mul_val(ctx, N, r, val);
+}
+
+/* UOp.reduce builds a fresh node with the value's dtype and the supplied
+ * range tuple. This compiler form must not run frontend axis admission. */
+static PolyUOp *collapse_reduce_value(PolyCtx *ctx, PolyUOp *red, PolyUOp *value) {
+  PolyUOp **src = malloc((size_t)red->n_src * sizeof(*src));
+  if (!src) return NULL;
+  src[0] = value;
+  for (int i = 1; i < red->n_src; i++)
+    src[i] = red->src[i];
+  PolyUOp *out =
+      poly_uop(ctx, POLY_OP_REDUCE, value->dtype, src, red->n_src, poly_arg_reduce(POLY_OP_ADD, 0));
+  free(src);
+  return out;
 }
 
 /* Rule 6: reduce_add_distribute
@@ -813,24 +783,14 @@ static PolyUOp *rule_collapse_reduce_add_distribute(
   if (value->op != POLY_OP_ADD || value->n_src != 2) return NULL;
   PolyUOp *x = value->src[0];
   PolyUOp *y = value->src[1];
-  /* Build x.reduce_add(*ranges) and y.reduce_add(*ranges) */
-  int n_extra = red->n_src - 1;
-  PolyUOp *xs[POLY_MAX_DIMS + 2];
-  PolyUOp *ys[POLY_MAX_DIMS + 2];
-  xs[0] = x;
-  ys[0] = y;
-  for (int i = 0; i < n_extra; i++) {
-    xs[1 + i] = red->src[1 + i];
-    ys[1 + i] = red->src[1 + i];
-  }
-  PolyUOp *xred = poly_uop(ctx, POLY_OP_REDUCE, red->dtype, xs, 1 + n_extra, red->arg);
-  PolyUOp *yred = poly_uop(ctx, POLY_OP_REDUCE, red->dtype, ys, 1 + n_extra, red->arg);
-  return poly_alu2(ctx, POLY_OP_ADD, xred, yred);
+  PolyUOp *xred = collapse_reduce_value(ctx, red, x);
+  PolyUOp *yred = collapse_reduce_value(ctx, red, y);
+  return xred && yred ? poly_add(ctx, xred, yred) : NULL;
 }
 
 /* Rule 7: and_on_where
  *   ((PARAM & y).where(c, 0)).reduce_add(*ranges)
- *     -> y.where(c, 0).reduce_add(*ranges) * x.cast(c.dtype)
+ *     -> y.where(c, 0).reduce_add(*ranges) * x
  * tinygrad simplify.py:115-116 */
 static PolyUOp *rule_collapse_and_on_where(PolyCtx *ctx, PolyUOp *red, const PolyBindings *b) {
   (void)b;
@@ -860,16 +820,8 @@ static PolyUOp *rule_collapse_and_on_where(PolyCtx *ctx, PolyUOp *red, const Pol
   PolyUOp *c = where->src[1];
   /* New WHERE: y.where(c, fval) */
   PolyUOp *new_where = poly_uop3(ctx, POLY_OP_WHERE, where->dtype, y, c, fval, poly_arg_none());
-  /* New REDUCE with same ranges */
-  int n_extra = red->n_src - 1;
-  PolyUOp *new_srcs[POLY_MAX_DIMS + 2];
-  new_srcs[0] = new_where;
-  for (int i = 0; i < n_extra; i++)
-    new_srcs[1 + i] = red->src[1 + i];
-  PolyUOp *new_red = poly_uop(ctx, POLY_OP_REDUCE, red->dtype, new_srcs, 1 + n_extra, red->arg);
-  /* * x.cast(c.dtype) */
-  PolyUOp *x_cast = cast_to(ctx, x, c->dtype);
-  return poly_alu2(ctx, POLY_OP_MUL, new_red, x_cast);
+  PolyUOp *new_red = collapse_reduce_value(ctx, red, new_where);
+  return new_red ? poly_mul(ctx, new_red, x) : NULL;
 }
 
 /* Rule 8: mul_casted_bool
@@ -1097,6 +1049,12 @@ static PolyPatternMatcher *pm_reduce_collapse_get(void) {
   return g_pm_reduce_collapse;
 }
 
+#ifdef POLY_TESTING
+PolyUOp *poly_test_reduce_collapse_rewrite(PolyCtx *ctx, PolyUOp *u) {
+  return poly_pm_rewrite(pm_reduce_collapse_base_get(), ctx, u);
+}
+#endif
+
 /* simplify.py: pm_reduce_load_collapse */
 
 static bool is_zero_const(PolyUOp *u) {
@@ -1125,7 +1083,7 @@ static PolyUOp *rule_lift_add_from_cmpne(PolyCtx *ctx, PolyUOp *cmpne, const Pol
     /* Same commutative UPat permutation behavior as tinygrad's load-collapse
      * `(x+y) != c` rule. */
     if (!poly_no_range(ctx, y)) continue;
-    PolyUOp *rhs = poly_alu2(ctx, POLY_OP_ADD, cast_to(ctx, c, y->dtype), mul_neg_one(ctx, y));
+    PolyUOp *rhs = poly_sub(ctx, poly_cast(ctx, c, y->dtype), y);
     return poly_uop2(ctx, POLY_OP_CMPNE, POLY_BOOL, x, rhs, poly_arg_none());
   }
   return NULL;
@@ -1154,14 +1112,12 @@ static PolyUOp *rule_reduce_gated_load_collapse(PolyCtx *ctx, PolyUOp *red, cons
   else
     return NULL;
 
-  PolyUOp *idx_cast = cast_to(ctx, idx, r->dtype);
+  PolyUOp *idx_cast = poly_cast(ctx, idx, r->dtype);
   PolyUOp *zero = typed_const(ctx, r->dtype, 0);
   PolyUOp *true_const = typed_const(ctx, POLY_BOOL, 1);
   PolyUOp *lt_zero = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, idx_cast, zero, poly_arg_none());
   PolyUOp *ge_zero = poly_uop2(ctx, POLY_OP_CMPNE, POLY_BOOL, lt_zero, true_const, poly_arg_none());
-  PolyUOp *lt_dim = poly_uop2(
-      ctx, POLY_OP_CMPLT, POLY_BOOL, idx_cast, cast_to(ctx, r->src[0], r->dtype), poly_arg_none()
-  );
+  PolyUOp *lt_dim = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, idx_cast, r->src[0], poly_arg_none());
   PolyUOp *valid = poly_uop2(ctx, POLY_OP_AND, POLY_BOOL, ge_zero, lt_dim, poly_arg_none());
 
   PolyUOp *invalid = poly_uop_const(ctx, poly_arg_invalid(), r->dtype);
@@ -1241,17 +1197,18 @@ static bool no_load(PolyCtx *ctx, PolyUOp *u) {
 static PolyUOp *undo_loaded_index_math(PolyCtx *ctx, PolyUOp *cmplt, const PolyBindings *b) {
   (void)b;
   if (!cmplt || cmplt->op != POLY_OP_CMPLT || cmplt->n_src != 2) return NULL;
-  if (!poly_dtype_is_int(cmplt->src[0]->dtype) || poly_dtype_is_bool(cmplt->src[0]->dtype))
-    return NULL;
   PolyUOp *lhs = cmplt->src[0];
   PolyUOp *c = cmplt->src[1];
   if (lhs->op != POLY_OP_ADD || lhs->n_src != 2) return NULL;
-  PolyUOp *x = lhs->src[0];
-  PolyUOp *y = lhs->src[1];
-  if (no_load(ctx, x)) return NULL;
-  if (!no_load(ctx, y) || !no_load(ctx, c)) return NULL;
-  PolyUOp *rhs = poly_alu2(ctx, POLY_OP_SUB, cast_to(ctx, c, y->dtype), y);
-  return poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, x, rhs, poly_arg_none());
+  if (!no_load(ctx, c)) return NULL;
+  for (int swap = 0; swap < 2; swap++) {
+    PolyUOp *x = lhs->src[swap], *y = lhs->src[swap ^ 1];
+    /* Pinned pm_load_collapse restricts x to weakint: moving arithmetic
+     * across a fixed-width comparison would change overflow semantics. */
+    if (!poly_dtype_eq(x->dtype, POLY_WEAKINT) || no_load(ctx, x) || !no_load(ctx, y)) continue;
+    return poly_alu2(ctx, POLY_OP_CMPLT, x, poly_sub(ctx, c, y));
+  }
+  return NULL;
 }
 
 static _Thread_local PolyPatternMatcher *g_pm_load_collapse = NULL;

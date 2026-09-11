@@ -12,18 +12,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* C form of UOp.divides(length), used by Tinygrad's vector-width choice. */
-static bool expr_divides_const(PolyUOp *u, int64_t v) {
-  if (!u || v == 0) return false;
-  if (v == 1) return true;
-  if (u->op == POLY_OP_CONST && u->arg.kind == POLY_ARG_INT) return (u->arg.i % v) == 0;
-  if (u->op == POLY_OP_ADD && u->n_src == 2)
-    return expr_divides_const(u->src[0], v) && expr_divides_const(u->src[1], v);
-  if (u->op == POLY_OP_MUL && u->n_src == 2)
-    return expr_divides_const(u->src[0], v) || expr_divides_const(u->src[1], v);
-  return false;
-}
-
 typedef struct {
   PolyUOp *u;
   PolyUOp *buf;
@@ -66,14 +54,15 @@ static bool memory_coalescing_same_key(
 static bool memory_coalescing_dtype(PolyDType dtype) {
   PolyDType scalar = dtype;
   return poly_dtype_eq(scalar, POLY_FLOAT32) || poly_dtype_eq(scalar, POLY_FLOAT16) ||
-         poly_dtype_eq(scalar, POLY_INT32) || poly_dtype_eq(scalar, POLY_UINT32);
+         poly_dtype_eq(scalar, POLY_INT32) || poly_dtype_eq(scalar, POLY_UINT32) ||
+         poly_dtype_is_fp8(scalar);
 }
 
 static bool const_true(PolyUOp *u) {
   return u && u->op == POLY_OP_CONST && u->arg.kind == POLY_ARG_BOOL && u->arg.b;
 }
 
-/* Rebuilds base+offset and reapplies valid after choosing vector length. */
+/* Rebuild base+offset without validity, as coalesce.py does before divides. */
 static PolyUOp *memory_coalescing_offset(
     PolyCtx *ctx,
     const MemoryCoalescingRecord *record,
@@ -91,11 +80,7 @@ static PolyUOp *memory_coalescing_offset(
   } else {
     offset = poly_uop_const(ctx, poly_arg_invalid(), record->idx_dtype);
   }
-  if (!offset || const_true(record->valid)) return offset;
-  PolyUOp *invalid = poly_uop_const(ctx, poly_arg_invalid(), offset->dtype);
-  return poly_uop3(
-      ctx, POLY_OP_WHERE, offset->dtype, record->valid, offset, invalid, poly_arg_none()
-  );
+  return offset;
 }
 
 /* Current tinygrad codegen/late/coalesce.py::memory_coalescing.  This runs
@@ -247,7 +232,7 @@ PolyUOp *poly_memory_coalescing(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps ca
         for (int c = 0; c < n_candidates; c++) {
           if (candidates[c] <= remaining) {
             PolyUOp *test_offset = memory_coalescing_offset(ctx, r, offsets[pos]);
-            if (candidates[c] == 1 || expr_divides_const(test_offset, candidates[c])) {
+            if (candidates[c] == 1 || poly_uop_divides(ctx, test_offset, candidates[c])) {
               length = candidates[c];
               break;
             }
@@ -255,6 +240,13 @@ PolyUOp *poly_memory_coalescing(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps ca
         }
 
         PolyUOp *offset = memory_coalescing_offset(ctx, r, offsets[pos]);
+        /* A predicate constrains execution, not base-address divisibility. */
+        if (offset && !const_true(r->valid)) {
+          PolyUOp *invalid = poly_uop_const(ctx, poly_arg_invalid(), offset->dtype);
+          offset = poly_uop3(
+              ctx, POLY_OP_WHERE, offset->dtype, r->valid, offset, invalid, poly_arg_none()
+          );
+        }
         PolyUOp *address = NULL;
         if (length > 1) {
           PolyUOp *len = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(length));

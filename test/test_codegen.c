@@ -23,6 +23,119 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
+/* Pinned coalesce.py chooses width on the ungated coordinate using UOp.divides,
+ * including ParamArg.multiple_of, then reapplies the predicate to SHRINK. */
+static int bundle_coalesced_loads(PolyDType dtype, bool masked, bool aligned) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *buf = poly_test_program_param(ctx, dtype, 64, 0);
+  PolyUOp *r = poly_range(ctx, 4, 0, POLY_AXIS_LOOP);
+  PolyUOp *base = aligned ? poly_uop_variable(ctx, "aligned", 0, 60, POLY_WEAKINT, 4, true)
+                          : poly_mul(ctx, r, poly_const_like_int(ctx, r, 4));
+  PolyUOp *gate = poly_alu2(ctx, POLY_OP_CMPLT, r, poly_const_like_int(ctx, r, 2));
+  PolyUOp *loads[4];
+  for (int i = 0; i < 4; i++) {
+    PolyUOp *idx = poly_add(ctx, base, poly_const_like_int(ctx, base, i));
+    if (masked)
+      idx = poly_uop3(
+          ctx, POLY_OP_WHERE, idx->dtype, gate, idx,
+          poly_uop_const(ctx, poly_arg_invalid(), idx->dtype), poly_arg_none()
+      );
+    loads[i] = poly_uop_load(ctx, poly_uop_index(ctx, buf, &idx, 1));
+  }
+  PolyUOp *out = poly_memory_coalescing(
+      ctx, poly_uop_sink(ctx, loads, 4), (PolyRendererCaps){.max_vec_width = 4}
+  );
+  int n = 0, count = 0;
+  PolyUOp **topo = out ? poly_toposort(ctx, out, &n) : NULL;
+  for (int i = 0; i < n; i++) {
+    if (topo[i]->op != POLY_OP_LOAD) continue;
+    count++;
+    if (topo[i]->src[0]->op != POLY_OP_SHRINK)
+      count += 100;
+    else {
+      PolyUOp *addr = topo[i]->src[0];
+      if (addr->n_src != 3 || addr->src[2]->arg.i != 4 ||
+          (masked && (addr->src[1]->op != POLY_OP_WHERE || addr->src[1]->src[0] != gate)))
+        count += 100;
+    }
+  }
+  poly_ctx_destroy(ctx);
+  return count;
+}
+
+TEST(codegen, bundle_coalesce_mask_after_width) {
+  ASSERT_INT_EQ(bundle_coalesced_loads(POLY_FLOAT32, true, false), 1);
+  PASS();
+}
+
+TEST(codegen, bundle_coalesce_param_alignment) {
+  ASSERT_INT_EQ(bundle_coalesced_loads(POLY_FLOAT32, false, true), 1);
+  PASS();
+}
+
+TEST(codegen, bundle_coalesce_fp8_storage) {
+  ASSERT_INT_EQ(bundle_coalesced_loads(POLY_FP8E4M3, false, false), 1);
+  PASS();
+}
+
+TEST(codegen, bundle_gpudims_uncapped_four_axes) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *ranges[4];
+  for (int i = 0; i < 4; i++)
+    ranges[i] = poly_range(ctx, 2, i, POLY_AXIS_GLOBAL);
+  PolyUOp *out = poly_add_gpudims(ctx, poly_test_kernel_sink(ctx, ranges, 4, "four_axes"));
+  int n = 0, specials = 0, remaining = 0;
+  PolyUOp **topo = out ? poly_toposort(ctx, out, &n) : NULL;
+  for (int i = 0; i < n; i++) {
+    specials += topo[i]->op == POLY_OP_SPECIAL;
+    remaining += topo[i]->op == POLY_OP_RANGE;
+  }
+  poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(specials, 4);
+  ASSERT_INT_EQ(remaining, 0);
+  PASS();
+}
+
+TEST(codegen, bundle_gpudims_gates_unchanged_store) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *buf = poly_test_program_param(ctx, POLY_FLOAT32, 1, 0);
+  PolyUOp *idx = poly_const_int(ctx, 0);
+  PolyUOp *store = poly_uop_store(
+      ctx, poly_uop_index(ctx, buf, &idx, 1), poly_uop_const(ctx, poly_arg_float(3), POLY_FLOAT32)
+  );
+  PolyUOp *local = poly_range(ctx, 4, 0, POLY_AXIS_LOCAL);
+  PolyUOp *end = poly_uop2(ctx, POLY_OP_END, POLY_VOID, store, local, poly_arg_none());
+  PolyUOp *out = poly_add_gpudims(ctx, poly_test_kernel_sink(ctx, &end, 1, "independent_store"));
+  PolyUOp *coord = out->src[0]->src[0]->src[0]->src[1];
+  bool gated = coord->op == POLY_OP_WHERE && coord->src[2]->arg.kind == POLY_ARG_INVALID;
+  int n = 0, remaining = 0;
+  PolyUOp **topo = poly_toposort(ctx, out, &n);
+  for (int i = 0; i < n; i++)
+    remaining += topo[i]->op == POLY_OP_RANGE;
+  gated &= coord->src[0] == poly_eq(ctx, out->src[0]->src[1], poly_const_like_int(ctx, local, 0));
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(gated);
+  ASSERT_INT_EQ(remaining, 0);
+  PASS();
+}
+
+TEST(codegen, bundle_gpudims_no_locals_contract) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyKernelInfo info = {.name = "no_locals", .dont_use_locals = true};
+  PolyUOp *global = poly_range(ctx, 4, 0, POLY_AXIS_GLOBAL);
+  PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, &global, 1, poly_arg_kernel_info(&info));
+  PolyUOp *out = poly_add_gpudims(ctx, sink);
+  bool named =
+      out && out->src[0]->op == POLY_OP_SPECIAL && strcmp(out->src[0]->arg.str, "idx0") == 0;
+  PolyUOp *local = poly_range(ctx, 4, 0, POLY_AXIS_LOCAL);
+  sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, &local, 1, poly_arg_kernel_info(&info));
+  bool rejected = poly_add_gpudims(ctx, sink) == NULL;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(named);
+  ASSERT_TRUE(rejected);
+  PASS();
+}
+
 #ifndef __EMSCRIPTEN__
 static PolyUOp *beam_action_sink(PolyCtx *ctx, PolyAxisType type, int n) {
   PolyUOp *r = poly_range(ctx, n, 0, type);
