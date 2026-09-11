@@ -586,7 +586,10 @@ def test_random_crop_indices_remain_consistent_after_readback():
 
 
 def test_python_loader_checks_current_abi_before_use():
-    assert _ffi.get_lib().poly_abi_version() == _ffi.POLYGRAD_ABI_VERSION == 76
+    header = (Path(__file__).resolve().parents[2] / 'src/frontend.h').read_text()
+    match = re.search(r'^#define POLYGRAD_ABI_VERSION (\d+)$', header, re.M)
+    assert match is not None
+    assert _ffi.get_lib().poly_abi_version() == _ffi.POLYGRAD_ABI_VERSION == int(match.group(1))
 
 
 def test_python_source_manifest_contains_quoted_dependencies():
