@@ -1,5 +1,6 @@
 /* Current Tinygrad LINEAR compilation and execution gates. */
 
+#define _POSIX_C_SOURCE 200809L
 #include "test_harness.h"
 
 #include "../src/ctx.h"
