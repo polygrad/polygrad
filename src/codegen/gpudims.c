@@ -73,16 +73,6 @@ static PolyUOp *gpudim_const(PolyCtx *ctx, int64_t v) {
   return poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(v));
 }
 
-static PolyUOp *gpudim_mul_const(PolyCtx *ctx, PolyUOp *x, int64_t v) {
-  if (v == 1) return x;
-  return poly_uop2(ctx, POLY_OP_MUL, POLY_WEAKINT, x, gpudim_const(ctx, v), poly_arg_none());
-}
-
-static PolyUOp *gpudim_floordiv_const(PolyCtx *ctx, PolyUOp *x, int64_t v) {
-  if (v == 1) return x;
-  return poly_uop2(ctx, POLY_OP_FLOORDIV, POLY_WEAKINT, x, gpudim_const(ctx, v), poly_arg_none());
-}
-
 static PolyUOp *gpudim_add(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
   return poly_uop2(ctx, POLY_OP_ADD, POLY_WEAKINT, a, b, poly_arg_none());
 }
@@ -156,8 +146,17 @@ static bool _group_dims(
   for (int i = 0; i < n; i++)
     out[i] = dims[i];
 
-  while (n > 3 || out[0].max > caps[0] || (n > 1 && out[1].max > caps[1]) ||
-         (n > 2 && out[2].max > caps[2])) {
+  while (true) {
+    bool exceeds = n > 3;
+    /* Python's any(d > cap) evaluates symbolic predicates, not vmax alone.
+     * Preserve short-circuit order; an unresolved comparison is an error. */
+    for (int i = 0; !exceeds && i < n; i++) {
+      int64_t lo, hi;
+      poly_uop_minmax(ctx, out[i].expr, &lo, &hi);
+      if (lo <= caps[i] && hi > caps[i]) return false;
+      exceeds = lo > caps[i];
+    }
+    if (!exceeds) break;
     bool grouped = false;
     for (int i = 0; i < 3 && i < n - 1; i++) {
       int64_t prod = 0;
@@ -190,8 +189,12 @@ static bool _split_dims(
     return false;
 
   bool already_ok = true;
-  for (int i = 0; i < n_dims; i++)
-    if (dims[i].max > caps[i]) already_ok = false;
+  for (int i = 0; already_ok && i < n_dims; i++) {
+    int64_t lo, hi;
+    poly_uop_minmax(ctx, dims[i].expr, &lo, &hi);
+    if (lo <= caps[i] && hi > caps[i]) return false;
+    already_ok = hi <= caps[i];
+  }
   if (already_ok) {
     for (int i = 0; i < n_dims; i++)
       out[i] = dims[i];
@@ -210,14 +213,19 @@ static bool _split_dims(
 
   for (int i = 0; i < 3; i++) {
     while (out[i].max > caps[i]) {
+      /* _split_dims factors an actual integer. A variable's vmax is not
+       * its runtime extent: dividing it could silently omit workitems. */
+      int64_t value;
+      if (!gpudim_const_i64(out[i].expr, &value)) return false;
       int64_t div = gpudim_smallest_divisor(out[i].max);
       if (div == 1) return false;
       int next = (i + 1) % 3;
       int64_t next_max = 0;
       if (!gpudim_safe_mul_i64(out[next].max, div, &next_max)) return false;
-      out[i].expr = gpudim_floordiv_const(ctx, out[i].expr, div);
+      out[i].expr = gpudim_const(ctx, value / div);
       out[i].max /= div;
-      out[next].expr = gpudim_mul_const(ctx, out[next].expr, div);
+      out[next].expr = gpudim_sint_mul(ctx, out[next].expr, gpudim_const(ctx, div));
+      if (!out[i].expr || !out[next].expr) return false;
       out[next].max = next_max;
     }
   }
@@ -362,11 +370,15 @@ PolyUOp *poly_add_gpudims_ex(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps)
   qsort(global_ranges, (size_t)n_global, sizeof(*global_ranges), cmp_range_axis_id_ptr);
   qsort(local_ranges, (size_t)n_local, sizeof(*local_ranges), cmp_range_axis_id_ptr);
   for (int i = 0; i < n_global; i++) {
-    global_dims[i].expr = gpudim_special_bound(ctx, global_ranges[i]->src[0]);
+    global_dims[i].expr = poly_graph_rewrite(ctx, global_ranges[i]->src[0], poly_symbolic());
+    global_dims[i].expr = gpudim_special_bound(ctx, global_dims[i].expr);
+    if (!global_dims[i].expr) goto done;
     global_dims[i].max = _dim_max(ctx, global_dims[i].expr);
   }
   for (int i = 0; i < n_local; i++) {
-    local_dims[i].expr = gpudim_special_bound(ctx, local_ranges[i]->src[0]);
+    local_dims[i].expr = poly_graph_rewrite(ctx, local_ranges[i]->src[0], poly_symbolic());
+    local_dims[i].expr = gpudim_special_bound(ctx, local_dims[i].expr);
+    if (!local_dims[i].expr) goto done;
     local_dims[i].max = _dim_max(ctx, local_dims[i].expr);
   }
   bool no_locals = sink->arg.kind == POLY_ARG_KERNEL_INFO && sink->arg.kernel_info &&

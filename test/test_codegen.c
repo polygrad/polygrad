@@ -52,6 +52,34 @@ TEST(codegen, release014_float_value_slices_are_not_storage_views) {
   PASS();
 }
 
+TEST(codegen, domains_gpudims_symbolic_limits) {
+  /* v0.14 get_grouped_dims rejects unresolved cap comparisons and cannot
+   * factor a variable by factoring its maximum. Binding n=9 must not
+   * silently launch floor(9/2)*2 workitems. */
+  bool correct = true;
+  const int lows[] = {4, 9, 4, 8};
+  const int highs[] = {16, 16, 8, 8};
+  const int limits[] = {8, 8, 8, 4};
+  for (int i = 0; i < 4; i++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyUOp *n = poly_uop_variable(ctx, "n", lows[i], highs[i], POLY_WEAKINT, 1, true);
+    PolyUOp *r =
+        poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, n, poly_arg_range(0, POLY_AXIS_GLOBAL));
+    PolyUOp *sink = poly_test_kernel_sink(ctx, &r, 1, "symbolic_limit");
+    PolyUOp *out =
+        poly_add_gpudims_ex(ctx, sink, (PolyRendererCaps){.global_max = {limits[i], 64, 64}});
+    if (i < 2)
+      correct &= out == NULL;
+    else if (i == 2)
+      correct &= out && out->src[0]->op == POLY_OP_SPECIAL && out->src[0]->src[0] == n;
+    else
+      correct &= out && out->src[0]->op != POLY_OP_RANGE;
+    poly_ctx_destroy(ctx);
+  }
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
 TEST(codegen, tail_gpudims_unit_cap) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *r = poly_range(ctx, 2, 0, POLY_AXIS_GLOBAL);

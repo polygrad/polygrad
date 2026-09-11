@@ -1,5 +1,6 @@
 {
   "schema_version": 1,
+  "compiler_domains_review": {"reference": "6f87158d77f66a36d5f8bbe915170b24e2acabe8", "origin": "temp/compiler-domains-20260911.b0LnMM/source-reviewed.md", "text": "# Compiler domain owner dispositions\n\nReference: Tinygrad v0.14.0/6f87158d77f6. Current owner review covers complete\ngpudims.py and simplify.py, with source/probe correspondence in correspondence.md.\nThis is not full scheduler_codegen closure or a release certificate.\n\n## Blocks with completed correspondence\n\n- `_split_dims`: identity for in-cap dimensions; three-axis padding, inclusive\n  square-root divisor search, ordered spill/wrap, prime failure and trailing\n  unit removal match the reference. C launch caps are three integer axes;\n  checked int64 multiplication is the existing backend dimension boundary.\n  Symbolic cap predicates must be decidable. A split factors an integer, never\n  a variable's maximum. Dimension expressions are simplified at add_gpudims,\n  matching ssimplify before get_grouped_dims.\n- `get_grouped_dims`: reverse before legalization and reverse returned indices;\n  group first, split only after grouping fails with at most three axes;\n  uncapped list, SPECIAL names, flattened stride sum and logical-axis\n  reconstruction all use existing UOp arithmetic/symbolic owners. Scratch\n  capacity is max(rank,3), not a fixed-rank graph representation. Existing\n  grouped-axis, repeated merge, uncapped-rank and oversized-launch tests pass.\n- `flatten_range`: partition trailing operands by bool/void dtype, preserve\n  ordered backedges and leading values, derive ordinary active ranges through\n  the shared range query, and preserve node metadata on replacement. Its\n  scratch failure declines rewriting. Fatal range-cache allocation policy is\n  unchanged. Existing backedge and END-expression normalization tests pass.\n- `mark_gated`: coordinate/valid extraction; left-to-right AND traversal;\n  last guard per range, maximum across INDEX uses, and full original bound\n  for any ungated use follow the reference. Private pass-state failure marker\n  prevents an incomplete inspection from publishing a smaller range. The\n  marker is cleared at the same SINK dictionary boundary; no public API or\n  new lifetime owner. Existing max-guard and new failed-scan/recovery tests pass.\n- `pm_load_collapse`: first rule requires (ADD,0), exactly one trailing range;\n  second requires weakint x, commutative ADD and proven no_load predicates.\n  Its called reduce_load_collapse/temporary-parameter algorithm remains a\n  separately pending dependency. Completing matcher admission does not certify\n  all possible temporary bounds. Negative axes/arity and overflow controls pass.\n\n## Repairs inside still-pending aggregate blocks\n\n- `pm_reduce_collapse` and `pm_reduce_simplify`: complete ADD metadata admission,\n  boolean zero matching and allow_any_len admission were repaired. Duplicate\n  zero tests consolidated; reduce_unparented deliberately keeps its broader\n  operator/axes contract. The composed symbolic matcher and temporary bound\n  dependency prevent a whole-aggregate equivalence claim.\n- `add_gpudims`: source dimensions now use ssimplify-equivalent symbolic\n  normalization. Existing C-only has_threads admission and absent renderer\n  global_prod_max/device-axis lowering need separate capability disposition.\n  CUDA/WebGPU reference renderers inherit global_prod_max=None. No unsupported\n  backend capability was enabled or silently approved.\n\n## Remaining named obligations (not new bugs)\n\n- Temporary PARAM bounds: Tinygrad uses PyConst endpoints, C ParamArg and the\n  legacy cache use int64. Executed fractional/unbounded reference controls and\n  the unbounded PG regression do not show a wrong result. Exact fractional,\n  infinite and unsigned64 metadata correspondence is still unproved. Carry\n  this into the symbolic/metadata owner batch, not another speculative rewrite.\n- Range merging/mod splitting were read end to end. Existing failure behavior\n  and tests remain useful; wider bigint/metadata dependency certification is\n  still pending. No opportunistic source rewrite was made without a red case.\n- PROGRAM worker/assembly diagnostics, image-specific gater, global_prod_max,\n  DEVICE-axis, DSP and forced dtype emulation retain explicit scope questions.\n  Pure aggregate @file rows cannot close while their dependencies remain open.\n\n## Analyzer\n\nThe same included-edge sum determines allocation capacity and the later fill\nloop. The remaining trace assumes capacity==0, then executes a positive-edge\nloop, an infeasible combination for immutable source nodes. The two-file run\nstill exits2; no project-wide analyzer-clean claim or warning suppression.\n", "native_evidence": "temp/compiler-domains-20260911.b0LnMM/codegen.log; reduce.log", "new_equivalent_rows": ["tinygrad/codegen/gpudims.py:_split_dims", "tinygrad/codegen/gpudims.py:get_grouped_dims", "tinygrad/codegen/simplify.py:flatten_range", "tinygrad/codegen/simplify.py:mark_gated", "tinygrad/codegen/simplify.py:pm_load_collapse"], "limits": "Five individually reviewed blocks; not whole-wave closure. Historical row hashes and execution bindings for other blocks are unchanged."},
   "retarget_review": {
     "reference": "6f87158d77f66a36d5f8bbe915170b24e2acabe8",
     "scope": "August22-to-v0.14 shared-contract delta; not full wave closure",
@@ -1556,8 +1557,35 @@
       "baseline_sha256": "4adbac33d4965aaf3b27269be033c2365ebf7ce8e95f53b5de1c863e9264d459",
       "id": "tinygrad/codegen/gpudims.py:_split_dims",
       "target_sha256": "6fad872105edcd2b16de7540f8b3eb3b3e376fee7e0b059da099cded2dddc600",
-      "disposition": "pending",
-      "reason": "Pending complete correspondence; remaining owner contracts are recorded in temp/scheduler-supported-20260909.NUkfBK/source-reviewed.md and its prior review links. Partial branch tests do not establish whole-function closure."
+      "disposition": "equivalent",
+      "reason": "Complete block correspondence recorded in compiler_domains_review. Tinygrad v0.14 source/probes and current native owner cases passed. C scratch failure behavior is explicit; independently pending called owners and aggregate files are not certified by this row.",
+      "counterparts": [
+        {
+          "path": "src/codegen/gpudims.c",
+          "symbol": "_split_dims",
+          "sha256": "35f6285e29e3ea6452375140f8cff501c0f157e3296e0964723e67b4555fe451"
+        }
+      ],
+      "tests": [
+        {
+          "path": "test/test_codegen.c",
+          "sha256": "4418aa7213fe9ec77163be941facf1fd78a58baaa7d3df310b4ed700dbb55cfc",
+          "case": "codegen.domains_gpudims_symbolic_limits",
+          "check": "native"
+        },
+        {
+          "path": "test/test_codegen.c",
+          "sha256": "4418aa7213fe9ec77163be941facf1fd78a58baaa7d3df310b4ed700dbb55cfc",
+          "case": "codegen.tail_gpudims_unit_cap",
+          "check": "native"
+        },
+        {
+          "path": "test/test_codegen.c",
+          "sha256": "4418aa7213fe9ec77163be941facf1fd78a58baaa7d3df310b4ed700dbb55cfc",
+          "case": "codegen.add_gpudims_webgpu_splits_oversized_global_dim",
+          "check": "native"
+        }
+      ]
     },
     {
       "baseline_sha256": "e7feac2d89a53e774bffc4a7d40b260bfd688802e786ef7fad6a9c6784184c5d",
@@ -1570,8 +1598,35 @@
       "baseline_sha256": "fa68e70e27d6e021d5566e954c1f77da8742e599989540be7c168bd389af525b",
       "id": "tinygrad/codegen/gpudims.py:get_grouped_dims",
       "target_sha256": "0b9065b545b8d1ffdd5c6096cb24c9f7cc08ca212273792a750162c0a1215048",
-      "disposition": "pending",
-      "reason": "Pending complete correspondence; remaining owner contracts are recorded in temp/scheduler-supported-20260909.NUkfBK/source-reviewed.md and its prior review links. Partial branch tests do not establish whole-function closure."
+      "disposition": "equivalent",
+      "reason": "Complete block correspondence recorded in compiler_domains_review. Tinygrad v0.14 source/probes and current native owner cases passed. C scratch failure behavior is explicit; independently pending called owners and aggregate files are not certified by this row.",
+      "counterparts": [
+        {
+          "path": "src/codegen/gpudims.c",
+          "symbol": "get_grouped_dims",
+          "sha256": "35f6285e29e3ea6452375140f8cff501c0f157e3296e0964723e67b4555fe451"
+        }
+      ],
+      "tests": [
+        {
+          "path": "test/test_codegen.c",
+          "sha256": "4418aa7213fe9ec77163be941facf1fd78a58baaa7d3df310b4ed700dbb55cfc",
+          "case": "codegen.domains_gpudims_symbolic_limits",
+          "check": "native"
+        },
+        {
+          "path": "test/test_codegen.c",
+          "sha256": "4418aa7213fe9ec77163be941facf1fd78a58baaa7d3df310b4ed700dbb55cfc",
+          "case": "codegen.bundle_gpudims_uncapped_four_axes",
+          "check": "native"
+        },
+        {
+          "path": "test/test_codegen.c",
+          "sha256": "4418aa7213fe9ec77163be941facf1fd78a58baaa7d3df310b4ed700dbb55cfc",
+          "case": "codegen.add_gpudims_reverse_group_handles_nonprefix_and_repeated_merges",
+          "check": "native"
+        }
+      ]
     },
     {
       "baseline_sha256": "3ebca58871b0b826362c5d64ecdb0024d15afc918b5ab365e060adb9a1855423",
@@ -2525,15 +2580,51 @@
       "baseline_sha256": "00d8ce267e2c89e8d52260593661a58f8c4cc992a17bbb5f8370fc6d5ba0e59b",
       "id": "tinygrad/codegen/simplify.py:flatten_range",
       "target_sha256": "c53d01d4256b7687475c8c445a582787af834013664547dfd228357de9bb253a",
-      "disposition": "pending",
-      "reason": "Pending complete correspondence; remaining owner contracts are recorded in temp/scheduler-supported-20260909.NUkfBK/source-reviewed.md and its prior review links. Partial branch tests do not establish whole-function closure."
+      "disposition": "equivalent",
+      "reason": "Complete block correspondence recorded in compiler_domains_review. Tinygrad v0.14 source/probes and current native owner cases passed. C scratch failure behavior is explicit; independently pending called owners and aggregate files are not certified by this row.",
+      "counterparts": [
+        {
+          "path": "src/codegen/simplify.c",
+          "symbol": "flatten_range",
+          "sha256": "1ab8d347d0964745d5ac3eb3d9a0ef943606da1575ce021762e41d7b94c62f4c"
+        }
+      ],
+      "tests": [
+        {
+          "path": "test/test_reduce_simplify.c",
+          "sha256": "573299a8dfeec3ba388ec86a30dd0c1147173f15a07b3f54d71f7d004ca9b63e",
+          "case": "reduce_simplify.flatten_range_preserves_bool_backedge",
+          "check": "native"
+        }
+      ]
     },
     {
       "baseline_sha256": "32706114af706e1a8d9b2212de53f318444d03583a7406f69f61150c5543bf04",
       "id": "tinygrad/codegen/simplify.py:mark_gated",
       "target_sha256": "58685cf12b49db2fb64688be387c457e8b8afe29748bac327dad6aea2a201d71",
-      "disposition": "pending",
-      "reason": "Pending complete correspondence; remaining owner contracts are recorded in temp/scheduler-supported-20260909.NUkfBK/source-reviewed.md and its prior review links. Partial branch tests do not establish whole-function closure."
+      "disposition": "equivalent",
+      "reason": "Complete block correspondence recorded in compiler_domains_review. Tinygrad v0.14 source/probes and current native owner cases passed. C scratch failure behavior is explicit; independently pending called owners and aggregate files are not certified by this row.",
+      "counterparts": [
+        {
+          "path": "src/codegen/simplify.c",
+          "symbol": "mark_gated",
+          "sha256": "1ab8d347d0964745d5ac3eb3d9a0ef943606da1575ce021762e41d7b94c62f4c"
+        }
+      ],
+      "tests": [
+        {
+          "path": "test/test_reduce_simplify.c",
+          "sha256": "573299a8dfeec3ba388ec86a30dd0c1147173f15a07b3f54d71f7d004ca9b63e",
+          "case": "reduce_simplify.domains_failed_guard_scan_discards_shrink_state",
+          "check": "native"
+        },
+        {
+          "path": "test/test_reduce_simplify.c",
+          "sha256": "573299a8dfeec3ba388ec86a30dd0c1147173f15a07b3f54d71f7d004ca9b63e",
+          "case": "reduce_simplify.simplify_ranges_uses_largest_index_guard",
+          "check": "native"
+        }
+      ]
     },
     {
       "baseline_sha256": "5e5d784b9852cdd787a4aab0ca976c166b559f0d305f96e7a59187d1fe19ebba",
@@ -2546,8 +2637,41 @@
       "baseline_sha256": "a686a66738c5c5274607623ae99162acee5e5727aa3d7fa291b811d49f39abb5",
       "id": "tinygrad/codegen/simplify.py:pm_load_collapse",
       "target_sha256": "0dcd913732fc41ebd2e1a5ef09a4323db795154959871700017343ebdb0b981b",
-      "disposition": "pending",
-      "reason": "Pending complete correspondence; remaining owner contracts are recorded in temp/scheduler-supported-20260909.NUkfBK/source-reviewed.md and its prior review links. Partial branch tests do not establish whole-function closure."
+      "disposition": "equivalent",
+      "reason": "Complete block correspondence recorded in compiler_domains_review. Tinygrad v0.14 source/probes and current native owner cases passed. C scratch failure behavior is explicit; independently pending called owners and aggregate files are not certified by this row.",
+      "counterparts": [
+        {
+          "path": "src/codegen/simplify.c",
+          "symbol": "poly_pm_load_collapse",
+          "sha256": "1ab8d347d0964745d5ac3eb3d9a0ef943606da1575ce021762e41d7b94c62f4c"
+        }
+      ],
+      "tests": [
+        {
+          "path": "test/test_reduce_simplify.c",
+          "sha256": "573299a8dfeec3ba388ec86a30dd0c1147173f15a07b3f54d71f7d004ca9b63e",
+          "case": "reduce_simplify.domains_load_collapse_requires_one_range",
+          "check": "native"
+        },
+        {
+          "path": "test/test_reduce_simplify.c",
+          "sha256": "573299a8dfeec3ba388ec86a30dd0c1147173f15a07b3f54d71f7d004ca9b63e",
+          "case": "reduce_simplify.domains_collapse_preserves_axis_metadata",
+          "check": "native"
+        },
+        {
+          "path": "test/test_reduce_simplify.c",
+          "sha256": "573299a8dfeec3ba388ec86a30dd0c1147173f15a07b3f54d71f7d004ca9b63e",
+          "case": "reduce_simplify.bundle_loaded_index_preserves_strong_overflow",
+          "check": "native"
+        },
+        {
+          "path": "test/test_reduce_simplify.c",
+          "sha256": "573299a8dfeec3ba388ec86a30dd0c1147173f15a07b3f54d71f7d004ca9b63e",
+          "case": "reduce_simplify.bundle_loaded_index_accepts_commuted_weak_add",
+          "check": "native"
+        }
+      ]
     },
     {
       "baseline_sha256": "dc99e904aac607d569e5184e9c21de1f8d26fb2ee075801c65cb635bafd4792b",

@@ -231,6 +231,17 @@ static PolyUOp *range_ctx_get(PolyMap *state, PolyUOp *range) {
   return state ? poly_map_get(state, poly_ptr_hash(range), range, poly_ptr_eq) : NULL;
 }
 
+/* The dictionary's own address cannot be a UOp key. Reserve it to reject
+ * the whole shrink decision after any failed INDEX inspection, including
+ * failure after earlier indices already published smaller bounds. */
+static bool range_ctx_failed(PolyMap *state) {
+  return poly_map_get(state, poly_ptr_hash(state), state, poly_ptr_eq) != NULL;
+}
+
+static void range_ctx_fail(PolyMap *state) {
+  poly_map_set(state, poly_ptr_hash(state), state, state, poly_ptr_eq);
+}
+
 typedef struct {
   PolyMap *state;
 } MergeGuardCtx;
@@ -255,6 +266,11 @@ static PolyUOp *mark_gated(PolyCtx *ctx, PolyUOp *idx, const PolyBindings *b) {
   (void)b;
   PolyMap *state = current_range_ctx();
   if (!state || !idx || idx->op != POLY_OP_INDEX) return NULL;
+  if (range_ctx_failed(state)) return NULL;
+  if (!simplify_operation_allowed()) {
+    range_ctx_fail(state);
+    return NULL;
+  }
   PolyMap *guards = poly_map_new(8);
   if (!guards) return NULL;
   PolyUOp *range_source = idx;
@@ -262,9 +278,15 @@ static PolyUOp *mark_gated(PolyCtx *ctx, PolyUOp *idx, const PolyBindings *b) {
     PolyUOp *coord = idx->src[1];
     range_source = poly_uop_get_idx(ctx, coord);
     PolyUOp *cond = poly_uop_get_valid(ctx, coord);
+    if (!range_source || !cond) {
+      range_ctx_fail(state);
+      poly_map_destroy(guards);
+      return NULL;
+    }
     int cap = 8, top = 0;
     PolyUOp **stack = malloc((size_t)cap * sizeof(*stack));
     if (cond && !stack) {
+      range_ctx_fail(state);
       poly_map_destroy(guards);
       return NULL;
     }
@@ -291,6 +313,7 @@ static PolyUOp *mark_gated(PolyCtx *ctx, PolyUOp *idx, const PolyBindings *b) {
     }
     free(stack);
     if (failed) {
+      range_ctx_fail(state);
       poly_map_destroy(guards);
       return NULL;
     }
@@ -299,12 +322,14 @@ static PolyUOp *mark_gated(PolyCtx *ctx, PolyUOp *idx, const PolyBindings *b) {
   int n_topo = 0;
   PolyUOp **topo = poly_toposort_alloc(ctx, range_source, &n_topo);
   if (!topo || n_topo <= 0) {
+    range_ctx_fail(state);
     poly_toposort_free(topo);
     poly_map_destroy(guards);
     return NULL;
   }
   PolyUOp **ranges = n_topo > 0 ? malloc((size_t)n_topo * sizeof(*ranges)) : NULL;
   if (!ranges) {
+    range_ctx_fail(state);
     poly_toposort_free(topo);
     poly_map_destroy(guards);
     return NULL;
@@ -396,6 +421,10 @@ static void build_range_substitution(const void *key, void *value, void *userdat
 static PolyUOp *do_range_substitute(PolyCtx *ctx, PolyUOp *root, bool split) {
   PolyMap *state = current_range_ctx();
   if (!state) return NULL;
+  if (range_ctx_failed(state)) {
+    poly_map_clear(state);
+    return NULL;
+  }
   size_t count = poly_map_len(state);
   if (count == 0) return NULL;
   PolyUOp **from = malloc(count * sizeof(*from));
@@ -588,6 +617,20 @@ static PolyUOp *reduce_unparented(PolyCtx *ctx, PolyUOp *red, const PolyBindings
 
 /* D3: pm_reduce_collapse rules */
 
+/* UPat.reduce(arg=ADD) matches the complete (ADD, 0) metadata tuple.
+ * reduce_unparented is deliberately broader and must not use this guard. */
+static bool is_add_reduce(PolyUOp *red) {
+  return red && red->op == POLY_OP_REDUCE && red->arg.kind == POLY_ARG_REDUCE &&
+         red->arg.reduce.op == POLY_OP_ADD && red->arg.reduce.num_axes == 0;
+}
+
+static bool is_zero_const(PolyUOp *u) {
+  if (!u || u->op != POLY_OP_CONST) return false;
+  return (u->arg.kind == POLY_ARG_INT && u->arg.i == 0) ||
+         (u->arg.kind == POLY_ARG_FLOAT && u->arg.f == 0.0) ||
+         (u->arg.kind == POLY_ARG_BOOL && !u->arg.b);
+}
+
 /* Rule 1: ((x+y).or_casted() < c) -> x < (c-y)  if no_range(y,c)
  * tinygrad simplify.py:96 */
 static PolyUOp *rule_collapse_lift_add_from_cmplt(
@@ -655,8 +698,7 @@ static bool match_where_cmplt_reduce(
     PolyUOp **out_tval,
     PolyUOp **out_fval
 ) {
-  if (red->op != POLY_OP_REDUCE) return false;
-  if (red->arg.kind != POLY_ARG_REDUCE || red->arg.reduce.op != POLY_OP_ADD) return false;
+  if (!is_add_reduce(red)) return false;
   if (red->n_src != 2) return false; /* exactly one range */
   PolyUOp *r = red->src[1];
   if (r->op != POLY_OP_RANGE) return false;
@@ -690,11 +732,7 @@ static PolyUOp *rule_collapse_fold_range_below(PolyCtx *ctx, PolyUOp *red, const
   PolyUOp *r, *cut, *tval, *fval;
   if (!match_where_cmplt_reduce(red, &r, &cut, &tval, &fval)) return NULL;
   /* tval must be CONST(0); val = fval */
-  if (tval->op != POLY_OP_CONST) return NULL;
-  bool tval_is_zero = (tval->arg.kind == POLY_ARG_INT && tval->arg.i == 0) ||
-                      (tval->arg.kind == POLY_ARG_FLOAT && tval->arg.f == 0.0) ||
-                      (tval->arg.kind == POLY_ARG_BOOL && tval->arg.b == false);
-  if (!tval_is_zero) return NULL;
+  if (!is_zero_const(tval)) return NULL;
   PolyUOp *val = fval;
   if (!poly_no_range(ctx, val)) return NULL;
   PolyUOp *N = poly_sub(ctx, r->src[0], poly_maximum(ctx, cut, poly_const_like_int(ctx, cut, 0)));
@@ -711,11 +749,7 @@ static PolyUOp *rule_collapse_fold_range_above(PolyCtx *ctx, PolyUOp *red, const
   PolyUOp *r, *cut, *tval, *fval;
   if (!match_where_cmplt_reduce(red, &r, &cut, &tval, &fval)) return NULL;
   /* fval must be CONST(0); val = tval */
-  if (fval->op != POLY_OP_CONST) return NULL;
-  bool fval_is_zero = (fval->arg.kind == POLY_ARG_INT && fval->arg.i == 0) ||
-                      (fval->arg.kind == POLY_ARG_FLOAT && fval->arg.f == 0.0) ||
-                      (fval->arg.kind == POLY_ARG_BOOL && fval->arg.b == false);
-  if (!fval_is_zero) return NULL;
+  if (!is_zero_const(fval)) return NULL;
   PolyUOp *val = tval;
   if (!poly_no_range(ctx, val)) return NULL;
   PolyUOp *N = poly_sub(ctx, poly_minimum(ctx, cut, r->src[0]), poly_const_like_int(ctx, r, 0));
@@ -734,19 +768,14 @@ static PolyUOp *rule_collapse_fold_range_two_sided(
     const PolyBindings *b
 ) {
   (void)b;
-  if (red->op != POLY_OP_REDUCE) return NULL;
-  if (red->arg.kind != POLY_ARG_REDUCE || red->arg.reduce.op != POLY_OP_ADD) return NULL;
-  if (red->n_src != 2) return NULL;
+  if (!is_add_reduce(red) || red->n_src != 2) return NULL;
   PolyUOp *r = red->src[1];
   if (r->op != POLY_OP_RANGE) return NULL;
   PolyUOp *value = red->src[0];
   if (value->op != POLY_OP_WHERE || value->n_src != 3) return NULL;
   PolyUOp *fval = value->src[2];
   PolyUOp *val = value->src[1];
-  if (fval->op != POLY_OP_CONST) return NULL;
-  bool fval_is_zero = (fval->arg.kind == POLY_ARG_INT && fval->arg.i == 0) ||
-                      (fval->arg.kind == POLY_ARG_FLOAT && fval->arg.f == 0.0);
-  if (!fval_is_zero) return NULL;
+  if (!is_zero_const(fval)) return NULL;
   PolyUOp *cond = value->src[0];
   if (cond->op != POLY_OP_AND || cond->n_src != 2) return NULL;
   /* One of the AND operands is CMPNE(CMPLT(r, lower), CONST(true)),
@@ -798,8 +827,7 @@ static PolyUOp *collapse_reduce_value(PolyCtx *ctx, PolyUOp *red, PolyUOp *value
  * Invalid is not a numeric zero or an accumulated value. */
 static PolyUOp *rule_collapse_invalid_guard(PolyCtx *ctx, PolyUOp *red, const PolyBindings *b) {
   (void)b;
-  if (red->arg.kind != POLY_ARG_REDUCE || red->arg.reduce.op != POLY_OP_ADD || red->n_src < 2)
-    return NULL;
+  if (!is_add_reduce(red) || red->n_src < 1) return NULL;
   PolyUOp *value = red->src[0];
   if (value->op != POLY_OP_WHERE || value->n_src != 3 || value->src[2]->op != POLY_OP_CONST ||
       value->src[2]->arg.kind != POLY_ARG_INVALID || !poly_no_range(ctx, value->src[0]))
@@ -821,9 +849,7 @@ static PolyUOp *rule_collapse_reduce_add_distribute(
     const PolyBindings *b
 ) {
   (void)b;
-  if (red->op != POLY_OP_REDUCE) return NULL;
-  if (red->arg.kind != POLY_ARG_REDUCE || red->arg.reduce.op != POLY_OP_ADD) return NULL;
-  if (red->n_src < 2) return NULL;
+  if (!is_add_reduce(red) || red->n_src < 1) return NULL;
   PolyUOp *value = red->src[0];
   if (value->op != POLY_OP_ADD || value->n_src != 2) return NULL;
   PolyUOp *x = value->src[0];
@@ -839,16 +865,11 @@ static PolyUOp *rule_collapse_reduce_add_distribute(
  * tinygrad simplify.py:115-116 */
 static PolyUOp *rule_collapse_and_on_where(PolyCtx *ctx, PolyUOp *red, const PolyBindings *b) {
   (void)b;
-  if (red->op != POLY_OP_REDUCE) return NULL;
-  if (red->arg.kind != POLY_ARG_REDUCE || red->arg.reduce.op != POLY_OP_ADD) return NULL;
-  if (red->n_src < 2) return NULL;
+  if (!is_add_reduce(red) || red->n_src < 1) return NULL;
   PolyUOp *where = red->src[0];
   if (where->op != POLY_OP_WHERE || where->n_src != 3) return NULL;
   PolyUOp *fval = where->src[2];
-  if (fval->op != POLY_OP_CONST) return NULL;
-  bool fval_is_zero = (fval->arg.kind == POLY_ARG_INT && fval->arg.i == 0) ||
-                      (fval->arg.kind == POLY_ARG_FLOAT && fval->arg.f == 0.0);
-  if (!fval_is_zero) return NULL;
+  if (!is_zero_const(fval)) return NULL;
   PolyUOp *and_op = where->src[0];
   if (and_op->op != POLY_OP_AND || and_op->n_src != 2) return NULL;
   /* One side must be the ALU PARAM introduced by reduce_collapse. */
@@ -1056,9 +1077,7 @@ fail:
  */
 static PolyUOp *reduce_simplify(PolyCtx *ctx, PolyUOp *red, const PolyBindings *b) {
   (void)b;
-  if (red->op != POLY_OP_REDUCE) return NULL;
-  if (red->arg.kind != POLY_ARG_REDUCE || red->arg.reduce.op != POLY_OP_ADD) return NULL;
-  if (red->n_src < 2) return NULL;
+  if (!is_add_reduce(red) || red->n_src < 1) return NULL;
   return reduce_collapse(ctx, red, red->src[0], pm_reduce_collapse_get());
 }
 
@@ -1127,13 +1146,6 @@ PolyUOp *poly_test_reduce_collapse(PolyCtx *ctx, PolyUOp *u) {
 
 /* simplify.py: pm_reduce_load_collapse */
 
-static bool is_zero_const(PolyUOp *u) {
-  if (!u || u->op != POLY_OP_CONST) return false;
-  return (u->arg.kind == POLY_ARG_INT && u->arg.i == 0) ||
-         (u->arg.kind == POLY_ARG_FLOAT && u->arg.f == 0.0) ||
-         (u->arg.kind == POLY_ARG_BOOL && u->arg.b == false);
-}
-
 static bool is_range_or_cast_of_range(PolyUOp *u, PolyUOp *r) {
   if (u == r) return true;
   return u && u->op == POLY_OP_CAST && u->n_src == 1 && u->src[0] == r;
@@ -1161,8 +1173,7 @@ static PolyUOp *rule_lift_add_from_cmpne(PolyCtx *ctx, PolyUOp *cmpne, const Pol
 
 static PolyUOp *rule_reduce_gated_load_collapse(PolyCtx *ctx, PolyUOp *red, const PolyBindings *b) {
   (void)b;
-  if (!red || red->op != POLY_OP_REDUCE) return NULL;
-  if (red->arg.kind != POLY_ARG_REDUCE || red->arg.reduce.op != POLY_OP_ADD) return NULL;
+  if (!is_add_reduce(red)) return NULL;
   if (red->n_src != 2 || red->src[1]->op != POLY_OP_RANGE) return NULL;
 
   PolyUOp *r = red->src[1];
@@ -1217,9 +1228,7 @@ static PolyPatternMatcher *pm_reduce_load_collapse_get(void) {
 
 static PolyUOp *reduce_load_collapse(PolyCtx *ctx, PolyUOp *red, const PolyBindings *b) {
   (void)b;
-  if (red->op != POLY_OP_REDUCE) return NULL;
-  if (red->arg.kind != POLY_ARG_REDUCE || red->arg.reduce.op != POLY_OP_ADD) return NULL;
-  if (red->n_src < 2) return NULL;
+  if (!is_add_reduce(red) || red->n_src != 2) return NULL;
   return reduce_collapse(ctx, red, red->src[0], pm_reduce_load_collapse_get());
 }
 
