@@ -2,7 +2,6 @@
 
 #include "device.h"
 #include "ctx.h"
-#include "frontend_internal.h"
 #include "utils.h"
 #include "engine/schedule.h"
 #include "runtime_wasm.h"

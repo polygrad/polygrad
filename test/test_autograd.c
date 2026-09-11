@@ -11,7 +11,8 @@
 #include "../src/schedule/rangeify.h"
 #include "../src/codegen/codegen.h"
 #include "../src/frontend.h"
-#include "../src/frontend_internal.h"
+#include "../src/engine/realize.h"
+#include "../src/uop/ops.h"
 #include "../src/tensor.h"
 
 /* Autograd e2e tests compile concrete scheduled kernels, not the earlier

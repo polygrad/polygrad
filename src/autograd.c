@@ -15,7 +15,7 @@
  */
 
 #include "ctx.h"
-#include "frontend_internal.h"
+#include "uop/ops.h"
 #include "uop/upat.h"
 #include "tensor.h"
 #include <stdio.h>

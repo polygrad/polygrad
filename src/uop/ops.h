@@ -3,6 +3,10 @@
 
 #include "../polygrad.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Current tinygrad/uop/ops.py:axis_letters and range_str. */
 char poly_axis_letter(PolyArg arg);
 char *poly_range_str(PolyArg arg);
@@ -27,5 +31,35 @@ bool poly_uop_addrspace(const PolyUOp *u, PolyAddrSpace *out);
 int poly_uop_cse_evict_unmarked(PolyCtx *ctx, PolyMap *live);
 bool poly_uop_storage_contains(PolyCtx *ctx, const void *ptr);
 void poly_uop_storage_destroy_all(PolyCtx *ctx);
+
+/* tinygrad's callified function uses value PARAMs as external storage
+ * identities until rangeify lowers them to kernel pointer PARAMs. */
+static inline bool poly_uop_is_shaped_value_param(const PolyUOp *u) {
+  return u && u->op == POLY_OP_PARAM && u->arg.kind == POLY_ARG_PARAM && u->arg.param &&
+         !u->arg.param->name && u->n_src == 1 && u->src[0] &&
+         (u->src[0]->op == POLY_OP_STACK || poly_dtype_is_int(u->src[0]->dtype));
+}
+
+/* Pass-local backing cache for pinned UOp.axis. NULL/false is represented
+ * explicitly in the map so shared unsharded subgraphs are not revisited. */
+bool poly_uop_axis_cached(PolyCtx *ctx, const PolyUOp *u, PolyMap *cache, int *out_axis);
+
+/* Apply one substitution map to several roots with one pass-local rewrite
+ * memo. This is the allocation-free-root equivalent of tinygrad substituting
+ * one temporary SINK: shared UOps are rewritten once, but no aggregate UOp is
+ * interned in Polygrad's ctx-lifetime arena/CSE. */
+int poly_uop_substitute_many(
+    PolyCtx *ctx,
+    PolyUOp **roots,
+    int n_roots,
+    PolyUOp **from,
+    PolyUOp **to,
+    int n,
+    PolyUOp **out
+);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

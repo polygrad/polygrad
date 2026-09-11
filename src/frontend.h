@@ -11,30 +11,13 @@
 
 #include "polygrad.h"
 
-/* Public C/frontend ABI version. Bump when exported symbols or public struct
- * layouts used by frontends change. */
-#define POLYGRAD_ABI_VERSION 78
-
-/* Current ElementwiseMixin._binop for language UOp operators. Compiler
- * matchers keep using raw poly_alu2. */
-PolyUOp *poly_binop(PolyCtx *ctx, PolyOps op, PolyUOp *a, PolyUOp *b);
-
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* Tinygrad helpers.NOOPT: library-wide compilation policy, initialized from
- * the environment once, not graph state. Existing PROGRAMs are unchanged. */
-int poly_get_noopt(void);
-void poly_set_noopt(int value);
-
-/* Tinygrad helpers.BEAM; the same library/module ownership as NOOPT. */
-int poly_get_beam(void);
-void poly_set_beam(int value);
-int poly_get_ignore_beam_cache(void);
-void poly_set_ignore_beam_cache(int value);
-
-/* FFI buffer constructors for bindings that cannot pass PolyDType by value. */
+/* Dtype-ID adapters for bindings that cannot pass PolyDType by value. */
+PolyUOp *poly_cast_by_id(PolyCtx *ctx, PolyUOp *x, int dtype_id);
+PolyUOp *poly_bitcast_by_id(PolyCtx *ctx, PolyUOp *x, int dtype_id);
 PolyUOp *poly_buffer_by_id(PolyCtx *ctx, int dtype_id, int64_t size);
 PolyUOp *poly_buffer_on_device_by_id(PolyCtx *ctx, int dtype_id, int64_t size, int device_id);
 PolyUOp *poly_buffer_f32(PolyCtx *ctx, int64_t size);
@@ -81,7 +64,6 @@ PolyTensor *poly_tensor_full_invalid_by_id(
     int device_id,
     bool buffer
 );
-PolyTensor *poly_tensor_const_like_int(PolyCtx *ctx, PolyTensor *ref, int64_t value);
 PolyTensor *poly_tensor_const_uint_by_id(PolyCtx *ctx, uint64_t value, int dtype_id, int device_id);
 PolyTensor *poly_tensor_full_uint_by_id(
     PolyCtx *ctx,
@@ -93,7 +75,6 @@ PolyTensor *poly_tensor_full_uint_by_id(
     bool dtype_explicit,
     bool buffer
 );
-PolyTensor *poly_tensor_const_like_float(PolyCtx *ctx, PolyTensor *ref, double value);
 PolyTensor *poly_tensor_full_int_by_id(
     PolyCtx *ctx,
     const int64_t *dims,
@@ -139,54 +120,12 @@ PolyTensor *poly_tensor_linspace_by_id(
     int device_id
 );
 PolyTensor *poly_tensor_eye_by_id(PolyCtx *ctx, int64_t n, int64_t m, int dtype_id, int device_id);
-void poly_tensor_manual_seed(PolyCtx *ctx, int64_t seed);
-PolyTensor *poly_tensor_rand_by_id(
-    PolyCtx *ctx,
-    const int64_t *dims,
-    int ndim,
-    int dtype_id,
-    PolyDevice device,
-    int contiguous
-);
-PolyTensor *poly_tensor_randn_by_id(
-    PolyCtx *ctx,
-    const int64_t *dims,
-    int ndim,
-    int dtype_id,
-    PolyDevice device
-);
 int poly_uop_op(PolyUOp *u);
 int poly_uop_dtype_id(PolyCtx *ctx, PolyUOp *u);
 int poly_uop_n_src(PolyUOp *u);
 PolyUOp *poly_uop_src(PolyUOp *u, int idx);
 uint32_t poly_uop_call_grad_fxn_key(PolyUOp *u);
-/* Pinned tinygrad uop/ops.py `resolve`: simplify a boolean UOp, return its
- * proven value when constant, otherwise the caller-provided default. */
-int poly_uop_resolve(PolyCtx *ctx, PolyUOp *u, int default_value);
-
-/* FFI-safe UOp construction helpers used by tinygrad-style custom kernels.
- * These only build UOps; execution still flows through normal CALL scheduling. */
-PolyUOp *poly_uop_placeholder_like(PolyCtx *ctx, PolyUOp *like, int slot);
 PolyUOp *poly_uop_range(PolyCtx *ctx, int64_t bound, int64_t axis_id, int axis_type);
-PolyUOp *poly_uop_index(PolyCtx *ctx, PolyUOp *base, PolyUOp **indices, int n_indices);
-PolyUOp *poly_uop_load(PolyCtx *ctx, PolyUOp *addr);
-PolyUOp *poly_uop_store(PolyCtx *ctx, PolyUOp *addr, PolyUOp *value);
-PolyUOp *poly_uop_set(PolyCtx *ctx, PolyUOp *addr, PolyUOp *value, PolyUOp **ranges, int n_ranges);
-PolyUOp *poly_uop_group(PolyCtx *ctx, PolyUOp **srcs, int n_src);
-PolyUOp *poly_uop_end(PolyCtx *ctx, PolyUOp *body, PolyUOp **ranges, int n_ranges);
-PolyUOp *poly_uop_sink(PolyCtx *ctx, PolyUOp **srcs, int n_src);
-PolyUOp *poly_uop_sink_ex(PolyCtx *ctx, PolyUOp **srcs, int n_src, const char *name, int optimize);
-PolyUOp *poly_uop_call(PolyCtx *ctx, PolyUOp *body, PolyUOp **args, int n_args);
-PolyUOp *poly_uop_after(PolyCtx *ctx, PolyUOp *target, PolyUOp *effect);
-PolyUOp *poly_uop_reduce(
-    PolyCtx *ctx,
-    PolyOps reduce_op,
-    PolyUOp *expr,
-    PolyUOp **ranges,
-    int n_ranges
-);
-PolyUOp *poly_uop_flatten(PolyCtx *ctx, PolyUOp *u);
-int64_t poly_uop_numel(PolyCtx *ctx, PolyUOp *u);
 
 /* ABI version (callers check at load time for compatibility). */
 int poly_abi_version(void);
@@ -219,8 +158,6 @@ void poly_debug_opsets(void);
 /* ABI cleanup hook retained for frontends. CPU program caches are per-context
  * and are released by poly_ctx_destroy(). */
 void poly_cpu_cache_flush(void);
-
-/* Free cached schedule results (param-to-binding mappings). */
 
 #ifdef __cplusplus
 }

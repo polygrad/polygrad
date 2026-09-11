@@ -2,7 +2,6 @@
 
 #include "test_harness.h"
 #include "../src/frontend.h"
-#include "../src/frontend_internal.h"
 #include "../src/model.h"
 #include "../src/ir.h"
 

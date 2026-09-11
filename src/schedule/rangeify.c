@@ -16,7 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-#include "frontend_internal.h"
+#include "uop/ops.h"
 #include "utils.h"
 
 #ifndef POLY_RANGEIFY_DEBUG

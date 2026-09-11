@@ -8,6 +8,10 @@
 
 #include "polygrad.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Allocator interface: per-device memory operations */
 
 typedef struct PolyBuffer PolyBuffer;
@@ -231,5 +235,13 @@ int poly_buffer_write(PolyCtx *ctx, PolyUOp *buf, const void *src, size_t nbytes
 
 /* Check if a buffer has data in the side table. */
 bool poly_buffer_is_allocated(PolyCtx *ctx, PolyUOp *buf);
+
+/* Memoized backing helper for poly_uop_device(), matching tinygrad's cached
+ * UOp._device property without storing pass-local cache state on every UOp. */
+PolyDevice poly_uop_device_cached(PolyUOp *u, PolyMap *cache);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* POLY_DEVICE_H */

@@ -12,7 +12,7 @@
 #include "../src/engine/schedule.h"
 #include "../src/device.h"
 #include "../src/frontend.h"
-#include "../src/frontend_internal.h"
+#include "../src/uop/ops.h"
 #include "../src/polygrad.h"
 #include "../src/tensor.h"
 #include "../src/utils.h"

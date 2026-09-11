@@ -11,8 +11,7 @@
 #include "engine/schedule.h"
 #include "ctx.h"
 #include "utils.h"
-#include "frontend_internal.h"
-#include "frontend.h"
+#include "placer.h"
 #include "codegen/codegen.h"
 #include "renderer/cstyle.h"
 #include "renderer/isa/x86.h"
@@ -4158,4 +4157,172 @@ int poly_run_linear(
   ctx->execution_depth--;
   poly_uop_release(ctx, linear);
   return rc;
+}
+
+/* Structural hash/eq for graph caches.
+ * Cached schedules/programs need to match computations that are structurally
+ * identical but use different BUFFER UOp instances, such as fresh training
+ * step buffers. We hash/compare the computation DAG structure: ops, dtypes,
+ * args, and connectivity, treating BUFFER storage identities as positional
+ * placeholders (first encountered = 0, etc.). Exact movement views remain
+ * ordinary graph topology, matching current Tinygrad call arguments.
+ */
+
+typedef struct {
+  PolyMap *visited; /* UOp* -> 1-based index into hashes. Dynamic for model-scale DAGs. */
+  uint32_t *hashes;
+  int n_hashes;
+  int cap_hashes;
+  PolyUOp **bufs;
+  int n_bufs;
+  int cap_bufs;
+} StructHashCtx;
+
+static uint32_t struct_hash_impl(PolyUOp *u, StructHashCtx *ctx) {
+  /* Check if already visited */
+  void *memo_val = poly_map_get(ctx->visited, poly_ptr_hash(u), u, poly_ptr_eq);
+  if (memo_val) return ctx->hashes[(int)((intptr_t)memo_val - 1)];
+
+  uint32_t h = 0x811c9dc5; /* FNV-1a offset basis */
+
+  if (u->op == POLY_OP_BUFFER) {
+    /* Storage identities use positional IDs instead of pointer identity. */
+    int buf_id = -1;
+    for (int i = 0; i < ctx->n_bufs; i++) {
+      if (ctx->bufs[i] == u) {
+        buf_id = i;
+        break;
+      }
+    }
+    if (buf_id < 0) {
+      if (ctx->n_bufs >= ctx->cap_bufs) {
+        int new_cap = ctx->cap_bufs ? ctx->cap_bufs * 2 : 64;
+        PolyUOp **new_bufs = realloc(ctx->bufs, (size_t)new_cap * sizeof(PolyUOp *));
+        if (!new_bufs) return h;
+        ctx->bufs = new_bufs;
+        ctx->cap_bufs = new_cap;
+      }
+      buf_id = ctx->n_bufs;
+      ctx->bufs[ctx->n_bufs++] = u;
+    }
+    h ^= (uint32_t)u->op;
+    h *= 0x01000193;
+    h ^= (uint32_t)u->dtype.priority;
+    h *= 0x01000193;
+    h ^= (uint32_t)u->dtype.bitsize;
+    h *= 0x01000193;
+    h ^= (uint32_t)buf_id;
+    h *= 0x01000193;
+    h ^= poly_arg_hash(u->arg);
+    h *= 0x01000193;
+  } else {
+    h ^= (uint32_t)u->op;
+    h *= 0x01000193;
+    h ^= (uint32_t)u->dtype.priority;
+    h *= 0x01000193;
+    h ^= (uint32_t)u->dtype.bitsize;
+    h *= 0x01000193;
+    for (int i = 0; i < u->n_src; i++) {
+      h ^= struct_hash_impl(u->src[i], ctx);
+      h *= 0x01000193;
+    }
+    h ^= poly_arg_hash(u->arg);
+    h *= 0x01000193;
+  }
+
+  if (ctx->n_hashes >= ctx->cap_hashes) {
+    int new_cap = ctx->cap_hashes ? ctx->cap_hashes * 2 : 1024;
+    uint32_t *new_hashes = realloc(ctx->hashes, (size_t)new_cap * sizeof(uint32_t));
+    if (!new_hashes) return h;
+    ctx->hashes = new_hashes;
+    ctx->cap_hashes = new_cap;
+  }
+  int idx = ctx->n_hashes++;
+  ctx->hashes[idx] = h;
+  poly_map_set(ctx->visited, poly_ptr_hash(u), u, (void *)(intptr_t)(idx + 1), poly_ptr_eq);
+  return h;
+}
+
+uint32_t poly_structural_hash(PolyUOp *u) {
+  if (!u) return 0;
+  StructHashCtx ctx;
+  memset(&ctx, 0, sizeof(ctx));
+  ctx.visited = poly_map_new(1024);
+  if (!ctx.visited) return 0;
+  uint32_t h = struct_hash_impl(u, &ctx);
+  poly_map_destroy(ctx.visited);
+  free(ctx.hashes);
+  free(ctx.bufs);
+  return h;
+}
+
+/* Structural equality */
+
+typedef struct {
+  PolyMap *a_to_b;
+  PolyMap *b_to_a;
+} BufPairs;
+
+typedef struct {
+  PolyMap *a_to_b;
+  PolyMap *b_to_a;
+} EqVisited;
+
+static bool struct_eq_impl(PolyUOp *a, PolyUOp *b, BufPairs *bp, EqVisited *ev) {
+  if (a == b) return true;
+  if (!a || !b) return false;
+
+  /* Check if this pair already visited (DAG sharing) */
+  void *seen_b = poly_map_get(ev->a_to_b, poly_ptr_hash(a), a, poly_ptr_eq);
+  if (seen_b) return seen_b == b;
+  if (poly_map_get(ev->b_to_a, poly_ptr_hash(b), b, poly_ptr_eq)) return false;
+
+  poly_map_set(ev->a_to_b, poly_ptr_hash(a), a, b, poly_ptr_eq);
+  poly_map_set(ev->b_to_a, poly_ptr_hash(b), b, a, poly_ptr_eq);
+
+  /* Both executable storage identities? Track positional correspondence. */
+  bool a_storage = a->op == POLY_OP_BUFFER;
+  bool b_storage = b->op == POLY_OP_BUFFER;
+  if (a_storage || b_storage) {
+    if (!a_storage || !b_storage || a->op != b->op) return false;
+    if (!poly_dtype_eq(a->dtype, b->dtype)) return false;
+    if (!poly_arg_eq(a->arg, b->arg)) return false;
+    /* Check existing mapping */
+    void *mapped_b = poly_map_get(bp->a_to_b, poly_ptr_hash(a), a, poly_ptr_eq);
+    if (mapped_b) return mapped_b == b;
+    if (poly_map_get(bp->b_to_a, poly_ptr_hash(b), b, poly_ptr_eq)) return false;
+    poly_map_set(bp->a_to_b, poly_ptr_hash(a), a, b, poly_ptr_eq);
+    poly_map_set(bp->b_to_a, poly_ptr_hash(b), b, a, poly_ptr_eq);
+    return true;
+  }
+
+  /* Same op, dtype, n_src, arg? */
+  if (a->op != b->op) return false;
+  if (!poly_dtype_eq(a->dtype, b->dtype)) return false;
+  if (a->n_src != b->n_src) return false;
+  if (!poly_arg_eq(a->arg, b->arg)) return false;
+
+  /* Recursively compare sources */
+  for (int i = 0; i < a->n_src; i++) {
+    if (!struct_eq_impl(a->src[i], b->src[i], bp, ev)) return false;
+  }
+  return true;
+}
+
+bool poly_structural_eq(const void *a, const void *b) {
+  BufPairs bp = {.a_to_b = poly_map_new(64), .b_to_a = poly_map_new(64)};
+  EqVisited ev = {.a_to_b = poly_map_new(1024), .b_to_a = poly_map_new(1024)};
+  if (!bp.a_to_b || !bp.b_to_a || !ev.a_to_b || !ev.b_to_a) {
+    if (bp.a_to_b) poly_map_destroy(bp.a_to_b);
+    if (bp.b_to_a) poly_map_destroy(bp.b_to_a);
+    if (ev.a_to_b) poly_map_destroy(ev.a_to_b);
+    if (ev.b_to_a) poly_map_destroy(ev.b_to_a);
+    return false;
+  }
+  bool ok = struct_eq_impl((PolyUOp *)a, (PolyUOp *)b, &bp, &ev);
+  poly_map_destroy(bp.a_to_b);
+  poly_map_destroy(bp.b_to_a);
+  poly_map_destroy(ev.a_to_b);
+  poly_map_destroy(ev.b_to_a);
+  return ok;
 }

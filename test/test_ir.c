@@ -7,7 +7,6 @@
 #include "../src/bigint.h"
 #include "../src/ctx.h"
 #include "../src/frontend.h"
-#include "../src/frontend_internal.h"
 #include "../src/device.h"
 #include "../src/engine/schedule.h"
 #include <string.h>

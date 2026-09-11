@@ -12,7 +12,6 @@
 #include "../src/engine/schedule.h"
 #include "../src/ir.h"
 #include "../src/frontend.h"
-#include "../src/frontend_internal.h"
 #include "../src/engine/schedule.h"
 #include "../src/optim.h"
 #include "../src/tensor.h"

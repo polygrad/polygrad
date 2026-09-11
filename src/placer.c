@@ -7,7 +7,8 @@
 
 #include "ctx.h"
 #include "device.h"
-#include "frontend_internal.h"
+#include "uop/ops.h"
+#include "placer.h"
 #include "tensor.h"
 #include "utils.h"
 

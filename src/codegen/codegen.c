@@ -19,8 +19,6 @@
 #include "bigint.h"
 #include "ir.h"
 #include "engine/schedule.h"
-#include "frontend_internal.h"
-#include "frontend.h"
 #include "schedule/indexing.h"
 #include "schedule/multi.h"
 #include "schedule/rangeify.h"

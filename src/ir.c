@@ -13,7 +13,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "ir.h"
 #include "ctx.h"
-#include "frontend.h"
 #include "engine/schedule.h"
 #include <limits.h>
 #include <stdlib.h>

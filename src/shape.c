@@ -10,7 +10,7 @@
 #include "polygrad.h"
 #include "ctx.h"
 #include "device.h"
-#include "frontend_internal.h"
+#include "uop/ops.h"
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1297,4 +1297,54 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
 
   /* Default: no shape */
   return make_entry_none(ctx);
+}
+
+int64_t poly_uop_numel(PolyCtx *ctx, PolyUOp *u) {
+  if (!ctx || !u) return -1;
+  int ndim = poly_uop_ndim(ctx, u);
+  if (ndim < 0 || ndim > POLY_MAX_DIMS) return -1;
+  const int64_t *dims = poly_uop_max_shape_dims(ctx, u);
+  if (ndim > 0 && !dims) return -1;
+  return ndim == 0 ? 1 : poly_shape_numel_checked(dims, ndim);
+}
+
+PolyUOp *poly_uop_flatten(PolyCtx *ctx, PolyUOp *u) {
+  if (!ctx || !u) return NULL;
+  int64_t numel = poly_uop_numel(ctx, u);
+  if (numel < 0) return NULL;
+  int ndim = poly_uop_ndim(ctx, u);
+  const int64_t *dims = poly_uop_max_shape_dims(ctx, u);
+  if (ndim == 1 && dims && dims[0] == numel) return u;
+  int64_t shape[1] = {numel};
+  return poly_reshape(ctx, u, shape, 1);
+}
+
+int64_t poly_shape_numel_checked(const int64_t *shape, int ndim) {
+  if (ndim < 0 || ndim > POLY_MAX_DIMS) return -1;
+  if (ndim == 0) return 1;
+  if (!shape) return -1;
+  bool has_zero = false;
+  for (int i = 0; i < ndim; i++) {
+    if (shape[i] < 0) return -1;
+    if (shape[i] == 0) has_zero = true;
+  }
+  /* Current helpers.prod returns zero for any zero extent even when an
+   * earlier partial product would overflow.  Match poly_shape_numel's
+   * already-proved ordering before the checked nonzero multiplication
+   * (helpers.py:13). */
+  if (has_zero) return 0;
+  int64_t n = 1;
+  for (int i = 0; i < ndim; i++) {
+    if (n > INT64_MAX / shape[i]) return -1;
+    n *= shape[i];
+  }
+  return n;
+}
+
+bool poly_shape_equal(const int64_t *a, int a_ndim, const int64_t *b, int b_ndim) {
+  if (!a || !b || a_ndim != b_ndim) return false;
+  for (int i = 0; i < a_ndim; i++) {
+    if (a[i] != b[i]) return false;
+  }
+  return true;
 }

@@ -82,6 +82,37 @@ int poly_realize_sink(PolyCtx *ctx, PolyUOp *sink);
  * Returns 0 on success, -1 on error. */
 int poly_realize_uops(PolyCtx *ctx, PolyUOp **uops, int n, PolyUOp **out_uops);
 
+/* Collect ordered external buffers (output-first, then inputs).
+ * Returns count of buffers found, up to max_bufs. */
+int poly_collect_ordered_buffers(
+    PolyCtx *ctx,
+    PolyUOp *tensor_sink,
+    PolyUOp **ordered,
+    int max_bufs
+);
+
+/* Owned dynamic version of poly_collect_ordered_buffers. Caller frees
+ * *out_ordered with free(). */
+bool poly_collect_ordered_buffers_alloc(
+    PolyCtx *ctx,
+    PolyUOp *tensor_sink,
+    PolyUOp ***out_ordered,
+    int *out_n_ordered
+);
+
+/* Physical-only counterpart to pinned transform_to_call's `(graph,
+ * buffer_map)` return. The caller owns and frees out_map_orig/out_map_repl;
+ * no Tensor, placement, Model, or residency state is mutated here. */
+PolyUOp *poly_transform_to_call_with_map(
+    PolyCtx *ctx,
+    PolyUOp **uops,
+    int n,
+    PolyUOp **out_uops,
+    PolyUOp ***out_map_orig,
+    PolyUOp ***out_map_repl,
+    int *out_map_n
+);
+
 #ifdef __cplusplus
 }
 #endif

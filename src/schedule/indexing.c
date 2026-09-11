@@ -3,7 +3,6 @@
 #include "schedule/indexing.h"
 #include "ctx.h"
 #include "device.h"
-#include "frontend_internal.h"
 #include "uop/upat.h"
 #include "utils.h"
 #include <limits.h>

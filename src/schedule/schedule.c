@@ -5,7 +5,6 @@
 #include "ctx.h"
 #include "device.h"
 #include "engine/jit.h"
-#include "frontend_internal.h"
 #include "uop/upat.h"
 #include "schedule/memory.h"
 #include "schedule/rangeify.h"

@@ -575,6 +575,10 @@ sync-source-mirrors:
 verify-source-mirrors:
 	$(PYTHON) scripts/verify-source-mirrors.py
 
+.PHONY: test-headers
+test-headers:
+	$(PYTHON) scripts/check-headers.py
+
 test-py: verify-source-mirrors build/libpolygrad.so
 	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 POLYGRAD_LIB=build/libpolygrad.so PYTHONPATH=py python -m pytest py/tests/ -v
 

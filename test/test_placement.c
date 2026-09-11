@@ -3,7 +3,7 @@
 #include "test_harness.h"
 #include "../src/engine/realize.h"
 #include "../src/frontend.h"
-#include "../src/frontend_internal.h"
+#include "../src/placer.h"
 #include "../src/polygrad.h"
 #include "../src/tensor.h"
 

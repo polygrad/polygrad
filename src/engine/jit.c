@@ -4,8 +4,6 @@
 #include "codegen/codegen.h"
 #include "ctx.h"
 #include "device.h"
-#include "frontend_internal.h"
-#include "frontend.h"
 #include "uop/upat.h"
 #include "schedule/memory.h"
 #include "tensor.h"

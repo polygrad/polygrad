@@ -9,7 +9,8 @@
 #define _POSIX_C_SOURCE 200809L
 #include "model.h"
 #include "ctx.h"
-#include "frontend_internal.h"
+#include "uop/ops.h"
+#include "placer.h"
 #include "utils.h"
 #include "ir.h"
 #include "safetensors.h"

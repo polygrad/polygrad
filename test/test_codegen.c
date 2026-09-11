@@ -11,7 +11,6 @@
 #include "../src/renderer/cstyle.h"
 #include "../src/bigint.h"
 #include "../src/frontend.h"
-#include "../src/frontend_internal.h"
 #include "../src/engine/schedule.h"
 #include "../src/interp.h"
 #include "../src/tensor.h" /* poly_sum_reduce */

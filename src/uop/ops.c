@@ -3805,3 +3805,181 @@ PolyUOp *poly_sink1(PolyCtx *ctx, PolyUOp *store) {
 PolyUOp *poly_sink_n(PolyCtx *ctx, PolyUOp **stores, int n) {
   return poly_uop(ctx, POLY_OP_SINK, POLY_VOID, stores, n, poly_arg_none());
 }
+
+PolyUOp *poly_bitcast(PolyCtx *ctx, PolyUOp *x, PolyDType target) {
+  if (!ctx || !x) return NULL;
+  /* Pinned uop/ops.py:UOp.bitcast. Unequal widths remain raw BITCAST;
+   * UOp shape inference owns the final-dimension byte calculation. */
+  if (poly_dtype_eq(x->dtype, target)) return x;
+  return poly_uop1(ctx, POLY_OP_BITCAST, target, x, poly_arg_none());
+}
+
+PolyUOp *poly_uop_placeholder_like(PolyCtx *ctx, PolyUOp *like, int slot) {
+  if (!ctx || !like || slot < 0) return NULL;
+  int ndim = poly_uop_ndim(ctx, like);
+  if (ndim < 0 || ndim > POLY_MAX_DIMS) return NULL;
+  const int64_t *dims = poly_uop_max_shape_dims(ctx, like);
+  if (ndim > 0 && !dims) return NULL;
+  return poly_uop_placeholder(ctx, dims, ndim, like->dtype, slot, POLY_ADDR_GLOBAL, NULL, false);
+}
+
+PolyUOp *poly_uop_load(PolyCtx *ctx, PolyUOp *addr) {
+  if (!ctx || !addr) return NULL;
+  return poly_uop1(ctx, POLY_OP_LOAD, addr->dtype, addr, poly_arg_none());
+}
+
+PolyUOp *poly_uop_store(PolyCtx *ctx, PolyUOp *addr, PolyUOp *value) {
+  if (!ctx || !addr || !value) return NULL;
+  return poly_store_val(ctx, addr, value);
+}
+
+PolyUOp *poly_uop_set(PolyCtx *ctx, PolyUOp *addr, PolyUOp *value, PolyUOp **ranges, int n_ranges) {
+  if (!ctx || !addr || !value || n_ranges < 0 || (n_ranges > 0 && !ranges)) return NULL;
+  if (addr->op != POLY_OP_INDEX || addr->n_src < 1 || !addr->src[0]) return NULL;
+  PolyUOp *store = poly_uop_store(ctx, addr, value);
+  if (!store) return NULL;
+  PolyUOp *effect = store;
+  if (n_ranges > 0) {
+    effect = poly_uop_end(ctx, store, ranges, n_ranges);
+    if (!effect) return NULL;
+  }
+  return poly_uop_after(ctx, addr->src[0], effect);
+}
+
+PolyUOp *poly_uop_group(PolyCtx *ctx, PolyUOp **srcs, int n_src) {
+  if (!ctx || n_src <= 0 || !srcs) return NULL;
+  return poly_uop(ctx, POLY_OP_GROUP, POLY_VOID, srcs, n_src, poly_arg_none());
+}
+
+PolyUOp *poly_uop_end(PolyCtx *ctx, PolyUOp *body, PolyUOp **ranges, int n_ranges) {
+  if (!ctx || !body || n_ranges < 0 || (n_ranges > 0 && !ranges)) return NULL;
+  PolyUOp **src = malloc((size_t)(n_ranges + 1) * sizeof(PolyUOp *));
+  if (!src) return NULL;
+  src[0] = body;
+  for (int i = 0; i < n_ranges; i++) {
+    if (!ranges[i]) {
+      free(src);
+      return NULL;
+    }
+    src[1 + i] = ranges[i];
+  }
+  PolyUOp *ret = poly_uop(ctx, POLY_OP_END, POLY_VOID, src, n_ranges + 1, poly_arg_none());
+  free(src);
+  return ret;
+}
+
+PolyUOp *poly_uop_sink(PolyCtx *ctx, PolyUOp **srcs, int n_src) {
+  if (!ctx || n_src < 0 || (n_src > 0 && !srcs)) return NULL;
+  return poly_uop(ctx, POLY_OP_SINK, POLY_VOID, srcs, n_src, poly_arg_none());
+}
+
+PolyUOp *poly_uop_sink_ex(PolyCtx *ctx, PolyUOp **srcs, int n_src, const char *name, int optimize) {
+  if (!ctx || n_src < 0 || (n_src > 0 && !srcs)) return NULL;
+  /* Current Tinygrad UOp.sink(KernelInfo): tag=1 disables ordinary codegen
+   * optimization while preserving the same compiler-kernel vocabulary. */
+  PolyKernelInfo info = {.name = (name && name[0]) ? name : "test"};
+  PolyArg arg = poly_arg_kernel_info(&info);
+  if (optimize) return poly_uop(ctx, POLY_OP_SINK, POLY_VOID, srcs, n_src, arg);
+  return poly_uop_tagged_arg(ctx, POLY_OP_SINK, POLY_VOID, srcs, n_src, arg, 1, poly_arg_none());
+}
+
+PolyUOp *poly_uop_call(PolyCtx *ctx, PolyUOp *body, PolyUOp **args, int n_args) {
+  if (!ctx || !body || n_args < 0 || (n_args > 0 && !args)) return NULL;
+  PolyUOp **src = malloc((size_t)(n_args + 1) * sizeof(PolyUOp *));
+  if (!src) return NULL;
+  src[0] = body;
+  for (int i = 0; i < n_args; i++) {
+    if (!args[i]) {
+      free(src);
+      return NULL;
+    }
+    src[1 + i] = args[i];
+  }
+  PolyUOp *ret = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, src, n_args + 1, poly_arg_none());
+  free(src);
+  return ret;
+}
+
+PolyUOp *poly_uop_after(PolyCtx *ctx, PolyUOp *target, PolyUOp *effect) {
+  if (!ctx || !target || !effect) return NULL;
+  PolyUOp *src[2] = {target, effect};
+  return poly_uop(ctx, POLY_OP_AFTER, target->dtype, src, 2, poly_arg_none());
+}
+
+PolyUOp *poly_uop_reduce(
+    PolyCtx *ctx,
+    PolyOps reduce_op,
+    PolyUOp *expr,
+    PolyUOp **ranges,
+    int n_ranges
+) {
+  if (!ctx || !expr || n_ranges < 0 || (n_ranges > 0 && !ranges)) return NULL;
+  switch (reduce_op) {
+  case POLY_OP_ADD:
+  case POLY_OP_MUL:
+  case POLY_OP_MAX:
+  case POLY_OP_AND:
+  case POLY_OP_OR:
+    break;
+  default:
+    return NULL;
+  }
+  if (n_ranges == 0) return expr;
+  PolyUOp **src = malloc((size_t)(n_ranges + 1) * sizeof(PolyUOp *));
+  if (!src) return NULL;
+  PolyUOp **from = malloc((size_t)n_ranges * sizeof(PolyUOp *));
+  PolyUOp **to = malloc((size_t)n_ranges * sizeof(PolyUOp *));
+  if (!from || !to) {
+    free(src);
+    free(from);
+    free(to);
+    return NULL;
+  }
+  int n_subs = 0;
+  src[0] = expr;
+  for (int i = 0; i < n_ranges; i++) {
+    if (!ranges[i] || ranges[i]->op != POLY_OP_RANGE) {
+      free(src);
+      free(from);
+      free(to);
+      return NULL;
+    }
+    PolyAxisType axis_type = poly_range_axis_type(ranges[i]->arg);
+    if (axis_type == POLY_AXIS_WEAK) {
+      PolyArg range_arg = ranges[i]->arg;
+      PolyArg new_arg = poly_arg_range(poly_range_axis_id(range_arg), POLY_AXIS_REDUCE);
+      if (poly_range_n_extra(range_arg) > 0) {
+        new_arg = poly_arg_range_ex(
+            poly_range_axis_id(range_arg), POLY_AXIS_REDUCE, poly_range_extra(range_arg),
+            poly_range_n_extra(range_arg)
+        );
+      }
+      PolyUOp *rr =
+          poly_uop(ctx, POLY_OP_RANGE, ranges[i]->dtype, ranges[i]->src, ranges[i]->n_src, new_arg);
+      if (!rr) {
+        free(src);
+        free(from);
+        free(to);
+        return NULL;
+      }
+      from[n_subs] = ranges[i];
+      to[n_subs] = rr;
+      n_subs++;
+      src[i + 1] = rr;
+    } else if (axis_type == POLY_AXIS_REDUCE || axis_type == POLY_AXIS_GROUP_REDUCE || axis_type == POLY_AXIS_UNROLL) {
+      src[i + 1] = ranges[i];
+    } else {
+      free(src);
+      free(from);
+      free(to);
+      return NULL;
+    }
+  }
+  if (n_subs > 0) src[0] = poly_uop_substitute(ctx, expr, from, to, n_subs);
+  PolyUOp *ret =
+      poly_uop(ctx, POLY_OP_REDUCE, expr->dtype, src, n_ranges + 1, poly_arg_reduce(reduce_op, 0));
+  free(src);
+  free(from);
+  free(to);
+  return ret;
+}

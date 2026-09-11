@@ -6,7 +6,8 @@
 #include "ctx.h"
 #include "engine/jit.h"
 #include "engine/schedule.h"
-#include "frontend_internal.h"
+#include "uop/ops.h"
+#include "placer.h"
 #include "uop/upat.h"
 #include "schedule/rangeify.h"
 #include "schedule/schedule.h"
@@ -2514,4 +2515,212 @@ int poly_realize_tensors_ex(
 
 int poly_realize_tensors(PolyCtx *ctx, PolyTensor **inputs, int n, PolyTensor **outputs) {
   return poly_realize_tensors_ex(ctx, inputs, n, outputs, true);
+}
+
+static bool uop_vec_append(PolyUOp ***items, int *count, int *cap, PolyUOp *u) {
+  if (!items || !count || !cap) return false;
+  if (*count >= *cap) {
+    int new_cap = *cap ? *cap * 2 : 16;
+    PolyUOp **tmp = realloc(*items, (size_t)new_cap * sizeof(PolyUOp *));
+    if (!tmp) return false;
+    *items = tmp;
+    *cap = new_cap;
+  }
+  (*items)[(*count)++] = u;
+  return true;
+}
+
+static bool uop_vec_contains(PolyUOp **items, int count, PolyUOp *u) {
+  for (int i = 0; i < count; i++)
+    if (items[i] == u) return true;
+  return false;
+}
+
+typedef bool (*CollectBufferFn)(PolyUOp *u, void *user_data);
+
+static bool collect_input_buffers_postorder(
+    PolyCtx *ctx,
+    PolyUOp *root,
+    CollectBufferFn collect,
+    void *user_data
+) {
+  if (!ctx || !root || !collect) return false;
+
+  PolyMap *visited = poly_map_new(256);
+  if (!visited) return false;
+
+  int stack_cap = 256;
+  int stack_top = 0;
+  PolyUOp **stack = malloc((size_t)stack_cap * sizeof(PolyUOp *));
+  int *state = malloc((size_t)stack_cap * sizeof(int));
+  if (!stack || !state) {
+    free(stack);
+    free(state);
+    poly_map_destroy(visited);
+    return false;
+  }
+
+  stack[stack_top] = root;
+  state[stack_top++] = 0;
+
+  while (stack_top > 0) {
+    PolyUOp *u = stack[stack_top - 1];
+    int s = state[stack_top - 1];
+    uint32_t h = poly_ptr_hash(u);
+
+    if (s == 0 && poly_map_get(visited, h, u, poly_ptr_eq) != NULL) {
+      stack_top--;
+      continue;
+    }
+
+    if (s == 0) {
+      state[stack_top - 1] = 1;
+      /* Tinygrad 2026-08-22/a9069c177a9d tensor.py:replace_input_view treats
+       * callify-owned SHRINK/BITCAST views as complete call arguments. Their
+       * source BUFFER is alias provenance, not another argument. */
+      bool view =
+          (u->op == POLY_OP_SHRINK || u->op == POLY_OP_BITCAST) && poly_buffer_get(ctx, u) != NULL;
+      if (u->op != POLY_OP_BUFFER && !view && !poly_uop_is_bound_var(u)) {
+        for (int i = u->n_src - 1; i >= 0; i--) {
+          PolyUOp *src = u->src[i];
+          if (!src) continue;
+          uint32_t sh = poly_ptr_hash(src);
+          if (poly_map_get(visited, sh, src, poly_ptr_eq) != NULL) continue;
+          if (stack_top >= stack_cap) {
+            int new_cap = stack_cap * 2;
+            PolyUOp **new_stack = realloc(stack, (size_t)new_cap * sizeof(PolyUOp *));
+            int *new_state = realloc(state, (size_t)new_cap * sizeof(int));
+            if (!new_stack || !new_state) {
+              free(new_stack ? new_stack : stack);
+              free(new_state ? new_state : state);
+              poly_map_destroy(visited);
+              return false;
+            }
+            stack = new_stack;
+            state = new_state;
+            stack_cap = new_cap;
+          }
+          stack[stack_top] = src;
+          state[stack_top++] = 0;
+        }
+      }
+      continue;
+    }
+
+    stack_top--;
+    if (poly_map_get(visited, h, u, poly_ptr_eq) != NULL) continue;
+    poly_map_set(visited, h, u, (void *)(uintptr_t)1, poly_ptr_eq);
+    bool view =
+        (u->op == POLY_OP_SHRINK || u->op == POLY_OP_BITCAST) && poly_buffer_get(ctx, u) != NULL;
+    if ((((u->op == POLY_OP_BUFFER || view) && !poly_uop_is_variable(u)) || poly_uop_is_bound_var(u)
+        ) &&
+        !collect(u, user_data)) {
+      free(stack);
+      free(state);
+      poly_map_destroy(visited);
+      return false;
+    }
+  }
+
+  free(stack);
+  free(state);
+  poly_map_destroy(visited);
+  return true;
+}
+
+typedef struct {
+  PolyUOp ***ordered;
+  int *n;
+  int *cap;
+} DynamicBufferCollect;
+
+static bool collect_dynamic_buffer(PolyUOp *u, void *user_data) {
+  DynamicBufferCollect *c = (DynamicBufferCollect *)user_data;
+  if (!c || !c->ordered || !c->n || !c->cap) return false;
+  return uop_vec_contains(*c->ordered, *c->n, u) || uop_vec_append(c->ordered, c->n, c->cap, u);
+}
+
+typedef struct {
+  PolyUOp **ordered;
+  int *n;
+  int max_bufs;
+} FixedBufferCollect;
+
+static bool collect_fixed_buffer(PolyUOp *u, void *user_data) {
+  FixedBufferCollect *c = (FixedBufferCollect *)user_data;
+  if (!c || !c->ordered || !c->n || c->max_bufs <= 0) return false;
+  int stored = *c->n < c->max_bufs ? *c->n : c->max_bufs;
+  if (uop_vec_contains(c->ordered, stored, u)) return true;
+  if (*c->n < c->max_bufs) c->ordered[*c->n] = u;
+  (*c->n)++;
+  return true;
+}
+
+/* Reconstruct the buffer-to-PARAM ordering used by kernel-graph scheduling:
+ * 1. Output buffers (STORE targets in SINK source order)
+ * 2. Remaining input buffers (toposort encounter order) */
+bool poly_collect_ordered_buffers_alloc(
+    PolyCtx *ctx,
+    PolyUOp *tensor_sink,
+    PolyUOp ***out_ordered,
+    int *out_n_ordered
+) {
+  if (!ctx || !tensor_sink || !out_ordered || !out_n_ordered) return false;
+  *out_ordered = NULL;
+  *out_n_ordered = 0;
+
+  PolyUOp **ordered = NULL;
+  int n = 0, cap = 0;
+
+  /* Output buffers first */
+  for (int i = 0; i < tensor_sink->n_src; i++) {
+    PolyUOp *store = tensor_sink->src[i];
+    if (store && store->op == POLY_OP_STORE && store->n_src >= 1 &&
+        store->src[0]->op == POLY_OP_BUFFER && !poly_uop_is_variable(store->src[0])) {
+      PolyUOp *buf = store->src[0];
+      if (!uop_vec_contains(ordered, n, buf) && !uop_vec_append(&ordered, &n, &cap, buf)) {
+        free(ordered);
+        return false;
+      }
+    }
+  }
+
+  /* Input buffers in toposort order. This is a local scan, like tinygrad's
+   * temporary UOp.toposort() result, so do not grow the persistent ctx arena. */
+  DynamicBufferCollect collect = {.ordered = &ordered, .n = &n, .cap = &cap};
+  if (!collect_input_buffers_postorder(ctx, tensor_sink, collect_dynamic_buffer, &collect)) {
+    free(ordered);
+    return false;
+  }
+
+  *out_ordered = ordered;
+  *out_n_ordered = n;
+  return true;
+}
+
+int poly_collect_ordered_buffers(
+    PolyCtx *ctx,
+    PolyUOp *tensor_sink,
+    PolyUOp **ordered,
+    int max_bufs
+) {
+  if (!ctx || !tensor_sink || !ordered || max_bufs <= 0) return 0;
+  int n = 0;
+
+  /* Output buffers first */
+  for (int i = 0; i < tensor_sink->n_src; i++) {
+    PolyUOp *store = tensor_sink->src[i];
+    if (store && store->op == POLY_OP_STORE && store->n_src >= 1 &&
+        store->src[0]->op == POLY_OP_BUFFER && !poly_uop_is_variable(store->src[0])) {
+      PolyUOp *buf = store->src[0];
+      if (!uop_vec_contains(ordered, n < max_bufs ? n : max_bufs, buf)) {
+        if (n < max_bufs) ordered[n] = buf;
+        n++;
+      }
+    }
+  }
+
+  FixedBufferCollect collect = {.ordered = ordered, .n = &n, .max_bufs = max_bufs};
+  if (!collect_input_buffers_postorder(ctx, tensor_sink, collect_fixed_buffer, &collect)) return 0;
+  return n;
 }

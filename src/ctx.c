@@ -19,7 +19,6 @@
 void poly_init_group_ops(void);
 
 /* Optional cleanup hooks (defined in other files, linked weakly). */
-void poly_frontend_ctx_cleanup(PolyCtx *ctx) __attribute__((weak));
 void poly_tensor_ctx_cleanup(PolyCtx *ctx) __attribute__((weak));
 void poly_engine_ctx_cleanup(PolyCtx *ctx) __attribute__((weak));
 
@@ -153,7 +152,6 @@ PolyCtx *poly_ctx_new(void) {
 
 void poly_ctx_destroy(PolyCtx *ctx) {
   if (!ctx) return;
-  if (poly_frontend_ctx_cleanup) poly_frontend_ctx_cleanup(ctx);
   if (poly_tensor_ctx_cleanup) poly_tensor_ctx_cleanup(ctx);
   if (poly_engine_ctx_cleanup) poly_engine_ctx_cleanup(ctx);
   poly_map_destroy(ctx->schedule_cache);

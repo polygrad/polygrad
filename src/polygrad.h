@@ -8,6 +8,10 @@
 #ifndef POLYGRAD_H
 #define POLYGRAD_H
 
+/* Public C/frontend ABI version. Bump when exported symbols or public struct
+ * layouts used by frontends change. */
+#define POLYGRAD_ABI_VERSION 78
+
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
@@ -495,7 +499,7 @@ static inline PolyArg poly_arg_int(int64_t v) {
 static inline PolyArg poly_arg_bigint(int sign, const uint32_t *limbs, uint32_t n_limbs) {
   return (PolyArg
   ){.kind = POLY_ARG_BIGINT,
-    .bigint = {.sign = sign < 0 ? -1 : 1, .n_limbs = n_limbs, .limbs = limbs}};
+    .bigint = {.sign = (int8_t)(sign < 0 ? -1 : 1), .n_limbs = n_limbs, .limbs = limbs}};
 }
 static inline PolyArg poly_arg_float(double v) {
   return (PolyArg){.kind = POLY_ARG_FLOAT, .f = v};
@@ -1727,7 +1731,8 @@ void poly_uop_minmax_ex(
     int64_t *vmin,
     int64_t *vmax
 );
-/* Current tinygrad uop/ops.py:resolve. */
+/* Pinned tinygrad uop/ops.py:resolve: simplify a boolean UOp, return its
+ * proven value when constant, otherwise the caller-provided default. */
 int poly_uop_resolve(PolyCtx *ctx, PolyUOp *u, int default_value);
 
 /* Pretty-print a UOp graph to a buffer (returns malloc'd string, caller frees) */
@@ -1801,7 +1806,6 @@ int poly_uop_bind_value(PolyUOp *u, int64_t *out);
 /* Current tinygrad UOp.contiguous_view_offset. */
 int poly_uop_contiguous_view_offset(PolyCtx *ctx, PolyUOp *u, int64_t *out);
 PolyShape poly_uop_max_shape_cached(PolyCtx *ctx, const PolyUOp *u);
-PolyArena *poly_ctx_arena(PolyCtx *ctx);
 
 /* Named buffer registry.
  *
@@ -1985,6 +1989,81 @@ PolyUOp *poly_const_like_float(PolyCtx *ctx, PolyUOp *ref, double val);
 PolyUOp *poly_const_like_bool(PolyCtx *ctx, PolyUOp *ref, bool val);
 PolyUOp *poly_identity_element(PolyCtx *ctx, PolyOps op, PolyDType dtype);
 PolyUOp *poly_cast(PolyCtx *ctx, PolyUOp *x, PolyDType target);
+/* UOp.bitcast keeps identity for an equal dtype; shape validation belongs
+ * to the consuming Tensor boundary, not raw graph construction. */
+PolyUOp *poly_bitcast(PolyCtx *ctx, PolyUOp *x, PolyDType target);
+/* Shared ElementwiseMixin graph operations (mixin/elementwise.c). */
+PolyUOp *poly_div(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
+PolyUOp *poly_contiguous(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_exp(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_log(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_log1p(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_expm1(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_sin(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_cos(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_tan(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_log10(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_atanh(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_asinh(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_acosh(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_asin(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_acos(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_atan(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_celu(PolyCtx *ctx, PolyUOp *x, PolyUOp *alpha);
+PolyUOp *poly_selu(PolyCtx *ctx, PolyUOp *x, PolyUOp *alpha, PolyUOp *gamma);
+PolyUOp *poly_sinh(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_cosh(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_softsign(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_erf(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_erfc(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_erfinv(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_ndtri(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_digamma(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_lgamma(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_sigmoid(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_tanh_act(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_abs(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_sign(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_square(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_rsqrt(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_ceil(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_floor(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_round_f(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_isinf(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_isnan(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_isfinite(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_isclose(
+    PolyCtx *ctx,
+    PolyUOp *x,
+    PolyUOp *other,
+    PolyUOp *rtol,
+    PolyUOp *atol,
+    bool equal_nan
+);
+PolyUOp *poly_copysign(PolyCtx *ctx, PolyUOp *x, PolyUOp *other);
+PolyUOp *poly_lerp(PolyCtx *ctx, PolyUOp *x, PolyUOp *end, PolyUOp *weight, bool scalar_weight);
+PolyUOp *poly_relu(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_relu6(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_leaky_relu(PolyCtx *ctx, PolyUOp *x, double neg_slope);
+PolyUOp *poly_gelu(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_quick_gelu(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_silu(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_elu(PolyCtx *ctx, PolyUOp *x, double alpha);
+PolyUOp *poly_softplus(PolyCtx *ctx, PolyUOp *x, double beta);
+PolyUOp *poly_logsigmoid(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_mish(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_hardtanh(PolyCtx *ctx, PolyUOp *x, double min_val, double max_val);
+PolyUOp *poly_hardswish(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_hardsigmoid(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_ne(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
+PolyUOp *poly_gt(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
+PolyUOp *poly_ge(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
+PolyUOp *poly_le(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
+PolyUOp *poly_maximum(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
+PolyUOp *poly_minimum(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
+PolyUOp *poly_clamp(PolyCtx *ctx, PolyUOp *x, double lo, double hi);
+PolyUOp *poly_detach(PolyCtx *ctx, PolyUOp *x);
+
 PolyUOp *poly_elementwise_promote(PolyCtx *ctx, PolyUOp *root, PolyDType common);
 bool poly_broadcasted_pair(PolyCtx *ctx, PolyUOp **a, PolyUOp **b);
 PolyUOp *poly_binop(PolyCtx *ctx, PolyOps op, PolyUOp *a, PolyUOp *b);
@@ -2077,7 +2156,11 @@ PolyUOp *poly_pad_uop(PolyCtx *ctx, PolyUOp *src, PolyUOp **offsets, PolyUOp **s
 PolyUOp *poly_flip(PolyCtx *ctx, PolyUOp *src, int64_t *axes, int n_axes);
 PolyUOp *poly_pad(PolyCtx *ctx, PolyUOp *src, int64_t (*pairs)[2], int ndim);
 PolyUOp *poly_reduce_axis(PolyCtx *ctx, PolyOps reduce_op, PolyUOp *src, int64_t *axes, int n_axes);
+/* Tensor._pad_constant: negative padding shrinks; nonnegative zero padding
+ * is equivalent to poly_pad. */
 PolyUOp *poly_pad_value(PolyCtx *ctx, PolyUOp *x, int64_t (*pads)[2], int ndim, double value);
+/* MovementMixin._pool: append one window axis per pooled dimension.
+ * NULL stride/dilation selects the default of one. */
 PolyUOp *poly_pool(
     PolyCtx *ctx,
     PolyUOp *x,
@@ -2119,6 +2202,43 @@ PolyUOp *poly_batchnorm(
 );
 PolyUOp *poly_one_hot(PolyCtx *ctx, PolyUOp *x, int64_t num_classes);
 PolyUOp *poly_index_select(PolyCtx *ctx, PolyUOp *x, int dim, PolyUOp *index);
+
+/* Shared host-shape checks implemented by shape.c. */
+int64_t poly_shape_numel_checked(const int64_t *shape, int ndim);
+bool poly_shape_equal(const int64_t *a, int a_ndim, const int64_t *b, int b_ndim);
+
+/* UOp construction helpers used by custom kernels.
+ * These only build UOps; execution still flows through normal CALL scheduling. */
+PolyUOp *poly_uop_placeholder_like(PolyCtx *ctx, PolyUOp *like, int slot);
+PolyUOp *poly_uop_load(PolyCtx *ctx, PolyUOp *addr);
+PolyUOp *poly_uop_store(PolyCtx *ctx, PolyUOp *addr, PolyUOp *value);
+PolyUOp *poly_uop_set(PolyCtx *ctx, PolyUOp *addr, PolyUOp *value, PolyUOp **ranges, int n_ranges);
+PolyUOp *poly_uop_group(PolyCtx *ctx, PolyUOp **srcs, int n_src);
+PolyUOp *poly_uop_end(PolyCtx *ctx, PolyUOp *body, PolyUOp **ranges, int n_ranges);
+PolyUOp *poly_uop_sink(PolyCtx *ctx, PolyUOp **srcs, int n_src);
+PolyUOp *poly_uop_sink_ex(PolyCtx *ctx, PolyUOp **srcs, int n_src, const char *name, int optimize);
+PolyUOp *poly_uop_call(PolyCtx *ctx, PolyUOp *body, PolyUOp **args, int n_args);
+PolyUOp *poly_uop_after(PolyCtx *ctx, PolyUOp *target, PolyUOp *effect);
+PolyUOp *poly_uop_reduce(
+    PolyCtx *ctx,
+    PolyOps reduce_op,
+    PolyUOp *expr,
+    PolyUOp **ranges,
+    int n_ranges
+);
+PolyUOp *poly_uop_flatten(PolyCtx *ctx, PolyUOp *u);
+int64_t poly_uop_numel(PolyCtx *ctx, PolyUOp *u);
+
+/* Tinygrad helpers.NOOPT: library-wide compilation policy, initialized from
+ * the environment once, not graph state. Existing PROGRAMs are unchanged. */
+int poly_get_noopt(void);
+void poly_set_noopt(int value);
+
+/* Tinygrad helpers.BEAM; the same library/module ownership as NOOPT. */
+int poly_get_beam(void);
+void poly_set_beam(int value);
+int poly_get_ignore_beam_cache(void);
+void poly_set_ignore_beam_cache(int value);
 
 #ifdef __cplusplus
 }
