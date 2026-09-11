@@ -7651,6 +7651,82 @@ TEST(codegen, default_dtype_lowering_keeps_integer_bound_policy) {
   PASS();
 }
 
+TEST(codegen, weak_owner_stacked_casts_resolve_each_kind) {
+  /* weak.py:pm_lower_weak resolves both kind conversions; a lone weak
+   * cast remains for its consumer. Float-to-integer bounds can require int64. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType strong[] = {POLY_FLOAT64, POLY_INT64};
+  PolyDType inner[] = {POLY_WEAKINT, POLY_WEAKFLOAT};
+  PolyDType outer[] = {POLY_WEAKFLOAT, POLY_WEAKINT};
+  PolyDType first[] = {POLY_INT32, POLY_FLOAT32};
+  PolyDType second[] = {POLY_FLOAT32, POLY_INT64};
+  for (int i = 0; i < 2; i++) {
+    PolyUOp *x = poly_uop_const(ctx, poly_arg_int(3), strong[i]);
+    PolyUOp *single = poly_cast(ctx, x, inner[i]);
+    ASSERT_PTR_EQ(poly_pm_rewrite(poly_pm_lower_weak(), ctx, single), NULL);
+    PolyUOp *out = poly_pm_rewrite(poly_pm_lower_weak(), ctx, poly_cast(ctx, single, outer[i]));
+    PolyUOp *expected =
+        poly_cast(ctx, poly_cast(ctx, poly_cast(ctx, x, first[i]), second[i]), outer[i]);
+    ASSERT_NOT_NULL(out);
+    ASSERT_PTR_EQ(out, expected);
+  }
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, weak_owner_cast_width_is_a_floor) {
+  /* weak.py:cast_weak_srcs commits arithmetic before the requested narrow
+   * cast. Overflow bounds, not the output storage width, choose int32/int64. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyArg values[] = {poly_arg_int(200), poly_arg_int(INT32_MAX), poly_arg_float(1.25)};
+  PolyDType weak[] = {POLY_WEAKINT, POLY_WEAKINT, POLY_WEAKFLOAT};
+  PolyDType target[] = {POLY_INT8, POLY_INT8, POLY_FLOAT16};
+  PolyDType floor[] = {POLY_INT32, POLY_INT64, POLY_FLOAT32};
+  for (int i = 0; i < 3; i++) {
+    PolyUOp *a = poly_uop_const(ctx, values[i], weak[i]);
+    PolyUOp *b = poly_uop_const(ctx, poly_arg_int(1), weak[i]);
+    PolyUOp *root = poly_cast(ctx, poly_alu2(ctx, POLY_OP_ADD, a, b), target[i]);
+    PolyUOp *out = poly_pm_rewrite(poly_pm_cast_weak(), ctx, root);
+    PolyUOp *expected = poly_cast(
+        ctx,
+        poly_alu2(
+            ctx, POLY_OP_ADD, poly_uop_const(ctx, values[i], floor[i]),
+            poly_uop_const(ctx, poly_arg_int(1), floor[i])
+        ),
+        target[i]
+    );
+    ASSERT_NOT_NULL(out);
+    ASSERT_PTR_EQ(out, expected);
+  }
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, weak_owner_store_commit_preserves_effects) {
+  /* weak.py:pm_commit_weak takes the destination dtype and preserves all
+   * trailing effect sources and the STORE identity tag. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *buf = program_param(ctx, POLY_FLOAT32, 4, 0);
+  PolyUOp *ptr = poly_uop2(
+      ctx, POLY_OP_INDEX, POLY_FLOAT32, buf, poly_uop_const(ctx, poly_arg_int(0), POLY_INT32),
+      poly_arg_none()
+  );
+  PolyUOp *effect = poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_none());
+  PolyUOp *src[] = {ptr, poly_const_float(ctx, 1.25), effect};
+  PolyUOp *root = poly_uop_tagged_arg(
+      ctx, POLY_OP_STORE, POLY_VOID, src, 3, poly_arg_none(), 0, poly_arg_str("store")
+  );
+  PolyUOp *out = poly_pm_rewrite(poly_pm_commit_weak(), ctx, root);
+  src[1] = poly_uop_const(ctx, poly_arg_float(1.25), POLY_FLOAT32);
+  PolyUOp *expected = poly_uop_tagged_arg(
+      ctx, POLY_OP_STORE, POLY_VOID, src, 3, poly_arg_none(), 0, poly_arg_str("store")
+  );
+  ASSERT_NOT_NULL(out);
+  ASSERT_PTR_EQ(out, expected);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(codegen, lower_weak_const_creates_untagged_literal) {
   /* pm_lower_weak creates a fresh UOp.const, not a tagged replacement. */
   PolyCtx *ctx = poly_ctx_new();

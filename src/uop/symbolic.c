@@ -327,6 +327,20 @@ static void minmax_default(PolyUOp *u, int64_t *vmin, int64_t *vmax) {
   *vmax = dtype_max(u->dtype);
 }
 
+typedef struct {
+  bool is_float;
+  int64_t i;
+  double f;
+} PolyBoundValue;
+
+typedef struct {
+  PolyBoundValue min;
+  PolyBoundValue max;
+} PolyTypedMinMax;
+
+static PolyTypedMinMax poly_uop_typed_minmax(PolyCtx *ctx, PolyUOp *u);
+static PolyTypedMinMax cast_minmax(PolyCtx *ctx, PolyUOp *u);
+
 static bool poly_uop_minmax_node(PolyCtx *ctx, PolyUOp *u, int64_t *vmin, int64_t *vmax) {
   (void)ctx;
   if (!u) {
@@ -624,20 +638,27 @@ static bool poly_uop_minmax_node(PolyCtx *ctx, PolyUOp *u, int64_t *vmin, int64_
     return true;
   }
 
-  /* CAST: clamp src[0] bounds to dtype range. Matches tinygrad ops.py:895 —
-   * only monotone casts. Cast to bool/unsigned is not necessarily monotone;
-   * fall through to dtype bounds for those. */
+  /* UOp._min_max: round before clamping monotone CAST bounds. A weakfloat
+   * CAST deliberately falls back to its dtype range in the pinned rule.
+   * The integer cache cannot encode fractional/nonfinite endpoints: retain
+   * an outward integer envelope, or the existing unknown-range sentinel. */
   if (u->op == POLY_OP_CAST && u->n_src >= 1) {
-    bool monotone = poly_dtype_is_float(u->dtype) ||
-                    (poly_dtype_is_int(u->dtype) && !poly_dtype_is_unsigned(u->dtype) &&
-                     !poly_dtype_eq(u->dtype, POLY_BOOL));
-    if (monotone) {
-      int64_t a0, a1;
-      if (!minmax_src(u->src[0], &a0, &a1)) return false;
-      *vmin = i64_max(dtype_min(u->dtype), a0);
-      *vmax = i64_min(a1, dtype_max(u->dtype));
-      return true;
+    PolyTypedMinMax bounds = cast_minmax(ctx, u);
+    PolyBoundValue endpoints[] = {bounds.min, bounds.max};
+    int64_t rounded[2];
+    for (int i = 0; i < 2; i++) {
+      if (!endpoints[i].is_float) {
+        rounded[i] = endpoints[i].i;
+        continue;
+      }
+      double value = i == 0 ? floor(endpoints[i].f) : ceil(endpoints[i].f);
+      /* INT64_MAX rounds to 2^63 as double; use the exclusive bound. */
+      if (!isfinite(value) || value < -0x1p63 || value >= 0x1p63) return false;
+      rounded[i] = (int64_t)value;
     }
+    *vmin = rounded[0];
+    *vmax = rounded[1];
+    return true;
   }
 
   /* Fallback: dtype range */
@@ -769,17 +790,6 @@ void poly_uop_minmax_ex(
  * uop/ops.py:1046-1109 `PyConst` bounds for semantic rewrites. Integer
  * expressions reuse the exact int64 query; float expressions preserve
  * constants and dtype infinities. */
-typedef struct {
-  bool is_float;
-  int64_t i;
-  double f;
-} PolyBoundValue;
-
-typedef struct {
-  PolyBoundValue min;
-  PolyBoundValue max;
-} PolyTypedMinMax;
-
 static PolyBoundValue bound_int(int64_t value) {
   return (PolyBoundValue){.is_float = false, .i = value, .f = 0.0};
 }
@@ -790,6 +800,45 @@ static PolyBoundValue bound_float(double value) {
 
 static long double bound_number(PolyBoundValue value) {
   return value.is_float ? (long double)value.f : (long double)value.i;
+}
+
+/* UOp._min_max CAST branch, shared by typed semantic queries and the int64
+ * cache. Querying the existing typed source bounds preserves fractional
+ * literals through AFTER/INDEX/STACK without a second float-bounds walker. */
+static PolyTypedMinMax cast_minmax(PolyCtx *ctx, PolyUOp *u) {
+  bool floating = poly_dtype_is_float(u->dtype);
+  bool integer = poly_dtype_is_int(u->dtype) && !poly_dtype_eq(u->dtype, POLY_BOOL);
+  PolyTypedMinMax fallback =
+      floating || poly_dtype_eq(u->dtype, POLY_WEAKINT)
+          ? (PolyTypedMinMax){bound_float(-INFINITY), bound_float(INFINITY)}
+          : (PolyTypedMinMax){bound_int(dtype_min(u->dtype)), bound_int(dtype_max(u->dtype))};
+  if (poly_dtype_eq(u->dtype, POLY_WEAKFLOAT) || (!floating && !integer)) return fallback;
+  PolyTypedMinMax bounds = poly_uop_typed_minmax(ctx, u->src[0]);
+  PolyBoundValue *ends[] = {&bounds.min, &bounds.max};
+  if (isfinite(bound_number(bounds.min)) && isfinite(bound_number(bounds.max))) {
+    for (int i = 0; i < 2; i++) {
+      PolyBoundValue value = *ends[i];
+      if (floating) {
+        PolyArg arg = value.is_float ? poly_arg_float(value.f) : poly_arg_int(value.i);
+        PolyArg rounded = poly_exec_alu(POLY_OP_CAST, u->dtype, &arg, 1, true);
+        if (rounded.kind != POLY_ARG_FLOAT) return fallback;
+        *ends[i] = bound_float(rounded.f);
+      } else if (value.is_float) {
+        double rounded = trunc(value.f);
+        *ends[i] = rounded >= -0x1p63 && rounded < 0x1p63 ? bound_int((int64_t)rounded)
+                                                          : bound_float(rounded);
+      }
+    }
+  }
+  if (poly_dtype_is_unsigned(u->dtype))
+    return bound_number(bounds.min) >= 0 && bound_number(bounds.max) <= dtype_max(u->dtype)
+               ? bounds
+               : fallback;
+  if (floating || poly_dtype_eq(u->dtype, POLY_WEAKINT)) return bounds;
+  if (!(bound_number(bounds.min) > dtype_min(u->dtype)))
+    bounds.min = bound_int(dtype_min(u->dtype));
+  if (dtype_max(u->dtype) < bound_number(bounds.max)) bounds.max = bound_int(dtype_max(u->dtype));
+  return bounds;
 }
 
 static PolyTypedMinMax poly_uop_typed_minmax(PolyCtx *ctx, PolyUOp *u) {
@@ -818,6 +867,10 @@ static PolyTypedMinMax poly_uop_typed_minmax(PolyCtx *ctx, PolyUOp *u) {
     poly_uop_minmax(ctx, u, &lo, &hi);
     return (PolyTypedMinMax){bound_int(lo), bound_int(hi)};
   }
+
+  /* Integer CASTs above reuse the iterative, cached query. Only floating
+   * results need their fractional endpoints retained outside that cache. */
+  if (u->op == POLY_OP_CAST && u->n_src == 1) return cast_minmax(ctx, u);
 
   if (u->op == POLY_OP_CONST && u->arg.kind != POLY_ARG_INVALID) {
     double value = 0.0;

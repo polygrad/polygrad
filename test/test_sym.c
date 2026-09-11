@@ -3858,6 +3858,10 @@ TEST(sym, minmax_deep_chain_is_iterative) {
     expr = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, expr, one, poly_arg_none());
   }
   check_mm(ctx, expr, 12000, 12009, "deep add chain");
+  /* CAST's typed source query must reuse already-computed integer bounds. */
+  for (int i = 0; i < 12000; i++)
+    expr = poly_cast(ctx, expr, i % 2 ? POLY_INT32 : POLY_INT64);
+  check_mm(ctx, expr, 12000, 12009, "deep cast chain");
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -4402,6 +4406,59 @@ TEST(sym, self_comparisons_keep_boolean_result_dtype) {
   }
 
   poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(sym, cast_bounds_round_before_integer_width_decisions) {
+  /* Pinned UOp._min_max rounds CAST endpoints before its monotone clamp.
+   * Weakfloat is excluded from that clamp; it must not carry integer proofs. */
+  PolyCtx *ctx = poly_ctx_new();
+  struct {
+    PolyArg value;
+    PolyDType from, to;
+    int64_t lo, hi;
+    bool unknown;
+  } cases[] = {
+      {poly_arg_float(3.75), POLY_FLOAT64, POLY_WEAKINT, 3, 3},
+      {poly_arg_float(-3.75), POLY_FLOAT64, POLY_INT32, -3, -3},
+      {poly_arg_int(3), POLY_INT64, POLY_WEAKFLOAT, 0, 0, true},
+      {poly_arg_int(INT32_MAX), POLY_INT64, POLY_FLOAT32, INT64_C(2147483648), INT64_C(2147483648)},
+      {poly_arg_int(2049), POLY_INT32, POLY_FLOAT16, 2048, 2048},
+      {poly_arg_int(255), POLY_INT32, POLY_UINT8, 255, 255},
+      {poly_arg_int(-1), POLY_INT32, POLY_UINT8, 0, 255},
+      /* These bounds cannot be represented in the C int64 cache. */
+      {poly_arg_int(INT64_MAX), POLY_INT64, POLY_FLOAT64, 0, 0, true},
+      {poly_arg_float(INFINITY), POLY_FLOAT64, POLY_INT32, INT32_MIN, INT32_MAX},
+      {poly_arg_float(NAN), POLY_FLOAT64, POLY_INT32, INT32_MIN, INT32_MAX},
+  };
+  bool matched = true;
+  for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    if (cases[i].unknown) {
+      PolyUOp *unknown = poly_uop0(ctx, POLY_OP_NOOP, cases[i].to, poly_arg_none());
+      poly_uop_minmax(ctx, unknown, &cases[i].lo, &cases[i].hi);
+    }
+    PolyUOp *input = poly_uop_const(ctx, cases[i].value, cases[i].from);
+    PolyUOp *cast = poly_cast(ctx, input, cases[i].to);
+    int64_t lo, hi;
+    poly_uop_minmax(ctx, cast, &lo, &hi);
+    if (lo != cases[i].lo || hi != cases[i].hi) {
+      fprintf(
+          stderr, "cast bounds case %zu: got [%lld,%lld], expected [%lld,%lld]\n", i, (long long)lo,
+          (long long)hi, (long long)cases[i].lo, (long long)cases[i].hi
+      );
+      matched = false;
+    }
+    if (i < 2) {
+      PolyUOp *effect = poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_none());
+      PolyUOp *after = poly_uop2(ctx, POLY_OP_AFTER, input->dtype, input, effect, poly_arg_none());
+      PolyUOp *lanes[] = {input, after};
+      PolyUOp *stack = poly_uop_stack(ctx, lanes, 2);
+      poly_uop_minmax(ctx, poly_cast(ctx, stack, cases[i].to), &lo, &hi);
+      matched &= lo == cases[i].lo && hi == cases[i].hi;
+    }
+  }
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(matched);
   PASS();
 }
 
