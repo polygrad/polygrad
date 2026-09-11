@@ -718,6 +718,14 @@ make test-browser-matrix
 `test-browser-matrix` adds non-WebGPU Playwright coverage across Chromium,
 Firefox, and installed Chrome/Chromium executables where available.
 
+Migration audit generation and checking use `PARITY_PY` (CPython 3.11).
+`ast.dump` hashes are interpreter-specific; direct invocations with another
+Python version are rejected. Durable, partial review records live in
+`test/fixtures/migration/`; stale hashes and missing execution evidence remain
+gate failures. A review-owner assignment does not exclude a shared dependency
+or approve a divergence. `make test-reference-migration` tests the checker;
+`make reference-migration-check` validates existing evidence without rebuilding.
+
 Strict release checks require actual fixtures and execution:
 
 ```bash

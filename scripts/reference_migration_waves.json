@@ -550,7 +550,8 @@
     {
       "id": "tensor_core",
       "title": "Tensor-core inventory, selection, shape and renderer lowering",
-      "source_status": "closed",
+      "source_status": "open",
+      "source_status_reason": "Historical runtime/implementation closure has no complete source audit; strict source closure remains unverified.",
       "implementation_status": "closed",
       "runtime_status": "cuda_green_hip_structural_green",
       "tinygrad_paths": [
@@ -652,7 +653,7 @@
     },
     {
       "id": "storage_identity",
-      "source_audit": "temp/reference_migration/audits/storage_identity.json",
+      "source_audit": "test/fixtures/migration/storage_identity.json",
       "title": "BUFFER, ParamArg, device and COPY identity",
       "source_status": "open",
       "implementation_status": "closed",
@@ -676,7 +677,7 @@
     },
     {
       "id": "weak_scalars",
-      "source_audit": "temp/reference_migration/audits/weak_scalars.json",
+      "source_audit": "test/fixtures/migration/weak_scalars.json",
       "title": "Weak scalar construction, promotion and lowering",
       "source_status": "open",
       "implementation_status": "open",
@@ -706,7 +707,7 @@
     },
     {
       "id": "movement_shape",
-      "source_audit": "temp/reference_migration/audits/movement_shape.json",
+      "source_audit": "test/fixtures/migration/movement_shape.json",
       "title": "Shape sources and movement composition",
       "source_status": "open",
       "implementation_status": "closed",
@@ -773,6 +774,11 @@
     },
     {
       "id": "scheduler_codegen",
+      "source_audit": "test/fixtures/migration/scheduler_codegen.json",
+      "source_review_owners": {
+        "tinygrad/schedule/multi.py": "multi_device",
+        "tinygrad/schedule/allreduce.py": "multi_device"
+      },
       "title": "SPEC=2 scheduling, rangeify, decomposition and codegen",
       "source_status": "open",
       "implementation_status": "closed",

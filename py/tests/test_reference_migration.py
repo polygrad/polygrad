@@ -78,6 +78,73 @@ def test_inventory_does_not_silently_drop_parse_errors(tmp_path):
         migration.python_symbols(tmp_path / "bad.py")
 
 
+@pytest.mark.parametrize("version", [(3, 10), (3, 12)])
+@pytest.mark.parametrize("entrypoint", ["symbols", "matcher"])
+def test_ast_hashing_rejects_other_python_versions(tmp_path, monkeypatch, version, entrypoint):
+    put(tmp_path, "ops.py", "def f(): return 1\npm = PatternMatcher([(UPat(), None)])\n")
+    monkeypatch.setattr(sys, "version_info", version)
+    with pytest.raises(RuntimeError, match="requires CPython 3.11"):
+        if entrypoint == "symbols":
+            migration.python_symbols(tmp_path / "ops.py")
+        else:
+            migration.python_matcher_rules(tmp_path / "ops.py", "pm")
+
+
+def test_cli_rejects_wrong_interpreter_before_reading_or_writing(monkeypatch):
+    monkeypatch.setattr(sys, "version_info", (3, 12))
+    monkeypatch.setattr(sys, "argv", ["reference_migration.py", "--config", "missing.json"])
+    with pytest.raises(RuntimeError, match="requires CPython 3.11"):
+        migration.main()
+
+
+def test_pinned_symbol_hash_preserves_existing_review_identity():
+    symbols = migration.python_symbols(
+        migration.ROOT / "references/tinygrad_latest/tinygrad/codegen/__init__.py"
+    )
+    assert symbols["ReduceContext"] == "72d4289d648ce7eb05636fa91986ca7a759ac6a2d694955ff861ef2cb7d7f2cc"
+
+
+def test_migration_make_targets_use_pinned_interpreter():
+    result = subprocess.run(
+        ["make", "-n", "reference-migration-report", "reference-migration-check",
+         "PYTHON=UNPINNED_PYTHON", "PARITY_PY=PINNED_PARITY_PY"],
+        cwd=migration.ROOT, text=True, capture_output=True, check=True,
+    )
+    commands = [line for line in result.stdout.splitlines()
+                if "scripts/reference_migration.py" in line or "-m pytest -q py/tests/test_reference_migration.py" in line]
+    assert len(commands) == 3
+    assert all("PINNED_PARITY_PY" in line and "UNPINNED_PYTHON" not in line for line in commands)
+
+
+def test_configured_audits_are_durable_and_closed_waves_have_evidence():
+    config = json.loads((migration.ROOT / "scripts/reference_migration_waves.json").read_text())
+    for wave in config["waves"]:
+        audit = wave.get("source_audit")
+        if wave["source_status"] == "closed":
+            assert audit, wave["id"]
+        if audit:
+            assert not audit.startswith("temp/"), wave["id"]
+            assert (migration.ROOT / audit).is_file(), wave["id"]
+            data = json.loads((migration.ROOT / audit).read_text())
+            for key in ("review", "overlay_review"):
+                if key in data:
+                    review = data[key]
+                    assert hashlib.sha256(review["text"].encode()).hexdigest() == review["sha256"]
+
+
+def test_source_review_routing_keeps_dependencies_in_both_inventories():
+    config = json.loads((migration.ROOT / "scripts/reference_migration_waves.json").read_text())
+    waves = {w["id"]: w for w in config["waves"]}
+    for wave in waves.values():
+        for path, owner in wave.get("source_review_owners", {}).items():
+            assert owner != wave["id"]
+            for ref in ("baseline_ref", "target_ref"):
+                root = migration.ROOT / config[ref]
+                if (root / path).is_file():
+                    assert path in migration.iter_wave_files(root, wave["tinygrad_paths"])
+                    assert path in migration.iter_wave_files(root, waves[owner]["tinygrad_paths"])
+
+
 @pytest.fixture
 def gate(tmp_path):
     source_hash = put(tmp_path, "src/owner.c", "void owner(void) {}\n")
@@ -98,9 +165,11 @@ def gate(tmp_path):
         "tests": [{"path": "test/test_owner.c", "sha256": test_hash,
                    "check": "native", "case": "owner_case"}],
     }
-    audit = {"schema_version": 1, "baseline_commit": "baseline", "target_commit": "target", "rows": [row]}
+    audit = {"schema_version": 1, "hash_scheme": migration.HASH_SCHEME,
+             "baseline_commit": "baseline", "target_commit": "target", "rows": [row]}
     put(tmp_path, "audit.json", json.dumps(audit))
     ledger = {
+        "hash_scheme": migration.HASH_SCHEME,
         "baseline": {"commit": "baseline"}, "target": {"commit": "target"},
         "required_checks": ["physical_graph", "native"],
         "rule_groups": [{"id": "matcher", "status": "pass"}], "matcher_aggregates": [],
@@ -133,6 +202,26 @@ def update_audit(gate):
 
 def test_strict_accepts_complete_synthetic_evidence(gate):
     assert errors(gate) == []
+
+
+@pytest.mark.parametrize("scheme", [None, "cpython-3.12-ast-dump-v1"])
+def test_strict_rejects_unidentified_or_different_audit_hash_scheme(gate, scheme):
+    gate[5]["hash_scheme"] = scheme
+    update_audit(gate)
+    assert any("audit hash scheme" in error for error in errors(gate))
+
+
+def test_strict_rejects_unidentified_ledger_hash_scheme(gate):
+    del gate[1]["hash_scheme"]
+    assert any("ledger: missing or unsupported hash scheme" in error for error in errors(gate))
+
+
+@pytest.mark.parametrize("status,stage", [("open_debt", "tensor"), ("approved", "logical")])
+def test_source_disposition_cannot_use_open_debt_or_wrong_stage(gate, status, stage):
+    gate[4]["entries"] = [{"id": "debt", "status": status, "stages": [stage]}]
+    gate[5]["rows"][0].update(disposition="approved_divergence", divergence_id="debt", stage="tensor")
+    update_audit(gate)
+    assert any("unapproved divergence" in error for error in errors(gate))
 
 
 @pytest.mark.parametrize("status", ["open", "unclassified", "broad_green", None])

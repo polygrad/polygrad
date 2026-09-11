@@ -1,0 +1,204 @@
+{
+  "schema_version": 1,
+  "hash_scheme": "cpython-3.11-ast-dump-v1",
+  "provenance": "Copied from temp/reference_migration/audits/storage_identity.json; all 5 upstream row hashes verified unchanged with CPython 3.11. Counterpart and execution freshness is not renewed.",
+  "baseline_commit": "ba1d3baae81c96b3ed72900cde87bb307933c61f",
+  "target_commit": "a9069c177a9da9cca18593edf55acd2e6073cca6",
+  "review": {
+    "origin": "temp/shape-storage-audit-20260906.VUymUD/owner-review.md",
+    "sha256": "61bec69a9333da0aa7ad66476ee11696dbabed626176afa79586132381870b82",
+    "text": "# Reviewed source slices\n\nPinned August a9069c177a9da9cca18593edf55acd2e6073cca6 against June\nba1d3baae81c96b3ed72900cde87bb307933c61f. The full mixin/movement diff was\nread, including new max helpers, negative symbolic slice bounds, broadcast,\nstack, pad_to identity and zero-size roll. Only the individually completed\nrows are accepted; neither the class nor its whole-file row is closed.\n\n## Movement and shape\n\n- UOp._mop/shape_to_shape_arg: canonical shape sources, rank-zero/one/many\n  encoding, STACK dtype commitment and scalar PAD/SHRINK no-ops. New exact\n  graph and rejection regressions bind the C movement helper correction.\n- MovementMixin._broadcast_to: admission is unchanged; squeeze expanded\n  singleton axes, prepend dimensions, permute back. A separate pinned\n  rejection probe confirms unsimplified unequal symbolic requests still fail.\n- MovementMixin.stack: same shape/axis checks and leading STACK/permutation;\n  C poly_stack plus executed Python instance-method cat/stack control.\n- max_shape/max_numel moved from UOp to MovementMixin. C accessors retain\n  the same max-shape/product concept and checked finite allocation sizes.\n  Their duplicate inventory rows refer to the move, not separate fixes.\n- All eight mop_cleanup rules and entire newly introduced module were\n  reviewed; reuse [previous callback review](../movement-owner-audit-20260906.18EYzd/owner-review.md).\n  Current C owner suites reran all eight and the empty-INDEX controls.\n\nConsumer source inspection: Tensor reshape/expand/shrink applies the helper\nto exact logical/physical occurrences; autograd PAD/SHRINK swaps inverse\noffset/extent operations; multi-device sharding passes rank-matched extents;\ncodegen reduction reconstruction calls the same reshape helper. No consumer\npatch, raw-UOp normalization, logical fallback or late scheduler workaround.\n\n## Weak lowering: partial acceptance, explicit blocker\n\nRead current weak.py completely; June has no such module. Reused the\napplicable [previous C callback and consumer review](../weak-owner-audit-20260906.w9YrgO/owner-review.md),\nand reran codegen/weak controls on the final source. Five rows are normalized:\nthe admitted operation set, explicit-dtype commit_weak, commit_srcs_at,\ncommit_weak_srcs, and ordered pm_commit_weak. They do not select defaults.\n\nDo not promote the whole file or default-dependent lowering callbacks.\nNew probe: DEFAULT_FLOAT=float64 makes pinned pm_lower_weak emit a float64\nCONST beneath the weak CAST; C emits dtype ID12 (float32) for both settings.\nPython's dtype module already recognizes the environment setting. This is\nPG-PARITY-025, not an approved allowance. Default-dtype selection, dependent\ncast/lowering rows, dtype helpers and frontend/core propagation need a\nseparate owning batch; do not patch only weak.c with getenv.\n\n## Accounting and remaining slices\n\nThe three strict inventories contain204/374/324 rows for movement/weak/storage,\nnot the earlier changed-symbol-only200/370/319. Files and class containers\noverlap method scope; these are evidence rows, not a workload percentage.\n\n[Source progress](source-progress.json) enumerates every remaining row by\nfile/owner group. Fifteen unique reviewed rows yield movement10/204,\nweak9/374 and storage4/324 because four shared UOp rows occur in all three.\nNo source audit is closed. Earlier reviewed storage helpers are not silently\ncounted until their individual dispositions and evidence are normalized.\n\nNext source slices: remaining movement-mixin changed methods and container\nrows (5), schedule/indexing (21), remaining UOp shape/storage methods and\ntheir shared dependencies, plus registered default-dtype propagation. The\nlarge UOp class/file rows require full residual review, not token matching.\nPotential shape-cache allocation failure handling and a legacy INT_TUPLE\nshape branch were observed statically but not proved by a failing test or\ndeclared dead; leave them in the allocation/analyzer and shape follow-up.\n\nArchbird overview and focused SHRINK query supplied candidate consumer/test\nroutes. Coverage remained incomplete; no static route was used as runtime\nevidence. No new Archbird failure or feedback entry in this batch.\n"
+  },
+  "rows": [
+    {
+      "id": "tinygrad/tensor.py:Tensor.realize",
+      "baseline_sha256": "40ac2fd6e241602ea9c105daac3b199c03bda882495aa95408c3b34ef6cb5e95",
+      "target_sha256": "a42e01eca899bf158820015c664be95fa9cb9741d5646133a9f661f5a20733e0",
+      "disposition": "equivalent",
+      "reason": "Tensor.realize selection/publication boundary: weak or deviceless roots are virtual no-ops; existing buffer identities skip callify; pending roots publish the current map and run LINEAR. Python preserves receiver identity; stats suppression implements do_update_stats. Physical-root validation, residency reconciliation and collection implement the approved C lifetime/placement contract, not fallback placement. Source/probe review and current native execution: temp/execution-config-20260907.FhQowS/correspondence.md and c-final.log. This row does not close the wider linear_with_vars, is_virtual consumer, or whole-file inventories.",
+      "counterparts": [
+        {
+          "path": "src/engine/realize.c",
+          "sha256": "d9d2f574ca13f445d8d8150c33263e29c3af1f33d2231a5a8897c8a8d67996d1",
+          "symbol": "poly_realize_tensors_impl"
+        },
+        {
+          "path": "src/engine/realize.c",
+          "sha256": "d9d2f574ca13f445d8d8150c33263e29c3af1f33d2231a5a8897c8a8d67996d1",
+          "symbol": "poly_realize_tensors_ex"
+        },
+        {
+          "path": "py/polygrad/tensor.py",
+          "sha256": "230d2ef168e0b4578c078f2505aa10964a7c8bd433c71f672c6b69ec84b06ef3",
+          "symbol": "realize"
+        }
+      ],
+      "tests": [
+        {
+          "path": "test/test_realize.c",
+          "sha256": "e60063497358f95a68ee87f0446d159472bae1de508557c6dab5dd9a0d336dbd",
+          "case": "realize.virtual_weak_realize_noop_but_scheduling_requires_concrete_cast",
+          "check": "native"
+        },
+        {
+          "path": "test/test_realize.c",
+          "sha256": "e60063497358f95a68ee87f0446d159472bae1de508557c6dab5dd9a0d336dbd",
+          "case": "realize.tensor_value_buffer_identity_is_residency_not_copy",
+          "check": "native"
+        },
+        {
+          "path": "test/test_realize.c",
+          "sha256": "e60063497358f95a68ee87f0446d159472bae1de508557c6dab5dd9a0d336dbd",
+          "case": "realize.transform_to_call_preserves_virtual_roots_without_storage",
+          "check": "native"
+        },
+        {
+          "path": "test/test_realize.c",
+          "sha256": "e60063497358f95a68ee87f0446d159472bae1de508557c6dab5dd9a0d336dbd",
+          "case": "realize.transform_to_call_virtual_contiguous_has_no_publication",
+          "check": "native"
+        }
+      ]
+    },
+    {
+      "baseline_sha256": "e1f48172408cfb44fb2257f1686e52283d27f8635392e8fa8fa94369c1d08663",
+      "id": "tinygrad/uop/ops.py:UOp._mop",
+      "target_sha256": "b6056a9c4a6bc05681683a17a9d7f581255b442d4c2049f477ba4de7a3b3945b",
+      "disposition": "equivalent",
+      "reason": "Raw movement construction stage: canonical shape operands, two sources for RESHAPE/EXPAND and three for PAD/SHRINK, scalar no-ops, tuple PERMUTE/FLIP and promoted STACK. C helpers also implement the surrounding MovementMixin identity checks; raw poly_uop remains raw.",
+      "counterparts": [
+        {
+          "path": "src/mixin/movement.c",
+          "sha256": "c2b05576e44329d26114cc6d3dc561f820fd6caa33babb404689617303d0cc16",
+          "symbol": "movement_shape_arg"
+        },
+        {
+          "path": "src/mixin/movement.c",
+          "sha256": "c2b05576e44329d26114cc6d3dc561f820fd6caa33babb404689617303d0cc16",
+          "symbol": "mop_expand"
+        },
+        {
+          "path": "src/uop/ops.c",
+          "sha256": "52b2c1b5a8d944f0d057144dc9b3970b8cd0da0520c57a527b43be6f63d3316a",
+          "symbol": "poly_uop_stack"
+        }
+      ],
+      "tests": [
+        {
+          "path": "test/test_shape.c",
+          "sha256": "79b0dce6261b274f98eebd0ea2b0f3e942162151d400477441ead7ffbc15b1be",
+          "case": "shape.movement_construction_canonicalizes_shape_sources",
+          "check": "native"
+        },
+        {
+          "path": "test/test_shape.c",
+          "sha256": "79b0dce6261b274f98eebd0ea2b0f3e942162151d400477441ead7ffbc15b1be",
+          "case": "shape.pad_shrink_construction_canonicalizes_both_shape_sources",
+          "check": "native"
+        },
+        {
+          "path": "test/test_shape.c",
+          "sha256": "79b0dce6261b274f98eebd0ea2b0f3e942162151d400477441ead7ffbc15b1be",
+          "case": "shape.movement_canonical_shape_identity_returns_source",
+          "check": "native"
+        },
+        {
+          "path": "test/test_shape.c",
+          "sha256": "79b0dce6261b274f98eebd0ea2b0f3e942162151d400477441ead7ffbc15b1be",
+          "case": "shape.pad_shrink_reject_wrong_rank_before_scalar_noop",
+          "check": "native"
+        },
+        {
+          "path": "test/test_tensor.c",
+          "sha256": "bd03b3825e2b24fde93b2b777b2fba282becfa990f5a70dcc0f4ff8e3519ee42",
+          "case": "shape_uop.flip_uses_rank_sized_boolean_mask",
+          "check": "native"
+        },
+        {
+          "path": "test/test_codegen.c",
+          "sha256": "02822e5f0249ca02cc508885bc3a755062f2c52a85533d8299c56dbcb9f51792",
+          "case": "codegen.weak_stack_rederives_dtype_from_committed_lanes",
+          "check": "native"
+        }
+      ]
+    },
+    {
+      "baseline_sha256": "68130e8c662e5eb7e6d5a16c9862da31ef3d30046fad05b223d57fe6c9bfea56",
+      "id": "tinygrad/uop/ops.py:UOp.max_numel",
+      "target_sha256": null,
+      "disposition": "equivalent",
+      "reason": "Method moved from UOp to MovementMixin without changing prod(max_shape). Existing C helper multiplies cached maxima with checked C allocation-size overflow; no second max-numel route.",
+      "counterparts": [
+        {
+          "path": "src/shape.c",
+          "sha256": "8d9c65058a8da18c29f84c99d9e86d39908cd6ca1b32ae4ac1d3e3d1997fb1f9",
+          "symbol": "poly_uop_max_numel"
+        }
+      ],
+      "tests": [
+        {
+          "path": "test/test_shape.c",
+          "sha256": "79b0dce6261b274f98eebd0ea2b0f3e942162151d400477441ead7ffbc15b1be",
+          "case": "shape.numel_zero_precedes_overflow_and_nonzero_overflow_is_rejected",
+          "check": "native"
+        },
+        {
+          "path": "test/test_codegen.c",
+          "sha256": "02822e5f0249ca02cc508885bc3a755062f2c52a85533d8299c56dbcb9f51792",
+          "case": "codegen.lower_loaded_weak_index_uses_overflow_bounds",
+          "check": "native"
+        }
+      ]
+    },
+    {
+      "baseline_sha256": "dc0e42ba9f91d75e7bd78187af1c4a0685b88e37553c959a11ab4fdc58164097",
+      "id": "tinygrad/uop/ops.py:UOp.max_shape",
+      "target_sha256": null,
+      "disposition": "equivalent",
+      "reason": "Method moved from UOp to MovementMixin, still replacing symbolic dimensions by vmax. C keeps the same context-owned cached shape accessor; no duplicate implementation or legacy logical fallback.",
+      "counterparts": [
+        {
+          "path": "src/shape.c",
+          "sha256": "8d9c65058a8da18c29f84c99d9e86d39908cd6ca1b32ae4ac1d3e3d1997fb1f9",
+          "symbol": "poly_uop_max_shape_cached"
+        }
+      ],
+      "tests": [
+        {
+          "path": "test/test_tensor.c",
+          "sha256": "bd03b3825e2b24fde93b2b777b2fba282becfa990f5a70dcc0f4ff8e3519ee42",
+          "case": "shape_uop.expand_uop_preserves_variable_extent_like_tinygrad",
+          "check": "native"
+        },
+        {
+          "path": "test/test_shape.c",
+          "sha256": "79b0dce6261b274f98eebd0ea2b0f3e942162151d400477441ead7ffbc15b1be",
+          "case": "shape.movement_shape_lanes_use_full_pinned_symbolic_canonicalization",
+          "check": "native"
+        }
+      ]
+    },
+    {
+      "baseline_sha256": "1ef5e4f15ebb2358a9cadc7f82dfcf19d0e5a8a10d321524832d510d2d460d53",
+      "id": "tinygrad/uop/ops.py:shape_to_shape_arg",
+      "target_sha256": "544eeabf4f916683b235edc6a0e34f7d6ed5136d3bdf8e4e675308465c33eb9b",
+      "disposition": "equivalent",
+      "reason": "Integer shape lanes retain rank-one scalar identity; zero/multiple lanes use raw STACK. Integer validation and source topology match; finite C rank/allocation limits remain separate contracts.",
+      "counterparts": [
+        {
+          "path": "src/uop/ops.c",
+          "sha256": "52b2c1b5a8d944f0d057144dc9b3970b8cd0da0520c57a527b43be6f63d3316a",
+          "symbol": "poly_shape_to_shape_arg"
+        }
+      ],
+      "tests": [
+        {
+          "path": "test/test_uop.c",
+          "sha256": "b974ccdd06df3e1704ced34bca1a6d332451b7cf93cbbf19f1125d1048799947",
+          "case": "uop.shape_to_shape_arg_matches_current_rank_topology",
+          "check": "native"
+        }
+      ]
+    }
+  ]
+}

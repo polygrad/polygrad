@@ -283,18 +283,18 @@ reference-migration-report: parity-graph-report
 	  test -n "$$ARCHBIRD" || ARCHBIRD=/home/anton/tools/miniconda3/envs/agents/bin/archbird; \
 	  XDG_CACHE_HOME=$(abspath temp/xdg_cache) "$$ARCHBIRD" map . \
 	    --format json --output temp/archbird-polygrad.json --check
-	$(PYTHON) scripts/reference_migration.py \
+	$(PARITY_PY) scripts/reference_migration.py \
 		--graph-report $(GRAPH_PARITY_DIR)/report.json \
 		--archbird-map temp/archbird-polygrad.json
 
 MIGRATION_EVIDENCE ?= temp/reference_migration/evidence.json
 .PHONY: test-reference-migration reference-migration-check
 test-reference-migration:
-	PYTHONPATH=. $(PYTHON) -m pytest -q py/tests/test_reference_migration.py
+	PYTHONPATH=. $(PARITY_PY) -m pytest -q py/tests/test_reference_migration.py
 
 # Validate frozen evidence without silently rebuilding or replacing its inputs.
 reference-migration-check: test-reference-migration
-	$(PYTHON) scripts/reference_migration.py --strict \
+	$(PARITY_PY) scripts/reference_migration.py --strict \
 		--graph-report $(GRAPH_PARITY_DIR)/report.json \
 		--archbird-map '' --evidence $(MIGRATION_EVIDENCE)
 

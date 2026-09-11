@@ -21,6 +21,17 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+HASH_SCHEME = "cpython-3.11-ast-dump-v1"
+
+
+def require_hash_interpreter() -> None:
+    # ast.dump is an interpreter-specific representation (3.12 adds
+    # type_params). Reject drift instead of silently invalidating prior review.
+    if sys.implementation.name != "cpython" or sys.version_info[:2] != (3, 11):
+        raise RuntimeError(
+            f"{HASH_SCHEME} requires CPython 3.11; use "
+            "references/.venv-tinygrad-py311/bin/python (Make: PARITY_PY)"
+        )
 
 
 def run(*args: str, cwd: Path | None = None) -> str:
@@ -32,6 +43,7 @@ def commit(root: Path) -> str:
 
 
 def python_symbols(path: Path) -> dict[str, str]:
+    require_hash_interpreter()
     if not path.is_file():
         return {}
     source = path.read_text(encoding="utf-8")
@@ -69,6 +81,7 @@ def python_matcher_rules(
     starred_expansions: dict[str, list[str]] | None = None,
 ) -> list[dict]:
     """Return ordered literal PatternMatcher rows composed into name."""
+    require_hash_interpreter()
     tree = ast.parse(path.read_text(encoding="utf-8"))
 
     def matcher_lists(node: ast.AST) -> list[ast.List | ast.Tuple]:
@@ -406,6 +419,8 @@ def release_errors(ledger: dict, report: dict, evidence: dict, register: dict, r
     for semantic correspondence; hashes attest identity, not truth of a claim.
     """
     errors = list(ledger.get("reference_errors", []))
+    if ledger.get("hash_scheme") != HASH_SCHEME:
+        errors.append("ledger: missing or unsupported hash scheme")
 
     def check_file(record, label):
         if not isinstance(record, dict) or not isinstance(record.get("path"), str):
@@ -519,6 +534,8 @@ def release_errors(ledger: dict, report: dict, evidence: dict, register: dict, r
         audit = load_audit(wave.get("source_audit"), label)
         if not audit:
             continue
+        if audit.get("hash_scheme") != HASH_SCHEME:
+            errors.append(f"{label}: missing or unsupported audit hash scheme")
         if (audit.get("baseline_commit") != ledger["baseline"]["commit"]
                 or audit.get("target_commit") != ledger["target"]["commit"]):
             errors.append(f"{label}: stale audit reference")
@@ -815,6 +832,7 @@ def main() -> int:
     parser.add_argument("--strict", action="store_true", help="fail on incomplete source/runtime evidence")
     parser.add_argument("--evidence", default="temp/reference_migration/evidence.json")
     args = parser.parse_args()
+    require_hash_interpreter()
 
     config_path = ROOT / args.config
     config = json.loads(config_path.read_text(encoding="utf-8"))
@@ -834,6 +852,13 @@ def main() -> int:
         changes = symbol_changes(
             old_root, new_root, wave["tinygrad_paths"], wave.get("symbol_patterns", [])
         )
+        inventory = source_inventory(old_root, new_root, wave["tinygrad_paths"])
+        # Routing is not an exclusion or an allowance. Keep shared dependencies
+        # in the exhaustive inventory until their evidence satisfies the gate.
+        for row in inventory:
+            row["review_owner"] = wave.get("source_review_owners", {}).get(
+                row["id"].rsplit(":", 1)[0], wave["id"]
+            )
         waves.append({
             **wave,
             "diff_stat": diff_stat(new_root, old_commit, new_commit, wave["tinygrad_paths"]),
@@ -842,7 +867,7 @@ def main() -> int:
                 new_root, old_commit, new_commit, wave["tinygrad_paths"]
             ),
             "changed_symbols": changes,
-            "source_inventory": source_inventory(old_root, new_root, wave["tinygrad_paths"]),
+            "source_inventory": inventory,
             "source_hints": source_hints([r for r in changes if r["routed"]], wave["polygrad_owners"]),
             "archbird_impact": archbird_impact(archbird, wave["polygrad_owners"]),
             "graph_status": graph_status(report, wave["case_patterns"]),
@@ -856,6 +881,7 @@ def main() -> int:
 
     ledger = {
         "schema_version": 3,
+        "hash_scheme": HASH_SCHEME,
         "required_checks": config.get("required_checks", []),
         "baseline": {"path": config["baseline_ref"], "commit": old_commit},
         "target": {"path": config["target_ref"], "commit": new_commit},
