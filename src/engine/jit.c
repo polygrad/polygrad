@@ -330,8 +330,8 @@ static int poly_jit_prepare_input_view(
   if (!root) return -1;
   PolyUOp *noop = poly_uop0(jit->ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_none());
   if (!noop) return -1;
-  PolyUOp *base_free = poly_uop_substitute(jit->ctx, root, &buf, &noop, 1);
-  if (!base_free) return -1;
+  PolyUOp *base_free = NULL;
+  if (poly_uop_substitute_many(jit->ctx, &root, 1, &buf, &noop, 1, &base_free) != 0) return -1;
 
   int n_topo = 0;
   PolyUOp **topo = poly_toposort_alloc(NULL, base_free, &n_topo);
@@ -362,7 +362,8 @@ static int poly_jit_prepare_input_view(
   }
 
   PolyUOp *unbound = base_free;
-  if (rc == 0 && n_sub > 0) unbound = poly_uop_substitute(jit->ctx, base_free, from, to, n_sub);
+  if (rc == 0 && n_sub > 0)
+    rc = poly_uop_substitute_many(jit->ctx, &base_free, 1, from, to, n_sub, &unbound);
   if (rc == 0 && unbound)
     unbound = poly_graph_rewrite(jit->ctx, unbound, poly_pm_jit_mop_cleanup());
   if (rc == 0 && !unbound) rc = -1;

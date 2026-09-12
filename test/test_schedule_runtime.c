@@ -182,6 +182,94 @@ TEST(schedule_runtime, binding_publication_jit_failure) {
 }
 #endif
 
+#ifdef POLY_TESTING
+TEST(schedule_runtime, jit_input_scalar_substitution_failure_is_not_capture) {
+  bool correct = true;
+  for (int failure = 0; failure < 2; failure++) {
+    PolyCtx *ctx = poly_ctx_new();
+    int64_t shape[] = {6};
+    PolyTensor *input = poly_tensor_empty_by_id(
+        ctx, poly_dtype_id_by_name("float32"), shape, 1, POLY_DEVICE_INTERP
+    );
+    PolyUOp *var = poly_uop_variable(ctx, "offset", 0, 4, POLY_WEAKINT, 1, false);
+    PolyUOp *start = poly_uop_bind(ctx, var, 2), *size = poly_const_int(ctx, 2);
+    PolyTensor *view = poly_tensor_shrink_uop(ctx, input, &start, &size, 1);
+    PolyUOp *original = poly_tensor_uop_physical(view);
+    PolyJit *jit = poly_jit_new(ctx);
+    poly_test_substitute_fail_after(failure);
+    int rc = poly_jit_begin_capture(jit, &view, 1);
+    poly_test_substitute_fail_after(-1);
+    correct &= rc == -1 && !poly_jit_is_capturing(jit) && ctx->active_jit_capture == NULL;
+    if (!rc) poly_jit_cancel_capture(jit);
+    correct &= poly_jit_begin_capture(jit, &view, 1) == 0;
+    correct &= poly_tensor_uop_physical(view) == original;
+    poly_jit_cancel_capture(jit);
+    poly_jit_free(jit);
+    poly_ctx_destroy(ctx);
+  }
+  ASSERT_TRUE(correct);
+  PASS();
+}
+#endif
+
+TEST(schedule_runtime, interp_scalar_params_use_numeric_bindings) {
+  /* PythonProgram consumes numeric vals. Polygrad's runner ABI supplies
+   * int32_t pointers regardless of the PARAM's computation dtype. */
+  PolyDType types[] = {POLY_INT32, POLY_INT64, POLY_FLOAT32, POLY_FLOAT64};
+  bool correct = true;
+  for (size_t t = 0; t < sizeof(types) / sizeof(*types); t++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyUOp *buffer = poly_test_program_param(ctx, POLY_FLOAT64, 1, 0);
+    PolyParamArg arg = {
+        .slot = 1,
+        .addrspace = POLY_ADDR_ALU,
+        .name = "scalar",
+        .has_minmax = true,
+        .min_val = INT32_MIN,
+        .max_val = INT32_MAX};
+    PolyUOp *scalar = poly_uop0(ctx, POLY_OP_PARAM, types[t], poly_arg_param(&arg));
+    PolyUOp *zero = poly_const_int(ctx, 0);
+    PolyUOp *ptr = poly_uop_index(ctx, buffer, &zero, 1);
+    PolyUOp *store = poly_uop2(
+        ctx, POLY_OP_STORE, POLY_VOID, ptr, poly_cast(ctx, scalar, POLY_FLOAT64), poly_arg_none()
+    );
+    PolyKernelInfo info = {.name = "scalar_numeric_binding"};
+    PolyUOp *sink =
+        poly_uop_tagged(ctx, POLY_OP_SINK, POLY_VOID, &store, 1, poly_arg_kernel_info(&info), 1);
+    PolyUOp *call = poly_uop2(ctx, POLY_OP_CALL, POLY_VOID, sink, buffer, poly_arg_none());
+    PolyRunner runner = {0};
+    int rc = poly_time_call_prepare(ctx, call, POLY_DEVICE_INTERP, &runner);
+    correct &= rc == 0;
+    if (!rc) {
+      /* Exactly four bytes: sanitizers must catch a future dtype-sized read. */
+      int32_t *value = malloc(sizeof(*value));
+      if (!value) {
+        poly_time_call_finish(ctx, &runner, POLY_DEVICE_INTERP);
+        poly_ctx_destroy(ctx);
+        FAIL("scalar test allocation failed");
+      }
+      const int32_t values[] = {-3, 7, 16777217};
+      for (size_t i = 0; i < sizeof(values) / sizeof(*values); i++) {
+        *value = values[i];
+        double got = NAN;
+        void *args[] = {&got, value};
+        PolyVarBinding binding = {.var = scalar, .value = *value};
+        double elapsed =
+            poly_time_call(&runner, POLY_DEVICE_INTERP, args, 2, &binding, 1, 1, INFINITY, 0);
+        /* PythonProgram preserves numeric pvals until a consuming operation;
+         * a float32 PARAM alone does not round the int32 binding. */
+        double expected = *value;
+        correct &= isfinite(elapsed) && got == expected;
+      }
+      free(value);
+      poly_time_call_finish(ctx, &runner, POLY_DEVICE_INTERP);
+    }
+    poly_ctx_destroy(ctx);
+  }
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
 TEST(schedule_runtime, beam_time_call_reads_scalar_values) {
 #ifdef __EMSCRIPTEN__
   PolyDevice devices[] = {POLY_DEVICE_WASM, POLY_DEVICE_INTERP};
@@ -335,6 +423,56 @@ static PolyUOp *runtime_test_graph(PolyCtx *ctx, PolyUOp *linear) {
   PolyUOp *call = poly_uop1(ctx, POLY_OP_CALL, POLY_VOID, function, poly_arg_none());
   return poly_uop1(ctx, POLY_OP_LINEAR, POLY_VOID, call, poly_arg_none());
 }
+
+#ifdef POLY_HAS_CUDA
+static bool runtime_scalar_integer_args(bool graph) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *out = poly_test_buffer_on_device(ctx, POLY_INT64, 1, POLY_DEVICE_CUDA);
+  PolyUOp *ptr = poly_test_program_param(ctx, POLY_INT64, 1, 0);
+  PolyParamArg arg = {
+      .slot = 1,
+      .addrspace = POLY_ADDR_ALU,
+      .name = "scalar",
+      .has_minmax = true,
+      .min_val = INT32_MIN,
+      .max_val = INT32_MAX};
+  PolyUOp *var = poly_uop0(ctx, POLY_OP_PARAM, POLY_INT64, poly_arg_param(&arg));
+  PolyUOp *zero = poly_const_int(ctx, 0);
+  PolyUOp *store = poly_uop2(
+      ctx, POLY_OP_STORE, POLY_VOID, poly_uop_index(ctx, ptr, &zero, 1), var, poly_arg_none()
+  );
+  PolyKernelInfo info = {.name = "scalar_integer_args"};
+  PolyUOp *sink =
+      poly_uop_tagged(ctx, POLY_OP_SINK, POLY_VOID, &store, 1, poly_arg_kernel_info(&info), 1);
+  PolyUOp *call = poly_uop2(ctx, POLY_OP_CALL, POLY_VOID, sink, out, poly_arg_none());
+  PolyUOp *linear = poly_uop1(ctx, POLY_OP_LINEAR, POLY_VOID, call, poly_arg_none());
+  linear = poly_compile_linear(ctx, linear, 0);
+  bool correct = linear != NULL;
+  if (linear && graph) linear = runtime_test_graph(ctx, linear);
+  const int32_t values[] = {-3, 7, INT32_MIN, INT32_MAX};
+  for (size_t i = 0; linear && i < sizeof(values) / sizeof(*values); i++) {
+    PolyVarBinding binding = {.var = var, .value = values[i]};
+    int64_t got = 0;
+    int rc = poly_run_linear(ctx, linear, &binding, 1, NULL, 0, true, false, true);
+    correct &= rc == 0 && poly_buffer_read(ctx, out, &got, sizeof(got)) == 0;
+    if (got != values[i])
+      fprintf(stderr, "CUDA graph=%d scalar=%d got=%lld\n", graph, values[i], (long long)got);
+    correct &= got == values[i];
+  }
+  poly_ctx_destroy(ctx);
+  return correct;
+}
+
+TEST_BACKEND(cuda, runtime_scalar_integer_args) {
+  ASSERT_TRUE(runtime_scalar_integer_args(false));
+  PASS();
+}
+
+TEST_BACKEND(cuda, graph_scalar_integer_args) {
+  ASSERT_TRUE(runtime_scalar_integer_args(true));
+  PASS();
+}
+#endif
 
 static bool runtime_allocates_only_program_globals(PolyDevice device) {
   /* exec_kernel resolves CALL arguments, but only ProgramInfo.globals own

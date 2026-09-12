@@ -652,7 +652,7 @@ typedef struct {
   PolyCudaKernelNodeParams params;
   PolyCudaMemcpy3D copy;
   CUdeviceptr *buffer_values;
-  int *scalar_values;
+  int64_t *scalar_values;
   void **kernel_params;
   int n_buffer_args;
   int n_args;
@@ -708,7 +708,9 @@ static int poly_cuda_graph_node_update(PolyCudaGraphNode *node, const PolyCudaGr
   for (int i = n_buffer_args; i < n_args; i++) {
     int scalar_idx = i - n_buffer_args;
     if (!args[i]) return -1;
-    node->scalar_values[scalar_idx] = *(int *)args[i];
+    /* CUDAGraph uses the same width-aware integer encoding as ordinary
+     * launches. Keep eight bytes alive even for an int32 host binding. */
+    node->scalar_values[scalar_idx] = (int64_t) * (int32_t *)args[i];
     node->kernel_params[i] = &node->scalar_values[scalar_idx];
   }
 

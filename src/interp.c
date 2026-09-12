@@ -881,9 +881,12 @@ static int interp_region(
     case POLY_OP_PARAM: {
       int arg_index = param_arg_indices[i];
       if (arg_index >= 0 && arg_index < n_args && args[arg_index]) {
+        /* PythonProgram consumes numeric pvals. The host binding is int32,
+         * regardless of the PARAM's computational dtype or storage width. */
         vals[i] = iv_scalar(
-            poly_uop_is_alu_param(u) ? mem_load_scalar(args[arg_index], u->dtype)
-                                     : il_ptr(args[arg_index])
+            poly_uop_is_alu_param(u)
+                ? cast_lane(il_int(*(int32_t *)args[arg_index]), POLY_INT32, u->dtype)
+                : il_ptr(args[arg_index])
         );
         iv_fixup(&vals[i]);
       } else {

@@ -2579,7 +2579,9 @@ static int cuda_execute(PolyRunner *runner, void **args, int n_args) {
 
   /* cuLaunchKernel kernelParams: each element points TO the arg value.
    * Buffer params (0..n_params-1): args[i] is a device ptr; cast to CUdeviceptr.
-   * Scalar params (n_params..): args[i] is already &int_val; use directly. */
+   * Scalars arrive as int32 bindings. Like ops_cuda.encode_args, extend the
+   * value into storage wide enough for the kernel's declared integer dtype;
+   * cuLaunchKernel copies that dtype's width, not the host binding's width. */
   unsigned long long *dptrs = malloc((size_t)n_args * sizeof(unsigned long long));
   void **cuda_args = malloc((size_t)n_args * sizeof(void *));
   if (!dptrs || !cuda_args) {
@@ -2592,7 +2594,8 @@ static int cuda_execute(PolyRunner *runner, void **args, int n_args) {
     cuda_args[i] = &dptrs[i];
   }
   for (int i = runner->n_params; i < n_args; i++) {
-    cuda_args[i] = args[i];
+    dptrs[i] = (unsigned long long)(int64_t) * (int32_t *)args[i];
+    cuda_args[i] = &dptrs[i];
   }
 
   int ret = runner->wait ? poly_cuda_launch_timed(

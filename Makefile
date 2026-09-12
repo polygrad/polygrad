@@ -118,6 +118,8 @@ test-runtime-wasm: build/test_schedule_runtime.js
 	$(SAN_RUN) $(NODE) $< --require-no-skips schedule_runtime.runtime_allocates_only_program_globals
 	$(SAN_RUN) $(NODE) $< --require-no-skips schedule_runtime.runtime_copy_accepts_empty_storage
 	$(SAN_RUN) $(NODE) $< --require-no-skips binding_publication
+	$(SAN_RUN) $(NODE) $< --require-no-skips schedule_runtime.interp_scalar_params_use_numeric_bindings
+	$(SAN_RUN) $(NODE) $< --require-no-skips schedule_runtime.jit_input_scalar_substitution_failure_is_not_capture
 
 build/test_schedule_runtime.js: $(WASM_SRC) test/test_main.c test/test_schedule_runtime.c test/test_uop.c test/test_harness.h $(PROJECT_HEADERS) Makefile
 	@mkdir -p build
