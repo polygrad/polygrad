@@ -3534,6 +3534,26 @@ static PolyUOp *rule_decomp_max(PolyCtx *ctx, PolyUOp *root, const PolyBindings 
   return poly_uop3(ctx, POLY_OP_WHERE, root->dtype, cmp, root->src[1], a, poly_arg_none());
 }
 
+/* decomp/op.py:powers_of_two includes 2**63. Inspect the exact positive
+ * payload before projecting to uint64, so oversized weakints cannot wrap. */
+static int power_of_two_shift(PolyArg arg) {
+  if (arg.kind == POLY_ARG_INT) {
+    if (arg.i <= 0) return -1;
+  } else if (arg.kind == POLY_ARG_BIGINT) {
+    if (arg.bigint.sign <= 0 || arg.bigint.n_limbs > 2) return -1;
+  } else {
+    return -1;
+  }
+  uint64_t value = poly_arg_integer_to_u64_mod(arg);
+  if (!value || (value & (value - 1))) return -1;
+  int shift = 0;
+  while (value > 1) {
+    value >>= 1;
+    shift++;
+  }
+  return shift;
+}
+
 /*
  * rule_mul_to_shl — Port of tinygrad's get_late_rewrite_patterns MUL→SHL rule.
  * x * c → SHL(x, log2(c))  when c is a power of 2 and x is integer type.
@@ -3543,15 +3563,8 @@ static PolyUOp *rule_mul_to_shl(PolyCtx *ctx, PolyUOp *root, const PolyBindings 
   PolyUOp *x_node = poly_bind(b, "x");
   if (!c_node || !x_node) return NULL;
   if (!poly_dtype_is_int(root->dtype)) return NULL;
-  if (c_node->arg.kind != POLY_ARG_INT) return NULL;
-  int64_t c = c_node->arg.i;
-  if (c <= 1 || (c & (c - 1)) != 0) return NULL; /* pinned rule excludes shift zero */
-  int shift = 0;
-  int64_t tmp = c;
-  while (tmp > 1) {
-    shift++;
-    tmp >>= 1;
-  }
+  int shift = power_of_two_shift(c_node->arg);
+  if (shift <= 0) return NULL; /* pinned rule excludes shift zero */
   PolyUOp *shift_const = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(shift));
   return poly_uop2(ctx, POLY_OP_SHL, root->dtype, x_node, shift_const, poly_arg_none());
 }
@@ -3566,15 +3579,8 @@ static PolyUOp *rule_cdiv_to_shr(PolyCtx *ctx, PolyUOp *root, const PolyBindings
   PolyUOp *x_node = poly_bind(b, "x");
   if (!c_node || !x_node) return NULL;
   if (!poly_dtype_is_int(root->dtype)) return NULL;
-  if (c_node->arg.kind != POLY_ARG_INT) return NULL;
-  int64_t c = c_node->arg.i;
-  if (c <= 1 || (c & (c - 1)) != 0) return NULL; /* pinned rule excludes shift zero */
-  int shift = 0;
-  int64_t tmp = c;
-  while (tmp > 1) {
-    shift++;
-    tmp >>= 1;
-  }
+  int shift = power_of_two_shift(c_node->arg);
+  if (shift <= 0) return NULL; /* pinned rule excludes shift zero */
   PolyUOp *shift_const = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(shift));
   /* Unsigned: just shift right */
   if (poly_dtype_is_unsigned(root->dtype))
@@ -3590,16 +3596,6 @@ static PolyUOp *rule_cdiv_to_shr(PolyCtx *ctx, PolyUOp *root, const PolyBindings
   return poly_binop(ctx, POLY_OP_SHR, poly_add(ctx, x_node, correction), shift_const);
 }
 
-static int power_of_two_shift(int64_t value) {
-  if (value <= 0 || (value & (value - 1)) != 0) return -1;
-  int shift = 0;
-  while (value > 1) {
-    value >>= 1;
-    shift++;
-  }
-  return shift;
-}
-
 /* Current get_simplifying_rewrite_patterns runs this before generic floor
  * decomposition: arithmetic right shift is signed floor division by 2**n. */
 static PolyUOp *floordiv_pow2_to_shr(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
@@ -3609,8 +3605,8 @@ static PolyUOp *floordiv_pow2_to_shr(PolyCtx *ctx, PolyUOp *root, const PolyBind
   if (!poly_dtype_is_int(scalar) || poly_dtype_is_index(scalar) || poly_dtype_is_bool(scalar))
     return NULL;
   PolyUOp *den = root->src[1];
-  if (den->op != POLY_OP_CONST || den->arg.kind != POLY_ARG_INT) return NULL;
-  int shift = power_of_two_shift(den->arg.i);
+  if (den->op != POLY_OP_CONST) return NULL;
+  int shift = power_of_two_shift(den->arg);
   if (shift <= 0) return NULL;
   PolyUOp *amount = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(shift));
   return poly_uop2(ctx, POLY_OP_SHR, root->dtype, root->src[0], amount, poly_arg_none());
@@ -3625,10 +3621,9 @@ static PolyUOp *floormod_pow2_to_and(PolyCtx *ctx, PolyUOp *root, const PolyBind
   if (!poly_dtype_is_int(scalar) || poly_dtype_is_index(scalar) || poly_dtype_is_bool(scalar))
     return NULL;
   PolyUOp *den = root->src[1];
-  if (den->op != POLY_OP_CONST || den->arg.kind != POLY_ARG_INT ||
-      power_of_two_shift(den->arg.i) < 0)
-    return NULL;
-  PolyUOp *mask = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(den->arg.i - 1));
+  if (den->op != POLY_OP_CONST || power_of_two_shift(den->arg) < 0) return NULL;
+  int64_t mask_value = (int64_t)(poly_arg_integer_to_u64_mod(den->arg) - 1);
+  PolyUOp *mask = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(mask_value));
   return poly_uop2(ctx, POLY_OP_AND, root->dtype, root->src[0], mask, poly_arg_none());
 }
 
@@ -3696,7 +3691,6 @@ static PolyUOp *rule_floormod_to_cmod(PolyCtx *ctx, PolyUOp *root, const PolyBin
 static PolyUOp *rule_mul_add_to_mulacc(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   (void)b;
   if (root->op != POLY_OP_ADD || root->n_src != 2) return NULL;
-  if (!poly_dtype_is_float(root->dtype)) return NULL;
   PolyUOp *mul = NULL, *add = NULL;
   if (root->src[0]->op == POLY_OP_MUL) {
     mul = root->src[0];
@@ -3717,7 +3711,7 @@ static PolyUOp *rule_mul_add_to_mulacc(PolyCtx *ctx, PolyUOp *root, const PolyBi
  * rule_shl_add_to_mulacc — ADD(SHL(x, n), c) → MULACC(x, 2^n, c)
  * When MUL(x, pow2) was already decomposed to SHL by an earlier pass,
  * the ADD fusion needs to recognize the shifted form.
- * Ref: tinygrad decompositions.py:480
+ * Ref: tinygrad/codegen/decomp/op.py:get_late_rewrite_patterns.
  */
 static PolyUOp *rule_shl_add_to_mulacc(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   (void)b;
@@ -3736,8 +3730,10 @@ static PolyUOp *rule_shl_add_to_mulacc(PolyCtx *ctx, PolyUOp *root, const PolyBi
   PolyUOp *n_const = shl->src[1];
   if (n_const->op != POLY_OP_CONST || n_const->arg.kind != POLY_ARG_INT) return NULL;
   int64_t shift = n_const->arg.i;
-  if (shift < 0 || shift > 30) return NULL;
-  PolyUOp *factor = poly_const_like_int(ctx, shl->src[0], 1LL << shift);
+  if (shift < 0 || shift >= root->dtype.bitsize || shift >= 64) return NULL;
+  uint64_t value = UINT64_C(1) << shift;
+  uint32_t limbs[] = {(uint32_t)value, (uint32_t)(value >> 32)};
+  PolyUOp *factor = poly_uop0(ctx, POLY_OP_CONST, shl->src[0]->dtype, poly_arg_bigint(1, limbs, 2));
   PolyUOp *srcs[3] = {shl->src[0], factor, c};
   return poly_uop(ctx, POLY_OP_MULACC, root->dtype, srcs, 3, poly_arg_none());
 }
@@ -3969,10 +3965,11 @@ static PolyUOp *u32_rol(PolyCtx *ctx, PolyUOp *x, int r) {
 /* tinygrad@2026-08-22/a9069c177a9d codegen/decomp/op.py:48-63 threefry2x32. */
 static PolyUOp *threefry2x32(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   (void)b;
-  if (root->op != POLY_OP_THREEFRY || root->n_src != 2) return NULL;
+  if (root->op != POLY_OP_THREEFRY || root->n_src != 2 || !poly_dtype_eq(root->dtype, POLY_UINT64))
+    return NULL;
 
   PolyUOp *x0, *x1, *key0, *key1;
-  if (poly_dtype_eq(root->dtype, POLY_UINT64)) {
+  {
     PolyUOp *x64 = u64_cast(ctx, root->src[0]);
     PolyUOp *k64 = u64_cast(ctx, root->src[1]);
     PolyUOp *shift32 = poly_const_int(ctx, 32);
@@ -3980,11 +3977,6 @@ static PolyUOp *threefry2x32(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b)
     x1 = u32_cast(ctx, poly_uop2(ctx, POLY_OP_SHR, POLY_UINT64, x64, shift32, poly_arg_none()));
     key0 = u32_cast(ctx, k64);
     key1 = u32_cast(ctx, poly_uop2(ctx, POLY_OP_SHR, POLY_UINT64, k64, shift32, poly_arg_none()));
-  } else {
-    x0 = u32_cast(ctx, root->src[0]);
-    x1 = poly_const_int(ctx, 0);
-    key0 = u32_cast(ctx, root->src[1]);
-    key1 = poly_const_int(ctx, 0);
   }
 
   PolyUOp *ks[3];
@@ -4025,15 +4017,11 @@ static PolyUOp *threefry2x32(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b)
     );
   }
 
-  if (poly_dtype_eq(root->dtype, POLY_UINT32)) return xr0;
-  if (poly_dtype_eq(root->dtype, POLY_UINT64)) {
-    PolyUOp *lo = u64_cast(ctx, xr0);
-    PolyUOp *hi = poly_uop2(
-        ctx, POLY_OP_SHL, POLY_UINT64, u64_cast(ctx, xr1), poly_const_int(ctx, 32), poly_arg_none()
-    );
-    return poly_uop2(ctx, POLY_OP_OR, POLY_UINT64, hi, lo, poly_arg_none());
-  }
-  return poly_uop1(ctx, POLY_OP_CAST, root->dtype, xr0, poly_arg_none());
+  PolyUOp *lo = u64_cast(ctx, xr0);
+  PolyUOp *hi = poly_uop2(
+      ctx, POLY_OP_SHL, POLY_UINT64, u64_cast(ctx, xr1), poly_const_int(ctx, 32), poly_arg_none()
+  );
+  return poly_uop2(ctx, POLY_OP_OR, POLY_UINT64, hi, lo, poly_arg_none());
 }
 
 /* Current Tinygrad codegen/decomp/op.py:get_simplifying_rewrite_patterns.
@@ -4139,8 +4127,8 @@ static PolyUOp *xd_polyN(
     const double *coeffs,
     int ncoeffs
 ) {
-  PolyUOp *u = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKFLOAT, poly_arg_float(coeffs[0]));
-  for (int i = 1; i < ncoeffs; i++) {
+  PolyUOp *u = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKFLOAT, poly_arg_float(0.0));
+  for (int i = 0; i < ncoeffs; i++) {
     u = poly_uop2(ctx, POLY_OP_MUL, ft, u, x, poly_arg_none());
     u = poly_uop2(
         ctx, POLY_OP_ADD, ft, u,
@@ -4235,6 +4223,10 @@ static bool xd_frexp(
     bit_scalar = POLY_UINT32;
     m1 = INT64_C(0x807fffff);
     m2 = INT64_C(0x3f000000);
+  } else if (poly_dtype_eq(scalar, POLY_FLOAT16)) {
+    bit_scalar = POLY_UINT16;
+    m1 = INT64_C(0x83ff);
+    m2 = INT64_C(0x3800);
   } else {
     return false;
   }
@@ -4319,11 +4311,10 @@ static PolyUOp *xd_ilogb2k(PolyCtx *ctx, PolyDType ft, PolyDType it, PolyUOp *d)
   int64_t emask = xd_exponent_mask(ft);
   int bias = xd_exponent_bias(ft);
   PolyUOp *i_mask = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(emask));
-  PolyUOp *i_neg_bias = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(-bias));
   PolyUOp *d_bits = poly_uop1(ctx, POLY_OP_BITCAST, it, d, poly_arg_none());
   PolyUOp *exp_bits = xd_floordiv_positive_const(ctx, it, d_bits, 1LL << mbits);
   PolyUOp *masked = poly_uop2(ctx, POLY_OP_AND, it, exp_bits, i_mask, poly_arg_none());
-  return poly_uop2(ctx, POLY_OP_ADD, it, masked, i_neg_bias, poly_arg_none());
+  return poly_sub(ctx, masked, poly_const_int(ctx, bias));
 }
 
 /*
@@ -4438,28 +4429,31 @@ static PolyUOp *rule_decomp_transcendental_other_float(
  * rule_decomp_log2 — Port of tinygrad's xlog2.
  *
  * LOG2(d) → polynomial + IEEE754 exponent/mantissa manipulation.
- * Supports float32 (3 coefficients) and float64 (7 coefficients).
+ * Supports float16/32 (3 coefficients) and float64 (7 coefficients).
  */
 static PolyUOp *rule_decomp_log2(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   (void)b;
   PolyUOp *d = root->src[0];
   PolyDType sft = root->dtype;
-  if (!poly_dtype_is_float(sft) || (sft.bitsize != 32 && sft.bitsize != 64)) return NULL;
+  if (!poly_dtype_eq(sft, POLY_FLOAT16) && !poly_dtype_eq(sft, POLY_FLOAT32) &&
+      !poly_dtype_eq(sft, POLY_FLOAT64))
+    return NULL;
 
   PolyDType ft = root->dtype;
   PolyDType it = xd_int_for_float(ft);
   PolyDType bt = POLY_BOOL;
   bool is_f64 = (sft.bitsize == 64);
 
-  PolyUOp *f_1e4 = poly_const_like_float(ctx, d, 1e-4);
+  bool is_f16 = poly_dtype_eq(sft, POLY_FLOAT16);
+  int denormal_exp = is_f16 ? 10 : 64;
+  PolyUOp *flt_min = poly_const_like_float(ctx, d, is_f16 ? 6.1e-5 : 1e-4);
   PolyUOp *f_4_3 = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKFLOAT, poly_arg_float(1.0 / 0.75));
-  PolyUOp *f_neg_64 = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKFLOAT, poly_arg_float(-64.0));
-  PolyUOp *f_2p64 =
-      poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKFLOAT, poly_arg_float(18446744073709551616.0));
+  PolyUOp *scale =
+      poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKFLOAT, poly_arg_float(ldexp(1.0, denormal_exp)));
 
-  /* Denormal handling: scale up subnormals by 2^64 */
-  PolyUOp *is_denormal = poly_uop2(ctx, POLY_OP_CMPLT, bt, d, f_1e4, poly_arg_none());
-  PolyUOp *scaled = poly_uop2(ctx, POLY_OP_MUL, ft, d, f_2p64, poly_arg_none());
+  /* xlog2 uses 2^10 for half: the wider formats' 2^64 overflows half. */
+  PolyUOp *is_denormal = poly_uop2(ctx, POLY_OP_CMPLT, bt, d, flt_min, poly_arg_none());
+  PolyUOp *scaled = poly_uop2(ctx, POLY_OP_MUL, ft, d, scale, poly_arg_none());
   PolyUOp *a = poly_uop3(ctx, POLY_OP_WHERE, ft, is_denormal, scaled, d, poly_arg_none());
 
   /* e = ilogb2k(a * (1/0.75)), using shared helper */
@@ -4474,20 +4468,18 @@ static PolyUOp *rule_decomp_log2(PolyCtx *ctx, PolyUOp *root, const PolyBindings
   );
   PolyUOp *m = xd_ldexp3k(ctx, ft, it, a, neg_e);
 
-  /* Denormal exponent correction: subtract the 2^64 scaling */
-  PolyUOp *e_minus64 = poly_uop2(ctx, POLY_OP_ADD, ft, e, f_neg_64, poly_arg_none());
-  PolyUOp *e_adj = poly_uop3(ctx, POLY_OP_WHERE, ft, is_denormal, e_minus64, e, poly_arg_none());
+  PolyUOp *e_corrected = poly_sub(ctx, e, poly_const_int(ctx, denormal_exp));
+  PolyUOp *e_adj = poly_uop3(ctx, POLY_OP_WHERE, ft, is_denormal, e_corrected, e, poly_arg_none());
 
   /* x = (m - 1) / (m + 1) */
-  PolyUOp *m_minus1 = poly_uop2(
-      ctx, POLY_OP_ADD, ft, m, poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKFLOAT, poly_arg_float(-1.0)),
-      poly_arg_none()
-  );
+  PolyUOp *m_minus1 = poly_sub(ctx, m, poly_const_typed(ctx, POLY_WEAKFLOAT, 1.0));
   PolyUOp *m_plus1 = poly_uop2(
       ctx, POLY_OP_ADD, ft, m, poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKFLOAT, poly_arg_float(1.0)),
       poly_arg_none()
   );
-  PolyUOp *x = poly_uop2(ctx, POLY_OP_FDIV, ft, m_minus1, m_plus1, poly_arg_none());
+  /* xlog2 uses ElementwiseMixin.div; only late renderer rewrites may fuse
+   * the reciprocal multiplication into FDIV. */
+  PolyUOp *x = poly_div(ctx, m_minus1, m_plus1);
   PolyUOp *x2 = poly_uop2(ctx, POLY_OP_MUL, ft, x, x, poly_arg_none());
 
   /* Polynomial: dtype-specific coefficients */
@@ -4514,7 +4506,7 @@ static PolyUOp *rule_decomp_log2(PolyCtx *ctx, PolyUOp *root, const PolyBindings
         poly_arg_none()
     );
   } else {
-    /* f32: k1 + s_lo term (x*k2) for extra precision */
+    /* xlog2 omits s_lo for half, where it underflows. */
     PolyUOp *f_k1 =
         poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKFLOAT, poly_arg_float(2.8853900432586669922));
     PolyUOp *f_k2 =
@@ -4524,7 +4516,9 @@ static PolyUOp *rule_decomp_log2(PolyCtx *ctx, PolyUOp *root, const PolyBindings
         poly_arg_none()
     );
     r = poly_uop2(
-        ctx, POLY_OP_ADD, ft, r, poly_uop2(ctx, POLY_OP_MUL, ft, x, f_k2, poly_arg_none()),
+        ctx, POLY_OP_ADD, ft, r,
+        is_f16 ? poly_const_typed(ctx, POLY_WEAKFLOAT, 0.0)
+               : poly_uop2(ctx, POLY_OP_MUL, ft, x, f_k2, poly_arg_none()),
         poly_arg_none()
     );
   }
@@ -4754,7 +4748,7 @@ static PolyUOp *cody_waite_reduce_f64(
  * rule_decomp_sin — Port of tinygrad's xsin.
  *
  * SIN(d) → sign handling + Cody-Waite / Payne-Hanek reduction + polynomial.
- * Supports float32 and float64.
+ * Supports float16, float32 and float64.
  *
  * f32: Cody-Waite (small) + Payne-Hanek (large), switchover at 30.0
  * f64: Cody-Waite with qdh precision split (small) + Payne-Hanek (large)
@@ -4763,7 +4757,9 @@ static PolyUOp *rule_decomp_sin(PolyCtx *ctx, PolyUOp *root, const PolyBindings 
   (void)b;
   PolyUOp *d = root->src[0];
   PolyDType sft = root->dtype;
-  if (!poly_dtype_is_float(sft) || (sft.bitsize != 32 && sft.bitsize != 64)) return NULL;
+  if (!poly_dtype_eq(sft, POLY_FLOAT16) && !poly_dtype_eq(sft, POLY_FLOAT32) &&
+      !poly_dtype_eq(sft, POLY_FLOAT64))
+    return NULL;
 
   PolyDType ft = root->dtype;
   PolyDType it = POLY_INT32;
@@ -4771,6 +4767,7 @@ static PolyUOp *rule_decomp_sin(PolyCtx *ctx, PolyUOp *root, const PolyBindings 
   PolyDType ut64 = POLY_UINT64;
   PolyDType bt = POLY_BOOL;
   bool is_f64 = (sft.bitsize == 64);
+  bool is_f16 = poly_dtype_eq(sft, POLY_FLOAT16);
 
   PolyUOp *f_zero = poly_const_like_float(ctx, d, 0.0);
   PolyUOp *f_one = poly_const_like_float(ctx, d, 1.0);
@@ -4832,18 +4829,27 @@ static PolyUOp *rule_decomp_sin(PolyCtx *ctx, PolyUOp *root, const PolyBindings 
     r_small = cody_waite_reduce_f64(ctx, ft, x_abs, qdh, qf);
     q_small = poly_uop1(ctx, POLY_OP_CAST, it, q_small_i64, poly_arg_none());
   } else {
-    /* f32: simple rintk(x_abs * m_1_pi) */
+    /* cody_waite_reduction rounds in the source dtype, but half's PI
+     * subtraction needs float32 precision before casting the remainder back. */
     PolyUOp *qf_raw = poly_uop2(ctx, POLY_OP_MUL, ft, x_abs, f_m_1_pi, poly_arg_none());
-    q_small = xd_rintk(ctx, ft, it, qf_raw);
+    q_small = xd_rintk(ctx, ft, xd_int_for_float(ft), qf_raw);
     PolyUOp *qf = poly_uop1(ctx, POLY_OP_CAST, ft, q_small, poly_arg_none());
-
-    r_small = cody_waite_reduce_f32(ctx, ft, x_abs, qf);
+    if (is_f16) {
+      r_small = cody_waite_reduce_f32(
+          ctx, POLY_FLOAT32, poly_cast(ctx, x_abs, POLY_FLOAT32), poly_cast(ctx, qf, POLY_FLOAT32)
+      );
+      r_small = poly_cast(ctx, r_small, ft);
+      q_small = poly_cast(ctx, q_small, it);
+    } else {
+      r_small = cody_waite_reduce_f32(ctx, ft, x_abs, qf);
+    }
   }
 
   /* Payne-Hanek reduction. Pinned tinygrad keeps f64 intermediates for f64
-   * inputs; only f16 widens to f32 (unsupported by this rule today). */
+   * inputs; only f16 widens to f32. */
   PolyUOp *f_frexp = NULL, *e_raw = NULL;
   if (!xd_frexp(ctx, ft, x_abs, &f_frexp, &e_raw)) return NULL;
+  PolyDType intermediate_dtype = is_f16 ? POLY_FLOAT32 : ft;
   PolyUOp *e_i = poly_uop2(
       ctx, POLY_OP_AND, it, poly_uop1(ctx, POLY_OP_CAST, it, e_raw, poly_arg_none()), i_31,
       poly_arg_none()
@@ -4851,7 +4857,7 @@ static PolyUOp *rule_decomp_sin(PolyCtx *ctx, PolyUOp *root, const PolyBindings 
   PolyUOp *ia = poly_uop1(
       ctx, POLY_OP_CAST, ut64,
       poly_uop2(
-          ctx, POLY_OP_MUL, ft, f_frexp,
+          ctx, POLY_OP_MUL, intermediate_dtype, poly_cast(ctx, f_frexp, intermediate_dtype),
           poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKFLOAT, poly_arg_float(4294967296.0)),
           poly_arg_none()
       ),
@@ -4910,9 +4916,10 @@ static PolyUOp *rule_decomp_sin(PolyCtx *ctx, PolyUOp *root, const PolyBindings 
   );
   PolyUOp *p_masked = poly_uop2(ctx, POLY_OP_AND, ut64, p, u_mask, poly_arg_none());
   PolyUOp *r_ph_base = poly_uop2(
-      ctx, POLY_OP_MUL, ft, poly_uop1(ctx, POLY_OP_CAST, ft, p_masked, poly_arg_none()), f_ph_mul,
+      ctx, POLY_OP_MUL, intermediate_dtype, poly_cast(ctx, p_masked, intermediate_dtype), f_ph_mul,
       poly_arg_none()
   );
+  r_ph_base = poly_cast(ctx, r_ph_base, ft);
   PolyUOp *f_lt_half = poly_uop2(ctx, POLY_OP_CMPLT, bt, f_frexp, w_half, poly_arg_none());
   PolyUOp *r_ph = poly_uop3(
       ctx, POLY_OP_WHERE, ft, f_lt_half, r_ph_base,

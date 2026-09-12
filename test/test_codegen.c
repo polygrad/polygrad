@@ -5415,6 +5415,119 @@ TEST(codegen, late_fdiv_rewrites_follow_renderer_capability) {
   PASS();
 }
 
+TEST(codegen, decomp_owner_integer_mulacc) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType types[] = {POLY_INT32, POLY_UINT64};
+  bool ok = true;
+  for (int i = 0; i < 2; i++) {
+    PolyUOp *a = program_param(ctx, types[i], 1, 0);
+    PolyUOp *b = program_param(ctx, types[i], 1, 1);
+    PolyUOp *c = program_param(ctx, types[i], 1, 2);
+    PolyUOp *raw = poly_add(ctx, poly_mul(ctx, a, b), c);
+    PolyUOp *out = poly_pm_rewrite(
+        poly_get_late_rewrite_patterns((PolyRendererCaps){.has_mulacc = true}), ctx, raw
+    );
+    ok &= out && out->op == POLY_OP_MULACC && out->n_src == 3 && out->src[0] == a &&
+          out->src[1] == b && out->src[2] == c;
+    ok &= poly_pm_rewrite(poly_get_late_rewrite_patterns((PolyRendererCaps){0}), ctx, raw) == NULL;
+  }
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
+TEST(codegen, decomp_owner_wide_shift_mulacc) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = program_param(ctx, POLY_UINT64, 1, 0);
+  PolyUOp *c = program_param(ctx, POLY_UINT64, 1, 1);
+  int shifts[] = {40, 63};
+  bool ok = true;
+  for (int i = 0; i < 2; i++) {
+    PolyUOp *shl = poly_uop2(
+        ctx, POLY_OP_SHL, POLY_UINT64, x, poly_const_int(ctx, shifts[i]), poly_arg_none()
+    );
+    PolyUOp *out = poly_pm_rewrite(
+        poly_get_late_rewrite_patterns((PolyRendererCaps){.has_mulacc = true}), ctx,
+        poly_add(ctx, shl, c)
+    );
+    ok &= out && out->op == POLY_OP_MULACC && out->n_src == 3 && out->src[0] == x &&
+          out->src[2] == c && out->src[1]->op == POLY_OP_CONST &&
+          poly_dtype_eq(out->src[1]->dtype, POLY_UINT64) &&
+          poly_arg_integer_to_u64_mod(out->src[1]->arg) == (UINT64_C(1) << shifts[i]);
+  }
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
+TEST(codegen, decomp_owner_unsigned_power_of_two_endpoint) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = program_param(ctx, POLY_UINT64, 1, 0);
+  uint32_t limbs[] = {0, UINT32_C(0x80000000)};
+  PolyUOp *den = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_bigint(1, limbs, 2));
+  PolyOps inputs[] = {POLY_OP_MUL, POLY_OP_CDIV, POLY_OP_FLOORDIV, POLY_OP_FLOORMOD};
+  PolyOps outputs[] = {POLY_OP_SHL, POLY_OP_SHR, POLY_OP_SHR, POLY_OP_AND};
+  bool ok = true;
+  for (int i = 0; i < 4; i++) {
+    PolyPatternMatcher *pm = i < 2 ? poly_get_late_rewrite_patterns((PolyRendererCaps){0})
+                                   : poly_get_simplifying_rewrite_patterns((PolyRendererCaps){0});
+    PolyUOp *raw = poly_uop2(ctx, inputs[i], POLY_UINT64, x, den, poly_arg_none());
+    PolyUOp *out = poly_pm_rewrite(pm, ctx, raw);
+    ok &= out && out->op == outputs[i] && out->n_src == 2 && out->src[0] == x &&
+          out->src[1]->arg.kind == POLY_ARG_INT && out->src[1]->arg.i == (i == 3 ? INT64_MAX : 63);
+  }
+  /* Reading a BIGINT modulo 2^64 must not admit negative or oversized powers. */
+  uint32_t too_wide[] = {0, 0, 1};
+  PolyArg rejected[] = {poly_arg_int(-2), poly_arg_bigint(1, too_wide, 3)};
+  for (int i = 0; i < 2; i++) {
+    PolyUOp *c = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, rejected[i]);
+    PolyUOp *raw = poly_uop2(ctx, POLY_OP_MUL, POLY_UINT64, x, c, poly_arg_none());
+    ok &= poly_pm_rewrite(poly_get_late_rewrite_patterns((PolyRendererCaps){0}), ctx, raw) == NULL;
+  }
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
+TEST(codegen, decomp_owner_threefry_requires_uint64) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = program_param(ctx, POLY_UINT32, 1, 0);
+  PolyUOp *raw = poly_uop2(ctx, POLY_OP_THREEFRY, POLY_UINT32, x, x, poly_arg_none());
+  PolyUOp *out =
+      poly_pm_rewrite(poly_get_simplifying_rewrite_patterns((PolyRendererCaps){0}), ctx, raw);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(out == NULL);
+  PASS();
+}
+
+static bool decomp_owner_half_matches_pinned(PolyOps op, uint64_t expected) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *shape = poly_const_int(ctx, 1);
+  PolyParamArg arg = {.slot = 0, .addrspace = POLY_ADDR_GLOBAL};
+  PolyUOp *input = poly_uop1(ctx, POLY_OP_PARAM, POLY_FLOAT16, shape, poly_arg_param(&arg));
+  PolyUOp *raw = poly_uop1(ctx, op, POLY_FLOAT16, input, poly_arg_none());
+  PolyUOp *lanes = poly_apply_devectorizer2_stage(ctx, raw, (PolyRendererCaps){.max_vec_width = 1});
+  PolyUOp *out =
+      poly_graph_rewrite(ctx, lanes, poly_get_transcendental_patterns((PolyRendererCaps){0}));
+  int n = 0;
+  PolyUOp **topo = poly_toposort_alloc(ctx, out, &n);
+  bool ok = topo && count_lin_ops(topo, n, op) == 0 &&
+            normalized_topology_fingerprint(ctx, topo, n, out) == expected;
+  free(topo);
+  poly_ctx_destroy(ctx);
+  return ok;
+}
+
+TEST(codegen, decomp_owner_half_log2) {
+  ASSERT_TRUE(decomp_owner_half_matches_pinned(POLY_OP_LOG2, UINT64_C(0x10dac6ce51e04c16)));
+  PASS();
+}
+
+TEST(codegen, decomp_owner_half_sin) {
+  ASSERT_TRUE(decomp_owner_half_matches_pinned(POLY_OP_SIN, UINT64_C(0x9cec2b63b042614b)));
+  PASS();
+}
+
 TEST(codegen, transcendental_pow2if_dtype_follows_integer_input) {
   /* Pinned tinygrad uop/decompositions.py:29-32 chooses pow2if's float result
    * from q.dtype: int32 -> float32 and int64 -> float64. Its f64
@@ -5488,9 +5601,11 @@ TEST(codegen, bf16_transcendental_widens_to_f32_like_tinygrad) {
   int floordiv_nodes = 0, cdiv_nodes = 0, cmod_nodes = 0;
   PolyUOp **topo = poly_toposort_alloc(ctx, rewritten, &n_topo);
   ASSERT_NOT_NULL(topo);
-  ASSERT_INT_EQ(n_topo, 72);
+  /* Raw matcher output includes helpers.polyN's initial 0*x + coefficient;
+   * this is before symbolic simplification, on both sides of the probe. */
+  ASSERT_INT_EQ(n_topo, 74);
   ASSERT_TRUE(
-      normalized_topology_fingerprint(ctx, topo, n_topo, rewritten) == UINT64_C(0x765bb834204fb131)
+      normalized_topology_fingerprint(ctx, topo, n_topo, rewritten) == UINT64_C(0x6bd9748dac5500ed)
   );
   for (int i = 0; i < n_topo; i++) {
     PolyUOp *u = topo[i];

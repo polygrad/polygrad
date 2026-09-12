@@ -1,5 +1,20 @@
 {
   "schema_version": 1,
+  "decomposition_closeout_review": {
+    "reference": "6f87158d77f66a36d5f8bbe915170b24e2acabe8",
+    "parent": "009bbd8",
+    "evidence": "temp/compiler-closeout-20260912.7UiFuB/results.md",
+    "correspondence": {
+      "split_store": "Qualified STORE extraction must reject final body/CALL publication failure; C exception-channel equivalent, transactionally retryable with original buffer identity.",
+      "power_of_two_shift / late and simplifying integer matchers": "decomp/op.py powers_of_two includes2^63. Exact positive integer admission precedes uint64 projection; integer MULACC and wide SHL fusion follow renderer capability.",
+      "threefry2x32": "Only uint64 THREEFRY matches. Deleted unsupported non-u64 zero-high-word and truncated-output branches.",
+      "xd_frexp / rule_decomp_log2 / rule_decomp_sin": "transcendental.py half masks, exponent widths, bounded denormal scaling and narrowly widened Cody-Waite/Payne-Hanek intermediates.",
+      "xd_polyN / xd_ilogb2k / rule_decomp_log2": "helpers.polyN includes its initial zero step. Core subtraction/division preserve weak construction and defer FDIV to late renderer rewriting. Exact raw half LOG2/SIN graphs match the pin. BF16 EXP2 snapshot regenerated from the same raw pinned stage, not relaxed."
+    },
+    "red": "Seven permanent defect regressions failed before their repairs; an eighth control executes decomposed half graphs. Native and sanitized Wasm extraction/allocation/value controls pass.",
+    "review_status": "Completed the supported extraction/decomposition owner review, reading all pinned dtype.py/op.py/transcendental.py blocks together. Reuse named float-format and long-decomposition evidence instead of repeating source discovery. Full optional-policy/source-wave certification remains separate.",
+    "limits": "EMULATED_DTYPES, forced TRANSCENDENTAL/SQRT fallback and enabled fast_idiv are unexposed optional policies, not new release prerequisites. C split_l2i lacks Python's extra memoization; equal construction cost is unproved. Explicit CONTIGUOUS Opt-tuple transport and genuine multidevice movement remain scope items. No open debt approved, historical evidence rebound, or whole-file equivalent label inferred."
+  },
   "materialization_review": {
     "reference": "6f87158d77f66a36d5f8bbe915170b24e2acabe8",
     "parent": "a4e0ef7",

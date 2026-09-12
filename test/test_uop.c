@@ -18,6 +18,9 @@
 #include "../src/schedule/indexing.h"
 #include "../src/schedule/rangeify.h"
 #include "../src/codegen/decomp/dtype.h"
+#include "../src/codegen/codegen.h"
+#include "../src/interp.h"
+#include "../src/uop/weak.h"
 #if defined(__linux__) && !defined(__EMSCRIPTEN__)
 #include <unistd.h>
 #include <signal.h>
@@ -3385,7 +3388,67 @@ TEST(uop, extraction_owner_buffer_map_failure_is_transactional) {
   ASSERT_TRUE(kernel_split_allocation_failure_retries());
   PASS();
 }
+
+TEST(uop, extraction_owner_call_publication_failure_is_not_no_match) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *buf = poly_test_buffer(ctx, POLY_FLOAT32, 2);
+  PolyUOp *idx =
+      poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, buf, poly_const_int(ctx, 0), poly_arg_none());
+  PolyUOp *store = poly_store_val(ctx, idx, poly_const_typed(ctx, POLY_FLOAT32, 1));
+  /* The two map columns succeed; the final CALL-source allocation fails. */
+  PolyUOp *failed = poly_test_split_kernels(ctx, store, 2);
+  PolyUOp *retry = poly_test_split_kernels(ctx, store, -1);
+  bool ok = failed == NULL && retry && retry->op == POLY_OP_CALL && retry->n_src == 2 &&
+            retry->src[0]->op == POLY_OP_SINK && retry->src[1] == buf;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
 #endif
+
+TEST(uop, decomposition_owner_half_transcendental_execution) {
+  /* Execute the decomposed half graph, not the interpreter's native SIN/
+   * LOG2. The graph tests separately require the pinned exact topology. */
+  PolyOps ops[] = {POLY_OP_LOG2, POLY_OP_SIN};
+  uint16_t inputs[][5] = {
+      {0x3400, 0x3800, 0x3c00, 0x4000, 0x4400}, {0x0000, 0x3c00, 0xbc00, 0x5000, 0x6400}};
+  double expected[][5] = {
+      {-2, -1, 0, 1, 2},
+      {0, 0.8414709848078965, -0.8414709848078965, 0.5514266812416906, -0.15853338004399595}};
+  bool ok = true;
+  for (int op = 0; op < 2; op++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyUOp *in = poly_test_uop_param(ctx, POLY_FLOAT16, 1, 1, POLY_ADDR_GLOBAL);
+    PolyUOp *out = poly_test_uop_param(ctx, POLY_FLOAT32, 1, 0, POLY_ADDR_GLOBAL);
+    PolyUOp *zero = poly_const_int(ctx, 0);
+    PolyUOp *addr = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT16, in, zero, poly_arg_none());
+    PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT16, addr, poly_arg_none());
+    PolyUOp *value = poly_uop1(ctx, ops[op], POLY_FLOAT16, load, poly_arg_none());
+    value = poly_graph_rewrite(ctx, value, poly_get_transcendental_patterns((PolyRendererCaps){0}));
+    PolyUOp *dst = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, out, zero, poly_arg_none());
+    PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, dst, poly_cast(ctx, value, POLY_FLOAT32)));
+    sink = poly_graph_rewrite(ctx, sink, poly_pm_commit_weak());
+    int n = 0;
+    PolyUOp **lin = poly_linearize(ctx, sink, &n);
+    ok &= lin != NULL;
+    for (int i = 0; lin && i < 5; i++) {
+      float result = 123;
+      void *args[] = {&result, &inputs[op][i]};
+      int status = poly_interp_eval(ctx, lin, n, args, 2);
+      if (status || !isfinite(result) || fabs(result - expected[op][i]) > 0.002) {
+        fprintf(
+            stderr, "half %s sample%d: status%d, result%.9g, expected%.9g\n", poly_op_name(ops[op]),
+            i, status, result, expected[op][i]
+        );
+        ok = false;
+      }
+    }
+    free(lin);
+    poly_ctx_destroy(ctx);
+  }
+  ASSERT_TRUE(ok);
+  PASS();
+}
 
 TEST(uop, ranges_partial_reduce_leaves_other_active) {
   PolyCtx *ctx = poly_ctx_new();

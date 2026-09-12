@@ -737,7 +737,7 @@ static PolyUOp *split_store(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) 
                               )
                             : NULL;
   if (body) {
-    PolyUOp **call_src = malloc((size_t)(lctx.map_count + 1) * sizeof(*call_src));
+    PolyUOp **call_src = kernel_split_alloc((size_t)(lctx.map_count + 1) * sizeof(*call_src));
     if (call_src) {
       call_src[0] = body;
       for (int i = 0; i < lctx.map_count; i++)
@@ -749,6 +749,9 @@ static PolyUOp *split_store(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) 
 
   free(lctx.map_values);
   free(lctx.map_keys);
+  /* Once a closed STORE qualifies, failure is not a matcher no-op. Python
+   * raises during body/CALL construction; C must reject the whole pass. */
+  if (!ret && split_ctx) split_ctx->failed = true;
   return ret;
 }
 
@@ -761,6 +764,17 @@ static PolyPatternMatcher *poly_split_kernels(void) {
   pm = poly_pm_thread_cache(poly_pm_new(rules, 1));
   return pm;
 }
+
+#ifdef POLY_TESTING
+PolyUOp *poly_test_split_kernels(PolyCtx *ctx, PolyUOp *root, int fail_after) {
+  PolySplitKernelsContext split_ctx = {0};
+  kernel_split_fail_after = fail_after;
+  PolyUOp *ret =
+      poly_graph_rewrite_ctx_ex2(ctx, root, poly_split_kernels(), &split_ctx, true, false);
+  kernel_split_fail_after = -1;
+  return split_ctx.failed ? NULL : ret;
+}
+#endif
 
 static bool shrink_has_zero_offset(PolyUOp *shrink) {
   if (!shrink || shrink->op != POLY_OP_SHRINK) return false;
