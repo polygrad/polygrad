@@ -3469,8 +3469,10 @@ static int poly_exec_linear_copy(
     PolyBuffer *src = args[1].items[lane];
     if (!dst || !src || poly_buffer_is_multi(dst) || poly_buffer_is_multi(src) ||
         poly_buffer_handle_ensure_allocated(ctx, dst) != 0 ||
-        poly_buffer_handle_ensure_allocated(ctx, src) != 0 || !src->valid)
+        poly_buffer_handle_ensure_allocated(ctx, src) != 0)
       return -1;
+    /* exec_copy accepts Tensor.empty storage. Allocation restores any current
+     * mirror; valid is coherence metadata, not a defined-byte requirement. */
     bool timing = update_stats && ctx->stats_suppression_depth == 0 && poly_debug_at_least(2);
     double start = timing ? poly_now_ms() : 0.0;
     if (poly_buffer_copy(dst, src) != 0) return -1;
@@ -3904,8 +3906,8 @@ static int poly_exec_linear_graph(
       PolyBuffer *dst = item->resolved[0].items[0];
       PolyBuffer *src = item->resolved[1].items[0];
       if (poly_buffer_handle_ensure_allocated(ctx, dst) != 0 ||
-          poly_buffer_handle_ensure_allocated(ctx, src) != 0 || !src->valid || !dst->ptr ||
-          !src->ptr || dst->nbytes != src->nbytes)
+          poly_buffer_handle_ensure_allocated(ctx, src) != 0 || !dst->ptr || !src->ptr ||
+          dst->nbytes != src->nbytes)
         goto fail_prepared;
       specs[node].kind = POLY_CUDA_GRAPH_COPY;
       specs[node].value.copy.dst = dst->ptr;
@@ -4082,10 +4084,23 @@ static int run_linear_impl(
     }
 
     bool ok = true;
+    /* exec_kernel resolves every PARAM slot, but only ProgramInfo.globals
+     * materialize storage. Eliminated CALL arguments must not allocate. */
     for (int i = 0; i < n_args; i++) {
-      PolyUOp *arg =
+      resolved[i].uop =
           poly_resolve_linear_param(ctx, poly_call_buffer_arg(call, i), input_uops, n_input_uops);
-      if (!arg || poly_resolve_linear_arg(ctx, arg, ins[i], &resolved[i]) != 0) {
+      if (!resolved[i].uop) {
+        ok = false;
+        break;
+      }
+    }
+    const PolyProgramInfo *info = body->op == POLY_OP_PROGRAM ? poly_program_info(ctx, body) : NULL;
+    int n_buffers = info ? info->n_globals : n_args;
+    for (int slot = 0; ok && slot < n_buffers; slot++) {
+      int i = info ? info->globals[slot] : slot;
+      if (resolved[i].items) continue;
+      PolyUOp *arg = resolved[i].uop;
+      if (poly_resolve_linear_arg(ctx, arg, ins[i], &resolved[i]) != 0) {
         if (debug)
           fprintf(
               stderr, "[polygrad:run_linear] call=%d arg=%d resolve failed op=%s read=%d\n",

@@ -111,12 +111,17 @@ build/test_bigint.js: $(WASM_SRC) test/test_main.c test/test_bigint.c test/test_
 # Exercise the shared runner ABI inside wasm32, not just emitted kernel bytes.
 .PHONY: test-runtime-wasm
 test-runtime-wasm: build/test_schedule_runtime.js
+	@set -e; for case in allocation_alignment_and_growth overflow_preserves_allocation_state alloc_and_destroy large_alloc reset; do \
+		$(SAN_RUN) $(NODE) $< --require-no-skips arena.$$case; \
+	done
 	$(SAN_RUN) $(NODE) $< --require-no-skips schedule_runtime.beam_time_call_reads_scalar_values
+	$(SAN_RUN) $(NODE) $< --require-no-skips schedule_runtime.runtime_allocates_only_program_globals
+	$(SAN_RUN) $(NODE) $< --require-no-skips schedule_runtime.runtime_copy_accepts_empty_storage
 
-build/test_schedule_runtime.js: $(WASM_SRC) test/test_main.c test/test_schedule_runtime.c test/test_harness.h $(PROJECT_HEADERS) Makefile
+build/test_schedule_runtime.js: $(WASM_SRC) test/test_main.c test/test_schedule_runtime.c test/test_uop.c test/test_harness.h $(PROJECT_HEADERS) Makefile
 	@mkdir -p build
 	EMSDK_PYTHON=$(EMSDK_PYTHON) $(EMCC) $(EMCC_CFLAGS_COMMON) -O1 -g \
-		-fsanitize=address,undefined -s ASSERTIONS=1 -s ALLOW_MEMORY_GROWTH=1 \
+		-fsanitize=address,undefined -fno-sanitize-recover=all -s ASSERTIONS=1 -s ALLOW_MEMORY_GROWTH=1 \
 		-s WASM_ASYNC_COMPILATION=0 -s ENVIRONMENT=node -s EXIT_RUNTIME=1 \
 		-o $@ $(filter %.c,$^)
 

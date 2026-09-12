@@ -179,6 +179,100 @@ TEST(schedule_runtime, compiler_sink_uses_kernel_info) {
   PASS();
 }
 
+static PolyUOp *runtime_test_graph(PolyCtx *ctx, PolyUOp *linear) {
+  PolyUOp *function =
+      poly_uop1(ctx, POLY_OP_CUSTOM_FUNCTION, POLY_VOID, linear, poly_arg_str("graph"));
+  PolyUOp *call = poly_uop1(ctx, POLY_OP_CALL, POLY_VOID, function, poly_arg_none());
+  return poly_uop1(ctx, POLY_OP_LINEAR, POLY_VOID, call, poly_arg_none());
+}
+
+static bool runtime_allocates_only_program_globals(PolyDevice device) {
+  /* exec_kernel resolves CALL arguments, but only ProgramInfo.globals own
+   * runtime allocations. An eliminated argument remains in the CALL. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *out = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, device);
+  PolyUOp *unused = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, device);
+  PolyUOp *param = poly_test_program_param(ctx, POLY_FLOAT32, 1, 0);
+  PolyUOp *zero = poly_const_int(ctx, 0);
+  PolyUOp *store = poly_uop2(
+      ctx, POLY_OP_STORE, POLY_VOID, poly_uop_index(ctx, param, &zero, 1),
+      poly_const_float(ctx, 7.0), poly_arg_none()
+  );
+  PolyUOp *sink = poly_test_kernel_sink(ctx, &store, 1, "unused_arg");
+  PolyUOp *sources[] = {sink, out, unused};
+  PolyUOp *call = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, sources, 3, poly_arg_none());
+  PolyUOp *linear = poly_compile_linear(
+      ctx, poly_uop1(ctx, POLY_OP_LINEAR, POLY_VOID, call, poly_arg_none()), -1
+  );
+  if (!linear) {
+    poly_ctx_destroy(ctx);
+    return false;
+  }
+  const PolyProgramInfo *info = poly_program_info(ctx, linear->src[0]->src[0]);
+  bool ok = info && info->n_globals == 1 && info->globals[0] == 0 &&
+            poly_call_n_buffer_args(linear->src[0]) == 2;
+  for (int replay = 0; replay < 2; replay++) {
+    float got = 0;
+    ok &= poly_run_linear(ctx, linear, NULL, 0, NULL, 0, true, true, true) == 0;
+    ok &= poly_buffer_read(ctx, out, &got, sizeof(got)) == 0 && got == 7.0f;
+    PolyBuffer *handle = poly_buffer_get(ctx, unused);
+    ok &= !handle || !handle->ptr;
+  }
+  /* Unused does not mean an invalid lexical PARAM slot may be ignored. */
+  PolyUOp *bad = poly_test_program_param(ctx, POLY_FLOAT32, 1, 7);
+  PolyUOp *bad_sources[] = {linear->src[0]->src[0], out, bad};
+  PolyUOp *bad_call = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, bad_sources, 3, poly_arg_none());
+  PolyUOp *bad_linear = poly_uop1(ctx, POLY_OP_LINEAR, POLY_VOID, bad_call, poly_arg_none());
+  ok &= poly_run_linear(ctx, bad_linear, NULL, 0, NULL, 0, false, true, true) == -1;
+  poly_ctx_destroy(ctx);
+  return ok;
+}
+
+TEST(schedule_runtime, runtime_allocates_only_program_globals) {
+  ASSERT_TRUE(runtime_allocates_only_program_globals(POLY_DEVICE_AUTO));
+  PASS();
+}
+
+static bool runtime_copy_accepts_empty_storage(PolyDevice device, bool graph) {
+  /* COPY preserves unspecified empty-storage bytes, not an initialization
+   * promise. Do not read them as values or require a particular bit pattern. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *out = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, device);
+  PolyUOp *in = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, device);
+  PolyUOp *copy = poly_uop1(
+      ctx, POLY_OP_COPY, POLY_FLOAT32, in,
+      poly_arg_str(poly_uop_device_uop_cached(ctx, out, NULL)->arg.str)
+  );
+  if (!copy) {
+    poly_ctx_destroy(ctx);
+    return false;
+  }
+  PolyUOp *sources[] = {copy, out, in};
+  PolyUOp *call = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, sources, 3, poly_arg_none());
+  PolyUOp *linear = poly_uop1(ctx, POLY_OP_LINEAR, POLY_VOID, call, poly_arg_none());
+  if (graph) linear = runtime_test_graph(ctx, linear);
+  int rc = poly_run_linear(ctx, linear, NULL, 0, NULL, 0, true, true, true);
+  PolyBuffer *dst = poly_buffer_get(ctx, out);
+  PolyBuffer *src = poly_buffer_get(ctx, in);
+  bool allocated = dst && dst->ptr && src && src->ptr;
+  if (!rc) rc = poly_run_linear(ctx, linear, NULL, 0, NULL, 0, true, true, true);
+  poly_ctx_destroy(ctx);
+  if (rc) fprintf(stderr, "empty COPY device=%d graph=%d returned %d\n", device, graph, rc);
+  return rc == 0 && allocated;
+}
+
+TEST(schedule_runtime, runtime_copy_accepts_empty_storage) {
+  ASSERT_TRUE(runtime_copy_accepts_empty_storage(POLY_DEVICE_AUTO, false));
+  PASS();
+}
+
+#ifdef POLY_HAS_CUDA
+TEST_BACKEND(cuda, runtime_graph_copy_accepts_empty_storage) {
+  ASSERT_TRUE(runtime_copy_accepts_empty_storage(POLY_DEVICE_CUDA, true));
+  PASS();
+}
+#endif
+
 TEST(schedule_runtime, compile_linear_replaces_compute_body_with_program) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);

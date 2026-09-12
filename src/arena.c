@@ -13,6 +13,7 @@
 #define ARENA_DEFAULT_CAP (64 * 1024) /* 64 KB blocks */
 
 static PolyArenaBlock *block_new(size_t cap) {
+  if (cap > SIZE_MAX - sizeof(PolyArenaBlock)) return NULL;
   PolyArenaBlock *b = malloc(sizeof(PolyArenaBlock) + cap);
   if (!b) return NULL;
   b->next = NULL;
@@ -36,24 +37,30 @@ PolyArena *poly_arena_new(size_t initial_cap) {
 }
 
 void *poly_arena_alloc(PolyArena *a, size_t size, size_t align) {
+  if (!a || !a->head || size > SIZE_MAX - a->total_used) return NULL;
   if (align == 0) align = 8;
+  if ((align & (align - 1)) != 0) return NULL;
   PolyArenaBlock *b = a->head;
 
-  /* align the current offset */
-  size_t offset = (b->used + align - 1) & ~(align - 1);
+  /* Align the address, not the offset: the flexible payload starts after
+   * three machine words, so it is not even 8-byte aligned on wasm32. */
+  size_t padding = (-(uintptr_t)(b->data + b->used)) & (align - 1);
 
-  if (offset + size > b->cap) {
-    /* need a new block — at least big enough for this allocation */
-    size_t new_cap = b->cap * 2;
-    if (new_cap < size + align) new_cap = size + align;
+  if (padding > b->cap - b->used || size > b->cap - b->used - padding) {
+    size_t limit = SIZE_MAX - sizeof(PolyArenaBlock);
+    if (align - 1 > limit || size > limit - (align - 1)) return NULL;
+    size_t needed = size + align - 1;
+    size_t new_cap = b->cap <= limit / 2 ? b->cap * 2 : limit;
+    if (new_cap < needed) new_cap = needed;
     PolyArenaBlock *nb = block_new(new_cap);
     if (!nb) return NULL;
     nb->next = b;
     a->head = nb;
     b = nb;
-    offset = 0;
+    padding = (-(uintptr_t)b->data) & (align - 1);
   }
 
+  size_t offset = b->used + padding;
   void *ptr = b->data + offset;
   b->used = offset + size;
   a->total_used += size;

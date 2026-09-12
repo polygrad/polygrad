@@ -2243,6 +2243,39 @@ TEST(uop, print_preserves_reduce_arg) {
 
 /* Arena basics */
 
+TEST(arena, allocation_alignment_and_growth) {
+  PolyArena *a = poly_arena_new(31);
+  bool ok = a != NULL;
+  for (int repeat = 0; ok && repeat < 3; repeat++) {
+    for (size_t align = 1; ok && align <= 64; align *= 2) {
+      void *p = poly_arena_alloc(a, 17, align);
+      ok = p && (uintptr_t)p % align == 0;
+      if (p) memset(p, 0x5a, 17);
+    }
+    poly_arena_reset(a);
+  }
+  if (a) poly_arena_destroy(a);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
+TEST(arena, overflow_preserves_allocation_state) {
+  PolyArena *a = poly_arena_new(64);
+  ASSERT_NOT_NULL(a);
+  PolyArenaMark before = poly_arena_mark(a);
+  bool rejected = poly_arena_alloc(a, SIZE_MAX, 8) == NULL;
+  rejected &= poly_arena_alloc(a, 16, 3) == NULL;
+  PolyArena *oversized = poly_arena_new(SIZE_MAX);
+  rejected &= oversized == NULL;
+  if (oversized) poly_arena_destroy(oversized);
+  PolyArenaMark after = poly_arena_mark(a);
+  bool unchanged = before.head == after.head && before.used == after.used &&
+                   before.total_used == after.total_used;
+  poly_arena_destroy(a);
+  ASSERT_TRUE(rejected && unchanged);
+  PASS();
+}
+
 TEST(arena, alloc_and_destroy) {
   PolyArena *a = poly_arena_new(1024);
   ASSERT_NOT_NULL(a);
