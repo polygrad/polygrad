@@ -1972,6 +1972,20 @@ typedef struct PolyRangeSet {
   int cap;
 } PolyRangeSet;
 
+int poly_range_arg_cmp(PolyArg a, PolyArg b) {
+  int64_t aid = poly_range_axis_id(a), bid = poly_range_axis_id(b);
+  if (aid != bid) return aid < bid ? -1 : 1;
+  int an = poly_range_n_extra(a), bn = poly_range_n_extra(b);
+  int n = an < bn ? an : bn;
+  const int64_t *ae = poly_range_extra(a), *be = poly_range_extra(b);
+  for (int i = 0; i < n; i++) {
+    if (ae[i] != be[i]) return ae[i] < be[i] ? -1 : 1;
+  }
+  if (an != bn) return an < bn ? -1 : 1;
+  PolyAxisType at = poly_range_axis_type(a), bt = poly_range_axis_type(b);
+  return at == bt ? 0 : at < bt ? -1 : 1;
+}
+
 /* These count/bool queries have no recoverable error channel. Match their
  * PolyMap's fatal allocation policy instead of returning a false empty set
  * that can silently remove reduction loops from the compiled graph. */
@@ -2027,7 +2041,8 @@ static void range_set_add(PolyCtx *ctx, PolyRangeSet *s, PolyUOp *r) {
 static void range_set_remove(PolyRangeSet *s, PolyUOp *r) {
   for (int i = 0; i < s->n; i++) {
     if (s->items[i] == r) {
-      s->items[i] = s->items[s->n - 1];
+      /* UOp._ranges removes dictionary keys without reordering survivors. */
+      memmove(s->items + i, s->items + i + 1, (size_t)(s->n - i - 1) * sizeof(*s->items));
       s->n--;
       return;
     }
@@ -2171,6 +2186,8 @@ static PolyRangeSet *compute_ranges_with_ended(
       ok = false;
       break;
     }
+    /* UOp.ranges prepends self to _ranges for RANGE nodes. */
+    if (cur->op == POLY_OP_RANGE) range_set_add(ctx, ret, cur);
     for (int i = 0; i < cur->n_src; i++) {
       const PolyRangeSet *src_ranges = ranges_memo_get(ranges_memo, cur->src[i]);
       if (!src_ranges) {
@@ -2182,7 +2199,6 @@ static PolyRangeSet *compute_ranges_with_ended(
     if (!ok) break;
 
     range_set_subtract(ret, ended);
-    if (cur->op == POLY_OP_RANGE) range_set_add(ctx, ret, cur);
     ranges_memo_set(ranges_memo, cur, ret);
   }
 
@@ -2384,30 +2400,34 @@ int poly_uop_ranges(PolyCtx *ctx, PolyUOp *u, PolyUOp **out, int max_out) {
   return poly_uop_ranges_ex(ctx, u, out, max_out, NULL);
 }
 
-int poly_uop_ranges_ex(PolyCtx *ctx, PolyUOp *u, PolyUOp **out, int max_out, PolyUOpCache *cache) {
-  if (!ctx || !u || !out || max_out <= 0) return 0;
-  if (!cache && u->ranges_cache) {
-    const PolyRangeSet *s = (const PolyRangeSet *)u->ranges_cache;
-    int n_out = s->n < max_out ? s->n : max_out;
-    memcpy(out, s->items, (size_t)n_out * sizeof(PolyUOp *));
-    return n_out;
-  }
+static const PolyRangeSet *uop_ranges_set(PolyCtx *ctx, PolyUOp *u, PolyUOpCache *cache) {
+  if (!ctx || !u) return NULL;
+  if (u->ranges_cache) return u->ranges_cache;
   PolyMap *memo = cache ? cache->ranges : poly_map_new(64);
   PolyMap *ended = cache ? cache->ended : poly_map_new(64);
-  if (!memo) return 0;
-  if (!ended) {
-    if (!cache) poly_map_destroy(memo);
-    return 0;
-  }
+  if (!memo || !ended) range_cache_failed();
   const PolyRangeSet *s = compute_ranges_with_ended(ctx, u, memo, ended);
   if (!s) range_cache_failed();
-  int n_out = s->n < max_out ? s->n : max_out;
-  memcpy(out, s->items, (size_t)n_out * sizeof(PolyUOp *));
   if (!cache) {
     poly_map_destroy(memo);
     poly_map_destroy(ended);
   }
-  return n_out;
+  return s;
+}
+
+PolyUOp *const *poly_uop_ranges_view(PolyCtx *ctx, PolyUOp *u, int *n_out) {
+  if (!n_out) return NULL;
+  const PolyRangeSet *s = uop_ranges_set(ctx, u, NULL);
+  *n_out = s ? s->n : -1;
+  return s ? s->items : NULL;
+}
+
+int poly_uop_ranges_ex(PolyCtx *ctx, PolyUOp *u, PolyUOp **out, int max_out, PolyUOpCache *cache) {
+  if (!out || max_out < 0) return -1;
+  const PolyRangeSet *s = uop_ranges_set(ctx, u, cache);
+  if (!s || s->n > max_out) return -1;
+  memcpy(out, s->items, (size_t)s->n * sizeof(PolyUOp *));
+  return s->n;
 }
 
 /* Pretty-print */

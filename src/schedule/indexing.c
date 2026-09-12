@@ -209,7 +209,7 @@ bool poly_apply_reshape(
   }
   int n_replacements =
       range_cap > 0 ? poly_uop_ranges(ctx, coordinate_sink, original_ranges, range_cap) : 0;
-  bool placeholder_ok = true;
+  bool placeholder_ok = n_replacements >= 0;
   for (int i = 0; i < n_replacements; i++) {
     PolyUOp *range = original_ranges[i];
     if (!range || range->op != POLY_OP_RANGE || range->n_src < 1) {
@@ -1162,23 +1162,6 @@ static bool is_tensor_reduce(PolyUOp *u) {
          u->arg.reduce.num_axes > 0 && u->n_src == 1;
 }
 
-/* C tuple comparison for Tinygrad 2026-08-22/a9069c177a9d
- * schedule/indexing.py:274 (`rr.arg > e.arg`). Polygrad stores the trailing
- * AxisType separately from the integer axis-id/split-path tuple. */
-static int range_arg_cmp(PolyArg a, PolyArg b) {
-  int64_t aid = poly_range_axis_id(a), bid = poly_range_axis_id(b);
-  if (aid != bid) return aid < bid ? -1 : 1;
-  int an = poly_range_n_extra(a), bn = poly_range_n_extra(b);
-  int n = an < bn ? an : bn;
-  const int64_t *ae = poly_range_extra(a), *be = poly_range_extra(b);
-  for (int i = 0; i < n; i++) {
-    if (ae[i] != be[i]) return ae[i] < be[i] ? -1 : 1;
-  }
-  if (an != bn) return an < bn ? -1 : 1;
-  PolyAxisType at = poly_range_axis_type(a), bt = poly_range_axis_type(b);
-  return at == bt ? 0 : at < bt ? -1 : 1;
-}
-
 /* Tinygrad schedule/indexing.py:269-278 keeps an axis under PCONTIG>1 unless
  * one of its active RANGE keys sorts after a propagated ending-range key. */
 static bool pcontig_realizes_ended_axis(
@@ -1189,9 +1172,13 @@ static bool pcontig_realizes_ended_axis(
     int scratch_cap
 ) {
   int n_ranges = poly_uop_ranges(ctx, range, scratch, scratch_cap);
+  /* Propagation creates ranges after the original toposort was captured;
+   * its node count is a scratch size, not a bound on the new range set. */
+  PolyUOp *const *ranges = scratch;
+  if (n_ranges < 0) ranges = poly_uop_ranges_view(ctx, range, &n_ranges);
   for (int i = 0; i < n_ranges; i++)
     for (int j = 0; j < ending->count; j++)
-      if (range_arg_cmp(scratch[i]->arg, ending->items[j]->arg) > 0) return true;
+      if (poly_range_arg_cmp(ranges[i]->arg, ending->items[j]->arg) > 0) return true;
   return false;
 }
 
@@ -1318,8 +1305,9 @@ bool poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
         for (int ai = 0; ai < n_axes; ai++) {
           int axis = axes[ai];
           if (axis < 0 || axis >= cre->n_in) continue;
-          PolyUOp *ranges[POLY_MAX_DIMS];
-          int n_ranges = poly_uop_ranges(ctx, cre->in_rngs[axis], ranges, POLY_MAX_DIMS);
+          int n_ranges = 0;
+          PolyUOp *const *ranges = poly_uop_ranges_view(ctx, cre->in_rngs[axis], &n_ranges);
+          if (!ranges) goto node_fail;
           for (int ri = 0; ri < n_ranges; ri++)
             if (!ending_add(broadcast_ending, ranges[ri])) goto node_fail;
         }
@@ -1595,8 +1583,9 @@ bool poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
       int n_marg = x->n_src == 2 ? poly_uop_as_shape(ctx, x->src[1], marg, POLY_MAX_DIMS) : -1;
       if (mark_prefix && n_marg >= 0 && n_marg <= n_out) {
         for (int i = 0; i < n_marg; i++) {
-          PolyUOp *ranges[POLY_MAX_DIMS];
-          int n_ranges = poly_uop_ranges(ctx, out_rngs[i], ranges, POLY_MAX_DIMS);
+          int n_ranges = 0;
+          PolyUOp *const *ranges = poly_uop_ranges_view(ctx, out_rngs[i], &n_ranges);
+          if (!ranges) goto node_fail;
           for (int j = 0; j < n_ranges; j++)
             if (!ending_add(ending, ranges[j])) goto node_fail;
         }

@@ -1,5 +1,22 @@
 {
   "schema_version": 1,
+  "materialization_review": {
+    "reference": "6f87158d77f66a36d5f8bbe915170b24e2acabe8",
+    "parent": "a4e0ef7",
+    "evidence": "temp/materialization-20260912.jZCnJE/results.md",
+    "correspondence": {
+      "uop_ranges_set / poly_uop_ranges_view / range_set_remove": "UOp._ranges/ranges: complete ordered union/subtraction, RANGE self precedes dependency keys; borrowed existing node cache, not a new owner",
+      "end_store_ranges / bufferize_to_store": "bufferize_to_store: complete sorted RANGE-key union, existing AFTER storage identity; symbolic allocation remains maximum-sized as pinned",
+      "poly_range_arg_cmp": "Python tuple ordering of RANGE.arg; shared by materialization and PCONTIG",
+      "renumber_range": "renumber_range changes only the leading id and tag, preserving split path and all dependency sources",
+      "local_add_buffer_map_setdefault": "C paired storage for LocalAddBufferContext.map: transactional allocation, no partial extraction publication",
+      "poly_limit_bufs": "_limit_bufs substitutes before STAGE construction; status-returning C substitution and explicit existing rank-limit rejection",
+      "l2i_cast_from_long": "l2i float CAST chooses float64 intermediates for float64 destination, preserving weak literals and small-value branch"
+    },
+    "red": "Eleven permanent regressions observed failing before their owning repairs; native and sanitized Wasm controls cover topology, range ordering/capacity, allocation/substitution retry and exact float64 reconstruction.",
+    "review_status": "Reviewed named blocks and all handwritten range-copy query callers; not whole-file decomposition/transcendental or allocation certification.",
+    "limits": "PG-PARITY-031 records the retained rank ceiling. Explicit CONTIGUOUS Opt-tuple transport and multidevice movement remain review/scope items. No historical audit hashes or pending dispositions below are upgraded by this record, and no stage allowance is granted."
+  },
   "indexing_owner_review": {
     "reference": "6f87158d77f66a36d5f8bbe915170b24e2acabe8",
     "parent": "3007527",

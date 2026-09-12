@@ -1709,6 +1709,8 @@ bool poly_no_range(PolyCtx *ctx, PolyUOp *u);
 bool poly_no_range_ex(PolyCtx *ctx, PolyUOp *u, PolyUOpCache *cache);
 bool poly_uop_in_ranges(PolyCtx *ctx, PolyUOp *u, PolyUOp *r);
 bool poly_uop_in_ranges_ex(PolyCtx *ctx, PolyUOp *u, PolyUOp *r, PolyUOpCache *cache);
+/* Copy the complete active-range set; -1 on invalid arguments or insufficient
+ * capacity, without writing any output. Range-cache OOM remains fatal. */
 int poly_uop_ranges(PolyCtx *ctx, PolyUOp *u, PolyUOp **out, int max_out);
 int poly_uop_ranges_ex(PolyCtx *ctx, PolyUOp *u, PolyUOp **out, int max_out, PolyUOpCache *cache);
 

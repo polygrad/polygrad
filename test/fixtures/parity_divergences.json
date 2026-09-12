@@ -814,6 +814,24 @@
         "temp/graph-owner-closeout-20260912.VLB3sF/owner-review.md"
       ],
       "close_when": "Implement the pinned diagnostic provenance contract or explicitly approve its omission for the supported release."
+    },
+    {
+      "id": "PG-PARITY-031",
+      "status": "open_debt",
+      "stages": ["schedule", "shape"],
+      "area": "rank-bounded Tensor and intermediate STAGE shapes",
+      "tinygrad": "Shapes and _limit_bufs STAGE axes use Python tuples without Polygrad's fixed rank ceiling; the pinned probe constructs a twenty-axis STAGE.",
+      "polygrad": "POLY_MAX_DIMS is16. Buffer-limit splitting rejects a replacement needing more than16 STAGE axes. This is distinct from active RANGE count: one flattened coordinate and its materialized END can retain more than16 ranges without truncation.",
+      "rationale": "Preserving complete dependencies does not remove the existing shape representation limit. Explicit rejection is not full parity or an approved release exclusion.",
+      "approval": null,
+      "evidence": [
+        "references/tinygrad_latest/tinygrad/schedule/rangeify.py:_limit_bufs",
+        "src/polygrad.h:POLY_MAX_DIMS",
+        "src/schedule/rangeify.c:poly_limit_bufs",
+        "test/test_uop.c:range_capacity_limit_buffers_rejects_unrepresentable_stage_rank",
+        "temp/materialization-20260912.jZCnJE/probe.py"
+      ],
+      "close_when": "Remove the rank ceiling through its shape and ABI consumers, or explicitly approve the stage-scoped supported-release limit; never truncate the active RANGE set."
     }
   ]
 }

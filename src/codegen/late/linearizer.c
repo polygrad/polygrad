@@ -1226,6 +1226,11 @@ static PolyUOp *do_split_ends(PolyCtx *ctx, PolyUOp *end, const PolyBindings *b)
   }
   int n_ranges = poly_uop_ranges(ctx, range_sink, ranges, n_topo);
   free(range_topo);
+  if (n_ranges < 0) {
+    free(ranges);
+    free(srcs);
+    return NULL;
+  }
   qsort(ranges, (size_t)n_ranges, sizeof(*ranges), cmp_range_arg);
   PolyUOp *ret = end->src[0];
   for (int i = n_ranges - 1; i >= 0; i--) {

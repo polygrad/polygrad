@@ -150,6 +150,12 @@ test-autograd-wasm: build/test_schedule_runtime.js
 test-indexing-wasm: build/test_schedule_runtime.js
 	$(SAN_RUN) $(NODE) $< --require-no-skips indexing_owner
 
+.PHONY: test-materialization-wasm
+test-materialization-wasm: build/test_schedule_runtime.js
+	$(SAN_RUN) $(NODE) $< --require-no-skips range_capacity
+	$(SAN_RUN) $(NODE) $< --require-no-skips extraction_owner
+	$(SAN_RUN) $(NODE) $< --require-no-skips decomposition_owner
+
 build/test_schedule_runtime.js: $(WASM_SRC) test/test_main.c test/test_schedule_runtime.c test/test_uop.c test/test_sym.c test/test_reduce_simplify.c test/test_ir.c test/test_harness.h $(PROJECT_HEADERS) Makefile
 	@mkdir -p build
 	EMSDK_PYTHON=$(EMSDK_PYTHON) $(EMCC) $(EMCC_CFLAGS_COMMON) -DPOLY_TESTING -O1 -g \

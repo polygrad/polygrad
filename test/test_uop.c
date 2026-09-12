@@ -16,6 +16,8 @@
 #include "../src/bigint.h"
 #include "../src/uop/symbolic.h"
 #include "../src/schedule/indexing.h"
+#include "../src/schedule/rangeify.h"
+#include "../src/codegen/decomp/dtype.h"
 #if defined(__linux__) && !defined(__EMSCRIPTEN__)
 #include <unistd.h>
 #include <signal.h>
@@ -3126,6 +3128,264 @@ TEST(uop, ranges_two_ranges_union) {
   poly_ctx_destroy(ctx);
   PASS();
 }
+
+static PolyUOp *capacity_coordinate(PolyCtx *ctx, int first, int count, PolyUOp **ranges) {
+  PolyUOp *idx = NULL;
+  for (int i = 0; i < count; i++) {
+    ranges[i] = poly_uop1(
+        ctx, POLY_OP_RANGE, POLY_WEAKINT, poly_const_int(ctx, 2),
+        poly_arg_range(first + i, POLY_AXIS_WEAK)
+    );
+    idx = idx ? poly_add(ctx, idx, ranges[i]) : ranges[i];
+  }
+  return idx;
+}
+
+TEST(uop, range_capacity_query_is_atomic) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *ranges[20], *out[20];
+  PolyUOp *idx = capacity_coordinate(ctx, 0, 20, ranges);
+  for (int i = 0; i < 20; i++)
+    out[i] = idx;
+  int short_count = poly_uop_ranges(ctx, idx, out, 16);
+  bool untouched = true;
+  for (int i = 0; i < 20; i++)
+    untouched &= out[i] == idx;
+  int full_count = poly_uop_ranges(ctx, idx, out, 20);
+  bool complete = true;
+  for (int i = 0; i < 20; i++)
+    complete &= out[i] == ranges[i];
+  poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(short_count, -1);
+  ASSERT_TRUE(untouched);
+  ASSERT_INT_EQ(full_count, 20);
+  ASSERT_TRUE(complete);
+  PASS();
+}
+
+TEST(uop, range_capacity_ending_preserves_insertion_order) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *ranges[4], *out[4];
+  PolyUOp *idx = capacity_coordinate(ctx, 0, 4, ranges);
+  PolyUOp *end = poly_uop2(ctx, POLY_OP_END, POLY_VOID, idx, ranges[0], poly_arg_none());
+  int count = poly_uop_ranges(ctx, end, out, 4);
+  bool ordered = count == 3;
+  for (int i = 0; ordered && i < 3; i++)
+    ordered &= out[i] == ranges[i + 1];
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ordered);
+  PASS();
+}
+
+TEST(uop, range_capacity_range_precedes_its_dependencies) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *dependency = poly_uop_range(ctx, 2, 0, POLY_AXIS_LOOP);
+  PolyUOp *src[] = {poly_const_int(ctx, 2), dependency};
+  PolyUOp *range =
+      poly_uop(ctx, POLY_OP_RANGE, POLY_WEAKINT, src, 2, poly_arg_range(42, POLY_AXIS_LOOP));
+  PolyUOp *out[2];
+  int count = poly_uop_ranges(ctx, range, out, 2);
+  bool ordered = count == 2 && out[0] == range && out[1] == dependency;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ordered);
+  PASS();
+}
+
+TEST(uop, decomposition_owner_long_to_double_keeps_precision) {
+  const int64_t values[] = {
+      INT64_C(1099511693313), -INT64_C(1099511693313), INT64_C(4294967297), -INT64_C(4294967297)};
+  PolyCtx *ctx = poly_ctx_new();
+  bool exact = true, no_float32 = true;
+  for (int i = 0; i < 4; i++) {
+    PolyUOp *value = poly_uop0(ctx, POLY_OP_CONST, POLY_INT64, poly_arg_int(values[i]));
+    PolyUOp *cast = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT64, value, poly_arg_dtype(POLY_FLOAT64));
+    unsigned char rewrite_ctx = 0;
+    PolyUOp *ret = poly_graph_rewrite_ctx_ex(ctx, cast, poly_pm_long_decomp(), &rewrite_ctx, true);
+    int n = 0;
+    PolyUOp **topo = ret ? poly_toposort_alloc(ctx, ret, &n) : NULL;
+    if (!topo) exact = false;
+    for (int j = 0; j < n; j++)
+      no_float32 &= !poly_dtype_eq(topo[j]->dtype, POLY_FLOAT32);
+    poly_toposort_free(topo);
+    PolyUOp *folded = ret ? poly_graph_rewrite(ctx, ret, poly_symbolic()) : NULL;
+    exact &= folded && folded->op == POLY_OP_CONST && folded->arg.kind == POLY_ARG_FLOAT &&
+             folded->arg.f == (double)values[i];
+  }
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(no_float32);
+  ASSERT_TRUE(exact);
+  PASS();
+}
+
+TEST(uop, range_capacity_materialization_ends_every_range) {
+  /* Pinned bufferize_to_store sorts the complete idx.ranges, independent of
+   * Tensor rank. This is one flattened coordinate containing twenty ranges. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *ranges[20];
+  PolyUOp *idx = capacity_coordinate(ctx, 0, 20, ranges);
+  PolyUOp *value = poly_const_typed(ctx, POLY_FLOAT32, 1);
+  PolyUOp *stage = poly_uop2(
+      ctx, POLY_OP_STAGE, POLY_FLOAT32, value, idx,
+      poly_arg_bufferize_opts("CPU", POLY_ADDR_GLOBAL, false)
+  );
+  int slot = 0;
+  PolyUOp *ret = poly_graph_rewrite_ctx_ex2(ctx, stage, poly_pm_add_buffers(), &slot, true, true);
+  bool complete = ret && ret->op == POLY_OP_AFTER && ret->n_src == 2;
+  PolyUOp *end = complete ? ret->src[1] : NULL;
+  complete &= end && end->op == POLY_OP_END && end->n_src == 21;
+  for (int i = 0; complete && i < 20; i++)
+    complete &= end->src[i + 1] == ranges[i];
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(complete);
+  PASS();
+}
+
+TEST(uop, range_capacity_materialization_merges_every_range) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *ranges[40];
+  PolyUOp *idx = capacity_coordinate(ctx, 0, 20, ranges);
+  PolyUOp *target_idx = capacity_coordinate(ctx, 20, 20, ranges + 20);
+  PolyUOp *buf = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 21, POLY_DEVICE_CPU);
+  PolyUOp *target = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, buf, target_idx, poly_arg_none());
+  PolyUOp *store = poly_store_val(ctx, target, poly_const_typed(ctx, POLY_FLOAT32, 1));
+  PolyUOp *after = poly_uop2(ctx, POLY_OP_AFTER, POLY_FLOAT32, buf, store, poly_arg_none());
+  PolyUOp *stage = poly_uop2(
+      ctx, POLY_OP_STAGE, POLY_FLOAT32, after, idx,
+      poly_arg_bufferize_opts("CPU", POLY_ADDR_GLOBAL, false)
+  );
+  int slot = 0;
+  PolyUOp *ret = poly_graph_rewrite_ctx_ex2(ctx, stage, poly_pm_add_buffers(), &slot, true, true);
+  bool complete = ret && ret->op == POLY_OP_AFTER && ret->n_src == 2 && ret->src[0] == buf;
+  PolyUOp *end = complete ? ret->src[1] : NULL;
+  complete &= end && end->op == POLY_OP_END && end->n_src == 41;
+  for (int i = 0; complete && i < 40; i++)
+    complete &= end->src[i + 1] == ranges[i];
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(complete);
+  PASS();
+}
+
+TEST(uop, range_capacity_materialization_sorts_complete_keys) {
+  PolyCtx *ctx = poly_ctx_new();
+  int64_t extra0 = 0, extra1 = 1;
+  PolyUOp *bound = poly_const_int(ctx, 2);
+  PolyUOp *a = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_WEAKINT, bound, poly_arg_range_ex(3, POLY_AXIS_WEAK, &extra0, 1)
+  );
+  PolyUOp *b = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_WEAKINT, bound, poly_arg_range_ex(3, POLY_AXIS_WEAK, &extra1, 1)
+  );
+  PolyUOp *idx = poly_add(ctx, b, a);
+  PolyUOp *stage = poly_uop2(
+      ctx, POLY_OP_STAGE, POLY_FLOAT32, poly_const_typed(ctx, POLY_FLOAT32, 1), idx,
+      poly_arg_bufferize_opts("CPU", POLY_ADDR_GLOBAL, false)
+  );
+  int slot = 0;
+  PolyUOp *ret = poly_graph_rewrite_ctx_ex2(ctx, stage, poly_pm_add_buffers(), &slot, true, true);
+  bool sorted = ret && ret->op == POLY_OP_AFTER && ret->n_src == 2;
+  PolyUOp *end = sorted ? ret->src[1] : NULL;
+  sorted &= end && end->op == POLY_OP_END && end->n_src == 3;
+  sorted &= end && end->n_src == 3 && end->src[1] == a && end->src[2] == b;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(sorted);
+  PASS();
+}
+
+#ifdef POLY_TESTING
+TEST(uop, extraction_owner_renumber_preserves_range_dependencies) {
+  PolyCtx *ctx = poly_ctx_new();
+  int64_t extra = 7;
+  PolyUOp *dependency = poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_none());
+  PolyUOp *src[] = {poly_const_int(ctx, 2), dependency};
+  PolyUOp *range = poly_uop_tagged_arg(
+      ctx, POLY_OP_RANGE, POLY_WEAKINT, src, 2, poly_arg_range_ex(42, POLY_AXIS_LOOP, &extra, 1),
+      0x5247, poly_arg_none()
+  );
+  PolyUOp *ret = poly_test_kernel_split(ctx, range);
+  bool complete = ret && ret->op == POLY_OP_RANGE && ret->n_src == 2 && ret->src[0] == src[0] &&
+                  ret->src[1] == dependency && ret->tag == 0 && poly_range_axis_id(ret->arg) == 0 &&
+                  poly_range_n_extra(ret->arg) == 1 && poly_range_extra(ret->arg)[0] == 7 &&
+                  poly_range_axis_type(ret->arg) == POLY_AXIS_LOOP;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(complete);
+  PASS();
+}
+
+extern PolyUOp *poly_test_limit_bufs(PolyCtx *ctx, PolyUOp *sink, int fail_after);
+
+TEST(uop, range_capacity_limit_buffers_rejects_unrepresentable_stage_rank) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *ranges[20];
+  PolyUOp *idx = capacity_coordinate(ctx, 0, 20, ranges);
+  PolyUOp *values[32];
+  for (int i = 0; i < 32; i++) {
+    PolyUOp *buf = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 21, POLY_DEVICE_CPU);
+    PolyUOp *param = poly_uop_param(ctx, i, buf);
+    values[i] = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, param, idx, poly_arg_none());
+  }
+  PolyUOp *sum = values[0];
+  for (int i = 1; i < 32; i++)
+    sum = poly_add(ctx, sum, values[i]);
+  PolyUOp *ret = poly_test_limit_bufs(ctx, sum, -1);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ret == NULL);
+  PASS();
+}
+
+TEST(uop, extraction_owner_limit_buffers_substitution_failure) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *r = poly_uop_range(ctx, 2, 0, POLY_AXIS_REDUCE);
+  PolyUOp *sum = NULL;
+  for (int i = 0; i < 32; i++) {
+    PolyUOp *buf = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 2, POLY_DEVICE_CPU);
+    PolyUOp *param = poly_uop_param(ctx, i, buf);
+    PolyUOp *value = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, param, r, poly_arg_none());
+    sum = sum ? poly_add(ctx, sum, value) : value;
+  }
+  poly_test_substitute_fail_after(0);
+  PolyUOp *failed = poly_test_limit_bufs(ctx, sum, -1);
+  poly_test_substitute_fail_after(-1);
+  PolyUOp *retry = poly_test_limit_bufs(ctx, sum, -1);
+  bool ok = failed == NULL && retry != NULL;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
+static bool kernel_split_allocation_failure_retries(void) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *buffers[10];
+  for (int i = 0; i < 10; i++)
+    buffers[i] = poly_test_buffer(ctx, POLY_FLOAT32, 2);
+  PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, buffers, 10, poly_arg_none());
+  bool ok = true;
+  /* Both arrays on initial allocation and on growth must fail cleanly. */
+  for (int fail = 0; fail < 4; fail++) {
+    ok &= poly_test_kernel_split_fail_after(ctx, sink, fail) == NULL;
+    ok &= poly_test_kernel_split(ctx, sink) != NULL;
+  }
+  poly_ctx_destroy(ctx);
+  return ok;
+}
+
+TEST(uop, extraction_owner_buffer_map_failure_is_transactional) {
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
+  pid_t pid = fork();
+  ASSERT_TRUE(pid >= 0);
+  if (pid == 0) {
+    struct rlimit no_core = {0, 0};
+    setrlimit(RLIMIT_CORE, &no_core);
+    _exit(kernel_split_allocation_failure_retries() ? 0 : 1);
+  }
+  int status = 0;
+  ASSERT_INT_EQ(waitpid(pid, &status, 0), pid);
+  ASSERT_TRUE(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+#endif
+  /* Also run in-process with leak detection on green, including wasm32. */
+  ASSERT_TRUE(kernel_split_allocation_failure_retries());
+  PASS();
+}
+#endif
 
 TEST(uop, ranges_partial_reduce_leaves_other_active) {
   PolyCtx *ctx = poly_ctx_new();

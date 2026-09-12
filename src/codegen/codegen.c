@@ -3449,6 +3449,7 @@ static PolyUOp *merge_reduce_ends(PolyCtx *ctx, PolyUOp *sink, const PolyBinding
       e->ranges = reduce_alloc((size_t)n_ranges, sizeof(*e->ranges));
       if (!e->ranges) goto fail;
       e->n_ranges = poly_uop_ranges(ctx, u, e->ranges, n_ranges);
+      if (e->n_ranges < 0) goto fail;
     }
   }
   int n_subs = 0;
@@ -6280,6 +6281,14 @@ static PolyUOp *rule_add_war_barrier(PolyCtx *ctx, PolyUOp *end, const PolyBindi
     PolyUOp *u = topo[i];
     if (!codegen_is_local_store(u)) continue;
     int n_active = poly_uop_ranges(ctx, u, active, n_topo);
+    if (n_active < 0) {
+      free(active);
+      free(loads);
+      free(store_bufs);
+      free(ranges);
+      poly_toposort_free(topo);
+      return NULL;
+    }
     bool inside = false;
     for (int ri = 0; ri < n_ranges && !inside; ri++)
       inside = codegen_ptr_in(active, n_active, ranges[ri]);

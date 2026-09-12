@@ -26,6 +26,12 @@ bool poly_find_bufs(PolyCtx *ctx, PolyUOp *store);
 /* Tinygrad schedule/rangeify.py analogue: build the kernel graph for a sink. */
 PolyUOp *poly_get_kernel_graph(PolyCtx *ctx, PolyUOp *sink);
 
+#ifdef POLY_TESTING
+/* Apply the production kernel-body rewrite without scheduling/execution. */
+PolyUOp *poly_test_kernel_split(PolyCtx *ctx, PolyUOp *root);
+PolyUOp *poly_test_kernel_split_fail_after(PolyCtx *ctx, PolyUOp *root, int count);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

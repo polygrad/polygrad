@@ -10,12 +10,19 @@ extern "C" {
 /* Current tinygrad/uop/ops.py:axis_letters and range_str. */
 char poly_axis_letter(PolyArg arg);
 char *poly_range_str(PolyArg arg);
+/* Compare the complete (axis id, split path, AxisType) range key. */
+int poly_range_arg_cmp(PolyArg a, PolyArg b);
 
 /* UOp.vconst_like: a scalar or flat STACK after movement lowering. */
 PolyUOp *poly_vconst_like(PolyCtx *ctx, PolyUOp *ref, PolyArg val);
 
 /* Heap-backed result of current Tinygrad UOp.split_uop. Caller frees it. */
 PolyUOp **poly_uop_split(PolyUOp *u, PolyOps sep, int *n_out);
+
+/* Complete UOp.ranges in insertion order. Borrowed immutable cache storage:
+ * keep u alive, do not free/sort the array, and do not cross a GC safe point
+ * without retaining u. Empty sets still return a non-NULL array. */
+PolyUOp *const *poly_uop_ranges_view(PolyCtx *ctx, PolyUOp *u, int *n_out);
 
 /* UOp.divides: prove exact divisibility structurally, not by sampled bounds. */
 PolyUOp *poly_uop_divides(PolyCtx *ctx, PolyUOp *u, int64_t factor);

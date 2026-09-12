@@ -94,6 +94,12 @@ These differences exist to make Polygrad useful as an embeddable runtime for
 tools and model packages, while preserving tinygrad-style compiler semantics
 where tinygrad has an equivalent.
 
+One remaining core limit is shape rank: Tensor/intermediate STAGE shapes
+support at most 16 axes (`PG-PARITY-031`). Active loop dependencies are not
+rank-limited: materialization preserves every RANGE, while buffer-limit
+splitting rejects an intermediate shape it cannot represent. This is an open
+parity limitation, not a claim of complete Tinygrad compatibility.
+
 ## Install
 
 Python:

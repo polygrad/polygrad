@@ -82,6 +82,12 @@ static PolyUOp *flatten_range(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b
     }
     n_flat = poly_uop_ranges(ctx, sink, flat, n_topo);
     poly_toposort_free(topo);
+    if (n_flat < 0) {
+      free(flat);
+      free(ordinary);
+      free(backedge);
+      return NULL;
+    }
   }
 
   int n_new = off + n_flat + n_backedge;
@@ -336,6 +342,13 @@ static PolyUOp *mark_gated(PolyCtx *ctx, PolyUOp *idx, const PolyBindings *b) {
     return NULL;
   }
   int n_ranges = poly_uop_ranges(ctx, range_source, ranges, n_topo);
+  if (n_ranges < 0) {
+    range_ctx_fail(state);
+    free(ranges);
+    poly_toposort_free(topo);
+    poly_map_destroy(guards);
+    return NULL;
+  }
   MergeGuardCtx merge = {.state = state};
   poly_map_foreach(guards, merge_guard_bound, &merge);
   for (int i = 0; i < n_ranges; i++)

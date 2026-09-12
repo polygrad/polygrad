@@ -389,10 +389,13 @@ static PolyUOp *l2i_cast_from_long(PolyCtx *ctx, PolyDType target, PolyUOp *a0, 
   );
   PolyUOp *direct = l2i_cast(ctx, a0, target);
   PolyUOp *scale = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKFLOAT, poly_arg_float(4294967296.0));
+  /* l2i uses float64 intermediates for a float64 destination; a float32
+   * reconstruction would discard low bits before the final widening cast. */
+  PolyDType compute = poly_dtype_eq(target, POLY_FLOAT64) ? POLY_FLOAT64 : POLY_FLOAT32;
   PolyUOp *wide = l2i_binary(
-      ctx, POLY_OP_ADD, POLY_FLOAT32,
-      l2i_binary(ctx, POLY_OP_MUL, POLY_FLOAT32, l2i_cast(ctx, a1, POLY_FLOAT32), scale),
-      l2i_cast(ctx, l2i_bitcast(ctx, a0, POLY_UINT32), POLY_FLOAT32)
+      ctx, POLY_OP_ADD, compute,
+      l2i_binary(ctx, POLY_OP_MUL, compute, l2i_cast(ctx, a1, compute), scale),
+      l2i_cast(ctx, l2i_bitcast(ctx, a0, POLY_UINT32), compute)
   );
   return l2i_where(ctx, target, small, direct, l2i_cast(ctx, wide, target));
 }

@@ -2488,7 +2488,7 @@ static bool where_on_load_can_move(PolyCtx *ctx, PolyUOp *clause, PolyUOp *idx) 
   }
   int n_idx_ranges = poly_uop_ranges(ctx, idx, idx_ranges, n_idx_topo);
   int n_clause_ranges = poly_uop_ranges(ctx, clause, clause_ranges, n_clause_topo);
-  bool can_move = true;
+  bool can_move = n_idx_ranges >= 0 && n_clause_ranges >= 0;
   for (int i = 0; i < n_clause_ranges; i++) {
     if (!uop_in_list(clause_ranges[i], idx_ranges, n_idx_ranges)) {
       can_move = false;
@@ -2918,7 +2918,8 @@ static bool valid_clause_reaches_value_range(PolyCtx *ctx, PolyUOp *clause, Poly
   PolyUOp **topo = poly_toposort_alloc(ctx, clause, &n_topo);
   PolyUOp **ranges = n_topo > 0 ? malloc((size_t)n_topo * sizeof(*ranges)) : NULL;
   int n_ranges = ranges ? poly_uop_ranges(ctx, clause, ranges, n_topo) : 0;
-  bool reaches = false;
+  /* A failed query cannot justify dropping a validity clause. */
+  bool reaches = !ranges || n_ranges < 0;
   for (int i = 0; i < n_ranges && !reaches; i++)
     reaches = poly_uop_in_ranges(ctx, value, ranges[i]);
   free(ranges);
