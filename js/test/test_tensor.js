@@ -113,6 +113,7 @@ async function runTensorTests(pg, createRuntime) {
   await test('device identity rejects unknown targets without AUTO fallback', async () => {
     const source = new Tensor([1, 2, 3])
     const scalar = new Tensor(1)
+    const sourceDevice = source.uop.device
     try {
       for (const device of ['bogus', 'CUDA:1', 'HIP:1']) {
         const requests = [
@@ -132,7 +133,7 @@ async function runTensorTests(pg, createRuntime) {
         }
       }
       assertShape(source.shape, [3])
-      assert(source.uop.device === pg.device.toUpperCase(), 'failed request changed source placement')
+      assert(source.uop.device === sourceDevice, 'failed request changed source placement')
     } finally {
       scalar.dispose()
       source.dispose()
@@ -4750,7 +4751,8 @@ async function runTensorTests(pg, createRuntime) {
     assertClose(await a.lerp(b, new Tensor([0.5, 0.5])).toArray(), [2, 2])
     // PythonProgram truncates the uint8 subtraction before widening; native
     // C instead promotes the subtraction. WGSL follows typed UOps (PG-DIV-008).
-    assertClose(await a.lerp(b, 0.5).toArray(), ['interp', 'wasm', 'webgpu', 'x86'].includes(pg.device) ? [258, 130] : [130, 130])
+    // A Wasm runtime may expose the public CPU alias; it still executes Wasm.
+    assertClose(await a.lerp(b, 0.5).toArray(), pg.core === 'wasm' || ['interp', 'webgpu', 'x86'].includes(pg.device) ? [258, 130] : [130, 130])
   })
 
   await test('pointwise owners: narrow integer casts survive widening', async () => {

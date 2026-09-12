@@ -2344,7 +2344,7 @@ function createWasmCoreFromModule(Module, device) {
     },
 
     setDevice(inst, device) {
-      const id = coreDeviceId(String(device).toLowerCase())
+      const id = ffi.poly_device_by_name(device)
       if (id <= 0) throw new Error(`polygrad: unsupported explicit device '${device}'`)
       const place = () => Module.ccall('poly_model_set_device', 'number',
         ['number', 'number'], [inst, id], { async: true })
@@ -2355,7 +2355,11 @@ function createWasmCoreFromModule(Module, device) {
 
     setDeviceMap(inst, entries) {
       const moduleStrings = entries.map(e => allocString(e.module))
-      const deviceStrings = entries.map(e => allocString(e.device))
+      // Model placement shares Tensor's public CPU -> Wasm alias. Preserve
+      // other exact names (including DISK paths) and reject AUTO in the core.
+      const deviceStrings = entries.map(e => allocString(
+        String(e.device).toLowerCase() === 'cpu' ? coreDeviceName(DEVICE_IDS.cpu) : e.device
+      ))
       const modulePtrs = writePtrArray(moduleStrings)
       const devicePtrs = writePtrArray(deviceStrings)
       const cleanup = () => {

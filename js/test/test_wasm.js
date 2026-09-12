@@ -42,6 +42,35 @@ async function runWasmOwnershipTests() {
     }
   }
 
+  for (const operation of ['place', 'device map']) {
+    await test(`Wasm CPU alias supports Model ${operation}`, async () => {
+      const pg = polygrad.create({ core: 'wasm', device: 'cpu' })
+      try {
+        const x = pg.Tensor.empty([2])
+        const output = x.add(1)
+        const model = await pg.Model.fromTensors({
+          inputs: { x }, outputs: { output },
+          modules: [{ name: 'block', inputs: [x], output }]
+        })
+        try {
+          if (operation === 'place') model.place('CPU')
+          else model.setDeviceMap({ block: 'CPU' })
+          assertClose((await model.forward({ x: new Float32Array([2, 3]) })).output, [3, 4])
+          if (x.uop.device !== 'WASM') throw new Error('CPU alias changed physical graph identity')
+          for (const device of ['AUTO', 'bogus']) {
+            let rejected = false
+            try {
+              if (operation === 'place') model.place(device)
+              else model.setDeviceMap({ block: device })
+            } catch (_) { rejected = true }
+            if (!rejected) throw new Error(`explicit placement accepted ${device}`)
+          }
+          assertClose((await model.forward({ x: new Float32Array([4, 5]) })).output, [5, 6])
+        } finally { model.dispose() }
+      } finally { pg.dispose() }
+    })
+  }
+
   function lifecycleRuntime(core) {
     const rt = Object.create(PolyRuntime.prototype)
     rt._core = core
