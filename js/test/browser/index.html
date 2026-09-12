@@ -322,6 +322,92 @@ async function runWebGpuLifecycleChecks() {
     }
   })
 
+  await test('webgpu rejected Model call does not poison queued work or disposal', async () => {
+    const rt = polygrad.create({ core: 'wasm', device: 'webgpu' })
+    const x = rt.Tensor.empty([2])
+    const model = await rt.Model.fromTensors({ inputs: { x }, outputs: { out: x.add(1) } })
+    try {
+      // Both calls are admitted before close; only the invalid entrypoint fails.
+      const bad = model.callAsync('missing', { x: new Float32Array([10, 20]) })
+      const good = model.forwardAsync({ x: new Float32Array([2, 4]) })
+      const settled = Promise.allSettled([bad, good])
+      const closing = rt.dispose()
+      const [failed, completed] = await settled
+      await closing
+      if (failed.status !== 'rejected' || !/call\('missing'\) failed/.test(String(failed.reason))) {
+        throw new Error('invalid entrypoint did not reject with its own error')
+      }
+      if (completed.status !== 'fulfilled' || completed.value.out.join(',') !== '3,5') {
+        throw new Error('failed call poisoned the following admitted forward')
+      }
+      if (rt._activeAsync !== 0 || model._activeAsync !== 0 || rt._core !== null) {
+        throw new Error('failed call retained an async lease or Runtime core')
+      }
+    } finally {
+      await rt.dispose()
+    }
+  })
+
+  await test('webgpu rejected buffer write preserves state and releases queued leases', async () => {
+    const rt = polygrad.create({ core: 'wasm', device: 'webgpu', logical: 'always' })
+    const x = rt.Tensor.empty([2])
+    const w = new rt.Tensor(new Float32Array([2, 3]))
+    const model = await rt.Model.fromTensors({ inputs: { x }, params: { w }, outputs: { out: x.mul(w) } })
+    try {
+      const bad = model.writeBufferAsync('w', new Float32Array([99]))
+      const pendingRead = model.readBufferAsync('w')
+      const [failed, read] = await Promise.allSettled([bad, pendingRead])
+      if (failed.status !== 'rejected' || !/exact storage dtype and extent/.test(String(failed.reason))) {
+        throw new Error('wrong-sized write did not reject with its storage validation error')
+      }
+      if (read.status !== 'fulfilled' || read.value.join(',') !== '2,3') {
+        throw new Error('rejected write changed model state or poisoned readback')
+      }
+      await model.writeBufferAsync('w', new Float32Array([4, 5]))
+      const output = await model.forwardAsync({ x: new Float32Array([2, 3]) })
+      if (output.out.join(',') !== '8,15') throw new Error('write did not recover after rejection')
+      await model.dispose()
+      if (rt._activeAsync !== 0 || model._activeAsync !== 0) {
+        throw new Error('rejected write retained an async lease')
+      }
+    } finally {
+      await rt.dispose()
+    }
+  })
+
+  await test('webgpu rejected JIT callback drains before Runtime disposal', async () => {
+    const rt = polygrad.create({ core: 'wasm', device: 'webgpu' })
+    const sentinel = new Error('intentional authoring failure')
+    let entered
+    let release
+    const started = new Promise(resolve => { entered = resolve })
+    const gate = new Promise(resolve => { release = resolve })
+    const f = rt.jitAsync(async x => {
+      await x.realizeAsync()
+      entered()
+      await gate
+      throw sentinel
+    })
+    try {
+      const pending = f(new rt.Tensor([1, 2, 3]))
+      const settled = Promise.allSettled([pending])
+      await Promise.race([started, pending])
+      const closing = rt.dispose()
+      release()
+      const [failed] = await settled
+      await closing
+      if (failed.status !== 'rejected' || failed.reason !== sentinel) {
+        throw new Error('JIT did not preserve the admitted callback failure')
+      }
+      if (rt._activeAsync !== 0 || rt._core !== null) {
+        throw new Error('failed JIT retained an async lease or Runtime core')
+      }
+    } finally {
+      release()
+      await rt.dispose()
+    }
+  })
+
   await test('webgpu bound program imports into a cold runtime', async () => {
     const sourceRt = polygrad.create({ core: 'wasm', device: 'webgpu' })
     const targetRt = polygrad.create({ core: 'wasm', device: 'webgpu' })

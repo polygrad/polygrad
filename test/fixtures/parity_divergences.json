@@ -832,6 +832,24 @@
         "temp/materialization-20260912.jZCnJE/probe.py"
       ],
       "close_when": "Remove the rank ceiling through its shape and ABI consumers, or explicitly approve the stage-scoped supported-release limit; never truncate the active RANGE set."
+    },
+    {
+      "id": "PG-PARITY-032",
+      "status": "open_debt",
+      "stages": ["ownership", "schedule"],
+      "area": "schedule-cache key ownership",
+      "tinygrad": "lower_sink_to_linear indexes schedule_cache by function.key bytes; the cache does not retain the source SINK as its key.",
+      "polygrad": "The context-local schedule cache uses a retained SINK pointer key and retains its LINEAR value. The source closure can keep storage until context teardown even after frontend owners retire.",
+      "rationale": "This is a cache lifetime difference, not a demonstrated numerical mismatch. The September12 HLB diagnostic attributes 593,152 CUDA bytes to the schedule cache after releasing worker owners and other caches; no leak beyond context lifetime is established. The separate 18,352,660-byte post-function delta disappears at collection and is not this debt.",
+      "approval": null,
+      "evidence": [
+        "references/tinygrad_latest/tinygrad/schedule/__init__.py:lower_sink_to_linear",
+        "references/tinygrad_latest/tinygrad/uop/ops.py:UOp.key",
+        "src/schedule/schedule.c:lower_sink_to_linear",
+        "temp/stabilization-20260912.9cb0eR/tinygrad-cache-probe.log",
+        "temp/stabilization-20260912.9cb0eR/residency-polygrad-cache.log"
+      ],
+      "close_when": "Use a complete immutable content key without retaining the source SINK, with collision-safe lookup, lifetime and reuse regressions; or explicitly approve the measured context-lifetime difference. Do not replace structural identity with an unchecked 32-bit hash."
     }
   ]
 }

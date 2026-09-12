@@ -738,7 +738,6 @@
       "tinygrad_paths": [
         "tinygrad/mixin/reduce.py",
         "tinygrad/mixin/gradient.py",
-        "tinygrad/gradient.py",
         "tinygrad/tensor.py",
         "tinygrad/uop/ops.py"
       ],

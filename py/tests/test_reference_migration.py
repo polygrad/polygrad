@@ -132,6 +132,14 @@ def test_configured_audits_are_durable_and_closed_waves_have_evidence():
                     assert hashlib.sha256(review["text"].encode()).hexdigest() == review["sha256"]
 
 
+def test_configured_source_paths_exist_in_at_least_one_reference():
+    config = json.loads((migration.ROOT / "scripts/reference_migration_waves.json").read_text())
+    for wave in config["waves"]:
+        for path in wave["tinygrad_paths"]:
+            assert any((migration.ROOT / config[ref] / path).exists()
+                       for ref in ("baseline_ref", "target_ref")), (wave["id"], path)
+
+
 def test_source_review_routing_keeps_dependencies_in_both_inventories():
     config = json.loads((migration.ROOT / "scripts/reference_migration_waves.json").read_text())
     waves = {w["id"]: w for w in config["waves"]}

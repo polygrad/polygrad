@@ -31,22 +31,6 @@ _uintptr = ctypes.c_size_t
 class PolyVarBinding(ctypes.Structure):
     _fields_ = [('var', _ptr), ('value', ctypes.c_int64)]
 
-class PolyBuffer(ctypes.Structure):
-    _fields_ = [
-        ('ptr', _ptr),
-        ('nbytes', ctypes.c_size_t),
-        ('device', ctypes.c_int),    # PolyDevice
-        ('owned', ctypes.c_bool),
-        ('allocator', _ptr),
-        ('src', _ptr),
-        ('valid', ctypes.c_bool),
-        ('frontend_release', _ptr),
-        ('memory_accounted', ctypes.c_bool),
-        ('memory_device', ctypes.c_int),
-        ('device_uop', _ptr),
-        ('memory_device_uop', _ptr),
-    ]
-
 class PolyIOBinding(ctypes.Structure):
     _fields_ = [('name', ctypes.c_char_p),
                 ('data', ctypes.c_void_p),

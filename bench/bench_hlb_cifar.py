@@ -26,11 +26,11 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKER = ROOT / "bench" / "hlb_cifar_worker.py"
-TINYGRAD = ROOT / "references" / "tinygrad_20260822"
+TINYGRAD = ROOT / "references" / "tinygrad_latest"
 DEFAULT_PYTHON = ROOT / "references" / ".venv-tinygrad-py311" / "bin" / "python"
 DEFAULT_LIB = ROOT / "build" / "libpolygrad.so"
 RESULT_PREFIX = "HLB_RESULT "
-EXPECTED_TINYGRAD_COMMIT = "a9069c177a9da9cca18593edf55acd2e6073cca6"
+EXPECTED_TINYGRAD_COMMIT = "6f87158d77f66a36d5f8bbe915170b24e2acabe8"
 EXPECTED_HLB_SHA256 = "9d692a09c52219f274c26199a6a1cb0143a1c004e019f5e563a06dd3480363ba"
 MAX_RTOL = 1e-5
 MAX_ATOL = 1e-5

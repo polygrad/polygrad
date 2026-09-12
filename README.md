@@ -100,6 +100,11 @@ rank-limited: materialization preserves every RANGE, while buffer-limit
 splitting rejects an intermediate shape it cannot represent. This is an open
 parity limitation, not a claim of complete Tinygrad compatibility.
 
+Schedule-cache keys currently retain source graphs until their C context is
+destroyed (`PG-PARITY-032`); Tinygrad uses byte keys. Releasing frontend objects
+does not promise immediate cache eviction. This lifetime difference remains
+an open parity debt, not an allowance for graph or numerical mismatches.
+
 ## Install
 
 Python:

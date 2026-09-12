@@ -6,6 +6,12 @@ import subprocess
 from bench import bench_hlb_cifar as hlb
 
 
+def test_hlb_uses_release014_reference_with_unchanged_workload():
+    assert hlb.TINYGRAD == hlb.ROOT / "references" / "tinygrad_latest"
+    assert hlb.EXPECTED_TINYGRAD_COMMIT == "6f87158d77f66a36d5f8bbe915170b24e2acabe8"
+    assert hlb.EXPECTED_HLB_SHA256 == "9d692a09c52219f274c26199a6a1cb0143a1c004e019f5e563a06dd3480363ba"
+
+
 def test_numeric_npz_rejects_matching_nonfinite_values(tmp_path):
     reference = tmp_path / "reference.npz"
     subject = tmp_path / "subject.npz"
