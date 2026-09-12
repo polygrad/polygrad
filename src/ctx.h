@@ -26,6 +26,7 @@ struct PolyCtx {
   PolyMap *schedule_cache;
   PolyMap *to_program_cache;
   PolyMap *runtime_cache;
+  PolyMap *local_size_cache;
   /* Current Tinygrad engine/realize.py:graph_cache. */
   PolyMap *graph_cache;
   size_t runtime_artifact_entries;

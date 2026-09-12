@@ -70,6 +70,7 @@ PolyCtx *poly_ctx_new(void) {
   ctx->schedule_cache = poly_map_new(16);
   ctx->to_program_cache = poly_map_new(16);
   ctx->runtime_cache = poly_map_new(16);
+  ctx->local_size_cache = poly_map_new(16);
   ctx->graph_cache = poly_map_new(8);
   ctx->runtime_artifact_entries = 0;
   ctx->runtime_artifact_live_bytes = 0;
@@ -108,9 +109,9 @@ PolyCtx *poly_ctx_new(void) {
   ctx->active_jit_capture = NULL;
   ctx->name_map = poly_map_new(16);
   if (!ctx->arena || !ctx->scratch || !ctx->cse || !ctx->uop_storage || !ctx->schedule_cache ||
-      !ctx->to_program_cache || !ctx->runtime_cache || !ctx->graph_cache ||
-      !ctx->mem_used_by_device || !ctx->shape_cache || !ctx->buffers || !ctx->retained_uops ||
-      !ctx->rng_states || !ctx->name_map) {
+      !ctx->to_program_cache || !ctx->runtime_cache || !ctx->local_size_cache ||
+      !ctx->graph_cache || !ctx->mem_used_by_device || !ctx->shape_cache || !ctx->buffers ||
+      !ctx->retained_uops || !ctx->rng_states || !ctx->name_map) {
     if (ctx->arena) poly_arena_destroy(ctx->arena);
     if (ctx->scratch) poly_arena_destroy(ctx->scratch);
     if (ctx->cse) poly_map_destroy(ctx->cse);
@@ -118,6 +119,7 @@ PolyCtx *poly_ctx_new(void) {
     if (ctx->schedule_cache) poly_map_destroy(ctx->schedule_cache);
     if (ctx->to_program_cache) poly_map_destroy(ctx->to_program_cache);
     if (ctx->runtime_cache) poly_map_destroy(ctx->runtime_cache);
+    if (ctx->local_size_cache) poly_map_destroy(ctx->local_size_cache);
     if (ctx->graph_cache) poly_map_destroy(ctx->graph_cache);
     if (ctx->mem_used_by_device) poly_map_destroy(ctx->mem_used_by_device);
     if (ctx->shape_cache) poly_map_destroy(ctx->shape_cache);
@@ -157,6 +159,7 @@ void poly_ctx_destroy(PolyCtx *ctx) {
   poly_map_destroy(ctx->schedule_cache);
   poly_map_destroy(ctx->to_program_cache);
   poly_map_destroy(ctx->runtime_cache);
+  poly_map_destroy(ctx->local_size_cache);
   poly_map_destroy(ctx->graph_cache);
   poly_shape_cache_destroy_all(ctx);
   poly_map_destroy(ctx->shape_cache);

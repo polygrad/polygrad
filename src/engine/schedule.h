@@ -39,6 +39,34 @@ typedef struct {
   int n_vars;
 } PolyRunner;
 
+/* args_from_ast scratch storage shared by BEAM and optimize_local_size.
+ * Buffer slots refer to PARAM identities, never the caller's live buffers. */
+typedef struct {
+  void **host;
+  int n_host;
+  PolyBuffer *buffers;
+  int *slots;
+  int count;
+  const PolyAllocator *allocator;
+} PolyTimingBuffers;
+void **poly_args_from_ast(PolyCtx *ctx, PolyUOp *sink, int *n_args);
+bool poly_timing_buffers_init(
+    PolyCtx *ctx,
+    PolyUOp *sink,
+    PolyDevice device,
+    PolyTimingBuffers *raw
+);
+void poly_timing_buffers_free(PolyTimingBuffers *raw);
+double poly_time_program(
+    PolyCtx *ctx,
+    PolyRunner *runner,
+    PolyDevice device,
+    const PolyTimingBuffers *raw,
+    int reps,
+    double early_stop_us,
+    int max_global_size
+);
+
 int poly_estimates_from_uops(
     PolyCtx *ctx,
     PolyUOp **uops,
@@ -63,6 +91,15 @@ PolyUOp *poly_program_from_call(PolyCtx *ctx, PolyUOp *call, const char *name);
 const PolyProgramInfo *poly_program_info(PolyCtx *ctx, PolyUOp *program);
 PolyUOp *poly_program_linear(PolyUOp *program);
 PolyUOp *poly_compile_linear(PolyCtx *ctx, PolyUOp *linear, int beam);
+#ifdef POLY_TESTING
+bool poly_test_optimize_local_size(
+    const int global[3],
+    double (*time)(void *, const int *),
+    void *opaque,
+    int best[3]
+);
+int poly_test_runtime_cache_policy(PolyCtx *ctx, PolyUOp *call, PolyDevice device, bool cache);
+#endif
 
 /* Uncached, waited time_call execution used by codegen/opt/search. The caller
  * owns scratch buffers; prepare/finish balance the compiled runner and roots.

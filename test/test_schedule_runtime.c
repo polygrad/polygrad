@@ -5,6 +5,7 @@
 #include <limits.h>
 
 #include "../src/ctx.h"
+#include "../src/ir.h"
 #include "../src/device.h"
 #include "../src/engine/jit.h"
 #include "../src/engine/realize.h"
@@ -24,6 +25,185 @@ static int execution_owner_probe(void *self, void **args, int n_args) {
   runner->elapsed_us = 1;
   return 0;
 }
+
+typedef struct {
+  int count, seen[65];
+  bool tied, fail;
+} LocalSizeProbe;
+
+static double local_size_probe(void *opaque, const int *local) {
+  LocalSizeProbe *p = opaque;
+  p->count++;
+  if (local[0] <= 64) p->seen[local[0]]++;
+  if (p->fail) return INFINITY;
+  return p->tied || local[0] == 8 ? 1 : 2;
+}
+
+TEST(schedule_runtime, local_size_candidate_minimum_ties_and_failure) {
+  int global[3] = {64, 1, 1}, best[3] = {-1, -1, -1};
+  LocalSizeProbe p = {0};
+  bool ok = poly_test_optimize_local_size(global, local_size_probe, &p, best);
+  ok &= p.count == 14 && best[0] == 8 && best[1] == 1 && best[2] == 1;
+  for (int i = 1; i <= 64; i *= 2)
+    ok &= p.seen[i] == 2;
+  p = (LocalSizeProbe){.tied = true};
+  global[0] = global[1] = 8;
+  ok &= poly_test_optimize_local_size(global, local_size_probe, &p, best);
+  ok &= p.count == 32 && best[0] == 1 && best[1] == 1 && best[2] == 1;
+  p = (LocalSizeProbe){.fail = true};
+  best[0] = best[1] = best[2] = -1;
+  ok &= !poly_test_optimize_local_size(global, local_size_probe, &p, best);
+  ok &= p.count == 32 && best[0] == -1 && best[1] == -1 && best[2] == -1;
+  p = (LocalSizeProbe){0};
+  global[0] = 3;
+  global[1] = 1;
+  ok &= poly_test_optimize_local_size(global, local_size_probe, &p, best);
+  ok &= p.count == 4; /* 3/2 is rejected, never truncated to a one-block launch. */
+  global[0] = 0;
+  ok &= !poly_test_optimize_local_size(global, local_size_probe, &p, best);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
+TEST(schedule_runtime, local_size_skips_fixed_and_symbolic_programs) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDevice devices[] = {
+      POLY_DEVICE_INTERP,
+#ifdef POLY_HAS_CUDA
+      POLY_DEVICE_CUDA,
+#endif
+#ifdef __EMSCRIPTEN__
+      POLY_DEVICE_WEBGPU,
+#endif
+  };
+  PolyUOp *variable =
+      poly_uop_variable(ctx, "n", poly_arg_int(1), poly_arg_int(64), POLY_WEAKINT, 1, false);
+  PolyUOp *sink = poly_test_kernel_sink(ctx, NULL, 0, "local_size_admission");
+  PolyUOp *stages[] = {
+      sink, poly_uop0(ctx, POLY_OP_LINEAR, POLY_VOID, poly_arg_none()),
+      poly_uop0(ctx, POLY_OP_SOURCE, POLY_VOID, poly_arg_str("must not compile or execute"))};
+  bool ok = variable != NULL;
+  for (size_t d = 0; d < sizeof(devices) / sizeof(*devices); d++) {
+    PolyUOp *out = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 64, devices[d]);
+    for (int mode = 0; mode < 4; mode++) {
+      PolyProgramInfo info = {
+          .name = "admission",
+          .target = poly_device_name(devices[d]),
+          .global_size = {64, 1, 1},
+          .local_size = {8, 1, 1},
+          .has_local_size = mode == 0};
+      if (mode == 1) info.global_exprs[0] = variable;
+      if (mode == 2) info.global_exprs[0] = poly_const_float(ctx, 64.5);
+      if (mode == 3) info.global_size[0] = 0;
+      PolyUOp *program =
+          poly_uop(ctx, POLY_OP_PROGRAM, POLY_VOID, stages, 3, poly_arg_program_info(&info));
+      PolyUOp *call = poly_uop2(ctx, POLY_OP_CALL, POLY_VOID, program, out, poly_arg_none());
+      PolyUOp *linear = poly_uop1(ctx, POLY_OP_LINEAR, POLY_VOID, call, poly_arg_none());
+      PolyUOp *compiled = poly_compile_linear(ctx, linear, 0);
+      ok &= mode == 3 && devices[d] != POLY_DEVICE_INTERP ? compiled == NULL : compiled == linear;
+      ok &= poly_map_len(ctx->local_size_cache) == 0 && poly_runtime_cache_len(ctx) == 0;
+    }
+  }
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
+TEST(schedule_runtime, local_size_runtime_cache_read_without_insert) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *out = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_INTERP);
+  PolyUOp *param = poly_test_program_param(ctx, POLY_FLOAT32, 1, 0);
+  PolyUOp *idx = poly_const_int(ctx, 0);
+  PolyUOp *store = poly_uop2(
+      ctx, POLY_OP_STORE, POLY_VOID, poly_uop_index(ctx, param, &idx, 1), poly_const_float(ctx, 7),
+      poly_arg_none()
+  );
+  PolyUOp *sink = poly_test_kernel_sink(ctx, &store, 1, "runtime_cache_policy");
+  PolyUOp *call = poly_uop2(ctx, POLY_OP_CALL, POLY_VOID, sink, out, poly_arg_none());
+  const char *old = getenv("POLY_PCACHE");
+  char *saved = old ? strdup(old) : NULL;
+  setenv("POLY_PCACHE", "1", 1);
+  bool ok = poly_test_runtime_cache_policy(ctx, call, POLY_DEVICE_INTERP, false) == 0;
+  ok &= poly_runtime_cache_len(ctx) == 0;
+  ok &= poly_test_runtime_cache_policy(ctx, call, POLY_DEVICE_INTERP, true) == 0;
+  ok &= poly_runtime_cache_len(ctx) == 1;
+  size_t hits = ctx->runtime_cache_hits;
+  ok &= poly_test_runtime_cache_policy(ctx, call, POLY_DEVICE_INTERP, false) == 0;
+  ok &= poly_runtime_cache_len(ctx) == 1 && ctx->runtime_cache_hits == hits + 1;
+  setenv("POLY_PCACHE", "0", 1);
+  hits = ctx->runtime_cache_hits;
+  ok &= poly_test_runtime_cache_policy(ctx, call, POLY_DEVICE_INTERP, false) == 0;
+  ok &= poly_runtime_cache_len(ctx) == 1 && ctx->runtime_cache_hits == hits;
+  if (saved) {
+    setenv("POLY_PCACHE", saved, 1);
+    free(saved);
+  } else
+    unsetenv("POLY_PCACHE");
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
+#ifdef POLY_HAS_CUDA
+TEST_BACKEND(cuda, local_size_compile_replay_uses_scratch) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *out = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 64, POLY_DEVICE_CUDA);
+  PolyUOp *param = poly_test_program_param(ctx, POLY_FLOAT32, 64, 0);
+  PolyUOp *idx =
+      poly_uop1(ctx, POLY_OP_SPECIAL, POLY_WEAKINT, poly_const_int(ctx, 64), poly_arg_str("idx0"));
+  PolyUOp *store = poly_uop2(
+      ctx, POLY_OP_STORE, POLY_VOID, poly_uop_index(ctx, param, &idx, 1), poly_const_float(ctx, 7),
+      poly_arg_none()
+  );
+  PolyUOp *sink = poly_test_kernel_sink(ctx, &store, 1, "local_size");
+  PolyUOp *call = poly_uop2(ctx, POLY_OP_CALL, POLY_VOID, sink, out, poly_arg_none());
+  PolyUOp *linear = poly_uop1(ctx, POLY_OP_LINEAR, POLY_VOID, call, poly_arg_none());
+  float data[64];
+  for (int i = 0; i < 64; i++)
+    data[i] = -7;
+  bool ok = poly_buffer_write(ctx, out, data, sizeof(data)) == 0;
+  PolyUOp *compiled = poly_compile_linear(ctx, linear, 0);
+  const PolyProgramInfo *info = compiled ? poly_program_info(ctx, compiled->src[0]->src[0]) : NULL;
+  ok &= info && info->has_local_size && info->local_size[0] > 0 &&
+        info->global_size[0] * info->local_size[0] == 64;
+  ok &= poly_map_len(ctx->local_size_cache) == 1 && poly_runtime_cache_len(ctx) == 0;
+  ok &= poly_buffer_read(ctx, out, data, sizeof(data)) == 0;
+  for (int i = 0; i < 64; i++)
+    ok &= data[i] == -7;
+  if (compiled) {
+    ok &= poly_compile_linear(ctx, linear, 0) == compiled;
+    ok &= poly_compile_linear(ctx, compiled, 0) == compiled;
+    ok &= poly_map_len(ctx->local_size_cache) == 1;
+    PolyIrEntrypoint entry = {.name = "run", .sink = compiled};
+    PolyIrSpec spec = {.ctx = ctx, .entrypoints = &entry, .n_entrypoints = 1};
+    int size = 0;
+    uint8_t *bytes = poly_program_graph_export(&spec, &size);
+    PolyIrSpec imported = {0};
+    bool loaded = bytes && poly_program_graph_import(bytes, size, &imported) == 0;
+    ok &= loaded;
+    if (loaded) {
+      PolyUOp *restored = imported.entrypoints[0].sink;
+      const PolyProgramInfo *restored_info =
+          poly_program_info(imported.ctx, restored->src[0]->src[0]);
+      ok &= restored_info && restored_info->has_local_size &&
+            restored_info->local_size[0] == info->local_size[0] &&
+            restored_info->global_size[0] == info->global_size[0];
+      ok &= poly_compile_linear(imported.ctx, restored, 0) == restored;
+      ok &= poly_map_len(imported.ctx->local_size_cache) == 0;
+      poly_ir_spec_free(&imported);
+      poly_ctx_destroy(imported.ctx);
+    }
+    free(bytes);
+    ok &= poly_run_linear(ctx, compiled, NULL, 0, NULL, 0, true, true, true) == 0;
+    ok &= poly_buffer_read(ctx, out, data, sizeof(data)) == 0;
+    for (int i = 0; i < 64; i++)
+      ok &= data[i] == 7;
+  }
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+#endif
 
 TEST(schedule_runtime, execution_owner_launch_admission) {
   PolyCtx *ctx = poly_ctx_new();

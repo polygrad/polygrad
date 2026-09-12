@@ -11,6 +11,7 @@
 #include "bigint.h"
 #include "ctx.h"
 #include "utils.h"
+#include "uop/upat.h"
 #include "placer.h"
 #include "codegen/codegen.h"
 #include "renderer/cstyle.h"
@@ -1533,6 +1534,12 @@ size_t poly_to_program_cache_len(PolyCtx *ctx) {
   return ctx && ctx->to_program_cache ? poly_map_len(ctx->to_program_cache) : 0;
 }
 
+static void poly_local_size_cache_release(const void *key, void *value, void *userdata) {
+  PolyCtx *ctx = userdata;
+  poly_uop_release(ctx, value);
+  poly_uop_release(ctx, (PolyUOp *)key);
+}
+
 void poly_engine_ctx_cleanup(PolyCtx *ctx) {
   /* PolyCtx owns the C maps corresponding to Tinygrad's to_program_cache and
    * runtime_cache; retained LINEAR/PROGRAM UOps own their weak C records. */
@@ -1542,6 +1549,8 @@ void poly_engine_ctx_cleanup(PolyCtx *ctx) {
 #endif
   poly_runtime_cache_clear(ctx);
   poly_to_program_cache_clear(ctx);
+  poly_map_foreach(ctx->local_size_cache, poly_local_size_cache_release, ctx);
+  poly_map_clear(ctx->local_size_cache);
 }
 
 static void *cpu_alloc(size_t nbytes, void *dev_ctx) {
@@ -2013,6 +2022,7 @@ static int poly_lower_compute_call_cached(
     PolyDevice device,
     uint32_t env_stamp,
     PolyRunner *out,
+    bool cache,
     PolyRuntimeCacheEntry **runtime_entry_out
 ) {
   if (runtime_entry_out) *runtime_entry_out = NULL;
@@ -2048,7 +2058,8 @@ static int poly_lower_compute_call_cached(
     PolyRunner lowered = {0};
     if (backend->lower_item(ctx, program, fn_name, &lowered) != 0) return -1;
 
-    if (poly_engine_cache_enabled() && ctx && ctx->runtime_cache) {
+    /* get_runtime(cache=False) reuses hits above, but never publishes a miss. */
+    if (cache && poly_engine_cache_enabled() && ctx && ctx->runtime_cache) {
       entry = calloc(1, sizeof(*entry));
       PolyRuntimeCacheEntry *runtime_entry =
           entry
@@ -2105,6 +2116,204 @@ static int poly_lower_compute_call_cached(
 /* ══════════════════════════════════════════════════════════════════════ */
 /*  Backend implementations (lower_item / execute / free_runner)         */
 /* ══════════════════════════════════════════════════════════════════════ */
+
+static void timing_free_args(void **bufs, int n_params) {
+  if (bufs)
+    for (int i = 0; i < n_params; i++)
+      free(bufs[i]);
+  free(bufs);
+}
+
+void **poly_args_from_ast(PolyCtx *ctx, PolyUOp *sink, int *n_args) {
+  *n_args = 0;
+  /* opt/postrange.py:args_from_ast, adapted to the existing C wrapper's
+   * compact buffer-then-scalar arguments and implicit core_id. */
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n_topo);
+  int n_params = 0;
+  void **bufs = NULL;
+  if (!topo) goto cleanup;
+  for (int i = 0; i < n_topo; i++) {
+    PolyUOp *u = topo[i];
+    if (u->op != POLY_OP_PARAM) continue;
+    if (u->arg.kind != POLY_ARG_PARAM || !u->arg.param) goto cleanup;
+    const char *name = poly_uop_expr(u);
+    if (poly_uop_is_alu_param(u) && name && strcmp(name, "core_id") == 0) continue;
+    topo[n_params++] = u;
+  }
+  for (int i = 1; i < n_params; i++) {
+    PolyUOp *param = topo[i];
+    bool scalar = poly_uop_is_alu_param(param);
+    int j = i;
+    while (j > 0) {
+      bool prior_scalar = poly_uop_is_alu_param(topo[j - 1]);
+      if (prior_scalar < scalar || (prior_scalar == scalar && poly_program_buffer_slot(topo[j - 1]
+                                                              ) <= poly_program_buffer_slot(param)))
+        break;
+      topo[j] = topo[j - 1];
+      j--;
+    }
+    topo[j] = param;
+  }
+  /* search._time_program passes the complete rawbufs list. The rendered
+   * wrapper reads every argument; silently truncating it corrupts memory. */
+  bufs = calloc((size_t)(n_params ? n_params : 1), sizeof(*bufs));
+  if (!bufs) goto cleanup;
+  for (int i = 0; i < n_params; i++) {
+    PolyUOp *param = topo[i];
+    bool scalar = poly_uop_is_alu_param(param);
+    /* The existing native wrapper takes all ALU values through int*, even
+     * when its typed function subsequently converts to another dtype. */
+    int itemsize = scalar ? (int)sizeof(int) : poly_dtype_itemsize(param->dtype);
+    int64_t sz = scalar ? 1 : poly_uop_max_numel(ctx, param);
+    if (sz < 0 || itemsize <= 0 || (uint64_t)sz > SIZE_MAX / (size_t)itemsize) goto cleanup;
+    bufs[i] = calloc((size_t)(sz ? sz : 1), (size_t)itemsize);
+    if (!bufs[i]) goto cleanup;
+    if (scalar) {
+      const PolyParamArg *arg = param->arg.param;
+      int64_t lo = 0, hi = 0;
+      if (!arg->has_minmax || !poly_arg_integer_to_i64(arg->min_val, &lo) ||
+          !poly_arg_integer_to_i64(arg->max_val, &hi) || lo > hi ||
+          (!poly_dtype_is_int(param->dtype) && !poly_dtype_eq(param->dtype, POLY_BOOL)))
+        goto cleanup;
+      /* Python's (lo+hi)//2, without overflowing the C sum. */
+      int64_t value = lo + (int64_t)(((uint64_t)hi - (uint64_t)lo) / 2);
+      if (value < INT_MIN || value > INT_MAX) goto cleanup;
+      *(int *)bufs[i] = (int)value;
+    } else if (poly_dtype_eq(param->dtype, POLY_FLOAT32)) {
+      /* Preserve existing finite f32 timing inputs; other storage is zeroed. */
+      float *fp = bufs[i];
+      for (int64_t j = 0; j < sz; j++)
+        fp[j] = 0.1f + (float)(j % 100) * 0.01f;
+    }
+  }
+  poly_toposort_free(topo);
+
+  *n_args = n_params;
+  return bufs;
+cleanup:
+  poly_toposort_free(topo);
+  timing_free_args(bufs, n_params);
+  return NULL;
+}
+
+void poly_timing_buffers_free(PolyTimingBuffers *raw) {
+  if (raw->buffers && raw->allocator && !raw->allocator->host_addressable)
+    for (int i = 0; i < raw->count; i++)
+      if (raw->buffers[i].ptr) raw->allocator->free(&raw->buffers[i], raw->allocator->dev_ctx);
+  free(raw->buffers);
+  free(raw->slots);
+  timing_free_args(raw->host, raw->n_host);
+  *raw = (PolyTimingBuffers){0};
+}
+
+bool poly_timing_buffers_init(
+    PolyCtx *ctx,
+    PolyUOp *sink,
+    PolyDevice device,
+    PolyTimingBuffers *raw
+) {
+  *raw = (PolyTimingBuffers){0};
+  const PolyBackendDesc *backend = poly_backend_get(device);
+  if (!backend || poly_backend_ensure_open(device) != 0 || !backend->get_allocator) return false;
+  raw->allocator = backend->get_allocator();
+  raw->host = poly_args_from_ast(ctx, sink, &raw->n_host);
+  int n = 0;
+  PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n);
+  if (!raw->host || !raw->allocator || !topo) goto failed;
+  for (int i = 0; i < n; i++)
+    if (topo[i]->op == POLY_OP_PARAM && !poly_uop_is_alu_param(topo[i]))
+      topo[raw->count++] = topo[i];
+  for (int i = 1; i < raw->count; i++) {
+    PolyUOp *param = topo[i];
+    int j = i;
+    while (j && poly_program_buffer_slot(topo[j - 1]) > poly_program_buffer_slot(param)) {
+      topo[j] = topo[j - 1];
+      j--;
+    }
+    topo[j] = param;
+  }
+  if (raw->count > raw->n_host) goto failed;
+  raw->buffers = calloc((size_t)(raw->count ? raw->count : 1), sizeof(*raw->buffers));
+  raw->slots = calloc((size_t)(raw->count ? raw->count : 1), sizeof(*raw->slots));
+  if (!raw->buffers || !raw->slots) goto failed;
+  for (int i = 0; i < raw->count; i++) {
+    int itemsize = poly_dtype_itemsize(topo[i]->dtype);
+    int64_t count = poly_uop_max_numel(ctx, topo[i]);
+    raw->slots[i] = poly_program_buffer_slot(topo[i]);
+    if (raw->slots[i] < 0 || (i && raw->slots[i] == raw->slots[i - 1]) || count < 0 ||
+        itemsize <= 0 || (uint64_t)(count ? count : 1) > SIZE_MAX / (size_t)itemsize)
+      goto failed;
+    size_t nbytes = (size_t)(count ? count : 1) * (size_t)itemsize;
+    raw->buffers[i] = (PolyBuffer
+    ){.ptr = raw->host[i],
+      .nbytes = nbytes,
+      .device = device,
+      .allocator = raw->allocator,
+      .valid = true};
+    if (raw->allocator->host_addressable) continue;
+    raw->buffers[i].ptr = raw->allocator->alloc(nbytes, raw->allocator->dev_ctx);
+    if (!raw->buffers[i].ptr) goto failed;
+    raw->buffers[i].owned = true;
+    PolyBuffer host = {
+        .ptr = raw->host[i], .nbytes = nbytes, .device = POLY_DEVICE_CPU, .valid = true};
+    if (!raw->allocator->copy_in ||
+        raw->allocator->copy_in(&raw->buffers[i], &host, nbytes, raw->allocator->dev_ctx) != 0)
+      goto failed;
+  }
+  poly_toposort_free(topo);
+  return true;
+failed:
+  poly_toposort_free(topo);
+  poly_timing_buffers_free(raw);
+  return false;
+}
+
+double poly_time_program(
+    PolyCtx *ctx,
+    PolyRunner *runner,
+    PolyDevice device,
+    const PolyTimingBuffers *raw,
+    int reps,
+    double early_stop_us,
+    int max_global_size
+) {
+  int n_args = runner->n_params + runner->n_vars;
+  void **args = calloc((size_t)(n_args ? n_args : 1), sizeof(*args));
+  PolyVarBinding *bindings =
+      calloc((size_t)(runner->n_vars ? runner->n_vars : 1), sizeof(*bindings));
+  int *values = calloc((size_t)(runner->n_vars ? runner->n_vars : 1), sizeof(*values));
+  const PolyProgramInfo *info = poly_program_info(ctx, runner->program);
+  double elapsed = INFINITY;
+  if (!args || !bindings || !values || !info) goto cleanup;
+  for (int i = 0; i < runner->n_params; i++) {
+    for (int j = 0; j < raw->count; j++)
+      if (raw->slots[j] == info->globals[i]) {
+        args[i] = raw->buffers[j].ptr;
+        break;
+      }
+    if (!args[i]) goto cleanup;
+  }
+  for (int i = 0; i < runner->n_vars; i++) {
+    PolyUOp *var = info->vars[runner->var_indices[i]];
+    int64_t lo, hi;
+    poly_uop_minmax(ctx, var, &lo, &hi);
+    if (lo > hi) goto cleanup;
+    int64_t value = lo + (int64_t)(((uint64_t)hi - (uint64_t)lo) / 2);
+    if (value < INT_MIN || value > INT_MAX) goto cleanup;
+    values[i] = (int)value;
+    bindings[i] = (PolyVarBinding){.var = var, .value = value};
+    args[runner->n_params + i] = &values[i];
+  }
+  elapsed = poly_time_call(
+      runner, device, args, n_args, bindings, runner->n_vars, reps, early_stop_us, max_global_size
+  );
+cleanup:
+  free(bindings);
+  free(values);
+  free(args);
+  return elapsed;
+}
 
 int poly_time_call_prepare(PolyCtx *ctx, PolyUOp *call, PolyDevice device, PolyRunner *out) {
   if (!ctx || !call || !out) return -1;
@@ -3184,6 +3393,199 @@ static PolyUOp *poly_apply_call_beam(PolyCtx *ctx, PolyUOp *call, int beam) {
   return ret;
 }
 
+/* engine/realize.py:optimize_local_size. Candidate order is shuffled without
+ * consuming the Tensor RNG. Only the timing minimum and lexicographic tie
+ * break affect selection; each member of the candidate product is tried twice. */
+static bool optimize_local_size_candidates(
+    const int global[3],
+    double (*time_candidate)(void *, const int *),
+    void *opaque,
+    int best[3]
+) {
+  int dims[3][11], counts[3] = {0};
+  const int sizes[] = {1, 2, 4, 8, 16, 32, 64, 128, 256, 1024};
+  for (int d = 0; d < 3; d++) {
+    if (global[d] <= 0) return false;
+    dims[d][counts[d]++] = global[d];
+    for (size_t i = 0; i < sizeof(sizes) / sizeof(*sizes); i++)
+      if (sizes[i] < global[d]) dims[d][counts[d]++] = sizes[i];
+  }
+  int(*candidates)[3] = malloc(2 * 11 * 11 * 11 * sizeof(*candidates));
+  if (!candidates) return false;
+  int n = 0;
+  for (int x = 0; x < counts[0]; x++)
+    for (int y = 0; y < counts[1]; y++)
+      for (int z = 0; z < counts[2]; z++) {
+        int a = dims[0][x], b = dims[1][y], c = dims[2][z];
+        if (a > 1024 || b > 1024 / a || c > 1024 / a / b) continue;
+        for (int twice = 0; twice < 2; twice++) {
+          candidates[n][0] = a;
+          candidates[n][1] = b;
+          candidates[n++][2] = c;
+        }
+      }
+  uint32_t random = poly_ptr_hash(opaque) ^ (uint32_t)fmod(poly_now_ms() * 1000, UINT32_MAX);
+  if (!random) random = 1;
+  for (int i = n - 1; i > 0; i--) {
+    random ^= random << 13;
+    random ^= random >> 17;
+    random ^= random << 5;
+    int j = (int)(random % (uint32_t)(i + 1)), tmp[3];
+    memcpy(tmp, candidates[i], sizeof(tmp));
+    memcpy(candidates[i], candidates[j], sizeof(tmp));
+    memcpy(candidates[j], tmp, sizeof(tmp));
+  }
+  double best_time = INFINITY;
+  for (int i = 0; i < n; i++) {
+    int *local = candidates[i];
+    /* Tinygrad lets runtimes reject fractional grid quotients. Our launch ABI
+     * is integer-only: reject, never silently floor or round the grid. */
+    if (global[0] % local[0] || global[1] % local[1] || global[2] % local[2]) continue;
+    double elapsed = time_candidate(opaque, local);
+    if (!isfinite(elapsed)) continue;
+    bool earlier = false;
+    if (elapsed == best_time)
+      for (int d = 0; d < 3; d++) {
+        if (local[d] == best[d]) continue;
+        earlier = local[d] < best[d];
+        break;
+      }
+    if (elapsed < best_time || earlier) {
+      best_time = elapsed;
+      memcpy(best, local, 3 * sizeof(*best));
+    }
+  }
+  free(candidates);
+  return isfinite(best_time);
+}
+
+typedef struct {
+  PolyCtx *ctx;
+  PolyRunner *runner;
+  PolyDevice device;
+  const PolyTimingBuffers *buffers;
+  int global[3];
+} LocalSizeTiming;
+
+static double local_size_time_candidate(void *opaque, const int *local) {
+  LocalSizeTiming *timing = opaque;
+  for (int d = 0; d < 3; d++) {
+    timing->runner->grid[d] = timing->global[d] / local[d];
+    timing->runner->block[d] = local[d];
+    timing->runner->grid_exprs[d] = timing->runner->block_exprs[d] = NULL;
+  }
+  return poly_time_program(
+      timing->ctx, timing->runner, timing->device, timing->buffers, 1, INFINITY, 0
+  );
+}
+
+static PolyUOp *poly_optimize_local_size(
+    PolyCtx *ctx,
+    PolyUOp *call,
+    PolyUOp *program,
+    PolyUOp *device_uop,
+    PolyDevice device
+) {
+  const PolyProgramInfo *info = poly_program_info(ctx, program);
+  /* Renderer.has_local: these are the three local-workgroup backends. WGSL's
+   * valid fixed-workgroup PROGRAMs already carry local_size and skip this pass. */
+  if (!info) return NULL;
+  if (info->has_local_size ||
+      (device != POLY_DEVICE_CUDA && device != POLY_DEVICE_HIP && device != POLY_DEVICE_WEBGPU))
+    return program;
+  int global[3];
+  for (int d = 0; d < 3; d++) {
+    int64_t size = info->global_size[d];
+    if (info->global_exprs[d]) {
+      PolyUOp *value = poly_graph_rewrite(ctx, info->global_exprs[d], poly_symbolic());
+      if (!value) return NULL;
+      if (value->op == POLY_OP_CAST && value->n_src == 1 && poly_dtype_is_int(value->dtype))
+        value = value->src[0];
+      /* all_int admission: a symbolic upper bound is not a fixed launch. */
+      if (value->op != POLY_OP_CONST || !poly_arg_integer_to_i64(value->arg, &size)) return program;
+    }
+    if (size <= 0 || size > INT_MAX) return NULL;
+    global[d] = (int)size;
+  }
+  uint32_t hash = poly_ptr_hash(program);
+  PolyUOp *cached = poly_map_get(ctx->local_size_cache, hash, program, poly_ptr_eq);
+  if (cached) return cached;
+  PolyRunner runner = {0};
+  PolyRuntimeCacheEntry *runtime = NULL;
+  PolyTimingBuffers buffers = {0};
+  PolyUOp *selected = NULL;
+  if (poly_lower_compute_call_cached(
+          ctx, call, device_uop, device, poly_runtime_cache_env_stamp(), &runner, false, &runtime
+      ) != 0)
+    goto cleanup;
+  runner.n_params = info->n_globals;
+  if (poly_bind_runner_vars(ctx, &runner) != 0 ||
+      !poly_timing_buffers_init(ctx, program->src[0], device, &buffers))
+    goto cleanup;
+  LocalSizeTiming timing = {.ctx = ctx, .runner = &runner, .device = device, .buffers = &buffers};
+  memcpy(timing.global, global, sizeof(global));
+  int local[3];
+  if (!optimize_local_size_candidates(global, local_size_time_candidate, &timing, local)) {
+    fprintf(stderr, "polygrad: all optimize_local_size executions failed\n");
+    goto cleanup;
+  }
+  PolyProgramInfo chosen = *info;
+  chosen.has_local_size = true;
+  for (int d = 0; d < 3; d++) {
+    chosen.global_size[d] = global[d] / local[d];
+    chosen.local_size[d] = local[d];
+    chosen.global_exprs[d] = chosen.local_exprs[d] = NULL;
+  }
+  selected = poly_uop_tagged_arg(
+      ctx, program->op, program->dtype, program->src, program->n_src,
+      poly_arg_program_info(&chosen), program->tag, program->tag_arg
+  );
+  /* Own only PROGRAM identities, not CALL arguments or user storage. Publish
+   * after selection succeeds; failed timing must not cache a fallback. */
+  if (!selected || poly_uop_retain(ctx, program) != 0) {
+    selected = NULL;
+    goto cleanup;
+  }
+  if (poly_uop_retain(ctx, selected) != 0) {
+    poly_uop_release(ctx, program);
+    selected = NULL;
+    goto cleanup;
+  }
+  poly_map_set(ctx->local_size_cache, hash, program, selected, poly_ptr_eq);
+  if (poly_map_get(ctx->local_size_cache, hash, program, poly_ptr_eq) != selected) {
+    poly_uop_release(ctx, selected);
+    poly_uop_release(ctx, program);
+    selected = NULL;
+  }
+cleanup:
+  poly_timing_buffers_free(&buffers);
+  poly_runner_cleanup(&runner, device);
+  poly_runtime_cache_entry_release(runtime);
+  return selected;
+}
+
+#ifdef POLY_TESTING
+bool poly_test_optimize_local_size(
+    const int global[3],
+    double (*time)(void *, const int *),
+    void *opaque,
+    int best[3]
+) {
+  return optimize_local_size_candidates(global, time, opaque, best);
+}
+int poly_test_runtime_cache_policy(PolyCtx *ctx, PolyUOp *call, PolyDevice device, bool cache) {
+  PolyRunner runner = {0};
+  PolyRuntimeCacheEntry *entry = NULL;
+  int rc = poly_lower_compute_call_cached(
+      ctx, call, poly_device_uop(ctx, device), device, poly_runtime_cache_env_stamp(), &runner,
+      cache, &entry
+  );
+  poly_runner_cleanup(&runner, device);
+  poly_runtime_cache_entry_release(entry);
+  return rc;
+}
+#endif
+
 /* Current Tinygrad engine/realize.py:compile_linear. beam=-1 selects BEAM. */
 PolyUOp *poly_compile_linear(PolyCtx *ctx, PolyUOp *linear, int beam) {
   if (!ctx || !linear || linear->op != POLY_OP_LINEAR) return NULL;
@@ -3228,6 +3630,22 @@ PolyUOp *poly_compile_linear(PolyCtx *ctx, PolyUOp *linear, int beam) {
     src[0] = program;
     calls[i] = linear_rebuild_preserving_metadata(ctx, call, src);
     free(src);
+    if (calls[i]) {
+      PolyUOp *selected = poly_optimize_local_size(ctx, calls[i], program, device_uop, item_device);
+      if (!selected)
+        calls[i] = NULL;
+      else if (selected != program) {
+        src = malloc((size_t)call->n_src * sizeof(*src));
+        if (!src)
+          calls[i] = NULL;
+        else {
+          memcpy(src, calls[i]->src, (size_t)call->n_src * sizeof(*src));
+          src[0] = selected;
+          calls[i] = linear_rebuild_preserving_metadata(ctx, calls[i], src);
+          free(src);
+        }
+      }
+    }
     if (!calls[i]) {
       ok = false;
       break;
@@ -3595,7 +4013,7 @@ static int poly_exec_linear_program(
     PolyRunner runner = {0};
     PolyRuntimeCacheEntry *runtime_entry = NULL;
     int lower_rc = poly_lower_compute_call_cached(
-        ctx, call, device_uop, device, poly_runtime_cache_env_stamp(), &runner, &runtime_entry
+        ctx, call, device_uop, device, poly_runtime_cache_env_stamp(), &runner, true, &runtime_entry
     );
     if (lower_rc != 0) return -1;
     runner.n_params = info->n_globals;
@@ -3986,10 +4404,11 @@ static int poly_exec_linear_graph(
     PolyRunner *runner = &entry->runners[node];
     if (new_entry) {
       PolyUOp *device_uop = poly_device_uop(ctx, POLY_DEVICE_CUDA);
-      if (!device_uop || poly_lower_compute_call_cached(
-                             ctx, item->call, device_uop, POLY_DEVICE_CUDA,
-                             poly_runtime_cache_env_stamp(), runner, &entry->runtime_entries[node]
-                         ) != 0)
+      if (!device_uop ||
+          poly_lower_compute_call_cached(
+              ctx, item->call, device_uop, POLY_DEVICE_CUDA, poly_runtime_cache_env_stamp(), runner,
+              true, &entry->runtime_entries[node]
+          ) != 0)
         goto fail_prepared;
       runner->n_params = info->n_globals;
       if (poly_bind_runner_vars(ctx, runner) != 0) goto fail_prepared;

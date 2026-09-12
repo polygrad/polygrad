@@ -2553,86 +2553,6 @@ bool poly_test_scheduler_reaches(PolyCtx *ctx, PolyUOp *sink, PolyUOp *index, Po
 }
 #endif
 
-static void beam_free_args(void **bufs, int n_params) {
-  if (bufs)
-    for (int i = 0; i < n_params; i++)
-      free(bufs[i]);
-  free(bufs);
-}
-
-static void **beam_args_from_ast(PolyCtx *ctx, PolyUOp *sink, int *n_args) {
-  *n_args = 0;
-  /* opt/postrange.py:args_from_ast, adapted to the existing C wrapper's
-   * compact buffer-then-scalar arguments and implicit core_id. */
-  int n_topo = 0;
-  PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n_topo);
-  int n_params = 0;
-  void **bufs = NULL;
-  if (!topo) goto cleanup;
-  for (int i = 0; i < n_topo; i++) {
-    PolyUOp *u = topo[i];
-    if (u->op != POLY_OP_PARAM) continue;
-    if (u->arg.kind != POLY_ARG_PARAM || !u->arg.param) goto cleanup;
-    const char *name = poly_uop_expr(u);
-    if (poly_uop_is_alu_param(u) && name && strcmp(name, "core_id") == 0) continue;
-    topo[n_params++] = u;
-  }
-  for (int i = 1; i < n_params; i++) {
-    PolyUOp *param = topo[i];
-    bool scalar = poly_uop_is_alu_param(param);
-    int j = i;
-    while (j > 0) {
-      bool prior_scalar = poly_uop_is_alu_param(topo[j - 1]);
-      if (prior_scalar < scalar || (prior_scalar == scalar && poly_program_buffer_slot(topo[j - 1]
-                                                              ) <= poly_program_buffer_slot(param)))
-        break;
-      topo[j] = topo[j - 1];
-      j--;
-    }
-    topo[j] = param;
-  }
-  /* search._time_program passes the complete rawbufs list. The rendered
-   * wrapper reads every argument; silently truncating it corrupts memory. */
-  bufs = calloc((size_t)(n_params ? n_params : 1), sizeof(*bufs));
-  if (!bufs) goto cleanup;
-  for (int i = 0; i < n_params; i++) {
-    PolyUOp *param = topo[i];
-    bool scalar = poly_uop_is_alu_param(param);
-    /* The existing native wrapper takes all ALU values through int*, even
-     * when its typed function subsequently converts to another dtype. */
-    int itemsize = scalar ? (int)sizeof(int) : poly_dtype_itemsize(param->dtype);
-    int64_t sz = scalar ? 1 : poly_uop_max_numel(ctx, param);
-    if (sz < 0 || itemsize <= 0 || (uint64_t)sz > SIZE_MAX / (size_t)itemsize) goto cleanup;
-    bufs[i] = calloc((size_t)(sz ? sz : 1), (size_t)itemsize);
-    if (!bufs[i]) goto cleanup;
-    if (scalar) {
-      const PolyParamArg *arg = param->arg.param;
-      int64_t lo = 0, hi = 0;
-      if (!arg->has_minmax || !poly_arg_integer_to_i64(arg->min_val, &lo) ||
-          !poly_arg_integer_to_i64(arg->max_val, &hi) || lo > hi ||
-          (!poly_dtype_is_int(param->dtype) && !poly_dtype_eq(param->dtype, POLY_BOOL)))
-        goto cleanup;
-      /* Python's (lo+hi)//2, without overflowing the C sum. */
-      int64_t value = lo + (int64_t)(((uint64_t)hi - (uint64_t)lo) / 2);
-      if (value < INT_MIN || value > INT_MAX) goto cleanup;
-      *(int *)bufs[i] = (int)value;
-    } else if (poly_dtype_eq(param->dtype, POLY_FLOAT32)) {
-      /* Preserve existing finite f32 timing inputs; other storage is zeroed. */
-      float *fp = bufs[i];
-      for (int64_t j = 0; j < sz; j++)
-        fp[j] = 0.1f + (float)(j % 100) * 0.01f;
-    }
-  }
-  poly_toposort_free(topo);
-
-  *n_args = n_params;
-  return bufs;
-cleanup:
-  poly_toposort_free(topo);
-  beam_free_args(bufs, n_params);
-  return NULL;
-}
-
 /* Uncached selected-backend compilation and minimum waited time, in us. */
 #ifdef POLY_TESTING
 static int beam_test_parameter_count;
@@ -2718,143 +2638,31 @@ static int beam_prepare_candidate(
   return rc;
 }
 
-/* args_from_ast/_ensure_buffer_alloc: one raw-buffer set for the whole search.
- * Candidate ProgramInfo may eliminate or reorder globals; bind by original slot. */
-typedef struct {
-  void **host;
-  int n_host;
-  PolyBuffer *buffers;
-  int *slots;
-  int count;
-  const PolyAllocator *allocator;
-} BeamBuffers;
-
-static void beam_buffers_free(BeamBuffers *raw) {
-  if (raw->buffers && raw->allocator && !raw->allocator->host_addressable)
-    for (int i = 0; i < raw->count; i++)
-      if (raw->buffers[i].ptr) raw->allocator->free(&raw->buffers[i], raw->allocator->dev_ctx);
-  free(raw->buffers);
-  free(raw->slots);
-  beam_free_args(raw->host, raw->n_host);
-  *raw = (BeamBuffers){0};
-}
-
-static bool beam_buffers_init(PolyCtx *ctx, PolyUOp *sink, PolyDevice device, BeamBuffers *raw) {
-  *raw = (BeamBuffers){0};
-  const PolyBackendDesc *backend = poly_backend_get(device);
-  if (!backend || poly_backend_ensure_open(device) != 0 || !backend->get_allocator) return false;
-  raw->allocator = backend->get_allocator();
-  raw->host = beam_args_from_ast(ctx, sink, &raw->n_host);
-  int n = 0;
-  PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n);
-  if (!raw->host || !raw->allocator || !topo) goto failed;
-  for (int i = 0; i < n; i++)
-    if (topo[i]->op == POLY_OP_PARAM && !poly_uop_is_alu_param(topo[i]))
-      topo[raw->count++] = topo[i];
-  for (int i = 1; i < raw->count; i++) {
-    PolyUOp *param = topo[i];
-    int j = i;
-    while (j && poly_program_buffer_slot(topo[j - 1]) > poly_program_buffer_slot(param)) {
-      topo[j] = topo[j - 1];
-      j--;
-    }
-    topo[j] = param;
-  }
-  if (raw->count > raw->n_host) goto failed;
-  raw->buffers = calloc((size_t)(raw->count ? raw->count : 1), sizeof(*raw->buffers));
-  raw->slots = calloc((size_t)(raw->count ? raw->count : 1), sizeof(*raw->slots));
-  if (!raw->buffers || !raw->slots) goto failed;
-  for (int i = 0; i < raw->count; i++) {
-    int itemsize = poly_dtype_itemsize(topo[i]->dtype);
-    int64_t count = poly_uop_max_numel(ctx, topo[i]);
-    raw->slots[i] = poly_program_buffer_slot(topo[i]);
-    if (raw->slots[i] < 0 || (i && raw->slots[i] == raw->slots[i - 1]) || count < 0 ||
-        itemsize <= 0 || (uint64_t)(count ? count : 1) > SIZE_MAX / (size_t)itemsize)
-      goto failed;
-    size_t nbytes = (size_t)(count ? count : 1) * (size_t)itemsize;
-    raw->buffers[i] = (PolyBuffer
-    ){.ptr = raw->host[i],
-      .nbytes = nbytes,
-      .device = device,
-      .allocator = raw->allocator,
-      .valid = true};
-    if (raw->allocator->host_addressable) continue;
-    raw->buffers[i].ptr = raw->allocator->alloc(nbytes, raw->allocator->dev_ctx);
-    if (!raw->buffers[i].ptr) goto failed;
-    raw->buffers[i].owned = true;
-    PolyBuffer host = {
-        .ptr = raw->host[i], .nbytes = nbytes, .device = POLY_DEVICE_CPU, .valid = true};
-    if (!raw->allocator->copy_in ||
-        raw->allocator->copy_in(&raw->buffers[i], &host, nbytes, raw->allocator->dev_ctx) != 0)
-      goto failed;
-  }
-  poly_toposort_free(topo);
-  return true;
-failed:
-  poly_toposort_free(topo);
-  beam_buffers_free(raw);
-  return false;
-}
-
 static double beam_time_candidate(
     PolyCtx *ctx,
     PolyRunner *runner,
     PolyDevice device,
-    const BeamBuffers *raw,
+    const PolyTimingBuffers *raw,
     int reps,
     double early_stop_us,
     int max_global_size
 ) {
-  int n_args = runner->n_params + runner->n_vars;
-  void **args = calloc((size_t)(n_args ? n_args : 1), sizeof(*args));
-  PolyVarBinding *bindings =
-      calloc((size_t)(runner->n_vars ? runner->n_vars : 1), sizeof(*bindings));
-  int *values = calloc((size_t)(runner->n_vars ? runner->n_vars : 1), sizeof(*values));
-  const PolyProgramInfo *info = poly_program_info(ctx, runner->program);
-  double elapsed = INFINITY;
-  if (!args || !bindings || !values || !info) goto cleanup;
-  for (int i = 0; i < runner->n_params; i++) {
-    for (int j = 0; j < raw->count; j++)
-      if (raw->slots[j] == info->globals[i]) {
-        args[i] = raw->buffers[j].ptr;
-        break;
-      }
-    if (!args[i]) goto cleanup;
-  }
-  for (int i = 0; i < runner->n_vars; i++) {
-    PolyUOp *var = info->vars[runner->var_indices[i]];
-    int64_t lo, hi;
-    poly_uop_minmax(ctx, var, &lo, &hi);
-    if (lo > hi) goto cleanup;
-    int64_t value = lo + (int64_t)(((uint64_t)hi - (uint64_t)lo) / 2);
-    if (value < INT_MIN || value > INT_MAX) goto cleanup;
-    values[i] = (int)value;
-    bindings[i] = (PolyVarBinding){.var = var, .value = value};
-    args[runner->n_params + i] = &values[i];
-  }
 #ifdef POLY_TESTING
-  beam_test_parameter_count = n_args;
+  beam_test_parameter_count = runner->n_params + runner->n_vars;
   beam_test_device = device;
 #endif
-  elapsed = poly_time_call(
-      runner, device, args, n_args, bindings, runner->n_vars, reps, early_stop_us, max_global_size
-  );
-cleanup:
-  free(bindings);
-  free(values);
-  free(args);
-  return elapsed;
+  return poly_time_program(ctx, runner, device, raw, reps, early_stop_us, max_global_size);
 }
 
 static double beam_compile_and_time(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOpts opts, int reps) {
   PolyRunner runner;
   if (beam_prepare_candidate(ctx, sink, opts, &runner) != 0) return INFINITY;
   PolyDevice device = beam_device(opts);
-  BeamBuffers raw;
+  PolyTimingBuffers raw;
   double elapsed = INFINITY;
-  if (beam_buffers_init(ctx, runner.program, device, &raw)) {
+  if (poly_timing_buffers_init(ctx, runner.program, device, &raw)) {
     elapsed = beam_time_candidate(ctx, &runner, device, &raw, reps, INFINITY, 65536);
-    beam_buffers_free(&raw);
+    poly_timing_buffers_free(&raw);
   }
   poly_time_call_finish(ctx, &runner, device);
   return elapsed;
@@ -2863,7 +2671,7 @@ static double beam_compile_and_time(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOpts
 /* Disk cache for BEAM results */
 #ifdef POLY_TESTING
 void **poly_test_beam_args_from_ast(PolyCtx *ctx, PolyUOp *sink, int *n_args) {
-  return beam_args_from_ast(ctx, sink, n_args);
+  return poly_args_from_ast(ctx, sink, n_args);
 }
 
 double poly_test_beam_compile_and_time(
@@ -3256,7 +3064,7 @@ static PolyUOp *poly_beam_search(PolyCtx *ctx, PolyUOp *sink, int width, PolyRew
       calloc((size_t)width * (size_t)actions.count, sizeof(*candidate_roots));
   int n_candidate_roots = 0, size = 1, count = 0;
   bool fatal = false;
-  BeamBuffers raw = {0};
+  PolyTimingBuffers raw = {0};
   size_t n_seen = 0, seen_capacity = 0;
   if (!beam || !candidates || !candidate_roots) {
     free(beam);
@@ -3290,7 +3098,7 @@ static PolyUOp *poly_beam_search(PolyCtx *ctx, PolyUOp *sink, int width, PolyRew
     beam_debug_graph(ctx, sink);
   }
   PolyDevice device = beam_device(opts);
-  if (!beam_buffers_init(ctx, sink, device, &raw)) goto done;
+  if (!poly_timing_buffers_init(ctx, sink, device, &raw)) goto done;
   double min_progress = 0.01;
   const char *progress = getenv("BEAM_MIN_PROGRESS");
   if (progress) {
@@ -3439,7 +3247,7 @@ done:
   }
   for (int i = 0; i < count; i++)
     sched_destroy(&candidates[i].sched);
-  beam_buffers_free(&raw);
+  poly_timing_buffers_free(&raw);
   for (int i = 0; i < n_candidate_roots; i++)
     poly_uop_release(ctx, candidate_roots[i]);
   free(candidate_roots);
