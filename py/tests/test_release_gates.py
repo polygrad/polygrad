@@ -3,6 +3,7 @@
 import os
 from pathlib import Path
 import runpy
+import shlex
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
@@ -11,6 +12,29 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_python_x86_target_selects_frontend_and_core_device():
+    recipe = subprocess.run(['make', '-n', 'test-py-x86'], cwd=ROOT,
+                            capture_output=True, text=True, check=True)
+    command = next(line for line in recipe.stdout.splitlines()
+                   if ' -m pytest ' in line and 'POLY_DEVICE=' in line)
+    env = dict(os.environ)
+    env.pop('DEV', None)
+    for token in shlex.split(command):
+        if '=' not in token:
+            break
+        key, value = token.split('=', 1)
+        env[key] = value
+    # DEV controls Python Tensor/factory construction; POLY_DEVICE still
+    # controls standalone C import/placement. Both must select the tested lane.
+    probe = subprocess.run([sys.executable, '-c',
+                            "import os; from polygrad import Tensor, Device; "
+                            "assert os.environ['POLY_DEVICE'].lower() == 'x86'; "
+                            "assert Device.DEFAULT == 'X86', Device.DEFAULT; "
+                            "assert Tensor([1.0]).device == 'X86'"],
+                           cwd=ROOT, env=env, capture_output=True, text=True)
+    assert probe.returncode == 0, probe.stdout + probe.stderr
 
 
 def test_package_gate_clears_checkout_and_backend_overrides(monkeypatch):

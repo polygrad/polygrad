@@ -626,7 +626,7 @@ test-py: verify-source-mirrors build/libpolygrad.so
 	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 POLYGRAD_LIB=build/libpolygrad.so PYTHONPATH=py python -m pytest py/tests/ -v
 
 test-py-x86: verify-source-mirrors build/libpolygrad.so
-	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 POLY_DEVICE=x86 POLYGRAD_LIB=build/libpolygrad.so PYTHONPATH=py python -m pytest py/tests/test_tensor.py py/tests/test_nn.py py/tests/test_model.py py/tests/test_hf.py py/tests/test_hf_e2e.py -v
+	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 DEV=X86 POLY_DEVICE=x86 POLYGRAD_LIB=build/libpolygrad.so PYTHONPATH=py python -m pytest py/tests/test_tensor.py py/tests/test_nn.py py/tests/test_model.py py/tests/test_hf.py py/tests/test_hf_e2e.py -v
 
 test-js: test-js-wasm test-js-native test-js-package
 
