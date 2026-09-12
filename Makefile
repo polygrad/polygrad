@@ -117,10 +117,11 @@ test-runtime-wasm: build/test_schedule_runtime.js
 	$(SAN_RUN) $(NODE) $< --require-no-skips schedule_runtime.beam_time_call_reads_scalar_values
 	$(SAN_RUN) $(NODE) $< --require-no-skips schedule_runtime.runtime_allocates_only_program_globals
 	$(SAN_RUN) $(NODE) $< --require-no-skips schedule_runtime.runtime_copy_accepts_empty_storage
+	$(SAN_RUN) $(NODE) $< --require-no-skips binding_publication
 
 build/test_schedule_runtime.js: $(WASM_SRC) test/test_main.c test/test_schedule_runtime.c test/test_uop.c test/test_harness.h $(PROJECT_HEADERS) Makefile
 	@mkdir -p build
-	EMSDK_PYTHON=$(EMSDK_PYTHON) $(EMCC) $(EMCC_CFLAGS_COMMON) -O1 -g \
+	EMSDK_PYTHON=$(EMSDK_PYTHON) $(EMCC) $(EMCC_CFLAGS_COMMON) -DPOLY_TESTING -O1 -g \
 		-fsanitize=address,undefined -fno-sanitize-recover=all -s ASSERTIONS=1 -s ALLOW_MEMORY_GROWTH=1 \
 		-s WASM_ASYNC_COMPILATION=0 -s ENVIRONMENT=node -s EXIT_RUNTIME=1 \
 		-o $@ $(filter %.c,$^)

@@ -1420,6 +1420,14 @@ static bool substitute_iter(
   return ok;
 }
 
+#ifdef POLY_TESTING
+static _Thread_local int substitute_fail_after = -1;
+
+void poly_test_substitute_fail_after(int count) {
+  substitute_fail_after = count;
+}
+#endif
+
 int poly_uop_substitute_many(
     PolyCtx *ctx,
     PolyUOp **roots,
@@ -1441,6 +1449,10 @@ int poly_uop_substitute_many(
     return 0;
   }
 
+#ifdef POLY_TESTING
+  /* Exercise callers' error publication without exhausting the process heap. */
+  if (substitute_fail_after >= 0 && substitute_fail_after-- == 0) return -1;
+#endif
   PolyMap *sub_map = poly_map_new((size_t)n * 2 + 16);
   PolyMap *memo = poly_map_new(256);
   if (!sub_map || !memo) {

@@ -14,6 +14,7 @@
 #include "../src/schedule/rangeify.h"
 #include "../src/schedule/schedule.h"
 #include "../src/uop/spec.h"
+#include "../src/uop/ops.h"
 #include "../src/tensor.h"
 
 static int count_root_ops(PolyCtx *ctx, PolyUOp *root, PolyOps op) {
@@ -31,6 +32,155 @@ static bool contains_uop(PolyUOp **items, int count, PolyUOp *item) {
     if (items[i] == item) return true;
   return false;
 }
+
+/* resolve_linear_call replaces p0 in each CALL source, not positional data
+ * inside another CALL's body. NOOP avoids unrelated kernel compilation here. */
+static PolyUOp *binding_publication_call(PolyCtx *ctx, int64_t value, bool used) {
+  PolyUOp *var =
+      poly_uop_variable(ctx, "value", -(INT64_C(1) << 40), INT64_C(1) << 40, POLY_INT64, 1, false);
+  PolyUOp *param =
+      poly_uop_variable(ctx, "p0", -(INT64_C(1) << 40), INT64_C(1) << 40, POLY_INT64, 1, true);
+  PolyUOp *body =
+      poly_uop(ctx, POLY_OP_NOOP, POLY_VOID, used ? &param : NULL, used ? 1 : 0, poly_arg_none());
+  PolyUOp *sources[] = {body, param};
+  PolyUOp *call = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, sources, used ? 2 : 1, poly_arg_none());
+  PolyUOp *linear = poly_uop1(ctx, POLY_OP_LINEAR, POLY_VOID, call, poly_arg_none());
+  return poly_uop2(
+      ctx, POLY_OP_CALL, POLY_VOID, linear, poly_uop_bind(ctx, var, value), poly_arg_none()
+  );
+}
+
+TEST(schedule_runtime, binding_publication_rejects_narrowing) {
+  /* Tinygrad retains Python ints. C's existing PolyVarBinding is int32_t:
+   * an unsupported value must fail, never become a different binding. */
+  const int64_t values[] = {
+      INT32_MIN, INT32_MAX, (int64_t)INT32_MIN - 1, (int64_t)INT32_MAX + 1, INT64_C(4294967303)};
+  bool correct = true;
+  for (int used = 0; used < 2; used++) {
+    for (size_t i = 0; i < sizeof(values) / sizeof(*values); i++) {
+      PolyCtx *ctx = poly_ctx_new();
+      PolyUOp *call = binding_publication_call(ctx, values[i], used);
+      PolyVarBinding *bindings = NULL;
+      int count = 0;
+      PolyUOp *linear = poly_create_linear_with_vars(ctx, call, &bindings, &count);
+      if (!used)
+        correct &= linear && count == 0;
+      else if (values[i] < INT32_MIN || values[i] > INT32_MAX) {
+        if (linear && count)
+          fprintf(stderr, "bound %lld became %d\n", (long long)values[i], bindings[0].value);
+        correct &= !linear && !bindings && count == 0;
+      } else {
+        correct &= linear && count == 1 && bindings[0].value == values[i];
+        if (linear) {
+          PolyUOp *resolved = linear->src[0]->src[0]->src[0];
+          correct &= resolved->op == POLY_OP_PARAM && strcmp(poly_uop_expr(resolved), "value") == 0;
+        }
+      }
+      free(bindings);
+      poly_ctx_destroy(ctx);
+    }
+  }
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
+TEST(schedule_runtime, binding_publication_memory_size_limits) {
+  /* C size_t admission is not Python's arbitrary-precision size domain.
+   * These are graph-only probes; never attempt the huge physical allocation. */
+  const int64_t sizes[] = {1, 128, (int64_t)(SIZE_MAX / 2), INT64_MAX};
+  bool correct = true;
+  for (size_t i = 0; i < sizeof(sizes) / sizeof(*sizes); i++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyUOp *buffer = poly_test_buffer_on_device(ctx, POLY_UINT16, sizes[i], POLY_DEVICE_CPU);
+    PolyUOp *body = poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_none());
+    PolyUOp *call = poly_uop2(ctx, POLY_OP_CALL, POLY_VOID, body, buffer, poly_arg_none());
+    PolyUOp *linear = poly_uop1(ctx, POLY_OP_LINEAR, POLY_VOID, call, poly_arg_none());
+    PolyUOp *planned = poly_memory_plan_rewrite(ctx, linear, NULL, 0);
+    correct &= i < 2 ? planned && planned->src[0]->src[1]->op == POLY_OP_BITCAST : !planned;
+    correct &= call->src[1] == buffer && !poly_buffer_get(ctx, buffer);
+    poly_ctx_destroy(ctx);
+  }
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
+#ifdef POLY_TESTING
+TEST(schedule_runtime, binding_publication_substitution_failure) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *call = binding_publication_call(ctx, 7, true);
+  PolyUOp *original_param = call->src[0]->src[0]->src[0]->src[0];
+  PolyVarBinding *bindings = NULL;
+  int count = 0;
+  bool correct = true;
+  /* Also fail after one source was rewritten: no partially bound CALL may
+   * escape, and the original must remain reusable. */
+  for (int failure = 0; failure < 2; failure++) {
+    poly_test_substitute_fail_after(failure);
+    PolyUOp *failed = poly_create_linear_with_vars(ctx, call, &bindings, &count);
+    poly_test_substitute_fail_after(-1);
+    correct &= !failed && !bindings && count == 0;
+    free(bindings);
+  }
+  PolyUOp *retry = poly_create_linear_with_vars(ctx, call, &bindings, &count);
+  correct &= retry && count == 1 && bindings[0].value == 7;
+  correct &= call->src[0]->src[0]->src[0]->src[0] == original_param;
+  if (retry) {
+    correct &= strcmp(poly_uop_expr(retry->src[0]->src[0]->src[0]), "value") == 0;
+    correct &= retry->src[0]->src[1] == retry->src[0]->src[0]->src[0];
+  }
+  free(bindings);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
+TEST(schedule_runtime, binding_publication_memory_failure) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *buffer = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 16, POLY_DEVICE_CPU);
+  PolyUOp *body = poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_none());
+  PolyUOp *call = poly_uop2(ctx, POLY_OP_CALL, POLY_VOID, body, buffer, poly_arg_none());
+  PolyUOp *linear = poly_uop1(ctx, POLY_OP_LINEAR, POLY_VOID, call, poly_arg_none());
+  poly_test_substitute_fail_after(0);
+  PolyUOp *failed = poly_memory_plan_rewrite(ctx, linear, NULL, 0);
+  poly_test_substitute_fail_after(-1);
+  PolyUOp *retry = poly_memory_plan_rewrite(ctx, linear, NULL, 0);
+  bool correct = !failed && retry && retry != linear && retry->src[0]->src[0] == body &&
+                 retry->src[0]->src[1]->op == POLY_OP_BITCAST && call->src[1] == buffer;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
+TEST(schedule_runtime, binding_publication_jit_failure) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *input = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_INTERP);
+  PolyUOp *output = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_INTERP);
+  PolyUOp *copy = poly_uop1(ctx, POLY_OP_COPY, POLY_FLOAT32, input, poly_arg_str("INTERP"));
+  PolyUOp *src[] = {copy, output, input};
+  PolyUOp *call = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, src, 3, poly_arg_none());
+  PolyUOp *linear = poly_uop1(ctx, POLY_OP_LINEAR, POLY_VOID, call, poly_arg_none());
+  PolyUOp *held[] = {input, output};
+  poly_test_substitute_fail_after(0);
+  PolyUOp *failed = poly_jit_lower(ctx, linear, held, 2, &input, 1);
+  poly_test_substitute_fail_after(-1);
+  PolyUOp *retry = poly_jit_lower(ctx, linear, held, 2, &input, 1);
+  bool correct = retry && call->src[2] == input;
+  if (retry) {
+    correct &= retry->src[0]->src[2]->op == POLY_OP_PARAM;
+    correct &= retry->src[0]->src[2]->arg.param->slot == 0;
+    PolyUOp *replacement = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_INTERP);
+    float value = 13.0f, got = 0;
+    correct &= poly_buffer_write(ctx, replacement, &value, sizeof(value)) == 0;
+    correct &= poly_run_linear(ctx, retry, NULL, 0, &replacement, 1, true, true, false) == 0;
+    correct &= poly_buffer_read(ctx, output, &got, sizeof(got)) == 0 && got == value;
+  }
+  if (failed) fprintf(stderr, "failed JIT input substitution returned an executable\n");
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(failed == NULL);
+  ASSERT_TRUE(correct);
+  PASS();
+}
+#endif
 
 TEST(schedule_runtime, beam_time_call_reads_scalar_values) {
 #ifdef __EMSCRIPTEN__

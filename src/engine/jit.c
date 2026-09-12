@@ -1,6 +1,7 @@
 /* jit.c -- tinygrad-style JIT capture/replay for raw Tensor realizes. */
 
 #include "engine/jit.h"
+#include "uop/ops.h"
 #include "codegen/codegen.h"
 #include "ctx.h"
 #include "device.h"
@@ -618,10 +619,13 @@ PolyUOp *poly_jit_lower(
       return NULL;
     }
   }
-  PolyUOp *parameterized = n_input_uops > 0
-                               ? poly_uop_substitute(ctx, linear, input_uops, params, n_input_uops)
-                               : linear;
+  PolyUOp *parameterized = linear;
+  /* jit_lower must not compile captured storage when input parameterization
+   * failed: that would silently replay against the original inputs. */
+  int rc =
+      poly_uop_substitute_many(ctx, &linear, 1, input_uops, params, n_input_uops, &parameterized);
   free(params);
+  if (rc != 0) return NULL;
   PolyUOp *planned = poly_memory_plan_rewrite(ctx, parameterized, held_bufs, n_held_bufs);
   int beam = poly_getenv_int("JITBEAM", poly_get_beam());
   PolyUOp *compiled = planned ? poly_compile_linear(ctx, planned, beam) : NULL;

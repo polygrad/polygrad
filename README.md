@@ -179,6 +179,9 @@ only regions that have been written. This is not zero initialization.
 Python accepts `Context(CHECK_OOB=0)`. Nonzero values raise: the optional
 Tinygrad compiler bounds verifier is not implemented (`PG-PARITY-026`).
 This is separate from Tensor index and shape validation.
+Runtime scalar bindings currently use signed 32-bit values (`PG-PARITY-028`).
+Scheduling and JIT reject used bindings outside that range; they do not wrap
+them. This limit does not restrict ordinary int64/uint64 Tensor storage.
 Python `Context(NOOPT=1)` and JS `runtime.noopt = 1` disable automatic
 kernel scheduling heuristics, not the compiler's required lowering passes or
 explicit BEAM search. The setting participates in program-cache keys and does

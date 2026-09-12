@@ -61,6 +61,11 @@ int poly_uop_substitute_many(
     PolyUOp **out
 );
 
+#ifdef POLY_TESTING
+/* Fail one nonempty substitution after count successful calls; -1 disables. */
+void poly_test_substitute_fail_after(int count);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

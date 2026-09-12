@@ -754,6 +754,26 @@
         "evidence": "Three observed red regressions now pass: exact grouped STAGE metadata, immutable argument/CSE identity, and integer graph serialization. Both PGIR17/PGPM9 preserve 0, 7, 2^40 and -1; every truncated artifact and old format version is rejected. Owning native suites, CUDA, numerical/physical parity and affected frontends pass. No stage allowance added."
       },
       "close_when": "Represent the integer LOCAL identity through the existing argument, CSE and serialization contracts and test exact STAGE metadata; or obtain an explicit stage-scoped divergence approval supported by consumer analysis."
+    },
+    {
+      "id": "PG-PARITY-028",
+      "status": "open_debt",
+      "stages": ["runtime"],
+      "area": "runtime scalar binding value domain",
+      "vocabulary": {"tinygrad_only": [], "polygrad_only": []},
+      "tinygrad": "create_linear_with_vars retains Python integer values without int32 narrowing; the v0.14.0 probe preserves 4294967303 in var_vals",
+      "polygrad": "PolyVarBinding.value is int32_t. Scheduling rejects used bindings outside that domain instead of silently changing their values and ignores unused bindings. JIT already rejects out-of-domain values while collecting its bindings",
+      "rationale": "Fail-closed admission preserves the current ABI but is not full Tinygrad scalar-domain parity. Extending it requires coordinated runner, backend and frontend representation changes, not a cast or an allowance.",
+      "approval": null,
+      "evidence": [
+        "references/tinygrad_latest/tinygrad/schedule/__init__.py:create_linear_with_vars",
+        "src/polygrad.h:PolyVarBinding",
+        "src/schedule/schedule.c:collect_bindings",
+        "src/engine/jit.c:poly_jit_append_var_binding",
+        "test/test_schedule_runtime.c:binding_publication_rejects_narrowing",
+        "temp/binding-publication-20260912.pBPFww/tinygrad.json"
+      ],
+      "close_when": "Define and verify the wider runtime binding ABI across supported runners/frontends, or obtain an explicit stage-scoped release limitation approval. This row grants no parity allowance."
     }
   ]
 }

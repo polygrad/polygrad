@@ -5,6 +5,7 @@
 #include "ctx.h"
 #include "device.h"
 #include "runtime/support/memory.h"
+#include "uop/ops.h"
 #include "utils.h"
 
 #include <limits.h>
@@ -286,7 +287,11 @@ PolyUOp *poly_memory_plan_rewrite(
     from[i] = buffers[i].buffer;
     to[i] = buffers[i].replacement;
   }
-  PolyUOp *planned = poly_uop_substitute(ctx, linear, from, to, buffer_count);
+  /* Like memory_plan_rewrite's final substitute, publish only a completed
+   * rewrite. The convenience API returns its input on failure. */
+  PolyUOp *planned = NULL;
+  if (poly_uop_substitute_many(ctx, &linear, 1, from, to, buffer_count, &planned) != 0)
+    planned = NULL;
   free(from);
   free(to);
   for (int i = 0; i < lane_count; i++)

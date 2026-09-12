@@ -6,6 +6,7 @@
 #include "device.h"
 #include "engine/jit.h"
 #include "uop/upat.h"
+#include "uop/ops.h"
 #include "schedule/memory.h"
 #include "schedule/rangeify.h"
 #include "utils.h"
@@ -632,8 +633,9 @@ static PolyUOp *apply_binds(PolyCtx *ctx, PolyUOp *call, LinearBind *binds, int 
     if (!src) goto fail;
     bool changed = false;
     for (int i = 0; i < call->n_src; i++) {
-      src[i] = poly_uop_substitute(ctx, call->src[i], from, to, n_sub);
-      if (!src[i]) {
+      /* Each source is its own lexical rewrite, as in apply_binds; a failed
+       * substitution must not publish an unchanged or partially bound CALL. */
+      if (poly_uop_substitute_many(ctx, &call->src[i], 1, from, to, n_sub, &src[i]) != 0) {
         free(src);
         goto fail;
       }
@@ -780,13 +782,16 @@ static bool collect_bindings(
         break;
       }
     if (!used) continue;
+    /* Python var_vals has arbitrary-width ints. The current C runner ABI
+     * carries int32_t values; match JIT admission instead of narrowing here. */
+    if (value->arg.i < INT32_MIN || value->arg.i > INT32_MAX) goto fail;
     int existing = -1;
     for (int j = 0; j < count; j++)
       if (linear_var_eq(bindings[j].var, used)) existing = j;
     if (existing >= 0) {
       if (bindings[existing].value != value->arg.i) goto fail;
     } else {
-      bindings[count++] = (PolyVarBinding){used, value->arg.i};
+      bindings[count++] = (PolyVarBinding){used, (int32_t)value->arg.i};
     }
   }
   *bindings_out = bindings;
