@@ -118,6 +118,14 @@ bool poly_device_is_host_addressable(PolyDevice device);
 
 #ifdef POLY_TESTING
 PolyUOp *poly_test_resolve_linear_param(PolyCtx *ctx, PolyUOp *uop, PolyUOp **inputs, int n_inputs);
+int poly_test_linear_lane_vars(
+    PolyVarBinding *bindings,
+    int n_bindings,
+    PolyUOp *device_num,
+    int lane,
+    PolyVarBinding **out,
+    int *n_out
+);
 #endif
 
 /* Structural hashing/equality (for cache keying by graph shape) */

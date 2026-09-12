@@ -2,6 +2,7 @@
 
 #define _POSIX_C_SOURCE 200809L
 #include "test_harness.h"
+#include <limits.h>
 
 #include "../src/ctx.h"
 #include "../src/device.h"
@@ -16,6 +17,100 @@
 #include "../src/uop/spec.h"
 #include "../src/uop/ops.h"
 #include "../src/tensor.h"
+
+static int execution_owner_probe(void *self, void **args, int n_args) {
+  PolyRunner *runner = self;
+  (*(int *)runner->handle)++;
+  runner->elapsed_us = 1;
+  return 0;
+}
+
+TEST(schedule_runtime, execution_owner_launch_admission) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyArg invalid[] = {
+      poly_arg_int(0),       poly_arg_int(-1),         poly_arg_int(INT64_C(1) << 31),
+      poly_arg_float(8.5),   poly_arg_float(INFINITY), poly_arg_float(NAN),
+      poly_arg_float(0x1p63)};
+  bool ok = true;
+  for (size_t i = 0; i < sizeof(invalid) / sizeof(*invalid); i++) {
+    int calls = 0;
+    PolyRunner runner = {
+        .handle = &calls, .execute = execution_owner_probe, .grid = {3, 4, 5}, .block = {6, 7, 8}};
+    runner.grid_exprs[0] = poly_const_int(ctx, 9);
+    runner.block_exprs[1] = poly_uop_const(
+        ctx, invalid[i], invalid[i].kind == POLY_ARG_FLOAT ? POLY_FLOAT64 : POLY_WEAKINT
+    );
+    double elapsed = poly_time_call(&runner, POLY_DEVICE_INTERP, NULL, 0, NULL, 0, 1, INFINITY, 0);
+    if (isfinite(elapsed) || calls)
+      fprintf(stderr, "invalid launch case%zu executed%d times\n", i, calls);
+    ok &= isinf(elapsed) && calls == 0 && runner.grid[0] == 3 && runner.block[1] == 7;
+  }
+  int calls = 0;
+  PolyRunner runner = {
+      .handle = &calls, .execute = execution_owner_probe, .grid = {1, 1, 1}, .block = {1, 1, 1}};
+  runner.grid_exprs[0] = poly_const_int(ctx, 8);
+  ok &= poly_time_call(&runner, POLY_DEVICE_INTERP, NULL, 0, NULL, 0, 1, INFINITY, 0) == 1;
+  ok &= calls == 1 && runner.grid[0] == 8;
+  runner.grid_exprs[0] = NULL;
+  runner.grid[0] = 0;
+  ok &= isinf(poly_time_call(&runner, POLY_DEVICE_INTERP, NULL, 0, NULL, 0, 1, INFINITY, 0));
+  ok &= calls == 1 && runner.grid[0] == 0;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
+TEST(schedule_runtime, execution_owner_lane_binding_capacity) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *key = poly_const_int(ctx, 0);
+  PolyVarBinding binding = {.var = key, .value = 1}, *out = NULL;
+  int count = 0;
+  /* Reject an unrepresentable result count before reading caller storage. */
+  int rc = poly_test_linear_lane_vars(&binding, INT_MAX, key, 3, &out, &count);
+  bool ok = rc == -1 && out == NULL && count == 0;
+  free(out);
+  out = NULL;
+  ok &= poly_test_linear_lane_vars(&binding, 1, key, 3, &out, &count) == 0;
+  ok &= out && count == 1 && out[0].var == key && out[0].value == 3;
+  free(out);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
+TEST(schedule_runtime, execution_owner_call_access_classification) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_AUTO);
+  PolyUOp *b = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_AUTO);
+  const char *names[] = {"encdec", "other"};
+  bool ok = true;
+  for (int i = 0; i < 2; i++) {
+    PolyUOp *body = poly_uop1(ctx, POLY_OP_CUSTOM_FUNCTION, POLY_VOID, a, poly_arg_str(names[i]));
+    PolyUOp *src[] = {body, a, b};
+    PolyUOp *call = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, src, 3, poly_arg_none());
+    bool outs[2] = {true, true}, ins[2] = {true, true};
+    ok &= poly_call_get_outs_ins(ctx, call, outs, ins, 2) == 0;
+    ok &= outs[0] == (i == 0) && !outs[1] && !ins[0] && ins[1] == (i == 0);
+    fprintf(stderr, "access %s: out%d%d in%d%d\n", names[i], outs[0], outs[1], ins[0], ins[1]);
+  }
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, a, poly_arg_none());
+  int globals[] = {0, 1}, output = 0, input = 1;
+  PolyProgramInfo info = {
+      .globals = globals, .n_globals = 2, .outs = &output, .n_outs = 1, .ins = &input, .n_ins = 1};
+  PolyUOp *program = poly_uop1(ctx, POLY_OP_PROGRAM, POLY_VOID, sink, poly_arg_program_info(&info));
+  PolyUOp *bodies[] = {
+      program, poly_uop1(ctx, POLY_OP_COPY, POLY_FLOAT32, b, poly_arg_str("CPU")), sink};
+  for (int i = 0; i < 3; i++) {
+    PolyUOp *src[] = {bodies[i], a, b};
+    PolyUOp *call = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, src, 3, poly_arg_none());
+    bool outs[2] = {true, true}, ins[2] = {true, true};
+    ok &= poly_call_get_outs_ins(ctx, call, outs, ins, 2) == 0;
+    ok &= outs[0] == (i < 2) && !outs[1] && !ins[0] && ins[1] == (i < 2);
+  }
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
 
 TEST(schedule_runtime, owner_call_arguments_exclude_only_bound_variables) {
   /* get_call_arg_uops filters bound variables, not every ALU BUFFER/PARAM. */
@@ -486,6 +581,86 @@ static PolyUOp *runtime_test_graph(PolyCtx *ctx, PolyUOp *linear) {
   PolyUOp *call = poly_uop1(ctx, POLY_OP_CALL, POLY_VOID, function, poly_arg_none());
   return poly_uop1(ctx, POLY_OP_LINEAR, POLY_VOID, call, poly_arg_none());
 }
+
+/* lower_and_compile's final substitution does not enter opaque CALL bodies.
+ * A graph runtime must receive a previously compiled inner LINEAR. */
+TEST(schedule_runtime, execution_owner_preserves_opaque_call_bodies) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *out = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_INTERP);
+  PolyUOp *param = poly_test_program_param(ctx, POLY_FLOAT32, 1, 0);
+  PolyUOp *zero = poly_const_int(ctx, 0);
+  PolyUOp *store = poly_uop2(
+      ctx, POLY_OP_STORE, POLY_VOID, poly_uop_index(ctx, param, &zero, 1), poly_const_float(ctx, 7),
+      poly_arg_none()
+  );
+  PolyUOp *sink = poly_test_kernel_sink(ctx, &store, 1, "nested_compile");
+  PolyUOp *call = poly_uop2(ctx, POLY_OP_CALL, POLY_VOID, sink, out, poly_arg_none());
+  PolyUOp *calls[] = {call, call};
+  PolyUOp *inner = poly_uop(ctx, POLY_OP_LINEAR, POLY_VOID, calls, 2, poly_arg_none());
+  PolyUOp *linear = runtime_test_graph(ctx, inner);
+  PolyUOp *compiled = poly_compile_linear(ctx, linear, 0);
+  bool ok = compiled != NULL;
+  if (compiled) {
+    PolyUOp *body = compiled->src[0]->src[0]->src[0];
+    ok &= body->op == POLY_OP_LINEAR && body->n_src == 2 && body->src[0] == body->src[1];
+    ok &= body->src[0]->src[0] == sink && body == inner;
+    ok &= body->src[0]->src[1] == out && call->src[0] == sink;
+    ok &= poly_compile_linear(ctx, compiled, 0) == compiled;
+  }
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
+static bool execution_owner_wait_stats(PolyDevice device, bool graph) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *out = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, device);
+  PolyUOp *param = poly_test_program_param(ctx, POLY_FLOAT32, 1, 0);
+  PolyUOp *zero = poly_const_int(ctx, 0);
+  PolyUOp *store = poly_uop2(
+      ctx, POLY_OP_STORE, POLY_VOID, poly_uop_index(ctx, param, &zero, 1), poly_const_float(ctx, 7),
+      poly_arg_none()
+  );
+  PolyUOp *sink = poly_test_kernel_sink(ctx, &store, 1, "wait_stats");
+  PolyUOp *call = poly_uop2(ctx, POLY_OP_CALL, POLY_VOID, sink, out, poly_arg_none());
+  PolyUOp *linear =
+      poly_compile_linear(ctx, poly_uop1(ctx, POLY_OP_LINEAR, POLY_VOID, call, poly_arg_none()), 0);
+  if (linear && graph) linear = runtime_test_graph(ctx, linear);
+  bool ok = linear != NULL;
+  if (linear) {
+    poly_ctx_reset_counters(ctx);
+    for (int i = 0; i < 2; i++)
+      ok &= poly_run_linear(ctx, linear, NULL, 0, NULL, 0, true, true, true) == 0;
+    ok &= ctx->kernel_count == 2 && ctx->time_sum_s > 0;
+    fprintf(
+        stderr, "wait stats device%d graph%d: kernels%llu seconds%.9g\n", device, graph,
+        (unsigned long long)ctx->kernel_count, ctx->time_sum_s
+    );
+    double elapsed = ctx->time_sum_s;
+    ok &= poly_run_linear(ctx, linear, NULL, 0, NULL, 0, false, true, true) == 0;
+    ok &= ctx->time_sum_s == elapsed && ctx->kernel_count == 2;
+    float got = 0;
+    ok &= poly_buffer_read(ctx, out, &got, sizeof(got)) == 0 && got == 7;
+  }
+  poly_ctx_destroy(ctx);
+  return ok;
+}
+
+TEST(schedule_runtime, execution_owner_wait_stats) {
+  ASSERT_TRUE(execution_owner_wait_stats(POLY_DEVICE_INTERP, false));
+  PASS();
+}
+
+#ifdef POLY_HAS_CUDA
+TEST_BACKEND(cuda, execution_owner_wait_stats) {
+  ASSERT_TRUE(execution_owner_wait_stats(POLY_DEVICE_CUDA, false));
+  PASS();
+}
+TEST_BACKEND(cuda, execution_owner_graph_wait_stats) {
+  ASSERT_TRUE(execution_owner_wait_stats(POLY_DEVICE_CUDA, true));
+  PASS();
+}
+#endif
 
 #ifdef POLY_HAS_CUDA
 static bool runtime_scalar_integer_args(bool graph) {

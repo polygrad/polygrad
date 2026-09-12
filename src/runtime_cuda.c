@@ -562,6 +562,33 @@ PolyCudaProgram *poly_compile_cuda(const char *source, const char *fn_name) {
   return poly_compile_cuda_with_binary(source, fn_name, NULL, NULL, NULL);
 }
 
+/* ops_cuda.cu_time_execution is shared by ordinary and graph launches.
+ * Keep event lifetime and failure cleanup identical for both paths. */
+typedef struct {
+  CUevent start, end;
+} CudaTiming;
+
+static bool cuda_timing_start(CudaTiming *timer) {
+  return cuda_api.cuEventCreate(&timer->start, 0) == CUDA_SUCCESS &&
+         cuda_api.cuEventCreate(&timer->end, 0) == CUDA_SUCCESS &&
+         cuda_api.cuEventRecord(timer->start, NULL) == CUDA_SUCCESS;
+}
+
+static int cuda_timing_finish(CudaTiming *timer, int rc, double *elapsed_us) {
+  if (rc == 0) {
+    float ms = 0;
+    if (cuda_api.cuEventRecord(timer->end, NULL) != CUDA_SUCCESS ||
+        cuda_api.cuEventSynchronize(timer->end) != CUDA_SUCCESS ||
+        cuda_api.cuEventElapsedTime(&ms, timer->start, timer->end) != CUDA_SUCCESS)
+      rc = -1;
+    else
+      *elapsed_us = (double)ms * 1000;
+  }
+  if (timer->end && cuda_api.cuEventDestroy_v2(timer->end) != CUDA_SUCCESS) rc = -1;
+  if (timer->start && cuda_api.cuEventDestroy_v2(timer->start) != CUDA_SUCCESS) rc = -1;
+  return rc;
+}
+
 int poly_cuda_launch_timed(
     PolyCudaProgram *prog,
     void **args,
@@ -576,26 +603,10 @@ int poly_cuda_launch_timed(
 ) {
   if (!elapsed_us || cuda_state != CUDA_INIT_OK) return -1;
   *elapsed_us = 0;
-  CUevent start = NULL, end = NULL;
-  int rc = -1;
-  /* ops_cuda.cu_time_execution: record around the launch on the same stream.
-   * Host compilation, argument packing and synchronization are not GPU time. */
-  if (cuda_api.cuEventCreate(&start, 0) != CUDA_SUCCESS ||
-      cuda_api.cuEventCreate(&end, 0) != CUDA_SUCCESS ||
-      cuda_api.cuEventRecord(start, NULL) != CUDA_SUCCESS)
-    goto done;
-  if (poly_cuda_launch(prog, args, n_args, gx, gy, gz, bx, by, bz) != 0 ||
-      cuda_api.cuEventRecord(end, NULL) != CUDA_SUCCESS ||
-      cuda_api.cuEventSynchronize(end) != CUDA_SUCCESS)
-    goto done;
-  float ms = 0;
-  if (cuda_api.cuEventElapsedTime(&ms, start, end) != CUDA_SUCCESS) goto done;
-  *elapsed_us = (double)ms * 1000;
-  rc = 0;
-done:
-  if (end && cuda_api.cuEventDestroy_v2(end) != CUDA_SUCCESS) rc = -1;
-  if (start && cuda_api.cuEventDestroy_v2(start) != CUDA_SUCCESS) rc = -1;
-  return rc;
+  CudaTiming timer = {0};
+  int rc =
+      cuda_timing_start(&timer) ? poly_cuda_launch(prog, args, n_args, gx, gy, gz, bx, by, bz) : -1;
+  return cuda_timing_finish(&timer, rc, elapsed_us);
 }
 
 int poly_cuda_launch(
@@ -859,6 +870,14 @@ int poly_cuda_graph_launch(PolyCudaGraph *graph) {
     return -1;
   }
   return 0;
+}
+
+int poly_cuda_graph_launch_timed(PolyCudaGraph *graph, double *elapsed_us) {
+  if (!elapsed_us || cuda_state != CUDA_INIT_OK) return -1;
+  *elapsed_us = 0;
+  CudaTiming timer = {0};
+  int rc = cuda_timing_start(&timer) ? poly_cuda_graph_launch(graph) : -1;
+  return cuda_timing_finish(&timer, rc, elapsed_us);
 }
 
 int poly_cuda_memset(unsigned long long ptr, unsigned char val, size_t bytes) {

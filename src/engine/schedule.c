@@ -1,10 +1,9 @@
 /*
  * schedule.c -- Tinygrad-aligned engine scheduling and compiled execution.
  *
- * This file plays the role of tinygrad/engine/schedule.py in C:
- *   - schedule construction from a tensor sink
- *   - backend lowering of schedule items
- *   - schedule execution with reusable workspace
+ * Execution counterpart: tinygrad/engine/realize.py. C runtime preparation,
+ * argument binding and backend resources sit below the same LINEAR/PROGRAM IR.
+ * Tensor scheduling lives in schedule/schedule.c.
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -843,14 +842,33 @@ static bool poly_program_info_collect_launch(PolyCtx *ctx, PolyUOp *body, PolyPr
 }
 
 int poly_call_get_outs_ins(PolyCtx *ctx, PolyUOp *call, bool *outs, bool *ins, int n_args) {
-  if (!ctx || !call || call->n_src < 1) return -1;
+  if (!ctx || !call || call->op != POLY_OP_CALL || call->n_src < 1 || n_args < 0 ||
+      (n_args > 0 && (!outs || !ins)))
+    return -1;
   PolyUOp *body = call->src[0];
-  if (body && body->op == POLY_OP_PROGRAM) {
+  if (!body) return -1;
+  if (body->op == POLY_OP_PROGRAM) {
     const PolyProgramInfo *info = poly_program_info(ctx, body);
     if (info) return poly_call_apply_program_info(info, outs, ins, n_args);
     return -1;
   }
-  return poly_call_get_outs_ins_from_body(ctx, call, body, NULL, outs, ins, n_args);
+  /* get_call_outs_ins classifies executable calls. The SINK walk belongs to
+   * ProgramInfo construction, not arbitrary custom-function children. */
+  if (n_args > 0) {
+    memset(outs, 0, (size_t)n_args * sizeof(*outs));
+    memset(ins, 0, (size_t)n_args * sizeof(*ins));
+  }
+  if (body->op == POLY_OP_COPY) {
+    if (n_args < 2) return -1;
+    outs[0] = ins[1] = true;
+  } else if (body->op == POLY_OP_CUSTOM_FUNCTION && body->arg.kind == POLY_ARG_STRING &&
+             body->arg.str && strcmp(body->arg.str, "encdec") == 0) {
+    if (n_args < 1) return -1;
+    outs[0] = true;
+    for (int i = 1; i < n_args; i++)
+      ins[i] = true;
+  }
+  return 0;
 }
 
 static void poly_program_info_destroy(PolyProgramInfo *info) {
@@ -1172,6 +1190,10 @@ static bool poly_launch_arg_to_i64(PolyArg arg, int64_t *out) {
     *out = arg.b ? 1 : 0;
     return true;
   case POLY_ARG_FLOAT:
+    /* C launch/estimate consumers require an exact representable integer.
+     * Checking before conversion avoids C float-to-integer undefined behavior. */
+    if (!isfinite(arg.f) || arg.f < -0x1p63 || arg.f >= 0x1p63 || trunc(arg.f) != arg.f)
+      return false;
     *out = (int64_t)arg.f;
     return true;
   case POLY_ARG_INT:
@@ -1230,24 +1252,32 @@ static int poly_resolve_runner_launch_dims(
     int n_bindings
 ) {
   if (!runner) return -1;
-
+  int grid[3], block[3];
+  memcpy(grid, runner->grid, sizeof(grid));
+  memcpy(block, runner->block, sizeof(block));
   for (int dim = 0; dim < 3; dim++) {
     if (runner->grid_exprs[dim]) {
       PolyArg value;
       if (!poly_eval_launch_expr(runner->grid_exprs[dim], bindings, n_bindings, &value)) return -1;
       int64_t resolved = 0;
-      if (!poly_launch_arg_to_i64(value, &resolved)) return -1;
-      runner->grid[dim] = (resolved > 0 && resolved <= INT32_MAX) ? (int)resolved : 1;
+      if (!poly_launch_arg_to_i64(value, &resolved) || resolved <= 0 || resolved > INT32_MAX)
+        return -1;
+      grid[dim] = (int)resolved;
     }
     if (runner->block_exprs[dim]) {
       PolyArg value;
       if (!poly_eval_launch_expr(runner->block_exprs[dim], bindings, n_bindings, &value)) return -1;
       int64_t resolved = 0;
-      if (!poly_launch_arg_to_i64(value, &resolved)) return -1;
-      runner->block[dim] = (resolved > 0 && resolved <= INT32_MAX) ? (int)resolved : 1;
+      if (!poly_launch_arg_to_i64(value, &resolved) || resolved <= 0 || resolved > INT32_MAX)
+        return -1;
+      block[dim] = (int)resolved;
     }
+    if (grid[dim] <= 0 || block[dim] <= 0) return -1;
   }
 
+  /* Failed inference must not leave a cached runner with mixed old/new dims. */
+  memcpy(runner->grid, grid, sizeof(grid));
+  memcpy(runner->block, block, sizeof(block));
   return 0;
 }
 
@@ -1262,28 +1292,19 @@ static void poly_runner_apply_program_launch_info(
   const PolyProgramInfo *info = poly_program_info(ctx, program);
   if (!info) return;
 
-  bool has_launch_expr = false;
-  for (int dim = 0; dim < 3; dim++) {
-    if (info->global_exprs[dim] || info->local_exprs[dim] || info->global_size[dim] != 1 ||
-        info->local_size[dim] != 1 || !info->has_local_size) {
-      has_launch_expr = true;
-      break;
-    }
-  }
-  if (!has_launch_expr) return;
-
+  /* Unit dimensions are metadata too: interpreter runners start zeroed. */
   for (int dim = 0; dim < 3; dim++) {
     int global = info->global_size[dim];
-    runner->grid[dim] = global > 0 ? global : 1;
+    runner->grid[dim] = global;
     runner->grid_exprs[dim] = info->global_exprs[dim];
 
     if (info->has_local_size && info->local_exprs[dim]) {
       int local = info->local_size[dim];
-      runner->block[dim] = local > 0 ? local : 1;
+      runner->block[dim] = local;
       runner->block_exprs[dim] = info->local_exprs[dim];
     } else if (info->has_local_size) {
       int local = info->local_size[dim];
-      runner->block[dim] = local > 0 ? local : 1;
+      runner->block[dim] = local;
       runner->block_exprs[dim] = NULL;
     } else if (!info->has_local_size) {
       runner->block[dim] = 1;
@@ -2612,11 +2633,8 @@ static int cuda_execute(PolyRunner *runner, void **args, int n_args) {
                                ch->prog, cuda_args, n_args, runner->grid[0], runner->grid[1],
                                runner->grid[2], runner->block[0], runner->block[1], runner->block[2]
                            );
-  /* Pinned tinygrad's run_linear passes wait=(DEBUG >= 2) to CUDA programs.
-   * Normal eager/JIT execution only enqueues work; explicit synchronization
-   * and host readback are the completion boundaries. Preserve synchronous
-   * execution when DEBUG requests per-kernel timing. */
-  if (ret == 0 && poly_debug_at_least(2)) ret = poly_cuda_sync();
+  /* Waited launches already synchronize their end event. Ordinary launches
+   * only enqueue; host readback remains a separate completion boundary. */
 
   free(dptrs);
   free(cuda_args);
@@ -3431,7 +3449,11 @@ static int poly_linear_lane_vars(
     int *n_out
 ) {
   if (!out || !n_out || n_bindings < 0 || (n_bindings > 0 && !bindings)) return -1;
-  int capacity = n_bindings + (device_num ? 1 : 0);
+  /* unwrap_multi merges one device binding into the call's variable map.
+   * Bound both the C result count and its allocation before reading inputs. */
+  if (device_num && n_bindings == INT_MAX) return -1;
+  size_t capacity = (size_t)n_bindings + (device_num ? 1 : 0);
+  if (capacity > SIZE_MAX / sizeof(PolyVarBinding)) return -1;
   PolyVarBinding *vars = capacity > 0 ? malloc((size_t)capacity * sizeof(*vars)) : NULL;
   if (capacity > 0 && !vars) return -1;
   if (n_bindings > 0) memcpy(vars, bindings, (size_t)n_bindings * sizeof(*vars));
@@ -3450,6 +3472,19 @@ static int poly_linear_lane_vars(
   *n_out = count;
   return 0;
 }
+
+#ifdef POLY_TESTING
+int poly_test_linear_lane_vars(
+    PolyVarBinding *bindings,
+    int n_bindings,
+    PolyUOp *device_num,
+    int lane,
+    PolyVarBinding **out,
+    int *n_out
+) {
+  return poly_linear_lane_vars(bindings, n_bindings, device_num, lane, out, n_out);
+}
+#endif
 
 static int poly_linear_stats(
     PolyCtx *ctx,
@@ -3608,19 +3643,21 @@ static int poly_exec_linear_program(
     if (poly_resolve_runner_launch_dims(&runner, lane_bindings, n_lane_bindings) != 0)
       goto lane_cleanup;
 
-    bool timing = update_stats && ctx->stats_suppression_depth == 0 && poly_debug_at_least(2);
-    double start = timing ? poly_now_ms() : 0.0;
+    /* exec_kernel forwards wait independently of update_stats. CUDA returns
+     * device-event time; synchronous C backends use the call's wall time. */
+    runner.wait = wait;
+    runner.elapsed_us = NAN;
+    double start = wait ? poly_now_ms() : 0.0;
     const PolyBackendDesc *backend = poly_backend_get(device);
     int exec_rc = runner.execute                ? runner.execute(&runner, args, n_runtime_args)
                   : backend && backend->execute ? backend->execute(&runner, args, n_runtime_args)
                                                 : -1;
-#ifdef POLY_HAS_CUDA
-    if (exec_rc == 0 && wait && device == POLY_DEVICE_CUDA) exec_rc = poly_cuda_sync();
-#endif
 #ifdef POLY_HAS_HIP
     if (exec_rc == 0 && wait && device == POLY_DEVICE_HIP) exec_rc = poly_hip_sync();
 #endif
-    double elapsed = timing ? poly_now_ms() - start : -1.0;
+    double elapsed = !wait                         ? -1.0
+                     : isfinite(runner.elapsed_us) ? runner.elapsed_us / 1000.0
+                                                   : poly_now_ms() - start;
     if (exec_rc != 0) goto lane_cleanup;
 
     for (int i = 0; i < info->n_outs; i++) {
@@ -4014,11 +4051,11 @@ static int poly_exec_linear_graph(
     goto fail_prepared;
   }
 
-  bool timing = update_stats && ctx->stats_suppression_depth == 0 && poly_debug_at_least(2);
-  double start = timing ? poly_now_ms() : 0.0;
-  if (poly_cuda_graph_launch(entry->graph) != 0 || ((wait || timing) && poly_cuda_sync() != 0))
-    goto fail_prepared;
-  double elapsed = timing ? poly_now_ms() - start : -1.0;
+  double elapsed_us = 0;
+  int launch_rc = wait ? poly_cuda_graph_launch_timed(entry->graph, &elapsed_us)
+                       : poly_cuda_graph_launch(entry->graph);
+  if (launch_rc != 0) goto fail_prepared;
+  double elapsed = wait ? elapsed_us / 1000.0 : -1.0;
   for (int node = 0; node < linear->n_src; node++)
     for (int arg = 0; arg < prepared[node].n_args; arg++)
       if (prepared[node].outs[arg] &&
@@ -4193,7 +4230,8 @@ int poly_run_linear(
   if (poly_uop_retain(ctx, linear) != 0) return -1;
   ctx->execution_depth++;
   int rc = run_linear_impl(
-      ctx, linear, var_bindings, n_var_bindings, input_uops, n_input_uops, update_stats, jit, wait
+      ctx, linear, var_bindings, n_var_bindings, input_uops, n_input_uops, update_stats, jit,
+      wait || poly_debug_at_least(2)
   );
   ctx->execution_depth--;
   poly_uop_release(ctx, linear);

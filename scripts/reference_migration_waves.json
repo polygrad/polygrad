@@ -239,15 +239,15 @@
         "path": "src/codegen/codegen.c",
         "matcher": "poly_pm_reduce_local",
         "callbacks": [
-          "poly_fix_group_for_reduce", "rule_reduce_to_acc",
-          "poly_expand_horizontal_reduce", "rule_merge_reduce_ends"
+          "poly_fix_group_for_reduce", "reduce_ranges_to_acc",
+          "poly_expand_horizontal_reduce", "merge_reduce_ends"
         ]
       },
       "mapping": [
         {"tinygrad_rule": 0, "polygrad_symbols": ["poly_fix_group_for_reduce"]},
-        {"tinygrad_rule": 1, "polygrad_symbols": ["rule_reduce_to_acc"]},
+        {"tinygrad_rule": 1, "polygrad_symbols": ["reduce_ranges_to_acc"]},
         {"tinygrad_rule": 2, "polygrad_symbols": ["poly_expand_horizontal_reduce"]},
-        {"tinygrad_rule": 3, "polygrad_symbols": ["rule_merge_reduce_ends"]}
+        {"tinygrad_rule": 3, "polygrad_symbols": ["merge_reduce_ends"]}
       ],
       "tests": ["test/test_codegen.c"]
     },

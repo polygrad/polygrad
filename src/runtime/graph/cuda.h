@@ -40,6 +40,7 @@ bool poly_cuda_graph_available(void);
 PolyCudaGraph *poly_cuda_graph_create(const PolyCudaGraphCallSpec *specs, int n_specs);
 int poly_cuda_graph_update(PolyCudaGraph *graph, const PolyCudaGraphCallSpec *specs, int n_specs);
 int poly_cuda_graph_launch(PolyCudaGraph *graph);
+int poly_cuda_graph_launch_timed(PolyCudaGraph *graph, double *elapsed_us);
 void poly_cuda_graph_destroy(PolyCudaGraph *graph);
 
 #endif /* POLY_RUNTIME_GRAPH_CUDA_H */

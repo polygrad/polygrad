@@ -131,6 +131,11 @@ test-runtime-wasm: build/test_schedule_runtime.js
 	$(SAN_RUN) $(NODE) $< --require-no-skips uop.typed_param_bounds_symbolic_consumers
 	$(SAN_RUN) $(NODE) $< --require-no-skips uop.typed_param_bounds_long_repr
 	$(SAN_RUN) $(NODE) $< --require-no-skips ir.typed_param_bounds_roundtrip
+	$(SAN_RUN) $(NODE) $< --require-no-skips schedule_runtime.execution_owner_launch_admission
+	$(SAN_RUN) $(NODE) $< --require-no-skips schedule_runtime.execution_owner_lane_binding_capacity
+	$(SAN_RUN) $(NODE) $< --require-no-skips schedule_runtime.execution_owner_call_access_classification
+	$(SAN_RUN) $(NODE) $< --require-no-skips schedule_runtime.execution_owner_preserves_opaque_call_bodies
+	$(SAN_RUN) $(NODE) $< --require-no-skips schedule_runtime.execution_owner_wait_stats
 
 build/test_schedule_runtime.js: $(WASM_SRC) test/test_main.c test/test_schedule_runtime.c test/test_uop.c test/test_sym.c test/test_reduce_simplify.c test/test_ir.c test/test_harness.h $(PROJECT_HEADERS) Makefile
 	@mkdir -p build
