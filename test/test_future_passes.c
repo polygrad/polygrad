@@ -257,7 +257,7 @@ TEST(decomp, mul_add_fuses_to_mulacc) {
  * MUL+ADD does NOT fuse to MULACC for integer types.
  * Fusion rule is float-only to match FMA semantics.
  */
-TEST(decomp, mul_add_int_no_fuse) {
+TEST(decomp, mul_add_int_fuses_when_supported) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *p0 = poly_test_program_param(ctx, POLY_INT32, 4, 0);
   PolyUOp *p1 = poly_test_program_param(ctx, POLY_INT32, 4, 1);
@@ -282,8 +282,13 @@ TEST(decomp, mul_add_int_no_fuse) {
   PolyRewriteOpts opts = {.optimize = false, .caps = {.has_mulacc = true}};
   PolyUOp *rewritten = poly_full_rewrite_to_sink_ex(ctx, sink, opts);
   int n_mulacc = count_ops_in(ctx, rewritten, POLY_OP_MULACC);
+  opts.caps.has_mulacc = false;
+  PolyUOp *unfused = poly_full_rewrite_to_sink_ex(ctx, sink, opts);
+  int n_unsupported = count_ops_in(ctx, unfused, POLY_OP_MULACC);
   poly_ctx_destroy(ctx);
-  ASSERT_INT_EQ(n_mulacc, 0); /* No fusion for int types */
+  /* Pinned get_late_rewrite_patterns gates fusion on capability, not dtype. */
+  ASSERT_INT_EQ(n_mulacc, 1);
+  ASSERT_INT_EQ(n_unsupported, 0);
   PASS();
 }
 

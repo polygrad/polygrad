@@ -614,9 +614,9 @@ TEST(nn, layernorm_non_last_axis) {
 }
 
 TEST(nn, threefry_reference_vector_cpu) {
-  /* Reference from JAX threefry2x32 primitive:
+  /* Low words of the pinned packed-uint64 threefry2x32 primitive:
    * key0=1337, key1=0, x0=counters 0..19, x1=0.
-   * This matches tinygrad's uint32 elementwise lowering semantics. */
+   * uint32 inputs must widen before THREEFRY, not request a uint32 opcode. */
   const uint32_t ref[20] = {2732499619u, 3322027265u, 2482432314u, 3871860445u, 3571867126u,
                             3019569655u, 2459680734u, 2731866067u, 986922480u,  1616040745u,
                             4238711754u, 3594775990u, 3046419939u, 3519108299u, 586160567u,
@@ -626,8 +626,12 @@ TEST(nn, threefry_reference_vector_cpu) {
   PolyUOp *counter = poly_test_buffer(ctx, POLY_UINT32, 20);
   PolyUOp *key = poly_test_buffer(ctx, POLY_UINT32, 20);
   PolyUOp *out = poly_test_buffer(ctx, POLY_UINT32, 20);
-  PolyUOp *thr = poly_uop2(ctx, POLY_OP_THREEFRY, POLY_UINT32, counter, key, poly_arg_none());
-  PolyUOp *sink = poly_sink1(ctx, poly_test_store_to_buffer(ctx, out, thr));
+  PolyUOp *thr = poly_uop2(
+      ctx, POLY_OP_THREEFRY, POLY_UINT64, poly_cast(ctx, counter, POLY_UINT64),
+      poly_cast(ctx, key, POLY_UINT64), poly_arg_none()
+  );
+  PolyUOp *sink =
+      poly_sink1(ctx, poly_test_store_to_buffer(ctx, out, poly_cast(ctx, thr, POLY_UINT32)));
 
   uint32_t counter_data[20], key_data[20], out_data[20];
   for (int i = 0; i < 20; i++) {
@@ -1504,10 +1508,10 @@ TEST(nn, c2c_threefry_lowered_in_compiled_kernel) {
    * isolated rewrite helpers). Build a THREEFRY kernel, run full_rewrite_to_sink
    * with has_threefry=false, then scan the linearized output for residual ops. */
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *counter = poly_test_buffer(ctx, POLY_UINT32, 8);
-  PolyUOp *key = poly_test_buffer(ctx, POLY_UINT32, 8);
-  PolyUOp *out = poly_test_buffer(ctx, POLY_UINT32, 8);
-  PolyUOp *thr = poly_uop2(ctx, POLY_OP_THREEFRY, POLY_UINT32, counter, key, poly_arg_none());
+  PolyUOp *counter = poly_test_buffer(ctx, POLY_UINT64, 8);
+  PolyUOp *key = poly_test_buffer(ctx, POLY_UINT64, 8);
+  PolyUOp *out = poly_test_buffer(ctx, POLY_UINT64, 8);
+  PolyUOp *thr = poly_uop2(ctx, POLY_OP_THREEFRY, POLY_UINT64, counter, key, poly_arg_none());
   PolyUOp *store = poly_test_store_to_buffer(ctx, out, thr);
   PolyUOp *sink = poly_sink1(ctx, store);
 
@@ -1535,9 +1539,9 @@ TEST(nn, c2c_threefry_lowered_in_compiled_kernel) {
     FAIL("found %d residual THREEFRY ops after full_rewrite_to_sink", residual_threefry);
 
   /* Also verify it actually executes on CPU */
-  uint32_t counter_data[8], key_data[8], out_data[8];
+  uint64_t counter_data[8], key_data[8], out_data[8];
   for (int i = 0; i < 8; i++) {
-    counter_data[i] = (uint32_t)i;
+    counter_data[i] = (uint64_t)i;
     key_data[i] = 42u;
     out_data[i] = 0u;
   }
@@ -1545,12 +1549,13 @@ TEST(nn, c2c_threefry_lowered_in_compiled_kernel) {
       POLY_TEST_HOST_VIEW(counter, counter_data), POLY_TEST_HOST_VIEW(key, key_data),
       POLY_TEST_HOST_VIEW(out, out_data)};
   ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink, binds, 3), 0);
-  /* Verify we got non-zero output (THREEFRY actually ran) */
-  int any_nonzero = 0;
-  for (int i = 0; i < 8; i++) {
-    if (out_data[i] != 0) any_nonzero = 1;
-  }
-  ASSERT_TRUE(any_nonzero);
+  /* Pinned uint64 THREEFRY, seed42: verify both words, not just nonzero output. */
+  const uint64_t expected[8] = {5723167036595107001ull,  18313067817178486892ull,
+                                1964069614479719466ull,  15876735867918476522ull,
+                                744373940230691697ull,   2976408540508175754ull,
+                                10786128305370340896ull, 14766023422270211685ull};
+  for (int i = 0; i < 8; i++)
+    ASSERT_TRUE(out_data[i] == expected[i]);
 
   free(uops);
   poly_ctx_destroy(ctx);

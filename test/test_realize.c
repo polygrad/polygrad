@@ -9038,10 +9038,14 @@ TEST(realize, nested_disk_view_copies_hold_contiguous_reduction_without_extra_co
   ASSERT_TRUE(poly_buffer_get(ctx, reduction) == NULL);
   ASSERT_FALSE(poly_buffer_is_allocated(ctx, reduction));
 
+  /* Access classification is an executable PROGRAM contract, not a SINK walk. */
+  PolyUOp *compiled = poly_compile_linear(ctx, schedule, -1);
+  ASSERT_NOT_NULL(compiled);
+  ASSERT_INT_EQ(compiled->n_src, schedule->n_src);
   int reduction_writes = 0;
   int reduction_reads = 0;
   for (int k = 0; k < schedule->n_src; k++) {
-    PolyUOp *call = poly_test_linear_call(schedule, k);
+    PolyUOp *call = poly_test_linear_call(compiled, k);
     int n_args = poly_call_n_buffer_args(call);
     bool *outs = calloc((size_t)n_args, sizeof(*outs));
     bool *ins = calloc((size_t)n_args, sizeof(*ins));
@@ -9058,7 +9062,7 @@ TEST(realize, nested_disk_view_copies_hold_contiguous_reduction_without_extra_co
   ASSERT_INT_EQ(reduction_writes, 1);
   ASSERT_INT_EQ(reduction_reads, 1);
 
-  ASSERT_INT_EQ(poly_run_linear(ctx, schedule, NULL, 0, NULL, 0, true, false, false), 0);
+  ASSERT_INT_EQ(poly_run_linear(ctx, compiled, NULL, 0, NULL, 0, true, false, false), 0);
   PolyBuffer *reduction_storage = poly_buffer_get(ctx, reduction);
   ASSERT_NOT_NULL(reduction_storage);
   ASSERT_TRUE(reduction_storage->valid);

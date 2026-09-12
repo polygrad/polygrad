@@ -607,10 +607,14 @@ TEST(optim, build_step_sgd_lazy_parameter_executes_shared_momentum_effect_once) 
 
   const PolyUOp *m_buf = poly_uop_get_buffer_identity(resolved[0]);
   ASSERT_NOT_NULL(m_buf);
+  /* get_call_outs_ins reads PROGRAM metadata; raw SINK calls have no access sets. */
+  PolyUOp *compiled = poly_compile_linear(ctx, linear, -1);
+  ASSERT_NOT_NULL(compiled);
+  ASSERT_INT_EQ(compiled->n_src, linear->n_src);
   int momentum_writes = 0;
   int momentum_read_writes = 0;
   for (int k = 0; k < linear->n_src; k++) {
-    PolyUOp *call = poly_test_linear_call(linear, k);
+    PolyUOp *call = poly_test_linear_call(compiled, k);
     int n_args = poly_call_n_buffer_args(call);
     bool *call_outs = calloc((size_t)n_args, sizeof(*call_outs));
     bool *call_ins = calloc((size_t)n_args, sizeof(*call_ins));
@@ -630,7 +634,7 @@ TEST(optim, build_step_sgd_lazy_parameter_executes_shared_momentum_effect_once) 
   ASSERT_INT_EQ(momentum_writes, 2);
   ASSERT_INT_EQ(momentum_read_writes, 1);
 
-  ASSERT_INT_EQ(poly_run_linear(ctx, linear, vars, n_vars, NULL, 0, true, false, false), 0);
+  ASSERT_INT_EQ(poly_run_linear(ctx, compiled, vars, n_vars, NULL, 0, true, false, false), 0);
   free(vars);
   float m_after[6] = {0};
   ASSERT_INT_EQ(poly_buffer_read(ctx, (PolyUOp *)m_buf, m_after, sizeof(m_after)), 0);
