@@ -693,7 +693,8 @@ TEST_BACKEND(hip, realize_ex_full_plus_buffer_dyn_shape) {
   PolyCtx *ctx = poly_ctx_new();
 
   /* out[N] = full(3.14)[N] + a[N], with N symbolic. */
-  PolyUOp *N = poly_uop_variable(ctx, "N", 1, 16, POLY_WEAKINT, 1, false);
+  PolyUOp *N =
+      poly_uop_variable(ctx, "N", poly_arg_int(1), poly_arg_int(16), POLY_WEAKINT, 1, false);
   int64_t shape_max[] = {16};
   PolyUOp *fill = poly_full(ctx, shape_max, 1, 3.14);
   PolyUOp *buf_a = poly_test_buffer_var(ctx, POLY_FLOAT32, N, NULL, 0);

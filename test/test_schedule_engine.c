@@ -1947,7 +1947,8 @@ TEST(sched, estimates_match_tinygrad_edge_semantics) {
   ASSERT_INT_EQ(poly_estimates_infer(&est, NULL, 0, &ops, &lds, &mem), 0);
   ASSERT_TRUE(ops == 0 && lds == 96 && mem == 64);
 
-  PolyUOp *n = poly_uop_variable(ctx, "n", 1, 8, POLY_WEAKINT, 1, false);
+  PolyUOp *n =
+      poly_uop_variable(ctx, "n", poly_arg_int(1), poly_arg_int(8), POLY_WEAKINT, 1, false);
   PolyUOp *dynamic_range =
       poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, n, poly_arg_range(2, POLY_AXIS_LOOP));
   PolyUOp *dynamic_end_src[] = {add, dynamic_range};
@@ -2039,7 +2040,8 @@ TEST(sched, estimate_inference_visits_shared_dag_once) {
    * linear in unique UOps rather than recursive source occurrences. */
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
-  PolyUOp *n = poly_uop_variable(ctx, "n", 0, 4, POLY_WEAKINT, 1, false);
+  PolyUOp *n =
+      poly_uop_variable(ctx, "n", poly_arg_int(0), poly_arg_int(4), POLY_WEAKINT, 1, false);
   PolyUOp *expr = poly_uop0(ctx, POLY_OP_CONST, POLY_INT64, poly_arg_int(0));
   PolyUOp *cap = poly_uop0(ctx, POLY_OP_CONST, POLY_INT64, poly_arg_int(32));
   ASSERT_NOT_NULL(n);

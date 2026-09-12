@@ -42,7 +42,7 @@ static PolyUOp *mk_const(PolyCtx *ctx, int64_t v) {
 }
 
 static PolyUOp *mk_dvar(PolyCtx *ctx, const char *name, int64_t lo, int64_t hi) {
-  return poly_uop_variable(ctx, name, lo, hi, POLY_INT32, 1, true);
+  return poly_uop_variable(ctx, name, poly_arg_int(lo), poly_arg_int(hi), POLY_INT32, 1, true);
 }
 
 static PolyUOp *mk_range(PolyCtx *ctx, PolyUOp *bound, int64_t axis_id) {

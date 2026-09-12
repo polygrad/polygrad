@@ -326,9 +326,12 @@ TEST(decomp, threefry_lowered_when_no_native_support) {
  * modulo retains the signed-correction expression carried by its bounds. */
 TEST(decomp, wrapped_unsigned_divmod_uses_expression_bounds) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *wrapped =
-      poly_uop_variable(ctx, "wrapped", -4294967295LL, 8589934590LL, POLY_UINT32, 1, false);
-  PolyUOp *nonnegative = poly_uop_variable(ctx, "nonnegative", 0, 1000000, POLY_UINT32, 1, false);
+  PolyUOp *wrapped = poly_uop_variable(
+      ctx, "wrapped", poly_arg_int(-4294967295LL), poly_arg_int(8589934590LL), POLY_UINT32, 1, false
+  );
+  PolyUOp *nonnegative = poly_uop_variable(
+      ctx, "nonnegative", poly_arg_int(0), poly_arg_int(1000000), POLY_UINT32, 1, false
+  );
   PolyUOp *pow2 = poly_uop0(ctx, POLY_OP_CONST, POLY_UINT32, poly_arg_int(1 << 19));
   PolyUOp *seven = poly_uop0(ctx, POLY_OP_CONST, POLY_UINT32, poly_arg_int(7));
   PolyUOp *roots[3] = {
@@ -365,8 +368,11 @@ TEST(decomp, wrapped_unsigned_divmod_uses_expression_bounds) {
  * the exact renderer-facing topology even though modular values agree. */
 TEST(decomp, threefry_round_key_injection_matches_tinygrad_topology) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *x = poly_uop_variable(ctx, "x", 0, INT64_MAX, POLY_UINT64, 1, false);
-  PolyUOp *key = poly_uop_variable(ctx, "key", 0, INT64_MAX, POLY_UINT64, 1, false);
+  PolyUOp *x =
+      poly_uop_variable(ctx, "x", poly_arg_int(0), poly_arg_int(INT64_MAX), POLY_UINT64, 1, false);
+  PolyUOp *key = poly_uop_variable(
+      ctx, "key", poly_arg_int(0), poly_arg_int(INT64_MAX), POLY_UINT64, 1, false
+  );
   PolyUOp *root = poly_uop2(ctx, POLY_OP_THREEFRY, POLY_UINT64, x, key, poly_arg_none());
   PolyRendererCaps caps = {
       .has_mulacc = false,
@@ -588,8 +594,10 @@ TEST(sym_future, bool_add_is_or) {
 /* Tinygrad 2026-08-22/a9069c177a9d symbolic.py:159-161. */
 TEST(sym_future, mul_div_cancel) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *x = poly_uop_variable(ctx, "x", -100, 100, POLY_FLOAT32, 1, false);
-  PolyUOp *x2 = poly_uop_variable(ctx, "x2", -100, 100, POLY_FLOAT32, 1, false);
+  PolyUOp *x =
+      poly_uop_variable(ctx, "x", poly_arg_int(-100), poly_arg_int(100), POLY_FLOAT32, 1, false);
+  PolyUOp *x2 =
+      poly_uop_variable(ctx, "x2", poly_arg_int(-100), poly_arg_int(100), POLY_FLOAT32, 1, false);
   PolyUOp *mul = poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT32, x, x2, poly_arg_none());
   PolyUOp *reciprocal = poly_uop1(ctx, POLY_OP_RECIPROCAL, POLY_FLOAT32, x2, poly_arg_none());
   PolyUOp *div = poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT32, mul, reciprocal, poly_arg_none());
@@ -603,10 +611,12 @@ TEST(sym_future, mul_div_cancel) {
 /* a.where(b.where(c, d), d) → (a & b).where(c, d).  Ref: tinygrad line 117 */
 TEST(sym_future, nested_where) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *a = poly_uop_variable(ctx, "a", 0, 1, POLY_BOOL, 1, false);
-  PolyUOp *b = poly_uop_variable(ctx, "b", 0, 1, POLY_BOOL, 1, false);
-  PolyUOp *c = poly_uop_variable(ctx, "c", -100, 100, POLY_FLOAT32, 1, false);
-  PolyUOp *d = poly_uop_variable(ctx, "d", -100, 100, POLY_FLOAT32, 1, false);
+  PolyUOp *a = poly_uop_variable(ctx, "a", poly_arg_int(0), poly_arg_int(1), POLY_BOOL, 1, false);
+  PolyUOp *b = poly_uop_variable(ctx, "b", poly_arg_int(0), poly_arg_int(1), POLY_BOOL, 1, false);
+  PolyUOp *c =
+      poly_uop_variable(ctx, "c", poly_arg_int(-100), poly_arg_int(100), POLY_FLOAT32, 1, false);
+  PolyUOp *d =
+      poly_uop_variable(ctx, "d", poly_arg_int(-100), poly_arg_int(100), POLY_FLOAT32, 1, false);
   PolyUOp *inner = poly_uop3(ctx, POLY_OP_WHERE, POLY_FLOAT32, b, c, d, poly_arg_none());
   PolyUOp *outer = poly_uop3(ctx, POLY_OP_WHERE, POLY_FLOAT32, a, inner, d, poly_arg_none());
   PolyUOp *r = simplify(ctx, outer);
@@ -621,7 +631,9 @@ TEST(sym_future, nested_where) {
 /* x ^ 0 → x.  Ref: tinygrad symbolic_simple line 44 */
 TEST(sym_future, xor_zero) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *x = poly_uop_variable(ctx, "x", INT32_MIN, INT32_MAX, POLY_INT32, 1, false);
+  PolyUOp *x = poly_uop_variable(
+      ctx, "x", poly_arg_int(INT32_MIN), poly_arg_int(INT32_MAX), POLY_INT32, 1, false
+  );
   PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
   PolyUOp * xor = poly_uop2(ctx, POLY_OP_XOR, POLY_INT32, x, zero, poly_arg_none());
   PolyUOp *r = simplify(ctx, xor);
@@ -634,7 +646,9 @@ TEST(sym_future, xor_zero) {
 /* x != x → False (ints only).  Ref: tinygrad symbolic_simple line 72 */
 TEST(sym_future, cmpne_self) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *x = poly_uop_variable(ctx, "x", INT32_MIN, INT32_MAX, POLY_INT32, 1, false);
+  PolyUOp *x = poly_uop_variable(
+      ctx, "x", poly_arg_int(INT32_MIN), poly_arg_int(INT32_MAX), POLY_INT32, 1, false
+  );
   PolyUOp *cmpne = poly_uop2(ctx, POLY_OP_CMPNE, POLY_BOOL, x, x, poly_arg_none());
   PolyUOp *r = simplify(ctx, cmpne);
   int is_const = (r->op == POLY_OP_CONST);
@@ -648,7 +662,7 @@ TEST(sym_future, cmpne_self) {
 /* bool & True → bool; bool & False → False.  Ref: tinygrad line 61 */
 TEST(sym_future, bool_and_const) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *x = poly_uop_variable(ctx, "x", 0, 1, POLY_BOOL, 1, false);
+  PolyUOp *x = poly_uop_variable(ctx, "x", poly_arg_int(0), poly_arg_int(1), POLY_BOOL, 1, false);
   PolyUOp *t = poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_bool(true));
   PolyUOp *f = poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_bool(false));
   PolyUOp *and_t = poly_uop2(ctx, POLY_OP_AND, POLY_BOOL, x, t, poly_arg_none());
@@ -668,7 +682,7 @@ TEST(sym_future, bool_and_const) {
 /* bool | True → True; bool | False → bool.  Ref: tinygrad line 62 */
 TEST(sym_future, bool_or_const) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *x = poly_uop_variable(ctx, "x", 0, 1, POLY_BOOL, 1, false);
+  PolyUOp *x = poly_uop_variable(ctx, "x", poly_arg_int(0), poly_arg_int(1), POLY_BOOL, 1, false);
   PolyUOp *t = poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_bool(true));
   PolyUOp *f = poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_bool(false));
   PolyUOp *or_t = poly_uop2(ctx, POLY_OP_OR, POLY_BOOL, x, t, poly_arg_none());
@@ -1874,9 +1888,11 @@ TEST(sym_future, cast_bool_to_cmpne) {
 /* SHL+ADD fuses to MULACC with FMA caps.  Ref: tinygrad decompositions.py:503 */
 TEST(decomp, shl_add_fuses_to_mulacc) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *x = poly_uop_variable(ctx, "x", -100, 100, POLY_INT32, 1, false);
+  PolyUOp *x =
+      poly_uop_variable(ctx, "x", poly_arg_int(-100), poly_arg_int(100), POLY_INT32, 1, false);
   PolyUOp *n = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(3));
-  PolyUOp *c = poly_uop_variable(ctx, "c", -100, 100, POLY_INT32, 1, false);
+  PolyUOp *c =
+      poly_uop_variable(ctx, "c", poly_arg_int(-100), poly_arg_int(100), POLY_INT32, 1, false);
   PolyUOp *shl = poly_uop2(ctx, POLY_OP_SHL, POLY_INT32, x, n, poly_arg_none());
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, shl, c, poly_arg_none());
 
@@ -3268,7 +3284,8 @@ TEST(unify_pre, symbolic_arithmetic_range_bound_linearizes_like_tinygrad) {
    * codegen/late/linearizer.py:19-20). */
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
-  PolyUOp *n = poly_uop_variable(ctx, "n", 1, 7, POLY_WEAKINT, 1, false);
+  PolyUOp *n =
+      poly_uop_variable(ctx, "n", poly_arg_int(1), poly_arg_int(7), POLY_WEAKINT, 1, false);
   PolyUOp *bound_n = poly_uop_bind(ctx, n, 3);
   PolyUOp *bound = poly_alu2(ctx, POLY_OP_ADD, bound_n, poly_const_int(ctx, 1));
   PolyUOp *range =

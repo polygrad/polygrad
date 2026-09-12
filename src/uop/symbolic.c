@@ -325,11 +325,7 @@ static void minmax_default(PolyUOp *u, int64_t *vmin, int64_t *vmax) {
   *vmax = dtype_max(u->dtype);
 }
 
-typedef struct {
-  bool is_float;
-  int64_t i;
-  double f;
-} PolyBoundValue;
+typedef PolyArg PolyBoundValue;
 
 typedef struct {
   PolyBoundValue min;
@@ -375,9 +371,8 @@ static bool poly_uop_minmax_node(PolyCtx *ctx, PolyUOp *u, int64_t *vmin, int64_
    * of exact_int_range_node's existing arbitrary-precision PARAM rule. */
   if ((u->op == POLY_OP_PARAM || u->op == POLY_OP_BUFFER) && u->arg.kind == POLY_ARG_PARAM &&
       u->arg.param && u->arg.param->has_minmax) {
-    *vmin = u->arg.param->min_val;
-    *vmax = u->arg.param->max_val;
-    return true;
+    return poly_arg_integer_to_i64(u->arg.param->min_val, vmin) &&
+           poly_arg_integer_to_i64(u->arg.param->max_val, vmax);
   }
 
   /* UOp._min_max computes with Python integers before narrowing. A uint64
@@ -658,8 +653,8 @@ static bool poly_uop_minmax_node(PolyCtx *ctx, PolyUOp *u, int64_t *vmin, int64_
     PolyBoundValue endpoints[] = {bounds.min, bounds.max};
     int64_t rounded[2];
     for (int i = 0; i < 2; i++) {
-      if (!endpoints[i].is_float) {
-        rounded[i] = endpoints[i].i;
+      if (endpoints[i].kind != POLY_ARG_FLOAT) {
+        if (!poly_arg_integer_to_i64(endpoints[i], &rounded[i])) return false;
         continue;
       }
       double value = i == 0 ? floor(endpoints[i].f) : ceil(endpoints[i].f);
@@ -802,15 +797,28 @@ void poly_uop_minmax_ex(
  * expressions reuse the exact int64 query; float expressions preserve
  * constants and dtype infinities. */
 static PolyBoundValue bound_int(int64_t value) {
-  return (PolyBoundValue){.is_float = false, .i = value, .f = 0.0};
+  return poly_arg_int(value);
 }
 
 static PolyBoundValue bound_float(double value) {
-  return (PolyBoundValue){.is_float = true, .i = 0, .f = value};
+  return poly_arg_float(value);
 }
 
 static long double bound_number(PolyBoundValue value) {
-  return value.is_float ? (long double)value.f : (long double)value.i;
+  return value.kind == POLY_ARG_FLOAT ? (long double)value.f
+         : value.kind == POLY_ARG_INT ? (long double)value.i
+                                      : (long double)poly_arg_integer_to_double(value);
+}
+
+static int bound_cmp(PolyBoundValue a, PolyBoundValue b) {
+  bool ok = false;
+  return poly_arg_python_numeric_cmp(a, b, &ok);
+}
+
+static PolyBoundValue bound_dtype_max(PolyDType dtype) {
+  static const uint32_t uint64_max[] = {UINT32_MAX, UINT32_MAX};
+  return poly_dtype_eq(dtype, POLY_UINT64) ? poly_arg_bigint(1, uint64_max, 2)
+                                           : bound_int(dtype_max(dtype));
 }
 
 /* UOp._min_max CAST branch, shared by typed semantic queries and the int64
@@ -822,7 +830,7 @@ static PolyTypedMinMax cast_minmax(PolyCtx *ctx, PolyUOp *u) {
   PolyTypedMinMax fallback =
       floating || poly_dtype_eq(u->dtype, POLY_WEAKINT)
           ? (PolyTypedMinMax){bound_float(-INFINITY), bound_float(INFINITY)}
-          : (PolyTypedMinMax){bound_int(dtype_min(u->dtype)), bound_int(dtype_max(u->dtype))};
+          : (PolyTypedMinMax){bound_int(dtype_min(u->dtype)), bound_dtype_max(u->dtype)};
   if (poly_dtype_eq(u->dtype, POLY_WEAKFLOAT) || (!floating && !integer)) return fallback;
   PolyTypedMinMax bounds = poly_uop_typed_minmax(ctx, u->src[0]);
   PolyBoundValue *ends[] = {&bounds.min, &bounds.max};
@@ -830,11 +838,11 @@ static PolyTypedMinMax cast_minmax(PolyCtx *ctx, PolyUOp *u) {
     for (int i = 0; i < 2; i++) {
       PolyBoundValue value = *ends[i];
       if (floating) {
-        PolyArg arg = value.is_float ? poly_arg_float(value.f) : poly_arg_int(value.i);
+        PolyArg arg = value;
         PolyArg rounded = poly_exec_alu(POLY_OP_CAST, u->dtype, &arg, 1, true);
         if (rounded.kind != POLY_ARG_FLOAT) return fallback;
         *ends[i] = bound_float(rounded.f);
-      } else if (value.is_float) {
+      } else if (value.kind == POLY_ARG_FLOAT) {
         double rounded = trunc(value.f);
         *ends[i] = rounded >= -0x1p63 && rounded < 0x1p63 ? bound_int((int64_t)rounded)
                                                           : bound_float(rounded);
@@ -842,39 +850,55 @@ static PolyTypedMinMax cast_minmax(PolyCtx *ctx, PolyUOp *u) {
     }
   }
   if (poly_dtype_is_unsigned(u->dtype))
-    return bound_number(bounds.min) >= 0 && bound_number(bounds.max) <= dtype_max(u->dtype)
+    return bound_cmp(bounds.min, bound_int(0)) >= 0 &&
+                   bound_cmp(bounds.max, bound_dtype_max(u->dtype)) <= 0
                ? bounds
                : fallback;
   if (floating || poly_dtype_eq(u->dtype, POLY_WEAKINT)) return bounds;
-  if (!(bound_number(bounds.min) > dtype_min(u->dtype)))
+  if (bound_cmp(bounds.min, bound_int(dtype_min(u->dtype))) <= 0)
     bounds.min = bound_int(dtype_min(u->dtype));
-  if (dtype_max(u->dtype) < bound_number(bounds.max)) bounds.max = bound_int(dtype_max(u->dtype));
+  if (bound_cmp(bound_dtype_max(u->dtype), bounds.max) < 0) bounds.max = bound_dtype_max(u->dtype);
   return bounds;
 }
 
 static PolyTypedMinMax poly_uop_typed_minmax(PolyCtx *ctx, PolyUOp *u) {
   if (!u) return (PolyTypedMinMax){bound_int(0), bound_int(0)};
+  if ((u->op == POLY_OP_PARAM || u->op == POLY_OP_BUFFER) && u->arg.kind == POLY_ARG_PARAM &&
+      u->arg.param && u->arg.param->has_minmax)
+    return (PolyTypedMinMax){u->arg.param->min_val, u->arg.param->max_val};
+  if (u->op == POLY_OP_CONST && (u->arg.kind == POLY_ARG_INT || u->arg.kind == POLY_ARG_BIGINT ||
+                                 u->arg.kind == POLY_ARG_BOOL))
+    return (PolyTypedMinMax){u->arg, u->arg};
 
   /* Tinygrad 2026-08-22/a9069c177a9d uop/ops.py:1083-1084 evaluates
    * comparison bounds from the operands' PyConst bounds, including floats. */
   if (u->n_src == 2 && (u->op == POLY_OP_CMPLT || u->op == POLY_OP_CMPNE)) {
     PolyTypedMinMax lhs = poly_uop_typed_minmax(ctx, u->src[0]);
     PolyTypedMinMax rhs = poly_uop_typed_minmax(ctx, u->src[1]);
-    long double lhs_min = bound_number(lhs.min), lhs_max = bound_number(lhs.max);
-    long double rhs_min = bound_number(rhs.min), rhs_max = bound_number(rhs.max);
     bool min = false, max = false;
     if (u->op == POLY_OP_CMPLT) {
-      min = lhs_max < rhs_min;
-      max = lhs_min < rhs_max;
+      min = bound_cmp(lhs.max, rhs.min) < 0;
+      max = bound_cmp(lhs.min, rhs.max) < 0;
     } else {
-      min = lhs_max < rhs_min || rhs_max < lhs_min;
-      max = !(lhs_min == lhs_max && lhs_max == rhs_min && rhs_min == rhs_max);
+      min = bound_cmp(lhs.max, rhs.min) < 0 || bound_cmp(rhs.max, lhs.min) < 0;
+      max =
+          !(bound_cmp(lhs.min, lhs.max) == 0 && bound_cmp(lhs.max, rhs.min) == 0 &&
+            bound_cmp(rhs.min, rhs.max) == 0);
     }
     return (PolyTypedMinMax){bound_int(min), bound_int(max)};
   }
 
   if (!poly_dtype_is_float(u->dtype)) {
     int64_t lo = 0, hi = 0;
+    /* The compact cache is a projection, not an upper bound for a wide
+     * integer domain. Only consume it when the exact interval fits. */
+    if (poly_dtype_eq(u->dtype, POLY_UINT64) || poly_dtype_eq(u->dtype, POLY_WEAKINT)) {
+      if (exact_int_minmax_i64(ctx, u, &lo, &hi))
+        return (PolyTypedMinMax){bound_int(lo), bound_int(hi)};
+      return poly_dtype_eq(u->dtype, POLY_UINT64)
+                 ? (PolyTypedMinMax){bound_int(0), bound_dtype_max(u->dtype)}
+                 : (PolyTypedMinMax){bound_float(-INFINITY), bound_float(INFINITY)};
+    }
     poly_uop_minmax(ctx, u, &lo, &hi);
     return (PolyTypedMinMax){bound_int(lo), bound_int(hi)};
   }
@@ -893,12 +917,10 @@ static PolyTypedMinMax poly_uop_typed_minmax(PolyCtx *ctx, PolyUOp *u) {
       value = u->arg.b ? 1.0 : 0.0;
     else
       return (PolyTypedMinMax){bound_float(-INFINITY), bound_float(INFINITY)};
+    /* NaN is not an ordered bound; literal folding handles its semantics. */
+    if (isnan(value)) return (PolyTypedMinMax){bound_float(-INFINITY), bound_float(INFINITY)};
     return (PolyTypedMinMax){bound_float(value), bound_float(value)};
   }
-
-  if ((u->op == POLY_OP_PARAM || u->op == POLY_OP_BUFFER) && u->arg.kind == POLY_ARG_PARAM &&
-      u->arg.param && u->arg.param->has_minmax)
-    return (PolyTypedMinMax){bound_int(u->arg.param->min_val), bound_int(u->arg.param->max_val)};
 
   if ((u->op == POLY_OP_AFTER || u->op == POLY_OP_INDEX) && u->n_src > 0)
     return poly_uop_typed_minmax(ctx, u->src[0]);
@@ -907,8 +929,8 @@ static PolyTypedMinMax poly_uop_typed_minmax(PolyCtx *ctx, PolyUOp *u) {
     PolyTypedMinMax result = poly_uop_typed_minmax(ctx, u->src[0]);
     for (int i = 1; i < u->n_src; i++) {
       PolyTypedMinMax lane = poly_uop_typed_minmax(ctx, u->src[i]);
-      if (bound_number(lane.min) < bound_number(result.min)) result.min = lane.min;
-      if (bound_number(lane.max) > bound_number(result.max)) result.max = lane.max;
+      if (bound_cmp(lane.min, result.min) < 0) result.min = lane.min;
+      if (bound_cmp(lane.max, result.max) > 0) result.max = lane.max;
     }
     return result;
   }
@@ -1168,12 +1190,10 @@ static PolyUOp *rule_bool_or_const(PolyCtx *ctx, PolyUOp *root, const PolyBindin
 static PolyUOp *rule_const_when_minmax_point(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   (void)b;
   PolyTypedMinMax bounds = poly_uop_typed_minmax(ctx, root);
-  long double vmin = bound_number(bounds.min), vmax = bound_number(bounds.max);
-  if (vmin != vmax) return NULL;
-  if (poly_dtype_eq(root->dtype, POLY_BOOL)) return poly_const_like_bool(ctx, root, vmin != 0.0L);
-  if (poly_dtype_is_float(root->dtype)) return poly_const_like_float(ctx, root, (double)vmin);
-  if (vmin < (long double)INT64_MIN || vmin > (long double)INT64_MAX) return NULL;
-  return poly_const_like_int(ctx, root, (int64_t)vmin);
+  /* PyConst equality precedes dtype.const. A floating projection can merge
+   * adjacent integer endpoints on wasm32 and cannot carry a uint64 point. */
+  if (bound_cmp(bounds.min, bounds.max) != 0) return NULL;
+  return poly_const_like(ctx, root, bounds.min);
 }
 
 /* max folding
@@ -1184,8 +1204,8 @@ static PolyUOp *rule_max_fold(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b
   if (!root || root->op != POLY_OP_MAX || root->n_src != 2) return NULL;
   PolyTypedMinMax x = poly_uop_typed_minmax(ctx, root->src[0]);
   PolyTypedMinMax y = poly_uop_typed_minmax(ctx, root->src[1]);
-  if (bound_number(x.min) >= bound_number(y.max)) return root->src[0];
-  if (bound_number(x.max) <= bound_number(y.min)) return root->src[1];
+  if (bound_cmp(x.min, y.max) >= 0) return root->src[0];
+  if (bound_cmp(x.max, y.min) <= 0) return root->src[1];
   return NULL;
 }
 
@@ -1690,8 +1710,11 @@ static bool exact_int_range_node(PolyUOp *u, PolyMap *memo, ExactIntRange *out) 
     return true;
   }
   if ((u->op == POLY_OP_PARAM || u->op == POLY_OP_BUFFER) && u->arg.kind == POLY_ARG_PARAM &&
-      u->arg.param && u->arg.param->has_minmax)
-    return exact_int_range_i64(out, u->arg.param->min_val, u->arg.param->max_val);
+      u->arg.param && u->arg.param->has_minmax) {
+    out->valid = poly_int_from_arg(&out->lo, u->arg.param->min_val) &&
+                 poly_int_from_arg(&out->hi, u->arg.param->max_val);
+    return out->valid;
+  }
 
   if ((u->op == POLY_OP_AFTER || u->op == POLY_OP_INDEX) && u->n_src >= 1) {
     ExactIntRange *src = exact_int_range_get(memo, u->src[0]);
@@ -1972,6 +1995,23 @@ static bool exact_int_minmax_i64(PolyCtx *ctx, PolyUOp *u, int64_t *lo, int64_t 
             poly_int_to_i64(&bounds.hi, hi);
   exact_int_range_free(&bounds);
   return ok;
+}
+
+PolyUOp *poly_uop_variable_like_bounds(PolyCtx *ctx, const char *name, PolyUOp *source) {
+  if (!ctx || !source) return NULL;
+  if (poly_dtype_is_float(source->dtype)) {
+    PolyTypedMinMax bounds = poly_uop_typed_minmax(ctx, source);
+    return poly_uop_variable(ctx, name, bounds.min, bounds.max, source->dtype, 1, true);
+  }
+  ExactIntRange bounds = {0};
+  PolyUOp *out = exact_int_range(ctx, source, &bounds)
+                     ? poly_uop_variable(
+                           ctx, name, poly_int_as_arg(&bounds.lo), poly_int_as_arg(&bounds.hi),
+                           source->dtype, 1, true
+                       )
+                     : NULL;
+  exact_int_range_free(&bounds);
+  return out;
 }
 
 static bool exact_int_range_fits_dtype(PolyCtx *ctx, PolyUOp *u, PolyDType dtype) {
@@ -2709,8 +2749,10 @@ PolyUOp *poly_uop_given_valid(PolyCtx *ctx, PolyUOp *valid, PolyUOp *uop, bool t
     if (bounds[i].lo > bounds[i].hi) continue;
     char name[48];
     snprintf(name, sizeof(name), "fake%d", i);
-    bounds[i].fake =
-        poly_uop_variable(ctx, name, bounds[i].lo, bounds[i].hi, bounds[i].expr->dtype, 1, true);
+    bounds[i].fake = poly_uop_variable(
+        ctx, name, poly_arg_int(bounds[i].lo), poly_arg_int(bounds[i].hi), bounds[i].expr->dtype, 1,
+        true
+    );
     if (!bounds[i].fake) continue;
 
     if (try_simplex && poly_uop_reachable(ctx, uop, bounds[i].expr)) {
@@ -2734,7 +2776,9 @@ PolyUOp *poly_uop_given_valid(PolyCtx *ctx, PolyUOp *valid, PolyUOp *uop, bool t
           int64_t term_lo = 0, term_hi = 0;
           poly_uop_minmax(ctx, terms[j], &term_lo, &term_hi);
           (void)term_lo;
-          PolyUOp *fake = poly_uop_variable(ctx, name, 1, term_hi, terms[j]->dtype, 1, true);
+          PolyUOp *fake = poly_uop_variable(
+              ctx, name, poly_arg_int(1), poly_arg_int(term_hi), terms[j]->dtype, 1, true
+          );
           if (!fake) {
             complete = false;
             break;
@@ -3848,9 +3892,9 @@ static int arg_tuplize_cmp(PolyArg a, PolyArg b) {
     ret = cmp_bool(a.param->has_minmax, b.param->has_minmax);
     if (ret) return ret;
     if (a.param->has_minmax) {
-      ret = cmp_i64(a.param->min_val, b.param->min_val);
+      ret = bound_cmp(a.param->min_val, b.param->min_val);
       if (ret) return ret;
-      ret = cmp_i64(a.param->max_val, b.param->max_val);
+      ret = bound_cmp(a.param->max_val, b.param->max_val);
       if (ret) return ret;
     }
     ret = cmp_cstr(a.param->name, b.param->name);

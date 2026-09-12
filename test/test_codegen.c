@@ -62,7 +62,9 @@ TEST(codegen, domains_gpudims_symbolic_limits) {
   const int limits[] = {8, 8, 8, 4};
   for (int i = 0; i < 4; i++) {
     PolyCtx *ctx = poly_ctx_new();
-    PolyUOp *n = poly_uop_variable(ctx, "n", lows[i], highs[i], POLY_WEAKINT, 1, true);
+    PolyUOp *n = poly_uop_variable(
+        ctx, "n", poly_arg_int(lows[i]), poly_arg_int(highs[i]), POLY_WEAKINT, 1, true
+    );
     PolyUOp *r =
         poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, n, poly_arg_range(0, POLY_AXIS_GLOBAL));
     PolyUOp *sink = poly_test_kernel_sink(ctx, &r, 1, "symbolic_limit");
@@ -122,8 +124,11 @@ static int bundle_coalesced_loads(PolyDType dtype, bool masked, bool aligned) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *buf = poly_test_program_param(ctx, dtype, 64, 0);
   PolyUOp *r = poly_range(ctx, 4, 0, POLY_AXIS_LOOP);
-  PolyUOp *base = aligned ? poly_uop_variable(ctx, "aligned", 0, 60, POLY_WEAKINT, 4, true)
-                          : poly_mul(ctx, r, poly_const_like_int(ctx, r, 4));
+  PolyUOp *base = aligned
+                      ? poly_uop_variable(
+                            ctx, "aligned", poly_arg_int(0), poly_arg_int(60), POLY_WEAKINT, 4, true
+                        )
+                      : poly_mul(ctx, r, poly_const_like_int(ctx, r, 4));
   PolyUOp *gate = poly_alu2(ctx, POLY_OP_CMPLT, r, poly_const_like_int(ctx, r, 2));
   PolyUOp *loads[4];
   for (int i = 0; i < 4; i++) {
@@ -544,7 +549,8 @@ static bool policy_thread_case(int lower, bool symbolic, bool legacy_cap) {
   PolyUOp *g = policy_range(ctx, 1 << 18, 0, POLY_AXIS_WEAK);
   PolyUOp *value = poly_cast(ctx, g, POLY_FLOAT32);
   if (symbolic) {
-    PolyUOp *n = poly_uop_variable(ctx, "n", lower, 4, POLY_WEAKINT, 1, false);
+    PolyUOp *n =
+        poly_uop_variable(ctx, "n", poly_arg_int(lower), poly_arg_int(4), POLY_WEAKINT, 1, false);
     PolyUOp *r =
         poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, n, poly_arg_range(1, POLY_AXIS_REDUCE));
     value = poly_uop2(
@@ -671,8 +677,9 @@ TEST(codegen, scheduler_symbolic_upcast_thresholds) {
   int64_t bounds[][2] = {{64, 128}, {1, 2}, {1, 128}};
   for (int i = 0; i < 3; i++) {
     PolyCtx *ctx = poly_ctx_new();
-    PolyUOp *size =
-        poly_uop_variable(ctx, "up", bounds[i][0], bounds[i][1], POLY_WEAKINT, 1, false);
+    PolyUOp *size = poly_uop_variable(
+        ctx, "up", poly_arg_int(bounds[i][0]), poly_arg_int(bounds[i][1]), POLY_WEAKINT, 1, false
+    );
     PolyUOp *u =
         poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, size, poly_arg_range(0, POLY_AXIS_UPCAST));
     PolyUOp *r = policy_range(ctx, 8, 1, POLY_AXIS_REDUCE);
@@ -705,7 +712,7 @@ TEST(codegen, scheduler_matvec_requires_integer_output_shape) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *bound = poly_alu2(
       ctx, POLY_OP_MUL, policy_const(ctx, 16),
-      poly_uop_variable(ctx, "matvec", 2, 4, POLY_WEAKINT, 1, false)
+      poly_uop_variable(ctx, "matvec", poly_arg_int(2), poly_arg_int(4), POLY_WEAKINT, 1, false)
   );
   PolyUOp *g =
       poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, bound, poly_arg_range(0, POLY_AXIS_GLOBAL));
@@ -742,7 +749,8 @@ TEST(codegen, scheduler_beam_proves_symbolic_budgets) {
       PolyCtx *ctx = poly_ctx_new();
       PolyUOp *g = policy_range(ctx, 8, 0, POLY_AXIS_GLOBAL);
       PolyUOp *n = poly_uop_variable(
-          ctx, "budget", bounds[type][span][0], bounds[type][span][1], POLY_WEAKINT, 1, false
+          ctx, "budget", poly_arg_int(bounds[type][span][0]), poly_arg_int(bounds[type][span][1]),
+          POLY_WEAKINT, 1, false
       );
       PolyUOp *u = poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, n, poly_arg_range(1, types[type]));
       PolyUOp *sources[] = {g, u};
@@ -765,7 +773,8 @@ TEST(codegen, scheduler_beam_proves_symbolic_budgets) {
 
 TEST(codegen, scheduler_full_axis_uses_proved_symbolic_maximum) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *n = poly_uop_variable(ctx, "whole", 0, 16, POLY_WEAKINT, 16, false);
+  PolyUOp *n =
+      poly_uop_variable(ctx, "whole", poly_arg_int(0), poly_arg_int(16), POLY_WEAKINT, 16, false);
   PolyUOp *r = poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, n, poly_arg_range(0, POLY_AXIS_GLOBAL));
   PolyUOp *sink = poly_test_kernel_sink(ctx, &r, 1, "test");
   PolyRendererCaps caps = {.device = "CPU"};
@@ -849,7 +858,8 @@ TEST(codegen, scheduler_symbolic_shared_memory_admission) {
   int limits[] = {128, 16, 48};
   for (int i = 0; i < 3; i++) {
     PolyCtx *ctx = poly_ctx_new();
-    PolyUOp *size = poly_uop_variable(ctx, "up", 2, 4, POLY_WEAKINT, 1, false);
+    PolyUOp *size =
+        poly_uop_variable(ctx, "up", poly_arg_int(2), poly_arg_int(4), POLY_WEAKINT, 1, false);
     PolyUOp *u =
         poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, size, poly_arg_range(0, POLY_AXIS_UPCAST));
     PolyUOp *r = policy_range(ctx, 8, 1, POLY_AXIS_REDUCE);
@@ -885,7 +895,7 @@ TEST(codegen, scheduler_symbolic_group_reduction) {
   PolyUOp *g = policy_range(ctx, 4, 0, POLY_AXIS_GLOBAL);
   PolyUOp *size = poly_alu2(
       ctx, POLY_OP_MUL, policy_const(ctx, 16),
-      poly_uop_variable(ctx, "rsize", 2, 4, POLY_WEAKINT, 1, false)
+      poly_uop_variable(ctx, "rsize", poly_arg_int(2), poly_arg_int(4), POLY_WEAKINT, 1, false)
   );
   PolyUOp *r =
       poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, size, poly_arg_range(1, POLY_AXIS_REDUCE));
@@ -985,7 +995,7 @@ TEST(codegen, scheduler_matvec_requires_symbolic_divisibility) {
   PolyUOp *g = policy_range(ctx, 16, 0, POLY_AXIS_GLOBAL);
   PolyUOp *size = poly_alu2(
       ctx, POLY_OP_MUL, policy_const(ctx, 3),
-      poly_uop_variable(ctx, "rsize", 2, 4, POLY_WEAKINT, 1, false)
+      poly_uop_variable(ctx, "rsize", poly_arg_int(2), poly_arg_int(4), POLY_WEAKINT, 1, false)
   );
   PolyUOp *r =
       poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, size, poly_arg_range(1, POLY_AXIS_REDUCE));
@@ -1469,7 +1479,8 @@ TEST(codegen, beam_scheduler_padto_guards_loads_and_stores) {
 
 TEST(codegen, beam_scheduler_splits_symbolic_divisible_bound) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *n = poly_uop_variable(ctx, "n", 2, 8, POLY_WEAKINT, 1, false);
+  PolyUOp *n =
+      poly_uop_variable(ctx, "n", poly_arg_int(2), poly_arg_int(8), POLY_WEAKINT, 1, false);
   PolyUOp *four = poly_const_int(ctx, 4);
   PolyUOp *bound = poly_alu2(ctx, POLY_OP_MUL, n, four);
   PolyUOp *r =
@@ -1654,8 +1665,8 @@ TEST(codegen, beam_scratch_samples_scalar_midpoint) {
       .slot = 2,
       .addrspace = POLY_ADDR_ALU,
       .name = "n",
-      .min_val = -9,
-      .max_val = -4,
+      .min_val = poly_arg_int(-9),
+      .max_val = poly_arg_int(-4),
       .has_minmax = true};
   PolyUOp *variable = poly_uop0(ctx, POLY_OP_PARAM, POLY_INT32, poly_arg_param(&arg));
   int n_args = 0;
@@ -1676,8 +1687,8 @@ TEST(codegen, beam_scratch_uses_c_wrapper_scalar_abi) {
       .slot = 0,
       .addrspace = POLY_ADDR_ALU,
       .name = "n",
-      .min_val = 4,
-      .max_val = 9,
+      .min_val = poly_arg_int(4),
+      .max_val = poly_arg_int(9),
       .has_minmax = true};
   PolyUOp *variable = poly_uop0(ctx, POLY_OP_PARAM, POLY_UINT8, poly_arg_param(&arg));
   int n_args = 0;
@@ -1699,8 +1710,8 @@ TEST(codegen, beam_scratch_mixed_arguments_and_symbolic_extent) {
       .slot = 0,
       .addrspace = POLY_ADDR_ALU,
       .name = "n",
-      .min_val = 4,
-      .max_val = 9,
+      .min_val = poly_arg_int(4),
+      .max_val = poly_arg_int(9),
       .has_minmax = true};
   PolyUOp *variable = poly_uop0(ctx, POLY_OP_PARAM, POLY_INT32, poly_arg_param(&var_arg));
   PolyParamArg buf_arg = {.slot = 7, .addrspace = POLY_ADDR_GLOBAL};
@@ -1731,8 +1742,8 @@ TEST(codegen, beam_scratch_scalar_bounds_and_failed_candidate_cleanup) {
       .slot = 1,
       .addrspace = POLY_ADDR_ALU,
       .name = "n",
-      .min_val = INT64_MIN,
-      .max_val = INT64_MAX,
+      .min_val = poly_arg_int(INT64_MIN),
+      .max_val = poly_arg_int(INT64_MAX),
       .has_minmax = true};
   PolyUOp *variable = poly_uop0(ctx, POLY_OP_PARAM, POLY_INT64, poly_arg_param(&arg));
   int n_args = 0;
@@ -1742,7 +1753,7 @@ TEST(codegen, beam_scratch_scalar_bounds_and_failed_candidate_cleanup) {
   free(args[0]);
   free(args);
   PolyUOp *buffer = poly_test_program_param(ctx, POLY_FLOAT64, 8, 0);
-  arg.min_val = arg.max_val = INT64_MAX;
+  arg.min_val = arg.max_val = poly_arg_int(INT64_MAX);
   variable = poly_uop0(ctx, POLY_OP_PARAM, POLY_INT64, poly_arg_param(&arg));
   PolyUOp *src[] = {buffer, variable};
   PolyUOp *sink = poly_test_kernel_sink(ctx, src, 2, "beam_unrepresentable_scalar");
@@ -5210,8 +5221,8 @@ TEST(codegen, simplifying_pow2_floor_ops_precede_generic_floor_decomposition) {
   PolyParamArg arg = {
       .slot = -1,
       .name = "x",
-      .min_val = -16,
-      .max_val = 16,
+      .min_val = poly_arg_int(-16),
+      .max_val = poly_arg_int(16),
       .has_minmax = true,
       .addrspace = POLY_ADDR_ALU,
   };
@@ -5242,12 +5253,18 @@ TEST(codegen, simplifying_pow2_floor_ops_precede_generic_floor_decomposition) {
 
 TEST(codegen, op_owner_default_rule_graphs) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *x =
-      poly_cast(ctx, poly_uop_variable(ctx, "x", -10, 10, POLY_WEAKINT, 1, false), POLY_INT32);
-  PolyUOp *y =
-      poly_cast(ctx, poly_uop_variable(ctx, "y", -10, 10, POLY_WEAKINT, 1, false), POLY_INT32);
-  PolyUOp *p =
-      poly_cast(ctx, poly_uop_variable(ctx, "p", 0, 10, POLY_WEAKINT, 1, false), POLY_INT32);
+  PolyUOp *x = poly_cast(
+      ctx, poly_uop_variable(ctx, "x", poly_arg_int(-10), poly_arg_int(10), POLY_WEAKINT, 1, false),
+      POLY_INT32
+  );
+  PolyUOp *y = poly_cast(
+      ctx, poly_uop_variable(ctx, "y", poly_arg_int(-10), poly_arg_int(10), POLY_WEAKINT, 1, false),
+      POLY_INT32
+  );
+  PolyUOp *p = poly_cast(
+      ctx, poly_uop_variable(ctx, "p", poly_arg_int(0), poly_arg_int(10), POLY_WEAKINT, 1, false),
+      POLY_INT32
+  );
   PolyUOp *one = poly_const_int(ctx, 1), *neg = poly_const_int(ctx, -1);
   PolyUOp *zero = poly_const_int(ctx, 0), *three = poly_const_int(ctx, 3);
   PolyUOp *four = poly_const_int(ctx, 4), *five = poly_const_int(ctx, 5),
@@ -5313,8 +5330,8 @@ TEST(codegen, late_demorgan_uses_renderer_or) {
   PolyParamArg x_arg = {
       .slot = -1,
       .name = "x",
-      .min_val = 0,
-      .max_val = 1,
+      .min_val = poly_arg_int(0),
+      .max_val = poly_arg_int(1),
       .has_minmax = true,
       .addrspace = POLY_ADDR_ALU,
   };
@@ -6339,7 +6356,9 @@ TEST(codegen, render_wgsl_alu_param) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *p0 = program_param(ctx, POLY_FLOAT32, 16, 0);
   PolyUOp *p1 = program_param(ctx, POLY_FLOAT32, 16, 1);
-  PolyUOp *N = poly_uop_param(ctx, 2, poly_uop_variable(ctx, "N", 1, 16, POLY_INT32, 1, false));
+  PolyUOp *N = poly_uop_param(
+      ctx, 2, poly_uop_variable(ctx, "N", poly_arg_int(1), poly_arg_int(16), POLY_INT32, 1, false)
+  );
 
   PolyUOp *range = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, N, poly_arg_int(0));
 
@@ -6541,8 +6560,8 @@ TEST(codegen, add_gpudims_threads_uses_core_id_param) {
   ASSERT_INT_EQ(rewritten->src[0]->src[0]->op, POLY_OP_PARAM);
   ASSERT_TRUE(poly_uop_is_alu_param(rewritten->src[0]->src[0]));
   ASSERT_STR_EQ(poly_uop_expr(rewritten->src[0]->src[0]), "core_id");
-  ASSERT_INT_EQ(rewritten->src[0]->src[0]->arg.param->min_val, 0);
-  ASSERT_INT_EQ(rewritten->src[0]->src[0]->arg.param->max_val, 7);
+  ASSERT_INT_EQ(rewritten->src[0]->src[0]->arg.param->min_val.i, 0);
+  ASSERT_INT_EQ(rewritten->src[0]->src[0]->arg.param->max_val.i, 7);
 
   int n_topo = 0;
   PolyUOp **topo = poly_toposort(ctx, rewritten, &n_topo);
@@ -8742,7 +8761,7 @@ TEST(codegen, image_valid_index_simplifies_two_coordinates_like_tinygrad) {
   PolyUOp *shape = poly_shape_to_shape_arg(ctx, shape_src, 3);
   PolyParamArg image_arg = {.slot = 0, .dtype = POLY_FLOAT16, .addrspace = POLY_ADDR_GLOBAL};
   PolyUOp *image = poly_uop1(ctx, POLY_OP_PARAM, POLY_FLOAT16, shape, poly_arg_param(&image_arg));
-  PolyUOp *y = poly_uop_variable(ctx, "y", 0, 3, POLY_WEAKINT, 1, true);
+  PolyUOp *y = poly_uop_variable(ctx, "y", poly_arg_int(0), poly_arg_int(3), POLY_WEAKINT, 1, true);
   PolyUOp *two = poly_const_int(ctx, 2);
   PolyUOp *x = poly_const_int(ctx, 0);
   PolyUOp *valid = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, y, two, poly_arg_none());

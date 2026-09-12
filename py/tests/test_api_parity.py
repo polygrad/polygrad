@@ -605,7 +605,7 @@ def test_random_crop_indices_remain_consistent_after_readback():
 
 
 def test_python_loader_checks_current_abi_before_use():
-    header = (Path(__file__).resolve().parents[2] / 'src/polygrad.h').read_text()
+    header = (Path(__file__).resolve().parents[2] / 'src/polygrad.h').read_text(encoding='utf-8')
     match = re.search(r'^#define POLYGRAD_ABI_VERSION (\d+)$', header, re.M)
     assert match is not None
     assert _ffi.get_lib().poly_abi_version() == _ffi.POLYGRAD_ABI_VERSION == int(match.group(1))
@@ -634,7 +634,7 @@ def test_python_source_manifest_contains_quoted_dependencies():
     'js/src/core/wasm_common.js',
 ])
 def test_javascript_loaders_expect_the_current_frontend_abi(relative):
-    source = (Path(__file__).resolve().parents[2] / relative).read_text()
+    source = (Path(__file__).resolve().parents[2] / relative).read_text(encoding='utf-8')
     match = re.search(r'const EXPECTED_ABI = (\d+)', source)
     assert match is not None
     assert int(match.group(1)) == _ffi.POLYGRAD_ABI_VERSION

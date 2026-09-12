@@ -2494,6 +2494,32 @@ class TestMovement:
         assert indexed.uop.op_name == "RESHAPE"
         np.testing.assert_allclose(indexed.numpy(), 0)
 
+    @pytest.mark.parametrize('bounds,dtype', [
+        ((0.25, 0.75), 'float32'),
+        ((-float('inf'), float('inf')), 'float32'),
+        ((2**63, 2**64-1), 'uint64'),
+        ((2**130, 2**131), 'weakint'),
+        ((0, 10**600-1), 'weakint'),
+        ((False, True), 'bool'),
+    ])
+    def test_uop_variable_preserves_typed_param_bounds(self, bounds, dtype):
+        from polygrad.uop.ops import UOp
+        value = UOp.variable('typed_bound', *bounds, dtype=dtype, param=True)
+        assert value is not None and value.raw
+        _ffi._lib.poly_uop_str.argtypes = [ctypes.c_void_p]
+        _ffi._lib.poly_uop_str.restype = ctypes.c_void_p
+        free = _ffi._lib.poly_free
+        free.argtypes = [ctypes.c_void_p]
+        free.restype = None
+        pointer = _ffi._lib.poly_uop_str(value.raw)
+        try:
+            text = ctypes.string_at(pointer).decode()
+        finally:
+            free(pointer)
+        assert 'typed_bound' in text
+        for endpoint in bounds:
+            assert str(endpoint) in text
+
     def test_movement_max_shape_preserves_symbolic_dimensions(self):
         t = Tensor.empty(2, UOp.variable('max_extent', 1, 8), 3)
         before = t.uop_physical.raw

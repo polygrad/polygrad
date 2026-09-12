@@ -1575,7 +1575,8 @@ TEST(rangeify, symbolic_reshape_indices_preserve_exact_dimensions) {
 
   /* Pinned schedule/indexing.py:113-127,142-145 flattens and decomposes with
    * exact symbolic in_shape/marg, never their allocation maxima. */
-  PolyUOp *n = poly_uop_variable(ctx, "n", 1, 8, POLY_WEAKINT, 1, false);
+  PolyUOp *n =
+      poly_uop_variable(ctx, "n", poly_arg_int(1), poly_arg_int(8), POLY_WEAKINT, 1, false);
   PolyUOp *two = poly_const_int(ctx, 2);
   PolyUOp *input_shape_srcs[] = {two, n};
   PolyUOp *base = poly_reshape(ctx, poly_buffer_f32(ctx, 2), (int64_t[]){2, 1}, 2);
@@ -1644,8 +1645,8 @@ TEST(rangeify, partial_reshape_matches_fully_canonical_symbolic_suffixes) {
 
   /* Pinned tinygrad/schedule/rangeify.py:68-77 compares movement suffixes
    * after as_shape has run the complete symbolic matcher. */
-  PolyUOp *n = poly_uop_variable(ctx, "n", 1, 8, POLY_INT32, 1, false);
-  PolyUOp *y = poly_uop_variable(ctx, "y", 1, 8, POLY_INT32, 1, false);
+  PolyUOp *n = poly_uop_variable(ctx, "n", poly_arg_int(1), poly_arg_int(8), POLY_INT32, 1, false);
+  PolyUOp *y = poly_uop_variable(ctx, "y", poly_arg_int(1), poly_arg_int(8), POLY_INT32, 1, false);
   PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(1));
   PolyUOp *index_one = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(1));
   PolyUOp *two = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(2));
@@ -5594,7 +5595,9 @@ TEST(rangeify, earliest_split_reduceop_rejects_symbolic_shape) {
   setenv("REDUCEOP_SPLIT_THRESHOLD", "1", 1);
 
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *n = poly_uop_variable(ctx, "split_n", 1, 65536, POLY_WEAKINT, 1, false);
+  PolyUOp *n = poly_uop_variable(
+      ctx, "split_n", poly_arg_int(1), poly_arg_int(65536), POLY_WEAKINT, 1, false
+  );
   PolyUOp *input = poly_test_buffer_var(ctx, POLY_FLOAT32, n, NULL, 0);
   int64_t axes[] = {0};
   PolyUOp *reduce = poly_reduce_axis(ctx, POLY_OP_ADD, input, axes, 1);
@@ -6263,7 +6266,8 @@ TEST(rangeify, define_var_1d_e2e) {
   PolyCtx *ctx = poly_ctx_new();
 
   /* Create symbolic variable N with bounds [1, 16] */
-  PolyUOp *N = poly_uop_variable(ctx, "N", 1, 16, POLY_WEAKINT, 1, false);
+  PolyUOp *N =
+      poly_uop_variable(ctx, "N", poly_arg_int(1), poly_arg_int(16), POLY_WEAKINT, 1, false);
 
   /* Create dynamic 1D buffers: a[N], out[N] */
   int float_id = poly_dtype_id_by_name("float");
@@ -6310,7 +6314,8 @@ TEST(rangeify, define_var_1d_e2e) {
 TEST(rangeify, define_var_2d_e2e) {
   PolyCtx *ctx = poly_ctx_new();
 
-  PolyUOp *N = poly_uop_variable(ctx, "N", 1, 8, POLY_WEAKINT, 1, false);
+  PolyUOp *N =
+      poly_uop_variable(ctx, "N", poly_arg_int(1), poly_arg_int(8), POLY_WEAKINT, 1, false);
 
   /* Create 2D dynamic buffers: a[N,4], out[N,4] */
   int64_t inner_dim = 4;
@@ -6362,7 +6367,8 @@ TEST(rangeify, bind_auto_extract) {
   PolyCtx *ctx = poly_ctx_new();
 
   /* Create symbolic variable N and bind it to 4. */
-  PolyUOp *N = poly_uop_variable(ctx, "N", 1, 16, POLY_WEAKINT, 1, false);
+  PolyUOp *N =
+      poly_uop_variable(ctx, "N", poly_arg_int(1), poly_arg_int(16), POLY_WEAKINT, 1, false);
   PolyUOp *bind_N = poly_uop_bind(ctx, N, 4);
 
   /* Use the binding as the dynamic dimension. Scheduling unbinds it to N. */
@@ -6535,7 +6541,8 @@ TEST(rangeify, schedule_cache_reuses_normalized_sink) {
 TEST(rangeify, define_var_cache_hit) {
   PolyCtx *ctx = poly_ctx_new();
 
-  PolyUOp *N = poly_uop_variable(ctx, "N", 1, 16, POLY_WEAKINT, 1, false);
+  PolyUOp *N =
+      poly_uop_variable(ctx, "N", poly_arg_int(1), poly_arg_int(16), POLY_WEAKINT, 1, false);
   int float_id = poly_dtype_id_by_name("float");
   PolyUOp *buf_a = poly_test_buffer_var_by_id(ctx, float_id, N, NULL, 0, POLY_DEVICE_CPU);
   PolyUOp *buf_out = poly_test_buffer_var_by_id(ctx, float_id, N, NULL, 0, POLY_DEVICE_CPU);

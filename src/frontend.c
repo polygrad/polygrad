@@ -8,6 +8,7 @@
 
 #define _GNU_SOURCE
 #include "frontend.h"
+#include "bigint.h"
 #include "ctx.h"
 #include "engine/realize.h"
 #include "engine/schedule.h"
@@ -65,18 +66,31 @@ PolyUOp *poly_buffer_f64(PolyCtx *ctx, int64_t size) {
   return frontend_new_buffer(ctx, POLY_FLOAT64, size, POLY_DEVICE_AUTO);
 }
 
+PolyUOp *poly_const_int_decimal(PolyCtx *ctx, const char *value) {
+  PolyInt integer = {0};
+  if (!ctx || !value || !poly_int_from_decimal(&integer, value)) {
+    poly_int_free(&integer);
+    return NULL;
+  }
+  PolyUOp *out = poly_uop(ctx, POLY_OP_CONST, POLY_WEAKINT, NULL, 0, poly_int_as_arg(&integer));
+  poly_int_free(&integer);
+  return out;
+}
+
 PolyUOp *poly_uop_variable_by_id(
     PolyCtx *ctx,
     const char *name,
-    int64_t min_val,
-    int64_t max_val,
+    PolyUOp *min_val,
+    PolyUOp *max_val,
     int dtype_id,
     int64_t multiple_of,
     bool param
 ) {
   PolyDType dtype;
-  if (!poly_dtype_by_id(dtype_id, &dtype)) return NULL;
-  return poly_uop_variable(ctx, name, min_val, max_val, dtype, multiple_of, param);
+  if (!min_val || !max_val || min_val->op != POLY_OP_CONST || max_val->op != POLY_OP_CONST ||
+      !poly_dtype_by_id(dtype_id, &dtype))
+    return NULL;
+  return poly_uop_variable(ctx, name, min_val->arg, max_val->arg, dtype, multiple_of, param);
 }
 
 PolyTensor *poly_tensor_empty_by_id(

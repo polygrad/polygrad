@@ -618,7 +618,9 @@ TEST(pat, const_like_preserves_vector_and_symbolic_shape) {
   ASSERT_INT_EQ(shape.ndim, 1);
   ASSERT_INT_EQ(shape.dims[0], 7);
 
-  PolyUOp *n = poly_uop_variable(ctx, "const_like_n", 1, 8, POLY_WEAKINT, 1, false);
+  PolyUOp *n = poly_uop_variable(
+      ctx, "const_like_n", poly_arg_int(1), poly_arg_int(8), POLY_WEAKINT, 1, false
+  );
   PolyUOp *dynamic = poly_test_buffer_var(ctx, POLY_FLOAT32, n, NULL, 0);
   PolyUOp *dynamic_like = poly_const_like_int(ctx, dynamic, 3);
   ASSERT_NOT_NULL(dynamic_like);

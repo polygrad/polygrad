@@ -333,6 +333,102 @@ TEST(ir, round_trip_exact_bigint_arg_current_format) {
   PASS();
 }
 
+TEST(ir, typed_param_bounds_roundtrip) {
+  uint32_t limbs[] = {UINT32_MAX, UINT32_MAX};
+  uint32_t lower_limbs[] = {0, 0x80000000};
+  PolyArg lows[] = {
+      poly_arg_float(.25), poly_arg_float(-INFINITY), poly_arg_bigint(1, lower_limbs, 2),
+      poly_arg_bool(false)};
+  PolyArg highs[] = {
+      poly_arg_float(.75), poly_arg_float(INFINITY), poly_arg_bigint(1, limbs, 2),
+      poly_arg_bool(true)};
+  PolyDType types[] = {POLY_FLOAT32, POLY_FLOAT32, POLY_UINT64, POLY_BOOL};
+  for (int mode = 0; mode < 2; mode++)
+    for (int k = 0; k < 4; k++) {
+      PolyCtx *ctx = poly_ctx_new();
+      PolyUOp *param = poly_uop_variable(ctx, "typed_bound", lows[k], highs[k], types[k], 4, true);
+      PolyParamArg metadata = *param->arg.param;
+      metadata.volatile_ = k % 2 != 0;
+      param = poly_uop(
+          ctx, param->op, param->dtype, param->src, param->n_src, poly_arg_param(&metadata)
+      );
+      PolyIrEntrypoint eps[] = {{.name = "forward", .sink = poly_sink1(ctx, param)}};
+      if (mode)
+        eps[0].sink = poly_uop1(ctx, POLY_OP_LINEAR, POLY_VOID, eps[0].sink, poly_arg_none());
+      PolyIrSpec spec = {ctx, NULL, 0, eps, 1, NULL, 0};
+      int len = 0;
+      uint8_t *bytes = mode ? poly_program_graph_export(&spec, &len) : poly_ir_export(&spec, &len);
+      ASSERT_NOT_NULL(bytes);
+      PolyIrSpec imported;
+      ASSERT_INT_EQ(
+          mode ? poly_program_graph_import(bytes, len, &imported)
+               : poly_ir_import(bytes, len, &imported),
+          0
+      );
+      int count = 0, seen = 0;
+      PolyUOp **topo = poly_toposort(imported.ctx, imported.entrypoints[0].sink, &count);
+      for (int i = 0; i < count; i++)
+        if (topo[i]->op == POLY_OP_PARAM) {
+          const PolyParamArg *arg = topo[i]->arg.param;
+          ASSERT_TRUE(poly_arg_eq(arg->min_val, param->arg.param->min_val));
+          ASSERT_TRUE(poly_arg_eq(arg->max_val, param->arg.param->max_val));
+          ASSERT_TRUE(arg->has_multiple_of);
+          ASSERT_INT_EQ(arg->multiple_of, 4);
+          ASSERT_TRUE(poly_arg_eq(topo[i]->arg, param->arg));
+          seen++;
+        }
+      ASSERT_INT_EQ(seen, 1);
+      poly_ir_spec_free(&imported);
+      poly_ctx_destroy(imported.ctx);
+      /* Reject the old wire version rather than reading scalar tags as i64. */
+      uint8_t version = bytes[4];
+      bytes[4]--;
+      PolyIrSpec invalid;
+      ASSERT_TRUE(
+          (mode ? poly_program_graph_import(bytes, len, &invalid)
+                : poly_ir_import(bytes, len, &invalid)) != 0
+      );
+      bytes[4] = version;
+      if (k == 0) {
+        uint64_t fraction_bits = UINT64_C(0x3fd0000000000000);
+        uint8_t needle[9] = {POLY_ARG_FLOAT};
+        for (int b = 0; b < 8; b++)
+          needle[b + 1] = (uint8_t)(fraction_bits >> (8 * b));
+        int offset = -1;
+        for (int b = 0; b + 9 <= len; b++)
+          if (!memcmp(bytes + b, needle, 9)) {
+            offset = b;
+            break;
+          }
+        ASSERT_TRUE(offset >= 0);
+        bytes[offset] = POLY_ARG_STRING;
+        ASSERT_TRUE(
+            (mode ? poly_program_graph_import(bytes, len, &invalid)
+                  : poly_ir_import(bytes, len, &invalid)) != 0
+        );
+        bytes[offset] = POLY_ARG_FLOAT;
+        uint64_t nan_bits = UINT64_C(0x7ff8000000000000);
+        for (int b = 0; b < 8; b++)
+          bytes[offset + 1 + b] = (uint8_t)(nan_bits >> (8 * b));
+        ASSERT_TRUE(
+            (mode ? poly_program_graph_import(bytes, len, &invalid)
+                  : poly_ir_import(bytes, len, &invalid)) != 0
+        );
+        memcpy(bytes + offset, needle, 9);
+      }
+      for (int cut = 0; cut < len; cut++) {
+        PolyIrSpec truncated;
+        ASSERT_TRUE(
+            (mode ? poly_program_graph_import(bytes, cut, &truncated)
+                  : poly_ir_import(bytes, cut, &truncated)) != 0
+        );
+      }
+      free(bytes);
+      poly_ctx_destroy(ctx);
+    }
+  PASS();
+}
+
 TEST(ir, round_trip_bufferize_opts_integer_identity) {
   const int64_t ids[] = {0, 7, INT64_C(1) << 40, -1};
   /* PGIR and the bound-program graph codec share argument encoding, not

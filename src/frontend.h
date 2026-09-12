@@ -22,11 +22,14 @@ PolyUOp *poly_buffer_by_id(PolyCtx *ctx, int dtype_id, int64_t size);
 PolyUOp *poly_buffer_on_device_by_id(PolyCtx *ctx, int dtype_id, int64_t size, int device_id);
 PolyUOp *poly_buffer_f32(PolyCtx *ctx, int64_t size);
 PolyUOp *poly_buffer_f64(PolyCtx *ctx, int64_t size);
+/* Lossless Python int/JS BigInt adaptation to the existing weakint CONST. */
+PolyUOp *poly_const_int_decimal(PolyCtx *ctx, const char *value);
+/* Scalar CONST endpoints avoid exposing PolyArg's tagged union through FFI. */
 PolyUOp *poly_uop_variable_by_id(
     PolyCtx *ctx,
     const char *name,
-    int64_t min_val,
-    int64_t max_val,
+    PolyUOp *min_val,
+    PolyUOp *max_val,
     int dtype_id,
     int64_t multiple_of,
     bool param

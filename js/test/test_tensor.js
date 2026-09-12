@@ -291,6 +291,27 @@ async function runTensorTests(pg, createRuntime) {
     }
   })
 
+  await test('typed PARAM bounds preserve scalar values and ownership', async () => {
+    const cases = [[.25, .75, 'float32'], [-Infinity, Infinity, 'float32'],
+      [2n**63n, 2n**64n-1n, 'uint64'], [2n**130n, 2n**131n, 'weakint'],
+      [0n, 10n**600n-1n, 'weakint']]
+    for (const [lo, hi, dtype] of cases) {
+      const value = pg.uop.variable('typed_bound', lo, hi, dtype, 1, true)
+      assert(value, 'variable construction failed')
+      const text = value.toString()
+      for (const endpoint of [lo, hi]) {
+        const expected = String(endpoint).replace('Infinity', 'inf')
+        assert(text.includes(expected), `${expected} not preserved: ${text}`)
+      }
+      value.dispose()
+    }
+    const a = pg.uop.variable('key', 0, 1, 'float32', 1, true)
+    const b = pg.uop.variable('key', 0n, 1n, 'float32', 1, true)
+    assert(pg.uop.key(a) === pg.uop.key(b), 'equal numeric bounds must CSE')
+    a.dispose(); b.dispose()
+    assert(pg.uop.variable('bad', NaN, 1, 'float32', 1, true) === null)
+  })
+
   await test('dtype API queries match pinned metadata', async () => {
     const bytes = {bool:1, int8:1, uint8:1, int16:2, uint16:2, int32:4, uint32:4,
       int64:8, uint64:8, float16:2, bfloat16:2, float32:4, float64:8,

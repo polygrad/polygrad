@@ -739,6 +739,21 @@ function createWasmCoreFromModule(Module, device) {
     poly_const_float: Module._poly_const_float,
     poly_const_double: Module._poly_const_double,
     poly_const_int: (ctx, val) => Module._poly_const_int(ctx, BigInt(val)),
+    poly_const_int_decimal: (ctx, val) => {
+      const ptr = allocString(val)
+      try { return Module._poly_const_int_decimal(ctx, ptr) }
+      finally { Module._free(ptr) }
+    },
+    poly_uop_variable_by_id: (ctx, name, lo, hi, dtype, multiple, param) => {
+      const ptr = allocString(name)
+      try { return Module._poly_uop_variable_by_id(ctx, ptr, lo, hi, dtype, BigInt(multiple), param) }
+      finally { Module._free(ptr) }
+    },
+    poly_uop_str: (raw) => {
+      const ptr = Module._poly_uop_str(raw)
+      try { return ptr ? Module.UTF8ToString(ptr) : '' }
+      finally { Module._free(ptr) }
+    },
     poly_const_float_by_id: Module._poly_const_float_by_id,
     poly_const_int_by_id: (ctx, val, dtypeId) =>
       Module._poly_const_int_by_id(ctx, BigInt(val), dtypeId),
@@ -1898,7 +1913,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 78
+  const EXPECTED_ABI = 79
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(

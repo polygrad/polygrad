@@ -9,6 +9,7 @@
 
 #define _POSIX_C_SOURCE 200809L
 #include "engine/schedule.h"
+#include "bigint.h"
 #include "ctx.h"
 #include "utils.h"
 #include "placer.h"
@@ -499,8 +500,8 @@ int poly_estimates_from_uops(
     }
     if (poly_uop_is_alu_param(u) && poly_uop_expr(u) && strcmp(poly_uop_expr(u), "core_id") == 0) {
       int64_t cores_count = 0;
-      if (__builtin_add_overflow(u->arg.param->max_val, INT64_C(1), &cores_count) ||
-          cores_count < 0) {
+      if (!poly_arg_integer_to_i64(u->arg.param->max_val, &cores_count) ||
+          __builtin_add_overflow(cores_count, INT64_C(1), &cores_count) || cores_count < 0) {
         rc = -1;
         break;
       }
@@ -799,8 +800,12 @@ static bool poly_program_info_collect_launch(PolyCtx *ctx, PolyUOp *body, PolyPr
         duplicate |= info->vars[v] == u;
       if (!duplicate) info->vars[info->n_vars++] = u;
       if (u->arg.param->name && strcmp(u->arg.param->name, "core_id") == 0) {
-        int64_t n = u->arg.param->max_val + 1;
-        if (n > 0 && n <= INT32_MAX) info->global_size[0] = (int)n;
+        int64_t n = 0;
+        if (!poly_arg_integer_to_i64(u->arg.param->max_val, &n) || n < 0 || n >= INT32_MAX) {
+          poly_toposort_free(topo);
+          return false;
+        }
+        info->global_size[0] = (int)(n + 1);
       }
     }
     if (!u || u->op != POLY_OP_SPECIAL || u->n_src <= 0 || u->arg.kind != POLY_ARG_STRING) continue;
@@ -3265,6 +3270,17 @@ static PolyUOp *poly_resolve_linear_param(
   return uop;
 }
 
+#ifdef POLY_TESTING
+PolyUOp *poly_test_resolve_linear_param(
+    PolyCtx *ctx,
+    PolyUOp *uop,
+    PolyUOp **inputs,
+    int n_inputs
+) {
+  return poly_resolve_linear_param(ctx, uop, inputs, n_inputs);
+}
+#endif
+
 static int poly_ensure_linear_arg_buffer(PolyCtx *ctx, PolyUOp *uop, bool read) {
   if (!ctx || !uop) return -1;
   if (uop->op == POLY_OP_MSTACK) {
@@ -3509,8 +3525,8 @@ static int poly_commit_resolved_write(PolyCtx *ctx, PolyResolvedLinearArg *arg, 
   return 0;
 }
 
-/* tinygrad@2026-08-22/a9069c177a9d engine/realize.py:exec_kernel selects
- * ProgramInfo.target independently from CALL buffer storage. */
+/* v0.14 engine/realize.py:exec_kernel selects the runtime from the CALL's
+ * exact device identity, not the PROGRAM's renderer target. */
 static int poly_exec_linear_program(
     PolyCtx *ctx,
     PolyUOp *call,
@@ -3526,12 +3542,19 @@ static int poly_exec_linear_program(
   int lanes = poly_linear_lane_count(info, resolved, n_resolved);
   if (!program || program->op != POLY_OP_PROGRAM || !info || lanes <= 0) return -1;
 
+  PolyUOp *devices = call->n_src > 1 ? poly_uop_device_uop_cached(ctx, call->src[1], NULL) : NULL;
+  if (!devices) return -1;
+  int device_lanes = devices->arg.kind == POLY_ARG_STRING_TUPLE ? devices->arg.string_tuple.n : 1;
+  if (device_lanes <= 0) return -1;
+  /* Match zip(call devices, resolved lanes), including globals-free kernels. */
+  if (lanes > device_lanes) lanes = device_lanes;
+
   PolyUOp *device_num = poly_call_device_num_var(ctx, poly_program_kernel_body(program));
   for (int lane = 0; lane < lanes; lane++) {
-    PolyDevice device = poly_device_by_name(info->target);
-    PolyUOp *device_uop = poly_device_uop(ctx, device);
-    /* Tinygrad 2026-08-22 a9069c17 exec_kernel selects the runtime from
-     * ProgramInfo.target even when symbolic folding leaves globals empty. */
+    PolyUOp *device_uop = devices->arg.kind == POLY_ARG_STRING_TUPLE
+                              ? poly_device_uop_from_name(ctx, devices->arg.string_tuple.vals[lane])
+                              : devices;
+    PolyDevice device = poly_device_from_device_uop(device_uop);
     if (!device_uop || device == POLY_DEVICE_AUTO || !poly_device_can_execute(device)) return -1;
 
     PolyRunner runner = {0};

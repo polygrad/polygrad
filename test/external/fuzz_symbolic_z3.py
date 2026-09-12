@@ -10,6 +10,10 @@ tinygrad's weak-index FLOORDIV/FLOORMOD domain, and the fixed mode uses z3
 bit-vectors for typed signed/unsigned wraparound. It is an external/nightly
 proof check, not a replacement for sanitizer-backed libFuzzer or structural
 tinygrad parity probes.
+
+Fixed-width mode is deliberately stricter than the pinned symbolic interval
+rules: its uint8_add_wrap_cmp case also disagrees with Tinygrad v0.14.0.
+Keep that failure visible; it is not a Polygrad-only parity finding.
 """
 
 from __future__ import annotations
@@ -41,11 +45,6 @@ class PolyDType(ctypes.Structure):
         ("bitsize", ctypes.c_uint16),
         ("name", ctypes.c_char_p),
         ("fmt", ctypes.c_char),
-        ("count", ctypes.c_uint16),
-        ("is_ptr", ctypes.c_bool),
-        ("addrspace", ctypes.c_int),
-        ("vcount", ctypes.c_uint16),
-        ("ptr_size", ctypes.c_int64),
     ]
 
 
@@ -53,11 +52,10 @@ class PolyIntTuple(ctypes.Structure):
     _fields_ = [("vals", ctypes.POINTER(ctypes.c_int64)), ("n", ctypes.c_int)]
 
 
-class PolyReduceAxisArg(ctypes.Structure):
+class PolyReduceArg(ctypes.Structure):
     _fields_ = [
         ("op", ctypes.c_int),
-        ("axes", ctypes.POINTER(ctypes.c_int64)),
-        ("n", ctypes.c_int),
+        ("num_axes", ctypes.c_int),
     ]
 
 
@@ -71,25 +69,7 @@ class PolyRangeArg(ctypes.Structure):
 
 
 class PolyParamArg(ctypes.Structure):
-    _fields_ = [
-        ("slot", ctypes.c_int64),
-        ("dtype", PolyDType),
-        ("name", ctypes.c_char_p),
-        ("min_val", ctypes.c_int64),
-        ("max_val", ctypes.c_int64),
-        ("has_minmax", ctypes.c_bool),
-        ("multiple_of", ctypes.c_int64),
-        ("has_multiple_of", ctypes.c_bool),
-        ("addrspace", ctypes.c_int),
-        ("axis", ctypes.c_int32),
-        ("has_axis", ctypes.c_bool),
-        ("device", ctypes.c_char_p),
-        ("devices", ctypes.POINTER(ctypes.c_char_p)),
-        ("n_devices", ctypes.c_int32),
-        ("device_is_tuple", ctypes.c_bool),
-        ("volatile_", ctypes.c_bool),
-    ]
-
+    pass
 
 class PolyBufferizeOptsArg(ctypes.Structure):
     _fields_ = [
@@ -99,7 +79,23 @@ class PolyBufferizeOptsArg(ctypes.Structure):
         ("device_is_tuple", ctypes.c_bool),
         ("addrspace", ctypes.c_int),
         ("removable", ctypes.c_bool),
+        ("device_is_int", ctypes.c_bool),
+        ("device_int", ctypes.c_int64),
     ]
+
+
+class PolyBigInt(ctypes.Structure):
+    _fields_ = [("sign", ctypes.c_int8), ("n_limbs", ctypes.c_uint32),
+                ("limbs", ctypes.POINTER(ctypes.c_uint32))]
+
+
+class PolyTensorCoreArg(ctypes.Structure):
+    # Largest union arm; it determines PolyArg's by-value ABI even though this
+    # integer fuzzer never constructs WMMA. No opaque padding guesses.
+    _fields_ = [("dims", ctypes.c_int * 3), ("dtype_in", PolyDType),
+                ("device", ctypes.c_char_p), ("threads", ctypes.c_int),
+                ("upcast_axes", ctypes.POINTER(ctypes.c_int64 * 2) * 3),
+                ("n_upcast_axes", ctypes.c_int * 3), ("has_upcast_axes", ctypes.c_bool)]
 
 
 class PolyArgValue(ctypes.Union):
@@ -110,16 +106,38 @@ class PolyArgValue(ctypes.Union):
         ("int_tuple", PolyIntTuple),
         ("str", ctypes.c_char_p),
         ("ops", ctypes.c_int),
-        ("reduce_axis", PolyReduceAxisArg),
+        ("reduce", PolyReduceArg),
         ("range", PolyRangeArg),
         ("param", ctypes.POINTER(PolyParamArg)),
         ("bufferize_opts", PolyBufferizeOptsArg),
         ("program_info", ctypes.c_void_p),
+        ("bigint", PolyBigInt),
+        ("tensor_core", PolyTensorCoreArg),
     ]
 
 
 class PolyArg(ctypes.Structure):
     _fields_ = [("kind", ctypes.c_int), ("value", PolyArgValue)]
+
+
+PolyParamArg._fields_ = [
+    ("slot", ctypes.c_int64),
+    ("dtype", PolyDType),
+    ("name", ctypes.c_char_p),
+    ("min_val", PolyArg),
+    ("max_val", PolyArg),
+    ("has_minmax", ctypes.c_bool),
+    ("multiple_of", ctypes.c_int64),
+    ("has_multiple_of", ctypes.c_bool),
+    ("addrspace", ctypes.c_int),
+    ("axis", ctypes.c_int32),
+    ("has_axis", ctypes.c_bool),
+    ("device", ctypes.c_char_p),
+    ("devices", ctypes.POINTER(ctypes.c_char_p)),
+    ("n_devices", ctypes.c_int32),
+    ("device_is_tuple", ctypes.c_bool),
+    ("volatile_", ctypes.c_bool),
+]
 
 
 class PolyUOp(ctypes.Structure):
@@ -135,7 +153,10 @@ PolyUOp._fields_ = [
     ("n_src", ctypes.c_uint16),
     ("arg", PolyArg),
     ("tag", ctypes.c_int32),
+    ("tag_arg", PolyArg),
     ("hash", ctypes.c_uint32),
+    ("addrspace_cached", ctypes.c_bool),
+    ("addrspace_cache", ctypes.c_int),
     ("minmax_cached", ctypes.c_bool),
     ("minmax_vmin", ctypes.c_int64),
     ("minmax_vmax", ctypes.c_int64),
@@ -146,9 +167,21 @@ PolyUOp._fields_ = [
 
 ARG_INT = 1
 ARG_BOOL = 3
-ARG_RANGE = 10
-ARG_PARAM = 16
-AXIS_LOOP = 3
+ARG_RANGE = 9
+ARG_PARAM = 15
+ARG_BIGINT = 16
+AXIS_LOOP = 11
+
+
+def integer_arg(arg: PolyArg) -> int:
+    if arg.kind == ARG_INT:
+        return int(arg.value.i)
+    if arg.kind == ARG_BOOL:
+        return int(arg.value.b)
+    if arg.kind == ARG_BIGINT:
+        big = arg.value.bigint
+        return int(big.sign) * sum(int(big.limbs[i]) << (32 * i) for i in range(big.n_limbs))
+    raise NotImplementedError(f"non-integer bound/literal kind {arg.kind}")
 
 
 def ptr_key(u: PolyUOpPtr) -> int:
@@ -173,8 +206,17 @@ def arg_none() -> PolyArg:
 
 def arg_int(value: int) -> PolyArg:
     a = PolyArg()
-    a.kind = ARG_INT
-    a.value.i = int(value)
+    value = int(value)
+    if -(1 << 63) <= value < (1 << 63):
+        a.kind = ARG_INT
+        a.value.i = value
+    else:
+        magnitude = abs(value)
+        count = (magnitude.bit_length() + 31) // 32
+        limbs = (ctypes.c_uint32 * count)(*((magnitude >> (32*i)) & 0xffffffff for i in range(count)))
+        a.kind = ARG_BIGINT
+        a.value.bigint = PolyBigInt(-1 if value < 0 else 1, count, limbs)
+        a._limbs = limbs  # Keep caller storage alive until the core copies it.
     return a
 
 
@@ -183,6 +225,12 @@ def load_lib() -> ctypes.CDLL:
     if not path.exists():
         raise SystemExit(f"libpolygrad not found: {path}. Build with `make build/libpolygrad.so`.")
     lib = ctypes.CDLL(str(path))
+    # These raw layouts and enum values are tied to this ABI. A new core must
+    # stop here until the declarations are reviewed, not corrupt ctypes calls.
+    lib.poly_abi_version.restype = ctypes.c_int
+    lib.poly_abi_version.argtypes = []
+    if (abi := lib.poly_abi_version()) != 79:
+        raise SystemExit(f"Z3 harness requires reviewed ABI79 layouts; core has ABI{abi}")
 
     lib.poly_ctx_new.restype = ctypes.c_void_p
     lib.poly_ctx_new.argtypes = []
@@ -201,7 +249,7 @@ def load_lib() -> ctypes.CDLL:
     lib.poly_dtype_id_by_name.argtypes = [ctypes.c_char_p]
     lib.poly_uop_variable_by_id.restype = PolyUOpPtr
     lib.poly_uop_variable_by_id.argtypes = [
-        ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int64, ctypes.c_int64,
+        ctypes.c_void_p, ctypes.c_char_p, PolyUOpPtr, PolyUOpPtr,
         ctypes.c_int, ctypes.c_int64, ctypes.c_bool,
     ]
     lib.poly_alu1.restype = PolyUOpPtr
@@ -268,7 +316,8 @@ class Poly:
     def var_typed(self, dtype: PolyDType, name: str, lo: int, hi: int) -> PolyUOpPtr:
         dtype_id = self.lib.poly_dtype_id_by_name(dtype_name(dtype).encode())
         return self.lib.poly_uop_variable_by_id(
-            self.ctx, name.encode(), lo, hi, dtype_id, 1, False,
+            self.ctx, name.encode(), self.const_typed(self.weakint, lo),
+            self.const_typed(self.weakint, hi), dtype_id, 1, False,
         )
 
     def range(self, bound: PolyUOpPtr, axis_id: int, dtype: PolyDType | None = None) -> PolyUOpPtr:
@@ -314,7 +363,7 @@ class Poly:
                 arg = f" arg={bool(node.arg.value.b)}"
             elif node.arg.kind == ARG_PARAM and node.arg.value.param:
                 var = node.arg.value.param.contents
-                arg = f" arg=({var.name.decode()},{var.min_val},{var.max_val})"
+                arg = f" arg=({var.name.decode()},{integer_arg(var.min_val)},{integer_arg(var.max_val)})"
             lines.append(f"{'  ' * depth}{op}:{dtype_name(node.dtype)}{arg}")
             if depth >= max_depth:
                 if node.n_src:
@@ -430,11 +479,11 @@ class Z3Translator:
         if op == "CONST":
             if node.arg.kind == ARG_BOOL:
                 out = z3.BoolVal(bool(node.arg.value.b), ctx=self.ctx)
-            elif node.arg.kind == ARG_INT:
+            elif node.arg.kind in (ARG_INT, ARG_BIGINT):
                 out = (
-                    z3.BitVecVal(int(node.arg.value.i), node.dtype.bitsize, ctx=self.ctx)
+                    z3.BitVecVal(integer_arg(node.arg), node.dtype.bitsize, ctx=self.ctx)
                     if self.fixed_width and not dtype_is_bool(node.dtype)
-                    else z3.IntVal(int(node.arg.value.i), ctx=self.ctx)
+                    else z3.IntVal(integer_arg(node.arg), ctx=self.ctx)
                 )
             else:
                 raise NotImplementedError(f"unsupported CONST arg kind {node.arg.kind}")
@@ -443,8 +492,8 @@ class Z3Translator:
             if not param.has_minmax or param.addrspace != 3:
                 raise NotImplementedError(f"non-variable {op}")
             name = param.name.decode()
-            lo = int(param.min_val)
-            hi = int(param.max_val)
+            lo = integer_arg(param.min_val)
+            hi = integer_arg(param.max_val)
             var_key = f"var:{name}:{dtype_name(node.dtype)}"
             out = self.z3_vars.get(var_key)
             if out is None:
@@ -604,25 +653,25 @@ def random_factor(
 
 
 def random_div_expr(poly: Poly, rng: random.Random, variables: list[PolyUOpPtr]) -> PolyUOpPtr:
-    factors = variables + [poly.const_typed(poly.index, v) for v in [1, 2, 3, 4, 7, 9, 16, 33]]
+    factors = variables + [poly.const_typed(poly.weakint, v) for v in [1, 2, 3, 4, 7, 9, 16, 33]]
     for _ in range(2):
         factors.append(poly.alu2("MUL", rng.choice(variables), rng.choice(variables)))
     for _ in range(2):
         factors.append(poly.alu2("ADD", rng.choice(variables), rng.choice(factors)))
     ranges = [
-        poly.range(random_factor(poly, rng, factors, poly.index), i, poly.index)
+        poly.range(random_factor(poly, rng, factors, poly.weakint), i, poly.weakint)
         for i in range(4)
     ]
 
     def term() -> PolyUOpPtr:
-        out = poly.alu2("MUL", rng.choice(ranges), random_factor(poly, rng, factors, poly.index))
+        out = poly.alu2("MUL", rng.choice(ranges), random_factor(poly, rng, factors, poly.weakint))
         return poly.alu1("NEG", out) if rng.randrange(4) == 0 else out
 
     expr = term()
     for _ in range(rng.randint(1, 4)):
         expr = poly.alu2("ADD", expr, term())
 
-    den = random_factor(poly, rng, factors, poly.index)
+    den = random_factor(poly, rng, factors, poly.weakint)
     if rng.randrange(4) == 0:
         den = poly.alu1("NEG", den)
     return poly.alu2(rng.choice(["FLOORDIV", "FLOORMOD"]), expr, den)
@@ -803,6 +852,19 @@ def prove_equivalent(
 
 def run(args: argparse.Namespace) -> int:
     lib = load_lib()
+    poly = Poly(lib)
+    try:
+        for value in (2**64-1, 2**130, -2**130):
+            variable = poly.var(f"abi_{value}", value, value)
+            param = variable.contents.arg.value.param.contents
+            assert integer_arg(param.min_val) == integer_arg(param.max_val) == value
+        ranged = poly.range(poly.const(4), 17)
+        assert ranged.contents.arg.kind == ARG_RANGE
+        assert ranged.contents.arg.value.range.axis_id == 17
+        assert ranged.contents.arg.value.range.axis_type == AXIS_LOOP
+    finally:
+        poly.close()
+    print("Z3 harness ABI79: typed scalar and RANGE controls pass")
     rng = random.Random(args.seed)
     skipped = 0
     checked = 0
@@ -844,9 +906,9 @@ def run(args: argparse.Namespace) -> int:
             elif args.mode == "div":
                 upper_bounds = [1, 2, 3, 16, 33, 53, 64, 256]
                 variables = [
-                    poly.var_typed(poly.index, "i", 1, rng.choice(upper_bounds)),
-                    poly.var_typed(poly.index, "j", 1, rng.choice(upper_bounds)),
-                    poly.var_typed(poly.index, "k", 1, rng.choice(upper_bounds)),
+                    poly.var_typed(poly.weakint, "i", 1, rng.choice(upper_bounds)),
+                    poly.var_typed(poly.weakint, "j", 1, rng.choice(upper_bounds)),
+                    poly.var_typed(poly.weakint, "k", 1, rng.choice(upper_bounds)),
                 ]
                 expr = random_div_expr(poly, rng, variables)
             elif args.mode == "fixed":

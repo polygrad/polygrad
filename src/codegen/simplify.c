@@ -9,6 +9,7 @@
 #include <limits.h>
 
 #include "uop/upat.h"
+#include "uop/symbolic.h"
 #include "polygrad.h"
 #include "bigint.h"
 #include "ctx.h"
@@ -531,16 +532,6 @@ static bool is_external_leaf(PolyUOp *u) {
 
 /* Pointer-key map helpers (mirror src/uop/ops.c). */
 
-static PolyUOp *make_reduce_param(
-    PolyCtx *ctx,
-    const char *name,
-    PolyDType dt,
-    int64_t vmin,
-    int64_t vmax
-) {
-  return poly_uop_variable(ctx, name, vmin, vmax, dt, 1, true);
-}
-
 /* CONST in a target dtype, value taken as a double and re-encoded into the
  * arg kind matching the dtype. Sole reason for existing: ensures we never
  * construct a CONST with mismatched dtype/arg.kind (the bug fixed in
@@ -1019,10 +1010,8 @@ static PolyUOp *reduce_collapse(PolyCtx *ctx, PolyUOp *red, PolyUOp *u, PolyPatt
         if (poly_map_get(included_map, poly_ptr_hash(s), s, poly_ptr_eq)) continue;
         if (poly_map_get(replaces_map, poly_ptr_hash(s), s, poly_ptr_eq)) continue;
         if (is_external_leaf(s)) continue;
-        int64_t vmin, vmax;
-        poly_uop_minmax_ex(ctx, s, cache, &vmin, &vmax);
         snprintf(namebuf, sizeof(namebuf), "in%d", n_repl);
-        PolyUOp *dv = make_reduce_param(ctx, namebuf, s->dtype, vmin, vmax);
+        PolyUOp *dv = poly_uop_variable_like_bounds(ctx, namebuf, s);
         if (!dv) goto fail;
         from_arr[n_repl] = s;
         to_arr[n_repl] = dv;

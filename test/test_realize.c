@@ -5343,7 +5343,8 @@ TEST(realize, transform_to_call_preserves_symbolic_reshape_shape_source) {
    * that callify preserves the exact target shape-value graph. */
   PolyUOp *source = poly_buffer_f32(ctx, 2);
   source = poly_reshape(ctx, source, (int64_t[]){1, 2}, 2);
-  PolyUOp *n = poly_uop_variable(ctx, "n", 1, 8, POLY_WEAKINT, 1, false);
+  PolyUOp *n =
+      poly_uop_variable(ctx, "n", poly_arg_int(1), poly_arg_int(8), POLY_WEAKINT, 1, false);
   PolyUOp *two = poly_const_int(ctx, 2);
   PolyUOp *shape_srcs[] = {n, two};
   PolyUOp *shape = poly_uop(ctx, POLY_OP_STACK, POLY_WEAKINT, shape_srcs, 2, poly_arg_none());
@@ -5392,7 +5393,8 @@ TEST(realize, symbolic_reshape_callify_runs_nonmax_binding) {
    * the exact symbolic root before replaying outer views. */
   PolyUOp *base = poly_buffer_f32(ctx, 2);
   PolyUOp *source = poly_reshape(ctx, base, (int64_t[]){1, 2}, 2);
-  PolyUOp *n = poly_uop_variable(ctx, "n_nonmax", 1, 8, POLY_WEAKINT, 1, false);
+  PolyUOp *n =
+      poly_uop_variable(ctx, "n_nonmax", poly_arg_int(1), poly_arg_int(8), POLY_WEAKINT, 1, false);
   PolyUOp *shape_srcs[] = {n, poly_const_int(ctx, 2)};
   PolyUOp *shape = poly_uop(ctx, POLY_OP_STACK, POLY_WEAKINT, shape_srcs, 2, poly_arg_none());
   PolyUOp *expanded = poly_expand_uop(ctx, source, shape_srcs, 2);
@@ -5437,7 +5439,8 @@ TEST(realize, transform_to_call_preserves_scalar_movement_shape_sources) {
 
   PolyUOp *reshape_value =
       poly_alu2(ctx, POLY_OP_ADD, poly_buffer_f32(ctx, 8), poly_const_float(ctx, 1.0f));
-  PolyUOp *n = poly_uop_variable(ctx, "n", 1, 8, POLY_WEAKINT, 1, false);
+  PolyUOp *n =
+      poly_uop_variable(ctx, "n", poly_arg_int(1), poly_arg_int(8), POLY_WEAKINT, 1, false);
   PolyUOp *reshape_src[] = {reshape_value, n};
   PolyUOp *reshape = poly_uop(ctx, POLY_OP_RESHAPE, POLY_FLOAT32, reshape_src, 2, poly_arg_none());
   ASSERT_NOT_NULL(reshape);
@@ -5580,7 +5583,8 @@ TEST(realize, linear_with_vars_then_run_vecadd) {
 TEST(realize, run_linear_uses_bind_default_from_ctx_buffers) {
   PolyCtx *ctx = poly_ctx_new();
 
-  PolyUOp *N = poly_uop_variable(ctx, "N", 1, 16, POLY_WEAKINT, 1, false);
+  PolyUOp *N =
+      poly_uop_variable(ctx, "N", poly_arg_int(1), poly_arg_int(16), POLY_WEAKINT, 1, false);
   PolyUOp *bind_N = poly_uop_bind(ctx, N, 4);
 
   int f32 = poly_dtype_id_by_name("float32");
@@ -5639,7 +5643,8 @@ TEST(realize, run_linear_uses_bind_default_from_ctx_buffers) {
 TEST(realize, run_linear_dynamic_var_override_from_ctx_buffers) {
   PolyCtx *ctx = poly_ctx_new();
 
-  PolyUOp *N = poly_uop_variable(ctx, "N", 1, 16, POLY_WEAKINT, 1, false);
+  PolyUOp *N =
+      poly_uop_variable(ctx, "N", poly_arg_int(1), poly_arg_int(16), POLY_WEAKINT, 1, false);
   PolyUOp *a = poly_test_buffer_var(ctx, POLY_FLOAT32, N, NULL, 0);
   PolyUOp *out = poly_test_buffer_var(ctx, POLY_FLOAT32, N, NULL, 0);
   PolyUOp *add = poly_alu2(ctx, POLY_OP_ADD, a, poly_const_float(ctx, 1.0));
@@ -6765,7 +6770,8 @@ TEST(realize, poly_jit_replays_symbolic_input_view_with_current_bind) {
   PolyTensor *input =
       initialized_f32_tensor(ctx, input_shape, 1, input_data, POLY_DEVICE_CPU, NULL);
 
-  PolyUOp *i = poly_uop_variable(ctx, "i", 0, 4, POLY_WEAKINT, 1, false);
+  PolyUOp *i =
+      poly_uop_variable(ctx, "i", poly_arg_int(0), poly_arg_int(4), POLY_WEAKINT, 1, false);
   PolyUOp *size_2 = poly_const_int(ctx, 2);
   PolyUOp *capture_start = poly_uop_bind(ctx, i, 2);
   PolyUOp *capture_starts[] = {capture_start};
@@ -7319,7 +7325,8 @@ TEST(realize, poly_jit_accepts_replay_buffer_size_mismatch_like_tinygrad) {
 TEST(realize, poly_jit_rejects_conflicting_runtime_var_override) {
   PolyCtx *ctx = poly_ctx_new();
 
-  PolyUOp *N = poly_uop_variable(ctx, "N", 1, 16, POLY_WEAKINT, 1, false);
+  PolyUOp *N =
+      poly_uop_variable(ctx, "N", poly_arg_int(1), poly_arg_int(16), POLY_WEAKINT, 1, false);
   PolyUOp *bind_N = poly_uop_bind(ctx, N, 4);
   ASSERT_NOT_NULL(N);
   ASSERT_NOT_NULL(bind_N);
@@ -7588,7 +7595,8 @@ TEST(realize, bound_view_materialization_executes_runtime_extent) {
   int f32 = poly_dtype_id_by_name("float32");
   PolyTensor *x = initialized_f32_tensor(ctx, shape, 1, x_data, POLY_DEVICE_CPU, NULL);
 
-  PolyUOp *n = poly_uop_variable(ctx, "n", 1, 8, POLY_WEAKINT, 1, false);
+  PolyUOp *n =
+      poly_uop_variable(ctx, "n", poly_arg_int(1), poly_arg_int(8), POLY_WEAKINT, 1, false);
   PolyUOp *bound_n = poly_uop_bind(ctx, n, 4);
   PolyUOp *starts[1] = {poly_const_int(ctx, 0)};
   PolyUOp *sizes[1] = {bound_n};

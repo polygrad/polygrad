@@ -16,7 +16,7 @@ import sys
 _lib = None
 OPS = {}
 _has_cuda_ffi = False
-POLYGRAD_ABI_VERSION = 78
+POLYGRAD_ABI_VERSION = 79
 
 # --- Opaque pointer type (always available) ---
 _ptr = ctypes.c_void_p
@@ -321,6 +321,8 @@ def _declare_signatures(lib):
 
     lib.poly_const_int.restype = _ptr
     lib.poly_const_int.argtypes = [_ptr, ctypes.c_int64]
+    lib.poly_const_int_decimal.restype = _ptr
+    lib.poly_const_int_decimal.argtypes = [_ptr, ctypes.c_char_p]
 
     lib.poly_contiguous.restype = _ptr
     lib.poly_contiguous.argtypes = [_ptr, _ptr]
@@ -664,7 +666,7 @@ def _declare_signatures(lib):
     # --- Current UOp.variable / UOp.bind storage topology ---
     lib.poly_uop_variable_by_id.restype = _ptr
     lib.poly_uop_variable_by_id.argtypes = [
-        _ptr, ctypes.c_char_p, ctypes.c_int64, ctypes.c_int64,
+        _ptr, ctypes.c_char_p, _ptr, _ptr,
         ctypes.c_int, ctypes.c_int64, ctypes.c_bool,
     ]
 

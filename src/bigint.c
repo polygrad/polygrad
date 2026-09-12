@@ -686,6 +686,19 @@ int poly_arg_integer_cmp_float(PolyArg integer, double value) {
   return float_sign < 0 ? -magnitude_cmp : magnitude_cmp;
 }
 
+int poly_arg_python_numeric_cmp(PolyArg a, PolyArg b, bool *ok) {
+  bool ai = a.kind == POLY_ARG_BOOL || a.kind == POLY_ARG_INT || a.kind == POLY_ARG_BIGINT;
+  bool bi = b.kind == POLY_ARG_BOOL || b.kind == POLY_ARG_INT || b.kind == POLY_ARG_BIGINT;
+  *ok = true;
+  if (ai && bi) return poly_arg_integer_cmp(a, b, ok);
+  if (ai && b.kind == POLY_ARG_FLOAT && !isnan(b.f)) return poly_arg_integer_cmp_float(a, b.f);
+  if (a.kind == POLY_ARG_FLOAT && !isnan(a.f) && bi) return -poly_arg_integer_cmp_float(b, a.f);
+  if (a.kind == POLY_ARG_FLOAT && b.kind == POLY_ARG_FLOAT && !isnan(a.f) && !isnan(b.f))
+    return (a.f > b.f) - (a.f < b.f);
+  *ok = false;
+  return 0;
+}
+
 bool poly_arg_python_numeric_eq(PolyArg a, PolyArg b) {
   /* Tinygrad UPat.match uses Python == for literal arguments. */
   bool a_int = a.kind == POLY_ARG_BOOL || a.kind == POLY_ARG_INT || a.kind == POLY_ARG_BIGINT;

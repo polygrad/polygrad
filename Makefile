@@ -125,8 +125,14 @@ test-runtime-wasm: build/test_schedule_runtime.js
 	$(SAN_RUN) $(NODE) $< --require-no-skips reduce_simplify.owner_uint64_collapse_preserves_upper_clamp
 	$(SAN_RUN) $(NODE) $< --require-no-skips reduce_simplify.owner_range_mod_admission_and_first_match
 	$(SAN_RUN) $(NODE) $< --require-no-skips schedule_runtime.owner_call_arguments_exclude_only_bound_variables
+	$(SAN_RUN) $(NODE) $< --require-no-skips schedule_runtime.closeout_resolve_preserves_invocation_graph_metadata
+	$(SAN_RUN) $(NODE) $< --require-no-skips reduce_simplify.closeout_float_parameter_does_not_invent_finite_bounds
+	$(SAN_RUN) $(NODE) $< --require-no-skips uop.typed_param_bounds_identity_and_ownership
+	$(SAN_RUN) $(NODE) $< --require-no-skips uop.typed_param_bounds_symbolic_consumers
+	$(SAN_RUN) $(NODE) $< --require-no-skips uop.typed_param_bounds_long_repr
+	$(SAN_RUN) $(NODE) $< --require-no-skips ir.typed_param_bounds_roundtrip
 
-build/test_schedule_runtime.js: $(WASM_SRC) test/test_main.c test/test_schedule_runtime.c test/test_uop.c test/test_sym.c test/test_reduce_simplify.c test/test_harness.h $(PROJECT_HEADERS) Makefile
+build/test_schedule_runtime.js: $(WASM_SRC) test/test_main.c test/test_schedule_runtime.c test/test_uop.c test/test_sym.c test/test_reduce_simplify.c test/test_ir.c test/test_harness.h $(PROJECT_HEADERS) Makefile
 	@mkdir -p build
 	EMSDK_PYTHON=$(EMSDK_PYTHON) $(EMCC) $(EMCC_CFLAGS_COMMON) -DPOLY_TESTING -O1 -g \
 		-fsanitize=address,undefined -fno-sanitize-recover=all -s ASSERTIONS=1 -s ALLOW_MEMORY_GROWTH=1 \

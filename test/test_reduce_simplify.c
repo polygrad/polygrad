@@ -21,6 +21,43 @@
 /* helpers */
 
 #ifdef POLY_TESTING
+TEST(reduce_simplify, closeout_float_parameter_does_not_invent_finite_bounds) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *r = poly_range(ctx, 4, 0, POLY_AXIS_REDUCE);
+  PolyUOp *buf = poly_test_program_param(ctx, POLY_FLOAT32, 1, 0);
+  PolyUOp *zero = poly_const_int(ctx, 0);
+  PolyUOp *load = poly_uop1(
+      ctx, POLY_OP_LOAD, POLY_FLOAT32, poly_uop_index(ctx, buf, &zero, 1), poly_arg_none()
+  );
+  PolyUOp *sum = poly_alu2(ctx, POLY_OP_ADD, poly_cast(ctx, r, POLY_FLOAT32), load);
+  PolyUOp *value = poly_uop3(
+      ctx, POLY_OP_WHERE, POLY_WEAKINT,
+      poly_alu2(ctx, POLY_OP_CMPLT, sum, poly_const_float(ctx, 1e30)), poly_const_int(ctx, 1), zero,
+      poly_arg_none()
+  );
+  PolyUOp *sources[] = {value, r};
+  PolyUOp *red =
+      poly_uop(ctx, POLY_OP_REDUCE, value->dtype, sources, 2, poly_arg_reduce(POLY_OP_ADD, 0));
+  PolyUOp *out = poly_test_reduce_collapse(ctx, red);
+  /* Tinygrad leaves this reduction intact; a valid optional collapse must
+   * still return zero when the loaded value is above the comparison cut. */
+  bool correct = !out;
+  if (out) {
+    PolyUOp *high = poly_const_float(ctx, 1e31);
+    PolyUOp *bound = poly_uop_substitute(ctx, out, &load, &high, 1);
+    bound = poly_graph_rewrite(ctx, bound, poly_symbolic());
+    int64_t result = -1;
+    correct = poly_uop_const_i64(bound, &result) == 0 && result == 0;
+    if (!correct)
+      fprintf(
+          stderr, "unbounded float reduction returned %lld instead of zero\n", (long long)result
+      );
+  }
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
 TEST(reduce_simplify, owner_uint64_collapse_preserves_upper_clamp) {
   /* v0.14 reduce_collapse must retain min(loaded_value >> 62, 2), including
    * when the original uint64 storage value exceeds INT64_MAX. */
@@ -85,7 +122,8 @@ TEST(reduce_simplify, owner_range_mod_admission_and_first_match) {
   }
   PolyCtx *ctx = poly_ctx_new();
   PolyMap *state = poly_map_new(16);
-  PolyUOp *extent = poly_uop_variable(ctx, "extent", 3, 12, POLY_WEAKINT, 1, false);
+  PolyUOp *extent =
+      poly_uop_variable(ctx, "extent", poly_arg_int(3), poly_arg_int(12), POLY_WEAKINT, 1, false);
   PolyUOp *r =
       poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, extent, poly_arg_range(0, POLY_AXIS_LOOP));
   PolyUOp *mod =
@@ -159,7 +197,8 @@ TEST(reduce_simplify, domains_boolean_interval_and_parameter_gate) {
   for (int mode = 0; mode < 2; mode++) {
     PolyCtx *ctx = poly_ctx_new();
     PolyUOp *r = poly_range(ctx, 8, 0, POLY_AXIS_REDUCE);
-    PolyUOp *p = poly_uop_variable(ctx, "gate", 0, 1, POLY_BOOL, 1, true);
+    PolyUOp *p =
+        poly_uop_variable(ctx, "gate", poly_arg_int(0), poly_arg_int(1), POLY_BOOL, 1, true);
     PolyUOp *upper = poly_alu2(ctx, POLY_OP_CMPLT, r, poly_const_like_int(ctx, r, 6));
     PolyUOp *lower =
         poly_logical_not(ctx, poly_alu2(ctx, POLY_OP_CMPLT, r, poly_const_like_int(ctx, r, 2)));
@@ -227,7 +266,8 @@ TEST(reduce_simplify, domains_load_collapse_requires_one_range) {
 TEST(reduce_simplify, tail_invalid_guard_moves_outside_reduce) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *r = poly_range(ctx, 8, 0, POLY_AXIS_REDUCE);
-  PolyUOp *gate = poly_uop_variable(ctx, "gate", 0, 1, POLY_BOOL, 1, true);
+  PolyUOp *gate =
+      poly_uop_variable(ctx, "gate", poly_arg_int(0), poly_arg_int(1), POLY_BOOL, 1, true);
   PolyUOp *invalid = poly_uop_const(ctx, poly_arg_invalid(), POLY_WEAKINT);
   PolyUOp *v = poly_uop3(ctx, POLY_OP_WHERE, POLY_WEAKINT, gate, r, invalid, poly_arg_none());
   PolyUOp *src[] = {v, r};
@@ -245,7 +285,8 @@ TEST(reduce_simplify, tail_invalid_guard_moves_outside_reduce) {
 TEST(reduce_simplify, tail_positive_factor_uses_core_subtraction) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *r = poly_range(ctx, 8, 0, POLY_AXIS_REDUCE);
-  PolyUOp *y = poly_uop_variable(ctx, "factor", 1, 3, POLY_WEAKINT, 1, true);
+  PolyUOp *y =
+      poly_uop_variable(ctx, "factor", poly_arg_int(1), poly_arg_int(3), POLY_WEAKINT, 1, true);
   PolyUOp *c = poly_const_like_int(ctx, r, 10);
   PolyUOp *expr = poly_alu2(ctx, POLY_OP_CMPLT, poly_mul(ctx, r, y), c);
   PolyUOp *out = poly_test_reduce_collapse_rewrite(ctx, expr);
@@ -266,8 +307,10 @@ static PolyUOp *tail_external_reduction(PolyCtx *ctx, int width, PolyUOp **exter
   for (int i = 0; i < width; i++) {
     char name[24];
     snprintf(name, sizeof(name), "v%d", i);
-    external[i] =
-        poly_cast(ctx, poly_uop_variable(ctx, name, 0, 9, POLY_INT32, 1, true), POLY_INT64);
+    external[i] = poly_cast(
+        ctx, poly_uop_variable(ctx, name, poly_arg_int(0), poly_arg_int(9), POLY_INT32, 1, true),
+        POLY_INT64
+    );
     PolyUOp *v =
         poly_uop3(ctx, POLY_OP_WHERE, POLY_INT64, cond, external[i], zero, poly_arg_none());
     value = poly_add(ctx, value, v);
@@ -359,7 +402,8 @@ static bool bundle_wide_collapse(bool parameter_gate) {
     value = poly_add(ctx, value, src[i]);
   }
   if (parameter_gate) {
-    PolyUOp *p = poly_uop_variable(ctx, "gate", 0, 1, POLY_BOOL, 1, true);
+    PolyUOp *p =
+        poly_uop_variable(ctx, "gate", poly_arg_int(0), poly_arg_int(1), POLY_BOOL, 1, true);
     PolyUOp *gate = poly_alu2(
         ctx, POLY_OP_AND, p, poly_alu2(ctx, POLY_OP_CMPLT, value, poly_const_int(ctx, 20))
     );
@@ -404,7 +448,8 @@ TEST(reduce_simplify, bundle_loaded_index_preserves_strong_overflow) {
   PolyUOp *buf = poly_test_program_param(ctx, POLY_INT32, 1, 0);
   PolyUOp *zero = poly_const_int(ctx, 0);
   PolyUOp *x = poly_uop_index(ctx, buf, &zero, 1);
-  PolyUOp *y = poly_uop_variable(ctx, "offset", 1, 3, POLY_INT32, 1, true);
+  PolyUOp *y =
+      poly_uop_variable(ctx, "offset", poly_arg_int(1), poly_arg_int(3), POLY_INT32, 1, true);
   PolyUOp *sum = poly_alu2(ctx, POLY_OP_ADD, x, y);
   PolyUOp *before = poly_alu2(ctx, POLY_OP_CMPLT, sum, poly_const_like_int(ctx, x, 0));
   PolyUOp *after = poly_graph_rewrite(ctx, before, poly_pm_load_collapse());
@@ -419,7 +464,8 @@ TEST(reduce_simplify, bundle_loaded_index_accepts_commuted_weak_add) {
   PolyUOp *buf = poly_test_program_param(ctx, POLY_INT32, 1, 0);
   PolyUOp *zero = poly_const_int(ctx, 0);
   PolyUOp *x = poly_cast(ctx, poly_uop_index(ctx, buf, &zero, 1), POLY_WEAKINT);
-  PolyUOp *y = poly_uop_variable(ctx, "offset", 1, 3, POLY_WEAKINT, 1, true);
+  PolyUOp *y =
+      poly_uop_variable(ctx, "offset", poly_arg_int(1), poly_arg_int(3), POLY_WEAKINT, 1, true);
   PolyUOp *sum = poly_alu2(ctx, POLY_OP_ADD, y, x);
   PolyUOp *before = poly_alu2(ctx, POLY_OP_CMPLT, sum, poly_const_like_int(ctx, x, 0));
   PolyUOp *after = poly_graph_rewrite(ctx, before, poly_pm_load_collapse());

@@ -554,6 +554,49 @@ static napi_value napi_poly_const_int(napi_env env, napi_callback_info info) {
   return make_external(env, poly_const_int(ctx, val));
 }
 
+static napi_value napi_poly_const_int_decimal(napi_env env, napi_callback_info info) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  char *value = read_utf8_arg(env, argv[1], NULL);
+  if (!value) return NULL;
+  PolyUOp *out = poly_const_int_decimal(get_external(env, argv[0]), value);
+  free(value);
+  return make_external(env, out);
+}
+
+static napi_value napi_poly_uop_variable_by_id(napi_env env, napi_callback_info info) {
+  napi_value argv[7];
+  size_t argc = 7;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  int32_t dtype;
+  int64_t multiple;
+  bool param;
+  NAPI_CALL(env, napi_get_value_int32(env, argv[4], &dtype));
+  NAPI_CALL(env, napi_get_value_int64(env, argv[5], &multiple));
+  NAPI_CALL(env, napi_get_value_bool(env, argv[6], &param));
+  char *name = read_utf8_arg(env, argv[1], NULL);
+  if (!name) return NULL;
+  PolyUOp *out = poly_uop_variable_by_id(
+      get_external(env, argv[0]), name, get_external(env, argv[2]), get_external(env, argv[3]),
+      dtype, multiple, param
+  );
+  free(name);
+  return make_external(env, out);
+}
+
+static napi_value napi_poly_uop_str(napi_env env, napi_callback_info info) {
+  napi_value argv[1], out;
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  char *value = poly_uop_str(get_external(env, argv[0]));
+  if (!value) return NULL;
+  napi_status status = napi_create_string_utf8(env, value, NAPI_AUTO_LENGTH, &out);
+  free(value);
+  NAPI_CALL(env, status);
+  return out;
+}
+
 static napi_value napi_poly_const_float_by_id(napi_env env, napi_callback_info info) {
   napi_value argv[3];
   size_t argc = 3;
@@ -6521,6 +6564,9 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_const_int", napi_poly_const_int),
       DECLARE_NAPI_METHOD("poly_const_float_by_id", napi_poly_const_float_by_id),
       DECLARE_NAPI_METHOD("poly_const_int_by_id", napi_poly_const_int_by_id),
+      DECLARE_NAPI_METHOD("poly_const_int_decimal", napi_poly_const_int_decimal),
+      DECLARE_NAPI_METHOD("poly_uop_variable_by_id", napi_poly_uop_variable_by_id),
+      DECLARE_NAPI_METHOD("poly_uop_str", napi_poly_uop_str),
 
       /* ALU */
       DECLARE_NAPI_METHOD("poly_contiguous", napi_poly_contiguous),

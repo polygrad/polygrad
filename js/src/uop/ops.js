@@ -90,7 +90,7 @@ class UOp {
     return releaseUopOwner(owner, this)
   }
 
-  toString() { return `UOp(${this.raw})` }
+  toString() { return this.ffi.poly_uop_str(this.raw) }
 
   get key() {
     if (!this.raw) return '0'
@@ -430,11 +430,30 @@ function createBoundUopNamespace(runtime) {
     range(bound, axisId = 0, axisType = AxisType.WEAK) {
       return UOp.range(ctx, ffi, bound, axisId, axisType)
     },
+    variable(name, min, max, dtype = 'weakint', multipleOf = 1, param = false) {
+      const dtypeId = dtypeIds[String(dtype)]
+      if (dtypeId === undefined) throw new TypeError(`unknown dtype ${dtype}`)
+      // Bounds retain their own scalar types, independently of the variable dtype.
+      const bounds = []
+      try {
+        for (const value of [min, max]) bounds.push(this.constant(value,
+          typeof value === 'number' && !Number.isSafeInteger(value) ? 'float64' : null))
+        const raw = ffi.poly_uop_variable_by_id(ctx, name, bounds[0].raw, bounds[1].raw,
+          dtypeId, multipleOf, param)
+        return raw ? new UOp(ctx, ffi, raw) : null
+      } finally { for (const bound of bounds) bound.dispose() }
+    },
     constant(value, dtype = null) {
+      if (typeof value === 'bigint') {
+        const raw = ffi.poly_const_int_decimal(ctx, String(value))
+        const valueUop = raw ? new UOp(ctx, ffi, raw) : null
+        if (!valueUop || dtype === null) return valueUop
+        try { return valueUop.cast(dtype) } finally { valueUop.dispose() }
+      }
       if (dtype !== null && dtype !== undefined) {
         const dtypeId = dtypeIds[String(dtype)]
         if (dtypeId === undefined || dtypeId < 0) throw new TypeError(`unknown dtype ${dtype}`)
-        const raw = (typeof value === 'boolean' || Number.isInteger(value))
+        const raw = (typeof value === 'boolean' || Number.isSafeInteger(value))
           ? ffi.poly_const_int_by_id(ctx, typeof value === 'boolean' ? (value ? 1 : 0) : value, dtypeId)
           : ffi.poly_const_float_by_id(ctx, value, dtypeId)
         return raw ? new UOp(ctx, ffi, raw) : null

@@ -579,7 +579,8 @@ TEST(autograd, no_path_zero_preserves_symbolic_shape_sources) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
 
-  PolyUOp *n = poly_uop_variable(ctx, "n", 1, 8, POLY_WEAKINT, 1, false);
+  PolyUOp *n =
+      poly_uop_variable(ctx, "n", poly_arg_int(1), poly_arg_int(8), POLY_WEAKINT, 1, false);
   int64_t inner[] = {2};
   PolyUOp *target = poly_test_buffer_var(ctx, POLY_FLOAT32, n, inner, 1);
   PolyUOp *unrelated = poly_buffer_f32(ctx, 1);

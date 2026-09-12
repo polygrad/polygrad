@@ -2607,12 +2607,13 @@ static void **beam_args_from_ast(PolyCtx *ctx, PolyUOp *sink, int *n_args) {
     if (!bufs[i]) goto cleanup;
     if (scalar) {
       const PolyParamArg *arg = param->arg.param;
-      if (!arg->has_minmax || arg->min_val > arg->max_val ||
+      int64_t lo = 0, hi = 0;
+      if (!arg->has_minmax || !poly_arg_integer_to_i64(arg->min_val, &lo) ||
+          !poly_arg_integer_to_i64(arg->max_val, &hi) || lo > hi ||
           (!poly_dtype_is_int(param->dtype) && !poly_dtype_eq(param->dtype, POLY_BOOL)))
         goto cleanup;
       /* Python's (lo+hi)//2, without overflowing the C sum. */
-      int64_t value =
-          arg->min_val + (int64_t)(((uint64_t)arg->max_val - (uint64_t)arg->min_val) / 2);
+      int64_t value = lo + (int64_t)(((uint64_t)hi - (uint64_t)lo) / 2);
       if (value < INT_MIN || value > INT_MAX) goto cleanup;
       *(int *)bufs[i] = (int)value;
     } else if (poly_dtype_eq(param->dtype, POLY_FLOAT32)) {

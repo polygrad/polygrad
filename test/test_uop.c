@@ -13,6 +13,8 @@
 #include "../src/uop/movement.h"
 #include "../src/uop/ops.h"
 #include "../src/utils.h"
+#include "../src/bigint.h"
+#include "../src/uop/symbolic.h"
 #if defined(__linux__) && !defined(__EMSCRIPTEN__)
 #include <unistd.h>
 #include <signal.h>
@@ -21,6 +23,107 @@
 #endif
 
 /* Basic creation */
+
+TEST(uop, typed_param_bounds_long_repr) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  char decimal[601];
+  memset(decimal, '9', sizeof(decimal) - 1);
+  decimal[sizeof(decimal) - 1] = '\0';
+  PolyInt value;
+  poly_int_init(&value);
+  ASSERT_TRUE(poly_int_from_decimal(&value, decimal));
+  PolyUOp *v = poly_uop_variable(
+      ctx, "long_bound", poly_arg_int(0), poly_int_as_arg(&value), POLY_WEAKINT, 1, false
+  );
+  ASSERT_NOT_NULL(v);
+  poly_int_free(&value);
+  char *text = poly_uop_str(v);
+  ASSERT_NOT_NULL(text);
+  ASSERT_TRUE(strstr(text, decimal) != NULL);
+  ASSERT_TRUE(strstr(text, "name='long_bound'") != NULL);
+  ASSERT_TRUE(text[strlen(text) - 1] == ')');
+  free(text);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(uop, typed_param_bounds_symbolic_consumers) {
+  PolyCtx *ctx = poly_ctx_new();
+  uint32_t lo[] = {0, 0x80000000}, hi[] = {UINT32_MAX, UINT32_MAX}, mid[] = {2, 0x80000000};
+  PolyArg upper = poly_arg_bigint(1, hi, 2);
+  PolyUOp *point = poly_uop_variable(ctx, "point", upper, upper, POLY_UINT64, 1, true);
+  PolyUOp *range =
+      poly_uop_variable(ctx, "range", poly_arg_bigint(1, lo, 2), upper, POLY_UINT64, 1, true);
+  PolyUOp *c = poly_uop_const(ctx, poly_arg_bigint(1, mid, 2), POLY_UINT64);
+  PolyUOp *maximum = poly_alu2(ctx, POLY_OP_MAX, range, c);
+  PolyUOp *p = poly_graph_rewrite(ctx, point, poly_symbolic());
+  PolyUOp *m = poly_graph_rewrite(ctx, maximum, poly_symbolic());
+  bool correct =
+      p->op == POLY_OP_CONST && poly_arg_python_numeric_eq(p->arg, upper) && m->op == POLY_OP_MAX;
+  if (!correct)
+    fprintf(
+        stderr, "typed bounds: point=%s maximum=%s\n", poly_op_name(p->op), poly_op_name(m->op)
+    );
+  PolyUOp *source = poly_test_program_param(ctx, POLY_UINT64, 1, 0);
+  PolyUOp *zero = poly_const_int(ctx, 0);
+  PolyUOp *load = poly_uop1(
+      ctx, POLY_OP_LOAD, POLY_UINT64, poly_uop_index(ctx, source, &zero, 1), poly_arg_none()
+  );
+  PolyUOp *temporary = poly_uop_variable_like_bounds(ctx, "temporary", load);
+  correct &= temporary && poly_arg_python_numeric_eq(temporary->arg.param->max_val, upper);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
+/* uop/ops.py:ParamArg.vmin_vmax keeps Python scalar values independently of
+ * dtype. Arena ownership replaces Python's immutable integer object owner. */
+TEST(uop, typed_param_bounds_identity_and_ownership) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *fraction = poly_uop_variable(
+      ctx, "fraction", poly_arg_float(.25), poly_arg_float(.75), POLY_FLOAT32, 1, true
+  );
+  ASSERT_NOT_NULL(fraction);
+  ASSERT_TRUE(fraction->arg.param->min_val.kind == POLY_ARG_FLOAT);
+  ASSERT_TRUE(fraction->arg.param->min_val.f == .25);
+  PolyUOp *copy = poly_uop_variable_like_bounds(ctx, "copy", fraction);
+  ASSERT_NOT_NULL(copy);
+  ASSERT_TRUE(poly_arg_eq(copy->arg.param->min_val, fraction->arg.param->min_val));
+  ASSERT_TRUE(poly_arg_eq(copy->arg.param->max_val, fraction->arg.param->max_val));
+  PolyUOp *a =
+      poly_uop_variable(ctx, "key", poly_arg_int(0), poly_arg_int(1), POLY_FLOAT32, 1, true);
+  PolyUOp *b =
+      poly_uop_variable(ctx, "key", poly_arg_float(-0.), poly_arg_float(1.), POLY_FLOAT32, 1, true);
+  ASSERT_PTR_EQ(a, b);
+  uint32_t limbs[] = {0, 0, 0, 0, 4}; /* 2**130 */
+  PolyArg huge = poly_arg_bigint(1, limbs, 5);
+  PolyUOp *wide = poly_uop_variable(ctx, "wide", huge, huge, POLY_WEAKINT, 1, true);
+  ASSERT_NOT_NULL(wide);
+  poly_uop_retain(ctx, wide);
+  limbs[4] = 8;
+  PolyUOp *other = poly_uop_variable(ctx, "wide", huge, huge, POLY_WEAKINT, 1, true);
+  ASSERT_TRUE(other != wide);
+  poly_ctx_collect(ctx);
+  char *decimal = poly_arg_integer_to_decimal(wide->arg.param->min_val);
+  ASSERT_STR_EQ(decimal, "1361129467683753853853498429727072845824");
+  free(decimal);
+  copy = poly_uop_variable_like_bounds(ctx, "wide_copy", wide);
+  ASSERT_NOT_NULL(copy);
+  ASSERT_TRUE(poly_arg_eq(wide->arg.param->min_val, copy->arg.param->min_val));
+  poly_uop_release(ctx, wide);
+  ASSERT_TRUE(
+      poly_uop_variable(
+          ctx, "bad", poly_arg_float(NAN), poly_arg_float(1), POLY_FLOAT32, 1, true
+      ) == NULL
+  );
+  ASSERT_TRUE(
+      poly_uop_variable(ctx, "bad", poly_arg_float(2), poly_arg_float(1), POLY_FLOAT32, 1, true) ==
+      NULL
+  );
+  poly_ctx_destroy(ctx);
+  PASS();
+}
 
 typedef struct {
   int reads;
@@ -1109,7 +1212,8 @@ TEST(uop, frontend_resolve_simplifies_before_using_bounds) {
    * vmin/vmax and uses the caller default only for an unresolved boolean. */
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
-  PolyUOp *v = poly_uop_variable(ctx, "resolve_v", 0, 5, POLY_WEAKINT, 1, false);
+  PolyUOp *v =
+      poly_uop_variable(ctx, "resolve_v", poly_arg_int(0), poly_arg_int(5), POLY_WEAKINT, 1, false);
   PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(0));
   PolyUOp *three = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(3));
   PolyUOp *ten = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(10));

@@ -127,7 +127,8 @@ TEST_BACKEND(x86, f64_bool_mask_uses_current_int32_immediate) {
   /* tinygrad@2026-08-22/a9069c177a9d renderer/isa/x86.py:227-232,383-385:
    * comparison masks use to_imm, so an int64 literal 1 encodes as int32. */
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *x = poly_uop_variable(ctx, "x", 0, 0, POLY_FLOAT64, 1, false);
+  PolyUOp *x =
+      poly_uop_variable(ctx, "x", poly_arg_int(0), poly_arg_int(0), POLY_FLOAT64, 1, false);
   PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT64, poly_arg_float(0.0));
   PolyUOp *cmp = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, x, zero, poly_arg_none());
   PolyUOp *isel = poly_x86_isel(ctx, cmp);
@@ -146,8 +147,8 @@ TEST_BACKEND(x86, f64_bool_mask_uses_current_int32_immediate) {
 
 TEST_BACKEND(x86, isel_shares_compare_between_current_cmovs) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *a = poly_uop_variable(ctx, "a", 0, 0, POLY_INT32, 1, false);
-  PolyUOp *b = poly_uop_variable(ctx, "b", 0, 0, POLY_INT32, 1, false);
+  PolyUOp *a = poly_uop_variable(ctx, "a", poly_arg_int(0), poly_arg_int(0), POLY_INT32, 1, false);
+  PolyUOp *b = poly_uop_variable(ctx, "b", poly_arg_int(0), poly_arg_int(0), POLY_INT32, 1, false);
   PolyUOp *lt = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, a, b, poly_arg_none());
   PolyUOp *ne = poly_uop2(ctx, POLY_OP_CMPNE, POLY_BOOL, a, b, poly_arg_none());
   PolyUOp *c = poly_uop3(ctx, POLY_OP_WHERE, POLY_INT32, lt, a, b, poly_arg_none());
@@ -170,10 +171,14 @@ TEST_BACKEND(x86, isel_shares_compare_between_current_cmovs) {
 
 TEST_BACKEND(x86, isel_stack_lanes_use_current_vinsertps) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *a = poly_uop_variable(ctx, "a", 0, 0, POLY_FLOAT32, 1, false);
-  PolyUOp *b = poly_uop_variable(ctx, "b", 0, 0, POLY_FLOAT32, 1, false);
-  PolyUOp *c = poly_uop_variable(ctx, "c", 0, 0, POLY_FLOAT32, 1, false);
-  PolyUOp *d = poly_uop_variable(ctx, "d", 0, 0, POLY_FLOAT32, 1, false);
+  PolyUOp *a =
+      poly_uop_variable(ctx, "a", poly_arg_int(0), poly_arg_int(0), POLY_FLOAT32, 1, false);
+  PolyUOp *b =
+      poly_uop_variable(ctx, "b", poly_arg_int(0), poly_arg_int(0), POLY_FLOAT32, 1, false);
+  PolyUOp *c =
+      poly_uop_variable(ctx, "c", poly_arg_int(0), poly_arg_int(0), POLY_FLOAT32, 1, false);
+  PolyUOp *d =
+      poly_uop_variable(ctx, "d", poly_arg_int(0), poly_arg_int(0), POLY_FLOAT32, 1, false);
   PolyUOp *src0[4] = {
       x86_lane(ctx, a, 0),
       x86_lane(ctx, b, 1),
@@ -204,7 +209,7 @@ TEST_BACKEND(x86, isel_stack_lanes_use_current_vinsertps) {
 
 TEST_BACKEND(x86, isel_complex_address_scales_current_index) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *a = poly_uop_variable(ctx, "a", 0, 0, POLY_INT32, 1, false);
+  PolyUOp *a = poly_uop_variable(ctx, "a", poly_arg_int(0), poly_arg_int(0), POLY_INT32, 1, false);
   PolyUOp *param = poly_test_program_param(ctx, POLY_INT32, 16, 0);
   PolyUOp *one =
       poly_uop1(ctx, POLY_OP_CAST, POLY_INT32, poly_const_int(ctx, 1), poly_arg_dtype(POLY_INT32));

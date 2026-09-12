@@ -20,7 +20,8 @@
 TEST(schedule_runtime, owner_call_arguments_exclude_only_bound_variables) {
   /* get_call_arg_uops filters bound variables, not every ALU BUFFER/PARAM. */
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *var = poly_uop_variable(ctx, "offset", 0, 4, POLY_WEAKINT, 1, false);
+  PolyUOp *var =
+      poly_uop_variable(ctx, "offset", poly_arg_int(0), poly_arg_int(4), POLY_WEAKINT, 1, false);
   PolyUOp *bound = poly_uop_bind(ctx, var, 2);
   PolyUOp *a = poly_test_program_param(ctx, POLY_FLOAT32, 1, 0);
   PolyUOp *b = poly_test_program_param(ctx, POLY_FLOAT32, 1, 1);
@@ -34,6 +35,45 @@ TEST(schedule_runtime, owner_call_arguments_exclude_only_bound_variables) {
   ASSERT_TRUE(correct);
   PASS();
 }
+
+#ifdef POLY_TESTING
+TEST(schedule_runtime, closeout_resolve_preserves_invocation_graph_metadata) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_test_program_param(ctx, POLY_FLOAT32, 4, 0);
+  PolyUOp *b = poly_test_program_param(ctx, POLY_FLOAT32, 4, 1);
+  PolyUOp *inputs[] = {
+      poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_CPU),
+      poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_CPU)};
+  bool correct = poly_test_resolve_linear_param(ctx, a, inputs, 2) == inputs[0] &&
+                 poly_test_resolve_linear_param(ctx, inputs[0], inputs, 2) == inputs[0];
+  PolyUOp *select = poly_uop1(ctx, POLY_OP_MSELECT, POLY_FLOAT32, a, poly_arg_int(0));
+  PolyUOp *slice = poly_shrink(ctx, b, (int64_t[][2]){{1, 3}}, 1);
+  PolyUOp *views[] = {select, slice};
+  for (int i = 0; i < 2; i++) {
+    PolyUOp **src = malloc((size_t)views[i]->n_src * sizeof(*src));
+    memcpy(src, views[i]->src, (size_t)views[i]->n_src * sizeof(*src));
+    src[0] = inputs[i];
+    PolyUOp *expected = poly_uop_tagged_arg(
+        ctx, views[i]->op, views[i]->dtype, src, views[i]->n_src, views[i]->arg, views[i]->tag,
+        views[i]->tag_arg
+    );
+    correct &= poly_test_resolve_linear_param(ctx, views[i], inputs, 2) == expected;
+    free(src);
+  }
+  PolyUOp *stack = poly_uop2(ctx, POLY_OP_MSTACK, POLY_FLOAT32, a, b, poly_arg_none());
+  PolyUOp *expected =
+      poly_uop2(ctx, POLY_OP_MSTACK, POLY_FLOAT32, inputs[0], inputs[1], poly_arg_none());
+  correct &= poly_test_resolve_linear_param(ctx, stack, inputs, 2) == expected;
+  correct &= !poly_test_resolve_linear_param(ctx, b, inputs, 1);
+  correct &= !poly_test_resolve_linear_param(ctx, stack, inputs, 1);
+  correct &= !poly_test_resolve_linear_param(ctx, a, NULL, 2);
+  /* No resolution publishes its substitutions into the reusable template. */
+  correct &= select->src[0] == a && slice->src[0] == b && stack->src[0] == a;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(correct);
+  PASS();
+}
+#endif
 
 static int count_root_ops(PolyCtx *ctx, PolyUOp *root, PolyOps op) {
   int n_topo = 0;
@@ -54,10 +94,14 @@ static bool contains_uop(PolyUOp **items, int count, PolyUOp *item) {
 /* resolve_linear_call replaces p0 in each CALL source, not positional data
  * inside another CALL's body. NOOP avoids unrelated kernel compilation here. */
 static PolyUOp *binding_publication_call(PolyCtx *ctx, int64_t value, bool used) {
-  PolyUOp *var =
-      poly_uop_variable(ctx, "value", -(INT64_C(1) << 40), INT64_C(1) << 40, POLY_INT64, 1, false);
-  PolyUOp *param =
-      poly_uop_variable(ctx, "p0", -(INT64_C(1) << 40), INT64_C(1) << 40, POLY_INT64, 1, true);
+  PolyUOp *var = poly_uop_variable(
+      ctx, "value", poly_arg_int(-(INT64_C(1) << 40)), poly_arg_int(INT64_C(1) << 40), POLY_INT64,
+      1, false
+  );
+  PolyUOp *param = poly_uop_variable(
+      ctx, "p0", poly_arg_int(-(INT64_C(1) << 40)), poly_arg_int(INT64_C(1) << 40), POLY_INT64, 1,
+      true
+  );
   PolyUOp *body =
       poly_uop(ctx, POLY_OP_NOOP, POLY_VOID, used ? &param : NULL, used ? 1 : 0, poly_arg_none());
   PolyUOp *sources[] = {body, param};
@@ -209,7 +253,8 @@ TEST(schedule_runtime, jit_input_scalar_substitution_failure_is_not_capture) {
     PolyTensor *input = poly_tensor_empty_by_id(
         ctx, poly_dtype_id_by_name("float32"), shape, 1, POLY_DEVICE_INTERP
     );
-    PolyUOp *var = poly_uop_variable(ctx, "offset", 0, 4, POLY_WEAKINT, 1, false);
+    PolyUOp *var =
+        poly_uop_variable(ctx, "offset", poly_arg_int(0), poly_arg_int(4), POLY_WEAKINT, 1, false);
     PolyUOp *start = poly_uop_bind(ctx, var, 2), *size = poly_const_int(ctx, 2);
     PolyTensor *view = poly_tensor_shrink_uop(ctx, input, &start, &size, 1);
     PolyUOp *original = poly_tensor_uop_physical(view);
@@ -243,8 +288,8 @@ TEST(schedule_runtime, interp_scalar_params_use_numeric_bindings) {
         .addrspace = POLY_ADDR_ALU,
         .name = "scalar",
         .has_minmax = true,
-        .min_val = INT32_MIN,
-        .max_val = INT32_MAX};
+        .min_val = poly_arg_int(INT32_MIN),
+        .max_val = poly_arg_int(INT32_MAX)};
     PolyUOp *scalar = poly_uop0(ctx, POLY_OP_PARAM, types[t], poly_arg_param(&arg));
     PolyUOp *zero = poly_const_int(ctx, 0);
     PolyUOp *ptr = poly_uop_index(ctx, buffer, &zero, 1);
@@ -302,8 +347,8 @@ TEST(schedule_runtime, beam_time_call_reads_scalar_values) {
         .addrspace = POLY_ADDR_ALU,
         .name = "scalar",
         .has_minmax = true,
-        .min_val = -8,
-        .max_val = 8};
+        .min_val = poly_arg_int(-8),
+        .max_val = poly_arg_int(8)};
     PolyUOp *scalar = poly_uop0(ctx, POLY_OP_PARAM, POLY_INT32, poly_arg_param(&arg));
     PolyUOp *zero = poly_const_int(ctx, 0);
     PolyUOp *ptr = poly_uop_index(ctx, buffer, &zero, 1);
@@ -452,8 +497,8 @@ static bool runtime_scalar_integer_args(bool graph) {
       .addrspace = POLY_ADDR_ALU,
       .name = "scalar",
       .has_minmax = true,
-      .min_val = INT32_MIN,
-      .max_val = INT32_MAX};
+      .min_val = poly_arg_int(INT32_MIN),
+      .max_val = poly_arg_int(INT32_MAX)};
   PolyUOp *var = poly_uop0(ctx, POLY_OP_PARAM, POLY_INT64, poly_arg_param(&arg));
   PolyUOp *zero = poly_const_int(ctx, 0);
   PolyUOp *store = poly_uop2(
@@ -928,6 +973,46 @@ TEST(schedule_runtime, owner_compiler_options_separate_program_cache) {
     poly_ctx_destroy(ctx);
   }
   ASSERT_TRUE(ok);
+  PASS();
+}
+
+TEST(schedule_runtime, closeout_runtime_cache_preserves_call_device_identity) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *out = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_CPU);
+  PolyUOp *param = poly_test_program_param(ctx, POLY_FLOAT32, 1, 0);
+  PolyUOp *zero = poly_const_int(ctx, 0);
+  PolyUOp *store = poly_uop2(
+      ctx, POLY_OP_STORE, POLY_VOID, poly_uop_index(ctx, param, &zero, 1),
+      poly_const_float(ctx, 7.0), poly_arg_none()
+  );
+  PolyUOp *sink = poly_test_kernel_sink(ctx, &store, 1, "call_device_identity");
+  PolyUOp *call = poly_uop2(ctx, POLY_OP_CALL, POLY_VOID, sink, out, poly_arg_none());
+  PolyUOp *linear = poly_compile_linear(
+      ctx, poly_uop1(ctx, POLY_OP_LINEAR, POLY_VOID, call, poly_arg_none()), -1
+  );
+  ASSERT_NOT_NULL(linear);
+  ASSERT_INT_EQ(poly_uop_retain(ctx, linear), 0);
+  poly_runtime_cache_clear(ctx);
+  bool correct = poly_run_linear(ctx, linear, NULL, 0, NULL, 0, false, true, false) == 0;
+  size_t first = poly_runtime_cache_len(ctx);
+  PolyUOp *other = poly_uop_new_buffer(
+      ctx, poly_device_uop_from_name(ctx, "CPU:1"), 1, POLY_FLOAT32, poly_ctx_next_unique_id(ctx)
+  );
+  PolyUOp *other_call =
+      poly_uop2(ctx, POLY_OP_CALL, POLY_VOID, linear->src[0]->src[0], other, poly_arg_none());
+  PolyUOp *other_linear = poly_uop1(ctx, POLY_OP_LINEAR, POLY_VOID, other_call, poly_arg_none());
+  correct &= poly_run_linear(ctx, other_linear, NULL, 0, NULL, 0, false, true, false) == 0;
+  float value = 0;
+  correct &= poly_buffer_read(ctx, other, &value, sizeof(value)) == 0 && value == 7.0f;
+  if (poly_runtime_cache_len(ctx) != first + 1)
+    fprintf(
+        stderr, "CPU:1 reused CPU runtime identity: %zu -> %zu\n", first,
+        poly_runtime_cache_len(ctx)
+    );
+  correct &= first == 1 && poly_runtime_cache_len(ctx) == first + 1;
+  poly_uop_release(ctx, linear);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(correct);
   PASS();
 }
 

@@ -569,8 +569,11 @@ static int param_arg_cmp(const PolyParamArg *a, const PolyParamArg *b) {
   if (ret) return ret;
   if (a->has_minmax != b->has_minmax) return a->has_minmax ? 1 : -1;
   if (a->has_minmax) {
-    if (a->min_val != b->min_val) return a->min_val < b->min_val ? -1 : 1;
-    if (a->max_val != b->max_val) return a->max_val < b->max_val ? -1 : 1;
+    bool ordered = false;
+    ret = poly_arg_python_numeric_cmp(a->min_val, b->min_val, &ordered);
+    if (ret) return ret;
+    ret = poly_arg_python_numeric_cmp(a->max_val, b->max_val, &ordered);
+    if (ret) return ret;
   }
   if (a->has_multiple_of != b->has_multiple_of) return a->has_multiple_of ? 1 : -1;
   if (a->has_multiple_of && a->multiple_of != b->multiple_of)

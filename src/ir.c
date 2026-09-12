@@ -292,6 +292,73 @@ static bool program_tag_arg_valid(PolyArg arg) {
   }
 }
 
+/* PARAM bounds use the existing scalar argument tags, not a second numeric
+ * encoding. BIGINT payloads are temporary owners until UOp construction. */
+static void bb_param_bound(ByteBuf *buf, PolyArg arg) {
+  bb_u8(buf, (uint8_t)arg.kind);
+  switch (arg.kind) {
+  case POLY_ARG_INT:
+    bb_i64(buf, arg.i);
+    break;
+  case POLY_ARG_FLOAT:
+    bb_f64(buf, arg.f);
+    break;
+  case POLY_ARG_BOOL:
+    bb_u8(buf, arg.b ? 1 : 0);
+    break;
+  case POLY_ARG_BIGINT:
+    bb_u8(buf, arg.bigint.sign < 0 ? 1 : 0);
+    bb_u32(buf, arg.bigint.n_limbs);
+    for (uint32_t i = 0; i < arg.bigint.n_limbs; i++)
+      bb_u32(buf, arg.bigint.limbs[i]);
+    break;
+  default:
+    break;
+  }
+}
+
+static bool br_param_bound(ByteReader *r, PolyArg *out) {
+  *out = poly_arg_none();
+  if (br_remaining(r) < 1) return false;
+  PolyArgKind kind = (PolyArgKind)br_u8(r);
+  switch (kind) {
+  case POLY_ARG_NONE:
+    return true;
+  case POLY_ARG_INT:
+    if (br_remaining(r) < 8) return false;
+    *out = poly_arg_int(br_i64(r));
+    return true;
+  case POLY_ARG_FLOAT:
+    if (br_remaining(r) < 8) return false;
+    *out = poly_arg_float(br_f64(r));
+    return true;
+  case POLY_ARG_BOOL:
+    if (br_remaining(r) < 1) return false;
+    {
+      uint8_t value = br_u8(r);
+      if (value > 1) return false;
+      *out = poly_arg_bool(value != 0);
+    }
+    return true;
+  case POLY_ARG_BIGINT: {
+    if (br_remaining(r) < 5) return false;
+    uint8_t negative = br_u8(r);
+    uint32_t count = br_u32(r);
+    if (negative > 1 || count == 0 || count > INT_MAX / sizeof(uint32_t) ||
+        br_remaining(r) < (int64_t)count * sizeof(uint32_t))
+      return false;
+    uint32_t *limbs = malloc((size_t)count * sizeof(*limbs));
+    if (!limbs) return false;
+    for (uint32_t i = 0; i < count; i++)
+      limbs[i] = br_u32(r);
+    *out = poly_arg_bigint(negative ? -1 : 1, limbs, count);
+    return true;
+  }
+  default:
+    return false;
+  }
+}
+
 static void program_tag_arg_collect_strings(StringTable *strings, PolyArg arg) {
   if (arg.kind == POLY_ARG_STRING && arg.str) st_add(strings, arg.str);
 }
@@ -1044,8 +1111,11 @@ static uint8_t *poly_graph_export(const PolyIrSpec *spec, int *out_len, bool exe
       bb_i32(&buf, u->arg.param->axis);
       bb_u8(&buf, u->arg.param->has_minmax ? 1 : 0);
       bb_u32(&buf, u->arg.param->name ? st_add(&strings, u->arg.param->name) : UINT32_MAX);
-      bb_i64(&buf, u->arg.param->min_val);
-      bb_i64(&buf, u->arg.param->max_val);
+      bb_param_bound(&buf, u->arg.param->min_val);
+      bb_param_bound(&buf, u->arg.param->max_val);
+      bb_u8(&buf, u->arg.param->has_multiple_of ? 1 : 0);
+      bb_i64(&buf, u->arg.param->multiple_of);
+      bb_u8(&buf, u->arg.param->volatile_ ? 1 : 0);
       break;
     case POLY_ARG_CALL_INFO:
       if (!u->arg.call_info || u->arg.call_info->has_grad_fxn || u->arg.call_info->has_aux) {
@@ -1717,9 +1787,11 @@ static int poly_graph_import(const uint8_t *data, int len, PolyIrSpec *out, bool
     case POLY_ARG_INVALID:
       break;
     case POLY_ARG_PARAM: {
+      if (br_remaining(&r) < 9) goto cleanup_node_arg;
       param_arg_tmp.slot = br_i64(&r);
       uint8_t device_kind = br_u8(&r);
       if (device_kind == 1) {
+        if (br_remaining(&r) < 4) goto cleanup_node_arg;
         uint32_t device_idx = br_u32(&r);
         param_arg_tmp.device = device_idx < n_strings ? strings[device_idx] : NULL;
         if (!param_arg_tmp.device) {
@@ -1749,15 +1821,27 @@ static int poly_graph_import(const uint8_t *data, int len, PolyIrSpec *out, bool
         if (srcs) free(srcs);
         goto fail_nodes;
       }
+      if (br_remaining(&r) < 11) goto cleanup_node_arg;
       param_arg_tmp.addrspace = (PolyAddrSpace)br_u8(&r);
       param_arg_tmp.has_axis = br_u8(&r) != 0;
       param_arg_tmp.axis = br_i32(&r);
       param_arg_tmp.has_minmax = br_u8(&r) != 0;
       uint32_t name_idx = br_u32(&r);
       param_arg_tmp.name = name_idx < n_strings ? strings[name_idx] : NULL;
-      param_arg_tmp.min_val = br_i64(&r);
-      param_arg_tmp.max_val = br_i64(&r);
       arg.param = &param_arg_tmp;
+      if ((name_idx != UINT32_MAX && !param_arg_tmp.name) ||
+          !br_param_bound(&r, &param_arg_tmp.min_val) ||
+          !br_param_bound(&r, &param_arg_tmp.max_val) ||
+          (!param_arg_tmp.has_minmax && (param_arg_tmp.min_val.kind != POLY_ARG_NONE ||
+                                         param_arg_tmp.max_val.kind != POLY_ARG_NONE)))
+        goto cleanup_node_arg;
+      if (br_remaining(&r) < 10) goto cleanup_node_arg;
+      uint8_t has_multiple = br_u8(&r);
+      param_arg_tmp.multiple_of = br_i64(&r);
+      uint8_t is_volatile = br_u8(&r);
+      if (has_multiple > 1 || is_volatile > 1) goto cleanup_node_arg;
+      param_arg_tmp.has_multiple_of = has_multiple != 0;
+      param_arg_tmp.volatile_ = is_volatile != 0;
       break;
     }
     case POLY_ARG_CALL_INFO: {
@@ -1816,6 +1900,10 @@ static int poly_graph_import(const uint8_t *data, int len, PolyIrSpec *out, bool
       free(kernel_axis_types_tmp);
     }
     if (tag_arg.kind == POLY_ARG_INT_TUPLE && tag_arg.int_tuple.vals) free(tag_arg.int_tuple.vals);
+    if (param_arg_tmp.min_val.kind == POLY_ARG_BIGINT)
+      free((void *)param_arg_tmp.min_val.bigint.limbs);
+    if (param_arg_tmp.max_val.kind == POLY_ARG_BIGINT)
+      free((void *)param_arg_tmp.max_val.bigint.limbs);
     if (bufferize_devices_tmp) free(bufferize_devices_tmp);
     if (allreduce_devices_tmp) free(allreduce_devices_tmp);
     if (param_devices_tmp) free(param_devices_tmp);

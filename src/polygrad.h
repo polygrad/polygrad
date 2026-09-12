@@ -10,7 +10,7 @@
 
 /* Public C/frontend ABI version. Bump when exported symbols or public struct
  * layouts used by frontends change. */
-#define POLYGRAD_ABI_VERSION 78
+#define POLYGRAD_ABI_VERSION 79
 
 #include <stdint.h>
 #include <stddef.h>
@@ -355,27 +355,7 @@ typedef struct {
 /* Pinned tinygrad ParamArg metadata. Value-level call PARAMs carry shape in
  * src[0] and keep slot/device here; rangeify later lowers them to the existing
  * pointer PARAM form whose arg is the kernel-local integer slot. */
-typedef struct {
-  int64_t slot;
-  PolyDType dtype;
-  const char *name;
-  int64_t min_val;
-  int64_t max_val;
-  bool has_minmax;
-  int64_t multiple_of;
-  bool has_multiple_of;
-  PolyAddrSpace addrspace;
-  int32_t axis;
-  bool has_axis;
-  /* Pinned ParamArg.device is str | tuple[str, ...] | None
-   * (tinygrad/uop/ops.py:1071-1076). Scalar identities use device;
-   * ordered tuple identities use devices/n_devices. Exactly one arm is set. */
-  const char *device;
-  const char **devices;
-  int32_t n_devices;
-  bool device_is_tuple;
-  bool volatile_;
-} PolyParamArg;
+typedef struct PolyParamArg PolyParamArg;
 
 /* Tinygrad 2026-08-22/a9069c177a9d CallInfo for CALL/FUNCTION UOps
  * (uop/ops.py:1261-1271). C stores the serializable fields and fail-closed
@@ -489,6 +469,30 @@ typedef struct {
     } bytes;
   };
 } PolyArg;
+
+struct PolyParamArg {
+  int64_t slot;
+  PolyDType dtype;
+  const char *name;
+  /* ParamArg.vmin_vmax: ordered scalar INT/FLOAT/BOOL/BIGINT values,
+   * independent of dtype. UOp storage owns copies, including integer limbs. */
+  PolyArg min_val;
+  PolyArg max_val;
+  bool has_minmax;
+  int64_t multiple_of;
+  bool has_multiple_of;
+  PolyAddrSpace addrspace;
+  int32_t axis;
+  bool has_axis;
+  /* Pinned ParamArg.device is str | tuple[str, ...] | None
+   * (tinygrad/uop/ops.py:1071-1076). Scalar identities use device;
+   * ordered tuple identities use devices/n_devices. Exactly one arm is set. */
+  const char *device;
+  const char **devices;
+  int32_t n_devices;
+  bool device_is_tuple;
+  bool volatile_;
+};
 
 static inline PolyArg poly_arg_none(void) {
   return (PolyArg){.kind = POLY_ARG_NONE};
@@ -2072,11 +2076,13 @@ PolyUOp *poly_mul(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
 PolyUOp *poly_eq(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
 PolyUOp *poly_logical_not(PolyCtx *ctx, PolyUOp *x);
 PolyUOp *poly_where_op(PolyCtx *ctx, PolyUOp *cond, PolyUOp *x, PolyUOp *y);
+/* Endpoints are copied; NaN, reversed and nonnumeric bounds are rejected.
+ * This metadata domain does not widen the runtime's integer binding ABI. */
 PolyUOp *poly_uop_variable(
     PolyCtx *ctx,
     const char *name,
-    int64_t min_val,
-    int64_t max_val,
+    PolyArg min_val,
+    PolyArg max_val,
     PolyDType dtype,
     int64_t multiple_of,
     bool param

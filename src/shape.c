@@ -11,6 +11,7 @@
 #include "ctx.h"
 #include "device.h"
 #include "uop/ops.h"
+#include "bigint.h"
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -927,7 +928,8 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
         if (ndim <= 0 || ndim > POLY_MAX_DIMS) return make_entry_none(ctx);
         int64_t dims[POLY_MAX_DIMS];
         PolyUOp *dim_uops[POLY_MAX_DIMS];
-        dims[0] = dynamic_var->arg.param->max_val;
+        if (!poly_arg_integer_to_i64(dynamic_var->arg.param->max_val, &dims[0]))
+          return make_entry_none(ctx);
         dim_uops[0] = u->src[1];
         for (int i = 1; i < ndim && i < POLY_MAX_DIMS; i++) {
           if (u->src[1 + i]->op != POLY_OP_CONST || u->src[1 + i]->arg.kind != POLY_ARG_INT)

@@ -385,8 +385,9 @@ PolyUOp *poly_add_gpudims_ex(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps)
                    sink->arg.kernel_info->dont_use_locals;
   if (caps.has_threads) {
     if (n_global != 1 || n_local != 0) goto done;
-    PolyUOp *core_id =
-        poly_uop_variable(ctx, "core_id", 0, global_dims[0].max - 1, POLY_INT32, 1, true);
+    PolyUOp *core_id = poly_uop_variable(
+        ctx, "core_id", poly_arg_int(0), poly_arg_int(global_dims[0].max - 1), POLY_INT32, 1, true
+    );
     global_idxs[0] = poly_cast(ctx, core_id, POLY_WEAKINT);
     if (!global_idxs[0]) goto done;
   } else {

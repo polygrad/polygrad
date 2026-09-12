@@ -16,6 +16,10 @@ bool poly_parse_valid(
  * uop/symbolic.py:pm_move_where_on_load. */
 PolyPatternMatcher *poly_pm_move_where_on_load(void);
 
+/* UOp.variable(name, source.vmin, source.vmax, source.dtype, param=True).
+ * The new PARAM owns copies of both typed endpoints. */
+PolyUOp *poly_uop_variable_like_bounds(PolyCtx *ctx, const char *name, PolyUOp *source);
+
 #ifdef POLY_TESTING
 void poly_test_exact_int_range_alloc_fail(bool fail);
 #endif

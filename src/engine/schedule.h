@@ -116,6 +116,10 @@ const PolyBackendDesc *poly_backend_get(PolyDevice device);
 int poly_backend_ensure_open(PolyDevice device);
 bool poly_device_is_host_addressable(PolyDevice device);
 
+#ifdef POLY_TESTING
+PolyUOp *poly_test_resolve_linear_param(PolyCtx *ctx, PolyUOp *uop, PolyUOp **inputs, int n_inputs);
+#endif
+
 /* Structural hashing/equality (for cache keying by graph shape) */
 
 uint32_t poly_structural_hash(PolyUOp *u);

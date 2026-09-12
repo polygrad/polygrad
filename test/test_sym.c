@@ -88,14 +88,15 @@ static PolyUOp *Variable(
     int64_t max_val,
     PolyDType dtype
 ) {
-  return poly_uop_variable(ctx, name, min_val, max_val, dtype, 1, true);
+  return poly_uop_variable(ctx, name, poly_arg_int(min_val), poly_arg_int(max_val), dtype, 1, true);
 }
 
 static bool integer_const_eq(PolyUOp *u, const char *expected);
 
 TEST(sym, scheduler_divides_parameter_multiple) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *n = poly_uop_variable(ctx, "n", 8, 32, POLY_WEAKINT, 8, true);
+  PolyUOp *n =
+      poly_uop_variable(ctx, "n", poly_arg_int(8), poly_arg_int(32), POLY_WEAKINT, 8, true);
   PolyUOp *expected = poly_alu2(ctx, POLY_OP_IDIV, n, poly_const_int(ctx, 4));
   bool correct = poly_uop_divides(ctx, n, 4) == expected && poly_uop_divides(ctx, n, 3) == NULL;
   poly_ctx_destroy(ctx);
@@ -608,7 +609,8 @@ TEST(sym, where_closure_folds_condition_inside_true_branch) {
 
 TEST(sym, variable_and_bind_use_current_alu_storage_topology) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *n = poly_uop_variable(ctx, "n", 1, 8, POLY_WEAKINT, 1, false);
+  PolyUOp *n =
+      poly_uop_variable(ctx, "n", poly_arg_int(1), poly_arg_int(8), POLY_WEAKINT, 1, false);
   ASSERT_NOT_NULL(n);
   ASSERT_INT_EQ(n->op, POLY_OP_BUFFER);
   ASSERT_TRUE(poly_dtype_eq(n->dtype, POLY_WEAKINT));
@@ -620,8 +622,8 @@ TEST(sym, variable_and_bind_use_current_alu_storage_topology) {
   ASSERT_INT_EQ(n->arg.param->slot, -1);
   ASSERT_TRUE(poly_dtype_eq(n->arg.param->dtype, POLY_WEAKINT));
   ASSERT_TRUE(n->arg.param->has_minmax);
-  ASSERT_INT_EQ(n->arg.param->min_val, 1);
-  ASSERT_INT_EQ(n->arg.param->max_val, 8);
+  ASSERT_INT_EQ(n->arg.param->min_val.i, 1);
+  ASSERT_INT_EQ(n->arg.param->max_val.i, 8);
   ASSERT_TRUE(n->arg.param->has_multiple_of);
   ASSERT_INT_EQ(n->arg.param->multiple_of, 1);
   ASSERT_INT_EQ(n->arg.param->addrspace, POLY_ADDR_ALU);
@@ -643,7 +645,8 @@ TEST(sym, variable_and_bind_use_current_alu_storage_topology) {
 
 TEST(sym, lower_weak_commits_current_alu_param_metadata) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *param = poly_uop_variable(ctx, "n", 1, 8, POLY_WEAKINT, 1, true);
+  PolyUOp *param =
+      poly_uop_variable(ctx, "n", poly_arg_int(1), poly_arg_int(8), POLY_WEAKINT, 1, true);
   PolyUOp *lowered = poly_graph_rewrite(ctx, param, poly_pm_lower_weak());
   ASSERT_NOT_NULL(lowered);
   ASSERT_INT_EQ(lowered->op, POLY_OP_CAST);
@@ -655,8 +658,8 @@ TEST(sym, lower_weak_commits_current_alu_param_metadata) {
   ASSERT_TRUE(
       lowered->src[0]->arg.param->name && strcmp(lowered->src[0]->arg.param->name, "n") == 0
   );
-  ASSERT_INT_EQ(lowered->src[0]->arg.param->min_val, 1);
-  ASSERT_INT_EQ(lowered->src[0]->arg.param->max_val, 8);
+  ASSERT_INT_EQ(lowered->src[0]->arg.param->min_val.i, 1);
+  ASSERT_INT_EQ(lowered->src[0]->arg.param->max_val.i, 8);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -2320,8 +2323,8 @@ TEST(sym, where_logical_not_swaps_branches) {
   ASSERT_TRUE(r->src[0]->dtype.bitsize == POLY_BOOL.bitsize);
   ASSERT_TRUE(r->src[0]->arg.kind == POLY_ARG_PARAM);
   ASSERT_STR_EQ(r->src[0]->arg.param->name, "c");
-  ASSERT_EQ(r->src[0]->arg.param->min_val, 0);
-  ASSERT_EQ(r->src[0]->arg.param->max_val, 1);
+  ASSERT_EQ(r->src[0]->arg.param->min_val.i, 0);
+  ASSERT_EQ(r->src[0]->arg.param->max_val.i, 1);
   ASSERT_PTR_EQ(r->src[1], f);
   ASSERT_PTR_EQ(r->src[2], t);
   poly_ctx_destroy(ctx);
@@ -2953,8 +2956,8 @@ TEST(sym, minmax_bounded_param_matches_tinygrad) {
   PolyParamArg arg = {
       .slot = 1,
       .name = "size",
-      .min_val = 1,
-      .max_val = 8,
+      .min_val = poly_arg_int(1),
+      .max_val = poly_arg_int(8),
       .has_minmax = true,
       .addrspace = POLY_ADDR_GLOBAL};
   PolyUOp *shape = poly_uop(ctx, POLY_OP_STACK, POLY_VOID, NULL, 0, poly_arg_none());

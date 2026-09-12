@@ -847,7 +847,9 @@ TEST(optim, build_step_rejects_invalid_lr_tensor_metadata) {
   PolyTensor *lr_vec = poly_tensor_empty(ctx, POLY_FLOAT32, vector_shape, 1, POLY_DEVICE_CPU);
   PolyTensor *lr_f16 = poly_tensor_empty(ctx, POLY_FLOAT16, scalar_shape, 1, POLY_DEVICE_CPU);
   PolyTensor *lr_bf16 = poly_tensor_empty(ctx, POLY_BFLOAT16, scalar_shape, 1, POLY_DEVICE_CPU);
-  PolyUOp *n = poly_uop_variable(ctx, "optim_lr_n", 0, 1, POLY_WEAKINT, 1, false);
+  PolyUOp *n = poly_uop_variable(
+      ctx, "optim_lr_n", poly_arg_int(0), poly_arg_int(1), POLY_WEAKINT, 1, false
+  );
   PolyUOp *symbolic_dims[] = {n};
   PolyUOp *lr_symbolic_uop = poly_expand_uop(ctx, poly_buffer_f32(ctx, 1), symbolic_dims, 1);
   PolyUOp *lr_symbolic_physical = poly_expand_uop(

@@ -368,6 +368,13 @@ independent devices, or a package boundary that must outlive/dispose separately.
 The C core owns graph construction, scheduling, placement, runtime caches, and
 backend dispatch. Frontends are thin wrappers over the same concepts.
 
+Low-level `UOp.variable` bounds retain integer, floating-point and boolean
+endpoints independently of the variable dtype. C takes scalar `PolyArg` values;
+Python accepts `int`/`float`/`bool`; JavaScript uses `pg.uop.variable(...)`, with
+`BigInt` for exact wide integers. NaN, reversed and nonnumeric bounds are rejected.
+This requires C ABI79 and graph formats PGIR18/PGPM10; older artifacts are rejected.
+It does not widen the runtime's existing int32 variable-binding domain.
+
 ```text
 default Tensor construction
   -> eager tinygrad-shaped physical tensor graph

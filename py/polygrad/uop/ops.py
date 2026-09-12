@@ -232,9 +232,12 @@ class UOp:
         dtype_id = _ffi._lib.poly_dtype_id_by_name(dtype_name.encode('utf-8'))
         if dtype_id < 0:
             raise ValueError(f'unknown dtype {dtype}')
+        # Endpoint types are independent of the variable dtype (ParamArg's PyConst).
+        bounds = [UOp.const(v, dtype=dtypes.float64 if isinstance(v, float) else None, ctx=ctx)
+                  for v in (min_val, max_val)]
         raw = _ffi._lib.poly_uop_variable_by_id(
             ctx, name.encode() if isinstance(name, str) else name,
-            min_val, max_val, dtype_id, multiple_of, param,
+            bounds[0].raw, bounds[1].raw, dtype_id, multiple_of, param,
         )
         return UOp(ctx, raw) if raw else None
 
@@ -403,7 +406,9 @@ class UOp:
             dtype_id = _ffi._lib.poly_dtype_id_by_name(b'bool')
             return UOp(ctx, _ffi._lib.poly_const_int_by_id(ctx, int(value), dtype_id))
         if isinstance(value, int):
-            return UOp(ctx, _ffi._lib.poly_const_int(ctx, value))
+            raw = (_ffi._lib.poly_const_int(ctx, value) if -(1 << 63) <= value < (1 << 63)
+                   else _ffi._lib.poly_const_int_decimal(ctx, str(value).encode()))
+            return UOp(ctx, raw) if raw else None
         if isinstance(value, float):
             return UOp(ctx, _ffi._lib.poly_const_float(ctx, value))
         raise TypeError(f'cannot convert {type(value).__name__} to UOp')

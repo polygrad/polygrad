@@ -544,7 +544,8 @@ static int drop_valid_stmts(
     if (!dropped[i] && lo <= hi) {
       char name[48];
       snprintf(name, sizeof(name), "fake%d", i);
-      PolyUOp *fake = poly_uop_variable(ctx, name, lo, hi, expr->dtype, 1, true);
+      PolyUOp *fake =
+          poly_uop_variable(ctx, name, poly_arg_int(lo), poly_arg_int(hi), expr->dtype, 1, true);
       if (fake) {
         PolyUOp *zero = poly_const_int(ctx, 0), *one = poly_const_int(ctx, 1);
         PolyUOp *x = poly_uop_index(ctx, idx, &zero, 1);

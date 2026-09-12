@@ -17,6 +17,7 @@
 #include <math.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <string.h>
 
 static bool uop_invalid_gate(PolyUOp *u) {
@@ -449,7 +450,9 @@ bool poly_arg_eq(PolyArg a, PolyArg b) {
     if (a.param == b.param) return true;
     if (!a.param || !b.param) return false;
     if (a.param->slot != b.param->slot || !poly_dtype_eq(a.param->dtype, b.param->dtype) ||
-        a.param->min_val != b.param->min_val || a.param->max_val != b.param->max_val ||
+        (a.param->has_minmax && (!poly_arg_python_numeric_eq(a.param->min_val, b.param->min_val) ||
+                                 !poly_arg_python_numeric_eq(a.param->max_val, b.param->max_val))
+        ) ||
         a.param->has_minmax != b.param->has_minmax ||
         a.param->multiple_of != b.param->multiple_of ||
         a.param->has_multiple_of != b.param->has_multiple_of ||
@@ -642,8 +645,16 @@ uint32_t poly_arg_hash(PolyArg a) {
       h = hash_mix(h, (uint32_t)a.param->axis);
       h = hash_mix(h, a.param->has_axis ? 1u : 0u);
       h = hash_mix(h, a.param->has_minmax ? 1u : 0u);
-      h = hash_mix(h, (uint32_t)(a.param->min_val ^ (a.param->min_val >> 32)));
-      h = hash_mix(h, (uint32_t)(a.param->max_val ^ (a.param->max_val >> 32)));
+      if (a.param->has_minmax) {
+        /* Python numeric equality crosses int/float/bool. A double projection
+         * gives equal values equal hashes; exact equality resolves collisions. */
+        PolyArg bounds[] = {a.param->min_val, a.param->max_val};
+        for (int i = 0; i < 2; i++) {
+          double value = bounds[i].kind == POLY_ARG_FLOAT ? bounds[i].f
+                                                          : poly_arg_integer_to_double(bounds[i]);
+          h = hash_mix(h, poly_arg_hash(poly_arg_float(value == 0 ? 0.0 : value)));
+        }
+      }
       h = hash_mix(h, a.param->has_multiple_of ? 1u : 0u);
       h = hash_mix(h, (uint32_t)(a.param->multiple_of ^ (a.param->multiple_of >> 32)));
       h = hash_mix(h, a.param->volatile_ ? 1u : 0u);
@@ -1142,6 +1153,9 @@ static bool poly_arg_copy_to_storage(PolyUOpStorage *storage, PolyArg *dst) {
     PolyParamArg *param = uop_storage_alloc(storage, sizeof(*param), _Alignof(PolyParamArg));
     if (!param) return false;
     *param = *dst->param;
+    if (!poly_arg_copy_to_storage(storage, &param->min_val) ||
+        !poly_arg_copy_to_storage(storage, &param->max_val))
+      return false;
     if (param->name) {
       size_t len = strlen(param->name);
       char *name = uop_storage_alloc(storage, len + 1, 1);
@@ -1312,6 +1326,17 @@ static PolyUOp *poly_uop_internal(
   if (arg.kind == POLY_ARG_PARAM && arg.param) {
     normalized_param = *arg.param;
     if (normalized_param.dtype.bitsize == 0) normalized_param.dtype = dtype;
+    if (normalized_param.has_minmax) {
+      if (!poly_arg_canonicalize_bigint(&normalized_param.min_val) ||
+          !poly_arg_canonicalize_bigint(&normalized_param.max_val))
+        return NULL;
+      bool ordered = false;
+      int cmp =
+          poly_arg_python_numeric_cmp(normalized_param.min_val, normalized_param.max_val, &ordered);
+      if (!ordered || cmp > 0) return NULL;
+    } else {
+      normalized_param.min_val = normalized_param.max_val = poly_arg_none();
+    }
     arg.param = &normalized_param;
   }
 
@@ -2411,14 +2436,42 @@ static const char *dtype_arg_repr_name(PolyDType dtype) {
   return name;
 }
 
-static void uop_print_one(PolyUOp *u, char *buf, int *pos, int cap) {
-  int written = snprintf(buf + *pos, cap - *pos, "UOp(%s", poly_op_name(u->op));
-  if (written > 0) *pos += written;
+static char *param_bound_string(PolyArg arg) {
+  if (arg.kind != POLY_ARG_FLOAT && arg.kind != POLY_ARG_BOOL)
+    return poly_arg_integer_to_decimal(arg);
+  char text[32];
+  if (arg.kind == POLY_ARG_BOOL)
+    snprintf(text, sizeof(text), "%s", arg.b ? "True" : "False");
+  else
+    snprintf(text, sizeof(text), "%.17g", arg.f);
+  size_t size = strlen(text) + 1;
+  char *copy = malloc(size);
+  if (copy) memcpy(copy, text, size);
+  return copy;
+}
+
+/* UOp.argstr/pretty_print may contain arbitrarily large scalar payloads.
+ * Count the full length even after the destination is exhausted, without
+ * forming a pointer outside it. The second pass allocates that exact length. */
+static int uop_snprintf(char *buf, size_t pos, size_t cap, const char *format, ...) {
+  va_list args;
+  va_start(args, format);
+  int written = vsnprintf(pos < cap ? buf + pos : NULL, pos < cap ? cap - pos : 0, format, args);
+  va_end(args);
+  if (written < 0 || (size_t)written >= SIZE_MAX - pos) return -1;
+  return written;
+}
+
+static bool uop_print_one(PolyUOp *u, char *buf, size_t *pos, size_t cap) {
+  int written = uop_snprintf(buf, *pos, cap, "UOp(%s", poly_op_name(u->op));
+  if (written < 0) return false;
+  *pos += (size_t)written;
 
   /* dtype */
   if (!poly_dtype_eq(u->dtype, POLY_VOID)) {
-    written = snprintf(buf + *pos, cap - *pos, ", %s", poly_dtype_name(u->dtype));
-    if (written > 0) *pos += written;
+    written = uop_snprintf(buf, *pos, cap, ", %s", poly_dtype_name(u->dtype));
+    if (written < 0) return false;
+    *pos += (size_t)written;
   }
 
   /* arg */
@@ -2426,227 +2479,264 @@ static void uop_print_one(PolyUOp *u, char *buf, int *pos, int cap) {
   case POLY_ARG_NONE:
     break;
   case POLY_ARG_INT:
-    written = snprintf(buf + *pos, cap - *pos, ", %ld", (long)u->arg.i);
-    if (written > 0) *pos += written;
+    written = uop_snprintf(buf, *pos, cap, ", %ld", (long)u->arg.i);
+    if (written < 0) return false;
+    *pos += (size_t)written;
     break;
   case POLY_ARG_ALLREDUCE:
-    written = snprintf(buf + *pos, cap - *pos, ", (%s,", poly_op_name(u->arg.allreduce.op));
-    if (written > 0) *pos += written;
+    written = uop_snprintf(buf, *pos, cap, ", (%s,", poly_op_name(u->arg.allreduce.op));
+    if (written < 0) return false;
+    *pos += (size_t)written;
     if (u->arg.allreduce.device_is_tuple) {
-      written = snprintf(buf + *pos, cap - *pos, "(");
-      if (written > 0) *pos += written;
+      written = uop_snprintf(buf, *pos, cap, "(");
+      if (written < 0) return false;
+      *pos += (size_t)written;
       for (int i = 0; i < u->arg.allreduce.n_devices; i++) {
-        written =
-            snprintf(buf + *pos, cap - *pos, "%s'%s'", i ? "," : "", u->arg.allreduce.devices[i]);
-        if (written > 0) *pos += written;
+        written = uop_snprintf(buf, *pos, cap, "%s'%s'", i ? "," : "", u->arg.allreduce.devices[i]);
+        if (written < 0) return false;
+        *pos += (size_t)written;
       }
-      written = snprintf(buf + *pos, cap - *pos, "))");
+      written = uop_snprintf(buf, *pos, cap, "))");
     } else {
-      written = snprintf(buf + *pos, cap - *pos, "'%s')", u->arg.allreduce.device);
+      written = uop_snprintf(buf, *pos, cap, "'%s')", u->arg.allreduce.device);
     }
-    if (written > 0) *pos += written;
+    if (written < 0) return false;
+    *pos += (size_t)written;
     break;
   case POLY_ARG_BIGINT: {
     char *decimal = poly_arg_integer_to_decimal(u->arg);
-    written = snprintf(buf + *pos, cap - *pos, ", %s", decimal ? decimal : "0");
+    written = uop_snprintf(buf, *pos, cap, ", %s", decimal ? decimal : "0");
     free(decimal);
-    if (written > 0) *pos += written;
+    if (written < 0) return false;
+    *pos += (size_t)written;
   } break;
   case POLY_ARG_REDUCE:
-    written = snprintf(
-        buf + *pos, cap - *pos, ", (%s,%d)", poly_op_name(u->arg.reduce.op), u->arg.reduce.num_axes
+    written = uop_snprintf(
+        buf, *pos, cap, ", (%s,%d)", poly_op_name(u->arg.reduce.op), u->arg.reduce.num_axes
     );
-    if (written > 0) *pos += written;
+    if (written < 0) return false;
+    *pos += (size_t)written;
     break;
   case POLY_ARG_FLOAT:
     /* Pinned UOp.argstr uses Python's round-trippable float repr
      * (uop/ops.py:166-171). Seventeen significant decimal digits preserve a
      * C double exactly for graph diagnostics and parity tooling. */
-    written = snprintf(buf + *pos, cap - *pos, ", %.17g", u->arg.f);
-    if (written > 0) *pos += written;
+    written = uop_snprintf(buf, *pos, cap, ", %.17g", u->arg.f);
+    if (written < 0) return false;
+    *pos += (size_t)written;
     break;
   case POLY_ARG_BOOL:
-    written = snprintf(buf + *pos, cap - *pos, ", %s", u->arg.b ? "True" : "False");
-    if (written > 0) *pos += written;
+    written = uop_snprintf(buf, *pos, cap, ", %s", u->arg.b ? "True" : "False");
+    if (written < 0) return false;
+    *pos += (size_t)written;
     break;
   case POLY_ARG_STRING:
-    written = snprintf(buf + *pos, cap - *pos, ", \"%s\"", u->arg.str ? u->arg.str : "");
-    if (written > 0) *pos += written;
+    written = uop_snprintf(buf, *pos, cap, ", \"%s\"", u->arg.str ? u->arg.str : "");
+    if (written < 0) return false;
+    *pos += (size_t)written;
     break;
   case POLY_ARG_STRING_TUPLE:
-    written = snprintf(buf + *pos, cap - *pos, ", (");
-    if (written > 0) *pos += written;
+    written = uop_snprintf(buf, *pos, cap, ", (");
+    if (written < 0) return false;
+    *pos += (size_t)written;
     for (int i = 0; i < u->arg.string_tuple.n; i++) {
-      written =
-          snprintf(buf + *pos, cap - *pos, "%s\"%s\"", i ? "," : "", u->arg.string_tuple.vals[i]);
-      if (written > 0) *pos += written;
+      written = uop_snprintf(buf, *pos, cap, "%s\"%s\"", i ? "," : "", u->arg.string_tuple.vals[i]);
+      if (written < 0) return false;
+      *pos += (size_t)written;
     }
-    written = snprintf(buf + *pos, cap - *pos, ")");
-    if (written > 0) *pos += written;
+    written = uop_snprintf(buf, *pos, cap, ")");
+    if (written < 0) return false;
+    *pos += (size_t)written;
     break;
   case POLY_ARG_OPS:
-    written = snprintf(buf + *pos, cap - *pos, ", %s", poly_op_name(u->arg.ops));
-    if (written > 0) *pos += written;
+    written = uop_snprintf(buf, *pos, cap, ", %s", poly_op_name(u->arg.ops));
+    if (written < 0) return false;
+    *pos += (size_t)written;
     break;
   case POLY_ARG_INVALID:
-    written = snprintf(buf + *pos, cap - *pos, ", Invalid");
-    if (written > 0) *pos += written;
+    written = uop_snprintf(buf, *pos, cap, ", Invalid");
+    if (written < 0) return false;
+    *pos += (size_t)written;
     break;
   case POLY_ARG_INT_TUPLE:
-    written = snprintf(buf + *pos, cap - *pos, ", (");
-    if (written > 0) *pos += written;
+    written = uop_snprintf(buf, *pos, cap, ", (");
+    if (written < 0) return false;
+    *pos += (size_t)written;
     for (int i = 0; i < u->arg.int_tuple.n; i++) {
       if (u->op == POLY_OP_FLIP)
-        written = snprintf(
-            buf + *pos, cap - *pos, "%s%s", i ? "," : "",
-            u->arg.int_tuple.vals[i] ? "True" : "False"
+        written = uop_snprintf(
+            buf, *pos, cap, "%s%s", i ? "," : "", u->arg.int_tuple.vals[i] ? "True" : "False"
         );
       else
         written =
-            snprintf(buf + *pos, cap - *pos, "%s%ld", i ? "," : "", (long)u->arg.int_tuple.vals[i]);
-      if (written > 0) *pos += written;
+            uop_snprintf(buf, *pos, cap, "%s%ld", i ? "," : "", (long)u->arg.int_tuple.vals[i]);
+      if (written < 0) return false;
+      *pos += (size_t)written;
     }
-    written = snprintf(buf + *pos, cap - *pos, ")");
-    if (written > 0) *pos += written;
+    written = uop_snprintf(buf, *pos, cap, ")");
+    if (written < 0) return false;
+    *pos += (size_t)written;
     break;
   case POLY_ARG_RANGE:
-    written = snprintf(
-        buf + *pos, cap - *pos, ", (%ld,%d", (long)u->arg.range.axis_id, (int)u->arg.range.axis_type
+    written = uop_snprintf(
+        buf, *pos, cap, ", (%ld,%d", (long)u->arg.range.axis_id, (int)u->arg.range.axis_type
     );
-    if (written > 0) *pos += written;
+    if (written < 0) return false;
+    *pos += (size_t)written;
     for (int i = 0; i < u->arg.range.n_extra; i++) {
-      written = snprintf(buf + *pos, cap - *pos, ",%ld", (long)u->arg.range.extra[i]);
-      if (written > 0) *pos += written;
+      written = uop_snprintf(buf, *pos, cap, ",%ld", (long)u->arg.range.extra[i]);
+      if (written < 0) return false;
+      *pos += (size_t)written;
     }
-    written = snprintf(buf + *pos, cap - *pos, ")");
-    if (written > 0) *pos += written;
+    written = uop_snprintf(buf, *pos, cap, ")");
+    if (written < 0) return false;
+    *pos += (size_t)written;
     break;
   case POLY_ARG_BUFFERIZE_OPTS:
-    written = snprintf(buf + *pos, cap - *pos, ", BufferizeOpts(device=");
-    if (written > 0) *pos += written;
+    written = uop_snprintf(buf, *pos, cap, ", BufferizeOpts(device=");
+    if (written < 0) return false;
+    *pos += (size_t)written;
     if (u->arg.bufferize_opts.device_is_int) {
-      written =
-          snprintf(buf + *pos, cap - *pos, "%lld", (long long)u->arg.bufferize_opts.device_int);
+      written = uop_snprintf(buf, *pos, cap, "%lld", (long long)u->arg.bufferize_opts.device_int);
     } else if (u->arg.bufferize_opts.device_is_tuple) {
-      written = snprintf(buf + *pos, cap - *pos, "(");
-      if (written > 0) *pos += written;
+      written = uop_snprintf(buf, *pos, cap, "(");
+      if (written < 0) return false;
+      *pos += (size_t)written;
       for (int i = 0; i < u->arg.bufferize_opts.n_devices; i++) {
-        written = snprintf(
-            buf + *pos, cap - *pos, "%s\"%s\"", i ? "," : "", u->arg.bufferize_opts.devices[i]
+        written = uop_snprintf(
+            buf, *pos, cap, "%s\"%s\"", i ? "," : "", u->arg.bufferize_opts.devices[i]
         );
-        if (written > 0) *pos += written;
+        if (written < 0) return false;
+        *pos += (size_t)written;
       }
-      written = snprintf(buf + *pos, cap - *pos, ")");
+      written = uop_snprintf(buf, *pos, cap, ")");
     } else {
-      written = snprintf(
-          buf + *pos, cap - *pos, "%s",
-          u->arg.bufferize_opts.device ? u->arg.bufferize_opts.device : "None"
+      written = uop_snprintf(
+          buf, *pos, cap, "%s", u->arg.bufferize_opts.device ? u->arg.bufferize_opts.device : "None"
       );
     }
-    if (written > 0) *pos += written;
-    written = snprintf(
-        buf + *pos, cap - *pos, ",addrspace=%d,removable=%d)", (int)u->arg.bufferize_opts.addrspace,
+    if (written < 0) return false;
+    *pos += (size_t)written;
+    written = uop_snprintf(
+        buf, *pos, cap, ",addrspace=%d,removable=%d)", (int)u->arg.bufferize_opts.addrspace,
         (int)u->arg.bufferize_opts.removable
     );
-    if (written > 0) *pos += written;
+    if (written < 0) return false;
+    *pos += (size_t)written;
     break;
   case POLY_ARG_TENSOR_CORE:
-    written = snprintf(
-        buf + *pos, cap - *pos, ", WMMA((%d,%d,%d),%s,%s,threads=%d,axes=%s)",
-        u->arg.tensor_core.dims[0], u->arg.tensor_core.dims[1], u->arg.tensor_core.dims[2],
+    written = uop_snprintf(
+        buf, *pos, cap, ", WMMA((%d,%d,%d),%s,%s,threads=%d,axes=%s)", u->arg.tensor_core.dims[0],
+        u->arg.tensor_core.dims[1], u->arg.tensor_core.dims[2],
         poly_dtype_name(u->arg.tensor_core.dtype_in),
         u->arg.tensor_core.device ? u->arg.tensor_core.device : "?", u->arg.tensor_core.threads,
         u->arg.tensor_core.has_upcast_axes ? "set" : "None"
     );
-    if (written > 0) *pos += written;
+    if (written < 0) return false;
+    *pos += (size_t)written;
     break;
   case POLY_ARG_PARAM:
     if (!u->arg.param) {
-      written = snprintf(buf + *pos, cap - *pos, ", ParamArg(-1)");
-      if (written > 0) *pos += written;
+      written = uop_snprintf(buf, *pos, cap, ", ParamArg(-1)");
+      if (written < 0) return false;
+      *pos += (size_t)written;
       break;
     }
-    written = snprintf(
-        buf + *pos, cap - *pos, ", ParamArg(%ld, dtypes.%s", (long)u->arg.param->slot,
+    written = uop_snprintf(
+        buf, *pos, cap, ", ParamArg(%ld, dtypes.%s", (long)u->arg.param->slot,
         dtype_arg_repr_name(u->arg.param->dtype)
     );
-    if (written > 0) *pos += written;
+    if (written < 0) return false;
+    *pos += (size_t)written;
     if (u->arg.param->has_minmax) {
-      written = snprintf(
-          buf + *pos, cap - *pos, ", vmin_vmax=(%ld, %ld)", (long)u->arg.param->min_val,
-          (long)u->arg.param->max_val
-      );
-      if (written > 0) *pos += written;
+      char *lo = param_bound_string(u->arg.param->min_val);
+      char *hi = param_bound_string(u->arg.param->max_val);
+      written = uop_snprintf(buf, *pos, cap, ", vmin_vmax=(%s, %s)", lo ? lo : "?", hi ? hi : "?");
+      free(lo);
+      free(hi);
+      if (written < 0) return false;
+      *pos += (size_t)written;
     }
     if (u->arg.param->has_multiple_of) {
-      written =
-          snprintf(buf + *pos, cap - *pos, ", multiple_of=%ld", (long)u->arg.param->multiple_of);
-      if (written > 0) *pos += written;
+      written = uop_snprintf(buf, *pos, cap, ", multiple_of=%ld", (long)u->arg.param->multiple_of);
+      if (written < 0) return false;
+      *pos += (size_t)written;
     }
     if (u->arg.param->name) {
-      written = snprintf(buf + *pos, cap - *pos, ", name='%s'", u->arg.param->name);
-      if (written > 0) *pos += written;
+      written = uop_snprintf(buf, *pos, cap, ", name='%s'", u->arg.param->name);
+      if (written < 0) return false;
+      *pos += (size_t)written;
     }
     if (u->arg.param->addrspace != POLY_ADDR_GLOBAL) {
       const char *addrspace = u->arg.param->addrspace == POLY_ADDR_LOCAL ? "AddrSpace.LOCAL"
                               : u->arg.param->addrspace == POLY_ADDR_REG ? "AddrSpace.REG"
                               : u->arg.param->addrspace == POLY_ADDR_ALU ? "AddrSpace.ALU"
                                                                          : "AddrSpace.UNKNOWN";
-      written = snprintf(buf + *pos, cap - *pos, ", addrspace=%s", addrspace);
-      if (written > 0) *pos += written;
+      written = uop_snprintf(buf, *pos, cap, ", addrspace=%s", addrspace);
+      if (written < 0) return false;
+      *pos += (size_t)written;
     }
     if (u->arg.param->has_axis) {
-      written = snprintf(buf + *pos, cap - *pos, ", axis=%d", u->arg.param->axis);
-      if (written > 0) *pos += written;
+      written = uop_snprintf(buf, *pos, cap, ", axis=%d", u->arg.param->axis);
+      if (written < 0) return false;
+      *pos += (size_t)written;
     }
     if (u->arg.param->device_is_tuple) {
-      written = snprintf(buf + *pos, cap - *pos, ", device=(");
-      if (written > 0) *pos += written;
+      written = uop_snprintf(buf, *pos, cap, ", device=(");
+      if (written < 0) return false;
+      *pos += (size_t)written;
       for (int i = 0; i < u->arg.param->n_devices; i++) {
-        written = snprintf(
-            buf + *pos, cap - *pos, "%s'%s'%s", i ? ", " : "", u->arg.param->devices[i],
+        written = uop_snprintf(
+            buf, *pos, cap, "%s'%s'%s", i ? ", " : "", u->arg.param->devices[i],
             u->arg.param->n_devices == 1 ? "," : ""
         );
-        if (written > 0) *pos += written;
+        if (written < 0) return false;
+        *pos += (size_t)written;
       }
-      written = snprintf(buf + *pos, cap - *pos, ")");
-      if (written > 0) *pos += written;
+      written = uop_snprintf(buf, *pos, cap, ")");
+      if (written < 0) return false;
+      *pos += (size_t)written;
     } else if (u->arg.param->device) {
-      written = snprintf(buf + *pos, cap - *pos, ", device='%s'", u->arg.param->device);
-      if (written > 0) *pos += written;
+      written = uop_snprintf(buf, *pos, cap, ", device='%s'", u->arg.param->device);
+      if (written < 0) return false;
+      *pos += (size_t)written;
     }
     if (u->arg.param->volatile_) {
-      written = snprintf(buf + *pos, cap - *pos, ", volatile=True");
-      if (written > 0) *pos += written;
+      written = uop_snprintf(buf, *pos, cap, ", volatile=True");
+      if (written < 0) return false;
+      *pos += (size_t)written;
     }
-    written = snprintf(buf + *pos, cap - *pos, ")");
-    if (written > 0) *pos += written;
+    written = uop_snprintf(buf, *pos, cap, ")");
+    if (written < 0) return false;
+    *pos += (size_t)written;
     break;
   case POLY_ARG_CALL_INFO:
     if (!u->arg.call_info) {
-      written = snprintf(buf + *pos, cap - *pos, ", CallInfo(None,None,False,False)");
+      written = uop_snprintf(buf, *pos, cap, ", CallInfo(None,None,False,False)");
     } else {
       const PolyCallInfo *info = u->arg.call_info;
-      written = snprintf(
-          buf + *pos, cap - *pos, ", CallInfo(%s,%s%s%s,%s,%s)",
-          info->has_grad_fxn ? "<callback>" : "None", info->name ? "'" : "",
-          info->name ? info->name : "None", info->name ? "'" : "",
+      written = uop_snprintf(
+          buf, *pos, cap, ", CallInfo(%s,%s%s%s,%s,%s)", info->has_grad_fxn ? "<callback>" : "None",
+          info->name ? "'" : "", info->name ? info->name : "None", info->name ? "'" : "",
           info->precompile ? "True" : "False", info->precompile_backward ? "True" : "False"
       );
     }
-    if (written > 0) *pos += written;
+    if (written < 0) return false;
+    *pos += (size_t)written;
     break;
   case POLY_ARG_KERNEL_INFO:
-    written = snprintf(
-        buf + *pos, cap - *pos, ", KernelInfo(name='%s', beam=%d)",
+    written = uop_snprintf(
+        buf, *pos, cap, ", KernelInfo(name='%s', beam=%d)",
         u->arg.kernel_info && u->arg.kernel_info->name ? u->arg.kernel_info->name : "test",
         u->arg.kernel_info ? u->arg.kernel_info->beam : 0
     );
-    if (written > 0) *pos += written;
+    if (written < 0) return false;
+    *pos += (size_t)written;
     break;
   case POLY_ARG_DTYPE:
-    written = snprintf(buf + *pos, cap - *pos, ", dtypes.%s", dtype_arg_repr_name(u->arg.dtype));
-    if (written > 0) *pos += written;
+    written = uop_snprintf(buf, *pos, cap, ", dtypes.%s", dtype_arg_repr_name(u->arg.dtype));
+    if (written < 0) return false;
+    *pos += (size_t)written;
     break;
   default:
     break;
@@ -2654,19 +2744,27 @@ static void uop_print_one(PolyUOp *u, char *buf, int *pos, int cap) {
 
   /* n_src */
   if (u->n_src > 0) {
-    written = snprintf(buf + *pos, cap - *pos, ", src=%d", u->n_src);
-    if (written > 0) *pos += written;
+    written = uop_snprintf(buf, *pos, cap, ", src=%d", u->n_src);
+    if (written < 0) return false;
+    *pos += (size_t)written;
   }
 
-  written = snprintf(buf + *pos, cap - *pos, ")");
-  if (written > 0) *pos += written;
+  written = uop_snprintf(buf, *pos, cap, ")");
+  if (written < 0) return false;
+  *pos += (size_t)written;
+  return true;
 }
 
 char *poly_uop_str(PolyUOp *u) {
-  int cap = 256;
-  char *buf = malloc(cap);
-  int pos = 0;
-  uop_print_one(u, buf, &pos, cap);
+  size_t length = 0;
+  if (!u || !uop_print_one(u, NULL, &length, 0)) return NULL;
+  char *buf = malloc(length + 1);
+  if (!buf) return NULL;
+  size_t pos = 0;
+  if (!uop_print_one(u, buf, &pos, length + 1) || pos != length) {
+    free(buf);
+    return NULL;
+  }
   buf[pos] = '\0';
   return buf;
 }
@@ -3687,8 +3785,8 @@ PolyUOp *poly_uop_param(PolyCtx *ctx, int slot, PolyUOp *like) {
   PolyParamArg param_arg = {
       .slot = slot,
       .name = NULL,
-      .min_val = 0,
-      .max_val = 0,
+      .min_val = {.kind = POLY_ARG_NONE},
+      .max_val = {.kind = POLY_ARG_NONE},
       .has_minmax = false,
       .addrspace = POLY_ADDR_GLOBAL,
       .axis = 0,
@@ -3707,13 +3805,15 @@ PolyUOp *poly_uop_param(PolyCtx *ctx, int slot, PolyUOp *like) {
 PolyUOp *poly_uop_variable(
     PolyCtx *ctx,
     const char *name,
-    int64_t min_val,
-    int64_t max_val,
+    PolyArg min_val,
+    PolyArg max_val,
     PolyDType dtype,
     int64_t multiple_of,
     bool param
 ) {
-  if (!ctx || !name || min_val > max_val || multiple_of <= 0) return NULL;
+  bool ordered = false;
+  int cmp = poly_arg_python_numeric_cmp(min_val, max_val, &ordered);
+  if (!ctx || !name || !ordered || cmp > 0 || multiple_of <= 0) return NULL;
   PolyUOp *shape = poly_uop0(ctx, POLY_OP_STACK, POLY_VOID, poly_arg_none());
   PolyParamArg arg = {
       .slot = -1,
@@ -3805,7 +3905,10 @@ const char *poly_uop_expr(const PolyUOp *u) {
 PolyUOp *poly_uop_bind(PolyCtx *ctx, PolyUOp *var, int64_t value) {
   if (!ctx || !poly_uop_is_variable(var)) return NULL;
   const PolyParamArg *arg = var->arg.param;
-  if (value < arg->min_val || value > arg->max_val ||
+  bool lo_ok = false, hi_ok = false;
+  int lower = poly_arg_python_numeric_cmp(poly_arg_int(value), arg->min_val, &lo_ok);
+  int upper = poly_arg_python_numeric_cmp(poly_arg_int(value), arg->max_val, &hi_ok);
+  if (!lo_ok || !hi_ok || lower < 0 || upper > 0 ||
       (arg->has_multiple_of && value % arg->multiple_of != 0))
     return NULL;
   PolyUOp *val = poly_uop0(ctx, POLY_OP_CONST, var->dtype, poly_arg_int(value));
