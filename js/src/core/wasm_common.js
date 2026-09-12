@@ -744,6 +744,7 @@ function createWasmCoreFromModule(Module, device) {
       try { return Module._poly_const_int_decimal(ctx, ptr) }
       finally { Module._free(ptr) }
     },
+    poly_uop_bind: (ctx, variable, value) => Module._poly_uop_bind(ctx, variable, value),
     poly_uop_variable_by_id: (ctx, name, lo, hi, dtype, multiple, param) => {
       const ptr = allocString(name)
       try { return Module._poly_uop_variable_by_id(ctx, ptr, lo, hi, dtype, BigInt(multiple), param) }
@@ -1913,7 +1914,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 79
+  const EXPECTED_ABI = 80
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(

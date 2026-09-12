@@ -128,6 +128,8 @@ def _var_binding_array(bindings):
     n = len(bindings)
     arr = (_ffi.PolyVarBinding * max(1, n))()
     for i, (raw, value) in enumerate(bindings):
+        if not isinstance(value, int) or not -(1 << 63) <= value < (1 << 63):
+            raise JitError('binding value exceeds the signed64 C runtime domain')
         arr[i].var = raw
         arr[i].value = value
     return arr, n

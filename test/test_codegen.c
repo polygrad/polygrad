@@ -1673,7 +1673,7 @@ TEST(codegen, beam_scratch_samples_scalar_midpoint) {
   void **args = poly_test_beam_args_from_ast(ctx, variable, &n_args);
   ASSERT_NOT_NULL(args);
   ASSERT_INT_EQ(n_args, 1);
-  int value = *(int32_t *)args[0];
+  int64_t value = *(int64_t *)args[0];
   free(args[0]);
   free(args);
   poly_ctx_destroy(ctx);
@@ -1696,7 +1696,7 @@ TEST(codegen, beam_scratch_uses_c_wrapper_scalar_abi) {
   ASSERT_NOT_NULL(args);
   ASSERT_INT_EQ(n_args, 1);
   /* The native C wrapper reads an int, then converts to the declared dtype. */
-  int value = *(int *)args[0];
+  int64_t value = *(int64_t *)args[0];
   free(args[0]);
   free(args);
   poly_ctx_destroy(ctx);
@@ -1728,7 +1728,7 @@ TEST(codegen, beam_scratch_mixed_arguments_and_symbolic_extent) {
   /* Buffer capacity uses the maximum, not the sampled scalar or topo order. */
   ((double *)args[0])[8] = 7.0;
   ASSERT_TRUE(((double *)args[0])[8] == 7.0);
-  ASSERT_INT_EQ(*(int *)args[1], 6);
+  ASSERT_TRUE(*(int64_t *)args[1] == 6);
   free(args[0]);
   free(args[1]);
   free(args);
@@ -1749,17 +1749,29 @@ TEST(codegen, beam_scratch_scalar_bounds_and_failed_candidate_cleanup) {
   int n_args = 0;
   void **args = poly_test_beam_args_from_ast(ctx, variable, &n_args);
   ASSERT_NOT_NULL(args);
-  ASSERT_INT_EQ(*(int *)args[0], -1);
+  ASSERT_TRUE(*(int64_t *)args[0] == -1);
   free(args[0]);
   free(args);
   PolyUOp *buffer = poly_test_program_param(ctx, POLY_FLOAT64, 8, 0);
   arg.min_val = arg.max_val = poly_arg_int(INT64_MAX);
   variable = poly_uop0(ctx, POLY_OP_PARAM, POLY_INT64, poly_arg_param(&arg));
   PolyUOp *src[] = {buffer, variable};
-  PolyUOp *sink = poly_test_kernel_sink(ctx, src, 2, "beam_unrepresentable_scalar");
+  PolyUOp *sink = poly_test_kernel_sink(ctx, src, 2, "beam_wide_scalar");
   args = poly_test_beam_args_from_ast(ctx, sink, &n_args);
-  ASSERT_TRUE(args == NULL);
-  ASSERT_INT_EQ(n_args, 0);
+  ASSERT_NOT_NULL(args);
+  ASSERT_INT_EQ(n_args, 2);
+  ASSERT_TRUE(*(int64_t *)args[1] == INT64_MAX);
+  free(args[0]);
+  free(args[1]);
+  free(args);
+  arg.min_val = poly_arg_int(8);
+  arg.max_val = poly_arg_int(4);
+  /* An invalid candidate still releases buffers allocated before its scalar. */
+  variable = poly_uop0(ctx, POLY_OP_PARAM, POLY_INT64, poly_arg_param(&arg));
+  src[1] = variable;
+  sink = poly_test_kernel_sink(ctx, src, 2, "beam_invalid_scalar");
+  args = poly_test_beam_args_from_ast(ctx, sink, &n_args);
+  ASSERT_TRUE(args == NULL && n_args == 0);
   /* Failure releases the already allocated buffer; a later candidate works. */
   args = poly_test_beam_args_from_ast(ctx, buffer, &n_args);
   ASSERT_NOT_NULL(args);

@@ -718,6 +718,13 @@ int poly_webgpu_lower_item(PolyCtx *ctx, PolyUOp *program, const char *fn_name, 
 
 int poly_webgpu_execute(PolyRunner *runner, void **args, int n_args) {
   if (!runner || !runner->handle) return -1;
+  /* WGSL uniforms remain 32-bit; widening host vals must not silently
+   * truncate an unsupported value or submit a partially prepared call. */
+  for (int i = runner->n_params; i < n_args; i++) {
+    if (!args[i]) return -1;
+    int64_t value = *(const int64_t *)args[i];
+    if (value < INT32_MIN || value > UINT32_MAX) return -1;
+  }
   PolyWebGpuRunnerHandle *wh = (PolyWebGpuRunnerHandle *)runner->handle;
   bool timing = poly_debug_at_least(7);
   double t0 = timing ? poly_now_ms() : 0.0;

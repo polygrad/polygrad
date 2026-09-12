@@ -16,7 +16,7 @@ import sys
 _lib = None
 OPS = {}
 _has_cuda_ffi = False
-POLYGRAD_ABI_VERSION = 79
+POLYGRAD_ABI_VERSION = 80
 
 # --- Opaque pointer type (always available) ---
 _ptr = ctypes.c_void_p
@@ -29,7 +29,7 @@ _uintptr = ctypes.c_size_t
 # --- Structures (always available, no _lib dependency) ---
 
 class PolyVarBinding(ctypes.Structure):
-    _fields_ = [('var', _ptr), ('value', ctypes.c_int32)]
+    _fields_ = [('var', _ptr), ('value', ctypes.c_int64)]
 
 class PolyBuffer(ctypes.Structure):
     _fields_ = [

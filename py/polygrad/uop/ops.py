@@ -243,6 +243,10 @@ class UOp:
 
     def bind(self, value):
         """Bind an integer through AFTER(variable, STORE(variable, CONST))."""
+        if not isinstance(value, int):
+            raise TypeError('binding value must be an integer')
+        if not -(1 << 63) <= value < (1 << 63):
+            raise OverflowError('binding value exceeds the signed64 C runtime domain')
         raw = _ffi._lib.poly_uop_bind(self.ctx, self.raw, value)
         return UOp(self.ctx, raw) if raw else None
 

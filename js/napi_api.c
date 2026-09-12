@@ -565,6 +565,22 @@ static napi_value napi_poly_const_int_decimal(napi_env env, napi_callback_info i
   return make_external(env, out);
 }
 
+static napi_value napi_poly_uop_bind(napi_env env, napi_callback_info info) {
+  napi_value argv[3];
+  size_t argc = 3;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  int64_t value;
+  bool lossless = false;
+  NAPI_CALL(env, napi_get_value_bigint_int64(env, argv[2], &value, &lossless));
+  if (!lossless) {
+    napi_throw_range_error(env, NULL, "binding value exceeds the signed64 C runtime domain");
+    return NULL;
+  }
+  return make_external(
+      env, poly_uop_bind(get_external(env, argv[0]), get_external(env, argv[1]), value)
+  );
+}
+
 static napi_value napi_poly_uop_variable_by_id(napi_env env, napi_callback_info info) {
   napi_value argv[7];
   size_t argc = 7;
@@ -6566,6 +6582,7 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_const_int_by_id", napi_poly_const_int_by_id),
       DECLARE_NAPI_METHOD("poly_const_int_decimal", napi_poly_const_int_decimal),
       DECLARE_NAPI_METHOD("poly_uop_variable_by_id", napi_poly_uop_variable_by_id),
+      DECLARE_NAPI_METHOD("poly_uop_bind", napi_poly_uop_bind),
       DECLARE_NAPI_METHOD("poly_uop_str", napi_poly_uop_str),
 
       /* ALU */

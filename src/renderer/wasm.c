@@ -2092,6 +2092,19 @@ static void count_local(
   }
 }
 
+/* Keep all-i32 address arguments and the buffer-only fast path. Both Wasm
+ * emitters convert the same signed64 numeric vals as the native C wrapper. */
+static void emit_scalar_param(WasmBuf *body, PolyUOp *u, int abi, int local) {
+  wb_byte(body, WASM_OP_LOCAL_GET);
+  wb_uleb128(body, abi);
+  wb_byte(body, WASM_OP_I64_LOAD);
+  wb_uleb128(body, 3);
+  wb_uleb128(body, 0);
+  emit_cast_stack_value(body, POLY_INT64, u->dtype);
+  wb_byte(body, WASM_OP_LOCAL_SET);
+  wb_uleb128(body, local);
+}
+
 static void build_code_scalar(
     PolyCtx *ctx,
     WasmBuf *mod,
@@ -2124,6 +2137,11 @@ static void build_code_scalar(
   for (int i = 0; i < n; i++) {
     if (skip && skip[i]) continue;
     PolyUOp *u = uops[i];
+    if (u->op == POLY_OP_PARAM && poly_uop_is_alu_param(u))
+      count_local(
+          u->dtype, false, &n_locals_i32, &n_locals_i64, &n_locals_f32, &n_locals_f64,
+          &n_locals_v128
+      );
     if (u->op == POLY_OP_RANGE) n_locals_i32++; /* loop counter always i32 */
     if (u->op == POLY_OP_LOAD) {
       PolyDType shrink_dtype;
@@ -2243,7 +2261,15 @@ static void build_code_scalar(
 
     /* --- PARAM --- */
     if (u->op == POLY_OP_PARAM) {
-      lm_set(&locals, u, wasm_param_abi_index(uops, n, u));
+      int abi = wasm_param_abi_index(uops, n, u);
+      if (poly_uop_is_alu_param(u)) {
+        int local =
+            alloc_local(u->dtype, false, &next_i32, &next_i64, &next_f32, &next_f64, &next_v128);
+        emit_scalar_param(&body, u, abi, local);
+        lm_set(&locals, u, local);
+      } else {
+        lm_set(&locals, u, abi);
+      }
       continue;
     }
 
@@ -2876,6 +2902,11 @@ static void build_code_simd(
   int n_indices = 0, n_loads = 0, n_simd_alus = 0;
   for (int i = 0; i < n; i++) {
     PolyUOp *u = uops[i];
+    if (u->op == POLY_OP_PARAM && poly_uop_is_alu_param(u))
+      count_local(
+          u->dtype, false, &n_locals_i32, &n_locals_i64, &n_locals_f32, &n_locals_f64,
+          &n_locals_v128
+      );
     if (u->op == POLY_OP_INDEX) n_indices++;
     if (u->op == POLY_OP_LOAD) n_loads++;
     if (poly_opset_has(POLY_GROUP_ALU, u->op)) {
@@ -2952,7 +2983,16 @@ static void build_code_simd(
   /* Assign PARAM locals */
   for (int i = 0; i < n; i++) {
     if (uops[i]->op == POLY_OP_PARAM) {
-      lm_set(&locals, uops[i], wasm_param_abi_index(uops, n, uops[i]));
+      PolyUOp *u = uops[i];
+      int abi = wasm_param_abi_index(uops, n, u);
+      if (poly_uop_is_alu_param(u)) {
+        int local =
+            alloc_local(u->dtype, false, &next_i32, &next_i64, &next_f32, &next_f64, &next_v128);
+        emit_scalar_param(&body, u, abi, local);
+        lm_set(&locals, u, local);
+      } else {
+        lm_set(&locals, u, abi);
+      }
     }
   }
 

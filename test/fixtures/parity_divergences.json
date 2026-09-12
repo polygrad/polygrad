@@ -762,8 +762,8 @@
       "area": "runtime scalar binding value domain",
       "vocabulary": {"tinygrad_only": [], "polygrad_only": []},
       "tinygrad": "create_linear_with_vars retains Python integer values without int32 narrowing; the v0.14.0 probe preserves 4294967303 in var_vals",
-      "polygrad": "PolyVarBinding.value is int32_t. Scheduling rejects used bindings outside that domain instead of silently changing their values and ignores unused bindings. JIT already rejects out-of-domain values while collecting its bindings",
-      "rationale": "Fail-closed admission preserves the current ABI but is not full Tinygrad scalar-domain parity. Extending it requires coordinated runner, backend and frontend representation changes, not a cast or an allowance.",
+      "polygrad": "ABI80 carries signed64 numeric PolyVarBinding values through scheduling, JIT, CPU/X86/INTERP, CUDA ordinary/graph replay and Wasm. Python and JS reject values outside signed64 before FFI conversion; JS accepts BigInt or safe integer Number. Wider Python integers (including positive uint64 above INT64_MAX) remain unsupported as bindings, independently of typed PARAM bounds. WebGPU retains its supported 32-bit uniform domain.",
+      "rationale": "The coordinated signed64 runtime transport removes the old int32 narrowing but does not establish arbitrary Python-integer binding parity. No runtime-value limitation is an approved allowance.",
       "approval": null,
       "evidence": [
         "references/tinygrad_latest/tinygrad/schedule/__init__.py:create_linear_with_vars",
@@ -771,9 +771,12 @@
         "src/schedule/schedule.c:collect_bindings",
         "src/engine/jit.c:poly_jit_append_var_binding",
         "test/test_schedule_runtime.c:binding_publication_rejects_narrowing",
-        "temp/binding-publication-20260912.pBPFww/tinygrad.json"
+        "temp/binding-publication-20260912.pBPFww/tinygrad.json",
+        "temp/runtime-bindings-20260912.RGwCAX/tinygrad.log",
+        "py/tests/test_tensor.py:TestJit.test_jit_wide_scalar_capture_and_replay",
+        "js/test/test_tensor.js:wide scalar bindings preserve BigInt and execute supported values"
       ],
-      "close_when": "Define and verify the wider runtime binding ABI across supported runners/frontends, or obtain an explicit stage-scoped release limitation approval. This row grants no parity allowance."
+      "close_when": "Resolve the remaining beyond-signed64 host binding domain, or obtain an explicit stage-scoped release limitation approval with backend admission documented. This row grants no parity allowance."
     }
   ]
 }

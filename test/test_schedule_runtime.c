@@ -235,6 +235,19 @@ TEST(schedule_runtime, execution_owner_launch_admission) {
   runner.grid[0] = 0;
   ok &= isinf(poly_time_call(&runner, POLY_DEVICE_INTERP, NULL, 0, NULL, 0, 1, INFINITY, 0));
   ok &= calls == 1 && runner.grid[0] == 0;
+  PolyUOp *wide = poly_uop_variable(
+      ctx, "wide_launch", poly_arg_int(1), poly_arg_int(INT64_MAX), POLY_INT64, 1, true
+  );
+  PolyVarBinding binding = {.var = wide, .value = INT64_C(9007199254740993)};
+  runner.grid_exprs[0] = poly_uop2(
+      ctx, POLY_OP_ADD, POLY_INT64, wide,
+      poly_uop_const(ctx, poly_arg_int(-INT64_C(9007199254740992)), POLY_INT64), poly_arg_none()
+  );
+  ok &= poly_time_call(&runner, POLY_DEVICE_INTERP, NULL, 0, &binding, 1, 1, INFINITY, 0) == 1;
+  ok &= calls == 2 && runner.grid[0] == 1;
+  runner.grid_exprs[0] = wide;
+  ok &= isinf(poly_time_call(&runner, POLY_DEVICE_INTERP, NULL, 0, &binding, 1, 1, INFINITY, 0));
+  ok &= calls == 2 && runner.grid[0] == 1;
   poly_ctx_destroy(ctx);
   ASSERT_TRUE(ok);
   PASS();
@@ -370,12 +383,10 @@ static bool contains_uop(PolyUOp **items, int count, PolyUOp *item) {
  * inside another CALL's body. NOOP avoids unrelated kernel compilation here. */
 static PolyUOp *binding_publication_call(PolyCtx *ctx, int64_t value, bool used) {
   PolyUOp *var = poly_uop_variable(
-      ctx, "value", poly_arg_int(-(INT64_C(1) << 40)), poly_arg_int(INT64_C(1) << 40), POLY_INT64,
-      1, false
+      ctx, "value", poly_arg_int(INT64_MIN), poly_arg_int(INT64_MAX), POLY_INT64, 1, false
   );
   PolyUOp *param = poly_uop_variable(
-      ctx, "p0", poly_arg_int(-(INT64_C(1) << 40)), poly_arg_int(INT64_C(1) << 40), POLY_INT64, 1,
-      true
+      ctx, "p0", poly_arg_int(INT64_MIN), poly_arg_int(INT64_MAX), POLY_INT64, 1, true
   );
   PolyUOp *body =
       poly_uop(ctx, POLY_OP_NOOP, POLY_VOID, used ? &param : NULL, used ? 1 : 0, poly_arg_none());
@@ -388,10 +399,16 @@ static PolyUOp *binding_publication_call(PolyCtx *ctx, int64_t value, bool used)
 }
 
 TEST(schedule_runtime, binding_publication_rejects_narrowing) {
-  /* Tinygrad retains Python ints. C's existing PolyVarBinding is int32_t:
-   * an unsupported value must fail, never become a different binding. */
+  /* create_linear_with_vars preserves values and PARAM substitution together. */
   const int64_t values[] = {
-      INT32_MIN, INT32_MAX, (int64_t)INT32_MIN - 1, (int64_t)INT32_MAX + 1, INT64_C(4294967303)};
+      INT32_MIN,
+      INT32_MAX,
+      (int64_t)INT32_MIN - 1,
+      (int64_t)INT32_MAX + 1,
+      INT64_C(4294967303),
+      INT64_C(9007199254740993),
+      INT64_MIN,
+      INT64_MAX};
   bool correct = true;
   for (int used = 0; used < 2; used++) {
     for (size_t i = 0; i < sizeof(values) / sizeof(*values); i++) {
@@ -402,11 +419,7 @@ TEST(schedule_runtime, binding_publication_rejects_narrowing) {
       PolyUOp *linear = poly_create_linear_with_vars(ctx, call, &bindings, &count);
       if (!used)
         correct &= linear && count == 0;
-      else if (values[i] < INT32_MIN || values[i] > INT32_MAX) {
-        if (linear && count)
-          fprintf(stderr, "bound %lld became %d\n", (long long)values[i], bindings[0].value);
-        correct &= !linear && !bindings && count == 0;
-      } else {
+      else {
         correct &= linear && count == 1 && bindings[0].value == values[i];
         if (linear) {
           PolyUOp *resolved = linear->src[0]->src[0]->src[0];
@@ -551,8 +564,7 @@ TEST(schedule_runtime, jit_input_scalar_substitution_failure_is_not_capture) {
 #endif
 
 TEST(schedule_runtime, interp_scalar_params_use_numeric_bindings) {
-  /* PythonProgram consumes numeric vals. Polygrad's runner ABI supplies
-   * int32_t pointers regardless of the PARAM's computation dtype. */
+  /* PythonProgram consumes numeric vals, not PARAM-dtype-sized memory. */
   PolyDType types[] = {POLY_INT32, POLY_INT64, POLY_FLOAT32, POLY_FLOAT64};
   bool correct = true;
   for (size_t t = 0; t < sizeof(types) / sizeof(*types); t++) {
@@ -579,8 +591,7 @@ TEST(schedule_runtime, interp_scalar_params_use_numeric_bindings) {
     int rc = poly_time_call_prepare(ctx, call, POLY_DEVICE_INTERP, &runner);
     correct &= rc == 0;
     if (!rc) {
-      /* Exactly four bytes: sanitizers must catch a future dtype-sized read. */
-      int32_t *value = malloc(sizeof(*value));
+      int64_t *value = malloc(sizeof(*value));
       if (!value) {
         poly_time_call_finish(ctx, &runner, POLY_DEVICE_INTERP);
         poly_ctx_destroy(ctx);
@@ -595,7 +606,7 @@ TEST(schedule_runtime, interp_scalar_params_use_numeric_bindings) {
         double elapsed =
             poly_time_call(&runner, POLY_DEVICE_INTERP, args, 2, &binding, 1, 1, INFINITY, 0);
         /* PythonProgram preserves numeric pvals until a consuming operation;
-         * a float32 PARAM alone does not round the int32 binding. */
+         * a float32 PARAM alone does not round the integer binding. */
         double expected = *value;
         correct &= isfinite(elapsed) && got == expected;
       }
@@ -638,7 +649,7 @@ TEST(schedule_runtime, beam_time_call_reads_scalar_values) {
     int rc = poly_time_call_prepare(ctx, call, devices[d], &runner);
     bool correct = rc == 0 && runner.n_params == 1 && runner.n_vars == 1;
     if (rc == 0) {
-      int values[] = {7, -3};
+      int64_t values[] = {7, -3};
       for (int i = 0; i < 2; i++) {
         float output = NAN;
         void *args[] = {&output, &values[i]};
@@ -646,7 +657,10 @@ TEST(schedule_runtime, beam_time_call_reads_scalar_values) {
         double elapsed = poly_time_call(&runner, devices[d], args, 2, &binding, 1, 1, INFINITY, 0);
         correct &= isfinite(elapsed) && output == values[i];
         if (output != values[i])
-          fprintf(stderr, "scalar backend%d: expected%d, got%g\n", devices[d], values[i], output);
+          fprintf(
+              stderr, "scalar backend%d: expected%lld, got%g\n", devices[d], (long long)values[i],
+              output
+          );
       }
       poly_time_call_finish(ctx, &runner, devices[d]);
     }
@@ -842,18 +856,17 @@ TEST_BACKEND(cuda, execution_owner_graph_wait_stats) {
 }
 #endif
 
-#ifdef POLY_HAS_CUDA
-static bool runtime_scalar_integer_args(bool graph) {
+static bool runtime_scalar_integer_args(PolyDevice device, bool graph) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *out = poly_test_buffer_on_device(ctx, POLY_INT64, 1, POLY_DEVICE_CUDA);
+  PolyUOp *out = poly_test_buffer_on_device(ctx, POLY_INT64, 1, device);
   PolyUOp *ptr = poly_test_program_param(ctx, POLY_INT64, 1, 0);
   PolyParamArg arg = {
       .slot = 1,
       .addrspace = POLY_ADDR_ALU,
       .name = "scalar",
       .has_minmax = true,
-      .min_val = poly_arg_int(INT32_MIN),
-      .max_val = poly_arg_int(INT32_MAX)};
+      .min_val = poly_arg_int(INT64_MIN),
+      .max_val = poly_arg_int(INT64_MAX)};
   PolyUOp *var = poly_uop0(ctx, POLY_OP_PARAM, POLY_INT64, poly_arg_param(&arg));
   PolyUOp *zero = poly_const_int(ctx, 0);
   PolyUOp *store = poly_uop2(
@@ -866,28 +879,54 @@ static bool runtime_scalar_integer_args(bool graph) {
   PolyUOp *linear = poly_uop1(ctx, POLY_OP_LINEAR, POLY_VOID, call, poly_arg_none());
   linear = poly_compile_linear(ctx, linear, 0);
   bool correct = linear != NULL;
-  if (linear && graph) linear = runtime_test_graph(ctx, linear);
-  const int32_t values[] = {-3, 7, INT32_MIN, INT32_MAX};
+  if (linear && graph) {
+    linear = runtime_test_graph(ctx, linear);
+    correct &= linear != NULL;
+  }
+  const int64_t values[] = {
+      -3,        7,        INT32_MIN, INT32_MAX, INT64_C(4294967303), INT64_C(9007199254740993),
+      INT64_MIN, INT64_MAX};
   for (size_t i = 0; linear && i < sizeof(values) / sizeof(*values); i++) {
     PolyVarBinding binding = {.var = var, .value = values[i]};
     int64_t got = 0;
     int rc = poly_run_linear(ctx, linear, &binding, 1, NULL, 0, true, false, true);
     correct &= rc == 0 && poly_buffer_read(ctx, out, &got, sizeof(got)) == 0;
     if (got != values[i])
-      fprintf(stderr, "CUDA graph=%d scalar=%d got=%lld\n", graph, values[i], (long long)got);
+      fprintf(
+          stderr, "CUDA graph=%d scalar=%lld got=%lld\n", graph, (long long)values[i],
+          (long long)got
+      );
     correct &= got == values[i];
   }
   poly_ctx_destroy(ctx);
   return correct;
 }
 
+TEST(schedule_runtime, wide_scalar_integer_args) {
+#ifdef __EMSCRIPTEN__
+  PolyDevice devices[] = {POLY_DEVICE_INTERP, POLY_DEVICE_WASM};
+#else
+  PolyDevice devices[] = {
+      POLY_DEVICE_INTERP,
+      POLY_DEVICE_CPU,
+#ifdef POLY_HAS_X86
+      POLY_DEVICE_X86,
+#endif
+  };
+#endif
+  for (size_t i = 0; i < sizeof(devices) / sizeof(*devices); i++)
+    ASSERT_TRUE(runtime_scalar_integer_args(devices[i], false));
+  PASS();
+}
+
+#ifdef POLY_HAS_CUDA
 TEST_BACKEND(cuda, runtime_scalar_integer_args) {
-  ASSERT_TRUE(runtime_scalar_integer_args(false));
+  ASSERT_TRUE(runtime_scalar_integer_args(POLY_DEVICE_CUDA, false));
   PASS();
 }
 
 TEST_BACKEND(cuda, graph_scalar_integer_args) {
-  ASSERT_TRUE(runtime_scalar_integer_args(true));
+  ASSERT_TRUE(runtime_scalar_integer_args(POLY_DEVICE_CUDA, true));
   PASS();
 }
 #endif

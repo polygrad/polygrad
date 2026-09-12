@@ -782,16 +782,15 @@ static bool collect_bindings(
         break;
       }
     if (!used) continue;
-    /* Python var_vals has arbitrary-width ints. The current C runner ABI
-     * carries int32_t values; match JIT admission instead of narrowing here. */
-    if (value->arg.i < INT32_MIN || value->arg.i > INT32_MAX) goto fail;
+    /* create_linear_with_vars preserves the value admitted by poly_uop_bind.
+     * BIGINT remains outside the signed64 C binding API (PG-PARITY-028). */
     int existing = -1;
     for (int j = 0; j < count; j++)
       if (linear_var_eq(bindings[j].var, used)) existing = j;
     if (existing >= 0) {
       if (bindings[existing].value != value->arg.i) goto fail;
     } else {
-      bindings[count++] = (PolyVarBinding){used, (int32_t)value->arg.i};
+      bindings[count++] = (PolyVarBinding){used, value->arg.i};
     }
   }
   *bindings_out = bindings;

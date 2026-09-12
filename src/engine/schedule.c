@@ -2124,6 +2124,19 @@ static void timing_free_args(void **bufs, int n_params) {
   free(bufs);
 }
 
+static bool timing_var_value(PolyUOp *var, int64_t *value) {
+  const PolyParamArg *arg = var && var->arg.kind == POLY_ARG_PARAM ? var->arg.param : NULL;
+  int64_t lo, hi;
+  if (!arg || !arg->has_minmax || !poly_arg_integer_to_i64(arg->min_val, &lo) ||
+      !poly_arg_integer_to_i64(arg->max_val, &hi) || lo > hi ||
+      (!poly_dtype_is_int(var->dtype) && !poly_dtype_eq(var->dtype, POLY_BOOL)))
+    return false;
+  /* args_from_ast: Python's (lo+hi)//2 without overflowing the C sum.
+   * Never sample a projected int64 interval for unsupported typed endpoints. */
+  *value = lo + (int64_t)(((uint64_t)hi - (uint64_t)lo) / 2);
+  return true;
+}
+
 void **poly_args_from_ast(PolyCtx *ctx, PolyUOp *sink, int *n_args) {
   *n_args = 0;
   /* opt/postrange.py:args_from_ast, adapted to the existing C wrapper's
@@ -2162,24 +2175,14 @@ void **poly_args_from_ast(PolyCtx *ctx, PolyUOp *sink, int *n_args) {
   for (int i = 0; i < n_params; i++) {
     PolyUOp *param = topo[i];
     bool scalar = poly_uop_is_alu_param(param);
-    /* The existing native wrapper takes all ALU values through int*, even
-     * when its typed function subsequently converts to another dtype. */
-    int itemsize = scalar ? (int)sizeof(int) : poly_dtype_itemsize(param->dtype);
+    /* Numeric vals have one host width, independent of kernel PARAM dtype. */
+    int itemsize = scalar ? (int)sizeof(int64_t) : poly_dtype_itemsize(param->dtype);
     int64_t sz = scalar ? 1 : poly_uop_max_numel(ctx, param);
     if (sz < 0 || itemsize <= 0 || (uint64_t)sz > SIZE_MAX / (size_t)itemsize) goto cleanup;
     bufs[i] = calloc((size_t)(sz ? sz : 1), (size_t)itemsize);
     if (!bufs[i]) goto cleanup;
     if (scalar) {
-      const PolyParamArg *arg = param->arg.param;
-      int64_t lo = 0, hi = 0;
-      if (!arg->has_minmax || !poly_arg_integer_to_i64(arg->min_val, &lo) ||
-          !poly_arg_integer_to_i64(arg->max_val, &hi) || lo > hi ||
-          (!poly_dtype_is_int(param->dtype) && !poly_dtype_eq(param->dtype, POLY_BOOL)))
-        goto cleanup;
-      /* Python's (lo+hi)//2, without overflowing the C sum. */
-      int64_t value = lo + (int64_t)(((uint64_t)hi - (uint64_t)lo) / 2);
-      if (value < INT_MIN || value > INT_MAX) goto cleanup;
-      *(int *)bufs[i] = (int)value;
+      if (!timing_var_value(param, bufs[i])) goto cleanup;
     } else if (poly_dtype_eq(param->dtype, POLY_FLOAT32)) {
       /* Preserve existing finite f32 timing inputs; other storage is zeroed. */
       float *fp = bufs[i];
@@ -2282,7 +2285,7 @@ double poly_time_program(
   void **args = calloc((size_t)(n_args ? n_args : 1), sizeof(*args));
   PolyVarBinding *bindings =
       calloc((size_t)(runner->n_vars ? runner->n_vars : 1), sizeof(*bindings));
-  int *values = calloc((size_t)(runner->n_vars ? runner->n_vars : 1), sizeof(*values));
+  int64_t *values = calloc((size_t)(runner->n_vars ? runner->n_vars : 1), sizeof(*values));
   const PolyProgramInfo *info = poly_program_info(ctx, runner->program);
   double elapsed = INFINITY;
   if (!args || !bindings || !values || !info) goto cleanup;
@@ -2296,12 +2299,9 @@ double poly_time_program(
   }
   for (int i = 0; i < runner->n_vars; i++) {
     PolyUOp *var = info->vars[runner->var_indices[i]];
-    int64_t lo, hi;
-    poly_uop_minmax(ctx, var, &lo, &hi);
-    if (lo > hi) goto cleanup;
-    int64_t value = lo + (int64_t)(((uint64_t)hi - (uint64_t)lo) / 2);
-    if (value < INT_MIN || value > INT_MAX) goto cleanup;
-    values[i] = (int)value;
+    int64_t value;
+    if (!timing_var_value(var, &value)) goto cleanup;
+    values[i] = value;
     bindings[i] = (PolyVarBinding){.var = var, .value = value};
     args[runner->n_params + i] = &values[i];
   }
@@ -2814,7 +2814,7 @@ static int cuda_execute(PolyRunner *runner, void **args, int n_args) {
 
   /* cuLaunchKernel kernelParams: each element points TO the arg value.
    * Buffer params (0..n_params-1): args[i] is a device ptr; cast to CUdeviceptr.
-   * Scalars arrive as int32 bindings. Like ops_cuda.encode_args, extend the
+   * Scalars arrive as int64 bindings. Like ops_cuda.encode_args, copy the
    * value into storage wide enough for the kernel's declared integer dtype;
    * cuLaunchKernel copies that dtype's width, not the host binding's width. */
   unsigned long long *dptrs = malloc((size_t)n_args * sizeof(unsigned long long));
@@ -2829,7 +2829,7 @@ static int cuda_execute(PolyRunner *runner, void **args, int n_args) {
     cuda_args[i] = &dptrs[i];
   }
   for (int i = runner->n_params; i < n_args; i++) {
-    dptrs[i] = (unsigned long long)(int64_t) * (int32_t *)args[i];
+    dptrs[i] = (uint64_t) * (int64_t *)args[i];
     cuda_args[i] = &dptrs[i];
   }
 
@@ -2979,7 +2979,7 @@ static int hip_execute(PolyRunner *runner, void **args, int n_args) {
 
   /* hipModuleLaunchKernel kernelParams: each element points TO the arg value.
    * Buffer params (0..n_params-1): args[i] is the device ptr, so &args[i] works.
-   * Scalar params (n_params..): args[i] is already &int_val, use it directly. */
+   * Scalar params (n_params..): args[i] points to a signed64 value. */
   void **hip_args = malloc((size_t)n_args * sizeof(void *));
   if (!hip_args) return -1;
   for (int i = 0; i < runner->n_params; i++)
@@ -3046,7 +3046,7 @@ static int x86_execute_fn(void *self, void **args, int n_args) {
     }
     PolyUOp *var = info->vars[info_idx];
     int slot = (int)var->arg.param->slot;
-    abi_args[slot] = (void *)(intptr_t)(*(int *)args[runner->n_params + v]);
+    abi_args[slot] = (void *)(intptr_t)(*(int64_t *)args[runner->n_params + v]);
   }
 
   int threads = runner->grid[0] > 1 ? runner->grid[0] : 1;
@@ -4028,7 +4028,7 @@ static int poly_exec_linear_program(
     PolyVarBinding *lane_bindings = NULL;
     int n_lane_bindings = 0;
     void **args = NULL;
-    int *var_values = NULL;
+    int64_t *var_values = NULL;
     int rc = -1;
     if (poly_linear_lane_vars(
             bindings, n_bindings, device_num, lane, &lane_bindings, &n_lane_bindings
@@ -4051,7 +4051,7 @@ static int poly_exec_linear_program(
       bool found = false;
       for (int j = 0; j < n_lane_bindings; j++) {
         if (!schedule_same_var(lane_bindings[j].var, info->vars[info_index])) continue;
-        var_values[i] = (int)lane_bindings[j].value;
+        var_values[i] = lane_bindings[j].value;
         args[runner.n_params + i] = &var_values[i];
         found = true;
         break;
@@ -4126,7 +4126,7 @@ typedef struct {
   bool *ins;
   int n_args;
   void **runtime_args;
-  int *scalar_values;
+  int64_t *scalar_values;
 } PreparedGraphCall;
 
 static int graph_resource_append(GraphResourceMap *map, GraphResourceRange range) {
@@ -4435,7 +4435,7 @@ static int poly_exec_linear_graph(
       if (info_index < 0 || info_index >= info->n_vars) goto fail_prepared;
       for (int j = 0; j < n_bindings; j++) {
         if (!schedule_same_var(bindings[j].var, info->vars[info_index])) continue;
-        item->scalar_values[i] = (int)bindings[j].value;
+        item->scalar_values[i] = bindings[j].value;
         item->runtime_args[runner->n_params + i] = &item->scalar_values[i];
         found = true;
         break;

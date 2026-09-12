@@ -40,7 +40,9 @@ typedef struct {
 } PolyRunner;
 
 /* args_from_ast scratch storage shared by BEAM and optimize_local_size.
- * Buffer slots refer to PARAM identities, never the caller's live buffers. */
+ * Buffer slots refer to PARAM identities, never the caller's live buffers.
+ * Runner args contain compact buffer pointers followed by int64_t* numeric
+ * vals; the backend performs its signature conversion, never the caller. */
 typedef struct {
   void **host;
   int n_host;

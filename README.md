@@ -179,8 +179,10 @@ only regions that have been written. This is not zero initialization.
 Python accepts `Context(CHECK_OOB=0)`. Nonzero values raise: the optional
 Tinygrad compiler bounds verifier is not implemented (`PG-PARITY-026`).
 This is separate from Tensor index and shape validation.
-Runtime scalar bindings currently use signed 32-bit values (`PG-PARITY-028`).
-Scheduling and JIT reject used bindings outside that range; they do not wrap
+Runtime scalar bindings use signed 64-bit values (C ABI80). Python and JS
+reject values outside that range; JS accepts safe integer Numbers or BigInts.
+Larger Python integers remain unsupported (`PG-PARITY-028`). WebGPU keeps its
+32-bit uniform limit. Scheduling and JIT preserve admitted values; they do not wrap
 them. This limit does not restrict ordinary int64/uint64 Tensor storage.
 Python `Context(NOOPT=1)` and JS `runtime.noopt = 1` disable automatic
 kernel scheduling heuristics, not the compiler's required lowering passes or
@@ -372,8 +374,9 @@ Low-level `UOp.variable` bounds retain integer, floating-point and boolean
 endpoints independently of the variable dtype. C takes scalar `PolyArg` values;
 Python accepts `int`/`float`/`bool`; JavaScript uses `pg.uop.variable(...)`, with
 `BigInt` for exact wide integers. NaN, reversed and nonnumeric bounds are rejected.
-This requires C ABI79 and graph formats PGIR18/PGPM10; older artifacts are rejected.
-It does not widen the runtime's existing int32 variable-binding domain.
+Current packages require C ABI80 and graph formats PGIR18/PGPM10; incompatible
+artifacts are rejected. Typed endpoints can exceed the runtime's signed64
+variable-binding domain; metadata support does not imply executable bindings.
 
 ```text
 default Tensor construction

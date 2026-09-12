@@ -1888,6 +1888,38 @@ class TestJit:
         assert y2 is y1
         assert not isinstance(y2.shape[0], int)
 
+    def test_jit_binding_array_preserves_signed64(self):
+        from polygrad.jit import _var_binding_array
+        for value in (-(1 << 63), -(1 << 40)-1, (1 << 32)+7, (1 << 53)+1, (1 << 63)-1):
+            variable = UOp.variable('wide_binding', -(1 << 63), (1 << 63)-1, dtype=dtypes.int64)
+            bound = variable.bind(value)
+            assert bound is not None
+            assert bound.op_name == 'AFTER'
+            assert bound.src[1].op_name == 'STORE'
+            stored = ctypes.c_int64()
+            assert _ffi._lib.poly_uop_bind_value(bound.raw, ctypes.byref(stored)) == 0
+            assert stored.value == value
+            bindings, count = _var_binding_array([(variable.raw, value)])
+            assert count == 1 and bindings[0].value == value
+        for value in (-(1 << 63)-1, 1 << 63, 1 << 100):
+            with pytest.raises(OverflowError, match='signed64'):
+                variable.bind(value)
+            with pytest.raises(JitError, match='signed64'):
+                _var_binding_array([(variable.raw, value)])
+
+    def test_jit_wide_scalar_capture_and_replay(self):
+        variable = Variable('wide_jit_binding', -(1 << 63), (1 << 63)-1)
+
+        @Jit
+        def f(x, value):
+            return (x + Tensor(value.uop).cast(dtypes.int64)).realize()
+
+        for value in ((1 << 32)+7, (1 << 53)+1, -(1 << 40)-1, (1 << 63)-2):
+            x = Tensor([1], dtype=dtypes.int64).realize()
+            assert f(x, variable.bind(value)).numpy().tolist() == [value+1]
+        assert f.captured
+        f.reset()
+
     def test_compile_warms_capture_and_replays(self):
         def f(x):
             return (x + 1).realize()

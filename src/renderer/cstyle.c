@@ -1479,6 +1479,7 @@ char *poly_render_c(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
   StrBuf out;
   sb_init(&out);
   sb_puts(&out, "#include <math.h>\n");
+  sb_puts(&out, "#include <stdint.h>\n");
   sb_puts(&out, "#include <stdbool.h>\n");
   sb_puts(&out, "#include <string.h>\n");
 
@@ -1503,7 +1504,8 @@ char *poly_render_c(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
       sb_puts(&out, "0");
       continue;
     }
-    /* pointer params: (type*)args[i]; int params: *(int*)args[i] */
+    /* CPUProgram numeric vals use the signed64 C transport before the
+     * ordinary typed function conversion; buffers remain addresses. */
     if (strchr(params[i].type, '*')) {
       /* extract base type (before '* restrict') */
       char base[128];
@@ -1514,7 +1516,7 @@ char *poly_render_c(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
       base[blen] = '\0';
       sb_printf(&out, "(%s*)args[%d]", base, arg_idx);
     } else {
-      sb_printf(&out, "*(int*)args[%d]", arg_idx);
+      sb_printf(&out, "*(int64_t*)args[%d]", arg_idx);
     }
   }
   sb_puts(&out, ");\n}\n");
@@ -1540,7 +1542,7 @@ char *poly_render_c(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
       base[blen] = '\0';
       sb_printf(&out, "(%s*)args[%d]", base, arg_idx);
     } else {
-      sb_printf(&out, "*(int*)args[%d]", arg_idx);
+      sb_printf(&out, "*(int64_t*)args[%d]", arg_idx);
     }
   }
   sb_puts(&out, ");\n}\n");

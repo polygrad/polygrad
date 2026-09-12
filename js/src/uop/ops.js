@@ -213,6 +213,18 @@ class UOp {
     return raw ? new UOp(this.ctx, this.ffi, raw) : null
   }
 
+  bind(value) {
+    if (typeof value !== 'bigint' && !Number.isSafeInteger(value)) {
+      throw new TypeError('binding value must be a safe integer or BigInt')
+    }
+    const integer = BigInt(value)
+    if (integer < -(1n << 63n) || integer >= (1n << 63n)) {
+      throw new RangeError('binding value exceeds the signed64 C runtime domain')
+    }
+    const raw = this.ffi.poly_uop_bind(this.ctx, this.raw, integer)
+    return raw ? new UOp(this.ctx, this.ffi, raw) : null
+  }
+
   store(value) {
     const v = this._coerce(value)
     const raw = this.ffi.poly_uop_store(this.ctx, this.raw, v.raw)

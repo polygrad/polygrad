@@ -2479,7 +2479,7 @@ static bool uop_print_one(PolyUOp *u, char *buf, size_t *pos, size_t cap) {
   case POLY_ARG_NONE:
     break;
   case POLY_ARG_INT:
-    written = uop_snprintf(buf, *pos, cap, ", %ld", (long)u->arg.i);
+    written = uop_snprintf(buf, *pos, cap, ", %lld", (long long)u->arg.i);
     if (written < 0) return false;
     *pos += (size_t)written;
     break;
@@ -2568,8 +2568,9 @@ static bool uop_print_one(PolyUOp *u, char *buf, size_t *pos, size_t cap) {
             buf, *pos, cap, "%s%s", i ? "," : "", u->arg.int_tuple.vals[i] ? "True" : "False"
         );
       else
-        written =
-            uop_snprintf(buf, *pos, cap, "%s%ld", i ? "," : "", (long)u->arg.int_tuple.vals[i]);
+        written = uop_snprintf(
+            buf, *pos, cap, "%s%lld", i ? "," : "", (long long)u->arg.int_tuple.vals[i]
+        );
       if (written < 0) return false;
       *pos += (size_t)written;
     }
@@ -2579,12 +2580,12 @@ static bool uop_print_one(PolyUOp *u, char *buf, size_t *pos, size_t cap) {
     break;
   case POLY_ARG_RANGE:
     written = uop_snprintf(
-        buf, *pos, cap, ", (%ld,%d", (long)u->arg.range.axis_id, (int)u->arg.range.axis_type
+        buf, *pos, cap, ", (%lld,%d", (long long)u->arg.range.axis_id, (int)u->arg.range.axis_type
     );
     if (written < 0) return false;
     *pos += (size_t)written;
     for (int i = 0; i < u->arg.range.n_extra; i++) {
-      written = uop_snprintf(buf, *pos, cap, ",%ld", (long)u->arg.range.extra[i]);
+      written = uop_snprintf(buf, *pos, cap, ",%lld", (long long)u->arg.range.extra[i]);
       if (written < 0) return false;
       *pos += (size_t)written;
     }
@@ -2643,7 +2644,7 @@ static bool uop_print_one(PolyUOp *u, char *buf, size_t *pos, size_t cap) {
       break;
     }
     written = uop_snprintf(
-        buf, *pos, cap, ", ParamArg(%ld, dtypes.%s", (long)u->arg.param->slot,
+        buf, *pos, cap, ", ParamArg(%lld, dtypes.%s", (long long)u->arg.param->slot,
         dtype_arg_repr_name(u->arg.param->dtype)
     );
     if (written < 0) return false;
@@ -2658,7 +2659,8 @@ static bool uop_print_one(PolyUOp *u, char *buf, size_t *pos, size_t cap) {
       *pos += (size_t)written;
     }
     if (u->arg.param->has_multiple_of) {
-      written = uop_snprintf(buf, *pos, cap, ", multiple_of=%ld", (long)u->arg.param->multiple_of);
+      written =
+          uop_snprintf(buf, *pos, cap, ", multiple_of=%lld", (long long)u->arg.param->multiple_of);
       if (written < 0) return false;
       *pos += (size_t)written;
     }

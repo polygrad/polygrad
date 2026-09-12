@@ -312,6 +312,45 @@ async function runTensorTests(pg, createRuntime) {
     assert(pg.uop.variable('bad', NaN, 1, 'float32', 1, true) === null)
   })
 
+  await test('wide scalar bindings preserve BigInt and execute supported values', async () => {
+    const variable = pg.uop.variable('wide_binding', -(1n << 63n), (1n << 63n)-1n, 'int64')
+    for (const value of [-(1n << 63n), -(1n << 40n)-1n, (1n << 32n)+7n,
+      (1n << 53n)+1n, (1n << 63n)-1n]) {
+      const bound = variable.bind(value)
+      assert(bound && bound.op === pg._core.ops.AFTER)
+      const sources = bound.src
+      const stored = sources[1].src
+      assert(sources[1].op === pg._core.ops.STORE)
+      assert(stored[1].toString().includes(String(value)), `lost binding value ${value}: ${stored[1]}`)
+      if (pg.device !== 'webgpu') {
+        const input = new Tensor(bound)
+        const output = input.contiguous()
+        const data = await output.toArray()
+        assert(data.length === 1 && BigInt(data[0]) === value, `binding execution changed ${value}`)
+        output.dispose(); input.dispose()
+      }
+      for (const item of [...sources, ...stored]) item.dispose()
+      bound.dispose()
+    }
+    for (const value of [-(1n << 63n)-1n, 1n << 63n, 1n << 100n, 9007199254740992, 1.25]) {
+      let error
+      try { variable.bind(value) } catch (e) { error = e }
+      assert(error instanceof RangeError || error instanceof TypeError)
+    }
+    variable.dispose()
+    // WGSL's runtime uniforms remain 32-bit. Exercise actual execution there
+    // too; wide int64 execution has separate native/Wasm C coverage.
+    const small = pg.uop.variable('binding_exec', -8, 8, 'int32')
+    for (const value of [-3n, 7n]) {
+      const bound = small.bind(value)
+      const input = new Tensor(bound)
+      const output = input.contiguous()
+      assertClose(await output.toArray(), [Number(value)])
+      output.dispose(); input.dispose(); bound.dispose()
+    }
+    small.dispose()
+  })
+
   await test('dtype API queries match pinned metadata', async () => {
     const bytes = {bool:1, int8:1, uint8:1, int16:2, uint16:2, int32:4, uint32:4,
       int64:8, uint64:8, float16:2, bfloat16:2, float32:4, float64:8,

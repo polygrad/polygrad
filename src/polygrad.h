@@ -10,7 +10,7 @@
 
 /* Public C/frontend ABI version. Bump when exported symbols or public struct
  * layouts used by frontends change. */
-#define POLYGRAD_ABI_VERSION 79
+#define POLYGRAD_ABI_VERSION 80
 
 #include <stdint.h>
 #include <stddef.h>
@@ -1385,7 +1385,7 @@ int poly_realize_tensors_ex(
 
 typedef struct PolyVarBinding {
   PolyUOp *var; /* ALU BUFFER variable */
-  int32_t value; /* concrete runtime value */
+  int64_t value; /* Numeric vals, not PARAM-dtype bits; same domain as poly_uop_bind. */
 } PolyVarBinding;
 
 /* Tinygrad-style raw Tensor JIT capture/replay.

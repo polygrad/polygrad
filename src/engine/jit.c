@@ -141,10 +141,10 @@ static int poly_jit_append_var_binding(
     PolyUOp *var,
     int64_t value
 ) {
-  if (!items || !n_items || !cap_items || !var || value < INT32_MIN || value > INT32_MAX) return -1;
+  if (!items || !n_items || !cap_items || !var) return -1;
   for (int i = 0; i < *n_items; i++) {
     if (!poly_jit_same_var((*items)[i].var, var)) continue;
-    return (*items)[i].value == (int32_t)value ? 0 : -1;
+    return (*items)[i].value == value ? 0 : -1;
   }
   if (*n_items >= *cap_items) {
     int new_cap = *cap_items ? *cap_items * 2 : 8;
@@ -153,7 +153,7 @@ static int poly_jit_append_var_binding(
     *items = tmp;
     *cap_items = new_cap;
   }
-  (*items)[*n_items] = (PolyVarBinding){.var = var, .value = (int32_t)value};
+  (*items)[*n_items] = (PolyVarBinding){.var = var, .value = value};
   (*n_items)++;
   return 0;
 }
@@ -842,7 +842,7 @@ static int poly_jit_override_var_binding(
     int *n_items,
     int *cap_items,
     PolyUOp *var,
-    int32_t value
+    int64_t value
 ) {
   for (int i = 0; i < *n_items; i++) {
     if (!poly_jit_same_var((*items)[i].var, var)) continue;
