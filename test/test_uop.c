@@ -15,6 +15,7 @@
 #include "../src/utils.h"
 #include "../src/bigint.h"
 #include "../src/uop/symbolic.h"
+#include "../src/schedule/indexing.h"
 #if defined(__linux__) && !defined(__EMSCRIPTEN__)
 #include <unistd.h>
 #include <signal.h>
@@ -35,6 +36,210 @@ static PolyUOp *gradient_function_square(PolyCtx *ctx, PolyUOp *x) {
 }
 
 extern void poly_test_substitute_fail_after(int count);
+
+TEST(uop, indexing_owner_reshape_failure_does_not_publish_placeholders) {
+  for (int fail = 0; fail < 2; fail++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyUOp *in_shape[] = {poly_const_int(ctx, 2), poly_const_int(ctx, 3)};
+    PolyUOp *out_shape[] = {poly_const_int(ctx, 6)};
+    PolyUOp *r = poly_range(ctx, 6, 12, POLY_AXIS_WEAK);
+    PolyUOp *coords[] = {r, r};
+    int ndim = 7;
+    poly_test_substitute_fail_after(fail);
+    bool ok = poly_apply_reshape(ctx, in_shape, 2, out_shape, 1, &r, 1, coords, &ndim);
+    poly_test_substitute_fail_after(-1);
+    bool untouched = coords[0] == r && coords[1] == r && ndim == 7;
+    poly_ctx_destroy(ctx);
+    ASSERT_FALSE(ok);
+    ASSERT_TRUE(untouched);
+  }
+  PASS();
+}
+
+TEST(uop, indexing_owner_reshape_restores_range_dependencies) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *in_shape[] = {poly_const_int(ctx, 2), poly_const_int(ctx, 3)};
+  PolyUOp *out_shape[] = {poly_const_int(ctx, 6)};
+  PolyUOp *dep = poly_range(ctx, 2, 19, POLY_AXIS_WEAK);
+  PolyUOp *r = poly_uop2(
+      ctx, POLY_OP_RANGE, POLY_WEAKINT, out_shape[0], dep, poly_arg_range(12, POLY_AXIS_WEAK)
+  );
+  ASSERT_NOT_NULL(r);
+  PolyUOp *coords[2] = {NULL, NULL};
+  int ndim = 0;
+  ASSERT_TRUE(poly_apply_reshape(ctx, in_shape, 2, out_shape, 1, &r, 1, coords, &ndim));
+  ASSERT_INT_EQ(ndim, 2);
+  ASSERT_INT_EQ(coords[0]->op, POLY_OP_FLOORDIV);
+  ASSERT_INT_EQ(coords[1]->op, POLY_OP_FLOORMOD);
+  ASSERT_PTR_EQ(coords[0]->src[0], r);
+  ASSERT_PTR_EQ(coords[1]->src[0], r);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(uop, indexing_owner_full_reshape_is_not_partial_indexing) {
+  PolyCtx *ctx = poly_ctx_new();
+  for (int scalar = 0; scalar < 2; scalar++) {
+    PolyUOp *x = poly_test_buffer(ctx, POLY_FLOAT32, scalar ? 1 : 10);
+    int64_t dims[] = {2, 5};
+    PolyUOp *reshape = poly_reshape(ctx, x, dims, scalar ? 0 : 2);
+    PolyUOp *r = scalar ? poly_const_int(ctx, 0) : poly_range(ctx, 10, 3, POLY_AXIS_WEAK);
+    PolyUOp *result = NULL;
+    int ndim = 0;
+    ASSERT_TRUE(poly_apply_movement_op(
+        ctx, reshape, reshape->op, poly_uop_max_shape_cached(ctx, x), reshape->arg, &r, 1, &result,
+        &ndim, NULL
+    ));
+    ASSERT_INT_EQ(ndim, 1);
+    ASSERT_PTR_EQ(result, r);
+  }
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(uop, indexing_owner_full_movement_coordinate_arity) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_reshape(ctx, poly_test_buffer(ctx, POLY_FLOAT32, 20), (int64_t[]){4, 5}, 2);
+  PolyUOp *zero = poly_const_int(ctx, 0);
+  PolyUOp *starts[] = {zero, zero}, *sizes[] = {poly_const_int(ctx, 4), poly_const_int(ctx, 5)};
+  PolyUOp *starts_uop = poly_uop(ctx, POLY_OP_STACK, POLY_WEAKINT, starts, 2, poly_arg_none());
+  PolyUOp *sizes_uop = poly_uop(ctx, POLY_OP_STACK, POLY_WEAKINT, sizes, 2, poly_arg_none());
+  PolyUOp *ops[] = {
+      poly_expand(ctx, poly_test_buffer(ctx, POLY_FLOAT32, 5), (int64_t[]){2, 5}, 2),
+      poly_uop3(ctx, POLY_OP_SHRINK, x->dtype, x, starts_uop, sizes_uop, poly_arg_none()),
+      poly_uop1(ctx, POLY_OP_FLIP, x->dtype, x, poly_arg_int_tuple((int64_t[]){0, 0}, 2)),
+      poly_uop3(ctx, POLY_OP_PAD, x->dtype, x, starts_uop, sizes_uop, poly_arg_none()),
+      poly_permute(ctx, x, (int64_t[]){1, 0}, 2),
+  };
+  PolyUOp *r = poly_range(ctx, 4, 29, POLY_AXIS_WEAK);
+  for (int i = 0; i < 5; i++) {
+    PolyUOp *movement = ops[i], *coords[2] = {NULL, NULL};
+    ASSERT_NOT_NULL(movement);
+    int ndim = -1;
+    bool ok = poly_apply_movement_op(
+        ctx, movement, movement->op, poly_uop_max_shape_cached(ctx, movement->src[0]),
+        movement->arg, &r, 1, coords, &ndim, NULL
+    );
+    if (i == 4) {
+      ASSERT_FALSE(ok);
+    } else {
+      ASSERT_TRUE(ok);
+      ASSERT_INT_EQ(ndim, i == 0 ? 0 : 1);
+      if (i > 0) ASSERT_PTR_EQ(coords[0], r);
+    }
+  }
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(uop, indexing_owner_flip_uses_symbolic_extent) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *n =
+      poly_uop_variable(ctx, "n", poly_arg_int(2), poly_arg_int(8), POLY_WEAKINT, 1, false);
+  PolyUOp *x = poly_expand_uop(ctx, poly_const_float(ctx, 1.0), &n, 1);
+  int64_t axes[] = {1};
+  PolyUOp *flip = poly_uop1(ctx, POLY_OP_FLIP, x->dtype, x, poly_arg_int_tuple(axes, 1));
+  PolyUOp *r = poly_range(ctx, 8, 7, POLY_AXIS_WEAK), *coord = NULL;
+  int ndim = 0;
+  ASSERT_TRUE(poly_apply_movement_op(
+      ctx, flip, flip->op, poly_uop_max_shape_cached(ctx, x), flip->arg, &r, 1, &coord, &ndim, NULL
+  ));
+  PolyUOp *from[] = {n, r}, *to[] = {poly_const_int(ctx, 4), poly_const_int(ctx, 1)};
+  PolyUOp *evaluated = poly_uop_substitute(ctx, coord, from, to, 2);
+  evaluated = poly_graph_rewrite(ctx, evaluated, poly_symbolic());
+  int64_t value = -1;
+  ASSERT_INT_EQ(poly_uop_const_i64(evaluated, &value), 0);
+  poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(value, 2);
+  PASS();
+}
+
+TEST(uop, indexing_owner_reduction_uses_symbolic_extent) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *n =
+      poly_uop_variable(ctx, "n", poly_arg_int(2), poly_arg_int(8), POLY_WEAKINT, 1, false);
+  PolyUOp *dims[] = {n, poly_const_int(ctx, 2)};
+  PolyUOp *x = poly_expand_uop(ctx, poly_const_float(ctx, 1.0), dims, 2);
+  PolyUOp *reduce = poly_uop1(ctx, POLY_OP_REDUCE, x->dtype, x, poly_arg_reduce(POLY_OP_ADD, 1));
+  PolyUOp *contiguous = poly_uop1(ctx, POLY_OP_CONTIGUOUS, reduce->dtype, reduce, poly_arg_none());
+  PolyUOp *sink = poly_sink1(ctx, contiguous);
+  PolyIndexingCtx *ictx = poly_indexing_ctx_new(ctx);
+  ASSERT_TRUE(poly_realize_map_build(ictx, sink));
+  ASSERT_TRUE(poly_range_propagate(ictx, sink));
+  PolyRangeEntry *entry = poly_range_map_get(ictx, reduce);
+  ASSERT_NOT_NULL(entry);
+  ASSERT_INT_EQ(entry->n_in, 2);
+  bool exact = entry->in_rngs[0]->op == POLY_OP_RANGE && entry->in_rngs[0]->src[0] == n;
+  poly_indexing_ctx_destroy(ictx);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(exact);
+  PASS();
+}
+
+TEST(uop, indexing_owner_movement_failure_aborts_propagation) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_reshape(ctx, poly_test_buffer(ctx, POLY_FLOAT32, 6), (int64_t[]){2, 3}, 2);
+  PolyUOp *contiguous = poly_uop1(ctx, POLY_OP_CONTIGUOUS, x->dtype, x, poly_arg_none());
+  PolyUOp *sink = poly_sink1(ctx, contiguous);
+  PolyIndexingCtx *ictx = poly_indexing_ctx_new(ctx);
+  ASSERT_TRUE(poly_realize_map_build(ictx, sink));
+  poly_test_substitute_fail_after(0);
+  bool ok = poly_range_propagate(ictx, sink);
+  poly_test_substitute_fail_after(-1);
+  poly_indexing_ctx_destroy(ictx);
+  poly_ctx_destroy(ctx);
+  ASSERT_FALSE(ok);
+  PASS();
+}
+
+TEST(uop, indexing_owner_symbolic_singleton_has_no_range) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *one =
+      poly_uop_variable(ctx, "one", poly_arg_int(1), poly_arg_int(1), POLY_WEAKINT, 1, false);
+  PolyUOp *x = poly_expand_uop(ctx, poly_const_float(ctx, 1.0), &one, 1);
+  PolyUOp *contiguous = poly_uop1(ctx, POLY_OP_CONTIGUOUS, x->dtype, x, poly_arg_none());
+  PolyUOp *sink = poly_sink1(ctx, contiguous);
+  PolyIndexingCtx *ictx = poly_indexing_ctx_new(ctx);
+  ASSERT_TRUE(poly_realize_map_build(ictx, sink));
+  ASSERT_TRUE(poly_range_propagate(ictx, sink));
+  PolyRangeEntry *entry = poly_range_map_get(ictx, contiguous);
+  ASSERT_NOT_NULL(entry);
+  int64_t value = -1;
+  bool zero =
+      entry->n_out == 1 && poly_uop_const_i64(entry->out_rngs[0], &value) == 0 && value == 0;
+  poly_indexing_ctx_destroy(ictx);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(zero);
+  PASS();
+}
+
+TEST(uop, indexing_owner_scalar_contiguous_is_staged) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x =
+      poly_uop1(ctx, POLY_OP_CONTIGUOUS, POLY_FLOAT32, poly_const_float(ctx, 1.0), poly_arg_none());
+  PolyUOp *result = poly_run_rangeify(ctx, poly_sink1(ctx, x), false);
+  ASSERT_NOT_NULL(result);
+  bool staged = result->src[0]->op == POLY_OP_STAGE && result->src[0]->n_src == 1;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(staged);
+  PASS();
+}
+
+TEST(uop, indexing_owner_consumer_map_deduplicates_edges) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_test_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *y = poly_add(ctx, x, x);
+  PolyIndexingCtx *ictx = poly_indexing_ctx_new(ctx);
+  ictx->consumer_map = poly_consumer_map_build(ctx, poly_sink1(ctx, y));
+  PolyConsumerList *consumers = poly_consumer_map_get(ictx->consumer_map, x);
+  ASSERT_NOT_NULL(consumers);
+  int count = consumers->count;
+  ASSERT_PTR_EQ(consumers->items[0], y);
+  poly_indexing_ctx_destroy(ictx);
+  poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(count, 1);
+  PASS();
+}
 
 TEST(uop, graph_owner_function_compaction_failure_preserves_outputs) {
   for (int fail = 0; fail < 2; fail++) {

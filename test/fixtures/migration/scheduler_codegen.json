@@ -1,5 +1,20 @@
 {
   "schema_version": 1,
+  "indexing_owner_review": {
+    "reference": "6f87158d77f66a36d5f8bbe915170b24e2acabe8",
+    "parent": "3007527",
+    "evidence": "temp/indexing-owner-20260912.vpLHNr/results.md",
+    "scope": "Complete schedule/indexing.py and C indexing owner read; rangeify.py full source plus C movement-index, flatten-stage and pipeline callers. Not full certification of other C rangeify/compiler owners.",
+    "correspondence": {
+      "poly_apply_reshape": "_apply_reshape plus placeholder substitution in apply_movement_op: zip complete shapes/coordinates, strip RANGE dependencies only temporarily, restore original identities, publish only after both substitutions succeed",
+      "poly_apply_movement_op": "apply_movement_op: FLIP uses the exact symbolic source extent; full RESHAPE mapping is separate from _mop_index partial suffix admission; EXPAND slices and SHRINK/FLIP/PAD zip the coordinate tuple without synthesizing zero axes; PERMUTE rejects missing coordinates",
+      "consumer_list_add": "run_rangeify consumer_map is an ordered set of consumers, not repeated data edges",
+      "new_range_uop": "IndexingContext.new_range preserves existing RANGE and resolves symbolic singleton bounds to zero without consuming an axis id",
+      "poly_range_propagate": "run_rangeify publishes empty realized-axis lists, uses exact symbolic reduction bounds, and aborts on movement-transform failure instead of inheriting untranslated coordinates"
+    },
+    "red": "Eight initial graph controls failed before repair; full-versus-partial reshape control then failed alongside two existing rangeify controls. Pinned probes cover corresponding graph shapes and bound-prefix numerical behavior.",
+    "limits": "No new IR, ABI, placement fallback, backend or JS symbolic frontend surface. Source dispositions below remain partial; this record does not refresh historical hashes, certify all allocation failures, or grant a parity allowance. Reuse these reviewed blocks when completing overlapping wave evidence."
+  },
   "runtime_binding_review": {
     "reference": "6f87158d77f66a36d5f8bbe915170b24e2acabe8",
     "parent": "42da424",

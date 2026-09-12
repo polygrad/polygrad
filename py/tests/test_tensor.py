@@ -1045,6 +1045,13 @@ print('leaving_live_instance')
         with pytest.raises(TypeError, match='Tensor.empty does not accept name'):
             Tensor.empty((2, 3), name='z')
 
+    def test_indexing_owner_bound_prefix_reduction_and_flip(self):
+        n = Variable('indexing_extent', 2, 8)
+        for size in (2, 4, 7):
+            prefix = Tensor([1., 2., 3., 4., 5., 6., 7., 8.]).shrink(((0, n.bind(size)),))
+            assert prefix.sum().item() == size * (size + 1) / 2
+            assert prefix.flip(0).shrink(((0, 1),)).sum().item() == size
+
     def test_empty_symbolic_shape_survives_realize_and_add(self):
         n = Variable('N', 1, 8)
         x = Tensor.empty(n.bind(4))

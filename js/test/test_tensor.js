@@ -291,6 +291,29 @@ async function runTensorTests(pg, createRuntime) {
     }
   })
 
+  await test('indexing owner bound prefix reduction and flip', async () => {
+    const n = pg.uop.variable('indexing_extent', 2, 8)
+    const zero = pg.uop.constant(0)
+    for (const size of [2, 4, 7]) {
+      const source = new Tensor([1, 2, 3, 4, 5, 6, 7, 8], {dtype: 'float32'})
+      const bound = n.bind(size)
+      // JS Tensor.shrink admits static bounds; exercise symbolic indexing
+      // through the existing C/UOp interface, without coercing UOps to numbers.
+      const root = source.uopPhysical
+      const raw = pg._core.ffi.poly_shrink_uop(root.ctx, root.raw, [zero.raw], [bound.raw], 1)
+      assert(raw, 'symbolic prefix construction failed')
+      const view = pg.uop.wrap(raw)
+      const prefix = new Tensor(view)
+      const total = prefix.sum()
+      const flipped = prefix.flip(0)
+      const first = flipped.shrink([[0, 1]]).sum()
+      assertClose(await total.toArray(), [size * (size + 1) / 2], 0)
+      assertClose(await first.toArray(), [size], 0)
+      for (const value of [first, flipped, total, prefix, view, root, bound, source]) await value.dispose()
+    }
+    await zero.dispose(); await n.dispose()
+  })
+
   await test('typed PARAM bounds preserve scalar values and ownership', async () => {
     const cases = [[.25, .75, 'float32'], [-Infinity, Infinity, 'float32'],
       [2n**63n, 2n**64n-1n, 'uint64'], [2n**130n, 2n**131n, 'weakint'],
