@@ -139,6 +139,12 @@ test-runtime-wasm: build/test_schedule_runtime.js
 	$(SAN_RUN) $(NODE) $< --require-no-skips schedule_runtime.execution_owner_preserves_opaque_call_bodies
 	$(SAN_RUN) $(NODE) $< --require-no-skips schedule_runtime.execution_owner_wait_stats
 
+.PHONY: test-autograd-wasm
+test-autograd-wasm: build/test_schedule_runtime.js
+	@set -e; for case in owner_target_identity_does_not_differentiate_target owner_target_walk_failure_is_not_zero_gradient owner_tuple_accumulation_preserves_noop_slots owner_reshape_gradient_preserves_symbolic_dimension owner_copy_returns_to_source_device; do \
+		$(SAN_RUN) $(NODE) $< --require-no-skips uop.gradient_$$case; \
+	done
+
 build/test_schedule_runtime.js: $(WASM_SRC) test/test_main.c test/test_schedule_runtime.c test/test_uop.c test/test_sym.c test/test_reduce_simplify.c test/test_ir.c test/test_harness.h $(PROJECT_HEADERS) Makefile
 	@mkdir -p build
 	EMSDK_PYTHON=$(EMSDK_PYTHON) $(EMCC) $(EMCC_CFLAGS_COMMON) -DPOLY_TESTING -O1 -g \

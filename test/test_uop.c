@@ -24,6 +24,115 @@
 
 /* Basic creation */
 
+TEST(uop, gradient_owner_copy_returns_to_source_device) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *source = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_CPU);
+  PolyUOp *seed = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_INTERP);
+  PolyUOp *dest = poly_uop_device_uop_cached(ctx, seed, NULL);
+  PolyUOp *copied = poly_copy_to_device_uop(ctx, source, dest);
+  PolyUOp *grad = NULL;
+  ASSERT_INT_EQ(poly_grad_many(ctx, copied, seed, &source, 1, &grad), 0);
+  ASSERT_NOT_NULL(grad);
+  ASSERT_INT_EQ(grad->op, POLY_OP_COPY);
+  ASSERT_PTR_EQ(grad->src[0], seed);
+  ASSERT_PTR_EQ(
+      poly_uop_device_uop_cached(ctx, grad, NULL), poly_uop_device_uop_cached(ctx, source, NULL)
+  );
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(uop, gradient_owner_target_identity_does_not_differentiate_target) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_const_float(ctx, 2.0);
+  PolyUOp *seed = poly_const_float(ctx, 3.0);
+  PolyUOp *targets[] = {
+      poly_detach(ctx, x),
+      poly_uop1(ctx, POLY_OP_CUSTOM, POLY_FLOAT32, x, poly_arg_none()),
+  };
+  for (int i = 0; i < 2; i++) {
+    PolyUOp *grad = NULL;
+    uint8_t present = 0;
+    ASSERT_INT_EQ(poly_grad_many_ex(ctx, targets[i], seed, &targets[i], 1, &grad, &present), 0);
+    ASSERT_INT_EQ(present, 1);
+    ASSERT_PTR_EQ(grad, seed);
+  }
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+extern void poly_test_grad_target_walk_fail_alloc(bool fail);
+
+TEST(uop, gradient_owner_target_walk_failure_is_not_zero_gradient) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_const_float(ctx, 2.0), *seed = poly_const_float(ctx, 3.0);
+  PolyUOp *root = poly_mul(ctx, x, x);
+  PolyUOp *grad = seed;
+  uint8_t present = 7;
+  size_t scratch_before = poly_arena_used(ctx->scratch);
+  poly_test_grad_target_walk_fail_alloc(true);
+  int rc = poly_grad_many_ex(ctx, root, seed, &x, 1, &grad, &present);
+  poly_test_grad_target_walk_fail_alloc(false);
+  ASSERT_INT_EQ(rc, -1);
+  ASSERT_PTR_EQ(grad, seed);
+  ASSERT_INT_EQ(present, 7);
+  ASSERT_INT_EQ(poly_arena_used(ctx->scratch), scratch_before);
+  ASSERT_INT_EQ(poly_grad_many_ex(ctx, root, seed, &x, 1, &grad, &present), 0);
+  ASSERT_NOT_NULL(grad);
+  ASSERT_INT_EQ(present, 1);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(uop, gradient_owner_tuple_accumulation_preserves_noop_slots) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_const_float(ctx, 2.0), *seed = poly_const_float(ctx, 3.0);
+  PolyUOp *noop = poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_none());
+  PolyUOp *pair = poly_uop2(ctx, POLY_OP_TUPLE, POLY_VOID, x, x, poly_arg_none());
+  PolyUOp *root = poly_uop2(ctx, POLY_OP_TUPLE, POLY_VOID, pair, pair, poly_arg_none());
+  PolyUOp *left = poly_uop2(ctx, POLY_OP_TUPLE, POLY_VOID, seed, noop, poly_arg_none());
+  PolyUOp *right = poly_uop2(ctx, POLY_OP_TUPLE, POLY_VOID, noop, seed, poly_arg_none());
+  PolyUOp *initial = poly_uop2(ctx, POLY_OP_TUPLE, POLY_VOID, left, right, poly_arg_none());
+  PolyUOp *grad = NULL;
+  ASSERT_INT_EQ(poly_grad_many(ctx, root, initial, &x, 1, &grad), 0);
+  ASSERT_NOT_NULL(grad);
+  ASSERT_INT_EQ(grad->op, POLY_OP_ADD);
+  ASSERT_PTR_EQ(grad->src[0], seed);
+  ASSERT_PTR_EQ(grad->src[1], seed);
+  /* Same-slot contributions add; two absent slots stay absent. */
+  initial = poly_uop2(ctx, POLY_OP_TUPLE, POLY_VOID, left, left, poly_arg_none());
+  ASSERT_INT_EQ(poly_grad_many(ctx, root, initial, &x, 1, &grad), 0);
+  ASSERT_INT_EQ(grad->op, POLY_OP_ADD);
+  ASSERT_PTR_EQ(grad->src[0], seed);
+  ASSERT_PTR_EQ(grad->src[1], seed);
+  PolyUOp *empty = poly_uop2(ctx, POLY_OP_TUPLE, POLY_VOID, noop, noop, poly_arg_none());
+  initial = poly_uop2(ctx, POLY_OP_TUPLE, POLY_VOID, empty, empty, poly_arg_none());
+  uint8_t present = 1;
+  ASSERT_INT_EQ(poly_grad_many_ex(ctx, root, initial, &x, 1, &grad, &present), 0);
+  ASSERT_INT_EQ(present, 0);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(uop, gradient_owner_reshape_gradient_preserves_symbolic_dimension) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *n =
+      poly_uop_variable(ctx, "n", poly_arg_int(1), poly_arg_int(8), POLY_WEAKINT, 1, false);
+  PolyUOp *one = poly_uop_const(ctx, poly_arg_int(1), POLY_WEAKINT);
+  PolyUOp *x = poly_expand_uop(ctx, poly_const_float(ctx, 2.0), &n, 1);
+  PolyUOp *shape[] = {one, n};
+  PolyUOp *root = poly_reshape_uop(ctx, x, shape, 2);
+  PolyUOp *seed = poly_expand_uop(ctx, poly_const_float(ctx, 3.0), shape, 2);
+  PolyUOp *grad = NULL;
+  ASSERT_INT_EQ(poly_grad_many(ctx, root, seed, &x, 1, &grad), 0);
+  ASSERT_NOT_NULL(grad);
+  ASSERT_INT_EQ(grad->op, POLY_OP_RESHAPE);
+  ASSERT_PTR_EQ(grad->src[0], seed);
+  ASSERT_PTR_EQ(poly_uop_shape_dim(ctx, grad, 0), n);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(uop, typed_param_bounds_long_repr) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);

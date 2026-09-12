@@ -4508,6 +4508,22 @@ class TestAutograd:
             loss.gradient(unreachable)[0].numpy(), [0.0, 0.0]
         )
 
+    def test_gradient_owner_detached_self_preserves_seed(self):
+        source = Tensor([2.0, 3.0])
+        detached = source.detach()
+        seed = Tensor([3.0, 4.0])
+        (grad,) = detached.gradient(detached, gradient=seed)
+        np.testing.assert_array_equal(grad.numpy(), [3.0, 4.0])
+        (blocked,) = detached.gradient(source, gradient=seed)
+        np.testing.assert_array_equal(blocked.numpy(), [0.0, 0.0])
+
+    def test_gradient_owner_copy_returns_to_source_device(self):
+        source = Tensor([2.0, 3.0], device='CPU')
+        loss = source.to('INTERP').square().sum()
+        (grad,) = loss.gradient(source)
+        assert grad.device == source.device
+        np.testing.assert_array_equal(grad.numpy(), [4.0, 6.0])
+
     def test_backward_type_shape_and_explicit_gradient_admission(self):
         with pytest.raises(RuntimeError, match='only float Tensors have gradient'):
             Tensor([1, 2, 3]).sum().backward()

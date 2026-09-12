@@ -9,7 +9,7 @@
  * - Binary: MAX (elementwise)
  * - Movement: RESHAPE, EXPAND, PERMUTE, PAD, SHRINK, FLIP
  * - Reductions: tensor REDUCE with ADD, MAX and MUL
- * - Utility: CAST pass-through, CONTIGUOUS/COPY/BUFFERIZE pass-through
+ * - Utility: CAST, CONTIGUOUS/COPY and structured FUNCTION gradients
  * - Stop gradient: DETACH, CMPLT, CMPNE, BITCAST
  * - Target-pruned reverse pass (port of tinygrad's _deepwalk)
  */
@@ -18,6 +18,7 @@
 #include "uop/ops.h"
 #include "uop/upat.h"
 #include "tensor.h"
+#include "device.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -102,12 +103,31 @@ static PolyUOp *shape_gradient_edge(PolyCtx *ctx, PolyUOp *source, PolyUOp *grad
 static bool grad_add(PolyCtx *ctx, PolyMap *grads, PolyUOp *u, PolyUOp *g) {
   if (!u || !g || !(g = shape_gradient_edge(ctx, u, g))) return false;
   PolyUOp *old = grad_get(grads, u);
-  if (!old) {
+  if (!old || old->op == POLY_OP_NOOP) {
     poly_map_set(grads, poly_ptr_hash(u), u, g, poly_ptr_eq);
     return true;
   }
-  PolyUOp *rhs = cast_to(ctx, g, old->dtype);
-  PolyUOp *sum = poly_uop2(ctx, POLY_OP_ADD, old->dtype, old, rhs, poly_arg_none());
+  /* compute_gradient merges tuple contributions slotwise: NOOP means an
+   * absent output gradient, not a void-typed value to add. */
+  PolyUOp *sum = NULL;
+  if (old->op == POLY_OP_TUPLE && g->op == POLY_OP_TUPLE) {
+    if (old->n_src != g->n_src) return false;
+    PolyUOp **parts = old->n_src ? malloc((size_t)old->n_src * sizeof(*parts)) : NULL;
+    if (old->n_src && !parts) return false;
+    for (int i = 0; i < old->n_src; i++) {
+      PolyUOp *p = old->src[i], *n = g->src[i];
+      parts[i] = p->op == POLY_OP_NOOP ? n : n->op == POLY_OP_NOOP ? p : poly_add(ctx, p, n);
+      if (!parts[i]) {
+        free(parts);
+        return false;
+      }
+    }
+    sum = poly_uop(ctx, POLY_OP_TUPLE, POLY_VOID, parts, old->n_src, poly_arg_none());
+    free(parts);
+  } else {
+    sum = poly_add(ctx, old, g);
+  }
+  if (!sum) return false;
   poly_map_set(grads, poly_ptr_hash(u), u, sum, poly_ptr_eq);
   return true;
 }
@@ -144,8 +164,16 @@ static PolyUOp *pow_grad(PolyCtx *ctx, PolyUOp *base, PolyUOp *exponent) {
 
 /* Target-pruned walk (port of tinygrad _deepwalk) */
 
+#ifdef POLY_TESTING
+static _Thread_local bool target_walk_fail_alloc = false;
+void poly_test_grad_target_walk_fail_alloc(bool fail) {
+  target_walk_fail_alloc = fail;
+}
+#endif
+
 /* Compute the subset of topo[] that lies on paths from any target to root.
- * Skips DETACH nodes. Returns filtered array (arena-allocated). */
+ * Skips DETACH nodes. Caller frees the filtered array; NULL means failure,
+ * while a non-NULL array with zero entries is a valid empty walk. */
 static PolyUOp **target_walk(
     PolyCtx *ctx,
     PolyUOp **topo,
@@ -155,29 +183,39 @@ static PolyUOp **target_walk(
     int *n_out
 ) {
   PolyMap *target_set = poly_map_new((size_t)n_targets * 2 + 16);
+  if (!target_set) return NULL;
   for (int i = 0; i < n_targets; i++)
     poly_map_set(target_set, poly_ptr_hash(targets[i]), targets[i], targets[i], poly_ptr_eq);
 
   /* Forward pass: mark nodes whose sources lead to any target */
   PolyMap *in_path = poly_map_new((size_t)n_topo * 2 + 16);
+  if (!in_path) {
+    poly_map_destroy(target_set);
+    return NULL;
+  }
   for (int i = 0; i < n_topo; i++) {
     PolyUOp *u = topo[i];
-    if (u->op == POLY_OP_DETACH) continue;
-    bool on_path = poly_map_get(target_set, poly_ptr_hash(u), u, poly_ptr_eq) != NULL;
-    if (!on_path) {
-      for (int j = 0; j < u->n_src; j++) {
-        PolyUOp *s = u->src[j];
-        if (poly_map_get(target_set, poly_ptr_hash(s), s, poly_ptr_eq) ||
-            poly_map_get(in_path, poly_ptr_hash(s), s, poly_ptr_eq)) {
-          on_path = true;
-          break;
-        }
+    /* _deepwalk marks ancestors of targets, not targets merely by identity.
+     * Keep DETACH in the path map but exclude it from the reverse walk. */
+    bool on_path = false;
+    for (int j = 0; j < u->n_src; j++) {
+      PolyUOp *s = u->src[j];
+      if (poly_map_get(target_set, poly_ptr_hash(s), s, poly_ptr_eq) ||
+          poly_map_get(in_path, poly_ptr_hash(s), s, poly_ptr_eq)) {
+        on_path = true;
+        break;
       }
     }
     if (on_path) poly_map_set(in_path, poly_ptr_hash(u), u, u, poly_ptr_eq);
   }
 
   PolyUOp **result = malloc((size_t)n_topo * sizeof(PolyUOp *));
+#ifdef POLY_TESTING
+  if (target_walk_fail_alloc) {
+    free(result);
+    result = NULL;
+  }
+#endif
   if (!result) {
     poly_map_destroy(target_set);
     poly_map_destroy(in_path);
@@ -187,7 +225,8 @@ static PolyUOp **target_walk(
   int count = 0;
   for (int i = 0; i < n_topo; i++) {
     PolyUOp *u = topo[i];
-    if (poly_map_get(in_path, poly_ptr_hash(u), u, poly_ptr_eq)) result[count++] = u;
+    if (u->op != POLY_OP_DETACH && poly_map_get(in_path, poly_ptr_hash(u), u, poly_ptr_eq))
+      result[count++] = u;
   }
 
   poly_map_destroy(target_set);
@@ -347,12 +386,9 @@ static PolyMap *grad_reverse_pass(
   if (targets && n_targets > 0) {
     walk = target_walk(ctx, topo, n_topo, targets, n_targets, &n_walk);
     walk_owned = true;
-    if (!walk || n_walk <= 0) {
-      /* No path from loss to any target — return empty gradient map */
-      free(walk);
-      PolyMap *grads = poly_map_new(16);
+    if (!walk) {
       poly_ctx_scratch_rewind(ctx, scratch);
-      return grads;
+      return NULL;
     }
   }
 
@@ -381,7 +417,7 @@ static PolyMap *grad_reverse_pass(
   for (int i = n_walk - 1; i >= 0; i--) {
     PolyUOp *u = walk[i];
     PolyUOp *g = grad_get(grads, u);
-    if (!g) continue;
+    if (!g || g->op == POLY_OP_NOOP) continue;
 
     switch (u->op) {
     /* leaf / no-parent cases */
@@ -504,7 +540,8 @@ static PolyMap *grad_reverse_pass(
       int n_needed = 0;
       for (int j = 0; j < n_args; j++) {
         all_args[j] = u->src[j + 1];
-        if (params_by_slot[j] && grad_walk_contains(walk, n_walk, u->src[j + 1])) {
+        if (params_by_slot[j] && (grad_walk_contains(targets, n_targets, u->src[j + 1]) ||
+                                  grad_walk_contains(walk, n_walk, u->src[j + 1]))) {
           needed_params[n_needed] = params_by_slot[j];
           needed_slots[n_needed++] = j;
         }
@@ -682,9 +719,17 @@ static PolyMap *grad_reverse_pass(
       fprintf(stderr, "polygrad: autograd: malformed STORE\n");
       GRAD_REVERSE_FAIL();
 
+    case POLY_OP_COPY: {
+      /* pm_gradient: COPY sends the gradient back to the input device.
+       * Keep exact device identity, not just its backend implementation. */
+      PolyUOp *device = poly_uop_device_uop_cached(ctx, u->src[0], NULL);
+      PolyUOp *gx = device ? poly_copy_to_device_uop(ctx, g, device)
+                           : poly_uop1(ctx, POLY_OP_COPY, g->dtype, g, poly_arg_none());
+      GRAD_ADD(u->src[0], gx);
+    } break;
+
     /* pass-through (no realize barrier on gradient) */
     case POLY_OP_CONTIGUOUS:
-    case POLY_OP_COPY:
     case POLY_OP_NOOP:
     case POLY_OP_STAGE:
       GRAD_ADD(u->src[0], g);
@@ -923,8 +968,14 @@ static PolyMap *grad_reverse_pass(
     } break;
 
     case POLY_OP_RESHAPE: {
-      PolyShape s0 = poly_uop_max_shape_cached(ctx, u->src[0]);
-      PolyUOp *gx = poly_reshape(ctx, g, s0.dims, s0.ndim);
+      /* pm_gradient reshapes to the source's actual shape, not its maximum
+       * allocation extent. Preserve symbolic dimensions through backward. */
+      int ndim = poly_uop_ndim(ctx, u->src[0]);
+      if (ndim < 0 || ndim > POLY_MAX_DIMS) GRAD_REVERSE_FAIL();
+      PolyUOp *dims[POLY_MAX_DIMS];
+      for (int i = 0; i < ndim; i++)
+        if (!(dims[i] = poly_uop_shape_dim(ctx, u->src[0], i))) GRAD_REVERSE_FAIL();
+      PolyUOp *gx = poly_reshape_uop(ctx, g, dims, ndim);
       GRAD_ADD(u->src[0], gx);
 
     } break;

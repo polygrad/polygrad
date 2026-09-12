@@ -875,6 +875,14 @@ async function runTensorTests(pg, createRuntime) {
     assertClose(await source.grad.toArray(), [0, 0, 0, 0])
   })
 
+  await test('gradient owner detached self retains seed', async () => {
+    const source = Tensor.full([], 2, { dtype: 'float32' })
+    const detached = source.detach()
+    await detached.backward()
+    assertClose(await detached.grad.toArray(), [1])
+    assertClose(await source.grad.toArray(), [0])
+  })
+
   await test('contiguousBackward has exact gradient barrier', async () => {
     const source = new Tensor([1, -2, 3], { dtype: 'float32' })
     const result = source.mul(2).contiguousBackward()
