@@ -120,8 +120,13 @@ test-runtime-wasm: build/test_schedule_runtime.js
 	$(SAN_RUN) $(NODE) $< --require-no-skips binding_publication
 	$(SAN_RUN) $(NODE) $< --require-no-skips schedule_runtime.interp_scalar_params_use_numeric_bindings
 	$(SAN_RUN) $(NODE) $< --require-no-skips schedule_runtime.jit_input_scalar_substitution_failure_is_not_capture
+	$(SAN_RUN) $(NODE) $< --require-no-skips sym.owner_uint64_derived_bounds_use_full_source_domain
+	$(SAN_RUN) $(NODE) $< --require-no-skips sym.owner_exact_interval_allocation_failure_cleans_up
+	$(SAN_RUN) $(NODE) $< --require-no-skips reduce_simplify.owner_uint64_collapse_preserves_upper_clamp
+	$(SAN_RUN) $(NODE) $< --require-no-skips reduce_simplify.owner_range_mod_admission_and_first_match
+	$(SAN_RUN) $(NODE) $< --require-no-skips schedule_runtime.owner_call_arguments_exclude_only_bound_variables
 
-build/test_schedule_runtime.js: $(WASM_SRC) test/test_main.c test/test_schedule_runtime.c test/test_uop.c test/test_harness.h $(PROJECT_HEADERS) Makefile
+build/test_schedule_runtime.js: $(WASM_SRC) test/test_main.c test/test_schedule_runtime.c test/test_uop.c test/test_sym.c test/test_reduce_simplify.c test/test_harness.h $(PROJECT_HEADERS) Makefile
 	@mkdir -p build
 	EMSDK_PYTHON=$(EMSDK_PYTHON) $(EMCC) $(EMCC_CFLAGS_COMMON) -DPOLY_TESTING -O1 -g \
 		-fsanitize=address,undefined -fno-sanitize-recover=all -s ASSERTIONS=1 -s ALLOW_MEMORY_GROWTH=1 \

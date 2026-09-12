@@ -251,7 +251,6 @@ static bool exec_symbolic_const_alu(
  * test/test_sym.c asserts every case verbatim. */
 
 static int64_t dtype_min(PolyDType dt) {
-  dt = dt;
   if (poly_dtype_eq(dt, POLY_BOOL)) return 0;
   if (poly_dtype_eq(dt, POLY_INT8)) return INT8_MIN;
   if (poly_dtype_eq(dt, POLY_UINT8)) return 0;
@@ -266,7 +265,6 @@ static int64_t dtype_min(PolyDType dt) {
 }
 
 static int64_t dtype_max(PolyDType dt) {
-  dt = dt;
   if (poly_dtype_eq(dt, POLY_BOOL)) return 1;
   if (poly_dtype_eq(dt, POLY_INT8)) return INT8_MAX;
   if (poly_dtype_eq(dt, POLY_UINT8)) return UINT8_MAX;
@@ -340,9 +338,9 @@ typedef struct {
 
 static PolyTypedMinMax poly_uop_typed_minmax(PolyCtx *ctx, PolyUOp *u);
 static PolyTypedMinMax cast_minmax(PolyCtx *ctx, PolyUOp *u);
+static bool exact_int_minmax_i64(PolyCtx *ctx, PolyUOp *u, int64_t *lo, int64_t *hi);
 
 static bool poly_uop_minmax_node(PolyCtx *ctx, PolyUOp *u, int64_t *vmin, int64_t *vmax) {
-  (void)ctx;
   if (!u) {
     *vmin = 0;
     *vmax = 0;
@@ -380,6 +378,19 @@ static bool poly_uop_minmax_node(PolyCtx *ctx, PolyUOp *u, int64_t *vmin, int64_
     *vmin = u->arg.param->min_val;
     *vmax = u->arg.param->max_val;
     return true;
+  }
+
+  /* UOp._min_max computes with Python integers before narrowing. A uint64
+   * operand's saturated cache endpoint is not its mathematical maximum:
+   * e.g. LOAD<uint64> >> 62 spans [0,3], not [0,1]. Reuse the exact interval
+   * engine at this boundary; never do arithmetic on that truncated endpoint. */
+  if (poly_dtype_is_int(u->dtype) || poly_dtype_is_bool(u->dtype)) {
+    for (int i = 0; i < u->n_src; i++) {
+      int64_t lo, hi;
+      if (poly_dtype_eq(u->src[i]->dtype, POLY_UINT64) && minmax_src(u->src[i], &lo, &hi) &&
+          hi == INT64_MAX)
+        return exact_int_minmax_i64(ctx, u, vmin, vmax);
+    }
   }
 
   /* RANGE / SPECIAL: tinygrad ops.py:888
@@ -1917,13 +1928,26 @@ static bool exact_int_range_node(PolyUOp *u, PolyMap *memo, ExactIntRange *out) 
 }
 
 /* Pinned tinygrad UOp._min_max uses arbitrary-precision Python integers.
- * Evaluate the exact integer interval only for the nested-CAST predicate;
+ * Shared by exact rewrite predicates and compact-cache boundary queries;
  * this is pass-local evidence, not persistent UOp state or a second graph. */
+#ifdef POLY_TESTING
+static _Thread_local bool exact_int_range_alloc_fail;
+void poly_test_exact_int_range_alloc_fail(bool fail) {
+  exact_int_range_alloc_fail = fail;
+}
+#endif
+
 static bool exact_int_range(PolyCtx *ctx, PolyUOp *root, ExactIntRange *out) {
   if (!ctx || !root || !out) return false;
   int n = 0;
   PolyUOp **topo = poly_toposort_alloc(ctx, root, &n);
   ExactIntRange *ranges = n > 0 ? calloc((size_t)n, sizeof(*ranges)) : NULL;
+#ifdef POLY_TESTING
+  if (exact_int_range_alloc_fail) {
+    free(ranges);
+    ranges = NULL;
+  }
+#endif
   PolyMap *memo = poly_map_new((size_t)n * 2 + 16);
   bool ok = topo && ranges && memo;
   for (int i = 0; ok && i < n; i++) {
@@ -1932,11 +1956,21 @@ static bool exact_int_range(PolyCtx *ctx, PolyUOp *root, ExactIntRange *out) {
   }
   ExactIntRange *found = ok ? exact_int_range_get(memo, root) : NULL;
   if (!found || !found->valid || !exact_int_range_copy(out, &found->lo, &found->hi)) ok = false;
-  for (int i = 0; i < n; i++)
-    exact_int_range_free(&ranges[i]);
+  /* The interval array may be the allocation that failed. */
+  if (ranges)
+    for (int i = 0; i < n; i++)
+      exact_int_range_free(&ranges[i]);
   poly_map_destroy(memo);
   free(ranges);
   free(topo);
+  return ok;
+}
+
+static bool exact_int_minmax_i64(PolyCtx *ctx, PolyUOp *u, int64_t *lo, int64_t *hi) {
+  ExactIntRange bounds = {0};
+  bool ok = exact_int_range(ctx, u, &bounds) && poly_int_to_i64(&bounds.lo, lo) &&
+            poly_int_to_i64(&bounds.hi, hi);
+  exact_int_range_free(&bounds);
   return ok;
 }
 

@@ -12,6 +12,7 @@
 #include "../src/codegen/simplify.h"
 #include "../src/tensor.h"
 #include "../src/uop/upat.h"
+#include "../src/utils.h"
 #include "../src/engine/schedule.h" /* poly_get_kernel_graph, poly_reshape, poly_reduce_axis */
 #include "../src/schedule/rangeify.h"
 #include "../src/codegen/codegen.h" /* poly_linearize */
@@ -20,6 +21,83 @@
 /* helpers */
 
 #ifdef POLY_TESTING
+TEST(reduce_simplify, owner_uint64_collapse_preserves_upper_clamp) {
+  /* v0.14 reduce_collapse must retain min(loaded_value >> 62, 2), including
+   * when the original uint64 storage value exceeds INT64_MAX. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *two = poly_uop_const(ctx, poly_arg_int(2), POLY_UINT64);
+  PolyUOp *r = poly_uop1(ctx, POLY_OP_RANGE, POLY_UINT64, two, poly_arg_range(0, POLY_AXIS_REDUCE));
+  PolyUOp *buf = poly_test_program_param(ctx, POLY_UINT64, 1, 0);
+  PolyUOp *zero = poly_const_int(ctx, 0);
+  PolyUOp *load = poly_uop1(
+      ctx, POLY_OP_LOAD, POLY_UINT64, poly_uop_index(ctx, buf, &zero, 1), poly_arg_none()
+  );
+  PolyUOp *upper = poly_alu2(ctx, POLY_OP_SHR, load, poly_const_int(ctx, 62));
+  PolyUOp *value = poly_uop3(
+      ctx, POLY_OP_WHERE, POLY_UINT64, poly_alu2(ctx, POLY_OP_CMPLT, r, upper),
+      poly_uop_const(ctx, poly_arg_int(1), POLY_UINT64),
+      poly_uop_const(ctx, poly_arg_int(0), POLY_UINT64), poly_arg_none()
+  );
+  PolyUOp *sources[] = {value, r};
+  PolyUOp *red =
+      poly_uop(ctx, POLY_OP_REDUCE, POLY_UINT64, sources, 2, poly_arg_reduce(POLY_OP_ADD, 0));
+  PolyUOp *out = poly_test_reduce_collapse(ctx, red);
+  PolyUOp *expected = poly_graph_rewrite(ctx, poly_minimum(ctx, upper, two), poly_symbolic());
+  bool correct = out == expected;
+  for (uint64_t high = 0; out && high < 4; high++) {
+    PolyUOp *sample = poly_uop_const(ctx, poly_arg_int((int64_t)(high << 62)), POLY_UINT64);
+    PolyUOp *bound = poly_uop_substitute(ctx, out, &load, &sample, 1);
+    bound = poly_graph_rewrite(ctx, bound, poly_symbolic());
+    int64_t result = -1;
+    correct &= poly_uop_const_i64(bound, &result) == 0 && result == (high < 2 ? high : 2);
+  }
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
+TEST(reduce_simplify, owner_range_mod_admission_and_first_match) {
+  /* mark_range_mod records the first eligible divisor; WARP/DEVICE and
+   * nonconstant extents never enter the split dictionary. */
+  PolyAxisType axes[] = {POLY_AXIS_LOOP, POLY_AXIS_REDUCE, POLY_AXIS_WARP, POLY_AXIS_DEVICE};
+  bool correct = true;
+  for (size_t i = 0; i < sizeof(axes) / sizeof(*axes); i++) {
+    for (int divisor = 3; divisor <= 5; divisor += 2) {
+      PolyCtx *ctx = poly_ctx_new();
+      PolyMap *state = poly_map_new(16);
+      PolyUOp *r = poly_range(ctx, 12, 0, axes[i]);
+      PolyUOp *c = poly_const_int(ctx, divisor);
+      PolyUOp *mod = poly_uop2(ctx, POLY_OP_FLOORMOD, POLY_WEAKINT, r, c, poly_arg_none());
+      poly_graph_rewrite_ctx(ctx, mod, poly_pm_split_ranges(), state);
+      PolyUOp *recorded = poly_map_get(state, poly_ptr_hash(r), r, poly_ptr_eq);
+      bool eligible = i < 2 && divisor == 3;
+      correct &= recorded == (eligible ? c : NULL);
+      if (eligible) {
+        PolyUOp *other = poly_uop2(
+            ctx, POLY_OP_FLOORMOD, POLY_WEAKINT, r, poly_const_int(ctx, 2), poly_arg_none()
+        );
+        poly_graph_rewrite_ctx(ctx, other, poly_pm_split_ranges(), state);
+        correct &= poly_map_get(state, poly_ptr_hash(r), r, poly_ptr_eq) == c;
+      }
+      poly_map_destroy(state);
+      poly_ctx_destroy(ctx);
+    }
+  }
+  PolyCtx *ctx = poly_ctx_new();
+  PolyMap *state = poly_map_new(16);
+  PolyUOp *extent = poly_uop_variable(ctx, "extent", 3, 12, POLY_WEAKINT, 1, false);
+  PolyUOp *r =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, extent, poly_arg_range(0, POLY_AXIS_LOOP));
+  PolyUOp *mod =
+      poly_uop2(ctx, POLY_OP_FLOORMOD, POLY_WEAKINT, r, poly_const_int(ctx, 3), poly_arg_none());
+  poly_graph_rewrite_ctx(ctx, mod, poly_pm_split_ranges(), state);
+  correct &= poly_map_len(state) == 0;
+  poly_map_destroy(state);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
 TEST(reduce_simplify, domains_unbounded_float_is_not_a_finite_parameter) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *r = poly_range(ctx, 8, 0, POLY_AXIS_REDUCE);

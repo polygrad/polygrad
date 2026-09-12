@@ -10,11 +10,71 @@
 #include "../src/tensor.h"
 #include "../src/uop/weak.h"
 #include "../src/uop/ops.h"
+#include "../src/uop/symbolic.h"
 #include <limits.h>
 #include <math.h>
 #include <stdlib.h>
 
 /* Helper: apply symbolic_simple via graph_rewrite */
+
+#ifdef POLY_TESTING
+TEST(sym, owner_exact_interval_allocation_failure_cleans_up) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *buf = poly_test_program_param(ctx, POLY_UINT64, 1, 0);
+  PolyUOp *zero = poly_const_int(ctx, 0);
+  PolyUOp *load = poly_uop1(
+      ctx, POLY_OP_LOAD, POLY_UINT64, poly_uop_index(ctx, buf, &zero, 1), poly_arg_none()
+  );
+  PolyUOp *shift = poly_alu2(ctx, POLY_OP_SHR, load, poly_const_int(ctx, 62));
+  int64_t lo = -1, hi = -1;
+  poly_test_exact_int_range_alloc_fail(true);
+  poly_uop_minmax(ctx, shift, &lo, &hi);
+  poly_test_exact_int_range_alloc_fail(false);
+  bool correct = lo == 0 && hi == INT64_MAX;
+  /* A fresh query after failure must still use the exact interval engine. */
+  PolyUOp *next = poly_alu2(ctx, POLY_OP_SHR, load, poly_const_int(ctx, 61));
+  poly_uop_minmax(ctx, next, &lo, &hi);
+  correct &= lo == 0 && hi == 7;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(correct);
+  PASS();
+}
+#endif
+
+TEST(sym, owner_uint64_derived_bounds_use_full_source_domain) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *buf = poly_test_program_param(ctx, POLY_UINT64, 1, 0);
+  PolyUOp *zero = poly_const_int(ctx, 0);
+  PolyUOp *load = poly_uop1(
+      ctx, POLY_OP_LOAD, POLY_UINT64, poly_uop_index(ctx, buf, &zero, 1), poly_arg_none()
+  );
+  PolyUOp *expressions[] = {
+      poly_alu2(ctx, POLY_OP_SHR, load, poly_const_int(ctx, 62)),
+      poly_alu2(
+          ctx, POLY_OP_FLOORDIV, load,
+          poly_uop_const(ctx, poly_arg_int(INT64_C(1) << 62), POLY_UINT64)
+      ),
+      poly_alu2(ctx, POLY_OP_AND, load, poly_uop_const(ctx, poly_arg_int(3), POLY_UINT64)),
+  };
+  bool correct = true;
+  for (size_t i = 0; i < sizeof(expressions) / sizeof(*expressions); i++) {
+    int64_t lo = -1, hi = -1;
+    poly_uop_minmax(ctx, expressions[i], &lo, &hi);
+    if (lo != 0 || hi != 3)
+      fprintf(
+          stderr, "uint64 interval op=%s: [%lld,%lld], expected [0,3]\n",
+          poly_op_name(expressions[i]->op), (long long)lo, (long long)hi
+      );
+    correct &= lo == 0 && hi == 3;
+    /* The compact cache must retain the derived interval, not the truncated
+     * source endpoint that preceded this query. */
+    poly_uop_minmax(ctx, expressions[i], &lo, &hi);
+    correct &= lo == 0 && hi == 3;
+  }
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(correct);
+  PASS();
+}
 
 static PolyUOp *simplify(PolyCtx *ctx, PolyUOp *root) {
   return poly_graph_rewrite(ctx, root, poly_symbolic_simple());

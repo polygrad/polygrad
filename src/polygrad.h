@@ -1708,14 +1708,13 @@ bool poly_uop_in_ranges_ex(PolyCtx *ctx, PolyUOp *u, PolyUOp *r, PolyUOpCache *c
 int poly_uop_ranges(PolyCtx *ctx, PolyUOp *u, PolyUOp **out, int max_out);
 int poly_uop_ranges_ex(PolyCtx *ctx, PolyUOp *u, PolyUOp **out, int max_out, PolyUOpCache *cache);
 
-/* vmin/vmax interval arithmetic. Full port of tinygrad uop/ops.py:856-897
- * (UOp._min_max) with per-pass memoization via PolyUOpCache.
+/* Compact integer projection of tinygrad UOp._min_max, cached on the UOp.
  *
- * Integer-only: polygrad tracks bounds as int64 and uses an (INT64_MIN,
- * INT64_MAX) sentinel for any float-dtype UOp. Phase D's rules only query
- * bounds on integer operands (range counts, comparison cuts) so this is
- * sufficient. Callers that need float bounds must check poly_dtype_is_float
- * first and handle the sentinel explicitly.
+ * The int64 result cannot represent fractional/infinite or full uint64 bounds.
+ * Unknown endpoints fall back to dtype-derived limits; those are not a proof
+ * that an arbitrary uint64 value fits int64. Internal semantic predicates use
+ * typed/exact interval queries where this distinction matters. Derived integer
+ * bounds from wide uint64 operands are computed exactly before projection.
  *
  * Overflow: corner multiplications and shifts use __builtin_*_overflow
  * detection and fall through to dtype bounds on overflow. This can produce

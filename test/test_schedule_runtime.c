@@ -17,6 +17,24 @@
 #include "../src/uop/ops.h"
 #include "../src/tensor.h"
 
+TEST(schedule_runtime, owner_call_arguments_exclude_only_bound_variables) {
+  /* get_call_arg_uops filters bound variables, not every ALU BUFFER/PARAM. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *var = poly_uop_variable(ctx, "offset", 0, 4, POLY_WEAKINT, 1, false);
+  PolyUOp *bound = poly_uop_bind(ctx, var, 2);
+  PolyUOp *a = poly_test_program_param(ctx, POLY_FLOAT32, 1, 0);
+  PolyUOp *b = poly_test_program_param(ctx, POLY_FLOAT32, 1, 1);
+  PolyUOp *sources[] = {
+      poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_none()), bound, a, bound, b, var};
+  PolyUOp *call = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, sources, 6, poly_arg_none());
+  bool correct = poly_call_n_buffer_args(call) == 3 && poly_call_buffer_arg(call, 0) == a &&
+                 poly_call_buffer_arg(call, 1) == b && poly_call_buffer_arg(call, 2) == var &&
+                 poly_call_buffer_arg(call, 3) == NULL && poly_call_buffer_arg(call, -1) == NULL;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
 static int count_root_ops(PolyCtx *ctx, PolyUOp *root, PolyOps op) {
   int n_topo = 0;
   PolyUOp **topo = poly_toposort_alloc(ctx, root, &n_topo);

@@ -16,4 +16,8 @@ bool poly_parse_valid(
  * uop/symbolic.py:pm_move_where_on_load. */
 PolyPatternMatcher *poly_pm_move_where_on_load(void);
 
+#ifdef POLY_TESTING
+void poly_test_exact_int_range_alloc_fail(bool fail);
+#endif
+
 #endif
