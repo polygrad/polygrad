@@ -123,6 +123,84 @@ TEST_BACKEND(x86, pre_isel_eliminates_current_gated_load) {
   PASS();
 }
 
+TEST_BACKEND(x86, gated_vector_load_selects_one_scalar_address) {
+  /* Tinygrad v0.14 x86.pre_isel_matcher normalizes every boolean gate.
+   * A shaped uint64 address still selects one GPR with CMOVNE, not VPBLENDVB. */
+  /* This direct post-decomposition fixture must fit the pinned 128-bit XMM. */
+  for (int lanes = 4; lanes >= 2; lanes /= 2) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyUOp *out = poly_test_program_param(ctx, POLY_FLOAT32, lanes, 0);
+    PolyUOp *src = poly_test_program_param(ctx, POLY_FLOAT32, lanes, 1);
+    PolyUOp *flag = poly_test_program_param(ctx, POLY_INT32, 1, 2);
+    PolyUOp *zero = poly_uop1(
+        ctx, POLY_OP_CAST, POLY_INT32, poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(0)),
+        poly_arg_dtype(POLY_INT32)
+    );
+    PolyUOp *end = poly_uop1(
+        ctx, POLY_OP_CAST, POLY_INT32,
+        poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(lanes)), poly_arg_dtype(POLY_INT32)
+    );
+    PolyUOp *two = poly_uop1(
+        ctx, POLY_OP_CAST, POLY_INT32, poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(2)),
+        poly_arg_dtype(POLY_INT32)
+    );
+    PolyUOp *value = poly_uop1(
+        ctx, POLY_OP_LOAD, POLY_INT32,
+        poly_uop2(ctx, POLY_OP_INDEX, POLY_INT32, flag, zero, poly_arg_none()), poly_arg_none()
+    );
+    PolyUOp *gate = poly_uop2(
+        ctx, POLY_OP_AND, POLY_BOOL,
+        poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, zero, value, poly_arg_none()),
+        poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, value, two, poly_arg_none()), poly_arg_none()
+    );
+    PolyUOp *alt_lane = poly_uop1(
+        ctx, POLY_OP_CAST, POLY_FLOAT32,
+        poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKFLOAT, poly_arg_float(7.5)),
+        poly_arg_dtype(POLY_FLOAT32)
+    );
+    PolyUOp *alt_srcs[8];
+    for (int i = 0; i < lanes; i++)
+      alt_srcs[i] = alt_lane;
+    PolyUOp *alt = poly_uop(ctx, POLY_OP_STACK, POLY_FLOAT32, alt_srcs, lanes, poly_arg_none());
+    PolyUOp *addr = poly_uop3(ctx, POLY_OP_SHRINK, POLY_FLOAT32, src, zero, end, poly_arg_none());
+    PolyUOp *load = poly_uop3(ctx, POLY_OP_LOAD, POLY_FLOAT32, addr, alt, gate, poly_arg_none());
+    PolyUOp *store = poly_uop2(
+        ctx, POLY_OP_STORE, POLY_VOID,
+        poly_uop3(ctx, POLY_OP_SHRINK, POLY_FLOAT32, out, zero, end, poly_arg_none()), load,
+        poly_arg_none()
+    );
+    int n_lin = 0;
+    PolyUOp **lin = poly_linearize_x86_rewritten(ctx, poly_sink1(ctx, store), &n_lin);
+    ASSERT_NOT_NULL(lin);
+    int cmovs = 0;
+    for (int i = 0; i < n_lin; i++) {
+      ASSERT_TRUE(lin[i]->op != POLY_OP_WHERE);
+      if (lin[i]->op == POLY_OP_INS && lin[i]->arg.i == POLY_X86_CMOVNE) cmovs++;
+    }
+    ASSERT_INT_EQ(cmovs, 1);
+    int n_code = 0;
+    uint8_t *code = poly_render_x86(lin, n_lin, &n_code);
+    ASSERT_NOT_NULL(code);
+    PolyX86Program *prog = poly_compile_x86(code, n_code);
+    ASSERT_NOT_NULL(prog);
+    float input[8], output[8];
+    for (int i = 0; i < lanes; i++)
+      input[i] = (float)i + 1.0f;
+    for (int32_t selected = 0; selected <= 2; selected++) {
+      /* A false gate must read scratch even when the caller's source is NULL. */
+      void *args[] = {output, selected == 1 ? input : NULL, &selected};
+      ASSERT_INT_EQ(poly_x86_program_call(prog, args, 3), 0);
+      for (int i = 0; i < lanes; i++)
+        ASSERT_FLOAT_EQ(output[i], selected == 1 ? input[i] : 7.5f, 0.0f);
+    }
+    poly_x86_program_destroy(prog);
+    free(code);
+    free(lin);
+    poly_ctx_destroy(ctx);
+  }
+  PASS();
+}
+
 TEST_BACKEND(x86, f64_bool_mask_uses_current_int32_immediate) {
   /* tinygrad@2026-08-22/a9069c177a9d renderer/isa/x86.py:227-232,383-385:
    * comparison masks use to_imm, so an int64 literal 1 encodes as int32. */

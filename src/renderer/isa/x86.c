@@ -1381,17 +1381,17 @@ static PolyUOp *rule_x86_pre_isel_bitcast_noop(PolyCtx *ctx, PolyUOp *u, const P
   return x86_pre_isel_noop(ctx, u->dtype, u->src[0]);
 }
 
-static PolyUOp *rule_x86_pre_isel_scalar_where_gate_compare(
+static PolyUOp *rule_x86_pre_isel_where_gate_compare(
     PolyCtx *ctx,
     PolyUOp *u,
     const PolyBindings *b
 ) {
   (void)b;
-  if (!u || u->op != POLY_OP_WHERE || u->n_src != 3 || poly_uop_max_numel(ctx, u) != 1) return NULL;
+  if (!u || u->op != POLY_OP_WHERE || u->n_src != 3) return NULL;
   PolyUOp *m = u->src[0];
   if (!m || !poly_dtype_is_bool(m->dtype) || x86_op_is_comparison(m->op)) return NULL;
-  /* tinygrad@2026-08-22/a9069c177a9d renderer/isa/x86.py:198-201 calls
-   * m.ne(cconst(0, int)); UOp broadcasting casts the bool value to int. */
+  /* Tinygrad v0.14 pre_isel_matcher calls m.ne(cconst(0, int)) for all
+   * boolean gates. A shaped address carries its load extent, not GPR lanes. */
   PolyUOp *m_int = poly_uop1(ctx, POLY_OP_CAST, POLY_INT32, m, poly_arg_dtype(POLY_INT32));
   PolyUOp *zero = x86_cconst(ctx, POLY_INT32, poly_arg_int(0));
   PolyUOp *cmp = poly_uop2(ctx, POLY_OP_CMPNE, POLY_BOOL, m_int, zero, poly_arg_none());
@@ -1407,7 +1407,7 @@ static PolyPatternMatcher *poly_pm_x86_pre_isel(void) {
       {poly_upat_op(POLY_OP_BITCAST, NULL, 0, NULL), rule_x86_pre_isel_bitcast_noop},
       {poly_upat_op(POLY_OP_LOAD, NULL, 0, NULL), rule_x86_pre_isel_gated_load},
       {poly_upat_op(POLY_OP_STORE, NULL, 0, NULL), rule_x86_pre_isel_gated_store},
-      {poly_upat_op(POLY_OP_WHERE, NULL, 0, NULL), rule_x86_pre_isel_scalar_where_gate_compare},
+      {poly_upat_op(POLY_OP_WHERE, NULL, 0, NULL), rule_x86_pre_isel_where_gate_compare},
   };
   g_pm_x86_pre_isel =
       poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
@@ -2162,7 +2162,8 @@ static PolyUOp *rule_x86_isel_where_graph(PolyCtx *ctx, PolyUOp *u, const PolyBi
     return x86_ins(ctx, op, u->dtype, srcs, 3, x86_graph_vreg_for_op(u->dtype, op, false));
   }
 
-  if (vec && x86_is_int_dtype(u->dtype) && x86_is_int_dtype(mask->src[0]->dtype)) {
+  if (vec && x86_is_int_dtype(u->dtype) && !poly_dtype_eq(u->dtype, POLY_UINT64) &&
+      x86_is_int_dtype(mask->src[0]->dtype)) {
     PolyUOp *mask_value = x86_graph_cmp_mask_as_value(ctx, mask);
     if (!mask_value) return NULL;
     PolyUOp *srcs[3] = {u->src[2], u->src[1], mask_value};
@@ -2172,7 +2173,9 @@ static PolyUOp *rule_x86_isel_where_graph(PolyCtx *ctx, PolyUOp *u, const PolyBi
     );
   }
 
-  if (!vec) {
+  /* Pinned isel_matcher's packed integer set excludes uint64. Address-valued
+   * WHERE uses a scalar conditional move even when its pointed-to shape is wide. */
+  {
     PolyUOp *flag = x86_graph_flag_compare(ctx, mask);
     if (!flag) return NULL;
     PolyDType mask_src = mask->src[0]->dtype;
@@ -2187,7 +2190,6 @@ static PolyUOp *rule_x86_isel_where_graph(PolyCtx *ctx, PolyUOp *u, const PolyBi
     };
     return x86_ins(ctx, op, u->dtype, srcs, 3, x86_graph_vreg_for_op(u->dtype, op, false));
   }
-  return NULL;
 }
 
 static PolyUOp *rule_x86_isel_if_graph(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
