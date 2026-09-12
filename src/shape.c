@@ -850,7 +850,9 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
       PolyUOp *dim = selected->dim_uops ? selected->dim_uops[i] : NULL;
       if (!dim) dim = shape_dim_const(ctx, selected->dims[i]);
       dim = shape_resolve_function_dim(ctx, dim, function);
-      if (!dim) return make_entry_none(ctx);
+      /* A failed PARAM rewrite is not a shapeless result. Leave this owner
+       * uncached so a subsequent query can retry, like recursive_property. */
+      if (!dim) return NULL;
       int64_t value = 0;
       if (poly_uop_const_i64(dim, &value) == 0) {
         if (value < 0) return make_entry_none(ctx);
@@ -1148,15 +1150,17 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
   /* PERMUTE: reorder src[0] shape */
   if (op == POLY_OP_PERMUTE && u->n_src >= 1 && u->arg.kind == POLY_ARG_INT_TUPLE) {
     int8_t in_ndim = SRC_NDIM(0);
-    if (in_ndim <= 0) {
+    if (in_ndim < 0) {
       return make_entry_none(ctx);
     }
     int n = u->arg.int_tuple.n;
-    if (!rank_tuple_valid(u->arg.int_tuple.vals, n) || n > in_ndim) return make_entry_none(ctx);
+    if (!rank_tuple_valid(u->arg.int_tuple.vals, n) || n != in_ndim) return make_entry_none(ctx);
     int64_t dims[POLY_MAX_DIMS];
+    bool seen[POLY_MAX_DIMS] = {false};
     for (int i = 0; i < n; i++) {
       int64_t idx = u->arg.int_tuple.vals[i];
-      if (idx < 0 || idx >= in_ndim) return make_entry_none(ctx);
+      if (idx < 0 || idx >= in_ndim || seen[idx]) return make_entry_none(ctx);
+      seen[idx] = true;
       dims[i] = SRC_DIMS(0)[idx];
     }
     PolyUOp *dim_uops[POLY_MAX_DIMS];
@@ -1174,9 +1178,15 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
 
   /* FLIP: same shape as src[0] */
   if (op == POLY_OP_FLIP) {
-    if (u->arg.kind == POLY_ARG_INT_TUPLE &&
-        !rank_tuple_valid(u->arg.int_tuple.vals, u->arg.int_tuple.n))
+    /* UOp._shape requires one boolean per source axis. C encodes those
+     * booleans as 0/1 entries in the existing integer tuple. */
+    if (u->arg.kind != POLY_ARG_INT_TUPLE ||
+        !rank_tuple_valid(u->arg.int_tuple.vals, u->arg.int_tuple.n) ||
+        u->arg.int_tuple.n != SRC_NDIM(0))
       return make_entry_none(ctx);
+    for (int i = 0; i < u->arg.int_tuple.n; i++)
+      if (u->arg.int_tuple.vals[i] != 0 && u->arg.int_tuple.vals[i] != 1)
+        return make_entry_none(ctx);
     if (u->n_src >= 1 && SRC_NDIM(0) >= 0)
       return make_entry_dims_uops(ctx, SRC_DIMS(0), SRC_DIM_UOPS(0), SRC_NDIM(0));
     return make_entry_none(ctx);
@@ -1312,13 +1322,13 @@ int64_t poly_uop_numel(PolyCtx *ctx, PolyUOp *u) {
 
 PolyUOp *poly_uop_flatten(PolyCtx *ctx, PolyUOp *u) {
   if (!ctx || !u) return NULL;
-  int64_t numel = poly_uop_numel(ctx, u);
-  if (numel < 0) return NULL;
   int ndim = poly_uop_ndim(ctx, u);
-  const int64_t *dims = poly_uop_max_shape_dims(ctx, u);
-  if (ndim == 1 && dims && dims[0] == numel) return u;
-  int64_t shape[1] = {numel};
-  return poly_reshape(ctx, u, shape, 1);
+  if (ndim < 0) return NULL;
+  if (ndim == 1) return u;
+  /* MovementMixin.flatten uses prod(shape), not max_numel: allocation
+   * bounds cannot replace a symbolic extent in the returned graph. */
+  PolyUOp *numel = axis_shape_product(ctx, u, ndim);
+  return numel ? poly_reshape_uop(ctx, u, &numel, 1) : NULL;
 }
 
 int64_t poly_shape_numel_checked(const int64_t *shape, int ndim) {

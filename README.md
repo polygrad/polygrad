@@ -184,6 +184,14 @@ reject values outside that range; JS accepts safe integer Numbers or BigInts.
 Larger Python integers remain unsupported (`PG-PARITY-028`). WebGPU keeps its
 32-bit uniform limit. Scheduling and JIT preserve admitted values; they do not wrap
 them. This limit does not restrict ordinary int64/uint64 Tensor storage.
+
+Python `function` supports ordinary backward, but its `precompile` and
+`precompile_backward` flags currently support forward execution only; backward
+rejects them. FUNCTION `grad_fxn` callbacks are not implemented
+(`PG-PARITY-029`). Existing Tensor custom-kernel gradient callbacks are a separate
+supported API. Sharded backward and Tinygrad-style backward provenance remain
+open gaps (`PG-PARITY-013`, `PG-PARITY-030`). These are not parity allowances.
+
 Python `Context(NOOPT=1)` and JS `runtime.noopt = 1` disable automatic
 kernel scheduling heuristics, not the compiler's required lowering passes or
 explicit BEAM search. The setting participates in program-cache keys and does

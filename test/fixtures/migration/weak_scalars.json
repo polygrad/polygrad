@@ -1,8 +1,19 @@
 {
   "schema_version": 1,
-  "target_transition": {"from_commit": "a9069c177a9da9cca18593edf55acd2e6073cca6", "to_commit": "6f87158d77f66a36d5f8bbe915170b24e2acabe8", "changed_rows": [{"id": "tinygrad/uop/ops.py:UOp._mop", "before": "b6056a9c4a6bc05681683a17a9d7f581255b442d4c2049f477ba4de7a3b3945b", "after": "e518523c9dafc6988c81934748e5849bed286f27192ccfee04eab09178c0cae8"}], "review": "August22-to-v0.14 source delta reviewed. UOp._mop only removes redundant inferred STACK dtype; C explicit dtype construction remains equivalent. Decomposition and multi matcher rows remain pending beyond the repaired delta. All other recorded block hashes unchanged; pre-existing weak-scalar hash mismatches and incomplete inventories remain unresolved. Historical counterpart/test hashes and execution evidence are not refreshed. Prior audit versions remain at Polygrad60dd005."},
-  "hash_scheme": "unverified-legacy",
-  "provenance": "Copied without rehashing from temp/reference_migration/audits/weak_scalars.json. Seven of 17 rows do not match the CPython 3.11 inventory (cast_weak_srcs, commit_srcs_at, commit_weak, commit_weak_srcs, default_dtype, lower_weak_node, lower_weak_srcs). Reconcile their original evidence before identifying a hash scheme; this audit cannot certify closure.",
+  "target_transition": {
+    "from_commit": "a9069c177a9da9cca18593edf55acd2e6073cca6",
+    "to_commit": "6f87158d77f66a36d5f8bbe915170b24e2acabe8",
+    "changed_rows": [
+      {
+        "id": "tinygrad/uop/ops.py:UOp._mop",
+        "before": "b6056a9c4a6bc05681683a17a9d7f581255b442d4c2049f477ba4de7a3b3945b",
+        "after": "e518523c9dafc6988c81934748e5849bed286f27192ccfee04eab09178c0cae8"
+      }
+    ],
+    "review": "August22-to-v0.14 source delta reviewed. UOp._mop only removes redundant inferred STACK dtype; C explicit dtype construction remains equivalent. Decomposition and multi matcher rows remain pending beyond the repaired delta. All other recorded block hashes unchanged; pre-existing weak-scalar hash mismatches and incomplete inventories remain unresolved. Historical counterpart/test hashes and execution evidence are not refreshed. Prior audit versions remain at Polygrad60dd005."
+  },
+  "hash_scheme": "cpython-3.11-ast-dump-v1",
+  "provenance": "September12: re-read the complete pinned v0.14 weak module and C callbacks. Reconciled its 13 module rows with CPython3.11 hashes; previous mismatching hashes are retained on the seven affected rows. Four non-weak UOp rows retain their historical evidence. No whole-wave closure.",
   "baseline_commit": "ba1d3baae81c96b3ed72900cde87bb307933c61f",
   "target_commit": "6f87158d77f66a36d5f8bbe915170b24e2acabe8",
   "review": {
@@ -165,14 +176,14 @@
         },
         {
           "path": "src/uop/symbolic.c",
-          "sha256": "e217f72f01cc9238e4f0ea61ad39211779d12def38c2dcf1d2b8615c4d473fda",
+          "sha256": "fa74cd9fe5dcc08cb3633be1ffb64895a82c072085c61bc0c99048e3c96c91ed",
           "symbol": "cast_minmax"
         }
       ],
       "tests": [
         {
           "path": "test/test_codegen.c",
-          "sha256": "912a4a241d59d103bc2150b98ae3312d0c009e6d6a3e3c94b763be08be415c3f",
+          "sha256": "b0cb24ddccde7c1dea5d57184ddcc20c1fb35880568aea064570eda1c460a39f",
           "case": "codegen.weak_owner_stacked_casts_resolve_each_kind",
           "check": "native"
         }
@@ -194,7 +205,7 @@
       "tests": [
         {
           "path": "test/test_codegen.c",
-          "sha256": "912a4a241d59d103bc2150b98ae3312d0c009e6d6a3e3c94b763be08be415c3f",
+          "sha256": "b0cb24ddccde7c1dea5d57184ddcc20c1fb35880568aea064570eda1c460a39f",
           "case": "codegen.lower_weak_comparison_legalizes_mixed_integer_operands",
           "check": "native"
         }
@@ -203,7 +214,7 @@
     {
       "baseline_sha256": null,
       "id": "tinygrad/uop/weak.py:cast_weak_srcs",
-      "target_sha256": "a4f0a448e0cba901eff21460c42a679e019a344e8f82d44d96a5a111bda93e8a",
+      "target_sha256": "98e872a5200057b3b1b38fbf74529dde9270cbffb6700d026bbc450bce69b27e",
       "disposition": "equivalent",
       "reason": "Bounded weak.py owner review at pinned target; see temp/release-disposition-20260911.3ca6YY/weak-owner-review.md, block cast_weak_srcs, and weak-results.md. Shared CAST-bound dependency repaired with observed red/green graph regression. This does not close the whole weak_scalars wave or certify all symbolic bounds.",
       "counterparts": [
@@ -216,16 +227,20 @@
       "tests": [
         {
           "path": "test/test_codegen.c",
-          "sha256": "912a4a241d59d103bc2150b98ae3312d0c009e6d6a3e3c94b763be08be415c3f",
+          "sha256": "b0cb24ddccde7c1dea5d57184ddcc20c1fb35880568aea064570eda1c460a39f",
           "case": "codegen.weak_owner_cast_width_is_a_floor",
           "check": "native"
         }
-      ]
+      ],
+      "superseded_hashes": {
+        "baseline_sha256": null,
+        "target_sha256": "a4f0a448e0cba901eff21460c42a679e019a344e8f82d44d96a5a111bda93e8a"
+      }
     },
     {
       "baseline_sha256": null,
       "id": "tinygrad/uop/weak.py:commit_srcs_at",
-      "target_sha256": "67c88bf668f59e9dfa6e80d99644a934fbe6f4254df9dd7e28b62be893e2c879",
+      "target_sha256": "e0c686a7a11c1a126589f13a6f2fd1393a6cbe10e890d9835d52f4c4d5493ff1",
       "disposition": "equivalent",
       "reason": "Bounded weak.py owner review at pinned target; see temp/release-disposition-20260911.3ca6YY/weak-owner-review.md, block commit_srcs_at, and weak-results.md. Shared CAST-bound dependency repaired with observed red/green graph regression. This does not close the whole weak_scalars wave or certify all symbolic bounds.",
       "counterparts": [
@@ -238,16 +253,20 @@
       "tests": [
         {
           "path": "test/test_codegen.c",
-          "sha256": "912a4a241d59d103bc2150b98ae3312d0c009e6d6a3e3c94b763be08be415c3f",
+          "sha256": "b0cb24ddccde7c1dea5d57184ddcc20c1fb35880568aea064570eda1c460a39f",
           "case": "codegen.weak_stack_rederives_dtype_from_committed_lanes",
           "check": "native"
         }
-      ]
+      ],
+      "superseded_hashes": {
+        "baseline_sha256": null,
+        "target_sha256": "67c88bf668f59e9dfa6e80d99644a934fbe6f4254df9dd7e28b62be893e2c879"
+      }
     },
     {
       "baseline_sha256": null,
       "id": "tinygrad/uop/weak.py:commit_weak",
-      "target_sha256": "567e39d1c4e21c04a0290b95261d4042c122aa9db2ace3cdc5664850dd6c3f40",
+      "target_sha256": "7eb0ce2d095a0ecc804135468e524d4664b8a11b70755678a0acb2ea9dd9ce17",
       "disposition": "equivalent",
       "reason": "Bounded weak.py owner review at pinned target; see temp/release-disposition-20260911.3ca6YY/weak-owner-review.md, block commit_weak, and weak-results.md. Shared CAST-bound dependency repaired with observed red/green graph regression. This does not close the whole weak_scalars wave or certify all symbolic bounds.",
       "counterparts": [
@@ -260,16 +279,20 @@
       "tests": [
         {
           "path": "test/test_codegen.c",
-          "sha256": "912a4a241d59d103bc2150b98ae3312d0c009e6d6a3e3c94b763be08be415c3f",
+          "sha256": "b0cb24ddccde7c1dea5d57184ddcc20c1fb35880568aea064570eda1c460a39f",
           "case": "codegen.weak_float_commit_uses_dtype_const_rounding",
           "check": "native"
         }
-      ]
+      ],
+      "superseded_hashes": {
+        "baseline_sha256": null,
+        "target_sha256": "567e39d1c4e21c04a0290b95261d4042c122aa9db2ace3cdc5664850dd6c3f40"
+      }
     },
     {
       "baseline_sha256": null,
       "id": "tinygrad/uop/weak.py:commit_weak_srcs",
-      "target_sha256": "dd7b196a99f2275b052b3af1c5bca3ce17bb520273f7ae195dc214db9f5f0e4c",
+      "target_sha256": "bebf2919f3461632c858242fed2aac68fad435fab4bfbe78dd8f9a76d8f3e92e",
       "disposition": "equivalent",
       "reason": "Bounded weak.py owner review at pinned target; see temp/release-disposition-20260911.3ca6YY/weak-owner-review.md, block commit_weak_srcs, and weak-results.md. Shared CAST-bound dependency repaired with observed red/green graph regression. This does not close the whole weak_scalars wave or certify all symbolic bounds.",
       "counterparts": [
@@ -282,16 +305,20 @@
       "tests": [
         {
           "path": "test/test_codegen.c",
-          "sha256": "912a4a241d59d103bc2150b98ae3312d0c009e6d6a3e3c94b763be08be415c3f",
+          "sha256": "b0cb24ddccde7c1dea5d57184ddcc20c1fb35880568aea064570eda1c460a39f",
           "case": "codegen.weak_stack_rederives_dtype_from_committed_lanes",
           "check": "native"
         }
-      ]
+      ],
+      "superseded_hashes": {
+        "baseline_sha256": null,
+        "target_sha256": "dd7b196a99f2275b052b3af1c5bca3ce17bb520273f7ae195dc214db9f5f0e4c"
+      }
     },
     {
       "baseline_sha256": null,
       "id": "tinygrad/uop/weak.py:default_dtype",
-      "target_sha256": "ee161c21de028ec5ac782b4e8e48fd64f801e0f4b663620f28ffaa63d5781cb9",
+      "target_sha256": "1d3672ac8d3159208ef3af947851eff0eadc70788900161058b9be3af8639d97",
       "disposition": "equivalent",
       "reason": "Bounded weak.py owner review at pinned target; see temp/release-disposition-20260911.3ca6YY/weak-owner-review.md, block default_dtype, and weak-results.md. Shared CAST-bound dependency repaired with observed red/green graph regression. This does not close the whole weak_scalars wave or certify all symbolic bounds.",
       "counterparts": [
@@ -302,23 +329,27 @@
         },
         {
           "path": "src/uop/symbolic.c",
-          "sha256": "e217f72f01cc9238e4f0ea61ad39211779d12def38c2dcf1d2b8615c4d473fda",
+          "sha256": "fa74cd9fe5dcc08cb3633be1ffb64895a82c072085c61bc0c99048e3c96c91ed",
           "symbol": "cast_minmax"
         }
       ],
       "tests": [
         {
           "path": "test/test_codegen.c",
-          "sha256": "912a4a241d59d103bc2150b98ae3312d0c009e6d6a3e3c94b763be08be415c3f",
+          "sha256": "b0cb24ddccde7c1dea5d57184ddcc20c1fb35880568aea064570eda1c460a39f",
           "case": "codegen.weak_owner_stacked_casts_resolve_each_kind",
           "check": "native"
         }
-      ]
+      ],
+      "superseded_hashes": {
+        "baseline_sha256": null,
+        "target_sha256": "ee161c21de028ec5ac782b4e8e48fd64f801e0f4b663620f28ffaa63d5781cb9"
+      }
     },
     {
       "baseline_sha256": null,
       "id": "tinygrad/uop/weak.py:lower_weak_node",
-      "target_sha256": "3abd258f433df28940495de327ac19035d821562c4a613ce348aa05c1dc3cd4a",
+      "target_sha256": "7e60c9c1425d0933caaa95c1d7947d659e16c43b3f8172532ad8d2fca162fcdc",
       "disposition": "equivalent",
       "reason": "Bounded weak.py owner review at pinned target; see temp/release-disposition-20260911.3ca6YY/weak-owner-review.md, block lower_weak_node, and weak-results.md. Shared CAST-bound dependency repaired with observed red/green graph regression. This does not close the whole weak_scalars wave or certify all symbolic bounds.",
       "counterparts": [
@@ -331,16 +362,20 @@
       "tests": [
         {
           "path": "test/test_codegen.c",
-          "sha256": "912a4a241d59d103bc2150b98ae3312d0c009e6d6a3e3c94b763be08be415c3f",
+          "sha256": "b0cb24ddccde7c1dea5d57184ddcc20c1fb35880568aea064570eda1c460a39f",
           "case": "codegen.lower_weak_comparison_legalizes_mixed_integer_operands",
           "check": "native"
         }
-      ]
+      ],
+      "superseded_hashes": {
+        "baseline_sha256": null,
+        "target_sha256": "3abd258f433df28940495de327ac19035d821562c4a613ce348aa05c1dc3cd4a"
+      }
     },
     {
       "baseline_sha256": null,
       "id": "tinygrad/uop/weak.py:lower_weak_srcs",
-      "target_sha256": "7282c18e21b2c71ab5b03d01f4f2b4931b97ef2116b3171a3bdd8016534b6a5c",
+      "target_sha256": "5e805f78895d8078096eb4efc99489b36cbb009ec0dd4da45c9d4dfe759ea35b",
       "disposition": "equivalent",
       "reason": "Bounded weak.py owner review at pinned target; see temp/release-disposition-20260911.3ca6YY/weak-owner-review.md, block lower_weak_srcs, and weak-results.md. Shared CAST-bound dependency repaired with observed red/green graph regression. This does not close the whole weak_scalars wave or certify all symbolic bounds.",
       "counterparts": [
@@ -353,11 +388,15 @@
       "tests": [
         {
           "path": "test/test_codegen.c",
-          "sha256": "912a4a241d59d103bc2150b98ae3312d0c009e6d6a3e3c94b763be08be415c3f",
+          "sha256": "b0cb24ddccde7c1dea5d57184ddcc20c1fb35880568aea064570eda1c460a39f",
           "case": "codegen.lower_index_dtype_memoizes_repeated_weak_source",
           "check": "native"
         }
-      ]
+      ],
+      "superseded_hashes": {
+        "baseline_sha256": null,
+        "target_sha256": "7282c18e21b2c71ab5b03d01f4f2b4931b97ef2116b3171a3bdd8016534b6a5c"
+      }
     },
     {
       "baseline_sha256": null,
@@ -375,7 +414,7 @@
       "tests": [
         {
           "path": "test/test_codegen.c",
-          "sha256": "912a4a241d59d103bc2150b98ae3312d0c009e6d6a3e3c94b763be08be415c3f",
+          "sha256": "b0cb24ddccde7c1dea5d57184ddcc20c1fb35880568aea064570eda1c460a39f",
           "case": "codegen.weak_owner_cast_width_is_a_floor",
           "check": "native"
         }
@@ -397,7 +436,7 @@
       "tests": [
         {
           "path": "test/test_codegen.c",
-          "sha256": "912a4a241d59d103bc2150b98ae3312d0c009e6d6a3e3c94b763be08be415c3f",
+          "sha256": "b0cb24ddccde7c1dea5d57184ddcc20c1fb35880568aea064570eda1c460a39f",
           "case": "codegen.weak_owner_store_commit_preserves_effects",
           "check": "native"
         }
@@ -419,7 +458,7 @@
       "tests": [
         {
           "path": "test/test_codegen.c",
-          "sha256": "912a4a241d59d103bc2150b98ae3312d0c009e6d6a3e3c94b763be08be415c3f",
+          "sha256": "b0cb24ddccde7c1dea5d57184ddcc20c1fb35880568aea064570eda1c460a39f",
           "case": "codegen.lower_gated_index_preserves_tag_and_width_boundary",
           "check": "native"
         }
@@ -439,18 +478,23 @@
         },
         {
           "path": "src/uop/symbolic.c",
-          "sha256": "e217f72f01cc9238e4f0ea61ad39211779d12def38c2dcf1d2b8615c4d473fda",
+          "sha256": "fa74cd9fe5dcc08cb3633be1ffb64895a82c072085c61bc0c99048e3c96c91ed",
           "symbol": "cast_minmax"
         }
       ],
       "tests": [
         {
           "path": "test/test_codegen.c",
-          "sha256": "912a4a241d59d103bc2150b98ae3312d0c009e6d6a3e3c94b763be08be415c3f",
+          "sha256": "b0cb24ddccde7c1dea5d57184ddcc20c1fb35880568aea064570eda1c460a39f",
           "case": "codegen.weak_owner_stacked_casts_resolve_each_kind",
           "check": "native"
         }
       ]
     }
-  ]
+  ],
+  "historical_provenance": "Copied without rehashing from temp/reference_migration/audits/weak_scalars.json. Seven of 17 rows do not match the CPython 3.11 inventory (cast_weak_srcs, commit_srcs_at, commit_weak, commit_weak_srcs, default_dtype, lower_weak_node, lower_weak_srcs). Reconcile their original evidence before identifying a hash scheme; this audit cannot certify closure.",
+  "current_owner_review": {
+    "path": "temp/graph-owner-closeout-20260912.VLB3sF/owner-review.md",
+    "text": "# Graph-semantics owner dispositions\n\nReference v0.14.0/6f87158d77f6; working parent bc290f9.\nThis is a contract review, not an assertion that every source-inventory row\nor every input has been certified. Final execution is recorded in results.md.\n\n| Owner | Complete block inspected | Disposition |\n| --- | --- | --- |\n| Movement cleanup | uop/movement.py, all eight rules; src/uop/movement.c | Construction/order match; reuse existing exact eight-rule and empty-INDEX controls. No rewrite needed. |\n| Weak lowering | uop/weak.py in full; src/uop/weak.c in full | Same commit/cast/lower ordering, default-width floor, comparison unification, cache and gated-index narrowing. Concrete C storage/default policy is already implemented. Renew only reviewed weak-module audit rows after their controls rerun. |\n| Shape production | UOp._shape cases; src/shape.c compute_and_cache and cache publication | FUNCTION shape failure, PERMUTE/FLIP admission and symbolic flatten corrections in this batch. Existing BUFFER logical forms are an approved portable-storage boundary, not physical fallback. C rank/int64 allocation limits remain explicit. |\n| Dtype production | dtype_from_uop and poly_dtype_from_uop/poly_rebuild_dtype | Forwarding UNSHARD dtype was missing. CONST/BUFFER/PARAM/CAST additionally use the explicit typed C constructors; no inferred Python-value constructor is claimed. GETADDR/PYLITERAL remain registered missing vocabulary. |\n| Gradient construction | mixin/gradient.py; entire C reverse pass, shaped-edge repair, parameter compaction | Earlier root/tuple/reshape/COPY fixes retained. This batch fixes deviceless gradient inputs and failed compaction publication. Unsupported FUNCTION flags and UNSHARD backward remain failing capabilities, not allowances. |\n| Substitution | UOp.substitute; C ordered opaque-body discovery and iterative shared memo | Current substitution intentionally follows replacement graphs and pins CALL/FUNCTION code bodies. Existing nested/deep/multiple-root controls cover those contracts. Compaction requires disjoint temporary slots and status-returning APIs; no new rewrite mode or scheduler was added. |\n\n## Explicit remaining boundaries\n\n- `call_gradient` precompile/precompile_backward combinations execute in pinned\n  Tinygrad; C rejects them before gradient publication. Python's flags support\n  forward execution only. `function(grad_fxn=...)` also rejects callbacks.\n  Existing Tensor.custom_kernel/customKernel callback registries in Python/JS\n  are a separate, implemented frontend boundary and are not evidence that\n  FUNCTION callbacks work. No automatic support expansion is included here.\n- UNSHARD shape/dtype representation is used by the core without requiring\n  physical multiple-GPU execution. Its gradient rule calls shard in Tinygrad;\n  C has no reverse-pass rule. Keep that with the multi-device debt, even though\n  fixing shared dtype forwarding itself needs no accelerator.\n- Tinygrad all_metadata propagates backward=True annotations on new gradient\n  nodes. No equivalent shared C provenance store was found. This is missing\n  diagnostic provenance, not proof of numerically wrong gradients. It is not\n  silently marked not_applicable or approved.\n- Resource bounds, symbolic arithmetic and rewrite-engine correctness retain\n  their existing owner records; reading shape consumers is not recertifying\n  every symbolic matcher. Index/range lowering belongs to group B. Residency\n  collection and executable/codec ownership belong to group C.\n\nThe entire movement/weak source modules and the named shape/dtype/autograd\nblocks were inspected together before the final checkpoint. Broad source\nwaves include other modules and overlapping file/class rows; these completed\nblocks must be reused, not re-reviewed under each wave label.\n\nArchbird overview completed with 360 files, 11,687 symbols, 192 warnings and\nno errors; graph coverage remains incomplete (71 unknown/unsupported). It was\nnavigation evidence only. No static route was counted as execution.\n"
+  }
 }

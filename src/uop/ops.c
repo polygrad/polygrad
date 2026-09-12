@@ -3379,6 +3379,7 @@ bool poly_dtype_from_uop(
     return true;
   case POLY_OP_LOAD:
   case POLY_OP_AFTER:
+  case POLY_OP_UNSHARD:
   case POLY_OP_RANGE:
   case POLY_OP_CONTIGUOUS:
   case POLY_OP_CONTIGUOUS_BACKWARD:

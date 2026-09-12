@@ -141,6 +141,7 @@ test-runtime-wasm: build/test_schedule_runtime.js
 
 .PHONY: test-autograd-wasm
 test-autograd-wasm: build/test_schedule_runtime.js
+	$(SAN_RUN) $(NODE) $< --require-no-skips graph_owner
 	@set -e; for case in owner_target_identity_does_not_differentiate_target owner_target_walk_failure_is_not_zero_gradient owner_tuple_accumulation_preserves_noop_slots owner_reshape_gradient_preserves_symbolic_dimension owner_copy_returns_to_source_device; do \
 		$(SAN_RUN) $(NODE) $< --require-no-skips uop.gradient_$$case; \
 	done

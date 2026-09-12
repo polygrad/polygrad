@@ -235,17 +235,6 @@ static PolyUOp **target_walk(
   return result;
 }
 
-/* Pinned UOp.base strips only movement, MULTI and DETACH
- * (tinygrad/uop/ops.py:675-680). FUNCTION backward keeps shaped constant
- * output gradients inline and parameterizes every other output gradient. */
-static PolyUOp *grad_uop_base(PolyUOp *u) {
-  while (u && u->n_src > 0 &&
-         (poly_opset_has(POLY_GROUP_MOVEMENT, u->op) || u->op == POLY_OP_UNSHARD ||
-          u->op == POLY_OP_DETACH))
-    u = u->src[0];
-  return u;
-}
-
 static bool grad_walk_contains(PolyUOp **walk, int n_walk, PolyUOp *u) {
   for (int i = 0; i < n_walk; i++)
     if (walk[i] == u) return true;
@@ -338,15 +327,19 @@ static bool grad_compact_params(
    * dense PARAM can be identical to another old PARAM, so direct renaming can
    * chain two intended terminal replacements. Pinned graph_rewrite does not.
    * Rename through disjoint slots, then densify in a second pass. */
-  PolyUOp *staged = n_used > 0 ? poly_uop_substitute(ctx, body, from, temporary, n_used) : body;
-  PolyUOp *compacted =
-      n_used > 0 ? poly_uop_substitute(ctx, staged, temporary, to, n_used) : staged;
+  PolyUOp *staged = body, *compacted = body;
+  /* _compact_params must not publish compact arguments with an unchanged
+   * body when either rewrite fails. The convenience API hides that failure. */
+  bool rewritten =
+      n_used == 0 ||
+      (poly_uop_substitute_many(ctx, &body, 1, from, temporary, n_used, &staged) == 0 &&
+       poly_uop_substitute_many(ctx, &staged, 1, temporary, to, n_used, &compacted) == 0);
   poly_toposort_free(topo);
   free(by_slot);
   free(from);
   free(temporary);
   free(to);
-  if (!compacted) {
+  if (!rewritten || !compacted) {
     free(args);
     return false;
   }
@@ -549,7 +542,9 @@ static PolyMap *grad_reverse_pass(
       for (int j = 0; j < n_outputs; j++) {
         PolyUOp *out_grad = g->src[j];
         all_args[n_args + j] = out_grad;
-        if (out_grad->op == POLY_OP_NOOP || grad_uop_base(out_grad)->op == POLY_OP_CONST) {
+        /* call_gradient leaves every deviceless expression inline, not only
+         * literals. PARAM is the boundary for device-backed gradient inputs. */
+        if (out_grad->op == POLY_OP_NOOP || !poly_uop_device_uop_cached(ctx, out_grad, NULL)) {
           root_grad_parts[j] = out_grad;
         } else {
           root_grad_parts[j] = poly_uop_param(ctx, n_args + j, out_grad);
@@ -990,7 +985,7 @@ static PolyMap *grad_reverse_pass(
         GRAD_REVERSE_FAIL();
       }
       int n = u->arg.int_tuple.n;
-      if (n < 0 || n > POLY_MAX_DIMS) {
+      if (n < 0 || n > POLY_MAX_DIMS || poly_uop_ndim(ctx, u) != n) {
         fprintf(stderr, "polygrad: autograd: PERMUTE rank %d out of bounds\n", n);
         GRAD_REVERSE_FAIL();
       }

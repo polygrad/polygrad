@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "hash_scheme": "cpython-3.11-ast-dump-v1",
+  "baseline_commit": "ba1d3baae81c96b3ed72900cde87bb307933c61f",
+  "target_commit": "6f87158d77f66a36d5f8bbe915170b24e2acabe8",
+  "provenance": "Partial reduction/autograd owner audit. Unchanged _compact_params and _deepwalk are covered in the embedded review but do not create invented changed-source inventory rows.",
+  "review": {
+    "sha256": "c3c1be5088036c4cbfdd47616e560057baa99b9e649e16270b6edd5efcbe2007",
+    "path": "temp/graph-owner-closeout-20260912.VLB3sF/owner-review.md",
+    "text": "# Graph-semantics owner dispositions\n\nReference v0.14.0/6f87158d77f6; working parent bc290f9.\nThis is a contract review, not an assertion that every source-inventory row\nor every input has been certified. Final execution is recorded in results.md.\n\n| Owner | Complete block inspected | Disposition |\n| --- | --- | --- |\n| Movement cleanup | uop/movement.py, all eight rules; src/uop/movement.c | Construction/order match; reuse existing exact eight-rule and empty-INDEX controls. No rewrite needed. |\n| Weak lowering | uop/weak.py in full; src/uop/weak.c in full | Same commit/cast/lower ordering, default-width floor, comparison unification, cache and gated-index narrowing. Concrete C storage/default policy is already implemented. Renew only reviewed weak-module audit rows after their controls rerun. |\n| Shape production | UOp._shape cases; src/shape.c compute_and_cache and cache publication | FUNCTION shape failure, PERMUTE/FLIP admission and symbolic flatten corrections in this batch. Existing BUFFER logical forms are an approved portable-storage boundary, not physical fallback. C rank/int64 allocation limits remain explicit. |\n| Dtype production | dtype_from_uop and poly_dtype_from_uop/poly_rebuild_dtype | Forwarding UNSHARD dtype was missing. CONST/BUFFER/PARAM/CAST additionally use the explicit typed C constructors; no inferred Python-value constructor is claimed. GETADDR/PYLITERAL remain registered missing vocabulary. |\n| Gradient construction | mixin/gradient.py; entire C reverse pass, shaped-edge repair, parameter compaction | Earlier root/tuple/reshape/COPY fixes retained. This batch fixes deviceless gradient inputs and failed compaction publication. Unsupported FUNCTION flags and UNSHARD backward remain failing capabilities, not allowances. |\n| Substitution | UOp.substitute; C ordered opaque-body discovery and iterative shared memo | Current substitution intentionally follows replacement graphs and pins CALL/FUNCTION code bodies. Existing nested/deep/multiple-root controls cover those contracts. Compaction requires disjoint temporary slots and status-returning APIs; no new rewrite mode or scheduler was added. |\n\n## Explicit remaining boundaries\n\n- `call_gradient` precompile/precompile_backward combinations execute in pinned\n  Tinygrad; C rejects them before gradient publication. Python's flags support\n  forward execution only. `function(grad_fxn=...)` also rejects callbacks.\n  Existing Tensor.custom_kernel/customKernel callback registries in Python/JS\n  are a separate, implemented frontend boundary and are not evidence that\n  FUNCTION callbacks work. No automatic support expansion is included here.\n- UNSHARD shape/dtype representation is used by the core without requiring\n  physical multiple-GPU execution. Its gradient rule calls shard in Tinygrad;\n  C has no reverse-pass rule. Keep that with the multi-device debt, even though\n  fixing shared dtype forwarding itself needs no accelerator.\n- Tinygrad all_metadata propagates backward=True annotations on new gradient\n  nodes. No equivalent shared C provenance store was found. This is missing\n  diagnostic provenance, not proof of numerically wrong gradients. It is not\n  silently marked not_applicable or approved.\n- Resource bounds, symbolic arithmetic and rewrite-engine correctness retain\n  their existing owner records; reading shape consumers is not recertifying\n  every symbolic matcher. Index/range lowering belongs to group B. Residency\n  collection and executable/codec ownership belong to group C.\n\nThe entire movement/weak source modules and the named shape/dtype/autograd\nblocks were inspected together before the final checkpoint. Broad source\nwaves include other modules and overlapping file/class rows; these completed\nblocks must be reused, not re-reviewed under each wave label.\n\nArchbird overview completed with 360 files, 11,687 symbols, 192 warnings and\nno errors; graph coverage remains incomplete (71 unknown/unsupported). It was\nnavigation evidence only. No static route was counted as execution.\n"
+  },
+  "rows": [
+    {
+      "id": "tinygrad/mixin/gradient.py:@file",
+      "baseline_sha256": "bdb6922dc6a4b5062070d3b71cbacb8532b5258c65253530f32ae27866bfba88",
+      "target_sha256": "50bee8d004334d2bb1335efeec38902190ffe1446533120f7a297f7a5642389a",
+      "disposition": "pending_evidence",
+      "reason": "Owner read completely; supported fixes and controls recorded. Full equivalence blocked by FUNCTION flags/callbacks (PG-PARITY-029), UNSHARD backward (PG-PARITY-013), and provenance (PG-PARITY-030)."
+    },
+    {
+      "id": "tinygrad/mixin/gradient.py:call_gradient",
+      "baseline_sha256": "a5a25403e84233187083f80421d661add4a6315b0810ce748873a39a8b81a01c",
+      "target_sha256": "ae6100365c4e34b270fb609214b9d8d991f9518ea1375fccd0a707f0a918de7b",
+      "disposition": "pending_evidence",
+      "reason": "Ordinary FUNCTION gradient input selection and transactional parameter compaction reviewed and tested. Precompiled/backward/custom-gradient CallInfo remains rejected (PG-PARITY-029); no allowance."
+    },
+    {
+      "id": "tinygrad/mixin/gradient.py:compute_gradient",
+      "baseline_sha256": "a29c513ef75359079d645802f219c2d24cc051b17dd111e1e1b5d2c76304f30f",
+      "target_sha256": "649cbf3449e386f1e621de072798acdb8eef0aa979207cf5c65d1da98d09b36e",
+      "disposition": "pending_evidence",
+      "reason": "Target/root seed, tuple NOOP accumulation and shape repair reviewed; backward provenance remains missing (PG-PARITY-030), and FUNCTION capabilities are partial. No whole-function equivalence claim."
+    },
+    {
+      "id": "tinygrad/mixin/gradient.py:pm_gradient",
+      "baseline_sha256": "db8da09c58d4f99f6781f70bfc2d8038c8c081b619354854a64c1091f2dc31c3",
+      "target_sha256": "9c39ad86f6821b35e519aa3ea8966a87949c5407e3341b1b46ae422f63ad331b",
+      "disposition": "pending_evidence",
+      "reason": "Supported movement/reduction/COPY paths reviewed. UNSHARD backward is not implemented (PG-PARITY-013); opaque custom-kernel callback dispatch remains frontend-owned. No full matcher equivalence claim."
+    },
+    {
+      "id": "tinygrad/mixin/gradient.py:reduce_gradient",
+      "baseline_sha256": "a4d1c54d7edeed7632b746b93707526c5a9a37be0c82e20f682485f3766574f9",
+      "target_sha256": "42ddc7f547fca5b960868455314e39ef4551d91df30039166aa702e77ed199f1",
+      "disposition": "pending_evidence",
+      "reason": "ADD/MAX/MUL source correspondence inspected with existing affected autograd controls. A standalone source-bound exact probe for every reduction-gradient branch remains required for whole-function certification."
+    }
+  ]
+}

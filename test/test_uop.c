@@ -24,6 +24,172 @@
 
 /* Basic creation */
 
+static PolyUOp *gradient_function_square(PolyCtx *ctx, PolyUOp *x) {
+  PolyUOp *param = poly_uop_param(ctx, 0, x);
+  PolyUOp *body =
+      poly_uop1(ctx, POLY_OP_TUPLE, POLY_VOID, poly_mul(ctx, param, param), poly_arg_none());
+  PolyCallInfo info = {.name = "square"};
+  PolyUOp *function =
+      poly_uop2(ctx, POLY_OP_FUNCTION, POLY_VOID, body, x, poly_arg_call_info(&info));
+  return poly_uop1(ctx, POLY_OP_GETTUPLE, x->dtype, function, poly_arg_int(0));
+}
+
+extern void poly_test_substitute_fail_after(int count);
+
+TEST(uop, graph_owner_function_compaction_failure_preserves_outputs) {
+  for (int fail = 0; fail < 2; fail++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyUOp *x = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 2, POLY_DEVICE_CPU);
+    PolyUOp *out = gradient_function_square(ctx, x);
+    PolyUOp *seed = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 2, POLY_DEVICE_CPU);
+    PolyUOp *grad = seed;
+    uint8_t present = 7;
+    poly_test_substitute_fail_after(fail);
+    int rc = poly_grad_many_ex(ctx, out, seed, &x, 1, &grad, &present);
+    poly_test_substitute_fail_after(-1);
+    ASSERT_INT_EQ(rc, -1);
+    ASSERT_PTR_EQ(grad, seed);
+    ASSERT_INT_EQ(present, 7);
+    ASSERT_INT_EQ(poly_grad_many_ex(ctx, out, seed, &x, 1, &grad, &present), 0);
+    ASSERT_INT_EQ(grad->op, POLY_OP_GETTUPLE);
+    ASSERT_INT_EQ(present, 1);
+    poly_ctx_destroy(ctx);
+  }
+  PASS();
+}
+
+TEST(uop, graph_owner_function_deviceless_gradient_stays_inline) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 2, POLY_DEVICE_CPU);
+  PolyUOp *out = gradient_function_square(ctx, x);
+  int64_t shape[] = {2};
+  PolyUOp *value = poly_add(ctx, poly_const_float(ctx, 2.0), poly_const_float(ctx, 3.0));
+  PolyUOp *seed = poly_expand(ctx, value, shape, 1);
+  PolyUOp *grad = NULL;
+  ASSERT_INT_EQ(poly_grad_many(ctx, out, seed, &x, 1, &grad), 0);
+  ASSERT_INT_EQ(grad->op, POLY_OP_GETTUPLE);
+  PolyUOp *backward = grad->src[0];
+  ASSERT_INT_EQ(backward->op, POLY_OP_FUNCTION);
+  ASSERT_INT_EQ(backward->n_src, 2);
+  ASSERT_PTR_EQ(backward->src[1], x);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(uop, graph_owner_function_shape_failure_is_retryable) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *n =
+      poly_uop_variable(ctx, "n", poly_arg_int(1), poly_arg_int(8), POLY_WEAKINT, 1, false);
+  PolyUOp *param = poly_uop_param(ctx, 0, n);
+  PolyUOp *value = poly_expand_uop(ctx, poly_const_float(ctx, 1.0), &param, 1);
+  PolyUOp *body = poly_uop1(ctx, POLY_OP_TUPLE, POLY_VOID, value, poly_arg_none());
+  PolyCallInfo info = {.name = "dynamic"};
+  PolyUOp *function =
+      poly_uop2(ctx, POLY_OP_FUNCTION, POLY_VOID, body, n, poly_arg_call_info(&info));
+  PolyUOp *out = poly_uop1(ctx, POLY_OP_GETTUPLE, POLY_FLOAT32, function, poly_arg_int(0));
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, value), 1);
+  poly_test_substitute_fail_after(0);
+  int ndim = poly_uop_ndim(ctx, out);
+  poly_test_substitute_fail_after(-1);
+  ASSERT_INT_EQ(ndim, -1);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, out), 1);
+  ASSERT_PTR_EQ(poly_uop_shape_dim(ctx, out, 0), n);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(uop, graph_owner_permute_shape_rejects_partial_and_duplicate_axes) {
+  PolyCtx *ctx = poly_ctx_new();
+  int64_t dims[] = {2, 3};
+  PolyUOp *x = poly_expand(ctx, poly_const_float(ctx, 1.0), dims, 2);
+  int64_t axes[] = {0, 0};
+  for (int n = 1; n <= 2; n++) {
+    PolyUOp *bad = poly_uop1(ctx, POLY_OP_PERMUTE, x->dtype, x, poly_arg_int_tuple(axes, n));
+    ASSERT_INT_EQ(poly_uop_ndim(ctx, bad), -1);
+  }
+  PolyUOp *scalar = poly_const_float(ctx, 1.0);
+  PolyUOp *empty =
+      poly_uop1(ctx, POLY_OP_PERMUTE, scalar->dtype, scalar, poly_arg_int_tuple(NULL, 0));
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, empty), 0);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(uop, graph_owner_flip_shape_requires_rank_matched_boolean_axes) {
+  PolyCtx *ctx = poly_ctx_new();
+  int64_t dims[] = {2, 3}, axes[] = {0, 2};
+  PolyUOp *x = poly_expand(ctx, poly_const_float(ctx, 1.0), dims, 2);
+  for (int n = 1; n <= 2; n++) {
+    PolyUOp *bad = poly_uop1(ctx, POLY_OP_FLIP, x->dtype, x, poly_arg_int_tuple(axes, n));
+    ASSERT_INT_EQ(poly_uop_ndim(ctx, bad), -1);
+  }
+  axes[1] = 1;
+  PolyUOp *valid = poly_uop1(ctx, POLY_OP_FLIP, x->dtype, x, poly_arg_int_tuple(axes, 2));
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, valid), 2);
+  ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, valid)[1], 3);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(uop, graph_owner_flatten_preserves_symbolic_product) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *n =
+      poly_uop_variable(ctx, "n", poly_arg_int(1), poly_arg_int(8), POLY_WEAKINT, 1, false);
+  PolyUOp *two = poly_const_int(ctx, 2);
+  PolyUOp *dims[] = {n, two};
+  PolyUOp *x = poly_expand_uop(ctx, poly_const_float(ctx, 1.0), dims, 2);
+  PolyUOp *flat = poly_uop_flatten(ctx, x);
+  ASSERT_NOT_NULL(flat);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, flat), 1);
+  PolyUOp *expected = poly_mul(ctx, n, two);
+  ASSERT_PTR_EQ(poly_uop_shape_dim(ctx, flat, 0), expected);
+  ASSERT_PTR_EQ(poly_uop_flatten(ctx, flat), flat);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(uop, graph_owner_unshard_dtype_follows_replaced_source) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *before = poly_test_buffer(ctx, POLY_FLOAT32, 2);
+  PolyUOp *after = poly_test_buffer(ctx, POLY_INT64, 2);
+  PolyUOp *range = poly_range(ctx, 2, -1, POLY_AXIS_DEVICE);
+  int64_t axis = 0;
+  PolyUOp *u = poly_unshard(ctx, before, &axis, &range, 1);
+  ASSERT_NOT_NULL(u);
+  PolyUOp *sources[] = {after, range};
+  PolyDType inferred = POLY_VOID;
+  ASSERT_TRUE(poly_dtype_from_uop(u->op, sources, 2, u->arg, u->dtype, &inferred));
+  ASSERT_TRUE(poly_dtype_eq(inferred, POLY_INT64));
+  ASSERT_TRUE(poly_dtype_eq(poly_rebuild_dtype(u, sources), POLY_INT64));
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(uop, graph_owner_function_unsupported_gradient_flags_fail_closed) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 2, POLY_DEVICE_CPU);
+  PolyUOp *plain = gradient_function_square(ctx, x)->src[0];
+  PolyUOp *seed = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 2, POLY_DEVICE_CPU);
+  for (int kind = 0; kind < 3; kind++) {
+    PolyCallInfo info = {
+        .name = "unsupported",
+        .precompile = kind == 0,
+        .precompile_backward = kind == 1,
+        .has_grad_fxn = kind == 2};
+    PolyUOp *fn = poly_uop(
+        ctx, POLY_OP_FUNCTION, POLY_VOID, plain->src, plain->n_src, poly_arg_call_info(&info)
+    );
+    PolyUOp *out = poly_uop1(ctx, POLY_OP_GETTUPLE, x->dtype, fn, poly_arg_int(0));
+    PolyUOp *grad = seed;
+    uint8_t present = 7;
+    ASSERT_INT_EQ(poly_grad_many_ex(ctx, out, seed, &x, 1, &grad, &present), -1);
+    ASSERT_PTR_EQ(grad, seed);
+    ASSERT_INT_EQ(present, 7);
+  }
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(uop, gradient_owner_copy_returns_to_source_device) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *source = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_CPU);

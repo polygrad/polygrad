@@ -417,11 +417,13 @@
       "stages": ["device", "multi-device"],
       "area": "device instance identity",
       "tinygrad": "Device strings distinguish instances such as CUDA:0 and CUDA:1",
-      "polygrad": "Closed PolyDevice enum identifies only backend classes",
-      "rationale": "This blocks true same-backend multi-device placement.",
+      "polygrad": "Core graph metadata retains exact device names/tuples, but frontend/backend admission still excludes genuine same-backend multi-device execution. UNSHARD has shape/dtype support but no core backward rule.",
+      "rationale": "Metadata representation and cache separation do not prove multi-device placement or sharded backward execution.",
       "approval": null,
       "evidence": [
         "src/polygrad.h:PolyDevice",
+        "src/autograd.c:grad_reverse_pass",
+        "references/tinygrad_latest/tinygrad/mixin/gradient.py:pm_gradient",
         "PLAN_CORE_20260720.md:WS6"
       ],
       "close_when": "Device identity is backend plus instance and multi-device construction/lowering passes."
@@ -777,6 +779,41 @@
         "js/test/test_tensor.js:wide scalar bindings preserve BigInt and execute supported values"
       ],
       "close_when": "Resolve the remaining beyond-signed64 host binding domain, or obtain an explicit stage-scoped release limitation approval with backend admission documented. This row grants no parity allowance."
+    },
+    {
+      "id": "PG-PARITY-029",
+      "status": "open_debt",
+      "stages": ["autograd", "python-api"],
+      "area": "Advanced FUNCTION backward",
+      "tinygrad": "call_gradient supports precompile, precompile_backward and grad_fxn; precompiled backward can reuse forward outputs as PARAM inputs.",
+      "polygrad": "FUNCTION forward accepts the precompile flags, but core backward rejects either flag, custom grad_fxn and auxiliary CallInfo. Python function rejects grad_fxn at construction. Tensor custom-kernel callbacks are a separate implemented frontend surface.",
+      "rationale": "Explicit rejection is not implementation parity or approval to exclude the capability from release claims.",
+      "approval": null,
+      "evidence": [
+        "references/tinygrad_latest/tinygrad/mixin/gradient.py:call_gradient",
+        "src/autograd.c:grad_reverse_pass",
+        "py/polygrad/function.py:_function",
+        "test/test_uop.c:graph_owner_function_unsupported_gradient_flags_fail_closed",
+        "py/tests/test_function.py:test_function_rejects_unimplemented_custom_gradient",
+        "temp/graph-owner-closeout-20260912.VLB3sF/tinygrad-complete.log"
+      ],
+      "close_when": "Port the full backward CallInfo contract with graph and execution controls, or explicitly approve a stage-scoped supported-release limitation."
+    },
+    {
+      "id": "PG-PARITY-030",
+      "status": "open_debt",
+      "stages": ["autograd", "diagnostics"],
+      "area": "Backward graph provenance",
+      "tinygrad": "compute_gradient propagates all_metadata with backward=True onto newly constructed derivative nodes.",
+      "polygrad": "The C reverse pass has no corresponding per-UOp backward provenance propagation. Program execution metadata is not the same contract.",
+      "rationale": "Missing diagnostic provenance is separate from numerical gradient correctness; it cannot be counted as equivalent source coverage.",
+      "approval": null,
+      "evidence": [
+        "references/tinygrad_latest/tinygrad/mixin/gradient.py:compute_gradient",
+        "src/autograd.c:grad_reverse_pass",
+        "temp/graph-owner-closeout-20260912.VLB3sF/owner-review.md"
+      ],
+      "close_when": "Implement the pinned diagnostic provenance contract or explicitly approve its omission for the supported release."
     }
   ]
 }

@@ -730,9 +730,10 @@
     },
     {
       "id": "reduction_autograd",
+      "source_audit": "test/fixtures/migration/reduction_autograd.json",
       "title": "Reduction topology and gradients",
       "source_status": "open",
-      "implementation_status": "closed",
+      "implementation_status": "open",
       "runtime_status": "broad_green",
       "tinygrad_paths": [
         "tinygrad/mixin/reduce.py",
