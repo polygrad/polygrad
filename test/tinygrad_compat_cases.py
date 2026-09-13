@@ -27,6 +27,9 @@ Tensor, TinyJit, nn = tinygrad.Tensor, tinygrad.TinyJit, tinygrad.nn
 Context = tinygrad.Context
 function = tinygrad.function
 ROOT = Path(__file__).resolve().parents[1]
+REFERENCE_COMMIT = json.loads(
+    (ROOT / "test" / "fixtures" / "parity_divergences.json").read_text(encoding="utf-8")
+)["reference"]["commit"]
 BEAUTIFUL_MNIST = ROOT / "references" / "tinygrad_latest" / "examples" / "beautiful_mnist.py"
 CONVNEXT = ROOT / "references" / "tinygrad_latest" / "extra" / "models" / "convnext.py"
 
@@ -379,6 +382,6 @@ if unknown_cases:
 print(json.dumps({
     "schema_version": 1,
     "engine": ENGINE,
-    "reference_commit": "a9069c177a9da9cca18593edf55acd2e6073cca6",
+    "reference_commit": REFERENCE_COMMIT,
     "cases": {name: case_builders[name]() for name in selected_cases},
 }, sort_keys=True))

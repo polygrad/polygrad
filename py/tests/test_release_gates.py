@@ -1,5 +1,6 @@
 """Negative controls for fixture gates; no network or GPU work is required."""
 
+import json
 import os
 from pathlib import Path
 import runpy
@@ -12,6 +13,29 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_model_compatibility_artifact_uses_canonical_reference(tmp_path):
+    env = dict(os.environ, ENGINE='polygrad', COMPAT_CASES='mlp_mnist',
+               DEV='CPU', POLY_DEVICE='cpu', PYTHONPATH='test:py',
+               POLYGRAD_LIB=str(ROOT / 'build/libpolygrad.so'))
+    run = subprocess.run([sys.executable, 'test/tinygrad_compat_cases.py'],
+                         cwd=ROOT, env=env, capture_output=True, text=True, check=True)
+    artifact = json.loads(run.stdout)
+    register = json.loads((ROOT / 'test/fixtures/parity_divergences.json').read_text(encoding='utf-8'))
+    assert artifact['reference_commit'] == register['reference']['commit']
+
+    # A canonical label must not make a genuinely stale artifact acceptable.
+    artifact['reference_commit'] = '0' * 40
+    stale = tmp_path / 'stale.json'
+    stale.write_text(json.dumps(artifact))
+    rejected = subprocess.run(
+        [sys.executable, 'test/compare_tinygrad_compat.py', str(stale), str(stale),
+         '--output', str(tmp_path / 'report.json')],
+        cwd=ROOT, env=env, capture_output=True, text=True,
+    )
+    assert rejected.returncode != 0
+    assert 'stale compatibility source lock' in rejected.stderr
 
 
 def test_python_x86_target_selects_frontend_and_core_device():
