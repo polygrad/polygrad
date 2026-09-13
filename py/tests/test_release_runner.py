@@ -28,12 +28,13 @@ def test_release_manifest_covers_required_lanes_once(runner):
             'test-py-sdist-install', 'test-js-package-install',
             'test-parity', 'test-parity-graph', 'test-parity-cuda',
             'test-compat-tinygrad-upstream-ratchet', 'test-compat-tinygrad-ops',
-            'reference-migration-check', 'analyze', 'format-check',
+            'test-reference-parity', 'test-analyze-reviewed', 'test-release-op-census', 'format-check',
             'verify-source-mirrors', 'fuzz-smoke', 'bench-smoke-regression',
             'bench-hlb-cuda-semantic', 'bench-hlb-cuda-timing'} <= set(targets)
     assert not {'test-all', 'verify', 'test-parity-opt', 'test-release-packages',
+                'reference-migration-check', 'test-parity-op-census', 'analyze',
                 'test-hip', 'publish-py', 'publish-js'} & set(targets)
-    assert targets.index('analyze') < targets.index('bench-hlb-cuda-semantic')
+    assert targets.index('test-analyze-reviewed') < targets.index('bench-hlb-cuda-semantic')
     assert targets[-1] == 'bench-hlb-cuda-timing'
     ops = next(g for g in runner['release_gates']() if g['target'] == 'test-compat-tinygrad-ops')
     assert '--baseline test/fixtures/tinygrad_upstream_ops_cpu_014_baseline.json' in ops['variables']['UPSTREAM_COMPAT_ARGS']
@@ -83,6 +84,28 @@ def test_release_missing_executable_is_a_failure(runner, tmp_path):
     row = json.loads((output / 'summary.json').read_text())['gates'][0]
     assert row['status'] == 'failed'
     assert row['exit_code'] == 127
+
+
+def test_release_rejects_source_changes_during_execution(runner, tmp_path):
+    (tmp_path / 'Makefile').write_text('first:\n\t@mkdir -p src\n\t@echo changed > src/new.c\n')
+    output = tmp_path / 'results'
+    assert runner['run_release'](tmp_path, output, ['make'],
+                                 [dict(target='first', variables={})], {}) == 1
+    report = json.loads((output / 'summary.json').read_text())
+    assert report['source_unchanged'] is False
+    assert report['gates'][0]['status'] == 'passed'
+    assert report['gates'][0]['log_sha256']
+
+
+def test_generated_browser_bundle_does_not_invalidate_source_evidence(runner, tmp_path):
+    (tmp_path / 'Makefile').write_text('first:\n\t@mkdir -p js/test/browser\n\t@echo generated > js/test/browser/tests.js\n')
+    output = tmp_path / 'results'
+    assert runner['run_release'](tmp_path, output, ['make'],
+                                 [dict(target='first', variables={})], {}) == 0
+    report = json.loads((output / 'summary.json').read_text())
+    assert report['source_unchanged'] is True
+    assert 'js/test/browser/tests.js' not in report['source_inputs']
+    assert 'Makefile' in report['source_inputs']
 
 
 def test_release_interrupt_stops_children_and_marks_remaining_not_run(runner, tmp_path, monkeypatch):

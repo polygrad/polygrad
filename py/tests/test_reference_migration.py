@@ -212,6 +212,28 @@ def test_strict_accepts_complete_synthetic_evidence(gate):
     assert errors(gate) == []
 
 
+def test_supported_parity_does_not_claim_full_certification(gate):
+    root, ledger, report, _, register, _ = gate
+    ledger['waves'][0]['source_status'] = 'open'
+    ledger['waves'][0]['required_checks'] = ['multi_gpu']
+    assert migration.release_errors(ledger, report, {}, register, root, certification=False) == []
+    assert migration.release_errors(ledger, report, {}, register, root)
+
+
+@pytest.mark.parametrize('mutation', ['reference', 'matcher', 'graph', 'allowance'])
+def test_supported_parity_still_rejects_shared_contract_failures(gate, mutation):
+    root, ledger, report, _, register, _ = gate
+    if mutation == 'reference':
+        ledger['reference_errors'] = ['dirty reference']
+    elif mutation == 'matcher':
+        ledger['rule_groups'][0]['status'] = 'fail'
+    elif mutation == 'graph':
+        next(iter(report['cases'].values()))['passed'] = False
+    else:
+        next(iter(report['cases'].values()))['findings'] = [{'id': 'unapproved', 'allowed': True}]
+    assert migration.release_errors(ledger, report, {}, register, root, certification=False)
+
+
 @pytest.mark.parametrize("scheme", [None, "cpython-3.12-ast-dump-v1"])
 def test_strict_rejects_unidentified_or_different_audit_hash_scheme(gate, scheme):
     gate[5]["hash_scheme"] = scheme

@@ -7,12 +7,37 @@ import argparse
 import json
 from pathlib import Path
 import subprocess
+import tomllib
 
-from polygrad import _ffi
-from tinygrad.uop import Ops
+def release_scope_errors(report, scope, version):
+    """Exclude exact product capabilities without changing parity ownership/status."""
+    errors = []
+    if scope.get('schema_version') != 1 or scope.get('version') != version:
+        errors.append('stale or invalid release scope version')
+    if scope.get('reference_commit') != report.get('reference_commit'):
+        errors.append('release scope reference differs from census')
+    expected = {}
+    for row in scope.get('excluded_vocabulary', []):
+        key = (row.get('side'), row.get('op'), row.get('id'))
+        if key in expected or not all(key) or not row.get('reason', '').strip():
+            errors.append('invalid or duplicate vocabulary exclusion')
+        expected[key] = row
+    used = set()
+    for row in report['findings']:
+        key = (row['side'], row['op'], row['id'])
+        if row['allowed'] and row['status'] == 'approved' and row['present']:
+            continue
+        if key not in expected or row['status'] != 'open_debt' or not row['present'] or key in used:
+            errors.append(f'out-of-scope or changed vocabulary finding: {key}')
+        used.add(key)
+    if set(expected) != used:
+        errors.append('release vocabulary exclusions no longer match the actual census')
+    return errors
 
 
 def main():
+    from polygrad import _ffi
+    from tinygrad.uop import Ops
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--register", default="test/fixtures/parity_divergences.json",
@@ -20,6 +45,7 @@ def main():
     parser.add_argument("--reference-root", default="references/tinygrad_latest")
     parser.add_argument("--report-only", action="store_true")
     parser.add_argument("--output")
+    parser.add_argument("--release-scope", help="exact candidate limits; does not approve parity allowances")
     args = parser.parse_args()
 
     register = json.loads(Path(args.register).read_text())
@@ -108,6 +134,18 @@ def main():
         "findings": findings,
         "summary": summary,
     }
+    release_errors = None
+    if args.release_scope:
+        if args.report_only:
+            parser.error('--release-scope cannot be combined with --report-only')
+        scope = json.loads(Path(args.release_scope).read_text(encoding='utf-8'))
+        root = Path(__file__).resolve().parents[1]
+        version = tomllib.loads((root / 'py/pyproject.toml').read_text())['project']['version']
+        release_errors = release_scope_errors(report, scope, version)
+        if json.loads((root / 'js/package.json').read_text())['version'] != version:
+            release_errors.append('Python and npm package versions disagree')
+        report['release_scope'] = dict(status='failed' if release_errors else 'passed',
+                                       errors=release_errors, excluded=scope['excluded_vocabulary'])
     encoded = json.dumps(report, sort_keys=True)
     if args.output:
         Path(args.output).write_text(encoded + "\n")
@@ -125,6 +163,9 @@ def main():
             )
     else:
         print(encoded)
+    if release_errors is not None:
+        print(f'release vocabulary: {report["release_scope"]["status"]}; parity debts remain open')
+        return int(bool(release_errors))
     return 0 if args.report_only or summary["blocking"] == 0 else 1
 
 

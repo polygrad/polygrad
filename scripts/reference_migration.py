@@ -376,7 +376,7 @@ def source_manifest(root: Path) -> dict[str, str]:
     execution and verify it again afterwards, never backfill it onto an old log.
     """
     paths = set()
-    for directory in ("src", "py/polygrad", "js/src", "test", "py/tests", "js/test",
+    for directory in ("src", "bench", "py/polygrad", "js/src", "test", "py/tests", "js/test",
                       "scripts", "js/scripts", "references/tinygrad_latest/tinygrad"):
         paths.update(p for p in (root / directory).rglob("*")
                      if p.suffix in {".c", ".h", ".py", ".js", ".mjs", ".ts", ".sh"} and p.is_file())
@@ -385,6 +385,10 @@ def source_manifest(root: Path) -> dict[str, str]:
         "scripts/reference_migration_waves.json", "test/fixtures/parity_divergences.json",
     ) if (root / p).is_file())
     paths.update(p for p in (root / "js").glob("*") if p.suffix in {".c", ".h"} and p.is_file())
+    paths.update((root / 'test/fixtures').rglob('*.json'))
+    # The maintained browser runner regenerates this bundle from handwritten
+    # tests during acceptance; it is an output, not an authoring-source edit.
+    paths.discard(root / 'js/test/browser/tests.js')
     return {str(p.relative_to(root)): file_hash(p) for p in sorted(paths)}
 
 
@@ -404,7 +408,8 @@ def graph_corpus(root: Path) -> dict[str, str]:
     return cases
 
 
-def release_errors(ledger: dict, report: dict, evidence: dict, register: dict, root: Path = ROOT) -> list[str]:
+def release_errors(ledger: dict, report: dict, evidence: dict, register: dict, root: Path = ROOT,
+                   *, certification: bool = True) -> list[str]:
     """Validate reviewed audit rows and source-bound execution records, not labels.
 
     A wave's source_audit is schema-1 JSON with baseline_commit, target_commit,
@@ -489,6 +494,12 @@ def release_errors(ledger: dict, report: dict, evidence: dict, register: dict, r
     if report.get("summary") != summary:
         errors.append("physical graph: summary disagrees with cases/register")
     check_file(ledger.get("graph_report"), "physical graph report")
+
+    # Bounded release parity still checks the complete physical corpus,
+    # matcher contracts and reference locks. It does not certify every source
+    # audit row or claim that excluded multi-device execution was performed.
+    if not certification:
+        return errors
 
     inputs = source_manifest(root)
     if evidence.get("schema_version") != 1 or not inputs or evidence.get("source_inputs") != inputs:
@@ -817,7 +828,8 @@ def render_markdown(ledger: dict) -> str:
                 lines.append(f"- `{row['path']}` ({row['witnesses']} static witnesses)")
     release = ledger.get("release_check")
     if release:
-        lines.extend(["", f"## Strict evidence check: {release['status']}", ""])
+        label = release.get('scope', 'strict evidence').capitalize()
+        lines.extend(["", f"## {label} check: {release['status']}", ""])
         lines.extend(f"- {error}" for error in release["errors"])
     return "\n".join(lines) + "\n"
 
@@ -829,7 +841,9 @@ def main() -> int:
     parser.add_argument("--archbird-map", default="temp/archbird-polygrad.json")
     parser.add_argument("--json-output", default="temp/reference_migration/ledger.json")
     parser.add_argument("--markdown-output", default="temp/reference_migration/ledger.md")
-    parser.add_argument("--strict", action="store_true", help="fail on incomplete source/runtime evidence")
+    scope = parser.add_mutually_exclusive_group()
+    scope.add_argument("--strict", action="store_true", help="fail on incomplete source/runtime evidence")
+    scope.add_argument("--release", action="store_true", help="require supported graph/matcher parity, not full source certification")
     parser.add_argument("--evidence", default="temp/reference_migration/evidence.json")
     args = parser.parse_args()
     require_hash_interpreter()
@@ -910,8 +924,9 @@ def main() -> int:
     if commit(ROOT / register["reference"]["root"]) != new_commit:
         reference_errors.append("graph reference checkout differs from migration target")
     ledger["reference_errors"] = reference_errors
-    errors = release_errors(ledger, report, evidence, register, ROOT)
-    ledger["release_check"] = {"status": "fail" if errors else "pass", "errors": errors}
+    errors = release_errors(ledger, report, evidence, register, ROOT, certification=not args.release)
+    scope_name = "supported parity" if args.release else "strict evidence"
+    ledger["release_check"] = {"scope": scope_name, "status": "fail" if errors else "pass", "errors": errors}
     json_path, markdown_path = ROOT / args.json_output, ROOT / args.markdown_output
     json_path.parent.mkdir(parents=True, exist_ok=True)
     markdown_path.parent.mkdir(parents=True, exist_ok=True)
@@ -931,11 +946,11 @@ def main() -> int:
             f"{aggregate['id']}: {aggregate['status']} "
             f"({aggregate['tinygrad_rule_count']}/{aggregate['polygrad_rule_count']} rows)"
         )
-    print(f"strict evidence: {ledger['release_check']['status']} ({len(errors)} findings)")
-    if args.strict:
+    print(f"{scope_name}: {ledger['release_check']['status']} ({len(errors)} findings)")
+    if args.strict or args.release:
         for error in errors:
             print(f"  {error}")
-    return 1 if (args.strict and errors) or any(
+    return 1 if ((args.strict or args.release) and errors) or any(
         row["status"] != "pass" for row in rule_groups + matcher_aggregates
     ) else 0
 

@@ -777,29 +777,48 @@ make test-release PYTHON=/path/to/test/python HF_PYTHON=/path/to/hf/python
 `test-release` runs maintained targets serially, including common and specific
 CUDA/X86 C tests, INTERP, Python and Node lanes, sanitized Wasm controls,
 browser auto/INTERP/WebGPU and Qwen, strict HF/Qwen fixtures, isolated Python/npm
-installs, model interchange, value/graph/upstream parity, migration audits,
-analysis, bounded fuzz, smoke regression and frozen HLB semantic/timing gates.
-CUDA and browser WebGPU are required; HIP is explicitly excluded for this
-candidate. Optional MSan/TSan/Fil-C, legacy packages, research benchmarks and
+installs, model interchange, value/graph/upstream parity, source matcher checks,
+reviewed analysis, bounded fuzz, smoke regression and frozen HLB semantic/timing
+gates. CUDA and browser WebGPU are required. HIP, HCQ2/GETADDR, genuine multi-GPU
+execution and PYLITERAL are outside the [0.5.0 scope](test/fixtures/release_050_scope.json).
+GETADDR/PYLITERAL debts remain open; their exclusions do not permit physical
+graph mismatches. Optional MSan/TSan/Fil-C, legacy packages, research benchmarks and
 the additional browser-executable matrix remain separate targets.
 
 Provide the documented toolchains, pinned `PARITY_PY` environment, fixtures,
 writable caches and browser display. `PYTHON` selects the ordinary frontend and
 package-test environment; `HF_PYTHON` selects the HF reference stack. Override
-`QWEN3_GGUF`, `BENCH_BASELINE` and `MIGRATION_EVIDENCE` as needed. The runner
+`QWEN3_GGUF` and `BENCH_BASELINE` as needed. The runner
 does not download missing fixtures, approve debts, or update baselines itself.
 Individual targets retain their existing package/network behavior.
 
 Results go to a fresh `temp/release-*` directory, or a new `RELEASE_DIR` supplied
 by the caller. Each gate gets a command log, exit code and elapsed time in
-`summary.json`; test counts and skips remain in the raw logs. The runner prints
+`summary.json`, alongside source inputs checked before/after execution, log hashes
+and final built-artifact hashes; test counts and skips remain in the raw logs.
+This is bounded release evidence, not the full migration certificate. The runner prints
 the final summary after all gates finish, continues after failures, and exits
 nonzero if any gate fails. Interrupted runs terminate their child process group
-and mark remaining gates unrun. Analyzer warnings and incomplete migration
-audits are failures, not automatic release exclusions; a passing upstream ratchet
-does not mean every upstream test passed. This target never publishes packages.
+and mark remaining gates unrun. Source edits during execution fail the run.
+A passing upstream ratchet does not mean every upstream test passed. This target
+never publishes packages.
 `make test-release-runner` tests orchestration using small Make fixtures without
 running the release matrix.
+
+`make analyze` remains the raw zero-warning gate. Release acceptance instead
+uses `test-analyze-reviewed`, which executes that same analysis and checks each
+warning against [reviewed path explanations](test/fixtures/analyzer_reviews.json)
+bound to source files, headers, flags and Clang version. New warnings, stale
+reviews, compiler failures and missing translation-unit completions fail. Raw
+logs and exit status remain visible; there are no broad checker suppressions.
+For a standalone run, provide a new `ANALYZER_REVIEW_DIR`.
+
+Complete migration certification remains separate: `make reference-migration-check`
+still requires every source-wave audit and its source-bound execution manifest
+(`MIGRATION_EVIDENCE`), including multi-GPU. `make test-parity-op-census` still
+fails on open vocabulary debts. The release uses `test-reference-parity` and
+`test-release-op-census` instead: complete graph/matcher checks and exact named
+capability exclusions, without claiming those audits or debts are closed.
 
 Migration audit generation and checking use `PARITY_PY` (CPython 3.11).
 `ast.dump` hashes are interpreter-specific; direct invocations with another

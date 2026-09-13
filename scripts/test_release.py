@@ -10,12 +10,17 @@ from pathlib import Path
 import shlex
 import signal
 import subprocess
+import sys
 import time
 import uuid
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EXCLUSIONS = ['HIP: outside the 0.5.0 candidate validation matrix']
+sys.path.insert(0, str(ROOT))
+from scripts.reference_migration import file_hash, manifest_hash, source_manifest
+
+SCOPE = json.loads((ROOT / 'test/fixtures/release_050_scope.json').read_text(encoding='utf-8'))
+EXCLUSIONS = SCOPE['excluded_capabilities']
 
 
 def release_gates():
@@ -23,7 +28,7 @@ def release_gates():
     # test-parity-opt: those would repeat whole suites. Analyze precedes HLB
     # because its temporary .plist files affect HLB's checkout source lock.
     targets = '''
-        format-check verify-source-mirrors test-headers analyze
+        format-check verify-source-mirrors test-headers test-analyze-reviewed
         test test-x86 test-interp test-cuda test-qwen3
         test-harness-skip-accounting test-release-gates
         test-py test-py-x86 test-hf-e2e
@@ -34,10 +39,10 @@ def release_gates():
         test-js-wasm test-js-package test-browser test-browser-qwen3
         test-model-interchange test-py-sdist-install test-js-package-install
         test-parity test-parity-ir test-parity-ir-opt test-parity-cuda
-        test-parity-graph test-parity-op-census
+        test-parity-graph test-release-op-census
         test-compat-tinygrad-upstream-ratchet test-compat-tinygrad-ops
         test-compat-tinygrad-tier1 test-compat-tinygrad-convnext
-        reference-migration-check fuzz-smoke test-symbolic-z3
+        test-reference-parity fuzz-smoke test-symbolic-z3
         bench-smoke-regression bench-hlb-cuda-semantic bench-hlb-cuda-timing
     '''.split()
     gates = [dict(target=target, variables={}) for target in targets]
@@ -112,9 +117,14 @@ def run_release(root, output, make, gates, variables):
                   OP_PARITY_DIR=str(output / 'op-census'),
                   COMPAT_TIER1_DIR=str(output / 'tier1'),
                   COMPAT_CONVNEXT_DIR=str(output / 'convnext'),
+                  ANALYZER_REVIEW_DIR=str(output / 'analyzer'),
+                  REFERENCE_RELEASE_DIR=str(output / 'reference-parity'),
                   FUZZ_WORK_DIR=str(output / 'fuzz-corpus'),
                   BENCH_SMOKE_JSON=str(output / 'smoke.json'))
-    report = dict(schema_version=1, status='running',
+    inputs = source_manifest(root)
+    report = dict(schema_version=2, status='running', acceptance_scope='polygrad-0.5.0-supported',
+                  source_inputs=inputs, source_sha256=manifest_hash(inputs),
+                  deferred_certification=SCOPE['deferred_certification'],
                   started_at=datetime.now(timezone.utc).isoformat(),
                   exclusions=EXCLUSIONS, gates=[])
     for index, gate in enumerate(gates, 1):
@@ -152,12 +162,21 @@ def run_release(root, output, make, gates, variables):
                     stop_process(process)
                 row['exit_code'] = 130
         row['duration_seconds'] = round(time.monotonic() - start, 3)
+        row['log_sha256'] = file_hash(output / row['log'])
         row['status'] = 'interrupted' if interrupted else ('passed' if row['exit_code'] == 0 else 'failed')
         save_summary(output, report)
         if interrupted:
             break
+    report['source_unchanged'] = source_manifest(root) == inputs
+    report['errors'] = [] if report['source_unchanged'] else ['source inputs changed during release execution']
+    report['artifacts'] = {name: file_hash(root / name) for name in (
+        'build/polygrad_test', 'build/libpolygrad.so', 'build/polygrad_parity_runner',
+        'build/polygrad_parity_runner_cuda', 'build/core.sync.js', 'build/core.async.js',
+        'js/build/Release/polygrad_napi.node', 'build/bench_smoke',
+    ) if (root / name).is_file()}
     report['status'] = ('interrupted' if interrupted else
-                        'passed' if all(row['status'] == 'passed' for row in report['gates']) else 'failed')
+                        'passed' if report['source_unchanged'] and
+                        all(row['status'] == 'passed' for row in report['gates']) else 'failed')
     report['finished_at'] = datetime.now(timezone.utc).isoformat()
     save_summary(output, report)
     print(f'Release checks: {report["status"]}', flush=True)
@@ -165,6 +184,8 @@ def run_release(root, output, make, gates, variables):
         print(f'{row["status"]:11} {row["target"]}: exit={row["exit_code"]}, '
               f'seconds={row["duration_seconds"]}, log={row["log"]}')
     print('Excluded: ' + '; '.join(EXCLUSIONS))
+    for error in report['errors']:
+        print(error)
     print('Individual test counts/skips and detailed findings remain in each gate log; '
           'a passing ratchet is not an all-passing upstream suite.')
     return 130 if interrupted else int(report['status'] != 'passed')
@@ -179,7 +200,7 @@ def main():
     args = parser.parse_args()
     gates = release_gates()
     if args.list:
-        print(json.dumps(dict(exclusions=EXCLUSIONS, gates=gates), indent=2))
+        print(json.dumps(dict(exclusions=EXCLUSIONS, deferred_certification=SCOPE['deferred_certification'], gates=gates), indent=2))
         return 0
     variables = dict(value.split('=', 1) for value in args.make_var)
     output = (Path(args.output) if args.output else ROOT / 'temp' /

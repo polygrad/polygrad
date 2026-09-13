@@ -341,6 +341,14 @@ reference-migration-check: test-reference-migration
 		--graph-report $(GRAPH_PARITY_DIR)/report.json \
 		--archbird-map '' --evidence $(MIGRATION_EVIDENCE)
 
+REFERENCE_RELEASE_DIR ?= temp/reference_release
+.PHONY: test-reference-parity
+test-reference-parity: test-reference-migration
+	$(PARITY_PY) scripts/reference_migration.py --release \
+		--graph-report $(GRAPH_PARITY_DIR)/report.json --archbird-map '' \
+		--json-output $(REFERENCE_RELEASE_DIR)/ledger.json \
+		--markdown-output $(REFERENCE_RELEASE_DIR)/ledger.md
+
 test-parity-op-census parity-op-census-report: build/libpolygrad.so
 	@mkdir -p $(OP_PARITY_DIR)
 	POLYGRAD_LIB=$(abspath build/libpolygrad.so) \
@@ -348,6 +356,13 @@ test-parity-op-census parity-op-census-report: build/libpolygrad.so
 		test/op_vocabulary_census.py \
 		$(if $(filter parity-op-census-report,$@),--report-only,) \
 		--output $(OP_PARITY_DIR)/report.json
+
+.PHONY: test-release-op-census
+test-release-op-census: build/libpolygrad.so
+	@mkdir -p $(OP_PARITY_DIR)
+	POLYGRAD_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py:references/tinygrad_latest \
+		$(PARITY_PY) test/op_vocabulary_census.py \
+		--release-scope test/fixtures/release_050_scope.json --output $(OP_PARITY_DIR)/report.json
 
 test-compat-tinygrad-tier1: build/libpolygrad.so
 	@mkdir -p $(COMPAT_TIER1_DIR) temp/cc_tmp
@@ -885,13 +900,25 @@ clean:
 # ── Safety tooling ──────────────────────────────────────────────────
 
 # Clang Static Analyzer (requires clang)
+ANALYZER_REVIEW_DIR ?= temp/analyzer-reviewed
+.PHONY: test-analyze-reviewed test-analyzer-review
+test-analyze-reviewed:
+	@$(PARITY_PY) scripts/check_analyzer.py --make '$(RELEASE_MAKE)' \
+		--output '$(ANALYZER_REVIEW_DIR)' --sources '$(ANALYZE_SRC)' \
+		--flags '$(filter-out -pipe,$(CFLAGS_COMMON)) $(ANALYZE_FLAGS)'
+
+test-analyzer-review:
+	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 $(PARITY_PY) -m pytest -q py/tests/test_analyzer_review.py
+
 analyze:
 	@mkdir -p build
 	@rm -f build/analyze.log; status=0; \
 	  for src in $(ANALYZE_SRC); do \
 	    echo "==> $$src" >> build/analyze.log; \
 	    clang --analyze $(filter-out -pipe,$(CFLAGS_COMMON)) $(ANALYZE_FLAGS) "$$src" \
-	      >> build/analyze.log 2>&1 || status=1; \
+	      >> build/analyze.log 2>&1; rc=$$?; \
+	    echo "analyzer-exit: $$src $$rc" >> build/analyze.log; \
+	    test $$rc -eq 0 || status=1; \
 	  done; \
 	  cat build/analyze.log; \
 	  if grep -Eq '(^|: )(warning|error):' build/analyze.log; then status=1; fi; \
