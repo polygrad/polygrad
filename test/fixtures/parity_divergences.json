@@ -853,6 +853,78 @@
         "temp/cache-clear-20260913.itgPPu/results.md"
       ],
       "close_when": "Use a complete immutable content key without retaining the source SINK, with collision-safe lookup, lifetime and reuse regressions; or explicitly approve the measured context-lifetime difference. Do not replace structural identity with an unchecked 32-bit hash."
+    },
+    {
+      "id": "PG-PARITY-033",
+      "status": "open_debt",
+      "stages": ["tensor", "python-api"],
+      "area": "nonzero and masked_select API coverage",
+      "tinygrad": "Both APIs support data-dependent output lengths and explicit size/fill_value variants usable during JIT capture.",
+      "polygrad": "The Tensor methods are absent, including fixed-size variants. Three upstream JIT cases stop at AttributeError before testing capture or numerical behavior.",
+      "rationale": "This is not solely a dynamic-shape scheduler limitation. test_item_bakes_in_values also stops at the missing method before exercising the host-read guard. Registration grants no allowance or passing result.",
+      "approval": null,
+      "evidence": [
+        "references/tinygrad_latest/tinygrad/tensor.py:Tensor.nonzero",
+        "references/tinygrad_latest/tinygrad/tensor.py:Tensor.masked_select",
+        "references/tinygrad_latest/test/unit/test_jit_footguns.py:test_masked_select_static_size_jittable",
+        "references/tinygrad_latest/test/unit/test_jit_footguns.py:test_nonzero_static_size_jittable",
+        "references/tinygrad_latest/test/unit/test_jit_footguns.py:test_item_bakes_in_values",
+        "temp/readiness-safety-scope-20260913.lRth9A/upstream/report.json"
+      ],
+      "close_when": "Implement the shared Tensor semantics and frontend bindings with fixed-size/JIT and dynamic-size controls, without weakening the capture host-read guard."
+    },
+    {
+      "id": "PG-PARITY-034",
+      "status": "open_debt",
+      "stages": ["python-api", "jit"],
+      "area": "Python JIT without Tensor arguments",
+      "tinygrad": "TinyJit captures functions using realized closure tensors, including calls with only scalar variable arguments.",
+      "polygrad": "Python raises JitError: JIT requires at least one Tensor input on capture because the wrapper selects its PolyCtx from Tensor arguments. The C begin-capture API admits zero inputs; the observed restriction is in the frontend.",
+      "rationale": "The two upstream cases fail explicitly before replay. This is a context-selection capability gap, not evidence of incorrect replay values. Registration does not approve a divergence.",
+      "approval": null,
+      "evidence": [
+        "py/polygrad/jit.py:TinyJit",
+        "src/engine/jit.c:poly_jit_begin_capture",
+        "references/tinygrad_latest/test/unit/test_jit_footguns.py:test_implicit_inputs_need_realize",
+        "references/tinygrad_latest/test/unit/test_jit_footguns.py:test_slice_assign_works_without_realize",
+        "temp/readiness-safety-scope-20260913.lRth9A/upstream/report.json"
+      ],
+      "close_when": "Define and test context ownership for closure-only/scalar-only Python capture, including mixed-context rejection and replay after closure-state writes."
+    },
+    {
+      "id": "PG-PARITY-035",
+      "status": "open_debt",
+      "stages": ["python-api", "shape"],
+      "area": "Python symbolic movement argument admission",
+      "tinygrad": "Tensor slicing/padding accepts symbolic UOp bounds. test_symbolic_pad_view_frozen additionally asserts a known capture bug and a contiguous workaround.",
+      "polygrad": "The test stops in _pair_array with TypeError: 'UOp' object cannot be interpreted as an integer, before either reference behavior is exercised.",
+      "rationale": "The Python int64 movement adapter is narrower than core symbolic UOp movement. Do not implement Tinygrad's documented frozen-pad wrong result to make the footgun test pass; use correct-value controls for future support.",
+      "approval": null,
+      "evidence": [
+        "py/polygrad/tensor.py:_pair_array",
+        "src/uop/movement.c",
+        "references/tinygrad_latest/test/unit/test_jit_footguns.py:test_symbolic_pad_view_frozen",
+        "temp/readiness-safety-scope-20260913.lRth9A/upstream/report.json"
+      ],
+      "close_when": "Carry symbolic movement arguments through the frontend with exact graph and changing-bound value tests; separately disposition the reference's known-bug assertion."
+    },
+    {
+      "id": "PG-PARITY-036",
+      "status": "open_debt",
+      "stages": ["python-api", "diagnostics"],
+      "area": "compiled-device graph capability introspection",
+      "tinygrad": "Device[Device.DEFAULT].graph exposes its graph runner constructor or None; the CPU control skips test_graph_input_output_aliasing when no graph runner is available.",
+      "polygrad": "Python Compiled has no graph attribute, so the same test fails at capability inspection rather than executing its alias scenario. C CUDA graph execution is implemented and tested separately.",
+      "rationale": "Do not fabricate a runner object or turn an absent attribute into evidence of missing CUDA graph execution. This CPU comparison contains no graph execution in either provider.",
+      "approval": null,
+      "evidence": [
+        "py/polygrad/device.py:Compiled",
+        "references/tinygrad_latest/test/unit/test_jit_footguns.py:test_graph_input_output_aliasing",
+        "test/test_cuda.c",
+        "temp/jit-correctness-20260913.pw0c5c/results.md",
+        "temp/readiness-safety-scope-20260913.lRth9A/upstream/report.json"
+      ],
+      "close_when": "Expose truthful graph capability semantics without a fabricated Python GraphRunner, and execute the unchanged alias scenario on a graph-capable provider."
     }
   ]
 }

@@ -78,7 +78,7 @@ baselines remain historical controls. Target selection is not a claim that
 every upstream feature or source audit is complete.
 
 The public Tensor APIs do not yet provide SVD/Newton–Schulz,
-data-dependent `nonzero`/`masked_select`, or borrowed-pointer `from_blob`
+`nonzero`/`masked_select` (including fixed-size variants), or borrowed-pointer `from_blob`
 construction. Tinygrad's `PYTHON` backend name is not an alias for Polygrad's
 `INTERP` backend. These are compatibility limits, not passing upstream tests;
 the reviewed [Tensor](test/fixtures/tinygrad_upstream_014_baseline.json),
@@ -698,6 +698,15 @@ Tensor host-data reads during capture are rejected: their values would otherwise
 be baked into the replay. Read results outside the captured function. Following
 Tinygrad, replay snapshots an input when it aliases a captured write-only output;
 ordinary inputs and explicit in-place updates do not need this extra copy.
+
+Python capture currently requires at least one Tensor argument to select its
+C context; closure-only and scalar-only calls are unsupported. Python movement
+arguments also do not accept symbolic UOp bounds, so symbolic slicing/padding
+cannot be used to vary a JIT input shape. These are frontend limits, not limits
+on every C symbolic operation. Tinygrad's `Device[...].graph` introspection
+attribute is not exposed; its absence does not mean CUDA graph execution is
+absent. The upstream JIT tests remain non-green for these gaps and the missing
+selection APIs above.
 
 Python:
 
