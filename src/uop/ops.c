@@ -4128,3 +4128,375 @@ PolyUOp *poly_uop_reduce(
   free(to);
   return ret;
 }
+
+/* UOp.substitute / RewriteContext (tinygrad/uop/ops.py). C uses an explicit
+ * stack and shared memo to preserve ordered opaque-body identity without
+ * depending on gradient construction. */
+
+typedef struct {
+  PolyUOp *u;
+  PolyUOp *link;
+  int stage;
+} SubFrame;
+
+static bool sub_stack_push(SubFrame **stack, int *n, int *cap, SubFrame f) {
+  if (*n >= *cap) {
+    int new_cap = (*cap > 0) ? (*cap * 2) : 256;
+    SubFrame *new_stack = realloc(*stack, (size_t)new_cap * sizeof(SubFrame));
+    if (!new_stack) return false;
+    *stack = new_stack;
+    *cap = new_cap;
+  }
+  (*stack)[(*n)++] = f;
+  return true;
+}
+
+static bool substitute_opaque_body_op(PolyOps op) {
+  return op == POLY_OP_CALL || op == POLY_OP_FUNCTION;
+}
+
+/* Discover only the identity pins that pinned RewriteContext will eventually
+ * install while traversing these roots in order. This dry traversal follows
+ * substitutions and shared-memo visibility but creates no UOps. Preinstalling
+ * the final pins prevents an earlier standalone body root from allocating a
+ * rebuilt UOp that a later CALL/FUNCTION owner overwrites with body->body.
+ *
+ * This is deliberately ordered rather than a whole-graph opaque-body scan: if
+ * an outer owner pins its body before that body is exposed as a later root,
+ * nested owners inside it are not visited, matching the pinned probe. */
+static bool substitute_collect_opaque_pins(
+    PolyUOp **roots,
+    int n_roots,
+    PolyMap *sub_map,
+    PolyUOp ***out_pins,
+    int *out_n_pins
+) {
+  if (!roots || n_roots < 0 || !sub_map || !out_pins || !out_n_pins) return false;
+  *out_pins = NULL;
+  *out_n_pins = 0;
+
+  PolyMap *done = poly_map_new(256);
+  PolyMap *visiting = poly_map_new(256);
+  PolyMap *pin_seen = poly_map_new(64);
+  SubFrame *stack = NULL;
+  PolyUOp **pins = NULL;
+  int n_stack = 0, cap_stack = 0, n_pins = 0, pins_cap = 0;
+  bool ok = done && visiting && pin_seen;
+
+  for (int root_idx = 0; ok && root_idx < n_roots; root_idx++) {
+    PolyUOp *root = roots[root_idx];
+    if (!root) {
+      ok = false;
+      break;
+    }
+    if (poly_map_get(done, poly_ptr_hash(root), root, poly_ptr_eq)) continue;
+    ok = sub_stack_push(&stack, &n_stack, &cap_stack, (SubFrame){root, NULL, 0});
+
+    while (ok && n_stack > 0) {
+      SubFrame f = stack[--n_stack];
+      PolyUOp *u = f.u;
+      if (!u) {
+        ok = false;
+        break;
+      }
+      uint32_t h = poly_ptr_hash(u);
+
+      if (f.stage == 0) {
+        if (poly_map_get(done, h, u, poly_ptr_eq)) continue;
+        if (poly_map_get(visiting, h, u, poly_ptr_eq)) {
+          ok = false;
+          break;
+        }
+        poly_map_set(visiting, h, u, (void *)(uintptr_t)1, poly_ptr_eq);
+
+        PolyUOp *sub = poly_map_get(sub_map, h, u, poly_ptr_eq);
+        if (sub) {
+          ok = sub_stack_push(&stack, &n_stack, &cap_stack, (SubFrame){u, sub, 2}) &&
+               sub_stack_push(&stack, &n_stack, &cap_stack, (SubFrame){sub, NULL, 0});
+          continue;
+        }
+
+        int first_src = 0;
+        if (substitute_opaque_body_op(u->op) && u->n_src > 0) {
+          PolyUOp *body = u->src[0];
+          if (!body || (poly_map_get(visiting, poly_ptr_hash(body), body, poly_ptr_eq) &&
+                        !poly_map_get(done, poly_ptr_hash(body), body, poly_ptr_eq))) {
+            ok = false;
+            break;
+          }
+          if (!poly_map_get(pin_seen, poly_ptr_hash(body), body, poly_ptr_eq)) {
+            if (n_pins >= pins_cap) {
+              int new_cap = pins_cap ? pins_cap * 2 : 16;
+              PolyUOp **new_pins = realloc(pins, (size_t)new_cap * sizeof(*new_pins));
+              if (!new_pins) {
+                ok = false;
+                break;
+              }
+              pins = new_pins;
+              pins_cap = new_cap;
+            }
+            pins[n_pins++] = body;
+            poly_map_set(pin_seen, poly_ptr_hash(body), body, (void *)(uintptr_t)1, poly_ptr_eq);
+          }
+          /* A later owner overwrites any earlier rewritten result for body. */
+          poly_map_set(done, poly_ptr_hash(body), body, (void *)(uintptr_t)1, poly_ptr_eq);
+          first_src = 1;
+        }
+
+        ok = sub_stack_push(&stack, &n_stack, &cap_stack, (SubFrame){u, NULL, 1});
+        for (int i = u->n_src - 1; ok && i >= first_src; i--) {
+          PolyUOp *src = u->src[i];
+          if (!src || poly_map_get(done, poly_ptr_hash(src), src, poly_ptr_eq)) continue;
+          ok = sub_stack_push(&stack, &n_stack, &cap_stack, (SubFrame){src, NULL, 0});
+        }
+        continue;
+      }
+
+      if (f.stage == 2 &&
+          (!f.link || !poly_map_get(done, poly_ptr_hash(f.link), f.link, poly_ptr_eq))) {
+        ok = false;
+        break;
+      }
+      poly_map_set(done, h, u, (void *)(uintptr_t)1, poly_ptr_eq);
+      poly_map_remove(visiting, h, u, poly_ptr_eq);
+    }
+  }
+
+  poly_map_destroy(pin_seen);
+  poly_map_destroy(visiting);
+  poly_map_destroy(done);
+  free(stack);
+  if (!ok) {
+    free(pins);
+    return false;
+  }
+  *out_pins = pins;
+  *out_n_pins = n_pins;
+  return true;
+}
+
+static bool substitute_iter(
+    PolyCtx *ctx,
+    PolyUOp *root,
+    PolyMap *sub_map,
+    PolyMap *memo,
+    PolyUOp **out
+) {
+  if (!ctx || !root || !sub_map || !memo || !out) return false;
+
+  PolyMap *visiting = poly_map_new(256);
+  SubFrame *stack = NULL;
+  int n_stack = 0, cap_stack = 0;
+  bool ok = visiting && sub_stack_push(&stack, &n_stack, &cap_stack, (SubFrame){root, NULL, 0});
+
+  while (ok && n_stack > 0) {
+    SubFrame f = stack[--n_stack];
+    PolyUOp *u = f.u;
+    if (!u) {
+      ok = false;
+      break;
+    }
+    uint32_t h = poly_ptr_hash(u);
+
+    if (f.stage == 0) {
+      if (poly_map_get(memo, h, u, poly_ptr_eq)) continue;
+      if (poly_map_get(visiting, h, u, poly_ptr_eq)) {
+        ok = false;
+        break;
+      }
+      poly_map_set(visiting, h, u, (void *)(uintptr_t)1, poly_ptr_eq);
+
+      PolyUOp *sub = poly_map_get(sub_map, h, u, poly_ptr_eq);
+      if (sub) {
+        PolyUOp *cached = poly_map_get(memo, poly_ptr_hash(sub), sub, poly_ptr_eq);
+        if (cached) {
+          poly_map_set(memo, h, u, cached, poly_ptr_eq);
+          poly_map_remove(visiting, h, u, poly_ptr_eq);
+          continue;
+        }
+        ok = sub_stack_push(&stack, &n_stack, &cap_stack, (SubFrame){u, sub, 2}) &&
+             sub_stack_push(&stack, &n_stack, &cap_stack, (SubFrame){sub, NULL, 0});
+        continue;
+      }
+
+      ok = sub_stack_push(&stack, &n_stack, &cap_stack, (SubFrame){u, NULL, 1});
+      int first_src = 0;
+      if (substitute_opaque_body_op(u->op) && u->n_src > 0) {
+        /* Pinned graph_rewrite keeps a CALL/FUNCTION's code body opaque unless
+         * enter_calls is explicitly enabled. Scope discovery still enters the
+         * body, but default substitution preserves source zero exactly and
+         * rewrites only the external arguments. */
+        PolyUOp *body = u->src[0];
+        if (!body) {
+          ok = false;
+          break;
+        }
+        poly_map_set(memo, poly_ptr_hash(body), body, body, poly_ptr_eq);
+        first_src = 1;
+      }
+      for (int i = u->n_src - 1; ok && i >= first_src; i--) {
+        PolyUOp *src = u->src[i];
+        if (!src || poly_map_get(memo, poly_ptr_hash(src), src, poly_ptr_eq)) continue;
+        ok = sub_stack_push(&stack, &n_stack, &cap_stack, (SubFrame){src, NULL, 0});
+      }
+      continue;
+    }
+
+    if (f.stage == 2) {
+      PolyUOp *mapped =
+          f.link ? poly_map_get(memo, poly_ptr_hash(f.link), f.link, poly_ptr_eq) : NULL;
+      if (!mapped) {
+        ok = false;
+        break;
+      }
+      poly_map_set(memo, h, u, mapped, poly_ptr_eq);
+      poly_map_remove(visiting, h, u, poly_ptr_eq);
+      continue;
+    }
+
+    PolyUOp *src_buf[POLY_MAX_DIMS + 2];
+    PolyUOp **new_srcs = src_buf;
+    if ((size_t)u->n_src > sizeof(src_buf) / sizeof(src_buf[0])) {
+      new_srcs = malloc((size_t)u->n_src * sizeof(PolyUOp *));
+      if (!new_srcs) {
+        ok = false;
+        break;
+      }
+    }
+
+    bool changed = false;
+    for (int i = 0; i < u->n_src; i++) {
+      PolyUOp *src = u->src[i];
+      PolyUOp *mapped = src ? poly_map_get(memo, poly_ptr_hash(src), src, poly_ptr_eq) : NULL;
+      if (!mapped) {
+        if (new_srcs != src_buf) free(new_srcs);
+        ok = false;
+        break;
+      }
+      new_srcs[i] = mapped;
+      if (mapped != src) changed = true;
+    }
+    if (!ok) break;
+
+    PolyUOp *result = u;
+    if (changed) {
+      result = (u->tag != 0 || u->tag_arg.kind != POLY_ARG_NONE)
+                   ? poly_uop_tagged_arg(
+                         ctx, u->op, u->dtype, new_srcs, u->n_src, u->arg, u->tag, u->tag_arg
+                     )
+                   : poly_uop(ctx, u->op, u->dtype, new_srcs, u->n_src, u->arg);
+    }
+    if (new_srcs != src_buf) free(new_srcs);
+    poly_map_set(memo, h, u, result, poly_ptr_eq);
+    poly_map_remove(visiting, h, u, poly_ptr_eq);
+  }
+
+  if (ok) {
+    *out = poly_map_get(memo, poly_ptr_hash(root), root, poly_ptr_eq);
+    if (!*out) ok = false;
+  }
+  if (visiting) poly_map_destroy(visiting);
+  free(stack);
+  return ok;
+}
+
+#ifdef POLY_TESTING
+static _Thread_local int substitute_fail_after = -1;
+
+void poly_test_substitute_fail_after(int count) {
+  substitute_fail_after = count;
+}
+#endif
+
+int poly_uop_substitute_many(
+    PolyCtx *ctx,
+    PolyUOp **roots,
+    int n_roots,
+    PolyUOp **from,
+    PolyUOp **to,
+    int n,
+    PolyUOp **out
+) {
+  if (!ctx || n_roots < 0 || n < 0 || (n_roots > 0 && (!roots || !out)) ||
+      (n > 0 && (!from || !to)))
+    return -1;
+  if (n_roots == 0) return 0;
+  if (n == 0) {
+    for (int i = 0; i < n_roots; i++) {
+      if (!roots[i]) return -1;
+      out[i] = roots[i];
+    }
+    return 0;
+  }
+
+#ifdef POLY_TESTING
+  /* Exercise callers' error publication without exhausting the process heap. */
+  if (substitute_fail_after >= 0 && substitute_fail_after-- == 0) return -1;
+#endif
+  PolyMap *sub_map = poly_map_new((size_t)n * 2 + 16);
+  PolyMap *memo = poly_map_new(256);
+  if (!sub_map || !memo) {
+    if (sub_map) poly_map_destroy(sub_map);
+    if (memo) poly_map_destroy(memo);
+    return -1;
+  }
+
+  for (int i = 0; i < n; i++) {
+    if (!from[i] || !to[i] || from[i] == to[i]) continue;
+    poly_map_set(sub_map, poly_ptr_hash(from[i]), from[i], to[i], poly_ptr_eq);
+  }
+
+  int rc = 0;
+  if (poly_map_len(sub_map) == 0) {
+    for (int i = 0; i < n_roots; i++) {
+      if (!roots[i]) {
+        rc = -1;
+        break;
+      }
+      out[i] = roots[i];
+    }
+  } else {
+    PolyUOp **opaque_pins = NULL;
+    int n_opaque_pins = 0;
+    if (!substitute_collect_opaque_pins(roots, n_roots, sub_map, &opaque_pins, &n_opaque_pins)) {
+      rc = -1;
+    }
+    for (int i = 0; rc == 0 && i < n_opaque_pins; i++) {
+      PolyUOp *body = opaque_pins[i];
+      poly_map_set(memo, poly_ptr_hash(body), body, body, poly_ptr_eq);
+    }
+    free(opaque_pins);
+
+    for (int i = 0; rc == 0 && i < n_roots; i++) {
+      PolyUOp *root = roots[i];
+      if (!root) {
+        rc = -1;
+        break;
+      }
+      PolyUOp *rewritten = poly_map_get(memo, poly_ptr_hash(root), root, poly_ptr_eq);
+      if (!rewritten && (!substitute_iter(ctx, root, sub_map, memo, &rewritten) || !rewritten)) {
+        rc = -1;
+        break;
+      }
+    }
+    /* Pinned UOp.sink(*roots).substitute(...) owns one shared RewriteContext
+     * and reads every SINK source only after the complete ordered traversal.
+     * A later CALL/FUNCTION can therefore identity-pin a body that was also an
+     * earlier root. Read outputs from that final shared memo. */
+    for (int i = 0; rc == 0 && i < n_roots; i++) {
+      out[i] = poly_map_get(memo, poly_ptr_hash(roots[i]), roots[i], poly_ptr_eq);
+      if (!out[i]) rc = -1;
+    }
+  }
+
+  poly_map_destroy(sub_map);
+  poly_map_destroy(memo);
+  return rc;
+}
+
+PolyUOp *poly_uop_substitute(PolyCtx *ctx, PolyUOp *root, PolyUOp **from, PolyUOp **to, int n) {
+  if (!ctx || !root || n <= 0) return root;
+  PolyUOp *result = root;
+  if (poly_uop_substitute_many(ctx, &root, 1, from, to, n, &result) != 0) return root;
+  return result;
+}

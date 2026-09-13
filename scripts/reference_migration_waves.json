@@ -744,7 +744,7 @@
       "symbol_patterns": ["reduce", "sum", "prod", "max", "arg", "softmax", "gradient", "backward"],
       "polygrad_owners": [
         "src/tensor.c",
-        "src/autograd.c",
+        "src/mixin/gradient.c",
         "src/uop/ops.c",
         "src/engine/schedule.c"
       ],

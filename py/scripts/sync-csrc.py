@@ -42,7 +42,7 @@ SOURCES = [
     'src/uop/symbolic.c',
     'src/uop/symbolic.h',
     'src/shape.c',
-    'src/autograd.c',
+    'src/mixin/gradient.c',
     'src/codegen/codegen.c',
     'src/codegen/opt/tc.c',
     'src/codegen/decomp/dtype.c',

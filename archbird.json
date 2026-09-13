@@ -417,7 +417,7 @@
   "components": [
     {"name": "ir", "paths": ["src/uop/ops.c", "src/uop/weak.c", "src/uop/symbolic.c", "src/ir.c", "src/uop/upat.c"], "description": "UOp IR, weak lowering, patterns, and symbolic algebra"},
     {"name": "tensor", "paths": ["src/tensor.c", "src/ops.c", "src/mixin/movement.c", "src/shape.c"], "description": "tensor graph construction and shape semantics"},
-    {"name": "autograd", "paths": ["src/autograd.c"], "description": "gradient construction"},
+    {"name": "autograd", "paths": ["src/mixin/gradient.c"], "description": "gradient construction"},
     {"name": "schedule", "paths": ["src/engine/schedule.c", "src/schedule/**/*.c", "src/placer.c"], "description": "schedule construction, placement, range/index lowering"},
     {"name": "realize", "paths": ["src/engine/realize.c"], "description": "schedule execution and realization"},
     {"name": "codegen", "paths": ["src/codegen/**", "src/render_*.c"], "description": "linearization and backend rendering"},

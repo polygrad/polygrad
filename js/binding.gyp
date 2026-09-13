@@ -6,7 +6,7 @@
         "napi_api.c",
         "csrc/src/alu.c",
         "csrc/src/arena.c",
-        "csrc/src/autograd.c",
+        "csrc/src/mixin/gradient.c",
         "csrc/src/bigint.c",
         "csrc/src/bundle.c",
         "csrc/vendor/cjson/cJSON.c",

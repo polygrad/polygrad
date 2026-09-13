@@ -422,7 +422,7 @@
       "approval": null,
       "evidence": [
         "src/polygrad.h:PolyDevice",
-        "src/autograd.c:grad_reverse_pass",
+        "src/mixin/gradient.c:compute_gradient",
         "references/tinygrad_latest/tinygrad/mixin/gradient.py:pm_gradient",
         "PLAN_CORE_20260720.md:WS6"
       ],
@@ -791,7 +791,7 @@
       "approval": null,
       "evidence": [
         "references/tinygrad_latest/tinygrad/mixin/gradient.py:call_gradient",
-        "src/autograd.c:grad_reverse_pass",
+        "src/mixin/gradient.c:compute_gradient",
         "py/polygrad/function.py:_function",
         "test/test_uop.c:graph_owner_function_unsupported_gradient_flags_fail_closed",
         "py/tests/test_function.py:test_function_rejects_unimplemented_custom_gradient",
@@ -810,7 +810,7 @@
       "approval": null,
       "evidence": [
         "references/tinygrad_latest/tinygrad/mixin/gradient.py:compute_gradient",
-        "src/autograd.c:grad_reverse_pass",
+        "src/mixin/gradient.c:compute_gradient",
         "temp/graph-owner-closeout-20260912.VLB3sF/owner-review.md"
       ],
       "close_when": "Implement the pinned diagnostic provenance contract or explicitly approve its omission for the supported release."
