@@ -694,6 +694,10 @@ kernels are planned for larger matrices.
 
 `jit` follows tinygrad's three-call shape: first call runs normally, second call
 captures, later calls replay.
+Tensor host-data reads during capture are rejected: their values would otherwise
+be baked into the replay. Read results outside the captured function. Following
+Tinygrad, replay snapshots an input when it aliases a captured write-only output;
+ordinary inputs and explicit in-place updates do not need this extra copy.
 
 Python:
 

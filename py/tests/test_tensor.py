@@ -1693,6 +1693,51 @@ print('leaving_live_instance')
 
 
 class TestJit:
+    @pytest.mark.parametrize('operation, expected', [
+        ('__iadd__', [10, 18]), ('__isub__', [6, 14]),
+        ('__imul__', [16, 32]), ('__itruediv__', [4, 8]),
+    ])
+    def test_jit_correctness_inplace_operator_identity(self, operation, expected):
+        x = Tensor([8.0, 16.0]).realize()
+        assert getattr(x, operation)(2) is x
+        np.testing.assert_equal(x.numpy(), expected)
+
+    def test_jit_correctness_inplace_keeps_caller_tensor(self):
+        @Jit
+        def f(x):
+            x += 1
+            return x.realize()
+        x = Tensor([0]).contiguous().realize()
+        for _ in range(5):
+            f(x)
+        assert x.item() == 5
+
+    @pytest.mark.parametrize('read', ['item', 'tolist', 'numpy', 'data'])
+    def test_jit_correctness_host_reads_reject_capture_and_recover(self, read):
+        @Jit
+        def f(x):
+            getattr(x, read)()
+            return x + 1
+        x = Tensor([1.0]).realize()
+        f(x)
+        with pytest.raises(JitError, match='cannot access tensor data during JIT capture'):
+            f(x)
+        other = Jit(lambda value: value + 2)
+        for _ in range(3):
+            np.testing.assert_equal(other(x).numpy(), [3])
+
+    def test_jit_correctness_protects_output_fed_back_as_input(self):
+        @Jit
+        def f(buf, frame):
+            joined = buf[1:].cat(frame)
+            return joined.contiguous(), joined[:1].contiguous()
+        buf = Tensor([0, 1, 2]).contiguous().realize()
+        for i in range(6):
+            expected = buf.numpy()[1:].tolist() + [10 + i]
+            buf, first = f(buf, Tensor([10 + i]).contiguous().realize())
+            np.testing.assert_equal(buf.numpy(), expected)
+            np.testing.assert_equal(first.numpy(), expected[:1])
+
     def test_runtime_dispose_releases_its_retained_jits_first(self):
         runtime = Runtime(device='interp')
         other_runtime = Runtime(device='interp')

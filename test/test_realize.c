@@ -6366,6 +6366,55 @@ TEST(realize, schedule_with_vars_tril_root_has_no_early_loads) {
   PASS();
 }
 
+TEST(realize, jit_correctness_protects_shared_output_input) {
+  PolyCtx *ctx = poly_ctx_new();
+  poly_ctx_set_preferred_device(ctx, POLY_DEVICE_CPU);
+  float initial[] = {0, 1, 2}, incoming[] = {10};
+  PolyTensor *buf = initialized_f32_tensor(ctx, (int64_t[]){3}, 1, initial, POLY_DEVICE_CPU, NULL);
+  PolyTensor *frame =
+      initialized_f32_tensor(ctx, (int64_t[]){1}, 1, incoming, POLY_DEVICE_CPU, NULL);
+  ASSERT_NOT_NULL(buf);
+  ASSERT_NOT_NULL(frame);
+  PolyTensor *inputs[] = {buf, frame};
+  PolyJit *jit = poly_jit_new(ctx);
+  ASSERT_NOT_NULL(jit);
+  ASSERT_INT_EQ(poly_jit_begin_capture(jit, inputs, 2), 0);
+  PolyTensor *tail = poly_tensor_shrink(ctx, buf, (int64_t[][2]){{1, 3}}, 1);
+  PolyUOp *parts[] = {poly_tensor_uop(tail), poly_tensor_uop(frame)};
+  PolyUOp *cat = poly_cat(ctx, parts, 2, 0);
+  PolyTensor *joined =
+      poly_tensor_create_with_roots(ctx, cat, cat, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *head = poly_tensor_shrink(ctx, joined, (int64_t[][2]){{0, 1}}, 1);
+  PolyTensor *outputs[] = {poly_tensor_contiguous(ctx, joined), poly_tensor_contiguous(ctx, head)};
+  ASSERT_NOT_NULL(outputs[0]);
+  ASSERT_NOT_NULL(outputs[1]);
+  PolyTensor *realized[2];
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, outputs, 2, realized), 0);
+  ASSERT_INT_EQ(poly_jit_end_capture(jit, ctx->tensors, ctx->n_tensors), 0);
+  PolyUOp *linear = poly_jit_captured_linear(jit);
+  ASSERT_NOT_NULL(linear);
+  ASSERT_INT_EQ(linear->op, POLY_OP_LINEAR);
+  inputs[0] = outputs[0];
+  for (int step = 0; step < 12; step++) {
+    ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+    float before[3], after[3], first;
+    PolyUOp *out = (PolyUOp *)poly_uop_get_buffer_identity(poly_tensor_uop(outputs[0]));
+    PolyUOp *first_buf = (PolyUOp *)poly_uop_get_buffer_identity(poly_tensor_uop(outputs[1]));
+    ASSERT_INT_EQ(poly_buffer_read(ctx, out, before, sizeof(before)), 0);
+    ASSERT_INT_EQ(poly_jit_run(jit, inputs, 2), 0);
+    ASSERT_PTR_EQ(poly_jit_captured_linear(jit), linear);
+    ASSERT_INT_EQ(poly_buffer_read(ctx, out, after, sizeof(after)), 0);
+    ASSERT_INT_EQ(poly_buffer_read(ctx, first_buf, &first, sizeof(first)), 0);
+    ASSERT_FLOAT_EQ(after[0], before[1], 0.0);
+    ASSERT_FLOAT_EQ(after[1], before[2], 0.0);
+    ASSERT_FLOAT_EQ(after[2], 10, 0.0);
+    ASSERT_FLOAT_EQ(first, before[1], 0.0);
+  }
+  poly_jit_free(jit);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(realize, poly_jit_replays_raw_tensor_realize_with_new_input) {
   PolyCtx *ctx = poly_ctx_new();
 

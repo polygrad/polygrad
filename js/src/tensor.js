@@ -14,6 +14,7 @@
 
 const { UOp } = require('./uop/ops')
 const { PolyAsyncRequired } = require('./errors')
+const { assertJitBufferAccess } = require('./jit')
 
 /**
  * Strong frontend owner registry. Maps C-side PolyBuffer* address value ->
@@ -1049,6 +1050,7 @@ function createBoundTensorClass(runtime) {
     }
 
     _readBufferBytesWith(readBuffer) {
+      assertJitBufferAccess()
       const { ffi, ctx } = this._rt._core
       const numel = this.numel()
       const AT = TA_BY_DTYPE[this._dtype] || Float32Array
@@ -1094,6 +1096,7 @@ function createBoundTensorClass(runtime) {
     }
 
     async _readBufferBytesAsync() {
+      assertJitBufferAccess()
       const { ffi, ctx } = this._rt._core
       const numel = this.numel()
       const AT = TA_BY_DTYPE[this._dtype] || Float32Array
@@ -1134,6 +1137,7 @@ function createBoundTensorClass(runtime) {
         const AT = TA_BY_DTYPE[this._dtype] || Float32Array
         return new AT(0)
       }
+      assertJitBufferAccess()
       let t = this
       if (this._dtype === 'weakint') t = t.cast('int32')
       if (this._dtype === 'weakfloat' || this._dtype === 'float16' ||
@@ -1154,6 +1158,7 @@ function createBoundTensorClass(runtime) {
         const AT = TA_BY_DTYPE[this._dtype] || Float32Array
         return new AT(0)
       }
+      assertJitBufferAccess()
       let t = this
       if (this._dtype === 'weakint') t = t.cast('int32')
       if (this._dtype === 'weakfloat' || this._dtype === 'float16' ||

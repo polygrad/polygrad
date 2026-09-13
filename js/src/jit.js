@@ -2,6 +2,13 @@
 
 const capturing = []
 
+// Tinygrad Tensor._buffer rejects reads whose values would be baked into capture.
+function assertJitBufferAccess() {
+  if (capturing.length) {
+    throw new Error('cannot access tensor data during JIT capture, the value will be baked in')
+  }
+}
+
 function flattenTensors(value, Tensor, out) {
   if (value instanceof Tensor) {
     out.push(value)
@@ -530,4 +537,4 @@ function createBoundJit(runtime) {
   return jit
 }
 
-module.exports = { createBoundJit }
+module.exports = { createBoundJit, assertJitBufferAccess }

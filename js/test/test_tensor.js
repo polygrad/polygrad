@@ -1397,6 +1397,56 @@ async function runTensorTests(pg, createRuntime) {
     assertClose(await got.toArray(), expected, 1e-4)
   })
 
+  await test('jit correctness protects output fed back as input', async () => {
+    const f = pg.jitAsync((buf, frame) => {
+      const joined = buf.shrink([[1, 3]]).cat(frame)
+      return [joined.contiguous(), joined.shrink([[0, 1]]).contiguous()]
+    })
+    try {
+      let buf = new Tensor(new Float32Array([0, 1, 2])).contiguous()
+      for (let i = 0; i < 6; i++) {
+        const expected = Array.from(await buf.toArrayAsync()).slice(1).concat(10 + i)
+        const outputs = await f(buf, new Tensor(new Float32Array([10 + i])).contiguous())
+        buf = outputs[0]
+        assertClose(await buf.toArrayAsync(), expected)
+        assertClose(await outputs[1].toArrayAsync(), expected.slice(0, 1))
+      }
+    } finally { await f.dispose() }
+  })
+
+  await test('jit correctness protects overlapping single-output replay', async () => {
+    const n = 8192
+    const f = pg.jitAsync((buf, frame) => buf.shrink([[n / 2, n]]).cat(frame).contiguous())
+    try {
+      let buf = new Tensor(new Float32Array(n)).contiguous()
+      for (let i = 0; i < 5; i++) {
+        buf = await f(buf, new Tensor(new Float32Array(n / 2).fill(i + 1)).contiguous())
+        const expected = new Float32Array(n).fill(i)
+        expected.fill(i + 1, n / 2)
+        assertClose(await buf.toArrayAsync(), expected)
+      }
+    } finally { await f.dispose() }
+  })
+
+  for (const read of ['array', 'batch']) await test(`jit correctness rejects capture ${read} reads and recovers`, async () => {
+    const f = pg.jitAsync(async x => {
+      if (read === 'batch') await Tensor.toTypedArraysAsync(x)
+      else await x.toArrayAsync()
+      return x.add(1)
+    })
+    const x = new Tensor(new Float32Array([1, 2]))
+    try {
+      assertClose(await (await f(x)).toArrayAsync(), [2, 3])
+      let error
+      try { await f(x) } catch (e) { error = e }
+      assert(error && /cannot access tensor data during JIT capture/.test(error.message), 'capture read must fail explicitly')
+    } finally { await f.dispose() }
+    const other = pg.jitAsync(x => x.add(2))
+    try {
+      for (let i = 0; i < 3; i++) assertClose(await (await other(x)).toArrayAsync(), [3, 4])
+    } finally { await other.dispose() }
+  })
+
   await test('jit captures customKernel and replays after input update', async () => {
     function addKernel(c, a, b) {
       c = c.flatten(); a = a.flatten(); b = b.flatten()

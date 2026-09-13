@@ -1375,6 +1375,10 @@ class Tensor:
     def _buffer(self) -> Buffer:
         """Return the runtime Buffer backing this tensor.
         Matches tinygrad's temporary base-dtype/contiguous readback path."""
+        from .jit import capturing, JitError
+        from .helpers import getenv
+        if capturing and not getenv('UNSAFE_ALLOW_JIT_BUFFER', 0):
+            raise JitError('cannot access tensor data during JIT capture, the value will be baked in')
         if str(self._device).upper().startswith('DISK:'):
             self.realize()
             identity = self.uop.buffer
@@ -1810,6 +1814,18 @@ class Tensor:
 
     def __add__(self, other):
         return self._binop(other, 'ADD')
+
+    def __iadd__(self, other):
+        return self.assign(self.add(other))
+
+    def __isub__(self, other):
+        return self.assign(self.sub(other))
+
+    def __imul__(self, other):
+        return self.assign(self.mul(other))
+
+    def __itruediv__(self, other):
+        return self.assign(self.div(other))
 
     def __radd__(self, other):
         # Pinned __radd__ preserves scalar-first source order through

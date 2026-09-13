@@ -1,6 +1,7 @@
 /* jit.c -- tinygrad-style JIT capture/replay for raw Tensor realizes. */
 
 #include "engine/jit.h"
+#include "engine/schedule.h"
 #include "uop/ops.h"
 #include "codegen/codegen.h"
 #include "ctx.h"
@@ -28,6 +29,7 @@ struct PolyJit {
   int n_var_bindings;
   int var_bindings_cap;
   PolyUOp *captured_linear;
+  PolyMap *written_uops; /* Borrowed descendants of the retained captured LINEAR. */
   bool captured_root_retained;
   bool prune;
   bool capturing;
@@ -43,6 +45,8 @@ static int poly_jit_run_captured_linear(
 
 static void poly_jit_clear(PolyJit *jit) {
   if (!jit) return;
+  if (jit->written_uops) poly_map_destroy(jit->written_uops);
+  jit->written_uops = NULL;
   if (jit->captured_root_retained && jit->ctx && jit->captured_linear)
     poly_uop_release(jit->ctx, jit->captured_linear);
   for (int i = 0; jit->ctx && i < jit->n_linears; i++)
@@ -852,6 +856,65 @@ static int poly_jit_override_var_binding(
   return poly_jit_append_var_binding(items, n_items, cap_items, var, value);
 }
 
+/* Pinned CapturedJit._written_uops: exclude read/write arguments and PARAMs.
+ * Build once, so ordinary replay only performs identity-set lookups. */
+static int poly_jit_written_uops(PolyJit *jit) {
+  int n = 0;
+  PolyUOp **topo = poly_toposort_alloc(jit->ctx, jit->captured_linear, &n);
+  if (!topo) return -1;
+  jit->written_uops = poly_map_new(16);
+  int rc = -1;
+  for (int i = 0; i < n; i++) {
+    PolyUOp *call = topo[i];
+    if (call->op != POLY_OP_CALL) continue;
+    int argc = poly_call_n_buffer_args(call);
+    if (argc <= 0) continue;
+    bool *roles = calloc((size_t)argc, 2 * sizeof(*roles));
+    if (!roles) goto done;
+    if (poly_call_get_outs_ins(jit->ctx, call, roles, roles + argc, argc) != 0) {
+      free(roles);
+      goto done;
+    }
+    for (int k = 0; k < argc; k++) {
+      if (!roles[k] || roles[argc + k]) continue;
+      PolyUOp *u = poly_call_buffer_arg(call, k), *base;
+      PolyShape shape;
+      int64_t numel;
+      size_t offset;
+      if (poly_uop_contiguous_view_info(jit->ctx, u, &base, &shape, &numel, &offset)) u = base;
+      if (u && u->op == POLY_OP_BUFFER)
+        poly_map_set(jit->written_uops, poly_ptr_hash(u), u, u, poly_ptr_eq);
+    }
+    free(roles);
+  }
+  rc = 0;
+done:
+  poly_toposort_free(topo);
+  return rc;
+}
+
+/* Pinned engine/jit.py _copy_input emits a same-device COPY CALL. The returned
+ * buffer owns a retain until the enclosing replay finishes, including errors. */
+static PolyUOp *poly_jit_copy_input(PolyJit *jit, PolyUOp *u) {
+  PolyCtx *ctx = jit->ctx;
+  PolyUOp *device = poly_uop_device_uop_cached(ctx, u, NULL);
+  if (!device) return NULL;
+  PolyUOp *copy = poly_uop_new_buffer(
+      ctx, device, poly_uop_numel(ctx, u), u->dtype, poly_ctx_next_unique_id(ctx)
+  );
+  if (!copy || poly_uop_retain(ctx, copy) != 0) return NULL;
+  PolyUOp *body = poly_copy_to_device_uop(ctx, u, device);
+  PolyUOp *args[] = {copy, u};
+  PolyUOp *call = body ? poly_uop_call(ctx, body, args, 2) : NULL;
+  PolyUOp *linear =
+      call ? poly_uop(ctx, POLY_OP_LINEAR, POLY_VOID, &call, 1, poly_arg_none()) : NULL;
+  if (!linear || poly_run_linear(ctx, linear, NULL, 0, NULL, 0, true, false, false) != 0) {
+    poly_uop_release(ctx, copy);
+    return NULL;
+  }
+  return copy;
+}
+
 static int poly_jit_run_captured_linear(
     PolyJit *jit,
     PolyUOp **current_inputs,
@@ -860,6 +923,8 @@ static int poly_jit_run_captured_linear(
 ) {
   if (!jit || !jit->captured_linear || (jit->n_inputs > 0 && !current_inputs)) return -1;
   PolyVarBinding *effective = NULL;
+  PolyUOp **concrete = NULL;
+  int rc = -1;
   int n_effective = 0, cap_effective = 0;
   for (int i = 0; i < jit->n_var_bindings; i++)
     if (poly_jit_override_var_binding(
@@ -872,16 +937,31 @@ static int poly_jit_run_captured_linear(
             &effective, &n_effective, &cap_effective, var_bindings[i].var, var_bindings[i].value
         ) != 0)
       goto fail;
-  int rc = poly_run_linear(
-      jit->ctx, jit->captured_linear, effective, n_effective, current_inputs, jit->n_inputs, true,
-      true, false
+  if (!jit->written_uops && poly_jit_written_uops(jit) != 0) goto fail;
+  for (int i = 0; i < jit->n_inputs; i++) {
+    PolyUOp *u = current_inputs[i];
+    if (!poly_map_get(jit->written_uops, poly_ptr_hash(u), u, poly_ptr_eq)) continue;
+    if (!concrete) {
+      concrete = malloc((size_t)jit->n_inputs * sizeof(*concrete));
+      if (!concrete) goto fail;
+      memcpy(concrete, current_inputs, (size_t)jit->n_inputs * sizeof(*concrete));
+    }
+    PolyUOp *copy = poly_jit_copy_input(jit, u);
+    if (!copy) goto fail;
+    concrete[i] = copy;
+  }
+  rc = poly_run_linear(
+      jit->ctx, jit->captured_linear, effective, n_effective, concrete ? concrete : current_inputs,
+      jit->n_inputs, true, true, false
   );
+fail:
+  if (concrete) {
+    for (int i = 0; i < jit->n_inputs; i++)
+      if (concrete[i] != current_inputs[i]) poly_uop_release(jit->ctx, concrete[i]);
+    free(concrete);
+  }
   free(effective);
   return rc;
-
-fail:
-  free(effective);
-  return -1;
 }
 
 int poly_jit_run_with_vars(
