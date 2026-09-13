@@ -1624,6 +1624,16 @@ async function runTensorTests(pg, createRuntime) {
     assert(threw, 'shape-only canRun queries should fail explicitly')
   })
 
+  await test('runtime capability probe reports construction budgets', async () => {
+    // Compilation queries alone do not initialize the lazy WebGPU runtime.
+    const x = new Tensor([1, 2])
+    assertClose(await x.add(1).toArray(), [2, 3])
+    assert(pg.canRun({ op: 'add', dtype: 'float32', shape: [2] }), 'add should compile')
+    let budgetError
+    try { pg.canRun({ op: 'qr', dtype: 'float32', shape: [17, 17] }) } catch (e) { budgetError = e }
+    assert(budgetError && /cannot prove/.test(budgetError.message), 'probe budget is not unsupported')
+  })
+
   await test('runtime compile wrapper warms capture and replays', async () => {
     assert(typeof pg.compile === 'function', 'runtime should expose pg.compile')
     const sample = new Tensor(new Float32Array([1, 2, 3]))

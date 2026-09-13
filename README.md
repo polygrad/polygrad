@@ -420,11 +420,16 @@ independent devices, or a package boundary that must outlive/dispose separately.
 The C core owns graph construction, scheduling, placement, runtime caches, and
 backend dispatch. Frontends are thin wrappers over the same concepts.
 
+For C embedding, `polygrad.h` exposes context controls and ABI lookup;
+`tensor.h` adds typed creation/composition APIs. `frontend.h` is the language-
+binding adapter surface: dtype IDs, scalar arguments and opaque-handle access.
+Core implementations do not call these FFI adapters.
+
 Low-level `UOp.variable` bounds retain integer, floating-point and boolean
 endpoints independently of the variable dtype. C takes scalar `PolyArg` values;
 Python accepts `int`/`float`/`bool`; JavaScript uses `pg.uop.variable(...)`, with
 `BigInt` for exact wide integers. NaN, reversed and nonnumeric bounds are rejected.
-Current packages require C ABI81 and graph formats PGIR18/PGPM10; incompatible
+Current packages require C ABI83 and graph formats PGIR18/PGPM10; incompatible
 artifacts are rejected. Typed endpoints can exceed the runtime's signed64
 variable-binding domain; metadata support does not imply executable bindings.
 

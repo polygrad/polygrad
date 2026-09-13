@@ -4879,14 +4879,6 @@ static napi_value napi_poly_sink_n(napi_env env, napi_callback_info info) {
 
 /* ── Cache cleanup ─────────────────────────────────────────────────────── */
 
-static napi_value napi_poly_cpu_cache_flush(napi_env env, napi_callback_info info) {
-  (void)info;
-  poly_cpu_cache_flush();
-  napi_value undef;
-  napi_get_undefined(env, &undef);
-  return undef;
-}
-
 /* ── PolyModel / model runtime ────────────────────────────────────── */
 
 static napi_value napi_poly_model_from_ir(napi_env env, napi_callback_info info) {
@@ -7128,7 +7120,6 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_abi_version", napi_poly_abi_version),
 
       /* Cache cleanup */
-      DECLARE_NAPI_METHOD("poly_cpu_cache_flush", napi_poly_cpu_cache_flush),
 
       /* PolyModel / model runtime */
       DECLARE_NAPI_METHOD("poly_model_from_ir", napi_poly_model_from_ir),

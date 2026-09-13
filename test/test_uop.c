@@ -2953,6 +2953,69 @@ TEST(uop, can_run_op_probes_backend_lowering) {
   PASS();
 }
 
+TEST(uop, can_run_op_reports_declined_probe_budgets) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int f32 = poly_dtype_id_by_name("float32");
+  /* A probe's construction budget is not a backend capability verdict. */
+  ASSERT_INT_EQ(
+      poly_can_run_op(ctx, POLY_DEVICE_INTERP, "qr", (int)f32, (int64_t[]){17, 17}, 2), -2
+  );
+  ASSERT_INT_EQ(poly_can_run_op(ctx, POLY_DEVICE_INTERP, "solve", f32, (int64_t[]){13, 13}, 2), -2);
+  ASSERT_INT_EQ(
+      poly_can_run_op(ctx, POLY_DEVICE_INTERP, "matmul", f32, (int64_t[]){1, 65, 65}, 3), -2
+  );
+  ASSERT_INT_EQ(poly_can_run_op(ctx, POLY_DEVICE_INTERP, "add", f32, (int64_t[]){9000}, 1), -2);
+  ASSERT_INT_EQ(poly_can_run_op(ctx, POLY_DEVICE_INTERP, "qr", f32, (int64_t[]){129, 129}, 2), -2);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(uop, ffi_creation_adapters_delegate_to_typed_core) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int f32 = poly_dtype_id_by_name("float32"), i32 = poly_dtype_id_by_name("int32");
+  int64_t shape[] = {2, 3};
+  ASSERT_PTR_EQ(poly_const_int_by_id(ctx, 3, i32), poly_const_int_dtype(ctx, 3, POLY_INT32));
+  ASSERT_PTR_EQ(
+      poly_const_uint_by_id(ctx, UINT64_MAX, i32),
+      poly_const_uint_dtype(ctx, UINT64_MAX, POLY_INT32)
+  );
+  ASSERT_PTR_EQ(
+      poly_const_float_by_id(ctx, 1.5, f32), poly_const_float_dtype(ctx, 1.5, POLY_FLOAT32)
+  );
+  ASSERT_PTR_EQ(
+      poly_full_int_by_id(ctx, shape, 2, 3, i32), poly_full_int_dtype(ctx, shape, 2, 3, POLY_INT32)
+  );
+  ASSERT_PTR_EQ(
+      poly_full_uint_by_id(ctx, shape, 2, 3, i32),
+      poly_full_uint_dtype(ctx, shape, 2, 3, POLY_INT32)
+  );
+  ASSERT_PTR_EQ(
+      poly_full_float_by_id(ctx, shape, 2, 1.5, f32),
+      poly_full_float_dtype(ctx, shape, 2, 1.5, POLY_FLOAT32)
+  );
+  ASSERT_PTR_EQ(
+      poly_full_invalid_by_id(ctx, shape, 2, i32),
+      poly_full_invalid_dtype(ctx, shape, 2, POLY_INT32)
+  );
+  ASSERT_PTR_EQ(
+      poly_arange_int_by_id(ctx, 2, 10, 2, i32), poly_arange_int_dtype(ctx, 2, 10, 2, POLY_INT32)
+  );
+  ASSERT_PTR_EQ(
+      poly_arange_float_by_id(ctx, 1, 3, 0.5, f32),
+      poly_arange_float_dtype(ctx, 1, 3, 0.5, POLY_FLOAT32)
+  );
+  ASSERT_PTR_EQ(
+      poly_linspace_by_id(ctx, 1, 3, 3, f32), poly_linspace_dtype(ctx, 1, 3, 3, POLY_FLOAT32)
+  );
+  ASSERT_PTR_EQ(poly_eye_by_id(ctx, 2, 3, f32), poly_eye_dtype(ctx, 2, 3, POLY_FLOAT32));
+  ASSERT_TRUE(poly_full_int_by_id(ctx, shape, 2, 3, -1) == NULL);
+  ASSERT_TRUE(poly_arange_float_by_id(ctx, 0, 3, 1, -1) == NULL);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(uop, collect_ordered_buffers_uses_transient_toposort) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_test_buffer(ctx, POLY_FLOAT32, 4);

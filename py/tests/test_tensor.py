@@ -839,6 +839,8 @@ print('leaving_live_instance')
     def test_can_run_probes_core_op_shape_support(self):
         assert can_run('add', dtype='float32', shape=(4,))
         assert can_run('add', dtype=dtypes.float16, shape=(4,))
+        with pytest.raises(RuntimeError, match='cannot prove'):
+            can_run('qr', dtype='float32', shape=(17, 17))
         assert can_run('matmul', dtype='float32', shapes=((2, 3), (3, 4)))
         assert can_run('gather', dtype='float32', shape=(2, 3))
         assert can_run('sort', dtype='float32', shape=(2, 3))

@@ -41,6 +41,7 @@ def main():
                 # Context controls must be usable without compiler-owner headers.
                 unit += "size_t (*cache_len)(PolyCtx *) = poly_schedule_cache_len;\n"
                 unit += "int (*cache_clear)(PolyCtx *) = poly_schedule_cache_clear;\n"
+                unit += "int (*abi_version)(void) = poly_abi_version;\n"
             subprocess.run(shlex.split(compiler) + [f"-std={standard}", "-Werror",
                            "-Isrc", "-x", language, "-fsyntax-only", "-"],
                            input=unit, text=True, cwd=ROOT, check=True)

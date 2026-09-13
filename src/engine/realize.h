@@ -113,6 +113,17 @@ PolyUOp *poly_transform_to_call_with_map(
     int *out_map_n
 );
 
+/* Diagnostic: 1 compiled, 0 unsupported/compile failure, -1 invalid query,
+ * -2 construction budget exceeded. No execution or value check is performed. */
+int poly_can_compile_op(
+    PolyCtx *ctx,
+    PolyDevice device,
+    const char *op,
+    PolyDType dtype,
+    const int64_t *shape,
+    int n_shape
+);
+
 #ifdef __cplusplus
 }
 #endif

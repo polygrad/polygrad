@@ -810,3 +810,7 @@ void poly_ctx_reserve_buf_tag(PolyCtx *ctx, int32_t tag) {
   if (!ctx || tag <= 0) return;
   if (ctx->next_buf_tag <= tag) ctx->next_buf_tag = tag + 1;
 }
+
+int poly_abi_version(void) {
+  return POLYGRAD_ABI_VERSION;
+}

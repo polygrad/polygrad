@@ -11,16 +11,11 @@
  */
 
 #include "test_harness.h"
-#include "../src/frontend.h"
 
 /* Global test registry — defined here, declared extern in test_harness.h */
 TestEntry g_tests[MAX_TESTS];
 int g_n_tests = 0;
 int g_current_test_skipped = 0;
-
-static void cleanup_caches(void) {
-  poly_cpu_cache_flush();
-}
 
 static const char *slow_suites[] = {"nn", NULL};
 
@@ -33,7 +28,6 @@ static int is_slow(const char *suite) {
 int main(int argc, char **argv) {
   /* Keep crash diagnostics useful when stdout is redirected by Make/CI. */
   setvbuf(stdout, NULL, _IONBF, 0);
-  atexit(cleanup_caches);
   int fast = 0;
   int common = 0;
   int require_no_skips = 0;

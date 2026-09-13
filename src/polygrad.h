@@ -10,7 +10,7 @@
 
 /* Public C/frontend ABI version. Bump when exported symbols or public struct
  * layouts used by frontends change. */
-#define POLYGRAD_ABI_VERSION 82
+#define POLYGRAD_ABI_VERSION 83
 
 #include <stdint.h>
 #include <stddef.h>
@@ -1472,6 +1472,8 @@ struct PolyUOp {
  * may reclaim both residency and an unretained UOp record. */
 
 /* Context owns the arena, CSE, to_program/runtime caches, and all UOps. */
+/* Version query is public to native C and language bindings alike. */
+int poly_abi_version(void);
 PolyCtx *poly_ctx_new(void);
 void poly_ctx_destroy(PolyCtx *ctx);
 /* Explicit safe-point collection for retired owners. */

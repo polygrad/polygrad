@@ -19,6 +19,7 @@
         "csrc/src/dtype.c",
         "csrc/src/engine/jit.c",
         "csrc/src/engine/realize.c",
+        "csrc/src/engine/capability.c",
         "csrc/src/utils.c",
         "csrc/src/engine/schedule.c",
         "csrc/src/frontend.c",

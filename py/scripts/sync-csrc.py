@@ -31,6 +31,7 @@ SOURCES = [
     'src/placer.c',
     'src/engine/jit.c',
     'src/engine/realize.c',
+    'src/engine/capability.c',
     'src/uop/ops.c',
     'src/uop/spec.c',
     'src/uop/movement.c',
