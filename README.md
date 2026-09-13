@@ -766,6 +766,41 @@ make test-browser-matrix
 `test-browser-matrix` adds non-WebGPU Playwright coverage across Chromium,
 Firefox, and installed Chrome/Chromium executables where available.
 
+`make test-all` is the functional backend/frontend matrix. For complete
+CUDA/Wasm candidate acceptance, use:
+
+```bash
+make test-release-list  # inspect the gate list without running it
+make test-release PYTHON=/path/to/test/python HF_PYTHON=/path/to/hf/python
+```
+
+`test-release` runs maintained targets serially, including common and specific
+CUDA/X86 C tests, INTERP, Python and Node lanes, sanitized Wasm controls,
+browser auto/INTERP/WebGPU and Qwen, strict HF/Qwen fixtures, isolated Python/npm
+installs, model interchange, value/graph/upstream parity, migration audits,
+analysis, bounded fuzz, smoke regression and frozen HLB semantic/timing gates.
+CUDA and browser WebGPU are required; HIP is explicitly excluded for this
+candidate. Optional MSan/TSan/Fil-C, legacy packages, research benchmarks and
+the additional browser-executable matrix remain separate targets.
+
+Provide the documented toolchains, pinned `PARITY_PY` environment, fixtures,
+writable caches and browser display. `PYTHON` selects the ordinary frontend and
+package-test environment; `HF_PYTHON` selects the HF reference stack. Override
+`QWEN3_GGUF`, `BENCH_BASELINE` and `MIGRATION_EVIDENCE` as needed. The runner
+does not download missing fixtures, approve debts, or update baselines itself.
+Individual targets retain their existing package/network behavior.
+
+Results go to a fresh `temp/release-*` directory, or a new `RELEASE_DIR` supplied
+by the caller. Each gate gets a command log, exit code and elapsed time in
+`summary.json`; test counts and skips remain in the raw logs. The runner prints
+the final summary after all gates finish, continues after failures, and exits
+nonzero if any gate fails. Interrupted runs terminate their child process group
+and mark remaining gates unrun. Analyzer warnings and incomplete migration
+audits are failures, not automatic release exclusions; a passing upstream ratchet
+does not mean every upstream test passed. This target never publishes packages.
+`make test-release-runner` tests orchestration using small Make fixtures without
+running the release matrix.
+
 Migration audit generation and checking use `PARITY_PY` (CPython 3.11).
 `ast.dump` hashes are interpreter-specific; direct invocations with another
 Python version are rejected. Durable, partial review records live in

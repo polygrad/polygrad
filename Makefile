@@ -623,10 +623,10 @@ test-headers:
 	$(PYTHON) scripts/check-headers.py
 
 test-py: verify-source-mirrors build/libpolygrad.so
-	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 POLYGRAD_LIB=build/libpolygrad.so PYTHONPATH=py python -m pytest py/tests/ -v
+	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 POLYGRAD_LIB=build/libpolygrad.so PYTHONPATH=py $(PYTHON) -m pytest py/tests/ -v
 
 test-py-x86: verify-source-mirrors build/libpolygrad.so
-	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 DEV=X86 POLY_DEVICE=x86 POLYGRAD_LIB=build/libpolygrad.so PYTHONPATH=py python -m pytest py/tests/test_tensor.py py/tests/test_nn.py py/tests/test_model.py py/tests/test_hf.py py/tests/test_hf_e2e.py -v
+	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 DEV=X86 POLY_DEVICE=x86 POLYGRAD_LIB=build/libpolygrad.so PYTHONPATH=py $(PYTHON) -m pytest py/tests/test_tensor.py py/tests/test_nn.py py/tests/test_model.py py/tests/test_hf.py py/tests/test_hf_e2e.py -v
 
 test-js: test-js-wasm test-js-native test-js-package
 
@@ -638,12 +638,16 @@ test-js-native: verify-source-mirrors js/build/Release/polygrad_napi.node
 	$(NODE) js/test/test_native.js
 	$(NODE) --expose-gc js/test/test_gc.js native
 
+.PHONY: test-js-native-gc
+test-js-native-gc: verify-source-mirrors js/build/Release/polygrad_napi.node
+	$(NODE) --expose-gc js/test/test_gc.js native
+
 test-js-package: verify-source-mirrors wasm-pkg
 	cd js && bash scripts/build-browser.sh && $(NODE) test/test_package_exports.js
 
 test-model-interchange: verify-source-mirrors build/libpolygrad.so js/build/Release/polygrad_napi.node wasm-pkg
 	PYTHONPATH=py POLYGRAD_LIB=$(abspath build/libpolygrad.so) \
-		python test/test_model_interchange.py --cores native,wasm
+		$(PYTHON) test/test_model_interchange.py --cores native,wasm
 
 js/build/Release/polygrad_napi.node: build/libpolygrad.a js/binding.gyp js/napi_api.c
 	cd js && npm run build:native
@@ -721,6 +725,27 @@ endif
 test-all: $(TEST_ALL_DEPS)
 	@echo ""
 	@echo "=== test-all: all backends passed ==="
+
+# Full candidate acceptance, not publication. The runner forces CUDA on/HIP
+# off, serializes children even under make -j, and retains all failing gates.
+# Explicit forwarding preserves tool/fixture choices without inheriting -i/-n
+# or jobserver flags. Keep this a normal recipe so make -n never starts tests.
+RELEASE_DIR ?=
+# Indirection is intentional: a literal $(MAKE) in the recipe causes GNU Make
+# to execute it under -n, even though this recipe invokes Python, not Make.
+RELEASE_MAKE := $(MAKE)
+RELEASE_MAKE_VARS = CC AR EMCC EMSDK_PYTHON NODE NPM PYTHON PARITY_PY HF_PYTHON \
+                   QWEN3_GGUF BENCH_BASELINE MIGRATION_EVIDENCE
+.PHONY: test-release test-release-list test-release-runner
+test-release:
+	@$(PARITY_PY) scripts/test_release.py --make '$(RELEASE_MAKE)' --output '$(RELEASE_DIR)' \
+		$(foreach var,$(RELEASE_MAKE_VARS),--make-var '$(var)=$($(var))')
+
+test-release-list:
+	@$(PARITY_PY) scripts/test_release.py --list
+
+test-release-runner:
+	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 $(PARITY_PY) -m pytest -q py/tests/test_release_runner.py
 
 wasm: build/polygrad.js build/polygrad.wasm
 
