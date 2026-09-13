@@ -15,6 +15,31 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.mark.parametrize('available', [0, 1])
+def test_c_harness_registration_capacity(tmp_path, available):
+    source = tmp_path / 'registry.c'
+    source.write_text('''#include "test_harness.h"
+TestEntry g_tests[MAX_TESTS];
+int g_n_tests;
+int g_current_test_skipped;
+__attribute__((constructor(101))) static void fill_registry(void) {
+  g_n_tests = MAX_TESTS - AVAILABLE;
+}
+TEST(harness, boundary) { PASS(); }
+int main(void) { return g_n_tests == MAX_TESTS ? 0 : 1; }
+''')
+    binary = tmp_path / 'registry'
+    subprocess.run([*shlex.split(os.environ.get('CC', 'cc')), '-std=gnu11',
+                    '-fsanitize=address,undefined', '-fno-sanitize-recover=all',
+                    '-Itest', '-Isrc', f'-DAVAILABLE={available}', str(source),
+                    '-o', str(binary), '-lm'], cwd=ROOT, check=True, capture_output=True)
+    run = subprocess.run([str(binary)], capture_output=True, text=True)
+    assert run.returncode == (0 if available else 2), run.stderr
+    if not available:
+        assert 'test registry capacity exceeded' in run.stderr
+    assert 'AddressSanitizer' not in run.stderr
+
+
 def test_model_compatibility_artifact_uses_canonical_reference(tmp_path):
     env = dict(os.environ, ENGINE='polygrad', COMPAT_CASES='mlp_mnist',
                DEV='CPU', POLY_DEVICE='cpu', PYTHONPATH='test:py',

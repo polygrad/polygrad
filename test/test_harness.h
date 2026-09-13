@@ -250,7 +250,7 @@ enum {
   POLY_TEST_COMMON = 1u << 0,
 };
 
-#define MAX_TESTS 2048
+#define MAX_TESTS 4096
 extern TestEntry g_tests[MAX_TESTS];
 extern int g_n_tests;
 extern int g_current_test_skipped;
@@ -258,6 +258,10 @@ extern int g_current_test_skipped;
 #define POLY_TEST_REGISTER(suite, name, test_flags)                                                \
   static void test_##suite##_##name(int *_passed, int *_failed);                                   \
   __attribute__((constructor)) static void register_##suite##_##name(void) {                       \
+    if (g_n_tests >= MAX_TESTS) {                                                                  \
+      fprintf(stderr, "test registry capacity exceeded (%d): %s.%s\n", MAX_TESTS, #suite, #name);  \
+      exit(2);                                                                                     \
+    }                                                                                              \
     g_tests[g_n_tests++] = (TestEntry){#suite, #name, test_##suite##_##name, (test_flags)};        \
   }                                                                                                \
   static void test_##suite##_##name(int *_passed, int *_failed)
