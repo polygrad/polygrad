@@ -77,6 +77,15 @@ The previous `references/tinygrad_20260822` checkout and its compatibility
 baselines remain historical controls. Target selection is not a claim that
 every upstream feature or source audit is complete.
 
+The public Tensor APIs do not yet provide SVD/Newton–Schulz,
+data-dependent `nonzero`/`masked_select`, or borrowed-pointer `from_blob`
+construction. Tinygrad's `PYTHON` backend name is not an alias for Polygrad's
+`INTERP` backend. These are compatibility limits, not passing upstream tests;
+the reviewed [Tensor](test/fixtures/tinygrad_upstream_014_baseline.json) and
+[operation](test/fixtures/tinygrad_upstream_ops_cpu_014_baseline.json) baselines
+keep nonpassing cases explicit. HIP is outside the 0.5.0 candidate's validation
+matrix.
+
 The main intentional differences are:
 
 | Area | Polygrad difference |
