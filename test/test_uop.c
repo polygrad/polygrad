@@ -1031,6 +1031,8 @@ static void *replacement_no_alloc(size_t nbytes, void *arg) {
   return NULL;
 }
 
+/* Storage ownership fixtures need a host-addressable backend shared by native
+ * and Wasm, not native CPU compiler support. */
 static bool replacement_preserves_old(int operation, bool with_view) {
   PolyCtx *ctx = poly_ctx_new();
   int frees = 0;
@@ -1045,7 +1047,7 @@ static bool replacement_preserves_old(int operation, bool with_view) {
   PolyBuffer old = {
       .ptr = old_data,
       .nbytes = sizeof(old_data),
-      .device = POLY_DEVICE_CPU,
+      .device = POLY_DEVICE_INTERP,
       .owned = true,
       .valid = true,
       .allocator = &allocator};
@@ -1060,7 +1062,8 @@ static bool replacement_preserves_old(int operation, bool with_view) {
   PolyBuffer candidate = old;
   candidate.ptr = new_data;
   if (!with_view) poly_test_buffer_handle_fail_after(0);
-  int rc = operation == 0   ? poly_buffer_set(ctx, buf, new_data, sizeof(new_data), POLY_DEVICE_CPU)
+  int rc = operation == 0
+               ? poly_buffer_set(ctx, buf, new_data, sizeof(new_data), POLY_DEVICE_INTERP)
            : operation == 1 ? poly_buffer_attach(ctx, buf, &candidate)
                             : poly_buffer_adopt(ctx, buf, &candidate);
   poly_test_buffer_handle_fail_after(-1);
@@ -1081,7 +1084,7 @@ static bool replacement_preserves_old(int operation, bool with_view) {
     /* Unretained view metadata is collectible; the retained BUFFER keeps
      * the old binding alive. Retrying must transfer ownership only now. */
     if (with_view) preserved = poly_ctx_collect(ctx) == 0;
-    rc = operation == 0   ? poly_buffer_set(ctx, buf, new_data, sizeof(new_data), POLY_DEVICE_CPU)
+    rc = operation == 0 ? poly_buffer_set(ctx, buf, new_data, sizeof(new_data), POLY_DEVICE_INTERP)
          : operation == 1 ? poly_buffer_attach(ctx, buf, &candidate)
                           : poly_buffer_adopt(ctx, buf, &candidate);
     PolyBuffer *after = poly_buffer_get(ctx, buf);
@@ -1136,12 +1139,12 @@ TEST(uop, buffer_initial_attachment_failure_keeps_caller_ownership) {
     PolyBuffer candidate = {
         .ptr = data,
         .nbytes = sizeof(data),
-        .device = POLY_DEVICE_CPU,
+        .device = POLY_DEVICE_INTERP,
         .owned = true,
         .valid = true,
         .allocator = &allocator};
     poly_test_buffer_handle_fail_after(0);
-    int rc = operation == 0   ? poly_buffer_set(ctx, buf, data, sizeof(data), POLY_DEVICE_CPU)
+    int rc = operation == 0   ? poly_buffer_set(ctx, buf, data, sizeof(data), POLY_DEVICE_INTERP)
              : operation == 1 ? poly_buffer_attach(ctx, buf, &candidate)
                               : poly_buffer_adopt(ctx, buf, &candidate);
     poly_test_buffer_handle_fail_after(-1);
@@ -1166,7 +1169,7 @@ TEST(uop, buffer_replacement_rejects_storage_and_multibuffer_aliases) {
     PolyBuffer owned = {
         .ptr = data,
         .nbytes = sizeof(data),
-        .device = POLY_DEVICE_CPU,
+        .device = POLY_DEVICE_INTERP,
         .owned = true,
         .valid = true,
         .allocator = &allocator};
@@ -1183,7 +1186,7 @@ TEST(uop, buffer_replacement_rejects_storage_and_multibuffer_aliases) {
       view.nbytes = 3 * sizeof(float);
       ASSERT_INT_EQ(poly_buffer_attach(ctx, other, &view), 0);
     }
-    int rc = poly_buffer_set(ctx, buf, alias == 0 ? data : next, sizeof(data), POLY_DEVICE_CPU);
+    int rc = poly_buffer_set(ctx, buf, alias == 0 ? data : next, sizeof(data), POLY_DEVICE_INTERP);
     bool preserved = rc == -1 && frees == 0 && poly_buffer_get(ctx, buf) == before;
     poly_ctx_destroy(ctx);
     ASSERT_TRUE(preserved);
@@ -1201,7 +1204,7 @@ TEST(uop, buffer_replacement_retires_the_complete_owned_chain) {
   PolyBuffer owned = {
       .ptr = data,
       .nbytes = sizeof(data),
-      .device = POLY_DEVICE_CPU,
+      .device = POLY_DEVICE_INTERP,
       .owned = true,
       .valid = true,
       .allocator = &allocator};
@@ -1213,10 +1216,10 @@ TEST(uop, buffer_replacement_retires_the_complete_owned_chain) {
   *before->src = owned;
   before->src->ptr = source;
   poly_test_buffer_handle_fail_after(0);
-  int rc = poly_buffer_set(ctx, buf, next, sizeof(next), POLY_DEVICE_CPU);
+  int rc = poly_buffer_set(ctx, buf, next, sizeof(next), POLY_DEVICE_INTERP);
   poly_test_buffer_handle_fail_after(-1);
   bool preserved = rc == -1 && frees == 0 && poly_buffer_get(ctx, buf) == before;
-  rc = poly_buffer_set(ctx, buf, next, sizeof(next), POLY_DEVICE_CPU);
+  rc = poly_buffer_set(ctx, buf, next, sizeof(next), POLY_DEVICE_INTERP);
   bool retired = rc == 0 && frees == 2;
   poly_ctx_destroy(ctx);
   ASSERT_TRUE(preserved && retired);
@@ -1233,6 +1236,43 @@ static void replacement_frontend_release(uintptr_t key) {
   if (++replacement_callback_count == 1)
     replacement_callback_saw_publication =
         poly_buffer_get_key(replacement_callback_ctx, replacement_callback_buf) != key;
+}
+
+TEST(uop, buffer_host_snapshot_write_accounting) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *buf = poly_test_buffer(ctx, POLY_UINT8, 4);
+  replacement_callback_ctx = ctx;
+  replacement_callback_buf = buf;
+  replacement_callback_count = 0;
+  ctx->frontend_buffer_release = replacement_frontend_release;
+  ASSERT_INT_EQ(poly_buffer_set(ctx, buf, NULL, 4, POLY_DEVICE_HOST), 0);
+  PolyCtxStats stats;
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
+  ASSERT_INT_EQ(stats.buffer_write_count, 1);
+  ASSERT_INT_EQ(stats.buffer_write_bytes, 4);
+  uint64_t key = poly_buffer_get_key(ctx, buf);
+  poly_test_buffer_handle_fail_after(0);
+  int rc = poly_buffer_set(ctx, buf, NULL, 4, POLY_DEVICE_HOST);
+  poly_test_buffer_handle_fail_after(-1);
+  ASSERT_INT_EQ(rc, -1);
+  ASSERT_TRUE(poly_buffer_get_key(ctx, buf) == key);
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
+  ASSERT_INT_EQ(stats.buffer_write_count, 1);
+  ASSERT_INT_EQ(stats.buffer_write_bytes, 4);
+  ASSERT_INT_EQ(poly_buffer_set(ctx, buf, NULL, 4, POLY_DEVICE_HOST), 0);
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
+  ASSERT_INT_EQ(stats.buffer_write_count, 2);
+  ASSERT_INT_EQ(stats.buffer_write_bytes, 8);
+  poly_ctx_reset_counters(ctx);
+  /* Empty registration and ordinary borrowed storage are not frontend writes. */
+  ASSERT_INT_EQ(poly_buffer_set(ctx, buf, NULL, 0, POLY_DEVICE_HOST), 0);
+  uint8_t borrowed[4] = {0};
+  ASSERT_INT_EQ(poly_buffer_set(ctx, buf, borrowed, 4, POLY_DEVICE_INTERP), 0);
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
+  ASSERT_INT_EQ(stats.buffer_write_count, 2);
+  ASSERT_INT_EQ(stats.buffer_write_bytes, 8);
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(uop, buffer_host_replacement_publishes_before_release_callback) {

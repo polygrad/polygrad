@@ -1639,6 +1639,9 @@ async function runTensorTests(pg, createRuntime) {
     assert(before.memUsed === liveMem, 'resetCounters should preserve live memory')
     const x = Tensor.empty([3], { dtype: 'float32' })
     x.copyFrom(new Float32Array([1, 2, 3]))
+    const written = pg.stats().coreStats
+    assert(written.bufferWriteCount === before.bufferWriteCount + 1, 'host write should count exactly once')
+    assert(written.bufferWriteBytes === before.bufferWriteBytes + 12, 'host write should count exactly 12 bytes')
     const t = await x.add(1).realize()
     assertClose(await t.toArray(), [2, 3, 4])
     const after = pg.stats().coreStats
@@ -1652,6 +1655,13 @@ async function runTensorTests(pg, createRuntime) {
     assert(after.globalOps === expectedOps, `expected ${expectedOps} global ops, got ${after.globalOps}`)
     assert(after.globalMem === expectedMem, `expected ${expectedMem} global memory bytes, got ${after.globalMem}`)
     assert(after.kernelCount === 1, `expected one tracked call, got ${after.kernelCount}`)
+    // The first execution initializes a cold WebGPU runtime; replacement now
+    // uses its normal C write path, not frontend-key snapshot publication.
+    x.copyFrom(new Float32Array([4, 5, 6]))
+    const rewritten = pg.stats().coreStats
+    assert(rewritten.bufferWriteCount === after.bufferWriteCount + 1, 'warm write should count exactly once')
+    assert(rewritten.bufferWriteBytes === after.bufferWriteBytes + 12, 'warm write should count exactly 12 bytes')
+    assertClose(await x.toArray(), [4, 5, 6])
     assert(pg.canRun({ dtype: 'float32' }), 'float32 should be supported by every current runtime')
     if (pg.caps.f64 === false) {
       assert(!pg.canRun({ dtype: 'float64' }), 'canRun should reject f64 when caps.f64 is false')

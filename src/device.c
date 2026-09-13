@@ -590,7 +590,17 @@ int poly_buffer_set(PolyCtx *ctx, PolyUOp *buf, void *ptr, size_t nbytes, int de
       .device_uop = poly_buffer_device_uop(ctx, buf, (PolyDevice)device),
       .memory_device_uop = NULL,
   };
-  return buffer_publish_replacement(ctx, buf, h);
+  /* A nonempty HOST key with no C address publishes bytes already copied by
+   * the frontend (cold WebGPU). Count that write only after publication; plain
+   * pointer attachment and empty metadata are not host-data writes. */
+  bool frontend_snapshot =
+      !ptr && nbytes && (PolyDevice)device == POLY_DEVICE_HOST && h->frontend_release;
+  int rc = buffer_publish_replacement(ctx, buf, h);
+  if (rc == 0 && frontend_snapshot) {
+    ctx->buffer_write_count++;
+    ctx->buffer_write_bytes += nbytes;
+  }
+  return rc;
 }
 
 int poly_buffer_attach(PolyCtx *ctx, PolyUOp *buf, const PolyBuffer *handle) {

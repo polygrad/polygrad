@@ -326,12 +326,18 @@ async function runWasmOwnershipTests() {
     const { createWasmCoreFromModule } = require('../src/core/wasm_common')
     const Module = pg._core.Module
     const cold = createWasmCoreFromModule(Module, 'webgpu')
+    // Install the frontend-key owner, as normal runtime construction does.
+    const coldRuntime = new PolyRuntime(cold)
     const originalSet = Module._poly_buffer_set
     const originalWrite = Module._poly_buffer_write
     try {
       const buf = cold.ffi.poly_buffer_on_device_by_id(cold.ctx, cold.dtypeIds.float32, 4, cold.deviceIds.webgpu)
       cold.ffi.poly_uop_retain(cold.ctx, buf)
+      cold.ffi.poly_ctx_reset_counters(cold.ctx)
       cold.ffi.poly_buffer_write(cold.ctx, buf, new Float32Array([1, 2, 3, 4]))
+      const firstStats = cold.ffi.poly_ctx_stats(cold.ctx)
+      if (firstStats.bufferWriteCount !== 1 || firstStats.bufferWriteBytes !== 16)
+        throw new Error('cold HOST snapshot must count one 16-byte write')
       const key = String(Module._poly_buffer_get_key(cold.ctx, buf))
       const originalBytes = Module.__polygradHostBuffers.get(key)
       let writes = 0
@@ -342,6 +348,9 @@ async function runWasmOwnershipTests() {
       catch (error) { rejected = /poly_buffer_set/.test(error.message) }
       if (!rejected) throw new Error('failed C attachment was reported as success')
       if (writes !== 0) throw new Error('old storage was written before attachment succeeded')
+      const failedStats = cold.ffi.poly_ctx_stats(cold.ctx)
+      if (failedStats.bufferWriteCount !== 1 || failedStats.bufferWriteBytes !== 16)
+        throw new Error('failed HOST publication must not count a write')
       if (String(Module._poly_buffer_get_key(cold.ctx, buf)) !== key ||
           Module.__polygradHostBuffers.get(key) !== originalBytes)
         throw new Error('failed attachment changed the old C/JS binding')
@@ -352,10 +361,17 @@ async function runWasmOwnershipTests() {
       const nextKey = String(Module._poly_buffer_get_key(cold.ctx, buf))
       const nextBytes = Module.__polygradHostBuffers.get(nextKey)
       assertClose(new Float32Array(nextBytes.buffer, nextBytes.byteOffset, 4), [9, 8, 7, 6])
+      const nextStats = cold.ffi.poly_ctx_stats(cold.ctx)
+      if (nextStats.bufferWriteCount !== 2 || nextStats.bufferWriteBytes !== 32)
+        throw new Error('HOST snapshot replacement must count exactly once')
+      cold.ffi.poly_ctx_reset_counters(cold.ctx)
+      const resetStats = cold.ffi.poly_ctx_stats(cold.ctx)
+      if (resetStats.bufferWriteCount !== 2 || resetStats.bufferWriteBytes !== 32)
+        throw new Error('execution-counter reset must preserve cumulative HOST transfer counters')
     } finally {
       Module._poly_buffer_set = originalSet
       Module._poly_buffer_write = originalWrite
-      await cold.destroy()
+      await coldRuntime.dispose()
       await pg.dispose()
     }
   })
