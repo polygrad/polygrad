@@ -1193,7 +1193,7 @@ static PolyTensor *tensor_empty_uop_result(
     PolyDType scalar_dtype,
     PolyUOp **dims,
     int ndim,
-    PolyDevice device,
+    PolyUOp *device_uop,
     PolyTensor *const *inputs,
     int n_inputs
 ) {
@@ -1201,9 +1201,16 @@ static PolyTensor *tensor_empty_uop_result(
    * dimension's vmax for storage, then RESHAPE(max_shape).shrink_to(shape)
    * (mixin/creation.py:23-40, uop/ops.py:1752). Polygrad constructs that exact
    * physical graph and its approved deviceless logical peer with one slot. */
+  /* Backend extraction permits symbolic accelerator ordinals for placement;
+   * construction admission must use the strict supported-name lookup. */
+  PolyDevice device = device_uop && device_uop->arg.kind == POLY_ARG_STRING
+                          ? poly_device_by_name(device_uop->arg.str)
+                          : POLY_DEVICE_AUTO;
+  bool disk = device == POLY_DEVICE_DISK && device_uop && device_uop->arg.kind == POLY_ARG_STRING &&
+              strlen(device_uop->arg.str) > 5;
   int logical_state = tensor_result_logical_state(ctx, inputs, n_inputs);
   if (logical_state < 0 || ndim < 0 || ndim > POLY_MAX_DIMS || (ndim > 0 && !dims) ||
-      !poly_device_can_execute(device) || poly_dtype_is_weak(scalar_dtype))
+      (!disk && !poly_device_can_execute(device)) || poly_dtype_is_weak(scalar_dtype))
     return NULL;
   bool build_logical = logical_state == POLY_LOGICAL_AVAILABLE;
 
@@ -1219,8 +1226,7 @@ static PolyTensor *tensor_empty_uop_result(
   }
 
   int64_t slot = poly_ctx_next_unique_id(ctx);
-  PolyUOp *physical =
-      poly_uop_new_buffer(ctx, poly_device_uop(ctx, device), numel, scalar_dtype, slot);
+  PolyUOp *physical = poly_uop_new_buffer(ctx, device_uop, numel, scalar_dtype, slot);
   if (!physical) return NULL;
 
   if (ndim != 1 || max_shape[0] != numel) {
@@ -1256,7 +1262,9 @@ PolyTensor *poly_tensor_empty_uop(
     int ndim,
     PolyDevice device
 ) {
-  return tensor_empty_uop_result(ctx, scalar_dtype, dims, ndim, device, NULL, 0);
+  return tensor_empty_uop_result(
+      ctx, scalar_dtype, dims, ndim, poly_device_uop(ctx, device), NULL, 0
+  );
 }
 
 PolyTensor *poly_tensor_empty(
@@ -1273,6 +1281,21 @@ PolyTensor *poly_tensor_empty(
     if (!shape[i]) return NULL;
   }
   return poly_tensor_empty_uop(ctx, scalar_dtype, shape, ndim, device);
+}
+
+PolyTensor *poly_tensor_empty_uop_name(
+    PolyCtx *ctx,
+    PolyDType scalar_dtype,
+    PolyUOp **dims,
+    int ndim,
+    const char *device
+) {
+  /* CreationMixin.empty constructs storage, not a kernel: DISK is admitted
+   * without opening a file. Retain the path in BUFFER's DEVICE identity;
+   * never manufacture a CPU buffer and COPY it to make empty storage. */
+  return tensor_empty_uop_result(
+      ctx, scalar_dtype, dims, ndim, poly_device_uop_from_name(ctx, device), NULL, 0
+  );
 }
 
 PolyTensor *poly_tensor_from_host(
@@ -1986,7 +2009,8 @@ PolyTensor *poly_tensor_clone(PolyCtx *ctx, PolyTensor *source, PolyDevice devic
   }
   PolyTensor *inputs[1] = {source};
   PolyTensor *target = tensor_empty_uop_result(
-      ctx, poly_dtype_strong(source->uop_physical->dtype), dims, ndim, device, inputs, 1
+      ctx, poly_dtype_strong(source->uop_physical->dtype), dims, ndim, poly_device_uop(ctx, device),
+      inputs, 1
   );
   if (!target) return NULL;
   if (!poly_tensor_clone_into(ctx, target, source)) {

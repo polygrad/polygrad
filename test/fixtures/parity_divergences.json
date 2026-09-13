@@ -417,13 +417,14 @@
       "stages": ["device", "multi-device"],
       "area": "device instance identity",
       "tinygrad": "Device strings distinguish instances such as CUDA:0 and CUDA:1",
-      "polygrad": "Core graph metadata retains exact device names/tuples, but frontend/backend admission still excludes genuine same-backend multi-device execution. UNSHARD has shape/dtype support but no core backward rule.",
+      "polygrad": "Core graph metadata retains exact device names/tuples, but frontend/backend admission still excludes genuine same-backend multi-device execution. Public Tensor.shard is absent, including the repeated-device tuple used by test_realize_is_realize.test_multi; that failure occurs before execution and is not a demonstrated multi-GPU failure. UNSHARD has shape/dtype support but no core backward rule.",
       "rationale": "Metadata representation and cache separation do not prove multi-device placement or sharded backward execution.",
       "approval": null,
       "evidence": [
         "src/polygrad.h:PolyDevice",
         "src/mixin/gradient.c:compute_gradient",
         "references/tinygrad_latest/tinygrad/mixin/gradient.py:pm_gradient",
+        "temp/construction-materialization-20260913.p1Kmxp/upstream-accepted/report.json",
         "PLAN_CORE_20260720.md:WS6"
       ],
       "close_when": "Device identity is backend plus instance and multi-device construction/lowering passes."
@@ -895,10 +896,10 @@
       "id": "PG-PARITY-035",
       "status": "open_debt",
       "stages": ["python-api", "shape"],
-      "area": "Python symbolic movement argument admission",
+      "area": "Python symbolic padding argument admission",
       "tinygrad": "Tensor slicing/padding accepts symbolic UOp bounds. test_symbolic_pad_view_frozen additionally asserts a known capture bug and a contiguous workaround.",
       "polygrad": "The test stops in _pair_array with TypeError: 'UOp' object cannot be interpreted as an integer, before either reference behavior is exercised.",
-      "rationale": "The Python int64 movement adapter is narrower than core symbolic UOp movement. Do not implement Tinygrad's documented frozen-pad wrong result to make the footgun test pass; use correct-value controls for future support.",
+      "rationale": "Python padding still uses the int64 pair adapter; shrink, reshape and expand already have symbolic UOp-backed paths. Do not implement Tinygrad's documented frozen-pad wrong result to make the footgun test pass; use correct-value controls for future support.",
       "approval": null,
       "evidence": [
         "py/polygrad/tensor.py:_pair_array",
@@ -906,7 +907,7 @@
         "references/tinygrad_latest/test/unit/test_jit_footguns.py:test_symbolic_pad_view_frozen",
         "temp/readiness-safety-scope-20260913.lRth9A/upstream/report.json"
       ],
-      "close_when": "Carry symbolic movement arguments through the frontend with exact graph and changing-bound value tests; separately disposition the reference's known-bug assertion."
+      "close_when": "Carry symbolic padding arguments through the frontend with exact graph and changing-bound value tests; separately disposition the reference's known-bug assertion."
     },
     {
       "id": "PG-PARITY-036",

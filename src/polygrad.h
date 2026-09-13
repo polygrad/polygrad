@@ -10,7 +10,7 @@
 
 /* Public C/frontend ABI version. Bump when exported symbols or public struct
  * layouts used by frontends change. */
-#define POLYGRAD_ABI_VERSION 83
+#define POLYGRAD_ABI_VERSION 84
 
 #include <stdint.h>
 #include <stddef.h>
@@ -906,6 +906,14 @@ PolyTensor *poly_tensor_empty_uop(
     PolyUOp **dims,
     int ndim,
     PolyDevice device
+);
+/* CreationMixin.empty preserves the complete device identity (e.g. DISK:path). */
+PolyTensor *poly_tensor_empty_uop_name(
+    PolyCtx *ctx,
+    PolyDType scalar_dtype,
+    PolyUOp **dims,
+    int ndim,
+    const char *device
 );
 PolyTensor *poly_tensor_from_host(
     PolyCtx *ctx,

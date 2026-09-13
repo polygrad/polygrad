@@ -578,6 +578,9 @@ class Tensor:
     def __init__(self, data=None, *, dtype=None, device=None, logical=None, _ctx=None, _uop=None,
                  _data=None, _shape=None, _dtype=None, _device=None, _tensor=None):
         from . import _default_ctx
+        # Variable wrappers carry the existing PARAM/AFTER graph, not host data.
+        if isinstance(data, (Variable, BoundVariable)):
+            data = data.uop
         ctx = _ctx or (data.ctx if isinstance(data, UOp) else None) or _default_ctx
         policy = _normalize_logical_policy(logical)
         if policy is None:
@@ -601,6 +604,11 @@ class Tensor:
         from . import _default_ctx
         from .device import Device
         if isinstance(data, UOp) and _uop is None:
+            if dtype is not None:
+                data = data.cast(dtype)
+                # A failed FFI cast is not Tensor(None), which constructs zero.
+                if data is None:
+                    raise ValueError('Tensor UOp cast failed')
             _uop = data
             data = None
             if _ctx is None:
@@ -3741,6 +3749,16 @@ class Tensor:
         return Tensor.full(_shape_tuple(*shape), Invalid, **kwargs)
 
     @staticmethod
+    def const(value, dtype=None, *, _ctx=None):
+        """Wrap a scalar/UOp, casting the graph when dtype is explicit."""
+        if isinstance(value, (Variable, BoundVariable)):
+            value = value.uop
+        node = UOp.const(value, dtype, ctx=_ctx)
+        if node is None:
+            raise ValueError('invalid scalar constant')
+        return Tensor(node, _ctx=_ctx)
+
+    @staticmethod
     def empty(*shape, **kwargs):
         if 'name' in kwargs:
             raise TypeError('Tensor.empty does not accept name; pass names to Model.from_tensors')
@@ -3748,6 +3766,15 @@ class Tensor:
         dtype_name = _dtype_name(kwargs.get('dtype', dtypes.default_float), default='float32')
         shape = _shape_tuple(*shape)
         shape = tuple(_py_scalar(x) for x in shape)
+        if dev.startswith('DISK:'):
+            if not any(_is_symbolic_dim(x) for x in shape):
+                shape = tuple(_require_i64(x, 'shape') for x in shape)
+            tensor = _ffi._lib.poly_tensor_empty_uop_name_by_id(
+                ctx, _dtype_id(dtype_name), _shape_uop_array(ctx, shape), len(shape), dev.encode()
+            )
+            if not tensor:
+                raise ValueError(f'invalid empty storage shape {shape} on {dev}')
+            return Tensor(_ctx=ctx, _tensor=tensor, _dtype=dtype_name, _device=dev)
         if any(_is_symbolic_dim(x) for x in shape):
             dims = _shape_uop_array(ctx, shape)
             tensor = _ffi._lib.poly_tensor_empty_uop_by_id(

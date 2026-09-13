@@ -48,6 +48,13 @@ PolyTensor *poly_tensor_empty_uop_by_id(
     int ndim,
     int device_id
 );
+PolyTensor *poly_tensor_empty_uop_name_by_id(
+    PolyCtx *ctx,
+    int dtype_id,
+    PolyUOp **dims,
+    int ndim,
+    const char *device
+);
 PolyTensor *poly_tensor_from_host_by_id(
     PolyCtx *ctx,
     void *ptr,

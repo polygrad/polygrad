@@ -647,6 +647,11 @@ function createBoundTensorClass(runtime) {
         if (opts._ctx && opts._ctx !== data.ctx) {
           throw new Error('Tensor UOp must belong to the same Polygrad context')
         }
+        if (opts.dtype) {
+          data = data.cast(opts.dtype)
+          // A failed FFI cast is not Tensor(null), which constructs zero.
+          if (!data) throw new Error('Tensor UOp cast failed')
+        }
         opts = Object.assign({}, opts, { _uop: data, _ctx: data.ctx })
         data = null
       }
@@ -3769,9 +3774,10 @@ function createBoundTensorClass(runtime) {
       const tensorDevice = normalizeDevice(
         (opts && (opts._device || opts.device)) || _runtime.device || 'cpu'
       )
-      const tensor = ffi.poly_tensor_empty_by_id(
-        ctx, dtypeId, shape, shape.length, deviceId(tensorDevice)
-      )
+      const tensor = tensorDevice.startsWith('disk:')
+        ? ffi.poly_tensor_empty_uop_name_by_id(
+          ctx, dtypeId, shape.map(x => ffi.poly_const_int(ctx, x)), shape.length, tensorDevice)
+        : ffi.poly_tensor_empty_by_id(ctx, dtypeId, shape, shape.length, deviceId(tensorDevice))
       if (!tensor) throw new Error('poly_tensor_empty_by_id failed')
       return new Tensor(null, {
         _ctx: ctx,
@@ -3783,6 +3789,13 @@ function createBoundTensorClass(runtime) {
 
     cat(...tensors) {
       return Tensor.cat(this, ...tensors)
+    }
+
+    static const(value, dtype = null) {
+      const source = value instanceof UOp ? value : _runtime.uop.constant(value, dtype)
+      if (!source) throw new TypeError('invalid scalar constant')
+      try { return new Tensor(source, dtype == null ? {} : {dtype}) }
+      finally { if (source && source !== value) source.dispose() }
     }
 
     static cat(...tensors) {

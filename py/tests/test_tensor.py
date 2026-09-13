@@ -16,6 +16,46 @@ from polygrad.helpers import Context
 from polygrad.uop.ops import AxisType, KernelInfo, UOp, _dispose_uops_for_ctx
 
 
+def test_construction_const_uop_and_bound_variable():
+    source = UOp.const(1.0).cast(dtypes.float32)
+    out = Tensor.const(source, dtypes.int8)
+    assert out.dtype == dtypes.int8
+    assert out.item() == 1
+    direct = Tensor(source, dtype=dtypes.int8)
+    assert direct.uop.dtype == dtypes.int8
+    assert direct.item() == 1
+    bound = Variable('construction_bound', 1, 10).bind(5)
+    tensor = Tensor(bound)
+    assert tensor.uop.raw == bound.uop.raw
+    assert not tensor.realize().uop.is_realized
+    assert tensor.item() == 5
+    assert Tensor.const(bound, dtypes.int32).item() == 5
+    with Runtime(device='interp') as runtime:
+        local = runtime.Tensor.const(7, dtypes.int32)
+        assert local._ctx == runtime._ctx
+        assert local.item() == 7
+        with pytest.raises(ValueError, match='context mismatch'):
+            runtime.Tensor.const(source)
+
+
+@pytest.mark.parametrize('explicit_context', [False, True])
+def test_construction_rejects_failed_uop_cast(monkeypatch, explicit_context):
+    source = UOp.const(1.5, dtypes.float32)
+    monkeypatch.setattr(UOp, 'cast', lambda self, dtype: None)
+    with pytest.raises(ValueError, match='UOp cast failed'):
+        Tensor(source, dtype=dtypes.int8, _ctx=source.ctx if explicit_context else None)
+
+
+def test_construction_empty_disk_is_lazy_and_preserves_path(tmp_path):
+    path = tmp_path / 'CaseSensitive.bin'
+    path.write_bytes(np.array([1, 2, 3, 4], dtype=np.float32).tobytes())
+    t = Tensor.empty(4, dtype=dtypes.float32, device=f'disk:{path}')
+    assert t.device == f'DISK:{path}'
+    assert not t.realize().uop.is_realized
+    np.testing.assert_array_equal(t.to('CPU').numpy(), [1, 2, 3, 4])
+    np.testing.assert_array_equal(np.frombuffer(path.read_bytes(), dtype=np.float32), [1, 2, 3, 4])
+
+
 @pytest.mark.parametrize('device', ['cpu', 'interp', 'cuda'])
 def test_schedule_cache_clear_preserves_live_model_and_jit(device):
     if device == 'cuda' and not Device.cuda_available():

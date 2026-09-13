@@ -1086,6 +1086,19 @@ function createWasmCoreFromModule(Module, device) {
         if (dimsPtr) Module._free(dimsPtr)
       }
     },
+    poly_tensor_empty_uop_name_by_id: (ctx, dtypeId, shape, ndim, device) => {
+      if (!Array.isArray(shape) || shape.length !== ndim) {
+        throw new RangeError('polygrad: shape length does not match ndim')
+      }
+      const dimsPtr = writePtrArray(shape || [])
+      const namePtr = allocString(device)
+      try {
+        return Module._poly_tensor_empty_uop_name_by_id(ctx, dtypeId, dimsPtr, ndim, namePtr)
+      } finally {
+        Module._free(dimsPtr)
+        Module._free(namePtr)
+      }
+    },
     poly_tensor_create_with_roots: (ctx, logical, physical, role, device) =>
       Module._poly_tensor_create_with_roots(ctx, logical, physical, role, device),
     poly_tensor_create_result_like: (ctx, input, logical, physical, role, device) =>
@@ -1943,7 +1956,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 83
+  const EXPECTED_ABI = 84
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(

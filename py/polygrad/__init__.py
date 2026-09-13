@@ -212,6 +212,10 @@ def _bound_tensor_class(ctx, runtime):
             super().__init__(data, *args, **kwargs)
 
         @staticmethod
+        def const(value, dtype=None):
+            return Tensor.const(value, dtype, _ctx=live_ctx())
+
+        @staticmethod
         def from_url(url, gunzip=False, **kwargs):
             kwargs.setdefault('_ctx', live_ctx())
             return Tensor.from_url(url, gunzip=gunzip, **kwargs)

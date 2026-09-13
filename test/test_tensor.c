@@ -23,6 +23,31 @@
 #include "../src/tensor.h"
 #include "../src/codegen/codegen.h"
 
+TEST(tensor, construction_empty_preserves_named_storage) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *dim = poly_const_int(ctx, 4);
+  PolyTensor *t = poly_tensor_empty_uop_name(ctx, POLY_FLOAT32, &dim, 1, "disk:CaseSensitive.bin");
+  PolyUOp *root = t ? poly_tensor_uop_physical(t) : NULL;
+  PolyUOp *dev = root ? poly_uop_device_uop_cached(ctx, root, NULL) : NULL;
+  bool valid = t && dev && dev->arg.kind == POLY_ARG_STRING &&
+               !strcmp(dev->arg.str, "DISK:CaseSensitive.bin") && root->op == POLY_OP_BUFFER &&
+               root->n_src == 1 && poly_dtype_eq(root->dtype, POLY_FLOAT32) &&
+               !poly_buffer_is_allocated(ctx, root);
+  /* Rejection must not substitute a different device or accept foreign dims. */
+  valid &= poly_tensor_empty_uop_name(ctx, POLY_FLOAT32, &dim, 1, "DISK:") == NULL;
+  valid &= poly_tensor_empty_uop_name(ctx, POLY_FLOAT32, &dim, 1, "CUDA:1") == NULL;
+  valid &= poly_tensor_empty_uop_name(ctx, POLY_WEAKFLOAT, &dim, 1, "DISK:weak") == NULL;
+  PolyUOp *negative = poly_const_int(ctx, -1);
+  valid &= poly_tensor_empty_uop_name(ctx, POLY_FLOAT32, &negative, 1, "DISK:negative") == NULL;
+  PolyCtx *foreign = poly_ctx_new();
+  PolyUOp *foreign_dim = poly_const_int(foreign, 4);
+  valid &= poly_tensor_empty_uop_name(ctx, POLY_FLOAT32, &foreign_dim, 1, "DISK:foreign") == NULL;
+  poly_ctx_destroy(foreign);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(valid);
+  PASS();
+}
+
 TEST(tensor, execution_scalar_reduction_axes) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *x = poly_const_typed(ctx, POLY_FLOAT32, 2.0);

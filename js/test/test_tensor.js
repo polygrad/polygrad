@@ -154,6 +154,42 @@ async function runTensorTests(pg, createRuntime) {
   })
 
   // -- Creation --
+
+  await test('construction const preserves UOp dtype and bound value', async () => {
+    const value = new Tensor(1.5, {dtype: 'float32'})
+    const out = Tensor.const(value.uop, 'int8')
+    assert(out.dtype === 'int8', 'const did not cast its UOp')
+    assert((await out.item()) === 1, 'const returned the wrong cast value')
+    const variable = pg.uop.variable('construction_bound', 1, 10)
+    const bound = variable.bind(5)
+    const scalar = Tensor.const(bound, 'int32')
+    assert((await scalar.item()) === 5, 'const lost its bound value')
+    scalar.dispose(); bound.dispose(); variable.dispose()
+    out.dispose()
+    value.dispose()
+  })
+
+  await test('construction empty preserves named disk storage without host I/O', async () => {
+    const out = Tensor.empty([4], {dtype: 'float32', device: 'disk:CaseSensitive.bin'})
+    assert(out.device === 'DISK:CaseSensitive.bin', 'empty lost the disk path')
+    assert(!out.uop.is_realized, 'empty allocated storage during construction')
+    let rejected = false
+    try {
+      pg._core.ffi.poly_tensor_empty_uop_name_by_id(pg._core.ctx, 0, [], 1, 'disk:bad')
+    } catch (e) { rejected = /shape length/.test(e.message) }
+    assert(rejected, 'FFI accepted a shape length mismatch')
+    out.dispose()
+  })
+
+  await test('construction rejects a failed UOp cast instead of creating zero', async () => {
+    const source = pg.uop.constant(1.5, 'float32')
+    source.cast = () => null
+    let rejected = false, output
+    try { output = new Tensor(source, {dtype: 'int8'}) }
+    catch (e) { rejected = /cast failed/.test(e.message) }
+    finally { if (output) output.dispose(); source.dispose() }
+    assert(rejected, 'failed cast became a zero Tensor')
+  })
   await test('execution scalar reductions and virtual oneHot', async () => {
     for (const axis of [0, -1]) {
       const x = new Tensor(2.0, { dtype: 'float32' })

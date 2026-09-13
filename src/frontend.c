@@ -107,6 +107,18 @@ PolyTensor *poly_tensor_empty_uop_by_id(
   return poly_tensor_empty_uop(ctx, dt, dims, ndim, (PolyDevice)device_id);
 }
 
+PolyTensor *poly_tensor_empty_uop_name_by_id(
+    PolyCtx *ctx,
+    int dtype_id,
+    PolyUOp **dims,
+    int ndim,
+    const char *device
+) {
+  PolyDType dt;
+  if (!poly_dtype_by_id(dtype_id, &dt)) return NULL;
+  return poly_tensor_empty_uop_name(ctx, dt, dims, ndim, device);
+}
+
 PolyTensor *poly_tensor_from_host_by_id(
     PolyCtx *ctx,
     void *ptr,

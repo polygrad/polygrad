@@ -270,9 +270,16 @@ bounds-based int32/int64 lowering of weak integer indices.
 Native file-backed tensors use C-owned `DISK:<path>` storage. Python
 `Tensor(pathlib.Path(...))` passes the path to C for memory mapping;
 `.to('DISK:<path>')` copies to that exact file, preserving filename case.
+`Tensor.empty(..., device='DISK:<path>')` constructs lazy storage with that
+identity; it does not open or initialize the file. JS uses
+`Tensor.empty(shape, {device: 'disk:<path>'})`.
 DISK is not a compute backend. Wasm does not implement native file mapping:
 load bytes in JavaScript and pass typed arrays through the host-buffer API.
 JS does not currently provide Python's Tensor path constructor.
+
+`Tensor.const(value, dtype)` wraps a scalar or UOp, casting its graph when a
+dtype is supplied. Python also accepts `Variable`/`BoundVariable` wrappers;
+bound values retain their graph identity, not a host-side snapshot.
 
 Scalar reductions accept axes `0` and `-1`. `realize()` leaves virtual weak
 tensors unchanged; cast before requesting storage or a schedule. Einsum supports
@@ -429,7 +436,7 @@ Low-level `UOp.variable` bounds retain integer, floating-point and boolean
 endpoints independently of the variable dtype. C takes scalar `PolyArg` values;
 Python accepts `int`/`float`/`bool`; JavaScript uses `pg.uop.variable(...)`, with
 `BigInt` for exact wide integers. NaN, reversed and nonnumeric bounds are rejected.
-Current packages require C ABI83 and graph formats PGIR18/PGPM10; incompatible
+Current packages require C ABI84 and graph formats PGIR18/PGPM10; incompatible
 artifacts are rejected. Typed endpoints can exceed the runtime's signed64
 variable-binding domain; metadata support does not imply executable bindings.
 
@@ -700,10 +707,9 @@ Tinygrad, replay snapshots an input when it aliases a captured write-only output
 ordinary inputs and explicit in-place updates do not need this extra copy.
 
 Python capture currently requires at least one Tensor argument to select its
-C context; closure-only and scalar-only calls are unsupported. Python movement
-arguments also do not accept symbolic UOp bounds, so symbolic slicing/padding
-cannot be used to vary a JIT input shape. These are frontend limits, not limits
-on every C symbolic operation. Tinygrad's `Device[...].graph` introspection
+C context; closure-only and scalar-only calls are unsupported. Python padding
+arguments do not accept symbolic UOp bounds; symbolic shrink/reshape/expand
+already have separate UOp-backed paths. Tinygrad's `Device[...].graph` introspection
 attribute is not exposed; its absence does not mean CUDA graph execution is
 absent. The upstream JIT tests remain non-green for these gaps and the missing
 selection APIs above.

@@ -1610,6 +1610,37 @@ static napi_value napi_poly_tensor_empty_by_id(napi_env env, napi_callback_info 
   return make_external(env, tensor);
 }
 
+static napi_value napi_poly_tensor_empty_uop_name_by_id(napi_env env, napi_callback_info info) {
+  napi_value argv[5];
+  size_t argc = 5;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 5) {
+    napi_throw_type_error(env, NULL, "polygrad: expected context, dtype, shape, ndim and device");
+    return NULL;
+  }
+  PolyCtx *ctx = get_external(env, argv[0]);
+  int32_t dtype_id, ndim;
+  NAPI_CALL(env, napi_get_value_int32(env, argv[1], &dtype_id));
+  NAPI_CALL(env, napi_get_value_int32(env, argv[3], &ndim));
+  int n = 0;
+  PolyUOp **dims = read_uop_array(env, argv[2], &n);
+  if (!dims) return NULL;
+  if (n != ndim) {
+    free(dims);
+    napi_throw_range_error(env, NULL, "polygrad: shape length does not match ndim");
+    return NULL;
+  }
+  char *device = read_utf8_arg(env, argv[4], NULL);
+  if (!device) {
+    free(dims);
+    return NULL;
+  }
+  PolyTensor *tensor = poly_tensor_empty_uop_name_by_id(ctx, dtype_id, dims, ndim, device);
+  free(device);
+  free(dims);
+  return make_external(env, tensor);
+}
+
 static napi_value napi_poly_tensor_create_with_roots(napi_env env, napi_callback_info info) {
   napi_value argv[5];
   size_t argc = 5;
@@ -6853,6 +6884,9 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_uop_reachable", napi_poly_uop_reachable),
       DECLARE_NAPI_METHOD("poly_realize_uops", napi_poly_realize_uops),
       DECLARE_NAPI_METHOD("poly_tensor_empty_by_id", napi_poly_tensor_empty_by_id),
+      DECLARE_NAPI_METHOD(
+          "poly_tensor_empty_uop_name_by_id", napi_poly_tensor_empty_uop_name_by_id
+      ),
       DECLARE_NAPI_METHOD("poly_tensor_create_with_roots", napi_poly_tensor_create_with_roots),
       DECLARE_NAPI_METHOD("poly_tensor_create_result_like", napi_poly_tensor_create_result_like),
       DECLARE_NAPI_METHOD("poly_tensor_replace_roots", napi_poly_tensor_replace_roots),
