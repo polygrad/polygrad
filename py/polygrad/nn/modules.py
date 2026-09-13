@@ -1,6 +1,8 @@
 """nn.modules — Stateful neural network layers (tinygrad-compatible)."""
 
 import math
+import ctypes
+from .. import _ffi
 from ..dtype import dtypes
 from ..helpers import TRAINING
 from ..tensor import Tensor
@@ -16,9 +18,9 @@ class Linear:
             self.bias = Tensor.uniform(out_features, low=-bound, high=bound)
 
     def __call__(self, x):
-        # Pinned nn/__init__.py:156-174 stores (out,in) and transposes at the
-        # module boundary; Tensor.linear itself consumes (in,out).
-        return x.linear(self.weight.transpose(), self.bias)
+        core = _ffi._lib.poly_tensor_linear_apply(x._ctx, x._tensor, self.weight._tensor,
+                                                  self.bias._tensor if self.bias is not None else None)
+        return x._make_result_from_core(core, None)
 
 
 class LayerNorm:
@@ -26,21 +28,25 @@ class LayerNorm:
     def __init__(self, normalized_shape, eps=1e-5, elementwise_affine=True):
         if isinstance(normalized_shape, int):
             normalized_shape = (normalized_shape,)
-        self.normalized_shape = normalized_shape
+        self.normalized_shape = tuple(normalized_shape)
+        self.axis = tuple(-1 - i for i in range(len(self.normalized_shape)))
         self.eps = eps
         self.elementwise_affine = elementwise_affine
         self.weight = None
         self.bias = None
         if elementwise_affine:
-            self.weight = Tensor.ones(*normalized_shape).realize()
-            self.bias = Tensor.zeros(*normalized_shape).realize()
+            self.weight = Tensor.ones(*normalized_shape)
+            self.bias = Tensor.zeros(*normalized_shape)
 
     def __call__(self, x):
-        axis = -1
-        result = x.layernorm(axis=axis, eps=self.eps)
-        if self.weight is not None:
-            result = result * self.weight + self.bias
-        return result
+        # Pinned nn.LayerNorm normalizes the entire declared trailing shape.
+        if x.shape[-len(self.normalized_shape):] != self.normalized_shape:
+            raise ValueError(f"last dimensions of {x.shape} must match {self.normalized_shape}")
+        axes = (ctypes.c_int64 * len(self.axis))(*self.axis)
+        core = _ffi._lib.poly_tensor_layernorm_axes_apply(x._ctx, x._tensor,
+            self.weight._tensor if self.weight is not None else None,
+            self.bias._tensor if self.bias is not None else None, axes, len(self.axis), self.eps)
+        return x._make_result_from_core(core, x.shape)
 
 
 class LayerNorm2d(LayerNorm):
@@ -66,19 +72,15 @@ class GroupNorm:
             self.bias = Tensor.zeros(num_channels)
 
     def __call__(self, x):
-        # Literal pinned tinygrad/nn/__init__.py:200-207 composition.
         shape = x.shape
         if len(shape) < 2:
             raise ValueError('GroupNorm expects input with at least 2 dimensions')
         if shape[1] != self.num_channels:
             raise ValueError(f'GroupNorm expected C={self.num_channels}, got C={shape[1]}')
-        result = x.reshape(shape[0], self.num_groups, -1).layernorm(
-            eps=self.eps
-        ).reshape(*shape)
-        if self.weight is None or self.bias is None:
-            return result
-        affine_shape = [1, -1] + [1] * (len(shape) - 2)
-        return result * self.weight.reshape(*affine_shape) + self.bias.reshape(*affine_shape)
+        core = _ffi._lib.poly_tensor_groupnorm_apply(x._ctx, x._tensor,
+            self.weight._tensor if self.weight is not None else None,
+            self.bias._tensor if self.bias is not None else None, self.num_groups, self.eps)
+        return x._make_result_from_core(core, x.shape)
 
 
 class RMSNorm:
@@ -87,13 +89,10 @@ class RMSNorm:
         self.eps = eps
         self.weight = Tensor.ones(dim) if elementwise_affine else None
 
-    def _norm(self, x):
-        # Literal pinned tinygrad/nn/__init__.py:301 expression.
-        return x * (x.square().mean(axis=-1, keepdim=True) + self.eps).rsqrt()
-
     def __call__(self, x):
-        normalized = self._norm(x.float()).cast(x.dtype)
-        return normalized if self.weight is None else normalized * self.weight
+        core = _ffi._lib.poly_tensor_rmsnorm_apply(x._ctx, x._tensor,
+            self.weight._tensor if self.weight is not None else None, self.eps)
+        return x._make_result_from_core(core, x.shape)
 
 
 class Embedding:
@@ -130,10 +129,9 @@ class Dropout:
         self.p = p
 
     def __call__(self, x):
-        if not TRAINING or self.p == 0:
-            return x
-        mask = Tensor.rand(*x.shape).gt(self.p)
-        return x * mask / (1.0 - self.p)
+        # Polygrad's module convenience delegates the pinned Tensor contract,
+        # including probability admission, p=1 and the shared training mode.
+        return x.dropout(self.p)
 
 
 class Conv2d:
@@ -141,19 +139,20 @@ class Conv2d:
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, groups=1, bias=True):
         if isinstance(kernel_size, int):
             kernel_size = (kernel_size, kernel_size)
+        self.kernel_size = tuple(kernel_size)
         if isinstance(padding, str):
             if padding.lower() != 'same':
                 raise ValueError(f"Invalid padding string {padding!r}, only 'same' is supported")
             if stride != 1:
                 raise ValueError("padding='same' is not supported for strided convolutions")
-            dilation_tuple = (dilation, dilation) if isinstance(dilation, int) else tuple(dilation)
+            dilation_tuple = (dilation,) * len(kernel_size) if isinstance(dilation, int) else tuple(dilation)
             padding = tuple(v for d, k in zip(dilation_tuple, kernel_size[::-1])
                             for v in (d * (k - 1) // 2, d * (k - 1) - d * (k - 1) // 2))
         self.stride = stride
         self.dilation = dilation
         self.groups = groups
         self.padding = padding
-        bound = 1 / math.sqrt(in_channels * kernel_size[0] * kernel_size[1])
+        bound = 1 / math.sqrt(in_channels * math.prod(kernel_size))
         self.weight = Tensor.uniform(
             out_channels, in_channels // groups, *kernel_size, low=-bound, high=bound
         )
@@ -165,40 +164,89 @@ class Conv2d:
         return x.conv2d(self.weight, self.bias, self.groups, self.stride, self.dilation, self.padding)
 
 
+def Conv1d(in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, groups=1, bias=True):
+    return Conv2d(in_channels, out_channels, (kernel_size,), stride, padding, dilation, groups, bias)
+
+
+class ConvTranspose2d(Conv2d):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, output_padding=0,
+                 dilation=1, groups=1, bias=True):
+        super().__init__(in_channels, out_channels, kernel_size, stride, padding, dilation, groups, bias)
+        # nn.ConvTranspose2d reverses the channel layout, not the bias layout.
+        bound = 1 / math.sqrt(in_channels * math.prod(self.kernel_size))
+        self.weight = Tensor.uniform(in_channels, out_channels // groups, *self.kernel_size, low=-bound, high=bound)
+        self.output_padding = output_padding
+
+    def __call__(self, x):
+        return x.conv_transpose2d(self.weight, self.bias, self.groups, self.stride, self.dilation,
+                                  self.padding, self.output_padding)
+
+
+def ConvTranspose1d(in_channels, out_channels, kernel_size, stride=1, padding=0, output_padding=0,
+                    dilation=1, groups=1, bias=True):
+    return ConvTranspose2d(in_channels, out_channels, (kernel_size,), stride, padding, output_padding, dilation, groups, bias)
+
+
+class InstanceNorm:
+    def __init__(self, num_features, eps=1e-5, affine=True):
+        self.num_features, self.eps = num_features, eps
+        self.weight = Tensor.ones(num_features) if affine else None
+        self.bias = Tensor.zeros(num_features) if affine else None
+
+    def __call__(self, x):
+        core = _ffi._lib.poly_tensor_instancenorm_apply(x._ctx, x._tensor,
+            self.weight._tensor if self.weight is not None else None,
+            self.bias._tensor if self.bias is not None else None, self.num_features, self.eps)
+        return x._make_result_from_core(core, x.shape)
+
+
+class LSTMCell:
+    def __init__(self, input_size, hidden_size, bias=True):
+        bound = 1 / math.sqrt(hidden_size)
+        self.weight_ih = Tensor.uniform(hidden_size * 4, input_size, low=-bound, high=bound)
+        self.weight_hh = Tensor.uniform(hidden_size * 4, hidden_size, low=-bound, high=bound)
+        self.bias_ih = Tensor.zeros(hidden_size * 4) if bias else None
+        self.bias_hh = Tensor.zeros(hidden_size * 4) if bias else None
+
+    def __call__(self, x, hc=None):
+        h, c = (None, None) if hc is None else hc
+        inputs = (x, h, c, self.weight_ih, self.weight_hh, self.bias_ih, self.bias_hh)
+        if any(t is not None and t._ctx != x._ctx for t in inputs):
+            raise ValueError("LSTMCell inputs must share the same context")
+        new_h, new_c = _ffi._ptr(), _ffi._ptr()
+        if _ffi._lib.poly_tensor_lstm_cell(x._ctx, *(t._tensor if t is not None else None for t in inputs),
+                                          ctypes.byref(new_h), ctypes.byref(new_c)) != 0:
+            raise RuntimeError("poly_tensor_lstm_cell failed")
+        shape = (x.shape[0], self.weight_hh.shape[1])
+        return x._make_result_from_core(new_h, shape), x._make_result_from_core(new_c, shape)
+
+
 class BatchNorm:
     """Batch normalization."""
     # Pinned tinygrad/nn/__init__.py:35-60.
-    def __init__(self, num_features, eps=1e-5, affine=True, track_running_stats=True, momentum=0.1):
+    def __init__(self, sz, eps=1e-5, affine=True, track_running_stats=True, momentum=0.1):
         self.eps, self.track_running_stats, self.momentum = eps, track_running_stats, momentum
-        self.weight = Tensor.ones(num_features) if affine else None
-        self.bias = Tensor.zeros(num_features) if affine else None
+        self.weight = Tensor.ones(sz) if affine else None
+        self.bias = Tensor.zeros(sz) if affine else None
         self.num_batches_tracked = Tensor.zeros(dtype='long').is_param_(False)
         if track_running_stats:
-            self.running_mean = Tensor.zeros(num_features).is_param_(False)
-            self.running_var = Tensor.ones(num_features).is_param_(False)
+            self.running_mean = Tensor.zeros(sz).is_param_(False)
+            self.running_var = Tensor.ones(sz).is_param_(False)
 
     def calc_stats(self, x):
-        shape_mask = [1, -1, *([1] * (x.ndim - 2))]
-        if self.track_running_stats and not TRAINING:
-            return self.running_mean, self.running_var.reshape(shape=shape_mask)
-        reduce_axes = tuple(axis for axis in range(x.ndim) if axis != 1)
-        batch_mean = x.mean(axis=reduce_axes)
-        y = x - batch_mean.detach().reshape(shape=shape_mask)
-        batch_var = (y * y).mean(axis=reduce_axes)
-        return batch_mean, batch_var
+        mean, var = _ffi._ptr(), _ffi._ptr()
+        if _ffi._lib.poly_tensor_batchnorm_stats(x._ctx, x._tensor,
+                self.running_mean._tensor if self.track_running_stats else None,
+                self.running_var._tensor if self.track_running_stats else None,
+                bool(TRAINING), ctypes.byref(mean), ctypes.byref(var)) != 0:
+            raise RuntimeError('poly_tensor_batchnorm_stats failed')
+        return x._make_result_from_core(mean, None), x._make_result_from_core(var, None)
 
     def __call__(self, x):
-        batch_mean, batch_var = self.calc_stats(x)
-        if self.track_running_stats and TRAINING:
-            self.running_mean.assign(
-                (1 - self.momentum) * self.running_mean + self.momentum * batch_mean.detach()
-            )
-            self.running_var.assign(
-                (1 - self.momentum) * self.running_var
-                + self.momentum * x.numel() / (x.numel() - x.shape[1]) * batch_var.detach()
-            )
-            # Pinned Tensor.__iadd__ lowers this spelling to assign(add(...)).
-            self.num_batches_tracked.assign(self.num_batches_tracked + 1)
-        return x.batchnorm(
-            self.weight, self.bias, batch_mean, batch_var.add(self.eps).rsqrt()
-        )
+        core = _ffi._lib.poly_tensor_batchnorm_apply(x._ctx, x._tensor,
+            self.weight._tensor if self.weight is not None else None,
+            self.bias._tensor if self.bias is not None else None,
+            self.running_mean._tensor if self.track_running_stats else None,
+            self.running_var._tensor if self.track_running_stats else None,
+            self.num_batches_tracked._tensor, bool(TRAINING), self.eps, self.momentum)
+        return x._make_result_from_core(core, x.shape)

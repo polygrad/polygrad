@@ -18,7 +18,7 @@ function normalizeParams(params) {
 }
 
 function parseOptions(lrOrOpts, defaults) {
-  if (lrOrOpts != null && typeof lrOrOpts === 'object') return { ...defaults, ...lrOrOpts }
+  if (lrOrOpts != null && typeof lrOrOpts === 'object' && !lrOrOpts._tensor) return { ...defaults, ...lrOrOpts }
   return { ...defaults, lr: lrOrOpts == null ? defaults.lr : lrOrOpts }
 }
 
@@ -28,7 +28,8 @@ function createBoundOptim(runtime) {
 
   class Optimizer {
     constructor(params, lr = 0.001, opts = {}) {
-      if (lr < 0) throw new Error(`Invalid learning rate: ${lr}`)
+      const lrTensor = lr instanceof Tensor ? lr : null
+      if (!lrTensor && Number(lr) < 0) throw new Error(`Invalid learning rate: ${lr}`)
       const allParams = normalizeParams(params)
       this.params = dedup(allParams.filter(p => p && p.isParam))
       if (!this.params.length) throw new Error('optimizer must have at least one param')
@@ -36,9 +37,13 @@ function createBoundOptim(runtime) {
       this.device = opts.device || this.params[0].device
       this._ctx = this.params[0]._ctx
       this._rt = this.params[0]._rt
-      this.lr = new Tensor([Number(lr)], {
-        dtype: 'float32', device: this.device, _ctx: this._ctx
-      }).is_param_(false)
+      // Same supplied-storage contract as Python: never detach or copy a
+      // caller-owned LR Tensor; the scheduled graph must see later writes.
+      this.lr = lrTensor || new Tensor([Number(lr)], {
+        dtype: runtime.defaultFloat === 'float64' ? 'float64' : 'float32',
+        device: this.device, _ctx: this._ctx
+      })
+      this._validateLearningRate()
     }
 
     zeroGrad() {
@@ -59,14 +64,7 @@ function createBoundOptim(runtime) {
       return [...this.params]
     }
 
-    scheduleStep() {
-      const grads = []
-      for (const p of this.params) {
-        if (!p.grad) throw new Error('optimizer parameter has no gradient')
-        grads.push(p.grad)
-      }
-
-      const state = this._stateArgs()
+    _validateLearningRate() {
       if (!(this.lr instanceof Tensor) || this.lr._ctx !== this._ctx) {
         throw new Error('learning rate Tensor must share the optimizer context')
       }
@@ -78,6 +76,19 @@ function createBoundOptim(runtime) {
       if (this.lr.dtype !== 'float32' && this.lr.dtype !== 'float64') {
         throw new Error('learning rate Tensor must have at least float32 precision')
       }
+    }
+
+    scheduleStep() {
+      // nn.optim.Optimizer.schedule_step uses the same training context as
+      // dropout and BatchNorm; reject before publishing assignment effects.
+      if (!Tensor.training) throw new Error('TRAINING must be enabled to use the optimizer')
+      const grads = []
+      for (const p of this.params) {
+        if (!p.grad) throw new Error('optimizer parameter has no gradient')
+        grads.push(p.grad)
+      }
+      this._validateLearningRate()
+      const state = this._stateArgs()
       const result = ffi.poly_optim_build_step(
         this._ctx,
         this._config(),
@@ -270,14 +281,46 @@ function createBoundOptim(runtime) {
       })
       if (opts.weight_decay != null) opts.weightDecay = opts.weight_decay
       if (opts.weightDecay < 0) throw new Error(`Invalid weightDecay value: ${opts.weightDecay}`)
-      super(params, { ...opts, weightDecay: 0 })
+      super(params, { ...opts, weightDecay: 0, weight_decay: 0 })
       this.weightDecay = Number(opts.weightDecay)
     }
 
     _kind() { return runtime.OPTIM_ADAMW }
   }
 
-  return { Optimizer, OptimizerGroup, SGD, Adam, AdamW }
+  class LARS extends SGD {
+    constructor(params, lrOrOpts = .001) {
+      const opts = parseOptions(lrOrOpts, {lr: .001, momentum: .9, weightDecay: 1e-4,
+        nsSteps: 0, nsCoefficients: null, nesterov: false, classic: true, preWd: true, tcoef: .001})
+      super(params, opts)
+      this.nsSteps = opts.ns_steps == null ? opts.nsSteps : opts.ns_steps
+      this.nsCoefficients = Array.from(opts.ns_coefficients || opts.nsCoefficients || [])
+      this.preWd = opts.pre_wd == null ? opts.preWd : opts.pre_wd
+      this.tcoef = opts.tcoef
+    }
+    _config() {
+      return {...super._config(), kind: 4, nsSteps: this.nsSteps, nsCoefficients: this.nsCoefficients,
+        preWd: this.preWd, tcoef: this.tcoef}
+    }
+  }
+
+  function Muon(params, lrOrOpts = .001) {
+    const opts = parseOptions(lrOrOpts, {lr: .001, momentum: .95, weightDecay: .1, nsSteps: 5,
+      nsCoefficients: [3.4445, -4.775, 2.0315], nesterov: true})
+    if (opts.fused) throw new Error('FUSE_OPTIM not allowed for Muon optimizer')
+    return new LARS(params, {...opts, classic: false, preWd: false, pre_wd: false, tcoef: 0})
+  }
+
+  class LAMB extends AdamW {
+    constructor(params, lrOrOpts = .001) {
+      const opts = parseOptions(lrOrOpts, {lr: .001, eps: 1e-6, weightDecay: 0, adam: false})
+      super(params, opts)
+      this.adam = Boolean(opts.adam)
+    }
+    _kind() { return this.adam ? runtime.OPTIM_ADAMW : 5 }
+  }
+
+  return { Optimizer, OptimizerGroup, SGD, Adam, AdamW, LARS, LAMB, Muon }
 }
 
 module.exports = { createBoundOptim }

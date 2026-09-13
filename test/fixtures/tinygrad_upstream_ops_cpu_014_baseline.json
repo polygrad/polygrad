@@ -24,7 +24,7 @@
     "failure_signature": "source-path-and-message-v2",
     "python": "3.11.12 (main, Apr  9 2025, 04:04:00) [Clang 20.1.0 ]",
     "reference_commit": "6f87158d77f66a36d5f8bbe915170b24e2acabe8",
-    "runner_sha256": "335b5b4879ca1f9e1828002826e1a810d1ea3429d23937a799bcec43a484c4d8",
+    "runner_sha256": "fdf52ba5d86dbe984ed67e448ffb2629388e3342aaa35cbc5c05cbd334783347",
     "test_sha256": {
       "test/backend/test_ops.py": "b0b8f94a538c555d3ecc094cc7d001de157805b340671b5efa845d54e0cefaf1"
     },
@@ -34,19 +34,19 @@
         "hypothesis": "6.131.9",
         "numpy": "2.4.6",
         "pytest": "8.3.5",
-        "torch": "2.5.1+cpu"
+        "torch": "2.10.0+cpu"
       },
       {
         "hypothesis": "6.131.9",
         "numpy": "2.4.6",
         "pytest": "8.3.5",
-        "torch": "2.5.1+cpu"
+        "torch": "2.10.0+cpu"
       }
     ]
   },
   "evidence": {
-    "report": "/home/anton/projects/polygrad/polygrad/temp/retarget-014-20260911.MPsDqT/new-ops/report.json",
-    "sha256": "785081f813912fbf85c48dc18414637200c12b063668f590bbbbc4b440843987"
+    "report": "/home/anton/projects/polygrad/polygrad/temp/nn-compat-closeout-20260913.Koda7V/ops-retry/report.json",
+    "sha256": "3b6ab1fe7e0a59ded1e54a8abdea2994aa6ea63ded8bb81dd2b7f714b11b8d3e"
   },
   "schema_version": 1,
   "tests": {
@@ -610,15 +610,10 @@
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_cummax": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/references/.uv-python/cpython-3.11.12-linux-x86_64-gnu/lib/python3.11/unittest/case.py:LINE: AssertionError: IndexError not raised",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "reference-failure: the Torch control fails IndexError not raised for scalar dim=1 under both providers, before invoking either implementation; supported scan values and graphs have dedicated cross-frontend regressions."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_cummax_zero_axis": {
       "expected": {
@@ -629,15 +624,10 @@
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_cummin": {
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/references/.uv-python/cpython-3.11.12-linux-x86_64-gnu/lib/python3.11/unittest/case.py:LINE: AssertionError: IndexError not raised",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "reference-failure: the Torch control fails IndexError not raised for scalar dim=1 under both providers, before invoking either implementation; supported scan values and graphs have dedicated cross-frontend regressions."
+      "reason": ""
     },
     "polygrad:test/backend/test_ops.py::TestOps::test_cummin_zero_axis": {
       "expected": {
@@ -3680,17 +3670,11 @@
       "reason": ""
     },
     "tinygrad:test/backend/test_ops.py::TestOps::test_cummax": {
-      "category": "reference-failure",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/references/.uv-python/cpython-3.11.12-linux-x86_64-gnu/lib/python3.11/unittest/case.py:LINE: AssertionError: IndexError not raised",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Pinned reference does not raise the expected IndexError; do not reproduce this failure as parity."
+      "reason": ""
     },
     "tinygrad:test/backend/test_ops.py::TestOps::test_cummax_zero_axis": {
       "expected": {
@@ -3700,17 +3684,11 @@
       "reason": ""
     },
     "tinygrad:test/backend/test_ops.py::TestOps::test_cummin": {
-      "category": "reference-failure",
       "expected": {
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<polygrad>/references/.uv-python/cpython-3.11.12-linux-x86_64-gnu/lib/python3.11/unittest/case.py:LINE: AssertionError: IndexError not raised",
-            "outcome": "failed"
-          }
-        },
-        "status": "failed"
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Pinned reference does not raise the expected IndexError; do not reproduce this failure as parity."
+      "reason": ""
     },
     "tinygrad:test/backend/test_ops.py::TestOps::test_cummin_zero_axis": {
       "expected": {

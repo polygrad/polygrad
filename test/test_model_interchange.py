@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import os
 from pathlib import Path
@@ -21,7 +22,51 @@ os.environ.setdefault('POLYGRAD_LIB', str(ROOT / 'build' / 'libpolygrad.so'))
 
 from polygrad.model import Model, OPTIM_ADAM  # noqa: E402
 from polygrad.models import MLP, Graph  # noqa: E402
-from polygrad import create  # noqa: E402
+from polygrad import create, _ffi  # noqa: E402
+
+
+def export_c_lstm(work: Path) -> None:
+    """Exercise C model construction without a Python Tensor/model recipe."""
+    lib = ctypes.CDLL(_ffi._lib._name)
+    ptr, i64 = ctypes.c_void_p, ctypes.c_int64
+    signatures = {
+        'poly_model_new': (ptr, [ptr, ptr]),
+        'poly_model_input': (ptr, [ptr, ctypes.c_char_p, _ffi.PolyDType, ctypes.POINTER(i64), ctypes.c_int]),
+        'poly_model_lstm_cell': (ctypes.c_int, [ptr, ctypes.c_char_p, ptr, ptr, ptr, ctypes.c_int, ctypes.c_int, ctypes.c_bool,
+                                              ctypes.POINTER(ptr), ctypes.POINTER(ptr)]),
+        'poly_model_output': (ctypes.c_int, [ptr, ctypes.c_char_p, ptr]),
+        'poly_model_entrypoint': (ctypes.c_int, [ptr, ctypes.c_char_p, ctypes.POINTER(ctypes.c_char_p), ctypes.c_int,
+                                               ctypes.POINTER(ctypes.c_char_p), ctypes.c_int, ptr]),
+        'poly_model_build': (ctypes.c_int, [ptr, ptr]),
+    }
+    for name, (result, arguments) in signatures.items():
+        function = getattr(lib, name)
+        function.restype, function.argtypes = result, arguments
+    ctx = _ffi._lib.poly_ctx_new()
+    handle = lib.poly_model_new(ctx, None)
+    model = Model(handle, _ctx=ctx)
+    try:
+        shape = (i64 * 2)(1, 2)
+        dtype = _ffi.PolyDType()
+        assert _ffi._lib.poly_dtype_by_id(_ffi._lib.poly_dtype_id_by_name(b'float32'), ctypes.byref(dtype))
+        x, h, c = [lib.poly_model_input(handle, name, dtype, shape, 2) for name in (b'x', b'h', b'c')]
+        hidden, cell = ptr(), ptr()
+        assert lib.poly_model_lstm_cell(handle, b'cell', x, h, c, 2, 2, False, ctypes.byref(hidden), ctypes.byref(cell)) == 0
+        assert lib.poly_model_output(handle, b'hidden', hidden) == 0
+        assert lib.poly_model_output(handle, b'cell_state', cell) == 0
+        inputs = (ctypes.c_char_p * 3)(b'x', b'h', b'c')
+        outputs = (ctypes.c_char_p * 2)(b'hidden', b'cell_state')
+        assert lib.poly_model_entrypoint(handle, b'forward', inputs, 3, outputs, 2, None) == 0
+        assert lib.poly_model_build(handle, None) == 0
+        model.write_buffer('cell.weight_ih', np.full((8, 2), .25, np.float32))
+        model.write_buffer('cell.weight_hh', np.full((8, 2), .125, np.float32))
+        (work / 'c-lstm.bundle').write_bytes(model.save_bundle(include_optimizer=False))
+        first = model.forward(x=np.array([[1, 2]], np.float32), h=np.zeros((1, 2), np.float32), c=np.zeros((1, 2), np.float32))
+        second = model.forward(x=np.array([[1, 2]], np.float32), h=first['hidden'], c=first['cell_state'])
+        (work / 'c-lstm-expected.json').write_text(json.dumps({k: v.reshape(-1).tolist() for k, v in second.items()}))
+    finally:
+        model.free()
+        _ffi._lib.poly_ctx_destroy(ctx)
 
 
 def safetensor_names(data: bytes) -> set[str]:
@@ -121,6 +166,7 @@ def main() -> None:
 
     (ROOT / 'temp').mkdir(exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix='model-interchange.', dir=ROOT / 'temp'))
+    export_c_lstm(work)
     export_custom(work)
     graph = Graph((ROOT / 'test/fixtures/model_definition.json').read_bytes())
     try:

@@ -4646,6 +4646,191 @@ async function runTensorTests(pg, createRuntime) {
     assertClose(await bn.toArray(), bnExpected, 1e-5)
   })
 
+  await test('nn empty input readback after normalization', async () => {
+    const x = Tensor.empty(2, 4)
+    await new pg.nn.LayerNorm(4).call(x).realize()
+    assert((await x.toArray()).length === 8, 'uninitialized input remains readable')
+  })
+
+  await test('nn multidimensional LayerNorm matches all trailing axes', async () => {
+    const layer = new pg.nn.LayerNorm([2, 2], {elementwiseAffine: false})
+    const x = new Tensor([1, 2, 3, 4]).reshape(1, 2, 2)
+    assertClose(await layer.call(x).toArray(), [-1.34163547, -0.44721183, 0.44721183, 1.34163547], 1e-5)
+    let rejected = false
+    try { layer.call(Tensor.ones(1, 3, 2)) } catch (e) { rejected = /must match/.test(e.message) }
+    assert(rejected, 'LayerNorm must validate the entire normalized shape')
+  })
+
+  await test('nn Conv2d accepts one spatial dimension', async () => {
+    const layer = new pg.nn.Conv2d(2, 3, [3], {bias: false})
+    assertShape(layer.weight.shape, [3, 2, 3])
+    assertShape(layer.call(Tensor.ones(1, 2, 5)).shape, [1, 3, 3])
+  })
+
+  await test('nn convolution factories InstanceNorm and LSTMCell', async () => {
+    const conv = new pg.nn.Conv1d(1, 1, 2, {bias: false})
+    conv.weight = Tensor.ones(1, 1, 2)
+    const x = new Tensor([1, 2, 3], {dtype: 'float32'}).reshape(1, 1, 3)
+    assertClose(await conv.call(x).toArray(), [3, 5])
+    const transposed = new pg.nn.ConvTranspose1d(1, 1, 2, {stride: 2, bias: false})
+    transposed.weight = Tensor.ones(1, 1, 2)
+    assertClose(await transposed.call(x).toArray(), [1, 1, 2, 2, 3, 3])
+    const norm = new pg.nn.InstanceNorm(2)
+    norm.weight = new Tensor([2, 3], {dtype: 'float32'})
+    norm.bias = new Tensor([4, 5], {dtype: 'float32'})
+    assertClose(await norm.call(new Tensor([1, 3, 10, 14], {dtype: 'float32'}).reshape(1, 2, 2)).toArray(), [2, 6, 2, 8], 2e-5)
+    const cell = new pg.nn.LSTMCell(2, 2, {bias: false})
+    cell.weightIh = Tensor.zeros(8, 2)
+    cell.weightHh = Tensor.zeros(8, 2)
+    const [zeroH, zeroC] = cell.call(Tensor.ones(1, 2))
+    assertClose(await zeroH.toArray(), [0, 0])
+    assertClose(await zeroC.toArray(), [0, 0])
+    const [h, c] = cell.call(Tensor.ones(1, 2), [Tensor.zeros(1, 2), Tensor.ones(1, 2)])
+    assertClose(await c.toArray(), [0.5, 0.5])
+    assertClose(await h.toArray(), [0.23105858, 0.23105858], 1e-6)
+    h.sum().backward()
+    assert(cell.weightIh.grad !== null)
+    assert((await cell.weightIh.grad.toArray()).every(Number.isFinite))
+  })
+
+  await test('nn RMSNorm and Embedding match Python module contracts', async () => {
+    const norm = new pg.nn.RMSNorm(2, {elementwiseAffine: false})
+    const x = new Tensor([1, 2, 3, 4], {dtype: 'float32'}).reshape(2, 2)
+    assertClose(await norm.call(x).toArray(), [0.6324554, 1.2649108, 0.8485281, 1.1313708], 1e-5)
+    const embedding = new pg.nn.Embedding(3, 2)
+    embedding.weight = new Tensor([1, 2, 3, 4, 5, 6], {dtype: 'float32'}).reshape(3, 2)
+    const out = embedding.call(new Tensor([2, 0], {dtype: 'int32'}))
+    assertClose(await out.toArray(), [5, 6, 1, 2])
+    let rejected = false
+    try { embedding.call(new Tensor([1.5])) } catch (e) { rejected = /integer/.test(e.message) }
+    assert(rejected, 'embedding must reject floating indices')
+    out.sum().backward()
+    assert(embedding.weight.grad !== null, 'embedding weight gradient missing')
+  })
+
+  await test('nn Dropout delegates Tensor training and endpoint behavior', async () => {
+    const previous = Tensor.training
+    const x = new Tensor([1, 2, 3])
+    try {
+      Tensor.training = false
+      assert(new pg.nn.Dropout(0.5).call(x) === x, 'eval dropout must be identity')
+      Tensor.training = true
+      assertClose(await new pg.nn.Dropout(1).call(x).toArray(), [0, 0, 0])
+      let rejected = false
+      try { new pg.nn.Dropout(1.1).call(x) } catch (e) { rejected = /out of range/.test(e.message) }
+      assert(rejected, 'dropout must validate probability')
+    } finally { Tensor.training = previous }
+  })
+
+  await test('nn BatchNorm training state and eval share one module', async () => {
+    const previous = Tensor.training
+    try {
+      assert(pg.nn.BatchNorm === pg.nn.BatchNorm2d && pg.nn.BatchNorm === pg.nn.BatchNorm3d, 'BatchNorm aliases')
+      const layer = new pg.nn.BatchNorm(2, {affine: false, momentum: 0.5})
+      const x = new Tensor([1, 2, 3, 4]).reshape(2, 2)
+      Tensor.training = true
+      assertClose(await layer.call(x).toArray(), [-0.999995, -0.999995, 0.999995, 0.999995], 1e-5)
+      assertClose(await layer.runningMean.toArray(), [1, 1.5])
+      assertClose(await layer.runningVar.toArray(), [1.5, 1.5])
+      assertClose(Array.from(await layer.numBatchesTracked.toArray(), Number), [1])
+      Tensor.training = false
+      assertClose(await layer.call(x).toArray(), [0, 0.4082469, 1.6329877, 2.0412346], 1e-5)
+    } finally { Tensor.training = previous }
+  })
+
+  await test('nn LSTM Model recurrent state and training checkpoint', isolatedRuntime(async rt => {
+    const T = rt.Tensor
+    const x = T.empty(1, 2), h = T.empty(1, 2), c = T.empty(1, 2)
+    const cell = new rt.nn.LSTMCell(2, 2, {bias: false})
+    cell.weightIh = T.full([8, 2], .25)
+    cell.weightHh = T.full([8, 2], .125)
+    const [hidden, state] = cell.call(x, [h, c])
+    const authored = await rt.Model.fromTensors({ inputs: {x, h, c}, state: {wi: cell.weightIh, wh: cell.weightHh},
+      outputs: {hidden, cell: state}, losses: {loss: hidden.square().mean()} })
+    const bundle = await authored.saveBundleAsync({includeOptimizer: false})
+    await authored.dispose()
+    const model = await rt.Model.fromBundle(bundle)
+    let restored = null
+    try {
+      const inputs = {x: new Float32Array([1, 2]), h: new Float32Array(2), c: new Float32Array(2)}
+      const first = await model.forward(inputs)
+      const second = await model.forward({x: inputs.x, h: first.hidden, c: first.cell})
+      assert(second.cell.every((v, i) => v > first.cell[i]), 'explicit recurrent state must advance')
+      model.setOptimizer(rt.OPTIM_ADAM, .01)
+      await model.trainStepAsync(inputs)
+      restored = await rt.Model.fromBundle(await model.saveBundleAsync())
+      restored.setOptimizer(rt.OPTIM_ADAM, .01)
+      assertClose([await model.trainStepAsync(inputs)], [await restored.trainStepAsync(inputs)], 1e-5)
+      assertClose(await model.readBufferAsync('wi'), await restored.readBufferAsync('wi'), 1e-5)
+      assert((await model.readBufferAsync('wi')).some(v => Math.abs(v - .25) > 1e-5), 'model weights must update')
+    } finally { if (restored) await restored.dispose(); await model.dispose() }
+  }))
+
+  await test('nn state discovery includes underscore and root tensor paths', async () => {
+    const x = new Tensor([1])
+    assert(pg.nn.getStateDict({_weight: x})._weight === x, 'underscore is a valid state name')
+    assert(pg.nn.getStateDict(x)[''] === x, 'root tensor path is empty')
+    assert(pg.nn.getStateDict({weight: x}, 'net.')['net.weight'] === x, 'state prefix lost')
+    const shared = {weight: x}
+    const obj = {a: shared, b: shared}; obj.self = obj
+    assert(Object.keys(pg.nn.getStateDict(obj)).length === 2, 'aliases must survive cycle protection')
+  })
+
+  await test('nn state loading preserves target handles and consumes named sources', async () => {
+    const model = {weight: new Tensor([1, 2], {dtype: 'float32'}), scalar: new Tensor(0.0)}
+    const target = model.weight
+    const state = {weight: new Tensor([3, 4], {dtype: 'float32'}), scalar: new Tensor([5], {dtype: 'float32'})}
+    const loaded = await pg.nn.loadStateDictAsync(model, state, {consume: true})
+    assert(loaded.length === 2 && model.weight === target, 'load must preserve target Tensor handles')
+    assert(Object.keys(state).length === 0, 'consumed keys remain')
+    assertClose(await target.toArray(), [3, 4])
+    assertClose(await model.scalar.toArray(), [5])
+    let rejected = false
+    try { pg.nn.loadStateDict(model, {weight: new Tensor([1])}, {realize: false}) } catch (e) { rejected = /Shape mismatch/.test(e.message) }
+    assert(rejected, 'state shape mismatch must reject')
+    assert(pg.nn.loadStateDict(model, {}, {strict: false}).length === 0, 'nonstrict missing keys must skip')
+  })
+
+  await test('nn LARS LAMB and Muon use shared optimizer graphs', async () => {
+    const previous = Tensor.training
+    try {
+      Tensor.training = true
+      for (const [name, opts, expected] of [
+        ['LAMB', {weightDecay: .01}, [.438561946, 2.54476404, 2.42744040, 4.53364801]],
+        ['LARS', {momentum: .9}, [.999709964, 2.00057888, 2.99913001, 4.00115776]],
+        ['Muon', {nsSteps: 2}, [1.03743243, 2.11009645, 2.77558279, 4.05183554]],
+      ]) {
+        const p = new Tensor([1, 2, 3, 4], {dtype: 'float32'}).reshape(2, 2)
+        const opt = new pg.nn.optim[name]([p], {lr: .1, ...opts})
+        for (let i = 0; i < 2; i++) {
+          p._grad = new Tensor([.1, -.2, .3, -.4]).reshape(2, 2)
+          await opt.stepAsync()
+        }
+        assertClose(await p.toArray(), expected, 2e-5)
+      }
+    } finally { Tensor.training = previous }
+  })
+
+  await test('nn optimizer rejects eval and preserves supplied learning rate Tensor', async () => {
+    const previous = Tensor.training
+    const p = new Tensor([1], {dtype: 'float32'}); p._grad = new Tensor([2], {dtype: 'float32'})
+    const lr = new Tensor([0.1])
+    try {
+      const opt = new pg.nn.optim.SGD([p], {lr})
+      assert(opt.lr === lr, 'learning rate Tensor must not be coerced to a number')
+      Tensor.training = false
+      let rejected = false
+      try { opt.scheduleStep() } catch (e) { rejected = /TRAINING/.test(e.message) }
+      assert(rejected, 'optimizer must reject eval before publishing effects')
+      Tensor.training = true
+      const scheduled = opt.scheduleStep()
+      lr.assign([0.2])
+      await lr.realizeAsync()
+      await scheduled[0].realizeAsync(...scheduled.slice(1))
+      assertClose(await p.toArray(), [0.6])
+    } finally { Tensor.training = previous }
+  })
+
   await test('nn Conv2d backward populates parameters', async () => {
     const mod = new pg.nn.Conv2d(3, 2, 3, { padding: 1 })
     const loss = mod.call(Tensor.randn(1, 3, 4, 4)).relu().mean()

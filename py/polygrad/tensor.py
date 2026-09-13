@@ -1388,7 +1388,10 @@ class Tensor:
         if int(_ffi._lib.poly_uop_device(self.uop.raw)) == 0 or isinstance(self._device, tuple):
             x = x.clone("CPU")
         x.realize()
-        return Buffer(self._ctx, x.uop.buffer, x._dtype_str, x.numel())
+        buf = x.uop.buffer
+        if buf is None or _ffi._lib.poly_buffer_ensure_allocated(x._ctx, buf.raw, _device_id(x.device)) != 0:
+            raise RuntimeError('Tensor._buffer: ensure_allocated failed')
+        return Buffer(self._ctx, buf, x._dtype_str, x.numel())
 
     def data(self):
         """Return tensor contents as a shaped memoryview, matching tinygrad."""

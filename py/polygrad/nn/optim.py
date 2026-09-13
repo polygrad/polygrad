@@ -1,6 +1,7 @@
 """nn.optim -- thin frontend wrappers over the C optimizer graph builders."""
 
 from .. import _ffi
+import ctypes
 from ..dtype import dtypes, least_upper_dtype, to_dtype
 from ..helpers import TRAINING
 from ..tensor import Tensor, _ptr_value
@@ -9,6 +10,8 @@ from ..tensor import Tensor, _ptr_value
 OPTIM_SGD = 1
 OPTIM_ADAM = 2
 OPTIM_ADAMW = 3
+OPTIM_LARS = 4
+OPTIM_LAMB = 5
 
 
 def _dedup(items):
@@ -38,7 +41,7 @@ class Optimizer:
     """Base optimizer class.
 
     Python owns the parameter/state Tensor handles. The update math is built by
-    src/optim.c so Model training and standalone frontend optimizers share
+    src/nn/optim.c so Model training and standalone frontend optimizers share
     one optimizer implementation.
     """
 
@@ -282,3 +285,40 @@ class AdamW(Adam):
 
     def _kind(self):
         return OPTIM_ADAMW
+
+
+class LARS(SGD):
+    """Shared C LARS update, including Muon's optional Newton-Schulz transform."""
+
+    def __init__(self, params, lr=.001, momentum=.9, weight_decay=1e-4, ns_steps=0, ns_coefficients=None,
+                 nesterov=False, classic=True, pre_wd=True, tcoef=.001, device=None, fused=False):
+        super().__init__(params, lr, momentum, weight_decay, nesterov, classic, device, fused)
+        self.ns_steps, self.ns_coefficients = int(ns_steps), tuple(ns_coefficients or ())
+        self.pre_wd, self.tcoef = bool(pre_wd), float(tcoef)
+        self._ns_coefficients = (ctypes.c_double * len(self.ns_coefficients))(*self.ns_coefficients)
+
+    def _config(self):
+        cfg = super()._config()
+        cfg.kind, cfg.tcoef, cfg.pre_wd = OPTIM_LARS, self.tcoef, self.pre_wd
+        cfg.ns_steps, cfg.n_ns_coefficients = self.ns_steps, len(self.ns_coefficients)
+        cfg.ns_coefficients = self._ns_coefficients
+        return cfg
+
+
+def Muon(params, lr=.001, momentum=.95, weight_decay=.1, ns_steps=5, ns_coefficients=(3.4445, -4.775, 2.0315),
+         nesterov=True, device=None, fused=False):
+    if fused:
+        raise AssertionError("FUSE_OPTIM not allowed for Muon optimizer")
+    return LARS(params, lr, momentum, weight_decay, ns_steps, ns_coefficients, nesterov,
+                classic=False, pre_wd=False, tcoef=0., device=device, fused=fused)
+
+
+class LAMB(AdamW):
+    """Adam moments and guarded trust-ratio scaling from the shared C builder."""
+
+    def __init__(self, params, lr=.001, b1=.9, b2=.999, eps=1e-6, weight_decay=0., adam=False, device=None, fused=False):
+        super().__init__(params, lr=lr, b1=b1, b2=b2, eps=eps, weight_decay=weight_decay, device=device, fused=fused)
+        self.adam = bool(adam)
+
+    def _kind(self):
+        return OPTIM_ADAMW if self.adam else OPTIM_LAMB

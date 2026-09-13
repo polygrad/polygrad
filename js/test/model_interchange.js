@@ -20,6 +20,17 @@ async function main() {
   }
   const pg = await polygrad.create({ core, device: core === 'native' ? 'cpu' : 'wasm' })
   try {
+    const recurrent = pg.Model.fromBundle(readBytes(path.join(dir, 'c-lstm.bundle')))
+    try {
+      const x = new Float32Array([1, 2])
+      const first = recurrent.forward({x, h: new Float32Array(2), c: new Float32Array(2)})
+      const second = recurrent.forward({x, h: first.hidden, c: first.cell_state})
+      const expected = JSON.parse(fs.readFileSync(path.join(dir, 'c-lstm-expected.json'), 'utf8'))
+      for (const name of ['hidden', 'cell_state']) {
+        if (second[name].some((v, i) => Math.abs(v - expected[name][i]) > 1e-5))
+          throw new Error(`C-built LSTM recurrent state mismatch: ${name}`)
+      }
+    } finally { recurrent.dispose() }
     const graphInput = { x: new Float32Array([1, 2]) }
     const loadedGraph = pg.Model.fromBundle(readBytes(path.join(dir, 'python-graph.bundle')))
     try {

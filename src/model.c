@@ -15,7 +15,7 @@
 #include "ir.h"
 #include "safetensors.h"
 #include "tensor.h"
-#include "optim.h"
+#include "nn/optim.h"
 #include "engine/jit.h"
 #include "engine/realize.h"
 #include "engine/schedule.h"
@@ -4248,6 +4248,9 @@ int poly_model_set_optimizer_ex(
     bool classic
 ) {
   if (!inst || inst->stage != POLY_MODEL_BUILT || !inst->has_portable_source) return -1;
+  /* Model's persisted optimizer configuration/state currently represents
+   * SGD/Adam/AdamW only. Reject other nn.optim kinds before replacing it. */
+  if (kind != POLY_OPTIM_SGD && kind != POLY_OPTIM_ADAM && kind != POLY_OPTIM_ADAMW) return -1;
   if (momentum < 0.0f) return -1;
 
   OptimState next = {

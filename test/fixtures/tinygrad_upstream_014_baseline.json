@@ -1,5 +1,6 @@
 {
   "contract": {
+    "adapter": null,
     "devices": [
       "CPU",
       "CPU",
@@ -27,18 +28,19 @@
       "DERANDOMIZE_CI": "1",
       "DEV": "CPU",
       "FORWARD_ONLY": "0",
+      "IMAGE": "0",
       "MKL_NUM_THREADS": "1",
       "OMP_NUM_THREADS": "1",
       "POLY_DEVICE": "cpu",
       "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
       "PYTHONHASHSEED": "0",
       "SKIP_SLOW_TEST": "0",
-      "TINY_BACKEND": "0",
-      "IMAGE": "0"
+      "TINY_BACKEND": "0"
     },
+    "failure_signature": "source-path-and-message-v2",
     "python": "3.11.12 (main, Apr  9 2025, 04:04:00) [Clang 20.1.0 ]",
     "reference_commit": "6f87158d77f66a36d5f8bbe915170b24e2acabe8",
-    "runner_sha256": "335b5b4879ca1f9e1828002826e1a810d1ea3429d23937a799bcec43a484c4d8",
+    "runner_sha256": "fdf52ba5d86dbe984ed67e448ffb2629388e3342aaa35cbc5c05cbd334783347",
     "test_sha256": {
       "test/backend/test_setitem.py": "bfa540e93690962ef332f5a5e8c6e6913f6fd6a219111da20dd8d596c5547e74",
       "test/backend/test_tensor.py": "5f98a533f473dd819728e208b5ced15b04acf63a3944fee4f9d957b55954ee59",
@@ -56,117 +58,115 @@
         "hypothesis": "6.131.9",
         "numpy": "2.4.6",
         "pytest": "8.3.5",
-        "torch": "2.5.1+cpu"
+        "torch": "2.10.0+cpu"
       },
       {
         "hypothesis": "6.131.9",
         "numpy": "2.4.6",
         "pytest": "8.3.5",
-        "torch": "2.5.1+cpu"
+        "torch": "2.10.0+cpu"
       },
       {
         "hypothesis": "6.131.9",
         "numpy": "2.4.6",
         "pytest": "8.3.5",
-        "torch": "2.5.1+cpu"
+        "torch": "2.10.0+cpu"
       },
       {
         "hypothesis": "6.131.9",
         "numpy": "2.4.6",
         "pytest": "8.3.5",
-        "torch": "2.5.1+cpu"
+        "torch": "2.10.0+cpu"
       },
       {
         "hypothesis": "6.131.9",
         "numpy": "2.4.6",
         "pytest": "8.3.5",
-        "torch": "2.5.1+cpu"
+        "torch": "2.10.0+cpu"
       },
       {
         "hypothesis": "6.131.9",
         "numpy": "2.4.6",
         "pytest": "8.3.5",
-        "torch": "2.5.1+cpu"
+        "torch": "2.10.0+cpu"
       },
       {
         "hypothesis": "6.131.9",
         "numpy": "2.4.6",
         "pytest": "8.3.5",
-        "torch": "2.5.1+cpu"
+        "torch": "2.10.0+cpu"
       },
       {
         "hypothesis": "6.131.9",
         "numpy": "2.4.6",
         "pytest": "8.3.5",
-        "torch": "2.5.1+cpu"
+        "torch": "2.10.0+cpu"
       },
       {
         "hypothesis": "6.131.9",
         "numpy": "2.4.6",
         "pytest": "8.3.5",
-        "torch": "2.5.1+cpu"
+        "torch": "2.10.0+cpu"
       },
       {
         "hypothesis": "6.131.9",
         "numpy": "2.4.6",
         "pytest": "8.3.5",
-        "torch": "2.5.1+cpu"
+        "torch": "2.10.0+cpu"
       },
       {
         "hypothesis": "6.131.9",
         "numpy": "2.4.6",
         "pytest": "8.3.5",
-        "torch": "2.5.1+cpu"
+        "torch": "2.10.0+cpu"
       },
       {
         "hypothesis": "6.131.9",
         "numpy": "2.4.6",
         "pytest": "8.3.5",
-        "torch": "2.5.1+cpu"
+        "torch": "2.10.0+cpu"
       },
       {
         "hypothesis": "6.131.9",
         "numpy": "2.4.6",
         "pytest": "8.3.5",
-        "torch": "2.5.1+cpu"
+        "torch": "2.10.0+cpu"
       },
       {
         "hypothesis": "6.131.9",
         "numpy": "2.4.6",
         "pytest": "8.3.5",
-        "torch": "2.5.1+cpu"
+        "torch": "2.10.0+cpu"
       },
       {
         "hypothesis": "6.131.9",
         "numpy": "2.4.6",
         "pytest": "8.3.5",
-        "torch": "2.5.1+cpu"
+        "torch": "2.10.0+cpu"
       },
       {
         "hypothesis": "6.131.9",
         "numpy": "2.4.6",
         "pytest": "8.3.5",
-        "torch": "2.5.1+cpu"
+        "torch": "2.10.0+cpu"
       },
       {
         "hypothesis": "6.131.9",
         "numpy": "2.4.6",
         "pytest": "8.3.5",
-        "torch": "2.5.1+cpu"
+        "torch": "2.10.0+cpu"
       },
       {
         "hypothesis": "6.131.9",
         "numpy": "2.4.6",
         "pytest": "8.3.5",
-        "torch": "2.5.1+cpu"
+        "torch": "2.10.0+cpu"
       }
-    ],
-    "adapter": null,
-    "failure_signature": "source-path-and-message-v2"
+    ]
   },
   "evidence": {
-    "report": "/home/anton/projects/polygrad/polygrad/temp/retarget-014-20260911.MPsDqT/new-nine/report.json",
-    "sha256": "2f1f6ab936eb7108bf983ee22fb4946d8e85fa070ecb2eb5faeb65eb5b3e231a"
+    "report": "/home/anton/projects/polygrad/polygrad/temp/nn-compat-closeout-20260913.Koda7V/suite/tensor/report.json",
+    "sha256": "2879a5604ebb87182d77713f71273a463c3a4a45b5bf292249fa2805a97cbb69"
   },
   "schema_version": 1,
   "tests": {
@@ -2649,6 +2649,6 @@
       "reason": ""
     }
   },
-  "scope_note": "Compatibility frontier only, not parity allowances or source-audit closure. No failures or skips are omitted from execution. test_ops.py executes in the separately reviewed CPU-adapted tinygrad_upstream_ops_cpu_baseline.json lane.",
+  "scope_note": "Compatibility frontier only, not parity allowances or source-audit closure. No failures or skips are omitted from execution. Operations and NN/optimizer files execute in separately reviewed CPU-adapted lanes.",
   "collection_blockers": []
 }

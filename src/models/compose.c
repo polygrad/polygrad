@@ -3,7 +3,7 @@
  * Math is owned by Tensor/nn (not this parser); sharing means reusing the same
  * parameter Tensor, as multiple calls to one tinygrad.nn.Linear do. */
 #include "compose.h"
-#include "../nn.h"
+#include "../nn/nn.h"
 #include "../tensor.h"
 #include "mlp.h"
 #include "../../vendor/cjson/cJSON.h"

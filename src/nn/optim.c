@@ -2,7 +2,7 @@
  * optim.c -- Open optimizer graph helpers.
  */
 
-#include "optim.h"
+#include "nn/optim.h"
 #include "tensor.h"
 #include <stdlib.h>
 #include <string.h>
@@ -80,6 +80,31 @@ static PolyUOp *optim_adam_bias_update(PolyCtx *ctx, PolyUOp *target, double bet
   return value ? optim_assign_uop_target(ctx, target, value) : NULL;
 }
 
+/* nn.optim.LARS/LAMB use a scalar L2 norm and a nested positive-norm guard.
+ * Keep the guards in the graph, including the zero-gradient branch. */
+static PolyUOp *optim_norm(PolyCtx *ctx, PolyUOp *x) {
+  if (!x) return NULL;
+  int ndim = poly_uop_ndim(ctx, x);
+  int64_t axes[POLY_MAX_DIMS];
+  if (ndim < 0 || ndim > POLY_MAX_DIMS) return NULL;
+  for (int i = 0; i < ndim; i++)
+    axes[i] = i;
+  PolyDType acc;
+  if (!poly_sum_acc_dtype(x->dtype, &acc)) return NULL;
+  PolyUOp *square = poly_mul(ctx, x, x);
+  PolyUOp *sum = poly_reduce_axis(ctx, POLY_OP_ADD, poly_cast(ctx, square, acc), axes, ndim);
+  if (poly_dtype_is_float(x->dtype)) sum = poly_cast(ctx, sum, x->dtype);
+  return sum ? poly_alu1(ctx, POLY_OP_SQRT, sum) : NULL;
+}
+
+static PolyUOp *optim_trust_ratio(PolyCtx *ctx, PolyUOp *r1, PolyUOp *r2, PolyUOp *ratio) {
+  PolyUOp *zero = poly_const_int(ctx, 0), *one = optim_float(ctx, 1.0);
+  return poly_where_op(
+      ctx, poly_alu2(ctx, POLY_OP_CMPLT, zero, r1),
+      poly_where_op(ctx, poly_alu2(ctx, POLY_OP_CMPLT, zero, r2), ratio, one), one
+  );
+}
+
 int poly_optim_build_update(
     PolyCtx *ctx,
     const PolyOptimConfig *cfg,
@@ -102,16 +127,26 @@ int poly_optim_build_update(
   if (!grad_value || !lr_value) return -1;
 
   switch (cfg->kind) {
-  case POLY_OPTIM_SGD: {
+  case POLY_OPTIM_SGD:
+  case POLY_OPTIM_LARS: {
     PolyUOp *base = poly_detach(ctx, param_value);
     PolyUOp *g = grad_value;
     if (!base) return -1;
-    if (cfg->weight_decay > 0.0f) {
+    bool pre_wd = cfg->kind == POLY_OPTIM_SGD || cfg->pre_wd;
+    PolyUOp *r = optim_float(ctx, 1.0);
+    if (cfg->kind == POLY_OPTIM_LARS && cfg->tcoef != 0) {
+      PolyUOp *r1 = optim_norm(ctx, base), *r2 = optim_norm(ctx, g);
+      PolyUOp *ratio = poly_div(
+          ctx, poly_mul(ctx, optim_float(ctx, cfg->tcoef), r1),
+          poly_add(ctx, r2, poly_mul(ctx, optim_float(ctx, cfg->weight_decay), r1))
+      );
+      r = optim_trust_ratio(ctx, r1, r2, ratio);
+    }
+    if (pre_wd && cfg->weight_decay > 0.0f) {
       PolyUOp *wd = optim_float(ctx, cfg->weight_decay);
       g = poly_add(ctx, g, poly_mul(ctx, wd, base));
     }
     if (cfg->classic) {
-      PolyUOp *r = optim_float(ctx, 1.0);
       g = r ? poly_mul(ctx, g, r) : NULL;
       g = g ? poly_mul(ctx, g, lr_value) : NULL;
     }
@@ -126,15 +161,32 @@ int poly_optim_build_update(
       if (!m_value || !out->m_new || !m_current) return -1;
       g = cfg->nesterov ? poly_add(ctx, g, poly_mul(ctx, mom, m_current)) : m_current;
     }
+    if (cfg->kind == POLY_OPTIM_LARS && cfg->n_ns_coefficients) {
+      int ndim = poly_uop_ndim(ctx, g);
+      const int64_t *dims = poly_uop_max_shape_dims(ctx, g);
+      if (ndim < 1 || !dims || dims[0] <= 0) return -1;
+      int64_t original[POLY_MAX_DIMS];
+      memcpy(original, dims, (size_t)ndim * sizeof(int64_t));
+      int64_t matrix[] = {dims[0], numel / dims[0]};
+      g = poly_newton_schulz(
+          ctx, poly_reshape(ctx, g, matrix, 2), cfg->ns_steps, cfg->ns_coefficients,
+          cfg->n_ns_coefficients, 1e-7
+      );
+      g = g ? poly_reshape(ctx, g, original, ndim) : NULL;
+    }
     if (!cfg->classic) {
-      PolyUOp *r = optim_float(ctx, 1.0);
       g = r ? poly_mul(ctx, g, r) : NULL;
       g = g ? poly_mul(ctx, g, lr_value) : NULL;
     }
-    out->param_new = optim_sub(ctx, base, g);
+    if (!pre_wd && cfg->weight_decay > 0)
+      g = poly_add(
+          ctx, g, poly_mul(ctx, poly_mul(ctx, optim_float(ctx, cfg->weight_decay), lr_value), base)
+      );
+    out->param_new = optim_sub(ctx, base, g ? poly_cast(ctx, g, param->dtype) : NULL);
     return (out->param_new && (cfg->momentum <= 0.0f || out->m_new)) ? 0 : -1;
   }
   case POLY_OPTIM_ADAM:
+  case POLY_OPTIM_LAMB:
   case POLY_OPTIM_ADAMW: {
     if (!m_buf || !v_buf || !bc1_buf || !bc2_buf) return -1;
     PolyUOp *m_value_root = m_buf;
@@ -157,8 +209,8 @@ int poly_optim_build_update(
 
     PolyUOp *bc1_value = poly_mul(ctx, bc1_buf, bc1_scale);
     PolyUOp *bc2_value = poly_mul(ctx, bc2_buf, bc2_scale);
-    out->m_new = optim_assign_uop_target(ctx, m_buf, m_value);
-    out->v_new = optim_assign_uop_target(ctx, v_buf, v_value);
+    out->m_new = optim_assign_uop_target(ctx, m_buf, poly_cast(ctx, m_value, m_buf->dtype));
+    out->v_new = optim_assign_uop_target(ctx, v_buf, poly_cast(ctx, v_value, v_buf->dtype));
     out->bc1_new = optim_assign_uop_target(ctx, bc1_buf, bc1_value);
     out->bc2_new = optim_assign_uop_target(ctx, bc2_buf, bc2_value);
     PolyUOp *m_current = out->m_new;
@@ -183,9 +235,13 @@ int poly_optim_build_update(
     /* Current LAMB returns `self.lr * r * up` and leaves `[1]`/parameter
      * broadcasting to UOp shape inference (nn/optim.py:168-178). */
     PolyUOp *r = optim_float(ctx, 1.0);
+    if (cfg->kind == POLY_OPTIM_LAMB) {
+      PolyUOp *r1 = optim_norm(ctx, base), *r2 = optim_norm(ctx, up);
+      r = optim_trust_ratio(ctx, r1, r2, poly_div(ctx, r1, r2));
+    }
     PolyUOp *lr_scaled = r ? poly_mul(ctx, lr_value, r) : NULL;
     PolyUOp *step = lr_scaled ? poly_mul(ctx, lr_scaled, up) : NULL;
-    out->param_new = optim_sub(ctx, poly_detach(ctx, param_value), step);
+    out->param_new = optim_sub(ctx, base, step ? poly_cast(ctx, step, param->dtype) : NULL);
     return (out->param_new && out->m_new && out->v_new && out->bc1_new && out->bc2_new) ? 0 : -1;
   }
   default:
@@ -208,8 +264,11 @@ int poly_optim_build_step(
     int out_cap
 ) {
   if (!ctx || !cfg || !lr || !params || !grads || n_params <= 0) return -1;
-  bool adam = (cfg->kind == POLY_OPTIM_ADAM || cfg->kind == POLY_OPTIM_ADAMW);
-  bool sgd_momentum = (cfg->kind == POLY_OPTIM_SGD && cfg->momentum > 0.0f);
+  bool adam =
+      (cfg->kind == POLY_OPTIM_ADAM || cfg->kind == POLY_OPTIM_ADAMW || cfg->kind == POLY_OPTIM_LAMB
+      );
+  bool sgd_momentum =
+      ((cfg->kind == POLY_OPTIM_SGD || cfg->kind == POLY_OPTIM_LARS) && cfg->momentum > 0.0f);
   PolyUOp *lr_physical = optim_lr_uop(ctx, poly_tensor_uop_physical(lr));
   PolyUOp *lr_logical = optim_lr_uop(ctx, poly_tensor_uop_logical(lr));
   if (!lr_physical) return -1;
@@ -390,11 +449,7 @@ int poly_optim_build_step(
    * logical operands so export/re-placement never inherits physical storage. */
   for (int i = 0; i < needed; i++) {
     PolyUOp *logical_effect = optim_tensor_has_logical(targets[i]) ? logical_effects[i] : NULL;
-    if (poly_tensor_replace_roots(
-            ctx, targets[i], logical_effect, physical_effects[i], targets[i]->role,
-            targets[i]->device
-        ) != 0)
-      goto done;
+    if (!poly_tensor_assign_after(ctx, targets[i], logical_effect, physical_effects[i])) goto done;
   }
   memcpy(out_tensors, targets, (size_t)needed * sizeof(PolyTensor *));
   rc = needed;

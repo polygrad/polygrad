@@ -26,6 +26,9 @@ async function runOptimTests(pg) {
   const Tensor = pg.Tensor
   let passed = 0
   let failed = 0
+  const previousTraining = Tensor.training
+  Tensor.training = true
+  try {
 
   async function test(name, fn) {
     try {
@@ -39,6 +42,13 @@ async function runOptimTests(pg) {
   }
 
   console.log('\n== Optimizers ==')
+
+  await test('AdamW snake-case weight decay reaches the shared update graph', async () => {
+    const p = new Tensor([1], {dtype: 'float32'}); p._grad = new Tensor([0], {dtype: 'float32'})
+    const opt = new pg.nn.optim.AdamW([p], {lr: 0.1, weight_decay: 0.2})
+    await opt.step()
+    assertClose(await p.toArray(), [0.98])
+  })
 
   await test('nn.optim API surface mirrors tinygrad names', async () => {
     assert(typeof pg.nn.optim.Optimizer === 'function', 'missing Optimizer')
@@ -166,6 +176,7 @@ async function runOptimTests(pg) {
 
   console.log(`\nOptimizer tests: ${passed} passed, ${failed} failed`)
   return { passed, failed }
+  } finally { Tensor.training = previousTraining }
 }
 
 module.exports = { runOptimTests }

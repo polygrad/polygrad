@@ -285,6 +285,28 @@ def test_cpu_ops_environment_uses_numeric_disabled_modes():
     assert int(upstream.ENVIRONMENT['IMAGE']) == 0
 
 
+@pytest.mark.parametrize('filename,count', [('test_nn.py', 43), ('test_optim.py', 39)])
+def test_nn_adapter_preserves_bodies_and_defers_only_private_helpers(filename, count):
+    import ast
+    path = 'test/backend/' + filename
+    source = (upstream.REFERENCE / path).read_text(encoding='utf-8')
+    helpers = (upstream.REFERENCE / 'test/helpers.py').read_text(encoding='utf-8')
+    adapted = upstream.adapt_cpu_nn(source, path, helpers)
+    bodies = lambda text: {n.name: ast.dump(ast.Module(body=n.body, type_ignores=[]))
+                          for n in ast.walk(ast.parse(text)) if isinstance(n, ast.FunctionDef)}
+    before, after = bodies(source), bodies(adapted)
+    assert sum(n.startswith('test_') for n in before) == count
+    assert all(after[name] == body for name, body in before.items())
+    original_helpers = bodies(helpers)
+    for name in ('not_support_multi_device', 'needs_second_gpu'):
+        assert after[name] == original_helpers[name]
+    assert upstream.worker_environment('cpu-nn')['RUN_SLOW'] == '1'
+    assert 'RUN_SLOW' not in upstream.worker_environment(None)
+    for changed_source, changed_helpers in ((source + '\n', helpers), (source, helpers + '\n')):
+        with pytest.raises(ValueError, match='source lock'):
+            upstream.adapt_cpu_nn(changed_source, path, changed_helpers)
+
+
 @pytest.mark.parametrize('device,renderer,interface,image', [
     ('CUDA', '', '', 0), ('CPU', 'LLVM', '', 0), ('CPU', '', 'MOCK', 0), ('CPU', '', '', 1),
 ])

@@ -18,7 +18,8 @@
 
 #define _POSIX_C_SOURCE 200809L
 #include "qwen3.h"
-#include "../nn.h"
+#include "layers.h"
+#include "../nn/nn.h"
 #include "../tensor.h"
 #include "../model.h"
 #include <stdlib.h>

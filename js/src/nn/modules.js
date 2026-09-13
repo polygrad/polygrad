@@ -1,5 +1,7 @@
 'use strict'
 
+const { isIntegerDtype } = require('../tensor')
+
 function createBoundModules(runtime) {
   const Tensor = runtime.Tensor
 
@@ -17,9 +19,9 @@ function createBoundModules(runtime) {
     }
 
     call(x) {
-      // Pinned nn/__init__.py:156-174 stores (out,in); Tensor.linear consumes
-      // the transposed (in,out) matrix.
-      return x.linear(this.weight.transpose(), this.bias)
+      const core = runtime._core.ffi.poly_tensor_linear_apply(x._ctx, x._tensor,
+        this.weight._tensor, this.bias === null ? null : this.bias._tensor)
+      return x._makeResultFromCore(core)
     }
   }
 
@@ -41,9 +43,8 @@ function createBoundModules(runtime) {
           tail.some((dim, i) => dim !== this.normalizedShape[i])) {
         throw new Error(`last dimensions of ${JSON.stringify(x.shape)} must match ${JSON.stringify(this.normalizedShape)}`)
       }
-      let result = x.layernorm(this.axis, this.eps)
-      if (this.weight !== null && this.bias !== null) result = result.mul(this.weight).add(this.bias)
-      return result
+      return x._makeResultFromCore(runtime._core.ffi.poly_tensor_layernorm_axes_apply(x._ctx, x._tensor,
+        this.weight === null ? null : this.weight._tensor, this.bias === null ? null : this.bias._tensor, this.axis, this.eps))
     }
   }
 
@@ -61,17 +62,17 @@ function createBoundModules(runtime) {
       const k = typeof kernelSize === 'number' ? [kernelSize, kernelSize] : Array.from(kernelSize)
       this.kernelSize = k
       this.stride = opts.stride == null
-        ? [1, 1]
-        : (typeof opts.stride === 'number' ? [opts.stride, opts.stride] : Array.from(opts.stride))
+        ? Array(k.length).fill(1)
+        : (typeof opts.stride === 'number' ? Array(k.length).fill(opts.stride) : Array.from(opts.stride))
       this.dilation = opts.dilation == null
-        ? [1, 1]
-        : (typeof opts.dilation === 'number' ? [opts.dilation, opts.dilation] : Array.from(opts.dilation))
+        ? Array(k.length).fill(1)
+        : (typeof opts.dilation === 'number' ? Array(k.length).fill(opts.dilation) : Array.from(opts.dilation))
       this.groups = opts.groups == null ? 1 : Number(opts.groups)
       if (typeof opts.padding === 'string') {
         if (opts.padding.toLowerCase() !== 'same') {
           throw new Error(`Invalid padding string ${opts.padding}, only 'same' is supported`)
         }
-        if (!(this.stride.length === 2 && this.stride[0] === 1 && this.stride[1] === 1)) {
+        if (!this.stride.every(s => s === 1)) {
           throw new Error("padding='same' is not supported for strided convolutions")
         }
         this.padding = []
@@ -82,12 +83,12 @@ function createBoundModules(runtime) {
         }
       } else {
         this.padding = opts.padding == null
-          ? [0, 0]
-          : (typeof opts.padding === 'number' ? [opts.padding, opts.padding] : Array.from(opts.padding))
+          ? Array(k.length).fill(0)
+          : (typeof opts.padding === 'number' ? Array(k.length).fill(opts.padding) : Array.from(opts.padding))
       }
-      const bound = 1.0 / Math.sqrt(Math.max(1, this.inChannels * k[0] * k[1]))
+      const bound = 1.0 / Math.sqrt(this.inChannels * k.reduce((a, b) => a * b, 1))
       this.weight = Tensor.uniform(
-        this.outChannels, Math.floor(this.inChannels / this.groups), k[0], k[1],
+        this.outChannels, Math.floor(this.inChannels / this.groups), ...k,
         { low: -bound, high: bound }
       )
       this.bias = opts.bias === false
@@ -105,6 +106,64 @@ function createBoundModules(runtime) {
     }
   }
 
+  function Conv1d(inChannels, outChannels, kernelSize, opts = {}) {
+    return new Conv2d(inChannels, outChannels, [kernelSize], opts)
+  }
+
+  class ConvTranspose2d extends Conv2d {
+    constructor(inChannels, outChannels, kernelSize, opts = {}) {
+      super(inChannels, outChannels, kernelSize, opts)
+      const bound = 1 / Math.sqrt(this.inChannels * this.kernelSize.reduce((a, b) => a * b, 1))
+      this.weight = Tensor.uniform(this.inChannels, Math.floor(this.outChannels / this.groups), ...this.kernelSize,
+        {low: -bound, high: bound})
+      this.outputPadding = opts.outputPadding == null ? 0 : opts.outputPadding
+    }
+
+    call(x) {
+      return x.convTranspose2d(this.weight, this.bias, {groups: this.groups, stride: this.stride,
+        dilation: this.dilation, padding: this.padding, outputPadding: this.outputPadding})
+    }
+  }
+
+  function ConvTranspose1d(inChannels, outChannels, kernelSize, opts = {}) {
+    return new ConvTranspose2d(inChannels, outChannels, [kernelSize], opts)
+  }
+
+  class InstanceNorm {
+    constructor(numFeatures, opts = {}) {
+      this.numFeatures = Number(numFeatures)
+      this.eps = opts.eps == null ? 1e-5 : Number(opts.eps)
+      this.weight = opts.affine === false ? null : Tensor.ones(this.numFeatures)
+      this.bias = opts.affine === false ? null : Tensor.zeros(this.numFeatures)
+    }
+
+    call(x) {
+      const core = runtime._core.ffi.poly_tensor_instancenorm_apply(x._ctx, x._tensor,
+        this.weight === null ? null : this.weight._tensor, this.bias === null ? null : this.bias._tensor,
+        this.numFeatures, this.eps)
+      return x._makeResultFromCore(core)
+    }
+  }
+
+  class LSTMCell {
+    constructor(inputSize, hiddenSize, opts = {}) {
+      const bound = 1 / Math.sqrt(hiddenSize)
+      this.weightIh = Tensor.uniform(hiddenSize * 4, inputSize, {low: -bound, high: bound})
+      this.weightHh = Tensor.uniform(hiddenSize * 4, hiddenSize, {low: -bound, high: bound})
+      this.biasIh = opts.bias === false ? null : Tensor.zeros(hiddenSize * 4)
+      this.biasHh = opts.bias === false ? null : Tensor.zeros(hiddenSize * 4)
+    }
+
+    call(x, hc = null) {
+      const [h, c] = hc === null ? [null, null] : hc
+      const inputs = [x, h, c, this.weightIh, this.weightHh, this.biasIh, this.biasHh]
+      if (inputs.some(t => t !== null && t._ctx !== x._ctx)) throw new Error('LSTMCell inputs must share the same context')
+      const pair = runtime._core.ffi.poly_tensor_lstm_cell(x._ctx, ...inputs.map(t => t === null ? null : t._tensor))
+      if (!pair) throw new Error('poly_tensor_lstm_cell failed')
+      return pair.map(core => x._makeResultFromCore(core))
+    }
+  }
+
   class GroupNorm {
     constructor(numGroups, numChannels, opts = {}) {
       this.numGroups = Number(numGroups)
@@ -119,20 +178,79 @@ function createBoundModules(runtime) {
     }
 
     call(x) {
-      // Literal pinned tinygrad/nn/__init__.py:200-207 composition.
       const shape = x.shape
       if (shape.length < 2) throw new Error('GroupNorm expects input with at least 2 dimensions')
       if (shape[1] !== this.numChannels) {
         throw new Error(`GroupNorm expected C=${this.numChannels}, got C=${shape[1]}`)
       }
-      let result = x.reshape(shape[0], this.numGroups, -1).layernorm(-1, this.eps).reshape(...shape)
-      if (this.weight === null || this.bias === null) return result
-      const affineShape = [1, -1, ...Array(Math.max(0, shape.length - 2)).fill(1)]
-      return result.mul(this.weight.reshape(...affineShape)).add(this.bias.reshape(...affineShape))
+      return x._makeResultFromCore(runtime._core.ffi.poly_tensor_groupnorm_apply(x._ctx, x._tensor,
+        this.weight === null ? null : this.weight._tensor, this.bias === null ? null : this.bias._tensor, this.numGroups, this.eps))
     }
   }
 
-  return { Linear, LayerNorm, LayerNorm2d, Conv2d, GroupNorm }
+  class RMSNorm {
+    constructor(dim, opts = {}) {
+      this.eps = opts.eps == null ? 1e-6 : Number(opts.eps)
+      this.weight = opts.elementwiseAffine === false ? null : Tensor.ones(dim)
+    }
+
+    call(x) {
+      const core = runtime._core.ffi.poly_tensor_rmsnorm_apply(x._ctx, x._tensor,
+        this.weight === null ? null : this.weight._tensor, this.eps)
+      return x._makeResultFromCore(core)
+    }
+  }
+
+  class Embedding {
+    constructor(vocabSize, embedDim) {
+      this.vocabSize = Number(vocabSize)
+      this.weight = Tensor.glorotUniform(this.vocabSize, Number(embedDim))
+    }
+
+    call(idx) {
+      if (!isIntegerDtype(idx.dtype)) throw new TypeError(`Expected integer dtype for index in embedding, got ${idx.dtype}`)
+      // nn._embedding_fwd: ordered selector and explicit weight-dtype reduction.
+      const mask = Tensor.arange(this.vocabSize).eq(idx.unsqueeze(-1))
+      return mask.unsqueeze(-1).where(this.weight, 0).sum(-2, false, this.weight.dtype)
+    }
+  }
+
+  class Dropout {
+    constructor(p = 0.5) { this.p = p }
+    call(x) { return x.dropout(this.p) }
+  }
+
+  class BatchNorm {
+    constructor(numFeatures, opts = {}) {
+      this.eps = opts.eps == null ? 1e-5 : Number(opts.eps)
+      this.momentum = opts.momentum == null ? 0.1 : Number(opts.momentum)
+      this.trackRunningStats = opts.trackRunningStats !== false
+      this.weight = opts.affine === false ? null : Tensor.ones(numFeatures)
+      this.bias = opts.affine === false ? null : Tensor.zeros(numFeatures)
+      this.numBatchesTracked = Tensor.zeros({dtype: 'int64'}).is_param_(false)
+      if (this.trackRunningStats) {
+        this.runningMean = Tensor.zeros(numFeatures).is_param_(false)
+        this.runningVar = Tensor.ones(numFeatures).is_param_(false)
+      }
+    }
+
+    calcStats(x) {
+      return runtime._core.ffi.poly_tensor_batchnorm_stats(x._ctx, x._tensor,
+        this.trackRunningStats ? this.runningMean._tensor : null, this.trackRunningStats ? this.runningVar._tensor : null,
+        !!Tensor.training).map(core => x._makeResultFromCore(core))
+    }
+
+    call(x) {
+      return x._makeResultFromCore(runtime._core.ffi.poly_tensor_batchnorm_apply(x._ctx, x._tensor,
+        this.weight === null ? null : this.weight._tensor, this.bias === null ? null : this.bias._tensor,
+        this.trackRunningStats ? this.runningMean._tensor : null, this.trackRunningStats ? this.runningVar._tensor : null,
+        this.numBatchesTracked._tensor, !!Tensor.training, this.eps, this.momentum))
+    }
+  }
+
+  return { Linear, LayerNorm, LayerNorm2d, Conv1d, Conv2d, ConvTranspose1d, ConvTranspose2d,
+    InstanceNorm, LSTMCell, GroupNorm, RMSNorm, Embedding, Dropout,
+    BatchNorm, BatchNorm2d: BatchNorm, BatchNorm3d: BatchNorm }
 }
 
 module.exports = { createBoundModules }

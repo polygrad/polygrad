@@ -13,7 +13,7 @@
 #include "../src/ctx.h"
 #include "../src/engine/schedule.h"
 #include "../src/frontend.h"
-#include "../src/nn.h"
+#include "../src/nn/nn.h"
 #include "../src/renderer/isa/x86.h"
 #include "../src/tensor.h"
 

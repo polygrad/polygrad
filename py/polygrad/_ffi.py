@@ -16,7 +16,7 @@ import sys
 _lib = None
 OPS = {}
 _has_cuda_ffi = False
-POLYGRAD_ABI_VERSION = 80
+POLYGRAD_ABI_VERSION = 81
 
 # --- Opaque pointer type (always available) ---
 _ptr = ctypes.c_void_p
@@ -55,6 +55,11 @@ class PolyOptimConfig(ctypes.Structure):
         ('momentum', ctypes.c_double),
         ('nesterov', ctypes.c_bool),
         ('classic', ctypes.c_bool),
+        ('tcoef', ctypes.c_double),
+        ('ns_steps', ctypes.c_int),
+        ('n_ns_coefficients', ctypes.c_int),
+        ('ns_coefficients', ctypes.POINTER(ctypes.c_double)),
+        ('pre_wd', ctypes.c_bool),
     ]
 
 class PolyCtxStats(ctypes.Structure):
@@ -764,6 +769,8 @@ def _declare_signatures(lib):
 
     lib.poly_buffer_ensure_device_allocated.restype = ctypes.c_int
     lib.poly_buffer_ensure_device_allocated.argtypes = [_ptr, _ptr, ctypes.c_int]
+    lib.poly_buffer_ensure_allocated.restype = ctypes.c_int
+    lib.poly_buffer_ensure_allocated.argtypes = [_ptr, _ptr, ctypes.c_int]
 
     lib.poly_buffer_read.restype = ctypes.c_int
     lib.poly_buffer_read.argtypes = [_ptr, _ptr, ctypes.c_void_p, ctypes.c_size_t]
@@ -1051,6 +1058,22 @@ def _declare_signatures(lib):
     ]
 
     lib.poly_tensor_topk.restype = ctypes.c_int
+    lib.poly_tensor_lstm_cell.restype = ctypes.c_int
+    lib.poly_tensor_lstm_cell.argtypes = [_ptr] * 8 + [_ptrp, _ptrp]
+    lib.poly_tensor_linear_apply.restype = _ptr
+    lib.poly_tensor_linear_apply.argtypes = [_ptr] * 4
+    lib.poly_tensor_rmsnorm_apply.restype = _ptr
+    lib.poly_tensor_rmsnorm_apply.argtypes = [_ptr] * 3 + [ctypes.c_double]
+    lib.poly_tensor_instancenorm_apply.restype = _ptr
+    lib.poly_tensor_instancenorm_apply.argtypes = [_ptr] * 4 + [ctypes.c_int, ctypes.c_double]
+    lib.poly_tensor_groupnorm_apply.restype = _ptr
+    lib.poly_tensor_groupnorm_apply.argtypes = [_ptr] * 4 + [ctypes.c_int, ctypes.c_double]
+    lib.poly_tensor_layernorm_axes_apply.restype = _ptr
+    lib.poly_tensor_layernorm_axes_apply.argtypes = [_ptr] * 4 + [ctypes.POINTER(ctypes.c_int64), ctypes.c_int, ctypes.c_double]
+    lib.poly_tensor_batchnorm_stats.restype = ctypes.c_int
+    lib.poly_tensor_batchnorm_stats.argtypes = [_ptr] * 4 + [ctypes.c_bool, _ptrp, _ptrp]
+    lib.poly_tensor_batchnorm_apply.restype = _ptr
+    lib.poly_tensor_batchnorm_apply.argtypes = [_ptr] * 7 + [ctypes.c_bool, ctypes.c_double, ctypes.c_double]
     lib.poly_tensor_topk.argtypes = [
         _ptr, _ptr, ctypes.c_int64, ctypes.c_int, ctypes.c_int, ctypes.c_int,
         _ptrp, _ptrp

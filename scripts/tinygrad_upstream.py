@@ -10,6 +10,7 @@ The default lane is unchanged; cpu-ops is an explicit hash-locked test adaptatio
 from __future__ import annotations
 
 import argparse
+import ast
 from collections import Counter
 import hashlib
 import importlib
@@ -33,12 +34,21 @@ import traceback
 ROOT = Path(__file__).resolve().parents[1]
 REFERENCE = ROOT / "references/tinygrad_latest"
 CPU_OPS_SHA256 = 'b0b8f94a538c555d3ecc094cc7d001de157805b340671b5efa845d54e0cefaf1'
+CPU_NN_SHA256 = {
+    'test/backend/test_nn.py': 'a64ce69e34511cc179a518c92ce2e91b51ff51fdf43a44fcc22c88c7bda8f23b',
+    'test/backend/test_optim.py': '1b6a8537c1c826ee5500cca1134a6a4a61dc302b2a3440393d64fc163370faa6',
+}
+NN_HELPERS_SHA256 = 'cfe8184a8d5349030a74bfc3322823574ea060713f71685524d6f6b9fbf98366'
 ENVIRONMENT = {
     "DEV": "CPU", "POLY_DEVICE": "cpu", "CACHELEVEL": "0", "DEBUG": "0",
     "FORWARD_ONLY": "0", "TINY_BACKEND": "0", "SKIP_SLOW_TEST": "0", "IMAGE": "0",
     "DERANDOMIZE_CI": "1", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1",
     "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1", "PYTHONHASHSEED": "0",
 }
+
+
+def worker_environment(adapter):
+    return dict(ENVIRONMENT, **({'RUN_SLOW': '1'} if adapter == 'cpu-nn' else {}))
 
 
 def digest(path):
@@ -80,7 +90,7 @@ def reference_lock(reference, tests, adapter, inputs):
             'upstream_inputs': {p: h for p, h in inputs.items() if Path(p).is_relative_to(reference)},
             'files': {str(p): digest(p) for p in sorted(paths)}, 'tools': tools,
             'environment': {k: os.environ.get(k) for k in ('PATH', 'HOME', 'LANG', 'LD_LIBRARY_PATH')},
-            'worker_environment': ENVIRONMENT, 'python': sys.version,
+            'worker_environment': worker_environment(adapter), 'python': sys.version,
             'platform': platform.platform(), 'cpu': cpu}
 
 
@@ -125,6 +135,43 @@ def adapt_cpu_ops(source):
 def check_cpu_ops_mode(device, renderer, interface, image):
     if (device, renderer, interface, image) != ('CPU', '', '', 0):
         raise ValueError('CPU ops adapter requires DEV=CPU, no renderer/interface override, IMAGE=0')
+
+
+def adapt_cpu_nn(source, path, helpers, reference=REFERENCE):
+    """Keep test bodies; load private compiler helpers only when a test uses them.
+
+    The two affected schedule tests still execute their original assertions:
+    missing compiler APIs fail those tests, rather than preventing collection.
+    Capability decorators are extracted verbatim from the locked test helper,
+    never from an upstream runtime implementation.
+    """
+    if (hashlib.sha256(source.encode()).hexdigest() != CPU_NN_SHA256.get(path)
+            or hashlib.sha256(helpers.encode()).hexdigest() != NN_HELPERS_SHA256):
+        raise ValueError('CPU NN adapter source lock mismatch; review the upstream change')
+    names = {'slow', 'not_support_multi_device', 'needs_second_gpu'}
+    segments = []
+    for node in ast.parse(helpers).body:
+        if ((isinstance(node, ast.FunctionDef) and node.name in names)
+                or (isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'slow' for t in node.targets))):
+            segments.append(ast.get_source_segment(helpers, node))
+    prelude = 'import os, functools\nfrom tinygrad.helpers import DEV\n' + '\n\n'.join(segments) + '\n'
+    for line in ('from test.helpers import check_schedule',
+                 'from tinygrad.engine.realize import run_linear',
+                 'from test.helpers import not_support_multi_device, needs_second_gpu, slow',
+                 'from test.helpers import needs_second_gpu, slow'):
+        source = source.replace(line + '\n', '\n')
+    # Insert after the original imports, before @slow can be evaluated.
+    pos = source.index('\n@slow') if path.endswith('test_nn.py') else source.index('\nnp.random.seed')
+    lazy = ('\ndef check_schedule(*args, **kwargs):\n'
+            '    import importlib.util\n'
+            f'    spec = importlib.util.spec_from_file_location("_upstream_nn_helpers", {str(reference / "test/helpers.py")!r})\n'
+            '    module = importlib.util.module_from_spec(spec)\n'
+            '    spec.loader.exec_module(module)\n'
+            '    return module.check_schedule(*args, **kwargs)\n'
+            '\ndef run_linear(*args, **kwargs):\n'
+            '    from tinygrad.engine.realize import run_linear as implementation\n'
+            '    return implementation(*args, **kwargs)\n')
+    return source[:pos] + '\n' + prelude + lazy + source[pos:]
 
 
 class ProviderAliases(importlib.abc.MetaPathFinder, importlib.abc.Loader):
@@ -265,22 +312,24 @@ def child(request):
                 raise RuntimeError(f"wrong Polygrad library: {loaded}")
             result["library"] = {"path": str(loaded), "sha256": digest(loaded)}
         test, pytest_root, adapted = request['test'], reference, None
-        if request.get('adapter') == 'cpu-ops':
+        if request.get('adapter') in ('cpu-ops', 'cpu-nn'):
             from tinygrad.helpers import DEV, IMAGE
             check_cpu_ops_mode(tinygrad.Device.DEFAULT, DEV.renderer, DEV.interface, IMAGE.value)
-            if request['engine'] == 'tinygrad':
+            if request['engine'] == 'tinygrad' and request['adapter'] == 'cpu-ops':
                 from tinygrad.renderer.nir import NIRRenderer
                 if isinstance(tinygrad.Device["CPU"].renderer, NIRRenderer):
                     raise ValueError('CPU ops adapter cannot remove an active NIR skip')
             original, *node = test.split('::')
-            if original != 'test/backend/test_ops.py':
+            if request['adapter'] == 'cpu-ops' and original != 'test/backend/test_ops.py':
                 raise ValueError('CPU ops adapter only supports test/backend/test_ops.py')
             adapted = Path(request['result']).parent / ('adapted-' + request['engine'])
             dest = adapted / original
             dest.parent.mkdir(parents=True, exist_ok=True)
             source = (reference / original).read_text(encoding='utf-8')
-            dest.write_text(adapt_cpu_ops(source), encoding='utf-8')
-            result['adaptation'] = {'id':'cpu-ops', 'original_sha256':digest(reference / original),
+            modified = (adapt_cpu_ops(source) if request['adapter'] == 'cpu-ops' else
+                        adapt_cpu_nn(source, original, (reference / 'test/helpers.py').read_text(encoding='utf-8'), reference))
+            dest.write_text(modified, encoding='utf-8')
+            result['adaptation'] = {'id':request['adapter'], 'original_sha256':digest(reference / original),
                                     'path':str(dest), 'sha256':digest(dest),
                                     'renderer_type':type(tinygrad.Device["CPU"].renderer).__name__}
             test, pytest_root = str(dest) + ''.join('::' + n for n in node), adapted
@@ -394,7 +443,7 @@ def run_one(output, engine, test, reference, library, timeout, adapter=None):
                "result": str(stem.with_suffix(".json")), "events": str(stem.with_suffix(".jsonl")), 'adapter':adapter}
     write_json(stem.with_suffix(".request.json"), request)
     env = {k: os.environ[k] for k in ("PATH", "HOME", "LANG", "LD_LIBRARY_PATH") if k in os.environ}
-    env.update(ENVIRONMENT, POLYGRAD_LIB=str(library), POLY_TMPDIR=str(output / "cc_tmp"),
+    env.update(worker_environment(adapter), POLYGRAD_LIB=str(library), POLY_TMPDIR=str(output / "cc_tmp"),
                TMPDIR=str(output / "cc_tmp"), XDG_CACHE_HOME=str(output / "cache"))
     command = [sys.executable, "-P", "-s", str(Path(__file__).resolve()), "--child", str(stem.with_suffix(".request.json"))]
     started = time.monotonic()
@@ -434,7 +483,7 @@ def main(argv=None):
     parser.add_argument("--baseline", type=Path)
     parser.add_argument("--compare-with", type=Path, help="attach outcome delta against a previous run; not acceptance")
     parser.add_argument("--write-baseline", type=Path, help="write new candidate only; nonpasses require reviewed reasons")
-    parser.add_argument('--adapter', choices=['cpu-ops'], help='explicit CPU-only test adaptation; default tests are unchanged')
+    parser.add_argument('--adapter', choices=['cpu-ops', 'cpu-nn'], help='explicit CPU-only test adaptation; default tests are unchanged')
     parser.add_argument('--record-reference-lock', action='store_true', help='content-lock this CPU reference execution for later reuse')
     parser.add_argument('--reuse-reference', type=Path, help='reuse only the original locked Tinygrad report; Polygrad always executes')
     parser.add_argument('--reference-sha256', help='required digest of --reuse-reference')
@@ -455,8 +504,10 @@ def main(argv=None):
         path = (reference / test.split("::")[0]).resolve()
         if not path.is_relative_to(reference / "test") or not path.is_file():
             parser.error(f"not an upstream test: {test}")
-        if args.adapter and test.split('::')[0] != 'test/backend/test_ops.py':
+        if args.adapter == 'cpu-ops' and test.split('::')[0] != 'test/backend/test_ops.py':
             parser.error('CPU ops adapter only supports test/backend/test_ops.py')
+        if args.adapter == 'cpu-nn' and test.split('::')[0] not in CPU_NN_SHA256:
+            parser.error('CPU NN adapter only supports test_nn.py and test_optim.py')
     if args.write_baseline and args.write_baseline.exists():
         parser.error("refusing to overwrite a baseline; write a separate review candidate")
     output.mkdir(parents=True, exist_ok=True)
@@ -491,7 +542,7 @@ def main(argv=None):
     contract = {"reference_commit": commit, "test_sha256": {t: digest(reference / t.split('::')[0]) for t in tests},
                 "upstream_sha256": hashlib.sha256(json.dumps({p.replace(str(reference), '<reference>'): h for p, h in inputs.items()
                     if Path(p).is_relative_to(reference)}, sort_keys=True).encode()).hexdigest(),
-                "engines": args.engine, "environment": ENVIRONMENT, "python": sys.version,
+                "engines": args.engine, "environment": worker_environment(args.adapter), "python": sys.version,
                 "runner_sha256": digest(__file__), "versions": [r.get("versions") for r in runs],
                 "devices": [r.get("device") for r in runs], 'adapter':args.adapter,
                 'failure_signature':'source-path-and-message-v2'}

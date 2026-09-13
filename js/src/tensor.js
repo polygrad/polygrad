@@ -1056,6 +1056,9 @@ function createBoundTensorClass(runtime) {
       const current = this._currentUopRaw()
       const bufRaw = current ? ffi.poly_uop_buffer(this._ctx, current) : null
       if (!bufRaw) throw new Error('toArray: tensor has no buffer identity')
+      // Tensor._buffer explicitly allocates terminal empty storage after
+      // realization; this is not execution-time placement or a host copy.
+      ffi.poly_buffer_ensure_allocated(this._ctx, bufRaw, tensorDevice(this._tensor))
       let raw
       const bufferKey = ffi.poly_buffer_get_key ? ffi.poly_buffer_get_key(ctx, bufRaw) : 0
       const normKey = bufferKey ? normalizeBufferKey(bufferKey) : null
@@ -1098,6 +1101,7 @@ function createBoundTensorClass(runtime) {
       const current = this._currentUopRaw()
       const bufRaw = current ? ffi.poly_uop_buffer(this._ctx, current) : null
       if (!bufRaw) throw new Error('toArray: tensor has no buffer identity')
+      ffi.poly_buffer_ensure_allocated(this._ctx, bufRaw, tensorDevice(this._tensor))
       let raw
       const bufferKey = ffi.poly_buffer_get_key ? ffi.poly_buffer_get_key(ctx, bufRaw) : 0
       const normKey = bufferKey ? normalizeBufferKey(bufferKey) : null
@@ -1305,6 +1309,22 @@ function createBoundTensorClass(runtime) {
 
     cloneAsync(device) {
       return this._rt._withAsync(() => this.clone(device))
+    }
+
+    replace(x) {
+      // Tensor.replace preserves the wrapper and atomically substitutes both
+      // roots at Polygrad's logical/physical boundary, as in the Python adapter.
+      if (!(x instanceof Tensor)) throw new TypeError('replace expects a Tensor in the same runtime')
+      if (!arraysEqual(this.shape, x.shape)) throw new Error('replace shape mismatch')
+      if (this._ctx !== x._ctx) throw new Error('replace requires Tensors owned by the same PolyCtx')
+      const logical = x._logicalUopRaw(), physical = x._physicalUopRaw()
+      if (!logical || !physical) throw new Error('replace source must have logical and physical roots')
+      if (ffi.poly_tensor_replace_roots(this._ctx, this._tensor, logical, physical,
+        POLY_TENSOR_VALUE, deviceId(x._device)) !== 0) throw new Error('poly_tensor_replace_roots failed during replace')
+      this._dtype = x._dtype
+      this._device = x._device
+      this._data = x._data
+      return this
     }
 
     assign(x) {
@@ -3858,5 +3878,5 @@ function createBoundTensorClass(runtime) {
 }
 
 module.exports = {
-  createBoundTensorClass, flattenArray, arraysEqual, _buildNested, normalizeLogicalPolicy
+  createBoundTensorClass, flattenArray, arraysEqual, _buildNested, normalizeLogicalPolicy, isIntegerDtype
 }

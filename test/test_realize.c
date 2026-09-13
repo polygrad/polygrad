@@ -1935,6 +1935,29 @@ TEST(realize, creation_copy_nested_shrink_assignment_preserves_version_topology)
   PASS();
 }
 
+TEST(realize, nn_lazy_view_assign_publishes_stripped_storage) {
+  PolyCtx *ctx = poly_ctx_new();
+  float initial[] = {1, 2, 3, 4}, values[4] = {0};
+  PolyTensor *host =
+      initialized_f32_tensor(ctx, (int64_t[]){4}, 1, initial, POLY_DEVICE_HOST, NULL);
+  PolyTensor *copy = poly_tensor_to_device(ctx, host, POLY_DEVICE_CPU);
+  PolyTensor *view = poly_tensor_reshape(ctx, copy, (int64_t[]){2, 2}, 2);
+  PolyTensor *value = poly_tensor_alu2(ctx, POLY_OP_ADD, view, view);
+  ASSERT_NOT_NULL(view);
+  ASSERT_PTR_EQ(poly_tensor_assign(ctx, view, value), view);
+  PolyTensor *out = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &view, 1, &out), 0);
+  ASSERT_PTR_EQ(out, view);
+  PolyUOp *root = poly_tensor_uop_physical(view);
+  ASSERT_INT_EQ(root->op, POLY_OP_RESHAPE);
+  ASSERT_INT_EQ(root->src[0]->op, POLY_OP_BUFFER);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, root->src[0], values, sizeof(values)), 0);
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(values[i], 2 * initial[i], 1e-6);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(realize, creation_copy_cuda_roundtrip_keeps_exact_call_dependency_topology) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);

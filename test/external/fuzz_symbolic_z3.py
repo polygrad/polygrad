@@ -229,8 +229,9 @@ def load_lib() -> ctypes.CDLL:
     # stop here until the declarations are reviewed, not corrupt ctypes calls.
     lib.poly_abi_version.restype = ctypes.c_int
     lib.poly_abi_version.argtypes = []
-    if (abi := lib.poly_abi_version()) != 80:
-        raise SystemExit(f"Z3 harness requires reviewed ABI80 layouts; core has ABI{abi}")
+    # ABI81 extends PolyOptimConfig, which this symbolic harness does not mirror.
+    if (abi := lib.poly_abi_version()) != 81:
+        raise SystemExit(f"Z3 harness requires reviewed ABI81 layouts; core has ABI{abi}")
 
     lib.poly_ctx_new.restype = ctypes.c_void_p
     lib.poly_ctx_new.argtypes = []
@@ -864,7 +865,7 @@ def run(args: argparse.Namespace) -> int:
         assert ranged.contents.arg.value.range.axis_type == AXIS_LOOP
     finally:
         poly.close()
-    print("Z3 harness ABI80: typed scalar and RANGE controls pass")
+    print("Z3 harness ABI81: typed scalar and RANGE controls pass")
     rng = random.Random(args.seed)
     skipped = 0
     checked = 0

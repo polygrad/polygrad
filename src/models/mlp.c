@@ -10,7 +10,7 @@
 
 #define _POSIX_C_SOURCE 200809L
 #include "mlp.h"
-#include "../nn.h"
+#include "../nn/nn.h"
 #include "../tensor.h"
 #include "../model.h"
 #include "../../vendor/cjson/cJSON.h"

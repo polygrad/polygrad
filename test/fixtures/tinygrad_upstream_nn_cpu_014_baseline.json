@@ -1,0 +1,1284 @@
+{
+  "schema_version": 1,
+  "contract": {
+    "adapter": "cpu-nn",
+    "devices": [
+      "CPU",
+      "CPU",
+      "CPU",
+      "CPU"
+    ],
+    "engines": "both",
+    "environment": {
+      "CACHELEVEL": "0",
+      "DEBUG": "0",
+      "DERANDOMIZE_CI": "1",
+      "DEV": "CPU",
+      "FORWARD_ONLY": "0",
+      "IMAGE": "0",
+      "MKL_NUM_THREADS": "1",
+      "OMP_NUM_THREADS": "1",
+      "POLY_DEVICE": "cpu",
+      "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+      "PYTHONHASHSEED": "0",
+      "RUN_SLOW": "1",
+      "SKIP_SLOW_TEST": "0",
+      "TINY_BACKEND": "0"
+    },
+    "failure_signature": "source-path-and-message-v2",
+    "python": "3.11.12 (main, Apr  9 2025, 04:04:00) [Clang 20.1.0 ]",
+    "reference_commit": "6f87158d77f66a36d5f8bbe915170b24e2acabe8",
+    "runner_sha256": "fdf52ba5d86dbe984ed67e448ffb2629388e3342aaa35cbc5c05cbd334783347",
+    "test_sha256": {
+      "test/backend/test_nn.py": "a64ce69e34511cc179a518c92ce2e91b51ff51fdf43a44fcc22c88c7bda8f23b",
+      "test/backend/test_optim.py": "1b6a8537c1c826ee5500cca1134a6a4a61dc302b2a3440393d64fc163370faa6"
+    },
+    "upstream_sha256": "f5f1b2736d521383cc28fa55a71a194d87484b84ce72a8013bb9e5915fe3809d",
+    "versions": [
+      {
+        "hypothesis": "6.131.9",
+        "numpy": "2.4.6",
+        "pytest": "8.3.5",
+        "torch": "2.10.0+cpu"
+      },
+      {
+        "hypothesis": "6.131.9",
+        "numpy": "2.4.6",
+        "pytest": "8.3.5",
+        "torch": "2.10.0+cpu"
+      },
+      {
+        "hypothesis": "6.131.9",
+        "numpy": "2.4.6",
+        "pytest": "8.3.5",
+        "torch": "2.10.0+cpu"
+      },
+      {
+        "hypothesis": "6.131.9",
+        "numpy": "2.4.6",
+        "pytest": "8.3.5",
+        "torch": "2.10.0+cpu"
+      }
+    ]
+  },
+  "tests": {
+    "polygrad:test/backend/test_nn.py::TestNN::test_batchnorm2d": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_nn.py::TestNN::test_batchnorm2d_no_running_stats": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_nn.py::TestNN::test_batchnorm2d_training": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_nn.py::TestNN::test_batchnorm2d_training_no_running_stats": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_nn.py::TestNN::test_batchnorm3d": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_nn.py::TestNN::test_batchnorm3d_no_running_stats": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_nn.py::TestNN::test_batchnorm3d_training": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_nn.py::TestNN::test_batchnorm3d_training_no_running_stats": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_nn.py::TestNN::test_batchnorm_axis": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_nn.py::TestNN::test_conv1d": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_nn.py::TestNN::test_conv1d_same_padding": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_nn.py::TestNN::test_conv2d": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_nn.py::TestNN::test_conv2d_same_padding_invalid_padding_str": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_nn.py::TestNN::test_conv2d_same_padding_invalid_stride": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_nn.py::TestNN::test_conv2d_same_padding_large_kernel": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_nn.py::TestNN::test_conv2d_same_padding_odd_input": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_nn.py::TestNN::test_conv2d_same_padding_with_dilation": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_nn.py::TestNN::test_conv2d_winograd": {
+      "expected": {
+        "status": "skipped",
+        "nonpassing_phases": {
+          "call": {
+            "detail": "('<adapted>/test/backend/test_nn.py', 173, 'Skipped: Takes too long to compile for Compiled backends')",
+            "outcome": "skipped"
+          }
+        }
+      },
+      "reason": "Unchanged upstream compiled-backend skip. Winograd remains unsupported in Polygrad (PG-PARITY-012); this skip does not certify it."
+    },
+    "polygrad:test/backend/test_nn.py::TestNN::test_conv_transpose1d": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_nn.py::TestNN::test_conv_transpose2d": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_nn.py::TestNN::test_embedding": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_nn.py::TestNN::test_embedding_one_kernel": {
+      "expected": {
+        "status": "failed",
+        "nonpassing_phases": {
+          "call": {
+            "detail": "<reference>/test/helpers.py:LINE: ImportError: cannot import name 'Ops' from 'polygrad.uop.ops' (<polygrad>/py/polygrad/uop/ops.py)",
+            "outcome": "failed"
+          }
+        }
+      },
+      "reason": "Private Python compiler-helper import is unsupported (Ops/check_schedule); this upstream numerical body is unexecuted. Native nn.embedding_cpu_schedule_reuses_table checks the pinned two-then-one SINK schedule, input COPY counts, values and51 operations without emulating compiler APIs."
+    },
+    "polygrad:test/backend/test_nn.py::TestNN::test_embedding_one_kernel_fused": {
+      "expected": {
+        "status": "failed",
+        "nonpassing_phases": {
+          "call": {
+            "detail": "<reference>/test/helpers.py:LINE: ImportError: cannot import name 'Ops' from 'polygrad.uop.ops' (<polygrad>/py/polygrad/uop/ops.py)",
+            "outcome": "failed"
+          }
+        }
+      },
+      "reason": "Private Python compiler-helper import is unsupported (Ops/check_schedule); this upstream numerical body is unexecuted. Native nn.embedding_cpu_schedule_reuses_table checks the pinned two-then-one SINK schedule, input COPY counts, values and51 operations without emulating compiler APIs."
+    },
+    "polygrad:test/backend/test_nn.py::TestNN::test_embedding_one_kernel_fused_noopt": {
+      "expected": {
+        "status": "failed",
+        "nonpassing_phases": {
+          "call": {
+            "detail": "<reference>/test/helpers.py:LINE: ImportError: cannot import name 'Ops' from 'polygrad.uop.ops' (<polygrad>/py/polygrad/uop/ops.py)",
+            "outcome": "failed"
+          }
+        }
+      },
+      "reason": "Private Python compiler-helper import is unsupported (Ops/check_schedule); this upstream numerical body is unexecuted. Native nn.embedding_cpu_schedule_reuses_table checks the pinned two-then-one SINK schedule, input COPY counts, values and51 operations without emulating compiler APIs. Tinygrad control also fails its <=0 operations assertion with51."
+    },
+    "polygrad:test/backend/test_nn.py::TestNN::test_embedding_regression": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_nn.py::TestNN::test_embedding_shape": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_nn.py::TestNN::test_groupnorm": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_nn.py::TestNN::test_instancenorm_2d": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_nn.py::TestNN::test_instancenorm_3d": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_nn.py::TestNN::test_layernorm": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_nn.py::TestNN::test_layernorm_2d": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_nn.py::TestNN::test_layernorm_forward": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_nn.py::TestNN::test_linear": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_nn.py::TestNN::test_load_conv_num_batches_tracked": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_nn.py::TestNN::test_load_state_dict": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_nn.py::TestNN::test_load_state_dict_shape_mismatch": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_nn.py::TestNN::test_load_state_dict_sharded_dict": {
+      "expected": {
+        "status": "skipped",
+        "nonpassing_phases": {
+          "call": {
+            "detail": "('<adapted>/test/backend/test_nn.py', 543, 'Skipped: no multi')",
+            "outcome": "skipped"
+          }
+        }
+      },
+      "reason": "Explicit upstream CPU multi-device capability skip. Polygrad CPU:1 is unsupported (PG-PARITY-013); pinned no-multi cases also skip on Tinygrad. No multi-device execution coverage or parity allowance is claimed."
+    },
+    "polygrad:test/backend/test_nn.py::TestNN::test_load_state_dict_sharded_model": {
+      "expected": {
+        "status": "skipped",
+        "nonpassing_phases": {
+          "call": {
+            "detail": "('<adapted>/test/backend/test_nn.py', 521, \"Skipped: second device not available: Unsupported device: 'CPU:1'\")",
+            "outcome": "skipped"
+          }
+        }
+      },
+      "reason": "Explicit upstream CPU multi-device capability skip. Polygrad CPU:1 is unsupported (PG-PARITY-013); pinned no-multi cases also skip on Tinygrad. No multi-device execution coverage or parity allowance is claimed."
+    },
+    "polygrad:test/backend/test_nn.py::TestNN::test_load_state_dict_sharded_model_dict_different_axis": {
+      "expected": {
+        "status": "skipped",
+        "nonpassing_phases": {
+          "call": {
+            "detail": "('<adapted>/test/backend/test_nn.py', 582, 'Skipped: no multi')",
+            "outcome": "skipped"
+          }
+        }
+      },
+      "reason": "Explicit upstream CPU multi-device capability skip. Polygrad CPU:1 is unsupported (PG-PARITY-013); pinned no-multi cases also skip on Tinygrad. No multi-device execution coverage or parity allowance is claimed."
+    },
+    "polygrad:test/backend/test_nn.py::TestNN::test_load_state_dict_sharded_model_dict_same_axis": {
+      "expected": {
+        "status": "skipped",
+        "nonpassing_phases": {
+          "call": {
+            "detail": "('<adapted>/test/backend/test_nn.py', 560, \"Skipped: second device not available: Unsupported device: 'CPU:1'\")",
+            "outcome": "skipped"
+          }
+        }
+      },
+      "reason": "Explicit upstream CPU multi-device capability skip. Polygrad CPU:1 is unsupported (PG-PARITY-013); pinned no-multi cases also skip on Tinygrad. No multi-device execution coverage or parity allowance is claimed."
+    },
+    "polygrad:test/backend/test_nn.py::TestNN::test_lstm_cell": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_nn.py::TestNN::test_lstm_cell_no_bias": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_nn.py::TestNN::test_rmsnorm": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_optim.py::TestOptim::test_adam": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_optim.py::TestOptim::test_adam_high_lr": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_optim.py::TestOptim::test_adamw": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_optim.py::TestOptim::test_adamw_high_lr": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_optim.py::TestOptim::test_assert_tensor_train": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_optim.py::TestOptim::test_duped_weights": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_optim.py::TestOptim::test_lamb_cpu_offload": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_optim.py::TestOptim::test_lamb_cpu_offload_multi": {
+      "expected": {
+        "status": "skipped",
+        "nonpassing_phases": {
+          "call": {
+            "detail": "('<adapted>/test/backend/test_optim.py', 203, \"Skipped: second device not available: Unsupported device: 'CPU:1'\")",
+            "outcome": "skipped"
+          }
+        }
+      },
+      "reason": "Explicit upstream CPU multi-device capability skip. Polygrad CPU:1 is unsupported (PG-PARITY-013); pinned no-multi cases also skip on Tinygrad. No multi-device execution coverage or parity allowance is claimed."
+    },
+    "polygrad:test/backend/test_optim.py::TestOptim::test_mixed_precision": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_optim.py::TestOptim::test_multistep_adam": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_optim.py::TestOptim::test_multistep_adam_high_lr": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_optim.py::TestOptim::test_multistep_adam_high_lr_teeny": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_optim.py::TestOptim::test_multistep_adamw": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_optim.py::TestOptim::test_multistep_adamw_high_lr": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_optim.py::TestOptim::test_multistep_muon_high_lr_teeny": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_optim.py::TestOptim::test_multistep_muon_momentum_wd": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_optim.py::TestOptim::test_multistep_muon_no_nesterov_momentum": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_optim.py::TestOptim::test_multistep_sgd": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_optim.py::TestOptim::test_multistep_sgd_high_lr": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_optim.py::TestOptim::test_multistep_sgd_high_lr_momentum": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_optim.py::TestOptim::test_multistep_sgd_high_lr_momentum_wd": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_optim.py::TestOptim::test_multistep_sgd_high_lr_nesterov_momentum": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_optim.py::TestOptim::test_multistep_sgd_high_lr_nesterov_momentum_wd": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_optim.py::TestOptim::test_multistep_sgd_high_lr_teeny": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_optim.py::TestOptim::test_multistep_sgd_high_lr_wd": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_optim.py::TestOptim::test_multistep_sgd_momentum": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_optim.py::TestOptim::test_multistep_sgd_momentum_wd": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_optim.py::TestOptim::test_multistep_sgd_nesterov_momentum": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_optim.py::TestOptim::test_multistep_sgd_nesterov_momentum_wd": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_optim.py::TestOptim::test_multistep_sgd_wd": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_optim.py::TestOptim::test_muon": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_optim.py::TestOptim::test_muon_momentum_wd_ns_steps_ns_coefficients": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_optim.py::TestOptim::test_muon_ns_coefficients": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_optim.py::TestOptim::test_muon_ns_steps": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_optim.py::TestOptim::test_muon_wd": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_optim.py::TestOptim::test_sgd": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_optim.py::TestOptim::test_sgd_high_lr": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_optim.py::TestOptim::test_sgd_high_lr_wd": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "polygrad:test/backend/test_optim.py::TestOptim::test_sgd_wd": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_batchnorm2d": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_batchnorm2d_no_running_stats": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_batchnorm2d_training": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_batchnorm2d_training_no_running_stats": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_batchnorm3d": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_batchnorm3d_no_running_stats": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_batchnorm3d_training": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_batchnorm3d_training_no_running_stats": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_batchnorm_axis": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_conv1d": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_conv1d_same_padding": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_conv2d": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_conv2d_same_padding_invalid_padding_str": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_conv2d_same_padding_invalid_stride": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_conv2d_same_padding_large_kernel": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_conv2d_same_padding_odd_input": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_conv2d_same_padding_with_dilation": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_conv2d_winograd": {
+      "expected": {
+        "status": "skipped",
+        "nonpassing_phases": {
+          "call": {
+            "detail": "('<adapted>/test/backend/test_nn.py', 173, 'Skipped: Takes too long to compile for Compiled backends')",
+            "outcome": "skipped"
+          }
+        }
+      },
+      "reason": "Unchanged upstream compiled-backend skip. Winograd remains unsupported in Polygrad (PG-PARITY-012); this skip does not certify it."
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_conv_transpose1d": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_conv_transpose2d": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_embedding": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_embedding_one_kernel": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_embedding_one_kernel_fused": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_embedding_one_kernel_fused_noopt": {
+      "expected": {
+        "status": "failed",
+        "nonpassing_phases": {
+          "call": {
+            "detail": "<polygrad>/references/.uv-python/cpython-3.11.12-linux-x86_64-gnu/lib/python3.11/unittest/case.py:LINE: AssertionError: 51 not less than or equal to 0",
+            "outcome": "failed"
+          }
+        }
+      },
+      "reason": "Reference failure: unchanged Tinygrad NOOPT embedding control reports51 operations against its <=0 assertion. The direct C schedule/value control preserves the measured51; this upstream assertion is unchanged."
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_embedding_regression": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_embedding_shape": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_groupnorm": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_instancenorm_2d": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_instancenorm_3d": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_layernorm": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_layernorm_2d": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_layernorm_forward": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_linear": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_load_conv_num_batches_tracked": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_load_state_dict": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_load_state_dict_shape_mismatch": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_load_state_dict_sharded_dict": {
+      "expected": {
+        "status": "skipped",
+        "nonpassing_phases": {
+          "call": {
+            "detail": "('<adapted>/test/backend/test_nn.py', 543, 'Skipped: no multi')",
+            "outcome": "skipped"
+          }
+        }
+      },
+      "reason": "Explicit upstream CPU multi-device capability skip. Polygrad CPU:1 is unsupported (PG-PARITY-013); pinned no-multi cases also skip on Tinygrad. No multi-device execution coverage or parity allowance is claimed."
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_load_state_dict_sharded_model": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_load_state_dict_sharded_model_dict_different_axis": {
+      "expected": {
+        "status": "skipped",
+        "nonpassing_phases": {
+          "call": {
+            "detail": "('<adapted>/test/backend/test_nn.py', 582, 'Skipped: no multi')",
+            "outcome": "skipped"
+          }
+        }
+      },
+      "reason": "Explicit upstream CPU multi-device capability skip. Polygrad CPU:1 is unsupported (PG-PARITY-013); pinned no-multi cases also skip on Tinygrad. No multi-device execution coverage or parity allowance is claimed."
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_load_state_dict_sharded_model_dict_same_axis": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_lstm_cell": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_lstm_cell_no_bias": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_nn.py::TestNN::test_rmsnorm": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_optim.py::TestOptim::test_adam": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_optim.py::TestOptim::test_adam_high_lr": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_optim.py::TestOptim::test_adamw": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_optim.py::TestOptim::test_adamw_high_lr": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_optim.py::TestOptim::test_assert_tensor_train": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_optim.py::TestOptim::test_duped_weights": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_optim.py::TestOptim::test_lamb_cpu_offload": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_optim.py::TestOptim::test_lamb_cpu_offload_multi": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_optim.py::TestOptim::test_mixed_precision": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_optim.py::TestOptim::test_multistep_adam": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_optim.py::TestOptim::test_multistep_adam_high_lr": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_optim.py::TestOptim::test_multistep_adam_high_lr_teeny": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_optim.py::TestOptim::test_multistep_adamw": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_optim.py::TestOptim::test_multistep_adamw_high_lr": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_optim.py::TestOptim::test_multistep_muon_high_lr_teeny": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_optim.py::TestOptim::test_multistep_muon_momentum_wd": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_optim.py::TestOptim::test_multistep_muon_no_nesterov_momentum": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_optim.py::TestOptim::test_multistep_sgd": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_optim.py::TestOptim::test_multistep_sgd_high_lr": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_optim.py::TestOptim::test_multistep_sgd_high_lr_momentum": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_optim.py::TestOptim::test_multistep_sgd_high_lr_momentum_wd": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_optim.py::TestOptim::test_multistep_sgd_high_lr_nesterov_momentum": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_optim.py::TestOptim::test_multistep_sgd_high_lr_nesterov_momentum_wd": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_optim.py::TestOptim::test_multistep_sgd_high_lr_teeny": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_optim.py::TestOptim::test_multistep_sgd_high_lr_wd": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_optim.py::TestOptim::test_multistep_sgd_momentum": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_optim.py::TestOptim::test_multistep_sgd_momentum_wd": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_optim.py::TestOptim::test_multistep_sgd_nesterov_momentum": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_optim.py::TestOptim::test_multistep_sgd_nesterov_momentum_wd": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_optim.py::TestOptim::test_multistep_sgd_wd": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_optim.py::TestOptim::test_muon": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_optim.py::TestOptim::test_muon_momentum_wd_ns_steps_ns_coefficients": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_optim.py::TestOptim::test_muon_ns_coefficients": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_optim.py::TestOptim::test_muon_ns_steps": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_optim.py::TestOptim::test_muon_wd": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_optim.py::TestOptim::test_sgd": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_optim.py::TestOptim::test_sgd_high_lr": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_optim.py::TestOptim::test_sgd_high_lr_wd": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    },
+    "tinygrad:test/backend/test_optim.py::TestOptim::test_sgd_wd": {
+      "expected": {
+        "status": "passed",
+        "nonpassing_phases": {}
+      },
+      "reason": ""
+    }
+  },
+  "scope_note": "Selected CPU NN/optimizer frontier, not a parity allowance or full compiler API certificate. Test bodies and skips remain unchanged; RUN_SLOW is enabled. Eight Muon controls execute against Torch2.10.0+cpu on both providers.",
+  "evidence": {
+    "report": "/home/anton/projects/polygrad/polygrad/temp/nn-compat-closeout-20260913.Koda7V/suite/nn/report.json",
+    "sha256": "9d029006013ca5288cf042ae3a5becf9c236969ee39720367d16758b0b75da1d"
+  }
+}

@@ -81,9 +81,11 @@ The public Tensor APIs do not yet provide SVD/Newton–Schulz,
 data-dependent `nonzero`/`masked_select`, or borrowed-pointer `from_blob`
 construction. Tinygrad's `PYTHON` backend name is not an alias for Polygrad's
 `INTERP` backend. These are compatibility limits, not passing upstream tests;
-the reviewed [Tensor](test/fixtures/tinygrad_upstream_014_baseline.json) and
-[operation](test/fixtures/tinygrad_upstream_ops_cpu_014_baseline.json) baselines
-keep nonpassing cases explicit. HIP is outside the 0.5.0 candidate's validation
+the reviewed [Tensor](test/fixtures/tinygrad_upstream_014_baseline.json),
+[operation](test/fixtures/tinygrad_upstream_ops_cpu_014_baseline.json) and
+[NN/optimizer](test/fixtures/tinygrad_upstream_nn_cpu_014_baseline.json) baselines
+keep nonpassing cases explicit, including unsupported Python compiler-private
+helpers. HIP is outside the 0.5.0 candidate's validation
 matrix.
 
 The main intentional differences are:
@@ -199,7 +201,7 @@ only regions that have been written. This is not zero initialization.
 Python accepts `Context(CHECK_OOB=0)`. Nonzero values raise: the optional
 Tinygrad compiler bounds verifier is not implemented (`PG-PARITY-026`).
 This is separate from Tensor index and shape validation.
-Runtime scalar bindings use signed 64-bit values (C ABI80). Python and JS
+Runtime scalar bindings use signed 64-bit values (since C ABI80). Python and JS
 reject values outside that range; JS accepts safe integer Numbers or BigInts.
 Larger Python integers remain unsupported (`PG-PARITY-028`). WebGPU keeps its
 32-bit uniform limit. Scheduling and JIT preserve admitted values; they do not wrap
@@ -402,7 +404,7 @@ Low-level `UOp.variable` bounds retain integer, floating-point and boolean
 endpoints independently of the variable dtype. C takes scalar `PolyArg` values;
 Python accepts `int`/`float`/`bool`; JavaScript uses `pg.uop.variable(...)`, with
 `BigInt` for exact wide integers. NaN, reversed and nonnumeric bounds are rejected.
-Current packages require C ABI80 and graph formats PGIR18/PGPM10; incompatible
+Current packages require C ABI81 and graph formats PGIR18/PGPM10; incompatible
 artifacts are rejected. Typed endpoints can exceed the runtime's signed64
 variable-binding domain; metadata support does not imply executable bindings.
 
@@ -632,13 +634,22 @@ Polygrad includes the usual tensor building blocks:
 - elementwise ops, broadcasting, reductions, movement ops, indexing, gather,
   sort, argsort, topk, matmul, softmax, normalization, and loss helpers;
 - reverse-mode autograd for first-order training;
-- `nn` layers and optimizers in Python, with JavaScript optimizer helpers;
+- `nn` layers and optimizers in Python and JavaScript;
 - structured linalg: QR, triangular solve, Cholesky, Cholesky solve, solve, and
   least squares;
 - tinygrad-style raw Tensor JIT capture/replay;
 - portable bundles for saving IR and weights together, plus separate bound
   compiled-program export for compatible runtimes;
 - model loading paths for supported safetensors/GGUF workflows.
+
+Reusable C layer programs are declared in `src/nn/nn.h`; scoped Model layer
+construction is in `src/models/layers.h`. LSTMCell, Linear, LayerNorm,
+GroupNorm, BatchNorm, InstanceNorm and RMSNorm share C programs across
+Python and JavaScript; C model builders can compose the same programs.
+LSTM state is explicit: each call returns hidden/cell tensors that can feed
+the next call. These are ordinary graphs, with existing autograd and export.
+Standalone optimizers include LARS/LAMB/Muon. Model optimizer configuration
+and checkpoints currently support SGD/Adam/AdamW, not those additional kinds.
 
 C Model imports reject malformed HF shards as a whole; they do not publish a
 partially loaded model. The C GGUF loader supports F32/F16/BF16, I8/I16/I32
@@ -771,7 +782,8 @@ CUDA/Wasm candidate acceptance, use:
 
 ```bash
 make test-release-list  # inspect the gate list without running it
-make test-release PYTHON=/path/to/test/python HF_PYTHON=/path/to/hf/python
+make test-release PYTHON=/path/to/test/python PARITY_PY=/path/to/parity/python \
+  HF_PYTHON=/path/to/hf/python
 ```
 
 `test-release` runs maintained targets serially, including common and specific
@@ -866,6 +878,10 @@ make test-compat-tinygrad-ops UPSTREAM_COMPAT_DIR=temp/upstream-ops-001
 # Ratchet the separately reviewed CPU ops frontier:
 make test-compat-tinygrad-ops UPSTREAM_COMPAT_DIR=temp/upstream-ops-002 \
   UPSTREAM_COMPAT_ARGS='--baseline test/fixtures/tinygrad_upstream_ops_cpu_014_baseline.json'
+# NN and optimizer files, with source-locked CPU helper adaptation:
+make test-compat-tinygrad-nn UPSTREAM_COMPAT_DIR=temp/upstream-nn-001
+# Diagnostic refresh of all674 selected cases per engine, in three serial lanes:
+make test-compat-tinygrad-suite UPSTREAM_COMPAT_DIR=temp/upstream-suite-001
 ```
 
 Each output directory must be new. `report.json` records source/library hashes,
@@ -885,6 +901,15 @@ that its actual renderer is not NIR. All test bodies, tolerances, gradients and
 other skips remain unchanged. Adapted-file hashes are recorded in the report.
 Keep its reviewed baseline separate from the unchanged lane; this adapter is
 test infrastructure, not a Polygrad renderer implementation or source-audit closure.
+
+The `cpu-nn` adapter preserves NN/optimizer test bodies and enables their
+`RUN_SLOW` controls. Compiler-private helper imports remain real failures when
+Polygrad has no counterpart; they are not replaced with stubs. Muon controls
+require a Torch version providing `torch.optim.Muon`. The reviewed environment
+uses Python3.11.12, Torch2.10.0+cpu, NumPy2.4.6, pytest8.3.5 and hypothesis6.131.9;
+select it through `PARITY_PY`. Baseline contracts check these versions.
+The suite target runs all lanes even when one fails, and remains nonzero for
+known failures/skips. It is a diagnostic refresh, not an allowance gate.
 
 `UPSTREAM_COMPAT_ARGS='--write-baseline temp/candidate.json'` writes a new
 candidate only after complete execution. Review every nonpass's `reason` before

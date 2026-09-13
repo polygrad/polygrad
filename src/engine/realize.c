@@ -261,38 +261,24 @@ static PolyUOp *poly_transform_to_call_after_result_buffer(PolyCtx *ctx, PolyUOp
     return NULL;
   }
 
-  /* Pinned tinygrad callify.apply_after strips the complete pending-version
-   * chain, not just one AFTER layer. Distinct STORE nodes remain distinct
-   * effects in the CALL body; this only selects their shared result storage. */
-  PolyUOp *base = root->src[0];
-  while (base && base->op == POLY_OP_AFTER && base->n_src >= 1)
+  /* tensor.finalize_after strips AFTER throughout the movement chain, then
+   * rebuilds every view. Leaving a nested creation AFTER inside a view would
+   * publish a buffer_map value that still contains an original COPY key. */
+  PolyUOp *base = root;
+  while (base && base->n_src >= 1 &&
+         (base->op == POLY_OP_AFTER || poly_transform_to_call_after_result_view_op(base->op))) {
+    if (base->op != POLY_OP_AFTER && !poly_transform_view_stack_push(&views, base)) {
+      poly_transform_view_stack_free(&views);
+      return NULL;
+    }
     base = base->src[0];
-
-  /* A STORE target may be a writable movement view rather than a contiguous
-   * buffer identity. Pinned tinygrad keeps raw
-   * AFTER(view, STORE(view, value)) in the assignment sink and returns the
-   * view after executing it; it does not replace the write with a fresh
-   * materialization. Follow the same movement/AFTER chain only to prove that
-   * storage exists, while preserving the exact view as the realized result. */
-  PolyUOp *storage = base;
-  while (storage && !poly_uop_has_buffer_identity(storage)) {
-    if (storage->op == POLY_OP_AFTER && storage->n_src >= 1) {
-      storage = storage->src[0];
-      continue;
-    }
-    if ((poly_opset_has(POLY_GROUP_MOVEMENT, storage->op) || storage->op == POLY_OP_BITCAST) &&
-        storage->n_src >= 1) {
-      storage = storage->src[0];
-      continue;
-    }
-    storage = NULL;
   }
-  if (!base || !storage) {
+  if (!base || !poly_uop_has_buffer_identity(base)) {
     poly_transform_view_stack_free(&views);
     return NULL;
   }
 
-  PolyUOp *ret = poly_transform_to_call_rebuild_view(ctx, base, root, &views);
+  PolyUOp *ret = poly_transform_to_call_rebuild_view(ctx, base, base, &views);
   poly_transform_view_stack_free(&views);
   return ret;
 }

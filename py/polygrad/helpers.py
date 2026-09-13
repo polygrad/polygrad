@@ -416,6 +416,10 @@ class _DEFAULT_DTYPE(ContextVar):
     def value(self, value):
         from . import _ffi
         lib = _ffi.get_lib()
+        # String defaults are installed while dtype.py is still importing.
+        if not isinstance(value, str):
+            from .dtype import to_dtype
+            value = to_dtype(value).name
         dtype_id = lib.poly_dtype_id_by_name(value.lower().encode())
         if getattr(lib, f'poly_set_default_{self.kind}')(dtype_id) != 0:
             raise AttributeError(f'unknown dtype {value!r}')

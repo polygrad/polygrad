@@ -21,5 +21,28 @@ model.dispose()
 const restored = rt.Model.fromBundle(bytes)
 assert.deepEqual(Array.from(restored.forward({ x: new Float32Array([7]) }).prediction), [7])
 restored.dispose()
+const Tensor = rt.Tensor
+const cell = new rt.nn.LSTMCell(2, 2, {bias: false})
+cell.weightIh = Tensor.zeros(8, 2)
+cell.weightHh = Tensor.zeros(8, 2)
+const [h, c] = cell.call(Tensor.ones(1, 2), [Tensor.zeros(1, 2), Tensor.ones(1, 2)])
+assert.deepEqual(Array.from(c.toArray()), [.5, .5])
+const hidden = Array.from(h.toArray())
+assert.equal(hidden.length, 2)
+assert(hidden.every(v => Math.abs(v - .23105858) < 1e-6))
+const parameter = new Tensor([1, 2, 3, 4], {dtype: 'float32'}).reshape(2, 2)
+const optimizer = new rt.nn.optim.Muon([parameter], {lr: .1, nsSteps: 2})
+const previousTraining = Tensor.training
+try {
+  Tensor.training = true
+  for (let i = 0; i < 2; i++) {
+    parameter._grad = new Tensor([.1, -.2, .3, -.4]).reshape(2, 2)
+    optimizer.step()
+  }
+  const expectedValues = [1.03743243, 2.11009645, 2.77558279, 4.05183554]
+  const actual = Array.from(parameter.toArray())
+  assert.equal(actual.length, expectedValues.length)
+  assert(actual.every((v, i) => Math.abs(v - expectedValues[i]) < 2e-5))
+} finally { Tensor.training = previousTraining }
 rt.dispose()
-console.log(JSON.stringify({ package: resolved, core: expected, tensor: true, modelBundle: true }))
+console.log(JSON.stringify({ package: resolved, core: expected, tensor: true, modelBundle: true, lstm: true, muon: true }))

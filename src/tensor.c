@@ -1853,6 +1853,26 @@ PolyTensor *poly_tensor_assign(PolyCtx *ctx, PolyTensor *target, PolyTensor *val
     if (!logical_after) return NULL;
   }
 
+  return poly_tensor_assign_after(ctx, target, logical_after, physical_after);
+}
+
+/* Tensor.assign's publication is shared with nn.optim.Optimizer.schedule_step.
+ * A view write must advance live aliases at its storage anchor, not merely
+ * replace the selected wrapper with AFTER(view, STORE(view, value)). */
+PolyTensor *poly_tensor_assign_after(
+    PolyCtx *ctx,
+    PolyTensor *target,
+    PolyUOp *logical_after,
+    PolyUOp *physical_after
+) {
+  if (!ctx || !target || !physical_after || physical_after->op != POLY_OP_AFTER ||
+      physical_after->n_src != 2 || physical_after->src[0] != target->uop_physical)
+    return NULL;
+  bool build_logical = logical_after != NULL;
+  PolyUOp *target_physical = target->uop_physical, *target_logical = target->uop_logical;
+  if (build_logical && (logical_after->op != POLY_OP_AFTER || logical_after->n_src != 2 ||
+                        logical_after->src[0] != target_logical))
+    return NULL;
   PolyUOp *physical_view_anchor = tensor_assign_view_anchor(target_physical);
   PolyUOp *logical_view_anchor = build_logical ? tensor_assign_view_anchor(target_logical) : NULL;
   if ((build_logical && logical_view_anchor) || physical_view_anchor) {
@@ -6165,22 +6185,31 @@ PolyUOp *poly_max_reduce(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim) {
 
 /* Tensor.mean (mixin/op.py): sum in the accumulator dtype, true division,
  * then cast back to the public dtype. Used by raw C composites too. */
-static PolyUOp *mean_axes_root(PolyCtx *ctx, PolyUOp *x, int64_t *axes, int n_axes, bool keepdim) {
+PolyUOp *poly_mean_axes(PolyCtx *ctx, PolyUOp *x, int64_t *axes, int n_axes, bool keepdim) {
   if (!ctx || !x || n_axes < 0 || n_axes > POLY_MAX_DIMS || (n_axes && !axes)) return NULL;
-  int64_t shape[POLY_MAX_DIMS], reduced_shape[POLY_MAX_DIMS];
-  int ndim = uop_shape(ctx, x, shape);
+  int ndim = poly_uop_ndim(ctx, x);
   if (ndim < 0) return NULL;
+  PolyUOp *count = poly_const_int(ctx, 1);
   for (int i = 0; i < n_axes; i++) {
     int64_t axis = axes[i] < 0 ? axes[i] + ndim : axes[i];
     if (axis < 0 || axis >= ndim) return NULL;
-    reduced_shape[i] = shape[axis];
+    PolyUOp *dim = poly_uop_shape_dim(ctx, x, (int)axis);
+    if (!count || !dim) return NULL;
+    int64_t n, d;
+    if (poly_uop_const_i64(count, &n) == 0 && poly_uop_const_i64(dim, &d) == 0) {
+      if (n < 0 || d < 0 || (d && n > INT64_MAX / d)) return NULL;
+      count = poly_const_int(ctx, n * d);
+    } else {
+      /* Tensor.mean divides by the actual reduced extents, not the
+       * maximum storage allocation of a bound dimension. */
+      count = poly_mul(ctx, count, dim);
+    }
   }
-  int64_t count = poly_shape_numel_checked(reduced_shape, n_axes);
-  if (count < 0) return NULL;
+  if (!count) return NULL;
   PolyDType acc;
   if (!poly_sum_acc_dtype(x->dtype, &acc)) return NULL;
   PolyUOp *sum = sum_axes_root(ctx, poly_cast(ctx, x, acc), axes, n_axes, keepdim);
-  PolyUOp *mean = poly_div(ctx, sum, poly_const_int(ctx, count));
+  PolyUOp *mean = poly_div(ctx, sum, count);
   /* Pinned mean's integer output is explicitly float32, unlike sqrt/div's
    * configured least_upper_float intermediate. */
   return poly_cast(ctx, mean, poly_dtype_is_float(x->dtype) ? x->dtype : POLY_FLOAT32);
@@ -6189,8 +6218,8 @@ static PolyUOp *mean_axes_root(PolyCtx *ctx, PolyUOp *x, int64_t *axes, int n_ax
 PolyUOp *poly_mean_reduce(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim) {
   int64_t a = axis;
   int ndim = poly_uop_ndim(ctx, x);
-  if (ndim == 0 && (axis == 0 || axis == -1)) return mean_axes_root(ctx, x, NULL, 0, keepdim != 0);
-  return mean_axes_root(ctx, x, &a, 1, keepdim != 0);
+  if (ndim == 0 && (axis == 0 || axis == -1)) return poly_mean_axes(ctx, x, NULL, 0, keepdim != 0);
+  return poly_mean_axes(ctx, x, &a, 1, keepdim != 0);
 }
 
 PolyUOp *poly_var_reduce(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim, int correction) {
@@ -6334,6 +6363,48 @@ static PolyUOp *poly_transpose_last2(PolyCtx *ctx, PolyUOp *x) {
   perm[ndim - 2] = ndim - 1;
   perm[ndim - 1] = ndim - 2;
   return poly_permute(ctx, x, perm, ndim);
+}
+
+/* OpMixin.newton_schulz: normalize once; each polynomial term uses the same
+ * iteration input. Preserve the ordered products/sum rather than Hornerizing. */
+PolyUOp *poly_newton_schulz(
+    PolyCtx *ctx,
+    PolyUOp *x,
+    int steps,
+    const double *coefficients,
+    int n_coefficients,
+    double eps
+) {
+  int64_t shape[POLY_MAX_DIMS];
+  if (!ctx || !x || n_coefficients <= 0 || !coefficients) return NULL;
+  int ndim = uop_shape(ctx, x, shape);
+  if (ndim < 2) return NULL;
+  if (shape[ndim - 2] > shape[ndim - 1]) {
+    PolyUOp *t = poly_newton_schulz(
+        ctx, poly_transpose_last2(ctx, x), steps, coefficients, n_coefficients, eps
+    );
+    return t ? poly_transpose_last2(ctx, t) : NULL;
+  }
+  int64_t axes[] = {ndim - 2, ndim - 1};
+  PolyUOp *square_sum = sum_axes_root_dtype(ctx, poly_mul(ctx, x, x), axes, 2, true, NULL);
+  PolyUOp *norm = poly_add(
+      ctx, poly_alu1(ctx, POLY_OP_SQRT, square_sum), poly_const_typed(ctx, POLY_WEAKFLOAT, eps)
+  );
+  PolyUOp *g = poly_div(ctx, x, norm);
+  for (int step = 0; step < steps && g; step++) {
+    PolyUOp *sum = NULL;
+    PolyUOp *power = g;
+    PolyUOp *gram = n_coefficients > 1 ? poly_dot(ctx, g, poly_transpose_last2(ctx, g)) : NULL;
+    if (n_coefficients > 1 && !gram) return NULL;
+    for (int i = 0; i < n_coefficients; i++) {
+      if (i) power = poly_dot(ctx, gram, power);
+      PolyUOp *term = poly_mul(ctx, poly_const_typed(ctx, POLY_WEAKFLOAT, coefficients[i]), power);
+      sum = i ? poly_add(ctx, sum, term) : term;
+      if (!sum) return NULL;
+    }
+    g = sum;
+  }
+  return g;
 }
 
 static PolyUOp *poly_qr_column(PolyCtx *ctx, PolyUOp *r, int64_t col) {
@@ -7535,7 +7606,7 @@ PolyUOp *poly_cross_entropy(PolyCtx *ctx, PolyUOp *logits, PolyUOp *target, int 
   int64_t axes[POLY_MAX_DIMS];
   for (int i = 0; i < ndim - 1; i++)
     axes[i] = i;
-  PolyUOp *mean = mean_axes_root(ctx, per_sample, axes, ndim - 1, false);
+  PolyUOp *mean = poly_mean_axes(ctx, per_sample, axes, ndim - 1, false);
   return poly_mul(ctx, mean, poly_const_int(ctx, -1));
 }
 

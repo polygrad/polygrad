@@ -30,10 +30,10 @@ FILC_CFLAGS_DEBUG = -std=c11 -D_POSIX_C_SOURCE=200809L -Isrc -g -O0 -w
 # Detect CUDA availability
 HAS_CUDA := $(shell test -f /usr/include/cuda.h && echo 1 || echo 0)
 
-SRC = src/ops.c src/dtype.c src/arena.c src/hashmap.c src/utils.c src/bigint.c src/selftest.c src/ctx.c src/device.c src/placer.c src/engine/realize.c src/engine/jit.c src/uop/ops.c src/uop/spec.c src/uop/weak.c src/uop/movement.c src/uop/symbolic.c src/mixin/elementwise.c src/mixin/movement.c src/uop/upat.c src/alu.c src/shape.c src/autograd.c src/codegen/codegen.c src/codegen/opt/tc.c src/codegen/decomp/dtype.c src/codegen/simplify.c src/codegen/gpudims.c src/codegen/late/coalesce.c src/codegen/late/gater.c src/codegen/late/linearizer.c src/renderer/cstyle.c src/renderer/wgsl.c src/runtime/support/memory.c src/runtime_cpu.c src/runtime_wasm.c src/runtime_webgpu.c src/wasm_builder.c src/renderer/wasm.c src/frontend.c src/tensor.c src/optim.c src/schedule/rangeify.c src/schedule/multi.c src/schedule/allreduce.c src/schedule/schedule.c src/schedule/memory.c src/schedule/indexing.c src/nn.c src/engine/schedule.c src/interp.c
-FILC_SRC = src/ops.c src/dtype.c src/arena.c src/hashmap.c src/utils.c src/bigint.c src/selftest.c src/ctx.c src/device.c src/placer.c src/engine/realize.c src/engine/jit.c src/uop/ops.c src/uop/spec.c src/uop/weak.c src/uop/movement.c src/uop/symbolic.c src/mixin/elementwise.c src/mixin/movement.c src/uop/upat.c src/alu.c src/shape.c src/autograd.c src/codegen/codegen.c src/codegen/opt/tc.c src/codegen/decomp/dtype.c src/codegen/simplify.c src/codegen/gpudims.c src/codegen/late/coalesce.c src/codegen/late/gater.c src/codegen/late/linearizer.c src/renderer/cstyle.c src/renderer/wgsl.c src/runtime/support/memory.c src/runtime_wasm.c src/runtime_webgpu.c src/wasm_builder.c src/renderer/wasm.c src/frontend.c src/tensor.c src/optim.c src/schedule/rangeify.c src/schedule/multi.c src/schedule/allreduce.c src/schedule/schedule.c src/schedule/memory.c src/schedule/indexing.c src/nn.c src/engine/schedule.c src/interp.c
+SRC = src/ops.c src/dtype.c src/arena.c src/hashmap.c src/utils.c src/bigint.c src/selftest.c src/ctx.c src/device.c src/placer.c src/engine/realize.c src/engine/jit.c src/uop/ops.c src/uop/spec.c src/uop/weak.c src/uop/movement.c src/uop/symbolic.c src/mixin/elementwise.c src/mixin/movement.c src/uop/upat.c src/alu.c src/shape.c src/autograd.c src/codegen/codegen.c src/codegen/opt/tc.c src/codegen/decomp/dtype.c src/codegen/simplify.c src/codegen/gpudims.c src/codegen/late/coalesce.c src/codegen/late/gater.c src/codegen/late/linearizer.c src/renderer/cstyle.c src/renderer/wgsl.c src/runtime/support/memory.c src/runtime_cpu.c src/runtime_wasm.c src/runtime_webgpu.c src/wasm_builder.c src/renderer/wasm.c src/frontend.c src/tensor.c src/nn/optim.c src/schedule/rangeify.c src/schedule/multi.c src/schedule/allreduce.c src/schedule/schedule.c src/schedule/memory.c src/schedule/indexing.c src/nn/nn.c src/engine/schedule.c src/interp.c
+FILC_SRC = src/ops.c src/dtype.c src/arena.c src/hashmap.c src/utils.c src/bigint.c src/selftest.c src/ctx.c src/device.c src/placer.c src/engine/realize.c src/engine/jit.c src/uop/ops.c src/uop/spec.c src/uop/weak.c src/uop/movement.c src/uop/symbolic.c src/mixin/elementwise.c src/mixin/movement.c src/uop/upat.c src/alu.c src/shape.c src/autograd.c src/codegen/codegen.c src/codegen/opt/tc.c src/codegen/decomp/dtype.c src/codegen/simplify.c src/codegen/gpudims.c src/codegen/late/coalesce.c src/codegen/late/gater.c src/codegen/late/linearizer.c src/renderer/cstyle.c src/renderer/wgsl.c src/runtime/support/memory.c src/runtime_wasm.c src/runtime_webgpu.c src/wasm_builder.c src/renderer/wasm.c src/frontend.c src/tensor.c src/nn/optim.c src/schedule/rangeify.c src/schedule/multi.c src/schedule/allreduce.c src/schedule/schedule.c src/schedule/memory.c src/schedule/indexing.c src/nn/nn.c src/engine/schedule.c src/interp.c
 LOADER_SRC = src/loaders/decoded.c src/loaders/import_error.c src/loaders/bind.c src/loaders/hf_decode.c src/loaders/gguf_decode.c src/loaders/gguf_loader.c src/loaders/import_desc.c
-CODEC_SRC = vendor/cjson/cJSON.c src/safetensors.c src/wlrn.c src/ir.c src/bundle.c src/model.c src/tokenizer.c src/models/compose.c src/models/mlp.c src/models/tabm.c src/models/nam.c src/models/registry.c src/models/gpt2.c src/models/qwen3.c src/models/hf_loader.c $(LOADER_SRC)
+CODEC_SRC = vendor/cjson/cJSON.c src/safetensors.c src/wlrn.c src/ir.c src/bundle.c src/model.c src/tokenizer.c src/models/compose.c src/models/layers.c src/models/mlp.c src/models/tabm.c src/models/nam.c src/models/registry.c src/models/gpt2.c src/models/qwen3.c src/models/hf_loader.c $(LOADER_SRC)
 TEST_SRC = test/test_main.c test/test_uop.c test/test_utils.c test/test_dtype.c test/test_bigint.c test/test_pat.c test/test_sym.c test/test_shape.c test/test_schedule_engine.c test/test_autograd.c test/test_codegen.c test/test_wasm.c test/test_rangeify.c test/test_reduce_simplify.c test/test_nn.c test/test_tensor.c test/test_fusion_fuzzer.c test/test_future_passes.c test/test_safetensors.c test/test_wlrn.c test/test_ir.c test/test_model.c test/test_program.c test/test_mlp.c test/test_tabm.c test/test_nam.c test/test_hf.c test/test_qwen3.c test/test_f16.c test/test_schedule_runtime.c test/test_bundle.c test/test_registry.c test/test_placement.c test/test_realize.c test/test_threading.c
 PROJECT_HEADERS := $(shell find src test bench vendor -type f -name '*.h' -print | sort)
 ANALYZE_SRC = $(filter-out vendor/%,$(sort $(SRC) $(CODEC_SRC)))
@@ -147,6 +147,10 @@ test-autograd-wasm: build/test_schedule_runtime.js
 	done
 
 .PHONY: test-indexing-wasm
+.PHONY: test-nn-wasm
+test-nn-wasm: build/test_schedule_runtime.js
+	$(SAN_RUN) $(NODE) $< --require-no-skips nn
+
 test-indexing-wasm: build/test_schedule_runtime.js
 	$(SAN_RUN) $(NODE) $< --require-no-skips indexing_owner
 
@@ -303,6 +307,22 @@ test-compat-tinygrad-upstream: build/libpolygrad.so
 test-compat-tinygrad-ops: build/libpolygrad.so
 	$(PARITY_PY) scripts/tinygrad_upstream.py --output $(UPSTREAM_COMPAT_DIR) \
 		--adapter cpu-ops --test test/backend/test_ops.py $(UPSTREAM_COMPAT_ARGS)
+
+.PHONY: test-compat-tinygrad-nn
+test-compat-tinygrad-nn: build/libpolygrad.so
+	$(PARITY_PY) scripts/tinygrad_upstream.py --output $(UPSTREAM_COMPAT_DIR) \
+		--adapter cpu-nn --test test/backend/test_nn.py --test test/backend/test_optim.py $(UPSTREAM_COMPAT_ARGS)
+
+.PHONY: test-compat-tinygrad-suite
+# Diagnostic refresh of all selected upstream files. Run every lane even when
+# one reports known failures; this is not a passing-baseline/allowance gate.
+test-compat-tinygrad-suite: build/libpolygrad.so
+	@status=0; \
+	$(MAKE) test-compat-tinygrad-upstream UPSTREAM_COMPAT_DIR="$(UPSTREAM_COMPAT_DIR)/tensor" \
+	  UPSTREAM_COMPAT_TESTS="$$($(PARITY_PY) -c 'import json; print(" ".join(json.load(open("$(UPSTREAM_COMPAT_BASELINE)"))["contract"]["test_sha256"]))')" || status=1; \
+	$(MAKE) test-compat-tinygrad-ops UPSTREAM_COMPAT_DIR="$(UPSTREAM_COMPAT_DIR)/ops" || status=1; \
+	$(MAKE) test-compat-tinygrad-nn UPSTREAM_COMPAT_DIR="$(UPSTREAM_COMPAT_DIR)/nn" || status=1; \
+	exit $$status
 
 test-compat-tinygrad-upstream-ratchet: build/libpolygrad.so
 	$(PARITY_PY) scripts/tinygrad_upstream.py --output $(UPSTREAM_COMPAT_DIR) \

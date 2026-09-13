@@ -5,7 +5,7 @@ const { createBoundJit } = require('./jit')
 const { createBoundModels } = require('./models')
 const { createBoundModules } = require('./nn/modules')
 const { createBoundOptim } = require('./nn/optim')
-const { getParameters, getStateDict } = require('./nn/state')
+const state = require('./nn/state')
 const { createBoundTensorClass, normalizeLogicalPolicy } = require('./tensor')
 const { createBoundTokenizerClass } = require('./tokenizer')
 const { createBoundUopNamespace } = require('./uop/ops')
@@ -59,13 +59,9 @@ class PolyRuntime {
     const modules = createBoundModules(this)
     const optim = createBoundOptim(this)
     this.nn = {
-      Linear: modules.Linear,
-      LayerNorm: modules.LayerNorm,
-      LayerNorm2d: modules.LayerNorm2d,
-      Conv2d: modules.Conv2d,
-      GroupNorm: modules.GroupNorm,
-      getParameters,
-      getStateDict,
+      ...modules,
+      ...state,
+      state,
       optim,
       Optimizer: optim.Optimizer,
       OptimizerGroup: optim.OptimizerGroup,

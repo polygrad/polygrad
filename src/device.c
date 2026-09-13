@@ -1686,12 +1686,24 @@ int poly_buffer_allocate(PolyCtx *ctx, PolyUOp *buf, PolyDevice device) {
 }
 
 int poly_buffer_ensure_allocated(PolyCtx *ctx, PolyUOp *buf, PolyDevice device) {
+  if (!ctx || !buf) return -1;
   PolyBuffer *b = poly_buffer_get(ctx, buf);
-  if (b && b->base) return poly_buffer_refresh_view(ctx, b);
-  if (b && poly_devices_share_storage(b->device, device) && b->ptr) return 0;
+  if (b && b->base) {
+    if (poly_buffer_handle_ensure_allocated(ctx, b->base) != 0) return -1;
+    if (!b->base->src) b->base->valid = true;
+    return poly_buffer_refresh_view(ctx, b);
+  }
   if (b && (b->valid || (b->src && b->src->valid)))
     return poly_buffer_ensure_device_current(ctx, buf, device);
-  return poly_buffer_ensure_device_allocated(ctx, buf, device);
+  if (!b || !poly_devices_share_storage(b->device, device) || !b->ptr) {
+    if (poly_buffer_ensure_device_allocated(ctx, buf, device) != 0) return -1;
+    b = poly_buffer_get(ctx, buf);
+  }
+  /* Tensor._buffer -> Buffer.ensure_allocated permits reading Tensor.empty.
+   * With no initialized source, the allocated bytes are the (unspecified)
+   * value. Output-only allocation remains separate and does not publish it. */
+  if (b && !b->src) b->valid = true;
+  return b && b->valid ? 0 : -1;
 }
 
 int poly_buffer_copyin(PolyCtx *ctx, PolyUOp *buf, const void *src, size_t nbytes) {

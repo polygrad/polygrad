@@ -10,6 +10,8 @@
 #include "../src/ctx.h"
 #include "../src/device.h"
 #include "../src/tensor.h"
+#include "../src/nn/nn.h"
+#include "../src/nn/optim.h"
 #include "../src/uop/movement.h"
 #include "../src/uop/ops.h"
 #include "../src/utils.h"
@@ -29,6 +31,174 @@
 #endif
 
 /* Basic creation */
+
+TEST(nn, optimizer_config_layout) {
+  ASSERT_INT_EQ(offsetof(PolyOptimConfig, tcoef), 56);
+  ASSERT_INT_EQ(offsetof(PolyOptimConfig, ns_steps), 64);
+  ASSERT_INT_EQ(offsetof(PolyOptimConfig, n_ns_coefficients), 68);
+  ASSERT_INT_EQ(offsetof(PolyOptimConfig, ns_coefficients), 72);
+  ASSERT_INT_EQ(offsetof(PolyOptimConfig, pre_wd), 72 + sizeof(void *));
+  ASSERT_INT_EQ(sizeof(PolyOptimConfig), sizeof(void *) == 8 ? 88 : 80);
+  PASS();
+}
+
+TEST(nn, rmsnorm_float_accumulation_graph) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType types[] = {POLY_FLOAT16, POLY_FLOAT32, POLY_FLOAT64};
+  for (int i = 0; i < 3; i++) {
+    PolyUOp *x = poly_reshape(ctx, poly_test_buffer(ctx, types[i], 4), (int64_t[]){2, 2}, 2);
+    PolyUOp *xf = poly_cast(ctx, x, POLY_FLOAT32);
+    PolyUOp *mean = poly_mean_reduce(ctx, poly_mul(ctx, xf, xf), -1, 1);
+    PolyUOp *scale =
+        poly_rsqrt(ctx, poly_add(ctx, mean, poly_const_typed(ctx, POLY_WEAKFLOAT, 1e-6)));
+    PolyUOp *expected = poly_cast(ctx, poly_mul(ctx, xf, scale), types[i]);
+    ASSERT_TRUE(poly_rmsnorm_apply(ctx, x, NULL, 1e-6) == expected);
+    PolyUOp *w = poly_reshape(ctx, poly_test_buffer(ctx, POLY_FLOAT32, 2), (int64_t[]){2}, 1);
+    ASSERT_TRUE(poly_rmsnorm_apply(ctx, x, w, 1e-6) == poly_mul(ctx, expected, w));
+  }
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(nn, layernorm_weak_epsilon_graph) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_reshape(ctx, poly_test_buffer(ctx, POLY_FLOAT16, 4), (int64_t[]){2, 2}, 2);
+  PolyUOp *centered = poly_sub(ctx, x, poly_mean_reduce(ctx, x, -1, 1));
+  PolyUOp *variance = poly_mean_reduce(ctx, poly_mul(ctx, centered, centered), -1, 1);
+  PolyUOp *scale =
+      poly_rsqrt(ctx, poly_add(ctx, variance, poly_const_typed(ctx, POLY_WEAKFLOAT, 1e-5)));
+  ASSERT_TRUE(poly_layernorm_apply(ctx, x, NULL, NULL, -1, 1e-5) == poly_mul(ctx, centered, scale));
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(nn, normalization_axes_and_stats_graph) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){2, 4, 2}, 3, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(x);
+  PolyUOp *u = x->uop_physical;
+  int64_t axes[] = {-1, -2};
+  PolyUOp *centered = poly_sub(ctx, u, poly_mean_axes(ctx, u, axes, 2, true));
+  PolyUOp *expected = poly_mul(
+      ctx, centered,
+      poly_rsqrt(
+          ctx, poly_add(
+                   ctx, poly_mean_axes(ctx, poly_mul(ctx, centered, centered), axes, 2, true),
+                   poly_const_typed(ctx, POLY_WEAKFLOAT, 1e-5)
+               )
+      )
+  );
+  ASSERT_TRUE(poly_layernorm_axes_apply(ctx, u, NULL, NULL, axes, 2, 1e-5) == expected);
+  PolyUOp *flat = poly_reshape(ctx, u, (int64_t[]){2, 2, 4}, 3);
+  ASSERT_TRUE(
+      poly_groupnorm_apply(ctx, u, NULL, NULL, 2, 1e-5) ==
+      poly_reshape(
+          ctx, poly_layernorm_apply(ctx, flat, NULL, NULL, -1, 1e-5), (int64_t[]){2, 4, 2}, 3
+      )
+  );
+  PolyTensor *mean = NULL, *var = NULL;
+  ASSERT_INT_EQ(poly_tensor_batchnorm_stats(ctx, x, NULL, NULL, true, &mean, &var), 0);
+  int64_t batch_axes[] = {0, 2};
+  PolyUOp *m = poly_mean_axes(ctx, u, batch_axes, 2, false);
+  PolyUOp *y = poly_sub(ctx, u, poly_reshape(ctx, poly_detach(ctx, m), (int64_t[]){1, 4, 1}, 3));
+  ASSERT_TRUE(mean->uop_physical == m);
+  ASSERT_TRUE(var->uop_physical == poly_mean_axes(ctx, poly_mul(ctx, y, y), batch_axes, 2, false));
+  poly_tensor_release(mean);
+  poly_tensor_release(var);
+  poly_tensor_release(x);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(nn, empty_storage_readback_after_ensure_allocated) {
+  /* Pinned Tensor._buffer finishes realization, then Buffer.ensure_allocated.
+   * Empty storage is readable, but its initial contents are unspecified. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDevice device = poly_device_default();
+  PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){4}, 1, device);
+  ASSERT_NOT_NULL(x);
+  PolyUOp *buf = poly_uop_buffer(ctx, x->uop_physical);
+  float values[4];
+  int rc = poly_buffer_ensure_allocated(ctx, buf, device);
+  if (rc == 0) rc = poly_buffer_read(ctx, buf, values, sizeof(values));
+  poly_tensor_release(x);
+  poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(rc, 0);
+  PASS();
+}
+
+TEST(nn, mean_uses_symbolic_reduction_extent_graph) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *n =
+      poly_uop_variable(ctx, "nn_extent", poly_arg_int(1), poly_arg_int(4), POLY_WEAKINT, 1, false);
+  PolyUOp *x = poly_expand_uop(ctx, poly_const_typed(ctx, POLY_FLOAT32, 3), &n, 1);
+  int64_t axis = 0;
+  PolyUOp *sum = poly_sum_reduce(ctx, x, 0, 0);
+  PolyUOp *denominator = poly_mul(ctx, poly_const_int(ctx, 1), n);
+  PolyUOp *expected = poly_cast(ctx, poly_div(ctx, sum, denominator), POLY_FLOAT32);
+  ASSERT_TRUE(poly_mean_axes(ctx, x, &axis, 1, false) == expected);
+  ASSERT_TRUE(expected != poly_cast(ctx, poly_div(ctx, sum, poly_const_int(ctx, 4)), POLY_FLOAT32));
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(nn, sdpa_accumulation_graph) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *q = poly_reshape(ctx, poly_test_buffer(ctx, POLY_FLOAT16, 2), (int64_t[]){1, 2}, 2);
+  PolyUOp *k = poly_reshape(ctx, poly_test_buffer(ctx, POLY_FLOAT16, 4), (int64_t[]){2, 2}, 2);
+  PolyUOp *v = poly_reshape(ctx, poly_test_buffer(ctx, POLY_FLOAT16, 2), (int64_t[]){2, 1}, 2);
+  PolyUOp *kt = poly_permute(ctx, k, (int64_t[]){1, 0}, 2);
+  PolyUOp *scores =
+      poly_dot(ctx, poly_cast(ctx, q, POLY_FLOAT32), poly_cast(ctx, kt, POLY_FLOAT32));
+  scores = poly_div(ctx, scores, poly_const_typed(ctx, POLY_WEAKFLOAT, sqrt(2.0)));
+  PolyUOp *expected = poly_dot(ctx, poly_softmax(ctx, poly_cast(ctx, scores, q->dtype), -1), v);
+  ASSERT_TRUE(poly_sdpa(ctx, q, k, v, NULL, 0) == expected);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(nn, lstm_cell_graph) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_reshape(ctx, poly_test_buffer(ctx, POLY_FLOAT32, 2), (int64_t[]){1, 2}, 2);
+  PolyUOp *h = poly_reshape(ctx, poly_test_buffer(ctx, POLY_FLOAT32, 2), (int64_t[]){1, 2}, 2);
+  PolyUOp *c = poly_reshape(ctx, poly_test_buffer(ctx, POLY_FLOAT32, 2), (int64_t[]){1, 2}, 2);
+  PolyUOp *wi = poly_reshape(ctx, poly_test_buffer(ctx, POLY_FLOAT32, 16), (int64_t[]){8, 2}, 2);
+  PolyUOp *wh = poly_reshape(ctx, poly_test_buffer(ctx, POLY_FLOAT32, 16), (int64_t[]){8, 2}, 2);
+  PolyUOp *g =
+      poly_add(ctx, poly_linear_apply(ctx, x, wi, NULL), poly_linear_apply(ctx, h, wh, NULL));
+  PolyUOp *i = poly_sigmoid(ctx, poly_shrink(ctx, g, (int64_t[][2]){{0, 1}, {0, 2}}, 2));
+  PolyUOp *f = poly_sigmoid(ctx, poly_shrink(ctx, g, (int64_t[][2]){{0, 1}, {2, 4}}, 2));
+  PolyUOp *v = poly_tanh_act(ctx, poly_shrink(ctx, g, (int64_t[][2]){{0, 1}, {4, 6}}, 2));
+  PolyUOp *o = poly_sigmoid(ctx, poly_shrink(ctx, g, (int64_t[][2]){{0, 1}, {6, 8}}, 2));
+  PolyUOp *expected_c = poly_add(ctx, poly_mul(ctx, f, c), poly_mul(ctx, i, v));
+  PolyUOp *expected_h = poly_mul(ctx, o, poly_tanh_act(ctx, expected_c));
+  PolyUOp *actual_h = NULL, *actual_c = NULL;
+  ASSERT_INT_EQ(poly_lstm_cell(ctx, x, h, c, wi, wh, NULL, NULL, &actual_h, &actual_c), 0);
+  ASSERT_TRUE(actual_h == expected_h && actual_c == expected_c);
+  ASSERT_INT_EQ(poly_lstm_cell(ctx, x, h, NULL, wi, wh, NULL, NULL, &actual_h, &actual_c), -1);
+  ASSERT_TRUE(actual_h == NULL && actual_c == NULL);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(nn, newton_schulz_graph) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_reshape(ctx, poly_test_buffer(ctx, POLY_FLOAT32, 6), (int64_t[]){2, 3}, 2);
+  PolyUOp *sum = poly_reduce_axis(ctx, POLY_OP_ADD, poly_mul(ctx, x, x), (int64_t[]){0, 1}, 2);
+  sum = poly_reshape(ctx, sum, (int64_t[]){1, 1}, 2);
+  PolyUOp *norm =
+      poly_add(ctx, poly_alu1(ctx, POLY_OP_SQRT, sum), poly_const_typed(ctx, POLY_WEAKFLOAT, 1e-7));
+  PolyUOp *g = poly_div(ctx, x, norm);
+  PolyUOp *gram = poly_dot(ctx, g, poly_permute(ctx, g, (int64_t[]){1, 0}, 2));
+  PolyUOp *expected = poly_add(
+      ctx, poly_mul(ctx, poly_const_typed(ctx, POLY_WEAKFLOAT, 2), g),
+      poly_mul(ctx, poly_const_typed(ctx, POLY_WEAKFLOAT, -1), poly_dot(ctx, gram, g))
+  );
+  ASSERT_TRUE(poly_newton_schulz(ctx, x, 1, (double[]){2, -1}, 2, 1e-7) == expected);
+  ASSERT_TRUE(poly_newton_schulz(ctx, x, 0, (double[]){2, -1}, 2, 1e-7) == g);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
 
 static PolyUOp *gradient_function_square(PolyCtx *ctx, PolyUOp *x) {
   PolyUOp *param = poly_uop_param(ctx, 0, x);

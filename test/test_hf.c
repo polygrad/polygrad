@@ -9,7 +9,7 @@
 #include "../src/safetensors.h"
 #include "../src/models/models.h"
 #include "../src/models/qwen3.h"
-#include "../src/nn.h"
+#include "../src/nn/nn.h"
 #include "../src/frontend.h"
 #include "../src/codegen/codegen.h"
 #include "../src/engine/schedule.h"

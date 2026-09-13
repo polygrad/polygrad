@@ -34,13 +34,13 @@ def release_gates():
         test-py test-py-x86 test-hf-e2e
         test-js-native-cpu test-js-native-x86 test-js-native-interp
         test-js-native-cuda test-js-native-gc
-        test-bigint-wasm test-runtime-wasm test-autograd-wasm
+        test-bigint-wasm test-runtime-wasm test-autograd-wasm test-nn-wasm
         test-indexing-wasm test-materialization-wasm
         test-js-wasm test-js-package test-browser test-browser-qwen3
         test-model-interchange test-py-sdist-install test-js-package-install
         test-parity test-parity-ir test-parity-ir-opt test-parity-cuda
         test-parity-graph test-release-op-census
-        test-compat-tinygrad-upstream-ratchet test-compat-tinygrad-ops
+        test-compat-tinygrad-upstream-ratchet test-compat-tinygrad-ops test-compat-tinygrad-nn
         test-compat-tinygrad-tier1 test-compat-tinygrad-convnext
         test-reference-parity fuzz-smoke test-symbolic-z3
         bench-smoke-regression bench-hlb-cuda-semantic bench-hlb-cuda-timing
@@ -50,9 +50,15 @@ def release_gates():
         if gate['target'] == 'test-compat-tinygrad-upstream-ratchet':
             gate['variables']['UPSTREAM_COMPAT_DIR'] = '{output}/upstream-nine'
         elif gate['target'] == 'test-compat-tinygrad-ops':
+            # This 427-case file exceeded 1800s after 405 completed cases. Keep
+            # assertions intact and allow a longer bounded process lifetime.
             gate['variables'].update(
                 UPSTREAM_COMPAT_DIR='{output}/upstream-ops',
-                UPSTREAM_COMPAT_ARGS='--baseline test/fixtures/tinygrad_upstream_ops_cpu_014_baseline.json')
+                UPSTREAM_COMPAT_ARGS='--timeout 3600 --baseline test/fixtures/tinygrad_upstream_ops_cpu_014_baseline.json')
+        elif gate['target'] == 'test-compat-tinygrad-nn':
+            gate['variables'].update(
+                UPSTREAM_COMPAT_DIR='{output}/upstream-nn',
+                UPSTREAM_COMPAT_ARGS='--baseline test/fixtures/tinygrad_upstream_nn_cpu_014_baseline.json')
     return gates
 
 

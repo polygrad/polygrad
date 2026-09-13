@@ -28,6 +28,7 @@ def test_release_manifest_covers_required_lanes_once(runner):
             'test-py-sdist-install', 'test-js-package-install',
             'test-parity', 'test-parity-graph', 'test-parity-cuda',
             'test-compat-tinygrad-upstream-ratchet', 'test-compat-tinygrad-ops',
+            'test-compat-tinygrad-nn', 'test-nn-wasm',
             'test-reference-parity', 'test-analyze-reviewed', 'test-release-op-census', 'format-check',
             'verify-source-mirrors', 'fuzz-smoke', 'bench-smoke-regression',
             'bench-hlb-cuda-semantic', 'bench-hlb-cuda-timing'} <= set(targets)
@@ -38,6 +39,9 @@ def test_release_manifest_covers_required_lanes_once(runner):
     assert targets[-1] == 'bench-hlb-cuda-timing'
     ops = next(g for g in runner['release_gates']() if g['target'] == 'test-compat-tinygrad-ops')
     assert '--baseline test/fixtures/tinygrad_upstream_ops_cpu_014_baseline.json' in ops['variables']['UPSTREAM_COMPAT_ARGS']
+    assert '--timeout 3600' in ops['variables']['UPSTREAM_COMPAT_ARGS']
+    nn = next(g for g in runner['release_gates']() if g['target'] == 'test-compat-tinygrad-nn')
+    assert '--baseline test/fixtures/tinygrad_upstream_nn_cpu_014_baseline.json' in nn['variables']['UPSTREAM_COMPAT_ARGS']
 
 
 def test_release_continues_after_failure_and_preserves_logs(runner, tmp_path):

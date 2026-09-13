@@ -7,7 +7,7 @@ import shlex
 import subprocess
 
 ROOT = Path(__file__).resolve().parent.parent
-PUBLIC = ("polygrad.h", "tensor.h", "frontend.h", "model.h", "nn.h", "optim.h")
+PUBLIC = ("polygrad.h", "tensor.h", "frontend.h", "model.h", "nn/nn.h", "nn/optim.h", "models/layers.h")
 OWNERS = ("mixin/elementwise.h", "uop/ops.h", "placer.h", "device.h",
           "engine/schedule.h", "engine/realize.h")
 

@@ -5,6 +5,7 @@
 #include "test_harness.h"
 #include "../src/model.h"
 #include "../src/models/compose.h"
+#include "../src/models/layers.h"
 #include "../src/codegen/codegen.h"
 #include "../src/ctx.h"
 #include "../src/engine/jit.h"
@@ -13,7 +14,7 @@
 #include "../src/ir.h"
 #include "../src/frontend.h"
 #include "../src/engine/schedule.h"
-#include "../src/optim.h"
+#include "../src/nn/optim.h"
 #include "../src/tensor.h"
 #include "../src/device.h"
 #include "../src/safetensors.h"
@@ -1158,6 +1159,115 @@ TEST(model, staged_build_forward_e2e) {
   ASSERT_FLOAT_EQ(y[3], 44.0f, 1e-5f);
 
   poly_model_free(inst);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(model, nn_lstm_cell_staged_build) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyModel *model = poly_model_new(ctx, NULL);
+  ASSERT_NOT_NULL(model);
+  PolyTensor *x = poly_model_input(model, "x", POLY_FLOAT32, (int64_t[]){1, 2}, 2);
+  PolyTensor *h = NULL, *c = NULL;
+  ASSERT_INT_EQ(poly_model_lstm_cell(model, "cell", x, NULL, NULL, 2, 2, true, &h, &c), 0);
+  ASSERT_NOT_NULL(h);
+  ASSERT_NOT_NULL(c);
+  ASSERT_INT_EQ(poly_model_output(model, "hidden", h), POLY_STATUS_OK);
+  ASSERT_INT_EQ(poly_model_output(model, "cell_state", c), POLY_STATUS_OK);
+  const char *inputs[] = {"x"}, *outputs[] = {"hidden", "cell_state"};
+  ASSERT_INT_EQ(
+      poly_model_entrypoint(model, "forward", inputs, 1, outputs, 2, NULL), POLY_STATUS_OK
+  );
+  ASSERT_INT_EQ(poly_model_build(model, NULL), POLY_STATUS_OK);
+  ASSERT_INT_EQ(poly_model_param_count(model), 4);
+  float zero[16] = {0}, input[] = {1, 1}, output[2];
+  ASSERT_INT_EQ(poly_model_write_buf_named(model, "cell.weight_ih", zero, sizeof(zero)), 0);
+  ASSERT_INT_EQ(poly_model_write_buf_named(model, "cell.weight_hh", zero, sizeof(zero)), 0);
+  ASSERT_INT_EQ(poly_model_write_buf_named(model, "cell.bias_ih", zero, 8 * sizeof(float)), 0);
+  ASSERT_INT_EQ(poly_model_write_buf_named(model, "cell.bias_hh", zero, 8 * sizeof(float)), 0);
+  PolyIOBinding io[] = {POLY_IO_BINDING_ARRAY("x", input, POLY_FLOAT32)};
+  ASSERT_INT_EQ(poly_model_call(model, "forward", io, 1), 0);
+  ASSERT_INT_EQ(poly_model_read_buf_named(model, "hidden", output, sizeof(output)), 0);
+  ASSERT_FLOAT_EQ(output[0], 0, 1e-6);
+  ASSERT_FLOAT_EQ(output[1], 0, 1e-6);
+  int ir_len = 0;
+  uint8_t *ir = poly_model_export_ir(model, &ir_len);
+  ASSERT_NOT_NULL(ir);
+  PolyModel *restored = poly_model_from_ir(ir, ir_len, NULL, 0);
+  ASSERT_NOT_NULL(restored);
+  free(ir);
+  ASSERT_INT_EQ(poly_model_param_count(restored), 4);
+  poly_model_free(restored);
+  poly_model_free(model);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(model, nn_lstm_explicit_state_training_checkpoint) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyModel *model = poly_model_new(ctx, NULL);
+  ASSERT_NOT_NULL(model);
+  int64_t shape[] = {1, 2};
+  PolyTensor *x = poly_model_input(model, "x", POLY_FLOAT32, shape, 2);
+  PolyTensor *h0 = poly_model_input(model, "h", POLY_FLOAT32, shape, 2);
+  PolyTensor *c0 = poly_model_input(model, "c", POLY_FLOAT32, shape, 2);
+  PolyTensor *h = NULL, *c = NULL;
+  ASSERT_INT_EQ(poly_model_lstm_cell(model, "cell", x, h0, c0, 2, 2, false, &h, &c), 0);
+  PolyTensor *square = poly_tensor_alu2(ctx, POLY_OP_MUL, h, h);
+  PolyTensor *loss = poly_tensor_sum(ctx, square, (int64_t[]){0, 1}, 2, false);
+  ASSERT_NOT_NULL(loss);
+  ASSERT_INT_EQ(poly_model_output(model, "hidden", h), 0);
+  ASSERT_INT_EQ(poly_model_output(model, "cell_state", c), 0);
+  ASSERT_INT_EQ(poly_model_output(model, "cost", loss), 0);
+  const char *inputs[] = {"x", "h", "c"}, *outputs[] = {"hidden", "cell_state"},
+             *objective[] = {"cost"};
+  ASSERT_INT_EQ(poly_model_entrypoint(model, "forward", inputs, 3, outputs, 2, NULL), 0);
+  PolyEntrypointOptions options = {.objective = "cost"};
+  ASSERT_INT_EQ(poly_model_entrypoint(model, "loss", inputs, 3, objective, 1, &options), 0);
+  ASSERT_INT_EQ(poly_model_build(model, NULL), 0);
+  float wi[16], wh[16], xd[] = {1, 2}, hd[2] = {0}, cd[2] = {0};
+  for (int i = 0; i < 16; i++) {
+    wi[i] = .25f;
+    wh[i] = .125f;
+  }
+  ASSERT_INT_EQ(poly_model_write_buf_named(model, "cell.weight_ih", wi, sizeof(wi)), 0);
+  ASSERT_INT_EQ(poly_model_write_buf_named(model, "cell.weight_hh", wh, sizeof(wh)), 0);
+  PolyIOBinding io[] = {
+      POLY_IO_BINDING_ARRAY("x", xd, POLY_FLOAT32), POLY_IO_BINDING_ARRAY("h", hd, POLY_FLOAT32),
+      POLY_IO_BINDING_ARRAY("c", cd, POLY_FLOAT32)};
+  ASSERT_INT_EQ(poly_model_call(model, "forward", io, 3), 0);
+  ASSERT_INT_EQ(poly_model_read_buf_named(model, "hidden", hd, sizeof(hd)), 0);
+  ASSERT_INT_EQ(poly_model_read_buf_named(model, "cell_state", cd, sizeof(cd)), 0);
+  float gate = 1.f / (1.f + expf(-.75f));
+  ASSERT_FLOAT_EQ(cd[0], gate * tanhf(.75f), 1e-6);
+  ASSERT_FLOAT_EQ(hd[0], gate * tanhf(cd[0]), 1e-6);
+  float old_c = cd[0];
+  ASSERT_INT_EQ(poly_model_call(model, "forward", io, 3), 0);
+  ASSERT_INT_EQ(poly_model_read_buf_named(model, "cell_state", cd, sizeof(cd)), 0);
+  ASSERT_TRUE(cd[0] > old_c);
+  ASSERT_INT_EQ(poly_model_set_optimizer(model, POLY_OPTIM_ADAM, .01f, .9f, .999f, 1e-8f, 0), 0);
+  float loss_a, loss_b;
+  ASSERT_INT_EQ(poly_model_train_step(model, "loss", io, 3, &loss_a), 0);
+  int ir_len, weights_len;
+  uint8_t *ir = poly_model_export_ir(model, &ir_len),
+          *weights = poly_model_export_weights(model, &weights_len);
+  ASSERT_NOT_NULL(ir);
+  ASSERT_NOT_NULL(weights);
+  PolyModel *restored = poly_model_from_ir(ir, ir_len, weights, weights_len);
+  ASSERT_NOT_NULL(restored);
+  ASSERT_INT_EQ(poly_model_set_optimizer(restored, POLY_OPTIM_ADAM, .01f, .9f, .999f, 1e-8f, 0), 0);
+  ASSERT_INT_EQ(poly_model_train_step(model, "loss", io, 3, &loss_a), 0);
+  ASSERT_INT_EQ(poly_model_train_step(restored, "loss", io, 3, &loss_b), 0);
+  ASSERT_FLOAT_EQ(loss_a, loss_b, 1e-6);
+  ASSERT_INT_EQ(poly_model_read_buf_named(model, "cell.weight_ih", wi, sizeof(wi)), 0);
+  ASSERT_INT_EQ(poly_model_read_buf_named(restored, "cell.weight_ih", wh, sizeof(wh)), 0);
+  for (int i = 0; i < 16; i++)
+    ASSERT_FLOAT_EQ(wi[i], wh[i], 1e-6);
+  ASSERT_TRUE(fabsf(wi[0] - .25f) > 1e-5);
+  free(ir);
+  free(weights);
+  poly_model_free(restored);
+  poly_model_free(model);
   poly_ctx_destroy(ctx);
   PASS();
 }

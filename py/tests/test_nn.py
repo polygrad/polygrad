@@ -1,6 +1,7 @@
 """Tests for polygrad.nn module — layers, optimizers, state dict."""
 
 import base64
+import ctypes
 import zlib
 import numpy as np
 import pytest
@@ -27,6 +28,181 @@ from polygrad.nn.state import safe_load, safe_load_metadata, torch_load
 
 
 # ── Helpers ──
+
+@pytest.mark.parametrize('symbol', ['poly_tensor_layernorm_axes_apply', 'poly_tensor_groupnorm_apply',
+                                   'poly_tensor_batchnorm_stats', 'poly_tensor_batchnorm_apply'])
+def test_shared_normalization_entrypoints(symbol):
+    assert getattr(_ffi._lib, symbol)
+
+
+def test_batchnorm_pinned_size_keyword():
+    assert BatchNorm(sz=4).weight.shape == (4,)
+
+
+def test_nn_dtype_context_accepts_dtype_objects():
+    from polygrad import dtypes
+    with Context(DEFAULT_FLOAT=dtypes.half):
+        assert Tensor.ones(2).dtype == dtypes.half
+
+
+def test_nn_empty_input_readback_after_normalization():
+    x = Tensor.empty(2, 4)
+    LayerNorm(4)(x).realize()
+    # There is no numerical oracle for uninitialized storage.
+    assert x.numpy().shape == (2, 4)
+
+
+@pytest.mark.parametrize('kind', ['layer', 'group', 'batch'])
+def test_normalization_preserves_symbolic_batch(kind):
+    from polygrad import Variable
+    batch = Variable('nn_batch_' + kind, 1, 4).bind(2)
+    x = Tensor.empty(batch, 4, 2)
+    layer = {'layer': lambda: LayerNorm((4, 2)), 'group': lambda: GroupNorm(2, 4),
+             'batch': lambda: BatchNorm(4)}[kind]()
+    # Pinned BatchNorm's training update does not accept symbolic numel;
+    # inference still preserves the batch extent. Layer/GroupNorm do both.
+    with Context(TRAINING=0 if kind == 'batch' else 1):
+        result = layer(x)
+        assert result.shape[0] == batch
+        result.realize()
+        assert result.shape[0] == batch
+
+
+def test_batchnorm_statistics_use_bound_extent_not_allocation_maximum():
+    from polygrad import Variable
+    batch = Variable('nn_stats_batch', 1, 4).bind(2)
+    x = Tensor.arange(32).float().reshape(4, 4, 2).shrink(((0, batch), (0, 4), (0, 2)))
+    with Context(TRAINING=1):
+        mean, var = BatchNorm(4, track_running_stats=False).calc_stats(x)
+        np.testing.assert_allclose(mean.numpy(), [4.5, 6.5, 8.5, 10.5], atol=1e-6)
+        np.testing.assert_allclose(var.numpy(), [16.25] * 4, atol=1e-6)
+
+
+def test_lstm_model_recurrent_state_and_training_checkpoint():
+    from polygrad import create
+    from polygrad.model import OPTIM_ADAM
+    rt = create(device='interp', logical='always')
+    x, h, c = (rt.Tensor.empty(1, 2) for _ in range(3))
+    wi, wh = rt.Tensor.full((8, 2), .25), rt.Tensor.full((8, 2), .125)
+    hp, cp = _ffi._ptr(), _ffi._ptr()
+    assert _ffi._lib.poly_tensor_lstm_cell(x._ctx, x._tensor, h._tensor, c._tensor, wi._tensor, wh._tensor,
+                                          None, None, ctypes.byref(hp), ctypes.byref(cp)) == 0
+    hidden, cell = x._make_result_from_core(hp, None), x._make_result_from_core(cp, None)
+    authored = Model.from_tensors(inputs={'x': x, 'h': h, 'c': c}, state={'wi': wi, 'wh': wh},
+                                  outputs={'hidden': hidden, 'cell': cell}, losses={'loss': hidden.square().mean()})
+    data = authored.save_bundle(include_optimizer=False)
+    authored.free()
+    rt.dispose()
+    model, restored = Model.from_bundle(data), None
+    try:
+        inputs = {'x': np.array([[1, 2]], np.float32), 'h': np.zeros((1, 2), np.float32), 'c': np.zeros((1, 2), np.float32)}
+        first = model.forward(**inputs)
+        second = model.forward(x=inputs['x'], h=first['hidden'], c=first['cell'])
+        assert np.all(second['cell'] > first['cell'])
+        model.set_optimizer(OPTIM_ADAM, lr=.01)
+        model.train_step(**inputs)
+        restored = Model.from_bundle(model.save_bundle())
+        restored.set_optimizer(OPTIM_ADAM, lr=.01)
+        a, b = model.train_step(**inputs), restored.train_step(**inputs)
+        np.testing.assert_allclose(a, b, atol=1e-6)
+        np.testing.assert_allclose(model.read_buffer('wi'), restored.read_buffer('wi'), atol=1e-6)
+        assert not np.allclose(model.read_buffer('wi'), .25)
+    finally:
+        if restored is not None: restored.free()
+        model.free()
+
+
+def test_model_rejects_unsupported_optimizer_without_losing_configuration():
+    from polygrad.models import MLP
+    from polygrad.model import OPTIM_SGD
+    model = MLP({'layers': [1, 1], 'bias': False, 'loss': 'mse', 'batch_size': 1})
+    try:
+        model.set_optimizer(OPTIM_SGD, lr=.1)
+        before = model.export_weights()
+        for kind in (-1, 0, 4, 5, 99):
+            with pytest.raises(RuntimeError, match='set_optimizer failed'):
+                model.set_optimizer(kind)
+        assert model.export_weights() == before
+        model.write_buffer('layers.0.weight', np.array([2], np.float32))
+        model.train_step(x=np.array([1], np.float32), y=np.array([1], np.float32))
+        np.testing.assert_allclose(model.read_buffer('layers.0.weight'), [1.8], atol=1e-6)
+    finally:
+        model.free()
+
+
+@pytest.mark.parametrize('name,opts,expected', [
+    ('LAMB', {'weight_decay': .01}, [[.438561946, 2.54476404], [2.42744040, 4.53364801]]),
+    ('LARS', {'momentum': .9}, [[.999709964, 2.00057888], [2.99913001, 4.00115776]]),
+    ('Muon', {'ns_steps': 2}, [[1.03743243, 2.11009645], [2.77558279, 4.05183554]]),
+])
+@pytest.mark.parametrize('view', [False, True])
+def test_extended_optimizers(name, opts, expected, view):
+    from polygrad.nn import optim
+    p = Tensor([1., 2., 3., 4.]).reshape(2, 2) if view else Tensor([[1., 2.], [3., 4.]])
+    opt = getattr(optim, name)([p], lr=.1, **opts)
+    with Context(TRAINING=1):
+        for _ in range(2):
+            p.grad = Tensor([[.1, -.2], [.3, -.4]])
+            opt.step()
+    np.testing.assert_allclose(p.numpy(), expected, atol=2e-5, rtol=2e-5)
+
+
+def test_missing_convolution_modules():
+    from polygrad.nn import Conv1d, ConvTranspose1d, ConvTranspose2d
+    x = Tensor([[[1., 2., 3.]]])
+    conv = Conv1d(1, 1, 2, bias=False)
+    conv.weight = Tensor.ones(1, 1, 2)
+    np.testing.assert_allclose(conv(x).numpy(), [[[3., 5.]]])
+    transposed = ConvTranspose1d(1, 1, 2, stride=2, bias=False)
+    transposed.weight = Tensor.ones(1, 1, 2)
+    np.testing.assert_allclose(transposed(x).numpy(), [[[1., 1., 2., 2., 3., 3.]]])
+    grouped = ConvTranspose2d(2, 4, 2, groups=2, bias=False)
+    assert grouped.weight.shape == (2, 2, 2, 2)
+    assert grouped(Tensor.ones(1, 2, 2, 2)).shape == (1, 4, 3, 3)
+
+
+def test_instance_norm_module():
+    from polygrad.nn import InstanceNorm
+    x = Tensor([[[1., 3.], [10., 14.]], [[2., 6.], [20., 28.]]])
+    norm = InstanceNorm(2)
+    norm.weight = Tensor([2., 3.])
+    norm.bias = Tensor([4., 5.])
+    expected = np.array([[[2., 6.], [2., 8.]], [[2., 6.], [2., 8.]]])
+    np.testing.assert_allclose(norm(x).numpy(), expected, atol=2e-5)
+    assert InstanceNorm(2, affine=False).weight is None
+
+
+def test_lstm_cell_state_and_gradients():
+    from polygrad.nn import LSTMCell
+    cell = LSTMCell(2, 2, bias=False)
+    cell.weight_ih = Tensor.zeros(8, 2)
+    cell.weight_hh = Tensor.zeros(8, 2)
+    x = Tensor.ones(1, 2)
+    h, c = cell(x)
+    np.testing.assert_array_equal(h.numpy(), [[0., 0.]])
+    np.testing.assert_array_equal(c.numpy(), [[0., 0.]])
+    h, c = cell(x, (Tensor.zeros(1, 2), Tensor.ones(1, 2)))
+    np.testing.assert_allclose(c.numpy(), [[0.5, 0.5]])
+    np.testing.assert_allclose(h.numpy(), [[0.23105858, 0.23105858]], atol=1e-6)
+    h.sum().backward()
+    assert cell.weight_ih.grad is not None
+    assert np.isfinite(cell.weight_ih.grad.numpy()).all()
+
+def test_dropout_module_uses_tensor_contract():
+    x = Tensor([1., 2., 3.])
+    with Context(TRAINING=1):
+        np.testing.assert_array_equal(Dropout(1)(x).numpy(), [0., 0., 0.])
+        for p in (-0.1, 1.1):
+            with pytest.raises(ValueError, match='out of range'):
+                Dropout(p)(x)
+    with Context(TRAINING=0):
+        assert Dropout(0.5)(x) is x
+
+
+def test_conv_module_supports_explicit_spatial_tuple():
+    layer = Conv2d(2, 3, (3,), bias=False)
+    assert layer.weight.shape == (3, 2, 3)
+    assert layer(Tensor.ones(1, 2, 5)).shape == (1, 3, 3)
 
 
 def approx(a, b, tol=1e-4):
@@ -84,6 +260,19 @@ class TestLinear:
 
 
 class TestLayerNorm:
+    def test_multidimensional_axes_and_shape_admission(self):
+        layer = LayerNorm((2, 2), elementwise_affine=False)
+        x = Tensor([[[1., 2.], [3., 4.]]])
+        expected = (np.arange(1, 5).reshape(1, 2, 2) - 2.5) / np.sqrt(1.25 + 1e-5)
+        np.testing.assert_allclose(layer(x).numpy(), expected, atol=1e-6)
+        with pytest.raises((AssertionError, ValueError), match='must match'):
+            layer(Tensor.ones(1, 3, 2))
+
+    def test_affine_parameters_remain_lazy(self):
+        layer = LayerNorm([2, 2])
+        assert not layer.weight.uop.has_buffer_identity()
+        assert not layer.bias.uop.has_buffer_identity()
+
     def test_forward_shape(self):
         ln = LayerNorm(4)
         x = Tensor.rand(2, 4)
@@ -153,7 +342,9 @@ class TestRMSNorm:
 
         no_affine = RMSNorm(4, elementwise_affine=False)
         assert no_affine.weight is None
-        assert no_affine(x).uop.raw == no_affine._norm(x.float()).cast(x.dtype).uop.raw
+        # Compare against the pinned expression, not a frontend implementation helper.
+        expected_no_affine = (x.float() * (x.float().square().mean(axis=-1, keepdim=True) + 1e-6).rsqrt()).cast(x.dtype)
+        assert no_affine(x).uop.raw == expected_no_affine.uop.raw
 
     def test_forward_shape(self):
         rn = RMSNorm(4)

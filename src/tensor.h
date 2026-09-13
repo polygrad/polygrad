@@ -15,6 +15,15 @@
 extern "C" {
 #endif
 
+/* C-only publication of already-built Tensor.assign effects. Shares view
+ * alias retargeting with optimizer batches; does not realize or place roots. */
+PolyTensor *poly_tensor_assign_after(
+    PolyCtx *ctx,
+    PolyTensor *target,
+    PolyUOp *logical_after,
+    PolyUOp *physical_after
+);
+
 /* Polygrad logical-lifetime boundary for composed Tensor operations. Physical
  * operands remain mandatory; this controls only the independent portable
  * result and propagates NEVER/UNSUPPORTED operand state. */
@@ -222,10 +231,19 @@ PolyUOp *poly_triangular_solve(
 PolyUOp *poly_sum_reduce(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim);
 PolyUOp *poly_max_reduce(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim);
 PolyUOp *poly_mean_reduce(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim);
+PolyUOp *poly_mean_axes(PolyCtx *ctx, PolyUOp *x, int64_t *axes, int n_axes, bool keepdim);
 PolyUOp *poly_var_reduce(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim, int correction);
 PolyUOp *poly_logsumexp(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim);
 
 PolyUOp *poly_dot(PolyCtx *ctx, PolyUOp *x, PolyUOp *w);
+PolyUOp *poly_newton_schulz(
+    PolyCtx *ctx,
+    PolyUOp *x,
+    int steps,
+    const double *coefficients,
+    int n_coefficients,
+    double eps
+);
 #define POLY_QR_COMPLETE 0
 #define POLY_QR_REDUCED 1
 #define POLY_QR_R_ONLY 2

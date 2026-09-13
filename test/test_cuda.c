@@ -18,8 +18,8 @@
 #include "../src/engine/jit.h"
 #include "../src/engine/schedule.h"
 #include "../src/schedule/rangeify.h"
-#include "../src/nn.h"
-#include "../src/optim.h"
+#include "../src/nn/nn.h"
+#include "../src/nn/optim.h"
 #include "../src/tensor.h"
 #include <string.h>
 

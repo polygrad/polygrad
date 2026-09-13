@@ -257,14 +257,16 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   function writeOptimConfig(cfg) {
-    /* PolyOptimConfig: int32 + 4-byte alignment, five float64 values,
-     * two bools, then 8-byte struct alignment. Keep Python/Native/WASM
-     * optimizer constants bit-identical to pinned Python ConstFloat values. */
-    const ptr = Module._malloc(56)
+    /* wasm32 PolyOptimConfig is 80 bytes. Coefficients follow it in the same
+     * allocation and are borrowed only until the synchronous builder returns.
+     * Native uses its C layout; Python uses ctypes rather than these offsets. */
+    const coefficients = cfg.nsCoefficients || []
+    const ptr = Module._malloc(80 + coefficients.length * 8)
+    if (!ptr) throw new Error('optimizer config allocation failed')
     const u8 = heapU8()
     const h32 = heap32()
     const f64 = heapF64()
-    u8.fill(0, ptr, ptr + 56)
+    u8.fill(0, ptr, ptr + 80)
     h32[ptr >> 2] = cfg.kind || 0
     const base = ptr >> 3
     f64[base + 1] = cfg.beta1 == null ? 0.9 : cfg.beta1
@@ -274,6 +276,12 @@ function createWasmCoreFromModule(Module, device) {
     f64[base + 5] = cfg.momentum == null ? 0 : cfg.momentum
     u8[ptr + 48] = cfg.nesterov ? 1 : 0
     u8[ptr + 49] = cfg.classic ? 1 : 0
+    f64[base + 7] = cfg.tcoef || 0
+    h32[(ptr + 64) >> 2] = cfg.nsSteps || 0
+    h32[(ptr + 68) >> 2] = coefficients.length
+    h32[(ptr + 72) >> 2] = coefficients.length ? ptr + 80 : 0
+    u8[ptr + 76] = cfg.preWd ? 1 : 0
+    f64.set(coefficients, (ptr + 80) >> 3)
     return ptr
   }
 
@@ -1285,6 +1293,23 @@ function createWasmCoreFromModule(Module, device) {
         [ctx, src, BigInt(k), dim, largest ? 1 : 0, sorted ? 1 : 0],
         'poly_tensor_topk'
       ),
+    poly_tensor_lstm_cell: (ctx, x, h, c, wi, wh, bi, bh) =>
+      callUopPair(Module._poly_tensor_lstm_cell, [ctx, x, h || 0, c || 0, wi, wh, bi || 0, bh || 0], 'poly_tensor_lstm_cell'),
+    poly_tensor_linear_apply: (ctx, x, w, b) => Module._poly_tensor_linear_apply(ctx, x, w, b || 0),
+    poly_tensor_rmsnorm_apply: (ctx, x, w, eps) => Module._poly_tensor_rmsnorm_apply(ctx, x, w || 0, eps),
+    poly_tensor_layernorm_axes_apply: (ctx, x, w, b, axes, eps) => {
+      const ptr = writeInt64Array(axes)
+      try { return Module._poly_tensor_layernorm_axes_apply(ctx, x, w || 0, b || 0, ptr, axes.length, eps) }
+      finally { Module._free(ptr) }
+    },
+    poly_tensor_groupnorm_apply: (ctx, x, w, b, groups, eps) =>
+      Module._poly_tensor_groupnorm_apply(ctx, x, w || 0, b || 0, groups, eps),
+    poly_tensor_batchnorm_stats: (ctx, x, mean, variance, training) =>
+      callUopPair(Module._poly_tensor_batchnorm_stats, [ctx, x, mean || 0, variance || 0, training ? 1 : 0], 'poly_tensor_batchnorm_stats'),
+    poly_tensor_batchnorm_apply: (ctx, x, w, b, mean, variance, batches, training, eps, momentum) =>
+      Module._poly_tensor_batchnorm_apply(ctx, x, w || 0, b || 0, mean || 0, variance || 0, batches || 0, training ? 1 : 0, eps, momentum),
+    poly_tensor_instancenorm_apply: (ctx, x, w, b, features, eps) =>
+      Module._poly_tensor_instancenorm_apply(ctx, x, w || 0, b || 0, features, eps),
     poly_tensor_softmax: (ctx, src, axis) =>
       Module._poly_tensor_softmax(ctx, src, axis),
     poly_tensor_log_softmax: (ctx, src, axis) =>
@@ -1515,7 +1540,7 @@ function createWasmCoreFromModule(Module, device) {
       const vPtr = writePtrArray(vTensors)
       let outPtr = 0
       try {
-        /* src/optim.c owns the optimizer math. JS only marshals PolyTensor*
+        /* src/nn/optim.c owns the optimizer math. JS only marshals PolyTensor*
          * arrays and receives the tensors whose AFTER/STORE effects must be
          * realized together. */
         const needed = Module._poly_optim_build_step(
@@ -1542,6 +1567,9 @@ function createWasmCoreFromModule(Module, device) {
     // Backend-aware readback helpers.
     poly_buffer_read: bufferReadSync,
     poly_buffer_read_async: bufferReadAsync,
+    poly_buffer_ensure_allocated: (ctx, buf, device) => {
+      if (Module._poly_buffer_ensure_allocated(ctx, buf, device) !== 0) throw new Error('poly_buffer_ensure_allocated failed')
+    },
     poly_buffer_ensure_device_allocated: (ctx, buf, device) => {
       if (deviceName === 'webgpu' && device === DEVICE_IDS.webgpu &&
           !(Module.__polygradWebGpuState && Module.__polygradWebGpuState.device)) return
@@ -1914,7 +1942,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 80
+  const EXPECTED_ABI = 81
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(

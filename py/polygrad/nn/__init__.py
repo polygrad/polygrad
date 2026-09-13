@@ -10,6 +10,11 @@ from .modules import (
     Embedding,
     Dropout,
     Conv2d,
+    Conv1d,
+    ConvTranspose1d,
+    ConvTranspose2d,
+    InstanceNorm,
+    LSTMCell,
     BatchNorm,
 )
 from .state import get_state_dict, load_state_dict, get_parameters, safe_load, safe_load_metadata
@@ -27,6 +32,11 @@ __all__ = [
     "Embedding",
     "Dropout",
     "Conv2d",
+    "Conv1d",
+    "ConvTranspose1d",
+    "ConvTranspose2d",
+    "InstanceNorm",
+    "LSTMCell",
     "BatchNorm",
     "BatchNorm2d",
     "BatchNorm3d",

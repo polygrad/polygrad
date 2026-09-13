@@ -22,6 +22,9 @@ extern "C" {
 #define POLY_OPTIM_ADAMW 3
 #endif
 
+#define POLY_OPTIM_LARS 4
+#define POLY_OPTIM_LAMB 5
+
 typedef struct {
   int kind;
   double beta1;
@@ -31,6 +34,11 @@ typedef struct {
   double momentum;
   bool nesterov;
   bool classic;
+  double tcoef;
+  int ns_steps;
+  int n_ns_coefficients;
+  const double *ns_coefficients; /* Borrowed only during graph construction. */
+  bool pre_wd;
 } PolyOptimConfig;
 
 typedef struct {
