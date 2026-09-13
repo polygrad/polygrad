@@ -4740,7 +4740,9 @@ async function runTensorTests(pg, createRuntime) {
     const a = new Tensor([1, 2, Infinity, -Infinity, NaN])
     const b = new Tensor([1.000005, 2.1, Infinity, Infinity, NaN])
     assertClose(await a.isfinite().toArray(), [1, 1, 0, 0, 0])
-    assertClose(await a.isclose(b, {equalNan: true}).toArray(), [1, 0, 1, 0, 1])
+    for (const equalNan of [false, true]) {
+      assertClose(await a.isclose(b, {equalNan}).toArray(), [1, 0, 1, 0, Number(equalNan)])
+    }
     assertClose(await new Tensor([2, -3]).copysign(new Tensor(new Float32Array([-0, 0]))).toArray(), [-2, 3])
   })
 

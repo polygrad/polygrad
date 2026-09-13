@@ -4586,11 +4586,14 @@ static int x86_emit_encode(
     if (sz == 2) xb_byte(b, 0x66);
     int r = reg >> 3, ix = idx >> 3, br = rm >> 3;
     bool w = (sz == 8);
-    if (w || r || ix || br || (reg_sz == 1 && (reg >> 2)) || (rm_sz == 1 && (rm >> 2)))
+    bool demote = (rm_sz == 1 || reg_sz == 1) && x && x->arg.kind == POLY_ARG_INT &&
+                  !x86_readflags((PolyX86Op)x->arg.i) && (PolyX86Op)x->arg.i != POLY_X86_LEA;
+    /* Tinygrad x86.encode: demotion also narrows a wider rm register. Without
+     * REX, indices 4..7 address AH/CH/DH/BH instead of SPL/BPL/SIL/DIL. */
+    if (w || r || ix || br || (reg_sz == 1 && (reg >> 2)) || (rm_sz == 1 && (rm >> 2)) ||
+        (demote && disp_uop == NULL && rm >= 4))
       emit_rex(b, w ? 1 : 0, r, ix, br);
-    if ((rm_sz == 1 || reg_sz == 1) && x && x->arg.kind == POLY_ARG_INT &&
-        !x86_readflags((PolyX86Op)x->arg.i) && (PolyX86Op)x->arg.i != POLY_X86_LEA)
-      opc -= 1;
+    if (demote) opc -= 1;
   }
 
   if (opc > 0xFF) xb_byte(b, (uint8_t)(opc >> 8));

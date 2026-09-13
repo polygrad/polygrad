@@ -67,6 +67,75 @@ static PolyUOp *x86_lane(PolyCtx *ctx, PolyUOp *value, int lane) {
   return poly_uop2(ctx, POLY_OP_INDEX, value->dtype, value, idx, poly_arg_none());
 }
 
+TEST_BACKEND(x86, byte_demoted_register_encoding_matches_tinygrad) {
+  /* Tinygrad v0.14 x86.encode: a bool destination demotes an int32 source
+   * access too. Registers 4..7 then mean SPL/BPL/SIL/DIL, not AH/CH/DH/BH. */
+  PolyCtx *ctx = poly_ctx_new();
+  const PolyX86Op ops[] = {POLY_X86_MOV, POLY_X86_AND, POLY_X86_OR};
+  const uint8_t opcodes[] = {0x8b, 0x23, 0x0b};
+  bool matches = true;
+  for (int op = 0; op < 3; op++) {
+    for (int reg = 0; reg < 16; reg++) {
+      for (int byte = 0; byte <= 1; byte++) {
+        /* Private X86 tag encoding: REAL | GPR class | physical index. */
+        PolyUOp *src = poly_uop_tagged(
+            ctx, POLY_OP_NOOP, POLY_INT32, NULL, 0, poly_arg_none(), 0x41000000 | reg
+        );
+        PolyUOp *dst = poly_uop_tagged(
+            ctx, POLY_OP_INS, byte ? POLY_BOOL : POLY_INT32, &src, 1, poly_arg_int(ops[op]),
+            0x41000000
+        );
+        int size = 0;
+        uint8_t *code = poly_render_x86(&dst, 1, &size);
+        bool rex = reg >= (byte ? 4 : 8);
+        uint8_t expected[] = {
+            (uint8_t)(0x40 | (reg >> 3)), (uint8_t)(opcodes[op] - byte),
+            (uint8_t)(0xc0 | (reg & 7))};
+        matches &= code && size == 2 + rex && memcmp(code, expected + !rex, (size_t)(2 + rex)) == 0;
+        free(code);
+      }
+    }
+  }
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(matches);
+  PASS();
+}
+
+TEST_BACKEND(x86, isclose_nonfinite_under_register_pressure) {
+  /* Exercise the mixed bool/int32 instruction operands produced after spills,
+   * not just the individually correct isinf/isnan/eq components. */
+  bool matches = true;
+  const int widths[] = {1, 2, 4, 5, 8, 16};
+  for (int k = 0; k < 6; k++) {
+    for (int nan = 0; nan <= 1; nan++) {
+      PolyCtx *ctx = poly_ctx_new();
+      poly_ctx_set_preferred_device(ctx, POLY_DEVICE_X86);
+      int n = widths[k];
+      float data[16];
+      for (int i = 0; i < n; i++)
+        data[i] = nan ? NAN : INFINITY;
+      PolyUOp *a = poly_buffer_f32(ctx, n), *b = poly_buffer_f32(ctx, n);
+      poly_buffer_set(ctx, a, data, (size_t)n * sizeof(float), POLY_DEVICE_CPU);
+      poly_buffer_set(ctx, b, data, (size_t)n * sizeof(float), POLY_DEVICE_CPU);
+      for (int equal_nan = 0; equal_nan <= 1; equal_nan++) {
+        PolyUOp *close = poly_isclose(
+            ctx, a, b, poly_const_float(ctx, 1e-5), poly_const_float(ctx, 1e-8), equal_nan
+        );
+        PolyUOp *realized = NULL;
+        int rc = poly_realize_uops(ctx, &close, 1, &realized);
+        uint8_t out[16] = {0};
+        PolyUOp *buffer = (PolyUOp *)poly_uop_get_buffer_identity(realized);
+        matches &= rc == 0 && buffer && poly_buffer_read(ctx, buffer, out, (size_t)n) == 0;
+        for (int i = 0; i < n; i++)
+          matches &= out[i] == (!nan || equal_nan);
+      }
+      poly_ctx_destroy(ctx);
+    }
+  }
+  ASSERT_TRUE(matches);
+  PASS();
+}
+
 TEST_BACKEND(x86, pre_isel_eliminates_current_gated_load) {
   /* tinygrad@2026-08-22/a9069c177a9d renderer/isa/x86.py:164-191:
    * gated LOAD selects the real or scratch address before instruction selection. */
