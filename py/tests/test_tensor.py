@@ -17,6 +17,40 @@ from polygrad.uop.ops import AxisType, KernelInfo, UOp, _dispose_uops_for_ctx
 
 
 @pytest.mark.parametrize('device', ['cpu', 'interp', 'cuda'])
+def test_schedule_cache_clear_preserves_live_model_and_jit(device):
+    if device == 'cuda' and not Device.cuda_available():
+        pytest.skip('CUDA device unavailable')
+    with Runtime(device=device) as runtime:
+        T = runtime.Tensor
+        x = T.empty(3)
+        model = runtime.Model.from_tensors(inputs={'x': x}, outputs={'prediction': x + 2})
+        data = np.array([1, 2, 3], dtype=np.float32)
+        np.testing.assert_array_equal(model.forward(x=data)['prediction'], data + 2)
+        x.copy_from(data)
+        f = runtime.jit(lambda a: (a + 1).realize())
+        for _ in range(3):
+            np.testing.assert_array_equal(f(x).numpy(), data + 1)
+        runtime.clear_schedule_cache()
+        runtime.collect()
+        for _ in range(3):
+            np.testing.assert_array_equal(f(x).numpy(), data + 1)
+            np.testing.assert_array_equal(model.forward(x=data)['prediction'], data + 2)
+            runtime.clear_schedule_cache()
+            runtime.collect()
+        f.reset()
+    with pytest.raises(RuntimeError, match='disposed'):
+        runtime.clear_schedule_cache()
+
+
+def test_schedule_cache_clear_default_context():
+    import polygrad as pg
+    x = (pg.Tensor([1., 2.]) + 1).realize()
+    pg.clear_schedule_cache()
+    pg.collect()
+    np.testing.assert_array_equal(x.numpy(), [2, 3])
+
+
+@pytest.mark.parametrize('device', ['cpu', 'interp', 'cuda'])
 def test_readback_copy_has_no_retained_host_shadow(device):
     if device == 'cuda' and not Device.cuda_available():
         pytest.skip('CUDA device unavailable')

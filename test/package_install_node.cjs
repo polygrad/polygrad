@@ -19,6 +19,8 @@ const model = rt.models.Sequential({
 const bytes = model.saveBundle({ includeOptimizer: false })
 model.dispose()
 const restored = rt.Model.fromBundle(bytes)
+rt.clearScheduleCache()
+rt.collect()
 assert.deepEqual(Array.from(restored.forward({ x: new Float32Array([7]) }).prediction), [7])
 restored.dispose()
 const Tensor = rt.Tensor
@@ -45,4 +47,4 @@ try {
   assert(actual.every((v, i) => Math.abs(v - expectedValues[i]) < 2e-5))
 } finally { Tensor.training = previousTraining }
 rt.dispose()
-console.log(JSON.stringify({ package: resolved, core: expected, tensor: true, modelBundle: true, lstm: true, muon: true }))
+console.log(JSON.stringify({ package: resolved, core: expected, tensor: true, modelBundle: true, lstm: true, muon: true, cacheClear: true }))

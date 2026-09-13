@@ -26,6 +26,83 @@ static int execution_owner_probe(void *self, void **args, int n_args) {
   return 0;
 }
 
+static PolyUOp *cache_clear_schedule(PolyCtx *ctx, int size) {
+  PolyUOp *a = poly_test_buffer_on_device(ctx, POLY_FLOAT32, size, POLY_DEVICE_INTERP);
+  PolyUOp *b = poly_test_buffer_on_device(ctx, POLY_FLOAT32, size, POLY_DEVICE_INTERP);
+  PolyUOp *requested[] = {poly_add(ctx, a, b)}, *outputs[1] = {NULL};
+  PolyUOp *call = poly_transform_to_call(ctx, requested, 1, outputs);
+  PolyVarBinding *vars = NULL;
+  int n_vars = 0;
+  PolyUOp *linear = call ? poly_create_linear_with_vars(ctx, call, &vars, &n_vars) : NULL;
+  free(vars);
+  return linear;
+}
+
+TEST(schedule_runtime, schedule_cache_clear_growth_and_repopulation) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  ASSERT_INT_EQ(poly_schedule_cache_clear(ctx), 0);
+  for (int round = 0; round < 3; round++) {
+    for (int size = 2; size < 10; size++)
+      ASSERT_NOT_NULL(cache_clear_schedule(ctx, size));
+    ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 8);
+    ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+    ASSERT_TRUE(poly_map_len(ctx->retained_uops) > 0);
+    ASSERT_INT_EQ(poly_schedule_cache_clear(ctx), 0);
+    ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 0);
+    ASSERT_INT_EQ((int)poly_map_len(ctx->retained_uops), 0);
+    ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+    ASSERT_INT_EQ((int)poly_map_len(ctx->uop_storage), 0);
+    ASSERT_INT_EQ(poly_schedule_cache_clear(ctx), 0);
+  }
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(schedule_runtime, schedule_cache_clear_preserves_independent_owner) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *linear = cache_clear_schedule(ctx, 4);
+  ASSERT_NOT_NULL(linear);
+  ASSERT_INT_EQ(poly_uop_retain(ctx, linear), 0);
+  ASSERT_INT_EQ(poly_schedule_cache_clear(ctx), 0);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  ASSERT_TRUE(poly_ctx_owns_ptr(ctx, linear));
+  ASSERT_INT_EQ(linear->op, POLY_OP_LINEAR);
+  ASSERT_TRUE(linear->n_src > 0);
+  poly_uop_release(ctx, linear);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  ASSERT_INT_EQ((int)poly_map_len(ctx->uop_storage), 0);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(schedule_runtime, schedule_cache_clear_rejects_busy_without_mutation) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(cache_clear_schedule(ctx, 4));
+  size_t count = poly_map_len(ctx->retained_uops);
+  ctx->execution_depth++;
+  int running = poly_schedule_cache_clear(ctx);
+  ctx->execution_depth--;
+  ctx->collecting = true;
+  int collecting = poly_schedule_cache_clear(ctx);
+  ctx->collecting = false;
+  PolyJit *jit = poly_jit_new(ctx);
+  ASSERT_NOT_NULL(jit);
+  ctx->active_jit_capture = jit;
+  int capturing = poly_schedule_cache_clear(ctx);
+  ctx->active_jit_capture = NULL;
+  ASSERT_INT_EQ(running, -1);
+  ASSERT_INT_EQ(collecting, -1);
+  ASSERT_INT_EQ(capturing, -1);
+  ASSERT_INT_EQ(poly_schedule_cache_clear(NULL), -1);
+  ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 1);
+  ASSERT_TRUE(poly_map_len(ctx->retained_uops) == count);
+  poly_jit_free(jit);
+  ASSERT_INT_EQ(poly_schedule_cache_clear(ctx), 0);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 typedef struct {
   int count, seen[65];
   bool tied, fail;

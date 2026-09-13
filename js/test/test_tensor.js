@@ -633,6 +633,46 @@ async function runTensorTests(pg, createRuntime) {
     assertClose(output, [1, 2, 3, 4])
   }))
 
+  await test('schedule cache clear preserves live Model and JIT', isolatedRuntime(async rt => {
+    const x = rt.Tensor.empty([3], {dtype: 'float32'})
+    const model = await rt.Model.fromTensors({inputs: {x}, outputs: {prediction: x.add(2)}})
+    const data = new Float32Array([1, 2, 3])
+    const f = rt.jit(a => a.add(1).realize())
+    try {
+      assertClose((await model.forward({x: data})).prediction, [3, 4, 5])
+      await x.copyFromAsync(data)
+      for (let i = 0; i < 3; i++) assertClose(await (await f(x)).toArrayAsync(), [2, 3, 4])
+      const schedules = f.scheduleCount
+      for (let i = 0; i < 3; i++) {
+        rt.clearScheduleCache()
+        rt.collect()
+        assertClose(await (await f(x)).toArrayAsync(), [2, 3, 4])
+        assert(f.scheduleCount === schedules, 'cache clear must not recapture live JIT')
+        assertClose((await model.forward({x: data})).prediction, [3, 4, 5])
+      }
+    } finally { f.dispose(); await model.dispose() }
+    await rt.dispose()
+    let rejected = false
+    try { rt.clearScheduleCache() } catch (e) { rejected = /disposed/.test(e.message) }
+    assert(rejected, 'disposed runtime accepted cache clear')
+  }))
+
+  await test('schedule cache clear rejects active async readback', isolatedRuntime(async rt => {
+    const x = await rt.Tensor.arange(4, {dtype: 'float32'}).realize()
+    const pending = x.toArrayAsync()
+    let error
+    try { rt.clearScheduleCache() } catch (e) { error = e }
+    assertClose(await pending, [0, 1, 2, 3])
+    if (rt.caps.core === 'wasm' && rt.caps.device === 'webgpu') {
+      assert(error && /active async work/.test(error.message), 'suspended WebGPU accepted cache clear')
+    } else {
+      assert(!error, 'synchronous backend rejected idle cache clear')
+    }
+    rt.clearScheduleCache()
+    rt.collect()
+    assertClose(await x.toArrayAsync(), [0, 1, 2, 3])
+  }))
+
   await test('Tensor dispose retires its exact core owner', isolatedRuntime(async pg => {
     const Tensor = pg.Tensor
     const before = pg.stats().coreStats.tensorRecords

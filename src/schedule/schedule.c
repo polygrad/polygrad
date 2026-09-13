@@ -996,3 +996,21 @@ PolyUOp *poly_copy_from_store(PolyCtx *ctx, PolyUOp *linear) {
 size_t poly_schedule_cache_len(PolyCtx *ctx) {
   return ctx && ctx->schedule_cache ? poly_map_len(ctx->schedule_cache) : 0;
 }
+
+static void schedule_cache_release(const void *key, void *value, void *userdata) {
+  PolyCtx *ctx = userdata;
+  /* Unlike Tinygrad's bytes keys, C pointer keys own a source-graph retain.
+   * Both retains were acquired independently, even if their graphs overlap. */
+  poly_uop_release(ctx, (PolyUOp *)key);
+  poly_uop_release(ctx, value);
+}
+
+/* Tinygrad schedule.schedule_cache.clear(), with C safe-point admission.
+ * Releasing roots marks collection dirty but never runs it: remove every key
+ * before a later collection can reclaim the graph used for pointer lookup. */
+int poly_schedule_cache_clear(PolyCtx *ctx) {
+  if (!ctx || ctx->execution_depth || ctx->collecting || ctx->active_jit_capture) return -1;
+  poly_map_foreach(ctx->schedule_cache, schedule_cache_release, ctx);
+  poly_map_clear(ctx->schedule_cache);
+  return 0;
+}

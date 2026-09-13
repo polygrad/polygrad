@@ -111,6 +111,7 @@ build/test_bigint.js: $(WASM_SRC) test/test_main.c test/test_bigint.c test/test_
 # Exercise the shared runner ABI inside wasm32, not just emitted kernel bytes.
 .PHONY: test-runtime-wasm
 test-runtime-wasm: build/test_schedule_runtime.js
+	$(SAN_RUN) $(NODE) $< --require-no-skips schedule_cache_clear
 	@set -e; for case in allocation_alignment_and_growth overflow_preserves_allocation_state alloc_and_destroy large_alloc reset; do \
 		$(SAN_RUN) $(NODE) $< --require-no-skips arena.$$case; \
 	done

@@ -9,7 +9,7 @@ import subprocess
 ROOT = Path(__file__).resolve().parent.parent
 PUBLIC = ("polygrad.h", "tensor.h", "frontend.h", "model.h", "nn/nn.h", "nn/optim.h", "models/layers.h")
 OWNERS = ("mixin/elementwise.h", "uop/ops.h", "placer.h", "device.h",
-          "engine/schedule.h", "engine/realize.h")
+          "engine/schedule.h", "engine/realize.h", "schedule/schedule.h")
 
 
 def main():
@@ -27,7 +27,7 @@ def main():
     # These public entry headers must not duplicate declarations. Including an
     # owner is sufficient; repeating a signature risks C/C++ linkage drift.
     seen = {}
-    for header in PUBLIC[:3]:
+    for header in (*PUBLIC[:3], "schedule/schedule.h"):
         for name in re.findall(r'^\w[^\n;{}]*\b(poly_\w+)\([^;{]*;',
                                (ROOT / "src" / header).read_text(), re.M):
             assert name not in seen, f"{name}: {seen.get(name)}, {header}"
@@ -37,6 +37,10 @@ def main():
                                           (os.getenv("CXX", "c++"), "c++", "c++17")):
         for headers in [(h,) for h in PUBLIC + OWNERS] + [PUBLIC, tuple(reversed(PUBLIC))]:
             unit = "".join(f'#include "{h}"\n' for h in headers)
+            if headers == ("polygrad.h",):
+                # Context controls must be usable without compiler-owner headers.
+                unit += "size_t (*cache_len)(PolyCtx *) = poly_schedule_cache_len;\n"
+                unit += "int (*cache_clear)(PolyCtx *) = poly_schedule_cache_clear;\n"
             subprocess.run(shlex.split(compiler) + [f"-std={standard}", "-Werror",
                            "-Isrc", "-x", language, "-fsyntax-only", "-"],
                            input=unit, text=True, cwd=ROOT, check=True)

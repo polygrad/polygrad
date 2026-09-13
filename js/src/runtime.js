@@ -198,6 +198,16 @@ class PolyRuntime {
     this._core.ffi.poly_ctx_reset_counters(this._core.ctx)
   }
 
+  // Explicit cache eviction is separate from collection; live Model/JIT owners
+  // survive. Scheduling may rebuild after a clear. Never enter suspended Wasm.
+  clearScheduleCache() {
+    if (this._closing || !this._core) throw new Error('polygrad runtime is disposed or closing')
+    if (this._activeAsync > 0) throw new Error('polygrad runtime has active async work')
+    if (this._core.ffi.poly_schedule_cache_clear(this._core.ctx) !== 0) {
+      throw new Error('schedule cache clear requires an idle runtime')
+    }
+  }
+
   canRun(query) {
     const q = query || {}
     const caps = this.caps

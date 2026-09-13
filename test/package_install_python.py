@@ -21,6 +21,8 @@ model = Sequential({'input': {'name': 'x', 'shape': [1], 'dtype': 'float32'},
 data = model.save_bundle(include_optimizer=False)
 model.free()
 restored = Model.from_bundle(data)
+polygrad.clear_schedule_cache()
+polygrad.collect()
 np.testing.assert_array_equal(restored.forward(x=np.array([7], np.float32))['prediction'], [7])
 restored.free()
 cell = LSTMCell(2, 2, bias=False)
@@ -38,4 +40,4 @@ with Context(TRAINING=1):
 np.testing.assert_allclose(p.numpy(), [[1.03743243, 2.11009645], [2.77558279, 4.05183554]],
                            atol=2e-5, rtol=2e-5)
 print({'package': polygrad.__file__, 'library': _ffi.get_lib()._name,
-       'tensor': True, 'model_bundle': True, 'lstm': True, 'muon': True})
+       'tensor': True, 'model_bundle': True, 'lstm': True, 'muon': True, 'cache_clear': True})

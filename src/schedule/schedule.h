@@ -23,9 +23,6 @@ PolyUOp *poly_create_linear_with_vars(
 /* Current tinygrad schedule/__init__.py:pm_copy_from_store. */
 PolyUOp *poly_copy_from_store(PolyCtx *ctx, PolyUOp *linear);
 
-/* C observability for current Tinygrad's module-level schedule_cache. */
-size_t poly_schedule_cache_len(PolyCtx *ctx);
-
 #ifdef __cplusplus
 }
 #endif

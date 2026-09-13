@@ -4113,6 +4113,15 @@ static napi_value napi_poly_ctx_reset_counters(napi_env env, napi_callback_info 
   return undef;
 }
 
+static napi_value napi_poly_schedule_cache_clear(napi_env env, napi_callback_info info) {
+  napi_value argv[1], out;
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  int rc = poly_schedule_cache_clear(get_external(env, argv[0]));
+  NAPI_CALL(env, napi_create_int32(env, rc, &out));
+  return out;
+}
+
 static napi_value napi_poly_can_run_op(napi_env env, napi_callback_info info) {
   napi_value argv[5];
   size_t argc = 5;
@@ -7011,6 +7020,7 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_set_default_int", napi_poly_set_default_int),
       DECLARE_NAPI_METHOD("poly_set_noopt", napi_poly_set_noopt),
       DECLARE_NAPI_METHOD("poly_ctx_collect", napi_poly_ctx_collect),
+      DECLARE_NAPI_METHOD("poly_schedule_cache_clear", napi_poly_schedule_cache_clear),
       DECLARE_NAPI_METHOD("poly_ctx_stats", napi_poly_ctx_stats),
       DECLARE_NAPI_METHOD("poly_ctx_reset_counters", napi_poly_ctx_reset_counters),
       DECLARE_NAPI_METHOD("poly_can_run_op", napi_poly_can_run_op),

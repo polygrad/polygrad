@@ -112,6 +112,16 @@ def collect():
         raise RuntimeError('poly_ctx_collect failed')
 
 
+def clear_schedule_cache():
+    """Release schedule-cache ownership; collect() reclaims unowned graphs.
+
+    Live Models/JITs keep their executions. New schedules may need rebuilding.
+    Call only with no concurrent execution or unfinished device work.
+    """
+    if _ffi.get_lib().poly_schedule_cache_clear(_default_ctx) != 0:
+        raise RuntimeError('schedule cache clear requires an idle runtime')
+
+
 def _can_run_dtype(dtype):
     if dtype is None:
         return 'float32'
@@ -340,6 +350,12 @@ class Runtime:
       if _ffi.get_lib().poly_ctx_collect(self._ctx) != 0:
           raise RuntimeError('poly_ctx_collect failed')
 
+    def clear_schedule_cache(self):
+      """Release this idle runtime's schedule-cache owners, without collecting."""
+      self._check_live()
+      if _ffi.get_lib().poly_schedule_cache_clear(self._ctx) != 0:
+          raise RuntimeError('schedule cache clear requires an idle runtime')
+
     def can_run(self, op=None, *, dtype='float32', shape=None, shapes=None, device='auto'):
       self._check_live()
       return _can_run_ctx(self._ctx, op, dtype=dtype, shape=shape, shapes=shapes, device=device)
@@ -376,7 +392,7 @@ __all__ = [
     'Tensor', 'Variable', 'BoundVariable', 'UOp', 'dtypes', 'Device', 'Model', 'nn',
     'GlobalCounters', 'Context', 'LOGICAL', 'fetch', 'getenv', 'function',
     'CompiledCallable', 'Jit', 'TinyJit', 'JitError', 'Runtime', 'create',
-    'compile', 'jit', 'stats', 'collect', 'can_run',
+    'compile', 'jit', 'stats', 'collect', 'clear_schedule_cache', 'can_run',
 ]
 
 try:

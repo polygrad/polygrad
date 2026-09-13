@@ -10,7 +10,7 @@
 
 /* Public C/frontend ABI version. Bump when exported symbols or public struct
  * layouts used by frontends change. */
-#define POLYGRAD_ABI_VERSION 81
+#define POLYGRAD_ABI_VERSION 82
 
 #include <stdint.h>
 #include <stddef.h>
@@ -1476,6 +1476,13 @@ PolyCtx *poly_ctx_new(void);
 void poly_ctx_destroy(PolyCtx *ctx);
 /* Explicit safe-point collection for retired owners. */
 int poly_ctx_collect(PolyCtx *ctx);
+/* C observability for current Tinygrad's module-level schedule_cache. */
+size_t poly_schedule_cache_len(PolyCtx *ctx);
+/* Explicit schedule_cache.clear(): release cache ownership only. The caller
+ * must serialize access and finish queued work. Returns -1 during execution,
+ * JIT capture or collection; otherwise 0, including an empty cache. Borrowed
+ * UOps need an independent owner before a subsequent poly_ctx_collect(). */
+int poly_schedule_cache_clear(PolyCtx *ctx);
 void poly_ctx_set_preferred_device(PolyCtx *ctx, PolyDevice device);
 PolyDevice poly_ctx_get_preferred_device(PolyCtx *ctx);
 int poly_ctx_set_logical_policy(PolyCtx *ctx, PolyLogicalPolicy policy);

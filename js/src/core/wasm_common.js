@@ -1619,6 +1619,7 @@ function createWasmCoreFromModule(Module, device) {
       }
     },
     poly_ctx_collect: (ctx) => Module._poly_ctx_collect(ctx),
+    poly_schedule_cache_clear: (ctx) => Module._poly_schedule_cache_clear(ctx),
     poly_ctx_stats: readCtxStats,
     poly_ctx_reset_counters: (ctx) => Module._poly_ctx_reset_counters(ctx),
     poly_grad: Module._poly_grad,
@@ -1942,7 +1943,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 81
+  const EXPECTED_ABI = 82
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(

@@ -111,10 +111,25 @@ rank-limited: materialization preserves every RANGE, while buffer-limit
 splitting rejects an intermediate shape it cannot represent. This is an open
 parity limitation, not a claim of complete Tinygrad compatibility.
 
-Schedule-cache keys currently retain source graphs until their C context is
-destroyed (`PG-PARITY-032`); Tinygrad uses byte keys. Releasing frontend objects
-does not promise immediate cache eviction. This lifetime difference remains
-an open parity debt, not an allowance for graph or numerical mismatches.
+The schedule cache has no automatic eviction or size cap. Every distinct
+cached graph keeps its schedule and, unlike Tinygrad's byte keys, its source
+graph (`PG-PARITY-032`). Long-lived runtimes producing many distinct graphs can
+therefore accumulate memory; `collect()` alone does not evict this cache.
+Symbolic bindings that reuse a schedule do not necessarily add cache entries.
+
+At an idle boundary, use Python `pg.clear_schedule_cache()` or
+`runtime.clear_schedule_cache()`, JavaScript `runtime.clearScheduleCache()`,
+or C `poly_schedule_cache_clear(ctx)` from `polygrad.h`. Then call
+`collect()` / `poly_ctx_collect(ctx)` to reclaim resources without other owners.
+Await pending browser operations before clearing; raw C callers must serialize
+access and finish queued device work. Independently owned Model/JIT executions
+remain usable. Use clearing at workload boundaries or under memory pressure,
+not after every operation. New schedules may need rebuilding, but compiled
+kernels can still be reused from other caches; recompilation is not inevitable.
+Other caches are untouched, so clearing does not promise that all runtime
+memory is returned.
+Pointer-key ownership remains an open parity debt; explicit clearing is a
+lifetime control, not a new graph-identity implementation.
 
 ## Install
 
