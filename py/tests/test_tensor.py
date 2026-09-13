@@ -1392,14 +1392,30 @@ print('leaving_live_instance')
         np.testing.assert_array_equal(wide.numpy(), [0x01010101, 0x01010101])
         np.testing.assert_array_equal(narrow.numpy(), [1, 0, 0, 0, 1, 0, 0, 0])
 
-    def test_bitcast_view_assign_matches_current_tinygrad(self):
-        a = Tensor([1.0, 2.0, 3.0, 4.0], dtype='float32').realize()
+    @pytest.mark.parametrize('mode', ['plain', 'reshape', 'shrink', 'aligned-shrink', 'detach', 'nested', 'repeated'])
+    def test_bitcast_view_assign_matches_current_tinygrad(self, mode):
+        initial = [1.0] * 64 + [2.0, 3.0, 4.0] if mode == 'aligned-shrink' else [1.0, 2.0, 3.0, 4.0]
+        a = Tensor(initial, dtype='float32').realize()
         view = a.bitcast('uint32')
-        view.assign(Tensor(
-            [0x40800000, 0x40400000, 0x40000000, 0x3f800000],
-            dtype='uint32',
-        )).realize()
-        np.testing.assert_array_equal(a.numpy(), [4.0, 3.0, 2.0, 1.0])
+        values = np.array([0x40800000, 0x40400000, 0x40000000, 0x3f800000], dtype=np.uint32)
+        expected = [4.0, 3.0, 2.0, 1.0]
+        if mode == 'reshape':
+            view, values = view.reshape(2, 2), values.reshape(2, 2)
+        elif mode == 'shrink':
+            view, values, expected = a[1:3].bitcast('uint32'), values[1:3], [1.0, 3.0, 2.0, 4.0]
+        elif mode == 'aligned-shrink':
+            view, values = a[64:66].bitcast('uint32'), values[1:3]
+            expected = [1.0] * 64 + [3.0, 2.0, 4.0]
+        elif mode == 'detach':
+            view = view.detach()
+        elif mode == 'nested':
+            view, values = view.bitcast('int32'), values.view(np.int32)
+        view.assign(Tensor(values)).realize()
+        np.testing.assert_array_equal(a.numpy(), expected)
+        if mode == 'repeated':
+            view = a.bitcast('uint32')
+            view.assign(Tensor(np.full(4, 0x40000000, dtype=np.uint32))).realize()
+            np.testing.assert_array_equal(a.numpy(), [2.0] * 4)
 
     def test_unequal_width_bitcast_preserves_symbolic_last_axis(self):
         n = Variable('n_bitcast', 4, 8).bind(4)

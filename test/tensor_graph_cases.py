@@ -2469,6 +2469,34 @@ for _result in (False, True):
     CASES[f'disk_copy_callify_{"output" if _result else "effect"}'] = ('callify', lambda r=_result: disk_copy_callify_graph(r))
 
 
+def typed_view_assign_callify_graph(offset, result):
+    base = Tensor.empty(4, dtype='float32', device='CPU').realize()
+    view = (base.shrink(((1, 3),)) if offset else base).bitcast('uint32')
+    value = Tensor.full(view.shape, 0x40800000, dtype='uint32', buffer=False)
+    target = view.uop
+    after = target.after(target.store(value.uop))
+    if ENGINE == 'tinygrad':
+        from tinygrad.tensor import transform_to_call
+        call, replacements = transform_to_call(UOp.sink(after))
+        output = replacements[after]
+    else:
+        from polygrad.uop.ops import UOp as PGUOp
+        fn = _ffi._lib.poly_transform_to_call
+        fn.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p), ctypes.c_int, ctypes.POINTER(ctypes.c_void_p)]
+        fn.restype = ctypes.c_void_p
+        outputs = (ctypes.c_void_p * 1)()
+        raw = fn(base._ctx, (ctypes.c_void_p * 1)(after.raw), 1, outputs)
+        if not raw or not outputs[0]: raise RuntimeError('typed view assignment callify returned NULL')
+        call, output = PGUOp(base._ctx, raw), PGUOp(base._ctx, outputs[0])
+    return {'physical': output if result else call}
+
+
+for _offset in (False, True):
+    for _result in (False, True):
+        CASES[f'view_assign_callify_{"offset" if _offset else "plain"}_{"output" if _result else "effect"}'] = (
+            'callify', lambda o=_offset, r=_result: typed_view_assign_callify_graph(o, r))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--case", action="append", choices=sorted(CASES))

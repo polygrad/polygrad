@@ -2654,17 +2654,54 @@ async function runTensorTests(pg, createRuntime) {
       'weak bitcast must fail at the Tensor API boundary')
   })
 
-  await test('bitcast view assign matches current tinygrad', async () => {
-    const a = new Tensor([1, 2, 3, 4], { dtype: 'float32' })
-    await a.realize()
-    const view = a.bitcast('uint32')
-    view.assign(new Tensor(
-      [0x40800000, 0x40400000, 0x40000000, 0x3f800000],
-      { dtype: 'uint32' }
-    ))
-    await view.realize()
-    assertClose(await a.toArray(), [4, 3, 2, 1], 0)
-  })
+  for (const mode of ['plain', 'reshape', 'shrink', 'aligned-shrink', 'detach', 'nested', 'repeated']) {
+    const unsupportedOffset = mode === 'shrink' && pg.device === 'webgpu'
+    const name = unsupportedOffset ? 'bitcast view assign rejects unsupported WebGPU offset' :
+      `bitcast view assign matches current tinygrad: ${mode}`
+    await test(name, async () => {
+      const initial = mode === 'aligned-shrink' ? Array(64).fill(1).concat([2, 3, 4]) : [1, 2, 3, 4]
+      const a = new Tensor(initial, { dtype: 'float32' })
+      await a.realize()
+      let view = a.bitcast('uint32')
+      let values = new Uint32Array([0x40800000, 0x40400000, 0x40000000, 0x3f800000])
+      let expected = [4, 3, 2, 1]
+      if (mode === 'reshape') view = view.reshape(2, 2)
+      if (mode === 'shrink') {
+        view = a.shrink([[1, 3]]).bitcast('uint32')
+        values = values.slice(1, 3)
+        expected = [1, 3, 2, 4]
+      }
+      if (mode === 'aligned-shrink') {
+        view = a.shrink([[64, 66]]).bitcast('uint32')
+        values = values.slice(1, 3)
+        expected = Array(64).fill(1).concat([3, 2, 4])
+      }
+      if (mode === 'detach') view = view.detach()
+      if (mode === 'nested') {
+        view = view.bitcast('int32')
+        values = new Int32Array(values.buffer)
+      }
+      const originalStorage = a.uop
+      view.assign(new Tensor(values).reshape(view.shape))
+      if (unsupportedOffset) {
+        // Release scope: pinned WebGPU has no allocator _offset implementation.
+        // PG supports aligned views only; rejection is not execution parity.
+        let error
+        try { await view.realize() } catch (e) { error = e }
+        assert(error && /poly_realize_tensors failed/.test(error.message), 'unaligned view must reject')
+        assertClose(await new Tensor(originalStorage).toArray(), initial, 0)
+        return
+      }
+      await view.realize()
+      assertClose(await a.toArray(), expected, 0)
+      if (mode === 'repeated') {
+        view = a.bitcast('uint32')
+        view.assign(new Tensor(new Uint32Array(4).fill(0x40000000)))
+        await view.realize()
+        assertClose(await a.toArray(), [2, 2, 2, 2], 0)
+      }
+    })
+  }
 
   await testIf(supportsF16, 'half and double convenience', async () => {
     const t = new Tensor([1, 2, 3])

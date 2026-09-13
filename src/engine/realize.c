@@ -34,7 +34,10 @@ static bool poly_transform_to_call_view_op(PolyOps op) {
 }
 
 static bool poly_transform_to_call_after_result_view_op(PolyOps op) {
-  return poly_transform_to_call_view_op(op) || op == POLY_OP_CONTIGUOUS;
+  /* tensor.finalize_after restores BITCAST along with movement views. Missing
+   * it also makes replace_store_after_with_contig mistake typed storage for
+   * a computed destination, replacing an in-place write with a fresh buffer. */
+  return poly_transform_to_call_view_op(op) || op == POLY_OP_BITCAST || op == POLY_OP_CONTIGUOUS;
 }
 
 typedef struct {
@@ -217,7 +220,11 @@ static PolyUOp *poly_transform_to_call_rebuild_view(
   int n_views = views ? views->n : 0;
   for (int i = n_views - 1; i >= 0; i--) {
     PolyUOp *step = views->items[i];
-    if (step->op == POLY_OP_RESHAPE) {
+    if (step->op == POLY_OP_BITCAST) {
+      /* Preserve the view's dtype, not the underlying allocation's dtype,
+       * matching finalize_after's v.replace(src=(replace_uop,)+v.src[1:]). */
+      view = poly_uop1(ctx, POLY_OP_BITCAST, step->dtype, view, step->arg);
+    } else if (step->op == POLY_OP_RESHAPE) {
       if (step->arg.kind != POLY_ARG_NONE || step->n_src != 2) return NULL;
       /* Pinned callify substitutes only the materialized base in the immutable
        * movement graph (callify.py:204-220, tensor.py:202-206). Preserve the
@@ -1481,22 +1488,35 @@ static PolyUOp *poly_transform_to_call_materialize_contiguous(
   return after;
 }
 
-static PolyUOp *poly_transform_to_call_contiguous_mops_to_view(PolyCtx *ctx, PolyUOp *contiguous) {
-  if (!ctx || !contiguous || contiguous->op != POLY_OP_CONTIGUOUS || contiguous->n_src != 1 ||
-      !poly_opset_has(POLY_GROUP_MOVEMENT, contiguous->src[0]->op))
-    return NULL;
+static PolyUOp *contiguous_mops_to_view(PolyCtx *ctx, PolyUOp *c) {
+  if (!ctx || !c || c->n_src < 1) return NULL;
+  PolyUOp *src = c->src[0];
+  bool store = c->op == POLY_OP_STORE && c->n_src >= 2 && src->op == POLY_OP_BITCAST;
+  bool contig = c->op == POLY_OP_CONTIGUOUS && c->n_src == 1 &&
+                (poly_opset_has(POLY_GROUP_MOVEMENT, src->op) || src->op == POLY_OP_BITCAST);
+  if (!store && !contig) return NULL;
 
-  PolyShape shape = poly_uop_max_shape_cached(ctx, contiguous);
+  PolyShape shape = poly_uop_max_shape_cached(ctx, c);
   /* Pinned contiguous_mops_to_view accepts only static movement graphs whose
    * flattened index is one contiguous range (callify.py:59-89).  Polygrad's
    * existing proof returns that same base/range for realized storage. */
-  if (shape.ndim < 0 || !poly_transform_to_call_is_static_max_shape(ctx, contiguous, shape))
-    return NULL;
+  if (shape.ndim < 0 || !poly_transform_to_call_is_static_max_shape(ctx, c, shape)) return NULL;
 
-  PolyUOp *view = make_buffer_view(ctx, contiguous->src[0]);
-  PolyUOp *shaped =
-      view ? poly_transform_to_call_rebuild_view(ctx, view, contiguous->src[0], NULL) : NULL;
-  return shaped && poly_uop_buffer(ctx, shaped) ? shaped : NULL;
+  PolyUOp *view = make_buffer_view(ctx, src);
+  PolyUOp *shaped = view ? poly_transform_to_call_rebuild_view(ctx, view, src, NULL) : NULL;
+  if (!shaped || !poly_uop_buffer(ctx, shaped)) return NULL;
+  if (!store) return shaped;
+  /* tensor.pm_early_transform_tensor_graph also applies this rule to a
+   * BITCAST STORE destination. Register the typed offset view before call
+   * argument replacement; scalar index lowering must not reconstruct it.
+   * COPY uses the same view proof in materialize_view_copy. */
+  PolyUOp **store_src = malloc((size_t)c->n_src * sizeof(*store_src));
+  if (!store_src) return NULL;
+  memcpy(store_src, c->src, (size_t)c->n_src * sizeof(*store_src));
+  store_src[0] = shaped;
+  PolyUOp *ret = poly_rebuild_with_sources(ctx, c, store_src);
+  free(store_src);
+  return ret;
 }
 
 /* tinygrad callify tags every CONTIGUOUS, not only the requested outer root.
@@ -1585,7 +1605,7 @@ static PolyUOp *poly_transform_to_call_rewrite_nested_contiguous(
    * before replace_contig_with_store_after (callify.py:152-164).  Returning
    * the storage view here removes the CONTIGUOUS through ordinary buffer
    * identity instead of allocating an intermediate materialization. */
-  PolyUOp *movement_view = poly_transform_to_call_contiguous_mops_to_view(ctx, ret);
+  PolyUOp *movement_view = contiguous_mops_to_view(ctx, ret);
   if (movement_view) {
     poly_map_set(memo, poly_ptr_hash(u), u, movement_view, poly_ptr_eq);
     return movement_view;

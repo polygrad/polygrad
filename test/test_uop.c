@@ -2475,6 +2475,53 @@ TEST(uop, toposort_scratch_rewinds_without_growing_ctx_arena) {
   PASS();
 }
 
+TEST(uop, view_assign_callify_preserves_bitcast_destination) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *buffer = poly_buffer_f32(ctx, 4);
+  PolyUOp *view = poly_bitcast(ctx, buffer, POLY_UINT32);
+  PolyUOp *value = poly_const_like_int(ctx, view, 0x40800000);
+  PolyUOp *store = poly_store_val(ctx, view, value);
+  PolyUOp *after = poly_uop2(ctx, POLY_OP_AFTER, POLY_UINT32, view, store, poly_arg_none());
+  PolyUOp *out = NULL;
+  ASSERT_NOT_NULL(after);
+  ASSERT_NOT_NULL(poly_transform_to_call(ctx, &after, 1, &out));
+  /* Pinned tensor.finalize_after removes AFTER, not the typed storage view.
+   * A fresh BUFFER here means callify discarded the in-place write. */
+  ASSERT_NOT_NULL(out);
+  ASSERT_INT_EQ(out->op, POLY_OP_BITCAST);
+  ASSERT_PTR_EQ(out->src[0], buffer);
+  ASSERT_TRUE(poly_dtype_eq(out->dtype, POLY_UINT32));
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(uop, view_assign_callify_binds_typed_offset_storage) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *buffer = poly_buffer_f32(ctx, 4);
+  PolyUOp *slice = poly_shrink(ctx, buffer, (int64_t[1][2]){{1, 3}}, 1);
+  PolyUOp *view = poly_bitcast(ctx, slice, POLY_UINT32);
+  PolyUOp *value = poly_const_like_int(ctx, view, 0x40800000);
+  PolyUOp *store = poly_store_val(ctx, view, value);
+  PolyUOp *after = poly_uop2(ctx, POLY_OP_AFTER, POLY_UINT32, view, store, poly_arg_none());
+  PolyUOp *out = NULL;
+  PolyUOp *call = poly_transform_to_call(ctx, &after, 1, &out);
+  ASSERT_NOT_NULL(call);
+  /* tensor.contiguous_mops_to_view registers the whole typed slice as a
+   * call argument. Lowering its offset as a computed STORE target is wrong. */
+  bool typed_argument = false;
+  for (int i = 1; i < call->n_src; i++) {
+    if (call->src[i] != view) continue;
+    PolyBuffer *storage = poly_buffer_get(ctx, view);
+    ASSERT_NOT_NULL(storage);
+    ASSERT_INT_EQ(storage->offset, sizeof(float));
+    ASSERT_INT_EQ(storage->nbytes, 2 * sizeof(float));
+    typed_argument = true;
+  }
+  ASSERT_TRUE(typed_argument);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(uop, substitute_nested_replacements_rewrite_replacement_graph) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *x = poly_test_buffer(ctx, POLY_FLOAT32, 1);

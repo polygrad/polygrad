@@ -178,6 +178,11 @@ Movement helpers accept `None` (Python) or `null` (JS) for unchanged axes in
 be a sequence or positional dimensions. For nonzero fill, use
 `x.pad_to(3, 5, value=-1)` or `x.padTo(3, 5, {value: -1})`.
 `pad_to` enlarges only; general symbolic padding is not implemented.
+
+WebGPU storage views require nonzero byte offsets to be multiples of 256.
+Unaligned typed-view assignment is rejected; it does not silently copy into
+separate storage. Arbitrary-offset views are deferred, and pinned Tinygrad
+v0.14.0's WebGPU allocator does not implement buffer offsets either.
 `max_shape` / `maxShape` and `max_numel()` / `maxNumel()` expose allocation
 bounds without changing the graph. Python retains symbolic `shape` values;
 JS `shape` already exposes maximum extents. Full slices and no-op shrink,
