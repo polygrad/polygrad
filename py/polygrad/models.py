@@ -12,6 +12,7 @@ import ctypes
 from . import _ffi
 from .device import _device_id
 from .model import Model
+from .model import _import_context
 
 
 def _normalize_spec(spec):
@@ -25,7 +26,7 @@ def _normalize_spec(spec):
 
 
 def MLP(spec=None, *, layers=None, activation="relu", bias=True, loss="none",
-        batch_size=1, seed=42, device=None, **extra):
+        batch_size=1, seed=42, device=None, runtime=None, **extra):
     """Build an MLP model family instance."""
     if spec is None:
         if layers is None:
@@ -46,11 +47,12 @@ def MLP(spec=None, *, layers=None, activation="relu", bias=True, loss="none",
         if layers is not None:
             spec["layers"] = layers
     data = _normalize_spec(spec)
-    ptr = _ffi.get_lib().poly_mlp_from_json(data, len(data), _device_id(device))
-    return Model(ptr)
+    ctx = _import_context(runtime)
+    ptr = _ffi.get_lib().poly_mlp_from_json_into(ctx, data, len(data), _device_id(device) if device is not None else 0)
+    return Model._from_handle(ptr, ctx)
 
 
-def TabM(spec=None, *, device=None, **kwargs):
+def TabM(spec=None, *, device=None, runtime=None, **kwargs):
     """Build a TabM model family instance."""
     if spec is None:
         spec = kwargs
@@ -59,11 +61,12 @@ def TabM(spec=None, *, device=None, **kwargs):
             raise TypeError("TabM keyword overrides require a dict spec")
         spec = {**spec, **kwargs}
     data = _normalize_spec(spec)
-    ptr = _ffi.get_lib().poly_tabm_from_json(data, len(data), _device_id(device))
-    return Model(ptr)
+    ctx = _import_context(runtime)
+    ptr = _ffi.get_lib().poly_tabm_from_json_into(ctx, data, len(data), _device_id(device) if device is not None else 0)
+    return Model._from_handle(ptr, ctx)
 
 
-def NAM(spec=None, *, device=None, **kwargs):
+def NAM(spec=None, *, device=None, runtime=None, **kwargs):
     """Build a NAM model family instance."""
     if spec is None:
         spec = kwargs
@@ -72,8 +75,9 @@ def NAM(spec=None, *, device=None, **kwargs):
             raise TypeError("NAM keyword overrides require a dict spec")
         spec = {**spec, **kwargs}
     data = _normalize_spec(spec)
-    ptr = _ffi.get_lib().poly_nam_from_json(data, len(data), _device_id(device))
-    return Model(ptr)
+    ctx = _import_context(runtime)
+    ptr = _ffi.get_lib().poly_nam_from_json_into(ctx, data, len(data), _device_id(device) if device is not None else 0)
+    return Model._from_handle(ptr, ctx)
 
 
 def _compose(family, spec, runtime):
@@ -95,7 +99,7 @@ def _compose(family, spec, runtime):
     ptr = getattr(_ffi.get_lib(), f'poly_{family}_from_json')(ctx, data, len(data), ctypes.byref(err))
     if not ptr:
         raise ValueError(bytes(err.message).split(b'\0', 1)[0].decode('utf-8', 'replace'))
-    return Model(ptr, _ctx=ctx)
+    return Model._from_handle(ptr, ctx)
 
 
 def Sequential(spec, *, runtime=None):

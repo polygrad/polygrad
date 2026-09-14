@@ -9,6 +9,7 @@ import ctypes
 import ctypes.util
 import math
 import pathlib
+import inspect
 import weakref
 import numpy as np
 from . import _ffi
@@ -16,6 +17,18 @@ from .device import _device_id
 
 _get_lib = _ffi.get_lib
 _live_models = weakref.WeakSet()
+
+
+def _import_context(runtime):
+    from . import Runtime, _default_ctx
+    if runtime is not None:
+        if not isinstance(runtime, Runtime):
+            raise TypeError('runtime must be a Polygrad Runtime')
+        runtime._check_live()
+    ctx = runtime._ctx if runtime is not None else _default_ctx
+    if not ctx:
+        raise RuntimeError('polygrad runtime has been disposed')
+    return ctx
 
 
 def _dispose_models_for_ctx(ctx):
@@ -104,7 +117,17 @@ def _param_items(params):
         return []
     if isinstance(params, dict):
         return list(params.items())
-    return [(f'param_{i}', p) for i, p in enumerate(params)]
+    if isinstance(params, (list, tuple)):
+        return [(f'param_{i}', p) for i, p in enumerate(params)]
+    from .nn.state import get_state_dict
+    return list(get_state_dict(params).items())
+
+def _synchronous_result(value):
+    if inspect.isawaitable(value) or inspect.isasyncgen(value):
+        if inspect.iscoroutine(value):
+            value.close()  # An unstarted coroutine owns no captured computation.
+        raise TypeError('Model author and loss must be synchronous')
+    return value
 
 
 def _name_bytes(name):
@@ -212,11 +235,6 @@ def _check_ctx(name, tensor, ctx, ctx_key):
     return ctx
 
 
-def _ensure_storage_binding(name, tensor):
-    if not tensor.uop.has_buffer_identity():
-        raise RuntimeError(f'{name!r} has no buffer identity')
-
-
 def _entrypoint_spec(name, inputs, outputs, objective=None, flags=0, keepalive=None):
     keepalive = keepalive if keepalive is not None else []
     name_b = _name_bytes(name)
@@ -270,48 +288,93 @@ def _model_from_binding_specs(ctx, binding_rows, entry_rows, keepalive):
         func = err.func.decode('utf-8', 'replace') if err.func else 'poly_model_from_bindings'
         detail = f'{func}: {msg}' if msg else func
         raise RuntimeError(f'poly_model_from_bindings failed: {detail}')
-    return Model(ptr, _ctx=ctx)
+    return Model._from_handle(ptr, ctx)
 
 
 class Model:
     """C-owned state and callables with sealed topology and optional training.
 
-    Author with ordinary Tensor code or ``trace``; overriding a Python method
+    Author with ordinary Tensor code or ``from_callable``; overriding a Python method
     does not change the captured executable or synchronize authoring attributes.
     """
 
-    def __init__(self, ptr=None, *, inputs=None, targets=None, state=None,
+    def __init__(self, source=None, *, inputs=None, targets=None,
                  outputs=None, entrypoints=None, params=None, losses=None,
-                 modules=None, _ctx=None):
-        spec_args = (inputs, targets, state, outputs, entrypoints, params, losses, modules)
+                 loss=None, modules=None, runtime=None):
+        self._ptr = self._ctx = None
+        if inspect.isclass(source):
+            raise TypeError('Model expects an object, not a class; instantiate it first')
+        if isinstance(source, dict):
+            if any(v is not None for v in (inputs, targets, outputs, entrypoints, params, losses, loss, modules)):
+                raise TypeError('Model configuration cannot be combined with Tensor bindings or a callable loss')
+            if source.get('format') != 'poly.modeldef@1' or source.get('type') not in ('sequential', 'graph'):
+                raise ValueError('Model configuration requires format="poly.modeldef@1" and type="sequential" or "graph"')
+            from .models import Sequential, Graph
+            self._adopt((Sequential if source['type'] == 'sequential' else Graph)(source, runtime=runtime))
+            return
+        if runtime is not None:
+            raise TypeError('runtime is only for configuration construction; Tensor bindings select their owning Runtime')
+        if callable(source):
+            if outputs is not None or losses is not None or modules is not None:
+                raise TypeError('Callable Model cannot be combined with prebuilt outputs, losses or modules')
+            built = Model.from_callable(source, inputs=inputs, targets=targets, loss=loss,
+                                        params=params, entrypoints=entrypoints)
+            self._adopt(built)
+            return
+        if loss is not None:
+            raise TypeError('loss requires a callable Model source; use losses for prebuilt tensors')
+        spec_args = (inputs, targets, outputs, entrypoints, params, losses, modules)
         has_spec = any(v is not None for v in spec_args)
         if has_spec:
-            if ptr is not None:
-                raise TypeError('Model handle cannot be combined with tensor bindings')
+            if source is not None:
+                raise TypeError('Model source cannot be combined with tensor bindings')
             built = Model.from_tensors(
                 inputs=inputs,
                 targets=targets,
                 outputs=outputs,
                 losses=losses,
                 params=params,
-                state=state,
                 entrypoints=entrypoints,
                 modules=modules,
             )
-            self._ptr = built._ptr
-            self._ctx = built._ctx
-            built._ptr = None
-            built._ctx = None
-            if self._ctx:
-                _live_models.add(self)
+            self._adopt(built)
             return
 
+        raise TypeError('Model expects a callable, tagged configuration or Tensor bindings; use Model.load for bytes')
+
+    @staticmethod
+    def _from_handle(ptr, ctx=None):
         if not ptr:
             raise RuntimeError('Failed to create PolyModel (NULL pointer)')
-        self._ptr = ptr
-        self._ctx = _ctx
+        model = Model.__new__(Model)
+        model._ptr, model._ctx = ptr, ctx
+        if ctx:
+            _live_models.add(model)
+        return model
+
+    def _adopt(self, built):
+        self._ptr, self._ctx = built._ptr, built._ctx
+        built._ptr = built._ctx = None
         if self._ctx:
             _live_models.add(self)
+
+    def dispose(self):
+        """Release this Model's C ownership; safe to call repeatedly."""
+        self.free()
+
+    def save(self, path=None, *, include_optimizer=True):
+        """Return a portable bundle, optionally writing it to a local path."""
+        data = self.save_bundle(include_optimizer=include_optimizer)
+        if path is not None:
+            pathlib.Path(path).write_bytes(data)
+        return data
+
+    @staticmethod
+    def load(source, *, runtime=None):
+        """Load bundle bytes or a local path, without the authoring object."""
+        if isinstance(source, (str, pathlib.Path)):
+            source = pathlib.Path(source).read_bytes()
+        return Model.from_bundle(source, runtime=runtime)
 
     def free(self):
         if self._ptr:
@@ -326,16 +389,17 @@ class Model:
     # ── Lifecycle ────────────────────────────────────────────────────
 
     @staticmethod
-    def from_ir(ir_bytes, weights_bytes=None):
+    def from_ir(ir_bytes, weights_bytes=None, *, runtime=None):
         """Create from IR binary + optional safetensors weights."""
+        ctx = _import_context(runtime)
         ir_buf = (ctypes.c_uint8 * len(ir_bytes)).from_buffer_copy(ir_bytes)
         w_buf = None
         w_len = 0
         if weights_bytes:
             w_buf = (ctypes.c_uint8 * len(weights_bytes)).from_buffer_copy(weights_bytes)
             w_len = len(weights_bytes)
-        ptr = _get_lib().poly_model_from_ir(ir_buf, len(ir_bytes), w_buf, w_len)
-        return Model(ptr)
+        ptr = _get_lib().poly_model_from_ir_into(ctx, ir_buf, len(ir_bytes), w_buf, w_len, 0)
+        return Model._from_handle(ptr, ctx)
 
     @staticmethod
     def from_program(program_bytes, weights_bytes=None):
@@ -352,7 +416,7 @@ class Model:
             w_len = len(weights_bytes)
         ptr = _get_lib().poly_model_from_program(
             program_buf, len(program_bytes), w_buf, w_len)
-        return Model(ptr)
+        return Model._from_handle(ptr)
 
     @staticmethod
     def from_bindings(bindings, entrypoints, *, modules=None):
@@ -391,8 +455,6 @@ class Model:
         ctx_key = _ptr_value(ctx)
         for name, role, tensor, _ in parsed:
             _check_ctx(name, tensor, ctx, ctx_key)
-            if role in (ROLE_INPUT, ROLE_TARGET):
-                _ensure_storage_binding(name, tensor)
 
         keepalive = []
         binding_rows = []
@@ -425,23 +487,59 @@ class Model:
         return inst
 
     @staticmethod
-    def trace(fn, *, inputs, targets=None, loss=None, state=None, params=None,
-              entrypoints=None):
+    def from_callable(fn, *, inputs, targets=None, loss=None, params=None,
+                      entrypoints=None):
         """Call ``fn(**inputs)`` once and seal its Tensor outputs.
 
         ``loss(result, **targets)`` returns a Tensor or a named loss dictionary.
-        Supply state explicitly (``nn.get_state_dict(net)`` is a convenience).
-        Preserve logical roots before construction; no host control-flow tracing,
+        Callable objects supply named state unless ``params`` overrides it.
+        Preserve newly constructed logical roots; no host control-flow tracing,
         automatic train/eval modes, or subsequent calls to the authoring object.
         """
-        if not callable(fn):
-            raise TypeError('Model.trace requires a callable')
-        inputs = dict(inputs)
+        if not callable(fn) or inspect.isclass(fn):
+            raise TypeError('Model.from_callable requires a callable instance, not a class')
+        for callback in (fn, loss):
+            if callback is None:
+                continue
+            if not callable(callback):
+                raise TypeError('Model author and loss must be callable')
+            call = callback if inspect.isroutine(callback) else callback.__call__
+            if inspect.iscoroutinefunction(call) or inspect.isasyncgenfunction(call):
+                raise TypeError('Model author and loss must be synchronous')
+        from .tensor import _ptr_value
+        inputs = dict(inputs or {})
         targets = dict(targets or {})
-        result = fn(**inputs)
-        losses = loss(result, **targets) if loss is not None else None
+        collect_object = params is None and not inspect.isroutine(fn)
+        if params is None:
+            params = {} if inspect.isroutine(fn) else dict(_param_items(fn))
+        params = dict(_param_items(params))
+        named = list(inputs.items()) + list(targets.items()) + list(params.items())
+        if not named:
+            raise ValueError('Model capture requires an input or named state Tensor to select its Runtime')
+        ctx = _require_tensor(*named[0])._ctx
+        for name, tensor in named:
+            _check_ctx(name, _require_tensor(name, tensor), ctx, _ptr_value(ctx))
+            if tensor.uop_logical is None:
+                raise ValueError(f'{name!r} has no logical source; construct it with logical retention enabled')
+        for name, tensor in params.items():
+            if any(tensor is t for t in (*inputs.values(), *targets.values())):
+                raise ValueError(f'{name!r} is both input/target and model state; supply a params override')
+        lib = _get_lib()
+        policy = lib.poly_ctx_get_logical_policy(ctx)
+        lib.poly_ctx_set_logical_policy(ctx, 1)  # ALWAYS applies only to new Tensor wrappers.
+        try:
+            result = _synchronous_result(fn(**inputs))
+            losses = _synchronous_result(loss(result, **targets)) if loss is not None else None
+            # Lazy layer initialization happens in the authoring call, not sealing.
+            if collect_object:
+                params = dict(_param_items(fn))
+                for name, tensor in params.items():
+                    if any(tensor is t for t in (*inputs.values(), *targets.values())):
+                        raise ValueError(f'{name!r} is both input/target and model state; supply a params override')
+        finally:
+            lib.poly_ctx_set_logical_policy(ctx, policy)
         return Model.from_tensors(inputs=inputs, targets=targets, outputs=result,
-                                  losses=losses, state=state, params=params,
+                                  losses=losses, params=params,
                                   entrypoints=entrypoints)
 
     @staticmethod
@@ -452,17 +550,11 @@ class Model:
         targets=None,
         losses=None,
         params=None,
-        state=None,
         entrypoints=None,
         modules=None,
     ):
         """Package named Tensor roots as a runnable/exportable Model."""
         from .tensor import _ptr_value
-
-        if params is not None and state is not None:
-            raise ValueError('Model.from_tensors accepts params or state, not both')
-        if state is not None:
-            params = state
 
         inputs = _normalize_named_tensors(inputs, 'input')
         targets = _normalize_named_tensors(targets, 'target')
@@ -486,25 +578,20 @@ class Model:
         for name, tensor in named_tensors:
             _check_ctx(name, tensor, ctx, ctx_key)
 
-        for name, tensor in list(inputs.items()) + list(targets.items()):
-            _ensure_storage_binding(name, tensor)
-
         keepalive = []
         binding_rows = []
 
-        def add_binding(name, role, tensor, flags=0):
+        def add_binding(name, role, tensor):
             name_b = _name_bytes(name)
             keepalive.append(name_b)
-            if role == ROLE_PARAM and not tensor.is_param:
-                flags |= _BIND_F_FROZEN
-            binding_rows.append(_ffi.PolyBindingSpec(name_b, int(role), tensor._tensor, int(flags)))
+            binding_rows.append(_ffi.PolyBindingSpec(name_b, int(role), tensor._tensor, 0))
 
         for name, tensor in inputs.items():
             add_binding(name, ROLE_INPUT, tensor)
         for name, tensor in targets.items():
             add_binding(name, ROLE_TARGET, tensor)
         for name, tensor in param_items:
-            add_binding(name, ROLE_AUX if state is not None and not tensor.is_param else ROLE_PARAM, tensor)
+            add_binding(name, ROLE_PARAM if tensor.is_param else ROLE_AUX, tensor)
         for name, tensor in outputs.items():
             add_binding(name, ROLE_OUTPUT, tensor)
         for name, tensor in losses.items():
@@ -616,7 +703,7 @@ class Model:
 
     @staticmethod
     def from_hf(model_path=None, *, config_json=None, weight_bytes_list=None,
-                max_batch=1, max_seq_len=0, device=None):
+                max_batch=1, max_seq_len=0, device=None, runtime=None):
         """Load a HuggingFace-format model as an Model."""
         from .hf import load_hf, load_hf_bytes
 
@@ -624,27 +711,28 @@ class Model:
             if config_json is None or weight_bytes_list is None:
                 raise ValueError('config_json and weight_bytes_list must be provided together')
             return load_hf_bytes(
-                config_json, weight_bytes_list, max_batch, max_seq_len, device=device
+                config_json, weight_bytes_list, max_batch, max_seq_len, device=device, runtime=runtime
             )
         if model_path is None:
             raise ValueError('model_path is required')
         return load_hf(
-            model_path, max_batch=max_batch, max_seq_len=max_seq_len, device=device
+            model_path, max_batch=max_batch, max_seq_len=max_seq_len, device=device, runtime=runtime
         )
 
     @staticmethod
-    def from_gguf(data, *, max_batch=1, max_seq_len=0, device=None):
+    def from_gguf(data, *, max_batch=1, max_seq_len=0, device=None, runtime=None):
         """Load a GGUF byte buffer or file path as an Model."""
         if isinstance(data, (str, pathlib.Path)):
             data = pathlib.Path(data).read_bytes()
         data = bytes(data)
         buf = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
-        ptr = _get_lib().poly_gguf_load(
-            buf, len(data), int(max_batch), int(max_seq_len), _device_id(device)
+        ctx = _import_context(runtime)
+        ptr = _get_lib().poly_gguf_load_into(
+            ctx, buf, len(data), int(max_batch), int(max_seq_len), _device_id(device) if device is not None else 0
         )
         if not ptr:
             raise RuntimeError('poly_gguf_load returned NULL')
-        return Model(ptr)
+        return Model._from_handle(ptr, ctx)
 
     # ── Param Enumeration ────────────────────────────────────────────
 
@@ -718,13 +806,28 @@ class Model:
         ndim = _get_lib().poly_model_buf_shape(self._ptr, i, shape_buf, 8)
         return tuple(shape_buf[d] for d in range(ndim))
 
+    def buf_current_shape(self, i):
+        """Concrete extents of the last successful call; capacity before first use."""
+        shape = (ctypes.c_int64 * 8)()
+        ndim = _get_lib().poly_model_buf_current_shape(self._ptr, i, shape, 8)
+        if ndim < 0:
+            raise ValueError('invalid buffer index')
+        return tuple(shape[:ndim])
+
+    def buf_shape_bounds(self, i):
+        lower, upper = (ctypes.c_int64 * 8)(), (ctypes.c_int64 * 8)()
+        ndim = _get_lib().poly_model_buf_shape_bounds(self._ptr, i, lower, upper, 8)
+        if ndim < 0:
+            raise ValueError('invalid buffer index')
+        return tuple(zip(lower[:ndim], upper[:ndim]))
+
     def buf_data(self, i):
         """Return an independent, flat copy in the buffer storage dtype."""
         if not self._ptr:
             raise RuntimeError('Model is disposed')
         if i < 0 or i >= self.buf_count:
             return None
-        shape = self.buf_shape(i)
+        shape = self.buf_current_shape(i)
         out = np.empty(math.prod(shape), dtype=_storage_dtype(self.buf_dtype(i)))
         ret = _get_lib().poly_model_read_buf(self._ptr, i, out.ctypes.data, out.nbytes)
         if ret != 0:
@@ -775,6 +878,7 @@ class Model:
             raise RuntimeError('Model has been disposed')
         return [{'name': self.buf_name(i), 'role': self.buf_role(i),
                  'dtype': self.buf_dtype(i), 'shape': self.buf_shape(i),
+                 'shape_bounds': self.buf_shape_bounds(i),
                  'trainable': self.buf_trainable(i)} for i in range(self.buf_count)]
 
     def entrypoints(self):
@@ -798,6 +902,17 @@ class Model:
         if i < 0:
             raise KeyError(name)
         return self.set_buf_trainable(i, trainable)
+
+    def summary(self):
+        """Describe the interface without executing graphs or reading state bytes."""
+        roles = ('PARAM', 'INPUT', 'TARGET', 'OUTPUT', 'AUX')
+        bindings = [f"  {b['name']}: {roles[b['role']]} {b['dtype']}[{','.join(map(str, b['shape']))}]" +
+                    ((' trainable' if b['trainable'] else ' frozen') if b['role'] == ROLE_PARAM else '')
+                    for b in self.bindings()]
+        entries = [f"  {e['name']}({', '.join(e['inputs'])}) -> {', '.join(e['outputs'])}" +
+                   (f"; objective={e['objective']}" if e['objective'] is not None else '')
+                   for e in self.entrypoints()]
+        return '\n'.join(['Model', 'Bindings:', *bindings, 'Entrypoints:', *entries])
 
     # ── Weight I/O ───────────────────────────────────────────────────
 
@@ -851,6 +966,8 @@ class Model:
 
     def save_bundle(self, *, include_optimizer=True):
         """Save as a poly.bundle@1 byte array (IR + weights + metadata)."""
+        if not self._ptr:
+            raise RuntimeError('Model has been disposed')
         flags = EXPORT_WEIGHTS_PARAMS
         if include_optimizer:
             flags |= EXPORT_WEIGHTS_OPTIMIZER
@@ -863,11 +980,12 @@ class Model:
         return data
 
     @staticmethod
-    def from_bundle(data):
+    def from_bundle(data, *, runtime=None):
         """Load from a poly.bundle@1 byte array."""
+        ctx = _import_context(runtime)
         buf = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
-        ptr = _get_lib().poly_model_from_bundle(buf, len(data))
-        return Model(ptr)
+        ptr = _get_lib().poly_model_from_bundle_into(ctx, buf, len(data), 0)
+        return Model._from_handle(ptr, ctx)
 
     # ── Execution ────────────────────────────────────────────────────
 
@@ -876,7 +994,7 @@ class Model:
                       nesterov=False, classic=False):
         """Configure optimizer before first train_step."""
         ret = _get_lib().poly_model_set_optimizer_ex(
-            self._ptr, kind,
+            self._ptr, _optimizer_kind(kind),
             ctypes.c_float(lr), ctypes.c_float(beta1), ctypes.c_float(beta2),
             ctypes.c_float(eps), ctypes.c_float(weight_decay),
             ctypes.c_float(momentum), bool(nesterov), bool(classic))
@@ -886,28 +1004,55 @@ class Model:
     def forward(self, **inputs):
         """Run forward pass. Pass input arrays as keyword args (name=array).
 
-        Returns dict of output buffer names to numpy arrays.
+        Returns named arrays, or owned Tensor results when any input is a Tensor.
         """
         return self.call('forward', inputs)
 
     def call(self, entrypoint, inputs=None, **kwargs):
-        """Run one named entrypoint with its exact declared input signature."""
+        """Run an entrypoint. Tensor inputs select owned, device-resident Tensor outputs.
+
+        Results are eager snapshots, not differentiable calls through the Model.
+        Their Runtime must remain alive; subsequent calls and Model disposal do
+        not change them. Array-only inputs retain the NumPy output contract.
+        """
         if inputs is not None and kwargs:
             raise TypeError('Model.call accepts either an input mapping or keyword inputs')
         io = dict(inputs or kwargs)
         bindings, n = self._make_bindings(io)
+        from .tensor import Tensor
+        if any(isinstance(value, Tensor) for value in io.values()):
+            lib = _get_lib()
+            ep = str(entrypoint).encode('utf-8')
+            count = lib.poly_model_entrypoint_output_count(self._ptr, ep)
+            if count < 0: raise ValueError(f"unknown entrypoint: {entrypoint}")
+            handles = (_ffi._ptr * count)()
+            if lib.poly_model_call_tensors(self._ptr, ep, bindings, n, handles, count) != 0:
+                raise RuntimeError(f"Tensor call('{entrypoint}') failed")
+            result = {}
+            try:
+                for i in range(count):
+                    name = lib.poly_model_entrypoint_output_name(self._ptr, ep, i).decode()
+                    result[name] = Tensor(_ctx=self._ctx, _tensor=handles[i],
+                                          _device=lib.poly_device_name(lib.poly_tensor_device(handles[i])).decode()).is_param_(False)
+                    handles[i] = None
+            finally:
+                for handle in handles:
+                    if handle: lib.poly_tensor_release(handle)
+            return result
         ret = _get_lib().poly_model_call(
             self._ptr, str(entrypoint).encode('utf-8'), bindings, n)
         if ret != 0:
             raise RuntimeError(f"call('{entrypoint}') failed (ret={ret})")
         return self._collect_outputs(str(entrypoint))
 
-    def train_step(self, *, entrypoint=None, **io):
-        """Run one training step. Pass input+target arrays as kwargs.
+    def train_step(self, inputs=None, *, entrypoint=None, **io):
+        """Run one training step with a named mapping or input+target kwargs.
 
         Returns the loss value (float).
         """
-        bindings, n = self._make_bindings(io)
+        if inputs is not None and io:
+            raise TypeError('Model.train_step accepts either an input mapping or keyword inputs')
+        bindings, n = self._make_bindings(dict(inputs if inputs is not None else io))
         loss = ctypes.c_float(0.0)
         ret = _get_lib().poly_model_train_step(
             self._ptr, _name_bytes(entrypoint) if entrypoint is not None else None,
@@ -919,17 +1064,25 @@ class Model:
     def fit(self, data=None, *, epochs=1, optimizer=None, lr=0.01,
             beta1=0.9, beta2=0.999, eps=1e-8, weight_decay=0.0,
             momentum=0.0, nesterov=False, classic=False,
-            on_step=None, entrypoint=None, **io):
-        """Repeat one supplied batch for ``epochs`` steps.
+            on_step=None, entrypoint=None, batch_size=None, remainder='error', **io):
+        """Train in input order; return one loss per optimizer step.
 
-        This is only orchestration: optimizer update graphs are still built by
-        the C core and executed through the same train_step path as custom
-        loops.
+        With batch_size=None, repeat the supplied batch once per epoch. With
+        batch_size, traverse host arrays along axis zero each epoch. The batch
+        size must match the sealed signature. An incomplete batch is rejected
+        before training, unless remainder='drop' is explicitly selected.
+        Device Tensor datasets use an explicit train_step loop for now.
         """
-        bindings = {}
-        if data:
-            bindings.update(data)
-        bindings.update(io)
+        if isinstance(epochs, bool) or not isinstance(epochs, (int, np.integer)) or epochs < 0:
+            raise ValueError('epochs must be a nonnegative integer')
+        if data is not None and io:
+            raise TypeError('Model.fit accepts either a data mapping or keyword inputs')
+        bindings = dict(data if data is not None else io)
+        if remainder not in ('error', 'drop'):
+            raise ValueError("remainder must be 'error' or 'drop'")
+        batches = 1
+        if batch_size is not None:
+            bindings, batches = self._fit_dataset(bindings, batch_size, remainder, entrypoint)
         if optimizer is not None:
             self.set_optimizer(
                 _optimizer_kind(optimizer), lr=lr, beta1=beta1, beta2=beta2,
@@ -937,34 +1090,99 @@ class Model:
                 nesterov=nesterov, classic=classic,
             )
         losses = []
-        for step in range(int(epochs)):
-            loss = self.train_step(entrypoint=entrypoint, **bindings)
-            losses.append(loss)
-            if on_step is not None:
-                on_step(step, loss)
+        for _ in range(epochs):
+            for batch in range(batches):
+                current = bindings if batch_size is None else {
+                    name: value[batch*batch_size:(batch+1)*batch_size] for name, value in bindings.items()}
+                loss = self.train_step(current, entrypoint=entrypoint)
+                losses.append(loss)
+                if on_step is not None:
+                    on_step(len(losses)-1, loss)
         return losses
+
+    def _fit_dataset(self, data, batch_size, remainder, entrypoint):
+        """Preflight the whole dataset before optimizer configuration or writes."""
+        from .tensor import Tensor
+        if isinstance(batch_size, bool) or not isinstance(batch_size, (int, np.integer)) or batch_size <= 0:
+            raise ValueError('batch_size must be a positive integer')
+        entries = self.entrypoints()
+        selected = [e for e in entries if e['name'] == entrypoint] if entrypoint is not None else [
+            e for e in entries if e['objective']]
+        if not selected and entrypoint is None:
+            selected = [e for e in entries if e['name'] == 'loss']
+        if len(selected) != 1:
+            raise ValueError('fit requires one selected objective entrypoint')
+        schema = {b['name']: b for b in self.bindings()}
+        required = selected[0]['inputs'] or [n for n, b in schema.items() if b['role'] in (ROLE_INPUT, ROLE_TARGET)]
+        if set(data) != set(required):
+            raise ValueError('fit data must match the selected entrypoint inputs')
+        normalized, count = {}, None
+        for name, value in data.items():
+            if isinstance(value, Tensor):
+                raise TypeError('minibatch Tensor datasets require an explicit train_step loop')
+            value = np.asarray(value) if isinstance(value, np.ndarray) else np.asarray(value, dtype=np.float32)
+            declared = schema[name]['shape']
+            if not declared or declared[0] != batch_size:
+                raise ValueError(f"batch_size must match the declared first axis of '{name}'")
+            if not value.dtype.isnative or value.dtype.name != schema[name]['dtype']:
+                raise TypeError(f"fit input '{name}' has the wrong storage dtype")
+            width = math.prod(declared[1:])
+            if value.ndim == 1 and width > 0 and value.size % width == 0:
+                value = value.reshape((-1, *declared[1:]))
+            if value.ndim != len(declared) or value.shape[1:] != declared[1:]:
+                raise ValueError(f"fit input '{name}' has incompatible sample shape")
+            if count is not None and count != len(value):
+                raise ValueError('fit inputs must have the same sample count')
+            count = len(value)
+            normalized[name] = value
+        if count is None or count < batch_size:
+            raise ValueError('fit requires at least one complete batch')
+        if count % batch_size and remainder == 'error':
+            raise ValueError('unsupported incomplete batch remainder; use remainder="drop" explicitly')
+        return normalized, count // batch_size
 
     # ── Internals ────────────────────────────────────────────────────
 
     def _make_bindings(self, io_dict):
-        """Convert {name: array} dict to PolyIOBinding array."""
+        """Pack host arrays or borrowed Tensor handles for C admission."""
+        from .tensor import Tensor
         n = len(io_dict)
         arr = (_ffi.PolyIOBinding * n)()
         owners = []
         lib = _get_lib()
         for i, (name, data) in enumerate(io_dict.items()):
+            arr[i].name = name.encode('utf-8')
+            if isinstance(data, Tensor):
+                if data._ctx != self._ctx or not data._tensor:
+                    raise ValueError(f"Model input '{name}' must be a live Tensor in its Runtime")
+                arr[i].tensor = data._tensor
+                owners.append(data)
+                continue
             if isinstance(data, np.ndarray):
+                data_shape = data.shape
                 data = np.ascontiguousarray(data)
             else:
-                data = np.ascontiguousarray(data, dtype=np.float32)
+                data = np.asarray(data, dtype=np.float32)
+                # A plain number, like JS number input, is flat one-element
+                # storage. A zero-dimensional ndarray above is explicitly scalar.
+                data_shape = data.shape if data.ndim else (1,)
+                data = np.ascontiguousarray(data)
             dtype_id = lib.poly_dtype_id_by_name(data.dtype.name.encode('utf-8'))
+            if not data.dtype.isnative:
+                raise TypeError('Model input arrays require native byte order')
             if dtype_id < 0:
                 raise TypeError(f"unsupported Model input dtype: {data.dtype}")
             owners.append(data)
-            arr[i].name = name.encode('utf-8')
             arr[i].data = ctypes.c_void_p(data.ctypes.data)
             arr[i].nbytes = data.nbytes
             arr[i].dtype_id = dtype_id
+            # Rank-one arrays retain the flat-storage contract. Higher ranks
+            # and scalars carry concrete shape, not just an equal byte count.
+            if len(data_shape) != 1:
+                shape = (ctypes.c_int64 * max(1, len(data_shape)))(*data_shape)
+                owners.append(shape)
+                arr[i].shape = shape
+                arr[i].ndim = len(data_shape)
         # Converted Python lists/scalars are not otherwise owned after this
         # method returns. Keep every contiguous array alive through the C call.
         arr._owners = owners
@@ -991,5 +1209,5 @@ class Model:
             if data is not None:
                 # Tensor.numpy() preserves scalar and multidimensional shape.
                 # buf_data already owns a copy; reshape without copying again.
-                result[name] = data.reshape(self.buf_shape(i))
+                result[name] = data.reshape(self.buf_current_shape(i))
         return result

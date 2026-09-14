@@ -7,6 +7,290 @@ from polygrad.models import MLP, Graph, Sequential
 from polygrad.tensor import Tensor
 
 
+@pytest.mark.parametrize('device', ['cpu', 'interp', 'cuda'])
+def test_dynamic_model_results_and_portable_signature(device):
+    from polygrad import create
+    from polygrad import _ffi
+    from polygrad.tensor import Variable
+    if device == 'cuda' and (not hasattr(_ffi._lib, 'poly_cuda_available') or not _ffi._lib.poly_cuda_available()):
+        pytest.skip('poly_cuda_available() is false in the selected library')
+    rt = create(device=device, logical='always')
+    n = Variable('model_batch', 1, 32, _ctx=rt._ctx)
+    model = Model(lambda x,y: {'prediction':x*2+y},
+                  inputs={'x':rt.Tensor.empty(n.bind(17),2), 'y':rt.Tensor.empty(n.bind(17),2)})
+    restored = None
+    try:
+        a = np.arange(34,dtype=np.float32).reshape(17,2)
+        first = model.forward(x=rt.Tensor(a), y=a)['prediction']
+        assert first.shape == (17,2)
+        np.testing.assert_array_equal(first.numpy(), a*3)
+        small = np.arange(6,dtype=np.float32).reshape(3,2)
+        np.testing.assert_array_equal(model.forward(x=small,y=small)['prediction'], small*3)
+        before = model.read_buffer('x')
+        with pytest.raises(RuntimeError): model.forward(x=a,y=small)
+        np.testing.assert_array_equal(model.read_buffer('x'), before)
+        for bad in (np.zeros((33,2),dtype=np.float32), np.zeros((2,3),dtype=np.float32)):
+            with pytest.raises(RuntimeError): model.forward(x=bad,y=bad)
+            np.testing.assert_array_equal(model.read_buffer('x'), before)
+        assert model.buf_shape_bounds(model.find_buf('x')) == ((1,32),(2,2))
+        restored = Model.load(model.save(include_optimizer=False), runtime=rt)
+        np.testing.assert_array_equal(restored.forward(x=small.ravel(),y=small)['prediction'], small*3)
+        model.dispose()
+        rt.clear_schedule_cache()
+        rt.collect()
+        np.testing.assert_array_equal(first.numpy(), a*3)
+    finally:
+        if restored is not None: restored.dispose()
+        model.dispose()
+        rt.dispose()
+
+
+def test_empty_model_binding_rejects_before_any_input_write():
+    from polygrad import create
+    rt = create(device='interp', logical='always')
+    n = rt.Variable('empty_model_batch', 0, 4)
+    model = Model(lambda offset, x: x + offset,
+                  inputs={'offset': rt.Tensor.empty(1), 'x': rt.Tensor.empty(n.bind(3), 2)})
+    try:
+        model.forward(offset=np.array([7], np.float32), x=np.ones((3, 2), np.float32))
+        before = model.read_buffer('offset')
+        with pytest.raises(RuntimeError):
+            model.forward(offset=np.array([99], np.float32), x=np.empty((0, 2), np.float32))
+        np.testing.assert_array_equal(model.read_buffer('offset'), before)
+    finally:
+        model.dispose()
+        rt.dispose()
+
+
+def test_dynamic_model_import_matches_direct_cpu_construction():
+    from polygrad import create
+    from polygrad.tensor import Variable
+    author = create(device='interp', logical='always')
+    runtime = create(device='cpu', logical='always')
+    imported_runtime = create(device='cpu', logical='always')
+    models = []
+    try:
+        for rt in (author, runtime):
+            n = Variable('import_batch', 1, 32, _ctx=rt._ctx)
+            models.append(Model(lambda x: {'prediction': x*2},
+                                inputs={'x': rt.Tensor.empty(n.bind(17), 2)}))
+        models.append(Model.load(models[0].save(include_optimizer=False), runtime=imported_runtime))
+        for size in (17, 3, 11):
+            x = np.arange(size*2, dtype=np.float32).reshape(size, 2)
+            direct = models[1].forward(x=x)['prediction']
+            restored = models[2].forward(x=x)['prediction']
+            np.testing.assert_array_equal(direct, x*2)
+            np.testing.assert_array_equal(restored, direct)
+    finally:
+        for model in reversed(models): model.dispose()
+        imported_runtime.dispose()
+        runtime.dispose()
+        author.dispose()
+
+
+@pytest.mark.parametrize('device', ['cpu', 'interp', 'cuda'])
+def test_dynamic_model_training_rebinds_cached_loss(device):
+    from polygrad import create
+    from polygrad import _ffi
+    from polygrad.tensor import Variable
+    if device == 'cuda' and (not hasattr(_ffi._lib, 'poly_cuda_available') or not _ffi._lib.poly_cuda_available()):
+        pytest.skip('poly_cuda_available() is false in the selected library')
+    rt = create(device=device, logical='always')
+    n = Variable('train_batch',1,32,_ctx=rt._ctx)
+    w = rt.Tensor([0.0])
+    model = Model(lambda x: x*w, inputs={'x':rt.Tensor.empty(n.bind(17),1)},
+                  targets={'y':rt.Tensor.empty(n.bind(17),1)}, params={'w':w},
+                  loss=lambda out,y:(out-y).square().mean())
+    try:
+        model.set_optimizer('sgd',lr=0.01)
+        expected = 0.0
+        for size in (17,3,11):
+            x = np.arange(1,size+1,dtype=np.float32).reshape(size,1)
+            expected_loss = np.mean(((expected-2)*x)**2)
+            loss = model.train_step(x=x,y=x*2)
+            np.testing.assert_allclose(loss, expected_loss, rtol=1e-5)
+            expected -= 0.02*(expected-2)*np.mean(x*x)
+            np.testing.assert_allclose(model.read_buffer('w'),[expected],rtol=1e-5)
+    finally:
+        model.dispose(); rt.dispose()
+
+
+def test_host_io_shape_admission_precedes_writes():
+    from polygrad import create
+    rt = create(device='interp')
+    model = Model(lambda x, y: x+y,
+                  inputs={'x': rt.Tensor.empty(2, 3), 'y': rt.Tensor.empty(2, 3)})
+    try:
+        flat = np.arange(6, dtype=np.float32)
+        np.testing.assert_array_equal(model.forward(x=flat, y=flat)['output'], (flat*2).reshape(2, 3))
+        before = model.read_buffer('x')
+        with pytest.raises(RuntimeError):
+            model.forward(x=flat+10, y=flat.reshape(3, 2))
+        np.testing.assert_array_equal(model.read_buffer('x'), before)
+        with pytest.raises(TypeError, match='native byte order'):
+            model.forward(x=flat+10, y=flat.astype('>f4'))
+        np.testing.assert_array_equal(model.read_buffer('x'), before)
+    finally:
+        model.dispose()
+        rt.dispose()
+
+
+def test_fit_minibatches_match_explicit_steps_and_reject_remainder():
+    from polygrad import create
+    rt = create(device='interp')
+    def build():
+        w = rt.Tensor([0.0])
+        return Model(lambda x: x*w, inputs={'x': rt.Tensor.empty(2, 1)},
+                     targets={'y': rt.Tensor.empty(2, 1)}, params={'w': w},
+                     loss=lambda out, y: (out-y).square().mean())
+    model, control = build(), build()
+    try:
+        x = np.arange(1, 7, dtype=np.float32).reshape(6, 1)
+        data = {'x': x, 'y': x*2}
+        observed = []
+        losses = model.fit(data, batch_size=2, epochs=2, optimizer='sgd', lr=0.01,
+                           on_step=lambda step, loss: observed.append((step, loss)))
+        control.set_optimizer('sgd', lr=0.01)
+        expected = [control.train_step({name: values[i:i+2] for name, values in data.items()})
+                    for _ in range(2) for i in range(0, 6, 2)]
+        np.testing.assert_allclose(losses, expected)
+        np.testing.assert_array_equal(model.read_buffer('w'), control.read_buffer('w'))
+        assert [step for step, _ in observed] == list(range(6))
+        before = model.read_buffer('w')
+        with pytest.raises(ValueError, match='remainder'):
+            model.fit({'x': x[:5], 'y': x[:5]*2}, batch_size=2, optimizer='adam')
+        np.testing.assert_array_equal(model.read_buffer('w'), before)
+        with pytest.raises(ValueError, match='epochs'):
+            model.fit(data, epochs=1.5, batch_size=2)
+        assert len(model.fit({'x': x[:5], 'y': x[:5]*2}, batch_size=2, remainder='drop')) == 2
+        for bad in ({'x': x, 'y': x[:4]}, {'x': x, 'y': x.astype(np.float64)},
+                    {'x': x, 'y': x.reshape(3, 2)}):
+            before = model.read_buffer('w')
+            with pytest.raises((ValueError, TypeError)):
+                model.fit(bad, batch_size=2)
+            np.testing.assert_array_equal(model.read_buffer('w'), before)
+    finally:
+        model.dispose()
+        control.dispose()
+        rt.dispose()
+
+
+@pytest.mark.parametrize('device', ['cpu', 'interp', 'cuda'])
+def test_tensor_io_owns_results_and_validates_before_writes(device):
+    from polygrad import create
+    from polygrad import _ffi
+    if device == 'cuda' and (not hasattr(_ffi._lib, 'poly_cuda_available') or not _ffi._lib.poly_cuda_available()):
+        pytest.skip('poly_cuda_available() is false in the selected library')
+    rt = create(device=device)
+    other = create(device=device)
+    model = None
+    try:
+        model = Model(lambda x, y: {'prediction': x*2+y},
+                      inputs={'x': rt.Tensor.empty(2, 2), 'y': rt.Tensor.empty(2, 2)})
+        x = rt.Tensor([[1., 2.], [3., 4.]]).transpose()
+        first = model.forward(x=x, y=np.ones((2, 2), dtype=np.float32))['prediction']
+        assert isinstance(first, Tensor)
+        second = model.forward(x=first, y=rt.Tensor.zeros(2, 2))['prediction']
+        np.testing.assert_array_equal(first.numpy(), [[3, 7], [5, 9]])
+        np.testing.assert_array_equal(second.numpy(), [[6, 14], [10, 18]])
+        before = model.read_buffer('x')
+        for bad in (other.Tensor.zeros(2, 2), rt.Tensor.zeros(4),
+                    rt.Tensor.zeros(2, 2, dtype='int32')):
+            with pytest.raises((ValueError, RuntimeError)):
+                model.forward(x=rt.Tensor.ones(2, 2), y=bad)
+            np.testing.assert_array_equal(model.read_buffer('x'), before)
+        # Evaluating a pending assign is ordinary Tensor realization, not an
+        # effect to replay on each Model invocation or later input readback.
+        effect = rt.Tensor.ones(2, 2).contiguous().realize()
+        effect.assign(effect+1)
+        once = model.forward(x=effect, y=np.zeros((2, 2), dtype=np.float32))['prediction']
+        twice = model.forward(x=effect, y=np.zeros((2, 2), dtype=np.float32))['prediction']
+        np.testing.assert_array_equal(once.numpy(), [[4, 4], [4, 4]])
+        np.testing.assert_array_equal(twice.numpy(), [[4, 4], [4, 4]])
+        np.testing.assert_array_equal(effect.numpy(), [[2, 2], [2, 2]])
+        model.dispose()
+        rt.clear_schedule_cache()
+        rt.collect()
+        np.testing.assert_array_equal(first.numpy(), [[3, 7], [5, 9]])
+        np.testing.assert_array_equal((second+1).numpy(), [[7, 15], [11, 19]])
+    finally:
+        if model is not None: model.dispose()
+        other.dispose()
+        rt.dispose()
+
+
+@pytest.mark.parametrize('dtype', ['float32', 'float16', 'bfloat16', 'int32', 'int64', 'bool'])
+def test_tensor_io_preserves_storage_dtype(dtype):
+    from polygrad import create
+    rt = create(device='interp')
+    model = None
+    try:
+        x = rt.Tensor([0, 1, 1, 0], dtype=dtype)
+        model = Model(lambda x: x.reshape(2, 2), inputs={'x': rt.Tensor.empty(4, dtype=dtype)})
+        output = model.forward(x=x)['output']
+        assert output.dtype == x.dtype
+        assert output.shape == (2, 2)
+        assert output.is_param is False
+        model.dispose()
+        np.testing.assert_array_equal(output.float().numpy(), [[0, 1], [1, 0]])
+    finally:
+        if model is not None: model.dispose()
+        rt.dispose()
+
+
+def test_bundle_load_uses_default_runtime_context():
+    import polygrad as pg
+    source = Model(sequential_definition())
+    loaded = None
+    try:
+        loaded = Model.load(source.save(include_optimizer=False))
+        assert loaded._ctx == pg._default_ctx
+    finally:
+        if loaded is not None: loaded.dispose()
+        source.dispose()
+
+
+@pytest.mark.parametrize('device', ['cpu', 'interp'])
+def test_runtime_import_isolation_aliases_and_failed_load(device):
+    from polygrad import create
+    rt = create(device=device, logical='always')
+    models = []
+    try:
+        x, w = rt.Tensor.empty(1), rt.Tensor([2.0])
+        live = rt.Tensor([19.0])
+        source = Model(lambda x: x*w, inputs={'x': x}, params={'w': w, 'alias': w})
+        models.append(source)
+        blob = source.save(include_optimizer=False)
+        a, b = Model.load(blob, runtime=rt), Model.from_bundle(blob, runtime=rt)
+        models.extend([a, b])
+        assert a._ctx == b._ctx == rt._ctx
+        a.write_buffer('alias', np.array([7], dtype=np.float32))
+        np.testing.assert_array_equal(a.read_buffer('w'), [7])
+        np.testing.assert_array_equal(b.forward(x=[3])['output'], [6])
+        np.testing.assert_array_equal(source.forward(x=[3])['output'], [6])
+        # A different artifact, also numbered in its own original namespace.
+        other = MLP(layers=[1, 1], bias=False, batch_size=1, seed=1)
+        try: other_blob = other.save(include_optimizer=False)
+        finally: other.dispose()
+        c = Model.load(other_blob, runtime=rt)
+        models.append(c)
+        assert c._ctx == rt._ctx
+        for n in (0, 31, len(blob)//2, len(blob)-1):
+            with pytest.raises(RuntimeError): Model.load(blob[:n], runtime=rt)
+        with pytest.raises(RuntimeError):
+            Model.from_ir(source.export_ir(), b'bad weights', runtime=rt)
+        a.dispose()
+        rt.collect()
+        np.testing.assert_array_equal(b.forward(x=[3])['output'], [6])
+        np.testing.assert_array_equal(live.numpy(), [19])
+        rt.dispose()
+        assert all(m._ptr is None for m in models)
+        with pytest.raises(RuntimeError, match='disposed'): Model.load(blob, runtime=rt)
+    finally:
+        for model in models: model.dispose()
+        rt.dispose()
+
+
 def safetensor_names(data):
     header_len = int.from_bytes(data[:8], 'little')
     header = data[8:8 + header_len].decode('utf-8')
@@ -31,6 +315,209 @@ def sequential_definition():
 
 
 class TestModelDefinition:
+    def test_usability_summary_and_path_roundtrip(self, tmp_path, monkeypatch):
+        weight = Tensor([2.0])
+        model = Model.from_tensors(params={'weight': weight}, outputs={'prediction': weight + 1})
+        restored = None
+        try:
+            def forbid(*args, **kwargs): raise AssertionError('metadata executed or read state')
+            with monkeypatch.context() as m:
+                m.setattr(model, 'read_buffer', forbid)
+                m.setattr(model, 'call', forbid)
+                text = model.summary()
+                assert 'weight' in text and 'PARAM' in text and 'float32[1]' in text
+                assert 'forward' in text and 'prediction' in text
+            path = tmp_path / 'model.pgb'
+            blob = model.save(path, include_optimizer=False)
+            assert path.read_bytes() == blob
+            restored = Model.load(path)
+            assert restored.summary() == model.summary()
+            model.dispose()
+            with pytest.raises(RuntimeError, match='disposed'):
+                model.save()
+            with pytest.raises(RuntimeError, match='disposed'):
+                model.summary()
+        finally:
+            model.dispose()
+            if restored is not None: restored.dispose()
+
+    def test_usability_rejects_async_author_and_loss_before_call(self):
+        calls = []
+        x = Tensor.empty(1)
+        async def author(x):
+            calls.append('author')
+            return x
+        async def loss(out): return out.mean()
+        def forward(x):
+            calls.append('forward')
+            return x
+        for fn, objective in ((author, None), (forward, loss)):
+            with pytest.raises(TypeError, match='synchronous'):
+                Model.from_callable(fn, inputs={'x': x}, loss=objective)
+        assert calls == []
+
+    def test_usability_mixed_runtime_and_role_conflicts_do_not_invoke_author(self):
+        from polygrad import create
+        rt = create(device='interp')
+        calls = []
+        x = Tensor.empty(1)
+        try:
+            with pytest.raises(ValueError, match='PolyCtx'):
+                Model.from_callable(lambda x: calls.append(x), inputs={'x': x}, params={'w': rt.Tensor([2.0])})
+            with pytest.raises(ValueError, match='input/target'):
+                Model.from_callable(lambda x: calls.append(x), inputs={'x': x}, params={'w': x})
+            assert calls == []
+        finally:
+            rt.dispose()
+
+    @pytest.mark.parametrize('factory,spec', [(Sequential, sequential_definition), (Graph, definition_fixture)])
+    def test_constructor_dispatches_tagged_config_to_existing_factory(self, factory, spec):
+        automatic = explicit = None
+        try:
+            automatic, explicit = Model(spec()), factory(spec())
+            assert automatic.bindings() == explicit.bindings()
+            assert automatic.entrypoints() == explicit.entrypoints()
+            actual = automatic.forward(x=np.array([[1, 2]], np.float32))
+            expected = explicit.forward(x=np.array([[1, 2]], np.float32))
+            for name in actual:
+                np.testing.assert_array_equal(actual[name], expected[name])
+        finally:
+            if automatic is not None: automatic.dispose()
+            if explicit is not None: explicit.dispose()
+
+    def test_explicit_callable_factory_and_constructor_share_capture(self):
+        x, weight = Tensor.empty(1), Tensor([2.0])
+        class Net:
+            def __call__(self, x): return x + 99
+            def forward(self, x): return x * weight
+        net = Net()
+        automatic = explicit = None
+        try:
+            automatic = Model(net, inputs={'x': x}, params={})
+            explicit = Model.from_callable(net.forward, inputs={'x': x}, params={'weight': weight})
+            np.testing.assert_array_equal(automatic.forward(x=[3])['output'], [102])
+            np.testing.assert_array_equal(explicit.forward(x=[3])['output'], [6])
+        finally:
+            if automatic is not None: automatic.dispose()
+            if explicit is not None: explicit.dispose()
+
+    @pytest.mark.parametrize('spec', [{'layers': [1, 2]}, {'nodes': []},
+                                    {'format': 'poly.modeldef@2', 'type': 'graph'},
+                                    {'format': 'poly.modeldef@1', 'type': 'unknown'}])
+    def test_constructor_does_not_guess_configuration(self, spec):
+        with pytest.raises((TypeError, ValueError), match='format|configuration'):
+            Model(spec)
+
+    def test_constructor_rejects_mixed_configuration_and_tensor_bindings(self):
+        with pytest.raises(TypeError, match='combined'):
+            Model(sequential_definition(), outputs=Tensor([1.0]))
+
+    def test_configuration_constructor_respects_runtime_ownership(self):
+        from polygrad import create
+        rt = create(device='interp', logical='always')
+        model = Model(sequential_definition(), runtime=rt)
+        assert model._ctx == rt._ctx
+        rt.dispose()
+        assert model._ptr is None
+        model.dispose()
+
+    def test_callable_rejects_missing_logical_source_before_invocation(self):
+        from polygrad import create
+        rt = create(device='interp', logical='never')
+        calls = []
+        try:
+            with pytest.raises(ValueError, match='logical source'):
+                Model.from_callable(lambda x: calls.append(x), inputs={'x': rt.Tensor.empty(1)})
+            assert calls == []
+        finally:
+            rt.dispose()
+
+    def test_callable_collects_lazily_initialized_attributes(self):
+        class Net:
+            def __call__(self, x):
+                self.weight = Tensor([2.0])
+                return x * self.weight
+        net = Net()
+        model = Model(net, inputs={'x': Tensor.empty(1)})
+        try:
+            assert {b['name']: b['role'] for b in model.bindings()}['weight'] == 0
+            np.testing.assert_array_equal(model.read_buffer('weight'), [2])
+        finally:
+            model.dispose()
+
+    def test_callable_constructor_collects_roles_and_owns_state(self):
+        from polygrad import create
+        rt = create(device='interp', logical='until_realize')
+        class Net:
+            def __init__(self):
+                self.weight = rt.Tensor([2.0])
+                self.alias = self.weight
+                self.offset = rt.Tensor([1.0]).is_param_(False)
+            def __call__(self, x):
+                return x * self.weight + self.offset
+        model = restored = None
+        try:
+            net = Net()
+            model = Model(net, inputs={'x': rt.Tensor.empty(1)},
+                          targets={'y': rt.Tensor.empty(1)},
+                          loss=lambda out, y: (out-y).square().mean())
+            roles = {b['name']: b['role'] for b in model.bindings()}
+            assert roles['weight'] == roles['alias'] == 0
+            assert roles['offset'] == 4
+            model.set_optimizer('sgd', lr=.1)
+            assert model.train_step({'x': [1.0], 'y': [0.0]}) == 9
+            np.testing.assert_allclose(model.read_buffer('weight'), [1.4])
+            np.testing.assert_array_equal(net.weight.numpy(), [2])
+            restored = Model.load(model.save(include_optimizer=False))
+            model.dispose()
+            model.dispose()
+            np.testing.assert_allclose(restored.forward(x=[1.0])['output'], [2.4])
+        finally:
+            if model is not None: model.free()
+            if restored is not None: restored.free()
+            rt.dispose()
+
+    def test_callable_constructor_override_and_failure_scope(self):
+        from polygrad import create, _ffi
+        rt = create(device='interp', logical='until_realize')
+        class Net:
+            def __init__(self): self.weight = rt.Tensor([2.0])
+            def __call__(self, x): return x + 1
+        model = None
+        try:
+            net, x = Net(), rt.Tensor.empty(1)
+            _ffi.get_lib().poly_ctx_set_logical_policy(x._ctx, 0)
+            before = _ffi.get_lib().poly_ctx_get_logical_policy(x._ctx)
+            model = Model(net, inputs={'x': x}, params={})
+            assert not any(b['role'] in (0, 4) for b in model.bindings())
+            assert _ffi.get_lib().poly_ctx_get_logical_policy(x._ctx) == before
+            with pytest.raises(TypeError, match='class'):
+                Model(Net, inputs={'x': x})
+            with pytest.raises(TypeError, match='outputs'):
+                Model(net, inputs={'x': x}, outputs=x)
+            def broken(x):
+                assert _ffi.get_lib().poly_ctx_get_logical_policy(x._ctx) == 1
+                raise ValueError('author failed')
+            with pytest.raises(ValueError, match='author failed'):
+                Model(broken, inputs={'x': x})
+            assert _ffi.get_lib().poly_ctx_get_logical_policy(x._ctx) == before
+        finally:
+            if model is not None: model.free()
+            rt.dispose()
+
+    def test_params_object_and_mapping_have_the_same_roles(self):
+        from types import SimpleNamespace
+        weight, aux = Tensor([2.0]), Tensor([1.0]).is_param_(False)
+        for params in (SimpleNamespace(weight=weight, aux=aux), {'weight': weight, 'aux': aux}):
+            model = Model(params=params, outputs={'value': weight+aux})
+            try:
+                roles = {b['name']: b['role'] for b in model.bindings()}
+                assert roles['weight'] == 0 and roles['aux'] == 4
+                model.set_trainable('weight', False)
+                assert {b['name']: b['role'] for b in model.bindings()}['weight'] == 0
+            finally:
+                model.free()
+
     def test_target_and_objective_use_existing_training_path(self):
         spec = {'inputs': {'x': {'shape': [2, 1], 'dtype': 'float32'},
                            'y': {'shape': [2, 1], 'dtype': 'float32', 'role': 'target'}},
@@ -189,7 +676,7 @@ class TestModelDefinition:
                 b = Tensor(model.read_buffer(prefix+'.bias'))
                 params.update({prefix+'.weight': w, prefix+'.bias': b})
                 y = (y @ w.T + b).relu()
-            direct = Model.from_tensors(inputs={'x': x}, outputs={'prediction': y}, state=params)
+            direct = Model.from_tensors(inputs={'x': x}, outputs={'prediction': y}, params=params)
             data = np.array([[1, -2]], np.float32)
             np.testing.assert_allclose(model.forward(x=data)['prediction'], direct.forward(x=data)['prediction'], atol=1e-6)
             # Equal zero biases must not acquire shared storage identity.
@@ -400,9 +887,9 @@ class TestModelConstructors:
                 return x * self.weight + self.offset
         net = Net()
         x, y = rt.Tensor.empty(1), rt.Tensor.empty(1)
-        model = Model.trace(net, inputs={'x': x}, targets={'y': y},
+        model = Model.from_callable(net, inputs={'x': x}, targets={'y': y},
                             loss=lambda out, y: {'mse': (out-y).square().mean()},
-                            state=get_state_dict(net))
+                            params=get_state_dict(net))
         restored = None
         try:
             assert {row['name']: row['role'] for row in model.bindings()}['offset'] == 4
@@ -484,6 +971,55 @@ class TestCompiledProgramExport:
 
 
 class TestMLPCreate:
+    @pytest.mark.parametrize('family,spec', [
+        ('MLP', {'layers': [2, 3, 1]}),
+        ('TabM', {'layers': [2, 3, 1], 'n_ensemble': 2}),
+        ('NAM', {'n_features': 2, 'hidden_sizes': [3], 'n_outputs': 1}),
+    ])
+    def test_family_uses_default_runtime(self, family, spec):
+        import polygrad as pg
+        model = getattr(pg.models, family)(spec)
+        try:
+            assert model._ctx == pg._default_ctx
+        finally:
+            model.dispose()
+
+    @pytest.mark.parametrize('family,spec', [
+        ('MLP', {'layers': [2, 3, 1]}),
+        ('TabM', {'layers': [2, 3, 1], 'n_ensemble': 2}),
+        ('NAM', {'n_features': 2, 'hidden_sizes': [3], 'n_outputs': 1}),
+    ])
+    def test_family_runtime_isolation_and_disposal(self, family, spec):
+        import polygrad as pg
+        rt = pg.create(device='interp', logical='never')
+        models = []
+        try:
+            live = rt.Tensor([19.0])
+            caller_records = rt.stats()['tensor_records']
+            factory = getattr(pg.models, family)
+            a, b = factory(spec, runtime=rt), factory(spec, runtime=rt)
+            models.extend([a, b])
+            assert a._ctx == b._ctx == rt._ctx
+            name = a.param_name(0)
+            before = b.read_buffer(name)
+            a.write_buffer(name, np.full_like(before, 7))
+            np.testing.assert_array_equal(b.read_buffer(name), before)
+            expected = b.forward(x=np.array([1, 2], dtype=np.float32))['output']
+            a.dispose()
+            pg._ffi.get_lib().poly_ctx_collect(rt._ctx)
+            assert rt.stats()['tensor_records'] == caller_records
+            np.testing.assert_array_equal(b.forward(x=[1, 2])['output'], expected)
+            np.testing.assert_array_equal(live.numpy(), [19])
+            assert pg._ffi.get_lib().poly_ctx_get_logical_policy(rt._ctx) == 0
+            rt.dispose()
+            with pytest.raises(RuntimeError):
+                b.forward(x=[1, 2])
+            with pytest.raises(RuntimeError):
+                factory(spec, runtime=rt)
+        finally:
+            for model in models: model.dispose()
+            rt.dispose()
+
     def test_create_simple(self):
         inst = MLP(
             layers=[2, 4, 1], activation='relu',

@@ -142,6 +142,7 @@ HEADERS = [
     'src/schedule/memory.h',
     'src/model.h',
     'src/models/compose.h',
+    'src/models/factory.h',
     'src/ir.h',
     'src/models/mlp.h',
     'src/models/nam.h',
@@ -163,6 +164,7 @@ HEADERS = [
     'src/loaders/bind.h',
     'src/loaders/hf_decode.h',
     'src/loaders/gguf_decode.h',
+    'src/loaders/gguf_loader.h',
     'src/loaders/import_desc.h',
     # Model headers referenced by gpt2.c
     'src/models/gpt2.h',

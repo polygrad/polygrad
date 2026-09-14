@@ -7,12 +7,14 @@
 
 #define _POSIX_C_SOURCE 200809L
 #include "gguf_decode.h"
+#include "gguf_loader.h"
 #include "import_desc.h"
 #include "import_error.h"
 #include "../model.h"
 #include <stdio.h>
 
-PolyModel *poly_gguf_load(
+static PolyModel *gguf_load(
+    PolyCtx *ctx,
     const uint8_t *data,
     int64_t len,
     int max_batch,
@@ -35,6 +37,7 @@ PolyModel *poly_gguf_load(
   }
 
   PolyGenericImportOpts opts = {
+      .ctx = ctx,
       .max_batch = max_batch,
       .max_seq_len = max_seq_len,
       .device = device,
@@ -43,4 +46,25 @@ PolyModel *poly_gguf_load(
 
   poly_gguf_decoded_free(gguf);
   return inst;
+}
+
+PolyModel *poly_gguf_load(
+    const uint8_t *data,
+    int64_t len,
+    int max_batch,
+    int max_seq_len,
+    PolyDevice device
+) {
+  return gguf_load(NULL, data, len, max_batch, max_seq_len, device);
+}
+
+PolyModel *poly_gguf_load_into(
+    PolyCtx *ctx,
+    const uint8_t *data,
+    int64_t len,
+    int max_batch,
+    int max_seq_len,
+    PolyDevice device
+) {
+  return ctx ? gguf_load(ctx, data, len, max_batch, max_seq_len, device) : NULL;
 }

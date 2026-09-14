@@ -228,6 +228,18 @@ PolyModel *poly_model_from_ir(
     int weights_len
 );
 
+/* Borrow an idle context. Storage identities are fresh per import. AUTO selects
+ * its preferred device; an explicit staging device does not change that default.
+ * The caller keeps ctx alive until all its Models/Tensors are released. */
+PolyModel *poly_model_from_ir_into(
+    PolyCtx *ctx,
+    const uint8_t *ir_data,
+    int ir_len,
+    const uint8_t *weights_data,
+    int weights_len,
+    PolyDevice device
+);
+
 /* Create from a PolyCtx with named buffer registry + entrypoints.
  * Requires at least one entrypoint registered. The ctx is NOT owned
  * by the model (caller manages ctx lifetime, must outlive the model).
@@ -268,6 +280,16 @@ bool poly_model_param_trainable(const PolyModel *inst, int i);
 int poly_model_set_buf_trainable(PolyModel *inst, int i, bool trainable);
 int poly_model_set_param_trainable(PolyModel *inst, int i, bool trainable);
 int poly_model_buf_shape(const PolyModel *inst, int i, int64_t *shape_out, int max_dims);
+/* buf_shape describes capacity. These queries distinguish the declared bounds
+ * from the last successful invocation; both return rank or -1 on invalid args. */
+int poly_model_buf_current_shape(const PolyModel *inst, int i, int64_t *shape_out, int max_dims);
+int poly_model_buf_shape_bounds(
+    const PolyModel *inst,
+    int i,
+    int64_t *lower,
+    int64_t *upper,
+    int max_dims
+);
 /* Historical F32-only mutable view. Returns NULL for non-F32 state. */
 float *poly_model_buf_data(PolyModel *inst, int i, int64_t *numel_out);
 /* Exact raw scalar-storage bytes in the declared dtype. */
@@ -363,6 +385,14 @@ typedef struct {
   const void *data;
   size_t nbytes;
   int dtype_id;
+  /* Exactly one of data/tensor. Tensor shape/dtype/device come from its handle;
+   * it must belong to this Model's context and executable device. */
+  PolyTensor *tensor;
+  /* Optional concrete host shape. NULL means flat storage interpreted using
+   * the declared signature; a non-NULL pointer with ndim=0 denotes a scalar.
+   * Tensor bindings must not supply a second shape. Borrowed for this call. */
+  const int64_t *shape;
+  int ndim;
 } PolyIOBinding;
 
 #define POLY_IO_BINDING_BYTES(name_, data_, nbytes_, dtype_)                                       \
@@ -380,6 +410,20 @@ typedef struct {
  * model-owned buffers (retrieve via poly_model_buf_data).
  * Returns 0 on success. */
 int poly_model_call(PolyModel *inst, const char *entrypoint, PolyIOBinding *io, int n_io);
+
+/* Eager, non-differentiable invocation. Outputs are independent device storage,
+ * in entrypoint output order, each with one caller-owned Tensor reference.
+ * They survive subsequent calls and Model disposal; ctx must remain alive.
+ * n_outputs must match exactly. On failure every output slot is NULL.
+ * Host bindings remain supported; Tensor bindings never stage through host arrays. */
+int poly_model_call_tensors(
+    PolyModel *inst,
+    const char *entrypoint,
+    PolyIOBinding *io,
+    int n_io,
+    PolyTensor **outputs,
+    int n_outputs
+);
 
 /* Entrypoint signature inspection for language frontends and generic callers. */
 int poly_model_entrypoint_count(const PolyModel *inst);

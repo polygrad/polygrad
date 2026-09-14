@@ -450,10 +450,10 @@ static void st_add_entrypoint_strings(StringTable *strings, const PolyIrEntrypoi
 static void free_ir_entrypoint(PolyIrEntrypoint *ep) {
   if (!ep) return;
   free((char *)ep->name);
-  for (int i = 0; i < ep->n_inputs; i++)
+  for (int i = 0; ep->inputs && i < ep->n_inputs; i++)
     free((char *)ep->inputs[i]);
   free((char **)ep->inputs);
-  for (int i = 0; i < ep->n_outputs; i++)
+  for (int i = 0; ep->outputs && i < ep->n_outputs; i++)
     free((char *)ep->outputs[i]);
   free((char **)ep->outputs);
   free((char *)ep->objective);
@@ -1203,8 +1203,72 @@ uint8_t *poly_program_graph_export(const PolyIrSpec *spec, int *out_len) {
 
 /* Import */
 
-static int poly_graph_import(const uint8_t *data, int len, PolyIrSpec *out, bool executable) {
+typedef struct {
+  int64_t old, fresh;
+} ImportIdentity;
+
+static bool import_identity_eq(const void *a, const void *b) {
+  return *(const int64_t *)a == *(const int64_t *)b;
+}
+
+#ifdef POLY_TESTING
+static int ir_import_fail_after = -1;
+void poly_test_ir_import_fail_after(int count) {
+  ir_import_fail_after = count;
+}
+#endif
+
+static void *import_calloc(size_t count, size_t size) {
+#ifdef POLY_TESTING
+  if (ir_import_fail_after == 0) {
+    ir_import_fail_after = -1;
+    return NULL;
+  }
+  if (ir_import_fail_after > 0) ir_import_fail_after--;
+#endif
+  return calloc(count, size);
+}
+
+/* Tinygrad UOp.new_buffer uses a fresh unique_num for each allocation.
+ * Serialization preserves aliases, not ownership of the source's namespace.
+ * BUFFER ParamArg slots and logical UNIQUEs share the context identity counter;
+ * argument PARAM slots and non-BUFFER compiler tags are semantic, not identities. */
+static bool import_identity(
+    PolyCtx *ctx,
+    PolyMap *map,
+    ImportIdentity *rows,
+    int *count,
+    int64_t old,
+    bool tag,
+    int64_t *fresh
+) {
+  uint32_t hash = poly_arg_hash(poly_arg_int(old));
+  ImportIdentity *row = poly_map_get(map, hash, &old, import_identity_eq);
+  if (!row) {
+    if (tag ? (ctx->next_buf_tag <= 0 || ctx->next_buf_tag == INT32_MAX)
+            : (ctx->next_unique_id < 0 || ctx->next_unique_id == INT64_MAX))
+      return false;
+    row = &rows[(*count)++];
+    *row = (ImportIdentity){old, tag ? ctx->next_buf_tag++ : poly_ctx_next_unique_id(ctx)};
+    poly_map_set(map, hash, &row->old, row, import_identity_eq);
+  }
+  *fresh = row->fresh;
+  return true;
+}
+
+static int poly_graph_import(
+    PolyCtx *borrowed,
+    const uint8_t *data,
+    int len,
+    PolyIrSpec *out,
+    bool executable
+) {
+  if (!out) return -1;
   memset(out, 0, sizeof(PolyIrSpec));
+  if (!data || len < 0 ||
+      (borrowed &&
+       (borrowed->execution_depth || borrowed->collecting || borrowed->active_jit_capture)))
+    return -1;
 
   ByteReader r = {data, len, 0};
 
@@ -1256,6 +1320,11 @@ static int poly_graph_import(const uint8_t *data, int len, PolyIrSpec *out, bool
     fprintf(stderr, "poly_ir_import: header count exceeds supported range\n");
     return -1;
   }
+  /* Reject impossible tables before allocating from attacker-controlled counts. */
+  if (n_nodes > (uint32_t)(len - 32) / (executable ? 23 : 11) ||
+      n_strings > (uint32_t)(len - 32) / 2 || n_entries > (uint32_t)(len - 32) / 16 ||
+      n_entrypts > (uint32_t)(len - 32) / 20 || n_modules > (uint32_t)(len - 32) / 12)
+    return -1;
 
   /* String table */
   char **strings = calloc(n_strings, sizeof(char *));
@@ -1272,10 +1341,14 @@ static int poly_graph_import(const uint8_t *data, int len, PolyIrSpec *out, bool
   }
 
   /* Create context */
-  PolyCtx *ctx = poly_ctx_new();
+  PolyCtx *ctx = borrowed ? borrowed : poly_ctx_new();
   if (!ctx) goto fail_strings;
-  PolyUOp **nodes = calloc(n_nodes, sizeof(PolyUOp *));
-  if (n_nodes > 0 && !nodes) goto fail_nodes;
+  PolyUOp **nodes = import_calloc(n_nodes, sizeof(PolyUOp *));
+  ImportIdentity *ids = import_calloc(n_nodes, sizeof(*ids)),
+                 *tags = import_calloc(n_nodes, sizeof(*tags));
+  PolyMap *id_map = poly_map_new(16), *tag_map = poly_map_new(16);
+  int n_ids = 0, n_tags = 0, n_owned = 0;
+  if ((n_nodes > 0 && (!nodes || !ids || !tags)) || !id_map || !tag_map) goto fail_nodes;
 
   /* Node table */
   for (uint32_t i = 0; i < n_nodes; i++) {
@@ -1301,6 +1374,7 @@ static int poly_graph_import(const uint8_t *data, int len, PolyIrSpec *out, bool
     PolyUOp **srcs = NULL;
     if (n_src > 0) {
       srcs = malloc(n_src * sizeof(PolyUOp *));
+      if (!srcs) goto fail_nodes;
       for (int s = 0; s < n_src; s++) {
         uint32_t src_idx = br_u32(&r);
         if (src_idx >= i) {
@@ -1873,7 +1947,24 @@ static int poly_graph_import(const uint8_t *data, int len, PolyIrSpec *out, bool
       goto cleanup_node_arg;
     }
 
-    /* Create UOp -- restore tag to preserve BUFFER CSE-distinctness */
+    if (!executable) {
+      int64_t fresh;
+      if (op_val == POLY_OP_UNIQUE && arg.kind == POLY_ARG_INT) {
+        if (!import_identity(ctx, id_map, ids, &n_ids, arg.i, false, &fresh)) goto cleanup_node_arg;
+        arg.i = fresh;
+      } else if (op_val == POLY_OP_BUFFER && arg.kind == POLY_ARG_PARAM && param_arg_tmp.slot >= 0) {
+        /* UOp.variable uses BUFFER too, but its -1 slot is a symbolic
+         * sentinel, not a storage identity or a positional CALL argument. */
+        if (!import_identity(ctx, id_map, ids, &n_ids, param_arg_tmp.slot, false, &fresh))
+          goto cleanup_node_arg;
+        param_arg_tmp.slot = fresh;
+      }
+      if (op_val == POLY_OP_BUFFER && tag != 0) {
+        if (!import_identity(ctx, tag_map, tags, &n_tags, tag, true, &fresh)) goto cleanup_node_arg;
+        tag = (int32_t)fresh;
+      }
+    }
+    /* Bound-program metadata is restored verbatim in its private context. */
     PolyDType dtype = *dtype_table[dtype_idx];
     if (arg.kind == POLY_ARG_DTYPE) arg.dtype = dtype;
     u = (tag != 0 || tag_arg.kind != POLY_ARG_NONE)
@@ -1913,17 +2004,33 @@ static int poly_graph_import(const uint8_t *data, int len, PolyIrSpec *out, bool
       goto fail_nodes;
     }
 
-    if (tag > 0) poly_ctx_reserve_buf_tag(ctx, tag);
-    if (op_val == POLY_OP_UNIQUE && arg.kind == POLY_ARG_INT)
-      poly_ctx_reserve_unique_id(ctx, arg.i);
+    if (executable) {
+      if (tag == INT32_MAX ||
+          (op_val == POLY_OP_UNIQUE && arg.kind == POLY_ARG_INT && arg.i == INT64_MAX)) {
+        free(srcs);
+        goto fail_nodes;
+      }
+      if (tag > 0) poly_ctx_reserve_buf_tag(ctx, tag);
+      if (op_val == POLY_OP_UNIQUE && arg.kind == POLY_ARG_INT)
+        poly_ctx_reserve_unique_id(ctx, arg.i);
+    }
 
+    if (poly_uop_retain(ctx, u) != 0) {
+      free(srcs);
+      goto fail_nodes;
+    }
     nodes[i] = (PolyUOp *)u;
+    n_owned++;
     if (srcs) free(srcs);
   }
 
   /* Interface table */
   out->n_bufs = (int)n_entries;
-  out->bufs = calloc(n_entries, sizeof(PolyIrBufEntry));
+  out->bufs = import_calloc(n_entries, sizeof(PolyIrBufEntry));
+  if (n_entries && !out->bufs) {
+    out->n_bufs = 0;
+    goto fail_bufs;
+  }
   for (uint32_t i = 0; i < n_entries; i++) {
     if (br_remaining(&r) < 12) goto fail_bufs;
     uint32_t name_idx = br_u32(&r);
@@ -1940,6 +2047,7 @@ static int poly_graph_import(const uint8_t *data, int len, PolyIrSpec *out, bool
       goto fail_bufs;
 
     out->bufs[i].name = (name_idx < n_strings) ? strdup(strings[name_idx]) : strdup("");
+    if (!out->bufs[i].name) goto fail_bufs;
     out->bufs[i].role = role;
     out->bufs[i].trainable_set = (iface_flags & 2) != 0;
     out->bufs[i].trainable =
@@ -1953,7 +2061,11 @@ static int poly_graph_import(const uint8_t *data, int len, PolyIrSpec *out, bool
 
   /* Entrypoint table */
   out->n_entrypoints = (int)n_entrypts;
-  out->entrypoints = calloc(n_entrypts, sizeof(PolyIrEntrypoint));
+  out->entrypoints = import_calloc(n_entrypts, sizeof(PolyIrEntrypoint));
+  if (n_entrypts && !out->entrypoints) {
+    out->n_entrypoints = 0;
+    goto fail_ep;
+  }
   for (uint32_t i = 0; i < n_entrypts; i++) {
     if (br_remaining(&r) < 8) goto fail_ep;
     uint32_t name_idx = br_u32(&r);
@@ -1962,6 +2074,7 @@ static int poly_graph_import(const uint8_t *data, int len, PolyIrSpec *out, bool
         (executable && nodes[node_idx]->op != POLY_OP_LINEAR))
       goto fail_ep;
     out->entrypoints[i].name = (name_idx < n_strings) ? strdup(strings[name_idx]) : strdup("");
+    if (!out->entrypoints[i].name) goto fail_ep;
     out->entrypoints[i].sink = (node_idx < n_nodes) ? nodes[node_idx] : NULL;
 
     if (br_remaining(&r) < 12) goto fail_ep;
@@ -1975,9 +2088,10 @@ static int poly_graph_import(const uint8_t *data, int len, PolyIrSpec *out, bool
       if (executable && objective_idx >= n_strings) goto fail_ep;
       out->entrypoints[i].objective =
           (objective_idx < n_strings) ? strdup(strings[objective_idx]) : strdup("");
+      if (!out->entrypoints[i].objective) goto fail_ep;
     }
     if (n_inputs > 0) {
-      char **inputs = calloc(n_inputs, sizeof(char *));
+      char **inputs = import_calloc(n_inputs, sizeof(char *));
       if (!inputs) goto fail_ep;
       out->entrypoints[i].inputs = (const char **)inputs;
       for (uint16_t j = 0; j < n_inputs; j++) {
@@ -1985,10 +2099,11 @@ static int poly_graph_import(const uint8_t *data, int len, PolyIrSpec *out, bool
         uint32_t idx = br_u32(&r);
         if (executable && idx >= n_strings) goto fail_ep;
         inputs[j] = (idx < n_strings) ? strdup(strings[idx]) : strdup("");
+        if (!inputs[j]) goto fail_ep;
       }
     }
     if (n_outputs > 0) {
-      char **outputs = calloc(n_outputs, sizeof(char *));
+      char **outputs = import_calloc(n_outputs, sizeof(char *));
       if (!outputs) goto fail_ep;
       out->entrypoints[i].outputs = (const char **)outputs;
       for (uint16_t j = 0; j < n_outputs; j++) {
@@ -1996,14 +2111,18 @@ static int poly_graph_import(const uint8_t *data, int len, PolyIrSpec *out, bool
         uint32_t idx = br_u32(&r);
         if (executable && idx >= n_strings) goto fail_ep;
         outputs[j] = (idx < n_strings) ? strdup(strings[idx]) : strdup("");
+        if (!outputs[j]) goto fail_ep;
       }
     }
   }
 
   /* Exact logical placement modules. */
   out->n_modules = (int)n_modules;
-  out->modules = calloc(n_modules, sizeof(PolyIrModule));
-  if (n_modules > 0 && !out->modules) goto fail_modules;
+  out->modules = import_calloc(n_modules, sizeof(PolyIrModule));
+  if (n_modules > 0 && !out->modules) {
+    out->n_modules = 0;
+    goto fail_modules;
+  }
   for (uint32_t i = 0; i < n_modules; i++) {
     if (br_remaining(&r) < 12) goto fail_modules;
     uint32_t name_idx = br_u32(&r);
@@ -2031,12 +2150,17 @@ static int poly_graph_import(const uint8_t *data, int len, PolyIrSpec *out, bool
   }
 
   out->ctx = ctx;
+  out->import_roots = nodes;
+  out->n_import_roots = n_owned;
 
   /* Cleanup temp arrays */
   for (uint32_t i = 0; i < n_strings; i++)
     free(strings[i]);
   free(strings);
-  free(nodes);
+  free(ids);
+  free(tags);
+  poly_map_destroy(id_map);
+  poly_map_destroy(tag_map);
   return 0;
 
 fail_modules:
@@ -2052,25 +2176,41 @@ fail_bufs:
     free((char *)out->bufs[i].name);
   free(out->bufs);
 fail_nodes:
-  poly_ctx_destroy(ctx);
+  for (int i = 0; i < n_owned; i++)
+    poly_uop_release(ctx, nodes[i]);
+  if (!borrowed) poly_ctx_destroy(ctx);
   free(nodes);
+  free(ids);
+  free(tags);
+  if (id_map) poly_map_destroy(id_map);
+  if (tag_map) poly_map_destroy(tag_map);
 fail_strings:
   for (uint32_t i = 0; i < n_strings; i++)
     free(strings[i]);
   free(strings);
+  memset(out, 0, sizeof(*out));
   return -1;
 }
 
 int poly_ir_import(const uint8_t *data, int len, PolyIrSpec *out) {
-  return poly_graph_import(data, len, out, false);
+  return poly_graph_import(NULL, data, len, out, false);
+}
+
+int poly_ir_import_into(PolyCtx *ctx, const uint8_t *data, int len, PolyIrSpec *out) {
+  return ctx ? poly_graph_import(ctx, data, len, out, false) : -1;
 }
 
 int poly_program_graph_import(const uint8_t *data, int len, PolyIrSpec *out) {
-  return poly_graph_import(data, len, out, true);
+  return poly_graph_import(NULL, data, len, out, true);
 }
 
 void poly_ir_spec_free(PolyIrSpec *spec) {
   if (!spec) return;
+  for (int i = 0; i < spec->n_import_roots; i++)
+    poly_uop_release(spec->ctx, spec->import_roots[i]);
+  free(spec->import_roots);
+  spec->import_roots = NULL;
+  spec->n_import_roots = 0;
   for (int i = 0; i < spec->n_bufs; i++)
     free((char *)spec->bufs[i].name);
   free(spec->bufs);

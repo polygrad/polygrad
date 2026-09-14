@@ -54,6 +54,31 @@ GPT2_TINY_CONFIG = json.dumps({
 
 
 class TestHFLoadBasic:
+    def test_runtime_bound_imports_are_independent(self):
+        import polygrad as pg
+        rt = pg.create(device='interp')
+        models = []
+        try:
+            live = rt.Tensor([19.0])
+            weights = make_safetensors({
+                'transformer.wte.weight': ('F32', (32, 16), np.zeros((32, 16), dtype=np.float32))
+            })
+            a = load_hf_bytes(GPT2_TINY_CONFIG, [weights], runtime=rt)
+            b = pg.Model.from_hf(config_json=GPT2_TINY_CONFIG, weight_bytes_list=[weights], runtime=rt)
+            models.extend([a, b])
+            assert a._ctx == b._ctx == rt._ctx
+            a.write_buffer('wte.weight', np.ones((32, 16), dtype=np.float32))
+            np.testing.assert_array_equal(b.read_buffer('wte.weight'), np.zeros(512))
+            with pytest.raises(RuntimeError):
+                load_hf_bytes(GPT2_TINY_CONFIG, [b'invalid'], runtime=rt)
+            a.dispose()
+            pg._ffi.get_lib().poly_ctx_collect(rt._ctx)
+            np.testing.assert_array_equal(b.read_buffer('wte.weight'), np.zeros(512))
+            np.testing.assert_array_equal(live.numpy(), [19])
+        finally:
+            for model in models: model.dispose()
+            rt.dispose()
+
     def test_load_from_config_only(self):
         """Load with empty weight files should still create the instance."""
         # Create a dummy weight file (empty tensor list is invalid, so use a valid one)
@@ -117,6 +142,26 @@ class TestHFLoadBasic:
 
 
 class TestHFLoadEdgeCases:
+    def test_zero_attention_heads_reject_without_crashing_runtime(self):
+        import subprocess
+        import sys
+        code = '''
+from polygrad import create, Model
+import json
+rt = create(device='interp')
+try:
+    Model.from_hf(config_json=json.dumps(dict(model_type='gpt2', vocab_size=8,
+        n_embd=4, n_head=0, n_layer=1, n_positions=2)), weight_bytes_list=[], runtime=rt)
+except RuntimeError:
+    assert rt.Tensor([19.0]).numpy().tolist() == [19.0]
+else:
+    raise AssertionError('zero attention heads accepted')
+finally:
+    rt.dispose()
+'''
+        result = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True)
+        assert result.returncode == 0, (result.returncode, result.stderr)
+
     @pytest.mark.parametrize('dtype,shape,npdtype', [('F32', (1,), np.float32), ('F64', (32, 16), np.float64)])
     def test_weight_conversion_or_copy_failure_rejects_model(self, dtype, shape, npdtype):
         shard = make_safetensors({'transformer.wte.weight': (dtype, shape, np.ones(shape, dtype=npdtype))})

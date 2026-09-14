@@ -3,6 +3,209 @@
 const compositionFixture = require('../../test/fixtures/model_definition.json')
 const quantizedFixture = require('../../test/fixtures/gguf_quantized_blocks.json')
 
+async function checkModelVariableShapes(pg) {
+  const gpu = String(pg.device).toLowerCase() === 'webgpu'
+  const n = pg.uop.variable('model_batch', 1, 32), bound = n.bind(17)
+  const x = pg.Tensor.empty([bound, 2]), y = pg.Tensor.empty([bound, 2])
+  const options = {inputs:{x,y}}
+  const author = ({x,y}) => ({prediction:x.mul(2).add(y)})
+  const model = gpu ? await pg.Model.fromCallableAsync(author, options) : new pg.Model(author, options)
+  let restored, first
+  const a = Float32Array.from({length:34}, (_,i)=>i)
+  const input = new pg.Tensor(a).reshape(17,2)
+  try {
+    const pending = model.forwardAsync({x:input,y:{data:a,shape:[17,2]}})
+    if (gpu) {
+      for (const query of [() => model.bufCurrentShape(0), () => model.bufShapeBounds(0)]) {
+        let rejected = false
+        try { query() } catch (e) { rejected = /active async work/.test(e.message) }
+        assert(rejected, 'metadata query entered suspended Wasm')
+      }
+    }
+    first = (await pending).prediction
+    assert(JSON.stringify(first.shape)==='[17,2]', 'result shape must be concrete')
+    assertClose(await first.toArrayAsync(), Array.from(a,v=>v*3), 0)
+    const small = a.slice(0,6)
+    const result = await model.forwardAsync({x:small,y:{data:small,shape:[3,2]}})
+    assertClose(result.prediction, Array.from(small,v=>v*3),0)
+    assert(JSON.stringify(model.bufCurrentShape(model.findBuf('prediction')))==='[3,2]')
+    assert(JSON.stringify(model.bufShapeBounds(model.findBuf('x')))==='[[1,32],[2,2]]')
+    const before = await model.readBufferAsync('x')
+    let rejected = false
+    try { await model.forwardAsync({x:a,y:small}) } catch { rejected=true }
+    assert(rejected, 'shared shape variable must reject inconsistent inputs')
+    assertClose(await model.readBufferAsync('x'),before,0)
+    const bytes = await model.saveAsync({includeOptimizer:false})
+    restored = pg.Model.load(bytes)
+    assertClose((await restored.forwardAsync({x:small,y:small})).prediction, Array.from(small,v=>v*3),0)
+    await model.dispose()
+    pg.clearScheduleCache(); pg.collect()
+    assertClose(await first.toArrayAsync(),Array.from(a,v=>v*3),0)
+    const w = new pg.Tensor([0.0], {dtype:'float32'})
+    const trainingOptions = {inputs:{x:pg.Tensor.empty([bound,1])},
+      targets:{y:pg.Tensor.empty([bound,1])}, params:{w},
+      loss:(out,{y})=>out.sub(y).square().mean()}
+    const trainAuthor=({x})=>x.mul(w)
+    const training=gpu ? await pg.Model.fromCallableAsync(trainAuthor,trainingOptions)
+      : new pg.Model(trainAuthor,trainingOptions)
+    try {
+      training.setOptimizer('sgd',0.01)
+      let expected=0
+      for (const size of [17,3,11]) {
+        const values=Float32Array.from({length:size},(_,i)=>i+1)
+        const meanSquare=values.reduce((sum,v)=>sum+v*v,0)/size
+        const loss=await training.trainStepAsync({x:values,y:values.map(v=>v*2)})
+        const wanted=(expected-2)**2*meanSquare
+        assert(Math.abs(loss-wanted)<=1e-5*Math.max(1,wanted), 'loss used a stale batch extent')
+        expected-=0.02*(expected-2)*meanSquare
+        assertClose(await training.readBufferAsync('w'),[expected],1e-4)
+      }
+    } finally { await training.dispose(); await w.dispose() }
+  } finally {
+    if(restored) await restored.dispose()
+    if(first) await first.dispose()
+    await input.dispose(); await model.dispose()
+    await x.dispose(); await y.dispose(); bound.dispose(); n.dispose()
+  }
+}
+
+async function checkModelEmptyInputAdmission(pg) {
+  const n = pg.uop.variable('empty_model_batch', 0, 4), bound = n.bind(3)
+  const offset = pg.Tensor.empty([1]), x = pg.Tensor.empty([bound, 2])
+  const model = await pg.Model.fromCallableAsync(({offset, x}) => x.add(offset), {inputs:{offset, x}})
+  try {
+    await model.forwardAsync({offset:new Float32Array([7]), x:new Float32Array(6).fill(1)})
+    const before = await model.readBufferAsync('offset')
+    let rejected = false
+    try { await model.forwardAsync({offset:new Float32Array([99]), x:new Float32Array(0)}) }
+    catch { rejected = true }
+    assert(rejected, 'unsupported empty Model binding must reject')
+    assertClose(await model.readBufferAsync('offset'), before, 0)
+  } finally {
+    await model.dispose(); await offset.dispose(); await x.dispose(); bound.dispose(); n.dispose()
+  }
+}
+
+async function checkModelTensorIO(pg) {
+  const gpu = String(pg.device).toLowerCase() === 'webgpu'
+  const author = ({x, y}) => ({prediction: x.mul(2).add(y)})
+  const options = {inputs:{x:pg.Tensor.empty([2,2]), y:pg.Tensor.empty([2,2])}}
+  const model = gpu ? await pg.Model.fromCallableAsync(author, options) : new pg.Model(author, options)
+  const owned = []
+  try {
+    const input = new pg.Tensor([[1,2],[3,4]], {dtype:'float32'}).transpose()
+    owned.push(input)
+    const pending = model.forwardAsync({x:input, y:new Float32Array([1,1,1,1])})
+    // The queued call owns access before explicit input release, also on Asyncify.
+    const disposing = input.dispose()
+    const first = (await pending).prediction
+    await disposing
+    owned.push(first)
+    assert(first instanceof pg.Tensor, 'Tensor input must select Tensor outputs')
+    assert(JSON.stringify(first.shape) === '[2,2]', 'result lost concrete shape')
+    const zero = pg.Tensor.zeros([2,2])
+    owned.push(zero)
+    const second = (await model.forwardAsync({x:first, y:zero})).prediction
+    owned.push(second)
+    assertClose(await first.toArrayAsync(), [3,7,5,9], 0)
+    assertClose(await second.toArrayAsync(), [6,14,10,18], 0)
+    const before = await model.readBufferAsync('x')
+    let shapeRejected = false
+    try {
+      await model.forwardAsync({x:new Float32Array([9,9,9,9]),
+        y:{data:new Float32Array([0,0,0,0]), shape:[1,4]}})
+    } catch { shapeRejected = true }
+    assert(shapeRejected, 'equal bytes must not admit a wrong explicit host shape')
+    assertClose(await model.readBufferAsync('x'), before, 0)
+    const shaped = await model.forwardAsync({x:{data:new Float32Array([1,2,3,4]), shape:[2,2]},
+      y:new Float32Array([0,0,0,0])})
+    assertClose(shaped.prediction, [2,4,6,8], 0)
+    const afterShape = await model.readBufferAsync('x')
+    for (const bad of [pg.Tensor.zeros([4]), pg.Tensor.zeros([2,2], {dtype:'int32'})]) {
+      owned.push(bad)
+      let rejected = false
+      try { await model.forwardAsync({x:zero, y:bad}) } catch { rejected = true }
+      assert(rejected, 'Tensor signature mismatch must reject')
+      assertClose(await model.readBufferAsync('x'), afterShape, 0)
+    }
+    const effect = pg.Tensor.ones([2,2]).contiguous()
+    owned.push(effect)
+    await effect.realizeAsync()
+    effect.assign(effect.add(1))
+    for (let i = 0; i < 2; i++) {
+      const result = (await model.forwardAsync({x:effect, y:zero})).prediction
+      owned.push(result)
+      assertClose(await result.toArrayAsync(), [4,4,4,4], 0)
+    }
+    assertClose(await effect.toArrayAsync(), [2,2,2,2], 0)
+    const finishing = model.forwardAsync({x:second, y:zero})
+    const closing = model.dispose()
+    const last = (await finishing).prediction
+    owned.push(last)
+    await closing
+    pg.clearScheduleCache()
+    pg.collect()
+    assertClose(await first.toArrayAsync(), [3,7,5,9], 0)
+    assertClose(await last.toArrayAsync(), [12,28,20,36], 0)
+    const chained = second.add(1)
+    owned.push(chained)
+    assertClose(await chained.toArrayAsync(), [7,15,11,19], 0)
+  } finally {
+    await model.dispose()
+    for (const tensor of owned) await tensor.dispose()
+  }
+}
+
+async function checkModelMinibatches(pg) {
+  const gpu = String(pg.device).toLowerCase() === 'webgpu'
+  const build = async () => {
+    const w = new pg.Tensor([0], {dtype:'float32'})
+    const opts = {inputs:{x:pg.Tensor.empty([2,1])}, targets:{y:pg.Tensor.empty([2,1])}, params:{w},
+      loss:(out, {y}) => out.sub(y).square().mean()}
+    return gpu ? pg.Model.fromCallableAsync(({x}) => x.mul(w), opts) : new pg.Model(({x}) => x.mul(w), opts)
+  }
+  const model = await build(), control = await build()
+  try {
+    const x = new Float32Array([1,2,3,4,5,6]), y = new Float32Array([2,4,6,8,10,12])
+    const seen = []
+    const losses = await model.fitAsync({x:{data:x, shape:[6,1]}, y}, {
+      batchSize:2, epochs:2, optimizer:'sgd', lr:0.01, onStep:step => seen.push(step)})
+    control.setOptimizer('sgd', 0.01)
+    const expected = []
+    for (let epoch = 0; epoch < 2; epoch++) for (let i = 0; i < 6; i += 2)
+      expected.push(await control.trainStepAsync({x:x.subarray(i,i+2), y:y.subarray(i,i+2)}))
+    assertClose(losses, expected, 1e-5)
+    assertClose(await model.readBufferAsync('w'), await control.readBufferAsync('w'), 1e-5)
+    assert(JSON.stringify(seen) === '[0,1,2,3,4,5]', 'callback step numbers must span epochs')
+    const before = await model.readBufferAsync('w')
+    let rejected = false
+    try { await model.fitAsync({x:x.subarray(0,5), y:y.subarray(0,5)}, {batchSize:2, optimizer:'adam'}) }
+    catch (e) { rejected = /remainder/.test(e.message) }
+    assert(rejected, 'incomplete batch must reject before any update')
+    assertClose(await model.readBufferAsync('w'), before, 0)
+    for (const bad of [{x, y:y.subarray(0,4)}, {x, y:new Int32Array(y)},
+      {x:{data:x, shape:[3,2]}, y}]) {
+      let invalid = false
+      try { await model.fitAsync(bad, {batchSize:2, optimizer:'adam'}) } catch { invalid = true }
+      assert(invalid, 'invalid dataset must fail preflight')
+      assertClose(await model.readBufferAsync('w'), before, 0)
+    }
+    const dropped = await model.fitAsync({x:x.subarray(0,5), y:y.subarray(0,5)}, {batchSize:2, remainder:'drop'})
+    assert(dropped.length === 2, 'drop must process only explicitly selected complete batches')
+    let callbackFailed = false
+    try { await model.fitAsync({x,y}, {batchSize:2, onStep:() => { throw new Error('callback sentinel') }}) }
+    catch (e) { callbackFailed = /callback sentinel/.test(e.message) }
+    assert(callbackFailed, 'callback failure must propagate without poisoning the queue')
+    const finishing = model.fitAsync({x,y}, {batchSize:2})
+    const closing = model.dispose()
+    assert((await finishing).length === 3, 'admitted fit must survive immediate Model disposal')
+    await closing
+  } finally {
+    await model.dispose()
+    await control.dispose()
+  }
+}
+
 async function checkQuantizedModelWeights(pg) {
   for (const c of quantizedFixture.cases) {
     const bytes = []
@@ -24,6 +227,11 @@ async function checkQuantizedModelWeights(pg) {
 }
 
 function checkModelCodecRejection(pg) {
+  const invalidHeads = new TextEncoder().encode(JSON.stringify({model_type:'gpt2',
+    n_embd:4, n_head:0, n_layer:1, vocab_size:8, n_positions:2}))
+  let invalidRejected = false
+  try { pg.Model.fromHF(invalidHeads, []).dispose() } catch (e) { invalidRejected = /fromHF failed/.test(e.message) }
+  assert(invalidRejected, 'zero attention heads must fail before division')
   const config = new TextEncoder().encode(JSON.stringify({ model_type: 'gpt2',
     n_embd: 8, n_head: 2, n_layer: 1, vocab_size: 4, n_positions: 4 }))
   const badShard = new Uint8Array([1, 0, 0, 0, 0, 0, 0, 0, 123])
@@ -465,14 +673,15 @@ async function checkModelTrace(pg, Model) {
   const w = new pg.Tensor([1], { dtype: 'float32' }).add(1)
   const offset = new pg.Tensor([1], { dtype: 'float32' }).is_param_(false)
   let calls = 0
-  const trace = String(pg.device).toLowerCase() === 'webgpu' ? Model.traceAsync.bind(Model) : Model.trace.bind(Model)
+  const trace = String(pg.device).toLowerCase() === 'webgpu' ? Model.fromCallableAsync.bind(Model) : Model.fromCallable.bind(Model)
   const model = await trace(({ x }) => { calls++; return x.mul(w).add(offset) }, {
-    inputs: { x }, targets: { y }, state: { w, offset },
+    inputs: { x }, targets: { y }, params: { w, offset },
     loss: (out, { y }) => ({ mse: out.sub(y).square().mean() })
   })
   try {
     model.setOptimizer(pg.OPTIM_SGD, .1, 0, 0, 0, 0)
-    assertClose([await model.trainStepAsync({ x: new Float32Array([1]), y: new Float32Array([0]) })], [9], 1e-6)
+    assertClose([await model.trainStepAsync({ x: new pg.Tensor([1], {dtype:'float32'}),
+      y: new pg.Tensor([0], {dtype:'float32'}) })], [9], 1e-6)
     assertClose(await model.readBufferAsync('w'), [1.4], 1e-6)
     assertClose(await model.readBufferAsync('offset'), [1], 0)
     assert(model.bindings().some(row => row.name === 'offset' && row.role === 4), 'AUX role lost')
@@ -482,6 +691,197 @@ async function checkModelTrace(pg, Model) {
     const objective = model.entrypoints().find(row => row.name === 'loss')
     assert(objective.objective === 'mse' && objective.inputs.join(',') === 'x,y', 'objective signature lost')
   } finally { await model.dispose() }
+}
+
+async function checkModelConstructor(pg, Model) {
+  class Net {
+    constructor() {
+      this.weight = new pg.Tensor([2], { dtype: 'float32' })
+      this.alias = this.weight
+      this.offset = new pg.Tensor([1], { dtype: 'float32' }).is_param_(false)
+    }
+    forward({ x }) { return x.mul(this.weight).add(this.offset) }
+  }
+  const net = new Net()
+  const options = { inputs: { x: pg.Tensor.empty([1]) }, targets: { y: pg.Tensor.empty([1]) },
+    loss: (out, { y }) => out.sub(y).square().mean() }
+  const gpu = String(pg.device).toLowerCase() === 'webgpu'
+  const model = gpu ? await Model.fromCallableAsync(net, options) : new Model(net, options)
+  try {
+    const roles = Object.fromEntries(model.bindings().map(b => [b.name, b.role]))
+    assert(roles.weight === 0 && roles.alias === 0 && roles.offset === 4, 'constructor state roles')
+    model.setOptimizer('sgd', .1)
+    assertClose([await model.trainStepAsync({ x: [1], y: [0] })], [9], 1e-6)
+    assertClose(await model.readBufferAsync('weight'), [1.4], 1e-6)
+    assertClose(await net.weight.toArrayAsync(), [2], 0)
+    const bytes = gpu ? await model.saveAsync({ includeOptimizer: false }) : model.save({ includeOptimizer: false })
+    assert(bytes instanceof Uint8Array && bytes.length > 0, 'bundle save')
+  } finally { await model.dispose() }
+}
+
+async function checkModelDispatch(pg, Model) {
+  const gpu = String(pg.device).toLowerCase() === 'webgpu'
+  for (const config of [compositionFixture, {
+    format: 'poly.modeldef@1', type: 'sequential', seed: 42,
+    input: { name: 'x', shape: [1, 2], dtype: 'float32' },
+    layers: [{ name: 'dense', type: 'linear', out_features: 2 }], output: 'prediction'
+  }]) {
+    const factory = config.type === 'graph' ? 'Graph' : 'Sequential'
+    let automatic, explicit
+    try {
+      if (gpu) {
+        let rejected = false
+        try { new Model(config) } catch (e) { rejected = /Async/.test(e.message) }
+        assert(rejected, 'WebGPU constructor must identify the explicit async factory')
+        automatic = await pg.models[factory + 'Async'](config)
+      } else automatic = new Model(config)
+      explicit = await pg.models[factory + (gpu ? 'Async' : '')](config)
+      assert(JSON.stringify(automatic.bindings()) === JSON.stringify(explicit.bindings()), 'configuration bindings differ')
+      const a = await automatic.forwardAsync({ x: new Float32Array([1, 2]) })
+      const b = await explicit.forwardAsync({ x: new Float32Array([1, 2]) })
+      for (const key of Object.keys(a)) assertClose(a[key], b[key], 0)
+    } finally {
+      if (automatic) await automatic.dispose()
+      if (explicit) await explicit.dispose()
+    }
+  }
+  const x = pg.Tensor.empty([1])
+  const source = { forward: ({ x }) => x.add(99), selected: ({ x }) => x.mul(2) }
+  const model = gpu
+    ? await Model.fromCallableAsync(source.selected, { inputs: { x }, params: {} })
+    : Model.fromCallable(source.selected, { inputs: { x }, params: {} })
+  try { assertClose((await model.forwardAsync({ x: [3] })).output, [6], 0) }
+  finally { await model.dispose() }
+  for (const invalid of [{ layers: [1, 2] }, { nodes: [] },
+    { format: 'poly.modeldef@2', type: 'graph' }, { format: 'poly.modeldef@1', type: 'unknown' }]) {
+    let rejected = false
+    try { new Model(invalid) } catch (_) { rejected = true }
+    assert(rejected, 'constructor guessed an untagged/unknown configuration')
+  }
+  let rejected = false
+  try { new Model(compositionFixture, { outputs: x }) } catch (e) { rejected = /combined/.test(e.message) }
+  assert(rejected, 'configuration accepted conflicting Tensor bindings')
+  class LazyNet {
+    forward({ x }) {
+      this.weight = new pg.Tensor([2], { dtype: 'float32' })
+      return x.mul(this.weight)
+    }
+  }
+  const lazy = gpu ? await Model.fromCallableAsync(new LazyNet(), { inputs: { x } })
+    : new Model(new LazyNet(), { inputs: { x } })
+  try { assert(lazy.bindings().some(b => b.name === 'weight' && b.role === 0), 'lazy parameter not collected') }
+  finally { await lazy.dispose() }
+}
+
+async function checkModelUsability(pg, Model) {
+  const x = pg.Tensor.empty([1])
+  const gpu = String(pg.device).toLowerCase() === 'webgpu'
+  const create = (fn, options) => gpu ? Model.fromCallableAsync(fn, options) : Model.fromCallable(fn, options)
+  const model = await create(({x}) => ({prediction:x.mul(2)}), {inputs:{x}})
+  try {
+    const text = model.summary()
+    assert(text.includes('prediction') && text.includes('float32[1]') && text.includes('forward'), 'missing model metadata')
+    if (gpu) {
+      const bytes = await model.saveAsync()
+      const running = model.forwardAsync({x:[3]})
+      let rejected = false
+      try { Model.load(bytes) } catch (e) { rejected = /async/.test(e.message) }
+      await running
+      assert(rejected, 'bundle load entered suspended Wasm')
+    }
+    let called = false
+    for (const [fn, loss] of [
+      [async ({x}) => { called = true; return x }, undefined],
+      [({x}) => { called = true; return x }, async out => out.mean()]
+    ]) {
+      let rejected = false
+      try { await create(fn, {inputs:{x}, loss}) } catch (e) { rejected = /synchronous/.test(e.message) }
+      assert(rejected && !called, 'async author/loss was invoked')
+    }
+    const policy = x.logicalPolicy
+    let rejected = false
+    try { await create(() => { throw new Error('author failed') }, {inputs:{x}}) }
+    catch (e) { rejected = /author failed/.test(e.message) }
+    assert(rejected && pg.Tensor.empty([1]).logicalPolicy === policy, 'failed capture changed logical policy')
+    // Browser entrypoints must reject paths before attempting filesystem access.
+    if (typeof process === 'undefined' || !process.versions || !process.versions.node) {
+      rejected = false
+      try { model.save('model.pgb') } catch (e) { rejected = /Node/.test(e.message) }
+      assert(rejected, 'browser save accepted a filesystem path')
+    }
+  } finally { await model.dispose() }
+}
+
+async function checkRuntimeImports(pg, Model) {
+  const gpu = String(pg.device).toLowerCase() === 'webgpu'
+  const x = pg.Tensor.empty([1]), w = new pg.Tensor([2], {dtype:'float32'})
+  const live = new pg.Tensor([19], {dtype:'float32'})
+  const options = {inputs:{x}, params:{w, alias:w}}
+  const source = gpu ? await Model.fromCallableAsync(({x}) => x.mul(w), options)
+    : Model.fromCallable(({x}) => x.mul(w), options)
+  const models = [source]
+  const read = m => gpu ? m.readBufferAsync('w') : m.readBuffer('w')
+  const forward = m => gpu ? m.forwardAsync({x:[3]}) : m.forward({x:[3]})
+  try {
+    const bytes = gpu ? await source.saveAsync() : source.save()
+    const a = Model.load(bytes), b = Model.fromBundle(bytes)
+    models.push(a, b)
+    if (gpu) await a.writeBufferAsync('alias', new Float32Array([7]))
+    else a.writeBuffer('alias', new Float32Array([7]))
+    assertClose(await read(a), [7], 0)
+    assertClose((await forward(b)).output, [6], 0)
+    assertClose((await forward(source)).output, [6], 0)
+    for (const n of [0, 31, Math.floor(bytes.length/2), bytes.length-1]) {
+      let rejected = false
+      try { Model.load(bytes.slice(0, n)) } catch { rejected = true }
+      assert(rejected, 'truncated import accepted')
+    }
+    await a.dispose()
+    pg.collect()
+    assertClose((await forward(b)).output, [6], 0)
+    assertClose(gpu ? await live.toArrayAsync() : live.toArray(), [19], 0)
+  } finally {
+    for (const model of models) await model.dispose()
+    x.dispose(); w.dispose(); live.dispose()
+  }
+}
+
+async function checkFamilyRuntimeOwnership(pg) {
+  const gpu = String(pg.device).toLowerCase() === 'webgpu'
+  const live = new pg.Tensor([19], {dtype:'float32'})
+  const specs = [
+    ['MLP', {layers:[2, 3, 1]}],
+    ['TabM', {layers:[2, 3, 1], n_ensemble:2}],
+    ['NAM', {n_features:2, hidden_sizes:[3], n_outputs:1}],
+  ]
+  try {
+    for (const [name, spec] of specs) {
+      const beforeStats = pg.stats().coreStats
+      const a = pg.models[name](spec), b = pg.models[name](spec)
+      try {
+        assert(pg.stats().coreStats.bufferEntries > beforeStats.bufferEntries,
+          'family storage was allocated outside its owning Runtime')
+        assert(pg.stats().coreStats.tensorRecords === beforeStats.tensorRecords,
+          'family retained construction Tensor wrappers')
+        const parameter = a.paramName(0)
+        const before = await b.readBufferAsync(parameter)
+        await a.writeBufferAsync(parameter, new Float32Array(before.length).fill(7))
+        assertClose(await b.readBufferAsync(parameter), before, 0)
+        const expected = await b.forwardAsync({x:[1, 2]})
+        await a.dispose()
+        pg.collect()
+        assertClose((await b.forwardAsync({x:[1, 2]})).output, expected.output, 0)
+        assertClose(gpu ? await live.toArrayAsync() : live.toArray(), [19], 0)
+        // Reject before entering a Wasm module suspended on the host bridge.
+        pg._activeAsync++
+        try {
+          let rejected = false
+          try { pg.models[name](spec) } catch (e) { rejected = /idle/.test(e.message) }
+          assert(rejected, 'factory entered a busy Runtime')
+        } finally { pg._activeAsync-- }
+      } finally { await a.dispose(); await b.dispose() }
+    }
+  } finally { live.dispose() }
 }
 
 async function runModelRuntimeTests(pg) {
@@ -518,6 +918,15 @@ async function runModelRuntimeTests(pg) {
   await test('Model composition factories share C construction', () => checkCompositionFactories(pg))
   await test('Model composition catalogue and named target objective', () => checkCompositionCatalogue(pg))
   await test('Model tied Adam placement freeze and checkpoint', () => checkTiedAdamCheckpoint(pg))
+  await test('Model constructor collects object state', () => checkModelConstructor(pg, Model))
+  await test('Model constructor dispatch and explicit factories', () => checkModelDispatch(pg, Model))
+  await test('Model usability summary and capture failures', () => checkModelUsability(pg, Model))
+  await test('Model runtime imports isolation and failure', () => checkRuntimeImports(pg, Model))
+  await test('Model family runtime ownership', () => checkFamilyRuntimeOwnership(pg))
+  await test('Model Tensor I/O owns device results', () => checkModelTensorIO(pg))
+  await test('Model variable shapes preserve results and portable signatures', () => checkModelVariableShapes(pg))
+  await test('Model empty bindings reject before input writes', () => checkModelEmptyInputAdmission(pg))
+  await test('Model minibatches match explicit training steps', () => checkModelMinibatches(pg))
   await test('Model trace seals independent state with named loss', () => checkModelTrace(pg, Model))
 
   await test('generic call validates signature and returns selected outputs', async () => {
@@ -1262,6 +1671,15 @@ async function runModelSmokeTests(pg) {
   await test('Model composition factories share C construction', () => checkCompositionFactories(pg))
   await test('Model composition catalogue and named target objective', () => checkCompositionCatalogue(pg))
   await test('Model tied Adam placement freeze and checkpoint', () => checkTiedAdamCheckpoint(pg))
+  await test('Model constructor collects object state', () => checkModelConstructor(pg, Model))
+  await test('Model constructor dispatch and explicit factories', () => checkModelDispatch(pg, Model))
+  await test('Model usability summary and capture failures', () => checkModelUsability(pg, Model))
+  await test('Model runtime imports isolation and failure', () => checkRuntimeImports(pg, Model))
+  await test('Model family runtime ownership', () => checkFamilyRuntimeOwnership(pg))
+  await test('Model Tensor I/O owns device results', () => checkModelTensorIO(pg))
+  await test('Model variable shapes preserve results and portable signatures', () => checkModelVariableShapes(pg))
+  await test('Model empty bindings reject before input writes', () => checkModelEmptyInputAdmission(pg))
+  await test('Model minibatches match explicit training steps', () => checkModelMinibatches(pg))
   await test('Model trace seals independent state with named loss', () => checkModelTrace(pg, Model))
 
   await test('Model copied storage exact writes and objective selection', () => checkModelStorageObjectives(pg, Model))

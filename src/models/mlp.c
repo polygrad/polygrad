@@ -10,6 +10,8 @@
 
 #define _POSIX_C_SOURCE 200809L
 #include "mlp.h"
+#include "factory.h"
+
 #include "../nn/nn.h"
 #include "../tensor.h"
 #include "../model.h"
@@ -155,7 +157,7 @@ MLPConfig poly_mlp_config_default(void) {
 
 /* MLP Builder (config struct) */
 
-PolyModel *poly_mlp(const MLPConfig *cfg, PolyDevice device) {
+static PolyModel *mlp_build(PolyCtx *ctx, const MLPConfig *cfg) {
   if (!cfg || cfg->n_layers < 2 || cfg->n_layers > POLY_MLP_MAX_LAYERS) return NULL;
 
   int n_linear = cfg->n_layers - 1;
@@ -165,18 +167,8 @@ PolyModel *poly_mlp(const MLPConfig *cfg, PolyDevice device) {
   ActivationKind activation = parse_activation(cfg->activation);
   const char *loss_type = cfg->loss ? cfg->loss : "none";
 
-  PolyCtx *ctx = poly_ctx_new();
-  if (!ctx) return NULL;
-  if (device != POLY_DEVICE_AUTO) poly_ctx_set_preferred_device(ctx, device);
-  PolyModelOptions opts = {
-      .own_ctx_on_success = true,
-      .own_ctx_on_failure = true,
-  };
-  PolyModel *inst = poly_model_new(ctx, &opts);
-  if (!inst) {
-    poly_ctx_destroy(ctx);
-    return NULL;
-  }
+  PolyModel *inst = poly_model_new(ctx, NULL);
+  if (!inst) return NULL;
 
   /* Declare I/O buffers on the staged model. */
   int64_t x_shape[] = {batch_size, in_dim};
@@ -257,13 +249,28 @@ PolyModel *poly_mlp(const MLPConfig *cfg, PolyDevice device) {
 
 fail_pre_build:
   poly_model_free(inst);
-  poly_ctx_destroy(ctx);
   return NULL;
+}
+
+/* Standalone C callers own a context through the returned Model; frontends
+ * use the context-taking form so Runtime disposal reaches every family. */
+static PolyModel *mlp_create(PolyCtx *ctx, const MLPConfig *cfg, PolyDevice device) {
+  PolyModelFactoryScope scope;
+  if (!model_factory_begin(&scope, ctx, device)) return NULL;
+  return model_factory_end(&scope, mlp_build(scope.ctx, cfg));
+}
+
+PolyModel *poly_mlp(const MLPConfig *cfg, PolyDevice device) {
+  return mlp_create(NULL, cfg, device);
+}
+
+PolyModel *poly_mlp_into(PolyCtx *ctx, const MLPConfig *cfg, PolyDevice device) {
+  return ctx ? mlp_create(ctx, cfg, device) : NULL;
 }
 
 /* FFI wrapper (JSON -> config -> build) */
 
-PolyModel *poly_mlp_from_json(const char *json, int len, PolyDevice device) {
+static PolyModel *mlp_from_json(PolyCtx *ctx, const char *json, int len) {
   if (!json || len <= 0) return NULL;
 
   cJSON *root = cJSON_ParseWithLength(json, (size_t)len);
@@ -289,7 +296,21 @@ PolyModel *poly_mlp_from_json(const char *json, int len, PolyDevice device) {
   for (int i = 0; i < cfg.n_layers; i++)
     cfg.layers[i] = cJSON_GetArrayItem(layers, i)->valueint;
 
-  PolyModel *inst = poly_mlp(&cfg, device);
+  PolyModel *inst = mlp_build(ctx, &cfg);
   cJSON_Delete(root);
   return inst;
+}
+
+static PolyModel *mlp_json_create(PolyCtx *ctx, const char *json, int len, PolyDevice device) {
+  PolyModelFactoryScope scope;
+  if (!model_factory_begin(&scope, ctx, device)) return NULL;
+  return model_factory_end(&scope, mlp_from_json(scope.ctx, json, len));
+}
+
+PolyModel *poly_mlp_from_json(const char *json, int len, PolyDevice device) {
+  return mlp_json_create(NULL, json, len, device);
+}
+
+PolyModel *poly_mlp_from_json_into(PolyCtx *ctx, const char *json, int len, PolyDevice device) {
+  return ctx ? mlp_json_create(ctx, json, len, device) : NULL;
 }

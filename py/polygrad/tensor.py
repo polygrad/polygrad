@@ -1731,7 +1731,10 @@ class Tensor:
         b = (1,) * (ndim - len(b)) + b
         result = []
         for x, y in zip(a, b):
-            if x == y:
+            # BoundVariable is constructor sugar for its C UOp. Compare the
+            # same graph identity when a later operation has returned a UOp.
+            if x == y or (not isinstance(x, int) and not isinstance(y, int) and
+                          _shape_dim_uop_raw(self._ctx, x) == _shape_dim_uop_raw(self._ctx, y)):
                 result.append(x)
             elif x == 1:
                 result.append(y)
@@ -2681,10 +2684,10 @@ class Tensor:
 
     def prod(self, axis=None, keepdim=False, dtype=None):
         x = self if dtype is None else self.cast(dtype)
-        return x._extremum(_ffi._lib.poly_tensor_prod, axis, keepdim)
+        return x._reduce(_ffi._lib.poly_tensor_prod, axis, keepdim)
 
     def logsumexp(self, axis=None, keepdim=False):
-        return self._extremum(_ffi._lib.poly_tensor_logsumexp, axis, keepdim)
+        return self._reduce(_ffi._lib.poly_tensor_logsumexp, axis, keepdim)
 
     def logcumsumexp(self, axis=0):
         core = _ffi._lib.poly_tensor_logcumsumexp(self._ctx, self._tensor, self._resolve_dim(axis))
@@ -2741,13 +2744,13 @@ class Tensor:
         return tuple(t.expand(shape) for t in tensors)
 
     def max(self, axis=None, keepdim=False):
-        return self._extremum(_ffi._lib.poly_tensor_max, axis, keepdim)
+        return self._reduce(_ffi._lib.poly_tensor_max, axis, keepdim)
 
     def all(self, axis=None, keepdim=False):
-        return self._extremum(_ffi._lib.poly_tensor_all, axis, keepdim)
+        return self._reduce(_ffi._lib.poly_tensor_all, axis, keepdim)
 
     def any(self, axis=None, keepdim=False):
-        return self._extremum(_ffi._lib.poly_tensor_any, axis, keepdim)
+        return self._reduce(_ffi._lib.poly_tensor_any, axis, keepdim)
 
     def cumsum(self, axis=0):
         core = _ffi._lib.poly_tensor_cumsum(self._ctx, self._tensor, self._resolve_dim(axis))
@@ -2772,7 +2775,7 @@ class Tensor:
     def cummin(self, axis=0):
         return self._cum_extremum(_ffi._lib.poly_tensor_cummin, axis)
 
-    def _extremum(self, operation, axis, keepdim):
+    def _reduce(self, operation, axis, keepdim):
         # Pinned ReduceMixin._reduce emits one REDUCE over the complete
         # normalized axis tuple (mixin/reduce.py:12-17, uop/ops.py:567-569).
         axes = tuple(range(self.ndim)) if axis is None else (
@@ -2843,21 +2846,10 @@ class Tensor:
         return vals, idx
 
     def min(self, axis=None, keepdim=False):
-        return self._extremum(_ffi._lib.poly_tensor_min, axis, keepdim)
+        return self._reduce(_ffi._lib.poly_tensor_min, axis, keepdim)
 
     def mean(self, axis=None, keepdim=False):
-        axes = tuple(range(self.ndim)) if axis is None else (
-            (self._resolve_dim(int(axis)),) if isinstance(axis, int) else
-            tuple(self._resolve_dim(int(a)) for a in axis)
-        )
-        # Pinned mixin/__init__.py:581-599 casts before sum, divides through
-        # Tensor reciprocal/multiply, then casts to the public output dtype.
-        numerator = self.cast(_sum_acc_dtype(self.dtype)).sum(
-            axis=axes, keepdim=keepdim
-        )
-        denominator = _prod(self.shape[a] for a in axes)
-        output_dtype = self.dtype if dtypes.is_float(self.dtype) else dtypes.float32
-        return numerator.div(denominator).cast(output_dtype)
+        return self._reduce(_ffi._lib.poly_tensor_mean, axis, keepdim)
 
     def var(self, axis=None, keepdim=False, correction=1):
         # Pinned Tensor.var is this exact lazy Tensor expression

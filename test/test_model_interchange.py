@@ -44,7 +44,7 @@ def export_c_lstm(work: Path) -> None:
         function.restype, function.argtypes = result, arguments
     ctx = _ffi._lib.poly_ctx_new()
     handle = lib.poly_model_new(ctx, None)
-    model = Model(handle, _ctx=ctx)
+    model = Model._from_handle(handle, ctx)
     try:
         shape = (i64 * 2)(1, 2)
         dtype = _ffi.PolyDType()
@@ -98,6 +98,14 @@ def run_core(work: Path, core: str, source_after: Model, expected_loss: float) -
         cwd=ROOT, check=True,
     )
     result = json.loads((work / f'javascript-{core}-result.json').read_text())
+    variable = Model.load((work / f'javascript-{core}-variable.bundle').read_bytes())
+    try:
+        assert variable.buf_shape_bounds(variable.find_buf('x')) == ((1,32),(2,2))
+        for n in (17,3,11):
+            x = np.arange(n*2,dtype=np.float32).reshape(n,2)
+            np.testing.assert_array_equal(variable.forward(x=x)['prediction'], x*2)
+    finally:
+        variable.dispose()
     composed = Model.from_bundle((work / f'javascript-{core}-graph.bundle').read_bytes())
     try:
         np.testing.assert_array_equal(composed.forward(x=np.array([[1, 2]], np.float32))['prediction'], [[28, 61]])
@@ -145,8 +153,8 @@ def export_custom(work: Path) -> None:
     def net(x):
         pred = x*w + offset
         return {'prediction': pred, 'twice': pred*2}
-    model = Model.trace(net, inputs={'x': rt.Tensor.empty(1)},
-                        state={'weight': w, 'tied': w, 'offset': offset}, entrypoints=[
+    model = Model.from_callable(net, inputs={'x': rt.Tensor.empty(1)},
+                        params={'weight': w, 'tied': w, 'offset': offset}, entrypoints=[
                             {'name': 'forward', 'inputs': ['x'], 'outputs': ['prediction']},
                             {'name': 'double', 'inputs': ['x'], 'outputs': ['twice']}])
     try:
@@ -154,6 +162,17 @@ def export_custom(work: Path) -> None:
     finally:
         model.free()
         rt.dispose()
+
+
+def export_variable(work: Path) -> None:
+    from polygrad.tensor import Variable
+    rt = create(device='interp',logical='always')
+    n = Variable('interchange_batch',1,32,_ctx=rt._ctx)
+    model = Model(lambda x:{'prediction':x*2}, inputs={'x':rt.Tensor.empty(n.bind(17),2)})
+    try:
+        (work / 'python-variable.bundle').write_bytes(model.save(include_optimizer=False))
+    finally:
+        model.dispose(); rt.dispose()
 
 
 def main() -> None:
@@ -166,8 +185,16 @@ def main() -> None:
 
     (ROOT / 'temp').mkdir(exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix='model-interchange.', dir=ROOT / 'temp'))
+    subprocess.run([sys.executable, str(ROOT / 'py/examples/linear_export.py'), str(work / 'linear.pgb')],
+                   check=True, capture_output=True, text=True)
+    for core in cores:
+        result = subprocess.run(['node', str(ROOT / 'js/examples/linear_predict.js'), str(work / 'linear.pgb')],
+                                env={**os.environ, 'POLY_CORE': core}, check=True, capture_output=True, text=True)
+        np.testing.assert_allclose(json.loads(result.stdout), [11, 14, 17, 20, 23], atol=1e-4)
+        print(f'linear example {core}: pass (named prediction, path save/load)')
     export_c_lstm(work)
     export_custom(work)
+    export_variable(work)
     graph = Graph((ROOT / 'test/fixtures/model_definition.json').read_bytes())
     try:
         graph.write_buffer('modules.shared.weight', np.array([1, 2, 3, 4], np.float32))

@@ -28,7 +28,10 @@ typedef struct {
 
 MLPConfig poly_mlp_config_default(void);
 PolyModel *poly_mlp(const MLPConfig *cfg, PolyDevice device);
+/* Borrows ctx; construction restores its defaults on success and failure. */
+PolyModel *poly_mlp_into(PolyCtx *ctx, const MLPConfig *cfg, PolyDevice device);
 PolyModel *poly_mlp_from_json(const char *json, int len, PolyDevice device);
+PolyModel *poly_mlp_from_json_into(PolyCtx *ctx, const char *json, int len, PolyDevice device);
 
 /* Deterministic parameter initialization.
  * Uses SplitMix64 PRNG seeded by (seed, FNV1a(name)).

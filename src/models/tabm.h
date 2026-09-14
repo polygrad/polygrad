@@ -36,5 +36,7 @@
  * Returns NULL on error.
  */
 PolyModel *poly_tabm_from_json(const char *spec_json, int spec_len, PolyDevice device);
+/* Borrows ctx; construction restores its defaults on success and failure. */
+PolyModel *poly_tabm_from_json_into(PolyCtx *ctx, const char *json, int len, PolyDevice device);
 
 #endif /* POLY_MODEL_TABM_H */

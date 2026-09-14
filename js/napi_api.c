@@ -9,6 +9,7 @@
 #include <node_api.h>
 #include <string.h>
 #include <stdlib.h>
+#include <math.h>
 
 #include "polygrad.h"
 #include "frontend.h"
@@ -20,6 +21,8 @@
 #include "tokenizer.h"
 #include "loaders/hf_decode.h"
 #include "loaders/gguf_decode.h"
+#include "loaders/gguf_loader.h"
+#include "models/hf_loader.h"
 #include "loaders/import_error.h"
 #include "bundle.h"
 
@@ -304,7 +307,20 @@ static napi_value read_model_storage_array(napi_env env, PolyModel *model, int i
     napi_throw_error(env, NULL, "polygrad: unsupported Model storage dtype");
     return NULL;
   }
-  size_t nbytes = poly_model_buf_nbytes(model, index);
+  int64_t shape[8];
+  int ndim = poly_model_buf_current_shape(model, index, shape, 8);
+  size_t nbytes = itemsize;
+  if (ndim < 0) {
+    napi_throw_error(env, NULL, "polygrad: invalid Model shape");
+    return NULL;
+  }
+  for (int d = 0; d < ndim; d++) {
+    if (shape[d] < 0 || (shape[d] && nbytes > SIZE_MAX / (uint64_t)shape[d])) {
+      napi_throw_error(env, NULL, "polygrad: Model shape overflow");
+      return NULL;
+    }
+    nbytes *= (size_t)shape[d];
+  }
   size_t len = nbytes / itemsize;
   void *dst = NULL;
   napi_value arraybuf, typed;
@@ -348,7 +364,10 @@ static int read_io_bindings(
     return 0;
   }
 
-  PolyIOBinding *bindings = calloc(n_names ? n_names : 1, sizeof(PolyIOBinding));
+  /* Shapes live in the same allocation as the rows, including scalar rows
+   * whose non-NULL shape pointer distinguishes them from flat storage. */
+  PolyIOBinding *bindings =
+      calloc(n_names ? n_names : 1, sizeof(PolyIOBinding) + 8 * sizeof(int64_t));
   char **names = calloc(n_names ? n_names : 1, sizeof(char *));
   if (!bindings || !names) {
     free(bindings);
@@ -369,6 +388,38 @@ static int read_io_bindings(
       free(names);
       free(bindings);
       return 0;
+    }
+
+    napi_valuetype value_type;
+    if (napi_typeof(env, data_val, &value_type) == napi_ok && value_type == napi_external) {
+      bindings[i].name = names[i];
+      bindings[i].tensor = get_external(env, data_val);
+      continue;
+    }
+
+    bool has_shape = false;
+    if (value_type == napi_object) napi_has_named_property(env, data_val, "shape", &has_shape);
+    if (has_shape) {
+      napi_value shape_val;
+      bool is_array = false;
+      uint32_t ndim = 0;
+      napi_get_named_property(env, data_val, "shape", &shape_val);
+      napi_is_array(env, shape_val, &is_array);
+      if (!is_array || napi_get_array_length(env, shape_val, &ndim) != napi_ok || ndim > 8)
+        goto invalid_shape;
+      int64_t *shape = (int64_t *)(bindings + n_names) + 8 * i;
+      for (uint32_t j = 0; j < ndim; j++) {
+        napi_value dim;
+        double extent;
+        napi_get_element(env, shape_val, j, &dim);
+        if (napi_get_value_double(env, dim, &extent) != napi_ok || !isfinite(extent) ||
+            extent < 0 || extent > 9007199254740991.0 || floor(extent) != extent)
+          goto invalid_shape;
+        shape[j] = (int64_t)extent;
+      }
+      bindings[i].shape = shape;
+      bindings[i].ndim = (int)ndim;
+      napi_get_named_property(env, data_val, "data", &data_val);
     }
 
     napi_typedarray_type type;
@@ -457,6 +508,16 @@ static int read_io_bindings(
   *out_names = names;
   *out_n = (int)n_names;
   return 1;
+
+invalid_shape:
+  for (uint32_t i = 0; i < n_names; i++)
+    free(names[i]);
+  free(names);
+  free(bindings);
+  napi_throw_type_error(
+      env, NULL, "Model binding shape requires up to eight nonnegative safe integers"
+  );
+  return 0;
 }
 
 static void free_io_bindings(char **names, PolyIOBinding *bindings, int n) {
@@ -2345,6 +2406,23 @@ static napi_value napi_poly_tensor_sum(napi_env env, napi_callback_info info) {
   return make_external(
       env,
       poly_tensor_sum(get_external(env, argv[0]), get_external(env, argv[1]), axes, n_axes, keepdim)
+  );
+}
+
+static napi_value napi_poly_tensor_mean(napi_env env, napi_callback_info info) {
+  napi_value argv[5];
+  size_t argc = 5;
+  int64_t axes[POLY_MAX_DIMS];
+  int32_t n_axes = 0;
+  bool keepdim = false;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  read_int64_array(env, argv[2], axes, POLY_MAX_DIMS);
+  napi_get_value_int32(env, argv[3], &n_axes);
+  napi_get_value_bool(env, argv[4], &keepdim);
+  return make_external(
+      env, poly_tensor_mean(
+               get_external(env, argv[0]), get_external(env, argv[1]), axes, n_axes, keepdim
+           )
   );
 }
 
@@ -4912,9 +4990,9 @@ static napi_value napi_poly_sink_n(napi_env env, napi_callback_info info) {
 
 /* ── PolyModel / model runtime ────────────────────────────────────── */
 
-static napi_value napi_poly_model_from_ir(napi_env env, napi_callback_info info) {
-  napi_value argv[2];
-  size_t argc = 2;
+static napi_value napi_poly_model_from_ir_into(napi_env env, napi_callback_info info) {
+  napi_value argv[3];
+  size_t argc = 3;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
 
   napi_typedarray_type ir_type;
@@ -4947,8 +5025,10 @@ static napi_value napi_poly_model_from_ir(napi_env env, napi_callback_info info)
     }
   }
 
-  PolyModel *inst =
-      poly_model_from_ir((const uint8_t *)ir_data, (int)ir_len, weights_data, (int)weights_len);
+  PolyModel *inst = poly_model_from_ir_into(
+      get_external(env, argv[2]), (const uint8_t *)ir_data, (int)ir_len, weights_data,
+      (int)weights_len, POLY_DEVICE_AUTO
+  );
 
   if (!inst) {
     napi_value result;
@@ -5422,16 +5502,17 @@ static napi_value napi_poly_graph_from_json(napi_env env, napi_callback_info inf
   return napi_poly_compose(env, info, false);
 }
 
-static napi_value napi_poly_mlp_from_json(napi_env env, napi_callback_info info) {
-  napi_value argv[2];
-  size_t argc = 2;
+static napi_value napi_poly_mlp_from_json_into(napi_env env, napi_callback_info info) {
+  napi_value argv[3];
+  size_t argc = 3;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   size_t spec_len = 0;
   char *spec = read_utf8_arg(env, argv[0], &spec_len);
   if (!spec) return NULL;
   int32_t device;
   NAPI_CALL(env, napi_get_value_int32(env, argv[1], &device));
-  PolyModel *inst = poly_mlp_from_json(spec, (int)spec_len, (PolyDevice)device);
+  PolyModel *inst =
+      poly_mlp_from_json_into(get_external(env, argv[2]), spec, (int)spec_len, (PolyDevice)device);
   free(spec);
   if (!inst) {
     napi_value result;
@@ -5441,16 +5522,17 @@ static napi_value napi_poly_mlp_from_json(napi_env env, napi_callback_info info)
   return make_external(env, inst);
 }
 
-static napi_value napi_poly_tabm_from_json(napi_env env, napi_callback_info info) {
-  napi_value argv[2];
-  size_t argc = 2;
+static napi_value napi_poly_tabm_from_json_into(napi_env env, napi_callback_info info) {
+  napi_value argv[3];
+  size_t argc = 3;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   size_t spec_len = 0;
   char *spec = read_utf8_arg(env, argv[0], &spec_len);
   if (!spec) return NULL;
   int32_t device;
   NAPI_CALL(env, napi_get_value_int32(env, argv[1], &device));
-  PolyModel *inst = poly_tabm_from_json(spec, (int)spec_len, (PolyDevice)device);
+  PolyModel *inst =
+      poly_tabm_from_json_into(get_external(env, argv[2]), spec, (int)spec_len, (PolyDevice)device);
   free(spec);
   if (!inst) {
     napi_value result;
@@ -5460,16 +5542,17 @@ static napi_value napi_poly_tabm_from_json(napi_env env, napi_callback_info info
   return make_external(env, inst);
 }
 
-static napi_value napi_poly_nam_from_json(napi_env env, napi_callback_info info) {
-  napi_value argv[2];
-  size_t argc = 2;
+static napi_value napi_poly_nam_from_json_into(napi_env env, napi_callback_info info) {
+  napi_value argv[3];
+  size_t argc = 3;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   size_t spec_len = 0;
   char *spec = read_utf8_arg(env, argv[0], &spec_len);
   if (!spec) return NULL;
   int32_t device;
   NAPI_CALL(env, napi_get_value_int32(env, argv[1], &device));
-  PolyModel *inst = poly_nam_from_json(spec, (int)spec_len, (PolyDevice)device);
+  PolyModel *inst =
+      poly_nam_from_json_into(get_external(env, argv[2]), spec, (int)spec_len, (PolyDevice)device);
   free(spec);
   if (!inst) {
     napi_value result;
@@ -5643,23 +5726,49 @@ static napi_value napi_poly_model_set_buf_trainable(napi_env env, napi_callback_
   return result;
 }
 
-static napi_value napi_poly_model_buf_shape(napi_env env, napi_callback_info info) {
+static napi_value model_shape_array(napi_env env, napi_callback_info info, int kind) {
   napi_value argv[2];
   size_t argc = 2;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   PolyModel *inst = get_external(env, argv[0]);
   int32_t i;
   napi_get_value_int32(env, argv[1], &i);
-  int64_t shape[8];
-  int ndim = poly_model_buf_shape(inst, i, shape, 8);
+  int64_t shape[8], upper[8];
+  int ndim = kind == 0   ? poly_model_buf_shape(inst, i, shape, 8)
+             : kind == 1 ? poly_model_buf_current_shape(inst, i, shape, 8)
+                         : poly_model_buf_shape_bounds(inst, i, shape, upper, 8);
+  if (ndim < 0) {
+    napi_throw_error(env, NULL, "polygrad: invalid buffer index");
+    return NULL;
+  }
   napi_value result;
   NAPI_CALL(env, napi_create_array_with_length(env, (size_t)(ndim > 0 ? ndim : 0), &result));
   for (int j = 0; j < ndim; j++) {
     napi_value v;
     NAPI_CALL(env, napi_create_int64(env, shape[j], &v));
+    if (kind == 2) {
+      napi_value pair, hi;
+      NAPI_CALL(env, napi_create_array_with_length(env, 2, &pair));
+      NAPI_CALL(env, napi_create_int64(env, upper[j], &hi));
+      NAPI_CALL(env, napi_set_element(env, pair, 0, v));
+      NAPI_CALL(env, napi_set_element(env, pair, 1, hi));
+      v = pair;
+    }
     NAPI_CALL(env, napi_set_element(env, result, (uint32_t)j, v));
   }
   return result;
+}
+
+static napi_value napi_poly_model_buf_shape(napi_env env, napi_callback_info info) {
+  return model_shape_array(env, info, 0);
+}
+
+static napi_value napi_poly_model_buf_current_shape(napi_env env, napi_callback_info info) {
+  return model_shape_array(env, info, 1);
+}
+
+static napi_value napi_poly_model_buf_shape_bounds(napi_env env, napi_callback_info info) {
+  return model_shape_array(env, info, 2);
 }
 
 static napi_value napi_poly_model_buf_data(napi_env env, napi_callback_info info) {
@@ -5780,9 +5889,9 @@ static napi_value napi_poly_model_save_bundle(napi_env env, napi_callback_info i
   return result;
 }
 
-static napi_value napi_poly_model_from_bundle(napi_env env, napi_callback_info info) {
-  napi_value argv[1];
-  size_t argc = 1;
+static napi_value napi_poly_model_from_bundle_into(napi_env env, napi_callback_info info) {
+  napi_value argv[2];
+  size_t argc = 2;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   uint8_t *data = NULL;
   size_t len = 0;
@@ -5792,7 +5901,8 @@ static napi_value napi_poly_model_from_bundle(napi_env env, napi_callback_info i
   NAPI_CALL(
       env, napi_get_typedarray_info(env, argv[0], &type, &len, (void **)&data, &arraybuf, &offset)
   );
-  PolyModel *inst = poly_model_from_bundle(data, (int)len);
+  PolyModel *inst =
+      poly_model_from_bundle_into(get_external(env, argv[1]), data, (int)len, POLY_DEVICE_AUTO);
   if (!inst) {
     napi_value undef;
     napi_get_undefined(env, &undef);
@@ -5854,8 +5964,8 @@ static napi_value napi_poly_model_forward(napi_env env, napi_callback_info info)
 }
 
 static napi_value napi_poly_model_call(napi_env env, napi_callback_info info) {
-  napi_value argv[4];
-  size_t argc = 4;
+  napi_value argv[5];
+  size_t argc = 5;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   PolyModel *inst = get_external(env, argv[0]);
   char *entrypoint = read_utf8_arg(env, argv[1], NULL);
@@ -5869,11 +5979,38 @@ static napi_value napi_poly_model_call(napi_env env, napi_callback_info info) {
     return NULL;
   }
 
-  int rc = poly_model_call(inst, entrypoint, bindings, n);
+  bool tensor_outputs = false;
+  if (argc > 4) napi_get_value_bool(env, argv[4], &tensor_outputs);
+  int count = tensor_outputs ? poly_model_entrypoint_output_count(inst, entrypoint) : 0;
+  PolyTensor **outputs =
+      tensor_outputs && count >= 0 ? calloc((size_t)(count ? count : 1), sizeof(*outputs)) : NULL;
+  int rc =
+      tensor_outputs
+          ? (outputs ? poly_model_call_tensors(inst, entrypoint, bindings, n, outputs, count) : -1)
+          : poly_model_call(inst, entrypoint, bindings, n);
   free_io_bindings(names, bindings, n);
   free(entrypoint);
 
   napi_value result;
+  if (tensor_outputs) {
+    napi_status status =
+        rc == 0 ? napi_create_array_with_length(env, (size_t)count, &result) : napi_generic_failure;
+    for (int i = 0; status == napi_ok && i < count; i++) {
+      napi_value handle;
+      status = napi_create_external(env, outputs[i], NULL, NULL, &handle);
+      if (status == napi_ok) status = napi_set_element(env, result, (uint32_t)i, handle);
+    }
+    if (status != napi_ok) {
+      if (outputs)
+        for (int i = 0; i < count; i++)
+          poly_tensor_release(outputs[i]);
+      free(outputs);
+      napi_throw_error(env, NULL, "polygrad: Model Tensor call failed");
+      return NULL;
+    }
+    free(outputs);
+    return result;
+  }
   NAPI_CALL(env, napi_create_int32(env, rc, &result));
   return result;
 }
@@ -6666,28 +6803,9 @@ static napi_value napi_poly_tokenizer_eos_id(napi_env env, napi_callback_info in
 
 /* ── HF / GGUF loaders ─────────────────────────────────────────────────── */
 
-extern PolyModel *poly_hf_load(
-    const char *config_json,
-    int config_len,
-    const uint8_t **weight_files,
-    const int64_t *weight_lens,
-    int n_weight_files,
-    int max_batch,
-    int max_seq_len,
-    PolyDevice device
-);
-
-extern PolyModel *poly_gguf_load(
-    const uint8_t *data,
-    int64_t len,
-    int max_batch,
-    int max_seq_len,
-    PolyDevice device
-);
-
-static napi_value napi_poly_hf_load(napi_env env, napi_callback_info info) {
-  napi_value argv[5];
-  size_t argc = 5;
+static napi_value napi_poly_hf_load_into(napi_env env, napi_callback_info info) {
+  napi_value argv[6];
+  size_t argc = 6;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
 
   /* argv[0] = config Buffer, argv[1] = weight Buffers array, argv[2] = maxBatch, argv[3] =
@@ -6716,9 +6834,9 @@ static napi_value napi_poly_hf_load(napi_env env, napi_callback_info info) {
   NAPI_CALL(env, napi_get_value_int32(env, argv[3], &max_seq_len));
   NAPI_CALL(env, napi_get_value_int32(env, argv[4], &device));
 
-  PolyModel *inst = poly_hf_load(
-      (const char *)cfg_data, (int)cfg_len, file_ptrs, file_lens, (int)n_files, max_batch,
-      max_seq_len, (PolyDevice)device
+  PolyModel *inst = poly_hf_load_into(
+      get_external(env, argv[5]), (const char *)cfg_data, (int)cfg_len, file_ptrs, file_lens,
+      (int)n_files, max_batch, max_seq_len, (PolyDevice)device
   );
 
   free(file_ptrs);
@@ -6732,9 +6850,9 @@ static napi_value napi_poly_hf_load(napi_env env, napi_callback_info info) {
   return make_external(env, inst);
 }
 
-static napi_value napi_poly_gguf_load(napi_env env, napi_callback_info info) {
-  napi_value argv[4];
-  size_t argc = 4;
+static napi_value napi_poly_gguf_load_into(napi_env env, napi_callback_info info) {
+  napi_value argv[5];
+  size_t argc = 5;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   void *data;
   size_t len;
@@ -6743,8 +6861,9 @@ static napi_value napi_poly_gguf_load(napi_env env, napi_callback_info info) {
   NAPI_CALL(env, napi_get_value_int32(env, argv[1], &max_batch));
   NAPI_CALL(env, napi_get_value_int32(env, argv[2], &max_seq_len));
   NAPI_CALL(env, napi_get_value_int32(env, argv[3], &device));
-  PolyModel *inst = poly_gguf_load(
-      (const uint8_t *)data, (int64_t)len, max_batch, max_seq_len, (PolyDevice)device
+  PolyModel *inst = poly_gguf_load_into(
+      get_external(env, argv[4]), (const uint8_t *)data, (int64_t)len, max_batch, max_seq_len,
+      (PolyDevice)device
   );
   if (!inst) {
     napi_value n;
@@ -6946,6 +7065,7 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_tensor_detach", napi_poly_tensor_detach),
       DECLARE_NAPI_METHOD("poly_tensor_contiguous_backward", napi_poly_tensor_contiguous_backward),
       DECLARE_NAPI_METHOD("poly_tensor_sum", napi_poly_tensor_sum),
+      DECLARE_NAPI_METHOD("poly_tensor_mean", napi_poly_tensor_mean),
       DECLARE_NAPI_METHOD("poly_tensor_sum_dtype_by_id", napi_poly_tensor_sum_dtype_by_id),
       DECLARE_NAPI_METHOD("poly_tensor_max", napi_poly_tensor_max),
       DECLARE_NAPI_METHOD("poly_tensor_min", napi_poly_tensor_min),
@@ -7156,7 +7276,7 @@ NAPI_MODULE_INIT() {
       /* Cache cleanup */
 
       /* PolyModel / model runtime */
-      DECLARE_NAPI_METHOD("poly_model_from_ir", napi_poly_model_from_ir),
+      DECLARE_NAPI_METHOD("poly_model_from_ir_into", napi_poly_model_from_ir_into),
       DECLARE_NAPI_METHOD("poly_model_from_program", napi_poly_model_from_program),
       DECLARE_NAPI_METHOD("poly_model_from_sinks", napi_poly_model_from_sinks),
       DECLARE_NAPI_METHOD("poly_model_from_binding_arrays", napi_poly_model_from_binding_arrays),
@@ -7168,9 +7288,9 @@ NAPI_MODULE_INIT() {
       ),
       DECLARE_NAPI_METHOD("poly_sequential_from_json", napi_poly_sequential_from_json),
       DECLARE_NAPI_METHOD("poly_graph_from_json", napi_poly_graph_from_json),
-      DECLARE_NAPI_METHOD("poly_mlp_from_json", napi_poly_mlp_from_json),
-      DECLARE_NAPI_METHOD("poly_tabm_from_json", napi_poly_tabm_from_json),
-      DECLARE_NAPI_METHOD("poly_nam_from_json", napi_poly_nam_from_json),
+      DECLARE_NAPI_METHOD("poly_mlp_from_json_into", napi_poly_mlp_from_json_into),
+      DECLARE_NAPI_METHOD("poly_tabm_from_json_into", napi_poly_tabm_from_json_into),
+      DECLARE_NAPI_METHOD("poly_nam_from_json_into", napi_poly_nam_from_json_into),
       DECLARE_NAPI_METHOD("poly_model_param_count", napi_poly_model_param_count),
       DECLARE_NAPI_METHOD("poly_model_param_name", napi_poly_model_param_name),
       DECLARE_NAPI_METHOD("poly_model_param_shape", napi_poly_model_param_shape),
@@ -7185,6 +7305,8 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_model_buf_trainable", napi_poly_model_buf_trainable),
       DECLARE_NAPI_METHOD("poly_model_set_buf_trainable", napi_poly_model_set_buf_trainable),
       DECLARE_NAPI_METHOD("poly_model_buf_shape", napi_poly_model_buf_shape),
+      DECLARE_NAPI_METHOD("poly_model_buf_current_shape", napi_poly_model_buf_current_shape),
+      DECLARE_NAPI_METHOD("poly_model_buf_shape_bounds", napi_poly_model_buf_shape_bounds),
       DECLARE_NAPI_METHOD("poly_model_buf_data", napi_poly_model_buf_data),
       DECLARE_NAPI_METHOD("poly_model_write_buf", napi_poly_model_write_buf),
       DECLARE_NAPI_METHOD("poly_model_buf_dtype_id", napi_poly_model_buf_dtype_id),
@@ -7193,7 +7315,7 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_model_export_ir", napi_poly_model_export_ir),
       DECLARE_NAPI_METHOD("poly_model_export_program", napi_poly_model_export_program),
       DECLARE_NAPI_METHOD("poly_model_save_bundle", napi_poly_model_save_bundle),
-      DECLARE_NAPI_METHOD("poly_model_from_bundle", napi_poly_model_from_bundle),
+      DECLARE_NAPI_METHOD("poly_model_from_bundle_into", napi_poly_model_from_bundle_into),
       DECLARE_NAPI_METHOD("poly_model_set_optimizer", napi_poly_model_set_optimizer),
       DECLARE_NAPI_METHOD("poly_model_forward", napi_poly_model_forward),
       DECLARE_NAPI_METHOD("poly_model_call", napi_poly_model_call),
@@ -7251,8 +7373,8 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_tokenizer_eos_id", napi_poly_tokenizer_eos_id),
 
       /* Loaders */
-      DECLARE_NAPI_METHOD("poly_hf_load", napi_poly_hf_load),
-      DECLARE_NAPI_METHOD("poly_gguf_load", napi_poly_gguf_load),
+      DECLARE_NAPI_METHOD("poly_hf_load_into", napi_poly_hf_load_into),
+      DECLARE_NAPI_METHOD("poly_gguf_load_into", napi_poly_gguf_load_into),
       DECLARE_NAPI_METHOD("poly_tokenizer_from_gguf", napi_poly_tokenizer_from_gguf),
 
       /* Import error */

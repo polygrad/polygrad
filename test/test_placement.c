@@ -22,6 +22,32 @@ static PolyUOp *placement_binding_on_device(PolyCtx *ctx, PolyUOp *logical, Poly
   );
 }
 
+TEST(placement, bounded_views_preserve_launch_metadata_and_store_shape) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *logical = placement_buffer(ctx, 32, POLY_DEVICE_AUTO);
+  PolyUOp *physical = placement_buffer(ctx, 32, POLY_DEVICE_INTERP);
+  PolyUOp *var = poly_uop_variable(
+      ctx, "placement_n", poly_arg_int(1), poly_arg_int(32), POLY_WEAKINT, 1, false
+  );
+  PolyUOp *dim = poly_uop_bind(ctx, var, 17), *zero = poly_const_int(ctx, 0);
+  PolyUOp *view = poly_shrink_uop(ctx, logical, &zero, &dim, 1);
+  PolyUOp *root = poly_sink1(ctx, poly_store_val(ctx, view, poly_add(ctx, view, view)));
+  PolyUOp *placed = NULL;
+  ASSERT_EQ(poly_place_roots(ctx, &root, 1, &logical, &physical, 1, &placed), 0);
+  ASSERT_NOT_NULL(placed);
+  ASSERT_EQ(placed->src[0]->op, POLY_OP_STORE);
+  ASSERT_EQ(placed->src[0]->src[0]->op, POLY_OP_SHRINK);
+  ASSERT_EQ(poly_uop_base(placed->src[0]->src[0]), physical);
+  ASSERT_EQ(poly_uop_shape_dim(ctx, placed->src[0]->src[0], 0), dim);
+  /* A naked scalar STORE is not a bound-variable metadata node. */
+  PolyUOp *invalid = poly_store_val(ctx, var, poly_const_int(ctx, 3));
+  PolyUOp *sentinel = placed;
+  ASSERT_EQ(poly_place_roots(ctx, &invalid, 1, &logical, &physical, 1, &placed), -1);
+  ASSERT_EQ(placed, sentinel);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(placement, logical_bindings_reproduce_eager_value_and_instance_sink) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);

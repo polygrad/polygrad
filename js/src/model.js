@@ -1,6 +1,7 @@
 'use strict'
 
 const { PolyAsyncRequired } = require('./errors')
+const { getStateDict } = require('./nn/state')
 
 const ROLE_PARAM = 0
 const ROLE_INPUT = 1
@@ -64,16 +65,39 @@ function normalizeBytes(bytes, name) {
   throw new TypeError(`polygrad: ${name} must be a Uint8Array or ArrayBuffer`)
 }
 
-function normalizeBindings(io) {
+function saveRequest(runtime, destination, options) {
+  if (typeof destination === 'string') {
+    if (!runtime._modelFiles) throw new TypeError('Model filesystem paths require Node; use bundle bytes in browsers')
+    return { path: destination, options }
+  }
+  if (options != null) throw new TypeError('Model.save options after the first argument require a destination path')
+  return { path: null, options: destination }
+}
+
+function normalizeBindings(io, runtime) {
   if (!io || typeof io !== 'object' || Array.isArray(io)) {
     throw new TypeError('polygrad: bindings must be an object of name -> numeric data')
   }
 
   const names = []
   const arrays = []
-  for (const [name, value] of Object.entries(io)) {
+  let tensors = false
+  for (const [name, supplied] of Object.entries(io)) {
+    const shaped = supplied && typeof supplied === 'object' && 'data' in supplied && 'shape' in supplied
+    const value = shaped ? supplied.data : supplied
+    if (shaped && (!Array.isArray(supplied.shape) || supplied.shape.length > 8 ||
+        supplied.shape.some(dim => !Number.isSafeInteger(dim) || dim < 0))) {
+      throw new TypeError(`Model input '${name}' shape requires up to eight nonnegative safe integers`)
+    }
     let arr
-    if (ArrayBuffer.isView(value) && !(value instanceof DataView)) {
+    if (value && typeof value === 'object' && '_tensor' in value) {
+      if (shaped) throw new TypeError('Tensor bindings already carry their shape')
+      if (!value._tensor || value._rt !== runtime || value._ctx !== runtime._core.ctx) {
+        throw new TypeError(`Model input '${name}' must be a live Tensor in its Runtime`)
+      }
+      arr = value._tensor
+      tensors = true
+    } else if (ArrayBuffer.isView(value) && !(value instanceof DataView)) {
       arr = value
     } else if (Array.isArray(value)) {
       arr = Float32Array.from(value)
@@ -83,9 +107,9 @@ function normalizeBindings(io) {
       throw new TypeError(`polygrad: binding '${name}' must be a number, array, or numeric TypedArray`)
     }
     names.push(name)
-    arrays.push(arr)
+    arrays.push(shaped ? {data:arr, shape:supplied.shape.slice()} : arr)
   }
-  return { names, arrays }
+  return { names, arrays, tensors }
 }
 
 function normalizeNamed(value, defaultName) {
@@ -98,7 +122,10 @@ function normalizeParams(params) {
   if (!params) return []
   if (Array.isArray(params)) return params.map((p, i) => [`param_${i}`, p])
   if (params instanceof Map) return Array.from(params.entries())
-  return Object.entries(params)
+  if (Object.getPrototypeOf(params) === Object.prototype || Object.getPrototypeOf(params) === null) {
+    return Object.entries(params)
+  }
+  return Object.entries(getStateDict(params))
 }
 
 function roleId(role) {
@@ -211,6 +238,7 @@ function isModelSpec(v) {
 
 function createBoundModelClass(runtime) {
   const _runtime = runtime
+  const adoptHandle = Symbol('Model handle adoption')
   const liveModelOwners = new Set()
   const modelFinalizer = typeof FinalizationRegistry === 'undefined'
     ? null
@@ -242,12 +270,6 @@ function createBoundModelClass(runtime) {
     return tensor
   }
 
-  function requireStorageBinding(name, tensor) {
-    if (!tensor.uop || !tensor.uop.hasBufferIdentity()) {
-      throw new Error(`${name} has no buffer identity; inputs and targets require storage-backed Tensors`)
-    }
-  }
-
   function defineModulesOnHandle(handle, modules, expectedCtx = null) {
     if (modules == null) return
     const rows = Array.from(modules)
@@ -275,13 +297,57 @@ function createBoundModelClass(runtime) {
     if (rc !== 0) throw new Error('polygrad: invalid or ambiguous Model module cuts')
   }
 
-  function traceSpec(fn, { inputs, targets = {}, loss = null, state, params, entrypoints } = {}) {
-    if (typeof fn !== 'function') throw new TypeError('Model.trace requires a callable')
-    const result = fn(inputs)
-    if (isPromiseLike(result)) throw new TypeError('Model.trace authoring must be synchronous')
-    const losses = loss == null ? null : loss(result, targets)
-    if (isPromiseLike(losses)) throw new TypeError('Model.trace loss must be synchronous')
-    return { inputs, targets, outputs: result, losses, state, params, entrypoints }
+  function callableSpec(source, options = {}) {
+    if (!_runtime._core || _runtime._closing) throw new Error('polygrad runtime has been disposed')
+    // Capture is synchronous host graph construction. Never enter suspended Wasm.
+    if (_runtime._activeAsync > 0) throw new Error('Model capture requires an idle Runtime; await pending operations first')
+    const { inputs = {}, targets = {}, loss = null, entrypoints } = options
+    if (options.outputs != null || options.losses != null || options.modules != null) {
+      throw new TypeError('Callable Model cannot be combined with prebuilt outputs, losses or modules')
+    }
+    if ('state' in options) throw new TypeError('Use params for named Model tensors, including auxiliary buffers')
+    if (typeof source === 'function' && /^class\s/.test(Function.prototype.toString.call(source))) {
+      throw new TypeError('Model expects an object, not a class; instantiate it first')
+    }
+    const fn = typeof source === 'function' ? source : source && typeof source.forward === 'function'
+      ? source.forward.bind(source) : null
+    if (!fn) throw new TypeError('Model requires a function or an object with forward(inputs)')
+    for (const callback of [fn, loss]) {
+      if (callback == null) continue
+      if (typeof callback !== 'function') throw new TypeError('Model author and loss must be callable')
+      if (['[object AsyncFunction]', '[object AsyncGeneratorFunction]'].includes(Object.prototype.toString.call(callback))) {
+        throw new TypeError('Model author and loss must be synchronous')
+      }
+    }
+    const collectObject = options.params == null && typeof source !== 'function'
+    let params = options.params == null ? (typeof source === 'function' ? {} : getStateDict(source))
+      : Object.fromEntries(normalizeParams(options.params))
+    for (const [name, tensor] of [...Object.entries(inputs), ...Object.entries(targets), ...Object.entries(params)]) {
+      requireTensor(name, tensor)
+      if (tensor._ctx !== _runtime._core.ctx) throw new Error(`${name} belongs to another PolyCtx`)
+      if (!tensor.uopLogical) throw new Error(`${name} has no logical source; construct it with logical retention enabled`)
+    }
+    for (const [name, tensor] of Object.entries(params)) {
+      if ([...Object.values(inputs), ...Object.values(targets)].includes(tensor)) {
+        throw new Error(`${name} is both input/target and model state; supply a params override`)
+      }
+    }
+    return _runtime.withLogical('always', () => {
+      const result = fn(inputs)
+      if (isPromiseLike(result)) throw new TypeError('Model authoring must be synchronous')
+      const losses = loss == null ? null : loss(result, targets)
+      if (isPromiseLike(losses)) throw new TypeError('Model loss must be synchronous')
+      // Include state created by lazy layers during this authoring call.
+      if (collectObject) {
+        params = getStateDict(source)
+        for (const [name, tensor] of Object.entries(params)) {
+          if ([...Object.values(inputs), ...Object.values(targets)].includes(tensor)) {
+            throw new Error(`${name} is both input/target and model state; supply a params override`)
+          }
+        }
+      }
+      return { inputs, targets, outputs: result, losses, params, entrypoints }
+    })
   }
 
   function sealBindings(ctx, bindings, entries, modules, async = false) {
@@ -295,10 +361,10 @@ function createBoundModelClass(runtime) {
         api.free(handle)
         throw err
       }
-      return async ? new Model(handle) : handle
+      return async ? Model._fromHandle(handle) : handle
     }
     if (_runtime._usesAsyncHostBridge()) {
-      if (!async) throw new PolyAsyncRequired('Model construction', 'Model.fromTensors()/traceAsync()/fromBindingsAsync()')
+      if (!async) throw new PolyAsyncRequired('Model construction', 'Model.fromTensors()/fromCallableAsync()/fromBindingsAsync()')
       // Queue construction and its marshalling before later Tensor releases.
       return _runtime._withAsync(() => _runtime._core.enqueueAsync(async () =>
         finish(await api.fromBindingsAsync(ctx, bindings, entries))))
@@ -308,11 +374,8 @@ function createBoundModelClass(runtime) {
 
   function lowerTensorSpec(spec = {}, async = false) {
     const { inputs, outputs, targets, losses, entrypoints, modules } = spec
-    let { params, state } = spec
-    if (params != null && state != null) {
-      throw new Error('Model accepts params or state, not both')
-    }
-    if (state != null) params = state
+    const { params } = spec
+    if ('state' in spec) throw new TypeError('Use params for named Model tensors, including auxiliary buffers')
 
     const inps = normalizeNamed(inputs, 'input')
     const tgts = normalizeNamed(targets, 'target')
@@ -336,10 +399,6 @@ function createBoundModelClass(runtime) {
     for (const [name, tensor] of namedTensors) {
       if (tensor._ctx !== ctx) throw new Error(`${name} belongs to another PolyCtx`)
     }
-    for (const [name, tensor] of [...Object.entries(inps), ...Object.entries(tgts)]) {
-      requireStorageBinding(name, tensor)
-    }
-
     const bindings = []
     const addBinding = (name, role, tensor, flags = 0) => {
       bindings.push({ name: String(name), role, tensor: tensor._tensor, flags })
@@ -347,8 +406,8 @@ function createBoundModelClass(runtime) {
     for (const [name, tensor] of Object.entries(inps)) addBinding(name, ROLE_INPUT, tensor)
     for (const [name, tensor] of Object.entries(tgts)) addBinding(name, ROLE_TARGET, tensor)
     for (const [name, tensor] of paramItems) {
-      const role = state != null && !tensor.isParam ? ROLE_AUX : ROLE_PARAM
-      addBinding(name, role, tensor, role === ROLE_PARAM && !tensor.isParam ? BIND_F_FROZEN : 0)
+      const role = tensor.isParam ? ROLE_PARAM : ROLE_AUX
+      addBinding(name, role, tensor)
     }
     for (const [name, tensor] of Object.entries(outs)) addBinding(name, ROLE_OUTPUT, tensor)
     for (const [name, tensor] of Object.entries(lossMap)) addBinding(name, ROLE_OUTPUT, tensor)
@@ -387,9 +446,25 @@ function createBoundModelClass(runtime) {
   }
 
   class Model {
-    constructor(handle) {
-      if (isModelSpec(handle)) handle = lowerTensorSpec(handle)
+    constructor(handle, options) {
+      const adopting = options === adoptHandle
+      if (typeof handle === 'function' || (handle && typeof handle.forward === 'function')) {
+        if (_runtime._usesAsyncHostBridge()) throw new PolyAsyncRequired('Model construction', 'Model.fromCallableAsync()')
+        handle = callableSpec(handle, options)
+      } else if (!adopting && handle && typeof handle === 'object' && ('format' in handle || 'type' in handle)) {
+        if (options != null) throw new TypeError('Model configuration cannot be combined with Tensor bindings')
+        if (handle.format !== 'poly.modeldef@1' || !['sequential', 'graph'].includes(handle.type)) {
+          throw new TypeError('Model configuration requires format="poly.modeldef@1" and type="sequential" or "graph"')
+        }
+        // The family factory registers the owner. Do not create a second handle owner.
+        return _runtime.models[handle.type === 'sequential' ? 'Sequential' : 'Graph'](handle)
+      } else if (options != null && !adopting) throw new TypeError('Model options require a callable source')
+      const spec = isModelSpec(handle)
+      if (spec) handle = lowerTensorSpec(handle)
       if (!handle) throw new Error('polygrad: failed to create PolyModel')
+      if (!spec && !adopting) {
+        throw new TypeError('Model expects a callable or Tensor bindings; use Model.load for bytes')
+      }
       this._rt = _runtime
       this._handle = handle
       const caps = _runtime && _runtime._core && _runtime._core.caps
@@ -410,6 +485,8 @@ function createBoundModelClass(runtime) {
       liveModelOwners.add(this._owner)
       if (modelFinalizer) modelFinalizer.register(this, this._owner, this)
     }
+
+    static _fromHandle(handle) { return new Model(handle, adoptHandle) }
 
     _usesAsyncHostBridge() {
       return this._asyncHostBridge
@@ -459,6 +536,8 @@ function createBoundModelClass(runtime) {
     }
 
     static fromIR(irBytes, weightsBytes) {
+      if (!_runtime._core || _runtime._closing) throw new Error('polygrad runtime has been disposed')
+      if (_runtime._activeAsync > 0) throw new Error('Model IR load unavailable during active async work')
       const api = _runtime._core.model
       if (!api) throw new Error('polygrad: model runtime unavailable for this core')
       const inst = api.fromIR(
@@ -466,7 +545,7 @@ function createBoundModelClass(runtime) {
         normalizeBytes(weightsBytes, 'weightsBytes')
       )
       if (!inst) throw new Error('polygrad: failed to create PolyModel from IR')
-      return new Model(inst)
+      return Model._fromHandle(inst)
     }
 
     static fromProgram(programBytes, weightsBytes) {
@@ -480,7 +559,7 @@ function createBoundModelClass(runtime) {
         normalizeBytes(weightsBytes, 'weightsBytes')
       )
       if (!inst) throw new Error('polygrad: failed to create PolyModel from program')
-      return new Model(inst)
+      return Model._fromHandle(inst)
     }
 
     static async fromProgramAsync(programBytes, weightsBytes) {
@@ -494,7 +573,7 @@ function createBoundModelClass(runtime) {
           ? await api.fromProgramAsync(program, weights)
           : api.fromProgram(program, weights)
         if (!inst) throw new Error('polygrad: failed to create PolyModel from program')
-        return new Model(inst)
+        return Model._fromHandle(inst)
       } finally {
         release()
       }
@@ -522,9 +601,6 @@ function createBoundModelClass(runtime) {
       const ctx = parsed[0].tensor._ctx
       for (const b of parsed) {
         if (b.tensor._ctx !== ctx) throw new Error(`${b.name} belongs to another PolyCtx`)
-        if (b.role === ROLE_INPUT || b.role === ROLE_TARGET) {
-          requireStorageBinding(b.name, b.tensor)
-        }
       }
 
       const entries = entrypoints.map(entry => {
@@ -545,20 +621,20 @@ function createBoundModelClass(runtime) {
     }
 
     static fromBindings(bindings, entrypoints, modules = null) {
-      return new Model(this._fromBindings(bindings, entrypoints, modules, false))
+      return Model._fromHandle(this._fromBindings(bindings, entrypoints, modules, false))
     }
 
     static async fromBindingsAsync(bindings, entrypoints, modules = null) {
       return this._fromBindings(bindings, entrypoints, modules, true)
     }
 
-    static trace(fn, options) {
-      if (_runtime._usesAsyncHostBridge()) throw new PolyAsyncRequired('Model.trace()', 'Model.traceAsync()')
-      return new Model(traceSpec(fn, options))
+    static fromCallable(fn, options) {
+      if (_runtime._usesAsyncHostBridge()) throw new PolyAsyncRequired('Model.fromCallable()', 'Model.fromCallableAsync()')
+      return new Model(callableSpec(fn, options))
     }
 
-    static traceAsync(fn, options) {
-      return this.fromTensors(traceSpec(fn, options))
+    static async fromCallableAsync(fn, options) {
+      return this.fromTensors(callableSpec(fn, options))
     }
 
     static async fromTensors(spec = {}) {
@@ -566,6 +642,8 @@ function createBoundModelClass(runtime) {
     }
 
     static fromHF(configBytes, weightFiles, opts = {}) {
+      if (_runtime._closing || !_runtime._core) throw new Error('polygrad runtime has been disposed')
+      if (_runtime._activeAsync > 0) throw new Error('Model HF load requires an idle Runtime')
       const api = _runtime._core.model
       const cfg = normalizeBytes(configBytes, 'config')
       const wf = weightFiles.map((f, i) => normalizeBytes(f, `weight file ${i}`))
@@ -574,10 +652,12 @@ function createBoundModelClass(runtime) {
         const err = api.importLastError && api.importLastError()
         throw new Error('polygrad: fromHF failed' + (err ? ': ' + err.message : ''))
       }
-      return new Model(handle)
+      return Model._fromHandle(handle)
     }
 
     static fromGGUF(ggufBytes, opts = {}) {
+      if (_runtime._closing || !_runtime._core) throw new Error('polygrad runtime has been disposed')
+      if (_runtime._activeAsync > 0) throw new Error('Model GGUF load requires an idle Runtime')
       const api = _runtime._core.model
       const bytes = normalizeBytes(ggufBytes, 'gguf')
       const handle = api.loadGGUF(bytes, opts.maxBatch, opts.maxSeqLen)
@@ -585,7 +665,7 @@ function createBoundModelClass(runtime) {
         const err = api.importLastError && api.importLastError()
         throw new Error('polygrad: fromGGUF failed' + (err ? ': ' + err.message : ''))
       }
-      return new Model(handle)
+      return Model._fromHandle(handle)
     }
 
     dispose() {
@@ -755,6 +835,18 @@ function createBoundModelClass(runtime) {
       return this._rt._core.model.bufShape(this._handle, i)
     }
 
+    bufCurrentShape(i) {
+      this._requireOpen()
+      if (this._rt._activeAsync) throw new Error('Model metadata unavailable during active async work')
+      return this._rt._core.model.bufCurrentShape(this._handle, i)
+    }
+
+    bufShapeBounds(i) {
+      this._requireOpen()
+      if (this._rt._activeAsync) throw new Error('Model metadata unavailable during active async work')
+      return this._rt._core.model.bufShapeBounds(this._handle, i)
+    }
+
     bufDtype(i) {
       const core = this._rt._core
       return modelDtypeName(core, core.model.bufDtypeId(this._handle, i))
@@ -788,7 +880,7 @@ function createBoundModelClass(runtime) {
       if (this._rt._activeAsync) throw new Error('Model metadata unavailable during active async work')
       return Array.from({ length: this.bufCount }, (_, i) => ({
         name: this.bufName(i), role: this.bufRole(i), dtype: this.bufDtype(i),
-        shape: this.bufShape(i), trainable: this.bufTrainable(i)
+        shape: this.bufShape(i), shapeBounds: this.bufShapeBounds(i), trainable: this.bufTrainable(i)
       }))
     }
 
@@ -796,6 +888,17 @@ function createBoundModelClass(runtime) {
       this._requireOpen()
       if (this._rt._activeAsync) throw new Error('Model metadata unavailable during active async work')
       return this._rt._core.model.entrypoints(this._handle)
+    }
+
+    summary() {
+      const roles = ['PARAM', 'INPUT', 'TARGET', 'OUTPUT', 'AUX']
+      const bindings = this.bindings().map(b =>
+        `  ${b.name}: ${roles[b.role]} ${b.dtype}[${b.shape.join(',')}]` +
+        (b.role === ROLE_PARAM ? (b.trainable ? ' trainable' : ' frozen') : ''))
+      const entries = this.entrypoints().map(e =>
+        `  ${e.name}(${e.inputs.join(', ')}) -> ${e.outputs.join(', ')}` +
+        (e.objective == null ? '' : `; objective=${e.objective}`))
+      return ['Model', 'Bindings:', ...bindings, 'Entrypoints:', ...entries].join('\n')
     }
 
     setTrainable(name, trainable) {
@@ -877,7 +980,31 @@ function createBoundModelClass(runtime) {
       return this._rt._core.model.saveBundle(this._handle, flags)
     }
 
+    save(destination = null, options = null) {
+      const request = saveRequest(this._rt, destination, options)
+      const bytes = this.saveBundle(request.options)
+      if (request.path !== null) this._rt._modelFiles.writeFileSync(request.path, bytes)
+      return bytes
+    }
+
+    async saveAsync(destination = null, options = null) {
+      const request = saveRequest(this._rt, destination, options)
+      const bytes = await this.saveBundleAsync(request.options)
+      // Exported bytes own their memory; file completion does not retain the Model.
+      if (request.path !== null) await this._rt._modelFiles.promises.writeFile(request.path, bytes)
+      return bytes
+    }
+
+    static load(source) {
+      if (typeof source === 'string') {
+        if (!_runtime._modelFiles) throw new TypeError('Model filesystem paths require Node; use bundle bytes in browsers')
+        source = _runtime._modelFiles.readFileSync(source)
+      }
+      return this.fromBundle(normalizeBytes(source, 'bundle'))
+    }
+
     saveBundleAsync(options = null) {
+      this._requireOpen()
       const flags = weightExportFlags(options)
       const run = () => this._rt._core.model.saveBundle(this._handle, flags)
       if (this._usesAsyncHostBridge()) return this._enqueueAsync(run)
@@ -885,11 +1012,13 @@ function createBoundModelClass(runtime) {
     }
 
     static fromBundle(bytes) {
+      if (!_runtime._core || _runtime._closing) throw new Error('polygrad runtime has been disposed')
+      if (_runtime._activeAsync > 0) throw new Error('Model bundle load unavailable during active async work')
       const api = _runtime._core.model
       if (!api) throw new Error('polygrad: model runtime unavailable for this core')
       const handle = api.fromBundle(bytes)
       if (!handle) throw new Error('polygrad: fromBundle failed')
-      return new Model(handle)
+      return Model._fromHandle(handle)
     }
 
 
@@ -906,7 +1035,7 @@ function createBoundModelClass(runtime) {
     ) {
       this._requireOpen()
       const rc = this._rt._core.model.setOptimizer(
-        this._handle, kind, lr, beta1, beta2, eps, weightDecay, momentum, nesterov, classic
+        this._handle, optimizerKind(kind), lr, beta1, beta2, eps, weightDecay, momentum, nesterov, classic
       )
       if (rc !== 0) throw new Error(`polygrad: setOptimizer failed (rc=${rc})`)
       return this
@@ -916,9 +1045,30 @@ function createBoundModelClass(runtime) {
       return this.call('forward', io)
     }
 
+    _wrapTensorOutputs(entrypoint, handles) {
+      const core = this._rt._core
+      const result = {}
+      try {
+        for (let i = 0; i < handles.length; i++) {
+          const name = core.model.entrypointOutputName(this._handle, entrypoint, i)
+          const deviceId = core.ffi.poly_tensor_device(handles[i])
+          const device = Object.keys(core.deviceIds).find(key => core.deviceIds[key] === deviceId)
+          result[name] = new this._rt.Tensor(null, { _tensor: handles[i], _device: device, isParam: false })
+          handles[i] = null
+        }
+        return result
+      } finally {
+        for (const handle of handles) if (handle) core.ffi.poly_tensor_release(handle)
+      }
+    }
+
     call(entrypoint, io) {
       this._requireSync('call()', 'callAsync()')
-      const { names, arrays } = normalizeBindings(io)
+      const { names, arrays, tensors } = normalizeBindings(io, this._rt)
+      if (tensors) {
+        return this._wrapTensorOutputs(String(entrypoint),
+          this._rt._core.model.callTensors(this._handle, String(entrypoint), names, arrays))
+      }
       const rc = this._rt._core.model.call(this._handle, String(entrypoint), names, arrays)
       if (isPromiseLike(rc)) throw new PolyAsyncRequired('call()', 'callAsync()')
       if (rc !== 0) throw new Error(`polygrad: call('${entrypoint}') failed (rc=${rc})`)
@@ -931,8 +1081,13 @@ function createBoundModelClass(runtime) {
 
     callAsync(entrypoint, io) {
       entrypoint = String(entrypoint)
-      const { names, arrays } = normalizeBindings(io)
+      const { names, arrays, tensors } = normalizeBindings(io, this._rt)
       const run = () => {
+        if (tensors) {
+          const handles = this._rt._core.model.callTensors(this._handle, entrypoint, names, arrays)
+          return isPromiseLike(handles) ? handles.then(v => this._wrapTensorOutputs(entrypoint, v))
+            : this._wrapTensorOutputs(entrypoint, handles)
+        }
         const rc = this._rt._core.model.call(this._handle, entrypoint, names, arrays)
         if (isPromiseLike(rc)) {
           return rc.then(v => {
@@ -943,13 +1098,15 @@ function createBoundModelClass(runtime) {
         if (rc !== 0) throw new Error(`polygrad: call('${entrypoint}') failed (rc=${rc})`)
         return this._collectOutputsRaw(entrypoint)
       }
+      // Queue now, before a subsequent Tensor.dispose can enqueue its release.
+      // No C calls are made while an earlier Asyncify invocation is suspended.
       if (this._usesAsyncHostBridge()) return this._enqueueAsync(run)
       return Promise.resolve(run())
     }
 
     trainStep(io, entrypoint = null) {
       this._requireSync('trainStep()', 'trainStepAsync()')
-      const { names, arrays } = normalizeBindings(io)
+      const { names, arrays } = normalizeBindings(io, this._rt)
       const loss = this._rt._core.model.trainStep(this._handle, names, arrays, entrypoint)
       if (isPromiseLike(loss)) throw new PolyAsyncRequired('trainStep()', 'trainStepAsync()')
       if (loss == null || Number.isNaN(loss)) throw new Error('polygrad: trainStep failed')
@@ -957,7 +1114,7 @@ function createBoundModelClass(runtime) {
     }
 
     trainStepAsync(io, entrypoint = null) {
-      const { names, arrays } = normalizeBindings(io)
+      const { names, arrays } = normalizeBindings(io, this._rt)
       const run = () => {
         const loss = this._rt._core.model.trainStep(this._handle, names, arrays, entrypoint)
         if (isPromiseLike(loss)) {
@@ -1015,10 +1172,58 @@ function createBoundModelClass(runtime) {
       return Promise.resolve(this._collectOutputsRaw())
     }
 
-    fit(io, opts = {}) {
-      // Repeat one supplied batch; this is not a dataset/batching framework.
-      this._requireSync('fit()', 'trainStepAsync()')
-      const epochs = opts.epochs == null ? 1 : Number(opts.epochs)
+    _fitPlan(io, opts) {
+      this._requireOpen()
+      if (this._rt._activeAsync) throw new Error('Model fit preparation unavailable during active async work')
+      const epochs = opts.epochs == null ? 1 : opts.epochs
+      if (!Number.isSafeInteger(epochs) || epochs < 0) throw new TypeError('epochs must be a nonnegative integer')
+      const remainder = opts.remainder == null ? 'error' : opts.remainder
+      if (!['error', 'drop'].includes(remainder)) throw new TypeError("remainder must be 'error' or 'drop'")
+      const normalized = normalizeBindings(io, this._rt)
+      if (opts.batchSize == null) return {epochs, count:1, batch:() => normalized}
+      const size = opts.batchSize
+      if (!Number.isSafeInteger(size) || size <= 0) throw new TypeError('batchSize must be a positive integer')
+      if (normalized.tensors) throw new TypeError('minibatch Tensor datasets require an explicit trainStep loop')
+      const entries = this.entrypoints()
+      let selected = opts.entrypoint == null ? entries.filter(e => e.objective) : entries.filter(e => e.name === opts.entrypoint)
+      if (!selected.length && opts.entrypoint == null) selected = entries.filter(e => e.name === 'loss')
+      if (selected.length !== 1) throw new Error('fit requires one selected objective entrypoint')
+      const schema = this.bindings()
+      const required = selected[0].inputs.length ? selected[0].inputs :
+        schema.filter(b => [ROLE_INPUT, ROLE_TARGET].includes(b.role)).map(b => b.name)
+      if (required.length !== normalized.names.length || required.some(name => !normalized.names.includes(name)))
+        throw new Error('fit data must match the selected entrypoint inputs')
+      let samples = null
+      const rows = normalized.names.map((name, i) => {
+        const declared = schema.find(b => b.name === name).shape
+        if (!declared.length || declared[0] !== size)
+          throw new Error(`batchSize must match the declared first axis of '${name}'`)
+        const supplied = normalized.arrays[i]
+        const data = supplied.data || supplied
+        const dtype = data.constructor.name.replace('Array', '').toLowerCase()
+          .replace('bigint64', 'int64').replace('biguint64', 'uint64').replace('uint8clamped', 'uint8')
+        if (dtype !== schema.find(b => b.name === name).dtype)
+          throw new TypeError(`fit input '${name}' has the wrong storage dtype`)
+        const width = declared.slice(1).reduce((a,b) => a*b, 1)
+        // Flat storage only determines a sample count when its stride is nonzero.
+        const shape = supplied.shape || (width > 0 && data.length % width === 0 ?
+          [data.length / width, ...declared.slice(1)] : null)
+        if (!shape || shape.length !== declared.length ||
+            shape.slice(1).some((d,j) => d !== declared[j+1]) ||
+            shape.reduce((a,b) => a*b, 1) !== data.length)
+          throw new Error(`fit input '${name}' has incompatible sample shape`)
+        if (samples != null && samples !== shape[0]) throw new Error('fit inputs must have the same sample count')
+        samples = shape[0]
+        return {data, width, shape:declared}
+      })
+      if (samples == null || samples < size) throw new Error('fit requires at least one complete batch')
+      if (samples % size && remainder === 'error')
+        throw new Error('unsupported incomplete batch remainder; use remainder="drop" explicitly')
+      return {epochs, count:Math.floor(samples/size), batch:i => ({names:normalized.names,
+        arrays:rows.map(r => ({data:r.data.subarray(i*size*r.width, (i+1)*size*r.width), shape:r.shape}))})}
+    }
+
+    _fitOptimizer(opts) {
       if (opts.optimizer != null) {
         this.setOptimizer(
           optimizerKind(opts.optimizer),
@@ -1032,13 +1237,43 @@ function createBoundModelClass(runtime) {
           !!opts.classic
         )
       }
+    }
+
+    fit(io, opts = {}) {
+      this._requireSync('fit()', 'fitAsync()')
+      const plan = this._fitPlan(io, opts)
+      this._fitOptimizer(opts)
       const losses = []
-      for (let step = 0; step < epochs; step++) {
-        const loss = this.trainStep(io, opts.entrypoint)
+      for (let step = 0; step < plan.epochs * plan.count; step++) {
+        const {names, arrays} = plan.batch(step % plan.count)
+        const loss = this._rt._core.model.trainStep(this._handle, names, arrays, opts.entrypoint)
+        if (loss == null || Number.isNaN(loss)) throw new Error('polygrad: trainStep failed')
         losses.push(loss)
         if (opts.onStep) opts.onStep(step, loss)
       }
       return losses
+    }
+
+    fitAsync(io, opts = {}) {
+      // Synchronous backends finish before returning; they have no suspended
+      // host bridge requiring deferred Model disposal.
+      if (!this._usesAsyncHostBridge()) return Promise.resolve(this.fit(io, opts))
+      const plan = this._fitPlan(io, opts)
+      this._fitOptimizer(opts)
+      // One queue owner for the entire loop: Model/Runtime/input disposal must
+      // not slip between steps. onStep is synchronous, as with fit().
+      const run = async () => {
+        const losses = []
+        for (let step = 0; step < plan.epochs * plan.count; step++) {
+          const {names, arrays} = plan.batch(step % plan.count)
+          const loss = await this._rt._core.model.trainStep(this._handle, names, arrays, opts.entrypoint)
+          if (loss == null || Number.isNaN(loss)) throw new Error('polygrad: trainStep failed')
+          losses.push(loss)
+          if (opts.onStep) opts.onStep(step, loss)
+        }
+        return losses
+      }
+      return this._enqueueAsync(run)
     }
 
   }

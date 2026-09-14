@@ -2620,10 +2620,8 @@ function createBoundTensorClass(runtime) {
           return a < 0 ? a + this.shape.length : a
         })
       }
-      const numerator = this.cast(sumAccumulatorDtype(this._dtype)).sum(axes, keepdim)
-      const denominator = product(axes.map(a => this.shape[a]))
-      const outputDtype = isFloatDtype(this._dtype) ? this._dtype : 'float32'
-      return numerator.div(denominator).cast(outputDtype)
+      return this._makeResultFromCore(ffi.poly_tensor_mean(
+        this._ctx, this._tensor, axes, axes.length, Boolean(keepdim)))
     }
 
     dropout(p = 0.5) {
@@ -3757,13 +3755,17 @@ function createBoundTensorClass(runtime) {
     static empty(...args) {
       let shape = args, opts
       if (args.length > 0 && typeof args[args.length - 1] === 'object'
-          && !(args[args.length - 1] instanceof Array)) {
+          && !(args[args.length - 1] instanceof Array) && !(args[args.length - 1] instanceof UOp)) {
         opts = args[args.length - 1]; shape = args.slice(0, -1)
       }
       if (shape.length === 1 && Array.isArray(shape[0])) shape = shape[0]
-      shape = shape.map(x => Number(x))
+      // CreationMixin.empty preserves UOp dimensions: C reserves vmax storage
+      // and keeps the bounded SHRINK. Number(UOp) would silently become zero
+      // at the integer FFI boundary instead of a runtime dimension.
+      shape = shape.map(x => x instanceof UOp ? x : Number(x))
       rejectRequiresGrad(opts)
-      if (shape.some(x => x < 0)) throw new Error(`negative dimensions are not allowed: ${shape}`)
+      if (shape.some(x => !(x instanceof UOp) && (!Number.isSafeInteger(x) || x < 0)))
+        throw new RangeError('Tensor.empty dimensions must be nonnegative safe integers or UOps')
       if (opts && Object.prototype.hasOwnProperty.call(opts, 'name')) {
         throw new TypeError('Tensor.empty does not accept name; pass names to Model.fromTensors')
       }
@@ -3774,9 +3776,9 @@ function createBoundTensorClass(runtime) {
       const tensorDevice = normalizeDevice(
         (opts && (opts._device || opts.device)) || _runtime.device || 'cpu'
       )
-      const tensor = tensorDevice.startsWith('disk:')
+      const tensor = tensorDevice.startsWith('disk:') || shape.some(x => x instanceof UOp)
         ? ffi.poly_tensor_empty_uop_name_by_id(
-          ctx, dtypeId, shape.map(x => ffi.poly_const_int(ctx, x)), shape.length, tensorDevice)
+          ctx, dtypeId, shape.map(x => x instanceof UOp ? x.raw : ffi.poly_const_int(ctx, x)), shape.length, tensorDevice)
         : ffi.poly_tensor_empty_by_id(ctx, dtypeId, shape, shape.length, deviceId(tensorDevice))
       if (!tensor) throw new Error('poly_tensor_empty_by_id failed')
       return new Tensor(null, {

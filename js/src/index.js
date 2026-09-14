@@ -81,11 +81,15 @@ async function resolveNodeCoreAsync(name, opts) {
 }
 
 function create(opts) {
-  return createRuntime(applyNodeEnv(normalizeOptions(opts)), resolveNodeCore)
+  const runtime = createRuntime(applyNodeEnv(normalizeOptions(opts)), resolveNodeCore)
+  runtime._modelFiles = require('node:fs')
+  return runtime
 }
 
 async function createAsync(opts) {
-  return createRuntimeAsync(applyNodeEnv(normalizeOptions(opts)), resolveNodeCoreAsync)
+  const runtime = await createRuntimeAsync(applyNodeEnv(normalizeOptions(opts)), resolveNodeCoreAsync)
+  runtime._modelFiles = require('node:fs')
+  return runtime
 }
 
 let defaultRuntime = null

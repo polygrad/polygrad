@@ -62,7 +62,7 @@ function createNativeCore(device) {
     if (name) ops[name] = i
   }
 
-  const EXPECTED_ABI = 84
+  const EXPECTED_ABI = 89
   const abi = binding.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(
@@ -77,23 +77,19 @@ function createNativeCore(device) {
         : binding.poly_graph_from_json(ctxPtr, json)
     },
     fromIR(irBytes, weightsBytes) {
-      const inst = binding.poly_model_from_ir(irBytes, weightsBytes ?? null)
-      return setModelDevice(inst)
+      return binding.poly_model_from_ir_into(irBytes, weightsBytes ?? null, ctx)
     },
     fromProgram(programBytes, weightsBytes) {
       return binding.poly_model_from_program(programBytes, weightsBytes ?? null)
     },
     mlp(specJson) {
-      const inst = binding.poly_mlp_from_json(specJson, deviceId)
-      return setModelDevice(inst)
+      return binding.poly_mlp_from_json_into(specJson, deviceId, ctx)
     },
     tabm(specJson) {
-      const inst = binding.poly_tabm_from_json(specJson, deviceId)
-      return setModelDevice(inst)
+      return binding.poly_tabm_from_json_into(specJson, deviceId, ctx)
     },
     nam(specJson) {
-      const inst = binding.poly_nam_from_json(specJson, deviceId)
-      return setModelDevice(inst)
+      return binding.poly_nam_from_json_into(specJson, deviceId, ctx)
     },
     free(inst) {
       binding.poly_model_free(inst)
@@ -137,6 +133,12 @@ function createNativeCore(device) {
     bufShape(inst, i) {
       return binding.poly_model_buf_shape(inst, i)
     },
+    bufCurrentShape(inst, i) {
+      return binding.poly_model_buf_current_shape(inst, i)
+    },
+    bufShapeBounds(inst, i) {
+      return binding.poly_model_buf_shape_bounds(inst, i)
+    },
     bufData(inst, i) {
       return binding.poly_model_buf_data(inst, i)
     },
@@ -162,8 +164,7 @@ function createNativeCore(device) {
       return binding.poly_model_save_bundle(inst, flags)
     },
     fromBundle(bytes) {
-      const inst = binding.poly_model_from_bundle(bytes)
-      return setModelDevice(inst)
+      return binding.poly_model_from_bundle_into(bytes, ctx)
     },
     fromSinks(ctxPtr, names, sinks) {
       const inst = binding.poly_model_from_sinks(ctxPtr, names, sinks)
@@ -209,14 +210,12 @@ function createNativeCore(device) {
       return binding.poly_model_set_device(inst, id)
     },
     loadHF(configBytes, weightFilesBytes, maxBatch, maxSeqLen) {
-      const inst = binding.poly_hf_load(configBytes, weightFilesBytes,
-        maxBatch || 1, maxSeqLen || 0, deviceId)
-      return setModelDevice(inst)
+      return binding.poly_hf_load_into(configBytes, weightFilesBytes,
+        maxBatch || 1, maxSeqLen || 0, deviceId, ctx)
     },
     loadGGUF(ggufBytes, maxBatch, maxSeqLen) {
-      const inst = binding.poly_gguf_load(
-        ggufBytes, maxBatch || 1, maxSeqLen || 0, deviceId)
-      return setModelDevice(inst)
+      return binding.poly_gguf_load_into(
+        ggufBytes, maxBatch || 1, maxSeqLen || 0, deviceId, ctx)
     },
     importLastError() {
       const code = binding.poly_import_last_error_code()
@@ -247,6 +246,9 @@ function createNativeCore(device) {
     },
     call(inst, entrypoint, names, arrays) {
       return binding.poly_model_call(inst, entrypoint, names, arrays)
+    },
+    callTensors(inst, entrypoint, names, arrays) {
+      return binding.poly_model_call(inst, entrypoint, names, arrays, true)
     },
     entrypointOutputCount(inst, entrypoint) {
       return binding.poly_model_entrypoint_output_count(inst, entrypoint)

@@ -67,8 +67,18 @@ function runWebGpuSyncPreflight(pg, probe) {
   }
 }
 
-function runWebGpuCapsCheck(pg) {
+async function runWebGpuCapsCheck(pg) {
   if (!isWebGpu) return { passed: 0, failed: 0, skipped: 0 }
+  // Filtered construction-only suites need not have initialized the device.
+  const input = new pg.Tensor([1])
+  const output = input.add(1)
+  try {
+    const values = await output.toArrayAsync()
+    if (values[0] !== 2) throw new Error('WebGPU initialization execution mismatch')
+  } finally {
+    output.dispose()
+    input.dispose()
+  }
   const state = pg && pg._core && pg._core.Module && pg._core.Module.__polygradWebGpuState
   if (!state || !state.device) {
     throw new Error('WebGPU caps check ran before lazy initialization')
@@ -481,7 +491,7 @@ async function main() {
   let webgpuLifecycleResult = { passed: 0, failed: 0, skipped: 0 }
   if (isWebGpu) {
     try {
-      webgpuCapsResult = runWebGpuCapsCheck(pg)
+      webgpuCapsResult = await runWebGpuCapsCheck(pg)
     } catch (e) {
       console.log('  [FAIL] webgpu caps update after lazy init: ' + e.message)
       webgpuCapsResult = { passed: 0, failed: 1, skipped: 0 }

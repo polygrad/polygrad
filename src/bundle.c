@@ -377,3 +377,16 @@ PolyModel *poly_model_from_bundle(const uint8_t *data, int len) {
       sections.ir_data, sections.ir_len, sections.weights_data, sections.weights_len
   );
 }
+
+PolyModel *poly_model_from_bundle_into(
+    PolyCtx *ctx,
+    const uint8_t *data,
+    int len,
+    PolyDevice device
+) {
+  PolyBundleSections sections;
+  if (poly_bundle_decode(data, len, &sections) != 0) return NULL;
+  return poly_model_from_ir_into(
+      ctx, sections.ir_data, sections.ir_len, sections.weights_data, sections.weights_len, device
+  );
+}

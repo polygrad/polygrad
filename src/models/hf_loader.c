@@ -11,7 +11,8 @@
 #include "../loaders/import_error.h"
 #include <stdio.h>
 
-PolyModel *poly_hf_load(
+static PolyModel *hf_load(
+    PolyCtx *ctx,
     const char *config_json,
     int config_len,
     const uint8_t **weight_files,
@@ -42,6 +43,7 @@ PolyModel *poly_hf_load(
 
   /* 3. Dispatch to model-owned importer */
   PolyGenericImportOpts opts = {
+      .ctx = ctx,
       .max_batch = max_batch,
       .max_seq_len = max_seq_len,
       .device = device,
@@ -51,4 +53,38 @@ PolyModel *poly_hf_load(
   /* 4. Cleanup */
   poly_hf_decoded_free(hf);
   return inst;
+}
+
+PolyModel *poly_hf_load(
+    const char *config_json,
+    int config_len,
+    const uint8_t **weight_files,
+    const int64_t *weight_lens,
+    int n_weight_files,
+    int max_batch,
+    int max_seq_len,
+    PolyDevice device
+) {
+  return hf_load(
+      NULL, config_json, config_len, weight_files, weight_lens, n_weight_files, max_batch,
+      max_seq_len, device
+  );
+}
+
+PolyModel *poly_hf_load_into(
+    PolyCtx *ctx,
+    const char *config_json,
+    int config_len,
+    const uint8_t **weight_files,
+    const int64_t *weight_lens,
+    int n_weight_files,
+    int max_batch,
+    int max_seq_len,
+    PolyDevice device
+) {
+  return ctx ? hf_load(
+                   ctx, config_json, config_len, weight_files, weight_lens, n_weight_files,
+                   max_batch, max_seq_len, device
+               )
+             : NULL;
 }

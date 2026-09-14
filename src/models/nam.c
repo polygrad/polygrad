@@ -15,6 +15,8 @@
 
 #define _POSIX_C_SOURCE 200809L
 #include "nam.h"
+#include "factory.h"
+
 #include "mlp.h" /* poly_init_param_kaiming */
 #include "../model.h"
 #include "../tensor.h"
@@ -49,7 +51,7 @@ static PolyTensor *nam_float_scalar(PolyCtx *ctx, double value) {
 
 /* NAM Builder */
 
-PolyModel *poly_nam_from_json(const char *spec_json, int spec_len, PolyDevice device) {
+static PolyModel *nam_build(PolyCtx *ctx, const char *spec_json, int spec_len) {
   if (!spec_json || spec_len <= 0) return NULL;
 
   /* Parse JSON */
@@ -113,16 +115,8 @@ PolyModel *poly_nam_from_json(const char *spec_json, int spec_len, PolyDevice de
   subnet_sizes[n_layers - 1] = n_outputs;
   int n_linear = n_layers - 1; /* number of linear transformations */
 
-  PolyCtx *ctx = poly_ctx_new();
-  if (!ctx) goto fail_no_instance;
-  if (device != POLY_DEVICE_AUTO) poly_ctx_set_preferred_device(ctx, device);
-  PolyModelOptions opts = {
-      .own_ctx_on_success = true,
-      .own_ctx_on_failure = true,
-  };
-  PolyModel *inst = poly_model_new(ctx, &opts);
+  PolyModel *inst = poly_model_new(ctx, NULL);
   if (!inst) {
-    poly_ctx_destroy(ctx);
     goto fail_no_instance;
   }
 
@@ -298,9 +292,24 @@ PolyModel *poly_nam_from_json(const char *spec_json, int spec_len, PolyDevice de
 
 fail_pre_build:
   poly_model_free(inst);
-  poly_ctx_destroy(ctx);
 fail_no_instance:
   free(subnet_sizes);
   cJSON_Delete(root);
   return NULL;
+}
+
+/* Standalone C callers own a context through the returned Model; frontends
+ * use the context-taking form so Runtime disposal reaches every family. */
+static PolyModel *nam_create(PolyCtx *ctx, const char *json, int len, PolyDevice device) {
+  PolyModelFactoryScope scope;
+  if (!model_factory_begin(&scope, ctx, device)) return NULL;
+  return model_factory_end(&scope, nam_build(scope.ctx, json, len));
+}
+
+PolyModel *poly_nam_from_json(const char *json, int len, PolyDevice device) {
+  return nam_create(NULL, json, len, device);
+}
+
+PolyModel *poly_nam_from_json_into(PolyCtx *ctx, const char *json, int len, PolyDevice device) {
+  return ctx ? nam_create(ctx, json, len, device) : NULL;
 }

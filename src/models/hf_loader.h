@@ -29,6 +29,19 @@ void poly_model_config_free(PolyModelConfig *config);
 
 /* HuggingFace loader (auto-dispatch by model_type) */
 
+/* Runtime-bound imports borrow ctx; the standalone form owns a new context. */
+PolyModel *poly_hf_load_into(
+    PolyCtx *ctx,
+    const char *config_json,
+    int config_len,
+    const uint8_t **weight_files,
+    const int64_t *weight_lens,
+    int n_weight_files,
+    int max_batch,
+    int max_seq_len,
+    PolyDevice device
+);
+
 PolyModel *poly_hf_load(
     const char *config_json,
     int config_len,

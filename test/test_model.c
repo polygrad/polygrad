@@ -6,12 +6,18 @@
 #include "../src/model.h"
 #include "../src/models/compose.h"
 #include "../src/models/layers.h"
+#include "../src/models/mlp.h"
+#include "../src/models/tabm.h"
+#include "../src/models/nam.h"
+#include "../src/models/gpt2.h"
+#include "../src/models/qwen3.h"
 #include "../src/codegen/codegen.h"
 #include "../src/ctx.h"
 #include "../src/engine/jit.h"
 #include "../src/engine/realize.h"
 #include "../src/engine/schedule.h"
 #include "../src/ir.h"
+#include "../src/bundle.h"
 #include "../src/frontend.h"
 #include "../src/engine/schedule.h"
 #include "../src/nn/optim.h"
@@ -23,6 +29,219 @@
 #include <math.h>
 
 static int test_find_model_buf(PolyModel *inst, const char *name);
+
+TEST(model, variable_invocations_preserve_result_owners) {
+  PolyCtx *ctx = poly_ctx_new();
+  poly_ctx_set_preferred_device(ctx, POLY_DEVICE_INTERP);
+  PolyUOp *n = poly_uop_variable(
+      ctx, "model_batch", poly_arg_int(1), poly_arg_int(32), POLY_WEAKINT, 1, false
+  );
+  PolyUOp *dims[] = {
+      poly_uop_bind(ctx, n, 17), poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(2))};
+  PolyTensor *x = poly_tensor_empty_uop_by_id(
+      ctx, poly_dtype_id_by_name("float32"), dims, 2, POLY_DEVICE_INTERP
+  );
+  ASSERT_NOT_NULL(x);
+  int64_t axes[] = {0, 1};
+  PolyTensor *mean = poly_tensor_mean(ctx, x, axes, 2, false);
+  ASSERT_NOT_NULL(mean);
+  ASSERT_EQ(mean->uop_physical, poly_mean_axes(ctx, x->uop_physical, axes, 2, false));
+  ASSERT_EQ(mean->uop_logical, poly_mean_axes(ctx, x->uop_logical, axes, 2, false));
+  poly_tensor_release(mean);
+  PolyTensor *sum = poly_tensor_alu2(ctx, POLY_OP_ADD, x, x);
+  PolyBindingSpec bindings[] = {
+      {.name = "x", .role = POLY_ROLE_INPUT, .tensor = x},
+      {.name = "prediction", .role = POLY_ROLE_OUTPUT, .tensor = sum}};
+  const char *inputs[] = {"x"}, *outputs[] = {"prediction"};
+  PolyEntrypointSpec ep = {
+      .name = "forward", .inputs = inputs, .n_inputs = 1, .outputs = outputs, .n_outputs = 1};
+  PolyModel *model = poly_model_from_bindings(ctx, bindings, 2, &ep, 1, NULL, NULL);
+  ASSERT_NOT_NULL(model);
+  float data[34], out[34];
+  for (int i = 0; i < 34; i++)
+    data[i] = (float)i;
+  int64_t shape[] = {17, 2};
+  PolyIOBinding io = POLY_IO_BINDING_ARRAY("x", data, POLY_FLOAT32);
+  io.shape = shape;
+  io.ndim = 2;
+  PolyTensor *first = NULL;
+  ASSERT_EQ(poly_model_call_tensors(model, "forward", &io, 1, &first, 1), 0);
+  ASSERT_NOT_NULL(first);
+  shape[0] = 3;
+  io.nbytes = 6 * sizeof(float);
+  ASSERT_EQ(poly_model_call(model, "forward", &io, 1), 0);
+  int64_t current[2], lo[2], hi[2];
+  ASSERT_EQ(poly_model_buf_current_shape(model, 1, current, 2), 2);
+  ASSERT_EQ(current[0], 3);
+  ASSERT_EQ(poly_model_buf_shape_bounds(model, 0, lo, hi, 2), 2);
+  ASSERT_EQ(lo[0], 1);
+  ASSERT_EQ(hi[0], 32);
+  ASSERT_EQ(poly_model_read_buf(model, 1, out, 6 * sizeof(float)), 0);
+  for (int i = 0; i < 6; i++)
+    ASSERT_FLOAT_EQ(out[i], 2 * data[i], 0);
+  int len = 0;
+  ASSERT_TRUE(poly_model_export_program(model, &len) == NULL);
+  poly_model_free(model);
+  poly_tensor_release(sum);
+  poly_tensor_release(x);
+  ASSERT_EQ(poly_schedule_cache_clear(ctx), 0);
+  poly_ctx_collect(ctx);
+  ASSERT_EQ(poly_buffer_read(ctx, poly_uop_base(first->uop_physical), out, sizeof(out)), 0);
+  for (int i = 0; i < 34; i++)
+    ASSERT_FLOAT_EQ(out[i], 2 * data[i], 0);
+  poly_tensor_release(first);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(model, tensor_io_owns_outputs_and_rejects_invalid_bindings) {
+  PolyCtx *ctx = poly_ctx_new();
+  poly_ctx_set_preferred_device(ctx, POLY_DEVICE_INTERP);
+  int64_t shape[] = {2, 2};
+  PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 2, POLY_DEVICE_INTERP);
+  PolyTensor *sum = poly_tensor_alu2(ctx, POLY_OP_ADD, x, x);
+  PolyBindingSpec bindings[] = {
+      {.name = "x", .role = POLY_ROLE_INPUT, .tensor = x},
+      {.name = "prediction", .role = POLY_ROLE_OUTPUT, .tensor = sum},
+  };
+  const char *inputs[] = {"x"}, *outputs[] = {"prediction"};
+  PolyEntrypointSpec ep = {
+      .name = "forward", .inputs = inputs, .n_inputs = 1, .outputs = outputs, .n_outputs = 1};
+  PolyModel *model = poly_model_from_bindings(ctx, bindings, 2, &ep, 1, NULL, NULL);
+  ASSERT_NOT_NULL(model);
+  PolyTensor *input = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 2, POLY_DEVICE_INTERP);
+  float data[] = {1, 2, 3, 4};
+  ASSERT_EQ(poly_buffer_write(ctx, poly_uop_base(input->uop_physical), data, sizeof(data)), 0);
+  PolyIOBinding io = {.name = "x", .tensor = input};
+  PolyTensor *first = NULL, *second = NULL;
+  ASSERT_EQ(poly_model_call_tensors(model, "forward", &io, 1, &first, 1), 0);
+  ASSERT_NOT_NULL(first);
+  ASSERT_EQ(first->owner_refs, 1);
+  ASSERT_TRUE(first->uop_logical == NULL);
+  ASSERT_TRUE(first->source == NULL);
+  ASSERT_TRUE(poly_uop_base(first->uop_physical) != poly_model_get_buffer(model, "prediction"));
+  io.tensor = first;
+  ASSERT_EQ(poly_model_call_tensors(model, "forward", &io, 1, &second, 1), 0);
+  /* Ambiguous representation and an exact output-count mismatch fail without
+   * publishing any handle or changing the previous output snapshot. */
+  PolyTensor *rejected = first;
+  io.data = data;
+  ASSERT_EQ(poly_model_call_tensors(model, "forward", &io, 1, &rejected, 1), -1);
+  ASSERT_TRUE(rejected == NULL);
+  io.data = NULL;
+  ASSERT_EQ(poly_model_call_tensors(model, "forward", &io, 1, &rejected, 0), -1);
+  /* Equal storage lengths are not evidence of equal concrete shapes. Flat
+   * host storage remains valid; explicit shape must match before any write. */
+  PolyIOBinding host = POLY_IO_BINDING_ARRAY("x", data, POLY_FLOAT32);
+  int64_t wrong_shape[] = {1, 4};
+  host.shape = wrong_shape;
+  host.ndim = 2;
+  ASSERT_EQ(poly_model_call(model, "forward", &host, 1), -1);
+  host.shape = shape;
+  ASSERT_EQ(poly_model_call(model, "forward", &host, 1), 0);
+  host.shape = NULL;
+  ASSERT_EQ(poly_model_call(model, "forward", &host, 1), -1);
+  host.ndim = 0;
+  ASSERT_EQ(poly_model_call(model, "forward", &host, 1), 0);
+  io.shape = shape;
+  io.ndim = 2;
+  ASSERT_EQ(poly_model_call(model, "forward", &io, 1), -1);
+  poly_model_free(model);
+  poly_schedule_cache_clear(ctx);
+  poly_ctx_collect(ctx);
+  float readback[4];
+  ASSERT_EQ(
+      poly_buffer_read(ctx, poly_uop_base(first->uop_physical), readback, sizeof(readback)), 0
+  );
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(readback[i], 2 * data[i], 0);
+  ASSERT_EQ(
+      poly_buffer_read(ctx, poly_uop_base(second->uop_physical), readback, sizeof(readback)), 0
+  );
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(readback[i], 4 * data[i], 0);
+  poly_tensor_release(second);
+  poly_tensor_release(first);
+  poly_tensor_release(input);
+  poly_tensor_release(sum);
+  poly_tensor_release(x);
+  poly_schedule_cache_clear(ctx);
+  poly_ctx_collect(ctx);
+  ASSERT_EQ(ctx->n_tensors, 0);
+  poly_ctx_destroy(ctx);
+}
+
+TEST(model, family_factories_borrow_context_and_restore_defaults) {
+  PolyModel *(*factories[])(PolyCtx *, const char *, int, PolyDevice) = {
+      poly_mlp_from_json_into,
+      poly_tabm_from_json_into,
+      poly_nam_from_json_into,
+      poly_gpt2_from_json_into,
+  };
+  const char *configs[] = {
+      "{\"layers\":[2,3,1]}",
+      "{\"layers\":[2,3,1],\"n_ensemble\":2}",
+      "{\"n_features\":2,\"hidden_sizes\":[3],\"n_outputs\":1}",
+      "{\"vocab_size\":8,\"n_embd\":4,\"n_head\":2,\"n_layer\":1,\"n_positions\":2}",
+  };
+  PolyCtx *ctx = poly_ctx_new();
+  poly_ctx_set_preferred_device(ctx, POLY_DEVICE_CPU);
+  poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_NEVER);
+  for (int i = 0; i < 4; i++) {
+    PolyModel *a = factories[i](ctx, configs[i], (int)strlen(configs[i]), POLY_DEVICE_INTERP);
+    PolyModel *b = factories[i](ctx, configs[i], (int)strlen(configs[i]), POLY_DEVICE_INTERP);
+    ASSERT_NOT_NULL(a);
+    ASSERT_NOT_NULL(b);
+    ASSERT_PTR_EQ(poly_model_ctx(a), ctx);
+    ASSERT_PTR_EQ(poly_model_ctx(b), ctx);
+    const char *name = poly_model_param_name(a, 0);
+    ASSERT_TRUE(poly_model_get_buffer(a, name) != poly_model_get_buffer(b, name));
+    ASSERT_INT_EQ(poly_uop_device(poly_model_get_buffer(a, name)), POLY_DEVICE_INTERP);
+    ASSERT_INT_EQ(poly_ctx_get_preferred_device(ctx), POLY_DEVICE_CPU);
+    ASSERT_INT_EQ(poly_ctx_get_logical_policy(ctx), POLY_LOGICAL_NEVER);
+    ctx->execution_depth++;
+    ASSERT_TRUE(factories[i](ctx, configs[i], (int)strlen(configs[i]), POLY_DEVICE_INTERP) == NULL);
+    ctx->execution_depth--;
+    poly_model_test_fail_residency_roots_after(0);
+    PolyModel *failed = factories[i](ctx, configs[i], (int)strlen(configs[i]), POLY_DEVICE_INTERP);
+    poly_model_test_fail_residency_roots_after(-1);
+    ASSERT_TRUE(failed == NULL);
+    ASSERT_INT_EQ(poly_ctx_get_preferred_device(ctx), POLY_DEVICE_CPU);
+    ASSERT_INT_EQ(poly_ctx_get_logical_policy(ctx), POLY_LOGICAL_NEVER);
+    poly_model_free(a);
+    ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+    ASSERT_NOT_NULL(poly_model_get_sink(b, "forward"));
+    poly_model_free(b);
+    ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+    PolyCtxStats stats = {0};
+    ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
+    ASSERT_INT_EQ(stats.tensor_records, 0);
+    ASSERT_INT_EQ(stats.mem_used, 0);
+  }
+  Qwen3Config cfg = poly_qwen3_config_default();
+  cfg.vocab_size = 8;
+  cfg.dim = 4;
+  cfg.n_heads = 2;
+  cfg.n_kv_heads = 1;
+  cfg.n_layers = 1;
+  cfg.hidden_dim = 8;
+  cfg.max_seq_len = 2;
+  cfg.n_heads = 0;
+  ASSERT_TRUE(poly_qwen3_into(ctx, &cfg, POLY_DEVICE_INTERP) == NULL);
+  cfg.n_heads = 2;
+  GPT2Config invalid = poly_gpt2_config_default();
+  invalid.n_head = 0;
+  ASSERT_TRUE(poly_gpt2_into(ctx, &invalid, POLY_DEVICE_INTERP) == NULL);
+  PolyModel *qwen = poly_qwen3_into(ctx, &cfg, POLY_DEVICE_INTERP);
+  ASSERT_NOT_NULL(qwen);
+  ASSERT_PTR_EQ(poly_model_ctx(qwen), ctx);
+  ASSERT_INT_EQ(poly_ctx_get_preferred_device(ctx), POLY_DEVICE_CPU);
+  ASSERT_INT_EQ(poly_ctx_get_logical_policy(ctx), POLY_LOGICAL_NEVER);
+  poly_model_free(qwen);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
 
 TEST(model, composition_sequential_topology_and_cleanup) {
   const char *json =
@@ -218,7 +437,7 @@ static uint8_t *make_add_ir(int *out_len) {
       {.name = "output", .role = POLY_IR_ROLE_OUTPUT, .buffer = out_buf, .shape = {4}, .ndim = 1},
   };
   PolyIrEntrypoint eps[] = {{.name = "forward", .sink = sink}};
-  PolyIrSpec spec = {ctx, bufs, 3, eps, 1, NULL, 0};
+  PolyIrSpec spec = {.ctx = ctx, .bufs = bufs, .n_bufs = 3, .entrypoints = eps, .n_entrypoints = 1};
 
   uint8_t *bytes = poly_ir_export(&spec, out_len);
   poly_ctx_destroy(ctx);
@@ -962,7 +1181,7 @@ static uint8_t *make_train_ir(int n, int *out_len) {
       {.name = "forward", .sink = fwd_sink},
       {.name = "loss", .sink = loss_sink},
   };
-  PolyIrSpec spec = {ctx, bufs, 5, eps, 2, NULL, 0};
+  PolyIrSpec spec = {.ctx = ctx, .bufs = bufs, .n_bufs = 5, .entrypoints = eps, .n_entrypoints = 2};
 
   uint8_t *bytes = poly_ir_export(&spec, out_len);
   poly_ctx_destroy(ctx);
@@ -4284,6 +4503,61 @@ TEST(model, tied_parameter_aliases_receive_one_sgd_update) {
   ASSERT_FLOAT_EQ(w0[0], 0.2f, 1e-6f);
 
   poly_model_free(inst);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(model, import_into_isolated_aliases_failure_and_lifetime) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyModel *source = make_tied_scalar_train_model(ctx);
+  ASSERT_NOT_NULL(source);
+  float one = 1, two = 2, value = 0;
+  ASSERT_INT_EQ(poly_model_write_buf_named(source, "w0", &one, sizeof(one)), 0);
+  int len = 0;
+  uint8_t *bytes = poly_model_save_bundle(source, &len);
+  ASSERT_NOT_NULL(bytes);
+  PolyDevice preferred = poly_ctx_get_preferred_device(ctx);
+  PolyModel *a = poly_model_from_bundle_into(ctx, bytes, len, POLY_DEVICE_INTERP);
+  PolyModel *b = poly_model_from_bundle_into(ctx, bytes, len, POLY_DEVICE_INTERP);
+  ASSERT_NOT_NULL(a);
+  ASSERT_NOT_NULL(b);
+  ASSERT_PTR_EQ(poly_model_ctx(a), ctx);
+  ASSERT_INT_EQ(poly_ctx_get_preferred_device(ctx), preferred);
+  ASSERT_PTR_EQ(poly_model_get_buffer(a, "w0"), poly_model_get_buffer(a, "w1"));
+  ASSERT_TRUE(poly_model_get_buffer(a, "w0") != poly_model_get_buffer(b, "w0"));
+  ASSERT_TRUE(poly_model_get_buffer(a, "w0") != poly_model_get_buffer(source, "w0"));
+  ASSERT_INT_EQ(poly_model_write_buf_named(a, "w1", &two, sizeof(two)), 0);
+  ASSERT_INT_EQ(poly_model_read_buf_named(b, "w0", &value, sizeof(value)), 0);
+  ASSERT_FLOAT_EQ(value, 1, 0);
+  ASSERT_INT_EQ(poly_model_read_buf_named(source, "w0", &value, sizeof(value)), 0);
+  ASSERT_FLOAT_EQ(value, 1, 0);
+  ASSERT_INT_EQ(poly_model_set_optimizer(a, POLY_OPTIM_SGD, .1f, 0, 0, 0, 0), 0);
+  float loss = 0;
+  ASSERT_INT_EQ(poly_model_train_step(a, "loss", NULL, 0, &loss), 0);
+  ASSERT_INT_EQ(poly_model_read_buf_named(a, "w1", &value, sizeof(value)), 0);
+  ASSERT_FLOAT_EQ(value, .4f, 1e-5f);
+  ASSERT_INT_EQ(poly_model_read_buf_named(b, "w0", &value, sizeof(value)), 0);
+  ASSERT_FLOAT_EQ(value, 1, 0);
+  int ir_len = 0;
+  uint8_t *ir = poly_model_export_ir(source, &ir_len);
+  ASSERT_NOT_NULL(ir);
+  uint8_t invalid_weights[] = {1, 2, 3};
+  ASSERT_TRUE(
+      poly_model_from_ir_into(
+          ctx, ir, ir_len, invalid_weights, sizeof(invalid_weights), POLY_DEVICE_INTERP
+      ) == NULL
+  );
+  poly_model_test_fail_residency_roots_after(0);
+  ASSERT_TRUE(poly_model_from_bundle_into(ctx, bytes, len, POLY_DEVICE_INTERP) == NULL);
+  poly_model_test_fail_residency_roots_after(-1);
+  poly_model_free(a);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  ASSERT_INT_EQ(poly_model_read_buf_named(b, "w0", &value, sizeof(value)), 0);
+  ASSERT_FLOAT_EQ(value, 1, 0);
+  poly_model_free(b);
+  poly_model_free(source);
+  free(ir);
+  free(bytes);
   poly_ctx_destroy(ctx);
   PASS();
 }

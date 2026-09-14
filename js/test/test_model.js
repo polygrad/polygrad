@@ -210,7 +210,7 @@ async function runModelTests(pg) {
     const logits = x.dot(w)
     const inst = new pg.Model({
       inputs: { x },
-      state: { 'layers.0.weight': w },
+      params: { 'layers.0.weight': w },
       outputs: { logits },
       entrypoints: [
         { name: 'forward', inputs: ['x'], outputs: ['logits'] }

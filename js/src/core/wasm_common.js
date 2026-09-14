@@ -410,6 +410,48 @@ function createWasmCoreFromModule(Module, device) {
     if (arr instanceof Float64Array) return DTYPE_IDS.float64
     return -1
   }
+
+  function packModelBindings(names, values) {
+    if (names.length !== values.length) throw new TypeError('polygrad: mismatched Model bindings')
+    const allocations = []
+    const alloc = size => {
+      const ptr = Module._malloc(Math.max(1, size))
+      if (!ptr) throw new Error('Model binding allocation failed')
+      allocations.push(ptr)
+      return ptr
+    }
+    const free = () => { for (const ptr of allocations) Module._free(ptr) }
+    const string = value => {
+      const bytes = new TextEncoder().encode(value + '\0')
+      const ptr = alloc(bytes.length)
+      heapU8().set(bytes, ptr)
+      return ptr
+    }
+    try {
+      // wasm32 PolyIOBinding: name, data, nbytes, dtype_id, Tensor, shape, ndim.
+      const ptr = alloc(names.length * 28)
+      for (let i = 0; i < names.length; i++) {
+        const namePtr = string(names[i])
+        const shaped = values[i] && Array.isArray(values[i].shape) ? values[i] : null
+        const value = shaped ? shaped.data : values[i]
+        const shapePtr = shaped ? alloc(Math.max(1, shaped.shape.length) * 8) : 0
+        if (shaped) {
+          const view = new DataView(heapU8().buffer)
+          shaped.shape.forEach((dim, j) => view.setBigInt64(shapePtr + j*8, BigInt(dim), true))
+        }
+        const tensor = Number.isInteger(value) && value > 0 ? value : 0
+        const dtype = tensor ? 0 : modelBindingDTypeId(value)
+        if (dtype < 0) throw new TypeError('polygrad: unsupported Model binding TypedArray')
+        const dataPtr = tensor ? 0 : alloc(value.byteLength)
+        if (!tensor) heapU8().set(new Uint8Array(value.buffer, value.byteOffset, value.byteLength), dataPtr)
+        const base = (ptr >> 2) + i * 7
+        heap32().set([namePtr, dataPtr, tensor ? 0 : value.byteLength, dtype, tensor,
+          shapePtr, shaped ? shaped.shape.length : 0], base)
+      }
+      // Entrypoint/loss/output marshalling shares the same checked owner.
+      return { ptr, alloc, string, free }
+    } catch (err) { free(); throw err }
+  }
   if (!(deviceName in DEVICE_IDS))
     throw new Error('polygrad: unsupported device \'' + deviceName + '\'')
   const resolvedDeviceName = deviceName === 'auto' ? 'wasm' : deviceName
@@ -1238,6 +1280,8 @@ function createWasmCoreFromModule(Module, device) {
       Module._poly_tensor_contiguous_backward(ctx, src),
     poly_tensor_sum: (ctx, src, axes, len, keepdim) =>
       callWithInt64(Module._poly_tensor_sum, ctx, src, axes, len, keepdim ? 1 : 0),
+    poly_tensor_mean: (ctx, src, axes, len, keepdim) =>
+      callWithInt64(Module._poly_tensor_mean, ctx, src, axes, len, keepdim ? 1 : 0),
     poly_tensor_sum_dtype_by_id: (ctx, src, axes, len, keepdim, dtypeId) =>
       callWithInt64(
         Module._poly_tensor_sum_dtype_by_id,
@@ -1971,7 +2015,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 84
+  const EXPECTED_ABI = 89
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(
@@ -2024,7 +2068,9 @@ function createWasmCoreFromModule(Module, device) {
         weightsPtr = allocBytes(weightsBytes)
         weightsLen = weightsBytes.length
       }
-      const inst = Module._poly_model_from_ir(irPtr, irBytes.length, weightsPtr, weightsLen)
+      // Preserve synchronous host staging; WebGPU placement stays deferred.
+      const inst = Module._poly_model_from_ir_into(ctx, irPtr, irBytes.length, weightsPtr,
+        weightsLen, deviceName === 'webgpu' ? DEVICE_IDS.interp : deviceId)
       Module._free(irPtr)
       if (weightsPtr) Module._free(weightsPtr)
       return configureModelDevice(inst)
@@ -2088,7 +2134,8 @@ function createWasmCoreFromModule(Module, device) {
     mlp(specJson) {
       const bytes = new TextEncoder().encode(specJson)
       const specPtr = allocBytes(bytes)
-      const inst = Module._poly_mlp_from_json(specPtr, bytes.length, deviceId)
+      const inst = Module._poly_mlp_from_json_into(ctx, specPtr, bytes.length,
+        deviceName === 'webgpu' ? DEVICE_IDS.interp : deviceId)
       Module._free(specPtr)
       return configureModelDevice(inst)
     },
@@ -2096,7 +2143,8 @@ function createWasmCoreFromModule(Module, device) {
     tabm(specJson) {
       const bytes = new TextEncoder().encode(specJson)
       const specPtr = allocBytes(bytes)
-      const inst = Module._poly_tabm_from_json(specPtr, bytes.length, deviceId)
+      const inst = Module._poly_tabm_from_json_into(ctx, specPtr, bytes.length,
+        deviceName === 'webgpu' ? DEVICE_IDS.interp : deviceId)
       Module._free(specPtr)
       return configureModelDevice(inst)
     },
@@ -2104,7 +2152,8 @@ function createWasmCoreFromModule(Module, device) {
     nam(specJson) {
       const bytes = new TextEncoder().encode(specJson)
       const specPtr = allocBytes(bytes)
-      const inst = Module._poly_nam_from_json(specPtr, bytes.length, deviceId)
+      const inst = Module._poly_nam_from_json_into(ctx, specPtr, bytes.length,
+        deviceName === 'webgpu' ? DEVICE_IDS.interp : deviceId)
       Module._free(specPtr)
       return configureModelDevice(inst)
     },
@@ -2145,11 +2194,26 @@ function createWasmCoreFromModule(Module, device) {
       const ndim = Module._poly_model_buf_shape(instPtr, i, _scratchOutShapePtr, 8)
       return readShapeFromPtr(_scratchOutShapePtr, ndim)
     },
+    bufCurrentShape(instPtr, i) {
+      const ndim = Module._poly_model_buf_current_shape(instPtr, i, _scratchOutShapePtr, 8)
+      if (ndim < 0) throw new Error('polygrad: invalid buffer index')
+      return readShapeFromPtr(_scratchOutShapePtr, ndim)
+    },
+    bufShapeBounds(instPtr, i) {
+      const ptr = Module._malloc(128)
+      if (!ptr) throw new Error('polygrad: shape query allocation failed')
+      try {
+        const ndim = Module._poly_model_buf_shape_bounds(instPtr, i, ptr, ptr + 64, 8)
+        if (ndim < 0) throw new Error('polygrad: invalid buffer index')
+        const lower = readShapeFromPtr(ptr, ndim), upper = readShapeFromPtr(ptr + 64, ndim)
+        return lower.map((lo, d) => [lo, upper[d]])
+      } finally { Module._free(ptr) }
+    },
     bufData(instPtr, i) {
       const run = () => {
         const dtypeId = this.bufDtypeId(instPtr, i)
         const [AT, itemsize] = storageInfo(dtypeId)
-        const numel = shapeNumel(this.bufShape(instPtr, i))
+        const numel = shapeNumel(this.bufCurrentShape(instPtr, i))
         const nbytes = numel * itemsize
         if (!nbytes) return new AT(0)
         const dst = Module._malloc(nbytes)
@@ -2271,7 +2335,8 @@ function createWasmCoreFromModule(Module, device) {
     },
     fromBundle(bytes) {
       const ptr = allocBytes(bytes)
-      const inst = Module._poly_model_from_bundle(ptr, bytes.length)
+      const inst = Module._poly_model_from_bundle_into(ctx, ptr, bytes.length,
+        deviceName === 'webgpu' ? DEVICE_IDS.interp : deviceId)
       Module._free(ptr)
       return configureModelDevice(inst)
     },
@@ -2449,9 +2514,9 @@ function createWasmCoreFromModule(Module, device) {
         heap32()[(lenArr >> 2) + i * 2] = weightFilesBytes[i].length
         heap32()[(lenArr >> 2) + i * 2 + 1] = 0
       }
-      const inst = Module._poly_hf_load(
-        cfgPtr, configBytes.length, ptrArr, lenArr, n,
-        maxBatch || 1, maxSeqLen || 0, deviceId)
+      const inst = Module._poly_hf_load_into(
+        ctx, cfgPtr, configBytes.length, ptrArr, lenArr, n,
+        maxBatch || 1, maxSeqLen || 0, deviceName === 'webgpu' ? DEVICE_IDS.interp : deviceId)
       for (const fp of filePtrs) Module._free(fp)
       Module._free(ptrArr); Module._free(lenArr); Module._free(cfgPtr)
       return configureModelDevice(inst)
@@ -2459,8 +2524,9 @@ function createWasmCoreFromModule(Module, device) {
 
     loadGGUF(ggufBytes, maxBatch, maxSeqLen) {
       const ptr = allocBytes(ggufBytes)
-      const inst = Module._poly_gguf_load(
-        ptr, BigInt(ggufBytes.length), maxBatch || 1, maxSeqLen || 0, deviceId)
+      const inst = Module._poly_gguf_load_into(
+        ctx, ptr, BigInt(ggufBytes.length), maxBatch || 1, maxSeqLen || 0,
+        deviceName === 'webgpu' ? DEVICE_IDS.interp : deviceId)
       Module._free(ptr)
       return configureModelDevice(inst)
     },
@@ -2522,46 +2588,47 @@ function createWasmCoreFromModule(Module, device) {
         instPtr, kind, lr, beta1, beta2, eps, weightDecay, momentum || 0, !!nesterov, !!classic)
     },
 
-    call(instPtr, entrypoint, names, arrays) {
+    call(instPtr, entrypoint, names, arrays, tensorOutputs = false) {
       const n = names.length
-      if (arrays.length !== n) throw new TypeError('polygrad: mismatched Model names and arrays')
-      const dtypeIds = arrays.map(modelBindingDTypeId)
-      if (dtypeIds.some(id => id < 0)) {
-        throw new TypeError('polygrad: unsupported Model binding TypedArray')
+      const bindings = packModelBindings(names, arrays)
+      const bindingPtr = bindings.ptr
+      const cleanup = bindings.free
+      let entrypointPtr, count, outputPtr
+      try {
+        entrypointPtr = bindings.string(entrypoint)
+        count = tensorOutputs ? Module._poly_model_entrypoint_output_count(instPtr, entrypointPtr) : 0
+        if (count < 0) throw new Error('Model Tensor output signature failed')
+        outputPtr = tensorOutputs ? bindings.alloc(Math.max(1, count) * 4) : 0
+      } catch (error) { cleanup(); throw error }
+      const finish = rc => {
+        if (!tensorOutputs) return rc
+        if (rc !== 0) throw new Error('polygrad: Model Tensor call failed')
+        return Array.from(heap32().subarray(outputPtr >> 2, (outputPtr >> 2) + count))
       }
-      const bindingPtr = Module._malloc(Math.max(1, n) * 16)
-      const entrypointPtr = allocString(entrypoint)
-      const namePtrs = new Array(n)
-      const dataPtrs = new Array(n)
-      for (let i = 0; i < n; i++) {
-        namePtrs[i] = allocString(names[i])
-        dataPtrs[i] = allocBytes(new Uint8Array(arrays[i].buffer, arrays[i].byteOffset, arrays[i].byteLength))
-        const base = (bindingPtr >> 2) + i * 4
-        heap32()[base] = namePtrs[i]
-        heap32()[base + 1] = dataPtrs[i]
-        heap32()[base + 2] = arrays[i].byteLength
-        heap32()[base + 3] = dtypeIds[i]
-      }
-      const cleanup = () => {
-        for (const ptr of dataPtrs) Module._free(ptr)
-        for (const ptr of namePtrs) Module._free(ptr)
-        Module._free(entrypointPtr)
-        Module._free(bindingPtr)
-      }
+      const symbol = tensorOutputs ? 'poly_model_call_tensors' : 'poly_model_call'
+      const args = [instPtr, entrypointPtr, bindingPtr, n]
+      if (tensorOutputs) args.push(outputPtr, count)
       if (deviceName === 'webgpu' && Module.ccall) {
         return ensureModelDevice(instPtr).then(() => {
           return Module.ccall(
-            'poly_model_call',
+            symbol,
             'number',
-            ['number', 'number', 'number', 'number'],
-            [instPtr, entrypointPtr, bindingPtr, n],
+            args.map(() => 'number'),
+            args,
             { async: true }
           )
-        }).finally(cleanup)
+        }).then(finish).finally(cleanup)
       }
-      const rc = Module._poly_model_call(instPtr, entrypointPtr, bindingPtr, n)
-      cleanup()
-      return rc
+      try {
+        const rc = tensorOutputs
+          ? Module._poly_model_call_tensors(instPtr, entrypointPtr, bindingPtr, n, outputPtr, count)
+          : Module._poly_model_call(instPtr, entrypointPtr, bindingPtr, n)
+        return finish(rc)
+      } finally { cleanup() }
+    },
+
+    callTensors(instPtr, entrypoint, names, arrays) {
+      return this.call(instPtr, entrypoint, names, arrays, true)
     },
 
     forward(instPtr, names, arrays) {
@@ -2598,32 +2665,15 @@ function createWasmCoreFromModule(Module, device) {
 
     trainStep(instPtr, names, arrays, entrypoint = null) {
       const n = names.length
-      const dtypeIds = arrays.map(modelBindingDTypeId)
-      if (dtypeIds.some(id => id < 0)) {
-        throw new TypeError('polygrad: unsupported Model binding TypedArray')
-      }
-      const bindingPtr = Module._malloc(Math.max(1, n) * 16)
-      const namePtrs = new Array(n)
-      const dataPtrs = new Array(n)
-      for (let i = 0; i < n; i++) {
-        namePtrs[i] = allocString(names[i])
-        dataPtrs[i] = allocBytes(new Uint8Array(arrays[i].buffer, arrays[i].byteOffset, arrays[i].byteLength))
-        const base = (bindingPtr >> 2) + i * 4
-        heap32()[base] = namePtrs[i]
-        heap32()[base + 1] = dataPtrs[i]
-        heap32()[base + 2] = arrays[i].byteLength
-        heap32()[base + 3] = dtypeIds[i]
-      }
-      const lossPtr = Module._malloc(4)
-      const entryPtr = entrypoint == null ? 0 : allocString(entrypoint)
+      const bindings = packModelBindings(names, arrays)
+      const bindingPtr = bindings.ptr
+      const cleanup = bindings.free
+      let lossPtr, entryPtr
+      try {
+        lossPtr = bindings.alloc(4)
+        entryPtr = entrypoint == null ? 0 : bindings.string(entrypoint)
+      } catch (error) { cleanup(); throw error }
       const readLoss = (rc) => rc === 0 ? heapF32()[lossPtr >> 2] : null
-      const cleanup = () => {
-        Module._free(entryPtr)
-        Module._free(lossPtr)
-        for (const ptr of dataPtrs) Module._free(ptr)
-        for (const ptr of namePtrs) Module._free(ptr)
-        Module._free(bindingPtr)
-      }
       if (deviceName === 'webgpu' && Module.ccall) {
         return ensureModelDevice(instPtr).then(() => {
           return Module.ccall(
@@ -2635,10 +2685,9 @@ function createWasmCoreFromModule(Module, device) {
           )
         }).then(readLoss).finally(cleanup)
       }
-      const rc = Module._poly_model_train_step(instPtr, entryPtr, bindingPtr, n, lossPtr)
-      const loss = readLoss(rc)
-      cleanup()
-      return loss
+      try {
+        return readLoss(Module._poly_model_train_step(instPtr, entryPtr, bindingPtr, n, lossPtr))
+      } finally { cleanup() }
     }
   }
 

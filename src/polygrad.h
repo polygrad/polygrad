@@ -10,7 +10,7 @@
 
 /* Public C/frontend ABI version. Bump when exported symbols or public struct
  * layouts used by frontends change. */
-#define POLYGRAD_ABI_VERSION 84
+#define POLYGRAD_ABI_VERSION 89
 
 #include <stdint.h>
 #include <stddef.h>
@@ -1082,6 +1082,13 @@ PolyTensor *poly_tensor_quick_gelu(PolyCtx *ctx, PolyTensor *src);
 PolyTensor *poly_tensor_detach(PolyCtx *ctx, PolyTensor *src);
 PolyTensor *poly_tensor_contiguous_backward(PolyCtx *ctx, PolyTensor *src);
 PolyTensor *poly_tensor_sum(PolyCtx *ctx, PolyTensor *src, int64_t *axes, int n_axes, bool keepdim);
+PolyTensor *poly_tensor_mean(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    int64_t *axes,
+    int n_axes,
+    bool keepdim
+);
 PolyTensor *poly_tensor_sum_dtype_by_id(
     PolyCtx *ctx,
     PolyTensor *src,

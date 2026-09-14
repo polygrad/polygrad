@@ -127,6 +127,20 @@ async function runWasmOwnershipTests() {
     if (!rejected) throw new Error('stats collected residency during active async work')
   })
 
+  await test('Model bundle load rejects suspended Wasm before entering the core', async () => {
+    let calls = 0
+    const rt = lifecycleRuntime({
+      caps: { core: 'wasm', device: 'webgpu' },
+      model: { fromBundle() { calls++; return 123 }, free() {} }
+    })
+    rt._activeAsync = 1
+    const Model = createBoundModelClass(rt)
+    let error, unexpected
+    try { unexpected = Model.load(new Uint8Array([0])) } catch (e) { error = e }
+    if (unexpected) await unexpected.dispose()
+    if (!error || !/async/.test(error.message) || calls !== 0) throw new Error('bundle load entered suspended core')
+  })
+
   await test('async Model disposal follows its admitted forward on the core queue', async () => {
     const events = []
     let tail = Promise.resolve()
@@ -151,7 +165,7 @@ async function runWasmOwnershipTests() {
     }
     const rt = lifecycleRuntime(core)
     const Model = createBoundModelClass(rt)
-    const inst = new Model(123)
+    const inst = Model._fromHandle(123)
     const forward = inst.forwardAsync({})
     const disposed = inst.dispose()
     await Promise.all([forward, disposed])
@@ -317,6 +331,49 @@ async function runWasmOwnershipTests() {
       core.heapU8().set(prefix, 0)
       Module._malloc = originalMalloc
       Module._poly_buffer_write = originalWrite
+      await pg.dispose()
+    }
+  })
+
+  await test('Model marshalling allocation failures release rows before entering C', async () => {
+    const pg = await polygrad.create({ core: 'wasm' })
+    const core = pg._core, Module = core.Module
+    const malloc = Module._malloc, free = Module._free
+    const call = Module._poly_model_call, train = Module._poly_model_train_step
+    const callTensors = Module._poly_model_call_tensors
+    const outputCount = Module._poly_model_entrypoint_output_count
+    const prefix = core.heapU8().slice(0, 32)
+    const live = new Set()
+    try {
+      for (const operation of ['call', 'tensors', 'train']) {
+        for (let failAt = 1; failAt <= (operation === 'call' ? 4 : 5); failAt++) {
+          let allocations = 0, entered = 0, rejected = false
+          Module._malloc = size => {
+            if (++allocations === failAt) return 0
+            const ptr = malloc(size)
+            if (ptr) live.add(ptr)
+            return ptr
+          }
+          Module._free = ptr => { live.delete(ptr); free(ptr) }
+          Module._poly_model_call = Module._poly_model_train_step = () => { entered++; return 0 }
+          Module._poly_model_call_tensors = () => { entered++; return 0 }
+          Module._poly_model_entrypoint_output_count = () => 1
+          try {
+            if (operation === 'call') core.model.call(1, 'forward', ['x'], [new Float32Array([1])])
+            else if (operation === 'tensors') core.model.callTensors(1, 'forward', ['x'], [new Float32Array([1])])
+            else core.model.trainStep(1, ['x'], [new Float32Array([1])], 'loss')
+          } catch (error) { rejected = /allocation/.test(error.message) }
+          if (!rejected || entered || live.size || !prefix.every((byte, i) => core.heapU8()[i] === byte))
+            throw new Error(`${operation} allocation ${failAt} reached C/address zero or leaked rows`)
+        }
+      }
+    } finally {
+      Module._malloc = malloc; Module._free = free
+      Module._poly_model_call = call; Module._poly_model_train_step = train
+      Module._poly_model_call_tensors = callTensors
+      Module._poly_model_entrypoint_output_count = outputCount
+      for (const ptr of live) free(ptr)
+      core.heapU8().set(prefix, 0)
       await pg.dispose()
     }
   })

@@ -7297,6 +7297,25 @@ PolyTensor *poly_tensor_sum(
   return tensor_sum_dtype(ctx, src, axes, n_axes, keepdim, NULL);
 }
 
+PolyTensor *poly_tensor_mean(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    int64_t *axes,
+    int n_axes,
+    bool keepdim
+) {
+  int build_logical = tensor_unary_builds_logical(ctx, src);
+  if (build_logical < 0) return NULL;
+  PolyUOp *current = tensor_current_uop(src);
+  if (!current) return NULL;
+  /* OpMixin.mean uses exact reduced extents, including runtime Variables.
+   * Frontend max-shape metadata must not become the divisor. */
+  return tensor_unary_result(
+      ctx, src, build_logical ? poly_mean_axes(ctx, src->uop_logical, axes, n_axes, keepdim) : NULL,
+      poly_mean_axes(ctx, current, axes, n_axes, keepdim)
+  );
+}
+
 PolyTensor *poly_tensor_sum_dtype_by_id(
     PolyCtx *ctx,
     PolyTensor *src,

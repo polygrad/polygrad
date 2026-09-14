@@ -32,6 +32,7 @@
 #define POLY_BUNDLE_H
 
 #include <stdint.h>
+#include "polygrad.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -96,6 +97,12 @@ uint8_t *poly_model_save_bundle_ex(PolyModel *inst, int *out_len, uint32_t weigh
  * Decodes bundle, imports IR, imports weights.
  * Returns NULL on error. */
 PolyModel *poly_model_from_bundle(const uint8_t *data, int len);
+PolyModel *poly_model_from_bundle_into(
+    PolyCtx *ctx,
+    const uint8_t *data,
+    int len,
+    PolyDevice device
+);
 
 #ifdef __cplusplus
 }

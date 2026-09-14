@@ -23,6 +23,8 @@
 
 #define _POSIX_C_SOURCE 200809L
 #include "gpt2.h"
+#include "factory.h"
+
 #include "layers.h"
 #include "../nn/nn.h"
 #include "../tensor.h"
@@ -49,8 +51,10 @@ GPT2Config poly_gpt2_config_default(void) {
 
 /* GPT-2 Builder */
 
-PolyModel *poly_gpt2(const GPT2Config *cfg, PolyDevice device) {
-  if (!cfg || cfg->n_layer < 1 || cfg->n_embd < 1 || cfg->vocab_size < 1) return NULL;
+static PolyModel *gpt2_build(PolyCtx *ctx, const GPT2Config *cfg) {
+  /* Validate the divisor before deriving head width from untrusted config. */
+  if (!cfg || cfg->n_layer < 1 || cfg->n_embd < 1 || cfg->vocab_size < 1 || cfg->n_head < 1)
+    return NULL;
 
   int V = cfg->vocab_size;
   int D = cfg->n_embd;
@@ -66,16 +70,8 @@ PolyModel *poly_gpt2(const GPT2Config *cfg, PolyDevice device) {
     return NULL;
   }
 
-  PolyCtx *ctx = poly_ctx_new();
-  if (!ctx) return NULL;
-  if (device != POLY_DEVICE_AUTO) poly_ctx_set_preferred_device(ctx, device);
-  PolyModelOptions opts = {
-      .own_ctx_on_success = true,
-      .own_ctx_on_failure = true,
-  };
-  PolyModel *inst = poly_model_new(ctx, &opts);
+  PolyModel *inst = poly_model_new(ctx, NULL);
   if (!inst) {
-    poly_ctx_destroy(ctx);
     return NULL;
   }
 
@@ -218,11 +214,26 @@ PolyModel *poly_gpt2(const GPT2Config *cfg, PolyDevice device) {
 
 fail_pre_build:
   poly_model_free(inst);
-  poly_ctx_destroy(ctx);
   return NULL;
 }
 
-PolyModel *poly_gpt2_from_json(const char *json, int len, PolyDevice device) {
+/* Standalone C callers own a context through the returned Model; frontends
+ * use the context-taking form so Runtime disposal reaches every family. */
+static PolyModel *gpt2_create(PolyCtx *ctx, const GPT2Config *cfg, PolyDevice device) {
+  PolyModelFactoryScope scope;
+  if (!model_factory_begin(&scope, ctx, device)) return NULL;
+  return model_factory_end(&scope, gpt2_build(scope.ctx, cfg));
+}
+
+PolyModel *poly_gpt2(const GPT2Config *cfg, PolyDevice device) {
+  return gpt2_create(NULL, cfg, device);
+}
+
+PolyModel *poly_gpt2_into(PolyCtx *ctx, const GPT2Config *cfg, PolyDevice device) {
+  return ctx ? gpt2_create(ctx, cfg, device) : NULL;
+}
+
+static PolyModel *gpt2_from_json(PolyCtx *ctx, const char *json, int len, PolyDevice device) {
   if (!json || len <= 0) return NULL;
 
   cJSON *root = cJSON_ParseWithLength(json, (size_t)len);
@@ -238,9 +249,17 @@ PolyModel *poly_gpt2_from_json(const char *json, int len, PolyDevice device) {
   if ((v = cJSON_GetObjectItem(root, "batch_size"))) cfg.batch_size = v->valueint;
   if ((v = cJSON_GetObjectItem(root, "layer_norm_epsilon"))) cfg.norm_eps = (float)v->valuedouble;
 
-  PolyModel *inst = poly_gpt2(&cfg, device);
+  PolyModel *inst = ctx ? poly_gpt2_into(ctx, &cfg, device) : poly_gpt2(&cfg, device);
   cJSON_Delete(root);
   return inst;
+}
+
+PolyModel *poly_gpt2_from_json(const char *json, int len, PolyDevice device) {
+  return gpt2_from_json(NULL, json, len, device);
+}
+
+PolyModel *poly_gpt2_from_json_into(PolyCtx *ctx, const char *json, int len, PolyDevice device) {
+  return ctx ? gpt2_from_json(ctx, json, len, device) : NULL;
 }
 
 /* HF import (model-specific) */
@@ -280,7 +299,8 @@ static int gpt2_needs_transpose(const char *name, int src_ndim, int dst_ndim) {
   return 0;
 }
 
-PolyModel *poly_gpt2_from_hf_decoded(
+static PolyModel *gpt2_from_hf_decoded(
+    PolyCtx *ctx,
     const PolyHfDecoded *hf,
     int max_batch,
     int max_seq_len,
@@ -300,7 +320,7 @@ PolyModel *poly_gpt2_from_hf_decoded(
   if (max_batch > 0) cfg.batch_size = max_batch;
   if (max_seq_len > 0) cfg.max_seq_len = max_seq_len;
 
-  PolyModel *inst = poly_gpt2(&cfg, device);
+  PolyModel *inst = ctx ? poly_gpt2_into(ctx, &cfg, device) : poly_gpt2(&cfg, device);
   if (!inst) return NULL;
 
   PolyBindIndex *idx = poly_bind_index_create(inst);
@@ -370,18 +390,27 @@ PolyModel *poly_gpt2_from_hf(
           0 ||
       !hf)
     return NULL;
-  PolyModel *inst = poly_gpt2_from_hf_decoded(hf, max_batch, max_seq_len, device);
+  PolyModel *inst = gpt2_from_hf_decoded(NULL, hf, max_batch, max_seq_len, device);
   poly_hf_decoded_free(hf);
   return inst;
 }
 
 /* Registry adapter */
+PolyModel *poly_gpt2_from_hf_decoded(
+    const PolyHfDecoded *hf,
+    int max_batch,
+    int max_seq_len,
+    PolyDevice device
+) {
+  return gpt2_from_hf_decoded(NULL, hf, max_batch, max_seq_len, device);
+}
+
 PolyModel *poly_gpt2_from_hf_decoded_generic(
     const PolyHfDecoded *hf,
     const PolyGenericImportOpts *opts
 ) {
-  return poly_gpt2_from_hf_decoded(
-      hf, opts ? opts->max_batch : 0, opts ? opts->max_seq_len : 0,
+  return gpt2_from_hf_decoded(
+      opts ? opts->ctx : NULL, hf, opts ? opts->max_batch : 0, opts ? opts->max_seq_len : 0,
       opts ? opts->device : POLY_DEVICE_AUTO
   );
 }
@@ -439,7 +468,8 @@ static const char *gpt2_gguf_map_name(const char *name, char *buf, int buf_size)
   return buf;
 }
 
-PolyModel *poly_gpt2_from_gguf_decoded(
+static PolyModel *gpt2_from_gguf_decoded(
+    PolyCtx *ctx,
     const PolyGgufDecoded *gguf,
     int max_batch,
     int max_seq_len,
@@ -466,7 +496,7 @@ PolyModel *poly_gpt2_from_gguf_decoded(
   if (max_batch > 0) cfg.batch_size = max_batch;
   if (max_seq_len > 0) cfg.max_seq_len = max_seq_len;
 
-  PolyModel *inst = poly_gpt2(&cfg, device);
+  PolyModel *inst = ctx ? poly_gpt2_into(ctx, &cfg, device) : poly_gpt2(&cfg, device);
   if (!inst) return NULL;
 
   PolyBindIndex *idx = poly_bind_index_create(inst);
@@ -531,18 +561,27 @@ PolyModel *poly_gpt2_from_gguf(
 ) {
   PolyGgufDecoded *gguf = NULL;
   if (poly_gguf_decode(data, len, &gguf) != 0 || !gguf) return NULL;
-  PolyModel *inst = poly_gpt2_from_gguf_decoded(gguf, max_batch, max_seq_len, device);
+  PolyModel *inst = gpt2_from_gguf_decoded(NULL, gguf, max_batch, max_seq_len, device);
   poly_gguf_decoded_free(gguf);
   return inst;
 }
 
 /* GGUF registry adapter */
+PolyModel *poly_gpt2_from_gguf_decoded(
+    const PolyGgufDecoded *gguf,
+    int max_batch,
+    int max_seq_len,
+    PolyDevice device
+) {
+  return gpt2_from_gguf_decoded(NULL, gguf, max_batch, max_seq_len, device);
+}
+
 PolyModel *poly_gpt2_from_gguf_decoded_generic(
     const PolyGgufDecoded *gguf,
     const PolyGenericImportOpts *opts
 ) {
-  return poly_gpt2_from_gguf_decoded(
-      gguf, opts ? opts->max_batch : 0, opts ? opts->max_seq_len : 0,
+  return gpt2_from_gguf_decoded(
+      opts ? opts->ctx : NULL, gguf, opts ? opts->max_batch : 0, opts ? opts->max_seq_len : 0,
       opts ? opts->device : POLY_DEVICE_AUTO
   );
 }

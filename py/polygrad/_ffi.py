@@ -16,7 +16,7 @@ import sys
 _lib = None
 OPS = {}
 _has_cuda_ffi = False
-POLYGRAD_ABI_VERSION = 84
+POLYGRAD_ABI_VERSION = 89
 
 # --- Opaque pointer type (always available) ---
 _ptr = ctypes.c_void_p
@@ -35,7 +35,10 @@ class PolyIOBinding(ctypes.Structure):
     _fields_ = [('name', ctypes.c_char_p),
                 ('data', ctypes.c_void_p),
                 ('nbytes', ctypes.c_size_t),
-                ('dtype_id', ctypes.c_int)]
+                ('dtype_id', ctypes.c_int),
+                ('tensor', _ptr),
+                ('shape', ctypes.POINTER(ctypes.c_int64)),
+                ('ndim', ctypes.c_int)]
 
 class PolyDType(ctypes.Structure):
     _fields_ = [
@@ -989,6 +992,8 @@ def _declare_signatures(lib):
 
     lib.poly_tensor_sum.restype = _ptr
     lib.poly_tensor_sum.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int, ctypes.c_bool]
+    lib.poly_tensor_mean.restype = _ptr
+    lib.poly_tensor_mean.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int, ctypes.c_bool]
 
     lib.poly_tensor_sum_dtype_by_id.restype = _ptr
     lib.poly_tensor_sum_dtype_by_id.argtypes = [
@@ -1314,6 +1319,8 @@ def _declare_signatures(lib):
         factory.argtypes = [_ptr, ctypes.c_char_p, ctypes.c_int, ctypes.POINTER(PolyModelError)]
     lib.poly_model_from_ir.restype = _ptr
     lib.poly_model_from_ir.argtypes = [_u8p, ctypes.c_int, _u8p, ctypes.c_int]
+    lib.poly_model_from_ir_into.restype = _ptr
+    lib.poly_model_from_ir_into.argtypes = [_ptr, _u8p, ctypes.c_int, _u8p, ctypes.c_int, ctypes.c_int]
     lib.poly_model_from_program.restype = _ptr
     lib.poly_model_from_program.argtypes = [_u8p, ctypes.c_int, _u8p, ctypes.c_int]
 
@@ -1395,6 +1402,10 @@ def _declare_signatures(lib):
 
     lib.poly_model_buf_shape.restype = ctypes.c_int
     lib.poly_model_buf_shape.argtypes = [_ptr, ctypes.c_int, _i64p, ctypes.c_int]
+    lib.poly_model_buf_current_shape.restype = ctypes.c_int
+    lib.poly_model_buf_current_shape.argtypes = [_ptr, ctypes.c_int, _i64p, ctypes.c_int]
+    lib.poly_model_buf_shape_bounds.restype = ctypes.c_int
+    lib.poly_model_buf_shape_bounds.argtypes = [_ptr, ctypes.c_int, _i64p, _i64p, ctypes.c_int]
 
     lib.poly_model_buf_data.restype = _fp
     lib.poly_model_buf_data.argtypes = [_ptr, ctypes.c_int, _i64p]
@@ -1431,6 +1442,8 @@ def _declare_signatures(lib):
 
     lib.poly_model_from_bundle.restype = _ptr
     lib.poly_model_from_bundle.argtypes = [_u8p, ctypes.c_int]
+    lib.poly_model_from_bundle_into.restype = _ptr
+    lib.poly_model_from_bundle_into.argtypes = [_ptr, _u8p, ctypes.c_int, ctypes.c_int]
 
     lib.poly_model_forward.restype = ctypes.c_int
     lib.poly_model_forward.argtypes = [_ptr, ctypes.POINTER(PolyIOBinding), ctypes.c_int]
@@ -1438,6 +1451,10 @@ def _declare_signatures(lib):
     lib.poly_model_call.restype = ctypes.c_int
     lib.poly_model_call.argtypes = [
         _ptr, ctypes.c_char_p, ctypes.POINTER(PolyIOBinding), ctypes.c_int]
+    lib.poly_model_call_tensors.restype = ctypes.c_int
+    lib.poly_model_call_tensors.argtypes = [
+        _ptr, ctypes.c_char_p, ctypes.POINTER(PolyIOBinding), ctypes.c_int,
+        ctypes.POINTER(_ptr), ctypes.c_int]
 
     lib.poly_model_entrypoint_count.restype = ctypes.c_int
     lib.poly_model_entrypoint_count.argtypes = [_ptr]
@@ -1468,29 +1485,29 @@ def _declare_signatures(lib):
         ctypes.c_bool, ctypes.c_bool]
 
     # MLP family builder (model_mlp.h)
-    lib.poly_mlp_from_json.restype = _ptr
-    lib.poly_mlp_from_json.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_int]
+    lib.poly_mlp_from_json_into.restype = _ptr
+    lib.poly_mlp_from_json_into.argtypes = [_ptr, ctypes.c_char_p, ctypes.c_int, ctypes.c_int]
 
     # TabM family builder (model_tabm.h)
-    lib.poly_tabm_from_json.restype = _ptr
-    lib.poly_tabm_from_json.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_int]
+    lib.poly_tabm_from_json_into.restype = _ptr
+    lib.poly_tabm_from_json_into.argtypes = [_ptr, ctypes.c_char_p, ctypes.c_int, ctypes.c_int]
 
     # NAM family builder (model_nam.h)
-    lib.poly_nam_from_json.restype = _ptr
-    lib.poly_nam_from_json.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_int]
+    lib.poly_nam_from_json_into.restype = _ptr
+    lib.poly_nam_from_json_into.argtypes = [_ptr, ctypes.c_char_p, ctypes.c_int, ctypes.c_int]
 
     # HF/model loaders (src/models/*.c)
-    lib.poly_hf_load.restype = _ptr
-    lib.poly_hf_load.argtypes = [
-        ctypes.c_char_p, ctypes.c_int,
+    lib.poly_hf_load_into.restype = _ptr
+    lib.poly_hf_load_into.argtypes = [
+        _ptr, ctypes.c_char_p, ctypes.c_int,
         ctypes.POINTER(_u8p),
         ctypes.POINTER(ctypes.c_int64),
         ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
     ]
 
-    lib.poly_gguf_load.restype = _ptr
-    lib.poly_gguf_load.argtypes = [
-        _u8p, ctypes.c_int64, ctypes.c_int, ctypes.c_int, ctypes.c_int
+    lib.poly_gguf_load_into.restype = _ptr
+    lib.poly_gguf_load_into.argtypes = [
+        _ptr, _u8p, ctypes.c_int64, ctypes.c_int, ctypes.c_int, ctypes.c_int
     ]
 
     # --- Shape-on-UOp accessors ---

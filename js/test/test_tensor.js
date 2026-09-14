@@ -181,6 +181,21 @@ async function runTensorTests(pg, createRuntime) {
     out.dispose()
   })
 
+  await test('construction empty preserves symbolic dimensions', async () => {
+    const n = pg.uop.variable('empty_batch', 1, 32), bound = n.bind(17)
+    const matrix = Tensor.empty([bound,2]), vector = Tensor.empty(bound)
+    try {
+      assert(JSON.stringify(matrix.shape) === '[32,2]', 'empty lost bounded capacity')
+      assert(JSON.stringify(vector.shape) === '[32]', 'trailing UOp was parsed as options')
+      assert(matrix.uop.op === pg._core.ops.SHRINK, 'empty must retain its symbolic view')
+      for (const bad of [NaN, Infinity, 1.5, -1]) {
+        let rejected = false
+        try { Tensor.empty([bad]) } catch { rejected = true }
+        assert(rejected, 'invalid dimension was coerced into storage')
+      }
+    } finally { matrix.dispose(); vector.dispose(); bound.dispose(); n.dispose() }
+  })
+
   await test('construction rejects a failed UOp cast instead of creating zero', async () => {
     const source = pg.uop.constant(1.5, 'float32')
     source.cast = () => null
@@ -4928,7 +4943,7 @@ async function runTensorTests(pg, createRuntime) {
     cell.weightIh = T.full([8, 2], .25)
     cell.weightHh = T.full([8, 2], .125)
     const [hidden, state] = cell.call(x, [h, c])
-    const authored = await rt.Model.fromTensors({ inputs: {x, h, c}, state: {wi: cell.weightIh, wh: cell.weightHh},
+    const authored = await rt.Model.fromTensors({ inputs: {x, h, c}, params: {wi: cell.weightIh, wh: cell.weightHh},
       outputs: {hidden, cell: state}, losses: {loss: hidden.square().mean()} })
     const bundle = await authored.saveBundleAsync({includeOptimizer: false})
     await authored.dispose()

@@ -18,6 +18,8 @@
 
 #define _POSIX_C_SOURCE 200809L
 #include "qwen3.h"
+#include "factory.h"
+
 #include "layers.h"
 #include "../nn/nn.h"
 #include "../tensor.h"
@@ -48,8 +50,10 @@ Qwen3Config poly_qwen3_config_default(void) {
 
 /* Builder */
 
-PolyModel *poly_qwen3(const Qwen3Config *cfg, PolyDevice device) {
-  if (!cfg || cfg->n_layers < 1 || cfg->dim < 1 || cfg->vocab_size < 1) return NULL;
+static PolyModel *qwen3_build(PolyCtx *ctx, const Qwen3Config *cfg) {
+  /* Validate the divisor even when the checkpoint supplies an explicit width. */
+  if (!cfg || cfg->n_layers < 1 || cfg->dim < 1 || cfg->vocab_size < 1 || cfg->n_heads < 1)
+    return NULL;
 
   int V = cfg->vocab_size;
   int D = cfg->dim;
@@ -68,16 +72,8 @@ PolyModel *poly_qwen3(const Qwen3Config *cfg, PolyDevice device) {
     return NULL;
   }
 
-  PolyCtx *ctx = poly_ctx_new();
-  if (!ctx) return NULL;
-  if (device != POLY_DEVICE_AUTO) poly_ctx_set_preferred_device(ctx, device);
-  PolyModelOptions opts = {
-      .own_ctx_on_success = true,
-      .own_ctx_on_failure = true,
-  };
-  PolyModel *inst = poly_model_new(ctx, &opts);
+  PolyModel *inst = poly_model_new(ctx, NULL);
   if (!inst) {
-    poly_ctx_destroy(ctx);
     return NULL;
   }
 
@@ -218,8 +214,23 @@ PolyModel *poly_qwen3(const Qwen3Config *cfg, PolyDevice device) {
 
 fail_pre_build:
   poly_model_free(inst);
-  poly_ctx_destroy(ctx);
   return NULL;
+}
+
+/* Standalone C callers own a context through the returned Model; frontends
+ * use the context-taking form so Runtime disposal reaches every family. */
+static PolyModel *qwen3_create(PolyCtx *ctx, const Qwen3Config *cfg, PolyDevice device) {
+  PolyModelFactoryScope scope;
+  if (!model_factory_begin(&scope, ctx, device)) return NULL;
+  return model_factory_end(&scope, qwen3_build(scope.ctx, cfg));
+}
+
+PolyModel *poly_qwen3(const Qwen3Config *cfg, PolyDevice device) {
+  return qwen3_create(NULL, cfg, device);
+}
+
+PolyModel *poly_qwen3_into(PolyCtx *ctx, const Qwen3Config *cfg, PolyDevice device) {
+  return ctx ? qwen3_create(ctx, cfg, device) : NULL;
 }
 
 /* GGUF import */
@@ -229,7 +240,8 @@ fail_pre_build:
 #include "../loaders/import_desc.h"
 #include "../loaders/import_error.h"
 
-PolyModel *poly_qwen3_from_gguf_decoded(
+static PolyModel *qwen3_from_gguf_decoded(
+    PolyCtx *ctx,
     const PolyGgufDecoded *gguf,
     int max_batch,
     int max_seq_len,
@@ -304,7 +316,7 @@ PolyModel *poly_qwen3_from_gguf_decoded(
       cfg.head_dim, cfg.max_seq_len, cfg.norm_eps, cfg.rope_theta, cfg.qk_norm
   );
 
-  PolyModel *inst = poly_qwen3(&cfg, device);
+  PolyModel *inst = ctx ? poly_qwen3_into(ctx, &cfg, device) : poly_qwen3(&cfg, device);
   if (!inst) return NULL;
 
   /* Precompute RoPE frequencies and fill the input buffers */
@@ -388,12 +400,21 @@ fail:
 }
 
 /* Registry adapter */
+PolyModel *poly_qwen3_from_gguf_decoded(
+    const PolyGgufDecoded *gguf,
+    int max_batch,
+    int max_seq_len,
+    PolyDevice device
+) {
+  return qwen3_from_gguf_decoded(NULL, gguf, max_batch, max_seq_len, device);
+}
+
 PolyModel *poly_qwen3_from_gguf_decoded_generic(
     const PolyGgufDecoded *gguf,
     const PolyGenericImportOpts *opts
 ) {
-  return poly_qwen3_from_gguf_decoded(
-      gguf, opts ? opts->max_batch : 0, opts ? opts->max_seq_len : 0,
+  return qwen3_from_gguf_decoded(
+      opts ? opts->ctx : NULL, gguf, opts ? opts->max_batch : 0, opts ? opts->max_seq_len : 0,
       opts ? opts->device : POLY_DEVICE_AUTO
   );
 }

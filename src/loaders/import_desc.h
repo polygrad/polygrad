@@ -17,6 +17,7 @@ extern "C" {
 #endif
 
 typedef struct {
+  PolyCtx *ctx; /* NULL requests a standalone owning model. */
   int max_batch;
   int max_seq_len;
   PolyDevice device;

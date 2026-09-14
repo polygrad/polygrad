@@ -88,7 +88,7 @@ def test_lstm_model_recurrent_state_and_training_checkpoint():
     assert _ffi._lib.poly_tensor_lstm_cell(x._ctx, x._tensor, h._tensor, c._tensor, wi._tensor, wh._tensor,
                                           None, None, ctypes.byref(hp), ctypes.byref(cp)) == 0
     hidden, cell = x._make_result_from_core(hp, None), x._make_result_from_core(cp, None)
-    authored = Model.from_tensors(inputs={'x': x, 'h': h, 'c': c}, state={'wi': wi, 'wh': wh},
+    authored = Model.from_tensors(inputs={'x': x, 'h': h, 'c': c}, params={'wi': wi, 'wh': wh},
                                   outputs={'hidden': hidden, 'cell': cell}, losses={'loss': hidden.square().mean()})
     data = authored.save_bundle(include_optimizer=False)
     authored.free()
@@ -1035,7 +1035,7 @@ class TestModelExport:
 
         inst = Model(
             inputs={"x": x},
-            state={"layers.0.weight": w},
+            params={"layers.0.weight": w},
             outputs={"logits": logits},
             entrypoints=[
                 {"name": "forward", "inputs": ["x"], "outputs": ["logits"]},

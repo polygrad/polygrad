@@ -29,6 +29,8 @@ typedef struct {
 
 Qwen3Config poly_qwen3_config_default(void);
 PolyModel *poly_qwen3(const Qwen3Config *cfg, PolyDevice device);
+/* Borrows ctx; construction restores its defaults on success and failure. */
+PolyModel *poly_qwen3_into(PolyCtx *ctx, const Qwen3Config *cfg, PolyDevice device);
 PolyModel *poly_qwen3_from_gguf_decoded(
     const PolyGgufDecoded *gguf,
     int batch_size,

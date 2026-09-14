@@ -14,6 +14,112 @@
 #include <limits.h>
 
 extern void poly_test_ir_topo_fail_after(int count);
+extern void poly_test_ir_import_fail_after(int count);
+
+TEST(ir, partial_entrypoint_cleanup_after_allocation_failure) {
+  PolyIrSpec spec = {0};
+  spec.entrypoints = calloc(1, sizeof(*spec.entrypoints));
+  ASSERT_NOT_NULL(spec.entrypoints);
+  spec.n_entrypoints = 1;
+  /* Parser records counts before allocating name arrays. An allocation failure
+   * reaches the same spec/entrypoint cleanup with a NULL array and live count. */
+  spec.entrypoints[0].n_inputs = 2;
+  spec.entrypoints[0].n_outputs = 1;
+  poly_ir_spec_free(&spec);
+  ASSERT_TRUE(spec.entrypoints == NULL);
+  PASS();
+}
+
+TEST(ir, import_into_freshens_storage_and_retains_aliases) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *logical = poly_uop_new_logical_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *physical = poly_uop_new_buffer(
+      ctx, poly_device_uop(ctx, POLY_DEVICE_CPU), 4, POLY_FLOAT32, poly_ctx_next_unique_id(ctx)
+  );
+  ASSERT_NOT_NULL(physical);
+  physical = poly_uop_tagged(
+      ctx, physical->op, physical->dtype, physical->src, physical->n_src, physical->arg, 17
+  );
+  PolyUOp *constant = poly_const_int(ctx, 7);
+  PolyUOp *variable = poly_uop_variable(
+      ctx, "import_extent", poly_arg_int(1), poly_arg_int(32), POLY_WEAKINT, 1, false
+  );
+  PolyUOp *src[] = {logical, logical, physical, constant, variable};
+  PolyUOp *sink = poly_sink_n(ctx, src, 5);
+  ASSERT_INT_EQ(poly_uop_retain(ctx, sink), 0);
+  const char *inputs[] = {"x"}, *outputs[] = {"y"};
+  PolyIrEntrypoint ep = {
+      .name = "forward",
+      .sink = sink,
+      .inputs = inputs,
+      .n_inputs = 1,
+      .outputs = outputs,
+      .n_outputs = 1};
+  PolyIrBufEntry bindings[] = {
+      {.name = "x", .role = POLY_IR_ROLE_INPUT, .buffer = logical, .shape = {4}, .ndim = 1},
+      {.name = "y", .role = POLY_IR_ROLE_OUTPUT, .buffer = physical, .shape = {4}, .ndim = 1},
+  };
+  PolyIrSpec spec = {
+      .ctx = ctx, .bufs = bindings, .n_bufs = 2, .entrypoints = &ep, .n_entrypoints = 1};
+  int len = 0;
+  uint8_t *bytes = poly_ir_export(&spec, &len);
+  ASSERT_NOT_NULL(bytes);
+  PolyIrSpec a = {0}, b = {0};
+  ASSERT_INT_EQ(poly_ir_import_into(ctx, bytes, len, &a), 0);
+  ASSERT_INT_EQ(poly_ir_import_into(ctx, bytes, len, &b), 0);
+  PolyUOp *sa = a.entrypoints[0].sink, *sb = b.entrypoints[0].sink;
+  ASSERT_TRUE(sa != sink && sa != sb);
+  ASSERT_PTR_EQ(sa->src[0], sa->src[1]);
+  ASSERT_TRUE(sa->src[0] != logical && sa->src[0] != sb->src[0]);
+  ASSERT_TRUE(sa->src[2] != physical && sa->src[2] != sb->src[2]);
+  ASSERT_TRUE(sa->src[2]->arg.param->slot != physical->arg.param->slot);
+  ASSERT_TRUE(sa->src[2]->arg.param->slot != sb->src[2]->arg.param->slot);
+  ASSERT_TRUE(sa->src[2]->tag != sb->src[2]->tag);
+  ASSERT_PTR_EQ(sa->src[3], constant);
+  /* Symbolic BUFFER slots are sentinels, not storage allocation identities. */
+  ASSERT_INT_EQ(sa->src[4]->arg.param->slot, -1);
+  ASSERT_INT_EQ(sb->src[4]->arg.param->slot, -1);
+  ASSERT_PTR_EQ(sa->src[4], variable);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  ASSERT_INT_EQ(sa->src[0]->src[0]->op, POLY_OP_UNIQUE);
+  poly_ir_spec_free(&a);
+  poly_ir_spec_free(&b);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  /* Every truncation releases parser ownership; pre-existing roots survive. */
+  int baseline = (int)poly_map_len(ctx->cse);
+  for (int n = 0; n < len; n++) {
+    PolyIrSpec bad = {0};
+    ASSERT_INT_EQ(poly_ir_import_into(ctx, bytes, n, &bad), -1);
+    ASSERT_TRUE(bad.import_roots == NULL);
+    ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+    ASSERT_INT_EQ(poly_map_len(ctx->cse), baseline);
+  }
+  ASSERT_PTR_EQ(sink->src[0], logical);
+  /* Owning parse arrays fail before publication without losing existing roots. */
+  for (int n = 0; n < 7; n++) {
+    PolyIrSpec bad = {0};
+    poly_test_ir_import_fail_after(n);
+    ASSERT_INT_EQ(poly_ir_import_into(ctx, bytes, len, &bad), -1);
+    poly_test_ir_import_fail_after(-1);
+    ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+    ASSERT_INT_EQ(poly_map_len(ctx->cse), baseline);
+  }
+  ctx->execution_depth++;
+  PolyIrSpec busy = {0};
+  ASSERT_INT_EQ(poly_ir_import_into(ctx, bytes, len, &busy), -1);
+  ctx->execution_depth--;
+  ASSERT_INT_EQ(poly_map_len(ctx->cse), baseline);
+  int64_t saved_unique = ctx->next_unique_id;
+  ctx->next_unique_id = INT64_MAX;
+  PolyIrSpec exhausted = {0};
+  ASSERT_INT_EQ(poly_ir_import_into(ctx, bytes, len, &exhausted), -1);
+  ASSERT_INT_EQ(ctx->next_unique_id, INT64_MAX);
+  ctx->next_unique_id = saved_unique;
+  free(bytes);
+  poly_uop_release(ctx, sink);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
 
 TEST(ir, export_rejects_failed_shared_root_traversal) {
   PolyCtx *ctx = poly_ctx_new();
@@ -116,7 +222,14 @@ TEST(ir, round_trip_add) {
       {.name = "forward", .sink = sink},
   };
 
-  PolyIrSpec spec = {ctx, bufs, 3, eps, 1, NULL, 0};
+  PolyIrSpec spec = {
+      .ctx = ctx,
+      .bufs = bufs,
+      .n_bufs = 3,
+      .entrypoints = eps,
+      .n_entrypoints = 1,
+      .modules = NULL,
+      .n_modules = 0};
 
   int out_len = 0;
   uint8_t *bytes = poly_ir_export(&spec, &out_len);
@@ -165,7 +278,14 @@ TEST(ir, export_rewinds_scratch_root_toposorts) {
       {.name = "output", .role = POLY_IR_ROLE_OUTPUT, .buffer = out_buf, .shape = {4}, .ndim = 1},
   };
   PolyIrEntrypoint eps[] = {{.name = "forward", .sink = sink}};
-  PolyIrSpec spec = {ctx, bufs, 3, eps, 1, NULL, 0};
+  PolyIrSpec spec = {
+      .ctx = ctx,
+      .bufs = bufs,
+      .n_bufs = 3,
+      .entrypoints = eps,
+      .n_entrypoints = 1,
+      .modules = NULL,
+      .n_modules = 0};
 
   size_t scratch_before = poly_arena_used(ctx->scratch);
   int out_len = 0;
@@ -196,7 +316,14 @@ TEST(ir, round_trip_const) {
       {.name = "output", .role = POLY_IR_ROLE_OUTPUT, .buffer = out, .shape = {4}, .ndim = 1},
   };
   PolyIrEntrypoint eps[] = {{.name = "forward", .sink = sink}};
-  PolyIrSpec spec = {ctx, bufs, 2, eps, 1, NULL, 0};
+  PolyIrSpec spec = {
+      .ctx = ctx,
+      .bufs = bufs,
+      .n_bufs = 2,
+      .entrypoints = eps,
+      .n_entrypoints = 1,
+      .modules = NULL,
+      .n_modules = 0};
 
   int out_len = 0;
   uint8_t *bytes = poly_ir_export(&spec, &out_len);
@@ -235,7 +362,14 @@ TEST(ir, round_trip_current_weak_dtype_and_cast_arg) {
       {.name = "output", .role = POLY_IR_ROLE_OUTPUT, .buffer = out, .shape = {1}, .ndim = 1},
   };
   PolyIrEntrypoint eps[] = {{.name = "forward", .sink = sink}};
-  PolyIrSpec spec = {ctx, bufs, 1, eps, 1, NULL, 0};
+  PolyIrSpec spec = {
+      .ctx = ctx,
+      .bufs = bufs,
+      .n_bufs = 1,
+      .entrypoints = eps,
+      .n_entrypoints = 1,
+      .modules = NULL,
+      .n_modules = 0};
 
   int out_len = 0;
   uint8_t *bytes = poly_ir_export(&spec, &out_len);
@@ -271,7 +405,14 @@ TEST(ir, round_trip_current_fp8_dtype) {
   PolyUOp *value = poly_uop0(ctx, POLY_OP_CONST, POLY_FP8E4M3, poly_arg_float(0.1015625));
   PolyUOp *sink = poly_sink1(ctx, value);
   PolyIrEntrypoint eps[] = {{.name = "forward", .sink = sink}};
-  PolyIrSpec spec = {ctx, NULL, 0, eps, 1, NULL, 0};
+  PolyIrSpec spec = {
+      .ctx = ctx,
+      .bufs = NULL,
+      .n_bufs = 0,
+      .entrypoints = eps,
+      .n_entrypoints = 1,
+      .modules = NULL,
+      .n_modules = 0};
 
   int nbytes = 0;
   uint8_t *bytes = poly_ir_export(&spec, &nbytes);
@@ -305,7 +446,14 @@ TEST(ir, round_trip_exact_bigint_arg_current_format) {
       {.name = "output", .role = POLY_IR_ROLE_OUTPUT, .buffer = out, .shape = {1}, .ndim = 1},
   };
   PolyIrEntrypoint eps[] = {{.name = "forward", .sink = sink}};
-  PolyIrSpec spec = {ctx, bufs, 1, eps, 1, NULL, 0};
+  PolyIrSpec spec = {
+      .ctx = ctx,
+      .bufs = bufs,
+      .n_bufs = 1,
+      .entrypoints = eps,
+      .n_entrypoints = 1,
+      .modules = NULL,
+      .n_modules = 0};
 
   int out_len = 0;
   uint8_t *bytes = poly_ir_export(&spec, &out_len);
@@ -355,7 +503,14 @@ TEST(ir, typed_param_bounds_roundtrip) {
       PolyIrEntrypoint eps[] = {{.name = "forward", .sink = poly_sink1(ctx, param)}};
       if (mode)
         eps[0].sink = poly_uop1(ctx, POLY_OP_LINEAR, POLY_VOID, eps[0].sink, poly_arg_none());
-      PolyIrSpec spec = {ctx, NULL, 0, eps, 1, NULL, 0};
+      PolyIrSpec spec = {
+          .ctx = ctx,
+          .bufs = NULL,
+          .n_bufs = 0,
+          .entrypoints = eps,
+          .n_entrypoints = 1,
+          .modules = NULL,
+          .n_modules = 0};
       int len = 0;
       uint8_t *bytes = mode ? poly_program_graph_export(&spec, &len) : poly_ir_export(&spec, &len);
       ASSERT_NOT_NULL(bytes);
@@ -452,7 +607,14 @@ TEST(ir, round_trip_bufferize_opts_integer_identity) {
     /* This is graph-codec coverage, not an executable PROGRAM fixture. */
     if (program)
       eps[0].sink = poly_uop1(ctx, POLY_OP_LINEAR, POLY_VOID, eps[0].sink, poly_arg_none());
-    PolyIrSpec spec = {ctx, bufs, 2, eps, 1, NULL, 0};
+    PolyIrSpec spec = {
+        .ctx = ctx,
+        .bufs = bufs,
+        .n_bufs = 2,
+        .entrypoints = eps,
+        .n_entrypoints = 1,
+        .modules = NULL,
+        .n_modules = 0};
     int len = 0;
     uint8_t *bytes = program ? poly_program_graph_export(&spec, &len) : poly_ir_export(&spec, &len);
     ASSERT_NOT_NULL(bytes);
@@ -518,7 +680,14 @@ TEST(ir, round_trip_bufferize_opts_arg) {
       {.name = "output", .role = POLY_IR_ROLE_OUTPUT, .buffer = out, .shape = {8}, .ndim = 1},
   };
   PolyIrEntrypoint eps[] = {{.name = "forward", .sink = sink}};
-  PolyIrSpec spec = {ctx, bufs, 2, eps, 1, NULL, 0};
+  PolyIrSpec spec = {
+      .ctx = ctx,
+      .bufs = bufs,
+      .n_bufs = 2,
+      .entrypoints = eps,
+      .n_entrypoints = 1,
+      .modules = NULL,
+      .n_modules = 0};
 
   int out_len = 0;
   uint8_t *bytes = poly_ir_export(&spec, &out_len);
@@ -578,7 +747,14 @@ TEST(ir, round_trip_bufferize_opts_tuple_device) {
       {.name = "output", .role = POLY_IR_ROLE_OUTPUT, .buffer = output, .shape = {8}, .ndim = 1},
   };
   PolyIrEntrypoint eps[] = {{.name = "forward", .sink = sink}};
-  PolyIrSpec spec = {ctx, bufs, 2, eps, 1, NULL, 0};
+  PolyIrSpec spec = {
+      .ctx = ctx,
+      .bufs = bufs,
+      .n_bufs = 2,
+      .entrypoints = eps,
+      .n_entrypoints = 1,
+      .modules = NULL,
+      .n_modules = 0};
 
   int out_len = 0;
   uint8_t *bytes = poly_ir_export(&spec, &out_len);
@@ -624,7 +800,14 @@ TEST(ir, round_trip_tuple_device_arg) {
       {.name = "output", .role = POLY_IR_ROLE_OUTPUT, .buffer = output, .shape = {4}, .ndim = 1},
   };
   PolyIrEntrypoint eps[] = {{.name = "forward", .sink = sink}};
-  PolyIrSpec spec = {ctx, bufs, 2, eps, 1, NULL, 0};
+  PolyIrSpec spec = {
+      .ctx = ctx,
+      .bufs = bufs,
+      .n_bufs = 2,
+      .entrypoints = eps,
+      .n_entrypoints = 1,
+      .modules = NULL,
+      .n_modules = 0};
 
   int out_len = 0;
   uint8_t *bytes = poly_ir_export(&spec, &out_len);
@@ -671,7 +854,14 @@ TEST(ir, round_trip_paramarg_exact_device_identity) {
   ASSERT_NOT_NULL(sink);
 
   PolyIrEntrypoint eps[] = {{.name = "forward", .sink = sink}};
-  PolyIrSpec spec = {ctx, NULL, 0, eps, 1, NULL, 0};
+  PolyIrSpec spec = {
+      .ctx = ctx,
+      .bufs = NULL,
+      .n_bufs = 0,
+      .entrypoints = eps,
+      .n_entrypoints = 1,
+      .modules = NULL,
+      .n_modules = 0};
   int out_len = 0;
   uint8_t *bytes = poly_ir_export(&spec, &out_len);
   ASSERT_NOT_NULL(bytes);
@@ -746,7 +936,14 @@ TEST(ir, round_trip_paramarg_ordered_device_tuple) {
 
   PolyUOp *sink = poly_sink1(ctx, param);
   PolyIrEntrypoint eps[] = {{.name = "forward", .sink = sink}};
-  PolyIrSpec spec = {ctx, NULL, 0, eps, 1, NULL, 0};
+  PolyIrSpec spec = {
+      .ctx = ctx,
+      .bufs = NULL,
+      .n_bufs = 0,
+      .entrypoints = eps,
+      .n_entrypoints = 1,
+      .modules = NULL,
+      .n_modules = 0};
   int out_len = 0;
   uint8_t *bytes = poly_ir_export(&spec, &out_len);
   ASSERT_NOT_NULL(bytes);
@@ -794,7 +991,14 @@ TEST(ir, round_trip_default_call_info) {
   ASSERT_NOT_NULL(sink);
 
   PolyIrEntrypoint eps[] = {{.name = "forward", .sink = sink}};
-  PolyIrSpec spec = {ctx, NULL, 0, eps, 1, NULL, 0};
+  PolyIrSpec spec = {
+      .ctx = ctx,
+      .bufs = NULL,
+      .n_bufs = 0,
+      .entrypoints = eps,
+      .n_entrypoints = 1,
+      .modules = NULL,
+      .n_modules = 0};
   int out_len = 0;
   uint8_t *bytes = poly_ir_export(&spec, &out_len);
   ASSERT_NOT_NULL(bytes);
@@ -846,7 +1050,14 @@ TEST(ir, round_trip_multi_entry) {
       {.name = "forward", .sink = fwd_sink},
       {.name = "loss", .sink = loss_sink},
   };
-  PolyIrSpec spec = {ctx, bufs, 3, eps, 2, NULL, 0};
+  PolyIrSpec spec = {
+      .ctx = ctx,
+      .bufs = bufs,
+      .n_bufs = 3,
+      .entrypoints = eps,
+      .n_entrypoints = 2,
+      .modules = NULL,
+      .n_modules = 0};
 
   int out_len = 0;
   uint8_t *bytes = poly_ir_export(&spec, &out_len);
@@ -879,7 +1090,14 @@ TEST(ir, import_reserves_unique_ids_for_future_buffers) {
       {.name = "loss", .role = POLY_IR_ROLE_OUTPUT, .buffer = loss_out, .shape = {1}, .ndim = 1},
   };
   PolyIrEntrypoint eps[] = {{.name = "loss", .sink = sink}};
-  PolyIrSpec spec = {ctx, bufs, 2, eps, 1, NULL, 0};
+  PolyIrSpec spec = {
+      .ctx = ctx,
+      .bufs = bufs,
+      .n_bufs = 2,
+      .entrypoints = eps,
+      .n_entrypoints = 1,
+      .modules = NULL,
+      .n_modules = 0};
 
   int out_len = 0;
   uint8_t *bytes = poly_ir_export(&spec, &out_len);
@@ -943,7 +1161,14 @@ TEST(ir, round_trip_entrypoint_metadata) {
           .flags = 7,
       },
   };
-  PolyIrSpec spec = {ctx, bufs, 4, eps, 2, NULL, 0};
+  PolyIrSpec spec = {
+      .ctx = ctx,
+      .bufs = bufs,
+      .n_bufs = 4,
+      .entrypoints = eps,
+      .n_entrypoints = 2,
+      .modules = NULL,
+      .n_modules = 0};
 
   int out_len = 0;
   uint8_t *bytes = poly_ir_export(&spec, &out_len);
@@ -997,7 +1222,14 @@ TEST(ir, round_trip_roles) {
       {.name = "output", .role = POLY_IR_ROLE_OUTPUT, .buffer = out, .shape = {2}, .ndim = 1},
   };
   PolyIrEntrypoint eps[] = {{.name = "forward", .sink = sink}};
-  PolyIrSpec spec = {ctx, bufs, 3, eps, 1, NULL, 0};
+  PolyIrSpec spec = {
+      .ctx = ctx,
+      .bufs = bufs,
+      .n_bufs = 3,
+      .entrypoints = eps,
+      .n_entrypoints = 1,
+      .modules = NULL,
+      .n_modules = 0};
 
   int out_len = 0;
   uint8_t *bytes = poly_ir_export(&spec, &out_len);
@@ -1200,7 +1432,14 @@ TEST(ir, round_trip_reshape) {
   PolyIrModule modules[] = {
       {.name = "reshape", .inputs = module_inputs, .n_inputs = 1, .output = reshaped},
   };
-  PolyIrSpec spec = {ctx, bufs, 2, eps, 1, modules, 1};
+  PolyIrSpec spec = {
+      .ctx = ctx,
+      .bufs = bufs,
+      .n_bufs = 2,
+      .entrypoints = eps,
+      .n_entrypoints = 1,
+      .modules = modules,
+      .n_modules = 1};
 
   int out_len = 0;
   uint8_t *bytes = poly_ir_export(&spec, &out_len);

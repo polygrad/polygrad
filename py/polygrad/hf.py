@@ -22,13 +22,13 @@ import pathlib
 import numpy as np
 from . import _ffi
 from .device import _device_id
-from .model import Model
+from .model import Model, _import_context
 
 _get_lib = _ffi.get_lib
 _u8p = ctypes.POINTER(ctypes.c_uint8)
 
 
-def load_hf(model_path, max_batch=1, max_seq_len=0, device=None):
+def load_hf(model_path, max_batch=1, max_seq_len=0, device=None, *, runtime=None):
     """Load a HuggingFace model from a local directory.
 
     Args:
@@ -57,10 +57,10 @@ def load_hf(model_path, max_batch=1, max_seq_len=0, device=None):
     for wf in weight_files:
         weight_data.append(wf.read_bytes())
 
-    return _load_from_bytes(config_bytes, weight_data, max_batch, max_seq_len, device)
+    return _load_from_bytes(config_bytes, weight_data, max_batch, max_seq_len, device, runtime)
 
 
-def load_hf_bytes(config_json, weight_bytes_list, max_batch=1, max_seq_len=0, device=None):
+def load_hf_bytes(config_json, weight_bytes_list, max_batch=1, max_seq_len=0, device=None, *, runtime=None):
     """Load from raw bytes (useful for non-filesystem sources).
 
     Args:
@@ -74,7 +74,7 @@ def load_hf_bytes(config_json, weight_bytes_list, max_batch=1, max_seq_len=0, de
     """
     if isinstance(config_json, str):
         config_json = config_json.encode('utf-8')
-    return _load_from_bytes(config_json, weight_bytes_list, max_batch, max_seq_len, device)
+    return _load_from_bytes(config_json, weight_bytes_list, max_batch, max_seq_len, device, runtime)
 
 
 def download_hf(repo_id, cache_dir=None):
@@ -198,7 +198,7 @@ def _find_safetensors(model_path):
     return files
 
 
-def _load_from_bytes(config_bytes, weight_data_list, max_batch, max_seq_len, device=None):
+def _load_from_bytes(config_bytes, weight_data_list, max_batch, max_seq_len, device=None, runtime=None):
     """Internal: call poly_hf_load with byte buffers."""
     if isinstance(config_bytes, str):
         config_bytes = config_bytes.encode('utf-8')
@@ -217,16 +217,17 @@ def _load_from_bytes(config_bytes, weight_data_list, max_batch, max_seq_len, dev
         file_ptrs[i] = ctypes.cast(buf, _u8p)
         file_lens[i] = len(data)
 
-    ptr = _get_lib().poly_hf_load(
-        config_bytes, len(config_bytes),
+    ctx = _import_context(runtime)
+    ptr = _get_lib().poly_hf_load_into(
+        ctx, config_bytes, len(config_bytes),
         file_ptrs, file_lens,
-        n_files, max_batch, max_seq_len, _device_id(device)
+        n_files, max_batch, max_seq_len, _device_id(device) if device is not None else 0
     )
 
     if not ptr:
         raise RuntimeError('poly_hf_load returned NULL')
 
-    return Model(ptr)
+    return Model._from_handle(ptr, ctx)
 
 
 def _get_vocab_size(instance):

@@ -60,7 +60,9 @@ function testNodeCjsRoot() {
 function testNodeEsmRoot() {
   const out = nodeModuleEval(`
     import { Tensor, Model, create, disposeDefault } from 'polygrad'
-    if (typeof Model.trace !== 'function') throw new Error('missing Model.trace export')
+    for (const name of ['fromCallable', 'fromCallableAsync', 'fromTensors', 'load']) {
+      if (typeof Model[name] !== 'function') throw new Error('missing Model.' + name + ' export')
+    }
     const rt = create({core:'wasm'})
     if (rt && typeof rt.then === 'function') throw new Error('create returned Promise')
     const y = new Tensor([1,2,3]).mul(3)
@@ -205,8 +207,47 @@ function testEnvironmentCompilerControls() {
   }
 }
 
+function testModelFileIO() {
+  for (const core of ['native', 'wasm']) {
+    const out = nodeEval(`
+      (async () => {
+        const fs = require('node:fs'), path = require('node:path'), os = require('node:os')
+        const pg = require('polygrad')
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'polygrad-model-files-'))
+        const file = path.join(dir, 'linear.pgb')
+        const rt = pg.create({core: ${JSON.stringify(core)}, device:'interp'})
+        let model, restored, asyncRuntime
+        try {
+          model = new rt.Model(({x}) => ({prediction:x.mul(2)}), {inputs:{x:rt.Tensor.empty([1])}})
+          const bytes = model.save(file, {includeOptimizer:false})
+          if (!(bytes instanceof Uint8Array) || !fs.readFileSync(file).equals(Buffer.from(bytes))) throw new Error('save did not write bundle')
+          restored = rt.Model.load(file)
+          if (restored.forward({x:[3]}).prediction[0] !== 6) throw new Error('path load failed')
+          restored.dispose(); restored = null
+          await model.saveAsync(file, {includeOptimizer:false})
+          asyncRuntime = await pg.createAsync({core:${JSON.stringify(core)}, device:'interp'})
+          restored = asyncRuntime.Model.load(file)
+          if (restored.forward({x:[4]}).prediction[0] !== 8) throw new Error('async runtime lacks file adapter')
+          let rejected = false
+          try { model.save(path.join(dir,'absent','model.pgb')) } catch (e) { rejected = e.code === 'ENOENT' }
+          if (!rejected || model.forward({x:[5]}).prediction[0] !== 10) throw new Error('file failure destroyed Model')
+          console.log('model files pass')
+        } finally {
+          if (restored) await restored.dispose()
+          if (model) await model.dispose()
+          if (asyncRuntime) await asyncRuntime.dispose()
+          await rt.dispose()
+          fs.rmSync(dir, {recursive:true, force:true})
+        }
+      })().catch(e => { console.error(e); process.exitCode=1 })
+    `)
+    assert.strictEqual(out, 'model files pass')
+  }
+}
+
 function main() {
   const tests = [
+    ['Model filesystem roundtrip', testModelFileIO],
     ['environment precedence', testEnvironmentPrecedence],
     ['environment compiler controls', testEnvironmentCompilerControls],
     ['node cjs root', testNodeCjsRoot],

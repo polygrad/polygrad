@@ -370,7 +370,10 @@ PolyUOp *poly_copy_to_device_uop(PolyCtx *ctx, PolyUOp *value, PolyUOp *device) 
 }
 
 static bool place_exact_buffer_identity(PolyUOp *u) {
-  return u && poly_uop_get_buffer_identity(u) == u;
+  /* UOp.realized excludes ALU variables: they carry launch values, not device
+   * allocations, even though v0.14 represents them with BUFFER/PARAM. */
+  return u && !poly_uop_is_variable(u) && !poly_uop_is_alu_param(u) &&
+         poly_uop_get_buffer_identity(u) == u;
 }
 
 static bool place_direct_buffer_binding(PolyUOp *u) {
@@ -403,6 +406,12 @@ static bool place_logical_forbidden_op(PolyOps op) {
          op == POLY_OP_MSTACK || op == POLY_OP_ALLREDUCE || place_lowered_op(op);
 }
 
+static bool place_logical_gate(PolyUOp *u) {
+  /* UOp.bind's exact AFTER(var, STORE(var, CONST)) is scalar launch metadata,
+   * not a persistent storage mutation. Other AFTER/STORE nodes remain effects. */
+  return !poly_uop_is_bound_var(u);
+}
+
 static bool place_validate_pure_logical(
     PolyCtx *ctx,
     PolyUOp *root,
@@ -411,11 +420,12 @@ static bool place_validate_pure_logical(
 ) {
   if (!ctx || !root) return false;
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort_ex_alloc(ctx, root, &n_topo, NULL, false);
+  PolyUOp **topo = poly_toposort_ex_alloc(ctx, root, &n_topo, place_logical_gate, false);
   if (!topo) return false;
   bool valid = true;
   for (int i = 0; i < n_topo; i++) {
     PolyUOp *u = topo[i];
+    if (poly_uop_is_bound_var(u)) continue;
     if (!u || place_logical_forbidden_op(u->op)) {
       valid = false;
       break;
@@ -442,9 +452,11 @@ static bool place_validate_logical_root(
   if (root->n_src == 0) return false;
   for (int i = 0; i < root->n_src; i++) {
     PolyUOp *store = root->src[i];
+    PolyUOp *target = store && store->n_src > 0 ? poly_uop_base(store->src[0]) : NULL;
     if (!store || store->op != POLY_OP_STORE || store->n_src != 2 ||
-        !place_exact_buffer_identity(store->src[0]) ||
-        place_binding_index(logical_bindings, n_bindings, store->src[0]) < 0 ||
+        !place_exact_buffer_identity(target) ||
+        place_binding_index(logical_bindings, n_bindings, target) < 0 ||
+        !place_validate_pure_logical(ctx, store->src[0], logical_bindings, n_bindings) ||
         !place_validate_pure_logical(ctx, store->src[1], logical_bindings, n_bindings))
       return false;
   }

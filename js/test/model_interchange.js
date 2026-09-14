@@ -20,6 +20,21 @@ async function main() {
   }
   const pg = await polygrad.create({ core, device: core === 'native' ? 'cpu' : 'wasm' })
   try {
+    const variable = pg.Model.load(readBytes(path.join(dir,'python-variable.bundle')))
+    try {
+      for (const n of [17,3,11]) {
+        const x = Float32Array.from({length:n*2},(_,i)=>i)
+        const result = variable.forward({x}).prediction
+        if (result.length !== x.length || result.some((v,i)=>v!==x[i]*2))
+          throw new Error('Python variable signature lost bound extent or values')
+      }
+    } finally { variable.dispose() }
+    const n = pg.uop.variable('interchange_batch',1,32), bound = n.bind(17)
+    const variableInput = pg.Tensor.empty([bound,2])
+    const variableAuthor = new pg.Model(({x})=>({prediction:x.mul(2)}), {inputs:{x:variableInput}})
+    try {
+      writeBytes(path.join(dir,`javascript-${core}-variable.bundle`),variableAuthor.save({includeOptimizer:false}))
+    } finally { variableAuthor.dispose(); variableInput.dispose(); bound.dispose(); n.dispose() }
     const recurrent = pg.Model.fromBundle(readBytes(path.join(dir, 'c-lstm.bundle')))
     try {
       const x = new Float32Array([1, 2])
@@ -55,10 +70,10 @@ async function main() {
 
     const w = new pg.Tensor([2], { dtype: 'float32' })
     const offset = new pg.Tensor([1], { dtype: 'float32' }).is_param_(false)
-    const authored = pg.Model.trace(({ x }) => {
+    const authored = pg.Model.fromCallable(({ x }) => {
       const prediction = x.mul(w).add(offset)
       return { prediction, twice: prediction.mul(2) }
-    }, { inputs: { x: pg.Tensor.empty([1]) }, state: { weight: w, tied: w, offset }, entrypoints: [
+    }, { inputs: { x: pg.Tensor.empty([1]) }, params: { weight: w, tied: w, offset }, entrypoints: [
       { name: 'forward', inputs: ['x'], outputs: ['prediction'] },
       { name: 'double', inputs: ['x'], outputs: ['twice'] }
     ] })

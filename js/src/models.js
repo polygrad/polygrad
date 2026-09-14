@@ -20,20 +20,23 @@ function createBoundModels(runtime) {
 
   function wrap(handle, family) {
     if (!handle) throw new Error(`polygrad: failed to create ${family} model`)
-    return new _runtime.Model(handle)
+    return _runtime.Model._fromHandle(handle)
   }
 
   function MLP(spec) {
+    if (_runtime._activeAsync > 0) throw new Error('Model construction requires an idle Runtime')
     const api = ensureApi()
     return wrap(api.mlp(normalizeSpec(spec)), 'MLP')
   }
 
   function TabM(spec) {
+    if (_runtime._activeAsync > 0) throw new Error('Model construction requires an idle Runtime')
     const api = ensureApi()
     return wrap(api.tabm(normalizeSpec(spec)), 'TabM')
   }
 
   function NAM(spec) {
+    if (_runtime._activeAsync > 0) throw new Error('Model construction requires an idle Runtime')
     const api = ensureApi()
     return wrap(api.nam(normalizeSpec(spec)), 'NAM')
   }

@@ -14,7 +14,7 @@
 #include "polygrad.h"
 #include <stdint.h>
 
-#define POLY_IR_VERSION 18
+#define POLY_IR_VERSION 19
 #define POLY_PROGRAM_VERSION 10
 
 #ifdef __cplusplus
@@ -40,7 +40,7 @@ typedef struct {
   const char *name; /* e.g. "layers.0.weight", "x", "output" */
   uint8_t role; /* POLY_IR_ROLE_* */
   PolyUOp *buffer; /* exact named logical UOp (legacy field name) */
-  int64_t shape[POLY_IR_MAX_DIMS];
+  int64_t shape[POLY_IR_MAX_DIMS]; /* capacity; exact signature is the named UOp shape */
   int ndim;
   bool trainable; /* PARAM default when absent in old IR payloads */
   bool trainable_set;
@@ -77,6 +77,10 @@ typedef struct {
   int n_entrypoints;
   PolyIrModule *modules;
   int n_modules;
+  /* Import-owned graph references, released by poly_ir_spec_free. Zero for
+   * caller-assembled export specs. Keep the context alive until spec_free. */
+  PolyUOp **import_roots;
+  int n_import_roots;
 } PolyIrSpec;
 
 /* Export */
@@ -97,6 +101,10 @@ uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len);
  *   - poly_ctx_destroy(spec->ctx)
  * Returns 0 on success, -1 on error. */
 int poly_ir_import(const uint8_t *data, int len, PolyIrSpec *out);
+
+/* Reconstruct fresh storage identities in a borrowed idle context. Failure
+ * releases only import ownership; collect can reclaim abandoned nodes. */
+int poly_ir_import_into(PolyCtx *ctx, const uint8_t *data, int len, PolyIrSpec *out);
 
 /* Free an imported PolyIrSpec (frees names, arrays; does NOT destroy ctx). */
 void poly_ir_spec_free(PolyIrSpec *spec);
