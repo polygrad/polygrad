@@ -458,7 +458,7 @@ Low-level `UOp.variable` bounds retain integer, floating-point and boolean
 endpoints independently of the variable dtype. C takes scalar `PolyArg` values;
 Python accepts `int`/`float`/`bool`; JavaScript uses `pg.uop.variable(...)`, with
 `BigInt` for exact wide integers. NaN, reversed and nonnumeric bounds are rejected.
-Current packages require C ABI84 and graph formats PGIR18/PGPM10; incompatible
+Current packages require C ABI89 and graph formats PGIR19/PGPM10; incompatible
 artifacts are rejected. Typed endpoints can exceed the runtime's signed64
 variable-binding domain; metadata support does not imply executable bindings.
 
@@ -559,15 +559,64 @@ format remains the portable PGIR-plus-weights product.
 ## High-Level APIs
 
 `Model` is a C-owned runtime with sealed graph topology and mutable named state.
-Use `Model.from_tensors(...)` / `Model.fromTensors(...)`, or capture an ordinary
-callable once with `Model.trace`. Curated `models.MLP`, `TabM`, and `NAM` use the
-same runtime. Training stays on Model; no separate Trainer is required.
+Use `Model(...)` / `new Model(...)` with a callable or Tensor bindings.
+Explicit `Model.from_callable(...)` / `Model.fromCallable(...)` and
+`Model.from_tensors(...)` / `Model.fromTensors(...)` bypass constructor dispatch.
+Curated `models.MLP`, `TabM`, and `NAM` use the
+same runtime. In Python, pass `runtime=rt` to a family factory or HF/GGUF loader
+to select an explicit Runtime; otherwise they use the default runtime. In JS,
+use `rt.models.MLP(...)` or `rt.Model.fromHF(...)` / `fromGGUF(...)`.
+Disposing a Model releases its ownership without destroying that runtime;
+disposing the Runtime invalidates its Models. Training stays on Model; no
+separate Trainer is required.
+
+Model calls accept arrays or Tensors. If any input is a Tensor, every output is
+an owned device Tensor; array-only calls still return host arrays. Tensor inputs
+must satisfy the declared shape, dtype, Runtime and device. Use
+`model.forward(x=x)["prediction"]` in Python or
+`(await model.forwardAsync({x})).prediction` in JS, where `prediction` is your
+declared output name. Results keep their values across later calls and Model
+disposal, but their Runtime must remain alive. Dispose results when finished.
+This enables device-resident chaining, not differentiation through a Model call.
+The initial implementation copies device values; it is not zero-copy. Ordinary
+schedule-cache retention still applies; clear that cache at an idle boundary
+when reclaiming cached execution resources. Borrowed/caller-supplied result
+storage is not supported by this interface yet.
+
+Captured inputs may have one bounded variable leading dimension and fixed trailing
+dimensions. Calls and explicit training steps can bind different leading extents;
+earlier outputs retain their concrete shapes and values. Shared dimensions must
+agree across inputs. Current storage reserves the declared maximum capacity.
+Portable save/load preserves these signatures; bound-program export rejects them.
+Empty input bindings are currently unsupported and reject before any input writes.
+
+Flat host arrays use the declared shape, inferring a variable leading extent when
+the fixed trailing dimensions determine it uniquely. Explicit shapes must match: Python
+multidimensional ndarrays carry their shape; JS accepts
+`{x: {data: new Float32Array(6), shape: [2, 3]}}`. Equal byte counts do not make
+`[3, 2]` interchangeable with `[2, 3]`. C checks all input rows before writes.
+
+`model.fit(data, epochs=2, batch_size=32)` in Python, or
+`model.fit(data, {epochs: 2, batchSize: 32})` in JS, traverses host datasets in
+input order each epoch. The captured inputs/targets must have first axis 32;
+all datasets must have the same sample count. Omit batch size to repeat the
+supplied full batch. An incomplete batch rejects before training unless
+`remainder="drop"` (JS `remainder: 'drop'`) is explicit. No padding or shuffling
+is implicit. Returns one loss per step; callback indices span epochs.
+WebGPU uses `await model.fitAsync(data, options)` with synchronous `onStep`
+callbacks. Tensor datasets still use explicit `train_step` / `trainStepAsync`
+loops; minibatching does not read device Tensors back into host arrays.
 
 ### Configuration-driven model families
 
 `models.Sequential(config)` and `models.Graph(config)` build ordinary Models in
 C, alongside MLP/TabM/NAM. One JSON configuration can be shared by Python, Node,
 and browsers without model-specific source compilation or an authoring callback.
+`Model(config)` / `new Model(config)` selects these same factories when the object
+declares `format: "poly.modeldef@1"` and `type: "sequential"` or `"graph"`.
+Untagged configurations are not guessed; the explicit family factories remain
+available. Python accepts `runtime=rt` for configuration construction. JavaScript
+uses the owning `rt.Model`; WebGPU requires `models.SequentialAsync`/`GraphAsync`.
 They are factories, not subclasses or a second execution graph.
 
 For example, save this as `network.json`:
@@ -655,32 +704,78 @@ result through existing Model bundle or graph/weights APIs.
 ### Tensor-authored models
 
 ```python
-from polygrad import Model, create
-from polygrad.nn.state import get_state_dict
+from polygrad import Model, Tensor
 
-rt = create(device="cpu", logical="always")
-class Net:
+class Linear:
     def __init__(self):
-        self.weight = rt.Tensor([2.0])
+        self.a = Tensor([0.0])
+        self.b = Tensor([0.0])
     def __call__(self, x):
-        return x * self.weight
+        return {"prediction": self.a * x + self.b}
 
-net = Net()
-model = Model.trace(net, inputs={"x": rt.Tensor.empty(1)},
-                    state=get_state_dict(net))
-blob = model.save_bundle(include_optimizer=False)
-model.free()
-rt.dispose()
+model = Model(
+    Linear(), inputs={"x": Tensor.empty(5)}, targets={"y": Tensor.empty(5)},
+    loss=lambda outputs, y: (outputs["prediction"] - y).square().mean(),
+)
+try:
+    model.fit({"x": [-2, -1, 0, 1, 2], "y": [-4, -1, 2, 5, 8]},
+              epochs=100, optimizer="sgd", lr=0.1)
+    model.save("linear.pgb", include_optimizer=False)
+finally:
+    model.dispose()
 ```
 
-Captured state is independent of `net`'s Tensor attributes. Reads return copies;
-use `read_buffer`/`write_buffer` (JS `readBuffer`/`writeBuffer`) for explicit
+Load in Node without the Python class:
+
+```javascript
+const { Model } = require('polygrad')
+const model = Model.load('linear.pgb')
+try {
+  const { prediction } = model.forward({x: new Float32Array([3, 4, 5, 6, 7])})
+  console.log(Array.from(prediction)) // approximately [11, 14, 17, 20, 23]
+} finally {
+  model.dispose()
+}
+```
+
+This example has a fixed input shape of five elements. Runnable checkout scripts:
+`py/examples/linear_export.py` and `js/examples/linear_predict.js`. `save()` returns
+bundle bytes, or also writes a supplied local path in Python/Node. Browser APIs
+accept bytes, not filesystem paths. `summary()` returns metadata-only text without
+executing graphs or reading weights. Excluding optimizer state does not remove
+training entrypoints.
+
+Portable loads use the default runtime unless explicitly selected: Python
+`Model.load(source, runtime=rt)` / `Model.from_bundle(data, runtime=rt)`, or JS
+`rt.Model.load(source)` / `rt.Model.fromBundle(data)`. Package-level JS
+`Model.load` uses the package default, not a runtime created separately with
+`pg.create()`. Imports have independent storage; tied names within an import
+remain aliases. Disposing a loaded Model does not destroy its runtime. Explicit
+runtime disposal invalidates its Models. Standalone C imports can still own a
+private context; bound-program imports keep their separate device/ABI contract.
+
+Captured state is independent of the authoring object's Tensor attributes. Reads return copies.
+Callable objects provide named Tensor attributes through `get_state_dict` (JS
+`getStateDict`). JS objects implement `forward(namedInputs)`; plain functions
+receive that same input object. Python callables receive keyword inputs.
+`params=net` or `params=get_state_dict(net)` explicitly selects state; a supplied
+mapping overrides automatic collection, and an empty mapping disables it.
+Functions do not expose lexical closure state: pass their tensors in `params`.
+`is_param=True` selects PARAM; false selects persistent AUX. Freeze a PARAM with
+`set_trainable`/`setTrainable` without changing its role. Advanced `from_bindings`
+can declare an initially frozen PARAM. The separate `state=` argument is removed.
+
+Capture temporarily preserves newly authored logical roots and restores the
+Runtime policy on failure or success. Inputs/state must still have logical roots;
+capture cannot recover discarded producers. It does not suppress execution effects.
+
+Use `read_buffer`/`write_buffer` (JS `readBuffer`/`writeBuffer`) for explicit
 state access. `bindings()` and `entrypoints()` describe the sealed interface.
 For training, supply targets and named losses, configure the optimizer, and
 call `train_step`/`trainStep`; select an entrypoint when objectives are ambiguous.
 `fit` repeats the supplied batch, not a Keras-style dataset workflow. WebGPU
 uses explicit `trainStepAsync`, `readBufferAsync`, and `writeBufferAsync`.
-For WebGPU capture, use `Model.traceAsync` or `await Model.fromTensors(...)`;
+For WebGPU capture, use `Model.fromCallableAsync` or `await Model.fromTensors(...)`;
 authoring still runs once, while C state initialization can suspend.
 
 Polygrad includes the usual tensor building blocks:

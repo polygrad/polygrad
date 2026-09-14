@@ -34,7 +34,7 @@ From this repository:
 
 ```bash
 make
-POLYGRAD_LIB=$PWD/build/libpolygrad.so PYTHONPATH=py python - <<'PY'
+POLY_LIB=$PWD/build/libpolygrad.so PYTHONPATH=py python - <<'PY'
 from polygrad import Tensor
 print((Tensor([1, 2, 3]) * 2 + 1).numpy())
 PY
@@ -99,7 +99,7 @@ print(y.numpy())
 Environment variables:
 
 ```bash
-POLY_DEVICE=cpu|cuda|hip|x86|interp
+POLY_DEV=cpu|cuda|hip|x86|interp
 POLY_DUMP_KERNELS=1
 POLY_BEAM=4
 ```
@@ -244,6 +244,69 @@ This is a UOp `CALL` extension point, not a raw program-launch API. Custom
 backward functions are not implemented yet.
 
 ## Model Loading
+
+### Fit in Python, load in JavaScript
+
+Model owns a captured graph and its state; JS does not need the Python class.
+
+```python
+from polygrad import Model, Tensor
+
+class Linear:
+    def __init__(self):
+        self.a = Tensor([0.0])
+        self.b = Tensor([0.0])
+    def __call__(self, x):
+        return {"prediction": self.a * x + self.b}
+
+model = Model(
+    Linear(), inputs={"x": Tensor.empty(5)}, targets={"y": Tensor.empty(5)},
+    loss=lambda outputs, y: (outputs["prediction"] - y).square().mean(),
+)
+try:
+    model.fit({"x": [-2, -1, 0, 1, 2], "y": [-4, -1, 2, 5, 8]},
+              epochs=100, optimizer="sgd", lr=0.1)
+    model.save("linear.pgb", include_optimizer=False)
+finally:
+    model.dispose()
+```
+
+In Node, using a matching Polygrad package:
+
+```javascript
+const { Model } = require('polygrad')
+const model = Model.load('linear.pgb')
+try {
+  const { prediction } = model.forward({x: new Float32Array([3, 4, 5, 6, 7])})
+  console.log(Array.from(prediction)) // approximately [11, 14, 17, 20, 23]
+} finally {
+  model.dispose()
+}
+```
+
+This example fixes the input shape at five elements. `params` defaults to named
+Tensor attributes of the supplied object; functions require explicit closure state.
+`model.summary()` returns interface metadata without executing or reading weights.
+Bundle bytes work across frontends; paths are Python/Node conveniences, not browser
+filesystem access. Excluding optimizer state does not remove training entrypoints.
+
+For variable-size calls, capture a bounded variable leading dimension with fixed
+trailing dimensions. Calls and explicit training steps bind concrete extents;
+returned Tensors retain their invocation's shape and values. Portable save/load
+preserves this signature; storage currently reserves its maximum capacity.
+
+For host datasets larger than the captured batch, use
+`model.fit(data, epochs=2, batch_size=32)`, where each declared input/target has
+first axis 32. Epochs traverse samples in input order; the return value contains
+one loss per step. An incomplete final batch is rejected before training unless
+`remainder='drop'` is explicit. Omit `batch_size` to repeat one full batch as
+before. Tensor datasets use explicit `train_step` loops for now.
+
+Flat arrays use the Model signature. Multidimensional ndarrays carry concrete
+shape and must match it, not merely its element count. JavaScript can express
+the same binding as `{data: typedArray, shape: [rows, columns]}`.
+
+### Pretrained models
 
 ```python
 from polygrad.hf import download_hf, load_hf, generate
@@ -440,7 +503,7 @@ Layers include `Linear`, `LayerNorm`, `RMSNorm`, `Embedding`, `Dropout`,
 ## Tests
 
 ```bash
-POLYGRAD_LIB=$PWD/build/libpolygrad.so PYTHONPATH=py python -m pytest py/tests -q
+POLY_LIB=$PWD/build/libpolygrad.so PYTHONPATH=py python -m pytest py/tests -q
 ```
 
 ## License
