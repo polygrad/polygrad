@@ -1068,18 +1068,17 @@ class Model:
         """Train in input order; return one loss per optimizer step.
 
         With batch_size=None, repeat the supplied batch once per epoch. With
-        batch_size, traverse host arrays along axis zero each epoch. The batch
-        size must match the sealed signature. An incomplete batch is rejected
-        before training, unless remainder='drop' is explicitly selected.
-        Device Tensor datasets use an explicit train_step loop for now.
+        batch_size, traverse arrays or device Tensors along axis zero each epoch.
+        Batch extents must satisfy the sealed signature. Incomplete batches
+        require remainder='drop', or 'keep' when the smaller extent is supported.
         """
         if isinstance(epochs, bool) or not isinstance(epochs, (int, np.integer)) or epochs < 0:
             raise ValueError('epochs must be a nonnegative integer')
         if data is not None and io:
             raise TypeError('Model.fit accepts either a data mapping or keyword inputs')
         bindings = dict(data if data is not None else io)
-        if remainder not in ('error', 'drop'):
-            raise ValueError("remainder must be 'error' or 'drop'")
+        if remainder not in ('error', 'drop', 'keep'):
+            raise ValueError("remainder must be 'error', 'drop' or 'keep'")
         batches = 1
         if batch_size is not None:
             bindings, batches = self._fit_dataset(bindings, batch_size, remainder, entrypoint)
@@ -1090,11 +1089,25 @@ class Model:
                 nesterov=nesterov, classic=classic,
             )
         losses = []
+        from .tensor import Tensor
         for _ in range(epochs):
             for batch in range(batches):
-                current = bindings if batch_size is None else {
-                    name: value[batch*batch_size:(batch+1)*batch_size] for name, value in bindings.items()}
-                loss = self.train_step(current, entrypoint=entrypoint)
+                current, owned = bindings, []
+                try:
+                    if batch_size is not None:
+                        current = {}
+                        for name, value in bindings.items():
+                            start, stop = batch*batch_size, min((batch+1)*batch_size, value.shape[0])
+                            if isinstance(value, Tensor):
+                                sliced = value.shrink(((start, stop),) + (None,)*(value.ndim-1))
+                                # Identity SHRINK may return the caller's Tensor.
+                                if sliced is not value: owned.append(sliced)
+                                current[name] = sliced
+                            else:
+                                current[name] = value[start:stop]
+                    loss = self.train_step(current, entrypoint=entrypoint)
+                finally:
+                    for sliced in owned: sliced.dispose()
                 losses.append(loss)
                 if on_step is not None:
                     on_step(len(losses)-1, loss)
@@ -1116,30 +1129,41 @@ class Model:
         required = selected[0]['inputs'] or [n for n, b in schema.items() if b['role'] in (ROLE_INPUT, ROLE_TARGET)]
         if set(data) != set(required):
             raise ValueError('fit data must match the selected entrypoint inputs')
-        normalized, count = {}, None
+        normalized, count, bounds = {}, None, []
         for name, value in data.items():
-            if isinstance(value, Tensor):
-                raise TypeError('minibatch Tensor datasets require an explicit train_step loop')
-            value = np.asarray(value) if isinstance(value, np.ndarray) else np.asarray(value, dtype=np.float32)
             declared = schema[name]['shape']
-            if not declared or declared[0] != batch_size:
-                raise ValueError(f"batch_size must match the declared first axis of '{name}'")
-            if not value.dtype.isnative or value.dtype.name != schema[name]['dtype']:
+            limits = schema[name]['shape_bounds']
+            if not declared or not limits[0][0] <= batch_size <= limits[0][1]:
+                raise ValueError(f"batch_size is outside the declared first-axis bounds of '{name}'")
+            bounds.append(limits[0])
+            if isinstance(value, Tensor):
+                if value._ctx != self._ctx or not value._tensor:
+                    raise ValueError(f"fit input '{name}' must be a live Tensor in its Runtime")
+                native = True
+                dtype = value._dtype_str
+            else:
+                value = np.asarray(value) if isinstance(value, np.ndarray) else np.asarray(value, dtype=np.float32)
+                native = value.dtype.isnative
+                dtype = value.dtype.name
+            if not native or dtype != schema[name]['dtype']:
                 raise TypeError(f"fit input '{name}' has the wrong storage dtype")
             width = math.prod(declared[1:])
-            if value.ndim == 1 and width > 0 and value.size % width == 0:
+            if not isinstance(value, Tensor) and value.ndim == 1 and width > 0 and value.size % width == 0:
                 value = value.reshape((-1, *declared[1:]))
-            if value.ndim != len(declared) or value.shape[1:] != declared[1:]:
+            if (value.ndim != len(declared) or value.shape[1:] != declared[1:] or
+                    any(not isinstance(d, (int, np.integer)) or d < 0 for d in value.shape)):
                 raise ValueError(f"fit input '{name}' has incompatible sample shape")
-            if count is not None and count != len(value):
+            if count is not None and count != value.shape[0]:
                 raise ValueError('fit inputs must have the same sample count')
-            count = len(value)
+            count = value.shape[0]
             normalized[name] = value
-        if count is None or count < batch_size:
+        if count is None or count == 0 or (count < batch_size and remainder != 'keep'):
             raise ValueError('fit requires at least one complete batch')
-        if count % batch_size and remainder == 'error':
-            raise ValueError('unsupported incomplete batch remainder; use remainder="drop" explicitly')
-        return normalized, count // batch_size
+        tail = count % batch_size
+        if tail and (remainder == 'error' or (remainder == 'keep' and
+                     any(not lower <= tail <= upper for lower, upper in bounds))):
+            raise ValueError('unsupported incomplete batch remainder; use remainder="drop" or a permitted "keep" extent')
+        return normalized, count // batch_size + int(bool(tail) and remainder == 'keep')
 
     # ── Internals ────────────────────────────────────────────────────
 

@@ -156,6 +156,94 @@ async function checkModelTensorIO(pg) {
   }
 }
 
+async function checkModelBoundedMinibatches(pg) {
+  const n = pg.uop.variable('fit_batch', 1, 8), bound = n.bind(4)
+  const owned = [], models = []
+  const build = async () => {
+    const w = new pg.Tensor([0], {dtype:'float32'}), x = pg.Tensor.empty([bound,2]), y = pg.Tensor.empty([bound,2])
+    owned.push(w,x,y)
+    const model = await pg.Model.fromCallableAsync(({x}) => x.mul(w), {inputs:{x},targets:{y},params:{w},
+      loss:(out,{y}) => out.sub(y).square().mean()})
+    models.push(model)
+    return model
+  }
+  try {
+    const x = Float32Array.from({length:14},(_,i)=>i/10), y = x.map(v=>v*2)
+    const tx = new pg.Tensor([Array.from(x.filter((_,i)=>i%2===0)),Array.from(x.filter((_,i)=>i%2===1))],
+      {dtype:'float32'}).transpose(), ty = new pg.Tensor(y).reshape(7,2)
+    owned.push(tx,ty)
+    const control = await build()
+    control.setOptimizer('sgd',0.01)
+    const expected = []
+    for (let epoch=0; epoch<2; epoch++) for (let i=0; i<7; i+=3)
+      expected.push(await control.trainStepAsync({x:x.subarray(i*2,(i+3)*2),y:y.subarray(i*2,(i+3)*2)}))
+    for (const data of [{x,y}, {x:tx,y:ty}, {x:tx,y}]) {
+      const model = await build()
+      const losses = await model.fitAsync(data,{batchSize:3,remainder:'keep',epochs:2,optimizer:'sgd',lr:0.01})
+      assertClose(losses,expected,1e-5)
+      assertClose(await model.readBufferAsync('w'),await control.readBufferAsync('w'),1e-5)
+      const before = await model.readBufferAsync('w')
+      for (const opts of [{batchSize:9,remainder:'keep'}, {batchSize:3,remainder:'error'}]) {
+        let rejected=false
+        try { await model.fitAsync(data,{...opts,optimizer:'adam'}) } catch { rejected=true }
+        assert(rejected, 'invalid batch must reject before any update')
+        assertClose(await model.readBufferAsync('w'),before,0)
+      }
+    }
+    assertClose(await tx.toArrayAsync(), x, 0)
+    const model = await build(), small = new pg.Tensor(x.subarray(0,4)).reshape(2,2)
+    owned.push(small)
+    assert((await model.fitAsync({x:small,y:y.subarray(0,4)}, {batchSize:3,remainder:'keep',optimizer:'sgd'})).length===1)
+    assertClose(await small.toArrayAsync(),x.subarray(0,4),0)
+    const ffi = pg._core.ffi, shrink = ffi.poly_tensor_shrink, release = ffi.poly_tensor_release
+    const train = pg._core.model.trainStep
+    for (const failure of ['shrink', 'train']) {
+      let allocated = [], calls = 0, rejected = false
+      const injectedShrink = (...args) => {
+        if (++calls === 2 && failure === 'shrink') return null
+        const handle = shrink(...args)
+        allocated.push(handle)
+        return handle
+      }
+      const injectedRelease = handle => {
+        const index = allocated.indexOf(handle)
+        if (index >= 0) allocated.splice(index,1)
+        return release(handle)
+      }
+      // N-API exports are read-only. Shadow them on a test-local facade rather
+      // than modifying the addon object or weakening native failure coverage.
+      pg._core.ffi = Object.create(ffi, {
+        poly_tensor_shrink:{value:injectedShrink}, poly_tensor_release:{value:injectedRelease}
+      })
+      pg._core.model.trainStep = (...args) => {
+        if (failure === 'train') throw new Error('train sentinel')
+        return train(...args)
+      }
+      try {
+        await model.fitAsync({x:tx,y:ty},{batchSize:3,remainder:'keep'})
+      } catch(e) { rejected = /shrink failed|train sentinel/.test(e.message) }
+      finally {
+        pg._core.ffi = ffi
+        pg._core.model.trainStep = train
+      }
+      assert(rejected, 'injected batch failure must propagate')
+      assert(allocated.length === 0, 'batch failure leaked Tensor slice owners')
+    }
+    let failed=false
+    try { await model.fitAsync({x:tx,y:ty},{batchSize:3,remainder:'keep',onStep:()=>{throw new Error('batch callback')}}) }
+    catch(e) { failed=/batch callback/.test(e.message) }
+    assert(failed, 'callback exception must clean up Tensor slices')
+    const pending = model.fitAsync({x:tx,y:ty},{batchSize:3,remainder:'keep'})
+    const releases = [tx.dispose(),ty.dispose(),model.dispose()]
+    assert((await pending).length===3, 'queued dataset must survive caller disposal')
+    await Promise.all(releases)
+  } finally {
+    for (const model of models) await model.dispose()
+    for (const tensor of owned) await tensor.dispose()
+    bound.dispose(); n.dispose()
+  }
+}
+
 async function checkModelMinibatches(pg) {
   const gpu = String(pg.device).toLowerCase() === 'webgpu'
   const build = async () => {
@@ -183,6 +271,11 @@ async function checkModelMinibatches(pg) {
     catch (e) { rejected = /remainder/.test(e.message) }
     assert(rejected, 'incomplete batch must reject before any update')
     assertClose(await model.readBufferAsync('w'), before, 0)
+    rejected = false
+    try { await model.fitAsync({x:x.subarray(0,5),y:y.subarray(0,5)}, {batchSize:2,remainder:'keep',optimizer:'adam'}) }
+    catch(e) { rejected = /remainder/.test(e.message) }
+    assert(rejected, 'keep cannot admit an extent outside the fixed signature')
+    assertClose(await model.readBufferAsync('w'),before,0)
     for (const bad of [{x, y:y.subarray(0,4)}, {x, y:new Int32Array(y)},
       {x:{data:x, shape:[3,2]}, y}]) {
       let invalid = false
@@ -927,6 +1020,7 @@ async function runModelRuntimeTests(pg) {
   await test('Model variable shapes preserve results and portable signatures', () => checkModelVariableShapes(pg))
   await test('Model empty bindings reject before input writes', () => checkModelEmptyInputAdmission(pg))
   await test('Model minibatches match explicit training steps', () => checkModelMinibatches(pg))
+  await test('Model bounded minibatches and Tensor datasets', () => checkModelBoundedMinibatches(pg))
   await test('Model trace seals independent state with named loss', () => checkModelTrace(pg, Model))
 
   await test('generic call validates signature and returns selected outputs', async () => {
@@ -1680,6 +1774,7 @@ async function runModelSmokeTests(pg) {
   await test('Model variable shapes preserve results and portable signatures', () => checkModelVariableShapes(pg))
   await test('Model empty bindings reject before input writes', () => checkModelEmptyInputAdmission(pg))
   await test('Model minibatches match explicit training steps', () => checkModelMinibatches(pg))
+  await test('Model bounded minibatches and Tensor datasets', () => checkModelBoundedMinibatches(pg))
   await test('Model trace seals independent state with named loss', () => checkModelTrace(pg, Model))
 
   await test('Model copied storage exact writes and objective selection', () => checkModelStorageObjectives(pg, Model))

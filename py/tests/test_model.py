@@ -115,6 +115,93 @@ def test_dynamic_model_training_rebinds_cached_loss(device):
         model.dispose(); rt.dispose()
 
 
+@pytest.mark.parametrize('device', ['cpu', 'interp', 'cuda'])
+@pytest.mark.parametrize('dataset', ['host', 'tensor', 'mixed'])
+def test_fit_bounded_minibatches_match_steps(device, dataset, monkeypatch):
+    from polygrad import create, _ffi
+    if device == 'cuda' and (not hasattr(_ffi._lib, 'poly_cuda_available') or not _ffi._lib.poly_cuda_available()):
+        pytest.skip('poly_cuda_available() is false in the selected library')
+    rt = create(device=device, logical='always')
+    n = rt.Variable('fit_batch', 1, 8)
+    def build():
+        w = rt.Tensor([0.0])
+        return Model(lambda x: x*w, inputs={'x':rt.Tensor.empty(n.bind(4), 2)},
+                     targets={'y':rt.Tensor.empty(n.bind(4), 2)}, params={'w':w},
+                     loss=lambda out,y:(out-y).square().mean())
+    model, control = build(), build()
+    x = np.arange(14, dtype=np.float32).reshape(2, 7).T / 10
+    tx, ty = rt.Tensor(x.T).transpose(), rt.Tensor(x*2)
+    try:
+        control.set_optimizer('sgd', lr=0.01)
+        expected = [control.train_step(x=x[i:i+3], y=x[i:i+3]*2)
+                    for _ in range(2) for i in range(0, 7, 3)]
+        data = {'x':x if dataset == 'host' else tx, 'y':ty if dataset == 'tensor' else x*2}
+        # Dataset slicing must not materialize through frontend host reads.
+        with monkeypatch.context() as patch:
+            patch.setattr(Tensor, 'numpy', lambda *a, **k: pytest.fail('Tensor dataset read back to host'))
+            losses = model.fit(data, batch_size=3, remainder='keep', epochs=2, optimizer='sgd', lr=0.01)
+        np.testing.assert_allclose(losses, expected, rtol=1e-5, atol=1e-6)
+        np.testing.assert_allclose(model.read_buffer('w'), control.read_buffer('w'), rtol=1e-5)
+        np.testing.assert_allclose(tx.numpy(), x)
+        # A complete one-batch shrink may return its caller: fit must not dispose it.
+        small = rt.Tensor(x[:2])
+        try:
+            assert len(model.fit({'x':small, 'y':x[:2]*2}, batch_size=3, remainder='keep')) == 1
+            np.testing.assert_array_equal(small.numpy(), x[:2])
+        finally: small.dispose()
+        before = model.read_buffer('w')
+        for size, remainder in ((9, 'keep'), (3, 'error')):
+            with pytest.raises(ValueError): model.fit(data, batch_size=size, remainder=remainder, optimizer='adam')
+            np.testing.assert_array_equal(model.read_buffer('w'), before)
+    finally:
+        tx.dispose(); ty.dispose(); model.dispose(); control.dispose(); rt.dispose()
+
+
+@pytest.mark.parametrize('dynamic', [False, True])
+def test_fit_dataset_preflight_and_slice_cleanup(dynamic, monkeypatch):
+    from polygrad import create
+    rt, other = create(device='interp', logical='always'), create(device='interp')
+    batch = rt.Variable('fit_minimum', 2, 4).bind(3) if dynamic else 3
+    w = rt.Tensor([0.0])
+    model = Model(lambda x: x*w, inputs={'x':rt.Tensor.empty(batch, 2)},
+                  targets={'y':rt.Tensor.empty(batch, 2)}, params={'w':w},
+                  loss=lambda out,y:(out-y).square().mean())
+    x = np.arange(12,dtype=np.float32).reshape(6,2)/10
+    tx, ty, wrong = rt.Tensor(x), rt.Tensor(x*2), other.Tensor(x)
+    disposed = rt.Tensor(x)
+    disposed.dispose()
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(model, 'set_optimizer', lambda *a, **k: pytest.fail('invalid dataset configured optimizer'))
+            for data, opts in [({'x':x[:4], 'y':x[:4]}, {'remainder':'keep'}),
+                               ({'x':x[:0], 'y':x[:0]}, {'remainder':'keep'}),
+                               ({'x':tx, 'y':x.astype(np.float64)}, {}),
+                               ({'x':wrong, 'y':ty}, {}), ({'x':disposed, 'y':ty}, {}),
+                               ({'x':x, 'y':x.reshape(3,4)}, {})]:
+                with pytest.raises((TypeError, ValueError)):
+                    model.fit(data, batch_size=3, optimizer='adam', **opts)
+        model.set_optimizer('sgd', lr=0.01)
+        # Partial batch construction must release already-created views.
+        shrink, created = Tensor.shrink, []
+        def fail_second(self, arg):
+            if created: raise RuntimeError('slice sentinel')
+            result = shrink(self, arg)
+            created.append(result)
+            return result
+        with monkeypatch.context() as patch:
+            patch.setattr(Tensor, 'shrink', fail_second)
+            with pytest.raises(RuntimeError, match='slice sentinel'):
+                model.fit({'x':tx,'y':ty}, batch_size=3)
+        assert created and created[0]._tensor is None
+        def fail_callback(*args): raise RuntimeError('callback sentinel')
+        with pytest.raises(RuntimeError, match='callback sentinel'):
+            model.fit({'x':tx,'y':ty}, batch_size=3, on_step=fail_callback)
+        assert len(model.fit({'x':tx,'y':ty}, batch_size=3)) == 2
+        np.testing.assert_array_equal(tx.numpy(), x)
+    finally:
+        tx.dispose(); ty.dispose(); wrong.dispose(); model.dispose(); other.dispose(); rt.dispose()
+
+
 def test_host_io_shape_admission_precedes_writes():
     from polygrad import create
     rt = create(device='interp')

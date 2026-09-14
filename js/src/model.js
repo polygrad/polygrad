@@ -1178,12 +1178,11 @@ function createBoundModelClass(runtime) {
       const epochs = opts.epochs == null ? 1 : opts.epochs
       if (!Number.isSafeInteger(epochs) || epochs < 0) throw new TypeError('epochs must be a nonnegative integer')
       const remainder = opts.remainder == null ? 'error' : opts.remainder
-      if (!['error', 'drop'].includes(remainder)) throw new TypeError("remainder must be 'error' or 'drop'")
+      if (!['error', 'drop', 'keep'].includes(remainder)) throw new TypeError("remainder must be 'error', 'drop' or 'keep'")
       const normalized = normalizeBindings(io, this._rt)
       if (opts.batchSize == null) return {epochs, count:1, batch:() => normalized}
       const size = opts.batchSize
       if (!Number.isSafeInteger(size) || size <= 0) throw new TypeError('batchSize must be a positive integer')
-      if (normalized.tensors) throw new TypeError('minibatch Tensor datasets require an explicit trainStep loop')
       const entries = this.entrypoints()
       let selected = opts.entrypoint == null ? entries.filter(e => e.objective) : entries.filter(e => e.name === opts.entrypoint)
       if (!selected.length && opts.entrypoint == null) selected = entries.filter(e => e.name === 'loss')
@@ -1195,32 +1194,54 @@ function createBoundModelClass(runtime) {
         throw new Error('fit data must match the selected entrypoint inputs')
       let samples = null
       const rows = normalized.names.map((name, i) => {
-        const declared = schema.find(b => b.name === name).shape
-        if (!declared.length || declared[0] !== size)
-          throw new Error(`batchSize must match the declared first axis of '${name}'`)
+        const binding = schema.find(b => b.name === name), declared = binding.shape
+        if (!declared.length || size < binding.shapeBounds[0][0] || size > binding.shapeBounds[0][1])
+          throw new Error(`batchSize is outside the declared first-axis bounds of '${name}'`)
         const supplied = normalized.arrays[i]
-        const data = supplied.data || supplied
-        const dtype = data.constructor.name.replace('Array', '').toLowerCase()
+        const tensor = io[name] && io[name]._tensor ? io[name] : null
+        const data = tensor ? null : supplied.data || supplied
+        const dtype = tensor ? tensor.dtype : data.constructor.name.replace('Array', '').toLowerCase()
           .replace('bigint64', 'int64').replace('biguint64', 'uint64').replace('uint8clamped', 'uint8')
-        if (dtype !== schema.find(b => b.name === name).dtype)
+        if (dtype !== binding.dtype)
           throw new TypeError(`fit input '${name}' has the wrong storage dtype`)
         const width = declared.slice(1).reduce((a,b) => a*b, 1)
         // Flat storage only determines a sample count when its stride is nonzero.
-        const shape = supplied.shape || (width > 0 && data.length % width === 0 ?
+        const shape = tensor ? tensor.shape : supplied.shape || (width > 0 && data.length % width === 0 ?
           [data.length / width, ...declared.slice(1)] : null)
         if (!shape || shape.length !== declared.length ||
+            shape.some(d => !Number.isSafeInteger(d) || d < 0) ||
             shape.slice(1).some((d,j) => d !== declared[j+1]) ||
-            shape.reduce((a,b) => a*b, 1) !== data.length)
+            (!tensor && shape.reduce((a,b) => a*b, 1) !== data.length))
           throw new Error(`fit input '${name}' has incompatible sample shape`)
         if (samples != null && samples !== shape[0]) throw new Error('fit inputs must have the same sample count')
         samples = shape[0]
-        return {data, width, shape:declared}
+        return {data, tensor: tensor ? supplied : null, width, shape, bounds:binding.shapeBounds[0]}
       })
-      if (samples == null || samples < size) throw new Error('fit requires at least one complete batch')
-      if (samples % size && remainder === 'error')
-        throw new Error('unsupported incomplete batch remainder; use remainder="drop" explicitly')
-      return {epochs, count:Math.floor(samples/size), batch:i => ({names:normalized.names,
-        arrays:rows.map(r => ({data:r.data.subarray(i*size*r.width, (i+1)*size*r.width), shape:r.shape}))})}
+      if (samples == null || samples === 0 || (samples < size && remainder !== 'keep'))
+        throw new Error('fit requires at least one complete batch')
+      const tail = samples % size
+      if (tail && (remainder === 'error' || (remainder === 'keep' &&
+          rows.some(r => tail < r.bounds[0] || tail > r.bounds[1]))))
+        throw new Error('unsupported incomplete batch remainder; use remainder="drop" or a permitted "keep" extent')
+      const ffi = this._rt._core.ffi, ctx = this._rt._core.ctx
+      return {epochs, count:Math.floor(samples/size) + Number(Boolean(tail) && remainder === 'keep'), batch:i => {
+        const start = i*size, stop = Math.min(start+size,samples), owned = []
+        const release = () => { for (const tensor of owned) ffi.poly_tensor_release(tensor) }
+        try {
+          const arrays = rows.map(r => {
+            if (!r.tensor) return {data:r.data.subarray(start*r.width, stop*r.width), shape:[stop-start,...r.shape.slice(1)]}
+            // Run the ordinary Tensor movement op between awaited C calls, never
+            // while Asyncify is suspended. Each C return owns one reference,
+            // including identity shrinks; release it before constructing the next batch.
+            const ranges = r.shape.flatMap((extent, axis) => axis === 0 ? [start,stop] : [0,extent])
+            const tensor = ffi.poly_tensor_shrink(ctx, r.tensor, ranges, r.shape.length)
+            if (!tensor) throw new Error('Model dataset shrink failed')
+            owned.push(tensor)
+            return tensor
+          })
+          return {names:normalized.names, arrays, release}
+        } catch (error) { release(); throw error }
+      }}
     }
 
     _fitOptimizer(opts) {
@@ -1245,8 +1266,10 @@ function createBoundModelClass(runtime) {
       this._fitOptimizer(opts)
       const losses = []
       for (let step = 0; step < plan.epochs * plan.count; step++) {
-        const {names, arrays} = plan.batch(step % plan.count)
-        const loss = this._rt._core.model.trainStep(this._handle, names, arrays, opts.entrypoint)
+        const batch = plan.batch(step % plan.count)
+        let loss
+        try { loss = this._rt._core.model.trainStep(this._handle, batch.names, batch.arrays, opts.entrypoint) }
+        finally { if (batch.release) batch.release() }
         if (loss == null || Number.isNaN(loss)) throw new Error('polygrad: trainStep failed')
         losses.push(loss)
         if (opts.onStep) opts.onStep(step, loss)
@@ -1265,8 +1288,10 @@ function createBoundModelClass(runtime) {
       const run = async () => {
         const losses = []
         for (let step = 0; step < plan.epochs * plan.count; step++) {
-          const {names, arrays} = plan.batch(step % plan.count)
-          const loss = await this._rt._core.model.trainStep(this._handle, names, arrays, opts.entrypoint)
+          const batch = plan.batch(step % plan.count)
+          let loss
+          try { loss = await this._rt._core.model.trainStep(this._handle, batch.names, batch.arrays, opts.entrypoint) }
+          finally { if (batch.release) batch.release() }
           if (loss == null || Number.isNaN(loss)) throw new Error('polygrad: trainStep failed')
           losses.push(loss)
           if (opts.onStep) opts.onStep(step, loss)

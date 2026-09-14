@@ -597,15 +597,19 @@ multidimensional ndarrays carry their shape; JS accepts
 `[3, 2]` interchangeable with `[2, 3]`. C checks all input rows before writes.
 
 `model.fit(data, epochs=2, batch_size=32)` in Python, or
-`model.fit(data, {epochs: 2, batchSize: 32})` in JS, traverses host datasets in
-input order each epoch. The captured inputs/targets must have first axis 32;
+`model.fit(data, {epochs: 2, batchSize: 32})` in JS, traverses host arrays or
+device Tensor datasets in input order each epoch. Each captured input/target
+must admit batch size 32 in its leading-axis bounds;
 all datasets must have the same sample count. Omit batch size to repeat the
 supplied full batch. An incomplete batch rejects before training unless
-`remainder="drop"` (JS `remainder: 'drop'`) is explicit. No padding or shuffling
-is implicit. Returns one loss per step; callback indices span epochs.
+`remainder="drop"` (JS `remainder: 'drop'`) discards it, or `remainder="keep"`
+processes it when every input's bounds permit the smaller extent. These policies
+are explicit; no padding or shuffling is implicit. Returns one loss per step;
+callback indices span epochs. Tensor datasets carry concrete shapes and are
+sliced on-device, including noncontiguous views; host and Tensor inputs may mix.
 WebGPU uses `await model.fitAsync(data, options)` with synchronous `onStep`
-callbacks. Tensor datasets still use explicit `train_step` / `trainStepAsync`
-loops; minibatching does not read device Tensors back into host arrays.
+callbacks. Minibatching does not read device datasets back into host arrays;
+the scalar loss still returns to the host each step.
 
 ### Configuration-driven model families
 

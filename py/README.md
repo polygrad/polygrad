@@ -295,12 +295,14 @@ trailing dimensions. Calls and explicit training steps bind concrete extents;
 returned Tensors retain their invocation's shape and values. Portable save/load
 preserves this signature; storage currently reserves its maximum capacity.
 
-For host datasets larger than the captured batch, use
-`model.fit(data, epochs=2, batch_size=32)`, where each declared input/target has
-first axis 32. Epochs traverse samples in input order; the return value contains
-one loss per step. An incomplete final batch is rejected before training unless
-`remainder='drop'` is explicit. Omit `batch_size` to repeat one full batch as
-before. Tensor datasets use explicit `train_step` loops for now.
+For host arrays or device Tensor datasets, use
+`model.fit(data, epochs=2, batch_size=32)`, where each declared input/target's
+leading-axis bounds admit 32. Epochs traverse samples in input order; the return
+value contains one loss per step. An incomplete final batch is rejected before
+training unless `remainder='drop'` discards it or `remainder='keep'` processes
+the smaller extent permitted by every input's bounds. Tensor datasets are sliced
+on-device without frontend host readback, and may mix with host inputs. Omit
+`batch_size` to repeat one full batch as before. No padding or shuffling is implicit.
 
 Flat arrays use the Model signature. Multidimensional ndarrays carry concrete
 shape and must match it, not merely its element count. JavaScript can express
