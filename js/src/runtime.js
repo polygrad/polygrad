@@ -242,6 +242,10 @@ class PolyRuntime {
 
   _beginAsync() {
     if (this._closing || !this._core) throw new Error('polygrad runtime has been disposed')
+    if (this._modelCapture) {
+      this._modelCapture.failed = true
+      throw new Error('Asynchronous execution is not allowed during Model capture')
+    }
     if (!this._usesAsyncHostBridge()) return () => {}
     this._activeAsync++
     let released = false
@@ -273,6 +277,7 @@ class PolyRuntime {
   }
 
   dispose() {
+    if (this._modelCapture) throw new Error('Runtime disposal is not allowed during Model capture')
     if (this._disposePromise) return this._disposePromise
     if (!this._core) return undefined
 

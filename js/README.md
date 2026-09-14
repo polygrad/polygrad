@@ -18,6 +18,24 @@ Polygrad runtime.
 npm install polygrad
 ```
 
+## Stateful Models
+
+`new pg.Model(author, {inputs, targets, params, loss})` captures evaluation and
+training forwards with shared named state. The author runs twice at construction,
+not during `forward` or `fit`. Object authors expose `forward(inputs)` and their
+Tensor attributes supply state unless `params` overrides it. BatchNorm and RNG
+updates belong to the Model; authoring Tensor roots and `Tensor.training` are
+restored on failure too. Set the seed before construction.
+
+For WebGPU, use `await pg.Model.fromCallableAsync(author, options)` to seal the
+graph; the author itself must stay synchronous and must not start async reads or
+execution. Authored assignments require auxiliary state (`is_param_(false)`);
+parameter updates belong to the optimizer. Arbitrary JavaScript side effects
+are not rolled back. Saved bundles preserve auxiliary/RNG and optional optimizer
+state; reapply the same optimizer configuration to resume training after loading.
+
+## Native installation
+
 Node tries to build the native addon during install. If that fails, runtime
 creation can still use the WASM core. To skip native compilation:
 

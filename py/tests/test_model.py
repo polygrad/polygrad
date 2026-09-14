@@ -7,6 +7,146 @@ from polygrad.models import MLP, Graph, Sequential
 from polygrad.tensor import Tensor
 
 
+def test_callable_model_captures_training_batchnorm_without_mutating_author():
+    from polygrad import nn
+    from polygrad.helpers import TRAINING
+    class Net:
+        def __init__(self): self.bn = nn.BatchNorm(2)
+        def __call__(self, x): return {'prediction':self.bn(x)}
+    net = Net()
+    previous_mode = TRAINING.value
+    model = Model(net, inputs={'x':Tensor.empty(2,2)}, targets={'y':Tensor.empty(2,2)},
+                  loss=lambda out,y:(out['prediction']-y).square().mean())
+    restored = None
+    try:
+        assert TRAINING.value == previous_mode
+        np.testing.assert_array_equal(model.read_buffer('bn.running_mean'), [0,0])
+        np.testing.assert_array_equal(model.read_buffer('bn.num_batches_tracked'), [0])
+        model.set_optimizer('sgd',lr=0.01)
+        x = np.array([[1,2],[3,6]],dtype=np.float32)
+        model.train_step(x=x,y=np.zeros_like(x))
+        np.testing.assert_allclose(model.read_buffer('bn.running_mean'),[0.2,0.4],rtol=1e-6)
+        np.testing.assert_allclose(model.read_buffer('bn.running_var'),[1.1,1.7],rtol=1e-6)
+        np.testing.assert_array_equal(model.read_buffer('bn.num_batches_tracked'),[1])
+        np.testing.assert_array_equal(net.bn.running_mean.numpy(), [0,0])
+        np.testing.assert_array_equal(net.bn.num_batches_tracked.numpy(), 0)
+        prediction = model.forward(x=x)['prediction']
+        expected = ((x-[0.2,0.4])/np.sqrt(np.array([1.1,1.7])+1e-5)*
+                    model.read_buffer('bn.weight')+model.read_buffer('bn.bias'))
+        np.testing.assert_allclose(prediction,expected,rtol=1e-5)
+        np.testing.assert_array_equal(model.read_buffer('bn.num_batches_tracked'),[1])
+        restored = Model.load(model.save())
+        restored.set_optimizer('sgd',lr=0.01)
+        np.testing.assert_allclose(model.train_step(x=x,y=x),restored.train_step(x=x,y=x),rtol=1e-5)
+        np.testing.assert_array_equal(restored.read_buffer('bn.num_batches_tracked'),[2])
+    finally:
+        if restored: restored.dispose()
+        model.dispose()
+
+
+def test_callable_model_rng_capture_is_private_and_resumable():
+    from polygrad.helpers import TRAINING
+    Tensor.manual_seed(123)
+    control = Tensor.rand(16).numpy()
+    Tensor.manual_seed(123)
+    weight = Tensor([1.0])
+    model = Model(lambda x: (x*weight).dropout(0.5), inputs={'x':Tensor.empty(16)},
+                  targets={'y':Tensor.empty(16)}, params={'weight':weight},
+                  loss=lambda out,y:(out-y).square().mean())
+    restored = None
+    try:
+        np.testing.assert_array_equal(Tensor.rand(16).numpy(),control)
+        assert not TRAINING.value
+        names = [model.buf_name(i) for i in range(model.buf_count)]
+        counters = [name for name in names if name.startswith('__rng.') and name.endswith('.counter')]
+        assert len(counters) == 1
+        counter = counters[0]
+        np.testing.assert_array_equal(model.read_buffer(counter),[0,0])
+        model.set_optimizer('sgd',lr=0.01)
+        x = np.ones(16,dtype=np.float32)
+        y = np.zeros(16,dtype=np.float32)
+        model.train_step(x=x,y=y)
+        after = model.read_buffer(counter)
+        assert np.any(after != 0)
+        model.forward(x=x)
+        np.testing.assert_array_equal(model.read_buffer(counter),after)
+        restored = Model.load(model.save())
+        restored.set_optimizer('sgd',lr=0.01)
+        for _ in range(2):
+            np.testing.assert_allclose(model.train_step(x=x,y=y),restored.train_step(x=x,y=y),rtol=1e-6)
+            np.testing.assert_array_equal(model.read_buffer(counter),restored.read_buffer(counter))
+            np.testing.assert_array_equal(model.read_buffer('weight'),restored.read_buffer('weight'))
+    finally:
+        if restored: restored.dispose()
+        model.dispose()
+
+
+def test_callable_model_capture_rejects_effectful_reads_and_restores_modes():
+    from polygrad.helpers import TRAINING
+    from polygrad import create
+    rt = create(device='interp')
+    state = rt.Tensor([0.0]).is_param_(False)
+    x = rt.Tensor.empty(1)
+    before = TRAINING.value
+    try:
+        for read in (False, True):
+            def author(x):
+                state.assign(state+1)
+                if read: state.numpy()
+                else: raise RuntimeError('author failed')
+                return x
+            with pytest.raises((RuntimeError, ValueError)):
+                Model(author,inputs={'x':x},params={'state':state})
+            assert TRAINING.value == before
+            np.testing.assert_array_equal(state.numpy(),[0])
+        def pure(x):
+            rt.Tensor([3.0]).numpy()
+            return x+1
+        model = Model(pure,inputs={'x':x})
+        try: np.testing.assert_array_equal(model.forward(x=np.array([2],dtype=np.float32))['output'],[3])
+        finally: model.dispose()
+    finally:
+        rt.dispose()
+
+
+def test_callable_model_capture_keeps_sequential_aux_updates():
+    from polygrad.helpers import TRAINING
+    state = Tensor([0.0]).is_param_(False)
+    weight = Tensor([1.0])
+    def author(x):
+        if TRAINING.value:
+            state.assign(state+1)
+            state.assign(state+2)
+        return x*weight
+    model = Model(author,inputs={'x':Tensor.empty(1)}, targets={'y':Tensor.empty(1)},
+                  params={'state':state,'weight':weight},loss=lambda out,y:(out-y).square().mean())
+    try:
+        model.set_optimizer('sgd',lr=0.01)
+        for i in (1,2):
+            model.train_step(x=np.ones(1,dtype=np.float32),y=np.zeros(1,dtype=np.float32))
+            np.testing.assert_array_equal(model.read_buffer('state'),[3*i])
+        np.testing.assert_array_equal(state.numpy(),[0])
+    finally: model.dispose()
+
+
+def test_callable_model_lazy_parameter_rng_is_not_an_inference_effect():
+    class Net:
+        def __init__(self): self.weight = None
+        def __call__(self,x):
+            if self.weight is None: self.weight = Tensor.rand(2)
+            return x*self.weight
+    model = Model(Net(),inputs={'x':Tensor.empty(2)},targets={'y':Tensor.empty(2)},
+                  loss=lambda out,y:(out-y).square().mean())
+    try:
+        counters = [model.buf_name(i) for i in range(model.buf_count)
+                    if model.buf_name(i).startswith('__rng.') and model.buf_name(i).endswith('.counter')]
+        before = {name:model.read_buffer(name) for name in counters}
+        for _ in range(2):
+            model.forward(x=np.ones(2,dtype=np.float32))
+            for name in counters: np.testing.assert_array_equal(model.read_buffer(name),before[name])
+    finally: model.dispose()
+
+
 @pytest.mark.parametrize('device', ['cpu', 'interp', 'cuda'])
 def test_dynamic_model_results_and_portable_signature(device):
     from polygrad import create

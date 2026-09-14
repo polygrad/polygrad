@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'py'))
 os.environ.setdefault('POLY_LIB', str(ROOT / 'build' / 'libpolygrad.so'))
 
-from polygrad.model import Model, OPTIM_ADAM  # noqa: E402
+from polygrad.model import Model, OPTIM_ADAM, ROLE_PARAM, ROLE_AUX  # noqa: E402
 from polygrad.models import MLP, Graph  # noqa: E402
 from polygrad import create, _ffi  # noqa: E402
 
@@ -98,6 +98,14 @@ def run_core(work: Path, core: str, source_after: Model, expected_loss: float) -
         cwd=ROOT, check=True,
     )
     result = json.loads((work / f'javascript-{core}-result.json').read_text())
+    stateful = Model.load((work / f'javascript-{core}-stateful.bundle').read_bytes())
+    try:
+        expected = json.loads((work / 'stateful-expected.json').read_text())
+        np.testing.assert_allclose(result['statefulLoss'], expected['loss'], rtol=1e-5)
+        for name, values in expected['state'].items():
+            np.testing.assert_allclose(stateful.read_buffer(name), values, rtol=1e-5, atol=1e-6)
+    finally:
+        stateful.dispose()
     variable = Model.load((work / f'javascript-{core}-variable.bundle').read_bytes())
     try:
         assert variable.buf_shape_bounds(variable.find_buf('x')) == ((1,32),(2,2))
@@ -175,6 +183,30 @@ def export_variable(work: Path) -> None:
         model.dispose(); rt.dispose()
 
 
+def export_stateful(work: Path) -> None:
+    from polygrad import Tensor
+    from polygrad.helpers import TRAINING
+    Tensor.manual_seed(123)
+    weight = Tensor([1.0])
+    counter = Tensor([0.0]).is_param_(False)
+    def author(x):
+        if TRAINING.value: counter.assign(counter+1)
+        return (x*weight).dropout(0.5)
+    model = Model(author, inputs={'x':Tensor.empty(16)}, targets={'y':Tensor.empty(16)},
+                  params={'weight':weight,'counter':counter},loss=lambda out,y:(out-y).square().mean())
+    try:
+        model.set_optimizer('adam',lr=0.01)
+        io = {'x':np.ones(16,np.float32),'y':np.zeros(16,np.float32)}
+        model.train_step(**io)
+        (work / 'python-stateful.bundle').write_bytes(model.save())
+        loss = model.train_step(**io)
+        state = {model.buf_name(i):model.read_buffer(model.buf_name(i)).tolist()
+                 for i in range(model.buf_count) if model.buf_role(i) in (ROLE_PARAM,ROLE_AUX)}
+        (work / 'stateful-expected.json').write_text(json.dumps({'loss':loss,'state':state}))
+    finally:
+        model.dispose()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument('--cores', default='native,wasm')
@@ -195,6 +227,7 @@ def main() -> None:
     export_c_lstm(work)
     export_custom(work)
     export_variable(work)
+    export_stateful(work)
     graph = Graph((ROOT / 'test/fixtures/model_definition.json').read_bytes())
     try:
         graph.write_buffer('modules.shared.weight', np.array([1, 2, 3, 4], np.float32))

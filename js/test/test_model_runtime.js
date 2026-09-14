@@ -3,6 +3,115 @@
 const compositionFixture = require('../../test/fixtures/model_definition.json')
 const quantizedFixture = require('../../test/fixtures/gguf_quantized_blocks.json')
 
+async function checkModelStatefulCapture(pg) {
+  const gpu = String(pg.device).toLowerCase() === 'webgpu'
+  const net = {bn:new pg.nn.BatchNorm(2), forward({x}) { return {prediction:this.bn.call(x)} }}
+  const mode = pg.Tensor.training
+  const opts = {inputs:{x:pg.Tensor.empty([2,2])},targets:{y:pg.Tensor.empty([2,2])},
+    loss:(out,{y})=>out.prediction.sub(y).square().mean()}
+  const model = gpu ? await pg.Model.fromCallableAsync(net,opts) : new pg.Model(net,opts)
+  let restored
+  try {
+    assert(pg.Tensor.training === mode,'capture changed authoring mode')
+    assertClose(await model.readBufferAsync('bn.runningMean'),[0,0],0)
+    assert(Number((await model.readBufferAsync('bn.numBatchesTracked'))[0])===0)
+    model.setOptimizer('sgd',0.01)
+    const x = new Float32Array([1,2,3,6]), y = new Float32Array(4)
+    await model.trainStepAsync({x,y})
+    assertClose(await model.readBufferAsync('bn.runningMean'),[0.2,0.4],1e-6)
+    assertClose(await model.readBufferAsync('bn.runningVar'),[1.1,1.7],1e-6)
+    assert(Number((await model.readBufferAsync('bn.numBatchesTracked'))[0])===1)
+    assertClose(await net.bn.runningMean.toArrayAsync(),[0,0],0)
+    const weight = await model.readBufferAsync('bn.weight'), bias = await model.readBufferAsync('bn.bias')
+    const expected = Array.from(x,(v,i)=>(v-[0.2,0.4][i%2])/Math.sqrt([1.1,1.7][i%2]+1e-5)*weight[i%2]+bias[i%2])
+    assertClose((await model.forwardAsync({x})).prediction,expected,1e-5)
+    assert(Number((await model.readBufferAsync('bn.numBatchesTracked'))[0])===1)
+    restored = pg.Model.load(await model.saveAsync())
+    restored.setOptimizer('sgd',0.01)
+    const a = await model.trainStepAsync({x,y:x}), b = await restored.trainStepAsync({x,y:x})
+    assert(Math.abs(a-b)<1e-5,'restored training diverged')
+    assert(Number((await restored.readBufferAsync('bn.numBatchesTracked'))[0])===2)
+  } finally {
+    if(restored) await restored.dispose()
+    await model.dispose()
+    for(const tensor of Object.values(net.bn)) if(tensor && tensor.dispose) await tensor.dispose()
+    for(const tensor of [...Object.values(opts.inputs),...Object.values(opts.targets)]) await tensor.dispose()
+  }
+}
+
+async function checkModelCaptureRng(pg) {
+  const gpu = String(pg.device).toLowerCase() === 'webgpu'
+  pg.Tensor.manual_seed(123)
+  const controlTensor = pg.Tensor.rand(16)
+  const control = await controlTensor.toArrayAsync()
+  await controlTensor.dispose()
+  pg.Tensor.manual_seed(123)
+  const weight = new pg.Tensor([1.0]), input = pg.Tensor.empty(16), target = pg.Tensor.empty(16)
+  const opts = {inputs:{x:input},targets:{y:target},params:{weight},loss:(out,{y})=>out.sub(y).square().mean()}
+  const author = ({x})=>x.mul(weight).dropout(0.5)
+  const model = gpu ? await pg.Model.fromCallableAsync(author,opts) : new pg.Model(author,opts)
+  let restored
+  try {
+    const after = pg.Tensor.rand(16)
+    try { assertClose(await after.toArrayAsync(),control,0) } finally { await after.dispose() }
+    const counters = Array.from({length:model.bufCount},(_,i)=>model.bufName(i))
+      .filter(name=>name.startsWith('__rng.') && name.endsWith('.counter'))
+    assert(counters.length===1,'capture must own one RNG counter')
+    const counter = counters[0]
+    assertClose(await model.readBufferAsync(counter),[0,0],0)
+    model.setOptimizer('sgd',0.01)
+    const x = new Float32Array(16).fill(1), y = new Float32Array(16)
+    await model.trainStepAsync({x,y})
+    const state = await model.readBufferAsync(counter)
+    assert(state.some(v=>v!==0),'training did not advance RNG')
+    await model.forwardAsync({x})
+    assertClose(await model.readBufferAsync(counter),state,0)
+    restored = pg.Model.load(await model.saveAsync())
+    restored.setOptimizer('sgd',0.01)
+    for(let i=0;i<2;i++) {
+      const a=await model.trainStepAsync({x,y}), b=await restored.trainStepAsync({x,y})
+      assert(Math.abs(a-b)<1e-5,'checkpoint changed RNG continuation')
+      assertClose(await model.readBufferAsync(counter),await restored.readBufferAsync(counter),0)
+      assertClose(await model.readBufferAsync('weight'),await restored.readBufferAsync('weight'),0)
+    }
+  } finally {
+    if(restored) await restored.dispose()
+    await model.dispose()
+    for(const tensor of [weight,input,target]) await tensor.dispose()
+  }
+}
+
+async function checkModelCaptureFailure(pg) {
+  const gpu = String(pg.device).toLowerCase() === 'webgpu'
+  const x = pg.Tensor.empty(1), state = new pg.Tensor([0.0]).is_param_(false)
+  const options = {inputs:{x},params:{state}}
+  const mode = pg.Tensor.training
+  const attempt = async author => {
+    let model
+    try {
+      model = gpu ? await pg.Model.fromCallableAsync(author,options) : new pg.Model(author,options)
+      return false
+    } catch { return true }
+    finally { if(model) await model.dispose() }
+  }
+  try {
+    assert(await attempt(({x})=>{ state.assign(state.add(1)); throw new Error('author failed') }))
+    assert(pg.Tensor.training===mode)
+    assertClose(await state.toArrayAsync(),[0],0)
+    state.is_param_(true)
+    assert(await attempt(({x})=>{state.assign(state.add(1)); return x}), 'parameter assignment escaped capture')
+    assertClose(await state.toArrayAsync(),[0],0)
+    state.is_param_(false)
+    let pending
+    const rejected = await attempt(({x})=>{
+      pending = state.toArrayAsync().catch(()=>{})
+      return x
+    })
+    await pending
+    assert(rejected,'capture allowed asynchronous execution to escape its scope')
+  } finally { await x.dispose(); await state.dispose() }
+}
+
 async function checkModelVariableShapes(pg) {
   const gpu = String(pg.device).toLowerCase() === 'webgpu'
   const n = pg.uop.variable('model_batch', 1, 32), bound = n.bind(17)
@@ -772,6 +881,7 @@ async function checkModelTrace(pg, Model) {
     loss: (out, { y }) => ({ mse: out.sub(y).square().mean() })
   })
   try {
+    assert(calls === 2, 'loss capture must construct evaluation and training forwards')
     model.setOptimizer(pg.OPTIM_SGD, .1, 0, 0, 0, 0)
     assertClose([await model.trainStepAsync({ x: new pg.Tensor([1], {dtype:'float32'}),
       y: new pg.Tensor([0], {dtype:'float32'}) })], [9], 1e-6)
@@ -780,7 +890,7 @@ async function checkModelTrace(pg, Model) {
     assert(model.bindings().some(row => row.name === 'offset' && row.role === 4), 'AUX role lost')
     const saved = await model.exportWeightsAsync({ includeOptimizer: false })
     assert(safetensorNames(saved).has('offset'), 'model-only export lost persistent AUX')
-    assert(calls === 1, 'training re-invoked authoring code')
+    assert(calls === 2, 'training re-invoked authoring code after train/eval capture')
     const objective = model.entrypoints().find(row => row.name === 'loss')
     assert(objective.objective === 'mse' && objective.inputs.join(',') === 'x,y', 'objective signature lost')
   } finally { await model.dispose() }
@@ -1004,6 +1114,9 @@ async function runModelRuntimeTests(pg) {
 
   console.log('\n== Model ==')
 
+  await test('Model stateful capture shares train eval state', () => checkModelStatefulCapture(pg))
+  await test('Model stateful capture owns resumable RNG', () => checkModelCaptureRng(pg))
+  await test('Model stateful capture restores failures and rejects async execution', () => checkModelCaptureFailure(pg))
   await test('Model copied storage exact writes and objective selection', () => checkModelStorageObjectives(pg, Model))
   await test('Model codecs reject malformed bytes before publication', () => checkModelCodecRejection(pg))
   await test('Model quantized weights match pinned GGUF bit planes', () => checkQuantizedModelWeights(pg))
@@ -1762,6 +1875,9 @@ async function runModelSmokeTests(pg) {
 
   console.log('\n== Model ==')
 
+  await test('Model stateful capture shares train eval state', () => checkModelStatefulCapture(pg))
+  await test('Model stateful capture owns resumable RNG', () => checkModelCaptureRng(pg))
+  await test('Model stateful capture restores failures and rejects async execution', () => checkModelCaptureFailure(pg))
   await test('Model composition factories share C construction', () => checkCompositionFactories(pg))
   await test('Model composition catalogue and named target objective', () => checkCompositionCatalogue(pg))
   await test('Model tied Adam placement freeze and checkpoint', () => checkTiedAdamCheckpoint(pg))

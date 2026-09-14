@@ -290,6 +290,15 @@ Tensor attributes of the supplied object; functions require explicit closure sta
 Bundle bytes work across frontends; paths are Python/Node conveniences, not browser
 filesystem access. Excluding optimizer state does not remove training entrypoints.
 
+Supplying `loss` captures evaluation and training forwards separately against the
+same state. The callable runs twice during construction, never during execution.
+BatchNorm/RNG updates affect Model-owned state; the authoring object's Tensor
+roots and the training mode are restored even on failure. Set the seed before
+construction. Capture rejects parameter/input assignments and effectful reads;
+arbitrary Python side effects are not transactional. Saved bundles retain RNG
+and auxiliary state. Reapply the same optimizer configuration after loading when
+resuming training; optimizer state and configuration are distinct.
+
 For variable-size calls, capture a bounded variable leading dimension with fixed
 trailing dimensions. Calls and explicit training steps bind concrete extents;
 returned Tensors retain their invocation's shape and values. Portable save/load

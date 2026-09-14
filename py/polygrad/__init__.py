@@ -18,7 +18,7 @@ if not _default_ctx:
 from .tensor import Tensor, Variable, BoundVariable, _dispose_tensors_for_ctx
 from .dtype import DType, INVERSE_DTYPES_DICT, dtypes
 from .device import Device
-from .model import Model, _dispose_models_for_ctx
+from .model import Model, _dispose_models_for_ctx, _model_capture_active
 from .jit import CompiledCallable, Jit, JitError, TinyJit, _dispose_jits_for_ctx, compile, jit
 from .function import function
 from .uop.ops import UOp, _dispose_uops_for_ctx
@@ -371,6 +371,8 @@ class Runtime:
       return _can_run_ctx(self._ctx, op, dtype=dtype, shape=shape, shapes=shapes, device=device)
 
     def dispose(self):
+      if _model_capture_active(self._ctx):
+          raise RuntimeError('Runtime disposal is not allowed during Model capture')
       if not self._disposed:
           _dispose_models_for_ctx(self._ctx)
           _dispose_jits_for_ctx(self._ctx)

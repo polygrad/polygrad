@@ -239,6 +239,7 @@ function isModelSpec(v) {
 function createBoundModelClass(runtime) {
   const _runtime = runtime
   const adoptHandle = Symbol('Model handle adoption')
+  const captureOwners = Symbol('Model capture owners')
   const liveModelOwners = new Set()
   const modelFinalizer = typeof FinalizationRegistry === 'undefined'
     ? null
@@ -333,20 +334,71 @@ function createBoundModelClass(runtime) {
       }
     }
     return _runtime.withLogical('always', () => {
-      const result = fn(inputs)
-      if (isPromiseLike(result)) throw new TypeError('Model authoring must be synchronous')
-      const losses = loss == null ? null : loss(result, targets)
-      if (isPromiseLike(losses)) throw new TypeError('Model loss must be synchronous')
-      // Include state created by lazy layers during this authoring call.
-      if (collectObject) {
-        params = getStateDict(source)
-        for (const [name, tensor] of Object.entries(params)) {
-          if ([...Object.values(inputs), ...Object.values(targets)].includes(tensor)) {
-            throw new Error(`${name} is both input/target and model state; supply a params override`)
+      const ffi = _runtime._core.ffi, Tensor = _runtime.Tensor
+      const mode = Tensor.training, capture = ffi.poly_tensor_capture_begin(_runtime._core.ctx)
+      if (!capture) throw new Error('Model capture requires an idle Runtime outside another capture')
+      const owned = [], rng = {}
+      let result, losses, initialParams
+      _runtime._modelCapture = {failed:false}
+      try {
+        for (const training of (loss == null ? [Boolean(mode)] : [false,true])) {
+          Tensor.training = training
+          const produced = fn(inputs)
+          if (isPromiseLike(produced)) throw new TypeError('Model authoring must be synchronous')
+          const values = training && loss != null ? loss(produced, targets) : produced
+          if (isPromiseLike(values)) throw new TypeError('Model loss must be synchronous')
+          if (_runtime._modelCapture.failed) throw new Error('Model capture attempted asynchronous execution')
+          const named = normalizeNamed(values, training && loss != null ? 'loss' : 'output')
+          if (collectObject) params = getStateDict(source)
+          for (const [name,tensor] of Object.entries(params)) {
+            if ([...Object.values(inputs), ...Object.values(targets)].includes(tensor))
+              throw new Error(`${name} is both input/target and model state; supply a params override`)
           }
+          if (initialParams && (Object.keys(params).length !== Object.keys(initialParams).length ||
+              Object.entries(initialParams).some(([k,v]) => params[k] !== v)))
+            throw new Error('Model train/eval capture must share the same named state Tensors')
+          initialParams = {...params}
+          for (let index=0; ; index++) {
+            const state = ffi.poly_tensor_capture_rng(capture,index)
+            if (!state) break
+            const device = ffi.poly_device_name(state.device)
+            try {
+              for (let i=0; i<2; i++) {
+                const name = `__rng.${device}.${i ? 'counter' : 'seed'}`, handle = state.tensors[i]
+                if (name in params) throw new Error(`${name} is reserved for Model RNG state`)
+                if (!(name in rng)) {
+                  rng[name] = new Tensor(null,{_ctx:_runtime._core.ctx,_tensor:handle,_device:device,_dtype:'uint32'}).is_param_(false)
+                  state.tensors[i] = null
+                  owned.push(rng[name])
+                }
+              }
+            } finally { for (const handle of state.tensors) if (handle) ffi.poly_tensor_release(handle) }
+          }
+          const states = [...Object.values(params),...Object.values(rng)]
+          const tensors = Object.entries(named).map(([name,tensor]) => requireTensor(name,tensor))
+          const handles = ffi.poly_tensor_capture_wrap(capture, states.map(t=>t._tensor),
+            states.map(t=>Number(!t.isParam)), tensors.map(t=>t._tensor))
+          const completed = {}
+          try {
+            Object.keys(named).forEach((name,i) => {
+              completed[name] = tensors[i]._makeResultFromCore(handles[i])
+              handles[i] = null
+              owned.push(completed[name])
+            })
+          } finally { for (const handle of handles) if (handle) ffi.poly_tensor_release(handle) }
+          if (training && loss != null) losses = completed
+          else result = completed
         }
+        return {inputs,targets,outputs:result,losses,params:{...params,...rng},entrypoints,
+          [captureOwners]:owned}
+      } catch(error) {
+        for (const tensor of owned) tensor.dispose()
+        throw error
+      } finally {
+        ffi.poly_tensor_capture_end(capture)
+        Tensor.training = mode
+        _runtime._modelCapture = false
       }
-      return { inputs, targets, outputs: result, losses, params, entrypoints }
     })
   }
 
@@ -460,7 +512,11 @@ function createBoundModelClass(runtime) {
         return _runtime.models[handle.type === 'sequential' ? 'Sequential' : 'Graph'](handle)
       } else if (options != null && !adopting) throw new TypeError('Model options require a callable source')
       const spec = isModelSpec(handle)
-      if (spec) handle = lowerTensorSpec(handle)
+      if (spec) {
+        const source = handle
+        try { handle = lowerTensorSpec(source) }
+        finally { if (source[captureOwners]) for (const tensor of source[captureOwners]) tensor.dispose() }
+      }
       if (!handle) throw new Error('polygrad: failed to create PolyModel')
       if (!spec && !adopting) {
         throw new TypeError('Model expects a callable or Tensor bindings; use Model.load for bytes')
@@ -634,7 +690,9 @@ function createBoundModelClass(runtime) {
     }
 
     static async fromCallableAsync(fn, options) {
-      return this.fromTensors(callableSpec(fn, options))
+      const spec = callableSpec(fn, options)
+      try { return await this.fromTensors(spec) }
+      finally { for (const tensor of spec[captureOwners]) await tensor.dispose() }
     }
 
     static async fromTensors(spec = {}) {

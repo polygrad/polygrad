@@ -1161,6 +1161,31 @@ function createWasmCoreFromModule(Module, device) {
     poly_tensor_create_result_like: (ctx, input, logical, physical, role, device) =>
       Module._poly_tensor_create_result_like(ctx, input, logical || 0, physical, role, device),
     poly_tensor_retain: (tensor) => Module._poly_tensor_retain(tensor),
+    poly_tensor_capture_begin: ctx => Module._poly_tensor_capture_begin(ctx),
+    poly_tensor_capture_end: capture => Module._poly_tensor_capture_end(capture),
+    poly_tensor_capture_rng: (capture, index) => {
+      const ptr = Module._malloc(8)
+      if (!ptr) throw new Error('Model capture RNG allocation failed')
+      try {
+        const device = Module._poly_tensor_capture_rng(capture, index, ptr, ptr+4)
+        if (device < 0) return null
+        return {device, tensors:[heap32()[ptr>>2], heap32()[(ptr>>2)+1]]}
+      } finally { Module._free(ptr) }
+    },
+    poly_tensor_capture_wrap: (capture, states, mutable, outputs) => {
+      if (states.length !== mutable.length || states.length >= 65535 || !outputs.length || outputs.length > 65535)
+        throw new Error('invalid Model capture arity')
+      const size = 8*(states.length+outputs.length)
+      const ptr = Module._malloc(Math.max(size,4))
+      if (!ptr) throw new Error('Model capture allocation failed')
+      try {
+        const flags = ptr+4*states.length, source = flags+4*states.length, result = source+4*outputs.length
+        heap32().set(states,ptr>>2); heap32().set(mutable,flags>>2); heap32().set(outputs,source>>2)
+        if (Module._poly_tensor_capture_wrap(capture,ptr,flags,states.length,source,outputs.length,result) !== 0)
+          throw new Error('Model capture requires declared AUX effects and prohibits effectful materialization')
+        return Array.from(heap32().subarray(result>>2,(result>>2)+outputs.length))
+      } finally { Module._free(ptr) }
+    },
     poly_tensor_release: (tensor) => Module._poly_tensor_release(tensor),
     poly_uop_retain: (ctx, uop) => Module._poly_uop_retain(ctx, uop),
     poly_uop_release: (ctx, uop) => Module._poly_uop_release(ctx, uop),
@@ -2015,7 +2040,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 89
+  const EXPECTED_ABI = 90
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(

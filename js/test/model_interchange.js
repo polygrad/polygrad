@@ -20,6 +20,13 @@ async function main() {
   }
   const pg = await polygrad.create({ core, device: core === 'native' ? 'cpu' : 'wasm' })
   try {
+    const stateful = pg.Model.load(readBytes(path.join(dir,'python-stateful.bundle')))
+    let statefulLoss
+    try {
+      stateful.setOptimizer('adam',0.01)
+      statefulLoss = await stateful.trainStepAsync({x:new Float32Array(16).fill(1),y:new Float32Array(16)})
+      writeBytes(path.join(dir,`javascript-${core}-stateful.bundle`),await stateful.saveAsync())
+    } finally { await stateful.dispose() }
     const variable = pg.Model.load(readBytes(path.join(dir,'python-variable.bundle')))
     try {
       for (const n of [17,3,11]) {
@@ -118,7 +125,7 @@ async function main() {
     }
 
     fs.writeFileSync(path.join(dir, `javascript-${core}-result.json`), JSON.stringify({
-      core, trainLoss, inferenceOutput
+      core, trainLoss, inferenceOutput, statefulLoss
     }, null, 2))
   } finally {
     await pg.dispose()

@@ -1702,6 +1702,109 @@ static napi_value napi_poly_tensor_empty_uop_name_by_id(napi_env env, napi_callb
   return make_external(env, tensor);
 }
 
+static napi_value napi_poly_tensor_capture_begin(napi_env env, napi_callback_info info) {
+  napi_value argv[1];
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyTensorCapture *capture = poly_tensor_capture_begin(get_external(env, argv[0]));
+  napi_value result = make_external(env, capture);
+  if (!result) poly_tensor_capture_end(capture);
+  return result;
+}
+
+static napi_value napi_poly_tensor_capture_end(napi_env env, napi_callback_info info) {
+  napi_value argv[1], result;
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  poly_tensor_capture_end(get_external(env, argv[0]));
+  napi_get_undefined(env, &result);
+  return result;
+}
+
+static napi_value napi_poly_tensor_capture_rng(napi_env env, napi_callback_info info) {
+  napi_value argv[2], result, id;
+  size_t argc = 2;
+  int32_t index;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  NAPI_CALL(env, napi_get_value_int32(env, argv[1], &index));
+  PolyTensor *seed = NULL, *counter = NULL;
+  int device = poly_tensor_capture_rng(get_external(env, argv[0]), index, &seed, &counter);
+  if (device < 0) {
+    napi_get_null(env, &result);
+    return result;
+  }
+  napi_value pair = make_external_pair(env, seed, counter);
+  if (!pair || napi_create_object(env, &result) != napi_ok ||
+      napi_create_int32(env, device, &id) != napi_ok ||
+      napi_set_named_property(env, result, "device", id) != napi_ok ||
+      napi_set_named_property(env, result, "tensors", pair) != napi_ok) {
+    poly_tensor_release(seed);
+    poly_tensor_release(counter);
+    napi_throw_error(env, NULL, "Model capture RNG result allocation failed");
+    return NULL;
+  }
+  return result;
+}
+
+static napi_value napi_poly_tensor_capture_wrap(napi_env env, napi_callback_info info) {
+  napi_value argv[4], result = NULL, value;
+  size_t argc = 4;
+  uint32_t n_states, n_flags, n_outputs;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  NAPI_CALL(env, napi_get_array_length(env, argv[1], &n_states));
+  NAPI_CALL(env, napi_get_array_length(env, argv[2], &n_flags));
+  NAPI_CALL(env, napi_get_array_length(env, argv[3], &n_outputs));
+  if (n_states != n_flags || n_states >= UINT16_MAX || !n_outputs || n_outputs > UINT16_MAX) {
+    napi_throw_range_error(env, NULL, "invalid Model capture arity");
+    return NULL;
+  }
+  PolyTensor **states = calloc(n_states ? n_states : 1, sizeof(*states));
+  int *flags = calloc(n_states ? n_states : 1, sizeof(*flags));
+  PolyTensor **outputs = calloc(n_outputs ? n_outputs : 1, sizeof(*outputs));
+  PolyTensor **wrapped = calloc(n_outputs ? n_outputs : 1, sizeof(*wrapped));
+  if (!states || !flags || !outputs || !wrapped) goto done;
+  for (uint32_t i = 0; i < n_states; i++) {
+    if (napi_get_element(env, argv[1], i, &value) != napi_ok) goto done;
+    states[i] = get_external(env, value);
+    if (napi_get_element(env, argv[2], i, &value) != napi_ok ||
+        napi_get_value_int32(env, value, &flags[i]) != napi_ok)
+      goto done;
+  }
+  for (uint32_t i = 0; i < n_outputs; i++) {
+    if (napi_get_element(env, argv[3], i, &value) != napi_ok) goto done;
+    outputs[i] = get_external(env, value);
+  }
+  if (poly_tensor_capture_wrap(
+          get_external(env, argv[0]), states, flags, n_states, outputs, n_outputs, wrapped
+      ) != 0)
+    goto done;
+  if (napi_create_array_with_length(env, n_outputs, &result) != napi_ok) {
+    result = NULL;
+    goto done;
+  }
+  for (uint32_t i = 0; i < n_outputs; i++) {
+    if (napi_set_element(env, result, i, make_external(env, wrapped[i])) != napi_ok) {
+      result = NULL;
+      goto done;
+    }
+  }
+done:
+  if (!result) {
+    if (wrapped)
+      for (uint32_t i = 0; i < n_outputs; i++)
+        poly_tensor_release(wrapped[i]);
+    napi_throw_error(
+        env, NULL,
+        "Model capture requires declared AUX effects and prohibits effectful materialization"
+    );
+  }
+  free(states);
+  free(flags);
+  free(outputs);
+  free(wrapped);
+  return result;
+}
+
 static napi_value napi_poly_tensor_create_with_roots(napi_env env, napi_callback_info info) {
   napi_value argv[5];
   size_t argc = 5;
@@ -7007,6 +7110,10 @@ NAPI_MODULE_INIT() {
           "poly_tensor_empty_uop_name_by_id", napi_poly_tensor_empty_uop_name_by_id
       ),
       DECLARE_NAPI_METHOD("poly_tensor_create_with_roots", napi_poly_tensor_create_with_roots),
+      DECLARE_NAPI_METHOD("poly_tensor_capture_begin", napi_poly_tensor_capture_begin),
+      DECLARE_NAPI_METHOD("poly_tensor_capture_end", napi_poly_tensor_capture_end),
+      DECLARE_NAPI_METHOD("poly_tensor_capture_wrap", napi_poly_tensor_capture_wrap),
+      DECLARE_NAPI_METHOD("poly_tensor_capture_rng", napi_poly_tensor_capture_rng),
       DECLARE_NAPI_METHOD("poly_tensor_create_result_like", napi_poly_tensor_create_result_like),
       DECLARE_NAPI_METHOD("poly_tensor_replace_roots", napi_poly_tensor_replace_roots),
       DECLARE_NAPI_METHOD("poly_tensor_to_device", napi_poly_tensor_to_device),

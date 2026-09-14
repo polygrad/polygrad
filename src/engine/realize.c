@@ -2513,6 +2513,7 @@ int poly_realize_tensors_ex(
     bool update_stats
 ) {
   if (!ctx) return -1;
+  if (!poly_tensor_capture_allows_realize(ctx, inputs, n)) return -1;
   if (!update_stats) ctx->stats_suppression_depth++;
   int rc = poly_realize_tensors_impl(ctx, inputs, n, outputs);
   if (!update_stats) ctx->stats_suppression_depth--;

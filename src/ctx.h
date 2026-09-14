@@ -68,6 +68,7 @@ struct PolyCtx {
   int tensors_cap;
   uint64_t next_tensor_order;
   PolyJit *active_jit_capture;
+  struct PolyTensorCapture *tensor_capture;
   /* Named buffer registry */
   PolyRegEntry **entries;
   int n_entries;

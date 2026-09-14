@@ -450,17 +450,37 @@ static bool place_validate_logical_root(
   if (root->op != POLY_OP_SINK)
     return place_validate_pure_logical(ctx, root, logical_bindings, n_bindings);
   if (root->n_src == 0) return false;
-  for (int i = 0; i < root->n_src; i++) {
-    PolyUOp *store = root->src[i];
-    PolyUOp *target = store && store->n_src > 0 ? poly_uop_base(store->src[0]) : NULL;
-    if (!store || store->op != POLY_OP_STORE || store->n_src != 2 ||
-        !place_exact_buffer_identity(target) ||
-        place_binding_index(logical_bindings, n_bindings, target) < 0 ||
-        !place_validate_pure_logical(ctx, store->src[0], logical_bindings, n_bindings) ||
-        !place_validate_pure_logical(ctx, store->src[1], logical_bindings, n_bindings))
-      return false;
+  for (int i = 0; i < root->n_src; i++)
+    if (!root->src[i] || root->src[i]->op != POLY_OP_STORE) return false;
+  /* Model entrypoints may contain captured Tensor.assign dependencies inside
+   * their output expressions. Preserve AFTER/STORE ordering; do not flatten
+   * effects or reinterpret them as named initializers. Every write still
+   * targets explicitly bound storage. Ordinary non-SINK roots stay pure. */
+  int n = 0;
+  PolyUOp **topo = poly_toposort_ex_alloc(ctx, root, &n, place_logical_gate, false);
+  if (!topo) return false;
+  bool valid = true;
+  for (int i = 0; i < n && valid; i++) {
+    PolyUOp *u = topo[i];
+    if (u == root || poly_uop_is_bound_var(u)) continue;
+    if (u->op == POLY_OP_STORE) {
+      PolyUOp *target = u->n_src == 2 ? poly_uop_base(u->src[0]) : NULL;
+      /* UOp.buf_uop follows current-value AFTER chains to storage. Only use
+       * that identity for admission; keep the chain in the executable. */
+      while (target && target->op == POLY_OP_AFTER && target->n_src >= 2)
+        target = poly_uop_base(target->src[0]);
+      valid = target && place_exact_buffer_identity(target) &&
+              place_binding_index(logical_bindings, n_bindings, target) >= 0;
+    } else if (u->op == POLY_OP_AFTER) {
+      valid = u->n_src >= 2;
+    } else {
+      valid = !place_logical_forbidden_op(u->op) &&
+              (!place_exact_buffer_identity(u) ||
+               place_binding_index(logical_bindings, n_bindings, u) >= 0);
+    }
   }
-  return true;
+  free(topo);
+  return valid;
 }
 
 static bool place_validate_physical_root(PolyCtx *ctx, PolyUOp *root) {

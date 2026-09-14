@@ -17,6 +17,12 @@ from .device import _device_id
 
 _get_lib = _ffi.get_lib
 _live_models = weakref.WeakSet()
+_capture_contexts = set()
+
+
+def _model_capture_active(ctx):
+    from .tensor import _ptr_value
+    return _ptr_value(ctx) in _capture_contexts
 
 
 def _import_context(runtime):
@@ -489,12 +495,12 @@ class Model:
     @staticmethod
     def from_callable(fn, *, inputs, targets=None, loss=None, params=None,
                       entrypoints=None):
-        """Call ``fn(**inputs)`` once and seal its Tensor outputs.
+        """Capture ``fn(**inputs)`` and seal its Tensor outputs.
 
         ``loss(result, **targets)`` returns a Tensor or a named loss dictionary.
         Callable objects supply named state unless ``params`` overrides it.
-        Preserve newly constructed logical roots; no host control-flow tracing,
-        automatic train/eval modes, or subsequent calls to the authoring object.
+        With a loss, capture evaluation and training forwards against shared
+        state. Preserve logical roots; do not trace arbitrary host control flow.
         """
         if not callable(fn) or inspect.isclass(fn):
             raise TypeError('Model.from_callable requires a callable instance, not a class')
@@ -524,23 +530,85 @@ class Model:
         for name, tensor in params.items():
             if any(tensor is t for t in (*inputs.values(), *targets.values())):
                 raise ValueError(f'{name!r} is both input/target and model state; supply a params override')
+        from .tensor import Tensor
+        from .helpers import TRAINING
         lib = _get_lib()
         policy = lib.poly_ctx_get_logical_policy(ctx)
         lib.poly_ctx_set_logical_policy(ctx, 1)  # ALWAYS applies only to new Tensor wrappers.
+        mode = TRAINING.value
+        capture = lib.poly_tensor_capture_begin(ctx)
+        if not capture:
+            lib.poly_ctx_set_logical_policy(ctx, policy)
+            raise RuntimeError('Model capture requires an idle Runtime outside another capture')
+        owned, rng = [], {}
+        _capture_contexts.add(_ptr_value(ctx))
         try:
-            result = _synchronous_result(fn(**inputs))
-            losses = _synchronous_result(loss(result, **targets)) if loss is not None else None
-            # Lazy layer initialization happens in the authoring call, not sealing.
-            if collect_object:
-                params = dict(_param_items(fn))
+            result, losses, initial_params = None, None, None
+            for training in ([False, True] if loss is not None else [bool(mode)]):
+                TRAINING.value = int(training)
+                produced = _synchronous_result(fn(**inputs))
+                values = _normalize_named_tensors(
+                    _synchronous_result(loss(produced, **targets)) if training and loss is not None else produced,
+                    'loss' if training and loss is not None else 'output')
+                if collect_object: params = dict(_param_items(fn))
                 for name, tensor in params.items():
                     if any(tensor is t for t in (*inputs.values(), *targets.values())):
                         raise ValueError(f'{name!r} is both input/target and model state; supply a params override')
+                if initial_params is not None and (params.keys() != initial_params.keys() or
+                        any(params[k] is not v for k, v in initial_params.items())):
+                    raise ValueError('Model train/eval capture must share the same named state Tensors')
+                initial_params = params.copy()
+                index = 0
+                while True:
+                    seed, counter = _ffi._ptr(), _ffi._ptr()
+                    device = lib.poly_tensor_capture_rng(capture, index, ctypes.byref(seed), ctypes.byref(counter))
+                    if device < 0: break
+                    device_name = lib.poly_device_name(device).decode()
+                    handles = [seed.value, counter.value]
+                    try:
+                        for i, suffix in enumerate(('seed', 'counter')):
+                            name = f'__rng.{device_name}.{suffix}'
+                            if name in params: raise ValueError(f'{name!r} is reserved for Model RNG state')
+                            if name not in rng:
+                                rng[name] = Tensor(_ctx=ctx, _tensor=handles[i], _device=device_name).is_param_(False)
+                                handles[i] = None
+                                owned.append(rng[name])
+                    finally:
+                        for handle in handles:
+                            if handle: lib.poly_tensor_release(handle)
+                    index += 1
+                states = list(params.values()) + list(rng.values())
+                handles = (_ffi._ptr * len(states))(*(t._tensor for t in states))
+                mutable = (ctypes.c_int * len(states))(*(not t.is_param for t in states))
+                tensors = [_require_tensor(name,t) for name,t in values.items()]
+                source = (_ffi._ptr * len(tensors))(*(t._tensor for t in tensors))
+                wrapped = (_ffi._ptr * len(tensors))()
+                if lib.poly_tensor_capture_wrap(capture,handles,mutable,len(states),source,len(tensors),wrapped) != 0:
+                    raise ValueError('Model capture requires declared AUX effects and prohibits effectful materialization')
+                completed = {}
+                try:
+                    for i, (name,tensor) in enumerate(values.items()):
+                        completed[name] = Tensor(_ctx=ctx,_tensor=wrapped[i],_device=tensor._device)
+                        wrapped[i] = None
+                        owned.append(completed[name])
+                finally:
+                    for handle in wrapped:
+                        if handle: lib.poly_tensor_release(handle)
+                if training and loss is not None: losses = completed
+                else: result = completed
+        except Exception:
+            for tensor in owned: tensor.dispose()
+            raise
         finally:
+            lib.poly_tensor_capture_end(capture)
+            _capture_contexts.discard(_ptr_value(ctx))
+            TRAINING.value = mode
             lib.poly_ctx_set_logical_policy(ctx, policy)
-        return Model.from_tensors(inputs=inputs, targets=targets, outputs=result,
-                                  losses=losses, params=params,
-                                  entrypoints=entrypoints)
+        try:
+            return Model.from_tensors(inputs=inputs, targets=targets, outputs=result,
+                                      losses=losses, params={**params, **rng}, entrypoints=entrypoints)
+        finally:
+            for tensor in owned: tensor.dispose()
 
     @staticmethod
     def from_tensors(

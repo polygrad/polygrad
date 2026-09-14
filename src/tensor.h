@@ -64,6 +64,32 @@ int poly_tensor_apply_realize_map(
  * resource, or mark unsupported forms unavailable without altering physical. */
 int poly_tensor_retire_logical_resources(PolyCtx *ctx, PolyTensor **tensors, int n_tensors);
 
+/* Construction-only ownership for Model train/eval capture. The caller keeps
+ * ctx alive and ends every successful begin, including after an error. Wrap
+ * returns owned Tensors and restores authoring roots between passes; sealing
+ * turns their auxiliary dependencies into ordinary SINK stores. RNG returns
+ * two owned handles and a device, or -1 at end (failure poisons the capture).
+ * No materialization of STORE effects, nested capture or seed reset is allowed. */
+typedef struct PolyTensorCapture PolyTensorCapture;
+PolyTensorCapture *poly_tensor_capture_begin(PolyCtx *ctx);
+int poly_tensor_capture_wrap(
+    PolyTensorCapture *capture,
+    PolyTensor **states,
+    const int *mutable_state,
+    int n_states,
+    PolyTensor **outputs,
+    int n_outputs,
+    PolyTensor **wrapped
+);
+int poly_tensor_capture_rng(
+    PolyTensorCapture *capture,
+    int index,
+    PolyTensor **seed,
+    PolyTensor **counter
+);
+void poly_tensor_capture_end(PolyTensorCapture *capture);
+bool poly_tensor_capture_allows_realize(PolyCtx *ctx, PolyTensor **inputs, int n);
+
 /* Full-buffer STORE effect for optimizer/direct core SINKs.
  * Tensor.assign itself still uses tinygrad's current-value shape:
  * AFTER(target, STORE(target, value)). Direct effect SINKs already sequence

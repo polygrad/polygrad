@@ -30,6 +30,93 @@
 
 static int test_find_model_buf(PolyModel *inst, const char *name);
 
+TEST(model, capture_restores_author_and_retains_explicit_effects) {
+  PolyCtx *ctx = poly_ctx_new();
+  poly_ctx_set_preferred_device(ctx, POLY_DEVICE_INTERP);
+  poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_ALWAYS);
+  int64_t dims[] = {1};
+  int dtype = poly_dtype_id_by_name("float32");
+  PolyTensor *state =
+      poly_tensor_full_float_by_id(ctx, dims, 1, 0, dtype, POLY_DEVICE_INTERP, true, false);
+  PolyTensor *one =
+      poly_tensor_full_float_by_id(ctx, dims, 1, 1, dtype, POLY_DEVICE_INTERP, false, false);
+  PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, dims, 1, POLY_DEVICE_INTERP);
+  ASSERT_NOT_NULL(state);
+  ASSERT_NOT_NULL(one);
+  ASSERT_NOT_NULL(x);
+  PolyUOp *before_logical = state->uop_logical, *before_physical = state->uop_physical;
+  PolyTensorCapture *capture = poly_tensor_capture_begin(ctx);
+  ASSERT_NOT_NULL(capture);
+  ASSERT_TRUE(poly_tensor_capture_begin(ctx) == NULL);
+  PolyTensor *increment = poly_tensor_alu2(ctx, POLY_OP_ADD, state, one);
+  ASSERT_NOT_NULL(poly_tensor_assign(ctx, state, increment));
+  PolyTensor *states[] = {state}, *outputs[] = {x}, *wrapped[] = {NULL};
+  int mutable[] = {1};
+  ASSERT_EQ(poly_tensor_capture_wrap(capture, states, mutable, 1, outputs, 1, wrapped), 0);
+  ASSERT_EQ(state->uop_logical, before_logical);
+  ASSERT_EQ(state->uop_physical, before_physical);
+  ASSERT_EQ(wrapped[0]->uop_logical->op, POLY_OP_AFTER);
+  ASSERT_EQ(wrapped[0]->uop_logical->n_src, 2);
+  ASSERT_EQ(wrapped[0]->uop_logical->src[1]->op, POLY_OP_AFTER);
+  ASSERT_EQ(wrapped[0]->uop_logical->src[1]->src[1]->op, POLY_OP_STORE);
+  poly_tensor_capture_end(capture);
+  PolyBindingSpec bindings[] = {
+      {"x", POLY_ROLE_INPUT, x, 0},
+      {"counter", POLY_ROLE_AUX, state, 0},
+      {"prediction", POLY_ROLE_OUTPUT, wrapped[0], 0}};
+  const char *inputs[] = {"x"}, *names[] = {"prediction"};
+  PolyEntrypointSpec ep = {
+      .name = "forward", .inputs = inputs, .n_inputs = 1, .outputs = names, .n_outputs = 1};
+  PolyModel *model = poly_model_from_bindings(ctx, bindings, 3, &ep, 1, NULL, NULL);
+  ASSERT_NOT_NULL(model);
+  float value[] = {7}, counter;
+  PolyIOBinding io = POLY_IO_BINDING_ARRAY("x", value, POLY_FLOAT32);
+  for (int i = 1; i <= 2; i++) {
+    ASSERT_EQ(poly_model_call(model, "forward", &io, 1), 0);
+    ASSERT_EQ(poly_model_read_buf(model, 1, &counter, sizeof(counter)), 0);
+    ASSERT_FLOAT_EQ(counter, i, 0);
+  }
+  poly_model_free(model);
+  poly_tensor_release(wrapped[0]);
+  poly_tensor_release(increment);
+  poly_tensor_release(x);
+  poly_tensor_release(one);
+  poly_tensor_release(state);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(model, capture_rejects_execution_and_undeclared_writes) {
+  PolyCtx *ctx = poly_ctx_new();
+  poly_ctx_set_preferred_device(ctx, POLY_DEVICE_INTERP);
+  int64_t dims[] = {1};
+  int dtype = poly_dtype_id_by_name("float32");
+  PolyTensor *state =
+      poly_tensor_full_float_by_id(ctx, dims, 1, 0, dtype, POLY_DEVICE_INTERP, true, false);
+  PolyTensor *one =
+      poly_tensor_full_float_by_id(ctx, dims, 1, 1, dtype, POLY_DEVICE_INTERP, false, false);
+  PolyUOp *before = state->uop_physical;
+  for (int execution = 0; execution < 2; execution++) {
+    PolyTensorCapture *capture = poly_tensor_capture_begin(ctx);
+    ASSERT_NOT_NULL(capture);
+    PolyTensor *increment = poly_tensor_alu2(ctx, POLY_OP_ADD, state, one);
+    ASSERT_NOT_NULL(poly_tensor_assign(ctx, state, increment));
+    PolyTensor *states[] = {state}, *outputs[] = {state}, *wrapped[] = {NULL};
+    int mutable[] = {0};
+    if (execution)
+      ASSERT_TRUE(poly_realize_tensors(ctx, outputs, 1, wrapped) != 0);
+    else
+      ASSERT_TRUE(poly_tensor_capture_wrap(capture, states, mutable, 1, outputs, 1, wrapped) != 0);
+    poly_tensor_capture_end(capture);
+    ASSERT_EQ(state->uop_physical, before);
+    poly_tensor_release(increment);
+  }
+  poly_tensor_release(one);
+  poly_tensor_release(state);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(model, variable_invocations_preserve_result_owners) {
   PolyCtx *ctx = poly_ctx_new();
   poly_ctx_set_preferred_device(ctx, POLY_DEVICE_INTERP);

@@ -570,6 +570,19 @@ Disposing a Model releases its ownership without destroying that runtime;
 disposing the Runtime invalidates its Models. Training stays on Model; no
 separate Trainer is required.
 
+With a `loss`, callable construction runs the author twice: evaluation for
+`forward`, then training for the loss entrypoint. Both use the same named state;
+execution never calls the author again. BatchNorm statistics and RNG progression
+belong to the Model, not the authoring object. Capture restores Tensor roots and
+training mode on success or failure. Only declared auxiliary state may be assigned
+by the author; optimizer updates to parameters remain part of training.
+Set the RNG seed before capture. Pure synchronous inspection is allowed, but
+effectful materialization and asynchronous work during capture reject. Arbitrary
+host-language side effects are not rolled back; keep authoring callbacks limited
+to graph construction. Without a loss, capture uses the current training mode.
+Bundles preserve auxiliary/RNG state. To resume training after loading, configure
+the same optimizer; `include_optimizer` saves its state, not its configuration.
+
 Model calls accept arrays or Tensors. If any input is a Tensor, every output is
 an owned device Tensor; array-only calls still return host arrays. Tensor inputs
 must satisfy the declared shape, dtype, Runtime and device. Use

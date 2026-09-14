@@ -107,6 +107,7 @@ PolyCtx *poly_ctx_new(void) {
   ctx->tensors_cap = 0;
   ctx->next_tensor_order = 1;
   ctx->active_jit_capture = NULL;
+  ctx->tensor_capture = NULL;
   ctx->name_map = poly_map_new(16);
   if (!ctx->arena || !ctx->scratch || !ctx->cse || !ctx->uop_storage || !ctx->schedule_cache ||
       !ctx->to_program_cache || !ctx->runtime_cache || !ctx->local_size_cache ||

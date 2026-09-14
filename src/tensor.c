@@ -16,6 +16,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <limits.h>
 #include <string.h>
 #include <math.h>
 
@@ -189,6 +190,99 @@ static bool tensor_roots_owned_by_ctx(PolyCtx *ctx, const PolyTensor *tensor) {
    * Logical availability is operand state, not an ambient-context condition. */
   return tensor_physical_owned_by_ctx(ctx, tensor) &&
          (!tensor->uop_logical || poly_ctx_owns_ptr(ctx, tensor->uop_logical));
+}
+
+typedef struct {
+  PolyTensor *tensor;
+  PolyTensor *source;
+  PolyUOp *logical, *physical;
+  PolyLogicalState logical_state;
+  PolyTensorRole role;
+  PolyDevice device;
+} TensorCaptureRoot;
+
+struct PolyTensorCapture {
+  PolyCtx *ctx;
+  TensorCaptureRoot *roots;
+  int n_roots, cap_roots;
+  PolyMap *indices, *saved_rng;
+  uint64_t saved_seed;
+  uint32_t saved_device_count;
+  bool failed;
+};
+
+/* Weak Tensor identities, strongly retained old roots: retaining all temporary
+ * Tensor handles would interfere with composite-call temporary retirement. */
+static int tensor_capture_record(PolyCtx *ctx) {
+  PolyTensorCapture *capture = ctx->tensor_capture;
+  if (!capture) return 0;
+  if (capture->failed) return -1;
+  for (int i = 0; i < ctx->n_tensors; i++) {
+    PolyTensor *tensor = ctx->tensors[i];
+    if (poly_map_get(capture->indices, poly_ptr_hash(tensor), tensor, poly_ptr_eq)) continue;
+    if (capture->n_roots == capture->cap_roots) {
+      if (capture->cap_roots > INT_MAX / 2) goto fail;
+      int capacity = capture->cap_roots ? capture->cap_roots * 2 : 64;
+      TensorCaptureRoot *roots = realloc(capture->roots, (size_t)capacity * sizeof(*roots));
+      if (!roots) goto fail;
+      capture->roots = roots;
+      capture->cap_roots = capacity;
+    }
+    if (tensor->uop_logical && poly_uop_retain(ctx, tensor->uop_logical) != 0) goto fail;
+    if (tensor->uop_physical && poly_uop_retain(ctx, tensor->uop_physical) != 0) {
+      poly_uop_release(ctx, tensor->uop_logical);
+      goto fail;
+    }
+    PolyTensor *source = poly_tensor_retain(tensor->source);
+    if (tensor->source && !source) {
+      poly_uop_release(ctx, tensor->uop_logical);
+      poly_uop_release(ctx, tensor->uop_physical);
+      goto fail;
+    }
+    int index = capture->n_roots++;
+    capture->roots[index] = (TensorCaptureRoot
+    ){tensor,       source,        tensor->uop_logical, tensor->uop_physical, tensor->logical_state,
+      tensor->role, tensor->device};
+    poly_map_set(
+        capture->indices, poly_ptr_hash(tensor), tensor, (void *)(uintptr_t)(index + 1), poly_ptr_eq
+    );
+    if ((uintptr_t)poly_map_get(capture->indices, poly_ptr_hash(tensor), tensor, poly_ptr_eq) !=
+        (uintptr_t)(index + 1)) {
+      capture->roots[index].tensor = NULL;
+      goto fail;
+    }
+  }
+  return 0;
+fail:
+  capture->failed = true;
+  return -1;
+}
+
+static void tensor_capture_forget(PolyCtx *ctx, PolyTensor *tensor) {
+  PolyTensorCapture *capture = ctx->tensor_capture;
+  if (!capture) return;
+  uintptr_t index =
+      (uintptr_t)poly_map_get(capture->indices, poly_ptr_hash(tensor), tensor, poly_ptr_eq);
+  if (index) capture->roots[index - 1].tensor = NULL;
+  poly_map_remove(capture->indices, poly_ptr_hash(tensor), tensor, poly_ptr_eq);
+}
+
+static void tensor_capture_restore(PolyTensorCapture *capture) {
+  for (int i = 0; i < capture->n_roots; i++) {
+    TensorCaptureRoot *root = &capture->roots[i];
+    if (!root->tensor) continue;
+    root->tensor->uop_logical = root->logical;
+    root->tensor->uop_physical = root->physical;
+    root->tensor->logical_state = root->logical_state;
+    root->tensor->role = root->role;
+    root->tensor->device = root->device;
+    if (root->tensor->source != root->source) {
+      PolyTensor *previous = root->tensor->source;
+      root->tensor->source = poly_tensor_retain(root->source);
+      poly_tensor_release(previous);
+    }
+  }
+  capture->ctx->collection_dirty = capture->ctx->ir_collection_dirty = true;
 }
 
 static void tensor_replace_roots_commit(
@@ -536,6 +630,7 @@ void poly_tensor_release(PolyTensor *tensor) {
   if (!tensor || !tensor->owner_ctx || tensor->owner_refs == 0) return;
   if (--tensor->owner_refs > 0) return;
   PolyCtx *ctx = tensor->owner_ctx;
+  tensor_capture_forget(ctx, tensor);
   PolyTensor *source = tensor->source;
   tensor->source = NULL;
   int slot = tensor->owner_slot;
@@ -1896,6 +1991,7 @@ PolyTensor *poly_tensor_assign_after(
   if (build_logical && (logical_after->op != POLY_OP_AFTER || logical_after->n_src != 2 ||
                         logical_after->src[0] != target_logical))
     return NULL;
+  if (tensor_capture_record(ctx) != 0) return NULL;
   PolyUOp *physical_view_anchor = tensor_assign_view_anchor(target_physical);
   PolyUOp *logical_view_anchor = build_logical ? tensor_assign_view_anchor(target_logical) : NULL;
   if ((build_logical && logical_view_anchor) || physical_view_anchor) {
@@ -5269,10 +5365,220 @@ static PolyRngDeviceState *rng_device_state(PolyCtx *ctx, PolyDevice device) {
 
 void poly_tensor_manual_seed(PolyCtx *ctx, int64_t seed) {
   if (!ctx || !ctx->rng_states) return;
+  if (ctx->tensor_capture) {
+    ctx->tensor_capture->failed = true;
+    fprintf(stderr, "Model capture: set the RNG seed before authoring\n");
+    return;
+  }
   poly_map_foreach(ctx->rng_states, release_rng_state, NULL);
   ctx->rng_seed = (uint64_t)seed;
   ctx->rng_device_count = 0;
   poly_map_clear(ctx->rng_states);
+}
+
+PolyTensorCapture *poly_tensor_capture_begin(PolyCtx *ctx) {
+  if (!ctx || ctx->tensor_capture || ctx->active_jit_capture || ctx->execution_depth ||
+      ctx->collecting)
+    return NULL;
+  PolyTensorCapture *capture = calloc(1, sizeof(*capture));
+  PolyMap *rng = poly_map_new(8);
+  if (!capture || !rng) {
+    free(capture);
+    poly_map_destroy(rng);
+    return NULL;
+  }
+  capture->ctx = ctx;
+  capture->indices = poly_map_new(64);
+  capture->saved_rng = ctx->rng_states;
+  capture->saved_seed = ctx->rng_seed;
+  capture->saved_device_count = ctx->rng_device_count;
+  ctx->rng_states = rng;
+  ctx->rng_device_count = 0;
+  ctx->tensor_capture = capture;
+  if (!capture->indices || tensor_capture_record(ctx) != 0) {
+    poly_tensor_capture_end(capture);
+    return NULL;
+  }
+  return capture;
+}
+
+static void capture_rng_by_device(const void *key, void *value, void *userdata) {
+  (void)key;
+  PolyRngDeviceState *state = value;
+  PolyRngDeviceState **states = userdata;
+  if (state && state->seed && state->seed->device >= 0 && state->seed->device <= POLY_DEVICE_DISK)
+    states[state->seed->device] = state;
+}
+
+int poly_tensor_capture_rng(
+    PolyTensorCapture *capture,
+    int index,
+    PolyTensor **seed,
+    PolyTensor **counter
+) {
+  if (!capture || index < 0 || !seed || !counter) return -1;
+  *seed = *counter = NULL;
+  PolyRngDeviceState *states[POLY_DEVICE_DISK + 1] = {0};
+  poly_map_foreach(capture->ctx->rng_states, capture_rng_by_device, states);
+  for (int i = 0; i <= POLY_DEVICE_DISK; i++) {
+    if (!states[i] || index--) continue;
+    *seed = poly_tensor_retain(states[i]->seed);
+    *counter = poly_tensor_retain(states[i]->counter);
+    if (!*seed || !*counter) {
+      poly_tensor_release(*seed);
+      poly_tensor_release(*counter);
+      *seed = *counter = NULL;
+      capture->failed = true;
+      return -1;
+    }
+    return i;
+  }
+  return -1;
+}
+
+static bool capture_effect_gate(PolyUOp *u) {
+  return !poly_uop_is_bound_var(u);
+}
+
+static bool capture_has_store(PolyCtx *ctx, PolyUOp *root) {
+  int n = 0;
+  PolyUOp **topo = poly_toposort_ex_alloc(ctx, root, &n, capture_effect_gate, false);
+  if (!topo) return true; /* Allocation failure cannot authorize execution. */
+  bool effects = false;
+  for (int i = 0; i < n; i++)
+    if (topo[i]->op == POLY_OP_STORE) {
+      effects = true;
+      break;
+    }
+  poly_toposort_free(topo);
+  return effects;
+}
+
+bool poly_tensor_capture_allows_realize(PolyCtx *ctx, PolyTensor **inputs, int n) {
+  if (!ctx || !ctx->tensor_capture) return true;
+  if (ctx->tensor_capture->failed) return false;
+  for (int i = 0; i < n; i++)
+    if (!inputs[i] || capture_has_store(ctx, inputs[i]->uop_physical)) {
+      ctx->tensor_capture->failed = true;
+      fprintf(stderr, "Model capture: effectful materialization is not supported\n");
+      return false;
+    }
+  return true;
+}
+
+int poly_tensor_capture_wrap(
+    PolyTensorCapture *capture,
+    PolyTensor **states,
+    const int *mutable_state,
+    int n_states,
+    PolyTensor **outputs,
+    int n_outputs,
+    PolyTensor **wrapped
+) {
+  if (!capture || n_states < 0 || (n_states && (!states || !mutable_state)) || n_outputs <= 0 ||
+      n_outputs > UINT16_MAX || !outputs || !wrapped || n_states >= UINT16_MAX)
+    return -1;
+  PolyCtx *ctx = capture->ctx;
+  int rc = -1;
+  PolyUOp **logical = calloc((size_t)n_states + 1, sizeof(*logical));
+  PolyUOp **physical = calloc((size_t)n_states + 1, sizeof(*physical));
+  memset(wrapped, 0, (size_t)n_outputs * sizeof(*wrapped));
+  if (!logical || !physical || capture->failed) goto done;
+  for (int i = 0; i < n_states; i++)
+    if (!states[i] || states[i]->owner_ctx != ctx) goto done;
+  for (int i = 0; i < capture->n_roots; i++) {
+    TensorCaptureRoot *root = &capture->roots[i];
+    if (!root->tensor || root->physical == root->tensor->uop_physical ||
+        !capture_has_store(ctx, root->tensor->uop_physical))
+      continue;
+    bool allowed = false;
+    PolyUOp *base = poly_uop_base(root->physical);
+    for (int j = 0; j < n_states && !allowed; j++) {
+      if (!mutable_state[j]) continue;
+      uintptr_t k = (uintptr_t
+      )poly_map_get(capture->indices, poly_ptr_hash(states[j]), states[j], poly_ptr_eq);
+      PolyUOp *original = k ? capture->roots[k - 1].physical : states[j]->uop_physical;
+      allowed = root->tensor == states[j] ||
+                (base && base->op == POLY_OP_BUFFER && base == poly_uop_base(original));
+    }
+    if (!allowed) {
+      fprintf(stderr, "Model capture: assignment requires declared auxiliary state\n");
+      goto done;
+    }
+  }
+  PolyRngDeviceState *rng[POLY_DEVICE_DISK + 1] = {0};
+  poly_map_foreach(ctx->rng_states, capture_rng_by_device, rng);
+  int n_effects = 0;
+  for (int i = 0; i < n_states; i++) {
+    uintptr_t k =
+        (uintptr_t)poly_map_get(capture->indices, poly_ptr_hash(states[i]), states[i], poly_ptr_eq);
+    if (!mutable_state[i] || !k || capture->roots[k - 1].physical == states[i]->uop_physical)
+      continue;
+    /* RandMixin already connects counter updates to random values. Forcing
+     * them into the entrypoint would replay lazy parameter initialization
+     * after Model binding has cut that initializer out of the executable. */
+    bool rng_counter = false;
+    for (int d = 0; d <= POLY_DEVICE_DISK; d++)
+      rng_counter |= rng[d] && rng[d]->counter == states[i];
+    if (rng_counter) continue;
+    logical[++n_effects] = states[i]->uop_logical;
+    physical[n_effects] = states[i]->uop_physical;
+    if (!logical[n_effects] || !physical[n_effects]) goto done;
+  }
+  for (int i = 0; i < n_outputs; i++) {
+    if (!outputs[i] || outputs[i]->owner_ctx != ctx || !outputs[i]->uop_logical ||
+        !outputs[i]->uop_physical)
+      goto done;
+    logical[0] = outputs[i]->uop_logical;
+    physical[0] = outputs[i]->uop_physical;
+    PolyUOp *l = n_effects ? poly_uop(
+                                 ctx, POLY_OP_AFTER, logical[0]->dtype, logical, n_effects + 1,
+                                 poly_arg_none()
+                             )
+                           : logical[0];
+    PolyUOp *p = n_effects ? poly_uop(
+                                 ctx, POLY_OP_AFTER, physical[0]->dtype, physical, n_effects + 1,
+                                 poly_arg_none()
+                             )
+                           : physical[0];
+    wrapped[i] =
+        l && p ? poly_tensor_create_with_roots(ctx, l, p, POLY_TENSOR_VALUE, outputs[i]->device)
+               : NULL;
+    if (!wrapped[i]) goto done;
+  }
+  rc = 0;
+done:
+  if (rc) {
+    capture->failed = true;
+    for (int i = 0; i < n_outputs; i++) {
+      poly_tensor_release(wrapped[i]);
+      wrapped[i] = NULL;
+    }
+  }
+  tensor_capture_restore(capture);
+  free(logical);
+  free(physical);
+  return rc;
+}
+
+void poly_tensor_capture_end(PolyTensorCapture *capture) {
+  if (!capture) return;
+  PolyCtx *ctx = capture->ctx;
+  tensor_capture_restore(capture);
+  /* Stop journaling before releasing private RNG owners and saved roots. */
+  ctx->tensor_capture = NULL;
+  poly_tensor_manual_seed(ctx, (int64_t)capture->saved_seed);
+  poly_map_destroy(ctx->rng_states);
+  ctx->rng_states = capture->saved_rng;
+  ctx->rng_device_count = capture->saved_device_count;
+  for (int i = 0; i < capture->n_roots; i++) {
+    poly_uop_release(ctx, capture->roots[i].logical);
+    poly_uop_release(ctx, capture->roots[i].physical);
+    poly_tensor_release(capture->roots[i].source);
+  }
+  poly_map_destroy(capture->indices);
+  free(capture->roots);
+  free(capture);
 }
 
 /* C argument validation for current RandMixin._rand

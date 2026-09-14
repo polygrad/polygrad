@@ -1734,16 +1734,45 @@ PolyStatus poly_model_build(PolyModel *inst, PolyModelError *err) {
 
   for (int i = 0; i < build->n_entrypoints; i++) {
     BuildEntrypoint *ep = &build->entrypoints[i];
-    PolyUOp **logical_stores = calloc((size_t)ep->n_outputs, sizeof(*logical_stores));
+    size_t capacity = (size_t)ep->n_outputs;
+    for (int j = 0; j < ep->n_outputs; j++) {
+      PolyUOp *value = find_build_binding(build, ep->outputs[j])->declared_logical_value;
+      if (value->op == POLY_OP_AFTER) capacity += value->n_src - 1;
+    }
+    if (capacity > UINT16_MAX) {
+      st = POLY_STATUS_INVALID;
+      goto pack_fail;
+    }
+    PolyUOp **logical_stores = calloc(capacity, sizeof(*logical_stores));
     if (!logical_stores) {
       free(logical_stores);
       poly_model_set_error(inst, POLY_STATUS_NOMEM, __func__, "out of memory");
       st = POLY_STATUS_NOMEM;
       goto pack_fail;
     }
+    int n_stores = ep->n_outputs;
     for (int j = 0; j < ep->n_outputs; j++) {
       BuildBinding *out = find_build_binding(build, ep->outputs[j]);
       PolyUOp *logical_value = out->declared_logical_value;
+      /* Capture packages auxiliary effects beside a result. Seal them as
+       * sibling SINK stores, keeping result arithmetic outside storage AFTER
+       * chains. Assignment and CALL results stay intact. */
+      bool capture_effects = logical_value->op == POLY_OP_AFTER && logical_value->n_src > 1;
+      for (int k = 1; capture_effects && k < logical_value->n_src; k++) {
+        PolyUOp *effect = logical_value->src[k];
+        capture_effects = effect->op == POLY_OP_AFTER && effect->n_src == 2 &&
+                          effect->src[1]->op == POLY_OP_STORE;
+      }
+      if (capture_effects) {
+        for (int k = 1; k < logical_value->n_src; k++) {
+          PolyUOp *store = logical_value->src[k]->src[1];
+          bool duplicate = false;
+          for (int e = ep->n_outputs; e < n_stores; e++)
+            duplicate |= logical_stores[e] == store;
+          if (!duplicate) logical_stores[n_stores++] = store;
+        }
+        logical_value = logical_value->src[0];
+      }
       int64_t numel = poly_shape_numel_checked(out->shape, out->ndim);
       if (out->buffer->op == POLY_OP_BUFFER && !(out->ndim == 1 && out->shape[0] == numel)) {
         int64_t flat[] = {numel};
@@ -1752,8 +1781,7 @@ PolyStatus poly_model_build(PolyModel *inst, PolyModelError *err) {
       logical_stores[j] = poly_store_val(inst->ctx, out->buffer, logical_value);
     }
     eps[i].name = ep->name;
-    eps[i].sink = ep->n_outputs == 1 ? poly_sink1(inst->ctx, logical_stores[0])
-                                     : poly_sink_n(inst->ctx, logical_stores, ep->n_outputs);
+    eps[i].sink = poly_sink_n(inst->ctx, logical_stores, n_stores);
     eps[i].inputs = (const char **)ep->inputs;
     eps[i].n_inputs = ep->n_inputs;
     eps[i].outputs = (const char **)ep->outputs;
@@ -3751,6 +3779,31 @@ static PolyUOp *model_shaped_storage(PolyCtx *ctx, const NamedBuf *binding, Poly
   return poly_reshape(ctx, buffer, (int64_t *)binding->shape, binding->ndim);
 }
 
+static bool model_effect_gate(PolyUOp *u) {
+  return !poly_uop_is_bound_var(u);
+}
+
+static bool model_portable_effects_valid(PolyModel *inst, PolyUOp *root) {
+  int n = 0;
+  PolyUOp **topo = poly_toposort_ex_alloc(inst->ctx, root, &n, model_effect_gate, false);
+  if (!topo) return false;
+  bool valid = true;
+  for (int i = 0; i < n && valid; i++) {
+    PolyUOp *u = topo[i];
+    if (u->op != POLY_OP_STORE) continue;
+    PolyUOp *target = u->n_src == 2 ? poly_uop_buf_uop(inst->ctx, u->src[0]) : NULL;
+    valid = false;
+    for (int j = 0; target && j < inst->n_bufs; j++)
+      if (target == inst->bufs[j].logical_buffer &&
+          (inst->bufs[j].role == POLY_ROLE_AUX || inst->bufs[j].role == POLY_ROLE_OUTPUT)) {
+        valid = true;
+        break;
+      }
+  }
+  free(topo);
+  return valid;
+}
+
 /* Activation is the only boundary that binds a named logical value to
  * persistent storage.  This transient result is then consumed by the ordinary
  * explicit placer; the immutable entrypoint and named value roots are never
@@ -3796,6 +3849,11 @@ static int model_bind_named_values(
   } else {
     rc = poly_uop_substitute_many(inst->ctx, roots, n_roots, from, to, n_subs, out_roots);
   }
+  /* Authored effects may update AUX, never inputs/targets or parameters.
+   * Optimizer PARAM writes are constructed later by the training owner. This
+   * also keeps moved-input mutation from acquiring a false portable identity. */
+  for (int i = 0; !rc && i < n_roots; i++)
+    if (!model_portable_effects_valid(inst, out_roots[i])) rc = -1;
   free(to);
   free(from);
   return rc;
@@ -4256,6 +4314,7 @@ static int bind_model_io(
     ModelInvocation *inv
 ) {
   if (!inst || !inst->ctx || !entry || n_io < 0 || (n_io > 0 && !io)) return -1;
+  if (inst->ctx->tensor_capture) return -1;
   inv->shapes = calloc((size_t)(inst->n_bufs ? inst->n_bufs : 1), sizeof(*inv->shapes));
   inv->vars = calloc((size_t)(n_io ? n_io : 1), sizeof(*inv->vars));
   if (!inv->shapes || !inv->vars) return -1;
@@ -4778,6 +4837,29 @@ static int64_t uop_numel(PolyCtx *ctx, PolyUOp *u) {
 }
 
 /* Build the combined fwd+bwd SINK for value_and_grad (lazy, once). */
+/* Autograd differentiates the objective; authored AUX updates remain sibling
+ * effects when assembling value/gradient or optimizer execution. */
+static PolyUOp *model_sink_with_effects(PolyModel *inst, int ep_index, PolyUOp **stores, int n) {
+  PolyUOp *entry = inst->entrypoints[ep_index].sink;
+  if (n < 0 || n > UINT16_MAX - entry->n_src) return NULL;
+  PolyUOp **roots = calloc((size_t)n + entry->n_src, sizeof(*roots));
+  if (!roots) return NULL;
+  memcpy(roots, stores, (size_t)n * sizeof(*roots));
+  for (int i = 0; i < entry->n_src; i++) {
+    PolyUOp *store = entry->src[i];
+    if (store->op != POLY_OP_STORE || store->n_src != 2) continue;
+    const PolyUOp *target = poly_uop_buf_uop(inst->ctx, store->src[0]);
+    for (int j = 0; j < inst->n_bufs; j++)
+      if (inst->bufs[j].role == POLY_ROLE_AUX && inst->bufs[j].buffer == target) {
+        roots[n++] = store;
+        break;
+      }
+  }
+  PolyUOp *sink = poly_sink_n(inst->ctx, roots, n);
+  free(roots);
+  return sink;
+}
+
 static int ensure_vag_graph(PolyModel *inst, int loss_ep_idx) {
   if (inst->training.vag && inst->training.vag->entrypoint_index == loss_ep_idx) return 0;
 
@@ -4935,11 +5017,15 @@ static int ensure_vag_graph(PolyModel *inst, int loss_ep_idx) {
     vag->grad_datas[i] = calloc((size_t)pb->numel, sizeof(float));
   }
 
-  vag->combined_sink = poly_sink_n(inst->ctx, stores, n_stores);
+  vag->combined_sink = model_sink_with_effects(inst, loss_ep_idx, stores, n_stores);
 
   free(stores);
   free(grads);
   free(param_bufs);
+  if (!vag->combined_sink) {
+    vag_free(vag, inst->n_params);
+    return -1;
+  }
 
   PolyModel candidate = *inst;
   candidate.training.vag = vag;
@@ -5232,8 +5318,12 @@ static int build_train_graph(PolyModel *inst, TrainState **out) {
       return -1;
     }
 
-  ts->combined_sink = poly_sink_n(ctx, sink_srcs, n_sink_srcs);
+  ts->combined_sink = model_sink_with_effects(inst, vag->entrypoint_index, sink_srcs, n_sink_srcs);
   free(sink_srcs);
+  if (!ts->combined_sink) {
+    train_free(ts, np);
+    return -1;
+  }
 
   *out = ts;
   return 0;
