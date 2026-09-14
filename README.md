@@ -150,7 +150,7 @@ From this source checkout:
 ```bash
 make
 
-POLYGRAD_LIB=$PWD/build/libpolygrad.so PYTHONPATH=py python - <<'PY'
+POLY_LIB=$PWD/build/libpolygrad.so PYTHONPATH=py python - <<'PY'
 from polygrad import Tensor
 print((Tensor([1, 2, 3]) * 2 + 1).numpy())
 PY
@@ -342,11 +342,33 @@ Backend table:
 Environment variables:
 
 ```bash
-POLY_DEVICE=cpu|cuda|hip|x86|interp
-POLY_CORE=native|wasm
+DEV=CPU                 # also CUDA, HIP, X86, INTERP, CPU:X86
+POLY_DEV=CPU            # Polygrad-specific override of DEV
+POLY_LIB=/path/to/libpolygrad.so
+POLY_CORE=native        # or wasm
 POLY_DUMP_KERNELS=1
 BEAM=4
 ```
+
+Explicit device choices override `POLY_DEV`, which overrides Tinygrad's `DEV`.
+Both environment names accept case-insensitive single backend names and
+`CPU:X86`. Unsupported renderer, architecture, interface, ordinal-like and
+multi-target forms fail rather than silently selecting another backend.
+Full Target-selection vocabulary remains open debt PG-PARITY-037, separate
+from multi-GPU execution support.
+`DEV=CUDA:1` is a renderer request in Tinygrad's target grammar, not GPU1.
+Device strings passed directly to Tensor/Runtime retain their existing rules.
+
+`POLY_DEBUG` overrides `DEBUG`, including `POLY_DEBUG=0` to suppress inherited
+verbosity. `BEAM` and `NOOPT` retain their Tinygrad names; explicit setters
+override their initial environment values. Native runtimes share compiler
+policy; each Wasm module owns its policy. Node initializes Wasm compiler
+settings once per module. Browsers use runtime properties, not process env.
+
+`POLY_LIB` is Python/R's explicit native-library path; an invalid Python path
+fails without falling back to another installation. Node loads its packaged
+addon or Wasm via `POLY_CORE`. In 0.5.0, `POLY_DEV` and `POLY_LIB` replace
+`POLY_DEVICE` and `POLYGRAD_LIB`; the old names are no longer recognized.
 
 ## Runtime Ownership
 

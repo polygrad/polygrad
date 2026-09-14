@@ -565,7 +565,7 @@ result = {
     "config": {
         name: os.environ[name]
         for name in (
-            "DEV", "POLY_DEVICE", "CUDA_DEVICE_ORDER", "BS", "EVAL_BS",
+            "DEV", "POLY_DEV", "CUDA_DEVICE_ORDER", "BS", "EVAL_BS",
             "STEPS", "EVAL_STEPS",
             "GPUS", "SEED",
             "BEAM", "WINO", "LATEBEAM", "LATEWINO", "DISABLE_BACKWARD",

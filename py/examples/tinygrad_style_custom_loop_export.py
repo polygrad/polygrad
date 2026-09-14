@@ -1,7 +1,7 @@
 """Tinygrad-style custom training loop, then export named entrypoints.
 
 Run from repo root:
-  PYTHONPATH=py POLYGRAD_LIB=build/libpolygrad.so python py/examples/tinygrad_style_custom_loop_export.py
+  PYTHONPATH=py POLY_LIB=build/libpolygrad.so python py/examples/tinygrad_style_custom_loop_export.py
 """
 
 import numpy as np

@@ -6,7 +6,7 @@
 
 .onLoad <- function(libname, pkgname) {
   # Load libpolygrad.so
-  polygrad_lib <- Sys.getenv("POLYGRAD_LIB", "")
+  polygrad_lib <- Sys.getenv("POLY_LIB", "")
   if (polygrad_lib == "") {
     polygrad_lib <- file.path(system.file(package = pkgname), "..", "..", "..", "build", "libpolygrad.so")
     polygrad_lib <- normalizePath(polygrad_lib, mustWork = FALSE)

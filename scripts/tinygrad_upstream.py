@@ -40,7 +40,7 @@ CPU_NN_SHA256 = {
 }
 NN_HELPERS_SHA256 = 'cfe8184a8d5349030a74bfc3322823574ea060713f71685524d6f6b9fbf98366'
 ENVIRONMENT = {
-    "DEV": "CPU", "POLY_DEVICE": "cpu", "CACHELEVEL": "0", "DEBUG": "0",
+    "DEV": "CPU", "CACHELEVEL": "0", "DEBUG": "0",
     "FORWARD_ONLY": "0", "TINY_BACKEND": "0", "SKIP_SLOW_TEST": "0", "IMAGE": "0",
     "DERANDOMIZE_CI": "1", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1",
     "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1", "PYTHONHASHSEED": "0",
@@ -443,7 +443,7 @@ def run_one(output, engine, test, reference, library, timeout, adapter=None):
                "result": str(stem.with_suffix(".json")), "events": str(stem.with_suffix(".jsonl")), 'adapter':adapter}
     write_json(stem.with_suffix(".request.json"), request)
     env = {k: os.environ[k] for k in ("PATH", "HOME", "LANG", "LD_LIBRARY_PATH") if k in os.environ}
-    env.update(worker_environment(adapter), POLYGRAD_LIB=str(library), POLY_TMPDIR=str(output / "cc_tmp"),
+    env.update(worker_environment(adapter), POLY_LIB=str(library), POLY_TMPDIR=str(output / "cc_tmp"),
                TMPDIR=str(output / "cc_tmp"), XDG_CACHE_HOME=str(output / "cache"))
     command = [sys.executable, "-P", "-s", str(Path(__file__).resolve()), "--child", str(stem.with_suffix(".request.json"))]
     started = time.monotonic()

@@ -221,7 +221,7 @@ def arg_int(value: int) -> PolyArg:
 
 
 def load_lib() -> ctypes.CDLL:
-    path = Path(os.environ.get("POLYGRAD_LIB", DEFAULT_LIB))
+    path = Path(os.environ.get("POLY_LIB", DEFAULT_LIB))
     if not path.exists():
         raise SystemExit(f"libpolygrad not found: {path}. Build with `make build/libpolygrad.so`.")
     lib = ctypes.CDLL(str(path))

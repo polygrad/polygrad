@@ -18,7 +18,7 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'py'))
-os.environ.setdefault('POLYGRAD_LIB', str(ROOT / 'build' / 'libpolygrad.so'))
+os.environ.setdefault('POLY_LIB', str(ROOT / 'build' / 'libpolygrad.so'))
 
 from polygrad.model import Model, OPTIM_ADAM  # noqa: E402
 from polygrad.models import MLP, Graph  # noqa: E402

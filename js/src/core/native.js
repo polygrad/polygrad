@@ -40,10 +40,10 @@ function createNativeCore(device) {
     weakfloat: binding.poly_dtype_id_by_name('weakfloat')
   }
 
-  const ctx = binding.poly_ctx_new()
-  if (!ctx) throw new Error('polygrad: poly_ctx_new failed; check POLY_LOGICAL, DEFAULT_FLOAT/INT and allocations')
   const nativeDevice = resolveNativeDevice(binding, device)
   const deviceId = nativeDevice.id
+  const ctx = binding.poly_ctx_new()
+  if (!ctx) throw new Error('polygrad: poly_ctx_new failed; check POLY_LOGICAL, DEFAULT_FLOAT/INT and allocations')
   binding.poly_ctx_set_preferred_device(ctx, deviceId)
 
   function setModelDevice(inst) {
@@ -284,7 +284,6 @@ const NATIVE_DEVICE_NAMES = new Set(['cpu', 'interp', 'x86', 'cuda', 'hip'])
 function normalizeDeviceName(device) {
   let name = null
   if (device && device !== 'auto') name = String(device)
-  else if (process.env.POLY_DEVICE && process.env.POLY_DEVICE !== 'auto') name = String(process.env.POLY_DEVICE)
   else name = 'cpu'
   name = name.toLowerCase()
   if (name.startsWith('cpu:')) name = name.slice(4)

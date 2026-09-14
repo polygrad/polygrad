@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <ctype.h>
 #ifndef __EMSCRIPTEN__
 #include <fcntl.h>
@@ -61,8 +62,18 @@ uint64_t poly_buffer_get_key(PolyCtx *ctx, PolyUOp *buf) {
   return (uint64_t)(uintptr_t)poly_buffer_get(ctx, buf);
 }
 
+static PolyDevice host_memory_device(void) {
+  /* Buffer.as_memoryview / allocator._copyout use host storage independently
+   * of DEV. A compute default must never relabel a C pointer as GPU memory. */
+#ifdef __EMSCRIPTEN__
+  return POLY_DEVICE_WASM;
+#else
+  return POLY_DEVICE_CPU;
+#endif
+}
+
 PolyBuffer poly_buffer_make_host_view(void *ptr, size_t nbytes) {
-  PolyDevice dev = poly_device_default();
+  PolyDevice dev = host_memory_device();
   const PolyBackendDesc *be = poly_backend_get(dev);
   return (PolyBuffer){
       .ptr = ptr,
@@ -96,11 +107,20 @@ static size_t poly_buffer_copy_nbytes(const PolyBuffer *dst, const PolyBuffer *s
 /* Device helpers */
 
 PolyDevice poly_device_default(void) {
-#ifdef __EMSCRIPTEN__
-  return POLY_DEVICE_WASM;
-#else
-  return POLY_DEVICE_CPU;
-#endif
+  const char *target = getenv("POLY_DEV");
+  if (!target || !target[0]) target = getenv("DEV");
+  if (target && target[0]) {
+    /* helpers.Target uses device:renderer:arch, not device ordinals. Only
+     * the implemented single-target subset can select a C backend. */
+    if (strchr(target, ';') || strchr(target, '+') ||
+        (strchr(target, ':') && strcasecmp(target, "CPU:X86") != 0))
+      return POLY_DEVICE_AUTO;
+    if (strcasecmp(target, "AUTO") != 0) {
+      PolyDevice device = poly_device_by_name(target);
+      return poly_device_can_execute(device) ? device : POLY_DEVICE_AUTO;
+    }
+  }
+  return host_memory_device();
 }
 
 bool poly_device_can_execute(PolyDevice dev) {
@@ -1395,7 +1415,7 @@ static int poly_buffer_alloc_host_root(
     PolyBuffer **out
 ) {
   if (!ctx || !owner || !out) return -1;
-  PolyDevice device = poly_device_default();
+  PolyDevice device = host_memory_device();
   const PolyBackendDesc *be = poly_backend_get(device);
   const PolyAllocator *alloc = be ? be->get_allocator() : NULL;
   if (!alloc || !alloc->host_addressable || !alloc->alloc) return -1;

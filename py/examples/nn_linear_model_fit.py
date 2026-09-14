@@ -1,7 +1,7 @@
 """Plain Python object + nn.Linear exported with Model.from_tensors.
 
 Run from repo root:
-  PYTHONPATH=py POLYGRAD_LIB=build/libpolygrad.so python py/examples/nn_linear_model_fit.py
+  PYTHONPATH=py POLY_LIB=build/libpolygrad.so python py/examples/nn_linear_model_fit.py
 """
 
 import numpy as np

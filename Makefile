@@ -208,19 +208,19 @@ test-common: build/polygrad_test
 	$(SAN_RUN) ./build/polygrad_test --common
 
 test-common-cpu: build/polygrad_test
-	$(SAN_RUN) POLY_DEVICE=cpu ./build/polygrad_test --common
+	$(SAN_RUN) POLY_DEV=cpu ./build/polygrad_test --common
 
 test-common-cuda: build/polygrad_test
-	$(SAN_RUN) POLY_DEVICE=cuda ./build/polygrad_test --common
+	$(SAN_RUN) POLY_DEV=cuda ./build/polygrad_test --common
 
 test-common-hip: build/polygrad_test
-	$(SAN_RUN) POLY_DEVICE=hip ./build/polygrad_test --common
+	$(SAN_RUN) POLY_DEV=hip ./build/polygrad_test --common
 
 test-common-interp: build/polygrad_test
-	$(SAN_RUN) POLY_DEVICE=interp ./build/polygrad_test --common
+	$(SAN_RUN) POLY_DEV=interp ./build/polygrad_test --common
 
 test-common-x86: build/polygrad_test
-	$(SAN_RUN) POLY_DEVICE=x86 ./build/polygrad_test --common
+	$(SAN_RUN) POLY_DEV=x86 ./build/polygrad_test --common
 
 test-cuda: test-common-cuda test-specific-cuda
 
@@ -231,7 +231,7 @@ test-interp: test-common-interp
 test-x86: test-common-x86 test-specific-x86
 
 test-specific-x86: build/polygrad_test
-	$(SAN_RUN) POLY_DEVICE=x86 ./build/polygrad_test --specific x86
+	$(SAN_RUN) POLY_DEV=x86 ./build/polygrad_test --specific x86
 
 require-qwen3-gguf:
 	@if [ ! -f "$(QWEN3_GGUF)" ]; then \
@@ -251,20 +251,20 @@ test-qwen3-cuda: build/polygrad_test require-qwen3-gguf
 # Missing dependencies and offline fixture misses are failures, not passes.
 HF_PYTHON ?= $(PARITY_PY)
 test-hf-e2e: build/libpolygrad.so
-	PYTEST_ADDOPTS= POLY_REQUIRE_HF=1 POLYGRAD_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py \
+	PYTEST_ADDOPTS= POLY_REQUIRE_HF=1 POLY_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py \
 		$(HF_PYTHON) -m pytest py/tests/test_hf_e2e.py -o addopts= -v
 
 test-release-gates: build/polygrad_test build/libpolygrad.so
-	PYTEST_ADDOPTS= POLYGRAD_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py \
+	PYTEST_ADDOPTS= POLY_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py \
 		$(HF_PYTHON) -m pytest py/tests/test_release_gates.py -o addopts= -v
 
 # Backend-specific tests only. --specific requires TEST_BACKEND and an exact
 # suite match, so portable tests with backend names remain in test-common-*.
 test-specific-cuda: build/polygrad_test
-	$(SAN_RUN) POLY_DEVICE=cuda ./build/polygrad_test --require-no-skips --specific cuda
+	$(SAN_RUN) POLY_DEV=cuda ./build/polygrad_test --require-no-skips --specific cuda
 
 test-specific-hip: build/polygrad_test
-	$(SAN_RUN) POLY_DEVICE=hip ./build/polygrad_test --require-no-skips --specific hip
+	$(SAN_RUN) POLY_DEV=hip ./build/polygrad_test --require-no-skips --specific hip
 
 test-harness-skip-accounting: build/polygrad_test
 	@mkdir -p build
@@ -335,8 +335,8 @@ test-parity-graph parity-graph-report: build/libpolygrad.so
 	@mkdir -p $(GRAPH_PARITY_DIR) temp/cc_tmp
 	ENGINE=tinygrad DEV=CPU PYTHONPATH=references/tinygrad_latest $(PARITY_PY) \
 		test/tensor_graph_cases.py $(GRAPH_PARITY_CASE_ARGS) > $(GRAPH_PARITY_DIR)/tinygrad.json
-	ENGINE=polygrad POLY_DEVICE=cpu POLY_TMPDIR=$(abspath temp/cc_tmp) TMPDIR=$(abspath temp/cc_tmp) \
-		POLYGRAD_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py $(PARITY_PY) \
+	ENGINE=polygrad POLY_DEV=cpu POLY_TMPDIR=$(abspath temp/cc_tmp) TMPDIR=$(abspath temp/cc_tmp) \
+		POLY_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py $(PARITY_PY) \
 		test/tensor_graph_cases.py $(GRAPH_PARITY_CASE_ARGS) > $(GRAPH_PARITY_DIR)/polygrad.json
 	$(PARITY_PY) test/compare_tensor_graphs.py \
 		$(GRAPH_PARITY_DIR)/tinygrad.json $(GRAPH_PARITY_DIR)/polygrad.json \
@@ -374,7 +374,7 @@ test-reference-parity: test-reference-migration
 
 test-parity-op-census parity-op-census-report: build/libpolygrad.so
 	@mkdir -p $(OP_PARITY_DIR)
-	POLYGRAD_LIB=$(abspath build/libpolygrad.so) \
+	POLY_LIB=$(abspath build/libpolygrad.so) \
 		PYTHONPATH=py:references/tinygrad_latest $(PARITY_PY) \
 		test/op_vocabulary_census.py \
 		$(if $(filter parity-op-census-report,$@),--report-only,) \
@@ -383,7 +383,7 @@ test-parity-op-census parity-op-census-report: build/libpolygrad.so
 .PHONY: test-release-op-census
 test-release-op-census: build/libpolygrad.so
 	@mkdir -p $(OP_PARITY_DIR)
-	POLYGRAD_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py:references/tinygrad_latest \
+	POLY_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py:references/tinygrad_latest \
 		$(PARITY_PY) test/op_vocabulary_census.py \
 		--release-scope test/fixtures/release_050_scope.json --output $(OP_PARITY_DIR)/report.json
 
@@ -391,9 +391,9 @@ test-compat-tinygrad-tier1: build/libpolygrad.so
 	@mkdir -p $(COMPAT_TIER1_DIR) temp/cc_tmp
 	ENGINE=tinygrad DEV=CPU PYTHONPATH=test:references/tinygrad_latest $(PARITY_PY) \
 		test/tinygrad_compat_cases.py > $(COMPAT_TIER1_DIR)/tinygrad.json
-	ENGINE=polygrad DEV=CPU POLY_DEVICE=cpu \
+	ENGINE=polygrad DEV=CPU POLY_DEV= \
 		POLY_TMPDIR=$(abspath temp/cc_tmp) TMPDIR=$(abspath temp/cc_tmp) \
-		POLYGRAD_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=test:py $(PARITY_PY) \
+		POLY_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=test:py $(PARITY_PY) \
 		test/tinygrad_compat_cases.py > $(COMPAT_TIER1_DIR)/polygrad.json
 	$(PARITY_PY) test/compare_tinygrad_compat.py \
 		$(COMPAT_TIER1_DIR)/tinygrad.json $(COMPAT_TIER1_DIR)/polygrad.json \
@@ -403,9 +403,9 @@ test-compat-tinygrad-convnext: build/libpolygrad.so
 	@mkdir -p $(COMPAT_CONVNEXT_DIR) temp/cc_tmp
 	ENGINE=tinygrad COMPAT_CASES=convnext DEV=CPU PYTHONPATH=test:references/tinygrad_latest $(PARITY_PY) \
 		test/tinygrad_compat_cases.py > $(COMPAT_CONVNEXT_DIR)/tinygrad.json
-	ENGINE=polygrad COMPAT_CASES=convnext DEV=CPU POLY_DEVICE=cpu \
+	ENGINE=polygrad COMPAT_CASES=convnext DEV=CPU POLY_DEV= \
 		POLY_TMPDIR=$(abspath temp/cc_tmp) TMPDIR=$(abspath temp/cc_tmp) \
-		POLYGRAD_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=test:py $(PARITY_PY) \
+		POLY_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=test:py $(PARITY_PY) \
 		test/tinygrad_compat_cases.py > $(COMPAT_CONVNEXT_DIR)/polygrad.json
 	$(PARITY_PY) test/compare_tinygrad_compat.py \
 		$(COMPAT_CONVNEXT_DIR)/tinygrad.json $(COMPAT_CONVNEXT_DIR)/polygrad.json \
@@ -414,11 +414,11 @@ test-compat-tinygrad-convnext: build/libpolygrad.so
 Z3_FUZZ_ITERS ?= 128
 Z3_FUZZ_SEED ?= 0
 test-symbolic-z3: build/libpolygrad.so
-	POLYGRAD_LIB=$(abspath build/libpolygrad.so) $(PARITY_PY) \
+	POLY_LIB=$(abspath build/libpolygrad.so) $(PARITY_PY) \
 		test/external/fuzz_symbolic_z3.py --mode general --seed $(Z3_FUZZ_SEED) --iters $(Z3_FUZZ_ITERS)
-	POLYGRAD_LIB=$(abspath build/libpolygrad.so) $(PARITY_PY) \
+	POLY_LIB=$(abspath build/libpolygrad.so) $(PARITY_PY) \
 		test/external/fuzz_symbolic_z3.py --mode div --seed $(Z3_FUZZ_SEED) --iters $(Z3_FUZZ_ITERS)
-	POLYGRAD_LIB=$(abspath build/libpolygrad.so) $(PARITY_PY) \
+	POLY_LIB=$(abspath build/libpolygrad.so) $(PARITY_PY) \
 		test/external/fuzz_symbolic_z3.py --mode fixed --seed $(Z3_FUZZ_SEED) --iters $(Z3_FUZZ_ITERS)
 
 build/polygrad_test: $(SRC) $(CODEC_SRC) $(TEST_SRC)
@@ -430,7 +430,7 @@ build/polygrad_test_filc: $(FILC_SRC) $(CODEC_SRC) $(TEST_SRC)
 	$(FILC) $(FILC_CFLAGS_DEBUG) -o $@ $(filter %.c,$^) -lm -ldl
 
 test-filc-interp-fast: build/polygrad_test_filc
-	POLY_DEVICE=interp CC=$(FILC) ./build/polygrad_test_filc --fast
+	POLY_DEV=interp CC=$(FILC) ./build/polygrad_test_filc --fast
 
 build/polygrad_parity_runner: $(SRC) $(CODEC_SRC) $(PARITY_RUNNER_SRC)
 	@mkdir -p build
@@ -478,7 +478,7 @@ bench-cuda: build/bench_cuda
 	./build/bench_cuda
 
 bench-model-cuda: build/libpolygrad.so js/build/Release/polygrad_napi.node
-	POLYGRAD_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=references/tinygrad_latest $(PARITY_PY) bench/bench_model_cuda_vs_tinygrad.py
+	POLY_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=references/tinygrad_latest $(PARITY_PY) bench/bench_model_cuda_vs_tinygrad.py
 
 # Bounded semantic gate for the exact pinned HLB source. The Python driver
 # owns engine-specific caches, model bytes, provenance, and comparison output.
@@ -559,11 +559,11 @@ BENCH_RATIO_LOCAL_BASELINE ?= bench/baselines/local/$(shell hostname -s)-ratios.
 BENCH_RATIO_BASELINE ?= $(BENCH_RATIO_LOCAL_BASELINE)
 
 bench-ratios: build/libpolygrad.so wasm-pkg
-	POLYGRAD_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py $(PARITY_PY) bench/bench_ratios.py
+	POLY_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py $(PARITY_PY) bench/bench_ratios.py
 	$(NODE) bench/bench_ratios.js --json-file $$(ls -t bench/results/2*.json | head -1)
 
 bench-parity: build/libpolygrad.so
-	POLYGRAD_LIB=$(abspath build/libpolygrad.so) $(PARITY_PY) bench/bench_tinygrad_parity.py
+	POLY_LIB=$(abspath build/libpolygrad.so) $(PARITY_PY) bench/bench_tinygrad_parity.py
 
 .PHONY: test-bench-wasm
 test-bench-wasm:
@@ -661,10 +661,10 @@ test-headers:
 	$(PYTHON) scripts/check-headers.py
 
 test-py: verify-source-mirrors build/libpolygrad.so
-	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 POLYGRAD_LIB=build/libpolygrad.so PYTHONPATH=py $(PYTHON) -m pytest py/tests/ -v
+	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 POLY_LIB=build/libpolygrad.so PYTHONPATH=py $(PYTHON) -m pytest py/tests/ -v
 
 test-py-x86: verify-source-mirrors build/libpolygrad.so
-	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 DEV=X86 POLY_DEVICE=x86 POLYGRAD_LIB=build/libpolygrad.so PYTHONPATH=py $(PYTHON) -m pytest py/tests/test_tensor.py py/tests/test_nn.py py/tests/test_model.py py/tests/test_hf.py py/tests/test_hf_e2e.py -v
+	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 DEV=X86 POLY_DEV=x86 POLY_LIB=build/libpolygrad.so PYTHONPATH=py $(PYTHON) -m pytest py/tests/test_tensor.py py/tests/test_nn.py py/tests/test_model.py py/tests/test_hf.py py/tests/test_hf_e2e.py -v
 
 test-js: test-js-wasm test-js-native test-js-package
 
@@ -684,29 +684,29 @@ test-js-package: verify-source-mirrors wasm-pkg
 	cd js && bash scripts/build-browser.sh && $(NODE) test/test_package_exports.js
 
 test-model-interchange: verify-source-mirrors build/libpolygrad.so js/build/Release/polygrad_napi.node wasm-pkg
-	PYTHONPATH=py POLYGRAD_LIB=$(abspath build/libpolygrad.so) \
+	PYTHONPATH=py POLY_LIB=$(abspath build/libpolygrad.so) \
 		$(PYTHON) test/test_model_interchange.py --cores native,wasm
 
 js/build/Release/polygrad_napi.node: build/libpolygrad.a js/binding.gyp js/napi_api.c
 	cd js && npm run build:native
 
 test-js-native-cpu: verify-source-mirrors js/build/Release/polygrad_napi.node
-	POLY_DEVICE=cpu $(NODE) js/test/test_native.js
+	POLY_DEV=cpu $(NODE) js/test/test_native.js
 
 test-js-native-x86: verify-source-mirrors js/build/Release/polygrad_napi.node
-	POLY_DEVICE=x86 $(NODE) js/test/test_native.js
+	POLY_DEV=x86 $(NODE) js/test/test_native.js
 
 test-js-native-interp: verify-source-mirrors js/build/Release/polygrad_napi.node
-	POLY_DEVICE=interp $(NODE) js/test/test_native.js
+	POLY_DEV=interp $(NODE) js/test/test_native.js
 
 ifeq ($(HAS_CUDA), 1)
 test-js-native-cuda: verify-source-mirrors js/build/Release/polygrad_napi.node
-	POLY_DEVICE=cuda $(NODE) js/test/test_native.js
+	POLY_DEV=cuda $(NODE) js/test/test_native.js
 endif
 
 ifeq ($(HAS_HIP), 1)
 test-js-native-hip: verify-source-mirrors js/build/Release/polygrad_napi.node
-	POLY_DEVICE=hip $(NODE) js/test/test_native.js
+	POLY_DEV=hip $(NODE) js/test/test_native.js
 endif
 
 # Browser/Playwright coverage should be invoked through Make so the wasm
@@ -840,7 +840,7 @@ VENDOR_SRC = vendor/dht/dht.c vendor/stun/STUNExternalIP.c
 P2P_SRC = src/p2p.c
 
 bench-train-py:
-	POLYGRAD_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py python bench/train_mlp_python.py
+	POLY_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py python bench/train_mlp_python.py
 
 # ── Package builds / publishing ─────────────────────────────────────
 

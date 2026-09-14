@@ -223,7 +223,9 @@ class ContextVar(Generic[T]):
         if key in ContextVar._cache:
             raise RuntimeError(f"attempt to recreate ContextVar {key}")
         ContextVar._cache[key] = self
-        self.value, self.key = getenv(key, default_value), key
+        override = {'DEV': 'POLY_DEV', 'DEBUG': 'POLY_DEBUG'}.get(key)
+        env_key = override if override and os.getenv(override) else key
+        self.value, self.key = getenv(env_key, default_value), key
 
     def __bool__(self):
         return bool(self.value)

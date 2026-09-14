@@ -926,6 +926,26 @@
         "temp/readiness-safety-scope-20260913.lRth9A/upstream/report.json"
       ],
       "close_when": "Expose truthful graph capability semantics without a fabricated Python GraphRunner, and execute the unchanged alias scenario on a graph-capable provider."
+    },
+    {
+      "id": "PG-PARITY-037",
+      "status": "open_debt",
+      "stages": ["configuration"],
+      "area": "DEV target-selection vocabulary",
+      "tinygrad": "DEV contains Target(device, renderer, arch, interface, indices) requests separated by semicolons; CPU;CUDA can configure both targets while default Tensor construction selects CPU. CUDA:1 is a renderer request, not a device ordinal.",
+      "polygrad": "Implicit selection accepts one supported backend name or CPU:X86. Other target fields and multiple targets are rejected rather than discarded. Explicit device choices override POLY_DEV, then DEV; POLY_LIB is the Polygrad loader path.",
+      "rationale": "Recipe compatibility does not imply the full Target selection vocabulary. This is distinct from genuine multi-device execution debt013 and grants no graph or behavioral allowance.",
+      "approval": null,
+      "evidence": [
+        "references/tinygrad_latest/tinygrad/helpers.py:Target",
+        "references/tinygrad_latest/tinygrad/device.py:_Device.DEFAULT",
+        "src/device.c:poly_device_default",
+        "py/polygrad/device.py:_Device.DEFAULT",
+        "js/src/index.js:applyNodeEnv",
+        "temp/environment-parity-20260914.OKqum5/correspondence.md",
+        "temp/environment-parity-20260914.OKqum5/tinygrad.log"
+      ],
+      "close_when": "Port supported multi-target/renderer/interface/architecture selection with matching pinned probes, without treating unimplemented backends as executable or dropping target fields."
     }
   ]
 }

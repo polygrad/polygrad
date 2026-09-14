@@ -1,5 +1,8 @@
 from pathlib import Path
+import os
 import re
+import subprocess
+import sys
 
 import numpy as np
 import pytest
@@ -10,6 +13,64 @@ from polygrad import Context, GlobalCounters, Jit, Tensor, TinyJit, UOp, Variabl
 from polygrad.helpers import Context as HelperContext, TRAINING, fetch as helper_fetch, getenv as helper_getenv
 from polygrad.nn.optim import SGD
 from polygrad.uop.ops import UOp as OpsUOp, resolve
+
+
+@pytest.mark.parametrize('env,code,expected', [
+    ({'DEV': 'iNtErP'}, 'print(Tensor([1.]).device)', 'INTERP'),
+    ({'DEV': 'INTERP', 'POLY_DEV': 'CPU'}, 'print(Tensor([1.]).device)', 'CPU'),
+    ({'DEV': 'CPU', 'POLY_DEV': 'INTERP'}, 'print(Tensor([1.]).device)', 'INTERP'),
+    ({'POLY_DEV': 'CPU:X86'}, 'print(Tensor([1.]).device)', 'X86'),
+    ({'DEV': 'INTERP', 'POLY_DEV': 'CPU'},
+     "from polygrad.helpers import DEV\nwith Context(DEV='INTERP'): print(Tensor([1.]).device)\nprint(Tensor([1.]).device)", 'INTERP\nCPU'),
+    ({'POLY_DEV': 'INTERP'}, "with Runtime(device='CPU') as rt: print(rt.Tensor.ones(1).device)", 'CPU'),
+    ({'POLY_DEV': 'INTERP'}, "with Runtime(device='CPU') as rt: print(rt.Tensor([1.], device=None).device)", 'CPU'),
+    ({'POLY_DEV': 'CPU;CUDA'}, "print(Tensor([1.], device='CPU').device)", 'CPU'),
+    ({'DEBUG': '4', 'POLY_DEBUG': '0'}, 'from polygrad.helpers import DEBUG\nprint(int(DEBUG.value))', '0'),
+])
+def test_environment_precedence(env, code, expected):
+    result = _environment_probe(env, code)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == expected
+
+
+def _environment_probe(env, code):
+    child_env = dict(os.environ)
+    for key in ('DEV', 'POLY_DEV', 'DEBUG', 'POLY_DEBUG'):
+        child_env.pop(key, None)
+    child_env.update(POLY_LIB=str(_ffi._lib._name), PYTHONPATH=str(Path(__file__).resolve().parents[1]))
+    child_env.update(env)
+    return subprocess.run([sys.executable, '-c', 'from polygrad import Tensor, Context, Runtime\n' + code],
+                          env=child_env, text=True, capture_output=True, timeout=30)
+
+
+@pytest.mark.parametrize('target', ['CUDA:0', 'CUDA:1', 'CPU;CUDA', 'CPU:CUDA', 'CPU:X86:arch', 'NV+CUDA'])
+def test_environment_rejects_unsupported_target(target):
+    result = _environment_probe({'POLY_DEV': target}, 'print(Tensor([1.]).device)')
+    assert result.returncode != 0
+    assert 'Unsupported' in result.stderr and target in result.stderr
+
+
+def test_environment_invalid_library_does_not_fall_back(tmp_path):
+    missing = str(tmp_path / 'missing.so')
+    result = _environment_probe({'POLY_LIB': missing}, 'print(Tensor([1.]).device)')
+    assert result.returncode != 0
+    assert 'POLY_LIB' in result.stderr and missing in result.stderr
+
+
+def test_environment_model_auto_uses_target_validation():
+    result = _environment_probe({'POLY_DEV': 'CPU'}, '''
+import os
+from polygrad import Model, _ffi
+x = Tensor.empty(1)
+model = Model.from_tensors(inputs={'x': x}, outputs={'copy': x})
+os.environ['POLY_DEV'] = 'CPU:0'
+_ffi._lib.poly_ctx_set_preferred_device(x._ctx, 0)
+try:
+    assert _ffi._lib.poly_model_set_device(model._ptr, 0) == -1
+finally:
+    model.free()
+''')
+    assert result.returncode == 0, result.stderr
 
 
 def test_release014_op_values_after_removed_wait():

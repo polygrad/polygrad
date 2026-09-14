@@ -396,7 +396,7 @@ def eval_model(model, x_test: Tensor, y_test: Tensor, bs: int, flatten: bool, li
 
 
 def configure_device() -> str:
-    requested = os.environ.get("DEVICE") or os.environ.get("POLY_DEVICE") or "CPU"
+    requested = os.environ.get("DEVICE") or os.environ.get("POLY_DEV") or "CPU"
     requested = requested.upper()
     if requested == "AUTO":
         requested = "CUDA" if Device.cuda_available() else "CPU"

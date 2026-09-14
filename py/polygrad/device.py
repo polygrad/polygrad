@@ -83,10 +83,15 @@ class _Device:
     @property
     def DEFAULT(self):
         from .helpers import DEV
-        target = repr(DEV.value[0])
+        targets = DEV.value
+        target = repr(targets[0])
+        value = targets[0]
+        if (len(targets) != 1 or value.interface or value.indices or value.arch or
+                (value.renderer and (value.device, value.renderer) != ('CPU', 'X86'))):
+            raise ValueError(f'Unsupported Polygrad device target: {DEV!r}')
         # Do not discard an unsupported renderer/interface request and execute
         # on another backend. The core still validates the complete target.
-        return self.canonicalize(target) if target else self._default
+        return self.canonicalize(target) if target and target.upper() != 'AUTO' else self._default
 
     @functools.cache
     def __getitem__(self, key):

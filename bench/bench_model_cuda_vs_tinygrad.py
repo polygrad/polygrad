@@ -199,7 +199,7 @@ def run_polygrad_node(cases: list[dict]) -> dict[str, float]:
         path = f.name
     try:
       env = os.environ.copy()
-      env["POLY_DEVICE"] = "cuda"
+      env["POLY_DEV"] = "cuda"
       proc = subprocess.run(
           [NODE, path, json.dumps(cases), str(WARMUP)],
           cwd=REPO,

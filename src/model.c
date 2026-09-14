@@ -3942,18 +3942,11 @@ int poly_model_set_device_map_arrays(
 int poly_model_set_device(PolyModel *inst, PolyDevice device) {
   if (!inst || inst->stage != POLY_MODEL_BUILT || !inst->has_portable_source) return -1;
 
-  /* Resolve AUTO the same way tensor placement does: an explicit environment
-   * device wins, otherwise use the platform default. */
+  /* Use the same validated default as Tensor construction. Device-name parsing
+   * here would mistake a DEV renderer suffix for an ordinal and bypass policy. */
   PolyDevice resolved = device;
-  if (resolved == POLY_DEVICE_AUTO) {
-    const char *dev_env = getenv("POLY_DEVICE");
-    if (dev_env && dev_env[0]) {
-      resolved = poly_device_by_name(dev_env);
-      if (resolved == POLY_DEVICE_AUTO) resolved = poly_device_default();
-    } else {
-      resolved = poly_device_default();
-    }
-  }
+  if (resolved == POLY_DEVICE_AUTO) resolved = poly_ctx_get_preferred_device(inst->ctx);
+  if (resolved == POLY_DEVICE_AUTO) resolved = poly_device_default();
 
   /* Validate: backend must exist for this build */
   const PolyBackendDesc *backend = poly_backend_get(resolved);

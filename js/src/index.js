@@ -4,11 +4,28 @@ const { createRuntime, createRuntimeAsync, normalizeOptions } = require('./runti
 const { PolyAsyncRequired, PolyWasmSyncUnsupported } = require('./errors')
 
 function applyNodeEnv(options) {
+  if (typeof process !== 'undefined' && process.env) {
+    for (const key of ['BEAM', 'NOOPT']) {
+      if (!process.env[key]) continue
+      const n = Number(process.env[key])
+      if (!/^\s*[+-]?\d+\s*$/.test(process.env[key]) || !Number.isInteger(n) || n < -2147483648 || n > 2147483647) {
+        throw new Error(`${key} must be a decimal int32`)
+      }
+    }
+  }
   if (options.core === 'auto' && typeof process !== 'undefined' && process.env) {
     if (process.env.POLY_CORE) options.core = process.env.POLY_CORE
   }
-  if (options.device === 'auto' && typeof process !== 'undefined' && process.env && process.env.POLY_DEVICE) {
-    options.device = process.env.POLY_DEVICE
+  if (options.device === 'auto' && typeof process !== 'undefined' && process.env) {
+    const target = process.env.POLY_DEV || process.env.DEV
+    if (target) {
+      const name = target.toLowerCase()
+      // DEV is Target syntax, not a Tensor device's ordinal suffix.
+      if (!['auto', 'host', 'cpu', 'interp', 'x86', 'cuda', 'hip', 'wasm', 'webgpu', 'cpu:x86'].includes(name)) {
+        throw new Error(`Unsupported Polygrad device target: ${target} (POLY_DEV/DEV)`)
+      }
+      options.device = name === 'cpu:x86' ? 'x86' : name
+    }
   }
   return options
 }
@@ -21,7 +38,7 @@ function resolveNodeCore(name, opts) {
 
   if (name === 'native') {
     /* Native core validates and routes cpu/x86/cuda/hip/interp through the C
-     * context. POLY_DEVICE is folded into opts.device above. */
+     * context. POLY_DEV is folded into opts.device above. */
     const { createNativeCore } = require('./core/native')
     return createNativeCore(opts.device)
   }

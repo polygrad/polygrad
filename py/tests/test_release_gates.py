@@ -42,8 +42,8 @@ int main(void) { return g_n_tests == MAX_TESTS ? 0 : 1; }
 
 def test_model_compatibility_artifact_uses_canonical_reference(tmp_path):
     env = dict(os.environ, ENGINE='polygrad', COMPAT_CASES='mlp_mnist',
-               DEV='CPU', POLY_DEVICE='cpu', PYTHONPATH='test:py',
-               POLYGRAD_LIB=str(ROOT / 'build/libpolygrad.so'))
+               DEV='CPU', POLY_DEV='cpu', PYTHONPATH='test:py',
+               POLY_LIB=str(ROOT / 'build/libpolygrad.so'))
     run = subprocess.run([sys.executable, 'test/tinygrad_compat_cases.py'],
                          cwd=ROOT, env=env, capture_output=True, text=True, check=True)
     artifact = json.loads(run.stdout)
@@ -67,7 +67,7 @@ def test_python_x86_target_selects_frontend_and_core_device():
     recipe = subprocess.run(['make', '-n', 'test-py-x86'], cwd=ROOT,
                             capture_output=True, text=True, check=True)
     command = next(line for line in recipe.stdout.splitlines()
-                   if ' -m pytest ' in line and 'POLY_DEVICE=' in line)
+                   if ' -m pytest ' in line and 'POLY_DEV=' in line)
     env = dict(os.environ)
     env.pop('DEV', None)
     for token in shlex.split(command):
@@ -75,11 +75,11 @@ def test_python_x86_target_selects_frontend_and_core_device():
             break
         key, value = token.split('=', 1)
         env[key] = value
-    # DEV controls Python Tensor/factory construction; POLY_DEVICE still
-    # controls standalone C import/placement. Both must select the tested lane.
+    # The prefixed override must select the same Python and C lane even when
+    # the caller supplied a different DEV default.
     probe = subprocess.run([sys.executable, '-c',
                             "import os; from polygrad import Tensor, Device; "
-                            "assert os.environ['POLY_DEVICE'].lower() == 'x86'; "
+                            "assert os.environ['POLY_DEV'].lower() == 'x86'; "
                             "assert Device.DEFAULT == 'X86', Device.DEFAULT; "
                             "assert Tensor([1.0]).device == 'X86'"],
                            cwd=ROOT, env=env, capture_output=True, text=True)
@@ -88,7 +88,7 @@ def test_python_x86_target_selects_frontend_and_core_device():
 
 def test_package_gate_clears_checkout_and_backend_overrides(monkeypatch):
     helpers = runpy.run_path(str(ROOT / 'test/test_package_install.py'))
-    keys = ('PYTHONPATH', 'PYTHONHOME', 'POLYGRAD_LIB', 'POLY_CORE',
+    keys = ('PYTHONPATH', 'PYTHONHOME', 'POLY_LIB', 'POLY_CORE',
             'POLYGRAD_SKIP_NATIVE', 'NODE_PATH', 'NODE_OPTIONS',
             'PIP_TARGET', 'PIP_PREFIX', 'PIP_USER',
             'npm_config_ignore_scripts', 'NPM_CONFIG_IGNORE_SCRIPTS')

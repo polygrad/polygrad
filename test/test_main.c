@@ -3,7 +3,7 @@
  *
  * Usage: polygrad_test [--fast] [--common] [--specific SUITE] [suite_filter|suite.test]
  *   --fast            Skip slow suites (nn)
- *   --common          Run the large backend-portable suite. POLY_DEVICE selects
+ *   --common          Run the large backend-portable suite. POLY_DEV selects
  *                     the execution backend.
  *   --specific SUITE  Run only TEST_BACKEND entries in the exact suite.
  *   --require-no-skips Fail if a selected test skips at runtime.

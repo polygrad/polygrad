@@ -68,10 +68,10 @@ def release_environment(root):
     # filtered, error-ignoring or concurrent run. Tool/fixture choices are
     # passed as explicit Make assignments, not inherited MAKEFLAGS.
     for key in ('MAKEFLAGS', 'MFLAGS', 'MAKEOVERRIDES', 'PYTHONHOME', 'PYTHONPATH',
-                'POLY_TEST_FILTER', 'POLYGRAD_LIB', 'POLY_CORE', 'COMPAT_CASES',
+                'POLY_TEST_FILTER', 'POLY_LIB', 'POLY_CORE', 'COMPAT_CASES',
                 'POLY_REQUIRE_HF', 'NODE_OPTIONS', 'NODE_PATH'):
         env.pop(key, None)
-    env.update(DEV='CPU', POLY_DEVICE='cpu', PYTEST_ADDOPTS='',
+    env.update(DEV='CPU', POLY_DEV='cpu', PYTEST_ADDOPTS='',
                PYTEST_DISABLE_PLUGIN_AUTOLOAD='1', POLY_BROWSER_DEVICES='auto,interp,webgpu',
                POLY_BROWSER_SKIP_UNAVAILABLE='0')
     for key, directory in (('POLY_TMPDIR', 'cc_tmp'), ('TMPDIR', 'cc_tmp'),

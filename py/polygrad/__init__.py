@@ -206,9 +206,14 @@ def _bound_tensor_class(ctx, runtime):
         runtime._check_live()
         return ctx
 
+    def bind_defaults(kwargs):
+        kwargs.setdefault('_ctx', live_ctx())
+        if kwargs.get('device') is None:
+            kwargs['device'] = runtime._device
+
     class RuntimeTensor(Tensor):
         def __init__(self, data=None, *args, **kwargs):
-            kwargs.setdefault('_ctx', live_ctx())
+            bind_defaults(kwargs)
             super().__init__(data, *args, **kwargs)
 
         @staticmethod
@@ -217,72 +222,72 @@ def _bound_tensor_class(ctx, runtime):
 
         @staticmethod
         def from_url(url, gunzip=False, **kwargs):
-            kwargs.setdefault('_ctx', live_ctx())
+            bind_defaults(kwargs)
             return Tensor.from_url(url, gunzip=gunzip, **kwargs)
 
         @staticmethod
         def zeros(*shape, **kwargs):
-            kwargs.setdefault('_ctx', live_ctx())
+            bind_defaults(kwargs)
             return Tensor.zeros(*shape, **kwargs)
 
         @staticmethod
         def ones(*shape, **kwargs):
-            kwargs.setdefault('_ctx', live_ctx())
+            bind_defaults(kwargs)
             return Tensor.ones(*shape, **kwargs)
 
         @staticmethod
         def full(shape, fill_value, **kwargs):
-            kwargs.setdefault('_ctx', live_ctx())
+            bind_defaults(kwargs)
             return Tensor.full(shape, fill_value, **kwargs)
 
         @staticmethod
         def invalids(*shape, **kwargs):
-            kwargs.setdefault('_ctx', live_ctx())
+            bind_defaults(kwargs)
             return Tensor.invalids(*shape, **kwargs)
 
         @staticmethod
         def arange(start, stop=None, step=1, **kwargs):
-            kwargs.setdefault('_ctx', live_ctx())
+            bind_defaults(kwargs)
             return Tensor.arange(start, stop, step, **kwargs)
 
         @staticmethod
         def rand(*shape, **kwargs):
-            kwargs.setdefault('_ctx', live_ctx())
+            bind_defaults(kwargs)
             return Tensor.rand(*shape, **kwargs)
 
         @staticmethod
         def randn(*shape, **kwargs):
-            kwargs.setdefault('_ctx', live_ctx())
+            bind_defaults(kwargs)
             return Tensor.randn(*shape, **kwargs)
 
         @staticmethod
         def kaiming_uniform(*shape, **kwargs):
-            kwargs.setdefault('_ctx', live_ctx())
+            bind_defaults(kwargs)
             return Tensor.kaiming_uniform(*shape, **kwargs)
 
         @staticmethod
         def randint(*shape, **kwargs):
-            kwargs.setdefault('_ctx', live_ctx())
+            bind_defaults(kwargs)
             return Tensor.randint(*shape, **kwargs)
 
         @staticmethod
         def randperm(n, **kwargs):
-            kwargs.setdefault('_ctx', live_ctx())
+            bind_defaults(kwargs)
             return Tensor.randperm(n, **kwargs)
 
         @staticmethod
         def linspace(start, stop, steps, **kwargs):
-            kwargs.setdefault('_ctx', live_ctx())
+            bind_defaults(kwargs)
             return Tensor.linspace(start, stop, steps, **kwargs)
 
         @staticmethod
         def eye(n, m=None, **kwargs):
-            kwargs.setdefault('_ctx', live_ctx())
+            bind_defaults(kwargs)
             return Tensor.eye(n, m, **kwargs)
 
         @staticmethod
         def empty(*shape, **kwargs):
-            kwargs.setdefault('_ctx', live_ctx())
+            bind_defaults(kwargs)
             return Tensor.empty(*shape, **kwargs)
 
         @staticmethod
@@ -299,6 +304,7 @@ class Runtime:
 
     def __init__(self, *, device='auto', logical=None):
       lib = _ffi.get_lib()
+      self._device = Device.canonicalize(None if str(device).lower() == 'auto' else device)
       self._ctx = lib.poly_ctx_new()
       if not self._ctx:
           raise RuntimeError('poly_ctx_new failed; check POLY_LOGICAL')
@@ -309,7 +315,7 @@ class Runtime:
           self._ctx = None
           self._disposed = True
           raise ValueError(f'invalid logical policy {logical!r}')
-      dev_id = lib.poly_device_by_name(str(device).lower().encode('utf-8'))
+      dev_id = lib.poly_device_by_name(self._device.encode('utf-8'))
       if dev_id >= 0 and hasattr(lib, 'poly_ctx_set_preferred_device'):
           lib.poly_ctx_set_preferred_device(self._ctx, dev_id)
       self.Tensor = _bound_tensor_class(self._ctx, self)

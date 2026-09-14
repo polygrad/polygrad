@@ -48,7 +48,7 @@ EXPECTED_SEMANTIC_JITS = [
 ]
 COMMON_CONFIG = {
     "DEV": "CUDA",
-    "POLY_DEVICE": "cuda",
+    "POLY_DEV": "cuda",
     "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
     "BS": "32",
     "EVAL_BS": "32",
@@ -350,7 +350,7 @@ def engine_environment(
     else:
         env.update({
             "PYTHONPATH": os.pathsep.join((str(ROOT / "py"), str(TINYGRAD))),
-            "POLYGRAD_LIB": str(library),
+            "POLY_LIB": str(library),
         })
     if initial_state is not None:
         if not initial_state.is_file():

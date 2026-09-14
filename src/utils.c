@@ -16,7 +16,8 @@ _Thread_local double poly_compile_deadline_ms;
 // clang-format off
 EM_JS(int, poly_browser_debug_level, (), {
   if (typeof globalThis === 'undefined') return 0;
-  const v = globalThis.__polygradDebugLevel;
+  const env = typeof process !== 'undefined' && process.versions && process.versions.node ? process.env : {};
+  const v = globalThis.__polygradDebugLevel ?? (env.POLY_DEBUG || env.DEBUG);
   if (v === undefined || v === null) return 0;
   const n = Number(v);
   return Number.isFinite(n) ? (n | 0) : 0;

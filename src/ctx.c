@@ -138,16 +138,12 @@ PolyCtx *poly_ctx_new(void) {
   ctx->ep_cap = 0;
   ctx->next_buf_tag = 1;
   ctx->next_unique_id = 0;
-  ctx->preferred_device = POLY_DEVICE_AUTO;
+  /* Snapshot a supported default without rejecting context creation: an
+   * explicit device can override an unsupported host environment afterward. */
+  ctx->preferred_device = poly_device_default();
   /* Polygrad logical-lifetime divergence: environment initializes one
    * context; later scoped changes are explicit and affect future Tensors. */
   ctx->logical_policy = logical_policy;
-  const char *dev_env = getenv("POLY_DEVICE");
-  if (dev_env && dev_env[0]) {
-    PolyDevice env_device = poly_device_by_name(dev_env);
-    if (env_device != POLY_DEVICE_AUTO && env_device != POLY_DEVICE_HOST)
-      ctx->preferred_device = env_device;
-  }
   ctx->frontend_buffer_release = NULL;
   return ctx;
 }

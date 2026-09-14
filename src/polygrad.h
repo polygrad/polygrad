@@ -789,6 +789,7 @@ typedef enum {
 } PolyDevice;
 
 /* Default compute backend for the current build */
+/* POLY_DEV > DEV > platform default; AUTO means an unsupported target. */
 PolyDevice poly_device_default(void);
 
 /* Can this device execute kernels? false for HOST and AUTO */

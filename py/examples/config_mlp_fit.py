@@ -3,7 +3,7 @@
 This is the family-template path used by built-in/imported models.
 
 Run from repo root:
-  PYTHONPATH=py POLYGRAD_LIB=build/libpolygrad.so python py/examples/config_mlp_fit.py
+  PYTHONPATH=py POLY_LIB=build/libpolygrad.so python py/examples/config_mlp_fit.py
 """
 
 import numpy as np

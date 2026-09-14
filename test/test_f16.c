@@ -764,13 +764,13 @@ TEST(f16, saturated_gelu_family_backward_matches_pinned_backend) {
       {0x8000u, 0x8000u, 0x8000u, 0x8000u, 0x8000u},
       {0x8000u, 0x8000u, 0x84ccu, 0x8d8du, 0x9634u},
   };
-  const char *device = getenv("POLY_DEVICE");
+  PolyDevice device = poly_device_default();
   uint16_t(*expected)[5] = expected_cpu;
-  if (device && strcmp(device, "interp") == 0)
+  if (device == POLY_DEVICE_INTERP)
     expected = expected_interp;
-  else if (device && strcmp(device, "x86") == 0)
+  else if (device == POLY_DEVICE_X86)
     expected = expected_x86;
-  else if (device && strcmp(device, "cuda") == 0)
+  else if (device == POLY_DEVICE_CUDA)
     expected = expected_cuda;
 
   for (int quick = 0; quick < 2; quick++) {

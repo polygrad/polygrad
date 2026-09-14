@@ -210,7 +210,7 @@ def _run_workload(Tensor: Any, cache_stats: Callable[[], dict[str, int]], name: 
 
 
 def _import_polygrad(repo_root: Path, lib_path: Path) -> tuple[Any, Callable[[], dict[str, int]]]:
-    os.environ["POLYGRAD_LIB"] = str(lib_path)
+    os.environ["POLY_LIB"] = str(lib_path)
     sys.path.insert(0, str(repo_root / "py"))
     import ctypes
     from polygrad import Tensor, _default_ctx, _ffi
@@ -266,7 +266,7 @@ def _run_worker(args: argparse.Namespace) -> int:
     os.environ.setdefault("VIZ", "0")
     os.environ.setdefault("PROFILE", "0")
     os.environ.setdefault("DEV", "CPU")
-    os.environ.setdefault("POLY_DEVICE", "cpu")
+    os.environ.setdefault("POLY_DEV", "cpu")
     os.environ.setdefault("POLY_CACHE", "1")
     os.environ.setdefault("CACHELEVEL", "2")
     os.environ.setdefault("SCACHE", "1")
@@ -308,7 +308,7 @@ def _worker_env(base: dict[str, str], cache_dir: Path) -> dict[str, str]:
         "VIZ": "0",
         "PROFILE": "0",
         "DEV": "CPU",
-        "POLY_DEVICE": "cpu",
+        "POLY_DEV": "cpu",
         "POLY_CACHE": "1",
         "CACHELEVEL": "2",
         "SCACHE": "1",

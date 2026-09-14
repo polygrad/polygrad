@@ -1097,7 +1097,7 @@ static int run_unary_e2e(PolyOps op, const float *in, float *out, int n) {
   PolyCtx *ctx = poly_ctx_new();
 
   /* Build tensor-level graph: out[i] = op(in[i]) via poly_test_realize_buffer_views.
-   * Respects POLY_DEVICE so conformance tests run on the selected backend. */
+   * Respects POLY_DEV so conformance tests run on the selected backend. */
   PolyUOp *buf_in = poly_buffer_f32(ctx, n);
   PolyUOp *result = poly_alu1(ctx, op, buf_in);
   PolyUOp *buf_out = poly_buffer_f32(ctx, n);

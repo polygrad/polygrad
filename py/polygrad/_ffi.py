@@ -136,9 +136,11 @@ PolyFrontendBufferReleaseFn = ctypes.CFUNCTYPE(None, _uintptr)
 
 def _find_lib():
     """Find libpolygrad shared library. Returns path or None."""
-    # 1. POLYGRAD_LIB env var (explicit override)
-    env_path = os.environ.get('POLYGRAD_LIB')
-    if env_path and os.path.isfile(env_path):
+    # 1. POLY_LIB env var (explicit override)
+    env_path = os.environ.get('POLY_LIB')
+    if env_path:
+        if not os.path.isfile(env_path):
+            raise RuntimeError(f'POLY_LIB does not name a library file: {env_path}')
         return env_path
 
     # 2. Installed _native extension module (pip install)
@@ -1570,7 +1572,7 @@ def get_lib():
             'Could not find libpolygrad shared library.\n'
             'Install: pip install polygrad\n'
             'Or build from source: make\n'
-            'Or set POLYGRAD_LIB=/path/to/libpolygrad.so'
+            'Or set POLY_LIB=/path/to/libpolygrad.so'
         )
 
     lib = ctypes.CDLL(lib_path)

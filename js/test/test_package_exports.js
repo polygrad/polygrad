@@ -151,8 +151,64 @@ function testEsbuildBundleSelection() {
   }
 }
 
+function testEnvironmentPrecedence() {
+  for (const core of ['native', 'wasm']) {
+    for (const [env, device, expected] of [
+      [{DEV: 'iNtErP'}, undefined, 'interp'],
+      [{DEV: 'INTERP', POLY_DEV: 'CPU'}, undefined, 'cpu'],
+      [{DEV: 'CPU', POLY_DEV: 'INTERP'}, undefined, 'interp'],
+      [{POLY_DEV: 'CPU;CUDA'}, 'cpu', 'cpu'],
+      [{POLY_DEV: 'INTERP'}, 'cpu', 'cpu'],
+    ]) {
+      const out = nodeEval(`
+        const rt = require('polygrad').create(${JSON.stringify({core, device})});
+        console.log(rt.device); rt.dispose();
+      `, [], {DEV: '', POLY_DEV: '', DEBUG: '0', POLY_DEBUG: '0', ...env})
+      // Public selection keeps the CPU alias; execution remains C/Wasm.
+      assert.strictEqual(out, expected)
+    }
+    for (const target of ['CUDA:0', 'CUDA:1', 'CPU;CUDA', 'CPU:CUDA', 'CPU:X86:arch', 'NV+CUDA']) {
+      const out = nodeEval(`
+        const assert = require('assert');
+        assert.throws(() => require('polygrad').create({core:${JSON.stringify(core)}}), /Unsupported.*target/);
+        console.log('rejected');
+      `, [], {DEV: '', POLY_DEV: target, DEBUG: '0', POLY_DEBUG: '0'})
+      assert.strictEqual(out, 'rejected')
+    }
+  }
+}
+
+function testEnvironmentCompilerControls() {
+  for (const core of ['native', 'wasm']) {
+    const rejected = nodeEval(`
+      const assert = require('assert');
+      assert.throws(() => require('polygrad').create({core:${JSON.stringify(core)}}), /BEAM must be a decimal int32/);
+      console.log('rejected');
+    `, [], {BEAM:'0x10', POLY_DEBUG:'0'})
+    assert.strictEqual(rejected, 'rejected')
+    for (const async of [false, true]) {
+      const create = async ? 'await pg.createAsync' : 'pg.create'
+      const out = nodeEval(`
+      (async () => {
+      const pg = require('polygrad');
+      const rt = ${create}({core:${JSON.stringify(core)}, device:'interp'});
+      console.log(rt.beam, rt.noopt);
+      rt.beam = 0; rt.noopt = 0;
+      const other = ${create}({core:${JSON.stringify(core)}, device:'interp'});
+      console.log(rt.beam, other.beam, rt.noopt, other.noopt);
+      await other.dispose(); await rt.dispose();
+      })().catch(e => {console.error(e); process.exitCode = 1});
+    `, [], {BEAM:'2', NOOPT:'1', POLY_DEBUG:'0'})
+      // Async Wasm creates independent modules; native and sync Wasm share policy.
+      assert.strictEqual(out, core === 'wasm' && async ? '2 1\n0 2 0 1' : '2 1\n0 0 0 0')
+    }
+  }
+}
+
 function main() {
   const tests = [
+    ['environment precedence', testEnvironmentPrecedence],
+    ['environment compiler controls', testEnvironmentCompilerControls],
     ['node cjs root', testNodeCjsRoot],
     ['node esm root', testNodeEsmRoot],
     ['browser condition sync root', testBrowserConditionSync],

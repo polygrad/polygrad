@@ -15,12 +15,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def clean_environment():
     env = os.environ.copy()
-    for key in ('PYTHONPATH', 'PYTHONHOME', 'POLYGRAD_LIB', 'POLY_CORE',
+    for key in ('PYTHONPATH', 'PYTHONHOME', 'POLY_LIB', 'POLY_CORE',
                 'POLYGRAD_SKIP_NATIVE', 'NODE_PATH', 'NODE_OPTIONS',
                 'PIP_TARGET', 'PIP_PREFIX', 'PIP_USER',
                 'npm_config_ignore_scripts', 'NPM_CONFIG_IGNORE_SCRIPTS'):
         env.pop(key, None)
-    env['POLY_DEVICE'] = 'cpu'
+    env['POLY_DEV'] = 'cpu'
     env['DEV'] = 'CPU'
     return env
 

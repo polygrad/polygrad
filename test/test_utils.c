@@ -6,6 +6,7 @@ TEST_BACKEND(harness, runtime_skip_accounting) {
 }
 #include "../src/polygrad.h"
 #include "../src/utils.h"
+#include "../src/device.h"
 
 #include <stdbool.h>
 #include <stdlib.h>
@@ -50,8 +51,54 @@ TEST(utils, debug_level_precedence) {
   setenv("POLY_DEBUG", "6", 1);
   ASSERT_INT_EQ(poly_debug_level(), 6);
 
+  setenv("POLY_DEBUG", "0", 1);
+  ASSERT_INT_EQ(poly_debug_level(), 0);
+
   restore_env(&poly_debug);
   restore_env(&debug);
+  PASS();
+}
+
+TEST(utils, environment_device_precedence) {
+  EnvSave dev = save_env("DEV"), poly_dev = save_env("POLY_DEV");
+  unsetenv("POLY_DEV");
+  setenv("DEV", "iNtErP", 1);
+  PolyCtx *ctx = poly_ctx_new();
+  bool valid = ctx && poly_ctx_get_preferred_device(ctx) == POLY_DEVICE_INTERP;
+  setenv("POLY_DEV", "CPU", 1);
+  valid &= poly_device_default() == POLY_DEVICE_CPU;
+  setenv("POLY_DEV", "CPU:X86", 1);
+  valid &= poly_device_default() == POLY_DEVICE_X86;
+  const char *invalid[] = {"CUDA:0", "CUDA:1", "CPU;CUDA", "CPU:CUDA", "CPU:X86:arch", "NV+CUDA"};
+  for (int i = 0; i < 6; i++) {
+    setenv("POLY_DEV", invalid[i], 1);
+    valid &= poly_device_default() == POLY_DEVICE_AUTO;
+  }
+  /* Explicit context selection must not consult an invalid ambient target. */
+  poly_ctx_set_preferred_device(ctx, POLY_DEVICE_INTERP);
+  valid &= poly_ctx_get_preferred_device(ctx) == POLY_DEVICE_INTERP;
+  poly_ctx_destroy(ctx);
+  restore_env(&poly_dev);
+  restore_env(&dev);
+  ASSERT_TRUE(valid);
+  PASS();
+}
+
+TEST(utils, environment_device_does_not_relabel_host_memory) {
+  EnvSave dev = save_env("POLY_DEV");
+  setenv("POLY_DEV", "CUDA", 1);
+  float data[] = {1.0f};
+  PolyBuffer view = poly_buffer_make_host_view(data, sizeof(data));
+  bool valid = view.ptr == data && view.allocator && view.allocator->host_addressable &&
+               view.device != POLY_DEVICE_CUDA;
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *buf = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_CPU);
+  PolyBuffer *host = NULL;
+  valid &=
+      poly_buffer_alloc_owned_host(ctx, buf, sizeof(data), false, &host) == 0 && host && host->ptr;
+  poly_ctx_destroy(ctx);
+  restore_env(&dev);
+  ASSERT_TRUE(valid);
   PASS();
 }
 
@@ -111,8 +158,8 @@ TEST(utils, device_name_accepts_tinygrad_style_cpu_renderer_aliases) {
 }
 
 TEST(utils, ctx_uses_poly_device_env_as_preferred_device) {
-  EnvSave dev = save_env("POLY_DEVICE");
-  setenv("POLY_DEVICE", "CPU:X86", 1);
+  EnvSave dev = save_env("POLY_DEV");
+  setenv("POLY_DEV", "CPU:X86", 1);
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
   ASSERT_INT_EQ(poly_ctx_get_preferred_device(ctx), POLY_DEVICE_X86);
@@ -122,8 +169,8 @@ TEST(utils, ctx_uses_poly_device_env_as_preferred_device) {
 }
 
 TEST(utils, poly_device_env_does_not_replace_existing_context_or_tensor) {
-  EnvSave dev = save_env("POLY_DEVICE");
-  setenv("POLY_DEVICE", "CPU", 1);
+  EnvSave dev = save_env("POLY_DEV");
+  setenv("POLY_DEV", "CPU", 1);
   PolyCtx *cpu_ctx = poly_ctx_new();
   ASSERT_NOT_NULL(cpu_ctx);
   int64_t shape[] = {2};
@@ -132,7 +179,7 @@ TEST(utils, poly_device_env_does_not_replace_existing_context_or_tensor) {
   PolyUOp *cpu_root = poly_tensor_uop_physical(cpu_tensor);
   ASSERT_NOT_NULL(cpu_root);
 
-  setenv("POLY_DEVICE", "INTERP", 1);
+  setenv("POLY_DEV", "INTERP", 1);
   ASSERT_INT_EQ(poly_ctx_get_preferred_device(cpu_ctx), POLY_DEVICE_CPU);
   ASSERT_PTR_EQ(poly_tensor_uop_physical(cpu_tensor), cpu_root);
   ASSERT_INT_EQ(poly_uop_device(cpu_root), POLY_DEVICE_CPU);
