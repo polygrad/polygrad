@@ -114,6 +114,7 @@ build/test_bigint.js: $(WASM_SRC) test/test_main.c test/test_bigint.c test/test_
 .PHONY: test-runtime-wasm
 test-runtime-wasm: build/test_schedule_runtime.js
 	$(SAN_RUN) $(NODE) $< --require-no-skips content_key
+	$(SAN_RUN) $(NODE) $< --require-no-skips import_metadata_allocation
 	$(SAN_RUN) $(NODE) $< --require-no-skips program_rejects
 	$(SAN_RUN) $(NODE) $< --require-no-skips view_assign_callify
 	$(SAN_RUN) $(NODE) $< --require-no-skips schedule_cache_clear
@@ -711,9 +712,10 @@ test-js-native-gc: verify-source-mirrors js/build/Release/polygrad_napi.node
 test-js-package: verify-source-mirrors wasm-pkg
 	cd js && bash scripts/build-browser.sh && $(NODE) test/test_package_exports.js
 
+MODEL_INTERCHANGE_ARGS ?=
 test-model-interchange: verify-source-mirrors build/libpolygrad.so js/build/Release/polygrad_napi.node wasm-pkg
 	PYTHONPATH=py POLY_LIB=$(abspath build/libpolygrad.so) \
-		$(PYTHON) test/test_model_interchange.py --cores native,wasm
+		$(PYTHON) test/test_model_interchange.py --cores native,wasm $(MODEL_INTERCHANGE_ARGS)
 
 js/build/Release/polygrad_napi.node: build/libpolygrad.a js/binding.gyp js/napi_api.c
 	cd js && npm run build:native

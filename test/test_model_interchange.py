@@ -8,6 +8,7 @@ import ctypes
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -92,17 +93,18 @@ def compare_checkpoint(source: Model, restored: Model, names: set[str], atol: fl
         )
 
 
-def check_artifact_imports(work: Path) -> None:
+def check_artifact_imports(work: Path, device: str) -> None:
     """Every generated fixture crosses private, cold and populated contexts.
 
     Fresh import/export canonicalizes allocation IDs without dropping fields.
     This codec-based oracle complements, not replaces, the independent direct
     kernel/value tests and exact C identity/slot assertions.
     """
-    def private(data, bundle):
+    def private(data, bundle, weights=None):
         buf = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
+        weight_buf = (ctypes.c_uint8 * len(weights)).from_buffer_copy(weights) if weights is not None else None
         ptr = (_ffi._lib.poly_model_from_bundle(buf, len(data)) if bundle else
-               _ffi._lib.poly_model_from_ir(buf, len(data), None, 0))
+               _ffi._lib.poly_model_from_ir(buf, len(data), weight_buf, len(weights) if weights is not None else 0))
         return Model._from_handle(ptr)
 
     def canonical(ir):
@@ -110,17 +112,49 @@ def check_artifact_imports(work: Path) -> None:
         try: return model.export_ir()
         finally: model.dispose()
 
+    def execute(model):
+        # Capture C stderr, not Python's sys.stderr wrapper. Compare exact
+        # source/signatures only between cold contexts on the same backend.
+        saved = os.dup(2)
+        previous = os.environ.get('POLY_DUMP_KERNELS')
+        outputs = {}
+        try:
+            os.environ['POLY_DUMP_KERNELS'] = '1'
+            with tempfile.TemporaryFile(mode='w+') as trace:
+                os.dup2(trace.fileno(), 2)
+                try:
+                    for ep in model.entrypoints():
+                        inputs = {name: np.ones(model.buf_shape(model.find_buf(name)),
+                                                dtype=model.buf_dtype(model.find_buf(name)))
+                                  for name in ep['inputs']}
+                        outputs[ep['name']] = model.call(ep['name'], **inputs)
+                finally:
+                    os.dup2(saved, 2)
+                    trace.seek(0)
+                    source = trace.read()
+                    # Preserve diagnostics if compilation/execution raises.
+                    print(source, end='', file=sys.stderr)
+            kernels = set(re.findall(r'^=== KERNEL (\S+) ===\n(.*?)\n=== END ===$', source, re.M | re.S))
+            return outputs, kernels
+        finally:
+            os.close(saved)
+            if previous is None: os.environ.pop('POLY_DUMP_KERNELS', None)
+            else: os.environ['POLY_DUMP_KERNELS'] = previous
+
     artifacts = sorted(p for p in work.iterdir() if p.suffix in {'.bundle', '.pgb', '.pgir'})
     for path in artifacts:
         data, bundle = path.read_bytes(), path.suffix != '.pgir'
-        cold, shared = create(device='interp'), create(device='interp')
+        # Raw PGIR is executable evidence only together with its checkpoint.
+        weights = None if bundle else path.with_suffix('.safetensors').read_bytes()
+        cold, shared = create(device=device), create(device=device)
         models = []
         try:
             live = shared.Tensor([19.0])
             primer = Model(lambda x: x+37, inputs={'x': shared.Tensor.empty(7)})
             models.append(primer)
-            load = Model.load if bundle else Model.from_ir
-            reference = private(data, bundle)
+            def load(data, runtime):
+                return Model.load(data, runtime=runtime) if bundle else Model.from_ir(data, weights, runtime=runtime)
+            reference = private(data, bundle, weights)
             models.append(reference)
             expected = canonical(reference.export_ir())
             assert canonical(expected) == expected, f'{path.name}: canonical IR not stable'
@@ -138,9 +172,9 @@ def check_artifact_imports(work: Path) -> None:
                     j = model.find_buf(name)
                     assert j >= 0 and model.buf_role(j) == reference.buf_role(i), (path.name, name)
                     assert model.buf_shape_bounds(j) == reference.buf_shape_bounds(i), (path.name, name)
-                    if bundle and reference.buf_role(i) in (ROLE_PARAM, ROLE_AUX):
+                    if reference.buf_role(i) in (ROLE_PARAM, ROLE_AUX):
                         np.testing.assert_array_equal(model.read_buffer(name), reference.read_buffer(name))
-            if bundle:
+            if bundle or weights is not None:
                 state = {c.buf_name(i): c.read_buffer(c.buf_name(i)) for i in range(c.buf_count)
                          if c.buf_role(i) in (ROLE_PARAM, ROLE_AUX)}
                 for name, original in state.items():
@@ -159,21 +193,21 @@ def check_artifact_imports(work: Path) -> None:
                 shared.collect()
                 for name, expected_state in state.items():
                     np.testing.assert_array_equal(c.read_buffer(name), expected_state)
-                reference.place('interp')
-                for ep in reference.entrypoints():
-                    inputs = {}
-                    for name in ep['inputs']:
-                        i = reference.find_buf(name)
-                        inputs[name] = np.ones(reference.buf_shape(i), dtype=reference.buf_dtype(i))
-                    expected_outputs = reference.call(ep['name'], **inputs)
-                    for model in (a, c):
-                        actual_outputs = model.call(ep['name'], **inputs)
-                        assert actual_outputs.keys() == expected_outputs.keys()
-                        for name, expected_output in expected_outputs.items():
-                            np.testing.assert_array_equal(actual_outputs[name], expected_output,
-                                                          err_msg=f'{path.name}:{ep["name"]}:{name}')
-                        for name in state:
-                            np.testing.assert_array_equal(model.read_buffer(name), reference.read_buffer(name))
+                reference.place(device)
+                expected_outputs, expected_kernels = execute(reference)
+                for model in (a, c):
+                    actual_outputs, actual_kernels = execute(model)
+                    assert actual_kernels == expected_kernels, f'{path.name}:{device}: kernel signature/hash/source changed'
+                    assert actual_outputs.keys() == expected_outputs.keys()
+                    for ep, expected_rows in expected_outputs.items():
+                        assert actual_outputs[ep].keys() == expected_rows.keys()
+                        for name, expected_output in expected_rows.items():
+                            np.testing.assert_array_equal(actual_outputs[ep][name], expected_output,
+                                                          err_msg=f'{path.name}:{device}:{ep}:{name}')
+                    for name in state:
+                        np.testing.assert_array_equal(model.read_buffer(name), reference.read_buffer(name))
+                if device == 'cpu':
+                    assert expected_kernels, f'{path.name}: no compiled CPU evidence'
             np.testing.assert_array_equal(live.numpy(), [19])
             np.testing.assert_array_equal(primer.forward(x=np.arange(7, dtype=np.float32))['output'],
                                           np.arange(7, dtype=np.float32)+37)
@@ -181,7 +215,7 @@ def check_artifact_imports(work: Path) -> None:
             for model in reversed(models): model.dispose()
             shared.dispose()
             cold.dispose()
-    print(f'model import matrix: {len(artifacts)} artifacts pass (private/cold/shared, canonical IR, state isolation)')
+    print(f'model import matrix {device}: {len(artifacts)} artifacts pass (private/cold/shared, canonical IR, state isolation, execution/kernels)')
 
 
 def run_core(work: Path, core: str, source_after: Model, expected_loss: float) -> None:
@@ -302,13 +336,19 @@ def export_stateful(work: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument('--cores', default='native,wasm')
+    parser.add_argument('--output', type=Path, help='keep generated artifacts in a new directory')
     args = parser.parse_args()
     cores = [value.strip() for value in args.cores.split(',') if value.strip()]
     if any(core not in {'native', 'wasm'} for core in cores):
         raise SystemExit('--cores accepts native,wasm')
 
     (ROOT / 'temp').mkdir(exist_ok=True)
-    work = Path(tempfile.mkdtemp(prefix='model-interchange.', dir=ROOT / 'temp'))
+    if args.output is not None:
+        work = args.output.resolve()
+        work.mkdir(parents=True, exist_ok=False)
+    else:
+        work = Path(tempfile.mkdtemp(prefix='model-interchange.', dir=ROOT / 'temp'))
+    completed = False
     subprocess.run([sys.executable, str(ROOT / 'py/examples/linear_export.py'), str(work / 'linear.pgb')],
                    check=True, capture_output=True, text=True)
     for core in cores:
@@ -342,10 +382,15 @@ def main() -> None:
         for core in cores:
             run_core(work, core, source, expected_loss)
             print(f'model interchange {core}: pass (Adam continuation and custom authoring both directions)')
-        check_artifact_imports(work)
+        for device in ('interp', 'cpu'):
+            check_artifact_imports(work, device)
+        completed = True
     finally:
         source.free()
-        shutil.rmtree(work, ignore_errors=True)
+        if completed and args.output is None:
+            shutil.rmtree(work)
+        else:
+            print(f'model interchange artifacts: {work}')
 
 
 if __name__ == '__main__':

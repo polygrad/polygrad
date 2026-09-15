@@ -76,6 +76,12 @@ async function main() {
     const inst = await pg.Model.fromTensors({
       inputs: { x }, outputs: { output: x.add(1) }
     })
+    x.copyFrom(new Float32Array([3, 4]))
+    const imported = pg.Model.load(inst.save())
+    const result = (await imported.forwardAsync({ x })).output
+    await imported.dispose()
+    pg.clearScheduleCache(); pg.collect()
+    assert.deepStrictEqual(Array.from(await result.toArrayAsync()), [4, 5])
     await pg.dispose()
     assert.strictEqual(inst._handle, null,
       'Runtime disposal left a borrowed Model handle alive')
@@ -83,6 +89,8 @@ async function main() {
       'UOp read through a destroyed runtime arena')
     assert.throws(() => pg.Tensor.empty([1]), /disposed/,
       'bound Tensor factory used a destroyed runtime context')
+    await assert.rejects(async () => result.toArrayAsync(), /disposed/,
+      'imported Model result used a destroyed runtime context')
     console.log(`[PASS] ${core} Tensor/UOp finalizers retire core owners`)
   } finally {
     await pg.dispose()

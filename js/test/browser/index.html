@@ -471,20 +471,21 @@ async function main() {
   if (isWebGpu) installWebGpuAsyncTestAdapter(pg)
 
   // Run the full tensor test suite
-  const tensorResult = await window.__runTensorTests(pg, () => {
+  const createRuntime = () => {
     const runtime = polygrad.create({ core: 'wasm', device })
     if (isWebGpu) installWebGpuAsyncTestAdapter(runtime)
     return runtime
-  })
+  }
+  const tensorResult = await window.__runTensorTests(pg, createRuntime)
 
   let instanceResult = { passed: 0, failed: 0 }
   if (isWebGpu) {
     // WebGPU instances use the same C scheduler/backend path as tensors. Run a
     // small smoke first while the heavier training suite is still being
     // validated for async host-visible calls.
-    instanceResult = await window.__runModelSmokeTests(pg)
+    instanceResult = await window.__runModelSmokeTests(pg, createRuntime)
   } else {
-    instanceResult = await window.__runModelRuntimeTests(pg)
+    instanceResult = await window.__runModelRuntimeTests(pg, createRuntime)
   }
 
   let webgpuCapsResult = { passed: 0, failed: 0, skipped: 0 }

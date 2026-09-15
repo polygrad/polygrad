@@ -1043,7 +1043,7 @@ async function checkModelUsability(pg, Model) {
   } finally { await model.dispose() }
 }
 
-async function checkRuntimeImports(pg, Model) {
+async function checkRuntimeImports(pg, Model, createRuntime) {
   const gpu = String(pg.device).toLowerCase() === 'webgpu'
   const x = pg.Tensor.empty([1]), w = new pg.Tensor([2], {dtype:'float32'})
   const live = new pg.Tensor([19], {dtype:'float32'})
@@ -1082,6 +1082,30 @@ async function checkRuntimeImports(pg, Model) {
     assertClose((await forward(b)).output, [33], 0)
     assertClose((await c.callAsync('double',{x:[3]})).twice,[12],0)
     assertClose(gpu ? await live.toArrayAsync() : live.toArray(), [19], 0)
+    // Other tests' deferred finalizers must not change this measurement's
+    // baseline. The isolated runtime contains only explicitly owned objects.
+    const runtime = await createRuntime()
+    const held = new runtime.Tensor([19], {dtype:'float32'})
+    try {
+      assertClose(await held.toArrayAsync(), [19], 0)
+      runtime.clearScheduleCache(); runtime.collect()
+      const fields = ['bufferOwnedBytes', 'bufferEntries', 'tensorRecords']
+      const baseline = runtime.stats().coreStats
+      for (let i = 0; i < 8; i++) {
+        const loaded = runtime.Model.load(bytes)
+        try {
+          assertClose((await loaded.forwardAsync({x:[3]})).output, [6], 0)
+          await loaded.writeBufferAsync('alias', new Float32Array([7]))
+          assertClose(await loaded.readBufferAsync('w'), [7], 0)
+        } finally { await loaded.dispose() }
+        runtime.clearScheduleCache(); runtime.collect()
+        const current = runtime.stats().coreStats
+        for (const field of fields)
+          assert(current[field] === baseline[field],
+            `import/dispose retained ${field}: ${baseline[field]} -> ${current[field]}`)
+      }
+      assertClose(await held.toArrayAsync(), [19], 0)
+    } finally { held.dispose(); await runtime.dispose() }
   } finally {
     for (const model of models) await model.dispose()
     x.dispose(); w.dispose(); live.dispose()
@@ -1126,7 +1150,7 @@ async function checkFamilyRuntimeOwnership(pg) {
   } finally { live.dispose() }
 }
 
-async function runModelRuntimeTests(pg) {
+async function runModelRuntimeTests(pg, createRuntime) {
   const Model = pg.Model
   const { MLP, TabM, NAM } = pg.models
   const testFilter = testFilterFor(pg)
@@ -1166,7 +1190,7 @@ async function runModelRuntimeTests(pg) {
   await test('Model constructor collects object state', () => checkModelConstructor(pg, Model))
   await test('Model constructor dispatch and explicit factories', () => checkModelDispatch(pg, Model))
   await test('Model usability summary and capture failures', () => checkModelUsability(pg, Model))
-  await test('Model runtime imports isolation and failure', () => checkRuntimeImports(pg, Model))
+  await test('Model runtime imports isolation and failure', () => checkRuntimeImports(pg, Model, createRuntime))
   await test('Model family runtime ownership', () => checkFamilyRuntimeOwnership(pg))
   await test('Model Tensor I/O owns device results', () => checkModelTensorIO(pg))
   await test('Model variable shapes preserve results and portable signatures', () => checkModelVariableShapes(pg))
@@ -1887,7 +1911,7 @@ async function runModelRuntimeTests(pg) {
   return { passed, failed }
 }
 
-async function runModelSmokeTests(pg) {
+async function runModelSmokeTests(pg, createRuntime) {
   const Model = pg.Model
   const { MLP, TabM, NAM } = pg.models
   const testFilter = testFilterFor(pg)
@@ -1923,7 +1947,7 @@ async function runModelSmokeTests(pg) {
   await test('Model constructor collects object state', () => checkModelConstructor(pg, Model))
   await test('Model constructor dispatch and explicit factories', () => checkModelDispatch(pg, Model))
   await test('Model usability summary and capture failures', () => checkModelUsability(pg, Model))
-  await test('Model runtime imports isolation and failure', () => checkRuntimeImports(pg, Model))
+  await test('Model runtime imports isolation and failure', () => checkRuntimeImports(pg, Model, createRuntime))
   await test('Model family runtime ownership', () => checkFamilyRuntimeOwnership(pg))
   await test('Model Tensor I/O owns device results', () => checkModelTensorIO(pg))
   await test('Model variable shapes preserve results and portable signatures', () => checkModelVariableShapes(pg))

@@ -296,7 +296,11 @@ def test_dynamic_model_results_and_portable_signature(device):
         model.dispose()
         rt.clear_schedule_cache()
         rt.collect()
+        assert first.shape == (17, 2)
         np.testing.assert_array_equal(first.numpy(), a*3)
+        rt.dispose()
+        with pytest.raises(RuntimeError, match='disposed'):
+            first.numpy()
     finally:
         if restored is not None: restored.dispose()
         model.dispose()
@@ -788,6 +792,39 @@ def test_runtime_import_isolation_aliases_and_failed_load(device):
     finally:
         for model in models: model.dispose()
         rt.dispose()
+
+
+@pytest.mark.parametrize('device', ['cpu', 'interp'])
+def test_runtime_import_disposal_reclaims_storage(device):
+    from polygrad import create
+    with create(device=device) as rt:
+        weight = rt.Tensor([2.0])
+        source = rt.Model(lambda x: x*weight, inputs={'x': rt.Tensor.empty(2)},
+                          params={'weight': weight, 'alias': weight})
+        try:
+            artifact = source.save(include_optimizer=False)
+            live = rt.Tensor([19.0]).realize()
+            retained = []
+            for _ in range(12):
+                loaded = rt.Model.load(artifact)
+                try:
+                    np.testing.assert_array_equal(loaded.forward(x=[3, 4])['output'], [6, 8])
+                    loaded.write_buffer('alias', np.array([7.0], np.float32))
+                    np.testing.assert_array_equal(loaded.read_buffer('weight'), [7])
+                finally:
+                    loaded.dispose()
+                # Schedule-cache retention is documented and explicitly released.
+                # Count live storage/owners, not arena high-water or cumulative IO.
+                rt.clear_schedule_cache()
+                rt.collect()
+                stats = rt.stats()
+                retained.append(tuple(stats[key] for key in
+                                      ('buffer_owned_bytes', 'buffer_entries', 'tensor_records')))
+            assert len(set(retained)) == 1, retained
+            np.testing.assert_array_equal(live.numpy(), [19])
+            np.testing.assert_array_equal(source.forward(x=[3, 4])['output'], [6, 8])
+        finally:
+            source.dispose()
 
 
 def safetensor_names(data):

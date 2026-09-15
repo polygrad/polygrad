@@ -1445,8 +1445,11 @@ static int poly_graph_import(
       arg.b = br_u8(&r) != 0;
       break;
     case POLY_ARG_INT_TUPLE: {
+      if (br_remaining(&r) < 2) goto cleanup_node_arg;
       uint16_t count = br_u16(&r);
-      int64_t *vals = malloc(count * sizeof(int64_t));
+      if (br_remaining(&r) < count * 8) goto cleanup_node_arg;
+      int64_t *vals = import_calloc(count, sizeof(int64_t));
+      if (count > 0 && !vals) goto cleanup_node_arg;
       for (int t = 0; t < count; t++)
         vals[t] = br_i64(&r);
       arg.int_tuple.vals = vals;
@@ -1536,11 +1539,14 @@ static int poly_graph_import(
       break;
     }
     case POLY_ARG_RANGE: {
+      if (br_remaining(&r) < 11) goto cleanup_node_arg;
       arg.range.axis_id = br_i64(&r);
       arg.range.axis_type = (PolyAxisType)br_u8(&r);
       uint16_t n_extra = br_u16(&r);
+      if (br_remaining(&r) < n_extra * 8) goto cleanup_node_arg;
       if (n_extra > 0) {
-        int64_t *extra = malloc(n_extra * sizeof(int64_t));
+        int64_t *extra = import_calloc(n_extra, sizeof(int64_t));
+        if (!extra) goto cleanup_node_arg;
         for (int t = 0; t < n_extra; t++)
           extra[t] = br_i64(&r);
         arg.range.extra = extra;

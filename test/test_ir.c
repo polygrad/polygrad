@@ -147,6 +147,61 @@ TEST(ir, import_into_freshens_storage_and_retains_aliases) {
   PASS();
 }
 
+TEST(ir, import_metadata_allocation_failures_preserve_owner) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *live = poly_const_int(ctx, 19);
+  ASSERT_INT_EQ(poly_uop_retain(ctx, live), 0);
+  for (int kind = 0; kind < 2; kind++) {
+    PolyArg arg =
+        kind ? poly_arg_int_tuple((int64_t[]){2, 4}, 2)
+             : (PolyArg
+               ){.kind = POLY_ARG_RANGE, .range = {7, POLY_AXIS_REDUCE, (int64_t[]){2, 4}, 2}};
+    PolyUOp *value = poly_uop1(ctx, POLY_OP_NOOP, POLY_VOID, live, arg);
+    PolyUOp *sink = poly_sink_n(ctx, &value, 1);
+    PolyIrEntrypoint ep = {.name = "metadata", .sink = sink};
+    PolyIrSpec spec = {.ctx = ctx, .entrypoints = &ep, .n_entrypoints = 1};
+    int len = 0;
+    uint8_t *bytes = poly_ir_export(&spec, &len);
+    ASSERT_NOT_NULL(bytes);
+    ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+    size_t baseline = poly_map_len(ctx->cse);
+    int failures = 0, successes = 0;
+    /* Sweep beyond all parser-table and temporary-vector allocations. A
+     * failed import must unwind its roots without destroying the caller. */
+    for (int n = 0; n < 16; n++) {
+      PolyIrSpec imported = {0};
+      poly_test_ir_import_fail_after(n);
+      int rc = poly_ir_import_into(ctx, bytes, len, &imported);
+      poly_test_ir_import_fail_after(-1);
+      if (rc == 0) {
+        successes++;
+        PolyUOp *restored = imported.entrypoints[0].sink->src[0];
+        ASSERT_INT_EQ(restored->arg.kind, arg.kind);
+        ASSERT_INT_EQ(kind ? restored->arg.int_tuple.vals[1] : restored->arg.range.extra[1], 4);
+        poly_ir_spec_free(&imported);
+      } else {
+        failures++;
+        ASSERT_TRUE(imported.import_roots == NULL);
+      }
+      ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+      ASSERT_INT_EQ(poly_map_len(ctx->cse), baseline);
+      ASSERT_PTR_EQ(poly_const_int(ctx, 19), live);
+    }
+    ASSERT_TRUE(failures >= 5 && successes > 0);
+    for (int n = 0; n < len; n++) {
+      PolyIrSpec truncated = {0};
+      ASSERT_INT_EQ(poly_ir_import_into(ctx, bytes, n, &truncated), -1);
+      ASSERT_TRUE(truncated.import_roots == NULL);
+      ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+      ASSERT_INT_EQ(poly_map_len(ctx->cse), baseline);
+    }
+    free(bytes);
+  }
+  poly_uop_release(ctx, live);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(ir, export_rejects_failed_shared_root_traversal) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *sink = poly_sink1(ctx, poly_const_int(ctx, 3));
