@@ -195,9 +195,8 @@ static int poly_call_param_index_for_identity(PolyUOp *call, const PolyUOp *iden
   if (identity->op == POLY_OP_PARAM &&
       (identity->arg.kind == POLY_ARG_INT ||
        (identity->arg.kind == POLY_ARG_PARAM && identity->arg.param))) {
-    int idx =
-        identity->arg.kind == POLY_ARG_INT ? (int)identity->arg.i : (int)identity->arg.param->slot;
-    return (idx >= 0 && idx < n_args) ? idx : -1;
+    int64_t idx = identity->arg.kind == POLY_ARG_INT ? identity->arg.i : identity->arg.param->slot;
+    return !poly_uop_is_alu_param(identity) && idx >= 0 && idx < n_args ? (int)idx : -1;
   }
   for (int i = 0; i < n_args; i++) {
     PolyUOp *arg = poly_call_buffer_arg(call, i);
@@ -206,33 +205,40 @@ static int poly_call_param_index_for_identity(PolyUOp *call, const PolyUOp *iden
   return -1;
 }
 
-static void poly_call_mark_access_param(PolyUOp *call, PolyUOp *ptr, bool *mask, int n_args) {
-  if (!ptr || !mask) return;
+static bool poly_call_mark_access_param(PolyUOp *call, PolyUOp *ptr, bool *mask, int n_args) {
+  if (!ptr) return true;
   /* Pinned ProgramInfo.from_sink reads ParamArg.slot for shaped function
    * PARAMs as well as the lowered integer-slot PARAM form
    * (tinygrad/uop/ops.py:1127-1152). */
   if (ptr->op == POLY_OP_CAST && ptr->n_src == 1 && ptr->src[0] && ptr->src[0]->op == POLY_OP_INDEX)
     ptr = ptr->src[0];
-  if (ptr->op == POLY_OP_PARAM &&
-      (ptr->arg.kind == POLY_ARG_INT || (ptr->arg.kind == POLY_ARG_PARAM && ptr->arg.param))) {
-    int idx = ptr->arg.kind == POLY_ARG_INT ? (int)ptr->arg.i : (int)ptr->arg.param->slot;
-    if (idx >= 0 && idx < n_args) mask[idx] = true;
-    return;
+  if (ptr->op == POLY_OP_PARAM) {
+    if (poly_uop_is_alu_param(ptr)) return true;
+    int64_t idx = ptr->arg.kind == POLY_ARG_INT                       ? ptr->arg.i
+                  : ptr->arg.kind == POLY_ARG_PARAM && ptr->arg.param ? ptr->arg.param->slot
+                                                                      : -1;
+    /* ProgramInfo.from_sink preserves every buffer slot. Reject an unbound
+     * CALL argument before narrowing, rather than silently dropping it. */
+    if (idx < 0 || idx >= n_args) return false;
+    if (mask) mask[idx] = true;
+    return true;
   }
   if (ptr->op == POLY_OP_INDEX || ptr->op == POLY_OP_SHRINK) {
-    if (ptr->n_src > 0) poly_call_mark_access_param(call, ptr->src[0], mask, n_args);
-    return;
+    return ptr->n_src == 0 || poly_call_mark_access_param(call, ptr->src[0], mask, n_args);
   }
   const PolyUOp *identity = poly_uop_get_buffer_identity(ptr);
+  if (identity && identity->op == POLY_OP_PARAM)
+    return poly_call_mark_access_param(call, (PolyUOp *)identity, mask, n_args);
   int idx = poly_call_param_index_for_identity(call, identity);
   if (idx >= 0 && idx < n_args) {
-    mask[idx] = true;
-    return;
+    if (mask) mask[idx] = true;
+    return true;
   }
   if (ptr->op == POLY_OP_STACK || ptr->op == POLY_OP_TUPLE || ptr->op == POLY_OP_GROUP) {
     for (int i = 0; i < ptr->n_src; i++)
-      poly_call_mark_access_param(call, ptr->src[i], mask, n_args);
+      if (!poly_call_mark_access_param(call, ptr->src[i], mask, n_args)) return false;
   }
+  return true;
 }
 
 static int poly_call_mask_to_indices(const bool *mask, int n, int **out_items, int *out_n) {
@@ -698,11 +704,12 @@ static int poly_call_get_outs_ins_from_body(
     if (!u) continue;
     if (poly_map_get(seen, poly_ptr_hash(u), u, poly_ptr_eq)) continue;
     poly_map_set(seen, poly_ptr_hash(u), u, u, poly_ptr_eq);
-    if (globals) poly_call_mark_access_param(call, u, globals, n_args);
+    if (!poly_call_mark_access_param(call, u, globals, n_args)) goto invalid_param;
 
     if (u->op == POLY_OP_STORE && u->n_src >= 1) {
-      if (globals) poly_call_mark_access_param(call, u->src[0], globals, n_args);
-      poly_call_mark_access_param(call, u->src[0], outs, n_args);
+      if (!poly_call_mark_access_param(call, u->src[0], globals, n_args) ||
+          !poly_call_mark_access_param(call, u->src[0], outs, n_args))
+        goto invalid_param;
       for (int s = 1; s < u->n_src; s++) {
         if (n_stack >= cap) {
           cap *= 2;
@@ -720,8 +727,9 @@ static int poly_call_get_outs_ins_from_body(
     }
 
     if (u->op == POLY_OP_LOAD && u->n_src >= 1) {
-      if (globals) poly_call_mark_access_param(call, u->src[0], globals, n_args);
-      poly_call_mark_access_param(call, u->src[0], ins, n_args);
+      if (!poly_call_mark_access_param(call, u->src[0], globals, n_args) ||
+          !poly_call_mark_access_param(call, u->src[0], ins, n_args))
+        goto invalid_param;
     } else {
       const PolyUOp *identity = poly_uop_get_buffer_identity(u);
       int idx = poly_call_param_index_for_identity(call, identity);
@@ -745,6 +753,11 @@ static int poly_call_get_outs_ins_from_body(
   free(stack);
   poly_map_destroy(seen);
   return 0;
+invalid_param:
+  fprintf(stderr, "polygrad: kernel PARAMs/ProgramInfo do not match CALL arguments\n");
+  free(stack);
+  poly_map_destroy(seen);
+  return -1;
 }
 
 static int poly_call_apply_program_info(
@@ -892,7 +905,6 @@ static PolyProgramInfo *poly_program_info_build(
     PolyDevice device
 ) {
   if (!ctx || !call || !body || !program_name) return NULL;
-  if (!program_call_params_valid(ctx, call, body)) return NULL;
   int n_args = poly_call_n_buffer_args(call);
   bool *globals = n_args > 0 ? calloc((size_t)n_args, sizeof(bool)) : NULL;
   bool *outs = n_args > 0 ? calloc((size_t)n_args, sizeof(bool)) : NULL;
@@ -2036,6 +2048,9 @@ static PolyUOp *poly_prepare_program_for_backend(
                ? entry->prepared_program
                : NULL;
 
+  /* Validate the CALL boundary before rewriting: number_params can turn an
+   * unbound slot -1 into slot 0. Post-lowering metadata alone cannot establish
+   * that the original graph bound the caller's arguments correctly. */
   if (!program_call_params_valid(ctx, call, ast)) return NULL;
   PolyUOp *prepared_input =
       ast->op == POLY_OP_PROGRAM ? poly_program_complete_metadata(ctx, call, ast, device) : ast;

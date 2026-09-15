@@ -1015,24 +1015,36 @@ TEST(schedule_runtime, program_rejects_unbound_buffer_parameter) {
 #endif
       POLY_DEVICE_INTERP};
   bool ok = true;
-  for (size_t d = 0; d < sizeof(devices) / sizeof(devices[0]); d++) {
-    PolyCtx *ctx = poly_ctx_new();
-    PolyUOp *out = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, devices[d]);
-    PolyUOp *param = poly_test_program_param(ctx, POLY_FLOAT32, 1, 1);
-    PolyUOp *zero = poly_const_int(ctx, 0);
-    PolyUOp *store = poly_uop2(
-        ctx, POLY_OP_STORE, POLY_VOID, poly_uop_index(ctx, param, &zero, 1),
-        poly_const_float(ctx, 7), poly_arg_none()
-    );
-    PolyUOp *sink = poly_test_kernel_sink(ctx, &store, 1, "missing_argument");
-    PolyUOp *call = poly_uop2(ctx, POLY_OP_CALL, POLY_VOID, sink, out, poly_arg_none());
-    PolyUOp *linear = poly_uop1(ctx, POLY_OP_LINEAR, POLY_VOID, call, poly_arg_none());
-    /* Do not execute the malformed kernel: CPU would dereference absent args. */
-    ok &= poly_program_from_call(ctx, call, "missing_argument") == NULL;
-    ok &= poly_compile_linear(ctx, linear, 0) == NULL;
-    ok &= poly_runtime_cache_len(ctx) == 0 && !poly_buffer_is_allocated(ctx, out);
-    poly_ctx_destroy(ctx);
-  }
+  int64_t slots[] = {-1, 1, INT64_C(1) << 32, INT64_MAX};
+  for (size_t d = 0; d < sizeof(devices) / sizeof(devices[0]); d++)
+    for (size_t s = 0; s < sizeof(slots) / sizeof(slots[0]); s++) {
+      PolyCtx *ctx = poly_ctx_new();
+      PolyUOp *out = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, devices[d]);
+      PolyUOp *param = poly_test_program_param(ctx, POLY_FLOAT32, 1, 1);
+      PolyParamArg arg = *param->arg.param;
+      arg.slot = slots[s];
+      param =
+          poly_uop(ctx, param->op, param->dtype, param->src, param->n_src, poly_arg_param(&arg));
+      PolyUOp *zero = poly_const_int(ctx, 0);
+      PolyUOp *store = poly_uop2(
+          ctx, POLY_OP_STORE, POLY_VOID, poly_uop_index(ctx, param, &zero, 1),
+          poly_const_float(ctx, 7), poly_arg_none()
+      );
+      PolyUOp *sink = poly_test_kernel_sink(ctx, &store, 1, "missing_argument");
+      PolyUOp *call = poly_uop2(ctx, POLY_OP_CALL, POLY_VOID, sink, out, poly_arg_none());
+      PolyUOp *linear = poly_uop1(ctx, POLY_OP_LINEAR, POLY_VOID, call, poly_arg_none());
+      /* Do not execute the malformed kernel: CPU would dereference absent args. */
+      bool metadata_rejected = poly_program_from_call(ctx, call, "missing_argument") == NULL;
+      bool compile_rejected = poly_compile_linear(ctx, linear, 0) == NULL;
+      if (!metadata_rejected || !compile_rejected)
+        fprintf(
+            stderr, "unbound PARAM device=%d slot=%lld metadata=%d compile=%d\n", devices[d],
+            (long long)slots[s], metadata_rejected, compile_rejected
+        );
+      ok &= metadata_rejected && compile_rejected;
+      ok &= poly_runtime_cache_len(ctx) == 0 && !poly_buffer_is_allocated(ctx, out);
+      poly_ctx_destroy(ctx);
+    }
   ASSERT_TRUE(ok);
   PASS();
 }
