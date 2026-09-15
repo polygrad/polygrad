@@ -1008,6 +1008,79 @@ TEST_BACKEND(cuda, graph_scalar_integer_args) {
 }
 #endif
 
+TEST(schedule_runtime, program_rejects_unbound_buffer_parameter) {
+  PolyDevice devices[] = {
+#ifndef __EMSCRIPTEN__
+      POLY_DEVICE_CPU,
+#endif
+      POLY_DEVICE_INTERP};
+  bool ok = true;
+  for (size_t d = 0; d < sizeof(devices) / sizeof(devices[0]); d++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyUOp *out = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, devices[d]);
+    PolyUOp *param = poly_test_program_param(ctx, POLY_FLOAT32, 1, 1);
+    PolyUOp *zero = poly_const_int(ctx, 0);
+    PolyUOp *store = poly_uop2(
+        ctx, POLY_OP_STORE, POLY_VOID, poly_uop_index(ctx, param, &zero, 1),
+        poly_const_float(ctx, 7), poly_arg_none()
+    );
+    PolyUOp *sink = poly_test_kernel_sink(ctx, &store, 1, "missing_argument");
+    PolyUOp *call = poly_uop2(ctx, POLY_OP_CALL, POLY_VOID, sink, out, poly_arg_none());
+    PolyUOp *linear = poly_uop1(ctx, POLY_OP_LINEAR, POLY_VOID, call, poly_arg_none());
+    /* Do not execute the malformed kernel: CPU would dereference absent args. */
+    ok &= poly_program_from_call(ctx, call, "missing_argument") == NULL;
+    ok &= poly_compile_linear(ctx, linear, 0) == NULL;
+    ok &= poly_runtime_cache_len(ctx) == 0 && !poly_buffer_is_allocated(ctx, out);
+    poly_ctx_destroy(ctx);
+  }
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
+TEST(schedule_runtime, program_rejects_hidden_buffer_parameter) {
+  PolyDevice devices[] = {
+#ifndef __EMSCRIPTEN__
+      POLY_DEVICE_CPU,
+#endif
+      POLY_DEVICE_INTERP};
+  bool ok = true;
+  for (size_t d = 0; d < sizeof(devices) / sizeof(devices[0]); d++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyUOp *out = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, devices[d]);
+    PolyUOp *unused = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, devices[d]);
+    PolyUOp *param = poly_test_program_param(ctx, POLY_FLOAT32, 1, 1);
+    PolyUOp *zero = poly_const_int(ctx, 0);
+    PolyUOp *store = poly_uop2(
+        ctx, POLY_OP_STORE, POLY_VOID, poly_uop_index(ctx, param, &zero, 1),
+        poly_const_float(ctx, 7), poly_arg_none()
+    );
+    PolyUOp *sink = poly_test_kernel_sink(ctx, &store, 1, "hidden_argument");
+    PolyUOp *sources[] = {sink, unused, out};
+    PolyUOp *call = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, sources, 3, poly_arg_none());
+    PolyUOp *linear = poly_compile_linear(
+        ctx, poly_uop1(ctx, POLY_OP_LINEAR, POLY_VOID, call, poly_arg_none()), 0
+    );
+    ASSERT_NOT_NULL(linear);
+    PolyUOp *program = linear->src[0]->src[0];
+    PolyProgramInfo bad = *poly_program_info(ctx, program);
+    int hidden = 0;
+    bad.globals = &hidden;
+    bad.n_globals = 1;
+    bad.outs = &hidden;
+    bad.n_outs = 1;
+    sources[0] = poly_uop(
+        ctx, program->op, program->dtype, program->src, program->n_src, poly_arg_program_info(&bad)
+    );
+    call = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, sources, 3, poly_arg_none());
+    linear = poly_uop1(ctx, POLY_OP_LINEAR, POLY_VOID, call, poly_arg_none());
+    ok &= poly_compile_linear(ctx, linear, 0) == NULL;
+    ok &= poly_runtime_cache_len(ctx) == 0 && !poly_buffer_is_allocated(ctx, out);
+    poly_ctx_destroy(ctx);
+  }
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
 static bool runtime_allocates_only_program_globals(PolyDevice device) {
   /* exec_kernel resolves CALL arguments, but only ProgramInfo.globals own
    * runtime allocations. An eliminated argument remains in the CALL. */

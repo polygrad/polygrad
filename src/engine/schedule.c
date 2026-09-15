@@ -89,6 +89,7 @@ typedef struct {
 #endif
 
 static uint32_t poly_runtime_cache_env_stamp(void);
+static bool program_call_params_valid(PolyCtx *ctx, PolyUOp *call, PolyUOp *ast);
 static int poly_launch_dim_upper_bound(PolyCtx *ctx, PolyUOp *expr);
 static PolyUOp *poly_program_ensure_source(
     PolyCtx *ctx,
@@ -891,6 +892,7 @@ static PolyProgramInfo *poly_program_info_build(
     PolyDevice device
 ) {
   if (!ctx || !call || !body || !program_name) return NULL;
+  if (!program_call_params_valid(ctx, call, body)) return NULL;
   int n_args = poly_call_n_buffer_args(call);
   bool *globals = n_args > 0 ? calloc((size_t)n_args, sizeof(bool)) : NULL;
   bool *outs = n_args > 0 ? calloc((size_t)n_args, sizeof(bool)) : NULL;
@@ -1919,6 +1921,71 @@ static PolyUOp *poly_prepare_x86_program_for_backend(
 );
 #endif
 
+static bool program_call_indices_valid(const PolyProgramInfo *info, int n_args) {
+  if (!info) return true;
+  const int *indices[] = {info->globals, info->outs, info->ins};
+  int counts[] = {info->n_globals, info->n_outs, info->n_ins};
+  if (info->n_vars < 0 || (info->n_vars && !info->vars)) return false;
+  for (int a = 0; a < 3; a++) {
+    if (counts[a] < 0 || (counts[a] && !indices[a])) return false;
+    for (int i = 0; i < counts[a]; i++) {
+      int slot = indices[a][i];
+      if (slot < 0 || slot >= n_args || (i && slot <= indices[a][i - 1])) return false;
+      if (a) {
+        bool found = false;
+        for (int j = 0; j < info->n_globals; j++)
+          found |= info->globals[j] == slot;
+        if (!found) return false;
+      }
+    }
+  }
+  return true;
+}
+
+/* ProgramInfo.from_sink preserves every PARAM slot; exec_kernel then indexes
+ * CALL arguments with those slots. C must reject an unbound slot, not discard
+ * it while building access masks and pass a short void** to compiled code.
+ * Supplied PROGRAM metadata is checked against the actual kernel too. */
+static bool program_call_params_valid(PolyCtx *ctx, PolyUOp *call, PolyUOp *ast) {
+  int n_args = poly_call_n_buffer_args(call);
+  const PolyProgramInfo *info = poly_program_info(ctx, ast);
+  if (!program_call_indices_valid(info, n_args)) goto invalid;
+  PolyUOp *root = poly_program_linear(ast);
+  if (!root) root = poly_program_body(ast);
+  int n = 0;
+  PolyUOp **topo = poly_toposort_alloc(ctx, root, &n);
+  if (!topo) return false;
+  bool valid = true;
+  for (int i = 0; i < n && valid; i++) {
+    PolyUOp *u = topo[i];
+    if (u->op != POLY_OP_PARAM) continue;
+    if (poly_uop_is_alu_param(u)) {
+      if (info) {
+        bool found = false;
+        for (int j = 0; j < info->n_vars; j++)
+          found |= schedule_same_var(u, info->vars[j]);
+        valid = found;
+      }
+      continue;
+    }
+    int64_t slot = u->arg.kind == POLY_ARG_INT                     ? u->arg.i
+                   : u->arg.kind == POLY_ARG_PARAM && u->arg.param ? u->arg.param->slot
+                                                                   : -1;
+    valid = slot >= 0 && slot < n_args;
+    if (valid && info) {
+      bool found = false;
+      for (int j = 0; j < info->n_globals; j++)
+        found |= info->globals[j] == slot;
+      valid = found;
+    }
+  }
+  poly_toposort_free(topo);
+  if (valid) return true;
+invalid:
+  fprintf(stderr, "polygrad: kernel PARAMs/ProgramInfo do not match CALL arguments\n");
+  return false;
+}
+
 static PolyUOp *poly_prepare_program_for_backend(
     PolyCtx *ctx,
     PolyUOp *call,
@@ -1932,17 +1999,18 @@ static PolyUOp *poly_prepare_program_for_backend(
   if (!ast) return NULL;
   const PolyBackendDesc *backend = poly_backend_get(device);
   if (!backend) return NULL;
-  PolyUOp *prepared_input =
-      ast->op == POLY_OP_PROGRAM ? poly_program_complete_metadata(ctx, call, ast, device) : ast;
-  if (!prepared_input) return NULL;
-  if (poly_program_is_complete_for_backend(prepared_input, backend, device)) return prepared_input;
-#ifdef POLY_HAS_X86
-  if (device == POLY_DEVICE_X86)
-    return poly_prepare_x86_program_for_backend(
-        ctx, call, prepared_input, device_uop, device, env_stamp, cache
-    );
-#endif
-
+  if (poly_program_is_complete_for_backend(ast, backend, device) && poly_program_info(ctx, ast) &&
+      cache && poly_engine_cache_enabled() && ctx->runtime_cache) {
+    PolyRuntimeCacheMapEntry runtime_key = {
+        .program = ast, .device_uop = device_uop, .device = device, .env_stamp = env_stamp};
+    uint32_t runtime_hash = poly_program_device_cache_hash(ast, device_uop, device, env_stamp);
+    /* A published runtime has already validated this immutable PROGRAM. Do
+     * not add PROGRAM->itself rows to the raw-AST compilation cache. */
+    if (poly_map_get(ctx->runtime_cache, runtime_hash, &runtime_key, poly_runtime_cache_eq))
+      return program_call_indices_valid(poly_program_info(ctx, ast), poly_call_n_buffer_args(call))
+                 ? ast
+                 : NULL;
+  }
   /* Pinned to_program caches the raw SINK ast.key before do_to_program builds
    * ProgramInfo (codegen/__init__.py:244-250). A PROGRAM input remains a
    * supported explicit precompiled boundary, but raw scheduled SINKs use the
@@ -1959,13 +2027,36 @@ static PolyUOp *poly_prepare_program_for_backend(
       (cache && poly_engine_cache_enabled() && ctx->to_program_cache)
           ? poly_map_get(ctx->to_program_cache, hash, &key, poly_to_program_cache_eq)
           : NULL;
-  if (entry) return entry->prepared_program;
+  /* Cached immutable PROGRAMs already passed the kernel walk. A new CALL may
+   * still bind fewer arguments, so retain the cheap metadata bounds check. */
+  if (entry)
+    return program_call_indices_valid(
+               poly_program_info(ctx, entry->prepared_program), poly_call_n_buffer_args(call)
+           )
+               ? entry->prepared_program
+               : NULL;
+
+  if (!program_call_params_valid(ctx, call, ast)) return NULL;
+  PolyUOp *prepared_input =
+      ast->op == POLY_OP_PROGRAM ? poly_program_complete_metadata(ctx, call, ast, device) : ast;
+  if (!prepared_input) return NULL;
+  PolyUOp *prepared = prepared_input;
+  if (poly_program_is_complete_for_backend(prepared_input, backend, device))
+    return program_call_params_valid(ctx, call, prepared_input) ? prepared_input : NULL;
+#ifdef POLY_HAS_X86
+  if (device == POLY_DEVICE_X86) {
+    prepared = poly_prepare_x86_program_for_backend(
+        ctx, call, prepared_input, device_uop, device, env_stamp, cache
+    );
+    /* X86 preparation publishes its own cache row; do not replace it below. */
+    return prepared && program_call_params_valid(ctx, call, prepared) ? prepared : NULL;
+  }
+#endif
 
   PolyUOp *body = poly_program_body(ast);
   if (!body) return NULL;
 
   /* do_to_program resumes PROGRAM stages; only a raw SINK needs full lowering. */
-  PolyUOp *prepared = prepared_input;
   if (ast->op != POLY_OP_PROGRAM) {
     PolyUOp *rewritten = backend->rewrite_program ? backend->rewrite_program(ctx, body) : body;
     if (!rewritten) return NULL;
@@ -1980,6 +2071,7 @@ static PolyUOp *poly_prepare_program_for_backend(
     if (!prepared) return NULL;
   }
 
+  if (!prepared || !program_call_params_valid(ctx, call, prepared)) return NULL;
   if (cache && poly_engine_cache_enabled() && ctx->to_program_cache) {
     entry = malloc(sizeof(*entry));
     if (entry) {
