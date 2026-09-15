@@ -43,7 +43,8 @@ def test_release_manifest_covers_required_lanes_once(runner):
     nn = next(g for g in runner['release_gates']() if g['target'] == 'test-compat-tinygrad-nn')
     assert '--baseline test/fixtures/tinygrad_upstream_nn_cpu_014_baseline.json' in nn['variables']['UPSTREAM_COMPAT_ARGS']
     policy = next(g for g in runner['release_gates']() if g['target'] == 'test-compat-tinygrad-policy')
-    assert policy['variables']['UPSTREAM_POLICY_TEST'] == 'test/backend/test_setitem.py'
+    assert policy['variables']['UPSTREAM_POLICY_TESTS'].split() == [
+        'test/backend/test_setitem.py', 'test/backend/test_tensor.py', 'test/null/test_indexing.py']
     assert policy['variables']['UPSTREAM_COMPAT_DIR'] == '{output}/upstream-policy'
 
 

@@ -84,6 +84,65 @@ def phases(status="passed", detail="AssertionError: expected 2"):
     }
 
 
+def policy_evidence():
+    contract = dict(reference_commit='pin', upstream_sha256='source',
+                    test_sha256={'test/a.py': 'a'})
+    tests = {f'{engine}:test/a.py::test_ok': dict(status='passed', phases=phases())
+             for engine in ('tinygrad', 'polygrad')}
+    tests['polygrad:test/a.py::test_gap'] = dict(status='failed', phases=phases('failed'))
+    row = dict(contract=contract, tests=tests, errors=[], source_inputs={'lib': 'hash'})
+    baseline = upstream.baseline_candidate(row)
+    baseline['tests']['polygrad:test/a.py::test_gap']['reason'] = 'Reviewed unsupported capability'
+    reports = [copy.deepcopy(row) for _ in range(6)]
+    for i, report in enumerate(reports):
+        report['contract']['polygrad_environment'] = upstream.worker_environment(None, engine='polygrad',
+            poly_device=('cpu', 'interp')[i // 3], logical_policy=('always', 'until_realize', 'never')[i % 3])
+    return reports, baseline
+
+
+def test_policy_matrix_accepts_only_reviewed_identical_outcomes():
+    reports, baseline = policy_evidence()
+    assert upstream.policy_matrix_errors(reports, baseline) == []
+
+
+@pytest.mark.parametrize('change', ['missing', 'changed', 'unreviewed', 'source', 'pin', 'test_hash', 'execution', 'lanes', 'policy'])
+def test_policy_matrix_rejects_incomplete_or_changed_evidence(change):
+    reports, baseline = policy_evidence()
+    if change == 'missing': del reports[2]['tests']['polygrad:test/a.py::test_ok']
+    if change == 'changed': reports[2]['tests']['polygrad:test/a.py::test_ok']['status'] = 'failed'
+    if change == 'unreviewed': baseline['tests']['polygrad:test/a.py::test_gap']['reason'] = 'UNREVIEWED'
+    if change == 'source': reports[2]['source_inputs']['lib'] = 'changed'
+    if change == 'pin': reports[0]['contract']['reference_commit'] = 'new'
+    if change == 'test_hash': reports[0]['contract']['test_sha256']['test/a.py'] = 'changed'
+    if change == 'execution': reports[2]['errors'] = ['provider mismatch']
+    if change == 'lanes': reports.pop()
+    if change == 'policy': reports[2]['contract']['polygrad_environment']['POLY_LOGICAL'] = '1'
+    assert upstream.policy_matrix_errors(reports, baseline)
+
+
+def test_policy_matrix_runs_six_pg_lanes_and_reuses_original_reference(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    reports, baseline = policy_evidence()
+    calls = []
+    def run(argv):
+        i = len(calls)
+        calls.append(argv)
+        lane = upstream.Path(argv[argv.index('--output') + 1])
+        lane.mkdir()
+        reports[i]['summary_by_engine'] = {'polygrad': {'passed': 1, 'failed': 1}}
+        upstream.write_json(lane / 'report.json', reports[i])
+        return 1  # Reviewed nonpasses are not accepted until matrix validation.
+    monkeypatch.setattr(upstream, 'main', run)
+    args = SimpleNamespace(reference=tmp_path, library=tmp_path / 'lib.so', timeout=10)
+    assert upstream.run_policy_matrix(args, ['test/a.py'], baseline, tmp_path) == 0
+    assert len(calls) == 6 and '--record-reference-lock' in calls[0]
+    original = tmp_path / 'cpu-always/report.json'
+    for argv in calls[1:]:
+        assert '--record-reference-lock' not in argv
+        assert argv[argv.index('--reuse-reference') + 1] == str(original)
+        assert argv[argv.index('--reference-sha256') + 1] == upstream.digest(original)
+
+
 @pytest.mark.parametrize("status", ["passed", "failed", "skipped"])
 def test_phase_outcomes(status):
     assert upstream.outcome(phases(status)) == status

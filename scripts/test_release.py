@@ -62,7 +62,7 @@ def release_gates():
                 UPSTREAM_COMPAT_ARGS='--baseline test/fixtures/tinygrad_upstream_nn_cpu_014_baseline.json')
         elif gate['target'] == 'test-compat-tinygrad-policy':
             gate['variables'].update(UPSTREAM_COMPAT_DIR='{output}/upstream-policy',
-                                     UPSTREAM_POLICY_TEST='test/backend/test_setitem.py')
+                                     UPSTREAM_POLICY_TESTS='test/backend/test_setitem.py test/backend/test_tensor.py test/null/test_indexing.py')
     return gates
 
 

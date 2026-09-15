@@ -334,16 +334,12 @@ test-compat-tinygrad-upstream-ratchet: build/libpolygrad.so
 
 # Ordinary upstream bodies, no Model or explicit Runtime. Keep each lane's
 # overrides in its report; Tinygrad remains the same CPU control.
-UPSTREAM_POLICY_TEST ?= test/backend/test_setitem.py
+UPSTREAM_POLICY_TESTS ?= test/backend/test_setitem.py test/backend/test_tensor.py test/null/test_indexing.py
 .PHONY: test-compat-tinygrad-policy
 test-compat-tinygrad-policy: build/libpolygrad.so
-	@status=0; for device in cpu interp; do \
-	  for policy in always until_realize never; do \
-	    $(PARITY_PY) scripts/tinygrad_upstream.py --test $(UPSTREAM_POLICY_TEST) \
-	      --poly-device $$device --logical-policy $$policy --allow-reference-skips \
-	      --output "$(UPSTREAM_COMPAT_DIR)/$$device-$$policy" $(UPSTREAM_COMPAT_ARGS) || status=1; \
-	  done; \
-	done; exit $$status
+	$(PARITY_PY) scripts/tinygrad_upstream.py --policy-matrix --baseline $(UPSTREAM_COMPAT_BASELINE) \
+	  $(foreach test,$(UPSTREAM_POLICY_TESTS),--test $(test)) \
+	  --output "$(UPSTREAM_COMPAT_DIR)" $(UPSTREAM_COMPAT_ARGS)
 
 test-parity-graph parity-graph-report: build/libpolygrad.so
 	@mkdir -p $(GRAPH_PARITY_DIR) temp/cc_tmp

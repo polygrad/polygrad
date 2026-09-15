@@ -420,6 +420,66 @@ def ratchet_errors(report, baseline):
     return errors
 
 
+def policy_matrix_errors(reports, baseline):
+    """Selected outcome/policy gate; the full baseline contract gate stays separate."""
+    if len(reports) != 6:
+        return ['policy matrix requires CPU/INTERP x three logical policies']
+    first = reports[0]
+    selected = first['contract']['test_sha256']
+    expected = {key: value for key, value in baseline['tests'].items()
+                if key.partition(':')[2].split('::')[0] in selected}
+    errors = []
+    for i, report in enumerate(reports):
+        contract = report['contract']
+        environment = worker_environment(None, engine='polygrad', poly_device=('cpu', 'interp')[i // 3],
+                                         logical_policy=('always', 'until_realize', 'never')[i % 3])
+        if contract.get('polygrad_environment') != environment:
+            errors.append(f'lane {i}: wrong backend/logical policy')
+        for field in ('reference_commit', 'upstream_sha256'):
+            if contract.get(field) != baseline['contract'].get(field):
+                errors.append(f'lane {i}: changed {field}')
+        if (contract['test_sha256'] != selected or
+                any(baseline['contract']['test_sha256'].get(p) != h for p, h in selected.items())):
+            errors.append(f'lane {i}: changed selected tests')
+        if report['source_inputs'] != first['source_inputs']:
+            errors.append(f'lane {i}: source/artifact inputs changed')
+        # Use the ordinary ratchet for test membership, reviewed nonpasses and
+        # exact failure signatures, not merely agreement on arbitrary failures.
+        errors.extend(f'lane {i}: {e}' for e in ratchet_errors(report, {
+            'schema_version': 1, 'contract': contract, 'tests': expected}))
+        if {k: signature(v) for k, v in report['tests'].items()} != {
+                k: signature(v) for k, v in first['tests'].items()}:
+            errors.append(f'lane {i}: outcomes differ across logical policies/backends')
+    return errors
+
+
+def run_policy_matrix(args, tests, baseline, output):
+    reports, paths = [], []
+    for device in ('cpu', 'interp'):
+        for policy in ('always', 'until_realize', 'never'):
+            lane = output / f'{device}-{policy}'
+            argv = ['--reference', str(args.reference), '--library', str(args.library),
+                    '--output', str(lane), '--timeout', str(args.timeout),
+                    '--poly-device', device, '--logical-policy', policy]
+            for test in tests: argv.extend(['--test', test])
+            if paths:
+                argv.extend(['--reuse-reference', str(paths[0]), '--reference-sha256', digest(paths[0])])
+            else:
+                argv.append('--record-reference-lock')
+            # Ordinary diagnostic runs can return nonzero for reviewed gaps;
+            # acceptance below requires complete evidence and baseline matches.
+            main(argv)
+            paths.append(lane / 'report.json')
+            reports.append(json.loads(paths[-1].read_text()))
+    errors = policy_matrix_errors(reports, baseline)
+    result = {'errors': errors, 'lanes': [
+        {'report': str(path), 'sha256': digest(path), 'summary': report['summary_by_engine']}
+        for path, report in zip(paths, reports)]}
+    write_json(output / 'matrix.json', result)
+    print(json.dumps(result, indent=2))
+    return int(bool(errors))
+
+
 def compare_reports(before, after):
     """Candidate-ref triage only; never change the accepted pin or baseline."""
     old, new = before["tests"], after["tests"]
@@ -509,6 +569,7 @@ def main(argv=None):
     parser.add_argument('--adapter', choices=['cpu-ops', 'cpu-nn'], help='explicit CPU-only test adaptation; default tests are unchanged')
     parser.add_argument('--logical-policy', choices=['always', 'until_realize', 'never'], help='explicit Polygrad logical-retention lane')
     parser.add_argument('--poly-device', choices=['cpu', 'interp'], help='Polygrad backend; Tinygrad control stays on CPU')
+    parser.add_argument('--policy-matrix', action='store_true', help='six policy/backend lanes against reviewed outcomes, one locked reference')
     parser.add_argument('--allow-reference-skips', action='store_true', help='accept only identical skips in both engines; failures remain errors')
     parser.add_argument('--record-reference-lock', action='store_true', help='content-lock this CPU reference execution for later reuse')
     parser.add_argument('--reuse-reference', type=Path, help='reuse only the original locked Tinygrad report; Polygrad always executes')
@@ -517,6 +578,10 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.child:
         return child(json.loads(args.child.read_text()))
+    if args.policy_matrix and (not args.baseline or args.engine != 'both' or args.adapter or
+                              args.logical_policy or args.poly_device or args.reuse_reference or
+                              args.write_baseline or args.compare_with):
+        parser.error('--policy-matrix requires --baseline and unadapted --engine both, without single-lane options')
     if bool(args.reuse_reference) != bool(args.reference_sha256):
         parser.error('--reuse-reference and --reference-sha256 must be provided together')
     if args.reuse_reference and args.engine != 'both':
@@ -527,6 +592,8 @@ def main(argv=None):
     if len(tests) != len(set(tests)) or args.timeout <= 0:
         parser.error("duplicate selections or invalid timeout")
     for test in tests:
+        if args.policy_matrix and '::' in test:
+            parser.error('--policy-matrix requires whole upstream files')
         path = (reference / test.split("::")[0]).resolve()
         if not path.is_relative_to(reference / "test") or not path.is_file():
             parser.error(f"not an upstream test: {test}")
@@ -540,6 +607,8 @@ def main(argv=None):
     # A run directory is an evidence unit, never a blend of old/new workers.
     if any(output.iterdir()):
         parser.error("output directory must be empty; use a fresh evidence directory")
+    if args.policy_matrix:
+        return run_policy_matrix(args, tests, baseline, output)
     (output / "cc_tmp").mkdir()
     (output / "cache").mkdir()
     inputs = source_inputs(reference, tests, library)
