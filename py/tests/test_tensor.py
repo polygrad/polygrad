@@ -3554,6 +3554,47 @@ class TestSpatialOwners:
 
 
 class TestIndexedOwners:
+    @pytest.mark.parametrize('device', ['cpu', 'interp'])
+    @pytest.mark.parametrize('logical', ['always', 'until_realize', 'never'])
+    @pytest.mark.parametrize('explicit', [False, True])
+    @pytest.mark.parametrize('op', ['add', 'sub', 'mul', 'div'])
+    def test_slice_inplace_preserves_assignment_and_gradients(self, device, logical, explicit, op):
+        rt = Runtime(device=device, logical=logical) if explicit else None
+        try:
+            cls = rt.Tensor if rt else Tensor
+            z = cls([1., 2., 3., 4.], device=device, logical=logical)
+            x = cls([10., 20.], device=device, logical=logical)
+            if op == 'add': z[:2] += x
+            elif op == 'sub': z[:2] -= x
+            elif op == 'mul': z[:2] *= x
+            else: z[:2] /= x
+            z.sum().backward()
+            expected = {'add': [11, 22], 'sub': [-9, -18], 'mul': [10, 40], 'div': [.1, .1]}
+            grads = {'add': [1, 1], 'sub': [-1, -1], 'mul': [1, 2], 'div': [-.01, -.005]}
+            np.testing.assert_allclose(z.numpy(), expected[op] + [3, 4], rtol=1e-6)
+            np.testing.assert_array_equal(z.grad.numpy(), np.ones(4))
+            np.testing.assert_allclose(x.grad.numpy(), grads[op], rtol=1e-6)
+        finally:
+            if rt: rt.dispose()
+
+    @pytest.mark.parametrize('device', ['cpu', 'interp'])
+    @pytest.mark.parametrize('logical', ['always', 'until_realize', 'never'])
+    @pytest.mark.parametrize('forward_first', [False, True])
+    def test_slice_inplace_realized_backward_ordering(self, device, logical, forward_first):
+        with Runtime(device=device, logical=logical) as rt:
+            z, x = rt.Tensor([1., 2., 3., 4.]).realize(), rt.Tensor([10., 20.])
+            z[:2] += x
+            # Pinned backward cannot differentiate the pending AFTER. Once the
+            # write is realized, z is a buffer leaf and x is no longer reachable.
+            if not forward_first:
+                with pytest.raises(RuntimeError, match='poly_grad_many failed'):
+                    z.sum().backward()
+                return
+            np.testing.assert_array_equal(z.numpy(), [11, 22, 3, 4])
+            z.sum().backward()
+            np.testing.assert_array_equal(z.grad.numpy(), np.ones(4))
+            assert x.grad is None
+
     @pytest.mark.parametrize('mode', ['plain', 'nested', 'reshape'])
     def test_realize_typed_storage_view_keeps_original_root(self, mode):
         with Runtime(device='cpu') as rt:

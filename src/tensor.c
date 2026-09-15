@@ -2003,8 +2003,11 @@ PolyTensor *poly_tensor_assign_after(
   if (tensor_capture_record(ctx) != 0) return NULL;
   PolyUOp *physical_view_anchor = tensor_assign_view_anchor(target_physical);
   PolyUOp *logical_view_anchor = build_logical ? tensor_assign_view_anchor(target_logical) : NULL;
-  if ((build_logical && logical_view_anchor) || physical_view_anchor) {
-    if (!physical_view_anchor || (build_logical && !logical_view_anchor)) return NULL;
+  /* Tensor.assign's branch is determined by the eager physical graph. A
+   * creation COPY is not storage even when its portable twin is a BUFFER;
+   * logical retention must not turn that simple assign into a view write. */
+  if (physical_view_anchor) {
+    if (build_logical && !logical_view_anchor) return NULL;
     PolyUOp *physical_anchor_src[2] = {physical_view_anchor, physical_after};
     PolyUOp *physical_assigned_anchor = poly_uop(
         ctx, POLY_OP_AFTER, physical_view_anchor->dtype, physical_anchor_src, 2, poly_arg_none()
@@ -4168,9 +4171,29 @@ static int tensor_setitem(
                    poly_buffer_is_allocated(ctx, storage_base));
   bool replace = (!base_realized && poly_dtype_is_float(u->dtype)) || !(advanced || realized);
   if (self->device == POLY_DEVICE_DISK && advanced) return -5;
+  PolyTensor *computed = NULL;
+  if (replace && v->op == POLY_OP_AFTER && v->n_src >= 2 && v->src[1]->op == POLY_OP_STORE &&
+      v->src[1]->n_src == 2) {
+    /* Tensor.__setitem__ unwraps the pending +=/-= write before functional
+     * replacement. Embedding its STORE would assign through the old slice
+     * again and disconnect the computed value's gradient. */
+    PolyUOp *logical = value->uop_logical;
+    if (logical) {
+      if (logical->op != POLY_OP_AFTER || logical->n_src < 2 ||
+          logical->src[1]->op != POLY_OP_STORE || logical->src[1]->n_src != 2)
+        return -1;
+      logical = logical->src[1]->src[1];
+    }
+    computed = poly_tensor_create_result(
+        ctx, &value, 1, logical, v->src[1]->src[1], POLY_TENSOR_VALUE, value->device
+    );
+    if (!computed) return -1;
+    value = computed;
+  }
   PolyTensor *out = tensor_getitem_impl(
       ctx, self, kinds, starts, sizes, steps, indices, n, (replace || advanced) ? value : NULL
   );
+  if (computed) poly_tensor_release(computed);
   if (!out) return -1;
   int result = -1;
   if (replace)

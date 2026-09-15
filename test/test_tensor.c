@@ -1112,6 +1112,34 @@ TEST(tensor, logical_never_effects_keep_physical_graph_and_values_exact) {
   PASS();
 }
 
+TEST(tensor, slice_iadd_keeps_same_owner_roots) {
+  PolyCtx *ctx = poly_ctx_new();
+  poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_ALWAYS);
+  float data[] = {1, 2, 3, 4};
+  PolyTensor *host =
+      poly_tensor_from_host(ctx, data, sizeof(data), POLY_FLOAT32, (int64_t[]){4}, 1);
+  PolyTensor *base = poly_tensor_to_device_name(ctx, host, "INTERP");
+  PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){2}, 1, POLY_DEVICE_INTERP);
+  int kind[] = {POLY_INDEX_SLICE};
+  PolyUOp *start[] = {poly_const_int(ctx, 0)}, *size[] = {poly_const_int(ctx, 2)};
+  int64_t step[] = {1};
+  PolyTensor *index[] = {NULL};
+  PolyTensor *view = poly_tensor_getitem(ctx, base, kind, start, size, step, index, 1);
+  PolyTensor *sum = view ? poly_tensor_alu2(ctx, POLY_OP_ADD, view, x) : NULL;
+  bool valid = sum && poly_tensor_assign(ctx, view, sum);
+  if (valid) {
+    valid &= view->uop_physical->op == POLY_OP_AFTER && view->uop_logical->op == POLY_OP_AFTER;
+    valid &= view->uop_physical->src[0]->op == POLY_OP_SHRINK &&
+             view->uop_logical->src[0]->op == POLY_OP_SHRINK;
+    valid &= poly_tensor_setitem(ctx, base, kind, start, size, step, index, 1, view) == 0;
+    valid &= !poly_uop_op_in_backward_slice_with_self(ctx, base->uop_physical, POLY_OP_STORE);
+    valid &= !poly_uop_op_in_backward_slice_with_self(ctx, base->uop_logical, POLY_OP_STORE);
+  }
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(valid);
+  PASS();
+}
+
 static PolyTensor *build_logical_policy_view_assign_oracle(
     PolyCtx *ctx,
     PolyLogicalPolicy policy,

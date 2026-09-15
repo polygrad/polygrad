@@ -5247,6 +5247,27 @@ async function runTensorTests(pg, createRuntime) {
     assertClose(await Tensor.arange(6).reshape(2, 3).getitem(new Tensor(1)).toArray(), [3, 4, 5])
   })
 
+  await test('indexed inplace: unrealized assignment and realized forward', async () => {
+    const expected = {add: [11, 22, 3, 4], sub: [-9, -18, 3, 4],
+      mul: [10, 40, 3, 4], div: [.1, .1, 3, 4]}
+    for (const logical of ['always', 'until_realize', 'never']) {
+      for (const realized of [false, true]) for (const op of ['add', 'sub', 'mul', 'div']) {
+        const z = new Tensor([1, 2, 3, 4], {dtype: 'float32', logical})
+        const x = new Tensor([10, 20], {dtype: 'float32', logical})
+        if (realized) await z.realize()
+        const view = z.getitem({start: 0, stop: 2})
+        const computed = view[op](x)
+        view.assign(computed)
+        // Match the temporary RHS lifetime of Python's indexed += expression;
+        // a deliberately retained computed owner is a separate other-use case.
+        await computed.dispose()
+        z.setitem({start: 0, stop: 2}, view)
+        assertClose(await z.toArray(), expected[op])
+        await view.dispose(); await x.dispose(); await z.dispose()
+      }
+    }
+  })
+
   await test('indexed owners: detached write and identity read', async () => {
     const x = Tensor.zeros(4)
     await x.realize()
