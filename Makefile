@@ -111,6 +111,7 @@ build/test_bigint.js: $(WASM_SRC) test/test_main.c test/test_bigint.c test/test_
 # Exercise the shared runner ABI inside wasm32, not just emitted kernel bytes.
 .PHONY: test-runtime-wasm
 test-runtime-wasm: build/test_schedule_runtime.js
+	$(SAN_RUN) $(NODE) $< --require-no-skips program_rejects
 	$(SAN_RUN) $(NODE) $< --require-no-skips view_assign_callify
 	$(SAN_RUN) $(NODE) $< --require-no-skips schedule_cache_clear
 	@set -e; for case in allocation_alignment_and_growth overflow_preserves_allocation_state alloc_and_destroy large_alloc reset; do \
@@ -330,6 +331,19 @@ test-compat-tinygrad-suite: build/libpolygrad.so
 test-compat-tinygrad-upstream-ratchet: build/libpolygrad.so
 	$(PARITY_PY) scripts/tinygrad_upstream.py --output $(UPSTREAM_COMPAT_DIR) \
 		--baseline $(UPSTREAM_COMPAT_BASELINE) $(UPSTREAM_COMPAT_ARGS)
+
+# Ordinary upstream bodies, no Model or explicit Runtime. Keep each lane's
+# overrides in its report; Tinygrad remains the same CPU control.
+UPSTREAM_POLICY_TEST ?= test/backend/test_setitem.py
+.PHONY: test-compat-tinygrad-policy
+test-compat-tinygrad-policy: build/libpolygrad.so
+	@status=0; for device in cpu interp; do \
+	  for policy in always until_realize never; do \
+	    $(PARITY_PY) scripts/tinygrad_upstream.py --test $(UPSTREAM_POLICY_TEST) \
+	      --poly-device $$device --logical-policy $$policy --allow-reference-skips \
+	      --output "$(UPSTREAM_COMPAT_DIR)/$$device-$$policy" $(UPSTREAM_COMPAT_ARGS) || status=1; \
+	  done; \
+	done; exit $$status
 
 test-parity-graph parity-graph-report: build/libpolygrad.so
 	@mkdir -p $(GRAPH_PARITY_DIR) temp/cc_tmp

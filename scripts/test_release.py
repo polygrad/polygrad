@@ -41,6 +41,7 @@ def release_gates():
         test-parity test-parity-ir test-parity-ir-opt test-parity-cuda
         test-parity-graph test-release-op-census
         test-compat-tinygrad-upstream-ratchet test-compat-tinygrad-ops test-compat-tinygrad-nn
+        test-compat-tinygrad-policy
         test-compat-tinygrad-tier1 test-compat-tinygrad-convnext
         test-reference-parity fuzz-smoke test-symbolic-z3
         bench-smoke-regression bench-hlb-cuda-semantic bench-hlb-cuda-timing
@@ -59,6 +60,9 @@ def release_gates():
             gate['variables'].update(
                 UPSTREAM_COMPAT_DIR='{output}/upstream-nn',
                 UPSTREAM_COMPAT_ARGS='--baseline test/fixtures/tinygrad_upstream_nn_cpu_014_baseline.json')
+        elif gate['target'] == 'test-compat-tinygrad-policy':
+            gate['variables'].update(UPSTREAM_COMPAT_DIR='{output}/upstream-policy',
+                                     UPSTREAM_POLICY_TEST='test/backend/test_setitem.py')
     return gates
 
 

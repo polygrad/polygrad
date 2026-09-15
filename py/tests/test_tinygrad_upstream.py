@@ -307,6 +307,35 @@ def test_nn_adapter_preserves_bodies_and_defers_only_private_helpers(filename, c
             upstream.adapt_cpu_nn(changed_source, path, changed_helpers)
 
 
+def test_worker_policy_and_backend_overrides_are_polygrad_only():
+    original = dict(upstream.ENVIRONMENT)
+    pg = upstream.worker_environment(None, engine='polygrad', logical_policy='never', poly_device='interp')
+    tg = upstream.worker_environment(None, engine='tinygrad', logical_policy='never', poly_device='interp')
+    assert pg['POLY_LOGICAL'] == '0' and pg['POLY_DEV'] == 'interp'
+    for policy, value in [('always', '1'), ('until_realize', '2')]:
+        assert upstream.worker_environment(None, engine='polygrad', logical_policy=policy)['POLY_LOGICAL'] == value
+    assert tg == original
+    assert upstream.worker_environment(None) == original
+    assert upstream.ENVIRONMENT == original
+
+
+@pytest.mark.parametrize('pg_status,tg_status,same_reason,accepted', [
+    ('passed', 'passed', True, True),
+    ('skipped', 'skipped', True, True),
+    ('skipped', 'skipped', False, False),
+    ('skipped', 'passed', True, False),
+    ('passed', 'skipped', True, False),
+    ('failed', 'failed', True, False),
+    ('skipped', None, True, False),
+])
+def test_reference_skip_allowance_requires_identical_skip(pg_status, tg_status, same_reason, accepted):
+    tests = {'polygrad:case': {'status': pg_status, 'phases': phases(pg_status, 'upstream skip')}}
+    if tg_status is not None:
+        tests['tinygrad:case'] = {'status': tg_status, 'phases': phases(tg_status, 'upstream skip' if same_reason else 'other')}
+    assert (not upstream.unaccepted_outcomes(tests, allow_reference_skips=True)) == accepted
+    assert bool(upstream.unaccepted_outcomes(tests)) == any(t['status'] != 'passed' for t in tests.values())
+
+
 @pytest.mark.parametrize('device,renderer,interface,image', [
     ('CUDA', '', '', 0), ('CPU', 'LLVM', '', 0), ('CPU', '', 'MOCK', 0), ('CPU', '', '', 1),
 ])

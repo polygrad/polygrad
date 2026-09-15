@@ -47,8 +47,15 @@ ENVIRONMENT = {
 }
 
 
-def worker_environment(adapter):
-    return dict(ENVIRONMENT, **({'RUN_SLOW': '1'} if adapter == 'cpu-nn' else {}))
+def worker_environment(adapter, *, engine=None, logical_policy=None, poly_device=None):
+    env = dict(ENVIRONMENT, **({'RUN_SLOW': '1'} if adapter == 'cpu-nn' else {}))
+    # The reference remains the pinned CPU oracle; these are explicit Polygrad
+    # execution lanes, not ambient settings or edits to upstream test bodies.
+    if engine == 'polygrad':
+        if logical_policy is not None:
+            env['POLY_LOGICAL'] = {'never': '0', 'always': '1', 'until_realize': '2'}[logical_policy]
+        if poly_device is not None: env['POLY_DEV'] = poly_device
+    return env
 
 
 def digest(path):
@@ -426,6 +433,21 @@ def compare_reports(before, after):
     }
 
 
+def unaccepted_outcomes(tests, *, allow_reference_skips=False):
+    rejected = []
+    for key, test in tests.items():
+        if test['status'] == 'passed': continue
+        engine, _, node = key.partition(':')
+        other = tests.get(('tinygrad' if engine == 'polygrad' else 'polygrad') + ':' + node)
+        # This permits an unchanged upstream skip, never two matching failures
+        # or a provider-specific skip that hides a missing implementation.
+        if (allow_reference_skips and engine in ('tinygrad', 'polygrad') and test['status'] == 'skipped'
+                and other is not None and signature(test) == signature(other)):
+            continue
+        rejected.append(key)
+    return rejected
+
+
 def source_inputs(reference, tests, library):
     paths = {Path(__file__).resolve(), ROOT / "Makefile", library}
     for directory, suffixes in ((ROOT / "src", (".c", ".h")), (ROOT / "py/polygrad", (".py",)),
@@ -436,14 +458,15 @@ def source_inputs(reference, tests, library):
     return {str(p.resolve()): digest(p) for p in sorted(paths)}
 
 
-def run_one(output, engine, test, reference, library, timeout, adapter=None):
+def run_one(output, engine, test, reference, library, timeout, adapter=None, logical_policy=None, poly_device=None):
     key = hashlib.sha256(test.encode()).hexdigest()[:12]
     stem = output / f"{engine}-{key}"
     request = {"engine": engine, "test": test, "reference": str(reference), "library": str(library),
                "result": str(stem.with_suffix(".json")), "events": str(stem.with_suffix(".jsonl")), 'adapter':adapter}
     write_json(stem.with_suffix(".request.json"), request)
     env = {k: os.environ[k] for k in ("PATH", "HOME", "LANG", "LD_LIBRARY_PATH") if k in os.environ}
-    env.update(worker_environment(adapter), POLY_LIB=str(library), POLY_TMPDIR=str(output / "cc_tmp"),
+    env.update(worker_environment(adapter, engine=engine, logical_policy=logical_policy, poly_device=poly_device),
+               POLY_LIB=str(library), POLY_TMPDIR=str(output / "cc_tmp"),
                TMPDIR=str(output / "cc_tmp"), XDG_CACHE_HOME=str(output / "cache"))
     command = [sys.executable, "-P", "-s", str(Path(__file__).resolve()), "--child", str(stem.with_suffix(".request.json"))]
     started = time.monotonic()
@@ -484,6 +507,9 @@ def main(argv=None):
     parser.add_argument("--compare-with", type=Path, help="attach outcome delta against a previous run; not acceptance")
     parser.add_argument("--write-baseline", type=Path, help="write new candidate only; nonpasses require reviewed reasons")
     parser.add_argument('--adapter', choices=['cpu-ops', 'cpu-nn'], help='explicit CPU-only test adaptation; default tests are unchanged')
+    parser.add_argument('--logical-policy', choices=['always', 'until_realize', 'never'], help='explicit Polygrad logical-retention lane')
+    parser.add_argument('--poly-device', choices=['cpu', 'interp'], help='Polygrad backend; Tinygrad control stays on CPU')
+    parser.add_argument('--allow-reference-skips', action='store_true', help='accept only identical skips in both engines; failures remain errors')
     parser.add_argument('--record-reference-lock', action='store_true', help='content-lock this CPU reference execution for later reuse')
     parser.add_argument('--reuse-reference', type=Path, help='reuse only the original locked Tinygrad report; Polygrad always executes')
     parser.add_argument('--reference-sha256', help='required digest of --reuse-reference')
@@ -533,7 +559,8 @@ def main(argv=None):
                 print(f'tinygrad {test}: reused original control {args.reuse_reference}', flush=True)
                 runs.append(reused[test])
             else:
-                runs.append(run_one(output, engine, test, reference, library, args.timeout, args.adapter))
+                runs.append(run_one(output, engine, test, reference, library, args.timeout, args.adapter,
+                                    args.logical_policy, args.poly_device))
     errors = [f"{r['engine']} {r['selection']}: {err}" for r in runs for err in execution_errors(r)]
     if inputs != source_inputs(reference, tests, library):
         errors.append("source/artifact inputs changed during execution")
@@ -546,6 +573,10 @@ def main(argv=None):
                 "runner_sha256": digest(__file__), "versions": [r.get("versions") for r in runs],
                 "devices": [r.get("device") for r in runs], 'adapter':args.adapter,
                 'failure_signature':'source-path-and-message-v2'}
+    if args.logical_policy is not None or args.poly_device is not None:
+        contract['polygrad_environment'] = worker_environment(args.adapter, engine='polygrad',
+            logical_policy=args.logical_policy, poly_device=args.poly_device)
+    if args.allow_reference_skips: contract['allow_reference_skips'] = True
     cases = {}
     for run in runs:
         for node, test in run.get("tests", {}).items():
@@ -579,7 +610,7 @@ def main(argv=None):
                       "report": str(output / "report.json")}, indent=2))
     if args.baseline:
         return int(bool(report["ratchet_errors"]))
-    return int(bool(errors) or any(t["status"] != "passed" for t in cases.values()))
+    return int(bool(errors) or bool(unaccepted_outcomes(cases, allow_reference_skips=args.allow_reference_skips)))
 
 
 if __name__ == "__main__":
