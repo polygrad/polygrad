@@ -92,6 +92,98 @@ def compare_checkpoint(source: Model, restored: Model, names: set[str], atol: fl
         )
 
 
+def check_artifact_imports(work: Path) -> None:
+    """Every generated fixture crosses private, cold and populated contexts.
+
+    Fresh import/export canonicalizes allocation IDs without dropping fields.
+    This codec-based oracle complements, not replaces, the independent direct
+    kernel/value tests and exact C identity/slot assertions.
+    """
+    def private(data, bundle):
+        buf = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
+        ptr = (_ffi._lib.poly_model_from_bundle(buf, len(data)) if bundle else
+               _ffi._lib.poly_model_from_ir(buf, len(data), None, 0))
+        return Model._from_handle(ptr)
+
+    def canonical(ir):
+        model = private(ir, False)
+        try: return model.export_ir()
+        finally: model.dispose()
+
+    artifacts = sorted(p for p in work.iterdir() if p.suffix in {'.bundle', '.pgb', '.pgir'})
+    for path in artifacts:
+        data, bundle = path.read_bytes(), path.suffix != '.pgir'
+        cold, shared = create(device='interp'), create(device='interp')
+        models = []
+        try:
+            live = shared.Tensor([19.0])
+            primer = Model(lambda x: x+37, inputs={'x': shared.Tensor.empty(7)})
+            models.append(primer)
+            load = Model.load if bundle else Model.from_ir
+            reference = private(data, bundle)
+            models.append(reference)
+            expected = canonical(reference.export_ir())
+            assert canonical(expected) == expected, f'{path.name}: canonical IR not stable'
+            copies = []
+            for runtime in (cold, shared, shared):
+                copies.append(load(data, runtime=runtime))
+                models.append(copies[-1])
+            a, b, c = copies
+            for model in (a, b, c):
+                assert model.entrypoints() == reference.entrypoints(), path.name
+                ir = model.export_ir()
+                assert canonical(ir) == expected, f'{path.name}: import changed canonical IR'
+                for i in range(reference.buf_count):
+                    name = reference.buf_name(i)
+                    j = model.find_buf(name)
+                    assert j >= 0 and model.buf_role(j) == reference.buf_role(i), (path.name, name)
+                    assert model.buf_shape_bounds(j) == reference.buf_shape_bounds(i), (path.name, name)
+                    if bundle and reference.buf_role(i) in (ROLE_PARAM, ROLE_AUX):
+                        np.testing.assert_array_equal(model.read_buffer(name), reference.read_buffer(name))
+            if bundle:
+                state = {c.buf_name(i): c.read_buffer(c.buf_name(i)) for i in range(c.buf_count)
+                         if c.buf_role(i) in (ROLE_PARAM, ROLE_AUX)}
+                for name, original in state.items():
+                    if not original.size: continue
+                    changed = original.copy()
+                    changed.flat[0] = 0 if original.flat[0] != 0 else 1
+                    b.write_buffer(name, changed)
+                    # Mutate every state family, including RNG and optimizer
+                    # buffers. Checking all siblings also catches cross-name aliasing.
+                    for other, expected_state in state.items():
+                        np.testing.assert_array_equal(c.read_buffer(other), expected_state)
+                    np.testing.assert_array_equal(a.read_buffer(name), original)
+                    np.testing.assert_array_equal(reference.read_buffer(name), original)
+                b.dispose()
+                shared.clear_schedule_cache()
+                shared.collect()
+                for name, expected_state in state.items():
+                    np.testing.assert_array_equal(c.read_buffer(name), expected_state)
+                reference.place('interp')
+                for ep in reference.entrypoints():
+                    inputs = {}
+                    for name in ep['inputs']:
+                        i = reference.find_buf(name)
+                        inputs[name] = np.ones(reference.buf_shape(i), dtype=reference.buf_dtype(i))
+                    expected_outputs = reference.call(ep['name'], **inputs)
+                    for model in (a, c):
+                        actual_outputs = model.call(ep['name'], **inputs)
+                        assert actual_outputs.keys() == expected_outputs.keys()
+                        for name, expected_output in expected_outputs.items():
+                            np.testing.assert_array_equal(actual_outputs[name], expected_output,
+                                                          err_msg=f'{path.name}:{ep["name"]}:{name}')
+                        for name in state:
+                            np.testing.assert_array_equal(model.read_buffer(name), reference.read_buffer(name))
+            np.testing.assert_array_equal(live.numpy(), [19])
+            np.testing.assert_array_equal(primer.forward(x=np.arange(7, dtype=np.float32))['output'],
+                                          np.arange(7, dtype=np.float32)+37)
+        finally:
+            for model in reversed(models): model.dispose()
+            shared.dispose()
+            cold.dispose()
+    print(f'model import matrix: {len(artifacts)} artifacts pass (private/cold/shared, canonical IR, state isolation)')
+
+
 def run_core(work: Path, core: str, source_after: Model, expected_loss: float) -> None:
     subprocess.run(
         ['node', str(ROOT / 'js' / 'test' / 'model_interchange.js'), str(work), core],
@@ -250,6 +342,7 @@ def main() -> None:
         for core in cores:
             run_core(work, core, source, expected_loss)
             print(f'model interchange {core}: pass (Adam continuation and custom authoring both directions)')
+        check_artifact_imports(work)
     finally:
         source.free()
         shutil.rmtree(work, ignore_errors=True)

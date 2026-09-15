@@ -44,8 +44,14 @@ TEST(ir, import_into_freshens_storage_and_retains_aliases) {
   PolyUOp *variable = poly_uop_variable(
       ctx, "import_extent", poly_arg_int(1), poly_arg_int(32), POLY_WEAKINT, 1, false
   );
-  PolyUOp *src[] = {logical, logical, physical, constant, variable};
-  PolyUOp *sink = poly_sink_n(ctx, src, 5);
+  PolyUOp *argument = poly_uop_param(ctx, 17, logical);
+  PolyUOp *tagged_constant = poly_uop_tagged(
+      ctx, constant->op, constant->dtype, constant->src, constant->n_src, constant->arg, 17
+  );
+  /* Deliberately reuse a BUFFER tag's number for unrelated semantic metadata.
+   * Relocation must classify by owner/op, not blindly rewrite integer fields. */
+  PolyUOp *src[] = {logical, logical, physical, constant, variable, argument, tagged_constant};
+  PolyUOp *sink = poly_sink_n(ctx, src, 7);
   ASSERT_INT_EQ(poly_uop_retain(ctx, sink), 0);
   const char *inputs[] = {"x"}, *outputs[] = {"y"};
   PolyIrEntrypoint ep = {
@@ -80,6 +86,26 @@ TEST(ir, import_into_freshens_storage_and_retains_aliases) {
   ASSERT_INT_EQ(sa->src[4]->arg.param->slot, -1);
   ASSERT_INT_EQ(sb->src[4]->arg.param->slot, -1);
   ASSERT_PTR_EQ(sa->src[4], variable);
+  ASSERT_INT_EQ(sa->src[5]->arg.param->slot, 17);
+  ASSERT_INT_EQ(sb->src[5]->arg.param->slot, 17);
+  ASSERT_INT_EQ(sa->src[6]->tag, 17);
+  ASSERT_PTR_EQ(sa->src[6], tagged_constant);
+  /* A second generation cannot collapse independent imports, even if its
+   * source artifact was itself relocated in this same populated context. */
+  int roundtrip_len = 0;
+  uint8_t *roundtrip = poly_ir_export(&a, &roundtrip_len);
+  ASSERT_NOT_NULL(roundtrip);
+  PolyIrSpec c = {0};
+  ASSERT_INT_EQ(poly_ir_import_into(ctx, roundtrip, roundtrip_len, &c), 0);
+  PolyUOp *sc = c.entrypoints[0].sink;
+  ASSERT_PTR_EQ(sc->src[0], sc->src[1]);
+  ASSERT_TRUE(sc->src[0] != sa->src[0] && sc->src[0] != sb->src[0]);
+  ASSERT_TRUE(sc->src[2] != sa->src[2] && sc->src[2] != sb->src[2]);
+  ASSERT_PTR_EQ(sc->src[4], variable);
+  ASSERT_INT_EQ(sc->src[5]->arg.param->slot, 17);
+  ASSERT_PTR_EQ(sc->src[6], tagged_constant);
+  poly_ir_spec_free(&c);
+  free(roundtrip);
   ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
   ASSERT_INT_EQ(sa->src[0]->src[0]->op, POLY_OP_UNIQUE);
   poly_ir_spec_free(&a);

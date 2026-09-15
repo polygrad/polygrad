@@ -228,6 +228,160 @@ def test_dynamic_model_import_matches_direct_cpu_construction():
         author.dispose()
 
 
+def _canonical_model_ir(ir):
+    """Normalize allocation numbering in a fresh namespace, not semantic slots.
+
+    This deliberately reuses the codec: it is a round-trip oracle, not an
+    independent proof of relocation. Direct execution and mutation isolation
+    below, plus test_ir.c's exact slot/alias assertions, supply that evidence.
+    """
+    import ctypes
+    from polygrad import _ffi
+    data = (ctypes.c_uint8 * len(ir)).from_buffer_copy(ir)
+    model = Model._from_handle(_ffi._lib.poly_model_from_ir(data, len(ir), None, 0))
+    try:
+        return model.export_ir()
+    finally:
+        model.dispose()
+
+
+def _import_equivalence_model(rt, kind):
+    if kind == 'variable':
+        n = rt.Variable('import_equivalence_batch', 1, 32)
+        return Model(lambda x: {'prediction': x*2},
+                     inputs={'x': rt.Tensor.empty(n.bind(17), 2)})
+    weight = rt.Tensor([2.0])
+    aux = rt.Tensor([1.0]).is_param_(False)
+    if kind == 'stateful':
+        from polygrad.helpers import TRAINING
+        def author(x):
+            if TRAINING.value:
+                aux.assign(aux+1)
+            return {'prediction': (x*weight).dropout(0.5)}
+        return Model(author, inputs={'x': rt.Tensor.empty(16)},
+                     targets={'y': rt.Tensor.empty(16)},
+                     params={'weight': weight, 'alias': weight, 'counter': aux},
+                     loss=lambda prediction, y: (prediction['prediction']-y).square().mean())
+    def author(x):
+        pred = x*weight+aux
+        return {'prediction': pred, 'twice': pred*2}
+    return Model(author, inputs={'x': rt.Tensor.empty(1)},
+                 params={'weight': weight, 'alias': weight, 'offset': aux}, entrypoints=[
+                     {'name': 'forward', 'inputs': ['x'], 'outputs': ['prediction']},
+                     {'name': 'double', 'inputs': ['x'], 'outputs': ['twice']}])
+
+
+@pytest.mark.parametrize('kind', ['variable', 'aliases_entrypoints', 'stateful'])
+def test_import_equivalence_isolation_and_roundtrip(kind, capfd, monkeypatch):
+    import ctypes
+    import re
+    from polygrad import create, _ffi
+    from polygrad.model import ROLE_PARAM, ROLE_AUX
+    monkeypatch.setenv('POLY_DUMP_KERNELS', '1')
+    # RNG resource names include the authoring device. Compare direct captures
+    # on that same device; other cases also exercise INTERP -> CPU placement.
+    author = create(device='cpu' if kind == 'stateful' else 'interp', logical='always')
+    direct_rt = create(device='cpu', logical='always')
+    fresh_rt = create(device='cpu', logical='always')
+    shared_rt = create(device='cpu', logical='always')
+    models = []
+    try:
+        source = _import_equivalence_model(author, kind)
+        models.append(source)
+        ir, weights, bundle = source.export_ir(), source.export_weights(), source.save()
+        canonical = _canonical_model_ir(ir)
+        assert canonical == _canonical_model_ir(canonical)
+        direct = _import_equivalence_model(direct_rt, kind)
+        models.append(direct)
+        # Initialization (including the complete RNG state) must match; fresh
+        # namespace allocation is intentionally allowed to differ.
+        if weights is not None:
+            direct.import_weights(weights)
+        live = shared_rt.Tensor([19.0])
+        primer = Model(lambda x: x+37, inputs={'x': shared_rt.Tensor.empty(7)})
+        models.append(primer)
+        np.testing.assert_array_equal(primer.forward(x=np.arange(7, dtype=np.float32))['output'],
+                                      np.arange(7, dtype=np.float32)+37)
+        data = (ctypes.c_uint8 * len(bundle)).from_buffer_copy(bundle)
+        private = Model._from_handle(_ffi._lib.poly_model_from_bundle(data, len(bundle)))
+        models.append(private)
+        private.place('cpu')
+        fresh = Model.load(bundle, runtime=fresh_rt)
+        models.append(fresh)
+        shared = Model.load(bundle, runtime=shared_rt)
+        models.append(shared)
+        sibling = Model.load(bundle, runtime=shared_rt)
+        models.append(sibling)
+        lanes = [direct, private, fresh, shared]
+        for model in lanes + [sibling]:
+            assert model.entrypoints() == source.entrypoints()
+            assert _canonical_model_ir(model.export_ir()) == canonical
+            for i in range(source.buf_count):
+                name = source.buf_name(i)
+                j = model.find_buf(name)
+                assert j >= 0
+                assert model.buf_shape_bounds(j) == source.buf_shape_bounds(i)
+                assert model.buf_role(j) == source.buf_role(i)
+            if kind == 'stateful':
+                model.set_optimizer('adam', lr=0.01)
+
+        def state(model):
+            return {model.buf_name(i): model.read_buffer(model.buf_name(i))
+                    for i in range(model.buf_count) if model.buf_role(i) in (ROLE_PARAM, ROLE_AUX)}
+
+        untouched = state(sibling)
+
+        def execute(model):
+            if kind == 'variable':
+                return [model.forward(x=np.arange(n*2, dtype=np.float32).reshape(n, 2))['prediction']
+                        for n in (17, 3, 11)]
+            if kind == 'aliases_entrypoints':
+                return [model.call(ep, x=[3])[out] for ep, out in
+                        [('forward', 'prediction'), ('double', 'twice'), ('forward', 'prediction')]]
+            io = {'x': np.ones(16, np.float32), 'y': np.zeros(16, np.float32)}
+            return [model.forward(x=io['x'])['prediction'],
+                    np.asarray(model.train_step(**io)), np.asarray(model.train_step(**io)),
+                    model.forward(x=io['x'])['prediction']]
+
+        results, kernels, states = [], [], []
+        for model in lanes:
+            capfd.readouterr()
+            results.append(execute(model))
+            # Compare full source, including function-name hash and argument
+            # signature. A multiset would confuse cache reuse with topology;
+            # these cold lanes must each emit the same nonempty kernel set.
+            stderr = capfd.readouterr().err
+            blocks = re.findall(r'^=== KERNEL (\S+) ===\n(.*?)\n=== END ===$', stderr, re.M | re.S)
+            assert blocks, f'{kind}: no compiled CPU kernel evidence'
+            kernels.append(set(blocks))
+            states.append(state(model))
+        for i in range(1, len(lanes)):
+            assert kernels[i] == kernels[0], f'{kind}: kernel signature/hash/source changed on import'
+            for expected, actual in zip(results[0], results[i]):
+                np.testing.assert_array_equal(actual, expected)
+            assert states[i].keys() == states[0].keys()
+            for name, expected in states[0].items():
+                np.testing.assert_array_equal(states[i][name], expected)
+        for name, expected in untouched.items():
+            np.testing.assert_array_equal(sibling.read_buffer(name), expected)
+        if kind != 'variable':
+            shared.write_buffer('alias', np.array([71], np.float32))
+            np.testing.assert_array_equal(shared.read_buffer('weight'), [71])
+            np.testing.assert_array_equal(sibling.read_buffer('weight'), untouched['weight'])
+        shared.dispose()
+        shared_rt.clear_schedule_cache()
+        shared_rt.collect()
+        np.testing.assert_array_equal(live.numpy(), [19])
+        for name, expected in untouched.items():
+            np.testing.assert_array_equal(sibling.read_buffer(name), expected)
+        execute(sibling)
+    finally:
+        for model in reversed(models):
+            model.dispose()
+        for rt in (shared_rt, fresh_rt, direct_rt, author):
+            rt.dispose()
+
+
 @pytest.mark.parametrize('device', ['cpu', 'interp', 'cuda'])
 def test_dynamic_model_training_rebinds_cached_loss(device):
     from polygrad import create

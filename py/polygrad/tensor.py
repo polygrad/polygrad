@@ -3607,6 +3607,8 @@ class Tensor:
     def rand_like(self, **kwargs):
         # Direct single-device port of pinned mixin/rand.py:70-86. Polygrad's
         # public Tensor wrapper currently exposes one device string per Tensor.
+        # Derived Tensors need not keep the Runtime-bound Python subclass.
+        kwargs.setdefault('_ctx', self._ctx)
         return type(self).rand(
             *self.shape,
             device=kwargs.pop('device', self.device),

@@ -1630,6 +1630,29 @@ print('leaving_live_instance')
         with Runtime(device='host') as runtime:
             assert runtime.can_run('add', dtype='float32', shape=(2,))
 
+    @pytest.mark.parametrize('device', ['cpu', 'interp', 'cuda'])
+    def test_rand_like_preserves_derived_tensor_runtime(self, device):
+        if device == 'cuda' and (not hasattr(_ffi._lib, 'poly_cuda_available') or not _ffi._lib.poly_cuda_available()):
+            pytest.skip('poly_cuda_available() is false in the selected library')
+        Tensor.manual_seed(123)
+        expected_default = Tensor.rand(16).numpy()
+        Tensor.manual_seed(123)
+        with Runtime(device=device) as runtime:
+            x = runtime.Tensor.ones(16)*2
+            runtime.Tensor.manual_seed(77)
+            expected = runtime.Tensor.rand(16).numpy()
+            runtime.Tensor.manual_seed(77)
+            random = x.rand_like()
+            assert random._ctx == x._ctx == runtime._ctx
+            assert random.shape == x.shape and random.device == x.device
+            np.testing.assert_array_equal(random.numpy(), expected)
+            runtime.Tensor.manual_seed(77)
+            with Context(TRAINING=1):
+                dropped = x.dropout(0.5)
+            assert dropped._ctx == runtime._ctx
+            np.testing.assert_array_equal(dropped.numpy(), np.where(expected >= 0.5, 4, 0))
+        np.testing.assert_array_equal(Tensor.rand(16).numpy(), expected_default)
+
     def test_uniform_bounds_determinism_and_validation(self):
         Tensor.manual_seed(42)
         a = Tensor.uniform(64, low=-2, high=3).numpy()

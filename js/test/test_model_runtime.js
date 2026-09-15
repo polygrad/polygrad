@@ -46,11 +46,11 @@ async function checkModelCaptureRng(pg) {
   const control = await controlTensor.toArrayAsync()
   await controlTensor.dispose()
   pg.Tensor.manual_seed(123)
-  const weight = new pg.Tensor([1.0]), input = pg.Tensor.empty(16), target = pg.Tensor.empty(16)
-  const opts = {inputs:{x:input},targets:{y:target},params:{weight},loss:(out,{y})=>out.sub(y).square().mean()}
+  const weight = new pg.Tensor([1.0], {dtype:'float32'}), input = pg.Tensor.empty(16), target = pg.Tensor.empty(16)
+  const opts = {inputs:{x:input},targets:{y:target},params:{weight,alias:weight},loss:(out,{y})=>out.sub(y).square().mean()}
   const author = ({x})=>x.mul(weight).dropout(0.5)
   const model = gpu ? await pg.Model.fromCallableAsync(author,opts) : new pg.Model(author,opts)
-  let restored
+  let restored, sibling, roundtripped
   try {
     const after = pg.Tensor.rand(16)
     try { assertClose(await after.toArrayAsync(),control,0) } finally { await after.dispose() }
@@ -66,15 +66,34 @@ async function checkModelCaptureRng(pg) {
     assert(state.some(v=>v!==0),'training did not advance RNG')
     await model.forwardAsync({x})
     assertClose(await model.readBufferAsync(counter),state,0)
-    restored = pg.Model.load(await model.saveAsync())
-    restored.setOptimizer('sgd',0.01)
+    const bytes = await model.saveAsync()
+    restored = pg.Model.load(bytes)
+    sibling = pg.Model.load(bytes)
+    roundtripped = pg.Model.load(await restored.saveAsync())
+    const siblingWeight = await sibling.readBufferAsync('weight')
+    for (const copy of [restored,roundtripped]) copy.setOptimizer('sgd',0.01)
     for(let i=0;i<2;i++) {
-      const a=await model.trainStepAsync({x,y}), b=await restored.trainStepAsync({x,y})
-      assert(Math.abs(a-b)<1e-5,'checkpoint changed RNG continuation')
-      assertClose(await model.readBufferAsync(counter),await restored.readBufferAsync(counter),0)
-      assertClose(await model.readBufferAsync('weight'),await restored.readBufferAsync('weight'),0)
+      const a=await model.trainStepAsync({x,y})
+      for (const copy of [restored,roundtripped]) {
+        const b=await copy.trainStepAsync({x,y})
+        assert(Math.abs(a-b)<1e-5,'checkpoint changed RNG continuation')
+        assertClose(await model.readBufferAsync(counter),await copy.readBufferAsync(counter),0)
+        assertClose(await model.readBufferAsync('weight'),await copy.readBufferAsync('weight'),0)
+        assertClose(await copy.readBufferAsync('alias'),await copy.readBufferAsync('weight'),0)
+      }
+      assertClose(await sibling.readBufferAsync(counter),state,0)
+      assertClose(await sibling.readBufferAsync('weight'),siblingWeight,0)
     }
+    await restored.writeBufferAsync('alias',new Float32Array([71]))
+    assertClose(await restored.readBufferAsync('weight'),[71],0)
+    assertClose(await sibling.readBufferAsync('weight'),siblingWeight,0)
+    await restored.dispose()
+    pg.clearScheduleCache(); pg.collect()
+    assertClose(await sibling.readBufferAsync(counter),state,0)
+    assertClose((await sibling.forwardAsync({x})).output,Array(16).fill(siblingWeight[0]),0)
   } finally {
+    if(roundtripped) await roundtripped.dispose()
+    if(sibling) await sibling.dispose()
     if(restored) await restored.dispose()
     await model.dispose()
     for(const tensor of [weight,input,target]) await tensor.dispose()
@@ -146,7 +165,16 @@ async function checkModelVariableShapes(pg) {
     assertClose(await model.readBufferAsync('x'),before,0)
     const bytes = await model.saveAsync({includeOptimizer:false})
     restored = pg.Model.load(bytes)
-    assertClose((await restored.forwardAsync({x:small,y:small})).prediction, Array.from(small,v=>v*3),0)
+    const roundtripped = pg.Model.load(await restored.saveAsync({includeOptimizer:false}))
+    try {
+      for (const copy of [restored,roundtripped]) {
+        assert(JSON.stringify(copy.bufShapeBounds(copy.findBuf('x')))==='[[1,32],[2,2]]')
+        for (const size of [17,3,11]) {
+          const values=Float32Array.from({length:size*2},(_,i)=>i)
+          assertClose((await copy.forwardAsync({x:values,y:values})).prediction,Array.from(values,v=>v*3),0)
+        }
+      }
+    } finally { await roundtripped.dispose() }
     await model.dispose()
     pg.clearScheduleCache(); pg.collect()
     assertClose(await first.toArrayAsync(),Array.from(a,v=>v*3),0)
@@ -1019,9 +1047,13 @@ async function checkRuntimeImports(pg, Model) {
   const gpu = String(pg.device).toLowerCase() === 'webgpu'
   const x = pg.Tensor.empty([1]), w = new pg.Tensor([2], {dtype:'float32'})
   const live = new pg.Tensor([19], {dtype:'float32'})
-  const options = {inputs:{x}, params:{w, alias:w}}
-  const source = gpu ? await Model.fromCallableAsync(({x}) => x.mul(w), options)
-    : Model.fromCallable(({x}) => x.mul(w), options)
+  const options = {inputs:{x}, params:{w, alias:w}, entrypoints:[
+    {name:'forward',inputs:['x'],outputs:['output']},
+    {name:'double',inputs:['x'],outputs:['twice']}
+  ]}
+  const author = ({x}) => ({output:x.mul(w),twice:x.mul(w).mul(2)})
+  const source = gpu ? await Model.fromCallableAsync(author, options)
+    : Model.fromCallable(author, options)
   const models = [source]
   const read = m => gpu ? m.readBufferAsync('w') : m.readBuffer('w')
   const forward = m => gpu ? m.forwardAsync({x:[3]}) : m.forward({x:[3]})
@@ -1034,6 +1066,12 @@ async function checkRuntimeImports(pg, Model) {
     assertClose(await read(a), [7], 0)
     assertClose((await forward(b)).output, [6], 0)
     assertClose((await forward(source)).output, [6], 0)
+    const c = Model.load(await b.saveAsync())
+    models.push(c)
+    assertClose((await c.callAsync('double',{x:[3]})).twice,[12],0)
+    await b.writeBufferAsync('alias',new Float32Array([11]))
+    assertClose((await c.callAsync('double',{x:[3]})).twice,[12],0)
+    assertClose((await c.forwardAsync({x:[3]})).output,[6],0)
     for (const n of [0, 31, Math.floor(bytes.length/2), bytes.length-1]) {
       let rejected = false
       try { Model.load(bytes.slice(0, n)) } catch { rejected = true }
@@ -1041,7 +1079,8 @@ async function checkRuntimeImports(pg, Model) {
     }
     await a.dispose()
     pg.collect()
-    assertClose((await forward(b)).output, [6], 0)
+    assertClose((await forward(b)).output, [33], 0)
+    assertClose((await c.callAsync('double',{x:[3]})).twice,[12],0)
     assertClose(gpu ? await live.toArrayAsync() : live.toArray(), [19], 0)
   } finally {
     for (const model of models) await model.dispose()
