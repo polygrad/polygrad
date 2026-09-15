@@ -31,7 +31,6 @@
       "IMAGE": "0",
       "MKL_NUM_THREADS": "1",
       "OMP_NUM_THREADS": "1",
-      "POLY_DEVICE": "cpu",
       "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
       "PYTHONHASHSEED": "0",
       "SKIP_SLOW_TEST": "0",
@@ -40,7 +39,7 @@
     "failure_signature": "source-path-and-message-v2",
     "python": "3.11.12 (main, Apr  9 2025, 04:04:00) [Clang 20.1.0 ]",
     "reference_commit": "6f87158d77f66a36d5f8bbe915170b24e2acabe8",
-    "runner_sha256": "fdf52ba5d86dbe984ed67e448ffb2629388e3342aaa35cbc5c05cbd334783347",
+    "runner_sha256": "445c3e2ca641004de5cef3edf7252db723b559c4c7ba275ae327460f9ee85e9d",
     "test_sha256": {
       "test/backend/test_setitem.py": "bfa540e93690962ef332f5a5e8c6e6913f6fd6a219111da20dd8d596c5547e74",
       "test/backend/test_tensor.py": "5f98a533f473dd819728e208b5ced15b04acf63a3944fee4f9d957b55954ee59",
@@ -165,8 +164,8 @@
     ]
   },
   "evidence": {
-    "report": "/home/anton/projects/polygrad/polygrad/temp/nn-compat-closeout-20260913.Koda7V/suite/tensor/report.json",
-    "sha256": "2879a5604ebb87182d77713f71273a463c3a4a45b5bf292249fa2805a97cbb69"
+    "report": "temp/candidate-reconcile-20260915.Ud7MV5/upstream/tensor/report.json",
+    "sha256": "70edd759f6a50a3d89efbfe54bb05ac2060eac480429f1b96043cc1a5872ce17"
   },
   "schema_version": 1,
   "tests": {

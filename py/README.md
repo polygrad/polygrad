@@ -311,6 +311,8 @@ construction. Capture rejects parameter/input assignments and effectful reads;
 arbitrary Python side effects are not transactional. Saved bundles retain RNG
 and auxiliary state. Reapply the same optimizer configuration after loading when
 resuming training; optimizer state and configuration are distinct.
+Without a loss, capture uses the current `TRAINING` context value for its forward
+entrypoint; changing that value later does not recapture the Model.
 
 For variable-size calls, capture a bounded variable leading dimension with fixed
 trailing dimensions. Calls and explicit training steps bind concrete extents;

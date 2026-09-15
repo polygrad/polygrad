@@ -946,6 +946,23 @@
         "temp/environment-parity-20260914.OKqum5/tinygrad.log"
       ],
       "close_when": "Port supported multi-target/renderer/interface/architecture selection with matching pinned probes, without treating unimplemented backends as executable or dropping target fields."
+    },
+    {
+      "id": "PG-PARITY-038",
+      "status": "open_debt",
+      "stages": ["renderer-source"],
+      "area": "Rendered parameter shape suffixes",
+      "tinygrad": "CStyleLanguage.render names PARAM values data{slot}_{shape}, including the trailing underscore for scalar shapes.",
+      "polygrad": "The C-style and WGSL renderers name parameters data{slot}, omitting the shape suffix. Argument numbering and runtime binding remain separate from this diagnostic spelling.",
+      "rationale": "Source-text parity is incomplete. This is not a demonstrated value or argument-binding defect and grants no graph or numerical allowance. Do not change names to conceal incorrect imported PARAM slots.",
+      "approval": null,
+      "evidence": [
+        "references/tinygrad_latest/tinygrad/renderer/cstyle.py:CStyleLanguage.render",
+        "src/renderer/cstyle.c:poly_render_c",
+        "src/renderer/wgsl.c",
+        "py/tests/test_model.py:test_import_equivalence_isolation_and_roundtrip"
+      ],
+      "close_when": "Port the supported renderer naming convention with source comparisons while preserving independent slot, signature and execution assertions."
     }
   ]
 }

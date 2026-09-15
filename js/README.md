@@ -33,6 +33,19 @@ execution. Authored assignments require auxiliary state (`is_param_(false)`);
 parameter updates belong to the optimizer. Arbitrary JavaScript side effects
 are not rolled back. Saved bundles preserve auxiliary/RNG and optional optimizer
 state; reapply the same optimizer configuration to resume training after loading.
+Without a loss, capture uses the current `Tensor.training` mode for its forward
+entrypoint; changing that setting later does not recapture the Model.
+
+Model inputs may have one bounded variable leading dimension with fixed trailing
+dimensions; storage currently reserves the maximum capacity. Calls reject empty
+inputs. A flat typed array uses the declared signature, or supply
+`{data: typedArray, shape: [rows, columns]}` for an explicit shape.
+
+Tensor inputs must belong to the Model's Runtime and device. Any Tensor input
+makes outputs owned device Tensors; array-only calls return host arrays. Returned
+Tensors keep their invocation's values and shape across later calls and Model
+disposal, but not Runtime disposal. This uses device copies, not zero-copy or
+differentiable Model composition. Dispose results when finished.
 
 ## Native installation
 
@@ -153,12 +166,15 @@ Environment variables:
 
 ```bash
 POLY_CORE=wasm node app.js
-POLY_DEVICE=cuda node app.js
+POLY_DEV=cuda node app.js
 ```
 
-For the native core, `POLY_DEVICE` is handled by the C runtime and may select
-`cpu`, `cuda`, `hip`, `x86`, or `interp`. For the WASM core, device choices are
-`wasm`, `interp`, and browser `webgpu` when available.
+Device selection uses the explicit `device` option, then `POLY_DEV`, then `DEV`,
+then the platform default. Target names are case-insensitive. Native choices
+include `cpu`, `cuda`, `hip`, `x86`, and `interp`; Wasm choices include `wasm`,
+`interp`, and browser `webgpu` when available. Unsupported ordinals/multi-target
+specifications reject rather than selecting another device. `POLY_DEVICE` is
+no longer read. Browsers use runtime options, not process environment variables.
 
 Call `pg.dispose()` when an application or long-running script is done with an
 explicit runtime.

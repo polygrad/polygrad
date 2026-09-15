@@ -111,6 +111,10 @@ rank-limited: materialization preserves every RANGE, while buffer-limit
 splitting rejects an intermediate shape it cannot represent. This is an open
 parity limitation, not a claim of complete Tinygrad compatibility.
 
+C-style and WGSL parameter names omit Tinygrad's shape suffix
+(`PG-PARITY-038`). This source-text parity debt does not permit differences in
+argument slots, graph topology or computed values.
+
 The schedule cache has no automatic eviction or size cap. Every distinct
 cached graph keeps its schedule and, unlike Tinygrad's byte keys, its source
 graph (`PG-PARITY-032`). Long-lived runtimes producing many distinct graphs can
@@ -458,7 +462,7 @@ Low-level `UOp.variable` bounds retain integer, floating-point and boolean
 endpoints independently of the variable dtype. C takes scalar `PolyArg` values;
 Python accepts `int`/`float`/`bool`; JavaScript uses `pg.uop.variable(...)`, with
 `BigInt` for exact wide integers. NaN, reversed and nonnumeric bounds are rejected.
-Current packages require C ABI89 and graph formats PGIR19/PGPM10; incompatible
+Current packages require C ABI90 and graph formats PGIR19/PGPM10; incompatible
 artifacts are rejected. Typed endpoints can exceed the runtime's signed64
 variable-binding domain; metadata support does not imply executable bindings.
 

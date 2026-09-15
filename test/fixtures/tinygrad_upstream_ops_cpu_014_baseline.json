@@ -15,7 +15,6 @@
       "IMAGE": "0",
       "MKL_NUM_THREADS": "1",
       "OMP_NUM_THREADS": "1",
-      "POLY_DEVICE": "cpu",
       "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
       "PYTHONHASHSEED": "0",
       "SKIP_SLOW_TEST": "0",
@@ -24,7 +23,7 @@
     "failure_signature": "source-path-and-message-v2",
     "python": "3.11.12 (main, Apr  9 2025, 04:04:00) [Clang 20.1.0 ]",
     "reference_commit": "6f87158d77f66a36d5f8bbe915170b24e2acabe8",
-    "runner_sha256": "fdf52ba5d86dbe984ed67e448ffb2629388e3342aaa35cbc5c05cbd334783347",
+    "runner_sha256": "445c3e2ca641004de5cef3edf7252db723b559c4c7ba275ae327460f9ee85e9d",
     "test_sha256": {
       "test/backend/test_ops.py": "b0b8f94a538c555d3ecc094cc7d001de157805b340671b5efa845d54e0cefaf1"
     },
@@ -45,8 +44,8 @@
     ]
   },
   "evidence": {
-    "report": "/home/anton/projects/polygrad/polygrad/temp/nn-compat-closeout-20260913.Koda7V/ops-retry/report.json",
-    "sha256": "3b6ab1fe7e0a59ded1e54a8abdea2994aa6ea63ded8bb81dd2b7f714b11b8d3e"
+    "report": "temp/candidate-reconcile-20260915.Ud7MV5/upstream/ops/report.json",
+    "sha256": "acad50b2acd3d911f8211a88fabb6ba9d99df4abd9cba3685ef8c7b392a67659"
   },
   "schema_version": 1,
   "tests": {

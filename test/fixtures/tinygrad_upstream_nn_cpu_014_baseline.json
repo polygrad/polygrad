@@ -18,7 +18,6 @@
       "IMAGE": "0",
       "MKL_NUM_THREADS": "1",
       "OMP_NUM_THREADS": "1",
-      "POLY_DEVICE": "cpu",
       "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
       "PYTHONHASHSEED": "0",
       "RUN_SLOW": "1",
@@ -28,7 +27,7 @@
     "failure_signature": "source-path-and-message-v2",
     "python": "3.11.12 (main, Apr  9 2025, 04:04:00) [Clang 20.1.0 ]",
     "reference_commit": "6f87158d77f66a36d5f8bbe915170b24e2acabe8",
-    "runner_sha256": "fdf52ba5d86dbe984ed67e448ffb2629388e3342aaa35cbc5c05cbd334783347",
+    "runner_sha256": "445c3e2ca641004de5cef3edf7252db723b559c4c7ba275ae327460f9ee85e9d",
     "test_sha256": {
       "test/backend/test_nn.py": "a64ce69e34511cc179a518c92ce2e91b51ff51fdf43a44fcc22c88c7bda8f23b",
       "test/backend/test_optim.py": "1b6a8537c1c826ee5500cca1134a6a4a61dc302b2a3440393d64fc163370faa6"
@@ -1278,7 +1277,7 @@
   },
   "scope_note": "Selected CPU NN/optimizer frontier, not a parity allowance or full compiler API certificate. Test bodies and skips remain unchanged; RUN_SLOW is enabled. Eight Muon controls execute against Torch2.10.0+cpu on both providers.",
   "evidence": {
-    "report": "/home/anton/projects/polygrad/polygrad/temp/nn-compat-closeout-20260913.Koda7V/suite/nn/report.json",
-    "sha256": "9d029006013ca5288cf042ae3a5becf9c236969ee39720367d16758b0b75da1d"
+    "report": "temp/candidate-reconcile-20260915.Ud7MV5/upstream/nn/report.json",
+    "sha256": "f23f28fd379cabe4d3e07163ffce3fe01a09a01f25625dc0568cfc7bc2e101e7"
   }
 }
