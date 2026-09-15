@@ -2497,6 +2497,24 @@ for _offset in (False, True):
             'callify', lambda o=_offset, r=_result: typed_view_assign_callify_graph(o, r))
 
 
+def chained_assignment_graph(storage, result):
+    z = Tensor([1, 2, 3, 4], dtype='float32')
+    if storage: z.realize()
+    x = Tensor([10, 20], dtype='float32')
+    v = z[:2]
+    v += x
+    w = v[:1]
+    w += 5
+    out = {'z': z, 'v': v, 'w': w}[result]
+    return {'physical': out.uop, 'logical': logical(out)}
+
+
+for _storage in (False, True):
+    for _result in ('z', 'v', 'w'):
+        CASES[f'chained_assignment_{"buffer" if _storage else "copy"}_{_result}'] = (
+            'tensor', lambda s=_storage, r=_result: chained_assignment_graph(s, r))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--case", action="append", choices=sorted(CASES))

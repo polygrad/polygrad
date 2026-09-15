@@ -5268,6 +5268,33 @@ async function runTensorTests(pg, createRuntime) {
     }
   })
 
+  await test('chained assignment: Tinygrad read-order semantics', async () => {
+    const cases = [
+      ['wvz', {w: [16], v: [16, 22], z: [16, 22, 3, 4]}],
+      ['wzv', {w: [16], z: [16, 22, 3, 4], v: [16, 22]}],
+      ['vwz', {v: [11, 22], w: [16], z: [16, 22, 3, 4]}],
+      ['vzw', {v: [11, 22], z: [11, 22, 3, 4], w: [16]}],
+      ['zwv', {z: [1, 2, 3, 4], w: [16], v: [16, 22]}],
+      ['zvw', {z: [1, 2, 3, 4], v: [11, 22], w: [16]}]
+    ]
+    for (const logical of ['always', 'until_realize', 'never']) {
+      for (const dtype of ['float32', 'int32']) for (const [order, expected] of cases) {
+        const z = new Tensor([1, 2, 3, 4], {dtype, logical})
+        const x = new Tensor([10, 20], {dtype, logical})
+        const v = z.getitem({start: 0, stop: 2}), vx = v.add(x)
+        v.assign(vx)
+        await vx.dispose()
+        const w = v.getitem({start: 0, stop: 1}), w5 = w.add(5)
+        w.assign(w5)
+        await w5.dispose()
+        const tensors = {z, v, w}
+        // Snapshot each read immediately: realization order affects pending writes.
+        for (const name of order) assertClose(Array.from(await tensors[name].toArray()), expected[name])
+        await w.dispose(); await v.dispose(); await x.dispose(); await z.dispose()
+      }
+    }
+  })
+
   await test('indexed owners: detached write and identity read', async () => {
     const x = Tensor.zeros(4)
     await x.realize()

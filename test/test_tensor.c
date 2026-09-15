@@ -1140,6 +1140,43 @@ TEST(tensor, slice_iadd_keeps_same_owner_roots) {
   PASS();
 }
 
+TEST(tensor, chained_assignment_requires_buffer_identity) {
+  bool valid = true;
+  for (int policy = POLY_LOGICAL_NEVER; policy <= POLY_LOGICAL_UNTIL_REALIZE; policy++) {
+    for (int copied = 0; copied < 2; copied++) {
+      PolyCtx *ctx = poly_ctx_new();
+      poly_ctx_set_logical_policy(ctx, policy);
+      float data[] = {1, 2, 3, 4};
+      PolyTensor *z =
+          copied
+              ? poly_tensor_to_device_name(
+                    ctx,
+                    poly_tensor_from_host(ctx, data, sizeof(data), POLY_FLOAT32, (int64_t[]){4}, 1),
+                    "INTERP"
+                )
+              : poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){4}, 1, POLY_DEVICE_INTERP);
+      PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){2}, 1, POLY_DEVICE_INTERP);
+      PolyTensor *v = poly_tensor_shrink(ctx, z, (int64_t[][2]){{0, 2}}, 1);
+      if (!v) {
+        poly_ctx_destroy(ctx);
+        valid = false;
+        continue;
+      }
+      valid &= v && poly_tensor_assign(ctx, v, poly_tensor_alu2(ctx, POLY_OP_ADD, v, x));
+      PolyUOp *before = v->uop_physical;
+      PolyTensor *w = poly_tensor_shrink(ctx, v, (int64_t[][2]){{0, 1}}, 1);
+      PolyTensor *five = poly_tensor_const_like_float(ctx, w, 5.0);
+      valid &= w && five && poly_tensor_assign(ctx, w, poly_tensor_alu2(ctx, POLY_OP_ADD, w, five));
+      /* AFTER(SHRINK(COPY)) is not storage; AFTER(BUFFER) is. Only the latter
+       * retargets other live owners when the nested view is assigned. */
+      valid &= copied ? v->uop_physical == before : v->uop_physical != before;
+      poly_ctx_destroy(ctx);
+    }
+  }
+  ASSERT_TRUE(valid);
+  PASS();
+}
+
 static PolyTensor *build_logical_policy_view_assign_oracle(
     PolyCtx *ctx,
     PolyLogicalPolicy policy,

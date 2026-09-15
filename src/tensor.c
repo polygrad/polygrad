@@ -316,20 +316,33 @@ static bool tensor_assign_anchor_op(PolyOps op) {
   return poly_opset_has(POLY_GROUP_MOVEMENT, op) || op == POLY_OP_BITCAST || op == POLY_OP_DETACH;
 }
 
-static PolyUOp *tensor_assign_view_anchor(PolyUOp *u) {
+static PolyUOp *tensor_assign_view_anchor(PolyUOp *u, bool logical) {
   if (!u || poly_uop_has_buffer_identity(u)) return NULL;
 
   /* tinygrad retargets view assigns at the nearest buffer-identity level:
    * SHRINK(BUFFER) maps BUFFER -> AFTER(BUFFER, assign), while
    * PERMUTE(RESHAPE(BUFFER)) maps RESHAPE(BUFFER) -> AFTER(...)
-   * (tensor.py:246-252).  The retained logical twin is not collapsed by
+   * (Tensor.assign).  The retained logical twin is not collapsed by
    * realization, so its explicit CONTIGUOUS provenance node is the matching
    * materialization occurrence after the physical twin becomes BUFFER.  Stop
    * at that existing Polygrad boundary, or at AFTER when chaining a pending
    * view write; the physical graph never takes this CONTIGUOUS-only branch. */
   PolyUOp *cur = u;
   while (cur && !poly_uop_has_buffer_identity(cur)) {
-    if (cur->op == POLY_OP_AFTER || cur->op == POLY_OP_CONTIGUOUS) return cur != u ? cur : NULL;
+    if (logical && (cur->op == POLY_OP_AFTER || cur->op == POLY_OP_CONTIGUOUS))
+      return cur != u ? cur : NULL;
+    if (cur->op == POLY_OP_AFTER) {
+      /* UOp.has_buffer_identity(after_ok=True): a pending write is not
+       * storage merely because it is AFTER. AFTER(SHRINK(COPY)) must take
+       * the simple-assign branch, without retargeting other live wrappers. */
+      PolyUOp *identity = cur;
+      while (identity->n_src > 0 &&
+             (identity->op == POLY_OP_AFTER || identity->op == POLY_OP_RESHAPE ||
+              identity->op == POLY_OP_UNSHARD || identity->op == POLY_OP_MSELECT))
+        identity = identity->src[0];
+      return cur != u && (identity->op == POLY_OP_BUFFER || identity->op == POLY_OP_PARAM) ? cur
+                                                                                           : NULL;
+    }
     if (!tensor_assign_anchor_op(cur->op) || cur->n_src < 1) return NULL;
     cur = cur->src[0];
   }
@@ -2001,8 +2014,9 @@ PolyTensor *poly_tensor_assign_after(
                         logical_after->src[0] != target_logical))
     return NULL;
   if (tensor_capture_record(ctx) != 0) return NULL;
-  PolyUOp *physical_view_anchor = tensor_assign_view_anchor(target_physical);
-  PolyUOp *logical_view_anchor = build_logical ? tensor_assign_view_anchor(target_logical) : NULL;
+  PolyUOp *physical_view_anchor = tensor_assign_view_anchor(target_physical, false);
+  PolyUOp *logical_view_anchor =
+      build_logical ? tensor_assign_view_anchor(target_logical, true) : NULL;
   /* Tensor.assign's branch is determined by the eager physical graph. A
    * creation COPY is not storage even when its portable twin is a BUFFER;
    * logical retention must not turn that simple assign into a view write. */

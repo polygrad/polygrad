@@ -3556,6 +3556,29 @@ class TestSpatialOwners:
 class TestIndexedOwners:
     @pytest.mark.parametrize('device', ['cpu', 'interp'])
     @pytest.mark.parametrize('logical', ['always', 'until_realize', 'never'])
+    @pytest.mark.parametrize('dtype', [dtypes.float32, dtypes.int32])
+    @pytest.mark.parametrize('order,expected', [
+        ('wvz', {'w': [16], 'v': [16, 22], 'z': [16, 22, 3, 4]}),
+        ('wzv', {'w': [16], 'v': [16, 22], 'z': [16, 22, 3, 4]}),
+        ('vwz', {'w': [16], 'v': [11, 22], 'z': [16, 22, 3, 4]}),
+        ('vzw', {'w': [16], 'v': [11, 22], 'z': [11, 22, 3, 4]}),
+        ('zwv', {'w': [16], 'v': [16, 22], 'z': [1, 2, 3, 4]}),
+        ('zvw', {'w': [16], 'v': [11, 22], 'z': [1, 2, 3, 4]}),
+    ])
+    def test_chained_assignment_read_order(self, device, logical, dtype, order, expected):
+        with Runtime(device=device, logical=logical) as rt:
+            z, x = rt.Tensor([1, 2, 3, 4], dtype=dtype), rt.Tensor([10, 20], dtype=dtype)
+            v = z[:2]
+            v += x
+            w = v[:1]
+            w += 5
+            tensors = {'z': z, 'v': v, 'w': w}
+            # Snapshot each read immediately: later writes may change shared storage.
+            actual = {name: tensors[name].numpy().tolist() for name in order}
+            assert actual == expected
+
+    @pytest.mark.parametrize('device', ['cpu', 'interp'])
+    @pytest.mark.parametrize('logical', ['always', 'until_realize', 'never'])
     @pytest.mark.parametrize('explicit', [False, True])
     @pytest.mark.parametrize('op', ['add', 'sub', 'mul', 'div'])
     def test_slice_inplace_preserves_assignment_and_gradients(self, device, logical, explicit, op):
