@@ -2,6 +2,8 @@
 
 import atexit
 import ctypes
+import functools
+from types import SimpleNamespace
 from collections import defaultdict
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
@@ -299,6 +301,32 @@ def _bound_tensor_class(ctx, runtime):
     return RuntimeTensor
 
 
+def _bound_runtime_call(runtime, function):
+    @functools.wraps(function)
+    def call(*args, **kwargs):
+        runtime._check_live()
+        selected = kwargs.get('runtime')
+        if selected is not None and selected is not runtime:
+            raise ValueError('constructor belongs to another Runtime')
+        kwargs['runtime'] = runtime
+        return function(*args, **kwargs)
+    return call
+
+
+def _bound_model_class(runtime):
+    # Bind construction/import ownership, not the executable Python class.
+    # from_program deliberately retains its private, device-bound context.
+    class RuntimeModel(Model):
+        __init__ = _bound_runtime_call(runtime, Model.__init__)
+
+    for name in ('from_callable', 'from_tensors', 'from_bindings', 'load', 'from_bundle',
+                 'from_ir', 'from_hf', 'from_gguf'):
+        setattr(RuntimeModel, name, staticmethod(_bound_runtime_call(runtime, getattr(Model, name))))
+    RuntimeModel.__name__ = 'Model'
+    RuntimeModel.__qualname__ = 'Model'
+    return RuntimeModel
+
+
 class Runtime:
     """Explicit PolyCtx owner for device/context-scoped Python code."""
 
@@ -309,24 +337,31 @@ class Runtime:
       if not self._ctx:
           raise RuntimeError('poly_ctx_new failed; check POLY_LOGICAL')
       self._disposed = False
-      policy = _normalize_logical_policy(logical)
-      if policy is not None and lib.poly_ctx_set_logical_policy(self._ctx, policy) != 0:
-          lib.poly_ctx_destroy(self._ctx)
-          self._ctx = None
-          self._disposed = True
-          raise ValueError(f'invalid logical policy {logical!r}')
-      dev_id = lib.poly_device_by_name(self._device.encode('utf-8'))
-      if dev_id >= 0 and hasattr(lib, 'poly_ctx_set_preferred_device'):
-          lib.poly_ctx_set_preferred_device(self._ctx, dev_id)
-      self.Tensor = _bound_tensor_class(self._ctx, self)
-      def runtime_variable(name, min_val, max_val):
-          self._check_live()
-          return Variable(name, min_val, max_val, _ctx=self._ctx)
-      self.Variable = runtime_variable
-      self.Model = Model
-      self.GlobalCounters = _global_counters_class(self._ctx)
-      self.jit = jit
-      self.compile = compile
+      try:
+          policy = _normalize_logical_policy(logical)
+          if policy is not None and lib.poly_ctx_set_logical_policy(self._ctx, policy) != 0:
+              raise ValueError(f'invalid logical policy {logical!r}')
+          dev_id = lib.poly_device_by_name(self._device.encode('utf-8'))
+          if dev_id >= 0 and hasattr(lib, 'poly_ctx_set_preferred_device'):
+              lib.poly_ctx_set_preferred_device(self._ctx, dev_id)
+          self.Tensor = _bound_tensor_class(self._ctx, self)
+          def runtime_variable(name, min_val, max_val):
+              self._check_live()
+              return Variable(name, min_val, max_val, _ctx=self._ctx)
+          self.Variable = runtime_variable
+          self.Model = _bound_model_class(self)
+          self.nn = nn._bind_runtime(self)
+          from . import models
+          self.models = SimpleNamespace(**{
+              name: _bound_runtime_call(self, getattr(models, name)) for name in models.__all__
+          })
+          self.GlobalCounters = _global_counters_class(self._ctx)
+          self.jit = jit
+          self.compile = compile
+      except BaseException:
+          # Namespace construction can fail after the C context is allocated.
+          self.dispose()
+          raise
 
     def context(self, **kwargs):
       if set(kwargs) != {'LOGICAL'}:

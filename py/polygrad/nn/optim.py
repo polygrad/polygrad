@@ -32,6 +32,30 @@ def _ptr_array(items):
     return (_ffi._ptr * len(items))(*[x._tensor for x in items])
 
 
+def _bind_runtime(runtime):
+    import functools
+    from types import SimpleNamespace
+
+    def bind(constructor):
+        @functools.wraps(constructor)
+        def create(params, *args, **kwargs):
+            runtime._check_live()
+            params = list(params)
+            if any(p._ctx != runtime._ctx for p in params):
+                raise ValueError('optimizer parameter belongs to another Runtime')
+            return constructor(params, *args, **kwargs)
+        return create
+
+    def group(*optimizers):
+        runtime._check_live()
+        if any(p._ctx != runtime._ctx for opt in optimizers for p in opt.params):
+            raise ValueError('optimizer belongs to another Runtime')
+        return OptimizerGroup(*optimizers)
+
+    return SimpleNamespace(**{name: bind(globals()[name]) for name in
+        ('Optimizer', 'SGD', 'Adam', 'AdamW', 'LARS', 'LAMB', 'Muon')}, OptimizerGroup=group)
+
+
 def _realize_all(items):
     if items:
         items[0].realize(*items[1:])

@@ -452,6 +452,38 @@ async function runTensorTests(pg, createRuntime) {
     assert(moved.uop.device === 'INTERP' && moved.device === 'INTERP')
   })
 
+  await test('Runtime ownership: reject foreign realization before FFI', async () => {
+    const other = await createRuntime()
+    const x = new Tensor([1, 2], { dtype: 'float32' })
+    const y = new other.Tensor([3, 4], { dtype: 'float32' })
+    try {
+      let failure
+      try { await x.realizeAsync(y) } catch (e) { failure = e }
+      assert(failure && /another Runtime/.test(failure.message), 'foreign Tensor reached realization')
+      assertClose(await x.toArrayAsync(), [1, 2])
+      assertClose(await y.toArrayAsync(), [3, 4])
+    } finally {
+      await x.dispose()
+      await y.dispose()
+      await other.dispose()
+    }
+  })
+
+  await testIf(pg.device !== 'webgpu', 'Runtime ownership: realized typed storage views', async () => {
+    // WebGPU sub-buffer offsets remain an explicitly unsupported capability.
+    const source = new Tensor(Array.from({ length: 100 }, (_, i) => i), { dtype: 'uint8' })
+    await source.realizeAsync()
+    const views = [26, 65].map(n => source.shrink([[n, n + 4]]).bitcast('uint16'))
+    try {
+      await views[0].realizeAsync(views[1])
+      assertClose(await views[0].toArrayAsync(), [6938, 7452], 0)
+      assertClose(await views[1].toArrayAsync(), [16961, 17475], 0)
+    } finally {
+      for (const view of views) await view.dispose()
+      await source.dispose()
+    }
+  })
+
   await test('device metadata admits deviceless assign and indexing', async () => {
     const value = new Tensor(pg.uop.constant(1.25, 'float32'), { device: 'interp' })
     const target = Tensor.empty([4])

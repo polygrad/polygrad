@@ -3554,6 +3554,74 @@ class TestSpatialOwners:
 
 
 class TestIndexedOwners:
+    @pytest.mark.parametrize('mode', ['plain', 'nested', 'reshape'])
+    def test_realize_typed_storage_view_keeps_original_root(self, mode):
+        with Runtime(device='cpu') as rt:
+            source = rt.Tensor(list(range(100)), dtype='uint8').realize()
+            if mode == 'nested':
+                view = source[20:40][6:10].bitcast('uint16')
+                expected = [6938, 7452]
+            elif mode == 'reshape':
+                view = source.reshape(10, 10)[2:3, 2:6].bitcast('uint16')
+                expected = [[5910, 6424]]
+            else:
+                view = source[26:30].bitcast('uint16')
+                expected = [6938, 7452]
+            root = view.uop_physical.raw
+            view.realize()
+            assert root == view.uop_physical.raw
+            np.testing.assert_array_equal(view.numpy(), expected)
+
+    def test_realize_rejects_foreign_runtime_before_mutation(self):
+        with Runtime(device='interp') as rt, Runtime(device='interp') as other:
+            x, y = rt.Tensor([1., 2.]), other.Tensor([3., 4.])
+            with pytest.raises(ValueError, match='another Runtime'):
+                x.realize(y)
+            np.testing.assert_array_equal(x.numpy(), [1., 2.])
+            np.testing.assert_array_equal(y.numpy(), [3., 4.])
+
+    @pytest.mark.parametrize('device', ['cpu', 'interp'])
+    @pytest.mark.parametrize('operation', ['assign', 'triu', 'tril', 'gather', 'scatter', 'scatter_reduce', 'cross_entropy'])
+    def test_runtime_temporaries_preserve_owner(self, device, operation):
+        with Runtime(device=device) as rt:
+            if operation == 'assign':
+                result = rt.Tensor([1., 2.]).realize().assign([3., 4.])
+                expected = [3., 4.]
+            elif operation in ('triu', 'tril'):
+                values = np.arange(6, dtype=np.float32).reshape(2, 3)
+                result = getattr(rt.Tensor(values), operation)()
+                expected = getattr(np, operation)(values)
+            elif operation == 'gather':
+                result = rt.Tensor([1., 2., 3.]).gather(0, [2, 0])
+                expected = [3., 1.]
+            elif operation == 'scatter':
+                result = rt.Tensor([1., 2., 3.]).scatter(0, [0, 2], 5.)
+                expected = [5., 2., 5.]
+            elif operation == 'scatter_reduce':
+                result = rt.Tensor([1., 2., 3.]).scatter_reduce(0, [0, 2], [5., 7.], 'sum')
+                expected = [6., 2., 10.]
+            else:
+                result = rt.Tensor([[0., 0.], [0., 0.]]).cross_entropy([0, 1])
+                expected = np.log(2.)
+            assert result._ctx == rt._ctx
+            np.testing.assert_allclose(result.numpy(), expected, rtol=1e-6)
+
+    @pytest.mark.parametrize('device', ['cpu', 'interp'])
+    @pytest.mark.parametrize('realized', [False, True])
+    def test_assign_rejects_foreign_runtime_without_mutation(self, device, realized):
+        with Runtime(device=device) as left, Runtime(device=device) as right:
+            target, source = left.Tensor([1., 2.]), right.Tensor([3., 4.])
+            if realized:
+                target.realize()
+            root = target.uop_physical.raw
+            with pytest.raises(ValueError, match='another Runtime'):
+                target.assign(source)
+            assert target.uop_physical.raw == root
+            np.testing.assert_array_equal(target.numpy(), [1., 2.])
+            np.testing.assert_array_equal(source.numpy(), [3., 4.])
+            target.assign([5., 6.])
+            np.testing.assert_array_equal(target.numpy(), [5., 6.])
+
     @pytest.mark.parametrize('logical', ['never', 'always'])
     def test_index_temporaries_use_explicit_runtime(self, logical):
         with Runtime(device='interp', logical=logical) as runtime:

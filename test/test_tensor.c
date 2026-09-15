@@ -2489,6 +2489,53 @@ TEST(tensor, stateful_rand_zero_extent_constructs_current_empty_graph) {
   PASS();
 }
 
+TEST(tensor, mutation_rejects_foreign_runtime_before_publication) {
+  /* C ownership adaptation of Tensor.assign/replace and UOp.clone: foreign
+   * roots must not enter this context's CSE or replace its live Tensor roots. */
+  for (int operation = 0; operation < 6; operation++) {
+    PolyCtx *ctx = poly_ctx_new(), *foreign = poly_ctx_new();
+    PolyTensor *target = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){2}, 1, POLY_DEVICE_CPU);
+    PolyTensor *other =
+        poly_tensor_empty(foreign, POLY_FLOAT32, (int64_t[]){2}, 1, POLY_DEVICE_CPU);
+    ASSERT_NOT_NULL(target);
+    ASSERT_NOT_NULL(other);
+    PolyUOp *logical = target->uop_logical, *physical = target->uop_physical;
+    bool rejected = false;
+    if (operation == 0) rejected = poly_tensor_assign(ctx, target, other) == NULL;
+    if (operation == 1) rejected = poly_tensor_clone_into(ctx, target, other) == NULL;
+    if (operation == 2)
+      rejected = poly_tensor_replace_roots(
+                     ctx, target, other->uop_logical, other->uop_physical, POLY_TENSOR_VALUE,
+                     POLY_DEVICE_CPU
+                 ) != 0;
+    if (operation == 3)
+      rejected = poly_tensor_set_physical(
+                     ctx, target, other->uop_physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
+                 ) != 0;
+    if (operation == 4)
+      rejected = poly_tensor_replace_roots(
+                     ctx, other, logical, physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
+                 ) != 0;
+    if (operation == 5) {
+      PolyUOp *lp = other->uop_logical, *pp = other->uop_physical;
+      PolyUOp *la = poly_uop2(
+          foreign, POLY_OP_AFTER, lp->dtype, lp, poly_store_val(foreign, lp, lp), poly_arg_none()
+      );
+      PolyUOp *pa = poly_uop2(
+          foreign, POLY_OP_AFTER, pp->dtype, pp, poly_store_val(foreign, pp, pp), poly_arg_none()
+      );
+      rejected = poly_tensor_assign_after(ctx, other, la, pa) == NULL;
+    }
+    bool unchanged = target->uop_logical == logical && target->uop_physical == physical;
+    /* Clean up before asserting, including on the pre-fix contaminated graph. */
+    poly_ctx_destroy(ctx);
+    poly_ctx_destroy(foreign);
+    ASSERT_TRUE(rejected);
+    ASSERT_TRUE(unchanged);
+  }
+  PASS();
+}
+
 TEST(tensor, assign_accepts_deviceless_value_with_different_backend_label) {
   PolyCtx *ctx = poly_ctx_new();
   int64_t dims[] = {4};

@@ -7,6 +7,124 @@ from polygrad.models import MLP, Graph, Sequential
 from polygrad.tensor import Tensor
 
 
+@pytest.mark.parametrize('device', ['cpu', 'interp'])
+def test_bound_runtime_model_construction_and_import(device):
+    import polygrad as pg
+    with pg.create(device=device) as rt:
+        x = rt.Tensor.empty(2)
+        model = rt.Model(lambda x: {'prediction': x + 1}, inputs={'x': x})
+        try:
+            data = model.save(include_optimizer=False)
+            for constructor in (rt.Model.load, rt.Model.from_bundle):
+                loaded = constructor(data)
+                try:
+                    assert loaded._ctx == rt._ctx
+                    np.testing.assert_array_equal(loaded.forward(x=np.array([2., 3.], np.float32))['prediction'], [3, 4])
+                finally:
+                    loaded.dispose()
+            family = rt.models.MLP(layers=[2, 1], batch_size=1)
+            try:
+                assert family._ctx == rt._ctx
+            finally:
+                family.dispose()
+        finally:
+            model.dispose()
+
+
+@pytest.mark.parametrize('route', ['constructor', 'from_callable', 'from_tensors', 'from_bindings'])
+def test_bound_runtime_model_rejects_foreign_authoring_before_callback(route):
+    import polygrad as pg
+    calls = []
+    def author(x):
+        calls.append(True)
+        return x + 1
+    with pg.create(device='interp') as rt, pg.create(device='interp') as foreign:
+        x = foreign.Tensor.empty(2)
+        with pytest.raises(ValueError, match='another (Runtime|PolyCtx)'):
+            if route == 'constructor':
+                rt.Model(author, inputs={'x': x})
+            elif route == 'from_callable':
+                rt.Model.from_callable(author, inputs={'x': x})
+            elif route == 'from_tensors':
+                rt.Model.from_tensors(inputs={'x': x}, outputs={'prediction': x + 1})
+            else:
+                rt.Model.from_bindings([('x', 'input', x), ('y', 'output', x + 1)],
+                                       [('forward', ['x'], ['y'])])
+        assert not calls
+
+
+@pytest.mark.parametrize('device', ['cpu', 'interp'])
+def test_bound_runtime_nn_model_training_and_import(device):
+    import polygrad as pg
+    with pg.create(device=device) as rt:
+        net = rt.nn.Linear(1, 1)
+        initial = net.weight.numpy().copy()
+        model = rt.Model(net, inputs={'x': rt.Tensor.empty(2, 1)},
+                         targets={'y': rt.Tensor.empty(2, 1)},
+                         loss=lambda prediction, y: (prediction - y).square().mean())
+        restored = None
+        try:
+            inputs = {'x': np.array([[1.], [2.]], np.float32),
+                      'y': np.array([[3.], [5.]], np.float32)}
+            losses = model.fit(inputs, epochs=3, optimizer='sgd', lr=0.01)
+            assert np.isfinite(losses).all() and losses[-1] < losses[0]
+            # Capture owns a state snapshot, not the author's Tensor storage.
+            np.testing.assert_array_equal(net.weight.numpy(), initial)
+            restored = rt.Model.load(model.save(include_optimizer=False))
+            np.testing.assert_array_equal(restored.forward(x=inputs['x'])['output'],
+                                          model.forward(x=inputs['x'])['output'])
+            restored.write_buffer('weight', np.zeros_like(initial))
+            assert not np.array_equal(restored.read_buffer('weight'), model.read_buffer('weight'))
+        finally:
+            if restored is not None:
+                restored.dispose()
+            model.dispose()
+
+
+def test_bound_runtime_model_conflicting_owner_and_disposal():
+    import polygrad as pg
+    with pg.create(device='interp') as rt, pg.create(device='interp') as other:
+        with pytest.raises(ValueError, match='another Runtime'):
+            rt.Model.load(b'invalid', runtime=other)
+        with pytest.raises(ValueError, match='another Runtime'):
+            rt.models.MLP(layers=[2, 1], runtime=other)
+        x = rt.Tensor.empty(2)
+        model = rt.Model(inputs={'x': x}, outputs={'y': x + 1})
+        model.dispose()
+    with pytest.raises(RuntimeError, match='disposed'):
+        rt.Model.load(b'invalid')
+    with pytest.raises(RuntimeError, match='disposed'):
+        rt.models.MLP(layers=[2, 1])
+
+
+def test_bound_runtime_initialization_failure_releases_context(monkeypatch):
+    import polygrad as pg
+    from polygrad import _ffi
+    allocated, destroyed = [], []
+    new, destroy = _ffi._lib.poly_ctx_new, _ffi._lib.poly_ctx_destroy
+    def allocate():
+        ctx = new()
+        allocated.append(ctx)
+        return ctx
+    def release(ctx):
+        destroyed.append(ctx)
+        destroy(ctx)
+    def fail(runtime):
+        raise MemoryError('namespace allocation')
+    monkeypatch.setattr(_ffi._lib, 'poly_ctx_new', allocate)
+    monkeypatch.setattr(_ffi._lib, 'poly_ctx_destroy', release)
+    monkeypatch.setattr(pg.nn, '_bind_runtime', fail)
+    try:
+        with pytest.raises(MemoryError, match='namespace allocation'):
+            pg.create(device='interp')
+        assert destroyed == allocated
+    finally:
+        # Keep the observed pre-fix failure from leaking the test's C owner.
+        for ctx in allocated:
+            if ctx not in destroyed:
+                destroy(ctx)
+
+
 def test_callable_model_captures_training_batchnorm_without_mutating_author():
     from polygrad import nn
     from polygrad.helpers import TRAINING

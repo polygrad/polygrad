@@ -1455,7 +1455,9 @@ int poly_tensor_replace_roots(
 ) {
   bool has_logical = tensor && (tensor->logical_state == POLY_LOGICAL_AVAILABLE ||
                                 tensor->logical_state == POLY_LOGICAL_RETIRED);
-  if (!ctx || !tensor || !uop_physical || has_logical != (uop_logical != NULL)) return -1;
+  if (!tensor_roots_owned_by_ctx(ctx, tensor) || !poly_ctx_owns_ptr(ctx, uop_physical) ||
+      (uop_logical && !poly_ctx_owns_ptr(ctx, uop_logical)) || has_logical != (uop_logical != NULL))
+    return -1;
   tensor_replace_roots_commit(tensor, uop_logical, uop_physical, role, device);
   return 0;
 }
@@ -1469,7 +1471,9 @@ int poly_tensor_set_physical(
 ) {
   bool has_logical = tensor && (tensor->logical_state == POLY_LOGICAL_AVAILABLE ||
                                 tensor->logical_state == POLY_LOGICAL_RETIRED);
-  if (!ctx || !tensor || !uop_physical || has_logical != (tensor->uop_logical != NULL)) return -1;
+  if (!tensor_roots_owned_by_ctx(ctx, tensor) || !poly_ctx_owns_ptr(ctx, uop_physical) ||
+      has_logical != (tensor->uop_logical != NULL))
+    return -1;
   tensor_replace_roots_commit(tensor, tensor->uop_logical, uop_physical, role, device);
   return 0;
 }
@@ -1906,7 +1910,10 @@ PolyTensor *poly_tensor_to_device_name(PolyCtx *ctx, PolyTensor *tensor, const c
 }
 
 PolyTensor *poly_tensor_assign(PolyCtx *ctx, PolyTensor *target, PolyTensor *value) {
-  if (!ctx || !target || !value) return NULL;
+  /* Tinygrad's STORE/AFTER semantics apply inside one C owner. Check before
+   * broadcasting: even a rejected write must not intern foreign graph edges. */
+  if (!tensor_roots_owned_by_ctx(ctx, target) || !tensor_roots_owned_by_ctx(ctx, value))
+    return NULL;
   const bool build_logical = target->logical_policy != POLY_LOGICAL_NEVER;
   PolyUOp *target_logical = target->uop_logical;
   PolyUOp *value_logical = value->uop_logical;
@@ -1983,8 +1990,10 @@ PolyTensor *poly_tensor_assign_after(
     PolyUOp *logical_after,
     PolyUOp *physical_after
 ) {
-  if (!ctx || !target || !physical_after || physical_after->op != POLY_OP_AFTER ||
-      physical_after->n_src != 2 || physical_after->src[0] != target->uop_physical)
+  if (!tensor_roots_owned_by_ctx(ctx, target) || !poly_ctx_owns_ptr(ctx, physical_after) ||
+      (logical_after && !poly_ctx_owns_ptr(ctx, logical_after)) ||
+      physical_after->op != POLY_OP_AFTER || physical_after->n_src != 2 ||
+      physical_after->src[0] != target->uop_physical)
     return NULL;
   bool build_logical = logical_after != NULL;
   PolyUOp *target_physical = target->uop_physical, *target_logical = target->uop_logical;
@@ -2029,7 +2038,9 @@ PolyTensor *poly_tensor_assign_after(
 }
 
 PolyTensor *poly_tensor_clone_into(PolyCtx *ctx, PolyTensor *target, PolyTensor *source) {
-  if (!ctx || !target || !source || target == source) return NULL;
+  if (!tensor_roots_owned_by_ctx(ctx, target) || !tensor_roots_owned_by_ctx(ctx, source) ||
+      target == source)
+    return NULL;
   if (target->device == POLY_DEVICE_AUTO) return NULL;
 
   const bool build_logical = target->logical_state == POLY_LOGICAL_AVAILABLE ||

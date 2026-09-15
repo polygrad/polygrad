@@ -29,6 +29,120 @@ from polygrad.nn.state import safe_load, safe_load_metadata, torch_load
 
 # ── Helpers ──
 
+@pytest.fixture(autouse=True)
+def _existing_nn_runtime_lane(request, monkeypatch):
+    """Run existing numerical/gradient assertions unchanged on explicit owners."""
+    import os
+    import polygrad as pg
+    device = os.environ.get('POLY_TEST_NN_RUNTIME')
+    classes = {'TestLinear', 'TestLayerNorm', 'TestRMSNorm', 'TestGroupNorm', 'TestConv2d',
+               'TestBatchNorm', 'TestEmbedding', 'TestDropout', 'TestSGD', 'TestAdam', 'TestAdamW', 'TestAssign'}
+    if not device or request.cls is None or request.cls.__name__ not in classes:
+        yield
+        return
+    with pg.create(device=device) as rt:
+        for name in ('Tensor', 'GlobalCounters'):
+            monkeypatch.setattr(request.module, name, getattr(rt, name))
+        for name in ('Linear', 'LayerNorm', 'LayerNorm2d', 'GroupNorm', 'RMSNorm', 'Conv2d',
+                     'BatchNorm', 'BatchNorm2d', 'BatchNorm3d', 'Embedding', 'Dropout'):
+            monkeypatch.setattr(request.module, name, getattr(rt.nn, name))
+        for name in ('SGD', 'Adam', 'AdamW', 'OptimizerGroup'):
+            monkeypatch.setattr(request.module, name, getattr(rt.nn.optim, name))
+        yield
+
+
+@pytest.mark.parametrize('device', ['cpu', 'interp'])
+def test_bound_runtime_nn_state_and_disposal(tmp_path, device):
+    import json
+    import polygrad as pg
+    values = np.array([1., 2.], np.float32)
+    header = json.dumps({'weight': {'dtype': 'F32', 'shape': [2], 'data_offsets': [0, 8]}}).encode()
+    path = tmp_path / 'weights.safetensors'
+    path.write_bytes(len(header).to_bytes(8, 'little') + header + values.tobytes())
+    with pg.create(device=device) as rt:
+        loaded = rt.nn.state.safe_load(path)
+        assert loaded['weight']._ctx == rt._ctx
+        assert loaded['weight'].device == f'DISK:{path.resolve()}'
+        np.testing.assert_array_equal(loaded['weight'].numpy(), values)
+        layer = rt.nn.Linear(2, 1)
+        optimizer = rt.nn.optim.Adam(rt.nn.get_parameters(layer))
+        assert optimizer._ctx == rt._ctx
+        assert rt.nn.optim.OptimizerGroup(optimizer).params == optimizer.params
+        with pytest.raises(ValueError, match='another Runtime'):
+            rt.nn.optim.Adam([pg.Tensor([1.])])
+        with pytest.raises(ValueError, match='another Runtime'):
+            rt.nn.state.safe_load(pg.Tensor([0], dtype='uint8'))
+    with pytest.raises(RuntimeError, match='disposed'):
+        rt.nn.Linear(2, 1)
+    with pytest.raises(RuntimeError, match='disposed'):
+        rt.nn.Dropout()
+    with pytest.raises(RuntimeError, match='disposed'):
+        rt.nn.state.safe_load(path)
+
+
+def test_bound_runtime_dataset_constructors(monkeypatch):
+    import polygrad as pg
+    # No downloads: test the existing IDX reader with tiny local payloads.
+    with pg.create(device='interp') as rt:
+        seen = []
+        def source(url, gunzip=False, **kwargs):
+            seen.append(url)
+            header, payload = (16, 784) if 'images' in url else (8, 1)
+            return rt.Tensor([0] * header + [1] * payload, dtype='uint8')
+        monkeypatch.setattr(rt.Tensor, 'from_url', source)
+        images, labels, test_images, test_labels = rt.nn.datasets.mnist()
+        assert len(seen) == 4
+        for value in (images, labels, test_images, test_labels):
+            assert value._ctx == rt._ctx
+            assert value.device == 'INTERP'
+            np.testing.assert_array_equal(value.numpy(), np.ones(value.shape))
+
+@pytest.mark.parametrize('device', ['cpu', 'interp'])
+@pytest.mark.parametrize('name,args,shape', [
+    ('Linear', (2, 1), (2, 2)), ('LayerNorm', (2,), (2, 2)),
+    ('LayerNorm2d', (2,), (1, 2, 2, 2)), ('GroupNorm', (1, 2), (1, 2, 2)),
+    ('RMSNorm', (2,), (2, 2)), ('Embedding', (4, 2), (2,)),
+    ('Conv2d', (1, 2, 1), (1, 1, 2, 2)), ('Conv1d', (1, 2, 1), (1, 1, 2)),
+    ('ConvTranspose2d', (1, 2, 1), (1, 1, 2, 2)), ('ConvTranspose1d', (1, 2, 1), (1, 1, 2)),
+    ('InstanceNorm', (2,), (1, 2, 2)), ('BatchNorm', (2,), (1, 2, 2)),
+    ('LSTMCell', (2, 2), (1, 2)), ('Dropout', (0.,), (2,)),
+])
+def test_bound_runtime_nn(name, args, shape, device):
+    import polygrad as pg
+    with pg.create(device=device) as rt:
+        layer = getattr(rt.nn, name)(*args)
+        parameters = rt.nn.get_state_dict(layer)
+        assert all(t._ctx == rt._ctx for t in parameters.values())
+        x = rt.Tensor.ones(*shape, dtype='int32' if name == 'Embedding' else 'float32')
+        with Context(TRAINING=0):
+            result = layer(x)
+        for value in result if isinstance(result, tuple) else (result,):
+            assert value._ctx == rt._ctx
+            assert np.isfinite(value.numpy()).all()
+        assert rt.nn.BatchNorm2d is rt.nn.BatchNorm3d is rt.nn.BatchNorm
+        assert rt.nn.get_state_dict is pg.nn.get_state_dict
+        if parameters:
+            with pytest.raises(ValueError, match='another Runtime'):
+                layer(pg.Tensor.ones(*shape, dtype=x.dtype, device=device))
+
+
+@pytest.mark.parametrize('device', ['cpu', 'interp'])
+def test_zip_extract_runtime_storage(device):
+    import io
+    import zipfile
+    import polygrad as pg
+    from polygrad.nn.state import zip_extract
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, 'w') as writer:
+        writer.writestr('stored', b'abc', compress_type=zipfile.ZIP_STORED)
+        writer.writestr('deflated', b'abc', compress_type=zipfile.ZIP_DEFLATED)
+    with pg.create(device=device) as rt:
+        members = zip_extract(rt.Tensor(list(archive.getvalue()), dtype='uint8'))
+        assert set(members) == {'stored', 'deflated'}
+        for tensor in members.values():
+            assert tensor._ctx == rt._ctx
+            assert tensor.tolist() == [97, 98, 99]
+
 @pytest.mark.parametrize('symbol', ['poly_tensor_layernorm_axes_apply', 'poly_tensor_groupnorm_apply',
                                    'poly_tensor_batchnorm_stats', 'poly_tensor_batchnorm_apply'])
 def test_shared_normalization_entrypoints(symbol):
@@ -418,7 +532,7 @@ class TestBatchNorm:
         # Tinygrad 2026-08-22/a9069c177a9d nn/__init__.py:43 keeps the
         # running variance at [1,C,1,1]; batchnorm performs broadcasting.
         bn = BatchNorm(4)
-        x = Tensor.empty(2, 4, 3, 3, device="CPU")
+        x = Tensor.empty(2, 4, 3, 3, device=bn.running_var.device)
         _, running_var = bn.calc_stats(x)
         assert running_var.shape == (1, 4, 1, 1)
         assert running_var.uop_physical.op_name == "RESHAPE"

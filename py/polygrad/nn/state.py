@@ -78,6 +78,35 @@ class TensorIO(io.RawIOBase):
         raise io.UnsupportedOperation("TensorIO.writelines not supported")
 
 
+def _bind_runtime(runtime):
+    from types import SimpleNamespace
+    from ..tensor import Tensor
+
+    def bind_loader(function):
+        @functools.wraps(function)
+        def load(filename):
+            runtime._check_live()
+            if not isinstance(filename, Tensor):
+                filename = Tensor(pathlib.Path(filename), _ctx=runtime._ctx)
+            if filename._ctx != runtime._ctx:
+                raise ValueError('state source belongs to another Runtime')
+            return function(filename)
+        return load
+
+    @functools.wraps(load_state_dict)
+    def load_into(model, state_dict, *args, **kwargs):
+        runtime._check_live()
+        tensors = [*get_state_dict(model).values(), *get_state_dict(state_dict).values()]
+        if any(t._ctx != runtime._ctx for t in tensors):
+            raise ValueError('state destination or source belongs to another Runtime')
+        return load_state_dict(model, state_dict, *args, **kwargs)
+
+    return SimpleNamespace(get_state_dict=get_state_dict, get_parameters=get_parameters,
+        load_state_dict=load_into, TensorIO=TensorIO, safe_load=bind_loader(safe_load),
+        safe_load_metadata=bind_loader(safe_load_metadata), torch_load=bind_loader(torch_load),
+        zip_extract=bind_loader(zip_extract), tar_extract=bind_loader(tar_extract))
+
+
 def accept_filename(func):
     @functools.wraps(func)
     def wrapper(filename):
@@ -138,7 +167,7 @@ def zip_extract(tensor):
                 continue
             if info.compress_type == zipfile.ZIP_DEFLATED:
                 raw = zlib.decompress(files[info.filename].data(), -15)
-                files[info.filename] = Tensor(list(raw), dtype=dtypes.uint8)
+                files[info.filename] = Tensor(list(raw), dtype=dtypes.uint8, _ctx=tensor._ctx)
                 continue
             raise NotImplementedError(f"compression {info.compress_type} not supported")
     return files

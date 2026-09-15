@@ -108,7 +108,9 @@ Polygrad keeps the exportable logical graph separate from the current physical
 placement. Calling `realize()`, `.to("cuda")`, or `.cpu()` changes where values
 live, not what logical graph is exported.
 
-The Python package uses a module-level default C context. Caller-created tensors
+Explicit runtimes are optional. Tinygrad-style programs use `from polygrad import
+Tensor, nn` and `from polygrad.nn.optim import Adam` without `create()` or a Model
+wrapper. The Python package uses a module-level default C context. Caller-created tensors
 share that context, so package functions should accept and return `Tensor`
 objects rather than copying through NumPy unless readback is required.
 
@@ -117,14 +119,25 @@ For explicit context/device ownership, create a runtime:
 ```python
 import polygrad
 
-pg = polygrad.create(device="cpu")
-x = pg.Tensor([1, 2, 3])
-print(((x * 2) + 1).numpy())
-pg.dispose()
+rt = polygrad.create(device="cpu")
+try:
+    layer = rt.nn.Linear(2, 1)
+    x = rt.Tensor([[1.0, 2.0]])
+    print(layer(x).numpy())
+finally:
+    rt.dispose()
 ```
 
 Use explicit runtimes for isolation, device-specific package wiring, or tests
 that need independent compiler caches.
+
+Use `rt.nn` for layers, optimizers and state loaders, `rt.models` for C-backed
+families, and `rt.Model` for capture/import on that runtime. For example,
+`rt.Model.load("model.pgb")` is equivalent to
+`polygrad.Model.load("model.pgb", runtime=rt)`. Package-level NN constructors
+still use the default runtime. Mixing Tensor owners is rejected even when their
+devices match; runtime-bound constructors do not switch a global default or
+silently copy foreign state.
 
 ## Data Flow
 

@@ -2,7 +2,23 @@ from ..tensor import Tensor
 from .state import tar_extract
 
 
-def mnist(device=None, fashion=False):
+def _bind_runtime(runtime):
+    import functools
+    from types import SimpleNamespace
+
+    def bind(function):
+        @functools.wraps(function)
+        def load(*args, **kwargs):
+            runtime._check_live()
+            kwargs['_Tensor'] = runtime.Tensor
+            if not args and kwargs.get('device') is None:
+                kwargs['device'] = runtime._device
+            return function(*args, **kwargs)
+        return load
+    return SimpleNamespace(mnist=bind(mnist), cifar=bind(cifar))
+
+
+def mnist(device=None, fashion=False, *, _Tensor=Tensor):
     """Load MNIST or Fashion-MNIST using the pinned IDX slicing convention."""
     base_url = (
         "http://fashion-mnist.s3-website.eu-central-1.amazonaws.com/"
@@ -11,7 +27,7 @@ def mnist(device=None, fashion=False):
     )
 
     def _mnist(file):
-        return Tensor.from_url(base_url + file, gunzip=True)
+        return _Tensor.from_url(base_url + file, gunzip=True)
 
     return (
         _mnist("train-images-idx3-ubyte.gz")[0x10:].reshape(-1, 1, 28, 28).to(device),
@@ -21,8 +37,8 @@ def mnist(device=None, fashion=False):
     )
 
 
-def cifar(device=None):
-    tensors = tar_extract(Tensor.from_url(
+def cifar(device=None, *, _Tensor=Tensor):
+    tensors = tar_extract(_Tensor.from_url(
         "https://www.cs.toronto.edu/~kriz/cifar-10-binary.tar.gz",
         gunzip=True,
     ))

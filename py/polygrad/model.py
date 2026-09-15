@@ -318,13 +318,11 @@ class Model:
             from .models import Sequential, Graph
             self._adopt((Sequential if source['type'] == 'sequential' else Graph)(source, runtime=runtime))
             return
-        if runtime is not None:
-            raise TypeError('runtime is only for configuration construction; Tensor bindings select their owning Runtime')
         if callable(source):
             if outputs is not None or losses is not None or modules is not None:
                 raise TypeError('Callable Model cannot be combined with prebuilt outputs, losses or modules')
             built = Model.from_callable(source, inputs=inputs, targets=targets, loss=loss,
-                                        params=params, entrypoints=entrypoints)
+                                        params=params, entrypoints=entrypoints, runtime=runtime)
             self._adopt(built)
             return
         if loss is not None:
@@ -342,6 +340,7 @@ class Model:
                 params=params,
                 entrypoints=entrypoints,
                 modules=modules,
+                runtime=runtime,
             )
             self._adopt(built)
             return
@@ -425,7 +424,7 @@ class Model:
         return Model._from_handle(ptr)
 
     @staticmethod
-    def from_bindings(bindings, entrypoints, *, modules=None):
+    def from_bindings(bindings, entrypoints, *, modules=None, runtime=None):
         """Create an Model from explicit binding and entrypoint records.
 
         Bindings may be dicts with ``name``, ``role``, ``tensor``, and optional
@@ -457,7 +456,7 @@ class Model:
                 flags = int(flags) | _BIND_F_FROZEN
             parsed.append((name, role, tensor, int(flags)))
 
-        ctx = parsed[0][2]._ctx
+        ctx = _import_context(runtime) if runtime is not None else parsed[0][2]._ctx
         ctx_key = _ptr_value(ctx)
         for name, role, tensor, _ in parsed:
             _check_ctx(name, tensor, ctx, ctx_key)
@@ -494,13 +493,14 @@ class Model:
 
     @staticmethod
     def from_callable(fn, *, inputs, targets=None, loss=None, params=None,
-                      entrypoints=None):
+                      entrypoints=None, runtime=None):
         """Capture ``fn(**inputs)`` and seal its Tensor outputs.
 
         ``loss(result, **targets)`` returns a Tensor or a named loss dictionary.
         Callable objects supply named state unless ``params`` overrides it.
         With a loss, capture evaluation and training forwards against shared
-        state. Preserve logical roots; do not trace arbitrary host control flow.
+        state. Without a loss, capture once using the current TRAINING setting.
+        Preserve logical roots; do not trace arbitrary host control flow.
         """
         if not callable(fn) or inspect.isclass(fn):
             raise TypeError('Model.from_callable requires a callable instance, not a class')
@@ -522,7 +522,7 @@ class Model:
         named = list(inputs.items()) + list(targets.items()) + list(params.items())
         if not named:
             raise ValueError('Model capture requires an input or named state Tensor to select its Runtime')
-        ctx = _require_tensor(*named[0])._ctx
+        ctx = _import_context(runtime) if runtime is not None else _require_tensor(*named[0])._ctx
         for name, tensor in named:
             _check_ctx(name, _require_tensor(name, tensor), ctx, _ptr_value(ctx))
             if tensor.uop_logical is None:
@@ -620,6 +620,7 @@ class Model:
         params=None,
         entrypoints=None,
         modules=None,
+        runtime=None,
     ):
         """Package named Tensor roots as a runnable/exportable Model."""
         from .tensor import _ptr_value
@@ -641,7 +642,7 @@ class Model:
         if not outputs and not losses:
             raise ValueError('Model.from_tensors requires outputs or losses')
 
-        ctx = named_tensors[0][1]._ctx
+        ctx = _import_context(runtime) if runtime is not None else named_tensors[0][1]._ctx
         ctx_key = _ptr_value(ctx)
         for name, tensor in named_tensors:
             _check_ctx(name, tensor, ctx, ctx_key)

@@ -1016,6 +1016,9 @@ function createBoundTensorClass(runtime) {
       const targets = []
       const seen = new Set()
       for (const t of tensors) {
+        // Different Wasm heaps can reuse the same numeric C pointer. Compare
+        // runtime owners before even querying a foreign Tensor handle.
+        if (t._rt !== this._rt) throw new Error('Tensor belongs to another Runtime')
         const key = `${uopKey(t._currentUopRaw())}:${tensorDevice(t._tensor)}`
         if (seen.has(key)) continue
         seen.add(key)
@@ -1040,6 +1043,7 @@ function createBoundTensorClass(runtime) {
       const targets = []
       const seen = new Set()
       for (const t of tensors) {
+        if (t._rt !== this._rt) throw new Error('Tensor belongs to another Runtime')
         const key = `${uopKey(t._currentUopRaw())}:${tensorDevice(t._tensor)}`
         if (seen.has(key)) continue
         seen.add(key)

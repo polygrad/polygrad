@@ -1303,7 +1303,8 @@ class Tensor:
         """In-place assignment: self's buffer will be overwritten with x's values.
         Must be realized before use. Returns self for chaining."""
         if not isinstance(x, Tensor):
-            x = Tensor(x, dtype=self._dtype_str, device=self._device)
+            x = Tensor(x, dtype=self._dtype_str, device=self._device, _ctx=self._ctx)
+        self._check_runtime(x)
         if self.shape != x.shape:
             if x._broadcast_shape(self.shape) != self.shape:
                 raise ValueError(f'assign shape mismatch {self.shape} != {x.shape}')
@@ -1360,6 +1361,7 @@ class Tensor:
         """Triggers the computation needed to create these Tensor(s).
         Batches tensors into the shared core realization path, which publishes
         the becomes-map to every live PolyTensor before scheduling."""
+        self._check_runtime(*lst)
         targets = []
         seen = set()
         for x in (self,) + lst:
@@ -1669,6 +1671,12 @@ class Tensor:
         if not lo <= dim <= hi:
             raise IndexError(f'dim={dim} out of range {[lo, hi]}')
         return dim + total if dim < 0 else dim
+
+    def _check_runtime(self, *others):
+        # Device equality does not imply C ownership; reject before entering
+        # FFI, including for operations that mutate an existing Tensor.
+        if any(t is not None and _ptr_value(t._ctx) != _ptr_value(self._ctx) for t in others):
+            raise ValueError('Tensor operand belongs to another Runtime; operands must belong to the same Polygrad context')
 
     def _ensure_tensor(self, other):
         if isinstance(other, Tensor):
@@ -2558,22 +2566,24 @@ class Tensor:
         return self.permute(*order)
 
     @staticmethod
-    def _tri(r, c, diagonal=0, device=None):
+    def _tri(r, c, diagonal=0, device=None, *, _ctx=None):
         # Pinned mixin/__init__.py:310-311. Polygrad's optional device is
         # wrapper placement metadata only; arange remains a deviceless UOp.
-        opts = {} if device is None else {'device': device}
+        opts = {'_ctx': _ctx}
+        if device is not None:
+            opts['device'] = device
         return (
             Tensor.arange(r, **opts).unsqueeze(-1) + diagonal
         ) <= Tensor.arange(c, **opts)
 
     def triu(self, diagonal=0):
         r, c = self.shape[-2], self.shape[-1]
-        mask = Tensor._tri(r, c, diagonal=diagonal, device=self.device)
+        mask = Tensor._tri(r, c, diagonal=diagonal, device=self.device, _ctx=self._ctx)
         return mask.where(self, self.const_like(0))
 
     def tril(self, diagonal=0):
         r, c = self.shape[-2], self.shape[-1]
-        mask = Tensor._tri(r, c, diagonal=diagonal + 1, device=self.device)
+        mask = Tensor._tri(r, c, diagonal=diagonal + 1, device=self.device, _ctx=self._ctx)
         return mask.where(self.const_like(0), self)
 
     def squeeze(self, dim=None):
@@ -2869,7 +2879,8 @@ class Tensor:
 
     def gather(self, dim, index):
         if not isinstance(index, Tensor):
-            index = Tensor(index, dtype='int32', device=self._device)
+            index = Tensor(index, dtype='int32', device=self._device, _ctx=self._ctx)
+        self._check_runtime(index)
         if _device_mismatch(index.device, self.device):
             raise RuntimeError(
                 f"expected index and self on the same device, index.device={index.device}, self.device={self.device}"
@@ -2923,9 +2934,10 @@ class Tensor:
 
     def _pre_scatter_validate(self, dim, index, src):
         if not isinstance(index, Tensor):
-            index = Tensor(index, dtype='int32', device=self._device)
+            index = Tensor(index, dtype='int32', device=self._device, _ctx=self._ctx)
         if not isinstance(src, Tensor):
-            src = Tensor.full(index.shape, _py_scalar(src), dtype=self._dtype_str, device=self._device)
+            src = Tensor.full(index.shape, _py_scalar(src), dtype=self._dtype_str, device=self._device, _ctx=self._ctx)
+        self._check_runtime(index, src)
         if _device_mismatch(index.device, self.device):
             raise RuntimeError(
                 f"expected index and self on the same device, index.device={index.device}, self.device={self.device}"
@@ -2954,7 +2966,7 @@ class Tensor:
         if reduce not in {'sum', 'prod', 'mean', 'amax', 'amin'}:
             raise RuntimeError(f"reduce={reduce!r} must be one of 'sum', 'prod', 'mean', 'amax', 'amin'")
         if not isinstance(src, Tensor):
-            src = Tensor(src, dtype=self._dtype_str, device=self._device)
+            src = Tensor(src, dtype=self._dtype_str, device=self._device, _ctx=self._ctx)
         dim, index, src = self._pre_scatter_validate(dim, index, src)
         core = _ffi._lib.poly_tensor_scatter_reduce(
             self._ctx, self._tensor, dim, index._tensor, src._tensor,
@@ -2973,7 +2985,7 @@ class Tensor:
         src_is_tensor = isinstance(src, Tensor)
         if not src_is_tensor:
             src = Tensor.full(index.shape if isinstance(index, Tensor) else np.asarray(index).shape,
-                              _py_scalar(src), dtype=self._dtype_str, device=self._device)
+                              _py_scalar(src), dtype=self._dtype_str, device=self._device, _ctx=self._ctx)
         elif reduce is not None:
             raise TypeError('non-scalar src is not supported with reduce arg. use scatter_reduce')
         dim, index, src = self._pre_scatter_validate(dim, index, src)
@@ -3267,7 +3279,8 @@ class Tensor:
             "label_smoothing must be in [0.0, 1.0]"
         )
         if not isinstance(target, Tensor):
-            target = Tensor(target, device=self._device)
+            target = Tensor(target, device=self._device, _ctx=self._ctx)
+        self._check_runtime(target)
         classes_dim = (
             self._resolve_dim(int(axis))
             if axis is not None

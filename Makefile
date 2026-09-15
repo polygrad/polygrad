@@ -663,6 +663,16 @@ test-headers:
 test-py: verify-source-mirrors build/libpolygrad.so
 	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 POLY_LIB=build/libpolygrad.so PYTHONPATH=py $(PYTHON) -m pytest py/tests/ -v
 
+# Default-runtime assertions stay unchanged; explicit-owner lanes reuse the
+# existing NN numerical and gradient bodies, not a second set of expectations.
+RUNTIME_TEST_DEVICES ?= cpu interp
+.PHONY: test-py-runtime
+test-py-runtime: verify-source-mirrors build/libpolygrad.so
+	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 POLY_LIB=build/libpolygrad.so PYTHONPATH=py $(PARITY_PY) -m pytest -q py/tests/test_tensor.py py/tests/test_nn.py py/tests/test_model.py -k 'bound_runtime or runtime_temporaries_preserve_owner or foreign_runtime or typed_storage_view or zip_extract_runtime_storage'
+	@for device in $(RUNTIME_TEST_DEVICES); do \
+	  PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 POLY_LIB=build/libpolygrad.so PYTHONPATH=py POLY_TEST_NN_RUNTIME=$$device $(PARITY_PY) -m pytest -q py/tests/test_nn.py -k 'TestLinear or TestLayerNorm or TestRMSNorm or TestGroupNorm or TestConv2d or TestBatchNorm or TestEmbedding or TestDropout or TestSGD or TestAdam or TestAssign' || exit $$?; \
+	done
+
 test-py-x86: verify-source-mirrors build/libpolygrad.so
 	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 DEV=X86 POLY_DEV=x86 POLY_LIB=build/libpolygrad.so PYTHONPATH=py $(PYTHON) -m pytest py/tests/test_tensor.py py/tests/test_nn.py py/tests/test_model.py py/tests/test_hf.py py/tests/test_hf_e2e.py -v
 

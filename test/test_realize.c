@@ -8859,6 +8859,69 @@ TEST(realize, host_reshape_contiguous_lowers_to_one_copy_call) {
   PASS();
 }
 
+TEST(realize, foreign_tensor_rejected_before_callification) {
+  PolyCtx *ctx = poly_ctx_new(), *other = poly_ctx_new();
+  float data[2] = {3, 4};
+  PolyTensor *host =
+      poly_tensor_from_host(other, data, sizeof(data), POLY_FLOAT32, (int64_t[]){2}, 1);
+  PolyTensor *value = poly_tensor_to_device(other, host, POLY_DEVICE_CPU), *out = NULL;
+  size_t before = poly_map_len(ctx->cse);
+  int rc = poly_realize_tensors(ctx, &value, 1, &out);
+  bool untouched = poly_map_len(ctx->cse) == before;
+  poly_ctx_destroy(ctx);
+  poly_ctx_destroy(other);
+  ASSERT_INT_EQ(rc, -1);
+  ASSERT_TRUE(untouched);
+  PASS();
+}
+
+TEST(realize, typed_cpu_views_of_realized_storage) {
+  PolyCtx *ctx = poly_ctx_new();
+  uint8_t data[100];
+  for (int i = 0; i < 100; i++)
+    data[i] = (uint8_t)i;
+  PolyTensor *host =
+      poly_tensor_from_host(ctx, data, sizeof(data), POLY_UINT8, (int64_t[]){100}, 1);
+  PolyTensor *source = poly_tensor_to_device(ctx, host, POLY_DEVICE_CPU), *realized = NULL;
+  ASSERT_NOT_NULL(source);
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &source, 1, &realized), 0);
+  PolyTensor *views[2], *outputs[2];
+  const int offsets[2] = {26, 65};
+  for (int i = 0; i < 2; i++) {
+    PolyTensor *bytes =
+        poly_tensor_shrink(ctx, source, (int64_t[][2]){{offsets[i], offsets[i] + 4}}, 1);
+    views[i] = poly_tensor_bitcast_by_id(ctx, bytes, poly_dtype_id_by_name("uint16"));
+    ASSERT_NOT_NULL(views[i]);
+  }
+  PolyUOp *roots[2] = {views[0]->uop_physical, views[1]->uop_physical}, *rewritten[2];
+  PolyUOp **from = NULL, **to = NULL;
+  int count = 0;
+  PolyUOp *call = poly_transform_to_call_with_map(ctx, roots, 2, rewritten, &from, &to, &count);
+  /* Pinned transform_to_call: empty CALL(SINK()), no becomes-map entries,
+   * and the original typed view, including its byte offset, stays unchanged. */
+  bool empty_call = call && call->op == POLY_OP_CALL && call->n_src == 1 &&
+                    call->src[0]->op == POLY_OP_SINK && call->src[0]->n_src == 0;
+  free(from);
+  free(to);
+  int rc = poly_realize_tensors(ctx, views, 2, outputs);
+  bool values_match = rc == 0;
+  if (rc == 0) {
+    for (int i = 0; i < 2; i++) {
+      uint8_t got[4] = {0};
+      PolyUOp *view = poly_uop_buffer(ctx, views[i]->uop_physical);
+      values_match &= views[i]->uop_physical == roots[i] && rewritten[i] == roots[i] && view &&
+                      poly_buffer_read(ctx, view, got, sizeof(got)) == 0 &&
+                      memcmp(got, data + offsets[i], sizeof(got)) == 0;
+    }
+  }
+  poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(rc, 0);
+  ASSERT_TRUE(empty_call);
+  ASSERT_INT_EQ(count, 0);
+  ASSERT_TRUE(values_match);
+  PASS();
+}
+
 TEST(realize, typed_disk_view_copy_matches_pinned_slice_pipeline) {
   char path[256];
   snprintf(path, sizeof(path), "temp/polygrad_disk_bitcast_%ld.bin", (long)getpid());

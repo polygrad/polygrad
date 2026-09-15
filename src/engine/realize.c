@@ -1747,8 +1747,11 @@ static PolyUOp *poly_transform_to_call_rewrite_nested_contiguous(
             : NULL;
     PolyUOp *replacement =
         executable ? poly_transform_to_call_cached_replacement(tctx, contiguous) : NULL;
-    if (!executable || !replacement ||
-        !poly_transform_to_call_cache_replacement(tctx, u, replacement)) {
+    /* tensor.contiguous_mops_to_view can erase CONTIGUOUS without producing
+     * AFTER. That successful view rewrite has no finalize_after buffer_map
+     * entry; absence of a materialization replacement is not a failure. */
+    if (!executable ||
+        (replacement && !poly_transform_to_call_cache_replacement(tctx, u, replacement))) {
       tctx->failed = true;
       return NULL;
     }
@@ -1968,10 +1971,19 @@ PolyUOp *poly_transform_to_call_with_map(
      * the physical root without changing its logical provenance. */
     PolyUOp *pure_view_base = u;
     while (pure_view_base && pure_view_base->n_src >= 1 &&
-           poly_opset_has(POLY_GROUP_MOVEMENT, pure_view_base->op))
+           (poly_opset_has(POLY_GROUP_MOVEMENT, pure_view_base->op) ||
+            pure_view_base->op == POLY_OP_BITCAST))
       pure_view_base = pure_view_base->src[0];
     if (pure_view_base != u && poly_uop_has_buffer_identity(pure_view_base)) {
-      out_uops[i] = u;
+      /* View canonicalization is internal to early rewriting. With no
+       * producer to finalize, Tinygrad publishes no map and preserves the
+       * original Tensor view, even if nested SHRINK/RESHAPE collapsed. */
+      PolyUOp *original_base = uops[i];
+      while (original_base && original_base->n_src >= 1 &&
+             (poly_opset_has(POLY_GROUP_MOVEMENT, original_base->op) ||
+              original_base->op == POLY_OP_BITCAST))
+        original_base = original_base->src[0];
+      out_uops[i] = poly_uop_has_buffer_identity(original_base) ? uops[i] : u;
       continue;
     }
 
@@ -2382,6 +2394,10 @@ static int poly_realize_tensors_impl(
   for (int i = 0; i < n; i++) {
     outputs[i] = NULL;
     if (!inputs[i]) goto cleanup;
+    if (inputs[i]->owner_ctx != ctx) {
+      fprintf(stderr, "poly_realize_tensors: tensor %d belongs to another Runtime\n", i);
+      goto cleanup;
+    }
     if (!inputs[i]->uop_physical ||
         poly_tensor_root_has_unplaced_buffer(ctx, inputs[i]->uop_physical)) {
       fprintf(stderr, "poly_realize_tensors: tensor %d has no complete physical root\n", i);
