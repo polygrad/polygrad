@@ -55,6 +55,7 @@
         "csrc/src/shape.c",
         "csrc/src/uop/symbolic.c",
         "csrc/src/uop/ops.c",
+        "csrc/src/uop/key.c",
         "csrc/src/uop/spec.c",
         "csrc/src/uop/movement.c",
         "csrc/src/uop/weak.c",

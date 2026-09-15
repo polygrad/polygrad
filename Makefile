@@ -33,6 +33,8 @@ HAS_CUDA := $(shell test -f /usr/include/cuda.h && echo 1 || echo 0)
 SRC = src/ops.c src/dtype.c src/arena.c src/hashmap.c src/utils.c src/bigint.c src/selftest.c src/ctx.c src/device.c src/placer.c src/engine/realize.c src/engine/capability.c src/engine/jit.c src/uop/ops.c src/uop/spec.c src/uop/weak.c src/uop/movement.c src/uop/symbolic.c src/mixin/elementwise.c src/mixin/movement.c src/uop/upat.c src/alu.c src/shape.c src/mixin/gradient.c src/codegen/codegen.c src/codegen/opt/tc.c src/codegen/decomp/dtype.c src/codegen/simplify.c src/codegen/gpudims.c src/codegen/late/coalesce.c src/codegen/late/gater.c src/codegen/late/linearizer.c src/renderer/cstyle.c src/renderer/wgsl.c src/runtime/support/memory.c src/runtime_cpu.c src/runtime_wasm.c src/runtime_webgpu.c src/wasm_builder.c src/renderer/wasm.c src/frontend.c src/tensor.c src/nn/optim.c src/schedule/rangeify.c src/schedule/multi.c src/schedule/allreduce.c src/schedule/schedule.c src/schedule/memory.c src/schedule/indexing.c src/nn/nn.c src/engine/schedule.c src/interp.c
 FILC_SRC = src/ops.c src/dtype.c src/arena.c src/hashmap.c src/utils.c src/bigint.c src/selftest.c src/ctx.c src/device.c src/placer.c src/engine/realize.c src/engine/capability.c src/engine/jit.c src/uop/ops.c src/uop/spec.c src/uop/weak.c src/uop/movement.c src/uop/symbolic.c src/mixin/elementwise.c src/mixin/movement.c src/uop/upat.c src/alu.c src/shape.c src/mixin/gradient.c src/codegen/codegen.c src/codegen/opt/tc.c src/codegen/decomp/dtype.c src/codegen/simplify.c src/codegen/gpudims.c src/codegen/late/coalesce.c src/codegen/late/gater.c src/codegen/late/linearizer.c src/renderer/cstyle.c src/renderer/wgsl.c src/runtime/support/memory.c src/runtime_wasm.c src/runtime_webgpu.c src/wasm_builder.c src/renderer/wasm.c src/frontend.c src/tensor.c src/nn/optim.c src/schedule/rangeify.c src/schedule/multi.c src/schedule/allreduce.c src/schedule/schedule.c src/schedule/memory.c src/schedule/indexing.c src/nn/nn.c src/engine/schedule.c src/interp.c
 LOADER_SRC = src/loaders/decoded.c src/loaders/import_error.c src/loaders/bind.c src/loaders/hf_decode.c src/loaders/gguf_decode.c src/loaders/gguf_loader.c src/loaders/import_desc.c
+SRC += src/uop/key.c
+FILC_SRC += src/uop/key.c
 CODEC_SRC = vendor/cjson/cJSON.c src/safetensors.c src/wlrn.c src/ir.c src/bundle.c src/model.c src/tokenizer.c src/models/compose.c src/models/layers.c src/models/mlp.c src/models/tabm.c src/models/nam.c src/models/registry.c src/models/gpt2.c src/models/qwen3.c src/models/hf_loader.c $(LOADER_SRC)
 TEST_SRC = test/test_main.c test/test_uop.c test/test_utils.c test/test_dtype.c test/test_bigint.c test/test_pat.c test/test_sym.c test/test_shape.c test/test_schedule_engine.c test/test_autograd.c test/test_codegen.c test/test_wasm.c test/test_rangeify.c test/test_reduce_simplify.c test/test_nn.c test/test_tensor.c test/test_fusion_fuzzer.c test/test_future_passes.c test/test_safetensors.c test/test_wlrn.c test/test_ir.c test/test_model.c test/test_program.c test/test_mlp.c test/test_tabm.c test/test_nam.c test/test_hf.c test/test_qwen3.c test/test_f16.c test/test_schedule_runtime.c test/test_bundle.c test/test_registry.c test/test_placement.c test/test_realize.c test/test_threading.c
 PROJECT_HEADERS := $(shell find src test bench vendor -type f -name '*.h' -print | sort)
@@ -111,6 +113,7 @@ build/test_bigint.js: $(WASM_SRC) test/test_main.c test/test_bigint.c test/test_
 # Exercise the shared runner ABI inside wasm32, not just emitted kernel bytes.
 .PHONY: test-runtime-wasm
 test-runtime-wasm: build/test_schedule_runtime.js
+	$(SAN_RUN) $(NODE) $< --require-no-skips content_key
 	$(SAN_RUN) $(NODE) $< --require-no-skips program_rejects
 	$(SAN_RUN) $(NODE) $< --require-no-skips view_assign_callify
 	$(SAN_RUN) $(NODE) $< --require-no-skips schedule_cache_clear
@@ -667,8 +670,13 @@ verify-source-mirrors:
 	$(PYTHON) scripts/verify-source-mirrors.py
 
 .PHONY: test-headers
-test-headers:
+test-headers: build/libpolygrad-core-check.so
 	$(PYTHON) scripts/check-headers.py
+
+# Link every core object, without Model/interchange objects or unresolved symbols.
+build/libpolygrad-core-check.so: $(SRC) $(PROJECT_HEADERS) Makefile
+	@mkdir -p build
+	$(CC) $(CFLAGS_RELEASE) -fPIC -shared -Wl,--no-undefined -o $@ $(filter %.c,$^) -lm -ldl
 
 test-py: verify-source-mirrors build/libpolygrad.so
 	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 POLY_LIB=build/libpolygrad.so PYTHONPATH=py $(PYTHON) -m pytest py/tests/ -v

@@ -33,6 +33,7 @@ SOURCES = [
     'src/engine/realize.c',
     'src/engine/capability.c',
     'src/uop/ops.c',
+    'src/uop/key.c',
     'src/uop/spec.c',
     'src/uop/movement.c',
     'src/uop/weak.c',

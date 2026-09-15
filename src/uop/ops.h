@@ -37,6 +37,10 @@ PolyUOp *poly_uop_get_valid(PolyCtx *ctx, PolyUOp *u);
 /* Tinygrad 2026-08-22/a9069c177a9d uop/ops.py:UOp.addrspace. */
 bool poly_uop_addrspace(const PolyUOp *u, PolyAddrSpace *out);
 
+/* UOp.key content identity, excluding tags. Caller frees the returned bytes;
+ * NULL disables persistent caching for unsupported process-local payloads. */
+uint8_t *poly_uop_key(PolyCtx *ctx, PolyUOp *root, size_t *size);
+
 /* C mechanics for Tinygrad's weak UOpMetaClass.ucache and Python-owned UOps. */
 int poly_uop_cse_evict_unmarked(PolyCtx *ctx, PolyMap *live);
 bool poly_uop_storage_contains(PolyCtx *ctx, const void *ptr);

@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
+import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
 PUBLIC = ("polygrad.h", "tensor.h", "frontend.h", "model.h", "nn/nn.h", "nn/optim.h", "models/layers.h")
@@ -15,6 +16,32 @@ OWNERS = ("mixin/elementwise.h", "uop/ops.h", "placer.h", "device.h",
 
 
 def main():
+    (ROOT / 'temp').mkdir(exist_ok=True)
+    # A linkable core must also run independently of Model/codec objects. Two
+    # fresh processes exercise ASLR-independent UOp content keys, not pointers.
+    with tempfile.TemporaryDirectory(prefix='core-header-', dir=ROOT / 'temp') as directory:
+        executable = Path(directory) / 'core'
+        unit = '''#include "polygrad.h"
+#include "uop/ops.h"
+#include <stdio.h>
+#include <stdlib.h>
+int main(void) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sum = poly_alu2(ctx, POLY_OP_ADD, poly_const_int(ctx, 2), poly_const_int(ctx, 3));
+  size_t size = 0;
+  unsigned char *key = poly_uop_key(ctx, sum, &size);
+  if (!key || !size) return 1;
+  for (size_t i = 0; i < size; i++) printf("%02x", key[i]);
+  free(key);
+  poly_ctx_destroy(ctx);
+  return 0;
+}
+'''
+        subprocess.run(shlex.split(os.getenv('CC', 'cc')) + ['-std=c11', '-Isrc', '-x', 'c', '-',
+                       '-Lbuild', '-lpolygrad-core-check', f'-Wl,-rpath,{ROOT / "build"}', '-o', str(executable)],
+                       input=unit, text=True, cwd=ROOT, check=True)
+        first = subprocess.check_output([executable])
+        assert first and first == subprocess.check_output([executable]), 'process-dependent UOp key'
     sources = {p: p.read_text() for p in (ROOT / "src").rglob("*")
                if p.suffix in (".c", ".h")}
     for path, source in sources.items():
@@ -48,7 +75,8 @@ def main():
                            "-Isrc", "-x", language, "-fsyntax-only", "-"],
                            input=unit, text=True, cwd=ROOT, check=True)
             count += 1
-    print(f"Headers: {count} C/C++ checks passed; unique public declarations; no core FFI includes")
+    print(f"Headers: {count} C/C++ checks passed; core-only link and process-stable key; "
+          "unique public declarations; no core FFI includes")
 
 
 if __name__ == "__main__":

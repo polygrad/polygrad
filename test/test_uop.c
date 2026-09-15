@@ -22,6 +22,164 @@
 #include "../src/codegen/decomp/dtype.h"
 #include "../src/codegen/codegen.h"
 #include "../src/interp.h"
+
+static bool content_keys_equal(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
+  size_t na = 0, nb = 0;
+  uint8_t *ka = poly_uop_key(ctx, a, &na), *kb = poly_uop_key(ctx, b, &nb);
+  bool equal = ka && kb && na == nb && !memcmp(ka, kb, na);
+  free(ka);
+  free(kb);
+  return equal;
+}
+
+static bool content_args_differ(PolyCtx *ctx, PolyArg a, PolyArg b) {
+  PolyUOp *x = poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, a);
+  PolyUOp *y = poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, b);
+  size_t nx = 0, ny = 0;
+  uint8_t *kx = poly_uop_key(ctx, x, &nx), *ky = poly_uop_key(ctx, y, &ny);
+  bool different = kx && ky && (nx != ny || memcmp(kx, ky, nx));
+  free(kx);
+  free(ky);
+  return different;
+}
+
+TEST(uop, content_key_context_tags_and_order) {
+  PolyCtx *ctx = poly_ctx_new(), *other = poly_ctx_new();
+  PolyUOp *a = poly_const_int(ctx, 2), *b = poly_const_int(ctx, 3);
+  PolyUOp *x = poly_alu2(ctx, POLY_OP_ADD, a, b);
+  PolyUOp *tagged =
+      poly_uop_tagged_arg(ctx, x->op, x->dtype, x->src, x->n_src, x->arg, 9, poly_arg_int(99));
+  bool ok = content_keys_equal(
+      ctx, poly_alu2(ctx, POLY_OP_MUL, x, x), poly_alu2(ctx, POLY_OP_MUL, x, tagged)
+  );
+  ok &= !content_keys_equal(ctx, x, poly_alu2(ctx, POLY_OP_ADD, b, a));
+  ok &= !content_keys_equal(ctx, x, poly_uop(ctx, x->op, POLY_UINT32, x->src, x->n_src, x->arg));
+  for (int i = 0; i < 37; i++)
+    (void)poly_const_int(other, i + 100);
+  PolyUOp *other_b = poly_const_int(other, 3), *other_a = poly_const_int(other, 2);
+  PolyUOp *y = poly_alu2(other, POLY_OP_ADD, other_a, other_b);
+  size_t nx = 0, ny = 0;
+  uint8_t *kx = poly_uop_key(ctx, x, &nx), *ky = poly_uop_key(other, y, &ny);
+  poly_ctx_destroy(ctx);
+  poly_ctx_destroy(other);
+  ok &= kx && ky && nx == ny && !memcmp(kx, ky, nx);
+  free(kx);
+  free(ky);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
+TEST(uop, content_key_argument_vocabulary) {
+  PolyCtx *ctx = poly_ctx_new();
+  bool ok = true;
+  uint32_t limbs[] = {1, 2, 3};
+  PolyArg values[] = {
+      poly_arg_none(),
+      poly_arg_int(7),
+      poly_arg_float(0.25),
+      poly_arg_bool(true),
+      poly_arg_str("name"),
+      poly_arg_int_tuple((int64_t[]){1, INT64_MAX}, 2),
+      poly_arg_string_tuple((const char *[]){"CPU", "CUDA"}, 2),
+      {.kind = POLY_ARG_OPS, .ops = POLY_OP_ADD},
+      {.kind = POLY_ARG_REDUCE, .reduce = {POLY_OP_ADD, 2}},
+      {.kind = POLY_ARG_RANGE, .range = {17, POLY_AXIS_REDUCE, (int64_t[]){2, 4}, 2}},
+      {.kind = POLY_ARG_ALLREDUCE, .allreduce = {.op = POLY_OP_ADD, .device = "CPU"}},
+      poly_arg_bufferize_opts_int(77, POLY_ADDR_LOCAL, true),
+      {.kind = POLY_ARG_TENSOR_CORE,
+       .tensor_core =
+           {.dims = {16, 16, 8}, .dtype_in = POLY_FLOAT16, .device = "CUDA", .threads = 32}},
+      {.kind = POLY_ARG_BYTES, .bytes = {(const uint8_t *)"a\0b", 3}},
+      {.kind = POLY_ARG_INVALID},
+      {.kind = POLY_ARG_BIGINT, .bigint = {1, 3, limbs}},
+      {.kind = POLY_ARG_DTYPE, .dtype = POLY_FLOAT32},
+  };
+  for (size_t i = 0; i < sizeof(values) / sizeof(values[0]); i++)
+    for (size_t j = i + 1; j < sizeof(values) / sizeof(values[0]); j++)
+      ok &= content_args_differ(ctx, values[i], values[j]);
+  ok &= content_args_differ(ctx, poly_arg_int(1), poly_arg_int(INT64_C(1) << 32));
+  ok &= content_args_differ(ctx, poly_arg_str("ab"), poly_arg_str("ac"));
+  ok &= content_args_differ(ctx, poly_arg_float(0.25), poly_arg_float(0.5));
+  PolyArg big = {.kind = POLY_ARG_BIGINT, .bigint = {1, 3, (uint32_t[]){1, 2, 4}}};
+  ok &= content_args_differ(ctx, values[15], big);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
+TEST(uop, content_key_typed_parameter_and_metadata_edges) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyParamArg param = {
+      .slot = 7,
+      .dtype = POLY_FLOAT32,
+      .name = "batch",
+      .addrspace = POLY_ADDR_ALU,
+      .has_minmax = true,
+      .min_val = poly_arg_int(1),
+      .max_val = poly_arg_float(17.5),
+      .has_multiple_of = true,
+      .multiple_of = 2};
+  PolyParamArg changed = param;
+  bool ok = true;
+#define PARAM_CHANGE(field, value)                                                                 \
+  do {                                                                                             \
+    changed = param;                                                                               \
+    changed.field = value;                                                                         \
+    ok &= content_args_differ(ctx, poly_arg_param(&param), poly_arg_param(&changed));              \
+  } while (0)
+  PARAM_CHANGE(slot, 8);
+  PARAM_CHANGE(dtype, POLY_FLOAT16);
+  PARAM_CHANGE(name, "other");
+  PARAM_CHANGE(addrspace, POLY_ADDR_GLOBAL);
+  PARAM_CHANGE(volatile_, true);
+  PARAM_CHANGE(has_axis, true);
+  PARAM_CHANGE(device, "CUDA");
+  PARAM_CHANGE(has_minmax, false);
+  PARAM_CHANGE(min_val, poly_arg_float(1.5));
+  PARAM_CHANGE(max_val, poly_arg_int(18));
+  PARAM_CHANGE(multiple_of, 3);
+  PARAM_CHANGE(has_multiple_of, false);
+#undef PARAM_CHANGE
+  PolyUOp *one = poly_const_int(ctx, 1), *two = poly_const_int(ctx, 2);
+  PolyEstimates estimates = {.ops = one, .lds = one, .mem = two};
+  PolyKernelInfo kernel = {.name = "kernel", .estimates = &estimates};
+  PolyUOp *first = poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_kernel_info(&kernel));
+  estimates.ops = two;
+  PolyUOp *second = poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_kernel_info(&kernel));
+  ok &= content_args_differ(ctx, first->arg, second->arg);
+  PolyUOp *vars[] = {one};
+  PolyProgramInfo program = {.name = "program", .target = "CPU", .vars = vars, .n_vars = 1};
+  first = poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_program_info(&program));
+  vars[0] = two;
+  second = poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_program_info(&program));
+  ok &= content_args_differ(ctx, first->arg, second->arg);
+  PolyCallInfo call = {.name = "call"}, other = {.name = "call", .precompile = true};
+  ok &= content_args_differ(ctx, poly_arg_call_info(&call), poly_arg_call_info(&other));
+  other.has_grad_fxn = true;
+  other.grad_fxn_key = 123;
+  size_t size = 123;
+  uint8_t *key =
+      poly_uop_key(ctx, poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_call_info(&other)), &size);
+  ok &= key == NULL && size == 0;
+  free(key);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
+TEST(uop, content_key_deep_graph) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *u = poly_const_int(ctx, 1);
+  for (int i = 0; i < 20000; i++)
+    u = poly_uop1(ctx, POLY_OP_NOOP, POLY_VOID, u, poly_arg_none());
+  size_t size = 0;
+  uint8_t *key = poly_uop_key(ctx, u, &size);
+  bool ok = key && size > 0;
+  free(key);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
 #include "../src/uop/weak.h"
 #if defined(__linux__) && !defined(__EMSCRIPTEN__)
 #include <unistd.h>

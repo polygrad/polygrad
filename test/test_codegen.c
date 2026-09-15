@@ -1845,6 +1845,24 @@ TEST(codegen, beam_cache_key_covers_graph_edges) {
   PASS();
 }
 
+TEST(codegen, beam_cache_key_ignores_tags_and_tag_only_sharing) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_const_int(ctx, 2), *b = poly_const_int(ctx, 3);
+  PolyUOp *sum = poly_alu2(ctx, POLY_OP_ADD, a, b);
+  PolyUOp *tagged = poly_uop_tagged_arg(
+      ctx, sum->op, sum->dtype, sum->src, sum->n_src, sum->arg, 91, poly_arg_str("debug")
+  );
+  PolyUOp *shared = poly_alu2(ctx, POLY_OP_MUL, sum, sum);
+  PolyUOp *split = poly_alu2(ctx, POLY_OP_MUL, sum, tagged);
+  PolyUOp *x = poly_test_kernel_sink(ctx, &shared, 1, "test");
+  PolyUOp *y = poly_test_kernel_sink(ctx, &split, 1, "test");
+  uint64_t xkey = poly_test_beam_cache_key(ctx, x, 1, POLY_DEVICE_CPU);
+  uint64_t ykey = poly_test_beam_cache_key(ctx, y, 1, POLY_DEVICE_CPU);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(xkey != 0 && xkey == ykey);
+  PASS();
+}
+
 TEST(codegen, beam_binary_identity_is_independent_of_temporary_path) {
   const char *source = "void test_call(void **args) { *(float *)args[0] = 7; }";
   PolyProgram *a = poly_compile_c(source, "test");
@@ -1878,6 +1896,32 @@ TEST(codegen, beam_cache_replays_long_history_and_rejects_truncation) {
   bool correct = result && result->arg.kernel_info->n_applied_opts == 7 &&
                  poly_test_beam_cache_write(ctx, sink, result, 17, path, sizeof(path)) == 0;
   correct &= poly_test_beam_cache_read(ctx, sink, 17) == result;
+  PolyCtx *other = poly_ctx_new();
+  PolyUOp *other_sink = beam_action_sink(other, POLY_AXIS_GLOBAL, 128);
+  other_sink = poly_uop_tagged_arg(
+      other, other_sink->op, other_sink->dtype, other_sink->src, other_sink->n_src, other_sink->arg,
+      99, poly_arg_str("diagnostic")
+  );
+  PolyUOp *replayed = poly_test_beam_cache_read(other, other_sink, 17);
+  correct &= replayed && replayed->arg.kernel_info->n_applied_opts == 7;
+  size_t original_size = 0, replayed_size = 0;
+  uint8_t *original_key = poly_uop_key(ctx, result, &original_size);
+  uint8_t *replayed_key = poly_uop_key(other, replayed, &replayed_size);
+  correct &= original_key && replayed_key && original_size == replayed_size &&
+             !memcmp(original_key, replayed_key, original_size);
+  free(original_key);
+  free(replayed_key);
+  poly_ctx_destroy(other);
+  /* A colliding filename must not bypass the stored full-key comparison. */
+  FILE *collision = path[0] ? fopen(path, "r+b") : NULL;
+  if (collision) {
+    correct &= fseek(collision, 5 * sizeof(uint32_t), SEEK_SET) == 0;
+    int byte = fgetc(collision);
+    correct &= byte != EOF && fseek(collision, -1, SEEK_CUR) == 0;
+    correct &= fputc(byte ^ 1, collision) != EOF;
+    fclose(collision);
+  }
+  correct &= collision != NULL && poly_test_beam_cache_read(ctx, sink, 17) == NULL;
   FILE *file = path[0] ? fopen(path, "wb") : NULL;
   if (file) {
     fputc(0, file);

@@ -17,7 +17,6 @@
 #include "codegen/late/gater.h"
 #include "renderer/cstyle.h"
 #include "bigint.h"
-#include "ir.h"
 #include "engine/schedule.h"
 #include "schedule/indexing.h"
 #include "schedule/multi.h"
@@ -2654,6 +2653,7 @@ static double beam_time_candidate(
   return poly_time_program(ctx, runner, device, raw, reps, early_stop_us, max_global_size);
 }
 
+#ifdef POLY_TESTING
 static double beam_compile_and_time(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOpts opts, int reps) {
   PolyRunner runner;
   if (beam_prepare_candidate(ctx, sink, opts, &runner) != 0) return INFINITY;
@@ -2667,6 +2667,7 @@ static double beam_compile_and_time(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOpts
   poly_time_call_finish(ctx, &runner, device);
   return elapsed;
 }
+#endif
 
 /* Disk cache for BEAM results */
 #ifdef POLY_TESTING
@@ -2688,9 +2689,8 @@ double poly_test_beam_compile_and_time(
 }
 #endif
 
-/* FNV-1a hash over the AST toposort (structural hash for cache key) */
-/* Cache identity reuses the existing UOp encoder on the pre-lowering SINK. These bytes are
- * compared, never imported or executed: cache values are only Opt sequences. */
+/* search.py:beam_search keys the pre-lowering AST content, amount, test-size
+ * policy and renderer/device. Full bytes are checked after the filename hash. */
 typedef struct {
   uint8_t *data;
   size_t size;
@@ -2719,12 +2719,8 @@ static bool beam_cache_key(
     BeamCacheKey *key
 ) {
   *key = (BeamCacheKey){0};
-  PolyIrEntrypoint entry = {.name = "beam", .sink = sink};
-  PolyIrSpec spec = {.ctx = ctx, .entrypoints = &entry, .n_entrypoints = 1};
-  int length = 0;
-  key->data = poly_ir_export(&spec, &length);
-  if (!key->data || length <= 0) goto failed;
-  key->size = (size_t)length;
+  key->data = poly_uop_key(ctx, sink, &key->size);
+  if (!key->data) goto failed;
   PolyRendererCaps c = opts.caps;
   int fields[] = {
       POLYGRAD_ABI_VERSION,

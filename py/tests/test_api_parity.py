@@ -672,6 +672,19 @@ def test_python_loader_checks_current_abi_before_use():
     assert _ffi.get_lib().poly_abi_version() == _ffi.POLYGRAD_ABI_VERSION == int(match.group(1))
 
 
+def test_python_source_manifest_contains_makefile_sources():
+    import runpy
+    root = Path(__file__).resolve().parents[2]
+    shipped = set(runpy.run_path(str(root / 'py/scripts/sync-csrc.py'))['SOURCES'])
+    required = set()
+    for line in (root / 'Makefile').read_text().splitlines():
+        if re.match(r'\s*(SRC|CODEC_SRC|LOADER_SRC)\s*[+:]?=', line):
+            required.update(re.findall(r'(?:src|vendor)/[\w/.-]+\.c\b', line))
+    assert required
+    # setup.py enables CUDA, but not the optional native x86 ISA backend.
+    assert required - shipped <= {'src/renderer/isa/x86.c'}
+
+
 def test_python_source_manifest_contains_quoted_dependencies():
     import runpy
     root = Path(__file__).resolve().parents[2]
