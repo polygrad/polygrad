@@ -655,6 +655,15 @@ logits, three greedy choices and bundle reload against Transformers. Set
 from testing; missing or altered weights fail this target. This is full-window
 recomputation, not KV-cached generation.
 
+For the pinned BF16 Llama 3.2 1B checkpoint, use `make test-llama32-pretrained
+LLAMA32_CHECKPOINT=/path/to/Llama-3.2-1B LLAMA32_TEST_DEVICES='cuda cpu'
+HF_PYTHON=/path/to/reference/python`. This runs the float32 Transformers oracle
+and each Polygrad backend in separate processes, comparing full logits and
+greedy choices. It does not download weights or test KV caching/bundle export.
+Allow substantial host RAM/swap as well as GPU memory: the current importer and
+float32 Model retain more storage than the BF16 checkpoint size. Float32 weights
+alone exceed 4 GB, so this is not a Wasm-sized checkpoint.
+
 `models.Sequential(config)` and `models.Graph(config)` build ordinary Models in
 C, alongside MLP/TabM/NAM. One JSON configuration can be shared by Python, Node,
 and browsers without model-specific source compilation or an authoring callback.

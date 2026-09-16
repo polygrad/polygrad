@@ -273,6 +273,19 @@ test-llama-pretrained: build/libpolygrad.so
 		LLAMA_TEST_DEVICES='$(LLAMA_TEST_DEVICES)' POLY_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py \
 		$(HF_PYTHON) -m pytest py/tests/test_llama_pretrained.py -o addopts= -v -s
 
+LLAMA32_CHECKPOINT ?= temp/llama32-1b
+LLAMA32_ORACLE ?= temp/llama32-reference.npz
+LLAMA32_TEST_DEVICES ?= cpu
+.PHONY: test-llama32-pretrained
+# Keep the 1B reference and each F32 Polygrad model in separate processes.
+test-llama32-pretrained: build/libpolygrad.so
+	@test -n "$(strip $(LLAMA32_TEST_DEVICES))" || { echo 'LLAMA32_TEST_DEVICES is empty'; exit 2; }
+	$(HF_PYTHON) test/llama32_pretrained.py reference --checkpoint '$(LLAMA32_CHECKPOINT)' --oracle '$(LLAMA32_ORACLE)'
+	@set -e; for llama_device in $(LLAMA32_TEST_DEVICES); do \
+		POLY_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py $(PARITY_PY) test/llama32_pretrained.py verify \
+			--checkpoint '$(LLAMA32_CHECKPOINT)' --oracle '$(LLAMA32_ORACLE)' --device "$$llama_device"; \
+	done
+
 test-hf-e2e: build/libpolygrad.so
 	PYTEST_ADDOPTS= POLY_REQUIRE_HF=1 POLY_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py \
 		$(HF_PYTHON) -m pytest py/tests/test_hf_e2e.py -o addopts= -v
