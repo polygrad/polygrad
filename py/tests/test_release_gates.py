@@ -15,6 +15,19 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def test_c_harness_probe_preserves_debug_link_flags(tmp_path, monkeypatch):
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, '', '')
+
+    monkeypatch.setenv('LDFLAGS_DEBUG', '-lm -ldl -fsanitize=address,undefined -no-pie')
+    monkeypatch.setattr(subprocess, 'run', run)
+    test_c_harness_registration_capacity(tmp_path, 1)
+    assert calls[0][-4:] == ['-lm', '-ldl', '-fsanitize=address,undefined', '-no-pie']
+
+
 @pytest.mark.parametrize('available', [0, 1])
 def test_c_harness_registration_capacity(tmp_path, available):
     source = tmp_path / 'registry.c'
@@ -29,10 +42,13 @@ TEST(harness, boundary) { PASS(); }
 int main(void) { return g_n_tests == MAX_TESTS ? 0 : 1; }
 ''')
     binary = tmp_path / 'registry'
+    # Use the same link configuration as the sanitized C suite, including any
+    # toolchain-specific executable layout flags (e.g. -no-pie).
+    link_flags = shlex.split(os.environ.get('LDFLAGS_DEBUG', '-lm -ldl -fsanitize=address,undefined'))
     subprocess.run([*shlex.split(os.environ.get('CC', 'cc')), '-std=gnu11',
                     '-fsanitize=address,undefined', '-fno-sanitize-recover=all',
                     '-Itest', '-Isrc', f'-DAVAILABLE={available}', str(source),
-                    '-o', str(binary), '-lm'], cwd=ROOT, check=True, capture_output=True)
+                    '-o', str(binary), *link_flags], cwd=ROOT, check=True, capture_output=True)
     run = subprocess.run([str(binary)], capture_output=True, text=True)
     assert run.returncode == (0 if available else 2), run.stderr
     if not available:
