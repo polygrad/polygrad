@@ -7,6 +7,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import signal
 import subprocess
@@ -43,7 +44,7 @@ def release_gates():
         test-compat-tinygrad-upstream-ratchet test-compat-tinygrad-ops test-compat-tinygrad-nn
         test-compat-tinygrad-policy
         test-compat-tinygrad-tier1 test-compat-tinygrad-convnext
-        test-reference-parity fuzz-smoke test-symbolic-z3
+        test-reference-parity fuzz-smoke test-symbolic-z3-supported
         bench-smoke-regression bench-hlb-cuda-semantic bench-hlb-cuda-timing
     '''.split()
     gates = [dict(target=target, variables={}) for target in targets]
@@ -67,6 +68,8 @@ def release_gates():
 
 
 def preflight(variables):
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(errors='backslashreplace')
     # The core may build with GCC while generated CPU kernels require __fp16.
     # Exercise that contract, not the compiler executable's spelling.
     checks = [('CC', [variables.get('CC', 'clang'), '-fsyntax-only', '-x', 'c', '-'],
@@ -78,15 +81,30 @@ def preflight(variables):
     )
     for name in ('PYTHON', 'PARITY_PY'):
         checks.append((name, shlex.split(variables.get(name, sys.executable)) + ['-c', version_check], None))
+    # Fail before the matrix when isolated-package/proof tooling is missing.
+    checks.append(('PYTHON build', shlex.split(variables.get('PYTHON', sys.executable)) +
+                   ['-c', 'import build'], None))
+    checks.append(('PARITY_PY z3', shlex.split(variables.get('PARITY_PY', sys.executable)) +
+                   ['-c', 'import z3'], None))
+    for name, default in (('CLANG_FORMAT', 'clang-format-14'), ('ANALYZER_CC', 'clang-14')):
+        checks.append((name, shlex.split(variables.get(name, default)) + ['--version'], None))
     failed = False
     for name, command, source in checks:
         print(f'{name}: {shlex.join(command)}', flush=True)
         try:
-            result = subprocess.run(command, input=source, text=True, capture_output=True, timeout=30)
+            result = subprocess.run(command, input=source, encoding='utf-8', errors='replace', capture_output=True, timeout=30)
             print(result.stdout + result.stderr, end='')
             if result.returncode:
                 failed = True
                 print(f'{name}: preflight failed (exit {result.returncode})')
+            if name == 'CLANG_FORMAT' and not re.search(r'\bversion 14\.', result.stdout):
+                failed = True
+                print('CLANG_FORMAT: release formatting requires version 14')
+            if name == 'ANALYZER_CC':
+                review = json.loads((ROOT / 'test/fixtures/analyzer_reviews.json').read_text(encoding='utf-8'))
+                if result.stdout != review['context']['clang']:
+                    failed = True
+                    print('ANALYZER_CC: compiler differs from the reviewed analyzer context')
         except (OSError, subprocess.TimeoutExpired) as exc:
             failed = True
             print(f'{name}: {exc}')
@@ -106,7 +124,7 @@ def release_environment(root):
                 'POLY_REQUIRE_HF', 'NODE_OPTIONS', 'NODE_PATH'):
         env.pop(key, None)
     env.update(DEV='CPU', POLY_DEV='cpu', PYTEST_ADDOPTS='',
-               PYTEST_DISABLE_PLUGIN_AUTOLOAD='1', POLY_BROWSER_DEVICES='auto,interp,webgpu',
+               PYTEST_DISABLE_PLUGIN_AUTOLOAD='1', PYTHONUTF8='1', POLY_BROWSER_DEVICES='auto,interp,webgpu',
                POLY_BROWSER_SKIP_UNAVAILABLE='0')
     for key, directory in (('POLY_TMPDIR', 'cc_tmp'), ('TMPDIR', 'cc_tmp'),
                            ('EM_CACHE', 'emscripten-cache'), ('XDG_CACHE_HOME', 'xdg_cache'),

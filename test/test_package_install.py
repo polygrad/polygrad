@@ -4,7 +4,7 @@
 import argparse
 import os
 from pathlib import Path
-import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -58,17 +58,27 @@ def node_install(work, env, npm, node):
     for lane, expected in (('native', 'native'), ('fallback', 'wasm')):
         prefix = work / lane
         prefix.mkdir()
-        install_env = dict(env, CC='false', CXX='false') if lane == 'fallback' else env
+        compiler_marker = work / 'compiler-invoked'
+        if lane == 'fallback':
+            compiler = work / 'failing-compiler'
+            compiler.write_text('#!/bin/sh\n: > ' + shlex.quote(str(compiler_marker)) + '\nexit 1\n',
+                                encoding='utf-8')
+            compiler.chmod(0o700)
+            install_env = dict(env, CC=str(compiler), CXX=str(compiler))
+        else:
+            install_env = env
         log = work / f'{lane}-install.log'
         run([npm, 'install', '--prefix', str(prefix), '--foreground-scripts',
              '--ignore-scripts=false', '--no-audit', '--no-fund', str(artifact)],
             prefix, install_env, log)
         marker = ('native addon built successfully' if lane == 'native'
                   else 'native addon build failed (will use WASM fallback)')
-        install_output = log.read_text()
+        install_output = log.read_text(encoding='utf-8')
         if marker not in install_output:
             raise RuntimeError(f'{lane}: install lifecycle did not report {marker!r}; see {log}')
-        if lane == 'fallback' and not re.search(r'\bfalse\b', install_output):
+        # node-gyp may hide compiler commands in quiet output. Prove execution
+        # independently of log verbosity, in addition to checking the fallback.
+        if lane == 'fallback' and not compiler_marker.is_file():
             raise RuntimeError(f'forced compiler failure was not observed; see {log}')
         addon = prefix / 'node_modules/polygrad/build/Release/polygrad_napi.node'
         if addon.exists() != (lane == 'native'):

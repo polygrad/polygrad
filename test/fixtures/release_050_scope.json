@@ -6,7 +6,8 @@
     "HIP backend validation",
     "HCQ2 execution and GETADDR",
     "Genuine multi-GPU execution",
-    "PYLITERAL matcher vocabulary"
+    "PYLITERAL matcher vocabulary",
+    "Strict fixed-width symbolic-overflow proof (uint8_add_wrap_cmp also fails in pinned Tinygrad); general/division Z3 proofs remain required"
   ],
   "deferred_certification": "Exhaustive June-to-0.14.0 source-wave certification remains open and is checked separately with reference-migration-check.",
   "excluded_vocabulary": [

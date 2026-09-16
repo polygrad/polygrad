@@ -1,7 +1,8 @@
 'use strict'
 
 const assert = require('node:assert/strict')
-const { runForDevice } = require('./browser/run')
+const fs = require('node:fs')
+const { runForDevice, launchOptionsFor } = require('./browser/run')
 
 async function check(device) {
   const results = { passed: 1, failed: 0 }
@@ -26,6 +27,14 @@ async function check(device) {
 }
 
 (async () => {
+  for (const device of ['auto', 'interp', 'webgpu']) {
+    const spec = { launcherName: 'chromium' }
+    const opts = launchOptionsFor(spec, device).opts
+    if (fs.existsSync('/usr/bin/google-chrome')) assert.equal(opts.executablePath, '/usr/bin/google-chrome')
+    assert.equal(launchOptionsFor({...spec, executablePath:'/chosen/chrome'}, device).opts.executablePath, '/chosen/chrome')
+    assert.equal(launchOptionsFor({...spec, channel:'chrome-beta'}, device).opts.channel, 'chrome-beta')
+    assert.equal(launchOptionsFor({...spec, channel:'chrome-beta'}, device).opts.executablePath, undefined)
+  }
   for (const device of ['auto', 'interp', 'webgpu']) await check(device)
   console.log('Browser runner: 3 passed')
 })().catch(error => { console.error(error); process.exitCode = 1 })

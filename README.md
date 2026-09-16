@@ -1022,8 +1022,11 @@ writable caches and browser display. `PYTHON` selects the ordinary frontend and
 package-test environment and defaults to `PARITY_PY` for release runs;
 both must use CPython 3.11 for the pinned source-audit tests. `HF_PYTHON` selects
 the independent HF reference stack. Release runs default to Clang unless `CC`
-is explicitly supplied. The first gate checks CPU-renderer `__fp16` support and
-the Python versions; failure stops the matrix before expensive tests. Override
+is explicitly supplied. Formatting uses `CLANG_FORMAT=clang-format-14`; analysis
+uses `ANALYZER_CC=clang-14` and requires the exact reviewed compiler version.
+The first gate checks these tools, CPU-renderer `__fp16` support, Python versions,
+`build` in `PYTHON`, and `z3` in `PARITY_PY`; failure stops the matrix before
+expensive tests. Release subprocesses use UTF-8. Override
 `QWEN3_GGUF` and `BENCH_BASELINE` as needed. The runner
 does not download missing fixtures, approve debts, or update baselines itself.
 Individual targets retain their existing package/network behavior.
@@ -1048,6 +1051,13 @@ bound to source files, headers, flags and Clang version. New warnings, stale
 reviews, compiler failures and missing translation-unit completions fail. Raw
 logs and exit status remain visible; there are no broad checker suppressions.
 For a standalone run, provide a new `ANALYZER_REVIEW_DIR`.
+
+Release acceptance runs `test-symbolic-z3-supported` (general integers and
+division). `test-symbolic-z3-fixed` remains a separate strict overflow oracle:
+its `uint8_add_wrap_cmp` case fails in both Polygrad and pinned Tinygrad 0.14.0.
+The symbolic interval fold produces false, while uint8 arithmetic at 250 gives
+`((250 + 10) % 256) < 5`, which is true. This known limitation is not fixed or
+silently accepted by the strict oracle; `test-symbolic-z3` still runs all modes.
 
 Complete migration certification remains separate: `make reference-migration-check`
 still requires every source-wave audit and its source-bound execution manifest

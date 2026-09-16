@@ -219,6 +219,34 @@ def test_ffi_dtype_layout_is_the_current_scalar_c_abi():
     ]
 
 
+def test_symbolic_proof_harness_layout_matches_c(tmp_path):
+    import ctypes
+    import runpy
+    import shlex
+
+    root = Path(__file__).resolve().parents[2]
+    harness = runpy.run_path(str(root / 'test/external/fuzz_symbolic_z3.py'))
+    expected, statements = {}, []
+    for name in ('PolyDType', 'PolyArg', 'PolyParamArg', 'PolyUOp', 'PolyBigInt'):
+        layout = harness[name]
+        expected[name] = ctypes.sizeof(layout)
+        statements.append(f'printf("{name} %zu\\n", sizeof({name}));')
+        for field, _ in layout._fields_:
+            c_field = 'i' if name == 'PolyArg' and field == 'value' else field
+            key = f'{name}.{field}'
+            expected[key] = getattr(layout, field).offset
+            statements.append(f'printf("{key} %zu\\n", offsetof({name}, {c_field}));')
+    source = tmp_path / 'layout.c'
+    source.write_text('#include <stddef.h>\n#include <stdio.h>\n#include "polygrad.h"\nint main(void) {\n' +
+                      '\n'.join(statements) + '\n}\n', encoding='utf-8')
+    binary = tmp_path / 'layout'
+    subprocess.run([*shlex.split(os.environ.get('CC', 'cc')), '-std=c11', '-Isrc',
+                    str(source), '-o', str(binary)], cwd=root, check=True, capture_output=True)
+    result = subprocess.run([str(binary)], check=True, capture_output=True, text=True)
+    assert dict((key, int(value)) for key, value in (line.split() for line in result.stdout.splitlines())) == expected
+    assert harness['load_lib']().poly_abi_version() == _ffi._lib.poly_abi_version()
+
+
 def test_can_lossless_cast_exposes_existing_core_dtype_rules():
     from polygrad.dtype import can_lossless_cast
 
@@ -677,7 +705,7 @@ def test_python_source_manifest_contains_makefile_sources():
     root = Path(__file__).resolve().parents[2]
     shipped = set(runpy.run_path(str(root / 'py/scripts/sync-csrc.py'))['SOURCES'])
     required = set()
-    for line in (root / 'Makefile').read_text().splitlines():
+    for line in (root / 'Makefile').read_text(encoding='utf-8').splitlines():
         if re.match(r'\s*(SRC|CODEC_SRC|LOADER_SRC)\s*[+:]?=', line):
             required.update(re.findall(r'(?:src|vendor)/[\w/.-]+\.c\b', line))
     assert required

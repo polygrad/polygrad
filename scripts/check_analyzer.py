@@ -69,16 +69,19 @@ def main():
     parser.add_argument('--review', default='test/fixtures/analyzer_reviews.json')
     parser.add_argument('--output', required=True)
     parser.add_argument('--make', default='make')
+    parser.add_argument('--clang', default='clang-14')
     parser.add_argument('--sources', required=True)
     parser.add_argument('--flags', required=True)
     args = parser.parse_args()
     output = Path(args.output).resolve()
     output.mkdir(parents=True, exist_ok=False)
     sources, flags = shlex.split(args.sources), shlex.split(args.flags)
-    clang = subprocess.run(['clang', '--version'], check=True, text=True, capture_output=True).stdout
+    clang = subprocess.run(shlex.split(args.clang) + ['--version'], check=True,
+                           encoding='utf-8', capture_output=True).stdout
     before = context(ROOT, sources, flags, clang)
     review = json.loads((ROOT / args.review).read_text(encoding='utf-8'))
     command = shlex.split(args.make) + ['--no-print-directory', '-j1', 'analyze', 'HAS_CUDA=1', 'HAS_HIP=0',
+                                       'ANALYZER_CC=' + args.clang,
                                        'ANALYZE_SRC=' + ' '.join(sources),
                                        'CFLAGS_COMMON=' + shlex.join(flags), 'ANALYZE_FLAGS=']
     env = {key: value for key, value in os.environ.items() if key not in ('MAKEFLAGS', 'MFLAGS', 'MAKEOVERRIDES')}

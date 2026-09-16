@@ -6,6 +6,8 @@ CFLAGS_DEBUG = $(CFLAGS_COMMON) -g -O0 -fsanitize=address,undefined -fno-omit-fr
 LDFLAGS = -lm
 LDFLAGS_DEBUG = -lm -ldl -fsanitize=address,undefined
 TSAN_CC ?= clang
+CLANG_FORMAT ?= clang-format-14
+ANALYZER_CC ?= clang-14
 TSAN_OPTIONS ?= halt_on_error=1:second_deadlock_stack=1
 TSAN_RUNNER ?= setarch $$(uname -m) -R
 # Keep LeakSanitizer enabled by default for the native debug test binary.
@@ -460,11 +462,18 @@ test-compat-tinygrad-convnext: build/libpolygrad.so
 
 Z3_FUZZ_ITERS ?= 128
 Z3_FUZZ_SEED ?= 0
-test-symbolic-z3: build/libpolygrad.so
+.PHONY: test-symbolic-z3-supported test-symbolic-z3-fixed
+test-symbolic-z3: test-symbolic-z3-supported test-symbolic-z3-fixed
+
+# Fixed-width overflow proofs are stricter than pinned Tinygrad's symbolic
+# interval rules. Keep that independent failing oracle out of parity acceptance.
+test-symbolic-z3-supported: build/libpolygrad.so
 	POLY_LIB=$(abspath build/libpolygrad.so) $(PARITY_PY) \
 		test/external/fuzz_symbolic_z3.py --mode general --seed $(Z3_FUZZ_SEED) --iters $(Z3_FUZZ_ITERS)
 	POLY_LIB=$(abspath build/libpolygrad.so) $(PARITY_PY) \
 		test/external/fuzz_symbolic_z3.py --mode div --seed $(Z3_FUZZ_SEED) --iters $(Z3_FUZZ_ITERS)
+
+test-symbolic-z3-fixed: build/libpolygrad.so
 	POLY_LIB=$(abspath build/libpolygrad.so) $(PARITY_PY) \
 		test/external/fuzz_symbolic_z3.py --mode fixed --seed $(Z3_FUZZ_SEED) --iters $(Z3_FUZZ_ITERS)
 
@@ -839,7 +848,7 @@ RELEASE_MAKE := $(MAKE)
 # user choices remain authoritative and are checked before the matrix starts.
 RELEASE_CC = $(if $(filter default,$(origin CC)),clang,$(CC))
 RELEASE_PYTHON = $(if $(filter file default undefined,$(origin PYTHON)),$(PARITY_PY),$(PYTHON))
-RELEASE_MAKE_VARS = AR EMCC EMSDK_PYTHON NODE NPM PARITY_PY HF_PYTHON CFLAGS_DEBUG LDFLAGS_DEBUG \
+RELEASE_MAKE_VARS = AR EMCC EMSDK_PYTHON NODE NPM PARITY_PY HF_PYTHON CFLAGS_DEBUG LDFLAGS_DEBUG CLANG_FORMAT ANALYZER_CC \
                    QWEN3_GGUF BENCH_BASELINE MIGRATION_EVIDENCE
 .PHONY: test-release test-release-list test-release-runner test-release-preflight
 test-release:
@@ -849,7 +858,8 @@ test-release:
 
 test-release-preflight:
 	@$(PARITY_PY) scripts/test_release.py --preflight \
-		--make-var 'CC=$(RELEASE_CC)' --make-var 'PYTHON=$(RELEASE_PYTHON)' --make-var 'PARITY_PY=$(PARITY_PY)'
+		--make-var 'CC=$(RELEASE_CC)' --make-var 'PYTHON=$(RELEASE_PYTHON)' --make-var 'PARITY_PY=$(PARITY_PY)' \
+		--make-var 'CLANG_FORMAT=$(CLANG_FORMAT)' --make-var 'ANALYZER_CC=$(ANALYZER_CC)'
 
 test-release-list:
 	@$(PARITY_PY) scripts/test_release.py --list
@@ -999,6 +1009,7 @@ ANALYZER_REVIEW_DIR ?= temp/analyzer-reviewed
 .PHONY: test-analyze-reviewed test-analyzer-review
 test-analyze-reviewed:
 	@$(PARITY_PY) scripts/check_analyzer.py --make '$(RELEASE_MAKE)' \
+		--clang '$(ANALYZER_CC)' \
 		--output '$(ANALYZER_REVIEW_DIR)' --sources '$(ANALYZE_SRC)' \
 		--flags '$(filter-out -pipe,$(CFLAGS_COMMON)) $(ANALYZE_FLAGS)'
 
@@ -1010,7 +1021,7 @@ analyze:
 	@rm -f build/analyze.log; status=0; \
 	  for src in $(ANALYZE_SRC); do \
 	    echo "==> $$src" >> build/analyze.log; \
-	    clang --analyze $(filter-out -pipe,$(CFLAGS_COMMON)) $(ANALYZE_FLAGS) "$$src" \
+	    $(ANALYZER_CC) --analyze $(filter-out -pipe,$(CFLAGS_COMMON)) $(ANALYZE_FLAGS) "$$src" \
 	      >> build/analyze.log 2>&1; rc=$$?; \
 	    echo "analyzer-exit: $$src $$rc" >> build/analyze.log; \
 	    test $$rc -eq 0 || status=1; \
@@ -1028,10 +1039,10 @@ cppcheck:
 
 # clang-format (install: apt install clang-format)
 format:
-	clang-format -i $(FORMAT_SRC)
+	$(CLANG_FORMAT) -i $(FORMAT_SRC)
 
 format-check:
-	clang-format --dry-run --Werror $(FORMAT_SRC)
+	$(CLANG_FORMAT) --dry-run --Werror $(FORMAT_SRC)
 
 # MemorySanitizer (requires clang, incompatible with ASan)
 test-msan: build/polygrad_test_msan

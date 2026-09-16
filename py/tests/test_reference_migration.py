@@ -117,7 +117,7 @@ def test_migration_make_targets_use_pinned_interpreter():
 
 
 def test_configured_audits_are_durable_and_closed_waves_have_evidence():
-    config = json.loads((migration.ROOT / "scripts/reference_migration_waves.json").read_text())
+    config = json.loads((migration.ROOT / "scripts/reference_migration_waves.json").read_text(encoding='utf-8'))
     for wave in config["waves"]:
         audit = wave.get("source_audit")
         if wave["source_status"] == "closed":
@@ -125,7 +125,7 @@ def test_configured_audits_are_durable_and_closed_waves_have_evidence():
         if audit:
             assert not audit.startswith("temp/"), wave["id"]
             assert (migration.ROOT / audit).is_file(), wave["id"]
-            data = json.loads((migration.ROOT / audit).read_text())
+            data = json.loads((migration.ROOT / audit).read_text(encoding='utf-8'))
             for key in ("review", "overlay_review"):
                 if key in data:
                     review = data[key]
@@ -133,7 +133,7 @@ def test_configured_audits_are_durable_and_closed_waves_have_evidence():
 
 
 def test_configured_source_paths_exist_in_at_least_one_reference():
-    config = json.loads((migration.ROOT / "scripts/reference_migration_waves.json").read_text())
+    config = json.loads((migration.ROOT / "scripts/reference_migration_waves.json").read_text(encoding='utf-8'))
     for wave in config["waves"]:
         for path in wave["tinygrad_paths"]:
             assert any((migration.ROOT / config[ref] / path).exists()
@@ -141,7 +141,7 @@ def test_configured_source_paths_exist_in_at_least_one_reference():
 
 
 def test_source_review_routing_keeps_dependencies_in_both_inventories():
-    config = json.loads((migration.ROOT / "scripts/reference_migration_waves.json").read_text())
+    config = json.loads((migration.ROOT / "scripts/reference_migration_waves.json").read_text(encoding='utf-8'))
     waves = {w["id"]: w for w in config["waves"]}
     for wave in waves.values():
         for path, owner in wave.get("source_review_owners", {}).items():

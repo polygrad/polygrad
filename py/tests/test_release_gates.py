@@ -117,6 +117,32 @@ def test_qwen_fixture_gate_rejects_missing_file(tmp_path):
     assert 'GGUF fixture not found' in run.stdout + run.stderr
 
 
+@pytest.mark.parametrize('invoke_compiler', [False, True])
+def test_package_fallback_proves_compiler_execution_without_verbose_logs(tmp_path, monkeypatch, invoke_compiler):
+    install = runpy.run_path(str(ROOT / 'test/test_package_install.py'))['node_install']
+
+    def fake_run(command, cwd, env, log):
+        if command[1] == 'pack':
+            (tmp_path / 'polygrad-test.tgz').touch()
+        elif command[1] == 'install':
+            native = cwd.name == 'native'
+            if native:
+                addon = cwd / 'node_modules/polygrad/build/Release/polygrad_napi.node'
+                addon.parent.mkdir(parents=True)
+                addon.touch()
+            elif invoke_compiler:
+                assert subprocess.run([env['CC']], capture_output=True).returncode == 1
+            log.write_text('native addon built successfully' if native else
+                           'native addon build failed (will use WASM fallback)', encoding='utf-8')
+
+    monkeypatch.setitem(install.__globals__, 'run', fake_run)
+    if invoke_compiler:
+        install(tmp_path, {}, 'npm', 'node')
+    else:
+        with pytest.raises(RuntimeError, match='forced compiler failure was not observed'):
+            install(tmp_path, {}, 'npm', 'node')
+
+
 def test_wino_environment_request_is_rejected():
     run = subprocess.run([sys.executable, '-c', 'import polygrad.helpers'], cwd=ROOT,
                          env=dict(os.environ, WINO='1'), capture_output=True, text=True)

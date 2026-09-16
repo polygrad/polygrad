@@ -38,6 +38,8 @@ def test_release_manifest_covers_required_lanes_once(runner):
                 'reference-migration-check', 'test-parity-op-census', 'analyze',
                 'test-hip', 'publish-py', 'publish-js'} & set(targets)
     assert targets.index('test-analyze-reviewed') < targets.index('bench-hlb-cuda-semantic')
+    assert 'test-symbolic-z3-supported' in targets
+    assert 'test-symbolic-z3' not in targets and 'test-symbolic-z3-fixed' not in targets
     assert targets[-1] == 'bench-hlb-cuda-timing'
     ops = next(g for g in runner['release_gates']() if g['target'] == 'test-compat-tinygrad-ops')
     assert '--baseline test/fixtures/tinygrad_upstream_ops_cpu_014_baseline.json' in ops['variables']['UPSTREAM_COMPAT_ARGS']
@@ -71,6 +73,32 @@ def test_release_preflight_checks_actual_compiler_and_python(runner, tmp_path):
     wrong_python.write_text('#!/bin/sh\necho "CPython 3.12"\nexit 1\n')
     wrong_python.chmod(0o700)
     assert runner['preflight'](dict(variables, PYTHON=str(wrong_python))) == 1
+
+
+def test_release_preflight_decodes_diagnostics_under_ascii_locale(tmp_path):
+    compiler = tmp_path / 'compiler'
+    compiler.write_bytes(b'#!/bin/sh\nprintf "\\342\\200\\230bad type\\342\\200\\231\\n" >&2\nexit 1\n')
+    compiler.chmod(0o700)
+    code = (f"import runpy; r=runpy.run_path({str(ROOT / 'scripts/test_release.py')!r}); "
+            f"assert r['preflight']({dict(CC=str(compiler), PYTHON=sys.executable, PARITY_PY=sys.executable)!r}) == 1")
+    result = subprocess.run([sys.executable, '-c', code],
+                            env=dict(os.environ, LC_ALL='C', PYTHONUTF8='0', PYTHONCOERCECLOCALE='0'),
+                            capture_output=True)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize('tool,version', [('CLANG_FORMAT', 'clang-format version 18.0.0'),
+                                         ('ANALYZER_CC', 'unreviewed clang')])
+def test_release_preflight_rejects_unreviewed_tools(runner, tmp_path, tool, version):
+    executable = tmp_path / 'tool'
+    executable.write_text(f'#!/bin/sh\necho "{version}"\n', encoding='utf-8')
+    executable.chmod(0o700)
+    assert runner['preflight'](dict(CC='clang', PYTHON=sys.executable, PARITY_PY=sys.executable,
+                                   **{tool:str(executable)})) == 1
+
+
+def test_release_subprocesses_use_utf8(runner, tmp_path):
+    assert runner['release_environment'](tmp_path)['PYTHONUTF8'] == '1'
 
 
 def test_release_make_defaults_do_not_export_builtin_cc_or_ambient_python():

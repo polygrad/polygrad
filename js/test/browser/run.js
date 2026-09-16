@@ -109,16 +109,18 @@ function launchOptionsFor(spec, device) {
   const opts = {}
   if (spec.channel) opts.channel = spec.channel
   if (spec.executablePath) opts.executablePath = spec.executablePath
+  // Use the same available full browser for every Chromium lane. A private
+  // XDG cache need not contain Playwright's separate headless-shell download.
+  if (spec.launcherName === 'chromium' && !opts.executablePath && !opts.channel &&
+      executableExists('/usr/bin/google-chrome')) {
+    opts.executablePath = '/usr/bin/google-chrome'
+  }
 
   if (device === 'webgpu') {
     if (spec.launcherName !== 'chromium') {
       return { skip: `WebGPU tests currently require a Chromium-family browser` }
     }
     // WebGPU needs the full Chrome binary (not headless-shell) with GPU access.
-    // Use an explicitly requested executable/channel first, then system Chrome.
-    if (!opts.executablePath && !opts.channel && executableExists('/usr/bin/google-chrome')) {
-      opts.executablePath = '/usr/bin/google-chrome'
-    }
     opts.headless = false
     opts.ignoreDefaultArgs = ['--enable-unsafe-swiftshader']
     opts.args = WEBGPU_ARGS
@@ -248,7 +250,7 @@ async function main() {
   process.exit(totalFailed > 0 ? 1 : 0)
 }
 
-module.exports = { runForDevice }
+module.exports = { runForDevice, launchOptionsFor }
 
 if (require.main === module) main().catch(e => {
   console.error(e)
