@@ -456,9 +456,9 @@ TEST(registry, instance_from_ctx_alias_shares_data) {
   PolyUOp *emb = poly_param(ctx, POLY_FLOAT32, s, 1, "embedding");
   poly_alias(ctx, "lm_head", "embedding");
 
-  /* Trivial graph that uses the embedding buffer */
-  PolyUOp *store =
-      poly_store_val(ctx, emb, poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0)));
+  /* Read PARAM state into an output; authored PARAM writes are not permitted. */
+  PolyUOp *output = poly_output(ctx, POLY_FLOAT32, s, 1, "output");
+  PolyUOp *store = poly_store_val(ctx, output, emb);
   PolyUOp *sink = poly_sink1(ctx, store);
   poly_register_entrypoint(ctx, "init", sink);
 
@@ -466,7 +466,7 @@ TEST(registry, instance_from_ctx_alias_shares_data) {
   ASSERT_TRUE(inst != NULL);
 
   /* Both names in instance */
-  ASSERT_INT_EQ(poly_model_buf_count(inst), 2);
+  ASSERT_INT_EQ(poly_model_buf_count(inst), 3);
 
   /* Both resolve to the same data pointer (shared allocation) */
   float *emb_data = poly_model_buf_data_named(inst, "embedding", NULL);
@@ -491,21 +491,57 @@ TEST(registry, instance_from_ctx_unreachable_excluded) {
   PolyUOp *x = poly_input(ctx, POLY_FLOAT32, s, 1, "x");
   poly_aux(ctx, POLY_FLOAT32, s, 1, "unused_aux"); /* not in graph */
 
-  PolyUOp *store = poly_store_val(ctx, w, poly_reshape(ctx, x, s, 1));
+  PolyUOp *output = poly_output(ctx, POLY_FLOAT32, s, 1, "output");
+  PolyUOp *store = poly_store_val(ctx, output, poly_mul(ctx, w, x));
   PolyUOp *sink = poly_sink1(ctx, store);
   poly_register_entrypoint(ctx, "copy", sink);
 
   PolyModel *inst = poly_model_from_ctx(ctx);
   ASSERT_TRUE(inst != NULL);
 
-  /* Only w and x are reachable; unused_aux is excluded */
-  ASSERT_INT_EQ(poly_model_buf_count(inst), 2);
+  /* Only w, x and output are reachable; unused_aux is excluded. */
+  ASSERT_INT_EQ(poly_model_buf_count(inst), 3);
   ASSERT_TRUE(poly_model_get_buffer(inst, "w") != NULL);
   ASSERT_TRUE(poly_model_get_buffer(inst, "x") != NULL);
   ASSERT_TRUE(poly_model_get_buffer(inst, "unused_aux") == NULL);
 
   poly_model_free(inst);
   poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(registry, model_from_ctx_enforces_authored_state_roles) {
+  /* Registry construction has the same effect contract as callable capture. */
+  for (int role = POLY_ROLE_PARAM; role <= POLY_ROLE_AUX; role++) {
+    PolyCtx *ctx = poly_ctx_new();
+    int64_t shape[] = {1};
+    PolyUOp *state = NULL;
+    switch (role) {
+    case POLY_ROLE_INPUT:
+      state = poly_input(ctx, POLY_FLOAT32, shape, 1, "state");
+      break;
+    case POLY_ROLE_TARGET:
+      state = poly_target(ctx, POLY_FLOAT32, shape, 1, "state");
+      break;
+    case POLY_ROLE_PARAM:
+      state = poly_param(ctx, POLY_FLOAT32, shape, 1, "state");
+      break;
+    case POLY_ROLE_OUTPUT:
+      state = poly_output(ctx, POLY_FLOAT32, shape, 1, "state");
+      break;
+    case POLY_ROLE_AUX:
+      state = poly_aux(ctx, POLY_FLOAT32, shape, 1, "state");
+      break;
+    }
+    poly_register_entrypoint(
+        ctx, "write", poly_sink1(ctx, poly_store_val(ctx, state, poly_const_float(ctx, 1)))
+    );
+    PolyModel *model = poly_model_from_ctx(ctx);
+    bool admitted = model != NULL;
+    poly_model_free(model);
+    poly_ctx_destroy(ctx);
+    ASSERT_EQ(admitted, role == POLY_ROLE_AUX || role == POLY_ROLE_OUTPUT);
+  }
   PASS();
 }
 
