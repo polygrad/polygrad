@@ -39,6 +39,10 @@ function createWasmCoreFromModule(Module, device) {
   }
   Module.__polygradHostBuffers = Module.__polygradHostBuffers || new Map()
 
+  // wasm32 pointers span all 4GB. JS bitwise shifts are signed unless >>> is
+  // used; normalize byte offsets too before passing them to TypedArray APIs.
+  function malloc(nbytes) { return Module._malloc(nbytes) >>> 0 }
+
   // --- Heap accessors ---
   function heap32() {
     if (Module.HEAP32) return Module.HEAP32
@@ -81,19 +85,19 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // --- Scratch pointers ---
-  const _scratchLenPtr = Module._malloc(4)
-  const _scratchNumelPtr = Module._malloc(8)
-  const _scratchAxisPtr = Module._malloc(64)  // 8 dims * 8 bytes
-  const _scratchOutShapePtr = Module._malloc(64)
-  const _scratchOutNdimPtr = Module._malloc(4)
+  const _scratchLenPtr = malloc(4)
+  const _scratchNumelPtr = malloc(8)
+  const _scratchAxisPtr = malloc(64)  // 8 dims * 8 bytes
+  const _scratchOutShapePtr = malloc(64)
+  const _scratchOutNdimPtr = malloc(4)
   let _scratchPtrArrayPtr = 0
   let _scratchPtrArrayCap = 0
 
   // --- Int64 marshalling helpers ---
   function writeInt64Array(arr) {
-    const ptr = Module._malloc(arr.length * 8)
+    const ptr = malloc(arr.length * 8)
     for (let i = 0; i < arr.length; i++) {
-      const base = (ptr >> 2) + i * 2
+      const base = (ptr >>> 2) + i * 2
       const val = arr[i]
       heap32()[base] = val & 0xFFFFFFFF
       // Preserve the high word; floor also gives two's-complement negatives.
@@ -104,7 +108,7 @@ function createWasmCoreFromModule(Module, device) {
 
   function writeInt64Scratch(arr) {
     for (let i = 0; i < arr.length; i++) {
-      const base = (_scratchAxisPtr >> 2) + i * 2
+      const base = (_scratchAxisPtr >>> 2) + i * 2
       const val = arr[i]
       heap32()[base] = val & 0xFFFFFFFF
       heap32()[base + 1] = Math.floor(val / 0x100000000)
@@ -113,7 +117,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   function readOutShape() {
-    const ndim = heap32()[_scratchOutNdimPtr >> 2]
+    const ndim = heap32()[_scratchOutNdimPtr >>> 2]
     return readShapeFromPtr(_scratchOutShapePtr, ndim)
   }
 
@@ -127,7 +131,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   function readInt64At(ptr) {
-    const base = ptr >> 2
+    const base = ptr >>> 2
     const lo = heap32()[base] >>> 0
     const hi = heap32()[base + 1]
     return hi >= 0
@@ -136,12 +140,12 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   function callUopPair(fn, args, name) {
-    const outPtr = Module._malloc(8)
+    const outPtr = malloc(8)
     try {
       const rc = fn(...args, outPtr, outPtr + 4)
       if (rc !== 0) throw new Error(`${name} failed (rc=${rc})`)
       const h32 = heap32()
-      return [h32[outPtr >> 2], h32[(outPtr >> 2) + 1]]
+      return [h32[outPtr >>> 2], h32[(outPtr >>> 2) + 1]]
     } finally {
       Module._free(outPtr)
     }
@@ -162,15 +166,15 @@ function createWasmCoreFromModule(Module, device) {
 
   function writePtrArray(arr) {
     if (!arr || arr.length === 0) return 0
-    const ptr = Module._malloc(arr.length * 4)
+    const ptr = malloc(arr.length * 4)
     const h32 = heap32()
-    for (let i = 0; i < arr.length; i++) h32[(ptr >> 2) + i] = arr[i] || 0
+    for (let i = 0; i < arr.length; i++) h32[(ptr >>> 2) + i] = arr[i] || 0
     return ptr
   }
 
   function writeCString(s) {
     const bytes = new TextEncoder().encode(String(s))
-    const ptr = Module._malloc(bytes.length + 1)
+    const ptr = malloc(bytes.length + 1)
     heapU8().set(bytes, ptr)
     heapU8()[ptr + bytes.length] = 0
     return ptr
@@ -181,25 +185,25 @@ function createWasmCoreFromModule(Module, device) {
     if (arr.length > _scratchPtrArrayCap) {
       if (_scratchPtrArrayPtr) Module._free(_scratchPtrArrayPtr)
       _scratchPtrArrayCap = Math.max(arr.length, _scratchPtrArrayCap ? _scratchPtrArrayCap * 2 : 8)
-      _scratchPtrArrayPtr = Module._malloc(_scratchPtrArrayCap * 4)
+      _scratchPtrArrayPtr = malloc(_scratchPtrArrayCap * 4)
     }
     const h32 = heap32()
-    for (let i = 0; i < arr.length; i++) h32[(_scratchPtrArrayPtr >> 2) + i] = arr[i] || 0
+    for (let i = 0; i < arr.length; i++) h32[(_scratchPtrArrayPtr >>> 2) + i] = arr[i] || 0
     return _scratchPtrArrayPtr
   }
 
   function writeI32Array(arr) {
     if (!arr || arr.length === 0) return 0
-    const ptr = Module._malloc(arr.length * 4)
+    const ptr = malloc(arr.length * 4)
     const h32 = heap32()
-    for (let i = 0; i < arr.length; i++) h32[(ptr >> 2) + i] = arr[i] | 0
+    for (let i = 0; i < arr.length; i++) h32[(ptr >>> 2) + i] = arr[i] | 0
     return ptr
   }
 
   function readPtrArray(ptr, n) {
     const out = new Array(n)
     const h32 = heap32()
-    for (let i = 0; i < n; i++) out[i] = h32[(ptr >> 2) + i]
+    for (let i = 0; i < n; i++) out[i] = h32[(ptr >>> 2) + i]
     return out
   }
 
@@ -233,14 +237,14 @@ function createWasmCoreFromModule(Module, device) {
   ]
 
   function readCtxStats(ctx) {
-    const ptr = Module._malloc(144)
+    const ptr = malloc(144)
     try {
       const rc = Module._poly_ctx_stats(ctx, ptr)
       if (rc !== 0) throw new Error('poly_ctx_stats failed (rc=' + rc + ')')
       const h32 = heap32()
       const out = {}
       for (let i = 0; i < ctxStatsFields.length; i++) {
-        out[ctxStatsFields[i]] = h32[(ptr >> 2) + i] >>> 0
+        out[ctxStatsFields[i]] = h32[(ptr >>> 2) + i] >>> 0
       }
       const view = new DataView(heapU8().buffer)
       const readU64 = (offset) => {
@@ -276,14 +280,14 @@ function createWasmCoreFromModule(Module, device) {
      * allocation and are borrowed only until the synchronous builder returns.
      * Native uses its C layout; Python uses ctypes rather than these offsets. */
     const coefficients = cfg.nsCoefficients || []
-    const ptr = Module._malloc(80 + coefficients.length * 8)
+    const ptr = malloc(80 + coefficients.length * 8)
     if (!ptr) throw new Error('optimizer config allocation failed')
     const u8 = heapU8()
     const h32 = heap32()
     const f64 = heapF64()
     u8.fill(0, ptr, ptr + 80)
-    h32[ptr >> 2] = cfg.kind || 0
-    const base = ptr >> 3
+    h32[ptr >>> 2] = cfg.kind || 0
+    const base = ptr >>> 3
     f64[base + 1] = cfg.beta1 == null ? 0.9 : cfg.beta1
     f64[base + 2] = cfg.beta2 == null ? 0.999 : cfg.beta2
     f64[base + 3] = cfg.eps == null ? 1e-8 : cfg.eps
@@ -292,11 +296,11 @@ function createWasmCoreFromModule(Module, device) {
     u8[ptr + 48] = cfg.nesterov ? 1 : 0
     u8[ptr + 49] = cfg.classic ? 1 : 0
     f64[base + 7] = cfg.tcoef || 0
-    h32[(ptr + 64) >> 2] = cfg.nsSteps || 0
-    h32[(ptr + 68) >> 2] = coefficients.length
-    h32[(ptr + 72) >> 2] = coefficients.length ? ptr + 80 : 0
+    h32[(ptr + 64) >>> 2] = cfg.nsSteps || 0
+    h32[(ptr + 68) >>> 2] = coefficients.length
+    h32[(ptr + 72) >>> 2] = coefficients.length ? ptr + 80 : 0
     u8[ptr + 76] = cfg.preWd ? 1 : 0
-    f64.set(coefficients, (ptr + 80) >> 3)
+    f64.set(coefficients, (ptr + 80) >>> 3)
     return ptr
   }
 
@@ -312,7 +316,7 @@ function createWasmCoreFromModule(Module, device) {
 
   function allocString(str) {
     const bytes = new TextEncoder().encode(str + '\0')
-    const ptr = Module._malloc(bytes.length)
+    const ptr = malloc(bytes.length)
     heapU8().set(bytes, ptr)
     return ptr
   }
@@ -391,6 +395,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   function copyModelStorage(dataPtr, numel, dtypeId) {
+    dataPtr >>>= 0
     if (!dataPtr) return null
     const [AT, itemsize] = storageInfo(dtypeId)
     const bytes = heapU8().buffer.slice(dataPtr, dataPtr + numel * itemsize)
@@ -415,7 +420,7 @@ function createWasmCoreFromModule(Module, device) {
     if (names.length !== values.length) throw new TypeError('polygrad: mismatched Model bindings')
     const allocations = []
     const alloc = size => {
-      const ptr = Module._malloc(Math.max(1, size))
+      const ptr = malloc(Math.max(1, size))
       if (!ptr) throw new Error('Model binding allocation failed')
       allocations.push(ptr)
       return ptr
@@ -444,7 +449,7 @@ function createWasmCoreFromModule(Module, device) {
         if (dtype < 0) throw new TypeError('polygrad: unsupported Model binding TypedArray')
         const dataPtr = tensor ? 0 : alloc(value.byteLength)
         if (!tensor) heapU8().set(new Uint8Array(value.buffer, value.byteOffset, value.byteLength), dataPtr)
-        const base = (ptr >> 2) + i * 7
+        const base = (ptr >>> 2) + i * 7
         heap32().set([namePtr, dataPtr, tensor ? 0 : value.byteLength, dtype, tensor,
           shapePtr, shaped ? shaped.shape.length : 0], base)
       }
@@ -525,12 +530,13 @@ function createWasmCoreFromModule(Module, device) {
   Module.__polygradEnsureWebGPU = ensureWebGPU
 
   function allocBytes(bytes) {
-    const ptr = Module._malloc(bytes.length || 1)
+    const ptr = malloc(bytes.length || 1)
     if (bytes.length > 0) heapU8().set(bytes, ptr)
     return ptr
   }
 
   function readCString(ptr) {
+    ptr >>>= 0
     if (!ptr) return null
     const bytes = heapU8()
     let end = ptr
@@ -607,16 +613,16 @@ function createWasmCoreFromModule(Module, device) {
     requireSyncBackend('poly_realize_uops', 'poly_realize_uops_async')
     const n = uops.length
     if (n === 0) return []
-    const inPtr = Module._malloc(n * 4)
-    const outPtr = Module._malloc(n * 4)
+    const inPtr = malloc(n * 4)
+    const outPtr = malloc(n * 4)
     const h32 = heap32()
-    for (let i = 0; i < n; i++) h32[(inPtr >> 2) + i] = uops[i]
-    for (let i = 0; i < n; i++) h32[(outPtr >> 2) + i] = 0
+    for (let i = 0; i < n; i++) h32[(inPtr >>> 2) + i] = uops[i]
+    for (let i = 0; i < n; i++) h32[(outPtr >>> 2) + i] = 0
     const rc = Module._poly_realize_uops(ctx, inPtr, n, outPtr)
     const out = new Array(n)
     if (rc === 0) {
       const h32b = heap32()
-      for (let i = 0; i < n; i++) out[i] = h32b[(outPtr >> 2) + i]
+      for (let i = 0; i < n; i++) out[i] = h32b[(outPtr >>> 2) + i]
     }
     Module._free(inPtr)
     Module._free(outPtr)
@@ -629,12 +635,12 @@ function createWasmCoreFromModule(Module, device) {
       await ensureWebGPU()
       const n = uops.length
       if (n === 0) return []
-      const inPtr = Module._malloc(n * 4)
-      const outPtr = Module._malloc(n * 4)
+      const inPtr = malloc(n * 4)
+      const outPtr = malloc(n * 4)
       try {
         const h32 = heap32()
-        for (let i = 0; i < n; i++) h32[(inPtr >> 2) + i] = uops[i]
-        for (let i = 0; i < n; i++) h32[(outPtr >> 2) + i] = 0
+        for (let i = 0; i < n; i++) h32[(inPtr >>> 2) + i] = uops[i]
+        for (let i = 0; i < n; i++) h32[(outPtr >>> 2) + i] = 0
         const rc = await Module.ccall(
           'poly_realize_uops',
           'number',
@@ -645,7 +651,7 @@ function createWasmCoreFromModule(Module, device) {
         const out = new Array(n)
         if (rc === 0) {
           const h32b = heap32()
-          for (let i = 0; i < n; i++) out[i] = h32b[(outPtr >> 2) + i]
+          for (let i = 0; i < n; i++) out[i] = h32b[(outPtr >>> 2) + i]
         }
         return rc === 0 ? out : null
       } finally {
@@ -659,16 +665,16 @@ function createWasmCoreFromModule(Module, device) {
     requireSyncBackend('poly_realize_tensors', 'poly_realize_tensors_async')
     const n = tensors.length
     if (n === 0) return []
-    const inPtr = Module._malloc(n * 4)
-    const outPtr = Module._malloc(n * 4)
+    const inPtr = malloc(n * 4)
+    const outPtr = malloc(n * 4)
     const h32 = heap32()
-    for (let i = 0; i < n; i++) h32[(inPtr >> 2) + i] = tensors[i]
-    for (let i = 0; i < n; i++) h32[(outPtr >> 2) + i] = 0
+    for (let i = 0; i < n; i++) h32[(inPtr >>> 2) + i] = tensors[i]
+    for (let i = 0; i < n; i++) h32[(outPtr >>> 2) + i] = 0
     const rc = Module._poly_realize_tensors(ctx, inPtr, n, outPtr)
     const out = new Array(n)
     if (rc === 0) {
       const h32b = heap32()
-      for (let i = 0; i < n; i++) out[i] = h32b[(outPtr >> 2) + i]
+      for (let i = 0; i < n; i++) out[i] = h32b[(outPtr >>> 2) + i]
     }
     Module._free(inPtr)
     Module._free(outPtr)
@@ -681,12 +687,12 @@ function createWasmCoreFromModule(Module, device) {
       await ensureWebGPU()
       const n = tensors.length
       if (n === 0) return []
-      const inPtr = Module._malloc(n * 4)
-      const outPtr = Module._malloc(n * 4)
+      const inPtr = malloc(n * 4)
+      const outPtr = malloc(n * 4)
       try {
         const h32 = heap32()
-        for (let i = 0; i < n; i++) h32[(inPtr >> 2) + i] = tensors[i]
-        for (let i = 0; i < n; i++) h32[(outPtr >> 2) + i] = 0
+        for (let i = 0; i < n; i++) h32[(inPtr >>> 2) + i] = tensors[i]
+        for (let i = 0; i < n; i++) h32[(outPtr >>> 2) + i] = 0
         const rc = await Module.ccall(
           'poly_realize_tensors',
           'number',
@@ -697,7 +703,7 @@ function createWasmCoreFromModule(Module, device) {
         const out = new Array(n)
         if (rc === 0) {
           const h32b = heap32()
-          for (let i = 0; i < n; i++) out[i] = h32b[(outPtr >> 2) + i]
+          for (let i = 0; i < n; i++) out[i] = h32b[(outPtr >>> 2) + i]
         }
         return rc === 0 ? out : null
       } finally {
@@ -752,7 +758,7 @@ function createWasmCoreFromModule(Module, device) {
   function bufferReadSync(ctx, buf, nbytes) {
     requireSyncBackend('poly_buffer_read', 'poly_buffer_read_async')
     if (nbytes <= 0) return new Uint8Array(0)
-    const dst = Module._malloc(nbytes)
+    const dst = malloc(nbytes)
     try {
       const rc = Module._poly_buffer_read(ctx, buf, dst, nbytes)
       if (rc !== 0) throw new Error('poly_buffer_read failed (rc=' + rc + ')')
@@ -767,7 +773,7 @@ function createWasmCoreFromModule(Module, device) {
     if (nbytes <= 0) return new Uint8Array(0)
     return enqueueAsyncify(async () => {
       await ensureWebGPU()
-      const dst = Module._malloc(nbytes)
+      const dst = malloc(nbytes)
       try {
         const rc = await Module.ccall(
           'poly_buffer_read',
@@ -1068,16 +1074,16 @@ function createWasmCoreFromModule(Module, device) {
     poly_uop_op: (uop) => Module._poly_uop_op(uop),
     poly_uop_device: (uop) => Module._poly_uop_device(uop),
     poly_uop_device_names: (ctx, uop) => {
-      const out = Module._malloc(8)
+      const out = malloc(8)
       if (!out) throw new Error('device metadata allocation failed')
       try {
         const count = Module._poly_uop_device_names(ctx, uop, out, out + 4)
         if (count < 0) throw new Error('poly_uop_device_names failed')
         // The query can grow memory. Reacquire views, then copy borrowed names.
-        const names = heap32()[out >> 2] >>> 0
+        const names = heap32()[out >>> 2] >>> 0
         const isTuple = heapU8()[out + 4] !== 0
         const values = Array.from({ length: count }, (_, i) =>
-          Module.UTF8ToString(heap32()[(names >> 2) + i] >>> 0))
+          Module.UTF8ToString(heap32()[(names >>> 2) + i] >>> 0))
         return isTuple ? values : count ? values[0] : null
       } finally { Module._free(out) }
     },
@@ -1091,12 +1097,12 @@ function createWasmCoreFromModule(Module, device) {
     poly_uop_substitute: (ctx, root, from, to) => {
       const n = Math.min(from.length, to.length)
       if (n <= 0) return root
-      const fromPtr = Module._malloc(n * 4)
-      const toPtr = Module._malloc(n * 4)
+      const fromPtr = malloc(n * 4)
+      const toPtr = malloc(n * 4)
       const h32 = heap32()
       for (let i = 0; i < n; i++) {
-        h32[(fromPtr >> 2) + i] = from[i] || 0
-        h32[(toPtr >> 2) + i] = to[i] || 0
+        h32[(fromPtr >>> 2) + i] = from[i] || 0
+        h32[(toPtr >>> 2) + i] = to[i] || 0
       }
       const out = Module._poly_uop_substitute(ctx, root, fromPtr, toPtr, n)
       Module._free(fromPtr)
@@ -1117,11 +1123,11 @@ function createWasmCoreFromModule(Module, device) {
     poly_tensor_custom_kernel: (ctx, body, inputs, gradFxnKey) => {
       const n = inputs.length
       if (n <= 0) return null
-      const inputsPtr = Module._malloc(n * 4)
-      const outputsPtr = Module._malloc(n * 4)
+      const inputsPtr = malloc(n * 4)
+      const outputsPtr = malloc(n * 4)
       const h32 = heap32()
       try {
-        for (let i = 0; i < n; i++) h32[(inputsPtr >> 2) + i] = inputs[i] || 0
+        for (let i = 0; i < n; i++) h32[(inputsPtr >>> 2) + i] = inputs[i] || 0
         if (Module._poly_tensor_custom_kernel(
           ctx, body, inputsPtr, n, gradFxnKey >>> 0, outputsPtr
         ) !== 0) {
@@ -1148,7 +1154,10 @@ function createWasmCoreFromModule(Module, device) {
         throw new RangeError('polygrad: shape length does not match ndim')
       }
       const dimsPtr = writePtrArray(shape || [])
-      const namePtr = allocString(device)
+      // Match integer-device factories and to(): public CPU means Wasm here.
+      // Preserve named storage paths instead of reducing them to backend IDs.
+      const key = String(device).toLowerCase()
+      const namePtr = allocString(DEVICE_IDS[key] !== undefined ? coreDeviceName(DEVICE_IDS[key]) : device)
       try {
         return Module._poly_tensor_empty_uop_name_by_id(ctx, dtypeId, dimsPtr, ndim, namePtr)
       } finally {
@@ -1164,26 +1173,26 @@ function createWasmCoreFromModule(Module, device) {
     poly_tensor_capture_begin: ctx => Module._poly_tensor_capture_begin(ctx),
     poly_tensor_capture_end: capture => Module._poly_tensor_capture_end(capture),
     poly_tensor_capture_rng: (capture, index) => {
-      const ptr = Module._malloc(8)
+      const ptr = malloc(8)
       if (!ptr) throw new Error('Model capture RNG allocation failed')
       try {
         const device = Module._poly_tensor_capture_rng(capture, index, ptr, ptr+4)
         if (device < 0) return null
-        return {device, tensors:[heap32()[ptr>>2], heap32()[(ptr>>2)+1]]}
+        return {device, tensors:[heap32()[ptr>>>2], heap32()[(ptr>>>2)+1]]}
       } finally { Module._free(ptr) }
     },
     poly_tensor_capture_wrap: (capture, states, mutable, outputs) => {
       if (states.length !== mutable.length || states.length >= 65535 || !outputs.length || outputs.length > 65535)
         throw new Error('invalid Model capture arity')
       const size = 8*(states.length+outputs.length)
-      const ptr = Module._malloc(Math.max(size,4))
+      const ptr = malloc(Math.max(size,4))
       if (!ptr) throw new Error('Model capture allocation failed')
       try {
         const flags = ptr+4*states.length, source = flags+4*states.length, result = source+4*outputs.length
-        heap32().set(states,ptr>>2); heap32().set(mutable,flags>>2); heap32().set(outputs,source>>2)
+        heap32().set(states,ptr>>>2); heap32().set(mutable,flags>>>2); heap32().set(outputs,source>>>2)
         if (Module._poly_tensor_capture_wrap(capture,ptr,flags,states.length,source,outputs.length,result) !== 0)
           throw new Error('Model capture requires declared AUX effects and prohibits effectful materialization')
-        return Array.from(heap32().subarray(result>>2,(result>>2)+outputs.length))
+        return Array.from(heap32().subarray(result>>>2,(result>>>2)+outputs.length))
       } finally { Module._free(ptr) }
     },
     poly_tensor_release: (tensor) => Module._poly_tensor_release(tensor),
@@ -1368,9 +1377,9 @@ function createWasmCoreFromModule(Module, device) {
     },
     poly_tensor_einsum: (ctx, formula, operands) => {
       const n = operands.length
-      const tensorPtrs = Module._malloc(Math.max(1, n) * 4)
+      const tensorPtrs = malloc(Math.max(1, n) * 4)
       for (let i = 0; i < n; i++) {
-        heap32()[(tensorPtrs >> 2) + i] = operands[i]
+        heap32()[(tensorPtrs >>> 2) + i] = operands[i]
       }
       const formulaPtr = allocString(formula)
       const result = Module._poly_tensor_einsum(ctx, formulaPtr, tensorPtrs, n)
@@ -1457,14 +1466,14 @@ function createWasmCoreFromModule(Module, device) {
       const stridePtr = writeInt64Array(stride)
       const dilationPtr = writeInt64Array(dilation)
       const paddingPtr = writeInt64Array(padding)
-      const indexPtr = returnIndices ? Module._malloc(4) : 0
+      const indexPtr = returnIndices ? malloc(4) : 0
       try {
-        if (indexPtr) heap32()[indexPtr >> 2] = 0
+        if (indexPtr) heap32()[indexPtr >>> 2] = 0
         const values = Module._poly_tensor_max_pool2d(
           ctx, tensor, kernelPtr, nKernel, stridePtr, dilationPtr, paddingPtr, nPadding,
           ceilMode ? 1 : 0, indexPtr
         )
-        return values && returnIndices ? [values, heap32()[indexPtr >> 2] >>> 0] : values
+        return values && returnIndices ? [values, heap32()[indexPtr >>> 2] >>> 0] : values
       } finally {
         if (indexPtr) Module._free(indexPtr)
         if (kernelPtr) Module._free(kernelPtr)
@@ -1647,7 +1656,7 @@ function createWasmCoreFromModule(Module, device) {
           ctx, cfgPtr, lr, paramsPtr, gradsPtr, n, mPtr, vPtr, bc1 || 0, bc2 || 0, 0, 0
         )
         if (needed < 0) return null
-        outPtr = Module._malloc(Math.max(1, needed) * 4)
+        outPtr = malloc(Math.max(1, needed) * 4)
         const rc = Module._poly_optim_build_step(
           ctx, cfgPtr, lr, paramsPtr, gradsPtr, n, mPtr, vPtr,
           bc1 || 0, bc2 || 0, outPtr, needed
@@ -1708,7 +1717,7 @@ function createWasmCoreFromModule(Module, device) {
         Module.__polygradHostBuffers.set(String(bufferKey), frontendBytes)
         return
       }
-      const ptr = nbytes ? Module._malloc(nbytes) : 0
+      const ptr = nbytes ? malloc(nbytes) : 0
       if (nbytes && !ptr) throw new Error('poly_buffer_write allocation failed')
       try {
         if (nbytes) heapU8().set(bytes, ptr)
@@ -1725,14 +1734,14 @@ function createWasmCoreFromModule(Module, device) {
     poly_grad: Module._poly_grad,
     poly_grad_many: (ctx, loss, initialGrad, targets) => {
       const n = targets.length
-      const wrtsPtr = Module._malloc(n * 4)
-      const outPtr = Module._malloc(n * 4)
-      const presentPtr = Module._malloc(n)
+      const wrtsPtr = malloc(n * 4)
+      const outPtr = malloc(n * 4)
+      const presentPtr = malloc(n)
       const h32 = heap32()
       const u8 = heapU8()
       for (let i = 0; i < n; i++) {
-        h32[(wrtsPtr >> 2) + i] = targets[i] || 0
-        h32[(outPtr >> 2) + i] = 0
+        h32[(wrtsPtr >>> 2) + i] = targets[i] || 0
+        h32[(outPtr >>> 2) + i] = 0
         u8[presentPtr + i] = 0
       }
       /* Match tinygrad's single gradient pass over all live targets. The
@@ -1753,7 +1762,7 @@ function createWasmCoreFromModule(Module, device) {
       const grads = new Array(n)
       const present = new Array(n)
       for (let i = 0; i < n; i++) {
-        grads[i] = h32b[(outPtr >> 2) + i]
+        grads[i] = h32b[(outPtr >>> 2) + i]
         present[i] = u8b[presentPtr + i] !== 0
       }
       Module._free(wrtsPtr)
@@ -1783,12 +1792,12 @@ function createWasmCoreFromModule(Module, device) {
 
     poly_shrink_uop: (ctx, uop, starts, sizes, ndim) => {
       const n = Number(ndim)
-      const startsPtr = Module._malloc(n * 4)
-      const sizesPtr = Module._malloc(n * 4)
+      const startsPtr = malloc(n * 4)
+      const sizesPtr = malloc(n * 4)
       const h32 = heap32()
       for (let i = 0; i < n; i++) {
-        h32[(startsPtr >> 2) + i] = starts[i] || 0
-        h32[(sizesPtr >> 2) + i] = sizes[i] || 0
+        h32[(startsPtr >>> 2) + i] = starts[i] || 0
+        h32[(sizesPtr >>> 2) + i] = sizes[i] || 0
       }
       const result = Module._poly_shrink_uop(ctx, uop, startsPtr, sizesPtr, n)
       Module._free(startsPtr)
@@ -1908,9 +1917,9 @@ function createWasmCoreFromModule(Module, device) {
 
     poly_einsum: (ctx, formula, operands) => {
       const n = operands.length
-      const tensorPtrs = Module._malloc(n * 4)
+      const tensorPtrs = malloc(n * 4)
       for (let i = 0; i < n; i++) {
-        heap32()[(tensorPtrs >> 2) + i] = operands[i]._uop
+        heap32()[(tensorPtrs >>> 2) + i] = operands[i]._uop
       }
       const formulaPtr = allocString(formula)
       const result = Module._poly_einsum(ctx, formulaPtr, tensorPtrs, n)
@@ -2146,7 +2155,7 @@ function createWasmCoreFromModule(Module, device) {
       if (bytes.length > 1048576) throw new Error('definition exceeds 1048576 JSON bytes')
       const ptr = allocBytes(bytes)
       // wasm32 PolyModelError: int code, pointer func, char message[256].
-      const err = Module._malloc(264)
+      const err = malloc(264)
       if (!ptr || !err) {
         if (ptr) Module._free(ptr)
         if (err) Module._free(err)
@@ -2243,7 +2252,7 @@ function createWasmCoreFromModule(Module, device) {
       return readShapeFromPtr(_scratchOutShapePtr, ndim)
     },
     bufShapeBounds(instPtr, i) {
-      const ptr = Module._malloc(128)
+      const ptr = malloc(128)
       if (!ptr) throw new Error('polygrad: shape query allocation failed')
       try {
         const ndim = Module._poly_model_buf_shape_bounds(instPtr, i, ptr, ptr + 64, 8)
@@ -2259,7 +2268,7 @@ function createWasmCoreFromModule(Module, device) {
         const numel = shapeNumel(this.bufCurrentShape(instPtr, i))
         const nbytes = numel * itemsize
         if (!nbytes) return new AT(0)
-        const dst = Module._malloc(nbytes)
+        const dst = malloc(nbytes)
         if (!dst) throw new Error('polygrad: buffer read allocation failed')
         const read = rc => {
           if (rc !== 0) throw new Error('polygrad: buffer read failed')
@@ -2304,8 +2313,8 @@ function createWasmCoreFromModule(Module, device) {
             { async: true }
           ).then(bytesPtr => {
             if (!bytesPtr) return null
-            const len = heap32()[_scratchLenPtr >> 2]
-            const bytes = new Uint8Array(heapU8().buffer.slice(bytesPtr, bytesPtr + len))
+            const len = heap32()[_scratchLenPtr >>> 2]
+            const bytes = new Uint8Array(heapU8().buffer.slice(bytesPtr >>> 0, (bytesPtr >>> 0) + len))
             Module._free(bytesPtr)
             return bytes
           })
@@ -2313,8 +2322,8 @@ function createWasmCoreFromModule(Module, device) {
       }
       const bytesPtr = Module._poly_model_export_weights_ex(instPtr, _scratchLenPtr, exportFlags)
       if (!bytesPtr) return null
-      const len = heap32()[_scratchLenPtr >> 2]
-      const bytes = new Uint8Array(heapU8().buffer.slice(bytesPtr, bytesPtr + len))
+      const len = heap32()[_scratchLenPtr >>> 2]
+      const bytes = new Uint8Array(heapU8().buffer.slice(bytesPtr >>> 0, (bytesPtr >>> 0) + len))
       Module._free(bytesPtr)
       return bytes
     },
@@ -2335,8 +2344,8 @@ function createWasmCoreFromModule(Module, device) {
     exportIR(instPtr) {
       const bytesPtr = Module._poly_model_export_ir(instPtr, _scratchLenPtr)
       if (!bytesPtr) return null
-      const len = heap32()[_scratchLenPtr >> 2]
-      const bytes = new Uint8Array(heapU8().buffer.slice(bytesPtr, bytesPtr + len))
+      const len = heap32()[_scratchLenPtr >>> 2]
+      const bytes = new Uint8Array(heapU8().buffer.slice(bytesPtr >>> 0, (bytesPtr >>> 0) + len))
       Module._free(bytesPtr)
       return bytes
     },
@@ -2345,16 +2354,16 @@ function createWasmCoreFromModule(Module, device) {
         return ensureModelDevice(instPtr).then(() => {
           const bytesPtr = Module._poly_model_export_program(instPtr, _scratchLenPtr)
           if (!bytesPtr) return null
-          const len = heap32()[_scratchLenPtr >> 2]
-          const bytes = new Uint8Array(heapU8().buffer.slice(bytesPtr, bytesPtr + len))
+          const len = heap32()[_scratchLenPtr >>> 2]
+          const bytes = new Uint8Array(heapU8().buffer.slice(bytesPtr >>> 0, (bytesPtr >>> 0) + len))
           Module._free(bytesPtr)
           return bytes
         })
       }
       const bytesPtr = Module._poly_model_export_program(instPtr, _scratchLenPtr)
       if (!bytesPtr) return null
-      const len = heap32()[_scratchLenPtr >> 2]
-      const bytes = new Uint8Array(heapU8().buffer.slice(bytesPtr, bytesPtr + len))
+      const len = heap32()[_scratchLenPtr >>> 2]
+      const bytes = new Uint8Array(heapU8().buffer.slice(bytesPtr >>> 0, (bytesPtr >>> 0) + len))
       Module._free(bytesPtr)
       return bytes
     },
@@ -2370,8 +2379,8 @@ function createWasmCoreFromModule(Module, device) {
             { async: true }
           ).then(bytesPtr => {
             if (!bytesPtr) return null
-            const len = heap32()[_scratchLenPtr >> 2]
-            const bytes = new Uint8Array(heapU8().buffer.slice(bytesPtr, bytesPtr + len))
+            const len = heap32()[_scratchLenPtr >>> 2]
+            const bytes = new Uint8Array(heapU8().buffer.slice(bytesPtr >>> 0, (bytesPtr >>> 0) + len))
             Module._free(bytesPtr)
             return bytes
           })
@@ -2379,8 +2388,8 @@ function createWasmCoreFromModule(Module, device) {
       }
       const bytesPtr = Module._poly_model_save_bundle_ex(instPtr, _scratchLenPtr, exportFlags)
       if (!bytesPtr) return null
-      const len = heap32()[_scratchLenPtr >> 2]
-      const bytes = new Uint8Array(heapU8().buffer.slice(bytesPtr, bytesPtr + len))
+      const len = heap32()[_scratchLenPtr >>> 2]
+      const bytes = new Uint8Array(heapU8().buffer.slice(bytesPtr >>> 0, (bytesPtr >>> 0) + len))
       Module._free(bytesPtr)
       return bytes
     },
@@ -2394,15 +2403,15 @@ function createWasmCoreFromModule(Module, device) {
 
     fromSinks(ctxPtr, names, sinks) {
       const n = Math.min(names.length, sinks.length)
-      const namesPtr = Module._malloc(Math.max(1, n) * 4)
-      const sinksPtr = Module._malloc(Math.max(1, n) * 4)
+      const namesPtr = malloc(Math.max(1, n) * 4)
+      const sinksPtr = malloc(Math.max(1, n) * 4)
       const namePtrs = []
       try {
         for (let i = 0; i < n; i++) {
           const p = allocString(names[i])
           namePtrs.push(p)
-          heap32()[(namesPtr >> 2) + i] = p
-          heap32()[(sinksPtr >> 2) + i] = sinks[i] || 0
+          heap32()[(namesPtr >>> 2) + i] = p
+          heap32()[(sinksPtr >>> 2) + i] = sinks[i] || 0
         }
         const inst = Module._poly_model_from_sinks(ctxPtr, namesPtr, sinksPtr, n)
         return configureModelDevice(inst)
@@ -2433,12 +2442,12 @@ function createWasmCoreFromModule(Module, device) {
 
       const stringPtrs = []
       const allocStringArray = (items, nullable = false) => {
-        const ptr = Module._malloc(Math.max(1, items.length) * 4)
+        const ptr = malloc(Math.max(1, items.length) * 4)
         for (let i = 0; i < items.length; i++) {
           const item = items[i]
           const sp = nullable && item == null ? 0 : allocString(item)
           if (sp) stringPtrs.push(sp)
-          heap32()[(ptr >> 2) + i] = sp
+          heap32()[(ptr >>> 2) + i] = sp
         }
         return ptr
       }
@@ -2493,11 +2502,11 @@ function createWasmCoreFromModule(Module, device) {
 
     defineModules(inst, modules) {
       const stringPtrs = []
-      const namePtrs = Module._malloc(Math.max(1, modules.length) * 4)
+      const namePtrs = malloc(Math.max(1, modules.length) * 4)
       for (let i = 0; i < modules.length; i++) {
         const p = allocString(modules[i].name)
         stringPtrs.push(p)
-        heap32()[(namePtrs >> 2) + i] = p
+        heap32()[(namePtrs >>> 2) + i] = p
       }
       const flatInputs = modules.flatMap(m => m.inputs || [])
       const inputPtrs = writePtrArray(flatInputs)
@@ -2541,13 +2550,15 @@ function createWasmCoreFromModule(Module, device) {
         if (modulePtrs) Module._free(modulePtrs)
         if (devicePtrs) Module._free(devicePtrs)
       }
-      const place = () => Module._poly_model_set_device_map_arrays(
-          inst, modulePtrs, devicePtrs, entries.length
-        )
+      // Migration may read back GPU state. Keep both the C call and its
+      // argument storage alive through Asyncify rewind, as uniform place does.
+      const place = () => Module.ccall('poly_model_set_device_map_arrays', 'number',
+        ['number', 'number', 'number', 'number'],
+        [inst, modulePtrs, devicePtrs, entries.length], { async: true })
       if (deviceName === 'webgpu') {
         return ensureModelDevice(inst).then(place).finally(cleanup)
       }
-      const rc = place()
+      const rc = Module._poly_model_set_device_map_arrays(inst, modulePtrs, devicePtrs, entries.length)
       cleanup()
       return rc
     },
@@ -2555,15 +2566,15 @@ function createWasmCoreFromModule(Module, device) {
     loadHF(configBytes, weightFilesBytes, maxBatch, maxSeqLen) {
       const cfgPtr = allocBytes(configBytes)
       const n = weightFilesBytes.length
-      const ptrArr = Module._malloc(n * 4)
-      const lenArr = Module._malloc(n * 8)
+      const ptrArr = malloc(n * 4)
+      const lenArr = malloc(n * 8)
       const filePtrs = []
       for (let i = 0; i < n; i++) {
         const fp = allocBytes(weightFilesBytes[i])
         filePtrs.push(fp)
-        heap32()[(ptrArr >> 2) + i] = fp
-        heap32()[(lenArr >> 2) + i * 2] = weightFilesBytes[i].length
-        heap32()[(lenArr >> 2) + i * 2 + 1] = 0
+        heap32()[(ptrArr >>> 2) + i] = fp
+        heap32()[(lenArr >>> 2) + i * 2] = weightFilesBytes[i].length
+        heap32()[(lenArr >>> 2) + i * 2 + 1] = 0
       }
       const inst = Module._poly_hf_load_into(
         ctx, cfgPtr, configBytes.length, ptrArr, lenArr, n,
@@ -2591,9 +2602,9 @@ function createWasmCoreFromModule(Module, device) {
 
     tokenizerFromGGUF(ggufBytes) {
       const ptr = allocBytes(ggufBytes)
-      const outPtr = Module._malloc(4)
+      const outPtr = malloc(4)
       Module._poly_gguf_decode(ptr, BigInt(ggufBytes.length), outPtr)
-      const decoded = heap32()[outPtr >> 2]
+      const decoded = heap32()[outPtr >>> 2]
       Module._free(outPtr)
       if (!decoded) { Module._free(ptr); return null }
       const tok = Module._poly_tokenizer_from_gguf(decoded)
@@ -2611,18 +2622,18 @@ function createWasmCoreFromModule(Module, device) {
 
     tokenize(tokPtr, text) {
       const textPtr = allocString(text)
-      const idsPtr = Module._malloc(4096 * 4)
+      const idsPtr = malloc(4096 * 4)
       const n = Module._poly_tokenize(tokPtr, textPtr, idsPtr, 4096)
       const ids = new Int32Array(n)
-      for (let i = 0; i < n; i++) ids[i] = heap32()[(idsPtr >> 2) + i]
+      for (let i = 0; i < n; i++) ids[i] = heap32()[(idsPtr >>> 2) + i]
       Module._free(idsPtr); Module._free(textPtr)
       return ids
     },
 
     detokenize(tokPtr, ids) {
-      const idsPtr = Module._malloc(ids.length * 4)
-      for (let i = 0; i < ids.length; i++) heap32()[(idsPtr >> 2) + i] = ids[i]
-      const bufPtr = Module._malloc(8192)
+      const idsPtr = malloc(ids.length * 4)
+      for (let i = 0; i < ids.length; i++) heap32()[(idsPtr >>> 2) + i] = ids[i]
+      const bufPtr = malloc(8192)
       Module._poly_detokenize(tokPtr, idsPtr, ids.length, bufPtr, 8192)
       const text = readCString(bufPtr)
       Module._free(bufPtr); Module._free(idsPtr)
@@ -2654,7 +2665,7 @@ function createWasmCoreFromModule(Module, device) {
       const finish = rc => {
         if (!tensorOutputs) return rc
         if (rc !== 0) throw new Error('polygrad: Model Tensor call failed')
-        return Array.from(heap32().subarray(outputPtr >> 2, (outputPtr >> 2) + count))
+        return Array.from(heap32().subarray(outputPtr >>> 2, (outputPtr >>> 2) + count))
       }
       const symbol = tensorOutputs ? 'poly_model_call_tensors' : 'poly_model_call'
       const args = [instPtr, entrypointPtr, bindingPtr, n]
@@ -2724,7 +2735,7 @@ function createWasmCoreFromModule(Module, device) {
         lossPtr = bindings.alloc(4)
         entryPtr = entrypoint == null ? 0 : bindings.string(entrypoint)
       } catch (error) { cleanup(); throw error }
-      const readLoss = (rc) => rc === 0 ? heapF32()[lossPtr >> 2] : null
+      const readLoss = (rc) => rc === 0 ? heapF32()[lossPtr >>> 2] : null
       if (deviceName === 'webgpu' && Module.ccall) {
         return ensureModelDevice(instPtr).then(() => {
           return Module.ccall(

@@ -71,6 +71,20 @@ async function runWasmOwnershipTests() {
     })
   }
 
+  await test('interpreter Model initializes physical storage without a host shadow', async () => {
+    const pg = polygrad.create({ core: 'wasm', device: 'interp' })
+    let model
+    try {
+      model = pg.models.MLP({ layers: [2, 3, 1] })
+      const stats = pg.stats().coreStats
+      if (stats.bufferOwnedSourceBytes !== 0) {
+        throw new Error(`Model retained ${stats.bufferOwnedSourceBytes} staging bytes`)
+      }
+      const result = await model.forwardAsync({ x: [1, 2] })
+      if (result.output.length !== 1 || !Number.isFinite(result.output[0])) throw new Error('invalid output')
+    } finally { if (model) await model.dispose(); pg.dispose() }
+  })
+
   function lifecycleRuntime(core) {
     const rt = Object.create(PolyRuntime.prototype)
     rt._core = core
@@ -430,6 +444,36 @@ async function runWasmOwnershipTests() {
       Module._poly_buffer_write = originalWrite
       await coldRuntime.dispose()
       await pg.dispose()
+    }
+  })
+
+  await test('tokenizer marshalling uses unsigned wasm32 addresses above 2GB', async () => {
+    const pg = polygrad.create({ core:'wasm' })
+    const core = pg._core, Module = core.Module
+    const keys = ['_malloc', '_free', 'HEAP32', 'HEAPU8', '_poly_gguf_decode', '_poly_gguf_decoded_free',
+      '_poly_tokenizer_from_gguf']
+    const saved = Object.fromEntries(keys.map(key => [key, Module[key]]))
+    try {
+      // Sparse fake memory tests address arithmetic without reserving gigabytes.
+      Module.HEAP32 = {}
+      Module.HEAPU8 = { set(bytes, offset) {
+        if (offset !== 0x80000010 || bytes[0] !== 42) throw new Error('signed byte offset')
+      } }
+      let address = 0x80000000
+      Module._malloc = () => { address += 16; return address | 0 }
+      Module._free = () => {}
+      Module._poly_gguf_decode = (bytes, length, out) => {
+        Module.HEAP32[out >>> 2] = 1234
+        return 0
+      }
+      Module._poly_gguf_decoded_free = decoded => {
+        if (decoded !== 1234) throw new Error('wrong decoded pointer')
+      }
+      Module._poly_tokenizer_from_gguf = decoded => decoded === 1234 ? 5678 : 0
+      if (core.model.tokenizerFromGGUF(new Uint8Array([42])) !== 5678) throw new Error('lost high-address output')
+    } finally {
+      for (const key of keys) Module[key] = saved[key]
+      pg.dispose()
     }
   })
 

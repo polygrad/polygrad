@@ -1205,8 +1205,6 @@ async function checkFamilyRuntimeOwnership(pg) {
       const beforeStats = pg.stats().coreStats
       const a = pg.models[name](spec), b = pg.models[name](spec)
       try {
-        assert(pg.stats().coreStats.bufferEntries > beforeStats.bufferEntries,
-          'family storage was allocated outside its owning Runtime')
         assert(pg.stats().coreStats.tensorRecords === beforeStats.tensorRecords,
           'family retained construction Tensor wrappers')
         const parameter = a.paramName(0)
@@ -1214,6 +1212,17 @@ async function checkFamilyRuntimeOwnership(pg) {
         await a.writeBufferAsync(parameter, new Float32Array(before.length).fill(7))
         assertClose(await b.readBufferAsync(parameter), before, 0)
         const expected = await b.forwardAsync({x:[1, 2]})
+        // Tensor I/O checks actual C context ownership. Net buffer counts can
+        // fall when a factory allocation collects previously retired storage.
+        const input = new pg.Tensor([[1, 2]], {dtype:'float32'})
+        let tensorOutputs
+        try {
+          tensorOutputs = await b.forwardAsync({x:input})
+          assertClose(await tensorOutputs.output.toArrayAsync(), expected.output, 0)
+        } finally {
+          if (tensorOutputs) for (const output of Object.values(tensorOutputs)) output.dispose()
+          input.dispose()
+        }
         await a.dispose()
         pg.collect()
         assertClose((await b.forwardAsync({x:[1, 2]})).output, expected.output, 0)

@@ -188,6 +188,13 @@ async function runTensorTests(pg, createRuntime) {
       assert(JSON.stringify(matrix.shape) === '[32,2]', 'empty lost bounded capacity')
       assert(JSON.stringify(vector.shape) === '[32]', 'trailing UOp was parsed as options')
       assert(matrix.uop.op === pg._core.ops.SHRINK, 'empty must retain its symbolic view')
+      const weight = new Tensor([2.0,3.0], {dtype:'float32'})
+      let mixed
+      try {
+        // Symbolic and host-backed factories must resolve the same Runtime device.
+        mixed = matrix.mul(weight)
+        assertShape(mixed.shape, [32,2])
+      } finally { if (mixed) mixed.dispose(); weight.dispose() }
       for (const bad of [NaN, Infinity, 1.5, -1]) {
         let rejected = false
         try { Tensor.empty([bad]) } catch { rejected = true }

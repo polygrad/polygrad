@@ -129,9 +129,16 @@ static int model_allocate_binding(PolyCtx *ctx, PolyUOp *buffer, size_t nbytes, 
   PolyBuffer *existing = poly_buffer_get(ctx, buffer);
   if (existing) return existing->nbytes >= nbytes ? 0 : -1;
   PolyDevice device = poly_uop_device(buffer);
-  if (poly_device_is_host_addressable(device))
-    return poly_buffer_alloc_owned_host(ctx, buffer, nbytes, zero, NULL);
   if (poly_buffer_ensure_device_allocated(ctx, buffer, device) != 0) return -1;
+  /* Host-addressable does not imply the host-staging allocator: INTERP and
+   * WASM can use distinct allocators. Initialize the physical residency itself
+   * so later placement cannot retain a second full-size host allocation. */
+  if (poly_device_is_host_addressable(device)) {
+    PolyBuffer *storage = poly_buffer_get(ctx, buffer);
+    if (!storage || !storage->ptr || storage->nbytes < nbytes) return -1;
+    if (zero) memset(storage->ptr, 0, nbytes);
+    return poly_buffer_mark_residency_written(ctx, buffer, device);
+  }
   if (!zero) return 0;
   void *initial = calloc(1, nbytes);
   if (!initial) return -1;

@@ -3525,7 +3525,7 @@ TEST(model, later_build_failure_unwinds_named_value_snapshot_and_residency) {
 
   /* The computed parameter above is snapshotted first.  This internal-only
    * output fixture keeps a valid movement shape but assigns the root VOID
-   * dtype, so packing rejects it before any backend runs. */
+   * dtype, so packing rejects it after initializing the parameter candidate. */
   PolyUOp *bad_value = poly_full(ctx, shape, 1, 1.0);
   PolyUOp *bad_reshape = poly_reshape(ctx, bad_value, shape, 1);
   ASSERT_NOT_NULL(bad_reshape);
@@ -3546,7 +3546,6 @@ TEST(model, later_build_failure_unwinds_named_value_snapshot_and_residency) {
   };
   int tensors_before = ctx->n_tensors;
   uint64_t memory_before = ctx->mem_used;
-  size_t writes_before = ctx->buffer_write_count;
   PolyCtxStats stats_before = {0};
   ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats_before), 0);
   ASSERT_INT_EQ(poly_tensor_uop_physical(a)->op, POLY_OP_COPY);
@@ -3568,7 +3567,8 @@ TEST(model, later_build_failure_unwinds_named_value_snapshot_and_residency) {
   ASSERT_TRUE(strstr(error.message, "failed to pack runtime model") != NULL);
   ASSERT_INT_EQ(ctx->n_tensors, tensors_before);
   ASSERT_INT_EQ(ctx->mem_used, memory_before);
-  ASSERT_INT_EQ(ctx->buffer_write_count, writes_before);
+  /* Candidate initialization can write to a device before rollback. Counters
+   * record actual work; the rollback contract concerns caller state/ownership. */
   PolyCtxStats stats_after = {0};
   ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats_after), 0);
   ASSERT_INT_EQ(stats_after.buffer_entries, stats_before.buffer_entries);
@@ -3591,7 +3591,6 @@ TEST(model, later_build_failure_unwinds_named_value_snapshot_and_residency) {
   ASSERT_EQ(failed, NULL);
   ASSERT_INT_EQ(ctx->n_tensors, tensors_before);
   ASSERT_INT_EQ(ctx->mem_used, memory_before);
-  ASSERT_INT_EQ(ctx->buffer_write_count, writes_before);
   ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats_after), 0);
   ASSERT_INT_EQ(stats_after.buffer_entries, stats_before.buffer_entries);
   ASSERT_PTR_EQ(poly_buffer_get(ctx, a_storage), a_head_before);
@@ -3605,6 +3604,8 @@ TEST(model, later_build_failure_unwinds_named_value_snapshot_and_residency) {
   ASSERT_EQ(a_head_before->valid, a_residency_before.valid);
   ASSERT_EQ(b_head_before->valid, b_residency_before.valid);
 
+  ASSERT_INT_EQ(memcmp(a_head_before->ptr, av, sizeof(av)), 0);
+  ASSERT_INT_EQ(memcmp(b_head_before->ptr, bv, sizeof(bv)), 0);
   poly_ctx_destroy(ctx);
   PASS();
 }
