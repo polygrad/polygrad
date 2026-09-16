@@ -1393,6 +1393,9 @@ function createWasmCoreFromModule(Module, device) {
     poly_tensor_lstm_cell: (ctx, x, h, c, wi, wh, bi, bh) =>
       callUopPair(Module._poly_tensor_lstm_cell, [ctx, x, h || 0, c || 0, wi, wh, bi || 0, bh || 0], 'poly_tensor_lstm_cell'),
     poly_tensor_linear_apply: (ctx, x, w, b) => Module._poly_tensor_linear_apply(ctx, x, w, b || 0),
+    poly_tensor_dropout: (ctx, x, p, training) => Module._poly_tensor_dropout(ctx, x, p, training ? 1 : 0),
+    poly_tensor_sdpa: (ctx, q, k, v, mask, p, causal, gqa, training) =>
+      Module._poly_tensor_sdpa(ctx, q, k, v, mask || 0, p, causal ? 1 : 0, gqa ? 1 : 0, training ? 1 : 0),
     poly_tensor_rmsnorm_apply: (ctx, x, w, eps) => Module._poly_tensor_rmsnorm_apply(ctx, x, w || 0, eps),
     poly_tensor_layernorm_axes_apply: (ctx, x, w, b, axes, eps) => {
       const ptr = writeInt64Array(axes)
@@ -2040,7 +2043,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 91
+  const EXPECTED_ABI = 92
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(

@@ -16,6 +16,64 @@ from polygrad.helpers import Context
 from polygrad.uop.ops import AxisType, KernelInfo, UOp, _dispose_uops_for_ctx
 
 
+@pytest.mark.parametrize('device', ['cpu', 'interp'])
+@pytest.mark.parametrize('logical', ['never', 'always', 'until_realize'])
+@pytest.mark.parametrize('kind', ['plain', 'causal', 'bool', 'bias', 'gqa', 'dropout'])
+@pytest.mark.parametrize('dtype', ['float32', 'float16'])
+def test_shared_sdpa_owner(device, logical, kind, dtype):
+    with Runtime(device=device, logical=logical) as rt:
+        q = rt.Tensor(np.arange(24, dtype=np.float32).reshape(1, 4, 2, 3) / 19, dtype=dtype)
+        heads = 2 if kind == 'gqa' else 4
+        k = rt.Tensor(np.arange(heads * 9, dtype=np.float32).reshape(1, heads, 3, 3) / 13, dtype=dtype)
+        v = rt.Tensor(np.arange(heads * 6, dtype=np.float32).reshape(1, heads, 3, 2) / 17, dtype=dtype)
+        mask = (rt.Tensor([[True, False, True], [True, True, False]]) if kind == 'bool' else
+                rt.Tensor([[0., -1., 1.], [1., 0., -1.]]) if kind == 'bias' else None)
+        p = 0.25 if kind == 'dropout' else 0
+        rt.Tensor.manual_seed(11)
+        with Context(TRAINING=1):
+            actual = q.scaled_dot_product_attention(k, v, mask, p, kind == 'causal', kind == 'gqa')
+        next_actual = rt.Tensor.rand(4)
+        rt.Tensor.manual_seed(11)
+        rk = k.repeat_interleave(2, -3) if kind == 'gqa' else k
+        rv = v.repeat_interleave(2, -3) if kind == 'gqa' else v
+        scores = q.matmul(rk.transpose(-2, -1), dtype=dtypes.float32) / math.sqrt(3)
+        if kind == 'causal':
+            mask = scores.cast(dtypes.bool).const_like(True).tril()
+        if mask is not None:
+            scores = scores + (mask.where(0, -float('inf')) if mask.dtype == dtypes.bool else mask)
+        weights = scores.cast(q.dtype).softmax(-1)
+        if p:
+            weights = (rt.Tensor.rand_like(weights, dtype=dtypes.default_float, contiguous=False) >= p).contiguous().where(weights, 0) / (1-p)
+        expected = weights @ rv
+        if not p:
+            assert actual.uop.raw == expected.uop.raw
+        next_expected = rt.Tensor.rand(4)
+        # Compute gradients before materialization can discard producers.
+        grads = actual.sum().gradient(q, k, v)
+        expected_grads = expected.sum().gradient(q, k, v)
+        for a, b in zip(grads, expected_grads):
+            np.testing.assert_allclose(a.numpy(), b.numpy(), rtol=1e-5, atol=1e-6)
+        np.testing.assert_allclose(actual.numpy(), expected.numpy(), rtol=1e-5, atol=1e-6)
+        np.testing.assert_array_equal(next_actual.numpy(), next_expected.numpy())
+
+
+@pytest.mark.parametrize('kind', ['causal', 'gqa', 'dropout'])
+@pytest.mark.parametrize('dtype', ['float32', 'float16'])
+def test_shared_sdpa_cuda(kind, dtype):
+    if not Device.cuda_available():
+        pytest.skip('CUDA execution unavailable')
+    test_shared_sdpa_owner('cuda', 'always', kind, dtype)
+
+
+@pytest.mark.parametrize('device', ['cpu', 'interp'])
+def test_sdpa_empty_feature_dimension(device):
+    with Runtime(device=device) as rt:
+        result = rt.Tensor.zeros(2, 0).scaled_dot_product_attention(
+            rt.Tensor.zeros(3, 0), rt.Tensor.ones(3, 4))
+        assert result.shape == (2, 4)
+        assert np.isnan(result.numpy()).all()
+
+
 def test_construction_const_uop_and_bound_variable():
     source = UOp.const(1.0).cast(dtypes.float32)
     out = Tensor.const(source, dtypes.int8)
@@ -3941,7 +3999,8 @@ class TestMatmulAndLoss:
         v = Tensor((np.arange(16, dtype=np.float32).reshape(1, 2, 2, 4) + 1) / 17)
         causal = q.scaled_dot_product_attention(k, v, is_causal=True)
         qk = q.matmul(k.transpose(-2, -1), dtype=dtypes.float32) / math.sqrt(3)
-        mask = qk.const_like(1).cast(dtypes.bool).tril().where(0, -float('inf'))
+        # Typed const_like, not a CAST of an expanded float constant.
+        mask = qk.cast(dtypes.bool).const_like(True).tril().where(0, -float('inf'))
         expected_causal = (qk + mask).cast(q.dtype).softmax(-1) @ v
         assert causal.uop.raw == expected_causal.uop.raw
         np.testing.assert_allclose(causal.numpy(), expected_causal.numpy(), rtol=1e-6, atol=1e-6)

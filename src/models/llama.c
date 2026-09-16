@@ -72,6 +72,7 @@ static bool llama_config(const cJSON *json, LlamaConfig *c, PolyModelError *err)
   for (int i = 0; i < 2; i++) {
     const cJSON *v = cJSON_GetObjectItemCaseSensitive(json, flags[i]);
     if (v && !cJSON_IsFalse(v)) {
+      llama_error(err, "unsupported bias");
       if (err) snprintf(err->message, sizeof(err->message), "Llama: %s must be false", flags[i]);
       return false;
     }
@@ -86,7 +87,7 @@ static bool llama_config(const cJSON *json, LlamaConfig *c, PolyModelError *err)
       !config_int(json, "vocab_size", 0, &c->vocab) ||
       !config_int(json, "batch_size", 1, &c->batch) ||
       !config_int(json, "max_seq_len", 1, &c->length) ||
-      !config_float(json, "rms_norm_eps", 1e-5, &c->eps) ||
+      !config_float(json, "rms_norm_eps", 1e-6, &c->eps) ||
       !config_float(json, "rope_theta", 10000, &c->theta))
     goto invalid;
   if (c->theta < 1 || c->eps > FLT_MAX) goto invalid;
@@ -174,7 +175,7 @@ static PolyTensor *attention(
     qkv[i] = i < 2 ? poly_tensor_rope(ctx, v, cos, sin) : v;
     if (!qkv[i]) return NULL;
   }
-  PolyTensor *out = poly_tensor_sdpa(ctx, qkv[0], qkv[1], qkv[2], NULL, 1);
+  PolyTensor *out = poly_tensor_sdpa(ctx, qkv[0], qkv[1], qkv[2], NULL, 0, 1, 1, 0);
   out = poly_tensor_permute(ctx, out, (int64_t[]){0, 2, 1, 3}, 4);
   out = poly_tensor_reshape(ctx, out, (int64_t[]){c->batch, c->length, c->dim}, 3);
   char name[128];

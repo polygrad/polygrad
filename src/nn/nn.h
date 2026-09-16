@@ -153,15 +153,28 @@ PolyTensor *poly_tensor_causal_mask(PolyCtx *ctx, int64_t T);
 
 /* Multi-Head Attention */
 
-/* SDPA: Q @ K.T / sqrt(d) + mask + softmax → @ V. No projections. */
-PolyUOp *poly_sdpa(PolyCtx *ctx, PolyUOp *q, PolyUOp *k, PolyUOp *v, PolyUOp *mask, int is_causal);
+/* RandMixin.dropout. Returns an owned reference, including identity results. */
+PolyTensor *poly_tensor_dropout(PolyCtx *ctx, PolyTensor *x, double p, int training);
+/* Inference SDPA; Tensor SDPA additionally owns training dropout/RNG. */
+PolyUOp *poly_sdpa(
+    PolyCtx *ctx,
+    PolyUOp *q,
+    PolyUOp *k,
+    PolyUOp *v,
+    PolyUOp *mask,
+    int is_causal,
+    int enable_gqa
+);
 PolyTensor *poly_tensor_sdpa(
     PolyCtx *ctx,
     PolyTensor *q,
     PolyTensor *k,
     PolyTensor *v,
     PolyTensor *mask,
-    int is_causal
+    double dropout_p,
+    int is_causal,
+    int enable_gqa,
+    int training
 );
 
 #ifdef __cplusplus

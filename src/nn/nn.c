@@ -4,6 +4,7 @@
 #include "tensor.h" /* poly_mean_reduce */
 #include "engine/schedule.h" /* poly_reshape, poly_permute, poly_expand */
 #include <stdint.h>
+#include <limits.h>
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -589,50 +590,43 @@ PolyTensor *poly_tensor_causal_mask(PolyCtx *ctx, int64_t T) {
 
 /* Scaled Dot-Product Attention */
 
-/*
- * Repeat K/V heads for Grouped Query Attention (GQA).
- * Input:  (B, n_kv_heads, T, head_dim)
- * Output: (B, n_heads, T, head_dim)  where n_heads = n_kv_heads * n_rep
- *
- * Matches tinygrad's repeat_kv: x.repeat((1,1,1,n_rep)).reshape(...)
- * but using expand (no data copy).
- */
-static PolyUOp *repeat_kv(PolyCtx *ctx, PolyUOp *kv, int n_rep) {
-  if (n_rep <= 1) return kv;
-  const int64_t *dims = poly_uop_max_shape_dims(ctx, kv);
-  int ndim = poly_uop_ndim(ctx, kv);
-  if (ndim != 4 || !dims) return NULL;
-  /* (B, n_kv_heads, T, hd) -> (B, n_kv_heads, 1, T, hd) */
-  int64_t rs[] = {dims[0], dims[1], 1, dims[2], dims[3]};
-  PolyUOp *r = poly_reshape(ctx, kv, rs, 5);
-  /* expand the new dim to n_rep */
-  int64_t ex[] = {dims[0], dims[1], n_rep, dims[2], dims[3]};
-  r = poly_expand(ctx, r, ex, 5);
-  /* flatten back: (B, n_kv_heads * n_rep, T, hd) */
-  int64_t fl[] = {dims[0], dims[1] * n_rep, dims[2], dims[3]};
-  return poly_reshape(ctx, r, fl, 4);
-}
-
-PolyUOp *poly_sdpa(PolyCtx *ctx, PolyUOp *q, PolyUOp *k, PolyUOp *v, PolyUOp *mask, int is_causal) {
+/* RandMixin.scaled_dot_product_attention: return probabilities and the
+ * optionally repeated V. Both public boundaries use this exact program. */
+static PolyUOp *sdpa_weights(
+    PolyCtx *ctx,
+    PolyUOp *q,
+    PolyUOp *k,
+    PolyUOp **value,
+    PolyUOp *mask,
+    int is_causal,
+    int enable_gqa
+) {
+  PolyUOp *v = *value;
   if (!ctx || !q || !k || !v || (is_causal && mask)) return NULL;
   int q_ndim = poly_uop_ndim(ctx, q);
   int k_ndim = poly_uop_ndim(ctx, k);
   int v_ndim = poly_uop_ndim(ctx, v);
   if (q_ndim < 2 || k_ndim < 2 || v_ndim < 2) return NULL;
   const int64_t *q_dims = poly_uop_max_shape_dims(ctx, q);
-  const int64_t *k_dims = poly_uop_max_shape_dims(ctx, k);
-  if (!q_dims || !k_dims) return NULL;
+  if (!q_dims) return NULL;
 
-  /* GQA: if Q has more heads than K/V, repeat K/V */
-  if (q_ndim == 4 && k_ndim == 4 && q_dims[1] != k_dims[1]) {
-    if (k_dims[1] <= 0 || q_dims[1] % k_dims[1] != 0 || q_dims[1] < k_dims[1]) return NULL;
-    int n_rep = (int)(q_dims[1] / k_dims[1]);
-    k = repeat_kv(ctx, k, n_rep);
-    v = repeat_kv(ctx, v, n_rep);
+  if (enable_gqa) {
+    if (q_ndim < 3 || k_ndim < 3 || v_ndim < 3) return NULL;
+    int64_t heads = q_dims[q_ndim - 3];
+    PolyUOp **kv[] = {&k, &v};
+    for (int i = 0; i < 2; i++) {
+      int ndim = poly_uop_ndim(ctx, *kv[i]);
+      const int64_t *dims = poly_uop_max_shape_dims(ctx, *kv[i]);
+      if (!dims || dims[ndim - 3] <= 0 || heads / dims[ndim - 3] > INT_MAX) return NULL;
+      *kv[i] = poly_repeat_interleave(ctx, *kv[i], (int)(heads / dims[ndim - 3]), -3);
+      if (!*kv[i]) return NULL;
+    }
   }
+  *value = v;
 
   int64_t d_k = q_dims[q_ndim - 1];
-  if (d_k <= 0) return NULL;
+  /* Tinygrad permits zero-width heads: dot / sqrt(0) propagates NaNs. */
+  if (d_k < 0) return NULL;
 
   int64_t k_perm[POLY_MAX_DIMS];
   for (int i = 0; i < k_ndim; i++)
@@ -647,7 +641,7 @@ PolyUOp *poly_sdpa(PolyCtx *ctx, PolyUOp *q, PolyUOp *k, PolyUOp *v, PolyUOp *ma
   if (!poly_dtype_least_upper(q->dtype, k->dtype, &acc) ||
       !poly_dtype_least_upper(acc, POLY_FLOAT32, &acc))
     return NULL;
-  PolyUOp *scores = poly_dot(ctx, poly_cast(ctx, q, acc), poly_cast(ctx, k_t, acc));
+  PolyUOp *scores = poly_dot_dtype(ctx, q, k_t, &acc);
   scores = poly_div(ctx, scores, poly_const_typed(ctx, POLY_WEAKFLOAT, sqrt((double)d_k)));
 
   if (is_causal) {
@@ -664,7 +658,67 @@ PolyUOp *poly_sdpa(PolyCtx *ctx, PolyUOp *q, PolyUOp *k, PolyUOp *v, PolyUOp *ma
   }
   if (mask) scores = poly_add(ctx, scores, mask);
 
-  return poly_dot(ctx, poly_softmax(ctx, poly_cast(ctx, scores, q->dtype), -1), v);
+  return poly_softmax(ctx, poly_cast(ctx, scores, q->dtype), -1);
+}
+
+PolyUOp *poly_sdpa(
+    PolyCtx *ctx,
+    PolyUOp *q,
+    PolyUOp *k,
+    PolyUOp *v,
+    PolyUOp *mask,
+    int is_causal,
+    int enable_gqa
+) {
+  PolyUOp *weights = sdpa_weights(ctx, q, k, &v, mask, is_causal, enable_gqa);
+  return weights ? poly_dot(ctx, weights, v) : NULL;
+}
+
+static PolyUOp *dropout(PolyCtx *ctx, PolyUOp *x, PolyUOp *noise, double p) {
+  if (p == 1) return poly_const_like(ctx, x, poly_arg_int(0));
+  PolyUOp *keep =
+      poly_contiguous(ctx, poly_ge(ctx, noise, poly_const_typed(ctx, POLY_WEAKFLOAT, p)));
+  return poly_div(
+      ctx, poly_where_op(ctx, keep, x, poly_const_int(ctx, 0)),
+      poly_const_typed(ctx, POLY_WEAKFLOAT, 1 - p)
+  );
+}
+
+PolyTensor *poly_tensor_dropout(PolyCtx *ctx, PolyTensor *x, double p, int training) {
+  if (!ctx || !x) return NULL;
+  PolyTensor *inputs[] = {x};
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, 1);
+  if (build_logical < 0 || !(p >= 0 && p <= 1)) return NULL;
+  if (!training || p == 0) return poly_tensor_retain(x);
+  PolyTensor *noise = NULL;
+  if (p != 1) {
+    int ndim = poly_uop_ndim(ctx, x->uop_physical);
+    int64_t dims[POLY_MAX_DIMS];
+    if (ndim < 0 || ndim > POLY_MAX_DIMS) return NULL;
+    for (int i = 0; i < ndim; i++) {
+      PolyUOp *dim = poly_uop_shape_dim(ctx, x->uop_physical, i);
+      /* RandMixin.rand requires concrete extents; never draw at a symbolic
+       * maximum and silently change the RNG stream for a smaller binding. */
+      if (!dim || dim->op != POLY_OP_CONST || dim->arg.kind != POLY_ARG_INT) return NULL;
+      dims[i] = dim->arg.i;
+    }
+    /* One RNG draw owns both graph occurrences; do not advance twice for
+     * logical retention. The existing RNG owner retains seed/counter state. */
+    PolyDevice device = x->device;
+    if (device == POLY_DEVICE_AUTO) device = poly_ctx_get_preferred_device(ctx);
+    if (device == POLY_DEVICE_AUTO) device = poly_device_default();
+    noise = poly_tensor_rand_by_id(ctx, dims, ndim, poly_get_default_float(), device, 0);
+    if (!noise || (build_logical && !noise->uop_logical)) {
+      poly_tensor_release(noise);
+      return NULL;
+    }
+  }
+  PolyUOp *physical = dropout(ctx, x->uop_physical, noise ? noise->uop_physical : NULL, p);
+  PolyUOp *logical =
+      build_logical ? dropout(ctx, x->uop_logical, noise ? noise->uop_logical : NULL, p) : NULL;
+  PolyTensor *out = nn_tensor_result(ctx, logical, physical, inputs, 1);
+  poly_tensor_release(noise);
+  return out;
 }
 
 PolyTensor *poly_tensor_sdpa(
@@ -673,20 +727,35 @@ PolyTensor *poly_tensor_sdpa(
     PolyTensor *k,
     PolyTensor *v,
     PolyTensor *mask,
-    int is_causal
+    double dropout_p,
+    int is_causal,
+    int enable_gqa,
+    int training
 ) {
   if (!ctx || !q || !k || !v) return NULL;
   PolyTensor *inputs[4] = {q, k, v, mask};
   int build_logical = poly_tensor_result_builds_logical(ctx, inputs, mask ? 4 : 3);
-  if (build_logical < 0) return NULL;
-  PolyUOp *physical = poly_sdpa(
-      ctx, q->uop_physical, k->uop_physical, v->uop_physical, mask ? mask->uop_physical : NULL,
-      is_causal
+  if (build_logical < 0 || !(dropout_p >= 0 && dropout_p <= 1)) return NULL;
+  PolyUOp *vp = v->uop_physical, *vl = v->uop_logical;
+  PolyUOp *physical = sdpa_weights(
+      ctx, q->uop_physical, k->uop_physical, &vp, mask ? mask->uop_physical : NULL, is_causal,
+      enable_gqa
   );
-  PolyUOp *logical = build_logical ? poly_sdpa(
-                                         ctx, q->uop_logical, k->uop_logical, v->uop_logical,
-                                         mask ? mask->uop_logical : NULL, is_causal
+  PolyUOp *logical = build_logical ? sdpa_weights(
+                                         ctx, q->uop_logical, k->uop_logical, &vl,
+                                         mask ? mask->uop_logical : NULL, is_causal, enable_gqa
                                      )
                                    : NULL;
-  return nn_tensor_result(ctx, logical, physical, inputs, mask ? 4 : 3);
+  PolyTensor *weights = nn_tensor_result(ctx, logical, physical, inputs, mask ? 4 : 3);
+  if (!weights) return NULL;
+  PolyTensor *dropped = poly_tensor_dropout(ctx, weights, dropout_p, training);
+  PolyTensor *out = dropped
+                        ? nn_tensor_result(
+                              ctx, build_logical ? poly_dot(ctx, dropped->uop_logical, vl) : NULL,
+                              poly_dot(ctx, dropped->uop_physical, vp), inputs, mask ? 4 : 3
+                          )
+                        : NULL;
+  poly_tensor_release(dropped);
+  poly_tensor_release(weights);
+  return out;
 }

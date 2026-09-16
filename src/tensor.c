@@ -6637,7 +6637,7 @@ PolyUOp *poly_logsumexp(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim) {
 
 /* Matmul */
 
-static PolyUOp *poly_dot_dtype_root(PolyCtx *ctx, PolyUOp *x, PolyUOp *w, const PolyDType *dtype) {
+PolyUOp *poly_dot_dtype(PolyCtx *ctx, PolyUOp *x, PolyUOp *w, const PolyDType *dtype) {
   if (!ctx || !x || !w) return NULL;
   int x_ndim = poly_uop_ndim(ctx, x);
   int w_ndim = poly_uop_ndim(ctx, w);
@@ -6710,7 +6710,7 @@ static PolyUOp *poly_dot_dtype_root(PolyCtx *ctx, PolyUOp *x, PolyUOp *w, const 
 }
 
 PolyUOp *poly_dot(PolyCtx *ctx, PolyUOp *x, PolyUOp *w) {
-  return poly_dot_dtype_root(ctx, x, w, NULL);
+  return poly_dot_dtype(ctx, x, w, NULL);
 }
 
 static PolyUOp *poly_transpose_last2(PolyCtx *ctx, PolyUOp *x) {
@@ -7918,8 +7918,8 @@ static PolyTensor *tensor_dot_dtype(
   PolyUOp *weight_current = tensor_current_uop(weight);
   if (!current || !weight_current) return NULL;
   PolyUOp *logical =
-      build_logical ? poly_dot_dtype_root(ctx, src->uop_logical, weight->uop_logical, dtype) : NULL;
-  PolyUOp *physical = poly_dot_dtype_root(ctx, current, weight_current, dtype);
+      build_logical ? poly_dot_dtype(ctx, src->uop_logical, weight->uop_logical, dtype) : NULL;
+  PolyUOp *physical = poly_dot_dtype(ctx, current, weight_current, dtype);
   return tensor_composite_result(ctx, logical, physical, inputs, 2);
 }
 

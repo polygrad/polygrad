@@ -149,7 +149,7 @@ static PolyModel *qwen3_build(PolyCtx *ctx, const Qwen3Config *cfg) {
     q = poly_tensor_rope(ctx, q, rope_cos, rope_sin);
     k = poly_tensor_rope(ctx, k, rope_cos, rope_sin);
 
-    PolyTensor *attn = poly_tensor_sdpa(ctx, q, k, v, mask, 0);
+    PolyTensor *attn = poly_tensor_sdpa(ctx, q, k, v, mask, 0, 0, 1, 0);
     attn = poly_tensor_contiguous(ctx, attn);
     if (!attn) goto fail_pre_build;
 

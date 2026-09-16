@@ -3032,6 +3032,55 @@ async function runTensorTests(pg, createRuntime) {
     ])
   })
 
+  await test('attention shared C dropout and rank-five GQA', async () => {
+    const q = Tensor.arange(48).cast('float32').reshape(1, 2, 4, 2, 3).div(37)
+    const k = Tensor.arange(36).cast('float32').reshape(1, 2, 2, 3, 3).div(29)
+    const v = Tensor.arange(12).cast('float32').reshape(1, 2, 1, 3, 2).div(17)
+    const oldTraining = Tensor.training
+    try {
+      let invalid = false
+      try { q.scaledDotProductAttention(k, v, { dropout_p: NaN }) }
+      catch (err) { invalid = /out of range/.test(String(err)) }
+      assert(invalid, 'snake-case dropout probability must reject NaN')
+      const empty = Tensor.zeros(2, 0).scaledDotProductAttention(Tensor.zeros(3, 0), Tensor.ones(3, 4))
+      assertShape(empty.shape, [2, 4])
+      assertClose(await empty.toArray(), Array(8).fill(NaN))
+      empty.dispose()
+      const active = q._rt._activeAsync
+      q._rt._activeAsync++
+      Tensor.training = true
+      try {
+        for (const call of [() => q.dropout(0.25), () => q.scaledDotProductAttention(k, v)]) {
+          let rejected = false
+          try { call() } catch (err) { rejected = /active async work/.test(String(err)) }
+          assert(rejected, 'attention/dropout must not enter a suspended core')
+        }
+      } finally { q._rt._activeAsync = active }
+      for (const [training, p] of [[false, 0.25], [true, 0.25], [true, 1]]) {
+        Tensor.training = training
+        Tensor.manual_seed(11)
+        const actual = q.scaledDotProductAttention(k, v, { enableGqa: true, dropoutP: p })
+        const nextActual = Tensor.rand(4)
+        Tensor.manual_seed(11)
+        const scores = q.matmul(k.repeatInterleave(2, -3).transpose(-2, -1), false, 'float32').div(Math.sqrt(3))
+        let weights = scores.cast(q.dtype).softmax(-1)
+        if (training) {
+          weights = p === 1 ? weights.constLike(0) : Tensor.randLike(weights, { dtype: 'float32', contiguous: false })
+            .ge(p).contiguous().where(weights, 0).div(1-p)
+        }
+        const expected = weights.matmul(v.repeatInterleave(4, -3))
+        const nextExpected = Tensor.rand(4)
+        assertShape(actual.shape, [1, 2, 4, 2, 2])
+        assertClose(await actual.toArray(), await expected.toArray())
+        assertClose(await nextActual.toArray(), await nextExpected.toArray(), 0)
+        for (const t of [actual, expected, nextActual, nextExpected]) t.dispose()
+      }
+    } finally {
+      Tensor.training = oldTraining
+      for (const t of [q, k, v]) t.dispose()
+    }
+  })
+
   await test('attention primitives match pinned compositions', async () => {
     const x = new Tensor([[1, 2], [3, 4]], { dtype: 'float32' })
     const repeated = x.repeatInterleave(2, 1)
@@ -3061,7 +3110,7 @@ async function runTensorTests(pg, createRuntime) {
     const v = new Tensor(Float32Array.from({ length: 16 }, (_, i) => (i + 1) / 17)).reshape(1, 2, 2, 4)
     const causal = q.scaledDotProductAttention(k, v, { isCausal: true })
     const qk = q.matmul(k.transpose(-2, -1), false, 'float32').div(Math.sqrt(3))
-    const mask = qk.constLike(1).cast('bool').tril().where(0, -Infinity)
+    const mask = qk.cast('bool').constLike(true).tril().where(0, -Infinity)
     const expectedCausal = qk.add(mask).cast(q.dtype).softmax(-1).matmul(v)
     assert(causal.uop.key === expectedCausal.uop.key, 'causal attention graph differs')
     assertClose(await causal.toArray(), await expectedCausal.toArray())

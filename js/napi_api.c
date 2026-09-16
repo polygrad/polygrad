@@ -2811,6 +2811,39 @@ static napi_value napi_poly_tensor_sort(napi_env env, napi_callback_info info) {
   return make_external_pair(env, values, indices);
 }
 
+static napi_value napi_poly_tensor_dropout(napi_env env, napi_callback_info info) {
+  napi_value argv[4];
+  size_t argc = 4;
+  double p;
+  bool training;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  NAPI_CALL(env, napi_get_value_double(env, argv[2], &p));
+  NAPI_CALL(env, napi_get_value_bool(env, argv[3], &training));
+  return make_external(
+      env, poly_tensor_dropout(get_external(env, argv[0]), get_external(env, argv[1]), p, training)
+  );
+}
+
+static napi_value napi_poly_tensor_sdpa(napi_env env, napi_callback_info info) {
+  napi_value argv[9];
+  size_t argc = 9;
+  double p;
+  bool causal, gqa, training;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  NAPI_CALL(env, napi_get_value_double(env, argv[5], &p));
+  NAPI_CALL(env, napi_get_value_bool(env, argv[6], &causal));
+  NAPI_CALL(env, napi_get_value_bool(env, argv[7], &gqa));
+  NAPI_CALL(env, napi_get_value_bool(env, argv[8], &training));
+  return make_external(
+      env, poly_tensor_sdpa(
+               get_external(env, argv[0]), get_external(env, argv[1]), get_external(env, argv[2]),
+               get_external(env, argv[3]),
+               napi_is_nullish(env, argv[4]) ? NULL : get_external(env, argv[4]), p, causal, gqa,
+               training
+           )
+  );
+}
+
 static napi_value napi_poly_tensor_linear_apply(napi_env env, napi_callback_info info) {
   napi_value argv[4];
   size_t argc = 4;
@@ -7204,6 +7237,8 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_tensor_topk", napi_poly_tensor_topk),
       DECLARE_NAPI_METHOD("poly_tensor_lstm_cell", napi_poly_tensor_lstm_cell),
       DECLARE_NAPI_METHOD("poly_tensor_linear_apply", napi_poly_tensor_linear_apply),
+      DECLARE_NAPI_METHOD("poly_tensor_dropout", napi_poly_tensor_dropout),
+      DECLARE_NAPI_METHOD("poly_tensor_sdpa", napi_poly_tensor_sdpa),
       DECLARE_NAPI_METHOD("poly_tensor_rmsnorm_apply", napi_poly_tensor_rmsnorm_apply),
       DECLARE_NAPI_METHOD(
           "poly_tensor_layernorm_axes_apply", napi_poly_tensor_layernorm_axes_apply

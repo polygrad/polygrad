@@ -2183,6 +2183,49 @@ for _op in ("all", "any", "cumsum", "cumprod", "cummax", "cummin"):
 
 
 
+def sdpa_core_graph(kind, dtype="float32"):
+    if kind == "empty":
+        q, k, v = Tensor.zeros(2, 0, dtype=dtype), Tensor.zeros(3, 0, dtype=dtype), Tensor.ones(3, 4, dtype=dtype)
+    else:
+        q = Tensor.empty(1, 4, 3, 4, dtype=dtype).realize()
+        heads = 2 if kind == "gqa" else 4
+        k = Tensor.empty(1, heads, 3, 4, dtype=dtype).realize()
+        v = Tensor.empty(1, heads, 3, 4, dtype=dtype).realize()
+    mask = (Tensor.empty(3, 3, dtype="bool" if kind == "bool" else dtype).realize()
+            if kind in ("bool", "bias") else None)
+    if ENGINE == "polygrad":
+        from polygrad.tensor import _uop_wrap
+        out = _ffi._lib.poly_sdpa(q._ctx, q.uop.raw, k.uop.raw, v.uop.raw,
+                                  mask.uop.raw if mask is not None else None, kind == "causal", kind == "gqa")
+        if not out: raise RuntimeError("poly_sdpa failed")
+        return {"physical": _uop_wrap(q._ctx, out)}
+    out = q.scaled_dot_product_attention(k, v, attn_mask=mask,
+                                         is_causal=kind == "causal", enable_gqa=kind == "gqa")
+    return {"physical": out.uop}
+
+
+def sdpa_dropout_graph(p, training, random_inputs=False):
+    Tensor.manual_seed(11)
+    q, k, v = [(Tensor.rand(1, 2, 2, 3) if random_inputs else realized_input(1, 2, 2, 3)) for _ in range(3)]
+    with Context(TRAINING=training):
+        out = q.scaled_dot_product_attention(k, v, dropout_p=p)
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+CASES['sdpa_dropout_random_inputs'] = ('tensor', lambda: sdpa_dropout_graph(0.25, 1, True))
+
+
+for _p, _training in ((0.25, 1), (1., 1), (0.25, 0)):
+    CASES[f"sdpa_dropout_{_p}_{_training}"] = (
+        "tensor", lambda p=_p, training=_training: sdpa_dropout_graph(p, training))
+
+
+for _kind in ("plain", "causal", "bool", "bias", "gqa", "empty"):
+    for _dtype in ("float32", "float16"):
+        CASES[f"sdpa_core_{_kind}_{_dtype}"] = (
+            "tensor", lambda kind=_kind, dtype=_dtype: sdpa_core_graph(kind, dtype))
+
+
 def pointwise_owner_graph(op, dtype="float32", raw=False):
     x = Tensor.empty(2, 3, dtype=dtype).realize()
     if raw and ENGINE == "polygrad":

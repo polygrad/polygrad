@@ -3483,7 +3483,7 @@ TEST(pe, sdpa_e2e) {
   PolyUOp *k = make_buf(ctx, (int64_t[]){1, 2, 2}, 3);
   PolyUOp *v = make_buf(ctx, (int64_t[]){1, 2, 2}, 3);
   PolyUOp *out_buf = poly_buffer_f32(ctx, 4);
-  PolyUOp *r = poly_sdpa(ctx, q, k, v, NULL, 0);
+  PolyUOp *r = poly_sdpa(ctx, q, k, v, NULL, 0, 0);
   ASSERT_NOT_NULL(r);
   ASSERT_INT_EQ(poly_uop_ndim(ctx, r), 3);
 
@@ -3535,7 +3535,7 @@ TEST(pe, sdpa_causal_graph_matches_pinned) {
       ctx, mask, poly_const_int(ctx, 0), poly_const_typed(ctx, POLY_WEAKFLOAT, -INFINITY)
   );
   PolyUOp *expected = poly_dot(ctx, poly_softmax(ctx, poly_add(ctx, scores, bias), -1), v);
-  bool matches = poly_sdpa(ctx, q, k, v, NULL, 1) == expected;
+  bool matches = poly_sdpa(ctx, q, k, v, NULL, 1, 0) == expected;
   poly_ctx_destroy(ctx);
   ASSERT_TRUE(matches);
   PASS();
@@ -3548,7 +3548,7 @@ TEST(pe, sdpa_causal_e2e) {
   PolyUOp *k = make_buf(ctx, (int64_t[]){1, 3, 2}, 3);
   PolyUOp *v = make_buf(ctx, (int64_t[]){1, 3, 2}, 3);
   PolyUOp *out_buf = poly_buffer_f32(ctx, 6);
-  PolyUOp *r = poly_sdpa(ctx, q, k, v, NULL, 1);
+  PolyUOp *r = poly_sdpa(ctx, q, k, v, NULL, 1, 0);
 
   float dq[] = {1, 0, 0, 1, 1, 1}, dk[] = {1, 0, 0, 1, 1, 1}, dv[] = {1, 0, 0, 1, 1, 1};
   float dout[6] = {0};
@@ -3573,7 +3573,7 @@ TEST(pe, sdpa_single_token_multihead_returns_v) {
   PolyUOp *k = make_buf(ctx, (int64_t *)shape, 4);
   PolyUOp *v = make_buf(ctx, (int64_t *)shape, 4);
   PolyUOp *out_buf = poly_buffer_f32(ctx, numel);
-  PolyUOp *r = poly_sdpa(ctx, q, k, v, NULL, 0);
+  PolyUOp *r = poly_sdpa(ctx, q, k, v, NULL, 0, 0);
   ASSERT_NOT_NULL(r);
   ASSERT_INT_EQ(poly_uop_ndim(ctx, r), 4);
 

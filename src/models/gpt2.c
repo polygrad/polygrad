@@ -143,7 +143,7 @@ static PolyModel *gpt2_build(PolyCtx *ctx, const GPT2Config *cfg) {
     v = poly_tensor_permute(ctx, v, perm, 4);
     if (!q || !k || !v) goto fail_pre_build;
 
-    PolyTensor *attn_out = poly_tensor_sdpa(ctx, q, k, v, mask, 0);
+    PolyTensor *attn_out = poly_tensor_sdpa(ctx, q, k, v, mask, 0, 0, 0, 0);
     attn_out = poly_tensor_contiguous(ctx, attn_out);
     if (!attn_out) goto fail_pre_build;
 

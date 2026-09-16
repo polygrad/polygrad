@@ -87,3 +87,23 @@ TEST(llama, malformed_config_preserves_context) {
   poly_ctx_destroy(ctx);
   PASS();
 }
+
+TEST(llama, rejected_bias_reports_invalid_status) {
+  PolyCtx *ctx = poly_ctx_new();
+  const char *json[] = {"{\"attention_bias\":true}", "{\"mlp_bias\":true}"};
+  int codes[2];
+  bool rejected[2];
+  for (int i = 0; i < 2; i++) {
+    PolyModelError err = {0};
+    PolyModel *m = poly_llama_from_json(ctx, json[i], (int)strlen(json[i]), &err);
+    codes[i] = err.code;
+    rejected[i] = !m && strstr(err.message, "must be false");
+    poly_model_free(m);
+  }
+  poly_ctx_destroy(ctx);
+  for (int i = 0; i < 2; i++) {
+    ASSERT_TRUE(rejected[i]);
+    ASSERT_INT_EQ(codes[i], POLY_STATUS_INVALID);
+  }
+  PASS();
+}

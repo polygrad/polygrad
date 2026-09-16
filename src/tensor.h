@@ -156,6 +156,9 @@ PolyTensor *poly_tensor_full_from_value(
     bool buffer
 );
 
+/* Tensor.dot(dtype=): widen the reduction, not the multiplied operands. */
+PolyUOp *poly_dot_dtype(PolyCtx *ctx, PolyUOp *x, PolyUOp *w, const PolyDType *dtype);
+
 /* Tensor losses compose shared elementwise graphs and reductions. */
 PolyUOp *poly_binary_crossentropy(PolyCtx *ctx, PolyUOp *x, PolyUOp *target, int reduction);
 PolyUOp *poly_binary_crossentropy_logits(

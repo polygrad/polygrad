@@ -2632,40 +2632,31 @@ function createBoundTensorClass(runtime) {
     }
 
     dropout(p = 0.5) {
-      // Direct port of pinned tensor.py:809-829.
+      this._requireLive()
       p = Number(p)
       if (!(p >= 0 && p <= 1)) throw new RangeError(`p=${p} is out of range [0, 1]`)
       if (!Tensor.training || p === 0) return this
-      if (p === 1) return this.constLike(0)
-      return Tensor.randLike(this, { dtype: _runtime.defaultFloat, contiguous: false })
-        .ge(p).contiguous().where(this, 0).div(1.0 - p)
+      if (_runtime._activeAsync > 0 || _runtime._closing) throw new Error('polygrad runtime has active async work')
+      return this._makeResultFromCore(ffi.poly_tensor_dropout(this._ctx, this._tensor, p, Boolean(Tensor.training)))
     }
 
     scaledDotProductAttention(key, value, opts = {}) {
-      // Direct port of pinned tensor.py:831-858. With float32 included in
-      // the accumulation lattice, supported JS dtypes choose float64 iff
-      // either Q or K is float64, otherwise float32.
+      this._requireLive()
       opts = opts || {}
       const attnMask = opts.attnMask === undefined ? (opts.attn_mask || null) : opts.attnMask
-      const dropoutP = opts.dropoutP === undefined ? Number(opts.dropout_p || 0) : Number(opts.dropoutP)
+      const dropoutP = Number(opts.dropoutP === undefined ? (opts.dropout_p === undefined ? 0 : opts.dropout_p) : opts.dropoutP)
       const isCausal = Boolean(opts.isCausal === undefined ? opts.is_causal : opts.isCausal)
       const enableGqa = Boolean(opts.enableGqa === undefined ? opts.enable_gqa : opts.enableGqa)
-      if (enableGqa) {
-        key = key.repeatInterleave(Math.trunc(this.shape.at(-3) / key.shape.at(-3)), -3)
-        value = value.repeatInterleave(Math.trunc(this.shape.at(-3) / value.shape.at(-3)), -3)
+      for (const t of [key, value, attnMask]) {
+        if (t !== null && t._rt !== this._rt) throw new Error('Tensor belongs to another Runtime')
       }
-      const accDtype = this.dtype === 'float64' || key.dtype === 'float64' ? 'float64' : 'float32'
-      let qk = this.matmul(key.transpose(-2, -1), false, accDtype).div(Math.sqrt(this.shape.at(-1)))
-      let mask = attnMask
-      if (isCausal) {
-        if (mask !== null) throw new Error('cannot set attn_mask when is_causal=True')
-        mask = qk.constLike(1).cast('bool').tril()
-      }
-      if (mask !== null) {
-        if (mask.dtype === 'bool') mask = mask.where(0, -Infinity)
-        qk = qk.add(mask)
-      }
-      return qk.cast(this.dtype).softmax(-1).dropout(dropoutP).matmul(value)
+      if (isCausal && attnMask !== null) throw new Error('cannot set attn_mask when is_causal=True')
+      if (!(dropoutP >= 0 && dropoutP <= 1)) throw new RangeError(`p=${dropoutP} is out of range [0, 1]`)
+      // This graph-building call is synchronous, never an Asyncify queue lease.
+      if (_runtime._activeAsync > 0 || _runtime._closing) throw new Error('polygrad runtime has active async work')
+      return this._makeResultFromCore(ffi.poly_tensor_sdpa(
+        this._ctx, this._tensor, key._tensor, value._tensor, attnMask ? attnMask._tensor : null,
+        dropoutP, isCausal, enableGqa, Boolean(Tensor.training)))
     }
 
     scaled_dot_product_attention(key, value, attnMask = null, dropoutP = 0, isCausal = false, enableGqa = false) {

@@ -99,6 +99,25 @@ def llama_weights(case):
             for name, shape in case['weights'].items()}
 
 
+@pytest.mark.parametrize('device', ['cpu', 'interp'])
+def test_llama_omitted_epsilon_matches_hf_default(device):
+    import polygrad as pg
+    case = LLAMA_CASES[0]
+    config = dict(case['config'])
+    config.pop('rms_norm_eps', None)
+    weights = llama_weights(case)
+    # Small embedding magnitudes make the epsilon contract observable.
+    weights['model.embed_tokens.weight'] *= 0.01
+    checkpoint = make_safetensors({k: ('F32', v.shape, v) for k, v in weights.items()})
+    with pg.create(device=device) as rt, ExitStack() as cleanup:
+        values = []
+        for cfg in (config, {**config, 'rms_norm_eps': 1e-6}):
+            model = load_hf_bytes(json.dumps(cfg), [checkpoint], max_seq_len=3, runtime=rt)
+            cleanup.callback(model.dispose)
+            values.append(model.forward(tokens=np.array(case['tokens'], np.int32))['logits'])
+        np.testing.assert_array_equal(values[0], values[1])
+
+
 def test_llama_cuda_checkpoint_io_does_not_retain_host_shadows():
     import polygrad as pg
     from polygrad import _ffi

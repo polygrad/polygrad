@@ -2343,37 +2343,28 @@ class Tensor:
         return self._make_result_from_core(core, self.shape)
 
     def dropout(self, p=0.5):
-        # Direct port of pinned tensor.py:809-829.
         if not 0 <= p <= 1:
             raise ValueError(f'p={p} is out of range [0, 1]')
         if not TRAINING or p == 0:
             return self
-        if p == 1:
-            return self.const_like(0)
-        return (Tensor.rand_like(self, dtype=dtypes.default_float, contiguous=False) >= p).contiguous().where(self, 0) / (1.0 - p)
+        return self._make_result_from_core(
+            _ffi._lib.poly_tensor_dropout(self._ctx, self._tensor, float(p), int(bool(TRAINING))), None
+        )
 
     def scaled_dot_product_attention(
         self, key, value, attn_mask=None, dropout_p=0.0,
         is_causal=False, enable_gqa=False,
     ):
-        # Direct port of pinned tensor.py:831-858.
-        if enable_gqa:
-            key = key.repeat_interleave(int(self.shape[-3] // key.shape[-3]), dim=-3)
-            value = value.repeat_interleave(int(self.shape[-3] // value.shape[-3]), dim=-3)
-
-        qk = self.matmul(
-            key.transpose(-2, -1),
-            dtype=least_upper_dtype(to_dtype(self.dtype), to_dtype(key.dtype), dtypes.float32),
-        ) / math.sqrt(self.shape[-1])
-        if is_causal:
-            if attn_mask is not None:
-                raise RuntimeError('cannot set attn_mask when is_causal=True')
-            attn_mask = qk.const_like(1).cast(dtypes.bool).tril()
-        if attn_mask is not None:
-            if dtypes.is_bool(to_dtype(attn_mask.dtype)):
-                attn_mask = attn_mask.where(0, -float('inf'))
-            qk = qk + attn_mask
-        return qk.cast(self.dtype).softmax(-1).dropout(dropout_p) @ value
+        self._check_runtime(key, value, attn_mask)
+        if is_causal and attn_mask is not None:
+            raise RuntimeError('cannot set attn_mask when is_causal=True')
+        if not 0 <= dropout_p <= 1:
+            raise ValueError(f'p={dropout_p} is out of range [0, 1]')
+        return self._make_result_from_core(_ffi._lib.poly_tensor_sdpa(
+            self._ctx, self._tensor, key._tensor, value._tensor,
+            attn_mask._tensor if attn_mask is not None else None,
+            float(dropout_p), int(bool(is_causal)), int(bool(enable_gqa)), int(bool(TRAINING)),
+        ), None)
 
     # --- Movement ops ---
 

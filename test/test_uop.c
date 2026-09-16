@@ -306,11 +306,11 @@ TEST(nn, sdpa_accumulation_graph) {
   PolyUOp *k = poly_reshape(ctx, poly_test_buffer(ctx, POLY_FLOAT16, 4), (int64_t[]){2, 2}, 2);
   PolyUOp *v = poly_reshape(ctx, poly_test_buffer(ctx, POLY_FLOAT16, 2), (int64_t[]){2, 1}, 2);
   PolyUOp *kt = poly_permute(ctx, k, (int64_t[]){1, 0}, 2);
-  PolyUOp *scores =
-      poly_dot(ctx, poly_cast(ctx, q, POLY_FLOAT32), poly_cast(ctx, kt, POLY_FLOAT32));
+  PolyDType acc = POLY_FLOAT32;
+  PolyUOp *scores = poly_dot_dtype(ctx, q, kt, &acc);
   scores = poly_div(ctx, scores, poly_const_typed(ctx, POLY_WEAKFLOAT, sqrt(2.0)));
   PolyUOp *expected = poly_dot(ctx, poly_softmax(ctx, poly_cast(ctx, scores, q->dtype), -1), v);
-  ASSERT_TRUE(poly_sdpa(ctx, q, k, v, NULL, 0) == expected);
+  ASSERT_TRUE(poly_sdpa(ctx, q, k, v, NULL, 0, 0) == expected);
   PolyUOp *mask =
       poly_tril(ctx, poly_const_like_dtype(ctx, scores, poly_arg_bool(true), POLY_BOOL), 0);
   PolyUOp *bias = poly_where_op(
@@ -319,7 +319,7 @@ TEST(nn, sdpa_accumulation_graph) {
   expected = poly_dot(
       ctx, poly_softmax(ctx, poly_cast(ctx, poly_add(ctx, scores, bias), q->dtype), -1), v
   );
-  bool causal_matches = poly_sdpa(ctx, q, k, v, NULL, 1) == expected;
+  bool causal_matches = poly_sdpa(ctx, q, k, v, NULL, 1, 0) == expected;
   poly_ctx_destroy(ctx);
   ASSERT_TRUE(causal_matches);
   PASS();

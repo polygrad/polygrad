@@ -16,7 +16,7 @@ import sys
 _lib = None
 OPS = {}
 _has_cuda_ffi = False
-POLYGRAD_ABI_VERSION = 91
+POLYGRAD_ABI_VERSION = 92
 
 # --- Opaque pointer type (always available) ---
 _ptr = ctypes.c_void_p
@@ -1104,6 +1104,11 @@ def _declare_signatures(lib):
     lib.poly_tensor_softmax.restype = _ptr
     lib.poly_tensor_softmax.argtypes = [_ptr, _ptr, ctypes.c_int]
 
+    lib.poly_tensor_dropout.restype = _ptr
+    lib.poly_tensor_dropout.argtypes = [_ptr, _ptr, ctypes.c_double, ctypes.c_int]
+    lib.poly_tensor_sdpa.restype = _ptr
+    lib.poly_tensor_sdpa.argtypes = [_ptr] * 5 + [ctypes.c_double] + [ctypes.c_int] * 3
+
     lib.poly_tensor_log_softmax.restype = _ptr
     lib.poly_tensor_log_softmax.argtypes = [_ptr, _ptr, ctypes.c_int]
 
@@ -1546,7 +1551,7 @@ def _declare_signatures(lib):
     lib.poly_rmsnorm_apply.argtypes = [_ptr, _ptr, _ptr, ctypes.c_double]
 
     lib.poly_sdpa.restype = _ptr
-    lib.poly_sdpa.argtypes = [_ptr, _ptr, _ptr, _ptr, _ptr, ctypes.c_int]
+    lib.poly_sdpa.argtypes = [_ptr] * 5 + [ctypes.c_int] * 2
 
     lib.poly_rope.restype = _ptr
     lib.poly_rope.argtypes = [_ptr, _ptr, _ptr, _ptr]

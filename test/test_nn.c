@@ -59,7 +59,7 @@ TEST(nn, sdpa_boolean_mask) {
   PolyUOp *values = poly_buffer_f32(ctx, 2);
   PolyUOp *v = poly_reshape(ctx, values, (int64_t[]){2, 1}, 2);
   PolyUOp *mask = poly_alu2(ctx, POLY_OP_CMPLT, poly_arange(ctx, 0, 2, 1), poly_const_int(ctx, 1));
-  PolyUOp *result = poly_sdpa(ctx, q, k, v, mask, 0);
+  PolyUOp *result = poly_sdpa(ctx, q, k, v, mask, 0, 0);
   PolyUOp *output = poly_buffer_f32(ctx, 1);
   float data[] = {10, 20}, out[1] = {0};
   PolyTestBufferView views[] = {
@@ -71,15 +71,80 @@ TEST(nn, sdpa_boolean_mask) {
       0
   );
   ASSERT_FLOAT_EQ(out[0], 10.0f, 1e-6f);
-  ASSERT_TRUE(poly_sdpa(ctx, q, k, v, mask, 1) == NULL);
+  ASSERT_TRUE(poly_sdpa(ctx, q, k, v, mask, 1, 0) == NULL);
   /* A one-query causal mask admits only key zero, like the explicit mask. */
-  result = poly_sdpa(ctx, q, k, v, NULL, 1);
+  result = poly_sdpa(ctx, q, k, v, NULL, 1, 0);
   int rc = poly_test_realize_buffer_views(
       ctx, poly_sink1(ctx, poly_test_store_to_buffer(ctx, output, result)), views, 2
   );
   bool causal_matches = rc == 0 && fabsf(out[0] - 10.0f) < 1e-6f;
   poly_ctx_destroy(ctx);
   ASSERT_TRUE(causal_matches);
+  PASS();
+}
+
+TEST(nn, sdpa_empty_feature_dimension) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *q = poly_full(ctx, (int64_t[]){2, 0}, 2, 0);
+  PolyUOp *k = poly_full(ctx, (int64_t[]){3, 0}, 2, 0);
+  PolyUOp *v = poly_full(ctx, (int64_t[]){3, 4}, 2, 1);
+  PolyUOp *result = poly_sdpa(ctx, q, k, v, NULL, 0, 0);
+  ASSERT_NOT_NULL(result);
+  PolyUOp *output = poly_buffer_f32(ctx, 8);
+  float data[8] = {0};
+  PolyTestBufferView view = POLY_TEST_HOST_VIEW(output, data);
+  int rc = poly_test_realize_buffer_views(
+      ctx, poly_sink1(ctx, poly_test_store_to_buffer(ctx, output, result)), &view, 1
+  );
+  poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(rc, 0);
+  for (int i = 0; i < 8; i++)
+    ASSERT_TRUE(isnan(data[i]));
+  PASS();
+}
+
+TEST(nn, sdpa_dropout_owner_and_admission) {
+  PolyCtx *ctx = poly_ctx_new(), *foreign = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  ASSERT_NOT_NULL(foreign);
+  float q_data[24] = {1}, k_data[18] = {1}, v_data[12] = {1};
+  PolyTensor *q =
+      poly_tensor_from_host(ctx, q_data, sizeof(q_data), POLY_FLOAT32, (int64_t[]){1, 4, 2, 3}, 4);
+  PolyTensor *k =
+      poly_tensor_from_host(ctx, k_data, sizeof(k_data), POLY_FLOAT32, (int64_t[]){1, 2, 3, 3}, 4);
+  PolyTensor *v =
+      poly_tensor_from_host(ctx, v_data, sizeof(v_data), POLY_FLOAT32, (int64_t[]){1, 2, 3, 2}, 4);
+  ASSERT_NOT_NULL(q);
+  ASSERT_NOT_NULL(k);
+  ASSERT_NOT_NULL(v);
+  ASSERT_TRUE(poly_tensor_dropout(ctx, NULL, 0.5, 1) == NULL);
+  ASSERT_TRUE(poly_tensor_dropout(foreign, q, 0.5, 1) == NULL);
+  ASSERT_TRUE(poly_tensor_dropout(ctx, q, NAN, 0) == NULL);
+  PolyTensor *identity = poly_tensor_dropout(ctx, q, 0.5, 0);
+  ASSERT_TRUE(identity == q);
+  poly_tensor_release(identity);
+  ASSERT_TRUE(poly_tensor_sdpa(ctx, q, k, v, NULL, 0, 0, 0, 0) == NULL);
+  ASSERT_TRUE(poly_tensor_sdpa(foreign, q, k, v, NULL, 0, 0, 1, 0) == NULL);
+  poly_tensor_manual_seed(ctx, 11);
+  PolyTensor *out = poly_tensor_sdpa(ctx, q, k, v, NULL, 0.25, 1, 1, 1);
+  ASSERT_NOT_NULL(out);
+  PolyTensor *realized = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &out, 1, &realized), 0);
+  poly_tensor_release(out);
+  poly_tensor_release(q);
+  poly_tensor_release(k);
+  poly_tensor_release(v);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  PolyCtxStats stats = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
+  /* Only the context RNG seed/counter survive call-local owners. */
+  ASSERT_INT_EQ(stats.tensor_records, 2);
+  poly_tensor_manual_seed(ctx, 0);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
+  ASSERT_INT_EQ(stats.tensor_records, 0);
+  poly_ctx_destroy(foreign);
+  poly_ctx_destroy(ctx);
   PASS();
 }
 
