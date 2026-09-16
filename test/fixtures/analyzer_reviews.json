@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "reviewed_on": "2026-09-15",
-  "basis": "CUDA-enabled/HIP-disabled scan of 78 units: 56 reviewed false-positive diagnostics. Reused 42 exact locations, reviewed 12 relocations and two initialized-prefix reports; one old CUDA null report is absent. Reviewed source delta 50f7a47..88841bb. Evidence: temp/candidate-reconcile-20260915.Ud7MV5/analyzer-review.md and analyzer/report.json. No suppression or source-scope exclusions.",
+  "reviewed_on": "2026-09-16",
+  "basis": "CUDA-enabled/HIP-disabled scan of 78 units: the same 56 reviewed false-positive diagnostics, with none added or absent. Only source input changed: src/nn/nn.c explicitly requests a boolean causal attention mask. Its BatchNorm warning at line 438 and the checked-result/paired-state proof are unchanged. Fresh scan and reevaluation: temp/release-repair-20260916.cB5oNl/analyzer/. Prior path reviews: temp/candidate-reconcile-20260915.Ud7MV5/analyzer-review.md. No suppression or source-scope exclusions.",
   "context": {
     "sources": [
       "src/alu.c",
@@ -176,7 +176,7 @@
       "src/models/registry.c": "4ccd22ea943e9fb4b1de96d83fd6db9627f3778cf4373f36c9fca3aa675a450d",
       "src/models/tabm.c": "166b3daccc1dd01fbd078cbff32100afe7275b2d28d7f45690ebbb1df8f5435e",
       "src/models/tabm.h": "00e49c6f8516dc624c63fdbe7d6ca90155042f150929c241439d4b94c5378ba6",
-      "src/nn/nn.c": "6dd18f5558be5731d5b18601cf715ee410a7eda006c7d0e8b00756f49ca50207",
+      "src/nn/nn.c": "f11199106693411a7832b8c46b915bf7b4f789afd79a7a317472c65f20f6ca01",
       "src/nn/nn.h": "f87bfd5ec5ed8db9b7f160fd62f438f6bf5342a18ea0b0bbe52031fc318d4ddb",
       "src/nn/optim.c": "b5277a9564bf79655241e7f177ea1391fa6192145937b954ca4ef08eaaf5d946",
       "src/nn/optim.h": "048b60b415cd53b19172654155a14ee55dd813683a9a01b96543710366ddb306",

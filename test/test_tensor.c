@@ -3518,6 +3518,29 @@ TEST(pe, relu_e2e_preserves_false_branch_zero) {
   PASS();
 }
 
+TEST(pe, sdpa_causal_graph_matches_pinned) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *q = make_buf(ctx, (int64_t[]){1, 3, 2}, 3);
+  PolyUOp *k = make_buf(ctx, (int64_t[]){1, 3, 2}, 3);
+  PolyUOp *v = make_buf(ctx, (int64_t[]){1, 3, 2}, 3);
+  PolyUOp *scores = poly_div(
+      ctx, poly_dot(ctx, q, poly_permute(ctx, k, (int64_t[]){0, 2, 1}, 3)),
+      poly_const_typed(ctx, POLY_WEAKFLOAT, sqrt(2.0))
+  );
+  /* RandMixin explicitly overrides the score dtype in const_like(True, bool).
+   * A float 0/1 mask would add a bias instead of masking future positions. */
+  PolyUOp *mask =
+      poly_tril(ctx, poly_const_like_dtype(ctx, scores, poly_arg_bool(true), POLY_BOOL), 0);
+  PolyUOp *bias = poly_where_op(
+      ctx, mask, poly_const_int(ctx, 0), poly_const_typed(ctx, POLY_WEAKFLOAT, -INFINITY)
+  );
+  PolyUOp *expected = poly_dot(ctx, poly_softmax(ctx, poly_add(ctx, scores, bias), -1), v);
+  bool matches = poly_sdpa(ctx, q, k, v, NULL, 1) == expected;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(matches);
+  PASS();
+}
+
 TEST(pe, sdpa_causal_e2e) {
   /* Reference: [[[1.0, 0.0], [0.3302, 0.6698], [0.7517, 0.7517]]] */
   PolyCtx *ctx = poly_ctx_new();

@@ -72,7 +72,14 @@ TEST(nn, sdpa_boolean_mask) {
   );
   ASSERT_FLOAT_EQ(out[0], 10.0f, 1e-6f);
   ASSERT_TRUE(poly_sdpa(ctx, q, k, v, mask, 1) == NULL);
+  /* A one-query causal mask admits only key zero, like the explicit mask. */
+  result = poly_sdpa(ctx, q, k, v, NULL, 1);
+  int rc = poly_test_realize_buffer_views(
+      ctx, poly_sink1(ctx, poly_test_store_to_buffer(ctx, output, result)), views, 2
+  );
+  bool causal_matches = rc == 0 && fabsf(out[0] - 10.0f) < 1e-6f;
   poly_ctx_destroy(ctx);
+  ASSERT_TRUE(causal_matches);
   PASS();
 }
 

@@ -651,7 +651,8 @@ PolyUOp *poly_sdpa(PolyCtx *ctx, PolyUOp *q, PolyUOp *k, PolyUOp *v, PolyUOp *ma
   scores = poly_div(ctx, scores, poly_const_typed(ctx, POLY_WEAKFLOAT, sqrt((double)d_k)));
 
   if (is_causal) {
-    mask = poly_tril(ctx, poly_const_like_bool(ctx, scores, true), 0);
+    /* const_like preserves the score dtype unless explicitly overridden. */
+    mask = poly_tril(ctx, poly_const_like_dtype(ctx, scores, poly_arg_bool(true), POLY_BOOL), 0);
     if (!mask) return NULL;
   }
 
