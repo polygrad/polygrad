@@ -28,7 +28,7 @@ def release_gates():
     # test-parity-opt: those would repeat whole suites. Analyze precedes HLB
     # because its temporary .plist files affect HLB's checkout source lock.
     targets = '''
-        format-check verify-source-mirrors test-headers test-analyze-reviewed
+        test-release-preflight format-check verify-source-mirrors test-headers test-analyze-reviewed
         test test-x86 test-interp test-cuda test-qwen3
         test-harness-skip-accounting test-release-gates
         test-py test-py-x86 test-hf-e2e
@@ -64,6 +64,36 @@ def release_gates():
             gate['variables'].update(UPSTREAM_COMPAT_DIR='{output}/upstream-policy',
                                      UPSTREAM_POLICY_TESTS='test/backend/test_setitem.py test/backend/test_tensor.py test/null/test_indexing.py')
     return gates
+
+
+def preflight(variables):
+    # The core may build with GCC while generated CPU kernels require __fp16.
+    # Exercise that contract, not the compiler executable's spelling.
+    checks = [('CC', [variables.get('CC', 'clang'), '-fsyntax-only', '-x', 'c', '-'],
+               'void kernel(__fp16 *out, const __fp16 *in) { out[0] = in[0]; }\n')]
+    version_check = (
+        'import platform, sys; print(sys.executable, platform.python_implementation(), '
+        'platform.python_version()); '
+        'sys.exit(not (sys.implementation.name == "cpython" and sys.version_info[:2] == (3, 11)))'
+    )
+    for name in ('PYTHON', 'PARITY_PY'):
+        checks.append((name, shlex.split(variables.get(name, sys.executable)) + ['-c', version_check], None))
+    failed = False
+    for name, command, source in checks:
+        print(f'{name}: {shlex.join(command)}', flush=True)
+        try:
+            result = subprocess.run(command, input=source, text=True, capture_output=True, timeout=30)
+            print(result.stdout + result.stderr, end='')
+            if result.returncode:
+                failed = True
+                print(f'{name}: preflight failed (exit {result.returncode})')
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            failed = True
+            print(f'{name}: {exc}')
+    if failed:
+        print('Use a compiler accepting CPU __fp16 kernels and CPython 3.11 for PYTHON/PARITY_PY. '
+              'HF_PYTHON is independent.')
+    return int(failed)
 
 
 def release_environment(root):
@@ -175,7 +205,7 @@ def run_release(root, output, make, gates, variables):
         row['log_sha256'] = file_hash(output / row['log'])
         row['status'] = 'interrupted' if interrupted else ('passed' if row['exit_code'] == 0 else 'failed')
         save_summary(output, report)
-        if interrupted:
+        if interrupted or (row['target'] == 'test-release-preflight' and row['exit_code'] != 0):
             break
     report['source_unchanged'] = source_manifest(root) == inputs
     report['errors'] = [] if report['source_unchanged'] else ['source inputs changed during release execution']
@@ -207,12 +237,15 @@ def main():
     parser.add_argument('--output', default='')
     parser.add_argument('--make-var', action='append', default=[])
     parser.add_argument('--list', action='store_true', help='show gates without executing or creating output')
+    parser.add_argument('--preflight', action='store_true', help='check candidate compiler and Python contracts only')
     args = parser.parse_args()
     gates = release_gates()
     if args.list:
         print(json.dumps(dict(exclusions=EXCLUSIONS, deferred_certification=SCOPE['deferred_certification'], gates=gates), indent=2))
         return 0
     variables = dict(value.split('=', 1) for value in args.make_var)
+    if args.preflight:
+        return preflight(variables)
     output = (Path(args.output) if args.output else ROOT / 'temp' /
               f'release-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:8]}').resolve()
     (ROOT / 'temp').mkdir(exist_ok=True)

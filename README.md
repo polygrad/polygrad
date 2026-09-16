@@ -981,7 +981,11 @@ the additional browser-executable matrix remain separate targets.
 
 Provide the documented toolchains, pinned `PARITY_PY` environment, fixtures,
 writable caches and browser display. `PYTHON` selects the ordinary frontend and
-package-test environment; `HF_PYTHON` selects the HF reference stack. Override
+package-test environment and defaults to `PARITY_PY` for release runs;
+both must use CPython 3.11 for the pinned source-audit tests. `HF_PYTHON` selects
+the independent HF reference stack. Release runs default to Clang unless `CC`
+is explicitly supplied. The first gate checks CPU-renderer `__fp16` support and
+the Python versions; failure stops the matrix before expensive tests. Override
 `QWEN3_GGUF` and `BENCH_BASELINE` as needed. The runner
 does not download missing fixtures, approve debts, or update baselines itself.
 Individual targets retain their existing package/network behavior.
@@ -991,7 +995,7 @@ by the caller. Each gate gets a command log, exit code and elapsed time in
 `summary.json`, alongside source inputs checked before/after execution, log hashes
 and final built-artifact hashes; test counts and skips remain in the raw logs.
 This is bounded release evidence, not the full migration certificate. The runner prints
-the final summary after all gates finish, continues after failures, and exits
+the final summary after all gates finish, continues after non-preflight failures, and exits
 nonzero if any gate fails. Interrupted runs terminate their child process group
 and mark remaining gates unrun. Source edits during execution fail the run.
 A passing upstream ratchet does not mean every upstream test passed. This target

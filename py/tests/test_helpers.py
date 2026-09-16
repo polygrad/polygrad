@@ -254,7 +254,7 @@ def test_dev_targets_restore_and_keep_device_selection_truthful():
         assert Device.DEFAULT == 'CPU'
         with Context(DEV='CPU:LLVM'):
             assert DEV.renderer == 'LLVM'
-            with pytest.raises(ValueError, match='Unsupported device'):
+            with pytest.raises(ValueError, match='Unsupported Polygrad device target: CPU:LLVM'):
                 Device.DEFAULT
     assert DEV.value == old
 

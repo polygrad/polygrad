@@ -1,6 +1,7 @@
 """Release orchestration controls use tiny Make fixtures, not the real matrix."""
 
 import json
+import os
 from pathlib import Path
 import runpy
 import signal
@@ -20,6 +21,7 @@ def runner():
 
 def test_release_manifest_covers_required_lanes_once(runner):
     targets = [gate['target'] for gate in runner['release_gates']()]
+    assert targets[0] == 'test-release-preflight'
     assert len(targets) == len(set(targets))
     assert {'test', 'test-x86', 'test-interp', 'test-cuda', 'test-py',
             'test-py-x86', 'test-hf-e2e', 'test-qwen3', 'test-browser',
@@ -46,6 +48,42 @@ def test_release_manifest_covers_required_lanes_once(runner):
     assert policy['variables']['UPSTREAM_POLICY_TESTS'].split() == [
         'test/backend/test_setitem.py', 'test/backend/test_tensor.py', 'test/null/test_indexing.py']
     assert policy['variables']['UPSTREAM_COMPAT_DIR'] == '{output}/upstream-policy'
+
+
+def test_release_stops_before_matrix_when_preflight_fails(runner, tmp_path):
+    (tmp_path / 'Makefile').write_text(
+        'test-release-preflight:\n\t@exit 3\n'
+        'next:\n\t@touch should-not-run\n')
+    gates = [dict(target=t, variables={}) for t in ('test-release-preflight', 'next')]
+    output = tmp_path / 'results'
+    assert runner['run_release'](tmp_path, output, ['make'], gates, {}) == 1
+    assert not (tmp_path / 'should-not-run').exists()
+    report = json.loads((output / 'summary.json').read_text())
+    assert [g['status'] for g in report['gates']] == ['failed', 'not_run']
+
+
+def test_release_preflight_checks_actual_compiler_and_python(runner, tmp_path):
+    variables = dict(CC='clang', PYTHON=sys.executable, PARITY_PY=sys.executable)
+    assert runner['preflight'](variables) == 0
+    # GCC accepts the C11 core, but not the CPU renderer's __fp16 storage type.
+    assert runner['preflight'](dict(variables, CC='gcc')) == 1
+    wrong_python = tmp_path / 'python'
+    wrong_python.write_text('#!/bin/sh\necho "CPython 3.12"\nexit 1\n')
+    wrong_python.chmod(0o700)
+    assert runner['preflight'](dict(variables, PYTHON=str(wrong_python))) == 1
+
+
+def test_release_make_defaults_do_not_export_builtin_cc_or_ambient_python():
+    env = {key: value for key, value in os.environ.items()
+           if key not in ('CC', 'PYTHON', 'MAKEFLAGS', 'MAKEOVERRIDES', 'MFLAGS')}
+    command = ['make', '-n', 'test-release', 'PARITY_PY=reviewed-python']
+    defaults = subprocess.run(command, cwd=ROOT, env=env, text=True, capture_output=True, check=True)
+    assert "--make-var 'CC=clang'" in defaults.stdout
+    assert "--make-var 'PYTHON=reviewed-python'" in defaults.stdout
+    explicit = subprocess.run(command + ['CC=gcc', 'PYTHON=other-python'],
+                              cwd=ROOT, env=env, text=True, capture_output=True, check=True)
+    assert "--make-var 'CC=gcc'" in explicit.stdout
+    assert "--make-var 'PYTHON=other-python'" in explicit.stdout
 
 
 def test_release_continues_after_failure_and_preserves_logs(runner, tmp_path):

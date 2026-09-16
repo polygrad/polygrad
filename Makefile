@@ -802,12 +802,21 @@ RELEASE_DIR ?=
 # Indirection is intentional: a literal $(MAKE) in the recipe causes GNU Make
 # to execute it under -n, even though this recipe invokes Python, not Make.
 RELEASE_MAKE := $(MAKE)
-RELEASE_MAKE_VARS = CC AR EMCC EMSDK_PYTHON NODE NPM PYTHON PARITY_PY HF_PYTHON \
+# Do not export Make's built-in cc as a runtime compiler override. Explicit
+# user choices remain authoritative and are checked before the matrix starts.
+RELEASE_CC = $(if $(filter default,$(origin CC)),clang,$(CC))
+RELEASE_PYTHON = $(if $(filter file default undefined,$(origin PYTHON)),$(PARITY_PY),$(PYTHON))
+RELEASE_MAKE_VARS = AR EMCC EMSDK_PYTHON NODE NPM PARITY_PY HF_PYTHON CFLAGS_DEBUG LDFLAGS_DEBUG \
                    QWEN3_GGUF BENCH_BASELINE MIGRATION_EVIDENCE
-.PHONY: test-release test-release-list test-release-runner
+.PHONY: test-release test-release-list test-release-runner test-release-preflight
 test-release:
 	@$(PARITY_PY) scripts/test_release.py --make '$(RELEASE_MAKE)' --output '$(RELEASE_DIR)' \
+		--make-var 'CC=$(RELEASE_CC)' --make-var 'PYTHON=$(RELEASE_PYTHON)' \
 		$(foreach var,$(RELEASE_MAKE_VARS),--make-var '$(var)=$($(var))')
+
+test-release-preflight:
+	@$(PARITY_PY) scripts/test_release.py --preflight \
+		--make-var 'CC=$(RELEASE_CC)' --make-var 'PYTHON=$(RELEASE_PYTHON)' --make-var 'PARITY_PY=$(PARITY_PY)'
 
 test-release-list:
 	@$(PARITY_PY) scripts/test_release.py --list
