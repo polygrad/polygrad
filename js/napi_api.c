@@ -29,6 +29,7 @@
 static bool napi_is_nullish(napi_env env, napi_value value);
 #include "models/mlp.h"
 #include "models/compose.h"
+#include "models/llama.h"
 #include "models/tabm.h"
 #include "models/nam.h"
 #include "engine/schedule.h"
@@ -5571,7 +5572,8 @@ fail:
   return NULL;
 }
 
-static napi_value napi_poly_compose(napi_env env, napi_callback_info info, bool sequential) {
+static napi_value napi_poly_model_factory(napi_env env, napi_callback_info info,
+    PolyModel *(*factory)(PolyCtx *, const char *, int, PolyModelError *)) {
   napi_value argv[2];
   size_t argc = 2;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
@@ -5584,9 +5586,7 @@ static napi_value napi_poly_compose(napi_env env, napi_callback_info info, bool 
   char *json = read_utf8_arg(env, argv[1], &len);
   if (!json) return NULL;
   PolyModelError err = {0};
-  PolyModel *model = len > 1048576 ? NULL
-                     : sequential  ? poly_sequential_from_json(ctx, json, (int)len, &err)
-                                   : poly_graph_from_json(ctx, json, (int)len, &err);
+  PolyModel *model = len > 1048576 ? NULL : factory(ctx, json, (int)len, &err);
   free(json);
   if (!model) {
     napi_throw_error(
@@ -5598,11 +5598,15 @@ static napi_value napi_poly_compose(napi_env env, napi_callback_info info, bool 
 }
 
 static napi_value napi_poly_sequential_from_json(napi_env env, napi_callback_info info) {
-  return napi_poly_compose(env, info, true);
+  return napi_poly_model_factory(env, info, poly_sequential_from_json);
 }
 
 static napi_value napi_poly_graph_from_json(napi_env env, napi_callback_info info) {
-  return napi_poly_compose(env, info, false);
+  return napi_poly_model_factory(env, info, poly_graph_from_json);
+}
+
+static napi_value napi_poly_llama_from_json(napi_env env, napi_callback_info info) {
+  return napi_poly_model_factory(env, info, poly_llama_from_json);
 }
 
 static napi_value napi_poly_mlp_from_json_into(napi_env env, napi_callback_info info) {
@@ -7395,6 +7399,7 @@ NAPI_MODULE_INIT() {
       ),
       DECLARE_NAPI_METHOD("poly_sequential_from_json", napi_poly_sequential_from_json),
       DECLARE_NAPI_METHOD("poly_graph_from_json", napi_poly_graph_from_json),
+      DECLARE_NAPI_METHOD("poly_llama_from_json", napi_poly_llama_from_json),
       DECLARE_NAPI_METHOD("poly_mlp_from_json_into", napi_poly_mlp_from_json_into),
       DECLARE_NAPI_METHOD("poly_tabm_from_json_into", napi_poly_tabm_from_json_into),
       DECLARE_NAPI_METHOD("poly_nam_from_json_into", napi_poly_nam_from_json_into),

@@ -462,7 +462,7 @@ Low-level `UOp.variable` bounds retain integer, floating-point and boolean
 endpoints independently of the variable dtype. C takes scalar `PolyArg` values;
 Python accepts `int`/`float`/`bool`; JavaScript uses `pg.uop.variable(...)`, with
 `BigInt` for exact wide integers. NaN, reversed and nonnumeric bounds are rejected.
-Current packages require C ABI90 and graph formats PGIR19/PGPM10; incompatible
+Current packages require C ABI91 and graph formats PGIR19/PGPM10; incompatible
 artifacts are rejected. Typed endpoints can exceed the runtime's signed64
 variable-binding domain; metadata support does not imply executable bindings.
 
@@ -629,6 +629,23 @@ callbacks. Minibatching does not read device datasets back into host arrays;
 the scalar loss still returns to the host each step.
 
 ### Configuration-driven model families
+
+`models.Llama(config)` constructs a dense Llama in C, with thin Python/JS
+wrappers. It accepts HF-style dimensions, `batch_size` (default 1) and
+`max_seq_len` (default 1). The signature is int32 `tokens[batch_size,max_seq_len]`
+to float32 `logits[batch_size,max_seq_len,vocab_size]`. Parameters must be populated;
+construction alone does not load a checkpoint or provide trained weights.
+Python `Model.from_hf(...)` and JS `Model.fromHF(...)` load config+safetensors
+through the same C builder, checking all required weights before publication.
+Python accepts `runtime=rt`; JS uses `rt.models.Llama`, or `LlamaAsync` on WebGPU.
+
+The initial Llama scope covers dense Llama 2/base 3 and text-only 3.x configurations
+using `rope_scaling.rope_type="llama3"`, including tied embeddings. Scaled rotary
+tables are a documented model-layer extension to pinned Tinygrad (PG-DIV-009),
+not a compiler change. Execution is fixed-window, float32, beginning at position
+zero. No KV cache, sampler, tokenizer/chat template, GGUF Llama importer, vision,
+MoE or arbitrary RoPE scheme is included. Small reference fixtures are tested;
+this is not a claim that every pretrained Llama checkpoint has been validated.
 
 `models.Sequential(config)` and `models.Graph(config)` build ordinary Models in
 C, alongside MLP/TabM/NAM. One JSON configuration can be shared by Python, Node,

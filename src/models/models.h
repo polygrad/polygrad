@@ -3,6 +3,7 @@
 
 #include "mlp.h"
 #include "gpt2.h"
+#include "llama.h"
 #include "hf_loader.h"
 
 #endif /* POLYGRAD_MODELS_H */

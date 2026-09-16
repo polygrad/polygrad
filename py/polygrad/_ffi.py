@@ -16,7 +16,7 @@ import sys
 _lib = None
 OPS = {}
 _has_cuda_ffi = False
-POLYGRAD_ABI_VERSION = 90
+POLYGRAD_ABI_VERSION = 91
 
 # --- Opaque pointer type (always available) ---
 _ptr = ctypes.c_void_p
@@ -1321,8 +1321,11 @@ def _declare_signatures(lib):
         ctypes.POINTER(ctypes.c_int64), ctypes.c_int,
     ]
 
+    lib.poly_import_last_error_message.restype = ctypes.c_char_p
+    lib.poly_import_last_error_message.argtypes = []
+
     # --- PolyModel (model.h) ---
-    for name in ('poly_sequential_from_json', 'poly_graph_from_json'):
+    for name in ('poly_sequential_from_json', 'poly_graph_from_json', 'poly_llama_from_json'):
         factory = getattr(lib, name)
         factory.restype = _ptr
         factory.argtypes = [_ptr, ctypes.c_char_p, ctypes.c_int, ctypes.POINTER(PolyModelError)]

@@ -56,10 +56,12 @@ function createBoundModels(runtime) {
 
   function Sequential(spec) { return compose('Sequential', spec) }
   function Graph(spec) { return compose('Graph', spec) }
+  function Llama(spec) { return compose('Llama', spec) }
   async function SequentialAsync(spec) { return compose('Sequential', spec, true) }
   async function GraphAsync(spec) { return compose('Graph', spec, true) }
+  async function LlamaAsync(spec) { return compose('Llama', spec, true) }
 
-  return { MLP, TabM, NAM, Sequential, Graph, SequentialAsync, GraphAsync }
+  return { MLP, TabM, NAM, Sequential, Graph, Llama, SequentialAsync, GraphAsync, LlamaAsync }
 }
 
 module.exports = { createBoundModels }

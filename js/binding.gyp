@@ -69,6 +69,7 @@
         "csrc/src/models/hf_loader.c",
         "csrc/src/models/gpt2.c",
         "csrc/src/models/qwen3.c",
+        "csrc/src/models/llama.c",
         "csrc/src/loaders/decoded.c",
         "csrc/src/loaders/import_error.c",
         "csrc/src/loaders/bind.c",

@@ -35,8 +35,9 @@ FILC_SRC = src/ops.c src/dtype.c src/arena.c src/hashmap.c src/utils.c src/bigin
 LOADER_SRC = src/loaders/decoded.c src/loaders/import_error.c src/loaders/bind.c src/loaders/hf_decode.c src/loaders/gguf_decode.c src/loaders/gguf_loader.c src/loaders/import_desc.c
 SRC += src/uop/key.c
 FILC_SRC += src/uop/key.c
-CODEC_SRC = vendor/cjson/cJSON.c src/safetensors.c src/wlrn.c src/ir.c src/bundle.c src/model.c src/tokenizer.c src/models/compose.c src/models/layers.c src/models/mlp.c src/models/tabm.c src/models/nam.c src/models/registry.c src/models/gpt2.c src/models/qwen3.c src/models/hf_loader.c $(LOADER_SRC)
+CODEC_SRC = vendor/cjson/cJSON.c src/safetensors.c src/wlrn.c src/ir.c src/bundle.c src/model.c src/tokenizer.c src/models/compose.c src/models/layers.c src/models/mlp.c src/models/tabm.c src/models/nam.c src/models/registry.c src/models/gpt2.c src/models/qwen3.c src/models/llama.c src/models/hf_loader.c $(LOADER_SRC)
 TEST_SRC = test/test_main.c test/test_uop.c test/test_utils.c test/test_dtype.c test/test_bigint.c test/test_pat.c test/test_sym.c test/test_shape.c test/test_schedule_engine.c test/test_autograd.c test/test_codegen.c test/test_wasm.c test/test_rangeify.c test/test_reduce_simplify.c test/test_nn.c test/test_tensor.c test/test_fusion_fuzzer.c test/test_future_passes.c test/test_safetensors.c test/test_wlrn.c test/test_ir.c test/test_model.c test/test_program.c test/test_mlp.c test/test_tabm.c test/test_nam.c test/test_hf.c test/test_qwen3.c test/test_f16.c test/test_schedule_runtime.c test/test_bundle.c test/test_registry.c test/test_placement.c test/test_realize.c test/test_threading.c
+TEST_SRC += test/test_llama.c
 PROJECT_HEADERS := $(shell find src test bench vendor -type f -name '*.h' -print | sort)
 ANALYZE_SRC = $(filter-out vendor/%,$(sort $(SRC) $(CODEC_SRC)))
 ANALYZE_FLAGS ?=
@@ -80,7 +81,7 @@ WASM_EXPORTS := $(shell $(PYTHON) scripts/wasm_exports.py js/src)
 WASM_ASYNCIFY_IMPORTS = ['js_webgpu_dispatch','js_webgpu_read_buffer_to_wasm','js_webgpu_read_buffer_to_hostkey']
 # Instrument suspension-bearing paths (including Model I/O and BEAM), preserving
 # the synchronous compiler fast path. Do not rely on helper inlining for safety.
-WASM_ASYNCIFY_ONLY = ['poly_model_call_tensors','prepare_model_io','model_run_copies','poly_sequential_from_json','poly_graph_from_json','compose_from_json','poly_model_write_buf_named','poly_model_from_binding_arrays','poly_model_from_bindings','poly_model_build','prepare_build_named_value_snapshots','snapshot_build_named_value','copy_initial_buffer_data','poly_realize_sink','poly_model_call','poly_model_train_step','poly_model_set_device_map_arrays','poly_model_set_device','model_place_uniform_device','model_publish_placement','run_model_sink','run_model_sink_bound','poly_model_param_data_raw','poly_model_buf_data','poly_model_buf_data_raw','poly_model_export_weights_ex','poly_model_save_bundle_ex','poly_model_read_buf','poly_model_write_buf','sync_buf_to_host','poly_model_readback_param','poly_model_readback_buf','poly_realize_uops','poly_realize_tensors','poly_realize_tensors_ex','poly_realize_tensors_impl','poly_realize_linear','poly_jit_end_capture','poly_jit_run','poly_jit_run_captured_linear','poly_run_linear','poly_webgpu_execute','poly_buffer_copy','poly_buffer_ensure_device_current','poly_buffer_ensure_host_current','poly_buffer_read','poly_buffer_write','host_copy_in','webgpu_copy_out','poly_compile_linear','poly_prepare_program_for_backend','poly_rewrite_webgpu','poly_full_rewrite_to_sink_ex','poly_beam_search','beam_time_candidate','poly_time_call','poly_timing_buffers_init','poly_time_program','poly_optimize_local_size','optimize_local_size_candidates','local_size_time_candidate','poly_time_call_prepare']
+WASM_ASYNCIFY_ONLY = ['poly_model_call_tensors','prepare_model_io','model_run_copies','poly_sequential_from_json','poly_graph_from_json','poly_llama_from_json','llama_create','llama_build','precompute_freqs','compose_from_json','poly_model_write_buf_named','poly_model_from_binding_arrays','poly_model_from_bindings','poly_model_build','prepare_build_named_value_snapshots','snapshot_build_named_value','copy_initial_buffer_data','poly_realize_sink','poly_model_call','poly_model_train_step','poly_model_set_device_map_arrays','poly_model_set_device','model_place_uniform_device','model_publish_placement','run_model_sink','run_model_sink_bound','poly_model_param_data_raw','poly_model_buf_data','poly_model_buf_data_raw','poly_model_export_weights_ex','poly_model_save_bundle_ex','poly_model_read_buf','poly_model_write_buf','sync_buf_to_host','poly_model_readback_param','poly_model_readback_buf','poly_realize_uops','poly_realize_tensors','poly_realize_tensors_ex','poly_realize_tensors_impl','poly_realize_linear','poly_jit_end_capture','poly_jit_run','poly_jit_run_captured_linear','poly_run_linear','poly_webgpu_execute','poly_buffer_copy','poly_buffer_ensure_device_current','poly_buffer_ensure_host_current','poly_buffer_read','poly_buffer_write','host_copy_in','webgpu_copy_out','poly_compile_linear','poly_prepare_program_for_backend','poly_rewrite_webgpu','poly_full_rewrite_to_sink_ex','poly_beam_search','beam_time_candidate','poly_time_call','poly_timing_buffers_init','poly_time_program','poly_optimize_local_size','optimize_local_size_candidates','local_size_time_candidate','poly_time_call_prepare']
 WASM_ASYNCIFY_FLAGS = -s ASYNCIFY=1 \
 	-s "ASYNCIFY_IMPORTS=$(WASM_ASYNCIFY_IMPORTS)" \
 	-s "ASYNCIFY_ONLY=$(WASM_ASYNCIFY_ONLY)"
@@ -247,6 +248,11 @@ require-qwen3-gguf:
 
 test-qwen3: build/polygrad_test require-qwen3-gguf
 	$(SAN_RUN) POLY_QWEN3_GGUF="$(QWEN3_GGUF)" ./build/polygrad_test --require-no-skips qwen3
+
+.PHONY: test-llama
+test-llama: build/polygrad_test build/libpolygrad.so
+	$(SAN_RUN) ./build/polygrad_test --require-no-skips llama
+	POLY_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py $(PARITY_PY) -m pytest -q py/tests/test_hf.py -k llama
 
 .PHONY: test-qwen3-cuda test-hf-e2e test-release-gates test-js-package-install test-release-packages
 test-qwen3-cuda: build/polygrad_test require-qwen3-gguf

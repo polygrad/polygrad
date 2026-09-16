@@ -1,5 +1,54 @@
 'use strict'
 
+const llamaFixture = require('../../test/fixtures/llama.json')
+
+async function checkLlamaFamily(pg) {
+  const gpu = pg.device === 'webgpu'
+  for (const item of llamaFixture.cases) {
+    const model = gpu ? await pg.models.LlamaAsync(item.config) : pg.models.Llama(item.config)
+    let restored, imported
+    try {
+      const header = {}, parts = []
+      let offsetBytes = 0
+      for (const [name, shape] of Object.entries(item.weights)) {
+        const offset = Array.from(name).reduce((s,c)=>s+c.charCodeAt(0),0)
+        const values = Float32Array.from({length:shape.reduce((a,b)=>a*b,1)},(_,i)=>
+          (shape.length===1?1:0)+((i*7+offset)%23-11)*0.017)
+        await model.writeBufferAsync(name, values)
+        header[name] = {dtype:'F32',shape,data_offsets:[offsetBytes,offsetBytes+values.byteLength]}
+        parts.push(new Uint8Array(values.buffer))
+        offsetBytes += values.byteLength
+      }
+      const headerBytes = new TextEncoder().encode(JSON.stringify(header))
+      const checkpoint = new Uint8Array(8+headerBytes.length+offsetBytes)
+      new DataView(checkpoint.buffer).setBigUint64(0,BigInt(headerBytes.length),true)
+      checkpoint.set(headerBytes,8)
+      offsetBytes = 8+headerBytes.length
+      for (const part of parts) { checkpoint.set(part,offsetBytes); offsetBytes += part.length }
+      imported = pg.Model.fromHF(new TextEncoder().encode(JSON.stringify(item.config)),[checkpoint],{maxSeqLen:3})
+      assertClose(await model.readBufferAsync('freqs_cos'),item.freqs_cos,2e-6)
+      assertClose(await model.readBufferAsync('freqs_sin'),item.freqs_sin,2e-6)
+      const tokens = new Int32Array([1,4,2])
+      const first = (await model.forwardAsync({tokens})).logits
+      assertClose(first,item.logits,2e-5)
+      assertClose((await imported.forwardAsync({tokens})).logits,item.logits,2e-5)
+      const changed = (await model.forwardAsync({tokens:new Int32Array([1,4,7])})).logits
+      assertClose(changed.slice(0,22),first.slice(0,22),2e-6)
+      restored = pg.Model.load(await model.saveAsync({includeOptimizer:false}))
+      assertClose((await restored.forwardAsync({tokens})).logits,item.logits,2e-5)
+      const name = 'model.embed_tokens.weight', before = await model.readBufferAsync(name)
+      await restored.writeBufferAsync(name,new Float32Array(before.length))
+      assertClose(await model.readBufferAsync(name),before,0)
+      if (item.config.tie_word_embeddings)
+        assertClose(await restored.readBufferAsync('lm_head.weight'),new Float32Array(before.length),0)
+    } finally {
+      if (restored) await restored.dispose()
+      if (imported) await imported.dispose()
+      await model.dispose()
+    }
+  }
+}
+
 const compositionFixture = require('../../test/fixtures/model_definition.json')
 const quantizedFixture = require('../../test/fixtures/gguf_quantized_blocks.json')
 
@@ -1192,6 +1241,7 @@ async function runModelRuntimeTests(pg, createRuntime) {
   await test('Model usability summary and capture failures', () => checkModelUsability(pg, Model))
   await test('Model runtime imports isolation and failure', () => checkRuntimeImports(pg, Model, createRuntime))
   await test('Model family runtime ownership', () => checkFamilyRuntimeOwnership(pg))
+  await test('Llama family reference and shared import', () => checkLlamaFamily(pg))
   await test('Model Tensor I/O owns device results', () => checkModelTensorIO(pg))
   await test('Model variable shapes preserve results and portable signatures', () => checkModelVariableShapes(pg))
   await test('Model empty bindings reject before input writes', () => checkModelEmptyInputAdmission(pg))
@@ -1949,6 +1999,7 @@ async function runModelSmokeTests(pg, createRuntime) {
   await test('Model usability summary and capture failures', () => checkModelUsability(pg, Model))
   await test('Model runtime imports isolation and failure', () => checkRuntimeImports(pg, Model, createRuntime))
   await test('Model family runtime ownership', () => checkFamilyRuntimeOwnership(pg))
+  await test('Llama family reference and shared import', () => checkLlamaFamily(pg))
   await test('Model Tensor I/O owns device results', () => checkModelTensorIO(pg))
   await test('Model variable shapes preserve results and portable signatures', () => checkModelVariableShapes(pg))
   await test('Model empty bindings reject before input writes', () => checkModelEmptyInputAdmission(pg))

@@ -1,6 +1,7 @@
 """Tests for HuggingFace model loading."""
 
 import ctypes
+from contextlib import ExitStack
 import json
 import struct
 from pathlib import Path
@@ -51,6 +52,107 @@ GPT2_TINY_CONFIG = json.dumps({
     'n_positions': 8,
     'layer_norm_epsilon': 1e-5
 })
+
+
+LLAMA_CASES = json.loads((Path(__file__).resolve().parents[2] / 'test/fixtures/llama.json').read_text())['cases']
+
+
+def llama_weights(case):
+    return {name: np.array([(1.0 if len(shape) == 1 else 0.0) +
+                            ((i * 7 + sum(name.encode())) % 23 - 11) * 0.017
+                            for i in range(int(np.prod(shape)))], np.float32).reshape(shape)
+            for name, shape in case['weights'].items()}
+
+
+@pytest.mark.parametrize('device', ['cpu', 'interp'])
+@pytest.mark.parametrize('case', LLAMA_CASES, ids=['llama2-gqa', 'llama2-mha', 'llama3', 'llama32-tied'])
+def test_llama_family_reference_and_shared_import(device, case):
+    import polygrad as pg
+    weights = llama_weights(case)
+    checkpoint = make_safetensors({k: ('F32', v.shape, v) for k,v in weights.items()})
+    with pg.create(device=device) as rt:
+        live = rt.Tensor([37.])
+        with ExitStack() as cleanup:
+            direct = rt.models.Llama(case['config'])
+            cleanup.callback(direct.dispose)
+            imported = load_hf_bytes(json.dumps(case['config']), [checkpoint], max_seq_len=3, runtime=rt)
+            cleanup.callback(imported.dispose)
+            for name, data in weights.items(): direct.write_buffer(name, data)
+            for model in (direct, imported):
+                np.testing.assert_allclose(model.read_buffer('freqs_cos').reshape(-1), case['freqs_cos'], atol=2e-6)
+                np.testing.assert_allclose(model.read_buffer('freqs_sin').reshape(-1), case['freqs_sin'], atol=2e-6)
+                tokens = np.array(case['tokens'], np.int32)
+                first = model.forward(tokens=tokens)['logits']
+                np.testing.assert_allclose(first.reshape(-1), case['logits'], atol=2e-5, rtol=2e-5)
+                changed = model.forward(tokens=np.array([[1,4,7]], np.int32))['logits']
+                np.testing.assert_allclose(changed[:, :2], first[:, :2], atol=2e-6)
+            restored = rt.Model.load(imported.save(include_optimizer=False))
+            cleanup.callback(restored.dispose)
+            np.testing.assert_allclose(restored.forward(tokens=tokens)['logits'].reshape(-1), case['logits'], atol=2e-5, rtol=2e-5)
+            key = 'model.embed_tokens.weight'
+            restored.write_buffer(key, np.zeros_like(weights[key]))
+            np.testing.assert_array_equal(imported.read_buffer(key), weights[key].reshape(-1))
+            if case['config']['tie_word_embeddings']:
+                np.testing.assert_array_equal(restored.read_buffer('lm_head.weight'), np.zeros(weights[key].size, np.float32))
+            np.testing.assert_array_equal(live.numpy(), [37.])
+
+
+@pytest.mark.parametrize('change', [dict(hidden_size=7), dict(num_key_value_heads=3),
+    dict(max_seq_len=17), dict(hidden_act='relu'), dict(attention_bias=True),
+    dict(rope_scaling={'rope_type':'dynamic'}), dict(rope_theta=-1), dict(num_hidden_layers=1.5)])
+def test_llama_rejects_unsupported_configuration_without_touching_runtime(change):
+    import polygrad as pg
+    with pg.create(device='interp') as rt:
+        live = rt.Tensor([19.])
+        with pytest.raises(ValueError, match='Llama'):
+            rt.models.Llama({**LLAMA_CASES[0]['config'], **change})
+        np.testing.assert_array_equal(live.numpy(), [19.])
+
+
+@pytest.mark.parametrize('damage', ['missing', 'shape', 'duplicate', 'tied_conflict'])
+def test_llama_checkpoint_rejects_incomplete_or_conflicting_state(damage):
+    import polygrad as pg
+    case = LLAMA_CASES[3 if damage == 'tied_conflict' else 0]
+    weights = llama_weights(case)
+    if damage == 'missing': weights.pop('model.norm.weight')
+    if damage == 'shape': weights['model.norm.weight'] = np.zeros(2, np.float32)
+    if damage == 'tied_conflict': weights['lm_head.weight'] = np.zeros_like(weights['model.embed_tokens.weight'])
+    checkpoint = make_safetensors({k: ('F32', v.shape, v) for k,v in weights.items()})
+    with pg.create(device='interp') as rt:
+        live = rt.Tensor([31.])
+        expected = {'missing':'missing weight', 'shape':'invalid weight',
+                    'duplicate':'duplicate', 'tied_conflict':'tied lm_head'}[damage]
+        with pytest.raises((RuntimeError, ValueError), match=expected):
+            load_hf_bytes(json.dumps(case['config']), [checkpoint] * (2 if damage == 'duplicate' else 1), runtime=rt)
+        np.testing.assert_array_equal(live.numpy(), [31.])
+
+
+def test_llama_default_runtime_and_batched_rows():
+    from polygrad import models
+    case = LLAMA_CASES[0]
+    model = models.Llama({**case['config'], 'batch_size': 2})
+    try:
+        for name, data in llama_weights(case).items(): model.write_buffer(name, data)
+        out = model.forward(tokens=np.array(case['tokens'] * 2, np.int32))['logits']
+        assert out.shape == (2, 3, 11)
+        for row in out: np.testing.assert_allclose(row.reshape(-1), case['logits'], atol=2e-5, rtol=2e-5)
+    finally:
+        model.dispose()
+
+
+@pytest.mark.parametrize('head_first', [False, True])
+def test_llama_tied_checkpoint_accepts_equal_duplicate_in_either_order(head_first):
+    case = LLAMA_CASES[-1]
+    weights = llama_weights(case)
+    head = {'lm_head.weight': weights['model.embed_tokens.weight']}
+    weights = {**head, **weights} if head_first else {**weights, **head}
+    checkpoint = make_safetensors({k: ('F32', v.shape, v) for k,v in weights.items()})
+    model = load_hf_bytes(json.dumps(case['config']), [checkpoint], max_seq_len=3)
+    try:
+        out = model.forward(tokens=np.array(case['tokens'], np.int32))['logits']
+        np.testing.assert_allclose(out.reshape(-1), case['logits'], atol=2e-5, rtol=2e-5)
+    finally:
+        model.dispose()
 
 
 class TestHFLoadBasic:

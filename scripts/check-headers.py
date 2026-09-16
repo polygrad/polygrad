@@ -12,7 +12,7 @@ PUBLIC = ("polygrad.h", "tensor.h", "frontend.h", "model.h", "nn/nn.h", "nn/opti
 OWNERS = ("mixin/elementwise.h", "uop/ops.h", "placer.h", "device.h",
           "engine/schedule.h", "engine/realize.h", "schedule/schedule.h",
           "models/mlp.h", "models/tabm.h", "models/nam.h", "models/gpt2.h",
-          "models/qwen3.h", "models/hf_loader.h", "loaders/gguf_loader.h")
+          "models/qwen3.h", "models/llama.h", "models/hf_loader.h", "loaders/gguf_loader.h")
 
 
 def main():

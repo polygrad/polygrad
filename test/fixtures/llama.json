@@ -1,0 +1,649 @@
+{
+  "reference": "Transformers 5.3.0 LlamaForCausalLM, Torch 2.10.0; unscaled cases cross-checked against Tinygrad v0.14.0 6f87158d77f66a36d5f8bbe915170b24e2acabe8; test/generate_llama_fixture.py",
+  "cases": [
+    {
+      "version": "2",
+      "config": {
+        "model_type": "llama",
+        "hidden_size": 8,
+        "intermediate_size": 12,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 1,
+        "num_hidden_layers": 2,
+        "vocab_size": 11,
+        "rms_norm_eps": 0.00001,
+        "rope_theta": 10000,
+        "max_position_embeddings": 16,
+        "batch_size": 1,
+        "max_seq_len": 3,
+        "tie_word_embeddings": false
+      },
+      "tokens": [
+        [
+          1,
+          4,
+          2
+        ]
+      ],
+      "weights": {
+        "model.embed_tokens.weight": [
+          11,
+          8
+        ],
+        "model.layers.0.input_layernorm.weight": [
+          8
+        ],
+        "model.layers.0.post_attention_layernorm.weight": [
+          8
+        ],
+        "model.layers.0.self_attn.q_proj.weight": [
+          8,
+          8
+        ],
+        "model.layers.0.self_attn.k_proj.weight": [
+          4,
+          8
+        ],
+        "model.layers.0.self_attn.v_proj.weight": [
+          4,
+          8
+        ],
+        "model.layers.0.self_attn.o_proj.weight": [
+          8,
+          8
+        ],
+        "model.layers.0.mlp.gate_proj.weight": [
+          12,
+          8
+        ],
+        "model.layers.0.mlp.up_proj.weight": [
+          12,
+          8
+        ],
+        "model.layers.0.mlp.down_proj.weight": [
+          8,
+          12
+        ],
+        "model.layers.1.input_layernorm.weight": [
+          8
+        ],
+        "model.layers.1.post_attention_layernorm.weight": [
+          8
+        ],
+        "model.layers.1.self_attn.q_proj.weight": [
+          8,
+          8
+        ],
+        "model.layers.1.self_attn.k_proj.weight": [
+          4,
+          8
+        ],
+        "model.layers.1.self_attn.v_proj.weight": [
+          4,
+          8
+        ],
+        "model.layers.1.self_attn.o_proj.weight": [
+          8,
+          8
+        ],
+        "model.layers.1.mlp.gate_proj.weight": [
+          12,
+          8
+        ],
+        "model.layers.1.mlp.up_proj.weight": [
+          12,
+          8
+        ],
+        "model.layers.1.mlp.down_proj.weight": [
+          8,
+          12
+        ],
+        "model.norm.weight": [
+          8
+        ],
+        "lm_head.weight": [
+          11,
+          8
+        ]
+      },
+      "logits": [
+        -0.08373266458511353,
+        0.2123628556728363,
+        0.40279674530029297,
+        0.2580987513065338,
+        -0.1411241590976715,
+        -0.07445239275693893,
+        -0.5254123210906982,
+        -0.0989779531955719,
+        -0.37538909912109375,
+        0.3875514566898346,
+        0.24285343289375305,
+        -0.2758362293243408,
+        -0.399817556142807,
+        0.06484386324882507,
+        -0.33821916580200195,
+        0.8110876679420471,
+        -0.3126642405986786,
+        0.09696711599826813,
+        -0.2963690161705017,
+        -0.17400763928890228,
+        0.04431106895208359,
+        -0.35875195264816284,
+        -0.13071969151496887,
+        -0.48286890983581543,
+        0.19611120223999023,
+        -0.4180883765220642,
+        0.5790441632270813,
+        -0.24215082824230194,
+        -0.004503313452005386,
+        -0.1523132026195526,
+        -0.24975328147411346,
+        0.1745176911354065,
+        -0.43968188762664795
+      ],
+      "freqs_cos": [
+        1,
+        1,
+        0.5403023362159729,
+        0.9999499917030334,
+        -0.416146844625473,
+        0.9998000264167786
+      ],
+      "freqs_sin": [
+        0,
+        0,
+        0.8414709568023682,
+        0.009999833069741726,
+        0.9092974066734314,
+        0.019998665899038315
+      ]
+    },
+    {
+      "version": "2",
+      "config": {
+        "model_type": "llama",
+        "hidden_size": 8,
+        "intermediate_size": 12,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 2,
+        "num_hidden_layers": 2,
+        "vocab_size": 11,
+        "rms_norm_eps": 0.00001,
+        "rope_theta": 10000,
+        "max_position_embeddings": 16,
+        "batch_size": 1,
+        "max_seq_len": 3,
+        "tie_word_embeddings": false
+      },
+      "tokens": [
+        [
+          1,
+          4,
+          2
+        ]
+      ],
+      "weights": {
+        "model.embed_tokens.weight": [
+          11,
+          8
+        ],
+        "model.layers.0.input_layernorm.weight": [
+          8
+        ],
+        "model.layers.0.post_attention_layernorm.weight": [
+          8
+        ],
+        "model.layers.0.self_attn.q_proj.weight": [
+          8,
+          8
+        ],
+        "model.layers.0.self_attn.k_proj.weight": [
+          8,
+          8
+        ],
+        "model.layers.0.self_attn.v_proj.weight": [
+          8,
+          8
+        ],
+        "model.layers.0.self_attn.o_proj.weight": [
+          8,
+          8
+        ],
+        "model.layers.0.mlp.gate_proj.weight": [
+          12,
+          8
+        ],
+        "model.layers.0.mlp.up_proj.weight": [
+          12,
+          8
+        ],
+        "model.layers.0.mlp.down_proj.weight": [
+          8,
+          12
+        ],
+        "model.layers.1.input_layernorm.weight": [
+          8
+        ],
+        "model.layers.1.post_attention_layernorm.weight": [
+          8
+        ],
+        "model.layers.1.self_attn.q_proj.weight": [
+          8,
+          8
+        ],
+        "model.layers.1.self_attn.k_proj.weight": [
+          8,
+          8
+        ],
+        "model.layers.1.self_attn.v_proj.weight": [
+          8,
+          8
+        ],
+        "model.layers.1.self_attn.o_proj.weight": [
+          8,
+          8
+        ],
+        "model.layers.1.mlp.gate_proj.weight": [
+          12,
+          8
+        ],
+        "model.layers.1.mlp.up_proj.weight": [
+          12,
+          8
+        ],
+        "model.layers.1.mlp.down_proj.weight": [
+          8,
+          12
+        ],
+        "model.norm.weight": [
+          8
+        ],
+        "lm_head.weight": [
+          11,
+          8
+        ]
+      },
+      "logits": [
+        -0.07643559575080872,
+        0.20543313026428223,
+        -0.19305849075317383,
+        0.22550560534000397,
+        -0.0670381486415863,
+        -0.058988794684410095,
+        -0.4904012382030487,
+        -0.08312639594078064,
+        0.09775981307029724,
+        -0.19974926114082336,
+        0.21881479024887085,
+        -0.32808613777160645,
+        -0.24772416055202484,
+        -0.04583235830068588,
+        -0.2104089856147766,
+        0.8113012909889221,
+        -0.3779626786708832,
+        0.06057564914226532,
+        -0.3405245244503021,
+        -0.06800717115402222,
+        -0.05827075242996216,
+        -0.2228473722934723,
+        -0.3212721645832062,
+        -0.1643604338169098,
+        0.23591576516628265,
+        -0.1650802493095398,
+        0.4286355674266815,
+        -0.37274041771888733,
+        0.03325618803501129,
+        -0.32103222608566284,
+        -0.188359797000885,
+        0.23615577816963196,
+        -0.16484034061431885
+      ],
+      "freqs_cos": [
+        1,
+        1,
+        0.5403023362159729,
+        0.9999499917030334,
+        -0.416146844625473,
+        0.9998000264167786
+      ],
+      "freqs_sin": [
+        0,
+        0,
+        0.8414709568023682,
+        0.009999833069741726,
+        0.9092974066734314,
+        0.019998665899038315
+      ]
+    },
+    {
+      "version": "3",
+      "config": {
+        "model_type": "llama",
+        "hidden_size": 8,
+        "intermediate_size": 12,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 1,
+        "num_hidden_layers": 2,
+        "vocab_size": 11,
+        "rms_norm_eps": 0.00001,
+        "rope_theta": 500000,
+        "max_position_embeddings": 16,
+        "batch_size": 1,
+        "max_seq_len": 3,
+        "tie_word_embeddings": false
+      },
+      "tokens": [
+        [
+          1,
+          4,
+          2
+        ]
+      ],
+      "weights": {
+        "model.embed_tokens.weight": [
+          11,
+          8
+        ],
+        "model.layers.0.input_layernorm.weight": [
+          8
+        ],
+        "model.layers.0.post_attention_layernorm.weight": [
+          8
+        ],
+        "model.layers.0.self_attn.q_proj.weight": [
+          8,
+          8
+        ],
+        "model.layers.0.self_attn.k_proj.weight": [
+          4,
+          8
+        ],
+        "model.layers.0.self_attn.v_proj.weight": [
+          4,
+          8
+        ],
+        "model.layers.0.self_attn.o_proj.weight": [
+          8,
+          8
+        ],
+        "model.layers.0.mlp.gate_proj.weight": [
+          12,
+          8
+        ],
+        "model.layers.0.mlp.up_proj.weight": [
+          12,
+          8
+        ],
+        "model.layers.0.mlp.down_proj.weight": [
+          8,
+          12
+        ],
+        "model.layers.1.input_layernorm.weight": [
+          8
+        ],
+        "model.layers.1.post_attention_layernorm.weight": [
+          8
+        ],
+        "model.layers.1.self_attn.q_proj.weight": [
+          8,
+          8
+        ],
+        "model.layers.1.self_attn.k_proj.weight": [
+          4,
+          8
+        ],
+        "model.layers.1.self_attn.v_proj.weight": [
+          4,
+          8
+        ],
+        "model.layers.1.self_attn.o_proj.weight": [
+          8,
+          8
+        ],
+        "model.layers.1.mlp.gate_proj.weight": [
+          12,
+          8
+        ],
+        "model.layers.1.mlp.up_proj.weight": [
+          12,
+          8
+        ],
+        "model.layers.1.mlp.down_proj.weight": [
+          8,
+          12
+        ],
+        "model.norm.weight": [
+          8
+        ],
+        "lm_head.weight": [
+          11,
+          8
+        ]
+      },
+      "logits": [
+        -0.08373266458511353,
+        0.2123628556728363,
+        0.40279674530029297,
+        0.2580987513065338,
+        -0.1411241590976715,
+        -0.07445239275693893,
+        -0.5254123210906982,
+        -0.0989779531955719,
+        -0.37538909912109375,
+        0.3875514566898346,
+        0.24285343289375305,
+        -0.2758150100708008,
+        -0.39993587136268616,
+        0.06468798965215683,
+        -0.338351845741272,
+        0.8112592697143555,
+        -0.3126344084739685,
+        0.09720116853713989,
+        -0.29634302854537964,
+        -0.17398260533809662,
+        0.04415999352931976,
+        -0.35887986421585083,
+        -0.1312912106513977,
+        -0.4825049042701721,
+        0.19624802470207214,
+        -0.4178074300289154,
+        0.5791915059089661,
+        -0.24188901484012604,
+        -0.004148326814174652,
+        -0.1528570055961609,
+        -0.2501845955848694,
+        0.17468221485614777,
+        -0.439373254776001
+      ],
+      "freqs_cos": [
+        1,
+        1,
+        0.5403023362159729,
+        0.9999989867210388,
+        -0.416146844625473,
+        0.9999960064888
+      ],
+      "freqs_sin": [
+        0,
+        0,
+        0.8414709568023682,
+        0.0014142129803076386,
+        0.9092974066734314,
+        0.0028284231666475534
+      ]
+    },
+    {
+      "version": "3.2",
+      "config": {
+        "model_type": "llama",
+        "hidden_size": 16,
+        "intermediate_size": 24,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 1,
+        "num_hidden_layers": 2,
+        "vocab_size": 11,
+        "rms_norm_eps": 0.00001,
+        "rope_theta": 500000,
+        "max_position_embeddings": 16,
+        "batch_size": 1,
+        "max_seq_len": 3,
+        "tie_word_embeddings": true,
+        "rope_scaling": {
+          "rope_type": "llama3",
+          "factor": 32,
+          "low_freq_factor": 1,
+          "high_freq_factor": 4,
+          "original_max_position_embeddings": 8192,
+          "rope_theta": 500000
+        }
+      },
+      "tokens": [
+        [
+          1,
+          4,
+          2
+        ]
+      ],
+      "weights": {
+        "model.embed_tokens.weight": [
+          11,
+          16
+        ],
+        "model.layers.0.input_layernorm.weight": [
+          16
+        ],
+        "model.layers.0.post_attention_layernorm.weight": [
+          16
+        ],
+        "model.layers.0.self_attn.q_proj.weight": [
+          16,
+          16
+        ],
+        "model.layers.0.self_attn.k_proj.weight": [
+          8,
+          16
+        ],
+        "model.layers.0.self_attn.v_proj.weight": [
+          8,
+          16
+        ],
+        "model.layers.0.self_attn.o_proj.weight": [
+          16,
+          16
+        ],
+        "model.layers.0.mlp.gate_proj.weight": [
+          24,
+          16
+        ],
+        "model.layers.0.mlp.up_proj.weight": [
+          24,
+          16
+        ],
+        "model.layers.0.mlp.down_proj.weight": [
+          16,
+          24
+        ],
+        "model.layers.1.input_layernorm.weight": [
+          16
+        ],
+        "model.layers.1.post_attention_layernorm.weight": [
+          16
+        ],
+        "model.layers.1.self_attn.q_proj.weight": [
+          16,
+          16
+        ],
+        "model.layers.1.self_attn.k_proj.weight": [
+          8,
+          16
+        ],
+        "model.layers.1.self_attn.v_proj.weight": [
+          8,
+          16
+        ],
+        "model.layers.1.self_attn.o_proj.weight": [
+          16,
+          16
+        ],
+        "model.layers.1.mlp.gate_proj.weight": [
+          24,
+          16
+        ],
+        "model.layers.1.mlp.up_proj.weight": [
+          24,
+          16
+        ],
+        "model.layers.1.mlp.down_proj.weight": [
+          16,
+          24
+        ],
+        "model.norm.weight": [
+          16
+        ]
+      },
+      "logits": [
+        0.2713891267776489,
+        0.9291383624076843,
+        0.0006756186485290527,
+        0.20870482921600342,
+        -0.09061503410339355,
+        -0.919259786605835,
+        -0.18096023797988892,
+        0.28555113077163696,
+        0.28547197580337524,
+        0.13032814860343933,
+        0.08401966094970703,
+        -0.1375708281993866,
+        -0.7450186014175415,
+        -0.6900337934494019,
+        0.19840417802333832,
+        1.279048204421997,
+        0.43855059146881104,
+        -0.2694587707519531,
+        0.11852874606847763,
+        -0.1626301407814026,
+        -0.797093391418457,
+        -0.4763565957546234,
+        0.1928788125514984,
+        0.5480930209159851,
+        0.997273325920105,
+        0.25748005509376526,
+        -0.10457956790924072,
+        -0.1515563428401947,
+        -0.8919546604156494,
+        -0.0967339277267456,
+        0.21408119797706604,
+        0.6117810606956482,
+        0.07914119958877563
+      ],
+      "freqs_cos": [
+        1,
+        1,
+        1,
+        1,
+        0.5403023362159729,
+        0.9992929697036743,
+        0.9999999403953552,
+        1,
+        -0.416146844625473,
+        0.9971728920936584,
+        0.9999996423721313,
+        1
+      ],
+      "freqs_sin": [
+        0,
+        0,
+        0,
+        0,
+        0.8414709568023682,
+        0.0375971682369709,
+        0.000429556705057621,
+        0.0000016619674170215148,
+        0.9092974066734314,
+        0.07514116913080215,
+        0.0008591132936999202,
+        0.0000033239348340430297
+      ]
+    }
+  ]
+}

@@ -225,7 +225,9 @@ def _load_from_bytes(config_bytes, weight_data_list, max_batch, max_seq_len, dev
     )
 
     if not ptr:
-        raise RuntimeError('poly_hf_load returned NULL')
+        detail = _get_lib().poly_import_last_error_message()
+        raise RuntimeError('poly_hf_load returned NULL' +
+                           (': ' + detail.decode('utf-8', 'replace') if detail else ''))
 
     return Model._from_handle(ptr, ctx)
 

@@ -27,7 +27,13 @@ extern PolyModel *poly_qwen3_from_gguf_decoded_generic(
     const PolyGenericImportOpts *opts
 );
 
+extern PolyModel *poly_llama_from_hf_decoded_generic(
+    const PolyHfDecoded *hf,
+    const PolyGenericImportOpts *opts
+);
+
 static const PolyImportDesc g_import_descs[] = {
+    {.model_type = "llama", .from_hf_decoded = poly_llama_from_hf_decoded_generic},
     {
         .model_type = "gpt2",
         .from_hf_decoded = poly_gpt2_from_hf_decoded_generic,

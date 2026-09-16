@@ -121,4 +121,14 @@ def Graph(spec, *, runtime=None):
     return _compose('graph', spec, runtime)
 
 
-__all__ = ["MLP", "TabM", "NAM", "Sequential", "Graph"]
+def Llama(spec, *, runtime=None):
+    """Construct a dense Llama from HF-style config in the owning C runtime.
+
+    Fixed int32 ``tokens[batch_size,max_seq_len]`` -> float32 ``logits``.
+    Supports unscaled/Llama-3 RoPE and tied embeddings. No KV cache or sampler.
+    Populate parameters explicitly, or use Model.from_hf for pretrained weights.
+    """
+    return _compose('llama', spec, runtime)
+
+
+__all__ = ["MLP", "TabM", "NAM", "Sequential", "Graph", "Llama"]

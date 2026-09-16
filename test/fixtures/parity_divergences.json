@@ -149,6 +149,18 @@
       "close_when": "Re-evaluate against the same typed cast/ALU probes when the Tinygrad pin changes. This row grants no Tensor or physical graph allowance."
     },
     {
+      "id": "PG-DIV-009",
+      "status": "approved",
+      "stages": ["model"],
+      "area": "shared dense Llama factory and scaled rotary tables",
+      "tinygrad": "Pinned extra/models/llama.py supplies dense Llama construction and unscaled RoPE; its HF converter permutes half-split Q/K weights into interleaved layout.",
+      "polygrad": "A C-owned Model factory uses existing RMSNorm/SDPA/SwiGLU and half-split poly_tensor_rope directly on HF weights. Optional llama3 wavelength scaling follows Meta/Hugging Face, and tied names share Model storage.",
+      "rationale": "One configuration/checkpoint must construct the same model from C, Python, Node and Wasm. No compiler, Tensor, scheduler or physical-graph allowance is granted by this model-layer extension.",
+      "approval": "User 2026-09-16 requested the shared Llama port and explicitly selected both Llama 2 and Llama 3.x.",
+      "evidence": ["src/models/llama.c", "test/generate_llama_fixture.py", "test/fixtures/llama.json", "test/test_llama.c", "py/tests/test_hf.py", "js/test/test_model_runtime.js", "temp/llama-20260916/correspondence.md"],
+      "close_when": "Re-evaluate model construction and rotary references on pin changes; this row never excuses core mismatches."
+    },
+    {
       "id": "PG-PARITY-001",
       "status": "resolved",
       "stages": ["placement", "realize"],

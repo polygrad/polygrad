@@ -2040,7 +2040,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 90
+  const EXPECTED_ABI = 91
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(
@@ -2144,13 +2144,16 @@ function createWasmCoreFromModule(Module, device) {
       }
       if (async) {
         try {
-          const factory = family === 'Sequential' ? 'poly_sequential_from_json' : 'poly_graph_from_json'
+          const factory = family === 'Llama' ? 'poly_llama_from_json'
+            : family === 'Sequential' ? 'poly_sequential_from_json' : 'poly_graph_from_json'
           return Module.ccall(factory, 'number',
             ['number', 'number', 'number', 'number'], [ctxPtr, ptr, bytes.length, err],
             { async: true }).then(finish).finally(cleanup)
         } catch (error) { cleanup(); throw error }
       }
-      try { return finish(family === 'Sequential'
+      try { return finish(family === 'Llama'
+        ? Module._poly_llama_from_json(ctxPtr, ptr, bytes.length, err)
+        : family === 'Sequential'
         ? Module._poly_sequential_from_json(ctxPtr, ptr, bytes.length, err)
         : Module._poly_graph_from_json(ctxPtr, ptr, bytes.length, err)) }
       finally { cleanup() }

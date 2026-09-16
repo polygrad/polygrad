@@ -62,7 +62,7 @@ function createNativeCore(device) {
     if (name) ops[name] = i
   }
 
-  const EXPECTED_ABI = 90
+  const EXPECTED_ABI = 91
   const abi = binding.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(
@@ -73,6 +73,7 @@ function createNativeCore(device) {
 
   const model = {
     compose(ctxPtr, json, family) {
+      if (family === 'Llama') return binding.poly_llama_from_json(ctxPtr, json)
       return family === 'Sequential' ? binding.poly_sequential_from_json(ctxPtr, json)
         : binding.poly_graph_from_json(ctxPtr, json)
     },
