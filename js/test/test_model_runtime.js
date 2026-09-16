@@ -1141,10 +1141,13 @@ async function checkRuntimeImports(pg, Model, createRuntime) {
     const runtime = await createRuntime()
     const held = new runtime.Tensor([19], {dtype:'float32'})
     try {
-      assertClose(await held.toArrayAsync(), [19], 0)
+      // Readback creates a GC-owned contiguous wrapper. Do not include that
+      // temporary in this import-lifetime baseline; check held's value below.
+      await held.realizeAsync()
       runtime.clearScheduleCache(); runtime.collect()
       const fields = ['bufferOwnedBytes', 'bufferEntries', 'tensorRecords']
       const baseline = runtime.stats().coreStats
+      assert(baseline.tensorRecords === 1, 'baseline must contain only the held Tensor')
       for (let i = 0; i < 8; i++) {
         const loaded = runtime.Model.load(bytes)
         try {

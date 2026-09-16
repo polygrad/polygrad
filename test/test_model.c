@@ -30,6 +30,39 @@
 
 static int test_find_model_buf(PolyModel *inst, const char *name);
 
+TEST(model, portable_factory_allocates_only_active_binding_storage) {
+  PolyCtx *ctx = poly_ctx_new();
+  poly_ctx_set_preferred_device(ctx, POLY_DEVICE_CPU);
+  MLPConfig cfg = poly_mlp_config_default();
+  cfg.layers[0] = 16;
+  cfg.layers[1] = 32;
+  cfg.layers[2] = 4;
+  cfg.n_layers = 3;
+  cfg.loss = "none";
+  PolyModel *model = poly_mlp_into(ctx, &cfg, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(model);
+  poly_ctx_collect(ctx);
+  uint64_t binding_bytes = 0;
+  for (int i = 0; i < poly_model_buf_count(model); i++) {
+    int64_t shape[POLY_MAX_DIMS];
+    int ndim = poly_model_buf_shape(model, i, shape, POLY_MAX_DIMS);
+    ASSERT_TRUE(ndim >= 0);
+    int64_t numel = 1;
+    for (int j = 0; j < ndim; j++)
+      numel *= shape[j];
+    /* This factory uses F32 and has no tied names. Portable identities must
+     * not each retain a second, unused host allocation after activation. */
+    binding_bytes += (uint64_t)numel * sizeof(float);
+  }
+  uint64_t resident_bytes = poly_ctx_mem_used_for_device(ctx, POLY_DEVICE_CPU);
+  poly_model_free(model);
+  poly_ctx_collect(ctx);
+  ASSERT_INT_EQ(ctx->mem_used, 0);
+  poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(resident_bytes, binding_bytes);
+  PASS();
+}
+
 TEST(model, capture_restores_author_and_retains_explicit_effects) {
   PolyCtx *ctx = poly_ctx_new();
   poly_ctx_set_preferred_device(ctx, POLY_DEVICE_INTERP);

@@ -541,9 +541,11 @@ static PolyModel *model_from_spec(
     PolyIrSpec *spec,
     PolyUOp **physical_buffers,
     PolyUOp **physical_sinks,
+    PolyDevice initial_device,
     bool owns_ctx,
     bool free_spec
 );
+static PolyUOp *model_binding_on_device(PolyCtx *ctx, PolyUOp *logical, PolyDevice device);
 
 static const char *model_stage_name(PolyModelStage stage) {
   switch (stage) {
@@ -1805,7 +1807,9 @@ PolyStatus poly_model_build(PolyModel *inst, PolyModelError *err) {
       .entrypoints = eps,
       .n_entrypoints = build->n_entrypoints,
   };
-  PolyModel *built = model_from_spec(&spec, NULL, NULL, false, false);
+  PolyDevice default_device = poly_ctx_get_preferred_device(inst->ctx);
+  if (!poly_device_can_execute(default_device)) default_device = poly_device_default();
+  PolyModel *built = model_from_spec(&spec, NULL, NULL, default_device, false, false);
   free(bufs);
   free(eps);
   if (!built) {
@@ -1820,8 +1824,6 @@ PolyStatus poly_model_build(PolyModel *inst, PolyModelError *err) {
     goto fail;
   }
   release_build_named_value_snapshots(inst->ctx, build);
-  PolyDevice default_device = poly_ctx_get_preferred_device(inst->ctx);
-  if (!poly_device_can_execute(default_device)) default_device = poly_device_default();
   if (poly_model_set_device(built, default_device) != 0) {
     poly_model_free(built);
     poly_model_set_error(inst, POLY_STATUS_ERROR, __func__, "default placement failed");
@@ -2171,6 +2173,7 @@ static PolyModel *model_from_spec(
     PolyIrSpec *spec,
     PolyUOp **physical_buffers,
     PolyUOp **physical_sinks,
+    PolyDevice initial_device,
     bool owns_ctx,
     bool free_spec
 ) {
@@ -2186,6 +2189,8 @@ static PolyModel *model_from_spec(
   inst->stage = POLY_MODEL_BUILT;
   inst->has_physical_capture = physical_buffers && physical_sinks;
   if ((physical_buffers != NULL) != (physical_sinks != NULL)) goto fail;
+  if (initial_device == POLY_DEVICE_AUTO) initial_device = poly_ctx_get_preferred_device(spec->ctx);
+  if (initial_device == POLY_DEVICE_AUTO) initial_device = poly_device_default();
   if (inst->has_physical_capture) {
     for (int i = 0; i < spec->n_bufs; i++)
       if (!physical_buffers[i]) goto fail;
@@ -2266,7 +2271,15 @@ static PolyModel *model_from_spec(
         inst->has_physical_capture
             ? physical_buffers[i]
             : (alias >= 0 ? inst->bufs[alias].capture_buffer : inst->bufs[i].logical_buffer);
-    inst->bufs[i].buffer = inst->bufs[i].capture_buffer;
+    /* Portable identities describe placement substitutions, not a second copy
+     * of state. Allocate initial bytes on the eventual physical binding; the
+     * caller still places the logical entrypoints before exposing this Model.
+     * Bound captures keep their exact original storage and graphs. */
+    inst->bufs[i].buffer =
+        inst->has_physical_capture
+            ? inst->bufs[i].capture_buffer
+            : model_binding_on_device(spec->ctx, inst->bufs[i].logical_buffer, initial_device);
+    if (!inst->bufs[i].buffer) goto fail;
     inst->bufs[i].ndim = spec->bufs[i].ndim;
     memcpy(inst->bufs[i].shape, spec->bufs[i].shape, spec->bufs[i].ndim * sizeof(int64_t));
     inst->bufs[i].numel = numel;
@@ -2626,9 +2639,8 @@ static int model_initialize_closed_computed_state(PolyModel *inst, PolyDevice de
   for (int i = 0; i < n_init; i++) {
     NamedBuf *binding = &inst->bufs[binding_indices[i]];
     size_t nbytes = named_buf_nbytes(binding);
-    if (nbytes > 0 &&
-        (poly_buffer_read(inst->ctx, realized[i], binding->data, nbytes) != 0 ||
-         poly_buffer_write(inst->ctx, binding->logical_buffer, binding->data, nbytes) != 0))
+    if (nbytes > 0 && (poly_buffer_read(inst->ctx, realized[i], binding->data, nbytes) != 0 ||
+                       poly_buffer_write(inst->ctx, binding->buffer, binding->data, nbytes) != 0))
       goto cleanup;
   }
   rc = 0;
@@ -2664,7 +2676,7 @@ static PolyModel *model_import_ir(
     return NULL;
   }
 
-  PolyModel *inst = model_from_spec(&spec, NULL, NULL, ctx == NULL, true);
+  PolyModel *inst = model_from_spec(&spec, NULL, NULL, device, ctx == NULL, true);
   if (!inst) return NULL;
   if (device == POLY_DEVICE_AUTO) device = poly_ctx_get_preferred_device(inst->ctx);
 
@@ -2801,7 +2813,7 @@ static PolyModel *model_from_named_sinks(
       .entrypoints = eps,
       .n_entrypoints = n_sinks,
   };
-  PolyModel *inst = model_from_spec(&spec, NULL, NULL, false, false);
+  PolyModel *inst = model_from_spec(&spec, NULL, NULL, POLY_DEVICE_AUTO, false, false);
   if (inst) {
     for (int i = 0; i < inst->n_bufs; i++) {
       PolyUOp *source = bufs[i].buffer;
@@ -3730,7 +3742,8 @@ PolyModel *poly_model_from_program(
   /* Bound import is Polygrad's approved export boundary. As current Tinygrad
    * PROGRAM replay does, retain the exact LINEAR buffer operands
    * (engine/realize.py:263-319); portable placement never consumes them. */
-  PolyModel *inst = model_from_spec(&spec, physical_buffers, physical_sinks, true, true);
+  PolyModel *inst =
+      model_from_spec(&spec, physical_buffers, physical_sinks, POLY_DEVICE_AUTO, true, true);
   free(physical_buffers);
   free(physical_sinks);
   if (!inst) return NULL;
