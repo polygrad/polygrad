@@ -458,6 +458,15 @@ function createBoundTensorClass(runtime) {
     release()
     return undefined
   }
+  function releaseReadbackTensors(owned) {
+    // Readback owns these wrappers, never its inputs. Async callers stay inside
+    // their lease and finish all awaited reads before releasing here: enqueueing
+    // disposal onto that same queue and awaiting it would deadlock.
+    for (let i = owned.length - 1; i >= 0; i--) {
+      const tensor = owned[i]._takeCoreTensor()
+      if (tensor) ffi.poly_tensor_release(tensor)
+    }
+  }
   const uopKey = (uop) => {
     if (!uop) return '0'
     if (ffi.poly_uop_key) return String(ffi.poly_uop_key(uop))
@@ -1139,6 +1148,26 @@ function createBoundTensorClass(runtime) {
       return new AT(raw.buffer, raw.byteOffset, numel)
     }
 
+    _prepareReadback(owned) {
+      if (this.numel() === 0) return this
+      assertJitBufferAccess()
+      const own = t => {
+        if (t !== this && !owned.includes(t)) owned.push(t)
+        return t
+      }
+      let t = this
+      if (this._dtype === 'weakint') t = own(t.cast('int32'))
+      if (this._dtype === 'weakfloat' || this._dtype === 'float16' ||
+          this._dtype === 'bfloat16' || isFp8Dtype(this._dtype)) t = own(t.cast('float32'))
+      t = own(t.contiguous())
+      // Pinned Tensor._buffer clones device-free sources for host readback;
+      // the input wrapper's logical and physical roots remain unchanged.
+      if (Number(ffi.poly_uop_device(this._currentUopRaw())) === deviceId('auto')) {
+        t = own(t.clone('cpu'))
+      }
+      return t
+    }
+
     toArray() {
       requireSyncHostBridge('toArray()', 'toArrayAsync()')
       const numel = this.numel()
@@ -1146,19 +1175,12 @@ function createBoundTensorClass(runtime) {
         const AT = TA_BY_DTYPE[this._dtype] || Float32Array
         return new AT(0)
       }
-      assertJitBufferAccess()
-      let t = this
-      if (this._dtype === 'weakint') t = t.cast('int32')
-      if (this._dtype === 'weakfloat' || this._dtype === 'float16' ||
-          this._dtype === 'bfloat16' || isFp8Dtype(this._dtype)) t = t.cast('float32')
-      t = t.contiguous()
-      // Pinned tensor.py:259-266 clones a device-free source to CPU for
-      // readback. Wrapper device metadata is not executable UOp placement.
-      if (Number(ffi.poly_uop_device(this._currentUopRaw())) === deviceId('auto')) {
-        t = t.clone('cpu')
-      }
-      t.realize()
-      return t._readBufferBytes()
+      const owned = []
+      try {
+        const t = this._prepareReadback(owned)
+        t.realize()
+        return t._readBufferBytes()
+      } finally { releaseReadbackTensors(owned) }
     }
 
     async _toArrayAsyncUnleased() {
@@ -1167,17 +1189,12 @@ function createBoundTensorClass(runtime) {
         const AT = TA_BY_DTYPE[this._dtype] || Float32Array
         return new AT(0)
       }
-      assertJitBufferAccess()
-      let t = this
-      if (this._dtype === 'weakint') t = t.cast('int32')
-      if (this._dtype === 'weakfloat' || this._dtype === 'float16' ||
-          this._dtype === 'bfloat16' || isFp8Dtype(this._dtype)) t = t.cast('float32')
-      t = t.contiguous()
-      if (Number(ffi.poly_uop_device(this._currentUopRaw())) === deviceId('auto')) {
-        t = t.clone('cpu')
-      }
-      await t._realizeAsyncUnleased()
-      return await t._readBufferBytesAsync()
+      const owned = []
+      try {
+        const t = this._prepareReadback(owned)
+        await t._realizeAsyncUnleased()
+        return await t._readBufferBytesAsync()
+      } finally { releaseReadbackTensors(owned) }
     }
 
     toArrayAsync() {
@@ -1200,29 +1217,22 @@ function createBoundTensorClass(runtime) {
         if (!(t instanceof Tensor)) throw new TypeError('Tensor.toTypedArrays expects Tensor arguments')
       }
       requireSyncHostBridge('Tensor.toTypedArrays()', 'Tensor.toTypedArraysAsync()')
-      const prepared = tensors.map(t => {
-        if (t.numel() === 0) return t
-        let out = t
-        if (out._dtype === 'float16' || out._dtype === 'bfloat16' || isFp8Dtype(out._dtype))
-          out = out.cast('float32')
-        out = out.contiguous()
-        if (Number(ffi.poly_uop_device(t._currentUopRaw())) === deviceId('auto')) {
-          out = out.clone('cpu')
+      const owned = []
+      try {
+        const prepared = tensors.map(t => t._prepareReadback(owned))
+        const targets = prepared.filter(t => t.numel() !== 0)
+        if (targets.length) targets[0].realize(...targets.slice(1))
+        const out = []
+        for (const t of prepared) {
+          if (t.numel() === 0) {
+            const AT = TA_BY_DTYPE[t._dtype] || Float32Array
+            out.push(new AT(0))
+          } else {
+            out.push(t._readBufferBytes())
+          }
         }
         return out
-      })
-      const targets = prepared.filter(t => t.numel() !== 0)
-      if (targets.length) targets[0].realize(...targets.slice(1))
-      const out = []
-      for (const t of prepared) {
-        if (t.numel() === 0) {
-          const AT = TA_BY_DTYPE[t._dtype] || Float32Array
-          out.push(new AT(0))
-        } else {
-          out.push(t._readBufferBytes())
-        }
-      }
-      return out
+      } finally { releaseReadbackTensors(owned) }
     }
 
     static async toTypedArraysAsync(...tensors) {
@@ -1236,29 +1246,22 @@ function createBoundTensorClass(runtime) {
         if (t._rt !== rt) throw new Error('Tensor.toTypedArraysAsync tensors must share a runtime')
       }
       return rt._withAsync(async () => {
-        const prepared = tensors.map(t => {
-          if (t.numel() === 0) return t
-          let out = t
-          if (out._dtype === 'float16' || out._dtype === 'bfloat16' || isFp8Dtype(out._dtype))
-            out = out.cast('float32')
-          out = out.contiguous()
-          if (Number(ffi.poly_uop_device(t._currentUopRaw())) === deviceId('auto')) {
-            out = out.clone('cpu')
+        const owned = []
+        try {
+          const prepared = tensors.map(t => t._prepareReadback(owned))
+          const targets = prepared.filter(t => t.numel() !== 0)
+          if (targets.length) await targets[0]._realizeAsyncUnleased(...targets.slice(1))
+          const out = []
+          for (const t of prepared) {
+            if (t.numel() === 0) {
+              const AT = TA_BY_DTYPE[t._dtype] || Float32Array
+              out.push(new AT(0))
+            } else {
+              out.push(await t._readBufferBytesAsync())
+            }
           }
           return out
-        })
-        const targets = prepared.filter(t => t.numel() !== 0)
-        if (targets.length) await targets[0]._realizeAsyncUnleased(...targets.slice(1))
-        const out = []
-        for (const t of prepared) {
-          if (t.numel() === 0) {
-            const AT = TA_BY_DTYPE[t._dtype] || Float32Array
-            out.push(new AT(0))
-          } else {
-            out.push(await t._readBufferBytesAsync())
-          }
-        }
-        return out
+        } finally { releaseReadbackTensors(owned) }
       })
     }
 

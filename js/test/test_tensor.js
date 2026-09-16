@@ -698,6 +698,63 @@ async function runTensorTests(pg, createRuntime) {
     assertClose(await t.toArray(), [1, 2, 3])
   })
 
+  for (const mode of ['single', 'batch', 'singleAsync', 'batchAsync']) {
+    await testIf(pg.device !== 'webgpu' || mode.endsWith('Async'),
+      `readback temporaries retire before return ${mode}`, isolatedRuntime(async pg => {
+      const halfSource = new pg.Tensor(new Float32Array([3, 4]))
+      // Native/Wasm cover the host-conversion cast. WebGPU devices need not
+      // support shader-f16; still exercise owned contiguous/readback buffers.
+      const inputs = [new pg.Tensor(new Float32Array([1, 2])),
+        halfSource.cast(pg.device === 'webgpu' ? 'int32' : 'float16')]
+      const read = async () => mode === 'single' ? inputs.map(t => t.toArray())
+        : mode === 'batch' ? pg.Tensor.toTypedArrays(inputs)
+        : mode === 'singleAsync' ? [await inputs[0].toArrayAsync(), await inputs[1].toArrayAsync()]
+        : pg.Tensor.toTypedArraysAsync(inputs)
+      // Finish constructor/realization-owned C temporaries before measuring
+      // only the additional wrappers produced by readback.
+      await halfSource.realizeAsync()
+      for (const t of inputs) await t.realizeAsync()
+      pg.collect()
+      const baseline = pg.stats().coreStats.tensorRecords
+      const checkOwners = () => assert(pg.stats().coreStats.tensorRecords === baseline,
+        `readback retained temporary owners: ${baseline} -> ${pg.stats().coreStats.tensorRecords}`)
+      const proto = pg.Tensor.prototype
+      const method = mode.endsWith('Async') ? '_readBufferBytesAsync' : '_readBufferBytes'
+      const original = proto[method]
+      let outputs
+      try {
+        for (let i = 0; i < 3; i++) {
+          outputs = await read()
+          assertClose(outputs[0], [1, 2]); assertClose(outputs[1], [3, 4])
+          checkOwners()
+        }
+        proto[method] = () => { throw new Error('injected readback failure') }
+        let error
+        try { await read() } catch (e) { error = e }
+        assert(error && /injected readback failure/.test(error.message))
+        checkOwners()
+        proto[method] = original
+        // A later preparation failure must also retire earlier batch owners.
+        if (mode.startsWith('batch')) {
+          const prepare = inputs[1]._prepareReadback
+          inputs[1]._prepareReadback = () => { throw new Error('injected preparation failure') }
+          try {
+            error = null
+            try { await read() } catch (e) { error = e }
+            assert(error && /injected preparation failure/.test(error.message))
+            checkOwners()
+          } finally { inputs[1]._prepareReadback = prepare }
+        }
+      } finally {
+        proto[method] = original
+        for (const t of inputs) await t.dispose()
+        await halfSource.dispose()
+      }
+      pg.collect()
+      assertClose(outputs[0], [1, 2]); assertClose(outputs[1], [3, 4])
+    }))
+  }
+
   await test('readback copy has no retained host shadow', isolatedRuntime(async pg => {
     const value = pg.Tensor.arange(4).cast('float32').add(1).contiguous()
     await value.realize()
