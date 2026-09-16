@@ -43,6 +43,41 @@ def make_safetensors(tensors):
     return result
 
 
+@pytest.mark.parametrize('storage', [bytes, bytearray, memoryview])
+def test_hf_borrows_immutable_shards_only_during_import(monkeypatch, storage):
+    import polygrad as pg
+    import polygrad.hf as hf
+    from types import SimpleNamespace
+
+    case = LLAMA_CASES[-1]
+    weights = llama_weights(case)
+    raw = make_safetensors({k: ('F32', v.shape, v) for k, v in weights.items()})
+    shard = storage(raw)
+    expected_address = ctypes.cast(ctypes.c_char_p(raw), ctypes.c_void_p).value
+    lib = hf._get_lib()
+    addresses = []
+
+    def load(*args):
+        addresses.append(ctypes.cast(args[3][0], ctypes.c_void_p).value)
+        assert ctypes.string_at(args[3][0], args[4][0]) == raw
+        return lib.poly_hf_load_into(*args)
+
+    monkeypatch.setattr(hf, '_get_lib', lambda: SimpleNamespace(
+        poly_hf_load_into=load, poly_import_last_error_message=lib.poly_import_last_error_message))
+    with pg.create(device='cpu') as rt:
+        model = load_hf_bytes(json.dumps(case['config']), [shard], max_seq_len=3, runtime=rt)
+        try:
+            if storage is bytes:
+                assert addresses == [expected_address], 'immutable shard was copied at the FFI boundary'
+            if storage is bytearray:
+                shard[:] = bytes(len(shard))
+            del shard
+            actual = model.forward(tokens=np.array(case['tokens'], np.int32))['logits']
+            np.testing.assert_allclose(actual.reshape(-1), case['logits'], atol=2e-5, rtol=2e-5)
+        finally:
+            model.dispose()
+
+
 GPT2_TINY_CONFIG = json.dumps({
     'model_type': 'gpt2',
     'vocab_size': 32,

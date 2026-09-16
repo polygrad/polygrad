@@ -208,11 +208,14 @@ def _load_from_bytes(config_bytes, weight_data_list, max_batch, max_seq_len, dev
     # Create ctypes arrays for weight files
     file_ptrs = (_u8p * n_files)()
     file_lens = (ctypes.c_int64 * n_files)()
-    # Keep references to prevent GC
+    # C reads shards synchronously and copies decoded state into the Model.
+    # Keep immutable bytes alive without duplicating whole checkpoint files;
+    # mutable buffers still need a snapshot while ctypes releases the GIL.
     bufs = []
 
     for i, data in enumerate(weight_data_list):
-        buf = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
+        buf = (ctypes.c_char_p(data) if isinstance(data, bytes)
+               else (ctypes.c_uint8 * len(data)).from_buffer_copy(data))
         bufs.append(buf)
         file_ptrs[i] = ctypes.cast(buf, _u8p)
         file_lens[i] = len(data)
