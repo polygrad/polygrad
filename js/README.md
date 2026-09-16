@@ -33,6 +33,10 @@ execution. Authored assignments require auxiliary state (`is_param_(false)`);
 parameter updates belong to the optimizer. Arbitrary JavaScript side effects
 are not rolled back. Saved bundles preserve auxiliary/RNG and optional optimizer
 state; reapply the same optimizer configuration to resume training after loading.
+To replace weights on an existing WebGPU Model, use
+`await model.importWeightsAsync(bytes)`. Replacement reads current device state
+for rollback; the queued call owns a copy of `bytes`. Synchronous backends also
+support `model.importWeights(bytes)`.
 Without a loss, capture uses the current `Tensor.training` mode for its forward
 entrypoint; changing that setting later does not recapture the Model.
 

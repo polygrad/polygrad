@@ -119,20 +119,22 @@ int poly_import_copy_named_tensor(
   int bi = bind_find(idx, dst_name);
   if (bi < 0) return 0; /* not found */
 
-  int64_t dst_numel;
-  float *dst_data = poly_model_buf_data(idx->inst, bi, &dst_numel);
-  if (!dst_data) {
-    /* Check raw data pointer to distinguish alloc failure from sync failure */
-    poly_import_error_set(
-        POLY_IMPORT_ERR_INTERNAL, "buffer '%s' data is NULL (bi=%d, numel=%lld)", dst_name, bi,
-        (long long)dst_numel
-    );
+  size_t dst_bytes = poly_model_buf_nbytes(idx->inst, bi);
+  if (poly_model_buf_dtype_id(idx->inst, bi) != poly_dtype_id_by_name("float32") || !src_data ||
+      !src_shape || src_ndim < 0 || src_ndim > POLY_MAX_DIMS) {
+    poly_import_error_set(POLY_IMPORT_ERR_INTERNAL, "invalid F32 binding data for '%s'", dst_name);
     return -1;
   }
+  int64_t dst_numel = (int64_t)(dst_bytes / sizeof(float));
 
   int64_t src_numel = 1;
-  for (int d = 0; d < src_ndim; d++)
+  for (int d = 0; d < src_ndim; d++) {
+    if (src_shape[d] < 0 || (src_shape[d] && src_numel > INT64_MAX / src_shape[d])) {
+      poly_import_error_set(POLY_IMPORT_ERR_SHAPE_MISMATCH, "invalid shape for '%s'", dst_name);
+      return -1;
+    }
     src_numel *= src_shape[d];
+  }
 
   int64_t dst_shape[8];
   int dst_ndim = poly_model_buf_shape(idx->inst, bi, dst_shape, 8);
@@ -153,16 +155,30 @@ int poly_import_copy_named_tensor(
       );
       return -1;
     }
+    float *dst_data = malloc(dst_bytes ? dst_bytes : 1);
+    if (!dst_data) {
+      poly_import_error_set(
+          POLY_IMPORT_ERR_INTERNAL, "transpose allocation failed for '%s'", dst_name
+      );
+      return -1;
+    }
     int64_t R = src_shape[0], C = src_shape[1];
     for (int64_t r = 0; r < R; r++)
       for (int64_t c = 0; c < C; c++)
         dst_data[c * R + r] = src_data[r * C + c];
-    return 1;
+    int rc = dst_bytes ? poly_model_write_buf(idx->inst, bi, dst_data, dst_bytes) : 0;
+    free(dst_data);
+    if (rc == 0) return 1;
+    poly_import_error_set(POLY_IMPORT_ERR_INTERNAL, "buffer write failed for '%s'", dst_name);
+    return -1;
   }
 
   if (dst_numel <= src_numel) {
-    memcpy(dst_data, src_data, (size_t)dst_numel * sizeof(float));
-    return 1;
+    /* Preserve prefix loading (e.g. a shortened position table), but do not
+     * request a persistent mutable CPU shadow of the destination parameter. */
+    if (!dst_bytes || poly_model_write_buf(idx->inst, bi, src_data, dst_bytes) == 0) return 1;
+    poly_import_error_set(POLY_IMPORT_ERR_INTERNAL, "buffer write failed for '%s'", dst_name);
+    return -1;
   }
 
   poly_import_error_set(

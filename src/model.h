@@ -265,7 +265,9 @@ const char *poly_model_param_name(const PolyModel *inst, int i);
 int poly_model_param_shape(const PolyModel *inst, int i, int64_t *shape_out, int max_dims);
 /* Historical F32-only mutable view. Returns NULL for non-F32 state. */
 float *poly_model_param_data(PolyModel *inst, int i, int64_t *numel_out);
-/* Exact raw scalar-storage bytes in the declared dtype. */
+/* Exact raw scalar-storage bytes in the declared dtype. Requests a host shadow
+ * on devices. Borrowed until disposal/placement; reacquire after any Model
+ * operation that can update storage. Prefer read_buf/write_buf for copied I/O. */
 void *poly_model_param_data_raw(PolyModel *inst, int i, int64_t *numel_out);
 int poly_model_param_dtype_id(const PolyModel *inst, int i);
 size_t poly_model_param_nbytes(const PolyModel *inst, int i);

@@ -2117,8 +2117,20 @@ function createWasmCoreFromModule(Module, device) {
     },
 
     async fromProgramAsync(programBytes, weightsBytes) {
-      if (deviceName === 'webgpu') await ensureWebGPU()
-      return this.fromProgram(programBytes, weightsBytes)
+      if (deviceName !== 'webgpu') return this.fromProgram(programBytes, weightsBytes)
+      await ensureWebGPU()
+      const programPtr = allocBytes(programBytes)
+      let weightsPtr = 0
+      try {
+        if (weightsBytes && weightsBytes.length) weightsPtr = allocBytes(weightsBytes)
+        return await Module.ccall('poly_model_from_program', 'number',
+          ['number', 'number', 'number', 'number'],
+          [programPtr, programBytes.length, weightsPtr, weightsPtr ? weightsBytes.length : 0],
+          { async: true })
+      } finally {
+        Module._free(programPtr)
+        if (weightsPtr) Module._free(weightsPtr)
+      }
     },
 
     async composeAsync(ctxPtr, json, family) {
@@ -2304,10 +2316,18 @@ function createWasmCoreFromModule(Module, device) {
       return bytes
     },
     importWeights(instPtr, bytes) {
+      if (deviceName === 'webgpu' && Module.ccall) {
+        return ensureModelDevice(instPtr).then(async () => {
+          const bytesPtr = allocBytes(bytes)
+          try { return await Module.ccall('poly_model_import_weights', 'number',
+            ['number', 'number', 'number'], [instPtr, bytesPtr, bytes.length],
+            { async: true }) }
+          finally { Module._free(bytesPtr) }
+        })
+      }
       const bytesPtr = allocBytes(bytes)
-      const rc = Module._poly_model_import_weights(instPtr, bytesPtr, bytes.length)
-      Module._free(bytesPtr)
-      return rc
+      try { return Module._poly_model_import_weights(instPtr, bytesPtr, bytes.length) }
+      finally { Module._free(bytesPtr) }
     },
     exportIR(instPtr) {
       const bytesPtr = Module._poly_model_export_ir(instPtr, _scratchLenPtr)

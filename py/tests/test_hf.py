@@ -99,6 +99,32 @@ def llama_weights(case):
             for name, shape in case['weights'].items()}
 
 
+def test_llama_cuda_checkpoint_io_does_not_retain_host_shadows():
+    import polygrad as pg
+    from polygrad import _ffi
+    if not hasattr(_ffi._lib, 'poly_cuda_available') or not _ffi._lib.poly_cuda_available():
+        pytest.skip('poly_cuda_available() is false in the selected library')
+    case = LLAMA_CASES[-1]
+    weights = llama_weights(case)
+    checkpoint = make_safetensors({k: ('F32', v.shape, v) for k, v in weights.items()})
+    with pg.create(device='cuda') as rt, ExitStack() as cleanup:
+        model = load_hf_bytes(json.dumps(case['config']), [checkpoint], max_seq_len=3, runtime=rt)
+        cleanup.callback(model.dispose)
+        rt.collect()
+        assert rt.GlobalCounters.mem_used_per_device.get('CPU', 0) == 0
+        key = 'model.embed_tokens.weight'
+        np.testing.assert_array_equal(model.read_buffer(key), weights[key].reshape(-1))
+        restored = rt.Model.load(model.save(include_optimizer=False))
+        cleanup.callback(restored.dispose)
+        restored.write_buffer('lm_head.weight', np.zeros_like(weights[key]))
+        np.testing.assert_array_equal(restored.read_buffer(key), 0)
+        np.testing.assert_array_equal(model.read_buffer(key), weights[key].reshape(-1))
+        rt.collect()
+        assert rt.GlobalCounters.mem_used_per_device.get('CPU', 0) == 0
+        actual = model.forward(tokens=np.array(case['tokens'], np.int32))['logits']
+        np.testing.assert_allclose(actual.reshape(-1), case['logits'], atol=2e-5, rtol=2e-5)
+
+
 @pytest.mark.parametrize('device', ['cpu', 'interp'])
 @pytest.mark.parametrize('case', LLAMA_CASES, ids=['llama2-gqa', 'llama2-mha', 'llama3', 'llama32-tied'])
 def test_llama_family_reference_and_shared_import(device, case):

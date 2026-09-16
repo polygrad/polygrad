@@ -1010,11 +1010,23 @@ function createBoundModelClass(runtime) {
     }
 
     importWeights(bytes) {
+      this._requireSync('importWeights()', 'importWeightsAsync()')
       const rc = this._rt._core.model.importWeights(
         this._handle,
         normalizeBytes(bytes, 'weights')
       )
       if (rc !== 0) throw new Error(`polygrad: importWeights failed (rc=${rc})`)
+    }
+
+    importWeightsAsync(bytes) {
+      this._requireOpen()
+      // Rollback reads current device state; own the archive until queued work finishes.
+      const copy = new Uint8Array(normalizeBytes(bytes, 'weights'))
+      const run = async () => {
+        const rc = await this._rt._core.model.importWeights(this._handle, copy)
+        if (rc !== 0) throw new Error(`polygrad: importWeights failed (rc=${rc})`)
+      }
+      return this._usesAsyncHostBridge() ? this._enqueueAsync(run) : run()
     }
 
     exportIR() {

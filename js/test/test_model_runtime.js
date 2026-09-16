@@ -57,6 +57,29 @@ async function checkLlamaFamily(pg) {
 const compositionFixture = require('../../test/fixtures/model_definition.json')
 const quantizedFixture = require('../../test/fixtures/gguf_quantized_blocks.json')
 
+async function checkModelCheckpointReplacement(pg) {
+  const model = pg.models.MLP({layers:[2,1],loss:'none',seed:3})
+  try {
+    const name = 'layers.0.weight'
+    const original = await model.readBufferAsync(name)
+    const weights = await model.exportWeightsAsync()
+    await model.writeBufferAsync(name, new Float32Array(original.length))
+    if (pg.device === 'webgpu') {
+      let rejected = false
+      try { model.importWeights(weights) } catch (e) { rejected = /Async/.test(e.message) }
+      assert(rejected, 'synchronous GPU replacement must reject before entering Wasm')
+    }
+    const pending = model.importWeightsAsync(weights)
+    weights.fill(0) // Queued imports own their input bytes.
+    await pending
+    assertClose(await model.readBufferAsync(name), original, 0)
+    let rejected = false
+    try { await model.importWeightsAsync(new Uint8Array([1,2,3])) } catch (_) { rejected = true }
+    assert(rejected, 'malformed checkpoint must reject')
+    assertClose(await model.readBufferAsync(name), original, 0)
+  } finally { await model.dispose() }
+}
+
 async function checkModelStatefulCapture(pg) {
   const gpu = String(pg.device).toLowerCase() === 'webgpu'
   const net = {bn:new pg.nn.BatchNorm(2), forward({x}) { return {prediction:this.bn.call(x)} }}
@@ -1234,6 +1257,7 @@ async function runModelRuntimeTests(pg, createRuntime) {
 
   console.log('\n== Model ==')
 
+  await test('Model checkpoint replacement uses queued readback', () => checkModelCheckpointReplacement(pg))
   await test('Model stateful capture shares train eval state', () => checkModelStatefulCapture(pg))
   await test('Model stateful capture owns resumable RNG', () => checkModelCaptureRng(pg))
   await test('Model stateful capture restores failures and rejects async execution', () => checkModelCaptureFailure(pg))
@@ -2000,6 +2024,7 @@ async function runModelSmokeTests(pg, createRuntime) {
   await test('Model stateful capture owns resumable RNG', () => checkModelCaptureRng(pg))
   await test('Model stateful capture restores failures and rejects async execution', () => checkModelCaptureFailure(pg))
   await test('Model composition factories share C construction', () => checkCompositionFactories(pg))
+  await test('Model checkpoint replacement uses queued readback', () => checkModelCheckpointReplacement(pg))
   await test('Model composition catalogue and named target objective', () => checkCompositionCatalogue(pg))
   await test('Model tied Adam placement freeze and checkpoint', () => checkTiedAdamCheckpoint(pg))
   await test('Model constructor collects object state', () => checkModelConstructor(pg, Model))

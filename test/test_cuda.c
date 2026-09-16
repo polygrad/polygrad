@@ -1693,6 +1693,68 @@ TEST_BACKEND(cuda, instance_cuda_roundtrip) {
   PASS();
 }
 
+TEST_BACKEND(cuda, model_host_storage_is_requested_not_implicit) {
+  SKIP_IF_NO_CUDA();
+  PolyCtx *ctx = poly_ctx_new();
+  poly_ctx_set_preferred_device(ctx, POLY_DEVICE_CUDA);
+  poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_ALWAYS);
+  int64_t shape[] = {4};
+  PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CUDA);
+  PolyTensor *w = poly_tensor_full_float_by_id(
+      ctx, shape, 1, 2, poly_dtype_id_by_name("float32"), POLY_DEVICE_CUDA, true, false
+  );
+  PolyTensor *y = poly_tensor_alu2(ctx, POLY_OP_ADD, x, w);
+  PolyBindingSpec bindings[] = {
+      {"x", POLY_ROLE_INPUT, x, 0},
+      {"w", POLY_ROLE_PARAM, w, 0},
+      {"tied", POLY_ROLE_PARAM, w, 0},
+      {"y", POLY_ROLE_OUTPUT, y, 0}};
+  const char *inputs[] = {"x"}, *outputs[] = {"y"};
+  PolyEntrypointSpec ep = {
+      .name = "forward", .inputs = inputs, .n_inputs = 1, .outputs = outputs, .n_outputs = 1};
+  PolyModel *model = poly_model_from_bindings(ctx, bindings, 4, &ep, 1, NULL, NULL);
+  ASSERT_NOT_NULL(model);
+  poly_tensor_release(y);
+  poly_tensor_release(w);
+  poly_tensor_release(x);
+  poly_ctx_collect(ctx);
+  uint64_t host_after_build = poly_ctx_mem_used_for_device(ctx, POLY_DEVICE_CPU);
+  float data[] = {3, 4, 5, 6}, got[4];
+  ASSERT_INT_EQ(poly_model_read_buf_named(model, "x", got, sizeof(got)), 0);
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(got[i], 0, 0);
+  ASSERT_INT_EQ(poly_model_write_buf_named(model, "w", data, sizeof(data)), 0);
+  ASSERT_INT_EQ(poly_model_read_buf_named(model, "tied", got, sizeof(got)), 0);
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(got[i], data[i], 0);
+  int size = 0;
+  uint8_t *weights = poly_model_export_weights(model, &size);
+  ASSERT_NOT_NULL(weights);
+  ASSERT_INT_EQ(poly_model_import_weights(model, weights, size), 0);
+  free(weights);
+  uint64_t host_after_io = poly_ctx_mem_used_for_device(ctx, POLY_DEVICE_CPU);
+  /* Explicit mutable host access still works and aliases share its storage. */
+  float *raw = poly_model_buf_data_named(model, "w", NULL);
+  ASSERT_NOT_NULL(raw);
+  ASSERT_PTR_EQ(raw, poly_model_buf_data_named(model, "tied", NULL));
+  raw[0] = 9;
+  ASSERT_INT_EQ(poly_model_read_buf_named(model, "w", got, sizeof(got)), 0);
+  ASSERT_FLOAT_EQ(got[0], 9, 0);
+  ASSERT_INT_EQ(poly_model_set_device(model, POLY_DEVICE_CPU), 0);
+  ASSERT_INT_EQ(poly_model_read_buf_named(model, "w", got, sizeof(got)), 0);
+  ASSERT_FLOAT_EQ(got[0], 9, 0);
+  ASSERT_INT_EQ(poly_model_set_device(model, POLY_DEVICE_CUDA), 0);
+  ASSERT_INT_EQ(poly_model_read_buf_named(model, "tied", got, sizeof(got)), 0);
+  ASSERT_FLOAT_EQ(got[0], 9, 0);
+  poly_model_free(model);
+  poly_ctx_collect(ctx);
+  ASSERT_INT_EQ(ctx->mem_used, 0);
+  poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(host_after_build, 0);
+  ASSERT_INT_EQ(host_after_io, 0);
+  PASS();
+}
+
 TEST_BACKEND(cuda, buffer_residency_keeps_single_host_root) {
   SKIP_IF_NO_CUDA();
 

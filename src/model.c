@@ -42,7 +42,6 @@ typedef struct {
   int64_t current_shape[POLY_IR_MAX_DIMS]; /* last successful invocation, not capacity */
   bool dynamic;
   int ndim;
-  void *data; /* non-owning cached host-root pointer */
   int64_t numel;
   bool trainable; /* PARAMs can be frozen while still saved as weights */
 } NamedBuf;
@@ -120,6 +119,37 @@ static bool named_buf_nbytes_checked(const NamedBuf *b, size_t *out) {
 static size_t named_buf_nbytes(const NamedBuf *b) {
   size_t out = 0;
   return named_buf_nbytes_checked(b, &out) ? out : 0;
+}
+
+/* Model's zero-initialized ABI storage is an extension. Allocate it on the
+ * physical device (Tinygrad Buffer.allocate), without a permanent CPU shadow.
+ * Existing captured storage must neither be zeroed nor read back here. */
+static int model_allocate_binding(PolyCtx *ctx, PolyUOp *buffer, size_t nbytes, bool zero) {
+  if (!nbytes) return 0;
+  PolyBuffer *existing = poly_buffer_get(ctx, buffer);
+  if (existing) return existing->nbytes >= nbytes ? 0 : -1;
+  PolyDevice device = poly_uop_device(buffer);
+  if (poly_device_is_host_addressable(device))
+    return poly_buffer_alloc_owned_host(ctx, buffer, nbytes, zero, NULL);
+  if (poly_buffer_ensure_device_allocated(ctx, buffer, device) != 0) return -1;
+  if (!zero) return 0;
+  void *initial = calloc(1, nbytes);
+  if (!initial) return -1;
+  int rc = poly_buffer_write(ctx, buffer, initial, nbytes);
+  free(initial);
+  return rc;
+}
+
+/* Staging belongs to this copy, not either binding. In particular, copying
+ * into a placement candidate must not attach a host mirror to the old owner. */
+static int model_copy_binding(PolyCtx *ctx, PolyUOp *dst, PolyUOp *src, size_t nbytes) {
+  if (!nbytes || dst == src) return 0;
+  void *data = malloc(nbytes);
+  if (!data) return -1;
+  int rc = poly_buffer_read(ctx, src, data, nbytes);
+  if (rc == 0) rc = poly_buffer_write(ctx, dst, data, nbytes);
+  free(data);
+  return rc;
 }
 
 typedef struct {
@@ -947,9 +977,7 @@ static int copy_initial_buffer_data(
     PolyBuffer *src = poly_buffer_get(ctx, source);
     size_t nbytes = named_buf_nbytes(&inst->bufs[i]);
     if (!src || !src->ptr || src->nbytes < nbytes || nbytes == 0) continue;
-    if (poly_buffer_read(ctx, source, inst->bufs[i].data, nbytes) != 0 && src->valid &&
-        poly_device_is_host_addressable(src->device))
-      memcpy(inst->bufs[i].data, src->ptr, nbytes);
+    if (model_copy_binding(ctx, inst->bufs[i].buffer, source, nbytes) != 0) return -1;
   }
   return 0;
 }
@@ -2303,25 +2331,17 @@ static PolyModel *model_from_spec(
     }
 
     /* Alias names share the same ctx-owned residency. */
-    void *shared = NULL;
-    if (alias >= 0) shared = inst->bufs[alias].data;
-    if (shared) {
-      inst->bufs[i].data = shared;
-    } else {
+    if (alias < 0) {
       size_t nbytes = 0;
-      PolyBuffer *host = NULL;
       if (!named_buf_nbytes_checked(&inst->bufs[i], &nbytes)) goto fail;
-      if (nbytes > 0 &&
-          poly_buffer_alloc_owned_host(spec->ctx, inst->bufs[i].buffer, nbytes, true, &host) != 0) {
+      if (model_allocate_binding(spec->ctx, inst->bufs[i].buffer, nbytes, true) != 0) {
         fprintf(
-            stderr,
-            "poly_model: host buffer allocation FAILED for '%s' (%lld elements = %lld MB)\n",
+            stderr, "poly_model: buffer allocation FAILED for '%s' (%lld elements = %lld MB)\n",
             spec->bufs[i].name ? spec->bufs[i].name : "?", (long long)inst->bufs[i].numel,
             (long long)(nbytes / 1024 / 1024)
         );
         goto fail;
       }
-      inst->bufs[i].data = host ? host->ptr : NULL;
     }
     if (spec->bufs[i].role == POLY_ROLE_PARAM) {
       n_params++;
@@ -2639,9 +2659,7 @@ static int model_initialize_closed_computed_state(PolyModel *inst, PolyDevice de
   for (int i = 0; i < n_init; i++) {
     NamedBuf *binding = &inst->bufs[binding_indices[i]];
     size_t nbytes = named_buf_nbytes(binding);
-    if (nbytes > 0 && (poly_buffer_read(inst->ctx, realized[i], binding->data, nbytes) != 0 ||
-                       poly_buffer_write(inst->ctx, binding->buffer, binding->data, nbytes) != 0))
-      goto cleanup;
+    if (model_copy_binding(inst->ctx, binding->buffer, realized[i], nbytes) != 0) goto cleanup;
   }
   rc = 0;
 
@@ -2820,21 +2838,17 @@ static PolyModel *model_from_named_sinks(
       PolyBuffer *src = poly_buffer_get(ctx, source);
       size_t nbytes = named_buf_nbytes(&inst->bufs[i]);
       if (!src || !src->ptr || src->nbytes < nbytes || nbytes == 0) continue;
-      /* Models own host-side ABI storage, but the source tensor may already
-       * live in a backend-specific residency (WASM heap, CUDA, WebGPU, etc.).
-       * `valid` only describes the host shadow freshness; backend copyout can
-       * still read the current residency, so do not reject invalid host shadows.
-       * Fall back to direct copy only for valid legacy host buffers whose
-       * allocator cannot service copyout. */
-      if (poly_buffer_read(ctx, source, inst->bufs[i].data, nbytes) != 0 && src->valid &&
-          poly_device_is_host_addressable(src->device))
-        memcpy(inst->bufs[i].data, src->ptr, nbytes);
+      if (model_copy_binding(ctx, inst->bufs[i].buffer, source, nbytes) != 0) {
+        poly_model_free(inst);
+        inst = NULL;
+        break;
+      }
     }
     /* Approved Model boundary: registry sinks are portable logical roots.
      * Activate them before exposing the Model so create_linear_with_vars
      * receives device-bound BUFFER arguments, as in Tinygrad 2026-08-22
      * uop/ops.py:814-816 and schedule/__init__.py:181-209. */
-    if (poly_model_set_device(inst, POLY_DEVICE_AUTO) != 0) {
+    if (inst && poly_model_set_device(inst, POLY_DEVICE_AUTO) != 0) {
       poly_model_free(inst);
       inst = NULL;
     }
@@ -2999,16 +3013,16 @@ int poly_model_param_shape(const PolyModel *inst, int i, int64_t *shape_out, int
   return b->ndim;
 }
 
-/* Sync device buffer to host shadow if on a non-host domain.
- * Returns 0 on success or if already on host; -1 on readback failure. */
-static int sync_buf_to_host(PolyModel *inst, int bi) {
-  if (!inst || bi < 0 || bi >= inst->n_bufs) return -1;
+/* Only explicit raw-pointer access requests a persistent host shadow.
+ * Callers must reacquire borrowed pointers after execution or placement. */
+static void *model_host_data(PolyModel *inst, int bi) {
+  if (!inst || bi < 0 || bi >= inst->n_bufs) return NULL;
   PolyBuffer *host = NULL;
   if (poly_buffer_ensure_host_current(inst->ctx, inst->bufs[bi].buffer, &host) != 0 || !host ||
       !host->ptr)
-    return -1;
-  inst->bufs[bi].data = host->ptr;
-  return 0;
+    return NULL;
+  if (poly_buffer_mark_host_written(inst->ctx, inst->bufs[bi].buffer) != 0) return NULL;
+  return host->ptr;
 }
 
 #ifdef POLY_TESTING
@@ -3072,12 +3086,10 @@ static int append_runtime_named_buffer(
   nb.trainable = trainable;
 
   size_t nbytes = named_buf_nbytes(&nb);
-  PolyBuffer *host = NULL;
-  if (nbytes > 0 && poly_buffer_alloc_owned_host(inst->ctx, buffer, nbytes, zero, &host) != 0) {
+  if (model_allocate_binding(inst->ctx, buffer, nbytes, zero) != 0) {
     free(nb.name);
     return -1;
   }
-  nb.data = host ? host->ptr : NULL;
 
   int idx = inst->n_bufs++;
   inst->bufs[idx] = nb;
@@ -3138,7 +3150,6 @@ static int ensure_optimizer_state_buffer(
   if (init_scalar) {
     if (numel != 1 || poly_buffer_write(inst->ctx, buf, &scalar_value, sizeof(float)) != 0)
       return -1;
-    if (sync_buf_to_host(inst, bi) != 0) return -1;
   }
   if (out) *out = buf;
   return 0;
@@ -3156,9 +3167,7 @@ void *poly_model_param_data_raw(PolyModel *inst, int i, int64_t *numel_out) {
   if (!inst || i < 0 || i >= inst->n_params) return NULL;
   int bi = inst->param_indices[i];
   if (numel_out) *numel_out = inst->bufs[bi].numel;
-  if (sync_buf_to_host(inst, bi) != 0) return NULL;
-  if (poly_buffer_mark_host_written(inst->ctx, inst->bufs[bi].buffer) != 0) return NULL;
-  return inst->bufs[bi].data;
+  return model_host_data(inst, bi);
 }
 
 float *poly_model_param_data(PolyModel *inst, int i, int64_t *numel_out) {
@@ -3306,9 +3315,7 @@ int poly_model_buf_shape_bounds(
 void *poly_model_buf_data_raw(PolyModel *inst, int i, int64_t *numel_out) {
   if (!inst || i < 0 || i >= inst->n_bufs) return NULL;
   if (numel_out) *numel_out = inst->bufs[i].numel;
-  if (sync_buf_to_host(inst, i) != 0) return NULL;
-  if (poly_buffer_mark_host_written(inst->ctx, inst->bufs[i].buffer) != 0) return NULL;
-  return inst->bufs[i].data;
+  return model_host_data(inst, i);
 }
 
 float *poly_model_buf_data(PolyModel *inst, int i, int64_t *numel_out) {
@@ -3336,9 +3343,7 @@ int poly_model_read_buf(PolyModel *inst, int i, void *host_dst, size_t dst_len) 
 
 int poly_model_write_buf(PolyModel *inst, int i, const void *host_src, size_t src_len) {
   if (!inst || i < 0 || i >= inst->n_bufs) return -1;
-  int rc = poly_buffer_write(inst->ctx, inst->bufs[i].buffer, host_src, src_len);
-  if (rc == 0) sync_buf_to_host(inst, i);
-  return rc;
+  return poly_buffer_write(inst->ctx, inst->bufs[i].buffer, host_src, src_len);
 }
 
 int poly_model_read_buf_named(PolyModel *inst, const char *name, void *host_dst, size_t dst_len) {
@@ -3391,28 +3396,46 @@ uint8_t *poly_model_export_weights_ex(PolyModel *inst, int *out_len, uint32_t fl
 
   PolySafetensorEntry *entries = calloc((size_t)n_export, sizeof(PolySafetensorEntry));
   if (!entries) return NULL;
+  void **staging = calloc((size_t)n_export, sizeof(*staging));
+  if (!staging) {
+    free(entries);
+    return NULL;
+  }
+  uint8_t *bytes = NULL;
   int ei = 0;
   for (int i = 0; i < inst->n_bufs; i++) {
     NamedBuf *b = &inst->bufs[i];
     if (!should_export_weight_buf_flags(b, flags)) continue;
-    if (sync_buf_to_host(inst, i) != 0) {
-      free(entries);
-      return NULL;
-    }
     entries[ei].name = b->name;
     PolySafetensorDType dtype;
     if (!b->buffer || !model_safetensor_dtype(b->buffer->dtype, &dtype)) {
-      free(entries);
-      return NULL;
+      goto cleanup;
     }
-    entries[ei].data = b->data;
+    size_t nbytes = named_buf_nbytes(b);
+    PolyBuffer *storage = poly_buffer_get(inst->ctx, b->buffer);
+    /* Encoding is synchronous and the Model retains these buffers. Borrow
+     * already-current host storage; only device readback needs staging. This
+     * avoids adding a whole-model copy to CPU checkpoint export. */
+    if (storage && !storage->base && storage->valid && storage->ptr && storage->nbytes >= nbytes &&
+        poly_device_is_host_addressable(storage->device)) {
+      entries[ei].data = storage->ptr;
+    } else {
+      staging[ei] = malloc(nbytes ? nbytes : 1);
+      if (!staging[ei]) goto cleanup;
+      entries[ei].data = staging[ei];
+      if (nbytes && poly_buffer_read(inst->ctx, b->buffer, staging[ei], nbytes) != 0) goto cleanup;
+    }
     entries[ei].shape = b->shape;
     entries[ei].ndim = b->ndim;
     entries[ei].dtype = dtype;
     ei++;
   }
 
-  uint8_t *bytes = poly_safetensors_encode(entries, n_export, NULL, out_len);
+  bytes = poly_safetensors_encode(entries, n_export, NULL, out_len);
+cleanup:
+  for (int i = 0; i < n_export; i++)
+    free(staging[i]);
+  free(staging);
   free(entries);
   return bytes;
 }
@@ -3500,7 +3523,6 @@ int poly_model_import_weights(PolyModel *inst, const uint8_t *data, int len) {
         );
   }
   for (int i = 0; i < n_undo; i++) {
-    (void)sync_buf_to_host(inst, undo[i].bi);
     free(undo[i].before);
   }
   free(undo);
@@ -3936,13 +3958,12 @@ static int model_publish_placement(
   if (!inst || !target_bindings || !placed_roots) return -1;
   size_t nb = (size_t)(unsigned)inst->n_bufs;
   size_t ne = (size_t)(unsigned)inst->n_entrypoints;
-  void **target_data = calloc(nb, sizeof(*target_data));
   uint8_t *target_existed = calloc(nb, sizeof(*target_existed));
   NamedBuf *candidate_bufs = malloc(nb * sizeof(*candidate_bufs));
   RuntimeEntrypoint *candidate_entrypoints = malloc(ne * sizeof(*candidate_entrypoints));
   ModelResidencyRoots prepared_roots = {0};
   int rc = -1;
-  if (!target_data || !target_existed || !candidate_bufs || !candidate_entrypoints) goto cleanup;
+  if (!target_existed || !candidate_bufs || !candidate_entrypoints) goto cleanup;
 
   for (int i = 0; i < inst->n_bufs; i++) {
     PolyUOp *device_uop = poly_uop_device_uop_cached(inst->ctx, target_bindings[i], NULL);
@@ -3975,10 +3996,7 @@ static int model_publish_placement(
         alias = j;
         break;
       }
-    if (alias >= 0) {
-      target_data[i] = target_data[alias];
-      continue;
-    }
+    if (alias >= 0) continue;
 
     PolyUOp *old = inst->bufs[i].buffer;
     PolyUOp *target = target_bindings[i];
@@ -3986,25 +4004,17 @@ static int model_publish_placement(
     PolyDevice backend = poly_device_from_device_uop(device_uop);
     size_t nbytes = named_buf_nbytes(&inst->bufs[i]);
     if (nbytes > 0 && target != old) {
-      PolyBuffer *host = NULL;
-      if (poly_buffer_ensure_host_current(inst->ctx, old, &host) != 0 || !host || !host->ptr ||
-          host->nbytes < nbytes || poly_buffer_write(inst->ctx, target, host->ptr, nbytes) != 0)
+      if (poly_buffer_ensure_device_allocated(inst->ctx, target, backend) != 0 ||
+          model_copy_binding(inst->ctx, target, old, nbytes) != 0)
         goto cleanup_residencies;
     }
     if (nbytes > 0 && inst->bufs[i].role != POLY_ROLE_OUTPUT &&
         poly_buffer_ensure_device_current(inst->ctx, target, backend) != 0)
       goto cleanup_residencies;
-    if (nbytes > 0) {
-      PolyBuffer *host = NULL;
-      if (poly_buffer_ensure_host_current(inst->ctx, target, &host) != 0 || !host || !host->ptr)
-        goto cleanup_residencies;
-      target_data[i] = host->ptr;
-    }
   }
 
   for (int i = 0; i < inst->n_bufs; i++) {
     inst->bufs[i].buffer = target_bindings[i];
-    inst->bufs[i].data = target_data[i];
   }
   for (int i = 0; i < inst->n_entrypoints; i++)
     inst->entrypoints[i].sink = placed_roots[i];
@@ -4026,7 +4036,6 @@ cleanup:
   free(candidate_entrypoints);
   free(candidate_bufs);
   free(target_existed);
-  free(target_data);
   return rc;
 }
 
@@ -4537,7 +4546,6 @@ static int prepare_model_io(
     int bi = find_buf_by_name(inst, io[i].name);
     size_t nbytes = io[i].nbytes;
     if (poly_buffer_write(inst->ctx, inst->bufs[bi].buffer, io[i].data, nbytes) != 0) goto cleanup;
-    if (sync_buf_to_host(inst, bi) != 0) goto cleanup;
   }
   ret = model_run_copies(inst->ctx, stores, n_tensors);
 cleanup:
@@ -5690,7 +5698,6 @@ int poly_model_copy_prefixed_weights(PolyModel *dst, PolyModel *src, const char 
     if (!tmp) return -1;
     int rc = poly_buffer_read(src->ctx, sb->buffer, tmp, nbytes);
     if (rc == 0) rc = poly_buffer_write(dst->ctx, db->buffer, tmp, nbytes);
-    if (rc == 0) rc = sync_buf_to_host(dst, dbi);
     free(tmp);
     if (rc != 0) return -1;
   }
