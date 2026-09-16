@@ -19,6 +19,11 @@ async function checkLlamaFamily(pg) {
         parts.push(new Uint8Array(values.buffer))
         offsetBytes += values.byteLength
       }
+      // The real TinyStories safetensors retains the head, not the embedding.
+      if (item.config.tie_word_embeddings) {
+        header['lm_head.weight'] = header['model.embed_tokens.weight']
+        delete header['model.embed_tokens.weight']
+      }
       const headerBytes = new TextEncoder().encode(JSON.stringify(header))
       const checkpoint = new Uint8Array(8+headerBytes.length+offsetBytes)
       new DataView(checkpoint.buffer).setBigUint64(0,BigInt(headerBytes.length),true)

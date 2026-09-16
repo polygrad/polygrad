@@ -307,10 +307,6 @@ PolyModel *poly_llama_from_hf_decoded_generic(
       );
       goto fail;
     }
-    if (c.tied && t == head) {
-      seen[b] = true;
-      continue;
-    }
     float *data = poly_decoded_tensor_to_f32(t);
     int rc = data ? poly_import_copy_named_tensor(idx, t->name, data, t->shape, t->ndim, 0) : -1;
     free(data);
@@ -322,16 +318,20 @@ PolyModel *poly_llama_from_hf_decoded_generic(
   }
   for (int b = 0; b < n; b++)
     if (poly_model_buf_role(m, b) == POLY_ROLE_PARAM && !seen[b]) {
-      if (c.tied && !strcmp(poly_model_buf_name(m, b), "lm_head.weight")) continue;
+      const char *name = poly_model_buf_name(m, b);
+      if (c.tied && ((embed && !strcmp(name, "lm_head.weight")) ||
+                     (head && !strcmp(name, "model.embed_tokens.weight"))))
+        continue;
       poly_import_error_set(
           POLY_IMPORT_ERR_WEIGHT_MISMATCH, "Llama: missing weight '%s'", poly_model_buf_name(m, b)
       );
       goto fail;
     }
-  /* Tied checkpoints may omit the duplicate head; if supplied, it must agree
-   * before publication, not overwrite the shared embedding according to order. */
-  if (c.tied && head) {
-    bool equal = embed && head->ndim == embed->ndim && head->numel == embed->numel;
+  /* HF safetensors may retain either name of the config-declared tied pair.
+   * Both names write the same unpublished storage; if both occur, validate
+   * equality before returning the Model so file order cannot choose its value. */
+  if (c.tied && head && embed) {
+    bool equal = head->ndim == embed->ndim && head->numel == embed->numel;
     for (int i = 0; equal && i < head->ndim; i++)
       equal = head->shape[i] == embed->shape[i];
     float *a = equal ? poly_decoded_tensor_to_f32(embed) : NULL;

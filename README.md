@@ -647,6 +647,14 @@ zero. No KV cache, sampler, tokenizer/chat template, GGUF Llama importer, vision
 MoE or arbitrary RoPE scheme is included. Small reference fixtures are tested;
 this is not a claim that every pretrained Llama checkpoint has been validated.
 
+`make fetch-llama-pretrained` downloads a pinned 61 MB TinyStories Llama 2-style
+checkpoint (not a Meta checkpoint). `make test-llama-pretrained` compares full
+logits, three greedy choices and bundle reload against Transformers. Set
+`HF_PYTHON` to an environment with Torch/Transformers/Hugging Face Hub, and
+`LLAMA_TEST_DEVICES='cpu cuda'` to require both backends. Downloads are separate
+from testing; missing or altered weights fail this target. This is full-window
+recomputation, not KV-cached generation.
+
 `models.Sequential(config)` and `models.Graph(config)` build ordinary Models in
 C, alongside MLP/TabM/NAM. One JSON configuration can be shared by Python, Node,
 and browsers without model-specific source compilation or an authoring callback.

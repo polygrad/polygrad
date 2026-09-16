@@ -261,6 +261,18 @@ test-qwen3-cuda: build/polygrad_test require-qwen3-gguf
 # Set HF_PYTHON to an environment containing the HF/Torch reference stack.
 # Missing dependencies and offline fixture misses are failures, not passes.
 HF_PYTHON ?= $(PARITY_PY)
+LLAMA_CHECKPOINT ?= temp/llama-stories15m
+LLAMA_TEST_DEVICES ?= cpu
+.PHONY: fetch-llama-pretrained test-llama-pretrained
+# Download only the pinned 61 MB checkpoint, not ONNX variants or pickle files.
+fetch-llama-pretrained:
+	$(HF_PYTHON) -c "from huggingface_hub import snapshot_download; snapshot_download('Xenova/llama2.c-stories15M', revision='17c2f1eabe1e163acc15ad35e225794e7b907682', allow_patterns=['config.json', 'model.safetensors'], local_dir='$(LLAMA_CHECKPOINT)')"
+
+test-llama-pretrained: build/libpolygrad.so
+	PYTEST_ADDOPTS= POLY_REQUIRE_LLAMA=1 POLY_LLAMA_CHECKPOINT=$(abspath $(LLAMA_CHECKPOINT)) \
+		LLAMA_TEST_DEVICES='$(LLAMA_TEST_DEVICES)' POLY_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py \
+		$(HF_PYTHON) -m pytest py/tests/test_llama_pretrained.py -o addopts= -v -s
+
 test-hf-e2e: build/libpolygrad.so
 	PYTEST_ADDOPTS= POLY_REQUIRE_HF=1 POLY_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py \
 		$(HF_PYTHON) -m pytest py/tests/test_hf_e2e.py -o addopts= -v

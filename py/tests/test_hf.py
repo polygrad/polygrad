@@ -109,19 +109,25 @@ def test_llama_rejects_unsupported_configuration_without_touching_runtime(change
         np.testing.assert_array_equal(live.numpy(), [19.])
 
 
-@pytest.mark.parametrize('damage', ['missing', 'shape', 'duplicate', 'tied_conflict'])
+@pytest.mark.parametrize('damage', ['missing', 'shape', 'duplicate', 'tied_conflict',
+                                  'tied_missing_both', 'tied_head_shape', 'untied_head_only'])
 def test_llama_checkpoint_rejects_incomplete_or_conflicting_state(damage):
     import polygrad as pg
-    case = LLAMA_CASES[3 if damage == 'tied_conflict' else 0]
+    case = LLAMA_CASES[3 if damage.startswith('tied_') else 0]
     weights = llama_weights(case)
     if damage == 'missing': weights.pop('model.norm.weight')
     if damage == 'shape': weights['model.norm.weight'] = np.zeros(2, np.float32)
     if damage == 'tied_conflict': weights['lm_head.weight'] = np.zeros_like(weights['model.embed_tokens.weight'])
+    if damage in ('tied_missing_both', 'tied_head_shape', 'untied_head_only'):
+        weights.pop('model.embed_tokens.weight')
+    if damage == 'tied_head_shape': weights['lm_head.weight'] = np.zeros((2, 2), np.float32)
     checkpoint = make_safetensors({k: ('F32', v.shape, v) for k,v in weights.items()})
     with pg.create(device='interp') as rt:
         live = rt.Tensor([31.])
         expected = {'missing':'missing weight', 'shape':'invalid weight',
-                    'duplicate':'duplicate', 'tied_conflict':'tied lm_head'}[damage]
+                    'duplicate':'duplicate', 'tied_conflict':'tied lm_head',
+                    'tied_missing_both':'missing weight', 'tied_head_shape':'invalid weight',
+                    'untied_head_only':'missing weight'}[damage]
         with pytest.raises((RuntimeError, ValueError), match=expected):
             load_hf_bytes(json.dumps(case['config']), [checkpoint] * (2 if damage == 'duplicate' else 1), runtime=rt)
         np.testing.assert_array_equal(live.numpy(), [31.])
@@ -140,12 +146,14 @@ def test_llama_default_runtime_and_batched_rows():
         model.dispose()
 
 
-@pytest.mark.parametrize('head_first', [False, True])
-def test_llama_tied_checkpoint_accepts_equal_duplicate_in_either_order(head_first):
+@pytest.mark.parametrize('layout', ['both-embed-first', 'both-head-first', 'head-only'])
+def test_llama_tied_checkpoint_accepts_either_alias(layout):
     case = LLAMA_CASES[-1]
     weights = llama_weights(case)
     head = {'lm_head.weight': weights['model.embed_tokens.weight']}
-    weights = {**head, **weights} if head_first else {**weights, **head}
+    weights = {**head, **weights} if layout == 'both-head-first' else {**weights, **head}
+    if layout == 'head-only':
+        del weights['model.embed_tokens.weight']
     checkpoint = make_safetensors({k: ('F32', v.shape, v) for k,v in weights.items()})
     model = load_hf_bytes(json.dumps(case['config']), [checkpoint], max_seq_len=3)
     try:

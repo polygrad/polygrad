@@ -22,8 +22,8 @@ TEST(llama, reference_logits_and_owned_state) {
   ASSERT_TRUE(desc && desc->from_hf_decoded);
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
-  for (int c = 0; c < 4; c++) {
-    cJSON *item = cJSON_GetArrayItem(cases, c);
+  for (int c = 0; c < 5; c++) {
+    cJSON *item = cJSON_GetArrayItem(cases, c < 4 ? c : 3);
     cJSON *config = cJSON_GetObjectItemCaseSensitive(item, "config");
     cJSON *weights = cJSON_GetObjectItemCaseSensitive(item, "weights");
     int n = cJSON_GetArraySize(weights), idx = 0;
@@ -48,6 +48,8 @@ TEST(llama, reference_logits_and_owned_state) {
         data[j] = (float)((t->ndim == 1 ? 1.0 : 0.0) + ((j * 7 + offset) % 23 - 11) * 0.017);
       t->data = data;
       t->dtype = POLY_DECODED_F32;
+      /* Safetensors may retain either member of a tied embedding/head pair. */
+      if (c == 4 && !strcmp(t->name, "model.embed_tokens.weight")) t->name = "lm_head.weight";
     }
     PolyHfDecoded hf = {.config = config, .model_type = "llama", .tensors = ts, .n_tensors = n};
     PolyGenericImportOpts opts = {.ctx = ctx, .max_batch = 1, .max_seq_len = 3};
