@@ -710,6 +710,29 @@ static InterpLane cast_lane(InterpLane src, PolyDType src_dt, PolyDType dst_dt) 
     return interp_truncate_lane(il_int(as_int(src, src_dt)), dst_dt);
 }
 
+/* PythonProgram._store assigns to a typed memoryview, not a union member.
+ * Unlike CAST, integer memoryviews reject floats and out-of-range integers. */
+static bool interp_memoryview_store(void *ptr, InterpLane v, PolyDType src, PolyDType dst) {
+  if (poly_dtype_is_bool(dst)) {
+    mem_store_scalar(ptr, il_int(as_float(v, src) != 0), dst);
+    return true;
+  }
+  if (!poly_dtype_is_float(dst)) {
+    if (poly_dtype_is_float(src)) return false;
+    if (!poly_dtype_is_unsigned(src) && v.i < 0) {
+      if (poly_dtype_is_unsigned(dst) ||
+          (dst.bitsize < 64 && v.i < -(INT64_C(1) << (dst.bitsize - 1))))
+        return false;
+    } else {
+      uint64_t max = poly_dtype_is_unsigned(dst) ? UINT64_MAX : INT64_MAX;
+      if (dst.bitsize < 64) max = (UINT64_C(1) << (dst.bitsize - !poly_dtype_is_unsigned(dst))) - 1;
+      if (as_uint(v, src) > max) return false;
+    }
+  }
+  mem_store_scalar(ptr, cast_lane(v, src, dst), dst);
+  return true;
+}
+
 /* UOp index map */
 
 typedef struct {
@@ -779,9 +802,7 @@ static int find_matching_end(PolyUOp **lin, int n, int range_pos) {
  * node's nominal dtype. */
 static PolyUOp *interp_follow_storage_base(PolyUOp *u) {
   while (u) {
-    if (u->op == POLY_OP_BUFFER &&
-        (poly_program_memory_is(u, POLY_ADDR_REG) || poly_program_memory_is(u, POLY_ADDR_LOCAL)))
-      return u;
+    if (u->op == POLY_OP_BUFFER || (u->op == POLY_OP_PARAM && !poly_uop_is_alu_param(u))) return u;
     if ((u->op == POLY_OP_AFTER || u->op == POLY_OP_CAST || u->op == POLY_OP_BITCAST ||
          u->op == POLY_OP_INDEX || u->op == POLY_OP_SHRINK) &&
         u->n_src > 0) {
@@ -836,7 +857,10 @@ static int interp_storage_lanes_for_def(PolyCtx *ctx, PolyUOp **lin, int n_lin, 
     PolyUOp *u = lin[i];
     if (u->op == POLY_OP_STORE && u->n_src >= 2) {
       if (interp_follow_storage_base(u->src[0]) == def) {
-        int need = interp_storage_extent_for_use(u->src[0], interp_uop_lane_count(ctx, u->src[1]));
+        int pack = poly_dtype_itemsize(u->src[1]->dtype) / poly_dtype_itemsize(u->src[0]->dtype);
+        int need = interp_storage_extent_for_use(
+            u->src[0], interp_uop_lane_count(ctx, u->src[1]) + (pack > 1 ? pack - 1 : 0)
+        );
         if (need > lanes) lanes = need;
       }
     } else if (u->op == POLY_OP_LOAD && u->n_src >= 1) {
@@ -1140,8 +1164,52 @@ static int interp_region(
        * effects. Do not turn missing storage into a successful no-op. */
       if (!ptr) return -1;
       int cnt = vals[src1].count;
-      for (int k = 0; k < cnt; k++)
-        mem_store_scalar(ptr + k * scalar_size, iv_get(&vals[src1], k), store_dt);
+      PolyDType value_dt = u->src[1]->dtype;
+      int value_size = poly_dtype_itemsize(value_dt);
+      int pack = value_size > scalar_size ? value_size / scalar_size : 1;
+      if (pack > 1) {
+        /* _store packs wide integers into successive smaller memoryview
+         * elements. Check the full footprint, not just the first element. */
+        PolyUOp *base = interp_follow_storage_base(u->src[0]);
+        int base_idx = base ? uop_index_map_get(idx_map, base) : -1;
+        if (base_idx < 0 || poly_dtype_is_float(value_dt)) return -1;
+        int64_t size = poly_program_buffer_size(base);
+        if (poly_program_memory_is(base, POLY_ADDR_REG) ||
+            poly_program_memory_is(base, POLY_ADDR_LOCAL))
+          size = interp_storage_lanes_for_def(ctx, lin, n_lin, base);
+        uintptr_t start = (uintptr_t)iv_get(&vals[base_idx], 0).p, at = (uintptr_t)ptr;
+        uint64_t bytes = size > 0 ? (uint64_t)size * poly_dtype_itemsize(base->dtype) : 0;
+        uint64_t needed = (uint64_t)(cnt + pack - 1) * scalar_size;
+        if (at < start || at - start > bytes || needed > bytes - (at - start)) return -1;
+      }
+      for (int k = 0; k < cnt; k++) {
+        InterpLane value = iv_get(&vals[src1], k);
+        if (poly_dtype_eq(value_dt, store_dt)) {
+          mem_store_scalar(ptr + k * scalar_size, value, store_dt);
+          continue;
+        }
+        PolyDType src = value_dt, dst = store_dt;
+        /* Match to_storage_scalar/storage_fmt_for_dtype for encoded floats. */
+        if (interp_is_bf16(dst)) dst = POLY_UINT16;
+        if (poly_dtype_is_fp8(dst)) dst = POLY_UINT8;
+        if (pack == 1 && (interp_is_bf16(src) || poly_dtype_is_fp8(src))) {
+          uint8_t encoded[8] = {0};
+          mem_store_scalar(encoded, value, src);
+          src = interp_is_bf16(src) ? POLY_UINT16 : POLY_UINT8;
+          value = mem_load_scalar(encoded, src);
+        }
+        for (int part = 0; part < pack; part++) {
+          InterpLane item = value;
+          PolyDType item_dt = src;
+          if (pack > 1) {
+            uint64_t mask = (UINT64_C(1) << (8 * scalar_size)) - 1;
+            item = il_uint((as_uint(value, src) >> (8 * scalar_size * part)) & mask);
+            item_dt = POLY_UINT64;
+          }
+          if (!interp_memoryview_store(ptr + (k + part) * scalar_size, item, item_dt, dst))
+            return -1;
+        }
+      }
       break;
     }
 

@@ -2607,27 +2607,16 @@ static void build_code_scalar(
         int addr = lm_get(&locals, u->src[0]);
         PolyDType val_dt = wasm_local_value_dtype(u->src[1]);
         bool val_is_v128 = wasm_uop_value_is_v128(ctx, u->src[1]);
-        bool val_is_float = poly_dtype_is_float(val_dt);
-        bool buf_is_float = poly_dtype_is_float(u->src[0]->dtype);
-        bool buf_is_f64 = dt_is_f64(u->src[0]->dtype);
         wb_byte(&body, WASM_OP_LOCAL_GET);
         wb_uleb128(&body, addr);
         wb_byte(&body, WASM_OP_LOCAL_GET);
         wb_uleb128(&body, val);
 
-        /* Type conversions for mismatched value/buffer dtypes */
-        if (!val_is_v128 && buf_is_f64 && !val_is_float) {
-          /* i32/i64 → f64 */
-          if (dt_is_i64(val_dt))
-            wb_byte(&body, WASM_OP_F64_CONVERT_I64_S);
-          else
-            wb_byte(&body, WASM_OP_F64_CONVERT_I32_S);
-        } else if (!val_is_v128 && buf_is_float && !buf_is_f64 && !val_is_float) {
-          /* i32 → f32 */
-          wb_byte(&body, WASM_OP_F32_CONVERT_I32_S);
-        }
-
         PolyDType buf_dt = u->src[0]->dtype;
+        /* Scalar destination-typed assignment, like CStyle. Use the same
+         * signedness/width conversion as CAST; vector mismatch is rejected
+         * before emission rather than silently reinterpreting v128 bits. */
+        if (!val_is_v128) emit_cast_stack_value(&body, val_dt, buf_dt);
         if (val_is_v128) {
           int64_t lanes = poly_uop_max_numel(ctx, u->src[1]);
           emit_v128_store_opcode(&body, val_dt, (int)lanes);
@@ -4864,6 +4853,13 @@ uint8_t *poly_render_wasm(PolyCtx *ctx, PolyUOp **uops, int n, int *size_out, bo
    * unsupported index before emission; it is never a linear-memory address. */
   for (int i = 0; i < n; i++) {
     PolyUOp *u = uops[i];
+    if (u->op == POLY_OP_STORE && u->n_src >= 2 && poly_uop_max_numel(ctx, u->src[1]) > 1 &&
+        !poly_dtype_eq(u->src[0]->dtype, u->src[1]->dtype)) {
+      fprintf(
+          stderr, "polygrad: vector STORE dtype mismatch; cast the value to the destination dtype\n"
+      );
+      return NULL;
+    }
     if (u->op != POLY_OP_INDEX || u->n_src < 2) continue;
     PolyUOp *base = wasm_acc_base(u->src[0]);
     if (base && poly_program_memory_is(base, POLY_ADDR_REG) &&

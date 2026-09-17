@@ -470,12 +470,12 @@ console.log(y.toArray()) // [11, 22, 33, 44]
 `KernelInfo` is required to mark the executable kernel boundary. Without it,
 the body can leave the output unchanged, as in pinned tinygrad. Match each
 stored value's dtype to its destination, using an explicit UOp `cast` when
-needed. In 0.5.1, the CPU renderer rejects mismatched vector stores with
+needed. Current C and Wasm renderers reject mismatched vector stores with
 `vector STORE dtype mismatch; cast the value to the destination dtype`.
 Scalar C stores can convert numerically, but that is not a portable kernel
-contract. Wasm/INTERP mismatched stores remain a known limitation: cast
-explicitly on every backend. Version 0.5.0 can silently return incorrect values
-for mismatched vector stores.
+contract. INTERP follows Tinygrad's Python memoryview conversion rules. Cast
+explicitly on every backend. Published 0.5.1 still has the Wasm/INTERP
+mismatched-store defects fixed in current source; 0.5.0 also has the CPU defect.
 
 ## Common API Recipes
 

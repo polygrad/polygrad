@@ -994,6 +994,19 @@ print('leaving_live_instance')
         finally:
             runtime.dispose()
 
+    def test_custom_kernel_interp_converts_store_to_float_storage(self):
+        import polygrad
+
+        def kernel(out, value):
+            i = UOp.range(out.ctx, 4, 0)
+            return out[i].store(value[i]).end(i).sink(arg=KernelInfo(name='numeric_store'))
+
+        with polygrad.create(device='interp') as runtime:
+            result = runtime.Tensor.empty(4).custom_kernel(
+                runtime.Tensor([11, 22, 33, 44]), fxn=kernel
+            )[0]
+            np.testing.assert_array_equal(result.numpy(), [11, 22, 33, 44])
+
     def test_custom_kernel_range_numeric_scalar_preserves_weakint(self):
         ctx = Tensor.empty((1,))._ctx
         index = UOp.range(ctx, 64, 0)

@@ -3585,6 +3585,65 @@ TEST(codegen, interp_if_masks_nested_stores_not_values) {
   PASS();
 }
 
+TEST(codegen, interp_store_converts_to_destination_storage) {
+  bool correct = true;
+  for (int lanes = 1; lanes <= 4; lanes *= 4) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyUOp *out = poly_test_uop_param(ctx, POLY_FLOAT32, 4, 0, POLY_ADDR_GLOBAL);
+    PolyUOp *address = poly_uop3(
+        ctx, POLY_OP_SHRINK, POLY_FLOAT32, out, poly_const_int(ctx, 0), poly_const_int(ctx, lanes),
+        poly_arg_none()
+    );
+    PolyUOp *items[4];
+    for (int i = 0; i < lanes; i++)
+      items[i] = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(11 + i));
+    PolyUOp *value = lanes == 1 ? items[0] : poly_uop_stack(ctx, items, lanes);
+    PolyUOp *sink = poly_sink1(ctx, poly_uop_store(ctx, address, value));
+    int n = 0;
+    PolyUOp **linear = poly_toposort_ex_alloc(ctx, sink, &n, NULL, false);
+    float result[4] = {0};
+    void *args[] = {result};
+    correct &= poly_interp_eval(ctx, linear, n, args, 1) == 0;
+    for (int i = 0; i < lanes; i++)
+      correct &= result[i] == 11 + i;
+    free(linear);
+    poly_ctx_destroy(ctx);
+  }
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
+TEST(codegen, interp_store_packs_wide_integer_and_rejects_invalid_conversion) {
+  bool correct = true;
+  for (int mode = 0; mode < 4; mode++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyDType dst = mode == 0 || mode == 3 ? POLY_UINT8 : mode == 1 ? POLY_INT32 : POLY_UINT32;
+    PolyDType src = mode == 0 || mode == 3 ? POLY_UINT32 : mode == 1 ? POLY_FLOAT32 : POLY_INT32;
+    PolyUOp *out = poly_test_uop_param(ctx, dst, mode == 3 ? 1 : 8, 0, POLY_ADDR_GLOBAL);
+    PolyUOp *address = poly_uop_index(ctx, out, (PolyUOp *[]){poly_const_int(ctx, 0)}, 1);
+    PolyUOp *value = poly_uop0(
+        ctx, POLY_OP_CONST, src,
+        mode == 1 ? poly_arg_float(1.5) : poly_arg_int(mode == 0 ? 0x12345678 : -1)
+    );
+    PolyUOp *sink = poly_sink1(ctx, poly_uop_store(ctx, address, value));
+    int n = 0;
+    PolyUOp **linear = poly_toposort_ex_alloc(ctx, sink, &n, NULL, false);
+    uint32_t result[8] = {0};
+    void *args[] = {result};
+    int rc = poly_interp_eval(ctx, linear, n, args, 1);
+    if (mode == 0) {
+      uint8_t *bytes = (uint8_t *)result;
+      correct &= rc == 0 && bytes[0] == 0x78 && bytes[1] == 0x56 && bytes[2] == 0x34 &&
+                 bytes[3] == 0x12 && bytes[4] == 0;
+    } else
+      correct &= rc != 0 && result[0] == 0;
+    free(linear);
+    poly_ctx_destroy(ctx);
+  }
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
 TEST(codegen, interp_float_to_narrow_integer_wraps) {
   /* PythonProgram CAST truncates after converting to int, including negatives. */
   PolyDType types[] = {POLY_INT8, POLY_UINT8, POLY_INT16, POLY_UINT16};

@@ -67,6 +67,33 @@ static int wasm_run_c_f32_buffer(
   return 0;
 }
 
+TEST(wasm, vector_store_requires_destination_type) {
+  bool correct = true;
+  for (int convert = 0; convert <= 1; convert++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyUOp *out = poly_test_uop_param(ctx, POLY_FLOAT32, 4, 0, POLY_ADDR_GLOBAL);
+    PolyUOp *address = poly_uop3(
+        ctx, POLY_OP_SHRINK, POLY_FLOAT32, out, poly_const_int(ctx, 0), poly_const_int(ctx, 4),
+        poly_arg_none()
+    );
+    PolyUOp *items[4];
+    for (int i = 0; i < 4; i++)
+      items[i] = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(11 + i));
+    PolyUOp *value = poly_uop_stack(ctx, items, 4);
+    if (convert) value = poly_cast(ctx, value, POLY_FLOAT32);
+    PolyUOp *sink = poly_sink1(ctx, poly_uop_store(ctx, address, value));
+    int n = 0, size = 0;
+    PolyUOp **linear = poly_toposort_ex_alloc(ctx, sink, &n, NULL, false);
+    uint8_t *wasm = poly_render_wasm(ctx, linear, n, &size, true);
+    correct &= convert ? wasm != NULL : wasm == NULL;
+    free(wasm);
+    free(linear);
+    poly_ctx_destroy(ctx);
+  }
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
 static int wasm_write_module(const char *path, const uint8_t *wasm, int wasm_size) {
   FILE *f = fopen(path, "wb");
   if (!f) return -1;
@@ -251,12 +278,39 @@ static int node_run_wasm_f32_buffer(const char *path, float expected) {
       "const dv=new DataView(mem.buffer);"
       "dv.setFloat32(4,2,true);dv.setFloat32(8,3,true);dv.setFloat32(12,5,true);"
       "inst.exports.kernel(0);"
-      "const got=dv.getFloat32(0,true);const expected=%.9g;"
-      "if(Math.abs(got-expected)>1e-6){console.error('got '+got+' expected "
+      "const got=dv.getFloat32(0,true);const expected=%.17g;"
+      "if(!Number.isFinite(got)||Math.abs(got-expected)>1e-6){console.error('got '+got+' expected "
       "'+expected);process.exit(2)}\"",
       node, path, (double)expected
   );
   return system(cmd);
+}
+
+TEST(wasm, scalar_store_uses_destination_numeric_conversion) {
+  PolyDType types[] = {POLY_UINT32, POLY_INT64, POLY_FLOAT64};
+  float expected[] = {4294967296.0f, 11.0f, 11.5f};
+  bool correct = true;
+  for (int i = 0; i < 3; i++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyUOp *out = poly_test_uop_param(ctx, POLY_FLOAT32, 1, 0, POLY_ADDR_GLOBAL);
+    PolyUOp *address = poly_uop_index(ctx, out, (PolyUOp *[]){poly_const_int(ctx, 0)}, 1);
+    PolyUOp *value = poly_uop0(
+        ctx, POLY_OP_CONST, types[i],
+        i == 2 ? poly_arg_float(11.5) : poly_arg_int(i == 0 ? UINT32_MAX : 11)
+    );
+    PolyUOp *sink = poly_sink1(ctx, poly_uop_store(ctx, address, value));
+    int n = 0, size = 0;
+    PolyUOp **linear = poly_toposort_ex_alloc(ctx, sink, &n, NULL, false);
+    uint8_t *wasm = poly_render_wasm(ctx, linear, n, &size, true);
+    const char *path = "temp/polygrad_test_numeric_store.wasm";
+    correct &= wasm && wasm_write_module(path, wasm, size) == 0 &&
+               node_run_wasm_f32_buffer(path, expected[i]) == 0;
+    free(wasm);
+    free(linear);
+    poly_ctx_destroy(ctx);
+  }
+  ASSERT_TRUE(correct);
+  PASS();
 }
 
 static int node_run_wasm_sparse_f32_params(const char *path) {

@@ -1284,8 +1284,8 @@ async function runTensorTests(pg, createRuntime) {
     result.dispose(); output.dispose(); input.dispose()
   })
 
-  if (pg.core === 'native' && pg.device === 'cpu') {
-    await test('customKernel CPU rejects vector store dtype mismatch', async () => {
+  if (pg.device === 'cpu' || pg.device === 'wasm') {
+    await test('customKernel rejects vector store dtype mismatch', async () => {
       const input = new Tensor([11, 22, 33, 44], { dtype: 'int32' })
       const output = Tensor.empty(4, { dtype: 'float32' })
       let result = null, error = null
@@ -1303,6 +1303,26 @@ async function runTensorTests(pg, createRuntime) {
         output.dispose(); input.dispose()
       }
       assert(error instanceof Error, 'mismatched vector STORE must not return reinterpreted bits')
+    })
+  }
+
+  if (pg.device === 'interp') {
+    await test('customKernel interpreter converts integer store to float storage', async () => {
+      const input = new Tensor([11, 22, 33, 44], { dtype: 'int32' })
+      const output = Tensor.empty(4, { dtype: 'float32' })
+      let result
+      try {
+        result = output.customKernel(input, (out, value) => {
+          const i = pg.uop.range(4, 0)
+          return out.index(i).store(value.index(i)).end(i).sink(
+            new pg.uop.KernelInfo('numeric_store')
+          )
+        })[0]
+        assertClose(await result.toArray(), [11, 22, 33, 44])
+      } finally {
+        if (result) result.dispose()
+        output.dispose(); input.dispose()
+      }
     })
   }
 

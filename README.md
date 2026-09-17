@@ -563,9 +563,10 @@ console.log(y.toArray()) // [11, 22, 33, 44]
 
 Without `KernelInfo`, a body can leave the output unchanged, as in pinned
 tinygrad. Match stored values to the destination dtype, using an explicit
-UOp cast where needed. Version 0.5.1 rejects mismatched vector stores on CPU;
-scalar C stores can convert numerically. Wasm/INTERP mismatched stores remain
-a known limitation, so portable kernels must cast explicitly.
+UOp cast where needed. Current C and Wasm renderers reject mismatched vector
+stores; INTERP follows Tinygrad's Python memoryview conversion rules. These
+backend rules differ, so portable kernels must cast explicitly. Published
+0.5.1 still has the Wasm/INTERP mismatched-store defects fixed in current source.
 
 For host-fed replay, `Tensor.copy_from(data)` (JS `copyFrom`) materializes
 pending work and writes current storage without replacing an existing BUFFER
