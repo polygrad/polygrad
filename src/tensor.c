@@ -8011,16 +8011,16 @@ PolyUOp *poly_cross_entropy(PolyCtx *ctx, PolyUOp *logits, PolyUOp *target, int 
 }
 
 static PolyUOp *poly_unsqueeze_axis(PolyCtx *ctx, PolyUOp *x, int axis) {
-  int64_t shape[POLY_MAX_DIMS];
-  int ndim = uop_shape(ctx, x, shape);
+  int ndim = poly_uop_ndim(ctx, x);
   if (ndim < 0 || ndim >= POLY_MAX_DIMS) return NULL;
   if (axis < 0) axis += ndim + 1;
   if (axis < 0 || axis > ndim) return NULL;
-  int64_t out[POLY_MAX_DIMS];
+  /* MovementMixin.unsqueeze inserts one, preserving symbolic shape expressions. */
+  PolyUOp *out[POLY_MAX_DIMS];
   for (int i = 0, j = 0; i < ndim + 1; i++) {
-    out[i] = (i == axis) ? 1 : shape[j++];
+    out[i] = (i == axis) ? poly_const_int(ctx, 1) : poly_uop_shape_dim(ctx, x, j++);
   }
-  return poly_reshape(ctx, x, out, ndim + 1);
+  return poly_reshape_uop(ctx, x, out, ndim + 1);
 }
 
 static PolyUOp *poly_flatten_axes(PolyCtx *ctx, PolyUOp *x, int start_dim, int end_dim) {
@@ -9545,27 +9545,25 @@ PolyUOp *poly_gather(PolyCtx *ctx, PolyUOp *table, PolyUOp *indices) {
 /* Additional composed ops */
 
 PolyUOp *poly_rope(PolyCtx *ctx, PolyUOp *x, PolyUOp *freqs_cos, PolyUOp *freqs_sin) {
-  int64_t shape[POLY_MAX_DIMS];
-  int ndim;
-  ndim = uop_shape(ctx, x, shape);
+  int ndim = poly_uop_ndim(ctx, x);
   if (ndim < 1) return NULL;
-  int64_t half_dim = shape[ndim - 1] / 2;
-  if (half_dim <= 0) return NULL;
+  PolyUOp *width = poly_uop_shape_dim(ctx, x, ndim - 1);
+  if (!width || width->op != POLY_OP_CONST || width->arg.i <= 0 || width->arg.i % 2) return NULL;
+  int64_t half_dim = width->arg.i / 2;
 
-  int64_t pairs1[POLY_MAX_DIMS][2], pairs2[POLY_MAX_DIMS][2];
+  /* Split-half rotary layout: chunk(-1), rotate, concatenate. Only the head
+   * width is fixed; batch/sequence extents must retain their bound expressions. */
+  PolyUOp *starts[POLY_MAX_DIMS], *sizes[POLY_MAX_DIMS];
+  PolyUOp *zero = poly_const_int(ctx, 0);
   for (int i = 0; i < ndim - 1; i++) {
-    pairs1[i][0] = 0;
-    pairs1[i][1] = shape[i];
-    pairs2[i][0] = 0;
-    pairs2[i][1] = shape[i];
+    starts[i] = zero;
+    sizes[i] = poly_uop_shape_dim(ctx, x, i);
   }
-  pairs1[ndim - 1][0] = 0;
-  pairs1[ndim - 1][1] = half_dim;
-  pairs2[ndim - 1][0] = half_dim;
-  pairs2[ndim - 1][1] = shape[ndim - 1];
-
-  PolyUOp *x1 = poly_shrink(ctx, x, pairs1, ndim);
-  PolyUOp *x2 = poly_shrink(ctx, x, pairs2, ndim);
+  starts[ndim - 1] = zero;
+  sizes[ndim - 1] = poly_const_int(ctx, half_dim);
+  PolyUOp *x1 = poly_shrink_uop(ctx, x, starts, sizes, ndim);
+  starts[ndim - 1] = sizes[ndim - 1];
+  PolyUOp *x2 = poly_shrink_uop(ctx, x, starts, sizes, ndim);
 
   PolyUOp *r1 = poly_alu2(
       ctx, POLY_OP_SUB, poly_alu2(ctx, POLY_OP_MUL, x1, freqs_cos),

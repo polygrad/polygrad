@@ -798,6 +798,35 @@ def case_nn_embedding_apply():
     return {"physical": out.uop, "logical": logical(out)}
 
 
+def bounded_nn_graph(kind):
+    n = UOp.variable('batch', 1, 3).bind(3) if ENGINE == 'tinygrad' else Variable('batch', 1, 3).bind(3)
+    if kind == 'embedding':
+        x = Tensor.empty(n, 3, dtype='int32', device='CPU')
+        w = Tensor.empty(4, 4, device='CPU')
+        if ENGINE == 'tinygrad':
+            from tinygrad.nn import _embedding_fwd
+            return {'physical': _embedding_fwd(w, x).uop}
+        raw = _ffi._lib.poly_gather(x._ctx, w.uop.raw, x.uop.raw)
+    else:
+        x = Tensor.empty(n, 2, 3, 4, device='CPU')
+        c = Tensor.empty(1, 1, 3, 2, device='CPU')
+        s = Tensor.empty(1, 1, 3, 2, device='CPU')
+        if ENGINE == 'tinygrad':
+            from tinygrad.uop.ops import Ops
+            # The existing C Model rotary helper is a split-half UOp program,
+            # not Tensor.cat's STACK lowering or Llama's interleaved layout.
+            prefix = tuple((0, dim) for dim in x.uop.shape[:-1])
+            a = x.uop.shrink(prefix + ((0, 2),))
+            b = x.uop.shrink(prefix + ((2, 4),))
+            first = (a*c.uop).alu(Ops.SUB, b*s.uop)
+            second = b*c.uop+a*s.uop
+            return {'physical': first.pad(((0,0),)*3+((0,2),)) + second.pad(((0,0),)*3+((2,0),))}
+        raw = _ffi._lib.poly_rope(x._ctx, x.uop.raw, c.uop.raw, s.uop.raw)
+    if not raw: raise RuntimeError(f'bounded {kind} returned NULL')
+    from polygrad.uop.ops import UOp as PolyUOp
+    return {'physical': PolyUOp(x._ctx, raw)}
+
+
 def case_quick_gelu_float32():
     out = typed_realized_empty("float32").quick_gelu()
     return {"physical": out.uop, "logical": logical(out)}
@@ -2077,6 +2106,8 @@ CASES = {
     "mlp_linear_relu": ("tensor", case_mlp_linear_relu),
     "mlp_mse": ("tensor", case_mlp_mse),
     "nn_embedding_apply": ("tensor", case_nn_embedding_apply),
+    "nn_embedding_bounded": ("tensor", lambda: bounded_nn_graph('embedding')),
+    "nn_rope_bounded": ("tensor", lambda: bounded_nn_graph('rope')),
     "nn_layernorm_apply": ("tensor", case_nn_layernorm_apply),
     "nn_rmsnorm_apply": ("tensor", case_nn_rmsnorm_apply),
     "relu6_occurrence": ("tensor", case_relu6_occurrence),

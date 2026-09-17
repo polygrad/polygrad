@@ -30,6 +30,50 @@ static int nn_param_index(PolyModel *inst, const char *name) {
 
 /* Convenience builder tests */
 
+TEST(nn, embedding_preserves_bounded_batch) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *n = poly_uop_bind(
+      ctx,
+      poly_uop_variable(ctx, "batch", poly_arg_int(1), poly_arg_int(3), POLY_WEAKINT, 1, false), 3
+  );
+  PolyUOp *dims[] = {n, poly_const_int(ctx, 3)};
+  PolyTensor *indices = poly_tensor_empty_uop(ctx, POLY_INT32, dims, 2, POLY_DEVICE_CPU);
+  PolyTensor *table = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){4, 4}, 2, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(indices);
+  ASSERT_NOT_NULL(table);
+  PolyTensor *out = poly_tensor_embedding_apply(ctx, indices, table);
+  ASSERT_NOT_NULL(out);
+  ASSERT_TRUE(poly_uop_shape_dim(ctx, poly_tensor_uop(out), 0) == n);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, poly_tensor_uop(out)), 3);
+  poly_tensor_release(out);
+  poly_tensor_release(table);
+  poly_tensor_release(indices);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(nn, rope_preserves_bounded_batch) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *n = poly_uop_bind(
+      ctx,
+      poly_uop_variable(ctx, "batch", poly_arg_int(1), poly_arg_int(3), POLY_WEAKINT, 1, false), 3
+  );
+  PolyUOp *dims[] = {n, poly_const_int(ctx, 2), poly_const_int(ctx, 3), poly_const_int(ctx, 2)};
+  PolyTensor *x = poly_tensor_empty_uop(ctx, POLY_FLOAT32, dims, 4, POLY_DEVICE_CPU);
+  PolyTensor *freq =
+      poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){1, 1, 3, 1}, 4, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(x);
+  ASSERT_NOT_NULL(freq);
+  PolyTensor *out = poly_tensor_rope(ctx, x, freq, freq);
+  ASSERT_NOT_NULL(out);
+  ASSERT_TRUE(poly_uop_shape_dim(ctx, poly_tensor_uop(out), 0) == n);
+  poly_tensor_release(out);
+  poly_tensor_release(freq);
+  poly_tensor_release(x);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(nn, rmsnorm_half_numeric) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *input = poly_buffer_f32(ctx, 2);
