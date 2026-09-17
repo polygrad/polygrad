@@ -29,6 +29,7 @@
 static bool napi_is_nullish(napi_env env, napi_value value);
 #include "models/mlp.h"
 #include "models/compose.h"
+#include "models/models.h"
 #include "models/llama.h"
 #include "models/tabm.h"
 #include "models/nam.h"
@@ -5538,6 +5539,15 @@ static napi_value napi_poly_model_set_device(napi_env env, napi_callback_info in
   return result;
 }
 
+static napi_value napi_poly_model_last_error(napi_env env, napi_callback_info info) {
+  napi_value arg, result;
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, &arg, NULL, NULL));
+  const PolyModelError *err = poly_model_last_error(get_external(env, arg));
+  NAPI_CALL(env, napi_create_string_utf8(env, err ? err->message : "", NAPI_AUTO_LENGTH, &result));
+  return result;
+}
+
 static napi_value napi_poly_model_set_device_name(napi_env env, napi_callback_info info) {
   napi_value argv[2];
   size_t argc = 2;
@@ -5645,104 +5655,58 @@ fail:
   return NULL;
 }
 
-static napi_value napi_poly_model_factory(
-    napi_env env,
-    napi_callback_info info,
-    PolyModel *(*factory)(PolyCtx *, const char *, int, PolyModelError *)
-) {
-  napi_value argv[2];
-  size_t argc = 2;
+static napi_value napi_poly_model_from_config(napi_env env, napi_callback_info info) {
+  napi_value argv[4];
+  size_t argc = 4;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  if (argc != 2) {
-    napi_throw_error(env, NULL, "model factory expects context and JSON");
+  if (argc != 4) {
+    napi_throw_error(env, NULL, "model factory expects context, family, JSON and device");
     return NULL;
   }
+  int32_t device;
+  NAPI_CALL(env, napi_get_value_int32(env, argv[3], &device));
   PolyCtx *ctx = get_external(env, argv[0]);
   size_t len = 0;
-  char *json = read_utf8_arg(env, argv[1], &len);
-  if (!json) return NULL;
+  char *family = read_utf8_arg(env, argv[1], NULL);
+  if (!family) return NULL;
+  char *json = read_utf8_arg(env, argv[2], &len);
+  if (!json) {
+    free(family);
+    return NULL;
+  }
   PolyModelError err = {0};
-  PolyModel *model = len > 1048576 ? NULL : factory(ctx, json, (int)len, &err);
+  PolyModel *model =
+      len > 1048576 ? NULL
+                    : poly_model_from_config(
+                          ctx, family[0] ? family : NULL, json, (int)len, (PolyDevice)device, &err
+                      );
   free(json);
+  free(family);
   if (!model) {
     napi_throw_error(
-        env, NULL, len > 1048576 ? "definition exceeds 1048576 JSON bytes" : err.message
+        env, NULL, len > 1048576 ? "configuration exceeds 1048576 JSON bytes" : err.message
     );
     return NULL;
   }
   return make_external(env, model);
 }
 
-static napi_value napi_poly_sequential_from_json(napi_env env, napi_callback_info info) {
-  return napi_poly_model_factory(env, info, poly_sequential_from_json);
-}
-
-static napi_value napi_poly_graph_from_json(napi_env env, napi_callback_info info) {
-  return napi_poly_model_factory(env, info, poly_graph_from_json);
-}
-
-static napi_value napi_poly_llama_from_json(napi_env env, napi_callback_info info) {
-  return napi_poly_model_factory(env, info, poly_llama_from_json);
-}
-
-static napi_value napi_poly_mlp_from_json_into(napi_env env, napi_callback_info info) {
-  napi_value argv[3];
-  size_t argc = 3;
+static napi_value napi_poly_model_family_name(napi_env env, napi_callback_info info) {
+  napi_value argv[1], result;
+  size_t argc = 1;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  size_t spec_len = 0;
-  char *spec = read_utf8_arg(env, argv[0], &spec_len);
-  if (!spec) return NULL;
-  int32_t device;
-  NAPI_CALL(env, napi_get_value_int32(env, argv[1], &device));
-  PolyModel *inst =
-      poly_mlp_from_json_into(get_external(env, argv[2]), spec, (int)spec_len, (PolyDevice)device);
-  free(spec);
-  if (!inst) {
-    napi_value result;
-    napi_get_null(env, &result);
-    return result;
+  int32_t index;
+  if (argc != 1) {
+    napi_throw_error(env, NULL, "family name expects an index");
+    return NULL;
   }
-  return make_external(env, inst);
-}
-
-static napi_value napi_poly_tabm_from_json_into(napi_env env, napi_callback_info info) {
-  napi_value argv[3];
-  size_t argc = 3;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  size_t spec_len = 0;
-  char *spec = read_utf8_arg(env, argv[0], &spec_len);
-  if (!spec) return NULL;
-  int32_t device;
-  NAPI_CALL(env, napi_get_value_int32(env, argv[1], &device));
-  PolyModel *inst =
-      poly_tabm_from_json_into(get_external(env, argv[2]), spec, (int)spec_len, (PolyDevice)device);
-  free(spec);
-  if (!inst) {
-    napi_value result;
-    napi_get_null(env, &result);
-    return result;
-  }
-  return make_external(env, inst);
-}
-
-static napi_value napi_poly_nam_from_json_into(napi_env env, napi_callback_info info) {
-  napi_value argv[3];
-  size_t argc = 3;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  size_t spec_len = 0;
-  char *spec = read_utf8_arg(env, argv[0], &spec_len);
-  if (!spec) return NULL;
-  int32_t device;
-  NAPI_CALL(env, napi_get_value_int32(env, argv[1], &device));
-  PolyModel *inst =
-      poly_nam_from_json_into(get_external(env, argv[2]), spec, (int)spec_len, (PolyDevice)device);
-  free(spec);
-  if (!inst) {
-    napi_value result;
-    napi_get_null(env, &result);
-    return result;
-  }
-  return make_external(env, inst);
+  NAPI_CALL(env, napi_get_value_int32(env, argv[0], &index));
+  const char *name = poly_model_family_name(index);
+  if (name)
+    NAPI_CALL(env, napi_create_string_utf8(env, name, NAPI_AUTO_LENGTH, &result));
+  else
+    NAPI_CALL(env, napi_get_null(env, &result));
+  return result;
 }
 
 static napi_value napi_poly_model_param_count(napi_env env, napi_callback_info info) {
@@ -5999,6 +5963,17 @@ static napi_value napi_poly_model_buf_dtype_id(napi_env env, napi_callback_info 
   return result;
 }
 
+static napi_value model_export_result(napi_env env, PolyModel *model, uint8_t *bytes, int len) {
+  const PolyModelError *error = poly_model_last_error(model);
+  if (!bytes && error && error->code) {
+    napi_throw_error(env, NULL, error->message);
+    return NULL;
+  }
+  napi_value result = make_uint8_array_copy(env, bytes, (size_t)(len > 0 ? len : 0));
+  free(bytes);
+  return result;
+}
+
 static napi_value napi_poly_model_export_weights(napi_env env, napi_callback_info info) {
   napi_value argv[2];
   size_t argc = 2;
@@ -6008,9 +5983,7 @@ static napi_value napi_poly_model_export_weights(napi_env env, napi_callback_inf
   if (argc > 1) napi_get_value_uint32(env, argv[1], &flags);
   int out_len = 0;
   uint8_t *bytes = poly_model_export_weights_ex(inst, &out_len, flags);
-  napi_value result = make_uint8_array_copy(env, bytes, (size_t)(out_len > 0 ? out_len : 0));
-  free(bytes);
-  return result;
+  return model_export_result(env, inst, bytes, out_len);
 }
 
 static napi_value napi_poly_model_import_weights(napi_env env, napi_callback_info info) {
@@ -6041,9 +6014,7 @@ static napi_value napi_poly_model_export_ir(napi_env env, napi_callback_info inf
   PolyModel *inst = get_external(env, argv[0]);
   int out_len = 0;
   uint8_t *bytes = poly_model_export_ir(inst, &out_len);
-  napi_value result = make_uint8_array_copy(env, bytes, (size_t)(out_len > 0 ? out_len : 0));
-  free(bytes);
-  return result;
+  return model_export_result(env, inst, bytes, out_len);
 }
 
 static napi_value napi_poly_model_export_program(napi_env env, napi_callback_info info) {
@@ -6053,9 +6024,7 @@ static napi_value napi_poly_model_export_program(napi_env env, napi_callback_inf
   PolyModel *inst = get_external(env, argv[0]);
   int out_len = 0;
   uint8_t *bytes = poly_model_export_program(inst, &out_len);
-  napi_value result = make_uint8_array_copy(env, bytes, (size_t)(out_len > 0 ? out_len : 0));
-  free(bytes);
-  return result;
+  return model_export_result(env, inst, bytes, out_len);
 }
 
 static napi_value napi_poly_model_save_bundle(napi_env env, napi_callback_info info) {
@@ -6067,9 +6036,7 @@ static napi_value napi_poly_model_save_bundle(napi_env env, napi_callback_info i
   if (argc > 1) napi_get_value_uint32(env, argv[1], &flags);
   int out_len = 0;
   uint8_t *bytes = poly_model_save_bundle_ex(inst, &out_len, flags);
-  napi_value result = make_uint8_array_copy(env, bytes, (size_t)(out_len > 0 ? out_len : 0));
-  free(bytes);
-  return result;
+  return model_export_result(env, inst, bytes, out_len);
 }
 
 static napi_value napi_poly_model_from_bundle_into(napi_env env, napi_callback_info info) {
@@ -6188,7 +6155,10 @@ static napi_value napi_poly_model_call(napi_env env, napi_callback_info info) {
         for (int i = 0; i < count; i++)
           poly_tensor_release(outputs[i]);
       free(outputs);
-      napi_throw_error(env, NULL, "polygrad: Model Tensor call failed");
+      const PolyModelError *err = poly_model_last_error(inst);
+      napi_throw_error(
+          env, NULL, err && err->message[0] ? err->message : "Model Tensor call failed"
+      );
       return NULL;
     }
     free(outputs);
@@ -7470,18 +7440,15 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_model_from_sinks", napi_poly_model_from_sinks),
       DECLARE_NAPI_METHOD("poly_model_from_binding_arrays", napi_poly_model_from_binding_arrays),
       DECLARE_NAPI_METHOD("poly_model_free", napi_poly_model_free),
+      DECLARE_NAPI_METHOD("poly_model_last_error", napi_poly_model_last_error),
       DECLARE_NAPI_METHOD("poly_model_set_device", napi_poly_model_set_device),
       DECLARE_NAPI_METHOD("poly_model_set_device_name", napi_poly_model_set_device_name),
       DECLARE_NAPI_METHOD("poly_model_define_module_arrays", napi_poly_model_define_module_arrays),
       DECLARE_NAPI_METHOD(
           "poly_model_set_device_map_arrays", napi_poly_model_set_device_map_arrays
       ),
-      DECLARE_NAPI_METHOD("poly_sequential_from_json", napi_poly_sequential_from_json),
-      DECLARE_NAPI_METHOD("poly_graph_from_json", napi_poly_graph_from_json),
-      DECLARE_NAPI_METHOD("poly_llama_from_json", napi_poly_llama_from_json),
-      DECLARE_NAPI_METHOD("poly_mlp_from_json_into", napi_poly_mlp_from_json_into),
-      DECLARE_NAPI_METHOD("poly_tabm_from_json_into", napi_poly_tabm_from_json_into),
-      DECLARE_NAPI_METHOD("poly_nam_from_json_into", napi_poly_nam_from_json_into),
+      DECLARE_NAPI_METHOD("poly_model_from_config", napi_poly_model_from_config),
+      DECLARE_NAPI_METHOD("poly_model_family_name", napi_poly_model_family_name),
       DECLARE_NAPI_METHOD("poly_model_param_count", napi_poly_model_param_count),
       DECLARE_NAPI_METHOD("poly_model_param_name", napi_poly_model_param_name),
       DECLARE_NAPI_METHOD("poly_model_param_shape", napi_poly_model_param_shape),

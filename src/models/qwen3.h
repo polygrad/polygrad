@@ -28,6 +28,8 @@ typedef struct {
 } Qwen3Config;
 
 Qwen3Config poly_qwen3_config_default(void);
+/* Checkpoint-required: execution/export reject until every PARAM is supplied
+ * through Model write/upload or checkpoint loading. */
 PolyModel *poly_qwen3(const Qwen3Config *cfg, PolyDevice device);
 /* Borrows ctx; construction restores its defaults on success and failure. */
 PolyModel *poly_qwen3_into(PolyCtx *ctx, const Qwen3Config *cfg, PolyDevice device);

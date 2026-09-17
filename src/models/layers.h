@@ -38,6 +38,19 @@ PolyTensor *poly_model_linear(
     bool use_bias
 );
 
+/* Declare one Linear's state for callers that reuse it across several calls.
+ * The caller owns the returned Tensor handles; initialization stays with the
+ * family/checkpoint loader. Same (out,in) convention as tinygrad.nn.Linear. */
+int poly_model_linear_parameters(
+    PolyModel *model,
+    const char *prefix,
+    int in_features,
+    int out_features,
+    bool use_bias,
+    PolyTensor **weight,
+    PolyTensor **bias
+);
+
 PolyTensor *poly_model_layernorm(
     PolyModel *inst,
     const char *prefix,

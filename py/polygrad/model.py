@@ -313,10 +313,8 @@ class Model:
         if isinstance(source, dict):
             if any(v is not None for v in (inputs, targets, outputs, entrypoints, params, losses, loss, modules)):
                 raise TypeError('Model configuration cannot be combined with Tensor bindings or a callable loss')
-            if source.get('format') != 'poly.modeldef@1' or source.get('type') not in ('sequential', 'graph'):
-                raise ValueError('Model configuration requires format="poly.modeldef@1" and type="sequential" or "graph"')
-            from .models import Sequential, Graph
-            self._adopt((Sequential if source['type'] == 'sequential' else Graph)(source, runtime=runtime))
+            from .models import _build
+            self._adopt(_build(None, source, runtime))
             return
         if callable(source):
             if outputs is not None or losses is not None or modules is not None:
@@ -996,6 +994,9 @@ class Model:
         out_len = ctypes.c_int(0)
         ptr = _get_lib().poly_model_export_weights_ex(self._ptr, ctypes.byref(out_len), flags)
         if not ptr:
+            error = _get_lib().poly_model_last_error(self._ptr)
+            if error and error.contents.code:
+                raise self._error('Model export failed')
             return None
         data = bytes(ctypes.cast(ptr, ctypes.POINTER(ctypes.c_uint8 * out_len.value)).contents)
         _libc.free(ptr)
@@ -1013,6 +1014,9 @@ class Model:
         out_len = ctypes.c_int(0)
         ptr = _get_lib().poly_model_export_ir(self._ptr, ctypes.byref(out_len))
         if not ptr:
+            error = _get_lib().poly_model_last_error(self._ptr)
+            if error and error.contents.code:
+                raise self._error('Model export failed')
             return None
         data = bytes(ctypes.cast(ptr, ctypes.POINTER(ctypes.c_uint8 * out_len.value)).contents)
         _libc.free(ptr)
@@ -1023,6 +1027,9 @@ class Model:
         out_len = ctypes.c_int(0)
         ptr = _get_lib().poly_model_export_program(self._ptr, ctypes.byref(out_len))
         if not ptr:
+            error = _get_lib().poly_model_last_error(self._ptr)
+            if error and error.contents.code:
+                raise self._error('Model export failed')
             return None
         data = bytes(ctypes.cast(ptr, ctypes.POINTER(ctypes.c_uint8 * out_len.value)).contents)
         _libc.free(ptr)
@@ -1040,6 +1047,9 @@ class Model:
         out_len = ctypes.c_int(0)
         ptr = _get_lib().poly_model_save_bundle_ex(self._ptr, ctypes.byref(out_len), flags)
         if not ptr:
+            error = _get_lib().poly_model_last_error(self._ptr)
+            if error and error.contents.code:
+                raise self._error('Model export failed')
             return None
         data = bytes(ctypes.cast(ptr, ctypes.POINTER(ctypes.c_uint8 * out_len.value)).contents)
         _libc.free(ptr)
@@ -1074,6 +1084,11 @@ class Model:
         """
         return self.call('forward', inputs)
 
+    def _error(self, fallback):
+        error = _get_lib().poly_model_last_error(self._ptr)
+        message = error.contents.message.decode('utf-8', 'replace').strip() if error else ''
+        return RuntimeError(message or fallback)
+
     def call(self, entrypoint, inputs=None, **kwargs):
         """Run an entrypoint. Tensor inputs select owned, device-resident Tensor outputs.
 
@@ -1093,7 +1108,7 @@ class Model:
             if count < 0: raise ValueError(f"unknown entrypoint: {entrypoint}")
             handles = (_ffi._ptr * count)()
             if lib.poly_model_call_tensors(self._ptr, ep, bindings, n, handles, count) != 0:
-                raise RuntimeError(f"Tensor call('{entrypoint}') failed")
+                raise self._error(f"Tensor call('{entrypoint}') failed")
             result = {}
             try:
                 for i in range(count):
@@ -1108,7 +1123,7 @@ class Model:
         ret = _get_lib().poly_model_call(
             self._ptr, str(entrypoint).encode('utf-8'), bindings, n)
         if ret != 0:
-            raise RuntimeError(f"call('{entrypoint}') failed (ret={ret})")
+            raise self._error(f"call('{entrypoint}') failed")
         return self._collect_outputs(str(entrypoint))
 
     def train_step(self, inputs=None, *, entrypoint=None, **io):
@@ -1124,7 +1139,7 @@ class Model:
             self._ptr, _name_bytes(entrypoint) if entrypoint is not None else None,
             bindings, n, ctypes.byref(loss))
         if ret != 0:
-            raise RuntimeError(f'train_step failed (ret={ret})')
+            raise self._error('train_step failed')
         return float(loss.value)
 
     def fit(self, data=None, *, epochs=1, optimizer=None, lr=0.01,

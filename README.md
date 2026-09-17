@@ -222,11 +222,20 @@ alone exceed 4 GB, so this is not a Wasm-sized checkpoint.
 C, alongside MLP/TabM/NAM. One JSON configuration can be shared by Python, Node,
 and browsers without model-specific source compilation or an authoring callback.
 `Model(config)` / `new Model(config)` selects these same factories when the object
-declares `format: "poly.modeldef@1"` and `type: "sequential"` or `"graph"`.
+declares `format: "poly.modeldef@1"` and a registered `type`: `mlp`, `tabm`, `nam`,
+`gpt2`, `llama`, `sequential` or `graph`. Named factories, including `models.GPT2`,
+use that same C dispatch and accept untagged configurations.
 Untagged configurations are not guessed; the explicit family factories remain
 available. Python accepts `runtime=rt` for configuration construction. JavaScript
 uses the owning `rt.Model`; WebGPU requires `models.SequentialAsync`/`GraphAsync`.
 They are factories, not subclasses or a second execution graph.
+
+MLP, TabM, NAM and Sequential/Graph initialize their parameters during construction.
+GPT-2, Llama and Qwen checkpoint builders allocate topology and storage, but refuse
+execution and export until all required parameters have been supplied. Use the HF/
+GGUF loaders or explicit Model writes; zero-valued weights are valid. Reading a C
+buffer pointer does not mark it initialized. Unchanged portable bundles remain
+byte-identical across load/save, while separate imports own independent state.
 
 For example, save this as `network.json`:
 
@@ -284,7 +293,8 @@ Graph configurations replace `input/layers/output` with:
 
 Both families accept `modules`, a table of named leaf-component configurations.
 Use `{name, call: "shared", inputs: [...]}` instead of `type` in a Graph node
-(omit `inputs` in Sequential). Repeated calls reuse the declared component's
+(omit `inputs` in Sequential). Here `shared` is the key of a declaration in
+`modules`, not a reserved keyword. Repeated calls reuse the declared component's
 parameters; ordinary Repeat bodies create fresh parameters. Module declarations
 are construction components, not device-placement cuts or runtime submodels.
 See [the shared-layer Graph configuration](test/fixtures/model_definition.json).

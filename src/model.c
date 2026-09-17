@@ -44,6 +44,7 @@ typedef struct {
   int ndim;
   int64_t numel;
   bool trainable; /* PARAMs can be frozen while still saved as weights */
+  bool needs_weights;
 } NamedBuf;
 
 /* Model inputs may use CreationMixin.empty's zero-origin bounded prefix.
@@ -306,6 +307,7 @@ struct PolyModel {
   /* Param subset (indices into bufs[]) */
   int *param_indices;
   int n_params;
+  int n_uninitialized;
   int *trainable_param_indices;
   int n_trainable_params;
 
@@ -3343,6 +3345,42 @@ size_t poly_model_buf_nbytes(const PolyModel *inst, int i) {
 
 /* Read / Write */
 
+int poly_model_require_weights(PolyModel *inst) {
+  if (!inst || inst->stage != POLY_MODEL_BUILT) return -1;
+  inst->n_uninitialized = 0;
+  for (int i = 0; i < inst->n_bufs; i++) {
+    inst->bufs[i].needs_weights = inst->bufs[i].role == POLY_ROLE_PARAM;
+    inst->n_uninitialized += inst->bufs[i].needs_weights;
+  }
+  return 0;
+}
+
+static bool model_weights_ready(PolyModel *inst) {
+  if (!inst) return false;
+  if (!inst->n_uninitialized) return true;
+  for (int i = 0; i < inst->n_bufs; i++)
+    if (inst->bufs[i].needs_weights) {
+      poly_model_set_error(
+          inst, POLY_STATUS_BAD_STAGE, __func__,
+          "weight '%s' is not initialized; load a checkpoint or write all required weights",
+          inst->bufs[i].name
+      );
+      return false;
+    }
+  return false;
+}
+
+static void model_weight_written(PolyModel *inst, int index) {
+  if (!inst->n_uninitialized) return;
+  /* Tied names refer to one logical storage identity, even after placement. */
+  for (int i = 0; i < inst->n_bufs; i++)
+    if (inst->bufs[i].needs_weights &&
+        inst->bufs[i].logical_buffer == inst->bufs[index].logical_buffer) {
+      inst->bufs[i].needs_weights = false;
+      inst->n_uninitialized--;
+    }
+}
+
 int poly_model_read_buf(PolyModel *inst, int i, void *host_dst, size_t dst_len) {
   if (!inst || i < 0 || i >= inst->n_bufs) return -1;
   return poly_buffer_read(inst->ctx, inst->bufs[i].buffer, host_dst, dst_len);
@@ -3350,7 +3388,9 @@ int poly_model_read_buf(PolyModel *inst, int i, void *host_dst, size_t dst_len) 
 
 int poly_model_write_buf(PolyModel *inst, int i, const void *host_src, size_t src_len) {
   if (!inst || i < 0 || i >= inst->n_bufs) return -1;
-  return poly_buffer_write(inst->ctx, inst->bufs[i].buffer, host_src, src_len);
+  int rc = poly_buffer_write(inst->ctx, inst->bufs[i].buffer, host_src, src_len);
+  if (!rc && src_len == named_buf_nbytes(&inst->bufs[i])) model_weight_written(inst, i);
+  return rc;
 }
 
 int poly_model_read_buf_named(PolyModel *inst, const char *name, void *host_dst, size_t dst_len) {
@@ -3391,8 +3431,9 @@ int poly_model_upload_param(PolyModel *inst, int i, const void *host_src, size_t
 /* Weight I/O */
 
 uint8_t *poly_model_export_weights_ex(PolyModel *inst, int *out_len, uint32_t flags) {
+  poly_model_set_error(inst, POLY_STATUS_OK, __func__, NULL);
   if (out_len) *out_len = 0;
-  if (!inst || inst->stage != POLY_MODEL_BUILT) {
+  if (!inst || inst->stage != POLY_MODEL_BUILT || !model_weights_ready(inst)) {
     return NULL;
   }
 
@@ -3530,6 +3571,8 @@ int poly_model_import_weights(PolyModel *inst, const uint8_t *data, int len) {
         );
   }
   for (int i = 0; i < n_undo; i++) {
+    /* Publish readiness only after the complete transaction succeeds. */
+    if (!rc) model_weight_written(inst, undo[i].bi);
     free(undo[i].before);
   }
   free(undo);
@@ -3541,8 +3584,10 @@ int poly_model_import_weights(PolyModel *inst, const uint8_t *data, int len) {
 /* IR Export */
 
 uint8_t *poly_model_export_ir(PolyModel *inst, int *out_len) {
+  poly_model_set_error(inst, POLY_STATUS_OK, __func__, NULL);
   if (!out_len) return NULL;
-  if (!inst || inst->stage != POLY_MODEL_BUILT || !inst->has_portable_source) {
+  if (!inst || inst->stage != POLY_MODEL_BUILT || !inst->has_portable_source ||
+      !model_weights_ready(inst)) {
     *out_len = 0;
     return NULL;
   }
@@ -3683,10 +3728,11 @@ static PolyLinearEntry *model_ensure_entry_executable(PolyModel *inst, int entry
 }
 
 uint8_t *poly_model_export_program(PolyModel *inst, int *out_len) {
+  poly_model_set_error(inst, POLY_STATUS_OK, __func__, NULL);
   if (!out_len) return NULL;
   *out_len = 0;
   if (!inst || inst->stage != POLY_MODEL_BUILT || inst->n_entrypoints <= 0 || !inst->entrypoints ||
-      !inst->entry_executables)
+      !inst->entry_executables || !model_weights_ready(inst))
     return NULL;
   for (int i = 0; i < inst->n_bufs; i++)
     if (inst->bufs[i].dynamic) {
@@ -4351,6 +4397,22 @@ static void model_publish_invocation(PolyModel *inst, const ModelInvocation *inv
       memcpy(inst->bufs[i].current_shape, inv->shapes[i], sizeof(inst->bufs[i].current_shape));
 }
 
+/* DType.name is a renderer spelling (float/long), not the binding vocabulary. */
+static const char *model_dtype_name(PolyDType dtype, char *name) {
+  if (poly_dtype_eq(dtype, POLY_BFLOAT16)) return "bfloat16";
+  if (poly_dtype_is_weak(dtype) || poly_dtype_is_fp8(dtype) || poly_dtype_is_bool(dtype))
+    return poly_dtype_name(dtype);
+  if (!poly_dtype_is_int(dtype) && !poly_dtype_is_float(dtype)) return poly_dtype_name(dtype);
+  snprintf(
+      name, 32, "%s%d",
+      poly_dtype_is_float(dtype)      ? "float"
+      : poly_dtype_is_unsigned(dtype) ? "uint"
+                                      : "int",
+      dtype.bitsize
+  );
+  return name;
+}
+
 static int bind_model_io(
     PolyModel *inst,
     const RuntimeEntrypoint *entry,
@@ -4381,9 +4443,10 @@ static int bind_model_io(
             (io[i].data || io[i].tensor))
           seen++;
       if (seen != 1) {
-        fprintf(
-            stderr, "poly_model_call: entrypoint '%s' requires input '%s' exactly once\n",
-            entry->name, entry->inputs[required]
+        poly_model_set_error(
+            inst, POLY_STATUS_INVALID, __func__,
+            "poly_model_call: entrypoint '%s' requires input '%s' exactly once\n", entry->name,
+            entry->inputs[required]
         );
         return -1;
       }
@@ -4395,19 +4458,26 @@ static int bind_model_io(
    * updated. */
   for (int i = 0; i < n_io; i++) {
     if (!!io[i].data == !!io[i].tensor) {
-      fprintf(stderr, "poly_model_call: input row %d requires exactly one data/Tensor value\n", i);
+      poly_model_set_error(
+          inst, POLY_STATUS_INVALID, __func__,
+          "poly_model_call: input row %d requires exactly one data/Tensor value\n", i
+      );
       return -1;
     }
     if (!io[i].name || !entrypoint_accepts_input(inst, entry, io[i].name)) {
-      fprintf(
-          stderr, "poly_model_call: '%s' is not an input of entrypoint '%s'\n",
+      poly_model_set_error(
+          inst, POLY_STATUS_INVALID, __func__,
+          "poly_model_call: '%s' is not an input of entrypoint '%s'\n",
           io[i].name ? io[i].name : "(null)", entry && entry->name ? entry->name : "(null)"
       );
       return -1;
     }
     for (int prior = 0; prior < i; prior++) {
       if (io[prior].name && strcmp(io[prior].name, io[i].name) == 0) {
-        fprintf(stderr, "poly_model_call: duplicate input '%s'\n", io[i].name);
+        poly_model_set_error(
+            inst, POLY_STATUS_INVALID, __func__, "poly_model_call: duplicate input '%s'\n",
+            io[i].name
+        );
         return -1;
       }
     }
@@ -4415,9 +4485,27 @@ static int bind_model_io(
     int bi = find_buf_by_name(inst, io[i].name);
     if (bi < 0) return -1;
     NamedBuf *b = &inst->bufs[bi];
+    if (!io[i].tensor) {
+      PolyDType supplied;
+      bool valid = poly_dtype_by_id(io[i].dtype_id, &supplied);
+      if (!valid || !poly_dtype_eq(supplied, b->buffer->dtype)) {
+        char expected[32], received[32];
+        poly_model_set_error(
+            inst, POLY_STATUS_INVALID, __func__,
+            "input '%s': expected %s, received %s (dtype id %d)", io[i].name,
+            model_dtype_name(b->buffer->dtype, expected),
+            valid ? model_dtype_name(supplied, received) : "unknown", io[i].dtype_id
+        );
+        return -1;
+      }
+    }
     if ((io[i].tensor && (io[i].shape || io[i].ndim)) || (!io[i].shape && io[i].ndim) ||
         (io[i].shape && (io[i].ndim < 0 || io[i].ndim != b->ndim))) {
-      fprintf(stderr, "poly_model_call: input '%s' has invalid shape metadata\n", io[i].name);
+      poly_model_set_error(
+          inst, POLY_STATUS_INVALID, __func__,
+          "input '%s': expected rank %d; received rank %d or conflicting shape metadata",
+          io[i].name, b->ndim, io[i].ndim
+      );
       return -1;
     }
     int64_t *shape = inv->shapes[bi];
@@ -4425,15 +4513,32 @@ static int bind_model_io(
     if (io[i].shape) memcpy(shape, io[i].shape, (size_t)b->ndim * sizeof(*shape));
     if (io[i].tensor) {
       PolyTensor *t = io[i].tensor;
+      if (t->uop_physical && !poly_dtype_eq(t->uop_physical->dtype, b->buffer->dtype)) {
+        char expected[32], received[32];
+        poly_model_set_error(
+            inst, POLY_STATUS_INVALID, __func__, "input '%s': expected %s, received %s", io[i].name,
+            model_dtype_name(b->buffer->dtype, expected),
+            model_dtype_name(t->uop_physical->dtype, received)
+        );
+        return -1;
+      }
       if (inst->ctx->execution_depth || inst->ctx->collecting || inst->ctx->active_jit_capture ||
           t->owner_ctx != inst->ctx || !t->uop_physical ||
           poly_uop_device(t->uop_physical) != poly_uop_device(b->buffer) ||
-          !poly_dtype_eq(t->uop_physical->dtype, b->buffer->dtype) ||
-          poly_uop_ndim(inst->ctx, t->uop_physical) != b->ndim) {
-        fprintf(
-            stderr,
-            "poly_model_call: Tensor '%s' context/device/dtype/rank mismatch or busy context\n",
+          !poly_dtype_eq(t->uop_physical->dtype, b->buffer->dtype)) {
+        poly_model_set_error(
+            inst, POLY_STATUS_INVALID, __func__,
+            "input '%s': Tensor belongs to another runtime/device, has no physical root, or "
+            "runtime is busy",
             io[i].name
+        );
+        return -1;
+      }
+      int rank = poly_uop_ndim(inst->ctx, t->uop_physical);
+      if (rank != b->ndim) {
+        poly_model_set_error(
+            inst, POLY_STATUS_INVALID, __func__, "input '%s': expected rank %d, received %d",
+            io[i].name, b->ndim, rank
         );
         return -1;
       }
@@ -4441,8 +4546,9 @@ static int bind_model_io(
         PolyUOp *extent = poly_uop_shape_dim(inst->ctx, t->uop_physical, dim);
         if (!extent || extent->op != POLY_OP_CONST || extent->arg.kind != POLY_ARG_INT ||
             extent->arg.i < 0) {
-          fprintf(
-              stderr, "poly_model_call: Tensor '%s' requires the declared fixed shape\n", io[i].name
+          poly_model_set_error(
+              inst, POLY_STATUS_INVALID, __func__,
+              "poly_model_call: Tensor '%s' requires the declared fixed shape\n", io[i].name
           );
           return -1;
         }
@@ -4461,15 +4567,38 @@ static int bind_model_io(
       PolyUOp *dim = model_signature_dim(inst->ctx, b, d);
       PolyUOp *var = poly_uop_unbind_var(dim);
       if (!var) {
-        if (shape[d] != b->shape[d]) return -1;
+        if (shape[d] != b->shape[d]) {
+          poly_model_set_error(
+              inst, POLY_STATUS_INVALID, __func__,
+              "input '%s': expected shape[%d]=%lld, received %lld", io[i].name, d,
+              (long long)b->shape[d], (long long)shape[d]
+          );
+          return -1;
+        }
         continue;
       }
-      if (!poly_uop_bind(inst->ctx, var, shape[d])) return -1;
+      if (!poly_uop_bind(inst->ctx, var, shape[d])) {
+        int64_t lo, hi;
+        poly_uop_minmax(inst->ctx, var, &lo, &hi);
+        poly_model_set_error(
+            inst, POLY_STATUS_INVALID, __func__,
+            "input '%s': shape[%d] must satisfy variable bounds [%lld,%lld], received %lld",
+            io[i].name, d, (long long)lo, (long long)hi, (long long)shape[d]
+        );
+        return -1;
+      }
       int found = -1;
       for (int j = 0; j < inv->n_vars; j++)
         if (model_same_var(var, inv->vars[j].var)) found = j;
       if (found >= 0) {
-        if (inv->vars[found].var != var || inv->vars[found].value != shape[d]) return -1;
+        if (inv->vars[found].var != var || inv->vars[found].value != shape[d]) {
+          poly_model_set_error(
+              inst, POLY_STATUS_INVALID, __func__,
+              "input '%s': shape[%d]=%lld conflicts with shared binding %lld", io[i].name, d,
+              (long long)shape[d], (long long)inv->vars[found].value
+          );
+          return -1;
+        }
       } else
         inv->vars[inv->n_vars++] = (PolyVarBinding){var, shape[d]};
     }
@@ -4477,27 +4606,21 @@ static int bind_model_io(
     /* Model's current storage/copy path cannot execute empty bindings. Admit
      * this capability before writes, not after earlier inputs were changed. */
     if (numel <= 0) {
-      fprintf(stderr, "poly_model_call: input '%s' requires nonempty storage\n", io[i].name);
+      poly_model_set_error(
+          inst, POLY_STATUS_INVALID, __func__,
+          "poly_model_call: input '%s' requires nonempty storage\n", io[i].name
+      );
       return -1;
     }
     if (io[i].tensor) continue;
     size_t itemsize = poly_dtype_itemsize(b->buffer->dtype);
     if (!itemsize || (uint64_t)numel > SIZE_MAX / itemsize) return -1;
     size_t nbytes = (size_t)numel * itemsize;
-    PolyDType supplied_dtype;
-    PolyDType expected_dtype = inst->bufs[bi].buffer->dtype;
     if (io[i].nbytes != nbytes) {
-      fprintf(
-          stderr, "poly_model_call: input '%s' has %zu bytes, expected %zu\n", io[i].name,
-          io[i].nbytes, nbytes
-      );
-      return -1;
-    }
-    if (!poly_dtype_by_id(io[i].dtype_id, &supplied_dtype) ||
-        !poly_dtype_eq(supplied_dtype, expected_dtype)) {
-      fprintf(
-          stderr, "poly_model_call: input '%s' dtype id %d does not match %s\n", io[i].name,
-          io[i].dtype_id, poly_dtype_name(expected_dtype)
+      poly_model_set_error(
+          inst, POLY_STATUS_INVALID, __func__,
+          "poly_model_call: input '%s' has %zu bytes, expected %zu\n", io[i].name, io[i].nbytes,
+          nbytes
       );
       return -1;
     }
@@ -4678,17 +4801,24 @@ static int run_model_sink(
 
 int poly_model_call(PolyModel *inst, const char *entrypoint, PolyIOBinding *io, int n_io) {
   if (!inst || inst->stage != POLY_MODEL_BUILT || !entrypoint) return -1;
+  poly_model_set_error(inst, POLY_STATUS_OK, __func__, NULL);
+  if (!model_weights_ready(inst)) return -1;
 
   int ep_idx = find_entrypoint(inst, entrypoint);
   if (ep_idx < 0) {
-    fprintf(stderr, "poly_model_call: no '%s' entrypoint\n", entrypoint);
+    poly_model_set_error(inst, POLY_STATUS_INVALID, __func__, "no '%s' entrypoint", entrypoint);
     return -1;
   }
 
   PolyUOp *sink = inst->entrypoints[ep_idx].sink;
   PolyLinearEntry *cached_executable =
       inst->entry_executables ? &inst->entry_executables[ep_idx] : NULL;
-  return run_model_sink(inst, &inst->entrypoints[ep_idx], sink, io, n_io, cached_executable);
+  int rc = run_model_sink(inst, &inst->entrypoints[ep_idx], sink, io, n_io, cached_executable);
+  if (rc && !inst->last_error.code)
+    poly_model_set_error(
+        inst, POLY_STATUS_INVALID, __func__, "entrypoint '%s' execution failed", entrypoint
+    );
+  return rc;
 }
 
 int poly_model_call_tensors(
@@ -4706,6 +4836,8 @@ int poly_model_call_tensors(
       inst->ctx->collecting || inst->ctx->active_jit_capture)
     return -1;
   int ep = find_entrypoint(inst, entrypoint);
+  poly_model_set_error(inst, POLY_STATUS_OK, __func__, NULL);
+  if (!model_weights_ready(inst)) return -1;
   if (ep < 0 || inst->entrypoints[ep].n_outputs != n_outputs) return -1;
   ModelInvocation inv = {0};
   if (bind_model_io(inst, &inst->entrypoints[ep], io, n_io, &inv) != 0) {
@@ -5098,6 +5230,7 @@ int poly_model_value_and_grad(
 ) {
   if (!inst || inst->stage != POLY_MODEL_BUILT || !inst->has_portable_source || !entrypoint)
     return -1;
+  if (!model_weights_ready(inst)) return -1;
 
   int ep_idx = find_entrypoint(inst, entrypoint);
   if (ep_idx < 0) {
@@ -5420,10 +5553,8 @@ int poly_model_train_step(
     float *loss_out
 ) {
   if (!inst || inst->stage != POLY_MODEL_BUILT || !inst->has_portable_source) return -1;
-  if (inst->training.optim.kind == POLY_OPTIM_NONE) {
-    fprintf(stderr, "poly_model_train_step: no optimizer configured\n");
-    return -1;
-  }
+  poly_model_set_error(inst, POLY_STATUS_OK, __func__, NULL);
+  if (!model_weights_ready(inst)) return -1;
 
   /* Default to the sole declared objective. A conventional 'loss' entrypoint
    * remains usable for low-level IR with omitted signatures, not as priority
@@ -5433,7 +5564,9 @@ int poly_model_train_step(
     for (int i = 0; i < inst->n_entrypoints; i++) {
       if (!inst->entrypoints[i].objective) continue;
       if (ep_idx >= 0) {
-        fprintf(stderr, "poly_model_train_step: multiple objectives; select an entrypoint\n");
+        poly_model_set_error(
+            inst, POLY_STATUS_INVALID, __func__, "multiple objectives; select an entrypoint"
+        );
         return -1;
       }
       ep_idx = i;
@@ -5441,7 +5574,11 @@ int poly_model_train_step(
     if (ep_idx < 0) ep_idx = find_entrypoint(inst, "loss");
   }
   if (ep_idx < 0) {
-    fprintf(stderr, "poly_model_train_step: no selected objective entrypoint\n");
+    poly_model_set_error(inst, POLY_STATUS_INVALID, __func__, "no selected objective entrypoint");
+    return -1;
+  }
+  if (inst->training.optim.kind == POLY_OPTIM_NONE) {
+    poly_model_set_error(inst, POLY_STATUS_INVALID, __func__, "no optimizer configured");
     return -1;
   }
 
@@ -5706,6 +5843,7 @@ done:
 
 int poly_model_copy_prefixed_weights(PolyModel *dst, PolyModel *src, const char *prefix) {
   if (!dst || !src) return -1;
+  if (!model_weights_ready(src)) return -1;
   for (int i = 0; i < src->n_params; i++) {
     int sbi = src->param_indices[i];
     const NamedBuf *sb = &src->bufs[sbi];
@@ -5720,7 +5858,7 @@ int poly_model_copy_prefixed_weights(PolyModel *dst, PolyModel *src, const char 
     uint8_t *tmp = malloc(nbytes);
     if (!tmp) return -1;
     int rc = poly_buffer_read(src->ctx, sb->buffer, tmp, nbytes);
-    if (rc == 0) rc = poly_buffer_write(dst->ctx, db->buffer, tmp, nbytes);
+    if (rc == 0) rc = poly_model_write_buf(dst, dbi, tmp, nbytes);
     free(tmp);
     if (rc != 0) return -1;
   }

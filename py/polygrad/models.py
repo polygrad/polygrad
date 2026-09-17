@@ -1,9 +1,8 @@
 """Model-family constructors.
 
 These constructors call C model-family builders and return generic
-``Model`` runtime objects. Model families do not belong on ``Model``:
-``Model`` is the runnable/exportable artifact, while this module owns named
-architecture factories such as MLP, TabM, and NAM.
+``Model`` runtime objects. This module owns named architecture factories; Model.from_hf/from_gguf are
+format-loading conveniences delegating to the C loaders.
 """
 
 import json
@@ -17,7 +16,7 @@ from .model import _import_context
 
 def _normalize_spec(spec):
     if isinstance(spec, dict):
-        spec = json.dumps(spec)
+        spec = json.dumps(spec, allow_nan=False)
     if isinstance(spec, str):
         return spec.encode("utf-8")
     if isinstance(spec, bytes):
@@ -46,59 +45,19 @@ def MLP(spec=None, *, layers=None, activation="relu", bias=True, loss="none",
         spec = {**spec, **extra}
         if layers is not None:
             spec["layers"] = layers
-    data = _normalize_spec(spec)
+    return _build('mlp', spec, runtime, device)
+
+
+
+def _build(family, spec, runtime=None, device=None):
     ctx = _import_context(runtime)
-    ptr = _ffi.get_lib().poly_mlp_from_json_into(ctx, data, len(data), _device_id(device) if device is not None else 0)
-    return Model._from_handle(ptr, ctx)
-
-
-def TabM(spec=None, *, device=None, runtime=None, **kwargs):
-    """Build a TabM model family instance."""
-    if spec is None:
-        spec = kwargs
-    elif kwargs:
-        if not isinstance(spec, dict):
-            raise TypeError("TabM keyword overrides require a dict spec")
-        spec = {**spec, **kwargs}
     data = _normalize_spec(spec)
-    ctx = _import_context(runtime)
-    ptr = _ffi.get_lib().poly_tabm_from_json_into(ctx, data, len(data), _device_id(device) if device is not None else 0)
-    return Model._from_handle(ptr, ctx)
-
-
-def NAM(spec=None, *, device=None, runtime=None, **kwargs):
-    """Build a NAM model family instance."""
-    if spec is None:
-        spec = kwargs
-    elif kwargs:
-        if not isinstance(spec, dict):
-            raise TypeError("NAM keyword overrides require a dict spec")
-        spec = {**spec, **kwargs}
-    data = _normalize_spec(spec)
-    ctx = _import_context(runtime)
-    ptr = _ffi.get_lib().poly_nam_from_json_into(ctx, data, len(data), _device_id(device) if device is not None else 0)
-    return Model._from_handle(ptr, ctx)
-
-
-def _compose(family, spec, runtime):
-    from . import _default_ctx, Runtime
-
-    if runtime is not None:
-        if not isinstance(runtime, Runtime):
-            raise TypeError('runtime must be a Polygrad Runtime')
-        runtime._check_live()
-    ctx = runtime._ctx if runtime is not None else _default_ctx
-    if not ctx:
-        raise RuntimeError('polygrad runtime has been disposed')
-    if isinstance(spec, dict):
-        spec = json.dumps(spec, allow_nan=False)
-    data = _normalize_spec(spec)
-    if len(data) > 1048576:
-        raise ValueError('model configuration exceeds 1048576 JSON bytes')
     err = _ffi.PolyModelError()
-    ptr = getattr(_ffi.get_lib(), f'poly_{family}_from_json')(ctx, data, len(data), ctypes.byref(err))
+    ptr = _ffi.get_lib().poly_model_from_config(
+        ctx, family.encode() if family else None, data, len(data),
+        _device_id(device) if device is not None else 0, ctypes.byref(err))
     if not ptr:
-        raise ValueError(bytes(err.message).split(b'\0', 1)[0].decode('utf-8', 'replace'))
+        raise ValueError(bytes(err.message).decode('utf-8', 'replace'))
     return Model._from_handle(ptr, ctx)
 
 
@@ -106,10 +65,11 @@ def Sequential(spec, *, runtime=None):
     """Build an ordered component stack in C; return an ordinary Model.
 
     Accept a configuration dict, JSON string or bytes. Uses the default context
-    unless runtime is supplied. That context must allow logical construction.
+    unless runtime is supplied. Construction scopes logical retention and
+    restores the runtime's policy without changing existing Tensors.
     Repeat creates fresh parameters; explicit shared-component calls reuse state.
     """
-    return _compose('sequential', spec, runtime)
+    return _build('sequential', spec, runtime)
 
 
 def Graph(spec, *, runtime=None):
@@ -118,7 +78,7 @@ def Graph(spec, *, runtime=None):
     Takes the same configuration forms and context ownership as Sequential.
     Inputs reference preceding nodes; explicit entrypoints can select objectives.
     """
-    return _compose('graph', spec, runtime)
+    return _build('graph', spec, runtime)
 
 
 def Llama(spec, *, runtime=None):
@@ -128,7 +88,27 @@ def Llama(spec, *, runtime=None):
     Supports unscaled/Llama-3 RoPE and tied embeddings. No KV cache or sampler.
     Populate parameters explicitly, or use Model.from_hf for pretrained weights.
     """
-    return _compose('llama', spec, runtime)
+    return _build('llama', spec, runtime)
 
 
-__all__ = ["MLP", "TabM", "NAM", "Sequential", "Graph", "Llama"]
+def _family_factory(name):
+    def factory(spec=None, *, runtime=None, device=None, **kwargs):
+        if spec is None:
+            spec = kwargs
+        elif kwargs:
+            if not isinstance(spec, dict):
+                raise TypeError(f'{name} keyword overrides require a dict spec')
+            spec = {**spec, **kwargs}
+        return _build(name, spec, runtime, device)
+    factory.__name__ = name
+    factory.__doc__ = f"Construct {name} through the shared C family registry."
+    return factory
+
+
+__all__ = []
+while (name := _ffi.get_lib().poly_model_family_name(len(__all__))) is not None:
+    name = name.decode('ascii')
+    __all__.append(name)
+    if name not in globals():
+        globals()[name] = _family_factory(name)
+del name

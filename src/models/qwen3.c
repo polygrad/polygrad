@@ -210,6 +210,7 @@ static PolyModel *qwen3_build(PolyCtx *ctx, const Qwen3Config *cfg) {
     poly_model_free(inst);
     return NULL;
   }
+  if (poly_model_require_weights(inst) != 0) goto fail_pre_build;
   return inst;
 
 fail_pre_build:

@@ -305,6 +305,11 @@ finally:
 safetensors. The `generate` helper above expects GPT-2 input/output names;
 it is not a Llama generation API. Qwen loading uses the shared C/GGUF path.
 
+`models.GPT2(config)` and `models.Llama(config)` build topology without pretrained
+weights. They reject execution and saving until every required parameter has been
+written; use a checkpoint loader for a ready-to-run model. Explicit zero weights
+are valid. Wrong input dtypes are rejected, not silently narrowed.
+
 For C-built families and JSON-based `models.Sequential` / `models.Graph`, see
 [model configuration](https://github.com/polygrad/polygrad#configuration-driven-model-families).
 These return the same Model type and use the same training and export APIs.

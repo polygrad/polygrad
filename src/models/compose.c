@@ -3,6 +3,8 @@
  * Math is owned by Tensor/nn (not this parser); sharing means reusing the same
  * parameter Tensor, as multiple calls to one tinygrad.nn.Linear do. */
 #include "compose.h"
+#include "factory.h"
+#include "layers.h"
 #include "../nn/nn.h"
 #include "../tensor.h"
 #include "mlp.h"
@@ -105,72 +107,6 @@ static bool integer(
       v->valuedouble > (double)hi || floor(v->valuedouble) != v->valuedouble)
     return def_error(d, path, "expected integer in [%lld,%lld]", (long long)lo, (long long)hi);
   *out = (int64_t)v->valuedouble;
-  return true;
-}
-
-/* Reject ambiguous duplicate keys at every level, including unused declarations.
- * The lexical preflight bounds recursion before cJSON itself parses the input. */
-static bool unique_keys(Definition *d, const cJSON *obj, int *budget) {
-  if (--*budget < 0) return def_error(d, "$", "JSON node budget exceeded");
-  for (const cJSON *a = obj->child; a; a = a->next) {
-    if (cJSON_IsObject(obj))
-      for (const cJSON *b = obj->child; b != a; b = b->next)
-        if (!strcmp(a->string, b->string))
-          return def_error(d, "$", "duplicate key '%s'", a->string);
-    if (!unique_keys(d, a, budget)) return false;
-  }
-  return true;
-}
-
-static bool json_preflight(Definition *d, const char *json, int len) {
-  if (!json || len <= 0 || len > 1024 * 1024)
-    return def_error(d, "$", "expected 1..1048576 JSON bytes");
-  int depth = 0;
-  bool quoted = false;
-  for (int i = 0; i < len; i++) {
-    unsigned char c = (unsigned char)json[i];
-    if (!c) return def_error(d, "$", "embedded NUL");
-    if (quoted && c == '\\') {
-      if (i + 5 < len && !memcmp(json + i, "\\u0000", 6)) return def_error(d, "$", "escaped NUL");
-      i++;
-    } else if (c == '"')
-      quoted = !quoted;
-    else if (quoted && c < 32)
-      return def_error(d, "$", "control character in string");
-    else if (!quoted && (c == '-' || (c >= '0' && c <= '9'))) {
-      /* cJSON's strtod parser accepts 01 and 1.; require JSON number grammar
-       * before schema integer/range validation, without another numeric evaluator. */
-      int p = i;
-      if (json[p] == '-') p++;
-      if (p == len || json[p] < '0' || json[p] > '9')
-        return def_error(d, "$", "invalid JSON number");
-      if (json[p] == '0')
-        p++;
-      else
-        while (p < len && json[p] >= '0' && json[p] <= '9')
-          p++;
-      if (p < len && json[p] >= '0' && json[p] <= '9')
-        return def_error(d, "$", "invalid JSON number");
-      if (p < len && json[p] == '.') {
-        int start = ++p;
-        while (p < len && json[p] >= '0' && json[p] <= '9')
-          p++;
-        if (p == start) return def_error(d, "$", "invalid JSON number");
-      }
-      if (p < len && (json[p] == 'e' || json[p] == 'E')) {
-        p++;
-        if (p < len && (json[p] == '+' || json[p] == '-')) p++;
-        int start = p;
-        while (p < len && json[p] >= '0' && json[p] <= '9')
-          p++;
-        if (p == start) return def_error(d, "$", "invalid JSON number");
-      }
-      i = p - 1;
-    } else if (!quoted && (c == '{' || c == '[')) {
-      if (++depth > 32) return def_error(d, "$", "JSON nesting exceeds 32");
-    } else if (!quoted && (c == '}' || c == ']'))
-      depth--;
-  }
   return true;
 }
 
@@ -431,19 +367,16 @@ static PolyTensor *apply(
       snprintf(layer->name, sizeof(layer->name), "%s", path);
       layer->in_features = fan_in;
       layer->out_features = width;
-      char name[DEF_NAME];
-      int64_t ws[] = {width, fan_in};
-      if (!path_join(d, name, path, "weight")) return NULL;
-      layer->weight = own(d, poly_model_param(d->model, name, POLY_FLOAT32, ws, 2), path);
-      if (!layer->weight) return NULL;
-      /* Wrapper-local retention: never change the caller's context policy. */
-      if (poly_tensor_set_logical_policy(d->ctx, layer->weight, POLY_LOGICAL_ALWAYS)) return NULL;
-      if (use_bias) {
-        if (!path_join(d, name, path, "bias")) return NULL;
-        layer->bias = own(d, poly_model_param(d->model, name, POLY_FLOAT32, &width, 1), path);
-        if (!layer->bias) return NULL;
-        if (poly_tensor_set_logical_policy(d->ctx, layer->bias, POLY_LOGICAL_ALWAYS)) return NULL;
+      PolyTensor *weight = NULL, *bias_tensor = NULL;
+      if (poly_model_linear_parameters(
+              d->model, path, (int)fan_in, (int)width, use_bias, &weight, &bias_tensor
+          )) {
+        def_error(d, path, "Linear parameter construction failed");
+        return NULL;
       }
+      layer->weight = own(d, weight, path);
+      if (bias_tensor) layer->bias = own(d, bias_tensor, path);
+      if (!layer->weight || (use_bias && !layer->bias)) return NULL;
     }
     out = own(d, poly_tensor_linear_apply(d->ctx, x, layer->weight, layer->bias), path);
     return out ? activation(d, out, act ? act->valuestring : "none", path) : NULL;
@@ -664,10 +597,9 @@ static bool construct(Definition *d, const cJSON *root) {
   return true;
 }
 
-static PolyModel *compose_from_json(
+static PolyModel *compose_build(
     PolyCtx *ctx,
-    const char *json,
-    int len,
+    const cJSON *root,
     PolyModelError *err,
     const char *family
 ) {
@@ -684,7 +616,6 @@ static PolyModel *compose_from_json(
   d->ctx = ctx;
   d->err = err;
   d->family = family;
-  cJSON *root = NULL;
   bool ok = false;
   if (!ctx) {
     def_error(d, "$", "a live borrowed context is required");
@@ -694,21 +625,6 @@ static PolyModel *compose_from_json(
     def_error(d, "$", "portable Model requires logical construction");
     goto done;
   }
-  if (!json_preflight(d, json, len)) goto done;
-  const char *end = NULL;
-  root = cJSON_ParseWithLengthOpts(json, (size_t)len, &end, false);
-  if (!root) {
-    def_error(d, "$", "invalid JSON near byte %ld", end ? (long)(end - json) : 0L);
-    goto done;
-  }
-  while (end < json + len && isspace((unsigned char)*end))
-    end++;
-  if (end != json + len) {
-    def_error(d, "$", "trailing JSON data");
-    goto done;
-  }
-  int budget = 16384;
-  if (!unique_keys(d, root, &budget)) goto done;
   d->model = poly_model_new(ctx, NULL);
   if (!d->model) {
     def_error(d, "$", "Model allocation failed");
@@ -720,32 +636,15 @@ static PolyModel *compose_from_json(
    * model state, never host-pointer aliases or a second residency table. */
   for (int i = 0; i < d->n_linear; i++) {
     DefLinear *layer = &d->linear[i];
-    int64_t count = layer->in_features * layer->out_features;
-    float *values = malloc((size_t)count * sizeof(float));
     char name[DEF_NAME];
-    if (!values) {
-      def_error(d, layer->name, "initializer allocation failed");
-      goto done;
-    }
-    if (!path_join(d, name, layer->name, "weight")) {
-      free(values);
-      goto done;
-    }
-    poly_init_param_kaiming(d->seed, name, values, count, layer->in_features);
-    int rc = poly_model_write_buf_named(d->model, name, values, (size_t)count * sizeof(float));
-    if (!rc && layer->bias) {
-      memset(values, 0, (size_t)layer->out_features * sizeof(float));
-      if (!path_join(d, name, layer->name, "bias")) {
-        free(values);
-        goto done;
-      }
-      rc = poly_model_write_buf_named(
-          d->model, name, values, (size_t)layer->out_features * sizeof(float)
-      );
-    }
-    free(values);
-    if (rc) {
+    if (!path_join(d, name, layer->name, "weight") ||
+        model_init_param(d->model, name, d->seed, layer->in_features, 0)) {
       def_error(d, layer->name, "initializer write failed");
+      goto done;
+    }
+    if (layer->bias &&
+        (!path_join(d, name, layer->name, "bias") || model_init_param(d->model, name, 0, 0, 0))) {
+      def_error(d, layer->name, "bias initializer write failed");
       goto done;
     }
   }
@@ -764,15 +663,22 @@ done:
     poly_tensor_release(d->handles[i]);
   PolyModel *result = ok ? d->model : NULL;
   if (!ok) poly_model_free(d->model);
-  cJSON_Delete(root);
   free(d);
   return result;
 }
 
 PolyModel *poly_sequential_from_json(PolyCtx *ctx, const char *json, int len, PolyModelError *err) {
-  return compose_from_json(ctx, json, len, err, "sequential");
+  return poly_model_from_config(ctx, "sequential", json, len, POLY_DEVICE_AUTO, err);
 }
 
 PolyModel *poly_graph_from_json(PolyCtx *ctx, const char *json, int len, PolyModelError *err) {
-  return compose_from_json(ctx, json, len, err, "graph");
+  return poly_model_from_config(ctx, "graph", json, len, POLY_DEVICE_AUTO, err);
+}
+
+PolyModel *model_sequential_build(PolyCtx *ctx, const cJSON *root, PolyModelError *err) {
+  return compose_build(ctx, root, err, "sequential");
+}
+
+PolyModel *model_graph_build(PolyCtx *ctx, const cJSON *root, PolyModelError *err) {
+  return compose_build(ctx, root, err, "graph");
 }

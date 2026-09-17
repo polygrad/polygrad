@@ -12,6 +12,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tabm.h"
 #include "factory.h"
+#include <limits.h>
 
 #include "mlp.h" /* poly_init_param_kaiming */
 #include "../model.h"
@@ -61,15 +62,12 @@ static PolyTensor *tabm_float_scalar(PolyCtx *ctx, double value) {
 
 /* TabM Builder */
 
-static PolyModel *tabm_build(PolyCtx *ctx, const char *spec_json, int spec_len) {
-  if (!spec_json || spec_len <= 0) return NULL;
-
-  /* Parse JSON */
-  cJSON *root = cJSON_ParseWithLength(spec_json, (size_t)spec_len);
-  if (!root) {
-    fprintf(stderr, "poly_tabm_from_json: JSON parse error\n");
+PolyModel *model_tabm_build(PolyCtx *ctx, const cJSON *root, PolyModelError *err) {
+  if (!(model_config_training(root, err) &&
+        model_config_sizes(root, "layers", 2, INT_MAX, true, err) &&
+        model_config_integer(root, "n_ensemble", 1, INT_MAX, false, err) &&
+        model_config_choice(root, "activation", "|relu|gelu|silu|none|", err)))
     return NULL;
-  }
 
   /* Extract fields */
   cJSON *layers_arr = cJSON_GetObjectItem(root, "layers");
@@ -79,22 +77,10 @@ static PolyModel *tabm_build(PolyCtx *ctx, const char *spec_json, int spec_len) 
   cJSON *seed_item = cJSON_GetObjectItem(root, "seed");
   cJSON *ensemble_item = cJSON_GetObjectItem(root, "n_ensemble");
 
-  if (!layers_arr || !cJSON_IsArray(layers_arr)) {
-    fprintf(stderr, "poly_tabm_from_json: 'layers' must be an array\n");
-    cJSON_Delete(root);
-    return NULL;
-  }
-
   int n_layers = cJSON_GetArraySize(layers_arr);
-  if (n_layers < 2) {
-    fprintf(stderr, "poly_tabm_from_json: need at least 2 layers\n");
-    cJSON_Delete(root);
-    return NULL;
-  }
 
   int *layer_sizes = malloc((size_t)n_layers * sizeof(int));
   if (!layer_sizes) {
-    cJSON_Delete(root);
     return NULL;
   }
   for (int i = 0; i < n_layers; i++) {
@@ -261,49 +247,26 @@ static PolyModel *tabm_build(PolyCtx *ctx, const char *spec_json, int spec_len) 
       goto fail_pre_build;
   }
 
-  PolyModelError err = {0};
-  if (poly_model_build(inst, &err) != POLY_STATUS_OK) {
-    if (err.message[0]) fprintf(stderr, "poly_tabm_from_json: build failed: %s\n", err.message);
+  if (poly_model_build(inst, err) != POLY_STATUS_OK) {
     poly_model_free(inst);
     free(param_bufs);
     free(layer_sizes);
-    cJSON_Delete(root);
     return NULL;
   }
 
-  /* Initialize weights directly in instance buffers. */
+  /* Publish initialized state coherently, including device-owned storage. */
   for (int l = 0; l < n_linear; l++) {
-    int l_in = layer_sizes[l];
-    int l_out = layer_sizes[l + 1];
     char name[128];
-
     snprintf(name, sizeof(name), "layers.%d.weight", l);
-    float *w_data = poly_model_buf_data_named(inst, name, NULL);
-    if (w_data) {
-      int64_t w_numel = (int64_t)l_out * l_in;
-      poly_init_param_kaiming(seed, name, w_data, w_numel, (int64_t)l_in);
-    }
-
+    if (model_init_param(inst, name, seed, layer_sizes[l], 0)) goto fail_pre_build;
     snprintf(name, sizeof(name), "layers.%d.r", l);
-    int64_t r_numel = 0;
-    float *r_data = poly_model_buf_data_named(inst, name, &r_numel);
-    if (r_data) {
-      for (int64_t i = 0; i < r_numel; i++)
-        r_data[i] = 1.0f;
-    }
-
+    if (model_init_param(inst, name, 0, 0, 1)) goto fail_pre_build;
     snprintf(name, sizeof(name), "layers.%d.s", l);
-    int64_t s_numel = 0;
-    float *s_data = poly_model_buf_data_named(inst, name, &s_numel);
-    if (s_data) {
-      for (int64_t i = 0; i < s_numel; i++)
-        s_data[i] = 1.0f;
-    }
+    if (model_init_param(inst, name, 0, 0, 1)) goto fail_pre_build;
   }
 
   free(param_bufs);
   free(layer_sizes);
-  cJSON_Delete(root);
   return inst;
 
 fail_pre_build:
@@ -311,16 +274,13 @@ fail_pre_build:
   poly_model_free(inst);
 fail_no_ctx:
   free(layer_sizes);
-  cJSON_Delete(root);
   return NULL;
 }
 
 /* Standalone C callers own a context through the returned Model; frontends
  * use the context-taking form so Runtime disposal reaches every family. */
 static PolyModel *tabm_create(PolyCtx *ctx, const char *json, int len, PolyDevice device) {
-  PolyModelFactoryScope scope;
-  if (!model_factory_begin(&scope, ctx, device)) return NULL;
-  return model_factory_end(&scope, tabm_build(scope.ctx, json, len));
+  return poly_model_from_config(ctx, "tabm", json, len, device, NULL);
 }
 
 PolyModel *poly_tabm_from_json(const char *json, int len, PolyDevice device) {

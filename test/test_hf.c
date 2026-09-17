@@ -957,9 +957,10 @@ TEST(hf, gpt2_forward_e2e) {
   /* Initialize weights with small random values */
   int np = poly_model_param_count(inst);
   for (int i = 0; i < np; i++) {
-    int64_t numel;
-    float *data = poly_model_param_data(inst, i, &numel);
     const char *name = poly_model_param_name(inst, i);
+    int64_t numel = poly_model_buf_numel_named(inst, name);
+    float *data = calloc((size_t)numel, sizeof(float));
+    ASSERT_NOT_NULL(data);
     /* LayerNorm weights init to 1, biases to 0 */
     if (strstr(name, "ln_") && strstr(name, "weight")) {
       for (int64_t j = 0; j < numel; j++)
@@ -971,6 +972,8 @@ TEST(hf, gpt2_forward_e2e) {
       for (int64_t j = 0; j < numel; j++)
         data[j] = 0.02f * ((float)(j % 100) / 100.0f - 0.5f);
     }
+    ASSERT_INT_EQ(poly_model_upload_param(inst, i, data, (size_t)numel * sizeof(float)), 0);
+    free(data);
   }
 
   /* Pinned GPT-style embedding inputs are integer token/position indices.
@@ -1067,9 +1070,10 @@ TEST(hf, gpt2_training_loss_decreases) {
   /* Initialize weights with small random values */
   int np = poly_model_param_count(inst);
   for (int i = 0; i < np; i++) {
-    int64_t numel;
-    float *data = poly_model_param_data(inst, i, &numel);
     const char *name = poly_model_param_name(inst, i);
+    int64_t numel = poly_model_buf_numel_named(inst, name);
+    float *data = calloc((size_t)numel, sizeof(float));
+    ASSERT_NOT_NULL(data);
     if (strstr(name, "ln_") && strstr(name, "weight")) {
       for (int64_t j = 0; j < numel; j++)
         data[j] = 1.0f;
@@ -1080,6 +1084,8 @@ TEST(hf, gpt2_training_loss_decreases) {
       for (int64_t j = 0; j < numel; j++)
         data[j] = 0.02f * ((float)((j * 7 + 13) % 100) / 100.0f - 0.5f);
     }
+    ASSERT_INT_EQ(poly_model_upload_param(inst, i, data, (size_t)numel * sizeof(float)), 0);
+    free(data);
   }
 
   int32_t token_data[8], position_data[8];

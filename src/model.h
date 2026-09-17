@@ -131,6 +131,11 @@ PolyModel *poly_model_new(PolyCtx *ctx, const PolyModelOptions *opts);
 PolyModelStage poly_model_stage(const PolyModel *inst);
 const PolyModelError *poly_model_last_error(const PolyModel *inst);
 
+/* Checkpoint-only builders call this after sealing. Each PARAM storage identity
+ * then needs a successful complete write/checkpoint import before execution or
+ * export. Reading a raw pointer does not initialize state. */
+int poly_model_require_weights(PolyModel *inst);
+
 PolyStatus poly_model_scope_push(PolyModel *inst, const char *fmt, ...)
     __attribute__((format(printf, 2, 3)));
 PolyStatus poly_model_scope_pop(PolyModel *inst);

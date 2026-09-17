@@ -16,6 +16,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "nam.h"
 #include "factory.h"
+#include <limits.h>
 
 #include "mlp.h" /* poly_init_param_kaiming */
 #include "../model.h"
@@ -51,15 +52,13 @@ static PolyTensor *nam_float_scalar(PolyCtx *ctx, double value) {
 
 /* NAM Builder */
 
-static PolyModel *nam_build(PolyCtx *ctx, const char *spec_json, int spec_len) {
-  if (!spec_json || spec_len <= 0) return NULL;
-
-  /* Parse JSON */
-  cJSON *root = cJSON_ParseWithLength(spec_json, (size_t)spec_len);
-  if (!root) {
-    fprintf(stderr, "poly_nam_from_json: JSON parse error\n");
+PolyModel *model_nam_build(PolyCtx *ctx, const cJSON *root, PolyModelError *err) {
+  if (!(model_config_training(root, err) &&
+        model_config_integer(root, "n_features", 1, INT_MAX, true, err) &&
+        model_config_integer(root, "n_outputs", 1, INT_MAX, false, err) &&
+        model_config_sizes(root, "hidden_sizes", 0, 16, false, err) &&
+        model_config_choice(root, "activation", "|relu|gelu|silu|exu|", err)))
     return NULL;
-  }
 
   /* Extract fields */
   cJSON *nf_item = cJSON_GetObjectItem(root, "n_features");
@@ -70,24 +69,13 @@ static PolyModel *nam_build(PolyCtx *ctx, const char *spec_json, int spec_len) {
   cJSON *batch_item = cJSON_GetObjectItem(root, "batch_size");
   cJSON *seed_item = cJSON_GetObjectItem(root, "seed");
 
-  if (!nf_item || !cJSON_IsNumber(nf_item)) {
-    fprintf(stderr, "poly_nam_from_json: 'n_features' required\n");
-    cJSON_Delete(root);
-    return NULL;
-  }
   int n_features = nf_item->valueint;
-  if (n_features < 1) {
-    fprintf(stderr, "poly_nam_from_json: n_features must be >= 1\n");
-    cJSON_Delete(root);
-    return NULL;
-  }
 
   /* Parse hidden_sizes array */
   int n_hidden = 1;
   int hidden_sizes[16] = {64};
   if (hs_item && cJSON_IsArray(hs_item)) {
     n_hidden = cJSON_GetArraySize(hs_item);
-    if (n_hidden > 16) n_hidden = 16;
     for (int i = 0; i < n_hidden; i++) {
       hidden_sizes[i] = cJSON_GetArrayItem(hs_item, i)->valueint;
     }
@@ -106,7 +94,6 @@ static PolyModel *nam_build(PolyCtx *ctx, const char *spec_json, int spec_len) {
   int n_layers = n_hidden + 2; /* input(1) + hidden... + output */
   int *subnet_sizes = malloc((size_t)n_layers * sizeof(int));
   if (!subnet_sizes) {
-    cJSON_Delete(root);
     return NULL;
   }
   subnet_sizes[0] = 1;
@@ -264,46 +251,36 @@ static PolyModel *nam_build(PolyCtx *ctx, const char *spec_json, int spec_len) {
       goto fail_pre_build;
   }
 
-  PolyModelError err = {0};
-  if (poly_model_build(inst, &err) != POLY_STATUS_OK) {
-    if (err.message[0]) fprintf(stderr, "poly_nam_from_json: build failed: %s\n", err.message);
+  if (poly_model_build(inst, err) != POLY_STATUS_OK) {
     poly_model_free(inst);
     free(subnet_sizes);
-    cJSON_Delete(root);
     return NULL;
   }
 
-  /* Initialize weights (Kaiming) directly in instance buffers. */
+  /* Publish initialized state through the coherent Model write API. */
   for (int k = 0; k < n_features; k++) {
     for (int l = 0; l < n_linear; l++) {
       int in_dim = subnet_sizes[l];
-      int out_dim = subnet_sizes[l + 1];
-      int64_t w_numel = (int64_t)out_dim * in_dim;
       char name[128];
       snprintf(name, sizeof(name), "features.%d.layers.%d.weight", k, l);
-      float *w_data = poly_model_buf_data_named(inst, name, NULL);
-      if (w_data) poly_init_param_kaiming(seed, name, w_data, w_numel, (int64_t)in_dim);
+      if (model_init_param(inst, name, seed, in_dim, 0)) goto fail_pre_build;
     }
   }
 
   free(subnet_sizes);
-  cJSON_Delete(root);
   return inst;
 
 fail_pre_build:
   poly_model_free(inst);
 fail_no_instance:
   free(subnet_sizes);
-  cJSON_Delete(root);
   return NULL;
 }
 
 /* Standalone C callers own a context through the returned Model; frontends
  * use the context-taking form so Runtime disposal reaches every family. */
 static PolyModel *nam_create(PolyCtx *ctx, const char *json, int len, PolyDevice device) {
-  PolyModelFactoryScope scope;
-  if (!model_factory_begin(&scope, ctx, device)) return NULL;
-  return model_factory_end(&scope, nam_build(scope.ctx, json, len));
+  return poly_model_from_config(ctx, "nam", json, len, device, NULL);
 }
 
 PolyModel *poly_nam_from_json(const char *json, int len, PolyDevice device) {

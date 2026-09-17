@@ -380,6 +380,10 @@ reapply the optimizer configuration after loading.
 For C-built families and `models.Sequential` / `models.Graph`, see
 [model configuration](https://github.com/polygrad/polygrad#configuration-driven-model-families).
 
+`models.GPT2` and `models.Llama` construct checkpoint-required models. Load
+weights or explicitly write every parameter before calling or exporting them.
+Partial writes do not initialize a parameter; explicitly written zeros do.
+
 ### Capture and input rules
 
 - Object authors expose `forward(inputs)`; their Tensor attributes supply state

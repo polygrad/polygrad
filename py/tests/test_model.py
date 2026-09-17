@@ -7,6 +7,79 @@ from polygrad.models import MLP, Graph, Sequential
 from polygrad.tensor import Tensor
 
 
+@pytest.mark.parametrize('family,config', [
+    ('mlp', {'layers':[2, 1]}), ('tabm', {'layers':[2, 1], 'n_ensemble':2}),
+    ('nam', {'n_features':2, 'hidden_sizes':[2]}),
+    ('gpt2', {'vocab_size':8, 'n_embd':4, 'n_head':2, 'n_layer':1, 'n_positions':2}),
+])
+def test_registered_family_config_dispatch(family, config):
+    import polygrad as pg
+    with pg.create(device='cpu', logical='never') as rt:
+        model = rt.Model({'format':'poly.modeldef@1', 'type':family, **config})
+        try:
+            assert model._ctx == rt._ctx
+            assert model.bindings()
+            assert model.entrypoints()
+        finally:
+            model.dispose()
+
+
+@pytest.mark.parametrize('family,config,field', [
+    ('MLP', {'layers':[2]}, 'layers'),
+    ('MLP', {'layers':[2, 1], 'activation':7}, 'activation'),
+    ('TabM', {'layers':[2, 1], 'n_ensemble':0}, 'n_ensemble'),
+    ('NAM', {'n_features':2, 'hidden_sizes':[0]}, 'hidden_sizes'),
+])
+def test_family_config_errors_are_structured(family, config, field, capfd):
+    import polygrad as pg
+    with pytest.raises(ValueError, match=field):
+        getattr(pg.models, family)(config)
+    assert capfd.readouterr().err == ''
+
+
+def test_tabm_factory_does_not_inherit_mlp_fixed_layer_limit():
+    from polygrad.models import TabM
+    model = TabM({'layers': [1] * 34, 'n_ensemble': 1})
+    try:
+        assert model.param_count == 33 * 4
+    finally:
+        model.dispose()
+
+
+def test_bundle_resave_is_canonical_in_shared_runtime():
+    import polygrad as pg
+    with pg.create(device='cpu', logical='always') as rt:
+        x = rt.Tensor.empty(2)
+        w = rt.Tensor([2., 3.])
+        model = rt.Model(lambda x: {'prediction': x * w}, inputs={'x': x}, params={'w': w})
+        try:
+            original = model.save(include_optimizer=False)
+            copies = []
+            try:
+                for _ in range(3):
+                    copies.append(rt.Model.load(original))
+                    assert copies[-1].save(include_optimizer=False) == original
+                copies[0].write_buffer('w', np.array([7, 8], np.float32))
+                for independent in (model, *copies[1:]):
+                    np.testing.assert_array_equal(independent.read_buffer('w'), [2, 3])
+            finally:
+                for copy in copies: copy.dispose()
+        finally:
+            model.dispose()
+
+
+def test_model_input_and_training_errors_describe_contract(capfd):
+    model = MLP(layers=[2, 1])
+    try:
+        with pytest.raises((ValueError, RuntimeError), match='x.*expected float32.*int64'):
+            model.forward(x=np.array([[1, 2]], dtype=np.int64))
+        with pytest.raises((ValueError, RuntimeError), match='objective'):
+            model.fit(x=np.array([[1, 2]], dtype=np.float32))
+        assert capfd.readouterr().err == ''
+    finally:
+        model.dispose()
+
+
 def test_uniform_placement_accepts_exact_cpu_identity():
     import polygrad as pg
     with pg.create(device='cpu', logical='always') as rt:
@@ -1011,7 +1084,7 @@ class TestModelDefinition:
                                     {'format': 'poly.modeldef@2', 'type': 'graph'},
                                     {'format': 'poly.modeldef@1', 'type': 'unknown'}])
     def test_constructor_does_not_guess_configuration(self, spec):
-        with pytest.raises((TypeError, ValueError), match='format|configuration'):
+        with pytest.raises((TypeError, ValueError), match='format|configuration|unknown model family'):
             Model(spec)
 
     def test_constructor_rejects_mixed_configuration_and_tensor_bindings(self):
@@ -1172,16 +1245,18 @@ class TestModelDefinition:
             spec.pop('format')
             model = factory(spec)
             model.free()
-        with pytest.raises(ValueError, match='type must match'):
+        with pytest.raises(ValueError, match="type: expected 'sequential'"):
             Sequential(definition_fixture())
         assert not hasattr(Model, 'from_definition')
 
-    def test_physical_only_context_is_rejected_without_policy_mutation(self):
+    def test_factory_scopes_logical_capture_without_mutating_existing_tensors(self):
         import polygrad as pg
         rt = pg.Runtime(device='interp', logical='never')
         try:
-            with pytest.raises(ValueError, match='requires logical construction'):
-                Graph(definition_fixture(), runtime=rt)
+            existing = rt.Tensor.empty(1)
+            model = Graph(definition_fixture(), runtime=rt)
+            model.dispose()
+            assert not pg._ffi.get_lib().poly_tensor_uop_logical(existing._tensor)
             assert int(pg._ffi.get_lib().poly_ctx_get_logical_policy(rt._ctx)) == 0
         finally:
             rt.dispose()
@@ -1658,7 +1733,7 @@ class TestMLPCreate:
         i2.free()
 
     def test_null_spec(self):
-        with pytest.raises(RuntimeError):
+        with pytest.raises(ValueError, match='layers'):
             MLP('{}')
 
 

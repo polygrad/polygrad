@@ -2052,7 +2052,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 93
+  const EXPECTED_ABI = 94
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(
@@ -2145,69 +2145,47 @@ function createWasmCoreFromModule(Module, device) {
       }
     },
 
-    async composeAsync(ctxPtr, json, family) {
-      if (deviceName === 'webgpu') await ensureWebGPU()
-      return this.compose(ctxPtr, json, family, deviceName === 'webgpu')
+    lastError(inst) {
+      const error = Module._poly_model_last_error(inst)
+      return error ? readCString(error + 8) : ''
     },
 
-    compose(ctxPtr, json, family, async = false) {
+    familyName(index) { return readCString(Module._poly_model_family_name(index)) || null },
+
+    async fromConfigAsync(ctxPtr, json, family) {
+      if (deviceName === 'webgpu') await ensureWebGPU()
+      return this.fromConfig(ctxPtr, json, family, deviceName === 'webgpu')
+    },
+
+    fromConfig(ctxPtr, json, family, async = false) {
       const bytes = new TextEncoder().encode(json)
-      if (bytes.length > 1048576) throw new Error('definition exceeds 1048576 JSON bytes')
+      if (bytes.length > 1048576) throw new Error('configuration exceeds 1048576 JSON bytes')
       const ptr = allocBytes(bytes)
+      const familyPtr = family ? allocBytes(new TextEncoder().encode(family + '\0')) : 0
       // wasm32 PolyModelError: int code, pointer func, char message[256].
       const err = malloc(264)
-      if (!ptr || !err) {
-        if (ptr) Module._free(ptr)
-        if (err) Module._free(err)
-        throw new Error('definition allocation failed')
+      const cleanup = () => { if (ptr) Module._free(ptr); if (familyPtr) Module._free(familyPtr); if (err) Module._free(err) }
+      if (!ptr || !err || (family && !familyPtr)) {
+        cleanup()
+        throw new Error('configuration allocation failed')
       }
-      const cleanup = () => { Module._free(ptr); Module._free(err) }
       const finish = model => {
-        if (!model) throw new Error(readCString(err + 8) || 'Model definition construction failed')
-        return model
+        if (!model) throw new Error(readCString(err + 8) || 'Model construction failed')
+        return async ? model : configureModelDevice(model)
       }
+      // Synchronous construction prepares host state; existing deferred placement
+      // applies it before WebGPU execution. Async construction may initialize there.
+      const target = deviceName === 'webgpu' && !async ? DEVICE_IDS.interp : deviceId
       if (async) {
         try {
-          const factory = family === 'Llama' ? 'poly_llama_from_json'
-            : family === 'Sequential' ? 'poly_sequential_from_json' : 'poly_graph_from_json'
-          return Module.ccall(factory, 'number',
-            ['number', 'number', 'number', 'number'], [ctxPtr, ptr, bytes.length, err],
+          return Module.ccall('poly_model_from_config', 'number',
+            ['number', 'number', 'number', 'number', 'number', 'number'],
+            [ctxPtr, familyPtr, ptr, bytes.length, target, err],
             { async: true }).then(finish).finally(cleanup)
         } catch (error) { cleanup(); throw error }
       }
-      try { return finish(family === 'Llama'
-        ? Module._poly_llama_from_json(ctxPtr, ptr, bytes.length, err)
-        : family === 'Sequential'
-        ? Module._poly_sequential_from_json(ctxPtr, ptr, bytes.length, err)
-        : Module._poly_graph_from_json(ctxPtr, ptr, bytes.length, err)) }
+      try { return finish(Module._poly_model_from_config(ctxPtr, familyPtr, ptr, bytes.length, target, err)) }
       finally { cleanup() }
-    },
-
-    mlp(specJson) {
-      const bytes = new TextEncoder().encode(specJson)
-      const specPtr = allocBytes(bytes)
-      const inst = Module._poly_mlp_from_json_into(ctx, specPtr, bytes.length,
-        deviceName === 'webgpu' ? DEVICE_IDS.interp : deviceId)
-      Module._free(specPtr)
-      return configureModelDevice(inst)
-    },
-
-    tabm(specJson) {
-      const bytes = new TextEncoder().encode(specJson)
-      const specPtr = allocBytes(bytes)
-      const inst = Module._poly_tabm_from_json_into(ctx, specPtr, bytes.length,
-        deviceName === 'webgpu' ? DEVICE_IDS.interp : deviceId)
-      Module._free(specPtr)
-      return configureModelDevice(inst)
-    },
-
-    nam(specJson) {
-      const bytes = new TextEncoder().encode(specJson)
-      const specPtr = allocBytes(bytes)
-      const inst = Module._poly_nam_from_json_into(ctx, specPtr, bytes.length,
-        deviceName === 'webgpu' ? DEVICE_IDS.interp : deviceId)
-      Module._free(specPtr)
-      return configureModelDevice(inst)
     },
 
     free(instPtr) {
@@ -2312,7 +2290,11 @@ function createWasmCoreFromModule(Module, device) {
             [instPtr, _scratchLenPtr, exportFlags],
             { async: true }
           ).then(bytesPtr => {
-            if (!bytesPtr) return null
+            if (!bytesPtr) {
+              const error = this.lastError(instPtr)
+              if (error) throw new Error(error)
+              return null
+            }
             const len = heap32()[_scratchLenPtr >>> 2]
             const bytes = new Uint8Array(heapU8().buffer.slice(bytesPtr >>> 0, (bytesPtr >>> 0) + len))
             Module._free(bytesPtr)
@@ -2321,7 +2303,11 @@ function createWasmCoreFromModule(Module, device) {
         })
       }
       const bytesPtr = Module._poly_model_export_weights_ex(instPtr, _scratchLenPtr, exportFlags)
-      if (!bytesPtr) return null
+      if (!bytesPtr) {
+              const error = this.lastError(instPtr)
+              if (error) throw new Error(error)
+              return null
+            }
       const len = heap32()[_scratchLenPtr >>> 2]
       const bytes = new Uint8Array(heapU8().buffer.slice(bytesPtr >>> 0, (bytesPtr >>> 0) + len))
       Module._free(bytesPtr)
@@ -2343,7 +2329,11 @@ function createWasmCoreFromModule(Module, device) {
     },
     exportIR(instPtr) {
       const bytesPtr = Module._poly_model_export_ir(instPtr, _scratchLenPtr)
-      if (!bytesPtr) return null
+      if (!bytesPtr) {
+              const error = this.lastError(instPtr)
+              if (error) throw new Error(error)
+              return null
+            }
       const len = heap32()[_scratchLenPtr >>> 2]
       const bytes = new Uint8Array(heapU8().buffer.slice(bytesPtr >>> 0, (bytesPtr >>> 0) + len))
       Module._free(bytesPtr)
@@ -2353,7 +2343,11 @@ function createWasmCoreFromModule(Module, device) {
       if (deviceName === 'webgpu') {
         return ensureModelDevice(instPtr).then(() => {
           const bytesPtr = Module._poly_model_export_program(instPtr, _scratchLenPtr)
-          if (!bytesPtr) return null
+          if (!bytesPtr) {
+              const error = this.lastError(instPtr)
+              if (error) throw new Error(error)
+              return null
+            }
           const len = heap32()[_scratchLenPtr >>> 2]
           const bytes = new Uint8Array(heapU8().buffer.slice(bytesPtr >>> 0, (bytesPtr >>> 0) + len))
           Module._free(bytesPtr)
@@ -2361,7 +2355,11 @@ function createWasmCoreFromModule(Module, device) {
         })
       }
       const bytesPtr = Module._poly_model_export_program(instPtr, _scratchLenPtr)
-      if (!bytesPtr) return null
+      if (!bytesPtr) {
+              const error = this.lastError(instPtr)
+              if (error) throw new Error(error)
+              return null
+            }
       const len = heap32()[_scratchLenPtr >>> 2]
       const bytes = new Uint8Array(heapU8().buffer.slice(bytesPtr >>> 0, (bytesPtr >>> 0) + len))
       Module._free(bytesPtr)
@@ -2378,7 +2376,11 @@ function createWasmCoreFromModule(Module, device) {
             [instPtr, _scratchLenPtr, exportFlags],
             { async: true }
           ).then(bytesPtr => {
-            if (!bytesPtr) return null
+            if (!bytesPtr) {
+              const error = this.lastError(instPtr)
+              if (error) throw new Error(error)
+              return null
+            }
             const len = heap32()[_scratchLenPtr >>> 2]
             const bytes = new Uint8Array(heapU8().buffer.slice(bytesPtr >>> 0, (bytesPtr >>> 0) + len))
             Module._free(bytesPtr)
@@ -2387,7 +2389,11 @@ function createWasmCoreFromModule(Module, device) {
         })
       }
       const bytesPtr = Module._poly_model_save_bundle_ex(instPtr, _scratchLenPtr, exportFlags)
-      if (!bytesPtr) return null
+      if (!bytesPtr) {
+              const error = this.lastError(instPtr)
+              if (error) throw new Error(error)
+              return null
+            }
       const len = heap32()[_scratchLenPtr >>> 2]
       const bytes = new Uint8Array(heapU8().buffer.slice(bytesPtr >>> 0, (bytesPtr >>> 0) + len))
       Module._free(bytesPtr)
@@ -2664,7 +2670,7 @@ function createWasmCoreFromModule(Module, device) {
       } catch (error) { cleanup(); throw error }
       const finish = rc => {
         if (!tensorOutputs) return rc
-        if (rc !== 0) throw new Error('polygrad: Model Tensor call failed')
+        if (rc !== 0) throw new Error(this.lastError(instPtr) || 'Model Tensor call failed')
         return Array.from(heap32().subarray(outputPtr >>> 2, (outputPtr >>> 2) + count))
       }
       const symbol = tensorOutputs ? 'poly_model_call_tensors' : 'poly_model_call'

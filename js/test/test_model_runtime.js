@@ -2,12 +2,51 @@
 
 const llamaFixture = require('../../test/fixtures/llama.json')
 
+async function checkModelContractErrors(pg) {
+  const model = pg.models.MLP({layers:[2,1]})
+  try {
+    let message = ''
+    try { await model.forwardAsync({x:new Int32Array([1,2])}) } catch (e) { message = e.message }
+    assert(/x.*expected float32.*int32/.test(message), `dtype diagnostic: ${message}`)
+    message = ''
+    try { await model.trainStepAsync({x:new Float32Array([1,2])}) } catch (e) { message = e.message }
+    assert(/objective/.test(message), `objective diagnostic: ${message}`)
+    const bytes = await model.saveAsync({includeOptimizer:false})
+    const imported = pg.Model.load(bytes)
+    try {
+      const saved = await imported.saveAsync({includeOptimizer:false})
+      assert(saved.length === bytes.length && saved.every((b,i)=>b===bytes[i]), 'noncanonical round trip')
+    } finally { await imported.dispose() }
+  } finally { await model.dispose() }
+}
+
+async function checkFamilyRegistry(pg) {
+  const configs = {MLP:{layers:[2,1]}, TabM:{layers:[2,1],n_ensemble:2},
+    NAM:{n_features:2,hidden_sizes:[2]}, GPT2:{vocab_size:8,n_embd:4,n_head:2,n_layer:1,n_positions:2}}
+  for (const [family, config] of Object.entries(configs)) {
+    assert(typeof pg.models[family] === 'function', `missing ${family}`)
+    const tagged = {format:'poly.modeldef@1',type:family.toLowerCase(),...config}
+    const model = pg.device === 'webgpu' ? await pg.models[family+'Async'](tagged) : new pg.Model(tagged)
+    try { assert(model.bindings().length > 0, `empty ${family}`) }
+    finally { await model.dispose() }
+  }
+  let message = ''
+  try { await pg.models.TabMAsync({layers:[2,1],n_ensemble:0}) } catch(e) { message=e.message }
+  assert(/n_ensemble/.test(message), `missing factory diagnostic: ${message}`)
+}
+
 async function checkLlamaFamily(pg) {
   const gpu = pg.device === 'webgpu'
   for (const item of llamaFixture.cases) {
     const model = gpu ? await pg.models.LlamaAsync(item.config) : pg.models.Llama(item.config)
     let restored, imported
     try {
+      for (const invoke of [() => model.forwardAsync({tokens:new Int32Array(item.tokens)}),
+        () => model.saveAsync(), () => model.exportWeightsAsync(), () => model.exportIR()]) {
+        let message = ''
+        try { await invoke() } catch (e) { message = e.message }
+        assert(/weight.*not initialized/.test(message), `unloaded Llama: ${message}`)
+      }
       const header = {}, parts = []
       let offsetBytes = 0
       for (const [name, shape] of Object.entries(item.weights)) {
@@ -637,7 +676,7 @@ async function checkCompositionFactories(pg) {
 
   for (const [bad, error] of [
     ['{"type":"graph","type":"sequential"}', /duplicate/],
-    [{ ...spec, type: 'sequential' }, /type must match/],
+    [{ ...spec, type: 'sequential' }, /type: expected 'graph'/],
     [{ ...spec, format: 'poly.modeldef@99' }, /format/],
     [{ ...spec, nodes: [{ name: 'bad', type: 'add', inputs: ['later', 'x'] }] }, /forward value/]
   ]) {
@@ -1285,6 +1324,9 @@ async function runModelRuntimeTests(pg, createRuntime) {
   }
 
   console.log('\n== Model ==')
+
+  await test('Model contract errors and canonical round trip', () => checkModelContractErrors(pg))
+  await test('Model registered family dispatch', () => checkFamilyRegistry(pg))
 
   await test('Model checkpoint replacement uses queued readback', () => checkModelCheckpointReplacement(pg))
   await test('Model stateful capture shares train eval state', () => checkModelStatefulCapture(pg))
@@ -2053,7 +2095,9 @@ async function runModelSmokeTests(pg, createRuntime) {
 
   console.log('\n== Model ==')
 
+  await test('Model contract errors and canonical round trip', () => checkModelContractErrors(pg))
   await test('Model stateful capture shares train eval state', () => checkModelStatefulCapture(pg))
+  await test('Model registered family dispatch', () => checkFamilyRegistry(pg))
   await test('Model stateful capture owns resumable RNG', () => checkModelCaptureRng(pg))
   await test('Model stateful capture restores failures and rejects async execution', () => checkModelCaptureFailure(pg))
   await test('Model composition factories share C construction', () => checkCompositionFactories(pg))

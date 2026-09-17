@@ -4,6 +4,8 @@
 
 #include "test_harness.h"
 #include "../src/models/mlp.h"
+#include "../src/models/models.h"
+#include "../src/ctx.h"
 #include "../src/model.h"
 #include <string.h>
 #include <stdlib.h>
@@ -17,6 +19,42 @@ static const char *simple_mlp_spec = "{\"layers\":[2,4,1],\"activation\":\"relu\
 
 static const char *no_bias_spec = "{\"layers\":[3,2],\"activation\":\"none\",\"bias\":false,"
                                   "\"loss\":\"none\",\"batch_size\":1,\"seed\":42}";
+
+TEST(mlp, registered_factory_scopes_and_validates_construction) {
+  PolyCtx *ctx = poly_ctx_new();
+  poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_NEVER);
+  PolyDevice device = poly_ctx_get_preferred_device(ctx);
+  const char *json = "{\"format\":\"poly.modeldef@1\",\"type\":\"mlp\",\"layers\":[2,1]}";
+  PolyModelError err = {0};
+  PolyModel *m =
+      poly_model_from_config(ctx, NULL, json, (int)strlen(json), POLY_DEVICE_INTERP, &err);
+  ASSERT_NOT_NULL(m);
+  ASSERT_INT_EQ(err.code, POLY_STATUS_OK);
+  ASSERT_PTR_EQ(poly_model_ctx(m), ctx);
+  ASSERT_INT_EQ(poly_ctx_get_logical_policy(ctx), POLY_LOGICAL_NEVER);
+  ASSERT_INT_EQ(poly_ctx_get_preferred_device(ctx), device);
+  ASSERT_INT_EQ(ctx->n_tensors, 0);
+  poly_model_free(m);
+  const char *bad[] = {
+      "{\"layers\":[2,0]}", "{\"layers\":[2,1],\"activation\":7}",
+      "{\"layers\":[2,1],\"layers\":[2,3]}", "{\"layers\":[2,1]} false"};
+  for (int i = 0; i < 4; i++) {
+    ASSERT_TRUE(
+        poly_model_from_config(ctx, "MLP", bad[i], (int)strlen(bad[i]), POLY_DEVICE_AUTO, &err) ==
+        NULL
+    );
+    ASSERT_TRUE(err.code != POLY_STATUS_OK && err.message[0]);
+    ASSERT_INT_EQ(poly_ctx_get_logical_policy(ctx), POLY_LOGICAL_NEVER);
+    ASSERT_INT_EQ(ctx->n_tensors, 0);
+  }
+  bool gpt2 = false;
+  for (int i = 0; poly_model_family_name(i); i++)
+    gpt2 |= !strcmp(poly_model_family_name(i), "GPT2");
+  ASSERT_TRUE(gpt2);
+  ASSERT_TRUE(poly_model_family_name(-1) == NULL);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
 
 typedef struct {
   const char *key;

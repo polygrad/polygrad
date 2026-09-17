@@ -344,7 +344,7 @@ async function runWebGpuLifecycleChecks() {
       const closing = rt.dispose()
       const [failed, completed] = await settled
       await closing
-      if (failed.status !== 'rejected' || !/call\('missing'\) failed/.test(String(failed.reason))) {
+      if (failed.status !== 'rejected' || !/no 'missing' entrypoint/.test(String(failed.reason))) {
         throw new Error('invalid entrypoint did not reject with its own error')
       }
       if (completed.status !== 'fulfilled' || completed.value.out.join(',') !== '3,5') {

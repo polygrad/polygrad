@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
-PUBLIC = ("polygrad.h", "tensor.h", "frontend.h", "model.h", "nn/nn.h", "nn/optim.h", "models/layers.h")
+PUBLIC = ("polygrad.h", "tensor.h", "frontend.h", "model.h", "nn/nn.h", "nn/optim.h", "models/layers.h", "models/models.h")
 OWNERS = ("mixin/elementwise.h", "uop/ops.h", "placer.h", "device.h",
           "engine/schedule.h", "engine/realize.h", "schedule/schedule.h",
           "models/mlp.h", "models/tabm.h", "models/nam.h", "models/gpt2.h",

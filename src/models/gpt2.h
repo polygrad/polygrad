@@ -18,6 +18,8 @@ typedef struct {
 } GPT2Config;
 
 GPT2Config poly_gpt2_config_default(void);
+/* Checkpoint-required: execution/export reject until every PARAM is supplied
+ * through Model write/upload or checkpoint loading (raw pointer reads do not count). */
 PolyModel *poly_gpt2(const GPT2Config *cfg, PolyDevice device);
 /* Borrows ctx; construction restores its defaults on success and failure. */
 PolyModel *poly_gpt2_into(PolyCtx *ctx, const GPT2Config *cfg, PolyDevice device);

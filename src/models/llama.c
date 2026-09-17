@@ -230,6 +230,7 @@ static PolyModel *llama_build(PolyCtx *ctx, const LlamaConfig *c, PolyModelError
       ) != POLY_STATUS_OK)
     goto fail;
   if (poly_model_build(m, err) != POLY_STATUS_OK) goto fail;
+  if (poly_model_require_weights(m) != 0) goto fail;
   return m;
 fail:
   if (err && !err->message[0]) {
@@ -258,22 +259,12 @@ static PolyModel *llama_create(
 }
 
 PolyModel *poly_llama_from_json(PolyCtx *ctx, const char *json, int len, PolyModelError *err) {
-  if (err) memset(err, 0, sizeof(*err));
-  const char *end = NULL;
-  cJSON *root = json && len > 0 && len <= 1048576
-                    ? cJSON_ParseWithLengthOpts(json, (size_t)len, &end, 0)
-                    : NULL;
-  if (root && end)
-    while (end < json + len && (*end == ' ' || *end == '\n' || *end == '\r' || *end == '\t'))
-      end++;
+  return poly_model_from_config(ctx, "llama", json, len, POLY_DEVICE_AUTO, err);
+}
+
+PolyModel *model_llama_build(PolyCtx *ctx, const cJSON *root, PolyModelError *err) {
   LlamaConfig c;
-  PolyModel *m = NULL;
-  if (!root || !json || end != json + len)
-    llama_error(err, "invalid configuration JSON");
-  else if (llama_config(root, &c, err))
-    m = llama_create(ctx, &c, POLY_DEVICE_AUTO, err);
-  cJSON_Delete(root);
-  return m;
+  return llama_config(root, &c, err) ? llama_build(ctx, &c, err) : NULL;
 }
 
 PolyModel *poly_llama_from_hf_decoded_generic(

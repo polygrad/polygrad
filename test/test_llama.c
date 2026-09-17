@@ -88,6 +88,49 @@ TEST(llama, malformed_config_preserves_context) {
   PASS();
 }
 
+TEST(llama, missing_weights_reject_execution_and_export) {
+  const char *json = "{\"hidden_size\":4,\"intermediate_size\":8,\"num_attention_heads\":2,"
+                     "\"num_hidden_layers\":1,\"vocab_size\":8,\"tie_word_embeddings\":true}";
+  PolyModelError err = {0};
+  PolyModel *m = poly_llama_from_json(NULL, json, (int)strlen(json), &err);
+  ASSERT_NOT_NULL(m);
+  int32_t tokens[] = {1};
+  PolyIOBinding io = POLY_IO_BINDING_ARRAY("tokens", tokens, POLY_INT32);
+  ASSERT_INT_EQ(poly_model_call(m, "forward", &io, 1), -1);
+  ASSERT_TRUE(strstr(poly_model_last_error(m)->message, "not initialized") != NULL);
+  int len = 123;
+  ASSERT_TRUE(poly_model_export_ir(m, &len) == NULL);
+  ASSERT_INT_EQ(len, 0);
+  ASSERT_TRUE(poly_model_export_weights(m, &len) == NULL);
+  ASSERT_INT_EQ(len, 0);
+  /* Zero is a valid explicit weight value. Tied aliases need one write, not
+   * one per name; a wrong-sized write must not publish readiness. */
+  for (int i = 0; i < poly_model_param_count(m); i++) {
+    const char *name = poly_model_param_name(m, i);
+    if (!strcmp(name, "lm_head.weight")) continue;
+    size_t bytes = (size_t)poly_model_buf_numel_named(m, name) * sizeof(float);
+    float *values = calloc(1, bytes);
+    ASSERT_NOT_NULL(values);
+    ASSERT_INT_EQ(poly_model_upload_param(m, i, values, bytes - 1), 0);
+    ASSERT_INT_EQ(poly_model_call(m, "forward", &io, 1), -1);
+    ASSERT_TRUE(poly_model_export_ir(m, &len) == NULL);
+    ASSERT_INT_EQ(poly_model_upload_param(m, i, values, bytes + 1), -1);
+    ASSERT_INT_EQ(poly_model_upload_param(m, i, values, bytes), 0);
+    free(values);
+  }
+  ASSERT_INT_EQ(poly_model_call(m, "forward", &io, 1), 0);
+  PolyModel *copy = poly_llama_from_json(NULL, json, (int)strlen(json), &err);
+  ASSERT_NOT_NULL(copy);
+  ASSERT_INT_EQ(poly_model_copy_prefixed_weights(copy, m, ""), 0);
+  ASSERT_INT_EQ(poly_model_call(copy, "forward", &io, 1), 0);
+  poly_model_free(copy);
+  uint8_t *ir = poly_model_export_ir(m, &len);
+  ASSERT_NOT_NULL(ir);
+  free(ir);
+  poly_model_free(m);
+  PASS();
+}
+
 TEST(llama, rejected_bias_reports_invalid_status) {
   PolyCtx *ctx = poly_ctx_new();
   const char *json[] = {"{\"attention_bias\":true}", "{\"mlp_bias\":true}"};

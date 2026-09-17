@@ -8,8 +8,9 @@
 extern "C" {
 #endif
 
-/* Build in a borrowed context, which must outlive the returned Model and allow
- * logical construction. JSON is borrowed during the call, never runtime state.
+/* Build in a borrowed context, which must outlive the returned Model; NULL
+ * creates an owned context. Logical retention is scoped to construction.
+ * JSON is borrowed during the call, never runtime state.
  * Optional format/type tags are checked when supplied; the factory selects the
  * family. Both return ordinary built Models, or NULL with a diagnostic. */
 PolyModel *poly_sequential_from_json(PolyCtx *ctx, const char *json, int len, PolyModelError *err);

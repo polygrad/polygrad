@@ -13,7 +13,9 @@ extern "C" {
  * unscaled or llama3 RoPE scaling, no KV cache.
  * Unsupported architecture options fail explicitly.
  * Borrows ctx (which must outlive the Model); NULL creates an owned context.
- * This constructs storage, not pretrained weights. Use poly_hf_load[_into]
+ * Execution/export reject until all PARAM storage has been initialized by
+ * successful writes or checkpoint loading. This constructs storage, not
+ * pretrained weights. Use poly_hf_load[_into]
  * for a complete config+safetensors checkpoint, or explicit Model writes. */
 PolyModel *poly_llama_from_json(PolyCtx *ctx, const char *json, int len, PolyModelError *err);
 

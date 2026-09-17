@@ -505,11 +505,8 @@ function createBoundModelClass(runtime) {
         handle = callableSpec(handle, options)
       } else if (!adopting && handle && typeof handle === 'object' && ('format' in handle || 'type' in handle)) {
         if (options != null) throw new TypeError('Model configuration cannot be combined with Tensor bindings')
-        if (handle.format !== 'poly.modeldef@1' || !['sequential', 'graph'].includes(handle.type)) {
-          throw new TypeError('Model configuration requires format="poly.modeldef@1" and type="sequential" or "graph"')
-        }
         // The family factory registers the owner. Do not create a second handle owner.
-        return _runtime.models[handle.type === 'sequential' ? 'Sequential' : 'Graph'](handle)
+        return require('./models').buildModel(_runtime, null, handle)
       } else if (options != null && !adopting) throw new TypeError('Model options require a callable source')
       const spec = isModelSpec(handle)
       if (spec) {
@@ -1132,6 +1129,10 @@ function createBoundModelClass(runtime) {
       }
     }
 
+    _error(fallback) {
+      return new Error(this._rt._core.model.lastError(this._handle).trim() || fallback)
+    }
+
     call(entrypoint, io) {
       this._requireSync('call()', 'callAsync()')
       const { names, arrays, tensors } = normalizeBindings(io, this._rt)
@@ -1141,7 +1142,7 @@ function createBoundModelClass(runtime) {
       }
       const rc = this._rt._core.model.call(this._handle, String(entrypoint), names, arrays)
       if (isPromiseLike(rc)) throw new PolyAsyncRequired('call()', 'callAsync()')
-      if (rc !== 0) throw new Error(`polygrad: call('${entrypoint}') failed (rc=${rc})`)
+      if (rc !== 0) throw this._error(`polygrad: call('${entrypoint}') failed (rc=${rc})`)
       return this._collectOutputsRaw(String(entrypoint))
     }
 
@@ -1161,11 +1162,11 @@ function createBoundModelClass(runtime) {
         const rc = this._rt._core.model.call(this._handle, entrypoint, names, arrays)
         if (isPromiseLike(rc)) {
           return rc.then(v => {
-            if (v !== 0) throw new Error(`polygrad: call('${entrypoint}') failed (rc=${v})`)
+            if (v !== 0) throw this._error(`polygrad: call('${entrypoint}') failed (rc=${v})`)
             return this._collectOutputsRawAsync(entrypoint)
           })
         }
-        if (rc !== 0) throw new Error(`polygrad: call('${entrypoint}') failed (rc=${rc})`)
+        if (rc !== 0) throw this._error(`polygrad: call('${entrypoint}') failed (rc=${rc})`)
         return this._collectOutputsRaw(entrypoint)
       }
       // Queue now, before a subsequent Tensor.dispose can enqueue its release.
@@ -1179,7 +1180,7 @@ function createBoundModelClass(runtime) {
       const { names, arrays } = normalizeBindings(io, this._rt)
       const loss = this._rt._core.model.trainStep(this._handle, names, arrays, entrypoint)
       if (isPromiseLike(loss)) throw new PolyAsyncRequired('trainStep()', 'trainStepAsync()')
-      if (loss == null || Number.isNaN(loss)) throw new Error('polygrad: trainStep failed')
+      if (loss == null || Number.isNaN(loss)) throw this._error('polygrad: trainStep failed')
       return loss
     }
 
@@ -1189,11 +1190,11 @@ function createBoundModelClass(runtime) {
         const loss = this._rt._core.model.trainStep(this._handle, names, arrays, entrypoint)
         if (isPromiseLike(loss)) {
           return loss.then(v => {
-            if (v == null || Number.isNaN(v)) throw new Error('polygrad: trainStep failed')
+            if (v == null || Number.isNaN(v)) throw this._error('polygrad: trainStep failed')
             return v
           })
         }
-        if (loss == null || Number.isNaN(loss)) throw new Error('polygrad: trainStep failed')
+        if (loss == null || Number.isNaN(loss)) throw this._error('polygrad: trainStep failed')
         return loss
       }
       if (this._usesAsyncHostBridge()) return this._enqueueAsync(run)
@@ -1340,7 +1341,7 @@ function createBoundModelClass(runtime) {
         let loss
         try { loss = this._rt._core.model.trainStep(this._handle, batch.names, batch.arrays, opts.entrypoint) }
         finally { if (batch.release) batch.release() }
-        if (loss == null || Number.isNaN(loss)) throw new Error('polygrad: trainStep failed')
+        if (loss == null || Number.isNaN(loss)) throw this._error('polygrad: trainStep failed')
         losses.push(loss)
         if (opts.onStep) opts.onStep(step, loss)
       }
@@ -1362,7 +1363,7 @@ function createBoundModelClass(runtime) {
           let loss
           try { loss = await this._rt._core.model.trainStep(this._handle, batch.names, batch.arrays, opts.entrypoint) }
           finally { if (batch.release) batch.release() }
-          if (loss == null || Number.isNaN(loss)) throw new Error('polygrad: trainStep failed')
+          if (loss == null || Number.isNaN(loss)) throw this._error('polygrad: trainStep failed')
           losses.push(loss)
           if (opts.onStep) opts.onStep(step, loss)
         }

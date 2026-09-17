@@ -11,6 +11,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "mlp.h"
 #include "factory.h"
+#include "layers.h"
 
 #include "../nn/nn.h"
 #include "../tensor.h"
@@ -87,16 +88,6 @@ static PolyTensor *apply_activation(PolyCtx *ctx, PolyTensor *x, ActivationKind 
   return x;
 }
 
-static PolyTensor *mlp_linear(PolyCtx *ctx, PolyTensor *x, PolyTensor *weight, PolyTensor *bias) {
-  /* Pinned nn.Linear stores (out,in), transposes it, then calls Tensor.linear;
-   * Tensor.linear is dot followed by optional add
-   * (nn/__init__.py:156-177; mixin/__init__.py:1335-1350). */
-  int64_t perm[] = {1, 0};
-  PolyTensor *weight_t = poly_tensor_permute(ctx, weight, perm, 2);
-  PolyTensor *out = weight_t ? poly_tensor_dot(ctx, x, weight_t) : NULL;
-  return out && bias ? poly_tensor_alu2(ctx, POLY_OP_ADD, out, bias) : out;
-}
-
 static PolyTensor *mlp_int_scalar(PolyCtx *ctx, int64_t value) {
   PolyUOp *constant = poly_const_typed(ctx, POLY_INT32, (double)value);
   if (!constant) return NULL;
@@ -144,6 +135,27 @@ static PolyTensor *mlp_dense_cross_entropy(PolyCtx *ctx, PolyTensor *logits, Pol
 
 /* MLP Config */
 
+int model_init_param(
+    PolyModel *model,
+    const char *name,
+    uint64_t seed,
+    int64_t fan_in,
+    float fill
+) {
+  int64_t n = poly_model_buf_numel_named(model, name);
+  if (n <= 0 || (uint64_t)n > SIZE_MAX / sizeof(float) || fan_in < 0) return -1;
+  float *values = malloc((size_t)n * sizeof(float));
+  if (!values) return -1;
+  if (fan_in)
+    poly_init_param_kaiming(seed, name, values, n, fan_in);
+  else
+    for (int64_t i = 0; i < n; i++)
+      values[i] = fill;
+  int rc = poly_model_write_buf_named(model, name, values, (size_t)n * sizeof(float));
+  free(values);
+  return rc;
+}
+
 MLPConfig poly_mlp_config_default(void) {
   return (MLPConfig){
       .n_layers = 0,
@@ -157,7 +169,7 @@ MLPConfig poly_mlp_config_default(void) {
 
 /* MLP Builder (config struct) */
 
-static PolyModel *mlp_build(PolyCtx *ctx, const MLPConfig *cfg) {
+static PolyModel *mlp_build(PolyCtx *ctx, const MLPConfig *cfg, PolyModelError *err) {
   if (!cfg || cfg->n_layers < 2 || cfg->n_layers > POLY_MLP_MAX_LAYERS) return NULL;
 
   int n_linear = cfg->n_layers - 1;
@@ -178,22 +190,9 @@ static PolyModel *mlp_build(PolyCtx *ctx, const MLPConfig *cfg) {
   /* Forward: chain of linear + activation. */
   PolyTensor *x = x_tensor;
   for (int l = 0; l < n_linear; l++) {
-    if (poly_model_scope_push(inst, "layers.%d", l) != POLY_STATUS_OK) goto fail_pre_build;
-
-    int64_t ws[] = {cfg->layers[l + 1], cfg->layers[l]};
-    PolyTensor *w_tensor = poly_model_param(inst, "weight", POLY_FLOAT32, ws, 2);
-    if (!w_tensor) goto fail_pre_build;
-
-    PolyTensor *b_tensor = NULL;
-    if (cfg->use_bias) {
-      int64_t bs[] = {cfg->layers[l + 1]};
-      b_tensor = poly_model_param(inst, "bias", POLY_FLOAT32, bs, 1);
-      if (!b_tensor) goto fail_pre_build;
-    }
-
-    if (poly_model_scope_pop(inst) != POLY_STATUS_OK) goto fail_pre_build;
-
-    x = mlp_linear(ctx, x, w_tensor, b_tensor);
+    char prefix[64];
+    snprintf(prefix, sizeof(prefix), "layers.%d", l);
+    x = poly_model_linear(inst, prefix, x, cfg->layers[l], cfg->layers[l + 1], cfg->use_bias);
     if (!x) goto fail_pre_build;
     if (l < n_linear - 1) x = apply_activation(ctx, x, activation);
     if (!x) goto fail_pre_build;
@@ -227,22 +226,16 @@ static PolyModel *mlp_build(PolyCtx *ctx, const MLPConfig *cfg) {
       goto fail_pre_build;
   }
 
-  PolyModelError err = {0};
-  if (poly_model_build(inst, &err) != POLY_STATUS_OK) {
-    if (err.message[0]) fprintf(stderr, "poly_mlp: build failed: %s\n", err.message);
+  if (poly_model_build(inst, err) != POLY_STATUS_OK) {
     poly_model_free(inst);
     return NULL;
   }
 
-  /* Init weights after build so runtime buffers keep the same legacy data API. */
+  /* Initialize through the same coherent writes used by checkpoint loading. */
   for (int l = 0; l < n_linear; l++) {
     char name[128];
     snprintf(name, sizeof(name), "layers.%d.weight", l);
-    float *w = poly_model_buf_data_named(inst, name, NULL);
-    if (w)
-      poly_init_param_kaiming(
-          cfg->seed, name, w, (int64_t)cfg->layers[l + 1] * cfg->layers[l], (int64_t)cfg->layers[l]
-      );
+    if (model_init_param(inst, name, cfg->seed, cfg->layers[l], 0)) goto fail_pre_build;
   }
 
   return inst;
@@ -257,7 +250,7 @@ fail_pre_build:
 static PolyModel *mlp_create(PolyCtx *ctx, const MLPConfig *cfg, PolyDevice device) {
   PolyModelFactoryScope scope;
   if (!model_factory_begin(&scope, ctx, device)) return NULL;
-  return model_factory_end(&scope, mlp_build(scope.ctx, cfg));
+  return model_factory_end(&scope, mlp_build(scope.ctx, cfg, NULL));
 }
 
 PolyModel *poly_mlp(const MLPConfig *cfg, PolyDevice device) {
@@ -270,41 +263,32 @@ PolyModel *poly_mlp_into(PolyCtx *ctx, const MLPConfig *cfg, PolyDevice device) 
 
 /* FFI wrapper (JSON -> config -> build) */
 
-static PolyModel *mlp_from_json(PolyCtx *ctx, const char *json, int len) {
-  if (!json || len <= 0) return NULL;
-
-  cJSON *root = cJSON_ParseWithLength(json, (size_t)len);
-  if (!root) return NULL;
-
-  cJSON *layers = cJSON_GetObjectItem(root, "layers");
-  if (!layers || !cJSON_IsArray(layers) || cJSON_GetArraySize(layers) < 2) {
-    fprintf(stderr, "poly_mlp_from_json: 'layers' must be an array with >= 2 entries\n");
-    cJSON_Delete(root);
+PolyModel *model_mlp_build(PolyCtx *ctx, const cJSON *root, PolyModelError *err) {
+  if (!model_config_sizes(root, "layers", 2, POLY_MLP_MAX_LAYERS, true, err) ||
+      !model_config_training(root, err) ||
+      !model_config_choice(root, "activation", "|relu|gelu|silu|tanh|sigmoid|none|", err))
+    return NULL;
+  cJSON *bias = cJSON_GetObjectItemCaseSensitive(root, "bias");
+  if (bias && !cJSON_IsBool(bias)) {
+    model_factory_error(err, "bias", "expected boolean");
     return NULL;
   }
-
+  cJSON *layers = cJSON_GetObjectItemCaseSensitive(root, "layers");
   MLPConfig cfg = poly_mlp_config_default();
   cJSON *v;
-  if ((v = cJSON_GetObjectItem(root, "activation"))) cfg.activation = v->valuestring;
-  if ((v = cJSON_GetObjectItem(root, "bias"))) cfg.use_bias = cJSON_IsTrue(v);
-  if ((v = cJSON_GetObjectItem(root, "loss"))) cfg.loss = v->valuestring;
-  if ((v = cJSON_GetObjectItem(root, "batch_size"))) cfg.batch_size = v->valueint;
-  if ((v = cJSON_GetObjectItem(root, "seed"))) cfg.seed = (uint64_t)v->valuedouble;
-
+  if ((v = cJSON_GetObjectItemCaseSensitive(root, "activation"))) cfg.activation = v->valuestring;
+  if (bias) cfg.use_bias = cJSON_IsTrue(bias);
+  if ((v = cJSON_GetObjectItemCaseSensitive(root, "loss"))) cfg.loss = v->valuestring;
+  if ((v = cJSON_GetObjectItemCaseSensitive(root, "batch_size"))) cfg.batch_size = v->valueint;
+  if ((v = cJSON_GetObjectItemCaseSensitive(root, "seed"))) cfg.seed = (uint64_t)v->valuedouble;
   cfg.n_layers = cJSON_GetArraySize(layers);
-  if (cfg.n_layers > POLY_MLP_MAX_LAYERS) cfg.n_layers = POLY_MLP_MAX_LAYERS;
   for (int i = 0; i < cfg.n_layers; i++)
     cfg.layers[i] = cJSON_GetArrayItem(layers, i)->valueint;
-
-  PolyModel *inst = mlp_build(ctx, &cfg);
-  cJSON_Delete(root);
-  return inst;
+  return mlp_build(ctx, &cfg, err);
 }
 
 static PolyModel *mlp_json_create(PolyCtx *ctx, const char *json, int len, PolyDevice device) {
-  PolyModelFactoryScope scope;
-  if (!model_factory_begin(&scope, ctx, device)) return NULL;
-  return model_factory_end(&scope, mlp_from_json(scope.ctx, json, len));
+  return poly_model_from_config(ctx, "mlp", json, len, device, NULL);
 }
 
 PolyModel *poly_mlp_from_json(const char *json, int len, PolyDevice device) {

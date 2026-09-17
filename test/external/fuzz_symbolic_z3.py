@@ -229,11 +229,11 @@ def load_lib() -> ctypes.CDLL:
     # stop here until the declarations are reviewed, not corrupt ctypes calls.
     lib.poly_abi_version.restype = ctypes.c_int
     lib.poly_abi_version.argtypes = []
-    # ABI93 adds named Model placement without changing these layouts;
+    # ABI94 adds Model family dispatch without changing these layouts;
     # test_api_parity compares every mirrored
     # top-level field offset and size against the compiled C header.
-    if (abi := lib.poly_abi_version()) != 93:
-        raise SystemExit(f"Z3 harness requires reviewed ABI93 layouts; core has ABI{abi}")
+    if (abi := lib.poly_abi_version()) != 94:
+        raise SystemExit(f"Z3 harness requires reviewed ABI94 layouts; core has ABI{abi}")
 
     lib.poly_ctx_new.restype = ctypes.c_void_p
     lib.poly_ctx_new.argtypes = []

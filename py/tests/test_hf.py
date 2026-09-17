@@ -146,6 +146,32 @@ def test_llama_cuda_checkpoint_io_does_not_retain_host_shadows():
 
 @pytest.mark.parametrize('device', ['cpu', 'interp'])
 @pytest.mark.parametrize('case', LLAMA_CASES, ids=['llama2-gqa', 'llama2-mha', 'llama3', 'llama32-tied'])
+def test_llama_requires_explicit_weights_before_execution_or_export(device, case):
+    import polygrad as pg
+    with pg.create(device=device) as rt:
+        with ExitStack() as cleanup:
+            model = rt.models.Llama(case['config'])
+            cleanup.callback(model.dispose)
+            tokens = np.array(case['tokens'], np.int32)
+            weights = llama_weights(case)
+            items = list(weights.items())
+            for count in (0, 1):
+                with pytest.raises(RuntimeError, match='weight.*not initialized'):
+                    model.forward(tokens=tokens)
+                for export in (model.export_ir, model.export_weights, model.save):
+                    with pytest.raises(RuntimeError, match='weight.*not initialized'):
+                        export()
+                name, data = items[count]
+                model.write_buffer(name, data)
+            for name, data in items[2:]:
+                model.write_buffer(name, data)
+            np.testing.assert_allclose(model.forward(tokens=tokens)['logits'].reshape(-1),
+                                       case['logits'], atol=2e-5, rtol=2e-5)
+            assert model.save() == model.save()
+
+
+@pytest.mark.parametrize('device', ['cpu', 'interp'])
+@pytest.mark.parametrize('case', LLAMA_CASES, ids=['llama2-gqa', 'llama2-mha', 'llama3', 'llama32-tied'])
 def test_llama_family_reference_and_shared_import(device, case):
     import polygrad as pg
     weights = llama_weights(case)

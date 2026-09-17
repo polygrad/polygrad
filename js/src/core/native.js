@@ -62,7 +62,7 @@ function createNativeCore(device) {
     if (name) ops[name] = i
   }
 
-  const EXPECTED_ABI = 93
+  const EXPECTED_ABI = 94
   const abi = binding.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(
@@ -72,25 +72,16 @@ function createNativeCore(device) {
   }
 
   const model = {
-    compose(ctxPtr, json, family) {
-      if (family === 'Llama') return binding.poly_llama_from_json(ctxPtr, json)
-      return family === 'Sequential' ? binding.poly_sequential_from_json(ctxPtr, json)
-        : binding.poly_graph_from_json(ctxPtr, json)
+    lastError(inst) { return binding.poly_model_last_error(inst) },
+    familyName(index) { return binding.poly_model_family_name(index) },
+    fromConfig(ctxPtr, json, family) {
+      return binding.poly_model_from_config(ctxPtr, family || '', json, deviceId)
     },
     fromIR(irBytes, weightsBytes) {
       return binding.poly_model_from_ir_into(irBytes, weightsBytes ?? null, ctx)
     },
     fromProgram(programBytes, weightsBytes) {
       return binding.poly_model_from_program(programBytes, weightsBytes ?? null)
-    },
-    mlp(specJson) {
-      return binding.poly_mlp_from_json_into(specJson, deviceId, ctx)
-    },
-    tabm(specJson) {
-      return binding.poly_tabm_from_json_into(specJson, deviceId, ctx)
-    },
-    nam(specJson) {
-      return binding.poly_nam_from_json_into(specJson, deviceId, ctx)
     },
     free(inst) {
       binding.poly_model_free(inst)

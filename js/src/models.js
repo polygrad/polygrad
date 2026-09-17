@@ -8,60 +8,37 @@ function normalizeSpec(spec) {
   throw new TypeError('polygrad: model spec must be an object or JSON string')
 }
 
-function createBoundModels(runtime) {
-  const _runtime = runtime
-
-  function ensureApi() {
-    if (_runtime._closing || !_runtime._core) throw new Error('polygrad runtime has been disposed')
-    const api = _runtime._core.model
-    if (!api) throw new Error('polygrad: model runtime unavailable for this core')
-    return api
+function buildModel(runtime, family, spec, async = false) {
+  if (runtime._closing || !runtime._core) throw new Error('polygrad runtime has been disposed')
+  if (runtime._activeAsync > 0) throw new Error('Model construction requires an idle Runtime')
+  const api = runtime._core.model
+  if (!api) throw new Error('polygrad: model runtime unavailable for this core')
+  const json = normalizeSpec(spec)
+  // Published tabular factories support synchronous host construction followed
+  // by deferred WebGPU placement. Keep that API; new families use async capture.
+  if (!async && runtime._usesAsyncHostBridge() && !['MLP', 'TabM', 'NAM'].includes(family))
+    throw new PolyAsyncRequired('Model construction', `models.${family || 'Graph'}Async()`)
+  const wrap = handle => {
+    if (!handle) throw new Error('polygrad: Model construction failed')
+    return runtime.Model._fromHandle(handle)
   }
-
-  function wrap(handle, family) {
-    if (!handle) throw new Error(`polygrad: failed to create ${family} model`)
-    return _runtime.Model._fromHandle(handle)
+  if (async && runtime._usesAsyncHostBridge()) {
+    // Register ownership before releasing async admission.
+    return runtime._withAsync(() => runtime._core.enqueueAsync(async () =>
+      wrap(await api.fromConfigAsync(runtime._core.ctx, json, family))))
   }
-
-  function MLP(spec) {
-    if (_runtime._activeAsync > 0) throw new Error('Model construction requires an idle Runtime')
-    const api = ensureApi()
-    return wrap(api.mlp(normalizeSpec(spec)), 'MLP')
-  }
-
-  function TabM(spec) {
-    if (_runtime._activeAsync > 0) throw new Error('Model construction requires an idle Runtime')
-    const api = ensureApi()
-    return wrap(api.tabm(normalizeSpec(spec)), 'TabM')
-  }
-
-  function NAM(spec) {
-    if (_runtime._activeAsync > 0) throw new Error('Model construction requires an idle Runtime')
-    const api = ensureApi()
-    return wrap(api.nam(normalizeSpec(spec)), 'NAM')
-  }
-
-  function compose(family, spec, async = false) {
-    const api = ensureApi()
-    const json = normalizeSpec(spec)
-    if (_runtime._usesAsyncHostBridge()) {
-      if (!async) throw new PolyAsyncRequired(`models.${family}()`, `models.${family}Async()`)
-      // Register ownership before releasing async admission, so Runtime disposal
-      // also covers a factory suspended inside C construction or initialization.
-      return _runtime._withAsync(() => _runtime._core.enqueueAsync(async () =>
-        wrap(await api.composeAsync(_runtime._core.ctx, json, family), family)))
-    }
-    return wrap(api.compose(_runtime._core.ctx, json, family), family)
-  }
-
-  function Sequential(spec) { return compose('Sequential', spec) }
-  function Graph(spec) { return compose('Graph', spec) }
-  function Llama(spec) { return compose('Llama', spec) }
-  async function SequentialAsync(spec) { return compose('Sequential', spec, true) }
-  async function GraphAsync(spec) { return compose('Graph', spec, true) }
-  async function LlamaAsync(spec) { return compose('Llama', spec, true) }
-
-  return { MLP, TabM, NAM, Sequential, Graph, Llama, SequentialAsync, GraphAsync, LlamaAsync }
+  return wrap(api.fromConfig(runtime._core.ctx, json, family))
 }
 
-module.exports = { createBoundModels }
+function createBoundModels(runtime) {
+  const result = {}
+  const api = runtime._core.model
+  if (!api) return result
+  for (let i = 0, name; (name = api.familyName(i)); i++) {
+    result[name] = spec => buildModel(runtime, name, spec)
+    result[name + 'Async'] = async spec => buildModel(runtime, name, spec, true)
+  }
+  return result
+}
+
+module.exports = { createBoundModels, buildModel }

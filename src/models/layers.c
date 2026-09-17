@@ -87,19 +87,22 @@ PolyUOp *poly_embedding(
   return poly_embedding_apply(ctx, tokens, poly_reshape(ctx, w, ws, 2));
 }
 
-PolyTensor *poly_model_linear(
+int poly_model_linear_parameters(
     PolyModel *inst,
     const char *prefix,
-    PolyTensor *x,
     int in_features,
     int out_features,
-    bool use_bias
+    bool use_bias,
+    PolyTensor **weight,
+    PolyTensor **bias
 ) {
-  if (!inst || !x) return NULL;
+  if (!weight || !bias || weight == bias) return -1;
+  *weight = *bias = NULL;
+  if (!inst || in_features <= 0 || out_features <= 0) return -1;
   PolyCtx *ctx = poly_model_ctx(inst);
-  if (!ctx) return NULL;
+  if (!ctx) return -1;
   bool scoped = prefix && prefix[0];
-  if (scoped && poly_model_scope_push(inst, "%s", prefix) != POLY_STATUS_OK) return NULL;
+  if (scoped && poly_model_scope_push(inst, "%s", prefix) != POLY_STATUS_OK) return -1;
 
   int64_t ws[] = {out_features, in_features};
   PolyTensor *w = poly_model_param(inst, "weight", POLY_FLOAT32, ws, 2);
@@ -109,9 +112,32 @@ PolyTensor *poly_model_linear(
     b = poly_model_param(inst, "bias", POLY_FLOAT32, bs, 1);
   }
 
-  if (scoped && poly_model_scope_pop(inst) != POLY_STATUS_OK) return NULL;
-  if (!w || (use_bias && !b)) return NULL;
-  return poly_tensor_linear_apply(ctx, x, w, b);
+  bool popped = !scoped || poly_model_scope_pop(inst) == POLY_STATUS_OK;
+  if (!w || (use_bias && !b) || !popped) {
+    poly_tensor_release(w);
+    poly_tensor_release(b);
+    return -1;
+  }
+  *weight = w;
+  *bias = b;
+  return 0;
+}
+
+PolyTensor *poly_model_linear(
+    PolyModel *inst,
+    const char *prefix,
+    PolyTensor *x,
+    int in_features,
+    int out_features,
+    bool use_bias
+) {
+  PolyTensor *w, *b;
+  if (!x || poly_model_linear_parameters(inst, prefix, in_features, out_features, use_bias, &w, &b))
+    return NULL;
+  PolyTensor *out = poly_tensor_linear_apply(poly_model_ctx(inst), x, w, b);
+  poly_tensor_release(w);
+  poly_tensor_release(b);
+  return out;
 }
 
 PolyTensor *poly_model_layernorm(

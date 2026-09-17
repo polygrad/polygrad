@@ -24,6 +24,9 @@
 #define _POSIX_C_SOURCE 200809L
 #include "gpt2.h"
 #include "factory.h"
+#include <limits.h>
+#include <float.h>
+#include <math.h>
 
 #include "layers.h"
 #include "../nn/nn.h"
@@ -51,7 +54,7 @@ GPT2Config poly_gpt2_config_default(void) {
 
 /* GPT-2 Builder */
 
-static PolyModel *gpt2_build(PolyCtx *ctx, const GPT2Config *cfg) {
+static PolyModel *gpt2_build(PolyCtx *ctx, const GPT2Config *cfg, PolyModelError *err) {
   /* Validate the divisor before deriving head width from untrusted config. */
   if (!cfg || cfg->n_layer < 1 || cfg->n_embd < 1 || cfg->vocab_size < 1 || cfg->n_head < 1)
     return NULL;
@@ -66,7 +69,7 @@ static PolyModel *gpt2_build(PolyCtx *ctx, const GPT2Config *cfg) {
   double eps = cfg->norm_eps > 0 ? (double)cfg->norm_eps : 1e-5;
 
   if (D % H != 0) {
-    fprintf(stderr, "poly_gpt2: n_embd (%d) not divisible by n_head (%d)\n", D, H);
+    model_factory_error(err, "n_embd", "%d is not divisible by n_head %d", D, H);
     return NULL;
   }
 
@@ -204,12 +207,11 @@ static PolyModel *gpt2_build(PolyCtx *ctx, const GPT2Config *cfg) {
       POLY_STATUS_OK)
     goto fail_pre_build;
 
-  PolyModelError err = {0};
-  if (poly_model_build(inst, &err) != POLY_STATUS_OK) {
-    if (err.message[0]) fprintf(stderr, "poly_gpt2: build failed: %s\n", err.message);
+  if (poly_model_build(inst, err) != POLY_STATUS_OK) {
     poly_model_free(inst);
     return NULL;
   }
+  if (poly_model_require_weights(inst) != 0) goto fail_pre_build;
   return inst;
 
 fail_pre_build:
@@ -222,7 +224,7 @@ fail_pre_build:
 static PolyModel *gpt2_create(PolyCtx *ctx, const GPT2Config *cfg, PolyDevice device) {
   PolyModelFactoryScope scope;
   if (!model_factory_begin(&scope, ctx, device)) return NULL;
-  return model_factory_end(&scope, gpt2_build(scope.ctx, cfg));
+  return model_factory_end(&scope, gpt2_build(scope.ctx, cfg, NULL));
 }
 
 PolyModel *poly_gpt2(const GPT2Config *cfg, PolyDevice device) {
@@ -233,12 +235,16 @@ PolyModel *poly_gpt2_into(PolyCtx *ctx, const GPT2Config *cfg, PolyDevice device
   return ctx ? gpt2_create(ctx, cfg, device) : NULL;
 }
 
-static PolyModel *gpt2_from_json(PolyCtx *ctx, const char *json, int len, PolyDevice device) {
-  if (!json || len <= 0) return NULL;
-
-  cJSON *root = cJSON_ParseWithLength(json, (size_t)len);
-  if (!root) return NULL;
-
+PolyModel *model_gpt2_build(PolyCtx *ctx, const cJSON *root, PolyModelError *err) {
+  const char *keys[] = {"vocab_size", "n_embd", "n_head", "n_layer", "n_positions", "batch_size"};
+  for (size_t i = 0; i < sizeof(keys) / sizeof(*keys); i++)
+    if (!model_config_integer(root, keys[i], 1, INT_MAX, false, err)) return NULL;
+  const cJSON *eps = cJSON_GetObjectItemCaseSensitive(root, "layer_norm_epsilon");
+  if (eps && (!cJSON_IsNumber(eps) || !isfinite(eps->valuedouble) || eps->valuedouble <= 0 ||
+              eps->valuedouble > FLT_MAX)) {
+    model_factory_error(err, "layer_norm_epsilon", "expected a positive finite float32 value");
+    return NULL;
+  }
   GPT2Config cfg = poly_gpt2_config_default();
   cJSON *v;
   if ((v = cJSON_GetObjectItem(root, "vocab_size"))) cfg.vocab_size = v->valueint;
@@ -249,17 +255,15 @@ static PolyModel *gpt2_from_json(PolyCtx *ctx, const char *json, int len, PolyDe
   if ((v = cJSON_GetObjectItem(root, "batch_size"))) cfg.batch_size = v->valueint;
   if ((v = cJSON_GetObjectItem(root, "layer_norm_epsilon"))) cfg.norm_eps = (float)v->valuedouble;
 
-  PolyModel *inst = ctx ? poly_gpt2_into(ctx, &cfg, device) : poly_gpt2(&cfg, device);
-  cJSON_Delete(root);
-  return inst;
+  return gpt2_build(ctx, &cfg, err);
 }
 
 PolyModel *poly_gpt2_from_json(const char *json, int len, PolyDevice device) {
-  return gpt2_from_json(NULL, json, len, device);
+  return poly_model_from_config(NULL, "gpt2", json, len, device, NULL);
 }
 
 PolyModel *poly_gpt2_from_json_into(PolyCtx *ctx, const char *json, int len, PolyDevice device) {
-  return ctx ? gpt2_from_json(ctx, json, len, device) : NULL;
+  return ctx ? poly_model_from_config(ctx, "gpt2", json, len, device, NULL) : NULL;
 }
 
 /* HF import (model-specific) */
