@@ -11,6 +11,35 @@
 
 #ifdef POLY_TESTING
 extern void poly_test_shape_alloc_fail_after(int count);
+extern size_t poly_test_shape_take_walk_nodes(void);
+
+TEST(shape, cached_ancestry_is_not_revisited) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *root = poly_const_typed(ctx, POLY_FLOAT32, 1.0);
+  for (int i = 0; i < 4096; i++)
+    root = poly_uop1(ctx, POLY_OP_SIN, POLY_FLOAT32, root, poly_arg_none());
+  ASSERT_NOT_NULL(root);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, root), 0);
+  poly_test_shape_take_walk_nodes();
+  PolyUOp *out = poly_uop1(ctx, POLY_OP_SIN, POLY_FLOAT32, root, poly_arg_none());
+  ASSERT_NOT_NULL(out);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, out), 0);
+  /* Tinygrad recursive_property stops its topological walk at cached nodes,
+   * not after walking the retained history and filtering the result. */
+  ASSERT_INT_EQ(poly_test_shape_take_walk_nodes(), 1);
+  ASSERT_TRUE(out->src[0] == root);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, out), 0);
+  ASSERT_INT_EQ(poly_test_shape_take_walk_nodes(), 0);
+  PolyUOp *branch = poly_uop1(ctx, POLY_OP_EXP2, POLY_FLOAT32, root, poly_arg_none());
+  PolyUOp *diamond = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, out, branch, poly_arg_none());
+  ASSERT_NOT_NULL(diamond);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, diamond), 0);
+  ASSERT_INT_EQ(poly_test_shape_take_walk_nodes(), 2);
+  ASSERT_TRUE(diamond->src[0] == out && diamond->src[1] == branch);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
 
 TEST(shape, allocation_failure_does_not_publish_or_poison_shape) {
   /* C storage for UOp._shape: a failed allocation is not a cached shapeless

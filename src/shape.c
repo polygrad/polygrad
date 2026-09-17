@@ -29,6 +29,12 @@ static bool axis_expr_equal(PolyUOp *a, PolyUOp *b);
 
 #ifdef POLY_TESTING
 static int test_shape_alloc_fail_after = -1;
+static _Thread_local size_t test_shape_walk_nodes;
+size_t poly_test_shape_take_walk_nodes(void) {
+  size_t count = test_shape_walk_nodes;
+  test_shape_walk_nodes = 0;
+  return count;
+}
 void poly_test_shape_alloc_fail_after(int count) {
   test_shape_alloc_fail_after = count;
 }
@@ -795,13 +801,22 @@ static PolyUOp *shape_resolve_function_dim(PolyCtx *ctx, PolyUOp *dim, PolyUOp *
   return valid ? resolved : NULL;
 }
 
+static bool shape_uncached(PolyUOp *u, void *ctx) {
+  return shape_cache_lookup(ctx, u) == NULL;
+}
+
 static ShapeCacheEntry *ensure_shape(PolyCtx *ctx, PolyUOp *u) {
   ShapeCacheEntry *cached = shape_cache_lookup(ctx, u);
   if (cached) return cached;
 
   PolyScratchMark scratch = poly_ctx_scratch_mark(ctx);
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort_scratch(ctx, u, &n_topo);
+  /* Tinygrad recursive_property.__get__ gates toposort on missing cache entries.
+   * Filtering only afterward repeatedly walks retained training history. */
+  PolyUOp **topo = poly_toposort_ex_user_scratch(ctx, u, &n_topo, shape_uncached, ctx, true);
+#ifdef POLY_TESTING
+  test_shape_walk_nodes += (size_t)n_topo;
+#endif
   PolyMap *cache = poly_ctx_shape_cache(ctx);
   if (!topo) {
     poly_ctx_scratch_rewind(ctx, scratch);

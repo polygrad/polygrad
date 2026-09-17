@@ -1242,26 +1242,29 @@ make bench-smoke-regression
 make bench-ratios
 ```
 
-For Python eager-call overhead, compare against an isolated interpreter with
-the published package installed:
+For Python eager-call and training-step overhead, compare against an isolated
+interpreter with the published package installed:
 
 ```bash
 make bench-py-eager PY_PERF_BASELINE=/path/to/baseline/venv/bin/python
 ```
 
-Run this on an idle machine. It alternates nine candidate/baseline process pairs,
-checks numerical results, isolated package/library paths, and matching Python
-and NumPy versions. It fails when the median of the paired timing ratios exceeds
-1.02; all pairs are retained, without retries or discarded outliers. The JSON
-report is `temp/python-eager-performance.json`.
+Run this on an idle machine. For each workload it alternates nine
+candidate/baseline process pairs, checks numerical results, isolated
+package/library paths, and matching Python and NumPy versions. The training
+fixture runs a small two-layer MLP with backward, Adam updates and loss readback;
+its loss trajectory is checked against pinned Tinygrad. Each workload must meet
+the 1.02 median paired-ratio limit independently. All pairs are retained, without
+retries or discarded outliers. The JSON report is
+`temp/python-eager-performance.json`.
 
 `test-release` runs this guard automatically using its own fresh published-package
 installation, not `PY_PERF_BASELINE`. Its report, installation logs and baseline
 provenance are under `python-performance/` in the release evidence directory.
 For a standalone run, use `make test-release-py-performance
 PY_PERF_OUTPUT=temp/my-new-performance-run/report.json` with a fresh output
-directory. This small-loop guard does not certify training or Model performance;
-the value assertion in `test_perf.py` is not a timing acceptance check.
+directory. These small-workload guards do not certify large-model or Model API
+performance; the value assertion in `test_perf.py` is not a timing acceptance check.
 
 Absolute benchmark baselines are machine-specific and are stored under ignored
 local paths.

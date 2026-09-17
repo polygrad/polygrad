@@ -43,7 +43,8 @@ def test_command_rejects_regression_hidden_by_drift(bench, tmp_path, monkeypatch
         return SimpleNamespace(returncode=0, stdout=json.dumps(row), stderr='')
     monkeypatch.setattr(bench['subprocess'], 'run', fake_run)
     monkeypatch.setattr(sys, 'argv', ['bench', '--baseline-python', '/baseline/bin/python',
-                                     '--rounds', '5', '--output', str(tmp_path / 'report.json')])
+                                     '--workload', 'eager', '--rounds', '5',
+                                     '--output', str(tmp_path / 'report.json')])
     assert bench['main']() == 1
 
 
@@ -54,6 +55,37 @@ def test_budget_keeps_every_pair_and_does_not_retry_for_a_pass(bench):
     assert result['ratio'] == .96
     assert result['pair_ratios'] == [.9, .95, .96, 1.1, 1.0]
     assert result['passed'] and data == before
+
+
+def test_training_regression_cannot_hide_behind_fast_eager_calls(bench):
+    data = [dict(row, workload=name)
+            for name, times in [('eager', [70] * 5), ('training', [110] * 5)]
+            for row in rows([100] * 5, times)]
+    report = bench['summarize_workloads'](data, 1.02)
+    assert report['workloads']['eager']['passed']
+    assert not report['workloads']['training']['passed']
+    assert not report['passed']
+
+
+def test_default_gate_measures_training_and_eager(bench, tmp_path, monkeypatch):
+    calls = []
+    def fake_run(command, **kwargs):
+        label = 'candidate' if command[0] == sys.executable else 'baseline'
+        workload = 'training' if 'Adam' in command[-1] else 'eager'
+        calls.append((label, workload))
+        prefix = ROOT if label == 'candidate' else Path('/baseline')
+        value = 110 if label == 'candidate' and workload == 'training' else 100
+        row = dict(median_us=value, samples_us=[value] * 9, python=sys.version, numpy_version='2.4.6',
+                   prefix=str(prefix), version='0.5.1', package=str(prefix / 'py/polygrad/__init__.py'),
+                   library=str(prefix / 'build/libpolygrad.so'))
+        return SimpleNamespace(returncode=0, stdout=json.dumps(row), stderr='')
+    monkeypatch.setattr(bench['subprocess'], 'run', fake_run)
+    output = tmp_path / 'report.json'
+    monkeypatch.setattr(sys, 'argv', ['bench', '--baseline-python', '/baseline/bin/python',
+                                     '--rounds', '5', '--output', str(output)])
+    assert bench['main']() == 1
+    assert len(calls) == 20
+    assert not json.loads(output.read_text())['workloads']['training']['passed']
 
 
 @pytest.mark.parametrize('bad', [0, -1, float('nan'), float('inf')])

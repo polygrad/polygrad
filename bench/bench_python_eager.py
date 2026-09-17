@@ -1,4 +1,4 @@
-"""Paired, isolated eager-loop guard against an installed Python package."""
+"""Paired eager and training guards against an isolated installed package."""
 
 import argparse
 import hashlib
@@ -36,6 +36,46 @@ print(json.dumps(dict(median_us=statistics.median(samples), samples_us=samples,
 '''
 
 
+TRAINING_PROBE = '''
+import json, statistics, sys, time
+import polygrad, numpy as np
+from polygrad import Tensor, Context, _ffi
+from polygrad.nn.optim import Adam
+x = Tensor(np.linspace(-1, 1, 32, dtype=np.float32).reshape(8, 4)).is_param_(False).realize()
+y = Tensor(np.linspace(-.5, .5, 16, dtype=np.float32).reshape(8, 2)).is_param_(False).realize()
+params = [Tensor(np.linspace(-.2, .3, 32, dtype=np.float32).reshape(4, 8)).realize(),
+          Tensor(np.full(8, .1, np.float32)).realize(),
+          Tensor(np.linspace(-.3, .2, 16, dtype=np.float32).reshape(8, 2)).realize(),
+          Tensor(np.full(2, .1, np.float32)).realize()]
+opt = Adam(params, lr=.001)
+def step():
+    opt.zero_grad()
+    loss = (((x @ params[0] + params[1]).relu() @ params[2] + params[3]) - y).square().mean()
+    loss.backward()
+    opt.step()
+    return loss.item()
+with Context(TRAINING=1):
+    initial = step()
+    for _ in range(14): step()
+    samples = []
+    for _ in range(7):
+        start = time.perf_counter()
+        for _ in range(20): final = step()
+        samples.append((time.perf_counter() - start) * 50000)
+# Pinned Tinygrad CPU and each Polygrad logical policy agree on this trajectory.
+# Check outside timing; a skipped optimizer/backward must not be a fast pass.
+np.testing.assert_allclose([initial, final], [0.07240158319473267, 0.0011362460209056735],
+                          rtol=1e-4, atol=1e-7)
+print(json.dumps(dict(median_us=statistics.median(samples), samples_us=samples,
+                     initial_loss=initial, final_loss=final,
+                     python=sys.version, version=polygrad.__version__,
+                     prefix=sys.prefix, numpy_version=np.__version__,
+                     package=polygrad.__file__, library=_ffi._lib._name)))
+'''
+
+WORKLOADS = dict(eager=PROBE, training=TRAINING_PROBE)
+
+
 def summarize(rows, max_ratio):
     if not math.isfinite(max_ratio) or max_ratio <= 0:
         raise ValueError('budget must be finite and positive')
@@ -55,6 +95,15 @@ def summarize(rows, max_ratio):
     return dict(baseline_us=statistics.median(pair['baseline'] for pair in pairs.values()),
                 candidate_us=statistics.median(pair['candidate'] for pair in pairs.values()),
                 ratio=ratio, pair_ratios=ratios, max_ratio=max_ratio, passed=ratio <= max_ratio, rows=rows)
+
+
+def summarize_workloads(rows, max_ratio):
+    names = sorted({row['workload'] for row in rows})
+    if not names or any(name not in WORKLOADS for name in names):
+        raise ValueError('unknown or missing workload')
+    reports = {name: summarize([row for row in rows if row['workload'] == name], max_ratio) for name in names}
+    # Never average workloads: fast getters cannot compensate for slow training.
+    return dict(passed=all(report['passed'] for report in reports.values()), workloads=reports)
 
 
 def validate_pair(pair):
@@ -109,6 +158,7 @@ def main():
     baseline.add_argument('--prepare-baseline', action='store_true', help='Install the pinned published sdist into a fresh venv')
     parser.add_argument('--baseline-sdist', type=Path, help='Use a local copy of the hash-pinned sdist')
     parser.add_argument('--rounds', type=int, default=9)
+    parser.add_argument('--workload', choices=['all', *WORKLOADS], default='all')
     parser.add_argument('--max-ratio', type=float, default=1.02)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
@@ -126,27 +176,29 @@ def main():
     if args.prepare_baseline:
         args.baseline_python, expected_version = prepare_baseline(args.output.resolve().parent / 'baseline', args.baseline_sdist)
     rows = []
-    for round_id in range(args.rounds):
-        for label in (('baseline', 'candidate') if round_id % 2 == 0 else ('candidate', 'baseline')):
-            child_env = dict(env)
-            python = str(Path(args.baseline_python).absolute())
-            if label == 'candidate':
-                python = sys.executable
-                child_env.update(PYTHONPATH=str(root / 'py'), POLY_LIB=str(root / 'build/libpolygrad.so'))
-            result = subprocess.run([python, '-c', PROBE], env=child_env, cwd=root,
-                                    capture_output=True, text=True, timeout=120)
-            if result.returncode:
-                raise RuntimeError(f'{label} failed ({result.returncode}): {result.stdout}\n{result.stderr}')
-            row = dict(json.loads(result.stdout), label=label, round=round_id)
-            rows.append(row)
-            print(f"{label} {round_id}: {row['median_us']:.1f} us", flush=True)
-        validate_pair(rows[-2:])
-        if expected_version and next(row['version'] for row in rows[-2:] if row['label'] == 'baseline') != expected_version:
-            raise ValueError('installed baseline version differs from pinned version')
-    report = summarize(rows, args.max_ratio)
+    for workload in WORKLOADS if args.workload == 'all' else [args.workload]:
+        for round_id in range(args.rounds):
+            for label in (('baseline', 'candidate') if round_id % 2 == 0 else ('candidate', 'baseline')):
+                child_env = dict(env)
+                python = str(Path(args.baseline_python).absolute())
+                if label == 'candidate':
+                    python = sys.executable
+                    child_env.update(PYTHONPATH=str(root / 'py'), POLY_LIB=str(root / 'build/libpolygrad.so'))
+                result = subprocess.run([python, '-c', WORKLOADS[workload]], env=child_env, cwd=root,
+                                        capture_output=True, text=True, timeout=120)
+                if result.returncode:
+                    raise RuntimeError(f'{label}/{workload} failed ({result.returncode}): {result.stdout}\n{result.stderr}')
+                row = dict(json.loads(result.stdout), workload=workload, label=label, round=round_id)
+                rows.append(row)
+                print(f"{workload} {label} {round_id}: {row['median_us']:.1f} us", flush=True)
+            validate_pair(rows[-2:])
+            if expected_version and next(row['version'] for row in rows[-2:] if row['label'] == 'baseline') != expected_version:
+                raise ValueError('installed baseline version differs from pinned version')
+    report = summarize_workloads(rows, args.max_ratio)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + '\n')
-    print(f"median paired candidate/baseline: {report['ratio']:.3f} (limit {args.max_ratio:.3f})")
+    for name, result in report['workloads'].items():
+        print(f"{name} median paired candidate/baseline: {result['ratio']:.3f} (limit {args.max_ratio:.3f})")
     return 0 if report['passed'] else 1
 
 
