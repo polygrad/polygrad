@@ -2515,11 +2515,12 @@ cleanup:
   free(pending_roots);
   free(pending_tensors);
   /* Pinned Tensor.realize does no scheduling for already-backed/virtual
-   * roots. Do not scan residency on that path just because a wrapper died.
+   * roots. Do not scan residency on that path just because a wrapper died;
+   * losing a covering owner or allocating storage requests a new scan.
    * Unlike Python's weak UOps, C IR still needs its growth-budgeted sweep,
    * including loops creating empty tensors without any storage allocation.
    * Genuine materialization and allocation retain their collection boundaries. */
-  if (rc == 0 && (n_pending > 0 || poly_ctx_ir_collection_due(ctx)) &&
+  if (rc == 0 && (n_pending > 0 || ctx->collection_requested || poly_ctx_ir_collection_due(ctx)) &&
       poly_ctx_collect_at_safe_point(ctx) != 0)
     rc = -1;
   return rc;

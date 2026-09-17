@@ -1678,6 +1678,37 @@ async function runTensorTests(pg, createRuntime) {
     }
   })
 
+  for (const lastView of [false, true]) {
+    await test(`jit readback reclaims dropped storage ${lastView ? 'view' : 'direct'}`, isolatedRuntime(async pg => {
+      const x = new pg.Tensor(new Float32Array([3]))
+      await x.realize()
+      const step = pg.jit(value => value.add(1).realize())
+      let large, view
+      try {
+        for (let i = 0; i < 5; i++) assertClose(await (await step(x)).toArray(), [4])
+        pg.collect()
+        const baseline = pg.stats().coreStats.memUsed
+        large = new pg.Tensor(new Float32Array(1 << 20))
+        await large.realize()
+        assert(pg.stats().coreStats.memUsed >= baseline + (1 << 22), 'large storage must be allocated')
+        if (lastView) view = large.shrink([[0, 1]])
+        await large.dispose()
+        if (lastView) {
+          pg.collect()
+          assert(pg.stats().coreStats.memUsed >= baseline + (1 << 22), 'view must keep base storage alive')
+          await view.dispose()
+        }
+        assertClose(await (await step(x)).toArray(), [4])
+        assert(pg.stats().coreStats.memUsed <= baseline, 'next readback must reclaim retired storage')
+      } finally {
+        if (view) await view.dispose()
+        if (large) await large.dispose()
+        step.dispose()
+        await x.dispose()
+      }
+    }))
+  }
+
   await test('jit correctness protects output fed back as input', async () => {
     const f = pg.jitAsync((buf, frame) => {
       const joined = buf.shrink([[1, 3]]).cat(frame)

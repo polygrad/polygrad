@@ -922,6 +922,9 @@ At an idle boundary, use Python `pg.clear_schedule_cache()` or
 `runtime.clear_schedule_cache()`, JavaScript `runtime.clearScheduleCache()`,
 or C `poly_schedule_cache_clear(ctx)` from `polygrad.h`. Then call
 `collect()` / `poly_ctx_collect(ctx)` to reclaim resources without other owners.
+Storage reclamation is deferred to safe points, including the next Tensor
+readback after a storage-owning root is retired. Ordinary JIT/readback does not
+scan retained graphs merely because a temporary wrapper was released.
 Await pending browser operations before clearing; raw C callers must serialize
 access and finish queued device work. Independently owned Model/JIT executions
 remain usable. Use clearing at workload boundaries or under memory pressure,

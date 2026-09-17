@@ -271,6 +271,10 @@ static void tensor_capture_restore(PolyTensorCapture *capture) {
   for (int i = 0; i < capture->n_roots; i++) {
     TensorCaptureRoot *root = &capture->roots[i];
     if (!root->tensor) continue;
+    if (root->tensor->uop_physical != root->physical) {
+      poly_ctx_root_acquired(capture->ctx, root->physical);
+      poly_ctx_root_released(capture->ctx, root->tensor->uop_physical);
+    }
     root->tensor->uop_logical = root->logical;
     root->tensor->uop_physical = root->physical;
     root->tensor->logical_state = root->logical_state;
@@ -297,6 +301,10 @@ static void tensor_replace_roots_commit(
    * becomes-map. A changed physical root invalidates the last residency mark
    * set even when no Tensor owner was released. */
   if (tensor->owner_ctx) {
+    if (tensor->uop_physical != uop_physical) {
+      poly_ctx_root_acquired(tensor->owner_ctx, uop_physical);
+      poly_ctx_root_released(tensor->owner_ctx, tensor->uop_physical);
+    }
     if (tensor->uop_physical != uop_physical) tensor->owner_ctx->collection_dirty = true;
     if (tensor->uop_physical != uop_physical || tensor->uop_logical != uop_logical)
       tensor->owner_ctx->ir_collection_dirty = true;
@@ -643,6 +651,7 @@ void poly_tensor_release(PolyTensor *tensor) {
   if (!tensor || !tensor->owner_ctx || tensor->owner_refs == 0) return;
   if (--tensor->owner_refs > 0) return;
   PolyCtx *ctx = tensor->owner_ctx;
+  poly_ctx_root_released(ctx, tensor->uop_physical);
   tensor_capture_forget(ctx, tensor);
   PolyTensor *source = tensor->source;
   tensor->source = NULL;
@@ -752,6 +761,7 @@ PolyTensor *poly_tensor_create_with_roots(
   tensor->owner_slot = ctx->n_tensors;
 
   ctx->tensors[ctx->n_tensors++] = tensor;
+  poly_ctx_root_acquired(ctx, uop_physical);
   return tensor;
 }
 

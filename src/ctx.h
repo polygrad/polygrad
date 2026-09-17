@@ -53,6 +53,10 @@ struct PolyCtx {
   /* C analogue of Tinygrad's weak UOp/Buffer ownership. Values are positive
    * retain counts encoded as uintptr_t. */
   PolyMap *retained_uops;
+  /* Weak trigger snapshot, not owners: direct-owner counts for roots whose
+   * traversal covered new residency rows in the last successful collection. */
+  PolyMap *collection_roots;
+  bool collection_requested;
   bool collection_dirty; /* runtime residency may have lost an owner */
   bool ir_collection_dirty; /* weak CSE/shape rows may have lost an owner */
   size_t ir_collection_baseline_bytes; /* UOp bytes after the last full IR sweep */
@@ -122,6 +126,8 @@ void poly_ctx_record_memory_free_exact(
 uint64_t poly_ctx_mem_used_for_device_uop(PolyCtx *ctx, PolyUOp *device_uop);
 int poly_ctx_collect_before_allocation(PolyCtx *ctx, PolyUOp *transient_root);
 bool poly_ctx_ir_collection_due(const PolyCtx *ctx);
+void poly_ctx_root_acquired(PolyCtx *ctx, PolyUOp *root);
+void poly_ctx_root_released(PolyCtx *ctx, PolyUOp *root);
 int poly_ctx_collect_at_safe_point(PolyCtx *ctx);
 void poly_ctx_reserve_unique_id(PolyCtx *ctx, int64_t id);
 void poly_ctx_reserve_buf_tag(PolyCtx *ctx, int32_t tag);

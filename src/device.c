@@ -584,6 +584,7 @@ static int buffer_publish_replacement(PolyCtx *ctx, PolyUOp *buf, PolyBuffer *ca
   /* The map retains its existing fatal-OOM policy. Publish before invoking
    * old allocator/frontend callbacks, which may inspect the current binding. */
   poly_map_set(ctx->buffers, poly_ptr_hash(buf), buf, candidate, poly_ptr_eq);
+  ctx->collection_requested = true;
   if (old) poly_buffer_free_chain(ctx, old);
   return 0;
 }

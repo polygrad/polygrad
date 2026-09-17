@@ -589,6 +589,37 @@ def test_tinyjit_repeated_scalar_readback_preserves_replay(device):
             step.reset()
 
 
+@pytest.mark.parametrize('device', ['CPU', 'INTERP', 'CUDA'])
+@pytest.mark.parametrize('last_view', [False, True])
+def test_tinyjit_readback_reclaims_dropped_storage(device, last_view):
+    from polygrad import Runtime
+    from polygrad.device import Device
+
+    if device == 'CUDA' and not Device.cuda_available():
+        pytest.skip('poly_cuda_available() is false in the selected library')
+    with Runtime(device=device) as rt:
+        x = rt.Tensor([3.0]).realize()
+        step = TinyJit(lambda value: (value + 1).realize())
+        try:
+            for _ in range(5):
+                assert step(x).item() == 4
+            rt.collect()
+            baseline = rt.stats()['mem_used']
+            large = rt.Tensor.ones(1 << 20).contiguous().realize()
+            assert rt.stats()['mem_used'] >= baseline + (1 << 22)
+            if last_view:
+                view = large[:1].realize()
+            large.dispose()
+            if last_view:
+                rt.collect()
+                assert rt.stats()['mem_used'] >= baseline + (1 << 22)
+                view.dispose()
+            assert step(x).item() == 4
+            assert rt.stats()['mem_used'] <= baseline
+        finally:
+            step.reset()
+
+
 def test_realized_contiguous_and_readback_reuse_current_buffer_identity():
     # Host-backed input makes the ADD deviceful in pinned tinygrad. A pure
     # arange+1 root is device-free and realize() is intentionally a no-op.

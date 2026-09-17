@@ -220,37 +220,136 @@ TEST(tensor, dirty_residency_is_collected_before_replacement_allocation) {
   PASS();
 }
 
-TEST(tensor, backed_readback_does_not_collect_unrelated_storage) {
-  /* Pinned Tensor.realize excludes has_buffer_identity roots. A read of
-   * existing storage is not an execution/collection boundary. */
+TEST(tensor, backed_readback_does_not_collect_live_aliases) {
+  /* A duplicate wrapper disappearing cannot orphan storage. */
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
   int64_t shape[] = {1};
   float value = 7, actual = 0;
   PolyTensor *live = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
-  PolyTensor *dead = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(live);
-  ASSERT_NOT_NULL(dead);
   ASSERT_INT_EQ(poly_buffer_write(ctx, live->uop_physical, &value, sizeof(value)), 0);
-  ASSERT_INT_EQ(poly_buffer_write(ctx, dead->uop_physical, &value, sizeof(value)), 0);
-  poly_tensor_release(dead);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
   for (int i = 0; i < 32; i++) {
+    PolyTensor *alias = poly_tensor_create_with_roots(
+        ctx, live->uop_logical, live->uop_physical, live->role, live->device
+    );
+    ASSERT_NOT_NULL(alias);
+    poly_tensor_release(alias);
     ASSERT_INT_EQ(read_tensor_bytes(ctx, live, &actual, sizeof(actual)), 0);
     ASSERT_TRUE(actual == value);
     ASSERT_TRUE(ctx->collection_dirty);
-    ASSERT_TRUE(poly_ctx_mem_used_for_device(ctx, POLY_DEVICE_CPU) == 2 * sizeof(float));
+    ASSERT_TRUE(poly_ctx_mem_used_for_device(ctx, POLY_DEVICE_CPU) == sizeof(float));
   }
-  /* The next real allocation must reclaim the dropped owner without an
-   * explicit collect, while preserving the tensor repeatedly read above. */
-  PolyTensor *next = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
-  ASSERT_NOT_NULL(next);
-  ASSERT_INT_EQ(poly_buffer_write(ctx, next->uop_physical, &value, sizeof(value)), 0);
-  ASSERT_TRUE(poly_ctx_mem_used_for_device(ctx, POLY_DEVICE_CPU) == 2 * sizeof(float));
-  ASSERT_INT_EQ(read_tensor_bytes(ctx, live, &actual, sizeof(actual)), 0);
-  ASSERT_TRUE(actual == value);
-  poly_tensor_release(next);
   poly_tensor_release(live);
   poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tensor, backed_readback_reclaims_retired_storage_owners) {
+  /* Buffer.__del__ in pinned Tinygrad releases the final owner, including a
+   * tiny view of a large allocation. C defers reclamation to a safe point. */
+  for (int mode = 0; mode < 4; mode++) {
+    PolyCtx *ctx = poly_ctx_new();
+    ASSERT_NOT_NULL(ctx);
+    float value = 7, actual = 0;
+    PolyTensor *live = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){1}, 1, POLY_DEVICE_CPU);
+    PolyTensor *dead =
+        poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){1 << 20}, 1, POLY_DEVICE_CPU);
+    ASSERT_NOT_NULL(live);
+    ASSERT_NOT_NULL(dead);
+    ASSERT_INT_EQ(poly_buffer_write(ctx, live->uop_physical, &value, sizeof(value)), 0);
+    ASSERT_INT_EQ(poly_buffer_allocate(ctx, dead->uop_physical, POLY_DEVICE_CPU), 0);
+    PolyTensor *view = NULL;
+    PolyUOp *root = dead->uop_physical;
+    if (mode == 1) {
+      view = poly_tensor_shrink(ctx, dead, (int64_t[][2]){{0, 1}}, 1);
+      ASSERT_NOT_NULL(view);
+    }
+    if (mode == 3) root = poly_sink_n(ctx, &root, 1);
+    if (mode >= 2) ASSERT_INT_EQ(poly_uop_retain(ctx, root), 0);
+    poly_tensor_release(dead);
+    if (mode != 0) {
+      ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+      ASSERT_TRUE(ctx->mem_used >= (1 << 22));
+      if (view)
+        poly_tensor_release(view);
+      else
+        poly_uop_release(ctx, root);
+    }
+    ASSERT_INT_EQ(read_tensor_bytes(ctx, live, &actual, sizeof(actual)), 0);
+    bool reclaimed = ctx->mem_used == sizeof(float);
+    poly_tensor_release(live);
+    poly_ctx_destroy(ctx);
+    ASSERT_TRUE(actual == value);
+    ASSERT_TRUE(reclaimed);
+  }
+  PASS();
+}
+
+TEST(tensor, backed_readback_ignores_redundant_small_views) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyTensor *base = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){1 << 20}, 1, POLY_DEVICE_CPU);
+  PolyTensor *live = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){1}, 1, POLY_DEVICE_CPU);
+  float value = 7, actual = 0;
+  ASSERT_NOT_NULL(base);
+  ASSERT_NOT_NULL(live);
+  ASSERT_INT_EQ(poly_buffer_allocate(ctx, base->uop_physical, POLY_DEVICE_CPU), 0);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, live->uop_physical, &value, sizeof(value)), 0);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  for (int i = 0; i < 64; i++) {
+    PolyTensor *view = poly_tensor_shrink(ctx, base, (int64_t[][2]){{0, 1}}, 1);
+    ASSERT_NOT_NULL(view);
+    poly_tensor_release(view);
+    ASSERT_INT_EQ(read_tensor_bytes(ctx, live, &actual, sizeof(actual)), 0);
+    ASSERT_TRUE(ctx->collection_dirty); /* No full scan merely for a view. */
+  }
+  poly_tensor_release(base);
+  ASSERT_INT_EQ(read_tensor_bytes(ctx, live, &actual, sizeof(actual)), 0);
+  bool reclaimed = ctx->mem_used == sizeof(float);
+  poly_tensor_release(live);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(reclaimed);
+  PASS();
+}
+
+TEST(tensor, backed_readback_prefers_explicit_storage_owners) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyTensor *base = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){1 << 20}, 1, POLY_DEVICE_CPU);
+  PolyTensor *live = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){1}, 1, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(base);
+  ASSERT_NOT_NULL(live);
+  float value = 7, actual = 0;
+  ASSERT_INT_EQ(poly_buffer_allocate(ctx, base->uop_physical, POLY_DEVICE_CPU), 0);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, live->uop_physical, &value, sizeof(value)), 0);
+  PolyUOp *root = base->uop_physical;
+  PolyTensorRole role = base->role;
+  ASSERT_INT_EQ(poly_uop_retain(ctx, root), 0);
+  PolyTensor *view = poly_tensor_shrink(ctx, base, (int64_t[][2]){{0, 1}}, 1);
+  ASSERT_NOT_NULL(view);
+  poly_tensor_release(base);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  bool no_scans = true;
+  for (int i = 0; i < 32; i++) {
+    poly_tensor_release(view);
+    base = poly_tensor_create_with_roots(ctx, root, root, role, POLY_DEVICE_CPU);
+    ASSERT_NOT_NULL(base);
+    view = poly_tensor_shrink(ctx, base, (int64_t[][2]){{0, 1}}, 1);
+    ASSERT_NOT_NULL(view);
+    poly_tensor_release(base);
+    ASSERT_INT_EQ(read_tensor_bytes(ctx, live, &actual, sizeof(actual)), 0);
+    no_scans &= ctx->collection_dirty;
+  }
+  poly_tensor_release(view);
+  poly_uop_release(ctx, root);
+  ASSERT_INT_EQ(read_tensor_bytes(ctx, live, &actual, sizeof(actual)), 0);
+  bool reclaimed = ctx->mem_used == sizeof(float);
+  poly_tensor_release(live);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(no_scans);
+  ASSERT_TRUE(reclaimed);
   PASS();
 }
 
@@ -266,8 +365,8 @@ TEST(tensor, dropped_storage_loop_is_bounded_without_explicit_collection) {
     ASSERT_TRUE(poly_ctx_mem_used_for_device(ctx, POLY_DEVICE_CPU) == sizeof(values));
     poly_tensor_release(t);
   }
-  /* Final unreachable allocation lasts until another allocation, a genuine
-   * materialization, explicit collection, or context destruction. */
+  /* Release only requests collection; bytes remain until the next safe point
+   * (including readback), explicit collection, or context destruction. */
   ASSERT_TRUE(poly_ctx_mem_used_for_device(ctx, POLY_DEVICE_CPU) == sizeof(values));
   poly_ctx_destroy(ctx);
   PASS();

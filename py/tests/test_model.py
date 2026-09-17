@@ -7,6 +7,28 @@ from polygrad.models import MLP, Graph, Sequential
 from polygrad.tensor import Tensor
 
 
+@pytest.mark.parametrize('device', ['cpu', 'interp', 'cuda'])
+def test_disposed_model_storage_reclaimed_by_unrelated_readback(device):
+    import polygrad as pg
+    from polygrad.device import Device
+    if device == 'cuda' and not Device.cuda_available():
+        pytest.skip('poly_cuda_available() is false in the selected library')
+    with pg.create(device=device) as rt:
+        live = rt.Tensor([7.0]).realize()
+        rt.collect()
+        baseline = rt.stats()['mem_used']
+        weight = rt.Tensor.zeros(1 << 20).contiguous().realize()
+        model = rt.Model.from_tensors(outputs={'out': weight}, params={'weight': weight})
+        try:
+            weight.dispose()
+            rt.collect()
+            assert rt.stats()['mem_used'] >= baseline + (1 << 22)
+        finally:
+            model.dispose()
+        assert live.item() == 7
+        assert rt.stats()['mem_used'] <= baseline
+
+
 @pytest.mark.parametrize('device', ['cpu', 'interp'])
 def test_bound_runtime_model_construction_and_import(device):
     import polygrad as pg
