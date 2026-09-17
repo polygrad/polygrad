@@ -11,13 +11,11 @@ import ctypes.util
 import os
 import platform
 import sys
-import threading
 
 # --- Module-level state (populated by get_lib()) ---
 _lib = None
 OPS = {}
 _has_cuda_ffi = False
-_setup_lock = threading.RLock()
 POLYGRAD_ABI_VERSION = 92
 
 # --- Opaque pointer type (always available) ---
@@ -26,51 +24,6 @@ _ptrp = ctypes.POINTER(_ptr)
 _i64p = ctypes.POINTER(ctypes.c_int64)
 _ip = ctypes.POINTER(ctypes.c_int)
 _uintptr = ctypes.c_size_t
-
-
-class _OwnedHandle(int):
-    """Opaque address carrying its runtime's call lock, not another C retain."""
-
-    def __new__(cls, value, lock):
-        out = super().__new__(cls, value)
-        out._call_lock = lock
-        return out
-
-
-def owned_handle(value, owner):
-    # ctypes output arrays/byref erase Python metadata. Restore it before a
-    # returned handle is used without an explicit context (notably release).
-    if isinstance(value, ctypes.c_void_p):
-        value = value.value
-    if not value:
-        return None
-    lock = getattr(owner, '_call_lock', None)
-    return _OwnedHandle(value, lock) if lock is not None else value
-
-
-class _NativeCall:
-    def __init__(self, function):
-        self._function = function
-
-    def __getattr__(self, name):
-        return getattr(self._function, name)
-
-    def __call__(self, *args):
-        locks = {id(lock): lock for arg in args if (lock := getattr(arg, '_call_lock', None)) is not None}
-        # Foreign-runtime operands still reach the existing rejection checks.
-        # Order both locks so opposing invalid calls cannot deadlock.
-        ordered = [locks[key] for key in sorted(locks)] or [_setup_lock]
-        for lock in ordered:
-            lock.acquire()
-        try:
-            result = self._function(*args)
-            if self._function.restype is _ptr and result:
-                owner_lock = next((arg._call_lock for arg in args if isinstance(arg, _OwnedHandle)), None)
-                return _OwnedHandle(result, owner_lock or threading.RLock())
-            return result
-        finally:
-            for lock in reversed(ordered):
-                lock.release()
 
 
 # --- Structures (always available, no _lib dependency) ---
@@ -1680,13 +1633,6 @@ def get_lib():
         name = lib.poly_op_name(i)
         if name:
             ops[name.decode()] = i
-
-    # CDLL continues to release the GIL. Context-derived handles share an RLock,
-    # including pointer-only release calls from finalizers; independent runtimes
-    # do not share that lock. Multi-call Python operations are not atomic.
-    for name, function in list(vars(lib).items()):
-        if isinstance(function, ctypes._CFuncPtr):
-            setattr(lib, name, _NativeCall(function))
 
     # Atomically populate module globals
     _lib = lib

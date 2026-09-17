@@ -93,12 +93,15 @@ Current `lstsq` is solution-only for full-rank tall or square systems.
 
 ## Devices And Runtimes
 
-Native calls sharing a runtime are serialized by a runtime-local lock; the GIL
-is released during those calls. Separate runtimes support parallel CPU/INTERP
-threads; concurrent GPU initialization has not been validated.
-A multi-call Python operation is not atomic: coordinate shared Tensor updates
-and global configuration changes. Call `collect()` and `dispose()` only when
-other threads have stopped using that runtime.
+Never use one runtime concurrently from multiple Python threads: native calls
+release the GIL, and overlapping context mutations can crash the process.
+The default runtime is process-global. For parallel work, create one runtime
+per thread, construct through `rt.Tensor` and `rt.Model`, and keep its objects
+in that thread, including cleanup.
+Separate-runtime CPU, INTERP and X86 execution is tested; concurrent GPU
+initialization is not validated. Alternatively, serialize all use and cleanup
+of a shared runtime yourself. Global configuration changes still need coordination.
+Call `collect()` and `dispose()` only when no other thread is using the runtime.
 
 ```python
 from polygrad import Device, Tensor

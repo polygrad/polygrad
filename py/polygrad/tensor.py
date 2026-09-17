@@ -101,6 +101,7 @@ def _ptr_value(ptr):
     return int(raw) if raw else 0
 
 
+@functools.lru_cache(maxsize=32)
 def _device_name_from_id(device_id):
     raw = _ffi._lib.poly_device_name(int(device_id))
     if not raw:
@@ -112,6 +113,13 @@ def _device_id(device):
     from .device import Device
 
     dev = Device.canonicalize(device).lower().encode('utf-8')
+    return _device_id_from_name(dev)
+
+
+@functools.lru_cache(maxsize=32)
+def _device_id_from_name(dev):
+    # Cache only the immutable name-to-enum mapping, not the current default
+    # device. Bound the cache because DISK names contain arbitrary paths.
     return int(_ffi._lib.poly_device_by_name(dev))
 
 
@@ -621,7 +629,7 @@ class Tensor:
         if requested_device is None and disk_device is not None:
             requested_device = disk_device
         self._device = Device.canonicalize(requested_device)
-        self._tensor = _ffi.owned_handle(_tensor, self._ctx)
+        self._tensor = _tensor
         self._shape_override = tuple(_shape) if _shape is not None else None
         current_uop = None
         imported_tensor_from_host = False
@@ -1644,7 +1652,6 @@ class Tensor:
     def _make_result_from_core(self, core_tensor, shape):
         if not core_tensor:
             raise RuntimeError('core Tensor operation failed')
-        core_tensor = _ffi.owned_handle(core_tensor, self._ctx)
         current = self._core_uop_raw(core_tensor)
         if not current:
             raise RuntimeError('core Tensor operation returned no current UOp')

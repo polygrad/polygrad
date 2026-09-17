@@ -724,6 +724,15 @@ build/libpolygrad-core-check.so: $(SRC) $(PROJECT_HEADERS) Makefile
 test-py: verify-source-mirrors build/libpolygrad.so
 	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 POLY_LIB=build/libpolygrad.so PYTHONPATH=py $(PYTHON) -m pytest py/tests/ -v
 
+# Supply an isolated interpreter with the published baseline installed. Run on
+# an idle machine; this guard measures frontend overhead, not only C kernels.
+PY_PERF_BASELINE ?=
+PY_PERF_OUTPUT ?= temp/python-eager-performance.json
+.PHONY: bench-py-eager
+bench-py-eager: build/libpolygrad.so
+	@test -n "$(PY_PERF_BASELINE)" || { echo 'Set PY_PERF_BASELINE to the baseline package interpreter'; exit 2; }
+	$(PARITY_PY) bench/bench_python_eager.py --baseline-python "$(PY_PERF_BASELINE)" --output "$(PY_PERF_OUTPUT)"
+
 # Default-runtime assertions stay unchanged; explicit-owner lanes reuse the
 # existing NN numerical and gradient bodies, not a second set of expectations.
 RUNTIME_TEST_DEVICES ?= cpu interp

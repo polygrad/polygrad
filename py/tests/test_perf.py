@@ -10,10 +10,27 @@ Run: python -m pytest py/tests/test_perf.py -v -s
 import os
 import time
 import shutil
+import statistics
 import numpy as np
 import pytest
 
 from polygrad import Tensor, dtypes
+
+
+def test_short_eager_chain():
+    """Include FFI/ownership overhead, not just time spent inside a kernel."""
+    a = Tensor([1., 2., 3., 4.]).realize()
+    def step():
+        assert a.mul(2).add(1).relu().sum().item() == 24.
+    for _ in range(20):
+        step()
+    samples = []
+    for _ in range(7):
+        start = time.perf_counter()
+        for _ in range(100):
+            step()
+        samples.append((time.perf_counter() - start) * 1e4)
+    print(f'\n  short eager chain: median={statistics.median(samples):.1f}us, samples={samples}')
 
 
 def _clear_disk_cache():

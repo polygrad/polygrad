@@ -102,18 +102,23 @@ class _Device:
             return self.DEFAULT
         if isinstance(device, Compiled):
             return device.device
+        return self._canonicalize(str(device))
+
+    @functools.lru_cache(maxsize=128)
+    def _canonicalize(self, value):
+        # Like pinned Device._canonicalize, cache explicit names only. DEFAULT
+        # remains dynamic; the bounded cache also accepts path-bearing DISK names.
         lib = _ffi.get_lib()
-        value = str(device)
         if not value.upper().startswith('DISK:') and value.endswith(':0'):
             value = value[:-2]
         device_id = int(lib.poly_device_by_name(value.encode('utf-8')))
         canonical = lib.poly_device_name(device_id).decode('utf-8').upper()
         if canonical == 'DISK':
             if ':' not in value or not value.split(':', 1)[1]:
-                raise ValueError(f'Unsupported device: {device!r}')
+                raise ValueError(f'Unsupported device: {value!r}')
             return f"DISK:{value.split(':', 1)[1]}"
         if not lib.poly_device_can_execute(device_id):
-            raise ValueError(f'Unsupported device: {device!r}')
+            raise ValueError(f'Unsupported device: {value!r}')
         return canonical
 
     def set_default(self, device):

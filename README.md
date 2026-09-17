@@ -1237,11 +1237,27 @@ make bench-smoke-regression
 make bench-ratios
 ```
 
+For Python eager-call overhead, compare against an isolated interpreter with
+the published package installed:
+
+```bash
+make bench-py-eager PY_PERF_BASELINE=/path/to/baseline/venv/bin/python
+```
+
+Run this on an idle machine. It alternates five candidate/baseline process pairs,
+checks numerical results and loaded package paths, and fails above a 1.02 timing
+ratio. The JSON report is `temp/python-eager-performance.json`; this small-loop
+guard is not a substitute for training or Model benchmarks.
+
 Absolute benchmark baselines are machine-specific and are stored under ignored
 local paths.
 
 ## Current Limits
 
+- Python threads must not use the same runtime concurrently, including the
+  process-global default. Overlapping native calls can crash the process.
+  Use one explicit runtime per thread or serialize all shared-runtime use and
+  cleanup. See the [Python threading contract](py/README.md#devices-and-runtimes).
 - Invalid padded coordinates use safe integer divisors before their results
   are discarded (PG-DIV-010). This fixes an inherited Tinygrad trap; division
   by zero at a valid coordinate remains unsupported and can terminate native
