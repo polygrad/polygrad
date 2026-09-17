@@ -270,7 +270,7 @@ try {
   declared shape, not merely its element count. The equivalent JS binding is
   `{data: typedArray, shape: [rows, columns]}`.
 
-Current source: `model.place('CPU:1')` and `set_device_map(...)` accept the same
+In 0.5.2, `model.place('CPU:1')` and `set_device_map(...)` accept the same
 exact native CPU identities. Unsupported accelerator ordinals reject without
 changing the Model. Published 0.5.1 accepts CPU ordinals only in module maps.
 

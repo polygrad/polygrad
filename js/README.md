@@ -417,7 +417,7 @@ weights, use `model.importWeights(bytes)` on synchronous backends or
 `await model.importWeightsAsync(bytes)` on WebGPU. The latter snapshots the
 supplied bytes and reads current device state for rollback.
 
-Current source: native `model.place('CPU:1')` and `setDeviceMap(...)` accept the
+In 0.5.2, native `model.place('CPU:1')` and `setDeviceMap(...)` accept the
 same exact CPU identities. Wasm maps plain `CPU` to `WASM`, but rejects CPU
 ordinals; unsupported accelerator ordinals also reject. On WebGPU use
 `await model.placeAsync(device)`. Published 0.5.1 accepts native CPU ordinals

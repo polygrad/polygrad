@@ -32,7 +32,7 @@ def test_release_manifest_covers_required_lanes_once(runner):
             'test-compat-tinygrad-upstream-ratchet', 'test-compat-tinygrad-ops',
             'test-compat-tinygrad-nn', 'test-compat-tinygrad-policy', 'test-nn-wasm',
             'test-reference-parity', 'test-analyze-reviewed', 'test-release-op-census', 'format-check',
-            'verify-source-mirrors', 'fuzz-smoke', 'bench-smoke-regression',
+            'verify-source-mirrors', 'fuzz-smoke', 'test-release-c-performance',
             'bench-hlb-cuda-semantic', 'bench-hlb-cuda-timing'} <= set(targets)
     assert not {'test-all', 'verify', 'test-parity-opt', 'test-release-packages',
                 'reference-migration-check', 'test-parity-op-census', 'analyze',
@@ -43,6 +43,9 @@ def test_release_manifest_covers_required_lanes_once(runner):
     assert targets.index('test-release-py-performance') < targets.index('test')
     perf = next(g for g in runner['release_gates']() if g['target'] == 'test-release-py-performance')
     assert perf['variables']['PY_PERF_OUTPUT'] == '{output}/python-performance/report.json'
+    c_perf = next(g for g in runner['release_gates']() if g['target'] == 'test-release-c-performance')
+    assert c_perf['variables']['C_PERF_OUTPUT'] == '{output}/c-performance/report.json'
+    assert 'bench-smoke-regression' not in targets
     assert 'test-symbolic-z3' not in targets and 'test-symbolic-z3-fixed' not in targets
     assert targets[-1] == 'bench-hlb-cuda-timing'
     ops = next(g for g in runner['release_gates']() if g['target'] == 'test-compat-tinygrad-ops')
@@ -54,6 +57,21 @@ def test_release_manifest_covers_required_lanes_once(runner):
     assert policy['variables']['UPSTREAM_POLICY_TESTS'].split() == [
         'test/backend/test_setitem.py', 'test/backend/test_tensor.py', 'test/null/test_indexing.py']
     assert policy['variables']['UPSTREAM_COMPAT_DIR'] == '{output}/upstream-policy'
+
+
+@pytest.mark.parametrize('mismatch', [False, True])
+def test_candidate_versions_must_agree(runner, tmp_path, mismatch):
+    (tmp_path / 'py').mkdir()
+    (tmp_path / 'js').mkdir()
+    (tmp_path / 'py/pyproject.toml').write_text('[project]\nversion = "0.5.2"\n')
+    (tmp_path / 'js/package.json').write_text(json.dumps(dict(version='0.5.2')))
+    (tmp_path / 'js/package-lock.json').write_text(json.dumps(dict(
+        version='0.5.2', packages={'': dict(version='0.5.1' if mismatch else '0.5.2')})))
+    if mismatch:
+        with pytest.raises(ValueError, match='version mismatch'):
+            runner['candidate_version'](tmp_path)
+    else:
+        assert runner['candidate_version'](tmp_path) == '0.5.2'
 
 
 def test_release_stops_before_matrix_when_preflight_fails(runner, tmp_path):
@@ -137,18 +155,24 @@ def test_release_continues_after_failure_and_preserves_logs(runner, tmp_path):
         runner['run_release'](tmp_path, output, ['make'], gates, {})
 
 
-def test_performance_failure_blocks_release_and_keeps_private_report_path(runner, tmp_path):
+@pytest.mark.parametrize('target,variable,directory', [
+    ('test-release-py-performance', 'PY_PERF_OUTPUT', 'python-performance'),
+    ('test-release-c-performance', 'C_PERF_OUTPUT', 'c-performance'),
+])
+def test_performance_failure_blocks_release_and_keeps_private_report_path(runner, tmp_path, target, variable, directory):
     (tmp_path / 'Makefile').write_text(
-        'test-release-py-performance:\n\t@test "$(PY_PERF_OUTPUT)" != override.json\n\t@exit 1\n'
+        f'{target}:\n\t@test "$({variable})" != override.json\n\t@exit 1\n'
         'next:\n\t@echo next\n')
-    gate = next(g for g in runner['release_gates']() if g['target'] == 'test-release-py-performance')
+    gate = next(g for g in runner['release_gates']() if g['target'] == target)
     output = tmp_path / 'results'
     assert runner['run_release'](tmp_path, output, ['make'], [gate, dict(target='next', variables={})],
-                                 {'PY_PERF_OUTPUT': 'override.json'}) == 1
+                                 {variable: 'override.json'}) == 1
     report = json.loads((output / 'summary.json').read_text())
     assert report['status'] == 'failed'
     assert [g['status'] for g in report['gates']] == ['failed', 'passed']
-    assert f'PY_PERF_OUTPUT={output}/python-performance/report.json' in report['gates'][0]['command']
+    assert f'{variable}={output}/{directory}/report.json' in report['gates'][0]['command']
+    assert 'before' in report['gates'][0]['machine_conditions']
+    assert 'after' in report['gates'][0]['machine_conditions']
 
 
 def test_release_serializes_recursive_make_and_clears_filters(runner, tmp_path, monkeypatch):

@@ -1,0 +1,5 @@
+{
+  "version": "0.5.1",
+  "commit": "e38eed7476585dfe62f3ba425ac3d9d4cd270358",
+  "description": "Repository checkpoint of published 0.5.1 corrections; no v0.5.1 Git tag exists. Build its C sources with the current smoke driver and identical CPU flags."
+}

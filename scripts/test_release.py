@@ -24,6 +24,18 @@ SCOPE = json.loads((ROOT / 'test/fixtures/release_050_scope.json').read_text(enc
 EXCLUSIONS = SCOPE['excluded_capabilities']
 
 
+def candidate_version(root):
+    match = re.search(r'^version\s*=\s*"([^"]+)"', (root / 'py/pyproject.toml').read_text(), re.M)
+    if not match:
+        raise ValueError('missing Python package version')
+    package = json.loads((root / 'js/package.json').read_text())
+    lock = json.loads((root / 'js/package-lock.json').read_text())
+    versions = [match.group(1), package['version'], lock['version'], lock['packages']['']['version']]
+    if len(set(versions)) != 1:
+        raise ValueError(f'package version mismatch: {versions}')
+    return versions[0]
+
+
 def release_gates():
     # Expand aggregates once. Do not nest test-all/verify or the alias
     # test-parity-opt: those would repeat whole suites. Analyze precedes HLB
@@ -45,12 +57,14 @@ def release_gates():
         test-compat-tinygrad-policy
         test-compat-tinygrad-tier1 test-compat-tinygrad-convnext
         test-reference-parity fuzz-smoke test-symbolic-z3-supported
-        bench-smoke-regression bench-hlb-cuda-semantic bench-hlb-cuda-timing
+        test-release-c-performance bench-hlb-cuda-semantic bench-hlb-cuda-timing
     '''.split()
     gates = [dict(target=target, variables={}) for target in targets]
     for gate in gates:
         if gate['target'] == 'test-release-py-performance':
             gate['variables']['PY_PERF_OUTPUT'] = '{output}/python-performance/report.json'
+        elif gate['target'] == 'test-release-c-performance':
+            gate['variables']['C_PERF_OUTPUT'] = '{output}/c-performance/report.json'
         elif gate['target'] == 'test-compat-tinygrad-upstream-ratchet':
             gate['variables']['UPSTREAM_COMPAT_DIR'] = '{output}/upstream-nine'
         elif gate['target'] == 'test-compat-tinygrad-ops':
@@ -72,6 +86,11 @@ def release_gates():
 def preflight(variables):
     if hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(errors='backslashreplace')
+    try:
+        print(f'Candidate package version: {candidate_version(ROOT)}')
+    except (OSError, ValueError, KeyError) as exc:
+        print(f'Candidate metadata: {exc}')
+        return 1
     # The core may build with GCC while generated CPU kernels require __fp16.
     # Exercise that contract, not the compiler executable's spelling.
     checks = [('CC', [variables.get('CC', 'clang'), '-fsyntax-only', '-x', 'c', '-'],
@@ -144,6 +163,15 @@ def save_summary(output, report):
     pending.replace(output / 'summary.json')
 
 
+def machine_conditions():
+    # Load is context, not proof of timing validity: affinity and other users'
+    # work can make a machine noisy even below its logical CPU count.
+    cpus = sorted(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity') else list(range(os.cpu_count() or 1))
+    load = list(os.getloadavg()) if hasattr(os, 'getloadavg') else None
+    return dict(load_average=load, affinity=cpus, cpu_count=os.cpu_count(),
+                busy=bool(load and load[0] > len(cpus)))
+
+
 def stop_process(process):
     try:
         os.killpg(process.pid, signal.SIGTERM)
@@ -183,6 +211,7 @@ def run_release(root, output, make, gates, variables):
                   BENCH_SMOKE_JSON=str(output / 'smoke.json'))
     inputs = source_manifest(root)
     report = dict(schema_version=2, status='running', acceptance_scope='polygrad-0.5.0-supported',
+                  candidate_version=candidate_version(ROOT),
                   source_inputs=inputs, source_sha256=manifest_hash(inputs),
                   deferred_certification=SCOPE['deferred_certification'],
                   started_at=datetime.now(timezone.utc).isoformat(),
@@ -202,6 +231,7 @@ def run_release(root, output, make, gates, variables):
         start = time.monotonic()
         process = None
         row['status'] = 'running'
+        row['machine_conditions'] = dict(before=machine_conditions())
         save_summary(output, report)
         with (output / row['log']).open('w', encoding='utf-8') as log:
             log.write(shlex.join(row['command']) + '\n')
@@ -222,6 +252,7 @@ def run_release(root, output, make, gates, variables):
                     stop_process(process)
                 row['exit_code'] = 130
         row['duration_seconds'] = round(time.monotonic() - start, 3)
+        row['machine_conditions']['after'] = machine_conditions()
         row['log_sha256'] = file_hash(output / row['log'])
         row['status'] = 'interrupted' if interrupted else ('passed' if row['exit_code'] == 0 else 'failed')
         save_summary(output, report)

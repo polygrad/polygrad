@@ -977,7 +977,7 @@ Low-level `UOp.variable` bounds retain integer, floating-point and boolean
 endpoints independently of the variable dtype. C takes scalar `PolyArg` values;
 Python accepts `int`/`float`/`bool`; JavaScript uses `pg.uop.variable(...)`, with
 `BigInt` for exact wide integers. NaN, reversed and nonnumeric bounds are rejected.
-Current packages require C ABI92 and graph formats PGIR19/PGPM10; incompatible
+The 0.5.2 candidate requires C ABI95 and graph formats PGIR19/PGPM10; incompatible
 artifacts are rejected. Typed endpoints can exceed the runtime's signed64
 variable-binding domain; metadata support does not imply executable bindings.
 
@@ -1126,7 +1126,7 @@ uses `ANALYZER_CC=clang-14` and requires the exact reviewed compiler version.
 The first gate checks these tools, CPU-renderer `__fp16` support, Python versions,
 `build` in `PYTHON`, and `z3` in `PARITY_PY`; failure stops the matrix before
 expensive tests. Release subprocesses use UTF-8. Override
-`QWEN3_GGUF` and `BENCH_BASELINE` as needed. The runner
+`QWEN3_GGUF` as needed. The runner
 does not download missing fixtures, approve debts, or update baselines itself.
 Individual targets retain their existing package/network behavior.
 The Python performance gate installs the hash-pinned published 0.5.1 source
@@ -1134,6 +1134,14 @@ package in a fresh virtual environment, with the runner's NumPy version. It
 requires PyPI access for dependencies. Set `PY_PERF_BASELINE_SDIST` to a local
 copy of that exact source archive to avoid downloading the archive itself;
 its hash is still checked. Installation or measurement failure fails acceptance.
+
+The C performance gate builds the pinned 0.5.1 repository checkpoint and current
+source in isolated directories with the same smoke driver and CPU build flags.
+Nine alternating pairs replace the machine-local absolute baseline; each workload
+retains its relative/absolute noise budget. The Git checkpoint must exist locally.
+Reports retain all pairs, build commands, source/binary hashes, load averages and
+CPU affinity. High load is flagged, not used to discard or retry slow samples.
+The standalone `bench-smoke-regression` target still uses `BENCH_BASELINE`.
 
 Results go to a fresh `temp/release-*` directory, or a new `RELEASE_DIR` supplied
 by the caller. Each gate gets a command log, exit code and elapsed time in

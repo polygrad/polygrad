@@ -522,6 +522,11 @@ bench-update-local-baseline: bench-local-baseline
 bench-smoke-regression: bench-smoke
 	$(PYTHON) bench/bench_compare_abs.py $(BENCH_BASELINE) $(BENCH_SMOKE_JSON) $(BENCH_COMPARE_ARGS)
 
+C_PERF_OUTPUT ?= temp/c-performance/report.json
+.PHONY: test-release-c-performance
+test-release-c-performance:
+	$(PARITY_PY) bench/bench_c_paired.py --cc '$(RELEASE_CC)' --output '$(C_PERF_OUTPUT)'
+
 bench-ci-regression: bench-smoke
 	@if [ -z "$(BENCH_CI_BASELINE)" ]; then \
 		echo "Set BENCH_CI_BASELINE=path/to/runner-specific-baseline.json"; \
