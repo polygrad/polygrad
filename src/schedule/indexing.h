@@ -29,6 +29,9 @@ typedef struct {
   PolyUOp *valid;
 } PolyRangeEntry;
 
+/* PG-DIV-010: preserve a real divisor on valid coordinates, one elsewhere. */
+PolyUOp *poly_guard_padded_divisor(PolyCtx *ctx, PolyUOp *divisor, PolyUOp **coords, int n);
+
 typedef struct {
   PolyCtx *ctx;
   PolyMap *consumer_map;

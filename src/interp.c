@@ -517,7 +517,9 @@ static InterpLane eval_alu(PolyOps op, PolyDType dt, InterpLane *srcs, int n_src
   case POLY_OP_FLOORMOD:
     return is_uns ? il_uint(bu != 0 ? au % bu : 0) : il_int(interp_floor_mod_i64(ai, bi));
   case POLY_OP_MAX:
-    if (is_flt) return il_flt(a > b ? a : b);
+    /* Tinygrad python_alu[MAX] is Python max: keep the first operand on
+     * unordered/equal comparisons, as the CPU MAX decomposition does. */
+    if (is_flt) return il_flt(a < b ? b : a);
     return is_uns ? il_uint(au > bu ? au : bu) : il_int(ai > bi ? ai : bi);
   case POLY_OP_POW:
     return il_flt(pow(a, b));

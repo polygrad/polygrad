@@ -575,7 +575,7 @@ class Model:
                                 owned.append(rng[name])
                     finally:
                         for handle in handles:
-                            if handle: lib.poly_tensor_release(handle)
+                            if handle: lib.poly_tensor_release(_ffi.owned_handle(handle, ctx))
                     index += 1
                 states = list(params.values()) + list(rng.values())
                 handles = (_ffi._ptr * len(states))(*(t._tensor for t in states))
@@ -593,7 +593,7 @@ class Model:
                         owned.append(completed[name])
                 finally:
                     for handle in wrapped:
-                        if handle: lib.poly_tensor_release(handle)
+                        if handle: lib.poly_tensor_release(_ffi.owned_handle(handle, ctx))
                 if training and loss is not None: losses = completed
                 else: result = completed
         except Exception:
@@ -1102,11 +1102,11 @@ class Model:
                 for i in range(count):
                     name = lib.poly_model_entrypoint_output_name(self._ptr, ep, i).decode()
                     result[name] = Tensor(_ctx=self._ctx, _tensor=handles[i],
-                                          _device=lib.poly_device_name(lib.poly_tensor_device(handles[i])).decode()).is_param_(False)
+                                          _device=lib.poly_device_name(lib.poly_tensor_device(_ffi.owned_handle(handles[i], self._ctx))).decode()).is_param_(False)
                     handles[i] = None
             finally:
                 for handle in handles:
-                    if handle: lib.poly_tensor_release(handle)
+                    if handle: lib.poly_tensor_release(_ffi.owned_handle(handle, self._ctx))
             return result
         ret = _get_lib().poly_model_call(
             self._ptr, str(entrypoint).encode('utf-8'), bindings, n)

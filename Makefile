@@ -742,14 +742,17 @@ test-js: test-js-wasm test-js-native test-js-package
 test-js-wasm: verify-source-mirrors wasm-pkg
 	$(NODE) js/test/test_wasm.js
 	$(NODE) --expose-gc js/test/test_gc.js wasm
+	$(NODE) js/test/test_workers.js wasm
 
 test-js-native: verify-source-mirrors js/build/Release/polygrad_napi.node
 	$(NODE) js/test/test_native.js
 	$(NODE) --expose-gc js/test/test_gc.js native
+	$(NODE) js/test/test_workers.js native
 
 .PHONY: test-js-native-gc
 test-js-native-gc: verify-source-mirrors js/build/Release/polygrad_napi.node
 	$(NODE) --expose-gc js/test/test_gc.js native
+	$(NODE) js/test/test_workers.js native
 
 test-js-package: verify-source-mirrors wasm-pkg
 	cd js && bash scripts/build-browser.sh && $(NODE) test/test_package_exports.js
@@ -1060,7 +1063,7 @@ test-tsan: build/polygrad_test_tsan
 
 build/polygrad_test_tsan: $(SRC) $(CODEC_SRC) $(TEST_SRC)
 	@mkdir -p build
-	$(TSAN_CC) $(CFLAGS_COMMON) -g -O1 -fsanitize=thread -fno-omit-frame-pointer \
+	$(TSAN_CC) $(CFLAGS_COMMON) -DPOLY_TESTING -g -O1 -fsanitize=thread -fno-omit-frame-pointer \
 		-o $@ $(filter %.c,$^) -lm -ldl -pthread -fsanitize=thread
 
 # ── Full verification ──────────────────────────────────────────────────

@@ -161,6 +161,18 @@
       "close_when": "Re-evaluate model construction and rotary references on pin changes; this row never excuses core mismatches."
     },
     {
+      "id": "PG-DIV-010",
+      "status": "approved",
+      "stages": ["rangeify", "codegen"],
+      "area": "invalid padded integer division and remainder",
+      "tinygrad": "Pinned rangeify can evaluate integer division/remainder of masked zero loads before discarding the invalid result; CPU MOD/cumsum at extent 10 raises SIGFPE with nonzero input divisors.",
+      "polygrad": "Indexing and STAGE fusion guard integer IDIV/MOD/FLOORDIV/FLOORMOD denominators with WHERE(coordinate_valid, original_divisor, typed_one) before backend lowering. Valid coordinates, including real zero divisors, are unchanged.",
+      "rationale": "Invalid padded coordinates must not trap while evaluating a result that will be discarded. This grants no Tensor graph, valid-coordinate arithmetic, or general division-by-zero allowance.",
+      "approval": "User 2026-09-17: approve guarded padded coordinates, at the shared coordinate-validity boundary.",
+      "evidence": ["src/schedule/indexing.c:poly_guard_padded_divisor", "src/schedule/rangeify.c:substitute_active_ranges", "test/test_rangeify.c:padded_integer_denominator_is_guarded", "test/test_rangeify.c:padded_stage_fusion_guards_integer_denominator", "test/tensor_graph_cases.py:padded_integer_scan_mod", "temp/feedback-20260917-9Dq9AhMD/safety-correspondence.md"],
+      "close_when": "Re-evaluate the exact invalid-coordinate graph and execution probes on Tinygrad pin changes. No backend-specific arithmetic policy is introduced."
+    },
+    {
       "id": "PG-PARITY-001",
       "status": "resolved",
       "stages": ["placement", "realize"],

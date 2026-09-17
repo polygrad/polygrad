@@ -17,6 +17,25 @@
 
 /* Helper: apply symbolic_simple via graph_rewrite */
 
+TEST(sym, where_to_max_preserves_comparison_operand_order) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_test_program_param(ctx, POLY_FLOAT32, 1, 0);
+  PolyUOp *zero = poly_const_float(ctx, 0.0);
+  for (int constant_first = 0; constant_first < 2; constant_first++) {
+    PolyUOp *a = constant_first ? zero : x;
+    PolyUOp *b = constant_first ? x : zero;
+    PolyUOp *cmp = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, a, b, poly_arg_none());
+    PolyUOp *where = poly_uop3(ctx, POLY_OP_WHERE, POLY_FLOAT32, cmp, b, a, poly_arg_none());
+    PolyUOp *out = poly_graph_rewrite(ctx, where, poly_symbolic());
+    ASSERT_NOT_NULL(out);
+    ASSERT_INT_EQ(out->op, POLY_OP_MAX);
+    ASSERT_PTR_EQ(out->src[0], a);
+    ASSERT_PTR_EQ(out->src[1], b);
+  }
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 #ifdef POLY_TESTING
 TEST(sym, owner_exact_interval_allocation_failure_cleans_up) {
   PolyCtx *ctx = poly_ctx_new();
@@ -665,6 +684,19 @@ TEST(sym, lower_weak_commits_current_alu_param_metadata) {
 }
 
 /* ALU constant fold tests */
+
+TEST(alu, max_keeps_first_operand_on_unordered_or_equal_comparison) {
+  /* tinygrad.uop.ops.python_alu[MAX] uses Python max, not C fmax. */
+  PolyArg operands[] = {poly_arg_float(NAN), poly_arg_float(0.0)};
+  ASSERT_TRUE(isnan(poly_exec_alu(POLY_OP_MAX, POLY_FLOAT32, operands, 2, true).f));
+  operands[0] = poly_arg_float(0.0);
+  operands[1] = poly_arg_float(NAN);
+  ASSERT_FLOAT_EQ(poly_exec_alu(POLY_OP_MAX, POLY_FLOAT32, operands, 2, true).f, 0.0, 0.0);
+  operands[0] = poly_arg_float(-0.0);
+  operands[1] = poly_arg_float(0.0);
+  ASSERT_TRUE(signbit(poly_exec_alu(POLY_OP_MAX, POLY_FLOAT32, operands, 2, true).f));
+  PASS();
+}
 
 TEST(alu, fold_add_int) {
   PolyArg ops[2] = {poly_arg_int(2), poly_arg_int(3)};

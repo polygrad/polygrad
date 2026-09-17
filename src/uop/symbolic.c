@@ -3222,12 +3222,13 @@ static PolyUOp *rule_combine_complementary_where(
 
 /* Tinygrad 2026-08-22/a9069c177a9d uop/symbolic.py:261-262. */
 static PolyUOp *rule_where_to_max(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
-  (void)root;
   PolyUOp *a = poly_bind(b, "a"), *bval = poly_bind(b, "b"), *c = poly_bind(b, "c");
   if (!a || !bval || !c || a->op != POLY_OP_CONST || c->op != POLY_OP_CONST ||
       !poly_arg_eq(a->arg, c->arg))
     return NULL;
-  return poly_binop(ctx, POLY_OP_MAX, a, bval);
+  /* Both pinned rules preserve the comparison's operand order. MAX lowers
+   * to an ordered comparison, so exchanging a float/constant changes NaNs. */
+  return poly_binop(ctx, POLY_OP_MAX, root->src[0]->src[0], root->src[0]->src[1]);
 }
 
 static PolyUOp *strip_casted_index_ptr(PolyUOp *u) {

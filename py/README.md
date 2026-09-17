@@ -36,7 +36,8 @@ Requirements:
 - Python 3.9 or newer (0.5.0 post-publication examples checked on CPython 3.11)
 - NumPy
 - A C compiler and Python development headers
-- `clang` on `PATH` for the CPU runtime
+- A C compiler on `PATH` for CPU execution: clang recommended, GCC fallback;
+  generated float16 kernels require clang's `__fp16` support
 
 The PyPI package is distributed as source; pip builds the native extension
 during installation unless it can reuse a cached wheel.
@@ -91,6 +92,13 @@ NumPy and Torch. They do not add LAPACK or runtime library dependencies.
 Current `lstsq` is solution-only for full-rank tall or square systems.
 
 ## Devices And Runtimes
+
+Native calls sharing a runtime are serialized by a runtime-local lock; the GIL
+is released during those calls. Separate runtimes support parallel CPU/INTERP
+threads; concurrent GPU initialization has not been validated.
+A multi-call Python operation is not atomic: coordinate shared Tensor updates
+and global configuration changes. Call `collect()` and `dispose()` only when
+other threads have stopped using that runtime.
 
 ```python
 from polygrad import Device, Tensor
@@ -485,7 +493,8 @@ Layers include `Linear`, `LayerNorm`, `LayerNorm2d`, `RMSNorm`, `Embedding`,
 
 ## Troubleshooting
 
-- **CPU compilation cannot find clang:** install clang, or try `DEV=X86`
+- **CPU compilation cannot find a compiler:** install clang (recommended) or GCC,
+  or try `DEV=X86`
   on a supported x86 machine or `DEV=INTERP` for interpreted execution.
 - **"TRAINING must be enabled":** wrap optimizer steps in
   `with Context(TRAINING=1):`, as in [Training](#training).

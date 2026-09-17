@@ -53,6 +53,7 @@ SOURCES = [
     'src/codegen/late/gater.c',
     'src/codegen/late/linearizer.c',
     'src/renderer/cstyle.c',
+    'src/renderer/isa/x86.c',
     'src/renderer/cuda.c',
     'src/renderer/wgsl.c',
     'src/runtime_cpu.c',

@@ -474,7 +474,8 @@ PolyArg poly_exec_alu(PolyOps op, PolyDType dtype, PolyArg *ops, int n_ops, bool
       r = safe_pow(a, b);
       break;
     case POLY_OP_MAX:
-      r = fmax(a, b);
+      /* tinygrad python_alu[MAX] uses max: unordered/equal keeps the first. */
+      r = a < b ? b : a;
       break;
     case POLY_OP_CMPLT:
     case POLY_OP_CMPNE:

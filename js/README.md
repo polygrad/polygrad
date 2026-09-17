@@ -30,8 +30,10 @@ WebAssembly or WebGPU; no Python server is required.
 npm install polygrad
 ```
 
-Requires Node 18 or newer. The CPU backend needs `clang` at runtime;
-Wasm does not. Browser/WebGPU setup is covered in [Browser](#browser).
+Requires Node 18 or newer. The CPU backend needs a C compiler at runtime:
+clang is recommended, with GCC as the fallback when clang is absent.
+Generated float16 kernels require clang's `__fp16` support. Wasm needs neither.
+Browser/WebGPU setup is covered in [Browser](#browser).
 The current native and Wasm checks run on Node 22.23.0.
 
 ### Native installation
@@ -97,6 +99,12 @@ Structured linalg methods are portable tensor-composed fallbacks. Current
 `lstsq` is solution-only for full-rank tall or square systems.
 
 ## Choose A Runtime
+
+Node workers can each create their own CPU/INTERP runtime (or Wasm instance);
+dispose it before the worker exits, and do not transfer native handles between
+workers. Concurrent GPU startup has not been validated. The Linux native
+addon remains loaded until process exit so
+worker teardown cannot unload code still needed by compiler thread-local cleanup.
 
 The default JavaScript API is sync-first. `polygrad.create(...)` returns a
 `PolyRuntime` immediately or throws; tensor construction and graph construction
@@ -599,7 +607,8 @@ buffer residency across packages.
   JavaScript arrays infer `int32`, including `[1.0, 2.0]`. For gradients, use
   `new Tensor([1, 2], { dtype: 'float32' })` or a `Float32Array`, and keep the
   floating-point input Tensors alive until `backward()`.
-- **CPU compilation cannot find clang:** install clang, or use `DEV=X86`
+- **CPU compilation cannot find a compiler:** install clang (recommended) or GCC,
+  or use `DEV=X86`
   with the native addon on a supported x86 machine, or `DEV=INTERP`.
 - **Native installation fell back to Wasm:** inspect `pg.core`. Install the
   native build prerequisites and rebuild if native execution is needed;

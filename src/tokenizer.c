@@ -23,6 +23,10 @@
 #include <string.h>
 #include <stdio.h>
 #include <ctype.h>
+#include <stdbool.h>
+#ifndef __EMSCRIPTEN__
+#include <pthread.h>
+#endif
 
 /* GPT-2 byte encoder/decoder */
 
@@ -38,10 +42,7 @@
 
 static int g_byte_to_char[256]; /* byte -> Unicode codepoint */
 static int g_char_to_byte[512]; /* codepoint -> byte (0-323 range) */
-static int g_byte_table_init = 0;
-
-static void init_byte_table(void) {
-  if (g_byte_table_init) return;
+static void build_byte_table(void) {
   memset(g_char_to_byte, -1, sizeof(g_char_to_byte));
 
   int n = 0;
@@ -54,7 +55,21 @@ static void init_byte_table(void) {
     }
     g_char_to_byte[g_byte_to_char[b]] = b;
   }
-  g_byte_table_init = 1;
+}
+
+static void init_byte_table(void) {
+  /* Immutable after publication, shared by independent tokenizer owners. */
+#ifndef __EMSCRIPTEN__
+  static pthread_once_t once = PTHREAD_ONCE_INIT;
+  pthread_once(&once, build_byte_table);
+#else
+  /* The packaged Wasm module has no shared-memory threads. */
+  static bool initialized = false;
+  if (!initialized) {
+    build_byte_table();
+    initialized = true;
+  }
+#endif
 }
 
 /*

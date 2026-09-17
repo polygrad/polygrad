@@ -4781,6 +4781,62 @@
           assert(x.min().uopPhysical.op === pg._core.ops.CMPNE);
           assertClose(await x.minimum(true).toArray(), [0, 0, 1, 1], 0);
         });
+        await test("padded integer scan keeps valid divisors", async () => {
+          for (const n of [3, 5, 7, 10]) {
+            const a = Array.from({ length: n }, (_, i) => i - n);
+            const b = a.map((_, i) => 2 + i % 3);
+            const x = new Tensor(a), y = new Tensor(b);
+            const mod = x.mod(y), div = x.div(y, "trunc");
+            try {
+              for (const [out, terms] of [
+                [mod, a.map((v, i) => (v % b[i] + b[i]) % b[i])],
+                [div, a.map((v, i) => Math.trunc(v / b[i]))]
+              ]) {
+                const scan = out.cumsum();
+                try {
+                  assertClose(await scan.toArray(), terms.map((_, i) => terms.slice(0, i + 1).reduce((s, v) => s + v, 0)), 0);
+                } finally {
+                  scan.dispose();
+                }
+              }
+            } finally {
+              div.dispose();
+              mod.dispose();
+              y.dispose();
+              x.dispose();
+            }
+          }
+        });
+        await test("NaN clip preserves unordered comparison", async () => {
+          const x = new Tensor([NaN], { dtype: "float32" });
+          const out = x.clip(0, 1);
+          try {
+            assert(Number.isNaN((await out.toArray())[0]));
+          } finally {
+            out.dispose();
+            x.dispose();
+          }
+        });
+        await test("RNG policy transitions preserve the stream", async () => {
+          for (const method of ["rand", "randn"]) {
+            for (const initial of ["always", "until_realize"]) {
+              Tensor.manual_seed(42);
+              const expected = [];
+              for (let i = 0; i < 3; i++) {
+                const t = pg.withLogical(initial, () => Tensor[method]([4]));
+                expected.push(Array.from(await t.toArray()));
+                t.dispose();
+              }
+              Tensor.manual_seed(42);
+              for (let i = 0; i < 3; i++) {
+                const t = pg.withLogical(i ? "never" : initial, () => Tensor[method]([4]));
+                if (i) assert(t.uopLogical === null);
+                assertClose(await t.toArray(), expected[i], 0);
+                t.dispose();
+              }
+            }
+          }
+        });
         for (const op of ["all", "any", "cumsum", "cumprod", "cummax", "cummin"]) {
           await test(`scan owners: ${op} values and dtype`, async () => {
             const x = new Tensor([-3, -1, -2, -1], { dtype: "int8" });

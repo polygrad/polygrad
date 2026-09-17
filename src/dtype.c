@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <stdatomic.h>
 
 /* Predefined scalar dtypes */
 /* priority, bitsize, name, fmt */
@@ -93,18 +94,29 @@ int poly_dtype_id_by_name(const char *name) {
  * this policy belongs to the loaded library (one copy per Wasm module), not
  * a Tensor/Model. Invalid names stay invalid instead of silently selecting f32.
  * Setters resolve names at the frontend and publish an existing dtype identity. */
-static int default_float_id = -2, default_int_id = -2;
+static atomic_int default_float_id = -2, default_int_id = -2;
 
-static int default_dtype_id(int *slot, const char *key, int fallback) {
-  if (*slot != -2) return *slot;
+static int default_dtype_id(atomic_int *slot, const char *key, int fallback) {
+  int current = atomic_load_explicit(slot, memory_order_relaxed);
+  if (current != -2) return current;
   const char *value = getenv(key);
-  if (!value) return *slot = fallback;
-  char name[32];
-  size_t n = strlen(value);
-  if (n >= sizeof(name)) return *slot = -1;
-  for (size_t i = 0; i <= n; i++)
-    name[i] = (char)tolower((unsigned char)value[i]);
-  return *slot = poly_dtype_id_by_name(name);
+  int selected = fallback;
+  if (value) {
+    char name[32];
+    size_t n = strlen(value);
+    selected = -1;
+    if (n < sizeof(name)) {
+      for (size_t i = 0; i <= n; i++)
+        name[i] = (char)tolower((unsigned char)value[i]);
+      selected = poly_dtype_id_by_name(name);
+    }
+  }
+  /* Publish only the scalar identity; do not overwrite a concurrent setter. */
+  if (atomic_compare_exchange_strong_explicit(
+          slot, &current, selected, memory_order_relaxed, memory_order_relaxed
+      ))
+    return selected;
+  return current;
 }
 
 int poly_get_default_float(void) {
@@ -116,13 +128,13 @@ int poly_get_default_int(void) {
 
 int poly_set_default_float(int id) {
   if (id < 0 || id >= N_DTYPE_TABLE) return -1;
-  default_float_id = id;
+  atomic_store_explicit(&default_float_id, id, memory_order_relaxed);
   return 0;
 }
 
 int poly_set_default_int(int id) {
   if (id < 0 || id >= N_DTYPE_TABLE) return -1;
-  default_int_id = id;
+  atomic_store_explicit(&default_int_id, id, memory_order_relaxed);
   return 0;
 }
 

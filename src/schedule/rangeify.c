@@ -2067,6 +2067,22 @@ static bool substitute_active_ranges(
         changed |= src[j] != u->src[j];
       }
       if (changed) {
+        /* PG-DIV-010: fusion can substitute padded indexes into an operation
+         * that originally had only valid ranges. Guard before discarding STAGE. */
+        if (u->n_src == 2 && poly_dtype_is_int(u->dtype) &&
+            (u->op == POLY_OP_IDIV || u->op == POLY_OP_MOD || u->op == POLY_OP_FLOORDIV ||
+             u->op == POLY_OP_FLOORMOD)) {
+          for (int j = 0; j < n; j++) {
+            if (!poly_uop_in_ranges(ctx, u, from[j])) continue;
+            src[1] = poly_guard_padded_divisor(ctx, src[1], &to[j], 1);
+            if (!src[1]) break;
+          }
+          if (!src[1]) {
+            if (src != src_stack) free(src);
+            ok = false;
+            break;
+          }
+        }
         PolyDType dtype = poly_rebuild_dtype(u, src);
         PolyArg arg =
             (u->op == POLY_OP_CAST || u->op == POLY_OP_BITCAST) ? poly_arg_dtype(dtype) : u->arg;

@@ -17,6 +17,10 @@ assert Path(polygrad.__file__).resolve().is_relative_to(prefix), polygrad.__file
 assert Path(_ffi.get_lib()._name).resolve().is_relative_to(prefix), _ffi.get_lib()._name
 assert Path(np.__file__).resolve().is_relative_to(prefix), np.__file__
 np.testing.assert_array_equal(Tensor([1, 2, 3]).mul(2).numpy(), [2, 4, 6])
+import platform
+if platform.machine().lower() in ('x86_64', 'amd64'):
+    with polygrad.create(device='X86') as runtime:
+        np.testing.assert_array_equal((runtime.Tensor([1., 2., 3.]) * 2).numpy(), [2, 4, 6])
 
 def store_kernel(out, value, *, convert):
     i = UOp.range(out.ctx, 4, 0)

@@ -5363,7 +5363,7 @@ static PolyTensor *rng_bits_to_rand(
   return zero_to_one ? rng_reshape_if_needed(ctx, zero_to_one, shape, ndim) : NULL;
 }
 
-static PolyTensor *rng_advance_counter(PolyCtx *ctx, PolyTensor *counter, uint64_t num) {
+static PolyTensor *rng_advance_counter_graph(PolyCtx *ctx, PolyTensor *counter, uint64_t num) {
   PolyTensor *low0 = rng_getitem_1d(ctx, counter, 0, 1, false);
   PolyTensor *high0 = rng_getitem_1d(ctx, counter, 1, 2, false);
   PolyTensor *low_add = rng_weakint(ctx, (int64_t)(num & UINT32_MAX));
@@ -5386,6 +5386,18 @@ static PolyTensor *rng_advance_counter(PolyCtx *ctx, PolyTensor *counter, uint64
   carry = counter0 && low_add ? poly_tensor_alu2(ctx, POLY_OP_CMPLT, counter0, low_add) : NULL;
   high = high && carry ? poly_tensor_alu2(ctx, POLY_OP_SUB, high, carry) : NULL;
   return low && high ? rng_cat2(ctx, low, high) : NULL;
+}
+
+static PolyTensor *rng_advance_counter(PolyCtx *ctx, PolyTensor *counter, uint64_t num) {
+  /* The persistent counter keeps its wrapper-local retention contract across
+   * caller policy changes. Its assignment needs a matching logical RHS; the
+   * random result is constructed later under the caller's policy. Never
+   * reconstruct a logical graph for a counter created under NEVER. */
+  PolyLogicalPolicy policy = ctx->logical_policy;
+  ctx->logical_policy = counter->logical_policy;
+  PolyTensor *out = rng_advance_counter_graph(ctx, counter, num);
+  ctx->logical_policy = policy;
+  return out;
 }
 
 static PolyRngDeviceState *rng_device_state(PolyCtx *ctx, PolyDevice device) {

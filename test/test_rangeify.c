@@ -2063,6 +2063,79 @@ TEST(rangeify, apply_pad_to_where) {
   PASS();
 }
 
+TEST(rangeify, padded_integer_denominator_is_guarded) {
+  PolyOps ops[] = {POLY_OP_IDIV, POLY_OP_MOD, POLY_OP_FLOORDIV, POLY_OP_FLOORMOD};
+  for (int i = 0; i < 4; i++) {
+    for (int padded = 0; padded < 2; padded++) {
+      PolyCtx *ctx = poly_ctx_new();
+      PolyUOp *a = poly_test_buffer(ctx, POLY_INT32, 10);
+      PolyUOp *b = poly_test_buffer(ctx, POLY_INT32, 10);
+      PolyUOp *value = poly_uop2(ctx, ops[i], POLY_INT32, a, b, poly_arg_none());
+      if (padded) value = poly_pad(ctx, value, (int64_t[][2]){{1, 2}}, 1);
+      PolyUOp *out = poly_test_buffer(ctx, POLY_INT32, padded ? 13 : 10);
+      PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, value));
+      PolyIndexingCtx *ictx = poly_indexing_ctx_new(ctx);
+      PolyUOp *result = run_apply_rangeify(ictx, sink);
+      ASSERT_NOT_NULL(result);
+      int n = 0, found = 0;
+      PolyUOp **topo = poly_toposort_alloc(ctx, result, &n);
+      for (int j = 0; j < n; j++) {
+        if (topo[j]->op != ops[i]) continue;
+        found++;
+        PolyUOp *denominator = topo[j]->src[1];
+        if (padded) {
+          ASSERT_INT_EQ(denominator->op, POLY_OP_WHERE);
+          ASSERT_INT_EQ(denominator->src[1]->op, POLY_OP_INDEX);
+          ASSERT_PTR_EQ(denominator->src[1]->src[0], b);
+          ASSERT_PTR_EQ(denominator->src[2], poly_const_like_int(ctx, denominator, 1));
+          ASSERT_PTR_EQ(denominator->src[0], poly_uop_get_valid(ctx, denominator->src[1]->src[1]));
+        } else {
+          /* Even a valid zero divisor remains untouched: this is padding
+           * safety, not a new integer division-by-zero policy. */
+          ASSERT_INT_EQ(denominator->op, POLY_OP_INDEX);
+          ASSERT_PTR_EQ(denominator->src[0], b);
+        }
+      }
+      ASSERT_INT_EQ(found, 1);
+      poly_toposort_free(topo);
+      poly_indexing_ctx_destroy(ictx);
+      poly_ctx_destroy(ctx);
+    }
+  }
+  PASS();
+}
+
+TEST(rangeify, padded_stage_fusion_guards_integer_denominator) {
+  PolyOps ops[] = {POLY_OP_IDIV, POLY_OP_MOD, POLY_OP_FLOORDIV, POLY_OP_FLOORMOD};
+  for (int i = 0; i < 4; i++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyUOp *r = poly_uop_range(ctx, 10, 0, POLY_AXIS_LOOP);
+    PolyUOp *p = poly_test_program_param(ctx, POLY_INT32, 10, 0);
+    PolyUOp *a = poly_uop2(ctx, POLY_OP_INDEX, POLY_INT32, p, r, poly_arg_none());
+    PolyUOp *value = poly_uop2(ctx, ops[i], POLY_INT32, a, a, poly_arg_none());
+    PolyUOp *stage_src[] = {value, r};
+    PolyUOp *stage = poly_uop(
+        ctx, POLY_OP_STAGE, POLY_INT32, stage_src, 2,
+        poly_arg_bufferize_opts("CPU", POLY_ADDR_GLOBAL, true)
+    );
+    PolyUOp *outer = poly_uop_range(ctx, 16, 1, POLY_AXIS_LOOP);
+    PolyUOp *valid = poly_alu2(ctx, POLY_OP_CMPLT, outer, poly_const_int(ctx, 10));
+    PolyUOp *invalid = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_invalid());
+    PolyUOp *index =
+        poly_uop3(ctx, POLY_OP_WHERE, POLY_WEAKINT, valid, outer, invalid, poly_arg_none());
+    PolyUOp *consumer = poly_uop2(ctx, POLY_OP_INDEX, POLY_INT32, stage, index, poly_arg_none());
+    PolyUOp *out = poly_pm_rewrite(poly_pm_remove_bufferize(), ctx, consumer);
+    ASSERT_NOT_NULL(out);
+    ASSERT_INT_EQ(out->op, ops[i]);
+    ASSERT_INT_EQ(out->src[1]->op, POLY_OP_WHERE);
+    ASSERT_PTR_EQ(out->src[1]->src[0], valid);
+    ASSERT_PTR_EQ(out->src[1]->src[1], out->src[0]);
+    ASSERT_PTR_EQ(out->src[1]->src[2], poly_const_like_int(ctx, out->src[0], 1));
+    poly_ctx_destroy(ctx);
+  }
+  PASS();
+}
+
 TEST(rangeify, apply_pad_coordinates_preserve_invalid_like_tinygrad) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);

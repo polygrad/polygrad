@@ -1810,6 +1810,27 @@ static PolyUOp *poly_remove_movement_op_after_rangeify(
   return poly_range_map_get(ictx, u) || new_src[0]->op == POLY_OP_INDEX ? new_src[0] : NULL;
 }
 
+/* PG-DIV-010: integer operations may execute before PAD's outer result mask.
+ * Both initial indexing and later STAGE inlining must preserve safe operands
+ * at invalid coordinates. This never changes a valid zero divisor. */
+PolyUOp *poly_guard_padded_divisor(PolyCtx *ctx, PolyUOp *divisor, PolyUOp **coords, int n) {
+  PolyUOp *valid = NULL;
+  for (int i = 0; i < n; i++) {
+    /* Reshape/shrink arithmetic can bury Invalid beneath ADD/MUL. */
+    PolyUOp *coord = poly_graph_rewrite(ctx, coords[i], poly_symbolic());
+    PolyUOp *gate = coord ? poly_uop_get_valid(ctx, coord) : NULL;
+    if (!gate) return NULL;
+    if (gate->op == POLY_OP_CONST && gate->arg.kind == POLY_ARG_BOOL && gate->arg.b) continue;
+    valid = valid ? poly_uop2(ctx, POLY_OP_AND, POLY_BOOL, valid, gate, poly_arg_none()) : gate;
+    if (!valid) return NULL;
+  }
+  return valid ? poly_uop3(
+                     ctx, POLY_OP_WHERE, divisor->dtype, valid, divisor,
+                     poly_const_like_int(ctx, divisor, 1), poly_arg_none()
+                 )
+               : divisor;
+}
+
 /* Tinygrad 2026-08-22/a9069c177a9d
  * schedule/indexing.py:create_bufferize_and_index_based_on_ranges. */
 static PolyUOp *poly_create_bufferize_and_index_based_on_ranges(
@@ -1818,6 +1839,17 @@ static PolyUOp *poly_create_bufferize_and_index_based_on_ranges(
     PolyUOp **new_src,
     bool src_changed
 ) {
+  if (u->n_src == 2 && poly_dtype_is_int(u->dtype) &&
+      (u->op == POLY_OP_IDIV || u->op == POLY_OP_MOD || u->op == POLY_OP_FLOORDIV ||
+       u->op == POLY_OP_FLOORMOD)) {
+    PolyRangeEntry *re = poly_range_map_get(ictx, u);
+    if (re) {
+      PolyUOp *guarded = poly_guard_padded_divisor(ictx->ctx, new_src[1], re->in_rngs, re->n_in);
+      if (!guarded) return poly_uop0(ictx->ctx, POLY_OP_REWRITE_ERROR, POLY_VOID, poly_arg_none());
+      src_changed |= guarded != new_src[1];
+      new_src[1] = guarded;
+    }
+  }
   return src_changed ? poly_uop(ictx->ctx, u->op, u->dtype, new_src, u->n_src, u->arg) : NULL;
 }
 

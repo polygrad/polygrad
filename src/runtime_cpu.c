@@ -31,6 +31,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <time.h>
+#include <stdatomic.h>
 
 struct PolyProgram {
   void *handle; /* dlopen handle */
@@ -40,7 +41,7 @@ struct PolyProgram {
   int cached; /* 1 if loaded from disk cache (don't remove on destroy) */
 };
 
-static int poly_compile_id = 0;
+static atomic_uint poly_compile_id = 0;
 
 typedef struct CachedSoHandle {
   char path[512];
@@ -49,6 +50,7 @@ typedef struct CachedSoHandle {
 } CachedSoHandle;
 
 static CachedSoHandle *g_cached_so_handles;
+static pthread_mutex_t g_cached_so_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static void *cached_so_handle_get(const char *so_path) {
   for (CachedSoHandle *e = g_cached_so_handles; e; e = e->next)
@@ -146,9 +148,9 @@ static const char *compile_tmp_dir(void) {
   return "/tmp";
 }
 
-static int compile_tmp_path(char *out, size_t cap, const char *suffix, int id) {
+static int compile_tmp_path(char *out, size_t cap, const char *suffix, unsigned int id) {
   const char *dir = compile_tmp_dir();
-  int n = snprintf(out, cap, "%s/polygrad_%d_%d.%s", dir, (int)getpid(), id, suffix);
+  int n = snprintf(out, cap, "%s/polygrad_%d_%u.%s", dir, (int)getpid(), id, suffix);
   if (n < 0 || n >= (int)cap) {
     if (cap) out[0] = '\0';
     return -1;
@@ -158,7 +160,7 @@ static int compile_tmp_path(char *out, size_t cap, const char *suffix, int id) {
 
 /* Load a .so and resolve the _call wrapper */
 
-static PolyProgram *load_so(const char *so_path, const char *fn_name, int cached) {
+static PolyProgram *load_so_unlocked(const char *so_path, const char *fn_name, int cached) {
   void *handle = cached ? cached_so_handle_get(so_path) : NULL;
   if (!handle) {
     /* Resolve JIT module relocations during dlopen. Lazy binding can defer a
@@ -208,6 +210,15 @@ static PolyProgram *load_so(const char *so_path, const char *fn_name, int cached
   prog->so_path[sizeof(prog->so_path) - 1] = '\0';
   prog->cached = cached;
   return prog;
+}
+
+static PolyProgram *load_so(const char *so_path, const char *fn_name, int cached) {
+  /* The process-wide dlopen cache is shared across contexts. Serialize lookup
+   * and publication, not compilation or kernel execution. */
+  if (cached) pthread_mutex_lock(&g_cached_so_mutex);
+  PolyProgram *program = load_so_unlocked(so_path, fn_name, cached);
+  if (cached) pthread_mutex_unlock(&g_cached_so_mutex);
+  return program;
 }
 
 /* Compile C source to .so */
@@ -368,7 +379,7 @@ PolyProgram *poly_compile_c(const char *source, const char *fn_name) {
 
   /* Cache miss: compile to temp .so */
   char c_path[512], so_path[512];
-  int compile_id = poly_compile_id++;
+  unsigned int compile_id = atomic_fetch_add_explicit(&poly_compile_id, 1, memory_order_relaxed);
   if (compile_tmp_path(c_path, sizeof(c_path), "c", compile_id) != 0 ||
       compile_tmp_path(so_path, sizeof(so_path), "so", compile_id) != 0) {
     fprintf(stderr, "polygrad: temporary compile path is too long\n");
@@ -385,9 +396,11 @@ PolyProgram *poly_compile_c(const char *source, const char *fn_name) {
 
   /* If disk cache enabled, copy .so to cache for future runs */
   if (use_cache && cache_path[0]) {
-    /* Atomic: write to .tmp, then rename (prevents corrupt partial reads) */
-    char tmp_path[520];
-    int tmp_len = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", cache_path);
+    /* Independent threads/processes may compile the same key concurrently.
+     * Each writer needs its own staging file before atomic publication. */
+    char tmp_path[560];
+    int tmp_len =
+        snprintf(tmp_path, sizeof(tmp_path), "%s.%d.%u.tmp", cache_path, (int)getpid(), compile_id);
 
     /* Read compiled .so */
     if (tmp_len >= 0 && tmp_len < (int)sizeof(tmp_path)) {
@@ -397,10 +410,15 @@ PolyProgram *poly_compile_c(const char *source, const char *fn_name) {
         if (dst_f) {
           char buf[8192];
           size_t n;
+          bool copied = true;
           while ((n = fread(buf, 1, sizeof(buf), src_f)) > 0)
-            fwrite(buf, 1, n, dst_f);
-          fclose(dst_f);
-          rename(tmp_path, cache_path);
+            if (fwrite(buf, 1, n, dst_f) != n) {
+              copied = false;
+              break;
+            }
+          copied &= !ferror(src_f);
+          if (fclose(dst_f) != 0) copied = false;
+          if (!copied || rename(tmp_path, cache_path) != 0) remove(tmp_path);
         }
         fclose(src_f);
       }

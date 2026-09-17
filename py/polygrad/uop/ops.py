@@ -106,7 +106,7 @@ class UOp:
         # raw: int returned by ctypes for a c_void_p restype (or None).
         # ctypes returns 0/None interchangeably; normalize to None for falsy.
         self.ctx = ctx
-        self.raw = raw if raw else None
+        self.raw = _ffi.owned_handle(raw, ctx)
         self._owned = False
         if self.raw is not None:
             if _ffi._lib.poly_uop_retain(self.ctx, self.raw) != 0:

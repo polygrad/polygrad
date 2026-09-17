@@ -621,7 +621,7 @@ class Tensor:
         if requested_device is None and disk_device is not None:
             requested_device = disk_device
         self._device = Device.canonicalize(requested_device)
-        self._tensor = _tensor
+        self._tensor = _ffi.owned_handle(_tensor, self._ctx)
         self._shape_override = tuple(_shape) if _shape is not None else None
         current_uop = None
         imported_tensor_from_host = False
@@ -1644,6 +1644,7 @@ class Tensor:
     def _make_result_from_core(self, core_tensor, shape):
         if not core_tensor:
             raise RuntimeError('core Tensor operation failed')
+        core_tensor = _ffi.owned_handle(core_tensor, self._ctx)
         current = self._core_uop_raw(core_tensor)
         if not current:
             raise RuntimeError('core Tensor operation returned no current UOp')

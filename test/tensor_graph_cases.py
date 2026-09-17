@@ -2154,6 +2154,17 @@ CASES = {
 }
 
 
+def padded_integer_scan(op):
+    a = Tensor.empty(10, dtype="int32")
+    b = Tensor.empty(10, dtype="int32")
+    out = ((a % b) if op == "mod" else a.div(b, rounding_mode="trunc")).cumsum()
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+for _op in ("mod", "div"):
+    CASES[f"padded_integer_scan_{_op}"] = ("tensor", lambda op=_op: padded_integer_scan(op))
+
+
 def scan_owner_gradient(op="cumsum", n=513):
     x = Tensor.empty(n, 2, dtype="float32").realize()
     return {"physical": raw_gradient(getattr(x, op)(0).sum(), x)}

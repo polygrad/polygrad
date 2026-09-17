@@ -83,6 +83,9 @@
       "cflags": ["-std=c11", "-O2", "-Wall", "-D_POSIX_C_SOURCE=200809L"],
       "conditions": [
         ["OS=='linux'", {
+          # Compiler TLS destructors and CPU worker entrypoints must remain
+          # mapped after Node releases the last worker's addon handle.
+          "ldflags": ["-Wl,-z,nodelete"],
           "libraries": ["-ldl", "-lm"]
         }],
         ["OS=='mac'", {

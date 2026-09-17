@@ -6,7 +6,79 @@
 #include "test_harness.h"
 #include "../src/uop/upat.h"
 #include "../src/schedule/rangeify.h"
+#include "../src/tokenizer.h"
+#include "../src/engine/schedule.h"
+#include "../src/codegen/codegen.h"
 #include <pthread.h>
+#include <unistd.h>
+
+static void *threading_compile_worker(void *opaque) {
+  pthread_barrier_t *barrier = opaque;
+  pthread_barrier_wait(barrier);
+  char source[256];
+  /* Same source exercises concurrent misses, then shared-handle cache hits.
+   * PID keeps previous test invocations from warming this particular entry. */
+  snprintf(
+      source, sizeof(source), "void threaded_call(void **args) { *(int *)args[0] = %d; }",
+      (int)getpid()
+  );
+  for (int i = 0; i < 3; i++) {
+    PolyProgram *program = poly_compile_c(source, "threaded");
+    if (!program) return NULL;
+    int value = 0;
+    void *args[] = {&value};
+    poly_program_call(program, args, 1);
+    poly_program_destroy(program);
+    if (value != (int)getpid()) return NULL;
+  }
+  return (void *)(uintptr_t)1;
+}
+
+TEST(threading, independent_cpu_compile_and_cache) {
+  pthread_barrier_t barrier;
+  ASSERT_INT_EQ(pthread_barrier_init(&barrier, NULL, 4), 0);
+  pthread_t threads[4];
+  for (int i = 0; i < 4; i++)
+    ASSERT_INT_EQ(pthread_create(&threads[i], NULL, threading_compile_worker, &barrier), 0);
+  bool passed = true;
+  for (int i = 0; i < 4; i++) {
+    void *ok = NULL;
+    ASSERT_INT_EQ(pthread_join(threads[i], &ok), 0);
+    passed &= (uintptr_t)ok != 0;
+  }
+  pthread_barrier_destroy(&barrier);
+  ASSERT_TRUE(passed);
+  PASS();
+}
+
+static void *threading_shared_metadata_worker(void *opaque) {
+  pthread_barrier_t *barrier = opaque;
+  pthread_barrier_wait(barrier);
+  const char *tokens[] = {"a", "b"};
+  PolyTokenizer *tokenizer = poly_tokenizer_create(tokens, NULL, 2);
+  bool ok = tokenizer && poly_tokenizer_vocab_size(tokenizer) == 2;
+  poly_tokenizer_free(tokenizer);
+  for (int i = 0; i < 1000; i++) {
+    poly_program_source_render_count_reset();
+    ok &= poly_program_source_render_count() >= 0;
+  }
+  return (void *)(uintptr_t)ok;
+}
+
+TEST(threading, shared_metadata_initialization_and_counters) {
+  pthread_barrier_t barrier;
+  ASSERT_INT_EQ(pthread_barrier_init(&barrier, NULL, 4), 0);
+  pthread_t threads[4];
+  for (int i = 0; i < 4; i++)
+    ASSERT_INT_EQ(pthread_create(&threads[i], NULL, threading_shared_metadata_worker, &barrier), 0);
+  for (int i = 0; i < 4; i++) {
+    void *ok = NULL;
+    ASSERT_INT_EQ(pthread_join(threads[i], &ok), 0);
+    ASSERT_TRUE((uintptr_t)ok != 0);
+  }
+  pthread_barrier_destroy(&barrier);
+  PASS();
+}
 
 typedef struct {
   int tid;

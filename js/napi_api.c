@@ -101,27 +101,53 @@ static void set_named_double(napi_env env, napi_value obj, const char *name, dou
   napi_set_named_property(env, obj, name, v);
 }
 
-static napi_env g_frontend_buffer_release_env = NULL;
-static napi_ref g_frontend_buffer_release_ref = NULL;
+typedef struct {
+  napi_env env;
+  napi_ref release_ref;
+  napi_callback *methods;
+} NapiState;
+
+/* Core release hooks run synchronously inside an addon call, on its isolate's
+ * thread. Scope the environment to that call; neither workers nor reentrant
+ * calls may inherit another environment's V8 handles. */
+static _Thread_local NapiState *active_napi_state;
+
+static void napi_state_finalize(napi_env env, void *data, void *hint) {
+  (void)hint;
+  NapiState *state = data;
+  if (state->release_ref) napi_delete_reference(env, state->release_ref);
+  free(state->methods);
+  free(state);
+}
+
+static napi_value napi_dispatch(napi_env env, napi_callback_info info) {
+  void *method = NULL;
+  NapiState *state = NULL;
+  NAPI_CALL(env, napi_get_cb_info(env, info, NULL, NULL, NULL, &method));
+  NAPI_CALL(env, napi_get_instance_data(env, (void **)&state));
+  NapiState *previous = active_napi_state;
+  active_napi_state = state;
+  napi_value result = (*(napi_callback *)method)(env, info);
+  active_napi_state = previous;
+  return result;
+}
 
 static void napi_frontend_buffer_release(uintptr_t buffer_key) {
-  if (!g_frontend_buffer_release_env || !g_frontend_buffer_release_ref) return;
+  NapiState *state = active_napi_state;
+  if (!state || !state->release_ref) return;
+  napi_env env = state->env;
 
   napi_handle_scope scope;
-  if (napi_open_handle_scope(g_frontend_buffer_release_env, &scope) != napi_ok) return;
+  if (napi_open_handle_scope(env, &scope) != napi_ok) return;
 
   napi_value fn, global, arg, result;
-  if (napi_get_reference_value(g_frontend_buffer_release_env, g_frontend_buffer_release_ref, &fn) !=
-      napi_ok)
-    goto done;
-  if (napi_get_global(g_frontend_buffer_release_env, &global) != napi_ok) goto done;
-  if (napi_create_bigint_uint64(g_frontend_buffer_release_env, (uint64_t)buffer_key, &arg) !=
-      napi_ok)
-    goto done;
-  napi_call_function(g_frontend_buffer_release_env, global, fn, 1, &arg, &result);
+  if (napi_get_reference_value(env, state->release_ref, &fn) != napi_ok) goto done;
+  if (napi_get_global(env, &global) != napi_ok) goto done;
+  if (napi_create_bigint_uint64(env, (uint64_t)buffer_key, &arg) != napi_ok) goto done;
+  napi_call_function(env, global, fn, 1, &arg, &result);
 
 done:
-  napi_close_handle_scope(g_frontend_buffer_release_env, scope);
+  napi_close_handle_scope(env, scope);
 }
 
 static int read_int64_array(napi_env env, napi_value arr, int64_t *out, int max_len) {
@@ -4061,12 +4087,10 @@ static napi_value napi_poly_set_frontend_buffer_release(napi_env env, napi_callb
   size_t argc = 1;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
 
-  if (g_frontend_buffer_release_ref) {
-    napi_delete_reference(env, g_frontend_buffer_release_ref);
-    g_frontend_buffer_release_ref = NULL;
-  }
-  g_frontend_buffer_release_env = env;
-  NAPI_CALL(env, napi_create_reference(env, argv[0], 1, &g_frontend_buffer_release_ref));
+  napi_ref candidate;
+  NAPI_CALL(env, napi_create_reference(env, argv[0], 1, &candidate));
+  if (active_napi_state->release_ref) napi_delete_reference(env, active_napi_state->release_ref);
+  active_napi_state->release_ref = candidate;
   poly_set_frontend_buffer_release(napi_frontend_buffer_release);
 
   napi_value undef;
@@ -4080,12 +4104,10 @@ static napi_value napi_poly_ctx_set_frontend_buffer_release(napi_env env, napi_c
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   PolyCtx *ctx = get_external(env, argv[0]);
 
-  if (g_frontend_buffer_release_ref) {
-    napi_delete_reference(env, g_frontend_buffer_release_ref);
-    g_frontend_buffer_release_ref = NULL;
-  }
-  g_frontend_buffer_release_env = env;
-  NAPI_CALL(env, napi_create_reference(env, argv[1], 1, &g_frontend_buffer_release_ref));
+  napi_ref candidate;
+  NAPI_CALL(env, napi_create_reference(env, argv[1], 1, &candidate));
+  if (active_napi_state->release_ref) napi_delete_reference(env, active_napi_state->release_ref);
+  active_napi_state->release_ref = candidate;
   poly_ctx_set_frontend_buffer_release(ctx, napi_frontend_buffer_release);
 
   napi_value undef;
@@ -5605,8 +5627,11 @@ fail:
   return NULL;
 }
 
-static napi_value napi_poly_model_factory(napi_env env, napi_callback_info info,
-    PolyModel *(*factory)(PolyCtx *, const char *, int, PolyModelError *)) {
+static napi_value napi_poly_model_factory(
+    napi_env env,
+    napi_callback_info info,
+    PolyModel *(*factory)(PolyCtx *, const char *, int, PolyModelError *)
+) {
   napi_value argv[2];
   size_t argc = 2;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
@@ -7529,7 +7554,25 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_import_last_error_message", napi_poly_import_error_msg),
   };
 
-  NAPI_CALL(env, napi_define_properties(env, exports, sizeof(props) / sizeof(props[0]), props));
+  size_t count = sizeof(props) / sizeof(props[0]);
+  NapiState *state = calloc(1, sizeof(*state));
+  if (!state || !(state->methods = calloc(count, sizeof(*state->methods)))) {
+    free(state);
+    napi_throw_error(env, NULL, "polygrad: addon state allocation failed");
+    return NULL;
+  }
+  state->env = env;
+  if (napi_set_instance_data(env, state, napi_state_finalize, NULL) != napi_ok) {
+    napi_state_finalize(env, state, NULL);
+    napi_throw_error(env, NULL, "polygrad: addon environment registration failed");
+    return NULL;
+  }
+  for (size_t i = 0; i < count; i++) {
+    state->methods[i] = props[i].method;
+    props[i].method = napi_dispatch;
+    props[i].data = &state->methods[i];
+  }
+  NAPI_CALL(env, napi_define_properties(env, exports, count, props));
 
   return exports;
 }

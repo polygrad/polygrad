@@ -67,7 +67,9 @@ npm install polygrad
 ```
 
 Python requires Linux, Python 3.9+, NumPy, and a C compiler/Python headers for
-installation from the published source package. The CPU backend needs `clang` at runtime.
+installation from the published source package. The CPU backend needs a C compiler
+at runtime: clang is recommended; GCC is the fallback when clang is absent.
+Generated float16 kernels require clang's `__fp16` support.
 Node requires version 18+; native builds need a `node-gyp` toolchain, with
 bundled Wasm fallback when compilation fails. To skip the native build:
 `POLYGRAD_SKIP_NATIVE=1 npm install polygrad`. Browser/Wasm execution does not
@@ -986,7 +988,7 @@ explicit policy. The first non-uniform policy uses exact named module cuts:
 ```python
 from polygrad import Model, Tensor
 
-x = Tensor([1.0, 2.0])
+x = Tensor.empty(2)
 h = x + 3
 y = h * 2
 model = Model.from_tensors(
@@ -997,6 +999,8 @@ model = Model.from_tensors(
     ],
 )
 model.set_device_map({"stem": "CPU", "head": "CPU:1"})
+assert model.forward(x=[1.0, 2.0])["y"].tolist() == [8.0, 10.0]
+model.dispose()
 ```
 
 The policy places the aggregate retained graph once, keeps module state with
@@ -1238,6 +1242,10 @@ local paths.
 
 ## Current Limits
 
+- Invalid padded coordinates use safe integer divisors before their results
+  are discarded (PG-DIV-010). This fixes an inherited Tinygrad trap; division
+  by zero at a valid coordinate remains unsupported and can terminate native
+  Python or Node processes. Validate integer divisors supplied by users.
 - Python currently targets Linux.
 - CUDA, HIP, and WebGPU require matching local runtimes.
 - Browser WebGPU requires a compatible browser and GPU adapter.

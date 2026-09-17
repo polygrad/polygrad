@@ -1442,6 +1442,36 @@ TEST(tensor, logical_never_rng_keeps_physical_graph_state_and_values_exact) {
   PASS();
 }
 
+TEST(tensor, rng_policy_switch_preserves_stream) {
+  for (int initial = POLY_LOGICAL_ALWAYS; initial <= POLY_LOGICAL_UNTIL_REALIZE; initial++) {
+    PolyCtx *control = poly_ctx_new(), *changed = poly_ctx_new();
+    ASSERT_INT_EQ(poly_ctx_set_logical_policy(control, initial), 0);
+    ASSERT_INT_EQ(poly_ctx_set_logical_policy(changed, initial), 0);
+    poly_tensor_manual_seed(control, 42);
+    poly_tensor_manual_seed(changed, 42);
+    int64_t shape[] = {4};
+    int dtype = poly_dtype_id_by_name("float32");
+    for (int call = 0; call < 3; call++) {
+      if (call == 1) ASSERT_INT_EQ(poly_ctx_set_logical_policy(changed, POLY_LOGICAL_NEVER), 0);
+      PolyTensor *a = poly_tensor_rand_by_id(control, shape, 1, dtype, POLY_DEVICE_CPU, 1);
+      PolyTensor *b = poly_tensor_rand_by_id(changed, shape, 1, dtype, POLY_DEVICE_CPU, 1);
+      ASSERT_NOT_NULL(a);
+      ASSERT_NOT_NULL(b);
+      if (call > 0) ASSERT_PTR_EQ(poly_tensor_uop_logical(b), NULL);
+      float av[4], bv[4];
+      ASSERT_INT_EQ(read_tensor_f32(control, a, av, 4), 0);
+      ASSERT_INT_EQ(read_tensor_f32(changed, b, bv, 4), 0);
+      for (int i = 0; i < 4; i++)
+        ASSERT_FLOAT_EQ(av[i], bv[i], 0.0);
+      poly_tensor_release(a);
+      poly_tensor_release(b);
+    }
+    poly_ctx_destroy(changed);
+    poly_ctx_destroy(control);
+  }
+  PASS();
+}
+
 TEST(tensor, logical_until_realize_retires_effect_custom_function_and_rng_outputs) {
   float source_values[2] = {5, 6}, target_values[2] = {1, 2};
   float a4[4] = {1, 2, 3, 4}, b4[4] = {5, 6, 7, 8};

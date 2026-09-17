@@ -26,6 +26,7 @@
 #include <stdio.h>
 #include <limits.h>
 #include <math.h>
+#include <stdatomic.h>
 
 static PolyUOp *poly_program_source_identity(PolyUOp *program) {
   if (!program || program->op != POLY_OP_PROGRAM) return program;
@@ -98,14 +99,14 @@ static PolyUOp *poly_program_ensure_source(
     PolyDevice device,
     const char *name_override
 );
-static int g_program_source_render_count = 0;
+static atomic_int g_program_source_render_count = 0;
 
 int poly_program_source_render_count(void) {
-  return g_program_source_render_count;
+  return atomic_load_explicit(&g_program_source_render_count, memory_order_relaxed);
 }
 
 void poly_program_source_render_count_reset(void) {
-  g_program_source_render_count = 0;
+  atomic_store_explicit(&g_program_source_render_count, 0, memory_order_relaxed);
 }
 
 static char *program_info_strdup(const char *s) {
@@ -2116,7 +2117,7 @@ static PolyUOp *poly_program_ensure_source(
   stable_kernel_fn_name(ctx, fn_name, sizeof(fn_name), device, program);
   char *source = backend->render_source(ctx, program, name_override ? name_override : fn_name);
   if (!source) return NULL;
-  g_program_source_render_count++;
+  atomic_fetch_add_explicit(&g_program_source_render_count, 1, memory_order_relaxed);
   PolyUOp *with_source = poly_program_attach_source(ctx, program, source);
   free(source);
   return with_source;
@@ -3245,7 +3246,7 @@ static PolyUOp *poly_prepare_x86_program_for_backend(
     free(code);
     return NULL;
   }
-  g_program_source_render_count++;
+  atomic_fetch_add_explicit(&g_program_source_render_count, 1, memory_order_relaxed);
   prepared = poly_program_attach_source(ctx, prepared, source);
   free(source);
   if (!prepared) {

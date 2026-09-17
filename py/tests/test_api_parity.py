@@ -57,6 +57,60 @@ def test_environment_invalid_library_does_not_fall_back(tmp_path):
     assert 'POLY_LIB' in result.stderr and missing in result.stderr
 
 
+@pytest.mark.parametrize('device', ['INTERP', 'CPU'])
+@pytest.mark.parametrize('separate', [False, True])
+def test_python_native_calls_serialize_shared_context(device, separate):
+    result = _environment_probe({'POLY_DEV': device, 'SEPARATE': str(int(separate))}, '''
+import concurrent.futures
+import resource
+import threading
+import os
+import polygrad
+resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+barrier = threading.Barrier(8)
+def compute(i):
+    runtime = polygrad.create(device=os.environ['POLY_DEV']) if os.environ['SEPARATE'] == '1' else None
+    constructor = runtime.Tensor if runtime else Tensor
+    try:
+        barrier.wait()
+        for j in range(20):
+            values = [float(i + j)] * (j + 1)
+            x = constructor(values)
+            assert (x * 2 + 1).numpy().tolist() == [v * 2 + 1 for v in values]
+    finally:
+        if runtime: runtime.dispose()
+    return i
+with concurrent.futures.ThreadPoolExecutor(8) as pool:
+    assert list(pool.map(compute, range(8))) == list(range(8))
+print('shared context survived')
+''')
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'shared context survived' in result.stdout
+
+
+def test_native_call_locks_follow_runtime_not_process():
+    import ctypes
+    import concurrent.futures
+    import threading
+    import polygrad
+    with polygrad.create(device='INTERP') as a, polygrad.create(device='INTERP') as b:
+        barrier = threading.Barrier(2)
+        def native_probe(ctx):
+            barrier.wait(timeout=5)
+        native_probe.restype = None
+        guarded = _ffi._NativeCall(native_probe)
+        assert a._ctx._call_lock is not b._ctx._call_lock
+        x = a.Tensor([1.])
+        assert x._tensor._call_lock is a._ctx._call_lock
+        assert x.uop.raw._call_lock is a._ctx._call_lock
+        restored = _ffi.owned_handle(ctypes.c_void_p(x._tensor), a._ctx)
+        assert restored == x._tensor and restored._call_lock is a._ctx._call_lock
+        assert _ffi.owned_handle(ctypes.c_void_p(), a._ctx) is None
+        with concurrent.futures.ThreadPoolExecutor(2) as pool:
+            list(pool.map(guarded, [a._ctx, b._ctx]))
+        x.dispose()
+
+
 def test_environment_model_auto_uses_target_validation():
     result = _environment_probe({'POLY_DEV': 'CPU'}, '''
 import os
@@ -709,8 +763,56 @@ def test_python_source_manifest_contains_makefile_sources():
         if re.match(r'\s*(SRC|CODEC_SRC|LOADER_SRC)\s*[+:]?=', line):
             required.update(re.findall(r'(?:src|vendor)/[\w/.-]+\.c\b', line))
     assert required
-    # setup.py enables CUDA, but not the optional native x86 ISA backend.
-    assert required - shipped <= {'src/renderer/isa/x86.c'}
+    assert not required - shipped
+
+
+def test_readme_device_map_example():
+    text = (Path(__file__).resolve().parents[2] / 'README.md').read_text(encoding='utf-8')
+    start = text.index('from polygrad import Model, Tensor', text.index('exact named module cuts'))
+    exec(text[start:text.index('```', start)], {})
+
+
+@pytest.mark.parametrize('device', ['CPU', 'INTERP', 'X86'])
+def test_padded_integer_scan(device):
+    result = _environment_probe({'POLY_DEV': device}, '''
+import resource
+resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+for n in (3, 5, 7, 10):
+    a, b = list(range(-n, 0)), [2 + i % 3 for i in range(n)]
+    x, y = Tensor(a), Tensor(b)
+    for out, terms in ((x % y, [v % d for v, d in zip(a, b)]),
+                       (x.div(y, rounding_mode='trunc'), [int(v / d) for v, d in zip(a, b)])):
+        expected = [sum(terms[:i + 1]) for i in range(n)]
+        assert out.cumsum().numpy().tolist() == expected
+print('padded integer scan passed')
+''')
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'padded integer scan passed' in result.stdout
+
+
+@pytest.mark.parametrize('device', ['CPU', 'INTERP'])
+def test_clip_nan_and_rng_policy_transition(device):
+    result = _environment_probe({'POLY_DEV': device}, '''
+import math
+import numpy as np
+from polygrad import Context
+assert math.isnan(Tensor([float('nan')]).clip(0, 1).item())
+for method in ('rand', 'randn'):
+    for initial in ('always', 'until_realize'):
+        Tensor.manual_seed(42)
+        with Context(LOGICAL=initial):
+            expected = [getattr(Tensor, method)(4).numpy() for _ in range(3)]
+        Tensor.manual_seed(42)
+        with Context(LOGICAL=initial): np.testing.assert_array_equal(getattr(Tensor, method)(4).numpy(), expected[0])
+        with Context(LOGICAL='never'):
+            for values in expected[1:]:
+                out = getattr(Tensor, method)(4)
+                assert out.uop_logical is None
+                np.testing.assert_array_equal(out.numpy(), values)
+print('clip and RNG passed')
+''')
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'clip and RNG passed' in result.stdout
 
 
 def test_python_source_manifest_contains_quoted_dependencies():
