@@ -203,7 +203,7 @@ async function main() {
     console.log('webgpu probe', JSON.stringify(probe))
     if (!probe.ok) throw new Error('WebGPU unavailable: ' + probe.reason)
 
-    const result = await page.waitForFunction(() => window.__qwenResults, { timeout: 900000 })
+    const result = await page.waitForFunction(() => window.__qwenResults, null, { timeout: 900000 })
       .then(h => h.jsonValue())
     console.log('result', JSON.stringify(result))
     if (!result.ok) throw new Error(result.error || 'qwen probe failed')

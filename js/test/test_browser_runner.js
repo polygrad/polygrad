@@ -27,6 +27,9 @@ async function check(device) {
 }
 
 (async () => {
+  const qwen = fs.readFileSync(require.resolve('./browser/qwen_webgpu'), 'utf8')
+  assert.match(qwen, /waitForFunction\(\(\) => window\.__qwenResults, null, \{ timeout: 900000 \}\)/,
+    'Qwen timeout must be the third argument, not predicate data')
   for (const device of ['auto', 'interp', 'webgpu']) {
     const spec = { launcherName: 'chromium' }
     const opts = launchOptionsFor(spec, device).opts
