@@ -775,6 +775,96 @@
           assert(t.dtype === "int32", `expected int32, got ${t.dtype}`);
           assertClose(await t.toArray(), [1, 2, 3]);
         });
+        await test("arithmetic temporaries retire before return", isolatedRuntime(async (pg2) => {
+          const a = new pg2.Tensor(new Float32Array([1, 2, 3]));
+          await a.realizeAsync();
+          const baseline = pg2.stats().coreStats.tensorRecords;
+          try {
+            for (let i = 0; i < 20; i++) {
+              const b = a.mul(2), c = b.add(1), d = c.relu(), e = d.sum();
+              try {
+                assertClose(await e.toArrayAsync(), [15]);
+              } finally {
+                await e.dispose();
+                await d.dispose();
+                await c.dispose();
+                await b.dispose();
+              }
+              assert(
+                pg2.stats().coreStats.tensorRecords === baseline,
+                `arithmetic retained hidden owners: ${baseline} -> ${pg2.stats().coreStats.tensorRecords}`
+              );
+            }
+          } finally {
+            await a.dispose();
+          }
+        }));
+        await test("scalar operands and comparisons preserve caller owners", isolatedRuntime(async (pg2) => {
+          const x = new pg2.Tensor(new Float32Array([1, 2, 3]));
+          const rhs = new pg2.Tensor(new Float32Array([2]));
+          await x.realizeAsync();
+          await rhs.realizeAsync();
+          const baseline = pg2.stats().coreStats.tensorRecords;
+          try {
+            for (const [name, operation, values] of [
+              ["div", () => x.div(2), [0.5, 1, 1.5]],
+              ["mod", () => x.mod(2), [1, 0, 1]],
+              ["fmod", () => x.fmod(2), [1, 0, 1]],
+              ["eq", () => x.eq(2), [0, 1, 0]],
+              ["le", () => x.le(2), [1, 1, 0]],
+              ["ge", () => x.ge(2), [0, 1, 1]],
+              ["minimum", () => x.minimum(rhs), [1, 2, 2]],
+              ["clamp", () => x.clamp(1.5, 2.5), [1.5, 2, 2.5]],
+              ["clamp lower", () => x.clamp(2), [2, 2, 3]],
+              ["celu", () => x.celu(), [1, 2, 3]],
+              ["selu", () => x.selu(1, 2), [2, 4, 6]],
+              ["isclose", () => x.isclose(2), [0, 1, 0]],
+              ["copysign", () => x.copysign(-1), [-1, -2, -3]],
+              ["lerp", () => x.lerp(rhs, 0.5), [1.5, 2, 2.5]],
+              ["logaddexp", () => x.logaddexp(2), [1, 2, 3].map((v) => Math.log(Math.exp(v) + Math.exp(2)))],
+              ["logits loss", () => x.binaryCrossEntropyLogits(1, { reduction: "none" }), [1, 2, 3].map((v) => Math.log1p(Math.exp(-v)))]
+            ]) {
+              const result = operation();
+              try {
+                assertClose(await result.toArrayAsync(), values);
+              } finally {
+                await result.dispose();
+              }
+              assert(pg2.stats().coreStats.tensorRecords === baseline, `${name} retained temporary owners`);
+            }
+            let error;
+            try {
+              x.where(1, {});
+            } catch (e) {
+              error = e;
+            }
+            assert(error instanceof TypeError, "invalid second operand must fail");
+            assert(pg2.stats().coreStats.tensorRecords === baseline, "failed conversion retained first scalar");
+            for (const operation of [() => x.conv2d(1, 0), () => x.convTranspose2d(1, 0)]) {
+              error = null;
+              try {
+                operation();
+              } catch (e) {
+                error = e;
+              }
+              assert(error, "scalar convolution weights must fail");
+              assert(pg2.stats().coreStats.tensorRecords === baseline, "failed convolution retained operands");
+            }
+            assertClose(await rhs.toArrayAsync(), [2]);
+            const y = x.relu();
+            const loss = y.sum();
+            try {
+              await loss.backward();
+              assertClose(await x.grad.toArrayAsync(), [1, 1, 1]);
+            } finally {
+              await loss.dispose();
+              await y.dispose();
+            }
+          } finally {
+            await rhs.dispose();
+            await x.dispose();
+          }
+        }));
         for (const mode of ["single", "batch", "singleAsync", "batchAsync"]) {
           await testIf(
             pg.device !== "webgpu" || mode.endsWith("Async"),

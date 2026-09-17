@@ -462,8 +462,8 @@ function createBoundTensorClass(runtime) {
     release()
     return undefined
   }
-  function releaseReadbackTensors(owned) {
-    // Readback owns these wrappers, never its inputs. Async callers stay inside
+  function releaseTensorTemporaries(owned) {
+    // The caller owns these wrappers, never its inputs. Async callers stay inside
     // their lease and finish all awaited reads before releasing here: enqueueing
     // disposal onto that same queue and awaiting it would deadlock.
     for (let i = owned.length - 1; i >= 0; i--) {
@@ -1191,7 +1191,7 @@ function createBoundTensorClass(runtime) {
         const t = this._prepareReadback(owned)
         t.realize()
         return t._readBufferBytes()
-      } finally { releaseReadbackTensors(owned) }
+      } finally { releaseTensorTemporaries(owned) }
     }
 
     async _toArrayAsyncUnleased() {
@@ -1205,7 +1205,7 @@ function createBoundTensorClass(runtime) {
         const t = this._prepareReadback(owned)
         await t._realizeAsyncUnleased()
         return await t._readBufferBytesAsync()
-      } finally { releaseReadbackTensors(owned) }
+      } finally { releaseTensorTemporaries(owned) }
     }
 
     toArrayAsync() {
@@ -1243,7 +1243,7 @@ function createBoundTensorClass(runtime) {
           }
         }
         return out
-      } finally { releaseReadbackTensors(owned) }
+      } finally { releaseTensorTemporaries(owned) }
     }
 
     static async toTypedArraysAsync(...tensors) {
@@ -1272,7 +1272,7 @@ function createBoundTensorClass(runtime) {
             }
           }
           return out
-        } finally { releaseReadbackTensors(owned) }
+        } finally { releaseTensorTemporaries(owned) }
       })
     }
 
@@ -1587,6 +1587,21 @@ function createBoundTensorClass(runtime) {
       throw new TypeError(`Cannot convert ${typeof other} to Tensor`)
     }
 
+    _withTensorOperands(values, fn) {
+      const owned = []
+      try {
+        const tensors = values.map(value => {
+          if (value === null) return null
+          const tensor = this._ensureTensor(value)
+          if (tensor !== value) owned.push(tensor)
+          return tensor
+        })
+        // Results own their C graph roots. Python drops these call-local scalar
+        // wrappers on return; JS must not wait for GC to retire the same owners.
+        return fn(...tensors)
+      } finally { releaseTensorTemporaries(owned) }
+    }
+
     constLike(value) {
       // Pinned uop/ops.py:581-583: one typed scalar CONST broadcast to this
       // Tensor's exact shape. C owns the shared Python/JS graph construction.
@@ -1629,11 +1644,12 @@ function createBoundTensorClass(runtime) {
 
     _binop(other, opName, reverse = false) {
       const { ffi, ops } = this._rt._core
-      other = this._ensureTensor(other)
-      let x = reverse ? other : this
-      let y = reverse ? this : other
-      const core = ffi.poly_tensor_alu2(this._ctx, ops[opName], x._tensor, y._tensor)
-      return this._makeResultFromCore(core)
+      return this._withTensorOperands([other], rhs => {
+        const x = reverse ? rhs : this
+        const y = reverse ? this : rhs
+        const core = ffi.poly_tensor_alu2(this._ctx, ops[opName], x._tensor, y._tensor)
+        return this._makeResultFromCore(core)
+      })
     }
 
     // --- Element-wise arithmetic ---
@@ -1653,26 +1669,33 @@ function createBoundTensorClass(runtime) {
       return this._makeResultFromCore(core)
     }
     mod(other) {
-      const b = this._ensureTensor(other)
-      if (isIntegerDtype(this._dtype) && isIntegerDtype(b._dtype)) return this._binop(b, 'FLOORMOD')
-      return this.sub(this.div(b, 'floor').mul(b))
+      return this._remainder(other, 'floor', 'FLOORMOD')
     }
     fmod(other) {
-      const b = this._ensureTensor(other)
-      if (isIntegerDtype(this._dtype) && isIntegerDtype(b._dtype)) return this._binop(b, 'CMOD')
-      return this.sub(this.div(b, 'trunc').mul(b))
+      return this._remainder(other, 'trunc', 'CMOD')
     }
-    maskedFill(mask, value) { return this._ensureTensor(mask).where(value, this) }
+    _remainder(other, rounding, op) {
+      return this._withTensorOperands([other], rhs => {
+        if (isIntegerDtype(this._dtype) && isIntegerDtype(rhs._dtype)) return this._binop(rhs, op)
+        const quotient = this.div(rhs, rounding)
+        let product
+        try {
+          product = quotient.mul(rhs)
+          return this.sub(product)
+        } finally { releaseTensorTemporaries(product ? [quotient, product] : [quotient]) }
+      })
+    }
+    maskedFill(mask, value) {
+      return this._withTensorOperands([mask], condition => condition.where(value, this))
+    }
     div(other, roundingMode = null) {
       // Pinned mixin/elementwise.py:219-247 selects integer CDIV/FLOORDIV
       // after promotion; floating rounding composes over true division.
-      const rhs = this._ensureTensor(other)
       const rounding = [null, 'trunc', 'floor'].indexOf(roundingMode)
       if (rounding < 0) throw new Error(`rounding_mode='${roundingMode}' is not supported`)
-      const core = this._rt._core.ffi.poly_tensor_div(
-        this._ctx, this._tensor, rhs._tensor, rounding
-      )
-      return this._makeResultFromCore(core)
+      return this._withTensorOperands([other], rhs => this._makeResultFromCore(
+        this._rt._core.ffi.poly_tensor_div(this._ctx, this._tensor, rhs._tensor, rounding)
+      ))
     }
     pow(other, reverse = false) {
       // Tinygrad 2026-08-22/a9069c177a9d mixin/elementwise.py:545-564
@@ -1682,6 +1705,7 @@ function createBoundTensorClass(runtime) {
       const nonnegativeInteger = typeof other === 'boolean' ||
         (typeof other === 'number' && Number.isInteger(other) && other >= 0)
       if (!isFloatDtype(result.dtype) && scalar && !nonnegativeInteger) {
+        releaseTensorTemporaries([result])
         throw new Error('base needs to be float')
       }
       return result
@@ -1697,7 +1721,9 @@ function createBoundTensorClass(runtime) {
 
     eq(other) {
       // Pinned mixin/elementwise.py:315-322: promoted CMPNE + logical_not.
-      return this._binop(other, 'CMPNE').ne(true)
+      const comparison = this._binop(other, 'CMPNE')
+      try { return comparison.ne(true) }
+      finally { releaseTensorTemporaries([comparison]) }
     }
 
     ne(other) {
@@ -1710,11 +1736,15 @@ function createBoundTensorClass(runtime) {
     }
 
     ge(other) {
-      return this.lt(other).ne(true)
+      const comparison = this.lt(other)
+      try { return comparison.ne(true) }
+      finally { releaseTensorTemporaries([comparison]) }
     }
 
     le(other) {
-      return this.gt(other).ne(true)
+      const comparison = this.gt(other)
+      try { return comparison.ne(true) }
+      finally { releaseTensorTemporaries([comparison]) }
     }
 
     where(x, y) {
@@ -1722,10 +1752,9 @@ function createBoundTensorClass(runtime) {
       // Current ElementwiseMixin.where uses one branch Tensor only to wrap
       // host scalars. C owns promotion and broadcast shape inference.
       const ref = x instanceof Tensor ? x : y instanceof Tensor ? y : this
-      if (!(x instanceof Tensor)) x = ref._ensureTensor(x)
-      if (!(y instanceof Tensor)) y = ref._ensureTensor(y)
-      const core = ffi.poly_tensor_alu3(this._ctx, ops.WHERE, this._tensor, x._tensor, y._tensor)
-      return this._makeResultFromCore(core)
+      return ref._withTensorOperands([x, y], (a, b) => this._makeResultFromCore(
+        ffi.poly_tensor_alu3(this._ctx, ops.WHERE, this._tensor, a._tensor, b._tensor)
+      ))
     }
 
     maximum(other) {
@@ -1734,12 +1763,17 @@ function createBoundTensorClass(runtime) {
 
     minimum(other) {
       const { ffi } = this._rt._core
-      other = this._ensureTensor(other)
-      const outShape = this._broadcastShape(other.shape)
-      const x = this._broadcastTensor(outShape)
-      const y = other._broadcastTensor(outShape)
-      const core = ffi.poly_tensor_minimum(this._ctx, x._tensor, y._tensor)
-      return this._makeResultFromCore(core)
+      return this._withTensorOperands([other], rhs => {
+        const owned = []
+        try {
+          const outShape = this._broadcastShape(rhs.shape)
+          const x = this._broadcastTensor(outShape)
+          if (x !== this) owned.push(x)
+          const y = rhs._broadcastTensor(outShape)
+          if (y !== rhs) owned.push(y)
+          return this._makeResultFromCore(ffi.poly_tensor_minimum(this._ctx, x._tensor, y._tensor))
+        } finally { releaseTensorTemporaries(owned) }
+      })
     }
 
     clamp(lo, hi) {
@@ -1749,8 +1783,20 @@ function createBoundTensorClass(runtime) {
       // Pinned clamp conditionally composes comparison/WHERE Tensor
       // operations; an omitted bound is not a finite sentinel
       // (mixin/elementwise.py:569-580).
-      const ret = lo !== undefined ? this.lt(lo).where(lo, this) : this
-      return hi !== undefined ? ret.gt(hi).where(hi, ret) : ret
+      const owned = []
+      try {
+        let ret = this
+        if (lo !== undefined) {
+          const comparison = this.lt(lo)
+          owned.push(comparison)
+          ret = comparison.where(lo, this)
+        }
+        if (hi === undefined) return ret
+        if (ret !== this) owned.push(ret)
+        const comparison = ret.gt(hi)
+        owned.push(comparison)
+        return comparison.where(hi, ret)
+      } finally { releaseTensorTemporaries(owned) }
     }
 
     // Pinned mixin/elementwise.py:582-584: clip is the public clamp alias.
@@ -1929,40 +1975,39 @@ function createBoundTensorClass(runtime) {
 
     celu(alpha) {
       // The pin's default is floating 1.0; JS Number alone loses that distinction.
-      alpha = alpha === undefined
+      const input = alpha
+      alpha = input === undefined
         ? new Tensor(1, {dtype: 'weakfloat', _ctx: this._ctx, device: this._device})
-        : this._ensureTensor(alpha)
-      const core = this._rt._core.ffi.poly_tensor_celu(this._ctx, this._tensor, alpha._tensor)
-      return this._makeResultFromCore(core)
+        : this._ensureTensor(input)
+      try {
+        const core = this._rt._core.ffi.poly_tensor_celu(this._ctx, this._tensor, alpha._tensor)
+        return this._makeResultFromCore(core)
+      } finally { if (alpha !== input) releaseTensorTemporaries([alpha]) }
     }
 
     selu(alpha = 1.67326, gamma = 1.0507) {
-      alpha = this._ensureTensor(alpha)
-      gamma = this._ensureTensor(gamma)
-      const core = this._rt._core.ffi.poly_tensor_selu(this._ctx, this._tensor, alpha._tensor, gamma._tensor)
-      return this._makeResultFromCore(core)
+      return this._withTensorOperands([alpha, gamma], (a, g) => this._makeResultFromCore(
+        this._rt._core.ffi.poly_tensor_selu(this._ctx, this._tensor, a._tensor, g._tensor)
+      ))
     }
 
     isclose(other, {rtol = 1e-5, atol = 1e-8, equalNan = false} = {}) {
-      other = this._ensureTensor(other)
-      rtol = this._ensureTensor(rtol)
-      atol = this._ensureTensor(atol)
-      const core = this._rt._core.ffi.poly_tensor_isclose(this._ctx, this._tensor, other._tensor, rtol._tensor, atol._tensor, !!equalNan)
-      return this._makeResultFromCore(core)
+      return this._withTensorOperands([other, rtol, atol], (rhs, r, a) => this._makeResultFromCore(
+        this._rt._core.ffi.poly_tensor_isclose(this._ctx, this._tensor, rhs._tensor, r._tensor, a._tensor, !!equalNan)
+      ))
     }
 
     copysign(other) {
-      other = this._ensureTensor(other)
-      const core = this._rt._core.ffi.poly_tensor_copysign(this._ctx, this._tensor, other._tensor)
-      return this._makeResultFromCore(core)
+      return this._withTensorOperands([other], rhs => this._makeResultFromCore(
+        this._rt._core.ffi.poly_tensor_copysign(this._ctx, this._tensor, rhs._tensor)
+      ))
     }
 
     lerp(end, weight) {
       const scalarWeight = !(weight instanceof Tensor)
-      end = this._ensureTensor(end)
-      weight = this._ensureTensor(weight)
-      const core = this._rt._core.ffi.poly_tensor_lerp(this._ctx, this._tensor, end._tensor, weight._tensor, scalarWeight)
-      return this._makeResultFromCore(core)
+      return this._withTensorOperands([end, weight], (e, w) => this._makeResultFromCore(
+        this._rt._core.ffi.poly_tensor_lerp(this._ctx, this._tensor, e._tensor, w._tensor, scalarWeight)
+      ))
     }
 
     _lossReductionId(reduction) {
@@ -1973,21 +2018,18 @@ function createBoundTensorClass(runtime) {
 
     binaryCrossEntropyLogits(target, {reduction = 'mean', posWeight = null} = {}) {
       const id = this._lossReductionId(reduction)
-      target = this._ensureTensor(target)
-      const weight = posWeight === null ? null : this._ensureTensor(posWeight)
-      const core = this._rt._core.ffi.poly_tensor_binary_crossentropy_logits(
-        this._ctx, this._tensor, target._tensor, weight ? weight._tensor : null, id)
-      return this._makeResultFromCore(core)
+      return this._withTensorOperands([target, posWeight], (t, w) => this._makeResultFromCore(
+        this._rt._core.ffi.poly_tensor_binary_crossentropy_logits(
+          this._ctx, this._tensor, t._tensor, w ? w._tensor : null, id)
+      ))
     }
 
     nllLoss(target, {weight = null, ignoreIndex = null, reduction = 'mean'} = {}) {
       const id = this._lossReductionId(reduction)
-      target = this._ensureTensor(target)
-      weight = weight === null ? null : this._ensureTensor(weight)
-      const ignore = ignoreIndex === null ? null : this._ensureTensor(ignoreIndex)
-      const core = this._rt._core.ffi.poly_tensor_nll_loss(
-        this._ctx, this._tensor, target._tensor, weight ? weight._tensor : null, ignore ? ignore._tensor : null, id)
-      return this._makeResultFromCore(core)
+      return this._withTensorOperands([target, weight, ignoreIndex], (t, w, ignore) => this._makeResultFromCore(
+        this._rt._core.ffi.poly_tensor_nll_loss(
+          this._ctx, this._tensor, t._tensor, w ? w._tensor : null, ignore ? ignore._tensor : null, id)
+      ))
     }
 
     log1p() {
@@ -2100,7 +2142,9 @@ function createBoundTensorClass(runtime) {
     relu() {
       // Pinned mixin/elementwise.py:656-666. Tensor comparison/where keeps
       // scalar-zero broadcasting and exact ordered physical occurrences.
-      return this.gt(0).where(this, 0)
+      const comparison = this.gt(0)
+      try { return comparison.where(this, 0) }
+      finally { releaseTensorTemporaries([comparison]) }
     }
 
     relu6() {
@@ -2147,12 +2191,20 @@ function createBoundTensorClass(runtime) {
 
     logaddexp(other) {
       // Pinned mixin/elementwise.py:403-410.
-      let b = this._ensureTensor(other)
-      const outShape = this._broadcastShape(b.shape)
-      const a = this._broadcastTensor(outShape)
-      b = b._broadcastTensor(outShape)
-      const m = a.maximum(b)
-      return a.sub(m).exp().add(b.sub(m).exp()).log().add(m)
+      return this._withTensorOperands([other], rhs => {
+        const owned = []
+        const keep = t => { owned.push(t); return t }
+        try {
+          const shape = this._broadcastShape(rhs.shape)
+          const a = this._broadcastTensor(shape), b = rhs._broadcastTensor(shape)
+          if (a !== this) keep(a)
+          if (b !== rhs) keep(b)
+          const m = keep(a.maximum(b))
+          const left = keep(keep(a.sub(m)).exp())
+          const right = keep(keep(b.sub(m)).exp())
+          return keep(keep(left.add(right)).log()).add(m)
+        } finally { releaseTensorTemporaries(owned) }
+      })
     }
 
     softplus(beta) {
@@ -3021,25 +3073,25 @@ function createBoundTensorClass(runtime) {
     }
 
     convTranspose2d(weight, bias = null, opts = {}) {
-      if (!(weight instanceof Tensor)) weight = this._ensureTensor(weight)
-      if (bias !== null && !(bias instanceof Tensor)) bias = this._ensureTensor(bias)
-      const n = weight.ndim - 2
-      let stride = makeTuple(opts.stride ?? 1, n)
-      const dilation = makeTuple(opts.dilation ?? 1, n)
-      if (dilation.length !== n) throw new Error('stride/dilation mismatch')
-      // Only inserting strides are consumed by the pin; normalize unused
-      // short/extra tuples before passing fixed-length C arrays.
-      if (stride.some(s => s > 1)) {
-        if (stride.length !== n) throw new Error('stride length mismatch')
-      } else stride = makeTuple(1, n)
-      const padding = resolvePoolPads(opts.padding ?? 0, n)
-      const op = makeTuple(opts.outputPadding ?? opts.output_padding ?? 0, n).slice(0, n)
-      if (!op.length) throw new Error('output_padding must not be empty')
-      const core = this._rt._core.ffi.poly_tensor_conv_transpose2d(
-        this._ctx, this._tensor, weight._tensor, bias ? bias._tensor : null, opts.groups ?? 1,
-        stride, dilation, padding, padding.length, op, op.length)
-      if (!core) throw new Error('poly_conv_transpose2d failed')
-      return this._makeResultFromCore(core)
+      return this._withTensorOperands([weight, bias], (weight, bias) => {
+        const n = weight.ndim - 2
+        let stride = makeTuple(opts.stride ?? 1, n)
+        const dilation = makeTuple(opts.dilation ?? 1, n)
+        if (dilation.length !== n) throw new Error('stride/dilation mismatch')
+        // Only inserting strides are consumed by the pin; normalize unused
+        // short/extra tuples before passing fixed-length C arrays.
+        if (stride.some(s => s > 1)) {
+          if (stride.length !== n) throw new Error('stride length mismatch')
+        } else stride = makeTuple(1, n)
+        const padding = resolvePoolPads(opts.padding ?? 0, n)
+        const op = makeTuple(opts.outputPadding ?? opts.output_padding ?? 0, n).slice(0, n)
+        if (!op.length) throw new Error('output_padding must not be empty')
+        const core = this._rt._core.ffi.poly_tensor_conv_transpose2d(
+          this._ctx, this._tensor, weight._tensor, bias ? bias._tensor : null, opts.groups ?? 1,
+          stride, dilation, padding, padding.length, op, op.length)
+        if (!core) throw new Error('poly_conv_transpose2d failed')
+        return this._makeResultFromCore(core)
+      })
     }
 
     conv_transpose2d(weight, bias = null, groups = 1, stride = 1, dilation = 1, padding = 0, outputPadding = 0) {
@@ -3057,32 +3109,31 @@ function createBoundTensorClass(runtime) {
     }
 
     conv2d(weight, bias = null, groupsOrOpts = 1, stride = 1, dilation = 1, padding = 0, dtype = null) {
-      if (!(weight instanceof Tensor)) weight = this._ensureTensor(weight)
-      if (bias !== null && !(bias instanceof Tensor)) bias = this._ensureTensor(bias)
-      let opts = groupsOrOpts
-      if (typeof opts !== 'object' || Array.isArray(opts)) {
-        opts = { groups: Number(groupsOrOpts), stride, dilation, padding, dtype }
-      }
-      const hw = weight.shape.slice(2)
-      const strideTuple = opts.stride == null ? makeTuple(1, hw.length) : makeTuple(opts.stride, hw.length)
-      const dilationTuple = opts.dilation == null ? makeTuple(1, hw.length) : makeTuple(opts.dilation, hw.length)
-      const paddingTuple = resolvePoolPads(opts.padding == null ? 0 : opts.padding, hw.length)
-      const groups = opts.groups == null ? 1 : Number(opts.groups)
-      const args = [
-        this._ctx, this._tensor, weight._tensor, bias ? bias._tensor : null,
-        groups, strideTuple, dilationTuple, paddingTuple, paddingTuple.length
-      ]
-      let core
-      if (opts.dtype === undefined || opts.dtype === null) {
-        core = this._rt._core.ffi.poly_tensor_conv2d(...args)
-      } else {
-        const dtypeId = DTYPE_ID[opts.dtype]
-        if (dtypeId === undefined) throw new Error(`unsupported dtype: ${opts.dtype}`)
-        core = this._rt._core.ffi.poly_tensor_conv2d_dtype_by_id(...args, dtypeId)
-      }
-      if (!core) throw new Error('poly_conv2d failed')
-      const inputs = bias ? [this, weight, bias] : [this, weight]
-      return this._makeResultFromCore(core)
+      return this._withTensorOperands([weight, bias], (weight, bias) => {
+        let opts = groupsOrOpts
+        if (typeof opts !== 'object' || Array.isArray(opts)) {
+          opts = { groups: Number(groupsOrOpts), stride, dilation, padding, dtype }
+        }
+        const hw = weight.shape.slice(2)
+        const strideTuple = opts.stride == null ? makeTuple(1, hw.length) : makeTuple(opts.stride, hw.length)
+        const dilationTuple = opts.dilation == null ? makeTuple(1, hw.length) : makeTuple(opts.dilation, hw.length)
+        const paddingTuple = resolvePoolPads(opts.padding == null ? 0 : opts.padding, hw.length)
+        const groups = opts.groups == null ? 1 : Number(opts.groups)
+        const args = [
+          this._ctx, this._tensor, weight._tensor, bias ? bias._tensor : null,
+          groups, strideTuple, dilationTuple, paddingTuple, paddingTuple.length
+        ]
+        let core
+        if (opts.dtype === undefined || opts.dtype === null) {
+          core = this._rt._core.ffi.poly_tensor_conv2d(...args)
+        } else {
+          const dtypeId = DTYPE_ID[opts.dtype]
+          if (dtypeId === undefined) throw new Error(`unsupported dtype: ${opts.dtype}`)
+          core = this._rt._core.ffi.poly_tensor_conv2d_dtype_by_id(...args, dtypeId)
+        }
+        if (!core) throw new Error('poly_conv2d failed')
+        return this._makeResultFromCore(core)
+      })
     }
 
     batchnorm(weight, bias, mean, invstd, axis = 1) {
@@ -3140,18 +3191,19 @@ function createBoundTensorClass(runtime) {
 
     sparseCategoricalCrossentropy(target, { ignoreIndex = -1, labelSmoothing = 0, reduction = 'mean' } = {}) {
       if (!(labelSmoothing >= 0 && labelSmoothing <= 1)) throw new RangeError('labelSmoothing must be in [0, 1]')
-      target = this._ensureTensor(target)
-      if (deviceMismatch(target.device, this.device)) throw new Error('loss inputs must be on the same device')
       if (!Number.isSafeInteger(ignoreIndex)) throw new RangeError('ignoreIndex must be a safe integer')
-      const core = this._rt._core.ffi.poly_tensor_sparse_categorical_crossentropy(this._ctx, this._tensor, target._tensor, ignoreIndex, labelSmoothing, this._lossReductionId(reduction))
-      return this._makeResultFromCore(core)
+      return this._withTensorOperands([target], t => {
+        if (deviceMismatch(t.device, this.device)) throw new Error('loss inputs must be on the same device')
+        const core = this._rt._core.ffi.poly_tensor_sparse_categorical_crossentropy(this._ctx, this._tensor, t._tensor, ignoreIndex, labelSmoothing, this._lossReductionId(reduction))
+        return this._makeResultFromCore(core)
+      })
     }
 
     binaryCrossEntropy(target, reduction = 'mean') {
       const id = this._lossReductionId(reduction)
-      target = this._ensureTensor(target)
-      const core = this._rt._core.ffi.poly_tensor_binary_crossentropy(this._ctx, this._tensor, target._tensor, id)
-      return this._makeResultFromCore(core)
+      return this._withTensorOperands([target], t => this._makeResultFromCore(
+        this._rt._core.ffi.poly_tensor_binary_crossentropy(this._ctx, this._tensor, t._tensor, id)
+      ))
     }
 
     layernorm(axis, eps) {
