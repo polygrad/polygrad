@@ -609,6 +609,12 @@ static bool place_module_has_input(const PolyPlaceModule *module, PolyUOp *u) {
   return false;
 }
 
+static int place_module_input_binding(PolyUOp **bindings, int n, PolyUOp *input) {
+  /* Model bindings are flat storage; a declared Tensor cut can be a RESHAPE
+   * of that storage. Resolve ownership here, not the cut's value or shape. */
+  return place_binding_index(bindings, n, (PolyUOp *)poly_uop_get_buffer_identity(input));
+}
+
 static bool place_scalar_devices_valid(PolyCtx *ctx, PolyUOp *root) {
   if (!ctx || !root) return false;
   int n_topo = 0;
@@ -740,7 +746,7 @@ int poly_place_module_map(
       for (int k = 0; k < j; k++)
         if (module->inputs[k] == input) goto cleanup;
       int producer = place_module_output_index(modules, i, input);
-      int binding = place_binding_index(logical_bindings, n_bindings, input);
+      int binding = place_module_input_binding(logical_bindings, n_bindings, input);
       if (producer < 0 && binding < 0) goto cleanup;
       if (binding >= 0) {
         if (output_bindings[binding]) goto cleanup;
@@ -804,9 +810,14 @@ int poly_place_module_map(
     for (int j = 0; j < module->n_inputs; j++) {
       PolyUOp *input = module->inputs[j];
       int producer = place_module_output_index(modules, i, input);
-      int binding = place_binding_index(logical_bindings, n_bindings, input);
-      PolyUOp *placed_input = producer >= 0 ? placed_modules[producer]
-                                            : (binding >= 0 ? target_bindings[binding] : NULL);
+      int binding = place_module_input_binding(logical_bindings, n_bindings, input);
+      PolyUOp *placed_input = producer >= 0 ? placed_modules[producer] : NULL;
+      if (producer < 0 && binding >= 0 &&
+          poly_uop_substitute_many(
+              ctx, &input, 1, &logical_bindings[binding], &target_bindings[binding], 1,
+              &placed_input
+          ) != 0)
+        goto cleanup;
       PolyUOp *on_device = place_exact_copy_to_device(ctx, placed_input, module->device);
       if (!on_device) goto cleanup;
       from[n_subs] = input;

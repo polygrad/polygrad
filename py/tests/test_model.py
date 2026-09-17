@@ -7,6 +7,33 @@ from polygrad.models import MLP, Graph, Sequential
 from polygrad.tensor import Tensor
 
 
+@pytest.mark.parametrize('shape', [(2,), (2, 2)])
+@pytest.mark.parametrize('weighted', [False, True, 'linear'])
+def test_module_device_map_preserves_shaped_cuts(shape, weighted):
+    import polygrad as pg
+    with pg.create(device='cpu', logical='always') as rt:
+        x = rt.Tensor.empty(*shape)
+        w = rt.Tensor([[3., 1.], [2., 4.]]) if weighted == 'linear' else rt.Tensor([3., 4.])
+        h = x.matmul(w) if weighted == 'linear' else x * w if weighted else x + 3
+        y = h * 2
+        model = rt.Model.from_tensors(
+            inputs={'x': x}, outputs={'y': y}, params={'w': w} if weighted else {},
+            modules=[{'name': 'stem', 'inputs': [x], 'output': h},
+                     {'name': 'head', 'inputs': [h], 'output': y}])
+        try:
+            values = np.arange(np.prod(shape), dtype=np.float32).reshape(shape)
+            expected = (values @ [[3, 1], [2, 4]] if weighted == 'linear'
+                        else values * [3, 4] if weighted else values + 3) * 2
+            for device in ('CPU:1', 'INTERP'):
+                model.set_device_map({'stem': 'CPU', 'head': device})
+                np.testing.assert_array_equal(model.forward(x=values)['y'], expected)
+                with pytest.raises(ValueError):
+                    model.set_device_map({'stem': 'CPU'})
+                np.testing.assert_array_equal(model.forward(x=values)['y'], expected)
+        finally:
+            model.dispose()
+
+
 @pytest.mark.parametrize('device', ['cpu', 'interp', 'cuda'])
 def test_disposed_model_storage_reclaimed_by_unrelated_readback(device):
     import polygrad as pg

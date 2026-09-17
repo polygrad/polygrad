@@ -856,9 +856,10 @@ async function checkCallSignatureAndSelectedOutputs(pg, Model) {
   assert(invalidParamRejected, 'invalid parameter must not be silently filtered')
 }
 
-async function checkModuleDeviceMap(pg, Model) {
+async function checkModuleDeviceMap(pg, Model, batched = false) {
   const Tensor = pg.Tensor
-  const x = Tensor.empty([2])
+  const x = Tensor.empty(batched ? [2, 2] : [2])
+  const input = new Float32Array(batched ? [1, 2, 3, 4] : [1, 2])
   const webgpu = String(pg.device).toLowerCase() === 'webgpu'
   const w0 = webgpu ? null : new Tensor([3, 4], { dtype: 'float32' })
   const w1 = webgpu ? null : new Tensor([2, 3], { dtype: 'float32' })
@@ -885,7 +886,8 @@ async function checkModuleDeviceMap(pg, Model) {
   }
   const forward = input => webgpu
     ? inst.forwardAsync(input) : inst.forward(input)
-  const expected = webgpu ? [8, 10] : [8, 18]
+  const expected = webgpu ? (batched ? [8, 10, 12, 14] : [8, 10])
+    : (batched ? [8, 18, 12, 24] : [8, 18])
   const present = (value, label) => {
     assert(value != null, `${label} returned null`)
     return value
@@ -899,7 +901,7 @@ async function checkModuleDeviceMap(pg, Model) {
     const irBefore = present(inst.exportIR(), 'initial IR export')
     const weightsBefore = await inst.exportWeights()
     await place({ 'layers.0': first, 'layers.1': second })
-    let result = await forward({ x: new Float32Array([1, 2]) })
+    let result = await forward({ x: input })
     assertClose(present(result.output, 'first placed output'), expected)
     assertClose(present(inst.exportIR(), 'first placed IR export'), irBefore, 0)
     assertOptionalBytesEqual(await inst.exportWeights(), weightsBefore, 'first placed weight export')
@@ -913,7 +915,7 @@ async function checkModuleDeviceMap(pg, Model) {
     assert(rejected, 'expected incomplete device map to fail')
 
     await place({ 'layers.0': second, 'layers.1': first })
-    result = await forward({ x: new Float32Array([1, 2]) })
+    result = await forward({ x: input })
     assertClose(present(result.output, 'replacement placed output'), expected)
     const irAfter = present(inst.exportIR(), 'replacement IR export')
     const weightsAfter = await inst.exportWeights()
@@ -923,8 +925,8 @@ async function checkModuleDeviceMap(pg, Model) {
     const restored = Model.fromIR(irAfter, weightsAfter)
     try {
       const restoredResult = webgpu
-        ? await restored.forwardAsync({ x: new Float32Array([1, 2]) })
-        : await restored.forward({ x: new Float32Array([1, 2]) })
+        ? await restored.forwardAsync({ x: input })
+        : await restored.forward({ x: input })
       assertClose(present(restoredResult.output, 'restored output'), expected)
     } finally {
       if (webgpu) await restored.dispose()
@@ -1518,6 +1520,10 @@ async function runModelRuntimeTests(pg, createRuntime) {
     await checkModuleDeviceMap(pg, Model)
   })
 
+  await test('module device map preserves batched Tensor cuts', async () => {
+    await checkModuleDeviceMap(pg, Model, true)
+  })
+
   await test('model-family constructors are not Model methods', async () => {
     assert(typeof Model.mlp === 'undefined', 'Model.mlp should not exist')
     assert(typeof MLP === 'function', 'pg.models.MLP should exist')
@@ -2063,6 +2069,10 @@ async function runModelSmokeTests(pg, createRuntime) {
 
   await test('webgpu module device map places exact Tensor cuts atomically', async () => {
     await checkModuleDeviceMap(pg, Model)
+  })
+
+  await test('webgpu module device map preserves batched Tensor cuts', async () => {
+    await checkModuleDeviceMap(pg, Model, true)
   })
 
   await test('webgpu mlp forward smoke', async () => {

@@ -304,6 +304,32 @@ TEST(placement, explicit_module_map_inserts_exact_cross_device_cut) {
   PASS();
 }
 
+TEST(placement, explicit_module_map_preserves_reshaped_input_cut) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *input = placement_buffer(ctx, 4, POLY_DEVICE_AUTO);
+  PolyUOp *x = poly_reshape(ctx, input, (int64_t[]){2, 2}, 2);
+  PolyUOp *h = poly_add(ctx, x, poly_const_like(ctx, x, poly_arg_float(3)));
+  PolyUOp *y = poly_mul(ctx, h, poly_const_like(ctx, h, poly_arg_float(2)));
+  PolyUOp *first_inputs[] = {x}, *second_inputs[] = {h};
+  PolyPlaceModule modules[] = {
+      {"stem", h, first_inputs, 1, poly_device_uop(ctx, POLY_DEVICE_CPU)},
+      {"head", y, second_inputs, 1, poly_device_uop(ctx, POLY_DEVICE_INTERP)},
+  };
+  PolyUOp *target = NULL, *placed = NULL;
+  int rc = poly_place_module_map(ctx, &y, 1, &input, 1, modules, 2, &target, &placed);
+  bool correct = rc == 0;
+  if (correct) {
+    PolyUOp *px = poly_reshape(ctx, target, (int64_t[]){2, 2}, 2);
+    PolyUOp *ph = poly_add(ctx, px, poly_const_like(ctx, px, poly_arg_float(3)));
+    PolyUOp *cut = poly_copy_to_device_uop(ctx, ph, modules[1].device);
+    PolyUOp *expected = poly_mul(ctx, cut, poly_const_like(ctx, cut, poly_arg_float(2)));
+    correct = placed == expected;
+  }
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
 TEST(placement, explicit_module_map_rejects_ambiguous_regions_atomically) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
