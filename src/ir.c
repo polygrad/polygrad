@@ -594,6 +594,65 @@ fail:
 
 /* Export */
 
+typedef struct {
+  PolyUOp *uop;
+  uint32_t idx;
+  int64_t identity, canonical_identity;
+  int64_t tag_identity, canonical_tag;
+} NodeMapEntry;
+
+static bool identity_eq(const void *a, const void *b) {
+  return *(const int64_t *)a == *(const int64_t *)b;
+}
+
+static bool export_identities(NodeMapEntry *nodes, int n, bool executable) {
+  PolyMap *ids = poly_map_new(16), *tags = poly_map_new(16);
+  if (!ids || !tags) {
+    if (ids) poly_map_destroy(ids);
+    if (tags) poly_map_destroy(tags);
+    return false;
+  }
+  int64_t next_id = 0, next_tag = 1;
+  for (int i = 0; i < n; i++) {
+    NodeMapEntry *row = &nodes[i];
+    PolyUOp *u = row->uop;
+    row->identity = row->canonical_identity = u->arg.kind == POLY_ARG_INT ? u->arg.i
+                                              : u->arg.kind == POLY_ARG_PARAM && u->arg.param
+                                                  ? u->arg.param->slot
+                                                  : 0;
+    row->tag_identity = row->canonical_tag = u->tag;
+    if (executable) continue;
+    /* Exactly the storage identities remapped on import. Positional PARAMs,
+     * variable slot -1 and non-BUFFER compiler tags retain their semantics.
+     * First occurrence in the ordered graph defines artifact-local numbering;
+     * never mutate live UOps or the context's identity counters. */
+    if ((u->op == POLY_OP_UNIQUE && u->arg.kind == POLY_ARG_INT) ||
+        (u->op == POLY_OP_BUFFER && u->arg.kind == POLY_ARG_PARAM && row->identity >= 0)) {
+      uint32_t hash = poly_arg_hash(poly_arg_int(row->identity));
+      int64_t *found = poly_map_get(ids, hash, &row->identity, identity_eq);
+      if (found)
+        row->canonical_identity = *found;
+      else {
+        row->canonical_identity = next_id++;
+        poly_map_set(ids, hash, &row->identity, &row->canonical_identity, identity_eq);
+      }
+    }
+    if (u->op == POLY_OP_BUFFER && u->tag) {
+      uint32_t hash = poly_arg_hash(poly_arg_int(row->tag_identity));
+      int64_t *found = poly_map_get(tags, hash, &row->tag_identity, identity_eq);
+      if (found)
+        row->canonical_tag = *found;
+      else {
+        row->canonical_tag = next_tag++;
+        poly_map_set(tags, hash, &row->tag_identity, &row->canonical_tag, identity_eq);
+      }
+    }
+  }
+  poly_map_destroy(tags);
+  poly_map_destroy(ids);
+  return true;
+}
+
 static uint8_t *poly_graph_export(const PolyIrSpec *spec, int *out_len, bool executable) {
   if (!out_len) return NULL;
   *out_len = 0;
@@ -697,10 +756,6 @@ static uint8_t *poly_graph_export(const PolyIrSpec *spec, int *out_len, bool exe
 
   /* Build node index map (UOp pointer -> index) */
   /* Use a simple linear scan (good enough for small-medium graphs) */
-  typedef struct {
-    PolyUOp *uop;
-    uint32_t idx;
-  } NodeMapEntry;
   NodeMapEntry *node_map = malloc(n_nodes * sizeof(NodeMapEntry));
   if (!node_map) {
     if (topo_is_heap) free(topo);
@@ -709,6 +764,11 @@ static uint8_t *poly_graph_export(const PolyIrSpec *spec, int *out_len, bool exe
   for (int i = 0; i < n_nodes; i++) {
     node_map[i].uop = topo[i];
     node_map[i].idx = (uint32_t)i;
+  }
+  if (!export_identities(node_map, n_nodes, executable)) {
+    free(node_map);
+    if (topo_is_heap) free(topo);
+    return NULL;
   }
 
 /* Helper: find index of a UOp */
@@ -896,7 +956,7 @@ static uint8_t *poly_graph_export(const PolyIrSpec *spec, int *out_len, bool exe
     PolyUOp *u = topo[i];
     bb_u16(&buf, (uint16_t)u->op);
     bb_u8(&buf, (uint8_t)dtype_to_index(u->dtype));
-    bb_i32(&buf, u->tag);
+    bb_i32(&buf, (int32_t)node_map[i].canonical_tag);
     bb_u16(&buf, u->n_src);
     bb_u8(&buf, (uint8_t)u->arg.kind);
     bb_u8(&buf, executable ? (uint8_t)u->tag_arg.kind : 0);
@@ -919,7 +979,7 @@ static uint8_t *poly_graph_export(const PolyIrSpec *spec, int *out_len, bool exe
     case POLY_ARG_NONE:
       break;
     case POLY_ARG_INT:
-      bb_i64(&buf, u->arg.i);
+      bb_i64(&buf, node_map[i].canonical_identity);
       break;
     case POLY_ARG_BIGINT:
       bb_u8(&buf, u->arg.bigint.sign < 0 ? 1 : 0);
@@ -1094,7 +1154,7 @@ static uint8_t *poly_graph_export(const PolyIrSpec *spec, int *out_len, bool exe
         free(buf.data);
         return NULL;
       }
-      bb_i64(&buf, u->arg.param->slot);
+      bb_i64(&buf, node_map[i].canonical_identity);
       if (u->arg.param->device_is_tuple) {
         bb_u8(&buf, 2);
         bb_u16(&buf, (uint16_t)u->arg.param->n_devices);
@@ -1207,10 +1267,6 @@ typedef struct {
   int64_t old, fresh;
 } ImportIdentity;
 
-static bool import_identity_eq(const void *a, const void *b) {
-  return *(const int64_t *)a == *(const int64_t *)b;
-}
-
 #ifdef POLY_TESTING
 static int ir_import_fail_after = -1;
 void poly_test_ir_import_fail_after(int count) {
@@ -1243,14 +1299,14 @@ static bool import_identity(
     int64_t *fresh
 ) {
   uint32_t hash = poly_arg_hash(poly_arg_int(old));
-  ImportIdentity *row = poly_map_get(map, hash, &old, import_identity_eq);
+  ImportIdentity *row = poly_map_get(map, hash, &old, identity_eq);
   if (!row) {
     if (tag ? (ctx->next_buf_tag <= 0 || ctx->next_buf_tag == INT32_MAX)
             : (ctx->next_unique_id < 0 || ctx->next_unique_id == INT64_MAX))
       return false;
     row = &rows[(*count)++];
     *row = (ImportIdentity){old, tag ? ctx->next_buf_tag++ : poly_ctx_next_unique_id(ctx)};
-    poly_map_set(map, hash, &row->old, row, import_identity_eq);
+    poly_map_set(map, hash, &row->old, row, identity_eq);
   }
   *fresh = row->fresh;
   return true;

@@ -95,6 +95,8 @@ TEST(ir, import_into_freshens_storage_and_retains_aliases) {
   int roundtrip_len = 0;
   uint8_t *roundtrip = poly_ir_export(&a, &roundtrip_len);
   ASSERT_NOT_NULL(roundtrip);
+  ASSERT_INT_EQ(roundtrip_len, len);
+  ASSERT_INT_EQ(memcmp(roundtrip, bytes, (size_t)len), 0);
   PolyIrSpec c = {0};
   ASSERT_INT_EQ(poly_ir_import_into(ctx, roundtrip, roundtrip_len, &c), 0);
   PolyUOp *sc = c.entrypoints[0].sink;
