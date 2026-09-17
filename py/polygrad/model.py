@@ -763,10 +763,7 @@ class Model:
             raise RuntimeError('Model is disposed')
         if not isinstance(device, str):
             return self.set_device_map(device)
-        device_id = _device_id(device)
-        if device_id <= 0:
-            raise ValueError(f'unsupported explicit device: {device!r}')
-        if _get_lib().poly_model_set_device(self._ptr, device_id) != 0:
+        if _get_lib().poly_model_set_device_name(self._ptr, _name_bytes(device)) != 0:
             raise RuntimeError(f'Model placement failed for {device!r}')
         return self
 

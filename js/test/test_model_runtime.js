@@ -900,6 +900,24 @@ async function checkModuleDeviceMap(pg, Model, batched = false) {
   try {
     const irBefore = present(inst.exportIR(), 'initial IR export')
     const weightsBefore = await inst.exportWeights()
+    // Uniform placement accepts the same exact identities as module maps.
+    // CPU ordinals are native-only; never silently alias them to WASM.
+    const uniform = device => webgpu ? inst.placeAsync(device) : inst.place(device)
+    const targets = pg.core === 'native' ? ['CPU:1', 'cpu:2', first] : [first]
+    for (const device of targets) {
+      await uniform(device)
+      assertClose((await forward({ x: input })).output, expected)
+      assertClose(inst.exportIR(), irBefore, 0)
+      assertOptionalBytesEqual(await inst.exportWeights(), weightsBefore, 'uniform weights')
+    }
+    const invalid = ['CUDA:1', 'CPU:bad', 'AUTO']
+    if (pg.core !== 'native') invalid.push('CPU:1')
+    for (const device of invalid) {
+      let rejected = false
+      try { await uniform(device) } catch (_) { rejected = true }
+      assert(rejected, `uniform placement must reject ${device}`)
+      assertClose((await forward({ x: input })).output, expected)
+    }
     await place({ 'layers.0': first, 'layers.1': second })
     let result = await forward({ x: input })
     assertClose(present(result.output, 'first placed output'), expected)

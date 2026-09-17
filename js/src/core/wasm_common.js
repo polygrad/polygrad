@@ -2052,7 +2052,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 92
+  const EXPECTED_ABI = 93
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(
@@ -2526,13 +2526,13 @@ function createWasmCoreFromModule(Module, device) {
     },
 
     setDevice(inst, device) {
-      const id = ffi.poly_device_by_name(device)
-      if (id <= 0) throw new Error(`polygrad: unsupported explicit device '${device}'`)
-      const place = () => Module.ccall('poly_model_set_device', 'number',
-        ['number', 'number'], [inst, id], { async: true })
+      // Match module maps: only the public CPU alias maps to this Wasm core.
+      const name = String(device).toLowerCase() === 'cpu' ? coreDeviceName(DEVICE_IDS.cpu) : device
+      const place = () => Module.ccall('poly_model_set_device_name', 'number',
+        ['number', 'string'], [inst, name], { async: true })
       if (deviceName === 'webgpu')
         return ensureModelDevice(inst).then(place)
-      return Module._poly_model_set_device(inst, id)
+      return Module.ccall('poly_model_set_device_name', 'number', ['number', 'string'], [inst, name])
     },
 
     setDeviceMap(inst, entries) {

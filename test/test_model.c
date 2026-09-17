@@ -5693,6 +5693,48 @@ TEST(model, set_device_roundtrip) {
   PASS();
 }
 
+TEST(model, set_device_name_preserves_exact_identity) {
+  int ir_len = 0;
+  uint8_t *ir = make_add_ir(&ir_len);
+  PolyModel *inst = poly_model_from_ir(ir, ir_len, NULL, 0);
+  ASSERT_NOT_NULL(inst);
+  PolyCtx *ctx = poly_model_ctx(inst);
+  const char *names[] = {"CPU:1", "cpu:2", "CPU:0"};
+  const char *canonical[] = {"CPU:1", "CPU:2", "CPU"};
+  float a[] = {1, 2, 3, 4}, b[] = {10, 20, 30, 40};
+  PolyIOBinding io[] = {
+      POLY_IO_BINDING_ARRAY("a", a, POLY_FLOAT32), POLY_IO_BINDING_ARRAY("b", b, POLY_FLOAT32)};
+  for (int d = 0; d < 3; d++) {
+    ASSERT_INT_EQ(poly_model_set_device_name(inst, names[d]), 0);
+    PolyUOp *buffer = poly_model_get_buffer(inst, "a");
+    PolyUOp *device = poly_uop_device_uop_cached(ctx, buffer, NULL);
+    ASSERT_NOT_NULL(device);
+    ASSERT_STR_EQ(device->arg.str, canonical[d]);
+    PolyUOp *sink = poly_model_get_sink(inst, "forward");
+    ASSERT_INT_EQ(poly_uop_retain(ctx, sink), 0);
+    ASSERT_INT_EQ(poly_model_set_device_name(inst, names[d]), 0);
+    ASSERT_PTR_EQ(poly_model_get_buffer(inst, "a"), buffer);
+    ASSERT_PTR_EQ(poly_model_get_sink(inst, "forward"), sink);
+    const char *invalid[] = {"CUDA:1", "CPU:bad", "AUTO", ""};
+    for (int j = 0; j < 4; j++) {
+      ASSERT_INT_EQ(poly_model_set_device_name(inst, invalid[j]), -1);
+      ASSERT_PTR_EQ(poly_model_get_buffer(inst, "a"), buffer);
+      ASSERT_PTR_EQ(poly_model_get_sink(inst, "forward"), sink);
+    }
+    ASSERT_INT_EQ(poly_model_forward(inst, io, 2), 0);
+    int64_t n;
+    float *out = poly_model_buf_data(inst, 2, &n);
+    ASSERT_NOT_NULL(out);
+    ASSERT_INT_EQ(n, 4);
+    for (int i = 0; i < 4; i++)
+      ASSERT_TRUE(out[i] == a[i] + b[i]);
+    poly_uop_release(ctx, sink);
+  }
+  poly_model_free(inst);
+  free(ir);
+  PASS();
+}
+
 TEST(model, failed_owner_root_preparation_does_not_publish_placement) {
   int ir_len = 0;
   uint8_t *ir = make_add_ir(&ir_len);

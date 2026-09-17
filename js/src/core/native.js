@@ -62,7 +62,7 @@ function createNativeCore(device) {
     if (name) ops[name] = i
   }
 
-  const EXPECTED_ABI = 92
+  const EXPECTED_ABI = 93
   const abi = binding.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(
@@ -206,9 +206,7 @@ function createNativeCore(device) {
       )
     },
     setDevice(inst, device) {
-      const id = binding.poly_device_by_name(String(device).toLowerCase())
-      if (id <= 0) throw new Error(`polygrad: unsupported explicit device '${device}'`)
-      return binding.poly_model_set_device(inst, id)
+      return binding.poly_model_set_device_name(inst, String(device))
     },
     loadHF(configBytes, weightFilesBytes, maxBatch, maxSeqLen) {
       return binding.poly_hf_load_into(configBytes, weightFilesBytes,

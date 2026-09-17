@@ -5538,6 +5538,24 @@ static napi_value napi_poly_model_set_device(napi_env env, napi_callback_info in
   return result;
 }
 
+static napi_value napi_poly_model_set_device_name(napi_env env, napi_callback_info info) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 2) {
+    napi_throw_error(env, NULL, "poly_model_set_device_name expects 2 args");
+    return NULL;
+  }
+  PolyModel *inst = get_external(env, argv[0]);
+  char *device = read_utf8_arg(env, argv[1], NULL);
+  if (!device) return NULL;
+  int rc = poly_model_set_device_name(inst, device);
+  free(device);
+  napi_value result;
+  NAPI_CALL(env, napi_create_int32(env, rc, &result));
+  return result;
+}
+
 static napi_value napi_poly_model_define_module_arrays(napi_env env, napi_callback_info info) {
   napi_value argv[5];
   size_t argc = 5;
@@ -7453,6 +7471,7 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_model_from_binding_arrays", napi_poly_model_from_binding_arrays),
       DECLARE_NAPI_METHOD("poly_model_free", napi_poly_model_free),
       DECLARE_NAPI_METHOD("poly_model_set_device", napi_poly_model_set_device),
+      DECLARE_NAPI_METHOD("poly_model_set_device_name", napi_poly_model_set_device_name),
       DECLARE_NAPI_METHOD("poly_model_define_module_arrays", napi_poly_model_define_module_arrays),
       DECLARE_NAPI_METHOD(
           "poly_model_set_device_map_arrays", napi_poly_model_set_device_map_arrays

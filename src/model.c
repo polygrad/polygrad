@@ -327,7 +327,7 @@ struct PolyModel {
 };
 
 static void runtime_modules_free(RuntimeModule *modules, int n_modules);
-static int model_place_uniform_device(PolyModel *inst, PolyDevice device, bool set_preferred);
+static int model_place_uniform_device(PolyModel *inst, PolyUOp *device, bool set_preferred);
 static int build_trainable_param_indices(const PolyModel *inst, int **indices_out, int *count_out);
 static PolyUOp *entrypoint_store_value(PolyUOp *sink, PolyUOp *buffer);
 
@@ -2722,7 +2722,7 @@ static PolyModel *model_import_ir(
   /* Cross the explicit named-value binding and placement boundary before
    * exposing a runnable Model; default Tensor realization remains
    * placement-free. */
-  if (model_place_uniform_device(inst, device, false) != 0) {
+  if (model_place_uniform_device(inst, poly_device_uop(inst->ctx, device), false) != 0) {
     fprintf(stderr, "poly_model_from_ir: default placement failed\n");
     poly_model_free(inst);
     return NULL;
@@ -3906,11 +3906,12 @@ fail:
   return -1;
 }
 
-static PolyUOp *model_binding_on_device(PolyCtx *ctx, PolyUOp *logical, PolyDevice device) {
-  if (!ctx || !model_is_portable_buffer(logical) || !poly_device_can_execute(device)) return NULL;
+static PolyUOp *model_binding_on_device_uop(PolyCtx *ctx, PolyUOp *logical, PolyUOp *device_uop) {
+  if (!ctx || !model_is_portable_buffer(logical) ||
+      !poly_device_can_execute(poly_device_from_device_uop(device_uop)))
+    return NULL;
   /* Polygrad's portable binding owns the slot. Current UOp.new_buffer creates
    * the physical one-source BUFFER (uop/ops.py:811-817). */
-  PolyUOp *device_uop = poly_device_uop(ctx, device);
   int64_t size = logical->arg.kind == POLY_ARG_INT ? logical->arg.i : -1;
   int64_t slot = logical->src[0]->arg.kind == POLY_ARG_INT ? logical->src[0]->arg.i : -1;
   PolyUOp *physical =
@@ -3922,6 +3923,10 @@ static PolyUOp *model_binding_on_device(PolyCtx *ctx, PolyUOp *logical, PolyDevi
                    physical->arg, logical->tag, logical->tag_arg
                )
              : physical;
+}
+
+static PolyUOp *model_binding_on_device(PolyCtx *ctx, PolyUOp *logical, PolyDevice device) {
+  return model_binding_on_device_uop(ctx, logical, poly_device_uop(ctx, device));
 }
 
 static void model_discard_candidate_residencies(
@@ -4046,7 +4051,8 @@ cleanup:
   return rc;
 }
 
-static int model_place_uniform_device(PolyModel *inst, PolyDevice device, bool set_preferred) {
+static int model_place_uniform_device(PolyModel *inst, PolyUOp *device_uop, bool set_preferred) {
+  PolyDevice device = poly_device_from_device_uop(device_uop);
   if (!inst || !inst->ctx || inst->n_bufs <= 0 || inst->n_entrypoints <= 0 ||
       !poly_device_can_execute(device))
     return -1;
@@ -4068,7 +4074,7 @@ static int model_place_uniform_device(PolyModel *inst, PolyDevice device, bool s
     goto cleanup;
   for (int i = 0; i < inst->n_bufs; i++) {
     logical_bindings[i] = inst->bufs[i].logical_buffer;
-    target_bindings[i] = model_binding_on_device(inst->ctx, logical_bindings[i], device);
+    target_bindings[i] = model_binding_on_device_uop(inst->ctx, logical_bindings[i], device_uop);
     if (!target_bindings[i]) goto cleanup;
   }
 
@@ -4194,14 +4200,10 @@ int poly_model_set_device_map_arrays(
   return rc;
 }
 
-int poly_model_set_device(PolyModel *inst, PolyDevice device) {
+static int model_set_device_uop(PolyModel *inst, PolyUOp *device) {
   if (!inst || inst->stage != POLY_MODEL_BUILT || !inst->has_portable_source) return -1;
-
-  /* Use the same validated default as Tensor construction. Device-name parsing
-   * here would mistake a DEV renderer suffix for an ordinal and bypass policy. */
-  PolyDevice resolved = device;
-  if (resolved == POLY_DEVICE_AUTO) resolved = poly_ctx_get_preferred_device(inst->ctx);
-  if (resolved == POLY_DEVICE_AUTO) resolved = poly_device_default();
+  if (!device || !poly_uop_explicit_devices_supported(inst->ctx, device)) return -1;
+  PolyDevice resolved = poly_device_from_device_uop(device);
 
   /* Validate: backend must exist for this build */
   const PolyBackendDesc *backend = poly_backend_get(resolved);
@@ -4223,11 +4225,25 @@ int poly_model_set_device(PolyModel *inst, PolyDevice device) {
   }
 #endif
 
-  if (model_place_uniform_device(inst, resolved, true) != 0) {
+  if (model_place_uniform_device(inst, device, true) != 0) {
     fprintf(stderr, "poly_model_set_device: placement failed for device %d\n", resolved);
     return -1;
   }
   return 0;
+}
+
+int poly_model_set_device(PolyModel *inst, PolyDevice device) {
+  if (!inst || !inst->ctx) return -1;
+  /* AUTO uses the validated Tensor default, not a parsed environment identity. */
+  if (device == POLY_DEVICE_AUTO) device = poly_ctx_get_preferred_device(inst->ctx);
+  if (device == POLY_DEVICE_AUTO) device = poly_device_default();
+  return model_set_device_uop(inst, poly_device_uop(inst->ctx, device));
+}
+
+int poly_model_set_device_name(PolyModel *inst, const char *device) {
+  if (!inst || !inst->ctx || !device || !device[0]) return -1;
+  /* Match module-map identity/admission; never erase ordinals into backend IDs. */
+  return model_set_device_uop(inst, poly_device_uop_from_name(inst->ctx, device));
 }
 
 /* Generic entrypoint execution */

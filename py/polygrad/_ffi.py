@@ -16,7 +16,7 @@ import sys
 _lib = None
 OPS = {}
 _has_cuda_ffi = False
-POLYGRAD_ABI_VERSION = 92
+POLYGRAD_ABI_VERSION = 93
 
 # --- Opaque pointer type (always available) ---
 _ptr = ctypes.c_void_p
@@ -1368,6 +1368,8 @@ def _declare_signatures(lib):
     lib.poly_model_set_device_map_arrays.restype = ctypes.c_int
     lib.poly_model_set_device.restype = ctypes.c_int
     lib.poly_model_set_device.argtypes = [_ptr, ctypes.c_int]
+    lib.poly_model_set_device_name.restype = ctypes.c_int
+    lib.poly_model_set_device_name.argtypes = [_ptr, ctypes.c_char_p]
     lib.poly_model_set_device_map_arrays.argtypes = [
         _ptr,
         ctypes.POINTER(ctypes.c_char_p),

@@ -7,6 +7,27 @@ from polygrad.models import MLP, Graph, Sequential
 from polygrad.tensor import Tensor
 
 
+def test_uniform_placement_accepts_exact_cpu_identity():
+    import polygrad as pg
+    with pg.create(device='cpu', logical='always') as rt:
+        x = rt.Tensor.empty(2)
+        model = rt.Model(lambda x: {'y': x + 1}, inputs={'x': x})
+        try:
+            portable = model.export_ir()
+            for device in ('CPU:1', 'cpu:2', 'CPU', 'INTERP'):
+                model.place(device)
+                np.testing.assert_array_equal(
+                    model.forward(x=np.array([2, 3], dtype=np.float32))['y'], [3, 4])
+                assert model.export_ir() == portable
+            for device in ('CUDA:1', 'CPU:bad', 'AUTO'):
+                with pytest.raises((ValueError, RuntimeError)):
+                    model.place(device)
+                np.testing.assert_array_equal(
+                    model.forward(x=np.array([2, 3], dtype=np.float32))['y'], [3, 4])
+        finally:
+            model.dispose()
+
+
 @pytest.mark.parametrize('shape', [(2,), (2, 2)])
 @pytest.mark.parametrize('weighted', [False, True, 'linear'])
 def test_module_device_map_preserves_shaped_cuts(shape, weighted):

@@ -333,6 +333,9 @@ uint8_t *poly_model_save_bundle_ex(PolyModel *inst, int *out_len, uint32_t weigh
  * roots and migrate bound values through ctx->buffers. Returns 0 on success,
  * <0 if placement fails or the device is unsupported/unavailable. */
 int poly_model_set_device(PolyModel *inst, PolyDevice device);
+/* Exact DEVICE identity, using the same admission as module maps. Unlike the
+ * enum setter this accepts CPU ordinals; AUTO is not an explicit identity. */
+int poly_model_set_device_name(PolyModel *inst, const char *device);
 
 /* Compile retained logical roots under a complete explicit module/device map,
  * migrate named state, then atomically publish the replacement physical
