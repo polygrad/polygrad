@@ -379,6 +379,10 @@ reapply the optimizer configuration after loading.
 
 For C-built families and `models.Sequential` / `models.Graph`, see
 [model configuration](https://github.com/polygrad/polygrad#configuration-driven-model-families).
+Their configurations support typed inputs, one bounded leading batch dimension,
+and shared embedding, normalization, RoPE and attention components. For example,
+`{dtype:'int32',shape:[{name:'batch',min:1,max:32},16]}` declares token batches of
+1 to 32 rows. Pass `Int32Array` token data; the signature determines its batch size.
 
 `models.GPT2` and `models.Llama` construct checkpoint-required models. Load
 weights or explicitly write every parameter before calling or exporting them.

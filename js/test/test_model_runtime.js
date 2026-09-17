@@ -1,6 +1,46 @@
 'use strict'
 
 const llamaFixture = require('../../test/fixtures/llama.json')
+const componentFixture = require('../../test/fixtures/model_components.json')
+const componentOracle = require('../../test/fixtures/model_components_expected.json')
+
+async function checkBoundedComponents(pg) {
+  const model = await pg.models.GraphAsync(componentFixture)
+  let restored
+  try {
+    await model.writeBufferAsync('nodes.embedding.weight', new Float32Array(componentOracle.table.flat()))
+    await model.writeBufferAsync('nodes.head.weight', new Float32Array(componentOracle.linear.flat()))
+    for (const batch of [3, 1]) {
+      const tokens = Int32Array.from({length:batch*3}, (_,i)=>i%4)
+      const result = await model.forwardAsync({tokens})
+      const expected = componentOracle.cases.find(c=>c.batch===batch)
+      assertClose(result.prediction, expected.prediction.flat(2), 2e-5)
+      assertClose(result.mean, [expected.mean], 2e-5)
+    }
+    const bytes = await model.saveAsync()
+    restored = pg.Model.load(bytes)
+    const saved = await restored.saveAsync()
+    assert(saved.length===bytes.length && saved.every((b,i)=>b===bytes[i]), 'component round trip is not canonical')
+    assertClose((await restored.forwardAsync({tokens:new Int32Array([0,1,2])})).prediction,
+      componentOracle.cases[0].prediction.flat(2), 2e-5)
+    let error
+    try { await model.forwardAsync({tokens:new Int32Array(12)}) } catch (e) { error=e }
+    assert(error && /bound|extent/.test(error.message), 'out-of-bound component input was accepted')
+  } finally {
+    if (restored) await restored.dispose()
+    await model.dispose()
+  }
+  const mean = await pg.models.SequentialAsync({
+    input:{name:'x',dtype:'int32',shape:[{name:'n',min:1,max:4},2]},
+    layers:[{name:'avg',type:'mean'}],output:'y'
+  })
+  try {
+    for (const rows of [4,1,3]) {
+      const x = Int32Array.from({length:rows*2},(_,i)=>i)
+      assertClose((await mean.forwardAsync({x})).y, [(rows*2-1)/2], 1e-6)
+    }
+  } finally { await mean.dispose() }
+}
 
 async function checkModelContractErrors(pg) {
   const model = pg.models.MLP({layers:[2,1]})
@@ -1337,6 +1377,7 @@ async function runModelRuntimeTests(pg, createRuntime) {
   await test('Model quantized weights match pinned GGUF bit planes', () => checkQuantizedModelWeights(pg))
 
   await test('Model composition factories share C construction', () => checkCompositionFactories(pg))
+  await test('Model bounded components match pinned Tensor programs', () => checkBoundedComponents(pg))
   await test('Model composition catalogue and named target objective', () => checkCompositionCatalogue(pg))
   await test('Model tied Adam placement freeze and checkpoint', () => checkTiedAdamCheckpoint(pg))
   await test('Model constructor collects object state', () => checkModelConstructor(pg, Model))
@@ -2101,6 +2142,7 @@ async function runModelSmokeTests(pg, createRuntime) {
   await test('Model stateful capture owns resumable RNG', () => checkModelCaptureRng(pg))
   await test('Model stateful capture restores failures and rejects async execution', () => checkModelCaptureFailure(pg))
   await test('Model composition factories share C construction', () => checkCompositionFactories(pg))
+  await test('Model bounded components match pinned Tensor programs', () => checkBoundedComponents(pg))
   await test('Model checkpoint replacement uses queued readback', () => checkModelCheckpointReplacement(pg))
   await test('Model composition catalogue and named target objective', () => checkCompositionCatalogue(pg))
   await test('Model tied Adam placement freeze and checkpoint', () => checkTiedAdamCheckpoint(pg))

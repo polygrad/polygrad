@@ -29,9 +29,10 @@ typedef struct {
 
 typedef struct {
   char name[DEF_NAME];
+  const char *kind;
   PolyTensor *weight, *bias;
   int64_t in_features, out_features;
-} DefLinear;
+} DefLayer;
 
 typedef struct {
   PolyCtx *ctx;
@@ -40,11 +41,14 @@ typedef struct {
   const char *family;
   cJSON *modules;
   DefValue values[DEF_NODES + DEF_IO];
-  int n_values, expanded, n_handles, n_linear;
+  int n_values, expanded, n_handles, n_layers;
   int64_t storage_elements;
   uint64_t seed;
   PolyTensor *handles[DEF_HANDLES];
-  DefLinear linear[DEF_NODES];
+  DefLayer layers[DEF_NODES];
+  PolyUOp *batch;
+  const char *batch_name;
+  int64_t batch_min, batch_max;
   const cJSON *used_modules[DEF_NODES];
   int n_used_modules;
 } Definition;
@@ -124,15 +128,51 @@ static PolyTensor *own(Definition *d, PolyTensor *t, const char *path) {
   return t;
 }
 
-static bool shape(Definition *d, const cJSON *spec, int64_t *dims, int *ndim, const char *path) {
+static bool shape(
+    Definition *d,
+    const cJSON *spec,
+    PolyUOp **dims,
+    int64_t *max_dims,
+    int *ndim,
+    const char *path
+) {
   if (!cJSON_IsArray(spec) || (*ndim = cJSON_GetArraySize(spec)) > 8)
     return def_error(d, path, "expected shape array of rank 0..8");
   int64_t elements = 1;
   for (int i = 0; i < *ndim; i++) {
-    if (!integer(d, cJSON_GetArrayItem(spec, i), 1, DEF_ELEMENTS, &dims[i], path)) return false;
-    if (elements > DEF_ELEMENTS / dims[i])
+    const cJSON *dim = cJSON_GetArrayItem(spec, i);
+    if (cJSON_IsObject(dim)) {
+      int64_t lo, hi;
+      const cJSON *name = field(dim, "name");
+      if (i != 0) return def_error(d, path, "only the leading dimension may be bounded");
+      if (!fields(d, dim, "|name||min||max|", path)) return false;
+      if (!cJSON_IsString(name)) return def_error(d, path, "bounded dimension requires a name");
+      if (!name_ok(d, name->valuestring, path) ||
+          !integer(d, field(dim, "min"), 1, DEF_ELEMENTS, &lo, path) ||
+          !integer(d, field(dim, "max"), lo, DEF_ELEMENTS, &hi, path))
+        return false;
+      if (d->batch &&
+          (strcmp(d->batch_name, name->valuestring) || d->batch_min != lo || d->batch_max != hi))
+        return def_error(d, path, "bounded dimensions must use the same batch name and bounds");
+      if (!d->batch) {
+        d->batch_name = name->valuestring;
+        d->batch_min = lo;
+        d->batch_max = hi;
+        PolyUOp *var = poly_uop_variable(
+            d->ctx, d->batch_name, poly_arg_int(lo), poly_arg_int(hi), POLY_WEAKINT, 1, false
+        );
+        d->batch = var ? poly_uop_bind(d->ctx, var, hi) : NULL;
+        if (!d->batch) return def_error(d, path, "batch variable construction failed");
+      }
+      dims[i] = d->batch;
+      max_dims[i] = hi;
+    } else {
+      if (!integer(d, dim, 1, DEF_ELEMENTS, &max_dims[i], path)) return false;
+      dims[i] = poly_uop0(d->ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(max_dims[i]));
+    }
+    if (elements > DEF_ELEMENTS / max_dims[i])
       return def_error(d, path, "shape exceeds element budget");
-    elements *= dims[i];
+    elements *= max_dims[i];
   }
   return true;
 }
@@ -142,7 +182,7 @@ static bool tensor_shape(Definition *d, PolyTensor *t, int64_t *dims, int *ndim,
   *ndim = poly_uop_ndim(d->ctx, u);
   const int64_t *s = poly_uop_max_shape_dims(d->ctx, u);
   if (*ndim < 0 || *ndim > 8 || (*ndim && !s))
-    return def_error(d, path, "expected concrete rank <= 8");
+    return def_error(d, path, "expected bounded shape of rank <= 8");
   int64_t elements = 1;
   for (int i = 0; i < *ndim; i++) {
     if (s[i] < 1 || elements > DEF_ELEMENTS / s[i])
@@ -150,6 +190,13 @@ static bool tensor_shape(Definition *d, PolyTensor *t, int64_t *dims, int *ndim,
     dims[i] = s[i];
     elements *= s[i];
   }
+  return true;
+}
+
+static bool dtype(Definition *d, const cJSON *v, PolyDType *dt, const char *path) {
+  if (!cJSON_IsString(v) || !poly_dtype_by_id(poly_dtype_id_by_name(v->valuestring), dt) ||
+      poly_dtype_is_weak(*dt) || poly_dtype_itemsize(*dt) == 0)
+    return def_error(d, path, "expected a concrete scalar dtype");
   return true;
 }
 
@@ -296,10 +343,27 @@ static PolyTensor *apply(
     allowed = "|name||inputs||type||count||body|";
   else if (!strcmp(kind, "reshape"))
     allowed = "|name||inputs||type||shape|";
+  else if (!strcmp(kind, "permute"))
+    allowed = "|name||inputs||type||axes|";
+  else if (!strcmp(kind, "cast"))
+    allowed = "|name||inputs||type||dtype|";
+  else if (!strcmp(kind, "embedding"))
+    allowed = "|name||inputs||type||vocab_size||embed_dim|";
+  else if (!strcmp(kind, "layernorm") || !strcmp(kind, "rmsnorm"))
+    allowed = "|name||inputs||type||eps||affine|";
+  else if (!strcmp(kind, "rope"))
+    allowed = "|name||inputs||type||theta|";
+  else if (!strcmp(kind, "attention"))
+    allowed = "|name||inputs||type||is_causal||enable_gqa|";
   if (!fields(d, spec, allowed, path)) return NULL;
   bool binary =
       !strcmp(kind, "add") || !strcmp(kind, "sub") || !strcmp(kind, "mul") || !strcmp(kind, "div");
-  if (n != (binary ? 2 : 1)) {
+  bool attention = !strcmp(kind, "attention");
+  if (attention ? (n != 3 && n != 4) : n != (binary ? 2 : 1)) {
+    if (attention) {
+      def_error(d, path, "expected query, key, value and optional mask inputs");
+      return NULL;
+    }
     def_error(d, path, "expected %d inputs, received %d", binary ? 2 : 1, n);
     return NULL;
   }
@@ -307,6 +371,15 @@ static PolyTensor *apply(
   int64_t dims[8];
   int rank;
   if (!tensor_shape(d, x, dims, &rank, path)) return NULL;
+  PolyUOp *xu = poly_tensor_uop_physical(x);
+  bool linear = !strcmp(kind, "linear"), embedding = !strcmp(kind, "embedding");
+  bool norm = !strcmp(kind, "layernorm") || !strcmp(kind, "rmsnorm");
+  bool rope = !strcmp(kind, "rope");
+  if ((linear || norm) &&
+      (rank < 1 || poly_uop_shape_dim(d->ctx, xu, rank - 1)->op != POLY_OP_CONST)) {
+    def_error(d, path, "feature dimension must be fixed");
+    return NULL;
+  }
   if (!strcmp(kind, "repeat")) {
     int64_t count;
     const cJSON *body = field(spec, "body");
@@ -330,7 +403,97 @@ static PolyTensor *apply(
     }
     return x;
   }
-  if (!strcmp(kind, "linear")) {
+  if (linear || embedding || norm || rope) {
+    DefLayer *layer = NULL;
+    for (int i = 0; i < d->n_layers; i++)
+      if (!strcmp(d->layers[i].name, path)) layer = &d->layers[i];
+    if (!linear) {
+      int64_t in = rank ? dims[rank - 1] : 0, width = in;
+      double eps = !strcmp(kind, "rmsnorm") ? 1e-6 : 1e-5, theta = 10000;
+      bool use_bias = !strcmp(kind, "layernorm"), affine = true;
+      if (embedding) {
+        if (!poly_dtype_is_int(xu->dtype)) {
+          def_error(d, path, "embedding requires integer indices");
+          return NULL;
+        }
+        if (!integer(d, field(spec, "vocab_size"), 1, DEF_ELEMENTS, &in, path) ||
+            !integer(d, field(spec, "embed_dim"), 1, DEF_ELEMENTS, &width, path))
+          return NULL;
+        /* Embedding's one-hot WHERE has the vocabulary axis before reduction. */
+        int64_t work = in * width;
+        for (int i = 0; i < rank; i++) {
+          if (work > DEF_ELEMENTS / dims[i]) {
+            def_error(d, path, "embedding exceeds element budget");
+            return NULL;
+          }
+          work *= dims[i];
+        }
+      } else if (norm) {
+        const cJSON *e = field(spec, "eps"), *a = field(spec, "affine");
+        if ((e && (!cJSON_IsNumber(e) || !isfinite(e->valuedouble) || e->valuedouble <= 0)) ||
+            (a && !cJSON_IsBool(a))) {
+          def_error(d, path, "expected positive finite eps and boolean affine");
+          return NULL;
+        }
+        if (e) eps = e->valuedouble;
+        affine = !a || cJSON_IsTrue(a);
+      } else {
+        const cJSON *t = field(spec, "theta");
+        if (rank != 4 || dims[3] % 2 || poly_uop_shape_dim(d->ctx, xu, 2)->op != POLY_OP_CONST ||
+            poly_uop_shape_dim(d->ctx, xu, 3)->op != POLY_OP_CONST ||
+            (t && (!cJSON_IsNumber(t) || !isfinite(t->valuedouble) || t->valuedouble < 1))) {
+          def_error(
+              d, path, "rope needs [batch,heads,fixed_sequence,even_head_dim] and theta >= 1"
+          );
+          return NULL;
+        }
+        in = dims[2];
+        width = dims[3];
+        if (t) theta = t->valuedouble;
+      }
+      if (layer && (layer->in_features != in || layer->out_features != width)) {
+        def_error(d, path, "shared %s dimensions do not match the first call", kind);
+        return NULL;
+      }
+      if (!layer && affine) {
+        int64_t elements = norm ? width * (use_bias ? 2 : 1) : in * width;
+        if (d->n_layers == DEF_NODES || !reserve_storage(d, elements, path)) return NULL;
+        layer = &d->layers[d->n_layers++];
+        snprintf(layer->name, sizeof(layer->name), "%s", path);
+        layer->kind = kind;
+        layer->in_features = in;
+        layer->out_features = width;
+        PolyTensor *w = NULL, *b = NULL;
+        if (embedding)
+          w = poly_model_embedding_parameters(d->model, path, (int)in, (int)width);
+        else if (norm) {
+          if (poly_model_norm_parameters(d->model, path, (int)width, use_bias, &w, &b)) return NULL;
+        } else {
+          char name[DEF_NAME];
+          PolyModelRoPEConfig config = {
+              .length = (int)in, .dim = (int)width, .theta = theta, .factor = 1};
+          if (!path_join(d, name, path, "freqs_cos")) return NULL;
+          w = poly_model_rope_frequencies(d->model, name, &config, false);
+          if (!path_join(d, name, path, "freqs_sin")) {
+            poly_tensor_release(w);
+            return NULL;
+          }
+          b = poly_model_rope_frequencies(d->model, name, &config, true);
+        }
+        layer->weight = own(d, w, path);
+        if (b) layer->bias = own(d, b, path);
+        if (!layer->weight || ((use_bias || rope) && !layer->bias)) return NULL;
+      }
+      PolyTensor *w = layer ? layer->weight : NULL, *b = layer ? layer->bias : NULL;
+      out = embedding                  ? poly_tensor_embedding_apply(d->ctx, x, w)
+            : rope                     ? poly_tensor_rope(d->ctx, x, w, b)
+            : !strcmp(kind, "rmsnorm") ? poly_tensor_rmsnorm_apply(d->ctx, x, w, eps)
+                                       : poly_tensor_layernorm_apply(d->ctx, x, w, b, -1, eps);
+      out = own(d, out, path);
+      int64_t result[8];
+      int result_rank;
+      return out && tensor_shape(d, out, result, &result_rank, path) ? out : NULL;
+    }
     int64_t width;
     const cJSON *bias = field(spec, "bias"), *act = field(spec, "activation");
     if (!integer(d, field(spec, "out_features"), 1, DEF_ELEMENTS, &width, path)) return NULL;
@@ -346,9 +509,6 @@ static PolyTensor *apply(
       }
       work *= dims[i];
     }
-    DefLinear *layer = NULL;
-    for (int i = 0; i < d->n_linear; i++)
-      if (!strcmp(d->linear[i].name, path)) layer = &d->linear[i];
     if (layer && layer->in_features != fan_in) {
       def_error(
           d, path, "shared linear expected %lld input features, received %lld",
@@ -359,11 +519,12 @@ static PolyTensor *apply(
     if (!layer) {
       bool use_bias = !bias || cJSON_IsTrue(bias);
       int64_t elements = width * fan_in + (use_bias ? width : 0);
-      if (d->n_linear == DEF_NODES || !reserve_storage(d, elements, path)) {
+      if (d->n_layers == DEF_NODES || !reserve_storage(d, elements, path)) {
         def_error(d, path, "parameter budget exceeded");
         return NULL;
       }
-      layer = &d->linear[d->n_linear++];
+      layer = &d->layers[d->n_layers++];
+      layer->kind = kind;
       snprintf(layer->name, sizeof(layer->name), "%s", path);
       layer->in_features = fan_in;
       layer->out_features = width;
@@ -382,25 +543,10 @@ static PolyTensor *apply(
     return out ? activation(d, out, act ? act->valuestring : "none", path) : NULL;
   }
   if (binary) {
-    int64_t rhs[8];
-    int rr;
-    if (!tensor_shape(d, inputs[1], rhs, &rr, path)) return NULL;
-    int br = rank > rr ? rank : rr;
-    int64_t elements = 1;
-    for (int i = 1; i <= br; i++) {
-      int64_t a = i <= rank ? dims[rank - i] : 1, b = i <= rr ? rhs[rr - i] : 1;
-      if (a != b && a != 1 && b != 1) {
-        def_error(
-            d, path, "incompatible broadcast dimensions %lld and %lld", (long long)a, (long long)b
-        );
-        return NULL;
-      }
-      int64_t size = a > b ? a : b;
-      if (elements > DEF_ELEMENTS / size) {
-        def_error(d, path, "broadcast exceeds element budget");
-        return NULL;
-      }
-      elements *= size;
+    PolyUOp *sources[] = {xu, poly_tensor_uop_physical(inputs[1])}, *broadcast[8];
+    if (poly_broadcast_shape(d->ctx, sources, 2, broadcast, 8) < 0) {
+      def_error(d, path, "incompatible broadcast dimensions");
+      return NULL;
     }
     if (!strcmp(kind, "div"))
       out = poly_tensor_div(d->ctx, x, inputs[1], 0);
@@ -411,29 +557,75 @@ static PolyTensor *apply(
       out =
           poly_tensor_alu2(d->ctx, !strcmp(kind, "add") ? POLY_OP_ADD : POLY_OP_MUL, x, inputs[1]);
   } else if (!strcmp(kind, "sum") || !strcmp(kind, "mean")) {
-    int64_t axes[8], elements = 1;
+    int64_t axes[8];
     for (int i = 0; i < rank; i++) {
       axes[i] = i;
-      elements *= dims[i];
     }
-    out = own(d, poly_tensor_sum(d->ctx, x, axes, rank, false), path);
-    if (!out || !strcmp(kind, "sum")) return out;
-    PolyTensor *scale =
-        own(d, poly_tensor_const_like_float(d->ctx, out, 1.0 / (double)elements), path);
-    return scale ? own(d, poly_tensor_alu2(d->ctx, POLY_OP_MUL, out, scale), path) : NULL;
+    out = !strcmp(kind, "sum") ? poly_tensor_sum(d->ctx, x, axes, rank, false)
+                               : poly_tensor_mean(d->ctx, x, axes, rank, false);
   } else if (!strcmp(kind, "reshape")) {
-    int64_t dest[8], before = 1, after = 1;
+    int64_t maximum[8];
+    PolyUOp *dest[8];
     int dr;
-    if (!shape(d, field(spec, "shape"), dest, &dr, path)) return NULL;
-    for (int i = 0; i < rank; i++)
-      before *= dims[i];
-    for (int i = 0; i < dr; i++)
-      after *= dest[i];
-    if (before != after) {
-      def_error(d, path, "reshape changes element count");
+    if (!shape(d, field(spec, "shape"), dest, maximum, &dr, path)) return NULL;
+    out = poly_tensor_reshape_uop(d->ctx, x, dest, dr);
+    if (!out) def_error(d, path, "reshape changes symbolic element count");
+  } else if (!strcmp(kind, "permute")) {
+    const cJSON *axes = field(spec, "axes");
+    int64_t perm[8];
+    bool seen[8] = {0};
+    if (!cJSON_IsArray(axes) || cJSON_GetArraySize(axes) != rank) {
+      def_error(d, path, "permute needs one axis per dimension");
       return NULL;
     }
-    out = poly_tensor_reshape(d->ctx, x, dest, dr);
+    for (int i = 0; i < rank; i++) {
+      if (!integer(d, cJSON_GetArrayItem(axes, i), 0, rank - 1, &perm[i], path)) return NULL;
+      if (seen[perm[i]]) {
+        def_error(d, path, "duplicate permutation axis");
+        return NULL;
+      }
+      seen[perm[i]] = true;
+    }
+    out = poly_tensor_permute(d->ctx, x, perm, rank);
+  } else if (!strcmp(kind, "cast")) {
+    PolyDType dt;
+    if (!dtype(d, field(spec, "dtype"), &dt, path)) return NULL;
+    out =
+        poly_tensor_cast_by_id(d->ctx, x, poly_dtype_id_by_name(field(spec, "dtype")->valuestring));
+  } else if (attention) {
+    const cJSON *causal = field(spec, "is_causal"), *gqa = field(spec, "enable_gqa");
+    if ((causal && !cJSON_IsBool(causal)) || (gqa && !cJSON_IsBool(gqa))) {
+      def_error(d, path, "attention flags must be boolean");
+      return NULL;
+    }
+    int64_t kdims[8];
+    int krank;
+    if (!tensor_shape(d, inputs[1], kdims, &krank, path)) return NULL;
+    if (rank < 2 || krank < 2) {
+      def_error(d, path, "attention requires rank >= 2");
+      return NULL;
+    }
+    /* Budget the attention scores, not just the smaller projected output. */
+    int64_t work = dims[rank - 2] * kdims[krank - 2];
+    int prefix = rank > krank ? rank - 2 : krank - 2;
+    for (int i = 0; i < prefix; i++) {
+      int qi = rank - 3 - i, ki = krank - 3 - i;
+      int64_t qdim = qi >= 0 ? dims[qi] : 1, kdim = ki >= 0 ? kdims[ki] : 1;
+      int64_t dim = qdim > kdim ? qdim : kdim;
+      if (work > DEF_ELEMENTS / dim) {
+        def_error(d, path, "attention exceeds element budget");
+        return NULL;
+      }
+      work *= dim;
+    }
+    if (work > DEF_ELEMENTS) {
+      def_error(d, path, "attention exceeds element budget");
+      return NULL;
+    }
+    out = poly_tensor_sdpa(
+        d->ctx, x, inputs[1], inputs[2], n == 4 ? inputs[3] : NULL, 0, cJSON_IsTrue(causal),
+        cJSON_IsTrue(gqa), 0
+    );
   } else if (!strcmp(kind, "identity"))
     return x;
   else if (!strcmp(kind, "none")) {
@@ -447,7 +639,10 @@ static PolyTensor *apply(
     out = poly_tensor_log(d->ctx, x);
   else
     return activation(d, x, kind, path);
-  return own(d, out, path);
+  out = own(d, out, path);
+  int64_t result[8];
+  int result_rank;
+  return out && tensor_shape(d, out, result, &result_rank, path) ? out : NULL;
 }
 
 static bool input(Definition *d, const char *name, const cJSON *spec, bool sequential) {
@@ -455,23 +650,24 @@ static bool input(Definition *d, const char *name, const cJSON *spec, bool seque
   if (!name_ok(d, name, "inputs") || !path_join(d, path, "inputs", name)) return false;
   if (!fields(d, spec, sequential ? "|name||shape||dtype|" : "|shape||dtype||role|", path))
     return false;
-  const cJSON *dtype = field(spec, "dtype"), *role = field(spec, "role");
-  if (!cJSON_IsString(dtype) || strcmp(dtype->valuestring, "float32"))
-    return def_error(d, path, "only explicit float32 is supported in modeldef@1");
+  const cJSON *role = field(spec, "role");
+  PolyDType dt;
+  if (!dtype(d, field(spec, "dtype"), &dt, path)) return false;
   bool target = role && cJSON_IsString(role) && !strcmp(role->valuestring, "target");
   if (role && !target && (!cJSON_IsString(role) || strcmp(role->valuestring, "input")))
     return def_error(d, path, "role must be input or target");
   int64_t dims[8];
+  PolyUOp *symbolic[8];
   int ndim;
-  if (!shape(d, field(spec, "shape"), dims, &ndim, path)) return false;
+  if (!shape(d, field(spec, "shape"), symbolic, dims, &ndim, path)) return false;
   int64_t elements = 1;
   for (int i = 0; i < ndim; i++)
     elements *= dims[i];
   if (!reserve_storage(d, elements, path)) return false;
   PolyTensor *t =
       own(d,
-          target ? poly_model_target(d->model, name, POLY_FLOAT32, dims, ndim)
-                 : poly_model_input(d->model, name, POLY_FLOAT32, dims, ndim),
+          target ? poly_model_target_uop(d->model, name, dt, symbolic, ndim)
+                 : poly_model_input_uop(d->model, name, dt, symbolic, ndim),
           path);
   if (!t) return false;
   if (poly_tensor_set_logical_policy(d->ctx, t, POLY_LOGICAL_ALWAYS))
@@ -551,9 +747,9 @@ static bool construct(Definition *d, const cJSON *root) {
       for (int i = 0; i < d->n_values; i++)
         if (!strcmp(d->values[i].name, name->valuestring))
           return def_error(d, path, "duplicate value '%s'", name->valuestring);
-      if (!cJSON_IsArray(refs) || cJSON_GetArraySize(refs) < 1 || cJSON_GetArraySize(refs) > 2)
-        return def_error(d, path, "expected 1 or 2 input references");
-      PolyTensor *args[2];
+      if (!cJSON_IsArray(refs) || cJSON_GetArraySize(refs) < 1 || cJSON_GetArraySize(refs) > 4)
+        return def_error(d, path, "expected 1..4 input references");
+      PolyTensor *args[4];
       int n = 0;
       for (const cJSON *ref = refs->child; ref; ref = ref->next) {
         args[n] = lookup(d, ref, path);
@@ -634,11 +830,16 @@ static PolyModel *compose_build(
   if (poly_model_build(d->model, err)) goto done;
   /* Initialize through the coherent buffer API after sealing. These bytes are
    * model state, never host-pointer aliases or a second residency table. */
-  for (int i = 0; i < d->n_linear; i++) {
-    DefLinear *layer = &d->linear[i];
+  for (int i = 0; i < d->n_layers; i++) {
+    DefLayer *layer = &d->layers[i];
+    if (!strcmp(layer->kind, "rope")) continue; /* AUX tables were captured before sealing. */
+    bool norm = !strcmp(layer->kind, "layernorm") || !strcmp(layer->kind, "rmsnorm");
+    int64_t fan_in = norm                                ? 0
+                     : !strcmp(layer->kind, "embedding") ? layer->out_features
+                                                         : layer->in_features;
     char name[DEF_NAME];
     if (!path_join(d, name, layer->name, "weight") ||
-        model_init_param(d->model, name, d->seed, layer->in_features, 0)) {
+        model_init_param(d->model, name, d->seed, fan_in, norm ? 1 : 0)) {
       def_error(d, layer->name, "initializer write failed");
       goto done;
     }

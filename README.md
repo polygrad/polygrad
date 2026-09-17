@@ -275,11 +275,17 @@ The initial component catalogue is deliberately bounded:
 | Component | Configuration |
 | --- | --- |
 | `linear` | `out_features`; optional `bias` (default true), `activation` (default `none`) |
+| `embedding` | Integer indices; `vocab_size`, `embed_dim` |
+| `layernorm`, `rmsnorm` | Normalize the fixed last dimension; `eps` (defaults `1e-5`/`1e-6`), `affine` (default true) |
+| `rope` | Split-half rotation of `[batch,heads,sequence,head_dim]`; fixed sequence and even head width; `theta` (default 10000) |
+| `attention` | Query, key, value, optional mask; `is_causal`, `enable_gqa` (default false); no dropout |
 | `relu`, `sigmoid`, `tanh`, `silu`, `gelu` | One input |
 | `identity`, `square`, `exp`, `log` | One input |
 | `add`, `sub`, `mul`, `div` | Two inputs, existing Tensor broadcasting |
 | `sum`, `mean` | Reduce all axes to a scalar |
-| `reshape` | Concrete positive `shape`, unchanged element count |
+| `reshape` | Positive `shape`, optionally the same bounded leading dimension; unchanged symbolic element count |
+| `permute` | `axes`: a permutation of all input axes |
+| `cast` | Explicit destination `dtype` |
 | `repeat` | Positive integer `count`; `body` is one unnamed component or a named layer list |
 
 Graph configurations replace `input/layers/output` with:
@@ -301,22 +307,33 @@ See [the shared-layer Graph configuration](test/fixtures/model_definition.json).
 
 Parameter names are `layers.<name>.weight/bias`, `nodes.<name>.weight/bias`, or
 `modules.<name>.weight/bias`; Repeat inserts zero-based indices. Linear weights
-use the existing seed/name-keyed C-family Kaiming uniform initializer and biases
-are zero. This does not promise Keras/Tinygrad initial-weight equivalence.
+and embedding weights use the existing seed/name-keyed C-family Kaiming uniform
+initializer; biases are zero. Normalization weights start at one. Parameters are
+float32; Tensor promotion rules apply to other input dtypes. RoPE owns deterministic
+`freqs_cos`/`freqs_sin` AUX tables under its component name. This does not promise
+Keras/Tinygrad initial-weight equivalence or automatic conversion between split-half
+and interleaved checkpoint layouts.
 
-Inputs currently require explicit float32, concrete rank ≤8 and positive
-dimensions. Names are ASCII identifiers of 1–63 characters. Configuration limits
+Inputs require an explicit concrete scalar dtype supported by the selected backend,
+rank <=8 and positive dimensions.
+A leading dimension may be `{"name":"batch","min":1,"max":32}`. All bounded
+declarations in one definition must use that same name and bounds; trailing
+dimensions remain fixed. Calls resolve concrete extents through the normal Model
+input contract, and reductions use the invocation extent, not the declared maximum.
+See [the typed, bounded transformer-component fixture](test/fixtures/model_components.json).
+Names are ASCII identifiers of 1–63 characters. Configuration limits
 are 1 MiB JSON, nesting 32, 16,384 JSON values, 1,024 expanded component calls,
 construction depth 16, and 64 inputs/outputs/entrypoints. Expanded paths are at
-most 191 bytes. Named storage totals at most 16,777,216 float32 elements; shapes,
-broadcasts and each linear contraction are bounded by that element count too.
+most 191 bytes. Named storage totals at most 16,777,216 elements; node shapes,
+linear contractions, embedding selectors and attention scores have the same limit,
+evaluated at maximum extents.
 These are construction limits, not a bound on compiler/backend peak memory.
 
 Optional `format: "poly.modeldef@1"` and `type: "sequential"`/`"graph"` tags are
 checked when present. The selected factory already identifies the family.
 Unknown fields, duplicate keys/names, forward/cyclic references, unused shared
 components and incompatible shapes fail. There are no config expressions,
-recursive modules, runtime loops, dynamic shapes or Keras JSON compatibility.
+recursive modules, runtime loops, data-dependent shapes or Keras JSON compatibility.
 Configuration describes construction, not checkpoint state: save/load the
 result through existing Model bundle or graph/weights APIs.
 

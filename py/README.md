@@ -313,6 +313,10 @@ are valid. Wrong input dtypes are rejected, not silently narrowed.
 For C-built families and JSON-based `models.Sequential` / `models.Graph`, see
 [model configuration](https://github.com/polygrad/polygrad#configuration-driven-model-families).
 These return the same Model type and use the same training and export APIs.
+Their configurations support typed inputs, one bounded leading batch dimension,
+and shared embedding, normalization, RoPE and attention components. For example,
+`{"dtype":"int32","shape":[{"name":"batch","min":1,"max":32},16]}`
+declares token batches of 1 to 32 rows without rebuilding the model.
 
 ## JIT And Compile
 

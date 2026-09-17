@@ -1,6 +1,65 @@
 /* Model-owned layer construction. Reuses nn programs; owns no runtime.
  * Deprecated ctx-registry constructors remain only for the existing C ABI. */
 #include "layers.h"
+#include "../device.h"
+#include <math.h>
+#include <stdlib.h>
+
+PolyTensor *poly_model_rope_frequencies(
+    PolyModel *model,
+    const char *name,
+    const PolyModelRoPEConfig *c,
+    bool sine
+) {
+  if (!model || !name || !c || c->length <= 0 || c->dim <= 0 || c->dim % 2 || !isfinite(c->theta) ||
+      c->theta < 1 || !isfinite(c->factor) || c->factor < 1 ||
+      (c->factor != 1 &&
+       (!isfinite(c->low_freq) || !isfinite(c->high_freq) || !isfinite(c->original_context) ||
+        c->low_freq <= 0 || c->high_freq <= c->low_freq || c->original_context <= 0)))
+    return NULL;
+  int half = c->dim / 2;
+  if ((size_t)c->length > SIZE_MAX / (size_t)half) return NULL;
+  size_t count = (size_t)c->length * (size_t)half;
+  if (count > SIZE_MAX / sizeof(float)) return NULL;
+  float *data = malloc(count * sizeof(float));
+  if (!data) return NULL;
+  /* extra/models/llama.py:precompute_freqs_cis, fixed positions starting at 0.
+   * The owned AUX snapshot makes export independent of this temporary array. */
+  for (int t = 0; t < c->length; t++)
+    for (int j = 0; j < half; j++) {
+      double freq = 1.0 / pow(c->theta, (double)j / half);
+      /* Llama 3.1/3.2's wavelength scaling (Meta apply_scaling and HF
+       * _compute_llama3_parameters). Model-owned extension: the pinned
+       * extra/models/llama.py has only the unscaled frequency constructor. */
+      if (c->factor != 1) {
+        double wavelength = 6.2831853071795864769 / freq;
+        if (wavelength > c->original_context / c->low_freq)
+          freq /= c->factor;
+        else if (wavelength >= c->original_context / c->high_freq) {
+          double smooth =
+              (c->original_context / wavelength - c->low_freq) / (c->high_freq - c->low_freq);
+          freq *= (1 - smooth) / c->factor + smooth;
+        }
+      }
+      float angle = (float)((double)t * freq);
+      data[(size_t)t * half + j] = sine ? sinf(angle) : cosf(angle);
+    }
+  PolyCtx *ctx = poly_model_ctx(model);
+  PolyDevice device = poly_ctx_get_preferred_device(ctx);
+  PolyTensor *v =
+      poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){1, 1, c->length, half}, 4, device);
+  PolyUOp *buffer = v ? (PolyUOp *)poly_uop_get_buffer_identity(poly_tensor_uop_physical(v)) : NULL;
+  /* from_host borrows its input. Initialize owned device storage instead so
+   * freeing this temporary cannot leave a pending COPY reading released bytes. */
+  bool copied = buffer && poly_buffer_ensure_device_allocated(ctx, buffer, device) == 0 &&
+                poly_buffer_write(ctx, buffer, data, count * sizeof(float)) == 0;
+  free(data);
+  if (!copied || poly_model_aux(model, name, v, 0) != POLY_STATUS_OK) {
+    poly_tensor_release(v);
+    return NULL;
+  }
+  return v;
+}
 
 int poly_model_lstm_cell(
     PolyModel *model,
@@ -87,33 +146,31 @@ PolyUOp *poly_embedding(
   return poly_embedding_apply(ctx, tokens, poly_reshape(ctx, w, ws, 2));
 }
 
-int poly_model_linear_parameters(
+static int model_parameters(
     PolyModel *inst,
     const char *prefix,
-    int in_features,
-    int out_features,
-    bool use_bias,
+    const int64_t *shape,
+    int ndim,
+    int64_t bias_dim,
     PolyTensor **weight,
     PolyTensor **bias
 ) {
   if (!weight || !bias || weight == bias) return -1;
   *weight = *bias = NULL;
-  if (!inst || in_features <= 0 || out_features <= 0) return -1;
+  if (!inst) return -1;
   PolyCtx *ctx = poly_model_ctx(inst);
   if (!ctx) return -1;
   bool scoped = prefix && prefix[0];
   if (scoped && poly_model_scope_push(inst, "%s", prefix) != POLY_STATUS_OK) return -1;
 
-  int64_t ws[] = {out_features, in_features};
-  PolyTensor *w = poly_model_param(inst, "weight", POLY_FLOAT32, ws, 2);
+  PolyTensor *w = poly_model_param(inst, "weight", POLY_FLOAT32, shape, ndim);
   PolyTensor *b = NULL;
-  if (w && use_bias) {
-    int64_t bs[] = {out_features};
-    b = poly_model_param(inst, "bias", POLY_FLOAT32, bs, 1);
+  if (w && bias_dim) {
+    b = poly_model_param(inst, "bias", POLY_FLOAT32, &bias_dim, 1);
   }
 
   bool popped = !scoped || poly_model_scope_pop(inst) == POLY_STATUS_OK;
-  if (!w || (use_bias && !b) || !popped) {
+  if (!w || (bias_dim && !b) || !popped) {
     poly_tensor_release(w);
     poly_tensor_release(b);
     return -1;
@@ -121,6 +178,47 @@ int poly_model_linear_parameters(
   *weight = w;
   *bias = b;
   return 0;
+}
+
+int poly_model_linear_parameters(
+    PolyModel *model,
+    const char *prefix,
+    int in_features,
+    int out_features,
+    bool use_bias,
+    PolyTensor **weight,
+    PolyTensor **bias
+) {
+  if (in_features <= 0 || out_features <= 0) return -1;
+  return model_parameters(
+      model, prefix, (int64_t[]){out_features, in_features}, 2, use_bias ? out_features : 0, weight,
+      bias
+  );
+}
+
+int poly_model_norm_parameters(
+    PolyModel *model,
+    const char *prefix,
+    int dim,
+    bool use_bias,
+    PolyTensor **weight,
+    PolyTensor **bias
+) {
+  if (dim <= 0) return -1;
+  return model_parameters(model, prefix, (int64_t[]){dim}, 1, use_bias ? dim : 0, weight, bias);
+}
+
+PolyTensor *poly_model_embedding_parameters(
+    PolyModel *model,
+    const char *prefix,
+    int vocab_size,
+    int embed_dim
+) {
+  PolyTensor *w = NULL, *b = NULL;
+  if (vocab_size <= 0 || embed_dim <= 0 ||
+      model_parameters(model, prefix, (int64_t[]){vocab_size, embed_dim}, 2, 0, &w, &b))
+    return NULL;
+  return w;
 }
 
 PolyTensor *poly_model_linear(
@@ -147,19 +245,12 @@ PolyTensor *poly_model_layernorm(
     int dim,
     double eps
 ) {
-  if (!inst || !x) return NULL;
-  PolyCtx *ctx = poly_model_ctx(inst);
-  if (!ctx) return NULL;
-  bool scoped = prefix && prefix[0];
-  if (scoped && poly_model_scope_push(inst, "%s", prefix) != POLY_STATUS_OK) return NULL;
-
-  int64_t ds[] = {dim};
-  PolyTensor *w = poly_model_param(inst, "weight", POLY_FLOAT32, ds, 1);
-  PolyTensor *b = poly_model_param(inst, "bias", POLY_FLOAT32, ds, 1);
-
-  if (scoped && poly_model_scope_pop(inst) != POLY_STATUS_OK) return NULL;
-  if (!w || !b) return NULL;
-  return poly_tensor_layernorm_apply(ctx, x, w, b, -1, eps);
+  PolyTensor *w, *b;
+  if (!x || poly_model_norm_parameters(inst, prefix, dim, true, &w, &b)) return NULL;
+  PolyTensor *out = poly_tensor_layernorm_apply(poly_model_ctx(inst), x, w, b, -1, eps);
+  poly_tensor_release(w);
+  poly_tensor_release(b);
+  return out;
 }
 
 PolyTensor *poly_model_rmsnorm(
@@ -169,18 +260,11 @@ PolyTensor *poly_model_rmsnorm(
     int dim,
     double eps
 ) {
-  if (!inst || !x) return NULL;
-  PolyCtx *ctx = poly_model_ctx(inst);
-  if (!ctx) return NULL;
-  bool scoped = prefix && prefix[0];
-  if (scoped && poly_model_scope_push(inst, "%s", prefix) != POLY_STATUS_OK) return NULL;
-
-  int64_t ds[] = {dim};
-  PolyTensor *w = poly_model_param(inst, "weight", POLY_FLOAT32, ds, 1);
-
-  if (scoped && poly_model_scope_pop(inst) != POLY_STATUS_OK) return NULL;
-  if (!w) return NULL;
-  return poly_tensor_rmsnorm_apply(ctx, x, w, eps);
+  PolyTensor *w, *b;
+  if (!x || poly_model_norm_parameters(inst, prefix, dim, false, &w, &b)) return NULL;
+  PolyTensor *out = poly_tensor_rmsnorm_apply(poly_model_ctx(inst), x, w, eps);
+  poly_tensor_release(w);
+  return out;
 }
 
 PolyTensor *poly_model_embedding(
@@ -190,16 +274,10 @@ PolyTensor *poly_model_embedding(
     int vocab_size,
     int embed_dim
 ) {
-  if (!inst || !tokens) return NULL;
-  PolyCtx *ctx = poly_model_ctx(inst);
-  if (!ctx) return NULL;
-  bool scoped = prefix && prefix[0];
-  if (scoped && poly_model_scope_push(inst, "%s", prefix) != POLY_STATUS_OK) return NULL;
-
-  int64_t ws[] = {vocab_size, embed_dim};
-  PolyTensor *w = poly_model_param(inst, "weight", POLY_FLOAT32, ws, 2);
-
-  if (scoped && poly_model_scope_pop(inst) != POLY_STATUS_OK) return NULL;
+  PolyTensor *w =
+      tokens ? poly_model_embedding_parameters(inst, prefix, vocab_size, embed_dim) : NULL;
   if (!w) return NULL;
-  return poly_tensor_embedding_apply(ctx, tokens, w);
+  PolyTensor *out = poly_tensor_embedding_apply(poly_model_ctx(inst), tokens, w);
+  poly_tensor_release(w);
+  return out;
 }

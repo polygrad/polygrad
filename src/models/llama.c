@@ -109,50 +109,6 @@ invalid:
   return false;
 }
 
-static PolyTensor *precompute_freqs(PolyModel *model, const LlamaConfig *c, bool sine) {
-  int half = c->dim / c->heads / 2;
-  if ((size_t)c->length > SIZE_MAX / (size_t)half) return NULL;
-  size_t count = (size_t)c->length * (size_t)half;
-  if (count > SIZE_MAX / sizeof(float)) return NULL;
-  float *data = malloc(count * sizeof(float));
-  if (!data) return NULL;
-  /* extra/models/llama.py:precompute_freqs_cis, fixed positions starting at 0.
-   * The owned AUX snapshot makes export independent of this temporary array. */
-  for (int t = 0; t < c->length; t++)
-    for (int j = 0; j < half; j++) {
-      double freq = 1.0 / pow(c->theta, (double)j / half);
-      /* Llama 3.1/3.2's wavelength scaling (Meta apply_scaling and HF
-       * _compute_llama3_parameters). Model-owned extension: the pinned
-       * extra/models/llama.py has only the unscaled frequency constructor. */
-      if (c->factor != 1) {
-        double wavelength = 6.2831853071795864769 / freq;
-        if (wavelength > c->original_context / c->low_freq)
-          freq /= c->factor;
-        else if (wavelength >= c->original_context / c->high_freq) {
-          double smooth =
-              (c->original_context / wavelength - c->low_freq) / (c->high_freq - c->low_freq);
-          freq *= (1 - smooth) / c->factor + smooth;
-        }
-      }
-      float angle = (float)((double)t * freq);
-      data[(size_t)t * half + j] = sine ? sinf(angle) : cosf(angle);
-    }
-  PolyCtx *ctx = poly_model_ctx(model);
-  PolyDevice device = poly_ctx_get_preferred_device(ctx);
-  PolyTensor *v =
-      poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){1, 1, c->length, half}, 4, device);
-  PolyUOp *buffer = v ? (PolyUOp *)poly_uop_get_buffer_identity(poly_tensor_uop_physical(v)) : NULL;
-  /* from_host borrows its input. Initialize owned device storage instead so
-   * freeing this temporary cannot leave a pending COPY reading released bytes. */
-  bool copied = buffer && poly_buffer_ensure_device_allocated(ctx, buffer, device) == 0 &&
-                poly_buffer_write(ctx, buffer, data, count * sizeof(float)) == 0;
-  free(data);
-  if (!copied) return NULL;
-  if (!v || poly_model_aux(model, sine ? "freqs_sin" : "freqs_cos", v, 0) != POLY_STATUS_OK)
-    return NULL;
-  return v;
-}
-
 static PolyTensor *attention(
     PolyModel *model,
     const LlamaConfig *c,
@@ -189,10 +145,12 @@ static PolyModel *llama_build(PolyCtx *ctx, const LlamaConfig *c, PolyModelError
   const char *stage = "embedding and rotary state";
   PolyTensor *tokens =
       poly_model_input(m, "tokens", POLY_INT32, (int64_t[]){c->batch, c->length}, 2);
-  PolyTensor *cos = precompute_freqs(m, c, false), *sin = precompute_freqs(m, c, true);
-  PolyTensor *embedding = poly_model_param(
-      m, "model.embed_tokens.weight", POLY_FLOAT32, (int64_t[]){c->vocab, c->dim}, 2
-  );
+  PolyModelRoPEConfig rope = {c->length,   c->dim / c->heads, c->theta,           c->factor,
+                              c->low_freq, c->high_freq,      c->original_context};
+  PolyTensor *cos = poly_model_rope_frequencies(m, "freqs_cos", &rope, false);
+  PolyTensor *sin = poly_model_rope_frequencies(m, "freqs_sin", &rope, true);
+  PolyTensor *embedding =
+      poly_model_embedding_parameters(m, "model.embed_tokens", c->vocab, c->dim);
   if (c->tied &&
       (!embedding || poly_model_state(m, "lm_head.weight", embedding, 0) != POLY_STATUS_OK))
     goto fail;

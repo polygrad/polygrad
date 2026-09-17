@@ -154,6 +154,22 @@ PolyTensor *poly_model_target(
     const int64_t *shape,
     int ndim
 );
+/* Symbolic shape variants use the same binding admission and invocation
+ * contract as Tensor-authored Models. Dimensions belong to the owning ctx. */
+PolyTensor *poly_model_input_uop(
+    PolyModel *inst,
+    const char *name,
+    PolyDType dt,
+    PolyUOp **shape,
+    int ndim
+);
+PolyTensor *poly_model_target_uop(
+    PolyModel *inst,
+    const char *name,
+    PolyDType dt,
+    PolyUOp **shape,
+    int ndim
+);
 PolyTensor *poly_model_param(
     PolyModel *inst,
     const char *name,

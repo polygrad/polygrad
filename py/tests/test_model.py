@@ -7,6 +7,173 @@ from polygrad.models import MLP, Graph, Sequential
 from polygrad.tensor import Tensor
 
 
+@pytest.mark.parametrize('device', ['cpu', 'interp'])
+def test_definition_typed_bounded_components(device):
+    import json
+    from pathlib import Path
+    import polygrad as pg
+    spec = json.loads((Path(__file__).parents[2] / 'test/fixtures/model_components.json').read_text())
+    expected = json.loads((Path(__file__).parents[2] / 'test/fixtures/model_components_expected.json').read_text())
+    with pg.create(device=device) as rt:
+        model = rt.Model(spec)
+        try:
+            model.write_buffer('nodes.embedding.weight', np.array(expected['table'], np.float32))
+            model.write_buffer('nodes.head.weight', np.array(expected['linear'], np.float32))
+            for batch in (3, 1):
+                outputs = model.forward(tokens=np.arange(batch*3, dtype=np.int32).reshape(batch,3)%4)
+                assert outputs['prediction'].shape == (batch,3,2)
+                oracle = next(case for case in expected['cases'] if case['batch'] == batch)
+                np.testing.assert_allclose(outputs['prediction'], oracle['prediction'], atol=2e-5)
+                np.testing.assert_allclose(outputs['mean'], outputs['prediction'].mean(), atol=1e-6)
+            loaded = rt.Model.load(model.save())
+            try:
+                assert loaded.save() == model.save()
+                for name, value in loaded.forward(tokens=np.array([[0,1,2]], np.int32)).items():
+                    np.testing.assert_allclose(value, outputs[name], atol=1e-6)
+            finally:
+                loaded.dispose()
+        finally:
+            model.dispose()
+
+
+@pytest.mark.parametrize('dtype', ['int32', 'int64', 'uint8', 'bool', 'float16', 'float64'])
+def test_definition_preserves_input_dtype(dtype):
+    model = Sequential({'input':{'name':'x','shape':[2,2],'dtype':dtype},
+                        'layers':[{'name':'copy','type':'identity'}], 'output':'y'})
+    try:
+        value = np.array([[0,1],[1,0]], dtype=dtype)
+        result = model.forward(x=value)['y']
+        assert result.dtype == value.dtype
+        np.testing.assert_array_equal(result, value)
+    finally:
+        model.dispose()
+
+
+def test_definition_bounded_mean_uses_invocation_extent():
+    model = Sequential({'input':{'name':'x','shape':[{'name':'n','min':1,'max':4},2],'dtype':'int32'},
+                        'layers':[{'name':'average','type':'mean'}], 'output':'y'})
+    try:
+        for rows in (4,1,3):
+            x = np.arange(rows*2, dtype=np.int32).reshape(rows,2)
+            np.testing.assert_allclose(model.forward(x=x)['y'], x.mean())
+        with pytest.raises((ValueError, RuntimeError), match='bound|extent'):
+            model.forward(x=np.zeros((5,2), np.int32))
+    finally:
+        model.dispose()
+
+
+@pytest.mark.parametrize('shape,dtype,message', [
+    ([{'min':1,'max':3},2], 'float32', 'name'),
+    ([{'name':'n','min':3,'max':1},2], 'float32', 'integer'),
+    ([2,{'name':'n','min':1,'max':3}], 'float32', 'leading'),
+    ([2], 'weakint', 'dtype'),
+])
+def test_definition_rejects_invalid_typed_bounds(shape, dtype, message):
+    with pytest.raises(ValueError, match=message):
+        Sequential({'input':{'name':'x','shape':shape,'dtype':dtype},
+                    'layers':[{'name':'id','type':'identity'}], 'output':'y'})
+
+
+def test_definition_shared_embedding_and_norm_state():
+    model = Graph({
+        'inputs':{'x':{'shape':[2],'dtype':'int32'}},
+        'modules':{'emb':{'type':'embedding','vocab_size':4,'embed_dim':2},
+                   'norm':{'type':'layernorm'}},
+        'nodes':[{'name':'a','call':'emb','inputs':['x']},
+                 {'name':'b','call':'emb','inputs':['x']},
+                 {'name':'c','call':'norm','inputs':['a']},
+                 {'name':'d','call':'norm','inputs':['b']}],
+        'outputs':{'a':'c','b':'d'}})
+    try:
+        assert model.param_count == 3
+        np.testing.assert_array_equal(model.read_buffer('modules.norm.weight'), [1,1])
+        np.testing.assert_array_equal(model.read_buffer('modules.norm.bias'), [0,0])
+        model.write_buffer('modules.emb.weight', np.arange(8, dtype=np.float32).reshape(4,2))
+        outputs = model.forward(x=np.array([0,3], np.int32))
+        np.testing.assert_array_equal(outputs['a'], outputs['b'])
+        np.testing.assert_allclose(outputs['a'], [[-0.99998,0.99998]]*2, atol=1e-5)
+    finally:
+        model.dispose()
+
+
+def test_definition_cast_permute_and_nonaffine_norm():
+    model = Sequential({'input':{'name':'x','shape':[2,3],'dtype':'int32'}, 'output':'y',
+        'layers':[{'name':'to_float','type':'cast','dtype':'float32'},
+                  {'name':'transpose','type':'permute','axes':[1,0]},
+                  {'name':'norm','type':'layernorm','affine':False}]})
+    try:
+        assert model.param_count == 0
+        y = model.forward(x=np.arange(6, dtype=np.int32).reshape(2,3))['y']
+        np.testing.assert_allclose(y, [[-0.9999978,0.9999978]]*3, atol=1e-6)
+    finally:
+        model.dispose()
+
+
+def test_definition_bounded_target_and_training():
+    bound = {'name':'batch','min':1,'max':4}
+    spec = {'inputs':{'x':{'shape':[bound,1],'dtype':'float32'},
+                      'y':{'shape':[bound,1],'dtype':'float32','role':'target'}},
+        'nodes':[{'name':'head','type':'linear','out_features':1,'bias':False,'inputs':['x']},
+                 {'name':'error','type':'sub','inputs':['head','y']},
+                 {'name':'square','type':'square','inputs':['error']},
+                 {'name':'average','type':'mean','inputs':['square']}],
+        'outputs':{'prediction':'head','cost':'average'},
+        'entrypoints':[{'name':'forward','inputs':['x'],'outputs':['prediction']},
+                       {'name':'loss','inputs':['x','y'],'outputs':['cost'],'objective':'cost'}]}
+    model = Graph(spec)
+    try:
+        model.write_buffer('nodes.head.weight', np.array([2], np.float32))
+        model.set_optimizer('sgd', lr=.1)
+        weight = 2.
+        for rows in (4,1,3):
+            x = np.arange(1, rows+1, dtype=np.float32).reshape(rows,1)
+            loss = (weight**2 * (x*x)).mean()
+            np.testing.assert_allclose(model.train_step(x=x,y=np.zeros_like(x)), loss, atol=1e-5)
+            weight -= .2 * weight * (x*x).mean()
+            np.testing.assert_allclose(model.read_buffer('nodes.head.weight'), [weight], atol=1e-5)
+    finally:
+        model.dispose()
+
+
+@pytest.mark.parametrize('kind,shape,options', [
+    ('embedding',[1024],{'vocab_size':1024,'embed_dim':32}),
+    ('attention',[4097,1],{}),
+])
+def test_definition_component_intermediate_budget(kind, shape, options):
+    inputs = ['x']*3 if kind == 'attention' else ['x']
+    dtype = 'float32' if kind == 'attention' else 'int32'
+    with pytest.raises(ValueError, match='element budget'):
+        Graph({'inputs':{'x':{'dtype':dtype,'shape':shape}},
+               'nodes':[{'name':'huge','type':kind,'inputs':inputs,**options}],
+               'outputs':{'y':'huge'}})
+
+
+@pytest.mark.parametrize('masked,gqa', [(False,False), (True,False), (False,True), (True,True)])
+def test_definition_attention_options_match_shared_tensor(masked, gqa):
+    q = np.arange(8, dtype=np.float32).reshape(1,2,2,2) / 10
+    k = np.ones((1,1 if gqa else 2,2,2), np.float32)
+    v = np.arange(k.size, dtype=np.float32).reshape(k.shape)
+    data = dict(q=q,k=k,v=v)
+    if masked: data['mask'] = np.array([[True,False],[True,True]])
+    model = Graph({'inputs':{name:{'shape':list(value.shape),'dtype':str(value.dtype)}
+                                     for name,value in data.items()},
+                   'nodes':[{'name':'attn','type':'attention','inputs':list(data),'enable_gqa':gqa}],
+                   'outputs':{'y':'attn'}})
+    try:
+        expected = Tensor(q).scaled_dot_product_attention(
+            Tensor(k), Tensor(v), attn_mask=Tensor(data['mask']) if masked else None, enable_gqa=gqa)
+        np.testing.assert_allclose(model.forward(**data)['y'], expected.numpy(), atol=1e-6)
+    finally:
+        model.dispose()
+
+
+def test_definition_rejects_conflicting_batch_declarations():
+    with pytest.raises(ValueError, match='same batch name and bounds'):
+        Graph({'inputs':{'x':{'shape':[{'name':'n','min':1,'max':3},2],'dtype':'float32'},
+                         'y':{'shape':[{'name':'n','min':1,'max':4},2],'dtype':'float32'}},
+               'nodes':[], 'outputs':{'out':'x'}})
+
+
 @pytest.mark.parametrize('family,config', [
     ('mlp', {'layers':[2, 1]}), ('tabm', {'layers':[2, 1], 'n_ensemble':2}),
     ('nam', {'n_features':2, 'hidden_sizes':[2]}),
@@ -1398,7 +1565,7 @@ class TestModelDefinition:
     @pytest.mark.parametrize('field,value,error', [
         ('shape', [1, 0], 'integer'), ('shape', [1, 2.5], 'integer'),
         ('shape', [1]*9, 'rank'), ('shape', [16777216, 2], 'budget'),
-        ('dtype', 'float64', 'float32'), ('dtype', 'typo', 'float32'),
+        ('dtype', 'weakfloat', 'dtype'), ('dtype', 'typo', 'dtype'),
         ('role', 'parameter', 'role'),
     ])
     def test_rejects_invalid_input(self, field, value, error):

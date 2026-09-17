@@ -20,6 +20,23 @@ async function main() {
   }
   const pg = await polygrad.create({ core, device: core === 'native' ? 'cpu' : 'wasm' })
   try {
+    const componentBytes = readBytes(path.join(dir,'python-components.bundle'))
+    const components = pg.Model.load(componentBytes)
+    try {
+      const oracle = require('../../test/fixtures/model_components_expected.json')
+      for (const item of [...oracle.cases].reverse()) {
+        const out = await components.forwardAsync({tokens:new Int32Array(item.tokens.flat())})
+        const expected = item.prediction.flat(2)
+        if (out.prediction.length !== expected.length ||
+            out.prediction.some((v,i)=>!Number.isFinite(v) || Math.abs(v-expected[i])>2e-5) ||
+            Math.abs(out.mean[0]-item.mean)>2e-5)
+          throw new Error('Python component artifact lost typed input, bound shape or values')
+      }
+      const saved = await components.saveAsync({includeOptimizer:false})
+      if (saved.length !== componentBytes.length || saved.some((b,i)=>b!==componentBytes[i]))
+        throw new Error('component bundle changed across frontends')
+      writeBytes(path.join(dir,`javascript-${core}-components.bundle`),saved)
+    } finally { await components.dispose() }
     const stateful = pg.Model.load(readBytes(path.join(dir,'python-stateful.bundle')))
     let statefulLoss
     try {

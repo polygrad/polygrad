@@ -51,6 +51,34 @@ int poly_model_linear_parameters(
     PolyTensor **bias
 );
 
+int poly_model_norm_parameters(
+    PolyModel *model,
+    const char *prefix,
+    int dim,
+    bool use_bias,
+    PolyTensor **weight,
+    PolyTensor **bias
+);
+PolyTensor *poly_model_embedding_parameters(
+    PolyModel *model,
+    const char *prefix,
+    int vocab_size,
+    int embed_dim
+);
+
+/* Fixed sequence table generation shared by named families and JSON RoPE.
+ * factor==1 is pinned Llama RoPE; other factors use the existing Llama3 extension. */
+typedef struct {
+  int length, dim;
+  double theta, factor, low_freq, high_freq, original_context;
+} PolyModelRoPEConfig;
+PolyTensor *poly_model_rope_frequencies(
+    PolyModel *model,
+    const char *name,
+    const PolyModelRoPEConfig *config,
+    bool sine
+);
+
 PolyTensor *poly_model_layernorm(
     PolyModel *inst,
     const char *prefix,

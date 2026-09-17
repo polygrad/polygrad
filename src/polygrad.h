@@ -10,7 +10,7 @@
 
 /* Public C/frontend ABI version. Bump when exported symbols or public struct
  * layouts used by frontends change. */
-#define POLYGRAD_ABI_VERSION 94
+#define POLYGRAD_ABI_VERSION 95
 
 #include <stdint.h>
 #include <stddef.h>

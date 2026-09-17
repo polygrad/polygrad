@@ -26,6 +26,14 @@ from polygrad.models import MLP, Graph  # noqa: E402
 from polygrad import create, _ffi  # noqa: E402
 
 
+def check_components(model):
+    oracle = json.loads((ROOT / 'test/fixtures/model_components_expected.json').read_text())
+    for case in reversed(oracle['cases']):
+        outputs = model.forward(tokens=np.array(case['tokens'], np.int32))
+        np.testing.assert_allclose(outputs['prediction'], case['prediction'], atol=2e-5)
+        np.testing.assert_allclose(outputs['mean'], case['mean'], atol=2e-5)
+
+
 def export_c_lstm(work: Path) -> None:
     """Exercise C model construction without a Python Tensor/model recipe."""
     lib = ctypes.CDLL(_ffi._lib._name)
@@ -240,6 +248,11 @@ def run_core(work: Path, core: str, source_after: Model, expected_loss: float) -
             np.testing.assert_array_equal(variable.forward(x=x)['prediction'], x*2)
     finally:
         variable.dispose()
+    components = Model.load((work / f'javascript-{core}-components.bundle').read_bytes())
+    try:
+        check_components(components)
+    finally:
+        components.dispose()
     composed = Model.from_bundle((work / f'javascript-{core}-graph.bundle').read_bytes())
     try:
         np.testing.assert_array_equal(composed.forward(x=np.array([[1, 2]], np.float32))['prediction'], [[28, 61]])
@@ -360,6 +373,15 @@ def main() -> None:
     export_custom(work)
     export_variable(work)
     export_stateful(work)
+    components = Graph((ROOT / 'test/fixtures/model_components.json').read_bytes())
+    try:
+        oracle = json.loads((ROOT / 'test/fixtures/model_components_expected.json').read_text())
+        for name, values in [('nodes.embedding.weight', oracle['table']), ('nodes.head.weight', oracle['linear'])]:
+            components.write_buffer(name, np.array(values, np.float32))
+        check_components(components)
+        (work / 'python-components.bundle').write_bytes(components.save(include_optimizer=False))
+    finally:
+        components.dispose()
     graph = Graph((ROOT / 'test/fixtures/model_definition.json').read_bytes())
     try:
         graph.write_buffer('modules.shared.weight', np.array([1, 2, 3, 4], np.float32))

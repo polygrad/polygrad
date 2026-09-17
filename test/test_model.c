@@ -429,11 +429,55 @@ TEST(model, composition_invalid_cleanup) {
   PASS();
 }
 
+TEST(model, composition_typed_bounded_mean) {
+  const char *json = "{\"input\":{\"name\":\"x\",\"dtype\":\"int32\","
+                     "\"shape\":[{\"name\":\"batch\",\"min\":1,\"max\":4},2]},"
+                     "\"layers\":[{\"name\":\"average\",\"type\":\"mean\"}],\"output\":\"y\"}";
+  PolyCtx *ctx = poly_ctx_new();
+  PolyModelError err = {0};
+  PolyModel *model = poly_sequential_from_json(ctx, json, (int)strlen(json), &err);
+  ASSERT_NOT_NULL(model);
+  int64_t lo[2], hi[2], shape[] = {4, 2};
+  ASSERT_EQ(poly_model_buf_shape_bounds(model, 0, lo, hi, 2), 2);
+  ASSERT_EQ(lo[0], 1);
+  ASSERT_EQ(hi[0], 4);
+  int32_t data[] = {0, 1, 2, 3, 4, 5, 6, 7};
+  PolyIOBinding io = POLY_IO_BINDING_ARRAY("x", data, POLY_INT32);
+  io.shape = shape;
+  io.ndim = 2;
+  int batches[] = {4, 1, 3};
+  for (int i = 0; i < 3; i++) {
+    shape[0] = batches[i];
+    io.nbytes = (size_t)batches[i] * 2 * sizeof(int32_t);
+    ASSERT_EQ(poly_model_call(model, "forward", &io, 1), 0);
+    float value;
+    ASSERT_EQ(poly_model_read_buf_named(model, "y", &value, sizeof(value)), 0);
+    ASSERT_FLOAT_EQ(value, (batches[i] * 2 - 1) / 2.0f, 1e-6);
+  }
+  poly_model_free(model);
+  poly_ctx_collect(ctx);
+  PolyCtxStats stats = {0};
+  ASSERT_EQ(poly_ctx_stats(ctx, &stats), 0);
+  ASSERT_EQ(stats.tensor_records, 0);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(model, composition_shape_validation_returns_before_using_dimensions) {
   /* Analyzer paths through def_error cannot continue as successful shape
    * validation. Exercise the public contract, including omitted error output. */
   const char *shapes[] = {
-      "null", "{}", "[0]", "[-1]", "[1.5]", "[\"2\"]", "[1,1,1,1,1,1,1,1,1]", "[16777216,2]"};
+      "null",
+      "{}",
+      "[0]",
+      "[-1]",
+      "[1.5]",
+      "[\"2\"]",
+      "[1,1,1,1,1,1,1,1,1]",
+      "[16777216,2]",
+      "[{\"min\":1,\"max\":3},2]",
+      "[{\"name\":\"n\",\"min\":3,\"max\":1},2]",
+      "[2,{\"name\":\"n\",\"min\":1,\"max\":3}]"};
   PolyCtx *ctx = poly_ctx_new();
   for (int graph = 0; graph < 2; graph++) {
     for (int i = 0; i < (int)(sizeof(shapes) / sizeof(shapes[0])); i++) {

@@ -1093,6 +1093,47 @@ PolyTensor *poly_model_param(
   );
 }
 
+static PolyTensor *model_input_uop(
+    PolyModel *inst,
+    const char *name,
+    PolyDType dt,
+    PolyUOp **shape,
+    int ndim,
+    uint8_t role
+) {
+  if (require_stage(inst, POLY_MODEL_BUILDING, __func__) != POLY_STATUS_OK) return NULL;
+  PolyTensor *t =
+      poly_tensor_empty_uop(inst->ctx, dt, shape, ndim, poly_ctx_get_preferred_device(inst->ctx));
+  if (!t) return NULL;
+  if (append_existing_tensor_binding(
+          inst, name, role, t, 0, true, false, POLY_TENSOR_PROVENANCE_USER_INPUT
+      ) != POLY_STATUS_OK) {
+    poly_tensor_release(t);
+    return NULL;
+  }
+  return t;
+}
+
+PolyTensor *poly_model_input_uop(
+    PolyModel *inst,
+    const char *name,
+    PolyDType dt,
+    PolyUOp **shape,
+    int ndim
+) {
+  return model_input_uop(inst, name, dt, shape, ndim, POLY_ROLE_INPUT);
+}
+
+PolyTensor *poly_model_target_uop(
+    PolyModel *inst,
+    const char *name,
+    PolyDType dt,
+    PolyUOp **shape,
+    int ndim
+) {
+  return model_input_uop(inst, name, dt, shape, ndim, POLY_ROLE_TARGET);
+}
+
 PolyStatus poly_model_state(PolyModel *inst, const char *name, PolyTensor *tensor, uint32_t flags) {
   return append_existing_tensor_binding(
       inst, name, POLY_ROLE_PARAM, tensor, flags, true, true, POLY_TENSOR_PROVENANCE_STATE_LOADED
